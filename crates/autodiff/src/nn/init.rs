@@ -257,11 +257,30 @@ fn try_alloc(len: usize) -> Result<Vec<f32>, AutodiffError> {
 /// `[low, high)` の一様分布で `len` 要素を埋める（グローバル RNG を
 /// 1 回だけロックし、要素をまとめて引く。`tensor-core::rng::rand` と
 /// 同じロック粒度の契約）。呼び出し元が `low <= high` を事前検証する。
+///
+/// **幅 `high - low` は `f64` で計算する**（codex-review 指摘。PR
+/// #2239）: `low`・`high` はそれぞれ有限な `f32` として検査済みでも、
+/// `low = -f32::MAX`・`high = f32::MAX` のように両端の差（幅）自体が
+/// `f32` の表現範囲を超えるケースが存在する。旧実装は幅を `f32` で
+/// 計算していたため、この幅が `inf` になり出力も `inf`（乱数値が 0 の
+/// 要素は `0 * inf` で `NaN` にもなる）を返していた——呼び出し元が
+/// 「両端とも有限」を保証していても出力が有限にならない欠陥だった。
+/// `f64` は `f32` の全表現域の差を必ず有限で表せる（`f64::MAX ≈
+/// 1.8e308` は `f32::MAX ≈ 3.4e38` の 2 倍を遥かに超える）ため、
+/// `low + t·(high - low)` を `f64` で計算すれば結果は常に `[low, high]`
+/// 区間内（両端は有限な `f32` として検証済み）に収まり、最後の 1 回の
+/// `f32` ダウンキャストで overflow しない。`xavier_uniform`／
+/// `kaiming_uniform` の `fill_uniform(numel, -bound, bound)` 呼び出し
+/// （幅 `2·bound` が同じ overflow クラスに該当する）も本関数経由で
+/// 同時に是正される。
 fn fill_uniform(len: usize, low: f32, high: f32) -> Result<Vec<f32>, AutodiffError> {
     let mut out = try_alloc(len)?;
+    let low_f64 = f64::from(low);
+    let width_f64 = f64::from(high) - low_f64;
     with_global_rng(|rng| {
         for _ in 0..len {
-            out.push(low + rng.next_unit_f32() * (high - low));
+            let v = low_f64 + f64::from(rng.next_unit_f32()) * width_f64;
+            out.push(v as f32);
         }
     });
     Ok(out)
@@ -271,8 +290,27 @@ fn fill_uniform(len: usize, low: f32, high: f32) -> Result<Vec<f32>, AutodiffErr
 /// 計算。`tensor-core::rng::randn`／本ファイル上部の `try_normal_init`
 /// と同一のアルゴリズム。決定性の範囲は「同一プロセス・同一プラット
 /// フォーム内」に限る〈`ln`／`sin`／`cos` を経由するため〉）。
+///
+/// **`z * std + mean` も `f64` で計算する**（codex-review 同類型点検。
+/// PR #2239）: 旧実装は Box–Muller の `z`（`r * cos(theta)` 等）を
+/// 直後に `f32` へダウンキャストしてから `f32` で `std` 倍・`mean` 加算
+/// していたため、`z`・`std`・`mean` の個々の値は有限でも、
+/// `z * std`（中間積）が `f32` の表現範囲を超えて `inf` になり、その後
+/// `mean` を足しても `inf` のまま出力されうる不具合クラスが存在した
+/// （`z ≈ 1.05`・`std ≈ 3.3e38`・`mean ≈ -3.3e38` の場合、真の値
+/// `z * std + mean ≈ 1.65e37` は `f32` に十分収まるが、`f32` の
+/// `z * std` 単体は `f32::MAX`（`≈3.4028e38`）を超えて `inf` になる）。
+/// `z`（`r * theta.cos()`／`r * theta.sin()`）を `f32` へ早期変換せず
+/// `f64` のまま `std`・`mean` を `f64` へ昇格して演算し、最後の 1 回だけ
+/// `f32` へダウンキャストすることで、この中間 overflow を避ける
+/// （`.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64` アキュム
+/// レータで統一する」契約と同じ「最終書き出しのみ 1 回ダウンキャスト」
+/// 方針を、ここでも適用した）。`xavier_normal`／`kaiming_normal` は
+/// 本関数経由で同時に是正される。
 fn fill_normal(len: usize, mean: f32, std: f32) -> Result<Vec<f32>, AutodiffError> {
     let mut out = try_alloc(len)?;
+    let mean_f64 = f64::from(mean);
+    let std_f64 = f64::from(std);
     with_global_rng(|rng| {
         let mut remaining = len;
         while remaining > 0 {
@@ -281,14 +319,14 @@ fn fill_normal(len: usize, mean: f32, std: f32) -> Result<Vec<f32>, AutodiffErro
             let u2 = rng.next_unit_f64();
             let r = (-2.0 * u1.ln()).sqrt();
             let theta = std::f64::consts::TAU * u2;
-            let z0 = (r * theta.cos()) as f32;
-            out.push(z0 * std + mean);
+            let z0 = r * theta.cos();
+            out.push((z0 * std_f64 + mean_f64) as f32);
             remaining -= 1;
             if remaining == 0 {
                 break;
             }
-            let z1 = (r * theta.sin()) as f32;
-            out.push(z1 * std + mean);
+            let z1 = r * theta.sin();
+            out.push((z1 * std_f64 + mean_f64) as f32);
             remaining -= 1;
         }
     });
@@ -685,7 +723,19 @@ pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffErr
     // 呼ばず `scaled`（[`try_alloc`] でフォールブル確保済み）へ
     // 転置とスケールを同時に書き込む（codex-review 指摘「テンソル
     // 変換」の是正。PR #2239）。
-    let q_slice = q.host_slice();
+    // `q` は直前の `Mat::try_to_tensor`（`Tensor::new` で `offset=0`・
+    // row-major strides の新規構築）が返した値のため必ず contiguous
+    // であり、`as_slice()` は常に `Some`（追加確保なしの借用）を返す
+    // 契約になる。`host_slice()`（非 contiguous 時に内部で非フォール
+    // ブルな `Tensor::contiguous()` を呼ぶ）は使わない——`eval::linalg::
+    // Mat::try_from_tensor` で同種の危険を除去した意図（codex-review
+    // 再指摘。PR #2239）を呼び出し元側でも一貫させるため、ここでも
+    // 明示的に contiguous 前提を検査してから `as_slice()` のみを使う。
+    let q_slice = q.as_slice().ok_or_else(|| {
+        invalid_argument(
+            "nn::init::orthogonal: qr の出力が contiguous ではありません（内部契約違反）",
+        )
+    })?;
     let mut scaled = try_alloc(gen_numel)?;
     if transposed {
         // `out[i, j] = q[j, i] * gain`（`q` は行優先 `[cols, rows]`
@@ -753,6 +803,21 @@ pub fn trunc_normal(
     }
     let mut out = try_alloc(numel)?;
     let attempt_budget = numel.saturating_mul(TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT);
+    // `mean`／`std`／窓比較を `f64` で行う（codex-review 同類型点検・
+    // `fill_normal` と同じ理由。PR #2239）: `z * std` を `f32` のまま
+    // 計算すると、`z`・`std` が個別に有限でも中間積が `f32` の表現範囲を
+    // 超えて `inf` になりうる。窓 `[a, b]` の受理判定自体は「`inf` は
+    // `<= b` を満たさず自動的に棄却される」ため誤った値が出力される
+    // ことはなかったが、本来受理されるべき（真の値が `[a, b]` 内の）
+    // サンプルまで中間 overflow のせいで誤って棄却され、`std` が極端に
+    // 大きい設定では試行回数上限（`TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT`）
+    // を無駄に消費しうる欠陥だった。`mean`／`std`／`a`／`b` を `f64` へ
+    // 昇格し、判定・出力とも `f64` で行ってから受理時にのみ 1 回
+    // `f32` へダウンキャストする。
+    let mean_f64 = f64::from(mean);
+    let std_f64 = f64::from(std);
+    let a_f64 = f64::from(a);
+    let b_f64 = f64::from(b);
     let fill_result: Result<(), AutodiffError> = with_global_rng(|rng| {
         let mut generated = 0usize;
         let mut attempts = 0usize;
@@ -772,10 +837,10 @@ pub fn trunc_normal(
             let u2 = rng.next_unit_f64();
             let r = (-2.0 * u1.ln()).sqrt();
             let theta = std::f64::consts::TAU * u2;
-            let z = (r * theta.cos()) as f32;
-            let value = z * std + mean;
-            if value >= a && value <= b {
-                out.push(value);
+            let z = r * theta.cos();
+            let value_f64 = z * std_f64 + mean_f64;
+            if value_f64 >= a_f64 && value_f64 <= b_f64 {
+                out.push(value_f64 as f32);
                 generated += 1;
             }
         }

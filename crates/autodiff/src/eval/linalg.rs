@@ -141,13 +141,20 @@ impl Mat {
     }
 
     /// フォールブルな [`Mat::from_tensor`]（[`qr`] 専用。`try_zeros` と
-    /// 同じ理由）。`t.host_slice()` は `t` が contiguous なら追加コピー
-    /// なしで借用する（`Tensor::host_slice` の doc 参照）。`qr` の唯一の
-    /// フォールブル呼び出し元 `nn::init::orthogonal` は `Tensor::new`
-    /// 直後の新規構築値を渡すため常に contiguous。非 contiguous な入力
-    /// （`var.rs::Var::qr` 経由）では `Tensor::contiguous()` 内部の
-    /// 非フォールブル確保が残るが、これは `tensor-core` 全体で共有される
-    /// 既存の設計前提であり本 PR（イシュー #2140）のスコープ外とする。
+    /// 同じ理由）。**`Tensor::host_slice`／`Tensor::contiguous` は使わない**
+    /// （codex-review 再指摘。PR #2239）: `host_slice()` は非 contiguous
+    /// な `t`（`var.rs::Var::qr` から非 contiguous な `Var`——転置・narrow
+    /// 済みの view 等——を渡せる本番経路で現実に発生しうる）に対して
+    /// 内部で `Tensor::contiguous()`（`tensor-core` 全体で共有される既存
+    /// 実装で `Vec::with_capacity` ベースの非フォールブル確保）を実行して
+    /// しまい、`qr` を `Result` 化した目的（確保失敗を `Err` で伝播する）
+    /// を満たせなくなる。かわりに `t` が contiguous なら [`Tensor::as_slice`]
+    /// を借用のみで使い（追加確保なし）、非 contiguous なら
+    /// `Tensor::get`（strides 経由の要素アクセス。`Option` を返すだけで
+    /// 確保を伴わない）で 1 要素ずつ予約済み `data` へ書き込む——
+    /// `Tensor::contiguous()` 自身の非 contiguous フォールバック実装
+    /// （`shape` を行優先順に走査して `get` を呼ぶ）と同じロジックを、
+    /// 確保だけフォールブル化した版として複製する。
     fn try_from_tensor(t: &Tensor<f32>) -> Result<Mat, AutodiffError> {
         let shape = t.shape();
         debug_assert!(
@@ -163,7 +170,28 @@ impl Mat {
         data.try_reserve_exact(len).map_err(|_| {
             invalid("eval::linalg::Mat::try_from_tensor: f64 変換用作業領域の確保に失敗しました")
         })?;
-        data.extend(t.host_slice().iter().map(|&v| f64::from(v)));
+        if let Some(slice) = t.as_slice() {
+            data.extend(slice.iter().map(|&v| f64::from(v)));
+        } else {
+            for r in 0..rows {
+                for c in 0..cols {
+                    // `[r, c]` は `shape == [rows, cols]` の範囲内であり、
+                    // `get` が `None` を返すのは shape 走査ロジックの
+                    // バグ以外あり得ない（`Tensor::contiguous()` 本体の
+                    // 同型フォールバックと同じ契約）。`debug_assert!` で
+                    // 到達不能パスを検知しつつ、release では `0.0` へ
+                    // 安全側フォールバックする（本番経路 panic 禁止。
+                    // `.claude/rules/coding-rust.md`）。
+                    let value = t.get(&[r, c]);
+                    debug_assert!(
+                        value.is_some(),
+                        "eval::linalg::Mat::try_from_tensor: shape 走査ロジックのバグにより \
+                         index [{r}, {c}] が範囲外になった"
+                    );
+                    data.push(f64::from(value.unwrap_or(0.0)));
+                }
+            }
+        }
         Ok(Mat { data, rows, cols })
     }
 
@@ -1794,6 +1822,43 @@ mod tests {
         let r_data = dense_vec(&r);
         assert!(r_data[0] >= 0.0);
         assert!(r_data[3] >= 0.0);
+    }
+
+    /// codex-review 指摘の回帰（イシュー #2140・PR #2239 再指摘）: `qr` を
+    /// 非 contiguous な入力（`transpose` 直後の view。`.contiguous()` を
+    /// 呼ばずそのまま渡す）で呼んでも、`Mat::try_from_tensor` が strides
+    /// 経由で正しい要素を読み取り、`.contiguous()` を経由した場合と
+    /// 数値的に同一の結果を返すことを固定する。`var.rs::Var::qr` は
+    /// テープが materialize した値をそのまま渡す本番経路であり、
+    /// 非 contiguous な `Var`（転置・narrow 済みの view 等）を渡せる
+    /// ため、この経路のカバレッジが必要（`Mat::try_from_tensor` の
+    /// `as_slice()`／`get` 分岐のうち `get` 分岐を直接運動させる）。
+    #[test]
+    fn qr_accepts_non_contiguous_transposed_input() {
+        // `base: [2, 3]` を転置した `[3, 2]` view（非 contiguous。
+        // `is_contiguous()` は `false` になる）をそのまま `qr` へ渡す。
+        let base = build_tensor(vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0], &[2, 3]);
+        let transposed_view = base.transpose(0, 1).unwrap();
+        assert!(
+            !transposed_view.is_contiguous(),
+            "テスト前提が崩れている: transpose 直後の view は非 contiguous のはず"
+        );
+
+        let (q_view, r_view) = qr(&transposed_view).unwrap();
+
+        // 同じ論理値を持つ contiguous な `Tensor`（`.contiguous()` 済み）
+        // で計算した結果と bit 完全一致することを確認する（`Mat::
+        // try_from_tensor` の contiguous 分岐〈`as_slice()`〉と
+        // 非 contiguous 分岐〈`get` ループ〉が同じ結果を返す契約）。
+        let contiguous_equivalent = transposed_view.contiguous();
+        let (q_contig, r_contig) = qr(&contiguous_equivalent).unwrap();
+
+        assert_eq!(dense_vec(&q_view), dense_vec(&q_contig));
+        assert_eq!(dense_vec(&r_view), dense_vec(&r_contig));
+
+        // 再構成 `Q R = Aᵀ` も成立することを確認する（数値の妥当性）。
+        let reconstructed = mat_matmul(&q_view, &r_view);
+        approx_eq(&reconstructed, &transposed_view.contiguous(), 1e-4);
     }
 
     /// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `qr` 内部の

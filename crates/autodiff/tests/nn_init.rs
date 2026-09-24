@@ -104,6 +104,44 @@ fn uniform_rejects_low_greater_than_high() {
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
 
+/// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `low`・`high` が
+/// 個別には有限でも、幅 `high - low` を `f32` で計算すると overflow する
+/// 極端な境界（`low = -f32::MAX`・`high = f32::MAX`）で、出力が `inf`／
+/// `NaN` にならず `[low, high]` 内の有限値になることを確認する。
+#[test]
+fn uniform_extreme_finite_bounds_do_not_produce_inf_or_nan() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(71);
+    let t = init::uniform(&[2000], -f32::MAX, f32::MAX).unwrap();
+    for &v in t.host_slice().iter() {
+        assert!(v.is_finite(), "非有限値が出力された: {v}");
+        assert!(
+            (-f32::MAX..=f32::MAX).contains(&v),
+            "範囲外の値が出力された: {v}"
+        );
+    }
+}
+
+/// 同型の回帰: `xavier_uniform`／`kaiming_uniform` は `fill_uniform` へ
+/// `[-bound, bound]` を渡すため、`bound` 自体は有限でも幅 `2*bound` が
+/// `f32` overflow する境界（`bound` を `f32::MAX` に近い値まで押し上げる
+/// 極端な `fan_in`／`fan_out`＝1 かつ巨大 `gain`）で同じ欠陥が生じうる
+/// ことを、`fill_uniform` を直接使わず公開 API 経由で固定する。
+#[test]
+fn xavier_uniform_extreme_gain_does_not_produce_inf_or_nan() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(72);
+    // `bound = gain * sqrt(6 / (fan_in + fan_out))`。`shape = [1, 1]` は
+    // `fan_in = fan_out = 1` のため `bound = gain * sqrt(3)`。
+    // `gain ≈ f32::MAX / sqrt(3) / 1.01` 程度に取れば `bound` 自体は
+    // 有限のまま `f32::MAX` の 99% 近くまで押し上げられる。
+    let gain = f32::MAX / 3f32.sqrt() / 1.01;
+    let t = init::xavier_uniform(&[1, 1], gain).unwrap();
+    for &v in t.host_slice().iter() {
+        assert!(v.is_finite(), "非有限値が出力された: {v}");
+    }
+}
+
 #[test]
 fn normal_large_sample_has_roughly_expected_statistics() {
     let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -136,6 +174,61 @@ fn normal_std_zero_returns_constant_mean_and_does_not_consume_rng() {
     }
     let after = init::uniform(&[4], 0.0, 1.0).unwrap();
     assert_eq!(before.host_slice(), after.host_slice());
+}
+
+/// codex-review 指摘の回帰（イシュー #2140・PR #2239。`fill_normal`
+/// 同類型点検）: `z * std` を `f32` のまま計算すると、`z`・`std`・`mean`
+/// が個別に有限でも中間積が overflow し `inf` を出力しうる（真の値
+/// `z * std + mean` は有限域に収まるケースでも発生する）。`std` を
+/// `f32::MAX` 近くまで押し上げつつ `mean` で打ち消す極端な設定で、出力が
+/// 有限のままであることを確認する。
+///
+/// **`normal` 自体では確定的に固定できない理由**: `mean = -std` の
+/// ような「中間 overflow を起こしつつ真の値は小さい」ケースは、
+/// `z`（Box–Muller のサンプル）が `1` に近い狭い帯域でしか成立しない
+/// （`std * (z - 1)` が小さいのはその帯域だけで、それ以外の典型的な
+/// `z`（例えば `z ≈ 0`）では `std * (z - 1) ≈ -std` 自体が `f32` の
+/// 表現域を優に超え、**真に**非有限になる——これはバグではなく正しい
+/// 挙動）。したがって `normal` の全出力に対する一律の有限性検査は
+/// 書けない（実際、素朴にそう書いたところ、正しく非有限になるはずの
+/// サンプルで誤って fail した）。かわりに `trunc_normal` の `[a, b]`
+/// 受理窓を使い、「真の値が `[a, b]` 内（したがって必ず有限）と
+/// 判定されるべきサンプルが、中間 overflow のせいで誤って棄却されない」
+/// ことを検証する（`trunc_normal` も同じ `z * std + mean` 式を使うため
+/// 同型の欠陥を持っていた）。
+#[test]
+fn trunc_normal_accepts_samples_whose_intermediate_product_would_overflow_f32() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(73);
+    // `std ≈ 0.97 * f32::MAX` のとき、`f32` で `z * std` を計算すると
+    // `z > f32::MAX / std ≈ 1.031` で overflow して `inf` になる
+    // （`z` 自体・`std` 自体は有限）。`mean = -std` とすると真の値は
+    // `std * (z - 1)` であり、`z ≈ 1.05〜1.2`（`N(0,1)` として十分
+    // 発生しうる範囲）では真の値が `1.6e37`〜`6.6e37` 程度に収まる。
+    let std = f32::MAX * 0.97;
+    let mean = -std;
+    // 窓 `[a, b]` は `z ≈ 0.97〜1.18` に相当する範囲を受理する
+    // （`std * (0.97 - 1) ≈ -1.0e37`・`std * (1.18 - 1) ≈ 5.9e37`）。
+    // 旧実装（`f32` のまま `z * std + mean` を計算）では `z > 1.031`
+    // の枝が軒並み `inf`（範囲外）として棄却され、受理される最大値は
+    // `std * (1.031 - 1) ≈ 1.02e37` 付近で頭打ちになっていたはずである。
+    let a = -1.0e37_f32;
+    let b = 5.9e37_f32;
+    let t = init::trunc_normal(&[3000], mean, std, a, b).unwrap();
+    let max_v = t
+        .host_slice()
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        max_v.is_finite(),
+        "受理された値が非有限になっている: {max_v}"
+    );
+    assert!(
+        max_v > 1.5e37,
+        "受理された最大値が中間 overflow の閾値付近（約 1.02e37）に \
+         頭打ちになっている（旧実装の欠陥が再発した疑い）: max={max_v}"
+    );
 }
 
 #[test]
