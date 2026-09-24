@@ -902,6 +902,57 @@ Result<Var, AutodiffError>`・borrow／consumed 4 組合せ・既存 inherent
 メソッドへの委譲のみで bit 同一を保証）・スカラー混合の段階 0 判断・
 `Div` の扱いはいずれも承認事項として列挙のみ（同 doc §8・§11・§12）。
 
+**#2140（`nn::init` 初期化関数群の facade 公開）は経路 2 未適用のまま承認待ち
+で保留した。** イシュー本文が前提とした `Initializer` trait・各層の
+`with_init` コンストラクタは実際には存在せず（前提の食い違い。`docs/
+facade-nn-init-exposure-decision.md` §1）、本イシューの実体は「autodiff 側
+への新規実装」＋「facade 公開（承認事項）」の 2 段だった。**autodiff 側
+（`fandhe_ai_autodiff::nn::init` を `pub mod` 化し `uniform`／`normal`／
+`constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／
+`kaiming_normal`／`orthogonal`／`trunc_normal` の 9 関数を実装）は本イシュー
+で完了済み**（内部クレートへの非破壊追加のため §5 手続き対象外・`fandhe_ai_tensor_core::rng::with_global_rng` へ従属し既存の個別シード API
+〈`Linear::new(.., seed)` 等〉とは独立）。facade 公開面拡張（`crates/
+facade/src/nn/init.rs` の新設）は §5 経路 2 の承認取得まで実施していない。
+詳細は `docs/facade-nn-init-exposure-decision.md`。
+
+**#2136（`Var` 演算子オーバーロード実装。`Add`／`Mul`／`Sub`）は経路 2 未適用の
+まま承認待ちで保留した。** `crates/autodiff/src/**`・`crates/facade/src/**`
+は変更しない（コード変更なし）。#2136・#2135・親 #2131・設計記録 PR #2237 の
+いずれにも所有者の明示承認コメントが確認できなかった（bot の自動レビューの
+み）。代わりに `crates/facade/tests/api_surface.rs` へ型レベルの正のプローブ
+（`var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold`。
+`static_assertions::assert_not_impl_any!` と同型の曖昧性トリックを手書き）を
+1 件追加し、`Var`／`&Var` が算術演算子トレイトを実装していないことを
+fail-closed に固定した。詳細は
+`docs/autodiff-var-operator-overload-design.md` §14。
+
+**#2138（forward・backward hooks の facade 公開可否）の設計記録は
+`docs/autodiff-forward-backward-hooks-design.md` として完了した。**
+コード変更なし。hook 機構は 1 節の Tier 1／Tier 2 いずれの列挙にも
+含まれない（Tier 外の新規事項）。backward hook の登録 API を
+`Var::register_backward_hook` の形にすると、facade が `Var` を
+再エクスポートしている（`crates/facade/src/lib.rs:184`）ため facade
+側のコードを変更せずとも公開面が自動的に広がる。同 doc の推奨（§5.1・
+§7）はこれを避け、登録の入口を autodiff の `Tape`（例:
+`Tape::register_backward_hook`）に置く案であり、facade の `Tape` は
+2 メソッドだけを出す newtype のため、この形であれば facade 公開面は
+不変のまま保てる。forward hook は `Var` 単位では意味論が破綻するため
+`nn::ForwardHooked<M: Module>` という Module レベルのラッパーとして
+設計した（同 doc §5.3）が、facade の `nn` は #2133 と同じ理由で未公開
+（`docs/facade-nn-module-exposure-decision.md`）のため、facade へ公開
+するには `nn::Module` 公開（#2133）と本節経路 2 の双方の承認が要る。
+本節経路 2 の承認（同 doc §11 承認事項 5）は #2139 着手可否を左右
+する条件の一つに過ぎない。同 doc §11 は設計案（§4・§5）の承認・
+hook と `CustomFunction` の役割分担・callback lifetime・エラー伝播
+規則・受入基準の改訂・facade 公開の 5 項目すべてを「いずれも未実施。
+#2139 着手前にユーザー承認が必要」と明記しており、facade 公開を
+伴わない内部クレート `autodiff` 側の実装であっても、これら 5 項目
+の承認が揃うまで #2139（実装）は着手不可である。型シグネチャ
+（backward hook は `Fn(&Tensor<f32>) -> Result<(),
+AutodiffError> + Send + Sync + 'static`）・保持形（`Arc`）・エラー
+伝播（fail-fast）・`AutodiffError` への variant 追加要否はいずれも
+承認事項として列挙のみ（同 doc §11）。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |

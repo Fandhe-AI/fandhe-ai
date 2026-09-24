@@ -36,6 +36,13 @@
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
 //! 外部入力を受け取らない（`.claude/rules/security.md`）。
+//!
+//! `var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold`
+//! は上記のソース走査型ガードとは別方式（型レベルの正のプローブ）で、
+//! `Var`（`crate::var.rs`。facade からは `fandhe_ai::Var` として `lib.rs:184`
+//! で再エクスポート済み）が `Add`／`Sub`／`Mul`／`Div`／`Neg` 等の演算子
+//! トレイトを実装していないことを固定する（イシュー #2136 は承認待ちで
+//! 保留。詳細は `docs/autodiff-var-operator-overload-design.md` §14）。
 
 use std::path::Path;
 
@@ -3093,6 +3100,41 @@ fn facade_does_not_reexport_custom_function() {
     );
 }
 
+/// `crates/facade/src/` の `pub use` が `nn::init`（PyTorch `torch.nn.
+/// init.*` 相当の初期化関数群・イシュー #2140）を再エクスポートして
+/// いないことを固定する（`docs/facade-nn-init-exposure-decision.md`
+/// §0・§3「facade 公開（承認事項・経路 2）は未承認のまま保留」。
+/// `facade_does_not_reexport_custom_function` と同型の走査）。
+/// `nn_mod_declares_only_rnn_submodule` が `pub mod init;` 追加自体を
+/// 別途固定する一方、本テストは `pub use fandhe_ai_autodiff::nn::
+/// init::...` のような迂回経路（`nn/mod.rs` 以外のファイルからの
+/// 再エクスポート）も走査対象に含める。
+#[test]
+fn facade_does_not_reexport_nn_init() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("nn::init") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が nn::init を含む",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が nn::init を再エクスポートしている\
+         （facade-nn-init-exposure-decision.md §3 は未承認のまま対象外\
+         という設計判断に違反）: {offending:?}"
+    );
+}
+
 /// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
 /// `Tape::custom` への転送メソッドを持たないことを固定する（`Tape::
 /// var_no_grad` の前例〈`docs/autodiff-custom-function-decision.md`
@@ -3547,7 +3589,11 @@ fn nn_rnn_module_is_pure_reexport() {
 /// 担う**: 案 B 採用時に想定する `nn::module`／`nn::container` 新設
 /// （`pub mod module;`／`pub mod container;`）はこの完全一致検査に
 /// より現時点では fail する。承認後に案 B を実装する際は期待集合
-/// （`["rnn", "module", "container"]` 等）へ更新する。
+/// （`["rnn", "module", "container"]` 等）へ更新する。**#2140 の保留
+/// （`docs/facade-nn-init-exposure-decision.md` §3・§4）も本テストが
+/// 担う**: `nn::init` の facade 公開（条件付き手順 §4）で想定する
+/// `pub mod init;` 追加はこの完全一致検査により現時点では fail する。
+/// 承認後に実装する際は期待集合（`["init", "rnn"]` 等）へ更新する。
 #[test]
 fn nn_mod_declares_only_rnn_submodule() {
     let path = nn_mod_rs_path();
@@ -5798,5 +5844,533 @@ fn facade_does_not_expose_kv_cache_stateful_attention() {
         "facade の公開面が KV キャッシュ（#2084 の K-2。`add_stateful_attention`／\
          `KvCache`／`StatefulAttention`）を公開している（`docs/kv-cache-design.md` \
          §6 承認事項 2 が未取得のまま対象外としている設計判断に違反）: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::Var`（`Var<'t>`・借用 `&Var<'t>`）が算術演算子トレイト
+/// （`Add`／`Sub`／`Mul`／`Div`／各 `*Assign`／`Neg`）を実装していない
+/// ことを固定する（イシュー #2136。実装計画 §3.2）。**`Var op Var`／
+/// `Var op &Var`／`Var op f32`／`Var op f64` に加え、逆向き（スカラー
+/// 左辺）の `f32 op Var`／`f64 op Var`（PR #2247 codex-review 指摘 1）
+/// と、スカラー右辺・借用レシーバの複合代入 `Var: *Assign<f32/f64>`・
+/// `&Var: *Assign<...>`（同指摘 2）も同じ否定ガード方式で固定する**。
+///
+/// # 背景
+///
+/// イシュー #2136（`Var` 演算子オーバーロード実装）・設計元の #2135・
+/// 親 #2131・設計 PR #2237 のいずれにも、リポジトリ所有者による明示
+/// 承認コメントが確認できない（bot（`github-actions`／codex）の自動
+/// レビューのみ）。`docs/compat-api-scope.md` §5 は「§5 経路 2 の承認が
+/// 得られるまで #2136（実装）は着手不可」と定めており、`Var` に
+/// トレイト impl を追加すると `crates/facade/src/lib.rs:184` の
+/// `pub use fandhe_ai_autodiff::{..., Var, ...}` を通じて facade の
+/// 公開面が自動的に拡大するため（「autodiff にだけ入れて facade には
+/// 出さない」は構造上できない）、本 PR では `crates/autodiff/src/**`・
+/// `crates/facade/src/**` を変更せず、本テストで現状（未実装）を
+/// fail-closed に固定する。
+///
+/// # ガード方式（#2133 の `NnModuleHoldDoctestGuard` とは別方式）
+///
+/// #2133 のガードはソースの `pub use` 行に現れる「名前」の衝突を
+/// 検出する方式だが、トレイト実装は再エクスポートのような新しい
+/// 識別子を導入しないため同じ方式では検出できない。代わりに
+/// `static_assertions::assert_not_impl_any!` と同じ原理の曖昧性
+/// トリック（依存追加を避け手書き）を用いる: 対象の型パラメータ
+/// （`()`）へブランケット実装した `AmbiguousIfImpl<()>` に加え、
+/// 「対象トレイトを実装している場合に限り」別の型パラメータ
+/// （`Invalid`）へも実装されるブランケット実装を用意すると、対象の
+/// トレイトが実際に実装されている場合にのみ `<$ty as
+/// AmbiguousIfImpl<_>>::probe` の型パラメータ推論が曖昧になり
+/// （E0283 系）、このテストバイナリのコンパイル自体が失敗する
+/// （fail-closed）。文字列走査の heuristics（`.claude/rules/
+/// out-of-scope-tracking.md` 系の過去指摘往復を招いた方式）は使わない。
+///
+/// # 既知の限界
+///
+/// 判定は rustc のコンパイル時トレイト解決に依るため、無効な `cfg`
+/// （例 `target_os = "macos"` 限定）の下に置かれた演算子 impl は
+/// Linux CI では検出できない。コア型の算術演算子 impl を OS 限定に
+/// する正当な理由はないため許容する。
+///
+/// # 承認取得後の撤去方針
+///
+/// #2136 の承認取得後、演算子オーバーロードを実装する際は、実装対象
+/// の型・トレイトの組に対応する `assert_not_impl!` 行を本テストから
+/// 削除すること（`crates/autodiff/tests/operator_overload.rs`
+/// （新規）の bit 一致テストへ置き換える）。
+#[test]
+fn var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold() {
+    // このテスト関数のスコープに閉じたヘルパー。他テストの名前空間を
+    // 汚さないための private な trait・macro（モジュールを分けない
+    // ことで `use` の追加が不要になる）。
+    trait AmbiguousIfImpl<A> {
+        fn probe() {}
+    }
+    impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+
+    macro_rules! assert_not_impl {
+        ($ty:ty: $($tr:path),+ $(,)?) => {{
+            $({
+                struct Invalid;
+                impl<T: ?Sized + $tr> AmbiguousIfImpl<Invalid> for T {}
+            })+
+            // `_` の推論が一意に定まらない（ブランケット実装が複数
+            // 候補になる）場合、対象トレイトが実装されていることを
+            // 意味し、コンパイルエラーで検出する。
+            let _ = <$ty as AmbiguousIfImpl<_>>::probe;
+        }};
+    }
+
+    use fandhe_ai::Var;
+    use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+
+    assert_not_impl!(
+        Var<'static>:
+        Add<Var<'static>>, Add<&'static Var<'static>>, Add<f32>, Add<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Add<Var<'static>>, Add<&'static Var<'static>>, Add<f32>, Add<f64>,
+    );
+
+    assert_not_impl!(
+        Var<'static>:
+        Sub<Var<'static>>, Sub<&'static Var<'static>>, Sub<f32>, Sub<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Sub<Var<'static>>, Sub<&'static Var<'static>>, Sub<f32>, Sub<f64>,
+    );
+
+    assert_not_impl!(
+        Var<'static>:
+        Mul<Var<'static>>, Mul<&'static Var<'static>>, Mul<f32>, Mul<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Mul<Var<'static>>, Mul<&'static Var<'static>>, Mul<f32>, Mul<f64>,
+    );
+
+    assert_not_impl!(
+        Var<'static>:
+        Div<Var<'static>>, Div<&'static Var<'static>>, Div<f32>, Div<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Div<Var<'static>>, Div<&'static Var<'static>>, Div<f32>, Div<f64>,
+    );
+
+    assert_not_impl!(Var<'static>: Neg);
+    assert_not_impl!(&'static Var<'static>: Neg);
+
+    assert_not_impl!(
+        Var<'static>:
+        AddAssign<Var<'static>>, AddAssign<&'static Var<'static>>,
+    );
+    assert_not_impl!(
+        Var<'static>:
+        SubAssign<Var<'static>>, SubAssign<&'static Var<'static>>,
+    );
+    assert_not_impl!(
+        Var<'static>:
+        MulAssign<Var<'static>>, MulAssign<&'static Var<'static>>,
+    );
+    assert_not_impl!(
+        Var<'static>:
+        DivAssign<Var<'static>>, DivAssign<&'static Var<'static>>,
+    );
+
+    // 逆向き（スカラー左辺）の演算子実装（`f32 + Var` 等）。codex-review
+    // 指摘（PR #2247 スレッド 1 件目）: `Var op f32` のみでは `f32 op Var`
+    // の追加を検出できないため、`f32`／`f64` を対象型とした
+    // `Add`/`Sub`/`Mul`/`Div<Var<'static>>`／`<&'static Var<'static>>`
+    // も同じ否定ガード方式で固定する。
+    //
+    // # `AmbiguousIfImpl` を使い回さない理由
+    //
+    // 上記の `Var<'static>: Add<f32>, Add<f64>, ...` の検査は
+    // `impl<T: ?Sized + Add<f32>> AmbiguousIfImpl<Invalid> for T {}` の
+    // ような無条件ブランケット実装を生成する。この `impl` はブロック内
+    // 宣言でもコンパイル単位全体（このクレート全体）でトレイト解決に
+    // 参加するため、`f32: Add<f32>`（プリミティブの自明な反射的実装）
+    // にも該当してしまい、以後 `<f32 as AmbiguousIfImpl<_>>::probe` を
+    // 呼ぶと無関係な既存ブロックの `Invalid` と `()` の 2 候補が生じて
+    // 常に E0283（曖昧）になる（実測確認済み: 本節をこのまま
+    // `AmbiguousIfImpl` へ追加すると `f32` プローブ時点で fail-closed
+    // ではなく偽陽性のコンパイルエラーになる）。プリミティブ型を `$ty`
+    // に取る本節専用に、別トレイト `AmbiguousIfImplRev`／別マクロ
+    // `assert_not_impl_rev!` を用意して汚染を避ける。
+    trait AmbiguousIfImplRev<A> {
+        fn probe() {}
+    }
+    impl<T: ?Sized> AmbiguousIfImplRev<()> for T {}
+
+    macro_rules! assert_not_impl_rev {
+        ($ty:ty: $($tr:path),+ $(,)?) => {{
+            $({
+                struct Invalid;
+                impl<T: ?Sized + $tr> AmbiguousIfImplRev<Invalid> for T {}
+            })+
+            let _ = <$ty as AmbiguousIfImplRev<_>>::probe;
+        }};
+    }
+
+    assert_not_impl_rev!(
+        f32:
+        Add<Var<'static>>, Add<&'static Var<'static>>,
+        Sub<Var<'static>>, Sub<&'static Var<'static>>,
+        Mul<Var<'static>>, Mul<&'static Var<'static>>,
+        Div<Var<'static>>, Div<&'static Var<'static>>,
+    );
+    assert_not_impl_rev!(
+        f64:
+        Add<Var<'static>>, Add<&'static Var<'static>>,
+        Sub<Var<'static>>, Sub<&'static Var<'static>>,
+        Mul<Var<'static>>, Mul<&'static Var<'static>>,
+        Div<Var<'static>>, Div<&'static Var<'static>>,
+    );
+
+    // スカラー右辺の複合代入（`Var: *Assign<f32/f64>`）・借用レシーバ
+    // （`&Var: *Assign<...>`）。codex-review 指摘（PR #2247 スレッド 2
+    // 件目）: 上記は `Var op= Var/&Var` のみを検査しており、スカラー
+    // 右辺（`v += 1.0f32` 等）と借用レシーバ経由の複合代入実装を検査
+    // していなかった。`&'static Var<'static>` 側は `*Assign` が通常
+    // `&mut self` を要求するため実装され得ないが、将来の変則的な実装
+    // （例: 内部可変性を用いた impl）も多層防御として同じ方式で固定する。
+    assert_not_impl!(
+        Var<'static>:
+        AddAssign<f32>, AddAssign<f64>,
+        SubAssign<f32>, SubAssign<f64>,
+        MulAssign<f32>, MulAssign<f64>,
+        DivAssign<f32>, DivAssign<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        AddAssign<Var<'static>>, AddAssign<&'static Var<'static>>,
+        AddAssign<f32>, AddAssign<f64>,
+        SubAssign<Var<'static>>, SubAssign<&'static Var<'static>>,
+        SubAssign<f32>, SubAssign<f64>,
+        MulAssign<Var<'static>>, MulAssign<&'static Var<'static>>,
+        MulAssign<f32>, MulAssign<f64>,
+        DivAssign<Var<'static>>, DivAssign<&'static Var<'static>>,
+        DivAssign<f32>, DivAssign<f64>,
+    );
+}
+
+// =====================================================================
+// #2141（親 #2131）の facade 公開保留固定（`VarBoolOpsHoldDoctestGuard`）。
+// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard` 系と同型の
+// 正のプローブ 1 ブロック方式のドリフト検査。承認事項・多層防御の
+// 位置づけは `docs/autodiff-bool-ops-exposure-decision.md` §6 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarBoolOpsHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （[`custom_function_hold_doctest_globs_all_pub_modules`] の
+/// `VarBoolOpsHoldDoctestGuard` 版）。
+#[test]
+fn bool_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarBoolOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarBoolOpsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`bool_ops_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの **glob
+/// 以外の本文**（ローカル自由関数群・`__FandheBoolHoldProbe` トレイト
+/// 定義・`Var`／`Tensor<bool>`／`Tensor<f32>`／`Tape` への実装・
+/// `__probe_*` 関数群）が固定文言 [`BOOL_OPS_HOLD_PROBE_BODY`] と 1 行
+/// たりとも違わず一致することを固定する（`custom_function_hold_
+/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
+/// を骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn bool_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarBoolOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, BOOL_OPS_HOLD_PROBE_BODY,
+        "VarBoolOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 BOOL_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_bool_hold_probe モジュール・__FandheBoolHoldProbe\
+         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか\
+         確認すること。"
+    );
+}
+
+/// [`bool_ops_hold_doctest_probe_body_matches_fixed_contract`] が要求
+/// する固定文言。`crates/facade/src/lib.rs` の `VarBoolOpsHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
+/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
+/// 含む）。
+const BOOL_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_bool_hold_probe {\n\
+\x20\x20\x20\x20pub mod bool_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn gt_bool() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn ge_bool() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn lt_bool() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn le_bool() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn eq_bool() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn ne_bool() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn logical_and() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn logical_or() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn logical_not() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn masked_select() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_bool_hold_probe::*;\n\
+\n\
+struct __FandheBoolMarker;\n\
+\n\
+trait __FandheBoolHoldProbe {\n\
+\x20\x20\x20\x20fn gt_bool(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn ge_bool(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn lt_bool(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn le_bool(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn eq_bool(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn ne_bool(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn logical_and(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn logical_or(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn logical_not(&self) -> __FandheBoolMarker;\n\
+\x20\x20\x20\x20fn masked_select(&self) -> __FandheBoolMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheBoolHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+}\n\
+\n\
+impl __FandheBoolHoldProbe for fandhe_ai::Tensor<bool> {\n\
+\x20\x20\x20\x20fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+}\n\
+\n\
+impl __FandheBoolHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+}\n\
+\n\
+impl __FandheBoolHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+\x20\x20\x20\x20fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `bool_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が\n\
+\x20\x20\x20\x20// 曖昧になり E0659 でコンパイル失敗する。バレ識別子の\n\
+\x20\x20\x20\x20// 未使用 glob 衝突は rustc が検出しないため、経路として\n\
+\x20\x20\x20\x20// 実際に `bool_ops` を解決させる必要がある）。\n\
+\x20\x20\x20\x20bool_ops::gt_bool();\n\
+\x20\x20\x20\x20bool_ops::ge_bool();\n\
+\x20\x20\x20\x20bool_ops::lt_bool();\n\
+\x20\x20\x20\x20bool_ops::le_bool();\n\
+\x20\x20\x20\x20bool_ops::eq_bool();\n\
+\x20\x20\x20\x20bool_ops::ne_bool();\n\
+\x20\x20\x20\x20bool_ops::logical_and();\n\
+\x20\x20\x20\x20bool_ops::logical_or();\n\
+\x20\x20\x20\x20bool_ops::logical_not();\n\
+\x20\x20\x20\x20bool_ops::masked_select();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = fandhe_ai::Var::gt_bool(x);\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = x.gt_bool();\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = fandhe_ai::Var::masked_select(x);\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = x.masked_select();\n\
+}\n\
+\n\
+fn __probe_tensor_bool(x: &fandhe_ai::Tensor<bool>) {\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = fandhe_ai::Tensor::logical_and(x);\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = x.logical_and();\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = fandhe_ai::Tensor::logical_not(x);\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = x.logical_not();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = fandhe_ai::Tensor::gt_bool(x);\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = x.gt_bool();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = fandhe_ai::Tape::gt_bool(x);\n\
+\x20\x20\x20\x20let _: __FandheBoolMarker = x.gt_bool();\n\
+}";
+
+/// bool 出力比較 6 種・logical 3 種・`masked_select`（10 個の関数名。
+/// イシュー #2141）。[`facade_does_not_reexport_or_declare_bool_ops`]・
+/// [`workspace_declares_bool_ops_fn_names_only_in_autodiff_bool_ops`]
+/// が共用する。
+const BOOL_OPS_FN_NAMES: [&str; 10] = [
+    "gt_bool",
+    "ge_bool",
+    "lt_bool",
+    "le_bool",
+    "eq_bool",
+    "ne_bool",
+    "logical_and",
+    "logical_or",
+    "logical_not",
+    "masked_select",
+];
+
+/// facade src 全体（`crates/facade/src/**`）に、`bool_ops` を参照する
+/// `pub use`（`pub use fandhe_ai_autodiff::bool_ops;` 等のモジュール
+/// 再エクスポート・別名含む）も、[`BOOL_OPS_FN_NAMES`]（10 個）の `fn`
+/// 宣言（可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`]
+/// と同じ検出契約）も存在しないことを固定する（`VarBoolOpsHoldDoctestGuard`
+/// の正のプローブと多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_nn_module_or_containers` 系と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_bool_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") && line_contains_identifier(trimmed, "bool_ops") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `bool_ops` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in BOOL_OPS_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が bool_ops（イシュー #2141 の内部クレート限定\
+         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
+         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`BOOL_OPS_FN_NAMES`]
+/// （10 個）の `fn` 宣言が `crates/autodiff/src/bool_ops.rs` の 1 ファイル
+/// のみ（各 1 件）に定義されていることを固定する（`workspace_declares_
+/// custom_fn_only_on_tape` と同型の workspace 全体インベントリ。facade
+/// のソース走査・`VarBoolOpsHoldDoctestGuard` の正のプローブはいずれも
+/// 「facade から到達可能か」しか見ないため、facade の外に同名の trait
+/// impl が新設され将来 facade が glob できる形で公開してしまう場合に
+/// 備え、そもそもの定義元を先に塞ぐ多層防御の最内層とする）。
+#[test]
+fn workspace_declares_bool_ops_fn_names_only_in_autodiff_bool_ops() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in BOOL_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = BOOL_OPS_FN_NAMES
+        .iter()
+        .map(|name| (format!("autodiff/src/bool_ops.rs::{name}"), 1usize))
+        .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の bool_ops 系 `fn` 宣言集合が\
+         `crates/autodiff/src/bool_ops.rs`（各 1 件）のみという期待と\
+         一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
+         が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
+         なのかを確認すること）: {found:?}"
     );
 }

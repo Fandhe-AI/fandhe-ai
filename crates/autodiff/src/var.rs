@@ -934,9 +934,11 @@ impl<'t> Var<'t> {
     /// PyTorch `torch.gt`／`>` 演算子相当）。イシュー #1712（親 #1593）。
     ///
     /// 比較演算 6 種（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は共通の出力・
-    /// 勾配規約を持つ: 出力は f32 の `0.0`／`1.0`（bool dtype 出力は
-    /// #1613 の対象で本メソッドの対象外。`docs/scalar-op-dispatch-design.md`
-    /// §3.2）。IEEE 754 準拠の比較（`NaN` を含む比較は `eq` を含め常に
+    /// 勾配規約を持つ: 出力は f32 の `0.0`／`1.0`（厳密な `Tensor<bool>`
+    /// 出力版は `fandhe_ai_autodiff::bool_ops::gt_bool` 等〈イシュー
+    /// #2141。facade 公開は承認待ちで保留〉が本メソッドとは独立に
+    /// 提供する。`docs/scalar-op-dispatch-design.md` §3.2）。IEEE 754
+    /// 準拠の比較（`NaN` を含む比較は `eq` を含め常に
     /// 偽・`ne` のみ真）。VJP は両入力とも常にゼロ勾配（比較演算は
     /// 局所的に階段関数のため微分不可能。`eval::scalar::binary_partials`
     /// が `(0.0, 0.0)` を返す設計を `grad.rs::vjp` がそのまま `Some`
@@ -5213,7 +5215,7 @@ impl<'t> Var<'t> {
                 verify_shape(factors.r.shape(), &[k, n])?;
                 (factors.q, factors.r)
             }
-            Err(BackendError::Unsupported(_)) => eval::linalg::qr(&a_val),
+            Err(BackendError::Unsupported(_)) => eval::linalg::qr(&a_val)?,
             Err(other) => return Err(unify_backend_error(other)),
         };
         let q_id = self.tape.push_eager(

@@ -132,9 +132,22 @@
 //! `nn/attention.rs` の既存合成（`project`／`split_heads`／
 //! `sdpa_compose`）のみで実装し、新規 `Op`／`BackendOps`／
 //! カーネル／依存は追加しない（`docs/kv-cache-design.md`）。
-//! facade 公開（`add_stateful_attention` 相当）は未承認のため
-//! 保留する（`crates/facade/tests/api_surface.rs` の否定ガードで
-//! 固定。`docs/kv-cache-design.md` §6 承認事項 2）。
+//! K-1（本 autodiff 内部実装）は 2026-09-24 にユーザー承認済み
+//! （`docs/kv-cache-design.md` §6 承認事項 1）。facade 公開
+//! （`add_stateful_attention` 相当・K-2）は別途承認が必要で未承認
+//! のため保留する（`crates/facade/tests/api_surface.rs` の否定
+//! ガードで固定。`docs/kv-cache-design.md` §6 承認事項 2）。
+//! イシュー #2140（親 #2131）で [`init`] を `pub mod` 化し、PyTorch
+//! `torch.nn.init.*` 相当の初期化関数群（`uniform`／`normal`／
+//! `constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／
+//! `kaiming_normal`／`orthogonal`／`trunc_normal`）を追加した。個別
+//! シード方式の既存 `pub(crate)` ヘルパー（`uniform_init` 等）とは独立
+//! に、プロセスグローバル決定的 RNG（`tensor-core::rng::manual_seed`）
+//! へ従属する（`init.rs` モジュール doc「`nn::init`」節参照）。facade
+//! への再エクスポートは別途ユーザー承認（`docs/compat-api-scope.md`
+//! §5 経路 2）を要する公開面拡張のため、本イシュー時点では未承認の
+//! まま保留し `crates/facade/**` は変更していない
+//! （`docs/facade-nn-init-exposure-decision.md` 参照）。
 
 mod attention;
 mod batch_norm;
@@ -143,7 +156,7 @@ mod conv;
 mod dropout;
 mod embedding;
 mod flatten;
-mod init;
+pub mod init;
 mod linear;
 mod module;
 mod norm;
