@@ -371,9 +371,21 @@ attention`）だけでは、複数行・ネストした group での `pub use`�
 | `pub use fandhe_ai_autodiff::nn::*` 等の glob 再エクスポート | 既存の `facade_source_uses_only_modelable_structures`／`facade_pub_use_leaves_are_not_modules`（facade 全体で拒否済み）＋正のプローブ |
 | facade 内の `struct`／`enum`／`type`／`trait` `KvCache`・`StatefulAttention` の独自宣言 | 正のプローブ＋`facade_does_not_reexport_or_declare_kv_cache_items` |
 | `compat::Sequential` の inherent `add_stateful_attention` | 正のプローブ（inherent メソッドがトレイトメソッドより優先解決されるため型・引数不一致で失敗）＋`facade_does_not_reexport_or_declare_kv_cache_items` |
-| facade の外（autodiff 等）で同名宣言が増える | `workspace_declares_kv_cache_items_only_in_autodiff_attention`（workspace インベントリ） |
 | doctest の無効化（`ignore`／`no_run`／`compile_fail` への書き換え・`# ` 隠し行・プローブの削除） | `extract_single_bare_fenced_doctest_block`（装飾なしのフェンスを 1 つだけ許す）＋`kv_cache_hold_doctest_probe_body_matches_fixed_contract`（本文の固定文言検査） |
 | `pub mod` を追加したのに doctest の glob を更新し忘れる | `kv_cache_hold_doctest_globs_all_pub_modules`（glob 集合の一致検査） |
+
+facade の外（`autodiff` 等）で同名宣言が増える経路は、workspace 全体の
+名前インベントリ（`workspace_declares_kv_cache_items_only_in_autodiff_
+attention`）としていったん導入したが、facade 到達可能性の保証と無関係
+な private 宣言（別バックエンド・K-3 実装の内部型・関数等）まで固定して
+しまい、正当な変更を不当に fail させる指摘（codex-review・PR #2252）を
+受けて撤去した。正のプローブ（`__fandhe_kv_hold_probe` モジュールが
+`KvCache`／`StatefulAttention`／`add_stateful_attention` を type/value
+として使用）は、facade が `pub use fandhe_ai_autodiff::nn::*` のような
+glob 再エクスポートで同名の別定義を巻き込んだ場合、型・引数の不一致で
+コンパイル失敗するため、この迂回パターンは正のプローブ＋
+`facade_does_not_reexport_or_declare_kv_cache_items` の既存 2 層で
+引き続き塞がれている。
 
 ### 10.2 承認後に外すもの・置き換えるもの
 
@@ -386,9 +398,6 @@ K-2 の承認を得た日が来たら、次を同時に行う（他の保留系�
   `facade_does_not_reexport_or_declare_kv_cache_items`（自己テスト含む）
   を削除するか、正ガード（実装した公開面が到達可能であることを検査する
   テスト）へ置き換える。
-- `workspace_declares_kv_cache_items_only_in_autodiff_attention` の
-  期待値マップを、facade 側に増えた宣言（10.3 の形が確定すれば）に
-  合わせて更新する。
 
 ### 10.3 承認依頼に向けた K-2 事前設計と、承認者が判断すべき論点
 

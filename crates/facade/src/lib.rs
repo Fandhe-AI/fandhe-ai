@@ -1491,10 +1491,9 @@ struct VarBoolOpsHoldDoctestGuard;
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// facade_does_not_expose_kv_cache_stateful_attention`〈直列 1 行走査。
 /// 内側の層として維持〉・`facade_does_not_reexport_or_declare_kv_cache_
-/// items`〈トークン方式。複数行・別名・独自宣言を検出〉・
-/// `workspace_declares_kv_cache_items_only_in_autodiff_attention`〈定義元
-/// インベントリ〉）との多層防御の位置づけ・承認未取得の経緯・承認依頼用
-/// の K-2 事前設計は `docs/kv-cache-design.md` §10「facade 公開（K-2）の
+/// items`〈トークン方式。複数行・別名・独自宣言を検出〉）との多層防御の
+/// 位置づけ・承認未取得の経緯・承認依頼用の K-2 事前設計は
+/// `docs/kv-cache-design.md` §10「facade 公開（K-2）の
 /// 保留固定と承認依頼用の事前設計」を参照。本 doctest が glob import する
 /// `pub mod` 集合と `src/lib.rs` の実宣言集合のドリフトは
 /// `kv_cache_hold_doctest_globs_all_pub_modules` が、本文（glob 以外）の

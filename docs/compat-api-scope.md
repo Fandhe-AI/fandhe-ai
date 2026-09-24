@@ -346,8 +346,7 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   `StatefulAttention` 相当）は未承認のため保留し、
   `crates/facade/tests/api_surface.rs` の否定ガード（`facade_does_not_
   expose_kv_cache_stateful_attention`・`KvCacheHoldDoctestGuard` の
-  正のプローブ・`facade_does_not_reexport_or_declare_kv_cache_items`・
-  `workspace_declares_kv_cache_items_only_in_autodiff_attention` の
+  正のプローブ・`facade_does_not_reexport_or_declare_kv_cache_items` の
   多層構成。`docs/kv-cache-design.md` §10）で固定した
   （Tier 1／Tier 2 表への行追加は引き続き行わない）
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
