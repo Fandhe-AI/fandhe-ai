@@ -283,7 +283,7 @@ cpu_f64_autograd_forward_and_grad_match_host_reference` で確認した（CI
 実行環境に DGX Spark GB10・Apple Silicon 実機への到達手段がないため
 **未実施のまま**であり、Mac／GB10 実機セッションへ申し送る。
 
-### #2196 への申し送り
+### #2196 への申し送り（実装済み。§14 参照）
 
 `OpF64`（`f64_autograd.rs`）は `pub(crate)` の非 `#[non_exhaustive]`
 enum とし、`match` を網羅形にしてある。後続イシュー #2196（matmul・sum・
@@ -291,3 +291,70 @@ mean・max、facade への到達経路）は `OpF64` へ variant を追加する
 本モジュールの上に積み増す想定。`Var<T>` への一般化・facade からの到達
 （§10 承認事項 3・4）は本イシューでは着手せず、必要になった時点で個別
 のユーザー承認を要する。
+
+## 14. 実装記録（イシュー #2196・親 #2142「f64 autograd の最小集合」第 2 段）
+
+§13 の申し送りどおり、`OpF64`（`f64_autograd.rs`）に `MatMul`（rank 2
+限定）・`Sum`／`Mean`／`Max`（`dim: Option<usize>`）の 4 variant を追加
+する形で `TapeF64`／`VarF64` の上に積み増した。`Var<'t>`／`Tape`／`Op`／
+`grad.rs`・`TypedOps` trait・facade の公開面はいずれも変更していない
+（`architecture_boundaries.rs`・`api_surface.rs` の既存否定ガードが
+無改変のまま通ることで機械的に確認した）。
+
+イシュー本文の「facade 到達実装」は、`TapeF64`／`VarF64` を facade へ
+再エクスポートする（§10 承認事項 3・4。未承認のまま）ことではなく、
+既存の公開 accessor `fandhe_ai::tape()` → `Tape::typed_ops_f64()`
+（#2195 で追加済み・本イシューで変更なし）経由で f64 の `gemm`／
+`sum`／`max` を計算できることと読み替えた（`crates/facade/tests/
+dtype_f64_integration.rs`）。`facade::Tape` は内部フィールドが
+`pub(crate)` の newtype のため、そこから `TapeF64` を構築することは
+できない——同テストは facade accessor が返す `&dyn TypedOps<f64>` を
+直接使う経路と、内部クレート `fandhe_ai_autodiff::f64_autograd::
+TapeF64`（`CpuBackendOps` を facade の依存経由で直接使う経路）の両方が
+bit 完全一致することで、facade accessor が `TapeF64` の内部 dispatch
+と同一のネイティブ実装へ到達していることを検証した。
+
+### バックエンド別 dispatch（実測記録。#2195 の表に matmul／sum／mean／max を追加）
+
+| バックエンド | `typed_ops_f64()` | `add`／`mul`／`matmul`／`sum`／`max` | `div`／`pow` | `mean` |
+|---|---|---|---|---|
+| CPU（`CpuBackendOps`） | `Some`（#1697） | ネイティブ | ホスト | ネイティブ `sum` + ホスト除算 1 回 |
+| CUDA（`CudaBackendOps`） | `Some`（#2060） | ネイティブ | ホスト | ネイティブ `sum` + ホスト除算 1 回 |
+| Metal（`MetalBackendOps`） | `None`（MSL `double` 非対応が恒久的） | ホスト | ホスト | ホスト `sum` + ホスト除算 1 回 |
+
+### bit 一致の境界（新規追加分）
+
+- `matmul`（rank 2 限定）: ホスト参照実装（ikj 順・`f64::mul_add`）は
+  CPU ネイティブ（`gemm_row_parallel_f64`）・`matmul_reference_fma_f64`
+  と常に bit 完全一致する。rank≥3 のバッチ matmul は本イシューの対象外
+  （`TypedOps<f64>` にバッチ版がないため。§10 承認事項 2 は消費しない）
+- `sum`（軸指定）: 縮約軸を昇順で逐次和する構造が CPU ネイティブと同一
+  のため任意要素数で bit 一致する
+- `sum`（全軸）: CPU ネイティブの `CHUNK = 4096` 単位 2 段構成に対し、
+  ホスト参照実装は単純逐次和のため、**bit 一致は要素数 4096 以下に
+  限る**（`docs/perf/cuda-parity-baseline.md` 系の CHUNK 契約とは別軸の
+  境界。tolerance 定数・baseline は変更していない）
+- `max`：NaN 非伝播・先勝ち決定的タイ方式は f32 版（イシュー #1718）と
+  同一。値自体は走査順に依らないため常に bit 一致する
+
+CPU ネイティブ対ホストの複合 backward（`matmul` → `sum`／`max` →
+`mean` の合成）が bit 完全一致することを `crates/facade/tests/
+dtype_f64_integration.rs::
+cpu_native_matmul_sum_mean_max_backward_matches_host_reference` で
+確認した（CI 実行）。複合 backward と数値微分（中心差分・h=1e-6）の
+突合は `crates/autodiff/tests/var_f64_integration.rs::
+composite_matmul_sum_mean_max_backward_matches_central_difference`
+（leaf → elementwise → GEMM → reduction の 3 段以上の合成）で確認した。
+CUDA・Metal の同経路（`#[ignore]` テスト）は、本エージェント実行環境に
+DGX Spark GB10・Apple Silicon 実機への到達手段がないため**未実施のまま**
+であり、`docs/perf/logs/var-f64-gemm-reduction-2196/README.md` へ
+申し送る。
+
+### 次段への申し送り
+
+- CUDA／Metal のネイティブ f64 カーネル追加・`TypedOps<f64>` への演算
+  追加（バッチ matmul・`mean`・`div`・`pow`）
+- `Var<T>` への一般化・facade からの `TapeF64`／`VarF64` 直接到達
+  （§10 承認事項 3・4）は引き続き未着手（必要になった時点で個別の
+  ユーザー承認を要する）
+- rank≥3 のバッチ matmul・`keepdim`・多軸縮約（`sum_dims` 相当）・`min`
