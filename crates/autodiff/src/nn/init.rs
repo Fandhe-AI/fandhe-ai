@@ -287,12 +287,65 @@ fn alloc_failed() -> AutodiffError {
     AutodiffError::Shape(ShapeError::ElementCountOverflow)
 }
 
+/// `nn::init` の全公開関数が `Tensor` 構築前に検査する rank 上限
+/// （codex-review 指摘。PR #2239・`init.rs:554` ほか）: `try_alloc` は
+/// 要素バッファ（`numel` に比例）のみをフォールブル化しているが、
+/// その後段の `Tensor::new(data, shape)` 自体は `tensor-core` 内部で
+/// `shape.to_vec()`（`Vec<usize>`）・`row_major_strides(shape)`
+/// （`Vec<isize>`）という**rank に比例する**確保を非フォールブルに行う
+/// （`tensor-core::Tensor::new` 実装参照。`tensor-core` は「`Tensor::
+/// new`／`shape` に rank 上限を課さない」設計〈`crates/tensor-core/src/
+/// tensor_fmt.rs` 冒頭コメント〉のため、rank に比例する確保が
+/// フォールブルかどうかは呼び出し側の責務になる）。`numel` が 0 や
+/// 小さくても rank だけを極端に大きくした shape（例:
+/// `shape = [1; 100_000]`）を渡すと、`numel` 由来の確保はすべて安価に
+/// 成功したうえで、この rank 比例の確保だけが失敗し allocation
+/// panic／abort に至りうる——「確保不能は `Err` で伝播する」契約
+/// （本ファイル上部の `alloc_failed` doc 参照）を rank 軸だけが
+/// 依然として破っていた。
+///
+/// **tensor-core（共有実装）は変更しない**（依存方向の制約・rank 無
+/// 制限という既存設計自体は妥当なため）。かわりに `nn::init` 側の
+/// 入口で確保より前に rank の上限を検査し、超過時は `alloc_failed()`
+/// を返す——これにより `shape.to_vec()`／`row_major_strides(shape)` は
+/// 常に「定数上限つきの微小確保」（高々 [`MAX_RANK`] 要素）に抑えられ、
+/// 実質的にフォールブル化したのと同じ安全性を得る。
+///
+/// **上限値の根拠**: `crates/tensor-core/src/tensor_fmt.rs::
+/// FMT_MAX_RENDER_RANK`（`Tensor` の `Debug` 表示が再帰探索する rank
+/// の上限。表示再帰のスタックオーバーフロー対策として既に導入
+/// 済みの前例）と同じ値 `64` を採用する。同定数の doc が述べる
+/// 採用理由（「PyTorch/NumPy が実務上使用する次元数を通常上回り、
+/// かつ default スレッドスタックでも安全な余裕を持つ値」）は本件にも
+/// そのまま当てはまる——実務上の重みテンソル（`Linear`＝2・
+/// `Conv1d`〜`Conv3d`＝3〜5・一般化した `ConvNd` でも 1 桁台）は
+/// この上限を大きく下回る。`GS_MAX_RANK`（`crates/backend-metal/src/
+/// gather_scatter_model.rs`＝`8`）は CUDA／Metal の `gather`／`scatter`
+/// カーネル固有のスタック配列サイズ制約であり、本件（`Tensor`
+/// 構築一般の確保安全性）とは意味論が異なるため採用しない
+/// （`tensor-core`・`onnx-interop` 側に汎用の rank 上限定数は存在
+/// しないことを確認済み）。本定数は `nn::init` 専用であり、他モジュール
+/// の rank 上限には波及しない。
+const MAX_RANK: usize = 64;
+
+/// [`MAX_RANK`] の検査（確保に先立つ入口検査。doc 参照）。
+fn check_rank(shape: &[usize]) -> Result<(), AutodiffError> {
+    if shape.len() > MAX_RANK {
+        return Err(alloc_failed());
+    }
+    Ok(())
+}
+
 /// `shape` の要素数積を `checked_mul` で求める（`tensor-core::
 /// checked_numel_for` は `pub(crate)` で他クレートから到達不能なため、
 /// `nn::init` 専用に同等の検査をここで再実装する。イシュー #1725／
 /// #1726 の `randn`／`arange` 等と同じ「アロケーション前に要素数
-/// オーバーフローを検出する」契約）。
+/// オーバーフローを検出する」契約）。`check_rank` も併せて検査する
+/// （本関数の呼び出し元は全て最終的に `Tensor::new(data, shape)` を
+/// 呼ぶため、rank 比例の確保も同じ入口でまとめて守る。`MAX_RANK` の
+/// doc 参照）。
 fn checked_numel(shape: &[usize]) -> Result<usize, AutodiffError> {
+    check_rank(shape)?;
     shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
@@ -806,6 +859,13 @@ pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffErr
             actual: shape.len(),
         }));
     }
+    // `orthogonal` は他の公開関数と異なり `checked_numel(shape)` を
+    // 呼ばない（`cols` を `shape[1..]` の積として独自計算するため）
+    // ので、`MAX_RANK` の検査をここで明示的に行う（末尾の
+    // `Tensor::new(scaled, shape)` が rank に比例する確保を行う。
+    // `MAX_RANK` の doc・codex-review 指摘 `init.rs:554` 参照。PR
+    // #2239）。
+    check_rank(shape)?;
     let rows = shape[0];
     // `cols`／`gen_numel` の `checked_mul` は shape 由来のサイズ計算
     // なので `alloc_failed`（非アロケーション）の適用対象（`alloc_
@@ -985,6 +1045,70 @@ pub fn trunc_normal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// codex-review 指摘の回帰（イシュー #2140・PR #2239・`init.rs:554`
+    /// ほか）: `check_rank` そのものを乱数を経由せず直接呼んで固定する
+    /// （決定的）。`MAX_RANK` を境界に `Err`／`Ok` が切り替わることを
+    /// 確認する。
+    #[test]
+    fn check_rank_rejects_shape_exceeding_max_rank() {
+        let shape = vec![1usize; MAX_RANK + 1];
+        let err = check_rank(&shape).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn check_rank_accepts_shape_at_max_rank() {
+        let shape = vec![1usize; MAX_RANK];
+        assert!(check_rank(&shape).is_ok());
+    }
+
+    /// エンドツーエンドの決定的回帰: `nn::init` の公開関数 9 個すべてで、
+    /// rank が `MAX_RANK` を超える shape（`numel` は小さいまま。
+    /// `vec![1usize; MAX_RANK + 1]`）を渡しても panic／abort せず
+    /// `Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))` を
+    /// 返すことを固定する（rank 検査は `try_alloc`／`with_global_rng`
+    /// よりも前で発火するため、プロセスグローバル RNG には触れず、
+    /// 本モジュールの他テストとの直列化〈`test_lock`〉も不要）。
+    #[test]
+    fn all_public_init_fns_reject_shape_exceeding_max_rank_without_panicking() {
+        let huge_rank_shape = vec![1usize; MAX_RANK + 1];
+        let is_alloc_failed = |err: &AutodiffError| {
+            matches!(err, AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        };
+
+        assert!(is_alloc_failed(
+            &uniform(&huge_rank_shape, 0.0, 1.0).unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &normal(&huge_rank_shape, 0.0, 1.0).unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &constant(&huge_rank_shape, 1.0).unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &xavier_uniform(&huge_rank_shape, 1.0).unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &xavier_normal(&huge_rank_shape, 1.0).unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &kaiming_uniform(&huge_rank_shape, 0.0, FanMode::FanIn, Nonlinearity::Relu)
+                .unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &kaiming_normal(&huge_rank_shape, 0.0, FanMode::FanIn, Nonlinearity::Relu).unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &orthogonal(&huge_rank_shape, 1.0).unwrap_err()
+        ));
+        assert!(is_alloc_failed(
+            &trunc_normal(&huge_rank_shape, 0.0, 1.0, -1.0, 1.0).unwrap_err()
+        ));
+    }
 
     /// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `f64` 計算
     /// →`f32` ダウンキャストの最近接丸めで `v == high` になったケースが

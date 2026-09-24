@@ -143,3 +143,36 @@
 
   - **回帰テスト**: `crates/autodiff/tests/nn_init.rs::calculate_gain_leaky_relu_large_finite_slope_does_not_collapse_to_zero`（`LeakyRelu(f32::MAX)` の gain が有限かつ非ゼロであることを確認）、`kaiming_uniform_large_finite_a_does_not_produce_all_zero_weights`（`a = f32::MAX`・`LeakyRelu` で呼んでも全要素が `0.0` に潰れないことを確認）。既存の `calculate_gain_matches_known_values`（許容誤差付き比較のため `f64` 経路への変更後も通過）・`kaiming_uniform_uses_a_as_leaky_relu_negative_slope`（同上）は変更なしで通過することを確認した。
 - **P2 五度目指摘: 一様分布が上限値 `high` を返し得る（PR #2239 五度目レビュー・`init.rs:332`）**: `next_unit_f32()` は `[0, 1)` だが、`low + t·(high - low)` を `f64` で計算した後に `f32` へ最近接丸めダウンキャストするため、`low`・`high` が隣接する `f32` で `t` が最大値 `1 - 2^-24` に近い場合等、結果が `high` へ丸め上がることがあり `fill_uniform` が明記する `[low, high)` 契約を破る（`xavier_uniform`／`kaiming_uniform` にも波及）。`exclude_high(v, low, high)`（新設）で `v >= high` なら `high.next_down()`（`low` 未満にはしない。`low == high` の縮退ケースは `.max(low)` で `low` へクランプし既存の「定数 `low` を返す」挙動を保つ）へ補正するよう `fill_uniform` の最終書き出し直前に適用した。同類型点検の結果、`trunc_normal` の `[a, b]`（閉区間）は `a`・`b` 自体が厳密に表現可能な `f32`（`f64` へ widen しても値は不変）であり、`value_f64 ∈ [a_exact, b_exact]` を満たす任意の `f64` 値を `f32` へ最近接丸めした結果は必ず `[a, b]` 内に収まる（最近接丸めが選ぶ 2 つの候補 `floor_repr(x)`／`ceil_repr(x)` はいずれも `a`／`b` 自身が候補集合に含まれるため境界を越えない、という数学的な性質による）ため補正不要と判断した——半開区間（片側排他）を持つのは `fill_uniform` の `high` のみ。回帰テスト: `crates/autodiff/src/nn/init.rs::tests::exclude_high_*`（`exclude_high` を乱数を経由せず直接呼ぶ決定的単体テスト 3 件）・`crates/autodiff/tests/nn_init.rs::uniform_never_returns_high_for_adjacent_f32_bounds`（`low`・`high` を隣接する `f32` に設定し 200,000 要素を生成、全出力が `high` 未満であることを確認するエンドツーエンド回帰）。
+- **P1 六度目指摘・確保系の最終棚卸し: 巨大 rank の shape で `Tensor` 構築が非フォールブルに確保する（PR #2239 六度目レビュー・`init.rs:554` ほか。`normal` 578・`constant` 587・`xavier_uniform` 631・`xavier_normal` 670・`kaiming_uniform` 753・`kaiming_normal` 783・`orthogonal` 884・`trunc_normal` 982 に同型）**: `try_alloc` は要素バッファ（`numel` に比例）のみをフォールブル化しており、その後段の `Tensor::new(data, shape)` は `tensor-core` 内部で `shape.to_vec()`（`Vec<usize>`）・`row_major_strides(shape)`（`Vec<isize>`）という**rank に比例する**確保を非フォールブルに行う。`numel` が 0 や小さくても rank だけを極端に大きくした shape（例: `shape = [1; 100_000]`）を渡すと、`numel` 由来の確保はすべて安価に成功したうえでこの rank 比例の確保だけが失敗し allocation panic／abort に至りうる。
+  - **方針**: `tensor-core`（共有実装。「`Tensor::new`／`shape` に rank 上限を課さない」既存設計自体は妥当）は変更しない。かわりに `nn::init` 側の入口で確保より前に rank の上限を検査し、超過時は既存の非アロケーションエラー `alloc_failed()`（`AutodiffError::Shape(ShapeError::ElementCountOverflow)`。前回〈P1 四度目〉と同一）を返す——`shape.to_vec()`／`row_major_strides(shape)` は常に「定数上限つきの微小確保」（高々 `MAX_RANK` 要素）に抑えられる。
+  - **上限値の根拠**: `crates/tensor-core/src/tensor_fmt.rs::FMT_MAX_RENDER_RANK`（`Tensor` の `Debug` 表示が再帰探索する rank の上限。表示再帰のスタックオーバーフロー対策として既に導入済みの前例）と同じ値 `64` を採用した（`crates/autodiff/src/nn/init.rs::MAX_RANK`。private 定数・`nn::init` 専用）。同定数の doc が述べる採用理由（「PyTorch/NumPy が実務上使用する次元数を通常上回り、かつ default スレッドスタックでも安全な余裕を持つ値」）は本件にもそのまま当てはまる——実務上の重みテンソル（`Linear`＝2・`Conv1d`〜`Conv3d`＝3〜5）はこの上限を大きく下回る。`crates/backend-metal/src/gather_scatter_model.rs::GS_MAX_RANK`（`8`）も調査したが、これは CUDA／Metal の `gather`／`scatter` カーネル固有のスタック配列サイズ制約であり、本件（`Tensor` 構築一般の確保安全性）とは意味論が異なるため不採用と判断した。`tensor-core`・`onnx-interop` に汎用の rank 上限定数は存在しないことを確認済み。
+  - **適用箇所**: `checked_numel(shape)`（`nn::init` の 8 公開関数——`uniform`／`normal`／`constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／`kaiming_normal`／`trunc_normal`——が共通して呼ぶ shape 検査の入口）の先頭に `check_rank(shape)?` を追加し、8 関数を一括で是正した。`orthogonal` のみ `cols` を `shape[1..]` の積として独自計算するため `checked_numel(shape)` を呼ばず、`shape.len() < 2` 検査の直後に `check_rank(shape)?` を個別に追加した（9 関数目）。
+  - **棚卸し（`nn::init` の公開関数・ユーザー入力に比例する確保を関数ごとに列挙。(a) フォールブル化済み／(b) `MAX_RANK` 検査で定数上限に抑えた／(c) 入力に比例しない、のいずれかに分類し、非フォールブルのまま比例して残る項目がゼロであることを確認した）**:
+
+    | 関数 | 確保箇所（比例パラメータ） | 分類 | 備考 |
+    |---|---|---|---|
+    | `calculate_gain` | なし（`shape` 引数自体を持たない） | — | 対象外 |
+    | `calculate_fan_in_and_fan_out` | なし（`shape[2..]` はイテレータ走査のみ・`Vec` 確保なし） | (c) | rank が巨大でも本関数自体は確保しない |
+    | `uniform` | `fill_uniform` の `Vec<f32>`（要素数 `numel`） | (a) | `try_alloc`／`try_reserve_exact` |
+    | 同上 | `Tensor::new(data, shape)` の `shape.to_vec()`／`row_major_strides`（rank 比例） | (b) | `checked_numel` 経由で `check_rank` 適用 |
+    | `normal` | `fill_normal` の `Vec<f32>`（`numel`） | (a) | 同上 |
+    | 同上 | `Tensor::new` の shape／strides | (b) | 同上（`std==0` 時は `constant` へ委譲しそちらの分類を継承） |
+    | `constant` | `try_alloc(numel)` | (a) | 同上 |
+    | 同上 | `Tensor::new` の shape／strides | (b) | 同上 |
+    | `xavier_uniform`／`xavier_normal` | `calculate_fan_in_and_fan_out(shape)` | (c) | 確保なし |
+    | 同上 | `fill_uniform`／`fill_normal` の `Vec<f32>` | (a) | 同上 |
+    | 同上 | `Tensor::new` の shape／strides | (b) | 同上 |
+    | `kaiming_uniform`／`kaiming_normal` | `select_fan`→`calculate_fan_in_and_fan_out(shape)` | (c) | 確保なし |
+    | 同上 | `fill_uniform`／`fill_normal` の `Vec<f32>` | (a) | 同上 |
+    | 同上 | `Tensor::new` の shape／strides | (b) | 同上 |
+    | `orthogonal` | `cols`（`shape[1..]` 積）・`gen_numel` の `checked_mul` | (c) | `Vec` を伴わない純粋な整数演算（overflow は `alloc_failed()` で拒否） |
+    | 同上 | `fill_normal(gen_numel, ..)` の `Vec<f32>` | (a) | `try_alloc` |
+    | 同上 | `m = Tensor::new(data, &[gen_rows, gen_cols])` の shape／strides | (c) | 常に rank 2 固定（ユーザー shape の rank に非依存） |
+    | 同上 | `qr(&m)` 内部（`Mat::try_zeros`／`try_from_tensor`／`try_to_tensor`・Householder ベクトル） | (a) | PR #2239 の先行是正で全経路フォールブル化済み（rank も常に 2 固定） |
+    | 同上 | `scaled = try_alloc(gen_numel)` | (a) | 同上 |
+    | 同上 | `Tensor::new(scaled, shape)`（**ユーザーの元 shape**。rank 比例） | (b) | 本指摘の直接該当箇所。明示的に追加した `check_rank(shape)?` で保護 |
+    | `trunc_normal` | `try_alloc(numel)` | (a) | 同上（`std==0` 時は `constant` へ委譲） |
+    | 同上 | `Tensor::new` の shape／strides | (b) | 同上 |
+
+    非フォールブルのまま入力に比例する確保として残る項目は **0 件**。`tensor-core` の変更なしに全件を閉じられたため、報告のみで止める事態には至らなかった。
+  - **回帰テスト**: `crates/autodiff/src/nn/init.rs::tests::check_rank_rejects_shape_exceeding_max_rank`／`check_rank_accepts_shape_at_max_rank`（`check_rank` 単体の境界値テスト。決定的）、`all_public_init_fns_reject_shape_exceeding_max_rank_without_panicking`（`nn::init` の公開関数 9 個全てを `vec![1usize; MAX_RANK + 1]`〈`numel` は小さいまま rank だけ超過〉で呼び、いずれも panic／abort せず `AutodiffError::Shape(ShapeError::ElementCountOverflow)` を返すことを固定するエンドツーエンド回帰。rank 検査は `try_alloc`／`with_global_rng` より前で発火するためプロセスグローバル RNG に触れず、他テストとの直列化ロックも不要）。
