@@ -12,7 +12,8 @@
 
 mod common;
 
-use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fandhe_ai_autodiff::f64_autograd::TapeF64;
 use fandhe_ai_autodiff::{AutodiffError, Tape};
@@ -177,15 +178,22 @@ fn fan_out_through_matmul_and_sum_accumulates_gradient() {
 /// `exp`／`tanh` は本テストの対象外のため `Unsupported` を返す
 /// （`var_f64_leaf_elementwise.rs::DummyF64Ops` と同じ最小フィクスチャ
 /// 方針）。
+///
+/// カウンタは `Arc<AtomicUsize>` で保持する（`Tape::new_with_ops` が
+/// `Box<dyn BackendOps + Send>` を要求するため `Rc<Cell<_>>` は `Send`
+/// を満たせず不可。`Cell` 単体だとフィクスチャの所有権が `tape` へ
+/// 移った後に呼び出し元から読めなくなる。`Arc` でクローンしたハンドルを
+/// フィクスチャ側と検証側の双方に持たせることで、`tape` に所有権が
+/// 移った後も dispatch 回数を独立に検証できる）。
 struct CountingF64Ops {
-    gemm_calls: Cell<usize>,
-    sum_calls: Cell<usize>,
-    max_calls: Cell<usize>,
+    gemm_calls: Arc<AtomicUsize>,
+    sum_calls: Arc<AtomicUsize>,
+    max_calls: Arc<AtomicUsize>,
 }
 
 impl TypedOps<f64> for CountingF64Ops {
     fn gemm(&self, a: &Tensor<f64>, b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
-        self.gemm_calls.set(self.gemm_calls.get() + 1);
+        self.gemm_calls.fetch_add(1, Ordering::SeqCst);
         let m = a.shape()[0];
         let k = a.shape()[1];
         let n = b.shape()[1];
@@ -221,7 +229,7 @@ impl TypedOps<f64> for CountingF64Ops {
         Err(BackendError::Unsupported("test fixture: tanh".into()))
     }
     fn sum(&self, a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, BackendError> {
-        self.sum_calls.set(self.sum_calls.get() + 1);
+        self.sum_calls.fetch_add(1, Ordering::SeqCst);
         let ac = a.contiguous();
         let asl = ac.host_slice();
         match dim {
@@ -251,7 +259,7 @@ impl TypedOps<f64> for CountingF64Ops {
         }
     }
     fn max(&self, a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, BackendError> {
-        self.max_calls.set(self.max_calls.get() + 1);
+        self.max_calls.fetch_add(1, Ordering::SeqCst);
         let ac = a.contiguous();
         let asl = ac.host_slice();
         match dim {
@@ -322,12 +330,21 @@ impl BackendOps for OpsWithCountingF64 {
 
 #[test]
 fn matmul_sum_max_dispatch_to_native_typed_ops_f64_when_available() {
+    // `OpsWithCountingF64`（延いては `tape`）へ所有権が移る前に `Arc` を
+    // クローンして手元に残す。これにより trait object から具体型を
+    // 取り戻せなくても、共有カウンタ経由で `native_or_host_reduce` が
+    // 実際に `typed_ops_f64()` 側の実装まで到達したかを検証できる
+    // （forward 値の一致だけでは host フォールバックとの区別が付かない
+    // 固定入力のケースを判別する。codex-review 指摘）。
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let sum_calls = Arc::new(AtomicUsize::new(0));
+    let max_calls = Arc::new(AtomicUsize::new(0));
     let ops = OpsWithCountingF64 {
         inner: common::naive_ops(),
         f64_ops: CountingF64Ops {
-            gemm_calls: Cell::new(0),
-            sum_calls: Cell::new(0),
-            max_calls: Cell::new(0),
+            gemm_calls: Arc::clone(&gemm_calls),
+            sum_calls: Arc::clone(&sum_calls),
+            max_calls: Arc::clone(&max_calls),
         },
     };
     let tape = Tape::new_with_ops(Box::new(ops));
@@ -339,24 +356,34 @@ fn matmul_sum_max_dispatch_to_native_typed_ops_f64_when_available() {
         c.value().host_slice().into_owned(),
         vec![4.0, 5.0, 10.0, 11.0]
     );
+    assert_eq!(
+        gemm_calls.load(Ordering::SeqCst),
+        1,
+        "matmul は typed_ops_f64().gemm を厳密に 1 回呼ぶはず（host フォールバック不可）"
+    );
 
     let s = a.sum(Some(1)).expect("sum はネイティブ経路で成功するはず");
     assert_eq!(s.value().host_slice().into_owned(), vec![6.0, 15.0]);
+    assert_eq!(
+        sum_calls.load(Ordering::SeqCst),
+        1,
+        "sum は typed_ops_f64().sum を厳密に 1 回呼ぶはず（host フォールバック不可）"
+    );
 
     let m = a.max(None).expect("max はネイティブ経路で成功するはず");
     assert_eq!(m.value().host_slice().into_owned(), vec![6.0]);
+    assert_eq!(
+        max_calls.load(Ordering::SeqCst),
+        1,
+        "max は typed_ops_f64().max を厳密に 1 回呼ぶはず（host フォールバック不可）"
+    );
 
     let counting_ops = &tape
         .typed_ops_f64()
         .expect("Some を返す BackendOps を渡したはず");
-    // trait object から具体型を取り戻せないため、呼び出し回数の確認は
-    // 別途 `Cell` を共有する構造にはしていない（本テストは `tape` の
-    // 生存期間中に `typed_ops_f64()` accessor が一貫して `Some` を返す
-    // ことと forward 結果がネイティブ実装の値と一致することで dispatch
-    // を検証する。呼び出し回数のカウンタ自体は
-    // `OpsWithCountingF64` の所有権が `tape` に移るため直接は読めない
-    // ——このため `Cell` の存在は将来の拡張余地として残しつつ、本テスト
-    // の合否は forward 値の一致で判定する）。
+    // `typed_ops_f64()` accessor が `tape` の生存期間中も一貫して
+    // `Some` を返し続けることを合わせて確認する（accessor 自体の生存
+    // 検証。呼び出し回数の判別力は上記の `Arc<AtomicUsize>` が担う）。
     let _ = counting_ops;
 }
 

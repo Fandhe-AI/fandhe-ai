@@ -70,6 +70,18 @@ fn facade_typed_ops_f64_accessor_is_some_on_cpu_and_computes_gemm_sum_max() {
 /// facade accessor（①）経由の `gemm`／`sum`／`max` の値が、`TapeF64`
 /// （②。`CpuBackendOps` を直接結線）の forward 値と bit 完全一致する
 /// ことを確認する。
+///
+/// **入力データの選定（codex-review 指摘への対応）**: 整数値（`1.0`〜
+/// `6.0` 等）は `f64` 上で加算が結合則どおり厳密に成立し、どの累積順序
+/// （逐次 fold・chunk 分割・並列化等）でも同一ビット列になるため、①②
+/// 両経路が偶然同じ結果になっただけでも合格してしまい dispatch の
+/// 実体一致を判別できない。本テストは非結合的な丸めが実際に発生する
+/// 小数値を使い、①②が「同じ累積順序で同じアルゴリズムを実行している」
+/// ことまで検証する（`crates/backend-cpu/src/typed_f64.rs::
+/// gemm_row_parallel_f64`／`sum_slice_f64` と
+/// `crates/autodiff/src/f64_autograd.rs::host_gemm_f64`／
+/// `host_sum_f64` が同一の累積順序で設計されている契約〈モジュール doc
+/// 「bit 一致の境界」〉の回帰検知力を持たせる）。
 #[test]
 fn facade_typed_ops_f64_matches_tape_f64_native_forward() {
     let facade_tape = fandhe_ai::tape();
@@ -77,8 +89,8 @@ fn facade_typed_ops_f64_matches_tape_f64_native_forward() {
         .typed_ops_f64()
         .expect("CPU は typed_ops_f64() が常に Some を返すはず");
 
-    let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    let b_data = vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let a_data = vec![1.1, 2.3, 0.7, 5.9, 3.4, 8.6];
+    let b_data = vec![0.9, 1.7, 2.2, 0.4, 1.3, 2.8];
     let a = t(a_data.clone(), &[2, 3]);
     let b = t(b_data.clone(), &[3, 2]);
 
@@ -116,6 +128,10 @@ fn facade_typed_ops_f64_matches_tape_f64_native_forward() {
 /// backend_parity.rs` の add/mul/div/pow 版と対になる #2196 版）。
 /// 全軸 `sum` を含む経路はモジュール doc「bit 一致の境界」（CHUNK=4096
 /// 以下）に従い、固定入力の要素数を 4096 以下に保つ。
+///
+/// 入力データは整数値ではなく非結合的な丸めが発生する小数値を使う
+/// （`facade_typed_ops_f64_matches_tape_f64_native_forward` と同じ
+/// codex-review 指摘への対応。理由は同関数の doc コメントを参照）。
 #[test]
 fn cpu_native_matmul_sum_mean_max_backward_matches_host_reference() {
     let native_tape = RawTape::new_with_ops(Box::new(CpuBackendOps::new()));
@@ -124,8 +140,8 @@ fn cpu_native_matmul_sum_mean_max_backward_matches_host_reference() {
     let native_graph = TapeF64::new(&native_tape);
     let host_graph = TapeF64::new(&host_tape);
 
-    let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    let b_data = vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let a_data = vec![1.1, 2.3, 0.7, 5.9, 3.4, 8.6];
+    let b_data = vec![0.9, 1.7, 2.2, 0.4, 1.3, 2.8];
 
     let a_native = native_graph.var(&t(a_data.clone(), &[2, 3]));
     let b_native = native_graph.var(&t(b_data.clone(), &[3, 2]));
