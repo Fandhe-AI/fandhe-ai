@@ -480,7 +480,7 @@ impl<'g, 't> VarF64<'g, 't> {
     /// 行列積 `self @ other`（rank 2 限定。イシュー #2196）。`Var::matmul`
     /// （f32 版）と同じ「①クロステープ検査 → ②入力値取得 → ③forward
     /// dispatch → ④出力 shape 再検査 → ⑤ノード記録」の順で処理する。
-    /// rank≠2 は [`forward_matmul`] 内の `gemm_out_shape` が
+    /// rank≠2 は `forward_matmul` 内の `gemm_out_shape` が
     /// `ShapeError::RankMismatch` で拒否する（バッチ matmul は本
     /// イシューの対象外。§10 承認事項 2 未承認のため `TypedOps<f64>` に
     /// バッチ版がない）。
@@ -711,6 +711,27 @@ fn checked_bytes_for_f64(shape: &[usize]) -> Result<(), ShapeError> {
     Ok(())
 }
 
+/// 部分次元列（`outer`／`inner` 等）の要素数積を overflow 検査付きで
+/// 計算する共通ヘルパー（`host_sum_f64`／`host_max_f64`／
+/// `max_first_match_vjp_f64` 共用。codex-review／Cursor Bugbot 指摘是正。
+/// イシュー #2196）。`out_shape`（縮約軸を除いた shape）全体の積が
+/// `checked_bytes_for_f64` を通過していても、`outer`（縮約軸より前の
+/// 次元列）と `inner`（縮約軸より後ろの次元列）は互いに独立な
+/// `.iter().product()` として再計算されるため、`out_shape` 側の検査
+/// （0 次元を経由すると overflow を素通りしうる逐次 `checked_mul` の
+/// 累積）では守れない。例えば `out_shape = [0, usize::MAX, usize::MAX]`
+/// は全体積が 0 で `checked_bytes_for_f64` を通過するが、`inner`（`0`
+/// を含まない後半部分列 `[usize::MAX, usize::MAX]`）の素の `.product()`
+/// は単独で overflow する。本関数は `outer`／`inner` それぞれを
+/// `checked_mul` で独立に検査することで、この 0 次元の手前の部分列に
+/// 依存しない overflow 検出を行う（本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md`。OWASP A03）。
+fn checked_product(dims: &[usize]) -> Result<usize, ShapeError> {
+    dims.iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)
+}
+
 /// `a`／`b`（NumPy 互換ブロードキャスト可能な任意 shape）に `f` を
 /// 要素ごとに適用したホスト参照実装。`div`／`pow` の唯一の forward
 /// 経路（`TypedOps<f64>` に演算が存在しないため）であり、`add`／`mul`
@@ -876,15 +897,15 @@ fn native_or_host_reduce(
 /// 単位の 2 段構成）との bit 一致は縮約対象要素数が `CHUNK` 以下の場合
 /// に限る（モジュール doc「bit 一致の境界」参照）。
 ///
-/// `outer`／`axis_len`／`inner` を素の `.iter().product()` で計算しても
-/// overflow しない理由: `out_shape`（`= in_shape[..axis] ++
-/// in_shape[axis+1..]`。`reduce_out_shape` の構築順）は直前の
-/// `checked_bytes_for_f64` で要素数積の overflow を確保前検査済みで
-/// あり、その検査は `out_shape` の次元を先頭から順に `checked_mul` で
-/// 累積する構造（`checked_bytes_for_f64` 本体参照）のため、`outer`
-/// （`out_shape` の先頭側部分列の積）は必ずその累積の中間値として
-/// overflow なく計算済みであることが保証される（`inner` も同様に後続の
-/// 部分列）。
+/// `outer`／`inner` の overflow 検査は `checked_product`（本モジュール
+/// 冒頭寄り。`checked_bytes_for_f64` 直後）に委譲する。`out_shape`
+/// （`= in_shape[..axis] ++ in_shape[axis+1..]`）全体の積が
+/// `checked_bytes_for_f64` を通過していても、`outer`（縮約軸より前の
+/// 部分列）と `inner`（縮約軸より後ろの部分列）を素の `.iter().product()`
+/// で独立に再計算すると、0 次元を含む shape（例
+/// `[0, usize::MAX, usize::MAX]`）で `inner` 単独の積が overflow しうる
+/// （codex-review／Cursor Bugbot 指摘是正。`checked_product` の doc
+/// comment 参照）。
 fn host_sum_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, ShapeError> {
     let out_shape = reduce_out_shape(a.shape(), dim)?;
     checked_bytes_for_f64(&out_shape)?;
@@ -897,10 +918,13 @@ fn host_sum_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, Shap
             Tensor::new(vec![total], &out_shape)
         }
         Some(axis) => {
-            let outer: usize = in_shape[..axis].iter().product();
+            let outer = checked_product(&in_shape[..axis])?;
             let axis_len = in_shape[axis];
-            let inner: usize = in_shape[axis + 1..].iter().product();
-            let mut data = vec![0.0f64; outer * inner];
+            let inner = checked_product(&in_shape[axis + 1..])?;
+            let data_len = outer
+                .checked_mul(inner)
+                .ok_or(ShapeError::ElementCountOverflow)?;
+            let mut data = vec![0.0f64; data_len];
             for o in 0..outer {
                 for i in 0..inner {
                     let mut acc = 0.0f64;
@@ -918,11 +942,11 @@ fn host_sum_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, Shap
 
 /// `max` のホスト参照実装（イシュー #2196）。単位元 `f64::NEG_INFINITY`
 /// から `f64::max` で fold する（NaN 非伝播は CPU ネイティブと同じ既知
-/// 事項）。overflow なしの根拠は [`host_sum_f64`] と同一
-/// （`checked_bytes_for_f64` 済みの `out_shape` の中間値として
-/// `outer`／`inner` が計算されるため）。呼び出し元
-/// （[`forward_max`]／[`VarF64::max`]）が空縮約を dispatch 前に拒否する
-/// 契約のため、本関数は空縮約を想定しない。
+/// 事項）。`outer`／`inner` の overflow 検査は [`host_sum_f64`] と同じ
+/// `checked_product` に委譲する（0 次元を含む shape での独立部分積
+/// overflow を個別検査する理由も同一。codex-review／Cursor Bugbot
+/// 指摘是正）。呼び出し元（[`forward_max`]／[`VarF64::max`]）が空縮約を
+/// dispatch 前に拒否する契約のため、本関数は空縮約を想定しない。
 fn host_max_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, ShapeError> {
     let out_shape = reduce_out_shape(a.shape(), dim)?;
     checked_bytes_for_f64(&out_shape)?;
@@ -935,10 +959,13 @@ fn host_max_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, Shap
             Tensor::new(vec![m], &out_shape)
         }
         Some(axis) => {
-            let outer: usize = in_shape[..axis].iter().product();
+            let outer = checked_product(&in_shape[..axis])?;
             let axis_len = in_shape[axis];
-            let inner: usize = in_shape[axis + 1..].iter().product();
-            let mut data = vec![f64::NEG_INFINITY; outer * inner];
+            let inner = checked_product(&in_shape[axis + 1..])?;
+            let data_len = outer
+                .checked_mul(inner)
+                .ok_or(ShapeError::ElementCountOverflow)?;
+            let mut data = vec![f64::NEG_INFINITY; data_len];
             for o in 0..outer {
                 for x in 0..axis_len {
                     for i in 0..inner {
@@ -1308,12 +1335,13 @@ fn max_first_match_vjp_f64(
             }
         }
         Some(axis) => {
-            // `outer`／`inner` の overflow なし根拠は `host_sum_f64` と
-            // 同一（`out_value`／`g` は forward 側で `reduce_out_shape`
-            // ＋ `checked_bytes_for_f64` を通過済みの shape を持つ）。
-            let outer: usize = in_shape[..axis].iter().product();
+            // `outer`／`inner` の overflow 検査は `host_sum_f64` と同じ
+            // `checked_product` に委譲する（0 次元を含む shape での
+            // 独立部分積 overflow を個別検査する理由も同一。
+            // codex-review／Cursor Bugbot 指摘是正）。
+            let outer = checked_product(&in_shape[..axis]).map_err(AutodiffError::Shape)?;
             let axis_len = in_shape[axis];
-            let inner: usize = in_shape[axis + 1..].iter().product();
+            let inner = checked_product(&in_shape[axis + 1..]).map_err(AutodiffError::Shape)?;
             for o in 0..outer {
                 for i in 0..inner {
                     let out_idx = o * inner + i;

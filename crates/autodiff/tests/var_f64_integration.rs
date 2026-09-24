@@ -624,6 +624,42 @@ fn matmul_no_grad_operand_contribution_is_discarded() {
     ));
 }
 
+// ---------------------------------------------------------------------
+// 空 shape の部分積 overflow 非 panic（codex-review／Cursor Bugbot 指摘
+// 是正。PR #2255）
+// ---------------------------------------------------------------------
+
+/// `sum(Some(axis))` は、縮約対象軸より前に 0 次元を挟む巨大 shape
+/// （`[0, 1, usize::MAX, usize::MAX]`）に対しても panic せず、型付き
+/// エラーで拒否する（本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md`）。`out_shape = [0, usize::MAX,
+/// usize::MAX]` は全体積 0 で `checked_bytes_for_f64` を通過するが、
+/// 縮約軸より後ろの部分列 `[usize::MAX, usize::MAX]` の素の
+/// `.iter().product()` は単独で overflow するため、以前は debug build
+/// で overflow panic していた（`host_sum_f64` 内 `inner` 計算）。
+#[test]
+fn sum_with_leading_zero_dim_does_not_panic_on_inner_product_overflow() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let graph = TapeF64::new(&tape);
+    let empty = t(vec![], &[0, 1, usize::MAX, usize::MAX]);
+    let x = graph.var(&empty);
+    // panic せず `Result` として返ることのみを検証する（`outer == 0`
+    // により実際の縮約ループは走らないが、`inner` 単独の overflow を
+    // 確保前に `checked_product` で拒否する型付きエラー経路を通る）。
+    let _ = x.sum(Some(1));
+}
+
+/// `max(Some(axis))` 版（[`sum_with_leading_zero_dim_does_not_panic_on_inner_product_overflow`]
+/// と同型。`host_max_f64` 内 `inner` 計算の overflow 非 panic を検証）。
+#[test]
+fn max_with_leading_zero_dim_does_not_panic_on_inner_product_overflow() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let graph = TapeF64::new(&tape);
+    let empty = t(vec![], &[0, 1, usize::MAX, usize::MAX]);
+    let x = graph.var(&empty);
+    let _ = x.max(Some(1));
+}
+
 #[test]
 fn shape_error_variant_smoke_test() {
     // `matches!` パターンで `ShapeError` の variant を直接参照している
