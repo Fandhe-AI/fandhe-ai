@@ -883,6 +883,19 @@ Module>>, .. }` の実装で既に実証済み（同 doc §3）。sealed 化は�
 1 件を除く）。承認事項（§10）が未承認のため否定ガード＋保留記録 doc のみを
 追加した。詳細は `docs/facade-nn-module-exposure-decision.md` §12。
 
+**#2140（`nn::init` 初期化関数群の facade 公開）は経路 2 未適用のまま承認待ち
+で保留した。** イシュー本文が前提とした `Initializer` trait・各層の
+`with_init` コンストラクタは実際には存在せず（前提の食い違い。`docs/
+facade-nn-init-exposure-decision.md` §1）、本イシューの実体は「autodiff 側
+への新規実装」＋「facade 公開（承認事項）」の 2 段だった。**autodiff 側
+（`fandhe_ai_autodiff::nn::init` を `pub mod` 化し `uniform`／`normal`／
+`constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／
+`kaiming_normal`／`orthogonal`／`trunc_normal` の 9 関数を実装）は本イシュー
+で完了済み**（内部クレートへの非破壊追加のため §5 手続き対象外・`fandhe_ai_tensor_core::rng::with_global_rng` へ従属し既存の個別シード API
+〈`Linear::new(.., seed)` 等〉とは独立）。facade 公開面拡張（`crates/
+facade/src/nn/init.rs` の新設）は §5 経路 2 の承認取得まで実施していない。
+詳細は `docs/facade-nn-init-exposure-decision.md`。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |

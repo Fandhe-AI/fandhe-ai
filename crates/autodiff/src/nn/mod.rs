@@ -124,7 +124,18 @@
 //! `container` モジュールへ追加した。いずれも数値経路（`Op`／
 //! `BackendOps`／VJP）を追加しない CPU ホスト側の introspection
 //! 機構であり、facade へは再エクスポートしない（`container.rs`
-//! モジュール doc「facade への非公開」節参照）。
+//! モジュール doc「facade への非公開」節参照）。イシュー #2140
+//! （親 #2131）で [`init`] を `pub mod` 化し、PyTorch `torch.nn.init.*`
+//! 相当の初期化関数群（`uniform`／`normal`／`constant`／
+//! `xavier_uniform`／`xavier_normal`／`kaiming_uniform`／
+//! `kaiming_normal`／`orthogonal`／`trunc_normal`）を追加した。個別
+//! シード方式の既存 `pub(crate)` ヘルパー（`uniform_init` 等）とは独立
+//! に、プロセスグローバル決定的 RNG（`tensor-core::rng::manual_seed`）
+//! へ従属する（`init.rs` モジュール doc「`nn::init`」節参照）。facade
+//! への再エクスポートは別途ユーザー承認（`docs/compat-api-scope.md`
+//! §5 経路 2）を要する公開面拡張のため、本イシュー時点では未承認の
+//! まま保留し `crates/facade/**` は変更していない
+//! （`docs/facade-nn-init-exposure-decision.md` 参照）。
 
 mod attention;
 mod batch_norm;
@@ -133,7 +144,7 @@ mod conv;
 mod dropout;
 mod embedding;
 mod flatten;
-mod init;
+pub mod init;
 mod linear;
 mod module;
 mod norm;

@@ -293,3 +293,44 @@ CreationError}`。委譲）まで結線した。`rng`（§10）の非乱数版�
   到達可能）・CUDA／Metal デバイス側の生成カーネル（#1602 のホスト
   生成→アップロード方針どおり）・`compat::array`／`Sequential` の
   変更・`torch.arange` の dtype 推論（整数引数→int64）との完全互換。
+
+## 12. 実装記録（#2140）
+
+`fandhe_ai_autodiff::nn::init`（PyTorch `torch.nn.init.*` 相当の重み初期化
+関数 9 件）を [`with_global_rng`] へ従属させて実装した。`randn`（§10）と
+同じく 1 呼び出しにつきロックを 1 回だけ取得し、必要な要素をまとめて引く。
+
+- **配置**: `crates/autodiff/src/nn/init.rs`（既存の `pub(crate)` 個別
+  シードヘルパー・`derive_seed` はそのまま不変。新規 public 関数群は
+  同ファイル下部に追記した別セクション）。`nn/mod.rs` の `mod init;` を
+  `pub mod init;` へ変更したのみで、facade（`crates/facade/**`）は
+  変更していない（`docs/facade-nn-init-exposure-decision.md` 参照。
+  facade 再エクスポートは経路 2 の承認待ちで保留）
+- **独立性の維持**: `Linear::new(.., seed)` 等の個別シード API は本節
+  §「既存の個別シード API との関係」の契約どおり `manual_seed` から
+  完全に独立したまま不変（回帰テスト `crates/autodiff/tests/
+  nn_init.rs::linear_new_output_is_unaffected_by_global_manual_seed_
+  state` で固定）
+- **数値契約**: `uniform`／`xavier_uniform`／`kaiming_uniform`／
+  `constant` は整数演算のみでプラットフォーム横断 bit 同一。`normal`／
+  `xavier_normal`／`kaiming_normal`／`orthogonal`／`trunc_normal`
+  （`std != 0` の場合）は Box–Muller（`f64` 中間計算）を経由するため
+  `randn` と同じく「同一プロセス・同一プラットフォーム内」限定の決定性
+- **`shape` の要素数検査**: `tensor-core::checked_numel_for` は
+  `pub(crate)` で他クレートから到達不能なため、`nn::init` 専用に
+  `checked_mul` による同等の検査を再実装した（`try_reserve_exact` に
+  よるアロケーション不能検出は `try_uniform_init` 等と同じ方針）
+- **`trunc_normal` の実装方式**: 逆 CDF 法に必要な erfinv を自作せず、
+  rejection sampling（`[a, b]` 外なら棄却して引き直す）を採用した。
+  受理確率が極端に低い窓での無限ループを防ぐため、要素あたり
+  `TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT`（10,000）回を上限とする試行
+  予算を設け、超過時は `AutodiffError::InvalidArgument` で打ち切る
+- **承認の扱い**: 内部クレート `nn::init` への非破壊追加（crates.io
+  `fandhe-ai-autodiff =0.9.0` の既存 API は不変）のため、本節（乱数生成
+  と RNG 契約）に既に列挙されている領域の拡張として追加承認手続きなく
+  着手した。facade 公開面拡張は別途 `docs/compat-api-scope.md` §5 経路
+  2 の承認を要し、未承認のまま保留している（`docs/facade-nn-init-
+  exposure-decision.md`）
+- **対象外**: 各層への `with_init` コンストラクタ・`Initializer`
+  trait の新設（イシュー本文の前提だったが実装時点で存在しないと判明。
+  同 decision doc §1）・層の既定初期化の変更・カスタム初期化 hook

@@ -37,8 +37,37 @@
 //! 重み初期化・回帰テストの決定性確保には十分だが、鍵・トークン生成や
 //! その他セキュリティ用途には使用しないこと
 //! （OWASP A02 暗号化の失敗の観点。`.claude/rules/security.md`）。
+//!
+//! # `nn::init`（PyTorch `torch.nn.init.*` 相当。イシュー #2140）
+//!
+//! 本モジュール下部の public 関数群（[`uniform`]／[`normal`]／
+//! [`constant`]／[`xavier_uniform`]／[`xavier_normal`]／
+//! [`kaiming_uniform`]／[`kaiming_normal`]／[`orthogonal`]／
+//! [`trunc_normal`]）は、上記の個別シード方式（`uniform_init` 等）とは
+//! 異なり、`tensor-core::rng::with_global_rng` を経由してプロセス
+//! グローバルな決定的 RNG（[`fandhe_ai_tensor_core::rng::manual_seed`]）
+//! に**従属する**（`tensor-core::rng::randn`／`rand` と同じ設計方針）。
+//! `Linear::new(.., seed)` 等の既存個別シード API・`derive_seed`・
+//! `uniform_init`／`try_uniform_init`／`try_normal_init`（本ファイル上部）
+//! は一切変更せず、`manual_seed` を何度呼んでもそれらの出力は不変の
+//! ままである（独立性はモジュール冒頭の契約どおり）。
+//!
+//! 呼び出し元は `Linear::from_parameters`／`Conv2d::from_parameters`／
+//! `Embedding::from_parameters` 等の「明示的な重み・バイアスから構築
+//! する」入口（safetensors ロード等と同じ位置づけ）へ、本モジュールの
+//! 関数が返す [`Tensor<f32>`] を渡して層を組み立てる。各層の既定
+//! コンストラクタ（`new(.., seed)`）自体はこの変更の対象外
+//! （イシュー #2140 のスコープ外。本文参照）。
+//!
+//! facade（`fandhe_ai::nn::init`）への再エクスポートは別途ユーザー承認
+//! （`docs/compat-api-scope.md` §5 経路 2）を要する公開面拡張であり、
+//! 本イシュー時点では未承認のため `crates/facade/**` には反映しない
+//! （`docs/facade-nn-init-exposure-decision.md` 参照）。
 
-use fandhe_ai_tensor_core::rng::Xorshift64Star;
+use fandhe_ai_tensor_core::rng::{Xorshift64Star, with_global_rng};
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
+
+use crate::error::AutodiffError;
 
 /// `Linear::new`（`nn/linear.rs`）から呼ばれる重み初期化本体。
 ///
@@ -186,6 +215,498 @@ pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+// ============================================================================
+// `nn::init`（PyTorch `torch.nn.init.*` 相当。イシュー #2140）公開 API。
+// 上のセクション（個別シード方式）とは独立に、プロセスグローバル RNG
+// （モジュール冒頭コメント参照）に従属する関数群をここに実装する。
+// ============================================================================
+
+/// `nn::init` の入力検証エラーを組み立てる補助関数（`AutodiffError::
+/// InvalidArgument` への集約。本番経路 `unwrap`／`expect` 禁止の方針
+/// どおり、RNG ロック取得・アロケーション前に fail-closed で拒否する）。
+fn invalid_argument(message: impl Into<String>) -> AutodiffError {
+    AutodiffError::InvalidArgument(message.into())
+}
+
+/// `shape` の要素数積を `checked_mul` で求める（`tensor-core::
+/// checked_numel_for` は `pub(crate)` で他クレートから到達不能なため、
+/// `nn::init` 専用に同等の検査をここで再実装する。イシュー #1725／
+/// #1726 の `randn`／`arange` 等と同じ「アロケーション前に要素数
+/// オーバーフローを検出する」契約）。
+fn checked_numel(shape: &[usize]) -> Result<usize, AutodiffError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| invalid_argument("nn::init: shape の要素数積が usize の範囲を超えます"))
+}
+
+/// `len` 要素の `Vec<f32>` を、確保不能なら panic せず `Err` を返す形で
+/// 事前予約する（`try_uniform_init`／`try_normal_init` と同じ理由。
+/// `try_reserve_exact` は要素数換算のバイトサイズが `isize::MAX` を
+/// 超えるアロケーション不能な `len` も検出する）。
+fn try_alloc(len: usize) -> Result<Vec<f32>, AutodiffError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|_| invalid_argument("nn::init: 要素数 {len} の確保に失敗しました"))?;
+    Ok(values)
+}
+
+/// `[low, high)` の一様分布で `len` 要素を埋める（グローバル RNG を
+/// 1 回だけロックし、要素をまとめて引く。`tensor-core::rng::rand` と
+/// 同じロック粒度の契約）。呼び出し元が `low <= high` を事前検証する。
+fn fill_uniform(len: usize, low: f32, high: f32) -> Result<Vec<f32>, AutodiffError> {
+    let mut out = try_alloc(len)?;
+    with_global_rng(|rng| {
+        for _ in 0..len {
+            out.push(low + rng.next_unit_f32() * (high - low));
+        }
+    });
+    Ok(out)
+}
+
+/// `N(mean, std²)` で `len` 要素を埋める（Box–Muller 変換・`f64` 中間
+/// 計算。`tensor-core::rng::randn`／本ファイル上部の `try_normal_init`
+/// と同一のアルゴリズム。決定性の範囲は「同一プロセス・同一プラット
+/// フォーム内」に限る〈`ln`／`sin`／`cos` を経由するため〉）。
+fn fill_normal(len: usize, mean: f32, std: f32) -> Result<Vec<f32>, AutodiffError> {
+    let mut out = try_alloc(len)?;
+    with_global_rng(|rng| {
+        let mut remaining = len;
+        while remaining > 0 {
+            // `u1` は `(0, 1]` に補正して `ln(0)`（負の無限大）を避ける。
+            let u1 = 1.0 - rng.next_unit_f64();
+            let u2 = rng.next_unit_f64();
+            let r = (-2.0 * u1.ln()).sqrt();
+            let theta = std::f64::consts::TAU * u2;
+            let z0 = (r * theta.cos()) as f32;
+            out.push(z0 * std + mean);
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+            let z1 = (r * theta.sin()) as f32;
+            out.push(z1 * std + mean);
+            remaining -= 1;
+        }
+    });
+    Ok(out)
+}
+
+/// PyTorch `nn.init.calculate_gain` の対応表に準拠した非線形性 kind
+/// （`#[non_exhaustive]`: 公開 API 非破壊のため後続の追加に備える。
+/// `.claude/rules/security.md`）。`LeakyRelu` は負勾配を値として保持
+/// する（`kaiming_uniform`／`kaiming_normal` の `a` 引数との関係は
+/// [`calculate_gain`] の doc を参照）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Nonlinearity {
+    Linear,
+    Conv1d,
+    Conv2d,
+    Sigmoid,
+    Tanh,
+    Relu,
+    /// 負勾配（PyTorch `leaky_relu` の `param` 相当）。
+    LeakyRelu(f32),
+    Selu,
+}
+
+/// [`calculate_fan_in_and_fan_out`] が返す `(fan_in, fan_out)` のどちら
+/// を初期化スケールに使うか（PyTorch `nn.init._calculate_correct_fan`
+/// の `mode` 相当）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanMode {
+    FanIn,
+    FanOut,
+}
+
+/// PyTorch `nn.init.calculate_gain` 相当。非線形性ごとの推奨 gain 値を
+/// 返す（[`kaiming_uniform`]／[`kaiming_normal`] の `std`／`bound` 計算
+/// に使う）。
+///
+/// `LeakyRelu(negative_slope)` は `negative_slope` を直接使って
+/// `sqrt(2 / (1 + negative_slope²))` を返す。`kaiming_uniform`／
+/// `kaiming_normal` の `a` 引数（PyTorch シグネチャ互換のため残す
+/// パラメータ）は本関数には渡らない——`Nonlinearity::LeakyRelu(slope)`
+/// を明示的に渡した場合は常に `slope` 側が優先される契約であり、
+/// `a` は `LeakyRelu` 以外の kind では PyTorch でも参照されない値の
+/// ため、本設計では `kaiming_*` 側で有限性のみ検証し gain には使わない
+/// （呼び出し元は負勾配を必ず `Nonlinearity::LeakyRelu(slope)` 経由で
+/// 渡す）。
+pub fn calculate_gain(nonlinearity: Nonlinearity) -> f32 {
+    match nonlinearity {
+        Nonlinearity::Linear | Nonlinearity::Conv1d | Nonlinearity::Conv2d => 1.0,
+        Nonlinearity::Sigmoid => 1.0,
+        Nonlinearity::Tanh => 5.0 / 3.0,
+        Nonlinearity::Relu => std::f32::consts::SQRT_2,
+        Nonlinearity::LeakyRelu(negative_slope) => {
+            (2.0 / (1.0 + negative_slope * negative_slope)).sqrt()
+        }
+        Nonlinearity::Selu => 3.0 / 4.0,
+    }
+}
+
+/// PyTorch `nn.init._calculate_fan_in_and_fan_out` 相当。`shape` は
+/// `[out_features_or_channels, in_features_or_channels, ..kernel_dims]`
+/// （rank ≥ 2）を要求し、`shape[2..]` の積を receptive field size として
+/// `fan_in = shape[1] * receptive_field_size`・
+/// `fan_out = shape[0] * receptive_field_size` を返す。
+///
+/// **`nn::Linear` へ適用する際の注意**: PyTorch `nn.Linear.weight` は
+/// `[out_features, in_features]` だが、`nn::Linear::weight`（`linear.rs`）
+/// は `y = input.matmul(weight)` の合成のため転置の関係にある
+/// `[in_features, out_features]` を持つ。本関数・[`xavier_uniform`] 等
+/// を `nn::Linear::from_parameters` へそのまま渡す shape 引数として
+/// 使う場合、`shape[0]` は物理的には `in_features` であり、fan の意味
+/// （`fan_in`／`fan_out`）が PyTorch の直感とは入れ替わる。`Conv2d`／
+/// `Embedding` の重みレイアウトは PyTorch と同じ `[out_channels,
+/// in_channels, ..]` のため本注意は生じない（`docs/
+/// facade-nn-init-exposure-decision.md` 参照）。
+pub fn calculate_fan_in_and_fan_out(shape: &[usize]) -> Result<(usize, usize), AutodiffError> {
+    if shape.len() < 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    let receptive_field_size = shape[2..]
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| {
+            invalid_argument(
+                "nn::init::calculate_fan_in_and_fan_out: receptive field がオーバーフローします",
+            )
+        })?;
+    let fan_in = shape[1].checked_mul(receptive_field_size).ok_or_else(|| {
+        invalid_argument("nn::init::calculate_fan_in_and_fan_out: fan_in がオーバーフローします")
+    })?;
+    let fan_out = shape[0].checked_mul(receptive_field_size).ok_or_else(|| {
+        invalid_argument("nn::init::calculate_fan_in_and_fan_out: fan_out がオーバーフローします")
+    })?;
+    Ok((fan_in, fan_out))
+}
+
+/// PyTorch `nn.init.uniform_` 相当。`shape` の全要素を `U(low, high)`
+/// から独立にサンプルする。`low > high` または非有限値は
+/// `AutodiffError::InvalidArgument` を返す（グローバル RNG は未消費）。
+pub fn uniform(shape: &[usize], low: f32, high: f32) -> Result<Tensor<f32>, AutodiffError> {
+    if !low.is_finite() || !high.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::uniform: low・high は有限である必要があります",
+        ));
+    }
+    if low > high {
+        return Err(invalid_argument(
+            "nn::init::uniform: low は high 以下である必要があります",
+        ));
+    }
+    let numel = checked_numel(shape)?;
+    let data = fill_uniform(numel, low, high)?;
+    Tensor::new(data, shape).map_err(AutodiffError::from)
+}
+
+/// PyTorch `nn.init.normal_` 相当。`shape` の全要素を `N(mean, std²)`
+/// から独立にサンプルする。`std == 0` は [`constant`]（`mean` の定数）
+/// にフォールバックし RNG を消費しない（PyTorch も `std=0` を許容する
+/// 挙動に合わせる）。`std < 0` または非有限値は
+/// `AutodiffError::InvalidArgument` を返す。
+pub fn normal(shape: &[usize], mean: f32, std: f32) -> Result<Tensor<f32>, AutodiffError> {
+    if !mean.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::normal: mean は有限である必要があります",
+        ));
+    }
+    if !std.is_finite() || std < 0.0 {
+        return Err(invalid_argument(
+            "nn::init::normal: std は有限かつ非負である必要があります",
+        ));
+    }
+    if std == 0.0 {
+        return constant(shape, mean);
+    }
+    let numel = checked_numel(shape)?;
+    let data = fill_normal(numel, mean, std)?;
+    Tensor::new(data, shape).map_err(AutodiffError::from)
+}
+
+/// PyTorch `nn.init.constant_` 相当。`shape` の全要素を `value` で埋める
+/// （RNG を消費しない）。
+pub fn constant(shape: &[usize], value: f32) -> Result<Tensor<f32>, AutodiffError> {
+    let numel = checked_numel(shape)?;
+    let mut out = try_alloc(numel)?;
+    out.resize(numel, value);
+    Tensor::new(out, shape).map_err(AutodiffError::from)
+}
+
+/// PyTorch `nn.init.xavier_uniform_` 相当。
+/// `bound = gain·√(6 / (fan_in + fan_out))` の `U(-bound, bound)`。
+/// `fan_in + fan_out == 0`（`shape` の該当軸が 0）は
+/// `AutodiffError::InvalidArgument` を返す。
+pub fn xavier_uniform(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffError> {
+    if !gain.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::xavier_uniform: gain は有限である必要があります",
+        ));
+    }
+    let (fan_in, fan_out) = calculate_fan_in_and_fan_out(shape)?;
+    let denom = fan_in
+        .checked_add(fan_out)
+        .filter(|&d| d > 0)
+        .ok_or_else(|| {
+            invalid_argument(
+                "nn::init::xavier_uniform: fan_in + fan_out は 0 より大きい必要があります",
+            )
+        })?;
+    let bound = gain * (6.0 / denom as f32).sqrt();
+    if !bound.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::xavier_uniform: 計算された bound が有限ではありません",
+        ));
+    }
+    let numel = checked_numel(shape)?;
+    let data = fill_uniform(numel, -bound, bound)?;
+    Tensor::new(data, shape).map_err(AutodiffError::from)
+}
+
+/// PyTorch `nn.init.xavier_normal_` 相当。
+/// `std = gain·√(2 / (fan_in + fan_out))` の `N(0, std²)`。
+pub fn xavier_normal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffError> {
+    if !gain.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::xavier_normal: gain は有限である必要があります",
+        ));
+    }
+    let (fan_in, fan_out) = calculate_fan_in_and_fan_out(shape)?;
+    let denom = fan_in
+        .checked_add(fan_out)
+        .filter(|&d| d > 0)
+        .ok_or_else(|| {
+            invalid_argument(
+                "nn::init::xavier_normal: fan_in + fan_out は 0 より大きい必要があります",
+            )
+        })?;
+    let std = gain * (2.0 / denom as f32).sqrt();
+    if !std.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::xavier_normal: 計算された std が有限ではありません",
+        ));
+    }
+    let numel = checked_numel(shape)?;
+    let data = fill_normal(numel, 0.0, std)?;
+    Tensor::new(data, shape).map_err(AutodiffError::from)
+}
+
+/// `mode` が選んだ fan（`FanIn`→`fan_in`／`FanOut`→`fan_out`）が 0 なら
+/// `kaiming_uniform`／`kaiming_normal` の `std`／`bound` 計算が
+/// `1/√0`（非有限）になるため、共通の事前検査としてここでまとめて
+/// 拒否する。
+fn select_fan(shape: &[usize], mode: FanMode) -> Result<usize, AutodiffError> {
+    let (fan_in, fan_out) = calculate_fan_in_and_fan_out(shape)?;
+    let fan = match mode {
+        FanMode::FanIn => fan_in,
+        FanMode::FanOut => fan_out,
+    };
+    if fan == 0 {
+        return Err(invalid_argument(
+            "nn::init::kaiming_*: 選択された fan（fan_in／fan_out）は 0 より大きい必要があります",
+        ));
+    }
+    Ok(fan)
+}
+
+/// PyTorch `nn.init.kaiming_uniform_` 相当。
+/// `std = gain / √fan`・`bound = √3·std` の `U(-bound, bound)`。
+///
+/// `a` は PyTorch シグネチャ互換のため残す引数で、有限性のみ検証する
+/// （実際の負勾配は [`calculate_gain`] の doc のとおり
+/// `Nonlinearity::LeakyRelu(slope)` 経由で渡す）。
+pub fn kaiming_uniform(
+    shape: &[usize],
+    a: f32,
+    mode: FanMode,
+    nonlinearity: Nonlinearity,
+) -> Result<Tensor<f32>, AutodiffError> {
+    if !a.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::kaiming_uniform: a は有限である必要があります",
+        ));
+    }
+    let fan = select_fan(shape, mode)?;
+    let gain = calculate_gain(nonlinearity);
+    let std = gain / (fan as f32).sqrt();
+    let bound = std * 3f32.sqrt();
+    if !bound.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::kaiming_uniform: 計算された bound が有限ではありません",
+        ));
+    }
+    let numel = checked_numel(shape)?;
+    let data = fill_uniform(numel, -bound, bound)?;
+    Tensor::new(data, shape).map_err(AutodiffError::from)
+}
+
+/// PyTorch `nn.init.kaiming_normal_` 相当。`std = gain / √fan` の
+/// `N(0, std²)`。`a` の扱いは [`kaiming_uniform`] と同じ。
+pub fn kaiming_normal(
+    shape: &[usize],
+    a: f32,
+    mode: FanMode,
+    nonlinearity: Nonlinearity,
+) -> Result<Tensor<f32>, AutodiffError> {
+    if !a.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::kaiming_normal: a は有限である必要があります",
+        ));
+    }
+    let fan = select_fan(shape, mode)?;
+    let gain = calculate_gain(nonlinearity);
+    let std = gain / (fan as f32).sqrt();
+    if !std.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::kaiming_normal: 計算された std が有限ではありません",
+        ));
+    }
+    let numel = checked_numel(shape)?;
+    let data = fill_normal(numel, 0.0, std)?;
+    Tensor::new(data, shape).map_err(AutodiffError::from)
+}
+
+/// PyTorch `nn.init.orthogonal_` 相当。`shape`（rank ≥ 2）を
+/// `[rows, cols]`（`rows = shape[0]`・`cols = Π shape[1..]`）へ平坦化し、
+/// `N(0, 1)` 行列を [`crate::eval::linalg::qr`]（Householder reduced QR。
+/// `R` の対角を非負に正規化済み——PyTorch の `q *= sign(diag(r))` と
+/// 等価な一意化）で直交化してから `gain` 倍し `shape` へ書き戻す。
+/// `rows < cols` の場合は PyTorch と同じく転置してから QR を取り、
+/// 結果を転置し戻す（`rows >= cols` を要求する QR の制約を回避する
+/// ため）。
+pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffError> {
+    if !gain.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::orthogonal: gain は有限である必要があります",
+        ));
+    }
+    if shape.len() < 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    let rows = shape[0];
+    let cols = shape[1..]
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| {
+            invalid_argument("nn::init::orthogonal: shape の要素数がオーバーフローします")
+        })?;
+    if rows == 0 || cols == 0 {
+        return Err(invalid_argument(
+            "nn::init::orthogonal: shape の各軸は 0 より大きい必要があります",
+        ));
+    }
+    let (gen_rows, gen_cols, transposed) = if rows < cols {
+        (cols, rows, true)
+    } else {
+        (rows, cols, false)
+    };
+    let gen_numel = gen_rows.checked_mul(gen_cols).ok_or_else(|| {
+        invalid_argument("nn::init::orthogonal: 生成用行列の要素数がオーバーフローします")
+    })?;
+    let data = fill_normal(gen_numel, 0.0, 1.0)?;
+    let m = Tensor::new(data, &[gen_rows, gen_cols])?;
+    let (q, _r) = crate::eval::linalg::qr(&m);
+    let q = if transposed {
+        q.transpose_2d()?.contiguous()
+    } else {
+        q
+    };
+    let scaled: Vec<f32> = q.host_slice().iter().map(|&v| v * gain).collect();
+    Tensor::new(scaled, shape).map_err(AutodiffError::from)
+}
+
+/// `trunc_normal` が無限ループへ陥らないための試行回数上限（要素あたり
+/// 平均試行数の上限。DoS 対策——`[a, b]` が `N(mean, std²)` の裾に
+/// ほとんど掛からない窓の場合、rejection sampling は原理的に停止しない
+/// ため、実用上十分大きい値で fail-closed に打ち切る）。
+const TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT: usize = 10_000;
+
+/// PyTorch `nn.init.trunc_normal_` 相当。`N(mean, std²)` を `[a, b]` へ
+/// 切断した分布から `shape` の全要素をサンプルする。逆 CDF 法に必要な
+/// erfinv を自作せず、rejection sampling（Box–Muller の各サンプルを
+/// `[a, b]` 外なら棄却して引き直す）で実装する
+/// （`docs/facade-nn-init-exposure-decision.md` 参照）。
+///
+/// `a >= b`（空・逆転区間）・非有限値・`std < 0` は
+/// `AutodiffError::InvalidArgument` を返す。`std == 0` は `mean` が
+/// `[a, b]` 内であることを検査したうえで [`constant`] にフォールバック
+/// する。受理確率が極端に低い窓（試行上限
+/// [`TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT`] を要素平均で超過）も
+/// `AutodiffError::InvalidArgument` で打ち切る。
+pub fn trunc_normal(
+    shape: &[usize],
+    mean: f32,
+    std: f32,
+    a: f32,
+    b: f32,
+) -> Result<Tensor<f32>, AutodiffError> {
+    if !mean.is_finite() || !a.is_finite() || !b.is_finite() {
+        return Err(invalid_argument(
+            "nn::init::trunc_normal: mean・a・b は有限である必要があります",
+        ));
+    }
+    if !std.is_finite() || std < 0.0 {
+        return Err(invalid_argument(
+            "nn::init::trunc_normal: std は有限かつ非負である必要があります",
+        ));
+    }
+    if a >= b {
+        return Err(invalid_argument(
+            "nn::init::trunc_normal: a は b 未満である必要があります",
+        ));
+    }
+    let numel = checked_numel(shape)?;
+    if std == 0.0 {
+        if mean < a || mean > b {
+            return Err(invalid_argument(
+                "nn::init::trunc_normal: std == 0 のとき mean は [a, b] 内である必要があります",
+            ));
+        }
+        return constant(shape, mean);
+    }
+    let mut out = try_alloc(numel)?;
+    let attempt_budget = numel.saturating_mul(TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT);
+    let fill_result: Result<(), AutodiffError> = with_global_rng(|rng| {
+        let mut generated = 0usize;
+        let mut attempts = 0usize;
+        while generated < numel {
+            if attempts >= attempt_budget {
+                return Err(invalid_argument(
+                    "nn::init::trunc_normal: 試行回数上限に達しました（[a, b] の受理確率が極端に低い可能性があります）",
+                ));
+            }
+            attempts += 1;
+            // Box–Muller は本来 2 値ずつ生成するが、rejection sampling は
+            // 値ごとに独立採否判定が必要なため、ここでは 1 回の変換で
+            // 得られる `cos` 側の値のみを使う（`sin` 側は捨てる。
+            // `fill_normal`〈#2140 の非切断版〉とは異なる消費契約になる
+            // ことをこの関数のスコープに閉じる）。
+            let u1 = 1.0 - rng.next_unit_f64();
+            let u2 = rng.next_unit_f64();
+            let r = (-2.0 * u1.ln()).sqrt();
+            let theta = std::f64::consts::TAU * u2;
+            let z = (r * theta.cos()) as f32;
+            let value = z * std + mean;
+            if value >= a && value <= b {
+                out.push(value);
+                generated += 1;
+            }
+        }
+        Ok(())
+    });
+    fill_result?;
+    Tensor::new(out, shape).map_err(AutodiffError::from)
 }
 
 #[cfg(test)]
