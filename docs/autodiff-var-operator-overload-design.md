@@ -18,14 +18,14 @@
 
 `Var` の四則演算は現状メソッド形（`a.add(&b)?`）でしか書けない。PyTorch 風の `loss + reg` のような式を直接書けないため、Phase 5-A が目指す「PyTorch／TF 置き換え水準の API 網羅」に届かない。
 
-### 1.2 本 issue で確定すること（受入基準の構造化要約）
+### 1.2 本 issue で確定すること（受入基準の構造化要約。カッコ内は対応する本 doc の節）
 
-1. 演算子トレイトのシグネチャ（借用形か consumed 形か、`Output` 型は何か）
-2. スカラー混合（`&Var + 2.0` 等）を入れるかどうか
-3. 既存メソッド形との bit 同一を仕組みとして保証する方法（#2136 で入れるコメント文面を含む）
-4. 単項 `-` と `Var::neg()` の bit 完全一致
-5. 複合式（`a + b * c` 等）の結合性テストの仕様
-6. 本 doc に背景・借用形の選択理由・bit 同一契約を書く
+1. 演算子トレイトのシグネチャ（借用形か consumed 形か、`Output` 型は何か）（§3・§4）
+2. スカラー混合（`&Var + 2.0` 等）を入れるかどうか（§8）
+3. 既存メソッド形との bit 同一を仕組みとして保証する方法（#2136 で入れるコメント文面を含む）（§5）
+4. 単項 `-` と `Var::neg()` の bit 完全一致（§6。テストとしての固定は§9。演算子が未実装のため本 issue では確認自体はできず、#2136 が実装するテストの仕様として固定する読み替えを採る）
+5. 複合式（`a + b * c` 等）の結合性テストの仕様（§9。同じ理由で本 issue ではテスト仕様の固定に留め、実装・実行は #2136 の責務とする）
+6. 本 doc に背景・借用形の選択理由・bit 同一契約を書く（本 doc 全体。背景は §1、借用形の選択理由は §3〜§4・§7、bit 同一契約は §5〜§6）
 
 ### 1.3 契約（イシュー共通）
 
@@ -43,7 +43,7 @@
 | CPU の融合 elementwise は `+`／`*` をそのまま使い、FMA（`mul_add`）は使わない。FMA 契約は GEMM 専用 | `crates/backend-cpu/src/fused_elementwise.rs:30-38`（モジュール doc「数値契約」） |
 | facade は `pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};` で `Var` を再エクスポートしている。**`Var` にトレイト impl を足すと、facade 側のコードを変えなくても facade の公開面が広がる** | `crates/facade/src/lib.rs:184` |
 | 演算子オーバーロードは `docs/compat-api-scope.md` の Tier 1／Tier 2 いずれにも列挙されていない。facade 公開には §5（範囲拡張の手続き。経路 2）の承認が要る | `docs/compat-api-scope.md` §1・§5 |
-| 葉プレフィックス長（`retained_leaf_len`）は演算が 1 件も記録されていない間は未固定で、`leaf_count()` は現在の全ノード数を返す。定数葉（`Tape::var_no_grad`。`push_leaf` 経由）をこの状態で追加すると、後で `reset()` しても葉プレフィックスに含まれて残り続ける | `crates/autodiff/src/tape.rs:2317-2322`（`freeze_leaf_prefix`）・`2330-2333`（`leaf_count`）・`2379-2384`（`reset` doc「一度も演算を記録していない `Tape` の reset は全ノードを保持する no-op」） |
+| 葉プレフィックス長（`retained_leaf_len`）は演算が 1 件も記録されていない間は未固定で、`leaf_count()` は現在の全ノード数を返す。定数葉（`Tape::var_no_grad`。`push_leaf` 経由）をこの状態で追加すると、後で `reset()` しても葉プレフィックスに含まれて残り続ける | `crates/autodiff/src/tape.rs:2329-2336`（`freeze_leaf_prefix`）・`2342-2350`（`leaf_count`）・`2395-2398`（`reset` doc「一度も演算を記録していない `Tape` の reset は全ノードを保持する no-op」） |
 | Rust の言語仕様上の実測（orphan 規則・E0117・inherent／トレイトメソッド解決順序）。rustc 1.98.1 の scratch クレートで確認し、確認後にクレートは削除済み | 下記 §4・§7 |
 
 ## 3. `Output` 型の案比較（中心論点）
@@ -139,7 +139,7 @@ FMA 契約とは無関係であることも明記する（elementwise は `mul_a
 
 - `crates/autodiff/src/var.rs:108-112, 662-701, 809-811, 873-888`
 - `crates/tensor-core/src/scalar_op.rs:74, 151, 183`
-- `crates/autodiff/src/tape.rs:2317-2333, 2379-2384`
+- `crates/autodiff/src/tape.rs:2329-2350, 2395-2398`
 - `crates/backend-cpu/src/fused_elementwise.rs:25-38`
 - `crates/facade/src/lib.rs:184`
 - `docs/compat-api-scope.md` §0・§1・§5
