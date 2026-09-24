@@ -407,7 +407,7 @@ exposure-decision.md` §12・`docs/autodiff-var-operator-overload-design.md`
 ### 13.3 追加したガード
 
 本体実装（`crates/autodiff/src/**`）・facade 公開面（`crates/facade/src/**`
-本番コード）はいずれも変更していない。追加したのは次の 3 層のみ:
+本番コード）はいずれも変更していない。追加したのは次の 4 層のみ:
 
 1. **doctest 正のプローブ**（`crates/facade/src/lib.rs::
    VarHooksHoldDoctestGuard`。`VarCustomHoldDoctestGuard`／
@@ -431,20 +431,36 @@ exposure-decision.md` §12・`docs/autodiff-var-operator-overload-design.md`
 3. **workspace 全体の定義元インベントリ**（`crates/facade/tests/
    api_surface.rs::workspace_declares_no_hook_registration_fns`）:
    `crates/*/src/` を再帰走査し、`register_forward_hook`／
-   `register_backward_hook`／`remove_hook` の `fn` 宣言が workspace 全体で
-   0 件であることを固定する。`register_hook` はあえて検査対象から外した
-   （並行する #2182 の DataLoader transform フック等、正当な用途で使われ
-   うる汎用名のため。facade から到達できないことは doctest 側が固定する）。
-   検出器（`count_fn_declarations_by_name`）が対象 3 関数名を実際に検出
-   できることは合成入力の自己テスト
+   `register_backward_hook`／`remove_hook`／`remove_backward_hook`（定数
+   `HOOK_REGISTRATION_FN_NAMES`。4 関数名。`remove_backward_hook` は
+   codex-review 指摘・PR #2254・discussion_r4096585898 を受けて追加）の
+   `fn` 宣言が workspace 全体で 0 件であることを固定する。`register_hook`
+   はあえてこの配列から外した（並行する #2182 の DataLoader transform
+   フック等、正当な用途で使われうる汎用名のため）。検出器
+   （`count_fn_declarations_by_name`）が対象 4 関数名を実際に検出できる
+   ことは合成入力の自己テスト
    `count_fn_declarations_by_name_detects_hook_registration_fn_names` で
    固定した
+4. **`crates/autodiff/src/` 限定の `register_hook` 否定ガード**（
+   `crates/facade/tests/api_surface.rs::
+   autodiff_declares_no_register_hook_fn`。codex-review 指摘・PR #2254・
+   discussion_r4096728116）: （3）が `register_hook` を workspace 全体
+   走査の対象から一律除外しているため、facade を経由しない autodiff 側の
+   本体実装（`fandhe_ai_autodiff::Tape::register_hook` 等）は doctest 正の
+   プローブ（1）にも（3）にも捕捉されない穴が生じる。`Var`／`Tape`／
+   `nn::Sequential`（実装候補の型）はいずれも `crates/autodiff/src/` 配下
+   に定義されているため、このクレート限定で `register_hook` の `fn` 宣言
+   0 件を別途固定し、この穴を塞ぐ（`crates/autodiff` の外・たとえば #2182
+   の DataLoader transform フックでの同名関数の使用は許容したまま）。
+   検出器が `register_hook` を実際に検出できることは合成入力の自己テスト
+   `count_fn_declarations_by_name_detects_register_hook` で固定した
 
 facade の `Tape`（`pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`。
 `crate::lib.rs`）は `Deref` を持たない newtype のため、doctest プローブ
 （1）が検出できるのは facade 側に追加されたメソッドのみである。autodiff
-側の `Tape` に追加された定義は（3）の workspace 全体走査が捕捉する分担と
-した。
+側の `Tape` に追加された定義は（3）（`register_hook` を除く 4 関数名）と
+（4）（`register_hook` 限定・`crates/autodiff/src/` スコープ）の 2 つの
+走査が分担して捕捉する。
 
 **合成注入による確認結果**（コミットには含めない。一時的な変更で確認後に
 元へ戻した。`git diff crates/autodiff` が空であることを確認済み）:

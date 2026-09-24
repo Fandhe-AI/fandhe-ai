@@ -6770,12 +6770,97 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 /// 関数名。`register_hook` はあえて含めない（並行する #2182 の DataLoader
 /// transform フック等、正当な用途で使われうる汎用名のため。facade から
 /// 到達できないことは `VarHooksHoldDoctestGuard` の doctest が固定する）。
+///
+/// **`register_hook` の除外は無条件ではない**（codex-review 指摘・PR #2254・
+/// discussion_r4096728116）。facade の `Tape`（`pub struct Tape(pub(crate)
+/// fandhe_ai_autodiff::Tape)`）は `Deref` を持たない newtype のため、doctest
+/// 正のプローブ（[`hooks_hold_doctest_probe_body_matches_fixed_contract`]）は
+/// facade に再エクスポートされたメソッドしか検出できない。`register_hook` を
+/// この配列から一律除外したままだと、`fandhe_ai_autodiff::Tape::
+/// register_hook`（facade を経由しない autodiff 側の本体実装）が doctest・
+/// 本走査のいずれからも検出されず、§11 承認前の本体実装を fail-closed に
+/// 止めるという受入ガードの前提が崩れる。この穴は
+/// [`autodiff_declares_no_register_hook_fn`] が
+/// `crates/autodiff/src/` 限定で `register_hook` の定義元を明示的に
+/// allowlist 化（= 0 件固定）することで塞ぐ（`crates/autodiff` 以外の
+/// クレート、たとえば #2182 の DataLoader transform フックでの
+/// `register_hook` という名称の使用は本配列・本 workspace 全体走査の
+/// 対象外のまま許容する）。
 const HOOK_REGISTRATION_FN_NAMES: [&str; 4] = [
     "register_forward_hook",
     "register_backward_hook",
     "remove_hook",
     "remove_backward_hook",
 ];
+
+/// [`HOOK_REGISTRATION_FN_NAMES`] が `register_hook` を意図的に除外している
+/// 穴（doctest 正のプローブは facade 経由の到達可能性しか見ず、facade
+/// `Tape` newtype は autodiff `Tape` を `Deref` しないため autodiff 側の
+/// 本体実装を検出できない）を塞ぐ、`crates/autodiff/src/` 限定の否定ガード
+/// （codex-review 指摘・PR #2254・discussion_r4096728116。`docs/
+/// autodiff-forward-backward-hooks-design.md` §13.3 の「正当な定義元だけを
+/// 明示的に allowlist 化する」対応）。`Var`／`Tape`／`nn::Sequential`（PyTorch
+/// 互換 API が実装候補として想定する型。§11 承認事項 4 の受入基準改訂で
+/// 変わりうる）はいずれも `crates/autodiff/src/` 配下に定義されているため、
+/// このクレート限定で `register_hook` の `fn` 宣言が 0 件であることを固定
+/// すれば、正当な定義元（本 PR 時点で存在しない）が承認前に紛れ込むことを
+/// 宣言文脈・可視性を問わず検出できる。`crates/autodiff` の外（#2182 の
+/// DataLoader transform フック等）での同名関数の使用は引き続き許容する
+/// （[`HOOK_REGISTRATION_FN_NAMES`] のコメント参照）。
+#[test]
+fn autodiff_declares_no_register_hook_fn() {
+    let crates_dir = workspace_crates_dir();
+    let autodiff_src_dir = crates_dir.join("autodiff").join("src");
+    assert!(
+        autodiff_src_dir.is_dir(),
+        "crates/autodiff/src ディレクトリが見つからない（テスト自体が検査対象を\
+         見失っている可能性がある）: {}",
+        autodiff_src_dir.display()
+    );
+
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    visit_rs_files(&autodiff_src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let count = count_fn_declarations_by_name(&tokens, "register_hook");
+        if count > 0 {
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            *found.entry(rel.to_string()).or_insert(0) += count;
+        }
+    });
+
+    assert!(
+        found.is_empty(),
+        "crates/autodiff/src/ に register_hook の `fn` 宣言が見つかった\
+         （イシュー #2139 は §11 の承認事項 5 項目がそろうまで着手不可という\
+         設計判断〈docs/autodiff-forward-backward-hooks-design.md §13〉に\
+         違反する可能性がある。承認済みの実装であれば本ガード自体を撤去\
+         すること）: {found:?}"
+    );
+}
+
+/// [`autodiff_declares_no_register_hook_fn`] が使う
+/// [`count_fn_declarations_by_name`] が `register_hook` を実際に検出できる
+/// ことを固定する合成入力の自己テスト（
+/// [`count_fn_declarations_by_name_detects_hook_registration_fn_names`] は
+/// [`HOOK_REGISTRATION_FN_NAMES`] の 4 関数名のみを対象とし `register_hook`
+/// を含まないため、検出器自体が `register_hook` を検出できることは別途
+/// 固定する必要がある）。
+#[test]
+fn count_fn_declarations_by_name_detects_register_hook() {
+    let src = "impl Var { pub fn register_hook(&self) {} }";
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "register_hook"),
+        1,
+        "src={src:?} tokens={tokens:?}"
+    );
+}
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、
 /// [`HOOK_REGISTRATION_FN_NAMES`]（4 個）の `fn` 宣言が可視性・宣言文脈
