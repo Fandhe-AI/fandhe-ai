@@ -271,21 +271,48 @@ pub fn repeat<'t>(x: &Var<'t>, repeats: &[usize]) -> Result<Var<'t>, AutodiffErr
         // `crates/tensor-core/src/tensor.rs::is_contiguous`）、
         // 個々の軸が target と異なる中間 shape のままでも
         // `ShapeError::NonContiguousReshape` にはならない。
+        // `total_out_elems == 0` は `axis_totals` の `checked_mul` 連鎖
+        // （usize 積）の結果であり、積が 0 になるのは因子のいずれかが
+        // 0 の場合に限る（IEEE 754 ではなく usize 演算のため NaN 等の
+        // 例外経路は存在しない）。よってこの `position` は必ず `Some`
+        // を返すが、内部不変条件の変更がここへ影響しても本番経路の
+        // panic に漏れないよう `.expect()` ではなく型付きエラーへ変換
+        // する（codex-review 指摘・P1・PR #2256「ゼロ軸探索に .expect()
+        // を使用しており panic 禁止規約違反」）。
         let z = axis_totals
             .iter()
             .position(|&t| t == 0)
-            .expect("total_out_elems == 0 のため axis_totals に 0 が必ず存在する");
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(AutodiffError::Shape)?;
         let empty_idx = Tensor::new(Vec::new(), &[0]).map_err(AutodiffError::Shape)?;
         cur = cur.index_select(z, &empty_idx)?;
         return cur.reshape(&axis_totals);
     }
 
-    // 非ゼロケース: `r == 1` の軸は添字ベクタを確保せず（後続ループで
-    // `continue` によりスキップ）そのまま no-op になるため、確保上限
-    // チェックの対象からも外す（cursor(Medium)「Allocation cap rejects
-    // no-op repeat」・PR #2256——`broadcast_to` 由来の stride-0 view で
-    // 論理長が 1GiB 換算の上限を超える軸でも、`r == 1`（no-op）呼び出し
-    // では実際の確保が発生しないため誤って拒否しない）。`r != 1` の軸に
+    // 非ゼロケースのうち、少なくとも 1 軸が `r != 1`（実際に
+    // `index_select` による実体化が発生する）場合は、個々の添字ベクタ
+    // が上限未満でも最終出力の総要素数 `total_out_elems` が 1 GiB
+    // （`i32`／`f32` 相当 4 バイト換算）を超えないかも検査する
+    // （cursor-review(Medium)「Large repeat can abort process」・
+    // PR #2256——各軸の `axis_totals[d]` 単体は `MAX_INDEX_ALLOC_BYTES`
+    // 未満でも、複数軸の `r != 1` を掛け合わせた最終出力（または経路上
+    // の中間実体化）が 1 GiB を大きく超えうる。逐次実行される
+    // `index_select` は軸ごとに要素数を増やしていくため、実体化を伴う
+    // 経路での中間確保サイズの上界は最終値 `total_out_elems` に一致する
+    // ）。全軸 `r == 1`（`repeat_no_op_on_huge_broadcast_view_does_not_
+    // reject` が検証する no-op 経路）は `index_select` を一切呼ばず
+    // `broadcast_to` 由来の stride-0 view のまま返るため、この検査の
+    // 対象外とする。
+    if repeats.iter().any(|&r| r != 1) {
+        checked_index_alloc_len(total_out_elems)?;
+    }
+
+    // `r == 1` の軸は添字ベクタを確保せず（後続ループで `continue` に
+    // よりスキップ）そのまま no-op になるため、軸単位の確保上限チェック
+    // の対象からも外す（cursor(Medium)「Allocation cap rejects no-op
+    // repeat」・PR #2256——`broadcast_to` 由来の stride-0 view で論理長
+    // が 1GiB 換算の上限を超える軸でも、`r == 1`（no-op）呼び出しでは
+    // 実際の確保が発生しないため誤って拒否しない）。`r != 1` の軸に
     // 限り、実際に確保する添字ベクタの長さ `axis_totals[d]` が
     // `i32` 添字値として表現できる範囲か（`checked_axis_len_as_i32`）・
     // 実用上の確保上限に収まるか（`checked_index_alloc_len`）を検査する。
@@ -841,6 +868,26 @@ mod tests {
         let x = tape.var(&t(vec![1.0], &[1]));
         let err = repeat(&x, &[1_000_000_000])
             .expect_err("実用上確保不能な repeats は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    // --- エラー系: 軸ごとの添字ベクタは上限未満でも、複数軸の `r != 1`
+    // を掛け合わせた最終出力の総要素数が 1 GiB 換算の上限を超える
+    // ケース（cursor-review(Medium)「Large repeat can abort process」・
+    // PR #2256）。各軸単体の確保上限チェックだけでは見逃すことを確認
+    // する。
+    #[test]
+    fn repeat_rejects_total_output_size_even_when_each_axis_is_small() {
+        let tape = Tape::new();
+        // 各軸の `axis_total` は 40,000（i32 換算 160,000 バイト。
+        // `MAX_INDEX_ALLOC_BYTES` = 1 GiB を大きく下回る）だが、2 軸の
+        // 積は 1.6e9 要素（4 バイト換算で約 6.4 GiB）となり上限を超える。
+        let x = tape.var(&t(vec![1.0], &[1, 1]));
+        let err = repeat(&x, &[40_000, 40_000])
+            .expect_err("軸ごとの積が実用上確保不能な規模なら確保前に拒否されるはず");
         assert!(matches!(
             err,
             AutodiffError::Shape(ShapeError::ElementCountOverflow)
