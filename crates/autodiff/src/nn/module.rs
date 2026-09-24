@@ -31,6 +31,7 @@ use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
+use crate::nn::container::{ModuleDict, ModuleList};
 use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
@@ -163,6 +164,52 @@ pub trait Module {
     /// [`Module::as_linear`] の可変版。`compat::Sequential::apply_parameters`
     /// が optimizer 更新後の `Tensor<f32>` を層へ書き戻す入口として使う。
     fn as_linear_mut(&mut self) -> Option<&mut Linear> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #2137 レビュー
+    /// 是正）。`ModuleList::set_requires_grad`（`nn/container.rs`）が
+    /// 失敗時ロールバックのため、子が入れ子コンテナかどうかを判定して
+    /// 再帰的な状態スナップショットを取るのに使う。`ModuleList` 自身に
+    /// 加え `Sequential`（内部 `ModuleList` を保持）もオーバーライドし
+    /// `Some(&self.inner)` を返す（`Sequential` は `ModuleList` の薄い
+    /// ラッパーであり、混在状態は `inner` 側に存在するため）。
+    /// `ModuleDict` は本フックではなく別フック [`Module::
+    /// as_module_dict`]（同型・別 downcast 先。第 2 ラウンドのレビュー
+    /// 是正・#2234）をオーバーライドする（`ModuleList` と `ModuleDict`
+    /// は別の内部表現を持つ別コンテナ型のため）。上記いずれにも該当
+    /// しない全層は既定 `None`（末端層として扱われ、単一 bool
+    /// スナップショットで復元可能という前提に従う）。
+    fn as_module_list(&self) -> Option<&ModuleList> {
+        None
+    }
+
+    /// [`Module::as_module_list`] の可変版。ロールバック時の復元
+    /// （子の状態を書き戻す）に使う。
+    fn as_module_list_mut(&mut self) -> Option<&mut ModuleList> {
+        None
+    }
+
+    /// [`Module::as_module_list`] と同型の明示フック（イシュー #2137
+    /// レビュー是正 PR #2234。review thread `PRRT_kwDOTuUCJc6lE8Gg`／
+    /// cursor\[bot\] `PRRT_kwDOTuUCJc6lE80z`）。`ModuleDict::
+    /// set_requires_grad`（`nn/container.rs`）のロールバックが
+    /// `ModuleList` と同じ再帰的スナップショット方式（`nn/
+    /// container.rs::snapshot_requires_grad`／`restore_requires_grad`）を
+    /// 使うために必要。`ModuleList`（`as_module_list`）と `ModuleDict`
+    /// は別のコンテナ型（`Vec<Box<dyn Module>>` と挿入順キー付き
+    /// `Vec<(String, Box<dyn Module>)>`）のため、判定フックも分離する
+    /// （どちらか一方だけを見るとネストした片方のコンテナが「末端層」
+    /// と誤判定され、混在状態がロールバックで破壊される）。`ModuleDict`
+    /// 自身がオーバーライドし `Some(&self)` を返す。それ以外の全層は
+    /// 既定 `None`。
+    fn as_module_dict(&self) -> Option<&ModuleDict> {
+        None
+    }
+
+    /// [`Module::as_module_dict`] の可変版。ロールバック時の復元
+    /// （子の状態を書き戻す）に使う。
+    fn as_module_dict_mut(&mut self) -> Option<&mut ModuleDict> {
         None
     }
 
@@ -393,6 +440,93 @@ pub trait Module {
         true
     }
 
+    /// 層別 `requires_grad` 凍結（PyTorch `module.requires_grad_(bool)`
+    /// 相当。イシュー #2137・`docs/autodiff-nograd-leaf-dinput-skip-
+    /// decision.md`「実装記録（#2137）」）。この層が保持する全パラメータ
+    /// 葉について、以後の [`Module::forward`]（内部で `Linear::bind`
+    /// 等・`Tape::var`／`var_no_grad` 相当の葉登録を経由する）が
+    /// `requires_grad` をどちらで登録するかを切り替える。
+    ///
+    /// # 反映タイミング（次の bind／forward から）
+    ///
+    /// フラグは層側（`struct` フィールド）に保持する状態であり、
+    /// **次に `bind`（葉ノードを新規登録する呼び出し）した時点から**
+    /// 反映される。すでに `Tape` へ登録済みの `Var`（過去の `bind`
+    /// 呼び出しが返したもの）は、登録時点のフラグのまま不変
+    /// （`TapeNode::requires_grad` は葉登録時に確定し事後変更されない。
+    /// `tape.rs` の `push_leaf` 参照）。`Tape::reset` 後に保持される
+    /// 葉プレフィックス（`Tape::leaf`）の葉も同様に登録時のフラグを
+    /// 保持し、フラグ変更後の再 bind から新しい値が反映される。
+    ///
+    /// # `training`／`set_training` とは独立の軸
+    ///
+    /// `freeze()`／`set_requires_grad(false)` は
+    /// [`Module::training`]／[`Module::set_training`] を変更しない。
+    /// `BatchNorm` 系の running statistics は、凍結後も training モード
+    /// のままなら引き続き更新される（PyTorch と同じ挙動。学習を完全に
+    /// 止めたい場合は呼び出し元が別途 `set_training(false)` を呼ぶ）。
+    ///
+    /// # `state_dict`／`load_state_dict` とは独立
+    ///
+    /// フラグは [`Module::state_dict`]／[`Module::load_state_dict`] の
+    /// 対象外（両者はテンソル値のみを扱う）。[`Module::set_parameter`]・
+    /// `load_state_dict` でパラメータを差し替えてもフラグは保持される。
+    ///
+    /// # 粒度
+    ///
+    /// per-layer（層内の `weight`／`bias` 等の全パラメータ葉をまとめて
+    /// 切り替える）。名前指定の per-parameter 粒度は本イシューの対象外
+    /// （`Module::named_parameters` の命名契約とは独立の機構）。
+    ///
+    /// # 既定実装（fail-closed。`.claude/rules/security.md` A08）
+    ///
+    /// [`Module::named_parameters`] が空なら何もせず `Ok(())`
+    /// （パラメータを持たない層は状態を保持する必要がないため）。
+    /// パラメータを持つのに本メソッドをオーバーライドしていない外部
+    /// `Module` 実装（`fandhe-ai-autodiff` は crates.io 公開クレートの
+    /// ため、非破壊拡張＝デフォルトメソッド追加として本イシューを実装
+    /// する。外部実装者が本メソッドを未実装のまま残すケースがある）に
+    /// 対しては `Err(AutodiffError::InvalidArgument)` を返す。
+    /// 「`named_parameters` だけをオーバーライドしたつもりで `freeze()`
+    /// を呼んだら実際には学習が継続していた」という静かな事故
+    /// （A08 ソフトウェア・データ整合性）を防ぐための意図的な設計であり、
+    /// `set_training` と同型の no-op 既定は採らない（実装計画
+    /// §2.1「設計」参照）。[`Module::named_parameters`] をオーバーライド
+    /// する本クレート内の全層は、対で本メソッドもオーバーライドする
+    /// （2.3 節の表。`ModuleList`／`Sequential`／`ModuleDict`（P1 是正・
+    /// #2234 レビュー指摘）は子へ伝播する）。
+    fn set_requires_grad(&mut self, _requires_grad: bool) -> Result<(), AutodiffError> {
+        let param_count = self.named_parameters().len();
+        if param_count == 0 {
+            Ok(())
+        } else {
+            Err(AutodiffError::InvalidArgument(format!(
+                "Module::set_requires_grad: this Module has {param_count} named parameter(s) \
+                 but does not override set_requires_grad (fail-closed default; freezing would \
+                 silently be a no-op)"
+            )))
+        }
+    }
+
+    /// [`Module::set_requires_grad`]`(false)` の別名（PyTorch
+    /// `module.requires_grad_(False)`／Keras `layer.trainable = False`
+    /// 相当。転移学習で backbone を固定する典型呼び出し）。
+    fn freeze(&mut self) -> Result<(), AutodiffError> {
+        self.set_requires_grad(false)
+    }
+
+    /// この層が現在追跡対象かどうか。**既定 `true`**（[`Module::
+    /// training`] と同じ契約: パラメータを持たない層は状態を保持
+    /// しないため `freeze()` 後も `true` のままとなる。パラメータを
+    /// 持つ層は [`Module::set_requires_grad`] と対でオーバーライド
+    /// する）。複合層（子を内包する層）の既定伝播は「子が 1 つでも
+    /// `true` を返せば `true`」（`MultiheadAttention`・
+    /// `TransformerEncoderLayer` 等。子はいずれも private フィールドの
+    /// ため実際には常に揃った値を返す）。
+    fn requires_grad(&self) -> bool {
+        true
+    }
+
     /// この層（および子を持つ場合は子を含む）が公開する学習可能
     /// パラメータの「名前, 参照」列（PyTorch `Module.named_parameters()`
     /// 相当。イシュー #1758）。
@@ -610,6 +744,233 @@ pub trait Module {
         }
         Ok(())
     }
+
+    /// この層が直接内包する子 `Module`（PyTorch `Module.children()` 相当。
+    /// イシュー #2134）の「名前, 参照」列を登録順で返す。
+    ///
+    /// # 命名契約
+    ///
+    /// 名前は [`Module::named_parameters`] が使う接頭辞（`prefixed`
+    /// ヘルパーの第 1 引数）と**完全一致**させる（[`Module::
+    /// named_modules`]・[`nn::summary`](crate::nn::container::summary) が
+    /// 本メソッドから辿るパスと `named_parameters` の平坦名の対応を
+    /// 保つため）。`ModuleList`／`Sequential`（`container.rs`）は
+    /// `"{index}"`、`ModuleDict`（同ファイル）は挿入キー、
+    /// `MultiheadAttention` は `q_proj`／`k_proj`／`v_proj`／
+    /// `out_proj`、`TransformerEncoderLayer` は `self_attn`／`linear1`／
+    /// `linear2`／`norm1`／`norm2` をそれぞれ返す。
+    ///
+    /// `Rnn`／`Lstm`／`Gru` は `RnnCell`／`LstmCell`／`GruCell` が
+    /// `Module` を実装しないため本メソッドを既定（空）のままとする
+    /// （`named_parameters` が使う `"cell."` 接頭辞はサブモジュール
+    /// パスではない。イシュー #2134 のスコープ判断）。
+    ///
+    /// # 既定実装
+    ///
+    /// 葉モジュール（子を持たない層）向けに空 `Vec` を返す。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        Vec::new()
+    }
+
+    /// この層の子孫を深さ優先（子自身 → その子孫の順）で再帰列挙する
+    /// （PyTorch `Module.named_modules()` 相当。イシュー #2134）。
+    ///
+    /// # PyTorch からの逸脱（意図的）
+    ///
+    /// PyTorch の `named_modules()` はルート自身を空文字列 `""` の
+    /// エントリとして先頭に含めるが、**本メソッドはルート自身を
+    /// 含めない**。理由: ルートを含めるには本メソッド内で `self` を
+    /// `&dyn Module` へ強制する必要があり、それには `Self: Sized`
+    /// 境界が要る。`Self: Sized` を付けると本メソッドは vtable から
+    /// 除外され、[`Box<dyn Module>`] 経由の子孫再帰
+    /// （[`Module::children`] が返す `&dyn Module` に対する再帰呼び
+    /// 出し）ができなくなり trait の object safety が壊れる
+    /// （[`crate::nn::container::ModuleDict`]・`Box<dyn Module>` を
+    /// 保持する既存コンテナ全般が本メソッドを呼べなくなる）。
+    /// ルートを含めたい場合は呼び出し側で `(String::new(), self)` を
+    /// 別途 push すること。
+    ///
+    /// パスは `"{parent}.{child}"` で連結する（[`Module::children`]
+    /// の命名契約に従う限り、[`Module::named_parameters`] の平坦名と
+    /// `"{path}.{parameter_name}"` の関係が保たれる）。
+    ///
+    /// # 循環・重複ノードの扱い（イシュー #2134 codex-review 指摘。
+    /// PR #2231）
+    ///
+    /// [`Module::children`] は trait object を返す性質上、実装者が
+    /// 自身（`self`）や既に列挙済みの `Module` を任意に返せる
+    /// （例: 手書きの循環参照構造）。本メソッドはノードの同一性を
+    /// **`(データポインタ, 型名)` の組**（`type_name` は
+    /// [`Module::type_name`]。`&dyn Module` の vtable を除いた実体
+    /// アドレスとセットで比較する）で判定し、2 種類の追跡を組み合わせて
+    /// 安全に打ち切る:
+    ///
+    /// 1. **祖先限定の循環検出**（常時・無条件）: ルートから現在ノード
+    ///    までの経路（祖先）上のキーのみをスタックで保持し、経路上に
+    ///    既出のノードへは再帰しない。循環構造でも panic
+    ///    （stack overflow）せず有限の結果を返す（`.claude/rules/
+    ///    security.md` A03・本番経路 panic 禁止の方針に合わせる）。
+    /// 2. **グローバルな共有オブジェクト dedup**（ゼロサイズ型を除く）:
+    ///    経路をまたいだ訪問済み集合も保持し、同じ `Module` が複数の
+    ///    親から共有される場合は最初に到達した経路でのみ列挙する
+    ///    （PyTorch `named_modules()` の memo と同じ契約）。ただし
+    ///    `std::mem::size_of_val` でゼロサイズ（ZST。`Relu`・`Gelu`
+    ///    等フィールドを持たない活性化層）と判定できる子はこの
+    ///    グローバル dedup の対象から除外する。理由: ZST を `Box` へ
+    ///    格納すると、実際には異なるインスタンスであっても複数
+    ///    インスタンスがアロケータの well-known dangling address
+    ///    （`align_of::<T>()` 相当の非 null 定数）を共有しうるため、
+    ///    同じ型どうしなら `(ポインタ, 型名)` キーでも「同一オブジェクト
+    ///    の共有」と「たまたまアドレスが一致した別インスタンス」を
+    ///    区別できない。`Sequential` に同種の ZST 活性化層を複数積んだ
+    ///    場合にグローバル dedup を適用すると後続レイヤーが誤って
+    ///    欠落するため、ZST は祖先限定の循環検出（1.）のみで保護し、
+    ///    常に列挙対象に含める。
+    ///
+    /// **型名を同一性キーに含める理由（イシュー #2134 codex-review／
+    /// Bugbot 指摘・PR #2231 是正）**: データポインタ単独をキーにすると
+    /// 上記 ZST 問題に加え、`MultiheadAttention { q_proj: Linear, ... }`
+    /// のような複合 `Module`（子の最初のフィールドがルート構造体の
+    /// 先頭に配置されうる）で、ルート自身のデータポインタと最初の子
+    /// フィールドのデータポインタが**異なる型でありながら数値としては
+    /// 一致**しうる（Rust のフィールドレイアウトは既定で最適化のため
+    /// 順序保証がないが、先頭フィールドがオフセット 0 に来る配置は
+    /// 珍しくない）。この場合、ポインタ単独の祖先チェックだと最初の子
+    /// （型が異なる別オブジェクト）を「ルート自身の既出」と誤判定して
+    /// 打ち切ってしまい、その子孫ごと丸ごと欠落する（`MultiheadAttention`
+    /// の `q_proj` や `TransformerEncoderLayer` の `self_attn` で実測
+    /// 再現。`crates/autodiff/tests/nn_module_introspection.rs` の
+    /// `named_modules_and_summary_do_not_drop_offset_zero_first_child`
+    /// 参照）。[`Module::type_name`] を組み合わせたキーにすれば、
+    /// アドレスが一致してもルート（`MultiheadAttention`）と子
+    /// （`Linear`）の型名が異なるため誤判定されない。
+    ///
+    /// # 既定実装
+    ///
+    /// [`Module::children`] を再帰するのみ（オーバーライド不要）。
+    fn named_modules(&self) -> Vec<(String, &dyn Module)> {
+        let mut out = Vec::new();
+        // `self` はここでは `&Self`（`Self: ?Sized` として扱われる。
+        // `named_modules` が dyn 安全であり続けるための制約は
+        // 上記コメント・`children` の doc を参照）であり、`&dyn
+        // Module` へ強制（unsizing coercion）することはできない
+        // （`Self: Sized` を要求し object safety を壊すため）。
+        // だが参照から生ポインタへの変換（`&Self -> *const Self`）は
+        // 強制を伴わないため常に可能であり、続く `*const Self ->
+        // *const ()` キャストで vtable を落としたデータアドレスだけを
+        // 取り出せる。`self.type_name()` と組にした `NodeKey` で
+        // ルート自身の同一性を、`children()` が返す `&dyn Module`
+        // （同じくキー化できる）と比較する（上記「循環・重複ノードの
+        // 扱い」節・型名を同一性キーに含める理由の節参照）。
+        let root_key: NodeKey = (self as *const Self as *const (), self.type_name());
+        // 祖先限定の循環検出用スタック（常時・全ノード対象。上記
+        // 「循環・重複ノードの扱い」節 1.）。
+        let mut ancestors: Vec<NodeKey> = vec![root_key];
+        // グローバルな共有オブジェクト dedup 用集合（ゼロサイズ型を
+        // 除く。同節 2.）。ルート自身は `named_modules` の戻り値には
+        // 含めないため事前登録しない（`children()` が返す非 ZST の子が
+        // ルートと同一キーを持つことは、同じ型かつ同じアドレスの場合
+        // のみで、それは `child` が `self` 自身を返す自己参照であり
+        // `ancestors` 側で捕捉される）。
+        let mut visited: HashSet<NodeKey> = HashSet::new();
+        for (name, child) in self.children() {
+            collect_named_modules(name, child, &mut ancestors, &mut visited, &mut out);
+        }
+        out
+    }
+
+    /// この層（および子孫を持つ場合はその全体）が公開する学習可能
+    /// パラメータの総要素数（PyTorch `sum(p.numel() for p in
+    /// model.parameters())` 相当。イシュー #2134）。
+    ///
+    /// [`Module::named_parameters`] が公開するもののみを数える
+    /// （`BatchNorm` の running stats 等、`named_parameters` に現れない
+    /// buffer は含まない。PyTorch `parameters()` と同じ扱い）。
+    /// オーバーフロー入力（想定外の巨大モデル）に対しても panic せず
+    /// `usize::MAX` に飽和させる（`.claude/rules/security.md` A03
+    /// fail-closed 方針に合わせ、DoS 目的の panic を避ける）。
+    ///
+    /// # 既定実装
+    ///
+    /// [`Module::named_parameters`] の各テンソルの `numel()` を
+    /// `saturating_add` で合計する（オーバーライド不要）。
+    fn parameter_count(&self) -> usize {
+        self.named_parameters()
+            .into_iter()
+            .fold(0usize, |acc, (_, tensor)| {
+                acc.saturating_add(tensor.numel())
+            })
+    }
+
+    /// この層の実装型名（[`nn::summary`](crate::nn::container::summary)
+    /// が表示用に使う。イシュー #2134）。
+    ///
+    /// `std::any::type_name::<Self>()` をそのまま返す。標準ライブラリは
+    /// この出力形式の安定性を保証しない（クレートパス付き・ジェネリク
+    /// スパラメータ付きの完全修飾名になりうる）ため、表示用に短縮する
+    /// 加工は呼び出し側（`nn::summary`）の責務とする。
+    ///
+    /// # 既定実装
+    ///
+    /// オーバーライド不要（`?Sized` 対応の `type_name` を使うため
+    /// `dyn Module` 経由でも呼び出し元の具象型へ正しく解決される）。
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+}
+
+/// [`Module::named_modules`]・[`crate::nn::container::summary`] が
+/// 共有するノード同一性キー（イシュー #2134。データポインタ単独では
+/// 誤判定しうるため型名を組み合わせる是正は codex-review／Bugbot
+/// 指摘・PR #2231）。「`&dyn Module` の vtable を除いた実体データ
+/// アドレス」と「[`Module::type_name`]」の組。詳細は
+/// [`Module::named_modules`] の「型名を同一性キーに含める理由」節
+/// 参照。
+pub(crate) type NodeKey = (*const (), &'static str);
+
+/// [`Module::named_modules`] の再帰本体（イシュー #2134。ZST・
+/// offset-0 誤判定是正は codex-review／Bugbot 指摘・PR #2231）。
+///
+/// `child`（`&dyn Module`。データポインタが一意に取れるため `self`
+/// とは異なり object safety の制約を受けない）を [`NodeKey`] へ写像
+/// し、次の 2 段階で判定する（[`Module::named_modules`] の
+/// 「循環・重複ノードの扱い」節参照）:
+///
+/// 1. `ancestors`（現在の再帰経路上の [`NodeKey`] のスタック）に
+///    既出なら真の循環として黙って打ち切る（ZST か否かに関わらず
+///    常時適用）。
+/// 2. `child` がゼロサイズ型（`size_of_val(child) == 0`）でなければ、
+///    経路をまたぐ `visited` 集合にも登録を試み、既登録（＝別経路で
+///    共有済みのオブジェクト）なら打ち切る。ZST はこの段を素通りし
+///    常に列挙・再帰対象になる（複数インスタンスがアロケータの
+///    dangling address を共有し「既出」と誤判定されるのを防ぐ）。
+fn collect_named_modules<'a>(
+    name: String,
+    child: &'a dyn Module,
+    ancestors: &mut Vec<NodeKey>,
+    visited: &mut HashSet<NodeKey>,
+    out: &mut Vec<(String, &'a dyn Module)>,
+) {
+    let key: NodeKey = (child as *const dyn Module as *const (), child.type_name());
+    if ancestors.contains(&key) {
+        return;
+    }
+    let is_zst = std::mem::size_of_val(child) == 0;
+    if !is_zst && !visited.insert(key) {
+        return;
+    }
+    out.push((name.clone(), child));
+    ancestors.push(key);
+    for (descendant_name, descendant) in child.children() {
+        collect_named_modules(
+            format!("{name}.{descendant_name}"),
+            descendant,
+            ancestors,
+            visited,
+            out,
+        );
+    }
+    ancestors.pop();
 }
 
 /// `Linear::bind(tape)` で当該ステップの葉ノードを登録してから
@@ -641,6 +1002,19 @@ impl Module for Linear {
     /// （`nn/linear.rs`）へ委譲する（イシュー #1752）。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         Linear::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。層内の
+    /// `requires_grad` フィールドを更新するのみ（既存テープ上の登録済み
+    /// `Var` には影響しない。次の `bind` から反映される契約は
+    /// `Module::set_requires_grad` doc 参照）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Linear::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Linear::requires_grad(self)
     }
 
     /// [`Module::forward`]（`Linear::bind(tape).forward(input)`。
@@ -723,6 +1097,17 @@ impl Module for Conv2d {
         Conv2d::set_parameter(self, name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Conv2d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Conv2d::requires_grad(self)
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -760,6 +1145,17 @@ impl Module for ConvTranspose2d {
         ConvTranspose2d::set_parameter(self, name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        ConvTranspose2d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        ConvTranspose2d::requires_grad(self)
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -795,6 +1191,17 @@ impl Module for Conv1d {
 
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         Conv1d::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Conv1d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Conv1d::requires_grad(self)
     }
 
     fn forward_host(
@@ -1287,6 +1694,17 @@ impl Module for RmsNorm {
         RmsNorm::set_parameter(self, name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        RmsNorm::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        RmsNorm::requires_grad(self)
+    }
+
     /// `Var::rms_norm`（`var.rs`）と同じディスパッチ規律を `tape` 不要
     /// 経路（`ops` を直接受け取る）で再現する: `row_norm_layout` で
     /// `hidden` を導出し `weight` の shape を検査してから `ops.rmsnorm`
@@ -1363,6 +1781,17 @@ impl Module for LayerNorm {
     /// （`nn/norm.rs`）へ委譲する（イシュー #1752）。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         LayerNorm::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        LayerNorm::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        LayerNorm::requires_grad(self)
     }
 
     fn forward_host(
@@ -1614,6 +2043,17 @@ impl Module for BatchNorm1d {
         self.core.set_parameter(name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。`core`
+    /// （`weight`／`bias`。running stats・`training` は不変）へ委譲する。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.core.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.core.requires_grad()
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1666,6 +2106,17 @@ impl Module for BatchNorm2d {
     /// 同じ委譲先。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         self.core.set_parameter(name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。
+    /// `BatchNorm1d` と同じ理由・同じ委譲先）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.core.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.core.requires_grad()
     }
 
     fn forward_host(
@@ -1806,6 +2257,17 @@ impl Module for Embedding {
     /// （`nn/embedding.rs`）へ委譲する。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         Embedding::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Embedding::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Embedding::requires_grad(self)
     }
 }
 

@@ -549,6 +549,39 @@ impl Module for TransformerEncoderLayer {
             "TransformerEncoderLayer::set_parameter: no parameter named `{name}`"
         )))
     }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。5 子層
+    /// （`self_attn`・`linear1`・`linear2`・`norm1`・`norm2`）すべてへ
+    /// 伝播する。子はいずれも本クレート内の層（fail-closed 既定の
+    /// 対象外）のため実際には常に `Ok` を返すが、`Module` trait の
+    /// 汎用契約に従い `?` で伝播する。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Module::set_requires_grad(&mut self.self_attn, requires_grad)?;
+        Module::set_requires_grad(&mut self.linear1, requires_grad)?;
+        Module::set_requires_grad(&mut self.linear2, requires_grad)?;
+        Module::set_requires_grad(&mut self.norm1, requires_grad)?;
+        Module::set_requires_grad(&mut self.norm2, requires_grad)?;
+        Ok(())
+    }
+
+    /// 5 子層はすべて private フィールドのため常に揃った値を返す
+    /// （`self_attn` の値を代表として返す）。
+    fn requires_grad(&self) -> bool {
+        Module::requires_grad(&self.self_attn)
+    }
+
+    /// [`Module::children`] の実装（イシュー #2134）。順序・名前は
+    /// [`Self::named_parameters`] の接頭辞契約（`self_attn`→
+    /// `linear1`→`linear2`→`norm1`→`norm2`）と一致させる。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![
+            ("self_attn".to_string(), &self.self_attn as &dyn Module),
+            ("linear1".to_string(), &self.linear1 as &dyn Module),
+            ("linear2".to_string(), &self.linear2 as &dyn Module),
+            ("norm1".to_string(), &self.norm1 as &dyn Module),
+            ("norm2".to_string(), &self.norm2 as &dyn Module),
+        ]
+    }
 }
 
 #[cfg(test)]

@@ -697,6 +697,95 @@ fn encode_binary_scalar_dispatch(
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
+/// N 引数カーネル共通のエンコード（GPU `run_fused` の elementwise
+/// allowlist 融合カーネル専用。区分 B-1・イシュー #2085）。
+/// [`encode_binary_dispatch`]／[`encode_unary_dispatch`] と同一構造だが
+/// 葉入力の本数（`leaf_bufs.len()`）が呼び出しごとに可変なため、
+/// バッファ結線を `for` ループで行う。`out` を index `leaf_bufs.len()`、
+/// `numel` を index `leaf_bufs.len() + 1` へ結線する
+/// （`fused_elementwise_source.rs::generate_source` が宣言する
+/// `[[buffer(i)]]` 番号と一致させる）。呼び出し元は `objc2` 系 FFI に
+/// 触れない `crate::fused_elementwise`（Linux でも単体テスト可能な
+/// allowlist 判定）を経て、本関数（macOS 限定・`ops.rs` からのみ到達）
+/// でのみディスパッチを行う（役割分担は `lib.rs::fused_elementwise`
+/// モジュール登録コメント参照）。
+pub(crate) fn encode_nary_dispatch(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    leaf_bufs: &[&MetalBuffer],
+    out_buf: &MetalBuffer,
+    numel: u32,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_binary_dispatch` と同一の根拠（該当コメント参照）。
+    // `leaf_bufs` の各要素・`out_buf` は呼び出し元 `ctx.dispatch_sync` が
+    // 完了するまで生存する。
+    for (i, buf) in leaf_bufs.iter().enumerate() {
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(buf.raw()), 0, i);
+        }
+    }
+    let out_index = leaf_bufs.len();
+    let numel_index = leaf_bufs.len() + 1;
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, out_index);
+    }
+
+    // SAFETY: `encode_binary_dispatch` と同一の根拠。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&numel).cast(),
+            std::mem::size_of::<u32>(),
+            numel_index,
+        );
+    }
+
+    let (threadgroups, threads_per_tg) = ew_dispatch_sizes(numel);
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// N 引数演算共通の起動手続き（GPU `run_fused` の elementwise
+/// allowlist 融合カーネル専用。[`encode_nary_dispatch`] を呼ぶだけの
+/// 薄いラッパー。CUDA 側 `elementwise.rs::launch_nary` と同型）。
+/// `leaves` は全て同一長であること（不一致は
+/// [`MetalError::InvalidElementwiseShape`]）。
+pub(crate) fn run_fused_nary(
+    ctx: &MetalContext,
+    pipeline: &MtlPipeline,
+    leaves: &[&[f32]],
+) -> Result<Vec<f32>, MetalError> {
+    let numel = leaves.first().map_or(0, |s| s.len());
+    for (i, l) in leaves.iter().enumerate() {
+        if l.len() != numel {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "fused elementwise leaf length mismatch: leaf[{i}].len()={}, expected \
+                     {numel} (leaf[0])",
+                    l.len()
+                ),
+            });
+        }
+    }
+    validate_elementwise_len(numel)?;
+    if numel == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut leaf_bufs: Vec<MetalBuffer> = Vec::with_capacity(leaves.len());
+    for l in leaves {
+        leaf_bufs.push(MetalBuffer::new_with_data(ctx, l)?);
+    }
+    let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
+
+    let leaf_refs: Vec<&MetalBuffer> = leaf_bufs.iter().collect();
+    ctx.dispatch_sync(|encoder| {
+        encode_nary_dispatch(encoder, pipeline, &leaf_refs, &out_buf, numel as u32);
+    })?;
+
+    Ok(out_buf.read_to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

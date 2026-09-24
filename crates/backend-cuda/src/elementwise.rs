@@ -85,7 +85,7 @@ pub(crate) fn validate_elementwise_len(len: usize) -> Result<(), CudaError> {
 /// `numel` に対し `EW_BLOCK` を `div_ceil` で包含するグリッド次元を構築する
 /// （`gemm.rs::launch_config` と同じ「末尾ブロックの余剰スレッドはカーネル
 /// 内境界チェックに委ねる」契約。REQ-8）。
-fn elementwise_launch_config(numel: u32) -> LaunchConfig {
+pub(crate) fn elementwise_launch_config(numel: u32) -> LaunchConfig {
     LaunchConfig {
         grid_dim: (numel.div_ceil(EW_BLOCK.0), 1, 1),
         block_dim: EW_BLOCK,
@@ -614,6 +614,80 @@ impl CudaElementwise {
         }
         Ok(())
     }
+}
+
+/// N 引数起動ヘルパー（GPU `run_fused` の elementwise allowlist 融合
+/// カーネル専用。区分 B-1・イシュー #2085）。`run_binary`／`run_unary`
+/// と同型の手続き（H2D → 起動 → 同期 → D2H）だが、葉入力の本数
+/// （`leaves.len()`）が呼び出しごとに可変なため `CudaElementwise` の
+/// メソッドではなく独立した自由関数として提供する（呼び出し元
+/// `fused_elementwise.rs::CudaFusedElementwise::run_f32` は融合プラン
+/// ごとに動的コンパイルされる [`CudaFunction`] を
+/// `context_cache::cached_fused_elementwise_kernel` から都度受け取る
+/// ため、`CudaElementwise::new` のような固定カーネル保持構造を持たない）。
+///
+/// `leaves` は全て同一長であること（不一致は
+/// [`CudaError::InvalidElementwiseShape`]）。呼び出し元
+/// （`ops.rs::CudaBackendOps::run_fused` の融合分岐）が
+/// `plan.output_shape()` との shape 一致・contiguous 性を先に検証した
+/// 上で本関数へスライスを渡す契約（`run_binary`／`run_unary` が
+/// `ops.rs::elementwise_binary`／`elementwise_unary` から同種の検証済み
+/// スライスを受け取るのと同じ責務分担）。
+pub(crate) fn launch_nary(
+    stream: &Arc<CudaStream>,
+    allocator: &CudaAllocator,
+    ordinal: usize,
+    func: &CudaFunction,
+    leaves: &[&[f32]],
+) -> Result<Vec<f32>, CudaError> {
+    let numel = leaves.first().map_or(0, |s| s.len());
+    for (i, l) in leaves.iter().enumerate() {
+        if l.len() != numel {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "fused elementwise leaf length mismatch: leaf[{i}].len()={}, expected \
+                     {numel} (leaf[0])",
+                    l.len()
+                ),
+            });
+        }
+    }
+    validate_elementwise_len(numel)?;
+    if numel == 0 {
+        return Ok(Vec::new());
+    }
+
+    // `run_binary`／`run_unary` と同じ理由（codex-review P0 指摘対応・
+    // PR #1390 是正の踏襲）で本体全体を CUDA Graph capture 排他へ
+    // 参加させる。
+    context_cache::with_driver_call(ordinal, || {
+        let mut dev_bufs = Vec::with_capacity(leaves.len());
+        for l in leaves {
+            dev_bufs.push(stream.clone_htod(*l)?);
+        }
+        let mut out_dev = allocator.alloc_uninit_f32(numel)?;
+        let cfg = elementwise_launch_config(numel as u32);
+        let numel_i = numel as i32;
+        let mut out_view = out_dev.as_view_mut();
+
+        // SAFETY: `dev_bufs` の各バッファ長は上で検証済みの `numel` と
+        // 1:1 対応するデバイスバッファであり、生成カーネル本体の
+        // `if (idx < numel)` 手動境界チェック（`kernels_fused_elementwise
+        // .rs::generate_source`。REQ-8）と合わせて OOB 読み書きが起きない
+        // 根拠とする（`run_binary` の SAFETY コメントと同一の論拠）。
+        // グリッド次元は `elementwise_launch_config` が `div_ceil` で
+        // numel を包含するよう構築するため、末尾ブロックの余剰スレッドは
+        // カーネル内境界チェックで弾かれる。
+        unsafe {
+            let mut builder = stream.launch_builder(func);
+            for d in &dev_bufs {
+                builder.arg(d);
+            }
+            builder.arg(&mut out_view).arg(&numel_i);
+            builder.launch(cfg)?;
+        }
+        crate::memory::readback(stream, &out_dev.as_view())
+    })
 }
 
 #[cfg(test)]

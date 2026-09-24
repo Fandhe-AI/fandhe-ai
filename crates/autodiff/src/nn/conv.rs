@@ -66,6 +66,9 @@ pub struct Conv2d {
     padding: [usize; 2],
     dilation: [usize; 2],
     groups: usize,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型。`nn/module.rs` の doc 参照）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl Conv2d {
@@ -169,6 +172,7 @@ impl Conv2d {
             padding: params.padding(),
             dilation: params.dilation(),
             groups: params.groups(),
+            requires_grad: true,
         })
     }
 
@@ -258,6 +262,7 @@ impl Conv2d {
             padding: params.padding(),
             dilation: params.dilation(),
             groups: params.groups(),
+            requires_grad: true,
         })
     }
 
@@ -265,8 +270,11 @@ impl Conv2d {
     /// `forward` を呼べる `Conv2dVars` を返す（`nn::Linear::bind` と
     /// 同型）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> Conv2dVars<'t> {
-        let weight = tape.var(&self.weight);
-        let bias = self.bias.as_ref().map(|b| tape.var(b));
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.requires_grad));
         Conv2dVars {
             weight,
             bias,
@@ -288,6 +296,18 @@ impl Conv2d {
     /// 渡した場合は `None`。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`Conv2d` 実装。
+    /// `module.rs` 参照）の本体（イシュー #2137）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`Conv2d` 実装）の
+    /// 本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// 空間軸 `[stride_h, stride_w]`（PyTorch `nn.Conv2d` と同じ軸順）。
@@ -492,6 +512,9 @@ pub struct ConvTranspose2d {
     output_padding: [usize; 2],
     dilation: [usize; 2],
     groups: usize,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl ConvTranspose2d {
@@ -615,6 +638,7 @@ impl ConvTranspose2d {
             output_padding,
             dilation: params.dilation(),
             groups: params.groups(),
+            requires_grad: true,
         })
     }
 
@@ -715,6 +739,7 @@ impl ConvTranspose2d {
             output_padding,
             dilation: params.dilation(),
             groups: params.groups(),
+            requires_grad: true,
         })
     }
 
@@ -722,8 +747,11 @@ impl ConvTranspose2d {
     /// `forward` を呼べる `ConvTranspose2dVars` を返す（[`Conv2d::bind`]
     /// と同型）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> ConvTranspose2dVars<'t> {
-        let weight = tape.var(&self.weight);
-        let bias = self.bias.as_ref().map(|b| tape.var(b));
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.requires_grad));
         ConvTranspose2dVars {
             weight,
             bias,
@@ -744,6 +772,18 @@ impl ConvTranspose2d {
     /// バイアス `[out_channels]`。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`ConvTranspose2d`
+    /// 実装。`module.rs` 参照）の本体（イシュー #2137）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`ConvTranspose2d`
+    /// 実装）の本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// 空間軸 `[stride_h, stride_w]`。
@@ -952,6 +992,9 @@ pub struct Conv1d {
     padding: usize,
     dilation: usize,
     groups: usize,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl Conv1d {
@@ -1043,6 +1086,7 @@ impl Conv1d {
             padding: params.padding()[1],
             dilation: params.dilation()[1],
             groups: params.groups(),
+            requires_grad: true,
         })
     }
 
@@ -1123,6 +1167,7 @@ impl Conv1d {
             padding: params.padding()[1],
             dilation: params.dilation()[1],
             groups: params.groups(),
+            requires_grad: true,
         })
     }
 
@@ -1130,8 +1175,11 @@ impl Conv1d {
     /// （`weight` は rank 3 のまま——`Var::conv1d` 自身が内部で reshape
     /// する契約のため、ここで reshape する必要はない）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> Conv1dVars<'t> {
-        let weight = tape.var(&self.weight);
-        let bias = self.bias.as_ref().map(|b| tape.var(b));
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.requires_grad));
         Conv1dVars {
             weight,
             bias,
@@ -1153,6 +1201,18 @@ impl Conv1d {
     /// 渡した場合は `None`。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`Conv1d` 実装。
+    /// `module.rs` 参照）の本体（イシュー #2137）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`Conv1d` 実装）の
+    /// 本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// 空間軸方向のストライド。

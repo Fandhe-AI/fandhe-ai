@@ -878,6 +878,11 @@ Module>>, .. }` の実装で既に実証済み（同 doc §3）。sealed 化は�
 の承認待ち（段階 0 継続）。#2133（実装）が想定していた素の再エクスポート
 形は本判断により再確定が必要（同 doc §8）。
 
+**#2133（`nn::Module`／`ModuleList` の facade 公開実装）は経路 2 未適用のまま
+承認待ちで保留した。** コード変更なし（`#[cfg(doctest)]` 限定の非公開足場
+1 件を除く）。承認事項（§10）が未承認のため否定ガード＋保留記録 doc のみを
+追加した。詳細は `docs/facade-nn-module-exposure-decision.md` §12。
+
 **#2135（`Var` 演算子オーバーロード〈`+`・`*`・`-`〉の facade 公開可否）
 の設計記録は `docs/autodiff-var-operator-overload-design.md` として
 完了した。** コード変更なし。`Var` へのトレイト impl（`Add`／`Mul`／

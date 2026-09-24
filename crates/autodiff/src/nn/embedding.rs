@@ -38,6 +38,9 @@ use crate::var::Var;
 pub struct Embedding {
     weight: Tensor<f32>,
     padding_idx: Option<usize>,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl Embedding {
@@ -120,6 +123,7 @@ impl Embedding {
         Ok(Embedding {
             weight,
             padding_idx,
+            requires_grad: true,
         })
     }
 
@@ -159,6 +163,7 @@ impl Embedding {
         Ok(Embedding {
             weight,
             padding_idx,
+            requires_grad: true,
         })
     }
 
@@ -166,7 +171,7 @@ impl Embedding {
     /// `forward` を呼べる `EmbeddingVars` を返す（`Linear::bind` と
     /// 同型）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> EmbeddingVars<'t> {
-        let weight = tape.var(&self.weight);
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
         EmbeddingVars {
             weight,
             padding_idx: self.padding_idx,
@@ -176,6 +181,18 @@ impl Embedding {
     /// 現在の重み（`[num_embeddings, embedding_dim]`）への参照を返す。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`Embedding`
+    /// 実装。`module.rs` 参照）の本体（イシュー #2137）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`Embedding` 実装）
+    /// の本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// `Embedding::new`／`from_parameters` に渡した `padding_idx` を

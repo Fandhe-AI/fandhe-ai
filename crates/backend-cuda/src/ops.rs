@@ -57,6 +57,7 @@ use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
+use crate::fused_elementwise::{self, gpu_elementwise_fusion_enabled, match_elementwise_plan};
 use crate::memory::{CudaBufferHandle, CudaMemory, CudaStorage, map_cuda_error};
 use crate::rmsnorm::match_rmsnorm_plan;
 use crate::softmax::match_softmax_plan;
@@ -1758,6 +1759,101 @@ pub(crate) fn checked_bytes_for<T>(shape: &[usize]) -> Result<usize, ShapeError>
         }
     }
     Ok(numel)
+}
+
+impl CudaBackendOps {
+    /// [`BackendOps::run_fused`] の GPU elementwise allowlist 融合経路
+    /// （区分 B-1・イシュー #2085）。`run_fused_rmsnorm`／
+    /// `run_fused_softmax` と同じ起動前 fail-closed 検証パターン
+    /// （dtype F32 限定・leaf 数一致・leaf shape 恒等・contiguous）を
+    /// 踏襲し、[`fused_elementwise::compile_program`]（構築フェーズ）・
+    /// [`fused_elementwise::launch_program_f32`]（実行フェーズ）へ
+    /// 委譲する。
+    fn run_fused_elementwise_allowlist(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+        program: fused_elementwise::ElementwiseProgram,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if plan.dtype() != DType::F32 {
+            return Err(BackendError::Unsupported(format!(
+                "CudaBackendOps::run_fused: unsupported dtype {:?} (GPU elementwise allowlist \
+                 fusion kernel supports F32 only)",
+                plan.dtype()
+            )));
+        }
+        if leaves.len() != program.leaf_count {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: program.leaf_count,
+                    actual: leaves.len(),
+                },
+            ));
+        }
+        let output_shape = plan.output_shape();
+        let mut leaf_slices: Vec<Tensor<f32>> = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            if leaf.shape() != output_shape {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: output_shape.to_vec(),
+                    rhs: leaf.shape().to_vec(),
+                }));
+            }
+            // `leaf.contiguous()` は非連続 Tensor（broadcast 由来等）に対し
+            // 内部で `Vec::with_capacity(numel)` を確保する。numel が usize に
+            // 収まっても必要バイト数が isize::MAX を超えると capacity overflow
+            // で panic しうるため（本番経路 panic 禁止規約違反）、`contiguous()`
+            // 呼び出し前に `checked_bytes_for::<f32>` で確保可能性を検証する
+            // （3673 行目付近の im2col 経路と同じパターン。codex-review 指摘
+            // PRRT_kwDOTuUCJc6lE7o4／PRRT_kwDOTuUCJc6lEzQv。イシュー #2085）。
+            checked_bytes_for::<f32>(leaf.shape()).map_err(BackendError::ShapeMismatch)?;
+            leaf_slices.push(leaf.contiguous());
+        }
+        let mut slices: Vec<&[f32]> = Vec::with_capacity(leaf_slices.len());
+        for (i, owned) in leaf_slices.iter().enumerate() {
+            let s = owned.as_slice().ok_or_else(|| {
+                BackendError::Unsupported(format!(
+                    "CudaBackendOps::run_fused: leaf {i} is non-contiguous after \
+                     contiguous() (unexpected; detect_fusion should already route \
+                     non-contiguous chains to the non-fused fallback)"
+                ))
+            })?;
+            slices.push(s);
+        }
+
+        // 構築フェーズ（デバイスハンドル取得・NVRTC コンパイル・
+        // allocator 取得）: 失敗は `CudaUnavailable` へ分類する
+        // （`run_fused_rmsnorm`／`run_fused_softmax` と同じ
+        // `map_fused_kernel_init_error` を使い、`DriverUnavailable`／
+        // `NvrtcUnavailable` を `CudaUnavailable` へ、それ以外を
+        // `KernelLaunchFailed` へ振り分ける）。
+        let (device, func, allocator) =
+            self.with_driver_call(&[], map_fused_kernel_init_error, || {
+                let device = self.device_handle_raw()?;
+                let func = fused_elementwise::compile_program(&device, &program)?;
+                let allocator = context_cache::cached_allocator(&device)?;
+                Ok((device, func, allocator))
+            })?;
+        let Some(func) = func else {
+            // キャッシュ上限到達（`context_cache::
+            // cached_fused_elementwise_kernel` が `Ok(None)`）。fail-closed
+            // に `Unsupported` へ変換し、呼び出し元の per-op フォールバック
+            // へ委ねる（`fused_elementwise.rs::compile_program` doc 参照）。
+            return Err(BackendError::Unsupported(
+                "CudaBackendOps::run_fused: fused elementwise kernel cache capacity reached \
+                 (falling back to per-op execution)"
+                    .into(),
+            ));
+        };
+
+        // 実行フェーズ（起動）: 失敗は `KernelLaunchFailed` へ分類する。
+        let data = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || fused_elementwise::launch_program_f32(&device, &allocator, &func, &slices),
+        )?;
+        Tensor::new(data, output_shape).map_err(BackendError::ShapeMismatch)
+    }
 }
 
 impl BackendOps for CudaBackendOps {
@@ -4074,11 +4170,25 @@ impl BackendOps for CudaBackendOps {
         if let Some((rows, cols)) = match_softmax_plan(plan) {
             return self.run_fused_softmax(plan, leaves, rows, cols);
         }
+        // 区分 B-1（イシュー #2085）: GPU elementwise allowlist 融合。
+        // ゲートは**デバイスアクセス前**に判定する（`fused_elementwise.rs`
+        // モジュール冒頭「opt-in ゲート」の契約: ゲート OFF 時は
+        // `device_handle_raw` 等の driver 呼び出しに一切触れず
+        // `Unsupported` を返す。CUDA 非搭載環境でも `CudaUnavailable` に
+        // ならず、本 PR 導入前と atomic load 1 回を除き bit 同一の挙動を
+        // 保つ）。
+        if gpu_elementwise_fusion_enabled()
+            && let Some(program) = match_elementwise_plan(plan)
+        {
+            return self.run_fused_elementwise_allowlist(plan, leaves, program);
+        }
         Err(BackendError::Unsupported(
             "CudaBackendOps::run_fused: プランが canonical RMSNorm 形状（x * \
-             rsqrt(sum(x^2))）・canonical softmax 形状（exp(x-max(x))/sum(...)）の \
+             rsqrt(sum(x^2))）・canonical softmax 形状（exp(x-max(x))/sum(...)）・\
+             opt-in 有効時の elementwise allowlist 形状（区分 B-1・#2085）の \
              いずれにも一致しないため融合カーネルへルーティングできない \
-             （#592／#594 スコープ。呼び出し元の per-op フォールバックに委ねる）"
+             （#592／#594／#2085 スコープ。呼び出し元の per-op フォールバックに \
+             委ねる）"
                 .into(),
         ))
     }
