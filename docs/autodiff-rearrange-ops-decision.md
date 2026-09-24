@@ -208,8 +208,11 @@ README.md` も新テスト名に追随済み。
    `metal_roll_backward_matches_cpu_reference` を
    `cuda_flip_roll_backward_matches_cpu_reference`・
    `metal_flip_roll_backward_matches_cpu_reference` へ改名し `flip`
-   backward の比較を追加（CUDA／Metal `#[ignore]` は 4 件のまま
-   〈テスト関数は増減なし、既存 2 件が `flip`／`roll` 両対応へ拡張〉）
+   backward の比較を追加（CUDA／Metal `#[ignore]` のテスト関数数は
+   6 件のまま〈1 巡目の追記時点で forward 2 件・`repeat`／`tile`
+   backward 2 件・`roll` backward 2 件の計 6 件へ増えていた。本追記は
+   その `roll` backward 2 件を `flip`／`roll` 両対応へ拡張しただけで
+   関数の増減はない〉）
 3. `docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md` の
    未実測対象カウントが「4 テスト」のままだった（実際は forward
    2 件・`flip`／`roll` backward 2 件・`repeat`／`tile` backward
