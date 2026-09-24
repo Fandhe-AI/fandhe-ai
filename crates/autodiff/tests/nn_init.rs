@@ -238,6 +238,46 @@ fn xavier_normal_has_expected_variance() {
 }
 
 #[test]
+fn xavier_uniform_rejects_negative_gain() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    // レビュー指摘（PR #2239・init.rs:460）: 負の gain は bound が非負区間の
+    // 半幅であるという前提を壊すため拒否する。RNG を消費していないことも
+    // 併せて確認する（`normal_std_zero_returns_constant_mean_and_does_not_
+    // consume_rng` と同型のパターン）。
+    manual_seed(33);
+    let before = init::uniform(&[4], 0.0, 1.0).unwrap();
+    manual_seed(33);
+    let err = init::xavier_uniform(&[8, 8], -1.0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let after = init::uniform(&[4], 0.0, 1.0).unwrap();
+    assert_eq!(before.host_slice(), after.host_slice());
+}
+
+#[test]
+fn xavier_normal_rejects_negative_gain() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(34);
+    let before = init::uniform(&[4], 0.0, 1.0).unwrap();
+    manual_seed(34);
+    let err = init::xavier_normal(&[8, 8], -1.0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let after = init::uniform(&[4], 0.0, 1.0).unwrap();
+    assert_eq!(before.host_slice(), after.host_slice());
+}
+
+#[test]
+fn xavier_uniform_zero_gain_returns_zeros() {
+    // gain == 0（負ではない境界値）は受理され、bound == 0 のため全要素 0
+    // になることを固定する。
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(35);
+    let t = init::xavier_uniform(&[8, 8], 0.0).unwrap();
+    for &v in t.host_slice().iter() {
+        assert_eq!(v, 0.0);
+    }
+}
+
+#[test]
 fn kaiming_uniform_values_are_within_bound() {
     let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
     manual_seed(41);
@@ -452,6 +492,20 @@ fn trunc_normal_std_zero_within_range_returns_constant() {
 #[test]
 fn trunc_normal_std_zero_mean_outside_range_is_rejected() {
     let err = init::trunc_normal(&[4], 5.0, 0.0, -1.0, 1.0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn trunc_normal_rejects_window_exceeding_attempt_cap() {
+    // `[a, b] = [20, 21]` は `N(0, 1)` の裾のさらに外側で受理確率が
+    // 実質ゼロのため、要素あたり試行上限
+    // （`TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT`）に達し fail-closed で
+    // 打ち切られることを固定する（Low follow-up・`docs/
+    // facade-nn-init-exposure-decision.md` §6）。要素数を小さく保ち
+    // テスト時間を試行上限×要素数程度に抑える。
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(63);
+    let err = init::trunc_normal(&[4], 0.0, 1.0, 20.0, 21.0).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
 

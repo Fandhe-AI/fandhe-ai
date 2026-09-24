@@ -442,10 +442,18 @@ pub fn constant(shape: &[usize], value: f32) -> Result<Tensor<f32>, AutodiffErro
 /// `bound = gain·√(6 / (fan_in + fan_out))` の `U(-bound, bound)`。
 /// `fan_in + fan_out == 0`（`shape` の該当軸が 0）は
 /// `AutodiffError::InvalidArgument` を返す。
+/// 負の `gain` も拒否する（PyTorch の `uniform_` が `from > to` を拒否
+/// するのと同じ意味論で、`bound` が非負区間の半幅であることを保証する。
+/// `orthogonal` は単なるスケールとして負の gain を受理するため対象外）。
 pub fn xavier_uniform(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffError> {
     if !gain.is_finite() {
         return Err(invalid_argument(
             "nn::init::xavier_uniform: gain は有限である必要があります",
+        ));
+    }
+    if gain < 0.0 {
+        return Err(invalid_argument(
+            "nn::init::xavier_uniform: gain は非負である必要があります",
         ));
     }
     let (fan_in, fan_out) = calculate_fan_in_and_fan_out(shape)?;
@@ -470,10 +478,18 @@ pub fn xavier_uniform(shape: &[usize], gain: f32) -> Result<Tensor<f32>, Autodif
 
 /// PyTorch `nn.init.xavier_normal_` 相当。
 /// `std = gain·√(2 / (fan_in + fan_out))` の `N(0, std²)`。
+/// 負の `gain` も拒否する（PyTorch の `normal_` が `std < 0` を拒否
+/// するのと同じ意味論で、`std` が非負であることを保証する。
+/// `orthogonal` は単なるスケールとして負の gain を受理するため対象外）。
 pub fn xavier_normal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffError> {
     if !gain.is_finite() {
         return Err(invalid_argument(
             "nn::init::xavier_normal: gain は有限である必要があります",
+        ));
+    }
+    if gain < 0.0 {
+        return Err(invalid_argument(
+            "nn::init::xavier_normal: gain は非負である必要があります",
         ));
     }
     let (fan_in, fan_out) = calculate_fan_in_and_fan_out(shape)?;
@@ -604,7 +620,10 @@ pub fn kaiming_normal(
 /// 等価な一意化）で直交化してから `gain` 倍し `shape` へ書き戻す。
 /// `rows < cols` の場合は PyTorch と同じく転置してから QR を取り、
 /// 結果を転置し戻す（`rows >= cols` を要求する QR の制約を回避する
-/// ため）。
+/// ため）。負の `gain` は（`xavier_uniform`／`xavier_normal` と異なり）
+/// 単なるスケール係数として受理する（PyTorch `orthogonal_` も同様に
+/// 符号チェックをしない。直交行列に負数を乗じても直交性は保たれる
+/// ため意味論上の破綻がない）。
 pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffError> {
     if !gain.is_finite() {
         return Err(invalid_argument(
