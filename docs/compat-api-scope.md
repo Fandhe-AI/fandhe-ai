@@ -894,6 +894,19 @@ Result<Var, AutodiffError>`・borrow／consumed 4 組合せ・既存 inherent
 メソッドへの委譲のみで bit 同一を保証）・スカラー混合の段階 0 判断・
 `Div` の扱いはいずれも承認事項として列挙のみ（同 doc §8・§11・§12）。
 
+**#2140（`nn::init` 初期化関数群の facade 公開）は経路 2 未適用のまま承認待ち
+で保留した。** イシュー本文が前提とした `Initializer` trait・各層の
+`with_init` コンストラクタは実際には存在せず（前提の食い違い。`docs/
+facade-nn-init-exposure-decision.md` §1）、本イシューの実体は「autodiff 側
+への新規実装」＋「facade 公開（承認事項）」の 2 段だった。**autodiff 側
+（`fandhe_ai_autodiff::nn::init` を `pub mod` 化し `uniform`／`normal`／
+`constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／
+`kaiming_normal`／`orthogonal`／`trunc_normal` の 9 関数を実装）は本イシュー
+で完了済み**（内部クレートへの非破壊追加のため §5 手続き対象外・`fandhe_ai_tensor_core::rng::with_global_rng` へ従属し既存の個別シード API
+〈`Linear::new(.., seed)` 等〉とは独立）。facade 公開面拡張（`crates/
+facade/src/nn/init.rs` の新設）は §5 経路 2 の承認取得まで実施していない。
+詳細は `docs/facade-nn-init-exposure-decision.md`。
+
 **#2136（`Var` 演算子オーバーロード実装。`Add`／`Mul`／`Sub`）は経路 2 未適用の
 まま承認待ちで保留した。** `crates/autodiff/src/**`・`crates/facade/src/**`
 は変更しない（コード変更なし）。#2136・#2135・親 #2131・設計記録 PR #2237 の

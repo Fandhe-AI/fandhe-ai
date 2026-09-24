@@ -3100,6 +3100,41 @@ fn facade_does_not_reexport_custom_function() {
     );
 }
 
+/// `crates/facade/src/` の `pub use` が `nn::init`（PyTorch `torch.nn.
+/// init.*` 相当の初期化関数群・イシュー #2140）を再エクスポートして
+/// いないことを固定する（`docs/facade-nn-init-exposure-decision.md`
+/// §0・§3「facade 公開（承認事項・経路 2）は未承認のまま保留」。
+/// `facade_does_not_reexport_custom_function` と同型の走査）。
+/// `nn_mod_declares_only_rnn_submodule` が `pub mod init;` 追加自体を
+/// 別途固定する一方、本テストは `pub use fandhe_ai_autodiff::nn::
+/// init::...` のような迂回経路（`nn/mod.rs` 以外のファイルからの
+/// 再エクスポート）も走査対象に含める。
+#[test]
+fn facade_does_not_reexport_nn_init() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("nn::init") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が nn::init を含む",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が nn::init を再エクスポートしている\
+         （facade-nn-init-exposure-decision.md §3 は未承認のまま対象外\
+         という設計判断に違反）: {offending:?}"
+    );
+}
+
 /// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
 /// `Tape::custom` への転送メソッドを持たないことを固定する（`Tape::
 /// var_no_grad` の前例〈`docs/autodiff-custom-function-decision.md`
@@ -3554,7 +3589,11 @@ fn nn_rnn_module_is_pure_reexport() {
 /// 担う**: 案 B 採用時に想定する `nn::module`／`nn::container` 新設
 /// （`pub mod module;`／`pub mod container;`）はこの完全一致検査に
 /// より現時点では fail する。承認後に案 B を実装する際は期待集合
-/// （`["rnn", "module", "container"]` 等）へ更新する。
+/// （`["rnn", "module", "container"]` 等）へ更新する。**#2140 の保留
+/// （`docs/facade-nn-init-exposure-decision.md` §3・§4）も本テストが
+/// 担う**: `nn::init` の facade 公開（条件付き手順 §4）で想定する
+/// `pub mod init;` 追加はこの完全一致検査により現時点では fail する。
+/// 承認後に実装する際は期待集合（`["init", "rnn"]` 等）へ更新する。
 #[test]
 fn nn_mod_declares_only_rnn_submodule() {
     let path = nn_mod_rs_path();
