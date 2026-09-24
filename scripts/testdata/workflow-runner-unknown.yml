@@ -48,3 +48,13 @@ jobs:
   arm-label-not-allowed:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
+
+  # ai-review（旧 codex-review）の入力名 `runner` / `post-feedback-runner`
+  # （RUNNER_KEYS 追加分）も許容形外なら fail することを検証する。
+  ai-review-runner-larger:
+    runner: ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  ai-review-post-feedback-runner-expression:
+    post-feedback-runner: ${{ matrix.runner }}
+    timeout-minutes: 5
