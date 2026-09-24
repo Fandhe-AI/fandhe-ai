@@ -2,10 +2,12 @@
 //! #2131「5-B 演算」）。
 //!
 //! **新規 `Op` はゼロ（受け入れ条件）**: いずれも既存の `Var::index_select`
-//! （実体は `Var::gather` → `Op::Gather`）と `Var::broadcast_to`
-//! （`Op::BroadcastTo`）の合成のみで構成する。両演算は CPU・CUDA・
-//! Metal の全バックエンドに経路があり（`gather` は既定 `Unsupported` で
-//! ホスト参照実装へフォールバック）、専用カーネルなしで到達可能。
+//! （実体は `Var::gather` → `Op::Gather`）・`Var::broadcast_to`
+//! （`Op::BroadcastTo`）・`Var::reshape`（`Op::Reshape`。`repeat` の空
+//! テンソル最終化のみで使用。PR #2256 codex-review／cursor-review 指摘
+//! 対応）の合成のみで構成する。いずれも CPU・CUDA・Metal の全バック
+//! エンドに経路があり（`gather` は既定 `Unsupported` でホスト参照実装へ
+//! フォールバック）、専用カーネルなしで到達可能。
 //!
 //! **facade 非公開（意図的）**: `crates/autodiff/src/bool_ops.rs`
 //! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
@@ -43,7 +45,7 @@
 //! `i32` 範囲）。巨大な繰り返し数による添字ベクタの過大確保は、確保前に
 //! 出力要素数を検査して拒否する（本番経路 panic 禁止規約）。この検査は
 //! `usize` オーバーフローの有無だけでなく、`checked_index_alloc_len` の
-//! 実用上の確保バイト数上限（[`MAX_INDEX_ALLOC_BYTES`]。既定 1 GiB）も
+//! 実用上の確保バイト数上限（`MAX_INDEX_ALLOC_BYTES`。既定 1 GiB）も
 //! 含む——`isize::MAX` 検査のみでは技術的にオーバーフローしない範囲の
 //! 巨大値（例: shape `[1]` に `repeats=[1_000_000_000]` で 4GB）を
 //! 確保前に拒否できず、`collect()` の実確保失敗による abort を招き
@@ -86,7 +88,7 @@ const MAX_INDEX_ALLOC_BYTES: usize = 1 << 30;
 /// （`crate::bool_ops::checked_bytes_for` と同型の独立複製。同じ理由
 /// による複製——モジュールをまたいで `pub(crate)` 化するほどの共有価値
 /// がなく、検査対象の型が固定〈`i32`〉のため専用化した）。要素数積の
-/// `usize` オーバーフローに加え、[`MAX_INDEX_ALLOC_BYTES`]（実用上の
+/// `usize` オーバーフローに加え、`MAX_INDEX_ALLOC_BYTES`（実用上の
 /// 確保上限）に収まるかも検査する。`repeat`／`tile` の巨大 `repeats`
 /// だけでなく `flip`／`roll` も `broadcast_to` の stride-0 view（`n` が
 /// 実体を伴わず巨大になりうる）経由で同じ添字巨大化を起こせるため、
@@ -200,11 +202,16 @@ pub fn roll<'t>(x: &Var<'t>, shifts: &[isize], dims: &[usize]) -> Result<Var<'t>
 /// 長さ 1 の軸を追加してから rank を揃える（view のため元が非 contiguous
 /// でもよい）。
 ///
-/// 軸ごとに `r == 1` ならスキップし、それ以外は添字
-/// `idx = (0..n*r).map(|j| j % n)` で [`Var::index_select`] する。
-/// `r == 0` または `n == 0` の軸は添字長 0 になり、対応する出力軸が
-/// 長さ 0 になる（エラーにしない。PyTorch と同じ）。全軸が `r == 1` で
-/// rank も変わらない場合は新しいノードを積まず `x` をそのまま返す。
+/// 軸ごとの最終要素数 `axis_total = n * r`（および全軸積
+/// `total_out_elems`）をどの軸も確保する前に `checked_mul` で確定させ
+/// てから分岐する（PR #2256 codex-review／cursor-review 指摘。詳細は
+/// 実装内コメント）: 全軸積が 0（いずれかの軸で `r == 0` または
+/// `n == 0`）なら最終出力は空テンソルであり、他の軸の `r` が大きくても
+/// 実際に巨大な添字ベクタは確保せず [`Var::reshape`] で最終 shape へ
+/// 一括変換する。それ以外は軸ごとに `r == 1` ならスキップし（確保上限
+/// チェックも対象外）、それ以外は添字 `idx = (0..n*r).map(|j| j % n)`
+/// で [`Var::index_select`] する。全軸が `r == 1` で rank も変わらない
+/// 場合は新しいノードを積まず `x` をそのまま返す。
 pub fn repeat<'t>(x: &Var<'t>, repeats: &[usize]) -> Result<Var<'t>, AutodiffError> {
     let in_shape = x.shape();
     let rank = in_shape.len();
@@ -225,30 +232,70 @@ pub fn repeat<'t>(x: &Var<'t>, repeats: &[usize]) -> Result<Var<'t>, AutodiffErr
         cur = cur.broadcast_to(&padded_shape)?;
     }
 
-    // 各軸の添字ベクタ（`Vec<i32>`）を確保する前に、全軸を通した最終
-    // 出力の総要素数を `checked_mul` で確定させる（codex-review 指摘・
-    // PR #2256。従来は軸ごとに `n * r` のみ検証してから確保していたため、
-    // 後続軸を検査する前に先頭軸だけで数 GB 規模の確保を試み、型付き
-    // `ElementCountOverflow` を返す前に allocation failure で abort し
-    // 得た。`cur.shape()` は broadcast 由来の stride-0 view でも論理
-    // shape を返すため、ここで軸ごとの `n_d * r_d` と全軸積の両方を
-    // 検査してから、後続ループで初めて確保に入る）。
+    // Pass 1（確保なし・overflow 検査のみ）: 軸ごとの最終要素数
+    // `axis_total = n_d * r_d` と、全軸を通した最終出力の総要素数
+    // `total_out_elems` を `checked_mul` で確定させる。この時点では
+    // まだ `MAX_INDEX_ALLOC_BYTES`（実用上の確保上限）を検査しない
+    // （codex-review 指摘・PR #2256「ゼロ係数より先の大きな軸が空
+    // テンソル契約をエラーに変える」）——ある軸の `r` が大きくても
+    // 他の軸に `r == 0`（または `n == 0`）があれば最終出力は空テンソル
+    // になり、その軸へ実際に `n*r` 長の添字ベクタを確保する必要はない
+    // ため、全軸積が確定するまで上限判定を保留する。`cur.shape()` は
+    // broadcast 由来の stride-0 view でも論理 shape を返す。
     let cur_shape = cur.shape();
+    let mut axis_totals: Vec<usize> = Vec::with_capacity(repeats.len());
     let mut total_out_elems: usize = 1;
     for (d, &r) in repeats.iter().enumerate() {
         let n = cur_shape[d];
-        checked_axis_len_as_i32(n)?;
         let axis_total = n
             .checked_mul(r)
             .ok_or(ShapeError::ElementCountOverflow)
             .map_err(AutodiffError::Shape)?;
-        checked_index_alloc_len(axis_total)?;
+        axis_totals.push(axis_total);
         total_out_elems = total_out_elems
             .checked_mul(axis_total)
             .ok_or(ShapeError::ElementCountOverflow)
             .map_err(AutodiffError::Shape)?;
     }
-    checked_index_alloc_len(total_out_elems)?;
+
+    if total_out_elems == 0 {
+        // 最終出力が空テンソルになるケース（`axis_totals` のいずれかが
+        // 0）。他の軸の `r` がどれだけ大きくても、実際に `n*r` 長の
+        // 添字ベクタを確保する必要はない（cursor(Medium)「Zero axis
+        // bypasses allocation guard」・codex(P2)「ゼロ係数より先の大きな
+        // 軸が空テンソル契約をエラーに変える」・PR #2256）。最初に見つ
+        // かった `axis_total == 0` の軸だけ空添字（長さ 0）で
+        // `index_select` し実体を空にしてから、`Var::reshape` で最終
+        // shape（`axis_totals`）へ一括変換する。`Tensor::is_contiguous`
+        // は `numel() == 0` を常に連続とみなすため（NumPy 方式。
+        // `crates/tensor-core/src/tensor.rs::is_contiguous`）、
+        // 個々の軸が target と異なる中間 shape のままでも
+        // `ShapeError::NonContiguousReshape` にはならない。
+        let z = axis_totals
+            .iter()
+            .position(|&t| t == 0)
+            .expect("total_out_elems == 0 のため axis_totals に 0 が必ず存在する");
+        let empty_idx = Tensor::new(Vec::new(), &[0]).map_err(AutodiffError::Shape)?;
+        cur = cur.index_select(z, &empty_idx)?;
+        return cur.reshape(&axis_totals);
+    }
+
+    // 非ゼロケース: `r == 1` の軸は添字ベクタを確保せず（後続ループで
+    // `continue` によりスキップ）そのまま no-op になるため、確保上限
+    // チェックの対象からも外す（cursor(Medium)「Allocation cap rejects
+    // no-op repeat」・PR #2256——`broadcast_to` 由来の stride-0 view で
+    // 論理長が 1GiB 換算の上限を超える軸でも、`r == 1`（no-op）呼び出し
+    // では実際の確保が発生しないため誤って拒否しない）。`r != 1` の軸に
+    // 限り、実際に確保する添字ベクタの長さ `axis_totals[d]` が
+    // `i32` 添字値として表現できる範囲か（`checked_axis_len_as_i32`）・
+    // 実用上の確保上限に収まるか（`checked_index_alloc_len`）を検査する。
+    for (d, &r) in repeats.iter().enumerate() {
+        if r == 1 {
+            continue;
+        }
+        checked_axis_len_as_i32(cur_shape[d])?;
+        checked_index_alloc_len(axis_totals[d])?;
+    }
 
     for (d, &r) in repeats.iter().enumerate() {
         if r == 1 {
@@ -256,11 +303,14 @@ pub fn repeat<'t>(x: &Var<'t>, repeats: &[usize]) -> Result<Var<'t>, AutodiffErr
         }
         let n = cur.shape()[d];
         // `n * r` は上記の事前検証ループで既に overflow・確保上限の
-        // 両方を確認済みのため、ここでは再検証せず素の乗算でよい。
+        // 両方を確認済みのため、ここでは再検証せず素の乗算でよい
+        // （`axis_totals[d]` と同じ値になる。軸 `d` の長さは他の軸への
+        // `index_select` の影響を受けないため一致する）。
         let total = n * r;
-        // `total == 0`（`n == 0` または `r == 0`）のときは `0..total` が
-        // 空のため、クロージャ内の `j % n` は評価されず `n == 0` による
-        // ゼロ除算は起きない（`Iterator::map` の遅延評価による）。
+        // `total == 0`（`n == 0` または `r == 0`）は `total_out_elems == 0`
+        // 分岐で既に処理済みのため、ここへは到達しない
+        // （`total_out_elems` はこの軸の `axis_total` を乗算因子に含む）。
+        debug_assert_ne!(total, 0);
         let idx_data: Vec<i32> = (0..total).map(|j| (j % n) as i32).collect();
         let idx = Tensor::new(idx_data, &[total]).map_err(AutodiffError::Shape)?;
         cur = cur.index_select(d, &idx)?;
@@ -553,6 +603,69 @@ mod tests {
         let x = tape.var(&t(vec![1.0, 2.0], &[2]));
         let out = repeat(&x, &[0]).unwrap();
         assert_eq!(out.to_tensor().shape(), &[0]);
+    }
+
+    // --- ゼロ軸が後続にあるため最終出力が空テンソルになるケース
+    // （cursor(Medium)「Zero axis bypasses allocation guard」・
+    // codex(P2)「ゼロ係数より先の大きな軸が空テンソル契約をエラーに
+    // 変える」・PR #2256）。先頭軸の `r` は `MAX_INDEX_ALLOC_BYTES`
+    // （1 GiB）換算の添字ベクタを要求する規模だが、後続軸に `r == 0`
+    // があるため最終出力は空テンソルであり、`Ok` で成功し実際には
+    // 巨大な確保を行わないことを検証する（`n == 1` ケース）。
+
+    #[test]
+    fn repeat_large_axis_before_zero_axis_returns_empty_ok() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0], &[1, 1]));
+        let out = repeat(&x, &[300_000_000, 0]).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[300_000_000, 0]);
+        assert_eq!(out.to_tensor().host_slice().into_owned(), Vec::<f32>::new());
+    }
+
+    // 同様のケースだが軸長 `n > 1`（`broadcast_to` 由来ではない実体軸）
+    // でも `reshape` による最終化経路（`n*r` 分の添字ベクタを介さない）
+    // を通ることを検証する。
+    #[test]
+    fn repeat_large_axis_before_zero_axis_with_n_gt_1() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0, 2.0], &[2, 1]));
+        let out = repeat(&x, &[200_000_000, 0]).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[400_000_000, 0]);
+    }
+
+    // 空テンソル経由の backward: 勾配は入力 shape のゼロ埋めになる
+    // （空テンソルへの寄与なので値そのものは検証対象外・shape 一致のみ
+    // 確認する）。ゼロ軸を先に処理する経路が勾配計算でも小さい中間
+    // テンソルに留まることを間接的に確認する。
+    #[test]
+    fn repeat_empty_output_gradient_matches_input_shape() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0], &[1, 1]));
+        let y = repeat(&x, &[300_000_000, 0]).unwrap();
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_eq!(dx.shape(), &[1, 1]);
+        assert_eq!(dx.host_slice().into_owned(), vec![0.0]);
+    }
+
+    // --- `r == 1`（no-op）専用軸は確保上限チェックの対象外（cursor
+    // (Medium)「Allocation cap rejects no-op repeat」・PR #2256）。
+    // `broadcast_to` の stride-0 view で論理長を `MAX_INDEX_ALLOC_BYTES`
+    // 換算の上限超（256M 要素超）まで拡張した軸でも、`repeats` が
+    // 全軸 `r == 1` なら実際の確保が発生せず誤って拒否しないことを
+    // 検証する（`to_tensor()` は呼ばない——呼ぶと実体化のため意図的に
+    // 避ける。`flip_on_broadcast_view_rejects_practically_unallocatable_
+    // size` と同じ手法）。
+    #[test]
+    fn repeat_no_op_on_huge_broadcast_view_does_not_reject() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0], &[1]));
+        let huge = x.broadcast_to(&[300_000_000]).unwrap();
+        let before = tape.len();
+        let out = repeat(&huge, &[1]).unwrap();
+        assert_eq!(tape.len(), before);
+        assert_eq!(out.shape(), &[300_000_000]);
     }
 
     #[test]

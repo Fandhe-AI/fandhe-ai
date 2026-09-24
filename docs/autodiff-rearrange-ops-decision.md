@@ -196,3 +196,39 @@ README.md` も新テスト名に追随済み。
 承認取得後の追随（本イシューでは未実施）: `Var::repeat`／`tile`／
 `flip`／`roll` 等の薄い委譲メソッド追加、facade 保留ガード
 （`VarRearrangeOpsHoldDoctestGuard`・対応する否定ガード 4 件）の撤去。
+
+**追記（PR #2256 CI・レビュー指摘対応。2026-09-24）**: `cargo doc`
+（`-D rustdoc::private-intra-doc-links` 相当。`-D warnings` 暗黙包含）が
+モジュール doc・`checked_index_alloc_len` の doc コメント中の
+`` [`MAX_INDEX_ALLOC_BYTES`] ``（private 定数への intra-doc リンク）を
+拒否したため、非リンクのコードスパン表記（`` `MAX_INDEX_ALLOC_BYTES` ``）
+へ変更した。
+
+`repeat` の確保前検査を以下のとおり作り直した（cursor-review「Zero
+axis bypasses allocation guard」・「Allocation cap rejects no-op
+repeat」・codex-review「ゼロ係数より先の大きな軸が空テンソル契約を
+エラーに変える」の 3 件を同一原因として一括解消）:
+
+1. Pass 1（確保なし）: 軸ごとの `axis_total = n * r`・全軸積
+   `total_out_elems` を `checked_mul` のみで確定する
+   （`MAX_INDEX_ALLOC_BYTES` の判定はまだ行わない）
+2. `total_out_elems == 0`（最終出力が空テンソル）なら、最初に見つかった
+   `axis_total == 0` の軸だけ空添字（長さ 0）で `index_select` して
+   実体を空にしてから `Var::reshape` で最終 shape へ一括変換する。
+   `Tensor::is_contiguous` は `numel() == 0` を常に連続とみなす
+   （NumPy 方式）ため `NonContiguousReshape` にならない。他の軸の
+   `r` がどれだけ大きくても `n*r` 長の添字ベクタを確保しない
+3. 非ゼロケースでは `r == 1` の軸（no-op でも確保上限チェック不要）を
+   除外してから `checked_axis_len_as_i32`・`checked_index_alloc_len`
+   を適用する
+
+「新規 `Op` はゼロ」の受け入れ条件は維持する——`Var::reshape`
+（`Op::Reshape`）は空テンソル最終化にのみ用いる既存演算で、CPU・
+CUDA・Metal 全バックエンドに既存経路がある。
+
+回帰テストを 4 件追加した（`repeat_large_axis_before_zero_axis_
+returns_empty_ok`・`repeat_large_axis_before_zero_axis_with_n_gt_1`・
+`repeat_empty_output_gradient_matches_input_shape`・
+`repeat_no_op_on_huge_broadcast_view_does_not_reject`）。既存の負例
+（`repeat_rejects_practically_unallocatable_size_without_panicking`
+等）は変更せず全件通過を確認済み。
