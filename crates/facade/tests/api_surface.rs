@@ -6766,18 +6766,19 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
 }";
 
-/// [`workspace_declares_no_hook_registration_fns`] が検査する 3 つの
+/// [`workspace_declares_no_hook_registration_fns`] が検査する 4 つの
 /// 関数名。`register_hook` はあえて含めない（並行する #2182 の DataLoader
 /// transform フック等、正当な用途で使われうる汎用名のため。facade から
 /// 到達できないことは `VarHooksHoldDoctestGuard` の doctest が固定する）。
-const HOOK_REGISTRATION_FN_NAMES: [&str; 3] = [
+const HOOK_REGISTRATION_FN_NAMES: [&str; 4] = [
     "register_forward_hook",
     "register_backward_hook",
     "remove_hook",
+    "remove_backward_hook",
 ];
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、
-/// [`HOOK_REGISTRATION_FN_NAMES`]（3 個）の `fn` 宣言が可視性・宣言文脈
+/// [`HOOK_REGISTRATION_FN_NAMES`]（4 個）の `fn` 宣言が可視性・宣言文脈
 /// を問わず 1 件も存在しないことを固定する（`workspace_declares_custom_
 /// fn_only_on_tape`・`workspace_declares_bool_ops_fn_names_only_in_
 /// autodiff_bool_ops` と同型の workspace 全体インベントリだが、本イシュー
@@ -6835,7 +6836,8 @@ fn workspace_declares_no_hook_registration_fns() {
     assert!(
         found.is_empty(),
         "workspace 全体（crates/*/src/）に register_forward_hook／\
-         register_backward_hook／remove_hook の `fn` 宣言が見つかった\
+         register_backward_hook／remove_hook／remove_backward_hook の \
+         `fn` 宣言が見つかった\
          （イシュー #2139 は §11 の承認事項 5 項目がそろうまで着手不可\
          という設計判断〈docs/autodiff-forward-backward-hooks-design.md\
          §13〉に違反する可能性がある。承認済みの実装であれば本ガード\
@@ -6844,7 +6846,7 @@ fn workspace_declares_no_hook_registration_fns() {
 }
 
 /// [`workspace_declares_no_hook_registration_fns`] が使う
-/// [`count_fn_declarations_by_name`] が、対象 3 関数名を実際に検出
+/// [`count_fn_declarations_by_name`] が、対象 4 関数名を実際に検出
 /// できることを固定する合成入力の自己テスト（検出器自体が機能して
 /// いなければ、前者の「0 件」判定が空合格になり得るため）。
 #[test]
