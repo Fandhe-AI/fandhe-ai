@@ -829,22 +829,36 @@ fn native_or_host_gemm(
 /// （`crates/backend-cpu/src/typed_f64.rs::gemm_row_parallel_f64`）・
 /// 同クレートの `matmul_reference_fma_f64`（parity ユーティリティ）と
 /// bit 完全一致する（モジュール doc「bit 一致の境界」参照）。`m == 0`／`n == 0`／
-/// `k == 0` はループが自然に空になり panic しない。
+/// `k == 0` はループが自然に空になり panic しない。ただし `n == 0`
+/// （出力が空）のとき `m` 自体が巨大（`usize::MAX` 等）だと、`i` 行
+/// ループは panic しないまま `m` 回逐次走査してしまい実質ハングする
+/// （`gemm_row_parallel_f64` が `n == 0` を早期 return で弾く契約と
+/// 揃っていなかった。codex-review 指摘是正。イシュー #2196）。出力
+/// 要素数（`= m * n`）が 0 の時点で走査すべき要素が存在しないため、
+/// 確保済みの空 `data` をそのまま返す早期 return で対処する。
 fn host_gemm_f64(a: &Tensor<f64>, b: &Tensor<f64>) -> Result<Tensor<f64>, ShapeError> {
     let out_shape = gemm_out_shape(a.shape(), b.shape())?;
     checked_bytes_for_f64(&out_shape)?;
     let m = a.shape()[0];
     let k = a.shape()[1];
     let n = b.shape()[1];
-    let a_c = a.contiguous();
-    let b_c = b.contiguous();
-    let a_slice = a_c.host_slice();
-    let b_slice = b_c.host_slice();
     // `out_shape` のバイトサイズは `checked_bytes_for_f64` で確保前検査
     // 済みのため、`m * n`（`out_shape` の要素数積そのもの）は
     // overflow しない（`gemm_out_shape` が `checked_numel` で同じ検査を
     // 行っている二重の裏付けでもある）。
     let mut data = vec![0.0f64; m * n];
+    // `m == 0` または `n == 0`（出力要素数 0）の場合、後続の `i` 行
+    // ループを回すべき理由が無い。`m` が巨大（`usize::MAX` 等）で
+    // `n == 0` の組合せは、走査対象が無いにもかかわらず `i` ループが
+    // `m` 回逐次実行されて実質ハングする（`gemm_row_parallel_f64` が
+    // `n == 0` を早期 return する契約と揃える。codex-review 指摘是正）。
+    if data.is_empty() {
+        return Tensor::new(data, &out_shape);
+    }
+    let a_c = a.contiguous();
+    let b_c = b.contiguous();
+    let a_slice = a_c.host_slice();
+    let b_slice = b_c.host_slice();
     for i in 0..m {
         let a_row = &a_slice[i * k..i * k + k];
         let c_row = &mut data[i * n..i * n + n];
@@ -925,6 +939,16 @@ fn host_sum_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, Shap
                 .checked_mul(inner)
                 .ok_or(ShapeError::ElementCountOverflow)?;
             let mut data = vec![0.0f64; data_len];
+            // 出力要素数（`data_len = outer * inner`）が 0 なら走査すべき
+            // 出力が存在しない。走査順が `o -> i -> x`（`inner` が
+            // `axis_len` より内側）のため `inner == 0` はここで自然に
+            // 空になるが、`axis_reduce_f64`（`crates/backend-cpu/src/
+            // typed_f64.rs`）が出力要素数 0 を明示的に走査しない契約と
+            // 揃えるため、[`host_max_f64`] と同じ早期 return で明示する
+            // （codex-review 指摘是正。イシュー #2196）。
+            if data_len == 0 {
+                return Tensor::new(data, &out_shape);
+            }
             for o in 0..outer {
                 for i in 0..inner {
                     let mut acc = 0.0f64;
@@ -945,8 +969,12 @@ fn host_sum_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, Shap
 /// 事項）。`outer`／`inner` の overflow 検査は [`host_sum_f64`] と同じ
 /// `checked_product` に委譲する（0 次元を含む shape での独立部分積
 /// overflow を個別検査する理由も同一。codex-review／Cursor Bugbot
-/// 指摘是正）。呼び出し元（[`forward_max`]／[`VarF64::max`]）が空縮約を
-/// dispatch 前に拒否する契約のため、本関数は空縮約を想定しない。
+/// 指摘是正）。呼び出し元（[`forward_max`]／[`VarF64::max`]）が
+/// **縮約対象**の要素数 0（`axis_len == 0`）を dispatch 前に拒否する
+/// 契約のため、本関数はその意味での空縮約を想定しない。ただし**出力**
+/// 要素数 0（`outer == 0` または `inner == 0`。`axis_len` 自体は非 0
+/// のまま巨大でもよい）は別の軸で発生しうる契約違反ではない正常系
+/// であり、下記の早期 return で扱う（codex-review 指摘是正）。
 fn host_max_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, ShapeError> {
     let out_shape = reduce_out_shape(a.shape(), dim)?;
     checked_bytes_for_f64(&out_shape)?;
@@ -966,6 +994,20 @@ fn host_max_f64(a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, Shap
                 .checked_mul(inner)
                 .ok_or(ShapeError::ElementCountOverflow)?;
             let mut data = vec![f64::NEG_INFINITY; data_len];
+            // 出力要素数（`data_len = outer * inner`）が 0 なら走査すべき
+            // 出力が存在しない。走査順は `o -> x -> i`（`axis_len` が
+            // `inner` より外側）のため、`inner == 0` かつ `axis_len` が
+            // 巨大（例 `usize::MAX`）な shape（`[usize::MAX, 0]` に
+            // `max(Some(0))` 等）では、早期 return が無いと出力へ書く
+            // べき要素が 0 個にもかかわらず `x` ループを `axis_len` 回
+            // 逐次走査してしまい実質ハングする。`axis_reduce_f64`
+            // （`crates/backend-cpu/src/typed_f64.rs`。出力要素数を
+            // `total_out` として走査対象を決めるため `total_out == 0`
+            // では走査自体が発生しない）と挙動を揃える（codex-review
+            // 指摘是正。イシュー #2196）。
+            if data_len == 0 {
+                return Tensor::new(data, &out_shape);
+            }
             for o in 0..outer {
                 for x in 0..axis_len {
                     for i in 0..inner {
@@ -1400,6 +1442,60 @@ mod tests {
             reduce_to_shape_f64(&g, &target_shape).expect("空テンソルはゼロ勾配へ縮約できるはず");
         assert_eq!(reduced.shape(), target_shape);
         assert_eq!(reduced.numel(), 0);
+    }
+
+    /// codex-review P1 是正の回帰テスト（PR #2255・イシュー #2196）:
+    /// `n == 0`（出力が空）だが `m` 側の次元が `usize::MAX` 級の
+    /// `host_gemm_f64` を、早期 return 無しでは `i` 行ループが `m` 回
+    /// 逐次走査して実質ハングする形状で呼び出し、即座に空出力
+    /// `[usize::MAX, 0]` を返すことを確認する（テスト自体が有限時間で
+    /// 終わることが早期 return の直接的な証拠になる。CI
+    /// `test-timeout-minutes: 20` がこの回帰を検出する設計）。
+    #[test]
+    fn host_gemm_f64_skips_huge_row_scan_when_output_is_empty() {
+        let a = Tensor::<f64>::new(Vec::new(), &[usize::MAX, 0])
+            .expect("checked_numel は usize::MAX * 0 を Some(0) とするため構築できるはず");
+        let b = Tensor::<f64>::new(Vec::new(), &[0, 0])
+            .expect("checked_numel は 0 * 0 を Some(0) とするため構築できるはず");
+        let out = host_gemm_f64(&a, &b).expect("空出力の gemm は成功するはず");
+        assert_eq!(out.shape(), vec![usize::MAX, 0]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    /// codex-review P1 是正の回帰テスト（PR #2255・イシュー #2196）:
+    /// `axis_len`（縮約軸の要素数）が `usize::MAX` 級でも、出力側の
+    /// `inner` が 0（`shape [usize::MAX, 0]` に `max(Some(0))`）であれば
+    /// 出力要素数は 0 であり、早期 return 無しでは `o -> x -> i` の
+    /// 走査順のため `x` ループが `axis_len` 回逐次走査して実質ハング
+    /// する形状で `host_max_f64` を呼び出し、即座に空出力 `[0]` を
+    /// 返すことを確認する（`axis_reduce_f64`〈`backend-cpu`〉が出力要素数
+    /// 0 で走査自体を行わない契約と揃える）。
+    #[test]
+    fn host_max_f64_skips_huge_axis_scan_when_output_is_empty() {
+        let a = Tensor::<f64>::new(Vec::new(), &[usize::MAX, 0])
+            .expect("checked_numel は usize::MAX * 0 を Some(0) とするため構築できるはず");
+        let out = host_max_f64(&a, Some(0)).expect("空出力の max は成功するはず");
+        assert_eq!(out.shape(), vec![0]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    /// codex-review 指摘の類型調査（PR #2255・イシュー #2196）:
+    /// `unreduce_broadcast_f64`（`Sum`／`Mean` の VJP）は
+    /// `host_gemm_f64`／`host_max_f64` と異なり `outer`／`axis_len`／
+    /// `inner` の手書き三重ループを持たず、`reshape` + `broadcast_to` +
+    /// `contiguous`（`tensor-core` 側の numel 駆動実装）へ委譲する。
+    /// 縮約後 `g`（`[0]`。numel 0）を巨大次元を含む `input_shape`
+    /// （`[usize::MAX, 0]`。numel 0）へ broadcast する経路が、同じ
+    /// ハング類型を持ち込んでいないことを回帰確認する。
+    #[test]
+    fn unreduce_broadcast_f64_handles_huge_input_shape_without_hang() {
+        let g = Tensor::<f64>::new(Vec::new(), &[0])
+            .expect("g は縮約後 shape [0]（軸長 0 のダミー）で構築できるはず");
+        let input_shape = [usize::MAX, 0usize];
+        let out =
+            unreduce_broadcast_f64(&g, &input_shape, Some(0)).expect("空 broadcast は成功するはず");
+        assert_eq!(out.shape(), input_shape);
+        assert_eq!(out.numel(), 0);
     }
 
     #[test]
