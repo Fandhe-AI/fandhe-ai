@@ -226,8 +226,65 @@ pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
 /// `nn::init` の入力検証エラーを組み立てる補助関数（`AutodiffError::
 /// InvalidArgument` への集約。本番経路 `unwrap`／`expect` 禁止の方針
 /// どおり、RNG ロック取得・アロケーション前に fail-closed で拒否する）。
+///
+/// **確保サイズ計算の失敗には使わない**（`alloc_failed` の doc 参照）:
+/// 本関数は「引数の意味論が不正」（`gain` の符号・`low <= high`・`rank`
+/// 等）を表す `String` メッセージ付きエラー専用とし、「shape が大きす
+/// ぎて確保できない」系の失敗は非アロケーションな [`alloc_failed`] を
+/// 使う。
 fn invalid_argument(message: impl Into<String>) -> AutodiffError {
     AutodiffError::InvalidArgument(message.into())
+}
+
+/// 確保不能（要素数積の `usize` オーバーフロー、または
+/// `Vec::try_reserve_exact` が実際に確保失敗を報告した）を表す
+/// **非アロケーションな** `AutodiffError` を返す（codex-review 指摘。
+/// PR #2239）。
+///
+/// `try_alloc`（本関数の直後）は以前 `format!("... 要素数 {len} の
+/// 確保に失敗しました")` を経由して `AutodiffError::InvalidArgument
+/// (String)` を構築していたが、これは確保失敗を検出した**直後**に
+/// 新たな `String` 確保（`format!` はヒープ確保を伴う）を試みる構造
+/// になっており、実メモリ枯渇による確保失敗時にはこのエラー文字列の
+/// 構築自体が `handle_alloc_error`（`String`／`Vec` の非フォールブル
+/// 確保 API 内部で呼ばれる）経由の abort を招きうる——「確保失敗は
+/// panic／abort ではなく `Err` で伝播する」契約（イシュー #2140・
+/// PR #2239 で `eval::linalg::qr` に確立した契約と同型）を、確保
+/// 失敗の*報告*経路自体が破ってしまっていた。
+///
+/// **既存の非アロケーションなエラー型の再利用（新規 variant は追加
+/// しない）**: `AutodiffError` は `#[non_exhaustive]` の公開型で
+/// `facade`（`fandhe_ai::AutodiffError`）が再エクスポートするため、
+/// 新規 variant の追加は公開面の変更としてユーザー承認が必要になる
+/// （`.claude/rules/deps-policy.md` 相当の「公開 API 非破壊」ガード
+/// レール）。調査の結果、`fandhe_ai_tensor_core::ShapeError::
+/// ElementCountOverflow`（`tensor-core/src/error.rs`）が既に
+/// 「shape の要素数積が `usize` の範囲でオーバーフローする、または
+/// 要素型込みのバイトサイズが `Vec` の allocation 上限（`isize::MAX`
+/// バイト）を超えアロケーション不能な shape」という**本件と全く同じ
+/// 意味論**を持つ非データ（unit）variant として存在し（`Tensor::
+/// zeros`／`ones`／`full` が既に同じ用途で使っている確立済みパターン
+/// ——それらも確保失敗時に個別メッセージを持たない）、`AutodiffError`
+/// は `From<ShapeError>` を既に実装しているため、新規 variant を
+/// 追加せずそのまま再利用できる。`AutodiffError::Shape(...)` の
+/// 構築・`ShapeError::ElementCountOverflow`（unit variant・`Clone`
+/// ／`Eq` 導出のみで `String` 等のヒープ保持フィールドを持たない）の
+/// 構築はいずれもスタック上のデータ移動のみで完結し、ヒープ確保を
+/// 一切伴わない。
+///
+/// **適用範囲（類型化）**: 「確保対象のサイズ計算・確保そのものが
+/// 失敗した」エラー（`checked_numel`・`try_alloc`・`calculate_fan_in_
+/// and_fan_out` の `checked_mul` 系・`orthogonal` の shape 要素数
+/// 計算・`eval::linalg::qr` 経路の `Mat::try_zeros`／`try_from_tensor`
+/// ／`try_to_tensor`／`try_vec_zeroed`）にのみ使う。引数の**意味論**
+/// が不正なエラー（`gain` の符号・`low <= high`・`std < 0`・`rank`
+/// 不足・軸が 0 等）は、確保が一切絡まないため従来どおり
+/// [`invalid_argument`]（`String` メッセージ付き）を使い続ける——
+/// これらは確保失敗の最中に発生するものではなく、システムが実メモリ
+/// 枯渇状態にあるとは限らないタイミングで発生するため、診断メッセ
+/// ージを保持する価値の方が上回る。
+fn alloc_failed() -> AutodiffError {
+    AutodiffError::Shape(ShapeError::ElementCountOverflow)
 }
 
 /// `shape` の要素数積を `checked_mul` で求める（`tensor-core::
@@ -239,7 +296,7 @@ fn checked_numel(shape: &[usize]) -> Result<usize, AutodiffError> {
     shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
-        .ok_or_else(|| invalid_argument("nn::init: shape の要素数積が usize の範囲を超えます"))
+        .ok_or_else(alloc_failed)
 }
 
 /// `len` 要素の `Vec<f32>` を、確保不能なら panic せず `Err` を返す形で
@@ -248,9 +305,7 @@ fn checked_numel(shape: &[usize]) -> Result<usize, AutodiffError> {
 /// 超えるアロケーション不能な `len` も検出する）。
 fn try_alloc(len: usize) -> Result<Vec<f32>, AutodiffError> {
     let mut values = Vec::new();
-    values
-        .try_reserve_exact(len)
-        .map_err(|_| invalid_argument(format!("nn::init: 要素数 {len} の確保に失敗しました")))?;
+    values.try_reserve_exact(len).map_err(|_| alloc_failed())?;
     Ok(values)
 }
 
@@ -372,13 +427,40 @@ pub enum FanMode {
 /// として優先される（`kaiming_gain` の doc 参照）。本関数を直接呼ぶ
 /// 場合は列挙子に埋め込んだ `negative_slope` がそのまま使われる。
 pub fn calculate_gain(nonlinearity: Nonlinearity) -> f32 {
+    calculate_gain_f64(nonlinearity) as f32
+}
+
+/// [`calculate_gain`] の `f64` 内部実装（codex-review 指摘。PR #2239）:
+/// `LeakyRelu(negative_slope)` の `negative_slope * negative_slope` を
+/// `f32` のまま計算すると、`|negative_slope| > √f32::MAX ≈ 1.85e19`
+/// という**有限**な入力で中間値が `inf` になり、`2.0 / inf == 0.0` の
+/// `sqrt` で `calculate_gain` が誤って `0.0` を返してしまう（真の値は
+/// `negative_slope = f32::MAX` で約 `4.2e-39`——`f32` の subnormal 域だが
+/// 表現可能）。`kaiming_uniform`／`kaiming_normal` は `gain == 0.0` だと
+/// `std == 0`／`bound == 0` になり重みが全て 0 で初期化されてしまう。
+/// `negative_slope` を `f32` へ早期変換せず `f64` で二乗・除算・平方根
+/// まで計算し、最後の 1 回だけ `f32` へダウンキャストする（`fill_*` 系
+/// で確立した「最終書き出しのみ 1 回ダウンキャスト」方針と同型）。
+///
+/// **挙動変化（1 点）**: `LeakyRelu(f32::INFINITY)` は旧実装では
+/// `inf * inf == inf`・`2.0 / (1.0 + inf) == 0.0`・`sqrt(0.0) == 0.0`
+/// と経由するはずが実際には `1.0 + inf == inf` の除算で `NaN` を返して
+/// いた（`f32` の `inf - inf`／`inf/inf` に相当する不定形が生じる中間
+/// 経路が存在するため）。`f64` でも同じ極限（`negative_slope² → inf`・
+/// `2/(1+inf) → 0`）を辿るため `0.0`（数学的な極限値と一致し、`NaN`
+/// より意味のある結果）を返すようになる。`negative_slope` は有限値の
+/// 想定（PyTorch の `leaky_relu` も有限のスロープを前提とする）であり、
+/// 呼び出し元（`kaiming_uniform`／`kaiming_normal`）は `a`（`negative_
+/// slope` の実引数）の有限性を事前検査するため実害はない。
+fn calculate_gain_f64(nonlinearity: Nonlinearity) -> f64 {
     match nonlinearity {
         Nonlinearity::Linear | Nonlinearity::Conv1d | Nonlinearity::Conv2d => 1.0,
         Nonlinearity::Sigmoid => 1.0,
         Nonlinearity::Tanh => 5.0 / 3.0,
-        Nonlinearity::Relu => std::f32::consts::SQRT_2,
+        Nonlinearity::Relu => std::f64::consts::SQRT_2,
         Nonlinearity::LeakyRelu(negative_slope) => {
-            (2.0 / (1.0 + negative_slope * negative_slope)).sqrt()
+            let slope = f64::from(negative_slope);
+            (2.0 / (1.0 + slope * slope)).sqrt()
         }
         Nonlinearity::Selu => 3.0 / 4.0,
     }
@@ -407,20 +489,20 @@ pub fn calculate_fan_in_and_fan_out(shape: &[usize]) -> Result<(usize, usize), A
             actual: shape.len(),
         }));
     }
+    // `receptive_field_size`／`fan_in`／`fan_out` の `checked_mul` は
+    // いずれも「shape 由来のサイズ計算が確保可能な範囲に収まるか」の
+    // 検査であり、`alloc_failed`（非アロケーション）の適用対象（`alloc_
+    // failed` の doc「類型化」参照。codex-review 同類型点検・PR #2239）。
     let receptive_field_size = shape[2..]
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
-        .ok_or_else(|| {
-            invalid_argument(
-                "nn::init::calculate_fan_in_and_fan_out: receptive field がオーバーフローします",
-            )
-        })?;
-    let fan_in = shape[1].checked_mul(receptive_field_size).ok_or_else(|| {
-        invalid_argument("nn::init::calculate_fan_in_and_fan_out: fan_in がオーバーフローします")
-    })?;
-    let fan_out = shape[0].checked_mul(receptive_field_size).ok_or_else(|| {
-        invalid_argument("nn::init::calculate_fan_in_and_fan_out: fan_out がオーバーフローします")
-    })?;
+        .ok_or_else(alloc_failed)?;
+    let fan_in = shape[1]
+        .checked_mul(receptive_field_size)
+        .ok_or_else(alloc_failed)?;
+    let fan_out = shape[0]
+        .checked_mul(receptive_field_size)
+        .ok_or_else(alloc_failed)?;
     Ok((fan_in, fan_out))
 }
 
@@ -503,7 +585,13 @@ pub fn xavier_uniform(shape: &[usize], gain: f32) -> Result<Tensor<f32>, Autodif
                 "nn::init::xavier_uniform: fan_in + fan_out は 0 より大きい必要があります",
             )
         })?;
-    let bound = gain * (6.0 / denom as f32).sqrt();
+    // `bound` は `f64` で計算し最後の 1 回だけ `f32` へダウンキャスト
+    // する（`calculate_gain_f64`／`kaiming_uniform` と同じ「最終書き出し
+    // のみ 1 回ダウンキャスト」方針。codex-review 同類型点検・PR
+    // #2239。`gain` 自体は既に有限な `f32` として検査済みのため、
+    // `f64` へ昇格しても情報の欠落は生じない）。
+    let bound_f64 = f64::from(gain) * (6.0 / denom as f64).sqrt();
+    let bound = bound_f64 as f32;
     if !bound.is_finite() {
         return Err(invalid_argument(
             "nn::init::xavier_uniform: 計算された bound が有限ではありません",
@@ -539,7 +627,10 @@ pub fn xavier_normal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, Autodiff
                 "nn::init::xavier_normal: fan_in + fan_out は 0 より大きい必要があります",
             )
         })?;
-    let std = gain * (2.0 / denom as f32).sqrt();
+    // `xavier_uniform` と同じ理由で `f64` 計算・最後の 1 回だけ
+    // ダウンキャスト。
+    let std_f64 = f64::from(gain) * (2.0 / denom as f64).sqrt();
+    let std = std_f64 as f32;
     if !std.is_finite() {
         return Err(invalid_argument(
             "nn::init::xavier_normal: 計算された std が有限ではありません",
@@ -586,12 +677,15 @@ fn select_fan(shape: &[usize], mode: FanMode) -> Result<usize, AutodiffError> {
 /// が `a` を指定しても初期化分散に反映されない互換性の欠落があった
 /// （codex-review 指摘。AGENTS.md「公開 API は PyTorch からの移行
 /// 容易性を保つ」契約）。
-fn kaiming_gain(nonlinearity: Nonlinearity, a: f32) -> f32 {
+/// `f64` で返す（呼び出し元 `kaiming_uniform`／`kaiming_normal` が
+/// `std`／`bound` の計算も `f64` で行い、最後の 1 回だけ `f32` へ
+/// ダウンキャストするため。`calculate_gain_f64` の doc 参照）。
+fn kaiming_gain(nonlinearity: Nonlinearity, a: f32) -> f64 {
     let effective = match nonlinearity {
         Nonlinearity::LeakyRelu(_) => Nonlinearity::LeakyRelu(a),
         other => other,
     };
-    calculate_gain(effective)
+    calculate_gain_f64(effective)
 }
 
 /// PyTorch `nn.init.kaiming_uniform_` 相当。
@@ -611,9 +705,15 @@ pub fn kaiming_uniform(
         ));
     }
     let fan = select_fan(shape, mode)?;
+    // `gain`／`std`／`bound` は `f64` で計算し、最後の 1 回だけ `f32` へ
+    // ダウンキャストする（`calculate_gain_f64` の doc と同じ理由。
+    // codex-review 同類型点検・PR #2239）。`fan as f64` は `fan` が
+    // `usize`（典型的な shape では `2^53` を大きく下回る）である限り
+    // 厳密変換になる。
     let gain = kaiming_gain(nonlinearity, a);
-    let std = gain / (fan as f32).sqrt();
-    let bound = std * 3f32.sqrt();
+    let std_f64 = gain / (fan as f64).sqrt();
+    let bound_f64 = std_f64 * 3f64.sqrt();
+    let bound = bound_f64 as f32;
     if !bound.is_finite() {
         return Err(invalid_argument(
             "nn::init::kaiming_uniform: 計算された bound が有限ではありません",
@@ -639,8 +739,11 @@ pub fn kaiming_normal(
         ));
     }
     let fan = select_fan(shape, mode)?;
+    // `f64` 計算・最後の 1 回だけダウンキャスト（`kaiming_uniform` と
+    // 同じ理由）。
     let gain = kaiming_gain(nonlinearity, a);
-    let std = gain / (fan as f32).sqrt();
+    let std_f64 = gain / (fan as f64).sqrt();
+    let std = std_f64 as f32;
     if !std.is_finite() {
         return Err(invalid_argument(
             "nn::init::kaiming_normal: 計算された std が有限ではありません",
@@ -675,12 +778,14 @@ pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffErr
         }));
     }
     let rows = shape[0];
+    // `cols`／`gen_numel` の `checked_mul` は shape 由来のサイズ計算
+    // なので `alloc_failed`（非アロケーション）の適用対象（`alloc_
+    // failed` の doc「類型化」参照。codex-review 同類型点検・PR
+    // #2239）。
     let cols = shape[1..]
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
-        .ok_or_else(|| {
-            invalid_argument("nn::init::orthogonal: shape の要素数がオーバーフローします")
-        })?;
+        .ok_or_else(alloc_failed)?;
     if rows == 0 || cols == 0 {
         return Err(invalid_argument(
             "nn::init::orthogonal: shape の各軸は 0 より大きい必要があります",
@@ -691,9 +796,7 @@ pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffErr
     } else {
         (rows, cols, false)
     };
-    let gen_numel = gen_rows.checked_mul(gen_cols).ok_or_else(|| {
-        invalid_argument("nn::init::orthogonal: 生成用行列の要素数がオーバーフローします")
-    })?;
+    let gen_numel = gen_rows.checked_mul(gen_cols).ok_or_else(alloc_failed)?;
     let data = fill_normal(gen_numel, 0.0, 1.0)?;
     let m = Tensor::new(data, &[gen_rows, gen_cols])?;
     // `crate::eval::linalg::qr` は `Result` を返す（内部の `f64` 作業

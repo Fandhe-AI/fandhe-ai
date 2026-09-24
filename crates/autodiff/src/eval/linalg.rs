@@ -36,7 +36,7 @@
 //! - **空行列（`n=0`）**: `det` は空積 `1.0`。`inv`／`cholesky`／`qr`／
 //!   `svd` は対応する空 shape のテンソルを返す。`solve` は `[0,k]`。
 
-use fandhe_ai_tensor_core::{MatrixNormOrd, Tensor};
+use fandhe_ai_tensor_core::{MatrixNormOrd, ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 
@@ -129,13 +129,12 @@ impl Mat {
     /// PR #2239）ため、実際に保持する確保そのものを `try_reserve_exact`
     /// 経由のフォールブルにする。
     fn try_zeros(rows: usize, cols: usize) -> Result<Mat, AutodiffError> {
-        let len = rows
-            .checked_mul(cols)
-            .ok_or_else(|| invalid("eval::linalg::Mat::try_zeros: 要素数がオーバーフローします"))?;
+        // 両分岐とも確保サイズ計算の失敗であり `alloc_failed`（非
+        // アロケーション）の適用対象（`alloc_failed` の doc 参照。
+        // codex-review 指摘・PR #2239）。
+        let len = rows.checked_mul(cols).ok_or_else(alloc_failed)?;
         let mut data: Vec<f64> = Vec::new();
-        data.try_reserve_exact(len).map_err(|_| {
-            invalid("eval::linalg::Mat::try_zeros: f64 作業領域の確保に失敗しました")
-        })?;
+        data.try_reserve_exact(len).map_err(|_| alloc_failed())?;
         data.resize(len, 0.0);
         Ok(Mat { data, rows, cols })
     }
@@ -163,13 +162,11 @@ impl Mat {
         );
         let rows = shape[0];
         let cols = shape[1];
-        let len = rows.checked_mul(cols).ok_or_else(|| {
-            invalid("eval::linalg::Mat::try_from_tensor: 要素数がオーバーフローします")
-        })?;
+        // `try_zeros` と同じ理由で `alloc_failed`（非アロケーション）
+        // を使う。
+        let len = rows.checked_mul(cols).ok_or_else(alloc_failed)?;
         let mut data: Vec<f64> = Vec::new();
-        data.try_reserve_exact(len).map_err(|_| {
-            invalid("eval::linalg::Mat::try_from_tensor: f64 変換用作業領域の確保に失敗しました")
-        })?;
+        data.try_reserve_exact(len).map_err(|_| alloc_failed())?;
         if let Some(slice) = t.as_slice() {
             data.extend(slice.iter().map(|&v| f64::from(v)));
         } else {
@@ -202,9 +199,10 @@ impl Mat {
     /// `collect` する）を経由せずここで直接構築する。
     fn try_to_tensor(&self) -> Result<Tensor<f32>, AutodiffError> {
         let mut data: Vec<f32> = Vec::new();
-        data.try_reserve_exact(self.data.len()).map_err(|_| {
-            invalid("eval::linalg::Mat::try_to_tensor: f32 出力バッファの確保に失敗しました")
-        })?;
+        // `try_zeros`／`try_from_tensor` と同じ理由で `alloc_failed`
+        // （非アロケーション）を使う。
+        data.try_reserve_exact(self.data.len())
+            .map_err(|_| alloc_failed())?;
         data.extend(self.data.iter().map(|&v| v as f32));
         Tensor::new(data, &[self.rows, self.cols]).map_err(AutodiffError::from)
     }
@@ -233,6 +231,36 @@ impl Mat {
 
 fn invalid(msg: impl Into<String>) -> AutodiffError {
     AutodiffError::InvalidArgument(msg.into())
+}
+
+/// 確保不能（要素数積の `usize` オーバーフロー、または
+/// `Vec::try_reserve_exact` が実際に確保失敗を報告した）を表す
+/// **非アロケーションな** `AutodiffError`（codex-review 指摘。PR
+/// #2239。`nn::init::alloc_failed` と同型・同じ判断根拠）。
+///
+/// `[qr]` 経路の `Mat::try_zeros`／`Mat::try_from_tensor`／`Mat::
+/// try_to_tensor`／`try_vec_zeroed`／`qr` 自身は、`invalid(msg)`
+/// （`msg.into()` で `String` へ変換するため必ずヒープ確保を伴う）を
+/// 確保失敗の**報告**に使っていた。固定文字列でも `Into<String>` は
+/// 新規確保を行うため、実メモリ枯渇による確保失敗の直後にエラーを
+/// 組み立てる際、その組み立て自体が確保失敗（`handle_alloc_error`
+/// 経由の abort）を招きうる——「確保失敗は `Err` で伝播する」契約
+/// （本ファイル上部のコメント参照）を報告経路自体が破っていた。
+/// `fandhe_ai_tensor_core::ShapeError::ElementCountOverflow`
+/// （`tensor-core::Tensor::zeros`／`ones`／`full` が既に同じ用途で
+/// 使う確立済みの非データ unit variant）を再利用し、新規 `AutodiffError`
+/// variant は追加しない（`AutodiffError` は facade が再エクスポート
+/// する `#[non_exhaustive]` 公開型のため、新規 variant の追加は公開面
+/// 変更としてユーザー承認が必要になる。`nn::init::alloc_failed` の doc
+/// を参照）。
+///
+/// 本モジュールの `qr` 以外の関数（`inv`／`solve`／`cholesky`／`svd`／
+/// `qr_vjp` 等）は非フォールブルな `Mat::zeros`／`Mat::from_tensor`／
+/// `Mat::to_tensor` を使い続ける契約のままであり、それらの `invalid(..)`
+/// 呼び出し（特異・非正定値・非収束等、確保と無関係な数値的失敗）は
+/// 対象外（`qr` 専用のナローな適用）。
+fn alloc_failed() -> AutodiffError {
+    AutodiffError::Shape(ShapeError::ElementCountOverflow)
 }
 
 // =====================================================================
@@ -568,9 +596,11 @@ pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), Autodiff
     // `docs/autodiff-linalg-design.md` §3.4「QR」）。
     let mut r = mat;
     let mut reflectors: Vec<(usize, Vec<f64>)> = Vec::new();
-    reflectors.try_reserve_exact(k).map_err(|_| {
-        invalid("eval::linalg::qr: 反射ベクトル一覧（列インデックス付き）の確保に失敗しました")
-    })?;
+    // `try_zeros` 等と同じ理由で `alloc_failed`（非アロケーション）を
+    // 使う。
+    reflectors
+        .try_reserve_exact(k)
+        .map_err(|_| alloc_failed())?;
 
     for col in 0..k {
         // Householder ベクトル `v`（列 `col` の対角以下）を作る。
@@ -683,8 +713,9 @@ pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), Autodiff
 /// 〈イシュー #2140・PR #2239〉）。
 fn try_vec_zeroed(len: usize) -> Result<Vec<f64>, AutodiffError> {
     let mut v: Vec<f64> = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|_| invalid("eval::linalg::qr: f64 作業領域の確保に失敗しました"))?;
+    // `try_zeros` 等と同じ理由で `alloc_failed`（非アロケーション）を
+    // 使う（codex-review 指摘・PR #2239）。
+    v.try_reserve_exact(len).map_err(|_| alloc_failed())?;
     v.resize(len, 0.0);
     Ok(v)
 }
@@ -1879,7 +1910,13 @@ mod tests {
         let rows = 1usize << 40;
         let cols = 1usize << 20;
         let err = Mat::try_zeros(rows, cols).unwrap_err();
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        // 確保失敗は非アロケーションな `AutodiffError::Shape(ShapeError::
+        // ElementCountOverflow)` を返す（`alloc_failed` の doc 参照。
+        // codex-review 指摘・PR #2239）。
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
     }
 
     /// 上記と同型の回帰を [`try_vec_zeroed`]（`qr` の Householder ベクトル
@@ -1891,7 +1928,10 @@ mod tests {
         // 倒れることを確認する（`usize` 乗算オーバーフローと `isize::MAX`
         // 超過のどちらの経路でも panic せず `Err` になる点を担保する）。
         let err = try_vec_zeroed(1usize << 61).unwrap_err();
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
     }
 
     /// codex-review 指摘の回帰: `qr` は以前 `Mat::identity(m)`（`m×m` の

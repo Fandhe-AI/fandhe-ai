@@ -294,6 +294,39 @@ fn calculate_gain_matches_known_values() {
     assert!((leaky - std::f32::consts::SQRT_2).abs() < 1e-6);
 }
 
+/// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `negative_slope`
+/// の二乗を `f32` のまま計算すると、`|negative_slope| > √f32::MAX ≈
+/// 1.85e19` という**有限**な入力で中間値が `inf` になり、
+/// `calculate_gain` が誤って `0.0`（本来は約 `4.2e-39`。`f32` の
+/// subnormal 域だが表現可能）を返していた。`f32::MAX` を渡しても中間
+/// overflow せず、有限かつ非ゼロの gain を返すことを確認する。
+#[test]
+fn calculate_gain_leaky_relu_large_finite_slope_does_not_collapse_to_zero() {
+    let gain = init::calculate_gain(Nonlinearity::LeakyRelu(f32::MAX));
+    assert!(gain.is_finite(), "gain が非有限になった: {gain}");
+    assert!(gain > 0.0, "gain が誤って 0 に潰れた: {gain}");
+}
+
+/// 上記の同類型点検: `kaiming_uniform`／`kaiming_normal` は
+/// `calculate_gain` の潰れをそのまま `std`／`bound` へ伝播し、`gain ==
+/// 0` だと重みが全て `0` になってしまう（PyTorch の Kaiming 初期化が
+/// 意図する「非退化」性質を壊す）。`a = f32::MAX`・`LeakyRelu` で
+/// 呼んでも全要素が `0.0` にならないことを確認する。
+#[test]
+fn kaiming_uniform_large_finite_a_does_not_produce_all_zero_weights() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(74);
+    let t = init::kaiming_uniform(
+        &[64, 32],
+        f32::MAX,
+        FanMode::FanIn,
+        Nonlinearity::LeakyRelu(0.0),
+    )
+    .unwrap();
+    let all_zero = t.host_slice().iter().all(|&v| v == 0.0);
+    assert!(!all_zero, "全要素が 0 に潰れている（gain 0 崩壊の疑い）");
+}
+
 // ---------------------------------------------------------------------
 // xavier / kaiming
 // ---------------------------------------------------------------------
@@ -574,7 +607,14 @@ fn orthogonal_rejects_rank_below_2() {
 #[test]
 fn orthogonal_rejects_huge_shape_without_panicking() {
     let err = init::orthogonal(&[1usize << 40, 1usize << 22], 1.0).unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    // 確保失敗は非アロケーションな `AutodiffError::Shape(ShapeError::
+    // ElementCountOverflow)` を返す（`nn::init::alloc_failed` の doc
+    // 参照。codex-review 指摘・PR #2239 で `InvalidArgument(String)` の
+    // `format!` 経由の確保から切り替えた）。
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 // ---------------------------------------------------------------------

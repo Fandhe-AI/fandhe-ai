@@ -97,3 +97,48 @@
     - `constant`: RNG も乗除算も伴わない単純な埋め込みのため対象外。
     - `orthogonal`: 直交行列への `gain` 乗算（`q_slice[..] * gain`）のみで、`gain` 自体が有限であれば積が overflow するのは真に表現域を超える場合のみ（`q` の各成分は単位ノルム由来で `|q_ij| <= 1` に収まるため `|q_ij * gain| <= |gain|`——`gain` が有限なら積も必ず有限）であり、同型の「両端は有限だが中間量だけ overflow する」構造を持たないため対象外。
   - **回帰テスト**: `crates/autodiff/tests/nn_init.rs::uniform_extreme_finite_bounds_do_not_produce_inf_or_nan`（`low = -f32::MAX`・`high = f32::MAX` で全要素が有限のまま `[low, high]` に収まることを確認）、`xavier_uniform_extreme_gain_does_not_produce_inf_or_nan`（`shape = [1, 1]` で `bound` を `f32::MAX` 近くまで押し上げる極端な `gain` でも有限であることを確認）、`trunc_normal_accepts_samples_whose_intermediate_product_would_overflow_f32`（`std ≈ 0.97 * f32::MAX`・`mean = -std` で「中間 overflow するが真の値は `[a, b]` 内」の帯域（`z ≈ 1.03〜1.18`）のサンプルが正しく受理され、受理された最大値が旧実装の頭打ち値〈約 `1.02e37`〉を明確に超えることを確認）。`normal` 自体は「`mean` で系統的に打ち消す」構成だと典型的な `z`（例えば `z ≈ 0`）でも真に非有限になる帯域が広く、全出力への一律の有限性検査を書けない（実際に試したところ正しく非有限になるはずのサンプルで誤って fail した）ため、同じ数式を共有する `trunc_normal`（`[a, b]` 受理窓により「受理された値は必ず有限」という不変量を持つ）側で固定した。
+- **P1 四度目指摘: 確保失敗後のエラー生成が再度非フォールブルな確保を行う（PR #2239 四度目レビュー・`init.rs:253`）**: `try_reserve_exact` の失敗を `format!`／`Into<String>` 経由で `AutodiffError::InvalidArgument(String)` へ変換する箇所（`nn::init::try_alloc` の `format!("nn::init: 要素数 {len} の確保に失敗しました")` が代表例。同型の問題が `eval::linalg.rs` の `Mat::try_zeros`／`try_from_tensor`／`try_to_tensor`／`try_vec_zeroed` にもあり、固定文字列でも `.into()` は新規 `String` を確保する）は、確保失敗を検出した**直後**にもう一度ヒープ確保を試みる構造になっており、実メモリ枯渇時にはこのエラー文字列の構築自体が `handle_alloc_error` 経由の abort を招きうる——「確保失敗は panic／abort ではなく `Err` で伝播する」契約を、確保失敗の*報告*経路自体が破っていた。
+  - **既存の非アロケーションなエラー型の調査結果（新規 variant は追加しない）**: `AutodiffError` は `#[non_exhaustive]` の公開型で `facade`（`fandhe_ai::AutodiffError`）が再エクスポートするため、新規 variant の追加は公開面の変更としてユーザー承認が必要になる。調査の結果、`fandhe_ai_tensor_core::ShapeError::ElementCountOverflow`（`tensor-core/src/error.rs`）が「shape の要素数積が `usize` の範囲でオーバーフローする、または要素型込みのバイトサイズが `Vec` の allocation 上限（`isize::MAX` バイト）を超えアロケーション不能な shape」という**本件と全く同じ意味論**を持つ非データ（unit）variant として既に存在し（`Tensor::zeros`／`ones`／`full` が既に同じ用途で使っている確立済みパターン）、`AutodiffError` は `From<ShapeError>` を既に実装しているため、新規 variant を追加せずそのまま再利用できると判断した。**AutodiffError への新規 variant 追加は不要だったため、ユーザー承認を要する変更はなかった**（`docs/facade-nn-init-exposure-decision.md` 冒頭「facade 公開は未承認」の状態自体も変えていない——`nn::init`／`eval::linalg::qr` はいずれも facade 未公開のため、本 PR での挙動変化は facade 経由では観測されない）。
+  - `nn::init`（`init.rs`）・`eval::linalg`（`linalg.rs`）それぞれに非アロケーションな `alloc_failed() -> AutodiffError { AutodiffError::Shape(ShapeError::ElementCountOverflow) }` を新設した（クレート内 `private` 関数。`linalg.rs` には `use fandhe_ai_tensor_core::ShapeError;` を追加）。`ShapeError::ElementCountOverflow`（unit variant・`Clone`／`Eq` 導出のみで `String` 等のヒープ保持フィールドを持たない）の構築はスタック上のデータ移動のみで完結し、ヒープ確保を一切伴わない。
+  - **類型化した適用範囲（「確保対象のサイズ計算・確保そのものが失敗した」エラーのみに適用。引数の意味論検証エラーは対象外）**: 「確保サイズ計算・確保失敗」エラーは全て `alloc_failed()` へ切り替え、`gain` の符号・`low <= high`・`std < 0`・`rank` 不足・軸が 0 等の**意味論**検証エラー（確保が一切絡まず、システムが実メモリ枯渇状態にあるとは限らないタイミングで発生するため診断メッセージを保持する価値の方が上回る）は `invalid_argument`／`invalid`（`String` メッセージ付き）のまま維持した。全該当箇所（14 件）を棚卸しした結果は下表のとおり:
+
+    | ファイル・関数 | 元の分岐 | 種別 | 対処 |
+    |---|---|---|---|
+    | `init.rs::checked_numel` | 要素数積の `checked_mul` オーバーフロー | サイズ計算 | `alloc_failed()` |
+    | `init.rs::try_alloc` | `try_reserve_exact` 失敗（当初の指摘箇所） | 確保失敗 | `alloc_failed()` |
+    | `init.rs::calculate_fan_in_and_fan_out` | `receptive_field_size` の `checked_mul` | サイズ計算 | `alloc_failed()` |
+    | 同上 | `fan_in` の `checked_mul` | サイズ計算 | `alloc_failed()` |
+    | 同上 | `fan_out` の `checked_mul` | サイズ計算 | `alloc_failed()` |
+    | `init.rs::orthogonal` | `cols`（`shape[1..]` 積）の `checked_mul` | サイズ計算 | `alloc_failed()` |
+    | 同上 | `gen_numel` の `checked_mul` | サイズ計算 | `alloc_failed()` |
+    | `init.rs::orthogonal` | `gain`／`shape` 各軸／`q` の contiguous 契約違反 | 意味論検証 | 対象外（`invalid_argument` 維持） |
+    | `init.rs::uniform`／`normal`／`xavier_*`／`kaiming_*`／`trunc_normal` | `low <= high`・`std < 0`・`gain` 符号・`a` 有限性・`bound`／`std` 有限性・`fan == 0`・`a >= b` 等 | 意味論検証 | 対象外（`invalid_argument` 維持） |
+    | `linalg.rs::Mat::try_zeros` | `rows.checked_mul(cols)` | サイズ計算 | `alloc_failed()` |
+    | 同上 | `try_reserve_exact` 失敗 | 確保失敗 | `alloc_failed()` |
+    | `linalg.rs::Mat::try_from_tensor` | `rows.checked_mul(cols)` | サイズ計算 | `alloc_failed()` |
+    | 同上 | `try_reserve_exact` 失敗 | 確保失敗 | `alloc_failed()` |
+    | `linalg.rs::Mat::try_to_tensor` | `try_reserve_exact` 失敗 | 確保失敗 | `alloc_failed()` |
+    | `linalg.rs::try_vec_zeroed` | `try_reserve_exact` 失敗 | 確保失敗 | `alloc_failed()` |
+    | `linalg.rs::qr` | `reflectors.try_reserve_exact` 失敗 | 確保失敗 | `alloc_failed()` |
+    | `linalg.rs`（`inv`／`solve`／`cholesky`／`svd`／`qr_vjp` 等） | 特異・非正定値・非収束等の数値的失敗 | 意味論検証（`qr` 経路外） | 対象外（`invalid` 維持。`qr` 専用のナローな適用） |
+
+  - **残る `format!`／`String` 化・`Box` 化の経路（`qr` 経路内で確認した限りゼロ）**: `qr`・`Mat::try_zeros`／`try_from_tensor`／`try_to_tensor`・`try_vec_zeroed`・`nn::init::try_alloc`／`checked_numel`／`calculate_fan_in_and_fan_out`／`orthogonal`（サイズ計算箇所）を全件確認し、確保失敗の報告経路に `format!`／`.into()`／`.to_string()`／`Vec` 化／`Box` 化は残っていないことを確認した。唯一残る非フォールブル確保は `Mat::try_to_tensor` が最後に呼ぶ `Tensor::new(data, shape)`（`tensor-core::Tensor::new`）内部の `shape.to_vec()`（`Vec<usize>`）・`row_major_strides(shape)`（`Vec<isize>`）・`Arc::new(Storage { data })`——いずれも要素数 `numel` ではなく `rank`（典型的に 2）に比例する O(1) 相当の小さな確保であり、`Mat::try_to_tensor` 自身が既に排除した O(numel) 確保（`data: Vec<f32>` 本体。`try_reserve_exact` 済み）とは規模が全く異なる。`tensor-core` 全体で共有される既存実装であり、依存方向の制約（`autodiff` → `tensor-core` の改修は本 PR のスコープ外）によりこれ以上のフォールブル化は行わない。`Mat::try_from_tensor` の `debug_assert!` マクロ（`{r}, {c}` を含むフォーマット文字列）は、shape 走査ロジックのバグ検出専用でありデバッグビルドでのみアサーション失敗時に評価され（release ビルドでは完全にコンパイル対象外）、正常系（OOM を含む）の実行パスには影響しない。
+  - **ユーザー承認が必要な既知の同類型（本 PR ではスコープ外・報告のみ）**: `crates/autodiff/src/nn/conv.rs::checked_uniform_init`・`crates/autodiff/src/nn/rnn.rs::checked_uniform_init`／`reserve_outputs`・`crates/autodiff/src/nn/embedding.rs::Embedding::new` は、いずれも `try_uniform_init`／`try_normal_init`（`nn::init` 由来。`TryReserveError` を返す）の `Err` を `AutodiffError::InvalidArgument(format!("...{err}"))` へ変換しており、本 PR で是正した P1 と全く同じ欠陥クラスを持つ（イシュー #1604／#1647／#1770 由来の既存コードで、本 PR〈イシュー #2140〉より前から存在する）。`nn::init`（本イシューのスコープ）の外側であるため本 PR では修正しない。ユーザーに別 Issue での追跡要否を確認する必要がある（`.claude/rules/out-of-scope-tracking.md`）。
+- **P2 四度目指摘: 大きな有限の LeakyReLU slope で gain が 0 に潰れる（PR #2239 四度目レビュー・`init.rs:381`）**: `calculate_gain(Nonlinearity::LeakyRelu(negative_slope))` は `negative_slope * negative_slope` を `f32` のまま計算していたため、`|negative_slope| > √f32::MAX ≈ 1.85e19` という**有限**な入力で中間値が `inf` になり、`2.0 / (1.0 + inf) == 0.0` の `sqrt` 経由で `calculate_gain` が誤って `0.0` を返していた（`negative_slope = f32::MAX` の正しい gain は約 `4.2e-39`——`f32` の subnormal 域だが表現可能）。`kaiming_uniform`／`kaiming_normal` は `gain == 0.0` だと `std == 0`／`bound == 0` になり重みが全て 0 で初期化されてしまう。
+  - `calculate_gain` を `calculate_gain_f64`（新設・`private`）＋`as f32` ダウンキャストへ分離し、二乗・除算・平方根を `f64` で計算してから最後の 1 回だけ `f32` へダウンキャストするよう是正した。`kaiming_gain` も `f64` を返すよう変更し、`kaiming_uniform`／`kaiming_normal` は `std`／`bound` の計算（`gain / √fan`・`std * √3`）も `f64`（`fan as f64`）で行ってから最後にダウンキャストする。`xavier_uniform`／`xavier_normal` の `bound`／`std`（`gain * √(6/denom)`・`gain * √(2/denom)`）も同じ理由で `f64` 化した。
+  - **挙動変化（1 点。doc に明記）**: `calculate_gain(LeakyRelu(f32::INFINITY))` は旧実装では `f32` の不定形経路（`1.0 + inf` の除算）を辿り `NaN` を返していたが、`f64` でも同じ極限（`negative_slope² → inf`・`2/(1+inf) → 0`）を辿るため `0.0`（数学的な極限値と一致し `NaN` より意味のある結果）を返すようになる。`negative_slope` は有限値の想定（PyTorch の `leaky_relu` も有限のスロープを前提とする）であり、呼び出し元（`kaiming_uniform`／`kaiming_normal`）は `a`（`negative_slope` の実引数）の有限性を事前検査するため実害はない。
+  - **`init.rs` の全 `f32` 中間演算の棚卸し（P2 の「類型」点検。式・旧挙動・対処）**:
+
+    | 式（関数） | 旧挙動 | 対処 |
+    |---|---|---|
+    | `LeakyRelu`: `negative_slope * negative_slope`（`calculate_gain`） | `\|negative_slope\| > 1.85e19` で中間値 `inf` → `gain` が誤って `0` | **f64 化（本件の主対象）** |
+    | `calculate_gain` の他 4 分岐（`Linear`／`Sigmoid`／`Tanh`／`Relu`／`Selu`） | 定数（RHS に変数を含まない） | 対象外（`f64` 定数へ統一のみ実施。挙動不変） |
+    | `xavier_uniform`: `gain * (6.0 / denom as f32).sqrt()` | 単発の `f32` 演算。真に表現域を超える場合のみ `is_finite` 検査で拒否（既存で安全）だが `denom`（`usize`）を `f32` へ変換する際 `2^24` 超で丸め誤差が生じうる | `f64` 統一（一貫性・精度向上目的。挙動不変の範囲を拡大） |
+    | `xavier_normal`: `gain * (2.0 / denom as f32).sqrt()` | 同上 | 同上 |
+    | `kaiming_uniform`／`kaiming_normal`: `gain / (fan as f32).sqrt()`・`std * 3f32.sqrt()` | `gain` 自体が `calculate_gain` 経由で `√2` 程度以下のため単体では overflow しないが、`fan as f32` は `fan > 2^24` で丸め誤差が生じうる | `f64` 統一 |
+    | `calculate_fan_in_and_fan_out`: `shape[2..]`／`fan_in`／`fan_out` の `checked_mul` | `usize` の `checked_mul`（P1 側で確保失敗として扱う対象。P2 の f32 中間演算とは別軸） | P1 側で `alloc_failed()` へ是正済み（重複対応なし） |
+    | `fill_uniform` の幅 `high - low` | 前回（P2・`init.rs:264`）是正済み | — |
+    | `fill_normal`／`trunc_normal` の `z * std + mean` | 前回（同上）是正済み | — |
+    | `orthogonal`: `q_slice[..] * gain` | `q` の各成分は単位ノルム由来で `\|q_ij\| <= 1` に収まるため `\|q_ij * gain\| <= \|gain\|`——`gain` が有限なら積も必ず有限（証明のみ。コード変更なし） | 対象外 |
+
+  - **回帰テスト**: `crates/autodiff/tests/nn_init.rs::calculate_gain_leaky_relu_large_finite_slope_does_not_collapse_to_zero`（`LeakyRelu(f32::MAX)` の gain が有限かつ非ゼロであることを確認）、`kaiming_uniform_large_finite_a_does_not_produce_all_zero_weights`（`a = f32::MAX`・`LeakyRelu` で呼んでも全要素が `0.0` に潰れないことを確認）。既存の `calculate_gain_matches_known_values`（許容誤差付き比較のため `f64` 経路への変更後も通過）・`kaiming_uniform_uses_a_as_leaky_relu_negative_slope`（同上）は変更なしで通過することを確認した。
