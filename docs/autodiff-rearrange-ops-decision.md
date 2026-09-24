@@ -171,6 +171,19 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 - `docs/compat-api-scope.md`: §1.2「形状操作」行へ追補
 - `docs/README.md`: 本 doc・perf log README の索引行を追加
 
+**追記（イシュー #2143 レビュー指摘対応）**: `crates/facade/tests/
+rearrange_ops_backend_parity.rs` の `#[ignore]` テストは当初 `flip`
+forward のみで、`repeat`／`tile` backward の実機カバレッジが欠けて
+いた（§7・本節が申し送る「期待結果」と実際のテスト内容の齟齬）。
+`cuda_repeat_tile_backward_matches_cpu_reference`・
+`metal_repeat_tile_backward_matches_cpu_reference`（`#[ignore]`）を
+追加し、CPU 側テストも `cpu_repeat_backward_matches_naive_reference_
+within_tolerance` から `cpu_repeat_tile_backward_matches_naive_
+reference_within_tolerance` へ改名して tile backward の突き合わせを
+追加した（属性なしテストは 4 件のまま、CUDA／Metal `#[ignore]` は
+2 件 → 4 件）。`docs/perf/logs/shape-repeat-tile-flip-roll-2143/
+README.md` も新テスト名に追随済み。
+
 承認取得後の追随（本イシューでは未実施）: `Var::repeat`／`tile`／
 `flip`／`roll` 等の薄い委譲メソッド追加、facade 保留ガード
 （`VarRearrangeOpsHoldDoctestGuard`・対応する否定ガード 4 件）の撤去。
