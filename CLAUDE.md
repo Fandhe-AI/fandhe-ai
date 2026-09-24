@@ -49,7 +49,7 @@ fandhe-ai/
 │       └── framework-compare/parity_torch_truth.py # PyTorch GEMM の parity fail 要素を厳密真値と突合する診断専用ツール（#1184 の `parity_dump_truth.py` 同型。`bench_py.py` と同じ入力・参照・複合判定を再現し c／線形 K・√K 形の救済表を出力。`--self-test` は torch 不在で torch 経路 skip。イシュー #1985）
 ├── .github/workflows/
 │   ├── ci.yml               # rust-ci（Fandhe-AI/actions rust-base-ci 呼び出し: fmt / clippy / test / deny。#325）+ 固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / runner-policy / guardrail-regression / verification-gates）+ ci-complete
-│   ├── codex-review.yml     # Codex PR 自動レビュー wrapper（Fandhe-AI/actions codex-review を SHA 固定呼び出し。#326。public 構成〈post-feedback-runner-label: ubuntu-latest〉へ切替済み。#469）
+│   ├── ai-review.yml        # ai-review（provider: codex）による PR 自動レビュー wrapper（Fandhe-AI/actions ai-review を `@latest` 呼び出し。#326。旧 codex-review.yml から移行。public 構成〈post-feedback-runner: ubuntu-latest〉へ切替済み。#469）
 │   ├── verification-gate-bench.yml # bench ゲート（schedule／workflow_dispatch。TASK-6.1c）
 │   ├── guardrail-regression-schedule.yml # guardrail 2 層検証の schedule 定期実行・失敗時 Issue 可視化（TASK-6.1b）
 │   ├── clippy-nocache-schedule.yml # キャッシュなしフルビルド clippy の定期検証・失敗時 Issue 可視化（イシュー #918）
@@ -110,7 +110,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | `.claude/rules/delegation-impl.md` | 作成・編集フェーズの委譲マッピング・実装フロー標準 |
 | `.claude/rules/coding-rust.md` | 完全自作コア方針・cfg ベースバックエンド・FMA 契約統一・品質基準 |
 | `.claude/rules/deps-policy.md` | 許容依存 8 区分・`=x.y.z` 完全固定・禁止リスト・ライセンス要件 |
-| `.claude/rules/ci.md` | **CI は GitHub ホステッド（`ubuntu-latest`）既定**（例外は codex-review の codex 実行ジョブのみ）・fork PR 対策・timeout 必須・SHA 固定・fail-closed 集約 |
+| `.claude/rules/ci.md` | **CI は GitHub ホステッド（`ubuntu-latest`）既定**（例外は ai-review の codex 実行ジョブのみ）・fork PR 対策・timeout 必須・SHA 固定・fail-closed 集約 |
 | `.claude/rules/security.md` | OWASP Top 10・秘密情報混入防止・自己修復ループのガードレール |
 | `.claude/rules/japanese-style.md` | 日本語出力スタイル |
 | `.claude/rules/conventional-commits.md` | Conventional Commits 詳細規約（`--no-verify` 禁止） |
