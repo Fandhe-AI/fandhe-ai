@@ -335,10 +335,39 @@ fn fill_uniform(len: usize, low: f32, high: f32) -> Result<Vec<f32>, AutodiffErr
     with_global_rng(|rng| {
         for _ in 0..len {
             let v = low_f64 + f64::from(rng.next_unit_f32()) * width_f64;
-            out.push(v as f32);
+            out.push(exclude_high(v as f32, low, high));
         }
     });
     Ok(out)
+}
+
+/// `[low, high)`（半開区間。上限 `high` を排他）を**最終出力型
+/// （`f32`）で**保証する（codex-review 指摘。PR #2239）: `next_unit_f32`
+/// 自体は `[0, 1)` だが、`low + t·(high - low)` を `f64` で計算した
+/// 真の値が `high` 未満でも、`f32` へダウンキャストする際の最近接丸め
+/// で `high` そのもの（`low`・`high` が隣接する `f32` で `t` が最大値
+/// `1 - 2^-24` に近い場合等）へ丸め上がることがあり、`fill_uniform` が
+/// 明記する `[low, high)` 契約を破る（`fill_uniform` の唯一の呼び出し
+/// 元 `uniform`・および `-bound..bound` を渡す `xavier_uniform`／
+/// `kaiming_uniform` に波及する）。
+///
+/// `v >= high` なら `high` の直前の有限 `f32`（[`f32::next_down`]。
+/// Rust 1.86 で安定化済み）へ補正する。`low == high` の縮退ケース
+/// （`uniform_low_equals_high_is_constant` が固定する「定数 `low` を
+/// 返す」契約）では `width_f64 == 0.0` のため `v` は常に厳密に `low`
+/// （`== high`）になり本関数の補正条件（`v >= high`）に必ず入るが、
+/// `high.next_down()` は `low` 未満になってしまうため `.max(low)` で
+/// 下限へクランプし、既存の「`low == high` は定数 `low` を返す」挙動を
+/// 保つ。`v < low` へ丸め落ちる経路は存在しない（`t >= 0.0`・
+/// `width_f64 >= 0.0` かつ `low` 自体が厳密に表現可能な `f32` である
+/// ため、`v_f64 >= low_f64` が常に成り立ち、最近接丸めは `low` 未満には
+/// ならない——`low` 自身が丸め候補の 1 つであるため）。
+fn exclude_high(v: f32, low: f32, high: f32) -> f32 {
+    if v >= high {
+        high.next_down().max(low)
+    } else {
+        v
+    }
 }
 
 /// `N(mean, std²)` で `len` 要素を埋める（Box–Muller 変換・`f64` 中間
@@ -956,6 +985,45 @@ pub fn trunc_normal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `f64` 計算
+    /// →`f32` ダウンキャストの最近接丸めで `v == high` になったケースが
+    /// `high` の直前の有限 `f32` へ補正されることを、乱数を経由せず
+    /// `exclude_high` を直接呼んで固定する（決定的）。
+    #[test]
+    fn exclude_high_corrects_value_rounded_up_to_high() {
+        let low = 1.0f32;
+        let high = f32::from_bits(low.to_bits() + 1); // `low` の次に表現可能な f32
+        // `v == high`（最近接丸めで上限へ丸め上がった状況を模す）。
+        let corrected = exclude_high(high, low, high);
+        assert!(corrected < high, "high 未満へ補正されていない: {corrected}");
+        assert!(corrected >= low, "low を下回って補正された: {corrected}");
+        assert_eq!(
+            corrected, low,
+            "low と high が隣接する場合は low に一致するはず"
+        );
+    }
+
+    #[test]
+    fn exclude_high_leaves_values_strictly_below_high_unchanged() {
+        assert_eq!(exclude_high(0.5, 0.0, 1.0), 0.5);
+    }
+
+    #[test]
+    fn exclude_high_degenerate_low_equals_high_returns_low() {
+        // `low == high` の縮退ケース（`uniform_low_equals_high_is_constant`
+        // が固定する「定数 low を返す」契約）。
+        let corrected = exclude_high(1.5, 1.5, 1.5);
+        assert_eq!(corrected, 1.5);
+    }
+
+    // エンドツーエンドの決定的回帰（`low`・`high` を隣接する正の `f32`
+    // に設定し、全出力が `high` 未満に収まることを確認する）は
+    // `manual_seed`／並列テスト直列化用ロックを共有する
+    // `crates/autodiff/tests/nn_init.rs::uniform_never_returns_high_for_
+    // adjacent_f32_bounds` に置く（本モジュールの `#[cfg(test)]` は
+    // プロセスグローバル RNG の直列化インフラ〈`test_lock`〉を持たない
+    // ため）。
 
     #[test]
     fn same_seed_produces_same_weights() {

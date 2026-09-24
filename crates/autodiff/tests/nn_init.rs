@@ -122,6 +122,31 @@ fn uniform_extreme_finite_bounds_do_not_produce_inf_or_nan() {
     }
 }
 
+/// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `uniform` が
+/// 明記する半開区間 `[low, high)` の排他上限を、`low`・`high` を隣接
+/// する正の `f32` に設定して固定する。この設定では `fill_uniform` が
+/// `f64` で計算する真の値のほぼ全てが `low` と `high` の間に他の
+/// 表現可能な `f32` を持たない（`low` と `high` の 2 値しか候補が
+/// ない）ため、多数の要素を生成すれば最近接丸めで `high` へ丸め
+/// 上がる経路（`nn::init::exclude_high` が補正する対象）を確実に
+/// 踏む（乱数の最大値を直接注入できないため、要素数を十分大きく取る
+/// ことで決定的に再現する）。
+#[test]
+fn uniform_never_returns_high_for_adjacent_f32_bounds() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(91);
+    let low = 1.0f32;
+    let high = f32::from_bits(low.to_bits() + 1);
+    let t = init::uniform(&[200_000], low, high).unwrap();
+    for &v in t.host_slice().iter() {
+        assert!(
+            v < high,
+            "high 以上の値が出力された（[low, high) 契約違反）: {v}"
+        );
+        assert!(v >= low, "low 未満の値が出力された: {v}");
+    }
+}
+
 /// 同型の回帰: `xavier_uniform`／`kaiming_uniform` は `fill_uniform` へ
 /// `[-bound, bound]` を渡すため、`bound` 自体は有限でも幅 `2*bound` が
 /// `f32` overflow する境界（`bound` を `f32::MAX` に近い値まで押し上げる
