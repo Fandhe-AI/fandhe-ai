@@ -155,8 +155,11 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
 - **捕捉規則**: `move` による所有値の捕捉を想定する。捕捉する値は **`Send + Sync`** でなければならな
   い（クロージャの自動 trait 実装は捕捉環境の型に従うため、`!Sync` な値を捕捉すると closure 自体が
   `!Sync` になり、上記の型境界を満たせない）。例: 統計を集める `Arc<Mutex<…>>`。
-  `std::sync::mpsc::Sender<T>` は `Send` だが `!Sync`（std 実装。`Sync` を得るには `Mutex` 等で包む必
-  要がある）なので、単独では捕捉できない例として明記する（誤って許容例に含めていた旧版の是正）。引
+  `std::cell::RefCell<T>`（`T: Send`）は `Send` だが `!Sync`（内部可変性を `unsafe impl` で明示的に
+  `Sync` にしていない標準ライブラリの実装。`Sync` を得るには `Mutex`／`RwLock` 等で包む必要がある）な
+  ので、単独では捕捉できない例として明記する（`std::sync::mpsc::Sender<T>` を同種の例として挙げてい
+  た旧版の是正。`Sender<T>` は `T: Send` のとき現行 Rust では `Send` かつ `Sync` であり `!Sync` の例
+  として不適切だった。codex-review 指摘・PR #2238）。引
   数は `&Tensor<f32>` の共有参照なので hook から勾配は変えられない。戻り値は `()` で、PyTorch の「勾
   配差し替え」相当の機能はスコープ外（`Tensor` に `&self` 経由の内部可変 API は存在しないため、構造
   的にも変更不能）。
@@ -254,6 +257,15 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
   `Tape::register_backward_hook(&self, var: &Var<'_>, hook) -> Result<HookHandle, AutodiffError>`、
   `Tape::remove_hook`）。`Var` に `pub fn` を足すと facade の `Var` 再エクスポート経由で公開面が自動
   的に広がり、`docs/compat-api-scope.md` §5 経路 2 の承認が要るため（§2）。
+- **クロステープ検証（codex-review 指摘・PR #2238 是正）**: `register_backward_hook` は `self` と
+  `var: &Var<'_>` を別々の引数として受け取るため、型上は他の `Tape` に属する `Var` も渡せてしまう。
+  `Gradients::get`（`backward.rs:75-77`）・`backward_impl`（`backward.rs:158-159`）と同じく、登録の
+  先頭で `var.tape_id() != self.id` を検証し、不一致なら側 table（§4.1 案 C の `hooks: RefCell<
+  HookRegistry>`）へ登録せず `Err(AutodiffError::TapeMismatch)` を返す契約とする。この検証を欠くと、
+  別 `Tape` の `Var` が持つ `NodeId` を自テープの `hooks` に登録してしまい、たまたま同じ index を持
+  つ無関係なノードの逆伝播で hook が誤発火し、別グラフの勾配を観察する構造的な誤動作になる。
+  `remove_hook`（§5.7）の `tape_id`／`epoch` 検証と対になる契約であり、登録側・解除側の双方で
+  `TapeMismatch` の fail-closed 検証を揃える。
 - forward 側の `nn::ForwardHooked` も、facade の `nn` が未公開（#2133）のため autodiff 内部に閉じる。
 - facade への公開は承認事項（§11）とする。#2139 では、`Var::register_backward_hook`・
   `Var::register_forward_hook`・`Tape::register_backward_hook` が facade に現れないことを、
@@ -269,6 +281,7 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
   - hook が `Err` を返した場合の打ち切り・伝播
   - hook の有無での勾配 bit 一致（CPU 本番 ops と naive 参照実装の双方）
   - `requires_grad == false`／resident ノードへの登録拒否
+  - 別 `Tape` の `Var` を渡した `register_backward_hook` の拒否（`Err(TapeMismatch)`。§7）
   - `Tape::reset` 後の `HookHandle` 無効化（`TapeMismatch`）
   - `Tape: Send` の静的アサーション（hook registry を含めても崩れないこと）
   - `nn::ForwardHooked` の `Module` メソッド委譲網羅性
