@@ -36,6 +36,13 @@
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
 //! 外部入力を受け取らない（`.claude/rules/security.md`）。
+//!
+//! `var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold`
+//! は上記のソース走査型ガードとは別方式（型レベルの正のプローブ）で、
+//! `Var`（`crate::var.rs`。facade からは `fandhe_ai::Var` として `lib.rs:184`
+//! で再エクスポート済み）が `Add`／`Sub`／`Mul`／`Div`／`Neg` 等の演算子
+//! トレイトを実装していないことを固定する（イシュー #2136 は承認待ちで
+//! 保留。詳細は `docs/autodiff-var-operator-overload-design.md` §14）。
 
 use std::path::Path;
 
@@ -5756,4 +5763,134 @@ fn compat_sequential_has_no_introspection_methods() {
              対象外としている設計判断に違反）"
         );
     }
+}
+
+/// `fandhe_ai::Var`（`Var<'t>`・借用 `&Var<'t>`）が算術演算子トレイト
+/// （`Add`／`Sub`／`Mul`／`Div`／各 `*Assign`／`Neg`）を実装していない
+/// ことを固定する（イシュー #2136。実装計画 §3.2）。
+///
+/// # 背景
+///
+/// イシュー #2136（`Var` 演算子オーバーロード実装）・設計元の #2135・
+/// 親 #2131・設計 PR #2237 のいずれにも、リポジトリ所有者による明示
+/// 承認コメントが確認できない（bot（`github-actions`／codex）の自動
+/// レビューのみ）。`docs/compat-api-scope.md` §5 は「§5 経路 2 の承認が
+/// 得られるまで #2136（実装）は着手不可」と定めており、`Var` に
+/// トレイト impl を追加すると `crates/facade/src/lib.rs:184` の
+/// `pub use fandhe_ai_autodiff::{..., Var, ...}` を通じて facade の
+/// 公開面が自動的に拡大するため（「autodiff にだけ入れて facade には
+/// 出さない」は構造上できない）、本 PR では `crates/autodiff/src/**`・
+/// `crates/facade/src/**` を変更せず、本テストで現状（未実装）を
+/// fail-closed に固定する。
+///
+/// # ガード方式（#2133 の `NnModuleHoldDoctestGuard` とは別方式）
+///
+/// #2133 のガードはソースの `pub use` 行に現れる「名前」の衝突を
+/// 検出する方式だが、トレイト実装は再エクスポートのような新しい
+/// 識別子を導入しないため同じ方式では検出できない。代わりに
+/// `static_assertions::assert_not_impl_any!` と同じ原理の曖昧性
+/// トリック（依存追加を避け手書き）を用いる: 対象の型パラメータ
+/// （`()`）へブランケット実装した `AmbiguousIfImpl<()>` に加え、
+/// 「対象トレイトを実装している場合に限り」別の型パラメータ
+/// （`Invalid`）へも実装されるブランケット実装を用意すると、対象の
+/// トレイトが実際に実装されている場合にのみ `<$ty as
+/// AmbiguousIfImpl<_>>::probe` の型パラメータ推論が曖昧になり
+/// （E0283 系）、このテストバイナリのコンパイル自体が失敗する
+/// （fail-closed）。文字列走査の heuristics（`.claude/rules/
+/// out-of-scope-tracking.md` 系の過去指摘往復を招いた方式）は使わない。
+///
+/// # 既知の限界
+///
+/// 判定は rustc のコンパイル時トレイト解決に依るため、無効な `cfg`
+/// （例 `target_os = "macos"` 限定）の下に置かれた演算子 impl は
+/// Linux CI では検出できない。コア型の算術演算子 impl を OS 限定に
+/// する正当な理由はないため許容する。
+///
+/// # 承認取得後の撤去方針
+///
+/// #2136 の承認取得後、演算子オーバーロードを実装する際は、実装対象
+/// の型・トレイトの組に対応する `assert_not_impl!` 行を本テストから
+/// 削除すること（`crates/autodiff/tests/operator_overload.rs`
+/// （新規）の bit 一致テストへ置き換える）。
+#[test]
+fn var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold() {
+    // このテスト関数のスコープに閉じたヘルパー。他テストの名前空間を
+    // 汚さないための private な trait・macro（モジュールを分けない
+    // ことで `use` の追加が不要になる）。
+    trait AmbiguousIfImpl<A> {
+        fn probe() {}
+    }
+    impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+
+    macro_rules! assert_not_impl {
+        ($ty:ty: $($tr:path),+ $(,)?) => {{
+            $({
+                struct Invalid;
+                impl<T: ?Sized + $tr> AmbiguousIfImpl<Invalid> for T {}
+            })+
+            // `_` の推論が一意に定まらない（ブランケット実装が複数
+            // 候補になる）場合、対象トレイトが実装されていることを
+            // 意味し、コンパイルエラーで検出する。
+            let _ = <$ty as AmbiguousIfImpl<_>>::probe;
+        }};
+    }
+
+    use fandhe_ai::Var;
+    use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+
+    assert_not_impl!(
+        Var<'static>:
+        Add<Var<'static>>, Add<&'static Var<'static>>, Add<f32>, Add<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Add<Var<'static>>, Add<&'static Var<'static>>, Add<f32>, Add<f64>,
+    );
+
+    assert_not_impl!(
+        Var<'static>:
+        Sub<Var<'static>>, Sub<&'static Var<'static>>, Sub<f32>, Sub<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Sub<Var<'static>>, Sub<&'static Var<'static>>, Sub<f32>, Sub<f64>,
+    );
+
+    assert_not_impl!(
+        Var<'static>:
+        Mul<Var<'static>>, Mul<&'static Var<'static>>, Mul<f32>, Mul<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Mul<Var<'static>>, Mul<&'static Var<'static>>, Mul<f32>, Mul<f64>,
+    );
+
+    assert_not_impl!(
+        Var<'static>:
+        Div<Var<'static>>, Div<&'static Var<'static>>, Div<f32>, Div<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        Div<Var<'static>>, Div<&'static Var<'static>>, Div<f32>, Div<f64>,
+    );
+
+    assert_not_impl!(Var<'static>: Neg);
+    assert_not_impl!(&'static Var<'static>: Neg);
+
+    assert_not_impl!(
+        Var<'static>:
+        AddAssign<Var<'static>>, AddAssign<&'static Var<'static>>,
+    );
+    assert_not_impl!(
+        Var<'static>:
+        SubAssign<Var<'static>>, SubAssign<&'static Var<'static>>,
+    );
+    assert_not_impl!(
+        Var<'static>:
+        MulAssign<Var<'static>>, MulAssign<&'static Var<'static>>,
+    );
+    assert_not_impl!(
+        Var<'static>:
+        DivAssign<Var<'static>>, DivAssign<&'static Var<'static>>,
+    );
 }

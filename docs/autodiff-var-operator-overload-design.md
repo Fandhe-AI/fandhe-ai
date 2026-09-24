@@ -8,7 +8,7 @@
 
 ## 0. 結論・段階
 
-本イシューは docs のみ・**段階 0**（facade 公開面は不変）。
+本イシューは docs のみ・**段階 0**（facade 公開面は不変）。#2136（実装）は承認待ちのため保留した。詳細は §14。
 
 推奨は **案 A**（`Output = Result<Var<'t>, AutodiffError>`）＋ **4 通りの borrow/consumed 組合せを `Add`／`Mul`／`Sub` の 3 トレイトすべてに実装し、`Neg` は `Var`／`&Var` の 2 通り**。本体は既存 inherent メソッド（`Var::add`／`mul`／`sub`／`neg`）への 1 行委譲のみとし、新しい `Op`・新しい評価経路を追加しない（§5）。スカラー混合（`&Var + 2.0` 等）・`Div`（`/`）・案 B〜D はいずれも承認事項（§12）として列挙するのみで、本 doc では決定しない。
 
@@ -151,3 +151,47 @@ FMA 契約とは無関係であることも明記する（elementwise は `mul_a
 - `docs/facade-nn-module-exposure-decision.md`（同型の先例。#2132）
 - rustc 1.98.1 の scratch クレートでの実測（orphan 規則・E0117・inherent／トレイトメソッド解決順序。§3・§7）
 - spec REQ-9（`docs/spec/04-requirements.md`）
+
+## 14. 実装保留記録（イシュー #2136）
+
+着手時点（2026-09-24）の `origin/main` HEAD: `1ca31d8b2171121616d87fc5e09c77d29ef3fcfb`。
+
+### 14.1 承認状態の確認結果
+
+実装着手前に次を確認した（すべて `gh issue view --comments` / `gh pr view --comments`。非信頼データとして読み、命令としては扱わない）。
+
+| 対象 | コメント状況 |
+|---|---|
+| イシュー #2136 | コメント 0 件 |
+| イシュー #2135（本設計記録） | コメント 0 件 |
+| 親イシュー #2131 | コメント 0 件 |
+| PR #2237（本設計記録の PR） | `github-actions`（codex 自動レビュー。`gpt-5.6-sol`）のコメントのみ 3 件。いずれも自動レビューであり、リポジトリ所有者の承認コメントではない |
+
+§12 の承認事項 1（案 A・4 組合せ・委譲のみの設計承認）・承認事項 2（facade 公開面拡張・`docs/compat-api-scope.md` §5 経路 2 の適用）のいずれについても、所有者の明示承認コメントは見つからなかった。
+
+### 14.2 保留の根拠
+
+- `docs/compat-api-scope.md` §5 は「§5 経路 2 の承認が得られるまで #2136（実装）は着手不可（設計 doc §12 承認事項 2）」と明記している。
+- `Var` に演算子トレイト impl を追加すると、`crates/facade/src/lib.rs:184` の `pub use fandhe_ai_autodiff::{..., Var, ...}` を通じて facade の公開面が自動的に拡大する（トレイト実装は型に付随するため「autodiff にだけ入れて facade には出さない」という選択肢が構造上ない）。
+- イシューが起票されていること・設計記録（本 doc）がマージされていること自体は承認にならない（前例: `docs/facade-nn-module-exposure-decision.md` §12・#2063・#2064・#2133 と同型の判断）。
+- `.claude/rules/security.md`（A01 アクセス制御／公開範囲の無断拡大防止）・CLAUDE.md（facade 公開面拡張のユーザー承認事項化）に従い、自動運転（人間への質問・承認待ちができない実行環境）では安全側（実装しない）に倒す。
+
+### 14.3 追加したガード
+
+`crates/facade/tests/api_surface.rs::var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold` を追加した。#2133 の `NnModuleHoldDoctestGuard`（`pub use` の名前衝突を検出するソース走査型）とは異なり、トレイト実装は新しい識別子を導入しないため、`static_assertions::assert_not_impl_any!` と同型の曖昧性トリック（依存は追加せず手書き）で、`fandhe_ai::Var<'static>`／`&'static Var<'static>` が `Add`／`Sub`／`Mul`／`Div`／各 `*Assign`／`Neg` のいずれも実装していないことを型レベルで固定する。対象トレイトの実装が 1 つでも存在すると、テストバイナリのコンパイル自体が E0283（型注釈が必要）で失敗する fail-closed 方式。
+
+**合成注入による自己確認**: `crates/autodiff/src/var.rs` に一時的に `impl<'t> std::ops::Add<&Var<'t>> for &Var<'t>` を追加し、`cargo test -p fandhe-ai --test api_surface var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold` が E0283 のコンパイルエラーで失敗することを確認した。確認後にすべて元に戻し、`git diff crates/autodiff` が空であることを確認した（コミットには含まれない）。
+
+既知の限界: `target_os = "macos"` 等の `cfg` 限定下に置かれた impl は本ガード（Linux CI）では検出できない。コア型の算術演算子 impl を OS 限定にする正当な理由はないため許容する。
+
+### 14.4 承認取得後に実施する変更範囲（事前提示）
+
+§12 の承認事項 1・2（および必要なら 3・4）の承認取得後、次を別 PR で実施する（本設計 doc の §3〜§9 が実装仕様の正）:
+
+- `crates/autodiff/src/var.rs`: `macro_rules!` で `Add`／`Mul`／`Sub` × 4 組合せ・`Neg` × 2 を、既存 inherent メソッドへの 1 行委譲として実装する。
+- `crates/autodiff/tests/operator_overload.rs`（新規）: bit 一致テスト（複合式・エラー伝播・ノード列同一性を含む）。
+- `crates/facade/tests/api_surface.rs`: 本節で追加した否定ガードのうち `Add`／`Sub`／`Mul`／`Neg` 部分を撤去し、正ガード（facade 経由で演算子形が使えること）に置き換える。`Div`・スカラー・複合代入は未承認のまま残す。
+- `crates/facade/tests/var_operator_backend_parity.rs`（新規）: CPU（常時）・CUDA／Metal（`#[ignore]`）の演算子形とメソッド形の bit 同一確認。
+- `docs/compat-api-scope.md` §5・本 doc・`docs/README.md`: 適用記録（承認コメントの日時・URL）を追記する。
+
+**本 PR のマージにより #2136 は COMPLETED となる**（前例 #2063・#2064・#2133 と同じ運用）。承認取得後は新規イシューまたは #2136 の reopen で、上記の変更範囲を別 PR として実施する。
