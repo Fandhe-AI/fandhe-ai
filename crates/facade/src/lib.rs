@@ -1470,6 +1470,118 @@ struct NnModuleHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarBoolOpsHoldDoctestGuard;
 
+/// イシュー #2143（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
+/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカルの自由関数群
+/// （`__fandhe_rearrange_hold_probe::rearrange_ops::{repeat, tile, flip,
+/// roll}`）とトレイト（`__FandheRearrangeHoldProbe`）を導入し、実際に
+/// 使う関数を書く。facade がどの経路（`pub use
+/// fandhe_ai_autodiff::rearrange_ops;` のようなモジュール再エクスポート・
+/// `Var` への inherent メソッド追加・別名 `pub use`）で `rearrange_ops`
+/// という名前や 4 個の関数名を公開しても、ローカル定義との glob 衝突
+/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
+/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
+/// `x.flip()` 呼び出しが `Var::flip(&self, dims: &[usize])` に解決されて
+/// 型・引数数エラーになる）でコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// rearrange_ops_hold_doctest_globs_all_pub_modules`・`rearrange_ops_
+/// hold_doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_rearrange_ops`・`workspace_declares_rearrange_
+/// ops_fn_names_only_in_autodiff_rearrange_ops`）との多層防御の位置づけは
+/// `docs/autodiff-rearrange-ops-decision.md` §6「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_rearrange_hold_probe {
+///     pub mod rearrange_ops {
+///         pub fn repeat() {}
+///         pub fn tile() {}
+///         pub fn flip() {}
+///         pub fn roll() {}
+///     }
+/// }
+/// use __fandhe_rearrange_hold_probe::*;
+///
+/// struct __FandheRearrangeMarker;
+///
+/// trait __FandheRearrangeHoldProbe {
+///     fn repeat(&self) -> __FandheRearrangeMarker;
+///     fn tile(&self) -> __FandheRearrangeMarker;
+///     fn flip(&self) -> __FandheRearrangeMarker;
+///     fn roll(&self) -> __FandheRearrangeMarker;
+/// }
+///
+/// impl<'t> __FandheRearrangeHoldProbe for fandhe_ai::Var<'t> {
+///     fn repeat(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn tile(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn flip(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn roll(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+/// }
+///
+/// impl __FandheRearrangeHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn repeat(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn tile(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn flip(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn roll(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+/// }
+///
+/// impl __FandheRearrangeHoldProbe for fandhe_ai::Tape {
+///     fn repeat(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn tile(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn flip(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+///     fn roll(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `rearrange_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     rearrange_ops::repeat();
+///     rearrange_ops::tile();
+///     rearrange_ops::flip();
+///     rearrange_ops::roll();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheRearrangeMarker = fandhe_ai::Var::flip(x);
+///     let _: __FandheRearrangeMarker = x.flip();
+///     let _: __FandheRearrangeMarker = fandhe_ai::Var::roll(x);
+///     let _: __FandheRearrangeMarker = x.roll();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheRearrangeMarker = fandhe_ai::Tensor::repeat(x);
+///     let _: __FandheRearrangeMarker = x.repeat();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheRearrangeMarker = fandhe_ai::Tape::tile(x);
+///     let _: __FandheRearrangeMarker = x.tile();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarRearrangeOpsHoldDoctestGuard;
+
 /// イシュー #2139（親 #2138・#2131）の facade 公開保留を固定する doctest
 /// 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
 /// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
