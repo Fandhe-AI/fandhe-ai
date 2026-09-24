@@ -5767,7 +5767,11 @@ fn compat_sequential_has_no_introspection_methods() {
 
 /// `fandhe_ai::Var`（`Var<'t>`・借用 `&Var<'t>`）が算術演算子トレイト
 /// （`Add`／`Sub`／`Mul`／`Div`／各 `*Assign`／`Neg`）を実装していない
-/// ことを固定する（イシュー #2136。実装計画 §3.2）。
+/// ことを固定する（イシュー #2136。実装計画 §3.2）。**`Var op Var`／
+/// `Var op &Var`／`Var op f32`／`Var op f64` に加え、逆向き（スカラー
+/// 左辺）の `f32 op Var`／`f64 op Var`（PR #2247 codex-review 指摘 1）
+/// と、スカラー右辺・借用レシーバの複合代入 `Var: *Assign<f32/f64>`・
+/// `&Var: *Assign<...>`（同指摘 2）も同じ否定ガード方式で固定する**。
 ///
 /// # 背景
 ///
@@ -5892,6 +5896,82 @@ fn var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold() {
     assert_not_impl!(
         Var<'static>:
         DivAssign<Var<'static>>, DivAssign<&'static Var<'static>>,
+    );
+
+    // 逆向き（スカラー左辺）の演算子実装（`f32 + Var` 等）。codex-review
+    // 指摘（PR #2247 スレッド 1 件目）: `Var op f32` のみでは `f32 op Var`
+    // の追加を検出できないため、`f32`／`f64` を対象型とした
+    // `Add`/`Sub`/`Mul`/`Div<Var<'static>>`／`<&'static Var<'static>>`
+    // も同じ否定ガード方式で固定する。
+    //
+    // # `AmbiguousIfImpl` を使い回さない理由
+    //
+    // 上記の `Var<'static>: Add<f32>, Add<f64>, ...` の検査は
+    // `impl<T: ?Sized + Add<f32>> AmbiguousIfImpl<Invalid> for T {}` の
+    // ような無条件ブランケット実装を生成する。この `impl` はブロック内
+    // 宣言でもコンパイル単位全体（このクレート全体）でトレイト解決に
+    // 参加するため、`f32: Add<f32>`（プリミティブの自明な反射的実装）
+    // にも該当してしまい、以後 `<f32 as AmbiguousIfImpl<_>>::probe` を
+    // 呼ぶと無関係な既存ブロックの `Invalid` と `()` の 2 候補が生じて
+    // 常に E0283（曖昧）になる（実測確認済み: 本節をこのまま
+    // `AmbiguousIfImpl` へ追加すると `f32` プローブ時点で fail-closed
+    // ではなく偽陽性のコンパイルエラーになる）。プリミティブ型を `$ty`
+    // に取る本節専用に、別トレイト `AmbiguousIfImplRev`／別マクロ
+    // `assert_not_impl_rev!` を用意して汚染を避ける。
+    trait AmbiguousIfImplRev<A> {
+        fn probe() {}
+    }
+    impl<T: ?Sized> AmbiguousIfImplRev<()> for T {}
+
+    macro_rules! assert_not_impl_rev {
+        ($ty:ty: $($tr:path),+ $(,)?) => {{
+            $({
+                struct Invalid;
+                impl<T: ?Sized + $tr> AmbiguousIfImplRev<Invalid> for T {}
+            })+
+            let _ = <$ty as AmbiguousIfImplRev<_>>::probe;
+        }};
+    }
+
+    assert_not_impl_rev!(
+        f32:
+        Add<Var<'static>>, Add<&'static Var<'static>>,
+        Sub<Var<'static>>, Sub<&'static Var<'static>>,
+        Mul<Var<'static>>, Mul<&'static Var<'static>>,
+        Div<Var<'static>>, Div<&'static Var<'static>>,
+    );
+    assert_not_impl_rev!(
+        f64:
+        Add<Var<'static>>, Add<&'static Var<'static>>,
+        Sub<Var<'static>>, Sub<&'static Var<'static>>,
+        Mul<Var<'static>>, Mul<&'static Var<'static>>,
+        Div<Var<'static>>, Div<&'static Var<'static>>,
+    );
+
+    // スカラー右辺の複合代入（`Var: *Assign<f32/f64>`）・借用レシーバ
+    // （`&Var: *Assign<...>`）。codex-review 指摘（PR #2247 スレッド 2
+    // 件目）: 上記は `Var op= Var/&Var` のみを検査しており、スカラー
+    // 右辺（`v += 1.0f32` 等）と借用レシーバ経由の複合代入実装を検査
+    // していなかった。`&'static Var<'static>` 側は `*Assign` が通常
+    // `&mut self` を要求するため実装され得ないが、将来の変則的な実装
+    // （例: 内部可変性を用いた impl）も多層防御として同じ方式で固定する。
+    assert_not_impl!(
+        Var<'static>:
+        AddAssign<f32>, AddAssign<f64>,
+        SubAssign<f32>, SubAssign<f64>,
+        MulAssign<f32>, MulAssign<f64>,
+        DivAssign<f32>, DivAssign<f64>,
+    );
+    assert_not_impl!(
+        &'static Var<'static>:
+        AddAssign<Var<'static>>, AddAssign<&'static Var<'static>>,
+        AddAssign<f32>, AddAssign<f64>,
+        SubAssign<Var<'static>>, SubAssign<&'static Var<'static>>,
+        SubAssign<f32>, SubAssign<f64>,
+        MulAssign<Var<'static>>, MulAssign<&'static Var<'static>>,
+        MulAssign<f32>, MulAssign<f64>,
+        DivAssign<Var<'static>>, DivAssign<&'static Var<'static>>,
+        DivAssign<f32>, DivAssign<f64>,
     );
 }
 
