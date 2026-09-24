@@ -180,7 +180,12 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
   の中で実体化され、interior ノードは値を持たないこともある。
 - **推奨**: PyTorch と同じく **Module レベル**にする。追加型のラッパー `nn::ForwardHooked<M: Module>`
   （名称は #2139 で確定）を用意し、`Module::forward`／`forward_host` を委譲したあと hook を呼ぶ。
-  - hook の型は `Fn(&ForwardHookCtx<'_>) -> Result<(), AutodiffError> + Send + 'static`。
+  - hook の型は `Fn(&ForwardHookCtx<'_>) -> Result<(), AutodiffError> + Send + Sync + 'static`。backward
+    hook（§5.2）と同じ境界に揃える。`ForwardHooked<M>` は単一の hook を所有するだけで `Arc` 共有はし
+    ないため `Sync` は必須ではないが、`CustomFunction`（§2・`custom.rs:44`）の `Send + Sync + 'static`
+    と型シグネチャを揃えておくことで、closure の捕捉規則（Sync な値のみ捕捉可）を hook 機構全体で単
+    一にし、非対称な規約による実装時の取り違えを防ぐ（§5.2 是正時の codex-review 指摘を踏まえた予防
+    的統一）。
   - ctx は入出力の shape を実体化なしで返し、値は明示メソッド（`output_value() -> Result<Tensor<f32>,
     AutodiffError>`、`materialize_fallible` 経由）で取る。ctx は `Var` を露出しない（hook 内から新規
     push できない）。
