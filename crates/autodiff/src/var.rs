@@ -5213,7 +5213,7 @@ impl<'t> Var<'t> {
                 verify_shape(factors.r.shape(), &[k, n])?;
                 (factors.q, factors.r)
             }
-            Err(BackendError::Unsupported(_)) => eval::linalg::qr(&a_val),
+            Err(BackendError::Unsupported(_)) => eval::linalg::qr(&a_val)?,
             Err(other) => return Err(unify_backend_error(other)),
         };
         let q_id = self.tape.push_eager(

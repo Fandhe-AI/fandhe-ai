@@ -459,6 +459,31 @@ fn orthogonal_rejects_rank_below_2() {
     ));
 }
 
+/// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `orthogonal` は
+/// 巨大だが算術上有効な shape（`checked_mul` はオーバーフローしない）を
+/// 渡されても `Err` を返し、allocation panic／プロセス abort に至らない
+/// ことを確認する。`rows * cols == 2^62` は `f32` 換算バイト数
+/// （`2^62 * 4 == 2^64`）が `usize` の乗算そのもので折り返る規模であり、
+/// `fill_normal`（既存の `try_alloc` 経由）内部の `Vec::try_reserve_exact`
+/// が `Layout` 計算のみで `CapacityOverflow` を検出し、実際にアロケータを
+/// 呼び出すことなく即座に `Err` を返す（実メモリ確保を一切試みないため
+/// 環境依存性がなく、テストは高速かつ決定的に完了する）。`crate::eval::
+/// linalg::qr` 側の `Mat::try_zeros`／`try_vec_zeroed` 等の新規フォール
+/// ブル化は `mat_try_zeros_rejects_isize_overflowing_byte_size`／
+/// `try_vec_zeroed_rejects_isize_overflowing_byte_size`
+/// （`crates/autodiff/src/eval/linalg.rs`）で個別に固定済み——`qr` の
+/// 入力段階で使う実データ `Tensor` を伴わずに確保可否だけを検証できる
+/// のはこの 2 関数のみで、`orthogonal` 経由のエンドツーエンド呼び出し
+/// では `fill_normal` が同じオーダーの shape で必ず先に `Err` を返す
+/// ため `qr` 内部の新規分岐そのものへは到達しない。それでも `orthogonal`
+/// 自体がパイプライン全体を通して panic せず `Err` へ収束することを
+/// 固定する意味で本テストを維持する。
+#[test]
+fn orthogonal_rejects_huge_shape_without_panicking() {
+    let err = init::orthogonal(&[1usize << 40, 1usize << 22], 1.0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
 // ---------------------------------------------------------------------
 // trunc_normal
 // ---------------------------------------------------------------------

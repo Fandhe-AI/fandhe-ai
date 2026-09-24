@@ -656,47 +656,49 @@ pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffErr
     let gen_numel = gen_rows.checked_mul(gen_cols).ok_or_else(|| {
         invalid_argument("nn::init::orthogonal: 生成用行列の要素数がオーバーフローします")
     })?;
-    // `crate::eval::linalg::qr` は `Result` を返さず、内部の `Mat`（`f64`
-    // 要素。本ファイル冒頭「数値契約」参照）を `vec![0.0; ..]`／
-    // `Vec::with_capacity`／`.collect()` 等の非 fallible な確保で構築する
-    // （`crates/backend-cpu/src/linalg.rs::qr` も同型の既存実装で、
-    // これらの確保呼び出し自体は `eval::linalg` モジュール共通の設計
-    // 前提——同モジュール冒頭コメント「呼び出し元が shape の整合性を
-    // 保証する契約」——であり本 PR のスコープ外）。`orthogonal` の
-    // `data`（直前の [`fill_normal`]）は `f32` 換算（4 バイト／要素）で
-    // 確保可否を検証済みだが、`qr` 内部は `f64`（8 バイト／要素）の
-    // `Mat` を複数構築するため、`checked_mul` で `usize` オーバーフロー
-    // を回避できていても `gen_numel * size_of::<f64>()` が
-    // `isize::MAX` を超える形状では `Vec::with_capacity` 相当の確保が
-    // capacity overflow で panic しうる（本番経路 panic 禁止。
-    // `.claude/rules/coding-rust.md`。codex-review 指摘）。`qr` 内部の
-    // 個々の作業領域（`mat`／`q_reduced`／`r_reduced` 等）はいずれも
-    // 高々 `gen_rows * gen_cols == gen_numel` 要素に収まるため、同じ
-    // 要素数で `f64` 確保を事前に試み（成功時は即座に解放し、実際の
-    // 確保は `qr` 内部に委ねる）、失敗時は fail-closed に `Err` を返す
-    // ことで panic 経路を防ぐ（実アロケータの状態変化までは保証しない
-    // 「事前検査」であることに留意——真に確保不能な巨大形状を確実に
-    // 弾くのが目的であり、`try_reserve_exact` は capacity overflow・
-    // アロケータ枯渇のいずれも `Err` で報告する。`nn::init::try_alloc`
-    // と同じ手法）。
-    {
-        let mut probe: Vec<f64> = Vec::new();
-        probe.try_reserve_exact(gen_numel).map_err(|_| {
-            invalid_argument(
-                "nn::init::orthogonal: QR 分解の内部作業領域（f64 換算）の確保に失敗しました",
-            )
-        })?;
-    }
     let data = fill_normal(gen_numel, 0.0, 1.0)?;
     let m = Tensor::new(data, &[gen_rows, gen_cols])?;
-    let (q, _r) = crate::eval::linalg::qr(&m);
-    let q = if transposed {
-        q.transpose_2d()?.contiguous()
+    // `crate::eval::linalg::qr` は `Result` を返す（内部の `f64` 作業
+    // 領域——`Mat::try_from_tensor`／`Mat::try_zeros`／Householder
+    // ベクトルの一時確保——を全て `try_reserve_exact` 経由のフォール
+    // ブル確保へ統一済み）。単発の probe-then-drop 検査（予約後すぐ
+    // 解放するだけで、`qr` 内部が複数の `f64` 作業領域を同時に保持する
+    // 実際の確保失敗を防げない）では不十分という codex-review 指摘
+    // （PR #2239）を受け、確保そのものをフォールブル化して `?` で
+    // そのまま伝播する形に是正した（実アロケータがオーバーコミット
+    // 環境で成功を返した後に実メモリ不足で OOM killer が働く経路までは
+    // 防げないが、我々のコード内の allocation panic／abort 経路は
+    // 閉じる。`docs/facade-nn-init-exposure-decision.md` §6）。
+    let (q, r) = crate::eval::linalg::qr(&m)?;
+    // `R` は `orthogonal` では使わないため即座に破棄し（`Mat::try_zeros`
+    // 分の `f64`／`f32` 作業領域を早期解放）、入力用の `m`（`fill_normal`
+    // が確保した `f32` バッファ）も `q` の抽出後は不要になるため同様に
+    // 破棄する。`scaled`（同程度のサイズの新規バッファ）を確保する前に
+    // ピーク時の同時確保量を減らす目的（advisor 指摘。PR #2239）。
+    drop(r);
+    drop(m);
+    // `q` の shape は `[gen_rows, gen_cols]`（`transposed` の場合は
+    // 転置前の形状のまま）。`q.transpose_2d()?.contiguous()` を呼ぶと
+    // `rows*cols` 要素の `f32` をもう 1 回非フォールブルに確保する
+    // （`Tensor::contiguous` は `tensor-core` 全体で共有される既存の
+    // 非フォールブル実装であり本 PR のスコープ外）ため、ここでは
+    // 呼ばず `scaled`（[`try_alloc`] でフォールブル確保済み）へ
+    // 転置とスケールを同時に書き込む（codex-review 指摘「テンソル
+    // 変換」の是正。PR #2239）。
+    let q_slice = q.host_slice();
+    let mut scaled = try_alloc(gen_numel)?;
+    if transposed {
+        // `out[i, j] = q[j, i] * gain`（`q` は行優先 `[cols, rows]`
+        // 形状——`gen_rows = cols`・`gen_cols = rows`——のデータで、
+        // `q[j, i]` は `q_slice[j * rows + i]` に対応する）。
+        for i in 0..rows {
+            for j in 0..cols {
+                scaled.push(q_slice[j * rows + i] * gain);
+            }
+        }
     } else {
-        q
-    };
-    let mut scaled = try_alloc(q.host_slice().len())?;
-    scaled.extend(q.host_slice().iter().map(|&v| v * gain));
+        scaled.extend(q_slice.iter().map(|&v| v * gain));
+    }
     Tensor::new(scaled, shape).map_err(AutodiffError::from)
 }
 

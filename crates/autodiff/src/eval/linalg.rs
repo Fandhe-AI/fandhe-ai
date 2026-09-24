@@ -116,6 +116,71 @@ impl Mat {
         out
     }
 
+    /// フォールブルな [`Mat::zeros`]（[`qr`] 専用のナローな追加）。
+    /// 本モジュールの他関数（`inv`／`solve`／`cholesky`／`svd`／
+    /// `qr_vjp` 等）は「呼び出し元が shape の整合性を保証する契約」
+    /// （本ファイル冒頭）のもと引き続き非フォールブル
+    /// `Mat::zeros`／`Mat::from_tensor`／`Mat::to_tensor` を使う。
+    /// `qr` だけは `nn::init::orthogonal`（イシュー #2140）経由で
+    /// ユーザー指定 shape がほぼそのまま渡りうる公開 API の内部実装
+    /// であり、事前の 1 回きり probe-then-drop（`try_reserve_exact` で
+    /// 予約後すぐ解放するだけの検査）では `qr` 内部で複数の `f64` 作業
+    /// 領域を同時に保持する確保失敗を防げない（codex-review 指摘。
+    /// PR #2239）ため、実際に保持する確保そのものを `try_reserve_exact`
+    /// 経由のフォールブルにする。
+    fn try_zeros(rows: usize, cols: usize) -> Result<Mat, AutodiffError> {
+        let len = rows
+            .checked_mul(cols)
+            .ok_or_else(|| invalid("eval::linalg::Mat::try_zeros: 要素数がオーバーフローします"))?;
+        let mut data: Vec<f64> = Vec::new();
+        data.try_reserve_exact(len).map_err(|_| {
+            invalid("eval::linalg::Mat::try_zeros: f64 作業領域の確保に失敗しました")
+        })?;
+        data.resize(len, 0.0);
+        Ok(Mat { data, rows, cols })
+    }
+
+    /// フォールブルな [`Mat::from_tensor`]（[`qr`] 専用。`try_zeros` と
+    /// 同じ理由）。`t.host_slice()` は `t` が contiguous なら追加コピー
+    /// なしで借用する（`Tensor::host_slice` の doc 参照）。`qr` の唯一の
+    /// フォールブル呼び出し元 `nn::init::orthogonal` は `Tensor::new`
+    /// 直後の新規構築値を渡すため常に contiguous。非 contiguous な入力
+    /// （`var.rs::Var::qr` 経由）では `Tensor::contiguous()` 内部の
+    /// 非フォールブル確保が残るが、これは `tensor-core` 全体で共有される
+    /// 既存の設計前提であり本 PR（イシュー #2140）のスコープ外とする。
+    fn try_from_tensor(t: &Tensor<f32>) -> Result<Mat, AutodiffError> {
+        let shape = t.shape();
+        debug_assert!(
+            shape.len() == 2,
+            "eval::linalg::Mat::try_from_tensor: 呼び出し元が rank-2 を検査済みの契約"
+        );
+        let rows = shape[0];
+        let cols = shape[1];
+        let len = rows.checked_mul(cols).ok_or_else(|| {
+            invalid("eval::linalg::Mat::try_from_tensor: 要素数がオーバーフローします")
+        })?;
+        let mut data: Vec<f64> = Vec::new();
+        data.try_reserve_exact(len).map_err(|_| {
+            invalid("eval::linalg::Mat::try_from_tensor: f64 変換用作業領域の確保に失敗しました")
+        })?;
+        data.extend(t.host_slice().iter().map(|&v| f64::from(v)));
+        Ok(Mat { data, rows, cols })
+    }
+
+    /// フォールブルな [`Mat::to_tensor`]（[`qr`] 専用。上記と同じ理由）。
+    /// `Tensor::new` は渡した `Vec` をそのまま `Arc` へラップするだけで
+    /// 追加確保をしない（`tensor-core::Tensor::new` 実装参照）ため、
+    /// `build_tensor`（`Tensor::from_shape_fill` 経由でもう 1 回
+    /// `collect` する）を経由せずここで直接構築する。
+    fn try_to_tensor(&self) -> Result<Tensor<f32>, AutodiffError> {
+        let mut data: Vec<f32> = Vec::new();
+        data.try_reserve_exact(self.data.len()).map_err(|_| {
+            invalid("eval::linalg::Mat::try_to_tensor: f32 出力バッファの確保に失敗しました")
+        })?;
+        data.extend(self.data.iter().map(|&v| v as f32));
+        Tensor::new(data, &[self.rows, self.cols]).map_err(AutodiffError::from)
+    }
+
     /// `self @ other`（rank-2 の素朴な `f64` 逐次和。分解サイズ〈通常
     /// 小〜中規模〉が対象のため、`BackendOps::gemm` の並列 SIMD 実装を
     /// ここで再利用しない——本モジュールは `tensor-core` の `Tensor<f32>`
@@ -441,15 +506,28 @@ pub(crate) fn cholesky(a: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
 
 /// reduced QR（`A: [m,n]` → `Q: [m,k]`・`R: [k,n]`、`k = min(m,n)`）。
 /// `R` の対角は非負に正規化する（設計文書 §3.5「符号・ゲージ規約」）。
-pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
-    let mat = Mat::from_tensor(a);
+///
+/// **確保失敗は `Err` で伝播する**（`Result` を返す。`nn::init::
+/// orthogonal`〈イシュー #2140〉のように、公開 API 経由でほぼそのまま
+/// ユーザー指定 shape が渡りうる呼び出し元があるため。内部の `f64`
+/// 作業領域（`Mat::try_zeros`／`Mat::try_from_tensor`／`try_vec_zeroed`）
+/// と出力変換（`Mat::try_to_tensor`）は全て `try_reserve_exact` 経由の
+/// フォールブル確保へ統一し、単発の probe-then-drop 検査〈予約後すぐ
+/// 解放するだけで実際の同時確保を検証しない〉では防げなかった
+/// allocation panic／abort 経路を閉じる（codex-review 指摘。
+/// PR #2239）。**オーバーコミット環境での確保成功までは保証しない**
+/// （`try_reserve_exact` はカーネルが `mmap` を成功で返せば成功と
+/// 判定するため、実メモリ不足時の OOM killer 発火までは防げない。
+/// `docs/facade-nn-init-exposure-decision.md` §6 参照）。
+pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
+    let mat = Mat::try_from_tensor(a)?;
     let (m, n) = (mat.rows, mat.cols);
     let k = m.min(n);
     if m == 0 || n == 0 {
-        return (
+        return Ok((
             build_tensor(Vec::new(), &[m, k]),
             build_tensor(Vec::new(), &[k, n]),
-        );
+        ));
     }
 
     // Householder 反射を `r`（作業用に `A` を上書き）へ逐次適用する。
@@ -461,11 +539,14 @@ pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
     // 招いていた——`m×m` だけで約 80 GB。codex-review 指摘。
     // `docs/autodiff-linalg-design.md` §3.4「QR」）。
     let mut r = mat;
-    let mut reflectors: Vec<(usize, Vec<f64>)> = Vec::with_capacity(k);
+    let mut reflectors: Vec<(usize, Vec<f64>)> = Vec::new();
+    reflectors.try_reserve_exact(k).map_err(|_| {
+        invalid("eval::linalg::qr: 反射ベクトル一覧（列インデックス付き）の確保に失敗しました")
+    })?;
 
     for col in 0..k {
         // Householder ベクトル `v`（列 `col` の対角以下）を作る。
-        let mut x = vec![0.0; m - col];
+        let mut x = try_vec_zeroed(m - col)?;
         for i in col..m {
             x[i - col] = r.get(i, col);
         }
@@ -478,7 +559,12 @@ pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
         // 数値安定性のため `alpha` の符号は `x[0]` と逆にする
         // （標準的な Householder 反射の選択）。
         let alpha = if x[0] >= 0.0 { -norm_x } else { norm_x };
-        let mut v = x.clone();
+        // `x.clone()` は非フォールブルな確保（内部で `Vec::with_capacity`
+        // 相当の成長を行う）のため、`try_vec_zeroed` で確保してから
+        // 要素をコピーする（`nn::init::try_alloc` と同じ「確保してから
+        // 書き込む」パターン）。
+        let mut v = try_vec_zeroed(x.len())?;
+        v.copy_from_slice(&x);
         v[0] -= alpha;
         let norm_v: f64 = v.iter().map(|e| e * e).sum::<f64>().sqrt();
         if norm_v == 0.0 {
@@ -513,7 +599,7 @@ pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
     // 反射を逆順に適用する）。`col > j` の反射は `e_j`（`j` 列成分の
     // みが非零）の `[col, m)` 区間が全て 0 のため内積が 0 になり恒等
     // 変換となる（`if dot == 0.0 { continue }` が自然にスキップする）。
-    let mut q_reduced = Mat::zeros(m, k);
+    let mut q_reduced = Mat::try_zeros(m, k)?;
     for i in 0..k {
         q_reduced.set(i, i, 1.0);
     }
@@ -536,7 +622,7 @@ pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
 
     // `R` の先頭 k 行へ切り出しつつ対角の符号を非負へ正規化する
     // （対応する `Q` 列の符号も反転して `Q R = A` を保つ）。
-    let mut r_reduced = Mat::zeros(k, n);
+    let mut r_reduced = Mat::try_zeros(k, n)?;
     for row in 0..k {
         for c in 0..n {
             // 下三角部分（`R` の理論上ゼロになるべき成分。Householder の
@@ -558,7 +644,21 @@ pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
         }
     }
 
-    (q_reduced.to_tensor(), r_reduced.to_tensor())
+    Ok((q_reduced.try_to_tensor()?, r_reduced.try_to_tensor()?))
+}
+
+/// [`qr`] 専用のフォールブル `f64` 作業領域確保（`vec![0.0; len]` は
+/// 総バイト数が `isize::MAX` を超えると capacity overflow で panic
+/// するため、`try_reserve_exact` で確保可否を検証してから `resize`
+/// する。`nn::init::try_alloc` と同じ手法。`qr` の Householder ベクトル
+/// `x`／`v` の一時確保をこの経由へ統一した。codex-review 指摘
+/// 〈イシュー #2140・PR #2239〉）。
+fn try_vec_zeroed(len: usize) -> Result<Vec<f64>, AutodiffError> {
+    let mut v: Vec<f64> = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| invalid("eval::linalg::qr: f64 作業領域の確保に失敗しました"))?;
+    v.resize(len, 0.0);
+    Ok(v)
 }
 
 // =====================================================================
@@ -1675,7 +1775,7 @@ mod tests {
     #[test]
     fn qr_reconstructs_input_and_is_orthonormal() {
         let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
-        let (q, r) = qr(&a);
+        let (q, r) = qr(&a).unwrap();
         assert_eq!(q.shape(), &[3, 2]);
         assert_eq!(r.shape(), &[2, 2]);
         let reconstructed = mat_matmul(&q, &r);
@@ -1690,10 +1790,43 @@ mod tests {
     #[test]
     fn qr_r_diagonal_is_nonnegative() {
         let a = build_tensor(vec![-1.0, 2.0, 3.0, -4.0, 5.0, 6.0], &[3, 2]);
-        let (_, r) = qr(&a);
+        let (_, r) = qr(&a).unwrap();
         let r_data = dense_vec(&r);
         assert!(r_data[0] >= 0.0);
         assert!(r_data[3] >= 0.0);
+    }
+
+    /// codex-review 指摘の回帰（イシュー #2140・PR #2239）: `qr` 内部の
+    /// `f64` 作業領域確保（`Mat::try_zeros`）は `try_reserve_exact` 経由
+    /// のフォールブルであり、要素数積が `usize` に収まっても
+    /// `rows * cols * size_of::<f64>()` が `isize::MAX` を超える shape
+    /// では `Err` を返し panic／abort しないことを確認する。実際に
+    /// メモリを確保しようとする前に `Layout` 計算のみで capacity
+    /// overflow が判定されるため、`rows`・`cols` 自体は小さい `usize`
+    /// 値（`2^40`・`2^20`）で構わず、テストは即座に完了する（実データを
+    /// 伴う `Tensor` を経由すると要素数分の実確保が必要になり検証
+    /// できないため、`Mat::try_zeros` を直接呼ぶ）。
+    #[test]
+    fn mat_try_zeros_rejects_isize_overflowing_byte_size() {
+        // `rows * cols == 2^60` であり、`2^60 * 8 == 2^63 >
+        // isize::MAX == 2^63 - 1`（f64 換算で 1 バイトだけ超過する
+        // ぎりぎりの境界）。
+        let rows = 1usize << 40;
+        let cols = 1usize << 20;
+        let err = Mat::try_zeros(rows, cols).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// 上記と同型の回帰を [`try_vec_zeroed`]（`qr` の Householder ベクトル
+    /// `x`／`v` 用のフォールブル確保）に対しても固定する。
+    #[test]
+    fn try_vec_zeroed_rejects_isize_overflowing_byte_size() {
+        // `2^61 * 8 == 2^64` は `u64`（64bit `usize`）の乗算自体が折り
+        // 返るため、`Layout` 計算内の checked 演算が確実に `Err` へ
+        // 倒れることを確認する（`usize` 乗算オーバーフローと `isize::MAX`
+        // 超過のどちらの経路でも panic せず `Err` になる点を担保する）。
+        let err = try_vec_zeroed(1usize << 61).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 
     /// codex-review 指摘の回帰: `qr` は以前 `Mat::identity(m)`（`m×m` の
@@ -1707,7 +1840,7 @@ mod tests {
         let m = 100_000usize;
         let data: Vec<f32> = (0..m).map(|i| 1.0 + (i % 7) as f32).collect();
         let a = build_tensor(data, &[m, 1]);
-        let (q, r) = qr(&a);
+        let (q, r) = qr(&a).unwrap();
         assert_eq!(q.shape(), &[m, 1]);
         assert_eq!(r.shape(), &[1, 1]);
 
@@ -2171,10 +2304,10 @@ mod tests {
         let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 7.0], &[3, 2]);
         let sq = build_tensor(vec![1.0, -0.5, 0.3, 0.7, -0.2, 0.4], &[3, 2]);
         let sr = build_tensor(vec![0.5, -1.0, 0.0, 0.3], &[2, 2]);
-        let (q, r) = qr(&a);
+        let (q, r) = qr(&a).unwrap();
         let da = qr_vjp(&q, &r, &sq, &sr).unwrap();
         let numeric = numeric_grad(&a, |ap| {
-            let (qp, rp) = qr(ap);
+            let (qp, rp) = qr(ap).unwrap();
             scalar_dot(&qp, &sq) + scalar_dot(&rp, &sr)
         });
         assert_grad_close("qr combined", &da, &numeric);
