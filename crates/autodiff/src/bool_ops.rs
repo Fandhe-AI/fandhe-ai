@@ -124,6 +124,40 @@ pub fn ne_bool<'t>(a: &Var<'t>, b: &Var<'t>) -> Result<Tensor<bool>, AutodiffErr
     compare_bool(a, b, ScalarBinaryOp::Ne)
 }
 
+/// `checked_numel_for::<T>`（`fandhe_ai_tensor_core::tensor`。
+/// `pub(crate)` のためクレートを跨いで共有できない）・`backend-cuda::
+/// cast::checked_bytes_for`／`backend-metal::cast::checked_bytes_for`
+/// と同型の独立複製（同じ理由による複製。可視性の意味論が異なる
+/// クレートを跨ぐため個別に持つ）。要素数積の `usize` オーバーフロー
+/// に加え、要素型 `T` 換算のバイトサイズが `Vec` の allocation 上限
+/// （`isize::MAX` バイト）に収まるかも検査する。`Tensor::contiguous()`
+/// （内部で無検査の `numel()` 乗算・`Vec::with_capacity(numel)` を
+/// 呼ぶ）を呼ぶ直前に必ず通す。本モジュールはホスト常駐データを直接
+/// 実体化するため（`Vec<usize>` に切り出す `broadcast_to`
+/// と同型の view を巨大 shape へ broadcast してから `.contiguous()`
+/// する経路は `checked_shape_numel` 単体では検出できない）、確保前に
+/// 型付きエラーで拒否する（本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md`。codex-review P1 指摘の是正・
+/// イシュー #2141・PR #2241）。
+fn checked_bytes_for<T>(shape: &[usize]) -> Result<(), AutodiffError> {
+    let numel = shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or(ShapeError::ElementCountOverflow)
+        .map_err(AutodiffError::Shape)?;
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size > 0 {
+        let bytes = numel
+            .checked_mul(elem_size)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(AutodiffError::Shape)?;
+        if bytes > isize::MAX as usize {
+            return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
+        }
+    }
+    Ok(())
+}
+
 /// `a`／`b`（`Tensor<bool>`）を共通形状へブロードキャストした
 /// `Vec<bool>` の組を返す（[`logical_and`]／[`logical_or`] 共通実装）。
 /// ホスト常駐のデータに対してのみ計算し、GPU 専用カーネル・tape は
@@ -132,6 +166,7 @@ type BoolPairData = (Vec<usize>, Vec<bool>, Vec<bool>);
 
 fn broadcast_bool_pair(a: &Tensor<bool>, b: &Tensor<bool>) -> Result<BoolPairData, AutodiffError> {
     let out_shape = broadcast_shape(a.shape(), b.shape()).map_err(AutodiffError::Shape)?;
+    checked_bytes_for::<bool>(&out_shape)?;
     let a_bc = a
         .broadcast_to(&out_shape)
         .map_err(AutodiffError::Shape)?
@@ -164,6 +199,7 @@ pub fn logical_or(a: &Tensor<bool>, b: &Tensor<bool>) -> Result<Tensor<bool>, Au
 /// 要素ごとの否定（`torch.logical_not` の bool 入力版）。イシュー
 /// #2141。
 pub fn logical_not(a: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError> {
+    checked_bytes_for::<bool>(a.shape())?;
     let a_c = a.contiguous();
     let data: Vec<bool> = a_c.host_slice().iter().map(|&x| !x).collect();
     Tensor::new(data, a.shape()).map_err(AutodiffError::Shape)
@@ -184,6 +220,8 @@ pub fn logical_not(a: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError> {
 /// の空テンソルを返す（エラーにしない。PyTorch と同じ）。
 pub fn masked_select<'t>(x: &Var<'t>, mask: &Tensor<bool>) -> Result<Tensor<f32>, AutodiffError> {
     let out_shape = broadcast_shape(&x.shape(), mask.shape()).map_err(AutodiffError::Shape)?;
+    checked_bytes_for::<f32>(&out_shape)?;
+    checked_bytes_for::<bool>(&out_shape)?;
 
     let x_val = {
         let nodes = x.tape().nodes.borrow();
@@ -499,6 +537,58 @@ mod tests {
         assert!(matches!(
             masked_select(&x, &mask),
             Err(AutodiffError::Shape(_))
+        ));
+    }
+
+    // --- codex-review P1 是正の回帰テスト（イシュー #2141・PR #2241）:
+    // 巨大 broadcast view の `.contiguous()` 実体化は確保前に型付き
+    // エラーで拒否され panic しない。`backend-cuda::cast::
+    // checked_contiguous_rejects_huge_broadcast_view_input_without_panicking`
+    // と同型。---
+
+    #[test]
+    fn logical_not_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = tb(vec![true], &[1usize]);
+        let huge_len = (isize::MAX as usize) / std::mem::size_of::<bool>() + 10;
+        let huge = base.broadcast_to(&[huge_len]).unwrap();
+        assert_eq!(huge.shape(), &[huge_len]);
+
+        let err =
+            logical_not(&huge).expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn logical_and_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = tb(vec![true], &[1usize]);
+        let huge_len = (isize::MAX as usize) / std::mem::size_of::<bool>() + 10;
+        let huge = base.broadcast_to(&[huge_len]).unwrap();
+        let small = tb(vec![true], &[1usize]);
+
+        let err = logical_and(&huge, &small)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn masked_select_rejects_huge_broadcast_shape_without_panicking() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0], &[1usize]));
+        let huge_len = (isize::MAX as usize) / std::mem::size_of::<f32>() + 10;
+        let base = tb(vec![true], &[1usize]);
+        let mask = base.broadcast_to(&[huge_len]).unwrap();
+
+        let err = masked_select(&x, &mask)
+            .expect_err("huge broadcast shape の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
         ));
     }
 }
