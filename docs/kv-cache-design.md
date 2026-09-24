@@ -21,7 +21,9 @@
 K-3（段階 0・将来候補）へ切り分ける。
 
 `docs/compat-api-scope.md` §5 経路 2（ユーザー承認＋issue 起票）の
-承認は、本 doc 単体では**取得済みと主張しない**（§6 承認事項）。
+承認のうち、K-1（本 autodiff 内部実装。§6 承認事項 1）は 2026-09-24 に
+ユーザー承認済み。facade 公開（K-2）・K-3・`sdpa_compose` 置換
+（§6 承認事項 2〜4）は未取得のまま（§6 承認事項）。
 
 ## 1. 背景
 
@@ -241,17 +243,22 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 案 B' は `Tape` のステップごとの再作成・切り詰め運用と相性が悪い
 ため、案 B（本 doc の推奨）を採る。
 
-## 6. 承認事項（本 doc は承認記録ではない・すべて未取得として列挙）
+## 6. 承認事項
 
-1. K-1 実装着手（#2084。`docs/compat-api-scope.md` §5 経路 2）
+1. **K-1 実装着手（#2084。`docs/compat-api-scope.md` §5 経路 2）**:
+   2026-09-24 にユーザー承認済み。承認範囲は autodiff 内部実装
+   （`crates/autodiff/src/nn/attention.rs` の `KvCache`・
+   `MultiheadAttentionVars::forward_with_cache`・
+   `StatefulAttention`）に限られ、facade 公開（下記 2）は含まない。
 2. facade 公開面拡張（#2084 の `add_stateful_attention`／
-   `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）
-3. K-3（デバイス常駐 KV。段階 0）
-4. `sdpa_compose` 置換の別 issue 起票
+   `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）: **未取得**
+3. K-3（デバイス常駐 KV。段階 0）: **未取得**
+4. `sdpa_compose` 置換の別 issue 起票: **未取得**
 
 これまでの類似イシュー（#2065／#2068）が「ツリーを `autoMerge=true`
 で起動した実行指示」を根拠に進められた前例は、**設計 doc の作成まで**
-にのみ及ぶものであり、上記 1〜4 には及ばない。
+にのみ及ぶものであり、上記 2〜4 には及ばない（1 は上記のとおり別途
+ユーザー承認済み）。
 
 ## 7. スコープ外
 
