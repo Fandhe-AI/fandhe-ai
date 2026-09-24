@@ -43,6 +43,16 @@
 //! で再エクスポート済み）が `Add`／`Sub`／`Mul`／`Div`／`Neg` 等の演算子
 //! トレイトを実装していないことを固定する（イシュー #2136 は承認待ちで
 //! 保留。詳細は `docs/autodiff-var-operator-overload-design.md` §14）。
+//!
+//! `hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
+//! body_matches_fixed_contract`・`workspace_declares_no_hook_registration_
+//! fns` は `VarHooksHoldDoctestGuard`（`VarBoolOpsHoldDoctestGuard` 系と
+//! 同型の正のプローブ 1 ブロック方式＋workspace 全体のソース走査）で、
+//! forward・backward hooks（イシュー #2139。親 #2138・#2131）の facade
+//! 公開保留を固定する。#2139 は設計 doc §11 の承認事項 5 項目がそろう
+//! まで着手不可という設計判断（`docs/autodiff-forward-backward-hooks-
+//! design.md` §13）のため、本体実装（`crates/autodiff/**`）自体を
+//! 含まない保留固定 PR である。
 
 use std::path::Path;
 
@@ -6373,4 +6383,255 @@ fn workspace_declares_bool_ops_fn_names_only_in_autodiff_bool_ops() {
          が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
          なのかを確認すること）: {found:?}"
     );
+}
+
+// =====================================================================
+// #2139（親 #2138・#2131）の facade 公開保留固定（`VarHooksHoldDoctestGuard`）。
+// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
+// `VarBoolOpsHoldDoctestGuard` 系と同型の正のプローブ 1 ブロック方式の
+// ドリフト検査に加え、workspace 全体のソース走査による定義元インベント
+// リを持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-forward-backward-hooks-design.md` §13 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarHooksHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （[`custom_function_hold_doctest_globs_all_pub_modules`] の
+/// `VarHooksHoldDoctestGuard` 版）。
+#[test]
+fn hooks_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarHooksHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarHooksHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`hooks_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの **glob
+/// 以外の本文**（型・モジュール名の衝突プローブ `__fandhe_hooks_hold_probe`・
+/// メソッド名の衝突プローブ `__FandheHooksHoldProbe` トレイト定義・
+/// `Var`／`Tape`／`compat::Sequential` への実装・`__probe_*` 関数群）が
+/// 固定文言 [`HOOKS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致すること
+/// を固定する（`bool_ops_hold_doctest_probe_body_matches_fixed_contract`
+/// と同じ理由: rustdoc の `# ` 隠し行・プローブの削除・別名への
+/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn hooks_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarHooksHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, HOOKS_HOLD_PROBE_BODY,
+        "VarHooksHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 HOOKS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_hooks_hold_probe モジュール・\
+         __FandheHooksHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`hooks_hold_doctest_probe_body_matches_fixed_contract`] が要求
+/// する固定文言。`crates/facade/src/lib.rs` の `VarHooksHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
+/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
+/// 含む）。
+const HOOKS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_hooks_hold_probe {\n\
+\x20\x20\x20\x20pub struct HookHandle;\n\
+\x20\x20\x20\x20pub struct ForwardHooked;\n\
+\x20\x20\x20\x20pub struct ForwardHookCtx;\n\
+\x20\x20\x20\x20pub mod hooks {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __probe() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_hooks_hold_probe::*;\n\
+\n\
+fn __probe_types(_: HookHandle, _: ForwardHooked, _: ForwardHookCtx) {\n\
+\x20\x20\x20\x20hooks::__probe();\n\
+}\n\
+\n\
+struct __FandheHooksMarker;\n\
+\n\
+trait __FandheHooksHoldProbe {\n\
+\x20\x20\x20\x20fn register_forward_hook(&self) -> __FandheHooksMarker;\n\
+\x20\x20\x20\x20fn register_backward_hook(&self) -> __FandheHooksMarker;\n\
+\x20\x20\x20\x20fn register_hook(&self) -> __FandheHooksMarker;\n\
+\x20\x20\x20\x20fn remove_hook(&self) -> __FandheHooksMarker;\n\
+\x20\x20\x20\x20fn remove_backward_hook(&self) -> __FandheHooksMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheHooksHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn register_forward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn register_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn register_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn remove_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn remove_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+}\n\
+\n\
+impl __FandheHooksHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn register_forward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn register_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn register_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn remove_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn remove_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+}\n\
+\n\
+impl __FandheHooksHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn register_forward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn register_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn register_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn remove_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+\x20\x20\x20\x20fn remove_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Var::register_forward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_forward_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Var::register_backward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_backward_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Var::register_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Var::remove_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Var::remove_backward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::register_forward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_forward_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::register_backward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_backward_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::register_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::remove_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::remove_backward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
+}\n\
+\n\
+fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::register_forward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_forward_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::register_backward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_backward_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::register_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::remove_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_hook();\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::remove_backward_hook(x);\n\
+\x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
+}";
+
+/// [`workspace_declares_no_hook_registration_fns`] が検査する 3 つの
+/// 関数名。`register_hook` はあえて含めない（並行する #2182 の DataLoader
+/// transform フック等、正当な用途で使われうる汎用名のため。facade から
+/// 到達できないことは `VarHooksHoldDoctestGuard` の doctest が固定する）。
+const HOOK_REGISTRATION_FN_NAMES: [&str; 3] = [
+    "register_forward_hook",
+    "register_backward_hook",
+    "remove_hook",
+];
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、
+/// [`HOOK_REGISTRATION_FN_NAMES`]（3 個）の `fn` 宣言が可視性・宣言文脈
+/// を問わず 1 件も存在しないことを固定する（`workspace_declares_custom_
+/// fn_only_on_tape`・`workspace_declares_bool_ops_fn_names_only_in_
+/// autodiff_bool_ops` と同型の workspace 全体インベントリだが、本イシュー
+/// #2139 は本体実装自体が承認待ちのため「唯一の定義元」ではなく「0 件」
+/// を期待値とする点が異なる）。facade のソース走査・
+/// `VarHooksHoldDoctestGuard` の正のプローブはいずれも「facade から到達
+/// 可能か」しか見ないため、facade の外（`autodiff`・`backend-*`・
+/// `onnx-interop` 等）に同名の関数が新設された場合に備え、そもそもの
+/// 定義自体の不在を固定する多層防御の最内層とする。
+#[test]
+fn workspace_declares_no_hook_registration_fns() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in HOOK_REGISTRATION_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    assert!(
+        found.is_empty(),
+        "workspace 全体（crates/*/src/）に register_forward_hook／\
+         register_backward_hook／remove_hook の `fn` 宣言が見つかった\
+         （イシュー #2139 は §11 の承認事項 5 項目がそろうまで着手不可\
+         という設計判断〈docs/autodiff-forward-backward-hooks-design.md\
+         §13〉に違反する可能性がある。承認済みの実装であれば本ガード\
+         自体を撤去すること）: {found:?}"
+    );
+}
+
+/// [`workspace_declares_no_hook_registration_fns`] が使う
+/// [`count_fn_declarations_by_name`] が、対象 3 関数名を実際に検出
+/// できることを固定する合成入力の自己テスト（検出器自体が機能して
+/// いなければ、前者の「0 件」判定が空合格になり得るため）。
+#[test]
+fn count_fn_declarations_by_name_detects_hook_registration_fn_names() {
+    for fn_name in HOOK_REGISTRATION_FN_NAMES {
+        let src = format!("impl Var {{ pub fn {fn_name}(&self) {{}} }}");
+        let cleaned: String = strip_comments_and_literals(&src).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, fn_name),
+            1,
+            "src={src:?} tokens={tokens:?}"
+        );
+    }
 }

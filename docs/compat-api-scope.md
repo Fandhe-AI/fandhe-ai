@@ -956,6 +956,18 @@ AutodiffError> + Send + Sync + 'static`）・保持形（`Arc`）・エラー
 伝播（fail-fast）・`AutodiffError` への variant 追加要否はいずれも
 承認事項として列挙のみ（同 doc §11）。
 
+**#2139（forward・backward hooks 実装）は経路 2 未適用のまま承認待ちで
+保留した。** 上記のとおり同 doc §11 の承認事項 5 項目（facade 公開の経路 2
+承認を含む）がそろうまで着手不可のため、本体実装（`crates/autodiff/
+src/**`）・facade 公開面（`crates/facade/src/**` 本番コード）のいずれも
+変更していない（`#[cfg(doctest)]` 限定の非公開足場 1 件を除く）。代わりに
+`crates/facade/src/lib.rs::VarHooksHoldDoctestGuard`（正のプローブ
+doctest）＋`crates/facade/tests/api_surface.rs` の 3 テスト（doctest
+ドリフト検査 2 件・workspace 全体の定義元インベントリ 1 件）で「facade 未
+公開・本体未実装」状態を fail-closed に固定した。詳細な承認状態の確認
+結果・保留の根拠・ガードの構成・承認取得後の実装範囲は
+`docs/autodiff-forward-backward-hooks-design.md` §13。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |

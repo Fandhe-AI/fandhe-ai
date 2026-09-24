@@ -1469,3 +1469,148 @@ struct NnModuleHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct VarBoolOpsHoldDoctestGuard;
+
+/// イシュー #2139（親 #2138・#2131）の facade 公開保留を固定する doctest
+/// 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
+/// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
+/// ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを併用する:
+///
+/// (a) 型・モジュール名の衝突プローブ（`NnModuleHoldDoctestGuard` 方式）。
+/// facade の全 `pub mod` を glob import したスコープに、本ブロック内でのみ
+/// 定義したローカル型（`__fandhe_hooks_hold_probe::{HookHandle,
+/// ForwardHooked, ForwardHookCtx}`）とモジュール（`hooks`）を導入し、
+/// 実際に使う関数を書く。facade が同名の型・モジュールを glob で公開
+/// すると、名前解決が曖昧になり（E0659 等）コンパイルが失敗する。
+///
+/// (b) メソッド名の衝突プローブ（`VarBoolOpsHoldDoctestGuard` 方式）。
+/// `register_forward_hook`／`register_backward_hook`／`register_hook`／
+/// `remove_hook`／`remove_backward_hook` の 5 メソッドをトレイト
+/// （`__FandheHooksHoldProbe`）として `fandhe_ai::Var<'t>`／
+/// `fandhe_ai::Tape`／`fandhe_ai::compat::Sequential` に実装し、UFCS 形・
+/// メソッド呼び出し形の両方で呼ぶ。inherent メソッドはトレイトメソッド
+/// より優先して解決されるため、これらの型に同名の inherent メソッドが
+/// 追加されると、引数の数や型の不一致でコンパイルが失敗する。
+///
+/// facade の `Tape` は `pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`
+/// という newtype で `Deref` を持たないため（`crate::tape::Tape` 参照）、
+/// 本プローブが検出できるのは facade 側に追加されたメソッドのみである。
+/// autodiff 側の `Tape` に追加された定義は `crates/facade/tests/
+/// api_surface.rs::workspace_declares_no_hook_registration_fns`（workspace
+/// 全体のソース走査）が捕捉する分担とする。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
+/// body_matches_fixed_contract`・`workspace_declares_no_hook_registration_
+/// fns`）との多層防御の位置づけ・承認未取得の経緯は
+/// `docs/autodiff-forward-backward-hooks-design.md` §13「実装保留記録
+/// （イシュー #2139）」を参照。
+///
+/// 承認（設計 doc §11 の 5 項目）を得て facade 公開を実施する日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_hooks_hold_probe {
+///     pub struct HookHandle;
+///     pub struct ForwardHooked;
+///     pub struct ForwardHookCtx;
+///     pub mod hooks {
+///         pub fn __probe() {}
+///     }
+/// }
+/// use __fandhe_hooks_hold_probe::*;
+///
+/// fn __probe_types(_: HookHandle, _: ForwardHooked, _: ForwardHookCtx) {
+///     hooks::__probe();
+/// }
+///
+/// struct __FandheHooksMarker;
+///
+/// trait __FandheHooksHoldProbe {
+///     fn register_forward_hook(&self) -> __FandheHooksMarker;
+///     fn register_backward_hook(&self) -> __FandheHooksMarker;
+///     fn register_hook(&self) -> __FandheHooksMarker;
+///     fn remove_hook(&self) -> __FandheHooksMarker;
+///     fn remove_backward_hook(&self) -> __FandheHooksMarker;
+/// }
+///
+/// impl<'t> __FandheHooksHoldProbe for fandhe_ai::Var<'t> {
+///     fn register_forward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn register_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn register_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn remove_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn remove_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+/// }
+///
+/// impl __FandheHooksHoldProbe for fandhe_ai::Tape {
+///     fn register_forward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn register_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn register_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn remove_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn remove_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+/// }
+///
+/// impl __FandheHooksHoldProbe for fandhe_ai::compat::Sequential {
+///     fn register_forward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn register_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn register_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn remove_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+///     fn remove_backward_hook(&self) -> __FandheHooksMarker { __FandheHooksMarker }
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheHooksMarker = fandhe_ai::Var::register_forward_hook(x);
+///     let _: __FandheHooksMarker = x.register_forward_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Var::register_backward_hook(x);
+///     let _: __FandheHooksMarker = x.register_backward_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Var::register_hook(x);
+///     let _: __FandheHooksMarker = x.register_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Var::remove_hook(x);
+///     let _: __FandheHooksMarker = x.remove_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Var::remove_backward_hook(x);
+///     let _: __FandheHooksMarker = x.remove_backward_hook();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheHooksMarker = fandhe_ai::Tape::register_forward_hook(x);
+///     let _: __FandheHooksMarker = x.register_forward_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Tape::register_backward_hook(x);
+///     let _: __FandheHooksMarker = x.register_backward_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Tape::register_hook(x);
+///     let _: __FandheHooksMarker = x.register_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Tape::remove_hook(x);
+///     let _: __FandheHooksMarker = x.remove_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::Tape::remove_backward_hook(x);
+///     let _: __FandheHooksMarker = x.remove_backward_hook();
+/// }
+///
+/// fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::register_forward_hook(x);
+///     let _: __FandheHooksMarker = x.register_forward_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::register_backward_hook(x);
+///     let _: __FandheHooksMarker = x.register_backward_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::register_hook(x);
+///     let _: __FandheHooksMarker = x.register_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::remove_hook(x);
+///     let _: __FandheHooksMarker = x.remove_hook();
+///     let _: __FandheHooksMarker = fandhe_ai::compat::Sequential::remove_backward_hook(x);
+///     let _: __FandheHooksMarker = x.remove_backward_hook();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarHooksHoldDoctestGuard;
