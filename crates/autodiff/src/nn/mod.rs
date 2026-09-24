@@ -125,6 +125,16 @@
 //! `BackendOps`／VJP）を追加しない CPU ホスト側の introspection
 //! 機構であり、facade へは再エクスポートしない（`container.rs`
 //! モジュール doc「facade への非公開」節参照）。
+//! イシュー #2084（親 #2059）で KV キャッシュ付き attention
+//! （[`attention::KvCache`]・`MultiheadAttentionVars::
+//! forward_with_cache`・[`attention::StatefulAttention`]）を
+//! 追加した。既存 `Var` 演算（`cat`／`var_no_grad`）と
+//! `nn/attention.rs` の既存合成（`project`／`split_heads`／
+//! `sdpa_compose`）のみで実装し、新規 `Op`／`BackendOps`／
+//! カーネル／依存は追加しない（`docs/kv-cache-design.md`）。
+//! facade 公開（`add_stateful_attention` 相当）は未承認のため
+//! 保留する（`crates/facade/tests/api_surface.rs` の否定ガードで
+//! 固定。`docs/kv-cache-design.md` §6 承認事項 2）。
 
 mod attention;
 mod batch_norm;
@@ -147,7 +157,8 @@ pub mod loss;
 pub mod optim;
 
 pub use attention::{
-    MultiheadAttention, MultiheadAttentionVars, multihead_attention_forward_low_precision,
+    KvCache, MultiheadAttention, MultiheadAttentionVars, StatefulAttention,
+    multihead_attention_forward_low_precision,
 };
 pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,

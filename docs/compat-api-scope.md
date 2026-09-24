@@ -335,7 +335,15 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   記録した（K-1／K-2。既存 `Var` 演算の合成のみで新規 `Op`／`BackendOps`／
   依存を要しない設計。ユーザー承認前のため Tier 1／Tier 2 表への行追加は
   行わない）。K-1 の設計自体は `docs/kv-cache-design.md`（#2083）として
-  確定した（コード変更なし・K-1 実装着手自体は引き続き未承認）
+  確定した（コード変更なし・K-1 実装着手自体は引き続き未承認）。**K-1
+  は内部クレート `fandhe_ai_autodiff::nn`（`KvCache`／
+  `MultiheadAttentionVars::forward_with_cache`／`StatefulAttention`）
+  として実装済み（#2084。同じツリー内の前例〈#2085・#2137・#2134〉に
+  倣った内部クレート限定の非破壊追加であり、ユーザー承認済みとは主張
+  しない）。facade 公開（K-2。`add_stateful_attention`／
+  `StatefulAttention` 相当）は未承認のため保留し、
+  `crates/facade/tests/api_surface.rs` の否定ガードで固定した
+  （Tier 1／Tier 2 表への行追加は引き続き行わない）
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
   の `max_vjp` は同値タイ発生時「最初に現れる最大要素 1 箇所のみ」へ
