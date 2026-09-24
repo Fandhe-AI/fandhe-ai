@@ -137,18 +137,29 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
 
 ### 5.2 backward hook
 
-- **型**: `Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + 'static`（`Arc<dyn …>` で保持）。
+- **型**: `Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + Sync + 'static`（`Arc<dyn …>` で保
+  持）。
 - **イシュー #2138 に記載の `Fn(&Var) -> Result<()>` を改める理由**:
   - 勾配は `Gradients` が保持する `Tensor<f32>` であり、`Var` ではない。
   - `Var<'t>` を渡すと、hook の中で `Var` 演算による push や `backward` の再入が可能になってしまう。
   - `'static` にすれば `&Tape`／`Var<'t>` を捕捉できず、`CustomFunction`（§2・`custom.rs:44`）と同じ
     構造で再入を防げる。
-  - `Send` は `Tape: Send` を維持するために必須。`Sync` は不要（`Tape` が `!Sync`）。
+  - **`Send` に加えて `Sync` も必須**（codex-review 指摘・PR #2238 是正）。`Arc<T>: Send` の要件は
+    `T: Send + Sync`（`std::sync::Arc` の blanket impl。`T: !Sync` だと `Arc<T>` 自体が `!Send` にな
+    る）であり、`hooks: RefCell<HookRegistry>`（`Vec<(seq, Arc<dyn Fn…>)>`。§4.1 案 C）を `Tape` に持
+    たせるかぎり、trait object 側に `Sync` を付けないと `Tape: Send`（§3・`tape_is_send` 静的アサー
+    ション）が壊れる。「`Sync` は不要（`Tape` が `!Sync`）」という当初の記述は誤りだった: `Tape` 自体
+    が `!Sync` であることと、`Tape` が保持するフィールドの型が `Arc<T>: Send` を満たすために
+    `T: Sync` を要求することは別の軸である。
   - `Rc` を使うと `Tape` が `!Send` になるため `Arc` を使う。
-- **捕捉規則**: `move` による所有値の捕捉を想定する（例: 統計を集める `Arc<Mutex<…>>`、
-  `mpsc::Sender`）。引数は `&Tensor<f32>` の共有参照なので hook から勾配は変えられない。戻り値は
-  `()` で、PyTorch の「勾配差し替え」相当の機能はスコープ外（`Tensor` に `&self` 経由の内部可変 API
-  は存在しないため、構造的にも変更不能）。
+- **捕捉規則**: `move` による所有値の捕捉を想定する。捕捉する値は **`Send + Sync`** でなければならな
+  い（クロージャの自動 trait 実装は捕捉環境の型に従うため、`!Sync` な値を捕捉すると closure 自体が
+  `!Sync` になり、上記の型境界を満たせない）。例: 統計を集める `Arc<Mutex<…>>`。
+  `std::sync::mpsc::Sender<T>` は `Send` だが `!Sync`（std 実装。`Sync` を得るには `Mutex` 等で包む必
+  要がある）なので、単独では捕捉できない例として明記する（誤って許容例に含めていた旧版の是正）。引
+  数は `&Tensor<f32>` の共有参照なので hook から勾配は変えられない。戻り値は `()` で、PyTorch の「勾
+  配差し替え」相当の機能はスコープ外（`Tensor` に `&self` 経由の内部可変 API は存在しないため、構造
+  的にも変更不能）。
 - **呼び出し位置**: `backward.rs::backward_impl` の逆走査ループで `let Some(upstream) = grads[id]` が
   成立した直後、`grad::vjp` の呼び出しの前に呼ぶ。この時点で `nodes` の借用は保持していない（借用規
   律）。hook 一覧は registry から `Arc` を複製したうえで `RefCell` の借用を解放し、その後に呼ぶ。こう
