@@ -905,6 +905,33 @@ Result<Var, AutodiffError>`・borrow／consumed 4 組合せ・既存 inherent
 fail-closed に固定した。詳細は
 `docs/autodiff-var-operator-overload-design.md` §14。
 
+**#2138（forward・backward hooks の facade 公開可否）の設計記録は
+`docs/autodiff-forward-backward-hooks-design.md` として完了した。**
+コード変更なし。hook 機構は 1 節の Tier 1／Tier 2 いずれの列挙にも
+含まれない（Tier 外の新規事項）。backward hook の登録 API を
+`Var::register_backward_hook` の形にすると、facade が `Var` を
+再エクスポートしている（`crates/facade/src/lib.rs:184`）ため facade
+側のコードを変更せずとも公開面が自動的に広がる。同 doc の推奨（§5.1・
+§7）はこれを避け、登録の入口を autodiff の `Tape`（例:
+`Tape::register_backward_hook`）に置く案であり、facade の `Tape` は
+2 メソッドだけを出す newtype のため、この形であれば facade 公開面は
+不変のまま保てる。forward hook は `Var` 単位では意味論が破綻するため
+`nn::ForwardHooked<M: Module>` という Module レベルのラッパーとして
+設計した（同 doc §5.3）が、facade の `nn` は #2133 と同じ理由で未公開
+（`docs/facade-nn-module-exposure-decision.md`）のため、facade へ公開
+するには `nn::Module` 公開（#2133）と本節経路 2 の双方の承認が要る。
+本節経路 2 の承認（同 doc §11 承認事項 5）は #2139 着手可否を左右
+する条件の一つに過ぎない。同 doc §11 は設計案（§4・§5）の承認・
+hook と `CustomFunction` の役割分担・callback lifetime・エラー伝播
+規則・受入基準の改訂・facade 公開の 5 項目すべてを「いずれも未実施。
+#2139 着手前にユーザー承認が必要」と明記しており、facade 公開を
+伴わない内部クレート `autodiff` 側の実装であっても、これら 5 項目
+の承認が揃うまで #2139（実装）は着手不可である。型シグネチャ
+（backward hook は `Fn(&Tensor<f32>) -> Result<(),
+AutodiffError> + Send + Sync + 'static`）・保持形（`Arc`）・エラー
+伝播（fail-fast）・`AutodiffError` への variant 追加要否はいずれも
+承認事項として列挙のみ（同 doc §11）。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |
