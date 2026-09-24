@@ -189,9 +189,21 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
     と型シグネチャを揃えておくことで、closure の捕捉規則（Sync な値のみ捕捉可）を hook 機構全体で単
     一にし、非対称な規約による実装時の取り違えを防ぐ（§5.2 是正時の codex-review 指摘を踏まえた予防
     的統一）。
-  - ctx は入出力の shape を実体化なしで返し、値は明示メソッド（`output_value() -> Result<Tensor<f32>,
-    AutodiffError>`、`materialize_fallible` 経由）で取る。ctx は `Var` を露出しない（hook 内から新規
-    push できない）。
+  - ctx は入出力の shape を実体化なしで返し、値は明示メソッド `output_value() -> Result<Tensor<f32>,
+    AutodiffError>` で取る。ctx は `Var` を露出しない（hook 内から新規 push できない）。
+  - **tape 経路／host 経路で値取得契約が異なる（codex-review 指摘・PR #2238 是正）**:
+    `Module::forward` は `Var<'t>` を返す（§2）ため `ForwardHooked::forward` 側の
+    `ForwardHookCtx` は `Var<'t>` を内部に保持し、`output_value()` は `materialize_fallible`
+    経由で実体化する（lazy ノードならこの呼び出しが実体化のタイミングそのもの。§5.3
+    observer effect の記述はこの経路にのみ適用される）。一方 `Module::forward_host` は
+    `tape`／`Var` を経由せず `Result<Tensor<f32>, AutodiffError>` を直接返す（§2・
+    `module.rs:97-107`）ため、`ForwardHooked::forward_host` 側の `ForwardHookCtx` は
+    既に確定済みの `Tensor<f32>` を内部に保持し、`output_value()` は `materialize_fallible`
+    を呼ばずその参照を複製して返すだけの経路になる（実体化・observer effect は発生しない。
+    forward_host はそもそも `Tape` を持たないため `materialize_fallible` を呼べない）。
+    `ForwardHookCtx` はこの 2 経路（tape 由来の `Var<'t>` を保持する構築子／host 由来の
+    `Tensor<f32>` を保持する構築子）を内部 enum で区別し、`output_value()` の外部シグネチャ
+    は両経路で共通のまま、実装だけを分岐させる。
 - **observer effect**: hook が lazy な出力の値を読むとその場で実体化が走る。モジュール境界をまたぐ融
   合の分割が変わり、下流の値が REQ-2 の複合判定の範囲内で変わりうる。これは §2 の lazy 融合の数値契
   約と同じ性質であり、tolerance は緩めない。値を読まない hook では bit 完全一致とする。
@@ -213,8 +225,16 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
 
 ### 5.5 順序・エラー伝播
 
-- **順序**: 同じノードの中では登録順（FIFO）。ノード間では逆走査の順（NodeId の降順）。forward の
-  Module hook は登録順。
+- **順序**: backward hook は同じノードの中では登録順（FIFO。§4.1 案 C の `hooks: RefCell<
+  HookRegistry>` は複数登録を許す `Vec<(seq, Arc<dyn Fn…>)>` のため FIFO が意味を持つ）。ノード間で
+  は逆走査の順（NodeId の降順）。
+- **forward hook は単一所有（複数登録なし。codex-review 指摘・PR #2238 是正）**: §5.3 のとおり
+  `ForwardHooked<M>` は hook を `Arc` 共有ではなく単一フィールドとして所有するため、同一
+  `ForwardHooked` に複数の hook を登録する API は設けない（backward hook の `HookRegistry` のような
+  `Vec` 保持ではない）。複数の観察点を Module 単位で持ちたい場合は、`ForwardHooked<ForwardHooked<M>>`
+  のように多層にラップして呼び出し側でスタックする（外側のラップが先に構築されるほど forward 完了
+  後の発火は内側から外側の順になる）。「登録順」という順序概念は backward hook の `HookRegistry`
+  （複数登録前提）にのみ適用され、forward hook（単一所有）には適用されない。
 - **エラー**: 最初の `Err` で打ち切る。同じノードの残りの hook と以降のノードの処理は実行せず、
   `backward_impl` はその `Err` を**そのまま**伝播する（新規 `AutodiffError` variant を追加する代替案
   も検討したが、公開面が最小になるため既存 `Err` のそのまま伝播を推奨する）。
