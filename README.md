@@ -263,7 +263,7 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 
 ## CI
 
-- CI ランナー方針は GitHub ホステッド（`ubuntu-latest`）既定へ移行済み（public 区分。例外は codex-review の codex 実行ジョブのみ。#457 Phase 1〜3 完了。逆戻り防止は `runner-policy` ジョブ〈#472〉が fail-closed で検知。詳細 → [`.claude/rules/ci.md`](.claude/rules/ci.md)）
+- CI ランナー方針は GitHub ホステッド（`ubuntu-latest`）既定へ移行済み（public 区分。例外は ai-review の codex 実行ジョブのみ。#457 Phase 1〜3 完了。逆戻り防止は `runner-policy` ジョブ〈#472〉が fail-closed で検知。詳細 → [`.claude/rules/ci.md`](.claude/rules/ci.md)）
 - `ci.yml`: `rust-ci`（fmt / clippy / test / deny の reusable workflow 呼び出し）＋固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / runner-policy / guardrail-regression / verification-gates）＋集約ジョブ `ci-complete`（fail-closed 集約の核。branch protection の required status check の詳細は `.claude/rules/ci.md`「ワークフロー設計」節を参照。二重管理を避けるため本節では書き写さない）
 - `update-external.yml`: `docs/spec` サブモジュールと `.claude/skills` の自動追従（毎日 09:00 JST。PR label: `dependencies`・`automated`）。`docs/spec` は private リポジトリのため、org secret `SUBMODULE_PAT`（visibility=all）を優先参照して取得します（`GITHUB_TOKEN` はフォールバックのみで、public 化後も private submodule は取得できません。#463）
 

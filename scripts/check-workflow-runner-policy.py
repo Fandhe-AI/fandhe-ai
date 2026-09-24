@@ -32,22 +32,23 @@
 #   1. 禁止トークン検査: デコード後の全スカラー文字列（キー・値とも）に `self-hosted` が
 #      現れたら違反とする（コメントはパース時点で消えるため、コメント内の言及は
 #      自然に検査対象外になる）
-#   2. 許容形検査: キー名が runner 宣言（runs-on / runner-label /
-#      post-feedback-runner-label。前後空白を除去して照合）である全マッピングエントリを
-#      再帰走査で収集し、値が ALLOWED_RUNNER_VALUES（標準 GitHub ホステッドランナーの
-#      安定ラベルの明示 allowlist。下記定数コメント参照）のいずれかとの完全一致でなければ
-#      違反とする（larger runner 名・式展開 `${{ ... }}`・配列・group 指定・null は
-#      すべて違反側）
+#   2. 許容形検査: キー名が runner 宣言（runs-on / runner-label / runner /
+#      post-feedback-runner / post-feedback-runner-label。前後空白を除去して照合）である
+#      全マッピングエントリを再帰走査で収集し、値が ALLOWED_RUNNER_VALUES（標準 GitHub
+#      ホステッドランナーの安定ラベルの明示 allowlist。下記定数コメント参照）のいずれかとの
+#      完全一致でなければ違反とする（larger runner 名・式展開 `${{ ... }}`・配列・
+#      group 指定・null はすべて違反側）
 #   3. 構造の fail-closed: YAML パース失敗・ドキュメントがマッピングでない・対象
 #      ディレクトリ不在・対象ファイル 0 件は、スキップせず全て失敗として扱う
 #      （検査の空振りで green にならない設計）
 #
-# 例外の扱い（.claude/rules/ci.md「codex-review」節）: codex-review wrapper の codex
-# 実行ジョブは runner-label を非指定とし reusable workflow の既定値 `codex`
-# （self-hosted な codex 専用 runner）へ委譲する設計のため、本リポ側ファイルに runner
-# 宣言が現れず本検査の対象外となる（ファイル名の除外ハードコードは持たない）。将来
-# `codex` 等のラベルを明示する場合は、本スクリプトの許容形の意図的な拡張（レビュー必須）
-# を要する。実機（CUDA/Metal）ジョブの将来的な例外追加（ci.md「実機依存」節）も同様。
+# 例外の扱い（.claude/rules/ci.md「ai-review」節）: ai-review wrapper（旧 codex-review。
+# `.github/workflows/ai-review.yml`）の `review` ジョブは `runner` を非指定とし
+# reusable workflow の既定値 `codex`（self-hosted な codex 専用 runner）へ委譲する
+# 設計のため、本リポ側ファイルに runner 宣言が現れず本検査の対象外となる（ファイル名の
+# 除外ハードコードは持たない）。将来 `codex` 等のラベルを明示する場合は、本スクリプトの
+# 許容形の意図的な拡張（レビュー必須）を要する。実機（CUDA/Metal）ジョブの将来的な
+# 例外追加（ci.md「実機依存」節）も同様。
 #
 # 終了コード: 0 = 適合、1 = 違反検出、2 = 使用方法・実行環境の異常（いずれも非 0 で
 # CI は fail する）。
@@ -855,8 +856,18 @@ ALLOWED_RUNNER_VALUES = frozenset({
     "windows-latest", "windows-2025", "windows-2022",
 })
 # runner 宣言と見なすキー名（runs-on に加え、reusable workflow への runner 指定入力
-# runner-label / post-feedback-runner-label 経由の逆戻りも検知対象とする）。
-RUNNER_KEYS = {"runs-on", "runner-label", "post-feedback-runner-label"}
+# 経由の逆戻りも検知対象とする）。rust-base-ci / pages-deploy 等は runner-label、
+# ai-review（旧 codex-review。`runner` / `post-feedback-runner` へ改名、イシュー #326→
+# ai-review 移行）は runner / post-feedback-runner を使う。旧 ai-review 入力名
+# post-feedback-runner-label は本リポの現行ワークフローでは使わないが、fail-closed
+# の趣旨（許容形リストに一致しなければ違反）に沿い検知対象から外さず残す。
+RUNNER_KEYS = {
+    "runs-on",
+    "runner-label",
+    "runner",
+    "post-feedback-runner",
+    "post-feedback-runner-label",
+}
 # 非コメント位置（デコード後のスカラー）に現れてはならない禁止トークン。
 BANNED_TOKEN = "self-hosted"
 
