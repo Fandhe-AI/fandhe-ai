@@ -2,13 +2,13 @@
 
 イシュー #2135「`Var` 演算子オーバーロード（`+`・`*`・`-`）の設計判断記録」。親 #2131（Phase 5「PyTorch／TF 置き換えの API 網羅」5-A 基盤）。後続 #2136（実装）がこの設計の承認を前提にする。兄弟イシューは #2141（比較・logical 演算）・#2145（`pow_scalar` 系）。
 
-本ドキュメントは **コード変更を伴わない設計記録**を成果物とする。`crates/**`・`CLAUDE.md`・`docs/spec/`（正本 submodule）・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・CI／hooks はいずれも変更しない。**例外**: #2136（実装）は §14 のとおり未承認のまま保留し、本番コード・facade 公開面は不変のまま、未実装状態を型レベルで固定する否定ガードテスト `crates/facade/tests/api_surface.rs` のみを追加する（詳細は §14.3）。
+本ドキュメントは **本番コード変更を伴わない設計記録**を成果物とする。`crates/**`（後述の例外を除く）・`CLAUDE.md`・`docs/spec/`（正本 submodule）・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・CI／hooks はいずれも変更しない。**例外**: #2136（実装）は §14 のとおり未承認のまま保留し、本番コード・facade 公開面は不変のまま、未実装状態を型レベルで固定する否定ガードテスト `crates/facade/tests/api_surface.rs` のみを追加する（詳細は §14.3）。
 
 基準コミット: `ea838b71`（本ブランチ作成時点の `origin/main`。2026-09-23）。
 
 ## 0. 結論・段階
 
-本イシューは docs のみ・**段階 0**（facade 公開面は不変）。#2136（実装）は承認待ちのため保留し、本番コード・facade 公開面を不変のまま固定する否定ガードテスト（`crates/facade/tests/api_surface.rs`）のみを追加した。詳細は §14。
+本イシューは docs ＋ 否定ガードテストのみ（本番コード・facade 公開面は不変）・**段階 0**。#2136（実装）は承認待ちのため保留し、本番コード・facade 公開面を不変のまま固定する否定ガードテスト（`crates/facade/tests/api_surface.rs`）のみを追加した。詳細は §14。
 
 推奨は **案 A**（`Output = Result<Var<'t>, AutodiffError>`）＋ **4 通りの borrow/consumed 組合せを `Add`／`Mul`／`Sub` の 3 トレイトすべてに実装し、`Neg` は `Var`／`&Var` の 2 通り**。本体は既存 inherent メソッド（`Var::add`／`mul`／`sub`／`neg`）への 1 行委譲のみとし、新しい `Op`・新しい評価経路を追加しない（§5）。スカラー混合（`&Var + 2.0` 等）・`Div`（`/`）・案 B〜D はいずれも承認事項（§12）として列挙するのみで、本 doc では決定しない。
 
