@@ -42,7 +42,7 @@
 
 `docs/model-download-design.md`（#2088・設計記録のみ・コード未実装）が整理した要点:
 
-- 公開 API 案: `ModelRegistry::download(&self, url: &str, name: &str, version: &str) -> Result<(), ModelError>`。`url` は **HTTPS URL 限定**（`http`・`file`・`ftp` 等は fail-closed で拒否。リダイレクト先にも同じ検証を通す。同 doc §6）。
+- 公開 API 案: `ModelRegistry::download(&self, url: &str, name: &str, version: &str) -> Result<(), ModelError>`（簡易形。pin を持たないため保証は破損・部分改変の検出まで）と、呼び出し側が信頼済み `sha256` pin・進捗コールバックを渡す本体 `ModelRegistry::download_with(&self, url, name, version, options: DownloadOptions<'_>)` の対（`DownloadOptions::expected_sha256(Sha256Pin)`・`progress(...)`。`Sha256Pin::from_hex` は 64 桁 16 進以外を接続前に拒否。PyTorch `download_url_to_file(..., hash_prefix)`・Keras `get_file(..., file_hash)` と同型。同 doc §5）。`url` は **HTTPS URL 限定**（`http`・`file`・`ftp` 等は fail-closed で拒否。リダイレクト先にも同じ検証を通す。同 doc §6）。
 - **manifest（キャッシュ有効判定）**: `<name>/<version>/download.json`（`serde_json`。許容依存区分内）に `url`・`etag`・`content_length`・`sha256`・`fetched_at` を保存し、条件付き GET（`If-None-Match`）で再取得の要否を判定する。304 応答時も保存済み `sha256` によるローカル再検証を必須とし、無条件の再利用シグナルとしては扱わない。**この保存値は破損・部分改変（片側のみの改変）の検出用に限られる**: `download.json` は `model.safetensors` と同じ書き込み可能なキャッシュ領域に置かれるため、両ファイルをともに書き換えられる攻撃者に対する意図的な改竄検知の信頼根にはならない。真正性（意図的改竄の検知）が必要な場合は、呼び出し側が明示的に与える信頼済み `sha256` pin を根拠とする（pin 指定時は保存値ではなく pin に対して検証する。`docs/model-download-design.md` §5「304 応答時のローカルキャッシュ再検証」・§6 (A08)）。
 - **書き込みの原子性**: 一時ファイルへストリーミング書き込み → 検証成功後に `rename` で公開する、既存の safetensors 保存（`st_save`）と同型の契約。シンボリックリンク経由のキャッシュルート脱出対策として dirfd 相対操作（`openat`／`openat2`／`renameat`）による構造的防御を設計済み（未実装。§7 参照）。
 - **version 管理**: version 文字列は semver 等の記法を解釈しない不透明な識別子として扱う（§2.1 と同一方針）。「最新版」解決・記法の意味論付けはスコープ外（`docs/facade-model-registry-decision.md` §9・`docs/model-download-design.md` §10）。
@@ -64,7 +64,7 @@
 1. **HTTP クライアント（＋ TLS スタック）の新規区分追加**（現行の許容依存 9 区分に続く第 10 区分相当）。`ModelRegistry::download` の実装に必須。候補は同期専用の `ureq`／`minreq`／`attohttpc`（`reqwest` は `tokio` を推移的に引き込むため非推奨。`docs/model-download-design.md` §3）。ライセンス（推移的依存を含む）は未実測のまま「承認後に `cargo tree` 実測を行う」と記録されている。
 2. **キャッシュ書き込みの dirfd 相対操作用 OS 呼び出しラッパー（`libc` または `rustix` 等）の新規区分追加**（1 の第 10 区分に続く第 11 区分相当。両者は承認単位が異なるため別区分として扱う）。`std::fs` は dirfd 相対のオープン・rename を提供しないため、シンボリックリンク経由のキャッシュルート脱出対策（TOCTOU を構造的に閉じる設計。`docs/model-download-design.md` §6）の実装に必須。
 
-上記 2 件に付随して、`docs/model-download-design.md` §7 は facade 公開面の拡張（`ModelRegistry::download` および進捗コールバック型の追加・`api_surface.rs` 到達性テストの追加）も承認事項として列挙しているが、これは依存追加そのものではなく、1・2 の承認を前提に実施する公開面拡張である。`docs/license-matrix.md` への行追加・承認後の実装イシュー起票（`.claude/rules/out-of-scope-tracking.md` によりユーザー承認が必要）も同様に 1・2 の後続事項として同 doc §7 に記録されている。
+上記 2 件に付随して、`docs/model-download-design.md` §7 は facade 公開面の拡張（`ModelRegistry::download`・`download_with`・`DownloadOptions`・`Sha256Pin`・`DownloadProgress` の追加・`api_surface.rs` 到達性テストの追加）も承認事項として列挙しているが、これは依存追加そのものではなく、1・2 の承認を前提に実施する公開面拡張である。`docs/license-matrix.md` への行追加・承認後の実装イシュー起票（`.claude/rules/out-of-scope-tracking.md` によりユーザー承認が必要）も同様に 1・2 の後続事項として同 doc §7 に記録されている。
 
 ## 5. HF hub 連携の方針（#2082 のスコープ外・ユーザー決定 2026-09-24）
 
