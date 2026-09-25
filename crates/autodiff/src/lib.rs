@@ -238,6 +238,7 @@ pub mod conv3d_ops;
 mod create_graph;
 mod custom;
 mod default_ops;
+pub mod determinism;
 mod einsum;
 pub mod einsum_batch;
 mod error;
