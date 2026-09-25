@@ -160,6 +160,15 @@
 //! （`crates/facade/src/lib.rs` の `SpatialLayersHoldDoctestGuard`・
 //! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
 //! `docs/autodiff-spatial-layers-decision.md` §6 承認事項）。
+//! イシュー #2162（親 #2131）で [`PixelShuffle`]／[`PixelUnshuffle`]
+//! （`pixel_shuffle` モジュール）を追加した。既存 `Var::reshape`／
+//! `permute`／`contiguous` の合成のみで新規 `Op`／`BackendOps`／VJP／
+//! カーネルは追加しない。`compat::Sequential::add_pixel_shuffle`／
+//! `add_pixel_unshuffle`・`Var::pixel_shuffle`／`pixel_unshuffle` の
+//! facade 公開は未承認のため保留する（`crates/facade/src/lib.rs` の
+//! `PixelShuffleHoldDoctestGuard`・`crates/facade/tests/api_surface.rs`
+//! の否定ガードで固定。`docs/autodiff-pixel-shuffle-decision.md` §6
+//! 承認事項）。
 //! イシュー #2163（親 #2131）で [`MultiheadAttention`] に
 //! [`attention::MultiheadAttentionConfig`]（`batch_first`・`kdim`・
 //! `vdim`）・`MultiheadAttentionVars::forward_with_key_padding_mask`
@@ -188,6 +197,7 @@ mod module;
 mod norm;
 mod normalization;
 mod padding;
+mod pixel_shuffle;
 mod pooling;
 mod rnn;
 mod transformer_encoder_layer;
@@ -223,6 +233,7 @@ pub use normalization::{
     GROUP_NORM_DEFAULT_EPS, GroupNorm, INSTANCE_NORM_DEFAULT_EPS, InstanceNorm,
 };
 pub use padding::ZeroPad2d;
+pub use pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 pub use pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
