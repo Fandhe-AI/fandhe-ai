@@ -28,7 +28,8 @@ cargo test -p fandhe-ai-backend-metal --test backend_ops_real_device \
 # log_softmax forward（CUDA）
 cargo test -p fandhe-ai-backend-cuda --lib kernels_softmax
 cargo test -p fandhe-ai-backend-cuda --test backend_ops_real_device \
-  log_softmax_non_last_axis_is_unsupported_without_device \
+  log_softmax_non_last_axis_is_unsupported_without_device
+cargo test -p fandhe-ai-backend-cuda --test backend_ops_real_device \
   log_softmax_parity_smoke_env_adaptive
 cargo test -p fandhe-ai-backend-cuda --test log_softmax_parity \
   log_softmax_parity_smoke_env_adaptive
