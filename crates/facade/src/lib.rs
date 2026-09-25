@@ -2186,3 +2186,106 @@ struct VarMatrixOpsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct VarReduceOpsHoldDoctestGuard;
+
+/// イシュー #2149（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarRearrangeOpsHoldDoctestGuard`（イシュー #2143）と同型の正の
+/// プローブ方式を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカルの自由関数
+/// （`__fandhe_einsum_batch_hold_probe::einsum_batch::einsum_batched`）
+/// とトレイト（`__FandheEinsumBatchHoldProbe`）を導入し、実際に使う
+/// 関数を書く。facade がどの経路（`pub use fandhe_ai_autodiff::
+/// einsum_batch;` のようなモジュール再エクスポート・`Var` への
+/// inherent メソッド追加・別名 `pub use`）で `einsum_batch` という
+/// 名前や `einsum_batched` を公開しても、ローカル定義との glob 衝突
+/// （モジュール名の場合）またはメソッド呼び出し形の型不一致で
+/// コンパイルが失敗する。
+///
+/// **`Var::einsum` と同様に「`self` を取らない関連関数」として追加
+/// されうる点への対応**: 既存の `Var::einsum(spec, operands)` に
+/// ならい、将来 `Var::einsum_batched(spec, operands)` が同じ形（`self`
+/// レシーバなし）で追加された場合、本 doctest のメソッド呼び出し形
+/// プローブ（`x.einsum_batched()`）はメソッド呼び出し構文の候補に
+/// ならないため検出できない可能性がある（`self` を取らない関連関数は
+/// メソッド呼び出し構文の解決対象にならないため）。この経路は
+/// `crates/facade/tests/api_surface.rs::
+/// facade_does_not_reexport_or_declare_einsum_batch`（`fn
+/// einsum_batched` 宣言の有無を可視性・`self` の有無を問わず走査する
+/// `count_fn_declarations_by_name`）が多層防御として捕捉する分担と
+/// する（`docs/autodiff-einsum-batch-decision.md` §6 参照）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// einsum_batch_hold_doctest_globs_all_pub_modules`・`einsum_batch_
+/// hold_doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_einsum_batch`・`workspace_declares_einsum_
+/// batched_fn_only_in_autodiff_einsum_batch`）との多層防御の位置づけは
+/// `docs/autodiff-einsum-batch-decision.md` §6「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var::einsum` の batch 添字対応拡張）を得た日が
+/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_einsum_batch_hold_probe {
+///     pub mod einsum_batch {
+///         pub fn einsum_batched() {}
+///     }
+/// }
+/// use __fandhe_einsum_batch_hold_probe::*;
+///
+/// struct __FandheEinsumBatchMarker;
+///
+/// trait __FandheEinsumBatchHoldProbe {
+///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker;
+/// }
+///
+/// impl<'t> __FandheEinsumBatchHoldProbe for fandhe_ai::Var<'t> {
+///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }
+/// }
+///
+/// impl __FandheEinsumBatchHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }
+/// }
+///
+/// impl __FandheEinsumBatchHoldProbe for fandhe_ai::Tape {
+///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `einsum_batch::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     einsum_batch::einsum_batched();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheEinsumBatchMarker = fandhe_ai::Var::einsum_batched(x);
+///     let _: __FandheEinsumBatchMarker = x.einsum_batched();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheEinsumBatchMarker = fandhe_ai::Tensor::einsum_batched(x);
+///     let _: __FandheEinsumBatchMarker = x.einsum_batched();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheEinsumBatchMarker = fandhe_ai::Tape::einsum_batched(x);
+///     let _: __FandheEinsumBatchMarker = x.einsum_batched();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarEinsumBatchHoldDoctestGuard;
