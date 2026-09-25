@@ -8083,3 +8083,234 @@ fn workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops() 
          すること）: {found:?}"
     );
 }
+
+// =====================================================================
+// #2149（親 #2131）の facade 公開保留固定（`VarEinsumBatchHoldDoctestGuard`）。
+// `VarRearrangeOpsHoldDoctestGuard`（イシュー #2143）と同型の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-einsum-batch-decision.md` §6 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarEinsumBatchHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`rearrange_ops_hold_doctest_globs_all_pub_modules` の
+/// `VarEinsumBatchHoldDoctestGuard` 版）。
+#[test]
+fn einsum_batch_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarEinsumBatchHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarEinsumBatchHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`einsum_batch_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`EINSUM_BATCH_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（`rearrange_ops_hold_
+/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
+/// を骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn einsum_batch_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarEinsumBatchHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, EINSUM_BATCH_HOLD_PROBE_BODY,
+        "VarEinsumBatchHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 EINSUM_BATCH_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_einsum_batch_hold_probe モジュール・\
+         __FandheEinsumBatchHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`einsum_batch_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `VarEinsumBatchHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const EINSUM_BATCH_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_einsum_batch_hold_probe {\n\
+\x20\x20\x20\x20pub mod einsum_batch {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn einsum_batched() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_einsum_batch_hold_probe::*;\n\
+\n\
+struct __FandheEinsumBatchMarker;\n\
+\n\
+trait __FandheEinsumBatchHoldProbe {\n\
+\x20\x20\x20\x20fn einsum_batched(&self) -> __FandheEinsumBatchMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheEinsumBatchHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }\n\
+}\n\
+\n\
+impl __FandheEinsumBatchHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }\n\
+}\n\
+\n\
+impl __FandheEinsumBatchHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `einsum_batch::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
+\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20einsum_batch::einsum_batched();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheEinsumBatchMarker = fandhe_ai::Var::einsum_batched(x);\n\
+\x20\x20\x20\x20let _: __FandheEinsumBatchMarker = x.einsum_batched();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheEinsumBatchMarker = fandhe_ai::Tensor::einsum_batched(x);\n\
+\x20\x20\x20\x20let _: __FandheEinsumBatchMarker = x.einsum_batched();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheEinsumBatchMarker = fandhe_ai::Tape::einsum_batched(x);\n\
+\x20\x20\x20\x20let _: __FandheEinsumBatchMarker = x.einsum_batched();\n\
+}";
+
+/// `einsum_batched`（1 個の関数名。イシュー #2149）。
+/// [`facade_does_not_reexport_or_declare_einsum_batch`]・
+/// [`workspace_declares_einsum_batched_fn_only_in_autodiff_einsum_batch`]
+/// が共用する。
+const EINSUM_BATCH_FN_NAMES: [&str; 1] = ["einsum_batched"];
+
+/// facade src 全体（`crates/facade/src/**`）に、`einsum_batch` を参照
+/// する `pub use`（`pub use fandhe_ai_autodiff::einsum_batch;` 等の
+/// モジュール再エクスポート・別名含む）も、[`EINSUM_BATCH_FN_NAMES`]
+/// （1 個）の `fn` 宣言（可視性・`self` の有無を問わない。
+/// [`count_fn_declarations_by_name`] と同じ検出契約——`Var::einsum` と
+/// 同じ「`self` を取らない関連関数」として追加される経路も本走査が
+/// 捕捉する）も存在しないことを固定する（`VarEinsumBatchHoldDoctestGuard`
+/// の正のプローブと多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_rearrange_ops` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_einsum_batch() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") && line_contains_identifier(trimmed, "einsum_batch") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `einsum_batch` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in EINSUM_BATCH_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が einsum_batch（イシュー #2149 の内部クレート限定\
+         新規公開面。facade 公開〈Var::einsum の batch 添字対応拡張〉は\
+         承認待ちのため対象外という設計判断に違反）を再エクスポート、\
+         または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`EINSUM_BATCH_FN_NAMES`]
+/// （1 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_
+/// rearrange_ops_fn_names_only_in_autodiff_rearrange_ops` と同型の
+/// インベントリ）。
+///
+/// **期待集合は `crates/autodiff/src/einsum_batch.rs`（1 件）のみ**
+/// （着手前確認の再 grep で他クレートとの衝突は見つからなかった。実装
+/// 計画「インベントリを実測する」手順）。
+#[test]
+fn workspace_declares_einsum_batched_fn_only_in_autodiff_einsum_batch() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in EINSUM_BATCH_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = EINSUM_BATCH_FN_NAMES
+        .iter()
+        .map(|name| (format!("autodiff/src/einsum_batch.rs::{name}"), 1usize))
+        .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の einsum_batch 系 `fn` 宣言集合が\
+         `crates/autodiff/src/einsum_batch.rs`（1 件）のみという期待と\
+         一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
+         が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
+         なのかを確認すること）: {found:?}"
+    );
+}
