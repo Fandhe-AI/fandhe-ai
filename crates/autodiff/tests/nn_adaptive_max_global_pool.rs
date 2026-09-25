@@ -309,6 +309,31 @@ fn adaptive_max_pool1d_new_rejects_output_size_zero() {
     assert!(AdaptiveMaxPool1d::new(0).is_err());
 }
 
+// PR #2280 レビュー指摘（codex-review・P2）: `L` が `i32::MAX` を
+// 超える入力は要素数ゼロ（`N=0`）でも `adaptive_pool2d_out_shape` の
+// 形状検査（rank・空間軸ゼロ・output_size>=1）だけでは弾けない
+// （`h=1・w=L` は非ゼロのため）。索引用 `l <= i32::MAX` は
+// `contiguous()?.reshape(...)` による view 作成より前に検査する契約
+// （`adaptive_max_pool_ops::adaptive_max_pool1d` doc 参照）であり、
+// view 作成後に `IndexRangeOverflow` を返してテープへ孤立ノードを
+// 残さないことを確認する。
+#[test]
+fn adaptive_max_pool1d_rejects_index_overflow_before_reshape() {
+    let huge_l = i32::MAX as usize + 1;
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // N=0 のため data は空で構築でき、numel オーバーフローには
+    // 当たらない（検査対象は L 自体の索引表現可能性）。
+    let x = Tensor::<f32>::new(vec![], &[0, 1, huge_l])
+        .expect("test fixture: N=0 のため空 data で shape と整合する");
+    let xv = tape.var(&x);
+    let layer = AdaptiveMaxPool1d::new(1).unwrap();
+    let err = layer.forward(&xv).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_l
+    ));
+}
+
 #[test]
 fn global_pool_forward_rejects_rank_mismatch() {
     let tape = Tape::new_with_ops(common::naive_ops());

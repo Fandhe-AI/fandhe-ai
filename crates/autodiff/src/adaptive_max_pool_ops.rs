@@ -96,8 +96,13 @@ pub(crate) fn adaptive_max_pool2d<'t>(
 ///
 /// 検査は reshape より前に完了させる（`Var::adaptive_avg_pool1d` と
 /// 同じ規律。reshape 後にエラーを返すと孤立した view ノードがテープに
-/// 残るため）。`adaptive_max_pool2d` 側の再検査はフェイルクローズドの
-/// 二重化として残す。
+/// 残るため）。Max 系は索引が `i32` のため `adaptive_pool2d_out_shape`
+/// の形状検査に加え `l <= i32::MAX` も reshape 前に検査する
+/// （`adaptive_max_pool2d` の `hw <= i32::MAX` 検査と同型。`h=1` 固定
+/// のため `hw == l`。要素数ゼロでも `l` 自体が `i32::MAX` を超えれば
+/// 索引が表現不能なため、形状検査を通過しても reshape 前に弾く）。
+/// `adaptive_max_pool2d` 側の再検査はフェイルクローズドの二重化として
+/// 残す。
 pub(crate) fn adaptive_max_pool1d<'t>(
     input: &Var<'t>,
     output_size: usize,
@@ -111,6 +116,11 @@ pub(crate) fn adaptive_max_pool1d<'t>(
     }
     let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
     adaptive_pool2d_out_shape(&[n, c, 1, l], [1, output_size]).map_err(AutodiffError::Shape)?;
+    if l > i32::MAX as usize {
+        return Err(AutodiffError::Shape(ShapeError::IndexRangeOverflow {
+            index: l,
+        }));
+    }
 
     let x4 = input.contiguous()?.reshape(&[n, c, 1, l])?;
     let (out4, index) = adaptive_max_pool2d(&x4, [1, output_size])?;
