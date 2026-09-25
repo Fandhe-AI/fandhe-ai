@@ -68,9 +68,23 @@ pub fn unique_ext(
     dim: Option<usize>,
     consecutive: bool,
 ) -> Result<UniqueExtOutput, ShapeError> {
-    checked_numel(x.shape())?;
+    let numel = checked_numel(x.shape())?;
     match dim {
         None => {
+            // codex-review P1 是正（PR #2270・イシュー #2153）:
+            // `inverse` は `in_shape`（`= x.shape()`。要素数積 `numel`）
+            // と同じ形状の `Tensor<i32>` として書き戻すため、`numel` が
+            // `i32` の表現範囲を超えないことを確保前に検査する。
+            // `fandhe_ai_autodiff::topk_unique_ops::
+            // ensure_target_len_fits_i32` は本関数を呼ぶ前に同じ検査を
+            // 行うが、`BackendOps::unique_ext`（本関数はその CPU 実装
+            // 本体）を `Var`／autodiff 層を経由せず直接呼び出す経路でも
+            // 過大確保・`as i32` の無検査切り詰めを防ぐため、本関数側
+            // でも独立に検査する（`.claude/rules/security.md` A08
+            // 「判定迂回経路を作らない」。`backend-cpu::sort_topk` が
+            // 同じ理由で使う `ShapeError::IndexRangeOverflow` 契約を
+            // 再利用する）。
+            i32::try_from(numel).map_err(|_| ShapeError::IndexRangeOverflow { index: numel })?;
             let data: Vec<f32> = x.host_slice().into_owned();
             let (values, inverse, counts) = unique_ext_flat(&data, consecutive);
             let in_shape = x.shape().to_vec();
@@ -88,28 +102,49 @@ pub fn unique_ext(
                 });
             }
             let shape = x.shape().to_vec();
-            // codex-review P0 是正（PR #2270・イシュー #2153）: shape に
-            // 0 長軸が含まれる（numel == 0）場合は `row_major_strides`
-            // へ進む前に打ち切る。`unique_ext_slices` は shape 全体の
-            // suffix stride 積（`row_major_strides`）と
-            // `other_shape.iter().product()` を無条件に計算するため、
-            // 例えば `[0, usize::MAX, 2]` のように総積は 0 でも
-            // 部分積（`usize::MAX * 2`）が usize を溢れる形状で
-            // overflow panic／wrap を起こしうる（Cursor Bugbot 指摘）。
-            // さらに `d` 自身が非 0 長軸で他の軸が 0 長のケース
-            // （例: `[大軸長, 0]`）では、各スライスが等しく空である
-            // ことが自明なので、`axis_len` に比例した `Vec<Vec<f32>>`
-            // （`unique_ext_slices`／`unique_ext_group_sorted` が
-            // 確保する行配列・ソート添字配列）を構築せず「1 群」へ
-            // 直接畳み込むことで過大確保を避ける（codex 指摘）。
-            // `axis_len`（`= shape[d]`）自体は呼び出し元
-            // `topk_unique_ops::ensure_target_len_fits_i32` が
-            // `i32::MAX` 以下であることを事前検査済みの契約
+            let axis_len = shape[d];
+            // codex-review P1 是正（PR #2270・イシュー #2153）:
+            // `axis_len`（`= shape[d]`）は呼び出し元
+            // `topk_unique_ops::ensure_target_len_fits_i32`
             // （`fandhe_ai_autodiff::grad::unique_ext_with_fallback`
-            // doc 参照）のため、`inverse`（`i32`）の確保自体は
-            // 契約どおりの出力サイズに収まる。
+            // 経由）が `i32::MAX` 以下であることを事前検査する契約だが、
+            // それは `Var`／autodiff 層を通る経路限定の契約であり、公開
+            // 関数である本関数（`BackendOps::unique_ext` の CPU 実装
+            // 本体）を直接呼び出す経路には及ばない。`[usize::MAX, 0]`
+            // のような shape で `dim=Some(0)` を直接呼ぶと、下記の
+            // `shape.contains(&0)` 分岐が `axis_len == usize::MAX` の
+            // まま `vec![0i32; axis_len]` を確保しようとして capacity
+            // overflow で panic しうる（codex-review 指摘）。
+            // `numel`（上で `checked_numel` により usize オーバーフロー
+            // 検査済み）は `[usize::MAX, 0]` のような shape では 0 に
+            // なり `checked_numel` 単体では防げないため、`axis_len` を
+            // `i32` 表現範囲で独立に検査し、超過時は確保前に型付き
+            // エラーで拒否する（本番経路 panic 禁止・
+            // `.claude/rules/coding-rust.md`）。
+            i32::try_from(axis_len)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: axis_len })?;
+            // 直前の検査により `axis_len <= i32::MAX` が確定したため、
+            // 以下の `vec![0i32; axis_len]`（`shape.contains(&0)` 分岐）
+            // ・`unique_ext_slices`／`unique_ext_group_sorted` が
+            // `axis_len` に比例して確保する行配列・ソート添字配列は
+            // いずれも `i32::MAX` 要素以内に収まる。
+            //
+            // なお shape に 0 長軸が含まれる（numel == 0）場合は
+            // `row_major_strides` へ進む前に打ち切る
+            // （codex-review P0 是正・PR #2270・イシュー #2153）。
+            // `unique_ext_slices` は shape 全体の suffix stride 積
+            // （`row_major_strides`）と `other_shape.iter().product()`
+            // を無条件に計算するため、例えば `[0, usize::MAX, 2]` の
+            // ように総積は 0 でも部分積（`usize::MAX * 2`）が usize を
+            // 溢れる形状で overflow panic／wrap を起こしうる
+            // （Cursor Bugbot 指摘）。さらに `d` 自身が非 0 長軸で他の
+            // 軸が 0 長のケース（例: `[大軸長, 0]`）では、各スライスが
+            // 等しく空であることが自明なので、`axis_len` に比例した
+            // `Vec<Vec<f32>>`（`unique_ext_slices`／
+            // `unique_ext_group_sorted` が確保する行配列・ソート添字
+            // 配列）を構築せず「1 群」へ直接畳み込むことで過大確保を
+            // 避ける（codex 指摘）。
             if shape.contains(&0) {
-                let axis_len = shape[d];
                 let m = usize::from(axis_len != 0);
                 let mut out_shape = shape.clone();
                 out_shape[d] = m;
@@ -506,5 +541,20 @@ mod tests {
         assert_eq!(out.values.shape(), &[0, usize::MAX, 2]);
         assert_eq!(out.inverse.shape(), &[0]);
         assert_eq!(out.counts.shape(), &[0]);
+    }
+
+    /// PR #2270 codex-review P1 是正の回帰テスト: `shape = [usize::MAX,
+    /// 0]`・`dim=Some(0)` を `BackendOps::unique_ext` の CPU 実装本体
+    /// （本関数）へ直接（`Var`／autodiff 層の `ensure_target_len_fits_i32`
+    /// 事前検査を経由せず）渡しても、`vec![0i32; axis_len]`（`axis_len
+    /// == usize::MAX`）の過大確保で panic せず、確保前に型付き
+    /// `ShapeError::IndexRangeOverflow` を返すことを確認する
+    /// （`checked_numel` は `[usize::MAX, 0]` の要素数積を 0 として
+    /// 受理するため、この経路は `checked_numel` 単体では防げない）。
+    #[test]
+    fn unique_ext_dim_axis_len_exceeding_i32_max_returns_typed_error_without_panic() {
+        let x = t(Vec::new(), &[usize::MAX, 0]);
+        let err = unique_ext(&x, Some(0), false).unwrap_err();
+        assert_eq!(err, ShapeError::IndexRangeOverflow { index: usize::MAX });
     }
 }

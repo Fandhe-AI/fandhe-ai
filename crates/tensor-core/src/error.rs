@@ -122,6 +122,16 @@ pub enum ShapeError {
     /// `.claude/rules/security.md` A08 の「判定迂回経路を作らない」
     /// に基づき、両実装で同一の添字契約を満たす）。`dim` 軸のサイズが
     /// `i32::MAX` を超える巨大テンソルでのみ構築されうる。
+    ///
+    /// `backend-cpu::unique::unique_ext`（`BackendOps::unique_ext` の
+    /// CPU 実装本体。イシュー #2153）も同じ契約を再利用する:
+    /// `inverse`（`Tensor<i32>`）へ書き戻す対象要素数（`dim=None` は
+    /// `numel`・`dim=Some(d)` は `shape[d]`）が `i32` の表現範囲を
+    /// 超える場合、`vec![0i32; ...]` の確保前に `i32::try_from` で
+    /// 検査し本 variant を返す（codex-review P1 是正・PR #2270。
+    /// `Var`／autodiff 層の `topk_unique_ops::ensure_target_len_fits_i32`
+    /// 事前検査を経由しない直接呼び出し経路でも過大確保・無検査切り
+    /// 詰めを防ぐ独立検査）。
     IndexRangeOverflow { index: usize },
 }
 

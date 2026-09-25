@@ -403,3 +403,59 @@ fn unique_ext_dim_leading_zero_axis_with_overflow_prone_suffix_does_not_panic() 
     assert_eq!(dense_vec_i32(out.inverse.as_ref().unwrap()), Vec::new());
     assert_eq!(dense_vec_i32(out.counts.as_ref().unwrap()), Vec::new());
 }
+
+/// codex-review P2 是正の回帰テスト（PR #2270・イシュー #2153）:
+/// `docs/autodiff-topk-unique-ops-decision.md` §3 の「`rank == 0`
+/// （0-d）入力の `topk`／`unique` 拡張はすべて拒否する」契約に従い、
+/// `unique_with_options`（`dim=None`・追加出力なしの既存 `Var::unique`
+/// 委譲分岐を含む）が 0-d 入力を `ShapeError::RankMismatch` で拒否する
+/// ことを確認する。
+#[test]
+fn unique_with_options_rejects_rank_zero_input() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0], &[]));
+
+    let err = unique_with_options(&x, UniqueOptions::default()).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        })
+    ));
+
+    let err_with_extras = unique_with_options(
+        &x,
+        UniqueOptions::default()
+            .with_return_inverse(true)
+            .with_return_counts(true),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err_with_extras,
+        AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        })
+    ));
+}
+
+/// codex-review P2 是正の回帰テスト（PR #2270・イシュー #2153）:
+/// `unique_consecutive` も同じ 0-d 拒否契約に従うことを確認する
+/// （`dim=None` 経路は `normalize_dim` を経由しないため独立に検査が
+/// 必要——`unique_with_options_rejects_rank_zero_input` と対の
+/// テスト）。
+#[test]
+fn unique_consecutive_rejects_rank_zero_input() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0], &[]));
+
+    let err = unique_consecutive(&x, UniqueOptions::default()).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        })
+    ));
+}

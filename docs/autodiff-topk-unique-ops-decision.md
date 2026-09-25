@@ -42,7 +42,7 @@ CPU 実装（`crates/backend-cpu/src/unique.rs::unique_ext`）は `fandhe_ai_aut
 
 ## 3. PyTorch との差分
 
-- `rank == 0`（0-d）入力の `topk`／`unique` 拡張はすべて拒否する（既存 `topk_out_shape` の契約を維持。PyTorch は 0-d を許容）。
+- `rank == 0`（0-d）入力の `topk`／`unique` 拡張はすべて拒否する（既存 `topk_out_shape` の契約を維持。PyTorch は 0-d を許容）。`topk_with_options` は常に `dim` を要求するため `normalize_dim`（`d >= rank` が `rank == 0` で常に真になる）が自然に拒否するが、`unique_with_options`／`unique_consecutive` は `dim=None`（軸非指定・平坦化）を許す API であり `normalize_dim` を経由しない経路（`unique_with_options` の `dim=None && !return_inverse && !return_counts` 早期委譲分岐を含む）が漏れていた。codex-review P2 是正（PR #2270）で両入口の冒頭に `topk_unique_ops::reject_rank_zero`（`ShapeError::RankMismatch { expected: 1, actual: 0 }`）を追加し、`dim` の有無に関わらず 0-d を一律拒否する契約に揃えた（既存 `Var::unique`〈#1734〉自体の 0-d 許容契約は本イシューのスコープ外のため変更していない）。
 - `unique` の `sorted=false` は本イシューの要件外（対応しない）。
 
 ## 4. バックエンド配線

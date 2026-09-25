@@ -198,6 +198,41 @@ fn normalize_dim(dim: isize, rank: usize) -> Result<usize, AutodiffError> {
     }
 }
 
+/// `rank == 0`（0-d スカラー）入力を拒否する（`docs/autodiff-
+/// topk-unique-ops-decision.md` §3「PyTorch との差分」：「`rank == 0`
+/// （0-d）入力の `topk`／`unique` 拡張はすべて拒否する」契約の
+/// 単一実装）。
+///
+/// [`normalize_dim`] は `dim` 引数を受け取る経路（`dim=Some(_)`）では
+/// `d >= rank`（`rank == 0` なら常に真）により自然に 0-d を拒否するが、
+/// `unique_with_options`／`unique_consecutive` は `dim=None`（軸非指定・
+/// 平坦化）を許す API であり、その経路は `normalize_dim` を一切呼ばない
+/// ため 0-d 拒否契約から漏れる（`unique_with_options` の
+/// `dim=None && !return_inverse && !return_counts` 早期委譲分岐は
+/// なおさら——既存 `Var::unique`〈#1734〉と bit 同一にするため
+/// `materialize_one` へ直行し軸検査を一切経由しない）。codex-review
+/// P2 是正（PR #2270・イシュー #2153）: 両公開入口の冒頭・
+/// `dim` 分岐より前で本関数を呼び、`dim` の有無に関わらず 0-d 入力を
+/// 一律拒否することで契約どおりの動作にする（既存 `Var::unique`
+/// 自体〈`unique_with_fallback` が直接ラップする既存 #1734 API〉の
+/// 0-d 許容契約は本 PR のスコープ外のため変更しない——変更対象は
+/// あくまで本モジュールが追加する `unique_with_options`／
+/// `unique_consecutive` の新規公開入口のみ）。
+///
+/// `topk_with_options` は常に `dim` を要求する API のため
+/// `normalize_dim` の自然な拒否のみで契約を満たし、本関数の呼び出しは
+/// 不要。
+fn reject_rank_zero(rank: usize) -> Result<(), AutodiffError> {
+    if rank == 0 {
+        Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        }))
+    } else {
+        Ok(())
+    }
+}
+
 /// 本モジュールの全公開入口（[`topk_with_options`]・
 /// [`unique_with_options`]・[`unique_consecutive`]）が冒頭で呼ぶ、
 /// 確保前バイト数上限検査ヘルパ（`crate::reduce_ops::
@@ -360,6 +395,10 @@ pub fn unique_with_options<'t>(
     let in_shape = x.shape();
     // 確保前検査（あらゆる分岐・委譲より前。モジュール doc 参照）。
     ensure_alloc_fits_f32(&in_shape, None)?;
+    // 0-d 拒否契約（`dim=None` の早期委譲分岐は `normalize_dim` を
+    // 経由しないため、ここで明示的に検査する。codex-review P2 是正・
+    // `reject_rank_zero` doc 参照）。
+    reject_rank_zero(in_shape.len())?;
 
     if opts.dim.is_none() && !opts.return_inverse && !opts.return_counts {
         let input_val = materialize_one(x)?;
@@ -402,6 +441,10 @@ pub fn unique_consecutive<'t>(
     let in_shape = x.shape();
     // 確保前検査（あらゆる分岐・委譲より前。モジュール doc 参照）。
     ensure_alloc_fits_f32(&in_shape, None)?;
+    // 0-d 拒否契約（`dim=None` 経路は `normalize_dim` を経由しないため
+    // ここで明示的に検査する。codex-review P2 是正・`reject_rank_zero`
+    // doc 参照）。
+    reject_rank_zero(in_shape.len())?;
 
     let rank = in_shape.len();
     let dim = match opts.dim {
