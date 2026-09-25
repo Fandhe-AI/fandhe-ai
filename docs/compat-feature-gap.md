@@ -323,7 +323,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `int32`/`int64`/`bool` | 同左 | 部分（`Tensor<T>` 生成のみ。CrossEntropy の `targets: Tensor<i32>` のように限定的に内部使用） | 汎用整数演算・型変換 API | L |
 | `.to(dtype)`（型変換） | `tf.cast` | なし | dtype 変換 Op（勾配は型により打ち切り／恒等など個別設計） | M |
 | AMP（自動混合精度） | `tf.keras.mixed_precision` | なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記） | 損失スケーリング・unscale ステップの追加（`optim.rs` の適用順序契約に定義済みの拡張点） | L |
-| `complex64`／`complex128`（`torch.fft` 含む） | `tf.complex64`／`tf.signal.fft` | **なし（非対応。`Scalar` は実数 4 型に封印。ONNX COMPLEX は `UnknownDataType` で拒否。決定記録 同上）** | 対象外（同上） | - |
+| `complex64`／`complex128`（`torch.fft` 含む） | `tf.complex64`／`tf.signal.fft` | **なし（非対応。`Scalar` は実数 4 型に封印。ONNX COMPLEX は `UnknownDataType` で拒否。決定記録 同上）**。実部・虚部対表現（`f32`・`[..., n, 2]`）による FFT の設計は `docs/autodiff-fft-design.md`（イシュー #2151）を参照。complex dtype 自体の非目標は本行の判定と変わらない | 対象外（同上） | - |
 
 ### 2.13 device
 
