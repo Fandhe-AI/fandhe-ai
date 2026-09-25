@@ -160,7 +160,7 @@ fn pixel_shuffle_forward_rejects_non_divisible_channels_without_leaving_orphan_n
 #[test]
 fn pixel_unshuffle_forward_rejects_non_divisible_spatial_without_leaving_orphan_nodes() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0; 1 * 3 * 4], &[1, 3, 4]));
+    let x = tape.var(&t(vec![1.0; 3 * 4], &[1, 3, 4]));
     let len_before = tape.len();
 
     let err = err_of(PixelUnshuffle::new(2).unwrap().forward(&x));
