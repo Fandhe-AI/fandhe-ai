@@ -704,6 +704,38 @@ mod tests {
     }
 
     #[test]
+    fn norm_p_small_p_overflow_does_not_zero_finite_gradient() {
+        // Cursor Bugbot（Medium）・Codex（P2）指摘（イシュー #2147）:
+        // `pnorm_vjp` が `norm.is_infinite()` を「入力に ±inf を含む」
+        // 判定にそのまま使っていたため、`±inf` を一切含まない有限入力
+        // でも `p` が極小・有効要素数（ここでは同値の複数要素）が多いと
+        // `mx * acc.powf(1/p)` が `f64` の範囲を超えてオーバーフローし、
+        // release build では `inf_count == 0` の 0 除算相当で全要素の
+        // 勾配が黙って `0.0` になっていた（debug build では
+        // `debug_assert!` が panic）。修正後は `mx.is_infinite()` で
+        // 「実際の ±inf 入力」と区別し、有限入力のオーバーフローは
+        // `acc`（常に有限）を経由した log-domain で計算するため、有限
+        // 入力の勾配が誤って 0 にならない。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![7.0, 7.0], &[2]));
+        let p = 0.0005f32;
+        let out = norm_p(&x, p, None).unwrap();
+        // 極小 p × 複数の同値要素により forward 自体も f64 の範囲を
+        // 超えてオーバーフローする（`docs/autodiff-reduce-ops-decision.md`
+        // のスケール形計算でも避けられない、数学的に真に巨大な値）。
+        assert!(out.to_tensor().host_slice()[0].is_infinite());
+        let grads = tape.backward(&out).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+        for &v in &dx {
+            assert!(
+                v > 0.0,
+                "有限入力（±inf を含まない）の勾配が 0 のまま（旧欠陥の再発）: dx={dx:?}"
+            );
+            assert!(!v.is_nan(), "勾配が NaN になった: dx={dx:?}");
+        }
+    }
+
+    #[test]
     fn norm_p_gradient_matches_finite_difference() {
         let eps = 1e-3f32;
         let base = vec![1.5f32, -2.5, 3.5];
