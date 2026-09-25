@@ -2315,8 +2315,14 @@ pub(crate) fn im2col3d(
     let [sd, sh, sw] = params.stride();
     let [pd, ph, pw] = params.padding();
     let [dd, dh, dw] = params.dilation();
+    let d_out = conv2d_dim_out_len(d_in, kd_k, sd, pd, dd);
     let h_out = conv2d_dim_out_len(h_in, kh_k, sh, ph, dh);
     let w_out = conv2d_dim_out_len(w_in, kw_k, sw, pw, dw);
+    debug_assert_eq!(
+        d_out.checked_mul(h_out).and_then(|v| v.checked_mul(w_out)),
+        Some(p),
+        "eval::im2col3d: out_shape の P 軸が conv2d_dim_out_len から再計算した Dout*Hout*Wout と一致しない（契約違反）"
+    );
 
     let mut out = vec![0f32; out_numel];
     for n in 0..n_batch {
