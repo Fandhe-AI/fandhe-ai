@@ -9336,3 +9336,278 @@ fn workspace_declares_extremum_ops_fn_names_only_in_allowed_locations() {
          なのかを確認すること）: {found:?}"
     );
 }
+
+// =====================================================================
+// #2156（親 #2131）の facade 公開保留固定（`RngDistributionsHoldDoctestGuard`）。
+// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の正のプローブ 1
+// ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// `docs/rng-distributions-generator-decision.md` 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `RngDistributionsHoldDoctestGuard` doc
+/// 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合
+/// と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`matrix_ops_hold_doctest_globs_all_pub_modules` の
+/// `RngDistributionsHoldDoctestGuard` 版）。
+#[test]
+fn rng_distributions_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "RngDistributionsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "RngDistributionsHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも\
+         追加すること。"
+    );
+}
+
+/// [`rng_distributions_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest ブロック
+/// の**glob 以外の本文**が固定文言 [`RNG_DISTRIBUTIONS_HOLD_PROBE_BODY`]
+/// と 1 行たりとも違わず一致することを固定する（`matrix_ops_hold_
+/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
+/// を骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn rng_distributions_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "RngDistributionsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, RNG_DISTRIBUTIONS_HOLD_PROBE_BODY,
+        "RngDistributionsHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 RNG_DISTRIBUTIONS_HOLD_PROBE_BODY からドリフト\
+         している。正のプローブ（__fandhe_rng_dist_hold_probe モジュール・\
+         __FandheRngDistHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`rng_distributions_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `RngDistributionsHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
+/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体
+/// の `use fandhe_ai::*;` は本文に含む）。
+const RNG_DISTRIBUTIONS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_rng_dist_hold_probe {\n\
+\x20\x20\x20\x20pub struct Generator;\n\
+\x20\x20\x20\x20pub fn bernoulli() {}\n\
+\x20\x20\x20\x20pub fn multinomial() {}\n\
+\x20\x20\x20\x20pub fn normal() {}\n\
+}\n\
+use __fandhe_rng_dist_hold_probe::*;\n\
+\n\
+struct __FandheRngDistMarker;\n\
+\n\
+trait __FandheRngDistHoldProbe {\n\
+\x20\x20\x20\x20fn bernoulli(&self) -> __FandheRngDistMarker;\n\
+\x20\x20\x20\x20fn multinomial(&self) -> __FandheRngDistMarker;\n\
+\x20\x20\x20\x20fn normal(&self) -> __FandheRngDistMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheRngDistHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn bernoulli(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }\n\
+\x20\x20\x20\x20fn multinomial(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }\n\
+\x20\x20\x20\x20fn normal(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }\n\
+}\n\
+\n\
+impl __FandheRngDistHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn bernoulli(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }\n\
+\x20\x20\x20\x20fn multinomial(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }\n\
+\x20\x20\x20\x20fn normal(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns(_: Generator) {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20bernoulli();\n\
+\x20\x20\x20\x20multinomial();\n\
+\x20\x20\x20\x20normal();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheRngDistMarker = fandhe_ai::Var::bernoulli(x);\n\
+\x20\x20\x20\x20let _: __FandheRngDistMarker = x.bernoulli();\n\
+\x20\x20\x20\x20let _: __FandheRngDistMarker = fandhe_ai::Var::normal(x);\n\
+\x20\x20\x20\x20let _: __FandheRngDistMarker = x.normal();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheRngDistMarker = fandhe_ai::Tensor::multinomial(x);\n\
+\x20\x20\x20\x20let _: __FandheRngDistMarker = x.multinomial();\n\
+}";
+
+/// `bernoulli`・`multinomial`・`normal`（3 個の関数名。イシュー #2156）。
+/// `Generator`（型名）と合わせて
+/// [`facade_does_not_reexport_or_declare_rng_distributions`]・
+/// [`workspace_declares_rng_distribution_names_only_in_allowed_locations`]
+/// が共用する。
+const RNG_DISTRIBUTIONS_FN_NAMES: [&str; 3] = ["bernoulli", "multinomial", "normal"];
+
+/// [`facade_does_not_reexport_or_declare_rng_distributions`]・その自己
+/// テストが共用する検出本体。facade src 全体（`crates/facade/src/**`）
+/// の `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を
+/// 集め `Generator` を検出し（単一行・複数行・ネストした group・別名も
+/// 検出）、`trait`／`struct`／`enum`／`type` 直後の `Generator` 独自
+/// 宣言、[`RNG_DISTRIBUTIONS_FN_NAMES`]（3 個）の `fn` 宣言（可視性・
+/// 宣言文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出
+/// 契約）を違反として返す（`scan_kv_cache_reexports_and_declarations`
+/// と同型）。
+fn scan_rng_distributions_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if leaf == "Generator" || RNG_DISTRIBUTIONS_FN_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens.get(i + 1).map(String::as_str) == Some("Generator")
+        {
+            offending.push(format!("{} Generator 宣言", tokens[i]));
+        }
+        i += 1;
+    }
+
+    for fn_name in RNG_DISTRIBUTIONS_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`Generator` を識別子
+/// 単位で含む `pub use`（複数行・ネストした group・別名含む）も、
+/// facade 独自の `trait`／`struct`／`enum`／`type` 宣言も、
+/// [`RNG_DISTRIBUTIONS_FN_NAMES`]（`bernoulli`／`multinomial`／
+/// `normal`）の `fn` 宣言も存在しないことを固定する
+/// （`RngDistributionsHoldDoctestGuard` の正のプローブと多層防御を成す
+/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_kv_
+/// cache_items` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_rng_distributions() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_rng_distributions_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が RNG 確率分布サンプラー（#2156 の\
+         `bernoulli`／`multinomial`／`normal`／`Generator`。内部クレート\
+         限定の新規公開面。facade 公開は承認待ちのため対象外という設計\
+         判断に違反）を再エクスポート、独自宣言、または同名の fn を\
+         宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、
+/// [`RNG_DISTRIBUTIONS_FN_NAMES`]（3 個）の `fn` 宣言の定義元集合を
+/// 固定する（`workspace_declares_matrix_ops_fn_names_only_in_autodiff_
+/// matrix_ops` と同型のインベントリ）。
+///
+/// **期待集合**（着手前確認の再 grep で `crates/autodiff/src/nn/
+/// init.rs:615` の既存 `pub fn normal`〈1 件〉のみが見つかった。実装後
+/// の実測で `crates/tensor-core/src/rng.rs` に各名 2 件〈自由関数 1 件 +
+/// `Generator` の同名メソッド 1 件〉が追加された）:
+/// - `autodiff/src/nn/init.rs::normal` = 1（既存。無変更）
+/// - `tensor-core/src/rng.rs::bernoulli` = 2
+/// - `tensor-core/src/rng.rs::multinomial` = 2
+/// - `tensor-core/src/rng.rs::normal` = 2
+#[test]
+fn workspace_declares_rng_distribution_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in RNG_DISTRIBUTIONS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("autodiff/src/nn/init.rs::normal".to_string(), 1usize),
+        ("tensor-core/src/rng.rs::bernoulli".to_string(), 2usize),
+        ("tensor-core/src/rng.rs::multinomial".to_string(), 2usize),
+        ("tensor-core/src/rng.rs::normal".to_string(), 2usize),
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の bernoulli／multinomial／normal\
+         `fn` 宣言集合が期待（autodiff/src/nn/init.rs::normal 1 件・\
+         tensor-core/src/rng.rs の各名 2 件〈自由関数 + Generator\
+         メソッド〉）と一致しない（過不足いずれも fail-closed に検出\
+         する。新たな定義元が見つかった場合、それが承認済みの実装なのか\
+         迂回経路の混入なのかを確認すること）: {found:?}"
+    );
+}
