@@ -811,6 +811,112 @@ mod tests {
         }
     }
 
+    /// PR #2268 codex-review〈P1〉指摘の回帰: `A=I₂`（重複する**非零**
+    /// 特異値 `σ=[1,1]`。打ち切りなし・`rank==k==2`）で `pinv`／`lstsq`
+    /// の逆伝播が無条件に失敗していた。`pinv(I)=I` の勾配は
+    /// `dP=-dA`（`eval::linalg::pinv_vjp_direct_f64` の doc 参照）で
+    /// 常に well-defined なため、grad-check が有限差分と一致すること
+    /// を確認する。
+    #[test]
+    fn pinv_gradient_matches_finite_difference_duplicate_nonzero_singular_values() {
+        let eps = 1e-3f32;
+        let base = vec![1.0f32, 0.0, 0.0, 1.0];
+        let eval_fn = |data: &[f32], out_idx: usize| -> f32 {
+            let tape = Tape::new();
+            let x = tape.var(&t(data.to_vec(), &[2, 2]));
+            let p = pinv(&x, None).unwrap_or_else(|e| {
+                panic!("重複する非零特異値（A=I₂）で pinv が誤って失敗した: {e:?}")
+            });
+            p.to_tensor().host_slice()[out_idx]
+        };
+        for out_idx in 0..4 {
+            let tape = Tape::new();
+            let x = tape.var(&t(base.clone(), &[2, 2]));
+            let p = pinv(&x, None).unwrap_or_else(|e| {
+                panic!("重複する非零特異値（A=I₂）で pinv が誤って失敗した: {e:?}")
+            });
+            let out_r = out_idx / 2;
+            let out_c = out_idx % 2;
+            let grads = tape
+                .backward(&p.narrow(0, out_r, 1).unwrap().narrow(1, out_c, 1).unwrap())
+                .unwrap();
+            let dx = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+            for i in 0..4 {
+                let mut plus = base.clone();
+                plus[i] += eps;
+                let mut minus = base.clone();
+                minus[i] -= eps;
+                let numeric = (eval_fn(&plus, out_idx) - eval_fn(&minus, out_idx)) / (2.0 * eps);
+                assert!(
+                    (numeric - dx[i]).abs() < 5e-2,
+                    "out_idx={out_idx} i={i} numeric={numeric} analytic={}",
+                    dx[i]
+                );
+            }
+        }
+    }
+
+    /// PR #2268 codex-review〈P1〉指摘の回帰（`lstsq` 側）: `A=I₂` で
+    /// `X=A⁺B` の逆伝播（内部で `pinv_vjp` を再利用）も同様に無条件
+    /// 失敗していた。
+    #[test]
+    fn lstsq_gradient_matches_finite_difference_duplicate_nonzero_singular_values() {
+        let eps = 1e-3f32;
+        let a_base = vec![1.0f32, 0.0, 0.0, 1.0];
+        let b_base = vec![2.0f32, 3.0, -1.0, 0.5];
+        let eval_fn = |a_data: &[f32], b_data: &[f32], out_idx: usize| -> f32 {
+            let tape = Tape::new();
+            let a = tape.var(&t(a_data.to_vec(), &[2, 2]));
+            let b = tape.var(&t(b_data.to_vec(), &[2, 2]));
+            let x = lstsq(&a, &b, None).unwrap_or_else(|e| {
+                panic!("重複する非零特異値（A=I₂）で lstsq が誤って失敗した: {e:?}")
+            });
+            x.to_tensor().host_slice()[out_idx]
+        };
+        for out_idx in 0..4 {
+            let tape = Tape::new();
+            let a = tape.var(&t(a_base.clone(), &[2, 2]));
+            let b = tape.var(&t(b_base.clone(), &[2, 2]));
+            let x = lstsq(&a, &b, None).unwrap_or_else(|e| {
+                panic!("重複する非零特異値（A=I₂）で lstsq が誤って失敗した: {e:?}")
+            });
+            let out_r = out_idx / 2;
+            let out_c = out_idx % 2;
+            let grads = tape
+                .backward(&x.narrow(0, out_r, 1).unwrap().narrow(1, out_c, 1).unwrap())
+                .unwrap();
+            let da = grads.get(&a).unwrap().unwrap().host_slice().into_owned();
+            let db = grads.get(&b).unwrap().unwrap().host_slice().into_owned();
+            for i in 0..4 {
+                let mut a_plus = a_base.clone();
+                a_plus[i] += eps;
+                let mut a_minus = a_base.clone();
+                a_minus[i] -= eps;
+                let numeric_a = (eval_fn(&a_plus, &b_base, out_idx)
+                    - eval_fn(&a_minus, &b_base, out_idx))
+                    / (2.0 * eps);
+                assert!(
+                    (numeric_a - da[i]).abs() < 5e-2,
+                    "a out_idx={out_idx} i={i} numeric={numeric_a} analytic={}",
+                    da[i]
+                );
+
+                let mut b_plus = b_base.clone();
+                b_plus[i] += eps;
+                let mut b_minus = b_base.clone();
+                b_minus[i] -= eps;
+                let numeric_b = (eval_fn(&a_base, &b_plus, out_idx)
+                    - eval_fn(&a_base, &b_minus, out_idx))
+                    / (2.0 * eps);
+                assert!(
+                    (numeric_b - db[i]).abs() < 5e-2,
+                    "b out_idx={out_idx} i={i} numeric={numeric_b} analytic={}",
+                    db[i]
+                );
+            }
+        }
+    }
+
     /// `eval::linalg::lstsq` の `m==0` 早期リターンは `n * k_cols` の
     /// 乗算を経て出力バッファを確保するが、`m` が非ゼロを要求しない
     /// ため `n`・`k_cols` を巨大にすると `checked_mul` なしでは

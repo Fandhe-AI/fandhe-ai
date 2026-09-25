@@ -2068,6 +2068,132 @@ pub(crate) fn pinv(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, A
 /// 引き継ぐ必要がないため、判定式を `|σ_j²−σ_i²| < 1e-9・(σ_i²+σ_j²)`
 /// （分母 `1/(σ_j²−σ_i²)` の相対誤差スケールに合わせた無次元の閾値）
 /// へ変更した。
+/// [`pinv_vjp`] の「打ち切りで非零特異値を捨てていない」専用高速路
+/// （2026-09-25 追加是正・PR #2268 codex-review〈P1〉指摘: 「重複する
+/// 非零特異値で `pinv`／`lstsq` の逆伝播が失敗する」）。`rank` 以上の
+/// 切り捨て特異値が全て厳密 `0.0`（`A_r == A` が exact に成立し、`P`
+/// が「打ち切り後の低ランク近似」ではなく `A` 自身の真の Moore–
+/// Penrose 擬似逆行列である場合。`rank == k`〈打ち切りなし〉を含む）
+/// に限り、[`svd_vjp_rank_limited_f64`] を経由せず Golub–Pereyra の
+/// 閉形式勾配式（`docs/autodiff-linalg-ops-decision.md` §2.5 に引用の
+/// PyTorch `pinv_backward` 相当。`A`・`P` を直接使う式で個々の
+/// `U`／`V` 列を区別しないため、特異値の重複・近接（`svd_vjp_rank_
+/// limited_f64` の分母縮退。例 `A=I₂` は `σ=[1,1]` で無条件に失敗
+/// していた）に一切依存しない）を適用する:
+///
+/// `gA = −Pᵀ G Pᵀ + (I_m − A P) Gᵀ P Pᵀ + Pᵀ P Gᵀ (I_n − P A)`
+///
+/// `A_r == A` の下では `A P = U_r U_rᵀ`・`P A = V_r V_rᵀ`（`U_rᵀU_r
+/// = V_rᵀV_r = I_rank`）が厳密に成立するため、`(I−AP)X` 型の射影を
+/// `X − U_r(U_rᵀX)` へ、`X(I−V_rV_rᵀ)` を `X − (XV_r)V_rᵀ` へ書き
+/// 換え、`Pᵀ P = U_r・diag(1/σ_i)²・U_rᵀ`・`P Pᵀ = V_r・diag(1/σ_i)²・
+/// V_rᵀ` の因子形のまま評価する——`svd_vjp` の term2／term3
+/// （`X−U(UᵀX)` 型）と同じ結合順序を踏襲し、`rank ≤ min(m,n)` に
+/// 比例する中間行列のみを経由する（`m×m`／`n×n` を一切実体化しない。
+/// `pinv_vjp_tall_matrix_does_not_allocate_full_m_by_m_intermediate`
+/// 回帰テストが縦長入力〈`[100000,1]`〉でこの契約を検査する）。
+/// degenerate 特異値（`A=I₂` 等）でも `P` 自身は `A` の滑らかな関数
+/// であり続けるため、この式は打ち切りで非零特異値を捨てていない限り
+/// 常に正しい。**打ち切りで非零特異値を捨てた場合**（`rank < k` かつ
+/// `s[rank..k]` に非零が残る。例 `A=diag(2,1)`・`rcond=0.75`）は
+/// `P` が `A` 自身の真の擬似逆行列ではなくなるためこの式は使えず、
+/// [`svd_vjp_rank_limited_f64`] 経由の従来路（打ち切り境界より内側の
+/// 縮退特異値ペアは引き続き `InvalidArgument`）を維持する——「特異値が
+/// 縮退しつつ、かつ非零特異値が打ち切られる」の二重発生ケースの解消は
+/// `docs/autodiff-linalg-ops-decision.md` §8 へスコープ外として申し
+/// 送る。
+fn pinv_vjp_direct_f64(u_mat: &Mat, s64: &[f64], vh_mat: &Mat, rank: usize, g: &Mat) -> Mat {
+    let m = u_mat.rows;
+    let n = vh_mat.cols;
+
+    // `U_r`（`[m, rank]`）・`V_r`（`[n, rank]`）・`sinv`（長さ `rank`。
+    // `1/σ_i`）を SVD 三つ組から切り出す。
+    let mut u_r = Mat::zeros(m, rank);
+    for i in 0..rank {
+        for row in 0..m {
+            u_r.set(row, i, u_mat.get(row, i));
+        }
+    }
+    let mut v_r = Mat::zeros(n, rank);
+    for i in 0..rank {
+        for row in 0..n {
+            v_r.set(row, i, vh_mat.get(i, row));
+        }
+    }
+    let sinv: Vec<f64> = s64[..rank].iter().map(|&sv| 1.0 / sv).collect();
+    let v_r_t = v_r.transpose(); // [rank, n]
+    let u_r_t = u_r.transpose(); // [rank, m]
+
+    // term1（符号未適用）= U_r・(Sinv・(V_rᵀ G U_r)・Sinv)・V_rᵀ
+    //   （`Pᵀ = U_r Sinv V_rᵀ` を `Pᵀ G Pᵀ` へ代入して展開。先頭の負号
+    //   〈`gA` 式の `−Pᵀ G Pᵀ`〉は最終合算時にまとめて適用する）。
+    let gu = g.matmul(&u_r); // [n, rank]
+    let mut c1 = v_r_t.matmul(&gu); // [rank, rank]（V_rᵀ G U_r）
+    for i in 0..rank {
+        for j in 0..rank {
+            let scaled = c1.get(i, j) * sinv[i] * sinv[j];
+            c1.set(i, j, scaled);
+        }
+    }
+    let term1 = u_r.matmul(&c1).matmul(&v_r_t); // [m, n]（Pᵀ G Pᵀ）
+
+    // `Y = Gᵀ P Pᵀ = (Gᵀ V_r)・Sinv²・V_rᵀ`（`P Pᵀ = V_r Sinv² V_rᵀ`）。
+    // `term2 = (I_m − A P) Y = Y − U_r(U_rᵀ Y)`（`A P = U_r U_rᵀ`）。
+    let g_t = g.transpose(); // [m, n]
+    let gt_vr = g_t.matmul(&v_r); // [m, rank]（Gᵀ V_r）
+    let mut y_scaled = gt_vr.clone();
+    for (i, &siv) in sinv.iter().enumerate() {
+        let scale = siv * siv;
+        for row in 0..m {
+            let v = y_scaled.get(row, i) * scale;
+            y_scaled.set(row, i, v);
+        }
+    }
+    let y = y_scaled.matmul(&v_r_t); // [m, n]
+    let urt_y = u_r_t.matmul(&y); // [rank, n]
+    let u_urt_y = u_r.matmul(&urt_y); // [m, n]
+    let mut term2 = Mat::zeros(m, n);
+    for row in 0..m {
+        for col in 0..n {
+            term2.set(row, col, y.get(row, col) - u_urt_y.get(row, col));
+        }
+    }
+
+    // `W = Gᵀ(I_n − P A) = Gᵀ − (Gᵀ V_r) V_rᵀ`（`P A = V_r V_rᵀ`）。
+    // `term3 = Pᵀ P W = U_r・Sinv²・(U_rᵀ W)`（`Pᵀ P = U_r Sinv² U_rᵀ`）。
+    let gt_vr_vrt = gt_vr.matmul(&v_r_t); // [m, n]
+    let mut w = Mat::zeros(m, n);
+    for row in 0..m {
+        for col in 0..n {
+            w.set(row, col, g_t.get(row, col) - gt_vr_vrt.get(row, col));
+        }
+    }
+    let mut urt_w = u_r_t.matmul(&w); // [rank, n]
+    for (i, &siv) in sinv.iter().enumerate() {
+        let scale = siv * siv;
+        for col in 0..n {
+            let v = urt_w.get(i, col) * scale;
+            urt_w.set(i, col, v);
+        }
+    }
+    let term3 = u_r.matmul(&urt_w); // [m, n]
+
+    // `gA = −term1 + term2 + term3`（`term1 = Pᵀ G Pᵀ` は符号未適用の
+    // まま構築しているため、ここで先頭の負号を適用する。上記 doc の
+    // 式 `gA = −Pᵀ G Pᵀ + (I_m−AP)Gᵀ P Pᵀ + Pᵀ P Gᵀ(I_n−PA)` 参照）。
+    let mut grad = Mat::zeros(m, n);
+    for row in 0..m {
+        for col in 0..n {
+            grad.set(
+                row,
+                col,
+                -term1.get(row, col) + term2.get(row, col) + term3.get(row, col),
+            );
+        }
+    }
+    grad
+}
+
 fn svd_vjp_rank_limited_f64(
     u: &Mat,
     s: &[f64],
@@ -2187,6 +2313,15 @@ fn svd_vjp_rank_limited_f64(
 /// `(du, ds, dv)`（`rank` 以上の列は厳密 `0.0`）へ変換したうえで
 /// [`svd_vjp_rank_limited_f64`]（Townsend 2016 の一般式）を適用する。
 ///
+/// **例外（2026-09-25 追加是正・PR #2268 codex-review〈P1〉指摘）**:
+/// 打ち切りで非零特異値を 1 つも捨てていない場合（`s[rank..k]` が
+/// 全て厳密 `0.0`。`rank == k`〈打ち切りなし〉を含む）は、代わりに
+/// [`pinv_vjp_direct_f64`] の Golub–Pereyra 閉形式を使う——このとき
+/// `P` は `A` 自身の真の擬似逆行列であり、[`svd_vjp_rank_limited_f64`]
+/// が要求する「特異値の非重複」を経由せずに済む（`A=I₂` 等の重複
+/// 特異値でも `pinv`／`lstsq` の勾配が定義される反例の是正。
+/// [`pinv_vjp_direct_f64`] の doc 参照）。
+///
 /// **以前の実装（Golub–Pereyra の pinv_backward 式をそのまま `P` へ
 /// 適用する方式）が誤りだった理由**: その式は `A A⁺ A = A` 等の
 /// Moore–Penrose の 4 条件が「真の A」に対して成立することを前提に
@@ -2199,7 +2334,9 @@ fn svd_vjp_rank_limited_f64(
 /// ランクの回帰テストだけでは検出できなかった）。SVD 三つ組の摂動式
 /// （`P` が依存する `U_r`／`S_r`／`V_r` の微分を直接求める）は打ち切り
 /// の有無に関わらず常に正しい——[`svd_vjp_rank_limited_f64`] の doc
-/// 参照。
+/// 参照。非零特異値を捨てていない場合は上記「例外」のとおり
+/// [`pinv_vjp_direct_f64`] を優先するため、この一般経路は「打ち切りで
+/// 非零特異値を実際に捨てた」場合にのみ使われる。
 ///
 /// `L = ⟨G, P⟩ = Σ_{i<rank} (1/σ_i)・⟨V[:,i], (G U)[:,i]⟩` から
 /// `dL/dU[:,i] = (1/σ_i)・(Gᵀ V)[:,i]`・`dL/dV[:,i] = (1/σ_i)・(G U)[:,i]`・
@@ -2226,6 +2363,15 @@ pub(crate) fn pinv_vjp(
     let v_mat = vh_mat.transpose(); // [n,k]
     let k = u_mat.cols;
     let g_mat = Mat::from_tensor(g); // [n,m]
+
+    // 打ち切りで非零特異値を 1 つも捨てていないか（`pinv_vjp_direct_
+    // f64` の doc「例外」参照）。`s64` は `svd` の契約により降順のため
+    // `rank..k` が全て厳密 `0.0` かどうかだけ見れば十分。
+    let no_nonzero_truncated = s64[rank..k].iter().all(|&sv| sv == 0.0);
+    if no_nonzero_truncated {
+        let da = pinv_vjp_direct_f64(&u_mat, &s64, &vh_mat, rank, &g_mat);
+        return Ok(da.to_tensor());
+    }
 
     let gtv = g_mat.transpose().matmul(&v_mat); // Gᵀ V: [m,k]
     let gu = g_mat.matmul(&u_mat); // G U: [n,k]

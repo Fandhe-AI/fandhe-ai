@@ -169,7 +169,40 @@ resolve_rcond` を `linalg_ops.rs` の入口で 1 回呼んで確定させた値
   縮退していないが `σ_j²−σ_i²=3e-12` が `1e-9` を下回り誤って
   `InvalidArgument` になっていた）ため、この関数は新規導入 API で
   `svd_vjp` の上流互換を引き継ぐ必要がないことを踏まえ相対閾値へ
-  変更した（`svd_vjp` 本体は変更しない）。
+  変更した（`svd_vjp` 本体は変更しない）。**重複する非零特異値
+  （2026-09-25 追加是正・PR #2268 codex-review〈P1〉指摘）**:
+  相対閾値化後も `svd_vjp_rank_limited_f64` は「有効ランク内
+  （`i<rank && j<rank`）の特異値ペアが縮退（分母 `σ_j²−σ_i²≈0`）
+  している」場合を無条件に `InvalidArgument` とする設計のままだった
+  ため、`A=I₂`（`σ=[1,1]`。打ち切りなし・`rank==k==2`）のような
+  「重複するが非零」の特異値では、`pinv(A)=A⁻¹` の勾配が数学的には
+  常に well-defined（`dP=-A⁻¹dA A⁻¹`）であるにもかかわらず `pinv`・
+  `lstsq`（内部で `pinv_vjp` を再利用）の逆伝播が無条件に失敗して
+  いた。是正として、**打ち切りで非零特異値を 1 つも捨てていない場合**
+  （`s[rank..k]` が全て厳密 `0.0`。`rank==k`〈打ち切りなし〉に加え、
+  ランク落ち行列で切り捨てた特異値が真に `0.0` のケースも含む）に限り、
+  `eval::linalg::pinv_vjp_direct_f64` が Golub–Pereyra の閉形式
+  （本節冒頭の `gA` 式）を `(U_r, S_r, V_r)` の低ランク因子だけで
+  （`A P = U_r U_rᵀ`・`P A = V_r V_rᵀ` の恒等式で `m×m`／`n×n` を一切
+  実体化せず）直接評価する専用高速路を新設した。この場合 `P` は
+  打ち切りの影響を受けない `A` 自身の真の擬似逆行列であり、Golub–
+  Pereyra 式が要求する「`A A⁺ A = A` 等の 4 条件が `A` に対して成立
+  する」前提が常に満たされるため、個々の `U`／`V` 列を区別する
+  `svd_vjp_rank_limited_f64` の分母縮退判定を経由せずに済む。**打ち
+  切りで非零特異値を実際に捨てた場合**（`rank < k` かつ `s[rank..k]`
+  に非零が残る）は従来どおり `svd_vjp_rank_limited_f64` 経由の式を
+  使う（この場合 `P` は `A` ではなく低ランク近似 `A_r` の擬似逆行列
+  であり、Golub–Pereyra 式を `A` に直接適用できないため）。**残る
+  スコープ外**: 「非零特異値を打ち切り、かつ打ち切り境界より内側で
+  重複特異値が生じる」の二重発生ケース（例 `A=diag(1,1,0.5)`・
+  `rcond` で `σ=0.5` のみ切り捨て、残る `σ=[1,1]` が縮退）は、`P` が
+  `A_r`（≠`A`）の擬似逆行列となり Golub–Pereyra 式を直接使えず、かつ
+  縮退もしているため、引き続き `svd_vjp_rank_limited_f64` 経由で
+  `InvalidArgument` になる。この解消は §8 へスコープ外として申し
+  送る。回帰テストは `crates/autodiff/src/linalg_ops.rs` の
+  `pinv_gradient_matches_finite_difference_duplicate_nonzero_
+  singular_values`・`lstsq_gradient_matches_finite_difference_
+  duplicate_nonzero_singular_values`（grad-check）。
 - `matrix_rank` は非微分（VJP 明示ゼロ）。
 - `lstsq` は `X = V S⁻¹ (Uᵀ B)`（有効ランクまでの和。`A⁺` を陽に作ら
   ない）。VJP は `gB = A⁺ᵀ gX`、`gA = pinv_vjp(a, rcond, G=gX Bᵀ)`
@@ -262,4 +295,9 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機への到達手段が�
 - `matrix_rank` の int 出力
 - 既存 `svd_vjp`（`Op::SvdU` 等の汎用契約）の縮退判定が無条件に働く問題（upstream がゼロでも
   発火する）の是正（§2.2 参照。本 PR では変更しない）
+- 「非零特異値を打ち切り、かつ打ち切り境界より内側で特異値が重複する」
+  の二重発生ケースにおける `pinv`／`lstsq` の逆伝播（§2.5「重複する
+  非零特異値」参照。2026-09-25 追加是正で `A=I₂` 等の単純な重複ケース
+  〈打ち切りなし〉は解消済みだが、この二重発生ケースは
+  `svd_vjp_rank_limited_f64` 経由のまま `InvalidArgument` になる）
 - CUDA／Metal 実機計測（§7 参照）
