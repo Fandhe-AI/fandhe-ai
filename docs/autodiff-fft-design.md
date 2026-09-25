@@ -170,37 +170,50 @@ eval と backend-cpu で意図的にコードを複製した先例であり、�
 
 `L` を実数値の損失とし、実部・虚部対表現の勾配 `g = ∂L/∂Re + i·
 ∂L/∂Im`（`torch.view_as_real` の勾配と同じ整理）を用いる。以下の
-`s(norm)` は各演算が順変換に対して適用するスケール係数を表す:
-`s(backward) = 1`・`s(ortho) = 1/√n`・`s(forward) = 1/n`。
+`s(norm)` は各演算が順変換（`fft`／`rfft`）に対して適用するスケール
+係数を表す: `s(backward) = 1`・`s(ortho) = 1/√n`・`s(forward) = 1/n`
+（§3 の順変換のスケールと同じ値）。あわせて `t(norm)` を逆変換
+（`ifft`／`irfft`）に適用するスケール係数とする: `t(backward) = 1/n`・
+`t(ortho) = 1/√n`・`t(forward) = 1`（§3 の逆変換のスケールと同じ値）。
 
 - **`fft`（複素線形）の VJP**: 随伴（実内積 `Re⟨a,b⟩` に関する）は
-  共役転置になる。`fft` の順変換は `norm` ごとに `s(norm)` 倍された
-  DFT 行列を掛ける演算なので、その随伴は「スケールなしの逆 DFT に、
+  共役転置になる。`fft` の順変換は `y = s(norm)·F·x`（`F` は DFT 行列
+  `F_{kj} = exp(-2πi kj/n)`）と書け、`F` は対称（`F^T = F`）なので
+  共役転置は `F^H = conj(F)` に等しく、これは `idft`（正規化なしの
+  逆 DFT。`+2πi kj/n` の位相で蓄積し `1/n` を掛けない生の逆変換核）
+  そのものである。スカラー倍 `s(norm)` は随伴を取っても実数のため
+  そのまま係数に残る。すなわち随伴は「スケールなしの逆 DFT に、
   順変換で適用したのと同じスケール係数 `s(norm)` を掛けたもの」に
-  等しい。すなわち `backward` なら `dx = s(backward)·n·idft(g) = n·
-  idft(g)`（スケールなし逆 DFT）、`ortho` なら `dx = s(ortho)·n·
-  idft(g) = √n·idft(g)`、`forward` なら `dx = s(forward)·n·idft(g) =
-  idft(g)`。ここで `idft` は正規化なしの逆 DFT（`+2πi kj/n` の位相で
-  蓄積し `1/n` を掛けない生の逆変換核）を指す。
+  等しく、`n` 倍は掛けない: `backward` なら
+  `dx = s(backward)·idft(g) = idft(g)`、`ortho` なら
+  `dx = s(ortho)·idft(g) = idft(g)/√n`、`forward` なら
+  `dx = s(forward)·idft(g) = idft(g)/n`。
 - **`ifft` の VJP**: `fft` と対になる形で、順変換の逆に当たる演算の
   随伴を取る。`backward` なら `dx = dft(g)/n`（正規化なし順 DFT を
   `n` で割る）、`ortho` なら `dx = dft(g)/√n`、`forward` なら
   `dx = dft(g)`（正規化なし順 DFT そのもの）。
 - **`rfft` の VJP**: `g`（長さ `n/2+1`）を全スペクトル長 `n` まで
   ゼロ詰めし、c2c 随伴（スケールなしの逆 DFT に `s(norm)` を掛けた
-  もの。上記 `fft` の随伴と同じ核）を適用して**実部を取る**。これは
-  PyTorch の `fft_r2c_backward` と同じで、単純な `irfft` の VJP
-  （下記）とは**異なる**。
-- **`irfft` の VJP**: `dX = rfft(g)`（実数 `g`、長さ `n` の実出力に
-  対する勾配）に係数 `c_k`（`k` は bin 添字）を掛け、`s(norm)` を
-  掛ける。`c_k` は「DC（`k=0`）と、`n` が偶数のときの Nyquist
-  （`k=n/2`）では `1`、それ以外の内部 bin（`n` が奇数なら `k=1..
-  (n-1)/2`、`n` が偶数なら `k=1..n/2-1`）では `2`」とする（PyTorch の
-  `fft_c2r_backward` と同じ倍加規則）。DC と（`n` が偶数のときの）
-  Nyquist の虚部方向の勾配（`Im(dX)` の該当成分）は `0` になる
-  （§4 の厳密ゼロ twiddle により `rfft(g)` 自体の該当成分が構造的に
-  `0.0` であるため）。`m > n/2+1` の余剰 bin（VJP の出力側）の勾配は
-  ゼロとし、`m < n/2+1` の場合は切り詰める。
+  もの。上記 `fft` の随伴と同じ核。`n` 倍は掛けない）を適用して
+  **実部を取る**。これは PyTorch の `fft_r2c_backward` と同じで、
+  単純な `irfft` の VJP（下記）とは**異なる**。
+- **`irfft` の VJP**: `irfft` 自身の順変換は `x = t(norm)·
+  Re(idft_full(X))`（Hermitian 拡張した生の逆 DFT に `irfft` 自身の
+  逆変換スケール `t(norm)` を掛ける演算）なので、その随伴は「`fft`
+  の随伴と対称に、順変換用ではなく `irfft` 自身の逆変換スケール
+  `t(norm)` を掛けたもの」になる（`fft` の随伴に `s(norm)` を掛けた
+  のと同じ理屈で、ここでは `s(norm)` ではなく `t(norm)` を使う）。
+  `dX = rfft(g)`（実数 `g`、長さ `n` の実出力に対する勾配）に係数
+  `c_k`（`k` は bin 添字）を掛け、`t(norm)` を掛ける: `backward` なら
+  `t(backward) = 1/n`、`ortho` なら `t(ortho) = 1/√n`、`forward` なら
+  `t(forward) = 1`（スケールなし）。`c_k` は「DC（`k=0`）と、`n` が
+  偶数のときの Nyquist（`k=n/2`）では `1`、それ以外の内部 bin
+  （`n` が奇数なら `k=1..(n-1)/2`、`n` が偶数なら `k=1..n/2-1`）では
+  `2`」とする（PyTorch の `fft_c2r_backward` と同じ倍加規則）。DC と
+  （`n` が偶数のときの）Nyquist の虚部方向の勾配（`Im(dX)` の該当
+  成分）は `0` になる（§4 の厳密ゼロ twiddle により `rfft(g)` 自体の
+  該当成分が構造的に `0.0` であるため）。`m > n/2+1` の余剰 bin
+  （VJP の出力側）の勾配はゼロとし、`m < n/2+1` の場合は切り詰める。
 - `n` による切り詰め・ゼロ詰めの VJP は、逆向きのゼロ詰め・切り詰め
   になる（切り詰められた成分の勾配は破棄、ゼロ詰めされた成分に対応
   する入力位置は勾配をそのまま受け取る）。
