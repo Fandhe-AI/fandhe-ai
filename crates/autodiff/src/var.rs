@@ -2597,11 +2597,17 @@ impl<'t> Var<'t> {
     /// **受理範囲（v1・安全側）**: 添字は ASCII 英字のみ（空白は無視）。
     /// オペランドは 1〜2 個限定。ellipsis（`...`）・同一オペランド内の
     /// 添字重複（対角／trace）・出力添字の重複・batch 添字を伴う縮約
-    /// （rank≥3 `matmul`〈#1600〉が未実装のため。例 `"bij,bjk->bik"`）は
-    /// `AutodiffError::InvalidArgument` で拒否する。`->` 省略時は
-    /// NumPy `einsum` 既定（入力に 1 回だけ現れる添字を ASCII 昇順）を
-    /// 出力とみなす。詳細な受理範囲・分解アルゴリズムは
-    /// `crate::einsum` モジュール doc を参照。
+    /// （両オペランドと出力に共通する添字を伴うもの。例
+    /// `"bij,bjk->bik"`）は `AutodiffError::InvalidArgument` で拒否する。
+    /// batch 添字を伴う縮約は内部には rank≥3 `matmul`（イシュー
+    /// #1715）への分解として実装済みだが、facade 公開はイシュー
+    /// #2149 の承認待ちのため本メソッド（facade `fandhe_ai::Var::
+    /// einsum` へそのまま到達する）では未対応のまま維持している
+    /// （内部クレート限定で `fandhe_ai_autodiff::einsum_batch::
+    /// einsum_batched` から到達可能。`docs/autodiff-einsum-batch-
+    /// decision.md` 参照）。`->` 省略時は NumPy `einsum` 既定（入力に
+    /// 1 回だけ現れる添字を ASCII 昇順）を出力とみなす。詳細な受理
+    /// 範囲・分解アルゴリズムは `crate::einsum` モジュール doc を参照。
     ///
     /// **数値契約**: 縮約（`contract` が非空）を伴う場合は
     /// `Var::matmul` をそのまま呼ぶため、CUDA TF32 opt-in の挙動を

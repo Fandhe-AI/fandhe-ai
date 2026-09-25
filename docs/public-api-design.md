@@ -547,6 +547,16 @@ matmul_out_shape`（`Var::matmul` が使う一般化版）と役割を明確に�
 本イシューでも対象外のまま残る（rank≥3 `matmul` 自体は受理される
 ようになったが、`einsum` 側の分解経路の再設計は別イシュー）。
 
+**イシュー #2149 追加**: 上記「`einsum` 側の分解経路の再設計」を
+実装した。`crate::einsum` に `BatchContraction`（`Reject`／`Allow`）
+モードを導入し、`Allow` では `einsum_matmul_path` が
+`[batch..., L, K] × [batch..., K, R]` の rank≥3 `Var::matmul`
+（`gemm_batched`）へ分解する。`Var::einsum`（facade 公開入口）自体は
+facade 公開がイシュー #2149 の承認事項のため引き続き `Reject` を
+使い、batch 添字を伴う縮約を拒否する。内部クレート限定の到達経路
+（`fandhe_ai_autodiff::einsum_batch::einsum_batched`）は
+`docs/autodiff-einsum-batch-decision.md` を参照。
+
 ## 4. backend 入口公開 API
 
 ### 4.1 デバイス選択

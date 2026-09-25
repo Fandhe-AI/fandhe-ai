@@ -186,6 +186,17 @@
 //! 意図的に再エクスポートしない（`docs/autodiff-matrix-ops-decision.md`・
 //! モジュール doc 参照）。
 
+//! イシュー #2149（親 #2131）で、[`crate::var::Var::einsum`] が
+//! rank≥3 `matmul`（#1600 未実装）を理由に拒否していた batch 添字
+//! （両オペランドと出力に共通する添字。例 `"bij,bjk->bik"`）を伴う
+//! 2 項縮約を、その後実装済みの rank≥3 `Var::matmul`（イシュー
+//! #1715）へ分解する経路として `crate::einsum` 内に実装した。
+//! `Var::einsum` 自体の挙動は不変（facade 公開は承認事項のため未
+//! 実施）で、内部クレート限定の到達入口を [`einsum_batch`] へ追加
+//! した（[`bool_ops`]／[`rearrange_ops`]／[`matrix_ops`] と同じ
+//! 「承認待ち保留」の枠組み。`docs/autodiff-einsum-batch-decision.md`・
+//! モジュール doc 参照）。
+
 mod attention;
 mod backward;
 pub mod bool_ops;
@@ -194,6 +205,7 @@ mod create_graph;
 mod custom;
 mod default_ops;
 mod einsum;
+pub mod einsum_batch;
 mod error;
 mod eval;
 pub mod f64_autograd;
