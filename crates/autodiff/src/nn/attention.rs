@@ -235,7 +235,12 @@ fn validate_linear_projections(
 /// `None`）に加え、4 層が同一 `Tape` に属することを検査する
 /// （`Var::check_same_tape`）。`(E, kdim, vdim)` を返す（イシュー #2163
 /// で `kdim`／`vdim` を weight 形状から推論するよう緩和。`kdim = vdim =
-/// E` の入力に対する既存のエラー値は変更しない）。
+/// E` の入力に対する既存のエラー値は変更しない）。`kdim == 0`／
+/// `vdim == 0`（`k`／`v` weight が `[0, E]`）は明示的に拒否する
+/// （`LinearVars` は `weight`/`bias` が `pub` のため `Linear::
+/// from_parameters` の zero-K 検証を経由せずに構築できてしまい、
+/// `MultiheadAttention::from_config` 側の同検証（本ファイル
+/// `from_config`）と非対称だった。PR #2279 レビュー指摘）。
 fn validate_projection_vars<'t>(
     q: &LinearVars<'t>,
     k: &LinearVars<'t>,
@@ -275,6 +280,11 @@ fn validate_projection_vars<'t>(
         }));
     }
     let kdim = k_shape[0];
+    if kdim == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "MultiheadAttentionVars::new: k weight in_features (kdim) must be > 0".to_string(),
+        ));
+    }
     let v_shape = v.weight.shape();
     if v_shape.len() != 2 || v_shape[1] != e {
         return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
@@ -283,6 +293,11 @@ fn validate_projection_vars<'t>(
         }));
     }
     let vdim = v_shape[0];
+    if vdim == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "MultiheadAttentionVars::new: v weight in_features (vdim) must be > 0".to_string(),
+        ));
+    }
 
     let bias_some = [
         q.bias.is_some(),
@@ -2256,6 +2271,46 @@ mod tests {
                 other.is_err()
             ),
         }
+    }
+
+    /// Cursor Bugbot 指摘（PR #2279）の回帰テスト: `LinearVars` は
+    /// `weight`/`bias` が `pub` のため `Linear::from_parameters` の
+    /// zero-K 検証（`crates/autodiff/src/nn/linear.rs`）を経由せずに
+    /// `[0, E]` 形状の weight を持つ `LinearVars` を構築できてしまう。
+    /// `MultiheadAttentionVars::new`（`validate_projection_vars`）が
+    /// `kdim == 0`／`vdim == 0` を明示的に拒否し、
+    /// `MultiheadAttention::from_config` の同検証（`from_config_
+    /// rejects_zero_kdim_or_vdim`）と対称であることを固定する。
+    #[test]
+    fn new_rejects_zero_kdim_or_vdim_on_vars_path() {
+        let e = 4;
+        let weight_e = Tensor::new(vec![0.0_f32; e * e], &[e, e]).unwrap();
+        let bias_e = Tensor::new(vec![0.0_f32; e], &[e]).unwrap();
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+
+        let mk_square = || LinearVars {
+            weight: tape.var(&weight_e),
+            bias: Some(tape.var(&bias_e)),
+        };
+        let mk_zero_kdim = || {
+            // `[0, E]`: in_features（kdim）が 0 の縮退 weight。
+            let zero_weight = Tensor::new(Vec::<f32>::new(), &[0, e]).unwrap();
+            LinearVars {
+                weight: tape.var(&zero_weight),
+                bias: Some(tape.var(&bias_e)),
+            }
+        };
+
+        // kdim == 0（k のみ縮退）。
+        assert!(matches!(
+            MultiheadAttentionVars::new(2, mk_square(), mk_zero_kdim(), mk_square(), mk_square()),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        // vdim == 0（v のみ縮退）。
+        assert!(matches!(
+            MultiheadAttentionVars::new(2, mk_square(), mk_square(), mk_zero_kdim(), mk_square()),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
     }
 
     #[test]
