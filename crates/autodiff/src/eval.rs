@@ -4229,6 +4229,147 @@ pub(crate) fn cross_entropy_loss(
     build_tensor(vec![loss], &[])
 }
 
+/// L1 損失 `|pred − target|` の縮約（スカラー出力。PyTorch `nn.L1Loss`
+/// 相当。イシュー #2166・親イシュー #2131）。shape 一致検査
+/// （`require_same_shape`）は呼び出し元（`crate::loss_ops::l1_loss`）が
+/// 済ませている前提。`mse_loss` とは異なり、`f64` アキュムレータで
+/// index 順に蓄積し 1 回だけ `f32` へ downcast する（`.claude/rules/
+/// coding-rust.md` の一般原則を新規損失 forward に適用する判断。
+/// 既存 `mse_loss`／`cross_entropy_loss` の `f32` 蓄積は R3〈既存経路
+/// 不変〉のため変更しない）。`numel == 0` は mean・sum とも 0.0
+/// （`mse_loss` と同じ規約）。要素に `NaN` を含む場合はそのまま
+/// 伝播する。
+pub(crate) fn l1_loss_forward(
+    pred: &Tensor<f32>,
+    target: &Tensor<f32>,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    let numel = pred_data.len();
+    let mut acc: f64 = 0.0;
+    for (&p, &t) in pred_data.iter().zip(target_data.iter()) {
+        acc += (p as f64 - t as f64).abs();
+    }
+    let total = acc as f32;
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                total / numel as f32
+            }
+        }
+        crate::var::Reduction::Sum => total,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// label_smoothing・ignore_index・class_weight 付き CrossEntropy 損失の
+/// forward（イシュー #2166・親イシュー #2131）。`cross_entropy_loss`
+/// （既定オプション相当）の一般化で、PyTorch
+/// `aten/src/ATen/native/LossNLL.cpp` の label smoothing 実装に準拠
+/// する（意味論の正は `crate::loss_ops` モジュール doc §数値契約）。
+/// shape・値検査（`class_dim` 範囲・targets shape 一致・targets 添字
+/// 範囲・ε 範囲・class_weight shape／非負性）は呼び出し元
+/// （`crate::loss_ops::cross_entropy_loss_with`）が済ませている前提。
+///
+/// 記法（サンプル `s = (o, i)`、クラス `c`）: `lp_c = x_c − lse`
+/// （log-softmax、`lse` は既存 `cross_entropy_loss` と同じ max シフト
+/// 安定化）、`w_c` はクラス重み（`class_weight` 未指定は全クラス
+/// `1.0`）、`W = Σ_{非 ignore} w[t_s]`（`Mean` の分母）。
+/// `L_s = (1−ε)·w[t_s]·(−lp_{t_s}) + (ε/C)·Σ_c w_c·(−lp_c)`
+/// （ignore されたサンプルは寄与 0・`W` にも含めない）。
+/// `Mean` は `(Σ_s L_s) / W`、`Sum` は `Σ_s L_s`。`W == 0`（全サンプル
+/// ignore、または重み和が 0）は損失 0.0 を返す（`mse_loss` の
+/// `n == 0 → 0.0` 規約と同型。PyTorch は `NaN` を返すため差分として
+/// `docs/autodiff-loss-ops-decision.md` に記録する）。蓄積は `f64`・
+/// index 順で行い最後に 1 回だけ `f32` へ downcast する。
+pub(crate) fn cross_entropy_loss_with_options_forward(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    options: &crate::loss_ops::CrossEntropyOptions,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let data = dense_vec(logits);
+    let target_data = dense_vec_i32(targets);
+
+    let eps = options.label_smoothing_value() as f64;
+    let ignore_index = options.ignore_index_value();
+    let weights: Vec<f64> = match options.class_weight_value() {
+        Some(cw) => dense_vec(cw).iter().map(|&v| v as f64).collect(),
+        None => vec![1.0f64; axis_len],
+    };
+
+    let mut total_loss: f64 = 0.0;
+    let mut denom_w: f64 = 0.0;
+
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                continue;
+            }
+            let mut m = f32::NEG_INFINITY;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                m = nan_propagating_max(m, data[idx]);
+            }
+            let mut sum_exp: f64 = 0.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                sum_exp += ((data[idx] - m) as f64).exp();
+            }
+            let lse = m as f64 + sum_exp.ln();
+
+            // 呼び出し元（`crate::loss_ops::cross_entropy_loss_with`）が
+            // `0 <= t < axis_len`（`ignore_index` に一致する場合を除く）
+            // を検査済みの前提。範囲外は契約違反であり `unwrap()`/
+            // `expect()` を使わず `debug_assert!` で検知しつつ安全側
+            // （寄与 0）へフォールバックする（`cross_entropy_loss` と
+            // 同型の契約違反対応）。
+            let in_range = t >= 0 && (t as usize) < axis_len;
+            debug_assert!(
+                in_range,
+                "cross_entropy_loss_with_options_forward: target 添字が範囲外（契約違反）"
+            );
+            if !in_range {
+                continue;
+            }
+
+            let mut weighted_sum_neg_lp: f64 = 0.0;
+            for (a, &w_a) in weights.iter().enumerate() {
+                let idx = (o * axis_len + a) * inner + i;
+                let lp = data[idx] as f64 - lse;
+                weighted_sum_neg_lp += w_a * (-lp);
+            }
+
+            let w_t = weights[t as usize];
+            let lp_t = data[(o * axis_len + t as usize) * inner + i] as f64 - lse;
+            let loss_s =
+                (1.0 - eps) * w_t * (-lp_t) + (eps / axis_len as f64) * weighted_sum_neg_lp;
+            total_loss += loss_s;
+            denom_w += w_t;
+        }
+    }
+    let loss = match reduction {
+        Reduction::Mean => {
+            if denom_w == 0.0 {
+                0.0
+            } else {
+                (total_loss / denom_w) as f32
+            }
+        }
+        Reduction::Sum => total_loss as f32,
+    };
+    build_tensor(vec![loss], &[])
+}
+
 // =====================================================================
 // RNN／LSTM／GRU セル演算のホスト参照実装（イシュー #1647・設計
 // `docs/autodiff-rnn-cell-tape-design.md` 決定 1・1b・1c・5・12）。

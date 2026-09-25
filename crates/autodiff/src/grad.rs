@@ -613,6 +613,54 @@ pub(crate) fn vjp(
             // CrossEntropyLoss` doc 参照）。
             vec![(logits, dlogits)]
         }
+        Op::L1Loss {
+            pred,
+            target,
+            reduction,
+        } => {
+            let pred_val = materialize_fallible(nodes, ops, pred)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = pred_val.numel();
+            let (dpred, dtarget) = if n == 0 {
+                // `Op::MseLoss` 分岐と同じゼロ除算回避（`scale` 計算前に
+                // 早期 return）。
+                let zeros = build_tensor(vec![0f32; 0], pred_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value / n as f32,
+                    Reduction::Sum => g_value,
+                };
+                // `BackendOps` に対応メソッドを持たない（`tape::Op::
+                // L1Loss` doc 参照）ため常にホスト参照実装のみを経由
+                // する（`Op::MseLoss`／`Op::HuberLoss` の `Unsupported`
+                // フォールバック分岐と異なり、融合カーネル呼び出し自体
+                // が存在しない）。
+                let dpred_vec = l1_loss_vjp(pred_val, target_val, scale);
+                let dtarget_data: Vec<f32> = dpred_vec.iter().map(|&v| -v).collect();
+                let dpred_t = build_tensor(dpred_vec, pred_val.shape());
+                let dtarget_t = build_tensor(dtarget_data, pred_val.shape());
+                (dpred_t, dtarget_t)
+            };
+            vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::CrossEntropyLossWithOptions {
+            logits,
+            targets,
+            class_dim,
+            reduction,
+            options,
+        } => {
+            let logits_val = materialize_fallible(nodes, ops, logits)?;
+            let dlogits = cross_entropy_loss_with_options_vjp(
+                logits_val, &targets, class_dim, reduction, &options, upstream,
+            );
+            // `targets`／`options.class_weight` はいずれも非追跡のため
+            // 勾配寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
+            // CrossEntropyLossWithOptions` doc 参照）。
+            vec![(logits, dlogits)]
+        }
         Op::NllLoss {
             input,
             targets,
@@ -7561,6 +7609,134 @@ fn cross_entropy_loss_vjp(
     }
     let scaled: Vec<f32> = grad.iter().map(|&v| v * scale).collect();
     build_tensor(scaled, &shape)
+}
+
+/// `L1Loss{pred, target}` の要素ごとの劣勾配（`d = pred − target`。
+/// イシュー #2166）。`dPred[k] = scale·sign(d[k])`（`sign(0) = 0`、
+/// `NaN` はそのまま `NaN` を伝播）。`Op::L1Loss` 分岐が呼ぶ（`BackendOps`
+/// に対応メソッドがないため常にホスト計算。`tape::Op::L1Loss` doc
+/// 参照）。`dTarget = −dPred` は呼び出し元が単純な符号反転（新規
+/// カーネル起動なし）で求める（`Op::MseLoss` 分岐と同じパターン）。
+fn l1_loss_vjp(pred: &Tensor<f32>, target: &Tensor<f32>, scale: f32) -> Vec<f32> {
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    pred_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &t)| scale * l1_grad_sign(p - t))
+        .collect()
+}
+
+/// [`l1_loss_vjp`] が使う `sign` 関数（`sign(0) = 0`・`NaN` は `NaN` を
+/// 伝播。標準ライブラリの `f32::signum`（`0.0`/`-0.0` をそれぞれ
+/// `1.0`/`-1.0` に丸め `sign(0) = 0` 契約と異なる）を使わず手書きする
+/// 理由）。
+fn l1_grad_sign(d: f32) -> f32 {
+    if d.is_nan() {
+        f32::NAN
+    } else if d > 0.0 {
+        1.0
+    } else if d < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// `CrossEntropyLossWithOptions` の VJP（イシュー #2166）。
+/// `eval::cross_entropy_loss_with_options_forward` の数式（doc 参照）を
+/// クラス `c` について微分した
+/// `dx_c = s·[(1−ε)·w[t_s]·(p_c − 1{c==t_s}) + (ε/C)·(p_c·Σ_k w_k − w_c)]`
+/// （`p_c = softmax(logits)[c]`。`s` は `Mean` なら `g/W`〈`W` は forward
+/// と同じ非 ignore サンプルの重み和〉・`Sum` なら `g`・分母 0 なら 0）
+/// を直接構成する。ignore されたサンプルの行は 0（`Op::
+/// CrossEntropyLossWithOptions` doc 参照）。`targets`／
+/// `options.class_weight` は非追跡のため戻り値は `logits` 側の勾配のみ
+/// （呼び出し元 `vjp()` の `CrossEntropyLossWithOptions` 分岐参照）。
+fn cross_entropy_loss_with_options_vjp(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    options: &crate::loss_ops::CrossEntropyOptions,
+    upstream: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+
+    let softmax = eval::softmax_along(logits, class_dim);
+    let p = dense_vec(&softmax);
+    let target_data = eval::dense_vec_i32(targets);
+
+    let eps = options.label_smoothing_value() as f64;
+    let ignore_index = options.ignore_index_value();
+    let weights: Vec<f64> = match options.class_weight_value() {
+        Some(cw) => dense_vec(cw).iter().map(|&v| v as f64).collect(),
+        None => vec![1.0f64; axis_len],
+    };
+    let total_weight_all_classes: f64 = weights.iter().sum();
+
+    // `Mean` の分母 `W`（forward と同じ「非 ignore サンプルの
+    // `w[t_s]` 総和」）を独立に再計算する（`eval::cross_entropy_
+    // loss_with_options_forward` と同じ縮約順序・`f64` 蓄積）。
+    let mut denom_w: f64 = 0.0;
+    if reduction == Reduction::Mean {
+        for o in 0..outer {
+            for i in 0..inner {
+                let t = target_data[o * inner + i];
+                if ignore_index == Some(t) {
+                    continue;
+                }
+                if t >= 0 && (t as usize) < axis_len {
+                    denom_w += weights[t as usize];
+                }
+            }
+        }
+    }
+
+    let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0) as f64;
+    let s = match reduction {
+        Reduction::Mean => {
+            if denom_w == 0.0 {
+                0.0
+            } else {
+                g_value / denom_w
+            }
+        }
+        Reduction::Sum => g_value,
+    };
+
+    let mut grad = vec![0f32; logits.numel()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                // ignore されたサンプルの行は 0 のまま（`Op::
+                // CrossEntropyLossWithOptions` doc 参照）。
+                continue;
+            }
+            let in_range = t >= 0 && (t as usize) < axis_len;
+            debug_assert!(
+                in_range,
+                "cross_entropy_loss_with_options_vjp: target 添字が範囲外（契約違反）"
+            );
+            if !in_range {
+                continue;
+            }
+            let w_t = weights[t as usize];
+            for (a, &w_a) in weights.iter().enumerate() {
+                let idx = (o * axis_len + a) * inner + i;
+                let p_c = p[idx] as f64;
+                let delta = if (t as usize) == a { 1.0 } else { 0.0 };
+                let term1 = (1.0 - eps) * w_t * (p_c - delta);
+                let term2 = (eps / axis_len as f64) * (p_c * total_weight_all_classes - w_a);
+                grad[idx] = (s * (term1 + term2)) as f32;
+            }
+        }
+    }
+    build_tensor(grad, &shape)
 }
 
 /// `nll_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の

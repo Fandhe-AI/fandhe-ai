@@ -31,6 +31,8 @@
 use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
+use crate::loss_ops;
+pub use crate::loss_ops::CrossEntropyOptions;
 pub use crate::var::Reduction;
 use crate::var::Var;
 
@@ -61,6 +63,39 @@ impl MseLoss {
     /// （`AutodiffError`）をそのまま返す。
     pub fn forward<'t>(&self, pred: &Var<'t>, target: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         pred.mse_loss_with(target, self.reduction)
+    }
+}
+
+/// L1 損失（`|pred − target|` の縮約。PyTorch `nn.L1Loss` 相当。
+/// イシュー #2166・親イシュー #2131）。`crate::loss_ops::l1_loss` の
+/// 薄いラッパー（`Var` に委譲メソッドを持たないため直接自由関数を
+/// 呼ぶ。`crate::loss_ops` モジュール doc「facade 非公開（意図的）」
+/// 参照）。`Default` は `Reduction::Mean`（PyTorch `nn.L1Loss` の
+/// 既定 `reduction='mean'` と一致）。
+#[derive(Debug, Clone, Copy)]
+pub struct L1Loss {
+    reduction: Reduction,
+}
+
+impl Default for L1Loss {
+    fn default() -> Self {
+        L1Loss {
+            reduction: Reduction::Mean,
+        }
+    }
+}
+
+impl L1Loss {
+    /// 縮約種別を指定して構築する。
+    pub fn new(reduction: Reduction) -> Self {
+        L1Loss { reduction }
+    }
+
+    /// `pred`（予測値）・`target`（正解値）から損失を計算する。
+    /// shape 不一致・クロステープは `crate::loss_ops::l1_loss` の検査
+    /// （`AutodiffError`）をそのまま返す。
+    pub fn forward<'t>(&self, pred: &Var<'t>, target: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        loss_ops::l1_loss(pred, target, self.reduction)
     }
 }
 
@@ -219,6 +254,23 @@ impl CrossEntropyLoss {
         targets: &Tensor<i32>,
     ) -> Result<Var<'t>, AutodiffError> {
         logits.cross_entropy_loss(targets, self.class_dim, self.reduction)
+    }
+
+    /// `logits`・`targets` に加え、label_smoothing・ignore_index・
+    /// class_weight（[`CrossEntropyOptions`]。イシュー #2166）を指定
+    /// して損失を計算する。`options` が既定値のときは [`Self::forward`]
+    /// と同じ数値経路（既存 `Var::cross_entropy_loss`。bit 完全一致）
+    /// になる（`crate::loss_ops::cross_entropy_loss_with` doc 参照）。
+    /// 検査・数値安定化の実体は `crate::loss_ops::cross_entropy_loss_with`
+    /// 側にあり、ここでは呼び出すだけ（「薄いラッパー性」は
+    /// `tests/loss_ops.rs` で検証する）。
+    pub fn forward_with<'t>(
+        &self,
+        logits: &Var<'t>,
+        targets: &Tensor<i32>,
+        options: &CrossEntropyOptions,
+    ) -> Result<Var<'t>, AutodiffError> {
+        loss_ops::cross_entropy_loss_with(logits, targets, self.class_dim, self.reduction, options)
     }
 }
 
