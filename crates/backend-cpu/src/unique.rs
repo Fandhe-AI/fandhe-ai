@@ -88,6 +88,53 @@ pub fn unique_ext(
                 });
             }
             let shape = x.shape().to_vec();
+            // codex-review P0 是正（PR #2270・イシュー #2153）: shape に
+            // 0 長軸が含まれる（numel == 0）場合は `row_major_strides`
+            // へ進む前に打ち切る。`unique_ext_slices` は shape 全体の
+            // suffix stride 積（`row_major_strides`）と
+            // `other_shape.iter().product()` を無条件に計算するため、
+            // 例えば `[0, usize::MAX, 2]` のように総積は 0 でも
+            // 部分積（`usize::MAX * 2`）が usize を溢れる形状で
+            // overflow panic／wrap を起こしうる（Cursor Bugbot 指摘）。
+            // さらに `d` 自身が非 0 長軸で他の軸が 0 長のケース
+            // （例: `[大軸長, 0]`）では、各スライスが等しく空である
+            // ことが自明なので、`axis_len` に比例した `Vec<Vec<f32>>`
+            // （`unique_ext_slices`／`unique_ext_group_sorted` が
+            // 確保する行配列・ソート添字配列）を構築せず「1 群」へ
+            // 直接畳み込むことで過大確保を避ける（codex 指摘）。
+            // `axis_len`（`= shape[d]`）自体は呼び出し元
+            // `topk_unique_ops::ensure_target_len_fits_i32` が
+            // `i32::MAX` 以下であることを事前検査済みの契約
+            // （`fandhe_ai_autodiff::grad::unique_ext_with_fallback`
+            // doc 参照）のため、`inverse`（`i32`）の確保自体は
+            // 契約どおりの出力サイズに収まる。
+            if shape.contains(&0) {
+                let axis_len = shape[d];
+                let m = usize::from(axis_len != 0);
+                let mut out_shape = shape.clone();
+                out_shape[d] = m;
+                // `out_shape` は shape 全体に 0 長軸を含んだまま
+                // （`d` 自身が 0 長なら `out_shape[d] == 0`、そうで
+                // なければ他の軸に残る 0 長がそのまま残る）なので
+                // 要素数積は常に 0 になる。検査は `.product()` では
+                // なく `.any()` で行う（`.product()` は左から順に
+                // 素朴な乗算で畳み込むため、0 の手前に巨大な値が
+                // 複数並ぶ shape では検査対象の debug_assert 自体が
+                // overflow しうる——まさに本 P0 是正が避けたい種類の
+                // 計算のため、検査側にも持ち込まない）。
+                debug_assert!(out_shape.contains(&0));
+                let inverse = vec![0i32; axis_len];
+                let counts = if m == 1 {
+                    vec![axis_len as i32]
+                } else {
+                    Vec::new()
+                };
+                return Ok(UniqueExtOutput {
+                    values: Tensor::new(Vec::new(), &out_shape)?,
+                    inverse: Tensor::new(inverse, &[axis_len])?,
+                    counts: Tensor::new(counts, &[m])?,
+                });
+            }
             let data: Vec<f32> = x.host_slice().into_owned();
             let (rows, other_shape) = unique_ext_slices(&shape, &data, d);
             let (group_of, reps) = if consecutive {
@@ -426,6 +473,37 @@ mod tests {
         let x = t(Vec::new(), &[0, 3]);
         let out = unique_ext(&x, Some(0), false).unwrap();
         assert_eq!(out.values.shape(), &[0, 3]);
+        assert_eq!(out.inverse.shape(), &[0]);
+        assert_eq!(out.counts.shape(), &[0]);
+    }
+
+    /// PR #2270 codex-review P0 是正の回帰テスト: `d` 自身は非 0 長軸
+    /// だが他軸が 0 長（`slice_len == 0`）の場合、全スライスが等しく
+    /// 空であるため「1 群」に畳み込まれ、`axis_len` に比例した行配列
+    /// を構築せず `inverse`／`counts` が必要量だけ生成されることを
+    /// 確認する（`shape = [大軸長, 0]` 型。codex 指摘）。
+    #[test]
+    fn unique_ext_dim_nonzero_axis_with_other_zero_axis_collapses_to_one_group() {
+        let axis_len = 100_000usize;
+        let x = t(Vec::new(), &[axis_len, 0]);
+        let out = unique_ext(&x, Some(0), false).unwrap();
+        assert_eq!(out.values.shape(), &[1, 0]);
+        assert_eq!(out.inverse.shape(), &[axis_len]);
+        assert!(out.inverse.host_slice().iter().all(|&g| g == 0));
+        assert_eq!(out.counts.host_slice().into_owned(), vec![axis_len as i32]);
+    }
+
+    /// PR #2270 codex-review Medium 是正の回帰テスト: `shape` の先頭が
+    /// 0 長軸で、他軸が `row_major_strides` の suffix 積で usize を
+    /// 溢れさせるほど巨大（`[0, usize::MAX, 2]` 型。総積は 0 だが
+    /// `usize::MAX * 2` の部分積は overflow する）でも panic せず、
+    /// `d` を 0 長軸自身に取れば早期 return で strides 計算自体を
+    /// 回避できることを確認する（Cursor Bugbot 指摘）。
+    #[test]
+    fn unique_ext_dim_leading_zero_axis_with_overflow_prone_suffix_does_not_panic() {
+        let x = t(Vec::new(), &[0, usize::MAX, 2]);
+        let out = unique_ext(&x, Some(0), false).unwrap();
+        assert_eq!(out.values.shape(), &[0, usize::MAX, 2]);
         assert_eq!(out.inverse.shape(), &[0]);
         assert_eq!(out.counts.shape(), &[0]);
     }

@@ -349,3 +349,57 @@ fn unique_dim_out_of_range_is_rejected() {
         AutodiffError::Shape(ShapeError::AxisOutOfRange { axis: 1, rank: 1 })
     ));
 }
+
+/// PR #2270 codex-review P0 是正の回帰テスト（`eval::unique_ext`
+/// フォールバック経路。`common::naive_ops()` は `unique_ext` に
+/// `Unsupported` を返すため必ずこの経路を通る）: `d` 自身は非 0 長軸
+/// だが他軸が 0 長（`shape = [大軸長, 0]` 型・`slice_len == 0`）の
+/// 場合、全スライスが等しく空であるため「1 群」に畳み込まれ、
+/// `axis_len` に比例した行配列を構築せず `inverse`／`counts` が
+/// 必要量だけ生成されることを確認する（codex 指摘）。
+#[test]
+fn unique_ext_dim_nonzero_axis_with_other_zero_axis_collapses_to_one_group() {
+    let axis_len = 100_000usize;
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::new(), &[axis_len, 0]));
+    let out = unique_with_options(
+        &x,
+        UniqueOptions::default()
+            .with_dim(0)
+            .with_return_inverse(true)
+            .with_return_counts(true),
+    )
+    .unwrap();
+    assert_eq!(out.values.shape(), &[1, 0]);
+    let inverse = dense_vec_i32(out.inverse.as_ref().unwrap());
+    assert_eq!(inverse.len(), axis_len);
+    assert!(inverse.iter().all(|&g| g == 0));
+    assert_eq!(
+        dense_vec_i32(out.counts.as_ref().unwrap()),
+        vec![axis_len as i32]
+    );
+}
+
+/// PR #2270 codex-review Medium 是正の回帰テスト（`eval::unique_ext`
+/// フォールバック経路）: `shape` の先頭が 0 長軸で、他軸が
+/// `row_major_strides` の suffix 積で `usize` を溢れさせるほど巨大
+/// （`[0, usize::MAX, 2]` 型。総積は 0 だが `usize::MAX * 2` の部分積は
+/// overflow する）でも、`d` を 0 長軸自身に取れば早期 return で
+/// strides 計算自体を回避でき panic しないことを確認する（Cursor
+/// Bugbot 指摘）。
+#[test]
+fn unique_ext_dim_leading_zero_axis_with_overflow_prone_suffix_does_not_panic() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::new(), &[0, usize::MAX, 2]));
+    let out = unique_with_options(
+        &x,
+        UniqueOptions::default()
+            .with_dim(0)
+            .with_return_inverse(true)
+            .with_return_counts(true),
+    )
+    .unwrap();
+    assert_eq!(out.values.shape(), &[0, usize::MAX, 2]);
+    assert_eq!(dense_vec_i32(out.inverse.as_ref().unwrap()), Vec::new());
+    assert_eq!(dense_vec_i32(out.counts.as_ref().unwrap()), Vec::new());
+}

@@ -3418,6 +3418,44 @@ pub(crate) fn unique_ext(
         }
         Some(d) => {
             let shape = input.shape().to_vec();
+            // codex-review P0 是正（PR #2270・イシュー #2153。
+            // `crates/backend-cpu/src/unique.rs::unique_ext` の同型
+            // 早期 return と同じ理由）: shape に 0 長軸が含まれる
+            // （numel == 0）場合は `unique_ext_slices` の
+            // `row_major_strides`／`other_shape.iter().product()` を
+            // 呼ぶ前に打ち切る。総積が 0 でも部分積が usize を溢れる
+            // 形状（例: `[0, usize::MAX, 2]`）で overflow panic／wrap
+            // しうるため（Cursor Bugbot 指摘）。`d` 以外の軸が 0 長の
+            // ケース（例: `[大軸長, 0]`）は全スライスが等しく空になる
+            // ため「1 群」へ直接畳み込み、`axis_len` に比例した
+            // `Vec<Vec<f32>>`（行配列）・ソート添字配列の確保を避ける
+            // （codex 指摘）。`axis_len`（`shape[d]`）は呼び出し元
+            // `topk_unique_ops::ensure_target_len_fits_i32` が
+            // `i32::MAX` 以下であることを事前検査済みの契約
+            // （[`unique_ext`] doc 冒頭参照）。
+            if shape.contains(&0) {
+                let axis_len = shape[d];
+                let m = usize::from(axis_len != 0);
+                let mut out_shape = shape.clone();
+                out_shape[d] = m;
+                // `.product()` ではなく `.any()` で検査する（0 の手前
+                // に巨大値が複数並ぶ shape では `.product()` 自体が
+                // overflow しうる——本 P0 是正が避けたい計算を検査側に
+                // 持ち込まない。`crates/backend-cpu/src/unique.rs`
+                // 同型コメント参照）。
+                debug_assert!(out_shape.contains(&0));
+                let inverse = vec![0i32; axis_len];
+                let counts = if m == 1 {
+                    vec![axis_len as i32]
+                } else {
+                    Vec::new()
+                };
+                return UniqueExtOutput {
+                    values: build_tensor(Vec::new(), &out_shape),
+                    inverse: build_index_tensor(inverse, &[axis_len]),
+                    counts: build_index_tensor(counts, &[m]),
+                };
+            }
             let data = dense_vec(input);
             let (rows, other_shape) = unique_ext_slices(&shape, &data, d);
             let (group_of, reps) = if consecutive {
