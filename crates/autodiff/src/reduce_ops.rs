@@ -178,9 +178,9 @@ fn empty_reduce_identity<'t>(
 /// いずれでも正しい。
 ///
 /// **空縮約（`n == 0`）は単位元 `1.0`**（PyTorch と同じ）を、`x` への
-/// 計算グラフ依存を保ったまま返す（[`empty_reduce_identity`]。
+/// 計算グラフ依存を保ったまま返す（`empty_reduce_identity`。
 /// `narrow(n-1)` の underflow を避けるため合成より前に分岐する）。
-/// 確保前に [`checked_bytes_for`] で `out_shape` の要素数積・バイト数
+/// 確保前に `checked_bytes_for` で `out_shape` の要素数積・バイト数
 /// を検査する（要素数積の `usize` オーバーフロー・`Vec` allocation
 /// 上限〈`isize::MAX` バイト〉超過のいずれも型付きエラーで拒否し、
 /// 無検査の確保による capacity overflow panic を避ける。本番経路
@@ -271,10 +271,10 @@ pub fn logsumexp<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, Autodif
 ///
 /// **空縮約（`n == 0`）は `0.0`**（PyTorch と同じ。`max` は単位元を
 /// 持たずエラーになるため合成できず、`x.ne(&zero)` を `sum(dim)` へ
-/// 通した単位元（[`empty_reduce_identity`]）で代替する。空縮約軸の
+/// 通した単位元（`empty_reduce_identity`）で代替する。空縮約軸の
 /// `sum` は `0.0` を返す契約〈モジュール doc「空縮約の意味論」〉の
 /// ため、`max`/`min` の代わりに使っても値は変わらない）。確保前に
-/// [`checked_bytes_for`] で `out_shape` を検査する（`prod` と同じ
+/// `checked_bytes_for` で `out_shape` を検査する（`prod` と同じ
 /// codex-review P1 是正・イシュー #2147・PR #2263）。
 pub fn any<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
@@ -295,7 +295,7 @@ pub fn any<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError
 ///
 /// **空縮約（`n == 0`）は `1.0`**（PyTorch と同じ。[`any`] と対称。
 /// 空縮約軸の `sum` 単位元 `0.0` に `1.0` を加算する形で
-/// [`empty_reduce_identity`] を使う。確保前検査も `any` と同じ）。
+/// `empty_reduce_identity` を使う。確保前検査も `any` と同じ）。
 pub fn all<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
