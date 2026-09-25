@@ -152,24 +152,44 @@ pub fn bilinear_blend(v00: f32, v01: f32, v10: f32, v11: f32, l1x: f32, l1y: f32
 ///
 /// PyTorch の `nearest-exact` は `min(floor((dst+0.5)*in/out), in-1)`
 /// （`f32` 計算）。本関数は float を使わず `((2*dst+1)*in) / (2*out)`
-/// を `u128` で計算する整数専用の等価式とする（`(dst+0.5)*in/out ==
-/// (2*dst+1)*in / (2*out)` を整数のまま床除算する形。`nearest_src_
-/// coord` と同型の overflow 対策——`dst`・`in_size` とも `usize::MAX`
-/// でも `u128` の範囲に収まる。実装計画 §3.1）。`Nearest`（既定の
-/// `src = (dst*in)/out`）とは異なる添字式であり、`(2*dst+1)` の
-/// half-pixel オフセットの有無が主な差（例: `in=out` の恒等写像では
-/// 両者とも `src=dst` に一致するが、非整数比では 1 要素ずれうる）。
+/// を整数のまま床除算する等価式とする（`(dst+0.5)*in/out ==
+/// (2*dst+1)*in / (2*out)`）。`Nearest`（既定の `src = (dst*in)/out`）
+/// とは異なる添字式であり、`(2*dst+1)` の half-pixel オフセットの
+/// 有無が主な差（例: `in=out` の恒等写像では両者とも `src=dst` に
+/// 一致するが、非整数比では 1 要素ずれうる）。
 ///
 /// `out_size==0`／`in_size==0` は呼び出し元が事前に拒否する契約だが
 /// （`interpolate_out_shape` の空間軸 0 検査）、`Nearest` 同様に
 /// 縦深防御として `0` を返す（ゼロ除算 panic を避ける）。
+///
+/// # overflow 対策（イシュー #2152 codex-review P1 是正）
+///
+/// `numer = (2*dst+1)*in_size` を素朴に `u128` へ昇格して直接計算
+/// すると、`dst`・`in_size` とも `usize::MAX` 付近では `u128::MAX`
+/// を超えうる（`2*dst+1` は最大 65bit 相当・`in_size` は最大 64bit
+/// 相当で、積は最大 129bit 相当になるため。`nearest_src_coord`
+/// 〈`dst*in_size`。最大 128bit 相当で `u128` に収まる〉より 1 bit
+/// 分だけ広く、同じ `u128` 昇格では防げない）。本関数は
+/// `p = dst*in_size`（二つの `usize` 値の積は高々 128bit で必ず
+/// `u128` に収まる）を `out_size` で割った商 `q`・余り `r`
+/// （`r < out_size`）に分解し、整数除算の恒等式
+/// `floor((D*q+B)/D) = q + floor(B/D)` を用いて
+/// `numer/denom = q + floor((2*r+in_size) / (2*out_size))`
+/// として計算する（`2*r+in_size < 2*out_size+in_size` は
+/// `usize::MAX` 同士の和の高々 2 倍程度で `u128` に余裕を持って
+/// 収まる）。
 pub fn nearest_exact_src_coord(dst: usize, in_size: usize, out_size: usize) -> usize {
     if out_size == 0 || in_size == 0 {
         return 0;
     }
-    let numer = (2u128 * dst as u128 + 1) * in_size as u128;
-    let denom = 2u128 * out_size as u128;
-    let src = numer / denom;
+    let dst128 = dst as u128;
+    let in_size128 = in_size as u128;
+    let out_size128 = out_size as u128;
+    let p = dst128 * in_size128;
+    let q = p / out_size128;
+    let r = p % out_size128;
+    let rest = (2 * r + in_size128) / (2 * out_size128);
+    let src = q + rest;
     (src as usize).min(in_size - 1)
 }
 
@@ -579,6 +599,27 @@ mod tests {
     fn nearest_exact_src_coord_huge_in_size_does_not_overflow() {
         let in_size = 1usize << 63;
         let src = nearest_exact_src_coord(2, in_size, 3);
+        assert!(src < in_size);
+    }
+
+    #[test]
+    fn nearest_exact_src_coord_max_usize_does_not_overflow() {
+        // codex-review P1 是正の回帰テスト（イシュー #2152 PR #2269）:
+        // `dst=out_size-1`・`in_size=out_size=usize::MAX` は
+        // `(2*dst+1)*in_size` を素朴に `u128` へ昇格すると
+        // `u128::MAX` を超える（`2*dst+1` が 65bit 相当・`in_size` が
+        // 64bit 相当で積が最大 129bit 相当になるため）。overflow
+        // せず、`in=out` の恒等写像として `src=dst` を返すことを
+        // `u128` 真値計算（`p_big = (2*dst+1)*in_size` を `u128` の
+        // まま 2 段に分けて求めた値）と突き合わせて確認する。
+        let out_size = usize::MAX;
+        let in_size = usize::MAX;
+        let dst = out_size - 1;
+        let src = nearest_exact_src_coord(dst, in_size, out_size);
+        // in_size == out_size の恒等写像では nearest-exact も
+        // Nearest と同じく src == dst になる（half-pixel オフセット
+        // を打ち消し合うため）。
+        assert_eq!(src, dst);
         assert!(src < in_size);
     }
 
