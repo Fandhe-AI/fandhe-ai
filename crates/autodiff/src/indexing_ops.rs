@@ -146,11 +146,26 @@ fn plan_flat_index(
     checked_index_alloc_len(m)?;
 
     // head 空間（P 次元）の行優先ストライド。stride[k-1] = 1、
-    // stride[j] = stride[j+1] * head[j+1]。head の各要素は checked_mul
-    // 済みの P 以下のため i64 での積・和は安全に収まる。
+    // stride[j] = stride[j+1] * head[j+1]。`P = Π head` は
+    // `checked_axis_len_as_i32(p)` で i32 範囲内と検査済みだが、これは
+    // 「全軸の積」のみの保証であり、途中の部分積（stride）は保証しない
+    // （codex-review 指摘・PR #2267）。例えば先頭軸 `head[0] == 0` の
+    // 空テンソルでは `p == 0` が無条件に検査を通過する一方、`head[1..]`
+    // の個々の軸長は無検査で任意に大きくなりうるため、`stride[j]` の
+    // 計算がこの後続軸だけで i64 をオーバーフローしうる（無検査の
+    // 乗算は debug ビルド〈overflow-checks 既定 ON〉では panic、
+    // release ビルドでは silent wrap）。`checked_mul` で検査し、
+    // オーバーフロー時は
+    // 本番経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に従い
+    // `AutodiffError` へ倒す。
     let mut strides = vec![1i64; k];
     for j in (0..k.saturating_sub(1)).rev() {
-        strides[j] = strides[j + 1] * head[j + 1] as i64;
+        let head_j1 = i64::try_from(head[j + 1])
+            .map_err(|_| AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+        strides[j] = strides[j + 1]
+            .checked_mul(head_j1)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(AutodiffError::Shape)?;
     }
 
     // `flat` は最初から `Vec<i32>`（長さ `m`）として確保し、`Vec<i64>` の
@@ -159,14 +174,15 @@ fn plan_flat_index(
     // 検査しないため、ここで `Vec<i64>`（要素 8 バイト）を確保して後から
     // `Vec<i32>` へ変換すると、変換の一時的な二重確保も合わせて検査
     // 想定（`m * 4` バイト）の最大 3 倍近いピーク確保量になりうる
-    // （旧実装の問題）。各項 `v_j * stride_j`（`v_j < head[j]`、
-    // `stride_j <= P / head[j]`）および任意個の部分和は
-    // `head[j] * stride_j <= P`（`checked_axis_len_as_i32(p)` 検査済み）
-    // に収まるため、常に `i32` の範囲に収まる。積・和は `i64` の
-    // スカラー計算（配列を経由しない）でオーバーフロー安全性を確保し、
-    // 最終値を `i32::try_from` で範囲検査してから `i32` バッファへ書き
-    // 戻す（数学的には常に成功するが、defense-in-depth として
-    // `unwrap()`／`expect()` は使わずエラーへ倒す）。
+    // （旧実装の問題）。各項 `v_j * stride_j`（`v_j < head[j]`）は
+    // 通常の入力では `head[j] * stride_j <= P` に収まり `i32` の範囲へ
+    // 収まるが、上記ストライド計算のコメントのとおり先頭軸が 0 の
+    // 空テンソルではこの不変条件が成立しない場合があるため、積・和は
+    // `i64` の `checked_mul`／`checked_add`（スカラー計算。配列を経由
+    // しない）で明示的にオーバーフローを検査し、最終値を
+    // `i32::try_from` で範囲検査してから `i32` バッファへ書き戻す
+    // （`unwrap()`／`expect()` は使わずエラーへ倒す。本番経路 panic
+    // 禁止規約 `.claude/rules/coding-rust.md`）。
     let mut flat_i32 = vec![0i32; m];
     for (j, idx) in indices.iter().enumerate() {
         let idx_bc = idx.broadcast_to(&b_shape).map_err(AutodiffError::Shape)?;
@@ -475,6 +491,49 @@ mod tests {
             advanced_indexing(&x, &[rows, cols]),
             Err(AutodiffError::Shape(_))
         ));
+    }
+
+    // codex-review 指摘（PR #2267）: 先頭軸が 0 の空テンソルでは
+    // `P = Π head` は `checked_axis_len_as_i32` を無条件に通過する一方
+    // （`p == 0` は常に i32 範囲内）、後続軸（`head[1..]`）の個々の
+    // 軸長は無検査のため任意に大きくなりうる。`plan_flat_index` の
+    // ストライド計算（先頭軸を含まない部分積）がこの後続軸だけで
+    // `i64` をオーバーフローしうる境界を、panic ではなく
+    // `AutodiffError::Shape` を返すことで検査する。
+    #[test]
+    fn advanced_indexing_empty_leading_axis_overflowing_strides_returns_err_not_panic() {
+        let tape = Tape::new();
+        // shape = [0, 3e9, 3e9, 3e9]（`numel == 0` のため `Tensor::new`
+        // はデータ確保なしで構築できる）。先頭軸 0 を除く 3 軸の積は
+        // `i64` をオーバーフローする（3e9^3 ≈ 2.7e28 ≫ i64::MAX）。
+        let huge = 3_000_000_000usize;
+        let x = tape.var(&t(vec![], &[0, huge, huge, huge]));
+        let idx0 = ti(vec![0], &[1]);
+        let idx1 = ti(vec![0], &[1]);
+        let idx2 = ti(vec![0], &[1]);
+        let idx3 = ti(vec![0], &[1]);
+        let result = advanced_indexing(&x, &[idx0, idx1, idx2, idx3]);
+        assert!(
+            matches!(result, Err(AutodiffError::Shape(_))),
+            "空テンソルのストライド計算オーバーフローは AutodiffError::Shape を返すべき: {result:?}"
+        );
+    }
+
+    #[test]
+    fn index_put_empty_leading_axis_overflowing_strides_returns_err_not_panic() {
+        let tape = Tape::new();
+        let huge = 3_000_000_000usize;
+        let x = tape.var(&t(vec![], &[0, huge, huge, huge]));
+        let idx0 = ti(vec![0], &[1]);
+        let idx1 = ti(vec![0], &[1]);
+        let idx2 = ti(vec![0], &[1]);
+        let idx3 = ti(vec![0], &[1]);
+        let values = tape.var(&t(vec![], &[0, huge, huge, huge]));
+        let result = index_put(&x, &[idx0, idx1, idx2, idx3], &values, false);
+        assert!(
+            matches!(result, Err(AutodiffError::Shape(_))),
+            "空テンソルのストライド計算オーバーフローは AutodiffError::Shape を返すべき: {result:?}"
+        );
     }
 
     #[test]
