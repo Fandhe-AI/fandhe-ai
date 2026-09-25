@@ -59,16 +59,27 @@
 //!   （`Var::max` の先勝ち VJP のみ・均等分配は別イシュー）のため見送る。
 //!
 //! **境界検査（REQ-8・`.claude/rules/security.md` A03）**: `prod` の
-//! 空縮約（`n == 0`）は単位元 `1.0` の定数葉を `narrow` 呼び出し前に
-//! 返す（`narrow(n-1)` の underflow 回避）。`any`／`all` の空縮約は
+//! 空縮約（`n == 0`）は単位元 `1.0` を `narrow` 呼び出し前に返す
+//! （`narrow(n-1)` の underflow 回避）。`any`／`all` の空縮約は
 //! `max`／`min` が単位元を持たずエラーになるため、`any(∅) = 0.0`・
-//! `all(∅) = 1.0` を定数葉で明示的に返す（PyTorch と同じ規約）。
-//! `norm_p` の `p` は有限性・正値を dispatch 前に検査する
-//! （`nn/norm.rs::validate_eps` と同じ fail-closed 規律）。本番経路で
-//! `unwrap()`／`expect()` は使わない。
+//! `all(∅) = 1.0` を明示的に返す（PyTorch と同じ規約）。いずれも
+//! `x`（`any`／`all` は `x.ne(&zero)`）への計算グラフ依存を保った
+//! `empty_reduce_identity`（`x.sum(dim)` の単位元 `0.0` 契約 +
+//! 定数バイアス加算）で構築し、`x` から独立した定数葉としては返さない
+//! （codex-review P2 是正・PR #2263。対応前は `push_leaf` による独立葉
+//! 登録で `x` への逆伝播経路が失われていた）。出力 shape の確保前には
+//! `checked_bytes_for::<f32>` で要素数積の `usize` オーバーフロー・
+//! `Vec` allocation 上限（`isize::MAX` バイト）超過を型付きエラーで
+//! 拒否する（codex-review P1 是正・PR #2263。対応前は `out_shape.iter
+//! ().product()` と `vec![...; numel]` を無検査で実行しており、例えば
+//! shape `[0, usize::MAX]` を `dim=Some(0)` で縮約すると capacity
+//! overflow で panic しえた）。`norm_p` の `p` は有限性・正値を
+//! dispatch 前に検査する（`nn/norm.rs::validate_eps` と同じ
+//! fail-closed 規律）。本番経路で `unwrap()`／`expect()` は使わない。
 
 use fandhe_ai_tensor_core::{BackendError, Tensor, reduce_out_shape};
 
+use crate::bool_ops::checked_bytes_for;
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::tape::{Op, materialize_fallible};
@@ -118,6 +129,44 @@ fn materialize_one<'t>(x: &Var<'t>) -> Result<Tensor<f32>, AutodiffError> {
     Ok(materialize_fallible(&nodes, ops, x.node_id())?.clone())
 }
 
+/// [`prod`]／[`any`]／[`all`] の空縮約（`n == 0`）分岐が共通で使う、
+/// `x`（または `x` から合成した中間 `Var`。`any`／`all` は `x.ne(&zero)`
+/// を渡す）への計算グラフ依存を保ったまま単位元を返すヘルパー
+/// （codex-review P2 是正・イシュー #2147・PR #2263）。
+///
+/// `Var::sum`（`Op::Sum`）は縮約対象要素数 0 のとき単位元 `0.0` を
+/// 返す既存契約を持つ（`backend-cpu::reduction::sum` モジュール doc
+/// 「空縮約の意味論」。NumPy 互換）ため、`base.sum(dim)` がそのまま
+/// `0.0` の定数を `out_shape` で返す。`bias`（`prod`／`all` は
+/// `1.0`・`any` は `0.0`）を加算して求める単位元へ揃える。
+///
+/// `Op::Sum` の VJP（`grad.rs::unreduce_broadcast`）が `input` へ
+/// shape 相応（縮約対象軸が 0 長のため要素数 0）の勾配を記録するため、
+/// 対応前の `push_leaf` による独立葉登録と異なり `base`（ひいては
+/// `x`）への逆伝播経路が保たれる。`any`／`all` は `base` が
+/// `x.ne(&zero)` であるため、`ne` の VJP（常にゼロを返す。
+/// `ScalarBinaryOp::Ne` の契約）を経由して非空の `any`／`all` と同じ
+/// 「勾配ゼロだが経路は保持」の形になる。
+///
+/// **事前条件（呼び出し元が満たす）**: `checked_bytes_for::<f32>
+/// (out_shape)` で確保前検証済みであること。`base.sum(dim)` 内部の
+/// `Vec` 確保（`backend-cpu::reduction::axis_reduce_sum` の
+/// `(0..total_out).into_par_iter().collect()`）はそれ自体は無検査の
+/// ため、呼び出し元が事前に境界検査を通す規律に依存する。
+fn empty_reduce_identity<'t>(
+    base: &Var<'t>,
+    dim: Option<usize>,
+    bias: f32,
+) -> Result<Var<'t>, AutodiffError> {
+    let summed = base.sum(dim)?;
+    if bias == 0.0 {
+        return Ok(summed);
+    }
+    let bias_val = Tensor::scalar(bias);
+    let bias_id = base.tape().push_leaf(bias_val, false);
+    summed.add(&Var::from_raw(base.tape(), bias_id))
+}
+
 /// 縮約対象の要素数 `n` に沿った累積積（`torch.prod` 相当。イシュー
 /// #2147）。`dim: None` は全軸縮約（先に `reshape([numel])` してから
 /// `cumprod(0)` を取る）。
@@ -128,18 +177,22 @@ fn materialize_one<'t>(x: &Var<'t>) -> Result<Tensor<f32>, AutodiffError> {
 /// 後ろ向き Horner 型再帰）のため、零要素が 0 個・1 個・2 個以上の
 /// いずれでも正しい。
 ///
-/// **空縮約（`n == 0`）は単位元 `1.0`**（PyTorch と同じ）を、出力
-/// shape に合わせた定数葉として返す（`narrow(n-1)` の underflow を
-/// 避けるため合成より前に分岐する）。
+/// **空縮約（`n == 0`）は単位元 `1.0`**（PyTorch と同じ）を、`x` への
+/// 計算グラフ依存を保ったまま返す（[`empty_reduce_identity`]。
+/// `narrow(n-1)` の underflow を避けるため合成より前に分岐する）。
+/// 確保前に [`checked_bytes_for`] で `out_shape` の要素数積・バイト数
+/// を検査する（要素数積の `usize` オーバーフロー・`Vec` allocation
+/// 上限〈`isize::MAX` バイト〉超過のいずれも型付きエラーで拒否し、
+/// 無検査の確保による capacity overflow panic を避ける。本番経路
+/// panic 禁止規約 `.claude/rules/coding-rust.md`。codex-review P1
+/// 是正・イシュー #2147・PR #2263）。
 pub fn prod<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
     let n = reduce_axis_len(&shape, dim);
     if n == 0 {
-        let numel: usize = out_shape.iter().product();
-        let value = Tensor::new(vec![1.0f32; numel], &out_shape).map_err(AutodiffError::Shape)?;
-        let id = x.tape().push_leaf(value, false);
-        return Ok(Var::from_raw(x.tape(), id));
+        checked_bytes_for::<f32>(&out_shape)?;
+        return empty_reduce_identity(x, dim, 1.0);
     }
     match dim {
         None => {
@@ -217,40 +270,43 @@ pub fn logsumexp<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, Autodif
 /// 自動的に勾配ゼロの tape ノードになる。
 ///
 /// **空縮約（`n == 0`）は `0.0`**（PyTorch と同じ。`max` は単位元を
-/// 持たずエラーになるため、合成より前に定数葉で返す）。
+/// 持たずエラーになるため合成できず、`x.ne(&zero)` を `sum(dim)` へ
+/// 通した単位元（[`empty_reduce_identity`]）で代替する。空縮約軸の
+/// `sum` は `0.0` を返す契約〈モジュール doc「空縮約の意味論」〉の
+/// ため、`max`/`min` の代わりに使っても値は変わらない）。確保前に
+/// [`checked_bytes_for`] で `out_shape` を検査する（`prod` と同じ
+/// codex-review P1 是正・イシュー #2147・PR #2263）。
 pub fn any<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
     let n = reduce_axis_len(&shape, dim);
-    if n == 0 {
-        let numel: usize = out_shape.iter().product();
-        let value = Tensor::new(vec![0.0f32; numel], &out_shape).map_err(AutodiffError::Shape)?;
-        let id = x.tape().push_leaf(value, false);
-        return Ok(Var::from_raw(x.tape(), id));
-    }
     let zero_val = Tensor::scalar(0.0f32);
     let zero_id = x.tape().push_leaf(zero_val, false);
     let zero = Var::from_raw(x.tape(), zero_id);
+    if n == 0 {
+        checked_bytes_for::<f32>(&out_shape)?;
+        return empty_reduce_identity(&x.ne(&zero)?, dim, 0.0);
+    }
     x.ne(&zero)?.max(dim)
 }
 
 /// `dim` 軸の全要素が非ゼロなら `1.0`、それ以外は `0.0`（`torch.all`
 /// 相当。イシュー #2147）。[`any`] と対称（`x.ne(&zero) → min(dim)`）。
 ///
-/// **空縮約（`n == 0`）は `1.0`**（PyTorch と同じ。[`any`] と対称）。
+/// **空縮約（`n == 0`）は `1.0`**（PyTorch と同じ。[`any`] と対称。
+/// 空縮約軸の `sum` 単位元 `0.0` に `1.0` を加算する形で
+/// [`empty_reduce_identity`] を使う。確保前検査も `any` と同じ）。
 pub fn all<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
     let n = reduce_axis_len(&shape, dim);
-    if n == 0 {
-        let numel: usize = out_shape.iter().product();
-        let value = Tensor::new(vec![1.0f32; numel], &out_shape).map_err(AutodiffError::Shape)?;
-        let id = x.tape().push_leaf(value, false);
-        return Ok(Var::from_raw(x.tape(), id));
-    }
     let zero_val = Tensor::scalar(0.0f32);
     let zero_id = x.tape().push_leaf(zero_val, false);
     let zero = Var::from_raw(x.tape(), zero_id);
+    if n == 0 {
+        checked_bytes_for::<f32>(&out_shape)?;
+        return empty_reduce_identity(&x.ne(&zero)?, dim, 1.0);
+    }
     x.ne(&zero)?.min(dim)
 }
 

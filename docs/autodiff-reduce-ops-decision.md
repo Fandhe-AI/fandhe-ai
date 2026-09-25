@@ -62,6 +62,19 @@ facade ガードの撤去のみ）。
   回帰を検出し是正した）。
 - 空縮約（`n == 0`）は PyTorch と同じく単位元 **1.0** を返す。
   `narrow(n-1)` の underflow を避けるため合成より前に分岐する。
+  **2026-09-25 追記（PR #2263 codex-review P1/P2 是正・イシュー
+  #2147）**: 対応前は `out_shape.iter().product()`（`usize` 乗算の
+  未検査）と `vec![1.0f32; numel]`（allocation 未検査）を実行しており、
+  `[0, usize::MAX]` を `dim=Some(0)` で縮約するような shape で
+  capacity overflow panic しえた（本番経路 panic 禁止規約
+  `.claude/rules/coding-rust.md` 違反）。加えて `x` から独立した
+  `push_leaf` 定数葉で返しており、backward で `x` への経路が失われて
+  いた。是正後は確保前に `checked_bytes_for::<f32>`
+  （`bool_ops.rs`。要素数積のオーバーフロー検査 + `Vec` allocation
+  上限〈`isize::MAX` バイト〉検査）で拒否し、`x.sum(dim)`
+  （空縮約軸は単位元 `0.0` を返す既存契約）+ 定数バイアス `1.0` の
+  合成（`reduce_ops.rs::empty_reduce_identity`）で `x` への計算グラフ
+  依存を保ったまま単位元を返す。
 
 ### §2.3 `any`／`all`: 既存 Op の合成（新規 Op なし）
 
@@ -76,8 +89,15 @@ facade ガードの撤去のみ）。
 - 勾配は `ScalarBinaryOp::Ne` の VJP がゼロを返すため、合成しただけで
   自動的に勾配ゼロの tape ノードになる。
 - 空縮約: `max`／`min` は単位元を持たずエラーになるため、合成より前に
-  分岐し `any(∅) = 0.0`・`all(∅) = 1.0` を定数葉で返す（PyTorch と
-  同じ）。
+  分岐し `any(∅) = 0.0`・`all(∅) = 1.0` を返す（PyTorch と同じ）。
+  **2026-09-25 追記（PR #2263。`prod` §2.2 追記と同じ是正）**:
+  確保前検査（`checked_bytes_for::<f32>`）を経たうえで、`x` から
+  独立した定数葉ではなく `x.ne(&zero)` を `empty_reduce_identity`
+  （`x.ne(&zero)`（縮約対象要素数 0 のため 0 要素）の `sum(dim)` が
+  単位元 `0.0` を返す契約 + `any` はバイアス `0.0`・`all` はバイアス
+  `1.0`）へ通した合成で返す。`ne` の VJP は常にゼロを返す契約
+  （非空の `any`／`all` と同じ）のため、勾配は従前どおりゼロだが
+  `x` への逆伝播経路自体は保たれる。
 - bool 出力版は #2141（`bool_ops`）の対象で本モジュールの対象外。
 
 ### §2.4 `logsumexp`: 専用 Op

@@ -9,9 +9,9 @@
 //! は「NaiveOps 単体で見た数値契約が正しいか」（閉形式・`f64` 参照値との
 //! 突合・bit 同一契約・中心差分による勾配検査）に責務を絞る。
 
-use fandhe_ai_autodiff::Tape;
 use fandhe_ai_autodiff::reduce_ops::{all, any, logsumexp, norm_p, prod};
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_autodiff::{AutodiffError, Tape};
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape 一致")
@@ -238,4 +238,101 @@ fn out_of_range_dim_and_empty_reduction_are_errors() {
     assert_eq!(prod(&empty, None).unwrap().to_tensor().host_slice()[0], 1.0);
     assert_eq!(any(&empty, None).unwrap().to_tensor().host_slice()[0], 0.0);
     assert_eq!(all(&empty, None).unwrap().to_tensor().host_slice()[0], 1.0);
+}
+
+// --- 空縮約の境界検査（REQ-8・codex-review P1 是正・イシュー #2147・
+// PR #2263）: `out_shape.iter().product()` と `vec![...; numel]` を
+// 無検査で実行すると `[0, usize::MAX]` を `dim=Some(0)` で縮約した際に
+// capacity overflow panic しうる回帰。`checked_bytes_for::<f32>` の
+// 確保前検査が `AutodiffError::Shape(ShapeError::ElementCountOverflow)`
+// を返すことを検証する（panic しないことが本質）。
+
+#[test]
+fn prod_any_all_empty_reduction_rejects_byte_overflow_without_panicking() {
+    let tape = Tape::new();
+    // shape=[0, usize::MAX]・dim=Some(0): axis 0 の長さが 0 のため
+    // 空縮約。out_shape=[usize::MAX] の要素数積自体はオーバーフロー
+    // しないが、f32 換算バイト数（`usize::MAX * 4`）が `usize`
+    // 乗算でオーバーフローする（`checked_bytes_for` のバイト側検査）。
+    let x = tape.var(&t(vec![], &[0, usize::MAX]));
+    for result in [prod(&x, Some(0)), any(&x, Some(0)), all(&x, Some(0))] {
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+    }
+}
+
+#[test]
+fn prod_any_all_empty_reduction_rejects_product_overflow_without_panicking() {
+    let tape = Tape::new();
+    // shape=[0, usize::MAX, 2]・dim=Some(0): out_shape=[usize::MAX, 2]
+    // の要素数積自体が `usize` 乗算でオーバーフローする（バイト換算を
+    // 待たず `checked_bytes_for` の要素数積側検査で拒否される）。
+    let x = tape.var(&t(vec![], &[0, usize::MAX, 2]));
+    for result in [prod(&x, Some(0)), any(&x, Some(0)), all(&x, Some(0))] {
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+    }
+}
+
+// --- 空縮約の計算グラフ接続（codex-review P2 是正・イシュー #2147・
+// PR #2263）: 対応前は `push_leaf` で `x` から独立した定数葉を返して
+// おり、backward で `x` への経路が失われていた（`Gradients::get` が
+// 「loss から未到達」を意味する `Ok(None)` を返す）。是正後は
+// `empty_reduce_identity`（`x.sum(dim)` 経由の合成）で `x` への経路を
+// 保つため、`Gradients::get(&x)` が形状相応（要素数 0）の勾配テンソル
+// を返す（`Ok(Some(_))`）ことを検証する。
+
+#[test]
+fn prod_empty_reduction_backward_reaches_input() {
+    let tape = Tape::new();
+    let x = tape.var(&t(vec![], &[0]));
+    let y = prod(&x, None).unwrap();
+    let grads = tape.backward(&y).unwrap();
+    let g = grads
+        .get(&x)
+        .unwrap()
+        .expect("空縮約でも x への逆伝播経路が保たれ Some を返すべき");
+    assert_eq!(g.host_slice().len(), 0);
+}
+
+#[test]
+fn any_all_empty_reduction_backward_reaches_input() {
+    for ctor in [any, all] {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[0]));
+        let y = ctor(&x, None).unwrap();
+        let grads = tape.backward(&y).unwrap();
+        let g = grads
+            .get(&x)
+            .unwrap()
+            .expect("空縮約でも x への逆伝播経路が保たれ Some を返すべき");
+        assert_eq!(g.host_slice().len(), 0);
+    }
+}
+
+#[test]
+fn prod_any_all_mixed_empty_axis_forward_matches_pytorch_identity() {
+    // shape=[2, 0, 3]・dim=Some(1): 縮約対象軸のみ長さ 0（他軸は非零）。
+    // out_shape=[2, 3] の全要素が単位元になる（PyTorch と同じ規約）。
+    let tape = Tape::new();
+    let x = tape.var(&t(vec![], &[2, 0, 3]));
+    let prod_out = prod(&x, Some(1)).unwrap();
+    assert_eq!(
+        prod_out.to_tensor().host_slice().into_owned(),
+        vec![1.0f32; 6]
+    );
+    let any_out = any(&x, Some(1)).unwrap();
+    assert_eq!(
+        any_out.to_tensor().host_slice().into_owned(),
+        vec![0.0f32; 6]
+    );
+    let all_out = all(&x, Some(1)).unwrap();
+    assert_eq!(
+        all_out.to_tensor().host_slice().into_owned(),
+        vec![1.0f32; 6]
+    );
 }
