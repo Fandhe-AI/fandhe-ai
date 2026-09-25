@@ -9861,3 +9861,206 @@ fn workspace_declares_rng_distribution_names_only_in_allowed_locations() {
          迂回経路の混入なのかを確認すること）: {found:?}"
     );
 }
+
+/// `SpatialLayersHoldDoctestGuard` の唯一の doctest ブロックが glob
+/// import するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod`
+/// 宣言集合が一致することを固定する（`kv_cache_hold_doctest_globs_all_
+/// pub_modules` と同型。新しい `pub mod` を facade へ追加した際、
+/// doctest 側の `use` 一覧の更新を機械的に強制する。イシュー #2159）。
+#[test]
+fn spatial_layers_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "SpatialLayersHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "SpatialLayersHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加する\
+         こと。"
+    );
+}
+
+/// [`spatial_layers_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**（`__fandhe_spatial_hold_probe` モジュール・
+/// `__FandheSpatialAddProbe`／`__FandheSpatialVarProbe` トレイト定義・
+/// `compat::Sequential`／`Var` への実装・`__probe` 関数）が固定文言
+/// [`SPATIAL_LAYERS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致する
+/// ことを固定する（rustdoc の `# ` 隠し行・プローブの削除・別名への
+/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否
+/// する。イシュー #2159）。
+#[test]
+fn spatial_layers_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "SpatialLayersHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, SPATIAL_LAYERS_HOLD_PROBE_BODY,
+        "SpatialLayersHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 SPATIAL_LAYERS_HOLD_PROBE_BODY からドリフト\
+         している。正のプローブ（__fandhe_spatial_hold_probe モジュール・\
+         __FandheSpatialAddProbe／__FandheSpatialVarProbe トレイト・\
+         __probe 関数）の削除・弱体化・隠し行の混入がないか確認する\
+         こと。"
+    );
+}
+
+/// [`spatial_layers_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `SpatialLayersHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const SPATIAL_LAYERS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_spatial_hold_probe {\n\
+\x20\x20\x20\x20pub struct ConvTranspose1d;\n\
+\x20\x20\x20\x20pub struct Upsample;\n\
+\x20\x20\x20\x20pub struct ZeroPad2d;\n\
+\x20\x20\x20\x20pub struct Identity;\n\
+\x20\x20\x20\x20pub struct Unflatten;\n\
+\x20\x20\x20\x20pub struct __FandheSpatialHoldMarker;\n\
+\x20\x20\x20\x20pub fn add_conv_transpose1d() -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_upsample() -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_zero_pad2d() -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_identity() -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_unflatten() -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_spatial_hold_probe::*;\n\
+\n\
+trait __FandheSpatialAddProbe {\n\
+\x20\x20\x20\x20fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker;\n\
+\x20\x20\x20\x20fn add_upsample(&self) -> __FandheSpatialHoldMarker;\n\
+\x20\x20\x20\x20fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker;\n\
+\x20\x20\x20\x20fn add_identity(&self) -> __FandheSpatialHoldMarker;\n\
+\x20\x20\x20\x20fn add_unflatten(&self) -> __FandheSpatialHoldMarker;\n\
+}\n\
+\n\
+impl __FandheSpatialAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_upsample(&self) -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_identity(&self) -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_unflatten(&self) -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandheSpatialVarProbe {\n\
+\x20\x20\x20\x20fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker;\n\
+\x20\x20\x20\x20fn unflatten(&self) -> __FandheSpatialHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheSpatialVarProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn unflatten(&self) -> __FandheSpatialHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: ConvTranspose1d,\n\
+\x20\x20\x20\x20_: Upsample,\n\
+\x20\x20\x20\x20_: ZeroPad2d,\n\
+\x20\x20\x20\x20_: Identity,\n\
+\x20\x20\x20\x20_: Unflatten,\n\
+\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_conv_transpose1d();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_upsample();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_zero_pad2d();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_identity();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_unflatten();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose1d(seq);\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_conv_transpose1d();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_upsample(seq);\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_upsample();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_zero_pad2d(seq);\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_zero_pad2d();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_identity(seq);\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_identity();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_unflatten(seq);\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_unflatten();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::Var::conv_transpose1d(v);\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = v.conv_transpose1d();\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::Var::unflatten(v);\n\
+\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = v.unflatten();\n\
+}";
+
+/// `src/compat` 配下に `add_conv_transpose1d`／`add_upsample`／
+/// `add_zero_pad2d`／`add_identity`／`add_unflatten` の `pub fn` 宣言が
+/// 存在しないことを固定する（イシュー #2159。
+/// `compat_sequential_does_not_expose_rnn_add_methods` と同型。
+/// `docs/autodiff-spatial-layers-decision.md` §6 承認事項 1 が未承認の
+/// まま対象外としている設計判断の固定）。
+#[test]
+fn compat_sequential_does_not_expose_spatial_layer_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = [
+        "add_conv_transpose1d",
+        "add_upsample",
+        "add_zero_pad2d",
+        "add_identity",
+        "add_unflatten",
+    ];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for name in forbidden {
+            if contains_pub_fn_declaration(content, name) {
+                offenses.push(format!("{}: pub fn {name}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に spatial layer 系 add_* が見つかった（承認\
+         スコープ〈#2159〉は Sequential への追加を認めていない）: \
+         {offenses:?}"
+    );
+}
+
+/// [`compat_sequential_does_not_expose_spatial_layer_add_methods`] の
+/// 自己テスト（合成入力で検出できることを確認する）。
+#[test]
+fn compat_sequential_does_not_expose_spatial_layer_add_methods_detects_offense() {
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_conv_transpose1d(&mut self, l: ConvTranspose1d) {}",
+        "add_conv_transpose1d"
+    ));
+    assert!(!contains_pub_fn_declaration(
+        "pub fn add_linear(&mut self, l: Linear) {}",
+        "add_conv_transpose1d"
+    ));
+}

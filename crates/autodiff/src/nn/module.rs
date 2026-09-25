@@ -32,16 +32,20 @@ use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
 use crate::nn::container::{ModuleDict, ModuleList};
-use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose2d};
+use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
+use crate::nn::identity::Identity;
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::nn::normalization::{GroupNorm, InstanceNorm, group_norm_forward_host};
+use crate::nn::padding::ZeroPad2d;
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
 use crate::nn::transformer_encoder_layer::TransformerEncoderLayer;
+use crate::nn::unflatten::Unflatten;
+use crate::nn::upsample::Upsample;
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
@@ -254,6 +258,22 @@ pub trait Module {
 
     /// [`Module::as_conv_transpose2d`] の可変版。
     fn as_conv_transpose2d_mut(&mut self) -> Option<&mut ConvTranspose2d> {
+        None
+    }
+
+    /// [`Module::as_conv_transpose2d`] と同型の明示フック（イシュー
+    /// #2159・親 #2131）。`ConvTranspose1d` 層向け。既定 `None`。
+    /// `compat::Sequential::add_conv_transpose1d`（facade 公開面）の
+    /// 接続はユーザー承認待ち（`docs/compat-api-scope.md` §5・
+    /// `docs/autodiff-spatial-layers-decision.md` §6「承認事項」節）
+    /// であり、本フック自体は `compat` 層と独立に `nn::Sequential`
+    /// （autodiff 汎用コンテナ）から利用できる。
+    fn as_conv_transpose1d(&self) -> Option<&ConvTranspose1d> {
+        None
+    }
+
+    /// [`Module::as_conv_transpose1d`] の可変版。
+    fn as_conv_transpose1d_mut(&mut self) -> Option<&mut ConvTranspose1d> {
         None
     }
 
@@ -1218,6 +1238,53 @@ impl Module for Conv1d {
     }
 }
 
+/// `ConvTranspose1d::bind(tape).forward(input)`（`nn/conv.rs` 参照。
+/// イシュー #2159）。`named_parameters`／`set_parameter`／
+/// `set_requires_grad`／`requires_grad` の命名契約は `ConvTranspose2d`
+/// と同型（`weight` → `bias`）。
+impl Module for ConvTranspose1d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn as_conv_transpose1d(&self) -> Option<&ConvTranspose1d> {
+        Some(self)
+    }
+
+    fn as_conv_transpose1d_mut(&mut self) -> Option<&mut ConvTranspose1d> {
+        Some(self)
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        ConvTranspose1d::set_parameter(self, name, value)
+    }
+
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        ConvTranspose1d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        ConvTranspose1d::requires_grad(self)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        ConvTranspose1d::forward_host(self, ops, input)
+    }
+}
+
 /// `Relu::forward`（shape 不変の単項演算のため構造的に失敗しえない）を
 /// `Result` へ包むだけの委譲。`tape` は使わない（`nn/activation.rs`
 /// 参照）。
@@ -1380,6 +1447,70 @@ impl Module for Flatten {
     ) -> Result<Tensor<f32>, AutodiffError> {
         let out_shape = flatten_out_shape(input.shape(), self.start_dim(), self.end_dim())?;
         Ok(input.reshape(&out_shape)?)
+    }
+}
+
+/// `Unflatten::forward`／`forward_host` への委譲（イシュー #2159）。
+/// [`Flatten`] の逆変換で、`tape` は使わない。
+impl Module for Unflatten {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Unflatten::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Unflatten::forward_host(self, ops, input)
+    }
+}
+
+/// `Upsample::forward`／`forward_host` への委譲（イシュー #2159）。
+/// `tape` は使わない（`Var::interpolate` は eager dispatch のため）。
+impl Module for Upsample {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Upsample::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Upsample::forward_host(self, ops, input)
+    }
+}
+
+/// `ZeroPad2d::forward`／`forward_host` への委譲（イシュー #2159）。
+impl Module for ZeroPad2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        ZeroPad2d::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        ZeroPad2d::forward_host(self, ops, input)
+    }
+}
+
+/// `Identity::forward`／`forward_host` への委譲（イシュー #2159）。
+/// パラメータを持たない ZST のため `named_parameters` は既定（空）の
+/// まま（`Relu` 等と同型）。
+impl Module for Identity {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Identity::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Identity::forward_host(self, ops, input)
     }
 }
 

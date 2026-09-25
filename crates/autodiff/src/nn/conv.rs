@@ -1390,3 +1390,526 @@ impl<'t> Conv1dVars<'t> {
         )
     }
 }
+
+/// ConvTranspose1d 層のパラメータ本体（イシュー #2159。親 #2131）。
+/// `weight` は `[in_channels, out_channels / groups, k]`（rank 3。
+/// PyTorch `nn.ConvTranspose1d.weight` と同じレイアウト。`ConvTranspose2d`
+/// の `[Cin, Cout/groups, kH, kW]` と先頭 2 軸の並びが `Conv2d` とは
+/// 逆な点も踏襲する）。`bias` は `Some` の場合 `[out_channels]`。
+///
+/// `Var` に `conv_transpose1d` 相当の inherent メソッドは追加しない
+/// （`Var` は facade から再エクスポートされるため、追加は即座に公開
+/// 面を広げる。イシュー #2143・#2144・#2146 の先例）。代わりに
+/// `ConvTranspose1dVars::forward`／`forward_host` が、[`Conv1d`]
+/// （本ファイル上部）と同じ「`[*, *, 1, *]` への reshape 併合」で
+/// 既存の [`crate::var::Var::conv_transpose2d`]（#2067）へ委譲する
+/// （新規 `Op`／`BackendOps`／VJP／カーネルなし）。`weight` は
+/// `Conv1d` と同じ理由で rank 3 のまま保持する（`weight()` が
+/// `&Tensor<f32>` を返す既存契約のため）。
+pub struct ConvTranspose1d {
+    weight: Tensor<f32>,
+    bias: Option<Tensor<f32>>,
+    stride: usize,
+    padding: usize,
+    output_padding: usize,
+    dilation: usize,
+    groups: usize,
+    /// 層別 `requires_grad` 凍結フラグ（`nn::Conv1d`／`ConvTranspose2d`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
+}
+
+impl ConvTranspose1d {
+    /// `nn::ConvTranspose2d::new` と同型（`kernel_size`／`stride`／
+    /// `padding`／`output_padding`／`dilation` をスカラーのまま
+    /// `Conv2dParams::new([1, k], [1, stride], [0, padding], [1,
+    /// dilation], groups)`〈`Conv1d::new`・`Var::conv1d` と同じ変換〉
+    /// で検査する）。`fan_in = (out_channels/groups) · k`（PyTorch の
+    /// transposed 規則。`ConvTranspose2d::new` doc 参照）。
+    #[allow(clippy::too_many_arguments)] // PyTorch `nn.ConvTranspose1d` の全引数を受理する必要があるため。
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        dilation: usize,
+        groups: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<ConvTranspose1d, AutodiffError> {
+        let params = Conv2dParams::new(
+            [1, kernel_size],
+            [1, stride],
+            [0, padding],
+            [1, dilation],
+            groups,
+        )
+        .map_err(AutodiffError::Backend)?;
+        if output_padding >= stride {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::new: output_padding ({output_padding}) must be < stride \
+                 ({stride})"
+            )));
+        }
+        if in_channels == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "ConvTranspose1d::new: in_channels must be > 0 (1/sqrt(fan_in) would be \
+                 non-finite)"
+                    .to_string(),
+            ));
+        }
+        if !in_channels.is_multiple_of(groups) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::new: in_channels ({in_channels}) must be divisible by groups \
+                 ({groups})"
+            )));
+        }
+        if !out_channels.is_multiple_of(groups) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::new: out_channels ({out_channels}) must be divisible by \
+                 groups ({groups})"
+            )));
+        }
+        if out_channels < groups {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::new: out_channels ({out_channels}) must be >= groups \
+                 ({groups})"
+            )));
+        }
+        let cout_g = out_channels / groups;
+        // fan_in = Cout_g * k（`ConvTranspose2d::new` の PyTorch 準拠 fan_in を 1d へ写す）。
+        let fan_in = cout_g.checked_mul(kernel_size).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "ConvTranspose1d::new: fan_in (out_channels/groups * k) overflows usize"
+                    .to_string(),
+            )
+        })?;
+        if fan_in == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "ConvTranspose1d::new: fan_in must be > 0 (1/sqrt(fan_in) would be non-finite)"
+                    .to_string(),
+            ));
+        }
+        let bound = 1.0 / (fan_in as f32).sqrt();
+
+        let weight_seed = derive_seed(seed, WEIGHT_SEED_SALT);
+        let weight_numel = in_channels
+            .checked_mul(cout_g)
+            .and_then(|v| v.checked_mul(kernel_size))
+            .ok_or_else(|| {
+                AutodiffError::InvalidArgument(
+                    "ConvTranspose1d::new: weight element count overflows usize".to_string(),
+                )
+            })?;
+        let weight_data = checked_uniform_init(
+            weight_numel,
+            bound,
+            weight_seed,
+            "ConvTranspose1d::new: weight",
+        )?;
+        let weight = Tensor::new(weight_data, &[in_channels, cout_g, kernel_size])?;
+
+        let bias = if bias {
+            let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
+            let bias_data =
+                checked_uniform_init(out_channels, bound, bias_seed, "ConvTranspose1d::new: bias")?;
+            Some(Tensor::new(bias_data, &[out_channels])?)
+        } else {
+            None
+        };
+
+        Ok(ConvTranspose1d {
+            weight,
+            bias,
+            stride: params.stride()[1],
+            padding: params.padding()[1],
+            output_padding,
+            dilation: params.dilation()[1],
+            groups: params.groups(),
+            requires_grad: true,
+        })
+    }
+
+    /// 明示的な重み・バイアス・ハイパーパラメータから構築する
+    /// （[`ConvTranspose2d::from_parameters`] を 1d に写したもの。
+    /// `weight` は rank 3）。
+    #[allow(clippy::too_many_arguments)] // ConvTranspose1d の全ハイパーパラメータを引数として受理する必要があるため。
+    pub fn from_parameters(
+        weight: Tensor<f32>,
+        bias: Option<Tensor<f32>>,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> Result<ConvTranspose1d, AutodiffError> {
+        if weight.rank() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: weight.rank(),
+            }));
+        }
+        let weight_shape = weight.shape().to_vec();
+        let cout_g = weight_shape[1];
+        if cout_g == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "ConvTranspose1d::from_parameters: weight.shape()[1] (out_channels/groups) must \
+                 be > 0"
+                    .to_string(),
+            ));
+        }
+        let kernel_size = weight_shape[2];
+        let params = Conv2dParams::new(
+            [1, kernel_size],
+            [1, stride],
+            [0, padding],
+            [1, dilation],
+            groups,
+        )
+        .map_err(AutodiffError::Backend)?;
+        if output_padding >= stride {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::from_parameters: output_padding ({output_padding}) must be < \
+                 stride ({stride})"
+            )));
+        }
+
+        let in_channels = weight_shape[0];
+        if in_channels == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "ConvTranspose1d::from_parameters: weight.shape()[0] (in_channels) must be > 0"
+                    .to_string(),
+            ));
+        }
+        if !in_channels.is_multiple_of(groups) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::from_parameters: in_channels ({in_channels}) must be \
+                 divisible by groups ({groups})"
+            )));
+        }
+        let out_channels = cout_g.checked_mul(groups).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "ConvTranspose1d::from_parameters: out_channels (weight.shape()[1] * groups) \
+                 overflows usize"
+                    .to_string(),
+            )
+        })?;
+        if out_channels < groups {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::from_parameters: out_channels ({out_channels}) must be >= \
+                 groups ({groups})"
+            )));
+        }
+
+        if let Some(ref b) = bias {
+            if b.rank() != 1 {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 1,
+                    actual: b.rank(),
+                }));
+            }
+            if b.shape() != [out_channels] {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![out_channels],
+                }));
+            }
+        }
+
+        Ok(ConvTranspose1d {
+            weight,
+            bias,
+            stride: params.stride()[1],
+            padding: params.padding()[1],
+            output_padding,
+            dilation: params.dilation()[1],
+            groups: params.groups(),
+            requires_grad: true,
+        })
+    }
+
+    /// このステップの `tape` へ `weight`/`bias` を葉ノードとして登録する
+    /// （[`Conv1d::bind`] と同型。`weight` は rank 3 のまま——
+    /// `ConvTranspose1dVars::forward` が内部で reshape する契約のため
+    /// ここで reshape する必要はない）。
+    pub fn bind<'t>(&self, tape: &'t Tape) -> ConvTranspose1dVars<'t> {
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.requires_grad));
+        ConvTranspose1dVars {
+            weight,
+            bias,
+            stride: self.stride,
+            padding: self.padding,
+            output_padding: self.output_padding,
+            dilation: self.dilation,
+            groups: self.groups,
+        }
+    }
+
+    /// 重み `[in_channels, out_channels / groups, k]`（PyTorch
+    /// `nn.ConvTranspose1d.weight` と同じレイアウト）。
+    pub fn weight(&self) -> &Tensor<f32> {
+        &self.weight
+    }
+
+    /// バイアス `[out_channels]`。
+    pub fn bias(&self) -> Option<&Tensor<f32>> {
+        self.bias.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`ConvTranspose1d`
+    /// 実装。`module.rs` 参照）の本体。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`ConvTranspose1d`
+    /// 実装）の本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
+    }
+
+    /// 空間軸方向のストライド。
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// 空間軸方向のパディング。
+    pub fn padding(&self) -> usize {
+        self.padding
+    }
+
+    /// 空間軸方向の output_padding（`< stride` を満たす。
+    /// `Var::conv_transpose2d` doc 参照）。
+    pub fn output_padding(&self) -> usize {
+        self.output_padding
+    }
+
+    /// 空間軸方向のダイレーション。
+    pub fn dilation(&self) -> usize {
+        self.dilation
+    }
+
+    /// グループ数。
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
+    /// [`crate::nn::module::Module::set_parameter`]（`ConvTranspose1d`
+    /// 実装）の本体（[`Conv1d::set_parameter`] と同型）。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match name {
+            "weight" => {
+                if value.shape() != self.weight.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight.shape().to_vec(),
+                    }));
+                }
+                self.weight = value;
+                Ok(())
+            }
+            "bias" => match &mut self.bias {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "ConvTranspose1d::set_parameter: no parameter named `{name}` (this layer \
+                     has no bias)"
+                ))),
+            },
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
+    /// [`crate::nn::module::Module::forward_host`]（`ConvTranspose1d`
+    /// 実装）の本体。`ConvTranspose1dVars::forward` と**同じ検査順序・
+    /// 同じ演算列**（①rank → ②`Conv2dParams::new` → ③
+    /// `output_padding < stride` → ④4 次元 `conv_transpose2d_out_shape`
+    /// → ⑤bias shape → ⑥`contiguous` → 4 次元 reshape → `grad::
+    /// conv_transpose2d_with_fallback` → 3 次元 reshape）をホスト
+    /// `Tensor` で再現する（[`Conv1d::forward_host`] doc「エラー型の
+    /// 一致契約」と同じ理由）。
+    pub fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let weight_shape = self.weight.shape();
+        let (cin_w, cout_g, k) = (weight_shape[0], weight_shape[1], weight_shape[2]);
+
+        let params = Conv2dParams::new(
+            [1, k],
+            [1, self.stride],
+            [0, self.padding],
+            [1, self.dilation],
+            self.groups,
+        )
+        .map_err(AutodiffError::Backend)?;
+        if self.output_padding >= self.stride {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1d::forward_host: output_padding ({}) must be < stride ({})",
+                self.output_padding, self.stride
+            )));
+        }
+
+        let (n, cin, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        let in_shape_4d = vec![n, cin, 1, l];
+        let weight_shape_4d = vec![cin_w, cout_g, 1, k];
+        let out_shape_4d = conv_transpose2d_out_shape(
+            &in_shape_4d,
+            &weight_shape_4d,
+            &params,
+            [0, self.output_padding],
+        )
+        .map_err(AutodiffError::Shape)?;
+        let cout = out_shape_4d[1];
+        let lout = out_shape_4d[3];
+
+        if let Some(ref bias) = self.bias
+            && bias.shape() != [cout]
+        {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: bias.shape().to_vec(),
+                rhs: vec![cout],
+            }));
+        }
+
+        let input4 = input
+            .contiguous()
+            .reshape(&in_shape_4d)
+            .map_err(AutodiffError::Shape)?;
+        let weight4 = self
+            .weight
+            .contiguous()
+            .reshape(&weight_shape_4d)
+            .map_err(AutodiffError::Shape)?;
+        let out4 = conv_transpose2d_with_fallback(
+            ops,
+            &input4,
+            &weight4,
+            self.bias.as_ref(),
+            &params,
+            &out_shape_4d,
+        )?;
+        out4.reshape(&[n, cout, lout]).map_err(AutodiffError::Shape)
+    }
+}
+
+/// [`ConvTranspose1d::bind`] が返す、1 ステップ分のテープに登録済み
+/// パラメータ（[`Conv1dVars`] と同型）。
+pub struct ConvTranspose1dVars<'t> {
+    /// [`ConvTranspose1d::weight`] をテープへ登録した `Var`。
+    pub weight: Var<'t>,
+    /// [`ConvTranspose1d::bias`] をテープへ登録した `Var`。元の
+    /// `ConvTranspose1d` が `bias: None` の場合は `None`。
+    pub bias: Option<Var<'t>>,
+    stride: usize,
+    padding: usize,
+    output_padding: usize,
+    dilation: usize,
+    groups: usize,
+}
+
+impl<'t> ConvTranspose1dVars<'t> {
+    /// 空間軸方向のストライド（[`ConvTranspose1d::stride`] と同じ）。
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// 空間軸方向のパディング（[`ConvTranspose1d::padding`] と同じ）。
+    pub fn padding(&self) -> usize {
+        self.padding
+    }
+
+    /// 空間軸方向の output_padding（[`ConvTranspose1d::output_padding`]
+    /// と同じ）。
+    pub fn output_padding(&self) -> usize {
+        self.output_padding
+    }
+
+    /// 空間軸方向のダイレーション（[`ConvTranspose1d::dilation`] と
+    /// 同じ）。
+    pub fn dilation(&self) -> usize {
+        self.dilation
+    }
+
+    /// グループ数（[`ConvTranspose1d::groups`] と同じ）。
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
+    /// `input`／`weight` を `[N, Cin, 1, L]`／`[Cin, Cout/groups, 1,
+    /// k]` へ reshape し `Var::conv_transpose2d`（#2067）へ委譲した
+    /// あと `[N, Cout, Lout]` へ戻す（[`crate::var::Var::conv1d`] と
+    /// 同じ「reshape 併合」設計。追加の shape 検査自体は委譲先の
+    /// `Var::conv_transpose2d` に任せる——本関数では `Var::reshape`
+    /// が view ノードを tape へ push するため、reshape より前に rank
+    /// 検査・tape 一致検査だけを済ませ、`Err` 経路で孤児ノードを
+    /// 残さない）。
+    pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.check_same_tape(&self.weight)?;
+        if let Some(b) = self.bias.as_ref() {
+            input.check_same_tape(b)?;
+        }
+
+        let in_shape = input.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let weight_shape = self.weight.shape();
+        if weight_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: weight_shape.len(),
+            }));
+        }
+
+        let (n, cin, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        let (cin_w, cout_g, k) = (weight_shape[0], weight_shape[1], weight_shape[2]);
+
+        let x4 = input.contiguous()?.reshape(&[n, cin, 1, l])?;
+        let w4 = self.weight.contiguous()?.reshape(&[cin_w, cout_g, 1, k])?;
+        let out4 = x4.conv_transpose2d(
+            &w4,
+            self.bias.as_ref(),
+            [1, self.stride],
+            [0, self.padding],
+            [0, self.output_padding],
+            [1, self.dilation],
+            self.groups,
+        )?;
+        let out4_shape = out4.shape();
+        let cout = out4_shape[1];
+        let lout = out4_shape[3];
+        out4.reshape(&[n, cout, lout])
+    }
+}
