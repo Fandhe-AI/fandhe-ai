@@ -137,6 +137,35 @@
 //!    親へ漏らさないが、`let` を伴わない単純代入による汚染だけは
 //!    親スコープへ伝播する（fn アイテムの境界をまたぐ場合は伝播しない）。
 //!
+//! 4 の `.collect(` 遮断規則はその後さらに 1 件の是正を受けた
+//! （codex P1）: `.collect::<Vec<_>>()` は「型で順序保持が明示される」
+//! ことを理由に一律遮断としていたが、rayon の `par_bridge()`
+//! （`ParallelBridge`／`IterBridge`。rayon 1.12.0 `src/iter/
+//! par_bridge.rs`）は `IndexedParallelIterator` を実装せず、複数
+//! スレッドが単一の `Mutex` 越しに逐次イテレータの `.next()` を
+//! 奪い合う実装のため収集順序が実行スケジュール依存になる。
+//! `data.iter().par_bridge().collect::<Vec<_>>().into_iter().sum()`
+//! は `.collect::<Vec<_>>()` を経由してもスレッド数依存の非決定性を
+//! 引き継ぐため、遮断してはならない。起点から collect までの区間
+//! （ネストしたブロック内部を含む）に識別子 `par_bridge`、または
+//! 初期化式に `par_bridge`／既存の順序非保証汚染識別子を含むために
+//! 「順序非保証」としても汚染された識別子（`tainted` とスコープ規則
+//! が同一の別集合 `unordered_tainted`。`order_unstable_positions_from_tokens`・
+//! `collect_blocks` 参照）が 1 つでもあれば、その collect は遮断しない
+//! （`initializer_taints`・同一文判定〈`has_reduce_after` 経由〉・
+//! UFCS 判定〈`has_ufcs_reduction`〉・仮想マーカーの生存判定
+//! 〈`has_live_chain_marker`・`has_live_tainted_ref`〉のすべてで
+//! 共通の判定を使う）。あわせて rayon 1.12.0 の `par_` 接頭辞 API・
+//! `into_par_iter`（本走査のマーカー検出対象）を全数確認したが、
+//! 順序非保証を明示するものは `par_bridge` のみだった。
+//! `rayon::iter::split`（`src/iter/splitter.rs`）はユーザー
+//! クロージャによる決定的な構造分割であり indexed source と同じ
+//! 性質を持つため対象外、`walk_tree`／`walk_tree_prefix`／
+//! `walk_tree_postfix`（`src/iter/walk_tree.rs`）は素の `walk_tree`
+//! のみ順序非保証を明記するがいずれも自由関数であり `par_` 接頭辞
+//! でも `into_par_iter` でもないため、本走査のマーカー検出対象自体に
+//! 含まれず変更不要と判断した。
+//!
 //! 同一文中の共起判定（`has_depth_aware_par_reduce`・
 //! `has_ufcs_reduction`）は、文内にネストした `{...}` ブロック本体を
 //! 塗りつぶしたテキストと「仮想マーカー位置」の一覧（`statement_own_view`
@@ -716,7 +745,11 @@ fn statement_spans(text: &str) -> Vec<(usize, usize)> {
 /// .into_iter().sum();`（`it` は汚染済み）のように、ブロック内で
 /// `it` が Vec collect された連鎖でしか使われていない場合まで「生きて
 /// いる」と誤判定していた（Cursor Bugbot 指摘）。
-fn statement_own_view(raw: &str, tainted: &HashSet<String>) -> (String, Vec<usize>) {
+fn statement_own_view(
+    raw: &str,
+    tainted: &HashSet<String>,
+    unordered_tainted: &HashSet<String>,
+) -> (String, Vec<usize>) {
     let spans = find_depth0_braces(raw);
     let mut out: Vec<u8> = raw.as_bytes().to_vec();
     let mut virtual_markers = Vec::new();
@@ -728,8 +761,14 @@ fn statement_own_view(raw: &str, tainted: &HashSet<String>) -> (String, Vec<usiz
             continue;
         }
         let interior_tokens = tokenize(&raw[interior_start..interior_end]);
-        let is_live = has_live_chain_marker(&interior_tokens, &[])
-            || has_live_tainted_ref(&interior_tokens, tainted);
+        // interior_tokens は塗りつぶし前の raw 部分文字列そのものの
+        // トークン化（ネストしたブロックも含め一切塗りつぶされていない）
+        // であるため、順序非保証マーカーの位置は自己参照的に求まる
+        // （別途 raw 全体を再トークン化する必要がない）。
+        let interior_order_unstable =
+            order_unstable_positions_from_tokens(&interior_tokens, unordered_tainted);
+        let is_live = has_live_chain_marker(&interior_tokens, &[], &interior_order_unstable)
+            || has_live_tainted_ref(&interior_tokens, tainted, &interior_order_unstable);
 
         if is_live {
             virtual_markers.push(*open_idx);
@@ -1109,18 +1148,87 @@ fn is_same_method_chain(tokens: &[Token], from_idx: usize, to_idx: usize) -> boo
     true
 }
 
+/// `tokens` の中で「順序非保証」マーカー（識別子 `par_bridge`。rayon
+/// の `ParallelBridge`／`IterBridge` は複数スレッドが単一の `Mutex`
+/// 越しに逐次イテレータの `.next()` を奪い合う実装〈rayon 1.12.0
+/// `src/iter/par_bridge.rs`〉であり `IndexedParallelIterator` を実装
+/// しない。収集順序が実行スケジュール依存になるため `.collect::<Vec<
+/// _>>()` を経由しても縮約順序のスレッド数非依存性は回復しない）、
+/// または `unordered_tainted`（本関数と対になる順序非保証汚染識別子
+/// 集合）に含まれる識別子であるトークンの開始バイト位置一覧を返す。
+///
+/// 呼び出し元は `tokens` と**同じ座標系**（`raw` から得た場合は
+/// `raw` 基準、`view` から得た場合は `view` 基準）のバイト位置として
+/// 扱う（`statement_own_view` によるブロック塗りつぶしは同じ長さの
+/// バイト列を保つため、`raw` 基準の位置はそのまま `view` 基準としても
+/// 通用する）。
+///
+/// なお同調査で rayon 1.12.0 の `par_` 接頭辞 API・`into_par_iter`
+/// （本走査のマーカー検出対象）を全数確認したが、順序非保証を明示する
+/// ものは `par_bridge` のみだった。`rayon::iter::split`（`src/iter/
+/// splitter.rs`）はユーザークロージャによる決定的な構造分割であり
+/// indexed source と同じ性質を持つため対象外。`walk_tree`／
+/// `walk_tree_prefix`／`walk_tree_postfix`（`src/iter/walk_tree.rs`）
+/// は素の `walk_tree` のみ順序非保証を明記するが、いずれも `par_`
+/// 接頭辞でも `into_par_iter` でもない自由関数のため、本走査のマーカー
+/// 検出対象自体に含まれず変更不要。
+fn order_unstable_positions_from_tokens(
+    tokens: &[Token],
+    unordered_tainted: &HashSet<String>,
+) -> Vec<usize> {
+    tokens
+        .iter()
+        .filter(|t| {
+            t.kind == TokenKind::Ident
+                && (t.text == "par_bridge" || unordered_tainted.contains(t.text))
+        })
+        .map(|t| t.start)
+        .collect()
+}
+
+/// collect による遮断の可否を判定する（`is_same_method_chain` の
+/// 「同一連鎖上」判定に加え、区間内に順序非保証マーカーが 1 つでも
+/// あれば遮断しないと判定する。codex P1 是正）。
+///
+/// `order_unstable_positions`（`order_unstable_positions_from_tokens`
+/// の戻り値）は `[tokens[from_idx].start, tokens[to_idx].start)` の
+/// 範囲に 1 件でも含まれれば遮断しない。この範囲は次をすべて満たす:
+///
+/// - `from_idx` 自身が `par_bridge` トークンである場合（起点そのものが
+///   `par_bridge`）は `tokens[from_idx].start` 自身が
+///   `order_unstable_positions` に含まれるため自動的に満たされる
+///   （区間の下端を含む半開区間のため）。
+/// - `order_unstable_positions` は raw（塗りつぶし前）テキストの
+///   トークン化から求めるため、`view`（`statement_own_view` で
+///   ネストしたブロックの中身を塗りつぶし済み）由来の `tokens` を
+///   対象にした判定であっても、ブロック内部に隠れた `par_bridge`・
+///   順序非保証汚染識別子を見逃さない（バイト位置は raw と view とで
+///   共通のため）。
+fn collect_blocks(
+    tokens: &[Token],
+    from_idx: usize,
+    to_idx: usize,
+    order_unstable_positions: &[usize],
+) -> bool {
+    is_same_method_chain(tokens, from_idx, to_idx)
+        && !order_unstable_positions
+            .iter()
+            .any(|&p| p >= tokens[from_idx].start && p < tokens[to_idx].start)
+}
+
 /// `origin_idx` より後方（トークンインデックス順）かつ**同じか浅い**
 /// 括弧深さに縮約マーカーが現れるかを判定する。ただし `origin_idx` と
-/// 縮約マーカーの間に、`origin_idx` と**同一のメソッド連鎖上**
-/// （`is_same_method_chain`）にある collect マーカーが挟まる場合は
-/// イテレータ連鎖が断ち切られているとみなし接続しない。縮約マーカー
-/// 側の「同じか浅い深さ」判定自体は緩めない（fail-closed 側を維持
-/// する）。
+/// 縮約マーカーの間に、`origin_idx` と**同一のメソッド連鎖上**で
+/// 順序非保証マーカーを含まない（`collect_blocks`）collect マーカーが
+/// 挟まる場合はイテレータ連鎖が断ち切られているとみなし接続しない。
+/// 縮約マーカー側の「同じか浅い深さ」判定自体は緩めない（fail-closed
+/// 側を維持する）。
 fn has_reduce_after(
     tokens: &[Token],
     origin_idx: usize,
     reduce_tokens: &[usize],
     collect_tokens: &[usize],
+    order_unstable_positions: &[usize],
 ) -> bool {
     let origin_depth = tokens[origin_idx].depth;
     reduce_tokens.iter().any(|&r_idx| {
@@ -1129,44 +1237,53 @@ fn has_reduce_after(
             && !collect_tokens.iter().any(|&c_idx| {
                 c_idx > origin_idx
                     && c_idx < r_idx
-                    && is_same_method_chain(tokens, origin_idx, c_idx)
+                    && collect_blocks(tokens, origin_idx, c_idx, order_unstable_positions)
             })
     })
 }
 
-/// `tokens` 中に「生きている」（`is_same_method_chain` の意味で同一
-/// 連鎖上の `Vec` collect に遮断されていない）並列マーカーが 1 つでも
-/// あるかを判定する。`extra_par_tokens`（`tokens` 中のトークン
-/// インデックス一覧）が与えられた場合、実マーカーと同様に起点として
-/// 扱う（`statement_own_view` のブロック本体を「生きているか」判定
-/// する際は `&[]`。`has_ufcs_reduction` が UFCS 呼び出し引数内の
-/// 仮想マーカーを渡す際に使う）。
-fn has_live_chain_marker(tokens: &[Token], extra_par_tokens: &[usize]) -> bool {
+/// `tokens` 中に「生きている」（`collect_blocks` の意味で同一連鎖上の
+/// 順序非保証マーカーなしの `Vec` collect に遮断されていない）並列
+/// マーカーが 1 つでもあるかを判定する。`extra_par_tokens`（`tokens`
+/// 中のトークンインデックス一覧）が与えられた場合、実マーカーと同様に
+/// 起点として扱う（`statement_own_view` のブロック本体を「生きて
+/// いるか」判定する際は `&[]`。`has_ufcs_reduction` が UFCS 呼び出し
+/// 引数内の仮想マーカーを渡す際に使う）。
+fn has_live_chain_marker(
+    tokens: &[Token],
+    extra_par_tokens: &[usize],
+    order_unstable_positions: &[usize],
+) -> bool {
     let collect_tokens = find_collect_marker_tokens(tokens);
     let mut par_tokens = find_par_marker_tokens(tokens);
     par_tokens.extend_from_slice(extra_par_tokens);
     par_tokens.into_iter().any(|p_idx| {
-        !collect_tokens
-            .iter()
-            .any(|&c_idx| c_idx > p_idx && is_same_method_chain(tokens, p_idx, c_idx))
+        !collect_tokens.iter().any(|&c_idx| {
+            c_idx > p_idx && collect_blocks(tokens, p_idx, c_idx, order_unstable_positions)
+        })
     })
 }
 
 /// `tokens` 中に、`tainted` のいずれかの識別子と同名のトークンで
-/// 「生きている」（同一連鎖上の `Vec` collect に遮断されていない）
-/// 出現が 1 つでもあるかを判定する。並列マーカーと同じ collect 遮断
-/// 規則を適用する（Cursor Bugbot 指摘: 旧実装は汚染識別子の出現有無
-/// のみで判定しており、`{ it.map(f).collect::<Vec<_>>() }
-/// .into_iter().sum();`〈`it` は汚染済み〉のように Vec collect された
-/// 連鎖でしか使われていない汚染識別子まで「生きている」と誤判定して
-/// いた）。トークン照合のため識別子境界は自然に保たれる。
-fn has_live_tainted_ref(tokens: &[Token], tainted: &HashSet<String>) -> bool {
+/// 「生きている」（同一連鎖上の順序非保証マーカーなしの `Vec` collect
+/// に遮断されていない）出現が 1 つでもあるかを判定する。並列マーカー
+/// と同じ collect 遮断規則（`collect_blocks`）を適用する（Cursor
+/// Bugbot 指摘: 旧実装は汚染識別子の出現有無のみで判定しており、
+/// `{ it.map(f).collect::<Vec<_>>() }.into_iter().sum();`〈`it` は
+/// 汚染済み〉のように Vec collect された連鎖でしか使われていない汚染
+/// 識別子まで「生きている」と誤判定していた）。トークン照合のため
+/// 識別子境界は自然に保たれる。
+fn has_live_tainted_ref(
+    tokens: &[Token],
+    tainted: &HashSet<String>,
+    order_unstable_positions: &[usize],
+) -> bool {
     let collect_tokens = find_collect_marker_tokens(tokens);
     tainted.iter().any(|name| {
         find_ident_name_tokens(tokens, name).into_iter().any(|idx| {
-            !collect_tokens
-                .iter()
-                .any(|&c_idx| c_idx > idx && is_same_method_chain(tokens, idx, c_idx))
+            !collect_tokens.iter().any(|&c_idx| {
+                c_idx > idx && collect_blocks(tokens, idx, c_idx, order_unstable_positions)
+            })
         })
     })
 }
@@ -1205,7 +1322,15 @@ fn virtual_marker_token_indices(tokens: &[Token], byte_positions: &[usize]) -> V
 /// .collect::<Vec<_>>().into_iter().fold(..)`〈collect で連鎖が切れる〉
 /// は非検出）。`view` は `statement_own_view` で塗りつぶし済みの
 /// テキスト、`virtual_markers` は同関数が返す仮想マーカー位置一覧。
-fn has_depth_aware_par_reduce(view: &str, virtual_markers: &[usize]) -> bool {
+/// `order_unstable_positions` は `view` と同じバイト位置座標系の
+/// 順序非保証マーカー位置一覧（`order_unstable_positions_from_tokens`
+/// を raw〈塗りつぶし前〉テキストへ適用して求める。ブロック内部に
+/// 隠れた `par_bridge` を見逃さないため）。
+fn has_depth_aware_par_reduce(
+    view: &str,
+    virtual_markers: &[usize],
+    order_unstable_positions: &[usize],
+) -> bool {
     let tokens = tokenize(view);
     let mut par_tokens = find_par_marker_tokens(&tokens);
     par_tokens.extend(virtual_marker_token_indices(&tokens, virtual_markers));
@@ -1217,16 +1342,27 @@ fn has_depth_aware_par_reduce(view: &str, virtual_markers: &[usize]) -> bool {
         return false;
     }
     let collect_tokens = find_collect_marker_tokens(&tokens);
-    par_tokens
-        .iter()
-        .any(|&p_idx| has_reduce_after(&tokens, p_idx, &reduce_tokens, &collect_tokens))
+    par_tokens.iter().any(|&p_idx| {
+        has_reduce_after(
+            &tokens,
+            p_idx,
+            &reduce_tokens,
+            &collect_tokens,
+            order_unstable_positions,
+        )
+    })
 }
 
 /// 過去の文で汚染された識別子（`tainted`）が、この文中でトークンと
 /// して一致し、かつ後方の同じか浅い括弧深さに縮約マーカーが現れるか
 /// を判定する（文をまたぐ並列縮約。`view` は `statement_own_view`）。
-/// `.collect(` による連鎖の遮断は `has_reduce_after` と同じ規則。
-fn has_tainted_reduction_usage(view: &str, tainted: &HashSet<String>) -> bool {
+/// `.collect(` による連鎖の遮断は `has_reduce_after` と同じ規則
+/// （`order_unstable_positions` は同関数への引数と同じ座標系）。
+fn has_tainted_reduction_usage(
+    view: &str,
+    tainted: &HashSet<String>,
+    order_unstable_positions: &[usize],
+) -> bool {
     if tainted.is_empty() {
         return false;
     }
@@ -1239,20 +1375,35 @@ fn has_tainted_reduction_usage(view: &str, tainted: &HashSet<String>) -> bool {
     tainted.iter().any(|name| {
         find_ident_name_tokens(&tokens, name)
             .into_iter()
-            .any(|idx| has_reduce_after(&tokens, idx, &reduce_tokens, &collect_tokens))
+            .any(|idx| {
+                has_reduce_after(
+                    &tokens,
+                    idx,
+                    &reduce_tokens,
+                    &collect_tokens,
+                    order_unstable_positions,
+                )
+            })
     })
 }
 
 /// UFCS 形の縮約呼び出し（`ParallelIterator::sum(data.par_iter()...)`
 /// 等）を検出し、その引数リスト内に生きている（`has_live_chain_marker`。
-/// 同一連鎖上の Vec collect で遮断されていない）並列マーカー（実マーカー・
-/// `virtual_markers` の仮想マーカーの両方）または生きている汚染識別子
-/// （`has_live_tainted_ref`）があれば真を返す（敵対的レビュー指摘
-/// REQ 2。`view`・`virtual_markers` は `statement_own_view` の戻り値）。
-/// 引数リストは呼び出しごとに独立して再トークン化する（深さ 0 起点の
-/// 局所的な連鎖判定にするため。元の `has_depth_aware_par_reduce` と
-/// 同じ理由）。
-fn has_ufcs_reduction(view: &str, tainted: &HashSet<String>, virtual_markers: &[usize]) -> bool {
+/// 同一連鎖上の順序非保証マーカーなしの Vec collect で遮断されていない）
+/// 並列マーカー（実マーカー・`virtual_markers` の仮想マーカーの両方）
+/// または生きている汚染識別子（`has_live_tainted_ref`）があれば真を
+/// 返す（敵対的レビュー指摘 REQ 2。`view`・`virtual_markers` は
+/// `statement_own_view` の戻り値）。引数リストは呼び出しごとに独立して
+/// 再トークン化する（深さ 0 起点の局所的な連鎖判定にするため。元の
+/// `has_depth_aware_par_reduce` と同じ理由）。`order_unstable_positions`
+/// も `local_virtual_markers` と同様に引数リストの範囲へ切り出し・
+/// シフトしてから渡す。
+fn has_ufcs_reduction(
+    view: &str,
+    tainted: &HashSet<String>,
+    virtual_markers: &[usize],
+    order_unstable_positions: &[usize],
+) -> bool {
     let tokens = tokenize(view);
     for (_, open, close) in find_ufcs_reduce_calls(&tokens) {
         let arg_start = tokens[open].start + 1;
@@ -1271,10 +1422,19 @@ fn has_ufcs_reduction(view: &str, tainted: &HashSet<String>, virtual_markers: &[
                     .position(|t| t.kind == TokenKind::LBrace && t.start == p - arg_start)
             })
             .collect();
-        if has_live_chain_marker(&arg_tokens, &local_virtual_markers) {
+        let local_order_unstable_positions: Vec<usize> = order_unstable_positions
+            .iter()
+            .filter(|&&p| p >= arg_start && p < arg_end)
+            .map(|&p| p - arg_start)
+            .collect();
+        if has_live_chain_marker(
+            &arg_tokens,
+            &local_virtual_markers,
+            &local_order_unstable_positions,
+        ) {
             return true;
         }
-        if has_live_tainted_ref(&arg_tokens, tainted) {
+        if has_live_tainted_ref(&arg_tokens, tainted, &local_order_unstable_positions) {
             return true;
         }
     }
@@ -1450,18 +1610,41 @@ fn parse_plain_assignment_range(view: &str) -> Option<(std::ops::Range<usize>, u
 /// （`let it = (data.par_iter(), other.collect::<Vec<_>>()).0;` の
 /// ようにタプル要素として同居するだけの collect）は同一連鎖上にない
 /// ため遮断しない〈codex-review 指摘 P1〉）。
-fn initializer_taints(init: &str, tainted: &HashSet<String>) -> bool {
+///
+/// 戻り値の第 2 要素は、この初期化式が「順序非保証」（`par_bridge`
+/// または既存の `unordered_tainted` 識別子を含む）かどうか。`init` は
+/// 塗りつぶし前のテキストであるため、`order_unstable_positions_from_tokens`
+/// を `tokens` 自身へ適用するだけで自己完結的に求まる（呼び出し元が
+/// 別途 raw テキストを再トークン化する必要がない）。判定は単純な
+/// トークン列上の存在チェックでよい: `par_bridge`／順序非保証汚染
+/// 識別子はそれ自身が `order_unstable_positions` に含まれるため、
+/// 後続にどのような Vec collect があっても `collect_blocks` により
+/// 自己言及的に「決して遮断されない」——つまりこの識別子が存在すれば
+/// 常に `is_tainted` も真になる（両者は独立ではなく `is_order_unstable
+/// ⟹ is_tainted` の関係にある）。
+fn initializer_taints(
+    init: &str,
+    tainted: &HashSet<String>,
+    unordered_tainted: &HashSet<String>,
+) -> (bool, bool) {
     let tokens = tokenize(init);
-    has_live_chain_marker(&tokens, &[]) || has_live_tainted_ref(&tokens, tainted)
+    let order_unstable_positions = order_unstable_positions_from_tokens(&tokens, unordered_tainted);
+    let is_tainted = has_live_chain_marker(&tokens, &[], &order_unstable_positions)
+        || has_live_tainted_ref(&tokens, tainted, &order_unstable_positions);
+    let is_order_unstable = !order_unstable_positions.is_empty();
+    (is_tainted, is_order_unstable)
 }
 
 /// [`classify_taint`] の結果。`let` による束縛（このレキシカルスコープ
 /// に閉じ、親スコープへは漏らさない）と、`let` を伴わない単純代入
 /// （親スコープへ伝播しうる）を区別する（敵対的レビュー指摘 REQ 1）。
+/// 付随する `bool` はこの束縛が「順序非保証」（`par_bridge` 起源）で
+/// あるかを表し、通常の汚染集合（`tainted`）とスコープ規則が同一の
+/// 別集合（`unordered_tainted`）へ同じ経路で伝播させる（codex P1）。
 enum TaintKind {
     None,
-    Let(Vec<String>),
-    Assignment(Vec<String>),
+    Let(Vec<String>, bool),
+    Assignment(Vec<String>, bool),
 }
 
 /// 1 文（`raw`）を解析し、新たに汚染される識別子を [`TaintKind`] として
@@ -1470,20 +1653,29 @@ enum TaintKind {
 /// 含むかの判定（`initializer_taints`）は塗りつぶし前の `raw` を使う
 /// （`let it = { let x = 1; data.par_iter() };` のような場合に
 /// `.par_iter(` を見失わないため）。
-fn classify_taint(raw: &str, tainted: &HashSet<String>) -> TaintKind {
-    let (view, _virtual_markers) = statement_own_view(raw, tainted);
+fn classify_taint(
+    raw: &str,
+    tainted: &HashSet<String>,
+    unordered_tainted: &HashSet<String>,
+) -> TaintKind {
+    let (view, _virtual_markers) = statement_own_view(raw, tainted, unordered_tainted);
     if let Some((pattern_range, init_start)) = parse_let_binding_range(&view) {
         let init = &raw[init_start..];
-        return if initializer_taints(init, tainted) {
-            TaintKind::Let(extract_pattern_idents(&view[pattern_range]))
+        let (is_tainted, is_order_unstable) = initializer_taints(init, tainted, unordered_tainted);
+        return if is_tainted {
+            TaintKind::Let(
+                extract_pattern_idents(&view[pattern_range]),
+                is_order_unstable,
+            )
         } else {
             TaintKind::None
         };
     }
     if let Some((pattern_range, init_start)) = parse_plain_assignment_range(&view) {
         let init = &raw[init_start..];
-        return if initializer_taints(init, tainted) {
-            TaintKind::Assignment(vec![view[pattern_range].to_string()])
+        let (is_tainted, is_order_unstable) = initializer_taints(init, tainted, unordered_tainted);
+        return if is_tainted {
+            TaintKind::Assignment(vec![view[pattern_range].to_string()], is_order_unstable)
         } else {
             TaintKind::None
         };
@@ -1491,12 +1683,13 @@ fn classify_taint(raw: &str, tainted: &HashSet<String>) -> TaintKind {
     TaintKind::None
 }
 
-/// [`classify_taint`] の `Let`／`Assignment` 種別を区別しない簡易版
-/// （単体テスト・後方互換用）。スコープ境界を持つ本走査本体
-/// （`count_in_scope`）は種別を区別する `classify_taint` を直接使う。
+/// [`classify_taint`] の `Let`／`Assignment` 種別・順序非保証フラグを
+/// 区別しない簡易版（単体テスト・後方互換用。`unordered_tainted` は
+/// 空集合固定）。スコープ境界を持つ本走査本体（`count_in_scope`）は
+/// 種別・順序非保証フラグを区別する `classify_taint` を直接使う。
 fn extract_taint_targets(raw: &str, tainted: &HashSet<String>) -> Vec<String> {
-    match classify_taint(raw, tainted) {
-        TaintKind::Let(idents) | TaintKind::Assignment(idents) => idents,
+    match classify_taint(raw, tainted, &HashSet::new()) {
+        TaintKind::Let(idents, _) | TaintKind::Assignment(idents, _) => idents,
         TaintKind::None => Vec::new(),
     }
 }
@@ -1581,35 +1774,62 @@ fn looks_like_fn_item(raw: &str) -> bool {
 ///   場合は、代入による汚染であっても一切伝播しない（fn は独立した
 ///   呼び出しスコープであり、呼び出し元のローカル変数と偶然同名で
 ///   あっても無関係なため）。
-fn count_in_scope(text: &str, tainted_in: &HashSet<String>) -> (usize, HashSet<String>) {
+///
+/// `unordered_tainted_in`／戻り値第 3 要素は「順序非保証」汚染識別子
+/// 集合（`par_bridge` 起源。`tainted`／`leaked_here` と全く同じスコープ
+/// 規則で並行管理する別集合。codex P1: `par_bridge()` は順序を保持
+/// しないため、この識別子越しに後段で `.collect::<Vec<_>>()` されても
+/// 縮約順序のスレッド数非依存性は回復しない。詳細は
+/// `order_unstable_positions_from_tokens`）。
+fn count_in_scope(
+    text: &str,
+    tainted_in: &HashSet<String>,
+    unordered_tainted_in: &HashSet<String>,
+) -> (usize, HashSet<String>, HashSet<String>) {
     let mut tainted = tainted_in.clone();
+    let mut unordered_tainted = unordered_tainted_in.clone();
     let mut count = 0usize;
     let mut leaked_here: HashSet<String> = HashSet::new();
+    let mut unordered_leaked_here: HashSet<String> = HashSet::new();
 
     for (s, e) in statement_spans(text) {
         let raw = &text[s..e];
-        let (view, virtual_markers) = statement_own_view(raw, &tainted);
+        let (view, virtual_markers) = statement_own_view(raw, &tainted, &unordered_tainted);
+        // 順序非保証マーカーの位置は raw（塗りつぶし前）を独立に
+        // トークン化して求める。`view` は深さ 0 のネストしたブロックを
+        // 塗りつぶし済みだが、raw と view はバイト長・バイト位置が
+        // 完全に一致するため、raw 側の位置は view ベースの各判定関数
+        // （`has_depth_aware_par_reduce` 等）へそのまま渡せる。
+        let order_unstable_positions =
+            order_unstable_positions_from_tokens(&tokenize(raw), &unordered_tainted);
 
         // 同一文中の共起（メソッド呼び出し形・UFCS 形）と、過去の文
         // からの汚染識別子の使用は、いずれも「1 件」として数える
         // （相互排他的な `||` 集約のため二重計上しない）。
-        if has_depth_aware_par_reduce(&view, &virtual_markers)
-            || has_tainted_reduction_usage(&view, &tainted)
-            || has_ufcs_reduction(&view, &tainted, &virtual_markers)
+        if has_depth_aware_par_reduce(&view, &virtual_markers, &order_unstable_positions)
+            || has_tainted_reduction_usage(&view, &tainted, &order_unstable_positions)
+            || has_ufcs_reduction(&view, &tainted, &virtual_markers, &order_unstable_positions)
         {
             count += 1;
         }
 
-        match classify_taint(raw, &tainted) {
-            TaintKind::Let(idents) => {
-                for ident in idents {
-                    tainted.insert(ident);
-                }
-            }
-            TaintKind::Assignment(idents) => {
+        match classify_taint(raw, &tainted, &unordered_tainted) {
+            TaintKind::Let(idents, is_order_unstable) => {
                 for ident in idents {
                     tainted.insert(ident.clone());
-                    leaked_here.insert(ident);
+                    if is_order_unstable {
+                        unordered_tainted.insert(ident);
+                    }
+                }
+            }
+            TaintKind::Assignment(idents, is_order_unstable) => {
+                for ident in idents {
+                    tainted.insert(ident.clone());
+                    leaked_here.insert(ident.clone());
+                    if is_order_unstable {
+                        unordered_tainted.insert(ident.clone());
+                        unordered_leaked_here.insert(ident);
+                    }
                 }
             }
             TaintKind::None => {}
@@ -1621,23 +1841,28 @@ fn count_in_scope(text: &str, tainted_in: &HashSet<String>) -> (usize, HashSet<S
                 continue;
             }
             let inner = &raw[open_idx + 1..close_idx];
-            let child_tainted = if is_fn_item {
-                HashSet::new()
+            let (child_tainted, child_unordered_tainted) = if is_fn_item {
+                (HashSet::new(), HashSet::new())
             } else {
-                tainted.clone()
+                (tainted.clone(), unordered_tainted.clone())
             };
-            let (inner_count, inner_leaked) = count_in_scope(inner, &child_tainted);
+            let (inner_count, inner_leaked, inner_unordered_leaked) =
+                count_in_scope(inner, &child_tainted, &child_unordered_tainted);
             count += inner_count;
             if !is_fn_item {
                 for ident in inner_leaked {
                     tainted.insert(ident.clone());
                     leaked_here.insert(ident);
                 }
+                for ident in inner_unordered_leaked {
+                    unordered_tainted.insert(ident.clone());
+                    unordered_leaked_here.insert(ident);
+                }
             }
         }
     }
 
-    (count, leaked_here)
+    (count, leaked_here, unordered_leaked_here)
 }
 
 /// rayon 並列イテレータと縮約マーカー（`.sum()`／`.reduce(`／
@@ -1649,7 +1874,7 @@ fn count_in_scope(text: &str, tainted_in: &HashSet<String>) -> (usize, HashSet<S
 /// 空集合）。
 fn count_par_reduce_cooccurrences(content: &str) -> usize {
     let cleaned = strip_comments_and_strings(content);
-    count_in_scope(&cleaned, &HashSet::new()).0
+    count_in_scope(&cleaned, &HashSet::new(), &HashSet::new()).0
 }
 
 /// `#[cfg(all(test, target_arch = "aarch64"))]` ゲート済み（`src/
@@ -2065,6 +2290,39 @@ fn count_par_reduce_detects_par_bridge_across_statements() {
 #[test]
 fn contains_rayon_marker_detects_par_bridge() {
     assert!(contains_rayon_marker("data.iter().par_bridge().sum()"));
+}
+
+// `par_bridge()` は `IndexedParallelIterator` を実装せず順序を保持
+// しない（rayon 1.12.0 `src/iter/par_bridge.rs`: 複数スレッドが単一の
+// `Mutex` 越しに逐次イテレータの `.next()` を奪い合う実装であり、
+// 収集順序は実行スケジュール依存）。このため `.collect::<Vec<_>>()`
+// を経由しても、後続の縮約はスレッド数依存の非決定性を引き継ぐ。
+// 次の 4 件は、いずれも `.collect::<Vec<_>>()` を挟んでいても遮断
+// せず「1 件」として検出されるべき（codex P1 是正）。
+
+#[test]
+fn count_par_reduce_detects_par_bridge_through_vec_collect_same_statement() {
+    let src = "data.iter().par_bridge().collect::<Vec<_>>().into_iter().sum::<f32>();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_par_bridge_through_vec_collect_tainted_across_statements() {
+    let src =
+        "let it = data.iter().par_bridge(); let s: f32 = it.collect::<Vec<_>>().into_iter().sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_par_bridge_through_vec_collect_order_unstable_taint_propagation() {
+    let src = "let v = data.iter().par_bridge().collect::<Vec<_>>(); let s: f32 = v.iter().sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_par_bridge_through_vec_collect_virtual_marker() {
+    let src = "let s: f32 = { data.iter().par_bridge() }.collect::<Vec<_>>().into_iter().sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
 }
 
 #[test]

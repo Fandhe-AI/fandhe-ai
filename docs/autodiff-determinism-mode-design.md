@@ -249,6 +249,37 @@ determinism_inventory.rs` 冒頭の `//!` を正とし、本節では要点の�
    data.par_chunks(4).map(f).collect::<Vec<_>>() } else { vec![] }
    .into_iter().sum::<f32>();`）は仮想マーカーを記録しない（0 件の
    まま）。
+9. **`par_bridge()` は `Vec` への collect で遮断しない（順序非保証
+   マーカーの導入）**: 4 の collect 遮断規則は「`Vec` への collect は
+   型で順序保持が明示される」ことを理由に一律遮断としていたが、rayon
+   の `par_bridge()`（`ParallelBridge`／`IterBridge`。rayon 1.12.0
+   `src/iter/par_bridge.rs`）は `IndexedParallelIterator` を実装せず、
+   複数スレッドが単一の `Mutex` 越しに逐次イテレータの `.next()` を
+   奪い合う実装であるため収集順序が実行スケジュール依存になる
+   （公式ドキュメント: "The resulting iterator is not guaranteed to
+   keep the order of the original iterator."）。このため
+   `data.iter().par_bridge().collect::<Vec<_>>().into_iter().sum()`
+   は `.collect::<Vec<_>>()` を経由してもスレッド数依存の非決定性を
+   引き継ぐが、旧規則ではこの collect が一律遮断してしまい検出漏れに
+   なっていた（codex P1）。起点から collect までの区間（ネストした
+   ブロック内部を含む）に識別子 `par_bridge`、または初期化式に
+   `par_bridge`／既存の順序非保証汚染識別子を含むために「順序非保証」
+   としても汚染された識別子（6 の `tainted` とスコープ規則が完全に
+   同一の別集合。`let`・単純代入いずれも同じスコープ規則で並行管理
+   する）が 1 つでもあれば、その collect は遮断しない（`initializer_taints`・
+   同一文判定・UFCS 判定・仮想マーカーの生存判定のすべてで共通の
+   判定〈`crates/backend-cpu/tests/determinism_inventory.rs::
+   collect_blocks`〉を使う。起点そのものが `par_bridge` である場合は
+   区間の下端に `par_bridge` 自身の位置が含まれるため自動的に満たされ、
+   別途の分岐は不要）。あわせて rayon 1.12.0 の `par_` 接頭辞 API・
+   `into_par_iter`（本走査のマーカー検出対象）を全数確認したが、順序
+   非保証を明示するものは `par_bridge` のみだった。`rayon::iter::split`
+   （`src/iter/splitter.rs`）はユーザークロージャによる決定的な構造
+   分割であり indexed source と同じ性質を持つため対象外、`walk_tree`／
+   `walk_tree_prefix`／`walk_tree_postfix`（`src/iter/walk_tree.rs`）は
+   素の `walk_tree` のみ順序非保証を明記するがいずれも `par_` 接頭辞
+   でも `into_par_iter` でもない自由関数のため、本走査のマーカー検出
+   対象自体に含まれず変更不要と判断した。
 
 見つかった `.sum()` 等はいずれも逐次 `std::iter::Iterator::sum()`
 （`ops.rs::gemm_checksum` の `out.iter().map(|&x| x as f64).sum()` 等）
@@ -327,7 +358,7 @@ float の `atomicAdd` は使わない方針（ソース検査テストあり:
 
 ### §3.3 fail-closed 化の担保（将来の回帰防止）
 
-`crates/backend-cpu/tests/determinism_inventory.rs`（65 テスト。すべて
+`crates/backend-cpu/tests/determinism_inventory.rs`（69 テスト。すべて
 green）に、次の fail-closed ソース走査テストを置く:
 
 - `rayon_marker_files_match_fixed_allowlist`: rayon 並列イテレータ
