@@ -121,6 +121,7 @@ fn contains_rayon_marker(content: &str) -> bool {
     content.contains("par_iter")
         || content.contains("par_chunks")
         || content.contains("into_par_iter")
+        || content.contains("par_bridge")
         || content.contains("rayon::")
 }
 
@@ -210,14 +211,23 @@ fn strip_comments_and_strings(content: &str) -> String {
 }
 
 /// rayon 並列イテレータのマーカー（`.par_iter(`／`.par_chunks(`／
-/// `.par_chunks_mut(`／`.into_par_iter(`／`.par_iter_mut(`）と
-/// 縮約マーカー（`.sum()`／`.sum::<T>()` 等の型指定付き turbofish 呼び
-/// 出し／`.reduce(`／`reduce_with(`）が共起する箇所を数える（分割依存の
-/// 縮約——rayon の並列イテレータをそのまま `.sum()`／`.reduce(` へ流す
-/// 典型パターンの検出。`docs/autodiff-determinism-mode-design.md`
-/// §2.3）。`.par_chunks_mut(` は GEMM 等の書き込み先チャンク分割で実際に
+/// `.par_chunks_mut(`／`.into_par_iter(`／`.par_iter_mut(`／
+/// `.par_bridge(`）と縮約マーカー（`.sum()`／`.sum::<T>()` 等の型指定付き
+/// turbofish 呼び出し／`.reduce(`／`reduce_with(`）が共起する箇所を数える
+/// （分割依存の縮約——rayon の並列イテレータをそのまま `.sum()`／
+/// `.reduce(` へ流す典型パターンの検出。
+/// `docs/autodiff-determinism-mode-design.md` §2.3・§3.3）。
+/// `.par_chunks_mut(` は GEMM 等の書き込み先チャンク分割で実際に
 /// 使われるマーカーであり、これを欠くと backend-cpu の並列イテレータ
 /// 使用箇所の一部が検出対象から漏れる（codex-review 指摘・PR #2274）。
+/// `.par_bridge(` は通常の `Iterator` を rayon の並列イテレータへ変換する
+/// 経路（`par_iter`／`into_par_iter`／`par_chunks` のいずれの命名パターン
+/// にも当たらない）で、これを欠くと将来 `src/` の新規ファイルへ
+/// `data.iter().par_bridge().sum()` のような並列縮約が追加されても
+/// allowlist 突合・並列縮約検査の両方をすり抜ける（`contains_rayon_marker`
+/// 側にも同マーカーを追加済み。§3.3 の「新しい非決定的経路を fail-closed
+/// に検出する」契約を満たすための追加。codex-review 指摘・PR #2274
+/// review r4105712809）。
 ///
 /// 検出は 2 段構成: (1) 同一文（`;` 区切り）中の共起（従来どおり）。
 /// (2) `let (mut )?IDENT = <par marker を含む式>;` で並列イテレータの
@@ -235,6 +245,7 @@ fn count_par_reduce_cooccurrences(content: &str) -> usize {
         ".par_chunks_mut(",
         ".into_par_iter(",
         ".par_iter_mut(",
+        ".par_bridge(",
     ];
     let reduce_markers = [".sum(", ".sum::<", ".reduce(", "reduce_with("];
 
@@ -284,10 +295,40 @@ fn count_par_reduce_cooccurrences(content: &str) -> usize {
 /// `"fn f() {\n    let it = data.par_iter()"` のままで、先頭が
 /// `"let "` ではないため代入として検出できず、後続の `it.sum()` を
 /// 見逃していた（codex-review 指摘・PR #2274 review r4105558135）。
-/// 対処として、チャンク内最後の `{`／`}` より後ろだけを実効的な文と
-/// みなす（ブロック境界をまたいだ前段のテキストを読み飛ばす）。
+/// 対処として、チャンク内で**閉じられていない**（マッチする `}` を
+/// このチャンク内に持たない）最後の `{` より後ろだけを実効的な文とみ
+/// なす（ブロック境界をまたいだ前段のテキストを読み飛ばす）。
+///
+/// 括弧の対応を無視した単純な `rfind(['{', '}'])`（チャンク内で最後に
+/// 出現する `{`／`}` を機械的に採用する実装）は、`let` の初期化式自体が
+/// ブロックを含む場合（`let it = if x { a } else { b }.par_iter();` の
+/// ような closure body／if／match 式）に誤検出する: この場合チャンク内
+/// 最後の `}` は初期化式内で**閉じている**（バランスが取れている）
+/// ブロックの閉じ括弧であり、その直後は `.par_iter()` のような式の続き
+/// であって新しい文の先頭ではない。それを「ブロック境界」として切り
+/// 捨てると `let it = ` 自体が失われ、先頭が `"let "` にならず代入検出
+/// をすり抜ける（Cursor Bugbot 指摘・PR #2274 review r4105736458）。
+/// スタックで `{`／`}` の対応を追跡し、チャンク終端時点で**閉じられて
+/// いない**最も右側の `{` の直後のみをブロック境界として扱うことで、
+/// 初期化式内の（開始と終了がこのチャンク内に収まる）balanced なブロッ
+/// クは剥がさず、関数・if・for 等の未閉じブロック開始だけを剥がす。
 fn assigned_identifier(stmt: &str) -> Option<&str> {
-    let block_start = stmt.rfind(['{', '}']).map(|i| i + 1).unwrap_or(0);
+    // 未閉じの `{` の位置を保持するスタック。`}` が来るたびに直近の
+    // `{` と対応づけて pop する（balanced な入れ子は互いに相殺され、
+    // スタックには「このチャンク内で閉じられなかった `{`」だけが
+    // 残る）。残った中で最も右側（＝スタック最上位）が実効的な
+    // ブロック境界。
+    let mut open_braces: Vec<usize> = Vec::new();
+    for (i, c) in stmt.char_indices() {
+        match c {
+            '{' => open_braces.push(i),
+            '}' => {
+                open_braces.pop();
+            }
+            _ => {}
+        }
+    }
+    let block_start = open_braces.last().map(|&i| i + 1).unwrap_or(0);
     let stmt = &stmt[block_start..];
 
     let rest = stmt.trim_start().strip_prefix("let ")?;
@@ -645,4 +686,65 @@ fn assigned_identifier_extracts_typed_let_binding() {
     );
     // 型注釈のみで代入が無い場合（`;` 区切りの空文等）は None を保つ。
     assert_eq!(assigned_identifier("let it: Vec<f32>"), None);
+}
+
+#[test]
+fn count_par_reduce_detects_par_bridge_same_statement() {
+    // `.par_bridge()` は `par_iter`／`into_par_iter`／`par_chunks` の
+    // いずれの命名パターンにも当たらない rayon 並列イテレータ変換経路
+    // であり、これを欠くと `data.iter().par_bridge().sum()` のような
+    // 並列縮約が allowlist 突合・並列縮約検査の両方をすり抜ける
+    // （codex-review 指摘・PR #2274 review r4105712809）。
+    let src = "let s: f32 = data.iter().par_bridge().sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_par_bridge_across_statements() {
+    // 文をまたぐ場合も `.par_bridge(` を汚染源として追跡できる。
+    let src = "let it = data.iter().par_bridge(); let s: f32 = it.sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn contains_rayon_marker_detects_par_bridge() {
+    assert!(contains_rayon_marker("data.iter().par_bridge().sum()"));
+}
+
+#[test]
+fn assigned_identifier_ignores_balanced_braces_in_initializer() {
+    // `let` の初期化式自体がブロック（if／match／closure body 等）を
+    // 含み、かつそのブロックがチャンク内で閉じている（balanced）場合、
+    // 単純な「チャンク内最後の `{`／`}`」採用では初期化式内の閉じ括弧
+    // を「ブロック境界」と誤認し、`let it = ` ごと剥がしてしまい代入
+    // 検出をすり抜けていた（Cursor Bugbot 指摘・PR #2274 review
+    // r4105736458）。balanced なブロックは境界とみなさないことを検証
+    // する。
+    assert_eq!(
+        assigned_identifier("let it = if x { a } else { b }.par_iter()"),
+        Some("it")
+    );
+    assert_eq!(
+        assigned_identifier("let it = match x { 0 => a, _ => b }.par_iter()"),
+        Some("it")
+    );
+    assert_eq!(
+        assigned_identifier("let it = (|| { data }()).par_iter()"),
+        Some("it")
+    );
+    // balanced なブロックを含む初期化式でも、外側の未閉じブロック境界
+    // （関数本体の開始 `{` 等）は引き続き正しく剥がす。
+    assert_eq!(
+        assigned_identifier("fn f() {\n    let it = if x { a } else { b }.par_iter()"),
+        Some("it")
+    );
+}
+
+#[test]
+fn count_par_reduce_detects_reduction_after_balanced_block_initializer() {
+    // `assigned_identifier` の balanced ブロック誤認バグが未修正だと、
+    // `it` が汚染集合へ登録されず後続の `it.sum()` を見逃す
+    // （Cursor Bugbot 指摘・PR #2274 review r4105736458）。
+    let src = "let it = if x { a } else { b }.par_iter(); let s: f32 = it.sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
 }
