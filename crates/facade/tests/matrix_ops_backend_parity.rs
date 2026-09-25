@@ -458,9 +458,10 @@ fn cpu_bit_exact_backward_matches_naive_reference() {
 
     // diag（2-D -> 1-D。抽出長 L は diagonal に依存し、範囲外
     // （L == 0）では `narrow(0, 0, 0)` -> `gather` -> `squeeze` で空
-    // テンソルへ収束する（エラーにはならない）。この境界では勾配が
-    // 記録されるか〈Some〉/されないか〈None〉を断定せず、CPU と
-    // NaiveOps の間で一致することのみを検証する）
+    // テンソルへ収束する（エラーにはならない）。この境界でも勾配は
+    // Some で記録されることを契約とし〈実測: 形状 [m, n] の全ゼロ
+    // 勾配〉、None は双方一致していても失敗とする。L == 0 のセルでは
+    // 形状 [m, n]・全要素ゼロであることも明示検証する）
     for &(m, n) in &TRIL_TRIU_SHAPES {
         let data = f32_fixture(m, n);
         for &k in &tril_triu_diagonals(m, n) {
@@ -503,6 +504,18 @@ fn cpu_bit_exact_backward_matches_naive_reference() {
                         f32_bits(b),
                         "diag(2D->1D) backward m={m} n={n} diagonal={k} L={extract_len}"
                     );
+                    if extract_len == 0 {
+                        // 範囲外セルの契約: 形状 [m, n]・全要素ゼロ（符号は問わない）
+                        assert_eq!(
+                            a.shape(),
+                            &[m, n][..],
+                            "diag(2D->1D) backward L=0 shape m={m} n={n} diagonal={k}"
+                        );
+                        assert!(
+                            f32_bits(a).iter().all(|&bits| bits & 0x7fff_ffff == 0),
+                            "diag(2D->1D) backward L=0 が全ゼロでない m={m} n={n} diagonal={k}"
+                        );
+                    }
                 }
                 (None, None) => panic!(
                     "diag(2D->1D) backward の勾配が CPU・NaiveOps 双方で\
@@ -1041,8 +1054,9 @@ fn metal_bit_exact_backward_matches_cpu_reference() {
         }
     }
 
-    // diag（2-D -> 1-D。範囲外（L == 0）は勾配 Some/None の一致のみを
-    // 検証する。CPU 側と同じ理由）
+    // diag（2-D -> 1-D。範囲外（L == 0）でも勾配は Some で記録される
+    // ことを契約とし、None は双方一致していても失敗とする。CPU 側と
+    // 同じ契約）
     for &(m, n) in &TRIL_TRIU_SHAPES {
         let data = f32_fixture(m, n);
         for &k in &tril_triu_diagonals(m, n) {
@@ -1312,8 +1326,9 @@ fn cuda_bit_exact_backward_matches_cpu_reference() {
         }
     }
 
-    // diag（2-D -> 1-D。範囲外（L == 0）は勾配 Some/None の一致のみを
-    // 検証する。CPU 側と同じ理由）
+    // diag（2-D -> 1-D。範囲外（L == 0）でも勾配は Some で記録される
+    // ことを契約とし、None は双方一致していても失敗とする。CPU 側と
+    // 同じ契約）
     for &(m, n) in &TRIL_TRIU_SHAPES {
         let data = f32_fixture(m, n);
         for &k in &tril_triu_diagonals(m, n) {

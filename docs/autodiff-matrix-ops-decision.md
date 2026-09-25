@@ -305,13 +305,15 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
   `k > 0`／`k < 0` は `pad` 引数〈行・列の順序〉が異なる分岐）。
   入力ベクタ長は通常長 `3` と境界値の長さ `1`（`DIAG_1D_LENGTHS`）の
   2 種。
-- `diag`（2-D→1-D）backward の `L = 0` セルは、勾配が
-  `Some`（記録される）か `None`（記録されない）かを断定せず、CPU・
-  NaiveOps（および `#[ignore]` の CUDA／Metal 実機セル）間で
-  一致することのみを検証する（`match (dx_cpu, dx_naive) { (Some,
-  Some) => bit 比較, (None, None) => 素通し, _ => panic }`）。実測では
-  CPU・NaiveOps ともに `Some`（形状 `[m, n]` の全ゼロ勾配）を返し
-  一致した。
+- `diag`（2-D→1-D）backward の `L = 0` セルも、他セルと同じく勾配が
+  `Some` で記録されることを契約とする（実測: CPU・NaiveOps ともに
+  形状 `[m, n]` の全ゼロ勾配を `Some` で返す）。テストは
+  `match (dx_cpu, dx_other) { (Some, Some) => 形状・bit 比較, (None,
+  None) => panic, _ => panic }` で判定し、`None` は双方一致していても
+  失敗とする（CPU・NaiveOps の比較セルに加え `#[ignore]` の CUDA／
+  Metal 実機セルも同じ判定）。CPU・NaiveOps セルでは `L = 0` のとき
+  勾配が形状 `[m, n]`・全要素ゼロ（符号は問わない）であることも
+  明示検証する。
 - forward・backward いずれのループも bit 列比較に加えて `shape()` の
   一致を明示的に検証する（`f32_bits` は連続化した要素列のみを比較し
   形状差を検出しないため、空テンソル・早期リターンの各セルで形状の

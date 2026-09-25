@@ -44,8 +44,10 @@ matrix_ops_backend_parity.rs`）で形状ごとに境界値・範囲外を機械
 生成し、コピー系 forward・bit 完全一致 backward の全テスト（CPU・
 CUDA・Metal）へ横展開した。`diag`（2-D→1-D）の `L=0`（範囲外）は
 `narrow(0,0,0)` → `gather` → `squeeze` 経由で空テンソルへ収束し
-**エラーにはならない**ため、backward は勾配の `Some`／`None` 一致
-（形状の断定はしない）で検証する。forward・backward いずれも
+**エラーにはならない**。backward は他セルと同じく勾配が `Some` で
+記録されることを契約とし（`None` は双方一致していても失敗とする）、
+CPU・NaiveOps セルでは `L=0` のとき形状 `[m, n]`・全要素ゼロである
+ことも明示検証する。forward・backward いずれも
 `f32_bits` の bit 列比較に加え `shape()` の一致も明示検証する
 （空テンソル・早期リターンのセルで形状差が素通りしないようにする
 ため）。CPU（属性なし）実行は `L=0` セルを含め全て green
