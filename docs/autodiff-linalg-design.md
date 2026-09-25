@@ -21,7 +21,8 @@ matrix_norm はいずれも欠落していた。REQ-9 の Tier 2 列挙・`docs/
   カーネル実装は別イシューのスコープ。out-of-scope-tracking.md 対象）
 - `det` の特異行列における勾配（SVD 経由）・`svd` の重複特異値での勾配・`qr` の
   `m<n` backward・`svd(full_matrices=true)`・`cholesky(upper=true)`・`matrix_norm` の
-  一般 `p`／`dim` 指定・`eigh`／`lstsq`／`pinv`／`matrix_rank`／`slogdet` は対象外
+  一般 `p`／`dim` 指定は対象外。`eigh`／`lstsq`／`pinv`／`matrix_rank`／`slogdet` は
+  #2150 で実装済み（`docs/autodiff-linalg-ops-decision.md`）
 
 ## 3. 全体構成
 
@@ -189,4 +190,5 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
 - GPU（CUDA／Metal）カーネル実装（本イシューは `Unsupported` フォールバック止まり）
 - `det` の特異行列における勾配（SVD 経路）・`svd` の重複特異値での勾配・`qr` の `m<n`
   backward・`svd(full_matrices=true)`・`cholesky(upper=true)`・`matrix_norm` の一般
-  `p`／`dim` 指定・`torch.linalg.eigh`／`lstsq`／`pinv`／`matrix_rank`／`slogdet`
+  `p`／`dim` 指定は対象外。`torch.linalg.eigh`／`lstsq`／`pinv`／`matrix_rank`／
+  `slogdet` は #2150 で実装済み（`docs/autodiff-linalg-ops-decision.md`）

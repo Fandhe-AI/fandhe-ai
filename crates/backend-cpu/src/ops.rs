@@ -17,14 +17,14 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput, BceKind,
-    BinaryElementwiseOp, ChecksumReadout, Conv2dParams, DType, FusionPlan, GemmChecksum,
-    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    BinaryElementwiseOp, ChecksumReadout, Conv2dParams, DType, EighFactors, FusionPlan,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams, QrFactors, ScatterReduce,
-    SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, VectorNormOrd,
-    adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape, im2col_out_shape,
-    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, pool2d_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors, Tensor, UnaryElementwiseOp,
+    VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape,
+    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
+    pool2d_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::batch_norm;
@@ -2532,6 +2532,75 @@ impl BackendOps for CpuBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         require_rank2(a.shape())?;
         linalg::matrix_norm(a, ord).map_err(linalg_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::linalg_eigh`] の CPU 実装
+    /// （イシュー #2150）。`linalg::eigh` へ薄く委譲する
+    /// （`linalg_qr`／`linalg_svd` と同型）。
+    fn linalg_eigh(&self, a: &Tensor<f32>) -> Result<EighFactors, BackendError> {
+        require_square_2d(a.shape(), "linalg_eigh")?;
+        let (eigenvalues, eigenvectors) = linalg::eigh(a).map_err(linalg_error_to_backend_error)?;
+        Ok(EighFactors {
+            eigenvalues,
+            eigenvectors,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::linalg_slogdet`] の CPU 実装
+    /// （イシュー #2150）。
+    fn linalg_slogdet(&self, a: &Tensor<f32>) -> Result<SlogdetFactors, BackendError> {
+        require_square_2d(a.shape(), "linalg_slogdet")?;
+        let (sign, logabsdet) = linalg::slogdet(a).map_err(linalg_error_to_backend_error)?;
+        Ok(SlogdetFactors { sign, logabsdet })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::linalg_pinv`] の CPU 実装
+    /// （イシュー #2150）。rank 検査は不要（`pinv` は非正方も受け付ける
+    /// ため `require_rank2` のみ）。
+    fn linalg_pinv(
+        &self,
+        a: &Tensor<f32>,
+        rcond: Option<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_rank2(a.shape())?;
+        linalg::pinv(a, rcond).map_err(linalg_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::linalg_lstsq`] の CPU 実装
+    /// （イシュー #2150）。`a`・`b` の行数一致は `linalg_solve` と同じ
+    /// 規律で `ops.rs` 側で検査する。
+    fn linalg_lstsq(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        rcond: Option<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let m = require_rank2(a.shape())?;
+        let b_shape = b.shape();
+        if b_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: b_shape.len(),
+            }));
+        }
+        if b_shape[0] != m {
+            return Err(BackendError::InvalidArgument(format!(
+                "linalg_lstsq: a の行数 {m} と b の行数 {} が一致しない",
+                b_shape[0]
+            )));
+        }
+        linalg::lstsq(a, b, rcond).map_err(linalg_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::linalg_matrix_rank`] の CPU
+    /// 実装（イシュー #2150）。
+    fn linalg_matrix_rank(
+        &self,
+        a: &Tensor<f32>,
+        rcond: Option<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_rank2(a.shape())?;
+        linalg::matrix_rank(a, rcond).map_err(linalg_error_to_backend_error)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::var`] の CPU 実装（イシュー

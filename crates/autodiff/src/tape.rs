@@ -664,6 +664,39 @@ pub(crate) enum Op {
         input: NodeId,
         ord: fandhe_ai_tensor_core::MatrixNormOrd,
     },
+    /// 対称固有値分解の固有値出力ノード（イシュー #2150・`docs/
+    /// autodiff-linalg-ops-decision.md`）。`QrQ`／`SvdU` と同じ多出力
+    /// 設計（1 ノード 1 出力・兄弟ノードの forward 値を非追跡 payload
+    /// として保持）。`vectors` は兄弟ノード `Op::EighVectors` の
+    /// forward 値（`V`。VJP が upstream `gV` に対する縮退判定・
+    /// `skew(Vᵀ gV)` の計算に使う）。`crate::linalg_ops::eigh` から
+    /// のみ積まれる（facade 非公開。`linalg_ops.rs` モジュール doc
+    /// 参照）。
+    EighValues { input: NodeId, vectors: Tensor<f32> },
+    /// 対称固有値分解の固有ベクトル出力ノード（`EighValues` と対）。
+    /// `values` は兄弟ノード `Op::EighValues` の forward 値（`λ`。VJP
+    /// の `E_ij = λ_j - λ_i` 計算に使う）。
+    EighVectors { input: NodeId, values: Tensor<f32> },
+    /// 符号付き log 行列式の符号出力ノード（イシュー #2150）。VJP は
+    /// 明示ゼロ（`grad.rs`。`Op::OneHot` と同型——符号は区分定数で
+    /// ほとんど至る所微分ゼロ）。`crate::linalg_ops::slogdet` からのみ
+    /// 積まれる。
+    SlogdetSign { input: NodeId },
+    /// 符号付き log 行列式の `ln|det A|` 出力ノード（`SlogdetSign` と
+    /// 対）。VJP は `a` から改めて `f64` の LU 分解を計算する
+    /// （`eval::linalg::slogdet_logabsdet_vjp`。forward 値は再利用
+    /// しない——`Op::Inv`／`Op::Det` と同じ理由）。
+    SlogdetLogAbsDet { input: NodeId },
+    /// Moore–Penrose 擬似逆行列（イシュー #2150）。`rcond` は forward
+    /// 時点で解決済みの値（`crate::eval::linalg::resolve_rcond`。
+    /// `None` 既定は解決済みのためここでは `Option` を持たない）。
+    Pinv { input: NodeId, rcond: f32 },
+    /// 最小二乗解（`A: [m,n]`・`B: [m,k]` → `X: [n,k]`。イシュー
+    /// #2150）。`rcond` は `Pinv` と同じく解決済みの値。
+    Lstsq { a: NodeId, b: NodeId, rcond: f32 },
+    /// 行列のランク（イシュー #2150）。非微分（VJP は明示ゼロ。
+    /// `Op::OneHot`／`SlogdetSign` と同型）。`rcond` は `Pinv` と同じ。
+    MatrixRank { input: NodeId, rcond: f32 },
     /// `Var::permute` が記録する view ノード（イシュー #1597。`Reshape`/
     /// `Transpose` と同じ「forward のたびにバッファ確保しない」骨格を
     /// 任意軸並べ替えへ一般化する。`docs/autodiff-view-recompute-
@@ -1403,6 +1436,19 @@ impl Op {
             | Op::SvdS { .. }
             | Op::SvdVh { .. }
             | Op::MatrixNorm { .. }
+            // `Op::EighValues`／`Op::EighVectors`／`Op::SlogdetSign`／
+            // `Op::SlogdetLogAbsDet`／`Op::Pinv`／`Op::Lstsq`／
+            // `Op::MatrixRank`（イシュー #2150）は `QrQ`／`SvdU` と同じ
+            // 多出力・非融合設計、または `Inv`／`Det` と同じ
+            // 非適格理由（`recompute_value` に再計算分岐を持たない）
+            // のため非適格のまま保持する。
+            | Op::EighValues { .. }
+            | Op::EighVectors { .. }
+            | Op::SlogdetSign { .. }
+            | Op::SlogdetLogAbsDet { .. }
+            | Op::Pinv { .. }
+            | Op::Lstsq { .. }
+            | Op::MatrixRank { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::RmsNorm { .. }
@@ -1524,7 +1570,11 @@ impl Op {
     pub(crate) fn for_each_input(&self, mut f: impl FnMut(NodeId)) {
         match self {
             Op::Leaf | Op::ResidentLeaf { .. } => {}
-            Op::MatMul(a, b) | Op::Add(a, b) | Op::Mul(a, b) | Op::Solve { a, b } => {
+            Op::MatMul(a, b)
+            | Op::Add(a, b)
+            | Op::Mul(a, b)
+            | Op::Solve { a, b }
+            | Op::Lstsq { a, b, .. } => {
                 f(*a);
                 f(*b);
             }
@@ -1549,6 +1599,12 @@ impl Op {
             | Op::SvdS { input, .. }
             | Op::SvdVh { input, .. }
             | Op::MatrixNorm { input, .. }
+            | Op::EighValues { input, .. }
+            | Op::EighVectors { input, .. }
+            | Op::SlogdetSign { input }
+            | Op::SlogdetLogAbsDet { input }
+            | Op::Pinv { input, .. }
+            | Op::MatrixRank { input, .. }
             | Op::Permute { input, .. }
             | Op::BroadcastTo { input }
             | Op::Narrow { input, .. }
@@ -1834,6 +1890,16 @@ impl Op {
             | Op::SvdS { .. }
             | Op::SvdVh { .. }
             | Op::MatrixNorm { .. }
+            // イシュー #2150 の 5 演算は子テープ方式の高階微分の初期
+            // スコープ（doc 上部「対象スコープ」）に含まれないため
+            // `Inv`／`Det`／`Svd*` と同じく非対応のまま保持する。
+            | Op::EighValues { .. }
+            | Op::EighVectors { .. }
+            | Op::SlogdetSign { .. }
+            | Op::SlogdetLogAbsDet { .. }
+            | Op::Pinv { .. }
+            | Op::Lstsq { .. }
+            | Op::MatrixRank { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::MaskedFill { .. }
