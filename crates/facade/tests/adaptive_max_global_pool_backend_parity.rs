@@ -9,12 +9,18 @@
 //!   `fandhe_ai_autodiff::Tape::new()`（`NaiveOps`。`eval::*` 参照
 //!   実装へ強制フォールバック）で forward／backward を bit 完全一致で
 //!   突き合わせる（純粋な選択演算のため `assert_parity` の許容誤差
-//!   ではなく `assert_eq!` の bit 一致を主張する）。
+//!   ではなく bit 一致を主張する）。`f32` 値の bit 完全一致契約は
+//!   `PartialEq for f32`（`+0.0 == -0.0` を等値と扱う IEEE 754 規則）
+//!   の `assert_eq!` ではなく `to_bits()` によるビット列比較
+//!   （`assert_bits_eq`）で検証する（codex-review 指摘対応）。索引
+//!   （`i32`）は bit 差分の懸念がないため `assert_eq!` のままとする。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の同経路を CPU
 //!   tape と比較する。本 PR 時点では CUDA／Metal とも専用カーネル
 //!   未実装（`Unsupported` → ホストフォールバック）のため CPU と
-//!   bit 完全一致する契約。未実測は `docs/perf/logs/
+//!   bit 完全一致する契約。forward 値に加えて索引・backward 勾配も
+//!   突き合わせる（codex-review 指摘対応。`AdaptiveMaxPool2dOnResult`／
+//!   `GlobalPoolOnResult` 参照）。未実測は `docs/perf/logs/
 //!   adaptive-max-global-pool-2160/README.md` へ申し送る。
 
 use bench_harness::rng::Xorshift64Star;
@@ -62,6 +68,19 @@ fn contiguous_slice_i32(t: &Tensor<i32>) -> Vec<i32> {
         .to_vec()
 }
 
+/// bit 完全一致契約の比較を `f32::to_bits()` によるビット列比較で行う
+/// （codex-review 指摘対応。`assert_eq!` による素の `f32` 比較は
+/// `+0.0`／`-0.0` を等値と扱ってしまい bit 差分を見逃すため、本ファイルが
+/// 主張する「純粋な選択演算のため bit 完全一致」契約の検証としては
+/// 不十分だった）。`PartialEq for f32` は IEEE 754 の等価規則
+/// （`+0.0 == -0.0`）に従うため、bit 完全一致を主張するテストは
+/// 必ず `to_bits()` 経由で比較する。
+fn assert_bits_eq(actual: &[f32], expected: &[f32], msg: &str) {
+    let actual_bits: Vec<u32> = actual.iter().map(|v| v.to_bits()).collect();
+    let expected_bits: Vec<u32> = expected.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(actual_bits, expected_bits, "{msg}");
+}
+
 // --- AdaptiveMaxPool2d（属性なし: CPU vs NaiveOps） ---
 
 #[test]
@@ -83,10 +102,10 @@ fn cpu_adaptive_max_pool2d_forward_matches_naive_reference() {
         .expect("adaptive_max_pool2d: 常に成功する");
     let out_naive = out_naive.to_tensor();
 
-    assert_eq!(
-        contiguous_slice(&out_cpu),
-        contiguous_slice(&out_naive),
-        "adaptive_max_pool2d: 純粋な選択演算のため bit 同一のはず"
+    assert_bits_eq(
+        &contiguous_slice(&out_cpu),
+        &contiguous_slice(&out_naive),
+        "adaptive_max_pool2d: 純粋な選択演算のため bit 同一のはず",
     );
     assert_eq!(
         contiguous_slice_i32(&idx_cpu),
@@ -114,10 +133,10 @@ fn cpu_adaptive_max_pool2d_backward_matches_naive_reference() {
     let grads_naive = naive_tape.backward(&loss_naive).unwrap();
     let dx_naive = grads_naive.get(&x_naive).unwrap().expect("到達する");
 
-    assert_eq!(
-        contiguous_slice(dx_cpu),
-        contiguous_slice(dx_naive),
-        "adaptive_max_pool2d backward: scatter_add ベース VJP のため bit 同一のはず"
+    assert_bits_eq(
+        &contiguous_slice(dx_cpu),
+        &contiguous_slice(dx_naive),
+        "adaptive_max_pool2d backward: scatter_add ベース VJP のため bit 同一のはず",
     );
 }
 
@@ -142,20 +161,20 @@ fn cpu_adaptive_max_pool1d_forward_and_backward_matches_naive_reference() {
     let grads_naive = naive_tape.backward(&loss_naive).unwrap();
     let dx_naive = grads_naive.get(&x_naive).unwrap().expect("到達する");
 
-    assert_eq!(
-        contiguous_slice(&out_cpu.to_tensor()),
-        contiguous_slice(&out_naive.to_tensor()),
-        "adaptive_max_pool1d forward: bit 同一のはず"
+    assert_bits_eq(
+        &contiguous_slice(&out_cpu.to_tensor()),
+        &contiguous_slice(&out_naive.to_tensor()),
+        "adaptive_max_pool1d forward: bit 同一のはず",
     );
     assert_eq!(
         contiguous_slice_i32(&idx_cpu),
         contiguous_slice_i32(&idx_naive),
         "adaptive_max_pool1d: 索引も bit 同一のはず"
     );
-    assert_eq!(
-        contiguous_slice(dx_cpu),
-        contiguous_slice(dx_naive),
-        "adaptive_max_pool1d backward: bit 同一のはず"
+    assert_bits_eq(
+        &contiguous_slice(dx_cpu),
+        &contiguous_slice(dx_naive),
+        "adaptive_max_pool1d backward: bit 同一のはず",
     );
 }
 
@@ -182,15 +201,19 @@ fn cpu_global_pool_forward_and_backward_matches_naive_reference() {
                 let grads_naive = naive_tape.backward(&loss_naive).unwrap();
                 let dx_naive = grads_naive.get(&x_naive).unwrap().expect("到達する");
 
-                assert_eq!(
-                    contiguous_slice(&out_cpu.to_tensor()),
-                    contiguous_slice(&out_naive.to_tensor()),
-                    "GlobalPool({mode:?}, keepdims={keepdims}) shape={shape:?} forward: bit 同一のはず"
+                assert_bits_eq(
+                    &contiguous_slice(&out_cpu.to_tensor()),
+                    &contiguous_slice(&out_naive.to_tensor()),
+                    &format!(
+                        "GlobalPool({mode:?}, keepdims={keepdims}) shape={shape:?} forward: bit 同一のはず"
+                    ),
                 );
-                assert_eq!(
-                    contiguous_slice(dx_cpu),
-                    contiguous_slice(dx_naive),
-                    "GlobalPool({mode:?}, keepdims={keepdims}) shape={shape:?} backward: bit 同一のはず"
+                assert_bits_eq(
+                    &contiguous_slice(dx_cpu),
+                    &contiguous_slice(dx_naive),
+                    &format!(
+                        "GlobalPool({mode:?}, keepdims={keepdims}) shape={shape:?} backward: bit 同一のはず"
+                    ),
                 );
             }
         }
@@ -199,25 +222,60 @@ fn cpu_global_pool_forward_and_backward_matches_naive_reference() {
 
 // --- 実機横断（`#[ignore]`。Metal／CUDA） ---
 
-fn adaptive_max_pool2d_forward_on(device: Device) -> Tensor<f32> {
+/// 実機横断 parity テストの突き合わせ対象一式（forward 値・索引・
+/// backward 勾配）。codex-review 指摘（P2「実機 parity で索引と勾配も
+/// 検証する」）対応: 本 PR 時点では CUDA／Metal とも専用カーネル未実装
+/// （`Unsupported` → ホストフォールバック）のため、フォールバック経路が
+/// forward 値だけでなく索引・勾配についても CPU と一致することまで
+/// 確認する。
+struct AdaptiveMaxPool2dOnResult {
+    forward: Tensor<f32>,
+    index: Tensor<i32>,
+    grad: Tensor<f32>,
+}
+
+fn adaptive_max_pool2d_forward_on(device: Device) -> AdaptiveMaxPool2dOnResult {
     let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
     let x = tape.make_var(&leaf(1, &[1, 1, 5, 7]));
     let layer = AdaptiveMaxPool2d::new([2, 3]).unwrap();
-    layer
+    let (out, idx) = layer
         .forward(&x)
-        .expect("adaptive_max_pool2d: 常に成功する")
-        .0
-        .to_tensor()
+        .expect("adaptive_max_pool2d: 常に成功する");
+    let forward = out.to_tensor();
+    let index = idx;
+    let loss = out.sum(None).expect("sum: 常に成功する");
+    let grads = tape.backward(&loss).expect("backward: 常に成功する");
+    let grad = grads
+        .get(&x)
+        .expect("x への勾配取得")
+        .expect("x は loss に到達するため勾配が存在するはず")
+        .clone();
+    AdaptiveMaxPool2dOnResult {
+        forward,
+        index,
+        grad,
+    }
 }
 
-fn global_pool_forward_on(device: Device) -> Tensor<f32> {
+struct GlobalPoolOnResult {
+    forward: Tensor<f32>,
+    grad: Tensor<f32>,
+}
+
+fn global_pool_forward_on(device: Device) -> GlobalPoolOnResult {
     let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
     let x = tape.make_var(&leaf(1, &[1, 2, 3, 4]));
     let layer = GlobalPool::new(GlobalPoolMode::Max, true);
-    layer
-        .forward(&x)
-        .expect("GlobalPool: 常に成功する")
-        .to_tensor()
+    let out = layer.forward(&x).expect("GlobalPool: 常に成功する");
+    let forward = out.to_tensor();
+    let loss = out.sum(None).expect("sum: 常に成功する");
+    let grads = tape.backward(&loss).expect("backward: 常に成功する");
+    let grad = grads
+        .get(&x)
+        .expect("x への勾配取得")
+        .expect("x は loss に到達するため勾配が存在するはず")
+        .clone();
+    GlobalPoolOnResult { forward, grad }
 }
 
 // `Device::Metal` variant 自体が `cfg(target_os = "macos")` 限定
@@ -230,10 +288,20 @@ fn global_pool_forward_on(device: Device) -> Tensor<f32> {
 fn metal_adaptive_max_pool2d_forward_matches_cpu() {
     let metal_out = adaptive_max_pool2d_forward_on(Device::Metal);
     let cpu_out = adaptive_max_pool2d_forward_on(Device::Cpu);
+    assert_bits_eq(
+        &contiguous_slice(&metal_out.forward),
+        &contiguous_slice(&cpu_out.forward),
+        "adaptive_max_pool2d: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
+    );
     assert_eq!(
-        contiguous_slice(&metal_out),
-        contiguous_slice(&cpu_out),
-        "adaptive_max_pool2d: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず"
+        contiguous_slice_i32(&metal_out.index),
+        contiguous_slice_i32(&cpu_out.index),
+        "adaptive_max_pool2d: 索引も BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず"
+    );
+    assert_bits_eq(
+        &contiguous_slice(&metal_out.grad),
+        &contiguous_slice(&cpu_out.grad),
+        "adaptive_max_pool2d backward: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
     );
 }
 
@@ -243,10 +311,15 @@ fn metal_adaptive_max_pool2d_forward_matches_cpu() {
 fn metal_global_pool_forward_matches_cpu() {
     let metal_out = global_pool_forward_on(Device::Metal);
     let cpu_out = global_pool_forward_on(Device::Cpu);
-    assert_eq!(
-        contiguous_slice(&metal_out),
-        contiguous_slice(&cpu_out),
-        "GlobalPool: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず"
+    assert_bits_eq(
+        &contiguous_slice(&metal_out.forward),
+        &contiguous_slice(&cpu_out.forward),
+        "GlobalPool: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
+    );
+    assert_bits_eq(
+        &contiguous_slice(&metal_out.grad),
+        &contiguous_slice(&cpu_out.grad),
+        "GlobalPool backward: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
     );
 }
 
@@ -255,10 +328,20 @@ fn metal_global_pool_forward_matches_cpu() {
 fn cuda_adaptive_max_pool2d_forward_matches_cpu() {
     let cuda_out = adaptive_max_pool2d_forward_on(Device::Cuda(0));
     let cpu_out = adaptive_max_pool2d_forward_on(Device::Cpu);
+    assert_bits_eq(
+        &contiguous_slice(&cuda_out.forward),
+        &contiguous_slice(&cpu_out.forward),
+        "adaptive_max_pool2d: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
+    );
     assert_eq!(
-        contiguous_slice(&cuda_out),
-        contiguous_slice(&cpu_out),
-        "adaptive_max_pool2d: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず"
+        contiguous_slice_i32(&cuda_out.index),
+        contiguous_slice_i32(&cpu_out.index),
+        "adaptive_max_pool2d: 索引も BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず"
+    );
+    assert_bits_eq(
+        &contiguous_slice(&cuda_out.grad),
+        &contiguous_slice(&cpu_out.grad),
+        "adaptive_max_pool2d backward: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
     );
 }
 
@@ -267,9 +350,14 @@ fn cuda_adaptive_max_pool2d_forward_matches_cpu() {
 fn cuda_global_pool_forward_matches_cpu() {
     let cuda_out = global_pool_forward_on(Device::Cuda(0));
     let cpu_out = global_pool_forward_on(Device::Cpu);
-    assert_eq!(
-        contiguous_slice(&cuda_out),
-        contiguous_slice(&cpu_out),
-        "GlobalPool: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず"
+    assert_bits_eq(
+        &contiguous_slice(&cuda_out.forward),
+        &contiguous_slice(&cpu_out.forward),
+        "GlobalPool: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
+    );
+    assert_bits_eq(
+        &contiguous_slice(&cuda_out.grad),
+        &contiguous_slice(&cpu_out.grad),
+        "GlobalPool backward: BackendOps 未実装フォールバックのため CPU と bit 完全一致のはず",
     );
 }
