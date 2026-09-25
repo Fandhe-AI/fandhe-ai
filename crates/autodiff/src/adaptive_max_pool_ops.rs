@@ -32,6 +32,27 @@ use crate::grad::adaptive_max_pool2d_with_fallback;
 use crate::tape::{Op, materialize_fallible};
 use crate::var::Var;
 
+/// 索引の表現可能範囲検査（`H·W <= i32::MAX`。索引は `i32` のため）。
+/// [`adaptive_max_pool2d`]／[`adaptive_max_pool1d`] の tape 経路
+/// （`Var::forward`）だけでなく、[`crate::nn::module::Module::forward_host`]
+/// の host 経路（`AdaptiveMaxPool2d`／`AdaptiveMaxPool1d`／
+/// `GlobalPool(Max)`）からも呼ばれる共通ヘルパー（codex-review・Cursor
+/// Bugbot 指摘・イシュー #2160）。host 経路がこの検査を欠くと、極端
+/// 形状（例: 空バッチかつ `H·W` が `i32::MAX` 超）で tape 経路は
+/// `IndexRangeOverflow` を返す一方 host 経路は成功してしまい、両経路の
+/// 契約が食い違う。
+pub(crate) fn check_max_index_range(h: usize, w: usize) -> Result<(), AutodiffError> {
+    let hw = h
+        .checked_mul(w)
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+    if hw > i32::MAX as usize {
+        return Err(AutodiffError::Shape(ShapeError::IndexRangeOverflow {
+            index: hw,
+        }));
+    }
+    Ok(())
+}
+
 /// 2 次元 adaptive max pooling（`torch.nn.AdaptiveMaxPool2d` 相当。
 /// NCHW 固定。イシュー #2160）。`input`: `[N, C, H, W]`・
 /// `output_size: [Hout, Wout]`。戻り値は `(values, index)` で
@@ -54,17 +75,10 @@ pub(crate) fn adaptive_max_pool2d<'t>(
     let out_shape =
         adaptive_pool2d_out_shape(&in_shape, output_size).map_err(AutodiffError::Shape)?;
 
-    let hw = in_shape
-        .get(2)
-        .copied()
-        .unwrap_or(0)
-        .checked_mul(in_shape.get(3).copied().unwrap_or(0))
-        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
-    if hw > i32::MAX as usize {
-        return Err(AutodiffError::Shape(ShapeError::IndexRangeOverflow {
-            index: hw,
-        }));
-    }
+    check_max_index_range(
+        in_shape.get(2).copied().unwrap_or(0),
+        in_shape.get(3).copied().unwrap_or(0),
+    )?;
 
     let input_val = {
         let nodes = input.tape().nodes.borrow();
@@ -116,11 +130,7 @@ pub(crate) fn adaptive_max_pool1d<'t>(
     }
     let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
     adaptive_pool2d_out_shape(&[n, c, 1, l], [1, output_size]).map_err(AutodiffError::Shape)?;
-    if l > i32::MAX as usize {
-        return Err(AutodiffError::Shape(ShapeError::IndexRangeOverflow {
-            index: l,
-        }));
-    }
+    check_max_index_range(1, l)?;
 
     let x4 = input.contiguous()?.reshape(&[n, c, 1, l])?;
     let (out4, index) = adaptive_max_pool2d(&x4, [1, output_size])?;

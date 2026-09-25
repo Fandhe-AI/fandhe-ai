@@ -1838,8 +1838,17 @@ impl Module for AdaptiveMaxPool2d {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        let out_shape = adaptive_pool2d_out_shape(input.shape(), self.output_size())
+        let in_shape = input.shape();
+        let out_shape = adaptive_pool2d_out_shape(in_shape, self.output_size())
             .map_err(AutodiffError::Shape)?;
+        // tape 経路（`AdaptiveMaxPool2d::forward` →
+        // `adaptive_max_pool_ops::adaptive_max_pool2d`）と同じ
+        // `H·W <= i32::MAX` 索引範囲検査（codex-review・Cursor Bugbot
+        // 指摘・イシュー #2160。索引は `i32` のため）。
+        crate::adaptive_max_pool_ops::check_max_index_range(
+            in_shape.get(2).copied().unwrap_or(0),
+            in_shape.get(3).copied().unwrap_or(0),
+        )?;
         let (values, _index) = crate::grad::adaptive_max_pool2d_with_fallback(
             ops,
             input,
@@ -1875,6 +1884,11 @@ impl Module for AdaptiveMaxPool1d {
             }));
         }
         let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // tape 経路（`AdaptiveMaxPool1d::forward` →
+        // `adaptive_max_pool_ops::adaptive_max_pool1d`）と同じ
+        // `l <= i32::MAX` 索引範囲検査（`h=1` 固定のため `hw == l`。
+        // codex-review・Cursor Bugbot 指摘・イシュー #2160）。
+        crate::adaptive_max_pool_ops::check_max_index_range(1, l)?;
         let x4 = input
             .contiguous()
             .reshape(&[n, c, 1, l])
@@ -1922,6 +1936,15 @@ impl Module for GlobalPool {
                         &out_shape,
                     )?,
                     GlobalPoolMode::Max => {
+                        // tape 経路（`GlobalPool::forward` →
+                        // `adaptive_max_pool_ops::adaptive_max_pool2d`）と
+                        // 同じ `H·W <= i32::MAX` 索引範囲検査
+                        // （codex-review・Cursor Bugbot 指摘・イシュー
+                        // #2160）。
+                        crate::adaptive_max_pool_ops::check_max_index_range(
+                            in_shape.get(2).copied().unwrap_or(0),
+                            in_shape.get(3).copied().unwrap_or(0),
+                        )?;
                         crate::grad::adaptive_max_pool2d_with_fallback(
                             ops,
                             input,
@@ -1953,6 +1976,12 @@ impl Module for GlobalPool {
                         &out_shape4,
                     )?,
                     GlobalPoolMode::Max => {
+                        // tape 経路（`GlobalPool::forward` →
+                        // `adaptive_max_pool_ops::adaptive_max_pool1d`）と
+                        // 同じ `l <= i32::MAX` 索引範囲検査（`h=1` 固定の
+                        // ため `hw == l`。codex-review・Cursor Bugbot
+                        // 指摘・イシュー #2160）。
+                        crate::adaptive_max_pool_ops::check_max_index_range(1, l)?;
                         crate::grad::adaptive_max_pool2d_with_fallback(
                             ops,
                             &x4,

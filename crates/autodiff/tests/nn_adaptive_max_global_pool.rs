@@ -334,6 +334,104 @@ fn adaptive_max_pool1d_rejects_index_overflow_before_reshape() {
     ));
 }
 
+/// `forward_host`（host 経路）が `forward`（tape 経路）と同じ
+/// `H·W <= i32::MAX` 索引範囲検査を行うことの回帰テスト
+/// （codex-review・Cursor Bugbot 指摘・イシュー #2160・PR #2280）。
+/// 空バッチ（`N=0`）かつ空間次元が `i32::MAX` 超という極端形状で、
+/// 両経路とも `IndexRangeOverflow` を返し契約が一致することを検証する
+/// （修正前は host 経路のみ成功していた）。
+#[test]
+fn adaptive_max_pool2d_forward_host_rejects_index_overflow() {
+    let huge_hw = i32::MAX as usize + 1;
+    let ops = common::naive_ops();
+    // N=0 のため data は空で構築でき、numel オーバーフローには
+    // 当たらない（検査対象は H·W 自体の索引表現可能性）。
+    let x = Tensor::<f32>::new(vec![], &[0, 1, huge_hw, 1])
+        .expect("test fixture: N=0 のため空 data で shape と整合する");
+    let layer = AdaptiveMaxPool2d::new([1, 1]).unwrap();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let tape_err = <AdaptiveMaxPool2d as Module>::forward(&layer, &tape, &xv).unwrap_err();
+    let host_err = layer.forward_host(ops.as_ref(), &x).unwrap_err();
+
+    assert!(matches!(
+        tape_err,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_hw
+    ));
+    assert!(matches!(
+        host_err,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_hw
+    ));
+}
+
+/// [`adaptive_max_pool2d_forward_host_rejects_index_overflow`] の
+/// `AdaptiveMaxPool1d` 版（`l <= i32::MAX` 検査。イシュー #2160）。
+#[test]
+fn adaptive_max_pool1d_forward_host_rejects_index_overflow() {
+    let huge_l = i32::MAX as usize + 1;
+    let ops = common::naive_ops();
+    let x = Tensor::<f32>::new(vec![], &[0, 1, huge_l])
+        .expect("test fixture: N=0 のため空 data で shape と整合する");
+    let layer = AdaptiveMaxPool1d::new(1).unwrap();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let tape_err = <AdaptiveMaxPool1d as Module>::forward(&layer, &tape, &xv).unwrap_err();
+    let host_err = layer.forward_host(ops.as_ref(), &x).unwrap_err();
+
+    assert!(matches!(
+        tape_err,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_l
+    ));
+    assert!(matches!(
+        host_err,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_l
+    ));
+}
+
+/// [`adaptive_max_pool2d_forward_host_rejects_index_overflow`] の
+/// `GlobalPool(Max)` 版（rank 3・rank 4 の両方。イシュー #2160）。
+/// `GlobalPoolMode::Avg` は索引を持たないため対象外。
+#[test]
+fn global_pool_max_forward_host_rejects_index_overflow_rank3_and_rank4() {
+    let huge_hw = i32::MAX as usize + 1;
+    let ops = common::naive_ops();
+    let layer = GlobalPool::new(GlobalPoolMode::Max, true);
+
+    // rank 4: N=0 のため空 data のまま H·W が i32::MAX 超。
+    let x4 = Tensor::<f32>::new(vec![], &[0, 1, huge_hw, 1])
+        .expect("test fixture: N=0 のため空 data で shape と整合する");
+    let tape4 = Tape::new_with_ops(common::naive_ops());
+    let xv4 = tape4.var(&x4);
+    let tape_err4 = <GlobalPool as Module>::forward(&layer, &tape4, &xv4).unwrap_err();
+    let host_err4 = layer.forward_host(ops.as_ref(), &x4).unwrap_err();
+    assert!(matches!(
+        tape_err4,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_hw
+    ));
+    assert!(matches!(
+        host_err4,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_hw
+    ));
+
+    // rank 3: N=0 のため空 data のまま L が i32::MAX 超。
+    let x3 = Tensor::<f32>::new(vec![], &[0, 1, huge_hw])
+        .expect("test fixture: N=0 のため空 data で shape と整合する");
+    let tape3 = Tape::new_with_ops(common::naive_ops());
+    let xv3 = tape3.var(&x3);
+    let tape_err3 = <GlobalPool as Module>::forward(&layer, &tape3, &xv3).unwrap_err();
+    let host_err3 = layer.forward_host(ops.as_ref(), &x3).unwrap_err();
+    assert!(matches!(
+        tape_err3,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_hw
+    ));
+    assert!(matches!(
+        host_err3,
+        AutodiffError::Shape(ShapeError::IndexRangeOverflow { index }) if index == huge_hw
+    ));
+}
+
 #[test]
 fn global_pool_forward_rejects_rank_mismatch() {
     let tape = Tape::new_with_ops(common::naive_ops());
