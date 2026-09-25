@@ -10918,3 +10918,147 @@ fn compat_sequential_does_not_expose_dropout_embedding_bag_add_methods_detects_o
         "add_dropout2d"
     ));
 }
+
+// =====================================================================
+// イシュー #2164（親 #2131）: RNN／LSTM／GRU の多層・双方向・dropout
+// （`RnnConfig`）の facade 公開保留を検査するテスト群。
+// `RnnConfigHoldDoctestGuard`（`src/lib.rs`）の正のプローブ 1 ブロック
+// 方式のドリフト検査を `spatial_layers_hold_doctest_*` と同型で持つ。
+// 承認事項・多層防御の位置づけは
+// `docs/autodiff-rnn-stacked-config-decision.md` §8 参照。
+// =====================================================================
+
+/// `RnnConfigHoldDoctestGuard` の唯一の doctest ブロックが glob import
+/// するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言
+/// 集合が一致することを固定する（`spatial_layers_hold_doctest_globs_
+/// all_pub_modules` と同型。イシュー #2164）。
+#[test]
+fn rnn_config_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "RnnConfigHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "RnnConfigHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
+         いる（declared={declared:?}, doctest={globbed:?}）。新しい pub\
+         mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`rnn_config_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`RNN_CONFIG_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
+/// する改変を機械的に拒否する。イシュー #2164）。
+#[test]
+fn rnn_config_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "RnnConfigHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, RNN_CONFIG_HOLD_PROBE_BODY,
+        "RnnConfigHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 RNN_CONFIG_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_rnn_config_hold_probe モジュール・\
+         __FandheRnnConfigTapeProbe／__FandheRnnConfigWithConfigProbe\
+         トレイト・__probe 関数）の削除・弱体化・隠し行の混入がないか\
+         確認すること。"
+    );
+}
+
+/// [`rnn_config_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `RnnConfigHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const RNN_CONFIG_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_rnn_config_hold_probe {\n\
+\x20\x20\x20\x20pub struct RnnConfig;\n\
+\x20\x20\x20\x20pub struct StackedRnn;\n\
+\x20\x20\x20\x20pub struct StackedLstm;\n\
+\x20\x20\x20\x20pub struct StackedGru;\n\
+\x20\x20\x20\x20pub struct StackedRnnSeqOutput;\n\
+\x20\x20\x20\x20pub struct StackedLstmSeqOutput;\n\
+}\n\
+use __fandhe_rnn_config_hold_probe::*;\n\
+\n\
+struct __FandheRnnConfigMarker;\n\
+\n\
+trait __FandheRnnConfigTapeProbe {\n\
+\x20\x20\x20\x20fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker;\n\
+\x20\x20\x20\x20fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker;\n\
+\x20\x20\x20\x20fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker;\n\
+}\n\
+\n\
+impl __FandheRnnConfigTapeProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandheRnnConfigWithConfigProbe {\n\
+\x20\x20\x20\x20fn with_config(&self) -> __FandheRnnConfigMarker;\n\
+}\n\
+\n\
+impl __FandheRnnConfigWithConfigProbe for fandhe_ai::nn::rnn::Rnn {\n\
+\x20\x20\x20\x20fn with_config(&self) -> __FandheRnnConfigMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheRnnConfigWithConfigProbe for fandhe_ai::nn::rnn::Lstm {\n\
+\x20\x20\x20\x20fn with_config(&self) -> __FandheRnnConfigMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheRnnConfigWithConfigProbe for fandhe_ai::nn::rnn::Gru {\n\
+\x20\x20\x20\x20fn with_config(&self) -> __FandheRnnConfigMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: RnnConfig,\n\
+\x20\x20\x20\x20_: StackedRnn,\n\
+\x20\x20\x20\x20_: StackedLstm,\n\
+\x20\x20\x20\x20_: StackedGru,\n\
+\x20\x20\x20\x20_: StackedRnnSeqOutput,\n\
+\x20\x20\x20\x20_: StackedLstmSeqOutput,\n\
+\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20rnn: &fandhe_ai::nn::rnn::Rnn,\n\
+\x20\x20\x20\x20lstm: &fandhe_ai::nn::rnn::Lstm,\n\
+\x20\x20\x20\x20gru: &fandhe_ai::nn::rnn::Gru,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_rnn_forward_seq(tape);\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = tape.stacked_rnn_forward_seq();\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_lstm_forward_seq(tape);\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = tape.stacked_lstm_forward_seq();\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_gru_forward_seq(tape);\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = tape.stacked_gru_forward_seq();\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Rnn::with_config(rnn);\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = rnn.with_config();\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Lstm::with_config(lstm);\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = lstm.with_config();\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Gru::with_config(gru);\n\
+\x20\x20\x20\x20let _: __FandheRnnConfigMarker = gru.with_config();\n\
+}";

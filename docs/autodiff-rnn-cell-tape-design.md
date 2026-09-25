@@ -223,8 +223,8 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
 
 - truncated BPTT
 - `pack_padded_sequence` 相当の可変長系列サポート
-- 双方向（bidirectional）RNN／LSTM／GRU
-- Sequence レベル API 自体のスタック（決定 4a (ii): 候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため `Var::narrow`〈#1599〉による候補 B 化が前提。セル単位の per-step 交互適用〈決定 4a (i)〉は勾配連続のまま v1 で成立するためスコープ外ではない）
+- 双方向（bidirectional）RNN／LSTM／GRU（**#2164 で内部クレートに実装済み**。`nn::rnn_stacked::{StackedRnn, StackedLstm, StackedGru}`。既存の `Rnn`／`Lstm`／`Gru` には手を入れず新しい型で提供。詳細は `docs/autodiff-rnn-stacked-config-decision.md`）
+- Sequence レベル API 自体のスタック（決定 4a (ii): 候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため `Var::narrow`〈#1599〉による候補 B 化が前提。セル単位の per-step 交互適用〈決定 4a (i)〉は勾配連続のまま v1 で成立するためスコープ外ではない。**#2164 でこの (i) 方式による多層化を `StackedRnn`／`StackedLstm`／`StackedGru::forward_seq` 内部に実装済み**——利用者が手組みする決定 4a (i) の「勾配連続」性質を層 1 以降の入力へ前層出力 `Var` をそのまま渡す形で構造化した）
 - reuse（デバイス常駐）経路（決定 7）
 - `predict_resident`／`linear_forward_device` 連携（決定 9）
 - facade 公開面（`fandhe_ai`／`compat`）への統合（決定 10。§6 の承認事項）
