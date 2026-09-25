@@ -2,17 +2,20 @@
 
 `docs/autodiff-matrix-ops-decision.md` §7・§8「実装記録」参照。
 本実装エージェント実行環境は CUDA／Metal 実機に到達できないため、
-`fandhe_ai_autodiff::matrix_ops`（`tril`／`triu`／`diag`／`trace`／
-`outer`／`dot`）の `crates/facade/tests/matrix_ops_backend_parity.rs`
-のうち CUDA（`Device::Cuda(0)`）・Metal（`Device::Metal`。
-`cfg(target_os = "macos")` 限定）を対象とする**計 8 テスト**（CUDA・
-Metal 各 4 件で対称。コピー系 4 演算 forward bit 完全一致の
+`fandhe_ai_autodiff::matrix_ops`（`tril`／`triu`／`diag`〈両方向〉／
+`trace`／`outer`／`dot`）の `crates/facade/tests/
+matrix_ops_backend_parity.rs` のうち CUDA（`Device::Cuda(0)`）・Metal
+（`Device::Metal`。`cfg(target_os = "macos")` 限定）を対象とする
+**計 8 テスト**（CUDA・Metal 各 4 件で対称。コピー系 4 演算（`diag`
+両方向を含む）forward bit 完全一致の
 `cuda_copy_ops_forward_matches_cpu_reference`／
 `metal_copy_ops_forward_matches_cpu_reference`、縮約系 2 演算 forward
 の REQ-2 統一複合判定
 `cuda_reduce_ops_forward_matches_cpu_reference`／
 `metal_reduce_ops_forward_matches_cpu_reference`、bit 完全一致
-backward（`trace` を代表として検証）の
+backward（`tril`／`triu`／`diag` 両方向／`trace`／`dot` の 5 演算 6 セル
+をそれぞれ個別に検証。「代表 1 演算での省略」はしない。イシュー
+#2144 codex-review 是正）の
 `cuda_bit_exact_backward_matches_cpu_reference`／
 `metal_bit_exact_backward_matches_cpu_reference`、`outer` backward の
 REQ-2 統一複合判定
@@ -43,9 +46,14 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト
 `tril`／`triu`／`diag`（両方向）forward（`masked_fill`／`gather`／
 `narrow`／`pad` の合成。いずれも値のコピーまたは定数 0 の埋め込みの
 みで算術を含まない）は CPU・CUDA・Metal 間で構造的に bit 完全一致
-するはず（`NaN`／`inf` の payload も含む）。backward（`Op::
-MaskedFill`／`Op::Gather` の VJP。寄与が高々 1 つ）も同じ理由で
-bit 一致するはず。
+するはず（`NaN`／`inf` の payload も含む）。backward は `tril`／
+`triu`／`diag`（2-D→1-D）が `Op::MaskedFill`／`Op::Gather` の VJP
+（寄与が高々 1 つ）を経由し同じ理由で bit 一致するはず。`diag`
+（1-D→2-D）はこれに加え `Op::Pad`・`Op::BroadcastTo` の VJP（軸方向
+の `reduce_to_shape` 縮約）も経由するが、縮約対象の行の非ゼロ要素が
+高々 1 つ（残りは厳密 `+0.0`）のため、同じ `BroadcastTo` VJP を経由
+しつつ複数の非ゼロ要素を縮約しうる `outer` backward（下記・REQ-2
+統一複合判定が必要）とは異なり bit 完全一致のまま成立するはず。
 
 `trace`（`diag` → `sum`）・`dot`（`mul` → `sum`）forward は `sum` の
 縮約順序がバックエンドで異なりうるため REQ-2 の統一複合判定（相対

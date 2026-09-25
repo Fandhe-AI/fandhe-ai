@@ -124,8 +124,15 @@ Issue の対象範囲には「`backend-cpu/src/ops.rs` に CPU 参照実装」�
 - `tril`／`triu`／`diag`（両方向）: forward はコピーまたは定数 0 の
   埋め込みのみ（算術を含まない）のため 3 バックエンド間で構造的に
   bit 完全一致する（`NaN` の payload も保存される）。backward は
-  `Op::MaskedFill`／`Op::Gather` の VJP（fill 位置はゼロ、それ以外は
-  素通し・scatter で寄与は各 1 つ）のため同じく bit 一致する
+  `tril`／`triu`／`diag`（2-D→1-D）が `Op::MaskedFill`／`Op::Gather`
+  の VJP（fill 位置はゼロ、それ以外は素通し・scatter で寄与は各
+  1 つ）を経由し、`diag`（1-D→2-D）はこれに加え `Op::Pad`（非
+  パディング領域は素通し）・`Op::BroadcastTo` の VJP（軸方向の
+  `reduce_to_shape` 縮約）も経由する。`BroadcastTo` の VJP は `outer`
+  backward（下記・REQ-2 統一複合判定が必要）と同じ縮約だが、`diag`
+  （1-D→2-D）側は縮約対象の行の非ゼロ要素が高々 1 つ（対角以外は
+  `masked_fill` で 0 済み）で残りは厳密 `+0.0`（加算順序に依存しない
+  exact 加算）のため bit 完全一致のまま成立する
 - `trace`: `diag(x, 0)`（bit 一致）→ `sum(None)`。`sum` の縮約順序は
   バックエンドで異なりうるため REQ-2 の統一複合判定（相対誤差 1e-3
   未満 または 絶対誤差 1e-5 未満）で比較する
@@ -168,8 +175,10 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 - `crates/autodiff/src/matrix_ops.rs`（新規）: `tril`／`triu`／
   `diag`／`trace`／`outer`／`dot`・モジュール doc（役割・facade
   非公開の理由・数値契約表・PyTorch との差分・REQ-8）・単体テスト
-  45 件（forward・エッジケース・非 contiguous 入力・エラー系・勾配・
-  有限差分検算・`NaN`／`inf` payload 保存・確保上限）
+  58 件（forward・エッジケース・非 contiguous 入力・エラー系・勾配・
+  有限差分検算・`NaN`／`inf` payload 保存・確保上限。§9 の是正時点の
+  実数。着手時点の見積り「45 件」から乖離していたため §9 で実数へ
+  更新した）
 - `crates/autodiff/src/rearrange_ops.rs`: `checked_axis_len_as_i32`・
   `checked_index_alloc_len` を `pub(crate)` へ昇格（挙動は不変）
 - `crates/autodiff/src/lib.rs`: `pub mod matrix_ops;` を追加
@@ -197,3 +206,32 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 承認取得後の追随（本イシューでは未実施）: `Var::tril` 等の薄い
 委譲メソッド追加、facade 保留ガード（`VarMatrixOpsHoldDoctestGuard`・
 対応する否定ガード 4 件）の撤去。
+
+## §9 網羅契約の是正（イシュー #2144・PR #2257 codex-review 指摘・2026-09-25）
+
+`crates/facade/tests/matrix_ops_backend_parity.rs` 冒頭が謳う「`diag`
+両方向を含む各演算の forward/backward と CPU・CUDA・Metal の主要セル
+を埋める」契約に対し、実際は次のセルが欠落していた（§8 時点）:
+
+- CUDA／Metal のコピー系 forward テストが `diag` の 2-D→1-D のみを
+  実行し、1-D→2-D（`pad` を通る経路）を検証していなかった
+- CUDA／Metal backward テストが `trace` のみを「代表」として検証し、
+  別 VJP 経路を持つ `tril`／`triu`／`diag`（両方向）／`dot` を省略
+  していた
+- CPU backward テストでも `diag` は 2-D→1-D のみだった
+
+`diag` の 1-D→2-D（`broadcast_to`／`masked_fill`／`pad` の合成）と
+2-D→1-D（`narrow`／`gather`／`squeeze` の合成）は別の VJP 経路を持つ
+ため代表検証では代替できない。契約文は縮めず、不足セルを追加する
+方針で是正した:
+
+- CPU backward（`cpu_bit_exact_backward_matches_naive_reference`）に
+  `diag`（1-D→2-D）を追加
+- CUDA／Metal のコピー系 forward テストに `diag`（1-D→2-D）を追加
+- CUDA／Metal backward テストを `trace` 単独代表から `tril`／
+  `triu`／`diag`（両方向）／`trace`／`dot` の個別検証へ拡張（CPU 側
+  `cpu_bit_exact_backward_matches_naive_reference` と同型の 6 ブロック
+  構成）
+
+併せて本 doc §8 の単体テスト件数「45 件」が実数（58 件）と乖離して
+いたため実数へ更新した（同種の宣言と実体の食い違いの横展開確認）。

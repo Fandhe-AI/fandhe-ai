@@ -33,8 +33,17 @@
 //!   埋め込みのみ（算術を含まない）のため 3 バックエンド間で構造的に
 //!   bit 完全一致する（`masked_fill`／`gather`／`narrow`／`pad` はいずれ
 //!   もコピー系演算。`NaN` の payload も保存される）。backward は
-//!   `Op::MaskedFill`／`Op::Gather` の VJP（fill 位置はゼロ、それ以外は
-//!   素通し・scatter で寄与は各 1 つ）のため同じく bit 一致する。
+//!   `tril`／`triu`／`diag`（2-D→1-D）が `Op::MaskedFill`／`Op::Gather`
+//!   の VJP（fill 位置はゼロ、それ以外は素通し・scatter で寄与は各
+//!   1 つ）を経由し、`diag`（1-D→2-D）はこれに加えて `Op::Pad`
+//!   （非パディング領域は素通し・パディング領域はゼロ勾配）・
+//!   `Op::BroadcastTo` の VJP（軸方向の `reduce_to_shape` 縮約）も
+//!   経由する。`BroadcastTo` の VJP は `outer` backward（REQ-2 統一
+//!   複合判定を要する）と同じ縮約だが、`diag`（1-D→2-D）側は縮約対象
+//!   の行のうち非ゼロ要素が高々 1 つ（対角以外は `masked_fill` で 0
+//!   済み）で残りは厳密 `+0.0`（IEEE 754 で加算順序に依存せず exact）
+//!   のため、`outer`（縮約対象が複数の非ゼロ要素を持ちうる）とは異なり
+//!   bit 完全一致のまま成立する。
 //! - `trace`: `diag(x, 0)`（bit 一致）→ `sum(None)`。`sum` の縮約順序は
 //!   バックエンドで異なりうるため REQ-2 の統一複合判定（相対誤差 1e-3
 //!   未満 または 絶対誤差 1e-5 未満）で比較する。
