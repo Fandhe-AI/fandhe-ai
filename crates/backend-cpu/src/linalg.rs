@@ -189,6 +189,42 @@ fn invalid(msg: impl Into<String>) -> LinalgError {
     LinalgError::InvalidArgument(msg.into())
 }
 
+/// 確保前の要素数・バイト数上限検査（`autodiff::bool_ops::
+/// checked_bytes_for` と同じ規律の独立複製。`autodiff` → `backend-cpu`
+/// の依存は作れる一方、逆方向の依存はできないためコードを複製する
+/// （本ファイル冒頭コメント「依存方向の制約」節と同じ理由）。要素数積の
+/// `usize` オーバーフローに加え、`T` 換算のバイトサイズが `Vec` の
+/// allocation 上限（`isize::MAX` バイト）に収まるかも検査し、確保不能
+/// な値なら `vec![0.0; numel]` 呼び出し前に型付きエラーで拒否する
+/// （本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`。PR #2268
+/// codex-review P1 指摘の是正: `checked_mul` 単体では要素数の overflow
+/// しか検出できず、overflow しない要素数でも確保不能なバイト数の
+/// ケースを見逃す）。
+fn checked_numel_for<T>(shape: &[usize], op_name: &str) -> Result<usize, LinalgError> {
+    let numel = shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| {
+            invalid(format!(
+                "{op_name}: 出力形状 {shape:?} の要素数が usize を超える"
+            ))
+        })?;
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size > 0 {
+        let bytes = numel.checked_mul(elem_size).ok_or_else(|| {
+            invalid(format!(
+                "{op_name}: 出力形状 {shape:?} のバイト数が usize を超える"
+            ))
+        })?;
+        if bytes > isize::MAX as usize {
+            return Err(invalid(format!(
+                "{op_name}: 出力形状 {shape:?} のバイト数が確保上限（isize::MAX）を超える"
+            )));
+        }
+    }
+    Ok(numel)
+}
+
 // =====================================================================
 // LU 分解（部分ピボット）。`inv`／`solve`／`det` の共通基盤。
 // =====================================================================
@@ -1223,11 +1259,12 @@ pub(crate) fn lstsq(
     // 確保前に `ensure_alloc_fits_f32` で出力形状 `[n, k_cols]` を
     // 検査するが、`BackendOps::linalg_lstsq` 経由で本関数へ直接到達
     // する経路にはその検査がなく、`m==0` 早期リターンの `n * k_cols`
-    // 乗算が検査なしに overflow しうる（巨大 `n`・`k_cols` の空入力。
-    // PR #2268 codex-review〈Bugbot〉指摘）。ここで独立に検査する。
-    let out_numel = n
-        .checked_mul(k_cols)
-        .ok_or_else(|| invalid("linalg::lstsq: 出力形状 [n, k_cols] の要素数が usize を超える"))?;
+    // 確保が検査なしに行われうる。`checked_mul` は要素数積の `usize`
+    // オーバーフローしか検出できず、overflow しない要素数でも
+    // `vec![0.0; out_numel]` が確保不能（`isize::MAX` バイト超過）な
+    // ケースで panic しうるため、`checked_numel_for` でバイト数上限まで
+    // 検査する（PR #2268 codex-review〈P1〉指摘の是正）。
+    let out_numel = checked_numel_for::<f32>(&[n, k_cols], "linalg::lstsq")?;
     if m == 0 || n == 0 {
         return build_tensor(vec![0.0; out_numel], &[n, k_cols]);
     }
@@ -1751,6 +1788,27 @@ mod tests {
         assert!(
             matches!(result, Err(LinalgError::InvalidArgument(_))),
             "巨大な出力形状は panic ではなく型付きエラーで拒否すべき: {result:?}"
+        );
+    }
+
+    /// `n * k_cols` の乗算自体は `usize` を超えないが、`f32` 換算の
+    /// バイト数が `Vec` の allocation 上限（`isize::MAX` バイト）を
+    /// 超えるため `vec![0.0; out_numel]` が確保不能な形状（PR #2268
+    /// codex-review〈P1〉指摘: `checked_mul` は要素数オーバーフローしか
+    /// 検出せず、この種の「要素数は溢れないが確保不能」なケースを
+    /// 見逃していた）。`checked_numel_for` がバイト数上限まで検査し、
+    /// panic ではなく型付きエラーで拒否することを確認する。
+    #[test]
+    fn lstsq_rejects_output_shape_exceeding_alloc_byte_limit_without_numel_overflow() {
+        // n * 4 バイト ≈ usize::MAX 未満（要素数乗算は overflow しない）
+        // だが isize::MAX バイトは上回る形状を選ぶ。
+        let n = (isize::MAX as usize) / 2;
+        let a = build_tensor(vec![], &[0, n]).unwrap();
+        let b = build_tensor(vec![], &[0, 1]).unwrap();
+        let result = lstsq(&a, &b, None);
+        assert!(
+            matches!(result, Err(LinalgError::InvalidArgument(_))),
+            "確保不能なバイト数の出力形状は panic ではなく型付きエラーで拒否すべき: {result:?}"
         );
     }
 }

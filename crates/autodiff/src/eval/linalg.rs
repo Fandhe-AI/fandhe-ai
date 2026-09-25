@@ -2032,11 +2032,82 @@ pub(crate) fn pinv(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, A
     Ok(pinv_mat_f64(a, rcond)?.to_tensor())
 }
 
+/// [`pinv_vjp`] 専用の低ランク SVD 分解: `P = A⁺ = V · diag(sinv) · Uᵀ`
+/// の各因子を有効ランク `rank`（`rcond` で打ち切り後。[`truncated_svd_rank`]）
+/// 列に絞って返す（`U: [m,rank]`・`sinv: 長さ rank`・`V: [n,rank]`。
+/// `V` は [`svd`] が返す `Vh: [k,n]`（`k = min(m,n)`）の転置を rank 列に
+/// 絞ったもの）。`pinv_vjp` がこの分解を経由して `AP`／`PA` を
+/// `rank`（`<= min(m,n)`）次元でのみ縮約し、`[m,m]`／`[n,n]` を一切
+/// 実体化しないために使う（下記 [`pinv_vjp`] のコメント参照）。
+fn pinv_svd_low_rank_f64(
+    a: &Tensor<f32>,
+    rcond: f64,
+) -> Result<(Mat, Vec<f64>, Mat), AutodiffError> {
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_full = Mat::from_tensor(&u);
+    let vh_full = Mat::from_tensor(&vh);
+    let m = u_full.rows;
+    let n = vh_full.cols;
+    let mut u_r = Mat::zeros(m, rank);
+    let mut v_r = Mat::zeros(n, rank);
+    let mut sinv = Vec::with_capacity(rank);
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        sinv.push(1.0 / sigma);
+        for row in 0..m {
+            u_r.set(row, i, u_full.get(row, i));
+        }
+        for row in 0..n {
+            v_r.set(row, i, vh_full.get(i, row));
+        }
+    }
+    Ok((u_r, sinv, v_r))
+}
+
+/// 対角行列 `diag(s)`（長さ `s.len() == m.rows`）を左から掛けた
+/// `diag(s) @ m` を、`[rank,rank]` の行列を陽に確保せず各行を
+/// スケールするだけで計算する（[`pinv_vjp`] の低ランク縮約専用）。
+fn scale_rows(m: &Mat, s: &[f64]) -> Mat {
+    debug_assert_eq!(m.rows, s.len());
+    let mut out = Mat::zeros(m.rows, m.cols);
+    for (r, &sr) in s.iter().enumerate() {
+        for c in 0..m.cols {
+            out.set(r, c, m.get(r, c) * sr);
+        }
+    }
+    out
+}
+
+/// [`scale_rows`] の列版（`m @ diag(s)`。`s.len() == m.cols`）。
+fn scale_cols(m: &Mat, s: &[f64]) -> Mat {
+    debug_assert_eq!(m.cols, s.len());
+    let mut out = Mat::zeros(m.rows, m.cols);
+    for r in 0..m.rows {
+        for (c, &sc) in s.iter().enumerate() {
+            out.set(r, c, m.get(r, c) * sc);
+        }
+    }
+    out
+}
+
 /// `Op::Pinv` の VJP（Golub–Pereyra の微分。PyTorch
 /// `pinv_backward` 相当。`docs/autodiff-linalg-ops-decision.md` §4
 /// 「pinv」）: `P = A⁺` を `a`／`rcond` から改めて計算し、
 /// `gA = -Pᵀ G Pᵀ + (I_m - A P) Gᵀ P Pᵀ + Pᵀ P Gᵀ (I_n - P A)`
 /// （`G` は `P` と同じ shape `[n,m]` の upstream cotangent）。
+///
+/// **低ランク SVD 経由の縮約（PR #2268 codex-review〈P1〉指摘の是正・
+/// 元スレッド `discussion_r4103061513` 含む）**: `P = A⁺` を `[n,m]` の
+/// 陽な行列として持ち、`A P`（`[m,m]`）・`P A`（`[n,n]`）を直接計算する
+/// 素朴な実装は、`A` が細長い（例 `[100000,1]`）場合に小さな入力の
+/// 逆伝播だけで数十 GB 規模の確保を試みる。数学的にはどの結合順序で
+/// 括っても `Pᵀ G Pᵀ` 等の中間項は `[m,m]` か `[n,n]` のいずれかに
+/// 潰れてしまう（結合則の変更だけでは回避できない）ため、`P` を
+/// `V · diag(sinv) · Uᵀ`（[`pinv_svd_low_rank_f64`]。`rank <= min(m,n)`）
+/// へ分解し、あらゆる縮約を常に `rank` 次元を経由して行う。これにより
+/// 生成される中間行列は `[m,rank]`・`[rank,n]`・`[rank,rank]`・最終出力
+/// `[m,n]` のみで、`[m,m]`／`[n,n]` を一度も実体化しない。
 pub(crate) fn pinv_vjp(
     a: &Tensor<f32>,
     rcond: Option<f32>,
@@ -2048,26 +2119,57 @@ pub(crate) fn pinv_vjp(
         return Ok(build_tensor(vec![0.0; m * n], &[m, n]));
     }
     let rcond = resolve_rcond(rcond, m, n)?;
+    let (u, sinv, v) = pinv_svd_low_rank_f64(a, rcond)?;
     let a_mat = Mat::from_tensor(a);
-    let p = pinv_mat_f64(a, rcond)?;
     let g_mat = Mat::from_tensor(g);
-    let pt = p.transpose();
+    let ut = u.transpose();
+    let vt = v.transpose();
     let gt = g_mat.transpose();
-    let ap = a_mat.matmul(&p);
-    let pa = p.matmul(&a_mat);
 
-    let term1 = pt.matmul(&g_mat).matmul(&pt);
+    // rank == 0（`A` が全零等）は下記の全ての縮約が空次元の行列積と
+    // なり自然に零行列へ帰着する（`Mat::matmul` は縮約次元 0 で
+    // `Mat::zeros` のまま返す）。
+    let av_r = a_mat.matmul(&v); // A V: [m,rank]
+    let au_r = ut.matmul(&a_mat); // Uᵀ A: [rank,n]
 
-    let im_minus_ap = mat_sub(&Mat::identity(m), &ap);
-    let term2 = im_minus_ap.matmul(&gt.matmul(&p).matmul(&pt));
+    // term1 = -Pᵀ G Pᵀ = -U · Sinv · (Vᵀ G U) · Sinv · Vᵀ
+    let vt_g = vt.matmul(&g_mat); // Vᵀ G: [rank,m]
+    let vt_g_u = vt_g.matmul(&u); // Vᵀ G U: [rank,rank]
+    let term1_mid = scale_rows(&scale_cols(&vt_g_u, &sinv), &sinv); // Sinv (Vᵀ G U) Sinv
+    let term1_raw = u.matmul(&term1_mid).matmul(&vt); // [m,n]
 
-    let in_minus_pa = mat_sub(&Mat::identity(n), &pa);
-    let term3 = pt.matmul(&p).matmul(&gt).matmul(&in_minus_pa);
+    // term2 = (I_m - A P) X2、X2 = Gᵀ P P᷆ᵀ = Gv · Sinv · (Uᵀ U) · Sinv · Vᵀ
+    // （Gv = Gᵀ V）。`(A P) X2` は `AP` を陽に作らず、分解済みの
+    // `A P = AV_r · Sinv · Uᵀ` を右（`Uᵀ X2`）から適用する。
+    let gv = gt.matmul(&v); // Gᵀ V: [m,rank]
+    let ut_u = ut.matmul(&u); // Uᵀ U: [rank,rank]
+    let x2_mid = scale_rows(&scale_cols(&ut_u, &sinv), &sinv); // Sinv (Uᵀ U) Sinv
+    let x2 = gv.matmul(&x2_mid).matmul(&vt); // [m,n]
+    let ut_x2 = ut.matmul(&x2); // Uᵀ X2: [rank,n]
+    let ut_x2_scaled = scale_rows(&ut_x2, &sinv); // Sinv (Uᵀ X2)
+    let ap_x2 = av_r.matmul(&ut_x2_scaled); // (A P) X2: [m,n]
+    let term2 = mat_sub(&x2, &ap_x2);
+
+    // term3 = X3 (I_n - P A)、X3 = Pᵀ P Gᵀ = U · Sinv · (Vᵀ V) · Sinv · (Uᵀ Gᵀ)。
+    // `X3 (P A)` は `PA` を陽に作らず、分解済みの `P A = V · Sinv · AU_r`
+    // を左（`X3 V`）から適用する。
+    let vt_v = vt.matmul(&v); // Vᵀ V: [rank,rank]
+    let x3_mid = scale_rows(&scale_cols(&vt_v, &sinv), &sinv); // Sinv (Vᵀ V) Sinv
+    let ut_gt = ut.matmul(&gt); // Uᵀ Gᵀ: [rank,n]
+    let x3 = u.matmul(&x3_mid.matmul(&ut_gt)); // [m,n]
+    let x3_v = x3.matmul(&v); // X3 V: [m,rank]
+    let x3_v_scaled = scale_cols(&x3_v, &sinv); // (X3 V) Sinv
+    let x3_pa = x3_v_scaled.matmul(&au_r); // X3 (P A): [m,n]
+    let term3 = mat_sub(&x3, &x3_pa);
 
     let mut ga = Mat::zeros(m, n);
     for r in 0..m {
         for c in 0..n {
-            ga.set(r, c, -term1.get(r, c) + term2.get(r, c) + term3.get(r, c));
+            ga.set(
+                r,
+                c,
+                -term1_raw.get(r, c) + term2.get(r, c) + term3.get(r, c),
+            );
         }
     }
     Ok(ga.to_tensor())
@@ -2482,6 +2584,32 @@ mod tests {
                 a_data[i]
             );
         }
+    }
+
+    /// PR #2268 codex-review〈P1〉指摘の回帰: `pinv_vjp` は以前 `A P`
+    /// （`[m,m]`）・`P A`（`[n,n]`）を陽な行列として構築しており、
+    /// `A: [100000,1]` のような縦長入力（データ自体は約 400 KB）でも
+    /// `A P`・`I_m` だけで数十 GB 規模の確保を試みてメモリ枯渇を
+    /// 招いた。低ランク SVD 分解経由（[`pinv_svd_low_rank_f64`]）へ
+    /// 是正済みで、この形状でも数秒以内に完了し、出力が全要素有限で
+    /// あることを確認する。
+    #[test]
+    fn pinv_vjp_tall_matrix_does_not_allocate_full_m_by_m_intermediate() {
+        let m = 100_000usize;
+        let n = 1usize;
+        let a_data: Vec<f32> = (0..m).map(|i| 1.0 + (i % 7) as f32).collect();
+        let a = build_tensor(a_data, &[m, n]);
+        // `G` は `P = A⁺` と同じ shape `[n,m]`。
+        let g_data: Vec<f32> = (0..m).map(|i| ((i % 5) as f32) * 0.1).collect();
+        let g = build_tensor(g_data, &[n, m]);
+
+        let ga = pinv_vjp(&a, None, &g).unwrap();
+        assert_eq!(ga.shape(), &[m, n]);
+        let ga_data = dense_vec(&ga);
+        assert!(
+            ga_data.iter().all(|v| v.is_finite()),
+            "低ランク経由の pinv_vjp が非有限値を返した"
+        );
     }
 
     #[test]
