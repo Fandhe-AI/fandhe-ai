@@ -431,4 +431,82 @@ mod tests {
         let out = d.forward_host(&ops, &input).unwrap();
         assert_eq!(out.as_slice().unwrap(), input.as_slice().unwrap());
     }
+
+    fn tape() -> Tape {
+        Tape::new_with_ops(crate::test_support::test_ops())
+    }
+
+    /// codex P1 指摘（PR #2281）: `AlphaDropout` の `p == 1.0` 全ドロップ
+    /// 特例（`forward`。モジュール doc「`p == 1.0` の特例」節）は、
+    /// マスクが全ゼロであっても入力に `NaN`／`±inf` が含まれると
+    /// `x * 0.0 == NaN` で出力が汚染されていた。`dropout_with_fallback`
+    /// の是正（`crate::grad::dropout_with_fallback` doc「ドロップ位置の
+    /// ゼロ出力契約」節）後は入力値に依存せず常に `0.0` を返すこと。
+    #[test]
+    fn alpha_dropout_p_one_forward_is_zero_even_with_non_finite_input() {
+        let t = tape();
+        let d = AlphaDropout::new(1.0).unwrap();
+        let input = Tensor::new(
+            vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0],
+            &[2, 2],
+        )
+        .unwrap();
+        let x = t.var_no_grad(&input);
+        let y = d.forward(&x).unwrap();
+        assert_eq!(y.to_tensor().as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// 上記 tape 経路と同一の入力・契約を `forward_host`（tape 不要
+    /// 経路）でも検証する（[`Dropout::forward_host`] doc「train／eval
+    /// と `predict`／`forward_host` の整合」節が要求する bit-exactness
+    /// の前提として、両経路が同じ [`crate::grad::dropout_with_fallback`]
+    /// を経由することを担保する）。
+    #[test]
+    fn alpha_dropout_p_one_forward_host_is_zero_even_with_non_finite_input() {
+        let d = AlphaDropout::new(1.0).unwrap();
+        let ops = crate::default_ops::NaiveOps;
+        let input = Tensor::new(
+            vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0],
+            &[2, 2],
+        )
+        .unwrap();
+        let out = d.forward_host(&ops, &input).unwrap();
+        assert_eq!(out.as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// codex P1 指摘（PR #2281）: `Dropout2d`（p==1.0 特例を持たない
+    /// 通常経路。モジュール doc「マスク生成と `Op::Dropout` の再利用」
+    /// 節）でも、抽選結果としてチャネルが全てドロップされた場合
+    /// （`p = 1.0` はチャネル全ドロップを決定的に発生させる）、入力に
+    /// `NaN`／`±inf` が含まれると出力が汚染されていた。同じ
+    /// `dropout_with_fallback` 経由のため是正後は常に `0.0` を返す。
+    #[test]
+    fn dropout2d_all_channels_dropped_forward_is_zero_even_with_non_finite_input() {
+        let t = tape();
+        let d = Dropout2d::new(1.0).unwrap();
+        // rank 4 [N=1, C=2, H=1, W=2]。チャネル 0 に NaN・チャネル 1 に
+        // ±inf を含める。
+        let input = Tensor::new(
+            vec![f32::NAN, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            &[1, 2, 1, 2],
+        )
+        .unwrap();
+        let x = t.var_no_grad(&input);
+        let y = d.forward(&x).unwrap();
+        assert_eq!(y.to_tensor().as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// 上記 tape 経路と同一の入力・契約を `forward_host` でも検証する。
+    #[test]
+    fn dropout2d_all_channels_dropped_forward_host_is_zero_even_with_non_finite_input() {
+        let d = Dropout2d::new(1.0).unwrap();
+        let ops = crate::default_ops::NaiveOps;
+        let input = Tensor::new(
+            vec![f32::NAN, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            &[1, 2, 1, 2],
+        )
+        .unwrap();
+        let out = d.forward_host(&ops, &input).unwrap();
+        assert_eq!(out.as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
 }

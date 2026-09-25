@@ -2874,12 +2874,32 @@ pub(crate) fn dropout_mask(shape: &[usize], p: f32) -> Result<Tensor<f32>, Autod
 /// （CPU／CUDA／Metal）で bit 同一の dropout forward が構造的に
 /// 成立する（`docs/compat-api-scope.md` の Embedding／SDPA／einsum と
 /// 同じ「既存演算への合成のみで `BackendOps` 非拡張」方針）。
+///
+/// # ドロップ位置のゼロ出力契約（PR #2281 codex-review 是正。イシュー
+/// #2161）
+///
+/// `mask` が `0.0` の位置は「ドロップされ、入力値に依存せず出力が
+/// `0.0` になる」という dropout の意味論上の契約を持つ。しかし単純な
+/// IEEE 乗算 `x * 0.0` は `x` が `NaN`／`±inf` のとき結果も `NaN` に
+/// なり契約を破る（[`crate::nn::dropout::AlphaDropout`] の `p == 1.0`
+/// 全ドロップ特例・[`crate::nn::dropout::Dropout2d`] の通常経路の
+/// いずれも、抽選結果としてチャネル全体が `mask == 0.0` になりうる。
+/// codex-review 指摘・PR #2281）。このため `ops.mul`／`eval::mul` の
+/// 乗算結果に対し [`zero_out_where_mask_is_zero`] を適用し、`mask ==
+/// 0.0` の位置を無条件で `0.0` へ上書きしてから返す。`mask != 0.0`
+/// の位置（keep 位置。`crate::grad::dropout_mask` 系が生成する
+/// スケール値は常に非ゼロの有限値）は乗算結果をそのまま使うため、
+/// 通常の dropout（部分的に keep する位置）の数値は変化しない。
+/// backward（`vjp()` 内 `Op::Dropout` 分岐 → [`vjp_elementwise_mul`]）
+/// は本関数を経由せず `upstream * mask` のまま変更しない——ドロップ
+/// 位置の勾配は `mask == 0.0` により構造的に `0.0` となるため
+/// （`upstream` が非有限の場合の扱いは本イシューのスコープ外）。
 pub(crate) fn dropout_with_fallback(
     ops: &dyn BackendOps,
     x: &Tensor<f32>,
     mask: &Tensor<f32>,
 ) -> Result<Tensor<f32>, AutodiffError> {
-    match ops.mul(x, mask) {
+    let v = match ops.mul(x, mask) {
         Ok(v) => {
             if v.shape() != x.shape() {
                 return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
@@ -2889,11 +2909,37 @@ pub(crate) fn dropout_with_fallback(
                     },
                 )));
             }
-            Ok(v)
+            v
         }
-        Err(BackendError::Unsupported(_)) => Ok(eval::mul(x, mask)),
-        Err(other) => Err(AutodiffError::Backend(other)),
-    }
+        Err(BackendError::Unsupported(_)) => eval::mul(x, mask),
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    };
+    Ok(zero_out_where_mask_is_zero(&v, mask))
+}
+
+/// [`dropout_with_fallback`] の doc「ドロップ位置のゼロ出力契約」節
+/// 参照。`mask`（`v` と同 shape。呼び出し元が事前に検査済み）が
+/// `0.0` の位置を無条件で `0.0` へ上書きしたホスト側の新規テンソルを
+/// 返す（`v`／`mask` を `contiguous()` してから走査する。非 contiguous
+/// な view でも `as_slice()` が `None` を返さないようにするため）。
+fn zero_out_where_mask_is_zero(v: &Tensor<f32>, mask: &Tensor<f32>) -> Tensor<f32> {
+    let shape = v.shape().to_vec();
+    let v_c = v.contiguous();
+    let mask_c = mask.contiguous();
+    let data: Vec<f32> = match (v_c.as_slice(), mask_c.as_slice()) {
+        (Some(v_data), Some(mask_data)) => v_data
+            .iter()
+            .zip(mask_data.iter())
+            .map(|(&val, &m)| if m == 0.0 { 0.0 } else { val })
+            .collect(),
+        // `contiguous()` 直後の `as_slice()` は内部不変条件上つねに
+        // `Some` を返すはずだが（`build_tensor` doc 参照）、契約違反を
+        // panic ではなく安全側（ゼロ埋め）へ吸収する
+        // （`build_tensor` 自身の `unwrap_or_else` フォールバックと
+        // 同じ方針）。
+        _ => vec![0.0; shape.iter().product()],
+    };
+    build_tensor(data, &shape)
 }
 
 /// [`crate::nn::dropout::Dropout2d`] の forward が使うチャネル単位
