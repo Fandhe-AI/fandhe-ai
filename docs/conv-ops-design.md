@@ -587,7 +587,7 @@ d_input スキップは `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
 issue で追跡。本 doc では起票しない）
 
 直接畳み込み／implicit GEMM／Winograd／FFT カーネル・depthwise
-（`groups = Cin`）専用カーネル・conv3d・ConvTranspose1d（col2im 再利用
+（`groups = Cin`）専用カーネル・ConvTranspose1d（col2im 再利用
 前提。`ConvTranspose2d` は #2067 で実装済み・§15 参照）・
 channels_last・`padding_mode ≠ zeros`・`padding='same'`／`'valid'`
 文字列・GPU backward 専用カーネル（d_bias の GPU 縮約含む）・デバイス
@@ -1345,3 +1345,109 @@ Conv2d 基盤（`im2col`／`col2im`／`gemm_batched`）の流用で実装した
   `#[ignore]` parity テストは本環境（実機非到達）では未実行のまま
   出荷し、`docs/perf/logs/conv-transpose2d-2067/README.md` へ実行
   コマンドを申し送る。
+
+## 16. #2158（Conv3d。im2col の空間 3 軸一般化）
+
+`Var::conv2d`（§5〜§8）・`Var::conv_transpose2d`（§15）と同じ段階的
+合成方針を空間 3 軸（D・H・W）へ一般化した。CPU 参照実装を先行させ、
+CUDA／Metal は既定 `Unsupported`（override なし）のままホスト
+フォールバック経路で到達可能にする（本節の対象範囲）。
+
+### 16.1 型・shape 関数
+
+- `Conv3dParams`（`tensor-core/src/backend_ops.rs`）: `kernel_size`／
+  `stride`／`padding`／`dilation` を `[usize; 3]`・`groups: usize` で
+  保持する **新規型**。検査規則は `Conv2dParams::new` と同一
+  （0 拒否・`2·padding` の `checked_mul` オーバーフロー検査）。
+- **`Conv2dParams` は const generic 化・型エイリアス化しない**（却下
+  案）。crates.io 公開済み型（`fandhe-ai-tensor-core`）の同一性を保つ
+  ためで、`Conv3dParams` は完全に独立した兄弟型として追加した。
+- `conv3d_out_shape`／`im2col3d_out_shape`（`ops_shape.rs`）:
+  `conv2d_out_shape`／`im2col_out_shape` と同じ検査順序を空間 3 軸へ
+  拡張。
+
+### 16.2 `BackendOps` の拡張
+
+`im2col3d`／`col2im3d`／`conv3d` の 3 メソッドを既定 `Unsupported`
+（override 用フック）で追加した（`im2col`／`col2im`／`conv2d` と同型。
+#2147 で `logsumexp`／`p_norm` を既定 `Unsupported` で追加した前例と
+同じ扱い）。CPU は `im2col3d`／`col2im3d` のみ override し、`conv3d`
+自身は override しない（Conv2d と同じ合成経路を通る）。CUDA／Metal は
+一切変更していない。
+
+### 16.3 autodiff 側の合成・数値契約
+
+- `eval::im2col3d`／`col2im3d`（ホスト参照実装）・`grad::
+  im2col3d_with_fallback`／`col2im3d_with_fallback`／
+  `conv3d_with_fallback`（forward の段階的合成: `ops.conv3d` →
+  im2col3d → `gemm_batched`〈常にバックエンド〉→ `add`〈bias〉）・
+  `Op::Conv3d`（`tape.rs`。checkpoint 対象外・create_graph 対象外・
+  低精度非対応のため `compute_dtype` フィールドを持たない）・VJP
+  （`grad.rs`。`Op::Conv2d` VJP と同型の d_input／d_weight／d_bias）。
+- 数値契約は `Op::Conv2d` と同一: `im2col3d` は bit 完全一致（純粋な
+  コピー演算）、`col2im3d`・d_bias の行方向縮約は `f64` アキュムレータ
+  への逐次加算（`.claude/rules/coding-rust.md` の勾配の長軸縮約規約）、
+  GEMM は forward が `gemm_batched`・VJP が `gemm_batched_fp32_strict`。
+- 入口は自由関数 `fandhe_ai_autodiff::conv3d_ops::conv3d`（`Var` の
+  外。§16.5 参照）。検査順序は `Var::conv2d` と同一。
+
+### 16.4 `nn` 層
+
+`nn::Conv3d`／`Conv3dVars`（`nn/conv.rs`）・`Module::as_conv3d`／
+`_mut` フック（`nn/module.rs`）を `Conv2d`／`Conv2dVars` と同型で
+追加した。`Conv3dVars::forward` は `Var::conv2d` の代わりに
+`conv3d_ops::conv3d`（自由関数）へ委譲する点のみが異なる。
+
+### 16.5 承認事項（facade 公開・未実装のまま保留）
+
+- **`Var::conv3d`（委譲メソッド）・`compat::Sequential::add_conv3d`
+  （facade 公開）は未承認のため本 PR では実装しない**。窓口はイシュー
+  #2158／親 #2131。
+- `Var` は facade（`fandhe_ai` クレート）から直接再エクスポートされる
+  ため、`Var::conv3d` を inherent メソッドとして追加するとそれだけで
+  facade 公開面が広がる（#2144／#2146／#2147 と同じ判断枠組み）。承認
+  が取れるまでは自由関数 `conv3d_ops::conv3d` として `Var` の外に置き
+  到達不能にする。
+- 保留は `crates/facade/src/lib.rs::VarConv3dHoldDoctestGuard`（正の
+  プローブ 1 ブロック方式。自由関数・`conv3d` メソッド・
+  `compat::Sequential::add_conv3d` の 3 種の衝突プローブ）と
+  `crates/facade/tests/api_surface.rs` の 4 テスト（`conv3d_hold_
+  doctest_globs_all_pub_modules`・`conv3d_hold_doctest_probe_body_
+  matches_fixed_contract`・`facade_does_not_reexport_or_declare_
+  conv3d`・`workspace_declares_conv3d_fn_names_only_in_allowed_
+  locations`）で機械的に固定する。承認後はガードを外し、`Var::conv3d`
+  の委譲メソッドと `add_conv3d` を追加する。
+- `compat::Sequential` に任意の `Box<dyn Module>` を積む公開経路は
+  無い（`from_boxed_layers` は `#[cfg(test)]` 限定）ため、
+  `trainable_parameters`／`bind` 等が `Conv3d` を認識しない問題には
+  facade から到達できない。追加の fail-closed ガードは不要と判断した
+  （承認後 `add_conv3d` を実装する際に併せて解消する）。
+
+### 16.6 テスト・実測
+
+- `crates/autodiff/tests/conv3d.rs`: forward の shape・`direct_
+  conv3d_f64`（独立 f64 直接畳み込みオラクル）との REQ-2 複合判定・
+  数値微分（中央差分）との突合・拒否系・kD=1 が reshape 経由の Conv2d
+  と bit 一致・bias broadcast の軸回帰。
+- `crates/autodiff/tests/nn_conv3d.rs`: `Conv3d`／`Conv3dVars` の構築
+  検査・決定性・`forward`／`forward_host` bit 一致・`named_parameters`／
+  `set_parameter`／`as_conv3d`。
+- `crates/autodiff/src/tape.rs::conv3d_op_tests`: `Op::Conv3d` の
+  checkpoint 対象外・create_graph 対象外・`for_each_input` 列挙。
+- `crates/facade/tests/conv3d_backend_parity.rs`: CPU（`CpuBackendOps`
+  の `im2col3d`／`col2im3d` override）と NaiveOps（ホスト `eval`
+  フォールバック）の forward／backward bit 一致・kD=1 の Conv2d 一致・
+  CUDA／Metal の `#[ignore]` テスト。
+- **実機未実測**: CUDA（DGX Spark GB10）・Metal（Apple Silicon）の
+  `#[ignore]` parity テストは本環境（実機非到達）では未実行のまま
+  出荷し、`docs/perf/logs/conv3d-2158/README.md` へ実行コマンドを
+  申し送る。
+
+### 16.7 スコープ外（本 issue では対応しない）
+
+CUDA／Metal 専用の `im2col3d`／`col2im3d`／直接畳み込みカーネル・
+groups 機構の拡張（既存 `[N, G, K_g, P]` レイアウトをそのまま 3D へ
+当てはめるのみ）・ConvTranspose3d・`padding='same'`／`padding_mode ≠
+zeros`・unbatched（rank 4）入力・channels_last（NDHWC）・低精度
+（f16／bf16）の conv3d・デバイス常駐経路・ONNX `Conv`（3D）の
+import／export。

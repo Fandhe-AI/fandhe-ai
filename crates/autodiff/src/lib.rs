@@ -234,6 +234,7 @@ mod attention;
 mod backward;
 pub mod bool_ops;
 pub mod compat;
+pub mod conv3d_ops;
 mod create_graph;
 mod custom;
 mod default_ops;

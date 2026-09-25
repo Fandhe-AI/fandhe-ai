@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, Device,
+    Activation, BackendError, BackendOps, CastElement, Conv2dParams, Conv3dParams, DType, Device,
     DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, Pool2dParams,
     ScalarBinaryOp, ScalarDType, ScalarUnaryOp, ScatterReduce, Tensor, TypedOps, bf16, f16,
 };
@@ -1056,6 +1056,25 @@ pub(crate) enum Op {
         bias: Option<NodeId>,
         params: Conv2dParams,
     },
+    /// `conv3d_ops::conv3d`（im2col3d＋GEMM の空間 3 軸一般化。イシュー
+    /// #2158・設計 `docs/conv-ops-design.md` §16）。`y = conv3d(input,
+    /// weight, bias, params)`（cross-correlation。NCDHW 固定）。`bias`
+    /// は `None` を許容する。
+    ///
+    /// **常に実体化済み**（`push_eager`）: `Op::Conv2d` と同じ理由
+    /// （非 elementwise・GEMM を含む段階的合成のため融合対象外）。
+    /// `col`（im2col3d の中間結果）は保持しない——backward で
+    /// `im2col3d` を再計算する（`Op::Conv2d` と同型）。
+    ///
+    /// `compute_dtype` を持たない——低精度 conv3d はスコープ外
+    /// （設計 doc §16「スコープ外」）のため `Op::Conv2d` と異なり常に
+    /// f32 forward／backward。
+    Conv3d {
+        input: NodeId,
+        weight: NodeId,
+        bias: Option<NodeId>,
+        params: Conv3dParams,
+    },
     /// `Var::one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot`
     /// 相当。**非微分演算**。イシュー #1755）。`input` は整数クラス id
     /// を f32 値として保持する追跡 `Var`（`Op::Gather`／`Sort`／`Topk`
@@ -1559,6 +1578,10 @@ impl Op {
             // 保持しない設計〈backward 再計算〉のため checkpoint 解放
             // との組合せは対象外のまま）。
             Op::ConvTranspose2d { .. } => false,
+            // `Op::Conv3d`（イシュー #2158）は `Op::Conv2d` と同じく
+            // eager 実体化演算だが `recompute_value` に再計算経路を
+            // 持たないため非適格（同一の最小・安全側の判断）。
+            Op::Conv3d { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -1680,6 +1703,12 @@ impl Op {
                 ..
             }
             | Op::ConvTranspose2d {
+                input,
+                weight,
+                bias,
+                ..
+            }
+            | Op::Conv3d {
                 input,
                 weight,
                 bias,
@@ -1951,6 +1980,7 @@ impl Op {
             | Op::Pad { .. }
             | Op::Conv2d { .. }
             | Op::ConvTranspose2d { .. }
+            | Op::Conv3d { .. }
             | Op::OneHot { .. }
             | Op::MaxPool2d { .. }
             | Op::AvgPool2d { .. }
@@ -4329,6 +4359,68 @@ mod custom_op_tests {
         let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
         let result = tape.custom(Arc::new(NoopFn), &[]);
         assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    }
+}
+
+/// `Op::Conv3d`（イシュー #2158）のメタ性質固定: checkpoint 対象外・
+/// create_graph replay 対象外・`for_each_input` が `[input, weight,
+/// bias]` を正確に列挙する（`Op::Conv2d`／`ConvTranspose2d` と同じ
+/// 最小・安全側の判断。`docs/conv-ops-design.md` §16「実装ステップ 3」
+/// 参照）。
+#[cfg(test)]
+mod conv3d_op_tests {
+    use super::*;
+
+    fn make_params() -> Conv3dParams {
+        Conv3dParams::new([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1).unwrap()
+    }
+
+    #[test]
+    fn conv3d_op_is_not_checkpoint_eligible() {
+        let op = Op::Conv3d {
+            input: NodeId(0),
+            weight: NodeId(1),
+            bias: None,
+            params: make_params(),
+        };
+        assert!(!op.is_checkpoint_eligible());
+    }
+
+    #[test]
+    fn conv3d_op_does_not_support_create_graph() {
+        let op = Op::Conv3d {
+            input: NodeId(0),
+            weight: NodeId(1),
+            bias: Some(NodeId(2)),
+            params: make_params(),
+        };
+        assert!(!op.supports_create_graph());
+    }
+
+    #[test]
+    fn conv3d_op_for_each_input_yields_input_weight_bias_in_order() {
+        let op = Op::Conv3d {
+            input: NodeId(3),
+            weight: NodeId(5),
+            bias: Some(NodeId(7)),
+            params: make_params(),
+        };
+        let mut seen = Vec::new();
+        op.for_each_input(|id| seen.push(id.0));
+        assert_eq!(seen, vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn conv3d_op_for_each_input_omits_bias_when_none() {
+        let op = Op::Conv3d {
+            input: NodeId(3),
+            weight: NodeId(5),
+            bias: None,
+            params: make_params(),
+        };
+        let mut seen = Vec::new();
+        op.for_each_input(|id| seen.push(id.0));
+        assert_eq!(seen, vec![3, 5]);
     }
 }
 

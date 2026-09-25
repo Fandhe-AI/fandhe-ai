@@ -255,6 +255,98 @@ impl Conv2dParams {
     }
 }
 
+/// Conv3d（`BackendOps::im2col3d`／`col2im3d`／`conv3d`）のパラメータ
+/// 記述子（イシュー #2158・設計 `docs/conv-ops-design.md` §16）。
+///
+/// `Conv2dParams` の空間 2 軸〈H, W〉を 3 軸〈D, H, W〉へ一般化した
+/// 兄弟型であり、`Conv2dParams` 自体は crates.io 公開済み型の同一性を
+/// 保つため const generic 化・型エイリアス化しない（設計 doc §16「却下
+/// した案」）。検査規則（0 拒否・`2*padding` の `checked_mul` 検査）は
+/// `Conv2dParams::new` と同一。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conv3dParams {
+    kernel_size: [usize; 3],
+    stride: [usize; 3],
+    padding: [usize; 3],
+    dilation: [usize; 3],
+    groups: usize,
+}
+
+impl Conv3dParams {
+    /// `kernel_size`／`stride`／`dilation`／`groups` の 0 を
+    /// [`BackendError::InvalidArgument`] で拒否する（`Conv2dParams::new`
+    /// と同方針）。`2 * padding`（各軸独立）の `usize` オーバーフローも
+    /// `checked_mul` で拒否する。
+    pub fn new(
+        kernel_size: [usize; 3],
+        stride: [usize; 3],
+        padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+    ) -> Result<Self, BackendError> {
+        if kernel_size.contains(&0) {
+            return Err(BackendError::InvalidArgument(
+                "Conv3dParams::new: kernel_size の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        if stride.contains(&0) {
+            return Err(BackendError::InvalidArgument(
+                "Conv3dParams::new: stride の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        if dilation.contains(&0) {
+            return Err(BackendError::InvalidArgument(
+                "Conv3dParams::new: dilation の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        if groups == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Conv3dParams::new: groups は 1 以上である必要がある".into(),
+            ));
+        }
+        for &p in &padding {
+            p.checked_mul(2).ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "Conv3dParams::new: 2 * padding が usize の範囲でオーバーフローする".into(),
+                )
+            })?;
+        }
+        Ok(Self {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+        })
+    }
+
+    /// カーネル空間サイズ `[kD, kH, kW]`。
+    pub fn kernel_size(&self) -> [usize; 3] {
+        self.kernel_size
+    }
+
+    /// ストライド `[sD, sH, sW]`。
+    pub fn stride(&self) -> [usize; 3] {
+        self.stride
+    }
+
+    /// パディング `[pD, pH, pW]`（各軸の前後同一幅）。
+    pub fn padding(&self) -> [usize; 3] {
+        self.padding
+    }
+
+    /// dilation `[dD, dH, dW]`。
+    pub fn dilation(&self) -> [usize; 3] {
+        self.dilation
+    }
+
+    /// グループ数。
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+}
+
 /// Pooling（`BackendOps::max_pool2d`／`avg_pool2d`／
 /// `adaptive_avg_pool2d`）のパラメータ記述子（イシュー #1728・設計
 /// `docs/pooling-ops-design.md` §3）。
@@ -2384,6 +2476,87 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "conv2d: default fail-safe (no fused conv2d kernel available)".into(),
+        ))
+    }
+
+    /// Conv3d の im2col（[`Self::im2col`] の空間 3 軸一般化。イシュー
+    /// #2158・設計 `docs/conv-ops-design.md` §16）。
+    ///
+    /// `input: [N, Cin, D, H, W]` を `[N, G, Cin_g·kD·kH·kW,
+    /// Dout·Hout·Wout]`（`K_g` 軸は `(c_in_g, kd, kh, kw)` の
+    /// row-major・`P` 軸は `(od, oh, ow)` の row-major）へ展開する。
+    /// 出力 shape は [`crate::ops_shape::im2col3d_out_shape`] が定める。
+    ///
+    /// 数値契約: [`Self::im2col`] と同じ純粋なコピー演算のため **bit
+    /// 完全一致**。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::im2col`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、
+    /// `fandhe_ai_autodiff::grad::im2col3d_with_fallback` は `Unsupported`
+    /// のときのみホスト参照実装（`fandhe_ai_autodiff::eval::im2col3d`）へ
+    /// フォールバックする。実装側でも `input.shape()` と `params` を
+    /// [`crate::ops_shape::im2col3d_out_shape`] で再検査し、不一致は
+    /// [`BackendError::ShapeMismatch`] を返すこと（fail-closed）。
+    fn im2col3d(
+        &self,
+        _input: &Tensor<f32>,
+        _params: &Conv3dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "im2col3d: default fail-safe (no fused im2col3d kernel available)".into(),
+        ))
+    }
+
+    /// Conv3d の col2im（[`Self::im2col3d`] の随伴。イシュー #2158・
+    /// 設計 `docs/conv-ops-design.md` §16）。
+    ///
+    /// `d_col: [N, G, Cin_g·kD·kH·kW, Dout·Hout·Wout]` を
+    /// `input_shape: [N, Cin, D, H, W]` へ畳み戻す。重なり窓は
+    /// [`Self::col2im`] と同じく `(kd, kh, kw)` row-major で **`f64`
+    /// アキュムレータへ逐次加算・最後に 1 回 `f32` へ downcast**する
+    /// （`.claude/rules/coding-rust.md` の勾配の長軸縮約規約）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::col2im`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、
+    /// `fandhe_ai_autodiff::grad::col2im3d_with_fallback` は `Unsupported`
+    /// のときのみホスト参照実装（`fandhe_ai_autodiff::eval::col2im3d`）へ
+    /// フォールバックする。実装側でも `d_col.shape()`／`input_shape`／
+    /// `params` を再検査し、不一致は [`BackendError::ShapeMismatch`]
+    /// を返すこと（fail-closed）。
+    fn col2im3d(
+        &self,
+        _d_col: &Tensor<f32>,
+        _input_shape: &[usize],
+        _params: &Conv3dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "col2im3d: default fail-safe (no fused col2im3d kernel available)".into(),
+        ))
+    }
+
+    /// Conv3d の直接融合カーネル入口（`torch.nn.functional.conv3d`
+    /// 相当。イシュー #2158・設計 `docs/conv-ops-design.md` §16）。
+    ///
+    /// **既定 `Unsupported` の純粋な override フック**
+    /// （[`Self::conv2d`] と同じ fail-safe 型）。v1 では 3 バックエンド
+    /// とも override せず、`fandhe_ai_autodiff::grad::conv3d_with_fallback`
+    /// （`ops.conv3d` → `Unsupported` のときのみ [`Self::im2col3d`] →
+    /// [`Self::gemm_batched`] → `ops.add`〈bias〉の段階的合成）を経由
+    /// する。将来 GPU が direct／fused カーネルで override する場合は
+    /// CPU 参照実装に対し REQ-2 複合判定を満たすこと。
+    fn conv3d(
+        &self,
+        _input: &Tensor<f32>,
+        _weight: &Tensor<f32>,
+        _bias: Option<&Tensor<f32>>,
+        _params: &Conv3dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "conv3d: default fail-safe (no fused conv3d kernel available)".into(),
         ))
     }
 
@@ -4622,6 +4795,29 @@ mod tests {
         let leaves: Vec<&Tensor<f32>> = vec![&leaf];
         let result = ops.run_fused(&plan, &leaves);
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    #[test]
+    fn conv3d_ops_default_return_unsupported() {
+        // イシュー #2158: `im2col3d`／`col2im3d`／`conv3d` はいずれも
+        // `im2col`／`col2im`／`conv2d` と同じ fail-safe 型（既定
+        // `Unsupported`）。`MockOps` は override しないため 3 メソッド
+        // すべてが `Unsupported` を返すことを固定する。
+        let ops = MockOps(Device::Cpu);
+        let p = Conv3dParams::new([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1).unwrap();
+        let x: Tensor<f32> = Tensor::zeros(&[1, 1, 1, 1, 1]).unwrap();
+        assert!(matches!(
+            ops.im2col3d(&x, &p),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.col2im3d(&x, &[1, 1, 1, 1, 1], &p),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.conv3d(&x, &x, None, &p),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     /// テスト専用の最小 `BufferHandle`（イシュー #1017・

@@ -2287,6 +2287,158 @@ pub(crate) fn col2im(
     build_tensor(out, input_shape)
 }
 
+/// Conv3d の im2col ホスト参照実装（`BackendOps::im2col3d` が
+/// `Unsupported` を返したときのみ `grad::im2col3d_with_fallback` から
+/// 呼ばれる。イシュー #2158）。[`im2col`] の空間 3 軸一般化。
+///
+/// `backend-cpu::im2col::im2col3d` と数式・走査順が完全に同一の
+/// ホスト側複製。`out_shape` は呼び出し元が
+/// [`fandhe_ai_tensor_core::im2col3d_out_shape`] で検査・確定済みの
+/// `[N, G, Cin_g·kD·kH·kW, Dout·Hout·Wout]` をそのまま渡す。
+pub(crate) fn im2col3d(
+    input: &Tensor<f32>,
+    params: &fandhe_ai_tensor_core::Conv3dParams,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let (d_in, h_in, w_in) = (in_shape[2], in_shape[3], in_shape[4]);
+    let n_batch = out_shape[0];
+    let groups = out_shape[1];
+    let k_g = out_shape[2];
+    let p = out_shape[3];
+    let cin_g = in_shape[1] / groups.max(1);
+    let [kd_k, kh_k, kw_k] = params.kernel_size();
+    let [sd, sh, sw] = params.stride();
+    let [pd, ph, pw] = params.padding();
+    let [dd, dh, dw] = params.dilation();
+    let d_out = conv2d_dim_out_len(d_in, kd_k, sd, pd, dd);
+    let h_out = conv2d_dim_out_len(h_in, kh_k, sh, ph, dh);
+    let w_out = conv2d_dim_out_len(w_in, kw_k, sw, pw, dw);
+    debug_assert_eq!(
+        d_out.checked_mul(h_out).and_then(|v| v.checked_mul(w_out)),
+        Some(p),
+        "eval::im2col3d: out_shape の P 軸が conv2d_dim_out_len から再計算した Dout*Hout*Wout と一致しない（契約違反）"
+    );
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for g in 0..groups {
+            for k_idx in 0..k_g {
+                let kw_ = k_idx % kw_k;
+                let rest = k_idx / kw_k;
+                let kh_ = rest % kh_k;
+                let rest = rest / kh_k;
+                let kd_ = rest % kd_k;
+                let c_g = rest / kd_k;
+                let c = g * cin_g + c_g;
+                for p_idx in 0..p {
+                    let ow = p_idx % w_out;
+                    let rest_p = p_idx / w_out;
+                    let oh = rest_p % h_out;
+                    let od = rest_p / h_out;
+                    let d_pos = conv2d_window_input_pos(od, sd, kd_, dd, pd);
+                    let h_pos = conv2d_window_input_pos(oh, sh, kh_, dh, ph);
+                    let w_pos = conv2d_window_input_pos(ow, sw, kw_, dw, pw);
+                    let value = match (d_pos, h_pos, w_pos) {
+                        (Some(d), Some(h), Some(w)) if d < d_in && h < h_in && w < w_in => {
+                            input.get(&[n, c, d, h, w]).unwrap_or(0.0)
+                        }
+                        _ => 0.0,
+                    };
+                    let out_idx = ((n * groups + g) * k_g + k_idx) * p + p_idx;
+                    out[out_idx] = value;
+                }
+            }
+        }
+    }
+    build_tensor(out, out_shape)
+}
+
+/// Conv3d の col2im ホスト参照実装（`BackendOps::col2im3d` が
+/// `Unsupported` を返したときのみ `grad::col2im3d_with_fallback` から
+/// 呼ばれる。[`im2col3d`] の随伴。イシュー #2158）。
+///
+/// `backend-cpu::im2col::col2im3d` と数式・走査順・`f64` アキュムレータ
+/// 契約が完全に同一のホスト側複製。
+pub(crate) fn col2im3d(
+    d_col: &Tensor<f32>,
+    input_shape: &[usize],
+    params: &fandhe_ai_tensor_core::Conv3dParams,
+) -> Tensor<f32> {
+    let out_numel: usize = input_shape.iter().product();
+    if out_numel == 0 {
+        return build_tensor(Vec::new(), input_shape);
+    }
+    let (n_batch, cin, d_in, h_in, w_in) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+        input_shape[4],
+    );
+    let d_col_shape = d_col.shape();
+    let groups = d_col_shape[1];
+    let p = d_col_shape[3];
+    let cin_g = cin / groups.max(1);
+    let [kd_k, kh_k, kw_k] = params.kernel_size();
+    let [sd, sh, sw] = params.stride();
+    let [pd, ph, pw] = params.padding();
+    let [dd, dh, dw] = params.dilation();
+    let d_out = conv2d_dim_out_len(d_in, kd_k, sd, pd, dd);
+    let h_out = conv2d_dim_out_len(h_in, kh_k, sh, ph, dh);
+    let w_out = conv2d_dim_out_len(w_in, kw_k, sw, pw, dw);
+    debug_assert_eq!(
+        d_out.checked_mul(h_out).and_then(|v| v.checked_mul(w_out)),
+        Some(p),
+        "eval::col2im3d: d_col の P 軸が conv2d_dim_out_len から再計算した Dout*Hout*Wout と一致しない（契約違反）"
+    );
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..cin {
+            let g = c / cin_g.max(1);
+            let c_g = c % cin_g.max(1);
+            for d in 0..d_in {
+                for h in 0..h_in {
+                    for w in 0..w_in {
+                        let mut acc: f64 = 0.0;
+                        for kd_ in 0..kd_k {
+                            let od = match conv2d_window_out_idx(d, pd, kd_, dd, sd, d_out) {
+                                Some(v) => v,
+                                None => continue,
+                            };
+                            for kh_ in 0..kh_k {
+                                let oh = match conv2d_window_out_idx(h, ph, kh_, dh, sh, h_out) {
+                                    Some(v) => v,
+                                    None => continue,
+                                };
+                                for kw_ in 0..kw_k {
+                                    let ow = match conv2d_window_out_idx(w, pw, kw_, dw, sw, w_out)
+                                    {
+                                        Some(v) => v,
+                                        None => continue,
+                                    };
+                                    let k_idx = ((c_g * kd_k + kd_) * kh_k + kh_) * kw_k + kw_;
+                                    let p_idx = (od * h_out + oh) * w_out + ow;
+                                    let v = d_col.get(&[n, g, k_idx, p_idx]).unwrap_or(0.0);
+                                    acc += f64::from(v);
+                                }
+                            }
+                        }
+                        let out_idx = (((n * cin + c) * d_in + d) * h_in + h) * w_in + w;
+                        out[out_idx] = acc as f32;
+                    }
+                }
+            }
+        }
+    }
+    build_tensor(out, input_shape)
+}
+
 /// Conv2d の forward ホスト参照実装（全ホスト im2col＋[`matmul`] の
 /// per-`(n, g)` 合成。イシュー #1764・設計 `docs/conv-ops-design.md`
 /// §5.3「本番フォールバックではなくテストオラクル／全ホスト参照専用」）。

@@ -10073,3 +10073,281 @@ fn workspace_declares_rng_distribution_names_only_in_allowed_locations() {
          迂回経路の混入なのかを確認すること）: {found:?}"
     );
 }
+
+// =====================================================================
+// イシュー #2158（親 #2131）: Conv3d の facade 公開保留を検査する
+// テスト群。`VarConv3dHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリと、`compat::Sequential::add_conv3d` の非宣言を
+// 持つ。承認事項・多層防御の位置づけは `docs/conv-ops-design.md` §16
+// 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarConv3dHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`activation_ops_hold_doctest_globs_all_pub_modules` の
+/// `VarConv3dHoldDoctestGuard` 版）。
+#[test]
+fn conv3d_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarConv3dHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarConv3dHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
+         いる（declared={declared:?}, doctest={globbed:?}）。新しい pub\
+         mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`conv3d_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの **glob
+/// 以外の本文**が固定文言 [`CONV3D_HOLD_PROBE_BODY`] と 1 行たりとも
+/// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの
+/// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
+/// 機械的に拒否する）。
+#[test]
+fn conv3d_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarConv3dHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, CONV3D_HOLD_PROBE_BODY,
+        "VarConv3dHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 CONV3D_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_conv3d_hold_probe モジュール・\
+         __FandheConv3dHoldProbe／__FandheConv3dAddProbe トレイト・\
+         __probe_* 関数）の削除・弱体化・隠し行の混入がないか確認する\
+         こと。"
+    );
+}
+
+/// [`conv3d_hold_doctest_probe_body_matches_fixed_contract`] が要求する
+/// 固定文言。`crates/facade/src/lib.rs` の `VarConv3dHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
+/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
+/// 含む）。
+const CONV3D_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_conv3d_hold_probe {\n\
+\x20\x20\x20\x20pub mod conv3d_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn conv3d() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_conv3d_hold_probe::*;\n\
+\n\
+struct __FandheConv3dMarker;\n\
+\n\
+trait __FandheConv3dHoldProbe {\n\
+\x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheConv3dHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
+}\n\
+\n\
+impl __FandheConv3dHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
+}\n\
+\n\
+impl __FandheConv3dHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
+}\n\
+\n\
+trait __FandheConv3dAddProbe {\n\
+\x20\x20\x20\x20fn add_conv3d(&self) -> __FandheConv3dMarker;\n\
+}\n\
+\n\
+impl __FandheConv3dAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `conv3d_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
+\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20conv3d_ops::conv3d();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheConv3dMarker = fandhe_ai::Var::conv3d(x);\n\
+\x20\x20\x20\x20let _: __FandheConv3dMarker = x.conv3d();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheConv3dMarker = fandhe_ai::Tensor::conv3d(x);\n\
+\x20\x20\x20\x20let _: __FandheConv3dMarker = x.conv3d();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheConv3dMarker = fandhe_ai::Tape::conv3d(x);\n\
+\x20\x20\x20\x20let _: __FandheConv3dMarker = x.conv3d();\n\
+}\n\
+\n\
+fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheConv3dMarker = fandhe_ai::compat::Sequential::add_conv3d(x);\n\
+}";
+
+/// facade src 全体（`crates/facade/src/**`）に、`conv3d_ops` を参照する
+/// `pub use`（モジュール再エクスポート・別名含む）も、`fn conv3d`／
+/// `fn add_conv3d` の宣言（可視性・宣言文脈を問わない）も存在しないこと
+/// を固定する（`VarConv3dHoldDoctestGuard` の正のプローブと多層防御を
+/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
+/// activation_ops` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_conv3d() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") && line_contains_identifier(trimmed, "conv3d_ops") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `conv3d_ops` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in ["conv3d", "add_conv3d"] {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が conv3d（イシュー #2158 の内部クレート限定新規\
+         公開面。facade 公開・compat::Sequential::add_conv3d 追加はいず\
+         れも承認待ちのため対象外という設計判断に違反）を再エクスポート、\
+         または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// `conv3d`・`im2col3d`・`col2im3d`（3 個の関数名。イシュー #2158）の
+/// workspace 全体（`crates/*/src/`）における `fn` 宣言の定義元集合が、
+/// 実装計画で列挙した許容集合とちょうど一致することを固定する
+/// （`workspace_declares_activation_ops_fn_names_only_in_autodiff_
+/// activation_ops` と同型のインベントリ）。
+///
+/// **期待集合（着手時に `grep -rn "fn conv3d\b\|fn im2col3d\b\|fn
+/// col2im3d\b" crates/*/src` で実測確認済み）**:
+/// - `conv3d`: `tensor-core/src/backend_ops.rs`（`BackendOps` trait の
+///   既定実装）・`autodiff/src/conv3d_ops.rs`（自由関数。CPU は
+///   `conv3d` を override しないため他に無い）
+/// - `im2col3d`／`col2im3d`: `tensor-core/src/backend_ops.rs`（trait 既定
+///   実装）・`backend-cpu/src/im2col.rs`（本体）・`backend-cpu/src/
+///   ops.rs`（override）・`autodiff/src/eval.rs`（ホスト参照実装）
+#[test]
+fn workspace_declares_conv3d_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in ["conv3d", "im2col3d", "col2im3d"] {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    found
+                        .entry(fn_name.to_string())
+                        .or_default()
+                        .push(format!("{rel} ({count})"));
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, Vec<String>> = [
+        (
+            "conv3d".to_string(),
+            vec![
+                "tensor-core/src/backend_ops.rs (1)".to_string(),
+                "autodiff/src/conv3d_ops.rs (1)".to_string(),
+            ],
+        ),
+        (
+            "im2col3d".to_string(),
+            vec![
+                "tensor-core/src/backend_ops.rs (1)".to_string(),
+                "backend-cpu/src/im2col.rs (1)".to_string(),
+                "backend-cpu/src/ops.rs (1)".to_string(),
+                "autodiff/src/eval.rs (1)".to_string(),
+            ],
+        ),
+        (
+            "col2im3d".to_string(),
+            vec![
+                "tensor-core/src/backend_ops.rs (1)".to_string(),
+                "backend-cpu/src/im2col.rs (1)".to_string(),
+                "backend-cpu/src/ops.rs (1)".to_string(),
+                "autodiff/src/eval.rs (1)".to_string(),
+            ],
+        ),
+    ]
+    .into_iter()
+    .map(|(k, mut v)| {
+        v.sort();
+        (k, v)
+    })
+    .collect();
+
+    let mut found_sorted = found.clone();
+    for v in found_sorted.values_mut() {
+        v.sort();
+    }
+
+    assert_eq!(
+        found_sorted, expected,
+        "conv3d／im2col3d／col2im3d の fn 宣言の定義元集合が実装計画の\
+         期待集合とドリフトしている（found={found_sorted:?},\
+         expected={expected:?}）。新たな定義元が見つかった場合、それが\
+         承認済みの実装なのか迂回経路の混入なのかを確認すること。"
+    );
+}

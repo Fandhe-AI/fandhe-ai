@@ -3057,3 +3057,126 @@ struct DeterminismHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct RngDistributionsHoldDoctestGuard;
+
+/// イシュー #2158（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarActivationOpsHoldDoctestGuard`（イシュー #2146）と同型の「正の
+/// プローブ 1 ブロック方式」を採るが、本ガードは 3 種類の衝突プローブを
+/// 併用する:
+///
+/// (a) 自由関数の衝突プローブ（`conv3d_ops::conv3d`。`VarActivationOps
+/// HoldDoctestGuard` の `__probe_free_fns` と同方式）。facade の全
+/// `pub mod` を glob import したスコープに、本ブロック内でのみ定義した
+/// ローカルの自由関数（`__fandhe_conv3d_hold_probe::conv3d_ops::
+/// conv3d`）を導入し、`conv3d_ops::conv3d()` という経路解決で使う。
+/// facade が `pub use fandhe_ai_autodiff::conv3d_ops;` のようなモジュール
+/// 再エクスポートで `conv3d_ops` を公開すれば、ローカル定義との glob
+/// 衝突（E0659）でコンパイルが失敗する。
+///
+/// (b) `Var`／`Tensor<f32>`／`Tape` への `conv3d` メソッド衝突プローブ
+/// （`__FandheConv3dHoldProbe` トレイト。`VarActivationOpsHoldDoctestGuard`
+/// の `__FandheActivationHoldProbe` と同方式）。`Var::conv3d` 等の
+/// inherent メソッドが追加されれば、トレイトメソッドより優先解決される
+/// ため戻り値型が `__FandheConv3dMarker` ではなくなり型エラーになる。
+///
+/// (c) `compat::Sequential::add_conv3d` の衝突プローブ（承認事項の
+/// 2 つ目）。`__FandheConv3dAddProbe` トレイトを `fandhe_ai::compat::
+/// Sequential` に実装し、**UFCS 形のみ**（`fandhe_ai::compat::
+/// Sequential::add_conv3d(x)`）で呼ぶ（`VarActivationOpsHoldDoctestGuard`
+/// の `__probe_sequential_add` と同じ理由: `compat::Sequential::add_*`
+/// の既存メソッドは値で `self` を取る inherent メソッドのため、メソッド
+/// 呼び出し形〈`x.add_conv3d()`〉だと inherent 側が優先解決され衝突を
+/// 検出できない）。
+///
+/// facade の `nn` は `pub mod rnn;` にのみ固定済み
+/// （`nn_mod_declares_only_rnn_submodule`）のため、`Conv3d` 型自体の
+/// glob 衝突プローブは不要（`nn::Conv3d` を追加しても `nn` モジュール
+/// 自体の公開面〈`pub mod rnn;` のみ〉には現れない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// conv3d_hold_doctest_globs_all_pub_modules`・`conv3d_hold_doctest_
+/// probe_body_matches_fixed_contract`・`facade_does_not_reexport_or_
+/// declare_conv3d`・`workspace_declares_conv3d_fn_names_only_in_
+/// allowed_locations`）との多層防御の位置づけは `docs/conv-ops-
+/// design.md` §16「承認事項」を参照。
+///
+/// 承認（`Var::conv3d` の委譲メソッド追加・`compat::Sequential::
+/// add_conv3d` 追加）を得た日が来たら、本モジュール・本 doctest 自体を
+/// 削除する（ソース走査側の対応する否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_conv3d_hold_probe {
+///     pub mod conv3d_ops {
+///         pub fn conv3d() {}
+///     }
+/// }
+/// use __fandhe_conv3d_hold_probe::*;
+///
+/// struct __FandheConv3dMarker;
+///
+/// trait __FandheConv3dHoldProbe {
+///     fn conv3d(&self) -> __FandheConv3dMarker;
+/// }
+///
+/// impl<'t> __FandheConv3dHoldProbe for fandhe_ai::Var<'t> {
+///     fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
+/// }
+///
+/// impl __FandheConv3dHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
+/// }
+///
+/// impl __FandheConv3dHoldProbe for fandhe_ai::Tape {
+///     fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
+/// }
+///
+/// trait __FandheConv3dAddProbe {
+///     fn add_conv3d(&self) -> __FandheConv3dMarker;
+/// }
+///
+/// impl __FandheConv3dAddProbe for fandhe_ai::compat::Sequential {
+///     fn add_conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `conv3d_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     conv3d_ops::conv3d();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheConv3dMarker = fandhe_ai::Var::conv3d(x);
+///     let _: __FandheConv3dMarker = x.conv3d();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheConv3dMarker = fandhe_ai::Tensor::conv3d(x);
+///     let _: __FandheConv3dMarker = x.conv3d();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheConv3dMarker = fandhe_ai::Tape::conv3d(x);
+///     let _: __FandheConv3dMarker = x.conv3d();
+/// }
+///
+/// fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheConv3dMarker = fandhe_ai::compat::Sequential::add_conv3d(x);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarConv3dHoldDoctestGuard;

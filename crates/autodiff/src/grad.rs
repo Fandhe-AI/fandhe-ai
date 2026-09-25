@@ -1096,6 +1096,90 @@ pub(crate) fn vjp(
             }
             contributions
         }
+        // `conv3d_ops::conv3d`（im2col3d＋GEMM。イシュー #2158・設計
+        // `docs/conv-ops-design.md` §16）。[`Op::Conv2d`] VJP の空間 3
+        // 軸一般化——col は `Op::Conv3d` に保持しないため im2col3d を
+        // 再計算する。GEMM は常に `gemm_batched_fp32_strict`（ホスト
+        // フォールバックなし）。低精度 conv3d はスコープ外のため
+        // `compute_dtype` フィールドを持たない（`Op::Conv2d` との差異）。
+        Op::Conv3d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let weight_val = materialize_fallible(nodes, ops, weight)?;
+            let input_shape = input_val.shape().to_vec();
+            let weight_shape = weight_val.shape().to_vec();
+
+            let groups = params.groups();
+            let cout = weight_shape[0];
+            let cout_g = cout / groups.max(1);
+
+            let upstream_shape = upstream.shape().to_vec();
+            let n_batch = upstream_shape[0];
+            let dout = upstream_shape[2];
+            let hout = upstream_shape[3];
+            let wout = upstream_shape[4];
+            let p = dout
+                .checked_mul(hout)
+                .and_then(|v| v.checked_mul(wout))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            // `upstream` は転置 view で来うるため `contiguous()` してから
+            // reshape する（`Op::Conv2d` VJP と同じ前提）。
+            let g5 = upstream
+                .contiguous()
+                .reshape(&[n_batch, groups, cout_g, p])
+                .map_err(AutodiffError::Shape)?;
+
+            let im2col_shape = fandhe_ai_tensor_core::im2col3d_out_shape(&input_shape, &params)
+                .map_err(AutodiffError::Shape)?;
+            let col = im2col3d_with_fallback(ops, input_val, &params, &im2col_shape)?;
+            let k_g = im2col_shape[2];
+
+            // d_weight（相関）: dw_full = gemm_batched_fp32_strict(g5, colᵀ)
+            //   -> [N, G, Cout_g, K_g] -> N 軸を f64 で縮約
+            //   -> [Cout, Cin_g, kD, kH, kW] へ reshape。
+            let col_t = transpose_last2(&col);
+            let dw_full = ops
+                .gemm_batched_fp32_strict(&g5, &col_t)
+                .map_err(AutodiffError::Backend)?;
+            let dw = reduce_batch_axes_f64(&dw_full, &[groups, cout_g, k_g])?;
+            let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+
+            // d_input（転置畳み込み）: d_col = gemm_batched_fp32_strict(w_matᵀ, g5)
+            //   -> [N, G, K_g, P] -> col2im3d。
+            let w_mat = weight_val
+                .contiguous()
+                .reshape(&[groups, cout_g, k_g])
+                .map_err(AutodiffError::Shape)?;
+            let w_mat_t = transpose_last2(&w_mat);
+            let d_col = ops
+                .gemm_batched_fp32_strict(&w_mat_t, &g5)
+                .map_err(AutodiffError::Backend)?;
+            let d_input = col2im3d_with_fallback(ops, &d_col, &input_shape, &params)?;
+
+            let mut contributions = vec![(input, d_input), (weight, d_weight)];
+            if let Some(bias_id) = bias {
+                // d_bias[c] = Σ_{n, od, oh, ow} upstream[n, c, od, oh, ow]
+                //   （`Op::Conv2d` VJP §6.3 と同じ f64 逐次加算契約。
+                //   `permute([0,2,3,4,1])` で Cout 軸を末尾へ動かしてから
+                //   `reduce_bias_grad_rows` の行縮約契約を再利用する）。
+                let cout_usize = weight_shape[0];
+                let permuted = upstream
+                    .permute(&[0, 2, 3, 4, 1])
+                    .map_err(AutodiffError::Shape)?;
+                let rows = permuted
+                    .contiguous()
+                    .reshape(&[n_batch * p, cout_usize])
+                    .map_err(AutodiffError::Shape)?;
+                let bias_data = eval::reduce_bias_grad_rows(&rows);
+                let d_bias = build_tensor(bias_data, &nodes[bias_id.0].shape);
+                contributions.push((bias_id, d_bias));
+            }
+            contributions
+        }
         // `Var::conv_transpose2d`（col2im＋GEMM。イシュー #2067・設計
         // `docs/conv-ops-design.md` §15）。`weight`: `[Cin, Cout_g,
         // kH, kW]`（`Op::Conv2d` と先頭 2 軸が逆）。`col` を保持しない
@@ -3161,6 +3245,137 @@ pub(crate) fn conv2d_with_fallback(
             let bias_reshaped = b
                 .contiguous()
                 .reshape(&[1, cout, 1, 1])
+                .map_err(AutodiffError::Shape)?;
+            let out = ops
+                .add(&out_no_bias, &bias_reshaped)
+                .map_err(AutodiffError::Backend)?;
+            if out.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(out)
+        }
+        None => Ok(out_no_bias),
+    }
+}
+
+/// Conv3d の im2col（`conv3d_ops::conv3d` の forward・[`Op::Conv3d`] の
+/// VJP 双方の再計算段）が使う「バックエンド実装 → フォールバック」
+/// ヘルパー（イシュー #2158・[`im2col_with_fallback`] の空間 3 軸
+/// 一般化）。`ops.im2col3d` → `Unsupported` のときのみ `eval::im2col3d`
+/// へフォールバックし、それ以外のエラーは伝播する（判定迂回経路を
+/// 作らない）。
+pub(crate) fn im2col3d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    params: &fandhe_ai_tensor_core::Conv3dParams,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.im2col3d(input, params) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::im2col3d(input, params, out_shape)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Conv3d`] の VJP（d_input＝転置畳み込み）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #2158・
+/// [`col2im_with_fallback`] の空間 3 軸一般化）。`ops.col2im3d` →
+/// `Unsupported` のときのみ `eval::col2im3d` へフォールバックする。
+pub(crate) fn col2im3d_with_fallback(
+    ops: &dyn BackendOps,
+    d_col: &Tensor<f32>,
+    input_shape: &[usize],
+    params: &fandhe_ai_tensor_core::Conv3dParams,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.col2im3d(d_col, input_shape, params) {
+        Ok(v) => {
+            if v.shape() != input_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: input_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::col2im3d(d_col, input_shape, params)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Conv3d`] の forward（`conv3d_ops::conv3d`）が使う段階的合成
+/// ヘルパー（イシュー #2158・[`conv2d_with_fallback`] の空間 3 軸
+/// 一般化。設計 `docs/conv-ops-design.md` §16）。
+///
+/// 段階: ①`ops.conv3d`（override フック。`Unsupported` のときのみ次段
+/// へ）→ ②[`im2col3d_with_fallback`] → ③`ops.gemm_batched`（常に
+/// バックエンド。ホストフォールバックなし）→ ④`ops.add`（bias。
+/// `[Cout]` を `[1, Cout, 1, 1, 1]` へ reshape してから加算し、右詰め
+/// broadcast による `Wout` 軸誤加算を回避する。[`conv2d_with_fallback`]
+/// と同じ罠回避）。
+pub(crate) fn conv3d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: Option<&Tensor<f32>>,
+    params: &fandhe_ai_tensor_core::Conv3dParams,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.conv3d(input, weight, bias, params) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            return Ok(v);
+        }
+        Err(BackendError::Unsupported(_)) => {}
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    }
+
+    let im2col_shape = fandhe_ai_tensor_core::im2col3d_out_shape(input.shape(), params)
+        .map_err(AutodiffError::Shape)?;
+    let col = im2col3d_with_fallback(ops, input, params, &im2col_shape)?;
+
+    let groups = im2col_shape[1];
+    let k_g = im2col_shape[2];
+    let weight_shape = weight.shape().to_vec();
+    let cout = weight_shape[0];
+    let cout_g = cout / groups.max(1);
+    let w_mat = weight
+        .contiguous()
+        .reshape(&[groups, cout_g, k_g])
+        .map_err(AutodiffError::Shape)?;
+    let out_mat = ops
+        .gemm_batched(&w_mat, &col)
+        .map_err(AutodiffError::Backend)?;
+    let out_no_bias = out_mat.reshape(out_shape).map_err(AutodiffError::Shape)?;
+
+    match bias {
+        Some(b) => {
+            let bias_reshaped = b
+                .contiguous()
+                .reshape(&[1, cout, 1, 1, 1])
                 .map_err(AutodiffError::Shape)?;
             let out = ops
                 .add(&out_no_bias, &bias_reshaped)

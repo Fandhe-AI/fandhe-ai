@@ -1,5 +1,11 @@
-//! 畳み込み層（Conv1d／Conv2d／ConvTranspose2d。イシュー #1770・
-//! #2067・親 #1645）。
+//! 畳み込み層（Conv1d／Conv2d／ConvTranspose2d／Conv3d。イシュー #1770・
+//! #2067・#2158・親 #1645）。
+//!
+//! **Conv3d の forward は `conv3d_ops::conv3d`（自由関数）へ委譲する**
+//! （`Var::conv2d`／`Var::conv1d` のような `Var` inherent メソッドでは
+//! ない）——facade 公開が未承認のため（`crates/autodiff/src/
+//! conv3d_ops.rs` モジュール doc・`docs/conv-ops-design.md` §16
+//! 「承認事項」参照）。
 //!
 //! `Var::conv2d`／`Var::conv1d`（#1764・#1765）・`Var::
 //! conv_transpose2d`（#2067。いずれも `var.rs`）・`BackendOps::
@@ -20,12 +26,13 @@
 //! 追加しない）。
 
 use fandhe_ai_tensor_core::{
-    BackendOps, Conv2dParams, ScalarDType, ShapeError, Tensor, conv_transpose2d_out_shape,
-    conv2d_out_shape,
+    BackendOps, Conv2dParams, Conv3dParams, ScalarDType, ShapeError, Tensor,
+    conv_transpose2d_out_shape, conv2d_out_shape, conv3d_out_shape,
 };
 
+use crate::conv3d_ops;
 use crate::error::AutodiffError;
-use crate::grad::{conv_transpose2d_with_fallback, conv2d_with_fallback};
+use crate::grad::{conv_transpose2d_with_fallback, conv2d_with_fallback, conv3d_with_fallback};
 use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, try_uniform_init};
 use crate::tape::Tape;
 use crate::var::Var;
@@ -1381,6 +1388,400 @@ impl<'t> Conv1dVars<'t> {
     /// `Var::conv1d` への薄い委譲。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.conv1d(
+            &self.weight,
+            self.bias.as_ref(),
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+        )
+    }
+}
+
+/// Conv3d 層のパラメータ本体（イシュー #2158）。`weight` は
+/// `[out_channels, in_channels / groups, kD, kH, kW]`（PyTorch
+/// `nn.Conv3d.weight` と同じレイアウト。[`Conv2d`] の空間 3 軸
+/// 一般化）、`bias` は `Some` の場合 `[out_channels]`。
+pub struct Conv3d {
+    weight: Tensor<f32>,
+    bias: Option<Tensor<f32>>,
+    stride: [usize; 3],
+    padding: [usize; 3],
+    dilation: [usize; 3],
+    groups: usize,
+    /// 層別 `requires_grad` 凍結フラグ（[`Conv2d`] と同型）。既定
+    /// `true`。
+    requires_grad: bool,
+}
+
+impl Conv3d {
+    /// 決定的シードで `U(-1/√fan_in, 1/√fan_in)`（`fan_in = (in_channels
+    /// / groups) · kD · kH · kW`）の一様初期化を行う（[`Conv2d::new`]
+    /// の空間 3 軸一般化。検査順序も同一）。
+    #[allow(clippy::too_many_arguments)] // PyTorch `nn.Conv3d` の全引数を受理する必要があるため（`Conv2d::new` と同じ理由）。
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: [usize; 3],
+        stride: [usize; 3],
+        padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<Conv3d, AutodiffError> {
+        let params = Conv3dParams::new(kernel_size, stride, padding, dilation, groups)
+            .map_err(AutodiffError::Backend)?;
+        if in_channels == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Conv3d::new: in_channels must be > 0 (1/sqrt(fan_in) would be non-finite)"
+                    .to_string(),
+            ));
+        }
+        if !in_channels.is_multiple_of(groups) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Conv3d::new: in_channels ({in_channels}) must be divisible by groups ({groups})"
+            )));
+        }
+        if !out_channels.is_multiple_of(groups) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Conv3d::new: out_channels ({out_channels}) must be divisible by groups \
+                 ({groups})"
+            )));
+        }
+        if out_channels < groups {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Conv3d::new: out_channels ({out_channels}) must be >= groups ({groups})"
+            )));
+        }
+        let cin_g = in_channels / groups;
+        let [kd, kh, kw] = kernel_size;
+        let fan_in = cin_g
+            .checked_mul(kd)
+            .and_then(|v| v.checked_mul(kh))
+            .and_then(|v| v.checked_mul(kw))
+            .ok_or_else(|| {
+                AutodiffError::InvalidArgument(
+                    "Conv3d::new: fan_in (in_channels/groups * kD * kH * kW) overflows usize"
+                        .to_string(),
+                )
+            })?;
+        if fan_in == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Conv3d::new: fan_in must be > 0 (1/sqrt(fan_in) would be non-finite)".to_string(),
+            ));
+        }
+        let bound = 1.0 / (fan_in as f32).sqrt();
+
+        let weight_seed = derive_seed(seed, WEIGHT_SEED_SALT);
+        let weight_numel = out_channels
+            .checked_mul(cin_g)
+            .and_then(|v| v.checked_mul(kd))
+            .and_then(|v| v.checked_mul(kh))
+            .and_then(|v| v.checked_mul(kw))
+            .ok_or_else(|| {
+                AutodiffError::InvalidArgument(
+                    "Conv3d::new: weight element count overflows usize".to_string(),
+                )
+            })?;
+        let weight_data =
+            checked_uniform_init(weight_numel, bound, weight_seed, "Conv3d::new: weight")?;
+        let weight = Tensor::new(weight_data, &[out_channels, cin_g, kd, kh, kw])?;
+
+        let bias = if bias {
+            let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
+            let bias_data =
+                checked_uniform_init(out_channels, bound, bias_seed, "Conv3d::new: bias")?;
+            Some(Tensor::new(bias_data, &[out_channels])?)
+        } else {
+            None
+        };
+
+        Ok(Conv3d {
+            weight,
+            bias,
+            stride: params.stride(),
+            padding: params.padding(),
+            dilation: params.dilation(),
+            groups: params.groups(),
+            requires_grad: true,
+        })
+    }
+
+    /// 明示的な重み・バイアス・ハイパーパラメータから構築する
+    /// （[`Conv2d::from_parameters`] の空間 3 軸一般化）。
+    ///
+    /// `weight` は rank 5・`weight.shape()[1] == 0` を拒否する
+    /// （[`Conv2d::from_parameters`] と同じ理由）。
+    #[allow(clippy::too_many_arguments)] // Conv3d の全ハイパーパラメータを引数として受理する必要があるため。
+    pub fn from_parameters(
+        weight: Tensor<f32>,
+        bias: Option<Tensor<f32>>,
+        stride: [usize; 3],
+        padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+    ) -> Result<Conv3d, AutodiffError> {
+        if weight.rank() != 5 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 5,
+                actual: weight.rank(),
+            }));
+        }
+        let weight_shape = weight.shape().to_vec();
+        let cin_g = weight_shape[1];
+        if cin_g == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Conv3d::from_parameters: weight.shape()[1] (in_channels/groups) must be > 0"
+                    .to_string(),
+            ));
+        }
+        let kernel_size = [weight_shape[2], weight_shape[3], weight_shape[4]];
+        let params = Conv3dParams::new(kernel_size, stride, padding, dilation, groups)
+            .map_err(AutodiffError::Backend)?;
+
+        let out_channels = weight_shape[0];
+        let in_channels = cin_g.checked_mul(groups).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "Conv3d::from_parameters: in_channels (weight.shape()[1] * groups) overflows \
+                 usize"
+                    .to_string(),
+            )
+        })?;
+        if !in_channels.is_multiple_of(groups)
+            || !out_channels.is_multiple_of(groups)
+            || out_channels < groups
+        {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Conv3d::from_parameters: in_channels ({in_channels}) / out_channels \
+                 ({out_channels}) not consistent with groups ({groups})"
+            )));
+        }
+
+        if let Some(ref b) = bias {
+            if b.rank() != 1 {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 1,
+                    actual: b.rank(),
+                }));
+            }
+            if b.shape() != [out_channels] {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![out_channels],
+                }));
+            }
+        }
+
+        Ok(Conv3d {
+            weight,
+            bias,
+            stride: params.stride(),
+            padding: params.padding(),
+            dilation: params.dilation(),
+            groups: params.groups(),
+            requires_grad: true,
+        })
+    }
+
+    /// このステップの `tape` へ `weight`/`bias` を葉ノードとして登録し、
+    /// `forward` を呼べる `Conv3dVars` を返す（[`Conv2d::bind`] と
+    /// 同型）。
+    pub fn bind<'t>(&self, tape: &'t Tape) -> Conv3dVars<'t> {
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.requires_grad));
+        Conv3dVars {
+            weight,
+            bias,
+            stride: self.stride,
+            padding: self.padding,
+            dilation: self.dilation,
+            groups: self.groups,
+        }
+    }
+
+    /// 重み `[out_channels, in_channels / groups, kD, kH, kW]`。
+    pub fn weight(&self) -> &Tensor<f32> {
+        &self.weight
+    }
+
+    /// バイアス `[out_channels]`。[`Conv3d::new`]／
+    /// [`Conv3d::from_parameters`] に `bias: false`／`bias: None` を
+    /// 渡した場合は `None`。
+    pub fn bias(&self) -> Option<&Tensor<f32>> {
+        self.bias.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`Conv3d` 実装）
+    /// の本体。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`Conv3d` 実装）の
+    /// 本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
+    }
+
+    /// 空間軸 `[stride_d, stride_h, stride_w]`。
+    pub fn stride(&self) -> [usize; 3] {
+        self.stride
+    }
+
+    /// 空間軸 `[padding_d, padding_h, padding_w]`。
+    pub fn padding(&self) -> [usize; 3] {
+        self.padding
+    }
+
+    /// 空間軸 `[dilation_d, dilation_h, dilation_w]`。
+    pub fn dilation(&self) -> [usize; 3] {
+        self.dilation
+    }
+
+    /// グループ数（[`Conv3d`] doc 参照）。
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
+    /// [`crate::nn::module::Module::set_parameter`]（`Conv3d` 実装）の
+    /// 本体（[`Conv2d::set_parameter`] と同型）。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match name {
+            "weight" => {
+                if value.shape() != self.weight.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight.shape().to_vec(),
+                    }));
+                }
+                self.weight = value;
+                Ok(())
+            }
+            "bias" => match &mut self.bias {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "Conv3d::set_parameter: no parameter named `{name}` (this layer has no bias)"
+                ))),
+            },
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "Conv3d::set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
+    /// [`crate::nn::module::Module::forward_host`]（`Conv3d` 実装）の
+    /// 本体。`conv3d_ops::conv3d`（`var.rs` の `Var::conv2d` に相当する
+    /// 検査順序）と**同じ検査順序**で事前検査してから、`conv3d_ops::
+    /// conv3d` が呼ぶのと同じ `grad::conv3d_with_fallback` を直接呼ぶ
+    /// （[`Conv2d::forward_host`] と同じ tape 経路／tape 不要経路 bit
+    /// 一致契約）。
+    pub fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape();
+        if in_shape.len() != 5 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 5,
+                actual: in_shape.len(),
+            }));
+        }
+        let weight_shape = self.weight.shape();
+        let kernel_size = [weight_shape[2], weight_shape[3], weight_shape[4]];
+        let params = Conv3dParams::new(
+            kernel_size,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+        )
+        .map_err(AutodiffError::Backend)?;
+        let out_shape =
+            conv3d_out_shape(in_shape, weight_shape, &params).map_err(AutodiffError::Shape)?;
+        if let Some(ref bias) = self.bias {
+            let cout = weight_shape[0];
+            if bias.shape() != [cout] {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: bias.shape().to_vec(),
+                    rhs: vec![cout],
+                }));
+            }
+        }
+        conv3d_with_fallback(
+            ops,
+            input,
+            &self.weight,
+            self.bias.as_ref(),
+            &params,
+            &out_shape,
+        )
+    }
+}
+
+/// `Conv3d::bind` が返す、1 ステップ分のテープに登録済みパラメータ
+/// （[`Conv2dVars`] と同型）。
+pub struct Conv3dVars<'t> {
+    /// `Conv3d::weight`（`[out_channels, in_channels / groups, kD, kH,
+    /// kW]`）をテープへ登録した `Var`。
+    pub weight: Var<'t>,
+    /// `Conv3d::bias`（`[out_channels]`）をテープへ登録した `Var`。
+    /// 元の `Conv3d` が `bias: None` の場合は `None`。
+    pub bias: Option<Var<'t>>,
+    stride: [usize; 3],
+    padding: [usize; 3],
+    dilation: [usize; 3],
+    groups: usize,
+}
+
+impl<'t> Conv3dVars<'t> {
+    /// 空間軸 `[stride_d, stride_h, stride_w]`（[`Conv3d::stride`] と
+    /// 同じ）。
+    pub fn stride(&self) -> [usize; 3] {
+        self.stride
+    }
+
+    /// 空間軸 `[padding_d, padding_h, padding_w]`（[`Conv3d::padding`]
+    /// と同じ）。
+    pub fn padding(&self) -> [usize; 3] {
+        self.padding
+    }
+
+    /// 空間軸 `[dilation_d, dilation_h, dilation_w]`（[`Conv3d::
+    /// dilation`] と同じ）。
+    pub fn dilation(&self) -> [usize; 3] {
+        self.dilation
+    }
+
+    /// グループ数（[`Conv3d::groups`] と同じ）。
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
+    /// `y = conv3d_ops::conv3d(input, weight, bias, stride, padding,
+    /// dilation, groups)`（自由関数への薄い委譲。`Conv2dVars::forward`
+    /// が `Var::conv2d` を呼ぶのと対応するが、`Conv3d` は facade 未承認
+    /// のため自由関数を呼ぶ点が異なる。モジュール doc 参照）。
+    pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        conv3d_ops::conv3d(
+            input,
             &self.weight,
             self.bias.as_ref(),
             self.stride,
