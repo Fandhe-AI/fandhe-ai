@@ -3362,7 +3362,6 @@ struct VarConv3dHoldDoctestGuard;
 /// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
 /// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
 /// 正ガードへ置き換える）。
-///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
 ///
@@ -3462,6 +3461,86 @@ struct VarConv3dHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct DropoutEmbeddingBagHoldDoctestGuard;
+
+/// イシュー #2163（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarConv3dHoldDoctestGuard`（イシュー #2158）と同型の「正のプローブ
+/// 1 ブロック方式」を採る。
+///
+/// `nn::MultiheadAttention` の構築時オプション（`batch_first`・`kdim`・
+/// `vdim`。`crates/autodiff/src/nn/attention.rs::
+/// MultiheadAttentionConfig`）自体は autodiff クレート側の公開 API
+/// として追加済みだが、facade（唯一のサポートされる公開 API 面）からの
+/// 公開は 2 点が未承認のため保留する: (a) `MultiheadAttentionConfig`
+/// 型の facade 再エクスポート、(b) `compat::Sequential` へのオプション
+/// 付き構築メソッド（例: `add_multihead_attention_with_config`）の追加。
+///
+/// (a) 型名の衝突プローブ（`__fandhe_mha_options_hold_probe::
+/// MultiheadAttentionConfig`。`SpatialLayersHoldDoctestGuard` の
+/// `ConvTranspose1d` 等と同方式）。facade が `nn::MultiheadAttentionConfig`
+/// を `pub use` で再エクスポートすれば、`use fandhe_ai::nn::*;` が同名を
+/// glob 公開し、ローカル定義との衝突（E0659）でコンパイルが失敗する。
+///
+/// (b) `compat::Sequential::add_multihead_attention_with_config` の
+/// 衝突プローブ（`__FandheMhaOptionsAddProbe` トレイト。
+/// `VarConv3dHoldDoctestGuard` の `__FandheConv3dAddProbe` と同方式）。
+/// **UFCS 形のみ**（`fandhe_ai::compat::Sequential::
+/// add_multihead_attention_with_config(seq)`）で呼ぶ
+/// （`compat::Sequential::add_*` の既存メソッドは値で `self` を取る
+/// inherent メソッドのため、メソッド呼び出し形だと inherent 側が優先
+/// 解決され衝突を検出できない——`VarConv3dHoldDoctestGuard` doc の
+/// 同一理由）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// mha_options_hold_doctest_globs_all_pub_modules`・`mha_options_hold_
+/// doctest_probe_body_matches_fixed_contract`・`compat_sequential_does_
+/// not_expose_mha_options_add_methods`・`facade_does_not_reexport_
+/// multihead_attention_config`）との多層防御の位置づけは
+/// `docs/autodiff-mha-options-decision.md` §承認事項を参照。
+///
+/// 承認（`compat::Sequential::add_multihead_attention_with_config` の
+/// 追加・`MultiheadAttentionConfig` の facade 再エクスポート）を得た日が
+/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードと同時に外す）。
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_mha_options_hold_probe {
+///     pub struct MultiheadAttentionConfig;
+/// }
+/// use __fandhe_mha_options_hold_probe::*;
+///
+/// struct __FandheMhaOptionsMarker;
+///
+/// trait __FandheMhaOptionsAddProbe {
+///     fn add_multihead_attention_with_config(&self) -> __FandheMhaOptionsMarker;
+/// }
+///
+/// impl __FandheMhaOptionsAddProbe for fandhe_ai::compat::Sequential {
+///     fn add_multihead_attention_with_config(&self) -> __FandheMhaOptionsMarker {
+///         __FandheMhaOptionsMarker
+///     }
+/// }
+///
+/// fn __probe(_: MultiheadAttentionConfig, seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheMhaOptionsMarker =
+///         fandhe_ai::compat::Sequential::add_multihead_attention_with_config(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct MhaOptionsHoldDoctestGuard;
 
 /// イシュー #2164（親 #2131。設計正本 `docs/autodiff-rnn-stacked-config-
 /// decision.md` §8 承認事項）の facade 公開保留を固定する doctest 足場。

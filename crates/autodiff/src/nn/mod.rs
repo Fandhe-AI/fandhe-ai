@@ -181,6 +181,19 @@
 //! `PixelShuffleHoldDoctestGuard`・`crates/facade/tests/api_surface.rs`
 //! の否定ガードで固定。`docs/autodiff-pixel-shuffle-decision.md` §6
 //! 承認事項）。
+//! イシュー #2163（親 #2131）で [`MultiheadAttention`] に
+//! [`attention::MultiheadAttentionConfig`]（`batch_first`・`kdim`・
+//! `vdim`）・`MultiheadAttentionVars::forward_with_key_padding_mask`
+//! （`key_padding_mask`）を追加した。既存 `Var` 演算の合成のみで新規
+//! `Op`／`BackendOps`／カーネルは追加しない。`batch_first == true`・
+//! `key_padding_mask.is_none()` の既定経路はテープに積むノード列が
+//! 変更前と bit 同一（`attention.rs` モジュール doc「構築時オプション」
+//! ／「呼び出し時オプション」節参照）。facade 公開（`compat::
+//! Sequential` のオプション付き構築メソッド・`MultiheadAttentionConfig`
+//! の再エクスポート）は未承認のため保留する（`crates/facade/src/lib.rs`
+//! の `MhaOptionsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs`
+//! の否定ガードで固定。`docs/autodiff-mha-options-decision.md` §承認
+//! 事項）。
 
 mod attention;
 mod batch_norm;
@@ -210,8 +223,8 @@ pub mod loss;
 pub mod optim;
 
 pub use attention::{
-    KvCache, MultiheadAttention, MultiheadAttentionVars, StatefulAttention,
-    multihead_attention_forward_low_precision,
+    KvCache, MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars,
+    StatefulAttention, multihead_attention_forward_low_precision,
 };
 pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,

@@ -71,6 +71,18 @@ fn validate_layer_parameters(
     norm2: &LayerNorm,
 ) -> Result<(usize, usize), AutodiffError> {
     let d_model = self_attn.embed_dim();
+    // イシュー #2163 の fail-closed 化: `residual = x + self_attn(x)` は
+    // `x: [B, L, E]` と `self_attn(x): [B, L, E]` の加算を前提とする
+    // ため、`self_attn` が `batch_first == false` または `kdim`/`vdim !=
+    // d_model`（self-attention では常に `kdim = vdim = E` のはず）だと
+    // この前提が無言で崩れる。非既定 config は構築時に拒否する。
+    if !self_attn.batch_first() || self_attn.kdim() != d_model || self_attn.vdim() != d_model {
+        return Err(AutodiffError::InvalidArgument(
+            "TransformerEncoderLayer: self_attn must have batch_first=true and kdim=vdim=d_model \
+             （イシュー #2163 スコープ外。非既定 MultiheadAttentionConfig は未対応）"
+                .to_string(),
+        ));
+    }
 
     let l1_shape = linear1.weight().shape();
     if l1_shape.len() != 2 {
@@ -127,6 +139,18 @@ fn validate_layer_vars<'t>(
     norm1: &LayerNormVars<'t>,
     norm2: &LayerNormVars<'t>,
 ) -> Result<(usize, usize), AutodiffError> {
+    let d_model_pre = self_attn.embed_dim();
+    if !self_attn.batch_first()
+        || self_attn.kdim() != d_model_pre
+        || self_attn.vdim() != d_model_pre
+    {
+        return Err(AutodiffError::InvalidArgument(
+            "TransformerEncoderLayerVars: self_attn must have batch_first=true and \
+             kdim=vdim=d_model（イシュー #2163 スコープ外。非既定 MultiheadAttentionConfig は \
+             未対応）"
+                .to_string(),
+        ));
+    }
     self_attn.q.weight.check_same_tape(&linear1.weight)?;
     self_attn.q.weight.check_same_tape(&linear2.weight)?;
     if let Some(w) = &norm1.weight {
@@ -695,6 +719,62 @@ mod tests {
         .unwrap();
         assert_eq!(layer.d_model(), D_MODEL);
         assert_eq!(layer.dim_feedforward(), DIM_FF);
+    }
+
+    /// イシュー #2163 の fail-closed 化: `self_attn` が非既定 config
+    /// （`batch_first=false`）だと構築時に拒否する。
+    #[test]
+    fn from_parameters_rejects_non_default_self_attn_batch_first() {
+        use crate::nn::attention::MultiheadAttentionConfig;
+        let cfg = MultiheadAttentionConfig::new(D_MODEL, NUM_HEADS).with_batch_first(false);
+        let self_attn = MultiheadAttention::from_config(&cfg, 1).unwrap();
+        let linear1 = Linear::new(D_MODEL, DIM_FF, true, 2).unwrap();
+        let linear2 = Linear::new(DIM_FF, D_MODEL, true, 3).unwrap();
+        let norm1 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS).unwrap();
+        let norm2 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS).unwrap();
+        let result = TransformerEncoderLayer::from_parameters(
+            self_attn,
+            linear1,
+            linear2,
+            norm1,
+            norm2,
+            FeedForwardActivation::Relu,
+        );
+        match result {
+            Err(AutodiffError::InvalidArgument(_)) => {}
+            other => panic!(
+                "非既定 config（batch_first=false）は Err を返すはず（is_err={})",
+                other.is_ok()
+            ),
+        }
+    }
+
+    /// イシュー #2163 の fail-closed 化: `self_attn` が `kdim != d_model`
+    /// だと構築時に拒否する。
+    #[test]
+    fn from_parameters_rejects_non_default_self_attn_kdim() {
+        use crate::nn::attention::MultiheadAttentionConfig;
+        let cfg = MultiheadAttentionConfig::new(D_MODEL, NUM_HEADS).with_kdim(D_MODEL + 2);
+        let self_attn = MultiheadAttention::from_config(&cfg, 1).unwrap();
+        let linear1 = Linear::new(D_MODEL, DIM_FF, true, 2).unwrap();
+        let linear2 = Linear::new(DIM_FF, D_MODEL, true, 3).unwrap();
+        let norm1 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS).unwrap();
+        let norm2 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS).unwrap();
+        let result = TransformerEncoderLayer::from_parameters(
+            self_attn,
+            linear1,
+            linear2,
+            norm1,
+            norm2,
+            FeedForwardActivation::Relu,
+        );
+        match result {
+            Err(AutodiffError::InvalidArgument(_)) => {}
+            other => panic!(
+                "非既定 config（kdim != d_model）は Err を返すはず（is_err={})",
+                other.is_ok()
+            ),
+        }
     }
 
     /// `TransformerEncoderLayerVars::new`（公開 `Result` コンストラクタ）
