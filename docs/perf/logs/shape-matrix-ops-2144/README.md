@@ -23,6 +23,15 @@ REQ-2 統一複合判定
 `metal_outer_backward_matches_cpu_reference`）は `#[ignore]` のまま
 未実測である。
 
+**diagonal の分岐セル（同 PR #2257 での追加是正）**: `tril`／`triu`／
+`diag`（両方向）は `Op` 経路が同じでも diagonal 値によって境界位置が
+変わるため、コピー系 forward・bit 完全一致 backward の各テストは
+`DIAGONALS = [-1, 0, 1]`（負・0・正）をループで走査する（`tril` の
+正・負、`triu` の負、`diag`〈1-D→2-D〉の `k<0`／`k==0` 分岐、`diag`
+〈2-D→1-D〉の `k≠0`〈正・負〉を含む。「経路が別なら代表 1 本では
+代わりにならない」という上記論拠を diagonal の境界位置にも適用した。
+関数の追加はしていない）。
+
 ## 測定コマンド案
 
 ```sh
