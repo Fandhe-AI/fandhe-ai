@@ -281,9 +281,21 @@ pub(crate) fn vjp(
             // 既存の `vjp_elementwise_mul`（イシュー #1583 のゲート
             // 付き乗算。`Exp`/`Tanh`/`Sigmoid` と同じ経路）へ渡す。
             let x_val = materialize_fallible(nodes, ops, input)?;
-            let factor = eval::scalar::unary_grad_factors(x_val, out_value, sop);
-            let da = vjp_elementwise_mul(ops, upstream, &factor)?;
-            vec![(input, da)]
+            if sop.is_piecewise_constant() {
+                // イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign` は
+                // 区分定数で勾配が恒等的にゼロ。`Op::ScalarBinary` の
+                // 比較演算分岐（上記コメント参照・PR #1823）と同じ理由
+                // で、`vjp_elementwise_mul(upstream, 0 係数)` を経由
+                // せず入力 shape のゼロテンソルを直接返す（upstream が
+                // `inf`／`NaN` を含む場合の `0.0 * inf = NaN` 汚染を
+                // 避ける）。
+                let da = build_tensor(vec![0.0f32; x_val.numel()], x_val.shape());
+                vec![(input, da)]
+            } else {
+                let factor = eval::scalar::unary_grad_factors(x_val, out_value, sop);
+                let da = vjp_elementwise_mul(ops, upstream, &factor)?;
+                vec![(input, da)]
+            }
         }
         Op::ScalarBinary { op: sop, a, b } => {
             // イシュー #1634: `ScalarBinaryOp` の汎用 VJP。`eval::scalar::
@@ -6471,7 +6483,14 @@ mod tests {
                 },
                 vec![-2.0, -0.3, 0.3, 2.0], // 境界 ±1.0 は避ける
             ),
-            (ScalarUnaryOp::PowScalar { exponent: 2.5 }, positive),
+            (ScalarUnaryOp::PowScalar { exponent: 2.5 }, positive.clone()),
+            // イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign`
+            // （区分定数）は中央差分の対象にできない（不連続点を
+            // 必ずまたぐため）。`scalar_unary_piecewise_constant_grad_
+            // is_always_zero` で解析値を直接検証する。
+            (ScalarUnaryOp::Reciprocal, general.clone()), // general は 0 を含まない
+            (ScalarUnaryOp::Rsqrt, positive),
+            (ScalarUnaryOp::Erf, general),
         ]
     }
 
@@ -6515,6 +6534,59 @@ mod tests {
         assert_eq!(eval::scalar::unary_grad_factor(clamp, 1.0, 1.0), 1.0);
         // 範囲外は 0。
         assert_eq!(eval::scalar::unary_grad_factor(clamp, -2.0, -1.0), 0.0);
+    }
+
+    /// イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign`（区分定数）の
+    /// `unary_grad_factor` が常に `0.0` を返すことを確認する
+    /// （`is_piecewise_constant()` の判定対象と一致）。
+    #[test]
+    fn scalar_unary_piecewise_constant_grad_is_always_zero() {
+        for op in [
+            ScalarUnaryOp::Floor,
+            ScalarUnaryOp::Ceil,
+            ScalarUnaryOp::Round,
+            ScalarUnaryOp::Sign,
+        ] {
+            for &x in &[-2.7_f32, -0.5, 0.0, 0.5, 2.7] {
+                let y = op.apply(x);
+                assert_eq!(
+                    eval::scalar::unary_grad_factor(op, x, y),
+                    0.0,
+                    "{op:?}(x={x}) の勾配係数は常に 0 のはず"
+                );
+            }
+        }
+    }
+
+    /// イシュー #2145（§4）: `Op::ScalarUnary` の区分定数分岐は
+    /// `vjp_elementwise_mul` を経由せずゼロテンソルを直接返すため、
+    /// upstream が `inf` を含んでいても `NaN` に汚染されず有限の `0`
+    /// になることを確認する（PR #1823 の比較演算と同じ類型の回帰
+    /// テスト）。`y * inf` を経由して `Op::Mul` の VJP が `inf` を
+    /// `Op::ScalarUnary` の upstream として渡す形を作る。
+    #[test]
+    fn scalar_unary_piecewise_constant_backward_does_not_nan_with_inf_upstream() {
+        for op in [
+            ScalarUnaryOp::Floor,
+            ScalarUnaryOp::Ceil,
+            ScalarUnaryOp::Round,
+            ScalarUnaryOp::Sign,
+        ] {
+            let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+            let x = tape.var(&t(&[1.3, -2.7, 0.0, 4.9], &[4]));
+            let y = x.scalar_unary(op).unwrap();
+            let inf = tape.var(&t(&[f32::INFINITY; 4], &[4]));
+            let loss = y.mul(&inf).unwrap().sum(None).unwrap();
+            let grads = tape.backward(&loss).unwrap();
+            let dx = grads.get(&x).unwrap().unwrap();
+            for i in 0..4 {
+                let g = dx.get(&[i]).unwrap();
+                assert!(
+                    g.is_finite() && g == 0.0,
+                    "{op:?}: upstream が inf でも勾配は有限の 0 であるべき（実際: {g}）"
+                );
+            }
+        }
     }
 
     fn binary_numeric_grad_cases() -> Vec<(ScalarBinaryOp, Vec<f32>, Vec<f32>)> {
