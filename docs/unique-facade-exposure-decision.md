@@ -56,6 +56,8 @@ unique は他の Tier 2 演算（sort／topk／cumsum）と異なり、次の 2 
 - 上記§5 の全項目
 - CUDA／Metal 実機実測（本実装環境には両実機への到達手段がなく、`#[ignore]` テストとして申し送る。§7）
 
+**#2153 追補（2026-09-25）**: 上記§5・§6 の `return_inverse`／`return_counts`／`dim` 指定・`unique_consecutive` は #2153（親 #2131）で**内部クレート限定モジュール `fandhe_ai_autodiff::topk_unique_ops`（`unique_with_options`／`unique_consecutive`）として実装済み**。facade 公開（`Var` への委譲メソッド追加）は本 doc §4 の判断枠組みと同じく未承認のまま対象外。契約・設計判断の正は `docs/autodiff-topk-unique-ops-decision.md`。
+
 ## 7. 実装記録・実機実測状況
 
 - CPU: `crates/backend-cpu/src/unique.rs`（参照実装）・単体テスト 6 件・`tests/unique_parity.rs`（`eval::unique` ホストフォールバックとの bit 一致。3 件）すべて Linux で green。

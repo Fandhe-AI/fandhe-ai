@@ -2669,6 +2669,113 @@ struct VarEinsumBatchHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarIndexingOpsHoldDoctestGuard;
 
+/// イシュー #2153（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarIndexingOpsHoldDoctestGuard`（イシュー #2148）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカルの自由
+/// 関数群（`__fandhe_topk_unique_hold_probe::topk_unique_ops::{
+/// topk_with_options, unique_with_options, unique_consecutive}`）と
+/// トレイト（`__FandheTopkUniqueHoldProbe`）を導入し、実際に使う関数を
+/// 書く。facade がどの経路（`pub use fandhe_ai_autodiff::
+/// topk_unique_ops;` のようなモジュール再エクスポート・`Var` への
+/// inherent メソッド追加・別名 `pub use`）で `topk_unique_ops` という
+/// 名前や 3 個の関数名を公開しても、ローカル定義との glob 衝突
+/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
+/// メソッドがトレイトメソッドより優先解決されるため）でコンパイルが
+/// 失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// topk_unique_ops_hold_doctest_globs_all_pub_modules`・`topk_unique_
+/// ops_hold_doctest_probe_body_matches_fixed_contract`・`facade_does_
+/// not_reexport_or_declare_topk_unique_ops`・`workspace_declares_
+/// topk_unique_ops_fn_names_only_in_allowed_locations`）との多層防御の
+/// 位置づけは `docs/autodiff-topk-unique-ops-decision.md` §6「承認
+/// 事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_topk_unique_hold_probe {
+///     pub mod topk_unique_ops {
+///         pub fn topk_with_options() {}
+///         pub fn unique_with_options() {}
+///         pub fn unique_consecutive() {}
+///     }
+/// }
+/// use __fandhe_topk_unique_hold_probe::*;
+///
+/// struct __FandheTopkUniqueMarker;
+///
+/// trait __FandheTopkUniqueHoldProbe {
+///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker;
+///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker;
+///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker;
+/// }
+///
+/// impl<'t> __FandheTopkUniqueHoldProbe for fandhe_ai::Var<'t> {
+///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+/// }
+///
+/// impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+/// }
+///
+/// impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tape {
+///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `topk_unique_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     topk_unique_ops::topk_with_options();
+///     topk_unique_ops::unique_with_options();
+///     topk_unique_ops::unique_consecutive();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheTopkUniqueMarker = fandhe_ai::Var::topk_with_options(x);
+///     let _: __FandheTopkUniqueMarker = x.topk_with_options();
+///     let _: __FandheTopkUniqueMarker = fandhe_ai::Var::unique_with_options(x);
+///     let _: __FandheTopkUniqueMarker = x.unique_with_options();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheTopkUniqueMarker = fandhe_ai::Tensor::unique_consecutive(x);
+///     let _: __FandheTopkUniqueMarker = x.unique_consecutive();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheTopkUniqueMarker = fandhe_ai::Tape::topk_with_options(x);
+///     let _: __FandheTopkUniqueMarker = x.topk_with_options();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarTopkUniqueOpsHoldDoctestGuard;
+
 /// イシュー #2154（親 #2131）の facade 公開保留を固定する doctest 足場。
 /// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob

@@ -1310,6 +1310,22 @@ CUDA〈GB10〉は引き続き未実測 → CUDA〈GB10〉も 2026-09-16 に実�
 （decision doc §5／§6）。facade 新規公開面なし（既存 `Var`
 再エクスポート経由）。
 
+**#2153 追補**: `topk` の `sorted=false`（既存 topk を `dim` 軸上の
+元添字昇順へ並べ替える決定的契約）・負 `dim`、`unique` の `dim`
+指定・`return_inverse`／`return_counts`・`unique_consecutive`（元
+順序のまま隣接群化）を内部クレート限定モジュール
+`fandhe_ai_autodiff::topk_unique_ops`（`topk_with_options`・
+`unique_with_options`・`unique_consecutive`）として実装済み化した。
+新規 `BackendOps::unique_ext`（既定 `Unsupported`。CUDA／Metal は
+override しない）を追加、`topk` は新規 `BackendOps` メソッドなし
+（既存 `topk_with_fallback` を再利用）。選択演算のため 3 バックエンド
+bit 完全一致契約。facade 公開（`Var` への委譲メソッド追加）は未承認
+のまま対象外（`VarTopkUniqueOpsHoldDoctestGuard`・`api_surface.rs`
+の 4 テストで多層固定）。CUDA／Metal 実機は本実装環境に到達手段が
+なく `#[ignore]` のまま GB10／Mac セッションへ申し送る
+（`docs/perf/logs/topk-unique-2153/README.md`）。詳細は
+`docs/autodiff-topk-unique-ops-decision.md`。
+
 
 ## #1713 の追補
 
