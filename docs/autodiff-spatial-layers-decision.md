@@ -45,11 +45,16 @@ SpatialLayersHoldDoctestGuard`（正のプローブ doctest）と
 `ConvTranspose1d` は `Conv1d`（#1770）と同じ理由で `weight` を rank 3
 のまま保持する（`weight()` が `&Tensor<f32>` を返す既存契約のため。
 `forward`／`forward_host` の内部でのみ rank 4 へ一時的に reshape す
-る）。`Var::conv_transpose2d` 自身が全ての shape 検査（rank・
-`output_padding < stride`・チャンネル整合等）を行うため、
-`ConvTranspose1dVars::forward` では reshape 前の rank・cross-tape
-検査のみを行い、それ以降の検査は委譲先に任せる（`Var::conv1d` と
-同じ「reshape より前に孤児ノードを残しうる検査を完了する」規律）。
+る）。`Var::reshape` は view ノードを tape へ push するため、
+`ConvTranspose1dVars::forward` では x4/w4 への reshape より前に
+`forward_host` と同じ検査順序（①rank → ②`Conv2dParams::new` →
+③`output_padding < stride` → ④4 次元 `conv_transpose2d_out_shape` →
+⑤bias shape）を純粋な shape 計算（形状値のみ・tape 操作なし）として
+完了させ、`Err` 経路で孤児ノードを残さない（`Var::conv1d` と同じ
+規律。イシュー #2159 レビュー指摘・codex／Cursor Bugbot 両方。PR
+#2276）。`Var::conv_transpose2d` 内部でも同じ検査が再実行されるが、
+それは reshape 後の 2 回目の検査であり `forward` 側のこの事前検査を
+代替しない。
 
 `Upsample` はサイズ指定方式を `enum UpsampleSize { Size(Vec<usize>),
 ScaleFactor(Vec<f64>) }`（`#[non_exhaustive]`）で表現し、`size` と
