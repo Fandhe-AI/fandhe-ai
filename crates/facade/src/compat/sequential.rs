@@ -465,7 +465,12 @@ impl Sequential {
     /// 経路は対象外。bias あり既定（`add_linear` と同様。PyTorch
     /// `nn.MultiheadAttention` の既定 `bias=True` と揃える）。
     /// `embed_dim % num_heads != 0` は `MultiheadAttention::new` が
-    /// 拒否する。
+    /// 拒否する。本メソッドは既定 config（`batch_first=true`・
+    /// `kdim=vdim=embed_dim`）固定のまま——オプション指定版
+    /// （`batch_first`・`kdim`/`vdim`・`key_padding_mask`。イシュー
+    /// #2163）の facade 公開は承認待ちのため保留する
+    /// （`crates/facade/src/lib.rs` の `MhaOptionsHoldDoctestGuard`
+    /// 参照）。
     pub fn add_multihead_attention(
         mut self,
         embed_dim: usize,

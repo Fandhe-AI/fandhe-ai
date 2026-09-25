@@ -292,6 +292,32 @@ fn forward_with_cache_rejects_batch_mismatch_and_leaves_cache_unchanged() {
     );
 }
 
+/// イシュー #2163 の fail-closed 化: `batch_first=false`・
+/// `kdim`/`vdim != embed_dim` の非既定 config は `cache` を一切変更せず
+/// 拒否する（K-1 設計は self-attention 限定のため）。
+#[test]
+fn forward_with_cache_rejects_non_default_config_and_leaves_cache_unchanged() {
+    use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;
+    let cfg = MultiheadAttentionConfig::new(E, H).with_batch_first(false);
+    let mha = MultiheadAttention::from_config(&cfg, SEED).unwrap();
+    let mut cache = KvCache::new();
+    let before = snapshot(&cache);
+
+    let x = fixture_sequence(1, 2, E);
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let err = mha
+        .bind(&tape)
+        .forward_with_cache(&xv, &xv, &xv, &mut cache)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert_eq!(
+        snapshot(&cache),
+        before,
+        "エラー時に cache が変化してはならない（空のままのはず）"
+    );
+}
+
 #[test]
 fn forward_with_cache_rejects_rank_mismatch() {
     let mha = MultiheadAttention::new(E, H, true, SEED).unwrap();

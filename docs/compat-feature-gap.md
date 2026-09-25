@@ -1831,6 +1831,17 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
   CUDA〈GB10〉は引き続き未実測 → CUDA〈GB10〉も 2026-09-16 に実測済み
   （pass。`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md`）。
 
+## #2163 の追補（`nn::MultiheadAttention` のオプション: batch_first・kdim/vdim・key_padding_mask）
+
+「#1640 の追補」節の対象外列挙（「unbatched 入力・`batch_first=false`・`kdim`/`vdim`・`key_padding_mask` 引数・…は対象外のまま」）のうち、`batch_first=false`・`kdim`/`vdim`・`key_padding_mask` の 3 項目をイシュー #2163（親 #2131）で実装した。残る対象外（unbatched 入力・`dropout_p`・`need_weights`／attention weights 返却・`add_bias_kv`／`add_zero_attn`・packed `in_proj_weight`）は不変。
+
+- `nn::MultiheadAttentionConfig`（構築時オプション。`with_bias`／`with_batch_first`／`with_kdim`／`with_vdim`）・`MultiheadAttention::from_config`／`from_parameters_with_config`・`MultiheadAttentionVars::new_with_config`／`forward_with_key_padding_mask`（呼び出し時オプション）を追加した（`crates/autodiff/src/nn/attention.rs`）。新規 `Op`／`BackendOps`／カーネルは追加せず、既存 `Var` 演算（`transpose`／`reshape`／`matmul`／`masked_fill`／`softmax`）の合成のみで実装した。
+- `MultiheadAttention::new`（シグネチャ不変）は内部で `from_config`（`kdim=vdim=embed_dim`・`batch_first=true` 固定の config）へ委譲し、初期値は変更前と bit 同一（単体テスト `new_matches_from_config_bit_identical`）。`MultiheadAttentionVars::forward`（シグネチャ不変）も `forward_with_key_padding_mask(.., key_padding_mask=None, ..)` へ委譲し、`batch_first=true`（既定）の経路はテープに積むノード列が変更前と bit 同一。
+- `key_padding_mask: Tensor<bool> [B, S]` の極性は本モジュールの `attn_mask` と同じ `true` = attend（`sdpa_compose` の既存規約を踏襲。PyTorch `nn.MultiheadAttention` の `key_padding_mask`〈`True` = 無視〉とは逆）。PyTorch 互換の極性反転フラグは追加しない（Issue の明示スコープ外）。
+- 未対応経路の fail-closed 化: `multihead_attention_forward_low_precision`（#2071）・`MultiheadAttentionVars::forward_with_cache`（#2084。cache 更新前に拒否し原子性を保つ）・`TransformerEncoderLayer::from_parameters`／`TransformerEncoderLayerVars::new`（#2068）は、非既定 config（`batch_first=false` または `kdim`/`vdim != embed_dim`）を渡すと `InvalidArgument` で拒否する（無言で batch-first 解釈しない）。
+- facade 新規公開面なし: `MultiheadAttentionConfig` の facade 再エクスポート・`compat::Sequential` のオプション付き構築メソッド（例: `add_multihead_attention_with_config`）はいずれも未承認のため保留する（`crates/facade/src/lib.rs` の `MhaOptionsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs` の否定ガードで固定）。承認事項の詳細は `docs/autodiff-mha-options-decision.md` を参照。
+- CUDA（DGX Spark GB10）／Metal 実機での `#[ignore]` parity（`crates/facade/tests/mha_options_backend_parity.rs`）は本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`docs/perf/logs/mha-options-2163/README.md`）。
+
 ## #1739 の追補（`HuberLoss`／`SmoothL1Loss`）
 
 §2.8 の `HuberLoss`/`SmoothL1Loss` 行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する。
