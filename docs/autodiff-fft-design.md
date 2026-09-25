@@ -334,7 +334,7 @@ docs のみの変更のため対象外。
 | `crates/autodiff/src/custom.rs:44` | `CustomFunction` trait（案 D の比較対象） |
 | `crates/autodiff/tests/architecture_boundaries.rs` | eval／backend-cpu 間の依存方向制約（linalg の意図的複製の理由） |
 | `.claude/rules/coding-rust.md` | FMA 契約統一・正規化統計の f64 アキュムレータ契約・結合順序が異なるカーネルの parity 判定方式 |
-| `.claude/rules/deps-policy.md` | 許容依存 8 区分（外部 FFT クレートは対象外） |
+| `.claude/rules/deps-policy.md` | 許容依存 9 区分（外部 FFT クレートは対象外） |
 | #2194 | complex dtype 等の非目標を spec に明記する提案（起草中・open） |
 | #2264 | `pad` の出力確保を巨大な pad 幅で fail-closed にする（境界検査の同型先例・open） |
 | #2131 | Phase 5「PyTorch／TF 置き換えの API 網羅」親 issue |
