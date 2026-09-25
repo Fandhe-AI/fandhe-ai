@@ -2668,3 +2668,104 @@ struct VarEinsumBatchHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct VarIndexingOpsHoldDoctestGuard;
+
+/// イシュー #2154（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカルの自由
+/// 関数群（`__fandhe_extremum_hold_probe::extremum_ops::{amax, amin}`）
+/// とトレイト（`__FandheExtremumHoldProbe`）を導入し、実際に使う関数を
+/// 書く。facade がどの経路（`pub use fandhe_ai_autodiff::extremum_ops;`
+/// のようなモジュール再エクスポート・`Var` への inherent メソッド
+/// 追加・別名 `pub use`）で `extremum_ops` という名前や 2 個の関数名を
+/// 公開しても、ローカル定義との glob 衝突（モジュール名の場合）または
+/// 呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッドより
+/// 優先解決されるため、引数なしの `x.amax()` 呼び出しが
+/// `Var::amax(&self, dim: Option<usize>)` に解決されて型・引数数
+/// エラーになる）でコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// extremum_ops_hold_doctest_globs_all_pub_modules`・`extremum_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_extremum_ops`・`workspace_declares_extremum_
+/// ops_fn_names_only_in_allowed_locations`）との多層防御の位置づけは
+/// `docs/autodiff-amax-grad-distribution-decision.md` §9「実装記録」を
+/// 参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_extremum_hold_probe {
+///     pub mod extremum_ops {
+///         pub fn amax() {}
+///         pub fn amin() {}
+///     }
+/// }
+/// use __fandhe_extremum_hold_probe::*;
+///
+/// struct __FandheExtremumMarker;
+///
+/// trait __FandheExtremumHoldProbe {
+///     fn amax(&self) -> __FandheExtremumMarker;
+///     fn amin(&self) -> __FandheExtremumMarker;
+/// }
+///
+/// impl<'t> __FandheExtremumHoldProbe for fandhe_ai::Var<'t> {
+///     fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
+///     fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
+/// }
+///
+/// impl __FandheExtremumHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
+///     fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
+/// }
+///
+/// impl __FandheExtremumHoldProbe for fandhe_ai::Tape {
+///     fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
+///     fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `extremum_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     extremum_ops::amax();
+///     extremum_ops::amin();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheExtremumMarker = fandhe_ai::Var::amax(x);
+///     let _: __FandheExtremumMarker = x.amax();
+///     let _: __FandheExtremumMarker = fandhe_ai::Var::amin(x);
+///     let _: __FandheExtremumMarker = x.amin();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheExtremumMarker = fandhe_ai::Tensor::amax(x);
+///     let _: __FandheExtremumMarker = x.amax();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheExtremumMarker = fandhe_ai::Tape::amin(x);
+///     let _: __FandheExtremumMarker = x.amin();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarExtremumOpsHoldDoctestGuard;

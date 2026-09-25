@@ -359,7 +359,18 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   〈`max(dim)`／`min(dim)` 族の意味論〉は先勝ち決定的を維持し、PyTorch
   `torch.amax`／`amin` 相当の均等分配は別 `Op`／別ヘルパーとして後続
   issue で実装する方針。`docs/autodiff-amax-grad-distribution-decision.md`
-  参照。`04-requirements.md:234`）
+  参照。`04-requirements.md:234`）。**均等分配版は #2154 で
+  `fandhe_ai_autodiff::extremum_ops::{amax, amin}`〈`crates/autodiff/
+  src/extremum_ops.rs`。`Op::Amax`／`Op::Amin`・`grad::
+  extremum_even_split_vjp`〉として内部クレート限定の自由関数で実装
+  済み（`reduce_ops`〈#2147〉と同型の facade 非公開保留。**facade 公開
+  〈`Var::amax`／`amin` の委譲メソッド追加〉は未承認のまま対象外**——
+  `crates/facade/src/lib.rs::VarExtremumOpsHoldDoctestGuard`＋
+  `api_surface.rs` の 4 テストで到達不能を多層固定。既存
+  `Var::max`／`min`／`max_dims` の先勝ち挙動は無変更。CUDA／Metal 実機
+  実測は未実施のまま `docs/perf/logs/amax-amin-2154/README.md` へ
+  申し送り。詳細は `docs/autodiff-amax-grad-distribution-decision.md`
+  §9 を正とする）
 - 対象外要望が生じた場合の受け皿は 2 通り。
   - 実装リポ側で追跡が完結する事項: `.claude/rules/out-of-scope-tracking.md`
     の規約に沿って Issue で追跡する
