@@ -335,26 +335,62 @@ fn metal_bit_exact_forward_matches_cpu_reference() {
     );
 }
 
-/// bit 完全一致 backward 3 演算の CPU／Metal 実機比較。
+/// bit 完全一致 backward 3 演算（`hardtanh`／`relu6`／`prelu` 入力勾配）
+/// の CPU／Metal 実機比較。`cpu_bit_exact_backward_matches_naive_
+/// reference` と同じ 3 演算を網羅する（codex-review 指摘・イシュー
+/// #2144 の教訓「代表 1 演算での省略はしない」の横展開。イシュー
+/// #2146）。
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Metal 実機が必要。docs/perf/logs/activation-ops-2146/README.md 参照"]
 fn metal_bit_exact_backward_matches_cpu_reference() {
     let data = activation_fixture();
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+
     let cpu_tape = fandhe_ai::tape();
     let x_cpu = cpu_tape.make_var(&data);
     let loss_cpu = hardtanh(&x_cpu, -1.0, 1.0).unwrap().sum(None).unwrap();
     let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
     let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap();
 
-    let metal_tape =
-        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
     let x_metal = metal_tape.make_var(&data);
     let loss_metal = hardtanh(&x_metal, -1.0, 1.0).unwrap().sum(None).unwrap();
     let grads_metal = metal_tape.backward(&loss_metal).unwrap();
     let dx_metal = grads_metal.get(&x_metal).unwrap().unwrap();
-
     assert_eq!(f32_bits(dx_cpu), f32_bits(dx_metal), "hardtanh backward");
+
+    let cpu_tape2 = fandhe_ai::tape();
+    let x_cpu2 = cpu_tape2.make_var(&data);
+    let loss_cpu2 = relu6(&x_cpu2).unwrap().sum(None).unwrap();
+    let grads_cpu2 = cpu_tape2.backward(&loss_cpu2).unwrap();
+    let dx_cpu2 = grads_cpu2.get(&x_cpu2).unwrap().unwrap();
+
+    let x_metal2 = metal_tape.make_var(&data);
+    let loss_metal2 = relu6(&x_metal2).unwrap().sum(None).unwrap();
+    let grads_metal2 = metal_tape.backward(&loss_metal2).unwrap();
+    let dx_metal2 = grads_metal2.get(&x_metal2).unwrap().unwrap();
+    assert_eq!(f32_bits(dx_cpu2), f32_bits(dx_metal2), "relu6 backward");
+
+    let w = prelu_weight_c2();
+    let xin = prelu_input_c2();
+    let cpu_tape3 = fandhe_ai::tape();
+    let x_cpu3 = cpu_tape3.make_var(&xin);
+    let w_cpu3 = cpu_tape3.make_var(&w);
+    let loss_cpu3 = prelu(&x_cpu3, &w_cpu3).unwrap().sum(None).unwrap();
+    let grads_cpu3 = cpu_tape3.backward(&loss_cpu3).unwrap();
+    let dx_cpu3 = grads_cpu3.get(&x_cpu3).unwrap().unwrap();
+
+    let x_metal3 = metal_tape.make_var(&xin);
+    let w_metal3 = metal_tape.make_var(&w);
+    let loss_metal3 = prelu(&x_metal3, &w_metal3).unwrap().sum(None).unwrap();
+    let grads_metal3 = metal_tape.backward(&loss_metal3).unwrap();
+    let dx_metal3 = grads_metal3.get(&x_metal3).unwrap().unwrap();
+    assert_eq!(
+        f32_bits(dx_cpu3),
+        f32_bits(dx_metal3),
+        "prelu backward (input grad)"
+    );
 }
 
 /// REQ-2 forward 2 演算（`mish`／`glu`）の CPU／Metal 実機比較。
@@ -386,29 +422,68 @@ fn metal_req2_forward_matches_cpu_reference() {
     );
 }
 
-/// REQ-2 backward（`mish`）の CPU／Metal 実機比較。
+/// REQ-2 backward（`mish`／`glu`）・`prelu`（`weight` 勾配）の
+/// CPU／Metal 実機比較。`cpu_req2_backward_matches_naive_reference_
+/// within_tolerance` と同じ 3 セルを網羅する（codex-review 指摘・
+/// イシュー #2144 の教訓の横展開。イシュー #2146）。
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Metal 実機が必要。docs/perf/logs/activation-ops-2146/README.md 参照"]
 fn metal_req2_backward_matches_cpu_reference() {
     let data = transcendental_fixture();
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+
     let cpu_tape = fandhe_ai::tape();
     let x_cpu = cpu_tape.make_var(&data);
     let loss_cpu = mish(&x_cpu).unwrap().sum(None).unwrap();
     let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
     let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap();
 
-    let metal_tape =
-        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
     let x_metal = metal_tape.make_var(&data);
     let loss_metal = mish(&x_metal).unwrap().sum(None).unwrap();
     let grads_metal = metal_tape.backward(&loss_metal).unwrap();
     let dx_metal = grads_metal.get(&x_metal).unwrap().unwrap();
-
     fandhe_ai_backend_cpu::parity::assert_parity(
         "mish backward: cpu vs metal",
         dx_cpu.host_slice().as_ref(),
         dx_metal.host_slice().as_ref(),
+    );
+
+    let cpu_tape2 = fandhe_ai::tape();
+    let x_cpu2 = cpu_tape2.make_var(&data);
+    let loss_cpu2 = glu(&x_cpu2, 0).unwrap().sum(None).unwrap();
+    let grads_cpu2 = cpu_tape2.backward(&loss_cpu2).unwrap();
+    let dx_cpu2 = grads_cpu2.get(&x_cpu2).unwrap().unwrap();
+
+    let x_metal2 = metal_tape.make_var(&data);
+    let loss_metal2 = glu(&x_metal2, 0).unwrap().sum(None).unwrap();
+    let grads_metal2 = metal_tape.backward(&loss_metal2).unwrap();
+    let dx_metal2 = grads_metal2.get(&x_metal2).unwrap().unwrap();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "glu backward: cpu vs metal",
+        dx_cpu2.host_slice().as_ref(),
+        dx_metal2.host_slice().as_ref(),
+    );
+
+    let w = prelu_weight_c2();
+    let xin = prelu_input_c2();
+    let cpu_tape3 = fandhe_ai::tape();
+    let x_cpu3 = cpu_tape3.make_var(&xin);
+    let w_cpu3 = cpu_tape3.make_var(&w);
+    let loss_cpu3 = prelu(&x_cpu3, &w_cpu3).unwrap().sum(None).unwrap();
+    let grads_cpu3 = cpu_tape3.backward(&loss_cpu3).unwrap();
+    let dw_cpu3 = grads_cpu3.get(&w_cpu3).unwrap().unwrap();
+
+    let x_metal3 = metal_tape.make_var(&xin);
+    let w_metal3 = metal_tape.make_var(&w);
+    let loss_metal3 = prelu(&x_metal3, &w_metal3).unwrap().sum(None).unwrap();
+    let grads_metal3 = metal_tape.backward(&loss_metal3).unwrap();
+    let dw_metal3 = grads_metal3.get(&w_metal3).unwrap().unwrap();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "prelu weight grad: cpu vs metal",
+        dw_cpu3.host_slice().as_ref(),
+        dw_metal3.host_slice().as_ref(),
     );
 }
 
@@ -448,25 +523,58 @@ fn cuda_bit_exact_forward_matches_cpu_reference() {
     );
 }
 
-/// bit 完全一致 backward 3 演算の CPU／CUDA 実機比較。
+/// bit 完全一致 backward 3 演算（`hardtanh`／`relu6`／`prelu` 入力勾配）
+/// の CPU／CUDA 実機比較。上記 Metal 版と対称。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/activation-ops-2146/README.md 参照"]
 fn cuda_bit_exact_backward_matches_cpu_reference() {
     let data = activation_fixture();
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+
     let cpu_tape = fandhe_ai::tape();
     let x_cpu = cpu_tape.make_var(&data);
     let loss_cpu = hardtanh(&x_cpu, -1.0, 1.0).unwrap().sum(None).unwrap();
     let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
     let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap();
 
-    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
-        .expect("実機が利用可能な前提のテストのため成功するはず");
     let x_cuda = cuda_tape.make_var(&data);
     let loss_cuda = hardtanh(&x_cuda, -1.0, 1.0).unwrap().sum(None).unwrap();
     let grads_cuda = cuda_tape.backward(&loss_cuda).unwrap();
     let dx_cuda = grads_cuda.get(&x_cuda).unwrap().unwrap();
-
     assert_eq!(f32_bits(dx_cpu), f32_bits(dx_cuda), "hardtanh backward");
+
+    let cpu_tape2 = fandhe_ai::tape();
+    let x_cpu2 = cpu_tape2.make_var(&data);
+    let loss_cpu2 = relu6(&x_cpu2).unwrap().sum(None).unwrap();
+    let grads_cpu2 = cpu_tape2.backward(&loss_cpu2).unwrap();
+    let dx_cpu2 = grads_cpu2.get(&x_cpu2).unwrap().unwrap();
+
+    let x_cuda2 = cuda_tape.make_var(&data);
+    let loss_cuda2 = relu6(&x_cuda2).unwrap().sum(None).unwrap();
+    let grads_cuda2 = cuda_tape.backward(&loss_cuda2).unwrap();
+    let dx_cuda2 = grads_cuda2.get(&x_cuda2).unwrap().unwrap();
+    assert_eq!(f32_bits(dx_cpu2), f32_bits(dx_cuda2), "relu6 backward");
+
+    let w = prelu_weight_c2();
+    let xin = prelu_input_c2();
+    let cpu_tape3 = fandhe_ai::tape();
+    let x_cpu3 = cpu_tape3.make_var(&xin);
+    let w_cpu3 = cpu_tape3.make_var(&w);
+    let loss_cpu3 = prelu(&x_cpu3, &w_cpu3).unwrap().sum(None).unwrap();
+    let grads_cpu3 = cpu_tape3.backward(&loss_cpu3).unwrap();
+    let dx_cpu3 = grads_cpu3.get(&x_cpu3).unwrap().unwrap();
+
+    let x_cuda3 = cuda_tape.make_var(&xin);
+    let w_cuda3 = cuda_tape.make_var(&w);
+    let loss_cuda3 = prelu(&x_cuda3, &w_cuda3).unwrap().sum(None).unwrap();
+    let grads_cuda3 = cuda_tape.backward(&loss_cuda3).unwrap();
+    let dx_cuda3 = grads_cuda3.get(&x_cuda3).unwrap().unwrap();
+    assert_eq!(
+        f32_bits(dx_cpu3),
+        f32_bits(dx_cuda3),
+        "prelu backward (input grad)"
+    );
 }
 
 /// REQ-2 forward 2 演算の CPU／CUDA 実機比較。
@@ -497,27 +605,64 @@ fn cuda_req2_forward_matches_cpu_reference() {
     );
 }
 
-/// REQ-2 backward（`mish`）の CPU／CUDA 実機比較。
+/// REQ-2 backward（`mish`／`glu`）・`prelu`（`weight` 勾配）の
+/// CPU／CUDA 実機比較。上記 Metal 版と対称。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/activation-ops-2146/README.md 参照"]
 fn cuda_req2_backward_matches_cpu_reference() {
     let data = transcendental_fixture();
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+
     let cpu_tape = fandhe_ai::tape();
     let x_cpu = cpu_tape.make_var(&data);
     let loss_cpu = mish(&x_cpu).unwrap().sum(None).unwrap();
     let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
     let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap();
 
-    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
-        .expect("実機が利用可能な前提のテストのため成功するはず");
     let x_cuda = cuda_tape.make_var(&data);
     let loss_cuda = mish(&x_cuda).unwrap().sum(None).unwrap();
     let grads_cuda = cuda_tape.backward(&loss_cuda).unwrap();
     let dx_cuda = grads_cuda.get(&x_cuda).unwrap().unwrap();
-
     fandhe_ai_backend_cpu::parity::assert_parity(
         "mish backward: cpu vs cuda",
         dx_cpu.host_slice().as_ref(),
         dx_cuda.host_slice().as_ref(),
+    );
+
+    let cpu_tape2 = fandhe_ai::tape();
+    let x_cpu2 = cpu_tape2.make_var(&data);
+    let loss_cpu2 = glu(&x_cpu2, 0).unwrap().sum(None).unwrap();
+    let grads_cpu2 = cpu_tape2.backward(&loss_cpu2).unwrap();
+    let dx_cpu2 = grads_cpu2.get(&x_cpu2).unwrap().unwrap();
+
+    let x_cuda2 = cuda_tape.make_var(&data);
+    let loss_cuda2 = glu(&x_cuda2, 0).unwrap().sum(None).unwrap();
+    let grads_cuda2 = cuda_tape.backward(&loss_cuda2).unwrap();
+    let dx_cuda2 = grads_cuda2.get(&x_cuda2).unwrap().unwrap();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "glu backward: cpu vs cuda",
+        dx_cpu2.host_slice().as_ref(),
+        dx_cuda2.host_slice().as_ref(),
+    );
+
+    let w = prelu_weight_c2();
+    let xin = prelu_input_c2();
+    let cpu_tape3 = fandhe_ai::tape();
+    let x_cpu3 = cpu_tape3.make_var(&xin);
+    let w_cpu3 = cpu_tape3.make_var(&w);
+    let loss_cpu3 = prelu(&x_cpu3, &w_cpu3).unwrap().sum(None).unwrap();
+    let grads_cpu3 = cpu_tape3.backward(&loss_cpu3).unwrap();
+    let dw_cpu3 = grads_cpu3.get(&w_cpu3).unwrap().unwrap();
+
+    let x_cuda3 = cuda_tape.make_var(&xin);
+    let w_cuda3 = cuda_tape.make_var(&w);
+    let loss_cuda3 = prelu(&x_cuda3, &w_cuda3).unwrap().sum(None).unwrap();
+    let grads_cuda3 = cuda_tape.backward(&loss_cuda3).unwrap();
+    let dw_cuda3 = grads_cuda3.get(&w_cuda3).unwrap().unwrap();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "prelu weight grad: cpu vs cuda",
+        dw_cpu3.host_slice().as_ref(),
+        dw_cuda3.host_slice().as_ref(),
     );
 }

@@ -89,7 +89,12 @@ max` を必須とする。違反は `AutodiffError::InvalidArgument` を返す�
 `C = weight.shape()[0] >= 1` を要求する。`C == 1` は全チャネル共有、
 `C > 1` は `x` の rank が 2 以上かつ `x.shape()[1] == C` を要求する
 （PyTorch のチャネル軸＝軸 1 規約）。検査は計算・メモリ確保の前に
-すべて行う。
+すべて行う。`weight` 勾配は `mul` の broadcast 縮約（汎用
+`grad::reduce_to_shape`）を経由する——`.claude/rules/coding-rust.md`
+の f64 アキュムレータ統一契約は bias パターン（`reduce_bias_grad`）
+限定であり、汎用 `reduce_to_shape` 自体は対象外・不変のまま
+（`activation_ops.rs` モジュール doc・実装計画 §2.3 補足と同じ
+注記）。
 
 **glu(x, dim)**: 検査を先に行う（rank 0・`dim >= rank` は
 `ShapeError::AxisOutOfRange`、`shape[dim]` が奇数なら
@@ -208,3 +213,30 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 メソッド追加、`compat::Sequential::add_*` 5 種追加、facade 保留
 ガード（`VarActivationOpsHoldDoctestGuard`・対応する否定ガード 4 件）
 の撤去。
+
+**手動検証（実装計画「手順 6」）**: `crates/facade/src/lib.rs` へ
+`pub use fandhe_ai_autodiff::activation_ops;` を仮に追加し、
+`facade_does_not_reexport_or_declare_activation_ops`（ソース走査
+ガード）が FAILED になること、`cargo test -p fandhe-ai --doc
+VarActivationOpsHoldDoctestGuard`（正のプローブ doctest）が
+E0659（名前解決の曖昧化）で FAILED になることを確認済み。同じ行を
+外すと両テストとも green に戻ることも確認済み（2026-09-25）。
+
+## §9 網羅契約の追加是正（codex-review 相当指摘・実装エージェント自己是正・2026-09-25）
+
+初版の `crates/facade/tests/activation_ops_backend_parity.rs` は
+CUDA／Metal の `#[ignore]` backward テスト 4 件（`metal_bit_exact_
+backward_matches_cpu_reference`・`cuda_bit_exact_backward_matches_
+cpu_reference`・`metal_req2_backward_matches_cpu_reference`・
+`cuda_req2_backward_matches_cpu_reference`）が、対応する CPU 版
+（`cpu_bit_exact_backward_matches_naive_reference`・`cpu_req2_
+backward_matches_naive_reference_within_tolerance`）と異なり
+代表 1 演算（`hardtanh`・`mish`）のみを検証し、`relu6`／`prelu`
+（bit 完全一致 backward 側）・`glu`／`prelu` の `weight` 勾配
+（REQ-2 backward 側）が空セルのまま残っていた。これはモジュール
+doc が明記する「関数名は網羅表と一対一対応する」契約・#2144 の
+codex-review 教訓「代表 1 演算での省略はしない」に反するため、
+CPU 版のテスト本体をそのまま device 版へ複製し、4 テストとも CPU
+版と同じ演算・セル数（3 セル）を網羅するよう是正した（`docs/perf/
+logs/activation-ops-2146/README.md` の「代表とする」という誤記述も
+同時に修正）。

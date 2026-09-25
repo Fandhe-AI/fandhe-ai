@@ -10,13 +10,15 @@ Metal（`Device::Metal`。`cfg(target_os = "macos")` 限定）を対象とする
 〈`hardtanh`／`relu6`／`prelu` forward〉の
 `cuda_bit_exact_forward_matches_cpu_reference`／
 `metal_bit_exact_forward_matches_cpu_reference`、bit 完全一致
-backward（`hardtanh` 入力勾配を代表とする）の
+backward（`hardtanh`／`relu6`／`prelu` 入力勾配の 3 セルを個別に検証。
+「代表 1 演算での省略」はしない。#2144 codex-review 指摘の横展開）の
 `cuda_bit_exact_backward_matches_cpu_reference`／
 `metal_bit_exact_backward_matches_cpu_reference`、REQ-2 統一複合判定
 forward 2 演算〈`mish`／`glu`〉の
 `cuda_req2_forward_matches_cpu_reference`／
 `metal_req2_forward_matches_cpu_reference`、REQ-2 統一複合判定
-backward（`mish` を代表とする）の
+backward（`mish`／`glu`・`prelu` の `weight` 勾配の 3 セルを個別に
+検証）の
 `cuda_req2_backward_matches_cpu_reference`／
 `metal_req2_backward_matches_cpu_reference`）は `#[ignore]` のまま
 未実測である。

@@ -436,4 +436,91 @@ mod tests {
         let scalar = tape.var(&Tensor::new(vec![1.0f32], &[]).unwrap());
         assert!(glu(&scalar, 0).is_err());
     }
+
+    #[test]
+    fn glu_dim1_forward_matches_reference() {
+        // shape [2, 4]・dim=1: 各行を前半 2 列・後半 2 列へ分割する
+        // （`glu_forward_matches_reference` は dim=0 のみを検証していた
+        // ため、非既定軸のカバレッジを補う）。
+        let tape = Tape::new();
+        let x = tape
+            .var(&Tensor::new(vec![1.0f32, 2.0, 0.0, 0.0, -1.0, 3.0, 0.0, 0.0], &[2, 4]).unwrap());
+        let y = glu(&x, 1).unwrap();
+        let out = y.to_tensor();
+        let d = out.as_slice().unwrap();
+        // 行 0: a=[1,2], b=[0,0] -> sigmoid(0)=0.5 -> [0.5, 1.0]
+        // 行 1: a=[-1,3], b=[0,0] -> sigmoid(0)=0.5 -> [-0.5, 1.5]
+        approx_eq(d[0], 0.5);
+        approx_eq(d[1], 1.0);
+        approx_eq(d[2], -0.5);
+        approx_eq(d[3], 1.5);
+    }
+
+    /// 中心差分（`h = 1e-3`）で `mish`／`glu` の backward を検算する
+    /// （実装計画 §5「backward: 有限差分で検算する」。境界値ちょうど
+    /// を避けた代表値を使う）。tape 経由の backward が独立に計算した
+    /// 数値微分と一致することを確認するため、合成のどこかで符号や
+    /// 係数を取り違えていないかを bit 完全一致テストとは別の角度で
+    /// 検証する。
+    fn finite_diff_grad(f: impl Fn(f32) -> f32, x: f32, h: f32) -> f32 {
+        (f(x + h) - f(x - h)) / (2.0 * h)
+    }
+
+    #[test]
+    fn mish_backward_matches_finite_difference() {
+        fn mish_scalar(x: f32) -> f32 {
+            let sp = (1.0 + x.exp()).ln();
+            x * sp.tanh()
+        }
+
+        let xs = [-2.3f32, -0.7, 0.4, 1.9];
+        for &xi in &xs {
+            let tape = Tape::new();
+            let x = tape.var(&Tensor::new(vec![xi], &[1]).unwrap());
+            let y = mish(&x).unwrap();
+            let grads = tape.backward(&y).unwrap();
+            let dx = grads.get(&x).unwrap().unwrap();
+            let analytic = dx.host_slice()[0];
+            let numeric = finite_diff_grad(mish_scalar, xi, 1e-3);
+            let diff = (analytic - numeric).abs();
+            assert!(
+                diff < 5e-2,
+                "mish backward mismatch at x={xi}: analytic={analytic}, numeric={numeric}"
+            );
+        }
+    }
+
+    #[test]
+    fn glu_backward_matches_finite_difference() {
+        // glu([a, b], dim=0) = a * sigmoid(b) の a・b それぞれについて
+        // 偏微分を中心差分と突合する（2 要素 fixture・境界値を避けた
+        // 代表値）。
+        fn glu_scalar(a: f32, b: f32) -> f32 {
+            a * (1.0 / (1.0 + (-b).exp()))
+        }
+
+        let cases = [(-1.3f32, 0.6f32), (2.1, -0.9)];
+        for &(a, b) in &cases {
+            let tape = Tape::new();
+            let x = tape.var(&Tensor::new(vec![a, b], &[2]).unwrap());
+            let y = glu(&x, 0).unwrap();
+            let grads = tape.backward(&y).unwrap();
+            let dx = grads.get(&x).unwrap().unwrap();
+            let analytic = dx.host_slice();
+
+            let numeric_da = finite_diff_grad(|v| glu_scalar(v, b), a, 1e-3);
+            let numeric_db = finite_diff_grad(|v| glu_scalar(a, v), b, 1e-3);
+
+            assert!(
+                (analytic[0] - numeric_da).abs() < 5e-2,
+                "glu d/da mismatch at (a={a}, b={b}): analytic={}, numeric={numeric_da}",
+                analytic[0]
+            );
+            assert!(
+                (analytic[1] - numeric_db).abs() < 5e-2,
+                "glu d/db mismatch at (a={a}, b={b}): analytic={}, numeric={numeric_db}",
+                analytic[1]
+            );
+        }
+    }
 }

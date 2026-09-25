@@ -3049,9 +3049,23 @@ mod tests {
 
         let glu = Glu::new(0);
         assert!(!Module::supports_forward_host(&glu));
+        assert!(matches!(
+            glu.forward_host(
+                crate::test_support::test_ops().as_ref(),
+                &Tensor::new(vec![1.0, 2.0], &[2]).unwrap()
+            ),
+            Err(AutodiffError::Backend(BackendError::Unsupported(_)))
+        ));
 
         let prelu = PRelu::new(1, 0.25).unwrap();
         assert!(!Module::supports_forward_host(&prelu));
+        assert!(matches!(
+            prelu.forward_host(
+                crate::test_support::test_ops().as_ref(),
+                &Tensor::new(vec![1.0], &[1]).unwrap()
+            ),
+            Err(AutodiffError::Backend(BackendError::Unsupported(_)))
+        ));
     }
 
     #[test]
@@ -3069,5 +3083,57 @@ mod tests {
 
         Module::freeze(&mut prelu).expect("weight を持つので freeze は成功する");
         assert!(!Module::requires_grad(&prelu));
+
+        // `freeze()` 後は `bind` が `requires_grad=false` で weight を
+        // 登録するため、backward 後の `Gradients::get(&weight)` は値
+        // ではなく `GradientTrackingDisabled` を返す（「フラグを立てた
+        // つもりで実際には学習が継続していた」という A08 の事故を防ぐ
+        // 契約。`device_transfer.rs`／`retain_graph_accumulate.rs` の
+        // 既存 `var_no_grad` 系テストと同じ判定形）。
+        let x2 = tape.var(&Tensor::new(vec![-3.0, -4.0], &[1, 2]).unwrap());
+        let vars = prelu.bind(&tape);
+        let y2 = vars.forward(&x2).unwrap();
+        let loss2 = y2.sum(None).unwrap();
+        let grads2 = tape.backward(&loss2).unwrap();
+        let err = grads2.get(&vars.weight).unwrap_err();
+        assert!(matches!(err, AutodiffError::GradientTrackingDisabled));
+    }
+
+    /// `PRelu::set_parameter`（`Module::set_parameter` 実装）が shape
+    /// 不一致を `AutodiffError::Shape` で拒否すること（`Module::
+    /// named_parameters` doc「命名契約」の shape 保存置換のみ契約）と、
+    /// `state_dict`／`load_state_dict` の往復が成功することを確認する。
+    #[test]
+    fn prelu_set_parameter_rejects_shape_mismatch_and_state_dict_round_trips() {
+        let mut prelu = PRelu::new(2, 0.25).unwrap();
+
+        let wrong_shape = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let err = Module::set_parameter(&mut prelu, "weight", wrong_shape).unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
+
+        let unknown = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
+        let err = Module::set_parameter(&mut prelu, "bias", unknown).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let state = Module::state_dict(&prelu);
+        assert_eq!(
+            state["weight"].contiguous().as_slice().unwrap(),
+            &[0.25f32, 0.25]
+        );
+
+        let mut updated = std::collections::HashMap::new();
+        updated.insert(
+            "weight".to_string(),
+            Tensor::new(vec![0.5f32, 0.7], &[2]).unwrap(),
+        );
+        Module::load_state_dict(&mut prelu, updated)
+            .expect("shape 一致する state_dict の往復は成功するはず");
+        assert_eq!(
+            Module::state_dict(&prelu)["weight"]
+                .contiguous()
+                .as_slice()
+                .unwrap(),
+            &[0.5f32, 0.7]
+        );
     }
 }
