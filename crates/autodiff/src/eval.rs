@@ -26,7 +26,8 @@ use std::borrow::Cow;
 use fandhe_ai_tensor_core::{
     BceKind, GruBackwardOutput, GruPointwiseOutput, HuberKind, KlDivTarget, LstmPointwiseOutput,
     Pool2dParams, ScatterReduce, ShapeError, Tensor, UniqueExtOutput, VectorNormOrd,
-    adaptive_window, bilinear_blend, bilinear_scale, bilinear_src_coord,
+    adaptive_window, bicubic_blend, bicubic_src_taps, bilinear_blend, bilinear_scale,
+    bilinear_src_coord, linear_blend, nearest_exact_src_coord, trilinear_blend,
 };
 
 use crate::layout;
@@ -2863,6 +2864,377 @@ pub(crate) fn interpolate_bilinear(
         let v10 = input_data[base + cy.i1 * stride_h + cx.i0 * stride_w];
         let v11 = input_data[base + cy.i1 * stride_h + cx.i1 * stride_w];
         *out_val = bilinear_blend(v00, v01, v10, v11, cx.lambda1, cy.lambda1);
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+/// `interpolate_nearest`／`interpolate_bilinear` が個別に持つ「入力側
+/// 稠密化コストの事前検査」（イシュー #1834 是正）を、新規 5 モード
+/// （イシュー #2152）向けに共有するヘルパー。巨大な `broadcast_to`
+/// view を小さい `size` へ縮小する interpolate は、出力側のバイト
+/// サイズ検査（呼び出し元 `Var::interpolate_impl` が事前検査済み）
+/// だけでは防げない `dense_vec_ref` の capacity overflow panic
+/// （本番経路 panic 禁止規約）を、入力側の要素数・バイトサイズを
+/// 独立に `checked_mul` で検査することで防ぐ。
+fn check_dense_capacity_f32(in_shape: &[usize]) -> Result<(), ShapeError> {
+    let in_numel = in_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let in_bytes = in_numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if in_bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    Ok(())
+}
+
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::
+/// NearestExact`]）のホスト参照実装（イシュー #2152）。
+/// `BackendOps::interpolate` が `Unsupported` を返したときのみ
+/// `grad::interpolate_with_fallback` から呼ばれる。`interpolate_
+/// nearest` と同じく算術を含まない純粋なコピー演算のため 3 バック
+/// エンド間で構造的に **bit 完全一致**する。添字式の単一情報源は
+/// [`nearest_exact_src_coord`]（`tensor-core`。forward／backward の
+/// VJP index 構築 `grad::nearest_exact_src_index_map` と共有）。
+pub(crate) fn interpolate_nearest_exact(
+    input: &Tensor<f32>,
+    size: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    check_dense_capacity_f32(&in_shape)?;
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let mut pos = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            let coord = if axis >= spatial_start {
+                nearest_exact_src_coord(coords[axis], in_shape[axis], out_shape[axis])
+            } else {
+                coords[axis]
+            };
+            pos += coord * stride;
+        }
+        *out_val = input_data[pos];
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::Area`]）の
+/// ホスト参照実装（イシュー #2152。adaptive average pooling と同型）。
+/// `BackendOps::interpolate` が `Unsupported` を返したときのみ
+/// `grad::interpolate_with_fallback` から呼ばれる。空間軸は任意
+/// （`size.len()` 個・`1..=rank`）。各出力位置の窓は
+/// [`fandhe_ai_tensor_core::adaptive_window`]（forward／backward 共有
+/// の単一情報源。`Op::AdaptiveAvgPool2d` の VJP・`backend-cpu::
+/// pooling::adaptive_avg_pool2d` と同じ関数）が定める。窓内は
+/// 空間軸の先頭を最も遅く・末尾を最も速く走査する固定順序（row-major
+/// ネストループと同型）で `f64` アキュムレータへ加算し、最後に 1 回
+/// だけ `f32` へ downcast する（`.claude/rules/coding-rust.md`「勾配
+/// の長軸縮約」節と同じ精度規律。この順序・精度規律は 2 軸の場合に
+/// `backend-cpu::pooling::adaptive_avg_pool2d`〈h 外側・w 内側の
+/// ネストループ〉と一致し bit 完全一致となる——`crates/facade/tests/
+/// interpolate_backend_parity.rs` の突き合わせテスト参照）。
+pub(crate) fn interpolate_area(
+    input: &Tensor<f32>,
+    size: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    check_dense_capacity_f32(&in_shape)?;
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+    let n_spatial = size.len();
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let mut starts = vec![0usize; n_spatial];
+        let mut lens = vec![0usize; n_spatial];
+        for (k, axis) in (spatial_start..rank).enumerate() {
+            let (s, e) = adaptive_window(coords[axis], in_shape[axis], out_shape[axis])
+                .ok_or(ShapeError::ElementCountOverflow)?;
+            starts[k] = s;
+            lens[k] = e - s;
+        }
+        let count: usize = lens
+            .iter()
+            .try_fold(1usize, |acc, &l| acc.checked_mul(l))
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        if count == 0 {
+            // `adaptive_pool2d_out_shape`／`interpolate_out_shape` が
+            // 入出力とも空間軸 >=1 を事前検査済みのため窓は常に
+            // 非空のはずだが、到達しない分岐でも fail-closed に
+            // 型付きエラーを返す（`adaptive_avg_pool2d` と同型）。
+            return Err(ShapeError::ElementCountOverflow);
+        }
+        let mut base = 0usize;
+        for axis in 0..spatial_start {
+            base += coords[axis] * input_strides[axis];
+        }
+
+        // 窓内を空間軸の先頭を最も遅く・末尾を最も速く走査する
+        // odometer（row-major ネストループと同型。`adaptive_avg_
+        // pool2d` の `for oh { for ow { .. } }` と同じ走査順）。
+        let mut idx = vec![0usize; n_spatial];
+        let mut acc: f64 = 0.0;
+        'window: loop {
+            let mut pos = base;
+            for (k, axis) in (spatial_start..rank).enumerate() {
+                pos += (starts[k] + idx[k]) * input_strides[axis];
+            }
+            acc += f64::from(input_data[pos]);
+            let mut k = n_spatial;
+            loop {
+                if k == 0 {
+                    break 'window;
+                }
+                k -= 1;
+                idx[k] += 1;
+                if idx[k] < lens[k] {
+                    break;
+                }
+                idx[k] = 0;
+                if k == 0 {
+                    break 'window;
+                }
+            }
+        }
+        *out_val = (acc / count as f64) as f32;
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::Linear`]）
+/// のホスト参照実装（イシュー #2152。1 軸版 `Bilinear`）。
+/// `BackendOps::interpolate` が `Unsupported` を返したときのみ
+/// `grad::interpolate_with_fallback` から呼ばれる。座標は
+/// [`bilinear_src_coord`]（1 軸分の呼び出し）、ブレンドは
+/// [`linear_blend`] を単一情報源として使う（`interpolate_bilinear`
+/// と同型の構成）。`size` はちょうど 1 個の末尾空間軸サイズ
+/// （`Var::interpolate` が `interpolate_out_shape_for_mode` で事前
+/// 検査済み——本関数は `size.len() == 1` を前提とする）。
+pub(crate) fn interpolate_linear(
+    input: &Tensor<f32>,
+    size: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    debug_assert_eq!(
+        size.len(),
+        1,
+        "interpolate_linear: caller must pre-validate size.len() == 1 via \
+         interpolate_out_shape_for_mode"
+    );
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    check_dense_capacity_f32(&in_shape)?;
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let axis = spatial_start;
+    let in_sz = in_shape[axis];
+    let out_sz = out_shape[axis];
+    let scale = bilinear_scale(in_sz, out_sz, align_corners);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let c = bilinear_src_coord(coords[axis], in_sz, scale, align_corners);
+
+        let mut base = 0usize;
+        for (ax, &stride) in input_strides.iter().enumerate() {
+            if ax != axis {
+                base += coords[ax] * stride;
+            }
+        }
+        let stride_axis = input_strides[axis];
+        let v0 = input_data[base + c.i0 * stride_axis];
+        let v1 = input_data[base + c.i1 * stride_axis];
+        *out_val = linear_blend(v0, v1, c.lambda1);
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Trilinear`]）のホスト参照実装（イシュー #2152。3 軸版
+/// `Bilinear`）。`BackendOps::interpolate` が `Unsupported` を返した
+/// ときのみ `grad::interpolate_with_fallback` から呼ばれる。座標は
+/// [`bilinear_src_coord`]（d／h／w 軸それぞれ独立に呼ぶ）、ブレンドは
+/// [`trilinear_blend`] を単一情報源として使う。`size` はちょうど 3
+/// 個の末尾空間軸サイズ（`(D, H, W)`。`Var::interpolate` が
+/// `interpolate_out_shape_for_mode` で事前検査済み）。
+pub(crate) fn interpolate_trilinear(
+    input: &Tensor<f32>,
+    size: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    debug_assert_eq!(
+        size.len(),
+        3,
+        "interpolate_trilinear: caller must pre-validate size.len() == 3 via \
+         interpolate_out_shape_for_mode"
+    );
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    check_dense_capacity_f32(&in_shape)?;
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let d_axis = spatial_start;
+    let h_axis = spatial_start + 1;
+    let w_axis = spatial_start + 2;
+    let in_d = in_shape[d_axis];
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_d = out_shape[d_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_d = bilinear_scale(in_d, out_d, align_corners);
+    let scale_h = bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let cz = bilinear_src_coord(coords[d_axis], in_d, scale_d, align_corners);
+        let cy = bilinear_src_coord(coords[h_axis], in_h, scale_h, align_corners);
+        let cx = bilinear_src_coord(coords[w_axis], in_w, scale_w, align_corners);
+
+        let mut base = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            if axis != d_axis && axis != h_axis && axis != w_axis {
+                base += coords[axis] * stride;
+            }
+        }
+        let stride_d = input_strides[d_axis];
+        let stride_h = input_strides[h_axis];
+        let stride_w = input_strides[w_axis];
+        let v000 = input_data[base + cz.i0 * stride_d + cy.i0 * stride_h + cx.i0 * stride_w];
+        let v001 = input_data[base + cz.i0 * stride_d + cy.i0 * stride_h + cx.i1 * stride_w];
+        let v010 = input_data[base + cz.i0 * stride_d + cy.i1 * stride_h + cx.i0 * stride_w];
+        let v011 = input_data[base + cz.i0 * stride_d + cy.i1 * stride_h + cx.i1 * stride_w];
+        let v100 = input_data[base + cz.i1 * stride_d + cy.i0 * stride_h + cx.i0 * stride_w];
+        let v101 = input_data[base + cz.i1 * stride_d + cy.i0 * stride_h + cx.i1 * stride_w];
+        let v110 = input_data[base + cz.i1 * stride_d + cy.i1 * stride_h + cx.i0 * stride_w];
+        let v111 = input_data[base + cz.i1 * stride_d + cy.i1 * stride_h + cx.i1 * stride_w];
+        *out_val = trilinear_blend(
+            v000, v001, v010, v011, v100, v101, v110, v111, cx.lambda1, cy.lambda1, cz.lambda1,
+        );
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Bicubic`]）のホスト参照実装（イシュー #2152）。`BackendOps::
+/// interpolate` が `Unsupported` を返したときのみ `grad::
+/// interpolate_with_fallback` から呼ばれる。座標・重みは
+/// [`bicubic_src_taps`]、ブレンドは [`bicubic_blend`]（16 tap。x 軸
+/// 4-tap 補間を 4 行分行ってから y 軸 4-tap 補間）を単一情報源として
+/// 使う。`size` はちょうど 2 個の末尾空間軸サイズ（`(H, W)`。
+/// `Var::interpolate` が `interpolate_out_shape_for_mode` で事前検査
+/// 済み）。
+pub(crate) fn interpolate_bicubic(
+    input: &Tensor<f32>,
+    size: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    debug_assert_eq!(
+        size.len(),
+        2,
+        "interpolate_bicubic: caller must pre-validate size.len() == 2 via \
+         interpolate_out_shape_for_mode"
+    );
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    check_dense_capacity_f32(&in_shape)?;
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let h_axis = spatial_start;
+    let w_axis = spatial_start + 1;
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_h = bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let taps_y = bicubic_src_taps(coords[h_axis], in_h, scale_h, align_corners);
+        let taps_x = bicubic_src_taps(coords[w_axis], in_w, scale_w, align_corners);
+
+        let mut base = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            if axis != h_axis && axis != w_axis {
+                base += coords[axis] * stride;
+            }
+        }
+        let stride_h = input_strides[h_axis];
+        let stride_w = input_strides[w_axis];
+        let mut v = [[0f32; 4]; 4];
+        for (j, row) in v.iter_mut().enumerate() {
+            for (k, cell) in row.iter_mut().enumerate() {
+                *cell = input_data[base + taps_y.idx[j] * stride_h + taps_x.idx[k] * stride_w];
+            }
+        }
+        *out_val = bicubic_blend(v, taps_x.w, taps_y.w);
     }
     Ok(build_tensor(out, &out_shape))
 }

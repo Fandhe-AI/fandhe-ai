@@ -600,6 +600,59 @@ pub enum InterpolateMode {
         /// half-pixel 変換を使う。
         align_corners: bool,
     },
+    /// 最近傍・半ピクセルオフセット版（`torch.nn.functional.
+    /// interpolate(mode='nearest-exact')` 相当。イシュー #2152）。
+    /// 添字式は `src = min(floor((dst+0.5)*in/out), in-1)`（float を
+    /// 使わない整数専用の等価式。単一情報源は [`crate::interpolate::
+    /// nearest_exact_src_coord`]）。`Nearest`（`src = (dst*in)/out`）
+    /// とは half-pixel オフセットの有無が異なるため一般に異なる添字
+    /// を返す。`Nearest` と同じく算術を含まない純粋なコピー演算のため
+    /// 3 バックエンド間で構造的に **bit 完全一致**する。
+    NearestExact,
+    /// 領域平均（`torch.nn.functional.interpolate(mode='area')`／
+    /// `tf.image.resize(method='area')` 相当。adaptive average
+    /// pooling と同型。イシュー #2152）。空間軸は任意（1..=rank）。
+    /// 各出力位置の窓は [`crate::ops_shape::adaptive_window`]（forward
+    /// ・backward 共有の単一情報源）が定める `[start, end)` で、窓内
+    /// 平均は `f64` アキュムレータで蓄積し最後に 1 回だけ `f32` へ
+    /// downcast する（`.claude/rules/coding-rust.md`「勾配の長軸縮約」
+    /// 節と同じ精度規律の先取り適用）。`align_corners` は持たない
+    /// （PyTorch と同じ——窓の定義自体が入出力比から決まるため）。
+    Area,
+    /// 線形（1 軸。`torch.nn.functional.interpolate(mode='linear')`
+    /// 相当。イシュー #2152）。空間軸は**ちょうど 1 軸**
+    /// （[`crate::ops_shape::interpolate_out_shape_for_mode`] が
+    /// `size.len() != 1` を `ShapeError::RankMismatch` で拒否する）。
+    /// 座標は [`crate::interpolate::bilinear_src_coord`]（1 軸分の
+    /// 呼び出し）、ブレンドは [`crate::interpolate::linear_blend`]
+    /// （`Bilinear` の行方向補間と同じ式）を単一情報源として使う。
+    Linear {
+        /// `Bilinear::align_corners` と同じ意味（1 軸版）。
+        align_corners: bool,
+    },
+    /// 三線形（3 軸。`torch.nn.functional.interpolate(mode=
+    /// 'trilinear')` 相当。イシュー #2152）。空間軸は**ちょうど 3 軸**
+    /// （`(D, H, W)`）。8 個の入力近傍を [`crate::interpolate::
+    /// trilinear_blend`]（`z0`／`z1` 面をそれぞれ `bilinear_blend` で
+    /// 合成し `linear_blend` で z 軸方向に結ぶ固定順序）で合成する。
+    Trilinear {
+        /// `Bilinear::align_corners` と同じ意味（3 軸版）。
+        align_corners: bool,
+    },
+    /// 双三次（2 軸・16 tap。`torch.nn.functional.interpolate(mode=
+    /// 'bicubic')` 相当。イシュー #2152）。空間軸は**ちょうど 2 軸**
+    /// （`(H, W)`）。cubic convolution（`A = -0.75`。PyTorch と同一
+    /// 係数）の 4-tap を x／y 軸それぞれに適用する（単一情報源は
+    /// [`crate::interpolate::bicubic_src_taps`]／[`crate::interpolate::
+    /// bicubic_blend`]）。`align_corners=false` でも `src<0` を
+    /// クランプしない（PyTorch `area_pixel_compute_source_index(...,
+    /// cubic=true)` と同じ契約——cubic 補間は `[-1,0,1,2]` の近傍参照
+    /// が必要なため。`bicubic_src_taps` doc 参照）。出力値はクランプ
+    /// しない（overshoot を許す。PyTorch と同じ）。
+    Bicubic {
+        /// `Bilinear::align_corners` と同じ意味（2 軸版）。
+        align_corners: bool,
+    },
 }
 
 /// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_sgd_step_segment`]
@@ -2457,8 +2510,10 @@ pub trait BackendOps {
     ///
     /// [`InterpolateMode::Nearest`] の添字式・数値契約は同 variant の
     /// doc を正とする——float を使わない整数演算のみのため forward は
-    /// **3 バックエンド間で構造的に bit 完全一致**する（`mode` の
-    /// 未知 variant〈将来 #1762 の bilinear 追加等〉は実装側が
+    /// **3 バックエンド間で構造的に bit 完全一致**する（`InterpolateMode`
+    /// は `#[non_exhaustive]` のため、実装が未対応の variant（本
+    /// crate 側で追加され得る `Bilinear`／`NearestExact`／`Area`／
+    /// `Linear`／`Trilinear`／`Bicubic` 等）に遭遇した場合は
     /// [`BackendError::Unsupported`] を返す契約とする）。
     ///
     /// # デフォルト実装

@@ -1568,9 +1568,9 @@ impl BackendOps for CpuBackendOps {
     }
 
     /// `BackendOps::interpolate` の CPU 実装（イシュー #1757・
-    /// bilinear は #1762）。[`interpolate_out_shape_for_mode`] で
-    /// `input`／`size` の shape を `mode` 別に再検査してから
-    /// `interpolate::interpolate_nearest`／`interpolate_bilinear` へ
+    /// bilinear は #1762・残り 5 モードは #2152）。
+    /// [`interpolate_out_shape_for_mode`] で `input`／`size` の shape
+    /// を `mode` 別に再検査してから `interpolate::interpolate_*` へ
     /// 委譲する（`gather`／`scatter` と同じ二重検査方針。
     /// `.claude/rules/security.md` A08）。`mode` の未知 variant
     /// （`InterpolateMode` は `#[non_exhaustive]`）は
@@ -1583,7 +1583,13 @@ impl BackendOps for CpuBackendOps {
         mode: InterpolateMode,
     ) -> Result<Tensor<f32>, BackendError> {
         match mode {
-            InterpolateMode::Nearest | InterpolateMode::Bilinear { .. } => {}
+            InterpolateMode::Nearest
+            | InterpolateMode::Bilinear { .. }
+            | InterpolateMode::NearestExact
+            | InterpolateMode::Area
+            | InterpolateMode::Linear { .. }
+            | InterpolateMode::Trilinear { .. }
+            | InterpolateMode::Bicubic { .. } => {}
             _ => {
                 return Err(BackendError::Unsupported(format!(
                     "CpuBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
@@ -1600,6 +1606,26 @@ impl BackendOps for CpuBackendOps {
             }
             InterpolateMode::Bilinear { align_corners } => {
                 interpolate::interpolate_bilinear(input, spatial_start, &out_shape, align_corners)
+                    .map_err(BackendError::ShapeMismatch)
+            }
+            InterpolateMode::NearestExact => {
+                interpolate::interpolate_nearest_exact(input, spatial_start, &out_shape)
+                    .map_err(BackendError::ShapeMismatch)
+            }
+            InterpolateMode::Area => {
+                interpolate::interpolate_area(input, spatial_start, &out_shape)
+                    .map_err(BackendError::ShapeMismatch)
+            }
+            InterpolateMode::Linear { align_corners } => {
+                interpolate::interpolate_linear(input, spatial_start, &out_shape, align_corners)
+                    .map_err(BackendError::ShapeMismatch)
+            }
+            InterpolateMode::Trilinear { align_corners } => {
+                interpolate::interpolate_trilinear(input, spatial_start, &out_shape, align_corners)
+                    .map_err(BackendError::ShapeMismatch)
+            }
+            InterpolateMode::Bicubic { align_corners } => {
+                interpolate::interpolate_bicubic(input, spatial_start, &out_shape, align_corners)
                     .map_err(BackendError::ShapeMismatch)
             }
             _ => Err(BackendError::Unsupported(format!(

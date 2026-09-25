@@ -143,6 +143,316 @@ pub fn bilinear_blend(v00: f32, v01: f32, v10: f32, v11: f32, l1x: f32, l1y: f32
     l1y.mul_add(row1, l0y * row0)
 }
 
+/// `dst`（`[0, out_size)`）に対応する `nearest-exact` の入力側添字
+/// （イシュー #2152。`torch.nn.functional.interpolate(mode=
+/// 'nearest-exact')` 相当）。[`crate::InterpolateMode::NearestExact`]
+/// が使う唯一の情報源（`autodiff::eval::interpolate_nearest_exact`・
+/// `autodiff::grad::nearest_exact_src_index_map`・
+/// `backend_cpu::interpolate::interpolate_nearest_exact` が共有）。
+///
+/// PyTorch の `nearest-exact` は `min(floor((dst+0.5)*in/out), in-1)`
+/// （`f32` 計算）。本関数は float を使わず `((2*dst+1)*in) / (2*out)`
+/// を整数のまま床除算する等価式とする（`(dst+0.5)*in/out ==
+/// (2*dst+1)*in / (2*out)`）。`Nearest`（既定の `src = (dst*in)/out`）
+/// とは異なる添字式であり、`(2*dst+1)` の half-pixel オフセットの
+/// 有無が主な差（例: `in=out` の恒等写像では両者とも `src=dst` に
+/// 一致するが、非整数比では 1 要素ずれうる）。
+///
+/// `out_size==0`／`in_size==0` は呼び出し元が事前に拒否する契約だが
+/// （`interpolate_out_shape` の空間軸 0 検査）、`Nearest` 同様に
+/// 縦深防御として `0` を返す（ゼロ除算 panic を避ける）。
+///
+/// # overflow 対策（イシュー #2152 codex-review P1 是正）
+///
+/// `numer = (2*dst+1)*in_size` を素朴に `u128` へ昇格して直接計算
+/// すると、`dst`・`in_size` とも `usize::MAX` 付近では `u128::MAX`
+/// を超えうる（`2*dst+1` は最大 65bit 相当・`in_size` は最大 64bit
+/// 相当で、積は最大 129bit 相当になるため。`nearest_src_coord`
+/// 〈`dst*in_size`。最大 128bit 相当で `u128` に収まる〉より 1 bit
+/// 分だけ広く、同じ `u128` 昇格では防げない）。本関数は
+/// `p = dst*in_size`（二つの `usize` 値の積は高々 128bit で必ず
+/// `u128` に収まる）を `out_size` で割った商 `q`・余り `r`
+/// （`r < out_size`）に分解し、整数除算の恒等式
+/// `floor((D*q+B)/D) = q + floor(B/D)` を用いて
+/// `numer/denom = q + floor((2*r+in_size) / (2*out_size))`
+/// として計算する（`2*r+in_size < 2*out_size+in_size` は
+/// `usize::MAX` 同士の和の高々 2 倍程度で `u128` に余裕を持って
+/// 収まる）。
+pub fn nearest_exact_src_coord(dst: usize, in_size: usize, out_size: usize) -> usize {
+    if out_size == 0 || in_size == 0 {
+        return 0;
+    }
+    let dst128 = dst as u128;
+    let in_size128 = in_size as u128;
+    let out_size128 = out_size as u128;
+    let p = dst128 * in_size128;
+    let q = p / out_size128;
+    let r = p % out_size128;
+    let rest = (2 * r + in_size128) / (2 * out_size128);
+    let src = q + rest;
+    (src as usize).min(in_size - 1)
+}
+
+/// 2 個の入力近傍値と補間重みから linear（1 軸）出力値を合成する
+/// （イシュー #2152。`bilinear_blend` の行方向補間と同じ式順序——
+/// `l1.mul_add(v1, (1-l1)*v0)`。`torch.nn.functional.interpolate
+/// (mode='linear')` 相当）。`v0`/`v1` は [`bilinear_src_coord`]（1 軸
+/// 分の呼び出し）が返す `i0`/`i1` 側の値、`l1` は同関数の `lambda1`。
+pub fn linear_blend(v0: f32, v1: f32, l1: f32) -> f32 {
+    l1.mul_add(v1, (1.0 - l1) * v0)
+}
+
+/// 8 個の入力近傍値（`z0` 面 4 個・`z1` 面 4 個）と 3 軸分の補間重みから
+/// trilinear 出力値を合成する（イシュー #2152。`torch.nn.functional.
+/// interpolate(mode='trilinear')` 相当）。`z0` 面・`z1` 面をそれぞれ
+/// [`bilinear_blend`]（`(y,x)` の 2 軸補間）で合成してから、
+/// [`linear_blend`] と同じ `fma` 式で `z` 軸方向に結ぶ固定順序
+/// （実装計画 §3.3）。
+///
+/// `v000`/`v001`/`v010`/`v011` は `z0` 面の `(y0,x0)`/`(y0,x1)`/
+/// `(y1,x0)`/`(y1,x1)`、`v100`/`v101`/`v110`/`v111` は `z1` 面の同順。
+/// `l1x`/`l1y`/`l1z` は [`bilinear_src_coord`]（x／y／z 軸それぞれ独立
+/// に呼ぶ）が返す `lambda1`。
+#[allow(clippy::too_many_arguments)]
+pub fn trilinear_blend(
+    v000: f32,
+    v001: f32,
+    v010: f32,
+    v011: f32,
+    v100: f32,
+    v101: f32,
+    v110: f32,
+    v111: f32,
+    l1x: f32,
+    l1y: f32,
+    l1z: f32,
+) -> f32 {
+    let p0 = bilinear_blend(v000, v001, v010, v011, l1x, l1y);
+    let p1 = bilinear_blend(v100, v101, v110, v111, l1x, l1y);
+    linear_blend(p0, p1, l1z)
+}
+
+/// bicubic convolution の重み係数（`A = -0.75`。PyTorch
+/// `cubic_convolution1`/`cubic_convolution2` と同一。`|x|<=1` 側の式）。
+fn cubic_convolution1(x: f32, a: f32) -> f32 {
+    ((a + 2.0) * x - (a + 3.0)).mul_add(x * x, 1.0)
+}
+
+/// bicubic convolution の重み係数（`1<|x|<2` 側の式）。
+fn cubic_convolution2(x: f32, a: f32) -> f32 {
+    (((a * x - 5.0 * a) * x + 8.0 * a) * x) - 4.0 * a
+}
+
+/// bicubic の 1 軸 4-tap 重み（PyTorch `get_cubic_upsample_
+/// coefficients` と同一の `A=-0.75` 固定係数。`t` は `floor(src)` から
+/// の小数部 `[0,1)`）。
+fn cubic_upsample_coefficients(t: f32) -> [f32; 4] {
+    const A: f32 = -0.75;
+    [
+        cubic_convolution2(t + 1.0, A),
+        cubic_convolution1(t, A),
+        cubic_convolution1(1.0 - t, A),
+        cubic_convolution2(2.0 - t, A),
+    ]
+}
+
+/// [`bicubic_src_taps`] の戻り値: 1 軸分の bicubic 4-tap 入力添字と重み。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BicubicTaps {
+    /// 4 個の入力側 tap 添字（`[0, in_size)` にクランプ済み。順序は
+    /// `floor(src)-1 ..= floor(src)+2`）。
+    pub idx: [usize; 4],
+    /// 対応する重み（`cubic_upsample_coefficients`。和は理論上 1）。
+    pub w: [f32; 4],
+}
+
+/// 出力座標 `dst` に対応する bicubic の 1 軸 4-tap 添字・重みを求める
+/// （イシュー #2152。PyTorch `upsample_get_value_bounded` 相当の境界
+/// クランプ + `cubic_interp1d` の係数。実装計画 §3.4）。
+///
+/// PyTorch `area_pixel_compute_source_index(..., cubic=true)` は
+/// `align_corners=false` でも `src<0` を**クランプしない**
+/// （`UpSample.h`: `(!cubic && src_idx < 0) ? 0 : src_idx` —— cubic
+/// 補間は `[-1,0,1,2]` の近傍参照が必要なため。実装前に PyTorch
+/// ソースで確認済み。`bilinear_src_coord` の `max(0.0)` クランプとは
+/// 異なる契約）。
+///
+/// `i = floor(src)`（`isize`。負値になりうる）、`t = src - i`。4 tap
+/// `i-1..=i+2` を `[0, in_size-1]` へ個別にクランプする（REQ-8 の
+/// 境界検査。クランプで重複した tap もそのまま加算する——PyTorch と
+/// 同じ端点飽和）。`in_size==0` は呼び出し元が事前に拒否する契約だが
+/// 縦深防御として `idx` を全て `0`・`t=0` 相当（重み `[0,1,0,0]`）
+/// として扱う。
+pub fn bicubic_src_taps(
+    dst: usize,
+    in_size: usize,
+    scale: f32,
+    align_corners: bool,
+) -> BicubicTaps {
+    if in_size == 0 {
+        return BicubicTaps {
+            idx: [0; 4],
+            w: [0.0, 1.0, 0.0, 0.0],
+        };
+    }
+    let src = if align_corners {
+        dst as f32 * scale
+    } else {
+        (dst as f32 + 0.5).mul_add(scale, -0.5)
+    };
+    let i = src.floor();
+    let t = src - i;
+    // `in_size` は `usize`（>=1 に確定済み）なので `isize` へ変換
+    // しても `in_size - 1` は非負に収まる（通常の interpolate shape
+    // 上限内であれば `isize` の範囲を超えない——巨大 shape は
+    // `interpolate_out_shape` のバイトサイズ上限が事前に拒否する）。
+    let i_isize = i as isize;
+    let last = (in_size - 1) as isize;
+    let mut idx = [0usize; 4];
+    for (k, slot) in idx.iter_mut().enumerate() {
+        let tap = i_isize - 1 + k as isize;
+        *slot = tap.clamp(0, last) as usize;
+    }
+    BicubicTaps {
+        idx,
+        w: cubic_upsample_coefficients(t),
+    }
+}
+
+/// 4x4 近傍値（`v[y][x]`。`y`/`x` は [`bicubic_src_taps`] が返す
+/// `idx` の並び順）と x／y 軸別の重みから bicubic 出力値を合成する
+/// （イシュー #2152。行方向〈x〉の 4-tap 補間を 4 行分行ってから、
+/// 列方向〈y〉の 4-tap 補間を行う固定順序。PyTorch `cubic_interp1d`
+/// の入れ子順と同じ。`fma` 連鎖で構成する——[`bilinear_blend`] と
+/// 同じ FMA 契約の方針）。出力値はクランプしない（PyTorch と同じく
+/// overshoot を許す）。
+pub fn bicubic_blend(v: [[f32; 4]; 4], wx: [f32; 4], wy: [f32; 4]) -> f32 {
+    let mut rows = [0f32; 4];
+    for (j, row) in v.iter().enumerate() {
+        rows[j] = wx[3].mul_add(
+            row[3],
+            wx[2].mul_add(row[2], wx[1].mul_add(row[1], wx[0] * row[0])),
+        );
+    }
+    wy[3].mul_add(
+        rows[3],
+        wy[2].mul_add(rows[2], wy[1].mul_add(rows[1], wy[0] * rows[0])),
+    )
+}
+
+/// [`interpolate_size_from_scale_factor`] のエラー型（イシュー
+/// #2152）。`tensor-core` は内部クレートのため（`docs/compat-api-
+/// scope.md` §0）facade からは再エクスポートされず、facade 公開面の
+/// 拡張にはならない（承認事項なしの判断根拠。実装計画 §3.6）。
+///
+/// `#[non_exhaustive]`: 将来の検査項目追加に備え非破壊を保つ
+/// （`ScatterReduce`／`Activation` と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScaleFactorError {
+    /// `spatial_in.len() != scale_factor.len()`。
+    LengthMismatch {
+        /// 空間軸数。
+        spatial_rank: usize,
+        /// `scale_factor` の長さ。
+        scale_factor_len: usize,
+    },
+    /// `scale_factor[axis]` が非有限（NaN／inf）または `<= 0.0`。
+    InvalidScaleFactor {
+        /// 軸番号。
+        axis: usize,
+        /// 拒否した値。
+        value: f64,
+    },
+    /// `floor(in * scale_factor[axis])` が `usize` へ収まらない
+    /// （非有限になる場合を含む）。
+    Overflow {
+        /// 軸番号。
+        axis: usize,
+    },
+    /// 導出した出力サイズが `0`（`interpolate_out_shape` が事前に
+    /// 拒否する空間軸 0 と同じ契約を scale_factor 経路でも守るため）。
+    ZeroOutputSize {
+        /// 軸番号。
+        axis: usize,
+    },
+}
+
+impl std::fmt::Display for ScaleFactorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LengthMismatch {
+                spatial_rank,
+                scale_factor_len,
+            } => write!(
+                f,
+                "scale_factor の長さ {scale_factor_len} が空間軸数 {spatial_rank} と一致しない"
+            ),
+            Self::InvalidScaleFactor { axis, value } => write!(
+                f,
+                "scale_factor[{axis}] = {value} は非有限または 0 以下で不正"
+            ),
+            Self::Overflow { axis } => {
+                write!(f, "軸 {axis} の出力サイズ導出が usize の範囲を超える")
+            }
+            Self::ZeroOutputSize { axis } => {
+                write!(f, "軸 {axis} の導出後の出力サイズが 0")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ScaleFactorError {}
+
+/// `scale_factor` から interpolate の `size` 引数を導出する（イシュー
+/// #2152。PyTorch `torch.nn.functional.interpolate(scale_factor=…)`
+/// 相当。`Var::interpolate` に新しいメソッドは追加せず、本関数の戻り
+/// 値を既存の `size` 引数へそのまま渡す設計——実装計画 §3.6「配置
+/// 判断」）。
+///
+/// `out[axis] = floor(spatial_in[axis] as f64 * scale_factor[axis])`
+/// （PyTorch と同じ）。これは `recompute_scale_factor=True` と同じ
+/// 座標系になる——既定（`None`／`False`）では座標計算に
+/// `1/scale_factor` をそのまま使うため、`in*s` が整数でない場合は
+/// 結果がわずかに異なりうる（整数倍では一致する。実装計画・対象外
+/// §7 に明記）。
+///
+/// 検査は fail-closed: 長さ不一致・非有限／0 以下の `scale_factor`・
+/// `usize` への変換オーバーフロー・導出後の出力サイズ 0 をそれぞれ
+/// 拒否する。`out_f >= usize::MAX as f64` を **`as usize` へ変換する
+/// 前に**検査する（`as` は範囲外を無言で飽和させるため、先に検査
+/// しないと fail-closed の意図に反する。実装計画・セキュリティ考慮
+/// §6）。
+pub fn interpolate_size_from_scale_factor(
+    spatial_in: &[usize],
+    scale_factor: &[f64],
+) -> Result<Vec<usize>, ScaleFactorError> {
+    if spatial_in.len() != scale_factor.len() {
+        return Err(ScaleFactorError::LengthMismatch {
+            spatial_rank: spatial_in.len(),
+            scale_factor_len: scale_factor.len(),
+        });
+    }
+    let mut out = Vec::with_capacity(spatial_in.len());
+    for (axis, (&in_sz, &s)) in spatial_in.iter().zip(scale_factor.iter()).enumerate() {
+        if !s.is_finite() || s <= 0.0 {
+            return Err(ScaleFactorError::InvalidScaleFactor { axis, value: s });
+        }
+        let out_f = in_sz as f64 * s;
+        // `as usize` へ変換する前に範囲を検査する（`as` は範囲外を
+        // 無言で飽和させ fail-closed の意図に反するため）。
+        if !out_f.is_finite() || out_f >= usize::MAX as f64 {
+            return Err(ScaleFactorError::Overflow { axis });
+        }
+        let out_sz = out_f.floor() as usize;
+        if out_sz == 0 {
+            return Err(ScaleFactorError::ZeroOutputSize { axis });
+        }
+        out.push(out_sz);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +573,183 @@ mod tests {
         // 全コーナー同値でない場合の中点補間: 単純平均になるはず。
         let out = bilinear_blend(0.0, 2.0, 4.0, 6.0, 0.5, 0.5);
         assert_eq!(out, 3.0);
+    }
+
+    #[test]
+    fn nearest_exact_src_coord_matches_pytorch_hand_computed() {
+        // PyTorch nearest-exact: floor((dst+0.5)*in/out)。in=out=4 は恒等。
+        for dst in 0..4 {
+            assert_eq!(nearest_exact_src_coord(dst, 4, 4), dst);
+        }
+        // in=8,out=3: floor((dst+0.5)*8/3): dst=0->1, dst=1->4, dst=2->6。
+        assert_eq!(nearest_exact_src_coord(0, 8, 3), 1);
+        assert_eq!(nearest_exact_src_coord(1, 8, 3), 4);
+        assert_eq!(nearest_exact_src_coord(2, 8, 3), 6);
+    }
+
+    #[test]
+    fn nearest_exact_src_coord_differs_from_nearest_for_non_integer_ratio() {
+        // nearest-exact は half-pixel オフセットを持つため Nearest
+        // （floor(dst*in/out)）と一般に異なる添字を返す。
+        // Nearest（`src = (dst*in)/out`）は dst=0 で常に src=0。
+        assert_ne!(nearest_exact_src_coord(0, 8, 3), 0);
+    }
+
+    #[test]
+    fn nearest_exact_src_coord_huge_in_size_does_not_overflow() {
+        let in_size = 1usize << 63;
+        let src = nearest_exact_src_coord(2, in_size, 3);
+        assert!(src < in_size);
+    }
+
+    #[test]
+    fn nearest_exact_src_coord_max_usize_does_not_overflow() {
+        // codex-review P1 是正の回帰テスト（イシュー #2152 PR #2269）:
+        // `dst=out_size-1`・`in_size=out_size=usize::MAX` は
+        // `(2*dst+1)*in_size` を素朴に `u128` へ昇格すると
+        // `u128::MAX` を超える（`2*dst+1` が 65bit 相当・`in_size` が
+        // 64bit 相当で積が最大 129bit 相当になるため）。overflow
+        // せず、`in=out` の恒等写像として `src=dst` を返すことを
+        // `u128` 真値計算（`p_big = (2*dst+1)*in_size` を `u128` の
+        // まま 2 段に分けて求めた値）と突き合わせて確認する。
+        let out_size = usize::MAX;
+        let in_size = usize::MAX;
+        let dst = out_size - 1;
+        let src = nearest_exact_src_coord(dst, in_size, out_size);
+        // in_size == out_size の恒等写像では nearest-exact も
+        // Nearest と同じく src == dst になる（half-pixel オフセット
+        // を打ち消し合うため）。
+        assert_eq!(src, dst);
+        assert!(src < in_size);
+    }
+
+    #[test]
+    fn nearest_exact_src_coord_zero_sizes_return_zero() {
+        assert_eq!(nearest_exact_src_coord(0, 0, 4), 0);
+        assert_eq!(nearest_exact_src_coord(0, 4, 0), 0);
+    }
+
+    #[test]
+    fn linear_blend_matches_bilinear_row_blend() {
+        assert_eq!(linear_blend(1.0, 3.0, 0.5), 2.0);
+        assert_eq!(linear_blend(1.0, 3.0, 0.0), 1.0);
+        assert_eq!(linear_blend(1.0, 3.0, 1.0), 3.0);
+    }
+
+    #[test]
+    fn trilinear_blend_identity_when_all_corners_equal() {
+        assert_eq!(
+            trilinear_blend(5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 0.3, 0.6, 0.9),
+            5.0
+        );
+    }
+
+    #[test]
+    fn trilinear_blend_pure_corner_selection_at_extremes() {
+        // l1x=l1y=l1z=0 -> v000; 全て1 -> v111。
+        let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        assert_eq!(
+            trilinear_blend(
+                vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], 0.0, 0.0,
+                0.0
+            ),
+            vals[0]
+        );
+        assert_eq!(
+            trilinear_blend(
+                vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], 1.0, 1.0,
+                1.0
+            ),
+            vals[7]
+        );
+    }
+
+    #[test]
+    fn cubic_upsample_coefficients_sum_to_one() {
+        for t in [0.0f32, 0.25, 0.5, 0.75, 0.9999] {
+            let w = cubic_upsample_coefficients(t);
+            let sum: f32 = w.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "t={t} sum={sum}");
+        }
+    }
+
+    #[test]
+    fn cubic_upsample_coefficients_at_zero_selects_second_tap() {
+        // t=0: PyTorch cubic_interp1d は w1=1・他 0 になる（中央 tap 一致）。
+        let w = cubic_upsample_coefficients(0.0);
+        assert!((w[1] - 1.0).abs() < 1e-6);
+        assert!(w[0].abs() < 1e-6);
+        assert!(w[2].abs() < 1e-6);
+        assert!(w[3].abs() < 1e-6);
+    }
+
+    #[test]
+    fn bicubic_src_taps_align_corners_false_allows_negative_src_no_clamp() {
+        // align_corners=false・cubic=true は PyTorch と同じく src<0 を
+        // クランプしない（UpSample.h `area_pixel_compute_source_index`
+        // の `!cubic` 条件。実装計画 §3.4 で確認済み）。in=4,out=8:
+        // scale=0.5。dst=0: src=(0.5)*0.5-0.5=-0.25 -> floor=-1 ->
+        // タップは [-2,-1,0,1] を [0,3] へクランプ -> [0,0,0,1]。
+        let taps = bicubic_src_taps(0, 4, 0.5, false);
+        assert_eq!(taps.idx, [0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn bicubic_src_taps_clamps_to_input_bounds() {
+        // 右端付近でも 4 タップが [0, in_size-1] にクランプされる。
+        let taps = bicubic_src_taps(7, 4, 0.5, true);
+        for &i in &taps.idx {
+            assert!(i < 4);
+        }
+    }
+
+    #[test]
+    fn bicubic_blend_identity_when_all_values_equal() {
+        let v = [[3.0f32; 4]; 4];
+        let wx = cubic_upsample_coefficients(0.3);
+        let wy = cubic_upsample_coefficients(0.7);
+        let out = bicubic_blend(v, wx, wy);
+        assert!((out - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn interpolate_size_from_scale_factor_doubles_each_axis() {
+        let out = interpolate_size_from_scale_factor(&[4, 6], &[2.0, 0.5]).unwrap();
+        assert_eq!(out, vec![8, 3]);
+    }
+
+    #[test]
+    fn interpolate_size_from_scale_factor_floors_non_integer_result() {
+        let out = interpolate_size_from_scale_factor(&[5], &[1.5]).unwrap();
+        assert_eq!(out, vec![7]); // floor(5*1.5)=floor(7.5)=7
+    }
+
+    #[test]
+    fn interpolate_size_from_scale_factor_rejects_length_mismatch() {
+        let err = interpolate_size_from_scale_factor(&[4, 4], &[2.0]).unwrap_err();
+        assert!(matches!(err, ScaleFactorError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn interpolate_size_from_scale_factor_rejects_non_finite_and_non_positive() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            let err = interpolate_size_from_scale_factor(&[4], &[bad]).unwrap_err();
+            assert!(matches!(err, ScaleFactorError::InvalidScaleFactor { .. }));
+        }
+    }
+
+    #[test]
+    fn interpolate_size_from_scale_factor_rejects_zero_output_size() {
+        let err = interpolate_size_from_scale_factor(&[1], &[0.1]).unwrap_err();
+        assert!(matches!(err, ScaleFactorError::ZeroOutputSize { .. }));
+    }
+
+    #[test]
+    fn interpolate_size_from_scale_factor_rejects_usize_overflow_without_saturating() {
+        // `in * s` が usize::MAX を大きく超える組合せは `as usize` の
+        // 無言飽和に頼らず Overflow を返す（`as` を検査前に使わない
+        // fail-closed 契約）。
+        let err = interpolate_size_from_scale_factor(&[usize::MAX], &[2.0]).unwrap_err();
+        assert!(matches!(err, ScaleFactorError::Overflow { .. }));
     }
 }

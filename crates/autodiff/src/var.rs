@@ -4279,21 +4279,26 @@ impl<'t> Var<'t> {
 
     /// 空間軸（末尾 `size.len()` 軸）を `size` へリサンプリングする
     /// （`torch.nn.functional.interpolate`／`tf.image.resize` 相当。
-    /// イシュー #1757）。先頭の残り軸（batch／channel 等）は素通し。
-    /// `mode` の意味論・数値契約は
+    /// イシュー #1757・#1762・#2152）。先頭の残り軸（batch／channel
+    /// 等）は素通し。`mode` の意味論・数値契約は
     /// [`fandhe_ai_tensor_core::InterpolateMode`] doc を正とする
-    /// （現状 [`fandhe_ai_tensor_core::InterpolateMode::Nearest`] の
-    /// み。算術を含まない純粋なコピー演算のため forward は 3
-    /// バックエンド間で構造的に bit 完全一致する）。
+    /// （`Nearest`／`NearestExact` は算術を含まない純粋なコピー演算
+    /// のため forward は 3 バックエンド間で構造的に bit 完全一致・
+    /// それ以外〈`Bilinear`／`Linear`／`Trilinear`／`Bicubic`／
+    /// `Area`〉は REQ-2 統一複合判定）。`scale_factor` 引数は持たず、
+    /// `fandhe_ai_tensor_core::interpolate_size_from_scale_factor` が
+    /// 導出した `size` をそのまま渡す設計（イシュー #2152 の配置
+    /// 判断。`docs/autodiff-interpolate-modes-decision.md` §3.6）。
     ///
     /// 検査順序: ①[`fandhe_ai_tensor_core::interpolate_out_shape_for_mode`]
-    /// （`size` の rank・空間軸の 0 サイズ・要素数オーバーフローを
-    /// 検査し `out_shape` を確定。違反は `AutodiffError::Shape`）→
-    /// ②`self` を層 1 で実体化 → ③`ops.interpolate` →
-    /// `Unsupported` のときのみホスト参照実装
-    /// （`eval::interpolate_nearest`）へフォールバック（それ以外の
-    /// エラーは伝播する。判定迂回経路を作らない）→ ④戻り shape 検証
-    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`。
+    /// （`size` の rank〈`mode` 別の空間軸数要求を含む〉・空間軸の
+    /// 0 サイズ・要素数オーバーフローを検査し `out_shape` を確定。
+    /// 違反は `AutodiffError::Shape`）→ ②`self` を層 1 で実体化 →
+    /// ③`ops.interpolate` → `Unsupported` のときのみホスト参照実装
+    /// （`eval::interpolate_*`。`mode` ごとに分岐）へフォールバック
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない）→
+    /// ④戻り shape 検証（`.claude/rules/security.md` A08）→
+    /// ⑤`push_eager`。
     pub fn interpolate(
         &self,
         size: &[usize],

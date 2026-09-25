@@ -1561,6 +1561,61 @@ CudaReduce::run_min_all_f32`／`run_min_axis_f32`。`fminf`・単位元
   汎用カーネルを再利用したまま。CUDA scatter_add の O(out×index)
   コストは #1834 が既知として記録済み）。
 
+## 追補（イシュー #2152）
+
+上記「対象外」に列挙していた `linear`／`trilinear`／`bicubic`／
+`nearest-exact`（`InterpolateMode` の残り 5 variant のうち
+`NearestExact`／`Area`／`Linear`／`Trilinear`／`Bicubic`）と
+`scale_factor` を実装済み化した。イシュータイトルの「6 モード」は
+「PyTorch の `mode` 7 種のうち未実装だった 5 種＋`scale_factor`」の
+意で、実在しない 6 番目のモードは追加していない（詳細な解釈・設計
+判断は `docs/autodiff-interpolate-modes-decision.md` を正とする）。
+
+- `InterpolateMode` に 5 variant を追加（`#[non_exhaustive]` のため
+  公開 API 非破壊）: `NearestExact`（`Nearest` と同型の bit 完全一致
+  純コピー演算・半ピクセルオフセット添字）・`Area`（adaptive average
+  pooling と同型・空間軸は任意 `1..=rank`）・`Linear { align_corners
+  }`（1 軸限定）・`Trilinear { align_corners }`（3 軸限定）・
+  `Bicubic { align_corners }`（2 軸限定・16 tap）。rank 検査は
+  `ops_shape::interpolate_out_shape_for_mode` に集約（`Bilinear` と
+  同型の `ShapeError::RankMismatch` fail-closed 拒否）。
+- 座標・重み・ブレンドの単一情報源を `tensor-core::interpolate`
+  （`nearest_exact_src_coord`・`linear_blend`・`trilinear_blend`・
+  `bicubic_src_taps`／`bicubic_blend`）へ追加し、`autodiff::eval::
+  interpolate_*`（ホスト参照）・`backend-cpu::interpolate::
+  interpolate_*`（CPU ネイティブ）がいずれも同じ関数を同じ順序で
+  呼ぶ（`Bilinear` と同型の設計。`crates/facade/tests/
+  interpolate_backend_parity.rs` が bit 完全一致を検証済み）。
+  `Bicubic` の `align_corners=false` は PyTorch `area_pixel_compute_
+  source_index(..., cubic=true)` と同じく `src<0` をクランプしない
+  （`UpSample.h` 実測で確認済み。`bilinear_src_coord` の `max(0.0)`
+  クランプとは異なる契約）。
+- VJP は `Bilinear` と同型の固定 K タップ scatter_add
+  （`NearestExact`=1・`Linear`=2・`Trilinear`=8・`Bicubic`=16。
+  `grad::interpolate_fixed_tap_scatter_vjp` に共通化）。`Area` のみ
+  出力位置あたりの tap 数が可変なため、`Op::AdaptiveAvgPool2d` の
+  VJP と同型の「`f64` アキュムレータを持つ稠密配列への直接加算」
+  方式（`grad::interpolate_area_vjp`）を採用する（scatter_with_
+  fallback を経由しないため backend 側 GPU scatter は使わないが、
+  `adaptive_avg_pool2d_vjp` も同じ設計であり本クレート内の既存
+  先例に沿う妥当な簡略化）。
+- `scale_factor` は `Var` の新規メソッドとしてではなく、`tensor-core`
+  の純関数 `interpolate_size_from_scale_factor(spatial_in, scale_
+  factor) -> Result<Vec<usize>, ScaleFactorError>` として実装した
+  （`tensor-core` は内部クレートのため facade からは再エクスポート
+  されず、facade 公開面の拡張にはならない——`docs/compat-api-
+  scope.md` §0）。導出した `size` を既存の `Var::interpolate(&size,
+  mode)` へそのまま渡す設計で、`recompute_scale_factor=True` と同じ
+  座標系になる（既定の `1/scale_factor` を直接座標へ使う経路とは
+  非整数倍で結果が異なりうる——対象外として明記）。
+- 対象外（引き続き）: GPU 専用カーネル（CUDA／Metal は本 5 モードも
+  `Unsupported` によるホストフォールバックのまま。実機 parity は
+  Mac／GB10 セッションへ申し送り。`docs/perf/logs/
+  interpolate-modes-2152/README.md`）・`antialias`・
+  `recompute_scale_factor=False`（既定）相当の座標系・`Var` への
+  `interpolate_scale_factor` 等の新規メソッド・facade 新規公開面・
+  TF 固有の `lanczos3/5`／`gaussian`／`mitchellcubic`。
+
 ## 追補（イシュー #1722）
 
 AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記）」）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
