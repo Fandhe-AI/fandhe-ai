@@ -32,7 +32,7 @@ use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
 use crate::nn::container::{ModuleDict, ModuleList};
-use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d};
+use crate::nn::conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
 use crate::nn::identity::Identity;
@@ -274,6 +274,21 @@ pub trait Module {
 
     /// [`Module::as_conv_transpose1d`] の可変版。
     fn as_conv_transpose1d_mut(&mut self) -> Option<&mut ConvTranspose1d> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #2158）。
+    /// `Conv3d` 層向け。既定 `None`。`compat::Sequential::add_conv3d`
+    /// （facade 公開面）の接続はユーザー承認待ち（`docs/conv-ops-
+    /// design.md` §16「承認事項」節）であり、本フック自体は `compat`
+    /// 層と独立に `nn::Sequential`（autodiff 汎用コンテナ）から利用
+    /// できる（[`Module::as_conv_transpose2d`] と同じ位置付け）。
+    fn as_conv3d(&self) -> Option<&Conv3d> {
+        None
+    }
+
+    /// [`Module::as_conv3d`] の可変版。
+    fn as_conv3d_mut(&mut self) -> Option<&mut Conv3d> {
         None
     }
 
@@ -1187,6 +1202,54 @@ impl Module for ConvTranspose2d {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         ConvTranspose2d::forward_host(self, ops, input)
+    }
+}
+
+/// `Conv3d::bind(tape).forward(input)`（`nn/conv.rs` 参照。イシュー
+/// #2158）。
+impl Module for Conv3d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn as_conv3d(&self) -> Option<&Conv3d> {
+        Some(self)
+    }
+
+    fn as_conv3d_mut(&mut self) -> Option<&mut Conv3d> {
+        Some(self)
+    }
+
+    /// 命名契約は `Conv2d` と同型（`weight` → `bias`）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        Conv3d::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Conv3d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Conv3d::requires_grad(self)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Conv3d::forward_host(self, ops, input)
     }
 }
 
