@@ -331,6 +331,87 @@ fn logsumexp_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking()
     ));
 }
 
+// --- `prod`／`any`／`all` の非空縮約における確保前バイト数上限検査
+// （codex-review P1 是正 3・イシュー #2147・PR #2263）: 前 2 検査
+// （空縮約向け・`logsumexp`／`norm_p` の非空縮約向け）は棚卸しの範囲が
+// 狭く、`prod`／`any`／`all` は空縮約分岐でしか `checked_bytes_for` を
+// 呼んでいなかった。非空縮約で `x` が小さなストレージを巨大な shape へ
+// broadcast した view の場合、`prod` は `contiguous()`／`cumprod` が、
+// `any`／`all` は `x.ne(&zero)` が、入力 shape 相応の `Vec` を無検査に
+// 確保して panic しうる回帰。`reduce_ops::ensure_alloc_fits_f32`
+// （全 5 入口が冒頭で呼ぶ共有ヘルパ）が dispatch 前に拒否することを
+// 検証する。
+
+#[test]
+fn prod_any_all_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+    let tape = Tape::new();
+    // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+    // （軸 1 は実軸〈長さ 4・非空縮約〉、軸 0 は broadcast で巨大）。
+    // dim=Some(1) で縮約すると out_shape=[1usize << 61] となり、f32
+    // 換算バイト数（2^61 * 4 = 2^63）が isize::MAX（2^63 - 1）を
+    // 1 超える。`logsumexp_norm_p_axis_reduce_rejects_huge_broadcast_
+    // output_without_panicking` と同型のフィクスチャ。
+    let base = t(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]);
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = tape.var(&huge);
+    for result in [prod(&x, Some(1)), any(&x, Some(1)), all(&x, Some(1))] {
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+    }
+}
+
+#[test]
+fn prod_any_all_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+    let tape = Tape::new();
+    // base shape [1] を broadcast して [1usize << 61] にする（非
+    // contiguous・全縮約〈dim=None〉・非空縮約）。`prod` は
+    // `contiguous()` が、`any`／`all` は `x.ne(&zero)` が入力 shape
+    // 相応の確保を試みる経路。
+    let base = t(vec![1.0], &[1]);
+    let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+    let x = tape.var(&huge);
+    for result in [prod(&x, None), any(&x, None), all(&x, None)] {
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+    }
+}
+
+// --- `norm_p` の `p ∈ {1.0, 2.0}` 委譲バイパスにおける確保前バイト数
+// 上限検査（codex-review P1 是正 3・イシュー #2147・PR #2263）:
+// 対応前は `p == 1.0`／`p == 2.0` の委譲判定（`Var::norm_l1`／
+// `norm_l2` への委譲）が確保前検査より前にあり、新設 API の検査を
+// 迂回して既存経路（本 PR の差分外）へそのまま渡っていた。是正後は
+// 委譲判定より前に `ensure_alloc_fits_f32` を呼ぶため、委譲前に拒否
+// されることを検証する。
+
+#[test]
+fn norm_p_one_and_two_reject_huge_broadcast_before_delegating() {
+    let tape = Tape::new();
+    let base = t(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]);
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = tape.var(&huge);
+    for p in [1.0f32, 2.0] {
+        assert!(matches!(
+            norm_p(&x, p, Some(1)),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+    }
+
+    let base_1d = t(vec![1.0], &[1]);
+    let huge_1d = base_1d.broadcast_to(&[1usize << 61]).unwrap();
+    let x_1d = tape.var(&huge_1d);
+    for p in [1.0f32, 2.0] {
+        assert!(matches!(
+            norm_p(&x_1d, p, None),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+    }
+}
+
 // --- 空縮約の計算グラフ接続（codex-review P2 是正・イシュー #2147・
 // PR #2263）: 対応前は `push_leaf` で `x` から独立した定数葉を返して
 // おり、backward で `x` への経路が失われていた（`Gradients::get` が

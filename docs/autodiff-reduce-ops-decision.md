@@ -75,6 +75,11 @@ facade ガードの撤去のみ）。
   （空縮約軸は単位元 `0.0` を返す既存契約）+ 定数バイアス `1.0` の
   合成（`reduce_ops.rs::empty_reduce_identity`）で `x` への計算グラフ
   依存を保ったまま単位元を返す。
+  **2026-09-25 追記 3（PR #2263 codex-review P1 是正 3・§2.6 参照）**:
+  上記の検査は当初この空縮約分岐にのみ置かれていたが、非空縮約
+  （`contiguous()`／`cumprod` の実体化）が未検査のまま残っていた。
+  現在は空縮約分岐ではなく `prod` 関数冒頭で `ensure_alloc_fits_f32`
+  により一律に検査する（分岐に依らず常に検査済み）。
 
 ### §2.3 `any`／`all`: 既存 Op の合成（新規 Op なし）
 
@@ -95,7 +100,12 @@ facade ガードの撤去のみ）。
   独立した定数葉ではなく `x.ne(&zero)` を `empty_reduce_identity`
   （`x.ne(&zero)`（縮約対象要素数 0 のため 0 要素）の `sum(dim)` が
   単位元 `0.0` を返す契約 + `any` はバイアス `0.0`・`all` はバイアス
-  `1.0`）へ通した合成で返す。`ne` の VJP は常にゼロを返す契約
+  `1.0`）へ通した合成で返す。
+  **2026-09-25 追記 3（PR #2263 codex-review P1 是正 3・§2.6 参照）**:
+  §2.2 の追記 3 と同じ理由で、現在は空縮約分岐ではなく `any`／`all`
+  関数冒頭で `ensure_alloc_fits_f32` により一律に検査する（`x.ne(&zero)`
+  の非空縮約側の実体化も併せて守られる）。
+  `ne` の VJP は常にゼロを返す契約
   （非空の `any`／`all` と同じ）のため、勾配は従前どおりゼロだが
   `x` への逆伝播経路自体は保たれる。
 - bool 出力版は #2141（`bool_ops`）の対象で本モジュールの対象外。
@@ -183,9 +193,15 @@ bit 不一致を実測確認済み。`vector_norm_p` は `n = 3・CHUNK + 17`
   実体化）は forward が拒否した shape は tape に push されないため
   追加検査不要（doc に事前条件として明記のみ）。
   `norm_p` の `p ∈ {1.0, 2.0}` 委譲先（`Var::norm_l1`／`norm_l2` →
-  `Var::norm` → `eval::vector_norm_along`）は本 PR の差分外
+  `Var::norm` → `eval::vector_norm_along`）自体の改修は本 PR の差分外
   （イシュー #1723 の既存経路）のため対象外（スコープ外として
   `.claude/rules/out-of-scope-tracking.md` の対象候補。§5 参照）。
+  **ただし §2.6（2026-09-25 追記 3）のとおり、委譲判定自体を検査より
+  後ろへ移したため、委譲先が未検査であっても本関数側の検査で巨大
+  broadcast shape を委譲前に拒否できる**（委譲先自体は改修していない
+  ため、委譲先を直接呼ぶ既存の `Var::norm_l1`／`norm_l2`／`Var::norm`
+  経由の呼び出しには本検査は及ばない。この残存範囲は §5 のスコープ外
+  候補のまま）。
 - 回帰テストは `crates/backend-cpu/src/reduction.rs` の
   `logsumexp_vector_norm_p_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
   `logsumexp_vector_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking`
@@ -235,6 +251,50 @@ VJP: `dx_i = g · sign(x_i) · (|x_i|/norm)^(p−1)` を比の形（`norm^
   防ぐ劣勾配の選択）。
 
 空縮約は既存の `Var::norm` と同じく `InvalidArgument`。
+
+### §2.6 確保前バイト数上限検査の統一契約（2026-09-25 追記 3・PR
+#2263 codex-review P1 是正 3）
+
+§2.2〜§2.5 の各追記は個別に検査を足す方式だったため棚卸しの範囲が
+狭く、同じ類型の指摘が 2 件残っていた:
+
+1. `prod`／`any`／`all` は**空縮約（`n == 0`）分岐でしか**
+   `checked_bytes_for` を呼んでおらず、非空縮約では `prod` の
+   `contiguous()`／`cumprod`、`any`／`all` の `x.ne(&zero)` が入力
+   shape 相応の `Vec` を無検査に確保しうるまま残っていた。
+2. `norm_p` は `p == 1.0`／`p == 2.0` の委譲判定（`Var::norm_l1`／
+   `norm_l2` へ委譲）が確保前検査より前にあり、委譲先（`Var::norm`
+   `pub(crate)` 経由。本 PR の差分外・イシュー #1723 の既存経路）が
+   独自に確保前検査を持たない限り、新設 API 側の検査を迂回して
+   そのまま既存経路へ渡っていた。
+
+**是正**: `crates/autodiff/src/reduce_ops.rs::ensure_alloc_fits_f32`
+（唯一の共有ヘルパ。`checked_bytes_for::<f32>` を入力 shape・
+`out_shape`〈既に求まっている場合〉の両方に適用する）を新設し、
+[`prod`]・[`logsumexp`]・[`any`]・[`all`]・[`norm_p`] の**全 5 公開
+入口が関数冒頭・あらゆる分岐（空縮約・`p` の特殊化・`dim` の有無・
+`Unsupported` フォールバック）や合成演算・実体化（`contiguous`／
+`cumprod`／`ne`／`materialize_one`／既存 API への委譲）よりも前**に
+本ヘルパを呼ぶ形へ統一した。個別に追加していた `checked_bytes_for`
+呼び出しはすべて `ensure_alloc_fits_f32` 経由に寄せ、重複を解消した。
+
+`prod`（`dim=None`／`Some(axis)` いずれの経路も入力と同じ要素数の
+中間 shape〈`reshape`／`cumprod`〉しか作らない）・`any`／`all`
+（`x.ne(&zero)` は入力と同じ shape）はいずれも入力 shape の検査のみで
+実体化経路全体が守られる。`norm_p` の `p ∈ {1.0, 2.0}` 委譲は検査後に
+行う（委譲先自体の改修はスコープ外のまま、委譲前に巨大 broadcast
+shape を拒否する）。
+
+回帰テストは `crates/autodiff/tests/reduction_parity.rs` の
+`prod_any_all_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
+`prod_any_all_full_reduce_rejects_huge_broadcast_input_without_panicking`／
+`norm_p_one_and_two_reject_huge_broadcast_before_delegating`
+（`Tensor::broadcast_to` で構築した非空・非 contiguous な巨大 shape
+view が panic せず `ShapeError::ElementCountOverflow` を返すことを
+検証）と、`crates/facade/tests/reduce_ops_backend_parity.rs::
+cpu_norm_p_two_rejects_huge_broadcast_before_delegating`（`fandhe_ai::
+tape()`〈`CpuBackendOps`〉経由でも同じ検査が dispatch 前に効くことを
+確認する facade 経路の代表 1 件）。
 
 ## §3 数値契約（まとめ）
 

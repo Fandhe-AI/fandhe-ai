@@ -67,29 +67,47 @@
 //! `empty_reduce_identity`（`x.sum(dim)` の単位元 `0.0` 契約 +
 //! 定数バイアス加算）で構築し、`x` から独立した定数葉としては返さない
 //! （codex-review P2 是正・PR #2263。対応前は `push_leaf` による独立葉
-//! 登録で `x` への逆伝播経路が失われていた）。出力 shape の確保前には
-//! `checked_bytes_for::<f32>` で要素数積の `usize` オーバーフロー・
-//! `Vec` allocation 上限（`isize::MAX` バイト）超過を型付きエラーで
-//! 拒否する（codex-review P1 是正・PR #2263。対応前は `out_shape.iter
-//! ().product()` と `vec![...; numel]` を無検査で実行しており、例えば
-//! shape `[0, usize::MAX]` を `dim=Some(0)` で縮約すると capacity
-//! overflow で panic しえた）。`norm_p` の `p` は有限性・正値を
-//! dispatch 前に検査する（`nn/norm.rs::validate_eps` と同じ
-//! fail-closed 規律）。本番経路で `unwrap()`／`expect()` は使わない。
+//! 登録で `x` への逆伝播経路が失われていた）。`norm_p` の `p` は
+//! 有限性・正値を dispatch 前に検査する（`nn/norm.rs::validate_eps`
+//! と同じ fail-closed 規律）。本番経路で `unwrap()`／`expect()` は
+//! 使わない。
 //!
-//! **確保前のバイト数上限検査の非空縮約への拡張（codex-review P1 是正
-//! 2・PR #2263）**: `logsumexp`／`norm_p` は `n == 0`（空縮約）の場合
-//! だけでなく `n != 0` でも、`x` が小さなストレージを巨大な shape へ
-//! broadcast した view であれば `outer`／`inner`（broadcast 側の
-//! 次元）が巨大になりうる。`materialize_one` の入力実体化
-//! （`gather_elements`／`dense_vec`）・`BackendOps::logsumexp`／
-//! `vector_norm_p`（`backend-cpu::reduction::axis_reduce_logsumexp`／
-//! `axis_reduce_vector_norm_p` の `.collect()`）・そのフォールバック
-//! （`eval::logsumexp_along`／`vector_norm_p_along` の
-//! `vec![0f32; outer * inner]`）のいずれも確保前検査を持たないため、
-//! `logsumexp`／`norm_p` は dispatch（`materialize_one` 呼び出し）前に
-//! 入力 shape・`out_shape` の双方を `checked_bytes_for::<f32>` で検査
-//! する。
+//! **確保前のバイト数上限検査は全公開入口の冒頭で一律に行う契約
+//! （codex-review P1 是正・累計 3 段階・イシュー #2147・PR #2263）**:
+//! 唯一の共有ヘルパ `ensure_alloc_fits_f32`（本ファイル内 `fn`）が
+//! `checked_bytes_for::<f32>`（`crate::bool_ops`）で入力 shape・
+//! `out_shape`（既に求まっている場合）の要素数積の `usize`
+//! オーバーフロー・`Vec` allocation 上限（`isize::MAX` バイト）超過を
+//! 検査する。[`prod`]・[`logsumexp`]・[`any`]・[`all`]・[`norm_p`] の
+//! 全 5 入口は、**あらゆる分岐（空縮約・`p` の特殊化・`dim` の有無・
+//! `Unsupported` フォールバック）や合成演算・実体化（`contiguous`／
+//! `cumprod`／`ne`／`materialize_one`／既存 API への委譲）よりも前**に
+//! 本ヘルパを呼ぶ（各関数 doc「確保前のバイト数上限検査」参照）。
+//!
+//! 是正の経緯（3 段階。各段の詳細は各関数 doc・
+//! `docs/autodiff-reduce-ops-decision.md` §2.2〜§2.5）:
+//! 1. 初版は `out_shape.iter().product()` と `vec![...; numel]` を
+//!    無検査で実行しており、例えば shape `[0, usize::MAX]` を
+//!    `dim=Some(0)` で縮約すると capacity overflow で panic しえた
+//!    （是正: 空縮約分岐に `checked_bytes_for` を追加）。
+//! 2. `logsumexp`／`norm_p` は非空縮約（`n != 0`）でも `x` が小さな
+//!    ストレージを巨大な shape へ broadcast した view であれば
+//!    `outer`／`inner`（broadcast 側の次元）が巨大になりうるため、
+//!    `materialize_one` の入力実体化（`gather_elements`／
+//!    `dense_vec`）・`BackendOps::logsumexp`／`vector_norm_p`
+//!    （`backend-cpu::reduction::axis_reduce_logsumexp`／
+//!    `axis_reduce_vector_norm_p` の `.collect()`）・そのフォールバック
+//!    （`eval::logsumexp_along`／`vector_norm_p_along` の
+//!    `vec![0f32; outer * inner]`）のいずれも未検査だった（是正:
+//!    dispatch 前に入力 shape・`out_shape` の両方を検査）。
+//! 3. 棚卸しの結果、`prod`／`any`／`all` は空縮約分岐でしか検査して
+//!    おらず非空縮約（`contiguous`／`cumprod`／`ne` の実体化）が未検査
+//!    のまま残っていた。加えて `norm_p` は `p ∈ {1.0, 2.0}` の委譲判定
+//!    （`Var::norm_l1`／`norm_l2` への委譲）が検査より前にあり、委譲先
+//!    が独自に確保前検査を持たない場合は本関数の検査を迂回していた
+//!    （是正: 共有ヘルパ `ensure_alloc_fits_f32` を導入し、全 5 入口
+//!    の冒頭・全分岐より前に呼ぶ形へ統一。codex-review 新規指摘 2 件・
+//!    PR #2263）。
 
 use fandhe_ai_tensor_core::{BackendError, Tensor, reduce_out_shape};
 
@@ -106,6 +124,45 @@ fn reduce_axis_len(shape: &[usize], dim: Option<usize>) -> usize {
         None => shape.iter().product(),
         Some(axis) => shape[axis],
     }
+}
+
+/// 本モジュールの全公開入口（[`prod`]・[`logsumexp`]・[`any`]・
+/// [`all`]・[`norm_p`]）が冒頭で呼ぶ、唯一の確保前バイト数上限検査
+/// ヘルパ（codex-review P1 是正 3・イシュー #2147・PR #2263）。
+///
+/// `input_shape`（`x` の shape。`materialize_one`／`contiguous`／`ne`
+/// など、入力を実体化するあらゆる経路が確保しうる最大サイズ）を
+/// `checked_bytes_for::<f32>` で検査し、`out_shape` が既に求まって
+/// いる場合（`reduce_out_shape` は shape 演算のみで確保を行わないため
+/// 常に先に呼べる）は出力側も併せて検査する。
+///
+/// **呼び出し規律**: 各 `pub fn` は、空縮約分岐・`p` の特殊化
+/// （`norm_p` の `p ∈ {1.0, 2.0}` 委譲）・`dim` の有無・
+/// `Unsupported` フォールバックのいずれの分岐にも入る前、かつ
+/// `contiguous`／`cumprod`／`ne`／`materialize_one`／既存 API への
+/// 委譲（`norm_l1`／`norm_l2`）のいずれの実体化よりも前に本関数を
+/// 呼ぶ（モジュール doc「確保前のバイト数上限検査」参照。対応前は
+/// `prod`／`any`／`all` が空縮約分岐でしか検査しておらず、非空縮約で
+/// `contiguous`／`cumprod`／`ne` が無検査に確保していた。`norm_p` は
+/// `p ∈ {1.0, 2.0}` の委譲が検査より前にあり、委譲先
+/// `Var::norm_l1`／`norm_l2`〈本 PR の差分外の既存経路〉が
+/// 確保前検査を欠いていた場合に迂回されていた。codex-review 新規
+/// 指摘 2 件・PR #2263）。
+///
+/// `prod` の `dim=None` 経路（`reshape([n])` → `cumprod(0)`）・
+/// `Some(axis)` 経路（`cumprod(axis)`）はいずれも入力と同じ要素数の
+/// 中間 shape しか作らないため、`input_shape` の検査のみで
+/// `contiguous`／`cumprod` の確保も守られる（中間 shape が入力より
+/// 大きくなる経路は本モジュールに存在しない）。
+fn ensure_alloc_fits_f32(
+    input_shape: &[usize],
+    out_shape: Option<&[usize]>,
+) -> Result<(), AutodiffError> {
+    checked_bytes_for::<f32>(input_shape)?;
+    if let Some(out_shape) = out_shape {
+        checked_bytes_for::<f32>(out_shape)?;
+    }
+    Ok(())
 }
 
 /// バックエンド実装の戻り値 shape を検証する（`var.rs::verify_shape`
@@ -162,11 +219,13 @@ fn materialize_one<'t>(x: &Var<'t>) -> Result<Tensor<f32>, AutodiffError> {
 /// `ScalarBinaryOp::Ne` の契約）を経由して非空の `any`／`all` と同じ
 /// 「勾配ゼロだが経路は保持」の形になる。
 ///
-/// **事前条件（呼び出し元が満たす）**: `checked_bytes_for::<f32>
-/// (out_shape)` で確保前検証済みであること。`base.sum(dim)` 内部の
-/// `Vec` 確保（`backend-cpu::reduction::axis_reduce_sum` の
+/// **事前条件（呼び出し元が満たす）**: `ensure_alloc_fits_f32`
+/// （`out_shape` を含む）で確保前検証済みであること。`base.sum(dim)`
+/// 内部の `Vec` 確保（`backend-cpu::reduction::axis_reduce_sum` の
 /// `(0..total_out).into_par_iter().collect()`）はそれ自体は無検査の
-/// ため、呼び出し元が事前に境界検査を通す規律に依存する。
+/// ため、呼び出し元が事前に境界検査を通す規律に依存する。呼び出し元
+/// （[`prod`]・[`any`]・[`all`]）は各関数冒頭で `ensure_alloc_fits_f32`
+/// を呼ぶため、この事前条件は分岐に依らず常に満たされる。
 fn empty_reduce_identity<'t>(
     base: &Var<'t>,
     dim: Option<usize>,
@@ -191,21 +250,26 @@ fn empty_reduce_identity<'t>(
 /// 後ろ向き Horner 型再帰）のため、零要素が 0 個・1 個・2 個以上の
 /// いずれでも正しい。
 ///
+/// **確保前のバイト数上限検査（`ensure_alloc_fits_f32`。codex-review
+/// P1 是正・イシュー #2147・PR #2263）**: 空縮約（`n == 0`）に限らず
+/// 非空縮約でも `x` が小さなストレージを巨大な shape へ broadcast した
+/// view であれば `contiguous()`／`cumprod` が入力 shape 相応の巨大な
+/// `Vec` を無検査に確保しうる（対応前は空縮約分岐でしか検査しておらず
+/// 非空縮約が未検査のまま残っていた。codex-review 新規指摘・PR
+/// #2263）。関数冒頭で入力 shape・`out_shape` の双方を検査し、要素数積
+/// の `usize` オーバーフロー・`Vec` allocation 上限〈`isize::MAX`
+/// バイト〉超過のいずれも型付きエラーで拒否する（本番経路 panic 禁止
+/// 規約 `.claude/rules/coding-rust.md`）。
+///
 /// **空縮約（`n == 0`）は単位元 `1.0`**（PyTorch と同じ）を、`x` への
 /// 計算グラフ依存を保ったまま返す（`empty_reduce_identity`。
 /// `narrow(n-1)` の underflow を避けるため合成より前に分岐する）。
-/// 確保前に `checked_bytes_for` で `out_shape` の要素数積・バイト数
-/// を検査する（要素数積の `usize` オーバーフロー・`Vec` allocation
-/// 上限〈`isize::MAX` バイト〉超過のいずれも型付きエラーで拒否し、
-/// 無検査の確保による capacity overflow panic を避ける。本番経路
-/// panic 禁止規約 `.claude/rules/coding-rust.md`。codex-review P1
-/// 是正・イシュー #2147・PR #2263）。
 pub fn prod<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
+    ensure_alloc_fits_f32(&shape, Some(&out_shape))?;
     let n = reduce_axis_len(&shape, dim);
     if n == 0 {
-        checked_bytes_for::<f32>(&out_shape)?;
         return empty_reduce_identity(x, dim, 1.0);
     }
     match dim {
@@ -246,31 +310,32 @@ pub fn prod<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffErro
 /// **空縮約（`n == 0`）は [`AutodiffError::InvalidArgument`]**
 /// （`-inf` を黙って返さない安全側の判断。`Var::norm` と同じ方針）。
 ///
-/// **確保前のバイト数上限検査（codex-review P1 是正・イシュー #2147・
-/// PR #2263）**: `x` が小さなストレージを巨大な shape へ broadcast
-/// した view の場合、`materialize_one`（`BackendOps::logsumexp` →
-/// `Unsupported` 時の `eval::logsumexp_along` フォールバックを含む）や
+/// **確保前のバイト数上限検査（`ensure_alloc_fits_f32`。codex-review
+/// P1 是正・イシュー #2147・PR #2263）**: `x` が小さなストレージを
+/// 巨大な shape へ broadcast した view の場合、`materialize_one`
+/// （`BackendOps::logsumexp` → `Unsupported` 時の
+/// `eval::logsumexp_along` フォールバックを含む）や
 /// `backend-cpu::reduction::logsumexp`（`axis_reduce_logsumexp`・
 /// `gather_elements`）が要素数積・出力 shape から確保する `Vec` の
 /// バイト数は、`n == 0` チェックだけでは検出できない（`n != 0` でも
 /// `outer`／`inner` の broadcast 次元が巨大なら overflow しうる）。
-/// `checked_bytes_for` は入力 shape（`gather_elements`／`dense_vec` が
-/// 実体化する側）・`out_shape`（`axis_reduce_logsumexp`／
-/// `eval::logsumexp_along` の `vec![0f32; outer * inner]` が確保する
-/// 側）の両方を確保前に検査し、`eval.rs` モジュール契約（「shape が
-/// 既に整合していることを前提とし `ShapeError` を返さない」）を保った
-/// まま、本関数（呼び出し元）側で `Result` として拒否する。
+/// `ensure_alloc_fits_f32` を関数冒頭（`n == 0` 判定より前）で呼び、
+/// 入力 shape（`gather_elements`／`dense_vec` が実体化する側）・
+/// `out_shape`（`axis_reduce_logsumexp`／`eval::logsumexp_along` の
+/// `vec![0f32; outer * inner]` が確保する側）の両方を確保前に検査し、
+/// `eval.rs` モジュール契約（「shape が既に整合していることを前提とし
+/// `ShapeError` を返さない」）を保ったまま、本関数（呼び出し元）側で
+/// `Result` として拒否する。
 pub fn logsumexp<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
+    ensure_alloc_fits_f32(&shape, Some(&out_shape))?;
     let n = reduce_axis_len(&shape, dim);
     if n == 0 {
         return Err(AutodiffError::InvalidArgument(format!(
             "reduce_ops::logsumexp: 縮約対象の要素数が 0（dim={dim:?}）"
         )));
     }
-    checked_bytes_for::<f32>(&shape)?;
-    checked_bytes_for::<f32>(&out_shape)?;
     let input_val = materialize_one(x)?;
     let value = match x.tape().ops().logsumexp(&input_val, dim) {
         Ok(v) => {
@@ -300,22 +365,29 @@ pub fn logsumexp<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, Autodif
 /// `ne`（`ScalarBinaryOp::Ne`）の VJP がゼロを返すため、合成しただけで
 /// 自動的に勾配ゼロの tape ノードになる。
 ///
+/// **確保前のバイト数上限検査（`ensure_alloc_fits_f32`。`prod` と同じ
+/// codex-review P1 是正・イシュー #2147・PR #2263）**: 空縮約
+/// （`n == 0`）に限らず非空縮約でも、`x` が小さなストレージを巨大な
+/// shape へ broadcast した view であれば `x.ne(&zero)` が入力 shape
+/// 相応の `Vec` を無検査に確保しうる（対応前は空縮約分岐でしか検査
+/// しておらず非空縮約が未検査のまま残っていた。codex-review 新規
+/// 指摘・PR #2263）。関数冒頭で入力 shape・`out_shape` の双方を検査
+/// する。
+///
 /// **空縮約（`n == 0`）は `0.0`**（PyTorch と同じ。`max` は単位元を
 /// 持たずエラーになるため合成できず、`x.ne(&zero)` を `sum(dim)` へ
 /// 通した単位元（`empty_reduce_identity`）で代替する。空縮約軸の
 /// `sum` は `0.0` を返す契約〈モジュール doc「空縮約の意味論」〉の
-/// ため、`max`/`min` の代わりに使っても値は変わらない）。確保前に
-/// `checked_bytes_for` で `out_shape` を検査する（`prod` と同じ
-/// codex-review P1 是正・イシュー #2147・PR #2263）。
+/// ため、`max`/`min` の代わりに使っても値は変わらない）。
 pub fn any<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
+    ensure_alloc_fits_f32(&shape, Some(&out_shape))?;
     let n = reduce_axis_len(&shape, dim);
     let zero_val = Tensor::scalar(0.0f32);
     let zero_id = x.tape().push_leaf(zero_val, false);
     let zero = Var::from_raw(x.tape(), zero_id);
     if n == 0 {
-        checked_bytes_for::<f32>(&out_shape)?;
         return empty_reduce_identity(&x.ne(&zero)?, dim, 0.0);
     }
     x.ne(&zero)?.max(dim)
@@ -324,18 +396,21 @@ pub fn any<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError
 /// `dim` 軸の全要素が非ゼロなら `1.0`、それ以外は `0.0`（`torch.all`
 /// 相当。イシュー #2147）。[`any`] と対称（`x.ne(&zero) → min(dim)`）。
 ///
+/// **確保前のバイト数上限検査**: [`any`] doc「確保前のバイト数上限
+/// 検査」と同じ理由・同じタイミング（関数冒頭・`ensure_alloc_fits_f32`）。
+///
 /// **空縮約（`n == 0`）は `1.0`**（PyTorch と同じ。[`any`] と対称。
 /// 空縮約軸の `sum` 単位元 `0.0` に `1.0` を加算する形で
-/// `empty_reduce_identity` を使う。確保前検査も `any` と同じ）。
+/// `empty_reduce_identity` を使う）。
 pub fn all<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
+    ensure_alloc_fits_f32(&shape, Some(&out_shape))?;
     let n = reduce_axis_len(&shape, dim);
     let zero_val = Tensor::scalar(0.0f32);
     let zero_id = x.tape().push_leaf(zero_val, false);
     let zero = Var::from_raw(x.tape(), zero_id);
     if n == 0 {
-        checked_bytes_for::<f32>(&out_shape)?;
         return empty_reduce_identity(&x.ne(&zero)?, dim, 1.0);
     }
     x.ne(&zero)?.min(dim)
@@ -357,11 +432,24 @@ pub fn all<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError
 /// **空縮約（`n == 0`）は [`AutodiffError::InvalidArgument`]**
 /// （`Var::norm` と同じ方針）。
 ///
-/// **確保前のバイト数上限検査（codex-review P1 是正・イシュー #2147・
-/// PR #2263）**: [`logsumexp`] doc「確保前のバイト数上限検査」と同じ
-/// 理由（`p == 1.0`／`p == 2.0` の委譲先 `Var::norm_l1`／`norm_l2` は
-/// 本 PR の差分外・イシュー #1723 の既存経路のため対象外）。
+/// **確保前のバイト数上限検査（`ensure_alloc_fits_f32`。codex-review
+/// P1 是正・イシュー #2147・PR #2263）**: [`logsumexp`] doc「確保前の
+/// バイト数上限検査」と同じ理由で、関数冒頭・`p` の有限性／正値検査
+/// よりも前に検査する（あらゆる分岐に先んじる、という本モジュールの
+/// 統一契約〈モジュール doc「確保前のバイト数上限検査は全公開入口の
+/// 冒頭で一律に行う契約」〉に従う）。とくに `p ∈ {1.0, 2.0}` の委譲
+/// 判定より前に検査することが要点（対応前は委譲判定が検査より前に
+/// あり、委譲先 `Var::norm_l1`／`norm_l2`〈`Var::norm` `pub(crate)`
+/// 経由。本 PR の差分外・イシュー #1723 の既存経路〉が独自に確保前
+/// 検査を持たない場合、本関数の検査を迂回してしまっていた。
+/// codex-review 新規指摘・PR #2263。委譲そのもの〈`Var::norm_l1`／
+/// `norm_l2`／`Var::norm` 本体〉の改修は既存 API のためスコープ外だが、
+/// 委譲前に本関数が検査することで巨大 broadcast shape は委譲前に
+/// 拒否される）。
 pub fn norm_p<'t>(x: &Var<'t>, p: f32, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+    let shape = x.shape();
+    let out_shape = reduce_out_shape(&shape, dim)?;
+    ensure_alloc_fits_f32(&shape, Some(&out_shape))?;
     if !p.is_finite() || p <= 0.0 {
         return Err(AutodiffError::InvalidArgument(format!(
             "reduce_ops::norm_p: p は有限かつ正である必要がある、got {p}"
@@ -373,16 +461,12 @@ pub fn norm_p<'t>(x: &Var<'t>, p: f32, dim: Option<usize>) -> Result<Var<'t>, Au
     if p == 2.0 {
         return x.norm_l2(dim);
     }
-    let shape = x.shape();
-    let out_shape = reduce_out_shape(&shape, dim)?;
     let n = reduce_axis_len(&shape, dim);
     if n == 0 {
         return Err(AutodiffError::InvalidArgument(format!(
             "reduce_ops::norm_p: 縮約対象の要素数が 0（dim={dim:?}）"
         )));
     }
-    checked_bytes_for::<f32>(&shape)?;
-    checked_bytes_for::<f32>(&out_shape)?;
     let input_val = materialize_one(x)?;
     let value = match x.tape().ops().vector_norm_p(&input_val, p, dim) {
         Ok(v) => {

@@ -33,9 +33,10 @@
 //!   （`docs/perf/logs/reduce-ops-2147/README.md`）。
 
 use fandhe_ai::Device;
+use fandhe_ai_autodiff::AutodiffError;
 use fandhe_ai_autodiff::Var;
 use fandhe_ai_autodiff::reduce_ops::{all, any, logsumexp, norm_p, prod};
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 trait VarSource {
     fn make_var(&self, tensor: &Tensor<f32>) -> Var<'_>;
@@ -803,4 +804,27 @@ fn cuda_prod_logsumexp_norm_p_backward_matches_cpu_reference() {
         dx_cpu.host_slice().as_ref(),
         dx_cuda.host_slice().as_ref(),
     );
+}
+
+// --- 確保前のバイト数上限検査（codex-review P1 是正 3・イシュー
+// #2147・PR #2263）の facade 経路（`fandhe_ai::tape()`。
+// `CpuBackendOps`）代表テスト。`crates/autodiff/tests/reduction_parity
+// .rs` は NaiveOps 単体の検査を担うため（本ファイル冒頭 doc の分担
+// 記述）、本テストは CPU 実バックエンド（`BackendOps::logsumexp`／
+// `vector_norm_p` の CPU 実装。`Unsupported` を返さない経路）でも
+// `reduce_ops::ensure_alloc_fits_f32` の確保前検査が dispatch より前で
+// 効き、`backend-cpu::reduction` 側の実体化に到達する前に拒否される
+// ことを確認する（`norm_p` の `p == 2.0` 委譲バイパス経路を代表に選ぶ:
+// 委譲判定の迂回が本 PR 是正の中心的な指摘のため）。
+
+#[test]
+fn cpu_norm_p_two_rejects_huge_broadcast_before_delegating() {
+    let cpu_tape = fandhe_ai::tape();
+    let base = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).expect("test fixture: shape 一致");
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = cpu_tape.make_var(&huge);
+    assert!(matches!(
+        norm_p(&x, 2.0, Some(1)),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
 }
