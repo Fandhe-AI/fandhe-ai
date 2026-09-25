@@ -56,3 +56,45 @@
 
 - facade 直下への新規公開面の要否（`docs/compat-api-scope.md` §5「範囲拡張手続き」の対象か、`unique`〈#1734〉と同様に既存 `Var` 再エクスポート経由で足りるかの判断）。
 - `Op::Amax`／`Op::Amin` という新規 `Op` variant 追加そのものはガードレール上の破壊的変更に該当しないが（既存 `Op::Max`／`Op::Min` の挙動を変えない加算的変更）、実装 PR のレビューで改めて確認する。
+
+## 9. 実装記録（イシュー #2154。親 #2131「Phase 5」）
+
+§7 の後続提案「`Var::amax`／`Var::amin`（`Op::Amax`／`Op::Amin`・`extremum_even_split_vjp`）の実装」を消化した。§5「確定方針」3 点（別 `Op` 新設・別 VJP ヘルパー・f64 長軸縮約契約の対象外）をそのまま実装し、実装に伴う判断・対象外事項を記録する。
+
+### 9.1 実装配置
+
+- `crates/autodiff/src/extremum_ops.rs`（新規モジュール）: `pub fn amax`／`amin`（自由関数）。`reduce_ops.rs`（#2147）と同型の「facade 非公開（意図的）」保留（§9.2 参照）。
+- `crates/autodiff/src/tape.rs`: `Op::Amax { input, dim }`／`Op::Amin { input, dim }` を新設。`is_checkpoint_eligible`／`for_each_input`／`supports_create_graph` の 3 網羅 match（ワイルドカードなし）へ追加。`recompute_value` は `_ =>` で吸収されるワイルドカード側のため無変更（`is_checkpoint_eligible` を `false` にしたため到達しない）。
+- `crates/autodiff/src/grad.rs`: `vjp()` に `Op::Amax { input, dim } | Op::Amin { input, dim }` の共有アームを追加（`extremum_first_match_vjp` を `Op::Max`／`Op::Min` が共有する構成と同型）。新規ヘルパー `extremum_even_split_vjp`（`extremum_first_match_vjp` と同じ「外側×走査軸×内側」3 段走査。各 lane を 2 周し、1 周目で一致要素数 `k` を数え、2 周目で `g/k` を書く）。
+- `crates/autodiff/src/lib.rs`: `pub mod extremum_ops;` を追加。
+
+### 9.2 facade 非公開の判断（§8 承認事項の回答）
+
+Issue 本文は facade への `Var::amax`／`amin` 委譲メソッド追加を承認事項として明示している。自動運転（ユーザー承認を得られない実行文脈）での実装のため、承認前提の公開は行わず、`crates/autodiff/src/reduce_ops.rs`（#2147）・`matrix_ops.rs`（#2144）と同じ「自由関数として `Var` の外に置き到達不能にする」判断枠組みを適用した。`crates/facade/src/lib.rs::VarExtremumOpsHoldDoctestGuard`（正のプローブ 1 ブロック方式）＋ `crates/facade/tests/api_surface.rs` の 4 テスト（`extremum_ops_hold_doctest_globs_all_pub_modules`／`_probe_body_matches_fixed_contract`／`facade_does_not_reexport_or_declare_extremum_ops`／`workspace_declares_extremum_ops_fn_names_only_in_allowed_locations`）が多層防御を構成する。承認後は `Var::amax`／`amin` の薄い委譲メソッドを追加し、本ガード一式を撤去する。
+
+### 9.3 checkpoint 適格性・create_graph 対応
+
+- `is_checkpoint_eligible`: `false`（`Op::LogSumExp`／`Op::PNorm`・`Op::Var`／`Op::Std` と同じ「最小・安全側の判断」。forward は `Op::Max`／`Op::Min` と bit 同一のため `true` へ拡張する余地はあるが、`recompute_value` の Visit／Process 双方への再計算分岐追加を要するため見送った）。
+- `supports_create_graph`: `false`（`Op::Max`／`Op::Min` と同じ列）。
+
+### 9.4 テスト構成
+
+- `crates/autodiff/src/extremum_ops.rs`（`#[cfg(test)]`）: forward の `Var::max`／`min` との bit 一致、タイの均等分配、タイなし時の先勝ちとの一致（`k=1`）、`dim` 範囲外・空縮約のエラー系。
+- `crates/autodiff/src/grad.rs`（`#[cfg(test)]`）: `extremum_even_split_vjp` 単体（全タイ・lane ごとにタイ数が異なる場合・タイなし時の `extremum_first_match_vjp` との一致・`k=0` 全ゼロ・`-0.0`/`0.0` タイ）。
+- `crates/autodiff/tests/extremum_ops.rs`（統合。NaiveOps）: forward・backward・既存 `Var::max` 勾配の無変更回帰・エラー系。
+- `crates/facade/tests/extremum_ops_backend_parity.rs`: CPU 対 NaiveOps の forward／backward bit 完全一致（属性なし）、CUDA／Metal 対 CPU（`#[ignore]`。§9.5 参照）、確保前バイト数上限検査の facade 経路代表テスト。
+
+### 9.5 CUDA／Metal 未実測の申し送り
+
+本エージェント実行環境は CUDA 実機（DGX Spark GB10）・Metal 実機のいずれにも到達できないため、`crates/facade/tests/extremum_ops_backend_parity.rs` の `cuda_*`／`metal_*`（`#[ignore]`）は未実行のまま Mac／GB10 実機セッションへ申し送る。測定コマンド案・期待結果は `docs/perf/logs/amax-amin-2154/README.md` を参照。forward は `Op::Max`／`Op::Min` と bit 同一・backward はホスト側計算（`extremum_even_split_vjp`）のため、いずれも bit 完全一致が期待値（REQ-2 統一複合判定より厳しい判定）。
+
+### 9.6 対象外（PR 本文にも記載）
+
+§7 のうち本イシューで消化していない事項:
+
+- 複数軸版 `amax_dims`／`amin_dims`・keepdim 版。
+- §6 の NaN 伝播の非対称性（`amax` は NaN 伝播・`amin` は非伝播。forward 実装〈`Op::Max`／`Op::Min`〉自体を変えない限り解消しない）。
+- `torch.max(input)`（全縮約）の勾配分配仕様との突合。
+- GPU 専用カーネル（forward は既存 `max`／`min` カーネルを再利用する契約〈§5〉のため対象外のまま）。
+- f64 autograd（`OpF64`）版の `amax`／`amin`。
+- facade 公開（`Var::amax`／`amin` の委譲メソッド追加・保留ガード撤去）: 経路 2 の承認待ち。窓口は #2154・#2131。

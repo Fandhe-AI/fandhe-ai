@@ -210,6 +210,25 @@
 //! 「承認待ち保留」の枠組み。`docs/autodiff-einsum-batch-decision.md`・
 //! モジュール doc 参照）。
 
+//! イシュー #2153（親 #2131）で、`Var::topk`（`sorted=True` 固定・
+//! 非負 `dim` のみ）・`Var::unique`（`dim`／`return_inverse`／
+//! `return_counts` 非対応）のオプション拡張（`sorted=false`・負
+//! `dim`・unique の `dim` 指定・`return_inverse`・`return_counts`・
+//! `unique_consecutive`）を [`topk_unique_ops`] へ追加した。
+//! [`reduce_ops`] と同じく非公開の自由関数群で、facade 公開は承認待ち
+//! のため意図的に再エクスポートしない（`docs/autodiff-topk-unique-
+//! ops-decision.md`・モジュール doc 参照）。
+
+//! イシュー #2154（親 #2131）で `amax`／`amin`（PyTorch `torch.amax`／
+//! `amin` 相当。タイに勾配を均等分配する VJP）を [`extremum_ops`] へ
+//! 追加した。既存 `Var::max`／`min`／`max_dims`（先勝ち決定的方式。
+//! イシュー #1718 で出荷済み挙動として維持を確定）とは独立の `Op`
+//! （`tape::Op::Amax`／`Amin`）・VJP として実装し、既存経路の勾配値は
+//! 変えない。[`reduce_ops`] と同じく非公開の自由関数群（`Var` への
+//! inherent メソッドではない）で、facade 公開は承認待ちのため意図的に
+//! 再エクスポートしない（`docs/autodiff-amax-grad-distribution-
+//! decision.md`・モジュール doc 参照）。
+
 pub mod activation_ops;
 mod attention;
 mod backward;
@@ -222,6 +241,7 @@ mod einsum;
 pub mod einsum_batch;
 mod error;
 mod eval;
+pub mod extremum_ops;
 pub mod f64_autograd;
 mod grad;
 pub mod indexing_ops;
@@ -237,6 +257,7 @@ pub mod scalar_unary_ops;
 mod tape;
 #[cfg(test)]
 mod test_support;
+pub mod topk_unique_ops;
 mod var;
 
 pub use backward::Gradients;

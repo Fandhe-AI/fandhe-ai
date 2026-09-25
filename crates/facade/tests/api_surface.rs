@@ -9095,3 +9095,494 @@ fn workspace_declares_indexing_ops_fn_names_only_in_autodiff_indexing_ops() {
          なのかを確認すること）: {found:?}"
     );
 }
+
+// =====================================================================
+// #2153（親 #2131）の facade 公開保留固定（`VarTopkUniqueOpsHoldDoctestGuard`）。
+// `VarIndexingOpsHoldDoctestGuard`（イシュー #2148）と同型の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-topk-unique-ops-decision.md` §6 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarTopkUniqueOpsHoldDoctestGuard` doc
+/// 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`indexing_ops_hold_doctest_globs_all_pub_modules` の
+/// `VarTopkUniqueOpsHoldDoctestGuard` 版）。
+#[test]
+fn topk_unique_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarTopkUniqueOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarTopkUniqueOpsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`topk_unique_ops_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの**glob 以外の本文**が固定文言
+/// [`TOPK_UNIQUE_OPS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
+/// することを固定する（`indexing_ops_hold_doctest_probe_body_matches_
+/// fixed_contract` と同じ理由: rustdoc の `# ` 隠し行・プローブの
+/// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
+/// 機械的に拒否する）。
+#[test]
+fn topk_unique_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarTopkUniqueOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, TOPK_UNIQUE_OPS_HOLD_PROBE_BODY,
+        "VarTopkUniqueOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 TOPK_UNIQUE_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_topk_unique_hold_probe モジュール・\
+         __FandheTopkUniqueHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`topk_unique_ops_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `VarTopkUniqueOpsHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
+/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート
+/// 自体の `use fandhe_ai::*;` は本文に含む）。
+const TOPK_UNIQUE_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_topk_unique_hold_probe {\n\
+\x20\x20\x20\x20pub mod topk_unique_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn topk_with_options() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn unique_with_options() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn unique_consecutive() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_topk_unique_hold_probe::*;\n\
+\n\
+struct __FandheTopkUniqueMarker;\n\
+\n\
+trait __FandheTopkUniqueHoldProbe {\n\
+\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker;\n\
+\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker;\n\
+\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheTopkUniqueHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+}\n\
+\n\
+impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+}\n\
+\n\
+impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `topk_unique_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
+\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20topk_unique_ops::topk_with_options();\n\
+\x20\x20\x20\x20topk_unique_ops::unique_with_options();\n\
+\x20\x20\x20\x20topk_unique_ops::unique_consecutive();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Var::topk_with_options(x);\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.topk_with_options();\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Var::unique_with_options(x);\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.unique_with_options();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Tensor::unique_consecutive(x);\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.unique_consecutive();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Tape::topk_with_options(x);\n\
+\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.topk_with_options();\n\
+}";
+
+/// `topk_with_options`・`unique_with_options`・`unique_consecutive`
+/// （3 個の関数名。イシュー #2153）。[`facade_does_not_reexport_or_
+/// declare_topk_unique_ops`]・[`workspace_declares_topk_unique_ops_fn_
+/// names_only_in_allowed_locations`] が共用する。
+const TOPK_UNIQUE_OPS_FN_NAMES: [&str; 3] = [
+    "topk_with_options",
+    "unique_with_options",
+    "unique_consecutive",
+];
+
+/// facade src 全体（`crates/facade/src/**`）に、`topk_unique_ops` を
+/// 参照する `pub use`（`pub use fandhe_ai_autodiff::topk_unique_ops;`
+/// 等のモジュール再エクスポート・別名含む）も、
+/// [`TOPK_UNIQUE_OPS_FN_NAMES`]（3 個）の `fn` 宣言（可視性・宣言
+/// 文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出契約）
+/// も存在しないことを固定する（`VarTopkUniqueOpsHoldDoctestGuard` の
+/// 正のプローブと多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_indexing_ops` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_topk_unique_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use")
+                && line_contains_identifier(trimmed, "topk_unique_ops")
+            {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `topk_unique_ops` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in TOPK_UNIQUE_OPS_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が topk_unique_ops（イシュー #2153 の内部クレート限定\
+         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
+         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、
+/// [`TOPK_UNIQUE_OPS_FN_NAMES`]（3 個）の `fn` 宣言の定義元集合を
+/// 固定する（`workspace_declares_indexing_ops_fn_names_only_in_
+/// autodiff_indexing_ops` と同型のインベントリ）。
+///
+/// **期待集合**（着手前確認の再 grep で判明）: `topk_with_options`・
+/// `unique_with_options`・`unique_consecutive` はいずれも
+/// `crates/autodiff/src/topk_unique_ops.rs` にのみ 1 件ずつ存在する。
+#[test]
+fn workspace_declares_topk_unique_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in TOPK_UNIQUE_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = TOPK_UNIQUE_OPS_FN_NAMES
+        .iter()
+        .map(|name| (format!("autodiff/src/topk_unique_ops.rs::{name}"), 1usize))
+        .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の topk_unique_ops 系 `fn` 宣言集合が\
+         `crates/autodiff/src/topk_unique_ops.rs`（3 件）のみという期待と\
+         一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
+         が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
+         なのかを確認すること）: {found:?}"
+    );
+}
+
+// =====================================================================
+// #2154（親 #2131）の facade 公開保留固定（`VarExtremumOpsHoldDoctestGuard`）。
+// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-amax-grad-distribution-decision.md` §9 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarExtremumOpsHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`reduce_ops_hold_doctest_globs_all_pub_modules` の
+/// `VarExtremumOpsHoldDoctestGuard` 版）。
+#[test]
+fn extremum_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarExtremumOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarExtremumOpsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`extremum_ops_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`EXTREMUM_OPS_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（`reduce_ops_hold_
+/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
+/// を骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn extremum_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarExtremumOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, EXTREMUM_OPS_HOLD_PROBE_BODY,
+        "VarExtremumOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 EXTREMUM_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_extremum_hold_probe モジュール・\
+         __FandheExtremumHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`extremum_ops_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `VarExtremumOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const EXTREMUM_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_extremum_hold_probe {\n\
+\x20\x20\x20\x20pub mod extremum_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn amax() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn amin() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_extremum_hold_probe::*;\n\
+\n\
+struct __FandheExtremumMarker;\n\
+\n\
+trait __FandheExtremumHoldProbe {\n\
+\x20\x20\x20\x20fn amax(&self) -> __FandheExtremumMarker;\n\
+\x20\x20\x20\x20fn amin(&self) -> __FandheExtremumMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheExtremumHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }\n\
+\x20\x20\x20\x20fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }\n\
+}\n\
+\n\
+impl __FandheExtremumHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }\n\
+\x20\x20\x20\x20fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }\n\
+}\n\
+\n\
+impl __FandheExtremumHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }\n\
+\x20\x20\x20\x20fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `extremum_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
+\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20extremum_ops::amax();\n\
+\x20\x20\x20\x20extremum_ops::amin();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = fandhe_ai::Var::amax(x);\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = x.amax();\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = fandhe_ai::Var::amin(x);\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = x.amin();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = fandhe_ai::Tensor::amax(x);\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = x.amax();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = fandhe_ai::Tape::amin(x);\n\
+\x20\x20\x20\x20let _: __FandheExtremumMarker = x.amin();\n\
+}";
+
+/// `amax`・`amin`（2 個の関数名。イシュー #2154）。
+/// [`facade_does_not_reexport_or_declare_extremum_ops`]・
+/// [`workspace_declares_extremum_ops_fn_names_only_in_allowed_locations`]
+/// が共用する。
+const EXTREMUM_OPS_FN_NAMES: [&str; 2] = ["amax", "amin"];
+
+/// facade src 全体（`crates/facade/src/**`）に、`extremum_ops` を参照
+/// する `pub use`（`pub use fandhe_ai_autodiff::extremum_ops;` 等の
+/// モジュール再エクスポート・別名含む）も、[`EXTREMUM_OPS_FN_NAMES`]
+/// （2 個）の `fn` 宣言（可視性・宣言文脈を問わない。
+/// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
+/// 固定する（`VarExtremumOpsHoldDoctestGuard` の正のプローブと多層防御を
+/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
+/// reduce_ops` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_extremum_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") && line_contains_identifier(trimmed, "extremum_ops") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `extremum_ops` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in EXTREMUM_OPS_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が extremum_ops（イシュー #2154 の内部クレート限定\
+         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
+         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`EXTREMUM_OPS_FN_NAMES`]
+/// （2 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_
+/// reduce_ops_fn_names_only_in_allowed_locations` と同型のインベン
+/// トリ）。
+///
+/// **期待集合**（着手前確認の再 grep で判明。実装計画「インベントリを
+/// 実測する」手順）: `amax`・`amin` はいずれも `crates/autodiff/src/
+/// extremum_ops.rs` にのみ 1 件ずつ存在する。`crates/backend-cpu/src/
+/// reduction.rs` のテストコードには `let amax = ...`／`let amin = ...`
+/// というローカル変数束縛があるが、`fn` 宣言ではないため
+/// [`count_fn_declarations_by_name`] は数えない（着手前確認の実行で
+/// 確かめた。誤検出しないことのドキュメント）。
+#[test]
+fn workspace_declares_extremum_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in EXTREMUM_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = EXTREMUM_OPS_FN_NAMES
+        .iter()
+        .map(|name| (format!("autodiff/src/extremum_ops.rs::{name}"), 1usize))
+        .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の extremum_ops 系 `fn` 宣言集合が\
+         `crates/autodiff/src/extremum_ops.rs`（2 件）のみという期待と\
+         一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
+         が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
+         なのかを確認すること）: {found:?}"
+    );
+}
