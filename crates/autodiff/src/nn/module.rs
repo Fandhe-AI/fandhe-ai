@@ -40,6 +40,7 @@ use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::nn::normalization::{GroupNorm, InstanceNorm, group_norm_forward_host};
 use crate::nn::padding::ZeroPad2d;
+use crate::nn::pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
     AvgPool2d, GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d,
@@ -1576,6 +1577,39 @@ impl Module for Identity {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Identity::forward_host(self, ops, input)
+    }
+}
+
+/// `PixelShuffle::forward`／`forward_host` への委譲（イシュー #2162）。
+/// パラメータを持たないため `named_parameters` は既定（空）のまま。
+impl Module for PixelShuffle {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        PixelShuffle::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        PixelShuffle::forward_host(self, ops, input)
+    }
+}
+
+/// `PixelUnshuffle::forward`／`forward_host` への委譲（イシュー
+/// #2162）。パラメータを持たないため `named_parameters` は既定
+/// （空）のまま。
+impl Module for PixelUnshuffle {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        PixelUnshuffle::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        PixelUnshuffle::forward_host(self, ops, input)
     }
 }
 
