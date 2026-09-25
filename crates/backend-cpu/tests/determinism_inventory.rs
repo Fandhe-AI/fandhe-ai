@@ -284,12 +284,29 @@ fn assigned_identifier(stmt: &str) -> Option<&str> {
         return None;
     }
     let after = rest[ident_end..].trim_start();
-    // `==`（比較）を代入と誤認しないよう、単一の `=` のみを代入とみなす。
-    if after.starts_with('=') && !after.starts_with("==") {
-        Some(ident)
-    } else {
-        None
+    // 型注釈 `: T` の有無に関わらず代入先を検出する（`let ident = ...`
+    // だけでなく `let ident: T = data.par_iter();` のような型注釈付き
+    // let も並列イテレータの汚染源として追跡する必要がある。codex-review
+    // 指摘・Bugbot 指摘 PR #2274: `assigned_identifier` が識別子直後の
+    // `=` のみを代入とみなしていたため、型注釈を挟む代入が汚染集合から
+    // 漏れ、後続の `.sum()`／`.reduce(` が並列縮約カウントから漏れて
+    // いた）。`after` を走査し、最初に現れる単独の `=`（`==` の一部で
+    // はなく、直前が `!`／`<`／`>`／`=` でもないもの）を代入演算子とみ
+    // なす。型注釈本体（`: T` 部分）に単独 `=` が現れるケース（const
+    // generics のデフォルト値等）は本テストが対象とするコードパターン
+    // には現れないため割り切る。
+    let bytes = after.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'=' {
+            continue;
+        }
+        let next_is_eq = bytes.get(i + 1) == Some(&b'=');
+        let prev_is_cmp = i > 0 && matches!(bytes[i - 1], b'!' | b'<' | b'>' | b'=');
+        if !next_is_eq && !prev_is_cmp {
+            return Some(ident);
+        }
     }
+    None
 }
 
 /// `#[cfg(all(test, target_arch = "aarch64"))]` ゲート済み（`src/
@@ -529,6 +546,17 @@ fn count_par_reduce_detects_variable_assignment_across_statements() {
 }
 
 #[test]
+fn count_par_reduce_detects_typed_let_assignment_across_statements() {
+    // 型注釈付き let（`let it: T = data.par_iter();`）を挟んで文をまた
+    // ぐ並列縮約。`assigned_identifier` が識別子直後の `=` のみを代入と
+    // みなしていたため、型注釈を挟むケースは汚染集合から漏れ、後続の
+    // `.sum()` が検出をすり抜けていた（codex-review 指摘・Bugbot 指摘・
+    // PR #2274）。
+    let src = "let it: Vec<f32> = data.par_iter().collect(); let s = it.iter().sum::<f32>();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
 fn count_par_reduce_detects_turbofish_sum() {
     // `.sum::<f32>()` は `.sum(` 前方一致では検出できない
     // （codex-review 指摘・PR #2274）。
@@ -559,4 +587,20 @@ fn assigned_identifier_extracts_let_binding() {
     );
     assert_eq!(assigned_identifier("x == 1"), None);
     assert_eq!(assigned_identifier("data.iter()"), None);
+}
+
+#[test]
+fn assigned_identifier_extracts_typed_let_binding() {
+    // 型注釈付き let（`let ident: T = ...`）も代入として追跡する
+    // （codex-review 指摘・Bugbot 指摘・PR #2274）。
+    assert_eq!(
+        assigned_identifier("let it: Vec<f32> = data.par_iter().collect()"),
+        Some("it")
+    );
+    assert_eq!(
+        assigned_identifier("let mut it: f32 = data.par_iter().sum()"),
+        Some("it")
+    );
+    // 型注釈のみで代入が無い場合（`;` 区切りの空文等）は None を保つ。
+    assert_eq!(assigned_identifier("let it: Vec<f32>"), None);
 }
