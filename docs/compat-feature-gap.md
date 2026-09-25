@@ -659,6 +659,42 @@ compat-api-scope.md` §5 の手続きは Tier 1 列挙済み機能につき再�
   `#[ignore]` テスト（`crates/facade/tests/einsum_backend_parity.rs`）
   として未実測のまま記録し、GB10 実機セッションへ引き継ぐ。
 
+## 追補（イシュー #2149）
+
+上記「batch 添字を伴う縮約は非対応」の見積もりに沿い、rank≥3
+`Var::matmul`（#1715）実装後に `einsum_matmul_path` を
+`[batch..., L, K] × [batch..., K, R]` の rank≥3 GEMM へ一般化した:
+
+- `crate::einsum` に `BatchContraction`（`Reject`／`Allow`）モードを
+  導入し、`compute_binary_plan` の batch∧contract 拒否判定を
+  `Reject` 限定にした。`einsum_matmul_path` は `batch` が空なら従来
+  どおりの 2 次元経路、非空なら `[batch..., left..., contract...]
+  → [B, L, K]`／`[batch..., contract..., right...] → [B, K, R]` へ
+  正規化してから rank≥3 `Var::matmul`（`gemm_batched`）を 1 回呼ぶ
+  経路を通る。新規 `Op`・新規 VJP は追加していない（既存の
+  `permute`／`reshape`／`matmul` への分解のまま）。
+- **facade 公開は本イシューの承認事項のため未実施**: `Var::einsum`
+  （facade `fandhe_ai::Var::einsum` へそのまま到達する公開入口）は
+  引き続き `Reject` モードで呼び出し、batch 添字を伴う縮約を
+  `AutodiffError::InvalidArgument` で拒否する。内部クレート限定の
+  到達入口として `fandhe_ai_autodiff::einsum_batch::einsum_batched`
+  を追加した（[`bool_ops`]／[`rearrange_ops`]／[`matrix_ops`] と同じ
+  「facade 公開承認待ち保留」の枠組み。facade 側の保留ガードは
+  `crates/facade/src/lib.rs::VarEinsumBatchHoldDoctestGuard`・
+  `crates/facade/tests/api_surface.rs` のソース走査 4 テスト）。
+  設計判断・承認後の切替手順は `docs/autodiff-einsum-batch-decision.md`
+  を参照。
+- **既知の制約**: `create_graph::validate_ancestors` は rank≥3 の
+  `MatMul` を高階微分の対象から拒否するため、batch 添字を伴う einsum
+  は `Tape::backward_create_graph` 下では型付きエラー（`AutodiffError::
+  Backward`）になる（panic はしない）。size-1 broadcast は引き続き
+  非対応（次元サイズの完全一致のみ）。
+- CPU（`CpuBackendOps` 経由 `gemm_batched`）は分解先演算の parity を
+  確認済み。CUDA／Metal は本エージェント実行環境に実機がないため
+  `#[ignore]` テスト（`crates/facade/tests/
+  einsum_batch_backend_parity.rs`）として未実測のまま記録し、
+  `docs/perf/logs/einsum-batch-2149/README.md` へ申し送る。
+
 ## 追補（イシュー #1634）
 
 §2.4「要素演算」の各行（`sub`／`div`／比較演算／`sin`/`cos`/`tan`／
