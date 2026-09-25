@@ -186,6 +186,13 @@
 //! 意図的に再エクスポートしない（`docs/autodiff-matrix-ops-decision.md`・
 //! モジュール doc 参照）。
 
+//! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
+//! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。
+//! [`matrix_ops`] と同じく非公開の自由関数群（`Var` への inherent
+//! メソッドではない）で、facade 公開は承認待ちのため意図的に
+//! 再エクスポートしない（`docs/autodiff-reduce-ops-decision.md`・
+//! モジュール doc 参照）。
+
 mod attention;
 mod backward;
 pub mod bool_ops;
@@ -204,6 +211,7 @@ pub mod nn;
 pub mod optim;
 pub mod rearrange_ops;
 mod reduce_dims;
+pub mod reduce_ops;
 mod tape;
 #[cfg(test)]
 mod test_support;

@@ -113,6 +113,11 @@ pub enum ReduceError {
     /// matrix_norm` が `MatrixNormOrd` に対して行う fail-closed 拒否と
     /// 同方針。イシュー #1723）が渡された。
     UnsupportedOrd(String),
+    /// `vector_norm_p` へ渡された `p` が無効（有限かつ正の実数ではない。
+    /// イシュー #2147）。`NaN`／`±inf`／`0`／負の値を fail-closed に
+    /// 拒否する（`fandhe_ai_tensor_core::BackendOps::vector_norm_p`
+    /// doc「エラー契約」参照）。
+    InvalidOrder(f32),
 }
 
 impl fmt::Display for ReduceError {
@@ -129,6 +134,9 @@ impl fmt::Display for ReduceError {
             ),
             ReduceError::UnsupportedOrd(desc) => {
                 write!(f, "unsupported VectorNormOrd variant: {desc}")
+            }
+            ReduceError::InvalidOrder(p) => {
+                write!(f, "vector_norm_p: p must be finite and positive, got {p}")
             }
         }
     }
@@ -607,6 +615,244 @@ pub fn vector_norm(
                 .checked_mul(inner)
                 .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
             axis_reduce_vector_norm(a, axis, kind)
+        }
+    };
+    Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
+}
+
+/// `f64` の NaN 伝播 2 項最大値（`eval::nan_propagating_max` の `f64`
+/// 版。イシュー #2147）。`f64::max` は非 `NaN` 側を返してしまうため、
+/// `logsumexp`／`vector_norm_p` の `m = max(x)`／`mx = max|x_i|` が
+/// `NaN` 入力を静かに消さないよう本関数で置き換える。
+fn nan_propagating_max_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// `logsumexp`（`dim=None` の全縮約対象。空でないことは呼び出し元
+/// [`logsumexp`] が事前検査済みの前提）を `f64` で計算する（イシュー
+/// #2147）。`m = max(x)`（非有限なら安定化シフトを `0` に切り替える）
+/// →`Σ exp(x_i − m)` を `f64` で蓄積 → `ln(acc) + m` を計算し、最後に
+/// 1 回だけ `f32` へ downcast する（`fandhe_ai_tensor_core::
+/// BackendOps::logsumexp` doc「数値契約」参照）。
+fn logsumexp_slice(data: &[f32]) -> f32 {
+    let m = data.iter().fold(f64::NEG_INFINITY, |acc, &v| {
+        nan_propagating_max_f64(acc, v as f64)
+    });
+    let shift = if m.is_finite() { m } else { 0.0 };
+    let acc: f64 = data
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .fold(0.0f64, |acc, &v| acc + ((v as f64) - shift).exp())
+        })
+        .collect::<Vec<f64>>()
+        .into_iter()
+        .fold(0.0f64, |acc, v| acc + v);
+    (acc.ln() + shift) as f32
+}
+
+/// [`logsumexp_slice`] の軸指定（`dim=Some(axis)`）版。`axis_reduce_
+/// vector_norm` と同じ決定性契約（出力要素側を rayon で並列化・縮約軸は
+/// 逐次走査）。
+fn axis_reduce_logsumexp(a: &Tensor<f32>, axis: usize) -> Vec<f32> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+
+    let compute = |flat: usize| -> f32 {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut m = f64::NEG_INFINITY;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            m = nan_propagating_max_f64(m, v);
+        }
+        let shift = if m.is_finite() { m } else { 0.0 };
+        let mut acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            acc += (v - shift).exp();
+        }
+        (acc.ln() + shift) as f32
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// 軸指定・全縮約いずれにも対応する `logsumexp`（`torch.logsumexp(dim)`
+/// 相当。イシュー #2147）。`dim=None` は rank 0（スカラー）テンソルを
+/// 返す。数値契約は [`fandhe_ai_tensor_core::BackendOps::logsumexp`]
+/// doc を正とする。
+///
+/// 縮約対象の要素数が `0` の場合は [`ReduceError::EmptyReduction`]
+/// （`op: "logsumexp"`）を返す（`-inf` を黙って返さない安全側の判断。
+/// `var`／`norm` と対称）。
+pub fn logsumexp(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, ReduceError> {
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let n = match dim {
+        None => a.numel(),
+        Some(axis) => a.shape()[axis],
+    };
+    if n == 0 {
+        return Err(ReduceError::EmptyReduction { op: "logsumexp" });
+    }
+    let data = match dim {
+        None => {
+            let total = match a.as_slice() {
+                Some(slice) => logsumexp_slice(slice),
+                None => logsumexp_slice(&gather_elements(a)),
+            };
+            vec![total]
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            axis_reduce_logsumexp(a, axis)
+        }
+    };
+    Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
+}
+
+/// p-ノルム（`data`。`dim=None` の全縮約対象。空でないこと・`p` が有限
+/// かつ正であることは呼び出し元 [`vector_norm_p`] が事前検査済みの
+/// 前提）を `f64` で計算する（イシュー #2147）。`mx = max|x_i|` を
+/// 括り出してから `norm = mx · (Σ (|x_i|/mx)^p)^(1/p)` を計算する
+/// overflow-safe なスケール形（`fandhe_ai_tensor_core::BackendOps::
+/// vector_norm_p` doc「数値契約」参照）。
+fn vector_norm_p_slice(data: &[f32], p: f64) -> f32 {
+    let mx = data.iter().fold(0.0f64, |acc, &v| {
+        nan_propagating_max_f64(acc, (v as f64).abs())
+    });
+    if mx.is_nan() {
+        return f32::NAN;
+    }
+    if mx == 0.0 {
+        return 0.0;
+    }
+    if mx.is_infinite() {
+        return f32::INFINITY;
+    }
+    let acc: f64 = data
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            chunk.iter().fold(0.0f64, |acc, &v| {
+                let ratio = (v as f64).abs() / mx;
+                acc + ratio.powf(p)
+            })
+        })
+        .collect::<Vec<f64>>()
+        .into_iter()
+        .fold(0.0f64, |acc, v| acc + v);
+    (mx * acc.powf(1.0 / p)) as f32
+}
+
+/// [`vector_norm_p_slice`] の軸指定（`dim=Some(axis)`）版。
+fn axis_reduce_vector_norm_p(a: &Tensor<f32>, axis: usize, p: f64) -> Vec<f32> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+
+    let compute = |flat: usize| -> f32 {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut mx = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            mx = nan_propagating_max_f64(mx, v.abs());
+        }
+        if mx.is_nan() {
+            return f32::NAN;
+        }
+        if mx == 0.0 {
+            return 0.0;
+        }
+        if mx.is_infinite() {
+            return f32::INFINITY;
+        }
+        let mut acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            let ratio = v.abs() / mx;
+            acc += ratio.powf(p);
+        }
+        (mx * acc.powf(1.0 / p)) as f32
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// 軸指定・全縮約いずれにも対応する `vector_norm_p`（`torch.linalg.
+/// vector_norm(ord=p)` 相当。イシュー #2147）。`dim=None` は rank 0
+/// （スカラー）テンソルを返す。数値契約は [`fandhe_ai_tensor_core::
+/// BackendOps::vector_norm_p`] doc を正とする。
+///
+/// `p` が有限かつ正でなければ [`ReduceError::InvalidOrder`]。縮約対象の
+/// 要素数が `0` の場合は [`ReduceError::EmptyReduction`]（`op:
+/// "norm_p"`）を返す。
+pub fn vector_norm_p(
+    a: &Tensor<f32>,
+    p: f32,
+    dim: Option<usize>,
+) -> Result<Tensor<f32>, ReduceError> {
+    if !p.is_finite() || p <= 0.0 {
+        return Err(ReduceError::InvalidOrder(p));
+    }
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let n = match dim {
+        None => a.numel(),
+        Some(axis) => a.shape()[axis],
+    };
+    if n == 0 {
+        return Err(ReduceError::EmptyReduction { op: "norm_p" });
+    }
+    let p64 = p as f64;
+    let data = match dim {
+        None => {
+            let total = match a.as_slice() {
+                Some(slice) => vector_norm_p_slice(slice, p64),
+                None => vector_norm_p_slice(&gather_elements(a), p64),
+            };
+            vec![total]
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            axis_reduce_vector_norm_p(a, axis, p64)
         }
     };
     Tensor::new(data, &out_shape).map_err(ReduceError::Shape)

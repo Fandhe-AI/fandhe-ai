@@ -2532,6 +2532,25 @@ impl BackendOps for CpuBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         reduction::vector_norm(a, ord, dim).map_err(reduce_error_to_backend_error)
     }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::logsumexp`] の CPU 実装
+    /// （イシュー #2147）。`reduction::logsumexp` へそのまま委譲する
+    /// （`var`／`vector_norm` と同型）。
+    fn logsumexp(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        reduction::logsumexp(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::vector_norm_p`] の CPU 実装
+    /// （イシュー #2147）。`reduction::vector_norm_p` へそのまま委譲する
+    /// （`var`／`vector_norm` と同型）。
+    fn vector_norm_p(
+        &self,
+        a: &Tensor<f32>,
+        p: f32,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        reduction::vector_norm_p(a, p, dim).map_err(reduce_error_to_backend_error)
+    }
 }
 
 /// `linalg_*` の公開エントリ（`BackendOps` トレイトメソッド。呼び出し元は
@@ -2789,15 +2808,19 @@ fn linalg_error_to_backend_error(err: LinalgError) -> BackendError {
 }
 
 /// `reduction::ReduceError`（`Shape`／`EmptyReduction`／
-/// `InsufficientDegreesOfFreedom`／`UnsupportedOrd` の 4 variant。
-/// イシュー #1723 で後半 2 つを追加）を `BackendError` へ写像する。
+/// `InsufficientDegreesOfFreedom`／`UnsupportedOrd`／`InvalidOrder` の
+/// 5 variant。イシュー #1723 で `InsufficientDegreesOfFreedom`／
+/// `UnsupportedOrd` を、イシュー #2147 で `InvalidOrder` を追加）を
+/// `BackendError` へ写像する。
 ///
 /// `EmptyReduction` の写像は `op` フィールドで分岐する（codex-review・
 /// Cursor Bugbot 指摘。イシュー #1723 レビュー是正）:
-/// - `op == "var"` または `"norm"`（`BackendOps::var`／`vector_norm` の
-///   呼び出し元。`reduction::var`／`vector_norm` が返す `op` 文字列と
-///   1 対 1）は、`fandhe_ai_tensor_core::BackendOps::var`／
-///   `vector_norm` doc「エラー契約」が「空縮約は
+/// - `op == "var"`・`"norm"`・`"logsumexp"`・`"norm_p"`
+///   （`BackendOps::var`／`vector_norm`／`logsumexp`／`vector_norm_p`
+///   の呼び出し元。`reduction::var`／`vector_norm`／`logsumexp`／
+///   `vector_norm_p` が返す `op` 文字列と 1 対 1。後 2 つはイシュー
+///   #2147 で追加）は、対応する `fandhe_ai_tensor_core::BackendOps`
+///   trait メソッドの doc「エラー契約」が「空縮約は
 ///   `BackendError::InvalidArgument`」と明記する公開トレイト契約に
 ///   従い `InvalidArgument` へ写像する。
 /// - それ以外（`"max"`。`reduction::max` が返す `ReduceError::
@@ -2812,16 +2835,16 @@ fn linalg_error_to_backend_error(err: LinalgError) -> BackendError {
 ///   `KernelLaunchFailed` を直接構築するのみで、`reduction::mean`
 ///   自体を呼び出す経路は本クレートに存在しない）。
 ///
-/// `InsufficientDegreesOfFreedom`／`UnsupportedOrd` は
+/// `InsufficientDegreesOfFreedom`／`UnsupportedOrd`／`InvalidOrder` は
 /// 呼び出し元（`fandhe_ai_tensor_core::BackendOps::var`／
-/// `vector_norm` doc「エラー契約」）の想定どおり `InvalidArgument`
-/// （`linalg_error_to_backend_error` と同じ「引数の組み合わせが不正」
-/// 分類）に寄せる。
+/// `vector_norm`／`vector_norm_p` doc「エラー契約」）の想定どおり
+/// `InvalidArgument`（`linalg_error_to_backend_error` と同じ「引数の
+/// 組み合わせが不正」分類）に寄せる。
 pub(crate) fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
     match err {
         reduction::ReduceError::Shape(shape_err) => BackendError::ShapeMismatch(shape_err),
         reduction::ReduceError::EmptyReduction {
-            op: op @ ("var" | "norm"),
+            op: op @ ("var" | "norm" | "logsumexp" | "norm_p"),
         } => BackendError::InvalidArgument(format!("empty reduction for op \"{op}\"")),
         reduction::ReduceError::EmptyReduction { op } => {
             BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
@@ -2833,6 +2856,9 @@ pub(crate) fn reduce_error_to_backend_error(err: reduction::ReduceError) -> Back
         }
         reduction::ReduceError::UnsupportedOrd(desc) => BackendError::InvalidArgument(format!(
             "vector_norm: unsupported VectorNormOrd variant ({desc})"
+        )),
+        reduction::ReduceError::InvalidOrder(p) => BackendError::InvalidArgument(format!(
+            "vector_norm_p: p must be finite and positive, got {p}"
         )),
     }
 }

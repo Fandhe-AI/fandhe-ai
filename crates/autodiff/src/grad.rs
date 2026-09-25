@@ -408,6 +408,16 @@ pub(crate) fn vjp(
             let da = std_vjp(input_val, dim, correction, upstream);
             vec![(input, da)]
         }
+        Op::LogSumExp { input, dim } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = logsumexp_vjp(input_val, dim, upstream);
+            vec![(input, da)]
+        }
+        Op::PNorm { input, p, dim } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = pnorm_vjp(input_val, p, dim, upstream);
+            vec![(input, da)]
+        }
         Op::Min { input, dim } => {
             // `extremum_first_match_vjp`（`Op::Max` の `max_vjp` と
             // 共有する実体）を直接呼ぶ: forward 記録値 `out_value` と
@@ -5847,6 +5857,138 @@ fn vector_norm_vjp(
                 // vector_norm_along` と同じ安全側フォールバック
                 // （寄与なし。到達しない想定）。
                 _ => {}
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::LogSumExp`（`crate::reduce_ops::logsumexp`）の VJP（イシュー
+/// #2147）。[`var_vjp`] と同じ 3 段走査で `input` から `y`（forward の
+/// `eval::logsumexp_along` と同じ `f64` アルゴリズム）を改めて計算し、
+/// `dx_i = g · exp(x_i − y)` を `f64` で計算してから 1 回だけ `f32` へ
+/// downcast する。`y == -inf`（縮約対象が全て `-inf`）の lane は勾配を
+/// 明示的に `0` へマスクする（PyTorch は同じ lane で `NaN` を返すが、
+/// `NaN` 勾配で学習を汚染しない安全側の判断。`docs/autodiff-reduce-
+/// ops-decision.md` §2.4 参照）。`y` が `NaN`（入力に `NaN` を含む）の
+/// 場合は `x_i − y` が全要素で `NaN` になるため `exp` 経由でそのまま
+/// 伝播する。
+fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f64::NEG_INFINITY;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                m = eval::nan_propagating_max_f64(m, data[src] as f64);
+            }
+            let shift = if m.is_finite() { m } else { 0.0 };
+            let mut acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                acc += (data[src] as f64 - shift).exp();
+            }
+            let y = acc.ln() + shift;
+            let y_is_neg_inf = y == f64::NEG_INFINITY;
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "logsumexp_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            }) as f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                if y_is_neg_inf {
+                    out[src] = 0.0;
+                    continue;
+                }
+                let d = (data[src] as f64 - y).exp();
+                out[src] = (g_val * d) as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::PNorm`（`crate::reduce_ops::norm_p`）の VJP（イシュー #2147）。
+/// [`var_vjp`] と同じ 3 段走査で `input` から `norm`（forward の
+/// `eval::vector_norm_p_along` と同じ `f64` のスケール形アルゴリズム）
+/// を改めて計算し、`dx_i = g · sign(x_i) · (|x_i| / norm)^(p−1)` を
+/// 比の形（`norm^(p−1)` を直接求めず overflow を避ける）で `f64`
+/// 計算してから 1 回だけ `f32` へ downcast する。`norm == 0` の lane・
+/// `x_i == 0` の要素（`p < 1` で `0^(負)` が `inf` になるのを防ぐ劣勾配
+/// の選択）は勾配 0、`norm` が `NaN`（入力に `NaN` を含む）の場合は
+/// `NaN` を伝播する（`vector_norm_vjp` の L2 分岐と同じマスク構造。
+/// `docs/autodiff-reduce-ops-decision.md` §2.5 参照）。
+fn pnorm_vjp(input: &Tensor<f32>, p: f32, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let p64 = p as f64;
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut mx = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                mx = eval::nan_propagating_max_f64(mx, (data[src] as f64).abs());
+            }
+            let norm = if mx.is_nan() {
+                f64::NAN
+            } else if mx == 0.0 {
+                0.0
+            } else if mx.is_infinite() {
+                f64::INFINITY
+            } else {
+                let mut acc = 0.0f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    let ratio = (data[src] as f64).abs() / mx;
+                    acc += ratio.powf(p64);
+                }
+                mx * acc.powf(1.0 / p64)
+            };
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "pnorm_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            }) as f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let v = data[src] as f64;
+                out[src] = if norm.is_nan() {
+                    f32::NAN
+                } else if norm == 0.0 || v == 0.0 {
+                    0.0
+                } else {
+                    let sign = if v > 0.0 { 1.0 } else { -1.0 };
+                    let ratio = v.abs() / norm;
+                    (g_val * sign * ratio.powf(p64 - 1.0)) as f32
+                };
             }
         }
     }

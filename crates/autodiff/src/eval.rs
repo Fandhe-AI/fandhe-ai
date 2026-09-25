@@ -396,6 +396,19 @@ fn nan_propagating_max(a: f32, b: f32) -> f32 {
     }
 }
 
+/// [`nan_propagating_max`] の `f64` 版（イシュー #2147）。
+/// [`logsumexp_along`]／[`vector_norm_p_along`]（`crate::grad` の
+/// `logsumexp_vjp`／`pnorm_vjp` からも再利用する。`pub(crate)`）が
+/// `f64` の安定化シフト・スケールを求める際、`f64::max` が非 `NaN`
+/// 側を返してしまう問題を避けるために使う。
+pub(crate) fn nan_propagating_max_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
 pub(crate) fn relu(input: &Tensor<f32>) -> Tensor<f32> {
     unary(input, |v| nan_propagating_max(v, 0.0))
 }
@@ -653,6 +666,92 @@ pub(crate) fn vector_norm_along(
     }
     build_tensor(out, out_shape)
 }
+
+/// `Op::LogSumExp`（`crate::reduce_ops::logsumexp`）のホスト参照実装
+/// （`BackendOps::logsumexp` が `Unsupported` を返した場合の
+/// フォールバック。イシュー #2147）。[`var_along`] と同じ
+/// `outer`／`axis_len`／`inner` 分解で、出力要素ごとに `m = max(x)`
+/// （`f64`。非有限なら安定化シフトを `0` に切り替える）→
+/// `Σ exp(x_i − m)` を `f64` で蓄積 → `ln(acc) + m` を計算し、最後に
+/// 1 回だけ `f32` へ downcast する（`n == 0` の検査は呼び出し元
+/// `crate::reduce_ops::logsumexp` が済ませている前提。`NaN` 入力は
+/// [`nan_propagating_max_f64`] 経由でそのまま伝播する）。
+pub(crate) fn logsumexp_along(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let shape = input.shape();
+    let (outer, axis_len, inner) = reduce_outer_axis_inner(shape, dim);
+    let data = dense_vec(input);
+    let mut out = vec![0f32; outer * inner];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f64::NEG_INFINITY;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                m = nan_propagating_max_f64(m, data[src] as f64);
+            }
+            let shift = if m.is_finite() { m } else { 0.0 };
+            let mut acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                acc += (data[src] as f64 - shift).exp();
+            }
+            out[o * inner + i] = (acc.ln() + shift) as f32;
+        }
+    }
+    build_tensor(out, out_shape)
+}
+
+/// `Op::PNorm`（`crate::reduce_ops::norm_p`）のホスト参照実装
+/// （`BackendOps::vector_norm_p` が `Unsupported` を返した場合の
+/// フォールバック。イシュー #2147）。[`var_along`] と同じ
+/// `outer`／`axis_len`／`inner` 分解で、出力要素ごとに `mx = max|x_i|`
+/// （`f64`）を括り出してから `norm = mx · (Σ (|x_i|/mx)^p)^(1/p)` を
+/// `f64` で計算する overflow-safe なスケール形を使う（`mx == 0` は
+/// `0.0`・`mx` が `inf` は `inf`・`NaN` はそのまま伝播）。最後に 1 回
+/// だけ `f32` へ downcast する（`n == 0`・`p` の有限性／正値検査は
+/// 呼び出し元 `crate::reduce_ops::norm_p` が済ませている前提）。
+pub(crate) fn vector_norm_p_along(
+    input: &Tensor<f32>,
+    p: f32,
+    dim: Option<usize>,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let shape = input.shape();
+    let (outer, axis_len, inner) = reduce_outer_axis_inner(shape, dim);
+    let data = dense_vec(input);
+    let p64 = p as f64;
+    let mut out = vec![0f32; outer * inner];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut mx = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                mx = nan_propagating_max_f64(mx, (data[src] as f64).abs());
+            }
+            let val = if mx.is_nan() {
+                f64::NAN
+            } else if mx == 0.0 {
+                0.0
+            } else if mx.is_infinite() {
+                f64::INFINITY
+            } else {
+                let mut acc = 0.0f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    let ratio = (data[src] as f64).abs() / mx;
+                    acc += ratio.powf(p64);
+                }
+                mx * acc.powf(1.0 / p64)
+            };
+            out[o * inner + i] = val as f32;
+        }
+    }
+    build_tensor(out, out_shape)
+}
+
 /// `min(dim)`。`dim: None` は全要素中の最小値をスカラー（shape `[]`）で
 /// 返す。[`max`] と異なり **NaN 非伝播**（`f32::min`。`fminf` と同じ）
 /// を用いる——`BackendOps::min`（`crate::backend_ops` 経由）の CPU
