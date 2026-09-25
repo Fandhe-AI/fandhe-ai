@@ -24,8 +24,8 @@ use std::collections::{HashMap, HashSet};
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::nn::activation::{
-    Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
-    Tanh,
+    Elu, Gelu, GeluTanh, Glu, Hardswish, Hardtanh, LeakyRelu, LogSoftmax, Mish, PRelu, Relu, Relu6,
+    Sigmoid, Silu, Softmax, Softplus, Tanh,
 };
 use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
@@ -97,11 +97,16 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 16 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// fail-safe（本クレート内 18 実装〈`Linear`・`Relu`・`Sigmoid`・
     /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Gelu`・
     /// `GeluTanh`・`Softplus`・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`
-    /// （イシュー #1714）・`Flatten`（イシュー #2065）〉はいずれも
-    /// このデフォルトを
+    /// （イシュー #1714）・`Flatten`（イシュー #2065）・`Hardtanh`・
+    /// `Relu6`（イシュー #2146。`clamp` と bit 完全一致するため
+    /// オーバーライド可能。同イシューの `Mish`・`Glu`・`PRelu` は
+    /// 多段合成〈`softplus`／`tanh`／`sigmoid` 等〉のホスト経路が tape
+    /// 経由 forward と bit 一致することを検証していないため既定の
+    /// まま。`supports_forward_host` を `false` へオーバーライドする〉
+    /// はいずれもこのデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
     /// フォールバックの合図として扱うこと）。
@@ -1661,6 +1666,110 @@ impl Module for Elu {
     }
 }
 
+/// `Mish::forward` への委譲（イシュー #2146）。`forward_host` は既定
+/// （`Unsupported`）のまま: `mish` は `softplus`／`tanh`／`mul` の多段
+/// 合成で、`tanh`（`Op::Tanh`）は融合実体化を経由するため、手書きの
+/// `ops.*`／`eval::*` 直接合成が tape 経由 forward と bit 一致するかを
+/// 検証していない（`crate::activation_ops` モジュール doc・実装計画
+/// §2.5「確かめていない bit 一致を主張しない」）。`supports_forward_host`
+/// を `false` へオーバーライドし、`compat::Sequential::predict` の
+/// tape 不要経路が本層より手前の副作用を保ったまま安全に旧経路へ
+/// フォールバックできるようにする（[`Embedding`] と同型の理由）。
+impl Module for Mish {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Mish::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+}
+
+/// `Hardtanh::forward` への委譲（イシュー #2146）。`forward_host` は
+/// `crate::activation_ops::hardtanh` の forward が `clamp` と bit
+/// 完全一致する（`Hardtanh::op` doc 参照）ことを根拠に
+/// `scalar_unary_with_fallback` へ委譲する（[`Silu`] と同型の
+/// ディスパッチ規律）。
+impl Module for Hardtanh {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Hardtanh::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `Relu6::forward` への委譲（イシュー #2146）。[`Hardtanh`] と同じ
+/// `forward_host` ディスパッチ規律（`min=0.0`・`max=6.0` 固定）。
+impl Module for Relu6 {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Relu6::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `Glu::forward` への委譲（イシュー #2146）。[`Mish`] と同じ理由
+/// （`narrow` → `sigmoid` → `mul` の多段合成の bit 一致を未検証）で
+/// `forward_host` は既定のまま・`supports_forward_host` を `false` へ
+/// オーバーライドする。
+impl Module for Glu {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Glu::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+}
+
+/// `PRelu::bind(tape).forward(input)` への委譲（イシュー #2146）。
+/// `RmsNorm`（学習可能パラメータを持つ層）と同型のパラメータ管理
+/// フック（`named_parameters`／`set_parameter`／`set_requires_grad`／
+/// `requires_grad`）を実装する。`forward_host` は [`Mish`] と同じ理由
+/// （`where_cond` を経由する多段合成の bit 一致を未検証）で既定のまま
+/// ・`supports_forward_host` を `false` へオーバーライドする。
+impl Module for PRelu {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（常に。`PRelu` は affine なし構成を持たないため
+    /// `Option` ではない）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        vec![("weight".to_string(), self.weight())]
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        PRelu::set_parameter(self, name, value)
+    }
+
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        PRelu::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        PRelu::requires_grad(self)
+    }
+}
+
 /// `RmsNorm::bind(tape).forward(input)` への委譲（イシュー #1596）。
 /// `Linear` と異なり `forward` 自体は fallible（`eps` 検査・`row_norm_
 /// layout` の shape 検査で失敗しうる）ため、戻り値をそのまま返す。
@@ -2858,5 +2967,173 @@ mod tests {
         assert!(!Module::is_pooling(&Relu));
         let linear = Linear::new(3, 2, true, 7).unwrap();
         assert!(!Module::is_pooling(&linear));
+    }
+
+    /// `Hardtanh`／`Relu6` の `forward_host`（tape 不要経路）が
+    /// `Module::forward`（tape 経路）と bit 完全一致することを検証する
+    /// （イシュー #2146。`silu_forward_host_matches_tape_forward` と
+    /// 同型——両経路とも同一の `grad::scalar_unary_with_fallback` を
+    /// `ScalarUnaryOp::Clamp` で呼ぶため構造的に bit-exactness が
+    /// 成立する）。境界値・NaN を含む fixture で確認する。
+    #[test]
+    fn hardtanh_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-2.0, -1.0, 0.0, 1.0, 2.0, f32::NAN], &[6]).unwrap();
+        let hardtanh = Hardtanh::new(-1.0, 1.0).unwrap();
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Hardtanh as Module>::forward(&hardtanh, &tape, &xv).unwrap();
+        let via_host = hardtanh.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        let tape_data = via_tape.to_tensor();
+        let ts = tape_data.as_slice().unwrap();
+        let hs = via_host.as_slice().unwrap();
+        for (t, h) in ts.iter().zip(hs.iter()) {
+            if t.is_nan() {
+                assert!(h.is_nan());
+            } else {
+                assert_eq!(t.to_bits(), h.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn relu6_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 0.0, 3.0, 6.0, 7.0], &[5]).unwrap();
+        let relu6 = Relu6;
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Relu6 as Module>::forward(&relu6, &tape, &xv).unwrap();
+        let via_host = relu6.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn hardtanh_default_matches_pytorch() {
+        // `min_val`／`max_val` は private フィールドのため直接読めない。
+        // 既定 `ScalarUnaryOp::Clamp { min: -1.0, max: 1.0 }`（PyTorch
+        // `nn.Hardtanh` 既定）を `op()` 経由で確認する。
+        let h = Hardtanh::default();
+        assert_eq!(
+            h.op(),
+            fandhe_ai_tensor_core::ScalarUnaryOp::Clamp {
+                min: -1.0,
+                max: 1.0
+            }
+        );
+    }
+
+    /// `Mish`／`Glu`／`PRelu` は多段合成（`softplus`／`tanh`／
+    /// `sigmoid`／`where_cond` を経由）の `forward_host` bit 一致を
+    /// 未検証のため、`supports_forward_host() == false` を事前申告し、
+    /// `forward_host` 自体は既定の `Unsupported` を返すことを固定する
+    /// （イシュー #2146・実装計画 §2.5。[`Embedding`]・
+    /// [`MultiheadAttention`] と同型の契約）。
+    #[test]
+    fn mish_glu_prelu_do_not_support_forward_host() {
+        let mish = Mish;
+        assert!(!Module::supports_forward_host(&mish));
+        assert!(matches!(
+            mish.forward_host(
+                crate::test_support::test_ops().as_ref(),
+                &Tensor::new(vec![1.0], &[1]).unwrap()
+            ),
+            Err(AutodiffError::Backend(BackendError::Unsupported(_)))
+        ));
+
+        let glu = Glu::new(0);
+        assert!(!Module::supports_forward_host(&glu));
+        assert!(matches!(
+            glu.forward_host(
+                crate::test_support::test_ops().as_ref(),
+                &Tensor::new(vec![1.0, 2.0], &[2]).unwrap()
+            ),
+            Err(AutodiffError::Backend(BackendError::Unsupported(_)))
+        ));
+
+        let prelu = PRelu::new(1, 0.25).unwrap();
+        assert!(!Module::supports_forward_host(&prelu));
+        assert!(matches!(
+            prelu.forward_host(
+                crate::test_support::test_ops().as_ref(),
+                &Tensor::new(vec![1.0], &[1]).unwrap()
+            ),
+            Err(AutodiffError::Backend(BackendError::Unsupported(_)))
+        ));
+    }
+
+    #[test]
+    fn prelu_module_named_parameters_and_freeze() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let mut prelu = PRelu::new(2, 0.25).unwrap();
+
+        let params = Module::named_parameters(&prelu);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].0, "weight");
+
+        let x = tape.var(&Tensor::new(vec![-1.0, -2.0], &[1, 2]).unwrap());
+        let y = <PRelu as Module>::forward(&prelu, &tape, &x).unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![-0.25, -0.5]);
+
+        Module::freeze(&mut prelu).expect("weight を持つので freeze は成功する");
+        assert!(!Module::requires_grad(&prelu));
+
+        // `freeze()` 後は `bind` が `requires_grad=false` で weight を
+        // 登録するため、backward 後の `Gradients::get(&weight)` は値
+        // ではなく `GradientTrackingDisabled` を返す（「フラグを立てた
+        // つもりで実際には学習が継続していた」という A08 の事故を防ぐ
+        // 契約。`device_transfer.rs`／`retain_graph_accumulate.rs` の
+        // 既存 `var_no_grad` 系テストと同じ判定形）。
+        let x2 = tape.var(&Tensor::new(vec![-3.0, -4.0], &[1, 2]).unwrap());
+        let vars = prelu.bind(&tape);
+        let y2 = vars.forward(&x2).unwrap();
+        let loss2 = y2.sum(None).unwrap();
+        let grads2 = tape.backward(&loss2).unwrap();
+        let err = grads2.get(&vars.weight).unwrap_err();
+        assert!(matches!(err, AutodiffError::GradientTrackingDisabled));
+    }
+
+    /// `PRelu::set_parameter`（`Module::set_parameter` 実装）が shape
+    /// 不一致を `AutodiffError::Shape` で拒否すること（`Module::
+    /// named_parameters` doc「命名契約」の shape 保存置換のみ契約）と、
+    /// `state_dict`／`load_state_dict` の往復が成功することを確認する。
+    #[test]
+    fn prelu_set_parameter_rejects_shape_mismatch_and_state_dict_round_trips() {
+        let mut prelu = PRelu::new(2, 0.25).unwrap();
+
+        let wrong_shape = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let err = Module::set_parameter(&mut prelu, "weight", wrong_shape).unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
+
+        let unknown = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
+        let err = Module::set_parameter(&mut prelu, "bias", unknown).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let state = Module::state_dict(&prelu);
+        assert_eq!(
+            state["weight"].contiguous().as_slice().unwrap(),
+            &[0.25f32, 0.25]
+        );
+
+        let mut updated = std::collections::HashMap::new();
+        updated.insert(
+            "weight".to_string(),
+            Tensor::new(vec![0.5f32, 0.7], &[2]).unwrap(),
+        );
+        Module::load_state_dict(&mut prelu, updated)
+            .expect("shape 一致する state_dict の往復は成功するはず");
+        assert_eq!(
+            Module::state_dict(&prelu)["weight"]
+                .contiguous()
+                .as_slice()
+                .unwrap(),
+            &[0.5f32, 0.7]
+        );
     }
 }
