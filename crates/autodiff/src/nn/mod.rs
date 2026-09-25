@@ -148,6 +148,18 @@
 //! §5 経路 2）を要する公開面拡張のため、本イシュー時点では未承認の
 //! まま保留し `crates/facade/**` は変更していない
 //! （`docs/facade-nn-init-exposure-decision.md` 参照）。
+//! イシュー #2159（親 #2131）で [`ConvTranspose1d`]（`conv`
+//! モジュール）・[`Upsample`]（`upsample` モジュール）・[`ZeroPad2d`]
+//! （`padding` モジュール）・[`Identity`]（`identity` モジュール）・
+//! [`Unflatten`]（`unflatten` モジュール）の 5 層を追加した。いずれも
+//! 既存 `Var` 演算（`conv_transpose2d`／`interpolate`／`pad`／
+//! `reshape`）の薄いラッパーで新規 `Op`／`BackendOps`／VJP／カーネル
+//! は追加しない。`compat::Sequential::add_conv_transpose1d`／
+//! `add_upsample`／`add_zero_pad2d`／`add_identity`／`add_unflatten`
+//! の facade 公開（経路 2）は未承認のため保留する
+//! （`crates/facade/src/lib.rs` の `SpatialLayersHoldDoctestGuard`・
+//! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
+//! `docs/autodiff-spatial-layers-decision.md` §6 承認事項）。
 
 mod attention;
 mod batch_norm;
@@ -156,14 +168,18 @@ mod conv;
 mod dropout;
 mod embedding;
 mod flatten;
+mod identity;
 pub mod init;
 mod linear;
 mod module;
 mod norm;
 mod normalization;
+mod padding;
 mod pooling;
 mod rnn;
 mod transformer_encoder_layer;
+mod unflatten;
+mod upsample;
 
 pub mod activation;
 pub mod loss;
@@ -178,12 +194,13 @@ pub use batch_norm::{
 };
 pub use container::{ModuleDict, ModuleList, Sequential, summary};
 pub use conv::{
-    Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose2d,
-    ConvTranspose2dVars, conv2d_forward_low_precision,
+    Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
+    ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, conv2d_forward_low_precision,
 };
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};
 pub use flatten::Flatten;
+pub use identity::Identity;
 pub use linear::{Linear, LinearVars, linear_forward_low_precision};
 pub use module::Module;
 pub use norm::{
@@ -192,6 +209,7 @@ pub use norm::{
 pub use normalization::{
     GROUP_NORM_DEFAULT_EPS, GroupNorm, INSTANCE_NORM_DEFAULT_EPS, InstanceNorm,
 };
+pub use padding::ZeroPad2d;
 pub use pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
@@ -202,3 +220,5 @@ pub use rnn::{
 pub use transformer_encoder_layer::{
     FeedForwardActivation, TransformerEncoderLayer, TransformerEncoderLayerVars,
 };
+pub use unflatten::Unflatten;
+pub use upsample::{Upsample, UpsampleSize};
