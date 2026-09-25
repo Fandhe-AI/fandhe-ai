@@ -1582,6 +1582,144 @@ struct VarBoolOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarRearrangeOpsHoldDoctestGuard;
 
+/// イシュー #2145（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarRearrangeOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ
+/// 1 ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカルの自由関数群
+/// （`__fandhe_scalar_unary_hold_probe::scalar_unary_ops::{floor, ceil,
+/// round, sign, reciprocal, rsqrt, erf, pow_scalar}`）とトレイト
+/// （`__FandheScalarUnaryHoldProbe`）を導入し、実際に使う関数を書く。
+/// facade がどの経路（`pub use fandhe_ai_autodiff::scalar_unary_ops;`
+/// のようなモジュール再エクスポート・`Var` への inherent メソッド追加・
+/// 別名 `pub use`）で `scalar_unary_ops` という名前や 8 個の関数名を
+/// 公開しても、ローカル定義との glob 衝突（モジュール名の場合）または
+/// 呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッドより
+/// 優先解決されるため、引数なしの `x.floor()` 呼び出しが
+/// `Var::floor(&self)` に解決されて戻り値型の不一致でコンパイルが失敗
+/// する）でコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// scalar_unary_ops_hold_doctest_globs_all_pub_modules`・
+/// `scalar_unary_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_scalar_unary_ops`・
+/// `workspace_declares_scalar_unary_ops_fn_names_only_in_autodiff_
+/// scalar_unary_ops`）との多層防御の位置づけは
+/// `docs/autodiff-scalar-unary-ops-decision.md` §9「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_scalar_unary_hold_probe {
+///     pub mod scalar_unary_ops {
+///         pub fn floor() {}
+///         pub fn ceil() {}
+///         pub fn round() {}
+///         pub fn sign() {}
+///         pub fn reciprocal() {}
+///         pub fn rsqrt() {}
+///         pub fn erf() {}
+///         pub fn pow_scalar() {}
+///     }
+/// }
+/// use __fandhe_scalar_unary_hold_probe::*;
+///
+/// struct __FandheScalarUnaryMarker;
+///
+/// trait __FandheScalarUnaryHoldProbe {
+///     fn floor(&self) -> __FandheScalarUnaryMarker;
+///     fn ceil(&self) -> __FandheScalarUnaryMarker;
+///     fn round(&self) -> __FandheScalarUnaryMarker;
+///     fn sign(&self) -> __FandheScalarUnaryMarker;
+///     fn reciprocal(&self) -> __FandheScalarUnaryMarker;
+///     fn rsqrt(&self) -> __FandheScalarUnaryMarker;
+///     fn erf(&self) -> __FandheScalarUnaryMarker;
+///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker;
+/// }
+///
+/// impl<'t> __FandheScalarUnaryHoldProbe for fandhe_ai::Var<'t> {
+///     fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+/// }
+///
+/// impl __FandheScalarUnaryHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+/// }
+///
+/// impl __FandheScalarUnaryHoldProbe for fandhe_ai::Tape {
+///     fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `scalar_unary_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     scalar_unary_ops::floor();
+///     scalar_unary_ops::ceil();
+///     scalar_unary_ops::round();
+///     scalar_unary_ops::sign();
+///     scalar_unary_ops::reciprocal();
+///     scalar_unary_ops::rsqrt();
+///     scalar_unary_ops::erf();
+///     scalar_unary_ops::pow_scalar();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheScalarUnaryMarker = fandhe_ai::Var::floor(x);
+///     let _: __FandheScalarUnaryMarker = x.floor();
+///     let _: __FandheScalarUnaryMarker = fandhe_ai::Var::erf(x);
+///     let _: __FandheScalarUnaryMarker = x.erf();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheScalarUnaryMarker = fandhe_ai::Tensor::sign(x);
+///     let _: __FandheScalarUnaryMarker = x.sign();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheScalarUnaryMarker = fandhe_ai::Tape::reciprocal(x);
+///     let _: __FandheScalarUnaryMarker = x.reciprocal();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarScalarUnaryOpsHoldDoctestGuard;
+
 /// イシュー #2139（親 #2138・#2131）の facade 公開保留を固定する doctest
 /// 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
 /// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1

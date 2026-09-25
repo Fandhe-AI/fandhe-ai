@@ -45,6 +45,19 @@
 //! `Unsupported` のまま残る。`Var` の公開メソッド（`sub`／`div`／
 //! `pow`／…）は #1593、活性化（GELU／SiLU／…）は #1595 の担当。
 //! 設計判断の全体は `docs/scalar-op-dispatch-design.md` を参照。
+//!
+//! ## イシュー #2145 で追加した 7 variant
+//!
+//! `Floor`／`Ceil`／`Round`／`Sign`／`Reciprocal`／`Rsqrt`／`Erf`
+//! （`PowScalar` は #1634 で既に定義済みのため対象外。入口関数
+//! `pow_scalar` の追加のみ #2145 が担当）。区分定数 4 種
+//! （`Floor`／`Ceil`／`Round`／`Sign`）は [`ScalarUnaryOp::
+//! is_piecewise_constant`] が `true` を返し、`autodiff::grad` 側で
+//! upstream `inf`／`NaN` による `0 * inf = NaN` 汚染を避けるゼロ勾配
+//! 直接生成へ分岐する（`ScalarBinaryOp::is_comparison` と同型。PR
+//! #1823 の教訓）。CUDA／Metal のカーネル実装は本イシューのスコープ
+//! 外で、既定の `Unsupported` のままホスト参照実装へフォールバックする
+//! （`docs/autodiff-scalar-unary-ops-decision.md` 参照）。
 
 /// [`ScalarUnaryOp`]／[`ScalarBinaryOp`] の NVRTC キャッシュキー等に使う
 /// 安定な判別子文字列を返す（`Debug` 出力はペイロード値を含むため
@@ -143,6 +156,34 @@ pub enum ScalarUnaryOp {
     PowScalar {
         exponent: f32,
     },
+    /// `x.floor()`（PyTorch `torch.floor` 相当。イシュー #2145）。
+    /// 区分定数のため勾配は恒等的に `0`
+    /// （[`ScalarUnaryOp::is_piecewise_constant`] が `true`）。
+    /// `NaN`／`±inf` は IEEE のまま伝播する。
+    Floor,
+    /// `x.ceil()`。[`Floor`](Self::Floor) と同じ勾配規約。
+    Ceil,
+    /// 偶数丸め（`x.round_ties_even()`。PyTorch `torch.round` と同じ
+    /// タイブレーク規則）。`f32::round`（0 から遠い側へ丸める）とは
+    /// 異なるため使わない。[`Floor`](Self::Floor) と同じ勾配規約。
+    Round,
+    /// 符号関数。`x > 0` で `1`、`x < 0` で `-1`、`±0` を含むそれ以外は
+    /// `0`（`f32::signum` は `±0` に対して `±1` を返すため使わない。
+    /// [`Abs`](Self::Abs) の劣勾配規約 `sign(0) = 0` と統一）。`NaN`
+    /// 入力は `NaN` を返す（明示分岐）。[`Floor`](Self::Floor) と同じ
+    /// 勾配規約。
+    Sign,
+    /// `1.0 / x`（PyTorch `torch.reciprocal` 相当）。`x == 0` は `inf`
+    /// を返し panic しない。
+    Reciprocal,
+    /// `1.0 / x.sqrt()`（PyTorch `torch.rsqrt` 相当）。`x < 0` は
+    /// `NaN`、`x == 0` は `inf`（いずれも IEEE のまま）。
+    Rsqrt,
+    /// 誤差関数 `erf(x)`（PyTorch `torch.erf` 相当）。[`Self::Gelu`]
+    /// （誤差関数版）と同じ `erf_f64`（`f64` 精度・最大絶対誤差
+    /// `1.5e-7`）を再利用し、`f64` で計算してから `f32` へ 1 回だけ
+    /// downcast する。
+    Erf,
 }
 
 impl ScalarOpKind for ScalarUnaryOp {
@@ -170,6 +211,13 @@ impl ScalarOpKind for ScalarUnaryOp {
             Self::Softplus { .. } => "softplus",
             Self::Clamp { .. } => "clamp",
             Self::PowScalar { .. } => "pow_scalar",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+            Self::Sign => "sign",
+            Self::Reciprocal => "reciprocal",
+            Self::Rsqrt => "rsqrt",
+            Self::Erf => "erf",
         }
     }
 }
@@ -266,7 +314,41 @@ impl ScalarUnaryOp {
                 }
             }
             Self::PowScalar { exponent } => x.powf(exponent),
+            Self::Floor => x.floor(),
+            Self::Ceil => x.ceil(),
+            // PyTorch `torch.round` と同じ偶数丸め（`f32::round` は 0
+            // から遠い側への丸めのため使わない。イシュー #2145）。
+            Self::Round => x.round_ties_even(),
+            // `f32::signum` は `x == 0.0`／`-0.0` に対して `1.0`／`-1.0`
+            // を返すため使わない（`Abs` の劣勾配規約 `sign(0) = 0` と
+            // 統一。イシュー #2145）。`NaN` は明示分岐で伝播する。
+            Self::Sign => {
+                if x.is_nan() {
+                    f32::NAN
+                } else if x > 0.0 {
+                    1.0
+                } else if x < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Reciprocal => 1.0 / x,
+            Self::Rsqrt => 1.0 / x.sqrt(),
+            Self::Erf => erf_f64(x as f64) as f32,
         }
+    }
+
+    /// `x` に依らず勾配が恒等的に `0`（区分定数）な kind か判定する
+    /// （`ScalarBinaryOp::is_comparison` と同型。イシュー #2145）。
+    /// 呼び出し元（`autodiff::grad::vjp` の `Op::ScalarUnary` 分岐）が
+    /// 比較演算と同じ理由でこの判定を使う: 区分定数の勾配を
+    /// `vjp_elementwise_mul(upstream, 0 係数)` 経由で計算すると、
+    /// `upstream` が `inf`／`NaN` を含む場合に `0.0 * inf = NaN` へ
+    /// 汚染されうる（PR #1823 codex-review 指摘と同じ類型）ため、乗算を
+    /// 経由せず各入力 shape のゼロテンソルを直接返す経路へ分岐させる。
+    pub fn is_piecewise_constant(self) -> bool {
+        matches!(self, Self::Floor | Self::Ceil | Self::Round | Self::Sign)
     }
 }
 
@@ -484,6 +566,16 @@ pub fn gelu_tanh_grad(x: f32) -> f32 {
         0.5 * x * sech2 * du_dx
     };
     0.5 * (1.0 + tanh_u) + second_term
+}
+
+/// [`ScalarUnaryOp::Erf`] の導関数 `d/dx[erf(x)] = 2/√π · exp(-x²)`
+/// （`autodiff::eval::scalar` の VJP 側から呼ばれる。イシュー #2145）。
+/// `erf_f64` と同じく `f64` で計算してから `f32` へ 1 回だけ downcast
+/// する（`gelu_erf_grad` と同型）。
+pub fn erf_grad(x: f32) -> f32 {
+    const INV_SQRT_PI: f64 = 0.564_189_583_547_756_3; // 1 / sqrt(pi)
+    let xf = x as f64;
+    (2.0 * INV_SQRT_PI * (-xf * xf).exp()) as f32
 }
 
 /// SiLU（`x * sigmoid(x)`）の導関数 `s + x·s·(1-s)`（`s = sigmoid(x)`）。
@@ -704,6 +796,89 @@ mod tests {
         assert_close(erf_f64(1.0) as f32, 0.842_700_8, 2e-6, "erf(1)");
         assert_close(erf_f64(-1.0) as f32, -0.842_700_8, 2e-6, "erf(-1)");
         assert_close(erf_f64(2.0) as f32, 0.995_322_3, 2e-6, "erf(2)");
+    }
+
+    // --- イシュー #2145: floor／ceil／round／sign／reciprocal／rsqrt／erf ---
+
+    #[test]
+    fn floor_ceil_known_values() {
+        assert_close(ScalarUnaryOp::Floor.apply(-1.5), -2.0, EPS, "floor(-1.5)");
+        assert_close(ScalarUnaryOp::Floor.apply(1.5), 1.0, EPS, "floor(1.5)");
+        assert_close(ScalarUnaryOp::Ceil.apply(-1.5), -1.0, EPS, "ceil(-1.5)");
+        assert_close(ScalarUnaryOp::Ceil.apply(1.5), 2.0, EPS, "ceil(1.5)");
+    }
+
+    #[test]
+    fn round_uses_ties_to_even() {
+        assert_close(ScalarUnaryOp::Round.apply(0.5), 0.0, EPS, "round(0.5)");
+        assert_close(ScalarUnaryOp::Round.apply(1.5), 2.0, EPS, "round(1.5)");
+        assert_close(ScalarUnaryOp::Round.apply(2.5), 2.0, EPS, "round(2.5)");
+        assert_close(ScalarUnaryOp::Round.apply(-0.5), 0.0, EPS, "round(-0.5)");
+        assert!(
+            ScalarUnaryOp::Round.apply(-0.5).is_sign_negative(),
+            "round(-0.5) は -0.0（負符号）であるべき"
+        );
+    }
+
+    #[test]
+    fn sign_known_values_and_zero_nan() {
+        assert_close(ScalarUnaryOp::Sign.apply(3.0), 1.0, EPS, "sign(3)");
+        assert_close(ScalarUnaryOp::Sign.apply(-3.0), -1.0, EPS, "sign(-3)");
+        assert_eq!(ScalarUnaryOp::Sign.apply(0.0), 0.0, "sign(0)");
+        assert_eq!(ScalarUnaryOp::Sign.apply(-0.0), 0.0, "sign(-0)");
+        assert!(ScalarUnaryOp::Sign.apply(f32::NAN).is_nan(), "sign(NaN)");
+    }
+
+    #[test]
+    fn reciprocal_rsqrt_known_values_and_domain_edges() {
+        assert_close(
+            ScalarUnaryOp::Reciprocal.apply(4.0),
+            0.25,
+            EPS,
+            "reciprocal(4)",
+        );
+        assert!(ScalarUnaryOp::Reciprocal.apply(0.0).is_infinite());
+        assert_close(ScalarUnaryOp::Rsqrt.apply(4.0), 0.5, EPS, "rsqrt(4)");
+        assert!(ScalarUnaryOp::Rsqrt.apply(0.0).is_infinite());
+        assert!(ScalarUnaryOp::Rsqrt.apply(-1.0).is_nan());
+    }
+
+    #[test]
+    fn erf_unary_matches_known_reference_value() {
+        assert_close(ScalarUnaryOp::Erf.apply(1.0), 0.842_700_8, 2e-6, "erf(1)");
+    }
+
+    #[test]
+    fn piecewise_constant_kinds_are_flagged() {
+        for op in [
+            ScalarUnaryOp::Floor,
+            ScalarUnaryOp::Ceil,
+            ScalarUnaryOp::Round,
+            ScalarUnaryOp::Sign,
+        ] {
+            assert!(op.is_piecewise_constant(), "{op:?} は区分定数のはず");
+        }
+        for op in [
+            ScalarUnaryOp::Reciprocal,
+            ScalarUnaryOp::Rsqrt,
+            ScalarUnaryOp::Erf,
+            ScalarUnaryOp::Neg,
+        ] {
+            assert!(!op.is_piecewise_constant(), "{op:?} は区分定数ではないはず");
+        }
+    }
+
+    #[test]
+    fn new_2145_kinds_propagate_nan() {
+        for op in [
+            ScalarUnaryOp::Floor,
+            ScalarUnaryOp::Ceil,
+            ScalarUnaryOp::Round,
+            ScalarUnaryOp::Reciprocal,
+            ScalarUnaryOp::Rsqrt,
+        ] {
+            assert!(op.apply(f32::NAN).is_nan(), "{op:?}: NaN must propagate");
+        }
     }
 
     #[test]

@@ -48,6 +48,17 @@ fn unary_variants() -> Vec<ScalarUnaryOp> {
             max: 0.5,
         },
         ScalarUnaryOp::PowScalar { exponent: 2.0 },
+        // イシュー #2145: `positive_data`（[0.1, 2.1) の正の範囲）は
+        // `Reciprocal`／`Rsqrt` の定義域外（`x <= 0`）を避けつつ全
+        // variant を同一データ生成器で試せる（モジュール doc の既存
+        // 方針を踏襲）。
+        ScalarUnaryOp::Floor,
+        ScalarUnaryOp::Ceil,
+        ScalarUnaryOp::Round,
+        ScalarUnaryOp::Sign,
+        ScalarUnaryOp::Reciprocal,
+        ScalarUnaryOp::Rsqrt,
+        ScalarUnaryOp::Erf,
     ]
 }
 
