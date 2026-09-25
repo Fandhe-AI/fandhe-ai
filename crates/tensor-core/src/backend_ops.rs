@@ -777,6 +777,28 @@ pub type GruBackwardOutput = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
 /// `layer_norm_backward` 側に集約する）。
 pub type LayerNormBackwardOutput = (Tensor<f32>, Option<Tensor<f32>>, Option<Tensor<f32>>);
 
+/// [`BackendOps::unique_ext`] の戻り値型（イシュー #2153・親 #2131）。
+/// `torch.unique`（`return_inverse`／`return_counts`／`dim` 指定）・
+/// `torch.unique_consecutive` を合わせた拡張版 unique の出力を常に
+/// 3 出力（`values`・`inverse`・`counts`）として返す（呼び出し元が
+/// 要求しなかった出力の破棄は `autodiff` 層〈`fandhe_ai_autodiff::
+/// topk_unique_ops`〉が行い、バックエンド署名は単純化する）。契約の
+/// 詳細（群化キー・±0／NaN の扱い・退化ケース）は
+/// [`BackendOps::unique_ext`] doc・`docs/autodiff-topk-unique-ops-
+/// decision.md` を正とする。
+#[derive(Debug, Clone)]
+pub struct UniqueExtOutput {
+    /// 一意値集合（`sorted=True`。`dim` 指定時は軸 `dim` のスライス
+    /// 単位で重複除去した値、`dim=None` は平坦化した値）。
+    pub values: Tensor<f32>,
+    /// 各入力要素（`dim` 指定時は各スライス）が属する `values` の
+    /// 添字（`torch.unique(..., return_inverse=True)` 相当）。
+    pub inverse: Tensor<i32>,
+    /// `values` の各要素（スライス）の出現回数
+    /// （`torch.unique(..., return_counts=True)` 相当）。
+    pub counts: Tensor<i32>,
+}
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -2622,6 +2644,68 @@ pub trait BackendOps {
     fn unique(&self, _x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "unique: default fail-safe (no fused unique kernel available)".into(),
+        ))
+    }
+
+    /// [`Self::unique`] の拡張版（`torch.unique(sorted=True,
+    /// return_inverse, return_counts, dim)`・`torch.unique_consecutive`
+    /// 相当。イシュー #2153・親 #2131「5-B 演算」）。呼び出し元
+    /// （`fandhe_ai_autodiff::topk_unique_ops`）が要求する出力
+    /// （`inverse`／`counts`）に関わらず常に 3 出力（[`UniqueExtOutput`]）
+    /// を返す。
+    ///
+    /// # 契約（`docs/autodiff-topk-unique-ops-decision.md` §2.4 が正）
+    ///
+    /// - `dim = None` の場合: 入力を row-major で平坦化し、`(値, 元
+    ///   添字)` を `f32::total_cmp` の昇順＋元添字昇順のタイブレーク
+    ///   で安定ソートしたうえで、先頭から走査して隣接要素を IEEE `==`
+    ///   で群化する（[`Self::unique`] と同じ順序キー・重複判定述語）。
+    ///   `values` の各群代表は群の先頭（`-0.0`／`+0.0` は totalOrder
+    ///   で隣接するため `-0.0` が代表になり [`Self::unique`] と
+    ///   bit 一致する）で、NaN は `NaN != NaN` のためすべて個別の
+    ///   群として保持される。`inverse[i]` は入力の位置 `i` が属する
+    ///   群番号（shape は入力 shape と同一）、`counts` は各群のサイズ
+    ///   （shape `[m]`）。
+    /// - `dim = Some(d)` の場合: 軸 `d` の各スライス（他軸を
+    ///   row-major で平坦化した行）を 1 単位として、上と同じ手続きを
+    ///   行方向に適用する（比較キーは要素ごとの `total_cmp` 辞書式
+    ///   ＋ ±0 を同一視する正規化キーの併用。`consecutive=true` の
+    ///   場合はソートせず元の並び順のまま隣接群化のみ行う——群代表は
+    ///   各ランの**先頭出現**、`inverse`／`counts` の shape 規則は
+    ///   同一）。退化ケース（対象要素数 0・スライス長 0）は
+    ///   `values`/`inverse`/`counts` すべて対応する 0 長 shape。
+    /// - `consecutive = true` の場合（`dim` の有無を問わず）:
+    ///   ソートを行わず、入力の元順序のまま隣接（`dim` 指定時は隣接
+    ///   スライス）を IEEE `==` で群化する（`torch.unique_consecutive`
+    ///   相当）。群代表は各連続ランの**先頭出現値**。
+    /// - `inverse`／`counts` は [`Tensor`]`<i32>`（対象要素数が
+    ///   `i32::MAX` を超える場合は呼び出し元が事前に
+    ///   `AutodiffError::InvalidArgument` で拒否する契約——本メソッドは
+    ///   その検査済み前提で呼ばれる）。
+    /// - 入力は strided view（非 contiguous）でもよく、各実装が
+    ///   `Tensor::contiguous()`／`host_slice()` で稠密化してから処理
+    ///   する契約（[`Self::unique`] と同じ）。
+    /// - **数値契約**: 選択演算（丸めなし）のため 3 バックエンドの
+    ///   出力は bit 完全一致（REQ-2 複合判定は用いない）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::unique`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`fandhe_ai_autodiff::
+    /// topk_unique_ops::{unique_with_options, unique_consecutive}` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::unique_ext`）へフォールバックする
+    /// （それ以外のエラーは伝播。判定迂回経路を作らない）。CUDA／Metal
+    /// は本メソッドを override しない（GPU 専用カーネルは別イシュー。
+    /// `docs/autodiff-topk-unique-ops-decision.md` §7「スコープ外」）。
+    fn unique_ext(
+        &self,
+        _x: &Tensor<f32>,
+        _dim: Option<usize>,
+        _consecutive: bool,
+    ) -> Result<UniqueExtOutput, BackendError> {
+        Err(BackendError::Unsupported(
+            "unique_ext: default fail-safe (no fused unique_ext kernel available)".into(),
         ))
     }
 
@@ -4921,6 +5005,20 @@ mod tests {
 
         let result = ops.unique(&input);
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::unique_ext`] の既定実装が非破壊拡張の fail-safe
+    /// 契約（`Unsupported`）を満たすことを確認する（イシュー #2153）。
+    #[test]
+    fn unique_ext_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![3.0, 1.0, 2.0, 1.0], &[2, 2]).unwrap();
+
+        let result = ops.unique_ext(&input, None, false);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+
+        let result_dim = ops.unique_ext(&input, Some(0), true);
+        assert!(matches!(result_dim, Err(BackendError::Unsupported(_))));
     }
 
     /// [`BackendOps::captured_segment_key`]／[`BackendOps::

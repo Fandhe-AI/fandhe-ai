@@ -1659,6 +1659,18 @@ impl BackendOps for CpuBackendOps {
         unique::unique(x).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::unique_ext` の CPU 実装（イシュー #2153・親
+    /// #2131）。`unique::unique_ext` へ委譲する（shape 検査は
+    /// `unique::unique_ext` 内部で行う）。
+    fn unique_ext(
+        &self,
+        x: &Tensor<f32>,
+        dim: Option<usize>,
+        consecutive: bool,
+    ) -> Result<fandhe_ai_tensor_core::UniqueExtOutput, BackendError> {
+        unique::unique_ext(x, dim, consecutive).map_err(BackendError::ShapeMismatch)
+    }
+
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         reduction::sum(a, dim).map_err(reduce_error_to_backend_error)
     }

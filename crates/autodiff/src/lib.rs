@@ -210,6 +210,15 @@
 //! 「承認待ち保留」の枠組み。`docs/autodiff-einsum-batch-decision.md`・
 //! モジュール doc 参照）。
 
+//! イシュー #2153（親 #2131）で、`Var::topk`（`sorted=True` 固定・
+//! 非負 `dim` のみ）・`Var::unique`（`dim`／`return_inverse`／
+//! `return_counts` 非対応）のオプション拡張（`sorted=false`・負
+//! `dim`・unique の `dim` 指定・`return_inverse`・`return_counts`・
+//! `unique_consecutive`）を [`topk_unique_ops`] へ追加した。
+//! [`reduce_ops`] と同じく非公開の自由関数群で、facade 公開は承認待ち
+//! のため意図的に再エクスポートしない（`docs/autodiff-topk-unique-
+//! ops-decision.md`・モジュール doc 参照）。
+
 pub mod activation_ops;
 mod attention;
 mod backward;
@@ -236,6 +245,7 @@ pub mod scalar_unary_ops;
 mod tape;
 #[cfg(test)]
 mod test_support;
+pub mod topk_unique_ops;
 mod var;
 
 pub use backward::Gradients;

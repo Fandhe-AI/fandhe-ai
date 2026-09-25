@@ -32,11 +32,11 @@
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, BatchNormTrainOutput, BceKind, CastElement, HuberKind,
     KlDivTarget, Pool2dParams, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor,
-    VectorNormOrd, adaptive_window, batch_norm_layout, row_norm_layout,
+    UniqueExtOutput, VectorNormOrd, adaptive_window, batch_norm_layout, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
-use crate::eval::{self, build_tensor, dense_vec};
+use crate::eval::{self, build_tensor, dense_vec, dense_vec_i32};
 use crate::tape::{
     NodeId, Op, ResidentBiasTarget, ResidentResolver, TapeId, TapeNode, materialize_fallible,
 };
@@ -3446,6 +3446,136 @@ fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffE
             v.shape()
         )))
     }
+}
+
+/// [`crate::topk_unique_ops::unique_with_options`]・[`crate::
+/// topk_unique_ops::unique_consecutive`] が使う「バックエンド実装 →
+/// フォールバック」ヘルパー（イシュー #2153・親 #2131）。
+/// [`unique_with_fallback`] と同型の 2 段構成: `ops.unique_ext` →
+/// `Unsupported` のときのみ `eval::unique_ext` へフォールバックし、
+/// それ以外のエラーは伝播する（判定迂回経路を作らない）。
+///
+/// **事前条件（呼び出し元が満たす）**: `x.shape()` の要素数積の
+/// `usize` オーバーフロー検査、および対象要素数（`dim=None` なら
+/// `numel`・`dim=Some(d)` なら `shape[d]`）が `i32::MAX` を超えない
+/// ことの検査は、呼び出し元（`topk_unique_ops` の確保前検査ヘルパー）
+/// が本関数を呼ぶ前に済ませている（`.claude/rules/security.md` A03。
+/// 確保前検査を迂回する分岐を作らない）。
+///
+/// バックエンドが返した出力へ、[`fandhe_ai_tensor_core::BackendOps::
+/// unique_ext`] doc の出力不変条件を事後検査する（3 バックエンド
+/// 実装が独立に契約を守っているかを呼び出し元でも検証する二重検査
+/// 方針。`.claude/rules/security.md` A08）: (1) `values` の rank が
+/// `dim=None` なら 1・`dim=Some(d)` なら入力と同ランクで `dim` 軸
+/// 以外が一致、(2) `inverse` の shape が `dim=None` なら入力 shape と
+/// 同一・`dim=Some(d)` なら `[shape[d]]`、(3) `counts` の shape が
+/// `[m]`（`m = values` の `dim` 軸長）、(4) `counts` の総和が対象
+/// 要素数に一致、(5) `inverse` の値域が `[0, m)`。
+pub(crate) fn unique_ext_with_fallback(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    dim: Option<usize>,
+    consecutive: bool,
+) -> Result<UniqueExtOutput, AutodiffError> {
+    let in_shape = x.shape().to_vec();
+    let target_len = match dim {
+        None => in_shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?,
+        Some(d) => in_shape[d],
+    };
+    let out = match ops.unique_ext(x, dim, consecutive) {
+        Ok(out) => out,
+        Err(BackendError::Unsupported(_)) => eval::unique_ext(x, dim, consecutive),
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    };
+    validate_unique_ext_output(&out, &in_shape, dim, target_len)?;
+    Ok(out)
+}
+
+/// [`unique_ext_with_fallback`] の出力不変条件検査。違反は
+/// [`validate_unique_output`] と同じ区別方針（shape 自体の不整合は
+/// `ShapeMismatch`、値域・総和の不整合は `InvalidArgument`）に従う。
+fn validate_unique_ext_output(
+    out: &UniqueExtOutput,
+    in_shape: &[usize],
+    dim: Option<usize>,
+    target_len: usize,
+) -> Result<(), AutodiffError> {
+    let m = match dim {
+        None => {
+            if out.values.shape().len() != 1 {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.values.shape().to_vec(),
+                        rhs: vec![out.values.numel()],
+                    },
+                )));
+            }
+            if out.inverse.shape() != in_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.inverse.shape().to_vec(),
+                        rhs: in_shape.to_vec(),
+                    },
+                )));
+            }
+            out.values.shape()[0]
+        }
+        Some(d) => {
+            let mut expected_values_shape = in_shape.to_vec();
+            let m = out.values.shape().get(d).copied().unwrap_or(0);
+            if expected_values_shape.len() != out.values.shape().len() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.values.shape().to_vec(),
+                        rhs: expected_values_shape,
+                    },
+                )));
+            }
+            expected_values_shape[d] = m;
+            if out.values.shape() != expected_values_shape.as_slice() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.values.shape().to_vec(),
+                        rhs: expected_values_shape,
+                    },
+                )));
+            }
+            if out.inverse.shape() != [in_shape[d]] {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.inverse.shape().to_vec(),
+                        rhs: vec![in_shape[d]],
+                    },
+                )));
+            }
+            m
+        }
+    };
+    if out.counts.shape() != [m] {
+        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: out.counts.shape().to_vec(),
+                rhs: vec![m],
+            },
+        )));
+    }
+    let counts_data = dense_vec_i32(&out.counts);
+    let total: i64 = counts_data.iter().map(|&c| c as i64).sum();
+    if total != target_len as i64 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "BackendOps::unique_ext の counts 総和（{total}）が対象要素数（{target_len}）と一致しない"
+        )));
+    }
+    let inverse_data = dense_vec_i32(&out.inverse);
+    if inverse_data.iter().any(|&v| v < 0 || (v as usize) >= m) {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "BackendOps::unique_ext の inverse の値域が [0, {m}) を外れている"
+        )));
+    }
+    Ok(())
 }
 
 /// [`Var::cast`] が使う「バックエンド実装 → フォールバック」ヘルパー
