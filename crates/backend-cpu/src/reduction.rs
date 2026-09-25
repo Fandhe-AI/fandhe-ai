@@ -283,6 +283,35 @@ pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
         .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))
 }
 
+/// [`checked_product`] に加え、`f32` 換算のバイトサイズが `Vec` の
+/// allocation 上限（`isize::MAX` バイト）に収まるかも検査する
+/// （`backend-cpu::ops::checked_alloc_numel_f32`／`backend-cuda::
+/// ops::checked_bytes_for`／`backend-metal::ops::checked_bytes_for`／
+/// `autodiff::bool_ops::checked_bytes_for` と同型の独立複製。可視性の
+/// 意味論が異なるモジュール・クレートを跨ぐため個別に持つ方針は本
+/// リポジトリの既存パターン〈`backend-cpu::ops.rs` の同名関数
+/// doc〉を踏襲する）。
+///
+/// **動機**: `logsumexp`／`vector_norm_p` は小さなストレージを
+/// 巨大な shape へ broadcast した view を受け取りうる。`outer *
+/// inner`（軸指定側の出力要素数）や `a.numel()`（全縮約・非
+/// contiguous 側の入力要素数）は `usize` の積としては収まっても、
+/// `f32` 換算のバイト数が `isize::MAX` を超えることがあり、その
+/// まま `Vec::with_capacity`／`.collect()` へ進むと型付きエラー
+/// ではなく capacity overflow panic になる（本番経路 panic 禁止
+/// 規約 `.claude/rules/coding-rust.md`。codex-review P1 指摘の是正・
+/// イシュー #2147・PR #2263）。
+pub(crate) fn checked_alloc_numel_f32(shape: &[usize]) -> Result<usize, ReduceError> {
+    let numel = checked_product(shape)?;
+    let bytes = numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+    if bytes > isize::MAX as usize {
+        return Err(ReduceError::Shape(ShapeError::ElementCountOverflow));
+    }
+    Ok(numel)
+}
+
 /// 軸指定 reduction（`dim=Some(axis)`）の出力要素ごとの畳み込みを行う共通
 /// 駆動関数。`axis` は呼び出し元（`sum`/`max`/`mean`）が `reduce_out_shape`
 /// で事前検査済みであることを前提とする（本関数自体は範囲検査を行わない）。
@@ -740,7 +769,15 @@ pub fn logsumexp(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, Red
         None => {
             let total = match a.as_slice() {
                 Some(slice) => logsumexp_slice(slice),
-                None => logsumexp_slice(&gather_elements(a)),
+                None => {
+                    // 非 contiguous（`gather_elements` が実体化する）
+                    // 経路のみ確保前検査する。`as_slice()` が `Some` の
+                    // 場合は既に実体化済みのスライスを走査するだけで
+                    // 新規確保がないため検査不要（[`checked_alloc_numel_f32`]
+                    // doc「動機」参照）。
+                    checked_alloc_numel_f32(a.shape())?;
+                    logsumexp_slice(&gather_elements(a))
+                }
             };
             vec![total]
         }
@@ -751,6 +788,13 @@ pub fn logsumexp(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, Red
             outer
                 .checked_mul(inner)
                 .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            // `axis_reduce_logsumexp` の `.collect()` は `out_shape`
+            // （`outer * inner` 要素）と同じサイズの `Vec<f32>` を
+            // 確保する。直上の `checked_mul` は要素数積のオーバー
+            // フローのみを検査するため、確保可能バイト数
+            // （`isize::MAX` 上限）は別途検査する
+            // （[`checked_alloc_numel_f32`] doc「動機」参照）。
+            checked_alloc_numel_f32(&out_shape)?;
             axis_reduce_logsumexp(a, axis)
         }
     };
@@ -865,7 +909,13 @@ pub fn vector_norm_p(
         None => {
             let total = match a.as_slice() {
                 Some(slice) => vector_norm_p_slice(slice, p64),
-                None => vector_norm_p_slice(&gather_elements(a), p64),
+                None => {
+                    // `logsumexp` の `None` 分岐と同じ理由（非 contiguous
+                    // 経路のみ確保前検査。[`checked_alloc_numel_f32`]
+                    // doc「動機」参照）。
+                    checked_alloc_numel_f32(a.shape())?;
+                    vector_norm_p_slice(&gather_elements(a), p64)
+                }
             };
             vec![total]
         }
@@ -876,6 +926,10 @@ pub fn vector_norm_p(
             outer
                 .checked_mul(inner)
                 .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            // `logsumexp` の `Some(axis)` 分岐と同じ理由（`axis_reduce_
+            // vector_norm_p` の `.collect()` 確保前にバイト数上限も
+            // 検査する。[`checked_alloc_numel_f32`] doc「動機」参照）。
+            checked_alloc_numel_f32(&out_shape)?;
             axis_reduce_vector_norm_p(a, axis, p64)
         }
     };
@@ -1402,6 +1456,60 @@ mod tests {
         // （axis_reduce 呼び出し前の checked_mul 検査。reduction.rs:226 付近）。
         let t = Tensor::<f32>::zeros(&[1usize << 40, 0, 1usize << 40]).unwrap();
         let err = sum(&t, Some(1)).unwrap_err();
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    // --- `logsumexp`／`vector_norm_p` の確保前バイト数上限検査
+    // （codex-review P1 是正・イシュー #2147・PR #2263）: 小さな
+    // ストレージを巨大な shape へ broadcast した view は、要素数積が
+    // `usize` に収まっても `f32` 換算のバイト数が `isize::MAX` を
+    // 超えうる。`checked_alloc_numel_f32` が `Vec::with_capacity`／
+    // `.collect()` 前に型付きエラーで拒否し panic しないことを検証する
+    // （本質は panic しないこと。エラー内容は `ElementCountOverflow`
+    // で共通）。
+
+    #[test]
+    fn logsumexp_vector_norm_p_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+        // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+        // （軸 1 は実軸〈長さ 4・非空縮約〉、軸 0 は broadcast で巨大）。
+        // dim=Some(1) で縮約すると out_shape=[1usize << 61] となり、
+        // 要素数積（2^61）自体は usize に収まるが f32 換算バイト数
+        // （2^61 * 4 = 2^63）が isize::MAX（2^63 - 1）を 1 超える。
+        let base = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+
+        let err = logsumexp(&huge, Some(1)).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+
+        let err = vector_norm_p(&huge, 3.0, Some(1)).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn logsumexp_vector_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+        // base shape [1] を broadcast して [1usize << 61] にする
+        // （非 contiguous・全縮約〈dim=None〉。`as_slice()` が `None`
+        // を返すため `gather_elements` 経路に入る）。
+        let base = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+        assert!(huge.as_slice().is_none(), "fixture は非 contiguous のはず");
+
+        let err = logsumexp(&huge, None).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+
+        let err = vector_norm_p(&huge, 3.0, None).expect_err("確保前に拒否されるはず");
         assert!(matches!(
             err,
             ReduceError::Shape(ShapeError::ElementCountOverflow)

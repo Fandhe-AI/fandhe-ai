@@ -5885,6 +5885,17 @@ fn vector_norm_vjp(
 /// ops-decision.md` §2.4 参照）。`y` が `NaN`（入力に `NaN` を含む）の
 /// 場合は `x_i − y` が全要素で `NaN` になるため `exp` 経由でそのまま
 /// 伝播する。
+///
+/// **事前条件（呼び出し元が満たす）**: `dense_vec(input)`・
+/// `dense_vec(g)`・`vec![0f32; data.len()]` はいずれも無検査で
+/// `input`／`g` の shape 相応のサイズを確保する。本関数は backward
+/// パスでのみ呼ばれ、`input`（forward の `x`）・`g`（forward の出力
+/// `out_shape` と同じ shape を持つ上流勾配）はいずれも forward 側
+/// （`crate::reduce_ops::logsumexp`）の `checked_bytes_for::<f32>` に
+/// よる確保前検証を経て構築済みのテンソルであるため、本関数を新たに
+/// 検査する必要はない（forward が拒否する shape は tape に push
+/// されないため backward にも到達しない。codex-review 指摘の確認・
+/// イシュー #2147・PR #2263）。
 fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     let (outer, axis_len, inner) = match dim {
@@ -5989,6 +6000,12 @@ fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Te
 /// 2 経路を混同すると、(2) を (1) の分岐で扱ってしまい `±inf` 要素が
 /// 実際には存在しないまま `inf_count == 0` の 0 除算相当となって
 /// 有限入力の勾配を黙って全要素 `0` にしてしまう欠陥があった。
+///
+/// **事前条件（呼び出し元が満たす）**: [`logsumexp_vjp`] と同じ理由
+/// （同関数 doc「事前条件」参照）で、`input`／`g` は forward
+/// （`crate::reduce_ops::norm_p`）の `checked_bytes_for::<f32>` による
+/// 確保前検証を経て構築済みであるため、本関数を新たに検査する必要は
+/// ない（codex-review 指摘の確認・イシュー #2147・PR #2263）。
 fn pnorm_vjp(input: &Tensor<f32>, p: f32, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     let (outer, axis_len, inner) = match dim {

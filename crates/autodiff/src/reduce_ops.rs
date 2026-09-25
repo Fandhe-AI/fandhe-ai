@@ -76,6 +76,20 @@
 //! overflow で panic しえた）。`norm_p` の `p` は有限性・正値を
 //! dispatch 前に検査する（`nn/norm.rs::validate_eps` と同じ
 //! fail-closed 規律）。本番経路で `unwrap()`／`expect()` は使わない。
+//!
+//! **確保前のバイト数上限検査の非空縮約への拡張（codex-review P1 是正
+//! 2・PR #2263）**: `logsumexp`／`norm_p` は `n == 0`（空縮約）の場合
+//! だけでなく `n != 0` でも、`x` が小さなストレージを巨大な shape へ
+//! broadcast した view であれば `outer`／`inner`（broadcast 側の
+//! 次元）が巨大になりうる。`materialize_one` の入力実体化
+//! （`gather_elements`／`dense_vec`）・`BackendOps::logsumexp`／
+//! `vector_norm_p`（`backend-cpu::reduction::axis_reduce_logsumexp`／
+//! `axis_reduce_vector_norm_p` の `.collect()`）・そのフォールバック
+//! （`eval::logsumexp_along`／`vector_norm_p_along` の
+//! `vec![0f32; outer * inner]`）のいずれも確保前検査を持たないため、
+//! `logsumexp`／`norm_p` は dispatch（`materialize_one` 呼び出し）前に
+//! 入力 shape・`out_shape` の双方を `checked_bytes_for::<f32>` で検査
+//! する。
 
 use fandhe_ai_tensor_core::{BackendError, Tensor, reduce_out_shape};
 
@@ -231,6 +245,21 @@ pub fn prod<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffErro
 ///
 /// **空縮約（`n == 0`）は [`AutodiffError::InvalidArgument`]**
 /// （`-inf` を黙って返さない安全側の判断。`Var::norm` と同じ方針）。
+///
+/// **確保前のバイト数上限検査（codex-review P1 是正・イシュー #2147・
+/// PR #2263）**: `x` が小さなストレージを巨大な shape へ broadcast
+/// した view の場合、`materialize_one`（`BackendOps::logsumexp` →
+/// `Unsupported` 時の `eval::logsumexp_along` フォールバックを含む）や
+/// `backend-cpu::reduction::logsumexp`（`axis_reduce_logsumexp`・
+/// `gather_elements`）が要素数積・出力 shape から確保する `Vec` の
+/// バイト数は、`n == 0` チェックだけでは検出できない（`n != 0` でも
+/// `outer`／`inner` の broadcast 次元が巨大なら overflow しうる）。
+/// `checked_bytes_for` は入力 shape（`gather_elements`／`dense_vec` が
+/// 実体化する側）・`out_shape`（`axis_reduce_logsumexp`／
+/// `eval::logsumexp_along` の `vec![0f32; outer * inner]` が確保する
+/// 側）の両方を確保前に検査し、`eval.rs` モジュール契約（「shape が
+/// 既に整合していることを前提とし `ShapeError` を返さない」）を保った
+/// まま、本関数（呼び出し元）側で `Result` として拒否する。
 pub fn logsumexp<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
@@ -240,6 +269,8 @@ pub fn logsumexp<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, Autodif
             "reduce_ops::logsumexp: 縮約対象の要素数が 0（dim={dim:?}）"
         )));
     }
+    checked_bytes_for::<f32>(&shape)?;
+    checked_bytes_for::<f32>(&out_shape)?;
     let input_val = materialize_one(x)?;
     let value = match x.tape().ops().logsumexp(&input_val, dim) {
         Ok(v) => {
@@ -325,6 +356,11 @@ pub fn all<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError
 ///
 /// **空縮約（`n == 0`）は [`AutodiffError::InvalidArgument`]**
 /// （`Var::norm` と同じ方針）。
+///
+/// **確保前のバイト数上限検査（codex-review P1 是正・イシュー #2147・
+/// PR #2263）**: [`logsumexp`] doc「確保前のバイト数上限検査」と同じ
+/// 理由（`p == 1.0`／`p == 2.0` の委譲先 `Var::norm_l1`／`norm_l2` は
+/// 本 PR の差分外・イシュー #1723 の既存経路のため対象外）。
 pub fn norm_p<'t>(x: &Var<'t>, p: f32, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     if !p.is_finite() || p <= 0.0 {
         return Err(AutodiffError::InvalidArgument(format!(
@@ -345,6 +381,8 @@ pub fn norm_p<'t>(x: &Var<'t>, p: f32, dim: Option<usize>) -> Result<Var<'t>, Au
             "reduce_ops::norm_p: 縮約対象の要素数が 0（dim={dim:?}）"
         )));
     }
+    checked_bytes_for::<f32>(&shape)?;
+    checked_bytes_for::<f32>(&out_shape)?;
     let input_val = materialize_one(x)?;
     let value = match x.tape().ops().vector_norm_p(&input_val, p, dim) {
         Ok(v) => {

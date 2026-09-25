@@ -676,6 +676,15 @@ pub(crate) fn vector_norm_along(
 /// 1 回だけ `f32` へ downcast する（`n == 0` の検査は呼び出し元
 /// `crate::reduce_ops::logsumexp` が済ませている前提。`NaN` 入力は
 /// [`nan_propagating_max_f64`] 経由でそのまま伝播する）。
+///
+/// **事前条件（呼び出し元が満たす）**: `dense_vec(input)`（`input.shape()`
+/// を実体化）・`vec![0f32; outer * inner]`（`out_shape` を確保）は
+/// いずれも無検査のため、呼び出し元 `crate::reduce_ops::logsumexp` が
+/// `checked_bytes_for::<f32>(&input.shape())`／`checked_bytes_for::
+/// <f32>(out_shape)` で確保前検証済みであること（本モジュール冒頭
+/// コメント「shape が既に整合していることを前提とし `ShapeError` を
+/// 返さない」契約のとおり、本関数自体は境界検査を行わない。
+/// codex-review P1 是正・イシュー #2147・PR #2263）。
 pub(crate) fn logsumexp_along(
     input: &Tensor<f32>,
     dim: Option<usize>,
@@ -713,6 +722,11 @@ pub(crate) fn logsumexp_along(
 /// `0.0`・`mx` が `inf` は `inf`・`NaN` はそのまま伝播）。最後に 1 回
 /// だけ `f32` へ downcast する（`n == 0`・`p` の有限性／正値検査は
 /// 呼び出し元 `crate::reduce_ops::norm_p` が済ませている前提）。
+///
+/// **事前条件（呼び出し元が満たす）**: [`logsumexp_along`] と同じ理由
+/// （同関数 doc「事前条件」参照）で、呼び出し元 `crate::reduce_ops::
+/// norm_p` が `checked_bytes_for::<f32>` による確保前検証済みである
+/// こと（codex-review P1 是正・イシュー #2147・PR #2263）。
 pub(crate) fn vector_norm_p_along(
     input: &Tensor<f32>,
     p: f32,

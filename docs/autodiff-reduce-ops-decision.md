@@ -147,6 +147,55 @@ bit 不一致を実測確認済み。`vector_norm_p` は `n = 3・CHUNK + 17`
 規模では相対誤差が f32 丸め粒度に届かず修正前でも自然には bit 不一致を
 再現できなかったため将来のリグレッション防止ロックとして追加）。
 
+**2026-09-25 追記 2（PR #2263 codex-review P1 是正・非空縮約への確保前
+バイト数上限検査の拡張）**: §2.2／§2.3 の空縮約（`n == 0`）向け
+`checked_bytes_for::<f32>` は `out_shape` の要素数積・バイトサイズを
+検査するが、`logsumexp`／`vector_norm_p` は `n != 0`（非空縮約）でも
+`x` が小さなストレージを巨大な shape へ broadcast した view の場合に
+同種の未検査確保が残っていた（要素数積は `usize` に収まってもバイト
+数〈`f32` 換算〉が `isize::MAX` を超えうる）:
+
+- `backend-cpu::reduction::logsumexp`／`vector_norm_p`
+  （`crates/backend-cpu/src/reduction.rs`）: 軸指定
+  （`dim=Some(axis)`）は `axis_reduce_logsumexp`／
+  `axis_reduce_vector_norm_p` の `.collect()` が `out_shape` サイズの
+  `Vec<f32>` を確保する前に `checked_alloc_numel_f32(&out_shape)` を
+  追加。全縮約（`dim=None`）の非 contiguous 入力（`as_slice()` が
+  `None`）は `gather_elements` が入力全体を実体化する前に
+  `checked_alloc_numel_f32(a.shape())` を追加（`checked_alloc_numel_f32`
+  は `checked_product` に `f32` 換算のバイトサイズ検査を足した
+  `pub(crate)` ヘルパで、`backend-cuda::ops::checked_bytes_for`／
+  `backend-metal::ops::checked_bytes_for`／`autodiff::bool_ops::
+  checked_bytes_for` と同型の独立複製）。
+- `autodiff::reduce_ops::logsumexp`／`norm_p`
+  （`crates/autodiff/src/reduce_ops.rs`）: `n == 0` 検査の直後・
+  `materialize_one` 呼び出し前に `checked_bytes_for::<f32>` を入力
+  shape・`out_shape` の双方に適用する。これは
+  `BackendOps::logsumexp`／`vector_norm_p`（CPU／CUDA／Metal いずれの
+  実装も）と `Unsupported` 時のフォールバック
+  `eval::logsumexp_along`／`vector_norm_p_along`
+  （`crates/autodiff/src/eval.rs`。`dim=Some(axis)` の
+  `vec![0f32; outer * inner]` 確保）の両方を単一の事前検査で守る
+  （`eval.rs` モジュール冒頭の「shape が既に整合していることを前提とし
+  `ShapeError` を返さない」契約を保つため、`eval.rs` 自体は
+  `Result` 化しない。事前条件は両関数の doc に明記）。
+  `grad.rs::logsumexp_vjp`／`pnorm_vjp`（backward の `dense_vec`
+  実体化）は forward が拒否した shape は tape に push されないため
+  追加検査不要（doc に事前条件として明記のみ）。
+  `norm_p` の `p ∈ {1.0, 2.0}` 委譲先（`Var::norm_l1`／`norm_l2` →
+  `Var::norm` → `eval::vector_norm_along`）は本 PR の差分外
+  （イシュー #1723 の既存経路）のため対象外（スコープ外として
+  `.claude/rules/out-of-scope-tracking.md` の対象候補。§5 参照）。
+- 回帰テストは `crates/backend-cpu/src/reduction.rs` の
+  `logsumexp_vector_norm_p_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
+  `logsumexp_vector_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking`
+  と、`crates/autodiff/tests/reduction_parity.rs` の
+  `logsumexp_norm_p_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
+  `logsumexp_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking`
+  （いずれも `Tensor::broadcast_to` で構築した非 contiguous な巨大
+  shape view が panic せず `ShapeError::ElementCountOverflow` を返す
+  ことを検証する）。
+
 ### §2.5 `norm_p`: 専用 Op
 
 `VectorNormOrd` は拡張しない（crates.io 公開クレートで `Eq` を
@@ -219,6 +268,13 @@ VJP: `dx_i = g · sign(x_i) · (|x_i|/norm)^(p−1)` を比の形（`norm^
 - keepdim 版・複数軸版（`*_dims`）: 対象外。
 - CUDA・Metal の実機 parity 実測: 申し送り（`docs/perf/logs/
   reduce-ops-2147/README.md`）。
+- `Var::norm`（`norm_l1`／`norm_l2`。`var.rs`）・
+  `eval::vector_norm_along`（`eval.rs:637-638` の `dense_vec`＋
+  `vec![0f32; outer * inner]`）は §2.4 追記 2 と同種（小さな
+  ストレージを巨大な shape へ broadcast した view で確保前検査が
+  ない）だが、イシュー #1723 の既存経路であり本 PR（#2147・PR
+  #2263）の差分外のため未修正。将来の是正候補として記録のみ
+  （codex-review 指摘・PR #2263 レビュー時点）。
 
 ## §6 承認事項（未承認として列挙）
 

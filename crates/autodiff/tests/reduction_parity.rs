@@ -278,6 +278,59 @@ fn prod_any_all_empty_reduction_rejects_product_overflow_without_panicking() {
     }
 }
 
+// --- `logsumexp`／`norm_p` の非空縮約における確保前バイト数上限検査
+// （codex-review P1 是正 2・イシュー #2147・PR #2263）: 空縮約
+// （`n == 0`）の境界検査（上記）とは別に、`n != 0` でも入力が小さな
+// ストレージを巨大な shape へ broadcast した view であれば
+// `materialize_one`（`gather_elements`／`dense_vec` による入力実体化）
+// や `eval::logsumexp_along`／`vector_norm_p_along`（`out_shape` の
+// `vec![0f32; outer * inner]` 確保）が無検査で capacity overflow
+// panic しうる回帰。`reduce_ops::logsumexp`／`norm_p` が dispatch 前に
+// `checked_bytes_for::<f32>` で入力 shape・`out_shape` の双方を検査し
+// panic せず型付きエラーを返すことを検証する。`Tape::new()` の既定
+// `ops`（`NaiveOps`）は `logsumexp`／`vector_norm_p` に `Unsupported`
+// を返すため、本テストは `eval::logsumexp_along`／`vector_norm_p_along`
+// フォールバック経路を通る。
+
+#[test]
+fn logsumexp_norm_p_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+    let tape = Tape::new();
+    // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+    // （軸 1 は実軸〈長さ 4・非空縮約〉、軸 0 は broadcast で巨大）。
+    // dim=Some(1) で縮約すると out_shape=[1usize << 61] となり、要素数
+    // 積（2^61）自体は usize に収まるが f32 換算バイト数
+    // （2^61 * 4 = 2^63）が isize::MAX（2^63 - 1）を 1 超える。
+    let base = t(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]);
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = tape.var(&huge);
+    assert!(matches!(
+        logsumexp(&x, Some(1)),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+    assert!(matches!(
+        norm_p(&x, 3.0, Some(1)),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+}
+
+#[test]
+fn logsumexp_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+    let tape = Tape::new();
+    // base shape [1] を broadcast して [1usize << 61] にする（非
+    // contiguous・全縮約〈dim=None〉）。
+    let base = t(vec![1.0], &[1]);
+    let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+    let x = tape.var(&huge);
+    assert!(matches!(
+        logsumexp(&x, None),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+    assert!(matches!(
+        norm_p(&x, 3.0, None),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+}
+
 // --- 空縮約の計算グラフ接続（codex-review P2 是正・イシュー #2147・
 // PR #2263）: 対応前は `push_leaf` で `x` から独立した定数葉を返して
 // おり、backward で `x` への経路が失われていた（`Gradients::get` が
