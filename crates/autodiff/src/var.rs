@@ -1269,8 +1269,10 @@ impl<'t> Var<'t> {
     /// 決定的」規約は、イシュー #1718 の確定により本メソッドも含めて
     /// **維持される**（`torch.amax` の均等分配とは勾配が異なる点は
     /// 意図的な設計判断。`docs/autodiff-amax-grad-distribution-
-    /// decision.md` 参照）。`dims`／`keepdim` の契約は `sum_dims` と
-    /// 同一。
+    /// decision.md` 参照）。`torch.amax` 相当の均等分配 VJP は
+    /// `crate::extremum_ops::amax`（単一軸限定。イシュー #2154）で
+    /// 別途提供する（本メソッドの先勝ち挙動は変えない）。`dims`／
+    /// `keepdim` の契約は `sum_dims` と同一。
     pub fn max_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
         self.reduce_dims_with(dims, keepdim, |v, axis| v.max(axis))
     }

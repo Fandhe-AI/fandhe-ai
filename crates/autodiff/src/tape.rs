@@ -234,7 +234,8 @@ pub(crate) enum Op {
     /// 方式を維持する設計判断が確定し（`docs/autodiff-
     /// amax-grad-distribution-decision.md`）、このヘルパーは今後も
     /// 差し替えない——PyTorch `amax`／`amin` 相当の均等分配は独立の
-    /// `Op`／VJP として実装する方針とした。
+    /// `Op`／VJP として実装する方針とした（イシュー #2154 で
+    /// [`Op::Amax`]／[`Op::Amin`] として実装済み）。
     Min { input: NodeId, dim: Option<usize> },
     /// `dim` に沿った縮約平均（イシュー #1719・親 #1601「Phase 2
     /// （Tier 1）」）。`BackendOps` に対応メソッドがないため、forward
@@ -1092,6 +1093,28 @@ pub(crate) enum Op {
         inputs: Vec<NodeId>,
         func: crate::custom::CustomFn,
     },
+
+    /// `crate::extremum_ops::amax`（`torch.amax(dim)` 相当。イシュー
+    /// #2154・親 #2131「Phase 5」・決定 doc
+    /// `docs/autodiff-amax-grad-distribution-decision.md` §5）。forward
+    /// は `Op::Max` と bit 同一（`crate::extremum_ops::amax` が
+    /// `Var::max` と同じ `ops.max` 経路を呼んでから本 variant で
+    /// `push_eager` するだけで、専用 `BackendOps` メソッドは追加しない）。
+    /// `Op::Max` との違いは VJP のみ——本 variant は
+    /// `grad::extremum_even_split_vjp`（`out_value` と `==` 一致する
+    /// 全位置へ `g / k` を均等分配。`k` は一致要素数）を使い、
+    /// `Op::Max`（`grad::extremum_first_match_vjp`。先勝ち・最初の
+    /// 1 箇所のみ）とは独立に保つ。#1718 で `Var::max`／`min`／
+    /// `max_dims` の先勝ち方式を出荷済み挙動として維持する決定が
+    /// 確定したため、均等分配は別 `Op` として新設する（決定 doc §4）。
+    Amax { input: NodeId, dim: Option<usize> },
+    /// `crate::extremum_ops::amin`（`torch.amin(dim)` 相当。イシュー
+    /// #2154）。[`Op::Amax`] と対称（forward は `Op::Min` と bit
+    /// 同一・VJP は `grad::extremum_even_split_vjp` を共有）。`Op::Min`
+    /// の NaN 非伝播 forward をそのまま使うため、`amax`（NaN 伝播）と
+    /// `amin`（NaN 非伝播）の非対称性は既存 `max`／`min` の性質を
+    /// 引き継ぐ（決定 doc §6。対象外）。
+    Amin { input: NodeId, dim: Option<usize> },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -1448,6 +1471,15 @@ impl Op {
             // （最小・安全側の判断。将来 `true` 化する場合は
             // `Op::Sum`／`Op::Max` 型の再計算分岐を追加する）。
             Op::LogSumExp { .. } | Op::PNorm { .. } => false,
+            // `Op::Amax`／`Op::Amin`（イシュー #2154）は forward が
+            // `Op::Max`／`Op::Min` と bit 同一のため `true` へ拡張する
+            // 余地もあるが、`recompute_value` の Visit／Process 双方に
+            // 再計算分岐を追加する必要があり、直近の前例
+            // （`Op::LogSumExp`／`Op::PNorm`・`Op::Var`／`Op::Std`）と
+            // 同じ「最小・安全側の判断」で非適格に揃える（将来 `true`
+            // 化する場合は `Op::Max`／`Op::Min` 型の再計算分岐を追加
+            // する）。
+            Op::Amax { .. } | Op::Amin { .. } => false,
             // `Op::Cumsum`／`Op::Cumprod`（イシュー #1731）は eager
             // 実体化演算で `recompute_value` に再計算経路を持たない
             // ため非適格（非網羅 match 是正で新規 variant 追加時に
@@ -1536,6 +1568,8 @@ impl Op {
             | Op::Std { input, .. }
             | Op::LogSumExp { input, .. }
             | Op::PNorm { input, .. }
+            | Op::Amax { input, .. }
+            | Op::Amin { input, .. }
             | Op::Min { input, .. }
             | Op::Mean { input, .. }
             | Op::Reshape { input }
@@ -1807,6 +1841,8 @@ impl Op {
             | Op::Std { .. }
             | Op::LogSumExp { .. }
             | Op::PNorm { .. }
+            | Op::Amax { .. }
+            | Op::Amin { .. }
             | Op::Min { .. }
             | Op::MseLoss { .. }
             | Op::HuberLoss { .. }

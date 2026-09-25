@@ -439,6 +439,17 @@ pub(crate) fn vjp(
             let da = extremum_first_match_vjp(input_val, dim, out_value, upstream);
             vec![(input, da)]
         }
+        Op::Amax { input, dim } | Op::Amin { input, dim } => {
+            // `crate::extremum_ops::amax`／`amin`（イシュー #2154）:
+            // forward は `Op::Max`／`Op::Min` と bit 同一だが VJP は
+            // 均等分配（`extremum_even_split_vjp`）を使う。最大／最小
+            // どちらの縮約かに依存しない実装のため `Op::Max`／`Op::Min`
+            // と同様に共有アームでよい（`extremum_first_match_vjp` と
+            // 同じ判断枠組み）。
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = extremum_even_split_vjp(input_val, dim, out_value, upstream);
+            vec![(input, da)]
+        }
         Op::Mean { input, dim } => {
             // `d(mean)/d(x_i) = 1/n`（`n` は forward〈`Var::mean`〉と
             // 同じ縮約対象要素数）。`Sum` の VJP（複製）を `n` で割った
@@ -6049,8 +6060,9 @@ fn mean_vjp(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>) -> Tenso
 /// arg_extremum`）と内部整合する。PyTorch `torch.amax`／`amin`
 /// （添字を返さない縮約）相当の均等分配 API を追加する場合は、本
 /// ヘルパーを差し替えず独立の `Op`／VJP として実装する方針とした
-/// （`docs/autodiff-amax-grad-distribution-decision.md` 参照。未実装・
-/// 後続 issue 提案のまま）。
+/// （`docs/autodiff-amax-grad-distribution-decision.md` 参照。イシュー
+/// #2154 で `Op::Amax`／`Op::Amin`・[`extremum_even_split_vjp`]
+/// （`crate::extremum_ops::amax`／`amin`）として実装済み）。
 ///
 /// **`Op::Min` との共有（イシュー #1720）**: 本関数の実体は
 /// 「`out_value` と `==` 一致する最初の位置へ `g` を置く」だけで
@@ -6129,6 +6141,115 @@ fn extremum_first_match_vjp(
                                     "max_vjp: input の要素数が in_shape と不一致（契約違反）"
                                 );
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    build_tensor(grad, &in_shape)
+}
+
+/// [`crate::extremum_ops::amax`]／[`crate::extremum_ops::amin`]
+/// （`Op::Amax`／`Op::Amin`）の VJP: `out_value`（forward の記録値。
+/// `Var::max`／`min` と bit 同一）と IEEE 754 の `==` で一致する
+/// `dim` 軸上の全位置へ、上流勾配を均等分配 `g / k`（`k` は一致した
+/// 要素数の整数カウント）で伝播する（決定 doc `docs/autodiff-amax-
+/// grad-distribution-decision.md` §5「確定方針」・イシュー #2154）。
+/// [`extremum_first_match_vjp`]（先勝ち・最初の 1 箇所のみ）とは
+/// 独立の実体であり、`Var::max`／`min`／`max_dims` の勾配値は変えない
+/// （#1718 で維持を確定済み。モジュール doc・`Op::Max`／`Op::Min` doc
+/// 参照）。
+///
+/// **走査**: `extremum_first_match_vjp` と同じ「外側（outer）×走査軸
+/// （axis_len）×内側（inner）」の 3 段走査（`dim=None` は
+/// `outer=inner=1`）。各 lane を 2 周する: 1 周目で一致要素数
+/// `k: usize`（丸めのない整数カウント）を数え、`k > 0` なら 2 周目で
+/// 一致位置へ `g_val / (k as f32)`（`f32` 除算 1 回）を書く。
+/// `k == 0`（forward が `Op::Max` の NaN 伝播で `out_value` が `NaN`
+/// になった場合等、`in_data` のいずれとも `==` 一致しない契約違反時）
+/// は先勝ち方式（`extremum_first_match_vjp`）の契約違反時と同じ安全側
+/// の扱いで全ゼロのまま返す。
+///
+/// **f64 長軸縮約契約（`.claude/rules/coding-rust.md`「正規化統計・
+/// 勾配の長軸縮約は f64 アキュムレータで統一する」）の対象外**:
+/// 本関数の演算は `g / k` の除算 1 回のみで、加算による縮約（重み
+/// 勾配の行方向蓄積・正規化統計の二乗和等）を経由しないため同契約は
+/// 適用しない（決定 doc §5）。
+///
+/// **総量保存**: 丸め誤差を除き各 lane 内で `sum(grad) == g`（`k` が
+/// `2^24` を超えると `k as f32` 変換で丸まる既知の限界があるが、実用
+/// 上想定しない極端なケース）。
+fn extremum_even_split_vjp(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_value: &Tensor<f32>,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
+    let in_shape = input.shape().to_vec();
+    let in_data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let out_data = dense_vec(out_value);
+    let mut grad = vec![0f32; in_data.len()];
+    match dim {
+        None => {
+            if let (Some(&target), Some(&gv)) = (out_data.first(), g_data.first()) {
+                let k = in_data.iter().filter(|&&v| v == target).count();
+                if k > 0 {
+                    let share = gv / (k as f32);
+                    for (dst, &v) in grad.iter_mut().zip(in_data.iter()) {
+                        if v == target {
+                            *dst = share;
+                        }
+                    }
+                }
+            }
+        }
+        Some(axis) => {
+            let outer: usize = in_shape[..axis].iter().product();
+            let axis_len = in_shape[axis];
+            let inner: usize = in_shape[axis + 1..].iter().product();
+            for o in 0..outer {
+                for i in 0..inner {
+                    let out_idx = o * inner + i;
+                    // `extremum_first_match_vjp` と同じ「契約違反時は
+                    // `debug_assert!` で検知しつつ安全側（当該 lane の
+                    // 勾配は 0 のまま）へフォールバックする」規律
+                    // （coding-rust.md「本番経路で unwrap/expect を
+                    // 使わない」方針の趣旨に揃える）。
+                    let (Some(&target), Some(&g_val)) =
+                        (out_data.get(out_idx), g_data.get(out_idx))
+                    else {
+                        debug_assert!(
+                            false,
+                            "extremum_even_split_vjp: out_value/g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                        );
+                        continue;
+                    };
+                    let mut k: usize = 0;
+                    for a in 0..axis_len {
+                        let src = (o * axis_len + a) * inner + i;
+                        match in_data.get(src) {
+                            Some(&v) if v == target => k += 1,
+                            Some(_) => {}
+                            None => {
+                                debug_assert!(
+                                    false,
+                                    "extremum_even_split_vjp: input の要素数が in_shape と不一致（契約違反）"
+                                );
+                            }
+                        }
+                    }
+                    if k == 0 {
+                        continue;
+                    }
+                    let share = g_val / (k as f32);
+                    for a in 0..axis_len {
+                        let src = (o * axis_len + a) * inner + i;
+                        if let Some(&v) = in_data.get(src)
+                            && v == target
+                        {
+                            grad[src] = share;
                         }
                     }
                 }
@@ -8683,6 +8804,88 @@ release ビルドでも検知できるよう `assert!` を使う）"
         );
         assert_eq!(grad[0..3].iter().sum::<f32>(), 3.0);
         assert_eq!(grad[3..6].iter().sum::<f32>(), 7.0);
+    }
+
+    // --- extremum_even_split_vjp（amax／amin の均等分配 VJP。
+    // イシュー #2154・決定 doc `docs/autodiff-amax-grad-distribution-
+    // decision.md` §5） ---
+
+    #[test]
+    fn extremum_even_split_grad_dim_none_all_tie() {
+        // 全要素が同値タイ（`[3, 1, 3]`）。g=1 を 2 要素へ均等分配。
+        let a = t(&[3.0, 1.0, 3.0], &[3]);
+        let g = t(&[1.0], &[]);
+        let out_value = eval::max(&a, None, &[]);
+        let da = extremum_even_split_vjp(&a, None, &out_value, &g);
+        let grad = dense_vec(&da);
+        assert_eq!(grad, vec![0.5, 0.0, 0.5]);
+        assert_eq!(grad.iter().sum::<f32>(), 1.0);
+    }
+
+    #[test]
+    fn extremum_even_split_grad_dim_axis_varies_per_lane() {
+        // shape [3, 3]。行ごとにタイ数が 1・2・3 と異なる。
+        let a = t(&[5.0, 1.0, 2.0, 5.0, 5.0, 1.0, 5.0, 5.0, 5.0], &[3, 3]);
+        let g = t(&[1.0, 1.0, 1.0], &[3]);
+        let out_value = eval::max(&a, Some(1), &[3]);
+        let da = extremum_even_split_vjp(&a, Some(1), &out_value, &g);
+        let grad = dense_vec(&da);
+        assert_eq!(
+            grad,
+            vec![
+                1.0,
+                0.0,
+                0.0,
+                0.5,
+                0.5,
+                0.0,
+                1.0 / 3.0,
+                1.0 / 3.0,
+                1.0 / 3.0
+            ]
+        );
+        // 各行内で勾配総量が上流勾配 g[row] と一致する（丸め誤差以内）。
+        for row in 0..3 {
+            let s: f32 = grad[row * 3..(row + 1) * 3].iter().sum();
+            assert!((s - 1.0).abs() < 1e-6, "row={row} sum={s}");
+        }
+    }
+
+    #[test]
+    fn extremum_even_split_grad_no_tie_matches_first_match() {
+        // タイが無ければ先勝ち（`extremum_first_match_vjp`）と均等分配
+        // （`extremum_even_split_vjp`）は bit 一致する（k=1 なら
+        // `g/1 == g`）。
+        let a = t(&[1.0, 9.0, 3.0], &[3]);
+        let g = t(&[2.5], &[]);
+        let out_value = eval::max(&a, None, &[]);
+        let first = dense_vec(&extremum_first_match_vjp(&a, None, &out_value, &g));
+        let even = dense_vec(&extremum_even_split_vjp(&a, None, &out_value, &g));
+        assert_eq!(first, even);
+    }
+
+    #[test]
+    fn extremum_even_split_grad_k_zero_is_all_zero() {
+        // `out_value` が入力のどの要素とも `==` 一致しない契約違反
+        // ケース（NaN 伝播等の安全側フォールバック相当）は全ゼロ。
+        let a = t(&[1.0, 2.0, 3.0], &[3]);
+        let bogus_out = t(&[f32::NAN], &[]);
+        let g = t(&[5.0], &[]);
+        let da = extremum_even_split_vjp(&a, None, &bogus_out, &g);
+        let grad = dense_vec(&da);
+        assert_eq!(grad, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn extremum_even_split_grad_negative_zero_ties_with_positive_zero() {
+        // IEEE `==` は `-0.0 == 0.0` のため両方が一致要素として扱われ、
+        // 均等分配される。
+        let a = t(&[-0.0, 0.0, -1.0], &[3]);
+        let g = t(&[1.0], &[]);
+        let out_value = eval::max(&a, None, &[]);
+        let da = extremum_even_split_vjp(&a, None, &out_value, &g);
+        let grad = dense_vec(&da);
+        assert_eq!(grad, vec![0.5, 0.5, 0.0]);
     }
 
     // --- MseLoss（pred/target 両勾配） ---
