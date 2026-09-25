@@ -10278,6 +10278,177 @@ fn compat_sequential_does_not_expose_spatial_layer_add_methods_detects_offense()
 }
 
 // =====================================================================
+// イシュー #2162（親 #2131）: PixelShuffle・PixelUnshuffle の facade
+// 公開保留を検査するテスト群。`PixelShuffleHoldDoctestGuard`（`src/
+// lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査と、
+// `compat::Sequential::add_pixel_shuffle`／`add_pixel_unshuffle` の
+// 非宣言を持つ。`spatial_layers_hold_doctest_*`（#2159）と同型。
+// 承認事項・多層防御の位置づけは
+// `docs/autodiff-pixel-shuffle-decision.md` §6 参照。
+// =====================================================================
+
+/// `PixelShuffleHoldDoctestGuard` の唯一の doctest ブロックが glob
+/// import するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod`
+/// 宣言集合が一致することを固定する（`spatial_layers_hold_doctest_
+/// globs_all_pub_modules` と同型。新しい `pub mod` を facade へ追加した
+/// 際、doctest 側の `use` 一覧の更新を機械的に強制する。イシュー
+/// #2162）。
+#[test]
+fn pixel_shuffle_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "PixelShuffleHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "PixelShuffleHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加する\
+         こと。"
+    );
+}
+
+/// [`pixel_shuffle_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**（`__fandhe_pixel_shuffle_hold_probe` モジュール・
+/// `__FandhePixelShuffleAddProbe`／`__FandhePixelShuffleVarProbe`
+/// トレイト定義・`compat::Sequential`／`Var` への実装・`__probe`
+/// 関数）が固定文言 [`PIXEL_SHUFFLE_HOLD_PROBE_BODY`] と 1 行たりとも
+/// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの
+/// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
+/// 機械的に拒否する。イシュー #2162）。
+#[test]
+fn pixel_shuffle_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "PixelShuffleHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, PIXEL_SHUFFLE_HOLD_PROBE_BODY,
+        "PixelShuffleHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 PIXEL_SHUFFLE_HOLD_PROBE_BODY からドリフト\
+         している。正のプローブ（__fandhe_pixel_shuffle_hold_probe\
+         モジュール・__FandhePixelShuffleAddProbe／\
+         __FandhePixelShuffleVarProbe トレイト・__probe 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`pixel_shuffle_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `PixelShuffleHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const PIXEL_SHUFFLE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_pixel_shuffle_hold_probe {\n\
+\x20\x20\x20\x20pub struct PixelShuffle;\n\
+\x20\x20\x20\x20pub struct PixelUnshuffle;\n\
+\x20\x20\x20\x20pub struct __FandhePixelShuffleHoldMarker;\n\
+\x20\x20\x20\x20pub fn add_pixel_shuffle() -> __FandhePixelShuffleHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_pixel_unshuffle() -> __FandhePixelShuffleHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_pixel_shuffle_hold_probe::*;\n\
+\n\
+trait __FandhePixelShuffleAddProbe {\n\
+\x20\x20\x20\x20fn add_pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
+\x20\x20\x20\x20fn add_pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
+}\n\
+\n\
+impl __FandhePixelShuffleAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandhePixelShuffleVarProbe {\n\
+\x20\x20\x20\x20fn pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
+\x20\x20\x20\x20fn pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandhePixelShuffleVarProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: PixelShuffle,\n\
+\x20\x20\x20\x20_: PixelUnshuffle,\n\
+\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = add_pixel_shuffle();\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = add_pixel_unshuffle();\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::compat::Sequential::add_pixel_shuffle(seq);\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = seq.add_pixel_shuffle();\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::compat::Sequential::add_pixel_unshuffle(seq);\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = seq.add_pixel_unshuffle();\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::Var::pixel_shuffle(v);\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = v.pixel_shuffle();\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::Var::pixel_unshuffle(v);\n\
+\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = v.pixel_unshuffle();\n\
+}";
+
+/// `src/compat` 配下に `add_pixel_shuffle`／`add_pixel_unshuffle` の
+/// `pub fn` 宣言が存在しないことを固定する（イシュー #2162。
+/// `compat_sequential_does_not_expose_spatial_layer_add_methods` と
+/// 同型。`docs/autodiff-pixel-shuffle-decision.md` §6 承認事項が未承認
+/// のまま対象外としている設計判断の固定）。
+#[test]
+fn compat_sequential_does_not_expose_pixel_shuffle_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = ["add_pixel_shuffle", "add_pixel_unshuffle"];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for name in forbidden {
+            if contains_pub_fn_declaration(content, name) {
+                offenses.push(format!("{}: pub fn {name}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に PixelShuffle／PixelUnshuffle 系 add_* が\
+         見つかった（承認スコープ〈#2162〉は Sequential への追加を\
+         認めていない）: {offenses:?}"
+    );
+}
+
+/// [`compat_sequential_does_not_expose_pixel_shuffle_add_methods`] の
+/// 自己テスト（合成入力で検出できることを確認する）。
+#[test]
+fn compat_sequential_does_not_expose_pixel_shuffle_add_methods_detects_offense() {
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_pixel_shuffle(&mut self, l: PixelShuffle) {}",
+        "add_pixel_shuffle"
+    ));
+    assert!(!contains_pub_fn_declaration(
+        "pub fn add_linear(&mut self, l: Linear) {}",
+        "add_pixel_shuffle"
+    ));
+}
+
+// =====================================================================
 // イシュー #2158（親 #2131）: Conv3d の facade 公開保留を検査する
 // テスト群。`VarConv3dHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
