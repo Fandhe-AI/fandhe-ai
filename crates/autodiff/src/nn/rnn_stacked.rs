@@ -381,7 +381,17 @@ impl StackedRnn {
     }
 
     /// `(layer, direction)` のセルへの参照。範囲外は `None`。
+    ///
+    /// `cell_index` は算術 overflow のみを検査するため、`layer`／
+    /// `direction` がそれぞれ `num_layers`／`num_directions` 未満
+    /// であることを先に検査する（未検査だと、双方向構成で範囲外の
+    /// `direction`〈例 `cell(0, 2)`〉が `layer * num_directions +
+    /// direction` の計算結果として別レイヤーのセルの index を指し、
+    /// 誤ったセルを返してしまう。codex-review 指摘）。
     pub fn cell(&self, layer: usize, direction: usize) -> Option<&RnnCell> {
+        if layer >= self.config.num_layers() || direction >= self.config.num_directions() {
+            return None;
+        }
         let k = cell_index(layer, direction, self.config.num_directions()).ok()?;
         self.cells.get(k)
     }
@@ -441,7 +451,8 @@ impl StackedRnn {
                 } else {
                     Box::new((0..t_len).rev())
                 };
-                let mut ordered: Vec<(usize, Var<'t>)> = Vec::with_capacity(t_len);
+                let mut ordered: Vec<(usize, Var<'t>)> =
+                    reserve_outputs(t_len, "StackedRnn::forward_seq")?;
                 for t in time_order {
                     h = vars.forward(&layer_in[t], &h)?;
                     ordered.push((t, h));
@@ -594,7 +605,8 @@ impl Module for StackedRnn {
                     )
                 })?;
                 let mut h = Tensor::zeros(&[b_dim, self.hidden_size])?;
-                let mut ordered: Vec<(usize, Tensor<f32>)> = Vec::with_capacity(t_len);
+                let mut ordered: Vec<(usize, Tensor<f32>)> =
+                    reserve_outputs(t_len, "StackedRnn::forward_host")?;
                 let time_order: Box<dyn Iterator<Item = usize>> = if direction == 0 {
                     Box::new(0..t_len)
                 } else {
@@ -710,7 +722,16 @@ impl StackedGru {
         self.hidden_size
     }
 
+    /// `(layer, direction)` のセルへの参照。範囲外は `None`。
+    ///
+    /// `cell_index` は算術 overflow のみを検査するため、`layer`／
+    /// `direction` がそれぞれ `num_layers`／`num_directions` 未満
+    /// であることを先に検査する（[`StackedRnn::cell`] と同じ理由。
+    /// codex-review 指摘）。
     pub fn cell(&self, layer: usize, direction: usize) -> Option<&GruCell> {
+        if layer >= self.config.num_layers() || direction >= self.config.num_directions() {
+            return None;
+        }
         let k = cell_index(layer, direction, self.config.num_directions()).ok()?;
         self.cells.get(k)
     }
@@ -762,7 +783,8 @@ impl StackedGru {
                 } else {
                     Box::new((0..t_len).rev())
                 };
-                let mut ordered: Vec<(usize, Var<'t>)> = Vec::with_capacity(t_len);
+                let mut ordered: Vec<(usize, Var<'t>)> =
+                    reserve_outputs(t_len, "StackedGru::forward_seq")?;
                 for t in time_order {
                     h = vars.forward(&layer_in[t], &h)?;
                     ordered.push((t, h));
@@ -909,7 +931,8 @@ impl Module for StackedGru {
                     )
                 })?;
                 let mut h = Tensor::zeros(&[b_dim, self.hidden_size])?;
-                let mut ordered: Vec<(usize, Tensor<f32>)> = Vec::with_capacity(t_len);
+                let mut ordered: Vec<(usize, Tensor<f32>)> =
+                    reserve_outputs(t_len, "StackedGru::forward_host")?;
                 let time_order: Box<dyn Iterator<Item = usize>> = if direction == 0 {
                     Box::new(0..t_len)
                 } else {
@@ -1024,7 +1047,16 @@ impl StackedLstm {
         self.hidden_size
     }
 
+    /// `(layer, direction)` のセルへの参照。範囲外は `None`。
+    ///
+    /// `cell_index` は算術 overflow のみを検査するため、`layer`／
+    /// `direction` がそれぞれ `num_layers`／`num_directions` 未満
+    /// であることを先に検査する（[`StackedRnn::cell`] と同じ理由。
+    /// codex-review 指摘）。
     pub fn cell(&self, layer: usize, direction: usize) -> Option<&LstmCell> {
+        if layer >= self.config.num_layers() || direction >= self.config.num_directions() {
+            return None;
+        }
         let k = cell_index(layer, direction, self.config.num_directions()).ok()?;
         self.cells.get(k)
     }
@@ -1089,7 +1121,8 @@ impl StackedLstm {
                 } else {
                     Box::new((0..t_len).rev())
                 };
-                let mut ordered: Vec<(usize, Var<'t>)> = Vec::with_capacity(t_len);
+                let mut ordered: Vec<(usize, Var<'t>)> =
+                    reserve_outputs(t_len, "StackedLstm::forward_seq")?;
                 for t in time_order {
                     let (h_t, c_t) = vars.forward(&layer_in[t], &h, &c)?;
                     h = h_t;
@@ -1243,7 +1276,8 @@ impl Module for StackedLstm {
                 })?;
                 let mut h = Tensor::zeros(&[b_dim, self.hidden_size])?;
                 let mut c = Tensor::zeros(&[b_dim, self.hidden_size])?;
-                let mut ordered: Vec<(usize, Tensor<f32>)> = Vec::with_capacity(t_len);
+                let mut ordered: Vec<(usize, Tensor<f32>)> =
+                    reserve_outputs(t_len, "StackedLstm::forward_host")?;
                 let time_order: Box<dyn Iterator<Item = usize>> = if direction == 0 {
                     Box::new(0..t_len)
                 } else {
