@@ -85,10 +85,13 @@ autodiff に追加するにあたり、非決定的な経路（rayon 縮約順�
 ### §2.3 `.sum()`／`.reduce(`／`reduce_with` の走査
 
 `crates/backend-cpu/src` 全体を「rayon 並列イテレータ（`par_iter`／
-`par_chunks`／`into_par_iter`／`par_iter_mut`）と `.sum()`／`.reduce(`／
-`reduce_with` が同一文中に共起する」条件で走査した結果、**該当箇所は
-0 件**（実装時の実測。`crates/backend-cpu/tests/determinism_inventory.rs`
-が同条件を固定 fail-closed 検査する）。見つかった `.sum()` はいずれも
+`par_chunks`／`par_chunks_mut`／`into_par_iter`／`par_iter_mut`）と
+`.sum()`／`.reduce(`／`reduce_with` が同一文中に共起する」条件で走査
+した結果、**該当箇所は 0 件**（実装時の実測。
+`crates/backend-cpu/tests/determinism_inventory.rs` が同条件を固定
+fail-closed 検査する。`par_chunks_mut` マーカーは codex-review 指摘
+〈PR #2274〉により追加し、追加後も 0 件を再確認済み）。見つかった
+`.sum()` はいずれも
 逐次 `std::iter::Iterator::sum()`（`ops.rs::gemm_checksum` の
 `out.iter().map(|&x| x as f64).sum()` 等）またはテストコード内の
 `naive_sum` 参照実装で、rayon 並列イテレータの `.sum()`／`.reduce(`
