@@ -24,12 +24,18 @@
 //! `gelu_tanh`／`softplus` の薄いラッパー）。イシュー #1714 で
 //! [`Silu`]／[`Hardswish`]／[`LeakyRelu`]／[`Elu`]（いずれも
 //! `crate::var::Var` の `ScalarUnaryOp` 汎用 dispatch。#1592／#1634 が
-//! 敷いた基盤への薄いラッパー）を追加した。さらなる追加活性化は必要に
-//! なった時点の後続イシューに委ねる。
+//! 敷いた基盤への薄いラッパー）を追加した。イシュー #2146 で
+//! [`Mish`]／[`Hardtanh`]／[`Relu6`]／[`PRelu`]／[`Glu`] を追加した
+//! （`crate::activation_ops` の自由関数への薄いラッパー。`activation_ops`
+//! は facade 非公開の内部専用モジュールのため、本 5 層自体も
+//! `nn::activation` 経由でのみ到達可能——facade 公開は承認待ち。
+//! `crate::activation_ops` モジュール doc 参照）。さらなる追加活性化は
+//! 必要になった時点の後続イシューに委ねる。
 
 use crate::error::AutodiffError;
+use crate::tape::Tape;
 use crate::var::Var;
-use fandhe_ai_tensor_core::ScalarUnaryOp;
+use fandhe_ai_tensor_core::{ScalarUnaryOp, ShapeError, Tensor};
 
 /// ReLU（`max(x, 0)`）。`Var::relu` の薄いラッパー。
 #[derive(Debug, Default, Clone, Copy)]
@@ -327,6 +333,243 @@ impl LogSoftmax {
     /// [`Softmax::dim`] と同じ理由のクレート内アクセサ。
     pub(crate) fn dim(&self) -> usize {
         self.dim
+    }
+}
+
+/// Mish（`x * tanh(softplus(x))`）。`crate::activation_ops::mish` への
+/// 薄いラッパー（イシュー #2146）。`Relu`/`Sigmoid`/`Tanh` と異なり
+/// `forward` は `Result` を返す（`softplus`／`tanh`／`mul` の合成が
+/// eager 実体化契約を持つため。[`Silu`] と同型の契約）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Mish;
+
+impl Mish {
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::mish(input)
+    }
+}
+
+/// Hardtanh（`min < x < max` の開区間では `x` を素通し、それ以外は
+/// `clamp(x, min, max)`）。`crate::activation_ops::hardtanh` への薄い
+/// ラッパー（イシュー #2146）。数値・境界勾配の契約は
+/// `crate::activation_ops::hardtanh` doc を参照。
+#[derive(Debug, Clone, Copy)]
+pub struct Hardtanh {
+    min_val: f32,
+    max_val: f32,
+}
+
+impl Hardtanh {
+    /// `min_val`／`max_val` を指定して構築する。`crate::activation_ops::
+    /// hardtanh` と同じ検査（有限〈`NaN` 拒否〉・`min_val < max_val`）を
+    /// 構築時に行う（`nn/norm.rs::validate_eps` と同じ「層構築の時点で
+    /// 早期に弾く」規律）。
+    pub fn new(min_val: f32, max_val: f32) -> Result<Self, AutodiffError> {
+        if min_val.is_nan() || max_val.is_nan() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Hardtanh::new: min_val/max_val must not be NaN, got min_val={min_val}, \
+                 max_val={max_val}"
+            )));
+        }
+        if min_val >= max_val {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Hardtanh::new: min_val must be less than max_val, got min_val={min_val}, \
+                 max_val={max_val}"
+            )));
+        }
+        Ok(Self { min_val, max_val })
+    }
+
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::hardtanh(input, self.min_val, self.max_val)
+    }
+
+    /// `nn/module.rs::Module::forward_host` が `scalar_unary_with_
+    /// fallback` へ渡す `ScalarUnaryOp::Clamp { min, max }` を組み立てる
+    /// ためのクレート内アクセサ（`Silu::op` と同型の理由）。
+    /// `crate::activation_ops::hardtanh` の forward が `clamp` と bit
+    /// 完全一致するため（同関数 doc 参照）、`forward_host` はこの
+    /// `Clamp` 経路をそのまま使ってよい。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Clamp {
+            min: self.min_val,
+            max: self.max_val,
+        }
+    }
+}
+
+impl Default for Hardtanh {
+    /// PyTorch `nn.Hardtanh` の既定値（`min_val=-1.0`・`max_val=1.0`）。
+    /// `new` の検査を通る既知の定数のため、本番経路 panic 禁止規約に
+    /// 従いフィールドを直接構築する（[`Softplus::default`] と同型）。
+    fn default() -> Self {
+        Self {
+            min_val: -1.0,
+            max_val: 1.0,
+        }
+    }
+}
+
+/// ReLU6（`hardtanh(x, 0.0, 6.0)`）。`crate::activation_ops::relu6` への
+/// 薄いラッパー（イシュー #2146）。数値・境界勾配の契約は
+/// [`Hardtanh`]／`crate::activation_ops::hardtanh` doc を参照。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Relu6;
+
+impl Relu6 {
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::relu6(input)
+    }
+
+    /// [`Hardtanh::op`] と同じ理由のクレート内アクセサ（`min=0.0`・
+    /// `max=6.0` 固定）。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Clamp { min: 0.0, max: 6.0 }
+    }
+}
+
+/// GLU（Gated Linear Unit。軸 `dim` に沿って前後半へ分割し
+/// `a * sigmoid(b)` を返す）。`crate::activation_ops::glu` への薄い
+/// ラッパー（イシュー #2146）。PyTorch の既定 `dim=-1` と異なり、本
+/// クレートの慣例に従い負の軸番号は受け付けない（呼び出し側が明示的な
+/// 軸番号を指定する。`crate::activation_ops` モジュール doc「PyTorch
+/// との既知の差分」参照）。
+#[derive(Debug, Clone, Copy)]
+pub struct Glu {
+    dim: usize,
+}
+
+impl Glu {
+    /// `dim`（分割・ゲートを適用する軸）を指定して構築する。
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
+
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::glu(input, self.dim)
+    }
+}
+
+/// PReLU（`x > 0 ? x : weight * x`。チャネルごとの傾きを学習する唯一の
+/// 「状態を持つ活性化」。イシュー #2146）。本体（`weight` を永続保持
+/// する層パラメータ）→ `bind(&tape)` で `Var` 化した `PReluVars`
+/// という分離パターンは `RmsNorm`／`RmsNormVars`（`nn/norm.rs`）と同型
+/// （モジュール冒頭 doc・`nn/norm.rs` 冒頭 doc 参照。`Tape` はステップ
+/// ごとに生成・破棄される前提のため）。
+#[derive(Debug)]
+pub struct PRelu {
+    weight: Tensor<f32>,
+    /// 層別 `requires_grad` 凍結フラグ（`nn::Linear`／`RmsNorm` と同型。
+    /// イシュー #2137 の横展開）。既定 `true`。
+    requires_grad: bool,
+}
+
+impl PRelu {
+    /// `num_parameters` 個のチャネルを持つ `weight` を `init`（PyTorch
+    /// `nn.PReLU` 既定は `0.25`）で初期化する。`num_parameters == 0` は
+    /// `AutodiffError::InvalidArgument` で拒否する（`crate::
+    /// activation_ops::prelu` の `C >= 1` 契約と同じ理由。層構築の時点
+    /// で早期に弾く）。
+    pub fn new(num_parameters: usize, init: f32) -> Result<Self, AutodiffError> {
+        if num_parameters == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "PRelu::new: num_parameters must be at least 1".into(),
+            ));
+        }
+        let weight = Tensor::new(vec![init; num_parameters], &[num_parameters])
+            .map_err(AutodiffError::Shape)?;
+        Ok(Self {
+            weight,
+            requires_grad: true,
+        })
+    }
+
+    /// 明示的な `weight` から構築する（safetensors ロード等向けの入口。
+    /// `RmsNorm::from_parameters` と同じ位置付け）。rank 1・非空を要求
+    /// する（A03: 外部由来パラメータを計算前に検証する契約。
+    /// `.claude/rules/security.md`）。
+    pub fn from_parameters(weight: Tensor<f32>) -> Result<Self, AutodiffError> {
+        if weight.rank() != 1 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 1,
+                actual: weight.rank(),
+            }));
+        }
+        if weight.shape()[0] == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "PRelu::from_parameters: weight must have at least 1 element".into(),
+            ));
+        }
+        Ok(Self {
+            weight,
+            requires_grad: true,
+        })
+    }
+
+    /// `weight` パラメータ（shape `[num_parameters]`）。
+    pub fn weight(&self) -> &Tensor<f32> {
+        &self.weight
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`PRelu` 実装。
+    /// `module.rs` 参照）の本体。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`PRelu` 実装）の
+    /// 本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
+    }
+
+    /// [`crate::nn::module::Module::set_parameter`]（`PRelu` 実装。
+    /// `module.rs` 参照）の本体。`"weight"` のみ受理し、shape 保存置換
+    /// のみを許す（`RmsNorm::set_parameter` と同じ契約。イシュー
+    /// #1752）。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match name {
+            "weight" => {
+                if value.shape() != self.weight.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight.shape().to_vec(),
+                    }));
+                }
+                self.weight = value;
+                Ok(())
+            }
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "PRelu::set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
+    /// このステップの `tape` へ `weight` を葉ノードとして登録し、
+    /// `forward` を呼べる `PReluVars` を返す（`RmsNorm::bind` と同じ
+    /// 理由）。
+    pub fn bind<'t>(&self, tape: &'t Tape) -> PReluVars<'t> {
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
+        PReluVars { weight }
+    }
+}
+
+/// `PRelu::bind` が返す、1 ステップ分のテープに登録済みパラメータ。
+/// `weight` を公開する理由は [`crate::nn::linear::LinearVars`] と同じ
+/// （`Tape::backward` 後に `Gradients::get(&vars.weight)` で `dweight`
+/// を取得する。呼び出し側の責務）。
+pub struct PReluVars<'t> {
+    pub weight: Var<'t>,
+}
+
+impl<'t> PReluVars<'t> {
+    /// `crate::activation_ops::prelu(input, &self.weight)` への委譲。
+    pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::prelu(input, &self.weight)
     }
 }
 

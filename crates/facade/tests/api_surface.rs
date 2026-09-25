@@ -7487,3 +7487,312 @@ fn workspace_declares_matrix_ops_fn_names_only_in_autodiff_matrix_ops() {
          なのかを確認すること）: {found:?}"
     );
 }
+// =====================================================================
+// #2146（親 #2131）の facade 公開保留固定（`VarActivationOpsHoldDoctestGuard`）。
+// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリと、`compat::Sequential::add_*` 5 種の非宣言を持つ。
+// 承認事項・多層防御の位置づけは `docs/autodiff-activation-ops-decision.md`
+// §6 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarActivationOpsHoldDoctestGuard` doc
+/// 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合
+/// と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`matrix_ops_hold_doctest_globs_all_pub_modules` の
+/// `VarActivationOpsHoldDoctestGuard` 版）。
+#[test]
+fn activation_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarActivationOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarActivationOpsHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`activation_ops_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`ACTIVATION_OPS_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（`matrix_ops_hold_
+/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
+/// を骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn activation_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarActivationOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, ACTIVATION_OPS_HOLD_PROBE_BODY,
+        "VarActivationOpsHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 ACTIVATION_OPS_HOLD_PROBE_BODY からドリフト\
+         している。正のプローブ（__fandhe_activation_hold_probe\
+         モジュール・__FandheActivationHoldProbe／\
+         __FandheActivationAddProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`activation_ops_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `VarActivationOpsHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
+/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート
+/// 自体の `use fandhe_ai::*;` は本文に含む）。
+const ACTIVATION_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_activation_hold_probe {\n\
+\x20\x20\x20\x20pub mod activation_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn mish() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn hardtanh() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn relu6() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn prelu() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn glu() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_activation_hold_probe::*;\n\
+\n\
+struct __FandheActivationMarker;\n\
+\n\
+trait __FandheActivationHoldProbe {\n\
+\x20\x20\x20\x20fn mish(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn hardtanh(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn relu6(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn prelu(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn glu(&self) -> __FandheActivationMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheActivationHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+}\n\
+\n\
+impl __FandheActivationHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+}\n\
+\n\
+impl __FandheActivationHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+}\n\
+\n\
+trait __FandheActivationAddProbe {\n\
+\x20\x20\x20\x20fn add_mish(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn add_hardtanh(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn add_relu6(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn add_prelu(&self) -> __FandheActivationMarker;\n\
+\x20\x20\x20\x20fn add_glu(&self) -> __FandheActivationMarker;\n\
+}\n\
+\n\
+impl __FandheActivationAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn add_hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn add_relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn add_prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+\x20\x20\x20\x20fn add_glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `activation_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
+\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20activation_ops::mish();\n\
+\x20\x20\x20\x20activation_ops::hardtanh();\n\
+\x20\x20\x20\x20activation_ops::relu6();\n\
+\x20\x20\x20\x20activation_ops::prelu();\n\
+\x20\x20\x20\x20activation_ops::glu();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Var::mish(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = x.mish();\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Var::glu(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = x.glu();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Tensor::hardtanh(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = x.hardtanh();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Tape::prelu(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = x.prelu();\n\
+}\n\
+\n\
+fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_mish(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_hardtanh(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_relu6(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_prelu(x);\n\
+\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_glu(x);\n\
+}";
+
+/// `mish`・`hardtanh`・`relu6`・`prelu`・`glu`（5 個の関数名。イシュー
+/// #2146）。[`facade_does_not_reexport_or_declare_activation_ops`]・
+/// [`workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops`]
+/// が共用する。
+const ACTIVATION_OPS_FN_NAMES: [&str; 5] = ["mish", "hardtanh", "relu6", "prelu", "glu"];
+
+/// `add_mish`・`add_hardtanh`・`add_relu6`・`add_prelu`・`add_glu`
+/// （5 個の関数名。承認事項の 2 つ目〈`compat::Sequential::add_*`〉。
+/// [`facade_does_not_reexport_or_declare_activation_ops`] が使う）。
+const ACTIVATION_OPS_ADD_FN_NAMES: [&str; 5] = [
+    "add_mish",
+    "add_hardtanh",
+    "add_relu6",
+    "add_prelu",
+    "add_glu",
+];
+
+/// facade src 全体（`crates/facade/src/**`）に、`activation_ops` を
+/// 参照する `pub use`（`pub use fandhe_ai_autodiff::activation_ops;` 等
+/// のモジュール再エクスポート・別名含む）も、[`ACTIVATION_OPS_FN_NAMES`]
+/// （5 個）・[`ACTIVATION_OPS_ADD_FN_NAMES`]（5 個）の `fn` 宣言
+/// （可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`] と
+/// 同じ検出契約）も存在しないことを固定する
+/// （`VarActivationOpsHoldDoctestGuard` の正のプローブと多層防御を成す
+/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
+/// matrix_ops` と同型。`ACTIVATION_OPS_ADD_FN_NAMES` は `matrix_ops`
+/// 版に無い追加検査——`compat::Sequential::add_*` は既存の
+/// `add_relu`／`add_silu` 等と同型の inherent メソッド追加経路のため、
+/// ソース走査でも独立に検出する）。
+#[test]
+fn facade_does_not_reexport_or_declare_activation_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") && line_contains_identifier(trimmed, "activation_ops")
+            {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `activation_ops` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in ACTIVATION_OPS_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+        for fn_name in ACTIVATION_OPS_ADD_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が activation_ops（イシュー #2146 の内部クレート\
+         限定新規公開面。facade 公開・compat::Sequential::add_* 追加は\
+         いずれも承認待ちのため対象外という設計判断に違反）を\
+         再エクスポート、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、
+/// [`ACTIVATION_OPS_FN_NAMES`]（5 個）の `fn` 宣言の定義元集合を固定
+/// する（`workspace_declares_matrix_ops_fn_names_only_in_autodiff_
+/// matrix_ops` と同型のインベントリ）。
+///
+/// **期待集合は `crates/autodiff/src/activation_ops.rs`（各 1 件）に
+/// 加え、`crates/tensor-core/src/scalar_op.rs::relu6`（private な既存
+/// 定義。着手前確認の実測 grep で判明。実装計画「インベントリを実測
+/// する」手順）**。
+#[test]
+fn workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in ACTIVATION_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let mut expected: std::collections::BTreeMap<String, usize> = ACTIVATION_OPS_FN_NAMES
+        .iter()
+        .map(|name| (format!("autodiff/src/activation_ops.rs::{name}"), 1usize))
+        .collect();
+    expected.insert("tensor-core/src/scalar_op.rs::relu6".to_string(), 1usize);
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の activation_ops 系 `fn` 宣言\
+         集合が期待（`crates/autodiff/src/activation_ops.rs` 各 1 件・\
+         `crates/tensor-core/src/scalar_op.rs::relu6` 1 件）と一致しない\
+         （過不足いずれも fail-closed に検出する。新たな定義元が見つかった\
+         場合、それが承認済みの実装なのか迂回経路の混入なのかを確認\
+         すること）: {found:?}"
+    );
+}
