@@ -20,7 +20,6 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
 use fandhe_ai_autodiff::nn::{PixelShuffle, PixelUnshuffle};
-use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_tensor_core::Tensor;
 
 trait VarSource {
@@ -192,7 +191,7 @@ fn metal_pixel_shuffle_forward_matches_cpu() {
     let metal_out = pixel_shuffle_forward_on(Device::Metal);
     let cpu_out = pixel_shuffle_forward_on(Device::Cpu);
 
-    assert_parity(
+    assert_bits_eq(
         "PixelShuffle forward: Metal tape_for vs CPU tape_for",
         &contiguous_slice(&metal_out),
         &contiguous_slice(&cpu_out),
@@ -209,7 +208,7 @@ fn cuda_pixel_shuffle_forward_matches_cpu() {
     let cuda_out = pixel_shuffle_forward_on(Device::Cuda(0));
     let cpu_out = pixel_shuffle_forward_on(Device::Cpu);
 
-    assert_parity(
+    assert_bits_eq(
         "PixelShuffle forward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
@@ -234,7 +233,7 @@ fn metal_pixel_unshuffle_forward_matches_cpu() {
     let metal_out = pixel_unshuffle_forward_on(Device::Metal);
     let cpu_out = pixel_unshuffle_forward_on(Device::Cpu);
 
-    assert_parity(
+    assert_bits_eq(
         "PixelUnshuffle forward: Metal tape_for vs CPU tape_for",
         &contiguous_slice(&metal_out),
         &contiguous_slice(&cpu_out),
@@ -251,7 +250,7 @@ fn cuda_pixel_unshuffle_forward_matches_cpu() {
     let cuda_out = pixel_unshuffle_forward_on(Device::Cuda(0));
     let cpu_out = pixel_unshuffle_forward_on(Device::Cpu);
 
-    assert_parity(
+    assert_bits_eq(
         "PixelUnshuffle forward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
