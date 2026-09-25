@@ -16,7 +16,8 @@ use fandhe_ai_autodiff::AutodiffError;
 use fandhe_ai_autodiff::nn::activation::Relu;
 use fandhe_ai_autodiff::nn::{
     FeedForwardActivation, LAYER_NORM_DEFAULT_EPS, Linear, Module, ModuleDict, ModuleList,
-    MultiheadAttention, Rnn, Sequential, TransformerEncoderLayer, summary,
+    MultiheadAttention, Rnn, Sequential, Transformer, TransformerConfig, TransformerDecoderLayer,
+    TransformerEncoderLayer, summary,
 };
 use fandhe_ai_tensor_core::Tensor;
 
@@ -156,6 +157,91 @@ fn transformer_encoder_layer_children_match_named_parameters_prefixes() {
         child_names,
         vec!["self_attn", "linear1", "linear2", "norm1", "norm2"]
     );
+}
+
+/// イシュー #2165（親 #2131・#2068 の対）: `TransformerDecoderLayer`
+/// の `children` 名・順序が `named_parameters` の接頭辞契約と一致する
+/// ことを固定する（`transformer_encoder_layer_children_match_named_parameters_prefixes`
+/// の decoder 版）。
+#[test]
+fn transformer_decoder_layer_children_match_named_parameters_prefixes() {
+    let layer = TransformerDecoderLayer::new(
+        4,
+        2,
+        8,
+        FeedForwardActivation::Relu,
+        LAYER_NORM_DEFAULT_EPS,
+        7,
+    )
+    .unwrap();
+    assert_children_names_match_named_parameters_prefixes(&layer);
+    let child_names: Vec<String> = layer.children().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        child_names,
+        vec![
+            "self_attn",
+            "multihead_attn",
+            "linear1",
+            "linear2",
+            "norm1",
+            "norm2",
+            "norm3",
+        ]
+    );
+}
+
+/// イシュー #2165: `Transformer` の `children` 名・順序（`encoder.layers.{i}`
+/// → `encoder.norm` → `decoder.layers.{i}` → `decoder.norm`）が
+/// `named_parameters` の接頭辞契約と一致することを固定する
+/// （dotted な子名でも `assert_children_names_match_named_parameters_prefixes`
+/// のパス連結が正しく機能することの回帰）。
+#[test]
+fn transformer_children_match_named_parameters_prefixes() {
+    let config = TransformerConfig::new(4, 2)
+        .with_num_encoder_layers(2)
+        .with_num_decoder_layers(2)
+        .with_dim_feedforward(8);
+    let model = Transformer::new(&config, 7).unwrap();
+    assert_children_names_match_named_parameters_prefixes(&model);
+    let child_names: Vec<String> = model.children().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        child_names,
+        vec![
+            "encoder.layers.0",
+            "encoder.layers.1",
+            "encoder.norm",
+            "decoder.layers.0",
+            "decoder.layers.1",
+            "decoder.norm",
+        ]
+    );
+}
+
+/// イシュー #2165: `Transformer::named_modules` が `encoder.layers.0.self_attn.q_proj`
+/// のような 3 段以上のネストでも二重ドット（先頭フィールドの
+/// offset-0 誤判定連鎖）を起こさず全孫を列挙することを固定する
+/// （`named_modules_does_not_drop_nested_offset_zero_descendants` の
+/// より深いネスト版）。
+#[test]
+fn transformer_named_modules_does_not_drop_deeply_nested_descendants() {
+    let config = TransformerConfig::new(4, 2)
+        .with_num_encoder_layers(1)
+        .with_num_decoder_layers(1)
+        .with_dim_feedforward(8);
+    let model = Transformer::new(&config, 7).unwrap();
+    let names: Vec<String> = model
+        .named_modules()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(names.contains(&"encoder.layers.0".to_string()));
+    assert!(names.contains(&"encoder.layers.0.self_attn".to_string()));
+    assert!(names.contains(&"encoder.layers.0.self_attn.q_proj".to_string()));
+    assert!(names.contains(&"decoder.layers.0.multihead_attn".to_string()));
+    assert!(names.contains(&"decoder.layers.0.multihead_attn.out_proj".to_string()));
+    assert!(names.contains(&"decoder.norm".to_string()));
+    // 二重ドットが生じていないことも直接確認する。
+    assert!(names.iter().all(|n| !n.contains("..")));
 }
 
 #[test]
@@ -530,6 +616,51 @@ fn named_modules_does_not_drop_nested_offset_zero_descendants() {
             "linear2",
             "norm1",
             "norm2",
+        ]
+    );
+}
+
+/// イシュー #2165: `TransformerDecoderLayer` は `self_attn`／
+/// `multihead_attn` の 2 個の `MultiheadAttention` を先頭寄りの
+/// フィールドに持つため、`TransformerEncoderLayer` 版
+/// （[`named_modules_does_not_drop_nested_offset_zero_descendants`]）
+/// より offset-0 誤判定の連鎖が起きやすい構成で、直接子（7 件）＋
+/// `self_attn`／`multihead_attn` それぞれの孫（4 件 * 2）の計 15 件が
+/// 欠落なく列挙されることを固定する。
+#[test]
+fn transformer_decoder_layer_named_modules_does_not_drop_nested_offset_zero_descendants() {
+    let layer = TransformerDecoderLayer::new(
+        4,
+        2,
+        8,
+        FeedForwardActivation::Relu,
+        LAYER_NORM_DEFAULT_EPS,
+        7,
+    )
+    .unwrap();
+    let names: Vec<String> = layer
+        .named_modules()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "self_attn",
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.out_proj",
+            "multihead_attn",
+            "multihead_attn.q_proj",
+            "multihead_attn.k_proj",
+            "multihead_attn.v_proj",
+            "multihead_attn.out_proj",
+            "linear1",
+            "linear2",
+            "norm1",
+            "norm2",
+            "norm3",
         ]
     );
 }

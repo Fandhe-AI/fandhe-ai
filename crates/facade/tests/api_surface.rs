@@ -11221,3 +11221,151 @@ fn __probe(\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Gru::with_config(gru);\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = gru.with_config();\n\
 }";
+
+// =====================================================================
+// イシュー #2165（親 #2131・#2068 の対）: TransformerDecoderLayer・
+// Transformer の facade 公開保留を検査するテスト群。
+// `TransformerDecoderHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、`compat::Sequential::
+// add_transformer_decoder_layer`／`add_transformer` の非宣言を持つ
+// （`mha_options_hold_doctest_*` と同型）。承認事項の位置づけは
+// `docs/autodiff-transformer-decoder-decision.md` 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `TransformerDecoderHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`mha_options_hold_doctest_globs_all_pub_modules` の
+/// `TransformerDecoderHoldDoctestGuard` 版）。
+#[test]
+fn transformer_decoder_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "TransformerDecoderHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "TransformerDecoderHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも\
+         追加すること。"
+    );
+}
+
+/// [`transformer_decoder_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの**glob 以外の本文**が固定文言
+/// [`TRANSFORMER_DECODER_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
+/// することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
+/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
+/// 拒否する）。
+#[test]
+fn transformer_decoder_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "TransformerDecoderHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, TRANSFORMER_DECODER_HOLD_PROBE_BODY,
+        "TransformerDecoderHoldDoctestGuard の doctest ブロック本文\
+         （glob 以外）が固定文言 TRANSFORMER_DECODER_HOLD_PROBE_BODY から\
+         ドリフトしている。正のプローブ（\
+         __fandhe_transformer_decoder_hold_probe モジュール・\
+         __FandheTransformerDecoderAddProbe トレイト・__probe 関数）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`transformer_decoder_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `TransformerDecoderHoldDoctestGuard` doc 内の唯一の doctest
+/// ブロックから、ネスト `pub mod` の glob import 行を除いた本文と
+/// 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const TRANSFORMER_DECODER_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_transformer_decoder_hold_probe {\n\
+\x20\x20\x20\x20pub struct TransformerDecoderLayer;\n\
+\x20\x20\x20\x20pub struct Transformer;\n\
+}\n\
+use __fandhe_transformer_decoder_hold_probe::*;\n\
+\n\
+struct __FandheTransformerDecoderMarker;\n\
+\n\
+trait __FandheTransformerDecoderAddProbe {\n\
+\x20\x20\x20\x20fn add_transformer_decoder_layer(&self) -> __FandheTransformerDecoderMarker;\n\
+\x20\x20\x20\x20fn add_transformer(&self) -> __FandheTransformerDecoderMarker;\n\
+}\n\
+\n\
+impl __FandheTransformerDecoderAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_transformer_decoder_layer(&self) -> __FandheTransformerDecoderMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheTransformerDecoderMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_transformer(&self) -> __FandheTransformerDecoderMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheTransformerDecoderMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(_: TransformerDecoderLayer, _: Transformer, seq: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheTransformerDecoderMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::add_transformer_decoder_layer(seq);\n\
+\x20\x20\x20\x20let _: __FandheTransformerDecoderMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::add_transformer(seq);\n\
+}";
+
+/// `src/compat` 配下に `add_transformer_decoder_layer`／
+/// `add_transformer` の `pub fn` 宣言が存在しないことを固定する
+/// （イシュー #2165。`compat_sequential_does_not_expose_mha_options_add_methods`
+/// と同型。`docs/autodiff-transformer-decoder-decision.md` §承認事項が
+/// 未承認のまま対象外としている設計判断の固定）。`contains_pub_fn_declaration`
+/// は識別子境界で判定するため、既存の `add_transformer_encoder`
+/// （#2068 で実装済み）を `add_transformer` の誤検出として拾わない
+/// （直後の自己テストで確認する）。
+#[test]
+fn compat_sequential_does_not_expose_transformer_decoder_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = ["add_transformer_decoder_layer", "add_transformer"];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for name in forbidden {
+            if contains_pub_fn_declaration(content, name) {
+                offenses.push(format!("{}: pub fn {name}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に TransformerDecoderLayer／Transformer の\
+         add_* が見つかった（承認スコープ〈#2165〉は Sequential への\
+         追加を認めていない）: {offenses:?}"
+    );
+}
+
+/// [`compat_sequential_does_not_expose_transformer_decoder_add_methods`]
+/// の自己テスト（合成入力で検出できることを確認する）。既存の
+/// `add_transformer_encoder`（#2068 で実装済み）を `add_transformer`
+/// の誤検出として拾わないことも確認する（`contains_pub_fn_declaration`
+/// の識別子境界判定・実装計画 §3「注記」参照）。
+#[test]
+fn compat_sequential_does_not_expose_transformer_decoder_add_methods_detects_offense() {
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_transformer_decoder_layer(&mut self, d_model: usize) {}",
+        "add_transformer_decoder_layer"
+    ));
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_transformer(&mut self, d_model: usize) {}",
+        "add_transformer"
+    ));
+    assert!(!contains_pub_fn_declaration(
+        "pub fn add_transformer_encoder(&mut self, d_model: usize) {}",
+        "add_transformer"
+    ));
+}

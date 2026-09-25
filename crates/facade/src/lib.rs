@@ -3779,3 +3779,85 @@ struct RnnConfigHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct PixelShuffleHoldDoctestGuard;
+
+/// イシュー #2165（親 #2131・#2068 の対）の facade 公開保留を固定する
+/// doctest 足場。`MhaOptionsHoldDoctestGuard`（#2163）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_transformer_decoder_hold_probe::{TransformerDecoderLayer,
+/// Transformer}` を導入する。facade がどの経路（単一行・複数行・
+/// ネストした group での `pub use`・別名エクスポート）でこれらの名前を
+/// 公開しても、ローカル定義との glob 衝突（E0659）でコンパイルが
+/// 失敗する。
+///
+/// `compat::Sequential::add_transformer_decoder_layer`／
+/// `add_transformer` の衝突プローブ
+/// （`__FandheTransformerDecoderAddProbe` トレイト・
+/// `MhaOptionsHoldDoctestGuard` の `__FandheMhaOptionsAddProbe` と
+/// 同方式）も同じブロックで併せて保留固定する。**UFCS 形のみ**
+/// （`fandhe_ai::compat::Sequential::add_transformer_decoder_layer(seq)`）
+/// で呼ぶ（`compat::Sequential::add_*` の既存メソッドは値で `self` を
+/// 取る inherent メソッドのため、メソッド呼び出し形だと inherent 側が
+/// 優先解決され衝突を検出できない——`MhaOptionsHoldDoctestGuard` doc
+/// の同一理由）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// transformer_decoder_hold_doctest_globs_all_pub_modules`・
+/// `transformer_decoder_hold_doctest_probe_body_matches_fixed_contract`・
+/// `compat_sequential_does_not_expose_transformer_decoder_add_methods`）
+/// との多層防御の位置づけは `docs/autodiff-transformer-decoder-
+/// decision.md` §承認事項を参照。
+///
+/// 承認（`compat::Sequential::add_transformer_decoder_layer`／
+/// `add_transformer` の追加・`TransformerDecoderLayer`／`Transformer`
+/// の facade 再エクスポート）を得た日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードと同時に
+/// 外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_transformer_decoder_hold_probe {
+///     pub struct TransformerDecoderLayer;
+///     pub struct Transformer;
+/// }
+/// use __fandhe_transformer_decoder_hold_probe::*;
+///
+/// struct __FandheTransformerDecoderMarker;
+///
+/// trait __FandheTransformerDecoderAddProbe {
+///     fn add_transformer_decoder_layer(&self) -> __FandheTransformerDecoderMarker;
+///     fn add_transformer(&self) -> __FandheTransformerDecoderMarker;
+/// }
+///
+/// impl __FandheTransformerDecoderAddProbe for fandhe_ai::compat::Sequential {
+///     fn add_transformer_decoder_layer(&self) -> __FandheTransformerDecoderMarker {
+///         __FandheTransformerDecoderMarker
+///     }
+///     fn add_transformer(&self) -> __FandheTransformerDecoderMarker {
+///         __FandheTransformerDecoderMarker
+///     }
+/// }
+///
+/// fn __probe(_: TransformerDecoderLayer, _: Transformer, seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheTransformerDecoderMarker =
+///         fandhe_ai::compat::Sequential::add_transformer_decoder_layer(seq);
+///     let _: __FandheTransformerDecoderMarker =
+///         fandhe_ai::compat::Sequential::add_transformer(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct TransformerDecoderHoldDoctestGuard;

@@ -45,6 +45,8 @@ use crate::nn::pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
+use crate::nn::transformer::Transformer;
+use crate::nn::transformer_decoder_layer::TransformerDecoderLayer;
 use crate::nn::transformer_encoder_layer::TransformerEncoderLayer;
 use crate::nn::unflatten::Unflatten;
 use crate::nn::upsample::Upsample;
@@ -417,6 +419,38 @@ pub trait Module {
 
     /// [`Module::as_transformer_encoder_layer`] の可変版。
     fn as_transformer_encoder_layer_mut(&mut self) -> Option<&mut TransformerEncoderLayer> {
+        None
+    }
+
+    /// [`Module::as_transformer_encoder_layer`] と同型の明示フック
+    /// （イシュー #2165・親 #2131・#2068 の対）。`TransformerDecoderLayer`
+    /// 層向け（self-attention → cross-attention → FFN の合成。
+    /// `nn/transformer_decoder_layer.rs` モジュール doc 参照）。
+    /// `compat::Sequential` の学習経路が本層を認識するために使う。
+    /// facade 結線（`compat::Sequential::add_transformer_decoder_layer`）
+    /// 自体は承認待ちのため未実装（`crates/facade/src/lib.rs` の
+    /// `TransformerDecoderHoldDoctestGuard` 参照）。既定 `None`。
+    fn as_transformer_decoder_layer(&self) -> Option<&TransformerDecoderLayer> {
+        None
+    }
+
+    /// [`Module::as_transformer_decoder_layer`] の可変版。
+    fn as_transformer_decoder_layer_mut(&mut self) -> Option<&mut TransformerDecoderLayer> {
+        None
+    }
+
+    /// [`Module::as_transformer_encoder_layer`] と同型の明示フック
+    /// （イシュー #2165・親 #2131）。`Transformer`（encoder スタック＋
+    /// decoder スタック＋各終端 LayerNorm の合成。`nn/transformer.rs`
+    /// モジュール doc 参照）向け。facade 結線（`compat::Sequential::
+    /// add_transformer`）自体は承認待ちのため未実装（
+    /// `TransformerDecoderHoldDoctestGuard` 参照）。既定 `None`。
+    fn as_transformer(&self) -> Option<&Transformer> {
+        None
+    }
+
+    /// [`Module::as_transformer`] の可変版。
+    fn as_transformer_mut(&mut self) -> Option<&mut Transformer> {
         None
     }
 
