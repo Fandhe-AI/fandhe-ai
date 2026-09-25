@@ -2,10 +2,10 @@
 
 ## Overview
 
-Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/fandhe-ai-spec](https://github.com/Fandhe-AI/fandhe-ai-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。本リポジトリ自体は **public**（#457 Phase 1〜3 完了）で、CI は GitHub ホステッド `ubuntu-latest` 既定へ移行済み（self-hosted への逆戻りは `runner-policy` ジョブ〈#472〉が fail-closed で検知。詳細 → `.claude/rules/ci.md`）。仕様 submodule（`docs/spec`）と旧実装（v1）は private を維持する（README「位置づけ」節）。
+Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/fandhe-ai-spec](https://github.com/Fandhe-AI/fandhe-ai-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。本リポジトリ自体は **public** で、CI は GitHub ホステッド `ubuntu-latest` が既定（self-hosted の再導入は `runner-policy` ジョブが fail-closed で検知する。詳細 → `.claude/rules/ci.md`）。仕様 submodule（`docs/spec`）と旧実装（v1）は private を維持する（README「位置づけ」節）。
 
-- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（TASK-9.3・イシュー #410 で新設した composition root。TASK-9.4・イシュー #411 で `autodiff::compat` から compat 公開面〈`compat::array`・`compat::Sequential`〉を移設済み）に加え、GitHub Pages 公開ツリー（#865 Phase 1）向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`。イシュー #868/#869）。**`facade` が唯一のサポートされる公開 API 面**であり `tensor-core`・`autodiff`・`backend-*` は内部クレート（範囲の正は `docs/compat-api-scope.md` §0）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない
-- crates.io 公開済みは 6 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`）で、`[package] name` は `fandhe-ai` prefix 付きの公開名（`docs/crates-io-naming-decision.md`）。`onnx-interop` は #1963 のユーザー承認（2026-09-17）を受けた 7 クレート目で、公開準備は完了済み・実 publish は次回リリースサイクル。`guardrail`・`self-repair`・`bench-harness`・`docs-site` は非公開。facade からの ONNX import／export・safetensors save／load の公開範囲は `docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-safetensors-exposure-decision.md` を正とする
+- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root。compat 公開面〈`compat::array`・`compat::Sequential`〉を持つ）に加え、GitHub Pages 公開ツリー向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`）。**`facade` が唯一のサポートされる公開 API 面**であり `tensor-core`・`autodiff`・`backend-*` は内部クレート（範囲の正は `docs/compat-api-scope.md` §0）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない
+- crates.io 公開済みは 6 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`）で、`[package] name` は `fandhe-ai` prefix 付きの公開名（`docs/crates-io-naming-decision.md`）。`onnx-interop` は公開承認済みの 7 クレート目で、公開準備は完了済み・実 publish は次回リリースサイクル。`guardrail`・`self-repair`・`bench-harness`・`docs-site` は非公開。facade からの ONNX import／export・safetensors save／load の公開範囲は `docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-safetensors-exposure-decision.md` を正とする
 - crates.io への公開は一括リリース `.github/workflows/release-all.yml`（workflow_dispatch 1 回・environment `crates-io-release` 承認 1 回で公開クレートを依存順に publish）を基本とし、単一クレートの再実行・障害復旧には `.github/workflows/release.yml` を使う（いずれも `CARGO_REGISTRY_TOKEN`〈org secret〉・fail-closed ガード群）。手順・版数運用・公開履歴（v0.3.0〜v0.9.0）の正は `docs/crates-io-publishing-order.md` §9〜11・`.claude/rules/ci.md`
 - 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
@@ -17,7 +17,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を�
 fandhe-ai/
 ├── CLAUDE.md                # 本ファイル
 ├── README.md                # 開発環境構築・実装方針の要点
-├── LICENSE-APACHE           # Apache License 2.0 全文（MIT/Apache-2.0 デュアルライセンス。#462）
+├── LICENSE-APACHE           # Apache License 2.0 全文（MIT/Apache-2.0 デュアルライセンス）
 ├── LICENSE-MIT              # MIT ライセンス本文（同上）
 ├── Makefile                 # make setup / ci / docker-* タスクランナー
 ├── lefthook.yml             # git hooks（rustfmt-check・secrets-guard・commit-msg・pre-push）
@@ -26,37 +26,37 @@ fandhe-ai/
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）
 ├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉・許容依存 8 区分を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
-├── rust-toolchain.toml       # toolchain 単一真実源（stable + rustfmt/clippy。rust-base-ci 前提。#325）
-├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans〈#353〉）
-├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c・#117。default プリセット）
+├── rust-toolchain.toml       # toolchain 単一真実源（stable + rustfmt/clippy。rust-base-ci 前提）
+├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans）
+├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c。default プリセット）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
 │                             # onnx-interop・guardrail・self-repair・bench-harness・facade（composition root・compat 公開面）・
-│                             # docs-site（GitHub Pages 公開ツリー向け SSG。開発者・CI 専用。#868/#869）
+│                             # docs-site（GitHub Pages 公開ツリー向け SSG。開発者・CI 専用）
 ├── scripts/
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
-│   ├── check-workflow-runner-policy.sh # self-hosted runner 逆戻り防止の fail-closed 契約検査の呼び出し面（ci.yml・Makefile 共用。#472）
-│   ├── check-workflow-runner-policy.py # 同検査の本体（python3 標準ライブラリのみの自前 YAML サブセットパーサー方式。追加依存なしで表記トリック迂回を遮断。#472・PR #626）
+│   ├── check-workflow-runner-policy.sh # self-hosted runner 逆戻り防止の fail-closed 契約検査の呼び出し面（ci.yml・Makefile 共用）
+│   ├── check-workflow-runner-policy.py # 同検査の本体（python3 標準ライブラリのみの自前 YAML サブセットパーサー方式。追加依存なしで表記トリック迂回を遮断）
 │   ├── run-verification-gates.sh # AI 自律メンテナンス検証 4 ゲート（build/test/clippy/bench）の実行ロジック（ci.yml・Makefile 共用。TASK-6.1c）
 │   ├── run-guardrail-regression.sh # guardrail 2 層検証ロジック（ci.yml・schedule 共用。TASK-6.1a）
 │   ├── report-guardrail-schedule-result.sh # schedule 定期実行失敗時の Issue 起票・復旧クローズ（TASK-6.1b）
-│   ├── report-clippy-nocache-schedule-result.sh # キャッシュなしフルビルド clippy 定期検証の失敗時 Issue 起票・復旧クローズ（イシュー #918）
+│   ├── report-clippy-nocache-schedule-result.sh # キャッシュなしフルビルド clippy 定期検証の失敗時 Issue 起票・復旧クローズ
 │   ├── testdata/             # 上記の self-test 用固定 fixture
 │   └── bench/
-│       ├── oss-gemm-compare/ # CPU GEMM OSS 直接比較ハーネス（本体 workspace 外の独立 Cargo パッケージ。matrixmultiply・gemm crate。イシュー #755）
+│       ├── oss-gemm-compare/ # CPU GEMM OSS 直接比較ハーネス（本体 workspace 外の独立 Cargo パッケージ。matrixmultiply・gemm crate）
 │       ├── gemm_bench_torch_mps_f16.py／gemm_bench_torch_mps_f32.py # PyTorch MPS 参照計測
-│       ├── gemm_bench_torch_cpu_f32.py # PyTorch CPU f32 GEMM 参照計測（イシュー #1141）
-│       ├── gemm_bench_mlx_f32.py # MLX f32 GEMM 計測（イシュー #755）
-│       └── framework-compare/parity_torch_truth.py # PyTorch GEMM の parity fail 要素を厳密真値と突合する診断専用ツール（#1184 の `parity_dump_truth.py` 同型。`bench_py.py` と同じ入力・参照・複合判定を再現し c／線形 K・√K 形の救済表を出力。`--self-test` は torch 不在で torch 経路 skip。イシュー #1985）
+│       ├── gemm_bench_torch_cpu_f32.py # PyTorch CPU f32 GEMM 参照計測
+│       ├── gemm_bench_mlx_f32.py # MLX f32 GEMM 計測
+│       └── framework-compare/parity_torch_truth.py # PyTorch GEMM の parity fail 要素を厳密真値と突合する診断専用ツール（`parity_dump_truth.py` 同型。`bench_py.py` と同じ入力・参照・複合判定を再現し c／線形 K・√K 形の救済表を出力。`--self-test` は torch 不在で torch 経路 skip）
 ├── .github/workflows/
-│   ├── ci.yml               # rust-ci（Fandhe-AI/actions rust-base-ci 呼び出し: fmt / clippy / test / deny。#325）+ 固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / runner-policy / guardrail-regression / verification-gates）+ ci-complete
-│   ├── ai-review.yml        # ai-review（provider: codex）による PR 自動レビュー wrapper（Fandhe-AI/actions ai-review を `@latest` 呼び出し。#326。旧 codex-review.yml から移行。public 構成〈post-feedback-runner: ubuntu-latest〉へ切替済み。#469）
+│   ├── ci.yml               # rust-ci（Fandhe-AI/actions rust-base-ci 呼び出し: fmt / clippy / test / deny）+ 固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / runner-policy / guardrail-regression / verification-gates）+ ci-complete
+│   ├── ai-review.yml        # ai-review（provider: codex）による PR 自動レビュー wrapper（Fandhe-AI/actions ai-review を `@latest` 呼び出し。`post-feedback-runner: ubuntu-latest`）
 │   ├── verification-gate-bench.yml # bench ゲート（schedule／workflow_dispatch。TASK-6.1c）
 │   ├── guardrail-regression-schedule.yml # guardrail 2 層検証の schedule 定期実行・失敗時 Issue 可視化（TASK-6.1b）
-│   ├── clippy-nocache-schedule.yml # キャッシュなしフルビルド clippy の定期検証・失敗時 Issue 可視化（イシュー #918）
-│   ├── release.yml          # crates.io publish（workflow_dispatch + `CARGO_REGISTRY_TOKEN`・environment `crates-io-release` 承認ゲート。#884。手順は `docs/crates-io-publishing-order.md` §9〜11・`.claude/rules/ci.md` release.yml 節）
+│   ├── clippy-nocache-schedule.yml # キャッシュなしフルビルド clippy の定期検証・失敗時 Issue 可視化
+│   ├── release.yml          # crates.io publish（workflow_dispatch + `CARGO_REGISTRY_TOKEN`・environment `crates-io-release` 承認ゲート。手順は `docs/crates-io-publishing-order.md` §9〜11・`.claude/rules/ci.md` release.yml 節）
 │   ├── update-external.yml  # docs/spec・.claude/skills の自動追従
 │   └── docs-site.yml        # GitHub Pages ビルド・デプロイ（Fandhe-AI/actions `pages-deploy.yml` 呼び出し）
-├── site/                    # GitHub Pages 公開原稿（`nav.toml` + Markdown。#873/#874/#875。`docs/spec` の内容は含めない）
+├── site/                    # GitHub Pages 公開原稿（`nav.toml` + Markdown。`docs/spec` の内容は含めない）
 ├── .claude/
 │   ├── agents/              # research / implement / testing / quality / docs
 │   ├── rules/               # 委譲・コーディング・依存・CI・セキュリティ等の規約
@@ -65,7 +65,7 @@ fandhe-ai/
 │   └── settings.json        # SessionStart / PostToolUse hooks
 └── docs/
     ├── README.md            # docs/ 配下（設計判断記録・perf 実測記録・perf/logs 実測ログ）の注釈付き索引。doc の新設・追記に伴う索引更新は本ファイルに対して行い CLAUDE.md には書かない（CLAUDE.md から逐語移設）
-    ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化ツリー #479 の実測記録を含む。個々の doc の索引は `docs/README.md`）
+    ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化の実測記録を含む。個々の doc の索引は `docs/README.md`）
     └── spec/                # 正本 submodule（fandhe-ai-spec。編集禁止）
         ├── 04-requirements.md  # REQ-1〜14
         ├── 05-tasks.md         # TASK 一覧（4h 粒度）
