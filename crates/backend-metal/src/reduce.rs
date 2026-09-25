@@ -1,5 +1,6 @@
 //! f32 `sum` reduction（全要素・単一軸。`torch.sum` 相当。イシュー
-//! #1895・親イシュー #1894）の起動 API（実行時コンパイル・パイプライン
+//! #1895・親イシュー #1894）に加え、argmax／argmin（イシュー #1951）・
+//! `min`（イシュー #2155）の起動 API（実行時コンパイル・パイプライン
 //! 保持・実行）。
 //!
 //! `crate::scan::MetalScan` と同じ構成方針を踏襲する:
@@ -67,9 +68,10 @@ fn map_prepare_error(err: ReducePrepareError) -> MetalError {
 /// （`crate::reduce_model::ArgExtKind` と同じ値）。
 pub use crate::reduce_model::ArgExtKind;
 
-/// f32 `sum` reduction 3 カーネル（全要素 2 段・単一軸 1 段）に加え、
+/// f32 `sum` reduction 3 カーネル（全要素 2 段・単一軸 1 段）・
 /// argmax／argmin 3 カーネル（全要素 2 段・単一軸 1 段。イシュー
-/// #1951）のコンパイル済みパイプラインを保持するハンドル。
+/// #1951）に加え、`min` 3 カーネル（全要素 2 段・単一軸 1 段。
+/// イシュー #2155）のコンパイル済みパイプラインを保持するハンドル。
 pub struct MetalReduce {
     sum_all_chunk_f32: objc2::rc::Retained<MtlPipeline>,
     sum_all_finalize_f32: objc2::rc::Retained<MtlPipeline>,
@@ -77,6 +79,9 @@ pub struct MetalReduce {
     arg_all_chunk_f32: objc2::rc::Retained<MtlPipeline>,
     arg_all_finalize_f32: objc2::rc::Retained<MtlPipeline>,
     arg_axis_f32: objc2::rc::Retained<MtlPipeline>,
+    min_all_chunk_f32: objc2::rc::Retained<MtlPipeline>,
+    min_all_finalize_f32: objc2::rc::Retained<MtlPipeline>,
+    min_axis_f32: objc2::rc::Retained<MtlPipeline>,
 }
 
 impl MetalReduce {
@@ -102,6 +107,11 @@ impl MetalReduce {
         let arg_all_finalize_f32 =
             pipeline::make_pipeline(ctx.device(), &library, "reduce_arg_all_finalize_f32")?;
         let arg_axis_f32 = pipeline::make_pipeline(ctx.device(), &library, "reduce_arg_axis_f32")?;
+        let min_all_chunk_f32 =
+            pipeline::make_pipeline(ctx.device(), &library, "reduce_min_all_chunk_f32")?;
+        let min_all_finalize_f32 =
+            pipeline::make_pipeline(ctx.device(), &library, "reduce_min_all_finalize_f32")?;
+        let min_axis_f32 = pipeline::make_pipeline(ctx.device(), &library, "reduce_min_axis_f32")?;
 
         Ok(Self {
             sum_all_chunk_f32,
@@ -110,6 +120,9 @@ impl MetalReduce {
             arg_all_chunk_f32,
             arg_all_finalize_f32,
             arg_axis_f32,
+            min_all_chunk_f32,
+            min_all_finalize_f32,
+            min_axis_f32,
         })
     }
 
@@ -424,6 +437,142 @@ impl MetalReduce {
         })?;
 
         Ok(out_buf.read_to_vec_i32())
+    }
+
+    /// `torch.min(x)`（全要素・単一スカラー出力。イシュー #2155）相当。
+    /// 呼び出し元（`ops.rs::MetalBackendOps::min`）が `numel == 0` を
+    /// GPU 起動なしで別処理する契約のため、`run_arg_all_f32` と同じく
+    /// `x` が非空であることを前提とする。
+    ///
+    /// `sum`／argmax・argmin と同じ理由で `dispatch_sync` の単一
+    /// クロージャ内に 2 段をエンコードする。`partial` バッファは `sum`
+    /// と同じ `ulong`（`MetalIndexBuffer::new_zeroed_u64`）型のため、
+    /// `encode_sum_all_chunk_dispatch`／`encode_sum_all_finalize_dispatch`
+    /// をパイプラインだけ差し替えてそのまま流用する（`shaders/
+    /// reduce.metal` 冒頭コメント「min（イシュー #2155）」・実装計画
+    /// §3.1 参照。新規 unsafe を追加しない）。
+    pub fn run_min_all_f32(&self, ctx: &MetalContext, x: &[f32]) -> Result<f32, MetalError> {
+        let plan = reduce_model::plan_reduce_all(x.len()).map_err(map_prepare_error)?;
+        let numel_u = u32::try_from(plan.numel).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_min_all_f32: numel={} exceeds u32 range (kernel argument type)",
+                plan.numel
+            ),
+        })?;
+        let num_chunks_u =
+            u32::try_from(plan.num_chunks).map_err(|_| MetalError::InvalidReduceShape {
+                detail: format!(
+                    "run_min_all_f32: num_chunks={} exceeds u32 range (kernel argument type)",
+                    plan.num_chunks
+                ),
+            })?;
+
+        let x_buf = MetalBuffer::new_with_data(ctx, x)?;
+        let partial_buf = MetalIndexBuffer::new_zeroed_u64(ctx, plan.num_chunks)?;
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, 1)?;
+
+        ctx.dispatch_sync(|encoder| {
+            encode_sum_all_chunk_dispatch(
+                encoder,
+                &self.min_all_chunk_f32,
+                &x_buf,
+                &partial_buf,
+                numel_u,
+                num_chunks_u,
+            );
+            encode_sum_all_finalize_dispatch(
+                encoder,
+                &self.min_all_finalize_f32,
+                &partial_buf,
+                &out_buf,
+                num_chunks_u,
+            );
+        })?;
+
+        // `reduce_min_all_finalize_f32` は `gid == 0` のスレッドが必ず
+        // `out[0]` を書く（`x` が非空である本関数の前提のもと、
+        // `plan.num_chunks >= 1` が成立するため。`shaders/reduce.metal`
+        // 参照）ため `unwrap_or` の既定値は構造的に到達しない。
+        Ok(out_buf
+            .read_to_vec()
+            .first()
+            .copied()
+            .unwrap_or(f32::INFINITY))
+    }
+
+    /// `torch.min(x, dim=dim).values` 相当（イシュー #2155）。`x` は
+    /// `outer * axis_len * inner` 要素の稠密（contiguous）スライス。
+    /// 呼び出し元が `lanes == 0`・`axis_len == 0` を事前に処理する契約
+    /// （`run_arg_axis_f32` と同じ理由。`sum` の単位元 `0.0` に相当する
+    /// 値は存在するが `ops.rs::MetalBackendOps::min` は sum とは異なり
+    /// 空縮約を独自の `KernelLaunchFailed` へ写像するため、本関数自体は
+    /// 空縮約を扱わない）。`out_buf` は `x_buf` と同じ `MetalBuffer`
+    /// （f32）のため `encode_sum_axis_dispatch` をパイプラインだけ
+    /// 差し替えて流用する。
+    pub fn run_min_axis_f32(
+        &self,
+        ctx: &MetalContext,
+        x: &[f32],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        let lanes = outer
+            .checked_mul(inner)
+            .ok_or_else(|| MetalError::InvalidReduceShape {
+                detail: "run_min_axis_f32: outer * inner overflowed usize".to_string(),
+            })?;
+        let numel = lanes
+            .checked_mul(axis_len)
+            .ok_or_else(|| MetalError::InvalidReduceShape {
+                detail: "run_min_axis_f32: lanes * axis_len overflowed usize".to_string(),
+            })?;
+        if x.len() != numel {
+            return Err(MetalError::InvalidReduceShape {
+                detail: format!(
+                    "run_min_axis_f32: x.len()={} does not match numel={numel}",
+                    x.len()
+                ),
+            });
+        }
+        if lanes == 0 || axis_len == 0 {
+            return Err(MetalError::InvalidReduceShape {
+                detail: "run_min_axis_f32: lanes==0 or axis_len==0 must be handled by the caller"
+                    .to_string(),
+            });
+        }
+        let lanes_u = u32::try_from(lanes).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_min_axis_f32: lanes={lanes} exceeds u32 range (kernel argument type)"
+            ),
+        })?;
+        let axis_len_u = u32::try_from(axis_len).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_min_axis_f32: axis_len={axis_len} exceeds u32 range (kernel argument type)"
+            ),
+        })?;
+        let inner_u = u32::try_from(inner).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_min_axis_f32: inner={inner} exceeds u32 range (kernel argument type)"
+            ),
+        })?;
+
+        let x_buf = MetalBuffer::new_with_data(ctx, x)?;
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, lanes)?;
+
+        ctx.dispatch_sync(|encoder| {
+            encode_sum_axis_dispatch(
+                encoder,
+                &self.min_axis_f32,
+                &x_buf,
+                &out_buf,
+                lanes_u,
+                axis_len_u,
+                inner_u,
+            );
+        })?;
+
+        Ok(out_buf.read_to_vec())
     }
 }
 
@@ -776,5 +925,8 @@ mod tests {
         assert!(REDUCE_MSL_SRC.contains("kernel void reduce_arg_all_chunk_f32("));
         assert!(REDUCE_MSL_SRC.contains("kernel void reduce_arg_all_finalize_f32("));
         assert!(REDUCE_MSL_SRC.contains("kernel void reduce_arg_axis_f32("));
+        assert!(REDUCE_MSL_SRC.contains("kernel void reduce_min_all_chunk_f32("));
+        assert!(REDUCE_MSL_SRC.contains("kernel void reduce_min_all_finalize_f32("));
+        assert!(REDUCE_MSL_SRC.contains("kernel void reduce_min_axis_f32("));
     }
 }

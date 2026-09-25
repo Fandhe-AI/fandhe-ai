@@ -647,3 +647,52 @@ fn metal_argmax_and_argmin_match_cpu_exact() {
         );
     }
 }
+
+/// (p) `tape_for(Device::Metal)` の `Var::min`（全軸・単一軸）が CPU
+/// tape と forward／backward で一致することを確認する（イシュー
+/// #2155。`crate::reduce::MetalReduce::run_min_all_f32`／
+/// `run_min_axis_f32` の結線。forward は値一致
+/// （`0.0 == -0.0` として比較。±0 の符号は実装依存のため bit 一致は
+/// 要求しない）。backward の `Op::Min` VJP は既存のホスト側実装
+/// （forward 出力値との比較で勾配を配る）を経由するため、tie（同値
+/// 極値）を含まないデータではどのバックエンドでも同じ添字へ勾配が
+/// 集中し bit 一致する）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_min_all_and_axis_forward_and_backward_match_cpu() {
+    // tie を避けるため全要素を異なる値にする。
+    let data = vec![4.0, 1.0, 3.0, 6.0, 2.0, 5.0];
+    let shape = [2usize, 3];
+
+    for dim in [None, Some(0usize), Some(1usize)] {
+        let metal_tape = tape_for(Device::Metal).unwrap();
+        let metal_a = metal_tape.var(&tensor(data.clone(), &shape));
+        let metal_loss = metal_a.min(dim).unwrap();
+        let metal_grads = metal_tape.backward(&metal_loss).unwrap();
+        let metal_da = metal_grads
+            .get(&metal_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+
+        let cpu_tape = tape_for(Device::Cpu).unwrap();
+        let cpu_a = cpu_tape.var(&tensor(data.clone(), &shape));
+        let cpu_loss = cpu_a.min(dim).unwrap();
+        let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+        let cpu_da = cpu_grads
+            .get(&cpu_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+
+        assert_eq!(
+            dense_vec(&metal_loss.to_tensor()),
+            dense_vec(&cpu_loss.to_tensor()),
+            "min(dim={dim:?}) forward が Metal/CPU で値一致しない"
+        );
+        assert_eq!(
+            dense_vec(metal_da),
+            dense_vec(cpu_da),
+            "min(dim={dim:?}) backward が Metal/CPU で bit 一致しない"
+        );
+    }
+}

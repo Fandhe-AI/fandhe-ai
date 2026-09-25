@@ -181,3 +181,99 @@ kernel void softmax_f32_twopass(
         }
     }
 }
+
+// ---- log_softmax（イシュー #2155）----
+//
+// `softmax_f32_onepass`／`softmax_f32_twopass` と全く同じ online
+// max/sum（`(m, l)`）計算を共有し、最終書き出しのみ異なる:
+// `softmax` は `exp2((xv - m) * SOFTMAX_LOG2E) / l` を書くのに対し、
+// `log_softmax` は **`(xv - m) - log(l)`**（CPU 参照実装
+// 〈`fandhe_ai_backend_cpu::softmax::run_log_softmax_f32`〉と同じ
+// Sterbenz 順序: 先に `xv - m` を計算し、その後で `log(l)` を引く。
+// 先に `m` と `log(l)` を合算してから引く形にはしない）を書く。
+// `log(l)`（自然対数）は
+// 行あたり 1 回だけ計算する。`exp2` と `log` の丸め差・総和順序の差が
+// あるため bit 一致は主張せず REQ-2 統一複合判定で検証する（`softmax`
+// と同じ扱い。イシュー #2155 実装計画 §2.2）。
+
+kernel void log_softmax_f32_onepass(
+    device const float* x [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& hidden [[buffer(3)]],
+    constant uint& grid_size [[buffer(4)]],
+    uint tg_id [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    threadgroup float smem[SOFTMAX_ONEPASS_MAX_HIDDEN];
+
+    for (uint row = tg_id; row < rows; row += grid_size) {
+        ulong row_base = (ulong)row * (ulong)hidden;
+
+        float m = SOFTMAX_NEG_FLT_MAX;
+        float l = 0.0f;
+
+        for (uint chunk_start = 0u; chunk_start < hidden; chunk_start += SOFTMAX_SIMD_WIDTH) {
+            uint idx = chunk_start + lane;
+            bool valid = idx < hidden;
+            float xv = valid ? x[row_base + idx] : SOFTMAX_NEG_FLT_MAX;
+            if (valid) {
+                smem[idx] = xv;
+            }
+
+            float chunk_max = softmax_reduce_max(xv);
+            float m_new = max(m, chunk_max);
+            float correction = (m_new > m) ? exp2((m - m_new) * SOFTMAX_LOG2E) : 1.0f;
+            float p = valid ? exp2((xv - m_new) * SOFTMAX_LOG2E) : 0.0f;
+            float chunk_sum = softmax_reduce_sum(p);
+            l = l * correction + chunk_sum;
+            m = m_new;
+        }
+
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        // `log_softmax` 固有の最終書き出し（本節冒頭コメント参照）。
+        float log_l = log(l);
+        for (uint idx = lane; idx < hidden; idx += SOFTMAX_SIMD_WIDTH) {
+            float xv = smem[idx];
+            out[row_base + idx] = (xv - m) - log_l;
+        }
+    }
+}
+
+kernel void log_softmax_f32_twopass(
+    device const float* x [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& hidden [[buffer(3)]],
+    constant uint& grid_size [[buffer(4)]],
+    uint tg_id [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    for (uint row = tg_id; row < rows; row += grid_size) {
+        ulong row_base = (ulong)row * (ulong)hidden;
+
+        float m = SOFTMAX_NEG_FLT_MAX;
+        float l = 0.0f;
+
+        for (uint chunk_start = 0u; chunk_start < hidden; chunk_start += SOFTMAX_SIMD_WIDTH) {
+            uint idx = chunk_start + lane;
+            bool valid = idx < hidden;
+            float xv = valid ? x[row_base + idx] : SOFTMAX_NEG_FLT_MAX;
+
+            float chunk_max = softmax_reduce_max(xv);
+            float m_new = max(m, chunk_max);
+            float correction = (m_new > m) ? exp2((m - m_new) * SOFTMAX_LOG2E) : 1.0f;
+            float p = valid ? exp2((xv - m_new) * SOFTMAX_LOG2E) : 0.0f;
+            float chunk_sum = softmax_reduce_sum(p);
+            l = l * correction + chunk_sum;
+            m = m_new;
+        }
+
+        float log_l = log(l);
+        for (uint idx = lane; idx < hidden; idx += SOFTMAX_SIMD_WIDTH) {
+            float xv = x[row_base + idx];
+            out[row_base + idx] = (xv - m) - log_l;
+        }
+    }
+}

@@ -204,6 +204,77 @@ fn argext_all_flat(x: &[f32], kind: ArgExtKind) -> usize {
 // §11「サイズ上限・エラー契約」参照）。エラー型自体は既存の
 // `ReducePrepareError` をそのまま再利用する（専用型を新設しない）。
 
+/// [`arg_key`]（`f32::INFINITY` の bit パターン `0x7F80_0000`）の結果
+/// （`nbits >> 31 == 0` のため `nbits | 0x8000_0000 = 0xFF80_0000`）を
+/// コンパイル時定数として固定する（`min_all_chunked`／`min_axis_lane`
+/// の単位元。`arg_key` は非 NaN 入力に対し `None` を返さないため
+/// `.expect()` を都度呼ぶ代わりに定数化し、`min_all_seed_key_matches_
+/// arg_key_of_positive_infinity` で `arg_key(f32::INFINITY.to_bits())`
+/// との一致を機械的に固定する）。
+const POS_INF_ARG_KEY: u32 = 0xFF80_0000;
+
+/// `reduce.metal::reduce_min_all_chunk_f32`／`reduce_min_all_finalize_f32`
+/// の 2 段構成モデル（イシュー #2155）。CPU 参照実装
+/// `fandhe_ai_backend_cpu::reduction::min`（`fold(f32::INFINITY,
+/// f32::min)`。NaN は伝播しない。空チャンク・全 NaN チャンクは
+/// `+inf` のまま単位元として畳み込まれる）と値が一致する契約
+/// （±0 の符号は実装依存のため値一致〈`0.0 == -0.0`〉のみを主張し
+/// bit 一致は要求しない。[`argext_all_chunked`] と同じ [`arg_key`]
+/// によるビットキー比較を使うが、min は「候補なしのとき +inf の bit
+/// をそのまま保持する」単位元方式である点が argmax／argmin の
+/// 「候補なしのとき添字 0」とは異なる。詳細は
+/// `docs/backend-metal-reduce-sum-design.md` §13）。
+///
+/// 比較は丸めを伴わない厳密な整数比較（[`arg_key`]）のため、チャンク
+/// 分割の有無・結合順序に関わらず平坦走査と常に同じ極値へ収束する
+/// （`min_all_chunked_matches_flat_scan` が全域で機械的に検証する）。
+pub fn min_all_chunked(x: &[f32]) -> f32 {
+    let mut global_best_bits = f32::INFINITY.to_bits();
+    let mut global_best_key = POS_INF_ARG_KEY;
+    for chunk in x.chunks(REDUCE_SUM_CHUNK) {
+        let mut local_best_bits = f32::INFINITY.to_bits();
+        let mut local_best_key = POS_INF_ARG_KEY;
+        for &v in chunk {
+            let bits = v.to_bits();
+            let Some(key) = arg_key(bits) else {
+                continue;
+            };
+            if key < local_best_key {
+                local_best_key = key;
+                local_best_bits = bits;
+            }
+        }
+        if local_best_key < global_best_key {
+            global_best_key = local_best_key;
+            global_best_bits = local_best_bits;
+        }
+    }
+    f32::from_bits(global_best_bits)
+}
+
+/// [`min_all_chunked`] の平坦走査版（チャンク分割せず全要素を一括で
+/// 走査する）。`reduce.metal::reduce_min_axis_f32` の 1 lane 分の
+/// ループ本体の逐語モデルとしても使う（`xs` はライン内を軸順に並べた
+/// スライス。単一軸縮約はチャンク分割しない 1 段構成であり
+/// `argext_axis_lane` と同型のため独立実装は持たない）。
+/// `min_all_chunked` との一致は `min_all_chunked_matches_flat_scan` が
+/// テストで検証する（`argext_all_flat` と同じ設計判断）。
+pub fn min_axis_lane(xs: &[f32]) -> f32 {
+    let mut best_bits = f32::INFINITY.to_bits();
+    let mut best_key = POS_INF_ARG_KEY;
+    for &v in xs {
+        let bits = v.to_bits();
+        let Some(key) = arg_key(bits) else {
+            continue;
+        };
+        if key < best_key {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    f32::from_bits(best_bits)
+}
+
 /// 全要素縮約（`dim=None`）の起動計画。[`plan_reduce_all`] に加えて
 /// `numel > i32::MAX` を検査する（候補添字が `i32` 範囲を超えうる
 /// ため。`ops.rs::metal_argext` が `Unsupported` へ写像しホスト
@@ -945,5 +1016,132 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ---- min（イシュー #2155）----
+
+    use fandhe_ai_backend_cpu::reduction::min as cpu_min;
+
+    /// [`POS_INF_ARG_KEY`] が `arg_key(f32::INFINITY.to_bits())` と
+    /// 一致することを固定する（定数化のドリフト検出）。
+    #[test]
+    fn min_all_seed_key_matches_arg_key_of_positive_infinity() {
+        assert_eq!(
+            Some(POS_INF_ARG_KEY),
+            arg_key(f32::INFINITY.to_bits()),
+            "POS_INF_ARG_KEY が arg_key(+inf) と一致しません"
+        );
+    }
+
+    fn cpu_min_value(data: &[f32], shape: &[usize], dim: Option<usize>) -> f32 {
+        let tensor = Tensor::new(data.to_vec(), shape).unwrap();
+        cpu_min(&tensor, dim).unwrap().as_slice().unwrap()[0]
+    }
+
+    /// [`min_all_chunked`]: CPU `reduction::min(a, None)` と各種サイズ
+    /// （チャンク境界前後・複数チャンク横断を含む）で値が一致する
+    /// （`0.0 == -0.0` として比較。±0 の符号は実装依存のため bit 一致
+    /// までは主張しない。モジュール doc 「min（イシュー #2155）」参照）。
+    #[test]
+    fn min_all_matches_cpu_reference_across_sizes() {
+        let mut rng = Rng(0x3333_5555_7777_9999);
+        for &n in &[1usize, 2, 4095, 4096, 4097, 2 * 4096 + 1, 3 * 4096 + 17] {
+            let data: Vec<f32> = (0..n).map(|_| rng.f32()).collect();
+            let model = min_all_chunked(&data);
+            let expected = cpu_min_value(&data, &[n], None);
+            assert_eq!(model, expected, "n={n}");
+        }
+    }
+
+    /// 全要素 NaN の縮約は `+inf` を返す（CPU `fold(f32::INFINITY,
+    /// f32::min)` が NaN を伝播しない契約。チャンク境界を跨ぐ全 NaN
+    /// 入力も含める）。
+    #[test]
+    fn min_all_returns_positive_infinity_for_all_nan_input() {
+        for &n in &[1usize, 4095, 4096, 4097, 2 * 4096 + 3] {
+            let data = vec![f32::NAN; n];
+            let model = min_all_chunked(&data);
+            assert!(
+                model.is_sign_positive() && model.is_infinite(),
+                "n={n}: expected +inf, got {model:?}"
+            );
+            let expected = cpu_min_value(&data, &[n], None);
+            assert!(
+                expected.is_sign_positive() && expected.is_infinite(),
+                "n={n}: CPU 参照実装が +inf を返さない（テスト前提の誤り）"
+            );
+        }
+    }
+
+    /// NaN 混在（NaN 以外に有限の最小値が存在する）行は NaN を無視して
+    /// 有限の最小値を返す。
+    #[test]
+    fn min_all_ignores_nan_mixed_with_finite_values() {
+        let data = vec![3.0f32, f32::NAN, -5.0f32, f32::NAN, 2.0f32];
+        assert_eq!(min_all_chunked(&data), -5.0f32);
+        assert_eq!(min_axis_lane(&data), -5.0f32);
+    }
+
+    /// `±0`・非正規化数・`±inf` を含む代表的な境界値集合で CPU 参照
+    /// 実装と値一致する（`0.0 == -0.0` として比較）。
+    #[test]
+    fn min_all_matches_cpu_reference_for_boundary_values() {
+        let data = vec![
+            0.0f32,
+            -0.0f32,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1.0e-40f32, // 非正規化数。
+            -1.0e-40f32,
+        ];
+        let model = min_all_chunked(&data);
+        let expected = cpu_min_value(&data, &[data.len()], None);
+        assert_eq!(model, expected);
+        assert_eq!(model, f32::NEG_INFINITY);
+    }
+
+    /// [`min_all_chunked`] と平坦走査（[`min_axis_lane`]。チャンク分割
+    /// しない構成）が全域で一致する（`argext_all_chunked_matches_flat_scan`
+    /// と同じ「結合順序に依存しない厳密比較」の機械的裏付け）。
+    #[test]
+    fn min_all_chunked_matches_flat_scan() {
+        let mut rng = Rng(0x2468_ace0_1357_9bdf);
+        for &n in &[1usize, 4095, 4096, 4097, 8192, 3 * 4096 + 17] {
+            let data: Vec<f32> = (0..n).map(|_| rng.f32()).collect();
+            assert_eq!(min_all_chunked(&data), min_axis_lane(&data), "n={n}");
+        }
+    }
+
+    /// [`min_axis_lane`]: CPU `reduction::min` の単一軸縮約（軸 0・
+    /// 中間・末尾）と値が一致する。
+    #[test]
+    fn min_axis_matches_cpu_reference_for_various_axes() {
+        let mut rng = Rng(0x1111_2222_3333_4444);
+        let shape = [3usize, 4, 5];
+        let data: Vec<f32> = (0..shape.iter().product()).map(|_| rng.f32()).collect();
+        for dim in 0..shape.len() {
+            let tensor = Tensor::new(data.clone(), &shape).unwrap();
+            let expected = cpu_min(&tensor, Some(dim)).unwrap();
+            let expected_slice = expected.as_slice().unwrap();
+
+            let outer: usize = shape[..dim].iter().product();
+            let axis_len = shape[dim];
+            let inner: usize = shape[dim + 1..].iter().product();
+            for o in 0..outer {
+                for i in 0..inner {
+                    let lane: Vec<f32> = (0..axis_len)
+                        .map(|a| data[(o * axis_len + a) * inner + i])
+                        .collect();
+                    let model = min_axis_lane(&lane);
+                    assert_eq!(
+                        model,
+                        expected_slice[o * inner + i],
+                        "dim={dim} o={o} i={i}"
+                    );
+                }
+            }
+        }
     }
 }
