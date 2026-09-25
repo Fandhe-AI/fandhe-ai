@@ -61,7 +61,12 @@ use crate::var::Var;
 /// 委譲先）は添字値を `i32` として受け取るため、軸長がこれを超える
 /// 場合は添字を作る前に拒否する（`.claude/rules/coding-rust.md` 本番
 /// 経路 panic 禁止・REQ-8 境界検査の趣旨）。
-fn checked_axis_len_as_i32(n: usize) -> Result<(), AutodiffError> {
+///
+/// `pub(crate)`: イシュー #2144（親 #2131）の `crate::matrix_ops`
+/// （`diag`／`tril`／`triu` の添字生成）も同じ検査を必要とするため、
+/// クレート内共有ヘルパーへ昇格した（可視性のみの変更・本モジュール内
+/// の挙動は不変。実装計画「設計判断」§2.4 参照）。
+pub(crate) fn checked_axis_len_as_i32(n: usize) -> Result<(), AutodiffError> {
     i32::try_from(n)
         .map(|_| ())
         .map_err(|_| AutodiffError::Shape(ShapeError::ElementCountOverflow))
@@ -93,7 +98,10 @@ const MAX_INDEX_ALLOC_BYTES: usize = 1 << 30;
 /// だけでなく `flip`／`roll` も `broadcast_to` の stride-0 view（`n` が
 /// 実体を伴わず巨大になりうる）経由で同じ添字巨大化を起こせるため、
 /// 呼び出し元を問わずこの関数を唯一の確保前チェックポイントとする。
-fn checked_index_alloc_len(len: usize) -> Result<(), AutodiffError> {
+///
+/// `pub(crate)`: `crate::matrix_ops`（マスク・添字の確保前サイズ検査）
+/// も同じ上限を共有する（`checked_axis_len_as_i32` と同じ昇格理由）。
+pub(crate) fn checked_index_alloc_len(len: usize) -> Result<(), AutodiffError> {
     let bytes = len
         .checked_mul(std::mem::size_of::<i32>())
         .ok_or(ShapeError::ElementCountOverflow)

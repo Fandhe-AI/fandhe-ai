@@ -1944,3 +1944,127 @@ struct VarHooksHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct KvCacheHoldDoctestGuard;
+
+/// イシュー #2144（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarRearrangeOpsHoldDoctestGuard`（イシュー #2143）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカルの自由
+/// 関数群（`__fandhe_matrix_hold_probe::matrix_ops::{tril, triu, diag,
+/// trace, outer, dot}`）とトレイト（`__FandheMatrixHoldProbe`）を導入
+/// し、実際に使う関数を書く。facade がどの経路（`pub use
+/// fandhe_ai_autodiff::matrix_ops;` のようなモジュール再エクスポート・
+/// `Var` への inherent メソッド追加・別名 `pub use`）で `matrix_ops`
+/// という名前や 6 個の関数名を公開しても、ローカル定義との glob 衝突
+/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
+/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
+/// `x.tril()` 呼び出しが `Var::tril(&self, diagonal: isize)` に解決
+/// されて型・引数数エラーになる）でコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// matrix_ops_hold_doctest_globs_all_pub_modules`・`matrix_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_matrix_ops`・`workspace_declares_matrix_ops_
+/// fn_names_only_in_autodiff_matrix_ops`）との多層防御の位置づけは
+/// `docs/autodiff-matrix-ops-decision.md` §6「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_matrix_hold_probe {
+///     pub mod matrix_ops {
+///         pub fn tril() {}
+///         pub fn triu() {}
+///         pub fn diag() {}
+///         pub fn trace() {}
+///         pub fn outer() {}
+///         pub fn dot() {}
+///     }
+/// }
+/// use __fandhe_matrix_hold_probe::*;
+///
+/// struct __FandheMatrixMarker;
+///
+/// trait __FandheMatrixHoldProbe {
+///     fn tril(&self) -> __FandheMatrixMarker;
+///     fn triu(&self) -> __FandheMatrixMarker;
+///     fn diag(&self) -> __FandheMatrixMarker;
+///     fn trace(&self) -> __FandheMatrixMarker;
+///     fn outer(&self) -> __FandheMatrixMarker;
+///     fn dot(&self) -> __FandheMatrixMarker;
+/// }
+///
+/// impl<'t> __FandheMatrixHoldProbe for fandhe_ai::Var<'t> {
+///     fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+/// }
+///
+/// impl __FandheMatrixHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+/// }
+///
+/// impl __FandheMatrixHoldProbe for fandhe_ai::Tape {
+///     fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+///     fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `matrix_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     matrix_ops::tril();
+///     matrix_ops::triu();
+///     matrix_ops::diag();
+///     matrix_ops::trace();
+///     matrix_ops::outer();
+///     matrix_ops::dot();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheMatrixMarker = fandhe_ai::Var::tril(x);
+///     let _: __FandheMatrixMarker = x.tril();
+///     let _: __FandheMatrixMarker = fandhe_ai::Var::trace(x);
+///     let _: __FandheMatrixMarker = x.trace();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheMatrixMarker = fandhe_ai::Tensor::triu(x);
+///     let _: __FandheMatrixMarker = x.triu();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheMatrixMarker = fandhe_ai::Tape::diag(x);
+///     let _: __FandheMatrixMarker = x.diag();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarMatrixOpsHoldDoctestGuard;
