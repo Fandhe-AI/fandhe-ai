@@ -14,7 +14,7 @@
 //!     上で共起する箇所（分割依存の縮約——結果がスレッド割り当てに
 //!     依存しうる典型パターン）が 0 件であること（走査方式は下記
 //!     §「文境界・レキシカルスコープ・汚染追跡の方式」を参照。
-//!     PR #2274 で 6 ラウンド、その後の敵対的レビューでさらに 4 件の
+//!     PR #2274 で 6 ラウンド、その後の敵対的レビューでさらに 7 件の
 //!     検出漏れ・過検出が指摘され、その都度走査方式を是正した）。
 //!     `fetch_add`（等の atomic read-modify-write 蓄積）が本番未結線
 //!     の診断コード 1 箇所（`gemm_blis/mod.rs`。`#[cfg(test)]` ゲート
@@ -38,7 +38,24 @@
 //! `fn(i32) -> i32` 型注釈・ローカル `impl` を挟むだけで汚染集合が
 //! 全消去される、UFCS 呼び出しを検出できない、`Vec` への `collect`
 //! で連鎖が切れた初期化式を誤って汚染するといった過検出・検出漏れが
-//! 敵対的レビューで指摘された。現行方式は次の 5 点で構成する:
+//! 敵対的レビューで指摘された。さらにその是正後、次の 3 件が追加で
+//! 指摘された: (i) 「並列マーカーと同じか浅い深さの collect なら
+//! 一律に遮断する」という単純な深さ比較は、`(data.par_iter(),
+//! other.collect::<Vec<_>>()).0` のようにタプル要素として無関係に
+//! 同居するだけの collect まで遮断してしまう（codex-review 指摘 P1。
+//! `is_same_method_chain` による「同一メソッド連鎖上にあるか」の判定
+//! へ置き換えた）。(ii) `statement_own_view` がネストした `{...}`
+//! ブロック本体を単純空白化していたため、`{ .. }.sum()` のように
+//! ブロック式の直後に連鎖する縮約が、同一文判定・UFCS 判定のどちらか
+//! らも見えなかった（Cursor Bugbot 指摘）。(iii) (ii) の初回是正は
+//! ブロック本体を合成マーカー文字列（`.par_iter(` 等）へ実際に書き
+//! 換える方式だったため、ブロック本体が合成マーカーの最小長（7 バイ
+//! ト）未満だと検出できない Critical な抜けがあった（`{it}`・
+//! `{ acc }` のような短い汚染識別子 1 つだけのブロック式。敵対的
+//! レビュー指摘）。`statement_own_view` がテキストへ何も書き込まず
+//! 「仮想マーカー位置」を別チャネル（バイト位置のリスト）として返す
+//! 方式へ置き換え、ブロック本体の長さに一切依存しない検出とした
+//! （`statement_own_view` doc 参照）。現行方式は次の 5 点で構成する:
 //!
 //! 1. **字句前処理**（`strip_comments_and_strings`）: `//`／`/* */`
 //!    （ネスト対応）・`"..."`・raw string（`r"..."`／`r#"..."#`）・
@@ -58,12 +75,21 @@
 //!    構文も `has_ufcs_reduction`（`UFCS_REDUCE_MARKERS`）が別途走査し、
 //!    呼び出し引数リストの内側に並列マーカーまたは汚染識別子があれば
 //!    1 件とカウントする（同一文内で他規則と二重計上しない）。
-//! 4. **`.collect(` による並列→逐次の連鎖の遮断**: 並列マーカー・
-//!    汚染識別子と縮約マーカーの間に、同じか浅い深さの `.collect(`
-//!    （順序保持が型で明示される `Vec` への collect。`COLLECT_MARKERS`）
-//!    が挟まる場合は接続しないとみなす（`has_reduce_after`）。同じ規則
-//!    は文をまたぐ汚染の**発生源**判定（`initializer_taints`）にも
-//!    適用する: `let parts = data.par_iter().map(f)
+//! 4. **`.collect(` による並列→逐次の連鎖の遮断（同一メソッド連鎖上
+//!    に限る）**: 並列マーカー・汚染識別子と縮約マーカーの間に、
+//!    `.collect(`（順序保持が型で明示される `Vec` への collect。
+//!    `COLLECT_MARKERS`）が挟まる場合は接続しないとみなすが、
+//!    「同じか浅い深さ」という単純な比較だけでは遮断範囲が広すぎる
+//!    （codex-review 指摘 P1: `(data.par_iter(), other
+//!    .collect::<Vec<_>>()).0` のように無関係なタプル要素として同居
+//!    するだけの collect まで遮断してしまう）。`is_same_method_chain`
+//!    が「到達点（collect）自身の深さを連鎖の合流点とみなし、そこまで
+//!    テキスト深さが一度も下回らず、かつ合流点の深さちょうどに現れる
+//!    文字がメソッド連鎖の構成要素（識別子・`.`／`:`・turbofish の
+//!    `<>`・`?`・空白・呼び出しの `(`・`)`）だけであること」を判定し、
+//!    これを満たす collect のみを遮断とみなす（`has_reduce_after`）。
+//!    同じ判定は文をまたぐ汚染の**発生源**判定（`initializer_taints`）
+//!    にも適用する: `let parts = data.par_iter().map(f)
 //!    .collect::<Vec<f32>>();` のように初期化式が Vec 確定で終わる
 //!    場合は束縛先を汚染しない（`.collect().into_iter().fold(..)` と
 //!    同じ「順序保持 collect 後は決定的」という理由）。`.collect(` の
@@ -88,10 +114,21 @@
 //!
 //! 同一文中の共起判定（`has_depth_aware_par_reduce`・
 //! `has_ufcs_reduction`）は、文内にネストした `{...}` ブロック本体を
-//! 空白で塗りつぶしたテキスト（`statement_own_view`）に対して行う
-//! （ネスト内は `count_in_scope` の再帰が別のレキシカルスコープとして
-//! 検査するため二重計上しない）。ただし `let` 初期化式の汚染判定
-//! （`classify_taint`）は塗りつぶし前の初期化式全体を見る（`let it =
+//! 塗りつぶしたテキストと「仮想マーカー位置」の一覧（`statement_own_view`
+//! の戻り値）に対して行う（ネスト内は `count_in_scope` の再帰が別の
+//! レキシカルスコープとして検査するため二重計上しない）。ただし単純な
+//! 空白塗りつぶしだけでは、ブロック式の直後に連鎖する縮約
+//! （`{ .. }.sum()`・`if c { a.par_iter() } else { b.par_iter() }
+//! .sum()` 等）をどちらの経路からも検出できなくなる（Cursor Bugbot
+//! 指摘）。ブロック本体が「生きている（4 の規則で collect に遮断され
+//! ていない）並列マーカー」または現スコープの汚染識別子を含む場合は、
+//! ブロックの開き `{` のバイト位置を仮想マーカーとして記録し
+//! （テキストへは何も書き込まない。長さに依存しない副チャネル。
+//! `statement_own_view` doc 参照）、`has_depth_aware_par_reduce`・
+//! `has_ufcs_reduction`・連鎖の遮断判定（`is_same_method_chain`
+//! 経由）のいずれも実マーカーと仮想マーカーの両方を起点として扱う。
+//! `let` 初期化式の汚染判定（`classify_taint`）は塗りつぶし前の
+//! 初期化式全体を見る（`let it =
 //! { let x = 1; data.par_iter() };` のような場合に `.par_iter(` を
 //! 見失わないため）。
 //!
@@ -104,6 +141,17 @@
 //! 関数定義や、それらを引数型に取る関数定義（`impl ParallelIterator`
 //! 等）が `crates/backend-cpu/src` に 0 件であることを fail-closed に
 //! 検査することで、経路そのものの導入を検知する。
+//!
+//! `is_same_method_chain` は「合流点（collect）の深さちょうどに現れる
+//! 文字」のみで連鎖の連続性を判定するトークンレベルの近似であり、
+//! 完全な構文解析ではない。`.zip(other.par_X(..))` のように、起点
+//! より深い位置（`.zip(` の引数内）にある並列マーカーが、無関係な
+//! 縮約マーカーと**単一式クロージャ本体**の中でたまたま同じ括弧深さに
+//! なる場合、理論上は誤って共起と判定されうる（本クレートの実際の
+//! コードは複数行の縮約を伴うクロージャに一貫してブロック本体
+//! `{ .. }` を使うため、この深さの偶然の一致は 1 段回避される。
+//! `count_par_reduce_does_not_flag_zip_argument_marker_blocked_by_outer_collect`
+//! の doc コメント参照）。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -635,24 +683,72 @@ fn statement_spans(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// `raw`（1 文）が内包する深さ 0 の `{...}` ブロック本体を空白へ塗り
-/// つぶしたテキストを返す。同一文中の並列マーカー／縮約マーカー共起
-/// 判定（`has_depth_aware_par_reduce`・`has_tainted_reduction_usage`）
-/// はこのテキストに対して行い、ネストしたブロックの中身は
-/// `count_in_scope` が別途、独立したレキシカルスコープとして再帰検査
-/// するため二重計上しない。`let` 初期化式の汚染判定（`classify_taint`）
-/// はこれとは別に塗りつぶし前の `raw` をそのまま使う。
-fn statement_own_view(raw: &str) -> String {
+/// `raw`（1 文）が内包する深さ 0 の `{...}` ブロック本体を空白で
+/// 塗りつぶしたテキストと、「仮想の並列マーカー位置」の一覧を返す
+/// （`(塗りつぶし済みテキスト, 仮想マーカーのバイト位置一覧)`）。
+/// 同一文中の並列マーカー／縮約マーカー共起判定
+/// （`has_depth_aware_par_reduce`・`has_tainted_reduction_usage`・
+/// `has_ufcs_reduction`）はこのテキスト・仮想マーカー一覧に対して
+/// 行い、ネストしたブロックの中身は `count_in_scope` が別途、独立
+/// したレキシカルスコープとして再帰検査するため二重計上しない。
+/// `let` 初期化式の汚染判定（`classify_taint`）はこれとは別に塗り
+/// つぶし前の `raw` をそのまま使う。
+///
+/// ブロック本体が「生きている（`is_same_method_chain` の判定で Vec
+/// collect に遮断されていない）並列マーカー」または `tainted` の識別子
+/// を含む場合、ブロックの開き `{` のバイト位置を仮想マーカー位置として
+/// 記録する（深さは `{` 自身の位置——すなわちブロック式そのものの、
+/// ブロックの外側から見た深さ——を使う。`compute_depths` は各位置に
+/// 「その文字を処理する直前」の深さを記録するため、`{` の位置の深さ
+/// は自然にブロックを開く前の深さと一致する）。これにより
+/// `{ let x = 1; data.par_iter() }.sum()`・`if c { a.par_iter() }
+/// else { b.par_iter() }.sum()`・`unsafe { data.par_iter() }
+/// .sum::<f32>()`・`match k { _ => data.par_iter() }.sum::<f32>()`・
+/// `if flag { it } else { acc }.sum()`（`it`／`acc` が汚染済み）の
+/// ようにブロック式の直後に連鎖した縮約を、同一文中の共起判定・UFCS
+/// 判定が検出できる（Cursor Bugbot 指摘: 旧実装は塗りつぶし後に
+/// 完全に空白化していたため、ブロックの外側からもブロックを再帰検査
+/// する `count_in_scope` の子スコープからも、この連鎖が見えなかった）。
+///
+/// 旧実装はテキスト中に合成マーカー文字列（`.par_iter(` 等）を実際に
+/// 書き込む方式だったため、ブロック本体が合成マーカーの最小長
+/// （7 バイト）未満だと検出できない Critical な抜けがあった
+/// （`{it}`・`{ acc }` のような短い汚染識別子 1 つだけのブロック式。
+/// 敵対的レビュー指摘）。仮想マーカーはテキストに何も書き込まず
+/// バイト位置のリストとして別チャネルで返すため、ブロック本体の
+/// 長さに一切依存しない。
+fn statement_own_view(raw: &str, tainted: &HashSet<String>) -> (String, Vec<usize>) {
     let spans = find_depth0_braces(raw);
-    let mut blanked = vec![false; raw.len()];
+    let mut out: Vec<u8> = raw.as_bytes().to_vec();
+    let mut virtual_markers = Vec::new();
+
     for (open_idx, close_idx) in &spans {
-        for flag in blanked.iter_mut().take(*close_idx).skip(*open_idx + 1) {
-            *flag = true;
+        let interior_start = open_idx + 1;
+        let interior_end = *close_idx;
+        if interior_start >= interior_end {
+            continue;
+        }
+        let interior = &raw[interior_start..interior_end];
+        let has_live_marker = has_live_chain_marker(interior);
+        let has_tainted_ref = tainted
+            .iter()
+            .any(|t| !find_ident_occurrences(interior, t).is_empty());
+
+        if has_live_marker || has_tainted_ref {
+            virtual_markers.push(*open_idx);
+        }
+        for b in &mut out[interior_start..interior_end] {
+            *b = b' ';
         }
     }
-    raw.char_indices()
-        .map(|(i, c)| if blanked[i] { ' ' } else { c })
-        .collect()
+
+    let view = String::from_utf8(out).expect(
+        "空白への置換は find_depth0_braces（char_indices 由来で文字境界に\
+         整列済み）が返す範囲のみを対象とし、範囲の開始・終了は常に有効な\
+         文字境界であるため、範囲内を ASCII 空白で埋め尽くしても全体として \
+         UTF-8 として有効であり続ける",
+    );
+    (view, virtual_markers)
 }
 
 // =====================================================================
@@ -738,12 +834,77 @@ fn find_marker_depths(text: &str, depths: &[i32], markers: &[&str]) -> Vec<(usiz
     hits
 }
 
+/// `text`（`depths` は `compute_depths(text)` の結果）において、
+/// `from_idx` から `to_idx` までが**同一のメソッド連鎖上**にあるかを
+/// 判定する（codex-review 指摘 P1: 無関係な `Vec` collect による誤
+/// 遮断の是正。`let it = (data.par_iter(), other.collect::<Vec<_>>())
+/// .0;` のようにタプル要素として同居するだけの collect は
+/// `data.par_iter()` の連鎖を遮断しない）。
+///
+/// `to_idx`（`.collect(` 等の到達点）自身の深さ `target_depth =
+/// depths[to_idx]` を「連鎖の合流点の深さ」とみなし、次の 2 条件を
+/// 満たす場合のみ真を返す:
+///
+/// 1. `from_idx..to_idx` の区間でテキストの深さが `target_depth` を
+///    一度も下回らない（`to_idx` の深さは区間内の最小値であること。
+///    `from_idx` 自身の深さが `target_depth` より深い場合——たとえば
+///    `data.par_chunks(..).zip(other.par_chunks(..)).map(..)
+///    .collect(..)` の `other.par_chunks(` のように `.zip(` の引数と
+///    して起点より深い位置にある場合——は、起点からいったん `.zip(`／
+///    `.map(` の呼び出し括弧を閉じて `target_depth` まで戻ってくる
+///    正当な連鎖として許容する。反対に区間内で `target_depth` より
+///    **浅い**深さに一度でも達したら、それは `to_idx` を包む別の外側
+///    の式を経由したことを意味し同一連鎖ではない）。
+/// 2. `target_depth` ちょうどの深さに現れる文字が、メソッド連鎖の
+///    構成要素（識別子文字・`.`／`:`・turbofish の `<`・`>`・`?`・
+///    空白・メソッド呼び出しの開き `(`・閉じ `)`）だけであること。
+///    `,`・`;`・`=`・二項演算子・`|` 等が `target_depth` に現れたら、
+///    `from_idx` と `to_idx` は別の式（タプル要素・別の変数への代入
+///    等）に属しており同一連鎖ではない。
+///
+/// （設計メモ: 当初は「`to_idx` の深さが起点 `from_idx` の深さと一致
+/// すること」を条件に含めていたが、これは `pred.par_chunks(CHUNK)
+/// .zip(target.par_chunks(CHUNK)).map(..).collect::<Vec<f32>>()
+/// .into_iter().fold(..)`〈`mse.rs`／`bce.rs`／`huber.rs`／`kl_div.rs`
+/// で実際に使われる形〉のような、`.zip(` の引数に現れる 2 つ目の
+/// `par_chunks` を独立した「起点より深い」マーカーとして誤って
+/// フラグ立てする実ソース回帰を生んだ（実測: §E）。到達点 `to_idx`
+/// 自身の深さを合流点として扱う本方式はその回帰を出さずに P1 の
+/// 逐語回帰例を通す）。
+fn is_same_method_chain(text: &str, depths: &[i32], from_idx: usize, to_idx: usize) -> bool {
+    if from_idx >= to_idx {
+        return false;
+    }
+    let target_depth = depths.get(to_idx).copied().unwrap_or(0);
+    let bytes = text.as_bytes();
+    for (i, &b) in bytes.iter().enumerate().take(to_idx).skip(from_idx) {
+        let d = depths.get(i).copied().unwrap_or(0);
+        if d < target_depth {
+            return false;
+        }
+        if d == target_depth {
+            let c = b as char;
+            let is_chain_char = is_ident_char(c)
+                || matches!(c, '.' | ':' | '<' | '>' | '?' | '(' | ')')
+                || c.is_whitespace();
+            if !is_chain_char {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// `origin_idx`（深さ `origin_depth`。並列マーカーまたは汚染識別子の
 /// 出現位置）より後方かつ**同じか浅い**括弧深さに縮約マーカーが現れる
-/// かを判定する。ただし `origin_idx` と縮約マーカーの間に、同じか浅い
-/// 深さの `.collect(` が挟まる場合はイテレータ連鎖が断ち切られている
-/// とみなし接続しない（`COLLECT_MARKERS` doc 参照）。
+/// かを判定する。ただし `origin_idx` と縮約マーカーの間に、`origin_idx`
+/// と**同一のメソッド連鎖上**（`is_same_method_chain`）にある `.collect(`
+/// が挟まる場合はイテレータ連鎖が断ち切られているとみなし接続しない
+/// （`COLLECT_MARKERS` doc 参照）。縮約マーカー側の「同じか浅い深さ」
+/// 判定自体は緩めない（fail-closed 側を維持する）。
 fn has_reduce_after(
+    text: &str,
+    depths: &[i32],
     origin_idx: usize,
     origin_depth: i32,
     reduce_hits: &[(usize, i32)],
@@ -752,21 +913,25 @@ fn has_reduce_after(
     reduce_hits.iter().any(|&(r_idx, r_depth)| {
         r_idx > origin_idx
             && r_depth <= origin_depth
-            && !collect_hits.iter().any(|&(c_idx, c_depth)| {
-                c_idx > origin_idx && c_idx < r_idx && c_depth <= origin_depth
+            && !collect_hits.iter().any(|&(c_idx, _)| {
+                c_idx > origin_idx
+                    && c_idx < r_idx
+                    && is_same_method_chain(text, depths, origin_idx, c_idx)
             })
     })
 }
 
-/// 1 文の中で、並列マーカーより後方かつ**同じか浅い**括弧深さに
-/// 縮約マーカーが現れるかを判定する（§C: `data.par_iter().map(..)
-/// .sum::<f32>()` は検出、`data.par_chunks(n).map(|c| c.iter()
-/// .sum::<f32>()).collect(..)`〈チャンク内逐次和〉・`data.par_chunks(..)
-/// .map(..).collect::<Vec<_>>().into_iter().fold(..)`〈collect で
-/// 連鎖が切れる〉は非検出）。`view` は `statement_own_view` で塗り
-/// つぶし済みのテキストを渡す。
-fn has_depth_aware_par_reduce(view: &str) -> bool {
-    let par_positions = find_par_marker_positions(view);
+/// 1 文の中で、並列マーカー（実マーカー・`virtual_markers` の仮想
+/// マーカーの両方）より後方かつ**同じか浅い**括弧深さに縮約マーカーが
+/// 現れるかを判定する（§C: `data.par_iter().map(..).sum::<f32>()` は
+/// 検出、`data.par_chunks(n).map(|c| c.iter().sum::<f32>())
+/// .collect(..)`〈チャンク内逐次和〉・`data.par_chunks(..).map(..)
+/// .collect::<Vec<_>>().into_iter().fold(..)`〈collect で連鎖が切れる〉
+/// は非検出）。`view` は `statement_own_view` で塗りつぶし済みの
+/// テキスト、`virtual_markers` は同関数が返す仮想マーカー位置一覧。
+fn has_depth_aware_par_reduce(view: &str, virtual_markers: &[usize]) -> bool {
+    let mut par_positions = find_par_marker_positions(view);
+    par_positions.extend_from_slice(virtual_markers);
     if par_positions.is_empty() {
         return false;
     }
@@ -778,8 +943,31 @@ fn has_depth_aware_par_reduce(view: &str) -> bool {
     let collect_hits = find_marker_depths(view, &depths, COLLECT_MARKERS);
     par_positions.iter().any(|&p_idx| {
         let p_depth = depths.get(p_idx).copied().unwrap_or(0);
-        has_reduce_after(p_idx, p_depth, &reduce_hits, &collect_hits)
+        has_reduce_after(view, &depths, p_idx, p_depth, &reduce_hits, &collect_hits)
     })
+}
+
+/// `text` 中に「生きている」（`is_same_method_chain` の意味で同一連鎖
+/// 上の `Vec` collect に遮断されていない）並列マーカーが 1 つでも
+/// あるかを判定する。`extra_positions`（`text` 中のバイト位置一覧）が
+/// 与えられた場合、実マーカーと同様に起点として扱う（`statement_own_view`
+/// のブロック本体を「生きているか」判定する際は `&[]`。`has_ufcs_reduction`
+/// が UFCS 呼び出し引数内の仮想マーカー位置を渡す際に使う）。
+fn has_live_chain_marker_with_extra(text: &str, extra_positions: &[usize]) -> bool {
+    let depths = compute_depths(text);
+    let collect_hits = find_marker_depths(text, &depths, COLLECT_MARKERS);
+    let mut positions = find_par_marker_positions(text);
+    positions.extend_from_slice(extra_positions);
+    positions.into_iter().any(|p_idx| {
+        !collect_hits
+            .iter()
+            .any(|&(c_idx, _)| c_idx > p_idx && is_same_method_chain(text, &depths, p_idx, c_idx))
+    })
+}
+
+/// [`has_live_chain_marker_with_extra`] の仮想マーカーなし版。
+fn has_live_chain_marker(text: &str) -> bool {
+    has_live_chain_marker_with_extra(text, &[])
 }
 
 /// `text` 中で識別子 `ident` が識別子境界（前後が識別子文字でない）で
@@ -815,7 +1003,7 @@ fn has_tainted_reduction_usage(view: &str, tainted: &HashSet<String>) -> bool {
     tainted.iter().any(|ident| {
         find_ident_occurrences(view, ident).iter().any(|&i_idx| {
             let i_depth = depths.get(i_idx).copied().unwrap_or(0);
-            has_reduce_after(i_idx, i_depth, &reduce_hits, &collect_hits)
+            has_reduce_after(view, &depths, i_idx, i_depth, &reduce_hits, &collect_hits)
         })
     })
 }
@@ -924,25 +1112,21 @@ fn find_ufcs_reduce_call_bodies(text: &str) -> Vec<(usize, usize)> {
 }
 
 /// UFCS 形の縮約呼び出し（`ParallelIterator::sum(data.par_iter()...)`
-/// 等）を検出し、その引数リスト内に並列マーカー（Vec への collect で
-/// 連鎖が切れていないもの）または汚染識別子（識別子境界一致）があれば
-/// 真を返す（REQ 2。`view` は `statement_own_view` 済みテキスト）。
-fn has_ufcs_reduction(view: &str, tainted: &HashSet<String>) -> bool {
+/// 等）を検出し、その引数リスト内に生きている（`has_live_chain_marker_with_extra`。
+/// 同一連鎖上の Vec collect で遮断されていない）並列マーカー（実マーカー・
+/// `virtual_markers` の仮想マーカーの両方）または汚染識別子（識別子
+/// 境界一致）があれば真を返す（REQ 2。`view`・`virtual_markers` は
+/// `statement_own_view` の戻り値）。
+fn has_ufcs_reduction(view: &str, tainted: &HashSet<String>, virtual_markers: &[usize]) -> bool {
     for (arg_start, arg_end) in find_ufcs_reduce_call_bodies(view) {
         let args = &view[arg_start..arg_end];
-        let par_positions = find_par_marker_positions(args);
-        if !par_positions.is_empty() {
-            let depths = compute_depths(args);
-            let collect_hits = find_marker_depths(args, &depths, COLLECT_MARKERS);
-            let has_uncollected_par = par_positions.iter().any(|&p_idx| {
-                let p_depth = depths.get(p_idx).copied().unwrap_or(0);
-                !collect_hits
-                    .iter()
-                    .any(|&(c_idx, c_depth)| c_idx > p_idx && c_depth <= p_depth)
-            });
-            if has_uncollected_par {
-                return true;
-            }
+        let local_virtual_markers: Vec<usize> = virtual_markers
+            .iter()
+            .filter(|&&p| p >= arg_start && p < arg_end)
+            .map(|&p| p - arg_start)
+            .collect();
+        if has_live_chain_marker_with_extra(args, &local_virtual_markers) {
+            return true;
         }
         if tainted
             .iter()
@@ -1114,25 +1298,28 @@ fn parse_plain_assignment_range(view: &str) -> Option<(std::ops::Range<usize>, u
 /// .map(f).collect::<Vec<f32>>();` のような Vec への collect で終わる
 /// 初期化式を誤って汚染していた過検出の是正）。並列マーカー
 /// （`find_par_marker_positions`。`::par_` パス参照を含む）または
-/// 既存の汚染識別子が、その後ろに同じか浅い深さの `COLLECT_MARKERS`
-/// （順序保持が型で明示される Vec への collect）を伴わずに現れる
-/// 場合のみ汚染源とみなす。`let v = x.par_iter().collect::<Vec<_>>()
-/// .par_iter();` のように collect の後に再び並列マーカーが現れる
-/// 場合は、その後方のマーカー自身が「後続に collect を伴わない」ため
-/// 汚染する。
+/// 既存の汚染識別子が、その後ろに**同一のメソッド連鎖上**
+/// （`is_same_method_chain`）の `COLLECT_MARKERS`（順序保持が型で
+/// 明示される Vec への collect）を伴わずに現れる場合のみ汚染源と
+/// みなす。`let v = x.par_iter().collect::<Vec<_>>().par_iter();` の
+/// ように collect の後に再び並列マーカーが現れる場合は、その後方の
+/// マーカー自身が「後続に同一連鎖上の collect を伴わない」ため汚染
+/// する。無関係な `Vec` collect（`let it = (data.par_iter(),
+/// other.collect::<Vec<_>>()).0;` のようにタプル要素として同居する
+/// だけの collect）は同一連鎖上にないため遮断しない（codex-review
+/// 指摘 P1）。
 fn initializer_taints(init: &str, tainted: &HashSet<String>) -> bool {
     let depths = compute_depths(init);
     let collect_hits = find_marker_depths(init, &depths, COLLECT_MARKERS);
-    let not_broken_by_collect = |idx: usize, depth: i32| {
+    let not_broken_by_collect = |idx: usize| {
         !collect_hits
             .iter()
-            .any(|&(c_idx, c_depth)| c_idx > idx && c_depth <= depth)
+            .any(|&(c_idx, _)| c_idx > idx && is_same_method_chain(init, &depths, idx, c_idx))
     };
 
-    let par_taints = find_par_marker_positions(init).into_iter().any(|p_idx| {
-        let p_depth = depths.get(p_idx).copied().unwrap_or(0);
-        not_broken_by_collect(p_idx, p_depth)
-    });
+    let par_taints = find_par_marker_positions(init)
+        .into_iter()
+        .any(not_broken_by_collect);
     if par_taints {
         return true;
     }
@@ -1140,10 +1327,7 @@ fn initializer_taints(init: &str, tainted: &HashSet<String>) -> bool {
     tainted.iter().any(|ident| {
         find_ident_occurrences(init, ident)
             .into_iter()
-            .any(|i_idx| {
-                let i_depth = depths.get(i_idx).copied().unwrap_or(0);
-                not_broken_by_collect(i_idx, i_depth)
-            })
+            .any(not_broken_by_collect)
     })
 }
 
@@ -1163,7 +1347,7 @@ enum TaintKind {
 /// （`let it = { let x = 1; data.par_iter() };` のような場合に
 /// `.par_iter(` を見失わないため）。
 fn classify_taint(raw: &str, tainted: &HashSet<String>) -> TaintKind {
-    let view = statement_own_view(raw);
+    let (view, _virtual_markers) = statement_own_view(raw, tainted);
     if let Some((pattern_range, init_start)) = parse_let_binding_range(&view) {
         let init = &raw[init_start..];
         return if initializer_taints(init, tainted) {
@@ -1261,14 +1445,14 @@ fn count_in_scope(text: &str, tainted_in: &HashSet<String>) -> (usize, HashSet<S
 
     for (s, e) in statement_spans(text) {
         let raw = &text[s..e];
-        let view = statement_own_view(raw);
+        let (view, virtual_markers) = statement_own_view(raw, &tainted);
 
         // 同一文中の共起（メソッド呼び出し形・UFCS 形）と、過去の文
         // からの汚染識別子の使用は、いずれも「1 件」として数える
         // （相互排他的な `||` 集約のため二重計上しない）。
-        if has_depth_aware_par_reduce(&view)
+        if has_depth_aware_par_reduce(&view, &virtual_markers)
             || has_tainted_reduction_usage(&view, &tainted)
-            || has_ufcs_reduction(&view, &tainted)
+            || has_ufcs_reduction(&view, &tainted, &virtual_markers)
         {
             count += 1;
         }
@@ -1916,5 +2100,134 @@ fn count_par_reduce_ignores_let_taint_leaking_out_of_nested_block() {
     // こと（`let なし代入だけが伝播する`〈REQ 1〉との対比）。ブロック
     // 外で同名 `it` を非汚染の初期化式で再束縛しても検出されない。
     let src = "{ let it = d.par_iter(); } let it = v; it.iter().sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+// =====================================================================
+// `is_same_method_chain`（メソッド連鎖連続性）の回帰テスト
+// （codex-review 指摘 P1: 無関係な Vec collect による誤遮断の是正）
+// =====================================================================
+
+#[test]
+fn count_par_reduce_detects_tuple_sibling_unrelated_collect() {
+    // タプル要素として同居するだけの無関係な collect は、別のタプル
+    // 要素の par_iter の連鎖を遮断しない（codex P1 の逐語回帰例）。
+    let src = "let it = (data.par_iter(), other.collect::<Vec<_>>()).0; \
+               let sum = it.sum::<f32>();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_ignores_same_chain_collect_inside_tuple_element() {
+    // 同一タプル要素内で par_iter → collect が同一連鎖上にある場合は
+    // 従来どおり遮断する（codex P1 の逐語回帰例。無関係な collect の
+    // 誤遮断是正が「連鎖上の collect」まで遮断しなくする regression
+    // にならないことの確認）。
+    let src = "let v = (a.par_iter().map(f).collect::<Vec<_>>(), 0).0; \
+               v.iter().sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+#[test]
+fn count_par_reduce_does_not_flag_zip_argument_marker_blocked_by_outer_collect() {
+    // 実ソース実測で判明した過検出パターンそのもの（`mse.rs::
+    // mse_sum_sq_f32` の逐語形。`bce.rs`／`huber.rs`／`kl_div.rs` も
+    // 同型）の固定回帰。`.zip(` の引数として現れる 2 つ目の
+    // par_chunks（起点より深い位置にある）も、外側の collect によって
+    // 同一連鎖として正しく遮断される必要がある（`is_same_method_chain`
+    // の「到達点の深さを合流点とする」設計メモ参照）。クロージャ本体を
+    // ブロック（`{ .. }`）にする（本クレートの実際のスタイル）ことが
+    // 重要: 単一式クロージャ本体だと内側の `.fold(` がたまたま `.zip(`
+    // 引数の par_chunks と同じ括弧深さになり、無関係な組と誤って
+    // ペアリングされうる（ブロック本体は 1 段深くなるため、この
+    // 偶然の深さ一致を避ける。既知の限界として §「文境界・
+    // レキシカルスコープ・汚染追跡の方式」に注記）。
+    let src = "fn f(pred: &[f32], target: &[f32]) -> f32 { \
+               pred.par_chunks(4).zip(target.par_chunks(4)) \
+               .map(|(p, t)| { p.iter().zip(t.iter()).fold(0.0, |a, (x, y)| a + (x - y)) }) \
+               .collect::<Vec<f32>>().into_iter().fold(0.0, |a, v| a + v) }";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+// =====================================================================
+// ブロック式に連鎖した縮約の回帰テスト
+// （Cursor Bugbot 指摘: statement_own_view の塗りつぶしがブロック式
+// 直後の連鎖を隠してしまい、同一文判定・UFCS 判定のどちらからも
+// 検出できなかった不具合の再発防止）
+// =====================================================================
+
+#[test]
+fn count_par_reduce_detects_reduction_chained_after_block_expression() {
+    let src = "let s: f32 = { let x = 1; data.par_iter() }.sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_reduction_chained_after_if_else_block_expression() {
+    let src = "let s: f32 = if c { a.par_iter() } else { b.par_iter() }.sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_reduction_chained_after_unsafe_block_expression() {
+    let src = "unsafe { data.par_iter() }.sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_reduction_chained_after_match_block_expression() {
+    let src = "match k { _ => data.par_iter() }.sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_ignores_reduction_chained_after_collected_block_expression() {
+    // ブロック本体の中で par_chunks → collect が同一連鎖上で完結して
+    // いる場合は、ブロックを「生きている並列マーカー」とみなさない
+    // （仮想マーカーを記録しない）。
+    let src = "let v = if c { data.par_chunks(4).map(f).collect::<Vec<_>>() } \
+               else { vec![] }.into_iter().sum::<f32>();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+// =====================================================================
+// 仮想マーカー（長さに依存しないブロック式連鎖検出）の回帰テスト
+// （敵対的レビュー指摘 Critical: 旧実装はテキストへ合成マーカー
+// 文字列を実際に書き込む方式だったため、ブロック本体が合成マーカーの
+// 最小長〈7 バイト〉未満だと検出できなかった。`{it}`・`{ acc }` の
+// ような短い汚染識別子 1 つだけのブロック式が典型例。`statement_own_view`
+// が返す仮想マーカー位置一覧〈テキストに何も書き込まない副チャネル〉
+// へ置き換えたことで、ブロック本体の長さに一切依存しなくなったことを
+// 固定する）
+// =====================================================================
+
+#[test]
+fn count_par_reduce_detects_short_tainted_identifier_block_packed() {
+    // 詰めた形 `{it}`／`{acc}`（4〜6 文字の識別子。旧実装の合成マーカー
+    // 最小長 7 バイトに満たず検出漏れしていた）。
+    let src = "let it = data.par_iter(); let acc = other.par_iter(); \
+               let s: f32 = if flag { it } else { acc }.sum();";
+    let packed = src.replace("{ it }", "{it}").replace("{ acc }", "{acc}");
+    assert_eq!(count_par_reduce_cooccurrences(&packed), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_short_tainted_identifier_block_spaced() {
+    // rustfmt が生成する `{ it }`（前後に空白を 1 つずつ挟む）形。
+    let src = "let it = data.par_iter(); let acc = other.par_iter(); \
+               let s: f32 = if flag { it } else { acc }.sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_short_tainted_identifier_in_match_arms() {
+    let src = "let a = data.par_iter(); let b = other.par_iter(); \
+               match k { 0 => {a}, _ => {b} }.sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_ignores_short_untainted_identifier_block() {
+    let src = "{x}.sum()";
     assert_eq!(count_par_reduce_cooccurrences(src), 0);
 }
