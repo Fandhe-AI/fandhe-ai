@@ -211,13 +211,22 @@ fn strip_comments_and_strings(content: &str) -> String {
 
 /// rayon 並列イテレータのマーカー（`.par_iter(`／`.par_chunks(`／
 /// `.par_chunks_mut(`／`.into_par_iter(`／`.par_iter_mut(`）と
-/// `.sum()`／`.reduce(`／`reduce_with(` が同一文（`;` 区切り）中に
-/// 共起する箇所を数える（分割依存の縮約——rayon の並列イテレータを
-/// そのまま `.sum()`／`.reduce(` へ流す典型パターンの検出。
-/// `docs/autodiff-determinism-mode-design.md` §2.3）。`.par_chunks_mut(`
-/// は GEMM 等の書き込み先チャンク分割で実際に使われるマーカーであり、
-/// これを欠くと backend-cpu の並列イテレータ使用箇所の一部が検出対象
-/// から漏れる（codex-review 指摘・PR #2274）。
+/// 縮約マーカー（`.sum()`／`.sum::<T>()` 等の型指定付き turbofish 呼び
+/// 出し／`.reduce(`／`reduce_with(`）が共起する箇所を数える（分割依存の
+/// 縮約——rayon の並列イテレータをそのまま `.sum()`／`.reduce(` へ流す
+/// 典型パターンの検出。`docs/autodiff-determinism-mode-design.md`
+/// §2.3）。`.par_chunks_mut(` は GEMM 等の書き込み先チャンク分割で実際に
+/// 使われるマーカーであり、これを欠くと backend-cpu の並列イテレータ
+/// 使用箇所の一部が検出対象から漏れる（codex-review 指摘・PR #2274）。
+///
+/// 検出は 2 段構成: (1) 同一文（`;` 区切り）中の共起（従来どおり）。
+/// (2) `let (mut )?IDENT = <par marker を含む式>;` で並列イテレータの
+/// 結果を変数へ代入し、後続の文で `IDENT.` に対して縮約マーカーを
+/// 呼び出す「変数代入を挟んで文をまたぐ並列縮約」（同一文分割のみでは
+/// 検出漏れになる。codex-review 指摘・PR #2274）。縮約マーカーの側も
+/// `.sum(` 前方一致に加え `.sum::<` を別マーカーとして扱う。`.sum(` は
+/// `.sum::<f32>()` のような turbofish では `sum` の直後に `(` が来ず
+/// `::<` が挟まるため単独では検出できない。
 fn count_par_reduce_cooccurrences(content: &str) -> usize {
     let cleaned = strip_comments_and_strings(content);
     let par_markers = [
@@ -227,14 +236,60 @@ fn count_par_reduce_cooccurrences(content: &str) -> usize {
         ".into_par_iter(",
         ".par_iter_mut(",
     ];
-    let reduce_markers = [".sum()", ".reduce(", "reduce_with("];
-    cleaned
-        .split(';')
-        .filter(|stmt| {
-            par_markers.iter().any(|m| stmt.contains(m))
-                && reduce_markers.iter().any(|m| stmt.contains(m))
-        })
-        .count()
+    let reduce_markers = [".sum(", ".sum::<", ".reduce(", "reduce_with("];
+
+    let statements: Vec<&str> = cleaned.split(';').collect();
+
+    // 並列イテレータの結果が代入された識別子集合（文をまたいだ検出用）。
+    // 一度汚染された識別子は関数末尾まで汚染済みとみなす保守的近似
+    // （再代入・シャドーイングの追跡はしない。fail-closed 側に倒す）。
+    let mut tainted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut count = 0usize;
+
+    for stmt in &statements {
+        let has_par = par_markers.iter().any(|m| stmt.contains(m));
+        let has_reduce = reduce_markers.iter().any(|m| stmt.contains(m));
+
+        if has_par && has_reduce {
+            // (1) 同一文中の共起。
+            count += 1;
+        } else if has_reduce {
+            // (2) 過去の文で汚染された識別子に対する縮約呼び出し。
+            if tainted
+                .iter()
+                .any(|ident| stmt.contains(&format!("{ident}.")))
+            {
+                count += 1;
+            }
+        }
+
+        if has_par && let Some(ident) = assigned_identifier(stmt) {
+            tainted.insert(ident);
+        }
+    }
+
+    count
+}
+
+/// `let (mut )?IDENT = ...` 形の文から代入先識別子を抽出する
+/// （[`count_par_reduce_cooccurrences`] の文をまたぐ汚染追跡が使う）。
+/// 該当しない場合は `None`。
+fn assigned_identifier(stmt: &str) -> Option<&str> {
+    let rest = stmt.trim_start().strip_prefix("let ")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+    let ident_end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+    let ident = &rest[..ident_end];
+    if ident.is_empty() {
+        return None;
+    }
+    let after = rest[ident_end..].trim_start();
+    // `==`（比較）を代入と誤認しないよう、単一の `=` のみを代入とみなす。
+    if after.starts_with('=') && !after.starts_with("==") {
+        Some(ident)
+    } else {
+        None
+    }
 }
 
 /// `#[cfg(all(test, target_arch = "aarch64"))]` ゲート済み（`src/
@@ -451,4 +506,57 @@ fn cpu_backend_mlp_forward_backward_is_thread_count_invariant() {
         "決定性モード ON/OFF で同一スレッド数でも結果が変わった\
          （no-op 契約違反）"
     );
+}
+
+// =====================================================================
+// count_par_reduce_cooccurrences の検出回帰テスト
+// （codex-review 指摘・PR #2274: 文をまたぐ並列縮約・turbofish 縮約の
+// 検出漏れの再発防止）
+// =====================================================================
+
+#[test]
+fn count_par_reduce_detects_same_statement_cooccurrence() {
+    let src = "let s: f32 = data.par_iter().sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_variable_assignment_across_statements() {
+    // 変数代入を挟んで文をまたぐ並列縮約（allowlist 対象ファイル内で
+    // 検査をすり抜けていたパターン。codex-review 指摘・PR #2274）。
+    let src = "let it = data.par_iter(); let s: f32 = it.sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_turbofish_sum() {
+    // `.sum::<f32>()` は `.sum(` 前方一致では検出できない
+    // （codex-review 指摘・PR #2274）。
+    let src = "let s = data.par_iter().sum::<f32>();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_ignores_unrelated_statements() {
+    let src = "let x = 1 + 2; let y = data.iter().sum::<f32>(); let z = data.par_iter().count();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+#[test]
+fn count_par_reduce_does_not_double_count_same_statement_hit() {
+    // 同一文で共起した場合は (1) の分岐だけがカウントし、(2) の分岐と
+    // 二重計上しない。
+    let src = "let s: f32 = data.par_iter().sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn assigned_identifier_extracts_let_binding() {
+    assert_eq!(assigned_identifier("let x = 1"), Some("x"));
+    assert_eq!(
+        assigned_identifier("let mut y = data.par_iter()"),
+        Some("y")
+    );
+    assert_eq!(assigned_identifier("x == 1"), None);
+    assert_eq!(assigned_identifier("data.iter()"), None);
 }
