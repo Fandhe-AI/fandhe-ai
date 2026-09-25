@@ -11,9 +11,9 @@
 //! `Unsupported` でホスト参照実装へフォールバック）、専用カーネルなしで
 //! 到達可能。`crates/backend-*`・`crates/tensor-core` は変更しない
 //! （`crates/autodiff/src/rearrange_ops.rs` の境界検査ヘルパー 2 点
-//! （[`crate::rearrange_ops::checked_axis_len_as_i32`]・
-//! [`crate::rearrange_ops::checked_index_alloc_len`]）のみ `pub(crate)`
-//! へ昇格して共有する）。
+//! （`checked_axis_len_as_i32`・`checked_index_alloc_len`。いずれも
+//! `pub(crate)` で非公開のため rustdoc intra-doc link は張らずコード
+//! 表記のみとする）のみ `pub(crate)` へ昇格して共有する）。
 //!
 //! **facade 非公開（意図的）**: `crates/autodiff/src/rearrange_ops.rs`
 //! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
@@ -57,10 +57,13 @@
 //! `diagonal: isize` は `unsigned_abs()`（`isize::MIN` 対策）・
 //! `checked_add`・`saturating_sub` のみで扱い、生の `usize ± isize` 演算
 //! は行わない。マスク・添字の確保前サイズ検査は
-//! [`crate::rearrange_ops::checked_axis_len_as_i32`]・
-//! [`crate::rearrange_ops::checked_index_alloc_len`] を経由する
-//! （`rearrange_ops` と同じ 1 GiB 実用上限）。本番経路で `unwrap()`／
-//! `expect()` は使わない。
+//! `checked_axis_len_as_i32`・`checked_index_alloc_len` を経由する
+//! （`rearrange_ops` と同じ 1 GiB 実用上限）。**要素数が 0 の場合は
+//! 確保前サイズ検査を通過しうるが、個々の軸長（`m`／`n`）は無関係に
+//! 巨大でありうる（`broadcast_to` の stride-0 view 由来）ため、
+//! `build_tril_triu_mask` は総要素数 0 を検査前に早期リターンし、
+//! 軸長に比例するループへ入らない（REQ-8。詳細は同関数のコメント）。
+//! 本番経路で `unwrap()`／`expect()` は使わない。
 
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
@@ -70,11 +73,24 @@ use crate::var::Var;
 
 /// `tril`／`triu` 共用のマスク構築（末尾 2 軸 `[m, n]`）。`fill_where`
 /// が真を返す位置（`(i, j)` の 0-based 行・列添字）を `true`（＝
-/// [`Var::masked_fill`] で 0 に落とす対象）とする `Tensor<bool>` を
+/// `Var::masked_fill` で 0 に落とす対象）とする `Tensor<bool>` を
 /// ホスト側で組み立てる。`checked_index_alloc_len` で `m * n` 要素の
 /// 確保前サイズを検査してから `Vec<bool>` を確保する（`broadcast_to`
 /// 由来の stride-0 view で `m`／`n` が実体を伴わず巨大になりうるため。
 /// `rearrange_ops::flip_on_broadcast_view_...` と同じ脅威モデル）。
+///
+/// # 早期リターン（要素数 0。codex-review 指摘・イシュー #2144）
+///
+/// `total == m * n == 0` は `checked_index_alloc_len` の確保前サイズ
+/// 検査（バイト数上限）を無条件に通過するが、`m`・`n` の一方が 0 でも
+/// 他方は `broadcast_to(&[usize::MAX, 0])` 等で無関係に巨大でありうる。
+/// 下の 2 重ループは外側を `m` 回・内側を `n` 回回す構造のため、`n == 0`
+/// でも外側ループ自体は `m` 回実行され（`m` が `usize::MAX` 相当なら
+/// 実質ハングする）、`m == 0` の側は対称的に安全（外側ループが 0 回で
+/// 終わるため `n` の大小に関係しない）。この非対称性を確保前サイズ検査
+/// だけでは検出できないため、`total == 0` を専用に検査してループへ入る
+/// 前に空の `Tensor` を返す（要素数 0 なのでマスク内容は意味を持たず、
+/// 空データで確定できる）。
 fn build_tril_triu_mask(
     m: usize,
     n: usize,
@@ -85,6 +101,9 @@ fn build_tril_triu_mask(
         .ok_or(ShapeError::ElementCountOverflow)
         .map_err(AutodiffError::Shape)?;
     checked_index_alloc_len(total)?;
+    if total == 0 {
+        return Tensor::new(Vec::new(), &[m, n]).map_err(AutodiffError::Shape);
+    }
     let mut data = Vec::with_capacity(total);
     for i in 0..m {
         let i64_i = i as i64;
@@ -117,7 +136,8 @@ fn diagonal_as_i64(diagonal: isize) -> i64 {
 ///
 /// `diagonal >= n - 1`（`n` は列数）のときは全要素が下三角に含まれる
 /// ため `x` をそのまま返す（`rearrange_ops::flip` の `dims.is_empty()`
-/// と同型）。
+/// と同型）。`m == 0` または `n == 0`（要素数 0）のときも同様に早期
+/// リターンする（`triu` と対称。イシュー #2144 codex-review 是正）。
 pub fn tril<'t>(x: &Var<'t>, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let rank = shape.len();
@@ -130,8 +150,20 @@ pub fn tril<'t>(x: &Var<'t>, diagonal: isize) -> Result<Var<'t>, AutodiffError> 
     let m = shape[rank - 2];
     let n = shape[rank - 1];
     let k = diagonal_as_i64(diagonal);
-    // `j - i > k` が常に偽 ⟺ 最大値 `(n-1) - 0` が `k` 以下。
-    if n == 0 || (n as i64 - 1) <= k {
+    // `j - i > k` が常に偽 ⟺ 最大値 `(n-1) - 0` が `k` 以下。`m == 0` も
+    // 全要素が空で自明に「下三角のみ」を満たすため合わせて早期
+    // リターンする（`triu` の `m == 0` 分岐と対称。旧実装は `n` のみを
+    // 検査しており `m == 0` かつ `n` が巨大な場合に無駄な
+    // `masked_fill` ノードを積んでいた）。`n as i64` の生キャストは
+    // `n > i64::MAX`（`broadcast_to` の stride-0 view でしか到達しない
+    // 域）でビット列の符号付き再解釈により静かに誤った値へ丸まる
+    // （codex-review 指摘・イシュー #2144。`i64::try_from` で変換不能
+    // なら早期リターンの可否を判定できないため素通りさせ、
+    // `build_tril_triu_mask` 側の総要素数 0 検査・確保前サイズ検査に
+    // fail-closed で委ねる——`diagonal_as_i64` が `isize → i64` の無損失
+    // 変換に `as` を使うのとは対照的に、こちらは `usize → i64` が
+    // 損失を伴いうるため `TryFrom` を使う）。
+    if n == 0 || m == 0 || i64::try_from(n).is_ok_and(|n64| n64 - 1 <= k) {
         return Ok(*x);
     }
     let mask = build_tril_triu_mask(m, n, |i, j| j - i > k)?;
@@ -144,7 +176,9 @@ pub fn tril<'t>(x: &Var<'t>, diagonal: isize) -> Result<Var<'t>, AutodiffError> 
 /// # 早期リターン（ノードを積まない）
 ///
 /// `diagonal <= -(m - 1)`（`m` は行数）のときは全要素が上三角に含まれ
-/// るため `x` をそのまま返す。
+/// るため `x` をそのまま返す。`m == 0` または `n == 0`（要素数 0）の
+/// ときも同様に早期リターンする（`tril` と対称。イシュー #2144
+/// codex-review 是正）。
 pub fn triu<'t>(x: &Var<'t>, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let rank = shape.len();
@@ -157,8 +191,16 @@ pub fn triu<'t>(x: &Var<'t>, diagonal: isize) -> Result<Var<'t>, AutodiffError> 
     let m = shape[rank - 2];
     let n = shape[rank - 1];
     let k = diagonal_as_i64(diagonal);
-    // `j - i < k` が常に偽 ⟺ 最小値 `0 - (m-1)` が `k` 以上。
-    if m == 0 || -((m as i64) - 1) >= k {
+    // `j - i < k` が常に偽 ⟺ 最小値 `0 - (m-1)` が `k` 以上。`n == 0` も
+    // 全要素が空で自明に「上三角のみ」を満たすため合わせて早期
+    // リターンする（`tril` の `n == 0` 分岐と対称。旧実装は `m` のみを
+    // 検査しており `n == 0` かつ `m` が巨大な場合に無駄な
+    // `masked_fill` ノードを積んでいた）。`m as i64` の生キャストが
+    // `m > i64::MAX` で符号付き再解釈により静かに誤った値へ丸まる問題
+    // （codex-review 指摘・イシュー #2144）は `tril` と同じ理由で
+    // `i64::try_from` に置き換え、変換不能時は `build_tril_triu_mask`
+    // 側の総要素数 0 検査・確保前サイズ検査へ fail-closed で委ねる。
+    if m == 0 || n == 0 || i64::try_from(m).is_ok_and(|m64| -(m64 - 1) >= k) {
         return Ok(*x);
     }
     let mask = build_tril_triu_mask(m, n, |i, j| j - i < k)?;
@@ -205,9 +247,31 @@ fn diag_1d_to_2d<'t>(
     if k_abs == 0 {
         return Ok(diag_square);
     }
-    // `N = n + k_abs` は下記 `pad` 内で `pad_out_shape` が checked_add で
-    // 確定させるため、ここでの独自オーバーフロー検査は不要（`Var::pad`
-    // の契約に委ねる）。
+    // `N = n + k_abs` の確保前サイズ検査（codex-review 指摘と同型・
+    // イシュー #2144）: `Var::pad`（`pad_out_shape`）は `usize`
+    // オーバーフローのみを検査し、`checked_numel_for` の実用上限は
+    // `isize::MAX` バイト（約 8 EiB）であって `MAX_INDEX_ALLOC_BYTES`
+    // （1 GiB）ほど厳しくない。さらに `eval::pad`（バックエンドが
+    // `Unsupported` を返した場合のホスト参照実装）は `out_shape` が
+    // 空を含むかの検査（`in_shape.contains(&0)`）より**先に**
+    // `vec![value; out_numel]` を確保するため、`n == 0`（本経路に
+    // 到達する空入力）でも `diagonal` だけに比例した巨大確保へ入り
+    // うる。`n` は既に `checked_axis_len_as_i32` で `i32` 範囲に収まる
+    // ことを確認済みのため `checked_add` は失敗しないが、`N * N` は
+    // 依然オーバーフロー・実用上限双方を検査する必要がある。
+    let n_padded = n
+        .checked_add(k_abs)
+        .ok_or(ShapeError::ElementCountOverflow)
+        .map_err(AutodiffError::Shape)?;
+    let padded_total = n_padded
+        .checked_mul(n_padded)
+        .ok_or(ShapeError::ElementCountOverflow)
+        .map_err(AutodiffError::Shape)?;
+    // `checked_index_alloc_len` は本来 `i32` 添字ベクタ向けだが、
+    // `size_of::<i32>() == size_of::<f32>() == 4` バイトのため `pad`
+    // 出力（`f32` テンソル）の確保前バイト数検査にもそのまま転用できる
+    // （数値的に同じ 1 GiB 上限が成立する）。
+    checked_index_alloc_len(padded_total)?;
     if diagonal > 0 {
         diag_square.pad(&[(0, k_abs), (k_abs, 0)], 0.0)
     } else {
@@ -940,5 +1004,178 @@ mod tests {
             err,
             AutodiffError::Shape(ShapeError::ElementCountOverflow)
         ));
+    }
+
+    // --- エラー系: 要素数 0・軸長巨大（codex-review P0 指摘・イシュー
+    //     #2144。`build_tril_triu_mask` の総要素数 0 早期リターン）---
+
+    #[test]
+    fn build_tril_triu_mask_zero_total_huge_m_does_not_hang() {
+        // `[1, 0]` を `broadcast_to(&[usize::MAX, 0])` した場合と同じ
+        // `(m, n)` 組（外側ループの回数を律速するのは `m` 自体であり、
+        // `n == 0`〈総要素数 0〉でも `checked_index_alloc_len` の確保前
+        // サイズ検査だけでは検出できないケース）。修正前は `for i in
+        // 0..m` が `usize::MAX` 回まわりテストがハングしていた。
+        let mask = build_tril_triu_mask(usize::MAX, 0, |_, _| true).unwrap();
+        assert_eq!(mask.shape(), &[usize::MAX, 0]);
+        assert!(mask.host_slice().is_empty());
+    }
+
+    #[test]
+    fn build_tril_triu_mask_zero_total_huge_n_does_not_hang() {
+        // 対称形（`m == 0`・`n` が巨大）。外側ループが `m == 0` 回のため
+        // 修正前から安全だったが、総要素数 0 早期リターンの一般性を示す
+        // 回帰として合わせて固定する。
+        let mask = build_tril_triu_mask(0, usize::MAX, |_, _| true).unwrap();
+        assert_eq!(mask.shape(), &[0, usize::MAX]);
+        assert!(mask.host_slice().is_empty());
+    }
+
+    #[test]
+    fn triu_on_broadcast_huge_rows_zero_cols_does_not_hang_and_pushes_no_node() {
+        // `triu` は修正後 `n == 0` を早期リターンの第一分岐で直接検査する
+        // ため（`tril` と対称化。codex-review 指摘・イシュー #2144）、
+        // `m = usize::MAX`・`n = 0` の組み合わせは `build_tril_triu_mask`
+        // へ到達せず新規ノードも積まない。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[1, 0]));
+        let big = x.broadcast_to(&[usize::MAX, 0]).unwrap();
+        let before = tape.len();
+        let out = triu(&big, 3).unwrap();
+        assert_eq!(tape.len(), before);
+        assert_eq!(out.to_tensor().shape(), &[usize::MAX, 0]);
+    }
+
+    #[test]
+    fn tril_on_broadcast_huge_rows_zero_cols_does_not_hang_and_pushes_no_node() {
+        // `tril` は元から `n == 0` を早期リターンの第一分岐で直接検査
+        // するため `build_tril_triu_mask` へは到達しない。修正後の
+        // `triu` と対称なことを固定する回帰。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[1, 0]));
+        let big = x.broadcast_to(&[usize::MAX, 0]).unwrap();
+        let before = tape.len();
+        let out = tril(&big, 0).unwrap();
+        assert_eq!(tape.len(), before);
+        assert_eq!(out.to_tensor().shape(), &[usize::MAX, 0]);
+    }
+
+    #[test]
+    fn narrow_zero_len_on_huge_nonzero_broadcast_does_not_densify() {
+        // `diag` の 2-D → 1-D 経路（`diag_2d_to_1d`）は `l == 0`（抽出
+        // 長 0。`diagonal` が軸範囲外）のとき `x.narrow(0, 0, 0)` を
+        // 呼ぶ。`Var::narrow` は `push_view` の契約上 `self` を先に
+        // 実体化するが、`BroadcastTo` view の実体化はストライド 0 の
+        // 共有バッファのまま完結し（`view_zero_alloc.rs` の
+        // `check_broadcast_to_forward_is_near_zero_alloc` と同じ
+        // 特性）、論理サイズに比例した新規 dense 確保は発生しない
+        // （`m * n` が `usize` オーバーフローしない `[usize::MAX, 1]`
+        // でも実測 0 秒で完了することを固定する回帰。`build_tril_
+        // triu_mask` の `Vec<bool>` 確保とは異なり、`narrow` 自体は
+        // `diag_2d_to_1d` 側の追加検査を要しない）。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0], &[1, 1]));
+        let big = x.broadcast_to(&[usize::MAX, 1]).unwrap();
+        let out = big.narrow(0, 0, 0).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[0, 1]);
+    }
+
+    // --- diag: 1-D -> 2-D の `pad` 確保前サイズ検査（codex-review
+    //     指摘と同型。`diagonal` は shape 由来ではなくユーザー直接指定
+    //     のため既存の軸長検査（`checked_axis_len_as_i32(n)`）が守らない
+    //     経路。イシュー #2144）---
+
+    #[test]
+    fn diag_1d_to_2d_huge_diagonal_on_empty_input_is_rejected_before_alloc() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[0]));
+        // N = n + k_abs = 0 + 300_000_000 → N^2 ≈ 9e16 要素。修正前は
+        // `pad` が `vec![0.0; N*N]` を確保しようとしていた（`eval::pad`
+        // は `in_shape.contains(&0)` を確保後にしか検査しない）。
+        let err = diag(&x, 300_000_000).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn diag_1d_to_2d_huge_negative_diagonal_on_empty_input_is_rejected_before_alloc() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[0]));
+        let err = diag(&x, -300_000_000).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    // --- outer: 要素数 0・軸長巨大（`build_tril_triu_mask` と同型の
+    //     脅威モデルの横展開確認。`outer` は `mul` 1 回のみで新規 Vec
+    //     確保を行わないため、ここでは「ハングしない」ことのみを固定
+    //     する回帰。理由は表（PR 報告）を参照）---
+
+    #[test]
+    fn outer_huge_a_zero_b_does_not_hang() {
+        let tape = Tape::new();
+        let a = tape.var(&t(vec![1.0], &[1]));
+        let big_a = a.broadcast_to(&[usize::MAX]).unwrap();
+        let b = tape.var(&t(vec![], &[0]));
+        let out = outer(&big_a, &b).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[usize::MAX, 0]);
+    }
+
+    #[test]
+    fn outer_zero_a_huge_b_does_not_hang() {
+        let tape = Tape::new();
+        let a = tape.var(&t(vec![], &[0]));
+        let b = tape.var(&t(vec![1.0], &[1]));
+        let big_b = b.broadcast_to(&[usize::MAX]).unwrap();
+        let out = outer(&a, &big_b).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[0, usize::MAX]);
+    }
+
+    // --- diag/trace: 2-D -> 1-D の `l == 0` 分岐（`narrow(0,0,0)` →
+    //     `gather(1, idx[0,1])`）が軸長巨大の側でも通ることの固定
+    //     （advisor 指摘・イシュー #2144。既存テストは `[0, 3]`・
+    //     `[2,2]+k=100` のみで `[m, 0]`／`[0, m]` を一度も通していな
+    //     かった）---
+
+    #[test]
+    fn diag_2d_huge_rows_zero_cols_returns_empty() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[1, 0]));
+        let big = x.broadcast_to(&[usize::MAX, 0]).unwrap();
+        let out = diag(&big, 0).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[0]);
+    }
+
+    #[test]
+    fn diag_2d_zero_rows_huge_cols_returns_empty() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[0, 1]));
+        let big = x.broadcast_to(&[0, usize::MAX]).unwrap();
+        let out = diag(&big, 0).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[0]);
+    }
+
+    #[test]
+    fn diag_2d_small_zero_cols_returns_empty() {
+        // 巨大軸を介さず `gather` の `dim` 軸不一致契約
+        // （`gather_out_shape` は `dim` 軸を index 側が input 側より
+        // 大きくても許容する）だけを切り出して確認する小規模版。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[3, 0]));
+        let out = diag(&x, 0).unwrap();
+        assert_eq!(out.to_tensor().shape(), &[0]);
+    }
+
+    #[test]
+    fn trace_on_huge_rows_zero_cols_is_zero() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[1, 0]));
+        let big = x.broadcast_to(&[usize::MAX, 0]).unwrap();
+        let out = trace(&big).unwrap();
+        assert_eq!(out.to_tensor().host_slice()[0], 0.0);
     }
 }
