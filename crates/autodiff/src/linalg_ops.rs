@@ -751,6 +751,66 @@ mod tests {
         );
     }
 
+    /// PR #2268 codex-review〈P1〉指摘の回帰（スケールの小さいフルランク
+    /// 行列）: `eval::linalg::svd_vjp_rank_limited_f64` の分母縮退判定を
+    /// 絶対閾値 `1e-9` のまま使うと、`σ_j²−σ_i²` 自体がスケールの二乗で
+    /// 小さくなる（例 `σ=[2e-6, 1e-6]`）フルランク行列で、実際には
+    /// 縮退していない特異値ペアまで `InvalidArgument` として誤って
+    /// 拒否してしまう（相対閾値への是正で解消。`eval::linalg::
+    /// svd_vjp_rank_limited_f64` の doc 参照）。切り捨てが起きない
+    /// （`rcond` 既定＝`max(m,n)・f32::EPSILON` は `σ=1e-6` を大幅に
+    /// 下回る）フルランク・非対角行列で確認する。
+    #[test]
+    fn pinv_gradient_matches_finite_difference_small_scale_full_rank() {
+        // 特異値が概ね [2e-6, 1e-6] 程度になるよう選んだ、非対角・
+        // フルランクの小スケール行列（対角行列だと `svd` が座標軸に
+        // 一致する自明な U／V を返し、判定分岐の非対角ケースを検査
+        // できないため避ける）。
+        let scale = 1e-6f32;
+        let base: Vec<f32> = [2.0, 0.3, 0.4, 1.0].iter().map(|v| v * scale).collect();
+        // 相対摂動（数値差分の丸め誤差を避けるため、値のスケールに
+        // 対して `1e-3` 相対の摂動幅を使う）。
+        let eps = scale * 1e-3;
+        let eval_fn = |data: &[f32], out_idx: usize| -> f32 {
+            let tape = Tape::new();
+            let x = tape.var(&t(data.to_vec(), &[2, 2]));
+            let p = pinv(&x, None).unwrap();
+            p.to_tensor().host_slice()[out_idx]
+        };
+        for out_idx in 0..4 {
+            let tape = Tape::new();
+            let x = tape.var(&t(base.clone(), &[2, 2]));
+            let p = pinv(&x, None).unwrap_or_else(|e| {
+                panic!("小スケールのフルランク行列で pinv が誤って失敗した: {e:?}")
+            });
+            let out_r = out_idx / 2;
+            let out_c = out_idx % 2;
+            let grads = tape
+                .backward(&p.narrow(0, out_r, 1).unwrap().narrow(1, out_c, 1).unwrap())
+                .unwrap();
+            let dx = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+            for i in 0..4 {
+                let mut plus = base.clone();
+                plus[i] += eps;
+                let mut minus = base.clone();
+                minus[i] -= eps;
+                let numeric = (eval_fn(&plus, out_idx) - eval_fn(&minus, out_idx)) / (2.0 * eps);
+                // 解析値・数値値ともに `1/scale` オーダーのため、絶対
+                // 許容誤差ではなくスケールに対する相対許容誤差で比較する
+                // （既存の `pinv_gradient_matches_finite_difference_
+                // full_rank` は値がオーダー 1 のため絶対許容誤差
+                // `5e-2` で足りるが、本テストは値が `1e-6` オーダーの
+                // ため同じ絶対許容誤差では意味を持たない）。
+                let rel_scale = numeric.abs().max(dx[i].abs()).max(1.0 / scale);
+                assert!(
+                    (numeric - dx[i]).abs() < 5e-2 * rel_scale,
+                    "out_idx={out_idx} i={i} numeric={numeric} analytic={}",
+                    dx[i]
+                );
+            }
+        }
+    }
+
     /// `eval::linalg::lstsq` の `m==0` 早期リターンは `n * k_cols` の
     /// 乗算を経て出力バッファを確保するが、`m` が非ゼロを要求しない
     /// ため `n`・`k_cols` を巨大にすると `checked_mul` なしでは
