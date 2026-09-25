@@ -2995,7 +2995,12 @@ pub(crate) fn alpha_dropout_mask_and_bias(
     let uniform = fandhe_ai_tensor_core::rng::rand(shape)
         .map_err(AutodiffError::Shape)?
         .contiguous();
-    let u = uniform.as_slice().unwrap_or_default();
+    let u = uniform.as_slice().ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "alpha_dropout_mask_and_bias: rng::rand の結果が contiguous でない（内部不変条件違反）"
+                .to_string(),
+        )
+    })?;
     let mut noise = Vec::with_capacity(u.len());
     let mut bias = Vec::with_capacity(u.len());
     for &uv in u {
