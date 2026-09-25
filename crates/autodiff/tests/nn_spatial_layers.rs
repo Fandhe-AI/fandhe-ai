@@ -114,6 +114,25 @@ fn conv_transpose1d_forward_rejects_rank_mismatch_without_leaving_orphan_nodes()
 }
 
 #[test]
+fn conv_transpose1d_forward_rejects_channel_mismatch_without_leaving_orphan_nodes() {
+    // rank は input/weight ともに 3 で一致するが、input の Cin
+    // （4）が weight の in_channels（2）と食い違う形状。reshape
+    // 自体は成立してしまう（numel は self 完結の検査のため）ため、
+    // x4/w4 の reshape をチャンネル数検証より先に行うと Err 経路で
+    // view ノードがテープに孤児として残る（イシュー #2159 レビュー
+    // 指摘・codex／Cursor Bugbot 両方。#2276）。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let layer = ConvTranspose1d::new(2, 3, 3, 1, 0, 0, 1, 1, true, 5).unwrap();
+    let vars = layer.bind(&tape);
+    let x_cin_mismatch = tape.var(&t(vec![1.0; 4 * 5], &[1, 4, 5]));
+    let len_before = tape.len();
+
+    assert!(vars.forward(&x_cin_mismatch).is_err());
+
+    assert_eq!(tape.len(), len_before, "孤児ノードが残っている");
+}
+
+#[test]
 fn conv_transpose1d_from_parameters_rejects_bias_shape_mismatch() {
     let weight = t(vec![1.0; 2 * 3 * 3], &[2, 3, 3]);
     let bad_bias = t(vec![1.0, 2.0], &[2]);

@@ -2262,11 +2262,17 @@ impl<'t> ConvTranspose1dVars<'t> {
     /// `input`／`weight` を `[N, Cin, 1, L]`／`[Cin, Cout/groups, 1,
     /// k]` へ reshape し `Var::conv_transpose2d`（#2067）へ委譲した
     /// あと `[N, Cout, Lout]` へ戻す（[`crate::var::Var::conv1d`] と
-    /// 同じ「reshape 併合」設計。追加の shape 検査自体は委譲先の
-    /// `Var::conv_transpose2d` に任せる——本関数では `Var::reshape`
-    /// が view ノードを tape へ push するため、reshape より前に rank
-    /// 検査・tape 一致検査だけを済ませ、`Err` 経路で孤児ノードを
-    /// 残さない）。
+    /// 同じ「reshape 併合」設計）。`Var::reshape` は view ノードを
+    /// tape へ push するため、`forward_host`（同ファイル・doc
+    /// 「エラー型の一致契約」参照）と**同じ検査順序**（①rank →
+    /// ②`Conv2dParams::new` → ③`output_padding < stride` →
+    /// ④4 次元 `conv_transpose2d_out_shape` → ⑤bias shape）を
+    /// x4/w4 の reshape より前に純粋な shape 計算（形状値のみ・tape
+    /// 操作なし）として完了させ、`Err` 経路で孤児ノードを残さない
+    /// （イシュー #2159 レビュー指摘・codex／Cursor Bugbot 両方）。
+    /// `Var::conv_transpose2d` 内部でも同じ検査が再実行されるが、
+    /// それは reshape 後の 2 回目の検査であり本関数のここでの検査を
+    /// 代替しない。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.check_same_tape(&self.weight)?;
         if let Some(b) = self.bias.as_ref() {
@@ -2291,8 +2297,44 @@ impl<'t> ConvTranspose1dVars<'t> {
         let (n, cin, l) = (in_shape[0], in_shape[1], in_shape[2]);
         let (cin_w, cout_g, k) = (weight_shape[0], weight_shape[1], weight_shape[2]);
 
-        let x4 = input.contiguous()?.reshape(&[n, cin, 1, l])?;
-        let w4 = self.weight.contiguous()?.reshape(&[cin_w, cout_g, 1, k])?;
+        let params = Conv2dParams::new(
+            [1, k],
+            [1, self.stride],
+            [0, self.padding],
+            [1, self.dilation],
+            self.groups,
+        )
+        .map_err(AutodiffError::Backend)?;
+        if self.output_padding >= self.stride {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ConvTranspose1dVars::forward: output_padding ({}) must be < stride ({})",
+                self.output_padding, self.stride
+            )));
+        }
+
+        let in_shape_4d = vec![n, cin, 1, l];
+        let weight_shape_4d = vec![cin_w, cout_g, 1, k];
+        let out_shape_4d = conv_transpose2d_out_shape(
+            &in_shape_4d,
+            &weight_shape_4d,
+            &params,
+            [0, self.output_padding],
+        )
+        .map_err(AutodiffError::Shape)?;
+        let cout = out_shape_4d[1];
+        let lout = out_shape_4d[3];
+
+        if let Some(ref bias) = self.bias
+            && bias.shape() != [cout]
+        {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: bias.shape(),
+                rhs: vec![cout],
+            }));
+        }
+
+        let x4 = input.contiguous()?.reshape(&in_shape_4d)?;
+        let w4 = self.weight.contiguous()?.reshape(&weight_shape_4d)?;
         let out4 = x4.conv_transpose2d(
             &w4,
             self.bias.as_ref(),
@@ -2302,9 +2344,6 @@ impl<'t> ConvTranspose1dVars<'t> {
             [1, self.dilation],
             self.groups,
         )?;
-        let out4_shape = out4.shape();
-        let cout = out4_shape[1];
-        let lout = out4_shape[3];
         out4.reshape(&[n, cout, lout])
     }
 }
