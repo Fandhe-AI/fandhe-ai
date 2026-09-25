@@ -29,7 +29,7 @@
 //! `Tensor::get`（境界チェック付き安全アクセス）のみを用い、`unsafe`／
 //! `unwrap`／`expect` は使わない。
 
-use fandhe_ai_tensor_core::{Conv2dParams, ShapeError, Tensor, conv_out_len};
+use fandhe_ai_tensor_core::{Conv2dParams, Conv3dParams, ShapeError, Tensor, conv_out_len};
 
 /// shape の要素数積を `checked_mul` の畳み込みで検査する
 /// （`constant_pad.rs::checked_numel` と同型。クレート内で `pub(crate)`
@@ -225,10 +225,170 @@ pub fn col2im(
     Tensor::new(out, input_shape)
 }
 
+/// [`fandhe_ai_tensor_core::BackendOps::im2col3d`] の CPU 実装本体
+/// （イシュー #2158）。`out_shape` は呼び出し元（`ops.rs`）が
+/// [`fandhe_ai_tensor_core::im2col3d_out_shape`] で検査・確定済みの
+/// `[N, G, Cin_g·kD·kH·kW, Dout·Hout·Wout]` をそのまま渡す（[`im2col`]
+/// の空間 3 軸一般化）。
+///
+/// `K_g` 軸は `(c_in_g, kd, kh, kw)` の row-major・`P` 軸は
+/// `(od, oh, ow)` の row-major で並べる（設計 doc §16）。
+pub fn im2col3d(
+    input: &Tensor<f32>,
+    params: &Conv3dParams,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(out_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let (n_batch, _cin, d_in, h_in, w_in) = (
+        in_shape[0],
+        in_shape[1],
+        in_shape[2],
+        in_shape[3],
+        in_shape[4],
+    );
+    let groups = out_shape[1];
+    let k_g = out_shape[2];
+    let p = out_shape[3];
+    let cin_g = in_shape[1] / groups.max(1);
+    let [kd_k, kh_k, kw_k] = params.kernel_size();
+    let [sd, sh, sw] = params.stride();
+    let [pd, ph, pw] = params.padding();
+    let [dd, dh, dw] = params.dilation();
+    let d_out = conv_out_len(d_in, kd_k, sd, pd, dd)?;
+    let h_out = conv_out_len(h_in, kh_k, sh, ph, dh)?;
+    let w_out = conv_out_len(w_in, kw_k, sw, pw, dw)?;
+    debug_assert_eq!(
+        d_out.checked_mul(h_out).and_then(|v| v.checked_mul(w_out)),
+        Some(p),
+        "im2col3d: out_shape の P 軸が conv_out_len から再計算した Dout*Hout*Wout と一致しない（契約違反）"
+    );
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for g in 0..groups {
+            for k_idx in 0..k_g {
+                // k_idx を (c_g, kd, kh, kw) の row-major へ展開
+                // （kw が最内軸）。
+                let kw_ = k_idx % kw_k;
+                let rest = k_idx / kw_k;
+                let kh_ = rest % kh_k;
+                let rest = rest / kh_k;
+                let kd_ = rest % kd_k;
+                let c_g = rest / kd_k;
+                let c = g * cin_g + c_g;
+                for p_idx in 0..p {
+                    let ow = p_idx % w_out;
+                    let rest_p = p_idx / w_out;
+                    let oh = rest_p % h_out;
+                    let od = rest_p / h_out;
+                    let d_pos = im2col_input_pos(od, sd, kd_, dd, pd);
+                    let h_pos = im2col_input_pos(oh, sh, kh_, dh, ph);
+                    let w_pos = im2col_input_pos(ow, sw, kw_, dw, pw);
+                    let value = match (d_pos, h_pos, w_pos) {
+                        (Some(d), Some(h), Some(w)) if d < d_in && h < h_in && w < w_in => {
+                            input.get(&[n, c, d, h, w]).unwrap_or(0.0)
+                        }
+                        _ => 0.0,
+                    };
+                    let out_idx = ((n * groups + g) * k_g + k_idx) * p + p_idx;
+                    out[out_idx] = value;
+                }
+            }
+        }
+    }
+    Tensor::new(out, out_shape)
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::col2im3d`] の CPU 実装本体
+/// （イシュー #2158）。`d_col: [N, G, K_g, P]` を `input_shape:
+/// [N, Cin, D, H, W]` へ畳み戻す（[`im2col3d`] の随伴。[`col2im`] の
+/// 空間 3 軸一般化）。
+///
+/// 入力位置定常の走査で `(kd, kh, kw)` を row-major に加算し、`f64`
+/// アキュムレータへ逐次加算して最後に 1 回 `f32` へ downcast する
+/// （モジュール doc の数値契約）。
+pub fn col2im3d(
+    d_col: &Tensor<f32>,
+    input_shape: &[usize],
+    params: &Conv3dParams,
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(input_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), input_shape);
+    }
+    let (n_batch, cin, d_in, h_in, w_in) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+        input_shape[4],
+    );
+    let d_col_shape = d_col.shape();
+    let groups = d_col_shape[1];
+    let p = d_col_shape[3];
+    let cin_g = cin / groups.max(1);
+    let [kd_k, kh_k, kw_k] = params.kernel_size();
+    let [sd, sh, sw] = params.stride();
+    let [pd, ph, pw] = params.padding();
+    let [dd, dh, dw] = params.dilation();
+    let d_out = conv_out_len(d_in, kd_k, sd, pd, dd)?;
+    let h_out = conv_out_len(h_in, kh_k, sh, ph, dh)?;
+    let w_out = conv_out_len(w_in, kw_k, sw, pw, dw)?;
+    debug_assert_eq!(
+        d_out.checked_mul(h_out).and_then(|v| v.checked_mul(w_out)),
+        Some(p),
+        "col2im3d: d_col の P 軸が conv_out_len から再計算した Dout*Hout*Wout と一致しない（契約違反）"
+    );
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..cin {
+            let g = c / cin_g.max(1);
+            let c_g = c % cin_g.max(1);
+            for d in 0..d_in {
+                for h in 0..h_in {
+                    for w in 0..w_in {
+                        let mut acc: f64 = 0.0;
+                        for kd_ in 0..kd_k {
+                            let od = match col2im_out_idx(d, pd, kd_, dd, sd, d_out) {
+                                Some(v) => v,
+                                None => continue,
+                            };
+                            for kh_ in 0..kh_k {
+                                let oh = match col2im_out_idx(h, ph, kh_, dh, sh, h_out) {
+                                    Some(v) => v,
+                                    None => continue,
+                                };
+                                for kw_ in 0..kw_k {
+                                    let ow = match col2im_out_idx(w, pw, kw_, dw, sw, w_out) {
+                                        Some(v) => v,
+                                        None => continue,
+                                    };
+                                    let k_idx = ((c_g * kd_k + kd_) * kh_k + kh_) * kw_k + kw_;
+                                    let p_idx = (od * h_out + oh) * w_out + ow;
+                                    let v = d_col.get(&[n, g, k_idx, p_idx]).unwrap_or(0.0);
+                                    acc += f64::from(v);
+                                }
+                            }
+                        }
+                        let out_idx = (((n * cin + c) * d_in + d) * h_in + h) * w_in + w;
+                        out[out_idx] = acc as f32;
+                    }
+                }
+            }
+        }
+    }
+    Tensor::new(out, input_shape)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fandhe_ai_tensor_core::im2col_out_shape;
+    use fandhe_ai_tensor_core::{im2col_out_shape, im2col3d_out_shape};
 
     fn params(
         kernel_size: [usize; 2],
@@ -366,6 +526,146 @@ mod tests {
         let out_shape = im2col_out_shape(x.shape(), &p).unwrap();
         let ones = Tensor::new(vec![1.0f32; out_shape.iter().product()], &out_shape).unwrap();
         let back = col2im(&ones, x.shape(), &p);
+        assert!(back.is_ok());
+    }
+
+    fn params3d(
+        kernel_size: [usize; 3],
+        stride: [usize; 3],
+        padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+    ) -> Conv3dParams {
+        Conv3dParams::new(kernel_size, stride, padding, dilation, groups).unwrap()
+    }
+
+    #[test]
+    fn im2col3d_basic_no_pad_matches_naive_reference() {
+        // 2x2x2 入力（1 チャンネル・1 バッチ）・kernel=2x2x2・stride=1・
+        // padding=0 -> im2col3d は単一の 8 要素列。
+        let x = Tensor::new(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[1, 1, 2, 2, 2],
+        )
+        .unwrap();
+        let p = params3d([2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let out_shape = im2col3d_out_shape(x.shape(), &p).unwrap();
+        assert_eq!(out_shape, vec![1, 1, 8, 1]);
+        let col = im2col3d(&x, &p, &out_shape).unwrap();
+        assert_eq!(
+            col.contiguous().as_slice().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    #[test]
+    fn im2col3d_with_padding_writes_zero_for_out_of_bounds() {
+        let x = Tensor::new(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[1, 1, 2, 2, 2],
+        )
+        .unwrap();
+        let p = params3d([1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1], 1);
+        let out_shape = im2col3d_out_shape(x.shape(), &p).unwrap();
+        // Dout=Hout=Wout=4 (in=2,k=1,s=1,p=1,d=1 -> (2+2-0-1)/1+1=4)
+        assert_eq!(out_shape, vec![1, 1, 1, 64]);
+        let col = im2col3d(&x, &p, &out_shape).unwrap();
+        let data = col.contiguous().as_slice().unwrap().to_vec();
+        // kernel=1x1x1 なので padding 位置以外はそのまま入力座標が写る。
+        // P 軸は (od, oh, ow) row-major、od/oh/ow in [0,4)。入力位置に対応する
+        // p_idx = ((od)*4 + oh)*4 + ow で od=1..2 が入力の d=0..1 に対応
+        // （padding=1 のため入力座標 = out_idx - padding）。
+        let mut nonzero_count = 0;
+        for &v in &data {
+            if v != 0.0 {
+                nonzero_count += 1;
+            }
+        }
+        assert_eq!(nonzero_count, 8, "入力 8 要素がそれぞれ 1 箇所ずつ写る");
+    }
+
+    #[test]
+    fn im2col3d_dilation_and_groups() {
+        let x = Tensor::new(
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                16.0,
+            ],
+            &[1, 2, 2, 2, 2],
+        )
+        .unwrap();
+        let p = params3d([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 2);
+        let out_shape = im2col3d_out_shape(x.shape(), &p).unwrap();
+        assert_eq!(out_shape, vec![1, 2, 1, 8]);
+        let col = im2col3d(&x, &p, &out_shape).unwrap();
+        let data = col.contiguous().as_slice().unwrap().to_vec();
+        assert_eq!(&data[0..8], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(
+            &data[8..16],
+            &[9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        );
+    }
+
+    #[test]
+    fn im2col3d_empty_output_returns_empty_tensor() {
+        let x = Tensor::new(Vec::<f32>::new(), &[0, 1, 3, 3, 3]).unwrap();
+        let p = params3d([3, 3, 3], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let out_shape = im2col3d_out_shape(x.shape(), &p).unwrap();
+        assert_eq!(out_shape, vec![0, 1, 27, 1]);
+        let col = im2col3d(&x, &p, &out_shape).unwrap();
+        assert_eq!(col.numel(), 0);
+    }
+
+    #[test]
+    fn col2im3d_is_adjoint_of_im2col3d_no_overlap() {
+        // stride == kernel -> 窓が重ならないため col2im3d(im2col3d(x)) は
+        // 恒等（padding 0）。
+        let x = Tensor::new(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[1, 1, 2, 2, 2],
+        )
+        .unwrap();
+        let p = params3d([2, 2, 2], [2, 2, 2], [0, 0, 0], [1, 1, 1], 1);
+        let out_shape = im2col3d_out_shape(x.shape(), &p).unwrap();
+        let col = im2col3d(&x, &p, &out_shape).unwrap();
+        let back = col2im3d(&col, x.shape(), &p).unwrap();
+        assert_eq!(
+            back.contiguous().as_slice().unwrap(),
+            x.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn col2im3d_overlapping_windows_sum_contributions() {
+        // stride=1 < kernel=2 -> 窓が重なるため col2im3d は
+        // im2col3d の随伴（転置畳み込み）として重複加算する。
+        let x = Tensor::new(vec![1.0f32; 27], &[1, 1, 3, 3, 3]).unwrap();
+        let p = params3d([2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let out_shape = im2col3d_out_shape(x.shape(), &p).unwrap();
+        let col = im2col3d(&x, &p, &out_shape).unwrap();
+        let ones = Tensor::new(vec![1.0f32; col.numel()], col.shape()).unwrap();
+        let back = col2im3d(&ones, x.shape(), &p).unwrap();
+        let back_c = back.contiguous();
+        let data = back_c.as_slice().unwrap();
+        fn idx(d: usize, h: usize, w: usize, size: usize) -> usize {
+            (d * size + h) * size + w
+        }
+        // 中心セル (1,1,1) は 2^3 = 8 個の窓すべてに含まれる。
+        assert_eq!(data[idx(1, 1, 1, 3)], 8.0);
+        // 角セル (0,0,0) は 1 個の窓のみに含まれる。
+        assert_eq!(data[idx(0, 0, 0, 3)], 1.0);
+        // 辺セル (0,0,1) は 2 個の窓に含まれる。
+        assert_eq!(data[idx(0, 0, 1, 3)], 2.0);
+    }
+
+    #[test]
+    fn col2im3d_coordinate_underflow_does_not_panic() {
+        // 設計 doc §6.2「訂正 2」の回帰の 3D 版。
+        let x: Tensor<f32> = Tensor::zeros(&[1, 1, 3, 3, 3]).unwrap();
+        let p = params3d([3, 3, 3], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let out_shape = im2col3d_out_shape(x.shape(), &p).unwrap();
+        let ones = Tensor::new(vec![1.0f32; out_shape.iter().product()], &out_shape).unwrap();
+        let back = col2im3d(&ones, x.shape(), &p);
         assert!(back.is_ok());
     }
 }
