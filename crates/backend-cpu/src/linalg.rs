@@ -1219,8 +1219,17 @@ pub(crate) fn lstsq(
     let (m, n) = (ashape[0], ashape[1]);
     let bshape = b.shape();
     let k_cols = bshape[1];
+    // `autodiff::linalg_ops::lstsq`（呼び出し元の facade 経路）は
+    // 確保前に `ensure_alloc_fits_f32` で出力形状 `[n, k_cols]` を
+    // 検査するが、`BackendOps::linalg_lstsq` 経由で本関数へ直接到達
+    // する経路にはその検査がなく、`m==0` 早期リターンの `n * k_cols`
+    // 乗算が検査なしに overflow しうる（巨大 `n`・`k_cols` の空入力。
+    // PR #2268 codex-review〈Bugbot〉指摘）。ここで独立に検査する。
+    let out_numel = n
+        .checked_mul(k_cols)
+        .ok_or_else(|| invalid("linalg::lstsq: 出力形状 [n, k_cols] の要素数が usize を超える"))?;
     if m == 0 || n == 0 {
-        return build_tensor(vec![0.0; n * k_cols], &[n, k_cols]);
+        return build_tensor(vec![0.0; out_numel], &[n, k_cols]);
     }
     let rcond = resolve_rcond(rcond, m, n)?;
     let (u, s, vh) = svd(a)?;
@@ -1727,5 +1736,21 @@ mod tests {
             .to_tensor()
             .unwrap();
         approx_eq(&reconstructed, &a, 1e-3);
+    }
+
+    /// `lstsq` の `m==0` 早期リターンは `n * k_cols` の乗算を経て出力
+    /// バッファを確保するが、`checked_mul` なしでは巨大な `n`・`k_cols`
+    /// で `usize` overflow（debug panic／release wrap）しうる（PR #2268
+    /// codex-review〈Bugbot〉指摘。`crates/autodiff/src/eval/linalg.rs`
+    /// の呼び出し元経路にも同型の検査を追加済み）。
+    #[test]
+    fn lstsq_rejects_overflowing_output_shape_instead_of_panicking() {
+        let a = build_tensor(vec![], &[0, usize::MAX]).unwrap();
+        let b = build_tensor(vec![], &[0, 2]).unwrap();
+        let result = lstsq(&a, &b, None);
+        assert!(
+            matches!(result, Err(LinalgError::InvalidArgument(_))),
+            "巨大な出力形状は panic ではなく型付きエラーで拒否すべき: {result:?}"
+        );
     }
 }

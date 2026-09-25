@@ -460,6 +460,80 @@ mod tests {
         }
     }
 
+    /// `eigenvectors` 出力がグラフ上は損失へ到達する（`Op::EighVectors`
+    /// の VJP が呼ばれ `g_vectors` が `Some` になる）が、その値が
+    /// （ゼロ重みとの `mul` 等により）全要素厳密ゼロの場合、固有値が
+    /// 縮退（本テストは単位行列で `λ0 = λ1 = 1`）していても
+    /// `gA = V diag(gL) Vᵀ` は well-defined なため成功すべき（PR #2268
+    /// codex-review〈P2〉指摘: `g_vectors` が `Some` というだけで縮退
+    /// 判定してしまうと誤って `InvalidArgument` になっていた）。
+    #[test]
+    fn eigh_backward_with_zero_vector_grad_and_degenerate_eigenvalues_does_not_error() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]));
+        let out = eigh(&x).unwrap();
+        let zero = tape.var(&t(vec![0.0, 0.0, 0.0, 0.0], &[2, 2]));
+        let zero_evecs_contrib = out.eigenvectors.mul(&zero).unwrap().sum(None).unwrap();
+        let loss = out
+            .eigenvalues
+            .sum(None)
+            .unwrap()
+            .add(&zero_evecs_contrib)
+            .unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let da = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+        // gA = V diag(1,1) Vᵀ = V Vᵀ = I（下三角へ集約: 対角のみ 1）。
+        assert!((da[0] - 1.0).abs() < 1e-4);
+        assert_eq!(da[1], 0.0);
+        assert!(da[2].abs() < 1e-4);
+        assert!((da[3] - 1.0).abs() < 1e-4);
+    }
+
+    /// `eigh_gradient_matches_finite_difference_on_eigenvalues` は `B` を
+    /// 対称化してから forward するため、`Op::EighValues`／`Vectors` の
+    /// VJP が実際に返す勾配テンソル（下三角のみ非ゼロという forward の
+    /// 契約に対応するはず）は検証していない。本テストは
+    /// `Tape::backward` が返す `[n,n]` 勾配テンソルそのものを、下三角
+    /// 単一要素だけを直接摂動する有限差分と突合する（PR #2268
+    /// codex-review〈P1〉指摘: 対称構成のまま返すと上三角へ誤った
+    /// 非ゼロ勾配が漏れ下三角非対角勾配が半分になっていた）。
+    #[test]
+    fn eigh_gradient_is_zero_on_upper_triangle_and_matches_lower_triangle_finite_difference() {
+        let eps = 1e-3f32;
+        let base = vec![2.0f32, 0.0, 0.7, 3.0]; // [a00, a01(上三角), a10(下三角), a11]
+        let weights = [1.0f32, 3.0f32]; // 異なる重みで非対角成分を非ゼロにする
+        let eval_fn = |a10: f32| -> f32 {
+            let mut data = base.clone();
+            data[2] = a10;
+            let tape = Tape::new();
+            let x = tape.var(&t(data, &[2, 2]));
+            let out = eigh(&x).unwrap();
+            let evals = out.eigenvalues.to_tensor().host_slice().into_owned();
+            weights[0] * evals[0] + weights[1] * evals[1]
+        };
+
+        let tape = Tape::new();
+        let x = tape.var(&t(base.clone(), &[2, 2]));
+        let out = eigh(&x).unwrap();
+        let w = tape.var(&t(weights.to_vec(), &[2]));
+        let loss = out.eigenvalues.mul(&w).unwrap().sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let da = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+
+        // 上三角（対角除く）は forward で読まれないため厳密ゼロ。
+        assert_eq!(
+            da[1], 0.0,
+            "上三角勾配は forward が読まないためゼロであるべき"
+        );
+
+        let numeric = (eval_fn(base[2] + eps) - eval_fn(base[2] - eps)) / (2.0 * eps);
+        assert!(
+            (numeric - da[2]).abs() < 5e-2,
+            "下三角 a10 の数値微分と解析勾配が一致しない: numeric={numeric} analytic={}",
+            da[2]
+        );
+    }
+
     #[test]
     fn slogdet_basic() {
         let tape = Tape::new();
@@ -607,6 +681,23 @@ mod tests {
                 dx[i]
             );
         }
+    }
+
+    /// `eval::linalg::lstsq` の `m==0` 早期リターンは `n * k_cols` の
+    /// 乗算を経て出力バッファを確保するが、`m` が非ゼロを要求しない
+    /// ため `n`・`k_cols` を巨大にすると `checked_mul` なしでは
+    /// `usize` overflow（debug panic／release wrap）しうる（PR #2268
+    /// codex-review〈Bugbot〉指摘。`crates/backend-cpu/src/linalg.rs`
+    /// の `BackendOps` 経路にも同型の検査を追加済み）。
+    #[test]
+    fn lstsq_eval_rejects_overflowing_output_shape_instead_of_panicking() {
+        let a = t(vec![], &[0, usize::MAX]);
+        let b = t(vec![], &[0, 2]);
+        let result = eval::linalg::lstsq(&a, &b, None);
+        assert!(
+            matches!(result, Err(AutodiffError::InvalidArgument(_))),
+            "巨大な出力形状は panic ではなく型付きエラーで拒否すべき: {result:?}"
+        );
     }
 
     #[test]

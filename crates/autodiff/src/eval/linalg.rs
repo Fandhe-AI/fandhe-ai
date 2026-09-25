@@ -38,6 +38,7 @@
 
 use fandhe_ai_tensor_core::{MatrixNormOrd, ShapeError, Tensor};
 
+use crate::bool_ops::checked_bytes_for;
 use crate::error::AutodiffError;
 
 use super::{build_tensor, dense_vec};
@@ -1820,6 +1821,15 @@ pub(crate) fn eigh(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), Autodi
 /// 縮退していても `gA = V diag(gL) Vᵀ` が well-defined なため成功させる
 /// （`svd_vjp` の無条件判定と違う設計判断。`docs/autodiff-linalg-ops-
 /// decision.md` §2「判断 2」）。
+///
+/// `V (…) Vᵀ` の対称構成式は本来対称行列全体（上三角・下三角双方）を
+/// 独立変数とみなした場合の勾配だが、forward（[`eigh_jacobi`]）は
+/// 入力の**下三角のみ**を読み、上三角は無視する契約。そのため対称行列
+/// のまま返すと上三角へ誤った非ゼロ勾配が漏れ、下三角の非対角勾配は
+/// 本来（下三角だけを独立変数とする有限差分）の半分になる（PR #2268
+/// codex-review 指摘）。上三角（対角除く）をゼロ化し、下三角の非対角
+/// 成分は対称行列の (i,j)・(j,i) 両方の寄与を合算する（`copyltu` 系の
+/// 逆演算。[`cholesky_vjp`] とは異なり対称化ではなく片側集約する）。
 pub(crate) fn eigh_vjp(
     values: &Tensor<f32>,
     vectors: &Tensor<f32>,
@@ -1837,32 +1847,57 @@ pub(crate) fn eigh_vjp(
         }
     }
     if let Some(gv) = g_vectors {
-        let max_abs_lambda = lambda.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
-        let threshold = EIGH_DEGENERATE_RTOL * max_abs_lambda.max(f64::MIN_POSITIVE);
-        for i in 0..n {
-            for j in 0..n {
-                if i != j && (lambda[j] - lambda[i]).abs() <= threshold {
-                    return Err(invalid(
-                        "eval::linalg::eigh_vjp: 固有値が縮退しておりベクトル勾配は未定義",
-                    ));
+        // `g_vectors` は `Some` というだけでは実際に `Op::EighVectors`
+        // 側から非ゼロ寄与があるとは限らない（`Tape::backward` の多出力
+        // 勾配合流経路では、寄与が無いノードにも形状だけ揃えたゼロ勾配
+        // が渡ることがある）。全要素が厳密ゼロなら `skew/e` 項も厳密
+        // ゼロで縮退判定・除算とも不要なため、縮退検査自体をスキップし
+        // 誤って `InvalidArgument` にしない（PR #2268 codex-review 指摘）。
+        let gv_all_zero = dense_vec(gv).iter().all(|&x| x == 0.0);
+        if !gv_all_zero {
+            let max_abs_lambda = lambda.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
+            let threshold = EIGH_DEGENERATE_RTOL * max_abs_lambda.max(f64::MIN_POSITIVE);
+            for i in 0..n {
+                for j in 0..n {
+                    if i != j && (lambda[j] - lambda[i]).abs() <= threshold {
+                        return Err(invalid(
+                            "eval::linalg::eigh_vjp: 固有値が縮退しておりベクトル勾配は未定義",
+                        ));
+                    }
                 }
             }
-        }
-        let gv_mat = Mat::from_tensor(gv);
-        let vt_gv = v.transpose().matmul(&gv_mat);
-        for i in 0..n {
-            for j in 0..n {
-                if i == j {
-                    continue;
+            let gv_mat = Mat::from_tensor(gv);
+            let vt_gv = v.transpose().matmul(&gv_mat);
+            for i in 0..n {
+                for j in 0..n {
+                    if i == j {
+                        continue;
+                    }
+                    let skew = (vt_gv.get(i, j) - vt_gv.get(j, i)) / 2.0;
+                    let e = lambda[j] - lambda[i];
+                    middle.set(i, j, middle.get(i, j) + skew / e);
                 }
-                let skew = (vt_gv.get(i, j) - vt_gv.get(j, i)) / 2.0;
-                let e = lambda[j] - lambda[i];
-                middle.set(i, j, middle.get(i, j) + skew / e);
             }
         }
     }
     let ga = v.matmul(&middle).matmul(&v.transpose());
-    Ok(ga.to_tensor())
+    // forward が下三角のみを読む契約に合わせ、対称行列 `ga` を下三角
+    // のみへ集約する: 上三角（対角除く）は 0、下三角の非対角成分は
+    // 転置位置の寄与を合算（`ga` は構成上対称なので `2 * ga[i,j]` と
+    // 等価）、対角はそのまま。
+    let mut ga_lower = Mat::zeros(n, n);
+    for i in 0..n {
+        for j in 0..n {
+            match j.cmp(&i) {
+                std::cmp::Ordering::Greater => {}
+                std::cmp::Ordering::Equal => ga_lower.set(i, i, ga.get(i, i)),
+                std::cmp::Ordering::Less => {
+                    ga_lower.set(i, j, ga.get(i, j) + ga.get(j, i));
+                }
+            }
+        }
+    }
+    Ok(ga_lower.to_tensor())
 }
 
 /// 符号付き log 行列式（`A: [n,n]` → `(sign: [], logabsdet: [])`）。
@@ -2079,6 +2114,15 @@ pub(crate) fn lstsq(
     let (m, n) = (ashape[0], ashape[1]);
     let bshape = b.shape();
     let k_cols = bshape[1];
+    // `linalg_ops::lstsq`（autodiff エントリポイント）は `ensure_alloc_
+    // fits_f32` で確保前に出力形状 `[n, k_cols]` を検査するが、本関数
+    // （`eval::linalg::lstsq`）は BackendOps 経由等でも直接呼ばれうる
+    // ため、`m==0` 早期リターンの `n * k_cols` 乗算自体が検査なしに
+    // overflow しうる（巨大 `n`・`k_cols` の空入力。PR #2268
+    // codex-review〈Bugbot〉指摘）。ここで独立に検査する。
+    checked_bytes_for::<f32>(&[n, k_cols]).map_err(|_| {
+        invalid("eval::linalg::lstsq: 出力形状 [n, k_cols] の要素数が確保上限を超える")
+    })?;
     if m == 0 || n == 0 {
         return Ok(build_tensor(vec![0.0; n * k_cols], &[n, k_cols]));
     }
