@@ -299,8 +299,10 @@ impl<'t> EmbeddingBagVars<'t> {
     /// ①`ids` が rank 1 → ②`offsets` が空でない → ③`offsets[0] == 0`
     /// → ④`offsets` が単調非減少 → ⑤全 `offsets` が `<= N` →
     /// ⑥`include_last_offset` のとき末尾が `== N` → ⑦bag 数が `> 0`
-    /// （`0` は [`crate::var::Var::cat`] が空リストを拒否するため事前に
-    /// 拒否する）。
+    /// （`0` は [`crate::var::Var::cat`] が空リストを拒否するため後段の
+    /// bag 構築経路を経由せず shape `[0, embedding_dim]` を早期に返す。
+    /// `weight` への微分可能な経路は維持したまま返す——codex P1 是正・
+    /// PR #2281。下段「空バッチ」分岐のコメント参照）。
     pub fn forward_with_offsets(
         &self,
         ids: &Tensor<i32>,
@@ -369,12 +371,31 @@ impl<'t> EmbeddingBagVars<'t> {
             // （後段の `Var::cat(&bags, 0)`）を経由せず shape
             // `[0, embedding_dim]` の Var を直接返す（cursor[bot] Low
             // 指摘「Empty batch rejected with padding」。PR #2281 是正）。
-            // 要素数 0 のため実データを持たず、`weight` への勾配寄与も
-            // 構造的に発生しない（backward 対象要素が存在しない）ので
-            // `var_no_grad` で十分（[`Self::forward`] の高速経路も
-            // 同様に B==0 では embedded/縮約の結果が空 shape になる）。
-            let empty = Tensor::<f32>::zeros(&[0, embedding_dim]).map_err(AutodiffError::Shape)?;
-            return Ok(self.weight.tape().var_no_grad(&empty));
+            //
+            // **`var_no_grad`（旧実装）が `weight` への勾配経路を切る
+            // 問題（codex P1 指摘・PR #2281 再是正）**: 要素数が 0 でも
+            // 出力の `requires_grad` は入力（`weight`）の状態を継承する
+            // という本層の学習時契約（下段の「空 bag（`bag_len == 0`）」
+            // 分岐が個々の空 bag に対して満たしているのと同じ契約）は
+            // 「全 bag が空」の場合にも成り立つ必要がある。`var_no_grad`
+            // は定数ノードを積むため `requires_grad` が常に `false` に
+            // 固定され、`sum(None) → Tape::backward` が「勾配追跡なし」
+            // で失敗する（`weight` へのゼロ勾配が得られるべきところで
+            // エラーになる）。
+            //
+            // 修正: 下段と同じ `weight_row0.masked_fill(&all_masked,
+            // 0.0)`（`weight` の値に一切依存しない定数 0.0 を forward
+            // 値としつつ `weight` への微分可能な経路を保つ。近傍の
+            // コメント「`masked_fill` による修正」参照）で shape
+            // `[1, embedding_dim]` の行を作り、`narrow(0, 0, 0)` で
+            // 0 行へ切り詰める（`num_embeddings > 0` により
+            // `weight_row0` は常に有効・`narrow` の `len == 0` は
+            // `start + len <= dim_size` を満たすため常に成功する）。
+            let weight_row0 = self.weight.narrow(0, 0, 1)?;
+            let all_masked = Tensor::<bool>::new(vec![true; embedding_dim], &[1, embedding_dim])
+                .map_err(AutodiffError::Shape)?;
+            let zero_row = weight_row0.masked_fill(&all_masked, 0.0)?;
+            return zero_row.narrow(0, 0, 0);
         }
 
         let bag_bounds: Vec<(usize, usize)> = (0..bag_count)
@@ -749,6 +770,32 @@ mod tests {
         let bag = EmbeddingBag::from_parameters(w, EmbeddingBagMode::Sum, None).unwrap();
         let out = bag.bind(&t).forward(&ids).unwrap().to_tensor();
         assert_eq!(out.shape(), &[0, 2]);
+    }
+
+    /// codex P1 指摘（PR #2281）是正の回帰テスト: `bag_count == 0`
+    /// （空バッチ。呼び出し元の bag 数がそもそも 0 件）でも出力の
+    /// `requires_grad` が `weight` を継承し、`sum(None) → Tape::backward`
+    /// が「勾配追跡なし」で失敗せず `weight` へゼロ勾配が得られること
+    /// （`all_bags_empty_still_backward_reaches_weight` の「バッチ内の
+    /// 全 bag が空」ケースとは異なり、こちらは「bag がそもそも 0 個」
+    /// ケース）。
+    #[test]
+    fn empty_batch_still_backward_reaches_weight() {
+        let w = Tensor::<f32>::new(vec![1.0, 1.0, 2.0, 2.0], &[2, 2]).unwrap();
+        let ids = Tensor::<i32>::new(Vec::<i32>::new(), &[0, 2]).unwrap();
+        let t = tape();
+        let bag = EmbeddingBag::from_parameters(w, EmbeddingBagMode::Sum, Some(0)).unwrap();
+        let vars = bag.bind(&t);
+        let out = vars.forward(&ids).unwrap();
+        assert_eq!(out.shape(), &[0, 2]);
+
+        let loss = out.sum(None).unwrap();
+        let grads = t.backward(&loss).unwrap();
+        let weight_grad = grads
+            .get(&vars.weight)
+            .unwrap()
+            .expect("bag_count == 0 でも weight への勾配経路は維持されるはず");
+        assert_eq!(dense_vec(weight_grad), vec![0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
