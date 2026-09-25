@@ -34,17 +34,45 @@ use fandhe_ai_tensor_core::Tensor;
 const RS_EXT: &str = "rs";
 
 /// `crates/backend-cpu/src` を再帰走査し `(相対パス, 内容)` を集める。
+///
+/// fail-closed 契約（`docs/autodiff-determinism-mode-design.md` §3.3・
+/// セキュリティ基準「検査スクリプト fail-open 禁止」）: ディレクトリ
+/// 列挙・エントリ取得・ファイル読み取りのいずれかが失敗した場合、
+/// その失敗を空扱いへ読み替えて検査を通してしまうと、実際には
+/// allowlist 突合の対象から漏れたファイルが「rayon マーカーなし」と
+/// 誤判定されうる。従って各失敗はテスト panic として fail-closed に
+/// 伝播させる（検査失敗をそのままテスト失敗として可視化する）。
 fn visit_rs_files(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "determinism_inventory: read_dir({}) に失敗した（fail-closed:\
+             走査失敗を「検査対象なし」へ読み替えない）: {e}",
+            dir.display()
+        )
+    });
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "determinism_inventory: {} 配下のエントリ列挙に失敗した\
+                 （fail-closed）: {e}",
+                dir.display()
+            )
+        });
+        paths.push(entry.path());
+    }
     paths.sort();
     for path in paths {
         if path.is_dir() {
             visit_rs_files(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some(RS_EXT) {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!(
+                    "determinism_inventory: {} の読み取りに失敗した\
+                     （fail-closed）: {e}",
+                    path.display()
+                )
+            });
             out.push((path, content));
         }
     }
@@ -182,16 +210,20 @@ fn strip_comments_and_strings(content: &str) -> String {
 }
 
 /// rayon 並列イテレータのマーカー（`.par_iter(`／`.par_chunks(`／
-/// `.into_par_iter(`／`.par_iter_mut(`）と `.sum()`／`.reduce(`／
-/// `reduce_with(` が同一文（`;` 区切り）中に共起する箇所を数える
-/// （分割依存の縮約——rayon の並列イテレータをそのまま `.sum()`／
-/// `.reduce(` へ流す典型パターンの検出。`docs/autodiff-determinism-
-/// mode-design.md` §2.3）。
+/// `.par_chunks_mut(`／`.into_par_iter(`／`.par_iter_mut(`）と
+/// `.sum()`／`.reduce(`／`reduce_with(` が同一文（`;` 区切り）中に
+/// 共起する箇所を数える（分割依存の縮約——rayon の並列イテレータを
+/// そのまま `.sum()`／`.reduce(` へ流す典型パターンの検出。
+/// `docs/autodiff-determinism-mode-design.md` §2.3）。`.par_chunks_mut(`
+/// は GEMM 等の書き込み先チャンク分割で実際に使われるマーカーであり、
+/// これを欠くと backend-cpu の並列イテレータ使用箇所の一部が検出対象
+/// から漏れる（codex-review 指摘・PR #2274）。
 fn count_par_reduce_cooccurrences(content: &str) -> usize {
     let cleaned = strip_comments_and_strings(content);
     let par_markers = [
         ".par_iter(",
         ".par_chunks(",
+        ".par_chunks_mut(",
         ".into_par_iter(",
         ".par_iter_mut(",
     ];
@@ -317,10 +349,16 @@ fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
 }
 
 /// `Tape::new_with_ops(Box::new(CpuBackendOps::new()))` 上で並列経路に
-/// 入る規模の MLP（batch 64・in 256・hidden 512・out 10。全縮約の要素数
-/// は `reduction.rs::CHUNK`〈4096〉を超える）の forward・backward を
-/// 実行し、`(loss の to_bits, dW1 の to_bits 列, db1 の to_bits 列)` を
-/// 返す。
+/// 入る規模の MLP（batch 512・in 256・hidden 512・out 10）の
+/// forward・backward を実行し、`(loss の to_bits, dW1 の to_bits 列,
+/// db1 の to_bits 列)` を返す。`mse_loss` の全縮約要素数は
+/// `batch * out_dim = 5120` で `reduction.rs::CHUNK`〈4096〉を超え
+/// （4096 要素の第 1 チャンク＋ 1024 要素の端数チャンクの 2 チャンク
+/// 構成）、チャンク内逐次 → チャンク間結合という複数チャンク縮約の
+/// 経路とスレッド数不変性を実際に検証できる形状にしている
+/// （batch 64・out 10＝640 要素は CHUNK 未満で単一チャンクに収まり
+/// 複数チャンク縮約を検証できていなかった。codex-review 指摘・
+/// PR #2274）。
 fn run_mlp(seed: u64) -> (u32, Vec<u32>, Vec<u32>) {
     let mut s = seed;
     let mut next = move || {
@@ -328,7 +366,7 @@ fn run_mlp(seed: u64) -> (u32, Vec<u32>, Vec<u32>) {
         (((s >> 40) % 2000) as f32 - 1000.0) * 0.001
     };
 
-    let batch = 64usize;
+    let batch = 512usize;
     let in_dim = 256usize;
     let hidden = 512usize;
     let out_dim = 10usize;
