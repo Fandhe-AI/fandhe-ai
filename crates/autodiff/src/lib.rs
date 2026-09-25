@@ -230,6 +230,7 @@
 //! decision.md`・モジュール doc 参照）。
 
 pub mod activation_ops;
+mod adaptive_max_pool_ops;
 mod attention;
 mod backward;
 pub mod bool_ops;

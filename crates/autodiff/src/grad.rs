@@ -3626,6 +3626,35 @@ pub(crate) fn adaptive_avg_pool2d_with_fallback(
     }
 }
 
+/// `adaptive_max_pool_ops::adaptive_max_pool2d`（内部クレート限定。
+/// イシュー #2160）が使う「バックエンド実装 → フォールバック」
+/// ヘルパー。[`max_pool2d_with_fallback`] と同型: `ops.
+/// adaptive_max_pool2d` → `Unsupported` のときのみ `eval::
+/// adaptive_max_pool2d` へフォールバックし、他のエラーは伝播する
+/// （判定迂回経路を作らない）。
+pub(crate) fn adaptive_max_pool2d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    output_size: [usize; 2],
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), AutodiffError> {
+    match ops.adaptive_max_pool2d(input, output_size) {
+        Ok((values, index)) => {
+            if values.shape() != out_shape || index.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: values.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok((values, index))
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::adaptive_max_pool2d(input, out_shape)?),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
 /// 縮約対象の要素数が 0 か（`min`／`argmax`／`argmin` は単位元を
 /// 持たないためエラーとする対象。`backend-cpu::reduction::max`
 /// の空縮約判定と同じ「`axis_len == 0` かつ `total_out > 0`」規則を

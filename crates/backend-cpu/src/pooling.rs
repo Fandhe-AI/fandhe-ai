@@ -1,8 +1,10 @@
-//! MaxPool／AvgPool／AdaptiveAvgPool（2d）の CPU 参照実装（イシュー
-//! #1728・設計 `docs/pooling-ops-design.md`）。
+//! MaxPool／AvgPool／AdaptiveAvgPool／AdaptiveMaxPool（2d）の CPU
+//! 参照実装（イシュー #1728・#2160・設計 `docs/pooling-ops-
+//! design.md`）。
 //!
 //! [`fandhe_ai_tensor_core::BackendOps::max_pool2d`]／`avg_pool2d`／
-//! `adaptive_avg_pool2d`（`ops.rs`）の CPU 実装本体。呼び出し元
+//! `adaptive_avg_pool2d`／`adaptive_max_pool2d`（`ops.rs`）の CPU
+//! 実装本体。呼び出し元
 //! （`ops.rs`）が `input.shape()`／`params` を
 //! [`fandhe_ai_tensor_core::pool2d_out_shape`]／
 //! `adaptive_pool2d_out_shape` で再検査してから本モジュールへ委譲する
@@ -275,6 +277,82 @@ pub fn adaptive_avg_pool2d(
     Tensor::new(out, out_shape)
 }
 
+/// [`fandhe_ai_tensor_core::BackendOps::adaptive_max_pool2d`] の CPU
+/// 実装本体（イシュー #2160）。`out_shape` は呼び出し元（`ops.rs`）が
+/// [`fandhe_ai_tensor_core::adaptive_pool2d_out_shape`] で検査・確定
+/// 済みの `[N, C, Hout, Wout]`。
+///
+/// 出力位置ごとの窓は [`adaptive_window`]（[`adaptive_avg_pool2d`] と
+/// 同じ単一情報源）が定める `[start, end)`。タイ規則・NaN 規則は
+/// [`max_pool2d`] と同一（`kh` 外側・`kw` 内側の row-major 走査・
+/// `v > best || (v.is_nan() && !best.is_nan())` の先勝ち更新）。
+/// 索引は `(n, c)` 平面内 flat 添字 `h·W + w`。
+pub fn adaptive_max_pool2d(
+    input: &Tensor<f32>,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return Ok((
+            Tensor::new(Vec::new(), out_shape)?,
+            Tensor::new(Vec::new(), out_shape)?,
+        ));
+    }
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+
+    let mut out_vals = vec![0f32; out_numel];
+    let mut out_idx = vec![0i32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                let (h_start, h_end) =
+                    adaptive_window(oh, h_in, h_out).ok_or(ShapeError::ElementCountOverflow)?;
+                for ow in 0..w_out {
+                    let (w_start, w_end) =
+                        adaptive_window(ow, w_in, w_out).ok_or(ShapeError::ElementCountOverflow)?;
+                    let mut best: Option<(f32, usize)> = None;
+                    for h in h_start..h_end {
+                        for w in w_start..w_end {
+                            let v = input.get(&[n, c, h, w]).ok_or_else(|| {
+                                ShapeError::ShapeMismatch {
+                                    lhs: vec![n, c, h, w],
+                                    rhs: in_shape.to_vec(),
+                                }
+                            })?;
+                            let flat = h * w_in + w;
+                            best = Some(match best {
+                                None => (v, flat),
+                                Some((b, bi)) => {
+                                    if v > b || (v.is_nan() && !b.is_nan()) {
+                                        (v, flat)
+                                    } else {
+                                        (b, bi)
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    // adaptive_pool2d_out_shape が H/W >= 1・output_size
+                    // >= 1 を検査済みのため窓は常に非空。到達しない分岐
+                    // だが `max_pool2d` と同じ安全側フォールバックとして
+                    // 型付きエラーを返す（パニックしない。REQ-8・A08）。
+                    let (v, idx) = best.ok_or(ShapeError::ElementCountOverflow)?;
+                    let out_pos = ((n * c_ch + c) * h_out + oh) * w_out + ow;
+                    out_vals[out_pos] = v;
+                    out_idx[out_pos] = i32::try_from(idx)
+                        .map_err(|_| ShapeError::IndexRangeOverflow { index: idx })?;
+                }
+            }
+        }
+    }
+    Ok((
+        Tensor::new(out_vals, out_shape)?,
+        Tensor::new(out_idx, out_shape)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +512,97 @@ mod tests {
         let first: f64 = data[0..4].iter().map(|&v| v as f64).sum::<f64>() / 4.0;
         let second: f64 = data[3..7].iter().map(|&v| v as f64).sum::<f64>() / 4.0;
         assert_eq!(out.host_slice(), vec![first as f32, second as f32]);
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_divisible_matches_max_pool2d() {
+        // in % out == 0 のとき adaptive_max_pool2d は等価な
+        // max_pool2d(kernel=stride=in/out) と値・索引とも bit 一致
+        // する（計画 §3 手順 3 の受入基準）。
+        let input = Tensor::new((1..=16).map(|v| v as f32).collect(), &[1, 1, 4, 4]).unwrap();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[1, 1, 4, 4], [2, 2]).unwrap();
+        let (a_vals, a_idx) = adaptive_max_pool2d(&input, &out_shape).unwrap();
+
+        let p = params([2, 2], None, [0, 0]);
+        let mp_out_shape = pool2d_out_shape(&[1, 1, 4, 4], &p).unwrap();
+        let (m_vals, m_idx) = max_pool2d(&input, &p, &mp_out_shape).unwrap();
+
+        assert_eq!(a_vals.host_slice(), m_vals.host_slice());
+        assert_eq!(a_idx.host_slice(), m_idx.host_slice());
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_overlapping_window_picks_first_max() {
+        // in=7, out=2 のような非割り切れ窓（重なりあり）でもタイは
+        // 先勝ち規則。窓 [0,4) の最大値 3 が flat=3 で唯一のため索引を
+        // 突合する。
+        let data: Vec<f32> = vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0];
+        let input = Tensor::new(data, &[1, 1, 1, 7]).unwrap();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[1, 1, 1, 7], [1, 2]).unwrap();
+        let (values, index) = adaptive_max_pool2d(&input, &out_shape).unwrap();
+        // 窓 (0,0)=[0,4)={0,1,2,3} -> max=3 flat=3。
+        assert_eq!(values.get(&[0, 0, 0, 0]), Some(3.0));
+        assert_eq!(index.get(&[0, 0, 0, 0]), Some(3));
+        // 窓 (0,1)=[3,7)={3,0,1,2} -> max=3 flat=3（先勝ち。窓内先頭）。
+        assert_eq!(values.get(&[0, 0, 0, 1]), Some(3.0));
+        assert_eq!(index.get(&[0, 0, 0, 1]), Some(3));
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_expand() {
+        // out > in（拡大側）: 各出力位置が単一入力要素を指す。
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]).unwrap();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[1, 1, 2, 2], [4, 4]).unwrap();
+        let (values, _index) = adaptive_max_pool2d(&input, &out_shape).unwrap();
+        assert_eq!(values.get(&[0, 0, 0, 0]), Some(1.0));
+        assert_eq!(values.get(&[0, 0, 3, 3]), Some(4.0));
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_tie_first_match_wins() {
+        let input = Tensor::new(vec![5.0; 16], &[1, 1, 4, 4]).unwrap();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[1, 1, 4, 4], [2, 2]).unwrap();
+        let (values, index) = adaptive_max_pool2d(&input, &out_shape).unwrap();
+        assert_eq!(values.host_slice(), vec![5.0; 4]);
+        assert_eq!(index.get(&[0, 0, 0, 0]), Some(0));
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_nan_propagates_and_keeps_first_nan_index() {
+        let data = vec![1.0, f32::NAN, 2.0, 3.0];
+        let input = Tensor::new(data, &[1, 1, 2, 2]).unwrap();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[1, 1, 2, 2], [1, 1]).unwrap();
+        let (values, index) = adaptive_max_pool2d(&input, &out_shape).unwrap();
+        assert!(values.get(&[0, 0, 0, 0]).unwrap().is_nan());
+        assert_eq!(index.get(&[0, 0, 0, 0]), Some(1));
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_batch_zero_yields_empty_output() {
+        let input = Tensor::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[0, 1, 4, 4], [2, 2]).unwrap();
+        let (values, index) = adaptive_max_pool2d(&input, &out_shape).unwrap();
+        assert_eq!(values.shape(), &[0, 1, 2, 2]);
+        assert_eq!(index.shape(), &[0, 1, 2, 2]);
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_non_contiguous_input_matches_contiguous() {
+        let input =
+            Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[1, 1, 2, 4]).unwrap();
+        let transposed = input.transpose(2, 3).unwrap(); // [1,1,4,2]（非 contiguous）
+        let contiguous = transposed.contiguous();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[1, 1, 4, 2], [2, 2]).unwrap();
+        let (v1, i1) = adaptive_max_pool2d(&transposed, &out_shape).unwrap();
+        let (v2, i2) = adaptive_max_pool2d(&contiguous, &out_shape).unwrap();
+        assert_eq!(v1.host_slice(), v2.host_slice());
+        assert_eq!(i1.host_slice(), i2.host_slice());
     }
 }

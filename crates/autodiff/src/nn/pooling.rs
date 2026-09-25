@@ -18,9 +18,10 @@
 //! `(values, index)` のうち `values` のみを返す（索引が必要な場合は
 //! [`MaxPool2d::forward`]／[`MaxPool1d::forward`] を直接呼ぶ）。
 
+use crate::adaptive_max_pool_ops;
 use crate::error::AutodiffError;
 use crate::var::Var;
-use fandhe_ai_tensor_core::{Pool2dParams, Tensor};
+use fandhe_ai_tensor_core::{Pool2dParams, ShapeError, Tensor};
 
 /// PyTorch `torch.nn.MaxPool2d` 相当（`ceil_mode=false` 固定）。
 #[derive(Debug, Clone, PartialEq)]
@@ -311,5 +312,192 @@ impl AdaptiveAvgPool1d {
     /// アクセサ。
     pub(crate) fn output_size_1d(&self) -> usize {
         self.output_size
+    }
+}
+
+/// PyTorch `torch.nn.AdaptiveMaxPool2d` 相当（イシュー #2160）。
+/// **内部クレート限定**（facade 未公開。`crate::adaptive_max_pool_ops`
+/// モジュール doc §承認事項を参照。`Var::adaptive_max_pool2d` の
+/// 公開委譲メソッド・facade `compat::Sequential::
+/// add_adaptive_max_pool2d` は未承認のため追加しない）。
+///
+/// [`AdaptiveAvgPool2d`] と異なり `forward` は `(values, index)` を
+/// 返す（[`MaxPool2d::forward`] と同型。索引は `(n,c)` 平面内 flat
+/// 添字 `h·W+w`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveMaxPool2d {
+    output_size: [usize; 2],
+}
+
+impl AdaptiveMaxPool2d {
+    /// 出力空間サイズ `output_size`（`[out_h, out_w]`）から構築
+    /// する。各軸が `0` の場合は `AutodiffError::InvalidArgument`
+    /// を返す（[`AdaptiveAvgPool2d::new`] と同型）。
+    pub fn new(output_size: [usize; 2]) -> Result<Self, AutodiffError> {
+        if output_size[0] == 0 || output_size[1] == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "AdaptiveMaxPool2d::new: output_size の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        Ok(Self { output_size })
+    }
+
+    pub(crate) fn output_size(&self) -> [usize; 2] {
+        self.output_size
+    }
+
+    /// `self.output_size` を用いて
+    /// `crate::adaptive_max_pool_ops::adaptive_max_pool2d` へ委譲
+    /// する（非公開項目のため intra-doc link にしない）。`NCHW`
+    /// 入力を受け取り `(values, index)` を返す（窓は
+    /// [`fandhe_ai_tensor_core::adaptive_window`] の重なり許容規則で
+    /// 決まる。タイ規則・NaN 規則は [`MaxPool2d::forward`] と同一）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        adaptive_max_pool_ops::adaptive_max_pool2d(input, self.output_size)
+    }
+}
+
+/// PyTorch `torch.nn.AdaptiveMaxPool1d` 相当（イシュー #2160）。
+/// [`AdaptiveMaxPool2d`] を `H` 軸固定（`output_size[0]=1`）で保持
+/// する薄いラッパー（[`AdaptiveAvgPool1d`] と同型）。**内部クレート
+/// 限定**（[`AdaptiveMaxPool2d`] の doc 参照）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveMaxPool1d {
+    output_size: usize,
+}
+
+impl AdaptiveMaxPool1d {
+    /// 出力長 `output_size` から構築する。`0` の場合は
+    /// `AutodiffError::InvalidArgument` を返す。
+    pub fn new(output_size: usize) -> Result<Self, AutodiffError> {
+        if output_size == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "AdaptiveMaxPool1d::new: output_size は 1 以上である必要がある".into(),
+            ));
+        }
+        Ok(Self { output_size })
+    }
+
+    /// `self.output_size` を用いて
+    /// `crate::adaptive_max_pool_ops::adaptive_max_pool1d` へ委譲
+    /// する（非公開項目のため intra-doc link にしない）。`NCL`
+    /// 入力を受け取り `(values, index)` を返す（窓決定
+    /// 規則は [`AdaptiveMaxPool2d::forward`] と同じ）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        adaptive_max_pool_ops::adaptive_max_pool1d(input, self.output_size)
+    }
+
+    /// `nn/module.rs::impl Module for AdaptiveMaxPool1d::forward_host`
+    /// が `[1, o]` 形の `output_size` を再構築するためのクレート内
+    /// アクセサ。
+    pub(crate) fn output_size_1d(&self) -> usize {
+        self.output_size
+    }
+}
+
+/// GlobalPool の集約方式（イシュー #2160）。ONNX `GlobalAveragePool`／
+/// `GlobalMaxPool`、Keras `GlobalAveragePooling*`／`GlobalMaxPooling*`
+/// 相当を単一の型 [`GlobalPool`] へ集約するための variant。
+/// `#[non_exhaustive]` により将来の variant 追加（例: `GlobalLp`）を
+/// 破壊的変更なしで行えるようにする（`docs/compat-api-scope.md` の
+/// 非破壊拡張方針）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GlobalPoolMode {
+    /// 空間軸全体の平均（[`AdaptiveAvgPool2d`]／`AdaptiveAvgPool1d`
+    /// の `output_size=1` に委譲）。
+    Avg,
+    /// 空間軸全体の最大（[`AdaptiveMaxPool2d`] の `output_size=1` に
+    /// 委譲。`Op::MaxPool2d` を経由するため索引は破棄する）。
+    Max,
+}
+
+/// 空間軸全体を単一値へ縮約する層（Keras `GlobalAveragePooling2D`／
+/// `GlobalMaxPooling2D`、ONNX `GlobalAveragePool`／`GlobalMaxPool`
+/// 相当。イシュー #2160・設計 `docs/pooling-ops-design.md` §11）。
+///
+/// rank 3（`[N, C, L]`）・rank 4（`[N, C, H, W]`）のいずれも受理し、
+/// [`Self::forward`] が rank で分岐する（`AdaptiveAvgPool1d`／`2d` の
+/// 使い分けと同型）。`keepdims`: `true` なら ONNX `Global*Pool` 互換で
+/// 空間軸を `1` のまま残す（`[N,C,1]`／`[N,C,1,1]`）・`false` なら
+/// Keras 既定互換で空間軸を潰す（`[N,C]`）。
+///
+/// `Max` の場合、[`AdaptiveMaxPool2d::forward`] が返す索引は
+/// [`Self::forward`] の戻り値には含まれない（値のみが必要な用途を
+/// 主眼とするため。索引が必要な場合は [`AdaptiveMaxPool2d::forward`]
+/// を直接呼ぶこと）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalPool {
+    mode: GlobalPoolMode,
+    keepdims: bool,
+}
+
+impl GlobalPool {
+    /// 集約方式 `mode` と `keepdims` から構築する。引数検査は不要
+    /// （`output_size` を伴わないため [`AdaptiveAvgPool2d::new`] 等と
+    /// 異なり `Result` を返さない）。
+    pub fn new(mode: GlobalPoolMode, keepdims: bool) -> Self {
+        Self { mode, keepdims }
+    }
+
+    pub(crate) fn mode(&self) -> GlobalPoolMode {
+        self.mode
+    }
+
+    pub(crate) fn keepdims(&self) -> bool {
+        self.keepdims
+    }
+
+    /// `self.mode`／`self.keepdims` に従って空間軸全体を縮約する。
+    /// rank 4（`NCHW`）は [`AdaptiveAvgPool2d::forward`]／
+    /// [`AdaptiveMaxPool2d::forward`] の `output_size=[1,1]` に、
+    /// rank 3（`NCL`）は `AdaptiveAvgPool1d`／[`AdaptiveMaxPool1d`]
+    /// の `output_size=1` に委譲する。rank がそれ以外の場合は
+    /// `AutodiffError::Shape(ShapeError::RankMismatch)` を返す
+    /// （`expected` は `4`。rank 3 と rank 4 のどちらでもない契約
+    /// 違反を型付きエラーで拒否する。REQ-8・A08）。
+    ///
+    /// `keepdims=false` の reshape は **縮約が確定した後にのみ**行う
+    /// （検査を reshape より前に完了させる `Var::adaptive_avg_pool1d`
+    /// 等の規律とは逆方向だが、ここでの reshape は「出力の後処理」
+    /// であり孤立 view ノードのリスクがある「入力の前処理」ではない
+    /// ため対象外）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = input.shape();
+        let reduced = match in_shape.len() {
+            4 => {
+                let (n, c) = (in_shape[0], in_shape[1]);
+                let reduced = match self.mode {
+                    GlobalPoolMode::Avg => input.adaptive_avg_pool2d([1, 1])?,
+                    GlobalPoolMode::Max => {
+                        adaptive_max_pool_ops::adaptive_max_pool2d(input, [1, 1])?.0
+                    }
+                };
+                if self.keepdims {
+                    reduced
+                } else {
+                    reduced.reshape(&[n, c])?
+                }
+            }
+            3 => {
+                let (n, c) = (in_shape[0], in_shape[1]);
+                let reduced = match self.mode {
+                    GlobalPoolMode::Avg => input.adaptive_avg_pool1d(1)?,
+                    GlobalPoolMode::Max => adaptive_max_pool_ops::adaptive_max_pool1d(input, 1)?.0,
+                };
+                if self.keepdims {
+                    reduced
+                } else {
+                    reduced.reshape(&[n, c])?
+                }
+            }
+            actual => {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 4,
+                    actual,
+                }));
+            }
+        };
+        Ok(reduced)
     }
 }

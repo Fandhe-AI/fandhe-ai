@@ -1589,6 +1589,20 @@ impl BackendOps for CpuBackendOps {
         pooling::adaptive_avg_pool2d(input, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::adaptive_max_pool2d` の CPU 実装（イシュー
+    /// #2160）。[`adaptive_pool2d_out_shape`] で `input.shape()`／
+    /// `output_size` を再検査してから `pooling::adaptive_max_pool2d`
+    /// へ委譲する。
+    fn adaptive_max_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 2],
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape = adaptive_pool2d_out_shape(input.shape(), output_size)
+            .map_err(BackendError::ShapeMismatch)?;
+        pooling::adaptive_max_pool2d(input, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::scatter` の CPU 実装（イシュー #1776）。
     /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
     /// 再検査してから `gather_scatter::scatter` へ委譲する（`gather`

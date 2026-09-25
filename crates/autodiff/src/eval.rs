@@ -3864,6 +3864,77 @@ pub(crate) fn adaptive_avg_pool2d(
     Ok(build_tensor(out, out_shape))
 }
 
+/// `Var::adaptive_max_pool2d`（内部クレート限定・facade 未公開。
+/// イシュー #2160）のホスト参照実装。`BackendOps::
+/// adaptive_max_pool2d` が `Unsupported` を返したときのみ
+/// `grad::adaptive_max_pool2d_with_fallback` から呼ばれる。窓は
+/// [`adaptive_window`]（[`adaptive_avg_pool2d`] と同じ forward／VJP
+/// 共有の単一情報源）が定める。タイ規則・NaN 伝播は [`max_pool2d`]
+/// と同一（先勝ち・`v > best || (v.is_nan() && !best.is_nan())`）。
+/// `backend-cpu::pooling::adaptive_max_pool2d` と意図的に同一
+/// アルゴリズムを複製する。
+pub(crate) fn adaptive_max_pool2d(
+    input: &Tensor<f32>,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return Ok((
+            build_tensor(Vec::new(), out_shape),
+            build_index_tensor(Vec::new(), out_shape),
+        ));
+    }
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+
+    let mut out_vals = vec![0f32; out_numel];
+    let mut out_idx = vec![0i32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                let (h_start, h_end) =
+                    adaptive_window(oh, h_in, h_out).ok_or(ShapeError::ElementCountOverflow)?;
+                for ow in 0..w_out {
+                    let (w_start, w_end) =
+                        adaptive_window(ow, w_in, w_out).ok_or(ShapeError::ElementCountOverflow)?;
+                    let mut best: Option<(f32, usize)> = None;
+                    for h in h_start..h_end {
+                        for w in w_start..w_end {
+                            let v = input.get(&[n, c, h, w]).ok_or_else(|| {
+                                ShapeError::ShapeMismatch {
+                                    lhs: vec![n, c, h, w],
+                                    rhs: in_shape.to_vec(),
+                                }
+                            })?;
+                            let flat = h * w_in + w;
+                            best = Some(match best {
+                                None => (v, flat),
+                                Some((b, bi)) => {
+                                    if v > b || (v.is_nan() && !b.is_nan()) {
+                                        (v, flat)
+                                    } else {
+                                        (b, bi)
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    let (v, idx) = best.ok_or(ShapeError::ElementCountOverflow)?;
+                    let out_pos = ((n * c_ch + c) * h_out + oh) * w_out + ow;
+                    out_vals[out_pos] = v;
+                    out_idx[out_pos] = i32::try_from(idx)
+                        .map_err(|_| ShapeError::IndexRangeOverflow { index: idx })?;
+                }
+            }
+        }
+    }
+    Ok((
+        build_tensor(out_vals, out_shape),
+        build_index_tensor(out_idx, out_shape),
+    ))
+}
+
 /// 平坦化・totalOrder ソート・隣接重複除去のホスト参照実装
 /// （`torch.unique(input, sorted=True)` の values のみ。イシュー
 /// #1734）。`BackendOps::unique` が `Unsupported` を返したときのみ

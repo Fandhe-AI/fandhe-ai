@@ -10554,3 +10554,186 @@ fn workspace_declares_conv3d_fn_names_only_in_allowed_locations() {
          承認済みの実装なのか迂回経路の混入なのかを確認すること。"
     );
 }
+
+// =====================================================================
+// イシュー #2160（親 #2131）: AdaptiveMaxPool2d／AdaptiveMaxPool1d／
+// GlobalPool の facade 公開保留を検査するテスト群。
+// `AdaptiveMaxGlobalPoolHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、`compat::Sequential::
+// add_adaptive_max_pool2d`／`add_adaptive_max_pool1d`／`add_global_pool`
+// の非宣言を持つ。`adaptive_max_pool_ops` 自体が非 `pub mod`
+// （`Var` の外の `pub(crate)` 自由関数）のため、`conv3d` 系の
+// `facade_does_not_reexport_or_declare_*`／`workspace_declares_*_fn_
+// names_only_in_allowed_locations` に相当する走査（`pub use` 再
+// エクスポート検査・fn 宣言インベントリ）は対象外（そもそも facade
+// から到達できるモジュールパスが存在しないため）。承認事項・多層防御の
+// 位置づけは `docs/autodiff-adaptive-max-global-pool-decision.md`
+// 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `AdaptiveMaxGlobalPoolHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`conv3d_hold_doctest_globs_all_pub_modules` の
+/// `AdaptiveMaxGlobalPoolHoldDoctestGuard` 版）。
+#[test]
+fn adaptive_max_global_pool_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "AdaptiveMaxGlobalPoolHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "AdaptiveMaxGlobalPoolHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`adaptive_max_global_pool_hold_doctest_globs_all_pub_modules`] が
+/// glob import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの **glob 以外の本文**が固定文言
+/// [`ADAPTIVE_MAX_GLOBAL_POOL_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
+/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
+/// 拒否する）。
+#[test]
+fn adaptive_max_global_pool_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "AdaptiveMaxGlobalPoolHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, ADAPTIVE_MAX_GLOBAL_POOL_HOLD_PROBE_BODY,
+        "AdaptiveMaxGlobalPoolHoldDoctestGuard の doctest ブロック本文\
+         （glob 以外）が固定文言 ADAPTIVE_MAX_GLOBAL_POOL_HOLD_PROBE_BODY\
+         からドリフトしている。正のプローブ\
+         （__FandheAdaptiveMaxPoolHoldProbe／__FandheAdaptiveMaxPoolAddProbe\
+         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか\
+         確認すること。"
+    );
+}
+
+/// [`adaptive_max_global_pool_hold_doctest_probe_body_matches_fixed_
+/// contract`] が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `AdaptiveMaxGlobalPoolHoldDoctestGuard` doc 内の唯一の doctest
+/// ブロックから、ネスト `pub mod` の glob import 行（`use fandhe_ai::
+/// <mod>::*;`）を除いた本文と 1 行単位で完全一致する必要がある
+/// （クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
+const ADAPTIVE_MAX_GLOBAL_POOL_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+struct __FandheAdaptiveMaxPoolMarker;\n\
+\n\
+trait __FandheAdaptiveMaxPoolHoldProbe {\n\
+\x20\x20\x20\x20fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
+\x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+\x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+}\n\
+\n\
+impl __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+\x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+}\n\
+\n\
+impl __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+\x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+}\n\
+\n\
+trait __FandheAdaptiveMaxPoolAddProbe {\n\
+\x20\x20\x20\x20fn add_adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
+\x20\x20\x20\x20fn add_adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
+\x20\x20\x20\x20fn add_global_pool(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
+}\n\
+\n\
+impl __FandheAdaptiveMaxPoolAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+\x20\x20\x20\x20fn add_adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+\x20\x20\x20\x20fn add_global_pool(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Var::adaptive_max_pool2d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool2d();\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Var::adaptive_max_pool1d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool1d();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Tensor::adaptive_max_pool2d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool2d();\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Tensor::adaptive_max_pool1d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool1d();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Tape::adaptive_max_pool2d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool2d();\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Tape::adaptive_max_pool1d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool1d();\n\
+}\n\
+\n\
+fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_adaptive_max_pool2d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_adaptive_max_pool1d(x);\n\
+\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_global_pool(x);\n\
+}";
+
+/// `src/compat` 配下に `add_adaptive_max_pool2d`／
+/// `add_adaptive_max_pool1d`／`add_global_pool` の `pub fn` 宣言が
+/// 存在しないことを固定する（イシュー #2160。
+/// `compat_sequential_does_not_expose_spatial_layer_add_methods` と
+/// 同型。`docs/autodiff-adaptive-max-global-pool-decision.md`
+/// 「承認事項」が未承認のまま対象外としている設計判断の固定）。
+#[test]
+fn compat_sequential_does_not_expose_adaptive_max_global_pool_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = [
+        "add_adaptive_max_pool2d",
+        "add_adaptive_max_pool1d",
+        "add_global_pool",
+    ];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for name in forbidden {
+            if contains_pub_fn_declaration(content, name) {
+                offenses.push(format!("{}: pub fn {name}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に AdaptiveMaxPool／GlobalPool 系 add_* が見つ\
+         かった（承認スコープ〈#2160〉は Sequential への追加を認めて\
+         いない）: {offenses:?}"
+    );
+}
+
+/// [`compat_sequential_does_not_expose_adaptive_max_global_pool_add_
+/// methods`] の自己テスト（合成入力で検出できることを確認する）。
+#[test]
+fn compat_sequential_does_not_expose_adaptive_max_global_pool_add_methods_detects_offense() {
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_adaptive_max_pool2d(&mut self, l: AdaptiveMaxPool2d) {}",
+        "add_adaptive_max_pool2d"
+    ));
+    assert!(!contains_pub_fn_declaration(
+        "pub fn add_linear(&mut self, l: Linear) {}",
+        "add_adaptive_max_pool2d"
+    ));
+}
