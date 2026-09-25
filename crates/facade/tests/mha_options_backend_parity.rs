@@ -14,7 +14,10 @@
 //! - `#[ignore]`: `tape_for(Device::Metal)`／`tape_for(Device::Cuda(0))`
 //!   の forward を CPU と突合する（実機必須。CUDA・Metal 実機は本環境
 //!   では未実測——`docs/perf/logs/mha-options-2163/README.md` へ申し
-//!   送る）。
+//!   送る）。各ケースは `print_fold_bits` で `fold_bits=` 行を 1 件
+//!   出力する（同 README の事前登録判定規則「run-to-run 決定性」が
+//!   2 回起動間の `fold_bits=` 行比較を要求するため。レビュー指摘・
+//!   イシュー #2163・PR #2279）。
 //!
 //! 既存 `mha_backend_parity.rs`・`kv_cache_backend_parity.rs`・
 //! `checkpoint_backend_bit_identity.rs` 等は無修正で green を維持する
@@ -187,6 +190,24 @@ fn cpu_forward_matches_naive_reference_key_padding_mask_with_causal() {
 
 // --- 実機横断（`#[ignore]`。Metal／CUDA。forward のみ）-----------------
 
+/// `data` の全要素の `to_bits()` を FNV-1a 相当で fold した診断用
+/// チェックサムを `<label>.fold_bits=<hex>` 形式で 1 行出力する
+/// （`nn_conv_backend_parity.rs::print_fold_bits` と同一実装。レビュー
+/// 指摘・イシュー #2163・PR #2279: `docs/perf/logs/mha-options-2163/
+/// README.md` の事前登録判定規則「run-to-run 決定性」は `fold_bits=`
+/// 行を 2 起動間で突合する設計のため、実機テスト側にその出力が無いと
+/// 判定手順が実行不能になっていた。実機ランブックはこの行を `grep` で
+/// 抽出し 2 回起動の出力を `diff` して run-to-run bit 同一を確認する）。
+fn print_fold_bits(label: &str, data: &[f32]) {
+    let mut acc: u64 = 0xcbf29ce484222325; // FNV-1a 相当の固定初期値（診断専用・暗号用途ではない）
+    for &v in data.iter() {
+        let bits = v.to_bits() as u64;
+        acc ^= bits;
+        acc = acc.wrapping_mul(0x100000001b3);
+    }
+    println!("{label}.fold_bits={acc:#018x}");
+}
+
 fn forward_asymmetric_on(device: Device) -> Tensor<f32> {
     let (b, l, s, e, h) = (2, 3, 4, 4, 2);
     let cfg = MultiheadAttentionConfig::new(e, h)
@@ -213,6 +234,10 @@ fn metal_forward_matches_cpu_asymmetric_kdim_vdim() {
         metal_out.as_slice().expect("contiguous"),
         cpu_out.as_slice().expect("contiguous"),
     );
+    print_fold_bits(
+        "metal_forward_matches_cpu_asymmetric_kdim_vdim[out]",
+        metal_out.as_slice().expect("contiguous"),
+    );
 }
 
 #[test]
@@ -224,5 +249,9 @@ fn cuda_forward_matches_cpu_asymmetric_kdim_vdim() {
         "MultiheadAttention forward（kdim/vdim 非対称）: CUDA vs CPU",
         cuda_out.as_slice().expect("contiguous"),
         cpu_out.as_slice().expect("contiguous"),
+    );
+    print_fold_bits(
+        "cuda_forward_matches_cpu_asymmetric_kdim_vdim[out]",
+        cuda_out.as_slice().expect("contiguous"),
     );
 }
