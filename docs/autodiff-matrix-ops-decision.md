@@ -262,3 +262,66 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 `k<0`／`k==0` 分岐・`diag`（2-D→1-D）の `k≠0`（正・負）という、前回
 是正では「同じ `Op` 経路だから」という理由でスコープ外とした diagonal
 分岐セルを全て埋めた。tolerance・REQ-2 判定は変更していない。
+
+## §11 diagonal の境界値・範囲外の走査（PR #2257 のフォローアップ・ユーザー承認
+2026-09-25）
+
+§10 の `DIAGONALS = [-1, 0, 1]` は正方形状 `f32_fixture_3x3`
+（`m = n = 3`）に対する内部値の走査に留まり、`tril`／`triu` の早期
+リターン境界・全ゼロ化境界そのもの（`|diagonal|` がちょうど `n - 1`
+／`-(m - 1)` に一致する値、およびそれを跨いで真に範囲外となる値）と
+`diag`（両方向）の抽出長 `L = 1`／`L = 0` の境界・非正方形状
+（行 < 列・行 > 列）は未検証だった。本節で以下を追加した。
+
+- `tril_triu_diagonals(m, n)`（`crates/facade/tests/
+  matrix_ops_backend_parity.rs`）: 形状 `[m, n]` ごとに
+  `{-1, 0, 1, -2, 2, -(m-1), -m, -m-1, -(m-1)+1, n-1, n, n+1, n-2}`
+  を重複除去・昇順ソートして生成する。
+  - `k = n-1／n／n+1`: `tril` の早期リターン境界（`diagonal >= n-1`
+    で `build_tril_triu_mask` を経由せず `x` をそのまま返す。ノードを
+    積まない）。`triu` 側ではこの範囲はマスク経路を通り全要素が
+    ゼロ化される（`k >= n` で mask 全 true）。
+  - `k = n-2`: `tril` がマスク経路を通る最後の値（早期リターン境界の
+    直前。1 要素のみゼロ化）。
+  - `k = -(m-1)／-m／-m-1`: `triu` の早期リターン境界。`tril` 側では
+    マスク経路で全ゼロ化される。
+  - `k = -(m-1)+1`: `triu` がマスク経路を通る最後の値（1 要素のみ
+    ゼロ化）。
+  - `diag`（2-D→1-D）: `k = n-1` または `-(m-1)` で抽出長 `L = 1`、
+    `k >= n` または `k <= -m` で `L = 0`（範囲外）。`L = 0` は
+    `crates/autodiff/src/matrix_ops.rs::diag_2d_to_1d` の
+    `narrow(0, 0, 0)` → `gather(1, idx[0,1])` → `squeeze` 経路により
+    空テンソル `[0]` へ収束し、**エラーにはならない**（`torch.diag`
+    と異なり範囲外オフセットを許容する既存仕様どおり）。
+  - **「マスク全 false（＝全要素を残す）」は `build_tril_triu_mask`
+    のマスク経路自体には現れない**: この条件は早期リターン分岐の
+    条件と一致し、マスクを構築する前に `x` がそのまま返るため
+    （早期リターンが優先的に成立する）。
+  - 走査する形状は正方形 `3×3`・非正方形状〈行 < 列〉`3×5`・
+    非正方形状〈行 > 列〉`5×3` の 3 種（`TRIL_TRIU_SHAPES`）。
+- `diag_1d_diagonals(n)`: `diag`（1-D→2-D）は早期リターン分岐を持たず
+  `N = n + |k|` へ `pad` するだけのため、pad 幅のバリエーション
+  `{-1, 0, 1, -2, 2, -n, n}` を走査する（`k == 0` は pad しない分岐・
+  `k > 0`／`k < 0` は `pad` 引数〈行・列の順序〉が異なる分岐）。
+  入力ベクタ長は通常長 `3` と境界値の長さ `1`（`DIAG_1D_LENGTHS`）の
+  2 種。
+- `diag`（2-D→1-D）backward の `L = 0` セルは、勾配が
+  `Some`（記録される）か `None`（記録されない）かを断定せず、CPU・
+  NaiveOps（および `#[ignore]` の CUDA／Metal 実機セル）間で
+  一致することのみを検証する（`match (dx_cpu, dx_naive) { (Some,
+  Some) => bit 比較, (None, None) => 素通し, _ => panic }`）。実測では
+  CPU・NaiveOps ともに `Some`（形状 `[m, n]` の全ゼロ勾配）を返し
+  一致した。
+- forward・backward いずれのループも bit 列比較に加えて `shape()` の
+  一致を明示的に検証する（`f32_bits` は連続化した要素列のみを比較し
+  形状差を検出しないため、空テンソル・早期リターンの各セルで形状の
+  取り違えが素通りしないようにする）。
+- 既存テスト関数のブロックにループ・形状バリエーションを追加する形に
+  留め、新規 `#[test]` 関数は追加していない（コーディネーター指示）。
+
+CPU（`cargo test -p fandhe-ai --test matrix_ops_backend_parity`）は
+全て green（`L = 0` セルを含む）。tolerance・REQ-2 判定・実装
+（`crates/autodiff/src/matrix_ops.rs`）は変更していない。CUDA／Metal
+実機セルは引き続き `#[ignore]` のまま Mac／DGX Spark GB10 実機
+セッションへ申し送る（`docs/perf/logs/shape-matrix-ops-2144/
+README.md`）。

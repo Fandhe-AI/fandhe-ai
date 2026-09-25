@@ -23,7 +23,7 @@ REQ-2 統一複合判定
 `metal_outer_backward_matches_cpu_reference`）は `#[ignore]` のまま
 未実測である。
 
-**diagonal の分岐セル（同 PR #2257 での追加是正）**: `tril`／`triu`／
+**diagonal の分岐セル（PR #2257 での追加是正）**: `tril`／`triu`／
 `diag`（両方向）は `Op` 経路が同じでも diagonal 値によって境界位置が
 変わるため、コピー系 forward・bit 完全一致 backward の各テストは
 `DIAGONALS = [-1, 0, 1]`（負・0・正）をループで走査する（`tril` の
@@ -31,6 +31,27 @@ REQ-2 統一複合判定
 〈2-D→1-D〉の `k≠0`〈正・負〉を含む。「経路が別なら代表 1 本では
 代わりにならない」という上記論拠を diagonal の境界位置にも適用した。
 関数の追加はしていない）。
+
+**diagonal の境界値・範囲外の走査（PR #2257 のフォローアップ・ユーザー
+承認 2026-09-25。`docs/autodiff-matrix-ops-decision.md` §11 参照）**:
+上記 `DIAGONALS = [-1, 0, 1]` は正方形状 `3×3` の内部値のみで、
+`tril`／`triu` の早期リターン境界そのもの（`|diagonal|` が `n-1` や
+`-(m-1)` に一致する値・それを跨ぐ範囲外の値）と `diag`（両方向）の
+抽出長 `L=1`／`L=0` 境界・非正方形状（行 < 列の `3×5`・行 > 列の
+`5×3`）は未走査だった。`tril_triu_diagonals(m, n)`・
+`diag_1d_diagonals(n)`（`crates/facade/tests/
+matrix_ops_backend_parity.rs`）で形状ごとに境界値・範囲外を機械的に
+生成し、コピー系 forward・bit 完全一致 backward の全テスト（CPU・
+CUDA・Metal）へ横展開した。`diag`（2-D→1-D）の `L=0`（範囲外）は
+`narrow(0,0,0)` → `gather` → `squeeze` 経由で空テンソルへ収束し
+**エラーにはならない**ため、backward は勾配の `Some`／`None` 一致
+（形状の断定はしない）で検証する。forward・backward いずれも
+`f32_bits` の bit 列比較に加え `shape()` の一致も明示検証する
+（空テンソル・早期リターンのセルで形状差が素通りしないようにする
+ため）。CPU（属性なし）実行は `L=0` セルを含め全て green
+（実測: CPU・NaiveOps ともに `Some`〈全ゼロ勾配〉で一致）。CUDA／
+Metal の対応セルは他セル同様 `#[ignore]` のまま本 README の申し送り
+対象に含む。
 
 ## 測定コマンド案
 
