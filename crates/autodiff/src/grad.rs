@@ -5905,13 +5905,26 @@ fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Te
                 let src = (o * axis_len + a) * inner + i;
                 m = eval::nan_propagating_max_f64(m, data[src] as f64);
             }
+            // `m` が `+inf`（縮約対象に `+inf` を含む）の場合、通常の
+            // `shift → exp → sum → ln` 経路は `exp(x_i − y) =
+            // exp(inf − inf) = exp(NaN) = NaN` を +inf 要素の勾配に
+            // 生む（forward の `y` 自体は `+inf` で正しいが VJP が
+            // 壊れる）。この lane は softmax の極限（最大要素へ勾配が
+            // 集中し、同点の +inf 要素間では均等分配）として扱い、
+            // +inf 要素へ上流勾配を均等分配・有限要素は 0 とする分岐
+            // で特別扱いする（codex-review 指摘・イシュー #2147）。
+            let y_is_pos_inf = m == f64::INFINITY;
             let shift = if m.is_finite() { m } else { 0.0 };
-            let mut acc = 0.0f64;
-            for a in 0..axis_len {
-                let src = (o * axis_len + a) * inner + i;
-                acc += (data[src] as f64 - shift).exp();
-            }
-            let y = acc.ln() + shift;
+            let y = if y_is_pos_inf {
+                f64::INFINITY
+            } else {
+                let mut acc = 0.0f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    acc += (data[src] as f64 - shift).exp();
+                }
+                acc.ln() + shift
+            };
             let y_is_neg_inf = y == f64::NEG_INFINITY;
             let out_idx = o * inner + i;
             let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
@@ -5921,6 +5934,25 @@ fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Te
                 );
                 0.0
             }) as f64;
+            if y_is_pos_inf {
+                let inf_count = (0..axis_len)
+                    .filter(|&a| data[(o * axis_len + a) * inner + i] == f32::INFINITY)
+                    .count();
+                debug_assert!(
+                    inf_count > 0,
+                    "logsumexp_vjp: y_is_pos_inf は +inf 要素の存在を前提とする"
+                );
+                let share = g_val / inf_count as f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    out[src] = if data[src] == f32::INFINITY {
+                        share as f32
+                    } else {
+                        0.0
+                    };
+                }
+                continue;
+            }
             for a in 0..axis_len {
                 let src = (o * axis_len + a) * inner + i;
                 if y_is_neg_inf {
@@ -5989,6 +6021,33 @@ fn pnorm_vjp(input: &Tensor<f32>, p: f32, dim: Option<usize>, g: &Tensor<f32>) -
                 );
                 0.0
             }) as f64;
+            // `norm` が `+inf`（縮約対象に `±inf` を含む）の場合、通常の
+            // `ratio = |x_i| / norm` は `±inf の要素` で `inf/inf = NaN`
+            // を生む（`logsumexp_vjp` の `+inf` 分岐と同じ構造の欠陥。
+            // codex-review 指摘・イシュー #2147）。この lane は
+            // `logsumexp_vjp` と同じ極限的な扱いとし、`±inf` 要素へ
+            // 符号付きで上流勾配を均等分配し、有限要素は 0 とする。
+            if norm.is_infinite() {
+                let inf_count = (0..axis_len)
+                    .filter(|&a| (data[(o * axis_len + a) * inner + i] as f64).is_infinite())
+                    .count();
+                debug_assert!(
+                    inf_count > 0,
+                    "pnorm_vjp: norm.is_infinite() は ±inf 要素の存在を前提とする"
+                );
+                let share = g_val / inf_count as f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    let v = data[src] as f64;
+                    out[src] = if v.is_infinite() {
+                        let sign = if v > 0.0 { 1.0 } else { -1.0 };
+                        (share * sign) as f32
+                    } else {
+                        0.0
+                    };
+                }
+                continue;
+            }
             for a in 0..axis_len {
                 let src = (o * axis_len + a) * inner + i;
                 let v = data[src] as f64;

@@ -143,7 +143,12 @@ pub fn prod<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffErro
     }
     match dim {
         None => {
-            let flat = x.reshape(&[n])?;
+            // `reshape` は非 contiguous view を `ShapeError::
+            // NonContiguousReshape` で拒否する（`Var::reshape` の契約。
+            // `var.rs`）。呼び出し元が転置・narrow 等の非 contiguous
+            // view を渡しうるため、`dim: Some` 分岐と同様に `reshape`
+            // 前に `contiguous()` で実体化する。
+            let flat = x.contiguous()?.reshape(&[n])?;
             let cp = flat.cumprod(0)?;
             let last = cp.narrow(0, n - 1, 1)?;
             last.squeeze(Some(0))
@@ -360,6 +365,20 @@ mod tests {
     }
 
     #[test]
+    fn prod_dim_none_accepts_non_contiguous_input() {
+        // `transpose` は非 contiguous な stride view を返す（イシュー
+        // #2147 codex-review 指摘: `dim: None` 分岐が `reshape` 前の
+        // `contiguous()` を欠き `ShapeError::NonContiguousReshape` で
+        // 落ちていた）。転置後の `prod(None)` が全要素積を返せることを
+        // 検証する。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+        let xt = x.transpose(0, 1).unwrap();
+        let out = prod(&xt, None).unwrap();
+        assert_eq!(out.to_tensor().host_slice()[0], 24.0);
+    }
+
+    #[test]
     fn prod_gradient_with_zero_matches_finite_difference() {
         let eps = 1e-3f32;
         let base = vec![2.0f32, 0.0, 3.0];
@@ -427,6 +446,20 @@ mod tests {
         let x = tape.var(&t(vec![1.0, f32::INFINITY], &[2]));
         let out = logsumexp(&x, None).unwrap();
         assert_eq!(out.to_tensor().host_slice()[0], f32::INFINITY);
+    }
+
+    #[test]
+    fn logsumexp_with_pos_inf_gradient_distributes_to_inf_elements() {
+        // codex-review 指摘（イシュー #2147）: `+inf` を含む
+        // `logsumexp` の勾配が `inf - inf = NaN` になっていた。修正後は
+        // `+inf` 要素へ上流勾配を均等分配し、有限要素は 0 になる。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0, f32::INFINITY, 5.0, f32::INFINITY], &[4]));
+        let out = logsumexp(&x, None).unwrap();
+        assert_eq!(out.to_tensor().host_slice()[0], f32::INFINITY);
+        let grads = tape.backward(&out).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+        assert_eq!(dx, vec![0.0, 0.5, 0.0, 0.5]);
     }
 
     #[test]
@@ -654,6 +687,20 @@ mod tests {
         let dx = grads.get(&x).unwrap().unwrap();
         assert!(dx.host_slice()[0].is_finite());
         assert_eq!(dx.host_slice()[0], 0.0);
+    }
+
+    #[test]
+    fn norm_p_with_inf_gradient_distributes_to_inf_elements() {
+        // codex-review 指摘（イシュー #2147）: `±inf` を含む p-norm の
+        // VJP が `inf / inf = NaN` になっていた。修正後は `±inf` 要素へ
+        // 符号付きで上流勾配を均等分配し、有限要素は 0 になる。
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![1.0, f32::INFINITY, 5.0, f32::NEG_INFINITY], &[4]));
+        let out = norm_p(&x, 3.0, None).unwrap();
+        assert_eq!(out.to_tensor().host_slice()[0], f32::INFINITY);
+        let grads = tape.backward(&out).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+        assert_eq!(dx, vec![0.0, 0.5, 0.0, -0.5]);
     }
 
     #[test]

@@ -3593,8 +3593,8 @@ pub trait BackendOps {
     /// 親 #2131「5-B 演算」）。`dim=None` は全要素縮約（スカラー出力）。
     /// `sum`／`exp`／`log` の素朴な合成は `max.detach → sub → exp → sum
     /// → log → add` の経路で全要素が `-inf`（または `+inf` を含む）
-    /// lane で `NaN` を生むため、[`crate::var::Var::sum`] 等の合成では
-    /// なく専用のデバイス側カーネル余地を持つメソッドとして独立させる
+    /// lane で `NaN` を生むため、`autodiff` クレートの `Var::sum` 等の
+    /// 合成ではなく専用のデバイス側カーネル余地を持つメソッドとして独立させる
     /// （`docs/autodiff-reduce-ops-decision.md` §2.4）。
     ///
     /// # 数値契約
@@ -3623,7 +3623,7 @@ pub trait BackendOps {
 
     /// p-ノルム（`torch.linalg.vector_norm(ord=p)` 相当。イシュー
     /// #2147・親 #2131）。`dim=None` は全要素縮約（スカラー出力）。
-    /// `p` は呼び出し元（[`crate::var::Var`] 側の入口）が有限かつ正で
+    /// `p` は呼び出し元（`autodiff` クレートの `Var` 側の入口）が有限かつ正で
     /// あることを検証済みの前提（本メソッド自体は `p` を検査しない。
     /// `docs/autodiff-reduce-ops-decision.md` §2.5「`p` の検証」）。
     ///
