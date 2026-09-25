@@ -160,6 +160,18 @@
 //! （`crates/facade/src/lib.rs` の `SpatialLayersHoldDoctestGuard`・
 //! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
 //! `docs/autodiff-spatial-layers-decision.md` §6 承認事項）。
+//! イシュー #2161（親 #2131）で [`Dropout2d`]／[`AlphaDropout`]
+//! （`dropout` モジュール）・[`EmbeddingBag`]（`embedding_bag`
+//! モジュール）を追加した。`Dropout2d`／`AlphaDropout` は既存
+//! `Var::dropout_with_mask`（[`Dropout`] と共有する forward 入口）を
+//! 再利用する合成、`EmbeddingBag` は `Var::embedding` と
+//! `sum`／`mean`／`max` 縮約の合成で、いずれも新規 `Op`／`BackendOps`／
+//! VJP／カーネルは追加しない。`compat::Sequential::add_dropout2d`／
+//! `add_alpha_dropout`／`add_embedding_bag` の facade 公開（経路 2）は
+//! 未承認のため保留する（`crates/facade/src/lib.rs` の
+//! `DropoutEmbeddingBagHoldDoctestGuard`・`crates/facade/tests/
+//! api_surface.rs` の否定ガードで固定。
+//! `docs/autodiff-dropout-embedding-bag-decision.md` §6 承認事項）。
 
 mod attention;
 mod batch_norm;
@@ -167,6 +179,7 @@ mod container;
 mod conv;
 mod dropout;
 mod embedding;
+mod embedding_bag;
 mod flatten;
 mod identity;
 pub mod init;
@@ -197,8 +210,9 @@ pub use conv::{
     Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
     ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, conv2d_forward_low_precision,
 };
-pub use dropout::Dropout;
+pub use dropout::{AlphaDropout, Dropout, Dropout2d};
 pub use embedding::{Embedding, EmbeddingVars};
+pub use embedding_bag::{EmbeddingBag, EmbeddingBagMode, EmbeddingBagVars};
 pub use flatten::Flatten;
 pub use identity::Identity;
 pub use linear::{Linear, LinearVars, linear_forward_low_precision};

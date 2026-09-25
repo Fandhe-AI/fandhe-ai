@@ -255,7 +255,7 @@ impl Embedding {
 /// は `2^31` へ丸め上がる（`as` キャストは float→int で飽和するため
 /// 境界値の判定を静かに緩めてしまう）。`f32 → f64` の昇格は無損失
 /// なので、`f64` 側で `i32::MAX` と比較すれば境界を厳密に判定できる。
-fn ids_from_f32(input: &Tensor<f32>) -> Result<Tensor<i32>, AutodiffError> {
+pub(crate) fn ids_from_f32(input: &Tensor<f32>) -> Result<Tensor<i32>, AutodiffError> {
     let dense = input.contiguous();
     let values = dense.as_slice().ok_or_else(|| {
         AutodiffError::InvalidArgument(
