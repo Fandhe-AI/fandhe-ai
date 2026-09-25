@@ -184,7 +184,13 @@ pub fn prelu<'t>(x: &Var<'t>, weight: &Var<'t>) -> Result<Var<'t>, AutodiffError
     let x_shape = x.shape();
     let x_rank = x_shape.len();
     let w_broadcast_shape: Vec<usize> = if c == 1 {
-        vec![1; x_rank.max(1)]
+        // `x_rank == 0`（スカラー入力）では空 shape（`[]`）へ reshape
+        // する。`x_rank.max(1)` で底上げすると rank-0 入力でも `[1]` へ
+        // broadcast され、活性化演算の shape 保存契約（rank-0 入力 →
+        // rank-0 出力。他の 4 活性化演算・`prelu_scalar_weight_rank0_
+        // preserves_shape` テスト参照）を破る（イシュー #2146 レビュー
+        // 指摘・codex #2262 スレッド・Bugbot 同旨）。
+        vec![1; x_rank]
     } else {
         if x_rank < 2 {
             return Err(AutodiffError::Shape(ShapeError::RankMismatch {
@@ -410,6 +416,45 @@ mod tests {
         let w_c2 = tape.var(&Tensor::new(vec![0.1f32, 0.2], &[2]).unwrap());
         // rank 1 の x に C=2 の weight を適用しようとするとエラー（rank < 2 要求違反）。
         assert!(prelu(&x2, &w_c2).is_err());
+    }
+
+    /// PReLU のスカラー入力（`x` が rank 0・`weight` が `C == 1`）で
+    /// 出力の rank が保存されることを固定する（イシュー #2146 レビュー
+    /// 指摘・codex/#2262 スレッド・Bugbot 同旨。`w_broadcast_shape` を
+    /// `x_rank.max(1)` で底上げすると `x_rank == 0` でも `[1]` へ
+    /// reshape され `[] ⊕ [1] -> [1]` の rank-0 → rank-1 leak が起きる。
+    /// `vec![1; x_rank]` は `x_rank == 0` で空 shape（`[]`）になり、他の
+    /// 4 活性化演算と同じ rank 保存契約を満たす）。
+    #[test]
+    fn prelu_scalar_weight_rank0_preserves_shape() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![-4.0f32], &[]).unwrap());
+        let w = tape.var(&Tensor::new(vec![0.25f32], &[1]).unwrap());
+        let y = prelu(&x, &w).unwrap();
+        assert_eq!(
+            y.shape(),
+            Vec::<usize>::new(),
+            "rank-0 入力は rank-0 出力を保つこと"
+        );
+        let out = y.to_tensor();
+        assert_eq!(out.as_slice().unwrap()[0], -1.0);
+
+        let sum = y.sum(None).unwrap();
+        let grads = tape.backward(&sum).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        let dw = grads.get(&w).unwrap().unwrap();
+        assert_eq!(
+            dx.shape(),
+            &[] as &[usize],
+            "x の勾配 shape も rank-0 を保つこと"
+        );
+        assert_eq!(
+            dw.shape(),
+            &[1usize] as &[usize],
+            "weight の勾配は weight 自身の shape [1] へ縮約されること"
+        );
+        assert_eq!(dx.host_slice()[0], 0.25);
+        approx_eq(dw.host_slice()[0], -4.0);
     }
 
     #[test]
