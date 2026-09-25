@@ -14,7 +14,7 @@
 //!     上で共起する箇所（分割依存の縮約——結果がスレッド割り当てに
 //!     依存しうる典型パターン）が 0 件であること（走査方式は下記
 //!     §「文境界・レキシカルスコープ・汚染追跡の方式」を参照。
-//!     PR #2274 で 6 ラウンド、その後の敵対的レビューでさらに 7 件の
+//!     PR #2274 で 6 ラウンド、その後の敵対的レビューでさらに 11 件の
 //!     検出漏れ・過検出が指摘され、その都度走査方式を是正した）。
 //!     `fetch_add`（等の atomic read-modify-write 蓄積）が本番未結線
 //!     の診断コード 1 箇所（`gemm_blis/mod.rs`。`#[cfg(test)]` ゲート
@@ -38,24 +38,39 @@
 //! `fn(i32) -> i32` 型注釈・ローカル `impl` を挟むだけで汚染集合が
 //! 全消去される、UFCS 呼び出しを検出できない、`Vec` への `collect`
 //! で連鎖が切れた初期化式を誤って汚染するといった過検出・検出漏れが
-//! 敵対的レビューで指摘された。さらにその是正後、次の 3 件が追加で
+//! 敵対的レビューで指摘された。さらにその是正後、次の 4 件が追加で
 //! 指摘された: (i) 「並列マーカーと同じか浅い深さの collect なら
 //! 一律に遮断する」という単純な深さ比較は、`(data.par_iter(),
 //! other.collect::<Vec<_>>()).0` のようにタプル要素として無関係に
-//! 同居するだけの collect まで遮断してしまう（codex-review 指摘 P1。
-//! `is_same_method_chain` による「同一メソッド連鎖上にあるか」の判定
-//! へ置き換えた）。(ii) `statement_own_view` がネストした `{...}`
-//! ブロック本体を単純空白化していたため、`{ .. }.sum()` のように
-//! ブロック式の直後に連鎖する縮約が、同一文判定・UFCS 判定のどちらか
-//! らも見えなかった（Cursor Bugbot 指摘）。(iii) (ii) の初回是正は
-//! ブロック本体を合成マーカー文字列（`.par_iter(` 等）へ実際に書き
-//! 換える方式だったため、ブロック本体が合成マーカーの最小長（7 バイ
-//! ト）未満だと検出できない Critical な抜けがあった（`{it}`・
-//! `{ acc }` のような短い汚染識別子 1 つだけのブロック式。敵対的
-//! レビュー指摘）。`statement_own_view` がテキストへ何も書き込まず
-//! 「仮想マーカー位置」を別チャネル（バイト位置のリスト）として返す
-//! 方式へ置き換え、ブロック本体の長さに一切依存しない検出とした
-//! （`statement_own_view` doc 参照）。現行方式は次の 5 点で構成する:
+//! 同居するだけの collect まで遮断してしまう（codex-review 指摘 P1）。
+//! (ii) `statement_own_view` がネストした `{...}` ブロック本体を単純
+//! 空白化していたため、`{ .. }.sum()` のようにブロック式の直後に
+//! 連鎖する縮約が、同一文判定・UFCS 判定のどちらからも見えなかった
+//! （Cursor Bugbot 指摘）。(iii) (ii) の初回是正はブロック本体を合成
+//! マーカー文字列（`.par_iter(` 等）へ実際に書き換える方式だった
+//! ため、ブロック本体が合成マーカーの最小長（7 バイト）未満だと検出
+//! できない Critical な抜けがあった（`{it}`・`{ acc }` のような短い
+//! 汚染識別子 1 つだけのブロック式。敵対的レビュー指摘）。
+//! `statement_own_view` がテキストへ何も書き込まず「仮想マーカー
+//! 位置」を別チャネル（バイト位置のリスト）として返す方式へ置き換え、
+//! ブロック本体の長さに一切依存しない検出とした。(iv) さらにその後、
+//! 4 件が同時に指摘された: 固定文字列の部分一致（`.par_iter(`・
+//! `.sum(` 等）では空白・改行を挟む呼び出し（`data.par_iter ()
+//! .sum ()`・複数行の連鎖・`sum :: < f32 > ()` のような turbofish の
+//! 空白入り形）を見逃す（codex-review 指摘 P1）・固定文字列
+//! `.into_par_iter(` では `rayon::iter::IntoParallelIterator::
+//! into_par_iter(data)` のような UFCS 形の任意の修飾パスを拾えない
+//! （codex-review 指摘 P1）・(i) で導入した「同一メソッド連鎖」判定が
+//! `{` を連鎖の構成要素として扱っておらず、ブロック式の仮想マーカーの
+//! 直後に `.collect::<Vec<_>>()` が続いても遮断が素通りする過検出
+//! （Cursor Bugbot 指摘）・仮想マーカーの生存判定が並列マーカーには
+//! collect 遮断を適用する一方、汚染識別子にはしていなかったため
+//! `Vec` collect された連鎖でしか使われていない汚染識別子でもブロック
+//! を「生きている」と誤判定する過検出（Cursor Bugbot 指摘）。この
+//! 4 件は同類型（固定文字列一致・字句レベルの近似の限界）としてまとめ
+//! て塞ぎ、マーカー検出のすべて（並列マーカー・縮約マーカー・collect
+//! マーカー・連鎖の連続性判定）を `tokenize` による簡易字句解析
+//! （トークン列の照合）へ置き換えた。現行方式は次の 5 点で構成する:
 //!
 //! 1. **字句前処理**（`strip_comments_and_strings`）: `//`／`/* */`
 //!    （ネスト対応）・`"..."`・raw string（`r"..."`／`r#"..."#`）・
@@ -67,35 +82,45 @@
 //!    `()`／`[]`／`{}` の深さを追跡し、深さ 0 での `;` と、深さ 0 に
 //!    戻る `}` のうち直後（空白を挟んで）が式の継続（`.`／`?`／二項
 //!    演算子／`[`／`(`／`else`／`catch`）でないものを文の終端とする。
-//! 3. **縮約マーカーの括弧深さ条件**（`has_reduce_after`）: 並列マーカー
-//!    （メソッド呼び出し形 `.par_iter(` 等・パス参照形 `T::par_iter`）
-//!    より後方かつ同じか浅い括弧深さに縮約マーカーが現れる場合のみ
-//!    共起とみなす。加えて `ParallelIterator::sum(...)`・
-//!    `Trait::reduce(...)` のような UFCS（fully-qualified）呼び出し
-//!    構文も `has_ufcs_reduction`（`UFCS_REDUCE_MARKERS`）が別途走査し、
-//!    呼び出し引数リストの内側に並列マーカーまたは汚染識別子があれば
-//!    1 件とカウントする（同一文内で他規則と二重計上しない）。
+//! 3. **トークン照合によるマーカー検出**（`tokenize`・`find_par_marker_tokens`・
+//!    `find_reduce_marker_tokens`・`find_ufcs_reduce_calls`・
+//!    `find_collect_marker_tokens`）: 空白・改行を無視してトークン列
+//!    へ分割し、並列マーカーは「識別子が `par_` 接頭辞または
+//!    `into_par_iter` で、直前のトークンが `.` または `::`」、縮約
+//!    マーカーは「識別子が縮約名の集合（`REDUCE_MARKER_NAMES`）に
+//!    含まれ、直前が `.`（メソッド形）または `::`（UFCS 形）で、直後
+//!    が呼び出し括弧または turbofish 経由の呼び出し括弧」、collect
+//!    マーカーは「`.collect::<Vec<`・`.collect_into_vec(`」で判定する。
+//!    直前・直後のトークンのみを見るため、`T::par_iter`（パス参照
+//!    形）・`rayon::iter::IntoParallelIterator::into_par_iter(data)`
+//!    （UFCS 形。修飾パスの深さ・区切りの数によらない）・
+//!    `ParallelIterator::sum(...)`（UFCS 形の縮約。`has_ufcs_reduction`
+//!    が呼び出し引数リストの内側を別途走査し、並列マーカーまたは汚染
+//!    識別子があれば 1 件とカウントする。同一文内で他規則と二重計上
+//!    しない）を一律に扱える。
 //! 4. **`.collect(` による並列→逐次の連鎖の遮断（同一メソッド連鎖上
-//!    に限る）**: 並列マーカー・汚染識別子と縮約マーカーの間に、
-//!    `.collect(`（順序保持が型で明示される `Vec` への collect。
-//!    `COLLECT_MARKERS`）が挟まる場合は接続しないとみなすが、
-//!    「同じか浅い深さ」という単純な比較だけでは遮断範囲が広すぎる
-//!    （codex-review 指摘 P1: `(data.par_iter(), other
-//!    .collect::<Vec<_>>()).0` のように無関係なタプル要素として同居
-//!    するだけの collect まで遮断してしまう）。`is_same_method_chain`
-//!    が「到達点（collect）自身の深さを連鎖の合流点とみなし、そこまで
-//!    テキスト深さが一度も下回らず、かつ合流点の深さちょうどに現れる
-//!    文字がメソッド連鎖の構成要素（識別子・`.`／`:`・turbofish の
-//!    `<>`・`?`・空白・呼び出しの `(`・`)`）だけであること」を判定し、
-//!    これを満たす collect のみを遮断とみなす（`has_reduce_after`）。
-//!    同じ判定は文をまたぐ汚染の**発生源**判定（`initializer_taints`）
+//!    に限る）**: 並列マーカー・汚染識別子と縮約マーカーの間に collect
+//!    マーカーが挟まる場合は接続しないとみなすが、「同じか浅い深さ」
+//!    という単純な比較だけでは遮断範囲が広すぎる（codex-review 指摘
+//!    P1: `(data.par_iter(), other.collect::<Vec<_>>()).0` のように
+//!    無関係なタプル要素として同居するだけの collect まで遮断して
+//!    しまう）。`is_same_method_chain` が「到達点（collect）自身の
+//!    深さを連鎖の合流点とみなし、そこまでトークンの深さが一度も
+//!    下回らず、かつ合流点の深さちょうどにあるトークンがすべて
+//!    メソッド連鎖の構成要素（識別子・`.`／`::`／`:`・turbofish の
+//!    `<`・`>`・`?`・括弧〈`()`／`{}`／`[]` すべて〉）であること」を
+//!    判定し、これを満たす collect のみを遮断とみなす
+//!    （`has_reduce_after`）。括弧に `{`／`}` を含めるのは Cursor
+//!    Bugbot 指摘の是正: 仮想マーカーの起点はブロックの `{` トークン
+//!    そのものであり、これを連鎖の構成要素として認めないと
+//!    `{ data.par_iter() }.collect::<Vec<_>>()` のようなブロック式
+//!    直後の collect による遮断が素通りしてしまう（過検出）。同じ
+//!    判定は文をまたぐ汚染の**発生源**判定（`initializer_taints`）
 //!    にも適用する: `let parts = data.par_iter().map(f)
 //!    .collect::<Vec<f32>>();` のように初期化式が Vec 確定で終わる
-//!    場合は束縛先を汚染しない（`.collect().into_iter().fold(..)` と
-//!    同じ「順序保持 collect 後は決定的」という理由）。`.collect(` の
-//!    後に再び並列マーカーが現れる場合（`x.par_iter()
-//!    .collect::<Vec<_>>().par_iter()`）はその後方のマーカー自身が
-//!    汚染源になる。
+//!    場合は束縛先を汚染しない。`.collect(` の後に再び並列マーカーが
+//!    現れる場合（`x.par_iter().collect::<Vec<_>>().par_iter()`）は
+//!    その後方のマーカー自身が汚染源になる。
 //! 5. **レキシカルスコープを持つ関数単位の汚染追跡**
 //!    （`count_in_scope`。再帰処理）: 文中の任意位置の `let`
 //!    （型注釈・タプルパターンを含む。`parse_let_binding_range`）
@@ -116,21 +141,17 @@
 //! `has_ufcs_reduction`）は、文内にネストした `{...}` ブロック本体を
 //! 塗りつぶしたテキストと「仮想マーカー位置」の一覧（`statement_own_view`
 //! の戻り値）に対して行う（ネスト内は `count_in_scope` の再帰が別の
-//! レキシカルスコープとして検査するため二重計上しない）。ただし単純な
-//! 空白塗りつぶしだけでは、ブロック式の直後に連鎖する縮約
-//! （`{ .. }.sum()`・`if c { a.par_iter() } else { b.par_iter() }
-//! .sum()` 等）をどちらの経路からも検出できなくなる（Cursor Bugbot
-//! 指摘）。ブロック本体が「生きている（4 の規則で collect に遮断され
-//! ていない）並列マーカー」または現スコープの汚染識別子を含む場合は、
-//! ブロックの開き `{` のバイト位置を仮想マーカーとして記録し
-//! （テキストへは何も書き込まない。長さに依存しない副チャネル。
-//! `statement_own_view` doc 参照）、`has_depth_aware_par_reduce`・
-//! `has_ufcs_reduction`・連鎖の遮断判定（`is_same_method_chain`
-//! 経由）のいずれも実マーカーと仮想マーカーの両方を起点として扱う。
-//! `let` 初期化式の汚染判定（`classify_taint`）は塗りつぶし前の
-//! 初期化式全体を見る（`let it =
-//! { let x = 1; data.par_iter() };` のような場合に `.par_iter(` を
-//! 見失わないため）。
+//! レキシカルスコープとして検査するため二重計上しない）。ブロック本体
+//! が「生きている（4 の規則で collect に遮断されていない）並列
+//! マーカー」または「生きている（同じく collect 遮断を適用した）
+//! 汚染識別子」を含む場合は、ブロックの開き `{` のバイト位置を仮想
+//! マーカーとして記録し（テキストへは何も書き込まない。長さに依存
+//! しない副チャネル。`statement_own_view` doc 参照）、
+//! `has_depth_aware_par_reduce`・`has_ufcs_reduction`・連鎖の遮断判定
+//! （`is_same_method_chain` 経由）のいずれも実マーカーと仮想マーカーの
+//! 両方を起点として扱う。`let` 初期化式の汚染判定（`classify_taint`）
+//! は塗りつぶし前の初期化式全体を見る（`let it = { let x = 1;
+//! data.par_iter() };` のような場合に `.par_iter(` を見失わないため）。
 //!
 //! ## 既知の限界
 //!
@@ -142,8 +163,8 @@
 //! 等）が `crates/backend-cpu/src` に 0 件であることを fail-closed に
 //! 検査することで、経路そのものの導入を検知する。
 //!
-//! `is_same_method_chain` は「合流点（collect）の深さちょうどに現れる
-//! 文字」のみで連鎖の連続性を判定するトークンレベルの近似であり、
+//! `is_same_method_chain` は「合流点（collect）の深さちょうどにある
+//! トークン」のみで連鎖の連続性を判定するトークンレベルの近似であり、
 //! 完全な構文解析ではない。`.zip(other.par_X(..))` のように、起点
 //! より深い位置（`.zip(` の引数内）にある並列マーカーが、無関係な
 //! 縮約マーカーと**単一式クロージャ本体**の中でたまたま同じ括弧深さに
@@ -254,7 +275,7 @@ const RAYON_MARKER_FILE_ALLOWLIST: &[&str] = &[
 
 /// `text` 中に識別子境界で `par_` から始まる語（`par_iter`／
 /// `par_chunks_mut`／将来の `par_windows`／`par_split` 等）が現れるかを
-/// 判定する（`contains_rayon_marker` 専用。`find_par_marker_positions`
+/// 判定する（`contains_rayon_marker` 専用。`find_par_marker_tokens`
 /// と異なり `.` 前置・`(` 後続を要求しない**生テキスト**走査であり、
 /// コメント中の `` `par_chunks_mut(...)` `` のような記述も拾う。旧実装
 /// の `content.contains("par_iter") || content.contains("par_chunks")`
@@ -569,26 +590,6 @@ fn strip_comments_and_strings(content: &str) -> String {
 // ブロック深さを考慮した文境界・括弧深さ
 // =====================================================================
 
-/// `text` 中の各バイト位置（char 境界）における「その文字を処理する
-/// 直前」の `()`／`[]`／`{}` 合算深さを返す（`text.len()` の位置には
-/// 走査終了時点の深さを入れる）。並列マーカー・縮約マーカーの出現
-/// 位置の括弧深さ比較（`has_depth_aware_par_reduce`・
-/// `has_tainted_reduction_usage`）に使う。
-fn compute_depths(text: &str) -> Vec<i32> {
-    let mut depths = vec![0i32; text.len() + 1];
-    let mut depth = 0i32;
-    for (i, c) in text.char_indices() {
-        depths[i] = depth;
-        match c {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = (depth - 1).max(0),
-            _ => {}
-        }
-    }
-    depths[text.len()] = depth;
-    depths
-}
-
 /// `text` 中の深さ 0（`()`／`[]`／`{}` 合算）で開く `{...}` ブロックの
 /// `(開き `{` の byte 位置, 閉じ `}` の byte 位置)` を列挙する。
 /// `count_in_scope`（再帰下降）と `statement_own_view`
@@ -695,28 +696,26 @@ fn statement_spans(text: &str) -> Vec<(usize, usize)> {
 /// つぶし前の `raw` をそのまま使う。
 ///
 /// ブロック本体が「生きている（`is_same_method_chain` の判定で Vec
-/// collect に遮断されていない）並列マーカー」または `tainted` の識別子
-/// を含む場合、ブロックの開き `{` のバイト位置を仮想マーカー位置として
-/// 記録する（深さは `{` 自身の位置——すなわちブロック式そのものの、
-/// ブロックの外側から見た深さ——を使う。`compute_depths` は各位置に
-/// 「その文字を処理する直前」の深さを記録するため、`{` の位置の深さ
-/// は自然にブロックを開く前の深さと一致する）。これにより
-/// `{ let x = 1; data.par_iter() }.sum()`・`if c { a.par_iter() }
-/// else { b.par_iter() }.sum()`・`unsafe { data.par_iter() }
-/// .sum::<f32>()`・`match k { _ => data.par_iter() }.sum::<f32>()`・
-/// `if flag { it } else { acc }.sum()`（`it`／`acc` が汚染済み）の
-/// ようにブロック式の直後に連鎖した縮約を、同一文中の共起判定・UFCS
-/// 判定が検出できる（Cursor Bugbot 指摘: 旧実装は塗りつぶし後に
-/// 完全に空白化していたため、ブロックの外側からもブロックを再帰検査
-/// する `count_in_scope` の子スコープからも、この連鎖が見えなかった）。
+/// collect に遮断されていない）並列マーカー」または「生きている汚染
+/// 識別子」を含む場合、ブロックの開き `{` のバイト位置を仮想マーカー
+/// 位置として記録する（トークン化した際の深さは `{` 自身のトークン
+/// 深さ——すなわちブロック式そのものの、ブロックの外側から見た深さ
+/// ——と一致する）。これにより `{ let x = 1; data.par_iter() }.sum()`・
+/// `if c { a.par_iter() } else { b.par_iter() }.sum()`・
+/// `unsafe { data.par_iter() }.sum::<f32>()`・`match k { _ =>
+/// data.par_iter() }.sum::<f32>()`・`if flag { it } else { acc }.sum()`
+/// （`it`／`acc` が汚染済み）のようにブロック式の直後に連鎖した縮約を、
+/// 同一文中の共起判定・UFCS 判定が検出できる（Cursor Bugbot 指摘: 旧
+/// 実装は塗りつぶし後に完全に空白化していたため、ブロックの外側からも
+/// ブロックを再帰検査する `count_in_scope` の子スコープからも、この
+/// 連鎖が見えなかった）。
 ///
-/// 旧実装はテキスト中に合成マーカー文字列（`.par_iter(` 等）を実際に
-/// 書き込む方式だったため、ブロック本体が合成マーカーの最小長
-/// （7 バイト）未満だと検出できない Critical な抜けがあった
-/// （`{it}`・`{ acc }` のような短い汚染識別子 1 つだけのブロック式。
-/// 敵対的レビュー指摘）。仮想マーカーはテキストに何も書き込まず
-/// バイト位置のリストとして別チャネルで返すため、ブロック本体の
-/// 長さに一切依存しない。
+/// 汚染識別子の「生存」判定（`has_live_tainted_ref`）は並列マーカーと
+/// **同じ** collect 遮断規則を適用する。旧実装は汚染識別子の存在
+/// だけで仮想マーカーを立てており、`{ it.map(f).collect::<Vec<_>>() }
+/// .into_iter().sum();`（`it` は汚染済み）のように、ブロック内で
+/// `it` が Vec collect された連鎖でしか使われていない場合まで「生きて
+/// いる」と誤判定していた（Cursor Bugbot 指摘）。
 fn statement_own_view(raw: &str, tainted: &HashSet<String>) -> (String, Vec<usize>) {
     let spans = find_depth0_braces(raw);
     let mut out: Vec<u8> = raw.as_bytes().to_vec();
@@ -728,13 +727,11 @@ fn statement_own_view(raw: &str, tainted: &HashSet<String>) -> (String, Vec<usiz
         if interior_start >= interior_end {
             continue;
         }
-        let interior = &raw[interior_start..interior_end];
-        let has_live_marker = has_live_chain_marker(interior);
-        let has_tainted_ref = tainted
-            .iter()
-            .any(|t| !find_ident_occurrences(interior, t).is_empty());
+        let interior_tokens = tokenize(&raw[interior_start..interior_end]);
+        let is_live = has_live_chain_marker(&interior_tokens, &[])
+            || has_live_tainted_ref(&interior_tokens, tainted);
 
-        if has_live_marker || has_tainted_ref {
+        if is_live {
             virtual_markers.push(*open_idx);
         }
         for b in &mut out[interior_start..interior_end] {
@@ -752,301 +749,200 @@ fn statement_own_view(raw: &str, tainted: &HashSet<String>) -> (String, Vec<usiz
 }
 
 // =====================================================================
-// 並列マーカー・縮約マーカーの検出
+// トークン化・並列マーカー・縮約マーカーの検出（敵対的レビュー指摘
+// codex P1 × 2・Cursor Bugbot Medium × 2 の是正）
 // =====================================================================
+//
+// 旧実装は固定文字列の部分一致（`text.contains(".par_iter(")` 等）で
+// マーカーを検出していたため、次の 2 件を見逃していた:
+//   - 空白・改行を挟むメソッド呼び出し（`data.par_iter ().sum ()`・
+//     複数行に折り返した連鎖・`sum :: < f32 > ()` のような turbofish
+//     の空白入り形）。原因は `.par_iter(`／`.sum(` 等の固定文字列一致
+//     そのものが空白を許容しないこと。
+//   - UFCS 形の任意の修飾パス（`rayon::iter::IntoParallelIterator::
+//     into_par_iter(data)`）。原因は `.into_par_iter(` という固定
+//     文字列が「直前が `.`」の形しか拾えないこと。
+// マーカー検出のすべて（並列マーカー・縮約マーカー・collect マーカー・
+// 連鎖の連続性判定）を、簡易字句解析によるトークン列の照合へ置き換える。
 
-/// `.par_` で始まり `(` へ続くメソッド呼び出し全般（`.par_iter(`／
-/// `.par_chunks(`／`.par_chunks_mut(`／`.par_iter_mut(`／`.par_bridge(`／
-/// `.par_windows(`／`.par_split(` 等。新規命名を個別列挙せずに拾う
-/// ための汎用規則）・`.into_par_iter(`（`par_` 接頭辞パターンに当た
-/// らない rayon 変換経路）に加え、`::par_` で始まるパス参照
-/// （`T::par_iter`。メソッド値として変数へ束縛して後から呼び出す形
-/// 〈`let f = T::par_iter; let it = f(&data); it.sum()`〉のため、末尾
-/// `(` の有無を問わず識別子境界のみで拾う。敵対的レビュー指摘）の
-/// 出現バイト位置を返す。
-fn find_par_marker_positions(text: &str) -> Vec<usize> {
-    let mut positions = Vec::new();
-    for (i, _) in text.match_indices(".par_") {
-        let rest = &text[i + 5..];
-        let ident_len = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
-        if ident_len > 0 && rest[ident_len..].starts_with('(') {
-            positions.push(i);
-        }
-    }
-    for (i, _) in text.match_indices("::par_") {
-        let rest = &text[i + 6..];
-        let ident_len = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
-        if ident_len > 0 {
-            positions.push(i);
-        }
-    }
-    for (i, _) in text.match_indices(".into_par_iter(") {
-        positions.push(i);
-    }
-    positions.sort_unstable();
-    positions.dedup();
-    positions
+/// トークンの種別。識別子・区切り記号（`::` は 1 トークンとして結合
+/// する）・括弧・その他の記号に分類する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenKind {
+    Ident,
+    Dot,
+    ColonColon,
+    Colon,
+    Lt,
+    Gt,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Question,
+    /// `,`・`;`・`=`・二項演算子・`|` 等、連鎖の構成要素とみなさない
+    /// その他の記号。
+    Other,
 }
 
-/// rayon の分割依存縮約マーカー。`.sum(`／`.sum::<`（turbofish）に加え
-/// `.product(`／`.fold(`／`.fold_with(`／`.fold_chunks(`／`.try_fold(`／
-/// `.try_reduce(`／`.try_reduce_with(`・`.reduce(`／`reduce_with(` を
-/// 含む（rayon の `fold` 系はスレッド分割依存の部分結果を返すため
-/// `sum`／`reduce` と同類型）。
-const REDUCE_MARKERS: &[&str] = &[
-    ".sum(",
-    ".sum::<",
-    ".product(",
-    ".product::<",
-    ".reduce(",
-    "reduce_with(",
-    ".fold(",
-    ".fold_with(",
-    ".fold_chunks(",
-    ".try_fold(",
-    ".try_reduce(",
-    ".try_reduce_with(",
-];
-
-/// `ParallelIterator::collect` 相当のマーカー。`data.par_chunks(..)
-/// .map(..).collect::<Vec<_>>().into_iter().fold(..)`
-/// （`crates/backend-cpu/src/mse.rs::mse_sum_sq_f32` 等、本クレートの
-/// 縮約実装で広く使われる実測イディオム。§E 実測）は `.collect(` で
-/// 一旦インデックス順の `Vec` へ確定し、`.into_iter()` 以降は通常の
-/// 逐次 `Iterator` になるため、`.collect(` より後方の `.fold(` 等は
-/// 直前の並列マーカー・汚染識別子とは**接続されない**。
-/// `has_reduce_after` がこの遮断を判定する。遮断は順序保持が型で
-/// 明示される `Vec` への collect（`.collect::<Vec<`・
-/// `.collect_into_vec(`）に限る。型推論に任せた `.collect()` や
-/// `HashMap`／`HashSet` 等への collect は反復順序が決まらない場合が
-/// あるため遮断せず、後続の縮約を並列縮約として数える（fail-closed 側）。
-const COLLECT_MARKERS: &[&str] = &[".collect::<Vec<", ".collect_into_vec("];
-
-/// `text`（`compute_depths` の対象と同一）中の `markers` 各出現に
-/// ついて `(バイト位置, その位置の括弧深さ)` を返す。
-fn find_marker_depths(text: &str, depths: &[i32], markers: &[&str]) -> Vec<(usize, i32)> {
-    let mut hits = Vec::new();
-    for marker in markers {
-        for (i, _) in text.match_indices(marker) {
-            hits.push((i, depths.get(i).copied().unwrap_or(0)));
-        }
-    }
-    hits
+/// トークン 1 個。`start` は `tokenize` の入力テキスト中のバイト位置
+/// （文字境界）、`depth` は `find_depth0_braces` 等と同じ規約
+/// （`()`／`[]`／`{}` 合算。開き括弧はそれ自身の増分前、閉じ括弧は
+/// それ自身の減分前の深さ）でのトークン自身の括弧深さ。
+#[derive(Clone, Copy, Debug)]
+struct Token<'a> {
+    kind: TokenKind,
+    text: &'a str,
+    start: usize,
+    depth: i32,
 }
 
-/// `text`（`depths` は `compute_depths(text)` の結果）において、
-/// `from_idx` から `to_idx` までが**同一のメソッド連鎖上**にあるかを
-/// 判定する（codex-review 指摘 P1: 無関係な `Vec` collect による誤
-/// 遮断の是正。`let it = (data.par_iter(), other.collect::<Vec<_>>())
-/// .0;` のようにタプル要素として同居するだけの collect は
-/// `data.par_iter()` の連鎖を遮断しない）。
-///
-/// `to_idx`（`.collect(` 等の到達点）自身の深さ `target_depth =
-/// depths[to_idx]` を「連鎖の合流点の深さ」とみなし、次の 2 条件を
-/// 満たす場合のみ真を返す:
-///
-/// 1. `from_idx..to_idx` の区間でテキストの深さが `target_depth` を
-///    一度も下回らない（`to_idx` の深さは区間内の最小値であること。
-///    `from_idx` 自身の深さが `target_depth` より深い場合——たとえば
-///    `data.par_chunks(..).zip(other.par_chunks(..)).map(..)
-///    .collect(..)` の `other.par_chunks(` のように `.zip(` の引数と
-///    して起点より深い位置にある場合——は、起点からいったん `.zip(`／
-///    `.map(` の呼び出し括弧を閉じて `target_depth` まで戻ってくる
-///    正当な連鎖として許容する。反対に区間内で `target_depth` より
-///    **浅い**深さに一度でも達したら、それは `to_idx` を包む別の外側
-///    の式を経由したことを意味し同一連鎖ではない）。
-/// 2. `target_depth` ちょうどの深さに現れる文字が、メソッド連鎖の
-///    構成要素（識別子文字・`.`／`:`・turbofish の `<`・`>`・`?`・
-///    空白・メソッド呼び出しの開き `(`・閉じ `)`）だけであること。
-///    `,`・`;`・`=`・二項演算子・`|` 等が `target_depth` に現れたら、
-///    `from_idx` と `to_idx` は別の式（タプル要素・別の変数への代入
-///    等）に属しており同一連鎖ではない。
-///
-/// （設計メモ: 当初は「`to_idx` の深さが起点 `from_idx` の深さと一致
-/// すること」を条件に含めていたが、これは `pred.par_chunks(CHUNK)
-/// .zip(target.par_chunks(CHUNK)).map(..).collect::<Vec<f32>>()
-/// .into_iter().fold(..)`〈`mse.rs`／`bce.rs`／`huber.rs`／`kl_div.rs`
-/// で実際に使われる形〉のような、`.zip(` の引数に現れる 2 つ目の
-/// `par_chunks` を独立した「起点より深い」マーカーとして誤って
-/// フラグ立てする実ソース回帰を生んだ（実測: §E）。到達点 `to_idx`
-/// 自身の深さを合流点として扱う本方式はその回帰を出さずに P1 の
-/// 逐語回帰例を通す）。
-fn is_same_method_chain(text: &str, depths: &[i32], from_idx: usize, to_idx: usize) -> bool {
-    if from_idx >= to_idx {
-        return false;
-    }
-    let target_depth = depths.get(to_idx).copied().unwrap_or(0);
+/// `text`（既に `strip_comments_and_strings` 済み。コメント・文字列・
+/// char/byte literal は既に空白へ置換済みのため、本関数はそれ以外の
+/// 記号のみを扱えばよい）をトークン列へ分割する。空白・改行はトークン
+/// 間で無視する（これにより `data.par_iter ()`・複数行の連鎖・
+/// `sum :: < f32 > ()` のような空白入りの書き方も、詰めて書いた場合と
+/// 同一のトークン列になる）。
+fn tokenize(text: &str) -> Vec<Token<'_>> {
     let bytes = text.as_bytes();
-    for (i, &b) in bytes.iter().enumerate().take(to_idx).skip(from_idx) {
-        let d = depths.get(i).copied().unwrap_or(0);
-        if d < target_depth {
-            return false;
-        }
-        if d == target_depth {
-            let c = b as char;
-            let is_chain_char = is_ident_char(c)
-                || matches!(c, '.' | ':' | '<' | '>' | '?' | '(' | ')')
-                || c.is_whitespace();
-            if !is_chain_char {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// `origin_idx`（深さ `origin_depth`。並列マーカーまたは汚染識別子の
-/// 出現位置）より後方かつ**同じか浅い**括弧深さに縮約マーカーが現れる
-/// かを判定する。ただし `origin_idx` と縮約マーカーの間に、`origin_idx`
-/// と**同一のメソッド連鎖上**（`is_same_method_chain`）にある `.collect(`
-/// が挟まる場合はイテレータ連鎖が断ち切られているとみなし接続しない
-/// （`COLLECT_MARKERS` doc 参照）。縮約マーカー側の「同じか浅い深さ」
-/// 判定自体は緩めない（fail-closed 側を維持する）。
-fn has_reduce_after(
-    text: &str,
-    depths: &[i32],
-    origin_idx: usize,
-    origin_depth: i32,
-    reduce_hits: &[(usize, i32)],
-    collect_hits: &[(usize, i32)],
-) -> bool {
-    reduce_hits.iter().any(|&(r_idx, r_depth)| {
-        r_idx > origin_idx
-            && r_depth <= origin_depth
-            && !collect_hits.iter().any(|&(c_idx, _)| {
-                c_idx > origin_idx
-                    && c_idx < r_idx
-                    && is_same_method_chain(text, depths, origin_idx, c_idx)
-            })
-    })
-}
-
-/// 1 文の中で、並列マーカー（実マーカー・`virtual_markers` の仮想
-/// マーカーの両方）より後方かつ**同じか浅い**括弧深さに縮約マーカーが
-/// 現れるかを判定する（§C: `data.par_iter().map(..).sum::<f32>()` は
-/// 検出、`data.par_chunks(n).map(|c| c.iter().sum::<f32>())
-/// .collect(..)`〈チャンク内逐次和〉・`data.par_chunks(..).map(..)
-/// .collect::<Vec<_>>().into_iter().fold(..)`〈collect で連鎖が切れる〉
-/// は非検出）。`view` は `statement_own_view` で塗りつぶし済みの
-/// テキスト、`virtual_markers` は同関数が返す仮想マーカー位置一覧。
-fn has_depth_aware_par_reduce(view: &str, virtual_markers: &[usize]) -> bool {
-    let mut par_positions = find_par_marker_positions(view);
-    par_positions.extend_from_slice(virtual_markers);
-    if par_positions.is_empty() {
-        return false;
-    }
-    let depths = compute_depths(view);
-    let reduce_hits = find_marker_depths(view, &depths, REDUCE_MARKERS);
-    if reduce_hits.is_empty() {
-        return false;
-    }
-    let collect_hits = find_marker_depths(view, &depths, COLLECT_MARKERS);
-    par_positions.iter().any(|&p_idx| {
-        let p_depth = depths.get(p_idx).copied().unwrap_or(0);
-        has_reduce_after(view, &depths, p_idx, p_depth, &reduce_hits, &collect_hits)
-    })
-}
-
-/// `text` 中に「生きている」（`is_same_method_chain` の意味で同一連鎖
-/// 上の `Vec` collect に遮断されていない）並列マーカーが 1 つでも
-/// あるかを判定する。`extra_positions`（`text` 中のバイト位置一覧）が
-/// 与えられた場合、実マーカーと同様に起点として扱う（`statement_own_view`
-/// のブロック本体を「生きているか」判定する際は `&[]`。`has_ufcs_reduction`
-/// が UFCS 呼び出し引数内の仮想マーカー位置を渡す際に使う）。
-fn has_live_chain_marker_with_extra(text: &str, extra_positions: &[usize]) -> bool {
-    let depths = compute_depths(text);
-    let collect_hits = find_marker_depths(text, &depths, COLLECT_MARKERS);
-    let mut positions = find_par_marker_positions(text);
-    positions.extend_from_slice(extra_positions);
-    positions.into_iter().any(|p_idx| {
-        !collect_hits
-            .iter()
-            .any(|&(c_idx, _)| c_idx > p_idx && is_same_method_chain(text, &depths, p_idx, c_idx))
-    })
-}
-
-/// [`has_live_chain_marker_with_extra`] の仮想マーカーなし版。
-fn has_live_chain_marker(text: &str) -> bool {
-    has_live_chain_marker_with_extra(text, &[])
-}
-
-/// `text` 中で識別子 `ident` が識別子境界（前後が識別子文字でない）で
-/// 一致する出現バイト位置を返す。
-fn find_ident_occurrences(text: &str, ident: &str) -> Vec<usize> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    for (i, _) in text.match_indices(ident) {
-        let before_ok = i == 0 || !is_ident_char(bytes[i - 1] as char);
-        let after = i + ident.len();
-        let after_ok = after >= bytes.len() || !is_ident_char(bytes[after] as char);
-        if before_ok && after_ok {
-            out.push(i);
-        }
-    }
-    out
-}
-
-/// 過去の文で汚染された識別子（`tainted`）が、この文中で識別子境界
-/// 一致し、かつ後方の同じか浅い括弧深さに縮約マーカーが現れるかを
-/// 判定する（文をまたぐ並列縮約。`view` は `statement_own_view`）。
-/// `.collect(` による連鎖の遮断は `has_reduce_after` と同じ規則。
-fn has_tainted_reduction_usage(view: &str, tainted: &HashSet<String>) -> bool {
-    if tainted.is_empty() {
-        return false;
-    }
-    let depths = compute_depths(view);
-    let reduce_hits = find_marker_depths(view, &depths, REDUCE_MARKERS);
-    if reduce_hits.is_empty() {
-        return false;
-    }
-    let collect_hits = find_marker_depths(view, &depths, COLLECT_MARKERS);
-    tainted.iter().any(|ident| {
-        find_ident_occurrences(view, ident).iter().any(|&i_idx| {
-            let i_depth = depths.get(i_idx).copied().unwrap_or(0);
-            has_reduce_after(view, &depths, i_idx, i_depth, &reduce_hits, &collect_hits)
-        })
-    })
-}
-
-// =====================================================================
-// UFCS（fully-qualified）縮約呼び出しの検出（敵対的レビュー指摘 REQ 2）
-// =====================================================================
-
-/// `REDUCE_MARKERS` と同じメソッド名を `::` 前置の関数呼び出し構文
-/// （`ParallelIterator::sum(...)`・`Trait::reduce(...)` 等。UFCS）で
-/// 検出するマーカー。`.sum(` ではなく `::sum(` のようにレシーバを
-/// メソッド構文の外（第 1 引数）に取る呼び出しは `.method(` 走査では
-/// 拾えないため、別途走査する。
-const UFCS_REDUCE_MARKERS: &[&str] = &[
-    "::sum(",
-    "::sum::<",
-    "::product(",
-    "::product::<",
-    "::reduce(",
-    "::reduce_with(",
-    "::fold(",
-    "::fold_with(",
-    "::fold_chunks(",
-    "::try_fold(",
-    "::try_reduce(",
-    "::try_reduce_with(",
-];
-
-/// `text[open_idx]` が `(` であることを前提に、対応する `)` のバイト
-/// 位置を深さ追跡（ネスト対応）で返す。
-fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    if bytes.get(open_idx) != Some(&b'(') {
-        return None;
-    }
+    let n = bytes.len();
+    let mut tokens = Vec::new();
     let mut depth = 0i32;
-    for (i, &b) in bytes.iter().enumerate().skip(open_idx) {
-        match b {
-            b'(' => depth += 1,
-            b')' => {
+    let mut i = 0usize;
+    while i < n {
+        let c = bytes[i] as char;
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if is_ident_char(c) {
+            let start = i;
+            // raw identifier（`r#sum`・`r#par_iter` 等）は `r#` を除いた
+            // 識別子 1 トークンとして扱う（`r`・`#`・`sum` の 3 トークンへ
+            // 分かれると直前トークン判定〈`.`／`::`〉をすり抜けるため）。
+            let name_start = if c == 'r'
+                && bytes.get(i + 1) == Some(&b'#')
+                && bytes.get(i + 2).is_some_and(|&b| is_ident_char(b as char))
+            {
+                i += 2;
+                i
+            } else {
+                start
+            };
+            while i < n && is_ident_char(bytes[i] as char) {
+                i += 1;
+            }
+            tokens.push(Token {
+                kind: TokenKind::Ident,
+                text: &text[name_start..i],
+                start,
+                depth,
+            });
+            continue;
+        }
+        if c == ':' && bytes.get(i + 1) == Some(&b':') {
+            tokens.push(Token {
+                kind: TokenKind::ColonColon,
+                text: &text[i..i + 2],
+                start: i,
+                depth,
+            });
+            i += 2;
+            continue;
+        }
+        let start = i;
+        let kind = match c {
+            '.' => TokenKind::Dot,
+            ':' => TokenKind::Colon,
+            '<' => TokenKind::Lt,
+            '>' => TokenKind::Gt,
+            '(' => TokenKind::LParen,
+            ')' => TokenKind::RParen,
+            '{' => TokenKind::LBrace,
+            '}' => TokenKind::RBrace,
+            '[' => TokenKind::LBracket,
+            ']' => TokenKind::RBracket,
+            '?' => TokenKind::Question,
+            _ => TokenKind::Other,
+        };
+        tokens.push(Token {
+            kind,
+            text: &text[start..start + 1],
+            start,
+            depth,
+        });
+        match kind {
+            TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                depth = (depth - 1).max(0);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    tokens
+}
+
+/// rayon の分割依存縮約を表す識別子名の集合。`sum`／`product`／
+/// `reduce`／`reduce_with`・`fold` 系（`fold`／`fold_with`／
+/// `fold_chunks`）・`try_fold`／`try_reduce`／`try_reduce_with`
+/// （rayon の `fold` 系はスレッド分割依存の部分結果を返すため
+/// `sum`／`reduce` と同類型）。メソッド形（直前が `.`）・UFCS 形
+/// （直前が `::`）のいずれで現れても同じ名前集合で判定する。
+const REDUCE_MARKER_NAMES: &[&str] = &[
+    "sum",
+    "product",
+    "reduce",
+    "reduce_with",
+    "fold",
+    "fold_with",
+    "fold_chunks",
+    "try_fold",
+    "try_reduce",
+    "try_reduce_with",
+];
+
+/// `tokens[ident_idx]`（識別子トークン）の直後が呼び出し括弧 `(` か、
+/// turbofish（`::` `<` ... 対応する `>` ... `(`）かを判定し、その場合
+/// 呼び出しの開き `(` のトークンインデックスを返す。
+fn call_open_paren_after(tokens: &[Token], ident_idx: usize) -> Option<usize> {
+    let mut i = ident_idx + 1;
+    if tokens.get(i).map(|t| t.kind) == Some(TokenKind::LParen) {
+        return Some(i);
+    }
+    if tokens.get(i).map(|t| t.kind) == Some(TokenKind::ColonColon)
+        && tokens.get(i + 1).map(|t| t.kind) == Some(TokenKind::Lt)
+    {
+        i += 2;
+        let mut depth = 1i32;
+        while i < tokens.len() && depth > 0 {
+            match tokens[i].kind {
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        if tokens.get(i).map(|t| t.kind) == Some(TokenKind::LParen) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// `tokens[open_idx]` が `(` であることを前提に、対応する `)` の
+/// トークンインデックスを深さ追跡（ネスト対応）で返す。
+fn matching_close_paren(tokens: &[Token], open_idx: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (j, tok) in tokens.iter().enumerate().skip(open_idx) {
+        match tok.kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(i);
+                    return Some(j);
                 }
             }
             _ => {}
@@ -1055,83 +951,330 @@ fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
     None
 }
 
-/// `after_marker` が turbofish マーカー（`::method::<`）の直後（型引数
-/// リストの内側）を指すとき、型引数を深さ追跡で読み飛ばした直後に
-/// 続く呼び出しの開き `(` のバイト位置を返す（`Trait::method::<T>(..)`
-/// 形）。
-fn find_turbofish_call_paren(text: &str, after_marker: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth = 1i32;
-    let mut i = after_marker;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'<' => depth += 1,
-            b'>' => {
-                depth -= 1;
-                if depth == 0 {
-                    i += 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
-        i += 1;
-    }
-    if bytes.get(i) == Some(&b'(') {
-        Some(i)
-    } else {
-        None
-    }
+/// `tokens` 中で並列マーカー（識別子が `par_` 接頭辞または
+/// `into_par_iter` であり、直前の非空白トークンが `.` または `::`）
+/// であるトークンのインデックス一覧を返す。メソッド呼び出し形
+/// （`.par_iter(`）・パス参照形（`T::par_iter`。メソッド値として
+/// 変数へ束縛して後から呼び出す形〈`let f = T::par_iter; let it =
+/// f(&data); it.sum()`〉のため末尾 `(` の有無を問わない）・UFCS 形
+/// （`rayon::iter::IntoParallelIterator::into_par_iter(data)`。直前
+/// トークンのみを見るため、修飾パスの深さ・区切りの数によらず検出
+/// する）を一律に扱う（敵対的レビュー指摘 codex P1）。
+fn find_par_marker_tokens(tokens: &[Token]) -> Vec<usize> {
+    (1..tokens.len())
+        .filter(|&i| {
+            let tok = &tokens[i];
+            tok.kind == TokenKind::Ident
+                && (tok.text.starts_with("par_") || tok.text == "into_par_iter")
+                && matches!(tokens[i - 1].kind, TokenKind::Dot | TokenKind::ColonColon)
+        })
+        .collect()
 }
 
-/// `text` 中の UFCS 縮約呼び出し（`UFCS_REDUCE_MARKERS`）を検出し、
-/// それぞれの呼び出し引数リストの `(内容の開始バイト位置, 終了バイト
-/// 位置)` を列挙する。
-fn find_ufcs_reduce_call_bodies(text: &str) -> Vec<(usize, usize)> {
+/// `tokens` 中でメソッド呼び出し形の縮約マーカー（識別子が
+/// `REDUCE_MARKER_NAMES` に含まれ、直前が `.`、直後が呼び出し括弧
+/// または turbofish 経由の呼び出し括弧）であるトークンのインデックス
+/// 一覧を返す。
+fn find_reduce_marker_tokens(tokens: &[Token]) -> Vec<usize> {
+    (1..tokens.len())
+        .filter(|&i| {
+            let tok = &tokens[i];
+            tok.kind == TokenKind::Ident
+                && REDUCE_MARKER_NAMES.contains(&tok.text)
+                && tokens[i - 1].kind == TokenKind::Dot
+                && call_open_paren_after(tokens, i).is_some()
+        })
+        .collect()
+}
+
+/// `tokens` 中の UFCS 形の縮約呼び出し（`ParallelIterator::sum(...)`・
+/// `Trait::reduce(...)` 等。直前が `::` の `REDUCE_MARKER_NAMES`）を
+/// 検出し、`(識別子トークン index, 開き ( トークン index, 閉じ )
+/// トークン index)` を列挙する（敵対的レビュー指摘 REQ 2）。
+fn find_ufcs_reduce_calls(tokens: &[Token]) -> Vec<(usize, usize, usize)> {
     let mut out = Vec::new();
-    for marker in UFCS_REDUCE_MARKERS {
-        for (i, _) in text.match_indices(marker) {
-            let marker_end = i + marker.len();
-            let open_idx = if marker.ends_with('(') {
-                marker_end - 1
-            } else {
-                match find_turbofish_call_paren(text, marker_end) {
-                    Some(idx) => idx,
-                    None => continue,
-                }
-            };
-            if let Some(close_idx) = find_matching_paren(text, open_idx) {
-                out.push((open_idx + 1, close_idx));
-            }
+    for i in 1..tokens.len() {
+        let tok = &tokens[i];
+        if tok.kind != TokenKind::Ident || !REDUCE_MARKER_NAMES.contains(&tok.text) {
+            continue;
+        }
+        if tokens[i - 1].kind != TokenKind::ColonColon {
+            continue;
+        }
+        if let Some(open) = call_open_paren_after(tokens, i)
+            && let Some(close) = matching_close_paren(tokens, open)
+        {
+            out.push((i, open, close));
         }
     }
     out
 }
 
+/// `tokens` 中で `Vec` への collect マーカー（`.collect::<Vec<`・
+/// `.collect_into_vec(`）であるトークン（`collect`／`collect_into_vec`
+/// 識別子トークン）のインデックス一覧を返す。順序保持が型で明示される
+/// `Vec` への collect に限る。型推論に任せた `.collect()` や
+/// `HashMap`／`HashSet` 等への collect は反復順序が決まらない場合が
+/// あるため対象外とし、後続の縮約を並列縮約として数える
+/// （fail-closed 側。`.collect(` でインデックス順の `Vec` へ一旦確定
+/// したあとの `.into_iter()` 以降は通常の逐次 `Iterator` になるため、
+/// `Vec` への collect より後方の縮約マーカーは直前の並列マーカー・
+/// 汚染識別子とは**接続されない**——`is_same_method_chain` がこの
+/// 遮断を判定する）。
+fn find_collect_marker_tokens(tokens: &[Token]) -> Vec<usize> {
+    (1..tokens.len())
+        .filter(|&i| {
+            let tok = &tokens[i];
+            if tok.kind != TokenKind::Ident || tokens[i - 1].kind != TokenKind::Dot {
+                return false;
+            }
+            match tok.text {
+                "collect" => {
+                    tokens.get(i + 1).map(|t| t.kind) == Some(TokenKind::ColonColon)
+                        && tokens.get(i + 2).map(|t| t.kind) == Some(TokenKind::Lt)
+                        && tokens.get(i + 3).map(|t| (t.kind, t.text))
+                            == Some((TokenKind::Ident, "Vec"))
+                }
+                "collect_into_vec" => tokens.get(i + 1).map(|t| t.kind) == Some(TokenKind::LParen),
+                _ => false,
+            }
+        })
+        .collect()
+}
+
+/// トークン種別が「メソッド連鎖の構成要素」とみなせるかを判定する
+/// （識別子・`.`／`::`／`:`・turbofish の `<`・`>`・`?`・括弧
+/// 〈`()`／`{}`／`[]` すべて〉）。`,`・`;`・`=`・二項演算子・`|` 等
+/// （`TokenKind::Other`）は含まない。
+///
+/// 括弧に `{`／`}` を含めるのは Cursor Bugbot 指摘の是正: 仮想マーカー
+/// （`statement_own_view` がブロック式の開き `{` に立てるマーカー）の
+/// 起点はブロックの `{` トークンそのものであり、`{ data.par_iter() }
+/// .collect::<Vec<_>>()` のように直後に collect が続く場合、`{`
+/// トークン自身がちょうど collect の合流点の深さに位置する。`{` を
+/// 連鎖の構成要素として認めないと、この `{` の時点で判定が打ち切られ
+/// 同一連鎖とみなされず、ブロック式の直後の collect による遮断が
+/// 素通りしてしまう（過検出）。
+fn is_chain_connector(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident
+            | TokenKind::Dot
+            | TokenKind::ColonColon
+            | TokenKind::Colon
+            | TokenKind::Lt
+            | TokenKind::Gt
+            | TokenKind::Question
+            | TokenKind::LParen
+            | TokenKind::RParen
+            | TokenKind::LBrace
+            | TokenKind::RBrace
+            | TokenKind::LBracket
+            | TokenKind::RBracket
+    )
+}
+
+/// `tokens` において、`from_idx` から `to_idx` までが**同一のメソッド
+/// 連鎖上**にあるかを判定する（codex-review 指摘 P1: 無関係な `Vec`
+/// collect による誤遮断の是正。`let it = (data.par_iter(), other
+/// .collect::<Vec<_>>()).0;` のようにタプル要素として同居するだけの
+/// collect は `data.par_iter()` の連鎖を遮断しない）。
+///
+/// `tokens[to_idx]`（`.collect(` 等の到達点）自身の深さ
+/// `target_depth` を「連鎖の合流点の深さ」とみなし、次の 2 条件を
+/// 満たす場合のみ真を返す:
+///
+/// 1. `from_idx..to_idx` の範囲でトークンの深さが `target_depth` を
+///    一度も下回らない（`from_idx` 自身の深さが `target_depth` より
+///    深い場合——たとえば `data.par_chunks(..).zip(other.par_chunks(..))
+///    .map(..).collect(..)` の `other.par_chunks(` のように `.zip(`
+///    の引数として起点より深い位置にある場合——は、起点からいったん
+///    `.zip(`／`.map(` の呼び出し括弧を閉じて `target_depth` まで
+///    戻ってくる正当な連鎖として許容する）。
+/// 2. `target_depth` ちょうどの深さにあるトークンが、すべて
+///    `is_chain_connector` を満たすこと。
+fn is_same_method_chain(tokens: &[Token], from_idx: usize, to_idx: usize) -> bool {
+    if from_idx >= to_idx {
+        return false;
+    }
+    let target_depth = tokens[to_idx].depth;
+    for tok in &tokens[from_idx..to_idx] {
+        if tok.depth < target_depth {
+            return false;
+        }
+        if tok.depth == target_depth && !is_chain_connector(tok.kind) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `origin_idx` より後方（トークンインデックス順）かつ**同じか浅い**
+/// 括弧深さに縮約マーカーが現れるかを判定する。ただし `origin_idx` と
+/// 縮約マーカーの間に、`origin_idx` と**同一のメソッド連鎖上**
+/// （`is_same_method_chain`）にある collect マーカーが挟まる場合は
+/// イテレータ連鎖が断ち切られているとみなし接続しない。縮約マーカー
+/// 側の「同じか浅い深さ」判定自体は緩めない（fail-closed 側を維持
+/// する）。
+fn has_reduce_after(
+    tokens: &[Token],
+    origin_idx: usize,
+    reduce_tokens: &[usize],
+    collect_tokens: &[usize],
+) -> bool {
+    let origin_depth = tokens[origin_idx].depth;
+    reduce_tokens.iter().any(|&r_idx| {
+        r_idx > origin_idx
+            && tokens[r_idx].depth <= origin_depth
+            && !collect_tokens.iter().any(|&c_idx| {
+                c_idx > origin_idx
+                    && c_idx < r_idx
+                    && is_same_method_chain(tokens, origin_idx, c_idx)
+            })
+    })
+}
+
+/// `tokens` 中に「生きている」（`is_same_method_chain` の意味で同一
+/// 連鎖上の `Vec` collect に遮断されていない）並列マーカーが 1 つでも
+/// あるかを判定する。`extra_par_tokens`（`tokens` 中のトークン
+/// インデックス一覧）が与えられた場合、実マーカーと同様に起点として
+/// 扱う（`statement_own_view` のブロック本体を「生きているか」判定
+/// する際は `&[]`。`has_ufcs_reduction` が UFCS 呼び出し引数内の
+/// 仮想マーカーを渡す際に使う）。
+fn has_live_chain_marker(tokens: &[Token], extra_par_tokens: &[usize]) -> bool {
+    let collect_tokens = find_collect_marker_tokens(tokens);
+    let mut par_tokens = find_par_marker_tokens(tokens);
+    par_tokens.extend_from_slice(extra_par_tokens);
+    par_tokens.into_iter().any(|p_idx| {
+        !collect_tokens
+            .iter()
+            .any(|&c_idx| c_idx > p_idx && is_same_method_chain(tokens, p_idx, c_idx))
+    })
+}
+
+/// `tokens` 中に、`tainted` のいずれかの識別子と同名のトークンで
+/// 「生きている」（同一連鎖上の `Vec` collect に遮断されていない）
+/// 出現が 1 つでもあるかを判定する。並列マーカーと同じ collect 遮断
+/// 規則を適用する（Cursor Bugbot 指摘: 旧実装は汚染識別子の出現有無
+/// のみで判定しており、`{ it.map(f).collect::<Vec<_>>() }
+/// .into_iter().sum();`〈`it` は汚染済み〉のように Vec collect された
+/// 連鎖でしか使われていない汚染識別子まで「生きている」と誤判定して
+/// いた）。トークン照合のため識別子境界は自然に保たれる。
+fn has_live_tainted_ref(tokens: &[Token], tainted: &HashSet<String>) -> bool {
+    let collect_tokens = find_collect_marker_tokens(tokens);
+    tainted.iter().any(|name| {
+        find_ident_name_tokens(tokens, name).into_iter().any(|idx| {
+            !collect_tokens
+                .iter()
+                .any(|&c_idx| c_idx > idx && is_same_method_chain(tokens, idx, c_idx))
+        })
+    })
+}
+
+/// `tokens` 中で識別子トークンのテキストが `name` と一致するものの
+/// インデックス一覧を返す（トークン照合のため識別子境界は自然に
+/// 保たれる）。
+fn find_ident_name_tokens(tokens: &[Token], name: &str) -> Vec<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.kind == TokenKind::Ident && t.text == name)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// `tokens`（`view` をトークン化したもの）中で、仮想マーカーの
+/// バイト位置一覧 `byte_positions`（`statement_own_view` の戻り値）に
+/// 対応する `{` トークンのインデックス一覧を返す。
+fn virtual_marker_token_indices(tokens: &[Token], byte_positions: &[usize]) -> Vec<usize> {
+    byte_positions
+        .iter()
+        .filter_map(|&p| {
+            tokens
+                .iter()
+                .position(|t| t.kind == TokenKind::LBrace && t.start == p)
+        })
+        .collect()
+}
+
+/// 1 文の中で、並列マーカー（実マーカー・`virtual_markers` の仮想
+/// マーカーの両方）より後方かつ同じか浅い括弧深さに縮約マーカーが
+/// 現れるかを判定する（`data.par_iter().map(..).sum::<f32>()` は
+/// 検出、`data.par_chunks(n).map(|c| c.iter().sum::<f32>())
+/// .collect(..)`〈チャンク内逐次和〉・`data.par_chunks(..).map(..)
+/// .collect::<Vec<_>>().into_iter().fold(..)`〈collect で連鎖が切れる〉
+/// は非検出）。`view` は `statement_own_view` で塗りつぶし済みの
+/// テキスト、`virtual_markers` は同関数が返す仮想マーカー位置一覧。
+fn has_depth_aware_par_reduce(view: &str, virtual_markers: &[usize]) -> bool {
+    let tokens = tokenize(view);
+    let mut par_tokens = find_par_marker_tokens(&tokens);
+    par_tokens.extend(virtual_marker_token_indices(&tokens, virtual_markers));
+    if par_tokens.is_empty() {
+        return false;
+    }
+    let reduce_tokens = find_reduce_marker_tokens(&tokens);
+    if reduce_tokens.is_empty() {
+        return false;
+    }
+    let collect_tokens = find_collect_marker_tokens(&tokens);
+    par_tokens
+        .iter()
+        .any(|&p_idx| has_reduce_after(&tokens, p_idx, &reduce_tokens, &collect_tokens))
+}
+
+/// 過去の文で汚染された識別子（`tainted`）が、この文中でトークンと
+/// して一致し、かつ後方の同じか浅い括弧深さに縮約マーカーが現れるか
+/// を判定する（文をまたぐ並列縮約。`view` は `statement_own_view`）。
+/// `.collect(` による連鎖の遮断は `has_reduce_after` と同じ規則。
+fn has_tainted_reduction_usage(view: &str, tainted: &HashSet<String>) -> bool {
+    if tainted.is_empty() {
+        return false;
+    }
+    let tokens = tokenize(view);
+    let reduce_tokens = find_reduce_marker_tokens(&tokens);
+    if reduce_tokens.is_empty() {
+        return false;
+    }
+    let collect_tokens = find_collect_marker_tokens(&tokens);
+    tainted.iter().any(|name| {
+        find_ident_name_tokens(&tokens, name)
+            .into_iter()
+            .any(|idx| has_reduce_after(&tokens, idx, &reduce_tokens, &collect_tokens))
+    })
+}
+
 /// UFCS 形の縮約呼び出し（`ParallelIterator::sum(data.par_iter()...)`
-/// 等）を検出し、その引数リスト内に生きている（`has_live_chain_marker_with_extra`。
+/// 等）を検出し、その引数リスト内に生きている（`has_live_chain_marker`。
 /// 同一連鎖上の Vec collect で遮断されていない）並列マーカー（実マーカー・
-/// `virtual_markers` の仮想マーカーの両方）または汚染識別子（識別子
-/// 境界一致）があれば真を返す（REQ 2。`view`・`virtual_markers` は
-/// `statement_own_view` の戻り値）。
+/// `virtual_markers` の仮想マーカーの両方）または生きている汚染識別子
+/// （`has_live_tainted_ref`）があれば真を返す（敵対的レビュー指摘
+/// REQ 2。`view`・`virtual_markers` は `statement_own_view` の戻り値）。
+/// 引数リストは呼び出しごとに独立して再トークン化する（深さ 0 起点の
+/// 局所的な連鎖判定にするため。元の `has_depth_aware_par_reduce` と
+/// 同じ理由）。
 fn has_ufcs_reduction(view: &str, tainted: &HashSet<String>, virtual_markers: &[usize]) -> bool {
-    for (arg_start, arg_end) in find_ufcs_reduce_call_bodies(view) {
+    let tokens = tokenize(view);
+    for (_, open, close) in find_ufcs_reduce_calls(&tokens) {
+        let arg_start = tokens[open].start + 1;
+        let arg_end = tokens[close].start;
+        if arg_start >= arg_end {
+            continue;
+        }
         let args = &view[arg_start..arg_end];
+        let arg_tokens = tokenize(args);
         let local_virtual_markers: Vec<usize> = virtual_markers
             .iter()
             .filter(|&&p| p >= arg_start && p < arg_end)
-            .map(|&p| p - arg_start)
+            .filter_map(|&p| {
+                arg_tokens
+                    .iter()
+                    .position(|t| t.kind == TokenKind::LBrace && t.start == p - arg_start)
+            })
             .collect();
-        if has_live_chain_marker_with_extra(args, &local_virtual_markers) {
+        if has_live_chain_marker(&arg_tokens, &local_virtual_markers) {
             return true;
         }
-        if tainted
-            .iter()
-            .any(|t| !find_ident_occurrences(args, t).is_empty())
-        {
+        if has_live_tainted_ref(&arg_tokens, tainted) {
             return true;
         }
     }
@@ -1296,39 +1439,20 @@ fn parse_plain_assignment_range(view: &str) -> Option<(std::ops::Range<usize>, u
 /// 初期化式 `init`（塗りつぶし前のテキスト）が汚染源を含むかを判定
 /// する（敵対的レビュー指摘 REQ 3: `let parts = data.par_iter()
 /// .map(f).collect::<Vec<f32>>();` のような Vec への collect で終わる
-/// 初期化式を誤って汚染していた過検出の是正）。並列マーカー
-/// （`find_par_marker_positions`。`::par_` パス参照を含む）または
-/// 既存の汚染識別子が、その後ろに**同一のメソッド連鎖上**
-/// （`is_same_method_chain`）の `COLLECT_MARKERS`（順序保持が型で
-/// 明示される Vec への collect）を伴わずに現れる場合のみ汚染源と
-/// みなす。`let v = x.par_iter().collect::<Vec<_>>().par_iter();` の
-/// ように collect の後に再び並列マーカーが現れる場合は、その後方の
-/// マーカー自身が「後続に同一連鎖上の collect を伴わない」ため汚染
-/// する。無関係な `Vec` collect（`let it = (data.par_iter(),
-/// other.collect::<Vec<_>>()).0;` のようにタプル要素として同居する
-/// だけの collect）は同一連鎖上にないため遮断しない（codex-review
-/// 指摘 P1）。
+/// 初期化式を誤って汚染していた過検出の是正）。並列マーカー（`::par_`
+/// パス参照・UFCS 形を含む）または既存の汚染識別子が、その後ろに
+/// **同一のメソッド連鎖上**（`is_same_method_chain`）の Vec への
+/// collect を伴わずに現れる場合のみ汚染源とみなす（`has_live_chain_marker`・
+/// `has_live_tainted_ref` と同一の判定。`let v = x.par_iter()
+/// .collect::<Vec<_>>().par_iter();` のように collect の後に再び
+/// 並列マーカーが現れる場合は、その後方のマーカー自身が「後続に同一
+/// 連鎖上の collect を伴わない」ため汚染する。無関係な `Vec` collect
+/// （`let it = (data.par_iter(), other.collect::<Vec<_>>()).0;` の
+/// ようにタプル要素として同居するだけの collect）は同一連鎖上にない
+/// ため遮断しない〈codex-review 指摘 P1〉）。
 fn initializer_taints(init: &str, tainted: &HashSet<String>) -> bool {
-    let depths = compute_depths(init);
-    let collect_hits = find_marker_depths(init, &depths, COLLECT_MARKERS);
-    let not_broken_by_collect = |idx: usize| {
-        !collect_hits
-            .iter()
-            .any(|&(c_idx, _)| c_idx > idx && is_same_method_chain(init, &depths, idx, c_idx))
-    };
-
-    let par_taints = find_par_marker_positions(init)
-        .into_iter()
-        .any(not_broken_by_collect);
-    if par_taints {
-        return true;
-    }
-
-    tainted.iter().any(|ident| {
-        find_ident_occurrences(init, ident)
-            .into_iter()
-            .any(not_broken_by_collect)
-    })
+    let tokens = tokenize(init);
+    has_live_chain_marker(&tokens, &[]) || has_live_tainted_ref(&tokens, tainted)
 }
 
 /// [`classify_taint`] の結果。`let` による束縛（このレキシカルスコープ
@@ -1375,6 +1499,25 @@ fn extract_taint_targets(raw: &str, tainted: &HashSet<String>) -> Vec<String> {
         TaintKind::Let(idents) | TaintKind::Assignment(idents) => idents,
         TaintKind::None => Vec::new(),
     }
+}
+
+/// `text` 中で識別子 `ident` が識別子境界（前後が識別子文字でない）で
+/// 一致する出現バイト位置を返す（`looks_like_fn_item` が「`fn` という
+/// 語」の出現位置を探す専用。マーカー検出は `tokenize` ベースのトークン
+/// 照合へ置き換え済みだが、こちらは単一キーワードの境界一致で足りる
+/// 単純な用途のため、既存の text ベースの実装を維持する）。
+fn find_ident_occurrences(text: &str, ident: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    for (i, _) in text.match_indices(ident) {
+        let before_ok = i == 0 || !is_ident_char(bytes[i - 1] as char);
+        let after = i + ident.len();
+        let after_ok = after >= bytes.len() || !is_ident_char(bytes[after] as char);
+        if before_ok && after_ok {
+            out.push(i);
+        }
+    }
+    out
 }
 
 /// `raw` の先頭文が関数アイテム（`fn`／`pub fn`／属性・`async`／
@@ -2230,4 +2373,89 @@ fn count_par_reduce_detects_short_tainted_identifier_in_match_arms() {
 fn count_par_reduce_ignores_short_untainted_identifier_block() {
     let src = "{x}.sum()";
     assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+// =====================================================================
+// トークン照合方式の回帰テスト（敵対的レビュー指摘 codex P1 × 2・
+// Cursor Bugbot Medium × 2。固定文字列の部分一致をやめ、簡易 lexer に
+// よるトークン列の照合へ置き換えたことの固定）
+// =====================================================================
+
+#[test]
+fn count_par_reduce_detects_spaced_method_calls() {
+    // codex P1: 空白を挟むメソッド呼び出し（`.par_iter(`／`.sum(` の
+    // 固定文字列一致では検出できなかった）。
+    let src = "data.par_iter ().sum ()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_multiline_chain() {
+    // codex P1: 改行を挟むメソッド連鎖。
+    let src = "data\n    .par_iter()\n    .map(|x| x)\n    .sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_spaced_turbofish() {
+    // codex P1: turbofish の空白入り形（`sum :: < f32 > ()`）。
+    let src = "data.par_iter().sum :: < f32 > ()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_ufcs_into_par_iter() {
+    // codex P1: UFCS 形の `into_par_iter`（固定文字列
+    // `.into_par_iter(` では「直前が `.`」の形しか拾えず、任意の修飾
+    // パスを経由する UFCS 呼び出しを見逃していた）。
+    let src = "rayon::iter::IntoParallelIterator::into_par_iter(data).sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_detects_ufcs_sum_with_spaces() {
+    let src = "ParallelIterator :: sum (data.par_iter())";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn count_par_reduce_ignores_block_expression_collected_before_let_bound_usage() {
+    // Bugbot Medium（過検出）: 仮想マーカーがブロック式直後の collect
+    // による遮断を通り抜けていた（`is_same_method_chain` が `{` を
+    // 連鎖の構成要素として扱っていなかったため）。
+    let src = "let v = { data.par_iter() }.collect::<Vec<_>>(); v.iter().sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+#[test]
+fn count_par_reduce_ignores_block_expression_collected_in_same_statement() {
+    let src = "{ data.par_iter() }.collect::<Vec<_>>().into_iter().sum::<f32>()";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+#[test]
+fn count_par_reduce_ignores_tainted_ref_only_used_in_collected_chain() {
+    // Bugbot Medium（過検出）: 仮想マーカーの生存判定が、並列マーカー
+    // には collect 遮断を適用する一方、汚染識別子にはしていなかった。
+    // `it` が Vec collect された連鎖でしか使われていないブロックは
+    // 「生きている」と判定してはならない。
+    let src = "let it = data.par_iter(); \
+               let s: f32 = { it.map(f).collect::<Vec<_>>() }.into_iter().sum();";
+    assert_eq!(count_par_reduce_cooccurrences(src), 0);
+}
+
+#[test]
+fn count_par_reduce_detects_raw_identifier_method_names() {
+    // raw identifier（`r#sum`）で書いた縮約名・並列マーカーも通常の
+    // 識別子と同じトークンとして照合する。
+    assert_eq!(
+        count_par_reduce_cooccurrences("fn f(data: &[f32]) -> f32 { data.par_iter().r#sum() }"),
+        1
+    );
+    assert_eq!(
+        count_par_reduce_cooccurrences(
+            "fn f(data: &[f32]) -> f32 { data.r#par_iter().sum::<f32>() }"
+        ),
+        1
+    );
 }
