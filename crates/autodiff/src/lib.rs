@@ -278,7 +278,18 @@ pub use tape::{NodeId, Tape, TapeId};
 // 委譲する共通コアと同じ場所）にあり、`autodiff` はここで素通しするのみ。
 // `facade` がさらにこれを再委譲する（composition root。
 // `docs/rng-global-contract-design.md`）。
-pub use fandhe_ai_tensor_core::rng::{RngError, manual_seed, rand, randint, randn};
+// `bernoulli`／`multinomial`／`normal`・`Generator`（イシュー #2156）:
+// PyTorch `torch.bernoulli`／`torch.multinomial`／`torch.normal`／
+// `torch.Generator` 相当の確率分布サンプラーと、グローバル RNG 状態と
+// 完全に独立した乱数源。同じく `tensor-core::rng` が実体で本クレートは
+// 素通しするのみ。**facade への再委譲は保留**（ユーザー承認待ち。
+// `docs/rng-global-contract-design.md` §13・`docs/compat-api-scope.md`
+// §1.2）——`fandhe_ai_autodiff::normal`（本関数。引数順
+// `mean, std, shape`）と `nn::init::normal`（`shape, mean, std`）は
+// パスが異なるため衝突しない。
+pub use fandhe_ai_tensor_core::rng::{
+    Generator, RngError, bernoulli, manual_seed, multinomial, normal, rand, randint, randn,
+};
 // `arange`／`linspace`／`eye`／`zeros_like`／`ones_like`（イシュー
 // #1726）: PyTorch 相当の決定的テンソル生成 API。`rng` と同じく実体は
 // `tensor-core::creation` にあり、本クレートは素通しするのみ（`facade`

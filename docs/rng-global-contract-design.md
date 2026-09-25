@@ -334,3 +334,25 @@ CreationError}`。委譲）まで結線した。`rng`（§10）の非乱数版�
 - **対象外**: 各層への `with_init` コンストラクタ・`Initializer`
   trait の新設（イシュー本文の前提だったが実装時点で存在しないと判明。
   同 decision doc §1）・層の既定初期化の変更・カスタム初期化 hook
+
+## 13. 実装記録（#2156）
+
+確率分布サンプラー（`bernoulli`／`multinomial`／`normal`）と、グローバル
+RNG 状態と完全に独立した乱数源 `Generator`（PyTorch `torch.Generator`
+相当）を実装した。詳細（API 設計・数値契約・PyTorch との差分・facade
+保留の経緯）は `docs/rng-distributions-generator-decision.md` を正とする
+（本節は要約のみ）。
+
+- **配置**: `crates/tensor-core/src/rng.rs`（既存の `randn`／`rand`／
+  `randint`・`RngError` と同一ファイル）。`autodiff`（素通し `pub use`）
+  は変更、`facade`（`crates/facade/**`）は保留 doctest 足場の追加のみ
+  （公開面は変更なし）
+- **消費契約**: `bernoulli` は 1 要素 1 抽選固定・`multinomial` は
+  `m * num_samples` 回固定・`normal` は `randn` と同じ `ceil(numel/2)`
+  組固定（`std == 0` でも同数消費。`nn::init::normal` は `std == 0` で
+  非消費という別契約——差分は decision doc §3）
+- **`Generator`**: `manual_seed(s)` 直後のグローバル自由関数と
+  `Generator::new(s)` は bit 完全一致する（private コアの共有による
+  機構的保証。`crates/autodiff/tests/random_parity.rs` で固定）
+- **facade 公開（経路 2）は未承認のまま保留**（`docs/rng-distributions-
+  generator-decision.md` §0・§5）

@@ -2876,3 +2876,107 @@ struct VarTopkUniqueOpsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct VarExtremumOpsHoldDoctestGuard;
+
+/// イシュー #2156（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）・`KvCacheHoldDoctestGuard`
+/// （#2084）と同型の「正のプローブ 1 ブロック方式」を採る: facade の
+/// 全 `pub mod` を glob import したスコープに、本ブロック内でのみ定義
+/// したローカルの自由関数群（`__fandhe_rng_dist_hold_probe::{bernoulli,
+/// multinomial, normal, Generator}`）とトレイト
+/// （`__FandheRngDistHoldProbe`）を導入し、実際に使う関数・型を書く。
+/// facade がどの経路（`pub use fandhe_ai_tensor_core::rng::{bernoulli,
+/// multinomial, normal, Generator};` のような再エクスポート・`Tensor`／
+/// `Var` への inherent メソッド追加・別名 `pub use`・facade 独自の
+/// `struct Generator` 宣言）でこれらの名前を公開しても、ローカル定義
+/// との glob 衝突（自由関数・型名の場合。E0659 等）または呼び出し
+/// シグネチャの不一致（inherent メソッドがトレイトメソッドより優先
+/// 解決されるため、引数なしの `x.bernoulli()` 呼び出しが実際のシグネチャ
+/// （`Tensor<f32>::bernoulli(probs: &Tensor<f32>)` 等）と型・引数数不一致
+/// になる）でコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// rng_distributions_hold_doctest_globs_all_pub_modules`・`rng_
+/// distributions_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_rng_distributions`・
+/// `workspace_declares_rng_distribution_names_only_in_allowed_locations`）
+/// との多層防御の位置づけ・承認未取得の経緯は
+/// `docs/rng-distributions-generator-decision.md` §「facade 保留と承認
+/// 依頼用の事前設計」を参照。
+///
+/// **注意**: `normal` は `crates/autodiff/src/nn/init.rs` の
+/// `nn::init::normal`（PyTorch `nn.init.normal_` 相当。`docs/facade-
+/// nn-init-exposure-decision.md` で facade 公開が別途保留中）と同名の
+/// 既存宣言を持つ。両者は無関係な機能だが同じ識別子を巡って承認判断が
+/// 干渉しうるため、どちらかが先に承認された場合はもう一方の doctest
+/// プローブを見直す必要がある（decision doc に記録）。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_rng_dist_hold_probe {
+///     pub struct Generator;
+///     pub fn bernoulli() {}
+///     pub fn multinomial() {}
+///     pub fn normal() {}
+/// }
+/// use __fandhe_rng_dist_hold_probe::*;
+///
+/// struct __FandheRngDistMarker;
+///
+/// trait __FandheRngDistHoldProbe {
+///     fn bernoulli(&self) -> __FandheRngDistMarker;
+///     fn multinomial(&self) -> __FandheRngDistMarker;
+///     fn normal(&self) -> __FandheRngDistMarker;
+/// }
+///
+/// impl<'t> __FandheRngDistHoldProbe for fandhe_ai::Var<'t> {
+///     fn bernoulli(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
+///     fn multinomial(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
+///     fn normal(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
+/// }
+///
+/// impl __FandheRngDistHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn bernoulli(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
+///     fn multinomial(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
+///     fn normal(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
+/// }
+///
+/// fn __probe_free_fns(_: Generator) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     bernoulli();
+///     multinomial();
+///     normal();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheRngDistMarker = fandhe_ai::Var::bernoulli(x);
+///     let _: __FandheRngDistMarker = x.bernoulli();
+///     let _: __FandheRngDistMarker = fandhe_ai::Var::normal(x);
+///     let _: __FandheRngDistMarker = x.normal();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheRngDistMarker = fandhe_ai::Tensor::multinomial(x);
+///     let _: __FandheRngDistMarker = x.multinomial();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct RngDistributionsHoldDoctestGuard;

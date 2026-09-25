@@ -114,6 +114,10 @@
 //! [`rng::randint`]・[`rng::RngError`]）をホスト側だけで完結する形
 //! （`BackendOps` 非経由。生成後は既存のアップロード経路がデバイスへ
 //! 反映する）で実装済み（設計判断は `docs/rng-global-contract-design.md`）。
+//! イシュー #2156 で確率分布サンプラー（[`rng::bernoulli`]／
+//! [`rng::multinomial`]／[`rng::normal`]）と、グローバル状態と独立した
+//! 乱数源 [`rng::Generator`] を実装済み（facade 公開は保留。
+//! `docs/rng-global-contract-design.md` §13）。
 //!
 //! `creation`（イシュー #1726。親 #1602）は `rng` の非乱数版カウンター
 //! パートとして PyTorch `torch.arange`／`torch.linspace`／`torch.eye`／
@@ -245,7 +249,9 @@ pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 // みを再公開する（`backend_ops::BackendOps::device_memory_pool_stats` の
 // 戻り値型。CUDA〈#1020〉・Metal〈#1021〉共通の統計スナップショット型）。
 pub use pool_core::PoolStats;
-pub use rng::{RngError, manual_seed, rand, randint, randn};
+pub use rng::{
+    Generator, RngError, bernoulli, manual_seed, multinomial, normal, rand, randint, randn,
+};
 pub use scalar_op::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};
