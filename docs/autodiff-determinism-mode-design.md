@@ -82,20 +82,86 @@ autodiff に追加するにあたり、非決定的な経路（rayon 縮約順�
   内 p 昇順の蓄積順序には影響しない（コメント `mod.rs:2395-2406`）ため、
   仮に本番結線されても数値結果はスレッド割り当てに依存しない。
 
-### §2.3 `.sum()`／`.reduce(`／`reduce_with` の走査
+### §2.3 rayon 並列イテレータと縮約マーカーの走査
 
-`crates/backend-cpu/src` 全体を「rayon 並列イテレータ（`par_iter`／
-`par_chunks`／`par_chunks_mut`／`into_par_iter`／`par_iter_mut`）と
-`.sum()`／`.reduce(`／`reduce_with` が同一文中に共起する」条件で走査
-した結果、**該当箇所は 0 件**（実装時の実測。
+`crates/backend-cpu/src` 全体を、rayon 並列イテレータ（`.par_iter(`／
+`.par_chunks(`／`.par_chunks_mut(`／`.into_par_iter(`／`.par_iter_mut(`／
+`.par_bridge(` ほか `.par_` 接頭辞のメソッド呼び出し全般・`T::par_iter`
+のようなパス参照形・メソッド値形）と縮約マーカー（`.sum()`／
+`.sum::<T>()`／`.reduce(`／`reduce_with(`／`.product(`／`.fold(` 系／
+`.try_fold(`／`.try_reduce(` 系。`ParallelIterator::sum(...)` のような
+UFCS〈fully-qualified〉呼び出し構文を含む）の共起を検出する条件で
+走査した結果、**該当箇所は 0 件**（実装時の実測。
 `crates/backend-cpu/tests/determinism_inventory.rs` が同条件を固定
-fail-closed 検査する。`par_chunks_mut` マーカーは codex-review 指摘
-〈PR #2274〉により追加し、追加後も 0 件を再確認済み）。見つかった
-`.sum()` はいずれも
-逐次 `std::iter::Iterator::sum()`（`ops.rs::gemm_checksum` の
-`out.iter().map(|&x| x as f64).sum()` 等）またはテストコード内の
-`naive_sum` 参照実装で、rayon 並列イテレータの `.sum()`／`.reduce(`
-ではない。
+fail-closed 検査する）。「同一文中に共起」という単純な判定は、6 ラウンド
+にわたる検出漏れ指摘（PR #2274。関数本体最初の文・型注釈 `let`・
+turbofish・`.par_bridge(`・ブロック式初期化子・未閉じ `{` の残余 `}` 等）、
+さらにその後の敵対的レビューで指摘された過検出・検出漏れ（`fn` という
+語の出現だけで汚染集合を全消去する不具合・UFCS 呼び出しの検出漏れ・
+Vec collect で連鎖が切れた初期化式の誤汚染）を経て、以下の走査方式へ
+置き換え済み（詳細な実装形は `crates/backend-cpu/tests/
+determinism_inventory.rs` 冒頭の `//!` を正とし、本節では要点のみを
+記す）:
+
+1. **ブロック深さを考慮した文境界**: `()`／`[]`／`{}` の深さを追跡し、
+   深さ 0 の `;` および深さ 0 に戻る `}`（直後が `.`／`?`／二項演算子／
+   `else`／`catch` 等の式継続でないもの）を文の終端とする。
+2. **縮約マーカーの括弧深さ条件**: 並列マーカーより後方かつ**同じか
+   浅い**括弧深さに縮約マーカーが現れる場合のみ共起とみなす
+   （`data.par_iter().map(..).sum::<f32>()` は検出、
+   `data.par_chunks(n).map(|c| c.iter().sum::<f32>()).collect(..)`
+   〈チャンク内逐次和〉は非検出）。加えて `ParallelIterator::sum(...)`・
+   `Trait::reduce(...)` のような UFCS 呼び出しも別途走査し、呼び出し
+   引数リストの内側に並列マーカーまたは汚染識別子があれば 1 件と
+   カウントする（同一文内で他規則と二重計上しない）。
+3. **`Vec` への collect による並列→逐次の連鎖の遮断**: 並列マーカー
+   （または後述の汚染識別子）と縮約マーカーの間に、同じか浅い深さの
+   `.collect::<Vec<`／`.collect_into_vec(` が挟まる場合は接続しないと
+   みなす。遮断は順序保持が型で明示される `Vec` への collect に限り、
+   型推論任せの `.collect()` や `HashMap`／`HashSet` 等への collect は
+   反復順序が決まらない場合があるため遮断しない（fail-closed 側）。本クレートの縮約実装は
+   `data.par_chunks(..).map(..).collect::<Vec<_>>().into_iter().fold(..)`
+   （`mse.rs::mse_sum_sq_f32` ほか `bce.rs`／`huber.rs`／`kl_div.rs`／
+   `nll.rs`／`reduction.rs`／`typed_f64.rs` で広く使われるイディオム）
+   という形を取っており、`.collect(` でインデックス順の `Vec` へ一旦
+   確定したあとの `.into_iter()` 以降は通常の逐次 `Iterator` になる
+   ため決定的である。この collect を境界とみなさないと、この正当な
+   パターンを誤って「並列縮約」と判定してしまう（実測で判明した
+   スキャナ側の過検出）。同じ「Vec collect で連鎖が切れる」規則は、
+   下記 4 の汚染**発生源**の判定にも適用する: `let parts =
+   data.par_iter().map(f).collect::<Vec<f32>>();` のように初期化式が
+   Vec 確定で終わる場合は束縛先を汚染しない（敵対的レビュー指摘。
+   これを適用しないと `let s = parts.iter().sum::<f32>();` のような
+   完全に逐次な後続コードまで並列縮約と誤検出する）。
+4. **レキシカルスコープを持つ関数単位の汚染追跡**: 文中の任意位置の
+   `let`（型注釈・タプルパターン `(a, mut b)` を含む）または `let` を
+   伴わない単純代入 `IDENT = <式>;` を検出し、初期化式（ネストした
+   ブロックの中身も含む）が 3 の規則で汚染源を含めば束縛名を汚染
+   する。クロージャ本体（`let f = |d| d.par_iter();`）や汚染識別子の
+   再代入（`let it2 = it;`）も初期化式のテキストをそのまま見る規則で
+   自然に捕捉する。汚染識別子が後続の文で識別子境界一致し、かつ
+   同じか浅い括弧深さで縮約マーカーが現れたら 1 件とカウントする。
+   汚染集合は**レキシカルスコープ単位**で再帰的に管理する（旧実装は
+   「`fn` という語が文の先頭付近に現れたら丸ごと `clear()` する」
+   ヒューリスティックだったため、ローカル `fn`・`fn(i32) -> i32` 型
+   注釈・ローカル `impl` を挟むだけで汚染集合が全消去される不具合が
+   あった。敵対的レビュー指摘）: fn アイテムの本体は fn がローカル
+   変数をキャプチャしないため空集合から始め、それ以外のネストした
+   ブロック（if／for／loop／match アーム／ブロック式／クロージャ
+   本体／impl・mod 内の非 fn アイテム）は現在の汚染集合を引き継ぐ。
+   ネストしたブロック内の `let` による汚染はそのブロックに閉じ親へ
+   漏らさないが、`let` を伴わない単純代入による汚染だけは親スコープ
+   へ伝播する（fn アイテムの境界をまたぐ場合は伝播しない）。
+5. **字句前処理**: `//`／`/* */`（ネスト対応）コメント・`"..."` 文字列
+   に加え、raw string（`r"..."`／`r#"..."#`）・byte string
+   （`b"..."`／`br#"..."#`）・char/byte literal（`'{'`／`';'`／
+   `'\''`／`'\u{7b}'` 等）を空白へ置換する。ライフタイム（`'a`／
+   `'static`）は char literal と誤認せずそのまま残す。
+
+見つかった `.sum()` 等はいずれも逐次 `std::iter::Iterator::sum()`
+（`ops.rs::gemm_checksum` の `out.iter().map(|&x| x as f64).sum()` 等）
+またはテストコード内の `naive_sum`／`naive` 参照実装で、rayon 並列
+イテレータの縮約ではない。
 
 ### §2.4 atomic 使用の棚卸し
 
@@ -162,13 +228,39 @@ float の `atomicAdd` は使わない方針（ソース検査テストあり:
 
 ### §3.3 fail-closed 化の担保（将来の回帰防止）
 
-`crates/backend-cpu/tests/determinism_inventory.rs` に、rayon 使用
-ファイル集合・atomic 蓄積箇所・`.sum()`／`.reduce(` 共起箇所を
-allowlist で固定するソース走査テストを置く。新しい非決定的経路が
-将来追加された場合、この allowlist との不一致で CI が fail-closed に
-落ちる。その時点で本 doc §7 の規則に従い、決定的実装への置き換えか
-決定性モード中の拒否（`AutodiffError` への `#[non_exhaustive]`
-variant 追加）のいずれかを選ぶ。
+`crates/backend-cpu/tests/determinism_inventory.rs`（42 テスト。すべて
+green）に、次の fail-closed ソース走査テストを置く:
+
+- `rayon_marker_files_match_fixed_allowlist`: rayon 並列イテレータ
+  使用ファイル集合を allowlist（24 件。§2.1）で固定する。
+- `no_rayon_parallel_reduce_cooccurrence_in_backend_cpu_src`: §2.3 の
+  走査方式（ブロック深さ・括弧深さ・UFCS 呼び出し検出・`Vec` への
+  collect による遮断・レキシカルスコープを持つ関数単位の汚染追跡）で
+  並列縮約の共起を検出し、`crates/backend-cpu/src` 実測で**0 件**で
+  あることを固定する。
+- `atomic_rmw_occurrences_match_expected_test_only_count`: atomic
+  蓄積箇所を 1 件（`gemm_blis/mod.rs` の `#[cfg(test)]` 限定診断コード
+  のみ）で固定する。
+- `no_parallel_iterator_valued_function_signature_in_backend_cpu_src`:
+  §2.3 の走査（トークン走査）が追跡しない**既知の限界**——関数引数・
+  戻り値経由で並列イテレータの値が流れる経路（例: 並列イテレータを
+  引数として受け取り関数内部で縮約する設計）——を別軸で fail-closed
+  に検出する。戻り値型・引数型に `ParallelIterator`／
+  `IndexedParallelIterator` を含む関数定義（`use` 文・コメントは除く）
+  が `crates/backend-cpu/src` に**0 件**であることを固定する。この
+  経路が導入された場合、トークン走査による値の流れの追跡拡張か、
+  本テストへの個別 exemption 追加のいずれかを検討する。
+- 上記に加え、レキシカルスコープ管理・UFCS・`::par_` パス参照・
+  Vec collect 遮断それぞれの単体回帰テスト（ローカル `fn`・
+  `fn(i32) -> i32` 型注釈・ローカル `impl` を挟んでも汚染集合が
+  維持されること／別々の fn 間で汚染が漏れないこと／ネストした
+  ブロック内の `let` 汚染は漏れず単純代入の汚染だけが伝播すること等。
+  敵対的レビューで実測確認した断片をそのまま固定）を置く。
+
+新しい非決定的経路が将来追加された場合、上記いずれかの固定値との
+不一致で CI が fail-closed に落ちる。その時点で本 doc §7 の規則に
+従い、決定的実装への置き換えか決定性モード中の拒否（`AutodiffError`
+への `#[non_exhaustive]` variant 追加）のいずれかを選ぶ。
 
 ## §4 置き場所の逸脱理由
 
