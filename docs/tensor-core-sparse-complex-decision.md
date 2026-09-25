@@ -143,3 +143,13 @@ fail-closed 化」の引き継ぎ候補は、イシュー #2079 で実装済み�
 事実の記録として変更しない。sparse テンソルの実装（COO 形式の
 `values`／`indices` の解釈）自体は本追補後も引き続きスコープ外（REQ-9）
 のままである。
+
+## §14 追補（イシュー #2151・2026-09-25）: FFT 設計との相互参照
+
+イシュー #2151 で FFT（`torch.fft.{fft, ifft, rfft, irfft}` 相当）の
+設計判断記録 `docs/autodiff-fft-design.md` を作成した。同 doc は実部・
+虚部を末尾次元 2 の実テンソル対（`f32`・`torch.view_as_real` 相当）で
+表す方式を採り、本 doc §6 の結論（案 A・complex dtype 非対応）は
+**覆していない**。`Tensor<complex64>` 等の complex dtype 自体は本
+追補後も §6 の結論どおり非対応のままである。相互参照のみで §5・§6 の
+判断内容・§10 の承認事項一覧は変更しない。
