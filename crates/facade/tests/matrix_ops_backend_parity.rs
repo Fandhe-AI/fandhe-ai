@@ -20,29 +20,27 @@
 //! `squeeze` の合成）と別の VJP 経路を持つため代表検証で代替できない
 //! ——両方向を全レイヤーで明示的に検証する）。
 //!
-//! **diagonal の分岐セル（同 PR での追加是正）**: `tril`／`triu`／
-//! `diag`（両方向）は `Op` 経路が同じでも diagonal 値によってマスク・
-//! パディング・抽出の境界位置が変わるため、`DIAGONALS = [-1, 0, 1]`
-//! （負・0・正）を全 forward／backward テストで走査する（`tril` は
-//! 正負とも・`triu` は負・`diag`（1-D→2-D）は `k<0`〈`pad` 引数が行
-//! `(|k|,0)`／列 `(0,|k|)`〉・`k==0`〈pad しない分岐〉・`k>0`〈行
-//! `(0,k)`／列 `(k,0)`〉の 3 分岐・`diag`（2-D→1-D）は `k` の符号で
-//! 抽出開始行と長さが変わる。「経路が別なら代表 1 本では代わりに
-//! ならない」という上記と同じ理由で、境界位置が別なら diagonal も
-//! 別セルとして扱う）。ループは既存の各テスト関数内に置き、新規
-//! `#[test]` 関数は追加していない。
+//! **diagonal の境界値・範囲外の走査（PR #2257 のフォローアップ・イシュー
+//! #2144。ユーザー承認 2026-09-25）**: `tril`／`triu`／`diag`（両方向）
+//! は `Op` 経路が同じでも diagonal 値によってマスク・パディング・
+//! 抽出の境界位置が変わるため、`tril_triu_diagonals`／
+//! `diag_1d_diagonals`（下記）が生成する diagonal 集合を非正方形状
+//! （行 < 列・行 > 列）を含む複数形状で全 forward／backward テストで
+//! 走査する。走査対象の分岐は各 helper 関数の doc を参照。ループは
+//! 既存の各テスト関数内に置き、新規 `#[test]` 関数は追加していない。
 //!
 //! - 属性なし（`fandhe_ai::tape()`〈`CpuBackendOps`〉と
 //!   `fandhe_ai_autodiff::Tape::new()`〈`NaiveOps`〉の突き合わせ）:
-//!   - コピー系（`tril`／`triu`／`diag` 両方向。diagonal 3 値）forward
-//!     bit 完全一致: `cpu_copy_ops_forward_bit_matches_naive_reference`
+//!   - コピー系（`tril`／`triu`／`diag` 両方向。diagonal 境界値走査）
+//!     forward bit 完全一致:
+//!     `cpu_copy_ops_forward_bit_matches_naive_reference`
 //!     （`outer` の bit 完全一致もここで検証）
 //!   - `tril`（0 埋め位置）の `NaN`／`inf` payload 保存確認:
 //!     `cpu_forward_masked_positions_are_zero_and_nan_bits_preserved`
 //!   - 縮約系（`trace`／`dot`）forward（REQ-2 統一複合判定）:
 //!     `cpu_reduce_ops_forward_matches_naive_reference_within_tolerance`
 //!   - bit 完全一致 backward（`tril`／`triu`／`diag` 両方向〈いずれも
-//!     diagonal 3 値〉／`trace`／`dot`）:
+//!     diagonal 境界値走査〉／`trace`／`dot`）:
 //!     `cpu_bit_exact_backward_matches_naive_reference`
 //!   - `outer` backward（REQ-2 統一複合判定）:
 //!     `cpu_outer_backward_matches_naive_reference_within_tolerance`
@@ -50,7 +48,7 @@
 //!   "macos")` 限定〉／`tape_for(Device::Cuda(0))` で同じ経路を CPU
 //!   tape と比較）: 上記のうち forward 2 種（コピー系・縮約系）と
 //!   backward 1 種（`tril`／`triu`／`diag` 両方向〈いずれも diagonal
-//!   3 値〉／`trace`／`dot` の bit 完全一致。
+//!   境界値走査〉／`trace`／`dot` の bit 完全一致。
 //!   `cpu_bit_exact_backward_matches_naive_reference` と同じ演算・
 //!   diagonal 粒度を明示的に検証し「代表 1 演算・代表 1 diagonal での
 //!   省略」はしない）に加え `outer` backward を `cuda_*`／`metal_*`
@@ -81,9 +79,17 @@ impl VarSource for fandhe_ai_autodiff::Tape {
     }
 }
 
+/// 形状 `[m, n]`・昇順シーケンス `1.0, 2.0, …` の `Tensor` を生成する
+/// （`tril`／`triu`／`diag`〈2-D→1-D〉の非正方形状セル向け。イシュー
+/// #2144 diagonal 境界是正・PR #2257 のフォローアップ）。
+fn f32_fixture(m: usize, n: usize) -> Tensor<f32> {
+    let numel = m * n;
+    let data: Vec<f32> = (0..numel).map(|i| (i as f32) + 1.0).collect();
+    Tensor::new(data, &[m, n]).expect("test fixture: shape 一致")
+}
+
 fn f32_fixture_3x3() -> Tensor<f32> {
-    Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3])
-        .expect("test fixture: shape 一致")
+    f32_fixture(3, 3)
 }
 
 fn f32_bits(t: &Tensor<f32>) -> Vec<u32> {
@@ -94,14 +100,84 @@ fn f32_bits(t: &Tensor<f32>) -> Vec<u32> {
         .collect()
 }
 
-/// `tril`／`triu`／`diag`（両方向）の境界セルを負・0・正それぞれ別物
-/// として検証するため backend parity テストで走査する diagonal 集合
-/// （codex-review 指摘・イシュー #2144・PR #2257。マスク生成は同じ
-/// `Op` 経路でも境界の位置が違えば bit 一致の検証としては別セル）。
-/// `f32_fixture_3x3`（`m = n = 3`）に対して早期リターン分岐（`tril`
-/// は `diagonal >= n - 1 == 2`、`triu` は `diagonal <= -(m - 1) == -2`）
-/// を踏まない範囲に収め、`build_tril_triu_mask` を実際に経由させる。
-const DIAGONALS: [isize; 3] = [-1, 0, 1];
+/// `tril`／`triu`／`diag`（2-D→1-D）を走査する形状の集合（正方形・
+/// 非正方形状〈行 < 列〉・非正方形状〈行 > 列〉。イシュー #2144
+/// diagonal 境界是正・PR #2257 のフォローアップ。ユーザー承認 2026-09-25）。
+const TRIL_TRIU_SHAPES: [(usize, usize); 3] = [(3, 3), (3, 5), (5, 3)];
+
+/// `diag`（1-D→2-D）を走査する入力ベクタ長の集合（通常長・長さ 1 の
+/// 境界入力）。
+const DIAG_1D_LENGTHS: [usize; 2] = [3, 1];
+
+/// `tril`／`triu`／`diag`（2-D→1-D）が形状 `[m, n]` に対して走査する
+/// diagonal 集合を生成する（イシュー #2144・PR #2257 のフォローアップ・diagonal 境界
+/// 是正。ユーザー承認 2026-09-25）。`tril` のマスク条件は
+/// `j - i > k`、`triu` のマスク条件は `j - i < k`（いずれも真＝ゼロ化
+/// 対象）で、含む値の意味は次のとおり:
+///
+/// - `n - 1`／`n`／`n + 1`: `tril` の早期リターン境界（`diagonal >=
+///   n - 1` で `build_tril_triu_mask` を経由せず `x` をそのまま返す。
+///   `crates/autodiff/src/matrix_ops.rs::tril` 参照）。`triu` 側では
+///   この範囲は逆にマスク経路を通り全要素がゼロ化される領域
+///   （`k >= n` で mask が全 true）。
+/// - `n - 2`: `tril` がマスク経路を通る最後の値（早期リターン境界の
+///   直前。右上角 1 要素のみゼロ化される）。
+/// - `-(m - 1)`／`-m`／`-m - 1`: `triu` の早期リターン境界
+///   （`diagonal <= -(m - 1)` で `x` をそのまま返す）。`tril` 側では
+///   この範囲はマスク経路を通り全要素がゼロ化される領域（`k <= -m`
+///   で mask が全 true）。
+/// - `-(m - 1) + 1`: `triu` がマスク経路を通る最後の値（早期リターン
+///   境界の直前。左下角 1 要素のみゼロ化される）。
+/// - `-2`／`-1`／`0`／`1`／`2`: 対角を跨ぐ一般的な内部値。
+///
+/// `diag`（2-D→1-D）にも同じ集合を流用する: `k = n - 1` または
+/// `k = -(m - 1)` は抽出長 `L = 1`（境界）、`k >= n` または
+/// `k <= -m` は `L = 0`（範囲外。`narrow(0, 0, 0)` → `gather` →
+/// `squeeze` で空テンソルへ収束し、エラーにはならない。
+/// `crates/autodiff/src/matrix_ops.rs::diag_2d_to_1d` 参照）。
+///
+/// **「マスク全 false（＝全要素を残す）」は `build_tril_triu_mask` の
+/// マスク経路自体には現れないことに注意**: `tril`／`triu`ともにこの
+/// 条件は早期リターン分岐の条件と一致し、マスクを構築する前に `x` が
+/// そのまま返るため（早期リターンが優先的に成立する）。
+fn tril_triu_diagonals(m: usize, n: usize) -> Vec<isize> {
+    let m = m as isize;
+    let n = n as isize;
+    let mut diagonals = vec![
+        -1,
+        0,
+        1,
+        -2,
+        2,
+        -(m - 1),
+        -m,
+        -m - 1,
+        -(m - 1) + 1,
+        n - 1,
+        n,
+        n + 1,
+        n - 2,
+    ];
+    diagonals.sort_unstable();
+    diagonals.dedup();
+    diagonals
+}
+
+/// `diag`（1-D→2-D）が長さ `n` の入力に対して走査する diagonal 集合
+/// （イシュー #2144・PR #2257 のフォローアップ・diagonal 境界是正）。`diag_1d_to_2d` は
+/// `tril`／`triu` のような早期リターン分岐を持たず、`N = n + |k|` へ
+/// `pad` するだけのため境界というより pad 幅のバリエーションを走査
+/// する: `k == 0`（pad しない分岐）・`k > 0`（`pad` 引数が行
+/// `(0, k)`／列 `(k, 0)`）・`k < 0`（行 `(k, 0)`／列 `(0, k)`）・
+/// `±2`（一般的な pad 幅）・`±n`（pad 幅が入力長と同程度に大きい
+/// 場合）。
+fn diag_1d_diagonals(n: usize) -> Vec<isize> {
+    let n = n as isize;
+    let mut diagonals = vec![-1, 0, 1, -2, 2, -n, n];
+    diagonals.sort_unstable();
+    diagonals.dedup();
+    diagonals
+}
 
 /// diagonal を可変にした backward parity ループ用の重み `Tensor`（要素
 /// 数分の昇順シーケンス `1.0, 2.0, …`）を生成する。`diag`（1-D→2-D）は
@@ -117,7 +193,7 @@ fn sequential_weight(shape: &[usize]) -> Tensor<f32> {
 /// [`fandhe_ai_autodiff::matrix_ops::diag`] の 2-D→1-D 経路が抽出する
 /// 長さ `L`（同関数 doc: `k >= 0` なら `min(m, n - k)`・`k < 0` なら
 /// `min(m - |k|, n)`）。backward parity ループで diagonal ごとに重みの
-/// 形状を合わせるために使う。
+/// 形状を合わせるために使う。`L == 0`（範囲外）もそのまま返す。
 fn diag_2d_to_1d_extract_len(k: isize, m: usize, n: usize) -> usize {
     if k >= 0 {
         m.min(n.saturating_sub(k as usize))
@@ -132,50 +208,89 @@ fn diag_2d_to_1d_extract_len(k: isize, m: usize, n: usize) -> usize {
 /// コピー・0 埋め演算のため）。
 #[test]
 fn cpu_copy_ops_forward_bit_matches_naive_reference() {
-    let data = f32_fixture_3x3();
-    let cpu_tape = fandhe_ai::tape();
-    let x_cpu = cpu_tape.make_var(&data);
-    let naive_tape = fandhe_ai_autodiff::Tape::new();
-    let x_naive = naive_tape.make_var(&data);
+    // tril／triu／diag（2-D→1-D）: 正方形・非正方形状（行<列・行>列）
+    // それぞれで diagonal 境界値・範囲外を走査する
+    // （`tril_triu_diagonals` doc 参照）。
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        let cpu_tape = fandhe_ai::tape();
+        let x_cpu = cpu_tape.make_var(&data);
+        let naive_tape = fandhe_ai_autodiff::Tape::new();
+        let x_naive = naive_tape.make_var(&data);
 
-    // `tril`／`triu`／`diag`（2-D→1-D）は diagonal ごとに境界位置が
-    // 変わるため、負・0・正それぞれを別セルとして検証する。
-    for &k in &DIAGONALS {
-        assert_eq!(
-            f32_bits(&tril(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&tril(&x_naive, k).unwrap().to_tensor()),
-            "tril diagonal={k}"
-        );
-        assert_eq!(
-            f32_bits(&triu(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&triu(&x_naive, k).unwrap().to_tensor()),
-            "triu diagonal={k}"
-        );
-        assert_eq!(
-            f32_bits(&diag(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&diag(&x_naive, k).unwrap().to_tensor()),
-            "diag(2D->1D) diagonal={k}"
-        );
+        for &k in &tril_triu_diagonals(m, n) {
+            let out_cpu = tril(&x_cpu, k).unwrap().to_tensor();
+            let out_naive = tril(&x_naive, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_naive.shape(),
+                "tril shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_naive),
+                "tril m={m} n={n} diagonal={k}"
+            );
+
+            let out_cpu = triu(&x_cpu, k).unwrap().to_tensor();
+            let out_naive = triu(&x_naive, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_naive.shape(),
+                "triu shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_naive),
+                "triu m={m} n={n} diagonal={k}"
+            );
+
+            let out_cpu = diag(&x_cpu, k).unwrap().to_tensor();
+            let out_naive = diag(&x_naive, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_naive.shape(),
+                "diag(2D->1D) shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_naive),
+                "diag(2D->1D) m={m} n={n} diagonal={k}"
+            );
+        }
     }
 
-    // diag（1-D -> 2-D。`k == 0` は pad しない分岐・`k < 0`／`k > 0` は
-    // それぞれ別の `pad` 引数〈行 `(0,k)`／`(k,0)` と `(k,0)`／`(0,k)`〉
-    // を通るため、3 分岐とも個別に検証する）。
-    let vec1d = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
-    let v_cpu = cpu_tape.make_var(&vec1d);
-    let v_naive = naive_tape.make_var(&vec1d);
-    for &k in &DIAGONALS {
-        assert_eq!(
-            f32_bits(&diag(&v_cpu, k).unwrap().to_tensor()),
-            f32_bits(&diag(&v_naive, k).unwrap().to_tensor()),
-            "diag(1D->2D) diagonal={k}"
-        );
+    // diag（1-D -> 2-D。通常長・長さ 1 それぞれで diagonal 境界を
+    // 走査する。`diag_1d_diagonals` doc 参照）。
+    for &n in &DIAG_1D_LENGTHS {
+        let data: Vec<f32> = (0..n).map(|i| (i as f32) + 1.0).collect();
+        let vec1d = Tensor::new(data, &[n]).unwrap();
+        let cpu_tape = fandhe_ai::tape();
+        let v_cpu = cpu_tape.make_var(&vec1d);
+        let naive_tape = fandhe_ai_autodiff::Tape::new();
+        let v_naive = naive_tape.make_var(&vec1d);
+        for &k in &diag_1d_diagonals(n) {
+            let out_cpu = diag(&v_cpu, k).unwrap().to_tensor();
+            let out_naive = diag(&v_naive, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_naive.shape(),
+                "diag(1D->2D) shape n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_naive),
+                "diag(1D->2D) n={n} diagonal={k}"
+            );
+        }
     }
 
     let a_data = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
     let b_data = Tensor::new(vec![10.0, 20.0, 30.0], &[3]).unwrap();
+    let cpu_tape = fandhe_ai::tape();
     let a_cpu = cpu_tape.make_var(&a_data);
     let b_cpu = cpu_tape.make_var(&b_data);
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
     let a_naive = naive_tape.make_var(&a_data);
     let b_naive = naive_tape.make_var(&b_data);
     assert_eq!(
@@ -245,144 +360,188 @@ fn cpu_reduce_ops_forward_matches_naive_reference_within_tolerance() {
 /// 「数値契約」参照: マスク・scatter の寄与がいずれも高々 1 つのため）。
 #[test]
 fn cpu_bit_exact_backward_matches_naive_reference() {
-    let data = f32_fixture_3x3();
-    let weight = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]).unwrap();
+    // tril／triu（正方形・非正方形状〈行<列〉・非正方形状〈行>列〉×
+    // diagonal 境界値・範囲外。`tril_triu_diagonals` doc 参照）
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        let weight = f32_fixture(m, n);
+        for &k in &tril_triu_diagonals(m, n) {
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&weight);
+            let loss_cpu = tril(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cpu = cpu_tape
+                .backward(&loss_cpu)
+                .unwrap()
+                .get(&x_cpu)
+                .unwrap()
+                .unwrap()
+                .clone();
 
-    // tril／triu（diagonal ごとに境界位置が変わるため負・0・正を個別に
-    // 検証する）
-    for &k in &DIAGONALS {
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&weight);
-        let loss_cpu = tril(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
+            let naive_tape = fandhe_ai_autodiff::Tape::new();
+            let x_naive = naive_tape.make_var(&data);
+            let w_naive = naive_tape.make_var(&weight);
+            let loss_naive = tril(&x_naive, k)
+                .unwrap()
+                .mul(&w_naive)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_naive = naive_tape
+                .backward(&loss_naive)
+                .unwrap()
+                .get(&x_naive)
+                .unwrap()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                dx_cpu.shape(),
+                dx_naive.shape(),
+                "tril backward shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&dx_cpu),
+                f32_bits(&dx_naive),
+                "tril backward m={m} n={n} diagonal={k}"
+            );
 
-        let naive_tape = fandhe_ai_autodiff::Tape::new();
-        let x_naive = naive_tape.make_var(&data);
-        let w_naive = naive_tape.make_var(&weight);
-        let loss_naive = tril(&x_naive, k)
-            .unwrap()
-            .mul(&w_naive)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_naive = naive_tape
-            .backward(&loss_naive)
-            .unwrap()
-            .get(&x_naive)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_naive),
-            "tril backward diagonal={k}"
-        );
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&weight);
+            let loss_cpu = triu(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cpu = cpu_tape
+                .backward(&loss_cpu)
+                .unwrap()
+                .get(&x_cpu)
+                .unwrap()
+                .unwrap()
+                .clone();
 
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&weight);
-        let loss_cpu = triu(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
-
-        let naive_tape = fandhe_ai_autodiff::Tape::new();
-        let x_naive = naive_tape.make_var(&data);
-        let w_naive = naive_tape.make_var(&weight);
-        let loss_naive = triu(&x_naive, k)
-            .unwrap()
-            .mul(&w_naive)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_naive = naive_tape
-            .backward(&loss_naive)
-            .unwrap()
-            .get(&x_naive)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_naive),
-            "triu backward diagonal={k}"
-        );
+            let naive_tape = fandhe_ai_autodiff::Tape::new();
+            let x_naive = naive_tape.make_var(&data);
+            let w_naive = naive_tape.make_var(&weight);
+            let loss_naive = triu(&x_naive, k)
+                .unwrap()
+                .mul(&w_naive)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_naive = naive_tape
+                .backward(&loss_naive)
+                .unwrap()
+                .get(&x_naive)
+                .unwrap()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                dx_cpu.shape(),
+                dx_naive.shape(),
+                "triu backward shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&dx_cpu),
+                f32_bits(&dx_naive),
+                "triu backward m={m} n={n} diagonal={k}"
+            );
+        }
     }
 
-    // diag（2-D -> 1-D。抽出長 `L` は diagonal に依存するため、重みの
-    // 形状を diagonal ごとに動的生成する）
-    for &k in &DIAGONALS {
-        let extract_len = diag_2d_to_1d_extract_len(k, 3, 3);
-        let w1d = sequential_weight(&[extract_len]);
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&w1d);
-        let loss_cpu = diag(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
+    // diag（2-D -> 1-D。抽出長 L は diagonal に依存し、範囲外
+    // （L == 0）では `narrow(0, 0, 0)` -> `gather` -> `squeeze` で空
+    // テンソルへ収束する（エラーにはならない）。この境界でも勾配は
+    // Some で記録されることを契約とし〈実測: 形状 [m, n] の全ゼロ
+    // 勾配〉、None は双方一致していても失敗とする。L == 0 のセルでは
+    // 形状 [m, n]・全要素ゼロであることも明示検証する）
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        for &k in &tril_triu_diagonals(m, n) {
+            let extract_len = diag_2d_to_1d_extract_len(k, m, n);
+            let w1d = sequential_weight(&[extract_len]);
 
-        let naive_tape = fandhe_ai_autodiff::Tape::new();
-        let x_naive = naive_tape.make_var(&data);
-        let w_naive = naive_tape.make_var(&w1d);
-        let loss_naive = diag(&x_naive, k)
-            .unwrap()
-            .mul(&w_naive)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_naive = naive_tape
-            .backward(&loss_naive)
-            .unwrap()
-            .get(&x_naive)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_naive),
-            "diag(2D->1D) backward diagonal={k}"
-        );
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&w1d);
+            let loss_cpu = diag(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+            let dx_cpu = grads_cpu.get(&x_cpu).unwrap();
+
+            let naive_tape = fandhe_ai_autodiff::Tape::new();
+            let x_naive = naive_tape.make_var(&data);
+            let w_naive = naive_tape.make_var(&w1d);
+            let loss_naive = diag(&x_naive, k)
+                .unwrap()
+                .mul(&w_naive)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let grads_naive = naive_tape.backward(&loss_naive).unwrap();
+            let dx_naive = grads_naive.get(&x_naive).unwrap();
+
+            match (dx_cpu, dx_naive) {
+                (Some(a), Some(b)) => {
+                    assert_eq!(
+                        a.shape(),
+                        b.shape(),
+                        "diag(2D->1D) backward shape m={m} n={n} diagonal={k} L={extract_len}"
+                    );
+                    assert_eq!(
+                        f32_bits(a),
+                        f32_bits(b),
+                        "diag(2D->1D) backward m={m} n={n} diagonal={k} L={extract_len}"
+                    );
+                    if extract_len == 0 {
+                        // 範囲外セルの契約: 形状 [m, n]・全要素ゼロ（符号は問わない）
+                        assert_eq!(
+                            a.shape(),
+                            &[m, n][..],
+                            "diag(2D->1D) backward L=0 shape m={m} n={n} diagonal={k}"
+                        );
+                        assert!(
+                            f32_bits(a).iter().all(|&bits| bits & 0x7fff_ffff == 0),
+                            "diag(2D->1D) backward L=0 が全ゼロでない m={m} n={n} diagonal={k}"
+                        );
+                    }
+                }
+                (None, None) => panic!(
+                    "diag(2D->1D) backward の勾配が CPU・NaiveOps 双方で\
+                     記録されなかった（想定外。実測では L=0 セルでも\
+                     形状 [m, n] の全ゼロ勾配が Some で返るはず）: \
+                     m={m} n={n} diagonal={k} L={extract_len}"
+                ),
+                _ => panic!(
+                    "diag(2D->1D) backward の勾配有無が CPU と NaiveOps で\
+                     食い違った: m={m} n={n} diagonal={k} L={extract_len} \
+                     cpu_some={} naive_some={}",
+                    dx_cpu.is_some(),
+                    dx_naive.is_some()
+                ),
+            }
+        }
     }
 
     // diag（1-D -> 2-D。`broadcast_to`／`masked_fill`／`pad` の VJP を
     // 経由し、2-D -> 1-D（`narrow`／`gather` の VJP）とは別経路。
-    // `k == 0` は pad しない分岐・`k < 0`／`k > 0` は別の `pad` 引数を
-    // 通るため出力形状 `N = n + |k|` ごとに重みを動的生成する）
-    {
-        let v1d = Tensor::new(vec![10.0, 20.0, 30.0], &[3]).unwrap();
-        for &k in &DIAGONALS {
-            let big_n = 3 + k.unsigned_abs();
+    // 通常長・長さ 1 それぞれで diagonal 境界を走査する）
+    for &n in &DIAG_1D_LENGTHS {
+        let data: Vec<f32> = (0..n).map(|i| (i as f32) + 1.0).collect();
+        let v1d = Tensor::new(data, &[n]).unwrap();
+        for &k in &diag_1d_diagonals(n) {
+            let big_n = n + k.unsigned_abs();
             let w2d = sequential_weight(&[big_n, big_n]);
             let cpu_tape = fandhe_ai::tape();
             let v_cpu = cpu_tape.make_var(&v1d);
@@ -418,15 +577,21 @@ fn cpu_bit_exact_backward_matches_naive_reference() {
                 .unwrap()
                 .clone();
             assert_eq!(
+                dv_cpu.shape(),
+                dv_naive.shape(),
+                "diag(1D->2D) backward shape n={n} diagonal={k}"
+            );
+            assert_eq!(
                 f32_bits(&dv_cpu),
                 f32_bits(&dv_naive),
-                "diag(1D->2D) backward diagonal={k}"
+                "diag(1D->2D) backward n={n} diagonal={k}"
             );
         }
     }
 
     // trace
     {
+        let data = f32_fixture_3x3();
         let cpu_tape = fandhe_ai::tape();
         let x_cpu = cpu_tape.make_var(&data);
         let loss_cpu = trace(&x_cpu).unwrap();
@@ -513,51 +678,92 @@ fn cpu_outer_backward_matches_naive_reference_within_tolerance() {
 #[test]
 #[ignore = "Metal 実機が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照"]
 fn metal_copy_ops_forward_matches_cpu_reference() {
-    let data = f32_fixture_3x3();
-    let cpu_tape = fandhe_ai::tape();
-    let x_cpu = cpu_tape.make_var(&data);
-    let metal_tape =
-        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
-    let x_metal = metal_tape.make_var(&data);
+    // tril／triu／diag（2-D→1-D）: 正方形・非正方形状（行<列・行>列）
+    // それぞれで diagonal 境界値・範囲外を走査する
+    // （`tril_triu_diagonals` doc 参照）。
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        let cpu_tape = fandhe_ai::tape();
+        let x_cpu = cpu_tape.make_var(&data);
+        let metal_tape = fandhe_ai::tape_for(Device::Metal)
+            .expect("実機が利用可能な前提のテストのため成功するはず");
+        let x_metal = metal_tape.make_var(&data);
 
-    // `tril`／`triu`／`diag`（2-D→1-D）は diagonal ごとに境界位置が
-    // 変わるため、負・0・正それぞれを別セルとして検証する。
-    for &k in &DIAGONALS {
-        assert_eq!(
-            f32_bits(&tril(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&tril(&x_metal, k).unwrap().to_tensor()),
-            "tril diagonal={k}"
-        );
-        assert_eq!(
-            f32_bits(&triu(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&triu(&x_metal, k).unwrap().to_tensor()),
-            "triu diagonal={k}"
-        );
-        assert_eq!(
-            f32_bits(&diag(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&diag(&x_metal, k).unwrap().to_tensor()),
-            "diag(2D->1D) diagonal={k}"
-        );
+        for &k in &tril_triu_diagonals(m, n) {
+            let out_cpu = tril(&x_cpu, k).unwrap().to_tensor();
+            let out_metal = tril(&x_metal, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_metal.shape(),
+                "tril shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_metal),
+                "tril m={m} n={n} diagonal={k}"
+            );
+
+            let out_cpu = triu(&x_cpu, k).unwrap().to_tensor();
+            let out_metal = triu(&x_metal, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_metal.shape(),
+                "triu shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_metal),
+                "triu m={m} n={n} diagonal={k}"
+            );
+
+            let out_cpu = diag(&x_cpu, k).unwrap().to_tensor();
+            let out_metal = diag(&x_metal, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_metal.shape(),
+                "diag(2D->1D) shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_metal),
+                "diag(2D->1D) m={m} n={n} diagonal={k}"
+            );
+        }
     }
 
-    // diag（1-D -> 2-D。`broadcast_to`／`masked_fill`／`pad` の合成で
-    // 2-D -> 1-D（`narrow`／`gather`）とは別経路。`k == 0` は pad しない
-    // 分岐・`k < 0`／`k > 0` は別の `pad` 引数を通るため個別に検証する）。
-    let vec1d = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
-    let v_cpu = cpu_tape.make_var(&vec1d);
-    let v_metal = metal_tape.make_var(&vec1d);
-    for &k in &DIAGONALS {
-        assert_eq!(
-            f32_bits(&diag(&v_cpu, k).unwrap().to_tensor()),
-            f32_bits(&diag(&v_metal, k).unwrap().to_tensor()),
-            "diag(1D->2D) diagonal={k}"
-        );
+    // diag（1-D -> 2-D。通常長・長さ 1 それぞれで diagonal 境界を
+    // 走査する）。
+    for &n in &DIAG_1D_LENGTHS {
+        let data: Vec<f32> = (0..n).map(|i| (i as f32) + 1.0).collect();
+        let vec1d = Tensor::new(data, &[n]).unwrap();
+        let cpu_tape = fandhe_ai::tape();
+        let v_cpu = cpu_tape.make_var(&vec1d);
+        let metal_tape = fandhe_ai::tape_for(Device::Metal)
+            .expect("実機が利用可能な前提のテストのため成功するはず");
+        let v_metal = metal_tape.make_var(&vec1d);
+        for &k in &diag_1d_diagonals(n) {
+            let out_cpu = diag(&v_cpu, k).unwrap().to_tensor();
+            let out_metal = diag(&v_metal, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_metal.shape(),
+                "diag(1D->2D) shape n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_metal),
+                "diag(1D->2D) n={n} diagonal={k}"
+            );
+        }
     }
 
     let a_data = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
     let b_data = Tensor::new(vec![10.0, 20.0, 30.0], &[3]).unwrap();
+    let cpu_tape = fandhe_ai::tape();
     let a_cpu = cpu_tape.make_var(&a_data);
     let b_cpu = cpu_tape.make_var(&b_data);
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
     let a_metal = metal_tape.make_var(&a_data);
     let b_metal = metal_tape.make_var(&b_data);
     assert_eq!(
@@ -571,51 +777,92 @@ fn metal_copy_ops_forward_matches_cpu_reference() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照"]
 fn cuda_copy_ops_forward_matches_cpu_reference() {
-    let data = f32_fixture_3x3();
-    let cpu_tape = fandhe_ai::tape();
-    let x_cpu = cpu_tape.make_var(&data);
-    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
-        .expect("実機が利用可能な前提のテストのため成功するはず");
-    let x_cuda = cuda_tape.make_var(&data);
+    // tril／triu／diag（2-D→1-D）: 正方形・非正方形状（行<列・行>列）
+    // それぞれで diagonal 境界値・範囲外を走査する
+    // （`tril_triu_diagonals` doc 参照）。
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        let cpu_tape = fandhe_ai::tape();
+        let x_cpu = cpu_tape.make_var(&data);
+        let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+            .expect("実機が利用可能な前提のテストのため成功するはず");
+        let x_cuda = cuda_tape.make_var(&data);
 
-    // `tril`／`triu`／`diag`（2-D→1-D）は diagonal ごとに境界位置が
-    // 変わるため、負・0・正それぞれを別セルとして検証する。
-    for &k in &DIAGONALS {
-        assert_eq!(
-            f32_bits(&tril(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&tril(&x_cuda, k).unwrap().to_tensor()),
-            "tril diagonal={k}"
-        );
-        assert_eq!(
-            f32_bits(&triu(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&triu(&x_cuda, k).unwrap().to_tensor()),
-            "triu diagonal={k}"
-        );
-        assert_eq!(
-            f32_bits(&diag(&x_cpu, k).unwrap().to_tensor()),
-            f32_bits(&diag(&x_cuda, k).unwrap().to_tensor()),
-            "diag(2D->1D) diagonal={k}"
-        );
+        for &k in &tril_triu_diagonals(m, n) {
+            let out_cpu = tril(&x_cpu, k).unwrap().to_tensor();
+            let out_cuda = tril(&x_cuda, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_cuda.shape(),
+                "tril shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_cuda),
+                "tril m={m} n={n} diagonal={k}"
+            );
+
+            let out_cpu = triu(&x_cpu, k).unwrap().to_tensor();
+            let out_cuda = triu(&x_cuda, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_cuda.shape(),
+                "triu shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_cuda),
+                "triu m={m} n={n} diagonal={k}"
+            );
+
+            let out_cpu = diag(&x_cpu, k).unwrap().to_tensor();
+            let out_cuda = diag(&x_cuda, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_cuda.shape(),
+                "diag(2D->1D) shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_cuda),
+                "diag(2D->1D) m={m} n={n} diagonal={k}"
+            );
+        }
     }
 
-    // diag（1-D -> 2-D。`broadcast_to`／`masked_fill`／`pad` の合成で
-    // 2-D -> 1-D（`narrow`／`gather`）とは別経路。`k == 0` は pad しない
-    // 分岐・`k < 0`／`k > 0` は別の `pad` 引数を通るため個別に検証する）。
-    let vec1d = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
-    let v_cpu = cpu_tape.make_var(&vec1d);
-    let v_cuda = cuda_tape.make_var(&vec1d);
-    for &k in &DIAGONALS {
-        assert_eq!(
-            f32_bits(&diag(&v_cpu, k).unwrap().to_tensor()),
-            f32_bits(&diag(&v_cuda, k).unwrap().to_tensor()),
-            "diag(1D->2D) diagonal={k}"
-        );
+    // diag（1-D -> 2-D。通常長・長さ 1 それぞれで diagonal 境界を
+    // 走査する）。
+    for &n in &DIAG_1D_LENGTHS {
+        let data: Vec<f32> = (0..n).map(|i| (i as f32) + 1.0).collect();
+        let vec1d = Tensor::new(data, &[n]).unwrap();
+        let cpu_tape = fandhe_ai::tape();
+        let v_cpu = cpu_tape.make_var(&vec1d);
+        let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+            .expect("実機が利用可能な前提のテストのため成功するはず");
+        let v_cuda = cuda_tape.make_var(&vec1d);
+        for &k in &diag_1d_diagonals(n) {
+            let out_cpu = diag(&v_cpu, k).unwrap().to_tensor();
+            let out_cuda = diag(&v_cuda, k).unwrap().to_tensor();
+            assert_eq!(
+                out_cpu.shape(),
+                out_cuda.shape(),
+                "diag(1D->2D) shape n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&out_cpu),
+                f32_bits(&out_cuda),
+                "diag(1D->2D) n={n} diagonal={k}"
+            );
+        }
     }
 
     let a_data = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
     let b_data = Tensor::new(vec![10.0, 20.0, 30.0], &[3]).unwrap();
+    let cpu_tape = fandhe_ai::tape();
     let a_cpu = cpu_tape.make_var(&a_data);
     let b_cpu = cpu_tape.make_var(&b_data);
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
     let a_cuda = cuda_tape.make_var(&a_data);
     let b_cuda = cuda_tape.make_var(&b_data);
     assert_eq!(
@@ -709,147 +956,174 @@ fn cuda_reduce_ops_forward_matches_cpu_reference() {
 #[test]
 #[ignore = "Metal 実機が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照"]
 fn metal_bit_exact_backward_matches_cpu_reference() {
-    let data = f32_fixture_3x3();
-    let weight = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]).unwrap();
+    // tril／triu（正方形・非正方形状〈行<列〉・非正方形状〈行>列〉×
+    // diagonal 境界値・範囲外。`tril_triu_diagonals` doc 参照）
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        let weight = f32_fixture(m, n);
+        for &k in &tril_triu_diagonals(m, n) {
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&weight);
+            let loss_cpu = tril(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cpu = cpu_tape
+                .backward(&loss_cpu)
+                .unwrap()
+                .get(&x_cpu)
+                .unwrap()
+                .unwrap()
+                .clone();
 
-    // tril／triu（diagonal ごとに境界位置が変わるため負・0・正を個別に
-    // 検証する）
-    for &k in &DIAGONALS {
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&weight);
-        let loss_cpu = tril(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
+            let metal_tape = fandhe_ai::tape_for(Device::Metal)
+                .expect("実機が利用可能な前提のテストのため成功するはず");
+            let x_metal = metal_tape.make_var(&data);
+            let w_metal = metal_tape.make_var(&weight);
+            let loss_metal = tril(&x_metal, k)
+                .unwrap()
+                .mul(&w_metal)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_metal = metal_tape
+                .backward(&loss_metal)
+                .unwrap()
+                .get(&x_metal)
+                .unwrap()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                dx_cpu.shape(),
+                dx_metal.shape(),
+                "tril backward shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&dx_cpu),
+                f32_bits(&dx_metal),
+                "tril backward m={m} n={n} diagonal={k}"
+            );
 
-        let metal_tape = fandhe_ai::tape_for(Device::Metal)
-            .expect("実機が利用可能な前提のテストのため成功するはず");
-        let x_metal = metal_tape.make_var(&data);
-        let w_metal = metal_tape.make_var(&weight);
-        let loss_metal = tril(&x_metal, k)
-            .unwrap()
-            .mul(&w_metal)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_metal = metal_tape
-            .backward(&loss_metal)
-            .unwrap()
-            .get(&x_metal)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_metal),
-            "tril backward diagonal={k}"
-        );
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&weight);
+            let loss_cpu = triu(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cpu = cpu_tape
+                .backward(&loss_cpu)
+                .unwrap()
+                .get(&x_cpu)
+                .unwrap()
+                .unwrap()
+                .clone();
 
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&weight);
-        let loss_cpu = triu(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
-
-        let metal_tape = fandhe_ai::tape_for(Device::Metal)
-            .expect("実機が利用可能な前提のテストのため成功するはず");
-        let x_metal = metal_tape.make_var(&data);
-        let w_metal = metal_tape.make_var(&weight);
-        let loss_metal = triu(&x_metal, k)
-            .unwrap()
-            .mul(&w_metal)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_metal = metal_tape
-            .backward(&loss_metal)
-            .unwrap()
-            .get(&x_metal)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_metal),
-            "triu backward diagonal={k}"
-        );
+            let metal_tape = fandhe_ai::tape_for(Device::Metal)
+                .expect("実機が利用可能な前提のテストのため成功するはず");
+            let x_metal = metal_tape.make_var(&data);
+            let w_metal = metal_tape.make_var(&weight);
+            let loss_metal = triu(&x_metal, k)
+                .unwrap()
+                .mul(&w_metal)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_metal = metal_tape
+                .backward(&loss_metal)
+                .unwrap()
+                .get(&x_metal)
+                .unwrap()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                dx_cpu.shape(),
+                dx_metal.shape(),
+                "triu backward shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&dx_cpu),
+                f32_bits(&dx_metal),
+                "triu backward m={m} n={n} diagonal={k}"
+            );
+        }
     }
 
-    // diag（2-D -> 1-D。抽出長 `L` は diagonal に依存するため、重みの
-    // 形状を diagonal ごとに動的生成する）
-    for &k in &DIAGONALS {
-        let extract_len = diag_2d_to_1d_extract_len(k, 3, 3);
-        let w1d = sequential_weight(&[extract_len]);
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&w1d);
-        let loss_cpu = diag(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
+    // diag（2-D -> 1-D。範囲外（L == 0）でも勾配は Some で記録される
+    // ことを契約とし、None は双方一致していても失敗とする。CPU 側と
+    // 同じ契約）
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        for &k in &tril_triu_diagonals(m, n) {
+            let extract_len = diag_2d_to_1d_extract_len(k, m, n);
+            let w1d = sequential_weight(&[extract_len]);
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&w1d);
+            let loss_cpu = diag(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+            let dx_cpu = grads_cpu.get(&x_cpu).unwrap();
 
-        let metal_tape = fandhe_ai::tape_for(Device::Metal)
-            .expect("実機が利用可能な前提のテストのため成功するはず");
-        let x_metal = metal_tape.make_var(&data);
-        let w_metal = metal_tape.make_var(&w1d);
-        let loss_metal = diag(&x_metal, k)
-            .unwrap()
-            .mul(&w_metal)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_metal = metal_tape
-            .backward(&loss_metal)
-            .unwrap()
-            .get(&x_metal)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_metal),
-            "diag(2D->1D) backward diagonal={k}"
-        );
+            let metal_tape = fandhe_ai::tape_for(Device::Metal)
+                .expect("実機が利用可能な前提のテストのため成功するはず");
+            let x_metal = metal_tape.make_var(&data);
+            let w_metal = metal_tape.make_var(&w1d);
+            let loss_metal = diag(&x_metal, k)
+                .unwrap()
+                .mul(&w_metal)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let grads_metal = metal_tape.backward(&loss_metal).unwrap();
+            let dx_metal = grads_metal.get(&x_metal).unwrap();
+
+            match (dx_cpu, dx_metal) {
+                (Some(a), Some(b)) => {
+                    assert_eq!(
+                        a.shape(),
+                        b.shape(),
+                        "diag(2D->1D) backward shape m={m} n={n} diagonal={k} L={extract_len}"
+                    );
+                    assert_eq!(
+                        f32_bits(a),
+                        f32_bits(b),
+                        "diag(2D->1D) backward m={m} n={n} diagonal={k} L={extract_len}"
+                    );
+                }
+                (None, None) => panic!(
+                    "diag(2D->1D) backward の勾配が CPU・Metal 双方で\
+                     記録されなかった（想定外。CPU 側は実測で L=0\
+                     セルでも形状 [m, n] の全ゼロ勾配が Some で返る\
+                     ことを確認済み）: m={m} n={n} diagonal={k} L={extract_len}"
+                ),
+                _ => panic!(
+                    "diag(2D->1D) backward の勾配有無が CPU と Metal で\
+                     食い違った: m={m} n={n} diagonal={k} L={extract_len} \
+                     cpu_some={} metal_some={}",
+                    dx_cpu.is_some(),
+                    dx_metal.is_some()
+                ),
+            }
+        }
     }
 
-    // diag（1-D -> 2-D。`broadcast_to`／`masked_fill`／`pad` の VJP を
-    // 経由し、2-D -> 1-D（`narrow`／`gather` の VJP）とは別経路。
-    // `k == 0` は pad しない分岐・`k < 0`／`k > 0` は別の `pad` 引数を
-    // 通るため出力形状 `N = n + |k|` ごとに重みを動的生成する）
-    {
-        let v1d = Tensor::new(vec![10.0, 20.0, 30.0], &[3]).unwrap();
-        for &k in &DIAGONALS {
-            let big_n = 3 + k.unsigned_abs();
+    // diag（1-D -> 2-D。通常長・長さ 1 それぞれで diagonal 境界を
+    // 走査する）
+    for &n in &DIAG_1D_LENGTHS {
+        let data: Vec<f32> = (0..n).map(|i| (i as f32) + 1.0).collect();
+        let v1d = Tensor::new(data, &[n]).unwrap();
+        for &k in &diag_1d_diagonals(n) {
+            let big_n = n + k.unsigned_abs();
             let w2d = sequential_weight(&[big_n, big_n]);
             let cpu_tape = fandhe_ai::tape();
             let v_cpu = cpu_tape.make_var(&v1d);
@@ -886,15 +1160,21 @@ fn metal_bit_exact_backward_matches_cpu_reference() {
                 .unwrap()
                 .clone();
             assert_eq!(
+                dv_cpu.shape(),
+                dv_metal.shape(),
+                "diag(1D->2D) backward shape n={n} diagonal={k}"
+            );
+            assert_eq!(
                 f32_bits(&dv_cpu),
                 f32_bits(&dv_metal),
-                "diag(1D->2D) backward diagonal={k}"
+                "diag(1D->2D) backward n={n} diagonal={k}"
             );
         }
     }
 
     // trace
     {
+        let data = f32_fixture_3x3();
         let cpu_tape = fandhe_ai::tape();
         let x_cpu = cpu_tape.make_var(&data);
         let loss_cpu = trace(&x_cpu).unwrap();
@@ -948,147 +1228,174 @@ fn metal_bit_exact_backward_matches_cpu_reference() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照"]
 fn cuda_bit_exact_backward_matches_cpu_reference() {
-    let data = f32_fixture_3x3();
-    let weight = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]).unwrap();
+    // tril／triu（正方形・非正方形状〈行<列〉・非正方形状〈行>列〉×
+    // diagonal 境界値・範囲外。`tril_triu_diagonals` doc 参照）
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        let weight = f32_fixture(m, n);
+        for &k in &tril_triu_diagonals(m, n) {
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&weight);
+            let loss_cpu = tril(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cpu = cpu_tape
+                .backward(&loss_cpu)
+                .unwrap()
+                .get(&x_cpu)
+                .unwrap()
+                .unwrap()
+                .clone();
 
-    // tril／triu（diagonal ごとに境界位置が変わるため負・0・正を個別に
-    // 検証する）
-    for &k in &DIAGONALS {
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&weight);
-        let loss_cpu = tril(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
+            let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+                .expect("実機が利用可能な前提のテストのため成功するはず");
+            let x_cuda = cuda_tape.make_var(&data);
+            let w_cuda = cuda_tape.make_var(&weight);
+            let loss_cuda = tril(&x_cuda, k)
+                .unwrap()
+                .mul(&w_cuda)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cuda = cuda_tape
+                .backward(&loss_cuda)
+                .unwrap()
+                .get(&x_cuda)
+                .unwrap()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                dx_cpu.shape(),
+                dx_cuda.shape(),
+                "tril backward shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&dx_cpu),
+                f32_bits(&dx_cuda),
+                "tril backward m={m} n={n} diagonal={k}"
+            );
 
-        let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
-            .expect("実機が利用可能な前提のテストのため成功するはず");
-        let x_cuda = cuda_tape.make_var(&data);
-        let w_cuda = cuda_tape.make_var(&weight);
-        let loss_cuda = tril(&x_cuda, k)
-            .unwrap()
-            .mul(&w_cuda)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cuda = cuda_tape
-            .backward(&loss_cuda)
-            .unwrap()
-            .get(&x_cuda)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_cuda),
-            "tril backward diagonal={k}"
-        );
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&weight);
+            let loss_cpu = triu(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cpu = cpu_tape
+                .backward(&loss_cpu)
+                .unwrap()
+                .get(&x_cpu)
+                .unwrap()
+                .unwrap()
+                .clone();
 
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&weight);
-        let loss_cpu = triu(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
-
-        let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
-            .expect("実機が利用可能な前提のテストのため成功するはず");
-        let x_cuda = cuda_tape.make_var(&data);
-        let w_cuda = cuda_tape.make_var(&weight);
-        let loss_cuda = triu(&x_cuda, k)
-            .unwrap()
-            .mul(&w_cuda)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cuda = cuda_tape
-            .backward(&loss_cuda)
-            .unwrap()
-            .get(&x_cuda)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_cuda),
-            "triu backward diagonal={k}"
-        );
+            let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+                .expect("実機が利用可能な前提のテストのため成功するはず");
+            let x_cuda = cuda_tape.make_var(&data);
+            let w_cuda = cuda_tape.make_var(&weight);
+            let loss_cuda = triu(&x_cuda, k)
+                .unwrap()
+                .mul(&w_cuda)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let dx_cuda = cuda_tape
+                .backward(&loss_cuda)
+                .unwrap()
+                .get(&x_cuda)
+                .unwrap()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                dx_cpu.shape(),
+                dx_cuda.shape(),
+                "triu backward shape m={m} n={n} diagonal={k}"
+            );
+            assert_eq!(
+                f32_bits(&dx_cpu),
+                f32_bits(&dx_cuda),
+                "triu backward m={m} n={n} diagonal={k}"
+            );
+        }
     }
 
-    // diag（2-D -> 1-D。抽出長 `L` は diagonal に依存するため、重みの
-    // 形状を diagonal ごとに動的生成する）
-    for &k in &DIAGONALS {
-        let extract_len = diag_2d_to_1d_extract_len(k, 3, 3);
-        let w1d = sequential_weight(&[extract_len]);
-        let cpu_tape = fandhe_ai::tape();
-        let x_cpu = cpu_tape.make_var(&data);
-        let w_cpu = cpu_tape.make_var(&w1d);
-        let loss_cpu = diag(&x_cpu, k)
-            .unwrap()
-            .mul(&w_cpu)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cpu = cpu_tape
-            .backward(&loss_cpu)
-            .unwrap()
-            .get(&x_cpu)
-            .unwrap()
-            .unwrap()
-            .clone();
+    // diag（2-D -> 1-D。範囲外（L == 0）でも勾配は Some で記録される
+    // ことを契約とし、None は双方一致していても失敗とする。CPU 側と
+    // 同じ契約）
+    for &(m, n) in &TRIL_TRIU_SHAPES {
+        let data = f32_fixture(m, n);
+        for &k in &tril_triu_diagonals(m, n) {
+            let extract_len = diag_2d_to_1d_extract_len(k, m, n);
+            let w1d = sequential_weight(&[extract_len]);
+            let cpu_tape = fandhe_ai::tape();
+            let x_cpu = cpu_tape.make_var(&data);
+            let w_cpu = cpu_tape.make_var(&w1d);
+            let loss_cpu = diag(&x_cpu, k)
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+            let dx_cpu = grads_cpu.get(&x_cpu).unwrap();
 
-        let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
-            .expect("実機が利用可能な前提のテストのため成功するはず");
-        let x_cuda = cuda_tape.make_var(&data);
-        let w_cuda = cuda_tape.make_var(&w1d);
-        let loss_cuda = diag(&x_cuda, k)
-            .unwrap()
-            .mul(&w_cuda)
-            .unwrap()
-            .sum(None)
-            .unwrap();
-        let dx_cuda = cuda_tape
-            .backward(&loss_cuda)
-            .unwrap()
-            .get(&x_cuda)
-            .unwrap()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            f32_bits(&dx_cpu),
-            f32_bits(&dx_cuda),
-            "diag(2D->1D) backward diagonal={k}"
-        );
+            let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+                .expect("実機が利用可能な前提のテストのため成功するはず");
+            let x_cuda = cuda_tape.make_var(&data);
+            let w_cuda = cuda_tape.make_var(&w1d);
+            let loss_cuda = diag(&x_cuda, k)
+                .unwrap()
+                .mul(&w_cuda)
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let grads_cuda = cuda_tape.backward(&loss_cuda).unwrap();
+            let dx_cuda = grads_cuda.get(&x_cuda).unwrap();
+
+            match (dx_cpu, dx_cuda) {
+                (Some(a), Some(b)) => {
+                    assert_eq!(
+                        a.shape(),
+                        b.shape(),
+                        "diag(2D->1D) backward shape m={m} n={n} diagonal={k} L={extract_len}"
+                    );
+                    assert_eq!(
+                        f32_bits(a),
+                        f32_bits(b),
+                        "diag(2D->1D) backward m={m} n={n} diagonal={k} L={extract_len}"
+                    );
+                }
+                (None, None) => panic!(
+                    "diag(2D->1D) backward の勾配が CPU・CUDA 双方で\
+                     記録されなかった（想定外。CPU 側は実測で L=0\
+                     セルでも形状 [m, n] の全ゼロ勾配が Some で返る\
+                     ことを確認済み）: m={m} n={n} diagonal={k} L={extract_len}"
+                ),
+                _ => panic!(
+                    "diag(2D->1D) backward の勾配有無が CPU と CUDA で\
+                     食い違った: m={m} n={n} diagonal={k} L={extract_len} \
+                     cpu_some={} cuda_some={}",
+                    dx_cpu.is_some(),
+                    dx_cuda.is_some()
+                ),
+            }
+        }
     }
 
-    // diag（1-D -> 2-D。`broadcast_to`／`masked_fill`／`pad` の VJP を
-    // 経由し、2-D -> 1-D（`narrow`／`gather` の VJP）とは別経路。
-    // `k == 0` は pad しない分岐・`k < 0`／`k > 0` は別の `pad` 引数を
-    // 通るため出力形状 `N = n + |k|` ごとに重みを動的生成する）
-    {
-        let v1d = Tensor::new(vec![10.0, 20.0, 30.0], &[3]).unwrap();
-        for &k in &DIAGONALS {
-            let big_n = 3 + k.unsigned_abs();
+    // diag（1-D -> 2-D。通常長・長さ 1 それぞれで diagonal 境界を
+    // 走査する）
+    for &n in &DIAG_1D_LENGTHS {
+        let data: Vec<f32> = (0..n).map(|i| (i as f32) + 1.0).collect();
+        let v1d = Tensor::new(data, &[n]).unwrap();
+        for &k in &diag_1d_diagonals(n) {
+            let big_n = n + k.unsigned_abs();
             let w2d = sequential_weight(&[big_n, big_n]);
             let cpu_tape = fandhe_ai::tape();
             let v_cpu = cpu_tape.make_var(&v1d);
@@ -1125,15 +1432,21 @@ fn cuda_bit_exact_backward_matches_cpu_reference() {
                 .unwrap()
                 .clone();
             assert_eq!(
+                dv_cpu.shape(),
+                dv_cuda.shape(),
+                "diag(1D->2D) backward shape n={n} diagonal={k}"
+            );
+            assert_eq!(
                 f32_bits(&dv_cpu),
                 f32_bits(&dv_cuda),
-                "diag(1D->2D) backward diagonal={k}"
+                "diag(1D->2D) backward n={n} diagonal={k}"
             );
         }
     }
 
     // trace
     {
+        let data = f32_fixture_3x3();
         let cpu_tape = fandhe_ai::tape();
         let x_cpu = cpu_tape.make_var(&data);
         let loss_cpu = trace(&x_cpu).unwrap();
