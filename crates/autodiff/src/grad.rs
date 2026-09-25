@@ -3765,6 +3765,27 @@ fn validate_unique_ext_output(
             "BackendOps::unique_ext の inverse の値域が [0, {m}) を外れている"
         )));
     }
+    // counts 総和と inverse 値域の検査だけでは「各群の出現回数」という
+    // BackendOps::unique_ext の契約（doc 不変条件 (3)(4)）を捉えきれない
+    // （例: m=2・inverse=[0,0]・counts=[1,1] は総和・値域チェックのみでは
+    // 通過してしまうが、群 0 の実際の出現回数は 2 で counts[0]=1 と矛盾する。
+    // PR #2270 codex-review 指摘）。inverse から群ごとの出現回数を実測集計し
+    // counts と要素ごとに突合する
+    let mut observed_counts = vec![0i64; m];
+    for &v in &inverse_data {
+        // 直前の値域検査で v は [0, m) 内と確定済みのため as usize は安全
+        observed_counts[v as usize] += 1;
+    }
+    for (group, (&observed, &declared)) in
+        observed_counts.iter().zip(counts_data.iter()).enumerate()
+    {
+        if observed != declared as i64 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "BackendOps::unique_ext の counts[{group}]（{declared}）が \
+                 inverse から実測した出現回数（{observed}）と一致しない"
+            )));
+        }
+    }
     Ok(())
 }
 
