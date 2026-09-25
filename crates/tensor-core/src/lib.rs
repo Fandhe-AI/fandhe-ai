@@ -220,7 +220,11 @@ pub use fusion::{
     FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_FUSED_CHAIN_LEN,
     MAX_FUSED_SEGMENT_NODES, RowFusionMeta,
 };
-pub use interpolate::{BilinearCoord, bilinear_blend, bilinear_scale, bilinear_src_coord};
+pub use interpolate::{
+    BicubicTaps, BilinearCoord, ScaleFactorError, bicubic_blend, bicubic_src_taps, bilinear_blend,
+    bilinear_scale, bilinear_src_coord, interpolate_size_from_scale_factor, linear_blend,
+    nearest_exact_src_coord, trilinear_blend,
+};
 pub use low_precision::{
     conv2d_forward_low_precision, linear_forward_low_precision, matmul_low_precision,
 };

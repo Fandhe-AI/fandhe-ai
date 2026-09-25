@@ -19,7 +19,9 @@
 //! （strided view）も `Tensor::get` で正しく読める。
 
 use fandhe_ai_tensor_core::{
-    ShapeError, Tensor, bilinear_blend, bilinear_scale, bilinear_src_coord,
+    BicubicTaps, ShapeError, Tensor, adaptive_window, bicubic_blend, bicubic_src_taps,
+    bilinear_blend, bilinear_scale, bilinear_src_coord, linear_blend, nearest_exact_src_coord,
+    trilinear_blend,
 };
 
 /// 線形添字（行優先）を `shape` の多次元添字へ展開する
@@ -171,6 +173,273 @@ pub fn interpolate_bilinear(
             cx.lambda1,
             cy.lambda1,
         ));
+    }
+    Tensor::new(out, out_shape)
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::interpolate`]（`NearestExact`）
+/// の CPU 実装本体（イシュー #2152）。`Nearest` と同じく算術を含まない
+/// 純粋なコピー演算のため 3 バックエンド間で構造的に **bit 完全一致**
+/// する。添字式は `fandhe_ai_tensor_core::nearest_exact_src_coord`
+/// （`autodiff::eval::interpolate_nearest_exact` と共有する単一情報源）
+/// を使う。
+pub fn interpolate_nearest_exact(
+    input: &Tensor<f32>,
+    spatial_start: usize,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(out_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+
+    let mut out = Vec::with_capacity(out_numel);
+    for flat in 0..out_numel {
+        let coords = unravel(flat, out_shape);
+        let mut src_coords = coords.clone();
+        for axis in spatial_start..out_shape.len() {
+            src_coords[axis] =
+                nearest_exact_src_coord(coords[axis], in_shape[axis], out_shape[axis]);
+        }
+        let v = input.get(&src_coords);
+        debug_assert!(
+            v.is_some(),
+            "interpolate_nearest_exact: 走査ロジックにバグがあり範囲外になった \
+             （契約違反。src_coords は各軸 [0, in_shape[axis]) を検査済み）"
+        );
+        out.push(v.unwrap_or(0.0));
+    }
+    Tensor::new(out, out_shape)
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::interpolate`]（`Area`）の CPU
+/// 実装本体（イシュー #2152。adaptive average pooling と同型）。
+/// 空間軸は任意（`out_shape.len() - spatial_start` 個）。各出力位置の
+/// 窓は [`adaptive_window`]（forward／backward 共有の単一情報源）が
+/// 定める。窓内は空間軸の先頭を最も遅く・末尾を最も速く走査する
+/// row-major 固定順序で `f64` アキュムレータへ加算し、最後に 1 回
+/// だけ `f32` へ downcast する（`autodiff::eval::interpolate_area` と
+/// 同じ走査順・精度規律——両者の bit 一致は `crates/facade/tests/
+/// interpolate_backend_parity.rs` が検証する）。
+pub fn interpolate_area(
+    input: &Tensor<f32>,
+    spatial_start: usize,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(out_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let n_spatial = out_shape.len() - spatial_start;
+
+    let mut out = Vec::with_capacity(out_numel);
+    for flat in 0..out_numel {
+        let coords = unravel(flat, out_shape);
+        let mut starts = vec![0usize; n_spatial];
+        let mut lens = vec![0usize; n_spatial];
+        for (k, axis) in (spatial_start..out_shape.len()).enumerate() {
+            let (s, e) = adaptive_window(coords[axis], in_shape[axis], out_shape[axis])
+                .ok_or(ShapeError::ElementCountOverflow)?;
+            starts[k] = s;
+            lens[k] = e - s;
+        }
+        let count: usize = lens
+            .iter()
+            .try_fold(1usize, |acc, &l| acc.checked_mul(l))
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        if count == 0 {
+            return Err(ShapeError::ElementCountOverflow);
+        }
+
+        let mut idx = vec![0usize; n_spatial];
+        let mut acc: f64 = 0.0;
+        let mut point = coords.clone();
+        'window: loop {
+            for (k, axis) in (spatial_start..out_shape.len()).enumerate() {
+                point[axis] = starts[k] + idx[k];
+            }
+            let v = input.get(&point);
+            debug_assert!(
+                v.is_some(),
+                "interpolate_area: 走査ロジックにバグがあり範囲外になった \
+                 （契約違反。窓添字は adaptive_window により [0, \
+                 in_shape[axis]) に収まる）"
+            );
+            acc += f64::from(v.unwrap_or(0.0));
+            let mut k = n_spatial;
+            loop {
+                if k == 0 {
+                    break 'window;
+                }
+                k -= 1;
+                idx[k] += 1;
+                if idx[k] < lens[k] {
+                    break;
+                }
+                idx[k] = 0;
+                if k == 0 {
+                    break 'window;
+                }
+            }
+        }
+        out.push((acc / count as f64) as f32);
+    }
+    Tensor::new(out, out_shape)
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::interpolate`]（`Linear`）の
+/// CPU 実装本体（イシュー #2152。1 軸版 `Bilinear`）。`out_shape` は
+/// 呼び出し元（`ops.rs`）が [`fandhe_ai_tensor_core::
+/// interpolate_out_shape_for_mode`] で検査・確定済みの出力 shape を
+/// そのまま渡す（`size.len() == 1` が保証済み）。座標・ブレンドは
+/// `fandhe_ai_tensor_core::interpolate`（`bilinear_scale`／
+/// `bilinear_src_coord`／`linear_blend`）の単一情報源を使う。
+pub fn interpolate_linear(
+    input: &Tensor<f32>,
+    spatial_start: usize,
+    out_shape: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(out_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let axis = spatial_start;
+    let in_sz = in_shape[axis];
+    let out_sz = out_shape[axis];
+    let scale = bilinear_scale(in_sz, out_sz, align_corners);
+
+    let mut out = Vec::with_capacity(out_numel);
+    for flat in 0..out_numel {
+        let coords = unravel(flat, out_shape);
+        let c = bilinear_src_coord(coords[axis], in_sz, scale, align_corners);
+
+        let mut p0 = coords.clone();
+        p0[axis] = c.i0;
+        let v0 = input.get(&p0);
+        let mut p1 = coords.clone();
+        p1[axis] = c.i1;
+        let v1 = input.get(&p1);
+        debug_assert!(
+            v0.is_some() && v1.is_some(),
+            "interpolate_linear: 走査ロジックにバグがあり範囲外になった \
+             （契約違反。各 tap 座標は [0, in_shape[axis]) を検査済み）"
+        );
+        out.push(linear_blend(
+            v0.unwrap_or(0.0),
+            v1.unwrap_or(0.0),
+            c.lambda1,
+        ));
+    }
+    Tensor::new(out, out_shape)
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::interpolate`]（`Trilinear`）の
+/// CPU 実装本体（イシュー #2152。3 軸版 `Bilinear`）。`out_shape` は
+/// 呼び出し元（`ops.rs`）が [`fandhe_ai_tensor_core::
+/// interpolate_out_shape_for_mode`] で検査・確定済みの出力 shape を
+/// そのまま渡す（`size.len() == 3` が保証済み）。座標・ブレンドは
+/// `fandhe_ai_tensor_core::interpolate`（`bilinear_scale`／
+/// `bilinear_src_coord`／`trilinear_blend`）の単一情報源を使う。
+pub fn interpolate_trilinear(
+    input: &Tensor<f32>,
+    spatial_start: usize,
+    out_shape: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(out_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let d_axis = spatial_start;
+    let h_axis = spatial_start + 1;
+    let w_axis = spatial_start + 2;
+    let in_d = in_shape[d_axis];
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_d = out_shape[d_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_d = bilinear_scale(in_d, out_d, align_corners);
+    let scale_h = bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = Vec::with_capacity(out_numel);
+    for flat in 0..out_numel {
+        let coords = unravel(flat, out_shape);
+        let cz = bilinear_src_coord(coords[d_axis], in_d, scale_d, align_corners);
+        let cy = bilinear_src_coord(coords[h_axis], in_h, scale_h, align_corners);
+        let cx = bilinear_src_coord(coords[w_axis], in_w, scale_w, align_corners);
+
+        let mut p = coords.clone();
+        let get = |pz: usize, py: usize, px: usize, p: &mut Vec<usize>| -> f32 {
+            p[d_axis] = pz;
+            p[h_axis] = py;
+            p[w_axis] = px;
+            input.get(p).unwrap_or(0.0)
+        };
+        let v000 = get(cz.i0, cy.i0, cx.i0, &mut p);
+        let v001 = get(cz.i0, cy.i0, cx.i1, &mut p);
+        let v010 = get(cz.i0, cy.i1, cx.i0, &mut p);
+        let v011 = get(cz.i0, cy.i1, cx.i1, &mut p);
+        let v100 = get(cz.i1, cy.i0, cx.i0, &mut p);
+        let v101 = get(cz.i1, cy.i0, cx.i1, &mut p);
+        let v110 = get(cz.i1, cy.i1, cx.i0, &mut p);
+        let v111 = get(cz.i1, cy.i1, cx.i1, &mut p);
+        out.push(trilinear_blend(
+            v000, v001, v010, v011, v100, v101, v110, v111, cx.lambda1, cy.lambda1, cz.lambda1,
+        ));
+    }
+    Tensor::new(out, out_shape)
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::interpolate`]（`Bicubic`）の
+/// CPU 実装本体（イシュー #2152）。`out_shape` は呼び出し元
+/// （`ops.rs`）が [`fandhe_ai_tensor_core::
+/// interpolate_out_shape_for_mode`] で検査・確定済みの出力 shape を
+/// そのまま渡す（`size.len() == 2` が保証済み）。座標・重み・ブレンド
+/// は `fandhe_ai_tensor_core::interpolate`（`bilinear_scale`／
+/// `bicubic_src_taps`／`bicubic_blend`）の単一情報源を使う。
+pub fn interpolate_bicubic(
+    input: &Tensor<f32>,
+    spatial_start: usize,
+    out_shape: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(out_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let h_axis = spatial_start;
+    let w_axis = spatial_start + 1;
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_h = bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = Vec::with_capacity(out_numel);
+    for flat in 0..out_numel {
+        let coords = unravel(flat, out_shape);
+        let taps_y: BicubicTaps = bicubic_src_taps(coords[h_axis], in_h, scale_h, align_corners);
+        let taps_x: BicubicTaps = bicubic_src_taps(coords[w_axis], in_w, scale_w, align_corners);
+
+        let mut p = coords.clone();
+        let mut v = [[0f32; 4]; 4];
+        for (j, row) in v.iter_mut().enumerate() {
+            for (k, cell) in row.iter_mut().enumerate() {
+                p[h_axis] = taps_y.idx[j];
+                p[w_axis] = taps_x.idx[k];
+                *cell = input.get(&p).unwrap_or(0.0);
+            }
+        }
+        out.push(bicubic_blend(v, taps_x.w, taps_y.w));
     }
     Tensor::new(out, out_shape)
 }
@@ -382,5 +651,104 @@ mod tests {
         // 常に唯一の入力行を参照する）。
         assert_eq!(&s[0..2], &s[2..4]);
         assert_eq!(&s[2..4], &s[4..6]);
+    }
+
+    #[test]
+    fn interpolate_nearest_exact_matches_hand_computed_values() {
+        let x = Tensor::new((1..=8).map(|v| v as f32).collect(), &[8]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::NearestExact;
+        let out_shape = out_shape_for_mode(&[8], &[3], mode);
+        let out = interpolate_nearest_exact(&x, 0, &out_shape).unwrap();
+        // floor((dst+0.5)*8/3): dst=0->1(idx1=2.0), dst=1->4(idx4=5.0), dst=2->6(idx6=7.0)。
+        assert_eq!(out.contiguous().as_slice().unwrap(), &[2.0, 5.0, 7.0]);
+    }
+
+    #[test]
+    fn interpolate_area_2x2_downsample_matches_hand_computed_values() {
+        let x = Tensor::new((1..=16).map(|v| v as f32).collect(), &[4, 4]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Area;
+        let out_shape = out_shape_for_mode(&[4, 4], &[2, 2], mode);
+        let out = interpolate_area(&x, 0, &out_shape).unwrap();
+        assert_eq!(
+            out.contiguous().as_slice().unwrap(),
+            &[3.5, 5.5, 11.5, 13.5]
+        );
+    }
+
+    #[test]
+    fn interpolate_area_matches_adaptive_avg_pool2d_bit_exact() {
+        // `Area`（2 軸）と `adaptive_avg_pool2d` は同じ走査順・精度
+        // 規律（`f64` アキュムレータ・1 回だけ `f32` downcast）のため
+        // bit 完全一致する（実装計画 §3.2 の設計判断）。
+        let data: Vec<f32> = (0..24).map(|v| (v as f32) * 0.37 - 3.0).collect();
+        let x = Tensor::new(data, &[1, 1, 4, 6]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Area;
+        let out_shape = out_shape_for_mode(&[1, 1, 4, 6], &[3, 4], mode);
+        let via_area = interpolate_area(&x, 2, &out_shape).unwrap();
+        let via_pool = crate::pooling::adaptive_avg_pool2d(&x, &out_shape).unwrap();
+        assert_eq!(
+            via_area.contiguous().as_slice().unwrap(),
+            via_pool.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn interpolate_linear_matches_hand_computed_values() {
+        let x = Tensor::new(vec![1.0f32, 3.0], &[2]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Linear {
+            align_corners: true,
+        };
+        let out_shape = out_shape_for_mode(&[2], &[3], mode);
+        let out = interpolate_linear(&x, 0, &out_shape, true).unwrap();
+        assert_eq!(out.contiguous().as_slice().unwrap(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn interpolate_trilinear_identity_size_is_passthrough() {
+        let data: Vec<f32> = (1..=8).map(|v| v as f32).collect();
+        let x = Tensor::new(data.clone(), &[2, 2, 2]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Trilinear {
+            align_corners: true,
+        };
+        let out_shape = out_shape_for_mode(&[2, 2, 2], &[2, 2, 2], mode);
+        let out = interpolate_trilinear(&x, 0, &out_shape, true).unwrap();
+        let got = out.contiguous();
+        let s = got.as_slice().unwrap();
+        for (g, e) in s.iter().zip(data.iter()) {
+            assert!((g - e).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn interpolate_bicubic_constant_input_is_constant_output() {
+        let x = Tensor::new(vec![7.0f32; 16], &[4, 4]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bicubic {
+            align_corners: false,
+        };
+        let out_shape = out_shape_for_mode(&[4, 4], &[6, 6], mode);
+        let out = interpolate_bicubic(&x, 0, &out_shape, false).unwrap();
+        for v in out.contiguous().as_slice().unwrap() {
+            assert!((v - 7.0).abs() < 1e-3, "got {v}");
+        }
+    }
+
+    #[test]
+    fn interpolate_bicubic_matches_host_reference_bit_exact() {
+        // CPU ネイティブとホスト参照（`autodiff::eval::
+        // interpolate_bicubic`）は同じ `tensor-core` 関数を同じ順序で
+        // 呼ぶため bit 完全一致する（`crates/facade/tests/
+        // interpolate_backend_parity.rs` の属性なしテストが本体の
+        // parity を検証する。本テストは backend-cpu 単体での回帰）。
+        let x = Tensor::new((1..=16).map(|v| v as f32 * 0.2 - 1.5).collect(), &[4, 4]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bicubic {
+            align_corners: false,
+        };
+        let out_shape = out_shape_for_mode(&[4, 4], &[5, 7], mode);
+        let out = interpolate_bicubic(&x, 0, &out_shape, false).unwrap();
+        // 出力に NaN／inf が現れないことの回帰（境界クランプ・overshoot
+        // 許容の健全性チェック）。
+        for v in out.contiguous().as_slice().unwrap() {
+            assert!(v.is_finite());
+        }
     }
 }

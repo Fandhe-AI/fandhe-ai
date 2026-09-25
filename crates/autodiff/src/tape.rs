@@ -960,18 +960,26 @@ pub(crate) enum Op {
         index: Tensor<i32>,
     },
     /// `Var::interpolate`（`torch.nn.functional.interpolate`
-    /// 相当。イシュー #1757）。空間軸（末尾 `size.len()` 軸）を
-    /// `size` へリサンプリングする。`mode` で方式を選択（現状
-    /// `InterpolateMode::Nearest` のみ）。`BackendOps::interpolate`
-    /// に対応メソッドがあるため非融合対象（`push_eager` で常に
-    /// 実体化。`Op::Gather`／`Op::Pad` と同型）。
+    /// 相当。イシュー #1757・#1762・#2152）。空間軸（末尾
+    /// `size.len()` 軸）を `size` へリサンプリングする。`mode` で
+    /// 方式を選択（`Nearest`／`NearestExact`／`Bilinear`／`Linear`／
+    /// `Trilinear`／`Bicubic`／`Area`。意味論・数値契約は
+    /// [`fandhe_ai_tensor_core::InterpolateMode`] doc が正）。
+    /// `BackendOps::interpolate` に対応メソッドがあるため非融合対象
+    /// （`push_eager` で常に実体化。`Op::Gather`／`Op::Pad` と同型）。
     ///
-    /// VJP（`grad.rs`）: 各出力要素の勾配を対応する単一入力要素へ
-    /// 加算する scatter_add 型（`d_input = scatter_add(zeros_like
-    /// (input), 1, index, upstream)`。`index` は forward と同じ
-    /// 添字式〈`eval::nearest_src_coord`〉から VJP 側で構築する。
-    /// 「Interpolate（各出力が単一入力を参照する演算）の VJP は
-    /// scatter_add」の原則——`Op::Gather` と同型）。
+    /// VJP（`grad.rs`）: `Nearest`／`NearestExact` は各出力要素の
+    /// 勾配を対応する単一入力要素へ加算する scatter_add 型
+    /// （`d_input = scatter_add(zeros_like(input), 1, index,
+    /// upstream)`）。`Bilinear`／`Linear`／`Trilinear`／`Bicubic` は
+    /// 固定 K 個（2／4／8／16）の重み付き scatter_add（`interpolate_
+    /// fixed_tap_scatter_vjp`）。`Area` は出力位置あたりの tap 数が
+    /// 可変なため `Op::AdaptiveAvgPool2d` の VJP と同型の稠密加算
+    /// 方式（`interpolate_area_vjp`）を使う。いずれも `index`（重みを持つ
+    /// モードは `weight` も）は forward と同じ座標式〈`tensor-core::
+    /// interpolate` の単一情報源〉から VJP 側で構築する（「各出力が
+    /// 有限個の入力を参照する演算の VJP は scatter_add」の原則——
+    /// `Op::Gather` と同型）。
     Interpolate {
         input: NodeId,
         size: Vec<usize>,

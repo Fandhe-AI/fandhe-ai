@@ -1072,23 +1072,37 @@ pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usiz
 }
 
 /// [`interpolate_out_shape`] に `mode`（[`crate::InterpolateMode`]。
-/// イシュー #1762）別の追加検査を重ねた版。`Nearest` は
-/// `interpolate_out_shape` と完全に同じ（追加検査なし）。`Bilinear`
-/// は空間軸がちょうど 2 軸（`size.len() == 2`。末尾 2 軸 = `(H, W)`）
-/// であることを追加で要求し、それ以外は
-/// `ShapeError::RankMismatch { expected: 2, actual: size.len() }`
-/// で拒否する（`linear`〈1 次元〉／`trilinear`〈3 次元〉／`bicubic`
-/// は対象外。実装計画「設計判断」§3.1）。
+/// イシュー #1762・#2152）別の追加検査を重ねた版。`Nearest`／
+/// `NearestExact`／`Area` は `interpolate_out_shape` と完全に同じ
+/// （追加検査なし。空間軸は任意 `1..=rank`）。`Linear` はちょうど
+/// 1 軸、`Bilinear`／`Bicubic` はちょうど 2 軸（`(H, W)`）、
+/// `Trilinear` はちょうど 3 軸（`(D, H, W)`）を要求し、それ以外は
+/// `ShapeError::RankMismatch { expected, actual: size.len() }` で
+/// 拒否する（実装計画「設計判断」§3.1・§3.3・§3.4）。
 pub fn interpolate_out_shape_for_mode(
     shape: &[usize],
     size: &[usize],
     mode: crate::backend_ops::InterpolateMode,
 ) -> Result<Vec<usize>, ShapeError> {
-    if let crate::backend_ops::InterpolateMode::Bilinear { .. } = mode
-        && size.len() != 2
+    use crate::backend_ops::InterpolateMode;
+    let expected_rank = match mode {
+        InterpolateMode::Linear { .. } => Some(1),
+        InterpolateMode::Bilinear { .. } | InterpolateMode::Bicubic { .. } => Some(2),
+        InterpolateMode::Trilinear { .. } => Some(3),
+        InterpolateMode::Nearest | InterpolateMode::NearestExact | InterpolateMode::Area => None,
+        // `InterpolateMode` は他クレートから見て `#[non_exhaustive]`
+        // だが、定義元の本クレート内では既知 variant で網羅済み
+        // （`_` 腕を書くと to-be-added variant が黙って `None`
+        // 〈追加検査なし〉に落ちる unreachable pattern 警告になる
+        // ため書かない。将来 variant 追加時は本 match の網羅性
+        // チェックにより追加を強制される——fail-closed の対象は
+        // `BackendOps::interpolate`／VJP 側の未知 variant 拒否）。
+    };
+    if let Some(expected) = expected_rank
+        && size.len() != expected
     {
         return Err(ShapeError::RankMismatch {
-            expected: 2,
+            expected,
             actual: size.len(),
         });
     }
@@ -1138,6 +1152,67 @@ mod interpolate_out_shape_for_mode_tests {
         let out = interpolate_out_shape_for_mode(&[2, 4, 4], &[9, 9], mode).unwrap();
         let base = interpolate_out_shape(&[2, 4, 4], &[9, 9]).unwrap();
         assert_eq!(out, base);
+        assert_eq!(out, vec![2, 9, 9]);
+    }
+
+    #[test]
+    fn nearest_exact_and_area_modes_accept_any_rank_like_base_fn() {
+        let a = interpolate_out_shape(&[2, 8], &[3]).unwrap();
+        let b =
+            interpolate_out_shape_for_mode(&[2, 8], &[3], InterpolateMode::NearestExact).unwrap();
+        assert_eq!(a, b);
+        let c = interpolate_out_shape_for_mode(&[2, 8], &[3], InterpolateMode::Area).unwrap();
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn linear_mode_requires_rank_one() {
+        let mode = InterpolateMode::Linear {
+            align_corners: false,
+        };
+        let err = interpolate_out_shape_for_mode(&[2, 3, 4], &[9, 9], mode).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 1,
+                actual: 2
+            }
+        ));
+        let out = interpolate_out_shape_for_mode(&[2, 3, 4], &[9], mode).unwrap();
+        assert_eq!(out, vec![2, 3, 9]);
+    }
+
+    #[test]
+    fn trilinear_mode_requires_rank_three() {
+        let mode = InterpolateMode::Trilinear {
+            align_corners: false,
+        };
+        let err = interpolate_out_shape_for_mode(&[2, 3, 4], &[9, 9], mode).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 3,
+                actual: 2
+            }
+        ));
+        let out = interpolate_out_shape_for_mode(&[1, 2, 3, 4], &[9, 9, 9], mode).unwrap();
+        assert_eq!(out, vec![1, 9, 9, 9]);
+    }
+
+    #[test]
+    fn bicubic_mode_requires_rank_two() {
+        let mode = InterpolateMode::Bicubic {
+            align_corners: false,
+        };
+        let err = interpolate_out_shape_for_mode(&[2, 3, 4], &[9], mode).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
+        let out = interpolate_out_shape_for_mode(&[2, 3, 4], &[9, 9], mode).unwrap();
         assert_eq!(out, vec![2, 9, 9]);
     }
 }
