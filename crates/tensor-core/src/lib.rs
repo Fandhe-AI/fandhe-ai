@@ -178,13 +178,13 @@ mod typed_ops;
 
 pub use backend_ops::{
     Activation, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput, BceKind,
-    BinaryElementwiseOp, ChecksumReadout, Conv2dParams, GemmChecksum, GruBackwardOutput,
-    GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget, LayerNormBackwardOutput,
-    LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams, QrFactors, ScatterReduce,
-    SegmentKey, SegmentResource, SegmentRun, SgdStepConfig, SvdFactors, UnaryElementwiseOp,
-    UniqueExtOutput, VectorNormOrd, checked_gemm_batched_output_len,
-    gemm_batched_via_per_batch_gemm, gemm_batched_via_per_batch_gemm_fp32_strict,
-    normalize_batched_operand, ops_for,
+    BinaryElementwiseOp, ChecksumReadout, Conv2dParams, EighFactors, GemmChecksum,
+    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    LayerNormBackwardOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
+    QrFactors, ScatterReduce, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig,
+    SlogdetFactors, SvdFactors, UnaryElementwiseOp, UniqueExtOutput, VectorNormOrd,
+    checked_gemm_batched_output_len, gemm_batched_via_per_batch_gemm,
+    gemm_batched_via_per_batch_gemm_fp32_strict, normalize_batched_operand, ops_for,
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};

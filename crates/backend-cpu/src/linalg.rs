@@ -189,6 +189,42 @@ fn invalid(msg: impl Into<String>) -> LinalgError {
     LinalgError::InvalidArgument(msg.into())
 }
 
+/// 確保前の要素数・バイト数上限検査（`autodiff::bool_ops::
+/// checked_bytes_for` と同じ規律の独立複製。`autodiff` → `backend-cpu`
+/// の依存は作れる一方、逆方向の依存はできないためコードを複製する
+/// （本ファイル冒頭コメント「依存方向の制約」節と同じ理由）。要素数積の
+/// `usize` オーバーフローに加え、`T` 換算のバイトサイズが `Vec` の
+/// allocation 上限（`isize::MAX` バイト）に収まるかも検査し、確保不能
+/// な値なら `vec![0.0; numel]` 呼び出し前に型付きエラーで拒否する
+/// （本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`。PR #2268
+/// codex-review P1 指摘の是正: `checked_mul` 単体では要素数の overflow
+/// しか検出できず、overflow しない要素数でも確保不能なバイト数の
+/// ケースを見逃す）。
+fn checked_numel_for<T>(shape: &[usize], op_name: &str) -> Result<usize, LinalgError> {
+    let numel = shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| {
+            invalid(format!(
+                "{op_name}: 出力形状 {shape:?} の要素数が usize を超える"
+            ))
+        })?;
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size > 0 {
+        let bytes = numel.checked_mul(elem_size).ok_or_else(|| {
+            invalid(format!(
+                "{op_name}: 出力形状 {shape:?} のバイト数が usize を超える"
+            ))
+        })?;
+        if bytes > isize::MAX as usize {
+            return Err(invalid(format!(
+                "{op_name}: 出力形状 {shape:?} のバイト数が確保上限（isize::MAX）を超える"
+            )));
+        }
+    }
+    Ok(numel)
+}
+
 // =====================================================================
 // LU 分解（部分ピボット）。`inv`／`solve`／`det` の共通基盤。
 // =====================================================================
@@ -986,6 +1022,294 @@ pub(crate) fn matrix_norm(a: &Tensor<f32>, ord: MatrixNormOrd) -> Result<Tensor<
     }
 }
 
+// =====================================================================
+// eigh・slogdet・pinv・matrix_rank・lstsq（イシュー #2150）。
+// `fandhe_ai_autodiff::eval::linalg` の同名関数（forward のみ。VJP は
+// `autodiff` クレート側に一元化——本クレートは `BackendOps` の forward
+// 実装のみを持つ）と同一アルゴリズム・同一符号規約の意図的複製
+// （ファイル冒頭コメント「eval と CPU の関係」）。
+// =====================================================================
+
+const EIGH_JACOBI_EPS: f64 = 1e-14;
+const EIGH_MAX_SWEEPS: usize = 60;
+
+/// 下三角のみを読んで対称化した `[n,n]` 行列に古典的巡回 Jacobi 法を
+/// 適用し、`(固有値, 固有ベクトル行列)` を返す（未ソート・符号未正規化。
+/// `fandhe_ai_autodiff::eval::linalg::eigh_jacobi` と同一アルゴリズム）。
+fn eigh_jacobi(a_lower: &Mat) -> Result<(Vec<f64>, Mat), LinalgError> {
+    let n = a_lower.rows;
+    let mut sym = Mat::zeros(n, n);
+    for i in 0..n {
+        for j in 0..=i {
+            let v = a_lower.get(i, j);
+            sym.set(i, j, v);
+            sym.set(j, i, v);
+        }
+    }
+    let mut v = Mat::identity(n);
+    let frob: f64 = sym.data.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+    for _sweep in 0..EIGH_MAX_SWEEPS {
+        let mut off_sq = 0.0f64;
+        for p in 0..n {
+            for q in (p + 1)..n {
+                off_sq += sym.get(p, q) * sym.get(p, q);
+            }
+        }
+        if (2.0 * off_sq).sqrt() <= EIGH_JACOBI_EPS * frob {
+            let eigenvalues: Vec<f64> = (0..n).map(|i| sym.get(i, i)).collect();
+            return Ok((eigenvalues, v));
+        }
+        for p in 0..n {
+            for q in (p + 1)..n {
+                let apq = sym.get(p, q);
+                if apq == 0.0 {
+                    continue;
+                }
+                let app = sym.get(p, p);
+                let aqq = sym.get(q, q);
+                let theta = (aqq - app) / (2.0 * apq);
+                let t = if theta == 0.0 {
+                    1.0
+                } else {
+                    theta.signum() / (theta.abs() + (1.0 + theta * theta).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = c * t;
+                for k in 0..n {
+                    if k == p || k == q {
+                        continue;
+                    }
+                    let akp = sym.get(k, p);
+                    let akq = sym.get(k, q);
+                    let new_kp = c * akp - s * akq;
+                    let new_kq = s * akp + c * akq;
+                    sym.set(k, p, new_kp);
+                    sym.set(p, k, new_kp);
+                    sym.set(k, q, new_kq);
+                    sym.set(q, k, new_kq);
+                }
+                let app_new = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+                let aqq_new = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+                sym.set(p, p, app_new);
+                sym.set(q, q, aqq_new);
+                sym.set(p, q, 0.0);
+                sym.set(q, p, 0.0);
+                for k in 0..n {
+                    let vkp = v.get(k, p);
+                    let vkq = v.get(k, q);
+                    v.set(k, p, c * vkp - s * vkq);
+                    v.set(k, q, s * vkp + c * vkq);
+                }
+            }
+        }
+    }
+    Err(invalid(
+        "linalg::eigh: 巡回 Jacobi 法が反復上限（60 スイープ）内に収束しなかった",
+    ))
+}
+
+/// 対称固有値分解（`A: [n,n]`〈対称。下三角のみ読む〉→
+/// `(eigenvalues: [n]〈昇順〉, eigenvectors: [n,n])`）。イシュー #2150。
+pub(crate) fn eigh(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgError> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return Ok((
+            build_tensor(Vec::new(), &[0])?,
+            build_tensor(Vec::new(), &[0, 0])?,
+        ));
+    }
+    let (eigenvalues, vecs) = eigh_jacobi(&mat)?;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| eigenvalues[i].total_cmp(&eigenvalues[j]));
+    let mut evals_sorted = vec![0.0f64; n];
+    let mut vecs_sorted = Mat::zeros(n, n);
+    for (new_idx, &old_idx) in order.iter().enumerate() {
+        evals_sorted[new_idx] = eigenvalues[old_idx];
+        vecs_sorted.set_col(new_idx, &vecs.col(old_idx));
+    }
+    for j in 0..n {
+        let mut col = vecs_sorted.col(j);
+        normalize_max_abs_sign(&mut col);
+        vecs_sorted.set_col(j, &col);
+    }
+    let evals_t = build_tensor(evals_sorted.iter().map(|&v| v as f32).collect(), &[n])?;
+    Ok((evals_t, vecs_sorted.to_tensor()?))
+}
+
+/// 符号付き log 行列式（`A: [n,n]` → `(sign: [], logabsdet: [])`）。
+/// イシュー #2150。空行列は `(1, 0)`。
+pub(crate) fn slogdet(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgError> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return Ok((build_tensor(vec![1.0], &[])?, build_tensor(vec![0.0], &[])?));
+    }
+    match lu_decompose(&mat) {
+        None => Ok((
+            build_tensor(vec![0.0], &[])?,
+            build_tensor(vec![f32::NEG_INFINITY], &[])?,
+        )),
+        Some(lu) => {
+            let mut sign = lu.sign;
+            let mut logabsdet = 0.0f64;
+            for i in 0..n {
+                let d = lu.lu.get(i, i);
+                sign *= d.signum();
+                logabsdet += d.abs().ln();
+            }
+            Ok((
+                build_tensor(vec![sign as f32], &[])?,
+                build_tensor(vec![logabsdet as f32], &[])?,
+            ))
+        }
+    }
+}
+
+/// `rcond`（`pinv`／`matrix_rank`／`lstsq` 共通）を解決する
+/// （`fandhe_ai_autodiff::eval::linalg::resolve_rcond` と同一契約）。
+pub(crate) fn resolve_rcond(rcond: Option<f32>, m: usize, n: usize) -> Result<f64, LinalgError> {
+    match rcond {
+        None => Ok((m.max(n) as f64) * f64::from(f32::EPSILON)),
+        Some(r) => {
+            if !r.is_finite() || r < 0.0 {
+                return Err(invalid(format!(
+                    "linalg: rcond は有限かつ非負である必要がある、got {r}"
+                )));
+            }
+            Ok(f64::from(r))
+        }
+    }
+}
+
+fn truncated_svd_rank(s: &[f64], rcond: f64) -> usize {
+    let smax = s.first().copied().unwrap_or(0.0);
+    if smax <= 0.0 {
+        return 0;
+    }
+    let tol = rcond * smax;
+    s.iter().filter(|&&v| v > tol).count()
+}
+
+fn pinv_mat_f64(a: &Tensor<f32>, rcond: f64) -> Result<Mat, LinalgError> {
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_mat = Mat::from_tensor(&u);
+    let vh_mat = Mat::from_tensor(&vh);
+    let n = vh_mat.cols;
+    let m = u_mat.rows;
+    let mut out = Mat::zeros(n, m);
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        let s_inv = 1.0 / sigma;
+        for row in 0..n {
+            let v_ri = vh_mat.get(i, row);
+            if v_ri == 0.0 {
+                continue;
+            }
+            for col in 0..m {
+                out.set(
+                    row,
+                    col,
+                    out.get(row, col) + s_inv * v_ri * u_mat.get(col, i),
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Moore–Penrose 擬似逆行列（`A: [m,n]` → `[n,m]`）。イシュー #2150。
+pub(crate) fn pinv(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, LinalgError> {
+    let shape = a.shape();
+    let (m, n) = (shape[0], shape[1]);
+    // `rcond` 検証（PR #2268 codex-review〈P2〉指摘の是正）: 空行列
+    // （`m==0`／`n==0`）の早期 return を `resolve_rcond` より前に置くと、
+    // `Some(NaN)` や負値等の不正な `rcond` が空行列入力では検証を
+    // 素通りしてしまう。他の非空行列と同じく必ず先に検証する
+    // （`fandhe_ai_autodiff::eval::linalg::pinv` と同一契約）。
+    let rcond = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return build_tensor(Vec::new(), &[n, m]);
+    }
+    pinv_mat_f64(a, rcond)?.to_tensor()
+}
+
+/// 行列のランク（`A: [m,n]` → スカラー `[]`）。イシュー #2150。
+pub(crate) fn matrix_rank(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, LinalgError> {
+    let shape = a.shape();
+    let (m, n) = (shape[0], shape[1]);
+    // `pinv` と同じ理由（PR #2268 codex-review〈P2〉指摘）で、空行列の
+    // 早期 return より前に `rcond` を検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return build_tensor(vec![0.0], &[]);
+    }
+    let (_u, s, _vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    build_tensor(vec![rank as f32], &[])
+}
+
+/// 最小二乗解（`A: [m,n]`・`B: [m,k]` → `X: [n,k]`）。イシュー #2150。
+pub(crate) fn lstsq(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    rcond: Option<f32>,
+) -> Result<Tensor<f32>, LinalgError> {
+    let ashape = a.shape();
+    let (m, n) = (ashape[0], ashape[1]);
+    let bshape = b.shape();
+    let k_cols = bshape[1];
+    // `autodiff::linalg_ops::lstsq`（呼び出し元の facade 経路）は
+    // 確保前に `ensure_alloc_fits_f32` で出力形状 `[n, k_cols]` を
+    // 検査するが、`BackendOps::linalg_lstsq` 経由で本関数へ直接到達
+    // する経路にはその検査がなく、`m==0` 早期リターンの `n * k_cols`
+    // 確保が検査なしに行われうる。`checked_mul` は要素数積の `usize`
+    // オーバーフローしか検出できず、overflow しない要素数でも
+    // `vec![0.0; out_numel]` が確保不能（`isize::MAX` バイト超過）な
+    // ケースで panic しうるため、`checked_numel_for` でバイト数上限まで
+    // 検査する（PR #2268 codex-review〈P1〉指摘の是正）。
+    let out_numel = checked_numel_for::<f32>(&[n, k_cols], "linalg::lstsq")?;
+    // `pinv`／`matrix_rank` と同じ理由（PR #2268 codex-review〈P2〉指摘）
+    // で、空行列の早期 return より前に `rcond` を検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return build_tensor(vec![0.0; out_numel], &[n, k_cols]);
+    }
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_mat = Mat::from_tensor(&u);
+    let vh_mat = Mat::from_tensor(&vh);
+    let b_mat = Mat::from_tensor(b);
+
+    let mut temp = Mat::zeros(rank, k_cols);
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        for col in 0..k_cols {
+            let mut acc = 0.0f64;
+            for row in 0..m {
+                acc += u_mat.get(row, i) * b_mat.get(row, col);
+            }
+            temp.set(i, col, acc / sigma);
+        }
+    }
+    let mut x = Mat::zeros(n, k_cols);
+    for i in 0..rank {
+        for row in 0..n {
+            let v_ri = vh_mat.get(i, row);
+            if v_ri == 0.0 {
+                continue;
+            }
+            for col in 0..k_cols {
+                x.set(row, col, x.get(row, col) + v_ri * temp.get(i, col));
+            }
+        }
+    }
+    x.to_tensor()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1458,5 +1782,42 @@ mod tests {
             .to_tensor()
             .unwrap();
         approx_eq(&reconstructed, &a, 1e-3);
+    }
+
+    /// `lstsq` の `m==0` 早期リターンは `n * k_cols` の乗算を経て出力
+    /// バッファを確保するが、`checked_mul` なしでは巨大な `n`・`k_cols`
+    /// で `usize` overflow（debug panic／release wrap）しうる（PR #2268
+    /// codex-review〈Bugbot〉指摘。`crates/autodiff/src/eval/linalg.rs`
+    /// の呼び出し元経路にも同型の検査を追加済み）。
+    #[test]
+    fn lstsq_rejects_overflowing_output_shape_instead_of_panicking() {
+        let a = build_tensor(vec![], &[0, usize::MAX]).unwrap();
+        let b = build_tensor(vec![], &[0, 2]).unwrap();
+        let result = lstsq(&a, &b, None);
+        assert!(
+            matches!(result, Err(LinalgError::InvalidArgument(_))),
+            "巨大な出力形状は panic ではなく型付きエラーで拒否すべき: {result:?}"
+        );
+    }
+
+    /// `n * k_cols` の乗算自体は `usize` を超えないが、`f32` 換算の
+    /// バイト数が `Vec` の allocation 上限（`isize::MAX` バイト）を
+    /// 超えるため `vec![0.0; out_numel]` が確保不能な形状（PR #2268
+    /// codex-review〈P1〉指摘: `checked_mul` は要素数オーバーフローしか
+    /// 検出せず、この種の「要素数は溢れないが確保不能」なケースを
+    /// 見逃していた）。`checked_numel_for` がバイト数上限まで検査し、
+    /// panic ではなく型付きエラーで拒否することを確認する。
+    #[test]
+    fn lstsq_rejects_output_shape_exceeding_alloc_byte_limit_without_numel_overflow() {
+        // n * 4 バイト ≈ usize::MAX 未満（要素数乗算は overflow しない）
+        // だが isize::MAX バイトは上回る形状を選ぶ。
+        let n = (isize::MAX as usize) / 2;
+        let a = build_tensor(vec![], &[0, n]).unwrap();
+        let b = build_tensor(vec![], &[0, 1]).unwrap();
+        let result = lstsq(&a, &b, None);
+        assert!(
+            matches!(result, Err(LinalgError::InvalidArgument(_))),
+            "確保不能なバイト数の出力形状は panic ではなく型付きエラーで拒否すべき: {result:?}"
+        );
     }
 }

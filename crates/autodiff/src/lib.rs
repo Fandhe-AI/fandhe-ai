@@ -235,6 +235,7 @@ pub mod f64_autograd;
 mod grad;
 pub mod indexing_ops;
 mod layout;
+pub mod linalg_ops;
 pub mod matrix_ops;
 pub mod nn;
 pub mod optim;

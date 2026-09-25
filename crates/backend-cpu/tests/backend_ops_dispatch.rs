@@ -276,6 +276,28 @@ fn cuda_linalg_ops_return_unsupported_not_panic() {
         cuda.linalg_matrix_norm(&a, fandhe_ai_tensor_core::MatrixNormOrd::Fro),
         Err(BackendError::Unsupported(_))
     ));
+    // イシュー #2150 の 5 演算も同じ契約（明示オーバーライドなし →
+    // `BackendOps` 既定 `Unsupported`）。
+    assert!(matches!(
+        cuda.linalg_eigh(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_slogdet(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_pinv(&a, None),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_lstsq(&a, &b, None),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_matrix_rank(&a, None),
+        Err(BackendError::Unsupported(_))
+    ));
 }
 
 /// [`cuda_linalg_ops_return_unsupported_not_panic`] の Metal 版
@@ -319,6 +341,26 @@ fn metal_linalg_ops_return_unsupported_not_panic() {
     ));
     assert!(matches!(
         metal.linalg_matrix_norm(&a, fandhe_ai_tensor_core::MatrixNormOrd::Fro),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_eigh(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_slogdet(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_pinv(&a, None),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_lstsq(&a, &b, None),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_matrix_rank(&a, None),
         Err(BackendError::Unsupported(_))
     ));
 }
