@@ -258,10 +258,17 @@ determinism_inventory.rs` 冒頭の `//!` を正とし、本節では要点の�
 ### §2.4 atomic 使用の棚卸し
 
 `crates/backend-cpu/src` 全体で `fetch_add`／`fetch_sub`／
-`compare_exchange`／`fetch_or`／`fetch_and`／`fetch_max`／`fetch_min`
-を検索した結果、実際のコード上の出現は §2.2 で述べた
+`compare_exchange`（`_weak` 含む）／`compare_and_swap`／`fetch_or`／
+`fetch_and`／`fetch_nand`／`fetch_xor`／`fetch_max`／`fetch_min`／
+`fetch_update` を検索した結果、実際のコード上の出現は §2.2 で述べた
 `gemm_blis_ic_dynamic_region`（`#[cfg(test)]` ゲート）内の 1 箇所のみ
 （他はすべてコメント中の言及）。本番経路に atomic 蓄積は存在しない。
+
+ロック越しの共有蓄積（`Mutex`／`RwLock`／`.lock(`／`.write(`）も
+同じ非決定性（加算順がスケジューリング依存）を持つため同様に検索した。
+コード上の出現は `gemm_blis/mod.rs` の 4 行（`#[cfg(test)]` 付き `use`
+と、`gemm_blis_ic_dynamic_region` の行パネル配布スロット）のみで、
+いずれも本番未結線の診断コードである。
 
 ### §2.5 `autodiff`／`tensor-core` の rayon 依存
 
@@ -320,7 +327,7 @@ float の `atomicAdd` は使わない方針（ソース検査テストあり:
 
 ### §3.3 fail-closed 化の担保（将来の回帰防止）
 
-`crates/backend-cpu/tests/determinism_inventory.rs`（63 テスト。すべて
+`crates/backend-cpu/tests/determinism_inventory.rs`（65 テスト。すべて
 green）に、次の fail-closed ソース走査テストを置く:
 
 - `rayon_marker_files_match_fixed_allowlist`: rayon 並列イテレータ
@@ -334,7 +341,10 @@ green）に、次の fail-closed ソース走査テストを置く:
   固定する。
 - `atomic_rmw_occurrences_match_expected_test_only_count`: atomic
   蓄積箇所を 1 件（`gemm_blis/mod.rs` の `#[cfg(test)]` 限定診断コード
-  のみ）で固定する。
+  のみ）で固定する（`fetch_update`・`fetch_nand`・`fetch_xor` を含む）。
+- `lock_accumulation_markers_match_expected_test_only_locations`:
+  ロック越しの共有蓄積の目印の出現を `gemm_blis/mod.rs` の 4 行
+  （`#[cfg(test)]` 限定診断コード）で固定する（§2.4）。
 - `no_parallel_iterator_valued_function_signature_in_backend_cpu_src`:
   §2.3 の走査（トークン走査）が追跡しない**既知の限界**——関数引数・
   戻り値経由で並列イテレータの値が流れる経路（例: 並列イテレータを

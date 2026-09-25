@@ -1696,24 +1696,44 @@ fn no_rayon_parallel_reduce_cooccurrence_in_backend_cpu_src() {
     );
 }
 
-/// atomic read-modify-write（`fetch_add`／`fetch_sub`／
-/// `compare_exchange`／`fetch_or`／`fetch_and`／`fetch_max`／
-/// `fetch_min`）の出現行数を数える。
-fn count_atomic_rmw_occurrences(content: &str) -> usize {
+/// atomic read-modify-write の操作名。蓄積に使える RMW 操作を網羅する
+/// （`fetch_update` はクロージャで任意の read-modify-write を表せる
+/// ため、`fetch_nand`／`fetch_xor` は他のビット演算 RMW と同類型のため
+/// 含める。`compare_exchange` は部分一致で `compare_exchange_weak` も
+/// 拾う。codex-review 指摘・PR #2274）。識別子の部分一致で数えるため、
+/// これらを名前に含む独自関数も数える（fail-closed 側の過検出）。
+const ATOMIC_RMW_MARKERS: &[&str] = &[
+    "fetch_add",
+    "fetch_sub",
+    "compare_exchange",
+    "compare_and_swap",
+    "fetch_or",
+    "fetch_and",
+    "fetch_nand",
+    "fetch_xor",
+    "fetch_max",
+    "fetch_min",
+    "fetch_update",
+];
+
+/// ロックによる共有蓄積（`Mutex`／`RwLock` への書き込み）の目印。
+/// 並列ワーカーがロック越しに同じアキュムレータへ加算すると、加算順が
+/// スレッドのスケジューリングに依存し atomic RMW と同じ非決定性を持つ
+/// ため、atomic RMW と同じ扱いで出現箇所を固定する。
+const LOCK_ACCUMULATION_MARKERS: &[&str] = &["Mutex", "RwLock", ".lock(", ".write("];
+
+/// `markers` のいずれかを含む行（コメント・文字列除去後）の数を数える。
+fn count_marker_lines(content: &str, markers: &[&str]) -> usize {
     let cleaned = strip_comments_and_strings(content);
-    let markers = [
-        "fetch_add",
-        "fetch_sub",
-        "compare_exchange",
-        "fetch_or",
-        "fetch_and",
-        "fetch_max",
-        "fetch_min",
-    ];
     cleaned
         .lines()
         .filter(|line| markers.iter().any(|m| line.contains(m)))
         .count()
+}
+
+/// atomic read-modify-write（`ATOMIC_RMW_MARKERS`）の出現行数を数える。
+fn count_atomic_rmw_occurrences(content: &str) -> usize {
+    count_marker_lines(content, ATOMIC_RMW_MARKERS)
 }
 
 #[test]
@@ -1754,6 +1774,45 @@ fn atomic_rmw_occurrences_match_expected_test_only_count() {
         "atomic read-modify-write の出現元ファイルが期待\
          （gemm_blis/mod.rs のみ）と一致しない: {per_file:?}"
     );
+}
+
+/// ロックによる共有蓄積の目印（`LOCK_ACCUMULATION_MARKERS`）の出現元
+/// ファイル集合と行数を固定する。`docs/autodiff-determinism-mode-design.md`
+/// §2.2 実測: 出現は `gemm_blis/mod.rs` の `#[cfg(test)]` 限定診断コード
+/// （`gemm_blis_ic_dynamic_region` の行パネル配布スロットと、その
+/// `#[cfg(test)]` 付き `use`）のみで、本番経路にロック越しの蓄積はない。
+#[test]
+fn lock_accumulation_markers_match_expected_test_only_locations() {
+    let src_dir = backend_cpu_src_dir();
+    let mut files = Vec::new();
+    visit_rs_files(&src_dir, &mut files);
+
+    let mut per_file: Vec<(String, usize)> = Vec::new();
+    for (path, content) in &files {
+        let count = count_marker_lines(content, LOCK_ACCUMULATION_MARKERS);
+        if count > 0 {
+            let rel = path
+                .strip_prefix(&src_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            per_file.push((rel, count));
+        }
+    }
+    assert_eq!(
+        per_file,
+        vec![("gemm_blis/mod.rs".to_string(), 4usize)],
+        "Mutex／RwLock／.lock(／.write( の出現が期待（gemm_blis/mod.rs の\
+         #[cfg(test)] 限定診断コード 4 行のみ）と一致しない（ロック越しの\
+         共有蓄積が本番経路へ混入した可能性がある。決定性の根拠を棚卸し\
+         してから期待値を更新すること）: {per_file:?}"
+    );
+}
+
+#[test]
+fn count_atomic_rmw_detects_fetch_update_and_bitwise_variants() {
+    let src = "a.fetch_update(Relaxed, Relaxed, |x| Some(x + 1));\nb.fetch_xor(1, Relaxed);\nc.fetch_nand(1, Relaxed);";
+    assert_eq!(count_atomic_rmw_occurrences(src), 3);
 }
 
 // =====================================================================
