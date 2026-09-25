@@ -3024,7 +3024,7 @@ impl BackendOps for MetalBackendOps {
 
     /// `torch.min(x)` / `torch.min(x, dim=dim).values` 相当（イシュー
     /// #2155。`reduce::MetalReduce::run_min_all_f32`／
-    /// `run_min_axis_f32` への委譲）。段取りは [`metal_argext`] と対称
+    /// `run_min_axis_f32` への委譲）。段取りは `metal_argext` と対称
     /// （`sum`・argmax／argmin と同じ「shape 検査 → 空縮約の早期分岐 →
     /// `checked_numel` → 起動計画の先出し → `contiguous()` →
     /// `context_cache::cached_reduce`」の順）だが、`min` は
