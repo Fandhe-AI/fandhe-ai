@@ -986,6 +986,275 @@ pub(crate) fn matrix_norm(a: &Tensor<f32>, ord: MatrixNormOrd) -> Result<Tensor<
     }
 }
 
+// =====================================================================
+// eigh・slogdet・pinv・matrix_rank・lstsq（イシュー #2150）。
+// `fandhe_ai_autodiff::eval::linalg` の同名関数（forward のみ。VJP は
+// `autodiff` クレート側に一元化——本クレートは `BackendOps` の forward
+// 実装のみを持つ）と同一アルゴリズム・同一符号規約の意図的複製
+// （ファイル冒頭コメント「eval と CPU の関係」）。
+// =====================================================================
+
+const EIGH_JACOBI_EPS: f64 = 1e-14;
+const EIGH_MAX_SWEEPS: usize = 60;
+
+/// 下三角のみを読んで対称化した `[n,n]` 行列に古典的巡回 Jacobi 法を
+/// 適用し、`(固有値, 固有ベクトル行列)` を返す（未ソート・符号未正規化。
+/// `fandhe_ai_autodiff::eval::linalg::eigh_jacobi` と同一アルゴリズム）。
+fn eigh_jacobi(a_lower: &Mat) -> Result<(Vec<f64>, Mat), LinalgError> {
+    let n = a_lower.rows;
+    let mut sym = Mat::zeros(n, n);
+    for i in 0..n {
+        for j in 0..=i {
+            let v = a_lower.get(i, j);
+            sym.set(i, j, v);
+            sym.set(j, i, v);
+        }
+    }
+    let mut v = Mat::identity(n);
+    let frob: f64 = sym.data.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+    for _sweep in 0..EIGH_MAX_SWEEPS {
+        let mut off_sq = 0.0f64;
+        for p in 0..n {
+            for q in (p + 1)..n {
+                off_sq += sym.get(p, q) * sym.get(p, q);
+            }
+        }
+        if (2.0 * off_sq).sqrt() <= EIGH_JACOBI_EPS * frob {
+            let eigenvalues: Vec<f64> = (0..n).map(|i| sym.get(i, i)).collect();
+            return Ok((eigenvalues, v));
+        }
+        for p in 0..n {
+            for q in (p + 1)..n {
+                let apq = sym.get(p, q);
+                if apq == 0.0 {
+                    continue;
+                }
+                let app = sym.get(p, p);
+                let aqq = sym.get(q, q);
+                let theta = (aqq - app) / (2.0 * apq);
+                let t = if theta == 0.0 {
+                    1.0
+                } else {
+                    theta.signum() / (theta.abs() + (1.0 + theta * theta).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = c * t;
+                for k in 0..n {
+                    if k == p || k == q {
+                        continue;
+                    }
+                    let akp = sym.get(k, p);
+                    let akq = sym.get(k, q);
+                    let new_kp = c * akp - s * akq;
+                    let new_kq = s * akp + c * akq;
+                    sym.set(k, p, new_kp);
+                    sym.set(p, k, new_kp);
+                    sym.set(k, q, new_kq);
+                    sym.set(q, k, new_kq);
+                }
+                let app_new = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+                let aqq_new = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+                sym.set(p, p, app_new);
+                sym.set(q, q, aqq_new);
+                sym.set(p, q, 0.0);
+                sym.set(q, p, 0.0);
+                for k in 0..n {
+                    let vkp = v.get(k, p);
+                    let vkq = v.get(k, q);
+                    v.set(k, p, c * vkp - s * vkq);
+                    v.set(k, q, s * vkp + c * vkq);
+                }
+            }
+        }
+    }
+    Err(invalid(
+        "linalg::eigh: 巡回 Jacobi 法が反復上限（60 スイープ）内に収束しなかった",
+    ))
+}
+
+/// 対称固有値分解（`A: [n,n]`〈対称。下三角のみ読む〉→
+/// `(eigenvalues: [n]〈昇順〉, eigenvectors: [n,n])`）。イシュー #2150。
+pub(crate) fn eigh(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgError> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return Ok((
+            build_tensor(Vec::new(), &[0])?,
+            build_tensor(Vec::new(), &[0, 0])?,
+        ));
+    }
+    let (eigenvalues, vecs) = eigh_jacobi(&mat)?;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| eigenvalues[i].total_cmp(&eigenvalues[j]));
+    let mut evals_sorted = vec![0.0f64; n];
+    let mut vecs_sorted = Mat::zeros(n, n);
+    for (new_idx, &old_idx) in order.iter().enumerate() {
+        evals_sorted[new_idx] = eigenvalues[old_idx];
+        vecs_sorted.set_col(new_idx, &vecs.col(old_idx));
+    }
+    for j in 0..n {
+        let mut col = vecs_sorted.col(j);
+        normalize_max_abs_sign(&mut col);
+        vecs_sorted.set_col(j, &col);
+    }
+    let evals_t = build_tensor(evals_sorted.iter().map(|&v| v as f32).collect(), &[n])?;
+    Ok((evals_t, vecs_sorted.to_tensor()?))
+}
+
+/// 符号付き log 行列式（`A: [n,n]` → `(sign: [], logabsdet: [])`）。
+/// イシュー #2150。空行列は `(1, 0)`。
+pub(crate) fn slogdet(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgError> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return Ok((build_tensor(vec![1.0], &[])?, build_tensor(vec![0.0], &[])?));
+    }
+    match lu_decompose(&mat) {
+        None => Ok((
+            build_tensor(vec![0.0], &[])?,
+            build_tensor(vec![f32::NEG_INFINITY], &[])?,
+        )),
+        Some(lu) => {
+            let mut sign = lu.sign;
+            let mut logabsdet = 0.0f64;
+            for i in 0..n {
+                let d = lu.lu.get(i, i);
+                sign *= d.signum();
+                logabsdet += d.abs().ln();
+            }
+            Ok((
+                build_tensor(vec![sign as f32], &[])?,
+                build_tensor(vec![logabsdet as f32], &[])?,
+            ))
+        }
+    }
+}
+
+/// `rcond`（`pinv`／`matrix_rank`／`lstsq` 共通）を解決する
+/// （`fandhe_ai_autodiff::eval::linalg::resolve_rcond` と同一契約）。
+pub(crate) fn resolve_rcond(rcond: Option<f32>, m: usize, n: usize) -> Result<f64, LinalgError> {
+    match rcond {
+        None => Ok((m.max(n) as f64) * f64::from(f32::EPSILON)),
+        Some(r) => {
+            if !r.is_finite() || r < 0.0 {
+                return Err(invalid(format!(
+                    "linalg: rcond は有限かつ非負である必要がある、got {r}"
+                )));
+            }
+            Ok(f64::from(r))
+        }
+    }
+}
+
+fn truncated_svd_rank(s: &[f64], rcond: f64) -> usize {
+    let smax = s.first().copied().unwrap_or(0.0);
+    if smax <= 0.0 {
+        return 0;
+    }
+    let tol = rcond * smax;
+    s.iter().filter(|&&v| v > tol).count()
+}
+
+fn pinv_mat_f64(a: &Tensor<f32>, rcond: f64) -> Result<Mat, LinalgError> {
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_mat = Mat::from_tensor(&u);
+    let vh_mat = Mat::from_tensor(&vh);
+    let n = vh_mat.cols;
+    let m = u_mat.rows;
+    let mut out = Mat::zeros(n, m);
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        let s_inv = 1.0 / sigma;
+        for row in 0..n {
+            let v_ri = vh_mat.get(i, row);
+            if v_ri == 0.0 {
+                continue;
+            }
+            for col in 0..m {
+                out.set(
+                    row,
+                    col,
+                    out.get(row, col) + s_inv * v_ri * u_mat.get(col, i),
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Moore–Penrose 擬似逆行列（`A: [m,n]` → `[n,m]`）。イシュー #2150。
+pub(crate) fn pinv(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, LinalgError> {
+    let shape = a.shape();
+    let (m, n) = (shape[0], shape[1]);
+    if m == 0 || n == 0 {
+        return build_tensor(Vec::new(), &[n, m]);
+    }
+    let rcond = resolve_rcond(rcond, m, n)?;
+    pinv_mat_f64(a, rcond)?.to_tensor()
+}
+
+/// 行列のランク（`A: [m,n]` → スカラー `[]`）。イシュー #2150。
+pub(crate) fn matrix_rank(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, LinalgError> {
+    let shape = a.shape();
+    let (m, n) = (shape[0], shape[1]);
+    if m == 0 || n == 0 {
+        return build_tensor(vec![0.0], &[]);
+    }
+    let rcond = resolve_rcond(rcond, m, n)?;
+    let (_u, s, _vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    build_tensor(vec![rank as f32], &[])
+}
+
+/// 最小二乗解（`A: [m,n]`・`B: [m,k]` → `X: [n,k]`）。イシュー #2150。
+pub(crate) fn lstsq(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    rcond: Option<f32>,
+) -> Result<Tensor<f32>, LinalgError> {
+    let ashape = a.shape();
+    let (m, n) = (ashape[0], ashape[1]);
+    let bshape = b.shape();
+    let k_cols = bshape[1];
+    if m == 0 || n == 0 {
+        return build_tensor(vec![0.0; n * k_cols], &[n, k_cols]);
+    }
+    let rcond = resolve_rcond(rcond, m, n)?;
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_mat = Mat::from_tensor(&u);
+    let vh_mat = Mat::from_tensor(&vh);
+    let b_mat = Mat::from_tensor(b);
+
+    let mut temp = Mat::zeros(rank, k_cols);
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        for col in 0..k_cols {
+            let mut acc = 0.0f64;
+            for row in 0..m {
+                acc += u_mat.get(row, i) * b_mat.get(row, col);
+            }
+            temp.set(i, col, acc / sigma);
+        }
+    }
+    let mut x = Mat::zeros(n, k_cols);
+    for i in 0..rank {
+        for row in 0..n {
+            let v_ri = vh_mat.get(i, row);
+            if v_ri == 0.0 {
+                continue;
+            }
+            for col in 0..k_cols {
+                x.set(row, col, x.get(row, col) + v_ri * temp.get(i, col));
+            }
+        }
+    }
+    x.to_tensor()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

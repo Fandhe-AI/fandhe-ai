@@ -2187,6 +2187,126 @@ struct VarMatrixOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarReduceOpsHoldDoctestGuard;
 
+/// イシュー #2150（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカルの自由
+/// 関数群（`__fandhe_linalg_hold_probe::linalg_ops::{eigh, slogdet,
+/// pinv, matrix_rank, lstsq}`）とトレイト（`__FandheLinalgHoldProbe`）を
+/// 導入し、実際に使う関数を書く。facade がどの経路（`pub use
+/// fandhe_ai_autodiff::linalg_ops;` のようなモジュール再エクスポート・
+/// `Var` への inherent メソッド追加・別名 `pub use`）で `linalg_ops`
+/// という名前や 5 個の関数名を公開しても、ローカル定義との glob 衝突
+/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
+/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
+/// `x.eigh()` 呼び出しが実際の `Var::eigh(&self)`〈引数は一致しても
+/// 戻り値型が `EighVars` になり `__FandheLinalgMarker` 型注釈と
+/// 不一致〉・`x.pinv()`〈実際は `rcond: Option<f32>` を要求〉に
+/// 解決されて型・引数数エラーになる）でコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// linalg_ops_hold_doctest_globs_all_pub_modules`・`linalg_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_linalg_ops`・`workspace_declares_linalg_ops_
+/// fn_names_only_in_allowed_locations`）との多層防御の位置づけは
+/// `docs/autodiff-linalg-ops-decision.md` §6「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_linalg_hold_probe {
+///     pub mod linalg_ops {
+///         pub fn eigh() {}
+///         pub fn slogdet() {}
+///         pub fn pinv() {}
+///         pub fn matrix_rank() {}
+///         pub fn lstsq() {}
+///     }
+/// }
+/// use __fandhe_linalg_hold_probe::*;
+///
+/// struct __FandheLinalgMarker;
+///
+/// trait __FandheLinalgHoldProbe {
+///     fn eigh(&self) -> __FandheLinalgMarker;
+///     fn slogdet(&self) -> __FandheLinalgMarker;
+///     fn pinv(&self) -> __FandheLinalgMarker;
+///     fn matrix_rank(&self) -> __FandheLinalgMarker;
+///     fn lstsq(&self) -> __FandheLinalgMarker;
+/// }
+///
+/// impl<'t> __FandheLinalgHoldProbe for fandhe_ai::Var<'t> {
+///     fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+/// }
+///
+/// impl __FandheLinalgHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+/// }
+///
+/// impl __FandheLinalgHoldProbe for fandhe_ai::Tape {
+///     fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+///     fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `linalg_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     linalg_ops::eigh();
+///     linalg_ops::slogdet();
+///     linalg_ops::pinv();
+///     linalg_ops::matrix_rank();
+///     linalg_ops::lstsq();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheLinalgMarker = fandhe_ai::Var::eigh(x);
+///     let _: __FandheLinalgMarker = x.eigh();
+///     let _: __FandheLinalgMarker = fandhe_ai::Var::slogdet(x);
+///     let _: __FandheLinalgMarker = x.slogdet();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheLinalgMarker = fandhe_ai::Tensor::pinv(x);
+///     let _: __FandheLinalgMarker = x.pinv();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheLinalgMarker = fandhe_ai::Tape::matrix_rank(x);
+///     let _: __FandheLinalgMarker = x.matrix_rank();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarLinalgOpsHoldDoctestGuard;
+
 /// イシュー #2146（親 #2131）の facade 公開保留を固定する doctest 足場。
 /// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の「正の
 /// プローブ 1 ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを

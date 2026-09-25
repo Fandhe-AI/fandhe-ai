@@ -724,6 +724,32 @@ pub struct SvdFactors {
     pub vh: Tensor<f32>,
 }
 
+/// [`BackendOps::linalg_eigh`] の戻り値（イシュー #2150。`docs/
+/// autodiff-linalg-ops-decision.md`）。`torch.linalg.eigh(UPLO='L')` と
+/// 同じ対称固有値分解（`A: [n,n]` → `eigenvalues: [n]`〈昇順〉・
+/// `eigenvectors: [n,n]`〈列が固有ベクトル〉）。各固有ベクトル列は
+/// 最大絶対値成分（同値は最小添字）が正になるよう符号を正規化する
+/// 契約（`fandhe_ai_autodiff::eval::linalg` と本クレートの実装が同一
+/// 符号規約を採る。`QrFactors`／`SvdFactors` と同方針）。
+#[derive(Debug, Clone)]
+pub struct EighFactors {
+    /// `[n]`。固有値（昇順・同値は安定順）。
+    pub eigenvalues: Tensor<f32>,
+    /// `[n, n]`。列が固有ベクトル（列直交・単位長）。
+    pub eigenvectors: Tensor<f32>,
+}
+
+/// [`BackendOps::linalg_slogdet`] の戻り値（イシュー #2150）。
+/// `torch.linalg.slogdet` と同じ `(sign, log|det A|)` の組
+/// （`A: [n,n]` → ともにスカラー `[]`）。
+#[derive(Debug, Clone)]
+pub struct SlogdetFactors {
+    /// `[]`。行列式の符号（`-1.0`／`0.0`／`1.0`）。
+    pub sign: Tensor<f32>,
+    /// `[]`。`ln|det A|`（`sign == 0.0` の場合は `-inf`）。
+    pub logabsdet: Tensor<f32>,
+}
+
 /// [`BackendOps::linalg_matrix_norm`] が計算する行列ノルムの種類
 /// （イシュー #1621。`torch.linalg.matrix_norm` の `ord` 引数のうち
 /// facade が対応する 5 種）。
@@ -3525,6 +3551,95 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "linalg_matrix_norm: default fail-safe (no device-side linear-algebra kernel \
+             available)"
+                .into(),
+        ))
+    }
+
+    /// 対称固有値分解（`A: [n,n]`〈対称。下三角のみ読む〉→
+    /// [`EighFactors`]）。イシュー #2150・`docs/autodiff-linalg-ops-
+    /// decision.md`。`torch.linalg.eigh(UPLO='L')` 相当。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約
+    /// （`fandhe_ai_autodiff::linalg_ops::eigh` がこの `Unsupported` のみを
+    /// ホスト参照実装 `eval::linalg::eigh` へフォールバックする）。巡回
+    /// Jacobi 法が反復上限内に収束しない場合は
+    /// [`BackendError::InvalidArgument`] を返す契約とする。
+    fn linalg_eigh(&self, _a: &Tensor<f32>) -> Result<EighFactors, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_eigh: default fail-safe (no device-side linear-algebra kernel available)"
+                .into(),
+        ))
+    }
+
+    /// 符号付き log 行列式（`A: [n,n]` → [`SlogdetFactors`]）。イシュー
+    /// #2150。`torch.linalg.slogdet` 相当。特異行列は `(sign=0,
+    /// logabsdet=-inf)`（エラーにしない。`eval::linalg::slogdet` doc
+    /// 参照）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn linalg_slogdet(&self, _a: &Tensor<f32>) -> Result<SlogdetFactors, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_slogdet: default fail-safe (no device-side linear-algebra kernel available)"
+                .into(),
+        ))
+    }
+
+    /// Moore–Penrose 擬似逆行列（`A: [m,n]` → `[n,m]`）。イシュー #2150。
+    /// `torch.linalg.pinv` 相当。`rcond`（`None` は
+    /// `max(m,n)・f32::EPSILON`。`Var::norm` 等と同じ「アルゴリズムの
+    /// 引数であり REQ-2 の tolerance ではない」契約）を下回る特異値は
+    /// 0 として扱う。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn linalg_pinv(
+        &self,
+        _a: &Tensor<f32>,
+        _rcond: Option<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_pinv: default fail-safe (no device-side linear-algebra kernel available)"
+                .into(),
+        ))
+    }
+
+    /// 最小二乗解（`A: [m,n]`・`B: [m,k]` → `X: [n,k]`）。イシュー #2150。
+    /// `torch.linalg.lstsq` 相当（rank 落ち・非正方でも `A⁺ B`
+    /// 〈最小ノルム解〉を返す。PyTorch 既定 driver の residuals／rank／
+    /// singular_values は返さない。`docs/autodiff-linalg-ops-decision.md`
+    /// §8「対象外」）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn linalg_lstsq(
+        &self,
+        _a: &Tensor<f32>,
+        _b: &Tensor<f32>,
+        _rcond: Option<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_lstsq: default fail-safe (no device-side linear-algebra kernel available)"
+                .into(),
+        ))
+    }
+
+    /// 行列のランク（`A: [m,n]` → スカラー `[]`。値は非負整数を表す
+    /// `f32`）。イシュー #2150。`torch.linalg.matrix_rank` 相当（`rcond`
+    /// を上回る特異値の個数）。非微分（勾配は明示ゼロ。`Op::OneHot` と
+    /// 同型）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn linalg_matrix_rank(
+        &self,
+        _a: &Tensor<f32>,
+        _rcond: Option<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_matrix_rank: default fail-safe (no device-side linear-algebra kernel \
              available)"
                 .into(),
         ))

@@ -188,3 +188,155 @@ fn linalg_empty_matrix_contracts() {
     let det_a = ops.linalg_det(&a).unwrap();
     assert_parity("linalg_det empty", &dense(&det_a), &[1.0]);
 }
+
+// --- eigh（イシュー #2150） ---
+
+#[test]
+fn linalg_eigh_known_symmetric_matrix() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![2.0, 1.0, 1.0, 2.0], &[2, 2]);
+    let factors = ops.linalg_eigh(&a).unwrap();
+    assert_parity(
+        "linalg_eigh eigenvalues",
+        &dense(&factors.eigenvalues),
+        &[1.0, 3.0],
+    );
+}
+
+#[test]
+fn linalg_eigh_non_square_is_invalid_argument() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+    assert!(matches!(
+        ops.linalg_eigh(&a),
+        Err(BackendError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn linalg_eigh_is_bit_deterministic_across_repeated_calls() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![4.0, 1.0, 2.0, 1.0, 3.0, 0.5, 2.0, 0.5, 5.0], &[3, 3]);
+    let r1 = ops.linalg_eigh(&a).unwrap();
+    let r2 = ops.linalg_eigh(&a).unwrap();
+    assert_eq!(dense(&r1.eigenvalues), dense(&r2.eigenvalues));
+    assert_eq!(dense(&r1.eigenvectors), dense(&r2.eigenvectors));
+}
+
+// --- slogdet（イシュー #2150） ---
+
+#[test]
+fn linalg_slogdet_known_value() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![2.0, 0.0, 0.0, 3.0], &[2, 2]);
+    let factors = ops.linalg_slogdet(&a).unwrap();
+    assert_parity("linalg_slogdet sign", &dense(&factors.sign), &[1.0]);
+    assert_parity(
+        "linalg_slogdet logabsdet",
+        &dense(&factors.logabsdet),
+        &[6.0f32.ln()],
+    );
+}
+
+#[test]
+fn linalg_slogdet_singular_matrix() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]);
+    let factors = ops.linalg_slogdet(&a).unwrap();
+    assert_eq!(dense(&factors.sign)[0], 0.0);
+    assert_eq!(dense(&factors.logabsdet)[0], f32::NEG_INFINITY);
+}
+
+// --- pinv（イシュー #2150） ---
+
+#[test]
+fn linalg_pinv_full_rank_matches_inverse() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![4.0, 7.0, 2.0, 6.0], &[2, 2]);
+    let p = ops.linalg_pinv(&a, None).unwrap();
+    assert_parity("linalg_pinv", &dense(&p), &[0.6, -0.7, -0.2, 0.4]);
+}
+
+#[test]
+fn linalg_pinv_is_bit_deterministic_across_repeated_calls() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
+    let r1 = ops.linalg_pinv(&a, None).unwrap();
+    let r2 = ops.linalg_pinv(&a, None).unwrap();
+    assert_eq!(dense(&r1), dense(&r2));
+}
+
+// --- matrix_rank（イシュー #2150） ---
+
+#[test]
+fn linalg_matrix_rank_known_values() {
+    let ops = CpuBackendOps::new();
+    let full = t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+    let deficient = t(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]);
+    assert_parity(
+        "linalg_matrix_rank full",
+        &dense(&ops.linalg_matrix_rank(&full, None).unwrap()),
+        &[2.0],
+    );
+    assert_parity(
+        "linalg_matrix_rank deficient",
+        &dense(&ops.linalg_matrix_rank(&deficient, None).unwrap()),
+        &[1.0],
+    );
+}
+
+#[test]
+fn linalg_matrix_rank_rejects_invalid_rcond() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+    assert!(matches!(
+        ops.linalg_matrix_rank(&a, Some(-1.0)),
+        Err(BackendError::InvalidArgument(_))
+    ));
+}
+
+// --- lstsq（イシュー #2150） ---
+
+#[test]
+fn linalg_lstsq_overdetermined_matches_known_solution() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2]);
+    let b = t(vec![1.0, 2.0, 4.0], &[3, 1]);
+    let x = ops.linalg_lstsq(&a, &b, None).unwrap();
+    let data = dense(&x);
+    assert!((data[0] - 4.0 / 3.0).abs() < 1e-4);
+    assert!((data[1] - 7.0 / 3.0).abs() < 1e-4);
+}
+
+#[test]
+fn linalg_lstsq_row_mismatch_is_invalid_argument() {
+    let ops = CpuBackendOps::new();
+    let a = t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+    let b = t(vec![1.0, 2.0, 3.0], &[3, 1]);
+    assert!(matches!(
+        ops.linalg_lstsq(&a, &b, None),
+        Err(BackendError::InvalidArgument(_))
+    ));
+}
+
+// --- 空行列（n=0）: 5 新演算 ---
+
+#[test]
+fn linalg_new_ops_empty_matrix_contracts() {
+    let ops = CpuBackendOps::new();
+    let empty = t(Vec::new(), &[0, 0]);
+    let eigh_factors = ops.linalg_eigh(&empty).unwrap();
+    assert_eq!(eigh_factors.eigenvalues.shape(), &[0]);
+    assert_eq!(eigh_factors.eigenvectors.shape(), &[0, 0]);
+    let slogdet_factors = ops.linalg_slogdet(&empty).unwrap();
+    assert_parity(
+        "linalg_slogdet empty sign",
+        &dense(&slogdet_factors.sign),
+        &[1.0],
+    );
+    let tall_zero = t(Vec::new(), &[0, 3]);
+    let p = ops.linalg_pinv(&tall_zero, None).unwrap();
+    assert_eq!(p.shape(), &[3, 0]);
+    let rank = ops.linalg_matrix_rank(&tall_zero, None).unwrap();
+    assert_parity("linalg_matrix_rank empty", &dense(&rank), &[0.0]);
+}
