@@ -404,6 +404,44 @@ pub fn multinomial(
     num_samples: usize,
     replacement: bool,
 ) -> Result<Tensor<i32>, RngError> {
+    let (rows, n, out_shape) = validate_multinomial(weights, num_samples, replacement)?;
+    let out_numel = checked_numel_for::<i32>(&out_shape)?;
+
+    if num_samples == 0 || rows == 0 {
+        return Tensor::new(Vec::new(), &out_shape).map_err(RngError::from);
+    }
+
+    let input = weights.host_slice();
+    let data = with_global_rng(|rng| {
+        let mut out = Vec::with_capacity(out_numel);
+        for row in 0..rows {
+            let row_slice = &input[row * n..(row + 1) * n];
+            if replacement {
+                multinomial_core_with_replacement(rng, row_slice, num_samples, &mut out);
+            } else {
+                multinomial_core_without_replacement(rng, row_slice, num_samples, &mut out);
+            }
+        }
+        out
+    });
+    Tensor::new(data, &out_shape).map_err(RngError::from)
+}
+
+/// [`multinomial`]・[`Generator::multinomial`] が共有する検証本体
+/// （イシュー #2156）。抽選本体（`multinomial_core_with_replacement`／
+/// `multinomial_core_without_replacement`）は両者ですでに共有していたが
+/// 検証ロジックは共有していなかったため、片方だけ検証条件を変更すると
+/// 挙動が分岐しうる問題があった。本関数へ切り出すことで両者を機構的に
+/// 同一に保つ。`weights` の shape 検証（rank 1 または 2 のみ許容）・
+/// 列数 `n` の範囲検証・作業用バッファ容量検証・行ごとの検証（有限性・
+/// 非負・総和が正・非復元抽出時の正の重みの個数）を行い、1 行でも
+/// 違反すれば乱数を一切消費せず [`RngError`] を返す（呼び出し元の契約）。
+/// 成功時は抽選本体が必要とする `(rows, n, out_shape)` を返す。
+fn validate_multinomial(
+    weights: &Tensor<f32>,
+    num_samples: usize,
+    replacement: bool,
+) -> Result<(usize, usize, Vec<usize>), RngError> {
     let shape = weights.shape();
     let (rows, n, out_shape): (usize, usize, Vec<usize>) = match *shape {
         [n] => (1, n, vec![num_samples]),
@@ -422,14 +460,12 @@ pub fn multinomial(
         });
     }
 
-    let out_numel = checked_numel_for::<i32>(&out_shape)?;
     // 作業用バッファ（行ごとの累積和・非復元抽出時の重みコピー）の
     // 容量も乱数消費前に検査する（`randint` と同じ防御。
     // イシュー #1725・PR #1815 codex-review P1 是正と同型の方針）。
     let _ = checked_numel_for::<f64>(&[n])?;
 
     let input = weights.host_slice();
-    let mut positive_counts = Vec::with_capacity(rows);
     for row in 0..rows {
         let row_slice = &input[row * n..(row + 1) * n];
         let mut sum = 0.0f64;
@@ -455,26 +491,9 @@ pub fn multinomial(
                 reason: "multinomial: 非復元抽出では num_samples は正の重みの個数以下である必要があります",
             });
         }
-        positive_counts.push(positive);
     }
 
-    if num_samples == 0 || rows == 0 {
-        return Tensor::new(Vec::new(), &out_shape).map_err(RngError::from);
-    }
-
-    let data = with_global_rng(|rng| {
-        let mut out = Vec::with_capacity(out_numel);
-        for row in 0..rows {
-            let row_slice = &input[row * n..(row + 1) * n];
-            if replacement {
-                multinomial_core_with_replacement(rng, row_slice, num_samples, &mut out);
-            } else {
-                multinomial_core_without_replacement(rng, row_slice, num_samples, &mut out);
-            }
-        }
-        out
-    });
-    Tensor::new(data, &out_shape).map_err(RngError::from)
+    Ok((rows, n, out_shape))
 }
 
 /// [`multinomial`] の復元抽出本体（イシュー #2156）。検証済みの
@@ -565,7 +584,7 @@ fn multinomial_core_without_replacement(
 /// [`randint`]（`low, high, shape`）に揃えて `mean, std, shape` とする。
 ///
 /// 検証: `mean` が有限、`std` が有限かつ `>= 0` であること
-/// （[`RngError::InvalidArgument`]）。出力容量は [`checked_numel_for`]
+/// （[`RngError::InvalidArgument`]）。出力容量は `checked_numel_for`
 /// で乱数消費前に検査する。
 ///
 /// アルゴリズムは [`randn`] と同じ Box–Muller（`f64` 中間計算）で、
@@ -713,65 +732,22 @@ impl Generator {
     }
 
     /// [`multinomial`] の Generator 版。グローバル RNG は消費しない。
+    /// 検証本体は自由関数版と `validate_multinomial` を共有する
+    /// （イシュー #2156。ドリフト防止）。
     pub fn multinomial(
         &mut self,
         weights: &Tensor<f32>,
         num_samples: usize,
         replacement: bool,
     ) -> Result<Tensor<i32>, RngError> {
-        let shape = weights.shape();
-        let (rows, n, out_shape): (usize, usize, Vec<usize>) = match *shape {
-            [n] => (1, n, vec![num_samples]),
-            [m, n] => (m, n, vec![m, num_samples]),
-            _ => {
-                return Err(RngError::Shape(ShapeError::RankMismatch {
-                    expected: 2,
-                    actual: shape.len(),
-                }));
-            }
-        };
-
-        if n == 0 || n > i32::MAX as usize {
-            return Err(RngError::InvalidArgument {
-                reason: "multinomial: weights の列数 n は 1..=i32::MAX の範囲である必要があります",
-            });
-        }
-
+        let (rows, n, out_shape) = validate_multinomial(weights, num_samples, replacement)?;
         let out_numel = checked_numel_for::<i32>(&out_shape)?;
-        let _ = checked_numel_for::<f64>(&[n])?;
-
-        let input = weights.host_slice();
-        for row in 0..rows {
-            let row_slice = &input[row * n..(row + 1) * n];
-            let mut sum = 0.0f64;
-            let mut positive = 0usize;
-            for (col, &w) in row_slice.iter().enumerate() {
-                if !w.is_finite() || w < 0.0 {
-                    return Err(RngError::InvalidProbability {
-                        index: row * n + col,
-                    });
-                }
-                if w > 0.0 {
-                    positive += 1;
-                }
-                sum += f64::from(w);
-            }
-            if sum <= 0.0 {
-                return Err(RngError::InvalidArgument {
-                    reason: "multinomial: 行の重みの総和は正である必要があります",
-                });
-            }
-            if !replacement && num_samples > positive {
-                return Err(RngError::InvalidArgument {
-                    reason: "multinomial: 非復元抽出では num_samples は正の重みの個数以下である必要があります",
-                });
-            }
-        }
 
         if num_samples == 0 || rows == 0 {
             return Tensor::new(Vec::new(), &out_shape).map_err(RngError::from);
         }
 
+        let input = weights.host_slice();
         let mut out = Vec::with_capacity(out_numel);
         for row in 0..rows {
             let row_slice = &input[row * n..(row + 1) * n];
@@ -1504,23 +1480,23 @@ mod tests {
         assert_eq!(state_after_multinomial, state_after_manual_draws);
     }
 
-    /// `partition_point` が丸めで `total` ちょうどに達し `idx == n` に
-    /// なるフォールバック分岐（最後の正の重みの index へ落とす）が到達
-    /// 可能であることを固定する。`Xorshift64Star::next_unit_f64` は
-    /// `next_u64() >> 11` を `2^53` で割るため、`next_u64() >> 11 ==
-    /// 2^53 - 1`（全 53bit が立った状態）で `next_unit_f64()` は
-    /// `1.0` に最も近い最大値を返す——`x = u * total` が丸めで
-    /// `total` に到達しうる境界ケースを直接検証する。
+    /// `Xorshift64Star::next_unit_f64` が返しうる最大値
+    /// （`(2^53 - 1) / 2^53`。`1.0` に最も近い）近傍を含む幅広い `u` を
+    /// 10,000 回抽選して `x = u * total` を評価する回帰的ストレステスト。
+    /// 丸めで `x` が `total` ちょうどに達し `partition_point` が
+    /// `idx == row.len()` を返すフォールバック分岐（最後の正の重みの
+    /// index へ落とす）に**実際にこの 10,000 回で到達したことを本テスト
+    /// は証明しない**（`next_u64()` の出現値は決定的だが `state = 1` の
+    /// 系列が当該境界値を厳密に生成するかは検証していない）。本テストが
+    /// 固定する保証は「多数回の抽選で `idx` が常に `[0, row.len())` に
+    /// 収まり panic しない」ことに限る。
     #[test]
     fn multinomial_with_replacement_handles_upper_boundary_without_panicking() {
-        // `state` を `next_u64()` が `0xFFFF_FFFF_FFFF_FFFF` 近傍を返す
-        // よう手動で構築する（xorshift の内部状態を直接操作せず、実際に
-        // 実現しうる `u` の最大値 `(2^53 - 1) / 2^53` で代表させる:
-        // 実装が `partition_point` の `idx == row.len()` 分岐を panic
-        // なく処理することが本テストの主眼）。
+        // 十分な回数（10,000 回）抽選し、境界近傍の `u` を含め幅広い
+        // 入力に対して実装が panic せず有効な index を返すことを確認する
+        // （個々の抽選が `idx == row.len()` 分岐を踏んだかどうかまでは
+        // 検証しない。上記 doc 参照）。
         let mut rng = Xorshift64Star::new(1);
-        // 十分な回数回してから、最後に手動で最大値ケースを模した行を
-        // 複数回評価し panic しないことを確認する。
         let row = [1.0f32, 1.0, 1.0];
         let mut out = Vec::new();
         for _ in 0..10_000 {
