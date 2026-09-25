@@ -274,7 +274,22 @@ fn count_par_reduce_cooccurrences(content: &str) -> usize {
 /// `let (mut )?IDENT = ...` 形の文から代入先識別子を抽出する
 /// （[`count_par_reduce_cooccurrences`] の文をまたぐ汚染追跡が使う）。
 /// 該当しない場合は `None`。
+///
+/// [`count_par_reduce_cooccurrences`] は `;` のみで文を分割するため、
+/// ブロック境界（`{`／`}`）をまたいだ直後の文（関数本体の最初の文・
+/// if/for ブロック本体の最初の文等）は、直前のブロック開始トークン
+/// （関数宣言・条件式・`{` 自体）が同じ `;` 区切りチャンクに含まれて
+/// しまう。例えば関数本体の最初の文 `fn f() {\n    let it =
+/// data.par_iter();` は `;` 分割後も 1 チャンク
+/// `"fn f() {\n    let it = data.par_iter()"` のままで、先頭が
+/// `"let "` ではないため代入として検出できず、後続の `it.sum()` を
+/// 見逃していた（codex-review 指摘・PR #2274 review r4105558135）。
+/// 対処として、チャンク内最後の `{`／`}` より後ろだけを実効的な文と
+/// みなす（ブロック境界をまたいだ前段のテキストを読み飛ばす）。
 fn assigned_identifier(stmt: &str) -> Option<&str> {
+    let block_start = stmt.rfind(['{', '}']).map(|i| i + 1).unwrap_or(0);
+    let stmt = &stmt[block_start..];
+
     let rest = stmt.trim_start().strip_prefix("let ")?;
     let rest = rest.trim_start();
     let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
@@ -587,6 +602,33 @@ fn assigned_identifier_extracts_let_binding() {
     );
     assert_eq!(assigned_identifier("x == 1"), None);
     assert_eq!(assigned_identifier("data.iter()"), None);
+}
+
+#[test]
+fn count_par_reduce_detects_first_statement_in_function_body() {
+    // 関数本体の最初の文（ブロック開始 `{` 直後の `let`）に対する
+    // 検出漏れの再発防止（codex-review 指摘・PR #2274 review
+    // r4105558135）。`;` 分割のみでは `fn f() {\n let it =
+    // data.par_iter();` が 1 チャンクとして残り、先頭が `let ` では
+    // ないため代入を検出できず、後続の `it.sum()` を見逃していた。
+    let src = "fn f(data: &[f32]) -> f32 {\n    let it = data.par_iter();\n    it.sum()\n}";
+    assert_eq!(count_par_reduce_cooccurrences(src), 1);
+}
+
+#[test]
+fn assigned_identifier_strips_block_boundary_prefix_before_let() {
+    // ブロック開始直後の `let`（`{` がチャンク内に混入するケース）で
+    // も代入先識別子を抽出できる（codex-review 指摘・PR #2274 review
+    // r4105558135）。
+    assert_eq!(
+        assigned_identifier("fn f() {\n    let it = data.par_iter()"),
+        Some("it")
+    );
+    // 複数ブロックをまたぐ場合も最後のブロック境界より後ろだけを見る。
+    assert_eq!(
+        assigned_identifier("if x { let it = data.par_iter()"),
+        Some("it")
+    );
 }
 
 #[test]
