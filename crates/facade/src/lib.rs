@@ -3448,6 +3448,135 @@ struct VarConv3dHoldDoctestGuard;
 #[allow(dead_code)]
 struct AdaptiveMaxGlobalPoolHoldDoctestGuard;
 
+/// イシュー #2164（親 #2131。設計正本 `docs/autodiff-rnn-stacked-config-
+/// decision.md` §8 承認事項）の facade 公開保留を固定する doctest 足場。
+/// `SpatialLayersHoldDoctestGuard`（イシュー #2159）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_rnn_config_hold_probe::{RnnConfig, StackedRnn, StackedLstm,
+/// StackedGru, StackedRnnSeqOutput, StackedLstmSeqOutput}` を導入する。
+/// facade がどの経路（単一行・複数行・ネストした group での `pub use`・
+/// 別名エクスポート）でこれらの名前を公開しても、ローカル定義との glob
+/// 衝突（E0659）でコンパイルが失敗する。
+///
+/// あわせて `fandhe_ai::Tape::{stacked_rnn_forward_seq,
+/// stacked_lstm_forward_seq, stacked_gru_forward_seq}`（多層・双方向
+/// スタックの `Tape` 委譲メソッド追加）と `fandhe_ai::nn::rnn::{Rnn,
+/// Lstm, Gru}::with_config`（既存型への `RnnConfig` 引数付き
+/// コンストラクタ追加。実装計画 §3.2「なぜ `Rnn`／`Lstm`／`Gru` に
+/// `with_config` を足さないか」参照）も同じブロックで保留固定する
+/// （trait 経由のプローブ呼び出しが inherent メソッドの型・引数不一致で
+/// コンパイル失敗する。`VarConv3dHoldDoctestGuard` の `__probe_var` 等と
+/// 同方式）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// rnn_config_hold_doctest_globs_all_pub_modules`・`rnn_config_hold_
+/// doctest_probe_body_matches_fixed_contract`）との多層防御の位置づけ・
+/// 承認未取得の経緯は `docs/autodiff-rnn-stacked-config-decision.md` §8
+/// 「承認事項」節を参照。
+///
+/// 承認（facade への `RnnConfig`／`Stacked*` 再エクスポート・`Tape` の
+/// 委譲メソッド新設）を得た日が来たら、本モジュール・本 doctest 自体を
+/// 削除する（ソース走査側の対応する否定ガードも同時に正ガードへ
+/// 置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_rnn_config_hold_probe {
+///     pub struct RnnConfig;
+///     pub struct StackedRnn;
+///     pub struct StackedLstm;
+///     pub struct StackedGru;
+///     pub struct StackedRnnSeqOutput;
+///     pub struct StackedLstmSeqOutput;
+/// }
+/// use __fandhe_rnn_config_hold_probe::*;
+///
+/// struct __FandheRnnConfigMarker;
+///
+/// trait __FandheRnnConfigTapeProbe {
+///     fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker;
+///     fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker;
+///     fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker;
+/// }
+///
+/// impl __FandheRnnConfigTapeProbe for fandhe_ai::Tape {
+///     fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker {
+///         __FandheRnnConfigMarker
+///     }
+///     fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker {
+///         __FandheRnnConfigMarker
+///     }
+///     fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker {
+///         __FandheRnnConfigMarker
+///     }
+/// }
+///
+/// trait __FandheRnnConfigWithConfigProbe {
+///     fn with_config(&self) -> __FandheRnnConfigMarker;
+/// }
+///
+/// impl __FandheRnnConfigWithConfigProbe for fandhe_ai::nn::rnn::Rnn {
+///     fn with_config(&self) -> __FandheRnnConfigMarker {
+///         __FandheRnnConfigMarker
+///     }
+/// }
+///
+/// impl __FandheRnnConfigWithConfigProbe for fandhe_ai::nn::rnn::Lstm {
+///     fn with_config(&self) -> __FandheRnnConfigMarker {
+///         __FandheRnnConfigMarker
+///     }
+/// }
+///
+/// impl __FandheRnnConfigWithConfigProbe for fandhe_ai::nn::rnn::Gru {
+///     fn with_config(&self) -> __FandheRnnConfigMarker {
+///         __FandheRnnConfigMarker
+///     }
+/// }
+///
+/// fn __probe(
+///     _: RnnConfig,
+///     _: StackedRnn,
+///     _: StackedLstm,
+///     _: StackedGru,
+///     _: StackedRnnSeqOutput,
+///     _: StackedLstmSeqOutput,
+///     tape: &fandhe_ai::Tape,
+///     rnn: &fandhe_ai::nn::rnn::Rnn,
+///     lstm: &fandhe_ai::nn::rnn::Lstm,
+///     gru: &fandhe_ai::nn::rnn::Gru,
+/// ) {
+///     let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_rnn_forward_seq(tape);
+///     let _: __FandheRnnConfigMarker = tape.stacked_rnn_forward_seq();
+///     let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_lstm_forward_seq(tape);
+///     let _: __FandheRnnConfigMarker = tape.stacked_lstm_forward_seq();
+///     let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_gru_forward_seq(tape);
+///     let _: __FandheRnnConfigMarker = tape.stacked_gru_forward_seq();
+///     let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Rnn::with_config(rnn);
+///     let _: __FandheRnnConfigMarker = rnn.with_config();
+///     let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Lstm::with_config(lstm);
+///     let _: __FandheRnnConfigMarker = lstm.with_config();
+///     let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Gru::with_config(gru);
+///     let _: __FandheRnnConfigMarker = gru.with_config();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct RnnConfigHoldDoctestGuard;
+
 /// イシュー #2162（親 #2131）の facade 公開保留を固定する doctest
 /// 足場。`SpatialLayersHoldDoctestGuard`（#2159）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob

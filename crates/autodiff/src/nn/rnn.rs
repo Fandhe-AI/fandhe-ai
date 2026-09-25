@@ -225,7 +225,7 @@ fn validate_gate_params(
 /// この非追跡経路にはそのまま使えず、独立実装を維持する）。
 /// 各要素は `[B, H]`（`stack` 対象の shape が全て一致することを前提に
 /// 呼び出し元が保証する）。
-fn stack_host_tensors(
+pub(super) fn stack_host_tensors(
     steps: &[Tensor<f32>],
     b_dim: usize,
     hidden: usize,
@@ -249,7 +249,7 @@ fn stack_host_tensors(
 /// （`Tensor::narrow` の view を `contiguous()` してから `reshape`。
 /// 非 contiguous な `x` を渡された場合も `contiguous()` が実体化して
 /// 吸収するため、呼び出し元は `x` の contiguity を意識しなくてよい）。
-fn slice_timestep(
+pub(super) fn slice_timestep(
     x: &Tensor<f32>,
     t: usize,
     b_dim: usize,
@@ -275,7 +275,7 @@ fn slice_timestep(
 /// capacity overflow で panic する（イシュー #1647 codex-review P1
 /// 指摘）。`D` を確保前に検証することで、この経路を型付きエラーへ
 /// 変換する。
-fn validate_seq_input(
+pub(super) fn validate_seq_input(
     x: &Tensor<f32>,
     expected_input_size: usize,
     op_name: &str,
@@ -311,7 +311,7 @@ fn validate_seq_input(
 /// イシュー #1647 codex-review P1 指摘）。`try_reserve_exact` で
 /// 確保可否を先に確認し、失敗時は panic させず
 /// [`AutodiffError::InvalidArgument`] へ変換して呼び出し元へ返す。
-fn reserve_outputs<T>(t_len: usize, op_name: &str) -> Result<Vec<T>, AutodiffError> {
+pub(super) fn reserve_outputs<T>(t_len: usize, op_name: &str) -> Result<Vec<T>, AutodiffError> {
     let mut outputs = Vec::new();
     outputs.try_reserve_exact(t_len).map_err(|err| {
         AutodiffError::InvalidArgument(format!(
@@ -392,7 +392,7 @@ fn validate_cell_host_shapes(
 
 /// `Module::forward` を明示的に無効化するための共通エラー（決定 4a
 /// 項目 3）。
-fn forward_not_supported(type_name: &str, seq_method: &str) -> AutodiffError {
+pub(super) fn forward_not_supported(type_name: &str, seq_method: &str) -> AutodiffError {
     AutodiffError::InvalidArgument(format!(
         "{type_name}::forward: Module::forward (Var-based) is not supported for sequence \
          layers because it would silently detach the input from the tape; use \
