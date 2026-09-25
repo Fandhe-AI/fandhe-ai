@@ -740,8 +740,9 @@ impl<'t> MultiheadAttentionVars<'t> {
     /// # Errors
     ///
     /// [`Self::new`] と同じ shape／tape 検証に加え、推論した
-    /// `embed_dim`／`kdim`／`vdim` のいずれかが `config` の値と不一致
-    /// のとき `AutodiffError::InvalidArgument` を返す。
+    /// `embed_dim`／`kdim`／`vdim` のいずれかが `config` の値と不一致、
+    /// または `q`（代表）の bias 有無が `config.bias()` と不一致のとき
+    /// `AutodiffError::InvalidArgument` を返す。
     pub fn new_with_config(
         config: &MultiheadAttentionConfig,
         q: LinearVars<'t>,
@@ -758,6 +759,19 @@ impl<'t> MultiheadAttentionVars<'t> {
                 config.embed_dim(),
                 config.kdim(),
                 config.vdim()
+            )));
+        }
+        // `validate_projection_vars` は 4 層の bias 有無が互いに一致する
+        // （全 `Some`／全 `None`）ことのみ検証し、`config.bias()` との
+        // 整合は見ない。`MultiheadAttention::from_parameters_with_config`
+        // と契約を揃えるため、代表として `q` の bias 有無を
+        // `config.bias()` と照合する（イシュー #2163 レビュー指摘）。
+        if q.bias.is_some() != config.bias() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "MultiheadAttentionVars::new_with_config: q の bias 有無 ({}) が config.bias() \
+                 ({}) と不一致",
+                q.bias.is_some(),
+                config.bias()
             )));
         }
         Ok(MultiheadAttentionVars {
@@ -2459,9 +2473,12 @@ mod tests {
         assert!(!mha.batch_first());
     }
 
-    /// [`new_with_config_matches_new_when_unchanged`] 専用のヘルパー
+    /// `new_with_config` 系テスト（[`new_with_config_matches_new_when_unchanged`]・
+    /// [`new_with_config_rejects_mismatched_bias`] ほか）共通のヘルパー
     /// （テスト内クロージャは `&Tape` の借用ライフタイムを
     /// `LinearVars<'t>` の `'t` へ正しく単一化できないため `fn` にする）。
+    /// bias 付き（`Some`）の `LinearVars` を返す。bias 無し版は
+    /// [`fixture_linear_vars_no_bias`]。
     fn fixture_linear_vars<'t>(tape: &'t Tape, seed: i64, e: usize) -> LinearVars<'t> {
         LinearVars {
             weight: tape.var(
@@ -2483,6 +2500,54 @@ mod tests {
                 ),
             ),
         }
+    }
+
+    /// [`fixture_linear_vars`] の bias 無し版（`new_with_config` の
+    /// bias 不一致検証テスト専用）。
+    fn fixture_linear_vars_no_bias<'t>(tape: &'t Tape, seed: i64, e: usize) -> LinearVars<'t> {
+        LinearVars {
+            weight: tape.var(
+                &Tensor::new(
+                    (0..e * e)
+                        .map(|i| (seed + i as i64) as f32 * 0.01)
+                        .collect(),
+                    &[e, e],
+                )
+                .unwrap(),
+            ),
+            bias: None,
+        }
+    }
+
+    /// レビュー指摘（イシュー #2163・PR #2279）: `new_with_config` は
+    /// 次元一致のみでなく `config.bias()` と実パラメータの bias 有無も
+    /// 検証する（`from_parameters_with_config` と同型の契約）。
+    /// `with_bias(false)` の config に bias 付き 4 層を渡すと拒否される
+    /// ことを固定する。
+    #[test]
+    fn new_with_config_rejects_mismatched_bias() {
+        let e = 4;
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let q = fixture_linear_vars(&tape, 1, e); // bias = Some(..)
+        let k = fixture_linear_vars(&tape, 2, e);
+        let v = fixture_linear_vars(&tape, 3, e);
+        let out = fixture_linear_vars(&tape, 4, e);
+        let cfg = MultiheadAttentionConfig::new(e, 2).with_bias(false);
+        assert!(MultiheadAttentionVars::new_with_config(&cfg, q, k, v, out).is_err());
+    }
+
+    /// bias 無し 4 層 + `with_bias(false)` config は一致するため成功する
+    /// ことを固定する（上記の否定側だけでなく肯定側も検証する）。
+    #[test]
+    fn new_with_config_accepts_consistent_no_bias() {
+        let e = 4;
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let q = fixture_linear_vars_no_bias(&tape, 1, e);
+        let k = fixture_linear_vars_no_bias(&tape, 2, e);
+        let v = fixture_linear_vars_no_bias(&tape, 3, e);
+        let out = fixture_linear_vars_no_bias(&tape, 4, e);
+        let cfg = MultiheadAttentionConfig::new(e, 2).with_bias(false);
+        assert!(MultiheadAttentionVars::new_with_config(&cfg, q, k, v, out).is_ok());
     }
 
     #[test]
