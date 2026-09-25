@@ -2981,6 +2981,153 @@ struct VarExtremumOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct RngDistributionsHoldDoctestGuard;
 
+/// イシュー #2159（親 #2131。設計正本 `docs/autodiff-spatial-layers-
+/// decision.md` §6 承認事項 1）の facade 公開保留を固定する doctest
+/// 足場。`KvCacheHoldDoctestGuard`（#2084）と同型の「正のプローブ 1
+/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_spatial_hold_probe::{ConvTranspose1d, Upsample, ZeroPad2d,
+/// Identity, Unflatten, add_conv_transpose1d, add_upsample,
+/// add_zero_pad2d, add_identity, add_unflatten}` を導入し、実際に使う
+/// 関数を書く。facade がどの経路（単一行・複数行・ネストした group で
+/// の `pub use`・別名エクスポート・facade 独自の `struct`／`type`
+/// 宣言・`compat::Sequential`／`Var` への inherent メソッド追加）でこれら
+/// の名前を公開しても、ローカル定義との glob 衝突（型名の場合。E0659
+/// 等）または呼び出しシグネチャの不一致（`compat::Sequential`／`Var`
+/// への inherent メソッドはトレイトメソッドより優先解決されるため、
+/// 本プローブの trait 経由呼び出しが型・引数不一致でコンパイル失敗
+/// する）でエラーコードに依存せずコンパイルが失敗する。
+///
+/// `Var::conv_transpose1d`／`Var::unflatten`（`nn::ConvTranspose1d`／
+/// `nn::Unflatten` の forward 相当の inherent メソッド追加）も同じ
+/// ブロックで併せて保留固定する（経路 1・経路 2 のどちらの facade
+/// 公開拡張も未承認のため。実装計画 §4「facade 公開の保留ガード」）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// spatial_layers_hold_doctest_globs_all_pub_modules`・`spatial_
+/// layers_hold_doctest_probe_body_matches_fixed_contract`・
+/// `compat_sequential_does_not_expose_spatial_layer_add_methods`）との
+/// 多層防御の位置づけ・承認未取得の経緯は
+/// `docs/autodiff-spatial-layers-decision.md` §6「承認事項」節を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_spatial_hold_probe {
+///     pub struct ConvTranspose1d;
+///     pub struct Upsample;
+///     pub struct ZeroPad2d;
+///     pub struct Identity;
+///     pub struct Unflatten;
+///     pub struct __FandheSpatialHoldMarker;
+///     pub fn add_conv_transpose1d() -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     pub fn add_upsample() -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     pub fn add_zero_pad2d() -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     pub fn add_identity() -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     pub fn add_unflatten() -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+/// }
+/// use __fandhe_spatial_hold_probe::*;
+///
+/// trait __FandheSpatialAddProbe {
+///     fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker;
+///     fn add_upsample(&self) -> __FandheSpatialHoldMarker;
+///     fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker;
+///     fn add_identity(&self) -> __FandheSpatialHoldMarker;
+///     fn add_unflatten(&self) -> __FandheSpatialHoldMarker;
+/// }
+///
+/// impl __FandheSpatialAddProbe for fandhe_ai::compat::Sequential {
+///     fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     fn add_upsample(&self) -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     fn add_identity(&self) -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     fn add_unflatten(&self) -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+/// }
+///
+/// trait __FandheSpatialVarProbe {
+///     fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker;
+///     fn unflatten(&self) -> __FandheSpatialHoldMarker;
+/// }
+///
+/// impl<'t> __FandheSpatialVarProbe for fandhe_ai::Var<'t> {
+///     fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+///     fn unflatten(&self) -> __FandheSpatialHoldMarker {
+///         __FandheSpatialHoldMarker
+///     }
+/// }
+///
+/// fn __probe(
+///     _: ConvTranspose1d,
+///     _: Upsample,
+///     _: ZeroPad2d,
+///     _: Identity,
+///     _: Unflatten,
+///     seq: &fandhe_ai::compat::Sequential,
+///     v: &fandhe_ai::Var<'_>,
+/// ) {
+///     let _: __FandheSpatialHoldMarker = add_conv_transpose1d();
+///     let _: __FandheSpatialHoldMarker = add_upsample();
+///     let _: __FandheSpatialHoldMarker = add_zero_pad2d();
+///     let _: __FandheSpatialHoldMarker = add_identity();
+///     let _: __FandheSpatialHoldMarker = add_unflatten();
+///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose1d(seq);
+///     let _: __FandheSpatialHoldMarker = seq.add_conv_transpose1d();
+///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_upsample(seq);
+///     let _: __FandheSpatialHoldMarker = seq.add_upsample();
+///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_zero_pad2d(seq);
+///     let _: __FandheSpatialHoldMarker = seq.add_zero_pad2d();
+///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_identity(seq);
+///     let _: __FandheSpatialHoldMarker = seq.add_identity();
+///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_unflatten(seq);
+///     let _: __FandheSpatialHoldMarker = seq.add_unflatten();
+///     let _: __FandheSpatialHoldMarker = fandhe_ai::Var::conv_transpose1d(v);
+///     let _: __FandheSpatialHoldMarker = v.conv_transpose1d();
+///     let _: __FandheSpatialHoldMarker = fandhe_ai::Var::unflatten(v);
+///     let _: __FandheSpatialHoldMarker = v.unflatten();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct SpatialLayersHoldDoctestGuard;
+
 /// イシュー #2158（親 #2131）の facade 公開保留を固定する doctest 足場。
 /// `VarActivationOpsHoldDoctestGuard`（イシュー #2146）と同型の「正の
 /// プローブ 1 ブロック方式」を採るが、本ガードは 3 種類の衝突プローブを
