@@ -890,8 +890,9 @@ impl<'t> Var<'t> {
     /// ブロードキャスト付き要素ごとの冪乗（`self.powf(other)`。PyTorch
     /// `torch.pow`／`**` 演算子相当。Var × Var の 2 項演算のみで、
     /// スカラー指数版〈`ScalarUnaryOp::PowScalar`〉は CUDA／Metal
-    /// カーネル未実装のため本メソッドの対象外）。イシュー #1710
-    /// （親 #1593）。
+    /// カーネル未実装のため本メソッドの対象外。入口は
+    /// `crate::scalar_unary_ops::pow_scalar`〈イシュー #2145〉）。
+    /// イシュー #1710（親 #1593）。
     ///
     /// `Var::scalar_binary`（[`ScalarBinaryOp::Pow`]）への薄い委譲。
     /// **数値規約（設計 §7）**: `da = b·a^(b−1)`・`db = y·ln(a)`

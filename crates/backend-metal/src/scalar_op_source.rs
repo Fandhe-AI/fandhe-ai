@@ -251,6 +251,18 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         ScalarUnaryOp::Softplus { .. } => {
             Some("(x * p0 > p1) ? x : (scalar_log1p_f32(metal::precise::exp(p0 * x)) / p0)")
         }
+        // イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign`／
+        // `Reciprocal`／`Rsqrt`／`Erf`（`PowScalar` は元から未実装）の
+        // GPU 専用カーネルは別イシューのスコープ。`None` を明示し
+        // `Unsupported` → ホスト参照実装へのフォールバックへ委ねる
+        // （CUDA 側 `kernels_scalar_op.rs::unary_expr` と同じ方針）。
+        ScalarUnaryOp::Floor
+        | ScalarUnaryOp::Ceil
+        | ScalarUnaryOp::Round
+        | ScalarUnaryOp::Sign
+        | ScalarUnaryOp::Reciprocal
+        | ScalarUnaryOp::Rsqrt
+        | ScalarUnaryOp::Erf => None,
         _ => None,
     }
 }
@@ -572,6 +584,27 @@ mod tests {
         assert!(unary_kernel_source(ScalarUnaryOp::Relu).is_none());
         assert!(unary_kernel_source(ScalarUnaryOp::Sigmoid).is_none());
         assert!(unary_kernel_source(ScalarUnaryOp::PowScalar { exponent: 2.0 }).is_none());
+    }
+
+    /// イシュー #2145: 新 7 kind の GPU 専用カーネルはスコープ外で、
+    /// `unary_kernel_source` は明示的に `None` を返す（CUDA 側
+    /// `new_2145_unary_kinds_are_unsupported` と同型）。
+    #[test]
+    fn new_2145_unary_kinds_are_unsupported() {
+        for op in [
+            ScalarUnaryOp::Floor,
+            ScalarUnaryOp::Ceil,
+            ScalarUnaryOp::Round,
+            ScalarUnaryOp::Sign,
+            ScalarUnaryOp::Reciprocal,
+            ScalarUnaryOp::Rsqrt,
+            ScalarUnaryOp::Erf,
+        ] {
+            assert!(
+                unary_kernel_source(op).is_none(),
+                "{op:?}: GPU カーネル未実装のため None のはず"
+            );
+        }
     }
 
     /// 超越関数系 8 kind すべてが REQ-8 境界チェック・buffer index

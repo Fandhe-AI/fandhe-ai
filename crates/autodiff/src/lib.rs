@@ -216,6 +216,7 @@ pub mod nn;
 pub mod optim;
 pub mod rearrange_ops;
 mod reduce_dims;
+pub mod scalar_unary_ops;
 mod tape;
 #[cfg(test)]
 mod test_support;
