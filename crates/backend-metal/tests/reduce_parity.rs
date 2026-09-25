@@ -292,3 +292,125 @@ fn metal_arg_all_tie_and_nan_match_cpu() {
         }
     }
 }
+
+// ---- min（イシュー #2155）----
+
+fn cpu_min_all(x: &[f32]) -> f32 {
+    let t = Tensor::new(x.to_vec(), &[x.len()]).expect("tensor");
+    fandhe_ai_backend_cpu::reduction::min(&t, None)
+        .expect("cpu min always succeeds for non-empty reduction")
+        .as_slice()
+        .expect("contiguous")[0]
+}
+
+fn cpu_min_axis(x: &[f32], shape: &[usize], dim: usize) -> Vec<f32> {
+    let t = Tensor::new(x.to_vec(), shape).expect("tensor");
+    fandhe_ai_backend_cpu::reduction::min(&t, Some(dim))
+        .expect("cpu min always succeeds for non-empty axis")
+        .as_slice()
+        .expect("contiguous")
+        .to_vec()
+}
+
+/// [`MetalReduce::run_min_all_f32`] が CPU 参照実装
+/// （`fandhe_ai_backend_cpu::reduction::min`）と値一致することを
+/// 複数サイズ（`REDUCE_SUM_CHUNK` 境界前後・大形状）で確認する
+/// （`0.0 == -0.0` として比較。±0 の符号は実装依存のため bit 一致は
+/// 要求しない。`reduce_model.rs` doc「min（イシュー #2155）」参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_min_all_matches_cpu() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    for &n in &[1usize, 2, 4095, 4096, 4097, 8192, 3 * 4096 + 17, 1 << 20] {
+        let data = gen_data(n, 0x2155_0000 + n as u64);
+        let metal_out = reduce
+            .run_min_all_f32(&ctx, &data)
+            .expect("metal min must succeed on Metal-equipped runner");
+        let cpu_out = cpu_min_all(&data);
+        assert_eq!(
+            metal_out, cpu_out,
+            "n={n}: 値不一致（metal={metal_out:?}, cpu={cpu_out:?}）"
+        );
+
+        // run-to-run 決定性（bit 一致。値自体の決定性とは別に検証する）。
+        let metal_out2 = reduce.run_min_all_f32(&ctx, &data).expect("metal min run2");
+        assert_eq!(
+            metal_out2.to_bits(),
+            metal_out.to_bits(),
+            "n={n}: run-to-run で bit 同一のはず"
+        );
+    }
+}
+
+/// [`MetalReduce::run_min_axis_f32`] が CPU 参照実装と複数 rank・複数
+/// `dim` で値一致することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_min_axis_matches_cpu() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    let cases: &[(&[usize], usize)] = &[
+        (&[5], 0),
+        (&[3, 4], 0),
+        (&[3, 4], 1),
+        (&[2, 3, 5], 0),
+        (&[2, 3, 5], 1),
+        (&[2, 3, 5], 2),
+        (&[2, 3, 4, 2], 2),
+    ];
+
+    for &(shape, dim) in cases {
+        let numel: usize = shape.iter().product();
+        let data = gen_data(numel, 0x2155_1000 + numel as u64);
+        let outer: usize = shape[..dim].iter().product();
+        let axis_len = shape[dim];
+        let inner: usize = shape[dim + 1..].iter().product();
+
+        let metal_out = reduce
+            .run_min_axis_f32(&ctx, &data, outer, axis_len, inner)
+            .expect("metal min axis must succeed on Metal-equipped runner");
+        let cpu_out = cpu_min_axis(&data, shape, dim);
+
+        assert_eq!(
+            metal_out.len(),
+            cpu_out.len(),
+            "shape={shape:?} dim={dim}: 出力長不一致"
+        );
+        assert_eq!(
+            metal_out, cpu_out,
+            "shape={shape:?} dim={dim}: 値不一致（metal={metal_out:?}, cpu={cpu_out:?}）"
+        );
+    }
+}
+
+/// NaN 混在（全 NaN の lane → `+inf`）・±0・非正規化数・`±inf` の境界値
+/// が CPU 参照実装と値一致することを確認する（`reduce_model.rs` の
+/// `min_all_returns_positive_infinity_for_all_nan_input` 等の実機版）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_min_nan_zero_inf_edge_cases_match_cpu() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    let cases: &[Vec<f32>] = &[
+        vec![f32::NAN; 4097],
+        vec![f32::NAN, 3.0, f32::NAN, -5.0, f32::NAN],
+        vec![0.0f32, -0.0f32, 1.0f32],
+        vec![f32::INFINITY, f32::NEG_INFINITY, 0.0f32],
+        vec![1.0e-40f32, -1.0e-40f32, f32::MIN_POSITIVE],
+    ];
+
+    for data in cases {
+        let metal_out = reduce
+            .run_min_all_f32(&ctx, data)
+            .expect("metal min (edge cases) must succeed");
+        let cpu_out = cpu_min_all(data);
+        assert_eq!(
+            metal_out, cpu_out,
+            "data={data:?}: 値不一致（metal={metal_out:?}, cpu={cpu_out:?}）"
+        );
+    }
+}

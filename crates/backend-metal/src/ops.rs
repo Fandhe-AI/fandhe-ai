@@ -3012,27 +3012,112 @@ impl BackendOps for MetalBackendOps {
     }
 
     /// `max`（`min`・`sum` とは異なり）reduction カーネル未実装
-    /// （`sum` は #1896 で結線済み。`max`／`min` は親 #1894 の残項目・
-    /// `docs/backend-metal-reduce-sum-design.md` §8「スコープ外」）。
+    /// （`sum` は #1896 で結線済み。`min` はイシュー #2155 で結線済み
+    /// （下記 [`Self::min`]）――`max` は引き続き親 #1894 の残項目
+    /// （`docs/backend-metal-reduce-sum-design.md` §8「スコープ外」・
+    /// イシュー #2155 実装計画 §7「スコープ外」）である）。
     fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "MetalBackendOps::max: reduction カーネル未実装（TASK-1.9c スコープ外）".into(),
         ))
     }
 
-    /// `min`（イシュー #1720）は `Self::max` と同じく reduction
-    /// カーネル未実装（`sum` は #1896 で結線済み）。`min` は
-    /// `BackendOps` のデフォルトメソッド（既定 `Unsupported`）のため
-    /// 本オーバーライドは機能上必須ではないが、`max` と横並びで明示し
-    /// 「Metal は max／min が未実装（sum は実装済み）」という事実を
-    /// 観測しやすくする（`Var::min` はホスト参照実装〈`eval::min`〉へ
-    /// フォールバックするため、この非対称〈`Var::max` は既存の必須
-    /// メソッド契約上フォールバックを持たずエラーとなる〉は既知の
-    /// 事実として記録する。実装計画 §7「スコープ外」参照）。
-    fn min(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::min: reduction カーネル未実装（イシュー #1720 スコープ外）".into(),
-        ))
+    /// `torch.min(x)` / `torch.min(x, dim=dim).values` 相当（イシュー
+    /// #2155。`reduce::MetalReduce::run_min_all_f32`／
+    /// `run_min_axis_f32` への委譲）。段取りは `metal_argext` と対称
+    /// （`sum`・argmax／argmin と同じ「shape 検査 → 空縮約の早期分岐 →
+    /// `checked_numel` → 起動計画の先出し → `contiguous()` →
+    /// `context_cache::cached_reduce`」の順）だが、`min` は
+    /// argmax／argmin と異なり**縮約結果の値そのもの**を返すため
+    /// `sum` と同じ「空縮約はエラー（CPU `reduction::min` は単位元を
+    /// 持たない `fold` のため `EmptyReduction`）」契約を持つ
+    /// （argmax／argmin の「空出力は空 Tensor」は本関数にも適用される
+    /// が、「`dim=None` かつ `numel==0`」または「`dim=Some(axis)` かつ
+    /// `shape[axis]==0`」は `KernelLaunchFailed` として GPU を起動
+    /// しない。`fandhe_ai_backend_cpu::reduction::min` の
+    /// `ReduceError::EmptyReduction { op: "min" }` と同じ文言・同じ
+    /// エラー分類。`crate::reduce_error_to_backend_error` の `"min"`
+    /// 分岐と一致させる）。
+    ///
+    /// **挙動変更の記録**（イシュー #2155）: 本結線により、Metal で
+    /// 空 `min` を呼んだときの結果は、従来の「未結線 → `Unsupported`
+    /// → `Var::min` のホスト参照実装〈`eval::min`〉フォールバック →
+    /// `AutodiffError::InvalidArgument`」から「GPU 起動なしで
+    /// `BackendError::KernelLaunchFailed` を直接返す」へ変わる。CPU・
+    /// CUDA（`fandhe_ai_backend_cpu::reduction::min`・`backend-cuda::
+    /// ops::CudaBackendOps::min`）と同じエラー分類へ揃う変更であり、
+    /// 非空 `min` の結果自体（値）は変わらない（実装計画 §2.1「エラー
+    /// 契約」参照）。
+    ///
+    /// 数値契約: `fandhe_ai_backend_cpu::reduction::min`
+    /// （`fold(f32::INFINITY, f32::min)`。NaN は伝播しない）と値が
+    /// 一致する（`0.0 == -0.0` として比較。±0 の符号は実装依存のため
+    /// bit 一致は主張しない。詳細は `crate::reduce_model` doc・
+    /// `docs/backend-metal-reduce-sum-design.md` §13）。
+    fn min(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let shape = a.shape().to_vec();
+
+        if shape.contains(&0) {
+            if dim.is_none() {
+                // `numel == 0`: CPU `reduction::min` は単位元を持たない
+                // `fold` のため `EmptyReduction` を返す（本関数 doc
+                // 「空縮約」参照）。
+                return Err(BackendError::KernelLaunchFailed(
+                    "empty reduction for op \"min\"".into(),
+                ));
+            }
+            if out_shape.contains(&0) {
+                // 空出力（`dim` 以外のいずれかの軸が 0）: 空 Tensor。
+                return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+            }
+            // `dim=Some(axis)` かつ `shape[axis]==0` のみ（他軸は非零）:
+            // 空縮約でありエラー（CPU と同じ `EmptyReduction` 相当）。
+            return Err(BackendError::KernelLaunchFailed(
+                "empty reduction for op \"min\"".into(),
+            ));
+        }
+
+        let numel = crate::gather_scatter_model::checked_numel(&shape)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        // カーネル `uint` 引数の上限超過を、デバイス初期化
+        // （`context_cache::cached_context`）より前に先出しして検査する
+        // （`Self::sum` と同型。`Var::min` はホストフォールバックを
+        // 持つため、この `Unsupported` はホストへ迂回される
+        // 〈argmax／argmin と同じ・`sum` とは異なる〉）。
+        let axis_plan = match dim {
+            None => {
+                crate::reduce_model::plan_reduce_all(numel).map_err(map_reduce_prepare_error)?;
+                None
+            }
+            Some(axis) => Some(
+                crate::reduce_model::plan_reduce_axis(&shape, axis)
+                    .map_err(map_reduce_prepare_error)?,
+            ),
+        };
+
+        let a_owned = a.contiguous();
+        let a_slice = a_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("min: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let reduce = context_cache::cached_reduce(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let data = match axis_plan {
+            None => {
+                let value = reduce
+                    .run_min_all_f32(&ctx, a_slice)
+                    .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+                vec![value]
+            }
+            Some(plan) => reduce
+                .run_min_axis_f32(&ctx, a_slice, plan.outer, plan.axis_len, plan.inner)
+                .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?,
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// `argmax`（イシュー #1951）。`crate::reduce::MetalReduce` の
@@ -4796,6 +4881,42 @@ impl BackendOps for MetalBackendOps {
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = softmax
             .run_softmax_f32(&ctx, x_slice, rows, cols)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::log_softmax`] の Metal 実装
+    /// （イシュー #2155）。`Self::softmax` と同型の段取り
+    /// （[`row_softmax_layout`] が非最終軸を `Ok(None)` として区別する
+    /// 契約に従い、その場合はデフォルトの `Unsupported`〈`Var::
+    /// log_softmax` がホスト参照実装 `eval::log_softmax_along` へ
+    /// フォールバックする合図〉を返す）だが、`context_cache::
+    /// cached_softmax`・`MetalSoftmax::run_log_softmax_f32`
+    /// （`softmax.rs::MetalSoftmax::run_row_kernel_f32` 共通 helper
+    /// 経由）を呼ぶ点のみが異なる。数値契約は `softmax.rs::
+    /// MetalSoftmax::run_log_softmax_f32` doc・`shaders/softmax.metal`
+    /// 「log_softmax（イシュー #2155）」節参照（REQ-2 統一複合判定。
+    /// CPU 参照実装との bit 一致は主張しない）。
+    fn log_softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "log_softmax: Metal 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）"
+                    .into(),
+            ));
+        };
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("log_softmax: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let softmax = context_cache::cached_softmax(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = softmax
+            .run_log_softmax_f32(&ctx, x_slice, rows, cols)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }

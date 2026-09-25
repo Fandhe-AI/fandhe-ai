@@ -44,18 +44,26 @@ fn map_validation_error(err: row_kernel::RowKernelValidationError) -> MetalError
     }
 }
 
-/// online softmax カーネル（1 パス／2 パスの 2 エントリ）のコンパイル済み
-/// パイプラインを保持するハンドル。
+/// online softmax カーネル（1 パス／2 パスの 2 エントリ）に加え、
+/// `log_softmax` forward（1 パス／2 パスの 2 エントリ。イシュー
+/// #2155）のコンパイル済みパイプラインを保持するハンドル。
 pub struct MetalSoftmax {
     onepass: objc2::rc::Retained<MtlPipeline>,
     twopass: objc2::rc::Retained<MtlPipeline>,
+    /// `log_softmax` forward（イシュー #2155）の 1 パス／2 パス
+    /// パイプライン。`onepass`／`twopass` と同じ経路選択・persistent
+    /// grid 導出・buffer レイアウトを共有し、最終正規化の式のみが
+    /// カーネル側で異なる（`run_row_kernel_f32`〈private helper〉doc
+    /// 参照）。
+    log_onepass: objc2::rc::Retained<MtlPipeline>,
+    log_twopass: objc2::rc::Retained<MtlPipeline>,
 }
 
 impl MetalSoftmax {
-    /// `ctx` のデバイス上で softmax 2 カーネルを実行時コンパイルし
-    /// パイプラインを構築する。`threadExecutionWidth == 32` の起動前検証は
-    /// [`crate::rmsnorm::MetalRmsNorm::new`] と同じ理由・同じ契約
-    /// （fail-closed）。
+    /// `ctx` のデバイス上で softmax・log_softmax 計 4 カーネルを実行時
+    /// コンパイルしパイプラインを構築する。`threadExecutionWidth == 32`
+    /// の起動前検証は [`crate::rmsnorm::MetalRmsNorm::new`] と同じ理由・
+    /// 同じ契約（fail-closed。4 パイプラインすべてに適用する）。
     pub fn new(ctx: &MetalContext) -> Result<Self, MetalError> {
         let src = objc2_foundation::NSString::from_str(SOFTMAX_MSL_SRC);
         let options = pipeline::compile_options();
@@ -68,8 +76,12 @@ impl MetalSoftmax {
 
         let onepass = pipeline::make_pipeline(ctx.device(), &library, "softmax_f32_onepass")?;
         let twopass = pipeline::make_pipeline(ctx.device(), &library, "softmax_f32_twopass")?;
+        let log_onepass =
+            pipeline::make_pipeline(ctx.device(), &library, "log_softmax_f32_onepass")?;
+        let log_twopass =
+            pipeline::make_pipeline(ctx.device(), &library, "log_softmax_f32_twopass")?;
 
-        for pipeline in [&onepass, &twopass] {
+        for pipeline in [&onepass, &twopass, &log_onepass, &log_twopass] {
             let width = pipeline.threadExecutionWidth();
             if width != SOFTMAX_THREADGROUP_WIDTH {
                 return Err(MetalError::UnexpectedThreadExecutionWidth {
@@ -79,19 +91,66 @@ impl MetalSoftmax {
             }
         }
 
-        Ok(Self { onepass, twopass })
+        Ok(Self {
+            onepass,
+            twopass,
+            log_onepass,
+            log_twopass,
+        })
     }
 
     /// `out = softmax(x)`（行ごと。`x` は `[rows, hidden]` の行優先
-    /// 1 次元化済みバッファ）を実行する。`rows == 0 || hidden == 0` は
-    /// 空結果の早期 return（`crate::rmsnorm::MetalRmsNorm::run_rmsnorm_f32_raw`
-    /// と同じ 0 要素契約）。
+    /// 1 次元化済みバッファ）を実行する。`run_row_kernel_f32`
+    /// 〈private helper〉へ `onepass`／`twopass` パイプラインを渡す
+    /// だけの薄いラッパー（イシュー #2155 でリファクタ抽出）。
     pub fn run_softmax_f32(
         &self,
         ctx: &MetalContext,
         x: &[f32],
         rows: usize,
         hidden: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        self.run_row_kernel_f32(ctx, x, rows, hidden, &self.onepass, &self.twopass)
+    }
+
+    /// `out = log_softmax(x)`（行ごと。イシュー #2155）を実行する。
+    /// `run_row_kernel_f32`〈private helper〉へ `log_onepass`／
+    /// `log_twopass` パイプラインを渡すだけの薄いラッパー
+    /// （[`Self::run_softmax_f32`] と同型）。`ops.rs::
+    /// MetalBackendOps::log_softmax` から呼ばれる。
+    pub fn run_log_softmax_f32(
+        &self,
+        ctx: &MetalContext,
+        x: &[f32],
+        rows: usize,
+        hidden: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        self.run_row_kernel_f32(ctx, x, rows, hidden, &self.log_onepass, &self.log_twopass)
+    }
+
+    /// [`Self::run_softmax_f32`]／[`Self::run_log_softmax_f32`] 共通の
+    /// 起動本体（イシュー #2155 でリファクタ抽出。旧
+    /// `run_softmax_f32` の本体をそのまま移動しただけで、検証
+    /// （`row_kernel::validate_row_kernel_launch`）・空結果の早期
+    /// return（`rows == 0 || hidden == 0`。`crate::rmsnorm::
+    /// MetalRmsNorm::run_rmsnorm_f32_raw` と同じ 0 要素契約）・経路選択
+    /// （`row_kernel::select_route`）・persistent grid 導出・
+    /// `encode_softmax_dispatch` の呼び出しは変更しない）。`pipeline`
+    /// は呼び出し元が渡すコンパイル済みハンドル（`softmax_f32_*` または
+    /// `log_softmax_f32_*`）で、バッファ・スカラー引数のレイアウト
+    /// （x・out・rows・hidden・grid_size）はどちらの組でも同一のため
+    /// `encode_softmax_dispatch` をそのまま流用できる（`shaders/
+    /// softmax.metal` 冒頭コメント「log_softmax（イシュー #2155）」
+    /// 参照）。既存の unsafe 起動（`encode_softmax_dispatch` 内）は
+    /// 変更せず、新たな unsafe は追加しない。
+    fn run_row_kernel_f32(
+        &self,
+        ctx: &MetalContext,
+        x: &[f32],
+        rows: usize,
+        hidden: usize,
+        onepass: &objc2::rc::Retained<MtlPipeline>,
+        twopass: &objc2::rc::Retained<MtlPipeline>,
     ) -> Result<Vec<f32>, MetalError> {
         row_kernel::validate_row_kernel_launch(rows, hidden, x.len(), None, None)
             .map_err(map_validation_error)?;
@@ -124,7 +183,7 @@ impl MetalSoftmax {
                         )
                     },
                 );
-                (&self.onepass, grid_size)
+                (onepass, grid_size)
             }
             RowKernelRoute::TwoPass => {
                 let grid_size = ctx.occupancy_params().map_or_else(
@@ -138,7 +197,7 @@ impl MetalSoftmax {
                         )
                     },
                 );
-                (&self.twopass, grid_size)
+                (twopass, grid_size)
             }
         };
 
