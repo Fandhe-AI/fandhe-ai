@@ -420,22 +420,45 @@ impl<'t> EmbeddingBagVars<'t> {
         // 空 bag（`bag_len == 0` になる可能性のある bag が 1 件でも
         // あれば構築する。バッチ内の全 bag が空になるケース（codex
         // P1／cursor[bot] Medium 指摘「Empty bags detach bag output」・
-        // PR #2281 是正）に備え、`weight` の行 0 を `0.0` 倍した
-        // 微分可能なゼロ値を使う（`weight.narrow(0, 0, 1)` は
-        // `num_embeddings > 0` により常に有効）。単純に
+        // PR #2281 是正）に備え、`weight` の行 0 への微分可能な経路を
+        // 保ったままゼロ値を出力する必要がある（`weight.narrow(0, 0,
+        // 1)` は `num_embeddings > 0` により常に有効）。単純に
         // `tape.var_no_grad` のゼロ定数を使うと、その bag が
         // `requires_grad == false` のまま `Var::cat` へ渡り、バッチ内
         // 全 bag が空の場合は `cat` 出力全体が `requires_grad == false`
         // に落ちて `Tape::backward` が失敗する（`weight` への期待される
-        // ゼロ勾配が得られない）。`mul` の VJP は他方オペランドの値を
-        // そのまま流すため、ゼロ定数（`requires_grad == false`）との
-        // 積は値としては `0.0`（有限な重み値 × 0.0 は非 NaN）のまま、
-        // `weight` への勾配経路（值は 0）だけを維持する。
-        let zero_scale = {
-            let zeros = Tensor::<f32>::zeros(&[1, embedding_dim]).map_err(AutodiffError::Shape)?;
-            self.weight.tape().var_no_grad(&zeros)
-        };
+        // ゼロ勾配が得られない）。
+        //
+        // **`weight_row0.mul(&zero_scale)`（旧実装）の NaN／inf 汚染
+        // （codex P1 指摘・PR #2281 是正）**: `mul` の forward 値は
+        // 両オペランドの実際の積（IEEE 754）であるため、`weight` の
+        // 行 0 に `NaN`／`±inf` が含まれていると `NaN * 0.0 == NaN`・
+        // `inf * 0.0 == NaN` となり、空 bag の出力が「常にゼロを返す」
+        // という公開契約（PyTorch `nn.EmbeddingBag` の空 bag 契約）を
+        // 破る。`from_parameters`／`set_parameter` は重みの有限性を
+        // 検証しないため、この経路は重みの値次第で壊れていた。
+        //
+        // **`masked_fill` による修正**: `Var::masked_fill` は
+        // 選択操作（`out[i] = if mask[i] { value } else { input[i] }`。
+        // `eval::masked_fill`／各バックエンド `masked_fill` 実装。
+        // `crates/backend-cpu/src/elementwise.rs::masked_fill_slice`
+        // 参照）であり、`mul` と異なり value と input を算術的に
+        // 組み合わせない。全要素を mask する
+        // （`weight_row0.masked_fill(&all_true, 0.0)`）ことで:
+        // - forward 値は `input`（`weight_row0`）の実際の値に一切
+        //   依存せず常に定数 `0.0`（有限）になる（`weight_row0` が
+        //   `NaN`／`inf` を含んでいても出力へ伝播しない）。
+        // - backward（`masked_fill_vjp`）は mask された位置の勾配を
+        //   常に `0.0` にする（`upstream` と `mask` のみから計算し
+        //   `input` の値を読まないため、こちらも `weight` の実際の
+        //   値に依存せず安全）。
+        // - `self`（`weight_row0`）がグラフ中に存在するため出力の
+        //   `requires_grad` は `weight` へ正しくリンクされたまま
+        //   （旧実装と同じく全 bag 空バッチでも `Tape::backward` が
+        //   成立する）。
         let weight_row0 = self.weight.narrow(0, 0, 1)?;
+        let all_masked = Tensor::<bool>::new(vec![true; embedding_dim], &[1, embedding_dim])
+            .map_err(AutodiffError::Shape)?;
 
         let mut bags: Vec<Var<'t>> = Vec::with_capacity(bag_count);
         for &(fstart, fend) in &bag_filtered_bounds {
@@ -443,9 +466,10 @@ impl<'t> EmbeddingBagVars<'t> {
             if bag_len == 0 {
                 // 空 bag（元々長さ 0、または全要素が padding_idx で
                 // 除外された）はゼロ行（PyTorch `nn.EmbeddingBag` の
-                // 空 bag 出力契約）。値は `0.0` のまま `weight` への
-                // 微分可能な経路を保つ（上記コメント参照）。
-                bags.push(weight_row0.mul(&zero_scale)?);
+                // 空 bag 出力契約）。値は常に `0.0`（`weight` の値に
+                // 非依存）のまま `weight` への微分可能な経路を保つ
+                // （上記コメント参照）。
+                bags.push(weight_row0.masked_fill(&all_masked, 0.0)?);
                 continue;
             }
             let slice = embedded_all.narrow(0, fstart, bag_len)?;
@@ -664,6 +688,41 @@ mod tests {
             .expect("全 bag が空でも weight への勾配経路は維持されるはず");
         // 値としては空 bag からの寄与は 0（`0.0` 倍したため）。
         assert_eq!(dense_vec(weight_grad), vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// codex P1 指摘（PR #2281。`all_bags_empty_still_backward_reaches_
+    /// weight` 是正後の再指摘）: `weight` の行 0 に `NaN`／`±inf` が
+    /// 含まれていても、空 bag の出力は PyTorch `nn.EmbeddingBag` の
+    /// 空 bag 契約どおり常に `0.0` であること（`weight_row0.mul(&zero)`
+    /// による旧実装は `NaN * 0.0 == NaN`／`inf * 0.0 == NaN` で汚染
+    /// されていた。`masked_fill` ベースの現行実装は `weight` の値を
+    /// 出力へ一切伝播しない）。あわせて `weight` への勾配経路（値は
+    /// `0.0`）も維持されること。
+    #[test]
+    fn empty_bag_output_is_zero_even_when_weight_row0_is_non_finite() {
+        let w = Tensor::<f32>::new(vec![f32::NAN, f32::INFINITY, 3.0, 4.0], &[2, 2]).unwrap();
+        // bag 0: 全 id が padding_idx=0 のため空。bag 1: 通常の非空 bag。
+        let ids = Tensor::<i32>::new(vec![0, 0, 1, 1], &[2, 2]).unwrap();
+        let t = tape();
+        let bag = EmbeddingBag::from_parameters(w, EmbeddingBagMode::Sum, Some(0)).unwrap();
+        let vars = bag.bind(&t);
+        let out = vars.forward(&ids).unwrap();
+        let got = dense_vec(&out.to_tensor());
+        // bag 0（空。weight 行 0 は [NaN, inf] だが出力は常に [0, 0]）、
+        // bag 1（row 1 の和 = [3,4]+[3,4] = [6,8]）。
+        assert_eq!(&got[..2], &[0.0, 0.0]);
+        assert_eq!(&got[2..], &[6.0, 8.0]);
+
+        let loss = out.sum(None).unwrap();
+        let grads = t.backward(&loss).unwrap();
+        let weight_grad = grads
+            .get(&vars.weight)
+            .unwrap()
+            .expect("weight への勾配経路は非有限値でも維持されるはず");
+        let dw = dense_vec(weight_grad);
+        // 空 bag（行 0）からの寄与は常に 0（NaN/inf 汚染なし）。
+        // 行 1 は非空 bag に 2 回参照されるため勾配は 2 倍。
+        assert_eq!(dw, vec![0.0, 0.0, 2.0, 2.0]);
     }
 
     /// PR #2281 是正（cursor[bot] Low「Empty batch rejected with
