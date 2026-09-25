@@ -177,6 +177,7 @@ mod normalization;
 mod padding;
 mod pooling;
 mod rnn;
+mod rnn_stacked;
 mod transformer_encoder_layer;
 mod unflatten;
 mod upsample;
@@ -216,6 +217,9 @@ pub use pooling::{
 pub use rnn::{
     Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,
     RnnCellVars, RnnSeqOutput,
+};
+pub use rnn_stacked::{
+    RnnConfig, StackedGru, StackedLstm, StackedLstmSeqOutput, StackedRnn, StackedRnnSeqOutput,
 };
 pub use transformer_encoder_layer::{
     FeedForwardActivation, TransformerEncoderLayer, TransformerEncoderLayerVars,
