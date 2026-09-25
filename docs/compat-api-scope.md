@@ -254,6 +254,21 @@ reshape」で呼ぶ合成のみで新規 `Op`／`BackendOps` を追加しない�
 ——facade からは到達できないまま内部クレート限定で残る。詳細は
 `docs/norm-ops-design.md` §11。
 
+**PixelShuffle／PixelUnshuffle（#2162・親 #2131）**: 上記「GroupNorm／
+InstanceNorm」行と同じ理由で、本 Tier 1 表（1 節）にも Tier 2（1.3
+節）にも個別の行を持たない。それでも `nn::PixelShuffle`／
+`nn::PixelUnshuffle`（`crates/autodiff/src/nn/pixel_shuffle.rs`）を
+実装済みである——既存の `Var::reshape`／`Var::permute`／
+`Var::contiguous` の合成のみで構成し新規 `Op`／`BackendOps` を追加
+しないため、本文書 §5 の範囲拡張手続き（新規カーネル・新規演算の
+追加）の対象外と判断した。`Module` trait への統合（`forward`／
+`forward_host`）は行ったが、**facade 公開面拡張
+（`compat::Sequential::add_pixel_shuffle`／`add_pixel_unshuffle`・
+`Var::pixel_shuffle`／`Var::pixel_unshuffle`）は本文書 §5 の承認
+（経路 1 または経路 2）が未取得のため実施していない**——facade
+からは到達できないまま内部クレート限定で残る。詳細は
+`docs/autodiff-pixel-shuffle-decision.md`。
+
 ### 1.3 Tier 2（長尾。対象範囲・未実装）
 
 REQ-9 2026-09-12 追記（`04-requirements.md:232`）の列挙を、実装リポ
