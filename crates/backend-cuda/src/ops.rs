@@ -5569,7 +5569,8 @@ impl BackendOps for CudaBackendOps {
     /// run_log_softmax_f32`（`softmax.rs::CudaSoftmax::
     /// run_row_kernel_f32_raw` 共通 helper 経由）を呼ぶ点のみが異なる。
     /// 数値契約は `softmax.rs::CudaSoftmax::run_log_softmax_f32` doc・
-    /// `kernels_softmax.rs` 冒頭コメント「`log_softmax`」節参照
+    /// `kernels_softmax.rs::LOG_SOFTMAX_F32_ONEPASS`／
+    /// `LOG_SOFTMAX_F32_TWOPASS` の doc コメント参照
     /// （REQ-2 統一複合判定。CPU 参照実装との bit 一致は主張しない）。
     fn log_softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
         let Some((rows, cols)) =

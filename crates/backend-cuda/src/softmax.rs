@@ -408,9 +408,10 @@ impl CudaSoftmax {
     /// 変更しない。`onepass`／`twopass` は呼び出し元が渡すカーネル
     /// ハンドル（`softmax_f32_*` または `log_softmax_f32_*`）で、
     /// バッファ・スカラー引数のレイアウト（x・out・rows・cols・scale）
-    /// はどちらの組でも同一のため共通化できる（`kernels_softmax.rs`
-    /// 冒頭コメント「`log_softmax` は `softmax` と最終書き出しの式のみ
-    /// が異なる」参照）。既存の unsafe 起動ブロックは本関数へ移動する
+    /// はどちらの組でも同一のため共通化できる（`kernels_softmax.rs::
+    /// LOG_SOFTMAX_F32_ONEPASS`／`LOG_SOFTMAX_F32_TWOPASS` の doc コメント
+    /// 「`log_softmax` は `softmax` と最終書き出しの式のみが異なる」旨の
+    /// 記述参照）。既存の unsafe 起動ブロックは本関数へ移動する
     /// だけで、新たな unsafe は追加しない（SAFETY コメントは維持）。
     fn run_row_kernel_f32_raw(
         &self,
