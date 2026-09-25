@@ -149,7 +149,15 @@ pub fn ne_bool<'t>(a: &Var<'t>, b: &Var<'t>) -> Result<Tensor<bool>, AutodiffErr
 /// 型付きエラーで拒否する（本番経路 panic 禁止規約
 /// `.claude/rules/coding-rust.md`。codex-review P1 指摘の是正・
 /// イシュー #2141・PR #2241）。
-fn checked_bytes_for<T>(shape: &[usize]) -> Result<(), AutodiffError> {
+///
+/// **`pub(crate)`（同一クレート内共有。イシュー #2147・PR #2263
+/// codex-review P1 是正）**: `crate::reduce_ops::ensure_alloc_fits_f32`
+/// （`prod`／`logsumexp`／`any`／`all`／`norm_p` の全公開入口が冒頭で
+/// 呼ぶ唯一の確保前検査ヘルパ）が `vec![...; numel]` を確保する前の
+/// 同種の境界検査として再利用する。同一クレート内のため「クレートを
+/// 跨ぐため個別に持つ」という上記の複製理由は適用されず、`pub(crate)`
+/// で共有する。
+pub(crate) fn checked_bytes_for<T>(shape: &[usize]) -> Result<(), AutodiffError> {
     let numel = shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))

@@ -3588,6 +3588,68 @@ pub trait BackendOps {
             "vector_norm: default fail-safe (no device-side reduction kernel available)".into(),
         ))
     }
+
+    /// log-sum-exp（`torch.logsumexp(dim)` 相当。イシュー #2147・
+    /// 親 #2131「5-B 演算」）。`dim=None` は全要素縮約（スカラー出力）。
+    /// `sum`／`exp`／`log` の素朴な合成は `max.detach → sub → exp → sum
+    /// → log → add` の経路で全要素が `-inf`（または `+inf` を含む）
+    /// lane で `NaN` を生むため、`autodiff` クレートの `Var::sum` 等の
+    /// 合成ではなく専用のデバイス側カーネル余地を持つメソッドとして独立させる
+    /// （`docs/autodiff-reduce-ops-decision.md` §2.4）。
+    ///
+    /// # 数値契約
+    /// [`Self::var`] と同じ `f64` 二段計算契約: 縮約対象を `f64` の
+    /// `m = max(x)`（非有限なら `m` を `0` に置き換える安定化シフト）で
+    /// シフトしてから `Σ exp(x_i − m)` を `f64` で蓄積し、
+    /// `ln(acc) + m` を計算して最後に 1 回だけ `f32` へ downcast する。
+    /// `NaN` 入力はそのまま伝播する。
+    ///
+    /// # エラー契約
+    /// 縮約対象の要素数が `0` の場合は [`BackendError::InvalidArgument`]
+    /// を返す（`-inf` を黙って返さない安全側の判断。[`Self::var`] と
+    /// 同じ方針）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn logsumexp(
+        &self,
+        _a: &Tensor<f32>,
+        _dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "logsumexp: default fail-safe (no device-side reduction kernel available)".into(),
+        ))
+    }
+
+    /// p-ノルム（`torch.linalg.vector_norm(ord=p)` 相当。イシュー
+    /// #2147・親 #2131）。`dim=None` は全要素縮約（スカラー出力）。
+    /// `p` は呼び出し元（`autodiff` クレートの `Var` 側の入口）が有限かつ正で
+    /// あることを検証済みの前提（本メソッド自体は `p` を検査しない。
+    /// `docs/autodiff-reduce-ops-decision.md` §2.5「`p` の検証」）。
+    ///
+    /// # 数値契約
+    /// [`Self::vector_norm`] と同じ `f64` 二段計算契約だが、overflow を
+    /// 避けるためスケール形（`mx = max|x_i|` を括り出し、`norm = mx ·
+    /// (Σ (|x_i|/mx)^p)^(1/p)` を `f64` で計算）を用いる。`mx == 0` の
+    /// lane は `0.0`、`mx` が `inf` の lane は `inf`、`NaN` はそのまま
+    /// 伝播する。最後に 1 回だけ `f32` へ downcast する。
+    ///
+    /// # エラー契約
+    /// 縮約対象の要素数が `0` の場合は [`BackendError::InvalidArgument`]
+    /// を返す（[`Self::vector_norm`] と同じ方針）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn vector_norm_p(
+        &self,
+        _a: &Tensor<f32>,
+        _p: f32,
+        _dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "vector_norm_p: default fail-safe (no device-side reduction kernel available)".into(),
+        ))
+    }
 }
 
 /// `default_gemm_batched`（CUDA／Metal が経由する既定合成実装）と
@@ -5070,6 +5132,29 @@ mod tests {
         ));
         assert!(matches!(
             ops.vector_norm(&a, VectorNormOrd::L2, Some(0)),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
+
+    /// [`BackendOps::logsumexp`]／[`BackendOps::vector_norm_p`] の既定
+    /// 実装がいずれも fail-safe（[`BackendError::Unsupported`]）を
+    /// 返すことを確認する（イシュー #2147。`var_vector_norm_defaults_
+    /// are_unsupported` と同型の回帰ガード）。
+    #[test]
+    fn logsumexp_vector_norm_p_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+
+        assert!(matches!(
+            ops.logsumexp(&a, None),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.vector_norm_p(&a, 3.0, None),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.vector_norm_p(&a, 3.0, Some(0)),
             Err(BackendError::Unsupported(_))
         ));
     }

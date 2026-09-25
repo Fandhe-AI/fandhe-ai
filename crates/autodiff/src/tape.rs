@@ -204,6 +204,28 @@ pub(crate) enum Op {
         correction: usize,
     },
 
+    /// log-sum-exp（`crate::reduce_ops::logsumexp`。`torch.logsumexp
+    /// (dim)` 相当。イシュー #2147・親 #2131「5-B 演算」）。`Op::Var`／
+    /// `Op::VectorNorm` と同じ eager・フォールバック契約
+    /// （`BackendOps::logsumexp` → `Unsupported` のときのみ `eval::
+    /// logsumexp_along` へフォールバック）。`sum`／`exp`／`log` の合成
+    /// では全要素が `-inf`（または `+inf` を含む）lane で `NaN` が出る
+    /// ため専用ノードとして分離する（`docs/autodiff-reduce-ops-
+    /// decision.md` §2.4）。
+    LogSumExp { input: NodeId, dim: Option<usize> },
+    /// p-ノルム（`crate::reduce_ops::norm_p`。`torch.linalg.vector_norm
+    /// (ord=p)` 相当。イシュー #2147）。`p` は呼び出し元
+    /// （`reduce_ops::norm_p`）が有限かつ正であることを検証済みの値を
+    /// `Op` payload として保持する（`RmsNorm`／`LayerNorm` の `eps` と
+    /// 同じ扱い。`Op` は `#[derive(Debug, Clone)]` のみのため `f32`
+    /// payload を持たせてよい）。`Op::Var`／`Op::VectorNorm` と同じ
+    /// eager・フォールバック契約。
+    PNorm {
+        input: NodeId,
+        p: f32,
+        dim: Option<usize>,
+    },
+
     /// 非 elementwise。常に実体化済み。`Max` と対称（イシュー #1720。
     /// `Var::min`）。VJP は `Max` と共有ヘルパー
     /// （`grad::extremum_first_match_vjp`）を使う——forward 記録値
@@ -1412,6 +1434,12 @@ impl Op {
             // ため非適格（最小・安全側の判断。将来 `true` 化する場合は
             // `Op::Sum`／`Op::Max` 型の再計算分岐を追加する）。
             Op::Var { .. } | Op::VectorNorm { .. } | Op::Std { .. } => false,
+            // `Op::LogSumExp`／`Op::PNorm`（イシュー #2147）は `Op::Var`／
+            // `Op::VectorNorm` と同じく eager 実体化演算だが
+            // `recompute_value` に再計算分岐を持たないため非適格
+            // （最小・安全側の判断。将来 `true` 化する場合は
+            // `Op::Sum`／`Op::Max` 型の再計算分岐を追加する）。
+            Op::LogSumExp { .. } | Op::PNorm { .. } => false,
             // `Op::Cumsum`／`Op::Cumprod`（イシュー #1731）は eager
             // 実体化演算で `recompute_value` に再計算経路を持たない
             // ため非適格（非網羅 match 是正で新規 variant 追加時に
@@ -1498,6 +1526,8 @@ impl Op {
             | Op::Var { input, .. }
             | Op::VectorNorm { input, .. }
             | Op::Std { input, .. }
+            | Op::LogSumExp { input, .. }
+            | Op::PNorm { input, .. }
             | Op::Min { input, .. }
             | Op::Mean { input, .. }
             | Op::Reshape { input }
@@ -1767,6 +1797,8 @@ impl Op {
             | Op::Var { .. }
             | Op::VectorNorm { .. }
             | Op::Std { .. }
+            | Op::LogSumExp { .. }
+            | Op::PNorm { .. }
             | Op::Min { .. }
             | Op::MseLoss { .. }
             | Op::HuberLoss { .. }

@@ -26,6 +26,18 @@
 //!   （<https://docs.rs/rayon/latest/rayon/iter/trait.IndexedParallelIterator.html>）。
 //!   本モジュールはこの保証を用いてチャンク部分和をチャンク番号順に逐次結合し、
 //!   PoC-v2-5 の「逐次固定順序で bit 一致」前提を踏襲する。
+//!   **例外（`logsumexp`／`vector_norm_p`。イシュー #2147・PR #2263
+//!   codex-review P2 是正）**: この 2 演算の全縮約経路（`logsumexp_slice`・
+//!   `vector_norm_p_slice`。いずれも非公開関数）は `autodiff::eval` の
+//!   ホスト参照実装（`logsumexp_along`／`vector_norm_p_along`）と **bit 完全一致**
+//!   させる契約（`docs/autodiff-reduce-ops-decision.md` §2.4）を持つ。
+//!   eval 側は `dim=None` を「単一 lane・逐次 `f64` fold」として計算する
+//!   ため、CHUNK 単位でチャンク内逐次 → チャンク間結合という 2 段の
+//!   結合順序（本節上記の一般契約）とは異なり、要素数が `CHUNK`
+//!   （4096）を超えると丸め結果が食い違う。そのためこの 2 演算のみ
+//!   `par_chunks` を使わず、eval と同一の単一逐次 `f64` fold をそのまま
+//!   用いる（全軸縮約の rayon 並列性を犠牲にする。軸指定側は他演算と
+//!   同じ lane 間並列化のままで問題は生じない）。
 //!
 //! ## `sum`/`mean` の `f64` アキュムレータ契約（イシュー #1675）
 //!
@@ -113,6 +125,11 @@ pub enum ReduceError {
     /// matrix_norm` が `MatrixNormOrd` に対して行う fail-closed 拒否と
     /// 同方針。イシュー #1723）が渡された。
     UnsupportedOrd(String),
+    /// `vector_norm_p` へ渡された `p` が無効（有限かつ正の実数ではない。
+    /// イシュー #2147）。`NaN`／`±inf`／`0`／負の値を fail-closed に
+    /// 拒否する（`fandhe_ai_tensor_core::BackendOps::vector_norm_p`
+    /// doc「エラー契約」参照）。
+    InvalidOrder(f32),
 }
 
 impl fmt::Display for ReduceError {
@@ -129,6 +146,9 @@ impl fmt::Display for ReduceError {
             ),
             ReduceError::UnsupportedOrd(desc) => {
                 write!(f, "unsupported VectorNormOrd variant: {desc}")
+            }
+            ReduceError::InvalidOrder(p) => {
+                write!(f, "vector_norm_p: p must be finite and positive, got {p}")
             }
         }
     }
@@ -261,6 +281,35 @@ pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
     dims.iter()
         .try_fold(1usize, |acc, &d| acc.checked_mul(d))
         .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))
+}
+
+/// [`checked_product`] に加え、`f32` 換算のバイトサイズが `Vec` の
+/// allocation 上限（`isize::MAX` バイト）に収まるかも検査する
+/// （`backend-cpu::ops::checked_alloc_numel_f32`／`backend-cuda::
+/// ops::checked_bytes_for`／`backend-metal::ops::checked_bytes_for`／
+/// `autodiff::bool_ops::checked_bytes_for` と同型の独立複製。可視性の
+/// 意味論が異なるモジュール・クレートを跨ぐため個別に持つ方針は本
+/// リポジトリの既存パターン〈`backend-cpu::ops.rs` の同名関数
+/// doc〉を踏襲する）。
+///
+/// **動機**: `logsumexp`／`vector_norm_p` は小さなストレージを
+/// 巨大な shape へ broadcast した view を受け取りうる。`outer *
+/// inner`（軸指定側の出力要素数）や `a.numel()`（全縮約・非
+/// contiguous 側の入力要素数）は `usize` の積としては収まっても、
+/// `f32` 換算のバイト数が `isize::MAX` を超えることがあり、その
+/// まま `Vec::with_capacity`／`.collect()` へ進むと型付きエラー
+/// ではなく capacity overflow panic になる（本番経路 panic 禁止
+/// 規約 `.claude/rules/coding-rust.md`。codex-review P1 指摘の是正・
+/// イシュー #2147・PR #2263）。
+pub(crate) fn checked_alloc_numel_f32(shape: &[usize]) -> Result<usize, ReduceError> {
+    let numel = checked_product(shape)?;
+    let bytes = numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+    if bytes > isize::MAX as usize {
+        return Err(ReduceError::Shape(ShapeError::ElementCountOverflow));
+    }
+    Ok(numel)
 }
 
 /// 軸指定 reduction（`dim=Some(axis)`）の出力要素ごとの畳み込みを行う共通
@@ -607,6 +656,281 @@ pub fn vector_norm(
                 .checked_mul(inner)
                 .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
             axis_reduce_vector_norm(a, axis, kind)
+        }
+    };
+    Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
+}
+
+/// `f64` の NaN 伝播 2 項最大値（`eval::nan_propagating_max` の `f64`
+/// 版。イシュー #2147）。`f64::max` は非 `NaN` 側を返してしまうため、
+/// `logsumexp`／`vector_norm_p` の `m = max(x)`／`mx = max|x_i|` が
+/// `NaN` 入力を静かに消さないよう本関数で置き換える。
+fn nan_propagating_max_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// `logsumexp`（`dim=None` の全縮約対象。空でないことは呼び出し元
+/// [`logsumexp`] が事前検査済みの前提）を `f64` で計算する（イシュー
+/// #2147・PR #2263 codex-review P2 是正）。`m = max(x)`（非有限なら
+/// 安定化シフトを `0` に切り替える）→`Σ exp(x_i − m)` を `f64` で蓄積
+/// → `ln(acc) + m` を計算し、最後に 1 回だけ `f32` へ downcast する
+/// （`fandhe_ai_tensor_core::BackendOps::logsumexp` doc「数値契約」
+/// 参照）。
+///
+/// **`par_chunks` を使わない理由（他の全縮約 slice 関数〈`sum_slice`
+/// 等〉との違い）**: この関数は `eval::logsumexp_along`（`dim=None`
+/// 時の `outer=1, axis_len=n, inner=1` 分解）の**逐次 `f64` 蓄積**
+/// （`0..n` を単一の `fold` で左から右へ加算）と bit 完全一致させる
+/// 契約を持つ（`docs/autodiff-reduce-ops-decision.md` §2.4）。CHUNK
+/// 単位でチャンク内を逐次累積してからチャンク結果をチャンク番号順に
+/// 結合する方式（`sum_slice` 等が使う）は、浮動小数点加算が結合則を
+/// 満たさないため要素数が `CHUNK`（4096）を超えると eval の単一逐次
+/// fold と異なる丸め結果になり bit 一致が崩れる（PR #2263
+/// codex-review 指摘。回帰テストは `crates/facade/tests/
+/// reduce_ops_backend_parity.rs::
+/// cpu_logsumexp_vector_norm_p_forward_bit_matches_naive_reference_across_chunk_boundary`）。
+/// そのためこの全縮約経路は rayon 並列化を諦め、eval と同一の演算列
+/// （逐次 `f64` fold）をそのまま踏襲する。軸指定側
+/// （[`axis_reduce_logsumexp`]）は出力要素（lane）間のみ rayon で
+/// 並列化し、各 lane 内は元々逐次走査のため本問題は生じない。
+fn logsumexp_slice(data: &[f32]) -> f32 {
+    let m = data.iter().fold(f64::NEG_INFINITY, |acc, &v| {
+        nan_propagating_max_f64(acc, v as f64)
+    });
+    let shift = if m.is_finite() { m } else { 0.0 };
+    let mut acc = 0.0f64;
+    for &v in data {
+        acc += ((v as f64) - shift).exp();
+    }
+    (acc.ln() + shift) as f32
+}
+
+/// [`logsumexp_slice`] の軸指定（`dim=Some(axis)`）版。`axis_reduce_
+/// vector_norm` と同じ決定性契約（出力要素側を rayon で並列化・縮約軸は
+/// 逐次走査）。
+fn axis_reduce_logsumexp(a: &Tensor<f32>, axis: usize) -> Vec<f32> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+
+    let compute = |flat: usize| -> f32 {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut m = f64::NEG_INFINITY;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            m = nan_propagating_max_f64(m, v);
+        }
+        let shift = if m.is_finite() { m } else { 0.0 };
+        let mut acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            acc += (v - shift).exp();
+        }
+        (acc.ln() + shift) as f32
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// 軸指定・全縮約いずれにも対応する `logsumexp`（`torch.logsumexp(dim)`
+/// 相当。イシュー #2147）。`dim=None` は rank 0（スカラー）テンソルを
+/// 返す。数値契約は [`fandhe_ai_tensor_core::BackendOps::logsumexp`]
+/// doc を正とする。
+///
+/// 縮約対象の要素数が `0` の場合は [`ReduceError::EmptyReduction`]
+/// （`op: "logsumexp"`）を返す（`-inf` を黙って返さない安全側の判断。
+/// `var`／`norm` と対称）。
+pub fn logsumexp(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, ReduceError> {
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let n = match dim {
+        None => a.numel(),
+        Some(axis) => a.shape()[axis],
+    };
+    if n == 0 {
+        return Err(ReduceError::EmptyReduction { op: "logsumexp" });
+    }
+    let data = match dim {
+        None => {
+            let total = match a.as_slice() {
+                Some(slice) => logsumexp_slice(slice),
+                None => {
+                    // 非 contiguous（`gather_elements` が実体化する）
+                    // 経路のみ確保前検査する。`as_slice()` が `Some` の
+                    // 場合は既に実体化済みのスライスを走査するだけで
+                    // 新規確保がないため検査不要（[`checked_alloc_numel_f32`]
+                    // doc「動機」参照）。
+                    checked_alloc_numel_f32(a.shape())?;
+                    logsumexp_slice(&gather_elements(a))
+                }
+            };
+            vec![total]
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            // `axis_reduce_logsumexp` の `.collect()` は `out_shape`
+            // （`outer * inner` 要素）と同じサイズの `Vec<f32>` を
+            // 確保する。直上の `checked_mul` は要素数積のオーバー
+            // フローのみを検査するため、確保可能バイト数
+            // （`isize::MAX` 上限）は別途検査する
+            // （[`checked_alloc_numel_f32`] doc「動機」参照）。
+            checked_alloc_numel_f32(&out_shape)?;
+            axis_reduce_logsumexp(a, axis)
+        }
+    };
+    Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
+}
+
+/// p-ノルム（`data`。`dim=None` の全縮約対象。空でないこと・`p` が有限
+/// かつ正であることは呼び出し元 [`vector_norm_p`] が事前検査済みの
+/// 前提）を `f64` で計算する（イシュー #2147・PR #2263 codex-review
+/// P2 是正）。`mx = max|x_i|` を括り出してから
+/// `norm = mx · (Σ (|x_i|/mx)^p)^(1/p)` を計算する overflow-safe な
+/// スケール形（`fandhe_ai_tensor_core::BackendOps::vector_norm_p` doc
+/// 「数値契約」参照）。
+///
+/// **`par_chunks` を使わない理由**: [`logsumexp_slice`] と同じ理由
+/// （同関数 doc 参照）で、`eval::vector_norm_p_along`（`dim=None` 時の
+/// 逐次 `f64` fold）と bit 完全一致させる契約を持つため、この全縮約
+/// 経路は rayon 並列化を用いない。
+fn vector_norm_p_slice(data: &[f32], p: f64) -> f32 {
+    let mx = data.iter().fold(0.0f64, |acc, &v| {
+        nan_propagating_max_f64(acc, (v as f64).abs())
+    });
+    if mx.is_nan() {
+        return f32::NAN;
+    }
+    if mx == 0.0 {
+        return 0.0;
+    }
+    if mx.is_infinite() {
+        return f32::INFINITY;
+    }
+    let mut acc = 0.0f64;
+    for &v in data {
+        let ratio = (v as f64).abs() / mx;
+        acc += ratio.powf(p);
+    }
+    (mx * acc.powf(1.0 / p)) as f32
+}
+
+/// [`vector_norm_p_slice`] の軸指定（`dim=Some(axis)`）版。
+fn axis_reduce_vector_norm_p(a: &Tensor<f32>, axis: usize, p: f64) -> Vec<f32> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+
+    let compute = |flat: usize| -> f32 {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut mx = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            mx = nan_propagating_max_f64(mx, v.abs());
+        }
+        if mx.is_nan() {
+            return f32::NAN;
+        }
+        if mx == 0.0 {
+            return 0.0;
+        }
+        if mx.is_infinite() {
+            return f32::INFINITY;
+        }
+        let mut acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let v = a.get(&full_idx).unwrap_or(0.0) as f64;
+            let ratio = v.abs() / mx;
+            acc += ratio.powf(p);
+        }
+        (mx * acc.powf(1.0 / p)) as f32
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// 軸指定・全縮約いずれにも対応する `vector_norm_p`（`torch.linalg.
+/// vector_norm(ord=p)` 相当。イシュー #2147）。`dim=None` は rank 0
+/// （スカラー）テンソルを返す。数値契約は [`fandhe_ai_tensor_core::
+/// BackendOps::vector_norm_p`] doc を正とする。
+///
+/// `p` が有限かつ正でなければ [`ReduceError::InvalidOrder`]。縮約対象の
+/// 要素数が `0` の場合は [`ReduceError::EmptyReduction`]（`op:
+/// "norm_p"`）を返す。
+pub fn vector_norm_p(
+    a: &Tensor<f32>,
+    p: f32,
+    dim: Option<usize>,
+) -> Result<Tensor<f32>, ReduceError> {
+    if !p.is_finite() || p <= 0.0 {
+        return Err(ReduceError::InvalidOrder(p));
+    }
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let n = match dim {
+        None => a.numel(),
+        Some(axis) => a.shape()[axis],
+    };
+    if n == 0 {
+        return Err(ReduceError::EmptyReduction { op: "norm_p" });
+    }
+    let p64 = p as f64;
+    let data = match dim {
+        None => {
+            let total = match a.as_slice() {
+                Some(slice) => vector_norm_p_slice(slice, p64),
+                None => {
+                    // `logsumexp` の `None` 分岐と同じ理由（非 contiguous
+                    // 経路のみ確保前検査。[`checked_alloc_numel_f32`]
+                    // doc「動機」参照）。
+                    checked_alloc_numel_f32(a.shape())?;
+                    vector_norm_p_slice(&gather_elements(a), p64)
+                }
+            };
+            vec![total]
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            // `logsumexp` の `Some(axis)` 分岐と同じ理由（`axis_reduce_
+            // vector_norm_p` の `.collect()` 確保前にバイト数上限も
+            // 検査する。[`checked_alloc_numel_f32`] doc「動機」参照）。
+            checked_alloc_numel_f32(&out_shape)?;
+            axis_reduce_vector_norm_p(a, axis, p64)
         }
     };
     Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
@@ -1132,6 +1456,60 @@ mod tests {
         // （axis_reduce 呼び出し前の checked_mul 検査。reduction.rs:226 付近）。
         let t = Tensor::<f32>::zeros(&[1usize << 40, 0, 1usize << 40]).unwrap();
         let err = sum(&t, Some(1)).unwrap_err();
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    // --- `logsumexp`／`vector_norm_p` の確保前バイト数上限検査
+    // （codex-review P1 是正・イシュー #2147・PR #2263）: 小さな
+    // ストレージを巨大な shape へ broadcast した view は、要素数積が
+    // `usize` に収まっても `f32` 換算のバイト数が `isize::MAX` を
+    // 超えうる。`checked_alloc_numel_f32` が `Vec::with_capacity`／
+    // `.collect()` 前に型付きエラーで拒否し panic しないことを検証する
+    // （本質は panic しないこと。エラー内容は `ElementCountOverflow`
+    // で共通）。
+
+    #[test]
+    fn logsumexp_vector_norm_p_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+        // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+        // （軸 1 は実軸〈長さ 4・非空縮約〉、軸 0 は broadcast で巨大）。
+        // dim=Some(1) で縮約すると out_shape=[1usize << 61] となり、
+        // 要素数積（2^61）自体は usize に収まるが f32 換算バイト数
+        // （2^61 * 4 = 2^63）が isize::MAX（2^63 - 1）を 1 超える。
+        let base = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+
+        let err = logsumexp(&huge, Some(1)).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+
+        let err = vector_norm_p(&huge, 3.0, Some(1)).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn logsumexp_vector_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+        // base shape [1] を broadcast して [1usize << 61] にする
+        // （非 contiguous・全縮約〈dim=None〉。`as_slice()` が `None`
+        // を返すため `gather_elements` 経路に入る）。
+        let base = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+        assert!(huge.as_slice().is_none(), "fixture は非 contiguous のはず");
+
+        let err = logsumexp(&huge, None).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+
+        let err = vector_norm_p(&huge, 3.0, None).expect_err("確保前に拒否されるはず");
         assert!(matches!(
             err,
             ReduceError::Shape(ShapeError::ElementCountOverflow)

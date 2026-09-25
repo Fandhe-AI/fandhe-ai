@@ -192,6 +192,13 @@
 //! 再エクスポートしない（`docs/autodiff-activation-ops-decision.md`・
 //! モジュール doc 参照）。
 
+//! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
+//! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。
+//! [`matrix_ops`] と同じく非公開の自由関数群（`Var` への inherent
+//! メソッドではない）で、facade 公開は承認待ちのため意図的に
+//! 再エクスポートしない（`docs/autodiff-reduce-ops-decision.md`・
+//! モジュール doc 参照）。
+
 //! イシュー #2149（親 #2131）で、[`crate::var::Var::einsum`] が
 //! rank≥3 `matmul`（#1600 未実装）を理由に拒否していた batch 添字
 //! （両オペランドと出力に共通する添字。例 `"bij,bjk->bik"`）を伴う
@@ -223,6 +230,7 @@ pub mod nn;
 pub mod optim;
 pub mod rearrange_ops;
 mod reduce_dims;
+pub mod reduce_ops;
 pub mod scalar_unary_ops;
 mod tape;
 #[cfg(test)]

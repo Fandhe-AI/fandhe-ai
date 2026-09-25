@@ -2069,6 +2069,124 @@ struct KvCacheHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarMatrixOpsHoldDoctestGuard;
 
+/// イシュー #2147（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカルの自由
+/// 関数群（`__fandhe_reduce_hold_probe::reduce_ops::{prod, logsumexp,
+/// any, all, norm_p}`）とトレイト（`__FandheReduceHoldProbe`）を導入
+/// し、実際に使う関数を書く。facade がどの経路（`pub use
+/// fandhe_ai_autodiff::reduce_ops;` のようなモジュール再エクスポート・
+/// `Var` への inherent メソッド追加・別名 `pub use`）で `reduce_ops`
+/// という名前や 5 個の関数名を公開しても、ローカル定義との glob 衝突
+/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
+/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
+/// `x.prod()` 呼び出しが `Var::prod(&self, dim: Option<usize>)` に
+/// 解決されて型・引数数エラーになる）でコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// reduce_ops_hold_doctest_globs_all_pub_modules`・`reduce_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_reduce_ops`・`workspace_declares_reduce_ops_
+/// fn_names_only_in_allowed_locations`）との多層防御の位置づけは
+/// `docs/autodiff-reduce-ops-decision.md` §6「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_reduce_hold_probe {
+///     pub mod reduce_ops {
+///         pub fn prod() {}
+///         pub fn logsumexp() {}
+///         pub fn any() {}
+///         pub fn all() {}
+///         pub fn norm_p() {}
+///     }
+/// }
+/// use __fandhe_reduce_hold_probe::*;
+///
+/// struct __FandheReduceMarker;
+///
+/// trait __FandheReduceHoldProbe {
+///     fn prod(&self) -> __FandheReduceMarker;
+///     fn logsumexp(&self) -> __FandheReduceMarker;
+///     fn any(&self) -> __FandheReduceMarker;
+///     fn all(&self) -> __FandheReduceMarker;
+///     fn norm_p(&self) -> __FandheReduceMarker;
+/// }
+///
+/// impl<'t> __FandheReduceHoldProbe for fandhe_ai::Var<'t> {
+///     fn prod(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn logsumexp(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn any(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn all(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn norm_p(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+/// }
+///
+/// impl __FandheReduceHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn prod(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn logsumexp(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn any(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn all(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn norm_p(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+/// }
+///
+/// impl __FandheReduceHoldProbe for fandhe_ai::Tape {
+///     fn prod(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn logsumexp(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn any(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn all(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+///     fn norm_p(&self) -> __FandheReduceMarker { __FandheReduceMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `reduce_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     reduce_ops::prod();
+///     reduce_ops::logsumexp();
+///     reduce_ops::any();
+///     reduce_ops::all();
+///     reduce_ops::norm_p();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheReduceMarker = fandhe_ai::Var::prod(x);
+///     let _: __FandheReduceMarker = x.prod();
+///     let _: __FandheReduceMarker = fandhe_ai::Var::logsumexp(x);
+///     let _: __FandheReduceMarker = x.logsumexp();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheReduceMarker = fandhe_ai::Tensor::any(x);
+///     let _: __FandheReduceMarker = x.any();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheReduceMarker = fandhe_ai::Tape::all(x);
+///     let _: __FandheReduceMarker = x.all();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarReduceOpsHoldDoctestGuard;
+
 /// イシュー #2146（親 #2131）の facade 公開保留を固定する doctest 足場。
 /// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の「正の
 /// プローブ 1 ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを

@@ -420,6 +420,16 @@ pub(crate) fn vjp(
             let da = std_vjp(input_val, dim, correction, upstream);
             vec![(input, da)]
         }
+        Op::LogSumExp { input, dim } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = logsumexp_vjp(input_val, dim, upstream);
+            vec![(input, da)]
+        }
+        Op::PNorm { input, p, dim } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = pnorm_vjp(input_val, p, dim, upstream);
+            vec![(input, da)]
+        }
         Op::Min { input, dim } => {
             // `extremum_first_match_vjp`（`Op::Max` の `max_vjp` と
             // 共有する実体）を直接呼ぶ: forward 記録値 `out_value` と
@@ -5859,6 +5869,266 @@ fn vector_norm_vjp(
                 // vector_norm_along` と同じ安全側フォールバック
                 // （寄与なし。到達しない想定）。
                 _ => {}
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::LogSumExp`（`crate::reduce_ops::logsumexp`）の VJP（イシュー
+/// #2147）。[`var_vjp`] と同じ 3 段走査で `input` から `y`（forward の
+/// `eval::logsumexp_along` と同じ `f64` アルゴリズム）を改めて計算し、
+/// `dx_i = g · exp(x_i − y)` を `f64` で計算してから 1 回だけ `f32` へ
+/// downcast する。`y == -inf`（縮約対象が全て `-inf`）の lane は勾配を
+/// 明示的に `0` へマスクする（PyTorch は同じ lane で `NaN` を返すが、
+/// `NaN` 勾配で学習を汚染しない安全側の判断。`docs/autodiff-reduce-
+/// ops-decision.md` §2.4 参照）。`y` が `NaN`（入力に `NaN` を含む）の
+/// 場合は `x_i − y` が全要素で `NaN` になるため `exp` 経由でそのまま
+/// 伝播する。
+///
+/// **事前条件（呼び出し元が満たす）**: `dense_vec(input)`・
+/// `dense_vec(g)`・`vec![0f32; data.len()]` はいずれも無検査で
+/// `input`／`g` の shape 相応のサイズを確保する。本関数は backward
+/// パスでのみ呼ばれ、`input`（forward の `x`）・`g`（forward の出力
+/// `out_shape` と同じ shape を持つ上流勾配）はいずれも forward 側
+/// （`crate::reduce_ops::logsumexp`）の `checked_bytes_for::<f32>` に
+/// よる確保前検証を経て構築済みのテンソルであるため、本関数を新たに
+/// 検査する必要はない（forward が拒否する shape は tape に push
+/// されないため backward にも到達しない。codex-review 指摘の確認・
+/// イシュー #2147・PR #2263）。
+fn logsumexp_vjp(input: &Tensor<f32>, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f64::NEG_INFINITY;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                m = eval::nan_propagating_max_f64(m, data[src] as f64);
+            }
+            // `m` が `+inf`（縮約対象に `+inf` を含む）の場合、通常の
+            // `shift → exp → sum → ln` 経路は `exp(x_i − y) =
+            // exp(inf − inf) = exp(NaN) = NaN` を +inf 要素の勾配に
+            // 生む（forward の `y` 自体は `+inf` で正しいが VJP が
+            // 壊れる）。この lane は softmax の極限（最大要素へ勾配が
+            // 集中し、同点の +inf 要素間では均等分配）として扱い、
+            // +inf 要素へ上流勾配を均等分配・有限要素は 0 とする分岐
+            // で特別扱いする（codex-review 指摘・イシュー #2147）。
+            let y_is_pos_inf = m == f64::INFINITY;
+            let shift = if m.is_finite() { m } else { 0.0 };
+            let y = if y_is_pos_inf {
+                f64::INFINITY
+            } else {
+                let mut acc = 0.0f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    acc += (data[src] as f64 - shift).exp();
+                }
+                acc.ln() + shift
+            };
+            let y_is_neg_inf = y == f64::NEG_INFINITY;
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "logsumexp_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            }) as f64;
+            if y_is_pos_inf {
+                let inf_count = (0..axis_len)
+                    .filter(|&a| data[(o * axis_len + a) * inner + i] == f32::INFINITY)
+                    .count();
+                debug_assert!(
+                    inf_count > 0,
+                    "logsumexp_vjp: y_is_pos_inf は +inf 要素の存在を前提とする"
+                );
+                let share = g_val / inf_count as f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    out[src] = if data[src] == f32::INFINITY {
+                        share as f32
+                    } else {
+                        0.0
+                    };
+                }
+                continue;
+            }
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                if y_is_neg_inf {
+                    out[src] = 0.0;
+                    continue;
+                }
+                let d = (data[src] as f64 - y).exp();
+                out[src] = (g_val * d) as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::PNorm`（`crate::reduce_ops::norm_p`）の VJP（イシュー #2147）。
+/// [`var_vjp`] と同じ 3 段走査で `input` から `norm`（forward の
+/// `eval::vector_norm_p_along` と同じ `f64` のスケール形アルゴリズム）
+/// を改めて計算し、`dx_i = g · sign(x_i) · (|x_i| / norm)^(p−1)` を
+/// 比の形（`norm^(p−1)` を直接求めず overflow を避ける）で `f64`
+/// 計算してから 1 回だけ `f32` へ downcast する。`norm == 0` の lane・
+/// `x_i == 0` の要素（`p < 1` で `0^(負)` が `inf` になるのを防ぐ劣勾配
+/// の選択）は勾配 0、`norm` が `NaN`（入力に `NaN` を含む）の場合は
+/// `NaN` を伝播する（`vector_norm_vjp` の L2 分岐と同じマスク構造。
+/// `docs/autodiff-reduce-ops-decision.md` §2.5 参照）。
+///
+/// **`norm` が `+inf` になる 2 経路の区別（Cursor Bugbot・Codex 指摘。
+/// イシュー #2147）**: (1) 入力に実際の `±inf` 要素を含む場合
+/// （`mx.is_infinite()`）は `±inf` 要素へ符号付きで上流勾配を均等分配
+/// し有限要素を `0` とする。(2) `p` が極小・有効要素数が多い等で
+/// 有限入力でも `mx · acc.powf(1/p)` が `f64` の範囲を超えて
+/// オーバーフローする場合（`acc` 自体は `[0, axis_len]` に収まり常に
+/// 有限）は、`norm` を経由せず `acc` の対数域で
+/// `dx_i = g · sign(x_i) · ratio_i^(p-1) · acc^((1-p)/p)` を計算する。
+/// 2 経路を混同すると、(2) を (1) の分岐で扱ってしまい `±inf` 要素が
+/// 実際には存在しないまま `inf_count == 0` の 0 除算相当となって
+/// 有限入力の勾配を黙って全要素 `0` にしてしまう欠陥があった。
+///
+/// **事前条件（呼び出し元が満たす）**: [`logsumexp_vjp`] と同じ理由
+/// （同関数 doc「事前条件」参照）で、`input`／`g` は forward
+/// （`crate::reduce_ops::norm_p`）の `checked_bytes_for::<f32>` による
+/// 確保前検証を経て構築済みであるため、本関数を新たに検査する必要は
+/// ない（codex-review 指摘の確認・イシュー #2147・PR #2263）。
+fn pnorm_vjp(input: &Tensor<f32>, p: f32, dim: Option<usize>, g: &Tensor<f32>) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let p64 = p as f64;
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut mx = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                mx = eval::nan_propagating_max_f64(mx, (data[src] as f64).abs());
+            }
+            // `mx`（縮約対象の絶対値の max）が `+inf` になるのは、実際に
+            // `±inf` 要素が含まれる場合のみ（有限要素の絶対値の max は
+            // 必ず有限）。一方 `norm = mx · acc.powf(1/p)` は `acc`
+            // （`Σ (|x_i|/mx)^p`。各項は `[0, 1]` のため `acc` 自体は常に
+            // 有限で `axis_len` 以下）を `1/p` 乗する過程で、`p` が極小
+            // （例 `p≈0.01`）かつ有効要素数が多いと有限入力でも `f64` の
+            // 範囲を超えてオーバーフローしうる。「入力に `±inf` を含む」
+            // 判定を `norm.is_infinite()` で行うと、この有限入力の
+            // オーバーフロー lane も同じ分岐に混入し、`±inf` 要素が
+            // 実際には存在しないため `inf_count == 0` の 0 除算相当と
+            // なって勾配を黙って全要素 0 にしてしまう（debug build では
+            // `debug_assert!` で panic）。判定は `mx.is_infinite()` に
+            // 分離し、有限入力のオーバーフローは `acc` を経由した
+            // log-domain 計算で扱う（Cursor Bugbot・Codex 指摘。
+            // イシュー #2147）。
+            let input_has_inf = mx.is_infinite();
+            let (norm, acc) = if mx.is_nan() {
+                (f64::NAN, 0.0)
+            } else if mx == 0.0 {
+                (0.0, 0.0)
+            } else if input_has_inf {
+                (f64::INFINITY, 0.0)
+            } else {
+                let mut acc = 0.0f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    let ratio = (data[src] as f64).abs() / mx;
+                    acc += ratio.powf(p64);
+                }
+                (mx * acc.powf(1.0 / p64), acc)
+            };
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "pnorm_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            }) as f64;
+            // 入力に実際に `±inf` 要素を含む場合、通常の
+            // `ratio = |x_i| / norm` は `±inf の要素` で `inf/inf = NaN`
+            // を生む（`logsumexp_vjp` の `+inf` 分岐と同じ構造の欠陥。
+            // codex-review 指摘・イシュー #2147）。この lane は
+            // `logsumexp_vjp` と同じ極限的な扱いとし、`±inf` 要素へ
+            // 符号付きで上流勾配を均等分配し、有限要素は 0 とする。
+            if input_has_inf {
+                let inf_count = (0..axis_len)
+                    .filter(|&a| (data[(o * axis_len + a) * inner + i] as f64).is_infinite())
+                    .count();
+                debug_assert!(
+                    inf_count > 0,
+                    "pnorm_vjp: mx.is_infinite() は ±inf 要素の存在を前提とする"
+                );
+                let share = g_val / inf_count as f64;
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    let v = data[src] as f64;
+                    out[src] = if v.is_infinite() {
+                        let sign = if v > 0.0 { 1.0 } else { -1.0 };
+                        (share * sign) as f32
+                    } else {
+                        0.0
+                    };
+                }
+                continue;
+            }
+            // 有限入力での `norm` オーバーフロー（`p` が極小・有効要素数
+            // が多い等）。`dNorm/dx_i = sign(x_i) · ratio_i^(p-1) ·
+            // acc^((1-p)/p)`（`ratio_i = |x_i|/mx ∈ [0, 1]`）を
+            // `norm` 自体を経由せず log-domain（`ln`／`exp`）で計算する。
+            // `acc` は常に有限（`<= axis_len`）なので `ln(acc)` は安全に
+            // 求まる。指数部が再び `f64` の範囲を超える場合は結果が
+            // `±inf` になるが、これは `p` が極小になるほど真の勾配が
+            // 発散するという数学的に正しい挙動であり、`±inf` 要素の
+            // 存在を前提とする上記分岐（`input_has_inf`）とは区別する。
+            if norm.is_infinite() {
+                for a in 0..axis_len {
+                    let src = (o * axis_len + a) * inner + i;
+                    let v = data[src] as f64;
+                    out[src] = if v == 0.0 {
+                        0.0
+                    } else {
+                        let sign = if v > 0.0 { 1.0 } else { -1.0 };
+                        let ratio = v.abs() / mx;
+                        let log_mag = (p64 - 1.0) * ratio.ln() + ((1.0 - p64) / p64) * acc.ln();
+                        (g_val * sign * log_mag.exp()) as f32
+                    };
+                }
+                continue;
+            }
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let v = data[src] as f64;
+                out[src] = if norm.is_nan() {
+                    f32::NAN
+                } else if norm == 0.0 || v == 0.0 {
+                    0.0
+                } else {
+                    let sign = if v > 0.0 { 1.0 } else { -1.0 };
+                    let ratio = v.abs() / norm;
+                    (g_val * sign * ratio.powf(p64 - 1.0)) as f32
+                };
             }
         }
     }
