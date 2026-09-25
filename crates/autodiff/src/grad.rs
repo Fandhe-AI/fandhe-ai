@@ -2874,12 +2874,32 @@ pub(crate) fn dropout_mask(shape: &[usize], p: f32) -> Result<Tensor<f32>, Autod
 /// （CPU／CUDA／Metal）で bit 同一の dropout forward が構造的に
 /// 成立する（`docs/compat-api-scope.md` の Embedding／SDPA／einsum と
 /// 同じ「既存演算への合成のみで `BackendOps` 非拡張」方針）。
+///
+/// # ドロップ位置のゼロ出力契約（PR #2281 codex-review 是正。イシュー
+/// #2161）
+///
+/// `mask` が `0.0` の位置は「ドロップされ、入力値に依存せず出力が
+/// `0.0` になる」という dropout の意味論上の契約を持つ。しかし単純な
+/// IEEE 乗算 `x * 0.0` は `x` が `NaN`／`±inf` のとき結果も `NaN` に
+/// なり契約を破る（[`crate::nn::dropout::AlphaDropout`] の `p == 1.0`
+/// 全ドロップ特例・[`crate::nn::dropout::Dropout2d`] の通常経路の
+/// いずれも、抽選結果としてチャネル全体が `mask == 0.0` になりうる。
+/// codex-review 指摘・PR #2281）。このため `ops.mul`／`eval::mul` の
+/// 乗算結果に対し [`zero_out_where_mask_is_zero`] を適用し、`mask ==
+/// 0.0` の位置を無条件で `0.0` へ上書きしてから返す。`mask != 0.0`
+/// の位置（keep 位置。`crate::grad::dropout_mask` 系が生成する
+/// スケール値は常に非ゼロの有限値）は乗算結果をそのまま使うため、
+/// 通常の dropout（部分的に keep する位置）の数値は変化しない。
+/// backward（`vjp()` 内 `Op::Dropout` 分岐 → [`vjp_elementwise_mul`]）
+/// は本関数を経由せず `upstream * mask` のまま変更しない——ドロップ
+/// 位置の勾配は `mask == 0.0` により構造的に `0.0` となるため
+/// （`upstream` が非有限の場合の扱いは本イシューのスコープ外）。
 pub(crate) fn dropout_with_fallback(
     ops: &dyn BackendOps,
     x: &Tensor<f32>,
     mask: &Tensor<f32>,
 ) -> Result<Tensor<f32>, AutodiffError> {
-    match ops.mul(x, mask) {
+    let v = match ops.mul(x, mask) {
         Ok(v) => {
             if v.shape() != x.shape() {
                 return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
@@ -2889,9 +2909,182 @@ pub(crate) fn dropout_with_fallback(
                     },
                 )));
             }
+            v
+        }
+        Err(BackendError::Unsupported(_)) => eval::mul(x, mask),
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    };
+    Ok(zero_out_where_mask_is_zero(&v, mask))
+}
+
+/// [`dropout_with_fallback`] の doc「ドロップ位置のゼロ出力契約」節
+/// 参照。`mask`（`v` と同 shape。呼び出し元が事前に検査済み）が
+/// `0.0` の位置を無条件で `0.0` へ上書きしたホスト側の新規テンソルを
+/// 返す（`v`／`mask` を `contiguous()` してから走査する。非 contiguous
+/// な view でも `as_slice()` が `None` を返さないようにするため）。
+fn zero_out_where_mask_is_zero(v: &Tensor<f32>, mask: &Tensor<f32>) -> Tensor<f32> {
+    let shape = v.shape().to_vec();
+    let v_c = v.contiguous();
+    let mask_c = mask.contiguous();
+    let data: Vec<f32> = match (v_c.as_slice(), mask_c.as_slice()) {
+        (Some(v_data), Some(mask_data)) => v_data
+            .iter()
+            .zip(mask_data.iter())
+            .map(|(&val, &m)| if m == 0.0 { 0.0 } else { val })
+            .collect(),
+        // `contiguous()` 直後の `as_slice()` は内部不変条件上つねに
+        // `Some` を返すはずだが（`build_tensor` doc 参照）、契約違反を
+        // panic ではなく安全側（ゼロ埋め）へ吸収する
+        // （`build_tensor` 自身の `unwrap_or_else` フォールバックと
+        // 同じ方針）。
+        _ => vec![0.0; shape.iter().product()],
+    };
+    build_tensor(data, &shape)
+}
+
+/// [`crate::nn::dropout::Dropout2d`] の forward が使うチャネル単位
+/// dropout マスク生成（イシュー #2161）。要素単位で抽選する
+/// [`dropout_mask`] と異なり、`shape`（`[N, C, H, W]`）のうち `[N, C]`
+/// 分だけ抽選し（RNG 消費は `N * C` 回で `torch.nn.Dropout2d` の
+/// feature-noise `[N, C, 1, 1]` と同じ回数）、その値をチャネル全体
+/// （`H * W` 要素）へホスト側で展開してから返す。
+///
+/// **展開が必須の理由**: [`Op::Dropout`] の VJP（`vjp()` 内
+/// `Op::Dropout { input, mask }` 分岐）は「`mask` と `input` が同
+/// shape」を前提に [`vjp_elementwise_mul`] を呼ぶため、`[N, C, 1, 1]`
+/// のままでは forward（`dropout_with_fallback` の `ops.mul` が
+/// broadcast する可能性）と backward の shape 契約が食い違う。ここで
+/// `[N, C, H, W]` へ展開した contiguous な実体を返すことで、
+/// [`crate::var::Var::dropout_with_mask`]（`Dropout` と共有する forward
+/// 入口）をそのまま再利用できる。
+///
+/// `shape` が呼び出し元（[`crate::nn::dropout::Dropout2d::forward`]）で
+/// 事前に rank 4 と検査済みであることが前提（本関数はその検査を
+/// 繰り返さない）。`p` は呼び出し元が `[0, 1]` の範囲かつ有限であると
+/// 検査済みの前提（[`dropout_mask`] と同じ契約）。
+pub(crate) fn feature_dropout_mask(shape: &[usize], p: f32) -> Result<Tensor<f32>, AutodiffError> {
+    debug_assert_eq!(
+        shape.len(),
+        4,
+        "feature_dropout_mask: shape must be rank 4 (got {shape:?})"
+    );
+    let n = shape[0];
+    let c = shape[1];
+    let h = shape[2];
+    let w = shape[3];
+    let channel_mask = dropout_mask(&[n, c], p)?;
+    let channel_data = channel_mask.as_slice().ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "feature_dropout_mask: dropout_mask の結果が contiguous でない（内部不変条件違反）"
+                .to_string(),
+        )
+    })?;
+    let hw = h.checked_mul(w).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "feature_dropout_mask: h ({h}) * w ({w}) overflowed usize"
+        ))
+    })?;
+    let numel = n
+        .checked_mul(c)
+        .and_then(|nc| nc.checked_mul(hw))
+        .ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "feature_dropout_mask: n * c * h * w overflowed usize".to_string(),
+            )
+        })?;
+    let mut data = Vec::with_capacity(numel);
+    for &m in channel_data {
+        data.extend(std::iter::repeat_n(m, hw));
+    }
+    Ok(build_tensor(data, shape))
+}
+
+/// [`crate::nn::dropout::AlphaDropout`] の forward が使う、ノイズ
+/// （マスク）と加算バイアスの同時生成（イシュー #2161）。ATen
+/// `aten/src/ATen/native/Dropout.cpp::_dropout_impl` の alpha 分岐と
+/// 同じ丸め順序（`a`／`alpha * a`／`alpha * a * p` を `f64` で計算して
+/// から**それぞれ 1 回だけ** `f32` へ narrow し、要素ごとの `noise`／
+/// `bias` は narrow 済みの `f32` 定数どうしの単純な演算で確定する）を
+/// 再現する。
+///
+/// - `noise`（keep 確率 `1 - p`。[`dropout_mask`] と同じ「`u >= p` で
+///   keep」規約）は keep 位置で `a`（narrow 済み `f32`）、drop 位置で
+///   `0.0`
+/// - `bias` は keep 位置で `alpha * a * p`（narrow 済み `f32` そのまま。
+///   `(1 - 1) * (alpha * a) + alpha * a * p` が `f32` の加算で厳密に
+///   `alpha * a * p` に一致するため追加の丸めは発生しない）、drop 位置
+///   で `-(alpha * a) + alpha * a * p`（narrow 済み `f32` 2 値の 1 回の
+///   `f32` 加算）
+///
+/// `p == 1.0` は `a` の分母 `(1 - p)` がゼロになり `a = inf` から
+/// `inf * 0 = NaN` が生じるため、呼び出し元
+/// （[`crate::nn::dropout::AlphaDropout`]）が本関数を呼ばずに専用の
+/// 全ゼロマスク経路（`b` を加えない）へ分岐する契約（本関数はこの
+/// 特例を扱わない）。`p` は呼び出し元が `[0, 1)` の範囲かつ有限である
+/// と検査済みの前提。
+pub(crate) fn alpha_dropout_mask_and_bias(
+    shape: &[usize],
+    p: f32,
+) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
+    // SELU 論文由来の固定定数（ATen 実装と同一値）。
+    const ALPHA: f64 = 1.7580993408473766;
+    let p64 = f64::from(p);
+    let a = 1.0 / ((ALPHA * ALPHA * p64 + 1.0) * (1.0 - p64)).sqrt();
+    let alpha_a = ALPHA * a;
+    let alpha_a_p = alpha_a * p64;
+    // ここで 1 回だけ f32 へ narrow する（doc「丸め順序」節）。
+    let a_f32 = a as f32;
+    let alpha_a_f32 = alpha_a as f32;
+    let alpha_a_p_f32 = alpha_a_p as f32;
+    let bias_drop = -alpha_a_f32 + alpha_a_p_f32;
+
+    let uniform = fandhe_ai_tensor_core::rng::rand(shape)
+        .map_err(AutodiffError::Shape)?
+        .contiguous();
+    let u = uniform.as_slice().ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "alpha_dropout_mask_and_bias: rng::rand の結果が contiguous でない（内部不変条件違反）"
+                .to_string(),
+        )
+    })?;
+    let mut noise = Vec::with_capacity(u.len());
+    let mut bias = Vec::with_capacity(u.len());
+    for &uv in u {
+        if uv >= p {
+            noise.push(a_f32);
+            bias.push(alpha_a_p_f32);
+        } else {
+            noise.push(0.0f32);
+            bias.push(bias_drop);
+        }
+    }
+    Ok((build_tensor(noise, shape), build_tensor(bias, shape)))
+}
+
+/// [`crate::nn::dropout::AlphaDropout::forward_host`]（tape 不要経路）
+/// が bias 加算に使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #2161）。tape 経路（`Var::add`）が呼ぶ `Op::Add` の VJP・
+/// forward と同じ単一 IEEE 加算を `ops.add` → `Unsupported` のときのみ
+/// `eval::add` で行う（[`dropout_with_fallback`] と同型。`b` は `y` と
+/// 同 shape のため broadcast は不要）。
+pub(crate) fn alpha_dropout_bias_add_with_fallback(
+    ops: &dyn BackendOps,
+    y: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.add(y, b) {
+        Ok(v) => {
+            if v.shape() != y.shape() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: y.shape().to_vec(),
+                    },
+                )));
+            }
             Ok(v)
         }
-        Err(BackendError::Unsupported(_)) => Ok(eval::mul(x, mask)),
+        Err(BackendError::Unsupported(_)) => Ok(eval::add(y, b)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }

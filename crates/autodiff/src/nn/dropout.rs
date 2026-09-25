@@ -49,7 +49,7 @@ use crate::error::AutodiffError;
 use crate::nn::module::Module;
 use crate::tape::Tape;
 use crate::var::Var;
-use fandhe_ai_tensor_core::{BackendOps, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor};
 
 /// PyTorch `torch.nn.Dropout(p=0.5)` 相当。`p`（drop 確率）と
 /// `training`（PyTorch `Module.training` 相当。イシュー #1758 の
@@ -136,6 +136,244 @@ impl Module for Dropout {
     }
 }
 
+/// PyTorch `torch.nn.Dropout2d(p=0.5)` 相当（イシュー #2161・親
+/// #2131）。要素単位の [`Dropout`] と異なり、`[N, C, H, W]` 入力の
+/// `(n, c)` チャネルをまとめて 0 に落とすか `1/(1-p)` 倍する
+/// （`at::native::feature_dropout` 相当。チャネル内の空間的相関を
+/// 考慮した正則化）。`p`／`training` の保持・検査規律は [`Dropout`] と
+/// 同一。
+///
+/// # rank 4 限定（スコープ）
+///
+/// PyTorch の `Dropout2d` はバージョンにより 3 次元入力（暗黙の
+/// バッチ次元なし `[C, H, W]`）の扱いが変遷し非推奨のため、本実装は
+/// **rank 4（`[N, C, H, W]`）限定**とする。それ以外の rank は
+/// [`AutodiffError::Shape`]（[`ShapeError::RankMismatch`]）で
+/// fail-closed に拒否する（`.claude/rules/security.md` A03）。
+///
+/// # マスク生成と `Op::Dropout` の再利用
+///
+/// `crate::grad::feature_dropout_mask`（`pub(crate)` のためコード
+/// スパン表記で参照しリンク化しない。`nn/embedding.rs` の
+/// `ids_from_f32` 等と同じ規約）がチャネル単位で抽選したマスクを
+/// `[N, C, H, W]` へ展開してから `crate::var::Var::dropout_with_mask`
+/// （同様に `pub(crate)`。[`Dropout`] と共有する forward 入口）へ渡す。
+/// forward（`ops.mul` 1 回）・backward
+/// （`Op::Dropout` の VJP。`vjp_elementwise_mul` 1 回）とも [`Dropout`]
+/// と全く同じ演算列を通るため、3 バックエンド間の bit 一致が構造的に
+/// 成り立つ（`crate::grad::dropout_with_fallback` doc 参照）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dropout2d {
+    p: f32,
+    training: bool,
+}
+
+impl Dropout2d {
+    /// [`Dropout::new`] と同じ検査（`p` は有限かつ `[0, 1]`）。
+    pub fn new(p: f32) -> Result<Self, AutodiffError> {
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Dropout2d::new: p must be finite and in [0, 1], got {p}"
+            )));
+        }
+        Ok(Self { p, training: true })
+    }
+
+    /// 構築済みの `p`（drop 確率）。
+    pub fn p(&self) -> f32 {
+        self.p
+    }
+
+    /// rank 4 検査 → 早期リターン判定（`!training || p == 0.0`）→
+    /// `crate::grad::feature_dropout_mask` → `crate::var::Var::
+    /// dropout_with_mask`（いずれも `pub(crate)`）の順に実行する
+    /// （モジュール doc 参照）。
+    /// 早期リターンは新しいノードを積まず RNG も消費しない
+    /// （[`Dropout::forward`] と同じ規律）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let shape = input.shape();
+        if shape.len() != 4 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 4,
+                actual: shape.len(),
+            }));
+        }
+        if !self.training || self.p == 0.0 {
+            return Ok(*input);
+        }
+        let mask = crate::grad::feature_dropout_mask(&shape, self.p)?;
+        input.dropout_with_mask(mask)
+    }
+}
+
+impl Default for Dropout2d {
+    /// PyTorch `torch.nn.Dropout2d` の既定値（`p=0.5`）。[`Dropout::
+    /// default`] と同じく構造体リテラルで直接構築する（本番経路
+    /// panic 禁止）。
+    fn default() -> Self {
+        Self {
+            p: 0.5,
+            training: true,
+        }
+    }
+}
+
+impl Module for Dropout2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Dropout2d::forward(self, input)
+    }
+
+    /// [`Self::forward`] と**同一の関数列**（rank 検査 → 早期リターン
+    /// 判定 → `crate::grad::feature_dropout_mask` → `crate::grad::
+    /// dropout_with_fallback`）を `tape` 不要経路で再現する（[`Dropout::
+    /// forward_host`] と同型。bit-exactness が構造的に成立する）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let shape = input.shape();
+        if shape.len() != 4 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 4,
+                actual: shape.len(),
+            }));
+        }
+        if !self.training || self.p == 0.0 {
+            return Ok(input.clone());
+        }
+        let mask = crate::grad::feature_dropout_mask(shape, self.p)?;
+        crate::grad::dropout_with_fallback(ops, input, &mask)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.training = training;
+    }
+
+    fn training(&self) -> bool {
+        self.training
+    }
+}
+
+/// PyTorch `torch.nn.AlphaDropout(p=0.5)` 相当（イシュー #2161・親
+/// #2131）。SELU 系ネットワーク向けに、drop 後の出力が入力（自己
+/// 正規化前提の `N(0, 1)`）の平均・分散を保つようアフィン補正する
+/// （`at::native::_dropout_impl` の alpha 分岐相当）。`p`／`training`
+/// の保持・検査規律は [`Dropout`] と同一で、入力の rank は任意
+/// （要素単位の変換のため）。
+///
+/// # 数式（`crate::grad::alpha_dropout_mask_and_bias`〈`pub(crate)`。
+/// コードスパン表記で参照しリンク化しない〉doc 参照）
+///
+/// `alpha = 1.7580993408473766`（SELU 定数）・
+/// `a = 1 / sqrt((alpha^2 * p + 1) * (1 - p))`（`f64` で計算し 1 回
+/// `f32` へ narrow）として、要素ごとに
+/// `out = x * noise + b`（`noise` は keep 位置で `a`・drop 位置で
+/// `0.0`。`b` は keep 位置で `alpha * a * p`・drop 位置で
+/// `-(alpha * a) + alpha * a * p`）。
+///
+/// forward は `crate::var::Var::dropout_with_mask`（`pub(crate)`。
+/// `x * noise`。[`Dropout`] と共有）→ [`crate::var::Var::add`]（`+ b`。`b` は
+/// [`crate::tape::Tape::var_no_grad`] で勾配を持たない定数として登録）
+/// の 2 段構成。`b` への勾配は流さない（`noise` に対する定数バイアスの
+/// ため、`x` への勾配は `upstream * noise` のみで `AlphaDropout` 固有の
+/// VJP は不要）。
+///
+/// # `p == 1.0` の特例
+///
+/// `a` の分母 `(1 - p)` がゼロになり `a = inf` から `inf * 0 = NaN` が
+/// 生じるため、`crate::grad::alpha_dropout_mask_and_bias` を呼ばず
+/// 全ゼロマスク（`b` は加えない）で `x * 0` を返す
+/// （`at::native::_dropout_impl` の `p == 1` 特例と同じ）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AlphaDropout {
+    p: f32,
+    training: bool,
+}
+
+impl AlphaDropout {
+    /// [`Dropout::new`] と同じ検査（`p` は有限かつ `[0, 1]`）。
+    pub fn new(p: f32) -> Result<Self, AutodiffError> {
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "AlphaDropout::new: p must be finite and in [0, 1], got {p}"
+            )));
+        }
+        Ok(Self { p, training: true })
+    }
+
+    /// 構築済みの `p`（drop 確率）。
+    pub fn p(&self) -> f32 {
+        self.p
+    }
+
+    /// モジュール doc「数式」節・「`p == 1.0` の特例」節参照。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        if !self.training || self.p == 0.0 {
+            return Ok(*input);
+        }
+        let shape = input.shape();
+        if self.p == 1.0 {
+            let zeros = Tensor::<f32>::zeros(&shape).map_err(AutodiffError::Shape)?;
+            return input.dropout_with_mask(zeros);
+        }
+        let (noise, bias) = crate::grad::alpha_dropout_mask_and_bias(&shape, self.p)?;
+        let y = input.dropout_with_mask(noise)?;
+        let b = y.tape().var_no_grad(&bias);
+        y.add(&b)
+    }
+}
+
+impl Default for AlphaDropout {
+    /// PyTorch `torch.nn.AlphaDropout` の既定値（`p=0.5`）。[`Dropout::
+    /// default`] と同じく構造体リテラルで直接構築する（本番経路
+    /// panic 禁止）。
+    fn default() -> Self {
+        Self {
+            p: 0.5,
+            training: true,
+        }
+    }
+}
+
+impl Module for AlphaDropout {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        AlphaDropout::forward(self, input)
+    }
+
+    /// [`Self::forward`] と**同一の関数列**（早期リターン判定 →
+    /// `p == 1.0` 特例 → `crate::grad::alpha_dropout_mask_and_bias` →
+    /// `crate::grad::dropout_with_fallback` → `crate::grad::
+    /// alpha_dropout_bias_add_with_fallback`）を `tape` 不要経路で
+    /// 再現する（[`Dropout::forward_host`] と同型。bit-exactness が
+    /// 構造的に成立する）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        if !self.training || self.p == 0.0 {
+            return Ok(input.clone());
+        }
+        let shape = input.shape();
+        if self.p == 1.0 {
+            let zeros = Tensor::<f32>::zeros(shape).map_err(AutodiffError::Shape)?;
+            return crate::grad::dropout_with_fallback(ops, input, &zeros);
+        }
+        let (noise, bias) = crate::grad::alpha_dropout_mask_and_bias(shape, self.p)?;
+        let y = crate::grad::dropout_with_fallback(ops, input, &noise)?;
+        crate::grad::alpha_dropout_bias_add_with_fallback(ops, &y, &bias)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.training = training;
+    }
+
+    fn training(&self) -> bool {
+        self.training
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +430,83 @@ mod tests {
         let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
         let out = d.forward_host(&ops, &input).unwrap();
         assert_eq!(out.as_slice().unwrap(), input.as_slice().unwrap());
+    }
+
+    fn tape() -> Tape {
+        Tape::new_with_ops(crate::test_support::test_ops())
+    }
+
+    /// codex P1 指摘（PR #2281）: `AlphaDropout` の `p == 1.0` 全ドロップ
+    /// 特例（`forward`。モジュール doc「`p == 1.0` の特例」節）は、
+    /// マスクが全ゼロであっても入力に `NaN`／`±inf` が含まれると
+    /// `x * 0.0 == NaN` で出力が汚染されていた。`dropout_with_fallback`
+    /// の是正（`crate::grad::dropout_with_fallback` doc「ドロップ位置の
+    /// ゼロ出力契約」節）後は入力値に依存せず常に `0.0` を返すこと。
+    #[test]
+    fn alpha_dropout_p_one_forward_is_zero_even_with_non_finite_input() {
+        let t = tape();
+        let d = AlphaDropout::new(1.0).unwrap();
+        let input = Tensor::new(
+            vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0],
+            &[2, 2],
+        )
+        .unwrap();
+        let x = t.var_no_grad(&input);
+        let y = d.forward(&x).unwrap();
+        assert_eq!(y.to_tensor().as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// 上記 tape 経路と同一の入力・契約を `forward_host`（tape 不要
+    /// 経路）でも検証する（[`Dropout::forward_host`] doc「train／eval
+    /// と `predict`／`forward_host` の整合」節が要求する bit-exactness
+    /// の前提として、両経路が同じ [`crate::grad::dropout_with_fallback`]
+    /// を経由することを担保する）。
+    #[test]
+    fn alpha_dropout_p_one_forward_host_is_zero_even_with_non_finite_input() {
+        let d = AlphaDropout::new(1.0).unwrap();
+        let ops = crate::default_ops::NaiveOps;
+        let input = Tensor::new(
+            vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0],
+            &[2, 2],
+        )
+        .unwrap();
+        let out = d.forward_host(&ops, &input).unwrap();
+        assert_eq!(out.as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// codex P1 指摘（PR #2281）: `Dropout2d`（p==1.0 特例を持たない
+    /// 通常経路。モジュール doc「マスク生成と `Op::Dropout` の再利用」
+    /// 節）でも、抽選結果としてチャネルが全てドロップされた場合
+    /// （`p = 1.0` はチャネル全ドロップを決定的に発生させる）、入力に
+    /// `NaN`／`±inf` が含まれると出力が汚染されていた。同じ
+    /// `dropout_with_fallback` 経由のため是正後は常に `0.0` を返す。
+    #[test]
+    fn dropout2d_all_channels_dropped_forward_is_zero_even_with_non_finite_input() {
+        let t = tape();
+        let d = Dropout2d::new(1.0).unwrap();
+        // rank 4 [N=1, C=2, H=1, W=2]。チャネル 0 に NaN・チャネル 1 に
+        // ±inf を含める。
+        let input = Tensor::new(
+            vec![f32::NAN, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            &[1, 2, 1, 2],
+        )
+        .unwrap();
+        let x = t.var_no_grad(&input);
+        let y = d.forward(&x).unwrap();
+        assert_eq!(y.to_tensor().as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// 上記 tape 経路と同一の入力・契約を `forward_host` でも検証する。
+    #[test]
+    fn dropout2d_all_channels_dropped_forward_host_is_zero_even_with_non_finite_input() {
+        let d = Dropout2d::new(1.0).unwrap();
+        let ops = crate::default_ops::NaiveOps;
+        let input = Tensor::new(
+            vec![f32::NAN, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            &[1, 2, 1, 2],
+        )
+        .unwrap();
+        let out = d.forward_host(&ops, &input).unwrap();
+        assert_eq!(out.as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
     }
 }

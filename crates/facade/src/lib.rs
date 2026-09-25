@@ -3328,6 +3328,140 @@ struct SpatialLayersHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarConv3dHoldDoctestGuard;
 
+/// イシュー #2161（親 #2131。設計正本 `docs/autodiff-dropout-embedding-
+/// bag-decision.md` §6 承認事項）の facade 公開保留を固定する doctest
+/// 足場。`SpatialLayersHoldDoctestGuard`（#2159）と同型の「正のプローブ
+/// 1 ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_dropout_embedding_bag_hold_probe::{Dropout2d, AlphaDropout,
+/// EmbeddingBag, EmbeddingBagVars, EmbeddingBagMode, add_dropout2d,
+/// add_alpha_dropout, add_embedding_bag}` を導入し、実際に使う関数を
+/// 書く。facade がどの経路（単一行・複数行・ネストした group での
+/// `pub use`・別名エクスポート・facade 独自の `struct`／`type` 宣言・
+/// `compat::Sequential`／`Var` への inherent メソッド追加）でこれらの
+/// 名前を公開しても、ローカル定義との glob 衝突（型名の場合。E0659
+/// 等）または呼び出しシグネチャの不一致（`compat::Sequential`／`Var`
+/// への inherent メソッドはトレイトメソッドより優先解決されるため、
+/// 本プローブの trait 経由呼び出しが型・引数不一致でコンパイル失敗
+/// する）でエラーコードに依存せずコンパイルが失敗する。
+///
+/// `Var::dropout2d`／`Var::alpha_dropout`／`Var::embedding_bag`
+/// （`nn::Dropout2d`／`nn::AlphaDropout`／`nn::EmbeddingBag` の forward
+/// 相当の inherent メソッド追加）も同じブロックで併せて保留固定する
+/// （経路 1・経路 2 のどちらの facade 公開拡張も未承認のため。実装計画
+/// §2.4「facade（公開は保留）」節）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// dropout_embedding_bag_hold_doctest_globs_all_pub_modules`・
+/// `dropout_embedding_bag_hold_doctest_probe_body_matches_fixed_
+/// contract`・`compat_sequential_does_not_expose_dropout_embedding_
+/// bag_add_methods`）との多層防御の位置づけ・承認未取得の経緯は
+/// `docs/autodiff-dropout-embedding-bag-decision.md` §6「承認事項」節を
+/// 参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_dropout_embedding_bag_hold_probe {
+///     pub struct Dropout2d;
+///     pub struct AlphaDropout;
+///     pub struct EmbeddingBag;
+///     pub struct EmbeddingBagVars;
+///     pub struct EmbeddingBagMode;
+///     pub struct __FandheDropoutEmbeddingBagHoldMarker;
+///     pub fn add_dropout2d() -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+///     pub fn add_alpha_dropout() -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+///     pub fn add_embedding_bag() -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+/// }
+/// use __fandhe_dropout_embedding_bag_hold_probe::*;
+///
+/// trait __FandheDropoutEmbeddingBagAddProbe {
+///     fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;
+///     fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;
+///     fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;
+/// }
+///
+/// impl __FandheDropoutEmbeddingBagAddProbe for fandhe_ai::compat::Sequential {
+///     fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+///     fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+///     fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+/// }
+///
+/// trait __FandheDropoutEmbeddingBagVarProbe {
+///     fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;
+///     fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;
+///     fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;
+/// }
+///
+/// impl<'t> __FandheDropoutEmbeddingBagVarProbe for fandhe_ai::Var<'t> {
+///     fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+///     fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+///     fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {
+///         __FandheDropoutEmbeddingBagHoldMarker
+///     }
+/// }
+///
+/// fn __probe(
+///     _: Dropout2d,
+///     _: AlphaDropout,
+///     _: EmbeddingBag,
+///     _: EmbeddingBagVars,
+///     _: EmbeddingBagMode,
+///     seq: &fandhe_ai::compat::Sequential,
+///     v: &fandhe_ai::Var<'_>,
+/// ) {
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = add_dropout2d();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = add_alpha_dropout();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = add_embedding_bag();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_dropout2d(seq);
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_dropout2d();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_alpha_dropout(seq);
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_alpha_dropout();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_embedding_bag(seq);
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_embedding_bag();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::dropout2d(v);
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = v.dropout2d();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::alpha_dropout(v);
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = v.alpha_dropout();
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::embedding_bag(v);
+///     let _: __FandheDropoutEmbeddingBagHoldMarker = v.embedding_bag();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct DropoutEmbeddingBagHoldDoctestGuard;
+
 /// イシュー #2163（親 #2131）の facade 公開保留を固定する doctest 足場。
 /// `VarConv3dHoldDoctestGuard`（イシュー #2158）と同型の「正のプローブ
 /// 1 ブロック方式」を採る。
@@ -3367,7 +3501,6 @@ struct VarConv3dHoldDoctestGuard;
 /// 追加・`MultiheadAttentionConfig` の facade 再エクスポート）を得た日が
 /// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
 /// 対応する否定ガードと同時に外す）。
-///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
 ///

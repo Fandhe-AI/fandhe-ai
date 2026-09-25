@@ -34,6 +34,7 @@ use crate::nn::batch_norm::{
 use crate::nn::container::{ModuleDict, ModuleList};
 use crate::nn::conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
+use crate::nn::embedding_bag::EmbeddingBag;
 use crate::nn::flatten::Flatten;
 use crate::nn::identity::Identity;
 use crate::nn::linear::Linear;
@@ -371,6 +372,21 @@ pub trait Module {
 
     /// [`Module::as_embedding`] の可変版。
     fn as_embedding_mut(&mut self) -> Option<&mut Embedding> {
+        None
+    }
+
+    /// [`Module::as_embedding`] と同型の明示フック（イシュー #2161・親
+    /// #2131）。`EmbeddingBag` 層向け。既定 `None`。
+    /// `compat::Sequential::add_embedding_bag`（facade 公開面）の接続は
+    /// ユーザー承認待ち（`docs/autodiff-dropout-embedding-bag-decision.md`
+    /// §6「承認事項」節）であり、本フック自体は `compat` 層と独立に
+    /// `nn::Sequential`（autodiff 汎用コンテナ）から利用できる。
+    fn as_embedding_bag(&self) -> Option<&EmbeddingBag> {
+        None
+    }
+
+    /// [`Module::as_embedding_bag`] の可変版。
+    fn as_embedding_bag_mut(&mut self) -> Option<&mut EmbeddingBag> {
         None
     }
 
@@ -2605,6 +2621,49 @@ impl Module for Embedding {
 
     fn requires_grad(&self) -> bool {
         Embedding::requires_grad(self)
+    }
+}
+
+/// `EmbeddingBag::bind(tape).forward_from_var(input)` への委譲
+/// （イシュー #2161。`impl Module for Embedding` と同型）。
+impl Module for EmbeddingBag {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward_from_var(input)
+    }
+
+    fn as_embedding_bag(&self) -> Option<&EmbeddingBag> {
+        Some(self)
+    }
+
+    fn as_embedding_bag_mut(&mut self) -> Option<&mut EmbeddingBag> {
+        Some(self)
+    }
+
+    /// `forward_host` を実装しないため既定 `Unsupported` のまま
+    /// （`impl Module for Embedding` と同じ理由: `compat::Sequential::
+    /// predict` の tape 不要経路が本層で `Unsupported` に当たる前に
+    /// 全層を事前判定できるようにする）。
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    /// 命名契約: `weight`（常に。`EmbeddingBag` は affine なし構成を
+    /// 持たないため必ず 1 件のみ）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        vec![("weight".to_string(), self.weight())]
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        EmbeddingBag::set_parameter(self, name, value)
+    }
+
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        EmbeddingBag::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        EmbeddingBag::requires_grad(self)
     }
 }
 

@@ -10727,6 +10727,199 @@ fn workspace_declares_conv3d_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
+// イシュー #2161（親 #2131）: Dropout2d・AlphaDropout・EmbeddingBag の
+// facade 公開保留を検査するテスト群。`DropoutEmbeddingBagHoldDoctestGuard`
+// （`src/lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査に加え、
+// `compat::Sequential::add_dropout2d`／`add_alpha_dropout`／
+// `add_embedding_bag` の非宣言を持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-dropout-embedding-bag-decision.md` §6 参照。
+// =====================================================================
+
+/// `DropoutEmbeddingBagHoldDoctestGuard` の唯一の doctest ブロックが
+/// glob import するネスト `pub mod` 集合と、`src/lib.rs` の実際の
+/// `pub mod` 宣言集合が一致することを固定する（`spatial_layers_hold_
+/// doctest_globs_all_pub_modules` と同型。イシュー #2161）。
+#[test]
+fn dropout_embedding_bag_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DropoutEmbeddingBagHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "DropoutEmbeddingBagHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`dropout_embedding_bag_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの**glob 以外の本文**（`__fandhe_dropout_embedding_bag_hold_
+/// probe` モジュール・`__FandheDropoutEmbeddingBagAddProbe`／
+/// `__FandheDropoutEmbeddingBagVarProbe` トレイト定義・
+/// `compat::Sequential`／`Var` への実装・`__probe` 関数）が固定文言
+/// [`DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
+/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
+/// 拒否する。イシュー #2161）。
+#[test]
+fn dropout_embedding_bag_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DropoutEmbeddingBagHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY,
+        "DropoutEmbeddingBagHoldDoctestGuard の doctest ブロック本文\
+         （glob 以外）が固定文言 DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY\
+         からドリフトしている。正のプローブ（__fandhe_dropout_\
+         embedding_bag_hold_probe モジュール・\
+         __FandheDropoutEmbeddingBagAddProbe／\
+         __FandheDropoutEmbeddingBagVarProbe トレイト・__probe 関数）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`dropout_embedding_bag_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `DropoutEmbeddingBagHoldDoctestGuard` doc 内の唯一の doctest
+/// ブロックから、ネスト `pub mod` の glob import 行
+/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
+/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
+/// 含む）。
+const DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_dropout_embedding_bag_hold_probe {\n\
+\x20\x20\x20\x20pub struct Dropout2d;\n\
+\x20\x20\x20\x20pub struct AlphaDropout;\n\
+\x20\x20\x20\x20pub struct EmbeddingBag;\n\
+\x20\x20\x20\x20pub struct EmbeddingBagVars;\n\
+\x20\x20\x20\x20pub struct EmbeddingBagMode;\n\
+\x20\x20\x20\x20pub struct __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20pub fn add_dropout2d() -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_alpha_dropout() -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_embedding_bag() -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_dropout_embedding_bag_hold_probe::*;\n\
+\n\
+trait __FandheDropoutEmbeddingBagAddProbe {\n\
+\x20\x20\x20\x20fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+}\n\
+\n\
+impl __FandheDropoutEmbeddingBagAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandheDropoutEmbeddingBagVarProbe {\n\
+\x20\x20\x20\x20fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheDropoutEmbeddingBagVarProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: Dropout2d,\n\
+\x20\x20\x20\x20_: AlphaDropout,\n\
+\x20\x20\x20\x20_: EmbeddingBag,\n\
+\x20\x20\x20\x20_: EmbeddingBagVars,\n\
+\x20\x20\x20\x20_: EmbeddingBagMode,\n\
+\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_dropout2d();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_alpha_dropout();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_embedding_bag();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_dropout2d(seq);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_dropout2d();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_alpha_dropout(seq);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_alpha_dropout();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_embedding_bag(seq);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_embedding_bag();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::dropout2d(v);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.dropout2d();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::alpha_dropout(v);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.alpha_dropout();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::embedding_bag(v);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.embedding_bag();\n\
+}";
+
+/// `src/compat` 配下に `add_dropout2d`／`add_alpha_dropout`／
+/// `add_embedding_bag` の `pub fn` 宣言が存在しないことを固定する
+/// （イシュー #2161。`compat_sequential_does_not_expose_spatial_layer_
+/// add_methods` と同型。`docs/autodiff-dropout-embedding-bag-decision.md`
+/// §6 が未承認のまま対象外としている設計判断の固定）。
+#[test]
+fn compat_sequential_does_not_expose_dropout_embedding_bag_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = ["add_dropout2d", "add_alpha_dropout", "add_embedding_bag"];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for name in forbidden {
+            if contains_pub_fn_declaration(content, name) {
+                offenses.push(format!("{}: pub fn {name}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に Dropout2d／AlphaDropout／EmbeddingBag 系\
+         add_* が見つかった（承認スコープ〈#2161〉は Sequential への\
+         追加を認めていない）: {offenses:?}"
+    );
+}
+
+/// [`compat_sequential_does_not_expose_dropout_embedding_bag_add_methods`]
+/// の自己テスト（合成入力で検出できることを確認する）。
+#[test]
+fn compat_sequential_does_not_expose_dropout_embedding_bag_add_methods_detects_offense() {
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_dropout2d(&mut self, l: Dropout2d) {}",
+        "add_dropout2d"
+    ));
+    assert!(!contains_pub_fn_declaration(
+        "pub fn add_linear(&mut self, l: Linear) {}",
+        "add_dropout2d"
+    ));
+}
+
+// =====================================================================
 // イシュー #2163（親 #2131）: MultiheadAttention のオプション
 // （batch_first・kdim/vdim・key_padding_mask）の facade 公開保留を
 // 検査するテスト群。`MhaOptionsHoldDoctestGuard`（`src/lib.rs`）の
@@ -10885,7 +11078,6 @@ fn facade_does_not_reexport_multihead_attention_config() {
          している: {offending:?}"
     );
 }
-
 // =====================================================================
 // イシュー #2164（親 #2131）: RNN／LSTM／GRU の多層・双方向・dropout
 // （`RnnConfig`）の facade 公開保留を検査するテスト群。
