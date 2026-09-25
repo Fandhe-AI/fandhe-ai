@@ -683,6 +683,74 @@ mod tests {
         }
     }
 
+    /// PR #2268 codex-review〈P1〉指摘の回帰: `rcond` 打ち切りで**非零**
+    /// の特異値を捨てるケース（`A=diag(2,1)`・`rcond=0.75` は `tol=1.5`
+    /// のため `σ=1` を切り捨て有効ランク 1 になる）。以前の実装は
+    /// Golub–Pereyra の `pinv_backward` 式を打ち切り後の `P` へそのまま
+    /// 適用しており、`A` が正方かつ全特異値が残るケース（本ファイルの
+    /// `pinv_gradient_matches_finite_difference_full_rank`）では偶然
+    /// 一致するが、実際に非零特異値を切り捨てるこのケースでは有限差分
+    /// と乖離していた（`docs/autodiff-linalg-ops-decision.md` §2.5）。
+    #[test]
+    fn pinv_gradient_matches_finite_difference_rank_deficient_truncation() {
+        let eps = 1e-3f32;
+        let rcond = 0.75f32;
+        let base = vec![2.0f32, 0.0, 0.0, 1.0];
+        let eval_fn = |data: &[f32], out_idx: usize| -> f32 {
+            let tape = Tape::new();
+            let x = tape.var(&t(data.to_vec(), &[2, 2]));
+            let p = pinv(&x, Some(rcond)).unwrap();
+            p.to_tensor().host_slice()[out_idx]
+        };
+        for out_idx in 0..4 {
+            let tape = Tape::new();
+            let x = tape.var(&t(base.clone(), &[2, 2]));
+            let p = pinv(&x, Some(rcond)).unwrap();
+            let out_r = out_idx / 2;
+            let out_c = out_idx % 2;
+            let grads = tape
+                .backward(&p.narrow(0, out_r, 1).unwrap().narrow(1, out_c, 1).unwrap())
+                .unwrap();
+            let dx = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+            for i in 0..4 {
+                let mut plus = base.clone();
+                plus[i] += eps;
+                let mut minus = base.clone();
+                minus[i] -= eps;
+                let numeric = (eval_fn(&plus, out_idx) - eval_fn(&minus, out_idx)) / (2.0 * eps);
+                assert!(
+                    (numeric - dx[i]).abs() < 5e-2,
+                    "out_idx={out_idx} i={i} numeric={numeric} analytic={}",
+                    dx[i]
+                );
+            }
+        }
+    }
+
+    /// PR #2268 codex-review〈P1〉指摘の回帰（複数のゼロ特異値。打ち切り
+    /// で捨てた特異値どうしが縮退するのはランク落ち行列でありふれた
+    /// ケースであり、これを理由に `InvalidArgument` になってはならない
+    /// （`eval::linalg::svd_vjp_rank_limited_f64` の doc 参照）。
+    #[test]
+    fn pinv_gradient_rank_deficient_with_multiple_zero_singular_values_does_not_error() {
+        let tape = Tape::new();
+        // rank 2（σ = [3,2,0,0,0]）の 5x5 対角行列。既定 rcond で
+        // σ=0 が 3 個切り捨てられる。
+        let mut data = vec![0.0f32; 25];
+        data[0] = 3.0;
+        data[6] = 2.0;
+        let x = tape.var(&t(data, &[5, 5]));
+        let p = pinv(&x, None).unwrap();
+        let grads = tape
+            .backward(&p.narrow(0, 0, 1).unwrap().narrow(1, 0, 1).unwrap())
+            .unwrap();
+        let dx = grads.get(&x).unwrap().unwrap().host_slice().into_owned();
+        assert!(
+            dx.iter().all(|v| v.is_finite()),
+            "縮退した打ち切り特異値ペアの近接判定で誤って失敗した: {dx:?}"
+        );
+    }
+
     /// `eval::linalg::lstsq` の `m==0` 早期リターンは `n * k_cols` の
     /// 乗算を経て出力バッファを確保するが、`m` が非ゼロを要求しない
     /// ため `n`・`k_cols` を巨大にすると `checked_mul` なしでは
@@ -706,6 +774,24 @@ mod tests {
         let x = tape.var(&t(vec![], &[0, 3]));
         let p = pinv(&x, None).unwrap();
         assert_eq!(p.to_tensor().shape(), &[3, 0]);
+    }
+
+    /// PR #2268 codex-review〈P2〉指摘の回帰: `pinv`／`matrix_rank`／
+    /// `lstsq` は空行列（`m==0` または `n==0`）の早期 return を `rcond`
+    /// 検証より前に置いていたため、`Some(NaN)` や負値等の不正な
+    /// `rcond` が空行列入力では素通りしていた。`rcond_rejects_negative_
+    /// and_non_finite`（非空行列）と対称に、空行列でも同じ検証が働く
+    /// ことを確認する。
+    #[test]
+    fn rcond_rejects_negative_and_non_finite_on_empty_matrix() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![], &[0, 3]));
+        let b = tape.var(&t(vec![], &[0, 1]));
+        for r in [-1.0f32, f32::NAN, f32::INFINITY] {
+            assert!(pinv(&x, Some(r)).is_err(), "pinv: r={r}");
+            assert!(matrix_rank(&x, Some(r)).is_err(), "matrix_rank: r={r}");
+            assert!(lstsq(&x, &b, Some(r)).is_err(), "lstsq: r={r}");
+        }
     }
 
     #[test]

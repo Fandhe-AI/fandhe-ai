@@ -1224,10 +1224,15 @@ fn pinv_mat_f64(a: &Tensor<f32>, rcond: f64) -> Result<Mat, LinalgError> {
 pub(crate) fn pinv(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, LinalgError> {
     let shape = a.shape();
     let (m, n) = (shape[0], shape[1]);
+    // `rcond` 検証（PR #2268 codex-review〈P2〉指摘の是正）: 空行列
+    // （`m==0`／`n==0`）の早期 return を `resolve_rcond` より前に置くと、
+    // `Some(NaN)` や負値等の不正な `rcond` が空行列入力では検証を
+    // 素通りしてしまう。他の非空行列と同じく必ず先に検証する
+    // （`fandhe_ai_autodiff::eval::linalg::pinv` と同一契約）。
+    let rcond = resolve_rcond(rcond, m, n)?;
     if m == 0 || n == 0 {
         return build_tensor(Vec::new(), &[n, m]);
     }
-    let rcond = resolve_rcond(rcond, m, n)?;
     pinv_mat_f64(a, rcond)?.to_tensor()
 }
 
@@ -1235,10 +1240,12 @@ pub(crate) fn pinv(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, L
 pub(crate) fn matrix_rank(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, LinalgError> {
     let shape = a.shape();
     let (m, n) = (shape[0], shape[1]);
+    // `pinv` と同じ理由（PR #2268 codex-review〈P2〉指摘）で、空行列の
+    // 早期 return より前に `rcond` を検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
     if m == 0 || n == 0 {
         return build_tensor(vec![0.0], &[]);
     }
-    let rcond = resolve_rcond(rcond, m, n)?;
     let (_u, s, _vh) = svd(a)?;
     let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
     let rank = truncated_svd_rank(&s64, rcond);
@@ -1265,10 +1272,12 @@ pub(crate) fn lstsq(
     // ケースで panic しうるため、`checked_numel_for` でバイト数上限まで
     // 検査する（PR #2268 codex-review〈P1〉指摘の是正）。
     let out_numel = checked_numel_for::<f32>(&[n, k_cols], "linalg::lstsq")?;
+    // `pinv`／`matrix_rank` と同じ理由（PR #2268 codex-review〈P2〉指摘）
+    // で、空行列の早期 return より前に `rcond` を検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
     if m == 0 || n == 0 {
         return build_tensor(vec![0.0; out_numel], &[n, k_cols]);
     }
-    let rcond = resolve_rcond(rcond, m, n)?;
     let (u, s, vh) = svd(a)?;
     let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
     let rank = truncated_svd_rank(&s64, rcond);

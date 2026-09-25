@@ -295,6 +295,40 @@ fn linalg_matrix_rank_rejects_invalid_rcond() {
     ));
 }
 
+/// PR #2268 codex-review〈P2〉指摘の回帰: `pinv`／`matrix_rank`／
+/// `lstsq` は空行列（`m==0` または `n==0`）の早期 return を `rcond`
+/// 検証より前に置いていたため、`Some(NaN)` や負値が空行列入力では
+/// 素通りしていた（`src/linalg.rs::resolve_rcond` 呼び出し順序の是正）。
+#[test]
+fn linalg_rejects_invalid_rcond_on_empty_matrix() {
+    let ops = CpuBackendOps::new();
+    let a = t(Vec::new(), &[0, 3]);
+    let b = t(Vec::new(), &[0, 1]);
+    for r in [-1.0f32, f32::NAN, f32::INFINITY] {
+        assert!(
+            matches!(
+                ops.linalg_pinv(&a, Some(r)),
+                Err(BackendError::InvalidArgument(_))
+            ),
+            "linalg_pinv: r={r}"
+        );
+        assert!(
+            matches!(
+                ops.linalg_matrix_rank(&a, Some(r)),
+                Err(BackendError::InvalidArgument(_))
+            ),
+            "linalg_matrix_rank: r={r}"
+        );
+        assert!(
+            matches!(
+                ops.linalg_lstsq(&a, &b, Some(r)),
+                Err(BackendError::InvalidArgument(_))
+            ),
+            "linalg_lstsq: r={r}"
+        );
+    }
+}
+
 // --- lstsq（イシュー #2150） ---
 
 #[test]

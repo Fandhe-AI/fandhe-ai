@@ -133,12 +133,32 @@ resolve_rcond` を `linalg_ops.rs` の入口で 1 回呼んで確定させた値
 を `f64` の行列として返す。`pinv`／`matrix_rank`／`lstsq` はいずれも
 この 1 関数を基盤にする。
 
-- `pinv` の VJP は Golub–Pereyra の微分（PyTorch `pinv_backward` 相当）:
-  `gA = −Pᵀ G Pᵀ + (I_m − A P) Gᵀ P Pᵀ + Pᵀ P Gᵀ (I_n − P A)`
-  （`P=A⁺`・`G` は upstream）。現在の実装は `m×m`／`n×n` の中間行列を
-  経由する直接式評価であり、計画時点で想定していた「結合順序を
-  `X−U(UᵀX)` 型にして中間行列を `r×max(m,n)` 以下に抑える」最適化は
-  未実装（§8 対象外・スコープ外事項として記録）。
+- `pinv` の VJP（2026-09-25 是正・PR #2268 codex-review〈P1〉指摘）は、
+  当初計画していた Golub–Pereyra の微分式（PyTorch `pinv_backward`
+  相当。`gA = −Pᵀ G Pᵀ + (I_m − A P) Gᵀ P Pᵀ + Pᵀ P Gᵀ (I_n − P A)`。
+  `P=A⁺`・`G` は upstream）を `rcond` 打ち切り後の `P` へそのまま
+  適用していたが、この式は `A A⁺ A = A` 等の Moore–Penrose の 4 条件
+  が「真の `A`」に対して成立することを前提に導出されており、`rcond`
+  打ち切りで**非零の特異値を捨てた**場合（`rank < min(m,n)` かつ
+  捨てた特異値が非零。例 `A=diag(2,1)`・`rcond=0.75`）は前提が崩れて
+  有限差分と乖離する不具合があった（`A` が正方かつ全特異値が残る
+  ケースは偶然一致するため、フルランクの回帰テストだけでは検出
+  できなかった）。是正後は `P` を `svd(a)` の `rank` 個の特異値
+  三つ組 `(U_r, S_r, V_r)` のみへ依存する関数として扱い、`P` の
+  コタンジェント `G` を三つ組のコタンジェント `(dU, dS, dV)`
+  （`rank` 以上の列は厳密 `0`）へ変換したうえで、`svd_vjp`
+  （`Op::SvdU`／`Op::SvdS`／`Op::SvdVh` 用の Townsend 2016 汎用式）と
+  同型の式（`eval::linalg::svd_vjp_rank_limited_f64`）を適用する。
+  打ち切りの有無に関わらず常に正しく、かつ `svd_vjp` の結合順序
+  （`X−U(UᵀX)` 型）をそのまま踏襲するため、中間行列は `m×k`・
+  `n×k`・`k×k`・最終出力 `m×n`（`k=min(m,n)`）以下に収まり
+  `m×m`／`n×n` を実体化しない（§8 に記録していた最適化は本是正で
+  同時に達成された）。`svd_vjp` 本体（`Op::SvdU` 等の汎用契約。全域
+  無条件の近接／重複特異値判定）は変更せず、`svd_vjp_rank_limited_f64`
+  は打ち切りで捨てた特異値どうしのペア（寄与が定義上厳密ゼロ）に
+  限り判定をスキップする専用の姉妹関数として新設した（§2.2 の
+  「既存 `svd_vjp` を経由しない」判断は維持しつつ、その式の骨格は
+  再利用する形）。
 - `matrix_rank` は非微分（VJP 明示ゼロ）。
 - `lstsq` は `X = V S⁻¹ (Uᵀ B)`（有効ランクまでの和。`A⁺` を陽に作ら
   ない）。VJP は `gB = A⁺ᵀ gX`、`gA = pinv_vjp(a, rcond, G=gX Bᵀ)`
@@ -229,9 +249,6 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機への到達手段が�
 - `lstsq` の `residuals`／`rank`／`singular_values` 返却・driver 選択
 - `pinv`／`matrix_rank` の `atol` 引数・`hermitian=True`
 - `matrix_rank` の int 出力
-- `pinv_vjp` の中間行列を有効ランク以下に抑える最適化（大規模
-  〈例 `[100000,1]`〉入力でのメモリ節約。現状は `m×m`／`n×n` 中間
-  行列を用いる直接式評価。§2.5 参照）
-- 既存 `svd_vjp` の縮退判定が無条件に働く問題（upstream がゼロでも
+- 既存 `svd_vjp`（`Op::SvdU` 等の汎用契約）の縮退判定が無条件に働く問題（upstream がゼロでも
   発火する）の是正（§2.2 参照。本 PR では変更しない）
 - CUDA／Metal 実機計測（§7 参照）
