@@ -18,7 +18,7 @@
 //! （本番経路 `unwrap()`/`expect()` 禁止。`.claude/rules/
 //! coding-rust.md`）。
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{ShapeError, Tensor, UniqueExtOutput};
 
 /// shape の要素数積を `checked_mul` の畳み込みで検査する
 /// （`gather_scatter.rs::checked_numel` と同型の独立実装。
@@ -54,6 +54,313 @@ pub fn unique(x: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
     v.dedup_by(|cur, prev| *cur == *prev);
     let m = v.len();
     Tensor::new(v, &[m])
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::unique_ext`] の CPU 実装本体
+/// （イシュー #2153・親 #2131）。`fandhe_ai_autodiff::eval::
+/// unique_ext`（`autodiff` クレート非公開のため本クレートから直接は
+/// 呼べない）と**意図的に同一アルゴリズムを複製**する（[`unique`] と
+/// 同じ理由による複製方針）。契約（群化キー・±0／NaN の扱い・
+/// 退化ケース）は [`fandhe_ai_tensor_core::BackendOps::unique_ext`]
+/// doc を正とする。
+pub fn unique_ext(
+    x: &Tensor<f32>,
+    dim: Option<usize>,
+    consecutive: bool,
+) -> Result<UniqueExtOutput, ShapeError> {
+    let numel = checked_numel(x.shape())?;
+    match dim {
+        None => {
+            // codex-review P1 是正（PR #2270・イシュー #2153）:
+            // `inverse` は `in_shape`（`= x.shape()`。要素数積 `numel`）
+            // と同じ形状の `Tensor<i32>` として書き戻すため、`numel` が
+            // `i32` の表現範囲を超えないことを確保前に検査する。
+            // `fandhe_ai_autodiff::topk_unique_ops::
+            // ensure_target_len_fits_i32` は本関数を呼ぶ前に同じ検査を
+            // 行うが、`BackendOps::unique_ext`（本関数はその CPU 実装
+            // 本体）を `Var`／autodiff 層を経由せず直接呼び出す経路でも
+            // 過大確保・`as i32` の無検査切り詰めを防ぐため、本関数側
+            // でも独立に検査する（`.claude/rules/security.md` A08
+            // 「判定迂回経路を作らない」。`backend-cpu::sort_topk` が
+            // 同じ理由で使う `ShapeError::IndexRangeOverflow` 契約を
+            // 再利用する）。
+            i32::try_from(numel).map_err(|_| ShapeError::IndexRangeOverflow { index: numel })?;
+            let data: Vec<f32> = x.host_slice().into_owned();
+            let (values, inverse, counts) = unique_ext_flat(&data, consecutive);
+            let in_shape = x.shape().to_vec();
+            Ok(UniqueExtOutput {
+                values: Tensor::new(values.clone(), &[values.len()])?,
+                inverse: Tensor::new(inverse, &in_shape)?,
+                counts: Tensor::new(counts.clone(), &[counts.len()])?,
+            })
+        }
+        Some(d) => {
+            if d >= x.shape().len() {
+                return Err(ShapeError::AxisOutOfRange {
+                    axis: d,
+                    rank: x.shape().len(),
+                });
+            }
+            let shape = x.shape().to_vec();
+            let axis_len = shape[d];
+            // codex-review P1 是正（PR #2270・イシュー #2153）:
+            // `axis_len`（`= shape[d]`）は呼び出し元
+            // `topk_unique_ops::ensure_target_len_fits_i32`
+            // （`fandhe_ai_autodiff::grad::unique_ext_with_fallback`
+            // 経由）が `i32::MAX` 以下であることを事前検査する契約だが、
+            // それは `Var`／autodiff 層を通る経路限定の契約であり、公開
+            // 関数である本関数（`BackendOps::unique_ext` の CPU 実装
+            // 本体）を直接呼び出す経路には及ばない。`[usize::MAX, 0]`
+            // のような shape で `dim=Some(0)` を直接呼ぶと、下記の
+            // `shape.contains(&0)` 分岐が `axis_len == usize::MAX` の
+            // まま `vec![0i32; axis_len]` を確保しようとして capacity
+            // overflow で panic しうる（codex-review 指摘）。
+            // `numel`（上で `checked_numel` により usize オーバーフロー
+            // 検査済み）は `[usize::MAX, 0]` のような shape では 0 に
+            // なり `checked_numel` 単体では防げないため、`axis_len` を
+            // `i32` 表現範囲で独立に検査し、超過時は確保前に型付き
+            // エラーで拒否する（本番経路 panic 禁止・
+            // `.claude/rules/coding-rust.md`）。
+            i32::try_from(axis_len)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: axis_len })?;
+            // 直前の検査により `axis_len <= i32::MAX` が確定したため、
+            // 以下の `vec![0i32; axis_len]`（`shape.contains(&0)` 分岐）
+            // ・`unique_ext_slices`／`unique_ext_group_sorted` が
+            // `axis_len` に比例して確保する行配列・ソート添字配列は
+            // いずれも `i32::MAX` 要素以内に収まる。
+            //
+            // なお shape に 0 長軸が含まれる（numel == 0）場合は
+            // `row_major_strides` へ進む前に打ち切る
+            // （codex-review P0 是正・PR #2270・イシュー #2153）。
+            // `unique_ext_slices` は shape 全体の suffix stride 積
+            // （`row_major_strides`）と `other_shape.iter().product()`
+            // を無条件に計算するため、例えば `[0, usize::MAX, 2]` の
+            // ように総積は 0 でも部分積（`usize::MAX * 2`）が usize を
+            // 溢れる形状で overflow panic／wrap を起こしうる
+            // （Cursor Bugbot 指摘）。さらに `d` 自身が非 0 長軸で他の
+            // 軸が 0 長のケース（例: `[大軸長, 0]`）では、各スライスが
+            // 等しく空であることが自明なので、`axis_len` に比例した
+            // `Vec<Vec<f32>>`（`unique_ext_slices`／
+            // `unique_ext_group_sorted` が確保する行配列・ソート添字
+            // 配列）を構築せず「1 群」へ直接畳み込むことで過大確保を
+            // 避ける（codex 指摘）。
+            if shape.contains(&0) {
+                let m = usize::from(axis_len != 0);
+                let mut out_shape = shape.clone();
+                out_shape[d] = m;
+                // `out_shape` は shape 全体に 0 長軸を含んだまま
+                // （`d` 自身が 0 長なら `out_shape[d] == 0`、そうで
+                // なければ他の軸に残る 0 長がそのまま残る）なので
+                // 要素数積は常に 0 になる。検査は `.product()` では
+                // なく `.any()` で行う（`.product()` は左から順に
+                // 素朴な乗算で畳み込むため、0 の手前に巨大な値が
+                // 複数並ぶ shape では検査対象の debug_assert 自体が
+                // overflow しうる——まさに本 P0 是正が避けたい種類の
+                // 計算のため、検査側にも持ち込まない）。
+                debug_assert!(out_shape.contains(&0));
+                let inverse = vec![0i32; axis_len];
+                let counts = if m == 1 {
+                    vec![axis_len as i32]
+                } else {
+                    Vec::new()
+                };
+                return Ok(UniqueExtOutput {
+                    values: Tensor::new(Vec::new(), &out_shape)?,
+                    inverse: Tensor::new(inverse, &[axis_len])?,
+                    counts: Tensor::new(counts, &[m])?,
+                });
+            }
+            let data: Vec<f32> = x.host_slice().into_owned();
+            let (rows, other_shape) = unique_ext_slices(&shape, &data, d);
+            let (group_of, reps) = if consecutive {
+                unique_ext_group_consecutive(&rows)
+            } else {
+                unique_ext_group_sorted(&rows)
+            };
+            let m = reps.len();
+            let mut counts = vec![0i32; m];
+            for &g in &group_of {
+                counts[g] += 1;
+            }
+            let mut out_shape = shape.clone();
+            out_shape[d] = m;
+            let out_strides = row_major_strides(&out_shape);
+            let other_axes: Vec<usize> = (0..shape.len()).filter(|&a| a != d).collect();
+            let mut values_data = vec![0f32; out_shape.iter().product()];
+            for (g, row) in reps.iter().enumerate() {
+                for (o, &val) in row.iter().enumerate() {
+                    let other_coords = unravel(o, &other_shape);
+                    let mut flat = g * out_strides[d];
+                    for (k, &axis) in other_axes.iter().enumerate() {
+                        flat += other_coords[k] * out_strides[axis];
+                    }
+                    values_data[flat] = val;
+                }
+            }
+            let inverse: Vec<i32> = group_of.iter().map(|&g| g as i32).collect();
+            Ok(UniqueExtOutput {
+                values: Tensor::new(values_data, &out_shape)?,
+                inverse: Tensor::new(inverse, &[shape[d]])?,
+                counts: Tensor::new(counts, &[m])?,
+            })
+        }
+    }
+}
+
+/// [`unique_ext`] の `dim = None` 経路が使うヘルパー
+/// （`fandhe_ai_autodiff::eval::unique_ext_flat` の複製）。
+fn unique_ext_flat(data: &[f32], consecutive: bool) -> (Vec<f32>, Vec<i32>, Vec<i32>) {
+    let n = data.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    let mut values = Vec::new();
+    let mut inverse = vec![0i32; n];
+    let mut counts: Vec<i32> = Vec::new();
+    if consecutive {
+        let mut cur = data[0];
+        values.push(cur);
+        counts.push(1);
+        let mut cur_group = 0usize;
+        for i in 1..n {
+            if data[i] == cur {
+                counts[cur_group] += 1;
+            } else {
+                cur = data[i];
+                values.push(cur);
+                counts.push(1);
+                cur_group += 1;
+            }
+            inverse[i] = (values.len() - 1) as i32;
+        }
+    } else {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| data[a].total_cmp(&data[b]).then(a.cmp(&b)));
+        let mut prev: Option<f32> = None;
+        for &idx in &order {
+            let v = data[idx];
+            if prev != Some(v) {
+                values.push(v);
+                counts.push(0);
+                prev = Some(v);
+            }
+            let g = values.len() - 1;
+            inverse[idx] = g as i32;
+            counts[g] += 1;
+        }
+    }
+    (values, inverse, counts)
+}
+
+/// row-major strides を求める（`fandhe_ai_autodiff::eval::
+/// row_major_strides` の複製。`pub(crate)` でクレートを跨いで共有
+/// できないため複製する）。
+fn row_major_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    strides
+}
+
+/// フラット添字を多次元添字へ展開する（`fandhe_ai_autodiff::eval::
+/// unravel` の複製）。
+fn unravel(mut idx: usize, shape: &[usize]) -> Vec<usize> {
+    let mut coords = vec![0usize; shape.len()];
+    for i in (0..shape.len()).rev() {
+        let dim = shape[i].max(1);
+        coords[i] = idx % dim;
+        idx /= dim;
+    }
+    coords
+}
+
+/// [`unique_ext`] の `dim = Some(d)` 経路が使うヘルパー
+/// （`fandhe_ai_autodiff::eval::unique_ext_slices` の複製）。
+fn unique_ext_slices(shape: &[usize], data: &[f32], dim: usize) -> (Vec<Vec<f32>>, Vec<usize>) {
+    let strides = row_major_strides(shape);
+    let axis_len = shape[dim];
+    let other_axes: Vec<usize> = (0..shape.len()).filter(|&a| a != dim).collect();
+    let other_shape: Vec<usize> = other_axes.iter().map(|&a| shape[a]).collect();
+    let slice_len: usize = other_shape.iter().product();
+    let mut rows = Vec::with_capacity(axis_len);
+    for idx in 0..axis_len {
+        let mut row = Vec::with_capacity(slice_len);
+        for o in 0..slice_len {
+            let other_coords = unravel(o, &other_shape);
+            let mut flat = idx * strides[dim];
+            for (k, &axis) in other_axes.iter().enumerate() {
+                flat += other_coords[k] * strides[axis];
+            }
+            row.push(data[flat]);
+        }
+        rows.push(row);
+    }
+    (rows, other_shape)
+}
+
+/// 2 行が IEEE `==`（要素ごと）で一致するかを判定する
+/// （`fandhe_ai_autodiff::eval::unique_ext_row_eq` の複製）。
+fn unique_ext_row_eq(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| x == y)
+}
+
+/// 行同士を比較する全順序（`fandhe_ai_autodiff::eval::
+/// unique_ext_row_cmp` の複製。2 キー方式は同関数 doc を参照）。
+fn unique_ext_row_cmp(a: &[f32], b: &[f32]) -> std::cmp::Ordering {
+    let normalize = |v: f32| if v == 0.0 { 0.0 } else { v };
+    for (&x, &y) in a.iter().zip(b) {
+        let c = normalize(x).total_cmp(&normalize(y));
+        if c != std::cmp::Ordering::Equal {
+            return c;
+        }
+    }
+    for (&x, &y) in a.iter().zip(b) {
+        let c = x.total_cmp(&y);
+        if c != std::cmp::Ordering::Equal {
+            return c;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// ソートベースの群化（`fandhe_ai_autodiff::eval::
+/// unique_ext_group_sorted` の複製）。
+fn unique_ext_group_sorted(rows: &[Vec<f32>]) -> (Vec<usize>, Vec<Vec<f32>>) {
+    let n = rows.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| unique_ext_row_cmp(&rows[a], &rows[b]).then(a.cmp(&b)));
+    let mut group_of = vec![0usize; n];
+    let mut reps: Vec<Vec<f32>> = Vec::new();
+    for &idx in &order {
+        let is_new = reps
+            .last()
+            .is_none_or(|last: &Vec<f32>| !unique_ext_row_eq(last, &rows[idx]));
+        if is_new {
+            reps.push(rows[idx].clone());
+        }
+        group_of[idx] = reps.len() - 1;
+    }
+    (group_of, reps)
+}
+
+/// 元の並び順のまま隣接行のみ群化する（`fandhe_ai_autodiff::eval::
+/// unique_ext_group_consecutive` の複製）。
+fn unique_ext_group_consecutive(rows: &[Vec<f32>]) -> (Vec<usize>, Vec<Vec<f32>>) {
+    let n = rows.len();
+    let mut group_of = vec![0usize; n];
+    let mut reps: Vec<Vec<f32>> = Vec::new();
+    for idx in 0..n {
+        let is_new = idx == 0 || !unique_ext_row_eq(&rows[idx - 1], &rows[idx]);
+        if is_new {
+            reps.push(rows[idx].clone());
+        }
+        group_of[idx] = reps.len() - 1;
+    }
+    (group_of, reps)
 }
 
 #[cfg(test)]
@@ -138,5 +445,116 @@ mod tests {
         assert_eq!(transposed.shape(), &[usize::MAX, 2, 0]);
         let err = unique(&transposed).unwrap_err();
         assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    /// [`unique_ext`] の `dim=None` 経路が [`unique`] と bit 一致する
+    /// `values` を返すこと・`inverse`/`counts` の不変条件を確認する
+    /// （イシュー #2153）。
+    #[test]
+    fn unique_ext_flat_matches_unique_and_reconstructs() {
+        let x = t(vec![3.0, 1.0, 2.0, 1.0, 3.0], &[5]);
+        let plain = unique(&x).unwrap();
+        let out = unique_ext(&x, None, false).unwrap();
+        assert_eq!(
+            out.values.host_slice().into_owned(),
+            plain.host_slice().into_owned()
+        );
+        assert_eq!(out.inverse.shape(), &[5]);
+        assert_eq!(out.counts.shape(), &[3]);
+        let values = out.values.host_slice().into_owned();
+        let inverse = out.inverse.host_slice().into_owned();
+        for (i, &g) in inverse.iter().enumerate() {
+            assert_eq!(values[g as usize], x.host_slice()[i]);
+        }
+        let counts = out.counts.host_slice().into_owned();
+        assert_eq!(counts.iter().sum::<i32>(), 5);
+    }
+
+    /// `consecutive=true` は元順序のまま隣接要素のみ群化し、代表は
+    /// 各ランの先頭出現であることを確認する（イシュー #2153）。
+    #[test]
+    fn unique_ext_consecutive_groups_adjacent_only() {
+        let x = t(vec![1.0, 1.0, 2.0, 1.0, 1.0], &[5]);
+        let out = unique_ext(&x, None, true).unwrap();
+        assert_eq!(out.values.host_slice().into_owned(), vec![1.0, 2.0, 1.0]);
+        assert_eq!(out.inverse.host_slice().into_owned(), vec![0, 0, 1, 2, 2]);
+        assert_eq!(out.counts.host_slice().into_owned(), vec![2, 1, 2]);
+    }
+
+    /// `dim` 指定時、`[-0.0, 5.0]`／`[+0.0, 5.0]` のような IEEE 等価
+    /// スライスが正しく 1 群に畳み込まれることを確認する
+    /// （2 キー方式の回帰テスト。イシュー #2153）。
+    #[test]
+    fn unique_ext_dim_collapses_ieee_equal_rows_with_signed_zero() {
+        let neg_zero = -0.0f32;
+        let pos_zero = 0.0f32;
+        // shape [3, 2]: row0=[-0,5], row1=[-0,7], row2=[+0,5]
+        let x = t(vec![neg_zero, 5.0, neg_zero, 7.0, pos_zero, 5.0], &[3, 2]);
+        let out = unique_ext(&x, Some(0), false).unwrap();
+        assert_eq!(out.values.shape(), &[2, 2]);
+        assert_eq!(out.counts.host_slice().into_owned().iter().sum::<i32>(), 3);
+        let inverse = out.inverse.host_slice().into_owned();
+        assert_eq!(
+            inverse[0], inverse[2],
+            "row0([-0,5]) と row2([+0,5]) は同じ群"
+        );
+        assert_ne!(inverse[0], inverse[1]);
+    }
+
+    /// `dim` 指定・degenerate ケース（`shape[d]==0`）は `m=0` を返す
+    /// ことを確認する（イシュー #2153）。
+    #[test]
+    fn unique_ext_dim_zero_length_axis_returns_empty() {
+        let x = t(Vec::new(), &[0, 3]);
+        let out = unique_ext(&x, Some(0), false).unwrap();
+        assert_eq!(out.values.shape(), &[0, 3]);
+        assert_eq!(out.inverse.shape(), &[0]);
+        assert_eq!(out.counts.shape(), &[0]);
+    }
+
+    /// PR #2270 codex-review P0 是正の回帰テスト: `d` 自身は非 0 長軸
+    /// だが他軸が 0 長（`slice_len == 0`）の場合、全スライスが等しく
+    /// 空であるため「1 群」に畳み込まれ、`axis_len` に比例した行配列
+    /// を構築せず `inverse`／`counts` が必要量だけ生成されることを
+    /// 確認する（`shape = [大軸長, 0]` 型。codex 指摘）。
+    #[test]
+    fn unique_ext_dim_nonzero_axis_with_other_zero_axis_collapses_to_one_group() {
+        let axis_len = 100_000usize;
+        let x = t(Vec::new(), &[axis_len, 0]);
+        let out = unique_ext(&x, Some(0), false).unwrap();
+        assert_eq!(out.values.shape(), &[1, 0]);
+        assert_eq!(out.inverse.shape(), &[axis_len]);
+        assert!(out.inverse.host_slice().iter().all(|&g| g == 0));
+        assert_eq!(out.counts.host_slice().into_owned(), vec![axis_len as i32]);
+    }
+
+    /// PR #2270 codex-review Medium 是正の回帰テスト: `shape` の先頭が
+    /// 0 長軸で、他軸が `row_major_strides` の suffix 積で usize を
+    /// 溢れさせるほど巨大（`[0, usize::MAX, 2]` 型。総積は 0 だが
+    /// `usize::MAX * 2` の部分積は overflow する）でも panic せず、
+    /// `d` を 0 長軸自身に取れば早期 return で strides 計算自体を
+    /// 回避できることを確認する（Cursor Bugbot 指摘）。
+    #[test]
+    fn unique_ext_dim_leading_zero_axis_with_overflow_prone_suffix_does_not_panic() {
+        let x = t(Vec::new(), &[0, usize::MAX, 2]);
+        let out = unique_ext(&x, Some(0), false).unwrap();
+        assert_eq!(out.values.shape(), &[0, usize::MAX, 2]);
+        assert_eq!(out.inverse.shape(), &[0]);
+        assert_eq!(out.counts.shape(), &[0]);
+    }
+
+    /// PR #2270 codex-review P1 是正の回帰テスト: `shape = [usize::MAX,
+    /// 0]`・`dim=Some(0)` を `BackendOps::unique_ext` の CPU 実装本体
+    /// （本関数）へ直接（`Var`／autodiff 層の `ensure_target_len_fits_i32`
+    /// 事前検査を経由せず）渡しても、`vec![0i32; axis_len]`（`axis_len
+    /// == usize::MAX`）の過大確保で panic せず、確保前に型付き
+    /// `ShapeError::IndexRangeOverflow` を返すことを確認する
+    /// （`checked_numel` は `[usize::MAX, 0]` の要素数積を 0 として
+    /// 受理するため、この経路は `checked_numel` 単体では防げない）。
+    #[test]
+    fn unique_ext_dim_axis_len_exceeding_i32_max_returns_typed_error_without_panic() {
+        let x = t(Vec::new(), &[usize::MAX, 0]);
+        let err = unique_ext(&x, Some(0), false).unwrap_err();
+        assert_eq!(err, ShapeError::IndexRangeOverflow { index: usize::MAX });
     }
 }

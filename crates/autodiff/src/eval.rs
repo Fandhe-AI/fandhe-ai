@@ -25,9 +25,9 @@ use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
     BceKind, GruBackwardOutput, GruPointwiseOutput, HuberKind, KlDivTarget, LstmPointwiseOutput,
-    Pool2dParams, ScatterReduce, ShapeError, Tensor, VectorNormOrd, adaptive_window, bicubic_blend,
-    bicubic_src_taps, bilinear_blend, bilinear_scale, bilinear_src_coord, linear_blend,
-    nearest_exact_src_coord, trilinear_blend,
+    Pool2dParams, ScatterReduce, ShapeError, Tensor, UniqueExtOutput, VectorNormOrd,
+    adaptive_window, bicubic_blend, bicubic_src_taps, bilinear_blend, bilinear_scale,
+    bilinear_src_coord, linear_blend, nearest_exact_src_coord, trilinear_blend,
 };
 
 use crate::layout;
@@ -3756,6 +3756,260 @@ pub(crate) fn unique(input: &Tensor<f32>) -> Tensor<f32> {
     v.dedup_by(|cur, prev| *cur == *prev);
     let m = v.len();
     build_tensor(v, &[m])
+}
+
+/// [`unique`] の拡張版のホスト参照実装（`torch.unique(sorted=True,
+/// return_inverse, return_counts, dim)`／`torch.unique_consecutive`
+/// 相当。イシュー #2153・親 #2131「5-B 演算」）。
+/// [`fandhe_ai_tensor_core::BackendOps::unique_ext`] が `Unsupported`
+/// を返したときのみ `grad::unique_ext_with_fallback` から呼ばれる。
+/// 契約（群化キー・±0／NaN の扱い・退化ケース）は
+/// [`fandhe_ai_tensor_core::BackendOps::unique_ext`] doc を正とする。
+///
+/// 呼び出し元（`grad::unique_ext_with_fallback`）が要素数積
+/// オーバーフロー・`i32` 上限を事前検査済みの前提で呼ぶ（[`unique`]
+/// と異なり本関数自身は二重防御を持たない——`Var::unique` は独立
+/// エントリで防御しているが、拡張版の全公開入口
+/// 〈`topk_unique_ops`〉は確保前検査を経由してから本関数へ到達する
+/// 契約のため、二重の `debug_assert!` フォールバックは設けない）。
+pub(crate) fn unique_ext(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    consecutive: bool,
+) -> UniqueExtOutput {
+    match dim {
+        None => {
+            let data = dense_vec(input);
+            let (values, inverse, counts) = unique_ext_flat(&data, consecutive);
+            let in_shape = input.shape().to_vec();
+            UniqueExtOutput {
+                values: build_tensor(values.clone(), &[values.len()]),
+                inverse: build_index_tensor(inverse, &in_shape),
+                counts: build_index_tensor(counts.clone(), &[counts.len()]),
+            }
+        }
+        Some(d) => {
+            let shape = input.shape().to_vec();
+            // codex-review P0 是正（PR #2270・イシュー #2153。
+            // `crates/backend-cpu/src/unique.rs::unique_ext` の同型
+            // 早期 return と同じ理由）: shape に 0 長軸が含まれる
+            // （numel == 0）場合は `unique_ext_slices` の
+            // `row_major_strides`／`other_shape.iter().product()` を
+            // 呼ぶ前に打ち切る。総積が 0 でも部分積が usize を溢れる
+            // 形状（例: `[0, usize::MAX, 2]`）で overflow panic／wrap
+            // しうるため（Cursor Bugbot 指摘）。`d` 以外の軸が 0 長の
+            // ケース（例: `[大軸長, 0]`）は全スライスが等しく空になる
+            // ため「1 群」へ直接畳み込み、`axis_len` に比例した
+            // `Vec<Vec<f32>>`（行配列）・ソート添字配列の確保を避ける
+            // （codex 指摘）。`axis_len`（`shape[d]`）は呼び出し元
+            // `topk_unique_ops::ensure_target_len_fits_i32` が
+            // `i32::MAX` 以下であることを事前検査済みの契約
+            // （[`unique_ext`] doc 冒頭参照）。
+            if shape.contains(&0) {
+                let axis_len = shape[d];
+                let m = usize::from(axis_len != 0);
+                let mut out_shape = shape.clone();
+                out_shape[d] = m;
+                // `.product()` ではなく `.any()` で検査する（0 の手前
+                // に巨大値が複数並ぶ shape では `.product()` 自体が
+                // overflow しうる——本 P0 是正が避けたい計算を検査側に
+                // 持ち込まない。`crates/backend-cpu/src/unique.rs`
+                // 同型コメント参照）。
+                debug_assert!(out_shape.contains(&0));
+                let inverse = vec![0i32; axis_len];
+                let counts = if m == 1 {
+                    vec![axis_len as i32]
+                } else {
+                    Vec::new()
+                };
+                return UniqueExtOutput {
+                    values: build_tensor(Vec::new(), &out_shape),
+                    inverse: build_index_tensor(inverse, &[axis_len]),
+                    counts: build_index_tensor(counts, &[m]),
+                };
+            }
+            let data = dense_vec(input);
+            let (rows, other_shape) = unique_ext_slices(&shape, &data, d);
+            let (group_of, reps) = if consecutive {
+                unique_ext_group_consecutive(&rows)
+            } else {
+                unique_ext_group_sorted(&rows)
+            };
+            let m = reps.len();
+            let mut counts = vec![0i32; m];
+            for &g in &group_of {
+                counts[g] += 1;
+            }
+            let mut out_shape = shape.clone();
+            out_shape[d] = m;
+            let out_strides = row_major_strides(&out_shape);
+            let other_axes: Vec<usize> = (0..shape.len()).filter(|&a| a != d).collect();
+            let mut values_data = vec![0f32; out_shape.iter().product()];
+            for (g, row) in reps.iter().enumerate() {
+                for (o, &val) in row.iter().enumerate() {
+                    let other_coords = unravel(o, &other_shape);
+                    let mut flat = g * out_strides[d];
+                    for (k, &axis) in other_axes.iter().enumerate() {
+                        flat += other_coords[k] * out_strides[axis];
+                    }
+                    values_data[flat] = val;
+                }
+            }
+            let inverse: Vec<i32> = group_of.iter().map(|&g| g as i32).collect();
+            UniqueExtOutput {
+                values: build_tensor(values_data, &out_shape),
+                inverse: build_index_tensor(inverse, &[shape[d]]),
+                counts: build_index_tensor(counts, &[m]),
+            }
+        }
+    }
+}
+
+/// [`unique_ext`] の `dim = None` 経路が使う共通ヘルパー: フラット化
+/// 済み `data` を（`consecutive` なら元順序のまま、そうでなければ
+/// `f32::total_cmp` 昇順 + 元添字昇順のタイブレークでソートして）
+/// 隣接 IEEE `==` で群化し、`(values, inverse, counts)` を返す。
+fn unique_ext_flat(data: &[f32], consecutive: bool) -> (Vec<f32>, Vec<i32>, Vec<i32>) {
+    let n = data.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    let mut values = Vec::new();
+    let mut inverse = vec![0i32; n];
+    let mut counts: Vec<i32> = Vec::new();
+    if consecutive {
+        let mut cur = data[0];
+        values.push(cur);
+        counts.push(1);
+        let mut cur_group = 0usize;
+        for i in 1..n {
+            if data[i] == cur {
+                counts[cur_group] += 1;
+            } else {
+                cur = data[i];
+                values.push(cur);
+                counts.push(1);
+                cur_group += 1;
+            }
+            inverse[i] = (values.len() - 1) as i32;
+        }
+    } else {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| data[a].total_cmp(&data[b]).then(a.cmp(&b)));
+        let mut prev: Option<f32> = None;
+        for &idx in &order {
+            let v = data[idx];
+            if prev != Some(v) {
+                values.push(v);
+                counts.push(0);
+                prev = Some(v);
+            }
+            let g = values.len() - 1;
+            inverse[idx] = g as i32;
+            counts[g] += 1;
+        }
+    }
+    (values, inverse, counts)
+}
+
+/// [`unique_ext`] の `dim = Some(d)` 経路が使う共通ヘルパー: 軸 `d`
+/// の各位置を、他軸を row-major で平坦化した「行」として切り出す。
+/// 戻り値は `(rows, other_shape)`（`rows.len() == shape[d]`・各行の
+/// 長さは `other_shape` の要素数積）。
+fn unique_ext_slices(shape: &[usize], data: &[f32], dim: usize) -> (Vec<Vec<f32>>, Vec<usize>) {
+    let strides = row_major_strides(shape);
+    let axis_len = shape[dim];
+    let other_axes: Vec<usize> = (0..shape.len()).filter(|&a| a != dim).collect();
+    let other_shape: Vec<usize> = other_axes.iter().map(|&a| shape[a]).collect();
+    let slice_len: usize = other_shape.iter().product();
+    let mut rows = Vec::with_capacity(axis_len);
+    for idx in 0..axis_len {
+        let mut row = Vec::with_capacity(slice_len);
+        for o in 0..slice_len {
+            let other_coords = unravel(o, &other_shape);
+            let mut flat = idx * strides[dim];
+            for (k, &axis) in other_axes.iter().enumerate() {
+                flat += other_coords[k] * strides[axis];
+            }
+            row.push(data[flat]);
+        }
+        rows.push(row);
+    }
+    (rows, other_shape)
+}
+
+/// [`unique_ext_slices`] が返す 2 行が IEEE `==`（要素ごと）で一致する
+/// かを判定する（[`unique`] の重複判定述語を行単位へ拡張したもの）。
+fn unique_ext_row_eq(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| x == y)
+}
+
+/// [`unique_ext_slices`] の行同士を比較する全順序（`unique_ext` doc
+/// §「`dim = Some(d)` の場合」の 2 キー方式）。主キーは ±0 を
+/// `0.0` へ正規化した値の要素ごと `total_cmp` 辞書式比較（IEEE 等価
+/// なスライス、例えば `[-0.0, 5.0]` と `[+0.0, 5.0]` を必ず隣接
+/// させる）、副キーは正規化しない生の `total_cmp` 辞書式比較
+/// （±0 を含む行同士のタイを totalOrder で確定的に解決し、群代表が
+/// 常に `-0.0` 側になるようにする）。
+fn unique_ext_row_cmp(a: &[f32], b: &[f32]) -> std::cmp::Ordering {
+    let normalize = |v: f32| if v == 0.0 { 0.0 } else { v };
+    for (&x, &y) in a.iter().zip(b) {
+        let c = normalize(x).total_cmp(&normalize(y));
+        if c != std::cmp::Ordering::Equal {
+            return c;
+        }
+    }
+    for (&x, &y) in a.iter().zip(b) {
+        let c = x.total_cmp(&y);
+        if c != std::cmp::Ordering::Equal {
+            return c;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// [`unique_ext`] の `dim = Some(d)`・`consecutive = false` 経路が
+/// 使うソートベースの群化: [`unique_ext_row_cmp`] で安定ソートした
+/// うえで隣接行を [`unique_ext_row_eq`] で群化する。戻り値は
+/// `(group_of, group_representatives)`（`group_of[idx]` は元の軸添字
+/// `idx` が属する群番号、`group_representatives` は群番号順の代表行）。
+fn unique_ext_group_sorted(rows: &[Vec<f32>]) -> (Vec<usize>, Vec<Vec<f32>>) {
+    let n = rows.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| unique_ext_row_cmp(&rows[a], &rows[b]).then(a.cmp(&b)));
+    let mut group_of = vec![0usize; n];
+    let mut reps: Vec<Vec<f32>> = Vec::new();
+    for &idx in &order {
+        let is_new = reps
+            .last()
+            .is_none_or(|last: &Vec<f32>| !unique_ext_row_eq(last, &rows[idx]));
+        if is_new {
+            reps.push(rows[idx].clone());
+        }
+        group_of[idx] = reps.len() - 1;
+    }
+    (group_of, reps)
+}
+
+/// [`unique_ext`] の `consecutive = true` 経路（`dim` 指定の有無を
+/// 問わず）が使う「元の並び順のまま隣接行のみ群化する」ヘルパー
+/// （`torch.unique_consecutive` 相当）。群代表は各連続ランの
+/// **先頭出現**行。戻り値の形は [`unique_ext_group_sorted`] と同じ。
+fn unique_ext_group_consecutive(rows: &[Vec<f32>]) -> (Vec<usize>, Vec<Vec<f32>>) {
+    let n = rows.len();
+    let mut group_of = vec![0usize; n];
+    let mut reps: Vec<Vec<f32>> = Vec::new();
+    for idx in 0..n {
+        let is_new = idx == 0 || !unique_ext_row_eq(&rows[idx - 1], &rows[idx]);
+        if is_new {
+            reps.push(rows[idx].clone());
+        }
+        group_of[idx] = reps.len() - 1;
+    }
+    (group_of, reps)
 }
 
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
