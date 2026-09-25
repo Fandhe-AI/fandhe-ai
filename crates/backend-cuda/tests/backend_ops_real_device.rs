@@ -144,3 +144,46 @@ fn ops_for_selects_cuda_backend_and_dispatch_does_not_panic() {
         Err(other) => panic!("unexpected error variant for ops_for-dispatched gemm: {other}"),
     }
 }
+
+// ---- log_softmax（イシュー #2155）----
+
+/// 非最終軸は `Unsupported`（`row_softmax_layout` による軸検査が
+/// `device_handle_raw` 呼び出しより前に行われるため、CUDA 非搭載環境
+/// でも通常 CI で実行できる。属性なし）。
+#[test]
+fn log_softmax_non_last_axis_is_unsupported_without_device() {
+    let cuda = CudaBackendOps::new(0);
+    let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("valid tensor");
+    let result = cuda.log_softmax(&x, 0);
+    assert!(matches!(result, Err(BackendError::Unsupported(_))));
+}
+
+/// 環境適応スモーク（属性なし。通常 CI で実行）。`backend_ops_gemm_
+/// parity_smoke_env_adaptive` と同じ分岐パターン: CUDA 不在なら
+/// `BackendError::CudaUnavailable` を確認して早期 return し、実機なら
+/// CPU 参照実装（`fandhe_ai_backend_cpu::softmax::run_log_softmax_f32`）
+/// と REQ-2 複合判定で突き合わせる。
+#[test]
+fn log_softmax_parity_smoke_env_adaptive() {
+    let cuda = CudaBackendOps::new(0);
+    let rows = 3usize;
+    let cols = 8usize;
+    let x_data = Xorshift64Star::new(2155).fill_vec(rows * cols);
+    let x = Tensor::new(x_data.clone(), &[rows, cols]).expect("valid tensor");
+
+    match cuda.log_softmax(&x, 1) {
+        Ok(out) => {
+            let cpu_out = fandhe_ai_backend_cpu::softmax::run_log_softmax_f32(&x_data, rows, cols)
+                .expect("cpu log_softmax reference must succeed");
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                "BackendOps cpu-cuda log_softmax smoke parity",
+                out.as_slice().expect("contiguous"),
+                &cpu_out,
+            );
+        }
+        Err(BackendError::CudaUnavailable(msg)) => {
+            assert!(!msg.is_empty(), "error detail message must not be empty");
+        }
+        Err(other) => panic!("unexpected error variant for CudaBackendOps::log_softmax: {other}"),
+    }
+}

@@ -73,6 +73,24 @@
 // 一致する契約。詳細は `docs/backend-metal-reduce-sum-design.md` §11）。
 // `sum` とは異なり加減算を伴わないため `red_f64_*` は使わず、比較は
 // NaN 除外・±0 同値化した単調 `uint` キーへの整数比較のみで行う。
+//
+// ---- min（イシュー #2155）----
+//
+// `reduce_min_all_chunk_f32`／`reduce_min_all_finalize_f32`／
+// `reduce_min_axis_f32` を本ファイル末尾に追加する（`crate::
+// reduce_model` の `min_all_chunked`／`min_axis_lane` の逐語移植）。
+// `sum` の 2 段構成（全要素）・1 段構成（単一軸）を踏襲しつつ、比較は
+// argmax／argmin と同じビットキー（`red_arg_key`／`red_arg_is_nan`。
+// NaN 除外・±0 同値化）で行う（加減算を伴わないため `red_f64_*` は
+// 使わない）。全要素・単一軸チャンクの `partial` バッファは `sum` と
+// 同じ `ulong` 型を再利用する（`crate::reduce::MetalReduce` の
+// `encode_sum_all_chunk_dispatch`／`encode_sum_all_finalize_dispatch`／
+// `encode_sum_axis_dispatch` をそのまま流用してディスパッチするため。
+// 実際に使うのは下位 32bit〈f32 の bit パターン〉のみで上位 32bit は
+// ゼロ拡張する）。CPU 参照実装 `fandhe_ai_backend_cpu::reduction::min`
+// （`fold(f32::INFINITY, f32::min)`。NaN は伝播しない）と値が一致する
+// 契約（±0 の符号は実装依存のため bit 一致は主張しない。詳細は
+// `docs/backend-metal-reduce-sum-design.md` §13）。
 
 #include <metal_stdlib>
 using namespace metal;
@@ -499,4 +517,109 @@ kernel void reduce_arg_axis_f32(
     // （`crate::reduce_model::argext_axis_lane` と同じ「全 NaN は
     // 添字 0」契約）。
     out[gid] = (int)best_idx;
+}
+
+// ---- min（イシュー #2155。`crate::reduce_model` の
+// `min_all_chunked`／`min_axis_lane` の逐語移植）----
+//
+// `red_arg_key`／`red_arg_is_nan`（argmax／argmin と共有）による
+// ビットキー比較を使う。候補が 1 つもない（チャンク・軸が全要素 NaN）
+// 場合は単位元 `+inf`（`RED_MIN_POS_INF_BITS`）の bit パターンを
+// そのまま保持する（CPU `fold(f32::INFINITY, f32::min)` と同じ「NaN は
+// 更新に寄与しない」畳み込み。argmax／argmin の「候補なし → 添字 0」
+// とは異なり、min は縮約結果の値そのものを返すため単位元が必要）。
+
+// `f32::INFINITY` の bit パターン。空でない任意の有限入力より必ず
+// 大きいキーを持つため、全要素 NaN の場合この値がそのまま残る。
+#define RED_MIN_POS_INF_BITS 0x7F800000u
+
+kernel void reduce_min_all_chunk_f32(
+    device const float* x [[buffer(0)]],
+    device ulong* partial [[buffer(1)]],
+    constant uint& numel [[buffer(2)]],
+    constant uint& num_chunks [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= num_chunks) {
+        return;
+    }
+    ulong begin = (ulong)gid * (ulong)REDUCE_SUM_CHUNK;
+    ulong end = begin + (ulong)REDUCE_SUM_CHUNK;
+    if (end > (ulong)numel) {
+        end = (ulong)numel;
+    }
+    uint best_bits = RED_MIN_POS_INF_BITS;
+    uint best_key = red_arg_key(best_bits);
+    for (ulong idx = begin; idx < end; idx++) {
+        uint bits = as_type<uint>(x[idx]);
+        if (red_arg_is_nan(bits)) {
+            continue;
+        }
+        uint key = red_arg_key(bits);
+        if (key < best_key) {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    // `partial` は `sum` と同じ `ulong` バッファ（本ファイル冒頭
+    // コメント「min（イシュー #2155）」参照）。上位 32bit はゼロ拡張
+    // する（`(ulong)best_bits` は暗黙にゼロ拡張される）。
+    partial[gid] = (ulong)best_bits;
+}
+
+kernel void reduce_min_all_finalize_f32(
+    device const ulong* partial [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& num_chunks [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid != 0u) {
+        return;
+    }
+    uint best_bits = RED_MIN_POS_INF_BITS;
+    uint best_key = red_arg_key(best_bits);
+    for (uint c = 0u; c < num_chunks; c++) {
+        // 下位 32bit のみが有効な f32 bit パターン（chunk カーネルが
+        // ゼロ拡張して書いた値。本ファイル冒頭コメント参照）。
+        uint bits = (uint)partial[c];
+        uint key = red_arg_key(bits);
+        if (key < best_key) {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    out[0] = as_type<float>(best_bits);
+}
+
+// ---- 単一軸 min（`crate::reduce_model::min_axis_lane` の逐語移植。
+// `reduce_sum_axis_f32`／`reduce_arg_axis_f32` と同じ添字規約）----
+
+kernel void reduce_min_axis_f32(
+    device const float* x [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& lanes [[buffer(2)]],
+    constant uint& axis_len [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= lanes) {
+        return;
+    }
+    ulong o = (ulong)gid / (ulong)inner;
+    ulong i = (ulong)gid % (ulong)inner;
+    uint best_bits = RED_MIN_POS_INF_BITS;
+    uint best_key = red_arg_key(best_bits);
+    for (uint a = 0u; a < axis_len; a++) {
+        ulong idx = (o * (ulong)axis_len + (ulong)a) * (ulong)inner + i;
+        uint bits = as_type<uint>(x[idx]);
+        if (red_arg_is_nan(bits)) {
+            continue;
+        }
+        uint key = red_arg_key(bits);
+        if (key < best_key) {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    out[gid] = as_type<float>(best_bits);
 }

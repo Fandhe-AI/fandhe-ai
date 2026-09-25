@@ -205,7 +205,13 @@ fn rmsnorm_and_softmax_use_persistent_threadgroup_loop() {
 /// 1 パス／2 パスの両カーネルエントリが定義されていることをロックする。
 #[test]
 fn rmsnorm_and_softmax_define_onepass_and_twopass_kernels() {
-    for (name, prefix) in [("rmsnorm", "rmsnorm_f32"), ("softmax", "softmax_f32")] {
+    for (name, prefix) in [
+        ("rmsnorm", "rmsnorm_f32"),
+        ("softmax", "softmax_f32"),
+        // `log_softmax`（イシュー #2155）: `softmax_f32_*` と同じ
+        // 1 パス／2 パス構成。
+        ("log_softmax", "log_softmax_f32"),
+    ] {
         let src = if name == "rmsnorm" {
             RMSNORM_METAL_SOURCE
         } else {
@@ -219,4 +225,28 @@ fn rmsnorm_and_softmax_define_onepass_and_twopass_kernels() {
             );
         }
     }
+}
+
+/// `log_softmax` の最終書き出し（実装計画 §2.2「Sterbenz 順序」）:
+/// `(xv - m) - log_l`（先に `xv - m` を計算し、その後で `log_l` を
+/// 引く）の形であり、`xv - (m + log_l)`（分配後に単一減算する誤った
+/// 形）ではないことを検査する。`log(` の呼び出しが `exp(` を経由しない
+/// （`SOFTMAX_METAL_SOURCE` は `exp2(` のみ使用する契約。本ファイル
+/// 「softmax_uses_exp2_only_not_exp」参照）ことは既存テストが担保する
+/// ため、本テストは書き出しの結合順序のみを検査する。
+#[test]
+fn log_softmax_writes_sterbenz_order() {
+    assert!(
+        SOFTMAX_METAL_SOURCE.contains("float log_l = log(l);"),
+        "log_l = log(l) が見つかりません"
+    );
+    assert!(
+        SOFTMAX_METAL_SOURCE.contains("out[row_base + idx] = (xv - m) - log_l;"),
+        "log_softmax の書き出しが Sterbenz 順序（(xv - m) - log_l）になっていない"
+    );
+    assert!(
+        !SOFTMAX_METAL_SOURCE.contains("xv - (m +")
+            && !SOFTMAX_METAL_SOURCE.contains("- (m + log_l)"),
+        "『xv - (m + log_l)』の分配後単一減算パターンが残っている（Sterbenz 順序ではない）"
+    );
 }

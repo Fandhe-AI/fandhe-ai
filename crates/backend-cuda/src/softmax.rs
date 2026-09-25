@@ -46,6 +46,12 @@ use crate::rmsnorm::{
     RmsNormRoute, derive_persistent_grid_one_pass, derive_persistent_grid_two_pass, rmsnorm_route,
 };
 
+// `log_softmax` forward（イシュー #2155）の追加により、本モジュールは
+// softmax／log_softmax 双方の起動 API を保持する。共通の起動本体
+// （経路選択・persistent grid 導出・H2D → 起動 → 同期 → D2H）は
+// [`CudaSoftmax::run_row_kernel_f32_raw`] へ抽出し、両者が同一 helper を
+// 呼ぶ（下記 struct doc・`run_row_kernel_f32_raw` doc 参照）。
+
 /// exp2 ドメインの境界マスク値（有限。`f32` 版）。
 ///
 /// `kernels_softmax.rs` の `SOFTMAX_MASK_E2` マクロ（自前リテラル
@@ -226,6 +232,12 @@ pub struct CudaSoftmax {
     allocator: Arc<CudaAllocator>,
     onepass_f32: CudaFunction,
     twopass_f32: CudaFunction,
+    /// `log_softmax` forward（イシュー #2155）の 1 パス／2 パス
+    /// カーネル。`onepass_f32`／`twopass_f32` と同じ経路選択・
+    /// persistent grid 導出を共有し、最終書き出しの式のみが異なる
+    /// （`run_row_kernel_f32_raw`〈private helper〉doc 参照）。
+    log_onepass_f32: CudaFunction,
+    log_twopass_f32: CudaFunction,
     /// per-block SMEM 予算（[`softmax_route`] の分岐に使う）。
     smem_per_block_budget_bytes: u64,
     /// per-SM SMEM 予算（[`derive_persistent_grid_one_pass`] の
@@ -244,6 +256,13 @@ impl CudaSoftmax {
 
         let onepass_ptx = compile_ptx(kernels_softmax::SOFTMAX_F32_ONEPASS, arch)?;
         let twopass_ptx = compile_ptx(kernels_softmax::SOFTMAX_F32_TWOPASS, arch)?;
+        // `log_softmax` forward（イシュー #2155）の 2 PTX を追加で
+        // コンパイルする。`CudaSoftmax::new` の初回構築コストは 2→4
+        // PTX に増えるが、`context_cache::cached_softmax` により 1 回
+        // 限りのコストであるため許容する（実装計画 §7「スコープ外・
+        // リスク」）。
+        let log_onepass_ptx = compile_ptx(kernels_softmax::LOG_SOFTMAX_F32_ONEPASS, arch)?;
+        let log_twopass_ptx = compile_ptx(kernels_softmax::LOG_SOFTMAX_F32_TWOPASS, arch)?;
 
         let onepass_f32 = device
             .context()
@@ -253,6 +272,14 @@ impl CudaSoftmax {
             .context()
             .load_module(twopass_ptx)?
             .load_function("softmax_f32_twopass")?;
+        let log_onepass_f32 = device
+            .context()
+            .load_module(log_onepass_ptx)?
+            .load_function("log_softmax_f32_onepass")?;
+        let log_twopass_f32 = device
+            .context()
+            .load_module(log_twopass_ptx)?
+            .load_function("log_softmax_f32_twopass")?;
 
         let smem_per_block_budget_bytes = read_clamped_smem_budget_bytes(device)?;
 
@@ -290,6 +317,8 @@ impl CudaSoftmax {
             allocator,
             onepass_f32,
             twopass_f32,
+            log_onepass_f32,
+            log_twopass_f32,
             smem_per_block_budget_bytes,
             smem_per_sm_budget_bytes,
             sm_count,
@@ -344,6 +373,55 @@ impl CudaSoftmax {
         rows: usize,
         cols: usize,
     ) -> Result<Vec<f32>, CudaError> {
+        self.run_row_kernel_f32_raw(x, scale, rows, cols, &self.onepass_f32, &self.twopass_f32)
+    }
+
+    /// `out[r, :] = log_softmax(x[r, :])`（行方向・最終軸。イシュー
+    /// #2155）を実行する公開エントリ。`scale = log2(e)` で
+    /// `run_row_kernel_f32_raw`〈private helper〉へ委譲する（[`Self::
+    /// run_softmax_f32`] と同型。`ops.rs::CudaBackendOps::log_softmax`
+    /// から呼ばれる独立入口——融合プランを経由しない点も `softmax` と
+    /// 同じ）。
+    pub fn run_log_softmax_f32(
+        &self,
+        x: &[f32],
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<f32>, CudaError> {
+        self.run_row_kernel_f32_raw(
+            x,
+            std::f32::consts::LOG2_E,
+            rows,
+            cols,
+            &self.log_onepass_f32,
+            &self.log_twopass_f32,
+        )
+    }
+
+    /// [`Self::run_softmax_f32_raw`]／[`Self::run_log_softmax_f32`]
+    /// 共通の起動本体（イシュー #2155 でリファクタ抽出。旧
+    /// `run_softmax_f32_raw` の本体をそのまま移動しただけで、経路選択
+    /// （[`softmax_route`]）・persistent grid 導出
+    /// （[`derive_persistent_grid_one_pass`]／
+    /// [`derive_persistent_grid_two_pass`]）・`validate_softmax_launch`
+    /// による起動前検証・`with_driver_call` による capture 排他参加は
+    /// 変更しない。`onepass`／`twopass` は呼び出し元が渡すカーネル
+    /// ハンドル（`softmax_f32_*` または `log_softmax_f32_*`）で、
+    /// バッファ・スカラー引数のレイアウト（x・out・rows・cols・scale）
+    /// はどちらの組でも同一のため共通化できる（`kernels_softmax.rs::
+    /// LOG_SOFTMAX_F32_ONEPASS`／`LOG_SOFTMAX_F32_TWOPASS` の doc コメント
+    /// 「`log_softmax` は `softmax` と最終書き出しの式のみが異なる」旨の
+    /// 記述参照）。既存の unsafe 起動ブロックは本関数へ移動する
+    /// だけで、新たな unsafe は追加しない（SAFETY コメントは維持）。
+    fn run_row_kernel_f32_raw(
+        &self,
+        x: &[f32],
+        scale: f32,
+        rows: usize,
+        cols: usize,
+        onepass: &CudaFunction,
+        twopass: &CudaFunction,
+    ) -> Result<Vec<f32>, CudaError> {
         validate_softmax_launch(rows, cols, x.len())?;
 
         if rows == 0 || cols == 0 {
@@ -380,7 +458,7 @@ impl CudaSoftmax {
                     );
                     let shared_mem_bytes = smem_bytes_per_block.min(u32::MAX as u64) as u32;
                     (
-                        &self.onepass_f32,
+                        onepass,
                         LaunchConfig {
                             grid_dim: (grid, 1, 1),
                             block_dim: (SOFTMAX_BLOCK_DIM, 1, 1),
@@ -391,7 +469,7 @@ impl CudaSoftmax {
                 RmsNormRoute::TwoPass => {
                     let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
                     (
-                        &self.twopass_f32,
+                        twopass,
                         LaunchConfig {
                             grid_dim: (grid, 1, 1),
                             block_dim: (SOFTMAX_BLOCK_DIM, 1, 1),

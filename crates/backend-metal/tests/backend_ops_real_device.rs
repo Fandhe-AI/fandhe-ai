@@ -563,3 +563,105 @@ fn ops_for_selects_metal_backend_and_matches_cpu() {
         cpu_result.as_slice().expect("contiguous"),
     );
 }
+
+// ---- min（イシュー #2155）----
+
+/// `min` の形状由来エラー経路（範囲外 `dim`・空縮約）が、`argmax_argmin_
+/// shape_errors_without_device_init` と同じ理由で `MetalContext::new`
+/// を呼ばず（`ops.rs::MetalBackendOps::min` が `reduce_out_shape`／
+/// `shape.contains(&0)` の検査を `context_cache::cached_context()`
+/// 呼び出しより前に行うため）Metal 実機・デバイス初期化を一切必要と
+/// しないことを検証する。
+#[test]
+fn min_shape_errors_without_device_init() {
+    let metal = MetalBackendOps::new();
+
+    // 範囲外 dim: ShapeMismatch。
+    let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor");
+    assert!(matches!(
+        metal.min(&a, Some(5)),
+        Err(BackendError::ShapeMismatch(_))
+    ));
+
+    // 空縮約: dim=None かつ numel==0（CPU と同じ EmptyReduction 相当。
+    // `ops.rs::MetalBackendOps::min` doc「挙動変更の記録」参照）。
+    let empty = Tensor::<f32>::new(Vec::new(), &[0]).expect("empty tensor");
+    assert!(matches!(
+        metal.min(&empty, None),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+
+    // 空縮約: dim=Some(axis) かつ shape[axis]==0 で他軸は非零。
+    let empty_axis = Tensor::<f32>::new(Vec::new(), &[0, 3]).expect("tensor");
+    assert!(matches!(
+        metal.min(&empty_axis, Some(0)),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+
+    // 空出力（非縮約軸が 0）は空 Tensor を返す成功経路（エラーではない）。
+    let empty_output = Tensor::<f32>::new(Vec::new(), &[0, 3, 5]).expect("tensor");
+    let out = metal
+        .min(&empty_output, Some(1))
+        .expect("empty output is not an error");
+    assert!(out.as_slice().expect("contiguous").is_empty());
+}
+
+/// `MetalBackendOps::min` を CPU 参照実装（`fandhe_ai_backend_cpu::
+/// reduction::min`）と実機で値突合する（`0.0 == -0.0` として比較。
+/// ±0 の符号は実装依存のため bit 一致は要求しない）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_min_matches_cpu() {
+    let metal = MetalBackendOps::new();
+    let cpu = CpuBackendOps::new();
+
+    let mut rng = Xorshift64Star::new(0x2155_2000);
+    let gen_vec = |n: usize, rng: &mut Xorshift64Star| -> Vec<f32> {
+        (0..n).map(|_| rng.next_f32() * 1024.0 - 512.0).collect()
+    };
+
+    let cases: &[(&[usize], Option<usize>)] = &[
+        (&[7], None),
+        (&[7], Some(0)),
+        (&[3, 4], Some(0)),
+        (&[3, 4], Some(1)),
+        (&[2, 3, 5], Some(1)),
+    ];
+    for &(shape, dim) in cases {
+        let numel: usize = shape.iter().product();
+        let data = gen_vec(numel, &mut rng);
+        let a = Tensor::new(data, shape).expect("tensor");
+
+        let m = metal.min(&a, dim).expect("metal min must succeed");
+        let c = cpu
+            .min(&a, dim)
+            .expect("cpu min always succeeds for non-empty reduction");
+        assert_eq!(m.shape(), c.shape(), "shape={shape:?} dim={dim:?}");
+        assert_eq!(
+            m.as_slice().expect("contiguous"),
+            c.as_slice().expect("contiguous"),
+            "shape={shape:?} dim={dim:?}: 値不一致"
+        );
+    }
+
+    // NaN 混入（クラス一致。全 NaN 行は +inf）。
+    let a = Tensor::new(vec![3.0f32, f32::NAN, -5.0, f32::NAN], &[4]).expect("tensor");
+    let m = metal.min(&a, None).expect("metal min with nan");
+    let c = cpu.min(&a, None).expect("cpu min with nan");
+    assert_eq!(
+        m.as_slice().expect("contiguous"),
+        c.as_slice().expect("contiguous")
+    );
+}
+
+// ---- log_softmax（イシュー #2155）----
+
+/// 非最終軸は `Unsupported`（`argmax_argmin_shape_errors_without_
+/// device_init` と同じ理由でデバイス初期化不要）。
+#[test]
+fn log_softmax_non_last_axis_unsupported_without_device_init() {
+    let metal = MetalBackendOps::new();
+    let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("valid tensor");
+    let result = metal.log_softmax(&x, 0);
+    assert!(matches!(result, Err(BackendError::Unsupported(_))));
+}

@@ -423,3 +423,106 @@ log_softmax_backward_model`）は `exp` の bit 表現を入力として受け�
   `facade/tests/softmax_backend_parity.rs::
   metal_log_softmax_backward_matches_cpu`（`matmul → log_softmax →
   mse_loss` backward の facade 到達経路）。**2026-09-18 M4 Max 実測済み**: source_evidence 7/7・parity 2 回実行各 4/4・facade Metal フィルタ 3/3 pass（§12 参照）。
+
+## 13. `min`（イシュー #2155）
+
+`MetalBackendOps::min`（`max`・`sum` とは異なりイシュー #1720 スコープ外
+のまま未結線だった）を GPU カーネルへ結線する。`log_softmax` forward の
+CUDA／Metal カーネル化と同一イシューで実施したが、契約が独立している
+ため本 doc に §13 として追補する（CUDA／Metal 共通の `log_softmax`
+forward の契約は `docs/gpu-log-softmax-forward-decision.md` を正とする）。
+
+### 13.1 契約の核心
+
+- **値一致**（CPU `fandhe_ai_backend_cpu::reduction::min` —
+  `fold(f32::INFINITY, f32::min)`。NaN は伝播しない）を主張し、**bit
+  完全一致は主張しない**（`min` 自体は結合順序に依存しない可換・結合
+  演算のため sum のような binary64 ソフトウェアエミュレーションは
+  不要だが、`±0` の符号は Rust `f32::min` 自体が規定しない実装依存の
+  性質であり、CPU 側の並列 chunk fold と GPU 側の 2 段構成とで一般に
+  一致する保証がない。`0.0 == -0.0` として比較する。`reduce_model.rs`
+  の `min_all_returns_positive_infinity_for_all_nan_input` 等のテスト
+  doc 参照）。
+- **全要素 NaN の lane は `+inf`**（CPU の `fold(f32::INFINITY,
+  f32::min)` は NaN を単位元として畳み込むため NaN にならない。argmax
+  ／argmin の「候補なし → 添字 0」とは異なり、`min` は縮約結果の値
+  そのものを返すため単位元（`+inf`）が必要）。
+- **比較は §11「argmax／argmin」と同じビットキー方式**（`crate::
+  reduce_model::arg_key`／`reduce.metal::red_arg_key`。NaN 除外・±0
+  同値化した単調 `uint` キーへの整数比較。GPU 上の非正規化数 flush
+  対策）。argmin の「添字を書く」代わりに「元の f32 bit をそのまま
+  書く」点のみが異なる。
+
+### 13.2 実装構成
+
+- `crate::reduce_model`: `min_all_chunked`（全要素 2 段構成のホスト
+  逐語モデル）・`min_axis_lane`（単一軸 1 段。平坦走査と同一実装。
+  `argext_axis_lane` と同型）。単位元 `+inf` から開始し `arg_key` の
+  strict 比較（`key < best_key`）のみで更新する。
+- `shaders/reduce.metal`: `reduce_min_all_chunk_f32`／
+  `reduce_min_all_finalize_f32`（全要素 2 段）・`reduce_min_axis_f32`
+  （単一軸 1 段）。**`sum` と同じ `ulong` 型 `partial` バッファを
+  再利用する**（実際に使うのは下位 32bit の f32 bit パターンのみ。
+  上位 32bit はゼロ拡張）。`red_arg_key`／`red_arg_is_nan`（argmax／
+  argmin と共有）を使い `red_f64_*`（加減算不要）・`mode` 引数
+  （min 単独のため切替不要）のいずれも使わない。
+- `crate::reduce::MetalReduce`: `run_min_all_f32`／`run_min_axis_f32`
+  を追加する。**新規 unsafe を追加しない**設計: 既存の
+  `encode_sum_all_chunk_dispatch`／`encode_sum_all_finalize_dispatch`／
+  `encode_sum_axis_dispatch`（buffer レイアウトが `sum`／`min` で
+  完全に同一のため）をパイプラインだけ差し替えてそのまま呼ぶ。
+- `crate::ops::MetalBackendOps::min`: `metal_argext`（§11.2）と同型の
+  段取り（`reduce_out_shape` → 空縮約判定 → `checked_numel` →
+  `plan_reduce_*` 先出し → `context_cache::cached_reduce` 経由で
+  カーネル起動）だが、`sum` と同じ「空縮約はエラー（単位元を持たない
+  `fold` のため）」契約を持つ（`argmax`／`argmin` の「空出力は空
+  Tensor」は `min` にも適用されるが、`dim=None` かつ `numel==0`、
+  または `dim=Some(axis)` かつ `shape[axis]==0` は
+  `BackendError::KernelLaunchFailed("empty reduction for op \"min\"")`
+  を GPU 起動なしで返す。CPU `reduction::min` の
+  `ReduceError::EmptyReduction { op: "min" }` と同じ文言・分類）。
+
+### 13.3 挙動変更の記録
+
+結線前は `min` が `BackendOps` のデフォルト実装（既定
+`Unsupported`）のままで、`Var::min` がホスト参照実装（`eval::min`）へ
+フォールバックしていた。空縮約の場合ホスト参照実装は
+`AutodiffError::InvalidArgument` を返す。結線後は Metal 側が空縮約を
+`BackendError::KernelLaunchFailed` として GPU 起動なしで直接返すため、
+Metal で空 `min` を呼んだときのエラー種別が変わる。CPU（`reduction::
+min`）・CUDA（`CudaBackendOps::min`。`ReduceKind::Min` 経由で既に同じ
+`KernelLaunchFailed` 契約）と同じ分類へ揃う変更であり、非空 `min` の
+結果自体（値）は変わらない（イシュー #2155 実装計画 §2.1「エラー
+契約」・§7「挙動変更の記録」）。
+
+副作用として、`reduce_ops::all`（内部で `min` を経由する）も Metal
+では GPU カーネル経由になる。
+
+### 13.4 サイズ上限・エラー契約
+
+`sum` と同一（§4・§6 参照）。カーネル `uint` 引数の上限超過は
+`plan_reduce_all`／`plan_reduce_axis` が `Unsupported` へ写像し、
+`Var::min` はホスト参照実装（`eval::min`）へフォールバックする
+（`sum` とは異なり `Var::min` はホストフォールバックを持つ点に注意。
+argmax／argmin と同じ迂回経路）。
+
+### 13.5 テスト構成・実機実測
+
+- Linux 実行可能: `reduce_model.rs` 単体テスト（CPU 参照実装との
+  値一致・全 NaN → `+inf`・NaN 混在・境界値〈±0・非正規化数・
+  ±inf〉・チャンク分割と平坦走査の等価性・複数 rank/dim の単一軸
+  一致）・`reduce_source_evidence.rs`（MSL 文字列証跡: カーネル宣言・
+  境界検査カウント 3 種組〈sum／argext／min〉・buffer index 一致）・
+  `reduce.rs::tests::reduce_msl_source_declares_all_kernels`（3 新規
+  カーネルの宣言確認）・`backend_ops_real_device.rs::
+  min_shape_errors_without_device_init`（形状由来エラー経路が
+  デバイス初期化を要しないこと。エラー分類変更〈§13.3〉を含む）。
+- macOS 実機 `#[ignore]`: `reduce_parity.rs::metal_min_all_matches_cpu`
+  ／`metal_min_axis_matches_cpu`／
+  `metal_min_nan_zero_inf_edge_cases_match_cpu`（起動 API 直叩き）・
+  `backend_ops_real_device.rs::backend_ops_min_matches_cpu`
+  （`BackendOps` 経由）・`facade/tests/reduce_backend_parity.rs::
+  metal_min_all_and_axis_forward_and_backward_match_cpu`（forward 値
+  一致・backward bit 一致）。**未実測**（本実装環境は Linux のため
+  Mac 実機実測は申し送り。`docs/perf/logs/gpu-min-log-softmax-2155/
+  README.md` 参照）。

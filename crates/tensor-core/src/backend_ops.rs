@@ -2072,11 +2072,17 @@ pub trait BackendOps {
     ///
     /// # デフォルト実装
     ///
-    /// [`Self::softmax`] と同じ非破壊拡張・fail-safe。本イシュー時点で
-    /// GPU 側（CUDA／Metal）に log_softmax 専用カーネルは存在しないため
-    /// 両バックエンドともこの既定のまま（ホストフォールバックに委ねる）
-    /// で、CPU のみ融合カーネル（`backend-cpu::softmax::
-    /// run_log_softmax_f32`）でオーバーライドする。
+    /// [`Self::softmax`] と同じ非破壊拡張・fail-safe。CPU は融合
+    /// カーネル（`backend-cpu::softmax::run_log_softmax_f32`）で
+    /// オーバーライドする。CUDA（`backend-cuda::softmax::CudaSoftmax::
+    /// run_log_softmax_f32`）・Metal（`backend-metal::softmax::
+    /// MetalSoftmax::run_log_softmax_f32`）も GPU カーネルでオーバー
+    /// ライドしている（イシュー #2155。`Self::softmax` と同じ online
+    /// softmax の `(m, l)` 計算を共有し、最終書き出しのみ
+    /// `(x - m) - ln(l)` に変える。CPU 参照実装との数値一致は bit 完全
+    /// 一致を主張せず REQ-2 統一複合判定〈相対誤差 1e-3 未満または
+    /// 絶対誤差 1e-5 未満〉で検証する）。非最終軸は 3 バックエンドとも
+    /// この既定〈`Unsupported`〉のままホストフォールバックへ委ねる。
     fn log_softmax(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "log_softmax: default fail-safe (no fused log_softmax kernel available)".into(),

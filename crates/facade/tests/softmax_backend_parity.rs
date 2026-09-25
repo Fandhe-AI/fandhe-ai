@@ -187,9 +187,13 @@ fn log_softmax_forward_on(device: Device) -> Tensor<f32> {
         .to_tensor()
 }
 
-/// `Var::log_softmax` forward が Metal（イシュー #1952 の backward
-/// カーネル追加時点でも forward 経路は無変更のまま）で CPU と一致する
-/// ことの非後退確認（`cuda_log_softmax_forward_matches_cpu` と対称）。
+/// `Var::log_softmax` forward が Metal で CPU と一致することの非後退
+/// 確認（`cuda_log_softmax_forward_matches_cpu` と対称）。イシュー
+/// #2155 で `MetalBackendOps::log_softmax` が GPU カーネル
+/// （`MetalSoftmax::run_log_softmax_f32`）でオーバーライドされたため、
+/// 本テストは以前とは異なり実際に GPU カーネル経路を通る（#2155
+/// 以前はホスト参照実装〈`eval::log_softmax_along`〉へのフォール
+/// バック経由だった）。
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
@@ -204,9 +208,12 @@ fn metal_log_softmax_forward_matches_cpu() {
     );
 }
 
-/// `Var::log_softmax` forward が CUDA（イシュー #1949 の backward
-/// カーネル追加時点でも forward 経路は無変更のまま）で CPU と一致する
-/// ことの非後退確認。
+/// `Var::log_softmax` forward が CUDA で CPU と一致することの非後退
+/// 確認。イシュー #2155 で `CudaBackendOps::log_softmax` が GPU
+/// カーネル（`CudaSoftmax::run_log_softmax_f32`）でオーバーライド
+/// されたため、本テストは以前とは異なり実際に GPU カーネル経路を
+/// 通る（#2155 以前はホスト参照実装〈`eval::log_softmax_along`〉への
+/// フォールバック経由だった）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn cuda_log_softmax_forward_matches_cpu() {

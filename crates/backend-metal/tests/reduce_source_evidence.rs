@@ -59,16 +59,21 @@ fn kernel_names_and_buffer_indices_are_declared() {
         "reduce_arg_all_chunk_f32",
         "reduce_arg_all_finalize_f32",
         "reduce_arg_axis_f32",
+        "reduce_min_all_chunk_f32",
+        "reduce_min_all_finalize_f32",
+        "reduce_min_axis_f32",
     ] {
         assert!(
             REDUCE_METAL_SOURCE.contains(&format!("kernel void {kernel}(")),
             "{kernel} カーネルの宣言が見つかりません"
         );
     }
-    // 6 カーネル合算で buffer index 0〜5 が使われる（sum の 3 カーネル:
+    // 9 カーネル合算で buffer index 0〜5 が使われる（sum の 3 カーネル:
     // chunk 0/1/2/3・finalize 0/1/2・axis 0/1/2/3/4。argext の 3
     // カーネル〈イシュー #1951〉: chunk 0/1/2/3/4/5・finalize 0/1/2/3/4・
-    // axis 0/1/2/3/4/5）。
+    // axis 0/1/2/3/4/5。min の 3 カーネル〈イシュー #2155〉: chunk
+    // 0/1/2/3・finalize 0/1/2・axis 0/1/2/3/4——sum の encode 関数を
+    // 流用するため buffer index は sum と同一）。
     for idx in 0..=5 {
         assert!(
             REDUCE_METAL_SOURCE.contains(&format!("[[buffer({idx})]]")),
@@ -78,30 +83,35 @@ fn kernel_names_and_buffer_indices_are_declared() {
 }
 
 /// REQ-8（境界検査規約）: `reduce_sum_all_chunk_f32`／
-/// `reduce_arg_all_chunk_f32`（イシュー #1951 追加）は
+/// `reduce_arg_all_chunk_f32`（イシュー #1951 追加）／
+/// `reduce_min_all_chunk_f32`（イシュー #2155 追加）は
 /// `gid >= num_chunks`、`reduce_sum_all_finalize_f32`／
-/// `reduce_arg_all_finalize_f32` は `gid != 0u`、`reduce_sum_axis_f32`／
-/// `reduce_arg_axis_f32` は `gid >= lanes` の境界検査を持つことを
-/// 機械検証する（最適化を理由に省略しない契約のロック。sum／argext の
-/// 各ペアで 1 回ずつ、計 2 回出現する）。
+/// `reduce_arg_all_finalize_f32`／`reduce_min_all_finalize_f32` は
+/// `gid != 0u`、`reduce_sum_axis_f32`／`reduce_arg_axis_f32`／
+/// `reduce_min_axis_f32` は `gid >= lanes` の境界検査を持つことを
+/// 機械検証する（最適化を理由に省略しない契約のロック。sum／argext／
+/// min の各 3 つ組で 1 回ずつ、計 3 回出現する）。
 #[test]
 fn boundary_checks_are_present() {
     assert_eq!(
         REDUCE_METAL_SOURCE
             .matches("if (gid >= num_chunks)")
             .count(),
-        2,
-        "reduce_sum_all_chunk_f32／reduce_arg_all_chunk_f32 に `if (gid >= num_chunks)` 境界検査が必要"
+        3,
+        "reduce_sum_all_chunk_f32／reduce_arg_all_chunk_f32／reduce_min_all_chunk_f32 に \
+         `if (gid >= num_chunks)` 境界検査が必要"
     );
     assert_eq!(
         REDUCE_METAL_SOURCE.matches("if (gid != 0u)").count(),
-        2,
-        "reduce_sum_all_finalize_f32／reduce_arg_all_finalize_f32 に `if (gid != 0u)` 境界検査が必要"
+        3,
+        "reduce_sum_all_finalize_f32／reduce_arg_all_finalize_f32／reduce_min_all_finalize_f32 に \
+         `if (gid != 0u)` 境界検査が必要"
     );
     assert_eq!(
         REDUCE_METAL_SOURCE.matches("if (gid >= lanes)").count(),
-        2,
-        "reduce_sum_axis_f32／reduce_arg_axis_f32 に `if (gid >= lanes)` 境界検査が必要"
+        3,
+        "reduce_sum_axis_f32／reduce_arg_axis_f32／reduce_min_axis_f32 に \
+         `if (gid >= lanes)` 境界検査が必要"
     );
 }
 
