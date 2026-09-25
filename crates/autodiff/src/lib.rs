@@ -186,6 +186,12 @@
 //! 意図的に再エクスポートしない（`docs/autodiff-matrix-ops-decision.md`・
 //! モジュール doc 参照）。
 
+//! イシュー #2146（親 #2131）で `mish`／`hardtanh`／`relu6`／`prelu`／
+//! `glu` の 5 活性化演算を [`activation_ops`] へ追加した。[`matrix_ops`]
+//! と同じく非公開の自由関数群で、facade 公開は承認待ちのため意図的に
+//! 再エクスポートしない（`docs/autodiff-activation-ops-decision.md`・
+//! モジュール doc 参照）。
+
 //! イシュー #2149（親 #2131）で、[`crate::var::Var::einsum`] が
 //! rank≥3 `matmul`（#1600 未実装）を理由に拒否していた batch 添字
 //! （両オペランドと出力に共通する添字。例 `"bij,bjk->bik"`）を伴う
@@ -197,6 +203,7 @@
 //! 「承認待ち保留」の枠組み。`docs/autodiff-einsum-batch-decision.md`・
 //! モジュール doc 参照）。
 
+pub mod activation_ops;
 mod attention;
 mod backward;
 pub mod bool_ops;

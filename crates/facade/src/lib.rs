@@ -2069,6 +2069,160 @@ struct KvCacheHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarMatrixOpsHoldDoctestGuard;
 
+/// イシュー #2146（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の「正の
+/// プローブ 1 ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを
+/// 併用する（`VarHooksHoldDoctestGuard` と同じ理由）:
+///
+/// (a) `Var` への委譲メソッド衝突プローブ（`VarMatrixOpsHoldDoctestGuard`
+/// 方式）。facade の全 `pub mod` を glob import したスコープに、本
+/// ブロック内でのみ定義したローカルの自由関数群
+/// （`__fandhe_activation_hold_probe::activation_ops::{mish, hardtanh,
+/// relu6, prelu, glu}`）とトレイト（`__FandheActivationHoldProbe`）を
+/// 導入し、`Var`／`Tensor<f32>`／`Tape` に実装して実際に使う。facade が
+/// `activation_ops` というモジュール名や 5 個の関数名を公開しても、
+/// ローカル定義との glob 衝突、または呼び出しシグネチャの不一致
+/// （inherent メソッドがトレイトメソッドより優先解決されるため）で
+/// コンパイルが失敗する。
+///
+/// (b) `compat::Sequential::add_*` 5 種の衝突プローブ（承認事項の 2 つ目。
+/// `crate::compat::sequential::Sequential` の既存 `add_relu`／
+/// `add_silu` 等と同型の命名）。トレイト（`__FandheActivationAddProbe`）
+/// を `fandhe_ai::compat::Sequential` に実装し、**UFCS 形のみ**
+/// （`fandhe_ai::compat::Sequential::add_mish(x)`）で呼ぶ。
+/// `compat::Sequential::add_*` の既存メソッド（`add_relu` 等）は値で
+/// `self` を取る inherent メソッドであり、メソッド呼び出し形
+/// （`x.add_mish()`）だとトレイト側より inherent 側が優先解決される
+/// ため、衝突を検出できない（メソッド呼び出し形は使わない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// activation_ops_hold_doctest_globs_all_pub_modules`・
+/// `activation_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_activation_ops`・
+/// `workspace_declares_activation_ops_fn_names_only_in_autodiff_
+/// activation_ops`）との多層防御の位置づけは
+/// `docs/autodiff-activation-ops-decision.md` §6「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加・`compat::Sequential::
+/// add_*` 追加）を得た日が来たら、本モジュール・本 doctest 自体を
+/// 削除する（ソース走査側の対応する否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_activation_hold_probe {
+///     pub mod activation_ops {
+///         pub fn mish() {}
+///         pub fn hardtanh() {}
+///         pub fn relu6() {}
+///         pub fn prelu() {}
+///         pub fn glu() {}
+///     }
+/// }
+/// use __fandhe_activation_hold_probe::*;
+///
+/// struct __FandheActivationMarker;
+///
+/// trait __FandheActivationHoldProbe {
+///     fn mish(&self) -> __FandheActivationMarker;
+///     fn hardtanh(&self) -> __FandheActivationMarker;
+///     fn relu6(&self) -> __FandheActivationMarker;
+///     fn prelu(&self) -> __FandheActivationMarker;
+///     fn glu(&self) -> __FandheActivationMarker;
+/// }
+///
+/// impl<'t> __FandheActivationHoldProbe for fandhe_ai::Var<'t> {
+///     fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+/// }
+///
+/// impl __FandheActivationHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+/// }
+///
+/// impl __FandheActivationHoldProbe for fandhe_ai::Tape {
+///     fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+/// }
+///
+/// trait __FandheActivationAddProbe {
+///     fn add_mish(&self) -> __FandheActivationMarker;
+///     fn add_hardtanh(&self) -> __FandheActivationMarker;
+///     fn add_relu6(&self) -> __FandheActivationMarker;
+///     fn add_prelu(&self) -> __FandheActivationMarker;
+///     fn add_glu(&self) -> __FandheActivationMarker;
+/// }
+///
+/// impl __FandheActivationAddProbe for fandhe_ai::compat::Sequential {
+///     fn add_mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn add_hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn add_relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn add_prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+///     fn add_glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `activation_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     activation_ops::mish();
+///     activation_ops::hardtanh();
+///     activation_ops::relu6();
+///     activation_ops::prelu();
+///     activation_ops::glu();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheActivationMarker = fandhe_ai::Var::mish(x);
+///     let _: __FandheActivationMarker = x.mish();
+///     let _: __FandheActivationMarker = fandhe_ai::Var::glu(x);
+///     let _: __FandheActivationMarker = x.glu();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheActivationMarker = fandhe_ai::Tensor::hardtanh(x);
+///     let _: __FandheActivationMarker = x.hardtanh();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheActivationMarker = fandhe_ai::Tape::prelu(x);
+///     let _: __FandheActivationMarker = x.prelu();
+/// }
+///
+/// fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_mish(x);
+///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_hardtanh(x);
+///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_relu6(x);
+///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_prelu(x);
+///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_glu(x);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarActivationOpsHoldDoctestGuard;
+
 /// イシュー #2149（親 #2131）の facade 公開保留を固定する doctest 足場。
 /// `VarRearrangeOpsHoldDoctestGuard`（イシュー #2143）と同型の正の
 /// プローブ方式を採る: facade の全 `pub mod` を glob import した
