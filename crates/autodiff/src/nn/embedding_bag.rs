@@ -362,12 +362,19 @@ impl<'t> EmbeddingBagVars<'t> {
         } else {
             offsets.len()
         };
+        let embedding_dim = self.weight.shape()[1];
         if bag_count == 0 {
-            return Err(AutodiffError::InvalidArgument(
-                "EmbeddingBagVars::forward_with_offsets: bag_count must be > 0 (empty offsets \
-                 list after include_last_offset adjustment)"
-                    .to_string(),
-            ));
+            // 空バッチ（`B == 0`。呼び出し元の bag 数がそもそも 0 件）:
+            // `Var::cat` は空リストを拒否するため、通常の bag 構築経路
+            // （後段の `Var::cat(&bags, 0)`）を経由せず shape
+            // `[0, embedding_dim]` の Var を直接返す（cursor[bot] Low
+            // 指摘「Empty batch rejected with padding」。PR #2281 是正）。
+            // 要素数 0 のため実データを持たず、`weight` への勾配寄与も
+            // 構造的に発生しない（backward 対象要素が存在しない）ので
+            // `var_no_grad` で十分（[`Self::forward`] の高速経路も
+            // 同様に B==0 では embedded/縮約の結果が空 shape になる）。
+            let empty = Tensor::<f32>::zeros(&[0, embedding_dim]).map_err(AutodiffError::Shape)?;
+            return Ok(self.weight.tape().var_no_grad(&empty));
         }
 
         let bag_bounds: Vec<(usize, usize)> = (0..bag_count)
@@ -409,7 +416,26 @@ impl<'t> EmbeddingBagVars<'t> {
         // （モジュール doc「id 範囲検査を `Var::embedding` へ一本化する
         // 設計」節）。
         let embedded_all = self.weight.embedding(&filtered_tensor, None)?;
-        let embedding_dim = self.weight.shape()[1];
+
+        // 空 bag（`bag_len == 0` になる可能性のある bag が 1 件でも
+        // あれば構築する。バッチ内の全 bag が空になるケース（codex
+        // P1／cursor[bot] Medium 指摘「Empty bags detach bag output」・
+        // PR #2281 是正）に備え、`weight` の行 0 を `0.0` 倍した
+        // 微分可能なゼロ値を使う（`weight.narrow(0, 0, 1)` は
+        // `num_embeddings > 0` により常に有効）。単純に
+        // `tape.var_no_grad` のゼロ定数を使うと、その bag が
+        // `requires_grad == false` のまま `Var::cat` へ渡り、バッチ内
+        // 全 bag が空の場合は `cat` 出力全体が `requires_grad == false`
+        // に落ちて `Tape::backward` が失敗する（`weight` への期待される
+        // ゼロ勾配が得られない）。`mul` の VJP は他方オペランドの値を
+        // そのまま流すため、ゼロ定数（`requires_grad == false`）との
+        // 積は値としては `0.0`（有限な重み値 × 0.0 は非 NaN）のまま、
+        // `weight` への勾配経路（值は 0）だけを維持する。
+        let zero_scale = {
+            let zeros = Tensor::<f32>::zeros(&[1, embedding_dim]).map_err(AutodiffError::Shape)?;
+            self.weight.tape().var_no_grad(&zeros)
+        };
+        let weight_row0 = self.weight.narrow(0, 0, 1)?;
 
         let mut bags: Vec<Var<'t>> = Vec::with_capacity(bag_count);
         for &(fstart, fend) in &bag_filtered_bounds {
@@ -417,10 +443,9 @@ impl<'t> EmbeddingBagVars<'t> {
             if bag_len == 0 {
                 // 空 bag（元々長さ 0、または全要素が padding_idx で
                 // 除外された）はゼロ行（PyTorch `nn.EmbeddingBag` の
-                // 空 bag 出力契約）。
-                let zeros =
-                    Tensor::<f32>::zeros(&[1, embedding_dim]).map_err(AutodiffError::Shape)?;
-                bags.push(self.weight.tape().var_no_grad(&zeros));
+                // 空 bag 出力契約）。値は `0.0` のまま `weight` への
+                // 微分可能な経路を保つ（上記コメント参照）。
+                bags.push(weight_row0.mul(&zero_scale)?);
                 continue;
             }
             let slice = embedded_all.narrow(0, fstart, bag_len)?;
@@ -613,6 +638,58 @@ mod tests {
             .unwrap()
             .to_tensor();
         assert_eq!(dense_vec(&out), vec![0.0, 0.0]);
+    }
+
+    /// PR #2281 是正（codex P1／cursor[bot] Medium「Empty bags detach bag
+    /// output」）: バッチ内の全 bag が空（全 id が `padding_idx`）でも
+    /// `weight` への微分可能な経路を維持し、`Tape::backward` が
+    /// 「勾配追跡なし」で失敗しないこと。値は空 bag 契約どおり
+    /// `0.0` のまま。
+    #[test]
+    fn all_bags_empty_still_backward_reaches_weight() {
+        let w = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        // 2 bag とも id が全て padding_idx=0 のため、どちらも空 bag。
+        let ids = Tensor::<i32>::new(vec![0, 0, 0, 0], &[2, 2]).unwrap();
+        let t = tape();
+        let bag = EmbeddingBag::from_parameters(w, EmbeddingBagMode::Sum, Some(0)).unwrap();
+        let vars = bag.bind(&t);
+        let out = vars.forward(&ids).unwrap();
+        assert_eq!(dense_vec(&out.to_tensor()), vec![0.0, 0.0, 0.0, 0.0]);
+
+        let loss = out.sum(None).unwrap();
+        let grads = t.backward(&loss).unwrap();
+        let weight_grad = grads
+            .get(&vars.weight)
+            .unwrap()
+            .expect("全 bag が空でも weight への勾配経路は維持されるはず");
+        // 値としては空 bag からの寄与は 0（`0.0` 倍したため）。
+        assert_eq!(dense_vec(weight_grad), vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// PR #2281 是正（cursor[bot] Low「Empty batch rejected with
+    /// padding」）: `padding_idx` 設定時または `L == 0` 時、`B == 0` の
+    /// ランク 2 バッチ（bag 0 個）が拒否されず shape `[0, D]` を返す
+    /// こと（no-padding fast path 以外でも成功する）。
+    #[test]
+    fn forward_rank2_empty_batch_with_padding_idx_succeeds() {
+        let w = Tensor::<f32>::new(vec![1.0, 1.0, 2.0, 2.0], &[2, 2]).unwrap();
+        let ids = Tensor::<i32>::new(Vec::<i32>::new(), &[0, 2]).unwrap();
+        let t = tape();
+        let bag = EmbeddingBag::from_parameters(w, EmbeddingBagMode::Sum, Some(0)).unwrap();
+        let out = bag.bind(&t).forward(&ids).unwrap().to_tensor();
+        assert_eq!(out.shape(), &[0, 2]);
+    }
+
+    /// 同上。`L == 0`（padding_idx なし）でも `forward_with_offsets` が
+    /// 経由され `B == 0` が拒否されないこと。
+    #[test]
+    fn forward_rank2_empty_batch_with_zero_length_succeeds() {
+        let w = Tensor::<f32>::new(vec![1.0, 1.0, 2.0, 2.0], &[2, 2]).unwrap();
+        let ids = Tensor::<i32>::new(Vec::<i32>::new(), &[0, 0]).unwrap();
+        let t = tape();
+        let bag = EmbeddingBag::from_parameters(w, EmbeddingBagMode::Sum, None).unwrap();
+        let out = bag.bind(&t).forward(&ids).unwrap().to_tensor();
+        assert_eq!(out.shape(), &[0, 2]);
     }
 
     #[test]
