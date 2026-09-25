@@ -17,14 +17,14 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput, BceKind,
-    BinaryElementwiseOp, ChecksumReadout, Conv2dParams, DType, EighFactors, FusionPlan,
-    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
-    LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams, QrFactors, ScatterReduce,
-    SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors, Tensor, UnaryElementwiseOp,
-    VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape,
-    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
-    pool2d_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    BinaryElementwiseOp, ChecksumReadout, Conv2dParams, Conv3dParams, DType, EighFactors,
+    FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
+    KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams, QrFactors,
+    ScatterReduce, SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors, Tensor,
+    UnaryElementwiseOp, VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout,
+    gather_out_shape, im2col_out_shape, im2col3d_out_shape, interpolate_out_shape_for_mode,
+    one_hot_out_shape, pad_out_shape, pool2d_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::batch_norm;
@@ -1505,6 +1505,45 @@ impl BackendOps for CpuBackendOps {
         }
         checked_alloc_numel_f32(input_shape)?;
         crate::im2col::col2im(d_col, input_shape, params).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::im2col3d` の CPU 実装（イシュー #2158）。
+    /// [`im2col3d_out_shape`] で `input.shape()`／`params` を再検査して
+    /// から `im2col::im2col3d` へ委譲する（`im2col` と同じ二重検査
+    /// 方針）。
+    fn im2col3d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Conv3dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            im2col3d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        crate::im2col::im2col3d(input, params, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::col2im3d` の CPU 実装（イシュー #2158）。
+    /// [`im2col3d_out_shape`] で `input_shape`／`params` から期待する
+    /// `d_col` 形状を導出し完全一致を検査したうえで、`input_shape`
+    /// 自体のバイトサイズも `checked_alloc_numel_f32` で検査してから
+    /// `im2col::col2im3d` へ委譲する（`col2im` の PR #1862 是正〈3 段
+    /// ゲート: rank 検査 → 期待形状との完全一致 → 確保上限検査〉を
+    /// 踏襲する）。
+    fn col2im3d(
+        &self,
+        d_col: &Tensor<f32>,
+        input_shape: &[usize],
+        params: &Conv3dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let expected_col_shape =
+            im2col3d_out_shape(input_shape, params).map_err(BackendError::ShapeMismatch)?;
+        if d_col.shape() != expected_col_shape.as_slice() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: d_col.shape().to_vec(),
+                rhs: expected_col_shape,
+            }));
+        }
+        checked_alloc_numel_f32(input_shape)?;
+        crate::im2col::col2im3d(d_col, input_shape, params).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::max_pool2d` の CPU 実装（イシュー #1728）。

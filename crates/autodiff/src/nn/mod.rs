@@ -178,8 +178,8 @@ pub use batch_norm::{
 };
 pub use container::{ModuleDict, ModuleList, Sequential, summary};
 pub use conv::{
-    Conv1d, Conv1dVars, Conv2d, Conv2dVars, ConvTranspose2d, ConvTranspose2dVars,
-    conv2d_forward_low_precision,
+    Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose2d,
+    ConvTranspose2dVars, conv2d_forward_low_precision,
 };
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};

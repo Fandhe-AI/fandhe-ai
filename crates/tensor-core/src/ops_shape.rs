@@ -22,7 +22,7 @@
 //! caaf3c0 でマージ済みとなったため本イシュー（#22・TASK-1.6b）で
 //! `broadcast_shape` への委譲へ差し替える。
 
-use crate::backend_ops::{Conv2dParams, Pool2dParams};
+use crate::backend_ops::{Conv2dParams, Conv3dParams, Pool2dParams};
 use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
 use crate::tensor::{checked_numel, checked_numel_for};
@@ -1455,6 +1455,242 @@ pub fn im2col_out_shape(
     let out_shape = vec![n, groups, k_g, p];
     checked_numel_for::<f32>(&out_shape)?;
     Ok(out_shape)
+}
+
+/// Conv3d（`BackendOps::conv3d`）の出力 shape を検査・計算する
+/// （イシュー #2158・設計 `docs/conv-ops-design.md` §16）。
+///
+/// `input_shape: [N, Cin, D, H, W]`・`weight_shape: [Cout, Cin/groups,
+/// kD, kH, kW]`（`conv2d_out_shape` と同じレイアウト一般化）。
+///
+/// 検査順序（[`conv2d_out_shape`] と同一）: rank（input／weight とも
+/// 5）→ `Cin % groups == 0` → `weight_shape[1] * groups == Cin` →
+/// `Cout % groups == 0` → `Cout >= groups` → 空間軸 `D`／`H`／`W == 0`
+/// 拒否（`N == 0` は受理）→ 各軸 [`conv_out_len`]（負分子拒否ゲート）→
+/// 出力要素数積オーバーフロー（`checked_numel_for`）。
+pub fn conv3d_out_shape(
+    input_shape: &[usize],
+    weight_shape: &[usize],
+    params: &Conv3dParams,
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 5 {
+        return Err(ShapeError::RankMismatch {
+            expected: 5,
+            actual: input_shape.len(),
+        });
+    }
+    if weight_shape.len() != 5 {
+        return Err(ShapeError::RankMismatch {
+            expected: 5,
+            actual: weight_shape.len(),
+        });
+    }
+    let (n, cin, d, h, w) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+        input_shape[4],
+    );
+    let (cout, cin_g, kd, kh, kw) = (
+        weight_shape[0],
+        weight_shape[1],
+        weight_shape[2],
+        weight_shape[3],
+        weight_shape[4],
+    );
+    let groups = params.groups();
+    if !cin.is_multiple_of(groups) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cin],
+            rhs: vec![groups],
+        });
+    }
+    let expected_cin_g = cin / groups;
+    if cin_g != expected_cin_g {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cin_g],
+            rhs: vec![expected_cin_g],
+        });
+    }
+    if !cout.is_multiple_of(groups) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cout],
+            rhs: vec![groups],
+        });
+    }
+    if cout < groups {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cout],
+            rhs: vec![groups],
+        });
+    }
+    if d == 0 || h == 0 || w == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![d, h, w],
+            rhs: vec![1, 1, 1],
+        });
+    }
+    let [sd, sh, sw] = params.stride();
+    let [pd, ph, pw] = params.padding();
+    let [dd, dh, dw] = params.dilation();
+    let dout = conv_out_len(d, kd, sd, pd, dd)?;
+    let hout = conv_out_len(h, kh, sh, ph, dh)?;
+    let wout = conv_out_len(w, kw, sw, pw, dw)?;
+    let out_shape = vec![n, cout, dout, hout, wout];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
+}
+
+/// Conv3d の im2col（[`crate::backend_ops::BackendOps::im2col3d`]）の
+/// 出力 shape を検査・計算する（イシュー #2158・設計 `docs/conv-ops-
+/// design.md` §16）。`input_shape: [N, Cin, D, H, W]` を `[N, G,
+/// Cin_g·kD·kH·kW, Dout·Hout·Wout]` へ展開する（`K_g` 軸は
+/// `(c_in_g, kd, kh, kw)` の row-major・`P` 軸は `(od, oh, ow)` の
+/// row-major）。
+pub fn im2col3d_out_shape(
+    input_shape: &[usize],
+    params: &Conv3dParams,
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 5 {
+        return Err(ShapeError::RankMismatch {
+            expected: 5,
+            actual: input_shape.len(),
+        });
+    }
+    let (n, cin, d, h, w) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+        input_shape[4],
+    );
+    let groups = params.groups();
+    if !cin.is_multiple_of(groups) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cin],
+            rhs: vec![groups],
+        });
+    }
+    if d == 0 || h == 0 || w == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![d, h, w],
+            rhs: vec![1, 1, 1],
+        });
+    }
+    let cin_g = cin / groups;
+    let [kd, kh, kw] = params.kernel_size();
+    let [sd, sh, sw] = params.stride();
+    let [pd, ph, pw] = params.padding();
+    let [dd, dh, dw] = params.dilation();
+    let dout = conv_out_len(d, kd, sd, pd, dd)?;
+    let hout = conv_out_len(h, kh, sh, ph, dh)?;
+    let wout = conv_out_len(w, kw, sw, pw, dw)?;
+    let k_g = cin_g
+        .checked_mul(kd)
+        .and_then(|v| v.checked_mul(kh))
+        .and_then(|v| v.checked_mul(kw))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let p = dout
+        .checked_mul(hout)
+        .and_then(|v| v.checked_mul(wout))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let out_shape = vec![n, groups, k_g, p];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
+}
+
+#[cfg(test)]
+mod conv3d_out_shape_tests {
+    use super::*;
+    use crate::backend_ops::Conv3dParams;
+
+    fn params(
+        k: [usize; 3],
+        s: [usize; 3],
+        p: [usize; 3],
+        d: [usize; 3],
+        groups: usize,
+    ) -> Conv3dParams {
+        Conv3dParams::new(k, s, p, d, groups).unwrap()
+    }
+
+    #[test]
+    fn conv3d_out_shape_basic() {
+        let p = params([2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        // input [N=1, Cin=1, D=3, H=3, W=3] weight [Cout=1, Cin_g=1, 2,2,2]
+        let out = conv3d_out_shape(&[1, 1, 3, 3, 3], &[1, 1, 2, 2, 2], &p).unwrap();
+        // (3+0-1*1-1)/1+1 = 2
+        assert_eq!(out, vec![1, 1, 2, 2, 2]);
+    }
+
+    #[test]
+    fn conv3d_out_shape_groups_depthwise() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 2);
+        let out = conv3d_out_shape(&[1, 2, 2, 2, 2], &[2, 1, 1, 1, 1], &p).unwrap();
+        assert_eq!(out, vec![1, 2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn conv3d_out_shape_n_zero_accepted() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let out = conv3d_out_shape(&[0, 1, 2, 2, 2], &[1, 1, 1, 1, 1], &p).unwrap();
+        assert_eq!(out, vec![0, 1, 2, 2, 2]);
+    }
+
+    #[test]
+    fn conv3d_out_shape_spatial_zero_rejected() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let err = conv3d_out_shape(&[1, 1, 0, 2, 2], &[1, 1, 1, 1, 1], &p);
+        assert!(matches!(err, Err(ShapeError::ShapeMismatch { .. })));
+    }
+
+    #[test]
+    fn conv3d_out_shape_rank_mismatch_rejected() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let err = conv3d_out_shape(&[1, 1, 2, 2], &[1, 1, 1, 1, 1], &p);
+        assert!(matches!(err, Err(ShapeError::RankMismatch { .. })));
+    }
+
+    #[test]
+    fn conv3d_out_shape_channel_mismatch_rejected() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let err = conv3d_out_shape(&[1, 3, 2, 2, 2], &[1, 2, 1, 1, 1], &p);
+        assert!(matches!(err, Err(ShapeError::ShapeMismatch { .. })));
+    }
+
+    #[test]
+    fn conv3d_out_shape_overflow_rejected() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let err = conv3d_out_shape(
+            &[1, 1, usize::MAX / 2, usize::MAX / 2, usize::MAX / 2],
+            &[1, 1, 1, 1, 1],
+            &p,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn im2col3d_out_shape_basic() {
+        let p = params([2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let out = im2col3d_out_shape(&[1, 1, 3, 3, 3], &p).unwrap();
+        // K_g = 1*2*2*2 = 8, P = 2*2*2 = 8
+        assert_eq!(out, vec![1, 1, 8, 8]);
+    }
+
+    #[test]
+    fn im2col3d_out_shape_groups() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 2);
+        let out = im2col3d_out_shape(&[1, 2, 2, 2, 2], &p).unwrap();
+        assert_eq!(out, vec![1, 2, 1, 8]);
+    }
+
+    #[test]
+    fn im2col3d_out_shape_rank_mismatch_rejected() {
+        let p = params([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1);
+        let err = im2col3d_out_shape(&[1, 1, 2, 2], &p);
+        assert!(matches!(err, Err(ShapeError::RankMismatch { .. })));
+    }
 }
 
 /// ConvTranspose2d（`Var::conv_transpose2d`。イシュー #2067・設計
