@@ -2876,3 +2876,80 @@ struct VarTopkUniqueOpsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct VarExtremumOpsHoldDoctestGuard;
+
+/// イシュー #2157（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarExtremumOpsHoldDoctestGuard`（イシュー #2153 系）と同型の「正の
+/// プローブ 1 ブロック方式」を採るが、`determinism` は `Var`／
+/// `Tensor`／`Tape` を経由しない**crate ルートの自由関数**（先例:
+/// `set_cuda_gemm_precision`／`cuda_gemm_precision`）として公開され
+/// うるため、プローブは 2 系統を併用する: (1) `determinism::` 経由の
+/// モジュール path（`pub use fandhe_ai_autodiff::determinism;` の
+/// ようなモジュール再エクスポートを検出）、(2) crate ルート直下の
+/// `set_deterministic`／`is_deterministic`（facade が
+/// `set_cuda_gemm_precision` と同型の薄い委譲関数を crate ルートへ
+/// 追加した場合を検出）。facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカルの自由関数群
+/// （`__fandhe_determinism_hold_probe::{determinism::{set_deterministic,
+/// is_deterministic}, set_deterministic, is_deterministic}`）を導入し、
+/// 実際に呼び出す。facade がどちらの経路で公開しても、ローカル定義との
+/// glob 衝突で名前解決が曖昧になりコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// determinism_hold_doctest_globs_all_pub_modules`・
+/// `determinism_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_determinism_fns`・
+/// `workspace_declares_determinism_fn_names_only_in_allowed_locations`）
+/// との多層防御の位置づけは `docs/autodiff-determinism-mode-design.md`
+/// §6「承認事項」を参照。
+///
+/// 承認（facade 公開）を得た日が来たら、本モジュール・本 doctest 自体を
+/// 削除する（ソース走査側の対応する否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_determinism_hold_probe {
+///     pub mod determinism {
+///         pub fn set_deterministic(_enabled: bool) {}
+///         pub fn is_deterministic() -> bool {
+///             false
+///         }
+///     }
+///     pub fn set_deterministic(_enabled: bool) {}
+///     pub fn is_deterministic() -> bool {
+///         false
+///     }
+/// }
+/// use __fandhe_determinism_hold_probe::*;
+///
+/// fn __probe_module_path() {
+///     // `determinism::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
+///     // なり E0659 でコンパイル失敗する）。
+///     determinism::set_deterministic(true);
+///     let _: bool = determinism::is_deterministic();
+/// }
+///
+/// fn __probe_root_path() {
+///     // crate ルート直下の自由関数経路（`use fandhe_ai::*;` が同名の
+///     // `pub fn` を glob 公開していれば同様に E0659 でコンパイル失敗
+///     // する）。
+///     set_deterministic(true);
+///     let _: bool = is_deterministic();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct DeterminismHoldDoctestGuard;
