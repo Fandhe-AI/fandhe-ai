@@ -38,6 +38,7 @@
 
 use fandhe_ai_tensor_core::{MatrixNormOrd, ShapeError, Tensor};
 
+use crate::bool_ops::checked_bytes_for;
 use crate::error::AutodiffError;
 
 use super::{build_tensor, dense_vec};
@@ -1678,6 +1679,841 @@ pub(crate) fn matrix_norm_vjp(
     }
 }
 
+// =====================================================================
+// eigh・slogdet・pinv・matrix_rank・lstsq（イシュー #2150・親 #2131
+// 「Tier 2 追加分」・`docs/autodiff-linalg-ops-decision.md`）。
+//
+// `crate::linalg_ops` モジュール（facade 非公開の自由関数入口。同 doc
+// §0）から `Unsupported` フォールバック時のみ呼ばれる。呼び出し元契約
+// はファイル冒頭のモジュール doc と同じ（shape 検査済み・非有限入力
+// 検査は `linalg_ops.rs` 側で行う）。
+// =====================================================================
+
+/// [`jacobi_svd_tall`]（片側 Jacobi 法）の巡回版を対称行列の固有値
+/// 分解に適用する古典的 Jacobi 法。収束判定は非対角要素の Frobenius
+/// ノルムが入力全体の Frobenius ノルム（Frobenius ノルムは直交相似
+/// 変換で不変なため巡回中も一定の基準として使える）の相対しきい値を
+/// 下回るかのみで行う（絶対下限を持たない。`docs/autodiff-linalg-ops-
+/// decision.md` §3「eigh」・[`jacobi_svd_tall`] と同じ設計判断）。
+const EIGH_JACOBI_EPS: f64 = 1e-14;
+const EIGH_MAX_SWEEPS: usize = 60;
+
+/// [`eigh_vjp`] の固有値縮退判定に使う相対しきい値
+/// （`docs/autodiff-linalg-ops-decision.md` §3「eigh」）。
+const EIGH_DEGENERATE_RTOL: f64 = 1e-9;
+
+/// 下三角のみを読んで対称化した `[n,n]` 行列に古典的巡回 Jacobi 法を
+/// 適用し、`(固有値, 固有ベクトル行列)` を返す（固有値は未ソート・
+/// 符号未正規化。[`eigh`] が仕上げる）。
+fn eigh_jacobi(a_lower: &Mat) -> Result<(Vec<f64>, Mat), AutodiffError> {
+    let n = a_lower.rows;
+    let mut sym = Mat::zeros(n, n);
+    for i in 0..n {
+        for j in 0..=i {
+            let v = a_lower.get(i, j);
+            sym.set(i, j, v);
+            sym.set(j, i, v);
+        }
+    }
+    let mut v = Mat::identity(n);
+    let frob: f64 = sym.data.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+    for _sweep in 0..EIGH_MAX_SWEEPS {
+        let mut off_sq = 0.0f64;
+        for p in 0..n {
+            for q in (p + 1)..n {
+                off_sq += sym.get(p, q) * sym.get(p, q);
+            }
+        }
+        // 非対角の Frobenius ノルムは対称性により `sqrt(2 * off_sq)`
+        // （上三角・下三角の両方を数える）。
+        if (2.0 * off_sq).sqrt() <= EIGH_JACOBI_EPS * frob {
+            let eigenvalues: Vec<f64> = (0..n).map(|i| sym.get(i, i)).collect();
+            return Ok((eigenvalues, v));
+        }
+        for p in 0..n {
+            for q in (p + 1)..n {
+                let apq = sym.get(p, q);
+                if apq == 0.0 {
+                    continue;
+                }
+                let app = sym.get(p, p);
+                let aqq = sym.get(q, q);
+                let theta = (aqq - app) / (2.0 * apq);
+                let t = if theta == 0.0 {
+                    1.0
+                } else {
+                    theta.signum() / (theta.abs() + (1.0 + theta * theta).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = c * t;
+                for k in 0..n {
+                    if k == p || k == q {
+                        continue;
+                    }
+                    let akp = sym.get(k, p);
+                    let akq = sym.get(k, q);
+                    let new_kp = c * akp - s * akq;
+                    let new_kq = s * akp + c * akq;
+                    sym.set(k, p, new_kp);
+                    sym.set(p, k, new_kp);
+                    sym.set(k, q, new_kq);
+                    sym.set(q, k, new_kq);
+                }
+                let app_new = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+                let aqq_new = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+                sym.set(p, p, app_new);
+                sym.set(q, q, aqq_new);
+                sym.set(p, q, 0.0);
+                sym.set(q, p, 0.0);
+                for k in 0..n {
+                    let vkp = v.get(k, p);
+                    let vkq = v.get(k, q);
+                    v.set(k, p, c * vkp - s * vkq);
+                    v.set(k, q, s * vkp + c * vkq);
+                }
+            }
+        }
+    }
+    Err(invalid(
+        "eval::linalg::eigh: 巡回 Jacobi 法が反復上限（60 スイープ）内に収束しなかった",
+    ))
+}
+
+/// 対称固有値分解（`A: [n,n]`〈対称。下三角のみ読む〉→
+/// `(eigenvalues: [n]〈昇順〉, eigenvectors: [n,n]〈列が固有ベクトル〉)`。
+/// イシュー #2150。空行列は `([0], [0,0])`。
+pub(crate) fn eigh(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return Ok((
+            build_tensor(Vec::new(), &[0]),
+            build_tensor(Vec::new(), &[0, 0]),
+        ));
+    }
+    let (eigenvalues, vecs) = eigh_jacobi(&mat)?;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| eigenvalues[i].total_cmp(&eigenvalues[j]));
+    let mut evals_sorted = vec![0.0f64; n];
+    let mut vecs_sorted = Mat::zeros(n, n);
+    for (new_idx, &old_idx) in order.iter().enumerate() {
+        evals_sorted[new_idx] = eigenvalues[old_idx];
+        vecs_sorted.set_col(new_idx, &vecs.col(old_idx));
+    }
+    for j in 0..n {
+        let mut col = vecs_sorted.col(j);
+        normalize_max_abs_sign(&mut col);
+        vecs_sorted.set_col(j, &col);
+    }
+    let evals_t = build_tensor(evals_sorted.iter().map(|&v| v as f32).collect(), &[n]);
+    Ok((evals_t, vecs_sorted.to_tensor()))
+}
+
+/// `Op::EighValues`／`Op::EighVectors` の VJP（PyTorch
+/// `linalg_eig_backward` のエルミート分岐相当。`docs/autodiff-linalg-
+/// ops-decision.md` §4「eigh」）: `gA = V (diag(gL) + skew(Vᵀ gV) ⊘ E) Vᵀ`
+/// （`skew(X) = (X - Xᵀ)/2`・`E_ij = λ_j - λ_i`〈i≠j〉）。
+///
+/// `g_vectors`（`Some` は `Op::EighVectors` からの寄与がある場合のみ）
+/// が `Some` のときに限り固有値縮退（[`EIGH_DEGENERATE_RTOL`]）を検査
+/// する——`Op::EighValues` のみが損失に到達する場合（`gV` が全て 0）は
+/// 縮退していても `gA = V diag(gL) Vᵀ` が well-defined なため成功させる
+/// （`svd_vjp` の無条件判定と違う設計判断。`docs/autodiff-linalg-ops-
+/// decision.md` §2「判断 2」）。
+///
+/// `V (…) Vᵀ` の対称構成式は本来対称行列全体（上三角・下三角双方）を
+/// 独立変数とみなした場合の勾配だが、forward（[`eigh_jacobi`]）は
+/// 入力の**下三角のみ**を読み、上三角は無視する契約。そのため対称行列
+/// のまま返すと上三角へ誤った非ゼロ勾配が漏れ、下三角の非対角勾配は
+/// 本来（下三角だけを独立変数とする有限差分）の半分になる（PR #2268
+/// codex-review 指摘）。上三角（対角除く）をゼロ化し、下三角の非対角
+/// 成分は対称行列の (i,j)・(j,i) 両方の寄与を合算する（`copyltu` 系の
+/// 逆演算。[`cholesky_vjp`] とは異なり対称化ではなく片側集約する）。
+pub(crate) fn eigh_vjp(
+    values: &Tensor<f32>,
+    vectors: &Tensor<f32>,
+    g_values: Option<&Tensor<f32>>,
+    g_vectors: Option<&Tensor<f32>>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let n = values.shape()[0];
+    let v = Mat::from_tensor(vectors);
+    let lambda: Vec<f64> = dense_vec(values).into_iter().map(f64::from).collect();
+    let mut middle = Mat::zeros(n, n);
+    if let Some(gl) = g_values {
+        let gl64: Vec<f64> = dense_vec(gl).into_iter().map(f64::from).collect();
+        for (i, &g) in gl64.iter().enumerate() {
+            middle.set(i, i, g);
+        }
+    }
+    if let Some(gv) = g_vectors {
+        // `g_vectors` は `Some` というだけでは実際に `Op::EighVectors`
+        // 側から非ゼロ寄与があるとは限らない（`Tape::backward` の多出力
+        // 勾配合流経路では、寄与が無いノードにも形状だけ揃えたゼロ勾配
+        // が渡ることがある）。全要素が厳密ゼロなら `skew/e` 項も厳密
+        // ゼロで縮退判定・除算とも不要なため、縮退検査自体をスキップし
+        // 誤って `InvalidArgument` にしない（PR #2268 codex-review 指摘）。
+        let gv_all_zero = dense_vec(gv).iter().all(|&x| x == 0.0);
+        if !gv_all_zero {
+            let max_abs_lambda = lambda.iter().fold(0.0f64, |acc, &x| acc.max(x.abs()));
+            let threshold = EIGH_DEGENERATE_RTOL * max_abs_lambda.max(f64::MIN_POSITIVE);
+            for i in 0..n {
+                for j in 0..n {
+                    if i != j && (lambda[j] - lambda[i]).abs() <= threshold {
+                        return Err(invalid(
+                            "eval::linalg::eigh_vjp: 固有値が縮退しておりベクトル勾配は未定義",
+                        ));
+                    }
+                }
+            }
+            let gv_mat = Mat::from_tensor(gv);
+            let vt_gv = v.transpose().matmul(&gv_mat);
+            for i in 0..n {
+                for j in 0..n {
+                    if i == j {
+                        continue;
+                    }
+                    let skew = (vt_gv.get(i, j) - vt_gv.get(j, i)) / 2.0;
+                    let e = lambda[j] - lambda[i];
+                    middle.set(i, j, middle.get(i, j) + skew / e);
+                }
+            }
+        }
+    }
+    let ga = v.matmul(&middle).matmul(&v.transpose());
+    // forward が下三角のみを読む契約に合わせ、対称行列 `ga` を下三角
+    // のみへ集約する: 上三角（対角除く）は 0、下三角の非対角成分は
+    // 転置位置の寄与を合算（`ga` は構成上対称なので `2 * ga[i,j]` と
+    // 等価）、対角はそのまま。
+    let mut ga_lower = Mat::zeros(n, n);
+    for i in 0..n {
+        for j in 0..n {
+            match j.cmp(&i) {
+                std::cmp::Ordering::Greater => {}
+                std::cmp::Ordering::Equal => ga_lower.set(i, i, ga.get(i, i)),
+                std::cmp::Ordering::Less => {
+                    ga_lower.set(i, j, ga.get(i, j) + ga.get(j, i));
+                }
+            }
+        }
+    }
+    Ok(ga_lower.to_tensor())
+}
+
+/// 符号付き log 行列式（`A: [n,n]` → `(sign: [], logabsdet: [])`）。
+/// イシュー #2150。`logabsdet = Σ ln|u_ii|`（部分ピボット LU の対角、
+/// `f64` で累積し最後に 1 回だけ `f32` へ変換。`lu_decompose` のピボット
+/// が厳密 `0.0` なら特異のため `(0, -inf)`）。空行列は `(1, 0)`。
+pub(crate) fn slogdet(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return (build_tensor(vec![1.0], &[]), build_tensor(vec![0.0], &[]));
+    }
+    match lu_decompose(&mat) {
+        None => (
+            build_tensor(vec![0.0], &[]),
+            build_tensor(vec![f32::NEG_INFINITY], &[]),
+        ),
+        Some(lu) => {
+            let mut sign = lu.sign;
+            let mut logabsdet = 0.0f64;
+            for i in 0..n {
+                let d = lu.lu.get(i, i);
+                sign *= d.signum();
+                logabsdet += d.abs().ln();
+            }
+            (
+                build_tensor(vec![sign as f32], &[]),
+                build_tensor(vec![logabsdet as f32], &[]),
+            )
+        }
+    }
+}
+
+/// `Op::SlogdetLogAbsDet` の VJP: `gA = g · A^{-T}`（`Op::SlogdetSign`
+/// の VJP は明示ゼロ・`grad.rs` 側で処理。`docs/autodiff-linalg-ops-
+/// decision.md` §4「slogdet」）。forward 値を再利用せず `a` から
+/// 改めて `f64` の `LuDecomp` を計算する（[`inv_vjp`] と同じ理由）。
+/// 特異行列（forward が `(0, -inf)` を返した場合）は `InvalidArgument`。
+pub(crate) fn slogdet_logabsdet_vjp(a: &Tensor<f32>, g: f32) -> Result<Tensor<f32>, AutodiffError> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return Ok(build_tensor(Vec::new(), &[0, 0]));
+    }
+    let lu = lu_decompose(&mat)
+        .ok_or_else(|| invalid("eval::linalg::slogdet_logabsdet_vjp: 行列が特異"))?;
+    let identity = Mat::identity(n);
+    let inv_mat = lu_solve_mat(&lu, &identity);
+    let inv_t = inv_mat.transpose();
+    let g64 = f64::from(g);
+    let mut out = Mat::zeros(n, n);
+    for r in 0..n {
+        for c in 0..n {
+            out.set(r, c, g64 * inv_t.get(r, c));
+        }
+    }
+    Ok(out.to_tensor())
+}
+
+/// `rcond`（`pinv`／`matrix_rank`／`lstsq` 共通）を解決する。`None` は
+/// PyTorch 既定 `max(m,n) · f32::EPSILON`。有限かつ非負を要求する
+/// （`docs/autodiff-linalg-ops-decision.md` §2「判断 4」: アルゴリズムの
+/// 引数であり REQ-2 の tolerance ではない）。
+pub(crate) fn resolve_rcond(rcond: Option<f32>, m: usize, n: usize) -> Result<f64, AutodiffError> {
+    match rcond {
+        None => Ok((m.max(n) as f64) * f64::from(f32::EPSILON)),
+        Some(r) => {
+            if !r.is_finite() || r < 0.0 {
+                return Err(invalid(format!(
+                    "eval::linalg: rcond は有限かつ非負である必要がある、got {r}"
+                )));
+            }
+            Ok(f64::from(r))
+        }
+    }
+}
+
+/// 降順ソート済み特異値列 `s` のうち `rcond · s[0]` を上回る個数
+/// （= 打ち切り後の有効ランク）。`s` が空、または `s[0] <= 0.0` の場合
+/// は `0`。
+fn truncated_svd_rank(s: &[f64], rcond: f64) -> usize {
+    let smax = s.first().copied().unwrap_or(0.0);
+    if smax <= 0.0 {
+        return 0;
+    }
+    let tol = rcond * smax;
+    s.iter().filter(|&&v| v > tol).count()
+}
+
+/// `pinv`／`pinv_vjp` 共通の内部実装。`svd(a)` の reduced SVD を
+/// `rcond` で打ち切り、`P = A⁺ = V diag(1/σ_i) Uᵀ`（`i < rank`）を
+/// `f64` の [`Mat`]（`[n,m]`）で返す（`f32` への downcast は呼び出し元
+/// が行う）。
+fn pinv_mat_f64(a: &Tensor<f32>, rcond: f64) -> Result<Mat, AutodiffError> {
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_mat = Mat::from_tensor(&u);
+    let vh_mat = Mat::from_tensor(&vh);
+    let n = vh_mat.cols;
+    let m = u_mat.rows;
+    let mut out = Mat::zeros(n, m);
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        let s_inv = 1.0 / sigma;
+        for row in 0..n {
+            let v_ri = vh_mat.get(i, row);
+            if v_ri == 0.0 {
+                continue;
+            }
+            for col in 0..m {
+                out.set(
+                    row,
+                    col,
+                    out.get(row, col) + s_inv * v_ri * u_mat.get(col, i),
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Moore–Penrose 擬似逆行列（`A: [m,n]` → `[n,m]`）。イシュー #2150。
+/// `rcond` は [`resolve_rcond`]。空行列（`m==0` または `n==0`）は
+/// `[n,m]` の零行列。
+pub(crate) fn pinv(a: &Tensor<f32>, rcond: Option<f32>) -> Result<Tensor<f32>, AutodiffError> {
+    let shape = a.shape();
+    let (m, n) = (shape[0], shape[1]);
+    // `rcond` 検証（PR #2268 codex-review〈P2〉指摘の是正）: 空行列
+    // （`m==0`／`n==0`）の早期 return を `resolve_rcond` より前に置くと、
+    // `Some(NaN)` や負値等の不正な `rcond` が空行列入力では検証を
+    // 素通りしてしまう。他の非空行列と同じく必ず先に検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return Ok(build_tensor(Vec::new(), &[n, m]));
+    }
+    Ok(pinv_mat_f64(a, rcond)?.to_tensor())
+}
+
+/// [`pinv_vjp`] 専用: `svd_vjp`（`Op::SvdU`／`Op::SvdS`／`Op::SvdVh` 用の
+/// 汎用 VJP。Townsend 2016）と同じ式を、打ち切り SVD（有効ランク
+/// `rank`。[`truncated_svd_rank`]）向けに適用する。`du`／`dv`
+/// （`[m,k]`／`[n,k]`。`k = min(m,n)`）・`ds`（長さ `k`）は
+/// `rank` 未満の列のみ非零、`rank` 以上は厳密 `0.0` である契約
+/// （[`pinv_vjp`] が構築する）。
+///
+/// **`svd_vjp` の全域無条件近接／重複判定と異なる設計判断（PR #2268
+/// codex-review〈P1〉指摘の是正。`docs/autodiff-linalg-ops-decision.md`
+/// §2.2 参照）**: `svd_vjp` は `k` 個の特異値ペア全てで
+/// `|σ_j²−σ_i²| < 1e-9` を無条件に `InvalidArgument` とする（`Op::SvdU`
+/// 等の汎用 VJP としては正しい——upstream がどの列を使うか一般には
+/// 分からないため）。一方ここでは `du`／`dv` の `rank` 以上の列が
+/// 契約上厳密 `0.0` であるため、`i >= rank && j >= rank`（打ち切りで
+/// 捨てた特異値どうしのペア）の寄与は `(Uᵀ du)[i,j]`／`(Vᵀ dv)[i,j]`
+/// が両方厳密 `0.0` になることで定義上厳密 `0.0` になる。このペアの
+/// 近接／重複判定をスキップしないと、階数落ち行列（複数のゼロ特異値を
+/// 持つのがありふれたケース）の `pinv`／`lstsq` 勾配が、寄与ゼロが
+/// 保証された箇所の縮退だけを理由に無条件で失敗する（`svd_vjp` を
+/// そのまま `pinv_vjp` へ流用しなかった §2.2 の理由と同根の問題）。
+/// `svd_vjp` 自体（`Op::SvdU` 等の汎用契約）は変更しない。
+///
+/// **閾値は絶対値ではなく `σ_i²+σ_j²` に対する相対値（PR #2268
+/// codex-review〈P1〉指摘の是正。2026-09-25）**: `svd_vjp` の絶対閾値
+/// （`|σ_j²−σ_i²| < 1e-9`）をそのまま流用すると、スケールの小さい
+/// フルランク行列（例 `σ=[2e-6, 1e-6]`）で `σ_j²−σ_i²` 自体がスケール
+/// の二乗で小さくなり、実際には縮退していない特異値ペアまで
+/// `InvalidArgument` として誤って拒否してしまう。`pinv_vjp` はこの
+/// 関数専用の新規 API（PR #2268 で導入）で `svd_vjp` の上流互換を
+/// 引き継ぐ必要がないため、判定式を `|σ_j²−σ_i²| < 1e-9・(σ_i²+σ_j²)`
+/// （分母 `1/(σ_j²−σ_i²)` の相対誤差スケールに合わせた無次元の閾値）
+/// へ変更した。
+/// [`pinv_vjp`] の「打ち切りで非零特異値を捨てていない」専用高速路
+/// （2026-09-25 追加是正・PR #2268 codex-review〈P1〉指摘: 「重複する
+/// 非零特異値で `pinv`／`lstsq` の逆伝播が失敗する」）。`rank` 以上の
+/// 切り捨て特異値が全て厳密 `0.0`（`A_r == A` が exact に成立し、`P`
+/// が「打ち切り後の低ランク近似」ではなく `A` 自身の真の Moore–
+/// Penrose 擬似逆行列である場合。`rank == k`〈打ち切りなし〉を含む）
+/// に限り、[`svd_vjp_rank_limited_f64`] を経由せず Golub–Pereyra の
+/// 閉形式勾配式（`docs/autodiff-linalg-ops-decision.md` §2.5 に引用の
+/// PyTorch `pinv_backward` 相当。`A`・`P` を直接使う式で個々の
+/// `U`／`V` 列を区別しないため、特異値の重複・近接（`svd_vjp_rank_
+/// limited_f64` の分母縮退。例 `A=I₂` は `σ=[1,1]` で無条件に失敗
+/// していた）に一切依存しない）を適用する:
+///
+/// `gA = −Pᵀ G Pᵀ + (I_m − A P) Gᵀ P Pᵀ + Pᵀ P Gᵀ (I_n − P A)`
+///
+/// `A_r == A` の下では `A P = U_r U_rᵀ`・`P A = V_r V_rᵀ`（`U_rᵀU_r
+/// = V_rᵀV_r = I_rank`）が厳密に成立するため、`(I−AP)X` 型の射影を
+/// `X − U_r(U_rᵀX)` へ、`X(I−V_rV_rᵀ)` を `X − (XV_r)V_rᵀ` へ書き
+/// 換え、`Pᵀ P = U_r・diag(1/σ_i)²・U_rᵀ`・`P Pᵀ = V_r・diag(1/σ_i)²・
+/// V_rᵀ` の因子形のまま評価する——`svd_vjp` の term2／term3
+/// （`X−U(UᵀX)` 型）と同じ結合順序を踏襲し、`rank ≤ min(m,n)` に
+/// 比例する中間行列のみを経由する（`m×m`／`n×n` を一切実体化しない。
+/// `pinv_vjp_tall_matrix_does_not_allocate_full_m_by_m_intermediate`
+/// 回帰テストが縦長入力〈`[100000,1]`〉でこの契約を検査する）。
+/// degenerate 特異値（`A=I₂` 等）でも `P` 自身は `A` の滑らかな関数
+/// であり続けるため、この式は打ち切りで非零特異値を捨てていない限り
+/// 常に正しい。**打ち切りで非零特異値を捨てた場合**（`rank < k` かつ
+/// `s[rank..k]` に非零が残る。例 `A=diag(2,1)`・`rcond=0.75`）は
+/// `P` が `A` 自身の真の擬似逆行列ではなくなるためこの式は使えず、
+/// [`svd_vjp_rank_limited_f64`] 経由の従来路（打ち切り境界より内側の
+/// 縮退特異値ペアは引き続き `InvalidArgument`）を維持する——「特異値が
+/// 縮退しつつ、かつ非零特異値が打ち切られる」の二重発生ケースの解消は
+/// `docs/autodiff-linalg-ops-decision.md` §8 へスコープ外として申し
+/// 送る。
+fn pinv_vjp_direct_f64(u_mat: &Mat, s64: &[f64], vh_mat: &Mat, rank: usize, g: &Mat) -> Mat {
+    let m = u_mat.rows;
+    let n = vh_mat.cols;
+
+    // `U_r`（`[m, rank]`）・`V_r`（`[n, rank]`）・`sinv`（長さ `rank`。
+    // `1/σ_i`）を SVD 三つ組から切り出す。
+    let mut u_r = Mat::zeros(m, rank);
+    for i in 0..rank {
+        for row in 0..m {
+            u_r.set(row, i, u_mat.get(row, i));
+        }
+    }
+    let mut v_r = Mat::zeros(n, rank);
+    for i in 0..rank {
+        for row in 0..n {
+            v_r.set(row, i, vh_mat.get(i, row));
+        }
+    }
+    let sinv: Vec<f64> = s64[..rank].iter().map(|&sv| 1.0 / sv).collect();
+    let v_r_t = v_r.transpose(); // [rank, n]
+    let u_r_t = u_r.transpose(); // [rank, m]
+
+    // term1（符号未適用）= U_r・(Sinv・(V_rᵀ G U_r)・Sinv)・V_rᵀ
+    //   （`Pᵀ = U_r Sinv V_rᵀ` を `Pᵀ G Pᵀ` へ代入して展開。先頭の負号
+    //   〈`gA` 式の `−Pᵀ G Pᵀ`〉は最終合算時にまとめて適用する）。
+    let gu = g.matmul(&u_r); // [n, rank]
+    let mut c1 = v_r_t.matmul(&gu); // [rank, rank]（V_rᵀ G U_r）
+    for i in 0..rank {
+        for j in 0..rank {
+            let scaled = c1.get(i, j) * sinv[i] * sinv[j];
+            c1.set(i, j, scaled);
+        }
+    }
+    let term1 = u_r.matmul(&c1).matmul(&v_r_t); // [m, n]（Pᵀ G Pᵀ）
+
+    // `Y = Gᵀ P Pᵀ = (Gᵀ V_r)・Sinv²・V_rᵀ`（`P Pᵀ = V_r Sinv² V_rᵀ`）。
+    // `term2 = (I_m − A P) Y = Y − U_r(U_rᵀ Y)`（`A P = U_r U_rᵀ`）。
+    let g_t = g.transpose(); // [m, n]
+    let gt_vr = g_t.matmul(&v_r); // [m, rank]（Gᵀ V_r）
+    let mut y_scaled = gt_vr.clone();
+    for (i, &siv) in sinv.iter().enumerate() {
+        let scale = siv * siv;
+        for row in 0..m {
+            let v = y_scaled.get(row, i) * scale;
+            y_scaled.set(row, i, v);
+        }
+    }
+    let y = y_scaled.matmul(&v_r_t); // [m, n]
+    let urt_y = u_r_t.matmul(&y); // [rank, n]
+    let u_urt_y = u_r.matmul(&urt_y); // [m, n]
+    let mut term2 = Mat::zeros(m, n);
+    for row in 0..m {
+        for col in 0..n {
+            term2.set(row, col, y.get(row, col) - u_urt_y.get(row, col));
+        }
+    }
+
+    // `W = Gᵀ(I_n − P A) = Gᵀ − (Gᵀ V_r) V_rᵀ`（`P A = V_r V_rᵀ`）。
+    // `term3 = Pᵀ P W = U_r・Sinv²・(U_rᵀ W)`（`Pᵀ P = U_r Sinv² U_rᵀ`）。
+    let gt_vr_vrt = gt_vr.matmul(&v_r_t); // [m, n]
+    let mut w = Mat::zeros(m, n);
+    for row in 0..m {
+        for col in 0..n {
+            w.set(row, col, g_t.get(row, col) - gt_vr_vrt.get(row, col));
+        }
+    }
+    let mut urt_w = u_r_t.matmul(&w); // [rank, n]
+    for (i, &siv) in sinv.iter().enumerate() {
+        let scale = siv * siv;
+        for col in 0..n {
+            let v = urt_w.get(i, col) * scale;
+            urt_w.set(i, col, v);
+        }
+    }
+    let term3 = u_r.matmul(&urt_w); // [m, n]
+
+    // `gA = −term1 + term2 + term3`（`term1 = Pᵀ G Pᵀ` は符号未適用の
+    // まま構築しているため、ここで先頭の負号を適用する。上記 doc の
+    // 式 `gA = −Pᵀ G Pᵀ + (I_m−AP)Gᵀ P Pᵀ + Pᵀ P Gᵀ(I_n−PA)` 参照）。
+    let mut grad = Mat::zeros(m, n);
+    for row in 0..m {
+        for col in 0..n {
+            grad.set(
+                row,
+                col,
+                -term1.get(row, col) + term2.get(row, col) + term3.get(row, col),
+            );
+        }
+    }
+    grad
+}
+
+fn svd_vjp_rank_limited_f64(
+    u: &Mat,
+    s: &[f64],
+    vh: &Mat,
+    du: &Mat,
+    ds: &[f64],
+    dv: &Mat,
+    rank: usize,
+) -> Result<Mat, AutodiffError> {
+    let v = vh.transpose();
+    let m = u.rows;
+    let k = u.cols;
+    let n = v.rows;
+
+    for i in 0..k {
+        for j in 0..k {
+            if i == j || (i >= rank && j >= rank) {
+                continue;
+            }
+            let denom = s[j] * s[j] - s[i] * s[i];
+            // `svd_vjp`（`Op::SvdU` 等の汎用 VJP）は分母の縮退判定を
+            // 絶対閾値 `1e-9` で行う（近接／重複を `σ_j²−σ_i²` の絶対値
+            // だけで見る設計。`svd_vjp` doc 参照）。ここではそれを
+            // そのまま流用せず、`σ_i²+σ_j²` に対する**相対**閾値へ
+            // 変える（PR #2268 codex-review〈P1〉指摘の是正）:
+            // `pinv`／`lstsq` はスケールの小さいフルランク行列
+            // （例 `σ=[2e-6, 1e-6]`）でも呼ばれ、絶対閾値のままだと
+            // `σ_j²−σ_i²` 自体がスケールの二乗で小さくなり、縮退が
+            // 無いのに `InvalidArgument` を誤って返してしまう
+            // （新規導入 API のため `svd_vjp` と違い上流互換の懸念がない。
+            // `svd_vjp` 本体〈汎用契約〉は変更しない）。
+            let scale = (s[i] * s[i] + s[j] * s[j]).max(f64::MIN_POSITIVE);
+            if denom.abs() < 1e-9 * scale {
+                return Err(invalid(
+                    "eval::linalg::pinv_vjp: 特異値が近接／重複しているため勾配が未定義（F 行列の分母が破綻）",
+                ));
+            }
+        }
+    }
+    let f = |i: usize, j: usize| -> f64 {
+        if i == j || (i >= rank && j >= rank) {
+            0.0
+        } else {
+            1.0 / (s[j] * s[j] - s[i] * s[i])
+        }
+    };
+
+    let utdu = u.transpose().matmul(du);
+    let vtdv = v.transpose().matmul(dv);
+
+    let mut inner = Mat::zeros(k, k);
+    for i in 0..k {
+        for j in 0..k {
+            let fij = f(i, j);
+            let mut val = (utdu.get(i, j) - utdu.get(j, i)) * fij * s[j]
+                + s[i] * (vtdv.get(i, j) - vtdv.get(j, i)) * fij;
+            if i == j {
+                val += ds[i];
+            }
+            inner.set(i, j, val);
+        }
+    }
+    let term1 = u.matmul(&inner).matmul(vh);
+
+    // term2 = (I_m − U Uᵀ) du diag(S)⁻¹ Vᵀ・term3 = U diag(S)⁻¹ dvᵀ
+    // (I_n − V Vᵀ) は `svd_vjp`（`Op::SvdU` 等）と同じ結合順序
+    // （`X − U(UᵀX)` 型）で `[m,m]`／`[n,n]` を実体化せず `k×k` 以下の
+    // 中間行列のみを経由する（`svd_vjp` term2／term3 のコメント参照。
+    // PR #2268 codex-review〈P1〉指摘の回帰テスト
+    // `pinv_vjp_tall_matrix_does_not_allocate_full_m_by_m_intermediate`
+    // が縦長入力〈`[100000,1]`〉でこの契約を検査する）。
+    let inv_s: Vec<f64> = s
+        .iter()
+        .map(|&sv| if sv != 0.0 { 1.0 / sv } else { 0.0 })
+        .collect();
+    let mut du_sinv = Mat::zeros(m, k);
+    for i in 0..m {
+        for (j, &isv) in inv_s.iter().enumerate() {
+            du_sinv.set(i, j, du.get(i, j) * isv);
+        }
+    }
+    let du_sinv_vht = du_sinv.matmul(vh); // m×n
+    let ut_du_sinv = u.transpose().matmul(&du_sinv); // k×k
+    let u_ut_du_sinv_vht = u.matmul(&ut_du_sinv).matmul(vh); // m×n
+
+    let dv_t = dv.transpose();
+    let mut sinv_dvt = Mat::zeros(k, n);
+    for (i, &isv) in inv_s.iter().enumerate() {
+        for j in 0..n {
+            sinv_dvt.set(i, j, isv * dv_t.get(i, j));
+        }
+    }
+    let u_sinv_dvt = u.matmul(&sinv_dvt); // m×n
+    let sinv_dvt_v = sinv_dvt.matmul(&v); // k×k
+    let u_sinv_dvt_v_vht = u.matmul(&sinv_dvt_v).matmul(vh); // m×n
+
+    let mut da = Mat::zeros(m, n);
+    for i in 0..m {
+        for j in 0..n {
+            da.set(
+                i,
+                j,
+                term1.get(i, j) + du_sinv_vht.get(i, j) - u_ut_du_sinv_vht.get(i, j)
+                    + u_sinv_dvt.get(i, j)
+                    - u_sinv_dvt_v_vht.get(i, j),
+            );
+        }
+    }
+    Ok(da)
+}
+
+/// `Op::Pinv` の VJP（`docs/autodiff-linalg-ops-decision.md` §2.5・§4
+/// 「pinv」。2026-09-25 是正・PR #2268 codex-review〈P1〉指摘）:
+/// `P = A⁺`（`rcond` 打ち切り後の有効ランク `rank`）を `U・S・Vh`
+/// （[`svd`] の reduced SVD）の `rank` 個の特異値三つ組のみへ依存する
+/// 関数として扱い、`P` のコタンジェント `G` を SVD 三つ組
+/// `(du, ds, dv)`（`rank` 以上の列は厳密 `0.0`）へ変換したうえで
+/// [`svd_vjp_rank_limited_f64`]（Townsend 2016 の一般式）を適用する。
+///
+/// **例外（2026-09-25 追加是正・PR #2268 codex-review〈P1〉指摘）**:
+/// 打ち切りで非零特異値を 1 つも捨てていない場合（`s[rank..k]` が
+/// 全て厳密 `0.0`。`rank == k`〈打ち切りなし〉を含む）は、代わりに
+/// [`pinv_vjp_direct_f64`] の Golub–Pereyra 閉形式を使う——このとき
+/// `P` は `A` 自身の真の擬似逆行列であり、[`svd_vjp_rank_limited_f64`]
+/// が要求する「特異値の非重複」を経由せずに済む（`A=I₂` 等の重複
+/// 特異値でも `pinv`／`lstsq` の勾配が定義される反例の是正。
+/// [`pinv_vjp_direct_f64`] の doc 参照）。
+///
+/// **以前の実装（Golub–Pereyra の pinv_backward 式をそのまま `P` へ
+/// 適用する方式）が誤りだった理由**: その式は `A A⁺ A = A` 等の
+/// Moore–Penrose の 4 条件が「真の A」に対して成立することを前提に
+/// 導出されている。`rcond` 打ち切りで非零の特異値を捨てた場合
+/// （`rank < min(m,n)` かつ捨てた特異値が非零。例 `A=diag(2,1)`・
+/// `rcond=0.75` は `σ=1` を捨てる）、`P` は真の `A⁺` ではなく
+/// 「打ち切り後の低ランク近似 `A_r = U_r S_r Vᵀ_r` の `A⁺`」になり、
+/// 上記の前提が崩れて式全体が有限差分と乖離する（`A` が正方かつ
+/// 特異値が全て残る場合は `A_r = A` となり偶然一致するため、フル
+/// ランクの回帰テストだけでは検出できなかった）。SVD 三つ組の摂動式
+/// （`P` が依存する `U_r`／`S_r`／`V_r` の微分を直接求める）は打ち切り
+/// の有無に関わらず常に正しい——[`svd_vjp_rank_limited_f64`] の doc
+/// 参照。非零特異値を捨てていない場合は上記「例外」のとおり
+/// [`pinv_vjp_direct_f64`] を優先するため、この一般経路は「打ち切りで
+/// 非零特異値を実際に捨てた」場合にのみ使われる。
+///
+/// `L = ⟨G, P⟩ = Σ_{i<rank} (1/σ_i)・⟨V[:,i], (G U)[:,i]⟩` から
+/// `dL/dU[:,i] = (1/σ_i)・(Gᵀ V)[:,i]`・`dL/dV[:,i] = (1/σ_i)・(G U)[:,i]`・
+/// `dL/dS_i = −(1/σ_i)²・⟨V[:,i], (G U)[:,i]⟩`（`i<rank` のみ。`i>=rank`
+/// は `P` が依存しないため厳密 `0.0`）を導出できる。
+pub(crate) fn pinv_vjp(
+    a: &Tensor<f32>,
+    rcond: Option<f32>,
+    g: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let shape = a.shape();
+    let (m, n) = (shape[0], shape[1]);
+    // `pinv`／`matrix_rank`／`lstsq` と同じ理由（PR #2268 codex-review
+    // 〈P2〉指摘）で、空行列の早期 return より前に `rcond` を検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return Ok(build_tensor(vec![0.0; m * n], &[m, n]));
+    }
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_mat = Mat::from_tensor(&u); // [m,k]
+    let vh_mat = Mat::from_tensor(&vh); // [k,n]
+    let v_mat = vh_mat.transpose(); // [n,k]
+    let k = u_mat.cols;
+    let g_mat = Mat::from_tensor(g); // [n,m]
+
+    // 打ち切りで非零特異値を 1 つも捨てていないか（`pinv_vjp_direct_
+    // f64` の doc「例外」参照）。`s64` は `svd` の契約により降順のため
+    // `rank..k` が全て厳密 `0.0` かどうかだけ見れば十分。
+    let no_nonzero_truncated = s64[rank..k].iter().all(|&sv| sv == 0.0);
+    if no_nonzero_truncated {
+        let da = pinv_vjp_direct_f64(&u_mat, &s64, &vh_mat, rank, &g_mat);
+        return Ok(da.to_tensor());
+    }
+
+    let gtv = g_mat.transpose().matmul(&v_mat); // Gᵀ V: [m,k]
+    let gu = g_mat.matmul(&u_mat); // G U: [n,k]
+
+    let mut du = Mat::zeros(m, k);
+    let mut dv = Mat::zeros(n, k);
+    let mut ds = vec![0.0f64; k];
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        // `rank` は `truncated_svd_rank`（`σ > tol` の個数）の定義により
+        // `sigma > 0.0` を保証するため 0 除算は起きない。
+        let sinv = 1.0 / sigma;
+        for row in 0..m {
+            du.set(row, i, sinv * gtv.get(row, i));
+        }
+        let mut dot = 0.0;
+        for row in 0..n {
+            let gu_ri = gu.get(row, i);
+            dv.set(row, i, sinv * gu_ri);
+            dot += v_mat.get(row, i) * gu_ri;
+        }
+        ds[i] = -sinv * sinv * dot;
+    }
+
+    let da = svd_vjp_rank_limited_f64(&u_mat, &s64, &vh_mat, &du, &ds, &dv, rank)?;
+    Ok(da.to_tensor())
+}
+
+/// 行列のランク（`A: [m,n]` → スカラー `[]`。値は非負整数を表す
+/// `f32`）。イシュー #2150。非微分（`grad.rs` 側で明示ゼロ）。空行列
+/// （`m==0` または `n==0`）は `0`。
+pub(crate) fn matrix_rank(
+    a: &Tensor<f32>,
+    rcond: Option<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let shape = a.shape();
+    let (m, n) = (shape[0], shape[1]);
+    // `pinv` と同じ理由（PR #2268 codex-review〈P2〉指摘）で、空行列の
+    // 早期 return より前に `rcond` を検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return Ok(build_tensor(vec![0.0], &[]));
+    }
+    let (_u, s, _vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    Ok(build_tensor(vec![rank as f32], &[]))
+}
+
+/// 最小二乗解（`A: [m,n]`・`B: [m,k]` → `X: [n,k]`）。イシュー #2150。
+/// `X = V S⁻¹ (Uᵀ B)`（`rcond` で打ち切った有効ランクまでの和）。
+/// `m==0` または `n==0` は `[n,k]` の零行列。
+pub(crate) fn lstsq(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    rcond: Option<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let ashape = a.shape();
+    let (m, n) = (ashape[0], ashape[1]);
+    let bshape = b.shape();
+    let k_cols = bshape[1];
+    // `linalg_ops::lstsq`（autodiff エントリポイント）は `ensure_alloc_
+    // fits_f32` で確保前に出力形状 `[n, k_cols]` を検査するが、本関数
+    // （`eval::linalg::lstsq`）は BackendOps 経由等でも直接呼ばれうる
+    // ため、`m==0` 早期リターンの `n * k_cols` 乗算自体が検査なしに
+    // overflow しうる（巨大 `n`・`k_cols` の空入力。PR #2268
+    // codex-review〈Bugbot〉指摘）。ここで独立に検査する。
+    checked_bytes_for::<f32>(&[n, k_cols]).map_err(|_| {
+        invalid("eval::linalg::lstsq: 出力形状 [n, k_cols] の要素数が確保上限を超える")
+    })?;
+    // `pinv`／`matrix_rank` と同じ理由（PR #2268 codex-review〈P2〉指摘）
+    // で、空行列の早期 return より前に `rcond` を検証する。
+    let rcond = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return Ok(build_tensor(vec![0.0; n * k_cols], &[n, k_cols]));
+    }
+    let (u, s, vh) = svd(a)?;
+    let s64: Vec<f64> = dense_vec(&s).into_iter().map(f64::from).collect();
+    let rank = truncated_svd_rank(&s64, rcond);
+    let u_mat = Mat::from_tensor(&u);
+    let vh_mat = Mat::from_tensor(&vh);
+    let b_mat = Mat::from_tensor(b);
+
+    let mut temp = Mat::zeros(rank, k_cols);
+    for (i, &sigma) in s64.iter().enumerate().take(rank) {
+        for col in 0..k_cols {
+            let mut acc = 0.0f64;
+            for row in 0..m {
+                acc += u_mat.get(row, i) * b_mat.get(row, col);
+            }
+            temp.set(i, col, acc / sigma);
+        }
+    }
+    let mut x = Mat::zeros(n, k_cols);
+    for i in 0..rank {
+        for row in 0..n {
+            let v_ri = vh_mat.get(i, row);
+            if v_ri == 0.0 {
+                continue;
+            }
+            for col in 0..k_cols {
+                x.set(row, col, x.get(row, col) + v_ri * temp.get(i, col));
+            }
+        }
+    }
+    Ok(x.to_tensor())
+}
+
+/// `Op::Lstsq` の VJP（PyTorch `linalg_lstsq_backward` 相当。`docs/
+/// autodiff-linalg-ops-decision.md` §4「lstsq」）: `gB = A⁺ᵀ gX`、
+/// `gA = pinv_vjp(a, rcond, G)`（`G = gX Bᵀ`。[`pinv_vjp`] の内部実装
+/// [`pinv_mat_f64`] を再利用するため `a` から改めて SVD を計算する
+/// 追加コストは小さい）。
+pub(crate) fn lstsq_vjp(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    rcond: Option<f32>,
+    g_x: &Tensor<f32>,
+) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
+    let ashape = a.shape();
+    let (m, n) = (ashape[0], ashape[1]);
+    let bshape = b.shape();
+    let k_cols = bshape[1];
+    // `pinv`／`matrix_rank`／`lstsq` と同じ理由（PR #2268 codex-review
+    // 〈P2〉指摘）で、空行列の早期 return より前に `rcond` を検証する。
+    let rcond_resolved = resolve_rcond(rcond, m, n)?;
+    if m == 0 || n == 0 {
+        return Ok((
+            build_tensor(vec![0.0; m * n], &[m, n]),
+            build_tensor(vec![0.0; m * k_cols], &[m, k_cols]),
+        ));
+    }
+    let p = pinv_mat_f64(a, rcond_resolved)?;
+    let gx_mat = Mat::from_tensor(g_x);
+    let pt = p.transpose();
+    let gb = pt.matmul(&gx_mat);
+    let b_mat = Mat::from_tensor(b);
+    let bt = b_mat.transpose();
+    let g_for_pinv = gx_mat.matmul(&bt);
+    let ga = pinv_vjp(a, rcond, &g_for_pinv.to_tensor())?;
+    Ok((ga, gb.to_tensor()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1968,6 +2804,32 @@ mod tests {
                 a_data[i]
             );
         }
+    }
+
+    /// PR #2268 codex-review〈P1〉指摘の回帰: `pinv_vjp` は以前 `A P`
+    /// （`[m,m]`）・`P A`（`[n,n]`）を陽な行列として構築しており、
+    /// `A: [100000,1]` のような縦長入力（データ自体は約 400 KB）でも
+    /// `A P`・`I_m` だけで数十 GB 規模の確保を試みてメモリ枯渇を
+    /// 招いた。低ランク SVD 分解経由（[`pinv_svd_low_rank_f64`]）へ
+    /// 是正済みで、この形状でも数秒以内に完了し、出力が全要素有限で
+    /// あることを確認する。
+    #[test]
+    fn pinv_vjp_tall_matrix_does_not_allocate_full_m_by_m_intermediate() {
+        let m = 100_000usize;
+        let n = 1usize;
+        let a_data: Vec<f32> = (0..m).map(|i| 1.0 + (i % 7) as f32).collect();
+        let a = build_tensor(a_data, &[m, n]);
+        // `G` は `P = A⁺` と同じ shape `[n,m]`。
+        let g_data: Vec<f32> = (0..m).map(|i| ((i % 5) as f32) * 0.1).collect();
+        let g = build_tensor(g_data, &[n, m]);
+
+        let ga = pinv_vjp(&a, None, &g).unwrap();
+        assert_eq!(ga.shape(), &[m, n]);
+        let ga_data = dense_vec(&ga);
+        assert!(
+            ga_data.iter().all(|v| v.is_finite()),
+            "低ランク経由の pinv_vjp が非有限値を返した"
+        );
     }
 
     #[test]

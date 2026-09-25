@@ -1691,6 +1691,59 @@ pub(crate) fn vjp(
             let da = eval::linalg::matrix_norm_vjp(a_val, ord, g_scalar)?;
             vec![(input, da)]
         }
+        // 対称固有値分解の多出力ノード（イシュー #2150・`tape::Op::
+        // EighValues` doc「多出力の扱い」）。`QrQ`／`QrR` と同じく
+        // 各出力ノードが自身のコタンジェントのみ非ゼロとして部分寄与を
+        // 返す。`out_value`（自ノードの forward 値）と兄弟の forward
+        // 値（payload）を `eval::linalg::eigh_vjp` へそのまま渡す。
+        Op::EighValues { input, vectors } => {
+            let da = eval::linalg::eigh_vjp(out_value, &vectors, Some(upstream), None)?;
+            vec![(input, da)]
+        }
+        Op::EighVectors { input, values } => {
+            let da = eval::linalg::eigh_vjp(&values, out_value, None, Some(upstream))?;
+            vec![(input, da)]
+        }
+        // 符号付き log 行列式の符号出力ノード（イシュー #2150）。区分
+        // 定数（ほとんど至る所微分ゼロ）のため明示ゼロ勾配を返す
+        // （`Op::OneHot` と同型の「寄与なしではなくゼロ勾配」設計）。
+        Op::SlogdetSign { input } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
+        Op::SlogdetLogAbsDet { input } => {
+            let a_val = materialize_fallible(nodes, ops, input)?;
+            let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
+            let da = eval::linalg::slogdet_logabsdet_vjp(a_val, g_scalar)?;
+            vec![(input, da)]
+        }
+        Op::Pinv { input, rcond } => {
+            let a_val = materialize_fallible(nodes, ops, input)?;
+            let da = eval::linalg::pinv_vjp(a_val, Some(rcond), upstream)?;
+            vec![(input, da)]
+        }
+        Op::Lstsq { a, b, rcond } => {
+            let a_val = materialize_fallible(nodes, ops, a)?;
+            let b_val = materialize_fallible(nodes, ops, b)?;
+            let (da, db) = eval::linalg::lstsq_vjp(a_val, b_val, Some(rcond), upstream)?;
+            vec![(a, da), (b, db)]
+        }
+        // 行列のランク（**非微分演算**。`Op::OneHot`／`SlogdetSign` と
+        // 同型の明示ゼロ勾配。イシュー #2150）。
+        Op::MatrixRank { input, rcond } => {
+            // `rcond` は非微分演算の forward 再現にのみ使う payload
+            // （VJP 自体は使わないが、フィールドを明示的に読むことで
+            // dead_code lint を素通りさせない——将来 checkpoint 再計算
+            // 等が forward を再現する際にこの payload が必要になる）。
+            debug_assert!(
+                rcond.is_finite() && rcond >= 0.0,
+                "grad::vjp: Op::MatrixRank の rcond が不正（forward 側の契約違反）"
+            );
+            let input_shape = nodes[input.0].shape.clone();
+            let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
         // `Var::permute` が記録する view ノード（イシュー #1597）。
         // 逆写像は逆置換（`inverse_permutation`）で `upstream` を
         // permute するだけで閉じる（zero-copy。`tape::Op::Permute`
