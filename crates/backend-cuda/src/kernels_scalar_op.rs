@@ -64,7 +64,13 @@
 //! `Add`／`Mul`／`Maximum`／`Minimum`（比較・算術以外の残り binary
 //! kind）はいずれの sub issue にも含まれず対象外のまま残る
 //! （`.claude/rules/out-of-scope-tracking.md` 対象。必要なら別イシューで
-//! 追跡）。
+//! 追跡）。イシュー #2145 が `tensor-core` 側へ追加した
+//! [`ScalarUnaryOp::Floor`]／[`Ceil`](ScalarUnaryOp::Ceil)／
+//! [`Round`](ScalarUnaryOp::Round)／[`Sign`](ScalarUnaryOp::Sign)／
+//! [`Reciprocal`](ScalarUnaryOp::Reciprocal)／[`Rsqrt`](ScalarUnaryOp::Rsqrt)／
+//! [`Erf`](ScalarUnaryOp::Erf) の 7 kind も GPU 専用カーネルは別
+//! イシューのスコープ外で、`unary_expr` に明示 `None` arm を持つ
+//! （末尾ワイルドカード任せにしない）。
 //!
 //! イシュー #1713 で GELU（誤差関数版・tanh 近似版）・Softplus を実装
 //! した。`Gelu`／`GeluTanh` は超越関数（`erff`／`tanhf`）のためホスト
@@ -159,6 +165,19 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         // 桁落ち回避特性〈PR #1686 是正〉を維持）。`p0`＝`beta`・
         // `p1`＝`threshold`（`unary_payload` 参照）。
         ScalarUnaryOp::Softplus { .. } => Some("(x * p0 > p1) ? x : (log1pf(expf(p0 * x)) / p0)"),
+        // イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign`／
+        // `Reciprocal`／`Rsqrt`／`Erf`（`PowScalar` は元から未実装）の
+        // GPU 専用カーネルは別イシューのスコープ。`None` を明示し
+        // `Unsupported` → ホスト参照実装（`ScalarUnaryOp::apply`）への
+        // フォールバックへ委ねる（末尾ワイルドカードに任せず、新 kind
+        // 追加の都度この match を見直すことを強制する）。
+        ScalarUnaryOp::Floor
+        | ScalarUnaryOp::Ceil
+        | ScalarUnaryOp::Round
+        | ScalarUnaryOp::Sign
+        | ScalarUnaryOp::Reciprocal
+        | ScalarUnaryOp::Rsqrt
+        | ScalarUnaryOp::Erf => None,
         _ => None,
     }
 }
@@ -310,6 +329,29 @@ mod tests {
         assert!(src.contains("if (idx < numel)"));
         assert!(src.contains("scalar_unary_sqrt"));
         assert!(!src.contains("rsqrtf("));
+    }
+
+    /// イシュー #2145: 新 7 kind の GPU 専用カーネルはスコープ外で、
+    /// `unary_kernel_source` は明示的に `None` を返す（末尾ワイルド
+    /// カードへの依存を確認するのではなく、新 kind ごとの明示 arm が
+    /// 存在することを固定する。`kind_name()` の申し送り「`_ => None`
+    /// のみに頼らない」方針の回帰テスト）。
+    #[test]
+    fn new_2145_unary_kinds_are_unsupported() {
+        for op in [
+            ScalarUnaryOp::Floor,
+            ScalarUnaryOp::Ceil,
+            ScalarUnaryOp::Round,
+            ScalarUnaryOp::Sign,
+            ScalarUnaryOp::Reciprocal,
+            ScalarUnaryOp::Rsqrt,
+            ScalarUnaryOp::Erf,
+        ] {
+            assert!(
+                unary_kernel_source(op).is_none(),
+                "{op:?}: GPU カーネル未実装のため None のはず"
+            );
+        }
     }
 
     #[test]

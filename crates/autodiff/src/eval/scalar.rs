@@ -55,6 +55,12 @@ pub(crate) fn binary(lhs: &Tensor<f32>, rhs: &Tensor<f32>, op: ScalarBinaryOp) -
 //   **`a`／`b` のいずれかが `NaN` の場合はタイ分割ではなく `(0.0, 0.0)`**
 //   （`Clamp` の NaN 規約と統一。PR #1686 codex-review／Bugbot 指摘の
 //   是正・`docs/scalar-op-dispatch-design.md` 参照）。
+// - イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign` は区分定数のため
+//   勾配は恒等的に `0`（`ScalarUnaryOp::is_piecewise_constant`）。
+//   `Reciprocal` は `-y^2`、`Rsqrt` は `-0.5*y/x`（forward 記録値 `y`
+//   を再利用。`Sqrt`/`Exp` と同型）。`Erf` は `2/√π・exp(-x^2)`
+//   （`f64` で計算し 1 回 downcast。`tensor_core::scalar_op::
+//   erf_grad`）。
 // - `Pow`（binary）の `db`（`∂/∂b[a^b] = a^b・ln(a)`）は `a == 0` の
 //   場合 `0` にマスクする（PyTorch のマスク規約。`ln(0) = -inf` に
 //   `y = 0` が掛かり `NaN` になるのを避ける）。`da`
@@ -149,6 +155,19 @@ pub(crate) fn unary_grad_factor(op: ScalarUnaryOp, x: f32, y: f32) -> f32 {
                 exponent * x.powf(exponent - 1.0)
             }
         }
+        // イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign` は区分定数
+        // （`ScalarUnaryOp::is_piecewise_constant() == true`）のため
+        // 勾配は恒等的に `0`。ここでの `0.0` は `unary_grad_factors` を
+        // 直接呼ぶ経路（本テスト等）のためのフォールバックで、
+        // `grad.rs::vjp` の `Op::ScalarUnary` 分岐は upstream の
+        // `inf`／`NaN` 汚染を避けるため乗算経由ではなくゼロテンソル
+        // 直接生成（`is_piecewise_constant()` 分岐）を使う（§4）。
+        ScalarUnaryOp::Floor | ScalarUnaryOp::Ceil | ScalarUnaryOp::Round | ScalarUnaryOp::Sign => {
+            0.0
+        }
+        ScalarUnaryOp::Reciprocal => -y * y,
+        ScalarUnaryOp::Rsqrt => -0.5 * y / x,
+        ScalarUnaryOp::Erf => fandhe_ai_tensor_core::scalar_op::erf_grad(x),
         // `ScalarUnaryOp` は `#[non_exhaustive]`（`tensor-core` 側で
         // 将来 variant を追加できるようにするため）で、crate 境界を
         // またぐ match は列挙済み variant のみでは非網羅と判定される。

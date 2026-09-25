@@ -6883,6 +6883,293 @@ fn workspace_declares_rearrange_ops_fn_names_only_in_autodiff_rearrange_ops() {
 }
 
 // =====================================================================
+// #2145（親 #2131）の facade 公開保留固定（`VarScalarUnaryOpsHoldDoctestGuard`）。
+// `VarRearrangeOpsHoldDoctestGuard` 系と同型の正のプローブ 1 ブロック
+// 方式のドリフト検査に加え、workspace 全体のソース走査による定義元
+// インベントリを持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-scalar-unary-ops-decision.md` §9 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `VarScalarUnaryOpsHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`rearrange_ops_hold_doctest_globs_all_pub_modules` の
+/// `VarScalarUnaryOpsHoldDoctestGuard` 版）。
+#[test]
+fn scalar_unary_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarScalarUnaryOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarScalarUnaryOpsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`scalar_unary_ops_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest ブロック
+/// の**glob 以外の本文**が固定文言 [`SCALAR_UNARY_OPS_HOLD_PROBE_BODY`]
+/// と 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し
+/// 行・プローブの削除・別名へのシャドーイング等で正のプローブを骨抜き
+/// にする改変を機械的に拒否する）。
+#[test]
+fn scalar_unary_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarScalarUnaryOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, SCALAR_UNARY_OPS_HOLD_PROBE_BODY,
+        "VarScalarUnaryOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 SCALAR_UNARY_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_scalar_unary_hold_probe モジュール・\
+         __FandheScalarUnaryHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`scalar_unary_ops_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `VarScalarUnaryOpsHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行を除いた本文と 1 行単位で
+/// 完全一致する必要がある。
+const SCALAR_UNARY_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_scalar_unary_hold_probe {\n\
+\x20\x20\x20\x20pub mod scalar_unary_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn floor() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn ceil() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn round() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn sign() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn reciprocal() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn rsqrt() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn erf() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn pow_scalar() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_scalar_unary_hold_probe::*;\n\
+\n\
+struct __FandheScalarUnaryMarker;\n\
+\n\
+trait __FandheScalarUnaryHoldProbe {\n\
+\x20\x20\x20\x20fn floor(&self) -> __FandheScalarUnaryMarker;\n\
+\x20\x20\x20\x20fn ceil(&self) -> __FandheScalarUnaryMarker;\n\
+\x20\x20\x20\x20fn round(&self) -> __FandheScalarUnaryMarker;\n\
+\x20\x20\x20\x20fn sign(&self) -> __FandheScalarUnaryMarker;\n\
+\x20\x20\x20\x20fn reciprocal(&self) -> __FandheScalarUnaryMarker;\n\
+\x20\x20\x20\x20fn rsqrt(&self) -> __FandheScalarUnaryMarker;\n\
+\x20\x20\x20\x20fn erf(&self) -> __FandheScalarUnaryMarker;\n\
+\x20\x20\x20\x20fn pow_scalar(&self) -> __FandheScalarUnaryMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheScalarUnaryHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+}\n\
+\n\
+impl __FandheScalarUnaryHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+}\n\
+\n\
+impl __FandheScalarUnaryHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+\x20\x20\x20\x20fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `scalar_unary_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
+\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20scalar_unary_ops::floor();\n\
+\x20\x20\x20\x20scalar_unary_ops::ceil();\n\
+\x20\x20\x20\x20scalar_unary_ops::round();\n\
+\x20\x20\x20\x20scalar_unary_ops::sign();\n\
+\x20\x20\x20\x20scalar_unary_ops::reciprocal();\n\
+\x20\x20\x20\x20scalar_unary_ops::rsqrt();\n\
+\x20\x20\x20\x20scalar_unary_ops::erf();\n\
+\x20\x20\x20\x20scalar_unary_ops::pow_scalar();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = fandhe_ai::Var::floor(x);\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = x.floor();\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = fandhe_ai::Var::erf(x);\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = x.erf();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = fandhe_ai::Tensor::sign(x);\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = x.sign();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = fandhe_ai::Tape::reciprocal(x);\n\
+\x20\x20\x20\x20let _: __FandheScalarUnaryMarker = x.reciprocal();\n\
+}";
+
+/// `floor`・`ceil`・`round`・`sign`・`reciprocal`・`rsqrt`・`erf`・
+/// `pow_scalar`（8 個の関数名。イシュー #2145）。
+/// [`facade_does_not_reexport_or_declare_scalar_unary_ops`]・
+/// [`workspace_declares_scalar_unary_ops_fn_names_only_in_autodiff_
+/// scalar_unary_ops`] が共用する。
+const SCALAR_UNARY_OPS_FN_NAMES: [&str; 8] = [
+    "floor",
+    "ceil",
+    "round",
+    "sign",
+    "reciprocal",
+    "rsqrt",
+    "erf",
+    "pow_scalar",
+];
+
+/// facade src 全体（`crates/facade/src/**`）に、`scalar_unary_ops` を
+/// 参照する `pub use`（`pub use fandhe_ai_autodiff::scalar_unary_ops;`
+/// 等のモジュール再エクスポート・別名含む）も、[`SCALAR_UNARY_OPS_FN_NAMES`]
+/// （8 個）の `fn` 宣言（可視性・宣言文脈を問わない。
+/// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
+/// 固定する（`VarScalarUnaryOpsHoldDoctestGuard` の正のプローブと多層
+/// 防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_rearrange_ops` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_scalar_unary_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use")
+                && line_contains_identifier(trimmed, "scalar_unary_ops")
+            {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `scalar_unary_ops` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in SCALAR_UNARY_OPS_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が scalar_unary_ops（イシュー #2145 の内部クレート限定\
+         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
+         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、
+/// [`SCALAR_UNARY_OPS_FN_NAMES`]（8 個）の `fn` 宣言の定義元集合を固定
+/// する（`workspace_declares_rearrange_ops_fn_names_only_in_autodiff_
+/// rearrange_ops` と同型のインベントリ）。
+///
+/// **期待集合は `crates/autodiff/src/scalar_unary_ops.rs`（各 1 件）に
+/// 加え、`crates/onnx-interop/src/ops/activation.rs::erf`（ONNX `Erf`
+/// 演算子の無関係な実装。1 件）を明示的に含める**（実装計画「着手前
+/// 確認」の再 grep 結果で確定させた。他 7 名の `fn` 宣言は workspace 内
+/// に存在しない）。
+#[test]
+fn workspace_declares_scalar_unary_ops_fn_names_only_in_autodiff_scalar_unary_ops() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in SCALAR_UNARY_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let mut expected: std::collections::BTreeMap<String, usize> = SCALAR_UNARY_OPS_FN_NAMES
+        .iter()
+        .map(|name| (format!("autodiff/src/scalar_unary_ops.rs::{name}"), 1usize))
+        .collect();
+    expected.insert("onnx-interop/src/ops/activation.rs::erf".to_string(), 1);
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の scalar_unary_ops 系 `fn` 宣言集合が\
+         期待（`crates/autodiff/src/scalar_unary_ops.rs` 各 1 件 +\
+         `onnx-interop/src/ops/activation.rs::erf` 1 件）と一致しない（過不足\
+         いずれも fail-closed に検出する。新たな定義元が見つかった場合、\
+         それが承認済みの実装なのか迂回経路の混入なのかを確認すること）: \
+         {found:?}"
+    );
+}
+
+// =====================================================================
 // #2139（親 #2138・#2131）の facade 公開保留固定（`VarHooksHoldDoctestGuard`）。
 // `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
 // `VarBoolOpsHoldDoctestGuard` 系と同型の正のプローブ 1 ブロック方式の
