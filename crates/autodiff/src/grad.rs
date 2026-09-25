@@ -2166,6 +2166,143 @@ pub(crate) fn vjp(
                         .map_err(AutodiffError::Shape)?;
                     vec![(input, d_input)]
                 }
+                // `Var::interpolate`（`NearestExact`。イシュー #2152）。
+                // `Nearest` と同型の 1 対 1 scatter_add（1 出力位置 =
+                // 1 入力位置）。添字式のみ `nearest_exact_src_index_map`
+                // （forward `eval::interpolate_nearest_exact` と共有
+                // する単一情報源）に差し替える。
+                fandhe_ai_tensor_core::InterpolateMode::NearestExact => {
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    let index =
+                        nearest_exact_src_index_map(&input_shape, &out_shape, spatial_start, outer);
+                    let upstream2d = upstream
+                        .contiguous()
+                        .reshape(&[outer, sp_out_numel])
+                        .map_err(AutodiffError::Shape)?;
+                    let zeros2d =
+                        Tensor::zeros(&[outer, sp_in_numel]).map_err(AutodiffError::Shape)?;
+                    let d_input2d = scatter_with_fallback(
+                        ops,
+                        &zeros2d,
+                        1,
+                        &index,
+                        &upstream2d,
+                        ScatterReduce::Add,
+                        &[outer, sp_in_numel],
+                    )?;
+                    let d_input = d_input2d
+                        .reshape(&input_shape)
+                        .map_err(AutodiffError::Shape)?;
+                    vec![(input, d_input)]
+                }
+                // `Var::interpolate`（`Area`。イシュー #2152）。窓の
+                // tap 数が出力位置ごとに可変なため、固定 K 個の
+                // scatter_add 平坦化ではなく `interpolate_area_vjp`
+                // （`Op::AdaptiveAvgPool2d` の VJP と同型の稠密加算
+                // 方式。関数 doc 参照）に委譲する。
+                fandhe_ai_tensor_core::InterpolateMode::Area => {
+                    let d_input = interpolate_area_vjp(
+                        upstream,
+                        &input_shape,
+                        &out_shape,
+                        spatial_start,
+                        outer,
+                    )?;
+                    vec![(input, d_input)]
+                }
+                // `Var::interpolate`（`Linear`。イシュー #2152）。
+                // `Bilinear` と同型の固定 2-tap scatter_add。
+                fandhe_ai_tensor_core::InterpolateMode::Linear { align_corners } => {
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    let (index_row, weight_row) = linear_src_index_and_weight_map(
+                        &input_shape,
+                        &out_shape,
+                        spatial_start,
+                        align_corners,
+                    );
+                    let d_input = interpolate_fixed_tap_scatter_vjp(
+                        ops,
+                        upstream,
+                        &input_shape,
+                        outer,
+                        sp_in_numel,
+                        sp_out_numel,
+                        2,
+                        &index_row,
+                        &weight_row,
+                    )?;
+                    vec![(input, d_input)]
+                }
+                // `Var::interpolate`（`Trilinear`。イシュー #2152）。
+                // `Bilinear` と同型の固定 8-tap scatter_add。
+                fandhe_ai_tensor_core::InterpolateMode::Trilinear { align_corners } => {
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    let (index_row, weight_row) = trilinear_src_index_and_weight_map(
+                        &input_shape,
+                        &out_shape,
+                        spatial_start,
+                        align_corners,
+                    );
+                    let d_input = interpolate_fixed_tap_scatter_vjp(
+                        ops,
+                        upstream,
+                        &input_shape,
+                        outer,
+                        sp_in_numel,
+                        sp_out_numel,
+                        8,
+                        &index_row,
+                        &weight_row,
+                    )?;
+                    vec![(input, d_input)]
+                }
+                // `Var::interpolate`（`Bicubic`。イシュー #2152）。
+                // `Bilinear` と同型の固定 16-tap scatter_add。
+                fandhe_ai_tensor_core::InterpolateMode::Bicubic { align_corners } => {
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    let (index_row, weight_row) = bicubic_src_index_and_weight_map(
+                        &input_shape,
+                        &out_shape,
+                        spatial_start,
+                        align_corners,
+                    );
+                    let d_input = interpolate_fixed_tap_scatter_vjp(
+                        ops,
+                        upstream,
+                        &input_shape,
+                        outer,
+                        sp_in_numel,
+                        sp_out_numel,
+                        16,
+                        &index_row,
+                        &weight_row,
+                    )?;
+                    vec![(input, d_input)]
+                }
                 // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
                 // 側で将来 variant を追加しうる。`Op::Scatter` VJP の
                 // 未知 `ScatterReduce` variant 分岐と同型の fail-closed
@@ -3548,6 +3685,25 @@ pub(crate) fn interpolate_with_fallback(
             fandhe_ai_tensor_core::InterpolateMode::Bilinear { align_corners } => {
                 eval::interpolate_bilinear(input, size, align_corners).map_err(AutodiffError::Shape)
             }
+            // イシュー #2152 で追加した 5 モード。各ホスト参照実装は
+            // `eval::` 側で forward／backward 共有の単一情報源
+            // （`tensor-core::interpolate` の座標・重み関数）を使う。
+            fandhe_ai_tensor_core::InterpolateMode::NearestExact => {
+                eval::interpolate_nearest_exact(input, size).map_err(AutodiffError::Shape)
+            }
+            fandhe_ai_tensor_core::InterpolateMode::Area => {
+                eval::interpolate_area(input, size).map_err(AutodiffError::Shape)
+            }
+            fandhe_ai_tensor_core::InterpolateMode::Linear { align_corners } => {
+                eval::interpolate_linear(input, size, align_corners).map_err(AutodiffError::Shape)
+            }
+            fandhe_ai_tensor_core::InterpolateMode::Trilinear { align_corners } => {
+                eval::interpolate_trilinear(input, size, align_corners)
+                    .map_err(AutodiffError::Shape)
+            }
+            fandhe_ai_tensor_core::InterpolateMode::Bicubic { align_corners } => {
+                eval::interpolate_bicubic(input, size, align_corners).map_err(AutodiffError::Shape)
+            }
             // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
             // 側で将来 variant を追加しうる。`ScatterReduce` の
             // `Op::Scatter` VJP 未知 variant 分岐と同型）。
@@ -3684,6 +3840,342 @@ pub(crate) fn bilinear_src_index_and_weight_map(
         }
     }
     (index_row, weight_row)
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// NearestExact`]）の VJP が使う scatter_add index 構築（イシュー
+/// #2152）。[`nearest_src_index_map`] と同型で、添字式のみ
+/// `tensor-core::nearest_exact_src_coord`（forward `eval::
+/// interpolate_nearest_exact` と共有する単一情報源）を使う。
+pub(crate) fn nearest_exact_src_index_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    outer: usize,
+) -> Tensor<i32> {
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+
+    let mut row = vec![0i32; sp_out_numel];
+    for (flat, slot) in row.iter_mut().enumerate() {
+        let coords = eval::unravel(flat, sp_out);
+        let mut pos = 0usize;
+        for (axis, &stride) in sp_in_strides.iter().enumerate() {
+            let src_c = fandhe_ai_tensor_core::nearest_exact_src_coord(
+                coords[axis],
+                sp_in[axis],
+                sp_out[axis],
+            );
+            pos += src_c * stride;
+        }
+        // `nearest_src_index_map` と同じ契約: 呼び出し元が事前に
+        // `sp_in_numel <= i32::MAX` を検査済み。
+        *slot = pos as i32;
+    }
+
+    let mut data = Vec::with_capacity(outer * sp_out_numel);
+    for _ in 0..outer {
+        data.extend_from_slice(&row);
+    }
+    eval::build_index_tensor(data, &[outer, sp_out_numel])
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Linear`]）の VJP が使う scatter_add index／重み構築（イシュー
+/// #2152。[`bilinear_src_index_and_weight_map`] の 1 軸・2-tap 版）。
+/// 戻り値の行長は `sp_out * 2`（コーナー順固定: `i0, i1`）。
+pub(crate) fn linear_src_index_and_weight_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    align_corners: bool,
+) -> (Vec<i32>, Vec<f32>) {
+    debug_assert_eq!(
+        out_shape.len() - spatial_start,
+        1,
+        "linear_src_index_and_weight_map: caller must guarantee exactly 1 spatial axis"
+    );
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let in_sz = sp_in[0];
+    let out_sz = sp_out[0];
+    let scale = fandhe_ai_tensor_core::bilinear_scale(in_sz, out_sz, align_corners);
+
+    let mut index_row = vec![0i32; sp_out_numel * 2];
+    let mut weight_row = vec![0f32; sp_out_numel * 2];
+    for p in 0..sp_out_numel {
+        let c = fandhe_ai_tensor_core::bilinear_src_coord(p, in_sz, scale, align_corners);
+        index_row[p * 2] = c.i0 as i32;
+        index_row[p * 2 + 1] = c.i1 as i32;
+        weight_row[p * 2] = 1.0 - c.lambda1;
+        weight_row[p * 2 + 1] = c.lambda1;
+    }
+    (index_row, weight_row)
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Trilinear`]）の VJP が使う scatter_add index／重み構築（イシュー
+/// #2152。[`bilinear_src_index_and_weight_map`] の 3 軸・8-tap 版）。
+/// コーナー順固定: forward（`eval::interpolate_trilinear`）と同じ
+/// `(z0,y0,x0),(z0,y0,x1),(z0,y1,x0),(z0,y1,x1),(z1,y0,x0),(z1,y0,x1),
+/// (z1,y1,x0),(z1,y1,x1)`。`in_shape`／`out_shape` の空間軸は
+/// `spatial_start..` のちょうど 3 軸（`(D,H,W)`。呼び出し元が
+/// `interpolate_out_shape_for_mode` 経由で事前保証済み）。
+pub(crate) fn trilinear_src_index_and_weight_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    align_corners: bool,
+) -> (Vec<i32>, Vec<f32>) {
+    debug_assert_eq!(
+        out_shape.len() - spatial_start,
+        3,
+        "trilinear_src_index_and_weight_map: caller must guarantee exactly 3 spatial axes"
+    );
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+    let (stride_d, stride_h, stride_w) = (sp_in_strides[0], sp_in_strides[1], sp_in_strides[2]);
+    let (in_d, in_h, in_w) = (sp_in[0], sp_in[1], sp_in[2]);
+    let (out_h, out_w) = (sp_out[1], sp_out[2]);
+    let scale_d = fandhe_ai_tensor_core::bilinear_scale(in_d, sp_out[0], align_corners);
+    let scale_h = fandhe_ai_tensor_core::bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = fandhe_ai_tensor_core::bilinear_scale(in_w, out_w, align_corners);
+
+    let mut index_row = vec![0i32; sp_out_numel * 8];
+    let mut weight_row = vec![0f32; sp_out_numel * 8];
+    for p in 0..sp_out_numel {
+        // `sp_out` はちょうど 3 軸のため flat 添字を直接分解する。
+        let z = p / (out_h * out_w);
+        let rem = p % (out_h * out_w);
+        let y = rem / out_w;
+        let x = rem % out_w;
+        let cz = fandhe_ai_tensor_core::bilinear_src_coord(z, in_d, scale_d, align_corners);
+        let cy = fandhe_ai_tensor_core::bilinear_src_coord(y, in_h, scale_h, align_corners);
+        let cx = fandhe_ai_tensor_core::bilinear_src_coord(x, in_w, scale_w, align_corners);
+        let l0z = 1.0 - cz.lambda1;
+        let l0y = 1.0 - cy.lambda1;
+        let l0x = 1.0 - cx.lambda1;
+        let corners = [
+            (cz.i0, cy.i0, cx.i0, l0z * l0y * l0x),
+            (cz.i0, cy.i0, cx.i1, l0z * l0y * cx.lambda1),
+            (cz.i0, cy.i1, cx.i0, l0z * cy.lambda1 * l0x),
+            (cz.i0, cy.i1, cx.i1, l0z * cy.lambda1 * cx.lambda1),
+            (cz.i1, cy.i0, cx.i0, cz.lambda1 * l0y * l0x),
+            (cz.i1, cy.i0, cx.i1, cz.lambda1 * l0y * cx.lambda1),
+            (cz.i1, cy.i1, cx.i0, cz.lambda1 * cy.lambda1 * l0x),
+            (cz.i1, cy.i1, cx.i1, cz.lambda1 * cy.lambda1 * cx.lambda1),
+        ];
+        for (k, &(iz, iy, ix, w)) in corners.iter().enumerate() {
+            let pos = iz * stride_d + iy * stride_h + ix * stride_w;
+            index_row[p * 8 + k] = pos as i32;
+            weight_row[p * 8 + k] = w;
+        }
+    }
+    (index_row, weight_row)
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Bicubic`]）の VJP が使う scatter_add index／重み構築（イシュー
+/// #2152。16-tap 版）。コーナー順固定: forward（`eval::
+/// interpolate_bicubic`）と同じ `taps_y.idx[j] × taps_x.idx[k]`
+/// （`j` major・`k` minor）。`in_shape`／`out_shape` の空間軸は
+/// `spatial_start..` のちょうど 2 軸（`(H,W)`）。
+pub(crate) fn bicubic_src_index_and_weight_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    align_corners: bool,
+) -> (Vec<i32>, Vec<f32>) {
+    debug_assert_eq!(
+        out_shape.len() - spatial_start,
+        2,
+        "bicubic_src_index_and_weight_map: caller must guarantee exactly 2 spatial axes"
+    );
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+    let (stride_h, stride_w) = (sp_in_strides[0], sp_in_strides[1]);
+    let (in_h, in_w) = (sp_in[0], sp_in[1]);
+    let (out_h, out_w) = (sp_out[0], sp_out[1]);
+    let scale_h = fandhe_ai_tensor_core::bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = fandhe_ai_tensor_core::bilinear_scale(in_w, out_w, align_corners);
+
+    let mut index_row = vec![0i32; sp_out_numel * 16];
+    let mut weight_row = vec![0f32; sp_out_numel * 16];
+    for p in 0..sp_out_numel {
+        let y = p / out_w;
+        let x = p % out_w;
+        let taps_y = fandhe_ai_tensor_core::bicubic_src_taps(y, in_h, scale_h, align_corners);
+        let taps_x = fandhe_ai_tensor_core::bicubic_src_taps(x, in_w, scale_w, align_corners);
+        for j in 0..4 {
+            for k in 0..4 {
+                let slot = p * 16 + j * 4 + k;
+                let pos = taps_y.idx[j] * stride_h + taps_x.idx[k] * stride_w;
+                index_row[slot] = pos as i32;
+                weight_row[slot] = taps_y.w[j] * taps_x.w[k];
+            }
+        }
+    }
+    (index_row, weight_row)
+}
+
+/// [`Op::Interpolate`] の `NearestExact` 以外の新規モード
+/// （`Linear`／`Trilinear`／`Bicubic`。イシュー #2152）が共有する
+/// 「固定 K 個 scatter_add 平坦化」の本体を切り出したヘルパー。
+/// `Bilinear` の VJP 分岐（本ファイル内）が持っていたインライン実装
+/// と同じ構成（`index_row`／`weight_row` を `outer` 回複製して
+/// `upstream` の重み付き寄与を `src` へ書き込み、`scatter_with_
+/// fallback`〈`dim=1`・`ScatterReduce::Add`〉で加算する）を、`k`
+/// （1 出力位置あたりのタップ数）を引数化して共通化する。
+///
+/// `index_row`／`weight_row` は呼び出し元（`*_src_index_and_weight_
+/// map`）が forward と共有する単一情報源から構築した「1 行分」の
+/// パターン（長さ `sp_out_numel * k`。全 `outer` 行が同一パターンを
+/// 持つ——`outer` 軸〈batch 等〉は素通しで対応が変わらないため）。
+#[allow(clippy::too_many_arguments)]
+fn interpolate_fixed_tap_scatter_vjp(
+    ops: &dyn BackendOps,
+    upstream: &Tensor<f32>,
+    input_shape: &[usize],
+    outer: usize,
+    sp_in_numel: usize,
+    sp_out_numel: usize,
+    k: usize,
+    index_row: &[i32],
+    weight_row: &[f32],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let sp_out_xk = sp_out_numel
+        .checked_mul(k)
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+    outer
+        .checked_mul(sp_out_xk)
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+    let upstream2d = upstream
+        .contiguous()
+        .reshape(&[outer, sp_out_numel])
+        .map_err(AutodiffError::Shape)?;
+    let upstream_data = eval::dense_vec(&upstream2d);
+
+    let mut index_data = Vec::with_capacity(outer * sp_out_xk);
+    let mut src_data = Vec::with_capacity(outer * sp_out_xk);
+    for o in 0..outer {
+        index_data.extend_from_slice(index_row);
+        let row_base = o * sp_out_numel;
+        for p in 0..sp_out_numel {
+            let u = upstream_data[row_base + p];
+            for kk in 0..k {
+                src_data.push(u * weight_row[p * k + kk]);
+            }
+        }
+    }
+    let index = eval::build_index_tensor(index_data, &[outer, sp_out_xk]);
+    let src2d = Tensor::new(src_data, &[outer, sp_out_xk]).map_err(AutodiffError::Shape)?;
+    let zeros2d = Tensor::zeros(&[outer, sp_in_numel]).map_err(AutodiffError::Shape)?;
+    let d_input2d = scatter_with_fallback(
+        ops,
+        &zeros2d,
+        1,
+        &index,
+        &src2d,
+        ScatterReduce::Add,
+        &[outer, sp_in_numel],
+    )?;
+    d_input2d.reshape(input_shape).map_err(AutodiffError::Shape)
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Area`]）の VJP 本体（イシュー #2152）。出力位置あたりの tap 数
+/// （窓要素数）が形状依存で可変のため、`Bilinear`／`Linear`／
+/// `Trilinear`／`Bicubic` のような固定 K 個 scatter_add 平坦化とは
+/// 異なる構成にする——`Op::AdaptiveAvgPool2d` の VJP
+/// （`adaptive_avg_pool2d_vjp`）と同じ「`f64` アキュムレータを持つ
+/// 稠密配列への直接加算」方式を空間軸任意次元へ一般化したもの
+/// （scatter_with_fallback を経由しないため backend 側 GPU scatter
+/// 実装は使わないが、`adaptive_avg_pool2d_vjp` も同じ設計であり本
+/// クレート内で既に受け入れられている先例——実装計画からの妥当な
+/// 簡略化。`.claude/rules/coding-rust.md`「勾配の長軸縮約」節と同じ
+/// 精度規律: 窓ごとの寄与 `upstream/count` を `f64` へ昇格してから
+/// 各入力位置へ加算し、最後に 1 回だけ `f32` へ downcast する）。
+fn interpolate_area_vjp(
+    upstream: &Tensor<f32>,
+    input_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    outer: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let sp_in = &input_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let n_spatial = sp_in.len();
+    let sp_in_numel: usize = sp_in.iter().product();
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+
+    let upstream2d = upstream
+        .contiguous()
+        .reshape(&[outer, sp_out_numel])
+        .map_err(AutodiffError::Shape)?;
+    let upstream_data = eval::dense_vec(&upstream2d);
+
+    let in_numel = input_shape.iter().product::<usize>();
+    let mut acc = vec![0f64; in_numel];
+    for o in 0..outer {
+        let out_base = o * sp_in_numel;
+        for p in 0..sp_out_numel {
+            let coords = eval::unravel(p, sp_out);
+            let mut starts = vec![0usize; n_spatial];
+            let mut lens = vec![0usize; n_spatial];
+            for axis in 0..n_spatial {
+                let (s, e) =
+                    fandhe_ai_tensor_core::adaptive_window(coords[axis], sp_in[axis], sp_out[axis])
+                        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                starts[axis] = s;
+                lens[axis] = e - s;
+            }
+            let count: usize = lens
+                .iter()
+                .try_fold(1usize, |acc, &l| acc.checked_mul(l))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            if count == 0 {
+                return Err(AutodiffError::Backward(
+                    "Op::Interpolate（Area）の VJP: 窓要素数が 0（契約違反）".into(),
+                ));
+            }
+            let g = f64::from(upstream_data[o * sp_out_numel + p]) / count as f64;
+
+            let mut idx = vec![0usize; n_spatial];
+            'window: loop {
+                let mut pos = out_base;
+                for axis in 0..n_spatial {
+                    pos += (starts[axis] + idx[axis]) * sp_in_strides[axis];
+                }
+                acc[pos] += g;
+                let mut k = n_spatial;
+                loop {
+                    if k == 0 {
+                        break 'window;
+                    }
+                    k -= 1;
+                    idx[k] += 1;
+                    if idx[k] < lens[k] {
+                        break;
+                    }
+                    idx[k] = 0;
+                    if k == 0 {
+                        break 'window;
+                    }
+                }
+            }
+        }
+    }
+    let out: Vec<f32> = acc.into_iter().map(|v| v as f32).collect();
+    Tensor::new(out, input_shape).map_err(AutodiffError::Shape)
 }
 
 /// [`Op::Scatter`]（`reduce = Overwrite`）の VJP 補助（イシュー

@@ -296,3 +296,242 @@ fn cuda_interpolate_bilinear_forward_matches_cpu() {
         &cpu_slice,
     );
 }
+
+// --- interpolate（新規 5 モード。イシュー #2152。属性なし:
+// CPU vs NaiveOps。CPU ネイティブ（`backend-cpu::interpolate::
+// interpolate_*`）とホスト参照（`autodiff::eval::interpolate_*`）は
+// いずれも `tensor-core::interpolate` の単一情報源（座標・重み関数）
+// を同じ順序で呼ぶため forward／backward とも bit 完全一致する
+// ——`Bilinear` の前例と同じ構成） ---
+
+/// 5 モード共通の forward／backward parity 検証（CPU vs NaiveOps）。
+/// `seed` は各テストで異なる leaf tensor を使うための撹拌値。
+fn assert_cpu_matches_naive_forward_backward(
+    label: &str,
+    seed: u64,
+    in_shape: &[usize],
+    size: &[usize],
+    mode: InterpolateMode,
+) {
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&leaf(seed, in_shape));
+    let out_cpu = x_cpu
+        .interpolate(size, mode)
+        .expect("interpolate: 常に成功する")
+        .to_tensor();
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&leaf(seed, in_shape));
+    let out_naive = x_naive
+        .interpolate(size, mode)
+        .expect("interpolate: 常に成功する")
+        .to_tensor();
+
+    let cpu_slice = contiguous_slice(&out_cpu);
+    let naive_slice = contiguous_slice(&out_naive);
+    assert_parity(
+        &format!("{label} forward: CpuBackendOps vs NaiveOps"),
+        &cpu_slice,
+        &naive_slice,
+    );
+    assert_eq!(
+        cpu_slice, naive_slice,
+        "{label} forward: 同一 tensor-core 単一情報源を使うため bit 同一のはず"
+    );
+
+    // backward（seed をずらした別 leaf で forward と独立に検証）。
+    let cpu_tape2 = fandhe_ai::tape();
+    let x_cpu2 = cpu_tape2.make_var(&leaf(seed + 100, in_shape));
+    let out_cpu2 = x_cpu2.interpolate(size, mode).unwrap();
+    let loss_cpu = out_cpu2.sum(None).unwrap();
+    let grads_cpu = cpu_tape2.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu2).unwrap().expect("到達する");
+
+    let naive_tape2 = fandhe_ai_autodiff::Tape::new();
+    let x_naive2 = naive_tape2.make_var(&leaf(seed + 100, in_shape));
+    let out_naive2 = x_naive2.interpolate(size, mode).unwrap();
+    let loss_naive = out_naive2.sum(None).unwrap();
+    let grads_naive = naive_tape2.backward(&loss_naive).unwrap();
+    let dx_naive = grads_naive.get(&x_naive2).unwrap().expect("到達する");
+
+    let dx_cpu_slice = contiguous_slice(dx_cpu);
+    let dx_naive_slice = contiguous_slice(dx_naive);
+    assert_parity(
+        &format!("{label} backward（dx）: CpuBackendOps vs NaiveOps"),
+        &dx_cpu_slice,
+        &dx_naive_slice,
+    );
+    assert_eq!(
+        dx_cpu_slice, dx_naive_slice,
+        "{label} backward: 同一 tensor-core 単一情報源を使うため bit 同一のはず"
+    );
+}
+
+#[test]
+fn cpu_interpolate_nearest_exact_matches_naive_reference() {
+    assert_cpu_matches_naive_forward_backward(
+        "interpolate nearest-exact",
+        11,
+        &[8],
+        &[3],
+        InterpolateMode::NearestExact,
+    );
+}
+
+#[test]
+fn cpu_interpolate_area_matches_naive_reference() {
+    assert_cpu_matches_naive_forward_backward(
+        "interpolate area",
+        12,
+        &[6, 6],
+        &[2, 3],
+        InterpolateMode::Area,
+    );
+}
+
+#[test]
+fn cpu_interpolate_linear_matches_naive_reference() {
+    let mode = InterpolateMode::Linear {
+        align_corners: false,
+    };
+    assert_cpu_matches_naive_forward_backward("interpolate linear", 13, &[5], &[9], mode);
+}
+
+#[test]
+fn cpu_interpolate_trilinear_matches_naive_reference() {
+    let mode = InterpolateMode::Trilinear {
+        align_corners: true,
+    };
+    assert_cpu_matches_naive_forward_backward(
+        "interpolate trilinear",
+        14,
+        &[2, 3, 2],
+        &[3, 4, 3],
+        mode,
+    );
+}
+
+#[test]
+fn cpu_interpolate_bicubic_matches_naive_reference() {
+    let mode = InterpolateMode::Bicubic {
+        align_corners: false,
+    };
+    assert_cpu_matches_naive_forward_backward("interpolate bicubic", 15, &[4, 4], &[6, 7], mode);
+}
+
+#[test]
+fn interpolate_mode_new_variants_are_facade_reachable() {
+    // `fandhe_ai::InterpolateMode` から新規 5 variant に到達できる
+    // ことの到達確認（`#[non_exhaustive]` の非破壊拡張。イシュー
+    // #2152）。
+    let _modes = [
+        InterpolateMode::NearestExact,
+        InterpolateMode::Area,
+        InterpolateMode::Linear {
+            align_corners: false,
+        },
+        InterpolateMode::Trilinear {
+            align_corners: false,
+        },
+        InterpolateMode::Bicubic {
+            align_corners: false,
+        },
+    ];
+}
+
+// --- 新規 5 モード実機横断（`#[ignore]`）。ホストフォールバック経路
+// （CUDA／Metal は `BackendOps::interpolate` が `Unsupported` を返し
+// `eval::interpolate_*` へ落ちる）のため bit 同一が期待値だが、判定は
+// 既存の `assert_parity`（REQ-2）で行い tolerance は変更しない。 ---
+
+fn interpolate_new_mode_forward_on(
+    device: Device,
+    in_shape: &[usize],
+    size: &[usize],
+    mode: InterpolateMode,
+) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf(21, in_shape));
+    x.interpolate(size, mode)
+        .expect("interpolate: 常に成功する")
+        .to_tensor()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_interpolate_new_modes_forward_matches_cpu() {
+    let cases: [(InterpolateMode, &[usize], &[usize]); 5] = [
+        (InterpolateMode::NearestExact, &[8], &[3]),
+        (InterpolateMode::Area, &[6, 6], &[2, 3]),
+        (
+            InterpolateMode::Linear {
+                align_corners: false,
+            },
+            &[5],
+            &[9],
+        ),
+        (
+            InterpolateMode::Trilinear {
+                align_corners: true,
+            },
+            &[2, 3, 2],
+            &[3, 4, 3],
+        ),
+        (
+            InterpolateMode::Bicubic {
+                align_corners: false,
+            },
+            &[4, 4],
+            &[6, 7],
+        ),
+    ];
+    for (mode, in_shape, size) in cases {
+        let metal_out = interpolate_new_mode_forward_on(Device::Metal, in_shape, size, mode);
+        let cpu_out = interpolate_new_mode_forward_on(Device::Cpu, in_shape, size, mode);
+        assert_parity(
+            "interpolate new-mode forward: Metal tape_for vs CPU tape_for",
+            &contiguous_slice(&metal_out),
+            &contiguous_slice(&cpu_out),
+        );
+    }
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_interpolate_new_modes_forward_matches_cpu() {
+    let cases: [(InterpolateMode, &[usize], &[usize]); 5] = [
+        (InterpolateMode::NearestExact, &[8], &[3]),
+        (InterpolateMode::Area, &[6, 6], &[2, 3]),
+        (
+            InterpolateMode::Linear {
+                align_corners: false,
+            },
+            &[5],
+            &[9],
+        ),
+        (
+            InterpolateMode::Trilinear {
+                align_corners: true,
+            },
+            &[2, 3, 2],
+            &[3, 4, 3],
+        ),
+        (
+            InterpolateMode::Bicubic {
+                align_corners: false,
+            },
+            &[4, 4],
+            &[6, 7],
+        ),
+    ];
+    for (mode, in_shape, size) in cases {
+        let cuda_out = interpolate_new_mode_forward_on(Device::Cuda(0), in_shape, size, mode);
+        let cpu_out = interpolate_new_mode_forward_on(Device::Cpu, in_shape, size, mode);
+        assert_parity(
+            "interpolate new-mode forward: CUDA tape_for vs CPU tape_for",
+            &contiguous_slice(&cuda_out),
+            &contiguous_slice(&cpu_out),
+        );
+    }
+}
