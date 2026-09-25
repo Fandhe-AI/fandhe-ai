@@ -210,6 +210,23 @@ pub(crate) const ENC_LINEAR1_SEED_SALT: u64 = 9;
 /// ソルト（上記参照）。
 pub(crate) const ENC_LINEAR2_SEED_SALT: u64 = 10;
 
+/// `nn::rnn_stacked`（イシュー #2164）が単一の呼び出しシードから
+/// 多層・双方向スタックの各 `(layer, direction)` セルを独立に導出する
+/// ためのソルト。既存の `WEIGHT_SEED_SALT`〜`ENC_LINEAR2_SEED_SALT`
+/// （0..=10）と衝突しない値（11）を割り当てる。`StackedRnn`／
+/// `StackedLstm`／`StackedGru::new` は index
+/// `k = layer * num_directions + direction` ごとに
+/// `derive_seed(derive_seed(seed, RNN_STACK_SEED_SALT), k)` という 2 段の
+/// `derive_seed` 合成でセル呼び出しシードを導出する
+/// （`ENC_ATTN_SEED_SALT` 等と同じ構造）。ただし index 0（layer 0・
+/// forward 方向）だけは `seed` をそのまま
+/// `RnnCell::new`／`LstmCell::new`／`GruCell::new` へ渡し、2 段合成を
+/// 適用しない——これにより `RnnConfig::default()`（`num_layers=1`・
+/// `bidirectional=false`）で構築した `StackedRnn::new(.., seed, ..)` が
+/// `Rnn::new(.., seed)` と bit 一致する（`nn_rnn_stacked.rs` の既定
+/// config bit 一致テストが検証する契約）。
+pub(crate) const RNN_STACK_SEED_SALT: u64 = 11;
+
 pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
