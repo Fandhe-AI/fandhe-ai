@@ -2570,7 +2570,9 @@ impl<'t> Var<'t> {
     /// 再エクスポートされるため、`docs/compat-api-scope.md` の Tier
     /// 列挙にない `contiguous` を `pub` にすると同 §5 手続きの対象になる
     /// 新規公開 API を無断で追加してしまう（承認範囲は `Var::einsum`
-    /// 自体のみ）。消費者は `crate::einsum`・`Var::conv1d`。
+    /// 自体のみ）。消費者は `crate::einsum`・`Var::conv1d`・
+    /// `nn::PixelShuffle`／`nn::PixelUnshuffle`（イシュー #2162。
+    /// permute 後の reshape 前の明示コピー）。
     ///
     /// 既に contiguous な場合は新規ノードを積まず `self` をそのまま
     /// 返す（`Tensor::contiguous` 自体は contiguous なら clone のみだが、
