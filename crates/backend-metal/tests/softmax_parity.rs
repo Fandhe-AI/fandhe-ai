@@ -360,3 +360,209 @@ fn backend_ops_softmax_non_final_axis_is_unsupported() {
     let result = metal.softmax(&x, 0);
     assert!(matches!(result, Err(BackendError::Unsupported(_))));
 }
+
+// ---- log_softmax forward（イシュー #2155）----
+
+/// テスト専用 CPU 参照実装（`x - m - ln(Σ exp(x - m))`。`softmax` の
+/// `cpu_softmax_reference` と同じ素朴な数式だが対数を取る解析形。
+/// カーネル側〈`(xv - m) - log(l)`。`shaders/softmax.metal`「log_softmax
+/// （イシュー #2155）」節参照〉とは異なる `exp`／`log` の丸め経路だが、
+/// 数学的に同一の log_softmax を計算するため REQ-2 統一複合判定で
+/// 突き合わせられる）。
+fn cpu_log_softmax_reference(x: &[f32], rows: usize, hidden: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; x.len()];
+    if hidden == 0 {
+        return out;
+    }
+    for r in 0..rows {
+        let row = &x[r * hidden..(r + 1) * hidden];
+        let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let sum: f32 = row.iter().map(|&v| (v - m).exp()).sum();
+        let log_sum = sum.ln();
+        let out_row = &mut out[r * hidden..(r + 1) * hidden];
+        for (i, &v) in row.iter().enumerate() {
+            out_row[i] = (v - m) - log_sum;
+        }
+    }
+    out
+}
+
+fn assert_log_softmax_parity(
+    ctx: &MetalContext,
+    softmax: &MetalSoftmax,
+    seed_x: u64,
+    rows: usize,
+    hidden: usize,
+) {
+    let x_data = Xorshift64Star::new(seed_x).fill_vec(rows * hidden);
+
+    let gpu_out = softmax
+        .run_log_softmax_f32(ctx, &x_data, rows, hidden)
+        .expect("MetalSoftmax::run_log_softmax_f32 must succeed on Metal-equipped test runner");
+    let cpu_out = cpu_log_softmax_reference(&x_data, rows, hidden);
+
+    assert_eq!(gpu_out.len(), cpu_out.len());
+    assert_parity(
+        &format!("log_softmax cpu-metal parity rows={rows} hidden={hidden}"),
+        &gpu_out,
+        &cpu_out,
+    );
+}
+
+/// `softmax_matches_cpu_across_shapes` と同じ形状網羅
+/// （1 パス／2 パス経路の境界・複数 rows）で `log_softmax` forward を
+/// 検証する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_log_softmax_matches_cpu_across_shapes() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let softmax = MetalSoftmax::new(&ctx).expect("softmax パイプラインの構築に失敗した");
+
+    let hiddens: &[usize] = &[8, 1024, 4096, 4097, 8192];
+    let rows_cases: &[usize] = &[1, 3, 33];
+
+    let mut seed = 22_000u64;
+    for &hidden in hiddens {
+        for &rows in rows_cases {
+            seed += 1;
+            assert_log_softmax_parity(&ctx, &softmax, seed, rows, hidden);
+        }
+    }
+
+    // hidden=1（行長 1。log_softmax は常に 0.0）。
+    assert_log_softmax_parity(&ctx, &softmax, 22_101, 5, 1);
+}
+
+/// 非有限行（`softmax_parity.rs` 実装計画 §5.2 の境界の入力）: 全要素
+/// `-inf`・`+inf` 混在・NaN 混在の各行が CPU 参照実装と NaN クラス一致
+/// する（`f32::is_nan` のみで比較。REQ-2 の対象外——非有限入力は数学的
+/// に未定義のため統一複合判定ではなく NaN クラス一致で判定する）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_log_softmax_extreme_and_nonfinite_rows() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let softmax = MetalSoftmax::new(&ctx).expect("softmax パイプラインの構築に失敗した");
+
+    let hidden = 8usize;
+    let rows_data: &[Vec<f32>] = &[
+        vec![f32::NEG_INFINITY; hidden],
+        {
+            let mut row = vec![1.0f32; hidden];
+            row[0] = f32::INFINITY;
+            row
+        },
+        {
+            let mut row = vec![1.0f32; hidden];
+            row[3] = f32::NAN;
+            row
+        },
+        {
+            // ±f32::MAX 混在: 最小側の要素は -inf になる想定（実装計画
+            // §2.2「境界の入力」）。
+            let mut row = vec![0.0f32; hidden];
+            row[0] = f32::MAX;
+            row[1] = -f32::MAX;
+            row
+        },
+    ];
+
+    let mut x_data = Vec::with_capacity(rows_data.len() * hidden);
+    for row in rows_data {
+        x_data.extend_from_slice(row);
+    }
+    let rows = rows_data.len();
+
+    let gpu_out = softmax
+        .run_log_softmax_f32(&ctx, &x_data, rows, hidden)
+        .expect("log_softmax must not error on non-finite rows");
+    let cpu_out = cpu_log_softmax_reference(&x_data, rows, hidden);
+
+    for r in 0..rows {
+        let g_row = &gpu_out[r * hidden..(r + 1) * hidden];
+        let c_row = &cpu_out[r * hidden..(r + 1) * hidden];
+        for (i, (&g, &c)) in g_row.iter().zip(c_row.iter()).enumerate() {
+            assert_eq!(
+                g.is_nan(),
+                c.is_nan(),
+                "row={r} idx={i}: NaN クラス不一致（metal={g:?}, cpu={c:?}）"
+            );
+            if !g.is_nan() {
+                assert_eq!(
+                    g, c,
+                    "row={r} idx={i}: 非有限値の一致が崩れている（metal={g:?}, cpu={c:?}）"
+                );
+            }
+        }
+    }
+}
+
+/// run-to-run の bit 同一性（決定性）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_log_softmax_run_to_run_is_bit_identical() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let softmax = MetalSoftmax::new(&ctx).expect("softmax パイプラインの構築に失敗した");
+
+    let rows = 5usize;
+    let hidden = 4097usize; // 2 パス経路を強制。
+    let x_data = Xorshift64Star::new(22_500).fill_vec(rows * hidden);
+
+    let out1 = softmax
+        .run_log_softmax_f32(&ctx, &x_data, rows, hidden)
+        .expect("log_softmax run1 must succeed");
+    let out2 = softmax
+        .run_log_softmax_f32(&ctx, &x_data, rows, hidden)
+        .expect("log_softmax run2 must succeed");
+
+    assert_eq!(
+        out1.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        out2.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "run-to-run で bit 同一のはず"
+    );
+}
+
+/// `MetalBackendOps::log_softmax` を CPU 参照実装と実機で直接
+/// `assert_parity` 突合する。実機必須（`#[ignore]`）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_log_softmax_matches_cpu_reference_across_shapes() {
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
+
+    let rows_cases: &[usize] = &[1, 3, 17];
+    let hidden_cases: &[usize] = &[1, 31, 32, 33, 1024, 4097];
+    let mut seed = 23_000u64;
+    for &rows in rows_cases {
+        for &hidden in hidden_cases {
+            seed += 1;
+            let x_data = Xorshift64Star::new(seed).fill_vec(rows * hidden);
+            let x = Tensor::new(x_data.clone(), &[rows, hidden]).expect("valid tensor");
+
+            let gpu_out = metal
+                .log_softmax(&x, 1)
+                .expect("BackendOps::log_softmax must succeed on Metal-equipped test runner");
+            let expected = cpu_log_softmax_reference(&x_data, rows, hidden);
+
+            assert_eq!(gpu_out.shape(), &[rows, hidden]);
+            assert_parity(
+                &format!("BackendOps::log_softmax vs cpu reference rows={rows} hidden={hidden}"),
+                gpu_out.as_slice().expect("contiguous"),
+                &expected,
+            );
+        }
+    }
+}
+
+/// 非最終軸は `Unsupported`（`backend_ops_softmax_non_final_axis_is_unsupported`
+/// と同じ理由でデバイス初期化不要）。
+#[test]
+fn backend_ops_log_softmax_non_final_axis_is_unsupported() {
+    use fandhe_ai_tensor_core::device::BackendError;
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("valid tensor");
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
+    let result = metal.log_softmax(&x, 0);
+    assert!(matches!(result, Err(BackendError::Unsupported(_))));
+}

@@ -326,6 +326,190 @@ extern "C" __global__ void softmax_f32_twopass(
 }
 "#;
 
+/// 1 パス経路（動的 SMEM 常駐）版 `log_softmax`（イシュー #2155）。
+/// [`SOFTMAX_F32_ONEPASS`] と全く同じ online softmax の `(m, l)` 計算
+/// （`m` は生ドメイン・`l = Σ exp2((raw - m) * log2(e))`）を共有し、
+/// 最終正規化の書き出しのみが異なる: `softmax` は
+/// `exp2((raw - m) * scale) * inv_l` を書くのに対し、`log_softmax` は
+/// **`(raw - m) - log(l)`**（CPU 参照実装〈`fandhe_ai_backend_cpu::
+/// softmax::run_log_softmax_f32`〉と同じ Sterbenz 順序: 先に
+/// `raw - m` を計算し、その後で `log(l)` を引く。`raw - (m + log(l))`
+/// の形にはしない。実装計画 §2.2「log_softmax forward」参照）を書く。
+/// `log(l)`（`logf`）は行あたり 1 回だけ計算する。
+///
+/// `exp2f`（`l` の計算）と `logf`（自然対数。底 2 の `log2f` ではなく
+/// 自然対数を使う理由は CPU 参照実装の `ln` と数学的に対応させるため）
+/// の丸め差・総和順序の差があるため bit 一致は主張せず、REQ-2 統一
+/// 複合判定（相対誤差 1e-3 未満または絶対誤差 1e-5 未満）で検証する
+/// （`softmax` と同じ扱い。`.claude/rules/coding-rust.md`）。
+pub const LOG_SOFTMAX_F32_ONEPASS: &str = r#"
+#define SOFTMAX_MASK_E2 (-3.402823466e+38f)
+
+extern "C" __global__ void log_softmax_f32_onepass(
+    const float* __restrict__ x,
+    float* __restrict__ out,
+    int rows,
+    int cols,
+    float scale)
+{
+    extern __shared__ float smem[];
+    int lane = threadIdx.x;
+    int vec_cols = (cols % 4 == 0) ? cols : 0;
+
+    for (long long row = blockIdx.x; row < rows; row += gridDim.x) {
+        const float* x_row = x + row * (long long)cols;
+        float* out_row = out + row * (long long)cols;
+
+        float m = SOFTMAX_MASK_E2;
+        float l = 0.0f;
+
+        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+            if (base + 3 < cols) {
+                float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
+                smem[base + 0] = v4.x;
+                smem[base + 1] = v4.y;
+                smem[base + 2] = v4.z;
+                smem[base + 3] = v4.w;
+                float vals[4] = { v4.x, v4.y, v4.z, v4.w };
+                #pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    float raw = vals[k];
+                    float m_new = fmaxf(m, raw);
+                    if (m_new > m) {
+                        l *= exp2f((m - m_new) * scale);
+                    }
+                    l += exp2f((raw - m_new) * scale);
+                    m = m_new;
+                }
+            }
+        }
+        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+            float raw = x_row[i];
+            smem[i] = raw;
+            float m_new = fmaxf(m, raw);
+            if (m_new > m) {
+                l *= exp2f((m - m_new) * scale);
+            }
+            l += exp2f((raw - m_new) * scale);
+            m = m_new;
+        }
+
+        __syncwarp(0xffffffffu);
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
+            float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
+            float m_t = fmaxf(m, m_o);
+            float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
+            float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
+            l = l_self + l_peer;
+            m = m_t;
+        }
+
+        // `log_softmax` 固有の最終書き出し: `(raw - m) - log(l)`
+        // （Sterbenz 順序。本定数冒頭コメント参照。`softmax` の
+        // `exp2f((smem[i] - m) * scale) * inv_l` とはここだけが異なる）。
+        float log_l = logf(l);
+        for (long long i = lane; i < cols; i += 32) {
+            out_row[i] = (smem[i] - m) - log_l;
+        }
+
+        __syncwarp(0xffffffffu);
+    }
+}
+"#;
+
+/// 2 パス経路版 `log_softmax`（イシュー #2155）。[`SOFTMAX_F32_TWOPASS`]
+/// と同じ 2 パス構造（Pass 1: `(m, l)` を確定・Pass 2: `x` を再読）を
+/// 共有し、Pass 2 の書き出しのみ [`LOG_SOFTMAX_F32_ONEPASS`] と同じ
+/// `(raw - m) - log(l)` に変える（本ファイル冒頭コメント参照）。
+pub const LOG_SOFTMAX_F32_TWOPASS: &str = r#"
+#define SOFTMAX_MASK_E2 (-3.402823466e+38f)
+
+extern "C" __global__ void log_softmax_f32_twopass(
+    const float* __restrict__ x,
+    float* __restrict__ out,
+    int rows,
+    int cols,
+    float scale)
+{
+    int lane = threadIdx.x;
+    int vec_cols = (cols % 4 == 0) ? cols : 0;
+
+    for (long long row = blockIdx.x; row < rows; row += gridDim.x) {
+        const float* x_row = x + row * (long long)cols;
+        float* out_row = out + row * (long long)cols;
+
+        // Pass 1: online (m, l) を計算する（smem 非使用・global 直読）。
+        // `m` は生ドメイン（スケール未適用）。`scale` は差分計算後の
+        // `exp2f` 直前でのみ乗算する（イシュー #594 PR #712 codex-review
+        // 指摘・P1 修正。本ファイル冒頭コメント参照）。
+        float m = SOFTMAX_MASK_E2;
+        float l = 0.0f;
+        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+            if (base + 3 < cols) {
+                float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
+                float vals[4] = { v4.x, v4.y, v4.z, v4.w };
+                #pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    float raw = vals[k];
+                    float m_new = fmaxf(m, raw);
+                    if (m_new > m) {
+                        l *= exp2f((m - m_new) * scale);
+                    }
+                    l += exp2f((raw - m_new) * scale);
+                    m = m_new;
+                }
+            }
+        }
+        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+            float raw = x_row[i];
+            float m_new = fmaxf(m, raw);
+            if (m_new > m) {
+                l *= exp2f((m - m_new) * scale);
+            }
+            l += exp2f((raw - m_new) * scale);
+            m = m_new;
+        }
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
+            float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
+            float m_t = fmaxf(m, m_o);
+            float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
+            float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
+            l = l_self + l_peer;
+            m = m_t;
+        }
+
+        // `log_softmax` 固有の最終書き出し（本ファイル
+        // `LOG_SOFTMAX_F32_ONEPASS` doc コメント「Sterbenz 順序」参照）。
+        float log_l = logf(l);
+
+        // Pass 2: x を再度 global から読み、Pass 1 とビット同一の
+        // `raw = x[i]` を再計算し `(raw - m) - log_l` を書き出す
+        // （同一カーネル・同一行ループ内で完結。中間テンソルは書き出さ
+        // ない）。
+        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+            if (base + 3 < cols) {
+                float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
+                float4 o;
+                o.x = (v4.x - m) - log_l;
+                o.y = (v4.y - m) - log_l;
+                o.z = (v4.z - m) - log_l;
+                o.w = (v4.w - m) - log_l;
+                *reinterpret_cast<float4*>(out_row + base) = o;
+            }
+        }
+        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+            out_row[i] = (x_row[i] - m) - log_l;
+        }
+    }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,7 +520,12 @@ mod tests {
     /// と同じ理由・同じ検査パターン）。
     #[test]
     fn onepass_and_twopass_loop_indices_are_declared_long_long() {
-        for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
+        for src in [
+            SOFTMAX_F32_ONEPASS,
+            SOFTMAX_F32_TWOPASS,
+            LOG_SOFTMAX_F32_ONEPASS,
+            LOG_SOFTMAX_F32_TWOPASS,
+        ] {
             assert!(
                 src.contains("for (long long row = blockIdx.x; row < rows; row += gridDim.x)"),
                 "row ループ添字が long long で宣言されていない"
@@ -366,7 +555,12 @@ mod tests {
     /// 部分文字列として含まない）ため誤検出しない。
     #[test]
     fn onepass_and_twopass_use_exp2f_only_not_expf() {
-        for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
+        for src in [
+            SOFTMAX_F32_ONEPASS,
+            SOFTMAX_F32_TWOPASS,
+            LOG_SOFTMAX_F32_ONEPASS,
+            LOG_SOFTMAX_F32_TWOPASS,
+        ] {
             assert!(src.contains("exp2f("), "exp2f が使われていない");
             assert!(
                 !src.contains("expf("),
@@ -379,7 +573,12 @@ mod tests {
     /// `if (base + 3 < cols)` の境界チェックを維持していることを検査する。
     #[test]
     fn onepass_and_twopass_keep_manual_bounds_check() {
-        for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
+        for src in [
+            SOFTMAX_F32_ONEPASS,
+            SOFTMAX_F32_TWOPASS,
+            LOG_SOFTMAX_F32_ONEPASS,
+            LOG_SOFTMAX_F32_TWOPASS,
+        ] {
             assert!(
                 src.contains("if (base + 3 < cols)"),
                 "float4 ベクトル化の手動境界チェックが見当たらない"
@@ -400,7 +599,12 @@ mod tests {
     /// ソースコード構造そのものの後退を防ぐ役割を持つ。
     #[test]
     fn onepass_and_twopass_scale_multiply_happens_after_max_subtraction() {
-        for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
+        for src in [
+            SOFTMAX_F32_ONEPASS,
+            SOFTMAX_F32_TWOPASS,
+            LOG_SOFTMAX_F32_ONEPASS,
+            LOG_SOFTMAX_F32_TWOPASS,
+        ] {
             assert!(
                 src.contains("exp2f((raw - m_new) * scale)"),
                 "online 更新の exp2f が『差分後に scale 乗算』の形になっていない"
@@ -427,6 +631,39 @@ mod tests {
         );
     }
 
+    /// `log_softmax` の最終書き出し（実装計画 §2.2「Sterbenz 順序」）:
+    /// `(raw - m) - log_l`（先に `raw - m` を計算し、その後で `log_l`
+    /// を引く）の形であり、`raw - (m + log_l)`（分配後に単一減算する
+    /// 誤った形）ではないことを検査する。`logf(` の呼び出しが行あたり
+    /// 1 回であることも合わせて検査する。
+    #[test]
+    fn log_softmax_writes_sterbenz_order_and_uses_logf_once() {
+        assert!(
+            LOG_SOFTMAX_F32_ONEPASS.contains("float log_l = logf(l);"),
+            "1 パス経路で log_l = logf(l) が見つかりません"
+        );
+        assert!(
+            LOG_SOFTMAX_F32_ONEPASS.contains("out_row[i] = (smem[i] - m) - log_l;"),
+            "1 パス経路の書き出しが Sterbenz 順序（(smem[i] - m) - log_l）になっていない"
+        );
+        assert!(
+            LOG_SOFTMAX_F32_TWOPASS.contains("float log_l = logf(l);"),
+            "2 パス経路で log_l = logf(l) が見つかりません"
+        );
+        assert!(
+            LOG_SOFTMAX_F32_TWOPASS.contains("o.x = (v4.x - m) - log_l;")
+                && LOG_SOFTMAX_F32_TWOPASS.contains("out_row[i] = (x_row[i] - m) - log_l;"),
+            "2 パス経路の書き出しが Sterbenz 順序（(raw - m) - log_l）になっていない"
+        );
+        for src in [LOG_SOFTMAX_F32_ONEPASS, LOG_SOFTMAX_F32_TWOPASS] {
+            assert!(
+                !src.contains("raw - (m +") && !src.contains("- (m + log_l)"),
+                "『raw - (m + log_l)』の分配後単一減算パターンが残っている（Sterbenz \
+                 順序ではない）"
+            );
+        }
+    }
+
     /// 境界マスク定数（本ファイル冒頭コメント「境界マスク定数」参照）:
     /// `-INFINITY` を直接使わず、`f32` の値域下限（自前リテラル
     /// `-3.402823466e+38f`）を使うことを検査する。加えて `__FLT_MAX__`
@@ -435,7 +672,12 @@ mod tests {
     /// いないことも fail-closed に検査する。
     #[test]
     fn onepass_and_twopass_use_finite_mask_not_infinity() {
-        for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
+        for src in [
+            SOFTMAX_F32_ONEPASS,
+            SOFTMAX_F32_TWOPASS,
+            LOG_SOFTMAX_F32_ONEPASS,
+            LOG_SOFTMAX_F32_TWOPASS,
+        ] {
             assert!(
                 src.contains("#define SOFTMAX_MASK_E2 (-3.402823466e+38f)"),
                 "境界マスク定数が f32 値域下限（-3.402823466e+38f）で定義されていない"

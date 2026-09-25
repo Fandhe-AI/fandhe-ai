@@ -5559,6 +5559,45 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::log_softmax`] の CUDA 実装
+    /// （イシュー #2155）。`Self::softmax` と同型の段取り（
+    /// [`row_softmax_layout`] が非最終軸を `Ok(None)` として区別する
+    /// 契約に従い、その場合はデフォルトの `Unsupported`〈`Var::
+    /// log_softmax` がホスト参照実装
+    /// `eval::log_softmax_along` へフォールバックする合図〉を返す）
+    /// だが、`context_cache::cached_softmax`・`CudaSoftmax::
+    /// run_log_softmax_f32`（`softmax.rs::CudaSoftmax::
+    /// run_row_kernel_f32_raw` 共通 helper 経由）を呼ぶ点のみが異なる。
+    /// 数値契約は `softmax.rs::CudaSoftmax::run_log_softmax_f32` doc・
+    /// `kernels_softmax.rs` 冒頭コメント「`log_softmax`」節参照
+    /// （REQ-2 統一複合判定。CPU 参照実装との bit 一致は主張しない）。
+    fn log_softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "log_softmax: CUDA 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）"
+                    .into(),
+            ));
+        };
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("log_softmax: input not contiguous".into())
+        })?;
+
+        let softmax = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_softmax(&device)
+        })?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || softmax.run_log_softmax_f32(x_slice, rows, cols),
+        )?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::log_softmax_backward`] の
     /// CUDA 実装（イシュー #1949）。`softmax` オーバーライドと同じ構成:
     /// [`row_softmax_layout`] が非最終軸を `Ok(None)` として区別する
