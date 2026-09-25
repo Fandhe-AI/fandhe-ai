@@ -46,3 +46,10 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト
 機能していない等）は本 README の「期待結果」を更新し、REQ-2 判定を
 外れた事実を型付き findings として PR へ記録すること（tolerance の
 単独緩和は行わない。`.claude/rules/coding-rust.md`）。
+
+## 2026-09-25 追記（PR #2263 codex-review P2 是正）
+
+`logsumexp`／`vector_norm_p` の全軸縮約（`dim=None`）は eval との bit
+一致契約（`docs/autodiff-reduce-ops-decision.md` §2.4）を優先し
+`par_chunks` による rayon 並列化を取りやめたため、この 2 演算のみ
+全軸縮約時の並列性を失う（軸指定側の並列性は変更なし）。

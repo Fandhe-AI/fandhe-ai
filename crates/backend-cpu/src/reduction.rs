@@ -26,6 +26,18 @@
 //!   （<https://docs.rs/rayon/latest/rayon/iter/trait.IndexedParallelIterator.html>）。
 //!   本モジュールはこの保証を用いてチャンク部分和をチャンク番号順に逐次結合し、
 //!   PoC-v2-5 の「逐次固定順序で bit 一致」前提を踏襲する。
+//!   **例外（`logsumexp`／`vector_norm_p`。イシュー #2147・PR #2263
+//!   codex-review P2 是正）**: この 2 演算の全縮約経路（`logsumexp_slice`・
+//!   `vector_norm_p_slice`。いずれも非公開関数）は `autodiff::eval` の
+//!   ホスト参照実装（`logsumexp_along`／`vector_norm_p_along`）と **bit 完全一致**
+//!   させる契約（`docs/autodiff-reduce-ops-decision.md` §2.4）を持つ。
+//!   eval 側は `dim=None` を「単一 lane・逐次 `f64` fold」として計算する
+//!   ため、CHUNK 単位でチャンク内逐次 → チャンク間結合という 2 段の
+//!   結合順序（本節上記の一般契約）とは異なり、要素数が `CHUNK`
+//!   （4096）を超えると丸め結果が食い違う。そのためこの 2 演算のみ
+//!   `par_chunks` を使わず、eval と同一の単一逐次 `f64` fold をそのまま
+//!   用いる（全軸縮約の rayon 並列性を犠牲にする。軸指定側は他演算と
+//!   同じ lane 間並列化のままで問題は生じない）。
 //!
 //! ## `sum`/`mean` の `f64` アキュムレータ契約（イシュー #1675）
 //!
@@ -634,25 +646,37 @@ fn nan_propagating_max_f64(a: f64, b: f64) -> f64 {
 
 /// `logsumexp`（`dim=None` の全縮約対象。空でないことは呼び出し元
 /// [`logsumexp`] が事前検査済みの前提）を `f64` で計算する（イシュー
-/// #2147）。`m = max(x)`（非有限なら安定化シフトを `0` に切り替える）
-/// →`Σ exp(x_i − m)` を `f64` で蓄積 → `ln(acc) + m` を計算し、最後に
-/// 1 回だけ `f32` へ downcast する（`fandhe_ai_tensor_core::
-/// BackendOps::logsumexp` doc「数値契約」参照）。
+/// #2147・PR #2263 codex-review P2 是正）。`m = max(x)`（非有限なら
+/// 安定化シフトを `0` に切り替える）→`Σ exp(x_i − m)` を `f64` で蓄積
+/// → `ln(acc) + m` を計算し、最後に 1 回だけ `f32` へ downcast する
+/// （`fandhe_ai_tensor_core::BackendOps::logsumexp` doc「数値契約」
+/// 参照）。
+///
+/// **`par_chunks` を使わない理由（他の全縮約 slice 関数〈`sum_slice`
+/// 等〉との違い）**: この関数は `eval::logsumexp_along`（`dim=None`
+/// 時の `outer=1, axis_len=n, inner=1` 分解）の**逐次 `f64` 蓄積**
+/// （`0..n` を単一の `fold` で左から右へ加算）と bit 完全一致させる
+/// 契約を持つ（`docs/autodiff-reduce-ops-decision.md` §2.4）。CHUNK
+/// 単位でチャンク内を逐次累積してからチャンク結果をチャンク番号順に
+/// 結合する方式（`sum_slice` 等が使う）は、浮動小数点加算が結合則を
+/// 満たさないため要素数が `CHUNK`（4096）を超えると eval の単一逐次
+/// fold と異なる丸め結果になり bit 一致が崩れる（PR #2263
+/// codex-review 指摘。回帰テストは `crates/facade/tests/
+/// reduce_ops_backend_parity.rs::
+/// cpu_logsumexp_vector_norm_p_forward_bit_matches_naive_reference_across_chunk_boundary`）。
+/// そのためこの全縮約経路は rayon 並列化を諦め、eval と同一の演算列
+/// （逐次 `f64` fold）をそのまま踏襲する。軸指定側
+/// （[`axis_reduce_logsumexp`]）は出力要素（lane）間のみ rayon で
+/// 並列化し、各 lane 内は元々逐次走査のため本問題は生じない。
 fn logsumexp_slice(data: &[f32]) -> f32 {
     let m = data.iter().fold(f64::NEG_INFINITY, |acc, &v| {
         nan_propagating_max_f64(acc, v as f64)
     });
     let shift = if m.is_finite() { m } else { 0.0 };
-    let acc: f64 = data
-        .par_chunks(CHUNK)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .fold(0.0f64, |acc, &v| acc + ((v as f64) - shift).exp())
-        })
-        .collect::<Vec<f64>>()
-        .into_iter()
-        .fold(0.0f64, |acc, v| acc + v);
+    let mut acc = 0.0f64;
+    for &v in data {
+        acc += ((v as f64) - shift).exp();
+    }
     (acc.ln() + shift) as f32
 }
 
@@ -735,10 +759,16 @@ pub fn logsumexp(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, Red
 
 /// p-ノルム（`data`。`dim=None` の全縮約対象。空でないこと・`p` が有限
 /// かつ正であることは呼び出し元 [`vector_norm_p`] が事前検査済みの
-/// 前提）を `f64` で計算する（イシュー #2147）。`mx = max|x_i|` を
-/// 括り出してから `norm = mx · (Σ (|x_i|/mx)^p)^(1/p)` を計算する
-/// overflow-safe なスケール形（`fandhe_ai_tensor_core::BackendOps::
-/// vector_norm_p` doc「数値契約」参照）。
+/// 前提）を `f64` で計算する（イシュー #2147・PR #2263 codex-review
+/// P2 是正）。`mx = max|x_i|` を括り出してから
+/// `norm = mx · (Σ (|x_i|/mx)^p)^(1/p)` を計算する overflow-safe な
+/// スケール形（`fandhe_ai_tensor_core::BackendOps::vector_norm_p` doc
+/// 「数値契約」参照）。
+///
+/// **`par_chunks` を使わない理由**: [`logsumexp_slice`] と同じ理由
+/// （同関数 doc 参照）で、`eval::vector_norm_p_along`（`dim=None` 時の
+/// 逐次 `f64` fold）と bit 完全一致させる契約を持つため、この全縮約
+/// 経路は rayon 並列化を用いない。
 fn vector_norm_p_slice(data: &[f32], p: f64) -> f32 {
     let mx = data.iter().fold(0.0f64, |acc, &v| {
         nan_propagating_max_f64(acc, (v as f64).abs())
@@ -752,17 +782,11 @@ fn vector_norm_p_slice(data: &[f32], p: f64) -> f32 {
     if mx.is_infinite() {
         return f32::INFINITY;
     }
-    let acc: f64 = data
-        .par_chunks(CHUNK)
-        .map(|chunk| {
-            chunk.iter().fold(0.0f64, |acc, &v| {
-                let ratio = (v as f64).abs() / mx;
-                acc + ratio.powf(p)
-            })
-        })
-        .collect::<Vec<f64>>()
-        .into_iter()
-        .fold(0.0f64, |acc, v| acc + v);
+    let mut acc = 0.0f64;
+    for &v in data {
+        let ratio = (v as f64).abs() / mx;
+        acc += ratio.powf(p);
+    }
     (mx * acc.powf(1.0 / p)) as f32
 }
 

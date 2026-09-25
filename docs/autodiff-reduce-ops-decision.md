@@ -123,8 +123,29 @@ VJP: `dx_i = g · exp(x_i - y)` を `f64` で計算して `f32` へ落とす。
 同じく `-inf` を黙って返さない）。
 
 backend-cpu の `reduction::logsumexp` は eval と**同じ lane ごとの
-逐次 `f64` アルゴリズム**で実装し（lane 間だけ rayon で並列化）、CPU
-カーネルとホストフォールバックの結果が bit 一致する構造にした。
+逐次 `f64` アルゴリズム**で実装し、CPU カーネルとホストフォールバックの
+結果が bit 一致する構造にした。**軸指定（`dim=Some(axis)`）は lane
+（出力要素）間だけ rayon で並列化**する（各 lane 内は逐次走査のため
+bit 一致は保たれる）。**全軸縮約（`dim=None`）は単一 lane しかない
+ため rayon 並列化を行わず、eval と同一の単一逐次 `f64` fold**を直接
+使う（`crates/backend-cpu/src/reduction.rs::logsumexp_slice`／
+`vector_norm_p_slice`）。
+
+**2026-09-25 追記（PR #2263 codex-review P2 是正）**: 対応前は
+`logsumexp_slice`／`vector_norm_p_slice`（全軸縮約経路）が `sum_slice`
+等と同じ「CHUNK（4096）単位でチャンク内を逐次累積 → チャンク結果を
+rayon 経由でチャンク番号順に結合」方式を使っており、浮動小数点加算が
+結合則を満たさないため要素数が CHUNK を超えると eval の単一逐次
+fold と異なる丸め結果になりえた（bit 一致契約違反。CHUNK を跨がない
+小さい入力では顕在化しない）。是正後は上記のとおり全軸縮約経路のみ
+`par_chunks` を使わず eval と同一の単一逐次 `f64` fold を用いる
+（全軸縮約の rayon 並列性を犠牲にする。軸指定側は影響なし）。
+回帰テストは `crates/facade/tests/reduce_ops_backend_parity.rs::
+cpu_logsumexp_vector_norm_p_forward_bit_matches_naive_reference_across_chunk_boundary`
+（`logsumexp` は `y ≈ 0` 近傍に潰す専用フィクスチャで修正前コードとの
+bit 不一致を実測確認済み。`vector_norm_p` は `n = 3・CHUNK + 17`
+規模では相対誤差が f32 丸め粒度に届かず修正前でも自然には bit 不一致を
+再現できなかったため将来のリグレッション防止ロックとして追加）。
 
 ### §2.5 `norm_p`: 専用 Op
 

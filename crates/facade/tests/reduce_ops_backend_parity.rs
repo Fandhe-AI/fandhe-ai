@@ -274,6 +274,114 @@ fn cpu_prod_logsumexp_norm_p_backward_matches_naive_reference_within_tolerance()
     );
 }
 
+/// `vector_norm_p` の全縮約（`dim=None`）フィクスチャ（CHUNK〈`crates/
+/// backend-cpu/src/reduction.rs::CHUNK` = 4096〉境界をまたぐ要素数。
+/// PR #2263 codex-review P2 指摘）。`sin` ベースで符号・桁（`1e-3`〜
+/// `1e3`）が混在する決定的な非一様データ。
+fn chunk_boundary_reduce_fixture() -> Tensor<f32> {
+    let n = 3 * 4096 + 17;
+    let data: Vec<f32> = (0..n)
+        .map(|i| {
+            let x = i as f32;
+            (x * 0.037).sin() * 10f32.powi((i % 7) as i32 - 3)
+        })
+        .collect();
+    Tensor::new(data, &[n]).expect("test fixture: shape 一致")
+}
+
+/// `logsumexp` の全縮約（`dim=None`）フィクスチャ（CHUNK 境界をまたぐ
+/// 要素数。PR #2263 codex-review P2 指摘）。
+///
+/// **なぜ `base = -ln(n)` を中心に置くか**: チャンク単位の並列結合
+/// （修正前の `par_chunks(CHUNK)` 方式）と単一逐次 `f64` fold（eval・
+/// 修正後の `logsumexp_slice`）の丸め誤差は、`Σ exp(x_i - shift)`
+/// （`acc`）に対する**相対**誤差としては常に数 `f64` ulp 程度
+/// （概ね `n・f64::EPSILON` のオーダー）に収まる。最終出力
+/// `y = ln(acc) + shift` の**絶対**誤差もこの相対誤差と同オーダー
+/// （`d(ln acc)/d(acc) = 1/acc` のため）だが、`shift`（通常は入力の
+/// 最大値、桁が大きい）がそのまま `y` に足し込まれるため、`shift` が
+/// 大きいと `y` の f32 ulp（`|y|` に比例）が上記絶対誤差を大きく
+/// 上回ってしまい bit 差が現れない。そこで全要素を
+/// `x_i ≈ -ln(n)`（微小な非一様ノイズ付き）に揃えると
+/// `Σ exp(x_i - shift) ≈ n・exp(-ln(n)) = 1`（`shift ≈ -ln(n)` も
+/// 微小）となり、`y ≈ ln(1) + (-ln(n)) ≈ 0` 近傍に潰れる。`y` 自体が
+/// ゼロに近づくほど f32 ulp（`|y|・2^-23`）も縮小し、チャンク結合差
+/// （絶対値では `n` に依らずほぼ一定）が相対的に効きやすくなる。
+/// 振幅・周波数パラメータ（`AMP`／`FREQ`）は上記構成のもとで実際に
+/// 修正前コード（`par_chunks(CHUNK)` 方式）と bit が分かれることを
+/// スクラッチ実装で確認した具体値（本ファイル冒頭 doc の実測記録に
+/// 対応。`docs/autodiff-reduce-ops-decision.md` §2.4 参照）。
+fn chunk_boundary_logsumexp_fixture() -> Tensor<f32> {
+    const AMP: f32 = 0.0010180001;
+    const FREQ: f32 = 0.019340001;
+    let n = 3 * 4096 + 17;
+    let base = -(n as f64).ln() as f32;
+    let data: Vec<f32> = (0..n)
+        .map(|i| {
+            let x = i as f32;
+            base + AMP * (x * FREQ).sin()
+        })
+        .collect();
+    Tensor::new(data, &[n]).expect("test fixture: shape 一致")
+}
+
+/// `logsumexp`／`vector_norm_p` の全縮約 forward が、CHUNK（4096）
+/// 境界をまたぐ要素数でも CPU（`fandhe_ai::tape()`）と NaiveOps
+/// （`fandhe_ai_autodiff::Tape::new()`）で **bit 完全一致**することを
+/// 確認する回帰テスト（PR #2263 codex-review P2 指摘）。
+///
+/// 修正前の `backend-cpu::reduction::logsumexp_slice`／
+/// `vector_norm_p_slice` は `sum_slice` 等と同じ「CHUNK 単位でチャンク
+/// 内を逐次累積 → チャンク結果を rayon 経由で並列結合」方式を使って
+/// おり、`autodiff::eval::logsumexp_along`／`vector_norm_p_along`
+/// （`dim=None` を単一 lane・単一逐次 `f64` fold として計算する）とは
+/// 結合順序が異なるため、要素数が CHUNK を超えると丸め結果が食い違い
+/// うる（`docs/autodiff-reduce-ops-decision.md` §2.4「bit 一致」契約
+/// 違反）。`crates/backend-cpu/src/reduction.rs` の
+/// `logsumexp_slice`／`vector_norm_p_slice` を eval と同一の単一逐次
+/// `f64` fold へ揃えたことで解消した（当該関数 doc 参照）。
+///
+/// **`logsumexp` は `chunk_boundary_logsumexp_fixture`（`y ≈ 0`
+/// 近傍に潰す構成）で実際に修正前コードとの bit 不一致を確認済み**
+/// （同フィクスチャ doc 参照）。`vector_norm_p`（`mx・acc^(1/p)` の
+/// 乗算形）は `n = 3・CHUNK + 17` 規模では相対誤差が f32 の丸め粒度に
+/// 届かず（同オーダー計算で概算 `n・f64::EPSILON ≈ 1.4e-12` に対し
+/// 必要な相対差は `2^-23 ≈ 1.2e-7`、約 5 桁不足）、修正前コードでも
+/// 自然には bit 不一致を再現できなかった。`vector_norm_p` 側の本テストは
+/// 将来のリグレッション防止ロック（bit 完全一致契約の固定）として
+/// 追加する。
+#[test]
+fn cpu_logsumexp_vector_norm_p_forward_bit_matches_naive_reference_across_chunk_boundary() {
+    let cpu_tape = fandhe_ai::tape();
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+
+    let lse_data = chunk_boundary_logsumexp_fixture();
+    let x_cpu = cpu_tape.make_var(&lse_data);
+    let x_naive = naive_tape.make_var(&lse_data);
+    let lse_cpu = logsumexp(&x_cpu, None).unwrap().to_tensor();
+    let lse_naive = logsumexp(&x_naive, None).unwrap().to_tensor();
+    assert_eq!(
+        f32_bits(&lse_cpu),
+        f32_bits(&lse_naive),
+        "logsumexp forward: CHUNK 境界（n={}）で cpu vs naive の bit 不一致",
+        lse_data.numel()
+    );
+
+    let norm_data = chunk_boundary_reduce_fixture();
+    let x_cpu = cpu_tape.make_var(&norm_data);
+    let x_naive = naive_tape.make_var(&norm_data);
+    for p in [3.0f32, 0.5f32] {
+        let norm_cpu = norm_p(&x_cpu, p, None).unwrap().to_tensor();
+        let norm_naive = norm_p(&x_naive, p, None).unwrap().to_tensor();
+        assert_eq!(
+            f32_bits(&norm_cpu),
+            f32_bits(&norm_naive),
+            "vector_norm_p(p={p}) forward: CHUNK 境界（n={}）で cpu vs naive の bit 不一致",
+            norm_data.numel()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------
 // 実機バックエンド（`#[ignore]`）: Mac／DGX Spark GB10 実機セッションへ
 // 申し送る（`docs/perf/logs/reduce-ops-2147/README.md`）。
