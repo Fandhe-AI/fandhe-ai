@@ -24,6 +24,11 @@
 //! - `#[ignore]`（`tape_for(Device::Metal)`〈`cfg(target_os =
 //!   "macos")` 限定〉／`tape_for(Device::Cuda(0))` で同じ経路を CPU
 //!   tape と比較）: 上記と対称に `cuda_*`／`metal_*` という接頭辞で置く。
+//!   forward（`advanced_indexing`／`index_put` 両 `accumulate`）に加え、
+//!   backward（`Op::Gather`／`Op::Scatter` の VJP。重複添字による
+//!   `scatter_add` を含む）も `*_indexing_backward_matches_cpu_reference`
+//!   として同じ接頭辞で置く（codex-review 指摘・PR #2267。forward の
+//!   みでは新しい合成経路が使う VJP が実機で比較されない）。
 //!
 //!   実機（DGX Spark GB10／Apple Silicon）への到達手段が本エージェント
 //!   実行環境にないため未実施のまま Mac／GB10 セッションへ申し送る
@@ -453,4 +458,188 @@ fn cuda_index_put_forward_matches_cpu_reference() {
         out_cpu.host_slice().as_ref(),
         out_cuda.host_slice().as_ref(),
     );
+}
+
+/// [`advanced_indexing`] backward（重複添字による `Op::Gather` の
+/// `scatter_add` VJP）の CPU／Metal 実機比較（REQ-2 統一複合判定。
+/// codex-review 指摘・PR #2267）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照"]
+fn metal_advanced_indexing_backward_matches_cpu_reference() {
+    let data = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).expect("test fixture: shape 一致");
+    let idx = ti(vec![0, 0, 1], &[3]);
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let loss_cpu = advanced_indexing(&x_cpu, std::slice::from_ref(&idx))
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let dx_cpu = cpu_tape
+        .backward(&loss_cpu)
+        .unwrap()
+        .get(&x_cpu)
+        .unwrap()
+        .unwrap()
+        .clone();
+
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x_metal = metal_tape.make_var(&data);
+    let loss_metal = advanced_indexing(&x_metal, std::slice::from_ref(&idx))
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let dx_metal = metal_tape
+        .backward(&loss_metal)
+        .unwrap()
+        .get(&x_metal)
+        .unwrap()
+        .unwrap()
+        .clone();
+
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "advanced_indexing backward (dup): cpu vs metal",
+        dx_cpu.host_slice().as_ref(),
+        dx_metal.host_slice().as_ref(),
+    );
+}
+
+/// [`advanced_indexing`] backward（重複添字による `Op::Gather` の
+/// `scatter_add` VJP）の CPU／CUDA 実機（DGX Spark GB10）比較（REQ-2
+/// 統一複合判定。codex-review 指摘・PR #2267）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照"]
+fn cuda_advanced_indexing_backward_matches_cpu_reference() {
+    let data = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).expect("test fixture: shape 一致");
+    let idx = ti(vec![0, 0, 1], &[3]);
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let loss_cpu = advanced_indexing(&x_cpu, std::slice::from_ref(&idx))
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let dx_cpu = cpu_tape
+        .backward(&loss_cpu)
+        .unwrap()
+        .get(&x_cpu)
+        .unwrap()
+        .unwrap()
+        .clone();
+
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+    let x_cuda = cuda_tape.make_var(&data);
+    let loss_cuda = advanced_indexing(&x_cuda, std::slice::from_ref(&idx))
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let dx_cuda = cuda_tape
+        .backward(&loss_cuda)
+        .unwrap()
+        .get(&x_cuda)
+        .unwrap()
+        .unwrap()
+        .clone();
+
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "advanced_indexing backward (dup): cpu vs cuda",
+        dx_cpu.host_slice().as_ref(),
+        dx_cuda.host_slice().as_ref(),
+    );
+}
+
+/// [`index_put`]（両 `accumulate`。重複添字を含む）backward の
+/// CPU／Metal 実機比較（`Op::Scatter` の VJP。REQ-2 統一複合判定。
+/// codex-review 指摘・PR #2267）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照"]
+fn metal_index_put_backward_matches_cpu_reference() {
+    let (data, idx, values) = index_put_fixture();
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let v_cpu = cpu_tape.make_var(&values);
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x_metal = metal_tape.make_var(&data);
+    let v_metal = metal_tape.make_var(&values);
+
+    for accumulate in [false, true] {
+        let loss_cpu = index_put(&x_cpu, std::slice::from_ref(&idx), &v_cpu, accumulate)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+        let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+        let dv_cpu = grads_cpu.get(&v_cpu).unwrap().unwrap().clone();
+
+        let loss_metal = index_put(&x_metal, std::slice::from_ref(&idx), &v_metal, accumulate)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let grads_metal = metal_tape.backward(&loss_metal).unwrap();
+        let dx_metal = grads_metal.get(&x_metal).unwrap().unwrap().clone();
+        let dv_metal = grads_metal.get(&v_metal).unwrap().unwrap().clone();
+
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            &format!("index_put(accumulate={accumulate}) backward dx: cpu vs metal"),
+            dx_cpu.host_slice().as_ref(),
+            dx_metal.host_slice().as_ref(),
+        );
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            &format!("index_put(accumulate={accumulate}) backward dv: cpu vs metal"),
+            dv_cpu.host_slice().as_ref(),
+            dv_metal.host_slice().as_ref(),
+        );
+    }
+}
+
+/// [`index_put`]（両 `accumulate`。重複添字を含む）backward の
+/// CPU／CUDA 実機（DGX Spark GB10）比較（`Op::Scatter` の VJP。REQ-2
+/// 統一複合判定。codex-review 指摘・PR #2267）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照"]
+fn cuda_index_put_backward_matches_cpu_reference() {
+    let (data, idx, values) = index_put_fixture();
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let v_cpu = cpu_tape.make_var(&values);
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+    let x_cuda = cuda_tape.make_var(&data);
+    let v_cuda = cuda_tape.make_var(&values);
+
+    for accumulate in [false, true] {
+        let loss_cpu = index_put(&x_cpu, std::slice::from_ref(&idx), &v_cpu, accumulate)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+        let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+        let dv_cpu = grads_cpu.get(&v_cpu).unwrap().unwrap().clone();
+
+        let loss_cuda = index_put(&x_cuda, std::slice::from_ref(&idx), &v_cuda, accumulate)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let grads_cuda = cuda_tape.backward(&loss_cuda).unwrap();
+        let dx_cuda = grads_cuda.get(&x_cuda).unwrap().unwrap().clone();
+        let dv_cuda = grads_cuda.get(&v_cuda).unwrap().unwrap().clone();
+
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            &format!("index_put(accumulate={accumulate}) backward dx: cpu vs cuda"),
+            dx_cpu.host_slice().as_ref(),
+            dx_cuda.host_slice().as_ref(),
+        );
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            &format!("index_put(accumulate={accumulate}) backward dv: cpu vs cuda"),
+            dv_cpu.host_slice().as_ref(),
+            dv_cuda.host_slice().as_ref(),
+        );
+    }
 }

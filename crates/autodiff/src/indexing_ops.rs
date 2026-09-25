@@ -153,7 +153,21 @@ fn plan_flat_index(
         strides[j] = strides[j + 1] * head[j + 1] as i64;
     }
 
-    let mut flat_i64 = vec![0i64; m];
+    // `flat` は最初から `Vec<i32>`（長さ `m`）として確保し、`Vec<i64>` の
+    // 中間バッファを経由しない（codex-review 指摘・PR #2267）。
+    // `checked_index_alloc_len(m)` は `Vec<i32>` 1 本分の確保サイズしか
+    // 検査しないため、ここで `Vec<i64>`（要素 8 バイト）を確保して後から
+    // `Vec<i32>` へ変換すると、変換の一時的な二重確保も合わせて検査
+    // 想定（`m * 4` バイト）の最大 3 倍近いピーク確保量になりうる
+    // （旧実装の問題）。各項 `v_j * stride_j`（`v_j < head[j]`、
+    // `stride_j <= P / head[j]`）および任意個の部分和は
+    // `head[j] * stride_j <= P`（`checked_axis_len_as_i32(p)` 検査済み）
+    // に収まるため、常に `i32` の範囲に収まる。積・和は `i64` の
+    // スカラー計算（配列を経由しない）でオーバーフロー安全性を確保し、
+    // 最終値を `i32::try_from` で範囲検査してから `i32` バッファへ書き
+    // 戻す（数学的には常に成功するが、defense-in-depth として
+    // `unwrap()`／`expect()` は使わずエラーへ倒す）。
+    let mut flat_i32 = vec![0i32; m];
     for (j, idx) in indices.iter().enumerate() {
         let idx_bc = idx.broadcast_to(&b_shape).map_err(AutodiffError::Shape)?;
         let dim_size = head[j];
@@ -168,16 +182,15 @@ fn plan_flat_index(
                 .checked_mul(strides[j])
                 .ok_or(ShapeError::ElementCountOverflow)
                 .map_err(AutodiffError::Shape)?;
-            flat_i64[pos] = flat_i64[pos]
+            let sum = (flat_i32[pos] as i64)
                 .checked_add(contrib)
                 .ok_or(ShapeError::ElementCountOverflow)
                 .map_err(AutodiffError::Shape)?;
+            flat_i32[pos] = i32::try_from(sum)
+                .map_err(|_| AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
         }
     }
 
-    // `checked_axis_len_as_i32(p)` を通過済みのため、`[0, p)` の範囲に
-    // 収まる `flat_i64` の各値は必ず `i32` へ無損失変換できる。
-    let flat_i32: Vec<i32> = flat_i64.into_iter().map(|v| v as i32).collect();
     let flat = Tensor::new(flat_i32, &[m]).map_err(AutodiffError::Shape)?;
 
     Ok((b_shape, p, flat))
