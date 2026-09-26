@@ -46,6 +46,8 @@
 //! （`AdamW` と同様、`Tape`/`Var`/`BackendOps` に依存しない値型・純関数。
 //! `crates/facade/src/optim.rs`「REQ-12 との整合」節）。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -353,6 +355,65 @@ impl Adam {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "adam"`・バッファ名 `m`／`v`・
+/// `beta1_pow_t`／`beta2_pow_t` あり・`mu_product` なし。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for Adam {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(4 + self.states.len() * 2);
+        out.insert(
+            super::state_dict::marker_key("adam"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::BETA1_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta1_pow_t)?,
+        );
+        out.insert(
+            super::state_dict::BETA2_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta2_pow_t)?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "m"),
+                Tensor::new(slot.m.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "v"),
+                Tensor::new(slot.v.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded =
+            super::state_dict::decode_state_dict("adam", &state, &["m", "v"], true, true, false)?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let m = buffers.remove("m").unwrap_or_default();
+                let v = buffers.remove("v").unwrap_or_default();
+                SlotState { shape, m, v }
+            })
+            .collect();
+        self.step_count = decoded.step_count;
+        self.beta1_pow_t = decoded.beta1_pow_t.unwrap_or(1.0);
+        self.beta2_pow_t = decoded.beta2_pow_t.unwrap_or(1.0);
+        self.states = states;
+        Ok(())
     }
 }
 

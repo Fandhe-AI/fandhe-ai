@@ -21,6 +21,8 @@
 //! fixture テストの統一複合判定では共通化による bit ドリフトを検出
 //! できないため。イシュー #1743 実装計画 §3.2）。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -296,6 +298,56 @@ impl Adagrad {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "adagrad"`・バッファ名
+/// `state_sum`・`beta*_pow_t`／`mu_product` なし。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for Adagrad {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(2 + self.states.len());
+        out.insert(
+            super::state_dict::marker_key("adagrad"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "state_sum"),
+                Tensor::new(slot.state_sum.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded = super::state_dict::decode_state_dict(
+            "adagrad",
+            &state,
+            &["state_sum"],
+            false,
+            false,
+            false,
+        )?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let state_sum = buffers.remove("state_sum").unwrap_or_default();
+                SlotState { shape, state_sum }
+            })
+            .collect();
+        self.step_count = decoded.step_count;
+        self.states = states;
+        Ok(())
     }
 }
 

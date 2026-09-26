@@ -12402,3 +12402,298 @@ fn facade_does_not_reexport_or_declare_optimizer_ext_items_detects_each_category
         .is_empty()
     );
 }
+
+// =====================================================================
+// イシュー #2174（親 #2131）: optimizer state_dict（save/load・
+// safetensors 経由）の facade 公開保留を検査するテスト群。
+// `OptimizerStateDictHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、facade src 全体への非再エクス
+// ポート・非独自宣言・workspace 全体の `fn state_dict`／
+// `fn load_state_dict` 宣言元インベントリを固定する。承認事項の位置
+// づけは `docs/autodiff-optimizer-state-dict-decision.md` §5 を参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `OptimizerStateDictHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`param_groups_hold_doctest_globs_all_pub_modules` の
+/// `OptimizerStateDictHoldDoctestGuard` 版）。
+#[test]
+fn optimizer_state_dict_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerStateDictHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "OptimizerStateDictHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`optimizer_state_dict_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest ブロック
+/// の**glob 以外の本文**が固定文言
+/// [`OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
+/// することを固定する（rustdoc の `# ` 隠し行・プローブの削除・別名へ
+/// のシャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否
+/// する。イシュー #2174）。
+#[test]
+fn optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerStateDictHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY,
+        "OptimizerStateDictHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY から\
+         ドリフトしている。正のプローブ（__fandhe_optim_state_dict_hold_\
+         probe モジュール・__FandheOptimizerStateDictProbe トレイト・\
+         __probe 関数）の削除・弱体化・隠し行の混入がないか確認する\
+         こと。"
+    );
+}
+
+/// [`optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `OptimizerStateDictHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
+/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート
+/// 自体の `use fandhe_ai::*;` は本文に含む）。
+const OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_optim_state_dict_hold_probe {\n\
+\x20\x20\x20\x20pub trait OptimizerStateDict {}\n\
+}\n\
+use __fandhe_optim_state_dict_hold_probe::*;\n\
+\n\
+struct __FandheOptimizerStateDictMarker;\n\
+\n\
+trait __FandheOptimizerStateDictProbe {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker;\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker;\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::AdamW {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Adam {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::RmsProp {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Adagrad {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Lamb {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20adamw: &mut fandhe_ai::optim::AdamW,\n\
+\x20\x20\x20\x20adam: &mut fandhe_ai::optim::Adam,\n\
+\x20\x20\x20\x20rmsprop: &mut fandhe_ai::optim::RmsProp,\n\
+\x20\x20\x20\x20adagrad: &mut fandhe_ai::optim::Adagrad,\n\
+\x20\x20\x20\x20lamb: &mut fandhe_ai::optim::Lamb,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::AdamW::state_dict(adamw);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adamw.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::AdamW::load_state_dict(adamw);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adamw.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adam::state_dict(adam);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adam.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adam::load_state_dict(adam);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adam.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::RmsProp::state_dict(rmsprop);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = rmsprop.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::RmsProp::load_state_dict(rmsprop);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = rmsprop.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adagrad::state_dict(adagrad);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adagrad.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adagrad::load_state_dict(adagrad);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adagrad.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Lamb::state_dict(lamb);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = lamb.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Lamb::load_state_dict(lamb);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = lamb.load_state_dict();\n\
+}";
+
+/// facade src 全体（`crates/facade/src/**`）に、`OptimizerStateDict`／
+/// `state_dict`（モジュール名としての識別子）を識別子単位で含む
+/// `pub use`（別名・ネストした group 経由含む）が存在しないことを
+/// 固定する（`OptimizerStateDictHoldDoctestGuard` の正のプローブと
+/// 多層防御を成す最内層のソース走査ガード。`facade_does_not_reexport_
+/// or_declare_param_groups` と同型）。`fn state_dict`／
+/// `fn load_state_dict` の宣言元は
+/// [`workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations`]
+/// が別途固定する（facade 側は許可集合に含まれないため、そちらが
+/// facade への追加も検出する）。
+#[test]
+fn facade_does_not_reexport_or_declare_optimizer_state_dict() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") {
+                for ident in ["OptimizerStateDict", "state_dict"] {
+                    if line_contains_identifier(trimmed, ident) {
+                        offending.push(format!(
+                            "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が optimizer state_dict（イシュー #2174 の内部\
+         クレート限定新規公開面。facade 公開は承認待ちのため対象外と\
+         いう設計判断に違反）を再エクスポートしている: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、`fn state_dict`／
+/// `fn load_state_dict` の定義元集合を固定する
+/// （`workspace_declares_param_group_fn_names_only_in_allowed_locations`
+/// と同型のインベントリ）。
+///
+/// **期待集合**（着手前確認の再 grep で判明）: 既存 2 か所
+/// （`autodiff/src/nn/module.rs`〈`Module` trait 既定実装〉・
+/// `facade/src/compat/sequential.rs`〈`Sequential` inherent〉）に加え、
+/// 本イシュー（#2174）が追加した [`OptimizerStateDict`] trait 宣言
+/// （`autodiff/src/nn/optim/state_dict.rs`）と、9 optimizer ファイル
+/// （`adamw`・`adam`・`rmsprop`・`adagrad`・`lamb`・`adadelta`・
+/// `adamax`・`nadam`・`radam`）各 1 件ずつの impl。
+#[test]
+fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    const NAMES: [&str; 2] = ["state_dict", "load_state_dict"];
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("autodiff/src/nn/module.rs::state_dict", 1usize),
+        ("autodiff/src/nn/module.rs::load_state_dict", 1usize),
+        ("facade/src/compat/sequential.rs::state_dict", 1usize),
+        ("facade/src/compat/sequential.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/state_dict.rs::state_dict", 1usize),
+        (
+            "autodiff/src/nn/optim/state_dict.rs::load_state_dict",
+            1usize,
+        ),
+        ("autodiff/src/nn/optim/adamw.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adamw.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adam.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adam.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/rmsprop.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/rmsprop.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adagrad.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adagrad.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/lamb.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/lamb.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adadelta.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adadelta.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adamax.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adamax.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/nadam.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/nadam.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/radam.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/radam.rs::load_state_dict", 1usize),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の state_dict／load_state_dict\
+         系 `fn` 宣言集合が期待と一致しない（過不足いずれも fail-closed\
+         に検出する。facade への新規宣言が紛れ込んでいないか、9\
+         optimizer 以外への実装漏れ・過剰実装がないかを含めて確認\
+         すること）: {found:?}"
+    );
+}

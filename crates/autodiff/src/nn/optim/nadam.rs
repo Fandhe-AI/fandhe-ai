@@ -33,6 +33,8 @@
 //! `adamw.rs` とは異なり、PyTorch の state dtype に合わせて `f32` で
 //! 持つ）。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -294,6 +296,77 @@ impl NAdam {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "nadam"`・バッファ名
+/// `exp_avg`／`exp_avg_sq`・`beta2_pow_t`／`mu_product` あり
+/// （`beta1_pow_t` なし。NAdam は `beta1` の bias correction を
+/// `mu_product` で表現する）。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for NAdam {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(4 + self.states.len() * 2);
+        out.insert(
+            super::state_dict::marker_key("nadam"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::BETA2_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta2_pow_t)?,
+        );
+        out.insert(
+            super::state_dict::MU_PRODUCT_KEY.to_string(),
+            Tensor::new(vec![self.mu_product], &[1])?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "exp_avg"),
+                Tensor::new(slot.exp_avg.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "exp_avg_sq"),
+                Tensor::new(slot.exp_avg_sq.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded = super::state_dict::decode_state_dict(
+            "nadam",
+            &state,
+            &["exp_avg", "exp_avg_sq"],
+            false,
+            true,
+            true,
+        )?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let exp_avg = buffers.remove("exp_avg").unwrap_or_default();
+                let exp_avg_sq = buffers.remove("exp_avg_sq").unwrap_or_default();
+                SlotState {
+                    shape,
+                    exp_avg,
+                    exp_avg_sq,
+                }
+            })
+            .collect();
+        self.step_count = decoded.step_count;
+        self.beta2_pow_t = decoded.beta2_pow_t.unwrap_or(1.0);
+        self.mu_product = decoded.mu_product.unwrap_or(1.0);
+        self.states = states;
+        Ok(())
     }
 }
 

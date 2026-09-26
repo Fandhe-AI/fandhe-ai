@@ -13,6 +13,8 @@
 //! 既存の不変更新パターン（`tests/nn_train_convergence.rs`）にそのまま
 //! 差し込める。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -303,6 +305,68 @@ impl AdamW {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "adamw"`・バッファ名 `m`／`v`・
+/// `beta1_pow_t`／`beta2_pow_t` あり・`mu_product` なし。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for AdamW {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(4 + self.states.len() * 2);
+        out.insert(
+            super::state_dict::marker_key("adamw"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::BETA1_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta1_pow_t)?,
+        );
+        out.insert(
+            super::state_dict::BETA2_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta2_pow_t)?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "m"),
+                Tensor::new(slot.m.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "v"),
+                Tensor::new(slot.v.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded =
+            super::state_dict::decode_state_dict("adamw", &state, &["m", "v"], true, true, false)?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let m = buffers.remove("m").unwrap_or_default();
+                let v = buffers.remove("v").unwrap_or_default();
+                SlotState { shape, m, v }
+            })
+            .collect();
+        // ここまでの検証（`decode_state_dict`）を全件通過した後にのみ
+        // 自身のフィールドを一括代入する（途中で `Err` の場合 `self` は
+        // 一切変わらない。`state_dict` モジュール冒頭 doc「検証順」節）。
+        self.step_count = decoded.step_count;
+        self.beta1_pow_t = decoded.beta1_pow_t.unwrap_or(1.0);
+        self.beta2_pow_t = decoded.beta2_pow_t.unwrap_or(1.0);
+        self.states = states;
+        Ok(())
     }
 }
 

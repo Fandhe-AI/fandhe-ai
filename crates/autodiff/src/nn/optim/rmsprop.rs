@@ -22,6 +22,8 @@
 //! 共通化による bit ドリフトを検出できないため。イシュー #1743
 //! 実装計画 §3.2）。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -343,6 +345,73 @@ impl RmsProp {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "rmsprop"`・バッファ名
+/// `square_avg`／`grad_avg`／`momentum_buffer`（config に関係なく常に
+/// 3 本確保されているため、キー集合は config に依存しない）・
+/// `beta*_pow_t`／`mu_product` なし。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for RmsProp {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(2 + self.states.len() * 3);
+        out.insert(
+            super::state_dict::marker_key("rmsprop"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "square_avg"),
+                Tensor::new(slot.square_avg.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "grad_avg"),
+                Tensor::new(slot.grad_avg.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "momentum_buffer"),
+                Tensor::new(slot.momentum_buffer.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded = super::state_dict::decode_state_dict(
+            "rmsprop",
+            &state,
+            &["square_avg", "grad_avg", "momentum_buffer"],
+            false,
+            false,
+            false,
+        )?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let square_avg = buffers.remove("square_avg").unwrap_or_default();
+                let grad_avg = buffers.remove("grad_avg").unwrap_or_default();
+                let momentum_buffer = buffers.remove("momentum_buffer").unwrap_or_default();
+                SlotState {
+                    shape,
+                    square_avg,
+                    grad_avg,
+                    momentum_buffer,
+                }
+            })
+            .collect();
+        self.step_count = decoded.step_count;
+        self.states = states;
+        Ok(())
     }
 }
 

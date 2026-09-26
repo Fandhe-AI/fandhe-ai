@@ -20,6 +20,8 @@
 //! `BackendOps` に一切依存しない値型・純関数であり、新規 `Op`／
 //! `BackendOps` メソッド／VJP は追加していない（カーネルなし）。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -270,6 +272,72 @@ impl Adamax {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "adamax"`・バッファ名
+/// `exp_avg`／`exp_inf`・`beta1_pow_t` あり（`beta2_pow_t`／
+/// `mu_product` なし。Adamax は `beta2`〈`exp_inf` の無限norm 更新〉に
+/// bias correction を適用しない）。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for Adamax {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(3 + self.states.len() * 2);
+        out.insert(
+            super::state_dict::marker_key("adamax"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::BETA1_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta1_pow_t)?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "exp_avg"),
+                Tensor::new(slot.exp_avg.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "exp_inf"),
+                Tensor::new(slot.exp_inf.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded = super::state_dict::decode_state_dict(
+            "adamax",
+            &state,
+            &["exp_avg", "exp_inf"],
+            true,
+            false,
+            false,
+        )?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let exp_avg = buffers.remove("exp_avg").unwrap_or_default();
+                let exp_inf = buffers.remove("exp_inf").unwrap_or_default();
+                SlotState {
+                    shape,
+                    exp_avg,
+                    exp_inf,
+                }
+            })
+            .collect();
+        self.step_count = decoded.step_count;
+        self.beta1_pow_t = decoded.beta1_pow_t.unwrap_or(1.0);
+        self.states = states;
+        Ok(())
     }
 }
 
