@@ -3,15 +3,21 @@
 //! - `proto`: protobuf デコード（`prost` 手書き derive、`protoc` 非依存。TASK-7.2a）
 //! - `graph`: `ModelProto` -> 内部グラフ表現（トポロジカル順検証・initializer 復号。TASK-7.2a）
 //! - `interp`: グラフ実行インタープリタ（`Graph` のノード列を `ops::*` へディスパッチ。
-//!   TASK-7.2b・イシュー #78）
+//!   TASK-7.2b・イシュー #78。import 対応は 28 op〈イシュー #2200 で `GlobalAveragePool`／
+//!   `BatchNormalization`／`Flatten`、イシュー #2199 で `MaxPool`／`AveragePool` を追加〉）
 //! - `export`: 内部グラフ表現 `Graph` -> `GraphProto`／`ModelProto` への降下
 //!   （`graph` の逆方向。イシュー #1772）。`build_model_proto` は `export_ops`
 //!   （内部 op -> `NodeProto` の意味論的マッピング。#1773）の
 //!   `check_exportable` を経由してから組み立てる。
-//! - `export_ops`: export allowlist の 23 op の逆マッピング（`ExportOp` ->
-//!   `NodeProto`。イシュー #1773）。`interp` の import 対応 25 op（イシュー
-//!   #2199 で `MaxPool`／`AveragePool` を追加）のうち import 専用の 2 op を
-//!   除いたもの。`export` から `pub use` で再エクスポートする。
+//! - `export_ops`: `interp` が対応する 28 op のうち export allowlist に含まれる
+//!   ものの逆マッピング（`ExportOp` -> `NodeProto`。イシュー #1773）。`export` から
+//!   `pub use` で再エクスポートする。**import（`interp`）と export（`export_ops`）
+//!   の対応 op 数は非対称**（イシュー #2200 で `GlobalAveragePool`／
+//!   `BatchNormalization`／`Flatten`、イシュー #2199 で `MaxPool`／`AveragePool`
+//!   を import へ追加した一方、export allowlist は 23 op のまま。これら 5 op は
+//!   import のみ対応し、これらを含むグラフの export は
+//!   `OnnxError::UnsupportedOp` で拒否される。`tests/onnx_export_ops.rs`
+//!   参照）。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
 //!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し
 //!   （イシュー #2036。本モジュール自体は本クレート内部限定のまま
