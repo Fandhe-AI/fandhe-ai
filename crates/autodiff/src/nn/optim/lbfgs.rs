@@ -649,9 +649,10 @@ fn abs_max(a: &[f32]) -> f32 {
 /// `x += t·d` 更新直後のフラット化パラメータに非有限値
 /// （overflow 由来の `inf`／`NaN`）が含まれないか検査する
 /// （`.claude/rules/security.md` A03。イシュー #2197 レビュー是正・
-/// discussion_r4110451838/r4110471293）。呼び出し元
-/// [`Lbfgs::try_step_closure`] はローカル作業コピー上で反復するため、
-/// ここで `Err` を返しても `self` の状態は変更されない。
+/// discussion_r4110451838/r4110471293・discussion_r4110528423）。呼び出し元
+/// [`Lbfgs::try_step_closure`]・[`directional_evaluate`] はいずれもローカル
+/// 作業コピー上で反復するため、ここで `Err` を返しても `self` の状態は
+/// 変更されない。
 fn ensure_finite_params(x: &[f32]) -> Result<(), AutodiffError> {
     if x.iter().any(|v| !v.is_finite()) {
         return Err(AutodiffError::InvalidArgument(
@@ -716,6 +717,11 @@ where
     for k in 0..trial.len() {
         trial[k] = f32::mul_add(t, d[k], trial[k]);
     }
+    // `x + t·d` の overflow により生じうる非有限値を closure へ渡す前に検査する
+    // （codex-review 指摘・PR #2295 discussion_r4110528423。有限な初期パラメータ・
+    // 勾配・学習率でも t が大きい場合は overflow しうるため、closure 呼び出し前に
+    // 検証する必要がある）。
+    ensure_finite_params(&trial)?;
     let trial_params = unflatten_tensors(&trial, slot_shapes)?;
     let (loss, grads) = closure(&trial_params)?;
     validate_closure_output(slot_shapes, loss, &grads)?;
@@ -1343,5 +1349,30 @@ mod tests {
             0,
             "エラー時は func_evals が呼び出し前のまま"
         );
+    }
+
+    #[test]
+    fn directional_evaluate_rejects_non_finite_trial_without_calling_closure() {
+        // `trial = x + t·d` の overflow で非有限値が生じる場合、
+        // `unflatten_tensors`／`closure` 呼び出し前に `ensure_finite_params`
+        // で弾くことを直接検証する（codex-review 指摘・PR #2295
+        // discussion_r4110528423）。`directional_evaluate` は同一モジュール
+        // 内 private のためテストから直接呼び出せる。
+        let mut called = false;
+        let x = [f32::MAX];
+        let d = [f32::MAX];
+        let slot_shapes = vec![vec![1]];
+        let result = directional_evaluate(
+            &mut |_p: &[Tensor<f32>]| -> Result<(f32, Vec<Tensor<f32>>), AutodiffError> {
+                called = true;
+                Ok((0.0, vec![t(vec![1.0], &[1])]))
+            },
+            &slot_shapes,
+            &x,
+            2.0,
+            &d,
+        );
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+        assert!(!called, "非有限な trial は closure 呼び出し前に弾かれる");
     }
 }
