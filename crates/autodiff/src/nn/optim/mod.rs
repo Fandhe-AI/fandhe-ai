@@ -226,9 +226,10 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // `docs/autodiff-param-groups-decision.md` 参照）。新規 `Op`／
 // `BackendOps` メソッド／VJP／カーネル／`unsafe`／依存は追加していない
 // （ホストの `Tensor<f32>` 経路のみ）。`crate::optim::device_store::
-// DeviceParamStore` の group 対応は対象外のまま。`Adadelta`／
-// `Adamax`／`NAdam`／`RAdam`（#2171。下記）も `ParamGroupStep` を
-// 実装済み（本ブランチで main の #2171 を取り込んだ際に横展開）。
+// DeviceParamStore` の group 対応は対象外のまま。本イシューと並行して
+// 追加された `Adadelta`／`Adamax`／`NAdam`／`RAdam`（#2171。下記）へは
+// `ParamGroupStep` を実装していない（実装対象は上記 6 種のみ。
+// `docs/autodiff-param-groups-decision.md` §6 参照）。
 //
 // イシュー #2171（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 // 行内深掘り）」）: Adadelta（[`Adadelta`]・[`AdadeltaConfig`]。Zeiler,

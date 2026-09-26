@@ -161,6 +161,9 @@ doctest）・`crates/facade/tests/api_surface.rs` の 4 テスト
 - `crate::optim::device_store::DeviceParamStore` 常駐経路の group 対応
 - `Optimizer` enum 拡張（#2170 の担当）
 - optimizer state_dict へのグループ保存（#2174 の担当）
+- 本イシューと並行して追加された `Adadelta`／`Adamax`／`NAdam`／`RAdam`
+  （#2171）への `ParamGroupStep` 実装（`param_group.rs` の実装対象は
+  上記 6 optimizer のみ）
 - 追跡 Issue の起票は承認なしに行わない規約（`out-of-scope-tracking.md`）
   に従い、必要なら PR 上でユーザーへ提案する
 
