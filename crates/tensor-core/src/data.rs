@@ -142,6 +142,18 @@ pub enum DataError {
     /// 収集後の列が空になることは無いが、[`default_collate`] を直接
     /// 呼び出す利用者向けに防御的に定義する。イシュー #2182）。
     EmptyBatch,
+    /// [`PrefetchConfig::new`] の構築時検査に失敗した（`prefetch_depth`
+    /// がゼロ、または `num_workers` が [`PREFETCH_MAX_WORKERS`] を
+    /// 超える。イシュー #2183）。
+    InvalidPrefetchConfig { reason: &'static str },
+    /// [`PrefetchDataLoader::iter`] が worker スレッドの起動
+    /// （`std::thread::Builder::spawn`）に失敗した（イシュー #2183）。
+    WorkerSpawn { reason: String },
+    /// [`PrefetchBatches`] の worker が `batch_index` 番目の結果を
+    /// 返さないまま終了した（panic 等）。§2.3 のライフサイクル契約に
+    /// 従い、この位置で 1 回だけ yield し以降は `None` を返す
+    /// （イシュー #2183）。
+    WorkerFailed { batch_index: usize },
 }
 
 impl From<ShapeError> for DataError {
@@ -188,6 +200,18 @@ impl std::fmt::Display for DataError {
                 "collate 対象のサンプル {position} の shape {found:?} が先頭サンプルの shape {expected:?} と一致しない"
             ),
             DataError::EmptyBatch => write!(f, "collate 対象のサンプル列が空"),
+            DataError::InvalidPrefetchConfig { reason } => {
+                write!(f, "PrefetchConfig の構築時検査に失敗: {reason}")
+            }
+            DataError::WorkerSpawn { reason } => {
+                write!(f, "prefetch worker スレッドの起動に失敗: {reason}")
+            }
+            DataError::WorkerFailed { batch_index } => {
+                write!(
+                    f,
+                    "prefetch worker がバッチ {batch_index} の結果を返さずに終了した"
+                )
+            }
         }
     }
 }
@@ -591,9 +615,9 @@ impl<'a, D: Dataset> IntoIterator for &'a DataLoader<D> {
 /// - [`Self::num_batches`] が `Some` を返す実装では、その値が
 ///   [`Self::next_batch`] が実際に空以外を返す回数と一致する
 ///   （`ExactSizeIterator` 相当の `size_hint` に用いる）。
-/// - `Send`: 将来のマルチワーカー化（#2181 の番号は issue 本文の誤記。
-///   `docs/tensor-core-data-sampler-hooks-decision.md` §6 参照）に
-///   備え、ローダー型を `Send` に保つための境界。
+/// - `Send`: マルチワーカー化（[`PrefetchDataLoader`]。イシュー #2183・
+///   `docs/tensor-core-data-sampler-hooks-decision.md` §6）に備え、
+///   ローダー型を `Send` に保つための境界。
 pub trait Sampler: Send {
     /// epoch 開始時に 1 回呼ぶ。抽選を伴う実装はここで確定させる。
     fn start_epoch(&mut self) -> Result<(), DataError>;
@@ -972,6 +996,448 @@ impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
             }
             None => (0, None),
         }
+    }
+}
+
+/// [`PrefetchConfig::new`] が受け付ける `num_workers` の上限（イシュー
+/// #2183）。無制限にスレッドを生成できると、誤操作・敵対的な設定値
+/// いずれの経路でも OS スレッド資源を枯渇させうるため、構築時に
+/// fail-closed で拒否する（OWASP A04。モジュール冒頭 OWASP 節）。
+pub const PREFETCH_MAX_WORKERS: usize = 64;
+
+/// マルチワーカー prefetch（イシュー #2183・親 #2131）の設定。
+/// [`PrefetchDataLoader::new`] に渡す。
+///
+/// # rayon ではなく `std::thread` を使う理由
+///
+/// `crates/tensor-core/Cargo.toml` の直接依存は [`crate::element::
+/// Element`] が要求する `half` のみであり、rayon を追加すると
+/// `.claude/rules/deps-policy.md` の許容依存区分への新規追加になる
+/// （ユーザー承認が必要な変更であり本イシューのスコープ外。
+/// `docs/tensor-core-data-prefetch-decision.md` §2.1 に承認事項として
+/// 記録する）。加えて `backend-cpu` の GEMM 等は rayon のグローバル
+/// pool を使うため、loader の worker を同じ pool に載せると学習ステップの
+/// カーネルと prefetch 用の worker が競合する。専用の OS スレッド
+/// （`std::thread::Builder::spawn`）ならこの競合を避けられる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefetchConfig {
+    num_workers: usize,
+    prefetch_depth: usize,
+}
+
+impl PrefetchConfig {
+    /// `num_workers`（起動する worker スレッド数。`0` は
+    /// [`PrefetchDataLoader`] を逐次経路〈スレッドを起動せず呼び出し
+    /// スレッド上で処理する。PyTorch `num_workers=0` と同じ意味〉に
+    /// する）・`prefetch_depth`（in-flight で許容するバッチ数の上限。
+    /// メモリ使用量はおおよそ `prefetch_depth` バッチ分に収まる）を
+    /// 検証してから構築する。`prefetch_depth == 0`（先読み無しは非対応）
+    /// または `num_workers` が [`PREFETCH_MAX_WORKERS`] を超える場合は
+    /// [`DataError::InvalidPrefetchConfig`]。
+    pub fn new(num_workers: usize, prefetch_depth: usize) -> Result<Self, DataError> {
+        if prefetch_depth == 0 {
+            return Err(DataError::InvalidPrefetchConfig {
+                reason: "prefetch_depth はゼロにできない（先読み 0 バッチは非対応）",
+            });
+        }
+        if num_workers > PREFETCH_MAX_WORKERS {
+            return Err(DataError::InvalidPrefetchConfig {
+                reason: "num_workers が上限（PREFETCH_MAX_WORKERS）を超えている",
+            });
+        }
+        Ok(Self {
+            num_workers,
+            prefetch_depth,
+        })
+    }
+
+    /// 設定された worker スレッド数。
+    pub fn num_workers(&self) -> usize {
+        self.num_workers
+    }
+
+    /// 設定された prefetch 深さ（in-flight バッチ数の上限）。
+    pub fn prefetch_depth(&self) -> usize {
+        self.prefetch_depth
+    }
+}
+
+/// マルチワーカー prefetch 版の [`SamplerDataLoader`]（イシュー
+/// #2183・親 #2131）。[`Sampler`] が返す添字列を worker スレッドへ
+/// 分配して並列に [`Dataset::batch`] を実行し、バッチ組み立て
+/// （ホスト側コピー・前処理）を学習ステップと重ねる。
+///
+/// # 決定性の契約（R2）
+///
+/// [`Self::iter`] は呼び出しスレッド上で [`Sampler::start_epoch`] を
+/// 1 回呼び、その後 [`Sampler::next_batch`] を空の番兵が出るまで呼んで
+/// 全バッチの添字列を **eager に** `Vec<Vec<usize>>` として確定する
+/// （モジュール冒頭「シャッフル契約」と同じ「1 回のクロージャ内で
+/// RNG 消費を完結させる」方式を踏襲——RNG を消費するのはこの eager
+/// 確定だけで、worker はグローバル RNG に一切触れない）。worker は
+/// `dataset.batch(&indices[k])` だけを実行し、結果は呼び出し順 `k` で
+/// 並べ直してから yield する（reorder buffer）。
+///
+/// この結果、任意の `(num_workers, prefetch_depth)` の組み合わせで、
+/// 出力列（`Err` の位置と内容を含む）は同じ [`Sampler`] を使う
+/// [`SamplerDataLoader`] と bit 完全一致する。前提は [`Dataset::batch`]
+/// が添字だけで決まる純関数であること（[`TensorDataset`] とタプル
+/// 実装は該当）。
+///
+/// transform／collate フック（[`HookedDataLoader`] 相当）の並列化は
+/// 対象外（worker 上の transform がグローバル RNG を使うと消費順が
+/// スケジューリングに依存し決定性契約を破るため。
+/// `docs/tensor-core-data-prefetch-decision.md` §2.2）。
+///
+/// # ライフサイクル
+///
+/// [`PrefetchBatches`] は `Drop` でタスク送信側を閉じ worker の
+/// `join` を待つ。イテレータを最後まで消費せず `break` した場合も、
+/// 送信側・受信側の drop により worker は `send`／`recv` のエラーで
+/// 自然に終了する（デッドロックしない。`join` の結果は捨てるため
+/// worker の panic がここへ波及しない）。
+pub struct PrefetchDataLoader<D: Dataset> {
+    dataset: std::sync::Arc<D>,
+    sampler: Box<dyn Sampler>,
+    config: PrefetchConfig,
+}
+
+impl<D> std::fmt::Debug for PrefetchDataLoader<D>
+where
+    D: Dataset,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrefetchDataLoader").finish_non_exhaustive()
+    }
+}
+
+impl<D> PrefetchDataLoader<D>
+where
+    D: Dataset + Send + Sync + 'static,
+    D::Batch: Send + 'static,
+{
+    /// `dataset.validate()` を実行してから構築する（[`SamplerDataLoader::
+    /// new`] と同じ契約）。`dataset` は `Arc` で保持し worker 間で共有
+    /// する。
+    pub fn new(
+        dataset: D,
+        sampler: impl Sampler + 'static,
+        config: PrefetchConfig,
+    ) -> Result<Self, DataError> {
+        dataset.validate()?;
+        Ok(Self {
+            dataset: std::sync::Arc::new(dataset),
+            sampler: Box::new(sampler),
+            config,
+        })
+    }
+
+    /// 保持するデータセットへの参照。
+    pub fn dataset(&self) -> &D {
+        &self.dataset
+    }
+
+    /// 構築時に渡した [`PrefetchConfig`]。
+    pub fn config(&self) -> PrefetchConfig {
+        self.config
+    }
+
+    /// 1 epoch あたりのバッチ数（[`Sampler::num_batches`] が `Some` を
+    /// 返す場合のみ）。
+    pub fn num_batches(&self) -> Option<usize> {
+        self.sampler.num_batches()
+    }
+
+    /// 1 epoch 分のイテレータを返す。`start_epoch` が失敗した場合は
+    /// スレッドを起動せず、最初の `next()` で 1 回だけ `Err` を返し
+    /// 以降は `None`（[`SamplerBatches`] の `pending_error` と同じ
+    /// 方式）。`config.num_workers() == 0` の場合もスレッドを起動せず、
+    /// 呼び出しスレッド上で逐次に処理する。
+    pub fn iter(&mut self) -> PrefetchBatches<D> {
+        match self.sampler.start_epoch() {
+            Err(err) => PrefetchBatches::with_pending_error(err),
+            Ok(()) => {
+                let mut indices: Vec<Vec<usize>> = Vec::new();
+                loop {
+                    let batch = self.sampler.next_batch();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    indices.push(batch);
+                }
+                PrefetchBatches::spawn(std::sync::Arc::clone(&self.dataset), indices, self.config)
+            }
+        }
+    }
+}
+
+/// worker → consumer の結果メッセージ 1 件（呼び出し順 `k` と
+/// `Dataset::batch` の結果）。`clippy::type_complexity` 対策の型
+/// エイリアス（[`PrefetchBatches`]・[`PrefetchBatches::spawn`] が使う）。
+type PrefetchResultMsg<D> = (usize, Result<<D as Dataset>::Batch, DataError>);
+
+/// [`PrefetchDataLoader::iter`] が返す 1 epoch 分のバッチイテレータ
+/// （イシュー #2183）。`num_workers() >= 1` の場合は worker スレッド群
+/// （タスクは共有 `Receiver` を `Mutex` 越しに取り合う。結果は
+/// `mpsc::Sender` を worker ごとに `clone` して送る）を保持し、
+/// `delivered + prefetch_depth` を超えない範囲でタスクを先行投入する
+/// ことで in-flight バッチ数を [`PrefetchConfig::prefetch_depth`] 以下に
+/// 抑える。`num_workers() == 0` の場合はスレッドを一切使わず
+/// `dataset.batch` を直接呼ぶ。
+pub struct PrefetchBatches<D: Dataset> {
+    /// 逐次経路（`num_workers == 0`）専用。並列経路では `None`。
+    dataset: Option<std::sync::Arc<D>>,
+    /// eager に確定済みの添字列（`indices[k]` がバッチ `k` の添字）。
+    indices: Vec<Vec<usize>>,
+    total: usize,
+    /// 呼び出し元へ既に yield したバッチ数（次に yield すべき `k`）。
+    delivered: usize,
+    /// 並列経路: 次にタスクとして投入すべき `k`（逐次経路では未使用）。
+    next_to_send: usize,
+    task_tx: Option<std::sync::mpsc::Sender<(usize, Vec<usize>)>>,
+    result_rx: Option<std::sync::mpsc::Receiver<PrefetchResultMsg<D>>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// 呼び出し順より先に届いた結果を `k` の順に並べ直すまで保持する
+    /// （reorder buffer。決定性契約——出力順は `k` の昇順に固定する）。
+    reorder: std::collections::BTreeMap<usize, Result<D::Batch, DataError>>,
+    pending_error: Option<DataError>,
+    done: bool,
+}
+
+impl<D: Dataset> PrefetchBatches<D> {
+    fn with_pending_error(err: DataError) -> Self {
+        Self {
+            dataset: None,
+            indices: Vec::new(),
+            total: 0,
+            delivered: 0,
+            next_to_send: 0,
+            task_tx: None,
+            result_rx: None,
+            workers: Vec::new(),
+            reorder: std::collections::BTreeMap::new(),
+            pending_error: Some(err),
+            done: false,
+        }
+    }
+}
+
+impl<D> PrefetchBatches<D>
+where
+    D: Dataset + Send + Sync + 'static,
+    D::Batch: Send + 'static,
+{
+    /// `indices` が確定した後、`config` に従って worker を起動する
+    /// （`num_workers == 0` または `indices` が空ならスレッドを起動
+    /// しない逐次経路）。
+    fn spawn(dataset: std::sync::Arc<D>, indices: Vec<Vec<usize>>, config: PrefetchConfig) -> Self {
+        let total = indices.len();
+        if config.num_workers() == 0 || total == 0 {
+            return Self {
+                dataset: Some(dataset),
+                indices,
+                total,
+                delivered: 0,
+                next_to_send: 0,
+                task_tx: None,
+                result_rx: None,
+                workers: Vec::new(),
+                reorder: std::collections::BTreeMap::new(),
+                pending_error: None,
+                done: total == 0,
+            };
+        }
+
+        let (task_tx, task_rx) = std::sync::mpsc::channel::<(usize, Vec<usize>)>();
+        let task_rx = std::sync::Arc::new(std::sync::Mutex::new(task_rx));
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<PrefetchResultMsg<D>>();
+
+        let mut workers = Vec::with_capacity(config.num_workers());
+        let mut spawn_err: Option<DataError> = None;
+        for worker_id in 0..config.num_workers() {
+            let task_rx = std::sync::Arc::clone(&task_rx);
+            let result_tx = result_tx.clone();
+            let dataset = std::sync::Arc::clone(&dataset);
+            let build = std::thread::Builder::new()
+                .name(format!("fandhe-ai-prefetch-{worker_id}"))
+                .spawn(move || {
+                    // タスクキューが閉じられる（送信側 `task_tx` の drop）
+                    // か、結果チャネルの受信側が drop された（consumer が
+                    // 早期 `break` した）ら自然に終了する（デッドロック
+                    // しない。§2.3 ライフサイクル節）。
+                    loop {
+                        let task = {
+                            let Ok(rx) = task_rx.lock() else {
+                                break; // consumer 側 panic による poisoning
+                            };
+                            rx.recv()
+                        };
+                        let Ok((k, idx)) = task else {
+                            break;
+                        };
+                        let result = dataset.batch(&idx);
+                        if result_tx.send((k, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            match build {
+                Ok(handle) => workers.push(handle),
+                Err(err) => {
+                    spawn_err = Some(DataError::WorkerSpawn {
+                        reason: err.to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+
+        if let Some(err) = spawn_err {
+            // 起動済みの worker を終了させてから起動失敗を伝える。
+            drop(task_tx);
+            for handle in workers {
+                let _ = handle.join();
+            }
+            return Self::with_pending_error(err);
+        }
+
+        // `delivered + prefetch_depth` を超えない範囲で先行投入する。
+        let mut next_to_send = 0usize;
+        let initial = config.prefetch_depth().min(total);
+        for _ in 0..initial {
+            let _ = task_tx.send((next_to_send, indices[next_to_send].clone()));
+            next_to_send += 1;
+        }
+
+        Self {
+            dataset: None,
+            indices,
+            total,
+            delivered: 0,
+            next_to_send,
+            task_tx: Some(task_tx),
+            result_rx: Some(result_rx),
+            workers,
+            reorder: std::collections::BTreeMap::new(),
+            pending_error: None,
+            done: false,
+        }
+    }
+
+    /// `delivered` を進め、残タスクがあれば 1 件だけ追加投入する
+    /// （in-flight 数を `prefetch_depth` 以下に保つ）。
+    fn advance_after_delivery(&mut self) {
+        self.delivered += 1;
+        if self.next_to_send < self.total {
+            if let Some(tx) = &self.task_tx {
+                let _ = tx.send((self.next_to_send, self.indices[self.next_to_send].clone()));
+            }
+            self.next_to_send += 1;
+        }
+        if self.delivered >= self.total {
+            self.done = true;
+        }
+    }
+}
+
+impl<D: Dataset> Drop for PrefetchBatches<D> {
+    fn drop(&mut self) {
+        // 送信側を先に閉じてタスクキューを枯渇させ、受信側を drop して
+        // worker の `send` を即座にエラーにする。その後 `join` の結果は
+        // 捨てる（worker の panic が drop 時の panic に波及しないように
+        // する。§2.3 ライフサイクル節）。
+        self.task_tx.take();
+        self.result_rx.take();
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl<D> Iterator for PrefetchBatches<D>
+where
+    D: Dataset + Send + Sync + 'static,
+    D::Batch: Send + 'static,
+{
+    type Item = Result<D::Batch, DataError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(err) = self.pending_error.take() {
+            self.done = true;
+            return Some(Err(err));
+        }
+        if self.done {
+            return None;
+        }
+
+        // 逐次経路（`num_workers == 0`）: スレッドを介さず直接処理する。
+        if self.task_tx.is_none() && self.result_rx.is_none() {
+            if self.delivered >= self.total {
+                self.done = true;
+                return None;
+            }
+            let idx = &self.indices[self.delivered];
+            let result = self
+                .dataset
+                .as_ref()
+                .expect("逐次経路は dataset を Some で保持する（spawn の構築契約）")
+                .batch(idx);
+            self.delivered += 1;
+            if self.delivered >= self.total {
+                self.done = true;
+            }
+            return Some(result);
+        }
+
+        if self.delivered >= self.total {
+            self.done = true;
+            return None;
+        }
+
+        // reorder buffer に既に届いていれば即座に yield する。
+        if let Some(result) = self.reorder.remove(&self.delivered) {
+            self.advance_after_delivery();
+            return Some(result);
+        }
+
+        let Some(rx) = self.result_rx.as_ref() else {
+            self.done = true;
+            return Some(Err(DataError::WorkerFailed {
+                batch_index: self.delivered,
+            }));
+        };
+        loop {
+            match rx.recv() {
+                Ok((k, result)) => {
+                    if k == self.delivered {
+                        self.advance_after_delivery();
+                        return Some(result);
+                    }
+                    self.reorder.insert(k, result);
+                }
+                Err(_) => {
+                    // 全 worker の送信側が終了したのに目的の位置が届いて
+                    // いない（panic 等で結果が失われた。§2.3 ライフ
+                    // サイクル節）。この位置で 1 回だけ yield し、以降は
+                    // `None` を返す。
+                    self.done = true;
+                    return Some(Err(DataError::WorkerFailed {
+                        batch_index: self.delivered,
+                    }));
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.pending_error.is_some() {
+            return (1, Some(1));
+        }
+        if self.done {
+            return (0, Some(0));
+        }
+        let remaining = self.total.saturating_sub(self.delivered);
+        (remaining, Some(remaining))
     }
 }
 
@@ -2241,5 +2707,291 @@ mod tests {
         // されるため、既存の auto trait（`Send`／`Sync`。`Dataset` 実装が
         // 両方を満たす場合）は本イシューの変更で退行しない。
         assert_send::<DataLoader<TensorDataset<f32>>>();
+        assert_send::<PrefetchDataLoader<TensorDataset<f32>>>();
+    }
+
+    // ---- マルチワーカー prefetch（イシュー #2183） ----
+
+    #[test]
+    fn prefetch_config_rejects_zero_depth_and_worker_overflow() {
+        assert_eq!(
+            PrefetchConfig::new(2, 0).unwrap_err(),
+            DataError::InvalidPrefetchConfig {
+                reason: "prefetch_depth はゼロにできない（先読み 0 バッチは非対応）",
+            }
+        );
+        assert_eq!(
+            PrefetchConfig::new(PREFETCH_MAX_WORKERS + 1, 1).unwrap_err(),
+            DataError::InvalidPrefetchConfig {
+                reason: "num_workers が上限（PREFETCH_MAX_WORKERS）を超えている",
+            }
+        );
+        let cfg = PrefetchConfig::new(4, 8).unwrap();
+        assert_eq!(cfg.num_workers(), 4);
+        assert_eq!(cfg.prefetch_depth(), 8);
+    }
+
+    /// `(workers, depth)` の全組み合わせで [`SamplerDataLoader`]（同じ
+    /// `Sampler` 種別のインスタンスを別途構築）と bit 完全一致すること
+    /// （AC R2）。`SequentialSampler`（RNG 非消費）で検証する。
+    #[test]
+    fn prefetch_matches_sampler_data_loader_sequential() {
+        let expected: Vec<Vec<f32>> = {
+            let mut loader = SamplerDataLoader::new(
+                TensorDataset::new(tensor_2d(11, 2)).unwrap(),
+                SequentialSampler::new(11, 3, false).unwrap(),
+            )
+            .unwrap();
+            loader
+                .iter()
+                .map(|b| b.unwrap().host_slice().to_vec())
+                .collect()
+        };
+
+        for workers in [0usize, 1, 2, 4] {
+            for depth in [1usize, 2, 8] {
+                let cfg = PrefetchConfig::new(workers, depth).unwrap();
+                let mut loader = PrefetchDataLoader::new(
+                    TensorDataset::new(tensor_2d(11, 2)).unwrap(),
+                    SequentialSampler::new(11, 3, false).unwrap(),
+                    cfg,
+                )
+                .unwrap();
+                let actual: Vec<Vec<f32>> = loader
+                    .iter()
+                    .map(|b| b.unwrap().host_slice().to_vec())
+                    .collect();
+                assert_eq!(
+                    actual, expected,
+                    "workers={workers} depth={depth} で SamplerDataLoader と不一致"
+                );
+            }
+        }
+    }
+
+    /// `RandomSampler` 経由の prefetch が `DataLoader{shuffle=true}` と
+    /// 添字順・出力とも bit 完全一致すること（#2182 で確立済みの等価性を
+    /// prefetch 経路へ拡張）。epoch 後のグローバル RNG 状態も一致する
+    /// ことをあわせて確認する。
+    #[test]
+    fn prefetch_random_sampler_matches_shuffle_true_data_loader_and_rng_state() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        manual_seed(4242);
+        let expected: Vec<Vec<f32>> = {
+            let loader = DataLoader::new(
+                TensorDataset::new(tensor_2d(10, 2)).unwrap(),
+                DataLoaderConfig::new(3).shuffle(true),
+            )
+            .unwrap();
+            loader
+                .iter()
+                .map(|b| b.unwrap().host_slice().to_vec())
+                .collect()
+        };
+        let expected_rng_after: Vec<f32> = crate::rng::rand(&[3]).unwrap().host_slice().to_vec();
+
+        for workers in [0usize, 2, 4] {
+            for depth in [1usize, 2, 8] {
+                manual_seed(4242);
+                let cfg = PrefetchConfig::new(workers, depth).unwrap();
+                let mut loader = PrefetchDataLoader::new(
+                    TensorDataset::new(tensor_2d(10, 2)).unwrap(),
+                    RandomSampler::new(10, 3, false).unwrap(),
+                    cfg,
+                )
+                .unwrap();
+                let actual: Vec<Vec<f32>> = loader
+                    .iter()
+                    .map(|b| b.unwrap().host_slice().to_vec())
+                    .collect();
+                assert_eq!(
+                    actual, expected,
+                    "workers={workers} depth={depth} で DataLoader{{shuffle=true}} と不一致"
+                );
+                let after: Vec<f32> = crate::rng::rand(&[3]).unwrap().host_slice().to_vec();
+                assert_eq!(
+                    after, expected_rng_after,
+                    "workers={workers} depth={depth} で epoch 後の RNG 状態が逐次版と不一致"
+                );
+            }
+        }
+    }
+
+    /// 添字だけで決まる `Dataset` に対する `Sampler` が特定位置で失敗を
+    /// 返す場合、prefetch 版でも逐次版（[`SamplerDataLoader`]）と同じ
+    /// 位置に `Err` が現れ、その前後の yield 内容も一致すること。
+    /// `Dataset::batch` の `Err`（[`DataError::IndexOutOfRange`]）は
+    /// [`Sampler`] の枯渇とは独立の事象であり、[`SamplerBatches::next`]
+    /// と同じく epoch を打ち切らない（`custom_sampler_out_of_range_
+    /// is_index_out_of_range` と同じ既存契約）。
+    #[derive(Clone)]
+    struct FailAtSampler {
+        len: usize,
+        batch_size: usize,
+        fail_at: usize,
+        cursor: usize,
+    }
+
+    impl Sampler for FailAtSampler {
+        fn start_epoch(&mut self) -> Result<(), DataError> {
+            self.cursor = 0;
+            Ok(())
+        }
+
+        fn next_batch(&mut self) -> Vec<usize> {
+            if self.cursor >= self.len {
+                return Vec::new();
+            }
+            let idx = self.cursor;
+            self.cursor += self.batch_size;
+            if idx == self.fail_at {
+                vec![9999] // out of range → Dataset::batch が Err を返す
+            } else {
+                vec![idx]
+            }
+        }
+    }
+
+    #[test]
+    fn prefetch_error_position_matches_sequential() {
+        let expected: Vec<Result<usize, ()>> = {
+            let mut loader = SamplerDataLoader::new(
+                TensorDataset::new(tensor_2d(6, 1)).unwrap(),
+                FailAtSampler {
+                    len: 6,
+                    batch_size: 1,
+                    fail_at: 2,
+                    cursor: 0,
+                },
+            )
+            .unwrap();
+            loader
+                .iter()
+                .map(|b| b.map(|t| t.host_slice()[0] as usize).map_err(|_| ()))
+                .collect()
+        };
+        assert_eq!(
+            expected.iter().filter(|r| r.is_err()).count(),
+            1,
+            "test fixture 前提: FailAtSampler は fail_at のみ 1 回失敗するはず"
+        );
+
+        for workers in [0usize, 1, 2, 4] {
+            let cfg = PrefetchConfig::new(workers, 2).unwrap();
+            let ds = TensorDataset::new(tensor_2d(6, 1)).unwrap();
+            let sampler = FailAtSampler {
+                len: 6,
+                batch_size: 1,
+                fail_at: 2,
+                cursor: 0,
+            };
+            let mut loader = PrefetchDataLoader::new(ds, sampler, cfg).unwrap();
+            let actual: Vec<Result<usize, ()>> = loader
+                .iter()
+                .map(|b| b.map(|t| t.host_slice()[0] as usize).map_err(|_| ()))
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "workers={workers} で逐次版（SamplerDataLoader）と不一致"
+            );
+        }
+    }
+
+    /// 添字列を最後まで消費せず途中で `break`（drop）してもハングしない
+    /// こと（worker 数を多め・depth を小さめにして確認）。
+    #[test]
+    fn prefetch_partial_consumption_drop_does_not_hang() {
+        let ds = TensorDataset::new(tensor_2d(50, 1)).unwrap();
+        let cfg = PrefetchConfig::new(8, 1).unwrap();
+        let mut loader =
+            PrefetchDataLoader::new(ds, SequentialSampler::new(50, 1, false).unwrap(), cfg)
+                .unwrap();
+        {
+            let mut it = loader.iter();
+            for _ in 0..3 {
+                assert!(it.next().is_some());
+            }
+            // `it` はここで drop される（Drop が worker を終了させる）。
+        }
+        // 2 回目の epoch も正常に完走できること（1 回目の drop が worker
+        // 資源を正しく解放していることの確認）。
+        let count = loader.iter().filter(|b| b.is_ok()).count();
+        assert_eq!(count, 50);
+    }
+
+    #[test]
+    fn prefetch_num_workers_zero_is_sequential_and_spawns_no_threads() {
+        let ds = TensorDataset::new(tensor_2d(4, 1)).unwrap();
+        let cfg = PrefetchConfig::new(0, 4).unwrap();
+        let mut loader =
+            PrefetchDataLoader::new(ds, SequentialSampler::new(4, 2, false).unwrap(), cfg).unwrap();
+        let batches: Vec<Vec<f32>> = loader
+            .iter()
+            .map(|b| b.unwrap().host_slice().to_vec())
+            .collect();
+        assert_eq!(batches, vec![vec![0.0, 1.0], vec![2.0, 3.0]]);
+    }
+
+    #[test]
+    fn prefetch_start_epoch_error_is_yielded_once_without_spawning_threads() {
+        let ds = TensorDataset::new(tensor_2d(4, 1)).unwrap();
+        let cfg = PrefetchConfig::new(4, 2).unwrap();
+        let mut loader = PrefetchDataLoader::new(ds, FailingStartEpochSampler, cfg).unwrap();
+        let mut it = loader.iter();
+        match it.next() {
+            Some(Err(DataError::ZeroBatchSize)) => {}
+            other => panic!("expected Some(Err(ZeroBatchSize)), got {other:?}"),
+        }
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn prefetch_tuple_dataset_indices_are_consistent_across_components() {
+        let features = TensorDataset::new(tensor_2d(8, 2)).unwrap();
+        let labels =
+            TensorDataset::new(tensor_1d(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])).unwrap();
+        let cfg = PrefetchConfig::new(3, 2).unwrap();
+        let mut loader = PrefetchDataLoader::new(
+            (features, labels),
+            SequentialSampler::new(8, 2, false).unwrap(),
+            cfg,
+        )
+        .unwrap();
+        for batch in loader.iter() {
+            let (x, y) = batch.unwrap();
+            let xs = x.host_slice();
+            let ys = y.host_slice();
+            for i in 0..ys.len() {
+                // `tensor_2d(rows, cols)` は行 `idx` の先頭要素が
+                // `idx * cols` になるよう `(0..rows*cols).map(|v| v as
+                // f32)` で生成する（本 fixture では cols=2）。labels
+                // 側は `tensor_1d` で行番号そのものを値とするため、
+                // `xs[i*2] == ys[i] * 2` が両成分に同じ添字が適用された
+                // ことの確認になる。
+                assert_eq!(xs[i * 2], ys[i] * 2.0);
+            }
+        }
+    }
+
+    #[test]
+    fn prefetch_size_hint_matches_observed_yield_count() {
+        let ds = TensorDataset::new(tensor_2d(10, 1)).unwrap();
+        let cfg = PrefetchConfig::new(2, 3).unwrap();
+        let mut loader =
+            PrefetchDataLoader::new(ds, SequentialSampler::new(10, 3, false).unwrap(), cfg)
+                .unwrap();
+        let mut it = loader.iter();
+        let (lower, upper) = it.size_hint();
+        assert_eq!(lower, 4);
+        assert_eq!(upper, Some(4));
+        let mut n = 0;
+        while it.next().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 4);
+        assert_eq!(it.size_hint(), (0, Some(0)));
     }
 }
