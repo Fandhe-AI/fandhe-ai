@@ -112,7 +112,17 @@
 //! 実装する（`transformer_encoder_layer.rs` モジュール doc 参照）。
 //! `fandhe_ai_facade::compat::sequential::Sequential` に
 //! `add_transformer_encoder` を追加した（`docs/compat-api-scope.md`
-//! §5「適用記録（経路2。イシュー #2068）」参照）。イシュー #2134
+//! §5「適用記録（経路2。イシュー #2068）」参照）。イシュー #2165
+//! （親 #2131・#2068 の対）で [`TransformerDecoderLayer`]
+//! （`transformer_decoder_layer` モジュール）・[`Transformer`]
+//! （`transformer` モジュール。encoder スタック＋decoder スタック＋
+//! 各終端 LayerNorm の合成）を追加した。いずれも新規 `Op`／
+//! `BackendOps`／VJP／カーネルを追加しない既存部品の合成（
+//! `transformer_decoder_layer.rs`・`transformer.rs` の各モジュール doc
+//! 参照）。facade 公開（`compat::Sequential::add_transformer_decoder_layer`／
+//! `add_transformer` 相当）は未承認のため保留（
+//! `crates/facade/src/lib.rs` の `TransformerDecoderHoldDoctestGuard`
+//! で固定）。イシュー #2134
 //! （親 #2131）で [`Module`] trait に `children`／`named_modules`／
 //! `parameter_count`／`type_name`（PyTorch `Module.children()`／
 //! `named_modules()`／`sum(p.numel() for p in model.parameters())`
@@ -214,6 +224,8 @@ mod pixel_shuffle;
 mod pooling;
 mod rnn;
 mod rnn_stacked;
+mod transformer;
+mod transformer_decoder_layer;
 mod transformer_encoder_layer;
 mod unflatten;
 mod upsample;
@@ -258,6 +270,11 @@ pub use rnn::{
 };
 pub use rnn_stacked::{
     RnnConfig, StackedGru, StackedLstm, StackedLstmSeqOutput, StackedRnn, StackedRnnSeqOutput,
+};
+pub use transformer::{Transformer, TransformerConfig, TransformerVars};
+pub use transformer_decoder_layer::{
+    TransformerDecoderLayer, TransformerDecoderLayerParts, TransformerDecoderLayerVars,
+    TransformerDecoderLayerVarsParts,
 };
 pub use transformer_encoder_layer::{
     FeedForwardActivation, TransformerEncoderLayer, TransformerEncoderLayerVars,

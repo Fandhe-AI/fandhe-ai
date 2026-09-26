@@ -227,6 +227,41 @@ pub(crate) const ENC_LINEAR2_SEED_SALT: u64 = 10;
 /// config bit 一致テストが検証する契約）。
 pub(crate) const RNN_STACK_SEED_SALT: u64 = 11;
 
+/// `nn::transformer_decoder_layer`（イシュー #2165・親 #2131。#2068 の
+/// 対）が単一の呼び出しシードから self-attention・cross-attention・
+/// FFN 第 1 層・FFN 第 2 層の 4 系統を独立に導出するためのソルト。
+/// 既存の `WEIGHT_SEED_SALT`〜`RNN_STACK_SEED_SALT`（0..=11）と衝突
+/// しない値（12..=15）を割り当てる。`ENC_ATTN_SEED_SALT` 等と同じ
+/// 「2 段の `derive_seed` 合成」構造（`DEC_SELF_ATTN_SEED_SALT`／
+/// `DEC_CROSS_ATTN_SEED_SALT` で導出したシードはさらに
+/// `MultiheadAttention::new` へ渡され、そちら側で `ATTN_Q_SEED_SALT`〜
+/// `ATTN_OUT_SEED_SALT` を再適用する）。
+pub(crate) const DEC_SELF_ATTN_SEED_SALT: u64 = 12;
+/// `nn::transformer_decoder_layer` の cross-attention（`multihead_attn`）
+/// 導出用ソルト（上記参照）。
+pub(crate) const DEC_CROSS_ATTN_SEED_SALT: u64 = 13;
+/// `nn::transformer_decoder_layer` の FFN 第 1 層（`linear1`）導出用
+/// ソルト（上記参照）。
+pub(crate) const DEC_LINEAR1_SEED_SALT: u64 = 14;
+/// `nn::transformer_decoder_layer` の FFN 第 2 層（`linear2`）導出用
+/// ソルト（上記参照）。
+pub(crate) const DEC_LINEAR2_SEED_SALT: u64 = 15;
+
+/// `nn::transformer`（イシュー #2165・親 #2131）が単一の呼び出し
+/// シードから encoder／decoder スタックの各層を独立に導出するための
+/// ソルト。既存の `WEIGHT_SEED_SALT`〜`DEC_LINEAR2_SEED_SALT`
+/// （0..=15）と衝突しない値（16・17）を割り当てる。`Transformer::new`
+/// は層 `i` ごとに `derive_seed(derive_seed(seed, TRANSFORMER_*_STACK_SEED_SALT),
+/// i)` という 2 段の `derive_seed` 合成で層呼び出しシードを導出する
+/// （`RNN_STACK_SEED_SALT` と同型。ただし `RNN_STACK_SEED_SALT` と
+/// 異なり index 0 特例は設けない——`Transformer` に `TransformerEncoderLayer`
+/// 単体との bit 一致契約はないため）。最終 LayerNorm（`encoder_norm`／
+/// `decoder_norm`）はシードを使わない決定的な 1／0 初期化のため専用
+/// ソルトは不要。
+pub(crate) const TRANSFORMER_ENC_STACK_SEED_SALT: u64 = 16;
+/// `nn::transformer` の decoder スタック層導出用ソルト（上記参照）。
+pub(crate) const TRANSFORMER_DEC_STACK_SEED_SALT: u64 = 17;
+
 pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -1062,6 +1097,50 @@ pub fn trunc_normal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// イシュー #2165 実装計画で要求される回帰: 個別シード方式の全ソルト
+    /// 定数（`WEIGHT_SEED_SALT`〜`TRANSFORMER_DEC_STACK_SEED_SALT`。
+    /// 0..=17）が互いに異なることを固定する。並行実装が同じ数値を
+    /// 先取りして独立乱数系列の保証（`derive_seed` doc）が崩れる事故を
+    /// 機械的に検知する。
+    #[test]
+    fn all_seed_salts_are_pairwise_distinct() {
+        let salts: Vec<(&str, u64)> = vec![
+            ("WEIGHT_SEED_SALT", WEIGHT_SEED_SALT),
+            ("BIAS_SEED_SALT", BIAS_SEED_SALT),
+            ("WEIGHT_HH_SEED_SALT", WEIGHT_HH_SEED_SALT),
+            ("BIAS_HH_SEED_SALT", BIAS_HH_SEED_SALT),
+            ("ATTN_Q_SEED_SALT", ATTN_Q_SEED_SALT),
+            ("ATTN_K_SEED_SALT", ATTN_K_SEED_SALT),
+            ("ATTN_V_SEED_SALT", ATTN_V_SEED_SALT),
+            ("ATTN_OUT_SEED_SALT", ATTN_OUT_SEED_SALT),
+            ("ENC_ATTN_SEED_SALT", ENC_ATTN_SEED_SALT),
+            ("ENC_LINEAR1_SEED_SALT", ENC_LINEAR1_SEED_SALT),
+            ("ENC_LINEAR2_SEED_SALT", ENC_LINEAR2_SEED_SALT),
+            ("RNN_STACK_SEED_SALT", RNN_STACK_SEED_SALT),
+            ("DEC_SELF_ATTN_SEED_SALT", DEC_SELF_ATTN_SEED_SALT),
+            ("DEC_CROSS_ATTN_SEED_SALT", DEC_CROSS_ATTN_SEED_SALT),
+            ("DEC_LINEAR1_SEED_SALT", DEC_LINEAR1_SEED_SALT),
+            ("DEC_LINEAR2_SEED_SALT", DEC_LINEAR2_SEED_SALT),
+            (
+                "TRANSFORMER_ENC_STACK_SEED_SALT",
+                TRANSFORMER_ENC_STACK_SEED_SALT,
+            ),
+            (
+                "TRANSFORMER_DEC_STACK_SEED_SALT",
+                TRANSFORMER_DEC_STACK_SEED_SALT,
+            ),
+        ];
+        for i in 0..salts.len() {
+            for j in (i + 1)..salts.len() {
+                assert_ne!(
+                    salts[i].1, salts[j].1,
+                    "ソルト衝突: {} と {} が同じ値 {}",
+                    salts[i].0, salts[j].0, salts[i].1
+                );
+            }
+        }
+    }
 
     /// codex-review 指摘の回帰（イシュー #2140・PR #2239・`init.rs:554`
     /// ほか）: `check_rank` そのものを乱数を経由せず直接呼んで固定する
