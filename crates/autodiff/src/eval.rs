@@ -4298,6 +4298,17 @@ pub(crate) fn cross_entropy_loss_with_options_forward(
     options: &crate::loss_ops::CrossEntropyOptions,
 ) -> Tensor<f32> {
     let shape = logits.shape().to_vec();
+    // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積は数学的には無関係な次元（例:
+    // `usize::MAX`）を含みうり、`checked_numel`（`Tensor::new` 側）が
+    // 通した shape でも部分積単体では usize オーバーフローしうる
+    // （全体積は途中の 0 で吸収されるが部分積はそれを経由しない。
+    // `softmax_along` と同型のガード。codex-review 指摘・PR #2283）。
+    // 要素数 0 は非 ignore サンプルが存在しないため `W == 0` と同じ
+    // 扱いで損失 0.0 を返す（doc 参照）。
+    if shape.contains(&0) {
+        return build_tensor(vec![0.0f32], &[]);
+    }
     let outer: usize = shape[..class_dim].iter().product();
     let axis_len = shape[class_dim];
     let inner: usize = shape[class_dim + 1..].iter().product();
@@ -4373,6 +4384,38 @@ pub(crate) fn cross_entropy_loss_with_options_forward(
         Reduction::Sum => total_loss as f32,
     };
     build_tensor(vec![loss], &[])
+}
+
+#[cfg(test)]
+mod cross_entropy_with_options_empty_tensor_overflow_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #2283）の回帰検証: `shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積は `softmax_along` と同様に
+    // オーバーフローしうる（`checked_numel` が通す `[0, 1, usize::MAX,
+    // usize::MAX]`・`class_dim=1` で `outer = 0`〈安全〉だが `inner =
+    // usize::MAX * usize::MAX` が overflow checks 有効時に panic
+    // していた）。冒頭の空 shape 早期 return で panic しないことを
+    // 確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_forward_empty_tensor_with_overflow_prone_shape_does_not_panic()
+     {
+        let shape = [0usize, 1, usize::MAX, usize::MAX];
+        let logits = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, usize::MAX])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().label_smoothing(0.1);
+        let out = cross_entropy_loss_with_options_forward(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+        );
+        assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
 }
 
 // =====================================================================

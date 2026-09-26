@@ -7662,6 +7662,16 @@ fn cross_entropy_loss_with_options_vjp(
     upstream: &Tensor<f32>,
 ) -> Tensor<f32> {
     let shape = logits.shape().to_vec();
+    // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積は数学的には無関係な次元（例:
+    // `usize::MAX`）を含みうり部分積単体で usize オーバーフローしうる
+    // （`eval::cross_entropy_loss_with_options_forward`・`softmax_along`
+    // と同型のガード。codex-review 指摘・PR #2283）。要素数 0 なら
+    // 勾配も要素なしの同 shape テンソルとして返す（forward が損失
+    // 0.0 を返すため勾配も寄与しない）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
     let outer: usize = shape[..class_dim].iter().product();
     let axis_len = shape[class_dim];
     let inner: usize = shape[class_dim + 1..].iter().product();
@@ -7737,6 +7747,40 @@ fn cross_entropy_loss_with_options_vjp(
         }
     }
     build_tensor(grad, &shape)
+}
+
+#[cfg(test)]
+mod cross_entropy_with_options_vjp_empty_tensor_overflow_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::Tensor;
+
+    // codex-review 指摘（PR #2283）の回帰検証: forward 側
+    // （`eval::cross_entropy_loss_with_options_forward`）と同型の
+    // 部分積オーバーフローが vjp 側にも存在した（`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積が `checked_numel` の吸収を経由
+    // しないため）。冒頭の空 shape 早期 return で panic せず、要素数
+    // 0 の勾配テンソルを返すことを確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_empty_tensor_with_overflow_prone_shape_does_not_panic() {
+        let shape = [0usize, 1, usize::MAX, usize::MAX];
+        let logits = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, usize::MAX])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().label_smoothing(0.1);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+        assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
+    }
 }
 
 /// `nll_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
