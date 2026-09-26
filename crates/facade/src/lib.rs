@@ -3987,18 +3987,19 @@ struct TransformerDecoderHoldDoctestGuard;
 /// イシュー #2167（親 #2131）で、距離ベースの損失 3 種
 /// （`cosine_embedding_loss`・`margin_ranking_loss`・
 /// `triplet_margin_loss`）と `poisson_nll_loss` を同じ保留対象へ追加
-/// した（6 関数名。`crate::loss_ops` モジュール doc「facade 非公開
+/// した。イシュー #2168（親 #2131）で `ctc_loss`（CTC 損失）を追加した
+/// （7 関数名。`crate::loss_ops` モジュール doc「facade 非公開
 /// （意図的）」と同じ判断枠組み）。
 /// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカルの自由
 /// 関数群（`__fandhe_loss_hold_probe::loss_ops::{l1_loss,
 /// cross_entropy_loss_with, cosine_embedding_loss, margin_ranking_loss,
-/// triplet_margin_loss, poisson_nll_loss}`）とトレイト
+/// triplet_margin_loss, poisson_nll_loss, ctc_loss}`）とトレイト
 /// （`__FandheLossHoldProbe`）を導入し、実際に使う関数を書く。facade が
 /// どの経路（`pub use fandhe_ai_autodiff::loss_ops;` のようなモジュール
 /// 再エクスポート・`Var` への inherent メソッド追加・別名 `pub use`）で
-/// `loss_ops` という名前や 6 個の関数名を公開しても、ローカル定義との
+/// `loss_ops` という名前や 7 個の関数名を公開しても、ローカル定義との
 /// glob 衝突（モジュール名の場合）または呼び出しシグネチャの不一致
 /// （inherent メソッドがトレイトメソッドより優先解決されるため、引数
 /// なしの `x.l1_loss()` 呼び出しが実際の `Var::l1_loss(&self, target,
@@ -4039,6 +4040,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///         pub fn margin_ranking_loss() {}
 ///         pub fn triplet_margin_loss() {}
 ///         pub fn poisson_nll_loss() {}
+///         pub fn ctc_loss() {}
 ///     }
 /// }
 /// use __fandhe_loss_hold_probe::*;
@@ -4052,6 +4054,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker;
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker;
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker;
+///     fn ctc_loss(&self) -> __FandheLossMarker;
 /// }
 ///
 /// impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {
@@ -4061,6 +4064,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {
@@ -4070,6 +4074,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// impl __FandheLossHoldProbe for fandhe_ai::Tape {
@@ -4079,6 +4084,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// fn __probe_free_fns() {
@@ -4091,6 +4097,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     loss_ops::margin_ranking_loss();
 ///     loss_ops::triplet_margin_loss();
 ///     loss_ops::poisson_nll_loss();
+///     loss_ops::ctc_loss();
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
@@ -4106,6 +4113,8 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     let _: __FandheLossMarker = x.triplet_margin_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Var::poisson_nll_loss(x);
 ///     let _: __FandheLossMarker = x.poisson_nll_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Var::ctc_loss(x);
+///     let _: __FandheLossMarker = x.ctc_loss();
 /// }
 ///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
@@ -4115,6 +4124,8 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     let _: __FandheLossMarker = x.cosine_embedding_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Tensor::margin_ranking_loss(x);
 ///     let _: __FandheLossMarker = x.margin_ranking_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Tensor::ctc_loss(x);
+///     let _: __FandheLossMarker = x.ctc_loss();
 /// }
 ///
 /// fn __probe_tape(x: &fandhe_ai::Tape) {
@@ -4124,6 +4135,8 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     let _: __FandheLossMarker = x.triplet_margin_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Tape::poisson_nll_loss(x);
 ///     let _: __FandheLossMarker = x.poisson_nll_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Tape::ctc_loss(x);
+///     let _: __FandheLossMarker = x.ctc_loss();
 /// }
 /// ```
 #[cfg(doctest)]

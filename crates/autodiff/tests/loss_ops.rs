@@ -20,6 +20,12 @@
 //! （shape 不一致・クロステープ・`y` の `±1` 制約・オプション値検査）・
 //! kink を避けた点での数値微分突合。
 //!
+//! イシュー #2168（親 #2131）で CTC 損失（`ctc_loss`）の受け入れ条件
+//! 検証を追加した（§13）: 総当たり整列との forward 一致・reduction・
+//! 数値微分突合・フレーム外勾配 0・整列不能（`zero_infinity` 有無）・
+//! `NaN` 伝播・空バッチ・target 形式（パディング／連結）の等価性・
+//! 入力検査の拒否ケース。
+//!
 //! 判定基準（backward）: 承認済み複合判定「相対誤差 1e-2 または絶対
 //! 誤差 1e-3」＋`τ=1e-4`（`crates/autodiff/tests/nn_cross_entropy.rs`・
 //! `nn_loss.rs` と同一パラメータを再利用。新規閾値は導入しない）。
@@ -27,7 +33,7 @@
 mod common;
 
 use fandhe_ai_autodiff::loss_ops::{
-    self, CrossEntropyOptions, PoissonNllOptions, TripletMarginOptions,
+    self, CrossEntropyOptions, CtcLossOptions, PoissonNllOptions, TripletMarginOptions,
 };
 use fandhe_ai_autodiff::nn::loss::{
     CosineEmbeddingLoss, CrossEntropyLoss, L1Loss, MarginRankingLoss, PoissonNllLoss,
@@ -1235,6 +1241,605 @@ fn nn_poisson_nll_loss_forward_matches_free_function_directly() {
     let module = PoissonNllLoss::new(PoissonNllOptions::default().full(true), Reduction::Sum);
     let via_module = module.forward(&input, &target).unwrap();
     let via_free = loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Sum).unwrap();
+
+    assert_eq!(dense(&via_module.to_tensor()), dense(&via_free.to_tensor()));
+}
+
+// =====================================================================
+// 13. CTC 損失（イシュー #2168）
+// =====================================================================
+
+/// DP（`loss_ops::ctc_loss`）と独立に、全パス `c^t_max` を列挙して
+/// collapse-then-remove-blank で `target` に一致するものの確率を `f64`
+/// で合計する（実装計画 §5.2「総当たりとの一致」）。`lp` は生の対数値を
+/// 返す関数で、正規化されている必要はない（DP 側も同じ値をそのまま
+/// 使うため、比較の妥当性は正規化に依存しない）。
+fn brute_force_ctc_nll(
+    t_max: usize,
+    c: usize,
+    target: &[i32],
+    blank: i32,
+    lp: &dyn Fn(usize, usize) -> f64,
+) -> f64 {
+    let mut total = 0.0f64;
+    let mut path = vec![0usize; t_max];
+    loop {
+        let mut collapsed: Vec<i32> = Vec::new();
+        let mut prev: Option<usize> = None;
+        for &p in &path {
+            if Some(p) != prev {
+                collapsed.push(p as i32);
+            }
+            prev = Some(p);
+        }
+        let label: Vec<i32> = collapsed.into_iter().filter(|&v| v != blank).collect();
+        if label == target {
+            let mut log_p = 0.0f64;
+            for (t, &k) in path.iter().enumerate() {
+                log_p += lp(t, k);
+            }
+            total += log_p.exp();
+        }
+
+        if t_max == 0 {
+            break;
+        }
+        let mut i = t_max;
+        let mut done = false;
+        loop {
+            if i == 0 {
+                done = true;
+                break;
+            }
+            i -= 1;
+            path[i] += 1;
+            if path[i] < c {
+                break;
+            }
+            path[i] = 0;
+        }
+        if done {
+            break;
+        }
+    }
+    if total > 0.0 {
+        -total.ln()
+    } else {
+        f64::INFINITY
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ctc_forward_sum(
+    lp_data: &[f32],
+    t_max: usize,
+    n: usize,
+    c: usize,
+    targets: &Tensor<i32>,
+    input_lengths: &[usize],
+    target_lengths: &[usize],
+    options: &CtcLossOptions,
+) -> f32 {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(lp_data, &[t_max, n, c]));
+    let loss = loss_ops::ctc_loss(
+        &log_probs,
+        targets,
+        input_lengths,
+        target_lengths,
+        options,
+        Reduction::Sum,
+    )
+    .unwrap();
+    scalar(&loss.to_tensor())
+}
+
+#[test]
+fn ctc_loss_forward_matches_brute_force_enumeration_with_repeats() {
+    // target=[1,1]（連続重複）・blank=0・T=3,C=2。
+    let t_max = 3;
+    let c = 2;
+    let blank = 0i32;
+    let target = [1i32, 1];
+    let lp_data = [-0.5f32, -1.0, -1.2, -0.4, -0.8, -0.6];
+    let lp = |t: usize, k: usize| lp_data[t * c + k] as f64;
+
+    let expected = brute_force_ctc_nll(t_max, c, &target, blank, &lp);
+    let targets = i32_tensor(&target, &[1, 2]);
+    let options = CtcLossOptions::default();
+    let actual = ctc_forward_sum(&lp_data, t_max, 1, c, &targets, &[t_max], &[2], &options);
+    assert_close("ctc_brute_force_repeats", actual, expected as f32);
+}
+
+#[test]
+fn ctc_loss_forward_matches_brute_force_enumeration_empty_target() {
+    let t_max = 2;
+    let c = 2;
+    let blank = 0i32;
+    let target: [i32; 0] = [];
+    let lp_data = [-0.3f32, -1.4, -0.9, -0.5];
+    let lp = |t: usize, k: usize| lp_data[t * c + k] as f64;
+
+    let expected = brute_force_ctc_nll(t_max, c, &target, blank, &lp);
+    let targets = i32_tensor(&[], &[1, 0]);
+    let options = CtcLossOptions::default();
+    let actual = ctc_forward_sum(&lp_data, t_max, 1, c, &targets, &[t_max], &[0], &options);
+    assert_close("ctc_brute_force_empty_target", actual, expected as f32);
+}
+
+#[test]
+fn ctc_loss_forward_matches_brute_force_enumeration_non_zero_blank() {
+    // blank=2・C=3・target=[0,1]（target != blank）。
+    let t_max = 4;
+    let c = 3;
+    let blank = 2i32;
+    let target = [0i32, 1];
+    let lp_data = [
+        -0.4f32, -1.1, -0.6, -0.9, -0.3, -1.5, -0.7, -0.8, -0.5, -1.0, -0.6, -0.4,
+    ];
+    let lp = |t: usize, k: usize| lp_data[t * c + k] as f64;
+
+    let expected = brute_force_ctc_nll(t_max, c, &target, blank, &lp);
+    let targets = i32_tensor(&target, &[1, 2]);
+    let options = CtcLossOptions::default().blank(2);
+    let actual = ctc_forward_sum(&lp_data, t_max, 1, c, &targets, &[t_max], &[2], &options);
+    assert_close("ctc_brute_force_non_zero_blank", actual, expected as f32);
+}
+
+#[test]
+fn ctc_loss_reduction_mean_and_sum_match_definition() {
+    let t_max = 3;
+    let n = 2;
+    let c = 2;
+    let lp_data = vec![
+        -0.5f32, -1.0, -1.2, -0.4, -0.8, -0.6, -0.3, -1.4, -0.9, -0.5, -0.2, -1.7,
+    ];
+    let targets = i32_tensor(&[1, 1, 1, 0], &[2, 2]);
+    let target_lengths = [2usize, 1];
+    let input_lengths = [3usize, 3];
+    let options = CtcLossOptions::default();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&lp_data, &[t_max, n, c]));
+    let sum_loss = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &input_lengths,
+        &target_lengths,
+        &options,
+        Reduction::Sum,
+    )
+    .unwrap();
+    let mean_loss = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &input_lengths,
+        &target_lengths,
+        &options,
+        Reduction::Mean,
+    )
+    .unwrap();
+
+    // 個別サンプルの nll を Sum reduction（N=1 相当）で取り出し、定義
+    // どおりの Mean/Sum と突き合わせる。
+    let nll = |sample: usize, tl: usize, tgt: &[i32]| -> f32 {
+        let t = Tape::new_with_ops(common::naive_ops());
+        let mut sample_lp: Vec<f32> = Vec::with_capacity(t_max * c);
+        for tt in 0..t_max {
+            for k in 0..c {
+                sample_lp.push(lp_data[tt * n * c + sample * c + k]);
+            }
+        }
+        let lpv = t.var(&f32_tensor(&sample_lp, &[t_max, 1, c]));
+        let tgt_tensor = i32_tensor(tgt, &[1, tl]);
+        scalar(
+            &loss_ops::ctc_loss(&lpv, &tgt_tensor, &[t_max], &[tl], &options, Reduction::Sum)
+                .unwrap()
+                .to_tensor(),
+        )
+    };
+    let nll0 = nll(0, 2, &[1, 1]);
+    let nll1 = nll(1, 1, &[1]);
+
+    assert_close(
+        "ctc_reduction_sum",
+        scalar(&sum_loss.to_tensor()),
+        nll0 + nll1,
+    );
+    assert_close(
+        "ctc_reduction_mean",
+        scalar(&mean_loss.to_tensor()),
+        (nll0 / 2.0 + nll1 / 1.0) / 2.0,
+    );
+}
+
+#[test]
+fn ctc_loss_t_zero_target_zero_is_zero_loss() {
+    let targets = i32_tensor(&[], &[1, 0]);
+    let options = CtcLossOptions::default();
+    let actual = ctc_forward_sum(&[], 0, 1, 2, &targets, &[0], &[0], &options);
+    assert_eq!(actual, 0.0);
+}
+
+#[test]
+fn ctc_loss_t_zero_target_nonzero_is_infinite() {
+    let lp_data: [f32; 0] = [];
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let actual = ctc_forward_sum(&lp_data, 0, 1, 2, &targets, &[0], &[1], &options);
+    assert!(actual.is_infinite() && actual > 0.0);
+}
+
+#[test]
+fn ctc_loss_unreachable_alignment_zero_infinity_false_is_infinite_and_grad_is_nan() {
+    // target=[1,1]・T_n=1 は最短でも 3 フレーム（l, blank, l）必要で
+    // 整列不能。
+    let t_max = 1;
+    let c = 2;
+    let lp_data = [-0.3f32, -1.2];
+    let targets = i32_tensor(&[1, 1], &[1, 2]);
+    let options = CtcLossOptions::default();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&lp_data, &[t_max, 1, c]));
+    let loss = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &[t_max],
+        &[2],
+        &options,
+        Reduction::Sum,
+    )
+    .unwrap();
+    assert!(scalar(&loss.to_tensor()).is_infinite());
+
+    let grads = tape.backward(&loss).unwrap();
+    let d = dense(grads.get(&log_probs).unwrap().expect("到達する"));
+    assert!(
+        d.iter().all(|v| v.is_nan()),
+        "整列不能・zero_infinity=false の勾配は NaN: {d:?}"
+    );
+}
+
+#[test]
+fn ctc_loss_unreachable_alignment_zero_infinity_true_is_zero_loss_and_grad() {
+    let t_max = 1;
+    let c = 2;
+    let lp_data = [-0.3f32, -1.2];
+    let targets = i32_tensor(&[1, 1], &[1, 2]);
+    let options = CtcLossOptions::default().zero_infinity(true);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&lp_data, &[t_max, 1, c]));
+    let loss = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &[t_max],
+        &[2],
+        &options,
+        Reduction::Sum,
+    )
+    .unwrap();
+    assert_eq!(scalar(&loss.to_tensor()), 0.0);
+
+    let grads = tape.backward(&loss).unwrap();
+    let d = dense(grads.get(&log_probs).unwrap().expect("到達する"));
+    assert!(
+        d.iter().all(|&v| v == 0.0),
+        "zero_infinity=true の勾配は全 0: {d:?}"
+    );
+}
+
+#[test]
+fn ctc_loss_propagates_nan() {
+    let t_max = 2;
+    let c = 2;
+    let lp_data = [f32::NAN, -1.0, -0.5, -0.2];
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let actual = ctc_forward_sum(&lp_data, t_max, 1, c, &targets, &[t_max], &[1], &options);
+    assert!(actual.is_nan());
+}
+
+#[test]
+fn ctc_loss_unreachable_state_plus_infinite_log_prob_does_not_become_nan() {
+    // イシュー #2168 PR #2292 codex-review 指摘の再現ケース。`log_probs`
+    // は値検査しない契約（`+inf` を受け付ける）ため、到達不能状態
+    // （累積対数確率 `-inf`）に `+inf` の emission が乗ると素朴な加算
+    // `acc + lp` は `-inf + inf = NaN` になる。target=[1]・blank=0・
+    // T=2（拡張ラベル列 `[blank, 1, blank]` は長さ 3 で `t_n=2` では
+    // 整列不能）で、frame0 の label クラスを `-inf`（状態 1 を強制的に
+    // 不可能にする）・frame1 の blank クラスを `+inf` にすると、
+    // 状態 2（`ext[2]=blank`）の α 遷移が `acc(-inf) + lp(+inf)` を
+    // 踏む。`eval::ctc_add_emission`（`crate::grad::ctc_loss_vjp` の
+    // α・β も共有）による修正後は到達不能状態を `-inf` のまま維持し
+    // `NaN` にならない。
+    let t_max = 2;
+    let c = 2;
+    let lp_data = [
+        -0.5f32,
+        f32::NEG_INFINITY, // frame0: blank=-0.5, label=-inf
+        f32::INFINITY,
+        -0.3, // frame1: blank=+inf, label=-0.3
+    ];
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let actual = ctc_forward_sum(&lp_data, t_max, 1, c, &targets, &[t_max], &[1], &options);
+    assert!(
+        !actual.is_nan(),
+        "到達不能状態への +inf 加算で NaN になってはならない: {actual}"
+    );
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&lp_data, &[t_max, 1, c]));
+    let loss = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &[t_max],
+        &[1],
+        &options,
+        Reduction::Sum,
+    )
+    .unwrap();
+    assert!(!scalar(&loss.to_tensor()).is_nan());
+
+    let grads = tape.backward(&loss).unwrap();
+    let d = dense(grads.get(&log_probs).unwrap().expect("到達する"));
+    assert!(
+        d.iter().all(|v| !v.is_nan()),
+        "VJP の α・β 計算でも到達不能状態からの NaN は生じない: {d:?}"
+    );
+}
+
+#[test]
+fn ctc_loss_empty_batch_is_zero_and_does_not_panic() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[], &[3, 0, 2]));
+    let targets = i32_tensor(&[], &[0, 0]);
+    let options = CtcLossOptions::default();
+
+    let mean =
+        loss_ops::ctc_loss(&log_probs, &targets, &[], &[], &options, Reduction::Mean).unwrap();
+    assert_eq!(scalar(&mean.to_tensor()), 0.0);
+    let sum = loss_ops::ctc_loss(&log_probs, &targets, &[], &[], &options, Reduction::Sum).unwrap();
+    assert_eq!(scalar(&sum.to_tensor()), 0.0);
+
+    let grads = tape.backward(&sum).unwrap();
+    let d = grads
+        .get(&log_probs)
+        .unwrap()
+        .expect("到達する（N=0 でもゼロ勾配を返す）");
+    assert_eq!(d.shape(), &[3, 0, 2]);
+}
+
+#[test]
+fn ctc_loss_padded_and_concatenated_target_formats_agree() {
+    let t_max = 3;
+    let c = 2;
+    let lp_data = [-0.5f32, -1.0, -1.2, -0.4, -0.8, -0.6];
+    let options = CtcLossOptions::default();
+
+    let padded = i32_tensor(&[1, 1], &[1, 2]);
+    let concatenated = i32_tensor(&[1, 1], &[2]);
+
+    let padded_loss = ctc_forward_sum(&lp_data, t_max, 1, c, &padded, &[t_max], &[2], &options);
+    let concat_loss = ctc_forward_sum(
+        &lp_data,
+        t_max,
+        1,
+        c,
+        &concatenated,
+        &[t_max],
+        &[2],
+        &options,
+    );
+    assert_eq!(padded_loss, concat_loss);
+}
+
+#[test]
+fn ctc_loss_frames_beyond_input_length_have_zero_gradient() {
+    let t_max = 4;
+    let c = 2;
+    let lp_data = [-0.5f32, -1.0, -1.2, -0.4, -0.8, -0.6, -0.9, -0.3];
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&lp_data, &[t_max, 1, c]));
+    // input_lengths=2 < T=4: t=2,3 は寄与しないので勾配 0。
+    let loss =
+        loss_ops::ctc_loss(&log_probs, &targets, &[2], &[1], &options, Reduction::Sum).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let d = dense(grads.get(&log_probs).unwrap().expect("到達する"));
+    for t in 2..t_max {
+        for k in 0..c {
+            assert_eq!(
+                d[t * c + k],
+                0.0,
+                "t={t},k={k} はフレーム外のため勾配 0 のはず"
+            );
+        }
+    }
+}
+
+#[test]
+fn ctc_loss_grad_matches_numeric_central_difference() {
+    // blank=2・C=3。sample0: target=[0,1]（tl=2, T_n=4）・
+    // sample1: target=[1,0]（tl=2, T_n=3。frame t=3 は寄与しないはず）。
+    let t_max = 4;
+    let n = 2;
+    let c = 3;
+    let blank = 2usize;
+    let lp_data = vec![
+        -0.4f32, -1.1, -0.6, -0.9, -0.3, -1.5, -0.7, -0.8, -0.5, -1.0, -0.6, -0.4, -0.5, -1.2,
+        -0.3, -0.6, -0.9, -0.7, -1.3, -0.4, -0.5, -0.8, -0.6, -0.9,
+    ];
+    let targets = i32_tensor(&[0, 1, 1, 0], &[2, 2]);
+    let input_lengths = [4usize, 3];
+    let target_lengths = [2usize, 2];
+    let options = CtcLossOptions::default().blank(blank);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&lp_data, &[t_max, n, c]));
+    let loss = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &input_lengths,
+        &target_lengths,
+        &options,
+        Reduction::Mean,
+    )
+    .unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let d_analytic = dense(grads.get(&log_probs).unwrap().expect("到達する"));
+
+    let eval_loss = |data: &[f32]| -> f64 {
+        let t = Tape::new_with_ops(common::naive_ops());
+        let lpv = t.var(&f32_tensor(data, &[t_max, n, c]));
+        let l = loss_ops::ctc_loss(
+            &lpv,
+            &targets,
+            &input_lengths,
+            &target_lengths,
+            &options,
+            Reduction::Mean,
+        )
+        .unwrap();
+        dense(&l.to_tensor())[0] as f64
+    };
+
+    let mut data = lp_data.clone();
+    for i in 0..data.len() {
+        let orig = data[i] as f64;
+        data[i] = (orig + H) as f32;
+        let lp = eval_loss(&data);
+        data[i] = (orig - H) as f32;
+        let lm = eval_loss(&data);
+        data[i] = orig as f32;
+        let numeric = ((lp - lm) / (2.0 * H)) as f32;
+        assert_close(&format!("ctc_loss_grad[{i}]"), d_analytic[i], numeric);
+    }
+}
+
+#[test]
+fn ctc_loss_rejects_rank_2_log_probs() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0], &[1, 2]));
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[1], &[1], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_blank_out_of_range() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0], &[1, 1, 2]));
+    let targets = i32_tensor(&[], &[1, 0]);
+    let options = CtcLossOptions::default().blank(2);
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[1], &[0], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_input_lengths_length_mismatch() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0], &[1, 1, 2]));
+    let targets = i32_tensor(&[], &[1, 0]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &[1, 1],
+        &[0],
+        &options,
+        Reduction::Mean,
+    )
+    .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_input_length_exceeding_t() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0], &[1, 1, 2]));
+    let targets = i32_tensor(&[], &[1, 0]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[2], &[0], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_target_length_exceeding_s_in_padded_form() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0, -0.3, -0.4], &[2, 1, 2]));
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[2], &[2], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_concatenated_length_mismatch() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0, -0.3, -0.4], &[2, 1, 2]));
+    let targets = i32_tensor(&[1, 1], &[2]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[2], &[1], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_target_value_out_of_range() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0], &[1, 1, 2]));
+    let targets = i32_tensor(&[5], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[1], &[1], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_target_value_equal_to_blank() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0], &[1, 1, 2]));
+    let targets = i32_tensor(&[0], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[1], &[1], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn ctc_loss_rejects_targets_rank_3() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0], &[1, 1, 2]));
+    let targets = i32_tensor(&[1], &[1, 1, 1]);
+    let options = CtcLossOptions::default();
+    let err = loss_ops::ctc_loss(&log_probs, &targets, &[1], &[1], &options, Reduction::Mean)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn nn_ctc_loss_forward_matches_free_function_directly() {
+    use fandhe_ai_autodiff::nn::loss::CtcLoss;
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&[-0.5, -1.0, -1.2, -0.4], &[2, 1, 2]));
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+
+    let module = CtcLoss::new(CtcLossOptions::default(), Reduction::Sum);
+    let via_module = module.forward(&log_probs, &targets, &[2], &[1]).unwrap();
+    let via_free =
+        loss_ops::ctc_loss(&log_probs, &targets, &[2], &[1], &options, Reduction::Sum).unwrap();
 
     assert_eq!(dense(&via_module.to_tensor()), dense(&via_free.to_tensor()));
 }

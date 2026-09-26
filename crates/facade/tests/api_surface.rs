@@ -11632,6 +11632,7 @@ mod __fandhe_loss_hold_probe {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn margin_ranking_loss() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn triplet_margin_loss() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn poisson_nll_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn ctc_loss() {}\n\
 \x20\x20\x20\x20}\n\
 }\n\
 use __fandhe_loss_hold_probe::*;\n\
@@ -11645,6 +11646,7 @@ trait __FandheLossHoldProbe {\n\
 \x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker;\n\
 \x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker;\n\
 \x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker;\n\
+\x20\x20\x20\x20fn ctc_loss(&self) -> __FandheLossMarker;\n\
 }\n\
 \n\
 impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {\n\
@@ -11654,6 +11656,7 @@ impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 \x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 \x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 }\n\
 \n\
 impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {\n\
@@ -11663,6 +11666,7 @@ impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 \x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 \x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 }\n\
 \n\
 impl __FandheLossHoldProbe for fandhe_ai::Tape {\n\
@@ -11672,6 +11676,7 @@ impl __FandheLossHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 \x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 \x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 }\n\
 \n\
 fn __probe_free_fns() {\n\
@@ -11684,6 +11689,7 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20loss_ops::margin_ranking_loss();\n\
 \x20\x20\x20\x20loss_ops::triplet_margin_loss();\n\
 \x20\x20\x20\x20loss_ops::poisson_nll_loss();\n\
+\x20\x20\x20\x20loss_ops::ctc_loss();\n\
 }\n\
 \n\
 fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
@@ -11699,6 +11705,8 @@ fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.triplet_margin_loss();\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::poisson_nll_loss(x);\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.poisson_nll_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::ctc_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.ctc_loss();\n\
 }\n\
 \n\
 fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
@@ -11708,6 +11716,8 @@ fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.cosine_embedding_loss();\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tensor::margin_ranking_loss(x);\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.margin_ranking_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tensor::ctc_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.ctc_loss();\n\
 }\n\
 \n\
 fn __probe_tape(x: &fandhe_ai::Tape) {\n\
@@ -11717,21 +11727,25 @@ fn __probe_tape(x: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.triplet_margin_loss();\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tape::poisson_nll_loss(x);\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.poisson_nll_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tape::ctc_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.ctc_loss();\n\
 }";
 
 /// `l1_loss`・`cross_entropy_loss_with`（イシュー #2166）・
 /// `cosine_embedding_loss`・`margin_ranking_loss`・
-/// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167。6 個の
-/// 関数名）。[`facade_does_not_reexport_or_declare_loss_ops`]・
+/// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167）・
+/// `ctc_loss`（イシュー #2168。7 個の関数名）。
+/// [`facade_does_not_reexport_or_declare_loss_ops`]・
 /// [`workspace_declares_loss_ops_fn_names_only_in_allowed_locations`]
 /// が共用する。
-const LOSS_OPS_FN_NAMES: [&str; 6] = [
+const LOSS_OPS_FN_NAMES: [&str; 7] = [
     "l1_loss",
     "cross_entropy_loss_with",
     "cosine_embedding_loss",
     "margin_ranking_loss",
     "triplet_margin_loss",
     "poisson_nll_loss",
+    "ctc_loss",
 ];
 
 /// facade src 全体（`crates/facade/src/**`）に、`loss_ops` を参照
@@ -11777,14 +11791,15 @@ fn facade_does_not_reexport_or_declare_loss_ops() {
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`LOSS_OPS_FN_NAMES`]
-/// （6 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_
+/// （7 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_
 /// reduce_ops_fn_names_only_in_allowed_locations` と同型のインベン
 /// トリ）。
 ///
 /// **期待集合**（着手前確認の再 grep で判明。実装計画「インベントリを
 /// 実測する」手順）: `l1_loss`・`cross_entropy_loss_with`（イシュー
 /// #2166）・`cosine_embedding_loss`・`margin_ranking_loss`・
-/// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167）は
+/// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167）・
+/// `ctc_loss`（イシュー #2168）は
 /// いずれも `crates/autodiff/src/loss_ops.rs` にのみ 1 件ずつ存在する。
 #[test]
 fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
@@ -11838,6 +11853,7 @@ fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
         ("autodiff/src/loss_ops.rs::margin_ranking_loss", 1usize),
         ("autodiff/src/loss_ops.rs::triplet_margin_loss", 1usize),
         ("autodiff/src/loss_ops.rs::poisson_nll_loss", 1usize),
+        ("autodiff/src/loss_ops.rs::ctc_loss", 1usize),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -11846,7 +11862,7 @@ fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の loss_ops 系 `fn` 宣言集合が\
-         期待（`crates/autodiff/src/loss_ops.rs` 6 件）と一致しない\
+         期待（`crates/autodiff/src/loss_ops.rs` 7 件）と一致しない\
          （過不足いずれも fail-closed に検出する。新たな定義元が\
          見つかった場合、それが承認済みの実装なのか迂回経路の混入なのか\
          を確認すること）: {found:?}"

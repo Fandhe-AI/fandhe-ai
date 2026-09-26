@@ -397,6 +397,26 @@ pub(crate) enum Op {
         options: crate::loss_ops::PoissonNllOptions,
         reduction: crate::var::Reduction,
     },
+    /// CTC（Connectionist Temporal Classification）損失。PyTorch
+    /// `nn.CTCLoss` 相当（イシュー #2168・親イシュー #2131）。
+    /// `L1Loss`／`PoissonNllLoss` と同型の融合対象外パターンで常に
+    /// ホスト参照実装（`eval::ctc_loss_forward`）を経由し実体化済み
+    /// （`push_eager`）。
+    ///
+    /// `log_probs`（`[T, N, C]`）のみが追跡対象。`targets`（パディング
+    /// 形式 `[N, S]` または連結形式 `[Σ target_lengths]`）・
+    /// `input_lengths`・`target_lengths`・`options` は非追跡データの
+    /// ため `Op` payload に直接埋め込む（`CrossEntropyLoss::targets` と
+    /// 同型の理由。勾配は `log_probs` の 1 系統のみ。`grad.rs::vjp` の
+    /// `CtcLoss` 分岐参照）。
+    CtcLoss {
+        log_probs: NodeId,
+        targets: Tensor<i32>,
+        input_lengths: Vec<usize>,
+        target_lengths: Vec<usize>,
+        options: crate::loss_ops::CtcLossOptions,
+        reduction: crate::var::Reduction,
+    },
     /// 負対数尤度損失（`NLLLoss`。イシュー #1738・親イシュー #1609
     /// 「損失関数の拡張」）。`MseLoss` と同じ融合パターン
     /// （`BackendOps::nll_loss`／`nll_loss_backward` 優先・`Unsupported`
@@ -1544,6 +1564,7 @@ impl Op {
             // 理由で非適格）／`CosineEmbeddingLoss`／
             // `MarginRankingLoss`／`TripletMarginLoss`／
             // `PoissonNllLoss`（イシュー #2167。同型の理由で非適格）／
+            // `CtcLoss`（イシュー #2168。同型の理由で非適格）／
             // `RnnCell`／
             // `Inv`／`Solve`／`Det`／`Cholesky`／`MatrixNorm`／
             // `Softmax`／`LogSoftmax`／
@@ -1566,6 +1587,7 @@ impl Op {
             | Op::MarginRankingLoss { .. }
             | Op::TripletMarginLoss { .. }
             | Op::PoissonNllLoss { .. }
+            | Op::CtcLoss { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }
@@ -1797,6 +1819,7 @@ impl Op {
                 f(*positive);
                 f(*negative);
             }
+            Op::CtcLoss { log_probs, .. } => f(*log_probs),
             Op::PoissonNllLoss { input, target, .. } => {
                 f(*input);
                 f(*target);
@@ -2064,6 +2087,7 @@ impl Op {
             | Op::MarginRankingLoss { .. }
             | Op::TripletMarginLoss { .. }
             | Op::PoissonNllLoss { .. }
+            | Op::CtcLoss { .. }
             | Op::NllLoss { .. }
             | Op::KlDivLoss { .. }
             | Op::ResidentLeaf { .. }
