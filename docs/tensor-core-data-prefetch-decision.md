@@ -29,7 +29,7 @@
 
 ## 2. 決定性の契約（R2）
 
-- `PrefetchDataLoader::iter` は呼び出しスレッド上で `Sampler::start_epoch` を 1 回呼び、その後 `Sampler::next_batch` を空の番兵が出るまで呼んで全バッチの添字列を **eager に** `Vec<Vec<usize>>` として確定する（`SamplerDataLoader::iter`・モジュール冒頭「シャッフル契約」と同じ「1 回のクロージャ内で RNG 消費を完結させる」方式）。RNG を消費するのはこの eager 確定だけで、worker はグローバル RNG に一切触れない。
+- `PrefetchDataLoader::iter` は呼び出しスレッド上で `Sampler::start_epoch` を 1 回呼ぶ。添字生成（`Sampler::next_batch`）もその後は呼び出しスレッド（consumer）上でのみ `k` の昇順に 1 回ずつ行うが、**`prefetch_depth` が定める投入窓ぶんだけ有界に**行う（§10「レビュー是正」参照。初版は epoch 全体を `Vec<Vec<usize>>` として eager に一括確定していたが、`prefetch_depth` が先読み量を抑える契約に反して大きな epoch でメモリを使い切り得たため是正した）。組み込みの 3 `Sampler` 実装（`SequentialSampler`／`RandomSampler`／`WeightedRandomSampler`）は RNG 消費を `start_epoch` 内の 1 回に限り、`next_batch` は確定済み順列（`IndexBatcher`）から純粋に切り出すだけのため、生成タイミングを分散させても RNG 消費順（＝添字順）は不変で決定性契約は保たれる。`next_batch` 側で RNG を消費するカスタム `Sampler` は本契約の対象外（transform／collate フックと同じ制約）。worker はグローバル RNG に一切触れない。
   - `start_epoch` が失敗した場合は、既存の `SamplerBatches` と同じ `pending_error` 方式にする（最初の `next()` で `Err` を 1 回だけ返し、以降は `None`。スレッドは起動しない）。
 - worker は `dataset.batch(&indices[k])` だけを実行し、`(k, result)` を結果チャネルへ送る。consumer は `BTreeMap<usize, Result<..>>` の reorder buffer で `k` の順に並べ直して yield する。
 - 保証する内容:
@@ -90,3 +90,9 @@
 - `crates/facade/tests/data_loader_prefetch.rs`（新規）: `fandhe_ai_tensor_core::data` を直接 import する統合テスト（bit 完全一致確認・ミニバッチ学習ループでの loss 減少・最終パラメータ bit 完全一致）。
 - `crates/facade/tests/data_loader_prefetch_bench.rs`（新規・`#[ignore]`）: 性能 A/B（W1: 取得ボトルネック構成、W2: fit 相当の大型データセット学習）。5 run 中央値・checksum hard assert・比率 record_only。実測は `docs/perf/logs/data-loader-prefetch-2183/README.md`。
 - facade 新規公開面: なし（既存 6 型のまま不変）。新規 `Op`／`BackendOps`／VJP なし。
+
+## 10. レビュー是正（PR #2315・codex-review P1 2 件）
+
+- **`PrefetchBatches::next` の逐次経路（`num_workers == 0`）で `.expect()` を使っていた**（`.claude/rules/coding-rust.md` の panic 禁止規約違反）。是正: `dataset: Arc<D>`・`sampler: &'s mut dyn Sampler` を `PrefetchBatches` の非 `Option` フィールドにし（構築契約により両方とも構築時に必ず存在する値へ変更）、`.expect()` を要する分岐自体を削除した。
+- **`PrefetchDataLoader::iter` が `Sampler::next_batch` を空の番兵が出るまで呼んで epoch 全体の添字列を `Vec<Vec<usize>>` として一括 eager 確定していた**ため、`prefetch_depth` が先読み量を抑えるはずの契約に反して大きな epoch でメモリを使い切り得た。是正: 添字生成を `PrefetchBatches` 内部（`spawn`・`advance_after_delivery`）へ移し、`sampler: &'s mut dyn Sampler` を `PrefetchBatches<'s, D>` の生存期間だけ借用する設計に変更。`spawn` は初回投入窓（`prefetch_depth` 個、または `Sampler` が先に尽きるまで）だけ添字を生成してから worker を起動し、以降は `advance_after_delivery`（1 バッチ配送完了ごとに呼ばれる）が次の 1 個だけを生成してタスク投入する。保持する添字は常に高々 in-flight 窓ぶん（`prefetch_depth` 程度）に収まり、`num_workers == 0` の逐次経路も同様に `next()` 呼び出しのたびに 1 個だけ生成する（事前一括確定をしない）。生成される `k` の順序自体は eager 版と変わらないため §2 の決定性契約は不変（`crates/tensor-core/src/data.rs::tests::prefetch_matches_sampler_data_loader_sequential`・`prefetch_random_sampler_matches_shuffle_true_data_loader_and_rng_state` 等の bit 完全一致テストが是正後も green であることを確認済み）。
+- 上記の是正に伴い `PrefetchBatches<D>` は `PrefetchBatches<'s, D>`（`sampler` への可変借用を保持するためのライフタイム）へ変更。公開型だが facade へは再エクスポートされていない内部 API のため破壊的変更の扱いは不要（§4・§8）。`PrefetchDataLoader::iter` は返す `PrefetchBatches<'_, D>` が `self.sampler` を可変借用するため、同一ローダーで前の epoch のイテレータが生存している間は次の `iter()` を呼べない（`&mut self` 契約により通常の Rust の借用検査で強制される）。

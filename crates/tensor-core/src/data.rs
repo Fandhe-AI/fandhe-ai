@@ -1070,13 +1070,31 @@ impl PrefetchConfig {
 /// # 決定性の契約（R2）
 ///
 /// [`Self::iter`] は呼び出しスレッド上で [`Sampler::start_epoch`] を
-/// 1 回呼び、その後 [`Sampler::next_batch`] を空の番兵が出るまで呼んで
-/// 全バッチの添字列を **eager に** `Vec<Vec<usize>>` として確定する
-/// （モジュール冒頭「シャッフル契約」と同じ「1 回のクロージャ内で
-/// RNG 消費を完結させる」方式を踏襲——RNG を消費するのはこの eager
-/// 確定だけで、worker はグローバル RNG に一切触れない）。worker は
-/// `dataset.batch(&indices[k])` だけを実行し、結果は呼び出し順 `k` で
-/// 並べ直してから yield する（reorder buffer）。
+/// 1 回呼ぶ。添字生成（[`Sampler::next_batch`]）はその後も呼び出し
+/// スレッド（consumer）上でのみ、`k` の昇順に 1 回ずつ行う（モジュール
+/// 冒頭「シャッフル契約」と同じ「RNG 消費はこの呼び出しスレッドだけで
+/// 完結させる」方式を踏襲——worker はグローバル RNG に一切触れない）。
+/// ただし呼び出しタイミングは **[`PrefetchConfig::prefetch_depth`] が
+/// 定める投入窓ぶんだけ有界** にする（レビュー指摘・イシュー #2183
+/// コメント: 以前は `iter()` が epoch 全体の添字列を `Vec<Vec<usize>>`
+/// として一括 eager 確定しており、`prefetch_depth` が先読み量を抑える
+/// はずの契約に反して大きな epoch でメモリを使い切り得た）。具体的には
+/// `PrefetchBatches::spawn`（内部実装）が初回投入窓分だけ `next_batch`
+/// を呼び、以降は `PrefetchBatches::advance_after_delivery`（内部実装）
+/// が 1 バッチ届くたびに次の 1 個だけを生成してタスク投入する。
+/// 生成される `k` の
+/// 順序自体は eager 版と変わらないため（呼ばれるタイミングが分散する
+/// だけ）、RNG 消費順は不変で決定性契約は保たれる。ただしこれは
+/// 組み込みの 3 [`Sampler`] 実装（[`SequentialSampler`]・
+/// [`RandomSampler`]・[`WeightedRandomSampler`]）が RNG 消費を
+/// `start_epoch` 内の 1 回に限り、`next_batch` は確定済み順列
+/// （`IndexBatcher`）から純粋に切り出すだけ、という前提の下でのみ
+/// 成立する。`next_batch` 側で RNG を消費するカスタム `Sampler`
+/// 実装は、生成タイミングがスケジューリング（学習ステップの進み方）
+/// に依存するため本契約の対象外（transform／collate フックと同じ
+/// 制約。次段落）。worker は `dataset.batch(&idx)` だけを実行し、
+/// 結果は呼び出し順 `k` で並べ直してから yield する（reorder
+/// buffer）。
 ///
 /// この結果、任意の `(num_workers, prefetch_depth)` の組み合わせで、
 /// 出力列（`Err` の位置と内容を含む）は同じ [`Sampler`] を使う
@@ -1152,21 +1170,22 @@ where
     /// スレッドを起動せず、最初の `next()` で 1 回だけ `Err` を返し
     /// 以降は `None`（[`SamplerBatches`] の `pending_error` と同じ
     /// 方式）。`config.num_workers() == 0` の場合もスレッドを起動せず、
-    /// 呼び出しスレッド上で逐次に処理する。
-    pub fn iter(&mut self) -> PrefetchBatches<D> {
+    /// 呼び出しスレッド上で逐次に処理する。返り値は `self.sampler` を
+    /// 可変借用する（添字生成が呼び出しスレッド限定である決定性契約を
+    /// 型で強制する。§ 決定性の契約）ため、次の epoch の `iter()` は
+    /// 前の epoch のイテレータが drop された後にしか呼べない。
+    pub fn iter(&mut self) -> PrefetchBatches<'_, D> {
         match self.sampler.start_epoch() {
-            Err(err) => PrefetchBatches::with_pending_error(err),
-            Ok(()) => {
-                let mut indices: Vec<Vec<usize>> = Vec::new();
-                loop {
-                    let batch = self.sampler.next_batch();
-                    if batch.is_empty() {
-                        break;
-                    }
-                    indices.push(batch);
-                }
-                PrefetchBatches::spawn(std::sync::Arc::clone(&self.dataset), indices, self.config)
-            }
+            Err(err) => PrefetchBatches::with_pending_error(
+                err,
+                std::sync::Arc::clone(&self.dataset),
+                self.sampler.as_mut(),
+            ),
+            Ok(()) => PrefetchBatches::spawn(
+                std::sync::Arc::clone(&self.dataset),
+                self.sampler.as_mut(),
+                self.config,
+            ),
         }
     }
 }
@@ -1184,15 +1203,32 @@ type PrefetchResultMsg<D> = (usize, Result<<D as Dataset>::Batch, DataError>);
 /// ことで in-flight バッチ数を [`PrefetchConfig::prefetch_depth`] 以下に
 /// 抑える。`num_workers() == 0` の場合はスレッドを一切使わず
 /// `dataset.batch` を直接呼ぶ。
-pub struct PrefetchBatches<D: Dataset> {
-    /// 逐次経路（`num_workers == 0`）専用。並列経路では `None`。
-    dataset: Option<std::sync::Arc<D>>,
-    /// eager に確定済みの添字列（`indices[k]` がバッチ `k` の添字）。
-    indices: Vec<Vec<usize>>,
-    total: usize,
+///
+/// 添字列（[`Sampler::next_batch`] の戻り値）はエポック全体を
+/// 事前確定せず、投入窓（`prefetch_depth`）分だけ有界に保持する
+/// （レビュー指摘・イシュー #2183 コメント。詳細は
+/// [`PrefetchDataLoader`] の「決定性の契約」節）。そのため `sampler`
+/// への可変参照をイテレータの生存期間 `'s` だけ借用し続ける。
+pub struct PrefetchBatches<'s, D: Dataset> {
+    /// 逐次経路（`num_workers == 0`）でのみ直接 `batch` を呼ぶ。並列
+    /// 経路（`task_tx`／`result_rx` が `Some`）では worker 側の
+    /// `Arc::clone` を通じてのみ使う（構築時に必ず存在するため
+    /// `Option` にしない。内部状態が想定と異なる場合の防御的
+    /// `unwrap`／`expect` を要らなくする——コーディング規約の
+    /// panic 禁止を「型」で保証する）。
+    dataset: std::sync::Arc<D>,
+    /// 添字生成元。呼び出し（consumer）スレッドからのみ `next_batch`
+    /// を呼ぶ（決定性契約）。構築時に必ず存在するため `Option` に
+    /// しない（`dataset` と同じ理由）。
+    sampler: &'s mut dyn Sampler,
+    /// `sampler` が空の番兵（epoch 終端）を返した後 `true`。以降は
+    /// `next_batch` を呼ばない。この時点で `next_to_send` が総バッチ数
+    /// と一致する。
+    exhausted: bool,
     /// 呼び出し元へ既に yield したバッチ数（次に yield すべき `k`）。
     delivered: usize,
-    /// 並列経路: 次にタスクとして投入すべき `k`（逐次経路では未使用）。
+    /// 並列経路: 次にタスクとして投入すべき `k`（生成済み添字の総数。
+    /// 逐次経路では未使用）。
     next_to_send: usize,
     task_tx: Option<std::sync::mpsc::Sender<(usize, Vec<usize>)>>,
     result_rx: Option<std::sync::mpsc::Receiver<PrefetchResultMsg<D>>>,
@@ -1204,12 +1240,21 @@ pub struct PrefetchBatches<D: Dataset> {
     done: bool,
 }
 
-impl<D: Dataset> PrefetchBatches<D> {
-    fn with_pending_error(err: DataError) -> Self {
+impl<'s, D: Dataset> PrefetchBatches<'s, D> {
+    /// `pending_error` 経由の即時 `Err`（`start_epoch` 失敗・worker
+    /// 起動失敗）を保持する。`dataset`／`sampler` は `next()` 側で
+    /// 一切参照されない（`pending_error.take()` が最初に処理される）
+    /// が、フィールドを非 `Option` にした構築契約上、呼び出し元が
+    /// 既に持つ値をそのまま渡す。
+    fn with_pending_error(
+        err: DataError,
+        dataset: std::sync::Arc<D>,
+        sampler: &'s mut dyn Sampler,
+    ) -> Self {
         Self {
-            dataset: None,
-            indices: Vec::new(),
-            total: 0,
+            dataset,
+            sampler,
+            exhausted: true,
             delivered: 0,
             next_to_send: 0,
             task_tx: None,
@@ -1222,21 +1267,25 @@ impl<D: Dataset> PrefetchBatches<D> {
     }
 }
 
-impl<D> PrefetchBatches<D>
+impl<'s, D> PrefetchBatches<'s, D>
 where
     D: Dataset + Send + Sync + 'static,
     D::Batch: Send + 'static,
 {
-    /// `indices` が確定した後、`config` に従って worker を起動する
-    /// （`num_workers == 0` または `indices` が空ならスレッドを起動
-    /// しない逐次経路）。
-    fn spawn(dataset: std::sync::Arc<D>, indices: Vec<Vec<usize>>, config: PrefetchConfig) -> Self {
-        let total = indices.len();
-        if config.num_workers() == 0 || total == 0 {
+    /// `config` に従って worker を起動する（`num_workers == 0` なら
+    /// スレッドを起動しない逐次経路）。添字は事前確定せず、
+    /// `config.prefetch_depth()` が定める投入窓ぶんだけ `sampler` から
+    /// 生成して送る（イシュー #2183 レビュー指摘の是正）。
+    fn spawn(
+        dataset: std::sync::Arc<D>,
+        sampler: &'s mut dyn Sampler,
+        config: PrefetchConfig,
+    ) -> Self {
+        if config.num_workers() == 0 {
             return Self {
-                dataset: Some(dataset),
-                indices,
-                total,
+                dataset,
+                sampler,
+                exhausted: false,
                 delivered: 0,
                 next_to_send: 0,
                 task_tx: None,
@@ -1244,7 +1293,41 @@ where
                 workers: Vec::new(),
                 reorder: std::collections::BTreeMap::new(),
                 pending_error: None,
-                done: total == 0,
+                done: false,
+            };
+        }
+
+        // 有界な投入窓ぶんだけ先読み添字を生成する。`prefetch_depth`
+        // 個生成しきる前にサンプラーが尽きた場合はこのエポックの
+        // バッチ数が確定する（`exhausted = true`）。
+        let mut initial_batches: Vec<Vec<usize>> = Vec::new();
+        let mut exhausted = false;
+        let window = config.prefetch_depth();
+        while initial_batches.len() < window {
+            let batch = sampler.next_batch();
+            if batch.is_empty() {
+                exhausted = true;
+                break;
+            }
+            initial_batches.push(batch);
+        }
+
+        if exhausted && initial_batches.is_empty() {
+            // このエポックにバッチが 0 件。worker スレッドを起動する
+            // 意味が無いため起動しない（旧 `total == 0` 早期リターンと
+            // 同じ最適化）。
+            return Self {
+                dataset,
+                sampler,
+                exhausted: true,
+                delivered: 0,
+                next_to_send: 0,
+                task_tx: None,
+                result_rx: None,
+                workers: Vec::new(),
+                reorder: std::collections::BTreeMap::new(),
+                pending_error: None,
+                done: true,
             };
         }
 
@@ -1319,21 +1402,19 @@ where
             for handle in workers {
                 let _ = handle.join();
             }
-            return Self::with_pending_error(err);
+            return Self::with_pending_error(err, dataset, sampler);
         }
 
-        // `delivered + prefetch_depth` を超えない範囲で先行投入する。
-        let mut next_to_send = 0usize;
-        let initial = config.prefetch_depth().min(total);
-        for _ in 0..initial {
-            let _ = task_tx.send((next_to_send, indices[next_to_send].clone()));
-            next_to_send += 1;
+        // 有界な投入窓分だけ既に生成済みの添字を投入する。
+        let next_to_send = initial_batches.len();
+        for (k, batch) in initial_batches.into_iter().enumerate() {
+            let _ = task_tx.send((k, batch));
         }
 
         Self {
-            dataset: None,
-            indices,
-            total,
+            dataset,
+            sampler,
+            exhausted,
             delivered: 0,
             next_to_send,
             task_tx: Some(task_tx),
@@ -1345,23 +1426,29 @@ where
         }
     }
 
-    /// `delivered` を進め、残タスクがあれば 1 件だけ追加投入する
-    /// （in-flight 数を `prefetch_depth` 以下に保つ）。
+    /// `delivered` を進め、サンプラーが尽きていなければ次の 1 個だけ
+    /// 添字を生成して追加投入する（in-flight 数・保持添字数を
+    /// `prefetch_depth` 以下に保つ）。
     fn advance_after_delivery(&mut self) {
         self.delivered += 1;
-        if self.next_to_send < self.total {
-            if let Some(tx) = &self.task_tx {
-                let _ = tx.send((self.next_to_send, self.indices[self.next_to_send].clone()));
+        if !self.exhausted {
+            let batch = self.sampler.next_batch();
+            if batch.is_empty() {
+                self.exhausted = true;
+            } else {
+                if let Some(tx) = &self.task_tx {
+                    let _ = tx.send((self.next_to_send, batch));
+                }
+                self.next_to_send += 1;
             }
-            self.next_to_send += 1;
         }
-        if self.delivered >= self.total {
+        if self.exhausted && self.delivered >= self.next_to_send {
             self.done = true;
         }
     }
 }
 
-impl<D: Dataset> Drop for PrefetchBatches<D> {
+impl<D: Dataset> Drop for PrefetchBatches<'_, D> {
     fn drop(&mut self) {
         // 送信側を先に閉じてタスクキューを枯渇させ、受信側を drop して
         // worker の `send` を即座にエラーにする。その後 `join` の結果は
@@ -1375,7 +1462,7 @@ impl<D: Dataset> Drop for PrefetchBatches<D> {
     }
 }
 
-impl<D> Iterator for PrefetchBatches<D>
+impl<D> Iterator for PrefetchBatches<'_, D>
 where
     D: Dataset + Send + Sync + 'static,
     D::Batch: Send + 'static,
@@ -1392,25 +1479,21 @@ where
         }
 
         // 逐次経路（`num_workers == 0`）: スレッドを介さず直接処理する。
+        // 添字は呼び出しのたびに 1 個だけ `sampler` から生成する
+        // （事前一括確定はしない。イシュー #2183 レビュー指摘の是正）。
         if self.task_tx.is_none() && self.result_rx.is_none() {
-            if self.delivered >= self.total {
+            let idx = self.sampler.next_batch();
+            if idx.is_empty() {
+                self.exhausted = true;
                 self.done = true;
                 return None;
             }
-            let idx = &self.indices[self.delivered];
-            let result = self
-                .dataset
-                .as_ref()
-                .expect("逐次経路は dataset を Some で保持する（spawn の構築契約）")
-                .batch(idx);
+            let result = self.dataset.batch(&idx);
             self.delivered += 1;
-            if self.delivered >= self.total {
-                self.done = true;
-            }
             return Some(result);
         }
 
-        if self.delivered >= self.total {
+        if self.exhausted && self.delivered >= self.next_to_send {
             self.done = true;
             return None;
         }
@@ -1457,8 +1540,35 @@ where
         if self.done {
             return (0, Some(0));
         }
-        let remaining = self.total.saturating_sub(self.delivered);
-        (remaining, Some(remaining))
+        if self.exhausted {
+            // サンプラーが尽きているため総バッチ数（`next_to_send`）が
+            // 確定済み。正確な残数を返せる。
+            let remaining = self.next_to_send.saturating_sub(self.delivered);
+            return (remaining, Some(remaining));
+        }
+        // 未確定: `Sampler::num_batches`（静的に既知の場合のみ）から
+        // 残数を見積もる（[`SamplerBatches::size_hint`] と同じ方式）。
+        match self.sampler.num_batches() {
+            Some(total) => {
+                let remaining = total.saturating_sub(self.delivered);
+                (remaining, Some(remaining))
+            }
+            None => {
+                // 総数不明でも、並列経路（`task_tx` が `Some`）なら
+                // 既に生成・投入済みで結果待ちの `next_to_send -
+                // delivered` 件は追加の `next_batch` 呼び出しなしに
+                // 必ず届くため、下限をここまで引き上げられる
+                // （`Iterator::size_hint` の契約: 下限の非過大申告を
+                // 満たしたまま安全に引き上げる）。逐次経路では
+                // `next_to_send` を使わないため下限 0 のままにする。
+                let lower = if self.task_tx.is_some() {
+                    self.next_to_send.saturating_sub(self.delivered)
+                } else {
+                    0
+                };
+                (lower, None)
+            }
+        }
     }
 }
 
@@ -3098,5 +3208,100 @@ mod tests {
         }
         assert_eq!(n, 4);
         assert_eq!(it.size_hint(), (0, Some(0)));
+    }
+
+    /// `next_batch` 呼び出し回数を数える `Sampler`（イシュー #2183
+    /// レビュー指摘の回帰固定専用フィクスチャ）。`Send` 境界を満たす
+    /// ため呼び出し回数は `Arc<AtomicUsize>` で共有する。
+    #[derive(Clone)]
+    struct CountingSampler {
+        len: usize,
+        batch_size: usize,
+        cursor: usize,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Sampler for CountingSampler {
+        fn start_epoch(&mut self) -> Result<(), DataError> {
+            self.cursor = 0;
+            Ok(())
+        }
+
+        fn next_batch(&mut self) -> Vec<usize> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.cursor >= self.len {
+                return Vec::new();
+            }
+            let start = self.cursor;
+            let end = (self.cursor + self.batch_size).min(self.len);
+            self.cursor = end;
+            (start..end).collect()
+        }
+    }
+
+    /// レビュー指摘（イシュー #2183 コメント）の回帰固定: `iter()` は
+    /// もはや epoch 全体の添字列を一括 eager 確定しない。`prefetch_
+    /// depth` が定める投入窓ぶんだけ `next_batch` を呼び、以降は
+    /// 1 バッチ配送されるたびに 1 個だけ追加生成する（`next_to_send`
+    /// の増分と `next_batch` 呼び出し回数が 1 対 1 で対応する）。
+    #[test]
+    fn prefetch_iter_generates_indices_within_bounded_window_not_eagerly() {
+        let len = 100;
+        let depth = 3;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ds = TensorDataset::new(tensor_2d(len, 1)).unwrap();
+        let sampler = CountingSampler {
+            len,
+            batch_size: 1,
+            cursor: 0,
+            calls: calls.clone(),
+        };
+        let cfg = PrefetchConfig::new(2, depth).unwrap();
+        let mut loader = PrefetchDataLoader::new(ds, sampler, cfg).unwrap();
+
+        let mut it = loader.iter();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            depth,
+            "iter() 直後は投入窓（prefetch_depth）ぶんだけ生成されるはず（epoch 全体 {len} 件の eager 一括確定はしない）"
+        );
+
+        for _ in 0..5 {
+            assert!(it.next().is_some());
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            depth + 5,
+            "5 バッチ配送後は投入窓 + 配送済み件数ぶんだけ生成されているはず（1 件配送ごとに次の 1 個だけを生成）"
+        );
+    }
+
+    /// 上記の逐次経路（`num_workers == 0`）版: `iter()` はスレッドを
+    /// 起動しないため呼び出し時点では 1 件も生成せず、`next()` の
+    /// 呼び出しごとに 1 個だけ生成する。
+    #[test]
+    fn prefetch_sequential_iter_generates_indices_lazily_one_at_a_time() {
+        let len = 20;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ds = TensorDataset::new(tensor_2d(len, 1)).unwrap();
+        let sampler = CountingSampler {
+            len,
+            batch_size: 1,
+            cursor: 0,
+            calls: calls.clone(),
+        };
+        let cfg = PrefetchConfig::new(0, 4).unwrap();
+        let mut loader = PrefetchDataLoader::new(ds, sampler, cfg).unwrap();
+
+        let mut it = loader.iter();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "num_workers == 0 の逐次経路は iter() 直後は 1 件も生成しないはず"
+        );
+        for expected in 1..=3 {
+            assert!(it.next().is_some());
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), expected);
+        }
     }
 }
