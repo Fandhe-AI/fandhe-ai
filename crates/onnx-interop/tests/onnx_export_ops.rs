@@ -20,7 +20,7 @@ use fandhe_ai_onnx_interop::onnx::export::{
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, RawTensor, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
 use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, ModelProto, attribute_type};
-use fandhe_ai_onnx_interop::ops::{self, ConvAttrs, GemmAttrs, LayerNormAttrs};
+use fandhe_ai_onnx_interop::ops::{self, BatchNormAttrs, ConvAttrs, GemmAttrs, LayerNormAttrs};
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 
@@ -786,6 +786,181 @@ fn conv_omitted_auto_pad_writes_no_auto_pad_attribute() {
     );
 }
 
+#[test]
+fn batch_normalization_exports_epsilon_momentum_training_mode_and_matches_direct_call() {
+    // イシュー #2187・親 #2186: `momentum` は `ops::BatchNormAttrs` が保持
+    // しない値のため export 側 variant 自身のフィールドとして持つ
+    // （`export_ops.rs` の `ExportOp::BatchNormalization` doc 参照）。
+    // `training_mode` は export 側が常に `0` を書く。属性値は非既定
+    // （`epsilon`）を用いて属性欠落を検出できるようにする
+    // （モジュール冒頭コメントの「非既定値を使う」方針）。
+    let epsilon = 1e-3f32;
+    let momentum = 0.75f32;
+    let node = ExportNode {
+        name: "bn1".to_string(),
+        op: ExportOp::BatchNormalization { epsilon, momentum },
+        inputs: vec![
+            "x".to_string(),
+            "scale".to_string(),
+            "bias".to_string(),
+            "mean".to_string(),
+            "var".to_string(),
+        ],
+        outputs: vec!["y".to_string()],
+    };
+
+    let proto = to_node_proto(&node).unwrap();
+    assert_eq!(proto.attribute.len(), 3, "3 属性すべてを常時書き出すはず");
+    let epsilon_attr = proto
+        .attribute
+        .iter()
+        .find(|a| a.name == "epsilon")
+        .unwrap();
+    assert_eq!(epsilon_attr.r#type, attribute_type::FLOAT);
+    assert_eq!(epsilon_attr.f, epsilon);
+    let momentum_attr = proto
+        .attribute
+        .iter()
+        .find(|a| a.name == "momentum")
+        .unwrap();
+    assert_eq!(momentum_attr.r#type, attribute_type::FLOAT);
+    assert_eq!(momentum_attr.f, momentum);
+    let training_mode_attr = proto
+        .attribute
+        .iter()
+        .find(|a| a.name == "training_mode")
+        .unwrap();
+    assert_eq!(training_mode_attr.r#type, attribute_type::INT);
+    assert_eq!(training_mode_attr.i, 0);
+
+    let (n, c, h, w) = (2usize, 3usize, 2usize, 2usize);
+    let x_data: Vec<f32> = (0..(n * c * h * w)).map(|v| v as f32 * 0.1 - 1.0).collect();
+    let scale = vec![1.1f32, 0.9, 1.3];
+    let bias = vec![0.05f32, -0.1, 0.2];
+    let mean = vec![0.0f32, 0.2, -0.1];
+    let var = vec![1.0f32, 0.5, 2.0];
+
+    let x = raw_f32(&[n as i64, c as i64, h as i64, w as i64], &x_data);
+    let scale_raw = raw_f32(&[c as i64], &scale);
+    let bias_raw = raw_f32(&[c as i64], &bias);
+    let mean_raw = raw_f32(&[c as i64], &mean);
+    let var_raw = raw_f32(&[c as i64], &var);
+
+    let result = run_exported_node(
+        node,
+        vec![
+            ("x", x),
+            ("scale", scale_raw),
+            ("bias", bias_raw),
+            ("mean", mean_raw),
+            ("var", var_raw),
+        ],
+    );
+    let y = expect_f32(&result, "y");
+    let expected = ops::batch_normalization(
+        &tensor_f32(&[n, c, h, w], &x_data),
+        &tensor_f32(&[c], &scale),
+        &tensor_f32(&[c], &bias),
+        &tensor_f32(&[c], &mean),
+        &tensor_f32(&[c], &var),
+        &BatchNormAttrs { epsilon },
+    )
+    .unwrap();
+    assert_f32_bit_exact(y, &expected);
+}
+
+#[test]
+fn batch_normalization_rejects_input_count_other_than_five() {
+    // `interp.rs::compute_batch_normalization` は入力数をちょうど 5 に
+    // 固定するため export 側も同じ範囲（`5..=5`）で fail-closed に拒否する。
+    let too_few = ExportNode {
+        name: "bn_bad".to_string(),
+        op: ExportOp::BatchNormalization {
+            epsilon: 1e-5,
+            momentum: 0.9,
+        },
+        inputs: vec!["x".to_string(), "scale".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    assert!(matches!(
+        to_node_proto(&too_few),
+        Err(ExportError::InputArityMismatch { actual: 2, .. })
+    ));
+}
+
+#[test]
+fn global_average_pool_exports_no_attributes_and_matches_direct_call() {
+    let node = ExportNode {
+        name: "gap1".to_string(),
+        op: ExportOp::GlobalAveragePool,
+        inputs: vec!["x".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    let proto = to_node_proto(&node).unwrap();
+    assert!(proto.attribute.is_empty(), "属性なしのはず");
+
+    let x_data: Vec<f32> = (0..(2 * 3 * 4 * 4))
+        .map(|v| v as f32 * 0.05 - 3.0)
+        .collect();
+    let x = raw_f32(&[2, 3, 4, 4], &x_data);
+    let result = run_exported_node(node, vec![("x", x)]);
+    let y = expect_f32(&result, "y");
+    let expected = ops::global_average_pool(&tensor_f32(&[2, 3, 4, 4], &x_data)).unwrap();
+    assert_f32_bit_exact(y, &expected);
+}
+
+#[test]
+fn global_average_pool_rejects_input_count_other_than_one() {
+    let node = ExportNode {
+        name: "gap_bad".to_string(),
+        op: ExportOp::GlobalAveragePool,
+        inputs: vec!["x".to_string(), "extra".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    assert!(matches!(
+        to_node_proto(&node),
+        Err(ExportError::InputArityMismatch { actual: 2, .. })
+    ));
+}
+
+#[test]
+fn flatten_exports_axis_attribute_and_matches_direct_call() {
+    // 非既定の `axis`（ONNX 既定値は 1）を使い属性欠落を検出できるようにする。
+    let node = ExportNode {
+        name: "flatten1".to_string(),
+        op: ExportOp::Flatten { axis: 2 },
+        inputs: vec!["x".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    let proto = to_node_proto(&node).unwrap();
+    assert_eq!(proto.attribute.len(), 1, "axis 属性のみ書き出すはず");
+    let axis_attr = proto.attribute.first().unwrap();
+    assert_eq!(axis_attr.name, "axis");
+    assert_eq!(axis_attr.r#type, attribute_type::INT);
+    assert_eq!(axis_attr.i, 2);
+
+    let x_data: Vec<f32> = (0..(2 * 3 * 4)).map(|v| v as f32).collect();
+    let x = raw_f32(&[2, 3, 4], &x_data);
+    let result = run_exported_node(node, vec![("x", x)]);
+    let y = expect_f32(&result, "y");
+    let expected = ops::flatten(&tensor_f32(&[2, 3, 4], &x_data), 2).unwrap();
+    assert_f32_bit_exact(y, &expected);
+}
+
+#[test]
+fn flatten_rejects_input_count_other_than_one() {
+    let node = ExportNode {
+        name: "flatten_bad".to_string(),
+        op: ExportOp::Flatten { axis: 1 },
+        inputs: Vec::new(),
+        outputs: vec!["y".to_string()],
+    };
+    assert!(matches!(
+        to_node_proto(&node),
+        Err(ExportError::InputArityMismatch { actual: 0, .. })
+    ));
+}
+
 // ---- 層 A: arity 検査 ----
 
 #[test]
@@ -957,15 +1132,14 @@ fn build_model_proto_rejects_unsupported_op_type() {
         nodes: vec![NodeProto {
             input: vec!["x".to_string()],
             output: vec!["y".to_string()],
-            name: "flatten1".to_string(),
-            // `Flatten` は export allowlist 外のまま（`Conv` はイシュー
-            // #2076 で対応済みのため負例に使えなくなった。`Flatten` は
-            // イシュー #2200 で import には対応したが export allowlist
-            // には追加していない〈import/export 非対称。`onnx/mod.rs`
-            // モジュール冒頭コメント参照〉ため、引き続き export 拒否の
-            // 負例として使える。`docs/onnx-export-op-mapping.md` §7
-            // 「Conv2d 対応 ≠ CNN 対応」参照）。
-            op_type: "Flatten".to_string(),
+            name: "global_max_pool1".to_string(),
+            // `GlobalMaxPool` は import（`interp.rs`）・export
+            // （`SUPPORTED_OP_TYPES`）のどちらのディスパッチ表にも存在しない
+            // （イシュー #2187 実装計画 §0 Step 0 で確認済み）。`Flatten` は
+            // イシュー #2187 で export 対応したため負例に使えなくなった
+            // （`Conv` はイシュー #2076 で対応済みのため既に負例に使えない
+            // のと同じ理由）。
+            op_type: "GlobalMaxPool".to_string(),
             attribute: Vec::new(),
             domain: String::new(),
         }],
@@ -980,7 +1154,7 @@ fn build_model_proto_rejects_unsupported_op_type() {
         ExportError::UnsupportedOp {
             op_type,
             ..
-        } if op_type == "Flatten"
+        } if op_type == "GlobalMaxPool"
     ));
 }
 
@@ -1011,11 +1185,12 @@ fn build_model_proto_rejects_non_default_domain() {
 
 #[test]
 fn export_op_variants_all_have_op_type_in_supported_list() {
-    // `ExportOp` の全 23 variant を 1 個ずつ構築し、`op_type()` が
+    // `ExportOp` の全 26 variant を 1 個ずつ構築し、`op_type()` が
     // `SUPPORTED_OP_TYPES` に含まれること・集合サイズが一致することを固定する
     // （drift 検出。variant 追加時はこの一覧・`op_type()`・`to_node_proto` の
     // 網羅 match 双方の更新がコンパイルエラーで強制される。`Conv` はイシュー
-    // #2076・親 #2034 で追加）。
+    // #2076・親 #2034、`BatchNormalization`／`GlobalAveragePool`／
+    // `Flatten` はイシュー #2187・親 #2186 で追加）。
     let sample: Vec<ExportOp> = vec![
         ExportOp::Gemm(GemmAttrs::default()),
         ExportOp::MatMul,
@@ -1040,9 +1215,15 @@ fn export_op_variants_all_have_op_type_in_supported_list() {
         ExportOp::Constant(ConstantAttr::Int(0)),
         ExportOp::LayerNormalization(LayerNormAttrs::default()),
         ExportOp::Conv(ConvAttrs::default()),
+        ExportOp::BatchNormalization {
+            epsilon: 1e-5,
+            momentum: 0.9,
+        },
+        ExportOp::GlobalAveragePool,
+        ExportOp::Flatten { axis: 1 },
     ];
-    assert_eq!(sample.len(), 23, "interp.rs 対応 23 op と揃うはず");
-    assert_eq!(SUPPORTED_OP_TYPES.len(), 23);
+    assert_eq!(sample.len(), 26, "interp.rs 対応 26 op と揃うはず");
+    assert_eq!(SUPPORTED_OP_TYPES.len(), 26);
     for op in &sample {
         assert!(
             SUPPORTED_OP_TYPES.contains(&op.op_type()),
@@ -1050,11 +1231,11 @@ fn export_op_variants_all_have_op_type_in_supported_list() {
             op.op_type()
         );
     }
-    // 重複なし（23 variant すべてが異なる op_type を持つ）ことも確認する。
+    // 重複なし（26 variant すべてが異なる op_type を持つ）ことも確認する。
     let mut op_types: Vec<&str> = sample.iter().map(ExportOp::op_type).collect();
     op_types.sort_unstable();
     op_types.dedup();
-    assert_eq!(op_types.len(), 23);
+    assert_eq!(op_types.len(), 26);
 }
 
 #[test]
