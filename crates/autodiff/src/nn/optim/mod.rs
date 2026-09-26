@@ -75,6 +75,7 @@ mod adamw;
 mod lamb;
 mod lbfgs;
 mod nadam;
+pub(crate) mod param_group;
 mod radam;
 mod rmsprop;
 
@@ -88,6 +89,15 @@ pub use adagrad::{Adagrad, AdagradConfig};
 pub use adam::{Adam, AdamConfig};
 pub use adamax::{Adamax, AdamaxConfig};
 pub use adamw::{AdamW, AdamWConfig};
+// イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）。
+// `ParamGroup`／`ParamGroupStep` は内部クレート限定の公開（facade 非
+// 公開。`param_group` モジュール冒頭 doc・
+// `docs/autodiff-param-groups-decision.md` 参照）。`SlotHparams` は
+// 各 optimizer ファイルの `step_with_slot_hparams` 実装が使う内部専用
+// ヘルパーのため `pub(crate)` に留める（facade はもとより、クレート外
+// からも到達不能）。`resolve_slot_hparams` は `param_group.rs` 内の
+// `ParamGroupStep` 実装からしか呼ばれないため mod.rs では再エクスポート
+// しない。
 pub use amp::{
     GradScaler, GradScalerConfig, UnscaleResult, has_non_finite, scale_grads, scale_loss,
     unscale_grads,
@@ -100,6 +110,8 @@ pub use lr_scheduler::{
     OneCycleLr, OneCycleLrConfig, StepLr,
 };
 pub use nadam::{NAdam, NAdamConfig};
+pub(crate) use param_group::SlotHparams;
+pub use param_group::{ParamGroup, ParamGroupStep};
 pub use radam::{RAdam, RAdamConfig};
 pub use reduce_lr_on_plateau::{
     PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
@@ -215,6 +227,26 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 承認事項のため本イシューでは対応しない）。`DeviceParamStore` 非対応
 // （デバイス常駐化は親 #2172 のスコープ外）。
 
+// イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）
+// を追加した（`param_group` モジュール冒頭 doc 参照）。`ParamGroup`／
+// `ParamGroupStep` を `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`
+// （本モジュール）・`crate::optim::Sgd`（別モジュール）へ実装した。
+// 各 optimizer の既存 `step()` は `step_with_slot_hparams`（新設。
+// `pub(crate)`）への薄い委譲へ変更したが、演算式の形は不変であり
+// `groups = &[]` は既存 `step()` と bit 完全一致する（`crates/autodiff/
+// tests/nn_optim_param_groups.rs` が固定する）。親 #2131 が定める
+// 「facade 公開面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則に
+// より、`ParamGroup`／`ParamGroupStep` は本イシュー時点で所有者の承認
+// コメントがないため facade（`fandhe_ai::optim`）へは公開していない
+// （`crates/facade/src/lib.rs::ParamGroupsHoldDoctestGuard`・
+// `docs/autodiff-param-groups-decision.md` 参照）。新規 `Op`／
+// `BackendOps` メソッド／VJP／カーネル／`unsafe`／依存は追加していない
+// （ホストの `Tensor<f32>` 経路のみ）。`crate::optim::device_store::
+// DeviceParamStore` の group 対応は対象外のまま。本イシューと並行して
+// 追加された `Adadelta`／`Adamax`／`NAdam`／`RAdam`（#2171。下記）へは
+// `ParamGroupStep` を実装していない（実装対象は上記 6 種のみ。
+// `docs/autodiff-param-groups-decision.md` §6 参照）。
+//
 // イシュー #2171（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 // 行内深掘り）」）: Adadelta（[`Adadelta`]・[`AdadeltaConfig`]。Zeiler,
 // 2012）・Adamax（[`Adamax`]・[`AdamaxConfig`]。Kingma & Ba, 2015

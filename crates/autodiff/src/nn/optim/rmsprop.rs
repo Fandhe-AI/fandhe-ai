@@ -156,6 +156,44 @@ impl RmsProp {
         &mut self,
         params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 既定 config の `lr`／`weight_decay` を全スロットへ一様に適用
+        // する `SlotHparams` 列を組んで委譲する（イシュー #2173。
+        // `step_with_slot_hparams` doc「`step()` との bit 一致契約」
+        // 参照）。
+        let hparams = vec![
+            super::SlotHparams {
+                lr: self.config.lr,
+                weight_decay: self.config.weight_decay,
+            };
+            params_and_grads.len()
+        ];
+        self.step_with_slot_hparams(params_and_grads, &hparams)
+    }
+
+    /// [`RmsProp::step`] の実装本体（イシュー #2173。param groups
+    /// 対応のため `lr`／`weight_decay` をスロット単位の
+    /// [`super::SlotHparams`] として受け取る形へ抽出した）。
+    ///
+    /// **`step()` との bit 一致契約**: `hparams` の全要素が
+    /// `self.config.lr`／`self.config.weight_decay` と等しいとき、
+    /// 本メソッドの出力は [`RmsProp::step`] 単体の出力と bit 完全
+    /// 一致する。`alpha`／`eps`／`momentum`／`centered` はグループで
+    /// 上書きしない共有ハイパーパラメータのまま（モジュール doc
+    /// 「追加しないもの」節）。
+    pub(crate) fn step_with_slot_hparams(
+        &mut self,
+        params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
+        hparams: &[super::SlotHparams],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        if hparams.len() != params_and_grads.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "RmsProp::step_with_slot_hparams: hparams.len() ({}) != \
+                 params_and_grads.len() ({})",
+                hparams.len(),
+                params_and_grads.len()
+            )));
+        }
+
         // 副作用（`self.states` の初期化を含む）を一切加えない検証専用
         // フェーズ。初回 step（`self.states` が空）でもここで
         // `self.states` を書き換えてはならない——検証がここで失敗した
@@ -216,11 +254,16 @@ impl RmsProp {
 
         let alpha = self.config.alpha;
         let one_minus_alpha = 1.0 - alpha;
-        let lr = self.config.lr;
         let eps = self.config.eps;
 
         let mut out = Vec::with_capacity(params_and_grads.len());
-        for (slot, (param, grad)) in self.states.iter_mut().zip(params_and_grads.iter()) {
+        for ((slot, (param, grad)), hp) in self
+            .states
+            .iter_mut()
+            .zip(params_and_grads.iter())
+            .zip(hparams.iter())
+        {
+            let lr = hp.lr;
             // `param`/`grad` は読み取り専用の走査のみ（状態バッファ・
             // new_param は別バッファへ積む）なので、contiguous 入力に
             // 対する不要コピーを避ける `dense_vec_ref`（`Cow<[f32]>`）
@@ -236,8 +279,8 @@ impl RmsProp {
                 // （weight_decay == 0 のときは演算自体を skip する。
                 // `AdamW` の decoupled 方式と異なり RMSprop の
                 // weight_decay は勾配へ加算する coupled L2 方式）。
-                if self.config.weight_decay != 0.0 {
-                    g = f32::mul_add(self.config.weight_decay, param_data[i], g);
+                if hp.weight_decay != 0.0 {
+                    g = f32::mul_add(hp.weight_decay, param_data[i], g);
                 }
 
                 // `square_avg.mul_(alpha).addcmul_(g, g, value=1-alpha)`。

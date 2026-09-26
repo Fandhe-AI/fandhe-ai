@@ -237,6 +237,43 @@ impl Sgd {
         params: &[&Tensor<f32>],
         grads: &[&Tensor<f32>],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 既定 config の `lr`／`weight_decay` を全スロットへ一様に適用
+        // する `SlotHparams` 列を組んで委譲する（イシュー #2173。
+        // `step_with_slot_hparams` doc「`step()` との bit 一致契約」
+        // 参照）。
+        let hparams = vec![
+            crate::nn::optim::SlotHparams {
+                lr: self.config.lr,
+                weight_decay: self.config.weight_decay,
+            };
+            params.len()
+        ];
+        self.step_with_slot_hparams(params, grads, &hparams)
+    }
+
+    /// [`Sgd::step`] の実装本体（イシュー #2173。param groups 対応の
+    /// ため `lr`／`weight_decay` をスロット単位の
+    /// `crate::nn::optim::SlotHparams` として受け取る形へ抽出した）。
+    ///
+    /// **`step()` との bit 一致契約**: `hparams` の全要素が
+    /// `self.config.lr`／`self.config.weight_decay` と等しいとき、
+    /// 本メソッドの出力は [`Sgd::step`] 単体の出力と bit 完全一致
+    /// する。`momentum`／`dampening`／`nesterov` はグループで上書き
+    /// しない共有ハイパーパラメータのまま（`crate::nn::optim::
+    /// param_group` モジュール doc「追加しないもの」節）。
+    pub(crate) fn step_with_slot_hparams(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+        hparams: &[crate::nn::optim::SlotHparams],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        if hparams.len() != params.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sgd::step_with_slot_hparams: hparams.len() ({}) != params.len() ({})",
+                hparams.len(),
+                params.len()
+            )));
+        }
         if params.len() != grads.len() {
             return Err(AutodiffError::InvalidArgument(format!(
                 "Sgd::step: params.len() ({}) != grads.len() ({})",
@@ -331,8 +368,8 @@ impl Sgd {
                 // 演算順に揃えて parity を取ることが目的のため対象外
                 // （実装計画 §3.3 参照）。
                 let mut g = grad_data[j];
-                if self.config.weight_decay != 0.0 {
-                    g += self.config.weight_decay * p;
+                if hparams[i].weight_decay != 0.0 {
+                    g += hparams[i].weight_decay * p;
                 }
 
                 if use_momentum {
@@ -350,7 +387,7 @@ impl Sgd {
                     v_out.push(b);
                 }
 
-                out.push(p - self.config.lr * g);
+                out.push(p - hparams[i].lr * g);
             }
 
             // `out`/`v_out` の要素数は `param_data.len()`（= `param` の
