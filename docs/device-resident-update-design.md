@@ -2210,7 +2210,20 @@ ratio）の状態バッファをデバイス常駐バッファとして保持し
   RmsProp・Adagrad・LAMB は互いに排他的で、いずれか 1 つで使用済みの
   ストアへ他の optimizer を呼ぶと一律拒否される（`step_adam_impl`
   側にも RmsProp／Adagrad／LAMB 使用済みストアを拒否する対称ガードを
-  追加した）。
+  追加した）。**例外は Adam 系 → SGD の 1 方向のみ**（§「Adam／AdamW
+  の常駐 step 結線」の既存契約を維持。`step()`〈SGD〉は
+  `rmsprop_state`／`adagrad_state`／`lamb_state` の 3 状態のみを検査
+  し `adam_state` は意図的に対象外のため、Adam 系で使用済みのストア
+  へ `step()` を呼ぶことは拒否されず「SGD として独立に動作し
+  `m`／`v` は無視される」契約のまま成功する）。ただし**その後の Adam
+  系の再利用（Adam → SGD → Adam）は拒否される**: `step_adam_impl` は
+  `self.sgd_used`（一度でも `step()` が成功したストアで true）を
+  `self.adam_state` の有無に関わらず常に検査するため、SGD 実行後に
+  再び Adam／AdamW を呼ぶと stale な `m`／`v`／`beta_pow_t` の再利用
+  を防ぐため一律拒否される（`crates/autodiff/src/optim/device_store.
+  rs::step_adam_impl` の `self.sgd_used` 検査コメント参照。PR #2002
+  レビュー是正）。RmsProp・Adagrad・LAMB にはこの非対称の例外はなく、
+  SGD・Adam 系を含む他のいずれの optimizer とも双方向に排他的である。
 - **facade 新規公開面**: `Tape::step_device_param_store_rmsprop`／
   `_adagrad`／`_lamb` の 3 メソッドのみ（`RmsPropConfig`／
   `AdagradConfig`／`LambConfig` は既存の `fandhe_ai::optim` 再
