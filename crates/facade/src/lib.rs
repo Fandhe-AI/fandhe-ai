@@ -180,7 +180,9 @@ pub use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
 // 引数型として使う。`AdamConfig`／`AdamWConfig` 自体は `crate::optim`
 // （`optim.rs`）から利用者向けにも再エクスポート済みのため、ここでは
 // 型を参照するためだけの `use`（`pub use` ではない）とする。
-use fandhe_ai_autodiff::nn::optim::{AdamConfig, AdamWConfig};
+use fandhe_ai_autodiff::nn::optim::{
+    AdagradConfig, AdamConfig, AdamWConfig, LambConfig, RmsPropConfig,
+};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 // `VarHostView`（借用ビュー読み出し API。イシュー #1335）は 1 文 1 行を
 // 維持する（`tests/api_surface.rs` が `pub use` を行単位で走査するため。
@@ -386,6 +388,39 @@ impl Tape {
         config: &AdamWConfig,
     ) -> Result<(), BackendError> {
         store.step_adamw(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::step_rmsprop`] への委譲入口（イシュー
+    /// #2175）。`step_device_param_store`（SGD）と同じ理由の薄い委譲。
+    pub fn step_device_param_store_rmsprop(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &RmsPropConfig,
+    ) -> Result<(), BackendError> {
+        store.step_rmsprop(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::step_adagrad`] への委譲入口（イシュー
+    /// #2175）。`step_device_param_store`（SGD）と同じ理由の薄い委譲。
+    pub fn step_device_param_store_adagrad(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &AdagradConfig,
+    ) -> Result<(), BackendError> {
+        store.step_adagrad(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::step_lamb`] への委譲入口（イシュー #2175）。
+    /// `step_device_param_store`（SGD）と同じ理由の薄い委譲。
+    pub fn step_device_param_store_lamb(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &LambConfig,
+    ) -> Result<(), BackendError> {
+        store.step_lamb(&self.0, grads, config)
     }
 
     /// [`DeviceParamStore::backward`] への委譲入口（イシュー #1022）。

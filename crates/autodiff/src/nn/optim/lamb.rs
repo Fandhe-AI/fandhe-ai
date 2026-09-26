@@ -84,23 +84,30 @@
 //! （`crates/autodiff/tests/nn_optim_lamb.rs`・本ファイル末尾の
 //! ユニットテストで固定する）。
 //!
-//! # `DeviceParamStore` 非対応
+//! # `DeviceParamStore` 結線済み（イシュー #2175）
 //!
-//! `crate::optim::device_store::DeviceParamStore::step` は
-//! `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、
-//! `Lamb` は結線されていない（`AdamW`／`Adam` と同様）。LAMB の
-//! デバイス常駐化にはパラメータテンソルごとの L2 norm reduction
-//! カーネルと trust ratio 適用カーネル（3 バックエンド）が必要で、
-//! 本イシュー（#1744）の対象外。`Lamb::step` はホスト `Tensor<f32>`
-//! を介した optimizer step のみを提供する。
+//! `crate::optim::device_store::DeviceParamStore::step_lamb` が
+//! `BackendOps::lamb_step_device` へ結線済み（CPU 実装のみ・CUDA／
+//! Metal のネイティブカーネルは後続イシューの対象）。layer-wise trust
+//! ratio は連結バッファ内の `segment_numels`（`DeviceParamStore::layout`
+//! から導出する各パラメータの要素数列）で表現し、`Lamb::
+//! step_with_slot_hparams` の 3 フェーズ契約（計算 → 全 segment 検証 →
+//! コミット）を CPU 参照実装（`crates/backend-cpu/src/ops.rs::
+//! lamb_step_device`）が逐語再現する。非有限検出時の no-op 失敗・
+//! no-poison 契約もホスト実装と同一（`DeviceParamStore::step_lamb` doc
+//! 参照）。bit 完全一致は `crates/backend-cpu/tests/lamb_device_parity.rs`
+//! が固定する。詳細は `docs/device-resident-update-design.md`「RmsProp／
+//! Adagrad／LAMB の常駐 step 結線（#2175）」節。
 //!
 //! `super::mod` doc が示す通り、`step()` は `(param, grad)` の参照列を
 //! 受け取り更新後 `Tensor<f32>` の列を返す（`AdamW::step`／`Adam::step`
 //! と同一シグネチャ）。
 //!
-//! 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は追加しない
-//! （`AdamW`／`Adam` と同様、`Tape`/`Var`/`BackendOps` に依存しない
-//! 値型・純関数。`crates/facade/src/optim.rs`「REQ-12 との整合」節）。
+//! `Lamb::step` 自体（値型・純関数）へは新規 `Op`／`Var` メソッド／VJP を
+//! 追加しない（`BackendOps` メソッドは `DeviceParamStore::step_lamb`
+//! 経由の別経路として追加済み。`Lamb::step` は `AdamW`／`Adam` と同様
+//! `Tape`/`Var`/`BackendOps` に依存しない値型・純関数のまま。
+//! `crates/facade/src/optim.rs`「REQ-12 との整合」節）。
 
 use std::collections::HashMap;
 

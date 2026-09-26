@@ -142,11 +142,10 @@ pub use state_dict::OptimizerStateDict;
 // facade（`fandhe_ai::optim`）への公開は `crates/facade/src/optim.rs`
 // の素の再エクスポート（純再エクスポート契約は
 // `docs/facade-optimizer-promotion-decision.md` §4 案 A）。
-// `crate::optim::device_store::DeviceParamStore::step` は
-// `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、
-// 本イシューでは対応する `BackendOps` メソッドを追加していないため
-// RMSprop・Adagrad とも **`DeviceParamStore` 非対応**。LAMB は #1744
-// が対象のまま。
+// `crate::optim::device_store::DeviceParamStore::step_rmsprop`／
+// `step_adagrad` がそれぞれ `BackendOps::rmsprop_step_device`／
+// `adagrad_step_device` へ結線済み（イシュー #2175。CPU 実装のみ・
+// CUDA／Metal は `Unsupported` のまま）。
 //
 // イシュー #1742（親 #1610）: Adam（coupled L2 weight decay。PyTorch
 // `torch.optim.Adam(weight_decay>0)` 相当）を追加した（`adam` モジュール
@@ -175,11 +174,12 @@ pub use state_dict::OptimizerStateDict;
 // `crates/facade/tests/api_surface.rs` の期待集合更新・
 // `docs/compat-api-scope.md` §1.3 optimizer 行の更新も本イシューで完了
 // 済み（`Lamb`／`LambConfig` の純再エクスポート。`crates/facade/src/
-// optim.rs` 参照）。`DeviceParamStore` への結線は非対応のまま
-// （`lamb` モジュール doc「`DeviceParamStore` 非対応」節。テンソル
-// ごとの L2 norm reduction カーネルが未実装のため）。#1610 配下の
+// optim.rs` 参照）。`DeviceParamStore` への結線はイシュー #2175 で
+// 完了済み（`lamb` モジュール doc「`DeviceParamStore` 結線済み」節。
+// layer-wise trust ratio は `segment_numels` で表現する）。#1610 配下の
 // optimizer sub-issue のうち LAMB（本イシュー）で Adam〈#1742〉に
-// 続き完了する（RMSprop／Adagrad は #1743 が別途対応）。
+// 続き完了する（RMSprop／Adagrad は #1743 が別途対応。常駐化は
+// いずれも #2175）。
 
 // イシュー #1745（親 #1611）: CosineAnnealingLr／ExponentialLr／
 // LinearWarmupLr（式ベース・stateless 純関数の LR スケジューラ 3 種）を
