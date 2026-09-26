@@ -206,6 +206,15 @@ fn w2_build_model() -> Sequential {
 /// `W2_EPOCHS` epoch 分の学習を回し、`(所要秒, 最終パラメータの
 /// checksum)` を返す。`Sequential::fit` は経由しない（facade 保留方針。
 /// `docs/tensor-core-data-prefetch-decision.md` §2.4）。
+///
+/// 特徴量・ラベルの 2 つの `TensorDataset` はタプル `(ds_x, ds_y)` の
+/// まま `PrefetchDataLoader` へ渡す（`Dataset for (A, B)` の
+/// `Batch = (A::Batch, B::Batch)` 実装。`crates/tensor-core/src/
+/// data.rs`）。これにより `Dataset::batch`（特徴量・ラベルの実バッチ
+/// 構築）自体が worker スレッド側で実行され、次バッチの取得と学習
+/// ステップ（消費側）が重ね合わさる（レビュー指摘・イシュー #2183
+/// コメント。添字だけを worker 側で複製し実バッチ構築を consumer 側の
+/// 逐次実行に残す旧構成では prefetch の効果を測定できていなかった）。
 fn run_w2_training(num_workers: usize) -> (f64, u64) {
     fandhe_ai::manual_seed(W2_SEED);
     let (x_data, y_data) = w2_gen_dataset();
@@ -220,37 +229,13 @@ fn run_w2_training(num_workers: usize) -> (f64, u64) {
     let mut model = w2_build_model();
     let mut sgd = Sgd::new(SgdConfig::new(0.02)).expect("test fixture: Sgd::new が失敗");
 
-    // インデックス列は `PrefetchDataLoader<()>` 相当（バッチを持たない
-    // ダミー Dataset）から取得し、実バッチは `ds_x`／`ds_y` へ委譲する
-    // ——特徴量・ラベルという 2 つの独立した `TensorDataset` を同じ
-    // 添字列で学習に使うため（`SamplerDataLoader<(D1, D2)>` を使わず
-    // ここで手動に分離しているのは、W1 と同じ `PrefetchDataLoader<D>`
-    // 単一型で両ワークロードを統一するため）。
-    struct IndexOnly {
-        len: usize,
-    }
-    impl Dataset for IndexOnly {
-        type Batch = Vec<usize>;
-        fn len(&self) -> usize {
-            self.len
-        }
-        fn batch(
-            &self,
-            indices: &[usize],
-        ) -> Result<Self::Batch, fandhe_ai_tensor_core::data::DataError> {
-            Ok(indices.to_vec())
-        }
-    }
-
-    let mut loader = PrefetchDataLoader::new(IndexOnly { len: W2_N }, sampler, config)
+    let mut loader = PrefetchDataLoader::new((ds_x, ds_y), sampler, config)
         .expect("test fixture: PrefetchDataLoader::new が失敗");
 
     let start = Instant::now();
     for _ in 0..W2_EPOCHS {
-        for indices in loader.iter() {
-            let indices = indices.expect("test fixture: W2 indices 取得が失敗");
-            let x_batch = ds_x.batch(&indices).expect("test fixture: batch(x) が失敗");
-            let y_batch = ds_y.batch(&indices).expect("test fixture: batch(y) が失敗");
+        for batch in loader.iter() {
+            let (x_batch, y_batch) = batch.expect("test fixture: W2 batch 取得が失敗");
 
             let updated = {
                 let tape = fandhe_ai::tape();
