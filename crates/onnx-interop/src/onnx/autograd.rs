@@ -1240,12 +1240,7 @@ fn dispatch_node<'t>(
             // 入力数検査・旧 opset `broadcast=0` 検査は `interp::compute_gemm`
             // と同じ検査関数を共用する（codex-review 指摘。イシュー #2186
             // PR #2313。従来は interp 経路にしか無く、同一 ONNX ノードで
-            // interp が拒否する入力を autograd 経路が受理し得た）。この
-            // 検査は `Const` 入力（`Value::F32`）を前提とするため、`Var`
-            // （勾配追跡対象）入力の場合は shape 検査を経ずそのまま
-            // `GemmFn` へ進む（`Var` 入力自体が #2078 スコープ外として
-            // 別経路で拒否されるため、ここで shape だけ検査しても
-            // 二重の複雑さを増すだけで安全側には効かない）。
+            // interp が拒否する入力を autograd 経路が受理し得た）。
             super::interp::validate_gemm_arity(node)?;
             let a_name = input_name(node, 0)?;
             let b_name = input_name(node, 1)?;
@@ -1254,28 +1249,40 @@ fn dispatch_node<'t>(
             // （イシュー #2186「Gemm の固め」節。forward は引き続き
             // `ops::gemm`〈`GemmFn::forward` 経由〉のみが担う）。
             let attrs = super::interp::read_gemm_attrs(node)?;
-            // `A`／`B`／`C` がいずれも `Const(Value::F32)`（`Var` 勾配追跡
-            // 対象ではない）場合のみ shape 検査する。`Var` 入力は #2078
-            // スコープ外として `as_var` 側で別途拒否されるため、ここで
-            // shape 検査を試みても安全側には効かず、無検証で通す。
-            if let AutogradValue::Const(Value::F32(a_t)) = get_env(env, node, a_name)?
-                && let AutogradValue::Const(Value::F32(b_t)) = get_env(env, node, b_name)?
-            {
-                let c_t = if has_c {
-                    match get_env(env, node, node.input[2].as_str())? {
-                        AutogradValue::Const(Value::F32(t)) => Some(t),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                super::interp::validate_gemm_broadcast(node, a_t, b_t, c_t, &attrs)?;
-            }
+            // `A`／`B`／`C` を先に `Var` へ揃える（`as_var` は `Const(F32)`
+            // もその場で `var_no_grad` 葉化するため、`Const`／`Var` いずれの
+            // 入力でも同じ形で shape を取れる）。**Cursor Bugbot 是正
+            // （イシュー #2313）**: 旧実装は `A`／`B`／`C` がいずれも
+            // `Const(Value::F32)` の場合のみ shape 検査しており、`C` が
+            // `Var`（Gemm は autograd 対応 op のため通常の学習経路で
+            // 常用される）だと不在扱いになって検査が素通りしていた
+            // （`Const`／`Var` のいずれであっても `interp` が拒否する
+            // `broadcast=0` かつ shape 不一致のノードを autograd 経路が
+            // 黙って受理し得た）。`Var::value()` は既に materialize 済み
+            // ノードの borrow を返す（後続 `tape.custom` が forward で
+            // 改めて materialize するのと同じ経路。二重計算ではなく
+            // キャッシュされた値の再参照）ため、ここで shape を読んでも
+            // フュージョン設計上の新たな eager 化は生じない。
             let a = as_var(tape, env, node, a_name)?;
             let b = as_var(tape, env, node, b_name)?;
+            let c = if has_c {
+                Some(as_var(tape, env, node, node.input[2].as_str())?)
+            } else {
+                None
+            };
+            let a_shape = a.value().shape().to_vec();
+            let b_shape = b.value().shape().to_vec();
+            let c_shape = c.as_ref().map(|v| v.value().shape().to_vec());
+            super::interp::validate_gemm_broadcast(
+                node,
+                &a_shape,
+                &b_shape,
+                c_shape.as_deref(),
+                &attrs,
+            )?;
             let mut inputs = vec![a, b];
-            if has_c {
-                inputs.push(as_var(tape, env, node, node.input[2].as_str())?);
+            if let Some(c) = c {
+                inputs.push(c);
             }
             let out = tape.custom(Arc::new(GemmFn { attrs, has_c }), &inputs)?;
             Ok(AutogradValue::Var(out))

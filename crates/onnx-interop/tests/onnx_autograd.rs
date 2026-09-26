@@ -356,6 +356,50 @@ fn gemm_broadcast_zero_requires_c_shape_exactly_mn_in_autograd() {
     ));
 }
 
+#[test]
+fn gemm_broadcast_zero_requires_c_shape_exactly_mn_when_c_is_var() {
+    // Cursor Bugbot 指摘是正（イシュー #2313）: 旧実装は `A`／`B`／`C` が
+    // いずれも `Const(Value::F32)` の場合のみ shape 検査しており、`C` が
+    // `Var`（勾配追跡対象。Gemm は autograd 対応 op のため通常の学習
+    // 経路で `C`〈bias〉も trainable な `Var` として渡ることが多い）だと
+    // 不在扱いになって検査が素通りしていた。`A`／`B` を `Const`、`C` を
+    // `Var` にした場合でも interp と同じ `InvalidAttribute` を返す
+    // ことを確認する（このテストが旧実装では通らなかった＝検査が
+    // 効いていなかったことの再現）。
+    let graph = single_node_graph(
+        node_with_attrs(
+            "Gemm",
+            vec!["a", "b", "c"],
+            vec!["y"],
+            vec![attr_i64("broadcast", 0)],
+        ),
+        vec!["a", "b", "c"],
+        "y",
+    );
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "a".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[1, 2]))),
+    );
+    feeds.insert(
+        "b".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[2, 1]))),
+    );
+    feeds.insert(
+        // [1] は出力 [1, 1] と異なる（broadcast=0 では不可）。`Const` では
+        // なく `Var`（勾配追跡対象）として渡す点が上記テストとの違い。
+        "c".to_string(),
+        AutogradValue::Var(tape.var(&f32(vec![1.0], &[1]))),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(
+        err,
+        AutogradError::Interp(interp::InterpError::InvalidAttribute { attr, .. }) if attr == "broadcast"
+    ));
+}
+
 // ================= model.onnx end-to-end =================
 
 fn fixture_path(name: &str) -> std::path::PathBuf {

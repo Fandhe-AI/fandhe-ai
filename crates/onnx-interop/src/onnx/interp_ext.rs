@@ -55,35 +55,64 @@ use super::interp::{
 use super::proto::NodeProto;
 use crate::ops::{OpError, normalize_axis};
 
-/// `shape` を要素型 `T` で実体化した場合のバイトサイズが `Vec` の
-/// allocation 上限（`isize::MAX` バイト）に収まるかを事前検査する
-/// （`tensor-core::checked_numel_for` と同じ検査だが `pub(crate)` の
-/// ため本クレートから直接呼べず複製する。codex-review P0 是正・
-/// イシュー #2186）。
-///
-/// `Expand` の `shape` 入力は ONNX という非信頼な外部データそのもの
-/// （OWASP A03）で、`broadcast_shape` は要素数積の `usize` オーバー
-/// フローのみ検査し型ごとの確保バイト数は見ない。小さな入力を
-/// 極端に大きい出力 shape へ拡張する攻撃的入力に対し、`contiguous()`
-/// （内部で `Vec::with_capacity(numel)` を呼ぶ）が要素サイズ込みの
-/// バイト数で capacity overflow して panic するのを防ぐため、
-/// `F32`／`I64`／`Bool`／`F16` の 4 腕すべてでこの関数を経由してから
-/// 実体化する。
-fn check_expand_output_bytes<T>(out_shape: &[usize]) -> Result<(), InterpError> {
+/// `Expand`／`Resize` が実体化（`contiguous()`／`interpolate()`）する
+/// 出力テンソルに対して許容する最大確保バイト数。`isize::MAX` の
+/// allocator 上限検査（オーバーフロー検査）だけでは「オーバーフローは
+/// しないが数 GB 規模」の確保を防げず、外部 ONNX の shape 入力だけで
+/// プロセスメモリを枯渇させられる（OWASP A03。イシュー #2313
+/// codex-review 指摘）。実運用上の CNN／画像系モデルの中間テンソルが
+/// 十分収まりつつ攻撃的な巨大 shape は拒否する保守的な既定値として
+/// 1 GiB を採用した。ガードレール閾値・テスト許容誤差（人間承認必須。
+/// `.claude/rules/security.md`）とは別軸の実装上の安全弁であり、値の
+/// 変更にユーザー承認は要さない（実装判断）。
+const MAX_MATERIALIZE_BYTES: usize = 1 << 30; // 1 GiB
+
+/// `numel` 個の要素型 `T`（サイズ `elem_size`）を実体化した場合の
+/// バイト数を検査する。`usize` 乗算オーバーフロー・`Vec` の allocation
+/// 上限（`isize::MAX` バイト。`tensor-core::checked_numel_for` と同じ
+/// 検査だが `pub(crate)` のため本クレートから直接呼べず複製する。
+/// codex-review P0 是正・イシュー #2186）に加え、[`MAX_MATERIALIZE_BYTES`]
+/// による実用的な上限（イシュー #2313）を fail-closed に検査する。
+/// `Expand`（`F32`／`I64`／`Bool`／`F16` の 4 腕）・`Resize`
+/// （`interpolate` 前）の両方から呼ぶ。
+fn check_materialize_bytes(
+    node: &NodeProto,
+    attr: &str,
+    numel: usize,
+    elem_size: usize,
+) -> Result<(), InterpError> {
+    if elem_size == 0 {
+        return Ok(());
+    }
+    let bytes = numel
+        .checked_mul(elem_size)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow.into());
+    }
+    if bytes > MAX_MATERIALIZE_BYTES {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: attr.to_string(),
+            reason: format!(
+                "出力テンソルの確保バイト数が上限（{MAX_MATERIALIZE_BYTES} バイト）を \
+                 超えます（実際: {bytes} バイト）"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `shape` を要素型 `T` で実体化した場合のバイト数が
+/// [`check_materialize_bytes`] の許容範囲に収まるかを事前検査する
+/// （`Expand` 専用の薄いラッパー。`out_shape` の要素数積の overflow は
+/// ここで検査してから [`check_materialize_bytes`] へ渡す）。
+fn check_expand_output_bytes<T>(node: &NodeProto, out_shape: &[usize]) -> Result<(), InterpError> {
     let numel = out_shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
         .ok_or(ShapeError::ElementCountOverflow)?;
-    let elem_size = std::mem::size_of::<T>();
-    if elem_size > 0 {
-        let bytes = numel
-            .checked_mul(elem_size)
-            .ok_or(ShapeError::ElementCountOverflow)?;
-        if bytes > isize::MAX as usize {
-            return Err(ShapeError::ElementCountOverflow.into());
-        }
-    }
-    Ok(())
+    check_materialize_bytes(node, "shape", numel, std::mem::size_of::<T>())
 }
 
 /// 単一入力（`node.input[0]`）を要求する op 共通の入力数検査。
@@ -305,7 +334,7 @@ pub(super) fn compute_expand(
     match get_value(env, node, data_name)? {
         Value::F32(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
-            check_expand_output_bytes::<f32>(&out_shape)?;
+            check_expand_output_bytes::<f32>(node, &out_shape)?;
             let tape = Tape::new();
             let out = tape
                 .var_no_grad(t)
@@ -315,17 +344,17 @@ pub(super) fn compute_expand(
         }
         Value::I64(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
-            check_expand_output_bytes::<i64>(&out_shape)?;
+            check_expand_output_bytes::<i64>(node, &out_shape)?;
             Ok(Value::I64(t.broadcast_to(&out_shape)?.contiguous()))
         }
         Value::Bool(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
-            check_expand_output_bytes::<bool>(&out_shape)?;
+            check_expand_output_bytes::<bool>(node, &out_shape)?;
             Ok(Value::Bool(t.broadcast_to(&out_shape)?.contiguous()))
         }
         Value::F16(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
-            check_expand_output_bytes::<f16>(&out_shape)?;
+            check_expand_output_bytes::<f16>(node, &out_shape)?;
             Ok(Value::F16(t.broadcast_to(&out_shape)?.contiguous()))
         }
     }
@@ -468,6 +497,21 @@ pub(super) fn compute_pad(
             node: node.name.clone(),
             attr: "pads".to_string(),
             reason: "pads の attr 形と入力形が混在しています".to_string(),
+        });
+    }
+    // `value`（Pad-2 の attr 形の埋め草値）と入力形（`constant_value` 第 3
+    // 入力）の混在も同様に拒否する。混在時、旧来は `value` attr を一切
+    // 読まず埋め草値を暗黙的に 0.0（または未指定の `constant_value`）とし
+    // て計算しており、指定値と異なる結果を無言で返していた（OWASP A03。
+    // codex-review 指摘）。
+    let has_value_attr = find_attr_unique(node, "value")?.is_some();
+    if has_value_attr && has_extra_input {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: "value".to_string(),
+            reason:
+                "value の attr 形（Pad-2）と入力形（Pad-11+ の constant_value）が混在しています"
+                    .to_string(),
         });
     }
 
@@ -842,6 +886,18 @@ pub(super) fn compute_resize(
             });
         }
     };
+
+    // `interpolate` の実体化前に出力確保バイト数の上限を検査する
+    // （`Expand` と同じ [`check_materialize_bytes`]。`out_h`／`out_w` は
+    // `sizes` 入力〈非信頼な外部 ONNX データ〉由来のため、オーバー
+    // フローしない範囲でも数 GB 規模の確保でプロセスメモリを枯渇
+    // させられる。イシュー #2313 codex-review 指摘）。
+    let out_numel = in_shape[0]
+        .checked_mul(in_shape[1])
+        .and_then(|v| v.checked_mul(out_h))
+        .and_then(|v| v.checked_mul(out_w))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    check_materialize_bytes(node, "sizes", out_numel, std::mem::size_of::<f32>())?;
 
     let tape = Tape::new();
     let out = tape

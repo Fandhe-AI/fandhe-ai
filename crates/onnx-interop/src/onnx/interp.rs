@@ -581,12 +581,14 @@ pub(super) fn read_gemm_attrs(node: &NodeProto) -> Result<GemmAttrs, InterpError
 /// 行う（`OpError::RankMismatch`）ため、ここでは rank 2 を前提にできない
 /// 呼び出し元向けに `None` を返し、後続の `ops::gemm` 呼び出しへ検証を委ねる
 /// （`compute_gemm` の旧 opset `broadcast=0` 検査専用の補助。イシュー #2186）。
-fn gemm_output_mn(a: &Tensor<f32>, b: &Tensor<f32>, attrs: &GemmAttrs) -> Option<(usize, usize)> {
-    if a.rank() != 2 || b.rank() != 2 {
+fn gemm_output_mn(
+    a_shape: &[usize],
+    b_shape: &[usize],
+    attrs: &GemmAttrs,
+) -> Option<(usize, usize)> {
+    if a_shape.len() != 2 || b_shape.len() != 2 {
         return None;
     }
-    let a_shape = a.shape();
-    let b_shape = b.shape();
     let m = if attrs.trans_a {
         a_shape[1]
     } else {
@@ -625,26 +627,35 @@ pub(super) fn validate_gemm_arity(node: &NodeProto) -> Result<(), InterpError> {
 /// （codex-review 指摘。イシュー #2186 PR #2313。従来 autograd 経路の
 /// `GemmFn` はこの検査を経ず、interp が拒否する `broadcast=0` かつ `C`
 /// 形状不一致のノードを受理し得た）。
+///
+/// **shape のみを受け取る（`Tensor<f32>` を要求しない）設計**（Cursor
+/// Bugbot 指摘・イシュー #2313）: `autograd::dispatch_node` の `Gemm` 腕は
+/// `A`／`B`／`C` が `Const`（`Value::F32`）だけでなく `Var`（勾配追跡
+/// 対象。通常の学習経路で常用される）でも受理するため、`Tensor<f32>` の
+/// 参照を要求する signature だと `C` が `Var` の場合に検査そのものを
+/// 呼べず、`interp` が拒否する `broadcast=0` かつ shape 不一致のノードを
+/// autograd 経路が黙って受理してしまう。shape の抽出（`Var` は
+/// `Var::value().shape()` 経由）を呼び出し側の責務にすることで、
+/// `Const`／`Var` いずれの入力でも同じ検査を適用できる。
 pub(super) fn validate_gemm_broadcast(
     node: &NodeProto,
-    a: &Tensor<f32>,
-    b: &Tensor<f32>,
-    c: Option<&Tensor<f32>>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    c_shape: Option<&[usize]>,
     attrs: &GemmAttrs,
 ) -> Result<(), InterpError> {
     let broadcast_flag = attr_i64_typed(node, "broadcast", 1)?;
     if broadcast_flag == 0
-        && let Some(c_t) = c
-        && let Some((m, n)) = gemm_output_mn(a, b, attrs)
-        && c_t.shape() != [m, n]
+        && let Some(c_shape) = c_shape
+        && let Some((m, n)) = gemm_output_mn(a_shape, b_shape, attrs)
+        && c_shape != [m, n]
     {
         return Err(InterpError::InvalidAttribute {
             node: node.name.clone(),
             attr: "broadcast".to_string(),
             reason: format!(
                 "broadcast=0 のとき C の shape は出力 [{m}, {n}] と一致する必要があります \
-                 （実際: {:?}）",
-                c_t.shape()
+                 （実際: {c_shape:?}）"
             ),
         });
     }
@@ -664,7 +675,7 @@ fn compute_gemm(
         _ => None,
     };
     let attrs = read_gemm_attrs(node)?;
-    validate_gemm_broadcast(node, a, b, c, &attrs)?;
+    validate_gemm_broadcast(node, a.shape(), b.shape(), c.map(Tensor::shape), &attrs)?;
 
     // opt-in ON（`dev_ops` が `Some`）のときのみ device 経路を試みる。
     // `Ok(None)`（未対応 shape・`Unsupported`）はホスト実装へそのまま

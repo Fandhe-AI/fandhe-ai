@@ -420,6 +420,26 @@ fn expand_rejects_output_byte_size_overflow_instead_of_panicking() {
     ));
 }
 
+#[test]
+fn expand_rejects_output_within_isize_max_but_over_practical_byte_cap() {
+    // レビュー指摘対応（codex P0・イシュー #2313）: `usize` オーバーフロー
+    // も `isize::MAX` allocator 上限も超えない「数 GB 規模」の出力 shape
+    // （小さい入力を極端に大きい shape へ拡張する攻撃的入力）は、従来の
+    // オーバーフロー検査だけでは拒否できず `contiguous()` が実際に
+    // 数 GB を確保してプロセスメモリを枯渇させ得た。実用的な上限
+    // （`MAX_MATERIALIZE_BYTES` = 1 GiB）による拒否を確認する。
+    let over_1gib_elements = (1usize << 30) / 4 + 1; // f32 換算で 1 GiB をわずかに超える要素数
+    let n = node("Expand", "n", vec!["data", "shape"], vec!["y"]);
+    let g = single_node_graph(n, &["data", "shape"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("data", vec![1.0], &[1]),
+        feed_i64("shape", vec![over_1gib_elements as i64], &[1]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "shape"));
+}
+
 // ================= ReduceMean =================
 
 #[test]
@@ -582,6 +602,30 @@ fn pad_input_form_with_constant_value() {
     ]);
     let result = run(&g, feeds).unwrap();
     assert_close(&as_f32_vec(&result["y"]), &[9.0, 5.0, 9.0, 9.0], 1e-6);
+}
+
+#[test]
+fn pad_rejects_mixed_value_attr_and_input_form() {
+    // レビュー指摘対応（codex P0・イシュー #2313）: `pads` を第 2 入力
+    // （入力形。Pad-11+）で渡しつつ、旧形式の `value` 属性（Pad-2）も
+    // 同時に指定した混在ノードを拒否する。従来は `value` 属性を一切
+    // 読まず埋め草値を暗黙的に 0.0 として計算しており、指定値（9.0）と
+    // 異なる結果を無言で返していた（security.md A03）。
+    let n = node_with_attrs(
+        "Pad",
+        "n",
+        vec!["x", "pads"],
+        vec!["y"],
+        vec![attr_f32_typed("value", 9.0)],
+    );
+    let g = single_node_graph(n, &["x", "pads"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![5.0], &[1]),
+        feed_i64("pads", vec![1, 1], &[2]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "value"));
 }
 
 #[test]
@@ -837,6 +881,35 @@ fn resize_sizes_form_accepted() {
         Value::F32(t) => assert_eq!(t.shape(), &[1, 1, 4, 4]),
         other => panic!("Value::F32 を期待したが {other:?}"),
     }
+}
+
+#[test]
+fn resize_rejects_output_over_practical_byte_cap() {
+    // レビュー指摘対応（codex P0・イシュー #2313）: `Expand` と同じ
+    // 実用的な上限（`MAX_MATERIALIZE_BYTES` = 1 GiB）を `interpolate`
+    // 実体化前に検査する。`sizes` 入力（非信頼な外部 ONNX データ）に
+    // よる H/W はオーバーフロー検査を通過しても数 GB 規模の確保を
+    // 引き起こし得るため、`sizes` 経由でも拒否できることを確認する。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "", "sizes"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "sizes"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        // 1*1*40000*40000 要素 * 4 バイト（f32）≈ 6.4 GB > 1 GiB。
+        feed_i64("sizes", vec![1, 1, 40_000, 40_000], &[4]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "sizes"));
 }
 
 #[test]
