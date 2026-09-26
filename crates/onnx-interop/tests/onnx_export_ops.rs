@@ -958,9 +958,13 @@ fn build_model_proto_rejects_unsupported_op_type() {
             input: vec!["x".to_string()],
             output: vec!["y".to_string()],
             name: "flatten1".to_string(),
-            // `Flatten` は本クレート未対応のまま（`Conv` はイシュー
-            // #2076 で対応済みのため負例に使えなくなった。`docs/onnx-
-            // export-op-mapping.md` §7「Conv2d 対応 ≠ CNN 対応」参照）。
+            // `Flatten` は export allowlist 外のまま（`Conv` はイシュー
+            // #2076 で対応済みのため負例に使えなくなった。`Flatten` は
+            // イシュー #2200 で import には対応したが export allowlist
+            // には追加していない〈import/export 非対称。`onnx/mod.rs`
+            // モジュール冒頭コメント参照〉ため、引き続き export 拒否の
+            // 負例として使える。`docs/onnx-export-op-mapping.md` §7
+            // 「Conv2d 対応 ≠ CNN 対応」参照）。
             op_type: "Flatten".to_string(),
             attribute: Vec::new(),
             domain: String::new(),

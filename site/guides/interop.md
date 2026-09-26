@@ -78,9 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   `producer_name`／グラフ名は保持されない**ため、export 結果には
   options の値が書き出されます。元モデルの opset と合わせる責任は
   利用者側にあります。
-- allowlist（`interp` 対応 23 op・既定 domain）外のノードを含む
-  モデルは、`from_bytes` では構築できても `to_bytes`／`to_path` の
-  時点で `OnnxError::UnsupportedOp` により拒否されます。
+- export allowlist（23 op・既定 domain。import 対応は 26 op で、
+  `GlobalAveragePool`／`BatchNormalization`／`Flatten` は import のみ
+  対応）外のノードを含むモデルは、`from_bytes` では構築できても
+  `to_bytes`／`to_path` の時点で `OnnxError::UnsupportedOp` により
+  拒否されます。
 
 ### `Sequential` からの export の最小コード例
 

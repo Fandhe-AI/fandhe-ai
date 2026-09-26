@@ -109,9 +109,9 @@ tolerance 自体は変更せず、必要なら spec リポへの提案（ユー�
 |---|---|---|
 | `Conv` | 対応済み（#2076）。`auto_pad`〈`mnist-12` が使う `SAME_UPPER`〉・group conv・pads／strides／dilations の一部組合せは未対応 | #2199（`auto_pad` は受け入れ条件に含まれず別追跡が必要） |
 | `MaxPool` | 未対応 | #2199 |
-| `BatchNormalization` | 未対応 | #2200 |
-| `Flatten` | 未対応 | #2200 |
-| `GlobalAveragePool` | 未対応 | #2200 |
+| `BatchNormalization` | 対応済み（#2200）。推論時（`training_mode` 非対応）の `scale`/`B`/`mean`/`var` 全入力形のみ | #2200 |
+| `Flatten` | 対応済み（#2200） | #2200 |
+| `GlobalAveragePool` | 対応済み（#2200） | #2200 |
 | `Clip`（min/max 入力形） | 未対応 | #2186 |
 | `Dropout`（推論時 identity） | 未対応 | 追跡先なし（起票候補。`docs/perf/logs/onnx-model-zoo-parity-2081/README.md` §「未対応 op の追跡」） |
 | group／depthwise conv（`Conv` の `group` 属性） | 未対応 | #2199（Phase 2 と明記されており本 issue 選定モデルの `mobilenetv2-12` に必須） |

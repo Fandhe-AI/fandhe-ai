@@ -2,23 +2,28 @@
 //! TASK-7.2c・#79）に加え、MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`。
 //! TASK-7.3a・#82）・MVP 形状操作オペ（`Cast`／`Reshape`／`Squeeze`／`Transpose`。
 //! TASK-7.3b・#83）・Attention 系オペ（`MatMul`／`Softmax`／`Erf`。TASK-7.3c・#84）・
-//! `LayerNormalization`（TASK-7.3d・#85）を提供する。算術・活性化・正規化系
-//! （`arith`／`activation`／`gemm`／`matmul`／`softmax`／`layer_norm`）は
-//! `tensor-core::Tensor<f32>` 専用の純粋関数のまま、形状系（`shape_ops`／
-//! `shape_transform`／`gather`／`concat`／`slice`）は要素コピーのみで算術を伴わないため
-//! `T: Element` でジェネリック化し、`Cast`（`cast`）は dtype ごとに型安全な変換関数を
-//! 個別に提供する（イシュー #274）。
+//! `LayerNormalization`（TASK-7.3d・#85）・`Conv`（イシュー #2076）・
+//! `GlobalAveragePool`／`BatchNormalization`／`Flatten`（イシュー #2200。
+//! CNN 系モデル対応）を提供する。算術・活性化・正規化系
+//! （`arith`／`activation`／`gemm`／`matmul`／`softmax`／`layer_norm`／
+//! `batch_norm`／`global_average_pool`）は `tensor-core::Tensor<f32>` 専用の
+//! 純粋関数のまま、形状系（`shape_ops`／`shape_transform`／`gather`／
+//! `concat`／`slice`）は要素コピーのみで算術を伴わないため `T: Element` で
+//! ジェネリック化し（`shape_transform::flatten` も同様）、`Cast`（`cast`）は
+//! dtype ごとに型安全な変換関数を個別に提供する（イシュー #274）。
 //!
 //! 各関数は「入力テンソル＋属性 → 出力テンソル」の単体演算に限定し、ONNX proto デコード
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
 //! プレーンな Rust 構造体・スライスで受け取るため、decode 層（`AttributeProto` 等）の
 //! 実装順序に依存せず本モジュール単体でテスト・使用できる。インタープリタのディスパッチ
 //! （op 名 → 本モジュール関数の解決）は [`crate::onnx::interp`]（TASK-7.2b・#78、
-//! TASK-7.3 系 14 オペの結線は #274 で実装）が担い、全 22 オペがグラフ実行から
-//! 到達可能である。
+//! TASK-7.3 系 14 オペの結線は #274・`Conv` の結線は #2076・`GlobalAveragePool`／
+//! `BatchNormalization`／`Flatten` の結線は #2200 で実装）が担い、全 26 オペが
+//! グラフ実行から到達可能である。
 
 mod activation;
 mod arith;
+mod batch_norm;
 mod cast;
 mod concat;
 mod constant;
@@ -26,6 +31,7 @@ mod conv;
 mod error;
 mod gather;
 mod gemm;
+mod global_average_pool;
 mod layer_norm;
 mod matmul;
 mod shape_ops;
@@ -35,6 +41,7 @@ mod softmax;
 
 pub use activation::{erf, relu, sigmoid};
 pub use arith::{add, add_i64, div, div_i64, mod_i64, modulo, mul, mul_i64, sqrt};
+pub use batch_norm::{BatchNormAttrs, batch_normalization};
 pub use cast::{
     cast_bool_to_float, cast_f16_to_float, cast_to_bool, cast_to_f16, cast_to_float, cast_to_int64,
     check_supported_cast_target,
@@ -45,10 +52,11 @@ pub use conv::{ConvAttrs, conv};
 pub use error::OpError;
 pub use gather::gather;
 pub use gemm::{GemmAttrs, gemm};
+pub use global_average_pool::global_average_pool;
 pub use layer_norm::{LayerNormAttrs, layer_normalization};
 pub use matmul::matmul;
 pub use shape_ops::{shape, unsqueeze};
-pub use shape_transform::{reshape, squeeze, transpose};
+pub use shape_transform::{flatten, reshape, squeeze, transpose};
 pub use slice::{SliceParams, slice};
 pub use softmax::softmax;
 
