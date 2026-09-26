@@ -26,11 +26,15 @@
 //! `triplet_margin_loss`）と `poisson_nll_loss` の parity テストを
 //! 追加した（L1・CE と同じ構成。実機未実測分は
 //! `docs/perf/logs/loss-ops-2167/README.md` へ申し送る）。
+//!
+//! イシュー #2168（親 #2131）で `ctc_loss` の parity テストを追加した
+//! （L1・CE と同じ構成。実機未実測分は
+//! `docs/perf/logs/ctc-loss-2168/README.md` へ申し送る）。
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
 use fandhe_ai_autodiff::loss_ops::{
-    self, CrossEntropyOptions, PoissonNllOptions, TripletMarginOptions,
+    self, CrossEntropyOptions, CtcLossOptions, PoissonNllOptions, TripletMarginOptions,
 };
 use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_tensor_core::Tensor;
@@ -426,6 +430,69 @@ fn cpu_poisson_nll_loss_forward_and_backward_match_naive_reference() {
     );
 }
 
+#[test]
+fn cpu_ctc_loss_forward_and_backward_match_naive_reference() {
+    let t_max = 4;
+    let n = 2;
+    let c = 3;
+    let lp_data = [
+        -0.4f32, -1.1, -0.6, -0.9, -0.3, -1.5, -0.7, -0.8, -0.5, -1.0, -0.6, -0.4, -0.5, -1.2,
+        -0.3, -0.6, -0.9, -0.7, -1.3, -0.4, -0.5, -0.8, -0.6, -0.9,
+    ];
+    let targets = i32_tensor(&[0, 1, 1, 0], &[2, 2]);
+    let input_lengths = [4usize, 3];
+    let target_lengths = [2usize, 2];
+    let options = CtcLossOptions::default().blank(2);
+
+    let cpu_tape = fandhe_ai::tape();
+    let log_probs_cpu = cpu_tape.make_var(&f32_tensor(&lp_data, &[t_max, n, c]));
+    let loss_cpu = loss_ops::ctc_loss(
+        &log_probs_cpu,
+        &targets,
+        &input_lengths,
+        &target_lengths,
+        &options,
+        fandhe_ai_autodiff::Reduction::Mean,
+    )
+    .unwrap();
+    let grads_cpu = cpu_tape
+        .backward(&loss_cpu)
+        .expect("backward は成功するはず");
+    let dlp_cpu = contiguous_slice(grads_cpu.get(&log_probs_cpu).unwrap().expect("到達する"));
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let log_probs_naive = naive_tape.make_var(&f32_tensor(&lp_data, &[t_max, n, c]));
+    let loss_naive = loss_ops::ctc_loss(
+        &log_probs_naive,
+        &targets,
+        &input_lengths,
+        &target_lengths,
+        &options,
+        fandhe_ai_autodiff::Reduction::Mean,
+    )
+    .unwrap();
+    let grads_naive = naive_tape
+        .backward(&loss_naive)
+        .expect("backward は成功するはず");
+    let dlp_naive = contiguous_slice(
+        grads_naive
+            .get(&log_probs_naive)
+            .unwrap()
+            .expect("到達する"),
+    );
+
+    assert_bits_eq(
+        "ctc_loss forward: CpuBackendOps vs NaiveOps",
+        &contiguous_slice(&loss_cpu.to_tensor()),
+        &contiguous_slice(&loss_naive.to_tensor()),
+    );
+    assert_bits_eq(
+        "ctc_loss backward: CpuBackendOps vs NaiveOps",
+        &dlp_cpu,
+        &dlp_naive,
+    );
+}
+
 // --- 実機横断（`#[ignore]`。Metal／CUDA。REQ-2 複合判定） ---
 
 fn l1_loss_forward_on(device: Device) -> Tensor<f32> {
@@ -498,6 +565,26 @@ fn poisson_nll_loss_forward_on(device: Device) -> Tensor<f32> {
     loss_ops::poisson_nll_loss(
         &input,
         &target,
+        &options,
+        fandhe_ai_autodiff::Reduction::Mean,
+    )
+    .unwrap()
+    .to_tensor()
+}
+
+fn ctc_loss_forward_on(device: Device) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let log_probs = tape.make_var(&f32_tensor(
+        &[-0.4, -1.1, -0.6, -0.9, -0.3, -1.5, -0.7, -0.8],
+        &[4, 1, 2],
+    ));
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+    loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &[4],
+        &[1],
         &options,
         fandhe_ai_autodiff::Reduction::Mean,
     )
@@ -654,6 +741,31 @@ fn cuda_poisson_nll_loss_forward_matches_cpu() {
     let cpu_out = poisson_nll_loss_forward_on(Device::Cpu);
     assert_parity(
         "poisson_nll_loss forward: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&cuda_out),
+        &contiguous_slice(&cpu_out),
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_ctc_loss_forward_matches_cpu() {
+    let metal_out = ctc_loss_forward_on(Device::Metal);
+    let cpu_out = ctc_loss_forward_on(Device::Cpu);
+    assert_parity(
+        "ctc_loss forward: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&metal_out),
+        &contiguous_slice(&cpu_out),
+    );
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）依存。CI では実行しない"]
+fn cuda_ctc_loss_forward_matches_cpu() {
+    let cuda_out = ctc_loss_forward_on(Device::Cuda(0));
+    let cpu_out = ctc_loss_forward_on(Device::Cpu);
+    assert_parity(
+        "ctc_loss forward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
     );

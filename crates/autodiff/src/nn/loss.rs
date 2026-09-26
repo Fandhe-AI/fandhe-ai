@@ -28,6 +28,9 @@
 //!   と `PoissonNllLoss` を追加した。`L1Loss` と同じく `crate::loss_ops`
 //!   の自由関数（`Var` に委譲メソッドを持たない。facade 非公開）を
 //!   呼ぶだけの薄いラッパー。
+//! - #2168（親イシュー #2131）で `CtcLoss`（`crate::loss_ops::ctc_loss`
+//!   の薄いラッパー。PyTorch `nn.CTCLoss` 相当）を追加した。上記と同じ
+//!   「自由関数を呼ぶだけ」パターン。
 //!
 //! `Reduction`（mean/sum 縮約）は MSE・CrossEntropy の両損失で共有する
 //! ため `crate::var::Reduction`（#190 が定義）をそのまま再利用し、
@@ -37,7 +40,9 @@ use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 use crate::loss_ops;
-pub use crate::loss_ops::{CrossEntropyOptions, PoissonNllOptions, TripletMarginOptions};
+pub use crate::loss_ops::{
+    CrossEntropyOptions, CtcLossOptions, PoissonNllOptions, TripletMarginOptions,
+};
 pub use crate::var::Reduction;
 use crate::var::Var;
 
@@ -522,6 +527,54 @@ impl PoissonNllLoss {
     }
 }
 
+/// CTC（Connectionist Temporal Classification）損失。
+/// `crate::loss_ops::ctc_loss` の薄いラッパー（PyTorch `nn.CTCLoss`
+/// 相当。イシュー #2168）。`Default` は [`CtcLossOptions::default`]
+/// （PyTorch 既定: `blank=0`・`zero_infinity=false`）・`Reduction::Mean`。
+#[derive(Debug, Clone)]
+pub struct CtcLoss {
+    options: CtcLossOptions,
+    reduction: Reduction,
+}
+
+impl Default for CtcLoss {
+    fn default() -> Self {
+        CtcLoss {
+            options: CtcLossOptions::default(),
+            reduction: Reduction::Mean,
+        }
+    }
+}
+
+impl CtcLoss {
+    /// オプション・縮約種別を指定して構築する。
+    pub fn new(options: CtcLossOptions, reduction: Reduction) -> Self {
+        CtcLoss { options, reduction }
+    }
+
+    /// `log_probs`（`[T, N, C]`。追跡対象）・`targets`（パディング形式
+    /// `[N, S]` または連結形式 `[Σ target_lengths]`）・
+    /// `input_lengths`・`target_lengths` から損失を計算する。検査の
+    /// 実体は `crate::loss_ops::ctc_loss` 側にあり、ここでは呼び出す
+    /// だけ。
+    pub fn forward<'t>(
+        &self,
+        log_probs: &Var<'t>,
+        targets: &Tensor<i32>,
+        input_lengths: &[usize],
+        target_lengths: &[usize],
+    ) -> Result<Var<'t>, AutodiffError> {
+        loss_ops::ctc_loss(
+            log_probs,
+            targets,
+            input_lengths,
+            target_lengths,
+            &self.options,
+            self.reduction,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! `nn::loss::MseLoss::forward` が、対応する `Var` メソッド直接呼び
@@ -914,6 +967,40 @@ mod tests {
             .unwrap();
         let via_fn =
             crate::loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Sum).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_fn.to_tensor())
+        );
+    }
+
+    /// `nn::loss::CtcLoss::forward` が `crate::loss_ops::ctc_loss`
+    /// 直接呼び出しと同一の値を返すことを確認する（イシュー #2168）。
+    #[test]
+    fn ctc_loss_forward_matches_free_fn() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        // T=2, N=1, C=2（`blank=0`）。ln(0.5) の値で軽く数値を分ける。
+        let log_probs = tape.var(
+            &fandhe_ai_tensor_core::Tensor::new(vec![-0.7f32, -0.7, -1.2, -0.3], &[2, 1, 2])
+                .unwrap(),
+        );
+        let targets = fandhe_ai_tensor_core::Tensor::<i32>::new(vec![1], &[1, 1]).unwrap();
+        let input_lengths = [2usize];
+        let target_lengths = [1usize];
+        let options = CtcLossOptions::default();
+
+        let via_module = CtcLoss::new(CtcLossOptions::default(), Reduction::Sum)
+            .forward(&log_probs, &targets, &input_lengths, &target_lengths)
+            .unwrap();
+        let via_fn = crate::loss_ops::ctc_loss(
+            &log_probs,
+            &targets,
+            &input_lengths,
+            &target_lengths,
+            &options,
+            Reduction::Sum,
+        )
+        .unwrap();
 
         assert_eq!(
             dense_vec(&via_module.to_tensor()),
