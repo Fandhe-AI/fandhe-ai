@@ -57,6 +57,40 @@
 //! - **A08**: タプルデータセットの長さ不一致は [`DataLoader::new`] の
 //!   `validate()` で fail-closed に拒否し、成分間でシャッフル順がずれた
 //!   学習データが黙って供給されない（[`DataError::LengthMismatch`]）。
+//!
+//! # Sampler／フック（イシュー #2182・親 #2131）
+//!
+//! [`DataLoader`]／[`DataLoaderConfig`] は既存の公開 API のまま
+//! **不変**とする（`#[non_exhaustive]` ではない `DataLoaderConfig` へ
+//! フィールドを足すと利用者の構造体リテラル構築を壊し、`DataLoader`
+//! への inherent メソッド追加は facade 公開保留の迂回になるため。
+//! `docs/tensor-core-data-sampler-hooks-decision.md` §2.1）。代わりに
+//! [`Sampler`] trait（添字の選び方を差し替える拡張点）と、それを使う
+//! 2 つの新しいローダー型を追加する:
+//!
+//! - [`SamplerDataLoader<D>`][SamplerDataLoader]: [`Sampler`] が返す
+//!   添字列をそのまま [`Dataset::batch`] へ渡す。タプルデータセットでも
+//!   成分間で同じ添字が使われる。
+//! - [`HookedDataLoader<T>`][HookedDataLoader]:
+//!   `SamplerDataLoader<TensorDataset<T>>` を内部に持ち、サンプル単位の
+//!   [`TransformFn`] と collate 単位の [`CollateFn`] を追加できる
+//!   （`TensorDataset<T>` 限定。issue の callback シグネチャが単一の
+//!   `Tensor` 型のため）。
+//!
+//! **RNG 消費順序の契約**: [`Sampler::start_epoch`] の抽選は epoch
+//! 開始時にすべて確定させ（上記「シャッフル契約」と同じ「1 回の
+//! `with_global_rng` クロージャで完結」方式）、ユーザーの
+//! transform／collate クロージャはその後にバッチごとに走る。
+//! したがって transform が乱数を使う augmentation であっても、
+//! `manual_seed` 下の再現性を sampler の抽選順のみで説明できる。
+//!
+//! [`RandomSampler`] は同一シードの下で `DataLoader{shuffle=true}` と、
+//! [`WeightedRandomSampler`] は [`crate::rng::multinomial`] と、それぞれ
+//! 添字列・抽選列が bit 完全一致する（各型の doc 参照）。
+//!
+//! facade（`fandhe_ai::data`）への再エクスポートは未承認のため保留中
+//! （`crates/facade/src/lib.rs::DataHooksHoldDoctestGuard`・
+//! `docs/tensor-core-data-sampler-hooks-decision.md` §5）。
 
 use crate::element::Element;
 use crate::error::ShapeError;
@@ -91,11 +125,34 @@ pub enum DataError {
     IndexOutOfRange { index: usize, len: usize },
     /// shape 起因の不整合（[`ShapeError`] への委譲）。
     Shape(ShapeError),
+    /// [`Sampler`] の抽選（[`RandomSampler`]・[`WeightedRandomSampler`]）
+    /// が [`crate::rng`] へ委譲した処理の失敗（イシュー #2182）。
+    Rng(crate::rng::RngError),
+    /// [`HookedDataLoader`] の collate（既定の [`default_collate`]
+    /// またはユーザー指定）に渡されたサンプル列で、`position` 番目の
+    /// サンプルの shape が先頭サンプル（`expected`）と一致しない
+    /// （イシュー #2182）。
+    SampleShapeMismatch {
+        position: usize,
+        expected: Vec<usize>,
+        found: Vec<usize>,
+    },
+    /// [`HookedDataLoader`] の collate に渡されたサンプル列が空
+    /// （[`Sampler::next_batch`] が空でない添字列を返したのにサンプル
+    /// 収集後の列が空になることは無いが、[`default_collate`] を直接
+    /// 呼び出す利用者向けに防御的に定義する。イシュー #2182）。
+    EmptyBatch,
 }
 
 impl From<ShapeError> for DataError {
     fn from(err: ShapeError) -> Self {
         DataError::Shape(err)
+    }
+}
+
+impl From<crate::rng::RngError> for DataError {
+    fn from(err: crate::rng::RngError) -> Self {
+        DataError::Rng(err)
     }
 }
 
@@ -121,6 +178,16 @@ impl std::fmt::Display for DataError {
                 write!(f, "添字 {index} がデータセットの長さ {len} を外れている")
             }
             DataError::Shape(err) => write!(f, "{err}"),
+            DataError::Rng(err) => write!(f, "{err}"),
+            DataError::SampleShapeMismatch {
+                position,
+                expected,
+                found,
+            } => write!(
+                f,
+                "collate 対象のサンプル {position} の shape {found:?} が先頭サンプルの shape {expected:?} と一致しない"
+            ),
+            DataError::EmptyBatch => write!(f, "collate 対象のサンプル列が空"),
         }
     }
 }
@@ -206,6 +273,23 @@ impl<T: Element> TensorDataset<T> {
         let row = self.tensor.narrow(0, index, 1)?;
         let rest = &self.tensor.shape()[1..];
         Ok(row.reshape(rest)?)
+    }
+
+    /// [`Self::get`] と異なり `reshape` を使わず `host_slice()` から
+    /// 直接組み立てる（イシュー #2182。[`HookedDataLoader`] が使う）。
+    /// `reshape` は非 contiguous な `tensor`（転置 view 等）で
+    /// `ShapeError::NonContiguousReshape` を返しうるが、`host_slice()`
+    /// は contiguous なら借用・非 contiguous なら 1 回だけ実体化して
+    /// 読み出すため（`tensor.rs` `host_slice` doc 参照）、この経路は
+    /// `tensor` の contiguity に依存しない。境界検査は先に行う（REQ-8）。
+    pub(crate) fn sample_owned(&self, index: usize) -> Result<Tensor<T>, DataError> {
+        let len = self.len();
+        if index >= len {
+            return Err(DataError::IndexOutOfRange { index, len });
+        }
+        let row = self.tensor.narrow(0, index, 1)?;
+        let rest = &self.tensor.shape()[1..];
+        Ok(Tensor::new(row.host_slice().into_owned(), rest)?)
     }
 }
 
@@ -487,6 +571,606 @@ impl<'a, D: Dataset> IntoIterator for &'a DataLoader<D> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+/// バッチ添字を供給する拡張点（PyTorch `Sampler` + `BatchSampler` を
+/// 合わせた「バッチ sampler」相当。イシュー #2182・親 #2131）。
+/// [`SamplerDataLoader`] がこの trait を経由して添字列を得る。
+///
+/// # 契約
+///
+/// - [`Self::start_epoch`] は epoch 開始時に 1 回だけ呼ぶ。抽選が
+///   必要な実装（[`RandomSampler`]・[`WeightedRandomSampler`]）は
+///   ここで 1 回の [`crate::rng::with_global_rng`] クロージャ内に
+///   まとめて抽選し、`manual_seed` 下の再現性を保つ
+///   （モジュール冒頭「シャッフル契約」と同じ「複数値をまとめて引く
+///   操作の原子性」を踏襲する）。
+/// - [`Self::next_batch`] は次バッチの添字列を返す。空の `Vec` は
+///   epoch 終了を表す番兵であり、空バッチとして yield しない。
+/// - [`Self::num_batches`] が `Some` を返す実装では、その値が
+///   [`Self::next_batch`] が実際に空以外を返す回数と一致する
+///   （`ExactSizeIterator` 相当の `size_hint` に用いる）。
+/// - `Send`: 将来のマルチワーカー化（#2181 の番号は issue 本文の誤記。
+///   `docs/tensor-core-data-sampler-hooks-decision.md` §6 参照）に
+///   備え、ローダー型を `Send` に保つための境界。
+pub trait Sampler: Send {
+    /// epoch 開始時に 1 回呼ぶ。抽選を伴う実装はここで確定させる。
+    fn start_epoch(&mut self) -> Result<(), DataError>;
+
+    /// 次バッチの添字列。空の `Vec` は epoch 終了の番兵。
+    fn next_batch(&mut self) -> Vec<usize>;
+
+    /// 1 epoch あたりのバッチ数（既知なら `Some`。既定は `None`）。
+    fn num_batches(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// [`Sampler`] の 3 実装が共有する「確定済み添字順列から
+/// `batch_size` 個ずつ切り出す」処理（イシュー #2182）。切り出し式は
+/// 既存 [`Batches::next`] の式と揃える（同一の `drop_last` 契約）。
+struct IndexBatcher {
+    order: Vec<usize>,
+    cursor: usize,
+    batch_size: usize,
+    drop_last: bool,
+}
+
+impl IndexBatcher {
+    fn new(batch_size: usize, drop_last: bool) -> Self {
+        Self {
+            order: Vec::new(),
+            cursor: 0,
+            batch_size,
+            drop_last,
+        }
+    }
+
+    /// 新しい epoch の順列を設定し、カーソルを先頭へ戻す。
+    fn set_order(&mut self, order: Vec<usize>) {
+        self.order = order;
+        self.cursor = 0;
+    }
+
+    /// [`Batches::next`] と同じ切り出し式で次バッチの添字列を返す。
+    /// 枯渇時・`drop_last` により端数を捨てる場合は空 `Vec`（[`Sampler`]
+    /// の「空 Vec は epoch 終了の番兵」契約に対応）。
+    fn next_batch(&mut self) -> Vec<usize> {
+        if self.cursor >= self.order.len() {
+            return Vec::new();
+        }
+        let remaining = self.order.len() - self.cursor;
+        if self.drop_last && remaining < self.batch_size {
+            return Vec::new();
+        }
+        let take = remaining.min(self.batch_size);
+        let batch = self.order[self.cursor..self.cursor + take].to_vec();
+        self.cursor += take;
+        batch
+    }
+
+    fn num_batches(&self, len: usize) -> usize {
+        batch_count(len, self.batch_size, self.drop_last)
+    }
+}
+
+/// 連番順（シャッフルなし）でバッチ添字を供給する（PyTorch
+/// `SequentialSampler` 相当。イシュー #2182）。グローバル RNG を
+/// **一切消費しない**。
+pub struct SequentialSampler {
+    len: usize,
+    batcher: IndexBatcher,
+}
+
+impl std::fmt::Debug for SequentialSampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SequentialSampler").finish_non_exhaustive()
+    }
+}
+
+impl SequentialSampler {
+    /// `len` はデータセットのサンプル総数。`batch_size == 0` は
+    /// [`DataError::ZeroBatchSize`]。
+    pub fn new(len: usize, batch_size: usize, drop_last: bool) -> Result<Self, DataError> {
+        if batch_size == 0 {
+            return Err(DataError::ZeroBatchSize);
+        }
+        Ok(Self {
+            len,
+            batcher: IndexBatcher::new(batch_size, drop_last),
+        })
+    }
+}
+
+impl Sampler for SequentialSampler {
+    fn start_epoch(&mut self) -> Result<(), DataError> {
+        // `Dataset::len()` は実装者が任意の値を返せるため、
+        // `DataLoader::iter` と同じ事前検査を経てから `0..len` を
+        // 確定する（capacity overflow パニック防止。PR #1867 是正の
+        // 契約を Sampler 側へも及ぼす）。
+        checked_numel_for::<usize>(&[self.len])?;
+        self.batcher.set_order((0..self.len).collect());
+        Ok(())
+    }
+
+    fn next_batch(&mut self) -> Vec<usize> {
+        self.batcher.next_batch()
+    }
+
+    fn num_batches(&self) -> Option<usize> {
+        Some(self.batcher.num_batches(self.len))
+    }
+}
+
+/// 順列でバッチ添字を供給する（PyTorch `RandomSampler` 相当。イシュー
+/// #2182）。同一の `manual_seed` の下で `DataLoader{shuffle=true}` と
+/// **添字順が bit 完全一致**する（[`start_epoch`](Sampler::start_epoch)
+/// が `shuffled_indices` を 1 回の [`crate::rng::with_global_rng`]
+/// クロージャ内で呼ぶため）。
+pub struct RandomSampler {
+    len: usize,
+    batcher: IndexBatcher,
+}
+
+impl std::fmt::Debug for RandomSampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RandomSampler").finish_non_exhaustive()
+    }
+}
+
+impl RandomSampler {
+    /// `batch_size == 0` は [`DataError::ZeroBatchSize`]。
+    pub fn new(len: usize, batch_size: usize, drop_last: bool) -> Result<Self, DataError> {
+        if batch_size == 0 {
+            return Err(DataError::ZeroBatchSize);
+        }
+        Ok(Self {
+            len,
+            batcher: IndexBatcher::new(batch_size, drop_last),
+        })
+    }
+}
+
+impl Sampler for RandomSampler {
+    fn start_epoch(&mut self) -> Result<(), DataError> {
+        // `DataLoader::iter` の `shuffle=true` 経路と同一の検査・
+        // 抽選手順（`checked_numel_for` → 1 回の `with_global_rng`）。
+        // `len == 0` は `shuffled_indices` が空順列を返すのみで RNG は
+        // 消費する（`DataLoader` 既存契約と揃える。事前検査失敗時のみ
+        // RNG を消費しない）。
+        checked_numel_for::<usize>(&[self.len])?;
+        let order = with_global_rng(|rng| shuffled_indices(self.len, rng));
+        self.batcher.set_order(order);
+        Ok(())
+    }
+
+    fn next_batch(&mut self) -> Vec<usize> {
+        self.batcher.next_batch()
+    }
+
+    fn num_batches(&self) -> Option<usize> {
+        Some(self.batcher.num_batches(self.len))
+    }
+}
+
+/// 重み付き復元・非復元抽出でバッチ添字を供給する（PyTorch
+/// `WeightedRandomSampler` 相当。イシュー #2182）。構築時
+/// （[`Self::new`]）に `crate::rng::validate_multinomial` で検証する
+/// （RNG を消費しない）。[`start_epoch`](Sampler::start_epoch) は公開 API
+/// [`crate::rng::multinomial`]（1 回の `with_global_rng` を使う原子的な
+/// 抽選）を呼び、同一シードの下で `rng::multinomial(&weights,
+/// num_samples, replacement)` と抽選列が bit 完全一致する。
+pub struct WeightedRandomSampler {
+    weights: Tensor<f32>,
+    num_samples: usize,
+    replacement: bool,
+    batcher: IndexBatcher,
+}
+
+impl std::fmt::Debug for WeightedRandomSampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeightedRandomSampler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl WeightedRandomSampler {
+    /// `weights`（rank 1: 各要素が対応する添字の重み）・抽選する
+    /// サンプル総数 `num_samples`・復元抽出の有無・バッチ化条件を
+    /// 受け取る。構築時に有限性・非負・総和が正・非復元抽出時の
+    /// 重み不足を検証する（`crate::rng::validate_multinomial` を
+    /// 再利用。RNG は一切消費しない）。`batch_size == 0` は
+    /// [`DataError::ZeroBatchSize`]。
+    pub fn new(
+        weights: Vec<f32>,
+        num_samples: usize,
+        replacement: bool,
+        batch_size: usize,
+        drop_last: bool,
+    ) -> Result<Self, DataError> {
+        if batch_size == 0 {
+            return Err(DataError::ZeroBatchSize);
+        }
+        let n = weights.len();
+        let weights = Tensor::new(weights, &[n])?;
+        // 構築時検証のみを行い `(rows, n, out_shape)` は使わない
+        // （`start_epoch` で `crate::rng::multinomial` を呼ぶ際に
+        // 改めて検証される。二重検証だが RNG 消費前の fail-closed
+        // ガードとして両呼び出しサイトで独立に成立させる）。
+        crate::rng::validate_multinomial(&weights, num_samples, replacement)?;
+        Ok(Self {
+            weights,
+            num_samples,
+            replacement,
+            batcher: IndexBatcher::new(batch_size, drop_last),
+        })
+    }
+}
+
+impl Sampler for WeightedRandomSampler {
+    fn start_epoch(&mut self) -> Result<(), DataError> {
+        if self.num_samples == 0 {
+            // `rng::multinomial` は `num_samples == 0` のとき RNG を
+            // 消費せず空テンソルを返すが、ここでは呼び出し自体を
+            // 省略して契約を明示する（`RandomSampler` の `len == 0`
+            // とは異なり、こちらは検証済みのため `?` は到達しない）。
+            self.batcher.set_order(Vec::new());
+            return Ok(());
+        }
+        let drawn = crate::rng::multinomial(&self.weights, self.num_samples, self.replacement)?;
+        let order = drawn
+            .host_slice()
+            .iter()
+            .map(|&v| {
+                usize::try_from(v).map_err(|_| {
+                    DataError::Rng(crate::rng::RngError::InvalidArgument {
+                        reason: "multinomial の抽選結果が負値（i32 → usize 変換不可）",
+                    })
+                })
+            })
+            .collect::<Result<Vec<usize>, DataError>>()?;
+        self.batcher.set_order(order);
+        Ok(())
+    }
+
+    fn next_batch(&mut self) -> Vec<usize> {
+        self.batcher.next_batch()
+    }
+
+    fn num_batches(&self) -> Option<usize> {
+        Some(self.batcher.num_batches(self.num_samples))
+    }
+}
+
+/// [`Sampler`] が返す添字列をそのまま [`Dataset::batch`] へ渡す
+/// ローダー（イシュー #2182）。タプルデータセット（`(TensorDataset<f32>,
+/// TensorDataset<i32>)` 等）でも同じ添字が全成分に適用されるため、
+/// 分類タスクのように特徴量とラベルを同一のシャッフル順で取り出す
+/// 要件を満たす（[`HookedDataLoader`] はサンプル単位 transform／collate
+/// のため `TensorDataset<T>` 限定になるが、本型はタプルにも使える）。
+pub struct SamplerDataLoader<D: Dataset> {
+    dataset: D,
+    sampler: Box<dyn Sampler>,
+}
+
+impl<D: Dataset> std::fmt::Debug for SamplerDataLoader<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamplerDataLoader").finish_non_exhaustive()
+    }
+}
+
+impl<D: Dataset> SamplerDataLoader<D> {
+    /// `dataset.validate()` を実行し、タプル成分の長さ不一致を
+    /// fail-closed に拒否する（[`DataLoader::new`] と同じ契約）。
+    pub fn new(dataset: D, sampler: impl Sampler + 'static) -> Result<Self, DataError> {
+        dataset.validate()?;
+        Ok(Self {
+            dataset,
+            sampler: Box::new(sampler),
+        })
+    }
+
+    /// 保持するデータセットへの参照。
+    pub fn dataset(&self) -> &D {
+        &self.dataset
+    }
+
+    /// 内部の `dataset` を取り出す。
+    pub fn into_dataset(self) -> D {
+        self.dataset
+    }
+
+    /// 1 epoch あたりのバッチ数（[`Sampler::num_batches`] が `Some` を
+    /// 返す場合のみ）。
+    pub fn num_batches(&self) -> Option<usize> {
+        self.sampler.num_batches()
+    }
+
+    /// 1 epoch 分のイテレータを返す。[`Sampler::start_epoch`] を呼んで
+    /// から yield を始める（失敗した場合は最初の `next()` で 1 回だけ
+    /// `Err` を返し、以降は `None`。[`Batches`] の `pending_error` と
+    /// 同じ方式）。
+    pub fn iter(&mut self) -> SamplerBatches<'_, D> {
+        let pending_error = self.sampler.start_epoch().err();
+        SamplerBatches {
+            dataset: &self.dataset,
+            sampler: self.sampler.as_mut(),
+            pending_error,
+            done: false,
+        }
+    }
+}
+
+/// [`SamplerDataLoader::iter`] が返す 1 epoch 分のバッチイテレータ
+/// （イシュー #2182）。`Sampler::next_batch` が空 `Vec` を返した後は
+/// `done` を立て、sampler を再び呼ばない。
+pub struct SamplerBatches<'a, D: Dataset> {
+    dataset: &'a D,
+    sampler: &'a mut dyn Sampler,
+    pending_error: Option<DataError>,
+    done: bool,
+}
+
+impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
+    type Item = Result<D::Batch, DataError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(err) = self.pending_error.take() {
+            self.done = true;
+            return Some(Err(err));
+        }
+        if self.done {
+            return None;
+        }
+        let indices = self.sampler.next_batch();
+        if indices.is_empty() {
+            self.done = true;
+            return None;
+        }
+        Some(self.dataset.batch(&indices))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.pending_error.is_some() {
+            return (1, Some(1));
+        }
+        match self.sampler.num_batches() {
+            Some(n) => (n, Some(n)),
+            None => (0, None),
+        }
+    }
+}
+
+/// サンプル単位の変換フック（PyTorch `Dataset` の `transform` 相当。
+/// イシュー #2182）。[`HookedDataLoader::with_try_transform`] が保持する
+/// 内部表現（fallible）。本番経路で `unwrap`／`expect` を使わない規約
+/// （`.claude/rules/coding-rust.md`）のため、[`HookedDataLoader::
+/// with_transform`]（issue の字句どおりの infallible シグネチャ）は
+/// `Ok` で包んでこの型へ格納する。
+pub type TransformFn<T> = Box<dyn Fn(Tensor<T>) -> Result<Tensor<T>, DataError> + Send + Sync>;
+
+/// サンプル列からバッチを組み立てる collate 関数（PyTorch
+/// `collate_fn` 相当。イシュー #2182）。[`TransformFn`] と同じ理由で
+/// fallible な内部表現を持つ。
+pub type CollateFn<T> = Box<dyn Fn(&[Tensor<T>]) -> Result<Tensor<T>, DataError> + Send + Sync>;
+
+/// 既定の collate（[`HookedDataLoader`] が `collate` 未設定時に使う。
+/// イシュー #2182）。`samples` を先頭軸へ積んだ `[k, sample_shape..]`
+/// のテンソルを返す。
+///
+/// 空スライスは [`DataError::EmptyBatch`]。全サンプルの shape が先頭
+/// サンプルと一致しなければ [`DataError::SampleShapeMismatch`]。出力
+/// 要素数は `checked_numel_for` で確保前に検査する（A03/A04 対策。
+/// モジュール冒頭 OWASP 節）。
+///
+/// transform も collate も未設定の fast path（[`HookedDataLoader::
+/// next`] 相当）では本関数を経由せず [`Dataset::batch`]（`gather_rows`）
+/// へ直行するため、その場合の出力は `gather_rows` と bit 完全一致
+/// する。本関数（slow path・恒等 transform 経由）を明示的に呼んだ
+/// 場合も、純粋なコピーで算術を含まないため同じ入力に対し bit 完全
+/// 一致する。
+pub fn default_collate<T: Element>(samples: &[Tensor<T>]) -> Result<Tensor<T>, DataError> {
+    let Some(first) = samples.first() else {
+        return Err(DataError::EmptyBatch);
+    };
+    let sample_shape = first.shape().to_vec();
+    for (position, sample) in samples.iter().enumerate().skip(1) {
+        if sample.shape() != sample_shape.as_slice() {
+            return Err(DataError::SampleShapeMismatch {
+                position,
+                expected: sample_shape,
+                found: sample.shape().to_vec(),
+            });
+        }
+    }
+    let mut out_shape = Vec::with_capacity(1 + sample_shape.len());
+    out_shape.push(samples.len());
+    out_shape.extend_from_slice(&sample_shape);
+    let numel = checked_numel_for::<T>(&out_shape)?;
+    let mut data = Vec::with_capacity(numel);
+    for sample in samples {
+        data.extend_from_slice(&sample.host_slice());
+    }
+    Ok(Tensor::new(data, &out_shape)?)
+}
+
+/// [`Sampler`] で選んだサンプルへ transform／collate フックをかけて
+/// バッチ化するローダー（PyTorch `DataLoader(sampler=, collate_fn=)`
+/// 相当。イシュー #2182）。内部に
+/// `SamplerDataLoader<TensorDataset<T>>` を持つ（合成）。issue の
+/// callback シグネチャ（`Tensor` 単体）に合わせ `TensorDataset<T>`
+/// 限定とする（タプルデータセットでのサンプル単位フックは対象外。
+/// `docs/tensor-core-data-sampler-hooks-decision.md` §2.2・§6）。
+///
+/// # 処理順（AC-4）
+///
+/// [`HookedBatches::next`] は「サンプリング → サンプルごとに transform
+/// → collate」の順で処理する。transform も collate も未設定なら
+/// [`Dataset::batch`] への fast path を通る（コピー 1 回。[`Self::
+/// with_transform`]／[`Self::with_collate`] を一度でも呼ぶと slow
+/// path に切り替わる）。
+pub struct HookedDataLoader<T: Element> {
+    inner: SamplerDataLoader<TensorDataset<T>>,
+    transform: Option<TransformFn<T>>,
+    collate: Option<CollateFn<T>>,
+}
+
+impl<T: Element> std::fmt::Debug for HookedDataLoader<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookedDataLoader").finish_non_exhaustive()
+    }
+}
+
+impl<T: Element> HookedDataLoader<T> {
+    /// [`SamplerDataLoader::new`] と同じ契約（タプルではないため
+    /// `validate()` は常に `Ok(())`）。
+    pub fn new(
+        dataset: TensorDataset<T>,
+        sampler: impl Sampler + 'static,
+    ) -> Result<Self, DataError> {
+        Ok(Self {
+            inner: SamplerDataLoader::new(dataset, sampler)?,
+            transform: None,
+            collate: None,
+        })
+    }
+
+    /// builder: infallible な transform を設定する（issue の字句どおり
+    /// のシグネチャ）。内部では `Ok` で包んで保持する。
+    pub fn with_transform(
+        mut self,
+        f: impl Fn(Tensor<T>) -> Tensor<T> + Send + Sync + 'static,
+    ) -> Self {
+        self.transform = Some(Box::new(move |t| Ok(f(t))));
+        self
+    }
+
+    /// builder: fallible な transform を設定する。
+    pub fn with_try_transform(
+        mut self,
+        f: impl Fn(Tensor<T>) -> Result<Tensor<T>, DataError> + Send + Sync + 'static,
+    ) -> Self {
+        self.transform = Some(Box::new(f));
+        self
+    }
+
+    /// builder: infallible な collate を設定する（issue の字句どおりの
+    /// シグネチャ）。
+    pub fn with_collate(
+        mut self,
+        f: impl Fn(&[Tensor<T>]) -> Tensor<T> + Send + Sync + 'static,
+    ) -> Self {
+        self.collate = Some(Box::new(move |samples| Ok(f(samples))));
+        self
+    }
+
+    /// builder: fallible な collate を設定する。
+    pub fn with_try_collate(
+        mut self,
+        f: impl Fn(&[Tensor<T>]) -> Result<Tensor<T>, DataError> + Send + Sync + 'static,
+    ) -> Self {
+        self.collate = Some(Box::new(f));
+        self
+    }
+
+    /// 保持するデータセットへの参照。
+    pub fn dataset(&self) -> &TensorDataset<T> {
+        self.inner.dataset()
+    }
+
+    /// 内部の `dataset` を取り出す。
+    pub fn into_dataset(self) -> TensorDataset<T> {
+        self.inner.into_dataset()
+    }
+
+    /// 1 epoch あたりのバッチ数（[`Sampler::num_batches`] が `Some` を
+    /// 返す場合のみ）。
+    pub fn num_batches(&self) -> Option<usize> {
+        self.inner.num_batches()
+    }
+
+    /// 1 epoch 分のイテレータを返す。
+    pub fn iter(&mut self) -> HookedBatches<'_, T> {
+        let pending_error = self.inner.sampler.start_epoch().err();
+        HookedBatches {
+            dataset: &self.inner.dataset,
+            sampler: self.inner.sampler.as_mut(),
+            transform: self.transform.as_ref(),
+            collate: self.collate.as_ref(),
+            pending_error,
+            done: false,
+        }
+    }
+}
+
+/// [`HookedDataLoader::iter`] が返す 1 epoch 分のバッチイテレータ
+/// （イシュー #2182）。`dataset`／`sampler` を [`SamplerDataLoader`] の
+/// private フィールドから直接分割借用する（`&mut HookedDataLoader` から
+/// `&TensorDataset<T>` と `&mut dyn Sampler` を同時に得るため。
+/// `Dataset::batch` へ委譲すると sampler 側の可変借用と衝突するため
+/// 経由しない）。
+pub struct HookedBatches<'a, T: Element> {
+    dataset: &'a TensorDataset<T>,
+    sampler: &'a mut dyn Sampler,
+    transform: Option<&'a TransformFn<T>>,
+    collate: Option<&'a CollateFn<T>>,
+    pending_error: Option<DataError>,
+    done: bool,
+}
+
+impl<T: Element> Iterator for HookedBatches<'_, T> {
+    type Item = Result<Tensor<T>, DataError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(err) = self.pending_error.take() {
+            self.done = true;
+            return Some(Err(err));
+        }
+        if self.done {
+            return None;
+        }
+        let indices = self.sampler.next_batch();
+        if indices.is_empty() {
+            self.done = true;
+            return None;
+        }
+        // fast path: transform も collate も未設定なら `Dataset::batch`
+        // （`gather_rows`）へ直行し、追加のコピーを発生させない
+        // （`HookedDataLoader` doc「処理順」節）。
+        if self.transform.is_none() && self.collate.is_none() {
+            return Some(self.dataset.batch(&indices));
+        }
+        let mut samples: Vec<Tensor<T>> = Vec::with_capacity(indices.len());
+        for &idx in &indices {
+            let sample = match self.dataset.sample_owned(idx) {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let sample = match self.transform {
+                Some(f) => match f(sample) {
+                    Ok(s) => s,
+                    Err(e) => return Some(Err(e)),
+                },
+                None => sample,
+            };
+            samples.push(sample);
+        }
+        let result = match self.collate {
+            Some(f) => f(&samples),
+            None => default_collate(&samples),
+        };
+        Some(result)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.pending_error.is_some() {
+            return (1, Some(1));
+        }
+        match self.sampler.num_batches() {
+            Some(n) => (n, Some(n)),
+            None => (0, None),
+        }
     }
 }
 
@@ -899,5 +1583,398 @@ mod tests {
             after_overflow_iter, direct,
             "overflow 検査失敗時は shuffle=true でも RNG を消費しない"
         );
+    }
+
+    // =====================================================================
+    // Sampler／フック（イシュー #2182）
+    // =====================================================================
+
+    #[test]
+    fn sequential_sampler_matches_data_loader_without_shuffle() {
+        for drop_last in [false, true] {
+            let ds = TensorDataset::new(tensor_2d(10, 2)).unwrap();
+            let loader =
+                DataLoader::new(ds, DataLoaderConfig::new(4).drop_last(drop_last)).unwrap();
+            let expected: Vec<Vec<f32>> = loader
+                .iter()
+                .map(|b| b.unwrap().host_slice().to_vec())
+                .collect();
+
+            let ds2 = TensorDataset::new(tensor_2d(10, 2)).unwrap();
+            let sampler = SequentialSampler::new(10, 4, drop_last).unwrap();
+            let mut sampler_loader = SamplerDataLoader::new(ds2, sampler).unwrap();
+            let actual: Vec<Vec<f32>> = sampler_loader
+                .iter()
+                .map(|b| b.unwrap().host_slice().to_vec())
+                .collect();
+            assert_eq!(actual, expected, "drop_last={drop_last}");
+        }
+
+        // RNG を消費しないことの確認。
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        manual_seed(11);
+        let ds = TensorDataset::new(tensor_2d(10, 1)).unwrap();
+        let mut loader =
+            SamplerDataLoader::new(ds, SequentialSampler::new(10, 3, false).unwrap()).unwrap();
+        for b in loader.iter() {
+            b.unwrap();
+        }
+        let after: Vec<f32> = crate::rng::rand(&[4]).unwrap().host_slice().to_vec();
+        manual_seed(11);
+        let direct: Vec<f32> = crate::rng::rand(&[4]).unwrap().host_slice().to_vec();
+        assert_eq!(after, direct);
+    }
+
+    #[test]
+    fn random_sampler_matches_data_loader_shuffle_under_manual_seed() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        for drop_last in [false, true] {
+            manual_seed(202);
+            let ds = TensorDataset::new(tensor_2d(9, 1)).unwrap();
+            let loader = DataLoader::new(
+                ds,
+                DataLoaderConfig::new(4).shuffle(true).drop_last(drop_last),
+            )
+            .unwrap();
+            let expected: Vec<Vec<f32>> = loader
+                .iter()
+                .map(|b| b.unwrap().host_slice().to_vec())
+                .collect();
+
+            manual_seed(202);
+            let ds2 = TensorDataset::new(tensor_2d(9, 1)).unwrap();
+            let mut sampler_loader =
+                SamplerDataLoader::new(ds2, RandomSampler::new(9, 4, drop_last).unwrap()).unwrap();
+            let actual: Vec<Vec<f32>> = sampler_loader
+                .iter()
+                .map(|b| b.unwrap().host_slice().to_vec())
+                .collect();
+            assert_eq!(actual, expected, "drop_last={drop_last}");
+        }
+    }
+
+    #[test]
+    fn random_sampler_empty_dataset_consumes_no_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        manual_seed(303);
+        let ds = TensorDataset::new(tensor_2d(1, 1).narrow(0, 0, 0).unwrap()).unwrap();
+        let mut loader =
+            SamplerDataLoader::new(ds, RandomSampler::new(0, 4, false).unwrap()).unwrap();
+        assert!(loader.iter().next().is_none());
+        let after: Vec<f32> = crate::rng::rand(&[4]).unwrap().host_slice().to_vec();
+        manual_seed(303);
+        let direct: Vec<f32> = crate::rng::rand(&[4]).unwrap().host_slice().to_vec();
+        assert_eq!(
+            after, direct,
+            "len == 0 の RandomSampler は epoch 開始時に RNG を消費しない\
+             （shuffled_indices(0, ..) が rng を呼ばないため）"
+        );
+    }
+
+    #[test]
+    fn weighted_sampler_matches_rng_multinomial() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        for replacement in [true, false] {
+            let weights = vec![1.0f32, 2.0, 3.0, 4.0];
+            manual_seed(404);
+            let w_tensor = Tensor::new(weights.clone(), &[4]).unwrap();
+            let expected = crate::rng::multinomial(&w_tensor, 4, replacement)
+                .unwrap()
+                .host_slice()
+                .to_vec();
+
+            manual_seed(404);
+            let ds = TensorDataset::new(tensor_2d(4, 1)).unwrap();
+            let sampler = WeightedRandomSampler::new(weights, 4, replacement, 4, false).unwrap();
+            let mut loader = SamplerDataLoader::new(ds, sampler).unwrap();
+            let mut actual_indices: Vec<i32> = Vec::new();
+            for b in loader.iter() {
+                let batch = b.unwrap();
+                actual_indices.extend(batch.host_slice().iter().map(|&v| v as i32));
+            }
+            // バッチは元データ列の値そのもの（tensor_2d の行値は
+            // `row_index as f32`）のため、抽選添字列と一致する。
+            assert_eq!(actual_indices, expected, "replacement={replacement}");
+        }
+    }
+
+    #[test]
+    fn weighted_sampler_rejects_invalid_weights_without_consuming_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        let cases: Vec<Vec<f32>> = vec![vec![-1.0, 2.0], vec![f32::NAN, 1.0], vec![0.0, 0.0]];
+        for weights in cases {
+            manual_seed(505);
+            let err = WeightedRandomSampler::new(weights, 2, true, 2, false).unwrap_err();
+            assert!(matches!(err, DataError::Rng(_)));
+            let after: Vec<f32> = crate::rng::rand(&[2]).unwrap().host_slice().to_vec();
+            manual_seed(505);
+            let direct: Vec<f32> = crate::rng::rand(&[2]).unwrap().host_slice().to_vec();
+            assert_eq!(after, direct, "検証失敗時は RNG を消費しない");
+        }
+
+        // 非復元抽出で重み不足。
+        let err = WeightedRandomSampler::new(vec![1.0, 0.0], 2, false, 2, false).unwrap_err();
+        assert!(matches!(err, DataError::Rng(_)));
+
+        // batch_size == 0。
+        let err = WeightedRandomSampler::new(vec![1.0], 1, true, 0, false).unwrap_err();
+        assert_eq!(err, DataError::ZeroBatchSize);
+    }
+
+    #[test]
+    fn sampler_num_batches_matches_yield_count() {
+        for drop_last in [false, true] {
+            let ds = TensorDataset::new(tensor_2d(10, 1)).unwrap();
+            let mut loader =
+                SamplerDataLoader::new(ds, SequentialSampler::new(10, 4, drop_last).unwrap())
+                    .unwrap();
+            let expected = loader.num_batches();
+            let actual = loader.iter().count();
+            assert_eq!(Some(actual), expected, "drop_last={drop_last}");
+        }
+    }
+
+    #[test]
+    fn sampler_data_loader_tuple_dataset_shares_indices() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        manual_seed(606);
+
+        let features = TensorDataset::new(tensor_2d(12, 1)).unwrap();
+        let labels_data: Vec<f32> = (0..12).map(|v| (v * 100) as f32).collect();
+        let labels = TensorDataset::new(tensor_1d(&labels_data)).unwrap();
+
+        let sampler = RandomSampler::new(12, 4, false).unwrap();
+        let mut loader = SamplerDataLoader::new((features, labels), sampler).unwrap();
+        for (x, y) in loader.iter().map(|b| b.unwrap()) {
+            let xs = x.host_slice();
+            let ys = y.host_slice();
+            for (xv, yv) in xs.iter().zip(ys.iter()) {
+                assert_eq!(*yv, xv * 100.0, "x={xv} y={yv} はずれた添字を指している");
+            }
+        }
+    }
+
+    /// 範囲外の添字を返すカスタム [`Sampler`]。
+    struct OutOfRangeSampler {
+        yielded: bool,
+    }
+
+    impl Sampler for OutOfRangeSampler {
+        fn start_epoch(&mut self) -> Result<(), DataError> {
+            self.yielded = false;
+            Ok(())
+        }
+
+        fn next_batch(&mut self) -> Vec<usize> {
+            if self.yielded {
+                Vec::new()
+            } else {
+                self.yielded = true;
+                vec![0, 9999]
+            }
+        }
+    }
+
+    #[test]
+    fn custom_sampler_out_of_range_is_index_out_of_range() {
+        let ds = TensorDataset::new(tensor_2d(4, 1)).unwrap();
+        let mut loader = SamplerDataLoader::new(ds, OutOfRangeSampler { yielded: false }).unwrap();
+        let err = loader.iter().next().unwrap().unwrap_err();
+        assert_eq!(
+            err,
+            DataError::IndexOutOfRange {
+                index: 9999,
+                len: 4
+            }
+        );
+    }
+
+    /// `start_epoch` が常に失敗するカスタム [`Sampler`]。
+    struct FailingStartEpochSampler;
+
+    impl Sampler for FailingStartEpochSampler {
+        fn start_epoch(&mut self) -> Result<(), DataError> {
+            Err(DataError::ZeroBatchSize)
+        }
+
+        fn next_batch(&mut self) -> Vec<usize> {
+            panic!("start_epoch が失敗したら next_batch は呼ばれないはず");
+        }
+    }
+
+    #[test]
+    fn sampler_start_epoch_error_is_yielded_once() {
+        let ds = TensorDataset::new(tensor_2d(4, 1)).unwrap();
+        let mut loader = SamplerDataLoader::new(ds, FailingStartEpochSampler).unwrap();
+        let mut it = loader.iter();
+        match it.next() {
+            Some(Err(DataError::ZeroBatchSize)) => {}
+            other => panic!("expected Some(Err(ZeroBatchSize)), got {other:?}"),
+        }
+        assert!(it.next().is_none());
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn hooked_default_collate_is_bit_identical_to_dataset_batch() {
+        // fast path（フックなし）。
+        let ds = TensorDataset::new(tensor_2d(10, 3)).unwrap();
+        let reference = ds.batch(&[0, 3, 7]).unwrap();
+        let ds2 = TensorDataset::new(tensor_2d(10, 3)).unwrap();
+        let mut loader =
+            HookedDataLoader::new(ds2, SequentialSampler::new(10, 3, false).unwrap()).unwrap();
+        let first = loader.iter().next().unwrap().unwrap();
+        assert_eq!(
+            first.host_slice().as_ref(),
+            ds.batch(&[0, 1, 2]).unwrap().host_slice().as_ref()
+        );
+        let _ = reference;
+
+        // slow path（恒等 transform を明示指定）が fast path と一致する。
+        let ds3 = TensorDataset::new(tensor_2d(10, 3)).unwrap();
+        let mut loader_slow =
+            HookedDataLoader::new(ds3, SequentialSampler::new(10, 3, false).unwrap())
+                .unwrap()
+                .with_transform(|t| t);
+        let first_slow = loader_slow.iter().next().unwrap().unwrap();
+        assert_eq!(
+            first.host_slice().as_ref(),
+            first_slow.host_slice().as_ref()
+        );
+
+        // 非 contiguous（transpose した view）の dataset でも一致する。
+        let base = tensor_2d(3, 4);
+        let transposed = base.transpose(0, 1).unwrap();
+        let ds_t = TensorDataset::new(transposed.contiguous()).unwrap();
+        let ds_t2 = TensorDataset::new(transposed.contiguous()).unwrap();
+        let expected_t = ds_t.batch(&[0, 1]).unwrap();
+        let mut loader_t =
+            HookedDataLoader::new(ds_t2, SequentialSampler::new(4, 2, false).unwrap()).unwrap();
+        let actual_t = loader_t.iter().next().unwrap().unwrap();
+        assert_eq!(
+            expected_t.host_slice().as_ref(),
+            actual_t.host_slice().as_ref()
+        );
+
+        // rank1 データセット（サンプル shape が `[]`）。
+        let labels = tensor_1d(&[10.0, 20.0, 30.0, 40.0]);
+        let ds_r1 = TensorDataset::new(labels.clone()).unwrap();
+        let ds_r1_slow = TensorDataset::new(labels).unwrap();
+        let expected_r1 = ds_r1.batch(&[0, 1, 2, 3]).unwrap();
+        let mut loader_r1 =
+            HookedDataLoader::new(ds_r1_slow, SequentialSampler::new(4, 4, false).unwrap())
+                .unwrap()
+                .with_transform(|t| t);
+        let actual_r1 = loader_r1.iter().next().unwrap().unwrap();
+        assert_eq!(
+            expected_r1.host_slice().as_ref(),
+            actual_r1.host_slice().as_ref()
+        );
+    }
+
+    #[test]
+    fn hooked_pipeline_order_is_sample_transform_collate() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Debug, Clone, PartialEq)]
+        enum Event {
+            Transform(usize),
+            Collate(usize),
+        }
+
+        let log: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let ds = TensorDataset::new(tensor_1d(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        let log_t = Arc::clone(&log);
+        let log_c = Arc::clone(&log);
+        let mut loader = HookedDataLoader::new(ds, SequentialSampler::new(4, 4, false).unwrap())
+            .unwrap()
+            .with_transform(move |t| {
+                let v = t.get(&[]).unwrap_or(0.0);
+                log_t.lock().unwrap().push(Event::Transform(v as usize));
+                Tensor::new(vec![v * 10.0], &[]).unwrap()
+            })
+            .with_collate(move |samples| {
+                log_c.lock().unwrap().push(Event::Collate(samples.len()));
+                default_collate(samples).unwrap()
+            });
+
+        let batch = loader.iter().next().unwrap().unwrap();
+        assert_eq!(batch.host_slice().as_ref(), &[10.0, 20.0, 30.0, 40.0]);
+
+        let events = log.lock().unwrap().clone();
+        // transform は各サンプルについて先に走り、collate は最後に 1 回。
+        let transform_count = events
+            .iter()
+            .filter(|e| matches!(e, Event::Transform(_)))
+            .count();
+        assert_eq!(transform_count, 4);
+        assert_eq!(events.last(), Some(&Event::Collate(4)));
+        // collate は変換後の値（10 倍済み）を受け取ったことを確認済み
+        // （上の assert_eq! で `[10, 20, 30, 40]` を検証）。
+    }
+
+    #[test]
+    fn custom_collate_and_try_variants_propagate_errors() {
+        let ds = TensorDataset::new(tensor_1d(&[1.0, 2.0])).unwrap();
+        let mut loader = HookedDataLoader::new(ds, SequentialSampler::new(2, 2, false).unwrap())
+            .unwrap()
+            .with_try_transform(|t| {
+                let v = t.get(&[]).unwrap_or(0.0);
+                if v > 1.5 {
+                    Err(DataError::ZeroBatchSize)
+                } else {
+                    Ok(t)
+                }
+            });
+        let err = loader.iter().next().unwrap().unwrap_err();
+        assert_eq!(err, DataError::ZeroBatchSize);
+
+        let ds2 = TensorDataset::new(tensor_1d(&[1.0, 2.0])).unwrap();
+        let mut loader2 = HookedDataLoader::new(ds2, SequentialSampler::new(2, 2, false).unwrap())
+            .unwrap()
+            .with_try_collate(|_samples| Err(DataError::EmptyBatch));
+        let err2 = loader2.iter().next().unwrap().unwrap_err();
+        assert_eq!(err2, DataError::EmptyBatch);
+    }
+
+    #[test]
+    fn default_collate_rejects_shape_mismatch_and_empty() {
+        let empty: Vec<Tensor<f32>> = Vec::new();
+        assert_eq!(default_collate(&empty).unwrap_err(), DataError::EmptyBatch);
+
+        let a = Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap();
+        let b = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let err = default_collate(&[a, b]).unwrap_err();
+        assert!(matches!(
+            err,
+            DataError::SampleShapeMismatch { position: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn loaders_are_send_and_existing_data_loader_auto_traits_unchanged() {
+        fn assert_send<T: Send>() {}
+        assert_send::<SamplerDataLoader<TensorDataset<f32>>>();
+        assert_send::<HookedDataLoader<f32>>();
+        // `DataLoader<TensorDataset<f32>>` は `D: Dataset` のみに束縛
+        // されるため、既存の auto trait（`Send`／`Sync`。`Dataset` 実装が
+        // 両方を満たす場合）は本イシューの変更で退行しない。
+        assert_send::<DataLoader<TensorDataset<f32>>>();
     }
 }

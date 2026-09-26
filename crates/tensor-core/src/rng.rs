@@ -437,7 +437,13 @@ pub fn multinomial(
 /// 非負・総和が正・非復元抽出時の正の重みの個数）を行い、1 行でも
 /// 違反すれば乱数を一切消費せず [`RngError`] を返す（呼び出し元の契約）。
 /// 成功時は抽選本体が必要とする `(rows, n, out_shape)` を返す。
-fn validate_multinomial(
+///
+/// `pub(crate)`（イシュー #2182）: `crate::data::WeightedRandomSampler`
+/// の構築時検証（RNG を消費しない事前検査）がこの検証本体をそのまま
+/// 再利用する（`crate::rng::multinomial` と機構的に同一の検証を保つ
+/// ため。上記 doc の「両者を機構的に同一に保つ」目的をさらに一段
+/// 外側の呼び出し元へも及ぼす）。
+pub(crate) fn validate_multinomial(
     weights: &Tensor<f32>,
     num_samples: usize,
     replacement: bool,

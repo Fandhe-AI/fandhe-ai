@@ -2953,6 +2953,366 @@ fn data_types_are_reachable_via_facade_only() {
     assert_is_dataset(&probe);
 }
 
+// =====================================================================
+// DataHooksHoldDoctestGuard（イシュー #2182）: `RngDistributionsHold
+// DoctestGuard`（#2156）系のテスト（`rng_distributions_hold_doctest_
+// globs_all_pub_modules`／`rng_distributions_hold_doctest_probe_body_
+// matches_fixed_contract`／`facade_does_not_reexport_or_declare_rng_
+// distributions`／`workspace_declares_rng_distribution_names_only_in_
+// allowed_locations`）を鏡写しにする。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `DataHooksHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`rng_distributions_hold_doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn data_hooks_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DataHooksHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "DataHooksHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも\
+         追加すること。"
+    );
+}
+
+/// [`data_hooks_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`DATA_HOOKS_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（`rng_distributions_hold_
+/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
+/// を骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn data_hooks_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DataHooksHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, DATA_HOOKS_HOLD_PROBE_BODY,
+        "DataHooksHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 DATA_HOOKS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_data_hooks_hold_probe モジュール・\
+         __FandheDataHooksHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`data_hooks_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `DataHooksHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const DATA_HOOKS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_data_hooks_hold_probe {\n\
+\x20\x20\x20\x20pub struct Sampler;\n\
+\x20\x20\x20\x20pub struct SequentialSampler;\n\
+\x20\x20\x20\x20pub struct RandomSampler;\n\
+\x20\x20\x20\x20pub struct WeightedRandomSampler;\n\
+\x20\x20\x20\x20pub struct SamplerDataLoader;\n\
+\x20\x20\x20\x20pub struct SamplerBatches;\n\
+\x20\x20\x20\x20pub struct HookedDataLoader;\n\
+\x20\x20\x20\x20pub struct HookedBatches;\n\
+\x20\x20\x20\x20pub struct TransformFn;\n\
+\x20\x20\x20\x20pub struct CollateFn;\n\
+\x20\x20\x20\x20pub fn default_collate() {}\n\
+}\n\
+use __fandhe_data_hooks_hold_probe::*;\n\
+\n\
+struct __FandheDataHooksHoldMarker;\n\
+\n\
+trait __FandheDataHooksHoldProbe {\n\
+\x20\x20\x20\x20fn with_sampler(&self) -> __FandheDataHooksHoldMarker;\n\
+\x20\x20\x20\x20fn with_transform(&self) -> __FandheDataHooksHoldMarker;\n\
+\x20\x20\x20\x20fn with_collate(&self) -> __FandheDataHooksHoldMarker;\n\
+\x20\x20\x20\x20fn with_try_transform(&self) -> __FandheDataHooksHoldMarker;\n\
+\x20\x20\x20\x20fn with_try_collate(&self) -> __FandheDataHooksHoldMarker;\n\
+}\n\
+\n\
+impl __FandheDataHooksHoldProbe\n\
+\x20\x20\x20\x20for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>\n\
+{\n\
+\x20\x20\x20\x20fn with_sampler(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
+\x20\x20\x20\x20fn with_transform(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
+\x20\x20\x20\x20fn with_collate(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
+\x20\x20\x20\x20fn with_try_transform(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
+\x20\x20\x20\x20fn with_try_collate(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns(_: Sampler, _: SequentialSampler, _: RandomSampler,\n\
+\x20\x20\x20\x20_: WeightedRandomSampler, _: SamplerDataLoader, _: SamplerBatches,\n\
+\x20\x20\x20\x20_: HookedDataLoader, _: HookedBatches, _: TransformFn, _: CollateFn) {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20default_collate();\n\
+}\n\
+\n\
+fn __probe_data_loader(x: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>) {\n\
+\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_sampler();\n\
+\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_transform();\n\
+\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_collate();\n\
+\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_try_transform();\n\
+\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_try_collate();\n\
+}";
+
+/// 型名 10 個（イシュー #2182）。[`scan_data_hooks_reexports_and_
+/// declarations`]・[`workspace_declares_data_hooks_names_only_in_
+/// tensor_core_data`] が共用する。
+const DATA_HOOKS_TYPE_NAMES: [&str; 10] = [
+    "Sampler",
+    "SequentialSampler",
+    "RandomSampler",
+    "WeightedRandomSampler",
+    "SamplerDataLoader",
+    "SamplerBatches",
+    "HookedDataLoader",
+    "HookedBatches",
+    "TransformFn",
+    "CollateFn",
+];
+
+/// fn 名 5 個（イシュー #2182。`with_sampler` はプローブのみが使う
+/// 予防的な識別子で、現行実装には存在しない——将来 facade が
+/// `DataLoader::with_sampler` のような名前で迂回するのを事前に塞ぐ）。
+/// [`scan_data_hooks_reexports_and_declarations`] が共用する。
+const DATA_HOOKS_FN_NAMES: [&str; 5] = [
+    "default_collate",
+    "with_transform",
+    "with_try_transform",
+    "with_collate",
+    "with_try_collate",
+];
+
+/// [`facade_does_not_reexport_or_declare_data_hooks`]・その自己テストが
+/// 共用する検出本体（`scan_rng_distributions_reexports_and_declarations`
+/// と同型）。facade src 全体（`crates/facade/src/**`）の `pub use` から
+/// [`collect_pub_use_leaves`] で別名にする前の葉を集め
+/// [`DATA_HOOKS_TYPE_NAMES`] を検出し（単一行・複数行・ネストした
+/// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
+/// 独自宣言、[`DATA_HOOKS_FN_NAMES`]（5 個）の `fn` 宣言（可視性・宣言
+/// 文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出契約）を
+/// 違反として返す。
+fn scan_data_hooks_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if DATA_HOOKS_TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && DATA_HOOKS_TYPE_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        i += 1;
+    }
+
+    for fn_name in DATA_HOOKS_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、[`DATA_HOOKS_TYPE_
+/// NAMES`]（10 個）を識別子単位で含む `pub use`（複数行・ネストした
+/// group・別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type`
+/// 宣言も、[`DATA_HOOKS_FN_NAMES`]（5 個）の `fn` 宣言も存在しないこと
+/// を固定する（`DataHooksHoldDoctestGuard` の正のプローブと多層防御を
+/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
+/// rng_distributions` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_data_hooks() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_data_hooks_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が DataLoader の Sampler・collate・transform\
+         フック（#2182 の Sampler 系 6 型／HookedDataLoader 系 4 型・\
+         with_transform 等の fn。内部クレート限定の新規公開面。facade\
+         公開は承認待ちのため対象外という設計判断に違反）を\
+         再エクスポート、独自宣言、または同名の fn を宣言している: \
+         {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、
+/// [`DATA_HOOKS_TYPE_NAMES`]（10 個。トレイト／struct／type 宣言）と
+/// [`DATA_HOOKS_FN_NAMES`]（5 個。`fn` 宣言）の定義元集合を固定する
+/// （`workspace_declares_rng_distribution_names_only_in_allowed_
+/// locations` と同型のインベントリ）。
+///
+/// **期待集合**（着手前確認のグレップで型名・fn 名いずれも既存の衝突は
+/// 0 件だった。実装後の実測ですべて `crates/tensor-core/src/data.rs`
+/// 1 箇所ずつに定義された）。
+#[test]
+fn workspace_declares_data_hooks_names_only_in_tensor_core_data() {
+    let crates_dir = workspace_crates_dir();
+    let mut found_types: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut found_fns: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let mut i = 0usize;
+            while i < tokens.len() {
+                if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+                    && let Some(name) = tokens.get(i + 1)
+                    && DATA_HOOKS_TYPE_NAMES.contains(&name.as_str())
+                {
+                    *found_types.entry(format!("{rel}::{name}")).or_insert(0) += 1;
+                }
+                i += 1;
+            }
+
+            for fn_name in DATA_HOOKS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found_fns.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected_types: std::collections::BTreeMap<String, usize> = [
+        ("tensor-core/src/data.rs::Sampler".to_string(), 1usize),
+        (
+            "tensor-core/src/data.rs::SequentialSampler".to_string(),
+            1usize,
+        ),
+        ("tensor-core/src/data.rs::RandomSampler".to_string(), 1usize),
+        (
+            "tensor-core/src/data.rs::WeightedRandomSampler".to_string(),
+            1usize,
+        ),
+        (
+            "tensor-core/src/data.rs::SamplerDataLoader".to_string(),
+            1usize,
+        ),
+        (
+            "tensor-core/src/data.rs::SamplerBatches".to_string(),
+            1usize,
+        ),
+        (
+            "tensor-core/src/data.rs::HookedDataLoader".to_string(),
+            1usize,
+        ),
+        ("tensor-core/src/data.rs::HookedBatches".to_string(), 1usize),
+        ("tensor-core/src/data.rs::TransformFn".to_string(), 1usize),
+        ("tensor-core/src/data.rs::CollateFn".to_string(), 1usize),
+    ]
+    .into_iter()
+    .collect();
+
+    let expected_fns: std::collections::BTreeMap<String, usize> = [
+        (
+            "tensor-core/src/data.rs::default_collate".to_string(),
+            1usize,
+        ),
+        (
+            "tensor-core/src/data.rs::with_transform".to_string(),
+            1usize,
+        ),
+        (
+            "tensor-core/src/data.rs::with_try_transform".to_string(),
+            1usize,
+        ),
+        ("tensor-core/src/data.rs::with_collate".to_string(), 1usize),
+        (
+            "tensor-core/src/data.rs::with_try_collate".to_string(),
+            1usize,
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        found_types, expected_types,
+        "workspace 全体（crates/*/src/）の Sampler 系型宣言集合が期待\
+         （tensor-core/src/data.rs に各 1 件）と一致しない（過不足いずれも\
+         fail-closed に検出する）: {found_types:?}"
+    );
+    assert_eq!(
+        found_fns, expected_fns,
+        "workspace 全体（crates/*/src/）の with_transform 等 fn 宣言集合が\
+         期待（tensor-core/src/data.rs に各 1 件。with_sampler は現行\
+         実装に存在しないため期待集合に含めない）と一致しない\
+         （過不足いずれも fail-closed に検出する。新たな定義元が見つかった\
+         場合、それが承認済みの実装なのか迂回経路の混入なのかを確認する\
+         こと）: {found_fns:?}"
+    );
+}
+
 /// Keras 風 `compile()`／`fit()`／`evaluate()`（イシュー #1761）の
 /// 新規公開型（`fandhe_ai::compat::{Loss, Optimizer, FitConfig,
 /// History}`）が `fandhe_ai` のみの import で構築でき、`FitTarget`
