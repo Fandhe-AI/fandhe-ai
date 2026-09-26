@@ -71,6 +71,7 @@ mod adagrad;
 mod adam;
 mod adamw;
 mod lamb;
+pub(crate) mod param_group;
 mod rmsprop;
 
 pub mod amp;
@@ -81,6 +82,15 @@ pub mod reduce_lr_on_plateau;
 pub use adagrad::{Adagrad, AdagradConfig};
 pub use adam::{Adam, AdamConfig};
 pub use adamw::{AdamW, AdamWConfig};
+// イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）。
+// `ParamGroup`／`ParamGroupStep` は内部クレート限定の公開（facade 非
+// 公開。`param_group` モジュール冒頭 doc・
+// `docs/autodiff-param-groups-decision.md` 参照）。`SlotHparams` は
+// 各 optimizer ファイルの `step_with_slot_hparams` 実装が使う内部専用
+// ヘルパーのため `pub(crate)` に留める（facade はもとより、クレート外
+// からも到達不能）。`resolve_slot_hparams` は `param_group.rs` 内の
+// `ParamGroupStep` 実装からしか呼ばれないため mod.rs では再エクスポート
+// しない。
 pub use amp::{
     GradScaler, GradScalerConfig, UnscaleResult, has_non_finite, scale_grads, scale_loss,
     unscale_grads,
@@ -91,6 +101,8 @@ pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, OneCycleAnneal,
     OneCycleLr, OneCycleLrConfig, StepLr,
 };
+pub(crate) use param_group::SlotHparams;
+pub use param_group::{ParamGroup, ParamGroupStep};
 pub use reduce_lr_on_plateau::{
     PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
 };
@@ -190,3 +202,20 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // optim.rs` 参照）。これにより「scheduler（Cosine／Exponential／
 // Plateau／OneCycle）」行のうち `ReduceLROnPlateau`／`OneCycleLR` も
 // 実装済みとなり、状態保持型のスケジューラは 2 種とも出揃った。
+
+// イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）
+// を追加した（`param_group` モジュール冒頭 doc 参照）。`ParamGroup`／
+// `ParamGroupStep` を `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`
+// （本モジュール）・`crate::optim::Sgd`（別モジュール）へ実装した。
+// 各 optimizer の既存 `step()` は `step_with_slot_hparams`（新設。
+// `pub(crate)`）への薄い委譲へ変更したが、演算式の形は不変であり
+// `groups = &[]` は既存 `step()` と bit 完全一致する（`crates/autodiff/
+// tests/nn_optim_param_groups.rs` が固定する）。親 #2131 が定める
+// 「facade 公開面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則に
+// より、`ParamGroup`／`ParamGroupStep` は本イシュー時点で所有者の承認
+// コメントがないため facade（`fandhe_ai::optim`）へは公開していない
+// （`crates/facade/src/lib.rs::ParamGroupsHoldDoctestGuard`・
+// `docs/autodiff-param-groups-decision.md` 参照）。新規 `Op`／
+// `BackendOps` メソッド／VJP／カーネル／`unsafe`／依存は追加していない
+// （ホストの `Tensor<f32>` 経路のみ）。`crate::optim::device_store::
+// DeviceParamStore` の group 対応は対象外のまま。

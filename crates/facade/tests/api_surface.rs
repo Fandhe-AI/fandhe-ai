@@ -11847,3 +11847,316 @@ fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
          を確認すること）: {found:?}"
     );
 }
+
+// =====================================================================
+// #2173（親 #2131）の facade 公開保留固定（`ParamGroupsHoldDoctestGuard`）。
+// `RnnConfigHoldDoctestGuard`（イシュー #2164）と同型の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリを持つ。承認事項の位置づけは
+// `docs/autodiff-param-groups-decision.md` §5 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `ParamGroupsHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`rnn_config_hold_doctest_globs_all_pub_modules` の
+/// `ParamGroupsHoldDoctestGuard` 版）。
+#[test]
+fn param_groups_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "ParamGroupsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "ParamGroupsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`param_groups_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`PARAM_GROUPS_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
+/// する改変を機械的に拒否する。イシュー #2173）。
+#[test]
+fn param_groups_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "ParamGroupsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, PARAM_GROUPS_HOLD_PROBE_BODY,
+        "ParamGroupsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 PARAM_GROUPS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_param_groups_hold_probe モジュール・\
+         __FandheParamGroupsCompileProbe／__FandheParamGroupsStepProbe\
+         トレイト・__probe 関数）の削除・弱体化・隠し行の混入がないか\
+         確認すること。"
+    );
+}
+
+/// [`param_groups_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `ParamGroupsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const PARAM_GROUPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_param_groups_hold_probe {\n\
+\x20\x20\x20\x20pub struct ParamGroup;\n\
+\x20\x20\x20\x20pub trait ParamGroupStep {}\n\
+}\n\
+use __fandhe_param_groups_hold_probe::*;\n\
+\n\
+struct __FandheParamGroupsMarker;\n\
+\n\
+trait __FandheParamGroupsCompileProbe {\n\
+\x20\x20\x20\x20fn compile_with_param_groups(&self) -> __FandheParamGroupsMarker;\n\
+}\n\
+\n\
+impl __FandheParamGroupsCompileProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn compile_with_param_groups(&self) -> __FandheParamGroupsMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandheParamGroupsStepProbe {\n\
+\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker;\n\
+}\n\
+\n\
+impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Sgd {\n\
+\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheParamGroupsStepProbe for fandhe_ai::optim::AdamW {\n\
+\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Adam {\n\
+\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheParamGroupsStepProbe for fandhe_ai::optim::RmsProp {\n\
+\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Adagrad {\n\
+\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Lamb {\n\
+\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: ParamGroup,\n\
+\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
+\x20\x20\x20\x20sgd: &fandhe_ai::optim::Sgd,\n\
+\x20\x20\x20\x20adamw: &fandhe_ai::optim::AdamW,\n\
+\x20\x20\x20\x20adam: &fandhe_ai::optim::Adam,\n\
+\x20\x20\x20\x20rmsprop: &fandhe_ai::optim::RmsProp,\n\
+\x20\x20\x20\x20adagrad: &fandhe_ai::optim::Adagrad,\n\
+\x20\x20\x20\x20lamb: &fandhe_ai::optim::Lamb,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::compile_with_param_groups(seq);\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = seq.compile_with_param_groups();\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Sgd::step_with_groups(sgd);\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = sgd.step_with_groups();\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::AdamW::step_with_groups(adamw);\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = adamw.step_with_groups();\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Adam::step_with_groups(adam);\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = adam.step_with_groups();\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::RmsProp::step_with_groups(rmsprop);\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = rmsprop.step_with_groups();\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Adagrad::step_with_groups(adagrad);\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = adagrad.step_with_groups();\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Lamb::step_with_groups(lamb);\n\
+\x20\x20\x20\x20let _: __FandheParamGroupsMarker = lamb.step_with_groups();\n\
+}";
+
+/// `ParamGroup`・`ParamGroupStep`・`step_with_groups`・
+/// `compile_with_param_groups`（イシュー #2173。4 個の識別子・fn 名）。
+/// [`facade_does_not_reexport_or_declare_param_groups`]・
+/// [`workspace_declares_param_group_fn_names_only_in_allowed_locations`]
+/// が共用する。
+const PARAM_GROUPS_FN_NAMES: [&str; 2] = ["step_with_groups", "compile_with_param_groups"];
+
+/// facade src 全体（`crates/facade/src/**`）に、`ParamGroup`／
+/// `ParamGroupStep`／`param_group` を識別子単位で含む `pub use`
+/// （別名・ネストした group 経由含む）も、[`PARAM_GROUPS_FN_NAMES`]
+/// （2 個）の `fn` 宣言（可視性・宣言文脈を問わない。
+/// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
+/// 固定する（`ParamGroupsHoldDoctestGuard` の正のプローブと多層防御を
+/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
+/// loss_ops` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_param_groups() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") {
+                for ident in ["ParamGroup", "ParamGroupStep", "param_group"] {
+                    if line_contains_identifier(trimmed, ident) {
+                        offending.push(format!(
+                            "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in PARAM_GROUPS_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が param groups（イシュー #2173 の内部クレート限定\
+         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
+         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、`step_with_groups`・
+/// `step_with_slot_hparams`・`resolve_slot_hparams`・
+/// `compile_with_param_groups` の `fn` 宣言の定義元集合を固定する
+/// （`workspace_declares_loss_ops_fn_names_only_in_allowed_locations`
+/// と同型のインベントリ）。
+///
+/// **期待集合**（着手前確認の再 grep で判明。実装計画「インベントリを
+/// 実測する」手順）: `step_with_groups`（trait 宣言 1 件 + impl 6 件、
+/// いずれも `crates/autodiff/src/nn/optim/param_group.rs`）・
+/// `resolve_slot_hparams`（同ファイルに 1 件）・`step_with_slot_hparams`
+/// （`adamw.rs`・`adam.rs`・`rmsprop.rs`・`adagrad.rs`・`lamb.rs`・
+/// `optim/sgd.rs` に各 1 件）・`compile_with_param_groups`（0 件。
+/// 承認待ちのため未実装）。
+#[test]
+fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    const NAMES: [&str; 4] = [
+        "step_with_groups",
+        "resolve_slot_hparams",
+        "step_with_slot_hparams",
+        "compile_with_param_groups",
+    ];
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = [
+        (
+            "autodiff/src/nn/optim/param_group.rs::step_with_groups",
+            7usize,
+        ),
+        (
+            "autodiff/src/nn/optim/param_group.rs::resolve_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/adamw.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/adam.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/rmsprop.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/adagrad.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/lamb.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        ("autodiff/src/optim/sgd.rs::step_with_slot_hparams", 1usize),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の param groups 系 `fn` 宣言集合が\
+         期待と一致しない（過不足いずれも fail-closed に検出する。\
+         `compile_with_param_groups` は 0 件のはず——承認前に実装が\
+         紛れ込んでいないかを含めて確認すること）: {found:?}"
+    );
+}
