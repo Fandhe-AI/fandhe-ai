@@ -116,6 +116,11 @@ pub enum OpError {
     /// （TASK-7.3d・`layer_norm.rs`。例: `shape=[2,0], axis=1`）。`axis` 自体は
     /// `[0, rank)` の範囲内であり [`OpError::AxisOutOfRange`] とは原因が異なるため、
     /// 分散計算の除数 0 割り（`NaN` を静かに生成する）を専用 variant で区別して拒否する。
+    ///
+    /// `GlobalAveragePool`（イシュー #2200・`global_average_pool.rs`）も
+    /// 空間軸の要素数積（`spatial`）が 0 の場合に本 variant を再利用する
+    /// （`axis` は空間軸の先頭である 2 固定。縮約対象集合が空という意味は
+    /// `LayerNormalization` と共通のため専用 variant を新設しない）。
     EmptyNormalizedSet { op: &'static str, axis: usize },
 
     /// `i64` 版 `Add`／`Mul`（`arith.rs`。イシュー #87 残作業）の `checked_add`／
@@ -148,6 +153,16 @@ pub enum OpError {
     /// 本クレートの依存関係外〈`tensor-core` のみ・`OpError` は独立した
     /// エラー型〉のため `From` 実装ではなく明示変換で運ぶ）。
     ConvParamsInvalid { reason: String },
+
+    /// `BatchNormalization`（イシュー #2200・`batch_norm.rs`）の属性が
+    /// ONNX 仕様上・本クレートの対応範囲上不正だった（`training_mode` が
+    /// 0 以外・opset 9 未満の `spatial` が 1 以外・`epsilon` が負値）。
+    /// `InvalidConvAttribute` と同型（属性は外部モデル由来の入力のため
+    /// 計算前に検証する。OWASP A03。`.claude/rules/security.md`）。
+    /// `epsilon` の非有限値は既存の [`OpError::InvalidEpsilon`]（`Conv`
+    /// 系と共有）で扱うため、本 variant は「finite だが負」のケースと
+    /// `training_mode`／`spatial` 専用とする。
+    InvalidBatchNormAttribute { reason: String },
 }
 
 impl fmt::Display for OpError {
@@ -243,6 +258,9 @@ impl fmt::Display for OpError {
             }
             OpError::ConvParamsInvalid { reason } => {
                 write!(f, "Conv: invalid Conv2dParams ({reason})")
+            }
+            OpError::InvalidBatchNormAttribute { reason } => {
+                write!(f, "BatchNormalization: invalid attribute ({reason})")
             }
         }
     }

@@ -12,8 +12,10 @@
 //! `Unsqueeze`／`Concat`／`Slice`）に加え、TASK-7.3 系 14 オペ（`Add`／`Mul`／`Div`／
 //! `Mod`／`Sqrt`／`Constant`／`Cast`／`Reshape`／`Squeeze`／`Transpose`／`MatMul`／
 //! `Softmax`／`Erf`／`LayerNormalization`）をイシュー #274 で結線した。イシュー
-//! #2076（親 #2034）で `Conv`（2 次元畳み込み）を追加し、全 23 オペがグラフ実行
-//! から到達可能（未対応 `op_type` は引き続き [`InterpError::UnsupportedOp`]
+//! #2076（親 #2034）で `Conv`（2 次元畳み込み）を追加し、イシュー #2200
+//! （親 #2185）で `GlobalAveragePool`／`BatchNormalization`／`Flatten`
+//! （CNN 系モデル対応）を追加し、全 26 オペがグラフ実行から到達可能
+//! （未対応 `op_type` は引き続き [`InterpError::UnsupportedOp`]
 //! で fail-closed に拒否し、無言 skip はしない）。
 //!
 //! ## 実行時値モデルと dtype の扱いについて
@@ -54,7 +56,9 @@ use half::f16;
 use super::graph::{Graph, GraphError, RawTensor};
 use super::interp_device;
 use super::proto::{AttributeProto, NodeProto, attribute_type};
-use crate::ops::{self, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, SliceParams};
+use crate::ops::{
+    self, BatchNormAttrs, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, SliceParams,
+};
 
 /// 実行時に env（変数束縛）へ格納される値。ONNX の `TensorProto.data_type` の
 /// うち本クレートが対応する 4 種類（`FLOAT`／`INT64`／`BOOL`／`FLOAT16`）に対応する
@@ -73,7 +77,7 @@ pub enum Value {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum InterpError {
-    /// ディスパッチ表（本モジュールが実装する全 22 オペ）に無い `op_type`。
+    /// ディスパッチ表（本モジュールが実装する全 26 オペ）に無い `op_type`。
     UnsupportedOp(String),
     /// ノードの入力名が env（feed／initializer／先行ノード出力の集合）に存在しない。
     /// `build_graph` はトポロジカル順を検証済みのため通常は到達しないが、
@@ -449,6 +453,20 @@ fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, Int
         Some(a) => {
             check_attr_type(node, a, attribute_type::INT, "INT")?;
             Ok(a.i)
+        }
+    }
+}
+
+/// `BatchNormalization` の `epsilon`／`momentum`（FLOAT 型属性。イシュー
+/// #2200）を読む。`attr_i64_typed` と同型の型検証（`attr_f32`／`attr_i64`
+/// の無検証版は使わない）。属性が省略されていれば `default` を返し、
+/// 存在する場合は `r#type == FLOAT` であることを検証してから `f` を返す。
+fn attr_f32_typed(node: &NodeProto, name: &str, default: f32) -> Result<f32, InterpError> {
+    match find_attr_unique(node, name)? {
+        None => Ok(default),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::FLOAT, "FLOAT")?;
+            Ok(a.f)
         }
     }
 }
@@ -1093,6 +1111,118 @@ fn compute_conv(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value,
     Ok(Value::F32(ops::conv(x, w, b, &attrs)?))
 }
 
+/// `BatchNormalization(X, scale, B, input_mean, input_var)`（イシュー
+/// #2200・親 #2185。`ops::batch_normalization` の結線）。推論モードのみ
+/// 対応する（`ops/batch_norm.rs` モジュール doc 参照。学習モードは
+/// スコープ外）。
+///
+/// 入力数はちょうど 5（`X`／`scale`／`B`／`input_mean`／`input_var`。
+/// ONNX `BatchNormalization` の必須入力はすべて必須で省略不可）。`Conv`
+/// で codex-review P0 を受けた経緯（余剰入力の無言無視）を踏まえ、5 個
+/// 以外は fail-closed に拒否する。
+///
+/// 属性は型検証付きヘルパーで読む: `epsilon`（FLOAT、既定 `1e-5`）・
+/// `momentum`（FLOAT。値は推論に使わないため型検証のみ行い捨てる）・
+/// `training_mode`（INT、既定 `0`。`0` 以外は学習モードでありスコープ外
+/// のため [`OpError::InvalidBatchNormAttribute`] で拒否）・`spatial`
+/// （INT、opset 9 未満の廃止属性。存在して `1` 以外なら同様に拒否）。
+/// 未知の属性は他オペと同じく無視する。
+///
+/// opset 9〜14 が許す任意出力（`mean`／`var`／`saved_mean`／`saved_var`。
+/// 学習モード専用）を宣言したノードは、[`require_single_output`]
+/// （呼び出し元 `run_impl`）が `OutputArityMismatch` で一律拒否する。
+fn compute_batch_normalization(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+) -> Result<Value, InterpError> {
+    if node.input.len() != 5 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 5,
+            max: 5,
+            actual: node.input.len(),
+        });
+    }
+    let x = get_f32(env, node, input_name(node, 0)?)?;
+    let scale = get_f32(env, node, input_name(node, 1)?)?;
+    let bias = get_f32(env, node, input_name(node, 2)?)?;
+    let mean = get_f32(env, node, input_name(node, 3)?)?;
+    let var = get_f32(env, node, input_name(node, 4)?)?;
+
+    // `momentum` は推論では使わないが、型を偽装した不正な属性（例:
+    // STRING 型で送る）を無言で無視しないよう型検証だけは行う
+    // （`Conv` の `auto_pad` と同じ fail-closed 方針）。
+    let _momentum = attr_f32_typed(node, "momentum", 0.9)?;
+
+    let training_mode = attr_i64_typed(node, "training_mode", 0)?;
+    if training_mode != 0 {
+        return Err(OpError::InvalidBatchNormAttribute {
+            reason: format!("training_mode は 0（推論モード）のみ対応する（実際 {training_mode}）"),
+        }
+        .into());
+    }
+    // opset 9 未満の廃止属性。存在すれば `1`（有効）のみ受理する
+    // （ONNX 仕様上 `spatial=0` は非対称チャネル別統計を意味し本クレート
+    // は対応しない）。
+    let spatial = attr_i64_typed(node, "spatial", 1)?;
+    if spatial != 1 {
+        return Err(OpError::InvalidBatchNormAttribute {
+            reason: format!("spatial は 1 のみ対応する（実際 {spatial}）"),
+        }
+        .into());
+    }
+
+    let attrs = BatchNormAttrs {
+        epsilon: attr_f32_typed(node, "epsilon", 1e-5)?,
+    };
+    Ok(Value::F32(ops::batch_normalization(
+        x, scale, bias, mean, var, &attrs,
+    )?))
+}
+
+/// `GlobalAveragePool(X)`（イシュー #2200・親 #2185。`ops::global_average_
+/// pool` の結線）。入力はちょうど 1 個・`F32` のみ。属性はない。
+fn compute_global_average_pool(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+) -> Result<Value, InterpError> {
+    if node.input.len() != 1 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 1,
+            max: 1,
+            actual: node.input.len(),
+        });
+    }
+    let x = get_f32(env, node, input_name(node, 0)?)?;
+    Ok(Value::F32(ops::global_average_pool(x)?))
+}
+
+/// `Flatten(input, axis=1)`（イシュー #2200・親 #2185。`ops::flatten` の
+/// 結線）。入力はちょうど 1 個。`axis` は ONNX 仕様の既定値 `1` へ
+/// fallback する（`attr_i64_typed` が省略を透過的に扱う）。`F32`／`I64`／
+/// `Bool`／`F16` いずれの dtype にも対応する（`ops::flatten` が `T:
+/// Element` でジェネリック化済み。`Reshape`／`Squeeze`／`Transpose` と
+/// 同じディスパッチ方針。`compute_reshape` 参照）。
+fn compute_flatten(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+    if node.input.len() != 1 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 1,
+            max: 1,
+            actual: node.input.len(),
+        });
+    }
+    let axis = attr_i64_typed(node, "axis", 1)?;
+    let name = input_name(node, 0)?;
+    match get_value(env, node, name)? {
+        Value::F32(t) => Ok(Value::F32(ops::flatten(t, axis)?)),
+        Value::I64(t) => Ok(Value::I64(ops::flatten(t, axis)?)),
+        Value::Bool(t) => Ok(Value::Bool(ops::flatten(t, axis)?)),
+        Value::F16(t) => Ok(Value::F16(ops::flatten(t, axis)?)),
+    }
+}
+
 /// `node.output` が単一出力であることを検査し、その名前を返す（本モジュールが実装する
 /// 全オペは単一出力。`LayerNormalization` の任意出力 `Mean`／`InvStdDev` 宣言もここで
 /// 一律拒否する。実装計画 5.3 節・#274 実装計画スコープ外節）。
@@ -1166,9 +1296,11 @@ fn run_impl(
         // device::device_*` が `Ok(Some(_))` を返した場合）を採用したかを
         // 正確に表す（device 結線対象外の op は常に `false` で揃える。
         // 推測・近似ではなく `compute_*` の戻り値そのものから得る）。
-        // `Conv`（イシュー #2076）は device 実行の対象外（#2077／#2222 の
-        // 結線範囲は `interp_device` モジュール冒頭コメント参照）のため
-        // 常にホスト実装（`ops::conv`）で実行し `false` を報告する。
+        // `Conv`（イシュー #2076）・`BatchNormalization`／
+        // `GlobalAveragePool`／`Flatten`（イシュー #2200）は device 実行の
+        // 対象外（#2077／#2222 の結線範囲は `interp_device` モジュール
+        // 冒頭コメント参照）のため常にホスト実装（`ops::*`）で実行し
+        // `false` を報告する。
         let (out_value, used_device) = match node.op_type.as_str() {
             "Gemm" => compute_gemm(&env, node, dev_ops)?,
             "Relu" => compute_relu(&env, node, dev_ops)?,
@@ -1193,6 +1325,9 @@ fn run_impl(
             "Erf" => (compute_erf(&env, node)?, false),
             "LayerNormalization" => compute_layer_normalization(&env, node, dev_ops)?,
             "Conv" => (compute_conv(&env, node)?, false),
+            "BatchNormalization" => (compute_batch_normalization(&env, node)?, false),
+            "GlobalAveragePool" => (compute_global_average_pool(&env, node)?, false),
+            "Flatten" => (compute_flatten(&env, node)?, false),
             other => return Err(InterpError::UnsupportedOp(other.to_string())),
         };
         if let Some(r) = report.as_deref_mut() {
@@ -1250,7 +1385,9 @@ pub fn run(
 /// [`InterpError::Backend`] として伝播する（黙示フォールバックしない。
 /// OWASP A08）。非 f32 経路・形状操作系（`Shape`／`Gather`／`Unsqueeze`／
 /// `Concat`／`Slice`／`Cast`／`Reshape`／`Squeeze`／`Transpose`／
-/// `Constant`）・`Mod`／`Erf` は常にホスト実行のまま（`run` と同一実装）。
+/// `Constant`）・`Mod`／`Erf`・`Conv`（イシュー #2076）・
+/// `BatchNormalization`／`GlobalAveragePool`／`Flatten`（イシュー #2200）
+/// は常にホスト実行のまま（`run` と同一実装）。
 pub fn run_with_ops(
     graph: &Graph,
     feeds: HashMap<String, Value>,
@@ -2166,6 +2303,305 @@ mod tests {
         let result = compute_conv(&conv_feeds(), &n).unwrap();
         match result {
             Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    // ---- イシュー #2200: BatchNormalization／GlobalAveragePool／Flatten ----
+
+    /// `r#type` を明示的に `FLOAT` へ設定した属性を組み立てる
+    /// （`BatchNormalization` の `epsilon`／`momentum` 用。イシュー #2200）。
+    fn build_attr_f32_typed(name: &str, f: f32) -> super::super::proto::AttributeProto {
+        super::super::proto::AttributeProto {
+            name: name.to_string(),
+            f,
+            r#type: super::super::proto::attribute_type::FLOAT,
+            ..Default::default()
+        }
+    }
+
+    fn bn_feeds() -> StdHashMap<String, Value> {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(
+                Tensor::<f32>::new((0..8).map(|v| v as f32).collect(), &[1, 2, 2, 2]).unwrap(),
+            ),
+        );
+        feeds.insert(
+            "scale".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.0, 2.0], &[2]).unwrap()),
+        );
+        feeds.insert(
+            "bias".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![0.0, 1.0], &[2]).unwrap()),
+        );
+        feeds.insert(
+            "mean".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.5, 5.5], &[2]).unwrap()),
+        );
+        feeds.insert(
+            "var".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.25, 1.25], &[2]).unwrap()),
+        );
+        feeds
+    }
+
+    fn bn_node(attrs: Vec<super::super::proto::AttributeProto>) -> NodeProto {
+        node_with_attrs(
+            "BatchNormalization",
+            vec!["x", "scale", "bias", "mean", "var"],
+            vec!["y"],
+            attrs,
+        )
+    }
+
+    #[test]
+    fn compute_batch_normalization_accepts_typed_attrs() {
+        let n = bn_node(vec![
+            build_attr_f32_typed("epsilon", 1e-5),
+            build_attr_f32_typed("momentum", 0.9),
+            build_attr_i64_typed("training_mode", 0),
+        ]);
+        let result = compute_batch_normalization(&bn_feeds(), &n).unwrap();
+        assert!(matches!(result, Value::F32(_)));
+    }
+
+    #[test]
+    fn compute_batch_normalization_falls_back_to_defaults_when_attrs_omitted() {
+        let n = bn_node(vec![]);
+        assert!(compute_batch_normalization(&bn_feeds(), &n).is_ok());
+    }
+
+    #[test]
+    fn compute_batch_normalization_rejects_wrong_input_arity() {
+        let n = node_with_attrs(
+            "BatchNormalization",
+            vec!["x", "scale", "bias", "mean"],
+            vec!["y"],
+            vec![],
+        );
+        let err = compute_batch_normalization(&bn_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 5,
+                max: 5,
+                actual: 4,
+                ..
+            }
+        ));
+
+        let n6 = node_with_attrs(
+            "BatchNormalization",
+            vec!["x", "scale", "bias", "mean", "var", "extra"],
+            vec!["y"],
+            vec![],
+        );
+        let err = compute_batch_normalization(&bn_feeds(), &n6).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 5,
+                max: 5,
+                actual: 6,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_batch_normalization_rejects_training_mode_nonzero() {
+        let n = bn_node(vec![build_attr_i64_typed("training_mode", 1)]);
+        let err = compute_batch_normalization(&bn_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::Op(OpError::InvalidBatchNormAttribute { .. })
+        ));
+    }
+
+    #[test]
+    fn compute_batch_normalization_rejects_spatial_zero() {
+        let n = bn_node(vec![build_attr_i64_typed("spatial", 0)]);
+        let err = compute_batch_normalization(&bn_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::Op(OpError::InvalidBatchNormAttribute { .. })
+        ));
+    }
+
+    #[test]
+    fn compute_batch_normalization_rejects_epsilon_wrong_type() {
+        // `epsilon`（本来 FLOAT）を INT 型として送る型偽装。
+        let n = bn_node(vec![build_attr_i64_typed("epsilon", 0)]);
+        let err = compute_batch_normalization(&bn_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "epsilon"
+        ));
+    }
+
+    #[test]
+    fn compute_batch_normalization_rejects_axis_style_output_arity() {
+        // opset 9〜14 の任意出力（mean／var 等）を宣言したノードは
+        // `require_single_output`（`run_impl` 経由）が拒否する。
+        let n = node_with_attrs(
+            "BatchNormalization",
+            vec!["x", "scale", "bias", "mean", "var"],
+            vec!["y", "running_mean", "running_var"],
+            vec![],
+        );
+        assert!(require_single_output(&n).is_err());
+    }
+
+    #[test]
+    fn run_end_to_end_batch_normalization_matches_ops_directly() {
+        let n = bn_node(vec![]);
+        let g = empty_graph(
+            vec![n],
+            vec!["x", "scale", "bias", "mean", "var"],
+            vec!["y"],
+        );
+        let result = run(&g, bn_feeds()).unwrap();
+        match result.get("y").unwrap() {
+            Value::F32(t) => assert_eq!(t.shape(), &[1, 2, 2, 2]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    fn gap_feeds() -> StdHashMap<String, Value> {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(
+                Tensor::<f32>::new((1..=8).map(|v| v as f32).collect(), &[1, 2, 2, 2]).unwrap(),
+            ),
+        );
+        feeds
+    }
+
+    #[test]
+    fn compute_global_average_pool_averages_spatial_axes() {
+        let n = node("GlobalAveragePool", vec!["x"], vec!["y"]);
+        let result = compute_global_average_pool(&gap_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => {
+                assert_eq!(t.shape(), &[1, 2, 1, 1]);
+                assert_eq!(t.get(&[0, 0, 0, 0]).unwrap(), 2.5);
+                assert_eq!(t.get(&[0, 1, 0, 0]).unwrap(), 6.5);
+            }
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_global_average_pool_rejects_wrong_input_arity() {
+        let n = node("GlobalAveragePool", vec!["x", "extra"], vec!["y"]);
+        let err = compute_global_average_pool(&gap_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 1,
+                max: 1,
+                actual: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_flatten_axis_default_and_explicit() {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(
+                Tensor::<f32>::new((0..24).map(|v| v as f32).collect(), &[2, 3, 4]).unwrap(),
+            ),
+        );
+
+        let n_default = node("Flatten", vec!["x"], vec!["y"]);
+        let result = compute_flatten(&feeds, &n_default).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.shape(), &[2, 12]),
+            _ => panic!("Value::F32 を期待"),
+        }
+
+        let n_axis2 = node_with_attrs(
+            "Flatten",
+            vec!["x"],
+            vec!["y"],
+            vec![build_attr_i64_typed("axis", 2)],
+        );
+        let result2 = compute_flatten(&feeds, &n_axis2).unwrap();
+        match result2 {
+            Value::F32(t) => assert_eq!(t.shape(), &[6, 4]),
+            _ => panic!("Value::F32 を期待"),
+        }
+
+        // I64 dtype 経路も flatten できることを固定化する（`ops::flatten`
+        // が `T: Element` でジェネリック化済み）。
+        feeds.insert(
+            "xi".to_string(),
+            Value::I64(Tensor::<i64>::new((0..6).collect(), &[2, 3]).unwrap()),
+        );
+        let n_i64 = node("Flatten", vec!["xi"], vec!["y"]);
+        let result_i64 = compute_flatten(&feeds, &n_i64).unwrap();
+        assert!(matches!(result_i64, Value::I64(_)));
+    }
+
+    #[test]
+    fn compute_flatten_rejects_wrong_input_arity() {
+        let n = node("Flatten", vec!["x", "extra"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::zeros(&[2, 3]).unwrap()),
+        );
+        let err = compute_flatten(&feeds, &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 1,
+                max: 1,
+                actual: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_flatten_rejects_axis_out_of_range() {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::zeros(&[2, 3]).unwrap()),
+        );
+        let n = node_with_attrs(
+            "Flatten",
+            vec!["x"],
+            vec!["y"],
+            vec![build_attr_i64_typed("axis", 5)],
+        );
+        let err = compute_flatten(&feeds, &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::Op(OpError::AxisOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn run_end_to_end_global_average_pool_and_flatten_chain() {
+        // GlobalAveragePool -> Flatten の連鎖（PyTorch export 構造の一部）。
+        let n_gap = node("GlobalAveragePool", vec!["x"], vec!["pooled"]);
+        let n_flatten = node("Flatten", vec!["pooled"], vec!["y"]);
+        let g = empty_graph(vec![n_gap, n_flatten], vec!["x"], vec!["y"]);
+        let result = run(&g, gap_feeds()).unwrap();
+        match result.get("y").unwrap() {
+            Value::F32(t) => {
+                assert_eq!(t.shape(), &[1, 2]);
+                assert_eq!(t.get(&[0, 0]).unwrap(), 2.5);
+                assert_eq!(t.get(&[0, 1]).unwrap(), 6.5);
+            }
             _ => panic!("Value::F32 を期待"),
         }
     }
