@@ -104,14 +104,41 @@ pub enum LbfgsLineSearch {
 /// `torch.optim.LBFGS` と同一の既定値。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LbfgsConfig {
+    /// 学習率（`torch.optim.LBFGS` の `lr`。既定 `1.0`）。固定ステップ
+    /// 時のステップ幅、strong Wolfe 時の初期試行ステップ幅に掛かる。
+    /// 初回反復は `min(1, 1/‖g‖₁) · lr`。有限かつ `>= 0.0` でなければ
+    /// `Lbfgs::new`／`Lbfgs::set_lr` が `InvalidArgument` を返す。
     pub lr: f32,
+    /// 1 回の `step_closure`／`try_step_closure` 呼び出しあたりの最大
+    /// 反復数（既定 `20`）。`>= 1` でなければ `Lbfgs::new` が
+    /// `InvalidArgument` を返す。`max_eval` が `None` の場合の解決元でも
+    /// ある。
     pub max_iter: usize,
-    /// `None` の場合 `max_iter * 5 / 4`（PyTorch と同じ整数除算）へ
-    /// 解決する。
+    /// 1 回の `step_closure`／`try_step_closure` 呼び出しあたりの
+    /// closure 評価回数の上限（既定 `None`）。`None` の場合 `max_iter *
+    /// 5 / 4`（PyTorch と同じ整数除算）へ解決する。解決値が `>= 1` で
+    /// ない場合、または `max_iter * 5` が overflow する場合は
+    /// `Lbfgs::new` が `InvalidArgument` を返す。
     pub max_eval: Option<usize>,
+    /// 勾配による収束判定の閾値（既定 `1e-7`）。フラット勾配の最大
+    /// 絶対値 `max|g|` がこの値以下になった時点で反復を打ち切る
+    /// （初回評価時点で満たせば closure 1 回で終了する）。有限かつ
+    /// `>= 0.0` でなければ `Lbfgs::new` が `InvalidArgument` を返す。
     pub tolerance_grad: f32,
+    /// 変化量による収束判定の閾値（既定 `1e-9`）。方向微分
+    /// `g·d > -tolerance_change`、パラメータ更新量 `max|t·d| <=
+    /// tolerance_change`、損失の変化 `|loss - prev_loss| <
+    /// tolerance_change`（`f64` で比較）のいずれかで反復を打ち切る。
+    /// strong Wolfe 内部の区間幅判定は PyTorch と同じく既定値 `1e-9`
+    /// 固定で本値を参照しない（`strong_wolfe` の doc 参照）。有限かつ
+    /// `>= 0.0` でなければ `Lbfgs::new` が `InvalidArgument` を返す。
     pub tolerance_change: f32,
+    /// 曲率ペア `(s, y)` の履歴保持数（既定 `100`）。満杯時は最古の
+    /// ペアを捨てる。`>= 1` でなければ `Lbfgs::new` が
+    /// `InvalidArgument` を返す。
     pub history_size: usize,
+    /// line search の方式（既定 [`LbfgsLineSearch::None`]＝固定
+    /// ステップ）。
     pub line_search: LbfgsLineSearch,
     /// strong Wolfe 1 回あたりの試行上限の追加キャップ。実効値は
     /// `min(line_search_steps, max_eval - current_evals)`
@@ -260,6 +287,8 @@ impl Lbfgs {
         })
     }
 
+    /// 検証済みの設定を返す（`set_lr` による学習率の書き換えを反映
+    /// する）。
     pub fn config(&self) -> &LbfgsConfig {
         &self.config
     }
