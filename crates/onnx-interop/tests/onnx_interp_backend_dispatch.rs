@@ -756,3 +756,69 @@ fn run_with_ops_new_ext_ops_always_stay_on_host_regardless_of_dev_ops() {
         as_f32_slice(&result_off["y"])
     );
 }
+
+// ---- イシュー #2200: BatchNormalization／GlobalAveragePool／Flatten は
+// `run_with_ops` opt-in ON でも常にホスト実行のまま（`interp_device` の
+// 結線対象外。`Conv` と同じ扱い）であることを固定化する。----
+
+/// 複数ノードのグラフ（initializer なし。全入力を feed で渡す）。
+/// `single_node_graph` の複数ノード版。
+fn multi_node_graph(nodes: Vec<NodeProto>, inputs: &[&str], outputs: &[&str]) -> Graph {
+    Graph {
+        nodes,
+        initializers: HashMap::new(),
+        inputs: inputs.iter().map(|s| s.to_string()).collect(),
+        outputs: outputs.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[test]
+fn run_with_ops_batch_norm_gap_flatten_stay_on_host_and_match_run() {
+    let (n, c, h, w) = (1usize, 2usize, 2usize, 2usize);
+    let x_data: Vec<f32> = (0..(n * c * h * w)).map(|v| v as f32).collect();
+
+    let nodes = vec![
+        node(
+            "BatchNormalization",
+            "n_bn",
+            vec!["x", "scale", "bias", "mean", "var"],
+            vec!["bn_out"],
+        ),
+        node(
+            "GlobalAveragePool",
+            "n_gap",
+            vec!["bn_out"],
+            vec!["gap_out"],
+        ),
+        node("Flatten", "n_flatten", vec!["gap_out"], vec!["y"]),
+    ];
+    let graph = multi_node_graph(nodes, &["x", "scale", "bias", "mean", "var"], &["y"]);
+
+    let feeds_on = HashMap::from([
+        feed_f32("x", x_data.clone(), &[n, c, h, w]),
+        feed_f32("scale", vec![1.0, 1.0], &[c]),
+        feed_f32("bias", vec![0.0, 0.0], &[c]),
+        feed_f32("mean", vec![0.0, 0.0], &[c]),
+        feed_f32("var", vec![1.0, 1.0], &[c]),
+    ]);
+    let feeds_off = feeds_on.clone();
+
+    let ops = CpuBackendOps::new();
+    let (result_on, report) =
+        run_with_ops_report(&graph, feeds_on, &ops).expect("run_with_ops_report は成功するはず");
+    let result_off = run(&graph, feeds_off).expect("run は成功するはず");
+
+    assert!(report.device_nodes.is_empty());
+    assert_eq!(
+        report.host_nodes,
+        vec![
+            "n_bn".to_string(),
+            "n_gap".to_string(),
+            "n_flatten".to_string(),
+        ]
+    );
+    assert_eq!(
+        as_f32_slice(&result_on["y"]),
+        as_f32_slice(&result_off["y"])
+    );
+}

@@ -24,8 +24,11 @@
 //! `.claude/rules/coding-rust.md` の REQ-2 統一複合判定（バックエンド間
 //! 数値一致）とは別指標である（両者を混同しない）。
 //!
-//! 対応 op は 23 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭コメント
-//! 参照）。未対応 `op_type` は無言 skip せず [`OnnxError::UnsupportedOp`]
+//! import 対応 op は 26 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭
+//! コメント参照。イシュー #2200 で `GlobalAveragePool`／
+//! `BatchNormalization`／`Flatten` を追加）。export allowlist は 23 種の
+//! まま非対称（下記「ONNX export」節参照）。未対応 `op_type` は無言 skip せず
+//! [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
 //! どおり同名 initializer を上書きする。`GraphProto.sparse_initializer` が
@@ -62,12 +65,14 @@
 //!   `to_path` で export できるのは import 済みモデル（`OnnxModel`）の
 //!   みで、学習済み `Sequential`／`nn` から直接 `OnnxModel` を構築する
 //!   経路は [`OnnxModel::from_sequential`]（次節・#2037）を使う
-//! - export allowlist（既定 domain・23 op。イシュー #2186 で import 側
-//!   `interp` のディスパッチ表へ追加した 8 op は import 対応のみで本
-//!   allowlist は未拡張のため、import 対応 op の集合とは非対称）外の
-//!   ノードを含むモデルは `from_bytes` では構築できても **export 時に**
-//!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する（無言
-//!   skip しない）
+//! - export allowlist（23 op・既定 domain。import 対応 34 op のうち
+//!   `GlobalAveragePool`／`BatchNormalization`／`Flatten`〈イシュー #2200〉・
+//!   `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／`ReduceMean`／`Pad`／
+//!   `Resize`〈イシュー #2186。import 側 `interp` のディスパッチ表へ追加
+//!   したのみで本 allowlist は未拡張〉を含まない）外のノードを含む
+//!   モデルは `from_bytes` では構築できても **export 時に**
+//!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する
+//!   （無言 skip しない）
 //!
 //! ## `Sequential` からの export（イシュー #2037・親 #2034）
 //!

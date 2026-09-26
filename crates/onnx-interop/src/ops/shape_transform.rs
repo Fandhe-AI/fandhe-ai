@@ -217,6 +217,54 @@ fn validate_perm(perm: &[i64], rank: usize) -> Result<Vec<usize>, OpError> {
     Ok(resolved)
 }
 
+/// `Flatten(input, axis=1)`（イシュー #2200・親 #2185）: `axis` を境に
+/// `[prod(shape[..axis]), prod(shape[axis..])]` の 2 次元へ再解釈する。
+///
+/// ONNX `Flatten` 仕様の `axis` 範囲は `[-r, r]`（両端含む。`Reshape`／
+/// `Squeeze`／`Transpose` が使う `normalize_axis`〈範囲
+/// `[0, rank)`〉とは異なるため、本関数専用に正規化する）。`axis == 0` は
+/// `[1, numel]`、`axis == rank` は `[numel, 1]`、rank 0 の入力に
+/// `axis == 0` を指定した場合は `[1, 1]` になる。
+///
+/// 要素数積はいずれも `checked_mul` で検査する（外部フォーマット由来の
+/// shape を信頼しない。OWASP A03。`.claude/rules/security.md`）。データは
+/// 不変・shape 再解釈のみのため `reshape`（`tensor-core::Tensor::reshape`）
+/// に委譲する。
+pub fn flatten<T: Element>(x: &Tensor<T>, axis: i64) -> Result<Tensor<T>, OpError> {
+    let rank = x.rank();
+    let rank_i = rank as i64;
+    // `Flatten` の `axis` は `[-r, r]`（両端含む）を許容する ONNX 仕様の
+    // 特例（他オペ共有の `normalize_axis` は `[0, rank)` のみ）のため、
+    // 独自に正規化する。
+    let normalized = if axis < 0 { axis + rank_i } else { axis };
+    if normalized < 0 || normalized > rank_i {
+        return Err(OpError::AxisOutOfRange {
+            op: "Flatten",
+            axis,
+            rank,
+        });
+    }
+    let split = normalized as usize;
+    let shape = x.shape();
+    let outer: usize = shape[..split]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(OpError::InvalidReshapeSpec {
+            op: "Flatten",
+            reason: "outer 次元の要素数積が usize 範囲を超える",
+        })?;
+    let inner: usize = shape[split..]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(OpError::InvalidReshapeSpec {
+            op: "Flatten",
+            reason: "inner 次元の要素数積が usize 範囲を超える",
+        })?;
+    x.contiguous()
+        .reshape(&[outer, inner])
+        .map_err(OpError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +432,84 @@ mod tests {
                 rank: 2,
             }
         ));
+    }
+
+    #[test]
+    fn flatten_axis_1_merges_trailing_dims() {
+        let t = Tensor::<f32>::new((0..24).map(|v| v as f32).collect(), &[2, 3, 4]).unwrap();
+        let y = flatten(&t, 1).unwrap();
+        assert_eq!(y.shape(), &[2, 12]);
+        assert_eq!(y.as_slice().unwrap(), t.as_slice().unwrap());
+    }
+
+    #[test]
+    fn flatten_axis_0_yields_row_vector() {
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let y = flatten(&t, 0).unwrap();
+        assert_eq!(y.shape(), &[1, 6]);
+    }
+
+    #[test]
+    fn flatten_axis_equal_rank_yields_column_vector() {
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let y = flatten(&t, 2).unwrap();
+        assert_eq!(y.shape(), &[6, 1]);
+    }
+
+    #[test]
+    fn flatten_negative_axis_equivalent_to_positive() {
+        let t = Tensor::<f32>::new((0..24).map(|v| v as f32).collect(), &[2, 3, 4]).unwrap();
+        let y_pos = flatten(&t, 1).unwrap();
+        let y_neg = flatten(&t, -2).unwrap();
+        assert_eq!(y_pos.shape(), y_neg.shape());
+        assert_eq!(y_pos.as_slice().unwrap(), y_neg.as_slice().unwrap());
+    }
+
+    #[test]
+    fn flatten_rank0_axis0_yields_1x1() {
+        let t = Tensor::<f32>::new(vec![7.0], &[]).unwrap();
+        let y = flatten(&t, 0).unwrap();
+        assert_eq!(y.shape(), &[1, 1]);
+    }
+
+    #[test]
+    fn flatten_axis_out_of_range_rejected() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let err = flatten(&t, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::AxisOutOfRange {
+                op: "Flatten",
+                axis: 3,
+                rank: 2,
+            }
+        ));
+        let err = flatten(&t, -3).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::AxisOutOfRange {
+                op: "Flatten",
+                axis: -3,
+                rank: 2,
+            }
+        ));
+    }
+
+    #[test]
+    fn flatten_i64_and_bool_dtypes() {
+        let t_i64 = Tensor::<i64>::new(vec![1, 2, 3, 4, 5, 6], &[2, 3]).unwrap();
+        let y_i64 = flatten(&t_i64, 1).unwrap();
+        assert_eq!(y_i64.shape(), &[2, 3]);
+
+        let t_bool = Tensor::<bool>::new(vec![true, false, true, false], &[2, 2]).unwrap();
+        let y_bool = flatten(&t_bool, 1).unwrap();
+        assert_eq!(y_bool.shape(), &[2, 2]);
+    }
+
+    #[test]
+    fn flatten_zero_dim_shape() {
+        let t = Tensor::<f32>::new(Vec::new(), &[0, 3]).unwrap();
+        let y = flatten(&t, 1).unwrap();
+        assert_eq!(y.shape(), &[0, 3]);
     }
 }
