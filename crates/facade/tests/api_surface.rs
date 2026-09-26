@@ -12402,6 +12402,408 @@ fn facade_does_not_reexport_or_declare_optimizer_ext_items_detects_each_category
         .is_empty()
     );
 }
+
+// =====================================================================
+// イシュー #2198（親 #2172・ルート #2131）: LBFGS の facade 公開・
+// `compile()` 統合の保留を検査するテスト群。`LbfgsHoldDoctestGuard`
+// （`src/lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査に加え、
+// facade src 全体への非再エクスポート・非独自宣言、および
+// `compat::Optimizer` enum への variant 非追加を固定する。承認事項の
+// 位置づけは `docs/autodiff-lbfgs-decision.md` §7 を参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `LbfgsHoldDoctestGuard` doc 内の唯一の
+/// doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// `LbfgsHoldDoctestGuard` 版）。
+#[test]
+fn lbfgs_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "LbfgsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "LbfgsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
+         いる（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`lbfgs_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの**glob
+/// 以外の本文**（`__fandhe_lbfgs_hold_probe` モジュール・`__probe`
+/// 関数・`__fandhe_lbfgs_variant_probe` モジュール）が固定文言
+/// [`LBFGS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致することを固定
+/// する（rustdoc の `# ` 隠し行・プローブの削除・別名へのシャドーイング
+/// 等で正のプローブを骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn lbfgs_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "LbfgsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, LBFGS_HOLD_PROBE_BODY,
+        "LbfgsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 LBFGS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_lbfgs_hold_probe モジュール・__probe 関数・\
+         __fandhe_lbfgs_variant_probe モジュール）の削除・弱体化・隠し\
+         行の混入がないか確認すること。"
+    );
+}
+
+/// [`lbfgs_hold_doctest_probe_body_matches_fixed_contract`] が要求する
+/// 固定文言。`crates/facade/src/lib.rs` の `LbfgsHoldDoctestGuard` doc
+/// 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行
+/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
+/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む。
+/// `__fandhe_lbfgs_variant_probe` 内の `use ::fandhe_ai::compat::
+/// Optimizer::*;` は先頭 `::` 付きの綴りのため
+/// [`split_glob_imports_and_probe_body`] の module glob 判定
+/// （`use fandhe_ai::` で始まる形）には一致せず、本文側に残る）。
+const LBFGS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_lbfgs_hold_probe {\n\
+\x20\x20\x20\x20pub struct Lbfgs;\n\
+\x20\x20\x20\x20pub struct LbfgsConfig;\n\
+\x20\x20\x20\x20pub struct LbfgsLineSearch;\n\
+}\n\
+use __fandhe_lbfgs_hold_probe::*;\n\
+\n\
+fn __probe(_: Lbfgs, _: LbfgsConfig, _: LbfgsLineSearch) {}\n\
+\n\
+mod __fandhe_lbfgs_variant_probe {\n\
+\x20\x20\x20\x20mod __local {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub struct Lbfgs;\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20use self::__local::*;\n\
+\x20\x20\x20\x20use ::fandhe_ai::compat::Optimizer::*;\n\
+\x20\x20\x20\x20fn __probe_variant() {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20let _: Lbfgs = Lbfgs;\n\
+\x20\x20\x20\x20}\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_lbfgs_items`]・その自己テストが
+/// 共用する検出本体。facade src 全体（`crates/facade/src/**`）の
+/// `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
+/// `Lbfgs`／`LbfgsConfig`／`LbfgsLineSearch` を検出し（単一行・複数行・
+/// ネストした group・別名も検出）、`trait`／`struct`／`enum`／`type`
+/// 直後の同名独自宣言を違反として返す（`scan_optimizer_ext_reexports_
+/// and_declarations` と同型。`Lbfgs` は `compat::Sequential`／`Var` への
+/// inherent メソッド追加を伴わない値型 API のため `fn` 宣言の検出は
+/// 不要）。
+fn scan_lbfgs_reexports_and_declarations(content: &str) -> Vec<String> {
+    const NAMES: [&str; 3] = ["Lbfgs", "LbfgsConfig", "LbfgsLineSearch"];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens
+                .get(i + 1)
+                .map(|t| NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`Lbfgs`／`LbfgsConfig`／
+/// `LbfgsLineSearch`（3 個の型名）を識別子単位で含む `pub use`（複数行・
+/// ネストした group・別名含む）も、facade 独自の `trait`／`struct`／
+/// `enum`／`type` 宣言も存在しないことを固定する（`LbfgsHoldDoctestGuard`
+/// の正のプローブと多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_optimizer_ext_items` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_lbfgs_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_lbfgs_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が LBFGS（イシュー #2198。Lbfgs／LbfgsConfig／\
+         LbfgsLineSearch）を再エクスポート、または独自宣言している\
+         （`docs/autodiff-lbfgs-decision.md` §7 承認事項が未取得のまま\
+         対象外としている設計判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_lbfgs_reexports_and_declarations`]（[`facade_does_not_reexport_
+/// or_declare_lbfgs_items`]）の自己テスト（正例・負例の合成入力）。
+#[test]
+fn facade_does_not_reexport_or_declare_lbfgs_items_detects_each_category() {
+    // 正例: 単一行 pub use。
+    assert!(
+        !scan_lbfgs_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::optim::Lbfgs;")
+            .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_lbfgs_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::nn::optim::{\n    Lbfgs,\n    LbfgsConfig,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_lbfgs_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::nn::optim::LbfgsLineSearch as Foo;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(!scan_lbfgs_reexports_and_declarations("pub struct LbfgsConfig;").is_empty());
+    // 負例: コメント中の出現。
+    assert!(scan_lbfgs_reexports_and_declarations("// pub use ...::Lbfgs;").is_empty());
+    // 負例: 文字列リテラル中の出現。
+    assert!(scan_lbfgs_reexports_and_declarations("let s = \"LbfgsConfig\";").is_empty());
+    // 負例: 非公開 use。
+    assert!(
+        scan_lbfgs_reexports_and_declarations("use fandhe_ai_autodiff::nn::optim::Lbfgs;")
+            .is_empty()
+    );
+    // 負例: 無関係な pub use。
+    assert!(
+        scan_lbfgs_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::optim::AdamW;")
+            .is_empty()
+    );
+}
+
+/// facade src 全体（`crates/facade/src/**`）を走査し、`enum Optimizer`
+/// 定義（`compat::Optimizer`。`OptimizerState` 等の同名接頭辞を持つ別
+/// enum とは区別する）の直接の variant 名の中に `Lbfgs`（大文字小文字を
+/// 無視した表記揺れ含む。`LBFGS`／`LBfgs` 等）が存在するかを検出する。
+/// `enum` `Optimizer` `{` の完全一致でトークン列を探索し、対応する `}`
+/// までの間で中括弧の深さを追跡する。variant 名は深さ 1 に入った直後
+/// （開き `{` の直後）と、深さ 1 での `,` の直後にのみ現れる識別子と
+/// してのみ収集するため、variant の payload 型（`Lbfgs(LbfgsConfig)` の
+/// `LbfgsConfig` 等）は対象に含まれない。doc コメント（`strip_comments_
+/// and_literals` で事前に除去済み）に加え、variant 直前の属性
+/// （`#[deprecated]` 等。`#` トークンから対応する `]` までを読み飛ばす。
+/// 属性の読み飛ばし中は variant 開始位置の判定を維持したままにするため、
+/// 属性付き variant（`#[deprecated]\nLbfgs(LbfgsConfig)` 等）も variant
+/// 名として正しく判定できる。イシュー #2198 の Codex レビュー指摘: 旧実装は
+/// `,` 直後の最初のトークンを無条件で variant 名扱いしていたため、属性の
+/// 先頭 `#` を variant 名候補として消費してしまい、続く実際の variant 名
+/// （`Lbfgs`）を検出できなかった）も読み飛ばして対象に含めない。
+/// `enum Optimizer` が 1 件も見つからない場合は検査対象を見失ったことと
+/// して扱い、呼び出し元が fail-closed で panic する（戻り値 `None`）。
+fn scan_optimizer_enum_variants_for_lbfgs(content: &str) -> Option<Vec<String>> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut found_enum = false;
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "enum"
+            && tokens.get(i + 1).map(String::as_str) == Some("Optimizer")
+            && tokens.get(i + 2).map(String::as_str) == Some("{")
+        {
+            found_enum = true;
+            let mut depth: i32 = 1;
+            let mut j = i + 3;
+            // 開き `{` の直後は新しい variant の開始位置（`,` 直後と同じ
+            // 扱い）。
+            let mut at_variant_start = true;
+            while j < tokens.len() && depth > 0 {
+                match tokens[j].as_str() {
+                    "{" => {
+                        depth += 1;
+                        at_variant_start = false;
+                    }
+                    "}" => {
+                        depth -= 1;
+                        at_variant_start = false;
+                    }
+                    "," if depth == 1 => {
+                        at_variant_start = true;
+                    }
+                    "#" if depth == 1 && at_variant_start => {
+                        // variant 直前の属性（`#[...]`）を読み飛ばす。
+                        // variant 名判定はまだ始まっていないため
+                        // at_variant_start は true のまま維持し、属性の
+                        // 次に続く実際の variant 名を取りこぼさない。
+                        j += 1;
+                        if tokens.get(j).map(String::as_str) == Some("[") {
+                            let mut bracket_depth: i32 = 1;
+                            j += 1;
+                            while j < tokens.len() && bracket_depth > 0 {
+                                match tokens[j].as_str() {
+                                    "[" => bracket_depth += 1,
+                                    "]" => bracket_depth -= 1,
+                                    _ => {}
+                                }
+                                j += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    tok if depth == 1 && at_variant_start => {
+                        if tok.eq_ignore_ascii_case("lbfgs") {
+                            offending.push(tok.to_string());
+                        }
+                        at_variant_start = false;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+
+    if found_enum { Some(offending) } else { None }
+}
+
+/// `crates/facade/src/**` 全体を走査し、`compat::Optimizer` enum の
+/// variant に `Lbfgs`（表記揺れ含む）が存在しないことを固定する
+/// （`LbfgsHoldDoctestGuard` の variant プローブと多層防御を成す最内層の
+/// ソース走査ガード。イシュー #2198 承認事項が未取得のまま対象外として
+/// いる設計判断に違反していないかを検査する）。`enum Optimizer` 定義が
+/// ワークスペース全体で 1 件も見つからない場合は、検査対象自体を見失った
+/// ものとして fail-closed に失敗する。
+#[test]
+fn compat_optimizer_enum_has_no_lbfgs_variant() {
+    let src_dir = facade_crate_root().join("src");
+    let mut found_enum = false;
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if let Some(hits) = scan_optimizer_enum_variants_for_lbfgs(content) {
+            found_enum = true;
+            for hit in hits {
+                offending.push(format!("{}: variant {hit}", path.display()));
+            }
+        }
+    });
+    assert!(
+        found_enum,
+        "crates/facade/src/** から `enum Optimizer` 定義を 1 件も抽出\
+         できなかった（テスト自体が検査対象を見失っている可能性がある。\
+         `compat::Optimizer` のファイル移動・改名を確認すること）"
+    );
+    assert!(
+        offending.is_empty(),
+        "compat::Optimizer enum に Lbfgs variant が追加されている\
+         （`docs/autodiff-lbfgs-decision.md` §7 承認事項が未取得のまま\
+         対象外としている設計判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_optimizer_enum_variants_for_lbfgs`]（[`compat_optimizer_enum_
+/// has_no_lbfgs_variant`]）の自己テスト（正例・負例の合成入力）。
+#[test]
+fn scan_optimizer_enum_variants_for_lbfgs_detects_each_category() {
+    // 正例: 単純な tuple variant 追加。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { Sgd(SgdConfig), Lbfgs(LbfgsConfig) }"
+        ),
+        Some(vec!["Lbfgs".to_string()])
+    );
+    // 正例: doc コメント・属性付きの variant（コメントは
+    // strip_comments_and_literals で除去済み想定の入力）。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "#[non_exhaustive]\npub enum Optimizer {\n    Sgd(SgdConfig),\n    /// doc\n    Lbfgs(LbfgsConfig),\n}"
+        ),
+        Some(vec!["Lbfgs".to_string()])
+    );
+    // 正例: 表記揺れ（大文字）。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs("pub enum Optimizer { LBFGS(LbfgsConfig) }"),
+        Some(vec!["LBFGS".to_string()])
+    );
+    // 負例: 現行の variant 集合のみ（Lbfgs なし）。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { Sgd(SgdConfig), AdamW(AdamWConfig) }"
+        ),
+        Some(vec![])
+    );
+    // 負例: 別 enum（OptimizerState）への同名 variant は対象外。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs("enum OptimizerState { Lbfgs(Lbfgs) }"),
+        None
+    );
+    // 負例: payload 型名としての出現は variant 名ではないため対象外。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { Sgd(LbfgsPayloadNotAVariant) }"
+        ),
+        Some(vec![])
+    );
+    // 負例: `enum Optimizer` 自体が存在しない。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs("pub struct Unrelated;"),
+        None
+    );
+    // 正例: variant 自体に属性が付いている場合（イシュー #2198 Codex
+    // レビュー指摘の回帰防止）。属性の先頭 `#` を variant 名として誤検出
+    // せず、属性を読み飛ばした先の `Lbfgs` を正しく検出する。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { Sgd(SgdConfig), #[deprecated] Lbfgs(LbfgsConfig) }"
+        ),
+        Some(vec!["Lbfgs".to_string()])
+    );
+    // 正例: 属性付き variant が先頭（開き `{` の直後）にある場合。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { #[deprecated] Lbfgs(LbfgsConfig), Sgd(SgdConfig) }"
+        ),
+        Some(vec!["Lbfgs".to_string()])
+    );
+    // 負例: 属性付き variant だが Lbfgs ではない場合は誤検出しない。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { #[deprecated] Sgd(SgdConfig) }"
+        ),
+        Some(vec![])
+    );
+}
+
 // =====================================================================
 // イシュー #2169（親 #2131）: `compat::Loss` enum への variant 追加
 // （BCE・BCEWithLogits・NLL・KLDiv・Huber・SmoothL1・L1）の facade
