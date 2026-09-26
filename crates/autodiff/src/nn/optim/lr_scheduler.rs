@@ -203,10 +203,22 @@ impl LrScheduler for CosineAnnealingLr {
         // 最後に 1 回だけ `f32` へ downcast する（bit 同一契約は主張
         // しない。`.claude/rules/coding-rust.md` の FMA 契約とは独立の
         // 精度方針）。
+        //
+        // `(1.0 + phase.cos()) / 2.0` は半角公式 `cos²(phase/2)` と
+        // 数学的に等価だが、`phase` が `π` の奇数倍に近い（周期が長い
+        // ほど `step` が大きい領域で頻出する）場合に `phase.cos()` が
+        // `-1.0` へ桁落ちし、分子の `1.0 + phase.cos()` が減算的
+        // キャンセレーションで早期にゼロへ丸まる（例:
+        // `t_max=1_000_000_000` 付近で学習率が下限 `eta_min` へ早期
+        // 収束する）。`(phase / 2.0).cos().powi(2)` は該当の減算を
+        // 経由しないためこの桁落ちを避ける（`OneCycleAnneal::Cosine`
+        // の `half_theta.cos().powi(2)` と同型の対策。指摘: PR #2301
+        // codex-review）。
         let base_lr = self.base_lr as f64;
         let eta_min = self.eta_min as f64;
         let phase = std::f64::consts::PI * (step as f64) / (self.t_max as f64);
-        (eta_min + (base_lr - eta_min) * (1.0 + phase.cos()) / 2.0) as f32
+        let cos_sq_half = (phase / 2.0).cos().powi(2);
+        (eta_min + (base_lr - eta_min) * cos_sq_half) as f32
     }
 }
 
@@ -816,8 +828,14 @@ impl LrScheduler for CosineAnnealingWarmRestarts {
         // `t_i` は `new`／`cycle_position` の契約上必ず 1 以上
         // （`t_0 >= 1` を構築時に検証済み。overflow 経路の
         // `u128::MAX` も非ゼロ）のためゼロ除算にならない。
+        //
+        // 半角公式 `cos²(phase/2)` を使う理由は `CosineAnnealingLr::
+        // lr_at` のコメントと同じ（`1.0 + phase.cos()` の桁落ち回避。
+        // `t_i` が大きい周期ほど顕在化しうる。指摘: PR #2301
+        // codex-review）。
         let phase = std::f64::consts::PI * (t_cur as f64) / (t_i as f64);
-        (eta_min + (base_lr - eta_min) * (1.0 + phase.cos()) / 2.0) as f32
+        let cos_sq_half = (phase / 2.0).cos().powi(2);
+        (eta_min + (base_lr - eta_min) * cos_sq_half) as f32
     }
 }
 
