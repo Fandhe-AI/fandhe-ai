@@ -4373,14 +4373,19 @@ pub(crate) fn cross_entropy_loss_with_options_forward(
             denom_w += w_t;
         }
     }
+    // `W == 0`（非 ignore サンプルの重み和が 0。例: `class_weight` が
+    // 全クラス 0、または全サンプルが ignore）は `Mean`／`Sum` いずれも
+    // 損失 0.0 を返す契約（doc 参照。`mse_loss` の `n == 0 → 0.0` と
+    // 同型）。`total_loss` 自体は `w_t == 0` でも `logits` に `NaN` が
+    // 混入していれば `0.0 * NaN = NaN` で汚染されうるため（`weighted_
+    // sum_neg_lp` の乗算経由）、`total_loss` を経由せず denom_w == 0.0
+    // を検知した時点で即座に 0.0 を返す（`Sum` も `Mean` と同じ早期
+    // return に統一。codex-review 指摘・PR #2283）。
+    if denom_w == 0.0 {
+        return build_tensor(vec![0.0f32], &[]);
+    }
     let loss = match reduction {
-        Reduction::Mean => {
-            if denom_w == 0.0 {
-                0.0
-            } else {
-                (total_loss / denom_w) as f32
-            }
-        }
+        Reduction::Mean => (total_loss / denom_w) as f32,
         Reduction::Sum => total_loss as f32,
     };
     build_tensor(vec![loss], &[])
@@ -4414,6 +4419,30 @@ mod cross_entropy_with_options_empty_tensor_overflow_tests {
             &options,
         );
         assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: `class_weight` が全クラス
+    // 0（`denom_w == 0`）かつ `logits` に `NaN` が混入する場合、`Mean`
+    // は早期 return で 0.0 を返すが、修正前の `Sum` は `total_loss`
+    // （`0.0 * NaN = NaN` で汚染された値）をそのまま返しており
+    // `docs/autodiff-loss-ops-decision.md` §2.2 の「W == 0 は損失
+    // 0.0・勾配 0」契約に違反していた。`Sum` でも 0.0 を返すことを
+    // 確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_forward_sum_reduction_zero_denom_w_with_nan_logits_returns_zero_loss()
+     {
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+
+        let out =
+            cross_entropy_loss_with_options_forward(&logits, &targets, 1, Reduction::Sum, &options);
+
         assert_eq!(out.get(&[]).unwrap(), 0.0);
     }
 }

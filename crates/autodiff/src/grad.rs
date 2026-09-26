@@ -7688,33 +7688,35 @@ fn cross_entropy_loss_with_options_vjp(
     };
     let total_weight_all_classes: f64 = weights.iter().sum();
 
-    // `Mean` の分母 `W`（forward と同じ「非 ignore サンプルの
-    // `w[t_s]` 総和」）を独立に再計算する（`eval::cross_entropy_
-    // loss_with_options_forward` と同じ縮約順序・`f64` 蓄積）。
+    // `W`（forward と同じ「非 ignore サンプルの `w[t_s]` 総和」）を
+    // 独立に再計算する（`eval::cross_entropy_loss_with_options_
+    // forward` と同じ縮約順序・`f64` 蓄積）。`Mean` の分母として使う
+    // ほか、`W == 0` 判定は `Sum` にも共通で適用する（下記）。
     let mut denom_w: f64 = 0.0;
-    if reduction == Reduction::Mean {
-        for o in 0..outer {
-            for i in 0..inner {
-                let t = target_data[o * inner + i];
-                if ignore_index == Some(t) {
-                    continue;
-                }
-                if t >= 0 && (t as usize) < axis_len {
-                    denom_w += weights[t as usize];
-                }
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                continue;
+            }
+            if t >= 0 && (t as usize) < axis_len {
+                denom_w += weights[t as usize];
             }
         }
     }
 
-    // `Mean` で非 ignore サンプルの重み和が 0（例: 該当クラスの
+    // `W == 0`（非 ignore サンプルの重み和が 0。例: 該当クラスの
     // `class_weight` が全て 0、または全サンプルが ignore）の場合、
-    // 仕様上の勾配はゼロテンソルである（`s = g/W` の `W = 0` を
-    // 素通しすると `s = 0` にはなるが、後続ループの `p_c` に
-    // `logits` 由来の `NaN`／`inf` が含まれていた場合 `0 * NaN = NaN`
-    // となり勾配がゼロにならない）。`s` を経由せず、ここで即座に
-    // 要素すべて 0 の勾配テンソルを返す（codex-review 指摘・
-    // PR #2283）。
-    if reduction == Reduction::Mean && denom_w == 0.0 {
+    // 仕様上の勾配は `Mean`／`Sum` いずれもゼロテンソルである（doc
+    // 契約: `eval::cross_entropy_loss_with_options_forward` の `W == 0
+    // → 損失 0.0` と対で「勾配も 0」。`Mean` は `s = g/W` の `W = 0` を
+    // 素通しすると `s = 0` にはなるが、`Sum` は `s = g` がそのまま
+    // 残る。いずれも後続ループの `p_c` に `logits` 由来の `NaN`／
+    // `inf` が含まれていた場合 `w_t == 0`・`w_a == 0` との乗算が
+    // `0 * NaN = NaN` となり勾配がゼロにならない）。`s` を経由せず、
+    // ここで即座に要素すべて 0 の勾配テンソルを返す（`Sum` も `Mean`
+    // と同じ早期 return に統一。codex-review 指摘・PR #2283）。
+    if denom_w == 0.0 {
         return build_tensor(vec![0f32; logits.numel()], &shape);
     }
 
@@ -7822,6 +7824,44 @@ mod cross_entropy_with_options_vjp_empty_tensor_overflow_tests {
         assert!(
             grad.iter().all(|&v| v == 0.0f32),
             "denom_w == 0 のとき勾配はゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: 上記テストと同条件
+    // （全クラス `class_weight` 0・`logits` に `NaN` 混入）を `Sum`
+    // reduction で確認する。修正前は `denom_w == 0` の早期 return が
+    // `Mean` にしか適用されておらず、`Sum` は `s = g` を経由して
+    // `term1 = (1-eps)*w_t*(p_c-delta)` の `w_t == 0` と `p_c`（`NaN`
+    // 混入の softmax 由来）の乗算で `0 * NaN = NaN` となり勾配が NaN
+    // 化していた（`docs/autodiff-loss-ops-decision.md` §2.2 の
+    // 「W == 0 は損失 0.0・勾配 0」契約に違反）。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_sum_reduction_zero_denom_w_with_nan_logits_returns_zero_grad()
+     {
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Sum,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "Sum reduction でも denom_w == 0 のとき勾配はゼロであるべき（NaN 混入は不可）: {grad:?}"
         );
     }
 }
