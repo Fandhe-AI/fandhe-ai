@@ -73,6 +73,7 @@ mod adam;
 mod adamax;
 mod adamw;
 mod lamb;
+mod lbfgs;
 mod nadam;
 pub(crate) mod param_group;
 mod radam;
@@ -103,6 +104,7 @@ pub use amp::{
 };
 pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
 pub use lamb::{Lamb, LambConfig};
+pub use lbfgs::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
 pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, OneCycleAnneal,
     OneCycleLr, OneCycleLrConfig, StepLr,
@@ -210,6 +212,20 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // optim.rs` 参照）。これにより「scheduler（Cosine／Exponential／
 // Plateau／OneCycle）」行のうち `ReduceLROnPlateau`／`OneCycleLR` も
 // 実装済みとなり、状態保持型のスケジューラは 2 種とも出揃った。
+
+// イシュー #2197（親 #2172「LBFGS」）: L-BFGS（closure・strong Wolfe
+// line search。[`Lbfgs`]／[`LbfgsConfig`]／[`LbfgsLineSearch`]）を
+// 追加した（`lbfgs` モジュール doc 参照）。既存 optimizer が前提とする
+// 「`(param, grad)` 参照列 → 更新後 `Tensor<f32>` 列」の 1 step 1 勾配
+// 評価パターンでは line search 中の複数回評価を表現できないため、
+// `Lbfgs::try_step_closure`／`step_closure` は「パラメータ列 →
+// `(損失, 勾配列)`」を返す closure を受け取り内部で複数回評価する形と
+// した（`torch.optim.LBFGS.step(closure)` 相当）。新規 `Op`／
+// `BackendOps` メソッド／`Var`／VJP は追加していない（ホスト側の値型・
+// 純関数。カーネルなし）。facade（`fandhe_ai::optim`）への公開・
+// `compile()` 統合は別イシュー #2198（facade 公開面拡張はユーザー
+// 承認事項のため本イシューでは対応しない）。`DeviceParamStore` 非対応
+// （デバイス常駐化は親 #2172 のスコープ外）。
 
 // イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）
 // を追加した（`param_group` モジュール冒頭 doc 参照）。`ParamGroup`／
