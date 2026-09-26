@@ -147,6 +147,15 @@ pub enum Callback {
    - CSV: fit 開始時に開く。`append=false` なら truncate してヘッダを
      書き、`append=true` なら追記し、ファイルが空か存在しない場合だけ
      ヘッダを書く。epoch ごとに書いて flush する
+   - CSV の `append=true` かつファイルが既存で空でない場合、fit 開始時
+     に先頭行を読み込み、今回の列集合から組み立てたヘッダ文字列
+     （`epoch,loss,lr,...`。§4 のとおり `validation`・metrics の有無で
+     変わる）と完全一致することを検証する。列集合は fit ごとに変わり
+     得るため（§4「列集合は fit 呼び出しの開始時に確定する」）、この
+     検証を経ずに追記すると列数・意味が既存行とずれた壊れた CSV になる。
+     不一致・先頭行が読み込めない場合はいずれも #4-9 のエラー写像に
+     従い fail-closed で `Err` を返し fit を開始しない（`compiled` は
+     書き戻す）。一致すればヘッダを再度書かず以後の epoch を追記する
    - 追記方式では `save_safetensors_f32` の「一時ファイル＋`rename`」
      による原子性は再利用できないため、「epoch 単位で flush」を契約と
      する（途中でクラッシュしても完了した epoch の行は残る）
@@ -197,9 +206,10 @@ pub enum Callback {
 - CSV・JSON を読み戻し、`History` と一致すること: 有限値は bit 一致、
   非有限値は値クラス一致（NaN／+Inf／-Inf の区別。NaN の payload は
   検証対象外）
-- `append` の挙動: CSV の追記・既存ファイルが空でなければヘッダ省略、
-  JSON の既存配列の読み込み・スキーマ検証・マージ（不正な既存
-  ファイルは fail-closed で `Err`）を含む
+- `append` の挙動: CSV の追記・既存ファイルが空でなければヘッダ省略・
+  既存ヘッダと今回の列集合の一致検証（不一致は fail-closed で
+  `Err`）、JSON の既存配列の読み込み・スキーマ検証・マージ（不正な
+  既存ファイルは fail-closed で `Err`）を含む
 - Lambda の呼び出し回数と引数
 - Lambda が `Err` を返したとき fit が打ち切られ、`compiled`／モードが
   復元されること
@@ -248,8 +258,10 @@ pub enum Callback {
   - CSV／JSON のキー・列名は固定の ASCII で、ユーザー由来の文字列を
     出力しないので、CSV／JSON インジェクション（数式注入・エスケープ
     漏れ）の経路がない
-  - 非有限値は JSON では `null`、CSV では固定表記にして、不正な JSON
-    を生まない
+  - 非有限値は §4 の 4・5 項のとおり固定表記（CSV は Rust `Display` の
+    `NaN`／`inf`／`-inf`、JSON はクォートなしの `NaN`／`Infinity`／
+    `-Infinity` 拡張トークン）で出力する。いずれもユーザー由来の
+    文字列を含まない固定リテラルのため、不正な JSON／CSV を生まない
   - 本番経路に `unwrap`／`expect` を置かない
 - **A08 ソフトウェア・データ整合性**
   - JSON は一時ファイル＋`rename` で原子的に書き直す。CSV は epoch
