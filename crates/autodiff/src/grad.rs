@@ -7706,15 +7706,21 @@ fn cross_entropy_loss_with_options_vjp(
         }
     }
 
+    // `Mean` で非 ignore サンプルの重み和が 0（例: 該当クラスの
+    // `class_weight` が全て 0、または全サンプルが ignore）の場合、
+    // 仕様上の勾配はゼロテンソルである（`s = g/W` の `W = 0` を
+    // 素通しすると `s = 0` にはなるが、後続ループの `p_c` に
+    // `logits` 由来の `NaN`／`inf` が含まれていた場合 `0 * NaN = NaN`
+    // となり勾配がゼロにならない）。`s` を経由せず、ここで即座に
+    // 要素すべて 0 の勾配テンソルを返す（codex-review 指摘・
+    // PR #2283）。
+    if reduction == Reduction::Mean && denom_w == 0.0 {
+        return build_tensor(vec![0f32; logits.numel()], &shape);
+    }
+
     let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0) as f64;
     let s = match reduction {
-        Reduction::Mean => {
-            if denom_w == 0.0 {
-                0.0
-            } else {
-                g_value / denom_w
-            }
-        }
+        Reduction::Mean => g_value / denom_w,
         Reduction::Sum => g_value,
     };
 
@@ -7780,6 +7786,43 @@ mod cross_entropy_with_options_vjp_empty_tensor_overflow_tests {
         );
         assert_eq!(out.shape(), &shape);
         assert_eq!(out.numel(), 0);
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: `Mean` で非 ignore
+    // サンプルの重み和 `denom_w` が 0（全クラスの `class_weight` が 0）
+    // の場合、`s = g/denom_w` を経由すると `s = 0` になるものの、
+    // 後続ループで `logits` の `NaN` と乗算されると `0 * NaN = NaN`
+    // となり勾配が NaN 化しうる。`denom_w == 0` を検知した時点で
+    // 同 shape のゼロ勾配を早期 return することを確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_zero_denom_w_with_nan_logits_returns_zero_grad() {
+        // shape [1, 2]（1 サンプル・2 クラス）。全クラスの重みを 0 に
+        // することで denom_w = 0 を作り、logits に NaN を混入させる。
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "denom_w == 0 のとき勾配はゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
     }
 }
 
