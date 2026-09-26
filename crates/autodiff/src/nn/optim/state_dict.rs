@@ -80,11 +80,20 @@
 //! する（初期値 `1.0` から `mu ∈ [0, beta1)` を逐次乗じる積のため。
 //! 有限性のみの検証では正常な逐次積では生じない負値・`f32::MAX` 等を
 //! 受理してしまう。P0 レビュー指摘・イシュー #2174 PR #2304）。
-//! `step_count` は復号後にさらに「次の 1 回の `step()` 呼び出しが
-//! `step_count += 1`〈`NAdam` はさらに `step + 1`〉でオーバーフロー
-//! しない」ことを検証する（`decode_u16x4_tensor` は `u64::MAX` を含む
-//! 任意の値をロスレスに受理できてしまうため。同レビュー指摘。
-//! [`validate_step_count_headroom`] 参照）。バッファ値（`m`・`v` 等）
+//! `step_count` は復号後にさらに「load 直後の 1 回の `step()` 呼び出し
+//! （`NAdam` はさらに内部で `step + 1` を評価する）が確実に成功する」
+//! ことを検証する（`decode_u16x4_tensor` は `u64::MAX` を含む任意の値を
+//! ロスレスに受理できてしまうため。[`validate_step_count_headroom`]
+//! 参照）。**恒久的な panic 対策は各 optimizer の `step()` 側にある**:
+//! `self.step_count += 1` の素朴な加算は `checked_add` に置き換え済み
+//! （2 回目以降の呼び出しで `step_count` が `u64::MAX` 近傍に達しても
+//! panic せず `AutodiffError::InvalidArgument` を返す。`NAdam` の
+//! `step + 1` も `u64` 加算を経由しない `f64` 式へ変更済み）ため、本検証
+//! は「load 直後の 1 回」を超える呼び出し回数の安全性には**依存しない**
+//! （P0 レビュー指摘・イシュー #2174 PR #2304 の是正コミットで追加）。
+//! 本検証はあくまで load 時点の fail-early（型・値域の一次防御。復元
+//! 直後に `step()` できないほど step_count が近すぎる状態を早期に
+//! 拒否する）としての位置づけである。バッファ値（`m`・`v` 等）
 //! 自体は値域を検証しない（学習が生んだ値をそのまま bit 単位で復元
 //! することを優先する）。
 //!
@@ -275,24 +284,31 @@ pub(crate) fn validate_pow_t_range(key: &str, value: f64) -> Result<(), Autodiff
     Ok(())
 }
 
-/// `step_count` の値域検証（P0 レビュー指摘・イシュー #2174 PR #2304:
-/// `decode_u16x4_tensor` は `u64::MAX` を含む任意のロスレス符号化値を
-/// 正しく受理するが、9 optimizer すべての `step()` は復元直後の呼び
-/// 出しで `self.step_count += 1` を実行するため、`step_count ==
-/// u64::MAX` を無検証で受理すると次の `step()` で加算オーバーフロー
-/// パニックを起こす。`NAdam`（`has_mu_product`）はさらに加算後の値へ
-/// `step + 1`〈`nadam.rs::step`〉を計算するため、加算 1 回分の追加の
-/// 余裕が要る。復元時点で「次の 1 回の `step()` が安全に実行できる」
-/// ことを状態変更前に検証し、超過は fail-closed で拒否する）。
+/// `step_count` の値域検証（load 時点の fail-early 用。P0 レビュー
+/// 指摘・イシュー #2174 PR #2304: `decode_u16x4_tensor` は `u64::MAX`
+/// を含む任意のロスレス符号化値を正しく受理してしまうため、極端に
+/// 大きい `step_count` を無検証で受理すると復元直後の 1 回目の
+/// `step()` が直感的でない失敗をする可能性がある）。**panic 防止の
+/// 恒久対策ではない**: 9 optimizer すべての `step()` は `self.
+/// step_count` の加算を `checked_add` で行うため、本関数を経由しない
+/// 経路（`step()` を直接繰り返し呼ぶ通常の学習ループ）でも
+/// `step_count` が `u64::MAX` に達すれば panic せず型付きエラーを返す
+/// （是正コミットで追加）。本関数は「load 直後の 1 回の `step()` が
+/// 確実に成功する」という早期の利用者向けエラーメッセージを提供する
+/// ための一次検証に留める。
 pub(crate) fn validate_step_count_headroom(
     kind: &str,
     step_count: u64,
     has_mu_product: bool,
 ) -> Result<(), AutodiffError> {
-    // NAdam は `self.step_count += 1` の後にさらに `step + 1` を計算
-    // する（`nadam.rs::step` の `mu_next` 導出）ため、加算 1 回分
-    // （`u64::MAX - 2`）の追加の余裕を要求する。他 8 optimizer は
-    // `self.step_count += 1` の 1 回のみのため `u64::MAX - 1` で足りる。
+    // `NAdam`（`has_mu_product`）は `nadam.rs::step` が `mu_next` 導出で
+    // `step + 1` 相当の式を評価するため、他 8 optimizer より 1 回分
+    // 保守的な余裕（`u64::MAX - 2`）を要求する。もっとも `nadam.rs` の
+    // 当該式は `u64` 加算ではなく `(step as f64 + 1.0)` で評価するため
+    // `u64` オーバーフローはそもそも起きない（是正コミットで変更済み）。
+    // この余裕は panic 防止のためではなく、`load` 直後の 1 回の
+    // `step()` が安全に実行できることを保証する fail-early 側の
+    // 保守的な閾値として維持する。
     let max_safe = if has_mu_product {
         u64::MAX - 2
     } else {
@@ -672,13 +688,13 @@ mod tests {
     }
 
     /// P0 レビュー指摘（イシュー #2174 PR #2304）: `decode_u16x4_tensor`
-    /// は `u64::MAX` を含む任意のロスレス符号化値を正しく受理するが、
-    /// 9 optimizer すべての `step()` は復元直後の呼び出しで
-    /// `self.step_count += 1` を実行するため、無検証だと次の `step()`
-    /// で加算オーバーフローパニックを起こす。`has_mu_product=false`
-    /// （8 optimizer）は `u64::MAX - 1` まで、`has_mu_product=true`
-    /// （`NAdam`。`step + 1` をさらに計算するため 1 回分の余裕が
-    /// 追加で要る）は `u64::MAX - 2` まで安全であることを固定する。
+    /// は `u64::MAX` を含む任意のロスレス符号化値を正しく受理するため、
+    /// 無検証だと極端に大きい `step_count` を load 時点でそのまま
+    /// 受理してしまう（panic 防止の恒久対策は `step()` 側の
+    /// `checked_add`。`validate_step_count_headroom` の doc 参照）。
+    /// `has_mu_product=false`（8 optimizer）は `u64::MAX - 1` まで、
+    /// `has_mu_product=true`（`NAdam`）は `u64::MAX - 2` まで load 直後の
+    /// 1 回の `step()` が安全に成功することを固定する。
     #[test]
     fn step_count_headroom_rejects_values_too_close_to_u64_max() {
         assert!(validate_step_count_headroom("adamw", u64::MAX, false).is_err());
@@ -733,7 +749,8 @@ mod tests {
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 
         // has_mu_product=true（NAdam 相当）は `u64::MAX - 1` も拒否する
-        // （`step + 1` をさらに計算するため）。
+        // （load 直後の 1 回の `step()` に対する保守的な追加の余裕。
+        // `validate_step_count_headroom` の doc 参照）。
         let mut state_nadam = base_state("nadam", 0);
         state_nadam.insert(
             STEP_COUNT_KEY.to_string(),

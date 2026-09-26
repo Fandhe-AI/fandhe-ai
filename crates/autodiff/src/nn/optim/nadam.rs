@@ -217,7 +217,19 @@ impl NAdam {
                 .collect();
         }
 
-        self.step_count += 1;
+        // イシュー #2174 PR #2304 codex-review P0 是正: state_dict の復元は
+        // load 直後の 1 回分の headroom しか保証しない
+        // （`state_dict.rs::validate_step_count_headroom`）ため、2 回目以降の
+        // `step()` 呼び出しでも `step_count` の素朴な `+= 1` は overflow panic
+        // しうる。`checked_add` で確実に型付きエラーへ落とす（本番経路で
+        // panic しない。`.claude/rules/coding-rust.md`）。
+        self.step_count = self.step_count.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "NAdam::step: step_count overflow: too many step() calls (or a restored step_count too \
+                 close to u64::MAX) for this optimizer to advance further"
+                    .to_string(),
+            )
+        })?;
         let step = self.step_count;
         self.beta2_pow_t *= self.config.beta2 as f64;
         let bc2 = (1.0 - self.beta2_pow_t) as f32;
@@ -237,8 +249,17 @@ impl NAdam {
         // `powf` を使い f64 で計算してから f32 へ落とす（`adamw.rs` の
         // 逐次積〈`beta.powi`〉とは異なり、`momentum_decay` が非整数の
         // 実数指数を要するため）。
+        // `step + 1` を `u64` のまま加算すると `step == u64::MAX` で
+        // オーバーフローしうる（`self.step_count` の headroom チェック
+        // 〈`state_dict.rs::validate_step_count_headroom`〉は復元直後の
+        // 1 回分の `step()` しか保証しないため、後続呼び出しでも
+        // panic しないよう、この式自体を `f64` 加算に倒して u64
+        // オーバーフロー経路を構造的に消しておく。この規模の `step`
+        // では `f64` の丸め誤差が支配的で `+1` の寄与は無視できるため
+        // 数値的な意味も変わらない）。
         let mu = beta1 as f64 * (1.0 - 0.5 * 0.96f64.powf(step as f64 * momentum_decay));
-        let mu_next = beta1 as f64 * (1.0 - 0.5 * 0.96f64.powf((step + 1) as f64 * momentum_decay));
+        let mu_next =
+            beta1 as f64 * (1.0 - 0.5 * 0.96f64.powf((step as f64 + 1.0) * momentum_decay));
         self.mu_product *= mu as f32;
         let mu_product = self.mu_product;
         let mu_product_next = mu_product * mu_next as f32;
@@ -595,5 +616,36 @@ mod tests {
 
         opt.set_lr(0.001).unwrap();
         assert_eq!(opt.step_count(), 1);
+    }
+
+    /// P0 レビュー指摘（イシュー #2174 PR #2304）の回帰検査:
+    /// `state_dict` からの復元で `step_count` が `u64::MAX` 近傍になった
+    /// 状態を模し、2 回目の `step()` で `self.step_count += 1` の素朴な
+    /// 加算がオーバーフロー panic しないこと（`checked_add` により
+    /// 型付きエラーへ落ちること）を固定する。`NAdam` は `mu_next`
+    /// 導出で `step + 1` 相当の式をさらに評価するため
+    /// `validate_step_count_headroom` の headroom は他 optimizer より
+    /// 1 回分保守的（`u64::MAX - 2`）だが、`step()` 側の panic 安全性は
+    /// `checked_add` 自体（＋ `mu_next` 式を `u64` 加算を経由しない
+    /// `f64` 式へ変更したこと）で担保する。
+    #[test]
+    fn step_returns_typed_error_instead_of_panicking_on_step_count_overflow() {
+        let mut opt = NAdam::new(NAdamConfig::default()).unwrap();
+        opt.step_count = u64::MAX - 1;
+        let param = t(vec![0.5], &[1]);
+        let grad = t(vec![0.3], &[1]);
+
+        // 1 回目: `step_count` が `u64::MAX - 1` → `u64::MAX` へ進み
+        // 成功する（headroom 検証が保証する「load 直後の 1 回」に相当。
+        // `mu_next` 導出の `(step as f64 + 1.0)` も `u64` 加算を経由
+        // しないため overflow しない）。
+        assert!(opt.step(&[(&param, &grad)]).is_ok());
+        assert_eq!(opt.step_count(), u64::MAX);
+
+        // 2 回目: `step_count` が既に `u64::MAX` のため素朴な `+= 1` なら
+        // panic する。`checked_add` により panic せず型付きエラーを
+        // 返すことを確認する（headroom 検証の対象外の呼び出し）。
+        let result = opt.step(&[(&param, &grad)]);
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
     }
 }

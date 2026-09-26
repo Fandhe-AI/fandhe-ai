@@ -434,7 +434,19 @@ impl Lamb {
                 })
                 .collect();
         }
-        self.step_count += 1;
+        // イシュー #2174 PR #2304 codex-review P0 是正: state_dict の復元は
+        // load 直後の 1 回分の headroom しか保証しない
+        // （`state_dict.rs::validate_step_count_headroom`）ため、2 回目以降の
+        // `step()` 呼び出しでも `step_count` の素朴な `+= 1` は overflow panic
+        // しうる。`checked_add` で確実に型付きエラーへ落とす（本番経路で
+        // panic しない。`.claude/rules/coding-rust.md`）。
+        self.step_count = self.step_count.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "Lamb::step: step_count overflow: too many step() calls (or a restored step_count too \
+                 close to u64::MAX) for this optimizer to advance further"
+                    .to_string(),
+            )
+        })?;
         self.beta1_pow_t = beta1_pow_t;
         self.beta2_pow_t = beta2_pow_t;
 
