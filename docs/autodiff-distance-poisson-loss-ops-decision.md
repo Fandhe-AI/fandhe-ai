@@ -106,13 +106,40 @@ negative)`。`swap = true` のとき `d_pn = d(positive, negative)`・
 `L_n = max(0, d_ap − d_neg + margin)`。`Mean` は `N` で除算
 （rank 1 は `N=1`）、`Sum` はそのまま加算（`N == 0` は損失 `0.0`）。
 
-**`p` ノルムの実装**（`crate::eval::p_norm_f64`）: `reduce_ops::
-norm_p`（#2147）の overflow-safe なスケール形は採らず、素直な
-`(Σ|v_i|^p)^(1/p)` を `f64` で計算する。理由: `triplet_margin_loss`
-の距離差はネットワーク出力の差分スケールが想定され、`rmsnorm`／
-`reduce_ops::norm_p` のような大規模縮約軸ほどの overflow リスクは
-ない（意図的なスコープ限定。将来 overflow が実測で問題になれば
-`pnorm_vjp` 方式へ揃える）。
+**`p` ノルムの実装**（`crate::eval::p_norm_f64`）: 当初は
+`reduce_ops::norm_p`（#2147）の overflow-safe なスケール形を採らず、
+素直な `(Σ|v_i|^p)^(1/p)` を `f64` で計算していた（`triplet_margin_
+loss` の距離差はネットワーク出力の差分スケールが想定され、
+`rmsnorm`／`reduce_ops::norm_p` のような大規模縮約軸ほどの overflow
+リスクはない、という判断だった）。しかし PR #2286（codex-review 指摘）
+で、有効な `p`（`p >= 1.0` 制約を満たす `p=1024` 等）と現実的な差分値
+（例 `|v_i|=2`）の組合せでも `|v_i|^p` 自体が `f64` の範囲を超えて
+overflow し、`d_ap`／`d_an` が `inf` になって以降の hinge 計算が
+`inf − inf = NaN` を生む欠陥が実際に指摘されたため、上記の「意図的な
+スコープ限定」は撤回する。`reduce_ops::norm_p` フォールバック
+（`eval::vector_norm_p_along`）と同じ overflow-safe なスケール形
+（`mx = max|v_i|` を括り出してから `mx · (Σ (|v_i|/mx)^p)^(1/p)` を
+計算する）へ揃えた。`p_norm_grad_f64`（勾配）も同様に、
+`|v_i|^(p-1)`／`norm^(p-1)` を別々に計算せず `(|v_i| / norm)^(p-1)`
+（`|v_i| <= norm` より必ず `[0, 1]` に収まり overflow しない）へ
+修正した。
+
+**CosineEmbeddingLoss の分母（`(m1 * m2).sqrt()`）**（PR #2286
+codex-review 指摘）: forward（`eval::cosine_embedding_loss_forward`）・
+VJP（`grad::cosine_embedding_loss_vjp`）とも、各ノルムを先に `sqrt`
+してから乗じる `m1.sqrt() * m2.sqrt()` へ修正した（中間積 `m1 * m2`
+の指数が `m1`／`m2` の 2 倍になるのを避ける標準的な安定化。数学的に
+同値）。
+
+**NaN の距離・ランキング値の hinge 適用**（PR #2286 codex-review
+指摘）: `CosineEmbeddingLoss`（`y == -1` の hinge 分岐）・
+`MarginRankingLoss`・`TripletMarginLoss` の forward で使っていた
+`raw.max(0.0)`（Rust の `f64::max` は左辺が `NaN` のとき右辺を返す
+ため `NaN` が黙って `0.0` に潰れる）を、`NaN` を伝播する
+`eval::nan_propagating_max_f64` へ置き換えた。VJP 側の hinge 判定
+（`raw >= 0.0` 等。`NaN` との比較は `false` を返すため、hinge が
+無効な扱いとなり勾配 0）は既存の PyTorch `clamp` backward マスクと
+同じ挙動のため変更していない。
 
 **勾配**: hinge が有効（`d_ap − d_neg + margin >= 0`。§2.2 と同じ
 境界規約）なときのみ、`d_ap` の寄与 `+1`・`d_neg` の寄与 `−1` を

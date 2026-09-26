@@ -4439,25 +4439,75 @@ pub(crate) fn sign0_f64(d: f64) -> f64 {
 }
 
 /// ベクトル `v`（`f64`）の `p` ノルム（イシュー #2167。`triplet_margin_
-/// loss` の距離計算で使う）。`pnorm_vjp`（`grad.rs`）のような
-/// overflow-safe なスケール形は採らず素直な `Σ|v_i|^p` の `1/p` 乗を
-/// 計算する——`triplet_margin_loss` の距離差はネットワーク出力の差分
-/// スケールが想定され、`rmsnorm`／`reduce_ops::norm_p` のような
-/// 大規模縮約軸ほどの overflow リスクはない（意図的なスコープ限定。
-/// 将来 overflow が実測で問題になれば `pnorm_vjp` 方式へ揃える）。
+/// loss` の距離計算で使う）。当初は `Σ|v_i|^p` を素直に計算する非
+/// スケール形だったが、有効な `p`（例 `p=1024`）と現実的な差分値
+/// （例 `|v_i|=2`）の組合せでも `|v_i|^p` 自体が `f64` の範囲を超えて
+/// overflow し、`d_ap`／`d_an` が `inf` になって以降の hinge 計算が
+/// `inf − inf = NaN` を生む欠陥があった（codex-review 指摘・PR #2286。
+/// `docs/autodiff-distance-poisson-loss-ops-decision.md` の「意図的な
+/// スコープ限定」は誤りだったため撤回する）。`reduce_ops::norm_p`
+/// フォールバック（[`vector_norm_p_along`]）と同じ overflow-safe な
+/// スケール形（`mx = max|v_i|` を括り出してから `mx ·
+/// (Σ (|v_i|/mx)^p)^(1/p)` を計算する）へ揃える。`mx == 0` は `0.0`・
+/// `mx` が `NaN` はそのまま伝播・`mx` が `inf`（入力に `±inf` 要素を
+/// 含む）は `inf` を返す（`vector_norm_p_along` と同じ判定順）。
 fn p_norm_f64(v: &[f64], p: f64) -> f64 {
-    v.iter().map(|d| d.abs().powf(p)).sum::<f64>().powf(1.0 / p)
+    let mut mx = 0.0f64;
+    for &d in v {
+        mx = nan_propagating_max_f64(mx, d.abs());
+    }
+    if mx.is_nan() {
+        f64::NAN
+    } else if mx == 0.0 {
+        0.0
+    } else if mx.is_infinite() {
+        f64::INFINITY
+    } else {
+        let acc: f64 = v.iter().map(|d| (d.abs() / mx).powf(p)).sum();
+        mx * acc.powf(1.0 / p)
+    }
 }
 
 /// `p_norm_f64` の勾配（`d(‖v‖_p)/d(v_i) = sign(v_i)·|v_i|^(p−1) /
 /// ‖v‖_p^(p−1)`。`‖v‖_p == 0` の要素は勾配 `0`——PyTorch
 /// `norm_backward` の `masked_fill` と同じ扱い。イシュー #2167）。
+/// `|v_i|^(p-1)`／`norm^(p-1)` を別々に計算すると `p_norm_f64` と同じ
+/// overflow（`p` が大きい・`|v_i|` が現実的な値でも `|v_i|^(p-1)` 自体
+/// が overflow しうる）を再現するため、比 `|v_i| / norm`（`|v_i| <=
+/// norm` より必ず `[0, 1]` に収まり overflow しない）を先に取ってから
+/// `p - 1` 乗する overflow-safe な形にする（codex-review 指摘・
+/// PR #2286。`pnorm_vjp`〈`grad.rs`〉のスケール形と同じ設計）。`norm`
+/// が `inf`（入力に `±inf` 要素を含む場合のみ、`p_norm_f64` の判定と
+/// 整合）のときは、`pnorm_vjp` の `±inf` 分岐と同じく符号付きで
+/// `±inf` 要素へ均等分配し、有限要素は `0` とする。
 pub(crate) fn p_norm_grad_f64(v: &[f64], p: f64, norm: f64) -> Vec<f64> {
     if norm == 0.0 {
         return vec![0.0; v.len()];
     }
+    if norm.is_nan() {
+        return vec![f64::NAN; v.len()];
+    }
+    if norm.is_infinite() {
+        let inf_count = v.iter().filter(|d| d.is_infinite()).count();
+        if inf_count == 0 {
+            // `p_norm_f64` の判定契約上、`norm` が `inf` になるのは
+            // 入力に `±inf` 要素を含む場合のみ（契約違反の防御的
+            // フォールバック。理論上到達しない）。
+            return vec![0.0; v.len()];
+        }
+        return v
+            .iter()
+            .map(|&d| {
+                if d.is_infinite() {
+                    sign0_f64(d) / inf_count as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+    }
     v.iter()
-        .map(|&d| sign0_f64(d) * d.abs().powf(p - 1.0) / norm.powf(p - 1.0))
+        .map(|&d| sign0_f64(d) * (d.abs() / norm).powf(p - 1.0))
         .collect()
 }
 
@@ -4497,12 +4547,23 @@ pub(crate) fn cosine_embedding_loss_forward(
             m2 += b * b;
             dot += a * b;
         }
-        let cos = dot / (m1 * m2).sqrt();
+        // 各ノルムを先に `sqrt` してから乗じる（`(m1 * m2).sqrt()` だと
+        // 中間積 `m1 * m2` の指数が `m1`／`m2` の 2 倍になり overflow
+        // へ近づく。`m1.sqrt() * m2.sqrt()` は数学的に同値のまま
+        // 中間値の指数を半分に抑える標準的な安定化。codex-review
+        // 指摘・PR #2286）。
+        let denom = m1.sqrt() * m2.sqrt();
+        let cos = dot / denom;
         let y_i = y_v as f64;
         let loss_i = if y_i > 0.0 {
             1.0 - cos
         } else {
-            (cos - margin as f64).max(0.0)
+            // `f64::max` は左辺が `NaN` のとき右辺（`0.0`）を返すため、
+            // `cos` が `NaN`（上流に `NaN` 入力を含む等）でも hinge が
+            // 黙って 0 に潰れてしまう欠陥があった（codex-review 指摘・
+            // PR #2286）。`NaN` を伝播する [`nan_propagating_max_f64`]
+            // で hinge を適用し、非有限値を隠さない。
+            nan_propagating_max_f64(cos - margin as f64, 0.0)
         };
         total += loss_i;
     }
@@ -4538,7 +4599,11 @@ pub(crate) fn margin_ranking_loss_forward(
     let mut total: f64 = 0.0;
     for i in 0..numel {
         let raw = -(y_data[i] as f64) * (x1_data[i] as f64 - x2_data[i] as f64) + margin as f64;
-        total += raw.max(0.0);
+        // `raw.max(0.0)` は `raw` が `NaN` のとき `0.0` を返し hinge が
+        // 黙って消えてしまうため、`NaN` を伝播する
+        // [`nan_propagating_max_f64`] を使う（codex-review 指摘・
+        // PR #2286）。
+        total += nan_propagating_max_f64(raw, 0.0);
     }
 
     let out = match reduction {
@@ -4666,7 +4731,11 @@ pub(crate) fn triplet_margin_loss_forward(
             &params,
         );
         let d_neg = stats.an_coeff * stats.d_an + (1.0 - stats.an_coeff) * stats.d_pn;
-        total += (stats.d_ap - d_neg + margin).max(0.0);
+        // `.max(0.0)` は左辺が `NaN`（`p_norm_f64` の overflow 由来を
+        // 含む）のとき `0.0` を返し hinge が黙って消えてしまうため、
+        // `NaN` を伝播する [`nan_propagating_max_f64`] を使う
+        // （codex-review 指摘・PR #2286）。
+        total += nan_propagating_max_f64(stats.d_ap - d_neg + margin, 0.0);
     }
 
     let out = match reduction {

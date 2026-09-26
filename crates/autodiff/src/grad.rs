@@ -7782,7 +7782,10 @@ fn cosine_embedding_loss_vjp(
             m2 += b * b;
             dot += a * b;
         }
-        let denom = (m1 * m2).sqrt();
+        // forward（`eval::cosine_embedding_loss_forward`）と同じ理由で
+        // 各ノルムを先に `sqrt` してから乗じる（`(m1 * m2).sqrt()` の
+        // 中間積 overflow を避ける。codex-review 指摘・PR #2286）。
+        let denom = m1.sqrt() * m2.sqrt();
         let cos = dot / denom;
         let y_i = y_v as f64;
         // `y == 1` は常に流す。`y == -1` は hinge（`cos − margin >= 0`）

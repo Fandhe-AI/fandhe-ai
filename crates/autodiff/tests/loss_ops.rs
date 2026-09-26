@@ -600,6 +600,40 @@ fn cosine_embedding_loss_negative_label_below_margin_is_zero() {
     assert!(scalar(&loss.to_tensor()).abs() < 1e-6);
 }
 
+// 同方向の極端な大きさのベクトル（`f32::MAX`）は cos ≈ 1 のはずで、
+// `y == 1` の損失（`1 - cos`）は 0 に近い有限値になるべき
+// （codex-review 指摘・PR #2286。`(m1 * m2).sqrt()` の中間積 overflow
+// 経路の回帰）。
+#[test]
+fn cosine_embedding_loss_extreme_magnitude_same_direction_stays_finite() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[f32::MAX, f32::MAX], &[2]));
+    let x2 = tape.var(&f32_tensor(&[f32::MAX, f32::MAX], &[2]));
+    let y = f32_tensor(&[1.0], &[]);
+
+    let loss = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap();
+    let got = scalar(&loss.to_tensor());
+    assert!(got.is_finite(), "got={got}");
+    assert!(
+        got.abs() < 1e-3,
+        "cos は約 1 のはずで loss は約 0: got={got}"
+    );
+}
+
+// `NaN` を含む入力（`y == -1` の hinge 分岐）は損失も `NaN` を伝播
+// すべきで、`f64::max(0.0)` の NaN 消失により黙って 0 に潰れては
+// ならない（codex-review 指摘・PR #2286）。
+#[test]
+fn cosine_embedding_loss_negative_label_nan_input_propagates_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[f32::NAN, 0.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let y = f32_tensor(&[-1.0], &[]);
+
+    let loss = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.5, Reduction::Mean).unwrap();
+    assert!(scalar(&loss.to_tensor()).is_nan());
+}
+
 #[test]
 fn cosine_embedding_loss_empty_batch_is_zero() {
     let tape = Tape::new_with_ops(common::naive_ops());
@@ -697,6 +731,20 @@ fn margin_ranking_loss_forward_matches_analytic_value() {
 
     let loss = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.5, Reduction::Sum).unwrap();
     assert!(scalar(&loss.to_tensor()).abs() < 1e-6);
+}
+
+// `NaN` を含む入力は `raw` を `NaN` にし、損失も `NaN` を伝播すべきで、
+// `f64::max(0.0)` の NaN 消失により黙って 0 に潰れてはならない
+// （codex-review 指摘・PR #2286）。
+#[test]
+fn margin_ranking_loss_nan_input_propagates_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[f32::NAN], &[1]));
+    let x2 = tape.var(&f32_tensor(&[1.0], &[1]));
+    let y = f32_tensor(&[1.0], &[1]);
+
+    let loss = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.5, Reduction::Mean).unwrap();
+    assert!(scalar(&loss.to_tensor()).is_nan());
 }
 
 #[test]
@@ -800,6 +848,34 @@ fn triplet_margin_loss_swap_selects_smaller_negative_distance() {
     assert!((scalar(&loss.to_tensor()) - 1.5).abs() < 1e-3);
 }
 
+// 有効な `p`（`p >= 1.0` 制約を満たす `p=1024`）と現実的な差分値
+// （`|diff_i| <= 3`）でも、素直な `Σ|v_i|^p` の計算は `|v_i|^p` 自体が
+// `f64` の範囲を超えて overflow し、`d_ap`/`d_an` が `inf` になって
+// `inf - inf = NaN` の損失・勾配を生む欠陥があった（codex-review 指摘・
+// PR #2286）。overflow-safe なスケール形（`p_norm_f64`）への修正で
+// forward・backward とも有限値を維持することを確認する。
+#[test]
+fn triplet_margin_loss_large_p_stays_finite_for_forward_and_backward() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[3.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 1.0], &[2]));
+    let options = TripletMarginOptions::default().p(1024.0);
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    let got = scalar(&loss.to_tensor());
+    // p=1024 では p ノルムは実質 L∞（最大要素の絶対値）に収束するため
+    // d_ap≈3・d_an≈1・loss=max(0, 3-1+margin(1.0))≈3。
+    assert!(got.is_finite(), "got={got}");
+    assert!((got - 3.0).abs() < 1e-2, "got={got}");
+
+    let grads = tape.backward(&loss).unwrap();
+    for var in [&a, &p, &n] {
+        let g = dense(grads.get(var).unwrap().expect("hinge 有効のため到達する"));
+        assert!(g.iter().all(|v| v.is_finite()), "grad={g:?}");
+    }
+}
+
 #[test]
 fn triplet_margin_loss_rejects_non_finite_p() {
     let tape = Tape::new_with_ops(common::naive_ops());
@@ -822,6 +898,21 @@ fn triplet_margin_loss_rejects_shape_mismatch() {
 
     let err = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Mean).unwrap_err();
     assert!(matches!(err, AutodiffError::Shape(_)));
+}
+
+// `NaN` を含む入力は距離統計を `NaN` にし、損失も `NaN` を伝播すべきで、
+// `f64::max(0.0)` の NaN 消失により黙って 0 に潰れてはならない
+// （codex-review 指摘・PR #2286）。
+#[test]
+fn triplet_margin_loss_nan_input_propagates_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[f32::NAN, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 4.0], &[2]));
+    let options = TripletMarginOptions::default();
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    assert!(scalar(&loss.to_tensor()).is_nan());
 }
 
 #[test]
