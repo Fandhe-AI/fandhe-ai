@@ -130,7 +130,9 @@ Keras `fit` の既定 `shuffle=True` とは異なり、`DataLoaderConfig::new`
 3.1 冒頭の「目的・スコープ」節を参照。callbacks・`validation_data`・
 LR スケジューラ連携は #1763 で実装済み（`docs/compat-callbacks-design.md`）。
 metrics は #2072 で実装済み（`docs/compat-metrics-design.md`）。
-`DataLoader` 直接入力は引き続き対象外のまま。
+`DataLoader` 直接入力は引き続き対象外のまま。class_weight・
+sample_weight・validation_split は #2177 で設計記録済み・facade 公開は
+承認待ち（`docs/compat-fit-sample-weighting-decision.md`）。
 
 ## 4. 正しさの検証
 

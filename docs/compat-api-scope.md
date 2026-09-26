@@ -1056,6 +1056,21 @@ compat_sequential_lbfgs_manual.rs`。`fandhe_ai_autodiff` 直接 import
 契約）。詳細な保留の根拠・承認後の実装設計は
 `docs/autodiff-lbfgs-decision.md` §7・§8。
 
+**#2177（`fit()` の class_weight・sample_weight・validation_split
+対応）は経路 2 未適用のまま承認待ちで保留した。** コード変更なし
+（`#[cfg(doctest)]` 限定の非公開足場 1 件を除く）。イシュー本文の
+承認事項節が `FitConfig` への直接フィールド追加を明記しているが、
+公開済み `FitConfig`（`Copy + Eq` derive・`crates/facade/tests/
+api_surface.rs` の `PartialEq` 固定テストあり）にそのまま適用すると
+0.9.0 公開 API 非破壊契約に反するため、非破壊な代替設計
+（`FitConfig::validation_split`・別型 `FitWeights<'a>`・新入口
+`fit_with_weights`）を承認依頼用に記録した。`crates/facade/src/
+lib.rs::FitWeightingHoldDoctestGuard`（正のプローブ doctest）＋
+`crates/facade/tests/api_surface.rs` のテスト（doctest ドリフト検査
+2 件・facade 再エクスポート／独自宣言の否定ガード・`FitConfig` の
+`Copy + Eq` 維持固定）で機械固定した。詳細な承認事項・意味論・
+実装スケッチは `docs/compat-fit-sample-weighting-decision.md` §2〜§7。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |

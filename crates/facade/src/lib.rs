@@ -4717,3 +4717,132 @@ struct CompileLossVariantsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct CallbacksLoggersHoldDoctestGuard;
+
+/// イシュー #2177（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// `MhaOptionsHoldDoctestGuard`（#2163）と同型の「正のプローブ 1
+/// ブロック方式」を採る。
+///
+/// 候補の公開面は 2 種に分かれる: (a) まだ存在しない新規型 `FitWeights`
+/// （型名の glob 衝突プローブ）、(b) 既存の公開型 `fandhe_ai::compat::
+/// {FitConfig, Sequential}` へのメソッド追加（トレイトプローブ）。
+///
+/// (a) `__fandhe_fit_weighting_hold_probe::FitWeights` をローカル
+/// 宣言する。facade が同名の型を `pub use`／`pub struct`／`pub type` の
+/// いずれで公開しても、`use fandhe_ai::compat::*;` の glob が同名を
+/// 持ち込み、ローカル定義との衝突（E0659）でコンパイルが失敗する
+/// （`CsvLogger` 等〈`CallbacksLoggersHoldDoctestGuard`〉と同方式）。
+///
+/// (b) `validation_split`／`class_weight`／`sample_weight` を
+/// `fandhe_ai::compat::FitConfig` へ、`fit_with_weights`／
+/// `fit_weighted` を `fandhe_ai::compat::Sequential` へ実装する
+/// `__FandheFitWeightHoldProbe` トレイトの衝突プローブ（`
+/// __FandheMhaOptionsAddProbe` と同方式）。`class_weight`／
+/// `sample_weight` を `FitConfig` 側のプローブに含めるのは、受入基準の
+/// 字面（`FitConfig` へ直接フィールド追加）どおりに実装すると
+/// `#[derive(Copy, Eq)]`（`crates/facade/src/compat/training.rs:175`）
+/// と衝突し 0.9.0 非破壊契約に反するため、その禁止された実装経路
+/// 自体も検出対象に含める設計判断による（`docs/compat-fit-sample-
+/// weighting-decision.md` §2）。**UFCS 形のみ**（`fandhe_ai::compat::
+/// FitConfig::validation_split(cfg)` 等）で呼ぶ（`FitConfig` の
+/// ビルダーは値で `self` を取る inherent メソッド、`Sequential::fit*`
+/// は `&mut self` を取る inherent メソッドのため、メソッド呼び出し形
+/// だと inherent 側が優先解決され衝突を検出できない——
+/// `MhaOptionsHoldDoctestGuard` doc の同一理由）。本プローブの
+/// トレイトメソッドはいずれも引数なし `&self` のみを取るため、facade
+/// 側に実引数を要求する本物の実装が追加されれば UFCS 呼び出しの引数
+/// 個数・型が一致せずコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// fit_weighting_hold_doctest_globs_all_pub_modules`・
+/// `fit_weighting_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_fit_weighting_items`・
+/// `fit_config_keeps_copy_eq_for_0_9_0_compat`）との多層防御の位置
+/// づけは `docs/compat-fit-sample-weighting-decision.md` §7 を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_fit_weighting_hold_probe {
+///     pub struct FitWeights;
+/// }
+/// use __fandhe_fit_weighting_hold_probe::*;
+///
+/// struct __FandheFitWeightHoldMarker;
+///
+/// trait __FandheFitWeightHoldProbe {
+///     fn validation_split(&self) -> __FandheFitWeightHoldMarker;
+///     fn class_weight(&self) -> __FandheFitWeightHoldMarker;
+///     fn sample_weight(&self) -> __FandheFitWeightHoldMarker;
+///     fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker;
+///     fn fit_weighted(&self) -> __FandheFitWeightHoldMarker;
+/// }
+///
+/// impl __FandheFitWeightHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn validation_split(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn class_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn sample_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+/// }
+///
+/// impl __FandheFitWeightHoldProbe for fandhe_ai::compat::Sequential {
+///     fn validation_split(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn class_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn sample_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+/// }
+///
+/// fn __probe(_: FitWeights, cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::FitConfig::validation_split(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::FitConfig::class_weight(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::FitConfig::sample_weight(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::Sequential::fit_with_weights(seq);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::Sequential::fit_weighted(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct FitWeightingHoldDoctestGuard;
