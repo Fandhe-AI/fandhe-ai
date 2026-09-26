@@ -54,19 +54,27 @@
 //!   `W = Σ_{非 ignore} w[t_s]`。
 //!   `L_s = (1−ε)·w[t_s]·(−lp_{t_s}) + (ε/C)·Σ_c w_c·(−lp_c)`
 //!   （ignore されたサンプルは寄与 0・`W` にも含めない）。`Mean` は
-//!   `(Σ_s L_s)/W`、`Sum` は `Σ_s L_s`。`W == 0`（全サンプル ignore、
-//!   または重み和が 0）は損失 `0.0`・勾配 `0` を返す（既存 `mse_loss`
-//!   の `n == 0 → 0.0` 規約と同型）。蓄積は `f64`・index 順で行い
-//!   最後に 1 回だけ `f32` へ downcast する（詳細は `crate::eval::
-//!   cross_entropy_loss_with_options_forward`／`crate::grad::
-//!   cross_entropy_loss_with_options_vjp` doc 参照）。
+//!   `(Σ_s L_s)/W`、`Sum` は `Σ_s L_s`。全サンプル ignore、または
+//!   `class_weight` の全クラス重み和（`Σ_c w_c`）が 0 のときは
+//!   `Mean`／`Sum` いずれも損失 `0.0`・勾配 `0`（既存 `mse_loss` の
+//!   `n == 0 → 0.0` 規約と同型）。`W == 0` だが `Σ_c w_c != 0`
+//!   （target クラスの重みのみ 0）のときは `Mean`／`Sum` で扱いが
+//!   異なる: `Sum` は `Σ_s L_s`（smoothing 項の非ゼロ寄与を反映）、
+//!   `Mean` は `Σ_s L_s / 0` が未定義になるため `0.0`・勾配 `0`
+//!   （2026-09-26 是正・codex-review 指摘・PR #2283。詳細は
+//!   `docs/autodiff-loss-ops-decision.md` §2.2）。蓄積は `f64`・
+//!   index 順で行い最後に 1 回だけ `f32` へ downcast する（詳細は
+//!   `crate::eval::cross_entropy_loss_with_options_forward`／
+//!   `crate::grad::cross_entropy_loss_with_options_vjp` doc 参照）。
 //!
 //! **PyTorch との差分**（`docs/autodiff-loss-ops-decision.md` §6）:
 //! - `ignore_index` は PyTorch の既定 `-100` を採用せず、既定
 //!   `None`（無効）とする。明示指定時のみ有効になる。
-//! - 全サンプル ignore、または `class_weight` の重み和が 0 のとき、
-//!   PyTorch は `NaN` を返すが、本実装は `0.0`（損失・勾配とも）を
-//!   返す（`Op::MseLoss` の空バッチ規約を踏襲する安全側の判断）。
+//! - 全サンプル ignore、または `class_weight` の全クラス重み和が
+//!   0 のとき、PyTorch は `NaN` を返すが、本実装は `0.0`（損失・
+//!   勾配とも）を返す（`Op::MseLoss` の空バッチ規約を踏襲する
+//!   安全側の判断）。`W` のみが 0（他クラスは非ゼロ）の場合は上記
+//!   のとおり `Mean`／`Sum` で扱いが分かれる。
 //! - `class_weight` は非負値のみ許容する（PyTorch は負値も受け付ける
 //!   が、負の重みは損失の単調性が崩れるため fail-closed に拒否する
 //!   安全側の判断）。
