@@ -61,6 +61,13 @@ impl Default for BatchNormAttrs {
 /// 4. `scale`／`B`／`input_mean`／`input_var` の rank が 1 以外なら
 ///    [`OpError::RankMismatch`]、要素数が `C`（`x.shape()[1]`）と一致しな
 ///    ければ [`OpError::LengthMismatch`]（ブロードキャストは行わない）
+/// 5. `input_var` の各チャネル値が非負（`v < 0.0 || v.is_nan()` を拒否
+///    条件とし、負値・`NaN` の双方を同じ条件で弾く）でなければ
+///    [`OpError::InvalidBatchNormAttribute`]。`input_var` は ONNX モデル（外部入力）
+///    由来の値であり、負値をそのまま `sqrt` へ渡すと `rstd` が `NaN` に
+///    汚染され出力全体へ静かに伝播する（OWASP A03。`.claude/rules/
+///    security.md`。`x` 自体の `NaN` 伝播〈`nan_propagates` テスト〉とは
+///    異なり、こちらは属性値の事前検証で fail-closed に拒否する）
 pub fn batch_normalization(
     x: &Tensor<f32>,
     scale: &Tensor<f32>,
@@ -153,6 +160,23 @@ pub fn batch_normalization(
     let var_slice = var_c.as_slice().ok_or(OpError::NonContiguousInternal(
         "BatchNormalization(input_var)",
     ))?;
+
+    // `input_var` は ONNX モデル（外部入力）由来の分散値。負値を検証せず
+    // `sqrt` へ渡すと `rstd` が `NaN` になり出力全体が静かに汚染される
+    // （OWASP A03。`.claude/rules/security.md`）ため、計算ループへ入る前に
+    // 全チャネルを検証する（`v >= 0.0` は `NaN` に対して常に偽になるため
+    // 負値・`NaN` の両方を同じ条件で拒否できる）。
+    for (ch, &v) in var_slice.iter().enumerate() {
+        // `v < 0.0 || v.is_nan()` は `!(v >= 0.0)` と同値だが、`clippy::
+        // neg_cmp_op_on_partial_ord` を避けつつ「負値・NaN のどちらも拒否
+        // する」意図を明示する（`PartialOrd` の否定比較は非全順序型で
+        // 直感に反する場合があるため、`f32` でも明示形を使う）。
+        if v < 0.0 || v.is_nan() {
+            return Err(OpError::InvalidBatchNormAttribute {
+                reason: format!("input_var[{ch}] は非負でなければならない（実際 {v}）"),
+            });
+        }
+    }
 
     let numel = n * c * spatial;
     let mut out = vec![0f32; numel];
@@ -350,6 +374,37 @@ mod tests {
                 actual: 3,
             }
         ));
+    }
+
+    #[test]
+    fn negative_variance_rejected() {
+        // `input_var` に負値を含む ONNX モデルは `sqrt` へそのまま渡すと
+        // `NaN` が静かに伝播するため、計算前に fail-closed で拒否する
+        // （codex-review 指摘・PR #2312。`crates/onnx-interop/src/ops/
+        // batch_norm.rs` の検証順序 5.）。
+        let xt = Tensor::<f32>::zeros(&[1, 2, 2, 2]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let bias = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let mean = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let var = Tensor::<f32>::new(vec![1.0, -0.5], &[2]).unwrap();
+        let err = batch_normalization(&xt, &scale, &bias, &mean, &var, &BatchNormAttrs::default())
+            .unwrap_err();
+        assert!(matches!(err, OpError::InvalidBatchNormAttribute { .. }));
+    }
+
+    #[test]
+    fn nan_variance_rejected() {
+        // `NaN` は `v >= 0.0` が常に偽になるため負値と同じ経路で拒否される
+        // ことを確認する（比較演算子の落とし穴〈`NaN < 0.0` も偽〉を突いた
+        // 迂回を防ぐ）。
+        let xt = Tensor::<f32>::zeros(&[1, 2, 2, 2]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let bias = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let mean = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let var = Tensor::<f32>::new(vec![1.0, f32::NAN], &[2]).unwrap();
+        let err = batch_normalization(&xt, &scale, &bias, &mean, &var, &BatchNormAttrs::default())
+            .unwrap_err();
+        assert!(matches!(err, OpError::InvalidBatchNormAttribute { .. }));
     }
 
     #[test]
