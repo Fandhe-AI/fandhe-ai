@@ -4423,6 +4423,310 @@ pub(crate) fn cross_entropy_loss_with_options_forward(
     build_tensor(vec![loss], &[])
 }
 
+/// `p` ノルム（`f64`）の劣勾配で使う `sign(0) = 0` 関数（イシュー
+/// #2167・`grad.rs::l1_grad_sign` の `f64` 版。`f64::signum` は
+/// `sign(0) = 1`／`sign(-0) = -1` を返すため使わない）。
+pub(crate) fn sign0_f64(d: f64) -> f64 {
+    if d.is_nan() {
+        f64::NAN
+    } else if d > 0.0 {
+        1.0
+    } else if d < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// ベクトル `v`（`f64`）の `p` ノルム（イシュー #2167。`triplet_margin_
+/// loss` の距離計算で使う）。`pnorm_vjp`（`grad.rs`）のような
+/// overflow-safe なスケール形は採らず素直な `Σ|v_i|^p` の `1/p` 乗を
+/// 計算する——`triplet_margin_loss` の距離差はネットワーク出力の差分
+/// スケールが想定され、`rmsnorm`／`reduce_ops::norm_p` のような
+/// 大規模縮約軸ほどの overflow リスクはない（意図的なスコープ限定。
+/// 将来 overflow が実測で問題になれば `pnorm_vjp` 方式へ揃える）。
+fn p_norm_f64(v: &[f64], p: f64) -> f64 {
+    v.iter().map(|d| d.abs().powf(p)).sum::<f64>().powf(1.0 / p)
+}
+
+/// `p_norm_f64` の勾配（`d(‖v‖_p)/d(v_i) = sign(v_i)·|v_i|^(p−1) /
+/// ‖v‖_p^(p−1)`。`‖v‖_p == 0` の要素は勾配 `0`——PyTorch
+/// `norm_backward` の `masked_fill` と同じ扱い。イシュー #2167）。
+pub(crate) fn p_norm_grad_f64(v: &[f64], p: f64, norm: f64) -> Vec<f64> {
+    if norm == 0.0 {
+        return vec![0.0; v.len()];
+    }
+    v.iter()
+        .map(|&d| sign0_f64(d) * d.abs().powf(p - 1.0) / norm.powf(p - 1.0))
+        .collect()
+}
+
+/// Cosine 類似度に基づく埋め込み損失の forward（PyTorch
+/// `nn.CosineEmbeddingLoss` 相当。イシュー #2167・親イシュー #2131）。
+/// shape・`y` 値検査は呼び出し元（`crate::loss_ops::
+/// cosine_embedding_loss`）が済ませている前提。数式・`f64` 契約は
+/// `crate::loss_ops::cosine_embedding_loss` doc 参照。
+pub(crate) fn cosine_embedding_loss_forward(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    y: &Tensor<f32>,
+    margin: f32,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    const EPSILON: f64 = 1e-12;
+    let shape = x1.shape();
+    let (n, d) = if shape.len() == 1 {
+        (1usize, shape[0])
+    } else {
+        (shape[0], shape[1])
+    };
+    let x1_data = dense_vec(x1);
+    let x2_data = dense_vec(x2);
+    let y_data = dense_vec(y);
+
+    let mut total: f64 = 0.0;
+    for (i, &y_v) in y_data.iter().enumerate().take(n) {
+        let base = i * d;
+        let mut m1 = EPSILON;
+        let mut m2 = EPSILON;
+        let mut dot = 0.0f64;
+        for k in 0..d {
+            let a = x1_data[base + k] as f64;
+            let b = x2_data[base + k] as f64;
+            m1 += a * a;
+            m2 += b * b;
+            dot += a * b;
+        }
+        let cos = dot / (m1 * m2).sqrt();
+        let y_i = y_v as f64;
+        let loss_i = if y_i > 0.0 {
+            1.0 - cos
+        } else {
+            (cos - margin as f64).max(0.0)
+        };
+        total += loss_i;
+    }
+
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if n == 0 {
+                0.0
+            } else {
+                (total / n as f64) as f32
+            }
+        }
+        crate::var::Reduction::Sum => total as f32,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// マージンランキング損失の forward（PyTorch `nn.MarginRankingLoss`
+/// 相当。イシュー #2167）。数式・`f64` 契約は `crate::loss_ops::
+/// margin_ranking_loss` doc 参照。
+pub(crate) fn margin_ranking_loss_forward(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    y: &Tensor<f32>,
+    margin: f32,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let x1_data = dense_vec(x1);
+    let x2_data = dense_vec(x2);
+    let y_data = dense_vec(y);
+    let numel = x1_data.len();
+
+    let mut total: f64 = 0.0;
+    for i in 0..numel {
+        let raw = -(y_data[i] as f64) * (x1_data[i] as f64 - x2_data[i] as f64) + margin as f64;
+        total += raw.max(0.0);
+    }
+
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                (total / numel as f64) as f32
+            }
+        }
+        crate::var::Reduction::Sum => total as f32,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// `triplet_margin_loss_forward`／`triplet_margin_loss_vjp`（`grad.rs`）
+/// が共有する、サンプル 1 件分の距離統計（イシュー #2167）。
+/// `d_ap`／`d_an`／`d_pn`（`swap` 無効時は未使用）と、`d_neg` の
+/// 選択元を示す `an_coeff`（`d_neg = an_coeff·d_an + (1−an_coeff)·d_pn`。
+/// `swap` 無効時は常に `1.0`、有効時は `d_an <= d_pn` なら `1.0`・
+/// `d_an > d_pn` なら `0.0`・同値なら `0.5`——PyTorch `min.other` の
+/// 同値時 VJP 契約と同じ等分）を持つ。
+pub(crate) struct TripletDistanceStats {
+    pub(crate) d_ap: f64,
+    pub(crate) d_an: f64,
+    pub(crate) d_pn: f64,
+    pub(crate) an_coeff: f64,
+}
+
+/// `triplet_distance_stats` のスカラーオプション（`p`・`eps`・
+/// `swap`）をまとめる。3 入力テンソル＋添字 2 個に加えて渡すと
+/// 引数過多（clippy `too_many_arguments`）になるための束ね（イシュー
+/// #2167）。
+pub(crate) struct TripletDistanceParams {
+    pub(crate) p: f64,
+    pub(crate) eps: f64,
+    pub(crate) swap: bool,
+}
+
+/// `TripletDistanceStats` を計算する（`triplet_margin_loss_forward`／
+/// `grad.rs::triplet_margin_loss_vjp` の共有ヘルパー）。`diff_ap`・
+/// `diff_an`・`diff_pn`（`eps` を加算済みの差分ベクトル。呼び出し元へ
+/// 返し、勾配計算での再利用を許す）も返す。
+pub(crate) fn triplet_distance_stats(
+    anchor: &[f64],
+    positive: &[f64],
+    negative: &[f64],
+    base: usize,
+    d: usize,
+    params: &TripletDistanceParams,
+) -> (TripletDistanceStats, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let TripletDistanceParams { p, eps, swap } = *params;
+    let mut diff_ap = vec![0.0f64; d];
+    let mut diff_an = vec![0.0f64; d];
+    let mut diff_pn = vec![0.0f64; d];
+    for k in 0..d {
+        diff_ap[k] = anchor[base + k] - positive[base + k] + eps;
+        diff_an[k] = anchor[base + k] - negative[base + k] + eps;
+        if swap {
+            diff_pn[k] = positive[base + k] - negative[base + k] + eps;
+        }
+    }
+    let d_ap = p_norm_f64(&diff_ap, p);
+    let d_an = p_norm_f64(&diff_an, p);
+    let d_pn = if swap { p_norm_f64(&diff_pn, p) } else { 0.0 };
+    // `!swap` のときは常に `d_an` を選ぶ（`d_pn` は未計算の `0.0`）。
+    // `swap` 有効時は `d_an <= d_pn` を選ぶ（同値は下の `else` 節で
+    // `0.5` に等分）。前者と `d_an < d_pn` はどちらも係数 `1.0` を
+    // 返すため 1 branch にまとめる（clippy `if_same_then_else` 回避）。
+    let an_coeff = if !swap || d_an < d_pn {
+        1.0
+    } else if d_an > d_pn {
+        0.0
+    } else {
+        0.5
+    };
+    (
+        TripletDistanceStats {
+            d_ap,
+            d_an,
+            d_pn,
+            an_coeff,
+        },
+        diff_ap,
+        diff_an,
+        diff_pn,
+    )
+}
+
+/// トリプレットマージン損失の forward（PyTorch `nn.TripletMarginLoss`
+/// 相当。イシュー #2167）。数式・境界規約は `crate::loss_ops::
+/// triplet_margin_loss` doc 参照。shape 検査（rank 1 or 2・3 入力の
+/// shape 一致）・オプション値検査は呼び出し元が済ませている前提。
+pub(crate) fn triplet_margin_loss_forward(
+    anchor: &Tensor<f32>,
+    positive: &Tensor<f32>,
+    negative: &Tensor<f32>,
+    options: &crate::loss_ops::TripletMarginOptions,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let shape = anchor.shape();
+    let (n, d) = if shape.len() == 1 {
+        (1usize, shape[0])
+    } else {
+        (shape[0], shape[1])
+    };
+    let anchor_data: Vec<f64> = dense_vec(anchor).iter().map(|&v| v as f64).collect();
+    let positive_data: Vec<f64> = dense_vec(positive).iter().map(|&v| v as f64).collect();
+    let negative_data: Vec<f64> = dense_vec(negative).iter().map(|&v| v as f64).collect();
+    let p = options.p_value() as f64;
+    let eps = options.eps_value() as f64;
+    let margin = options.margin_value() as f64;
+    let swap = options.swap_value();
+
+    let params = TripletDistanceParams { p, eps, swap };
+    let mut total: f64 = 0.0;
+    for i in 0..n {
+        let base = i * d;
+        let (stats, _, _, _) = triplet_distance_stats(
+            &anchor_data,
+            &positive_data,
+            &negative_data,
+            base,
+            d,
+            &params,
+        );
+        let d_neg = stats.an_coeff * stats.d_an + (1.0 - stats.an_coeff) * stats.d_pn;
+        total += (stats.d_ap - d_neg + margin).max(0.0);
+    }
+
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if n == 0 {
+                0.0
+            } else {
+                (total / n as f64) as f32
+            }
+        }
+        crate::var::Reduction::Sum => total as f32,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// ポアソン負対数尤度損失の forward（PyTorch `nn.PoissonNLLLoss`
+/// 相当。イシュー #2167）。数式・境界規約（`full` 時の Stirling 項
+/// マスク）は `crate::loss_ops::poisson_nll_loss` doc 参照。shape・
+/// オプション値検査は呼び出し元が済ませている前提。
+pub(crate) fn poisson_nll_loss_forward(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    options: &crate::loss_ops::PoissonNllOptions,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let numel = input_data.len();
+    let log_input = options.log_input_value();
+    let full = options.full_value();
+    let eps = options.eps_value() as f64;
+
+    let mut total: f64 = 0.0;
+    for i in 0..numel {
+        let x = input_data[i] as f64;
+        let t = target_data[i] as f64;
+        let mut loss_i = if log_input {
+            x.exp() - t * x
+        } else {
+            x - t * (x + eps).ln()
+        };
+        if full && t > 1.0 {
+            loss_i += t * t.ln() - t + 0.5 * (2.0 * std::f64::consts::PI * t).ln();
+        }
+        total += loss_i;
+    }
+
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                (total / numel as f64) as f32
+            }
+        }
+        crate::var::Reduction::Sum => total as f32,
+    };
+    build_tensor(vec![out], &[])
+}
+
 #[cfg(test)]
 mod cross_entropy_with_options_empty_tensor_overflow_tests {
     use super::*;

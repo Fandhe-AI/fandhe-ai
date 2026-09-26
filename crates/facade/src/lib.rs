@@ -3781,20 +3781,26 @@ struct RnnConfigHoldDoctestGuard;
 struct PixelShuffleHoldDoctestGuard;
 
 /// イシュー #2166（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// イシュー #2167（親 #2131）で、距離ベースの損失 3 種
+/// （`cosine_embedding_loss`・`margin_ranking_loss`・
+/// `triplet_margin_loss`）と `poisson_nll_loss` を同じ保留対象へ追加
+/// した（6 関数名。`crate::loss_ops` モジュール doc「facade 非公開
+/// （意図的）」と同じ判断枠組み）。
 /// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカルの自由
 /// 関数群（`__fandhe_loss_hold_probe::loss_ops::{l1_loss,
-/// cross_entropy_loss_with}`）とトレイト（`__FandheLossHoldProbe`）を
-/// 導入し、実際に使う関数を書く。facade がどの経路（`pub use
-/// fandhe_ai_autodiff::loss_ops;` のようなモジュール再エクスポート・
-/// `Var` への inherent メソッド追加・別名 `pub use`）で `loss_ops`
-/// という名前や 2 個の関数名を公開しても、ローカル定義との glob 衝突
-/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
-/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
-/// `x.l1_loss()` 呼び出しが実際の `Var::l1_loss(&self, target, reduction)`
-/// 〈引数数不一致〉に解決されて型・引数数エラーになる）でコンパイルが
-/// 失敗する。
+/// cross_entropy_loss_with, cosine_embedding_loss, margin_ranking_loss,
+/// triplet_margin_loss, poisson_nll_loss}`）とトレイト
+/// （`__FandheLossHoldProbe`）を導入し、実際に使う関数を書く。facade が
+/// どの経路（`pub use fandhe_ai_autodiff::loss_ops;` のようなモジュール
+/// 再エクスポート・`Var` への inherent メソッド追加・別名 `pub use`）で
+/// `loss_ops` という名前や 6 個の関数名を公開しても、ローカル定義との
+/// glob 衝突（モジュール名の場合）または呼び出しシグネチャの不一致
+/// （inherent メソッドがトレイトメソッドより優先解決されるため、引数
+/// なしの `x.l1_loss()` 呼び出しが実際の `Var::l1_loss(&self, target,
+/// reduction)`〈引数数不一致〉に解決されて型・引数数エラーになる）で
+/// コンパイルが失敗する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// loss_ops_hold_doctest_globs_all_pub_modules`・`loss_ops_hold_
@@ -3826,6 +3832,10 @@ struct PixelShuffleHoldDoctestGuard;
 ///     pub mod loss_ops {
 ///         pub fn l1_loss() {}
 ///         pub fn cross_entropy_loss_with() {}
+///         pub fn cosine_embedding_loss() {}
+///         pub fn margin_ranking_loss() {}
+///         pub fn triplet_margin_loss() {}
+///         pub fn poisson_nll_loss() {}
 ///     }
 /// }
 /// use __fandhe_loss_hold_probe::*;
@@ -3835,21 +3845,37 @@ struct PixelShuffleHoldDoctestGuard;
 /// trait __FandheLossHoldProbe {
 ///     fn l1_loss(&self) -> __FandheLossMarker;
 ///     fn cross_entropy_loss_with(&self) -> __FandheLossMarker;
+///     fn cosine_embedding_loss(&self) -> __FandheLossMarker;
+///     fn margin_ranking_loss(&self) -> __FandheLossMarker;
+///     fn triplet_margin_loss(&self) -> __FandheLossMarker;
+///     fn poisson_nll_loss(&self) -> __FandheLossMarker;
 /// }
 ///
 /// impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {
 ///     fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {
 ///     fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// impl __FandheLossHoldProbe for fandhe_ai::Tape {
 ///     fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// fn __probe_free_fns() {
@@ -3858,6 +3884,10 @@ struct PixelShuffleHoldDoctestGuard;
 ///     // なり E0659 でコンパイル失敗する）。
 ///     loss_ops::l1_loss();
 ///     loss_ops::cross_entropy_loss_with();
+///     loss_ops::cosine_embedding_loss();
+///     loss_ops::margin_ranking_loss();
+///     loss_ops::triplet_margin_loss();
+///     loss_ops::poisson_nll_loss();
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
@@ -3865,16 +3895,32 @@ struct PixelShuffleHoldDoctestGuard;
 ///     let _: __FandheLossMarker = x.l1_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Var::cross_entropy_loss_with(x);
 ///     let _: __FandheLossMarker = x.cross_entropy_loss_with();
+///     let _: __FandheLossMarker = fandhe_ai::Var::cosine_embedding_loss(x);
+///     let _: __FandheLossMarker = x.cosine_embedding_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Var::margin_ranking_loss(x);
+///     let _: __FandheLossMarker = x.margin_ranking_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Var::triplet_margin_loss(x);
+///     let _: __FandheLossMarker = x.triplet_margin_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Var::poisson_nll_loss(x);
+///     let _: __FandheLossMarker = x.poisson_nll_loss();
 /// }
 ///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
 ///     let _: __FandheLossMarker = fandhe_ai::Tensor::l1_loss(x);
 ///     let _: __FandheLossMarker = x.l1_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Tensor::cosine_embedding_loss(x);
+///     let _: __FandheLossMarker = x.cosine_embedding_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Tensor::margin_ranking_loss(x);
+///     let _: __FandheLossMarker = x.margin_ranking_loss();
 /// }
 ///
 /// fn __probe_tape(x: &fandhe_ai::Tape) {
 ///     let _: __FandheLossMarker = fandhe_ai::Tape::cross_entropy_loss_with(x);
 ///     let _: __FandheLossMarker = x.cross_entropy_loss_with();
+///     let _: __FandheLossMarker = fandhe_ai::Tape::triplet_margin_loss(x);
+///     let _: __FandheLossMarker = x.triplet_margin_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Tape::poisson_nll_loss(x);
+///     let _: __FandheLossMarker = x.poisson_nll_loss();
 /// }
 /// ```
 #[cfg(doctest)]
