@@ -145,7 +145,8 @@ pub struct Sequential {
     /// 設定される optimizer／loss の組。`fit`／`evaluate` はこれが
     /// `Some` であることを前提とする（未設定なら `InvalidArgument`）。
     /// `Compiled`（`OptimizerState` 経由で `crate::optim::{Sgd, AdamW,
-    /// Adam}` を保持）は本クレート内でのみ構築・参照する非公開型で、
+    /// Adam, RmsProp, Adagrad, Lamb}`（イシュー #2170 で後 3 者を
+    /// 追加）を保持）は本クレート内でのみ構築・参照する非公開型で、
     /// `Sequential` の他フィールドと同じく公開面には出さない。
     pub(super) compiled: Option<super::training::Compiled>,
 }
