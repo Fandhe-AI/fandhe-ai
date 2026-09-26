@@ -954,6 +954,32 @@ accumulate_tests`）は本イシューの実装スコープとして通常どお
 tolerance／baseline・`docs/spec/` は不変。承認後の完全な公開 API 案・
 数値契約は `docs/compat-grad-accumulation-decision.md` §5 を参照。
 
+**保留記録（イシュー #2184・親 #2131）**: 学習 step カスタムフック
+（Keras `Model.train_step()` 相当。`fit()` の既定バッチ処理を丸ごと
+差し替えられる機構）は `crates/facade/src/compat/training.rs::
+CustomStepHook`（非公開 `type` エイリアス）・`Sequential::run_fit` へ
+の配線まで実装済み。facade 公開面 3 件（`TrainStepFn`／
+`TrainStepOptimizer`／`TrainStepOutput`・`Sequential::
+fit_with_train_step`。本節経路 2）は、親 #2131 の「設計判断記録 →
+承認 → 実装の 2 段」規則（先例 #2171・#2173・#2176・#2178・#2179・
+#2180・#2198）に従い未承認のまま保留した。`custom_step` 引数自体・
+`#[cfg(test)]` 限定のテスト専用入口（`Sequential::
+fit_custom_step_for_test`）は既に存在し、`custom_step = None`（既存 3
+入口）は既存 `fit`／`fit_with_callbacks`／`fit_with_metrics` と bit
+完全一致する（R3）。コード変更の内訳は 2 系統: (1) フック本体
+（`crates/facade/src/compat/training.rs` の `CustomStepHook` 型・
+`fit_with_callbacks_named`／`run_fit` の `custom_step` 引数・AMP／
+勾配累積併用拒否の引数検査・テスト専用入口・`#[cfg(test)] mod
+train_step_tests`）は本イシューの実装スコープとして通常どおり
+変更・追加している。(2) 未承認のまま保留するのは**facade 公開面 3
+件**のみで、その不在は `crates/facade/src/lib.rs::
+TrainStepHoldDoctestGuard`（正のプローブ doctest）＋
+`crates/facade/tests/api_surface.rs` の 4 テスト（doctest ドリフト
+検査 2 件・facade の再エクスポート／独自宣言の否定ガードとその自己
+テスト）で機械的に固定する。`Cargo.toml`／`Cargo.lock`・tolerance／
+baseline・`docs/spec/` は不変。承認後の完全な公開 API 案・数値契約は
+`docs/compat-train-step-hook-decision.md` §5 を参照。
+
 **#2083 の設計記録は `docs/kv-cache-design.md` として完了した。**
 コード変更なし。KV キャッシュ（K-1）は既存 `Var` 演算（`cat`／
 `narrow`／`detach`・`nn/attention.rs` の `project`／`split_heads`／
