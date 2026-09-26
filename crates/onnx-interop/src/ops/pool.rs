@@ -43,7 +43,7 @@ use super::error::OpError;
 /// `strides`（`MaxPool`）・`count_include_pad`（`AveragePool`）・
 /// `storage_order`（`MaxPool`。検証のみ）を、`conv.rs::ConvAttrs` と
 /// 同じ「decode 層に依存しないプレーンな構造体」設計で受け取る。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PoolAttrs {
     /// `kernel_shape`。ONNX 仕様上必須（`conv.rs::ConvAttrs::kernel_shape`
     /// と異なり省略時の重み shape 由来の推論元が無いため）。
@@ -73,21 +73,6 @@ pub struct PoolAttrs {
     pub auto_pad: String,
 }
 
-impl Default for PoolAttrs {
-    fn default() -> Self {
-        PoolAttrs {
-            kernel_shape: Vec::new(),
-            strides: Vec::new(),
-            pads: Vec::new(),
-            dilations: Vec::new(),
-            ceil_mode: 0,
-            count_include_pad: 0,
-            storage_order: 0,
-            auto_pad: String::new(),
-        }
-    }
-}
-
 /// 窓添字 `k` から入力座標を符号安全に逆算する（`out_idx*stride +
 /// k*dilation - pad_begin`。`fandhe_ai_backend_cpu::pooling::
 /// window_input_pos`・`conv.rs` の座標計算と同型。`pad_begin` を超える
@@ -109,26 +94,39 @@ fn window_input_pos(
     unpadded.checked_sub(pad_begin)
 }
 
-/// 1 軸分の出力長を ONNX Pool 系仕様の式で計算する。
-///
-/// `eff = dilation·(kernel-1)+1`（実効カーネル幅）・`padded = in_len + pb
-/// + pe`。`floor` 時は `(padded-eff)/stride + 1`、`ceil` 時は
-/// `ceil((padded-eff)/stride) + 1` を求めたうえで、`(out-1)·stride >=
-/// in_len + pb` なら `out -= 1`（最後の窓が入力内または左パディング内で
-/// 始まらない場合は除外する。PyTorch・新しい ONNX 仕様の規則。§3.1）。
-/// すべて `checked_*` 演算で行い、`in_len == 0`・`padded < eff`・
-/// オーバーフロー・出力長 0 はいずれも [`OpError::InvalidPoolAttribute`]
-/// で拒否する。
-fn pool_out_axis_len(
-    op: &'static str,
-    in_len: usize,
+/// [`pool_out_axis_len`] の軸ごとのパラメータ（`kernel`／`stride`／
+/// `dilation`／`pad_begin`／`pad_end`）をまとめた小構造体。
+/// clippy::too_many_arguments 回避のための引数集約であり、呼び出し元
+/// （[`max_pool`]／[`average_pool`]）の H／W 軸それぞれで組み立てる。
+struct PoolAxisParams {
     k: usize,
     s: usize,
     d: usize,
     pb: usize,
     pe: usize,
+}
+
+/// 1 軸分の出力長を ONNX Pool 系仕様の式で計算する。
+///
+/// `eff = dilation·(kernel-1)+1`（実効カーネル幅）・`padded = in_len + pb
+/// + pe`。`floor` 時は `(padded-eff)/stride + 1`、`ceil` 時は
+/// `ceil((padded-eff)/stride) + 1` を求めたうえで、`(out-1)·stride >=
+///   in_len + pb` なら `out -= 1`（最後の窓が入力内または左パディング内で
+/// 始まらない場合は除外する。PyTorch・新しい ONNX 仕様の規則。§3.1）。
+/// すべて `checked_*` 演算で行い、`in_len == 0`・`padded < eff`・
+/// オーバーフロー・出力長 0 はいずれも [`OpError::InvalidPoolAttribute`]
+///   で拒否する。
+///
+/// 引数は [`PoolAxisParams`]（軸ごとの `kernel`／`stride`／`dilation`／
+/// `pad_begin`／`pad_end` をまとめた小構造体。clippy::too_many_arguments
+/// 回避のため `conv.rs` と同様の設計を踏襲する）で受け取る。
+fn pool_out_axis_len(
+    op: &'static str,
+    in_len: usize,
+    axis: PoolAxisParams,
     ceil_mode: bool,
 ) -> Result<usize, OpError> {
+    let PoolAxisParams { k, s, d, pb, pe } = axis;
     let overflow = |what: &str| OpError::InvalidPoolAttribute {
         reason: format!("{op}: 出力長計算が {what} でオーバーフローした"),
     };
@@ -416,8 +414,30 @@ pub fn max_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpErr
 
     let s4 = x4.shape().to_vec();
     let (n, c, h_in, w_in) = (s4[0], s4[1], s4[2], s4[3]);
-    let h_out = pool_out_axis_len(OP, h_in, kh, sh, dh, ph_b, ph_e, ceil_mode)?;
-    let w_out = pool_out_axis_len(OP, w_in, kw, sw, dw, pw_b, pw_e, ceil_mode)?;
+    let h_out = pool_out_axis_len(
+        OP,
+        h_in,
+        PoolAxisParams {
+            k: kh,
+            s: sh,
+            d: dh,
+            pb: ph_b,
+            pe: ph_e,
+        },
+        ceil_mode,
+    )?;
+    let w_out = pool_out_axis_len(
+        OP,
+        w_in,
+        PoolAxisParams {
+            k: kw,
+            s: sw,
+            d: dw,
+            pb: pw_b,
+            pe: pw_e,
+        },
+        ceil_mode,
+    )?;
     if !axis_windows_nonempty(h_out, kh, sh, dh, ph_b, h_in) {
         return Err(OpError::InvalidPoolAttribute {
             reason: format!("{OP}: H 軸に有効タップを持たない出力窓が存在する"),
@@ -519,8 +539,30 @@ pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, O
 
     let s4 = x4.shape().to_vec();
     let (n, c, h_in, w_in) = (s4[0], s4[1], s4[2], s4[3]);
-    let h_out = pool_out_axis_len(OP, h_in, kh, sh, dh, ph_b, ph_e, ceil_mode)?;
-    let w_out = pool_out_axis_len(OP, w_in, kw, sw, dw, pw_b, pw_e, ceil_mode)?;
+    let h_out = pool_out_axis_len(
+        OP,
+        h_in,
+        PoolAxisParams {
+            k: kh,
+            s: sh,
+            d: dh,
+            pb: ph_b,
+            pe: ph_e,
+        },
+        ceil_mode,
+    )?;
+    let w_out = pool_out_axis_len(
+        OP,
+        w_in,
+        PoolAxisParams {
+            k: kw,
+            s: sw,
+            d: dw,
+            pb: pw_b,
+            pe: pw_e,
+        },
+        ceil_mode,
+    )?;
     if !axis_windows_nonempty(h_out, kh, sh, dh, ph_b, h_in) {
         return Err(OpError::InvalidPoolAttribute {
             reason: format!("{OP}: H 軸に有効タップを持たない出力窓が存在する"),
