@@ -110,7 +110,7 @@ fn max_pool_facade_matches_internal_direct_call_bit_exact() {
     let internal_graph = build_graph(&internal_model).expect("build_graph は成功するはず");
 
     for batch in [1usize, 2usize] {
-        let numel = batch * 1 * 2 * 2;
+        let numel = batch * 2 * 2;
         let data: Vec<f32> = (0..numel).map(|i| i as f32 - 1.5).collect();
         let shape = [batch, 1, 2, 2];
 
@@ -165,7 +165,7 @@ fn conv1d_facade_matches_internal_direct_call_bit_exact() {
     let internal_graph = build_graph(&internal_model).expect("build_graph は成功するはず");
 
     for batch in [1usize, 2usize] {
-        let numel = batch * 1 * 4;
+        let numel = batch * 4;
         let data: Vec<f32> = (0..numel).map(|i| i as f32 * 0.5).collect();
         let shape = [batch, 1, 4];
 
