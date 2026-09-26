@@ -605,6 +605,19 @@ pub trait Sampler: Send {
     fn num_batches(&self) -> Option<usize> {
         None
     }
+
+    /// 呼び出し時点での残りバッチ数（既知なら `Some`。既定は
+    /// [`Self::num_batches`] と同じ epoch 全体の総数を返す）。
+    /// カーソルで進捗を追跡する実装（[`SequentialSampler`]・
+    /// [`RandomSampler`]・[`WeightedRandomSampler`]）はこれを
+    /// override し、`next_batch` 消費後も正しい残数を返す
+    /// （`ExactSizeIterator`／`Iterator::size_hint` の「残り要素数」
+    /// 契約に合わせる。レビュー指摘: イシュー #2182 review・PR 内
+    /// 是正。[`SamplerBatches::size_hint`]・[`HookedBatches::
+    /// size_hint`] が本メソッドを使う）。
+    fn remaining_batches(&self) -> Option<usize> {
+        self.num_batches()
+    }
 }
 
 /// [`Sampler`] の 3 実装が共有する「確定済み添字順列から
@@ -653,6 +666,22 @@ impl IndexBatcher {
     fn num_batches(&self, len: usize) -> usize {
         batch_count(len, self.batch_size, self.drop_last)
     }
+
+    /// 呼び出し時点でのカーソル位置を踏まえた「残りバッチ数」
+    /// （[`Batches::remaining_batches`] と同じ計算式）。[`Self::
+    /// num_batches`] は epoch 開始時の総数（カーソル非依存）のため、
+    /// `next_batch` 呼び出し後の `size_hint` にはこちらを使う
+    /// （レビュー指摘: イシュー #2182 review・PR 内是正）。
+    fn remaining_batches(&self) -> usize {
+        if self.cursor >= self.order.len() {
+            return 0;
+        }
+        batch_count(
+            self.order.len() - self.cursor,
+            self.batch_size,
+            self.drop_last,
+        )
+    }
 }
 
 /// 連番順（シャッフルなし）でバッチ添字を供給する（PyTorch
@@ -700,6 +729,10 @@ impl Sampler for SequentialSampler {
 
     fn num_batches(&self) -> Option<usize> {
         Some(self.batcher.num_batches(self.len))
+    }
+
+    fn remaining_batches(&self) -> Option<usize> {
+        Some(self.batcher.remaining_batches())
     }
 }
 
@@ -751,6 +784,10 @@ impl Sampler for RandomSampler {
 
     fn num_batches(&self) -> Option<usize> {
         Some(self.batcher.num_batches(self.len))
+    }
+
+    fn remaining_batches(&self) -> Option<usize> {
+        Some(self.batcher.remaining_batches())
     }
 }
 
@@ -840,6 +877,10 @@ impl Sampler for WeightedRandomSampler {
 
     fn num_batches(&self) -> Option<usize> {
         Some(self.batcher.num_batches(self.num_samples))
+    }
+
+    fn remaining_batches(&self) -> Option<usize> {
+        Some(self.batcher.remaining_batches())
     }
 }
 
@@ -935,7 +976,7 @@ impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
         if self.pending_error.is_some() {
             return (1, Some(1));
         }
-        match self.sampler.num_batches() {
+        match self.sampler.remaining_batches() {
             Some(n) => (n, Some(n)),
             None => (0, None),
         }
@@ -1167,7 +1208,7 @@ impl<T: Element> Iterator for HookedBatches<'_, T> {
         if self.pending_error.is_some() {
             return (1, Some(1));
         }
-        match self.sampler.num_batches() {
+        match self.sampler.remaining_batches() {
             Some(n) => (n, Some(n)),
             None => (0, None),
         }
@@ -1745,6 +1786,45 @@ mod tests {
             let actual = loader.iter().count();
             assert_eq!(Some(actual), expected, "drop_last={drop_last}");
         }
+    }
+
+    #[test]
+    fn sampler_batches_size_hint_reflects_partial_consumption() {
+        // イシュー #2182 review 指摘: `SamplerBatches::size_hint` が
+        // `Sampler::num_batches`（epoch 全体の静的値）をカーソル非依存で
+        // 返し続けると `Iterator::size_hint` の「残り要素数」契約に
+        // 反する。3 バッチ中 2 バッチ消費後の `size_hint` が残り 1
+        // バッチを正しく反映することを検証する。
+        let ds = TensorDataset::new(tensor_2d(10, 1)).unwrap();
+        let mut loader =
+            SamplerDataLoader::new(ds, SequentialSampler::new(10, 4, false).unwrap()).unwrap();
+        let mut batches = loader.iter();
+        assert_eq!(batches.size_hint(), (3, Some(3)));
+        batches.next();
+        assert_eq!(batches.size_hint(), (2, Some(2)));
+        batches.next();
+        assert_eq!(batches.size_hint(), (1, Some(1)));
+        batches.next();
+        assert_eq!(batches.size_hint(), (0, Some(0)));
+        assert!(batches.next().is_none());
+    }
+
+    #[test]
+    fn hooked_batches_size_hint_reflects_partial_consumption() {
+        // 上記 `SamplerBatches` 版と同じ契約を `HookedBatches` にも
+        // 適用する（同一の `Sampler::remaining_batches` を経由）。
+        let ds = TensorDataset::new(tensor_2d(10, 1)).unwrap();
+        let mut loader =
+            HookedDataLoader::new(ds, SequentialSampler::new(10, 4, false).unwrap()).unwrap();
+        let mut batches = loader.iter();
+        assert_eq!(batches.size_hint(), (3, Some(3)));
+        batches.next();
+        assert_eq!(batches.size_hint(), (2, Some(2)));
+        batches.next();
+        assert_eq!(batches.size_hint(), (1, Some(1)));
+        batches.next();
+        assert_eq!(batches.size_hint(), (0, Some(0)));
+        assert!(batches.next().is_none());
     }
 
     #[test]
