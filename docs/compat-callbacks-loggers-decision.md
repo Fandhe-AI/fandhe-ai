@@ -128,21 +128,25 @@ pub enum Callback {
    - 出力は epoch オブジェクトの配列。キーは CSV の列名と同じで、
      ASCII 固定のためエスケープは不要
    - 有限値は `f32` の `Display`（JSON の number 文法に合致する）
-   - 非有限値は Python `json` モジュール等で広く使われる非標準 JSON
-     拡張表記（クォートなしトークン `NaN`／`Infinity`／`-Infinity`）で
-     出力する。RFC 8259 の JSON 本体仕様には準拠しないが、
-     `json.loads`（Python の既定 `parse_constant`）・多くの JS 実装が
-     この表記を読み戻せる。CSV 側の `NaN`／`inf`／`-inf`（Rust
-     `Display`）とは字面が異なるため、読み戻し検証（§5）は
-     フォーマットごとに個別のトークン判定を使う（JSON 側は手書き
-     パーサに 3 値のリテラルトークン判定を組み込む。`serde_json` は
-     追加しない）。非有限値の読み戻し一致は §5 のとおり**値クラス一致**
-     （NaN／+Inf／-Inf の区別）で検証し、NaN の payload（元のビット
-     パターン）までは復元・検証しない（NaN の bit 表現は生成元の演算
-     経路に依存し一意に定まらないため。既存の Metal 実装の「NaN は
-     quiet NaN へ正規化しクラス一致で比較する」方針〈`.claude/rules/
-     coding-rust.md` の bias 勾配 Metal 実装節〉と同じ制約をここでも
-     踏襲する）
+   - 非有限値は RFC 8259 準拠の**クォート付き文字列トークン**
+     `"NaN"`／`"Infinity"`／`"-Infinity"` で出力する（当初案の
+     クォートなしトークンは JSON number 文法に存在せず RFC 8259 の
+     JSON 本体仕様に非準拠で、標準 JSON パーサ〈`JSON.parse`・
+     `serde_json` 既定設定等〉が読み込めないため撤回。codex-review
+     指摘・イシュー #2178 PR #2305 スレッド。クォート付き文字列は
+     RFC 8259 の string 文法にそのまま適合し、標準パーサで読み込める）。
+     フィールドの JSON 型は有限値が number・非有限値が string と
+     値によって変わるため、読み戻し側は先に文字列型かどうかを判定し
+     3 値のリテラルトークン判定へ振り分ける（CSV 側の `NaN`／`inf`／
+     `-inf`〈Rust `Display`〉とは字面が異なるため、読み戻し検証
+     （§5）はフォーマットごとに個別のトークン判定を使う。`serde_json`
+     は追加せず手書きパーサのまま）。非有限値の読み戻し一致は §5の
+     とおり**値クラス一致**（NaN／+Inf／-Inf の区別）で検証し、NaN の
+     payload（元のビットパターン）までは復元・検証しない（NaN の bit
+     表現は生成元の演算経路に依存し一意に定まらないため。既存の
+     Metal 実装の「NaN は quiet NaN へ正規化しクラス一致で比較する」
+     方針〈`.claude/rules/coding-rust.md` の bias 勾配 Metal 実装節〉
+     と同じ制約をここでも踏襲する）
 6. **書き込みの原子性・truncate／append**
    - CSV: fit 開始時に開く。`append=false` なら truncate してヘッダを
      書き、`append=true` なら追記し、ファイルが空か存在しない場合だけ
@@ -259,9 +263,10 @@ pub enum Callback {
     出力しないので、CSV／JSON インジェクション（数式注入・エスケープ
     漏れ）の経路がない
   - 非有限値は §4 の 4・5 項のとおり固定表記（CSV は Rust `Display` の
-    `NaN`／`inf`／`-inf`、JSON はクォートなしの `NaN`／`Infinity`／
-    `-Infinity` 拡張トークン）で出力する。いずれもユーザー由来の
-    文字列を含まない固定リテラルのため、不正な JSON／CSV を生まない
+    `NaN`／`inf`／`-inf`、JSON は RFC 8259 準拠のクォート付き文字列
+    `"NaN"`／`"Infinity"`／`"-Infinity"`）で出力する。いずれもユーザー
+    由来の文字列を含まない固定リテラルのため、不正な JSON／CSV を
+    生まない
   - 本番経路に `unwrap`／`expect` を置かない
 - **A08 ソフトウェア・データ整合性**
   - JSON は一時ファイル＋`rename` で原子的に書き直す。CSV は epoch
