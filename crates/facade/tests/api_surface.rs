@@ -13551,3 +13551,298 @@ fn compat_callback_enum_variants_are_exactly_expected_while_2178_on_hold() {
          callbacks-loggers-decision.md` §2 の承認事項参照）: {variants:?}"
     );
 }
+
+// #2177（親 #2131）の facade 公開保留固定（`FitWeightingHoldDoctestGuard`）。
+// `CallbacksLoggersHoldDoctestGuard`（#2178）と同型の 4 テスト構成。
+
+/// `crates/facade/src/lib.rs` の `FitWeightingHoldDoctestGuard` doc 内の
+/// doctest が glob import する `pub mod` 集合が、`src/lib.rs` の実際の
+/// `pub mod` 宣言集合と一致することを固定する（`callbacks_loggers_hold_
+/// doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn fit_weighting_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "FitWeightingHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "FitWeightingHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`fit_weighting_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`FIT_WEIGHTING_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
+/// する改変を機械的に拒否する）。
+#[test]
+fn fit_weighting_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "FitWeightingHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, FIT_WEIGHTING_HOLD_PROBE_BODY,
+        "FitWeightingHoldDoctestGuard の doctest ブロック本文（glob 以外）\
+         が固定文言 FIT_WEIGHTING_HOLD_PROBE_BODY からドリフトしている。\
+         正のプローブ（__fandhe_fit_weighting_hold_probe モジュール・\
+         __FandheFitWeightHoldProbe トレイト・__probe 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。\n--- actual ---\n{actual}"
+    );
+}
+
+/// [`fit_weighting_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `FitWeightingHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体
+/// の `use fandhe_ai::*;` は本文に含む）。
+const FIT_WEIGHTING_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_fit_weighting_hold_probe {\n\
+\x20\x20\x20\x20pub struct FitWeights;\n\
+}\n\
+use __fandhe_fit_weighting_hold_probe::*;\n\
+\n\
+struct __FandheFitWeightHoldMarker;\n\
+\n\
+trait __FandheFitWeightHoldProbe {\n\
+\x20\x20\x20\x20fn validation_split(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn class_weight(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn sample_weight(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn fit_weighted(&self) -> __FandheFitWeightHoldMarker;\n\
+}\n\
+\n\
+impl __FandheFitWeightHoldProbe for fandhe_ai::compat::FitConfig {\n\
+\x20\x20\x20\x20fn validation_split(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn class_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn sample_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheFitWeightHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn validation_split(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn class_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn sample_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(_: FitWeights, cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::validation_split(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::class_weight(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::sample_weight(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::fit_with_weights(seq);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::fit_weighted(seq);\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_fit_weighting_items`]・その
+/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/
+/// src/**`）の `pub use` から [`collect_pub_use_leaves`] で別名にする
+/// 前の葉を集め `FitWeights` を検出し（単一行・複数行・ネストした
+/// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
+/// 独自宣言、および `validation_split`／`class_weight`／
+/// `sample_weight`／`fit_with_weights`／`fit_weighted` の `fn` 宣言を
+/// 違反として返す（`scan_callback_loggers_reexports_and_declarations`
+/// と同型。`class_weight`／`sample_weight` を候補名に含めるのは、
+/// 受入基準の字面〈`FitConfig` へ直接フィールド追加〉どおりの禁止された
+/// 実装経路自体も検出対象に含めるため。`crates/autodiff/src/loss_ops.rs`
+/// 等の内部クレート側の既存 `class_weight` 言及は走査対象外〈facade の
+/// `src` のみを走査するため〉）。
+fn scan_fit_weighting_reexports_and_declarations(content: &str) -> Vec<String> {
+    const TYPE_NAMES: [&str; 1] = ["FitWeights"];
+    const FN_NAMES: [&str; 5] = [
+        "validation_split",
+        "class_weight",
+        "sample_weight",
+        "fit_with_weights",
+        "fit_weighted",
+    ];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens
+                .get(i + 1)
+                .map(|t| TYPE_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    for name in FN_NAMES {
+        offending.extend(
+            (0..count_fn_declarations_by_name(&tokens, name)).map(|_| format!("fn {name} 宣言")),
+        );
+    }
+
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`FitWeights`（型名）を
+/// 識別子単位で含む `pub use`（複数行・ネストした group・別名含む）も、
+/// facade 独自の `trait`／`struct`／`enum`／`type` 宣言も、
+/// `validation_split`／`class_weight`／`sample_weight`／
+/// `fit_with_weights`／`fit_weighted` の `fn` 宣言も存在しないことを
+/// 固定する（`FitWeightingHoldDoctestGuard` の正のプローブと多層防御を
+/// 成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_callback_loggers` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_fit_weighting_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_fit_weighting_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が fit() の重み付け拡張（#2177。FitWeights／\
+         validation_split／class_weight／sample_weight／\
+         fit_with_weights／fit_weighted）を再エクスポート、または\
+         独自宣言している（`docs/compat-fit-sample-weighting-decision.md`\
+         §2 承認事項が未取得のまま対象外としている設計判断に違反）: \
+         {offending:?}"
+    );
+}
+
+/// [`scan_fit_weighting_reexports_and_declarations`]（[`facade_does_not_
+/// reexport_or_declare_fit_weighting_items`]）の自己テスト（正例・負例
+/// の合成入力）。
+#[test]
+fn facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category() {
+    // 正例: 単一行 pub use（新規型）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::FitWeights;"
+        )
+        .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::{\n    FitConfig,\n    FitWeights,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::FitWeights as Foo;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(!scan_fit_weighting_reexports_and_declarations("pub struct FitWeights;").is_empty());
+    // 正例: validation_split の fn 宣言（ビルダー）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "impl FitConfig { pub fn validation_split(self, f: f32) -> Self { self } }"
+        )
+        .is_empty()
+    );
+    // 正例: 受入基準の字面どおりの禁止経路（FitConfig への class_weight
+    // フィールド追加想定の fn 宣言）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "impl FitConfig { pub fn class_weight(self, w: HashMap<u32, f32>) -> Self { self } }"
+        )
+        .is_empty()
+    );
+    // 正例: fit_with_weights の fn 宣言。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "impl Sequential { pub fn fit_with_weights(&mut self) {} }"
+        )
+        .is_empty()
+    );
+    // 負例: コメント中の出現。
+    assert!(
+        scan_fit_weighting_reexports_and_declarations("// pub use ...::FitWeights;").is_empty()
+    );
+    // 負例: 無関係な型・関数名。
+    assert!(
+        scan_fit_weighting_reexports_and_declarations(
+            "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
+        )
+        .is_empty()
+    );
+}
+
+/// `FitConfig` が `#[derive(Debug, Clone, Copy, PartialEq, Eq)]` を
+/// 維持していることを固定する（`crates/facade/src/compat/training.rs:
+/// 175`）。受入基準の字面（`HashMap<u32, f32>` の class_weight・
+/// `&[f32]` の sample_weight を直接フィールド追加）どおりに実装すると
+/// `Copy`（`HashMap` 保持）・`Eq`（`f32` 保持）のいずれかが外れ、
+/// crates.io 出荷済み `fandhe-ai =0.9.0` の公開 API 非破壊契約に反する
+/// （`docs/compat-fit-sample-weighting-decision.md` §2）。本テストは
+/// その非破壊契約（derive 維持）を正のガードとして直接固定する。
+#[test]
+fn fit_config_keeps_copy_eq_for_0_9_0_compat() {
+    fn assert_copy_eq<T: Copy + Eq>() {}
+    assert_copy_eq::<fandhe_ai::compat::FitConfig>();
+}
