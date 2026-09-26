@@ -4439,3 +4439,91 @@ struct OptimizerExtHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct LbfgsHoldDoctestGuard;
+
+/// イシュー #2169（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// `OptimizerExtHoldDoctestGuard`（#2171）が型名の glob 衝突を使うのに
+/// 対し、本ガードは `compat::Loss`（`Sequential::compile()` 用の
+/// unit-only enum）へ **variant を追加する**保留を検査するため、別の
+/// 仕組みを使う: `Loss::Bce` のような型相対パスは、`Loss` に同名の
+/// variant が存在しない間はローカルに定義したトレイト
+/// `__FandheLossVariantHoldProbe`（`compat::Loss` へ実装した関連 const）
+/// の解決に落ちる（Rust の名前解決規則で、型に該当する固有項目
+/// 〈variant〉が無ければトレイトの関連項目が候補になる）。variant が
+/// 追加されると `Loss::Bce` は enum variant（`Loss` 型そのもの）を指す
+/// ようになり、`Marker` 型を要求する呼び出し箇所で型不一致
+/// （`E0308`）としてコンパイルが失敗する。`compile_fail` doctest は
+/// stable rustdoc がエラーコードを照合しないため使わず（`docs/
+/// facade-compile-loss-variants-decision.md` §5）、常にコンパイルが
+/// 通ることを固定する「正のプローブ」方式を採る。
+///
+/// `Bce`／`BceWithLogits`／`Nll`／`KlDiv`／`Huber`／`SmoothL1`／`L1` の
+/// 7 variant は `fandhe_ai_autodiff`（`Var::bce_loss`／
+/// `bce_with_logits_loss`／`nll_loss`／`kl_div_loss`／`huber_loss`／
+/// `smooth_l1_loss`・`loss_ops::l1_loss`）に実装済みだが、`compat::Loss`
+/// への追加（facade 公開面の拡張）は未承認のため保留する（承認事項の
+/// 位置づけは `docs/facade-compile-loss-variants-decision.md` §4
+/// 「承認事項」参照）。`crates/facade/src/compat/training.rs` の
+/// `Loss` enum・`FitTarget::loss_for` 本体へは一切追記していない。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// compile_loss_variants_hold_doctest_globs_all_pub_modules`・
+/// `compile_loss_variants_hold_doctest_probe_body_matches_fixed_
+/// contract`・`compat_loss_enum_variants_are_exactly_mse_and_cross_
+/// entropy`）との多層防御の位置づけは decision doc §5 を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: `Loss` に 7 variant が存在しない間だけコンパイルが
+/// 通ること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// struct __FandheLossVariantMarker;
+///
+/// #[allow(non_upper_case_globals)]
+/// trait __FandheLossVariantHoldProbe {
+///     const Bce: __FandheLossVariantMarker;
+///     const BceWithLogits: __FandheLossVariantMarker;
+///     const Nll: __FandheLossVariantMarker;
+///     const KlDiv: __FandheLossVariantMarker;
+///     const Huber: __FandheLossVariantMarker;
+///     const SmoothL1: __FandheLossVariantMarker;
+///     const L1: __FandheLossVariantMarker;
+/// }
+///
+/// impl __FandheLossVariantHoldProbe for Loss {
+///     const Bce: __FandheLossVariantMarker = __FandheLossVariantMarker;
+///     const BceWithLogits: __FandheLossVariantMarker = __FandheLossVariantMarker;
+///     const Nll: __FandheLossVariantMarker = __FandheLossVariantMarker;
+///     const KlDiv: __FandheLossVariantMarker = __FandheLossVariantMarker;
+///     const Huber: __FandheLossVariantMarker = __FandheLossVariantMarker;
+///     const SmoothL1: __FandheLossVariantMarker = __FandheLossVariantMarker;
+///     const L1: __FandheLossVariantMarker = __FandheLossVariantMarker;
+/// }
+///
+/// fn __probe() {
+///     let _: __FandheLossVariantMarker = Loss::Bce;
+///     let _: __FandheLossVariantMarker = Loss::BceWithLogits;
+///     let _: __FandheLossVariantMarker = Loss::Nll;
+///     let _: __FandheLossVariantMarker = Loss::KlDiv;
+///     let _: __FandheLossVariantMarker = Loss::Huber;
+///     let _: __FandheLossVariantMarker = Loss::SmoothL1;
+///     let _: __FandheLossVariantMarker = Loss::L1;
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct CompileLossVariantsHoldDoctestGuard;
