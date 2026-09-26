@@ -13277,3 +13277,277 @@ fn collect_top_level_enum_variant_idents_detects_each_category() {
         vec!["Mse".to_string(), "CrossEntropy".to_string()]
     );
 }
+
+// =====================================================================
+// イシュー #2178（親 #2131）: callbacks（CsvLogger・JsonLogger・
+// LambdaCallback）の facade 公開保留を検査するテスト群。
+// `CallbacksLoggersHoldDoctestGuard`（`src/lib.rs`）の正のプローブの
+// ドリフト検査に加え、facade の再エクスポート・独自宣言の不在と
+// `compat::Callback` enum の variant 集合を固定する。承認事項の
+// 位置づけは `docs/compat-callbacks-loggers-decision.md` §2・§6 を参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `CallbacksLoggersHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// `CallbacksLoggersHoldDoctestGuard` 版）。
+#[test]
+fn callbacks_loggers_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "CallbacksLoggersHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "CallbacksLoggersHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`callbacks_loggers_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの**glob 以外の本文**（`__fandhe_callbacks_loggers_hold_probe`
+/// モジュール・`__probe` 関数）が固定文言
+/// [`CALLBACKS_LOGGERS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致する
+/// ことを固定する（rustdoc の `# ` 隠し行・プローブの削除・別名への
+/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn callbacks_loggers_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "CallbacksLoggersHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, CALLBACKS_LOGGERS_HOLD_PROBE_BODY,
+        "CallbacksLoggersHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 CALLBACKS_LOGGERS_HOLD_PROBE_BODY からドリフト\
+         している。正のプローブ（__fandhe_callbacks_loggers_hold_probe\
+         モジュール・__probe 関数）の削除・弱体化・隠し行の混入がないか\
+         確認すること。\n--- actual ---\n{actual}"
+    );
+}
+
+/// [`callbacks_loggers_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `CallbacksLoggersHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
+/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート
+/// 自体の `use fandhe_ai::*;` は本文に含む）。
+const CALLBACKS_LOGGERS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_callbacks_loggers_hold_probe {\n\
+\x20\x20\x20\x20pub struct CsvLogger;\n\
+\x20\x20\x20\x20pub struct JsonLogger;\n\
+\x20\x20\x20\x20pub struct CSVLogger;\n\
+\x20\x20\x20\x20pub struct JSONLogger;\n\
+\x20\x20\x20\x20pub struct LambdaCallback;\n\
+}\n\
+use __fandhe_callbacks_loggers_hold_probe::*;\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: CsvLogger,\n\
+\x20\x20\x20\x20_: JsonLogger,\n\
+\x20\x20\x20\x20_: CSVLogger,\n\
+\x20\x20\x20\x20_: JSONLogger,\n\
+\x20\x20\x20\x20_: LambdaCallback,\n\
+\x20\x20\x20\x20_: &Callback,\n\
+) {\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_callback_loggers`]・その
+/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/
+/// src/**`）の `pub use` から [`collect_pub_use_leaves`] で別名にする
+/// 前の葉を集め `CsvLogger`／`JsonLogger`／`CSVLogger`／`JSONLogger`／
+/// `LambdaCallback` を検出し（単一行・複数行・ネストした group・別名も
+/// 検出）、`trait`／`struct`／`enum`／`type` 直後の同名独自宣言、
+/// および `on_epoch_end` の `fn` 宣言を違反として返す
+/// （`scan_optimizer_ext_reexports_and_declarations` と同型。
+/// `LambdaCallback::on_epoch_end` はコンストラクタ用の関連関数のため
+/// `fn` 宣言の検出を追加する点が `scan_optimizer_ext_*` との差分）。
+fn scan_callback_loggers_reexports_and_declarations(content: &str) -> Vec<String> {
+    const TYPE_NAMES: [&str; 5] = [
+        "CsvLogger",
+        "JsonLogger",
+        "CSVLogger",
+        "JSONLogger",
+        "LambdaCallback",
+    ];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens
+                .get(i + 1)
+                .map(|t| TYPE_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    offending.extend(
+        (0..count_fn_declarations_by_name(&tokens, "on_epoch_end"))
+            .map(|_| "fn on_epoch_end 宣言".to_string()),
+    );
+
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、CsvLogger／JsonLogger／
+/// CSVLogger／JSONLogger／LambdaCallback（5 個の型名）を識別子単位で
+/// 含む `pub use`（複数行・ネストした group・別名含む）も、facade 独自の
+/// `trait`／`struct`／`enum`／`type` 宣言も、`on_epoch_end` の `fn`
+/// 宣言も存在しないことを固定する（`CallbacksLoggersHoldDoctestGuard`
+/// の正のプローブと多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_optimizer_ext_items` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_callback_loggers() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_callback_loggers_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が callbacks ロガー拡張（#2178。CsvLogger／\
+         JsonLogger／CSVLogger／JSONLogger／LambdaCallback）を再エクス\
+         ポート、または独自宣言している（`docs/compat-callbacks-loggers-\
+         decision.md` §2 承認事項が未取得のまま対象外としている設計\
+         判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_callback_loggers_reexports_and_declarations`]（[`facade_does_
+/// not_reexport_or_declare_callback_loggers`]）の自己テスト（正例・負例
+/// の合成入力）。
+#[test]
+fn facade_does_not_reexport_or_declare_callback_loggers_detects_each_category() {
+    // 正例: 単一行 pub use。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::CsvLogger;"
+        )
+        .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::{\n    JsonLogger,\n    LambdaCallback,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::CSVLogger as Foo;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(!scan_callback_loggers_reexports_and_declarations("pub struct JSONLogger;").is_empty());
+    // 正例: on_epoch_end の fn 宣言。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "impl LambdaCallback { pub fn on_epoch_end() {} }"
+        )
+        .is_empty()
+    );
+    // 負例: コメント中の出現。
+    assert!(
+        scan_callback_loggers_reexports_and_declarations("// pub use ...::CsvLogger;").is_empty()
+    );
+    // 負例: 無関係な型・関数名。
+    assert!(
+        scan_callback_loggers_reexports_and_declarations(
+            "pub struct EarlyStopping; impl EarlyStopping { pub fn new() {} }"
+        )
+        .is_empty()
+    );
+}
+
+/// glob 衝突では enum variant の追加を検出できないため、`compat::
+/// Callback` enum（`crates/facade/src/compat/callbacks.rs`。現行は
+/// `EarlyStopping`／`ModelCheckpoint`／`LrSchedule` の 3 variant のみ）
+/// が、承認なしに `CsvLogger`／`JsonLogger`／`Lambda` 等の variant を
+/// 増やされていないことを固定する（`compat_loss_enum_variants_are_
+/// exactly_mse_and_cross_entropy` の `Callback` 版。イシュー #2178・
+/// `docs/compat-callbacks-loggers-decision.md` §6）。
+#[test]
+fn compat_callback_enum_variants_are_exactly_expected_while_2178_on_hold() {
+    let path = facade_crate_root().join("src/compat/callbacks.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+
+    // "pub" "enum" "Callback" "{" の完全一致列を数える（0 件・2 件以上は
+    // fail-closed で失敗させる: enum の削除・複数定義・別名への変更を
+    // 見逃さない）。
+    let mut match_starts: Vec<usize> = Vec::new();
+    for i in 0..tokens.len() {
+        if tokens.get(i).map(String::as_str) == Some("pub")
+            && tokens.get(i + 1).map(String::as_str) == Some("enum")
+            && tokens.get(i + 2).map(String::as_str) == Some("Callback")
+            && tokens.get(i + 3).map(String::as_str) == Some("{")
+        {
+            match_starts.push(i + 4);
+        }
+    }
+    assert_eq!(
+        match_starts.len(),
+        1,
+        "callbacks.rs 内の `pub enum Callback {{` 宣言がちょうど 1 件では\
+         ない（0 件: enum が削除・改名された。2 件以上: 重複定義。いずれも\
+         本テストが検査対象を見失っている）: {} 件",
+        match_starts.len()
+    );
+
+    let variants = collect_top_level_enum_variant_idents(&tokens, match_starts[0]);
+    assert_eq!(
+        variants,
+        vec![
+            "EarlyStopping".to_string(),
+            "ModelCheckpoint".to_string(),
+            "LrSchedule".to_string(),
+        ],
+        "compat::Callback の variant 集合が [\"EarlyStopping\",\
+         \"ModelCheckpoint\", \"LrSchedule\"] からドリフトしている\
+         （未承認のまま variant が追加された可能性。`docs/compat-\
+         callbacks-loggers-decision.md` §2 の承認事項参照）: {variants:?}"
+    );
+}

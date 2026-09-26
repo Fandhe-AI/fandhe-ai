@@ -4608,3 +4608,77 @@ struct LbfgsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct CompileLossVariantsHoldDoctestGuard;
+
+/// イシュー #2178（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// `OptimizerExtHoldDoctestGuard`（#2171）と同型の「正のプローブ 1
+/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_callbacks_loggers_hold_probe::{CsvLogger, JsonLogger,
+/// CSVLogger, JSONLogger, LambdaCallback}` を導入し、5 個すべてと
+/// `&Callback` を引数に取る `__probe` 関数を書く。facade がどの経路
+/// （単一行・複数行・ネストした group での `pub use`・別名エクスポート・
+/// facade 独自の `struct`／`type` 宣言）でこれらの名前を公開しても、
+/// ローカル定義との glob 衝突（型名の場合。E0659 等）でコンパイルが
+/// 失敗する。`&Callback` を引数に含めることで `use fandhe_ai::compat::*;`
+/// の glob が効いていることも併せて確認する。
+///
+/// `CsvLogger`／`JsonLogger`／`LambdaCallback` は `compat::Callback`
+/// （`crates/facade/src/compat/callbacks.rs`。現行は `EarlyStopping`／
+/// `ModelCheckpoint`／`LrSchedule` の 3 variant のみ）へ追加する callback
+/// として設計記録済みだが、facade からの公開・`Callback` への variant
+/// 追加はいずれも未承認のため保留する。承認事項の位置づけ・完全な
+/// 公開 API 案は `docs/compat-callbacks-loggers-decision.md` §2・§3 を
+/// 参照。イシュー本文の表記 `CSVLogger`／`JSONLogger` も本プローブへ
+/// 含め、大文字表記での再エクスポート・独自宣言も検出できるようにする。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// callbacks_loggers_hold_doctest_globs_all_pub_modules`・
+/// `callbacks_loggers_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_callback_loggers`・
+/// `compat_callback_enum_variants_are_exactly_expected_while_2178_on_hold`）
+/// との多層防御の位置づけは decision doc §6 を参照。最後のテストは
+/// `Callback` enum の variant 集合そのものを直接走査する主防御であり、
+/// 型名の glob 衝突では検出できない enum variant 追加を検出する。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_callbacks_loggers_hold_probe {
+///     pub struct CsvLogger;
+///     pub struct JsonLogger;
+///     pub struct CSVLogger;
+///     pub struct JSONLogger;
+///     pub struct LambdaCallback;
+/// }
+/// use __fandhe_callbacks_loggers_hold_probe::*;
+///
+/// fn __probe(
+///     _: CsvLogger,
+///     _: JsonLogger,
+///     _: CSVLogger,
+///     _: JSONLogger,
+///     _: LambdaCallback,
+///     _: &Callback,
+/// ) {
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct CallbacksLoggersHoldDoctestGuard;
