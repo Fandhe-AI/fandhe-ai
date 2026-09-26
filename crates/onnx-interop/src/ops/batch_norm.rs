@@ -61,18 +61,25 @@ impl Default for BatchNormAttrs {
 /// 4. `scale`／`B`／`input_mean`／`input_var` の rank が 1 以外なら
 ///    [`OpError::RankMismatch`]、要素数が `C`（`x.shape()[1]`）と一致しな
 ///    ければ [`OpError::LengthMismatch`]（ブロードキャストは行わない）
-/// 5. `input_var[ch] as f64 + epsilon as f64` が非負（`NaN` を含め、
-///    `sum < 0.0 || sum.is_nan()` を拒否条件とする）でなければ
+/// 5. `input_var[ch] as f64 + epsilon as f64` が正かつ有限（`sum.is_finite()
+///    == false || sum <= 0.0` を拒否条件とする）でなければ
 ///    [`OpError::InvalidBatchNormAttribute`]。ONNX `BatchNormalization`
 ///    は `sqrt(var + epsilon)` を計算式とするため、判定は `var` 単体で
 ///    はなく `var + epsilon` に対して行う（`var` 単体の非負性で判定する
 ///    と、PyTorch エクスポートモデルでよく見られる「running variance が
 ///    浮動小数点誤差でわずかに負だが `epsilon` を加算すれば非負になる」
 ///    有効なケースまで fail-closed に拒否してしまう。Cursor Bugbot
-///    指摘・イシュー #2200 PR #2312 レビュー）。`input_var` は ONNX
-///    モデル（外部入力）由来の値であり、`var + epsilon` が負のまま
-///    `sqrt` へ渡ると `rstd` が `NaN` に汚染され出力全体へ静かに伝播
-///    する（OWASP A03。`.claude/rules/security.md`。`x` 自体の `NaN`
+///    指摘・イシュー #2200 PR #2312 レビュー）。`sum <= 0.0`（`sum == 0.0`
+///    を含む）を拒否条件に含めるのは、`sqrt(0) == 0` により `rstd = 1.0 /
+///    0.0 == inf` となり、`x == mean` の要素で `0.0 * inf == NaN` が出力へ
+///    静かに伝播するため（codex-review 指摘・PR #2312。`sum < 0.0` のみの
+///    判定では `sum == 0.0` を受理してしまい防げない）。`sum.is_finite()`
+///    を条件に含めるのは、`var` が `+inf` の場合に `sum` も `+inf` となり
+///    `sqrt` は素通りするが `rstd = 0.0` は数値的に無意味なため（`NaN`
+///    判定〈`is_nan()`〉だけでは `+inf` を検出できない）。`input_var` は
+///    ONNX モデル（外部入力）由来の値であり、検証せず `sqrt` へ渡すと
+///    `rstd` が `inf`／`NaN` に汚染され出力全体へ静かに伝播する
+///    （OWASP A03。`.claude/rules/security.md`。`x` 自体の `NaN`
 ///    伝播〈`nan_propagates` テスト〉とは異なり、こちらは属性値の事前
 ///    検証で fail-closed に拒否する）
 pub fn batch_normalization(
@@ -128,6 +135,17 @@ pub fn batch_normalization(
     }
 
     let n = x.shape()[0];
+
+    // `n == 0 || c == 0` は `spatial`（shape[2..] の要素数積）の
+    // `checked_mul` 計算より先に判定する。先に判定しないと、N または C が
+    // 0 で残りの空間次元が非常に大きい ONNX モデル（例: 空バッチ）で
+    // `checked_mul` が `None` を返し、本来返すべき空テンソルの代わりに
+    // `ElementCountOverflow` を誤って返してしまう（Cursor Bugbot 指摘・
+    // イシュー #2200 PR #2312 レビュー）。
+    if n == 0 || c == 0 {
+        return Tensor::new(Vec::new(), x.shape()).map_err(OpError::from);
+    }
+
     // `spatial` = shape[2..] の要素数積（rank 2 なら空スライスの積 = 1）。
     // 非信頼な shape 由来のオーバーフローを避けるため `checked_mul` で
     // 計算する（`Conv`／`GlobalAveragePool` と同じ方針。OWASP A03）。
@@ -138,9 +156,9 @@ pub fn batch_normalization(
             fandhe_ai_tensor_core::ShapeError::ElementCountOverflow,
         ))?;
 
-    if n == 0 || c == 0 || spatial == 0 {
-        // いずれかの次元が 0 の場合は部分積を計算する前に空テンソルを
-        // 返す（`tensor_core::batch_norm_layout` doc が警告する部分積
+    if spatial == 0 {
+        // 空間次元のいずれかが 0 の場合は空テンソルを返す
+        // （`tensor_core::batch_norm_layout` doc が警告する部分積
         // オーバーフローの罠を避ける。`ops::conv`／`global_average_pool`
         // と同じ早期 return 方針）。
         return Tensor::new(Vec::new(), x.shape()).map_err(OpError::from);
@@ -170,28 +188,33 @@ pub fn batch_normalization(
 
     // `input_var` は ONNX モデル（外部入力）由来の分散値。ONNX
     // `BatchNormalization` の計算式は `sqrt(var + epsilon)` であり、
-    // `var` 単体ではなく `var + epsilon` の非負性を検証する（`var` 単体
-    // で判定すると、PyTorch エクスポートモデルでよく見られる「running
-    // variance が浮動小数点誤差でわずかに負だが epsilon を加算すれば
-    // 非負になる」有効なケースまで fail-closed に拒否してしまう。
-    // Cursor Bugbot 指摘・イシュー #2200 PR #2312 レビュー）。検証せず
-    // `sqrt` へ渡すと `rstd` が `NaN` になり出力全体が静かに汚染される
+    // `var` 単体ではなく `var + epsilon` の正かつ有限性を検証する
+    // （`var` 単体で判定すると、PyTorch エクスポートモデルでよく見られる
+    // 「running variance が浮動小数点誤差でわずかに負だが epsilon を
+    // 加算すれば非負になる」有効なケースまで fail-closed に拒否して
+    // しまう。Cursor Bugbot 指摘・イシュー #2200 PR #2312 レビュー）。
+    // 「非負」（`sum >= 0.0`）ではなく「正」（`sum > 0.0`）を要求するのは、
+    // `sum == 0.0` を許すと `sqrt(0) == 0` から `rstd = 1.0 / 0.0 == inf`
+    // となり、`x == mean` の要素で `0.0 * inf == NaN` が出力へ静かに
+    // 伝播するため（codex-review 指摘・PR #2312）。加えて `sum` の有限性
+    // も要求するのは、`var` が `+inf` の場合に `sum` も `+inf` となり
+    // `sqrt` は素通りするが `rstd = 0.0` は数値的に無意味なため（`NaN`
+    // 判定だけでは `+inf` を検出できない）。検証せず `sqrt` へ渡すと
+    // `rstd` が `inf`／`NaN` に汚染され出力全体が静かに汚染される
     // （OWASP A03。`.claude/rules/security.md`）ため、計算ループへ入る前に
-    // 全チャネルを検証する（`sum >= 0.0` は `NaN` に対して常に偽になる
-    // ため、`var` が `NaN` の場合も `sum` の `NaN` 判定で同じ条件で拒否
-    // できる）。`epsilon` は関数冒頭で既に有限・非負を検証済みのため、
-    // ここでの非有限化要因は `var` 側の `NaN`／`inf` のみである。
+    // 全チャネルを検証する。`epsilon` は関数冒頭で既に有限・非負を検証
+    // 済みのため、ここでの拒否要因は `var` 側の値（負・ゼロ相殺・`NaN`・
+    // `inf`）のみである。
     let eps_f64 = attrs.epsilon as f64;
     for (ch, &v) in var_slice.iter().enumerate() {
         let sum = v as f64 + eps_f64;
-        // `sum < 0.0 || sum.is_nan()` は `!(sum >= 0.0)` と同値だが、
-        // `clippy::neg_cmp_op_on_partial_ord` を避けつつ「負値・NaN の
-        // どちらも拒否する」意図を明示する（`PartialOrd` の否定比較は
-        // 非全順序型で直感に反する場合があるため、明示形を使う）。
-        if sum < 0.0 || sum.is_nan() {
+        // `!sum.is_finite() || sum <= 0.0` は「正かつ有限」の否定。
+        // `is_finite()` が `NaN`／`±inf` をまとめて弾き、`sum <= 0.0` が
+        // 負値とゼロ相殺（`var + epsilon == 0.0`）をまとめて弾く。
+        if !sum.is_finite() || sum <= 0.0 {
             return Err(OpError::InvalidBatchNormAttribute {
                 reason: format!(
-                    "input_var[{ch}] + epsilon は非負でなければならない（実際 var={v}, epsilon={}）",
+                    "input_var[{ch}] + epsilon は正の有限値でなければならない（実際 var={v}, epsilon={}）",
                     attrs.epsilon
                 ),
             });
@@ -457,6 +480,53 @@ mod tests {
         let err = batch_normalization(&xt, &scale, &bias, &mean, &var, &BatchNormAttrs::default())
             .unwrap_err();
         assert!(matches!(err, OpError::InvalidBatchNormAttribute { .. }));
+    }
+
+    #[test]
+    fn zero_sum_variance_plus_epsilon_rejected() {
+        // `var + epsilon == 0.0` は `sqrt(0) == 0` から `rstd = 1/0 == inf`
+        // となり `x == mean` の要素で `0 * inf == NaN` を生む（codex-review
+        // 指摘・PR #2312）。`sum < 0.0` のみの判定では通ってしまうため、
+        // `sum <= 0.0` へ強化したことを確認する。
+        let xt = Tensor::<f32>::zeros(&[1, 2, 2, 2]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let bias = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let mean = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let var = Tensor::<f32>::new(vec![1.0, 0.0], &[2]).unwrap();
+        let attrs = BatchNormAttrs { epsilon: 0.0 };
+        let err = batch_normalization(&xt, &scale, &bias, &mean, &var, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidBatchNormAttribute { .. }));
+    }
+
+    #[test]
+    fn infinite_variance_rejected() {
+        // `var == +inf` は `sum == +inf` となり `sqrt` は素通りするが
+        // `rstd == 0.0` は数値的に無意味なため、有限性の検証で拒否される
+        // ことを確認する（`is_nan()` のみでは `+inf` を検出できない）。
+        let xt = Tensor::<f32>::zeros(&[1, 2, 2, 2]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let bias = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let mean = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let var = Tensor::<f32>::new(vec![1.0, f32::INFINITY], &[2]).unwrap();
+        let err = batch_normalization(&xt, &scale, &bias, &mean, &var, &BatchNormAttrs::default())
+            .unwrap_err();
+        assert!(matches!(err, OpError::InvalidBatchNormAttribute { .. }));
+    }
+
+    #[test]
+    fn zero_batch_with_large_spatial_dims_returns_empty_without_overflow() {
+        // N=0 かつ空間次元の積が usize をオーバーフローする形状でも、
+        // spatial の積計算より前に N==0 を判定して空テンソルを返す
+        // ことを確認する（Cursor Bugbot 指摘・イシュー #2200 PR #2312。
+        // 先に spatial を計算すると誤って `ElementCountOverflow` になる）。
+        let xt = Tensor::<f32>::new(Vec::new(), &[0, 2, usize::MAX / 2, 4]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let bias = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let mean = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let var = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let y = batch_normalization(&xt, &scale, &bias, &mean, &var, &BatchNormAttrs::default())
+            .unwrap();
+        assert_eq!(y.shape(), &[0, 2, usize::MAX / 2, 4]);
     }
 
     #[test]
