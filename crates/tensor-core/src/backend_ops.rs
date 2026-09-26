@@ -153,6 +153,106 @@ pub struct AdamStepConfig {
     pub kind: AdamStepKind,
 }
 
+/// [`BackendOps::rmsprop_step_device`] の 1 ステップ分のハイパー
+/// パラメータ（イシュー #2175・`docs/device-resident-update-design.md`）。
+///
+/// `fandhe_ai_autodiff::nn::optim::rmsprop::RmsPropConfig` と同じ意味論の
+/// フィールドを持つ（ステップ数に依存するスカラーが存在しないため、
+/// `AdamStepConfig` と異なり事前計算フィールドはない）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RmsPropStepConfig {
+    /// 学習率。
+    pub lr: f32,
+    /// 二乗移動平均の減衰率 `alpha`。
+    pub alpha: f32,
+    /// ゼロ除算防止項（`sqrt(square_avg)` の**後**に加算。ホスト
+    /// `RmsProp::step_with_slot_hparams` と同順）。
+    pub eps: f32,
+    /// L2 正則化係数（coupled 方式。`weight_decay == 0.0` では decay
+    /// 項の演算自体を skip する）。
+    pub weight_decay: f32,
+    /// モメンタム係数。`> 0.0` のとき `momentum_buf` 引数が必須になる。
+    pub momentum: f32,
+    /// centered RMSprop（`grad_avg` 引数が必須になる）を有効化するか。
+    pub centered: bool,
+}
+
+/// [`BackendOps::adagrad_step_device`] の 1 ステップ分のハイパー
+/// パラメータ（イシュー #2175）。
+///
+/// `clr`（`lr / (1 + (step-1) * lr_decay)`）はホストが `f64` で事前計算
+/// してから `f32` へ 1 回だけ丸めた値を渡す（`fandhe_ai_autodiff::optim::
+/// device_store::DeviceParamStore` が `AdagradStoreState::adagrad_step`
+/// を保持し、カーネル内では `step` を再計算しない設計。`AdamStepConfig`
+/// の `step_size` と同じ理由）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdagradStepConfig {
+    /// ホストで `(lr as f64 / (1.0 + (step-1) as f64 * lr_decay as f64))
+    /// as f32` として事前計算した学習率（`RmsProp`／`Lamb` と異なり
+    /// `lr` そのものではなくこの逓減後の値を渡す）。
+    pub clr: f32,
+    /// ゼロ除算防止項（`sqrt(state_sum)` の**後**に加算）。
+    pub eps: f32,
+    /// L2 正則化係数（coupled 方式。`RmsPropStepConfig::weight_decay` と
+    /// 同じ意味論）。
+    pub weight_decay: f32,
+}
+
+/// [`BackendOps::rmsprop_step_device`] の optional バッファ束（イシュー
+/// #2175・PR レビュー是正: `clippy::too_many_arguments` を個々の引数
+/// 展開ではなく構造体化で解消する。`AdamHyperparams`〈`fandhe_ai_autodiff::
+/// optim::device_store`〉と同じ理由。`.claude/rules/coding-rust.md` の
+/// `#[allow(clippy::…)]` 非追加方針に従う）。
+///
+/// `grad_avg` は `config.centered == true` の場合のみ、`momentum_buf` は
+/// `config.momentum > 0.0` の場合のみ `Some` である必要がある
+/// （`rmsprop_step_device` doc「エラー」節参照）。
+pub struct RmsPropOptionalBuffers<'a> {
+    /// centered RMSprop 用の勾配移動平均バッファ。
+    pub grad_avg: Option<&'a mut DeviceBuffer<f32>>,
+    /// momentum バッファ。
+    pub momentum_buf: Option<&'a mut DeviceBuffer<f32>>,
+}
+
+/// [`BackendOps::lamb_step_device`] の 1 次・2 次モーメントバッファ束
+/// （イシュー #2175・`RmsPropOptionalBuffers` と同じ `clippy::too_many_
+/// arguments` 回避目的）。
+pub struct LambMoments<'a> {
+    /// 1 次モーメント（`m`）。
+    pub m: &'a mut DeviceBuffer<f32>,
+    /// 2 次モーメント（`v`）。
+    pub v: &'a mut DeviceBuffer<f32>,
+}
+
+/// [`BackendOps::lamb_step_device`] の 1 ステップ分のハイパーパラメータ
+/// （イシュー #2175）。
+///
+/// `step_size`／`bias_correction2_sqrt` はホストが `beta1_pow_t`／
+/// `beta2_pow_t`（`f64` 逐次積）から事前計算した `f32` スカラーとして
+/// 渡す（`AdamStepConfig` と同じ設計。カーネル内では `beta^t` を再計算
+/// しない）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LambStepConfig {
+    /// 学習率（trust ratio `f = lr * ‖x‖ / ‖t‖` の計算にも使う）。
+    pub lr: f32,
+    /// 1 次モーメント（`m`）の指数移動平均係数 `β1`。
+    pub beta1: f32,
+    /// 2 次モーメント（`v`）の指数移動平均係数 `β2`。
+    pub beta2: f32,
+    /// 分母のゼロ除算防止項。
+    pub eps: f32,
+    /// L2 正則化係数（LAMB は paper 定義どおり更新方向 `u` へ coupled で
+    /// 織り込む。`weight_decay == 0.0` では decay 項の演算自体を skip
+    /// する）。
+    pub weight_decay: f32,
+    /// ホストで `(lr as f64 / bias_correction1) as f32` として事前計算
+    /// した値。
+    pub step_size: f32,
+    /// ホストで `((1.0 - beta2_pow_t).sqrt()) as f32` として事前計算
+    /// した値。
+    pub bias_correction2_sqrt: f32,
+}
+
 /// Conv2d（`BackendOps::im2col`／`col2im`／`conv2d`）のパラメータ記述子
 /// （イシュー #1764・設計 `docs/conv-ops-design.md` §8）。
 ///
@@ -1220,6 +1320,173 @@ pub trait BackendOps {
         _token: &DispatchFailureCell,
     ) -> Result<(), BackendError> {
         self.adam_step_device(param, grad, m, v, config)
+    }
+
+    /// デバイス常駐パラメータへ RmsProp 1 step を in-place 適用する
+    /// （イシュー #2175・`docs/device-resident-update-design.md`）。
+    ///
+    /// 演算列は `fandhe_ai_autodiff::nn::optim::rmsprop::RmsProp::
+    /// step_with_slot_hparams` の内側ループを逐語再現する契約: `g_eff`
+    /// （`weight_decay != 0.0` のときのみ coupled 加算）→
+    /// `square_avg ← mul_add(alpha, square_avg, (1-alpha)·g_eff²)` →
+    /// `centered` なら `grad_avg` の lerp を経て `avg = sqrt(square_avg -
+    /// grad_avg²)`、そうでなければ `avg = sqrt(square_avg)` → `avg += eps`
+    /// （sqrt の**後**）→ `momentum > 0.0` なら `momentum_buf ←
+    /// mul_add(momentum, momentum_buf, g_eff/avg)` を経由した更新、
+    /// そうでなければ `p -= (lr·g_eff)/avg`。`f32::mul_add` を使い CPU
+    /// 参照実装（`RmsProp`）と bit 一致させる契約は CPU 実装が担う
+    /// （`AdamStepConfig` と同じ理由）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed
+    /// （`adam_step_device` と同方針）。CPU はこのデフォルトを実カーネル
+    /// でオーバーライドする。CUDA・Metal は後続イシューの対象。
+    ///
+    /// # エラー
+    /// - `param`／`grad`／`square_avg`／`grad_avg`／`momentum_buf` の
+    ///   いずれかがこのバックエンドのハンドル型へダウンキャストできない・
+    ///   デバイスが一致しない → [`BackendError::DeviceMismatch`]
+    /// - shape が一致しない → [`BackendError::ShapeMismatch`]
+    /// - `config.centered == true` なのに `grad_avg` が `None`、または
+    ///   `config.momentum > 0.0` なのに `momentum_buf` が `None` →
+    ///   [`BackendError::Unsupported`]（どの要素も更新前に返す）
+    fn rmsprop_step_device(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _square_avg: &mut DeviceBuffer<f32>,
+        _optional: RmsPropOptionalBuffers<'_>,
+        _config: &RmsPropStepConfig,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "rmsprop_step_device: default fail-safe (no in-place RmsProp kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::rmsprop_step_device`] と同型だが、Metal のコマンド
+    /// バッファ共有向けに共有失敗トークン [`DispatchFailureCell`] を
+    /// 追加引数として受け取る非破壊拡張（`adam_step_device_tracked` と
+    /// 同じパターン）。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`BackendOps::rmsprop_step_device`] へ
+    /// そのまま委譲する（CPU はこのデフォルトのままでよい）。
+    fn rmsprop_step_device_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        square_avg: &mut DeviceBuffer<f32>,
+        optional: RmsPropOptionalBuffers<'_>,
+        config: &RmsPropStepConfig,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.rmsprop_step_device(param, grad, square_avg, optional, config)
+    }
+
+    /// デバイス常駐パラメータへ Adagrad 1 step を in-place 適用する
+    /// （イシュー #2175）。
+    ///
+    /// 演算列は `fandhe_ai_autodiff::nn::optim::adagrad::Adagrad::
+    /// step_with_slot_hparams` の内側ループを逐語再現する契約: `g_eff`
+    /// （`weight_decay != 0.0` のときのみ coupled 加算）→
+    /// `state_sum ← mul_add(g_eff, g_eff, state_sum)` → `std =
+    /// sqrt(state_sum) + eps` → `p -= (config.clr·g_eff)/std`。
+    ///
+    /// # デフォルト実装
+    /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed
+    /// （`adam_step_device` と同方針）。CPU はこのデフォルトを実カーネル
+    /// でオーバーライドする。CUDA・Metal は後続イシューの対象。
+    ///
+    /// # エラー
+    /// `adam_step_device` と同じ分類（`DeviceMismatch`／
+    /// `ShapeMismatch`）。
+    fn adagrad_step_device(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _state_sum: &mut DeviceBuffer<f32>,
+        _config: &AdagradStepConfig,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "adagrad_step_device: default fail-safe (no in-place Adagrad kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::adagrad_step_device`] と同型だが、Metal のコマンド
+    /// バッファ共有向けに共有失敗トークンを追加引数として受け取る
+    /// 非破壊拡張。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`BackendOps::adagrad_step_device`] へ
+    /// そのまま委譲する。
+    fn adagrad_step_device_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        state_sum: &mut DeviceBuffer<f32>,
+        config: &AdagradStepConfig,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.adagrad_step_device(param, grad, state_sum, config)
+    }
+
+    /// デバイス常駐パラメータへ LAMB 1 step を in-place 適用する
+    /// （イシュー #2175）。
+    ///
+    /// 演算列は `fandhe_ai_autodiff::nn::optim::lamb::Lamb::
+    /// step_with_slot_hparams` の 3 フェーズ契約（計算 → 全 segment 検証
+    /// → コミット）を再現する。`segment_numels` は連結バッファ内の各
+    /// パラメータ（layer）の要素数を登録順に並べたもので、LAMB の
+    /// trust ratio が layer-wise（segment 単位で独立に縮約する）ため
+    /// 必要になる（`fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore` の `layout` から導出する）。
+    ///
+    /// # デフォルト実装
+    /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed。
+    /// CPU はこのデフォルトを実カーネルでオーバーライドする。CUDA・
+    /// Metal は後続イシューの対象。
+    ///
+    /// # エラー
+    /// - `param`／`grad`／`m`／`v` のいずれかがこのバックエンドの
+    ///   ハンドル型へダウンキャストできない・デバイスが一致しない →
+    ///   [`BackendError::DeviceMismatch`]
+    /// - shape が一致しない → [`BackendError::ShapeMismatch`]
+    /// - `segment_numels` の合計が `param.numel()` と一致しない、または
+    ///   `usize` でオーバーフローする → [`BackendError::InvalidArgument`]
+    /// - いずれかの要素で `m`／`v`／norm／trust ratio が非有限になった
+    ///   → [`BackendError::InvalidArgument`]（`param`／`m`／`v` は
+    ///   一切変更しない no-op 失敗。`Lamb::step` と同じ fail-closed 契約。
+    ///   `.claude/rules/security.md` A08）
+    fn lamb_step_device(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _moments: LambMoments<'_>,
+        _segment_numels: &[usize],
+        _config: &LambStepConfig,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "lamb_step_device: default fail-safe (no in-place LAMB kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::lamb_step_device`] と同型だが、Metal のコマンド
+    /// バッファ共有向けに共有失敗トークンを追加引数として受け取る
+    /// 非破壊拡張。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`BackendOps::lamb_step_device`] へ
+    /// そのまま委譲する。
+    fn lamb_step_device_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        moments: LambMoments<'_>,
+        segment_numels: &[usize],
+        config: &LambStepConfig,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.lamb_step_device(param, grad, moments, segment_numels, config)
     }
 
     /// 学習 step の一区間（イシュー #1349 では

@@ -727,8 +727,11 @@ mod tests {
 // 一致）で行う（`tests/nn_optim_rmsprop.rs`）。facade への公開は
 // `crates/facade/src/optim.rs` の素の再エクスポート（純再エクスポート
 // 契約は `docs/facade-optimizer-promotion-decision.md` §4 案 A）。
-// `crate::optim::device_store::DeviceParamStore::step` は
-// `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、
-// 本イシューでは対応する `BackendOps` メソッドを追加していないため
-// RMSprop・Adagrad とも **`DeviceParamStore` 非対応**（ホスト
-// `Tensor<f32>` を介した `step()` のみ）。
+// `crate::optim::device_store::DeviceParamStore::step_rmsprop` は
+// `BackendOps::rmsprop_step_device` へ結線済み（イシュー #2175。
+// CPU 実装のみ・CUDA／Metal は `Unsupported` のまま）。`DeviceParamStore`
+// 結線済み: `RmsProp::step_with_slot_hparams` の演算列を CPU 参照実装
+// （`crates/backend-cpu/src/ops.rs::rmsprop_step_device`）が逐語再現し、
+// bit 完全一致を `crates/backend-cpu/tests/rmsprop_device_parity.rs` が
+// 固定する。詳細は `docs/device-resident-update-design.md`「RmsProp／
+// Adagrad／LAMB の常駐 step 結線（#2175）」節。

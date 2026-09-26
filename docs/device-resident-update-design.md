@@ -2157,3 +2157,84 @@ MSL ネイティブカーネルでオーバーライドした（イシュー #20
   end-to-end `#[ignore]` テストは本イシューでは対応しない
   （`out-of-scope-tracking.md` 対象。ユーザー承認を得て別 Issue で
   追跡する）。
+
+## RmsProp・Adagrad・LAMB の常駐 step 結線（イシュー #2175）
+
+Adam／AdamW（#1959）に続き、RmsProp・Adagrad・LAMB（layer-wise trust
+ratio）の状態バッファをデバイス常駐バッファとして保持し、
+`DeviceParamStore::step_rmsprop`／`step_adagrad`／`step_lamb`
+（`facade::Tape::step_device_param_store_rmsprop`／`_adagrad`／`_lamb`）
+経由で 1 step をデバイス上 in-place 実行する経路を追加した。
+
+- **新規 `BackendOps` メソッド**: `rmsprop_step_device`／
+  `adagrad_step_device`／`lamb_step_device`（既定 `Unsupported`）と、
+  それぞれの `_tracked` 版（既定は前者へ委譲）。`AdamStepConfig` と
+  同型の非破壊拡張（デフォルトメソッド追加）。新規設定型
+  `RmsPropStepConfig`（`lr`／`alpha`／`eps`／`weight_decay`／
+  `momentum`／`centered`）・`AdagradStepConfig`（ホストで事前計算した
+  `clr`／`eps`／`weight_decay`）・`LambStepConfig`（`lr`／`beta1`／
+  `beta2`／`eps`／`weight_decay`・ホストで事前計算した `step_size`／
+  `bias_correction2_sqrt`）。`clippy::too_many_arguments` 回避のため
+  RmsProp の optional バッファ（`grad_avg`／`momentum_buf`）は
+  `RmsPropOptionalBuffers`、LAMB の `m`／`v` は `LambMoments` という
+  引数束構造体にまとめた（`AdamHyperparams`〈`device_store.rs`〉と
+  同じ理由）。
+- **数値契約**: `crate::nn::optim::{rmsprop::RmsProp, adagrad::Adagrad,
+  lamb::Lamb}` の演算列（`f32::mul_add` を用いる項の並び）を逐語
+  再現し、CPU 実装はホスト参照実装と **bit 完全一致**する
+  （`crates/backend-cpu/tests/{rmsprop,adagrad,lamb}_device_parity.rs`）。
+  LAMB は `segment_numels`（連結バッファ内の各パラメータの要素数列。
+  `DeviceParamStore::layout` から導出）により layer-wise trust ratio の
+  segment 境界を表現する。
+- **LAMB の非有限検出は no-op 失敗・no-poison**: `lamb_step_device` が
+  返す非有限検出の `InvalidArgument`（`m`／`v`／norm／trust ratio が
+  非有限）は `param`／`m`／`v` を一切変更しない no-op 失敗であり、
+  `DeviceParamStore::step_lamb` は `Unsupported`／
+  `DeviceContextCaptureInProgress` と同列に扱う（`pending` を復元し
+  `poisoned` へ遷移させない・`beta_pow_t`／`step_count` もコミット
+  しない。`nn::optim::lamb` モジュール doc「非有限 norm の扱い
+  （fail-closed）」節と同じ理由）。
+- **Adagrad の専用 step カウンタ**: `DeviceParamStore::step_count` は
+  SGD／Adam 系と共有されるため、`clr = lr / (1 + (step-1)*lr_decay)`
+  の `step` は `AdagradStoreState::adagrad_step` として独立にカウント
+  する（`nn::optim::adagrad::Adagrad::step_count` と同じ役割）。
+  `state_sum` の初期値は `initial_accumulator_value`（`alloc_zeroed`
+  ではなく `mem.upload` で明示初期化）。
+- **CPU 実装のみ**: CUDA／Metal のカーネルは本イシューのスコープ外
+  （各 `*_step_device` の既定 `Unsupported` のまま。
+  `.claude/rules/out-of-scope-tracking.md` 対象。ユーザー承認を得て
+  別イシューへ切り出す）。
+- **状態種別ガード**: 初回呼び出しで固定ハイパーパラメータを確定し
+  以後の変更を `BackendError::InvalidArgument` で拒否する（`lr` の
+  みが可変。`step_adam_impl` と同じ設計）。SGD（`step()`）・Adam 系・
+  RmsProp・Adagrad・LAMB は互いに排他的で、いずれか 1 つで使用済みの
+  ストアへ他の optimizer を呼ぶと一律拒否される（`step_adam_impl`
+  側にも RmsProp／Adagrad／LAMB 使用済みストアを拒否する対称ガードを
+  追加した）。**例外は Adam 系 → SGD の 1 方向のみ**（§「Adam／AdamW
+  の常駐 step 結線」の既存契約を維持。`step()`〈SGD〉は
+  `rmsprop_state`／`adagrad_state`／`lamb_state` の 3 状態のみを検査
+  し `adam_state` は意図的に対象外のため、Adam 系で使用済みのストア
+  へ `step()` を呼ぶことは拒否されず「SGD として独立に動作し
+  `m`／`v` は無視される」契約のまま成功する）。ただし**その後の Adam
+  系の再利用（Adam → SGD → Adam）は拒否される**: `step_adam_impl` は
+  `self.sgd_used`（一度でも `step()` が成功したストアで true）を
+  `self.adam_state` の有無に関わらず常に検査するため、SGD 実行後に
+  再び Adam／AdamW を呼ぶと stale な `m`／`v`／`beta_pow_t` の再利用
+  を防ぐため一律拒否される（`crates/autodiff/src/optim/device_store.
+  rs::step_adam_impl` の `self.sgd_used` 検査コメント参照。PR #2002
+  レビュー是正）。RmsProp・Adagrad・LAMB にはこの非対称の例外はなく、
+  SGD・Adam 系を含む他のいずれの optimizer とも双方向に排他的である。
+- **facade 新規公開面**: `Tape::step_device_param_store_rmsprop`／
+  `_adagrad`／`_lamb` の 3 メソッドのみ（`RmsPropConfig`／
+  `AdagradConfig`／`LambConfig` は既存の `fandhe_ai::optim` 再
+  エクスポートをそのまま渡せる）。
+- **検証**: `crates/backend-cpu/tests/{rmsprop,adagrad,lamb}_device_
+  parity.rs`（カーネル単体・bit 一致・拒否系）・`crates/autodiff/src/
+  optim/device_store.rs` 内 unit test（状態種別ガード・`Unsupported`
+  no-poison 契約）・`crates/facade/tests/device_param_store_{rmsprop,
+  adagrad,lamb}_train.rs`（`Sequential::forward_resident` 学習ループ
+  内で毎 step の勾配を `Tape::param_grads_to_host` で読み出し、ホスト
+  `RmsProp::step`／`Adagrad::step`／`Lamb::step` の結果と bit 完全
+  一致で突合。状態種別ガード・NaN `lr` 拒否も検証）。CUDA／Metal
+  ネイティブカーネル・実機実測は対象外（`docs/perf/logs/
+  optimizer-device-step-2175/README.md` に申し送り）。
