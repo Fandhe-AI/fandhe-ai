@@ -94,6 +94,17 @@
 //! `[0, 1]` 範囲・`class_weight` の shape（厳密に `[C]`）と有限性・
 //! 非負性を、いずれも実体化・forward 計算より前に検査する
 //! （本番経路で `unwrap()`／`expect()` を使わない）。
+//!
+//! イシュー #2168（親 #2131）で [`ctc_loss`]（CTC 損失。PyTorch
+//! `nn.CTCLoss` 相当）を同じ枠組みで追加した。`log_probs`（`[T, N, C]`。
+//! 追跡対象）以外の入力（`targets`・`input_lengths`・`target_lengths`・
+//! `options`）は非追跡データのため `Op::CtcLoss` payload に直接
+//! 埋め込む（勾配は `log_probs` の 1 系統のみ）。CPU 上の `f64`
+//! アキュムレータ参照実装のみを持ち、CUDA／Metal からはホスト計算への
+//! フォールバックで到達する（GPU 専用カーネルはスコープ外）。
+//! 数式・境界規約・VJP の設計判断（PyTorch 勾配規約との差分を含む）は
+//! `docs/autodiff-ctc-design.md` を正とし、要旨のみ [`ctc_loss`] doc に
+//! 記す。
 
 use fandhe_ai_tensor_core::{Tensor, reduce_out_shape, require_same_shape};
 
@@ -102,6 +113,49 @@ use crate::error::AutodiffError;
 use crate::eval;
 use crate::tape::{Op, materialize_fallible};
 use crate::var::{Reduction, Var};
+
+/// [`ctc_loss`] のオプション（`blank`・`zero_infinity`。イシュー #2168）。
+/// フィールドは非公開（builder メソッドでのみ構築する）。`Default` は
+/// PyTorch `nn.CTCLoss()` の既定（`blank = 0`・`zero_infinity = false`）
+/// と一致する。
+///
+/// `#[non_exhaustive]` とする理由: 他損失オプション（[`PoissonNllOptions`]
+/// 等）と同じく将来のオプション追加で呼び出し側の構築コードを
+/// 破壊しないようにするため。
+/// `blank`（`usize` の既定 `0`）・`zero_infinity`（`bool` の既定
+/// `false`）はいずれも Rust の型既定値が PyTorch 既定と一致するため
+/// `#[derive(Default)]` で導出する（`CrossEntropyOptions` と同じ理由。
+/// clippy `derivable_impls` 指摘）。
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct CtcLossOptions {
+    blank: usize,
+    zero_infinity: bool,
+}
+
+impl CtcLossOptions {
+    /// blank ラベルのクラス添字（PyTorch `blank=` 相当）を設定する。
+    /// `0 <= blank < C` の検査は [`ctc_loss`] が実行前に行う。
+    pub fn blank(mut self, blank: usize) -> Self {
+        self.blank = blank;
+        self
+    }
+
+    /// `zero_infinity`（PyTorch `zero_infinity=` 相当。`true` なら
+    /// 整列不能サンプルの損失・勾配を `0` として扱う）を設定する。
+    pub fn zero_infinity(mut self, zero_infinity: bool) -> Self {
+        self.zero_infinity = zero_infinity;
+        self
+    }
+
+    pub(crate) fn blank_value(&self) -> usize {
+        self.blank
+    }
+
+    pub(crate) fn zero_infinity_value(&self) -> bool {
+        self.zero_infinity
+    }
+}
 
 /// [`triplet_margin_loss`] のオプション（`margin`・`p`・`eps`・`swap`。
 /// イシュー #2167）。フィールドは非公開（builder メソッドでのみ構築
@@ -759,4 +813,233 @@ pub fn poisson_nll_loss<'t>(
         value,
     );
     Ok(Var::from_raw(input.tape(), id))
+}
+
+/// CTC（Connectionist Temporal Classification）損失（`log_probs` は
+/// 追跡対象、`targets`・`input_lengths`・`target_lengths` は非追跡。
+/// PyTorch `nn.CTCLoss` 相当。イシュー #2168・親イシュー #2131）。CPU 上の
+/// `f64` アキュムレータ参照実装のみを持ち、CUDA／Metal からは
+/// ホスト計算へのフォールバックで到達する（GPU 専用カーネルは
+/// スコープ外）。数式・VJP の設計判断は `docs/autodiff-ctc-design.md`
+/// を正とする。
+///
+/// **shape 契約**: `log_probs` は rank 3（`[T, N, C]`。unbatched
+/// `[T, C]` は非対応——モジュール doc「PyTorch との差分」参照）。
+/// `targets` はパディング形式（rank 2・厳密に `[N, S]`）または連結形式
+/// （rank 1・長さ `Σ target_lengths`）のいずれか。
+///
+/// **数式**（サンプル `n`。拡張ラベル列 `l' = [blank, l_1, blank, …,
+/// blank]`・`L' = 2·target_lengths[n] + 1`）: 前向き再帰 α を対数空間・
+/// `f64` で計算し `nll_n = −logaddexp(α_{T_n−1}(L'−1), α_{T_n−1}(L'−2))`
+/// （`L'=1` は最後の 1 項のみ）。`T_n=0 ∧ tl_n=0` は `nll_n=0`、
+/// `T_n=0 ∧ tl_n>0` は `nll_n=+∞`。`zero_infinity=true` のとき
+/// `nll_n=+∞` のサンプルは損失 `0` として扱う。`Mean` は
+/// `(1/N)·Σ_n nll_n/max(tl_n,1)`、`Sum` は `Σ_n nll_n`（`N==0` は
+/// いずれも `0.0`）。
+///
+/// **VJP**: 後ろ向き再帰 β は**現フレームの emission を含めない**規約
+/// （標準 Graves 規約は α・β 双方が現フレームを含み `lcab` から
+/// `lp` を 1 回引くが、`lp=−∞` のとき `−∞−(−∞)=NaN` になるため
+/// 不採用。`docs/autodiff-ctc-design.md` §2.4）で計算し、
+/// `lcab_{t,k} = logsumexp_{s: l'_s=k}(α_t(s)+β_t(s))` から
+/// `γ_{t,k} = exp(lcab_{t,k} + nll_n)`（`nll_n = −log P` なので
+/// `log P = −nll_n`、`γ = exp(lcab − log P)`）・
+/// `∂nll_n/∂lp[t,n,k] = −γ_{t,k}`
+/// を得る（`log_softmax` 合成後は `softmax − γ` に一致し PyTorch
+/// 勾配と揃う。テストで固定）。`t >= T_n` の勾配は `0`。
+/// `zero_infinity=true` かつ `nll_n=+∞` のサンプルは勾配も全 `0`。
+/// `zero_infinity=false` かつ `nll_n=+∞` のとき、有効フレームの勾配は
+/// `NaN`（数学的に未定義。PyTorch も `NaN` を返す規約に合わせる）。
+///
+/// **検査順序**（確保・全データ複製より前に全て終える。REQ-8・A03。
+/// 本番経路で `unwrap()`／`expect()` は使わない。2026-09-26 codex-review
+/// 是正〈PR #2292〉: `targets` の全データ複製〈`eval::dense_vec_i32`〉を
+/// 形式・長さ・オーバーフロー・バッファ上限検査の後段へ移し、確保前
+/// 検証より先に大きな不正入力を複製しないようにした）:
+/// ①`log_probs` が rank 3・`C>=1` → ②確保前のバイト数上限検査
+/// （`checked_bytes_for::<f32>`） → ③`options.blank < C` →
+/// ④`input_lengths.len()==N`・`target_lengths.len()==N` →
+/// ⑤各 `n` で `input_lengths[n] <= T` → ⑥`targets` の形式検査
+/// （shape／`numel()` のみ。複製なし。パディング形式は shape `[N, S]`・
+/// `target_lengths[n] <= S`、連結形式は `numel()` が `Σ target_lengths`
+/// と一致。`checked_add` で計算） → ⑧各 `n` で `L'_n = 2·tl_n+1` を
+/// `checked_mul`／`checked_add` で計算 → ⑨α／β バッファの確保前上限
+/// 検査（`checked_bytes_for::<f64>`） → ⑦ここまで通過して初めて
+/// `targets` を 1 回だけ稠密化し、使われる範囲の全 target 値が
+/// `0 <= t < C` かつ `t != blank` であることを走査（サンプル別の
+/// 切り出しはこの複製結果を直接参照し、二重複製は行わない） →
+/// ⑩実体化（層 1） → ⑪forward 値計算（`eval::ctc_loss_forward`。
+/// `BackendOps` に対応メソッドがないため融合対象外） → ⑫ノード記録。
+#[allow(clippy::too_many_arguments)]
+pub fn ctc_loss<'t>(
+    log_probs: &Var<'t>,
+    targets: &Tensor<i32>,
+    input_lengths: &[usize],
+    target_lengths: &[usize],
+    options: &CtcLossOptions,
+    reduction: Reduction,
+) -> Result<Var<'t>, AutodiffError> {
+    let log_probs_shape = log_probs.shape();
+    if log_probs_shape.len() != 3 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "ctc_loss: log_probs は rank 3（[T, N, C]）でなければならない\
+             （got rank {}。unbatched [T, C] は非対応）",
+            log_probs_shape.len()
+        )));
+    }
+    let (t_max, n, c) = (log_probs_shape[0], log_probs_shape[1], log_probs_shape[2]);
+    if c == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "ctc_loss: log_probs のクラス数 C は 1 以上でなければならない（got 0）".to_string(),
+        ));
+    }
+    checked_bytes_for::<f32>(&log_probs_shape)?;
+
+    let blank = options.blank_value();
+    if blank >= c {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "ctc_loss: blank（{blank}）は C（{c}）未満でなければならない"
+        )));
+    }
+
+    if input_lengths.len() != n {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "ctc_loss: input_lengths の長さ（{}）が N（{n}）と一致しない",
+            input_lengths.len()
+        )));
+    }
+    if target_lengths.len() != n {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "ctc_loss: target_lengths の長さ（{}）が N（{n}）と一致しない",
+            target_lengths.len()
+        )));
+    }
+    for (i, &t_n) in input_lengths.iter().enumerate() {
+        if t_n > t_max {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ctc_loss: input_lengths[{i}]（{t_n}）が T（{t_max}）を超えている"
+            )));
+        }
+    }
+
+    // targets の形式・長さ検査（⑥）は shape／numel のみで行い、値の
+    // 複製（`eval::dense_vec_i32`）はまだ行わない（REQ-8・A03。確保前
+    // 検証を全データ複製より先に終える。PR #2292 codex-review 是正）。
+    let targets_shape = targets.shape();
+    let s_for_padded = match targets_shape.len() {
+        2 => {
+            if targets_shape[0] != n {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "ctc_loss: targets（パディング形式）の shape[0]（{}）が N（{n}）と\
+                     一致しない",
+                    targets_shape[0]
+                )));
+            }
+            let s = targets_shape[1];
+            for (i, &tl) in target_lengths.iter().enumerate() {
+                if tl > s {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "ctc_loss: target_lengths[{i}]（{tl}）が S（{s}）を超えている\
+                         （パディング形式）"
+                    )));
+                }
+            }
+            Some(s)
+        }
+        1 => {
+            let expected_len: usize = target_lengths.iter().try_fold(0usize, |acc, &tl| {
+                acc.checked_add(tl).ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "ctc_loss: target_lengths の総和が usize を overflow する".to_string(),
+                    )
+                })
+            })?;
+            // `targets.numel()` は shape 由来で複製を伴わない（`dense_vec_i32`
+            // による全データ複製は形式・長さ検査が済むまで行わない）。
+            if targets.numel() != expected_len {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "ctc_loss: targets（連結形式）の長さ（{}）が target_lengths の総和\
+                     （{expected_len}）と一致しない",
+                    targets.numel()
+                )));
+            }
+            None
+        }
+        _ => {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ctc_loss: targets は rank 2（[N, S]。パディング形式）または rank 1\
+                 （[Σ target_lengths]。連結形式）でなければならない（got rank {}）",
+                targets_shape.len()
+            )));
+        }
+    };
+
+    // 拡張ラベル長・α／β バッファサイズの確保前上限検査（⑧⑨）も、
+    // target_lengths のみで完結し targets の複製を必要としないため、
+    // 値の走査・サンプル別の複製（⑦）より先に行う。
+    let mut l_prime_max = 0usize;
+    for (i, &tl) in target_lengths.iter().enumerate() {
+        let l_prime = tl
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(1))
+            .ok_or_else(|| {
+                AutodiffError::InvalidArgument(format!(
+                    "ctc_loss: target_lengths[{i}]（{tl}）から拡張ラベル長 2·tl+1 の\
+                     計算が overflow する"
+                ))
+            })?;
+        l_prime_max = l_prime_max.max(l_prime);
+    }
+    checked_bytes_for::<f64>(&[t_max, l_prime_max])?;
+
+    // ここまでの検証（形式・長さ・オーバーフロー・バッファ上限）を
+    // 全て通過して初めて targets を稠密化する（⑦。一度だけ複製し、
+    // `eval::ctc_sample_targets` を呼ばずサンプルごとの範囲をこの場で
+    // 直接切り出すことで二重複製を避ける）。値検査に使うのはこの
+    // 1 回の複製のみで、forward 本体（`eval::ctc_loss_forward`）は
+    // 独立に再稠密化する（他の損失 `Op` と同じ「都度再計算」設計）。
+    let targets_data = eval::dense_vec_i32(targets);
+    let mut offset = 0usize;
+    for (n_idx, &tl) in target_lengths.iter().enumerate() {
+        let start = match s_for_padded {
+            Some(s) => n_idx * s,
+            None => offset,
+        };
+        for &t in &targets_data[start..start + tl] {
+            if t < 0 || (t as usize) >= c || (t as usize) == blank {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "ctc_loss: targets[{n_idx}] の要素 {t} が範囲 [0, {c}) を外れている、\
+                     または blank（{blank}）と一致している"
+                )));
+            }
+        }
+        if s_for_padded.is_none() {
+            offset += tl;
+        }
+    }
+
+    let log_probs_val = {
+        let nodes = log_probs.tape().nodes.borrow();
+        materialize_fallible(&nodes, log_probs.tape().ops(), log_probs.node_id())?.clone()
+    };
+    let value = eval::ctc_loss_forward(
+        &log_probs_val,
+        targets,
+        input_lengths,
+        target_lengths,
+        options,
+        reduction,
+    );
+    let id = log_probs.tape().push_eager(
+        Op::CtcLoss {
+            log_probs: log_probs.node_id(),
+            targets: targets.clone(),
+            input_lengths: input_lengths.to_vec(),
+            target_lengths: target_lengths.to_vec(),
+            options: options.clone(),
+            reduction,
+        },
+        value,
+    );
+    Ok(Var::from_raw(log_probs.tape(), id))
 }

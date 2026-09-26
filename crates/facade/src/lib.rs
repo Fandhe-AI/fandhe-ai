@@ -3987,18 +3987,19 @@ struct TransformerDecoderHoldDoctestGuard;
 /// イシュー #2167（親 #2131）で、距離ベースの損失 3 種
 /// （`cosine_embedding_loss`・`margin_ranking_loss`・
 /// `triplet_margin_loss`）と `poisson_nll_loss` を同じ保留対象へ追加
-/// した（6 関数名。`crate::loss_ops` モジュール doc「facade 非公開
+/// した。イシュー #2168（親 #2131）で `ctc_loss`（CTC 損失）を追加した
+/// （7 関数名。`crate::loss_ops` モジュール doc「facade 非公開
 /// （意図的）」と同じ判断枠組み）。
 /// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカルの自由
 /// 関数群（`__fandhe_loss_hold_probe::loss_ops::{l1_loss,
 /// cross_entropy_loss_with, cosine_embedding_loss, margin_ranking_loss,
-/// triplet_margin_loss, poisson_nll_loss}`）とトレイト
+/// triplet_margin_loss, poisson_nll_loss, ctc_loss}`）とトレイト
 /// （`__FandheLossHoldProbe`）を導入し、実際に使う関数を書く。facade が
 /// どの経路（`pub use fandhe_ai_autodiff::loss_ops;` のようなモジュール
 /// 再エクスポート・`Var` への inherent メソッド追加・別名 `pub use`）で
-/// `loss_ops` という名前や 6 個の関数名を公開しても、ローカル定義との
+/// `loss_ops` という名前や 7 個の関数名を公開しても、ローカル定義との
 /// glob 衝突（モジュール名の場合）または呼び出しシグネチャの不一致
 /// （inherent メソッドがトレイトメソッドより優先解決されるため、引数
 /// なしの `x.l1_loss()` 呼び出しが実際の `Var::l1_loss(&self, target,
@@ -4039,6 +4040,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///         pub fn margin_ranking_loss() {}
 ///         pub fn triplet_margin_loss() {}
 ///         pub fn poisson_nll_loss() {}
+///         pub fn ctc_loss() {}
 ///     }
 /// }
 /// use __fandhe_loss_hold_probe::*;
@@ -4052,6 +4054,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker;
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker;
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker;
+///     fn ctc_loss(&self) -> __FandheLossMarker;
 /// }
 ///
 /// impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {
@@ -4061,6 +4064,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {
@@ -4070,6 +4074,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// impl __FandheLossHoldProbe for fandhe_ai::Tape {
@@ -4079,6 +4084,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
+///     fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 /// }
 ///
 /// fn __probe_free_fns() {
@@ -4091,6 +4097,7 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     loss_ops::margin_ranking_loss();
 ///     loss_ops::triplet_margin_loss();
 ///     loss_ops::poisson_nll_loss();
+///     loss_ops::ctc_loss();
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
@@ -4106,6 +4113,8 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     let _: __FandheLossMarker = x.triplet_margin_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Var::poisson_nll_loss(x);
 ///     let _: __FandheLossMarker = x.poisson_nll_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Var::ctc_loss(x);
+///     let _: __FandheLossMarker = x.ctc_loss();
 /// }
 ///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
@@ -4115,6 +4124,8 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     let _: __FandheLossMarker = x.cosine_embedding_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Tensor::margin_ranking_loss(x);
 ///     let _: __FandheLossMarker = x.margin_ranking_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Tensor::ctc_loss(x);
+///     let _: __FandheLossMarker = x.ctc_loss();
 /// }
 ///
 /// fn __probe_tape(x: &fandhe_ai::Tape) {
@@ -4124,6 +4135,8 @@ struct TransformerDecoderHoldDoctestGuard;
 ///     let _: __FandheLossMarker = x.triplet_margin_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Tape::poisson_nll_loss(x);
 ///     let _: __FandheLossMarker = x.poisson_nll_loss();
+///     let _: __FandheLossMarker = fandhe_ai::Tape::ctc_loss(x);
+///     let _: __FandheLossMarker = x.ctc_loss();
 /// }
 /// ```
 #[cfg(doctest)]
@@ -4265,3 +4278,86 @@ struct LossOpsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct ParamGroupsHoldDoctestGuard;
+
+/// イシュー #2171（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// `KvCacheHoldDoctestGuard`（#2084）と同型の「正のプローブ 1 ブロック
+/// 方式」を採る: facade の全 `pub mod` を glob import したスコープに、
+/// 本ブロック内でのみ定義したローカル `__fandhe_optim_ext_hold_probe::
+/// {Adadelta, AdadeltaConfig, Adamax, AdamaxConfig, NAdam, NAdamConfig,
+/// RAdam, RAdamConfig}` を導入し、8 個すべてを引数に取る `__probe` 関数
+/// を書く。facade がどの経路（単一行・複数行・ネストした group での
+/// `pub use`・別名エクスポート・facade 独自の `struct`／`type` 宣言）で
+/// これらの名前を公開しても、ローカル定義との glob 衝突（型名の場合。
+/// E0659 等）でコンパイルが失敗する。
+///
+/// `Adadelta`（Zeiler, 2012）・`Adamax`（Kingma & Ba, 2015 §7.1）・
+/// `NAdam`（Dozat, 2016）・`RAdam`（Liu et al., 2019）は
+/// `fandhe_ai_autodiff::nn::optim` に実装済み（内部クレート限定。
+/// `crates/autodiff/src/nn/optim/{adadelta,adamax,nadam,radam}.rs`）
+/// だが、facade（`fandhe_ai::optim`）からの再エクスポートは未承認の
+/// ため保留する。`AdamW`／`Adam`／`RmsProp`／`Adagrad`／`LAMB` が
+/// `crates/facade/src/optim.rs` で素の再エクスポートを受けているのとは
+/// 対照的に、本 4 種は `optim.rs` へ一切追記しない（承認事項の位置づけ
+/// は `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md`
+/// §8「承認事項」を参照）。型（`struct`）のみが対象で、いずれも
+/// `compat::Sequential`／`Var` への inherent メソッド追加を伴わないため
+/// （`(param, grad)` の参照列を受け取る値型 API。`nn/optim/mod.rs` doc
+/// 参照）、`DropoutEmbeddingBagHoldDoctestGuard` のようなトレイト
+/// プローブは不要——型名の衝突のみで検出できる。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// optimizer_ext_hold_doctest_globs_all_pub_modules`・
+/// `optimizer_ext_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_optimizer_ext_items`）との
+/// 多層防御の位置づけは decision doc §8 を参照。既存の
+/// `optim_module_reexports_exactly_expected_surface`（`crates/facade/
+/// tests/api_surface.rs`）の期待集合は本イシューで変更していない
+/// （変更すれば同テストが検出する）。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_optim_ext_hold_probe {
+///     pub struct Adadelta;
+///     pub struct AdadeltaConfig;
+///     pub struct Adamax;
+///     pub struct AdamaxConfig;
+///     pub struct NAdam;
+///     pub struct NAdamConfig;
+///     pub struct RAdam;
+///     pub struct RAdamConfig;
+/// }
+/// use __fandhe_optim_ext_hold_probe::*;
+///
+/// fn __probe(
+///     _: Adadelta,
+///     _: AdadeltaConfig,
+///     _: Adamax,
+///     _: AdamaxConfig,
+///     _: NAdam,
+///     _: NAdamConfig,
+///     _: RAdam,
+///     _: RAdamConfig,
+/// ) {
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct OptimizerExtHoldDoctestGuard;
