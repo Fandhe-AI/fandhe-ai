@@ -34,7 +34,7 @@
 //! `supports_forward_host` は `false`。学習可能パラメータの認識には
 //! 専用の [`crate::nn::module::Module::as_transformer`] フックを使う。
 
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 use crate::nn::init::{
@@ -267,15 +267,45 @@ impl Transformer {
     }
 }
 
+/// `TransformerVars::forward` の `src`／`tgt` それぞれに対する入力
+/// shape 検査（rank 3・最終軸 `== d_model`）。層配列が空でも必ず実行
+/// される検査にするため、encoder／decoder 層への forward 委譲より前に
+/// 呼ぶ（`nn/transformer_decoder_layer.rs::TransformerDecoderLayerVars::
+/// forward` の `tgt`／`memory` 検査と同型）。
+fn check_transformer_input_shape(x: &Var<'_>, d_model: usize) -> Result<(), AutodiffError> {
+    let shape = x.shape();
+    if shape.len() != 3 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 3,
+            actual: shape.len(),
+        }));
+    }
+    if shape[2] != d_model {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: shape.clone(),
+            rhs: vec![shape[0], shape[1], d_model],
+        }));
+    }
+    Ok(())
+}
+
 /// `Transformer::bind` が返す、1 ステップ分のテープに登録済み
-/// パラメータ。フィールドは `pub` だが、構築は [`Transformer::bind`]
-/// からのみ行う契約（`encoder_layers`／`decoder_layers` の要素数を
-/// 独自に変える構築経路を作らないため）。`d_model` は private のため
-/// 呼び出し側はリテラル構築できず、`bind` 経由の構築のみが可能。
+/// パラメータ。`encoder_layers`／`decoder_layers` は private（codex-review
+/// 指摘・PR #2282: `pub Vec` だと `bind` が返した値に対し呼び出し側が
+/// `clear()` 等で要素数を書き換えられてしまい、`forward` が空スタックを
+/// 素通りする——encoder が空だと `src` の shape 検証すら行われず、
+/// decoder が空だと attention が一切走らない。要素数は `bind` 元の
+/// `Transformer::new` が構築時に `> 0` を検証済みの不変条件のため、
+/// 読み取り専用アクセサ [`Self::encoder_layers`]／[`Self::decoder_layers`]
+/// のみを公開する）。`encoder_norm`／`decoder_norm` は形状固定で長さの
+/// 不変条件を持たないため引き続き `pub`（`Tape::backward` 後に
+/// `Gradients::get` で勾配を取り出すのは呼び出し側の責務）。`d_model` も
+/// private のため呼び出し側はリテラル構築できず、`bind` 経由の構築のみが
+/// 可能。
 pub struct TransformerVars<'t> {
-    pub encoder_layers: Vec<TransformerEncoderLayerVars<'t>>,
+    encoder_layers: Vec<TransformerEncoderLayerVars<'t>>,
     pub encoder_norm: LayerNormVars<'t>,
-    pub decoder_layers: Vec<TransformerDecoderLayerVars<'t>>,
+    decoder_layers: Vec<TransformerDecoderLayerVars<'t>>,
     pub decoder_norm: LayerNormVars<'t>,
     d_model: usize,
 }
@@ -286,6 +316,18 @@ impl<'t> TransformerVars<'t> {
         self.d_model
     }
 
+    /// テープに登録済みの encoder 層への参照列（[`Transformer::bind`]
+    /// が構築した順序のまま）。
+    pub fn encoder_layers(&self) -> &[TransformerEncoderLayerVars<'t>] {
+        &self.encoder_layers
+    }
+
+    /// テープに登録済みの decoder 層への参照列（[`Transformer::bind`]
+    /// が構築した順序のまま）。
+    pub fn decoder_layers(&self) -> &[TransformerDecoderLayerVars<'t>] {
+        &self.decoder_layers
+    }
+
     /// `y = Transformer(src, tgt)`。`src: [B, S, E]`・`tgt: [B, T, E]`
     /// → `[B, T, E]`（モジュール doc「forward 順序」参照）。
     ///
@@ -293,11 +335,24 @@ impl<'t> TransformerVars<'t> {
     /// `nn.Transformer.forward` の既定と同じ）。`src_is_causal` は
     /// 対象外（モジュール doc「対象外」参照）。
     ///
+    /// 処理順序: ①`src`／`tgt` の rank・最終軸（`== d_model`）を検証
+    /// → ②encoder／decoder 層が 1 つ以上あることを検証（codex-review
+    /// 指摘・PR #2282: `encoder_layers()`／`decoder_layers()` が空だと
+    /// ①の検証だけでは encoder が `src` を一切処理しないまま `memory`
+    /// を返し、decoder は attention を一切実行しないまま `tgt` を
+    /// 素通りしてしまう。`Transformer::new` は構築時に層数 `> 0` を
+    /// 検証済みだが、`bind` が返す `TransformerVars` の層配列を
+    /// private 化しただけでは呼び出し側が空の値を構築できる経路
+    /// 自体は塞げないため、`forward` 側でも fail-closed に再検証する）
+    /// → ③encoder 層を順に適用 → ④`encoder_norm` → ⑤decoder 層を
+    /// 順に適用 → ⑥`decoder_norm`。
+    ///
     /// # Errors
     ///
-    /// `src`／`tgt` の rank・`d_model` 不一致は各 `TransformerEncoderLayerVars::forward`／
-    /// `TransformerDecoderLayerVars::forward` が検査する
-    /// `AutodiffError::Shape` をそのまま伝播する。テープ不一致は
+    /// `src`／`tgt` の rank が 3 でない・最終軸が `d_model` と不一致の
+    /// 場合、および `encoder_layers()`／`decoder_layers()` が空の場合は
+    /// `AutodiffError::InvalidArgument`／`AutodiffError::Shape` を返す
+    /// （②「処理順序」参照）。テープ不一致は各層 `forward` から伝播する
     /// `AutodiffError::TapeMismatch`。
     pub fn forward(
         &self,
@@ -308,6 +363,19 @@ impl<'t> TransformerVars<'t> {
         memory_mask: Option<&Tensor<bool>>,
         tgt_is_causal: bool,
     ) -> Result<Var<'t>, AutodiffError> {
+        check_transformer_input_shape(src, self.d_model)?;
+        check_transformer_input_shape(tgt, self.d_model)?;
+        if self.encoder_layers.is_empty() {
+            return Err(AutodiffError::InvalidArgument(
+                "TransformerVars::forward: encoder_layers must not be empty".to_string(),
+            ));
+        }
+        if self.decoder_layers.is_empty() {
+            return Err(AutodiffError::InvalidArgument(
+                "TransformerVars::forward: decoder_layers must not be empty".to_string(),
+            ));
+        }
+
         let mut x = *src;
         for layer in &self.encoder_layers {
             x = layer.forward(&x, src_mask, false)?;
@@ -736,6 +804,80 @@ mod tests {
                 .as_slice()
                 .unwrap()
         );
+    }
+
+    /// `encoder_layers`／`decoder_layers` を private 化した目的
+    /// （codex-review 指摘・PR #2282）そのものの回帰: 空スタックでは
+    /// encoder が `src` を一切処理せず decoder も attention を実行
+    /// しないため、fail-closed に `InvalidArgument` を返す必要がある。
+    /// private 化しただけでは `mod tests`（子モジュール）から
+    /// フィールドを直接空にできてしまうため、ここで `forward` 側の
+    /// ガードを検証する。
+    #[test]
+    fn forward_rejects_empty_encoder_layers() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let model = Transformer::new(&config(), 41).unwrap();
+        let mut bound = model.bind(&tape);
+        bound.encoder_layers.clear();
+        let src = tape.var(&Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        let tgt = tape.var(&Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        let err = bound
+            .forward(&src, &tgt, None, None, None, false)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn forward_rejects_empty_decoder_layers() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let model = Transformer::new(&config(), 43).unwrap();
+        let mut bound = model.bind(&tape);
+        bound.decoder_layers.clear();
+        let src = tape.var(&Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        let tgt = tape.var(&Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        let err = bound
+            .forward(&src, &tgt, None, None, None, false)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// shape 検査が層の処理より前に行われることの回帰: `encoder_layers`
+    /// を空にしても、rank 不一致の `src` は（encoder が素通りする形で
+    /// 誤って受理されるのではなく）`Shape(RankMismatch)` で拒否される
+    /// 必要がある。
+    #[test]
+    fn forward_rejects_src_rank_mismatch_even_with_empty_encoder_layers() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let model = Transformer::new(&config(), 47).unwrap();
+        let mut bound = model.bind(&tape);
+        bound.encoder_layers.clear();
+        let src = tape.var(&Tensor::new(vec![0.1f32; 3 * 4], &[3, 4]).unwrap());
+        let tgt = tape.var(&Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        let err = bound
+            .forward(&src, &tgt, None, None, None, false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch { .. })
+        ));
+    }
+
+    /// 同上（`tgt` の最終軸不一致・`decoder_layers` を空にしたケース）。
+    #[test]
+    fn forward_rejects_tgt_last_axis_mismatch_even_with_empty_decoder_layers() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let model = Transformer::new(&config(), 53).unwrap();
+        let mut bound = model.bind(&tape);
+        bound.decoder_layers.clear();
+        let src = tape.var(&Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        let tgt = tape.var(&Tensor::new(vec![0.1f32; 2 * 3 * 5], &[2, 3, 5]).unwrap());
+        let err = bound
+            .forward(&src, &tgt, None, None, None, false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ShapeMismatch { .. })
+        ));
     }
 
     #[test]
