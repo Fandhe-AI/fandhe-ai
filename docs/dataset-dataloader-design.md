@@ -212,3 +212,29 @@ PyTorch `Dataset.__getitem__`（単一サンプル）ではなく「添字列 �
 - facade 新規公開面: `fandhe_ai::data::{Batches, DataError, DataLoader,
   DataLoaderConfig, Dataset, TensorDataset}` の 6 型のみ。新規 `Op`／
   `BackendOps`／VJP なし。
+
+## 11. 追補（#2182）: Sampler・collate・transform フック
+
+上記 §9 の対象外欄に挙げていた「`Sampler`／`BatchSampler` の公開抽象・
+重み付き sampler・`collate_fn` クロージャ」を #2182 で実装した。詳細な
+設計判断・facade 保留の経緯は `docs/tensor-core-data-sampler-hooks-
+decision.md` を正とする。要点のみ記す:
+
+- `tensor-core::data` に `Sampler` trait（`SequentialSampler`／
+  `RandomSampler`／`WeightedRandomSampler` の 3 実装）・
+  `SamplerDataLoader<D>`（`Sampler` の添字をそのまま `Dataset::batch`
+  へ渡す）・`HookedDataLoader<T>`（`TensorDataset<T>` 限定でサンプル
+  単位 `TransformFn`／collate 単位 `CollateFn` を追加）を新設した。
+  既存の `DataLoader`／`DataLoaderConfig`（本ドキュメント §3）は
+  **不変**のまま維持する（フィールド追加・inherent メソッド追加とも
+  行わない）。
+- facade（`fandhe_ai::data`）への再エクスポートは未承認のまま保留
+  （`crates/facade/src/lib.rs::DataHooksHoldDoctestGuard`）。§10 の
+  6 型再エクスポートは不変。
+- 上記 §9 の残る対象外（`num_workers` 並列プリフェッチ・
+  `pin_memory`・iterable-style dataset・`ConcatDataset`／`Subset`／
+  `random_split`・タプルデータセットでのサンプル単位フック）は引き
+  続き対象外。「マルチワーカー prefetch」の追跡先イシュー番号は
+  issue #2182 本文の誤記（実際には無関係の #2181。`docs/tensor-core-
+  data-sampler-hooks-decision.md` §6 参照）であり、正しい追跡先は
+  未起票のまま。

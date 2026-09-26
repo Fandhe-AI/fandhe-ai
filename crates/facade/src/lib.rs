@@ -5221,3 +5221,104 @@ struct FitWeightingHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct GradAccumulationHoldDoctestGuard;
+
+/// イシュー #2182（親 #2131）の facade 公開保留を固定する doctest
+/// 足場。`RngDistributionsHoldDoctestGuard`（#2156）と同型の「正の
+/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカルの型・
+/// 自由関数群（`__fandhe_data_hooks_hold_probe::{Sampler,
+/// SequentialSampler, RandomSampler, WeightedRandomSampler,
+/// SamplerDataLoader, SamplerBatches, HookedDataLoader, HookedBatches,
+/// TransformFn, CollateFn, default_collate}`）と、`fandhe_ai::data::
+/// DataLoader<TensorDataset<f32>>` への inherent メソッドを装う
+/// トレイト（`__FandheDataHooksHoldProbe`）を導入し、実際に使う名前・
+/// 呼び出しを書く。facade がどの経路（`pub use` による再エクスポート・
+/// `DataLoader` への `with_sampler`／`with_transform`／`with_collate`
+/// 等のメソッド追加・別名 `pub use`・facade 独自の型宣言）でこれらの
+/// 名前を公開しても、ローカル定義との glob 衝突（型名・自由関数名の
+/// 場合。E0659 等）または呼び出しシグネチャの不一致（inherent
+/// メソッドがトレイトメソッドより優先解決されるため、本プローブの
+/// trait 経由呼び出しが型・引数不一致でコンパイル失敗する）で
+/// エラーコードに依存せずコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// data_hooks_hold_doctest_globs_all_pub_modules`・`data_hooks_hold_
+/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_data_hooks`・`workspace_declares_data_hooks_
+/// names_only_in_tensor_core_data`）との多層防御の位置づけ・承認未
+/// 取得の経緯は `docs/tensor-core-data-sampler-hooks-decision.md` §5
+/// 「facade 保留と承認依頼用の事前設計」を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_data_hooks_hold_probe {
+///     pub struct Sampler;
+///     pub struct SequentialSampler;
+///     pub struct RandomSampler;
+///     pub struct WeightedRandomSampler;
+///     pub struct SamplerDataLoader;
+///     pub struct SamplerBatches;
+///     pub struct HookedDataLoader;
+///     pub struct HookedBatches;
+///     pub struct TransformFn;
+///     pub struct CollateFn;
+///     pub fn default_collate() {}
+/// }
+/// use __fandhe_data_hooks_hold_probe::*;
+///
+/// struct __FandheDataHooksHoldMarker;
+///
+/// trait __FandheDataHooksHoldProbe {
+///     fn with_sampler(&self) -> __FandheDataHooksHoldMarker;
+///     fn with_transform(&self) -> __FandheDataHooksHoldMarker;
+///     fn with_collate(&self) -> __FandheDataHooksHoldMarker;
+///     fn with_try_transform(&self) -> __FandheDataHooksHoldMarker;
+///     fn with_try_collate(&self) -> __FandheDataHooksHoldMarker;
+/// }
+///
+/// impl __FandheDataHooksHoldProbe
+///     for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>
+/// {
+///     fn with_sampler(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }
+///     fn with_transform(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }
+///     fn with_collate(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }
+///     fn with_try_transform(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }
+///     fn with_try_collate(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }
+/// }
+///
+/// fn __probe_free_fns(_: Sampler, _: SequentialSampler, _: RandomSampler,
+///     _: WeightedRandomSampler, _: SamplerDataLoader, _: SamplerBatches,
+///     _: HookedDataLoader, _: HookedBatches, _: TransformFn, _: CollateFn) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     default_collate();
+/// }
+///
+/// fn __probe_data_loader(x: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>) {
+///     let _: __FandheDataHooksHoldMarker = x.with_sampler();
+///     let _: __FandheDataHooksHoldMarker = x.with_transform();
+///     let _: __FandheDataHooksHoldMarker = x.with_collate();
+///     let _: __FandheDataHooksHoldMarker = x.with_try_transform();
+///     let _: __FandheDataHooksHoldMarker = x.with_try_collate();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct DataHooksHoldDoctestGuard;
