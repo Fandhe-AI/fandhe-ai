@@ -106,8 +106,9 @@ pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm
 pub use lamb::{Lamb, LambConfig};
 pub use lbfgs::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
 pub use lr_scheduler::{
-    ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, OneCycleAnneal,
-    OneCycleLr, OneCycleLrConfig, StepLr,
+    ConstantLr, CosineAnnealingLr, CosineAnnealingWarmRestarts, CyclicLr, ExponentialLr, LambdaLr,
+    LinearWarmupLr, LrScheduler, MultiStepLr, OneCycleAnneal, OneCycleLr, OneCycleLrConfig,
+    SequentialLr, StepLr,
 };
 pub use nadam::{NAdam, NAdamConfig};
 pub(crate) use param_group::SlotHparams;
@@ -270,3 +271,24 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 保留固定の設計は `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-
 // decision.md` §8「承認事項」を参照（`crates/facade/src/lib.rs::
 // OptimizerExtHoldDoctestGuard` が正のプローブで固定する）。
+
+// イシュー #2176（親 #2131）: LR scheduler 5 種（[`MultiStepLr`]・
+// [`CosineAnnealingWarmRestarts`]・[`CyclicLr`]・[`LambdaLr`]・
+// [`SequentialLr`]）を追加した（`lr_scheduler` モジュール冒頭 doc・
+// 各型の doc 参照）。既存 6 種（`ConstantLr`〜`OneCycleLr`）と同じく
+// 式ベース・stateless 純関数であり、新規 `Op`／`BackendOps`／`Var`／
+// VJP は追加していない（テンソル演算ではなくホスト側の `f32` 純関数の
+// ため）。`CosineAnnealingWarmRestarts` の周期位置決定は整数演算
+// （`usize`／`u128` の `checked_add`／`checked_mul`）で行い、PyTorch の
+// epoch 引数経路が使う浮動小数 `log` 由来の周期誤判定を再現しない
+// （意図的な逸脱。`CosineAnnealingWarmRestarts` doc「PyTorch との
+// 意図的な相違」節参照）。
+//
+// **facade（`fandhe_ai::optim`）への公開は保留**（`Adadelta`／
+// `Adamax`／`NAdam`／`RAdam`〈#2171〉・param groups〈#2173〉と同型。
+// 親 #2131 が定める「facade 公開面の拡張は設計判断記録 → 承認 → 実装
+// の 2 段」規則により、本イシュー時点で所有者の承認コメントがないため
+// `crates/facade/src/optim.rs` への追記を行っていない）。承認事項・
+// 保留固定の設計は `docs/autodiff-lr-scheduler-ext-decision.md`
+// §8「承認事項」を参照（`crates/facade/src/lib.rs::
+// LrSchedulerExtHoldDoctestGuard` が正のプローブで固定する）。
