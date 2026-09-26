@@ -106,11 +106,18 @@ CUDA／Metal のカーネル実装（後続イシュー）に適用する受け�
    parity テスト判定方式」を適用する。
 2. **run-to-run bit 同一**: 同一入力・同一設定での GPU 実行を複数回
    繰り返し、出力が bit 単位で決定的であること。
-3. **性能**: 5 run 中央値（`bench_harness::median_q1_q3`）で計測し、
-   最終パラメータの checksum（`to_bits` の fold）が host 経路と完全
-   一致すること（正しさなので hard assert）。resident／host の所要
-   時間比（ratio）は record_only（CI／開発機は専有ゲートでないため
-   hard assert しない）。
+3. **性能**: 5 run 中央値（`bench_harness::median_q1_q3`）で計測する。
+   GPU 実装内の再実行間（run-to-run）の決定性確認には最終パラメータの
+   checksum（`to_bits` の fold）を用い、5 run 全てで checksum が完全
+   一致することを hard assert する（同一実装・同一入力の再実行間比較
+   のため bit 完全一致を要求してよい。上記 2. の run-to-run 判定と
+   同じ性質）。**host 経路との比較には checksum の完全一致を用いず**、
+   1. の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を
+   適用する（GPU は host と結合順序・丸めが異なりうるため、bit 完全
+   一致を要求すると許容範囲内の丸め差を持つ正常な GPU 実装が不合格に
+   なりうる。`.claude/rules/coding-rust.md` の数値一致契約と整合させる）。
+   resident／host の所要時間比（ratio）は record_only（CI／開発機は
+   専有ゲートでないため hard assert しない）。
 4. **SGD／Adam 常駐経路の非後退**: 既存の `sgd_step_device(_tracked)`／
    `adam_step_device(_tracked)`・`DeviceParamStore::step()`／
    `step_adam`／`step_adamw` の既存 `#[ignore]` テストが引き続き
