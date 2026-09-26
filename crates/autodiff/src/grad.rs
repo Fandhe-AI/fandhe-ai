@@ -613,6 +613,54 @@ pub(crate) fn vjp(
             // CrossEntropyLoss` doc 参照）。
             vec![(logits, dlogits)]
         }
+        Op::L1Loss {
+            pred,
+            target,
+            reduction,
+        } => {
+            let pred_val = materialize_fallible(nodes, ops, pred)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = pred_val.numel();
+            let (dpred, dtarget) = if n == 0 {
+                // `Op::MseLoss` 分岐と同じゼロ除算回避（`scale` 計算前に
+                // 早期 return）。
+                let zeros = build_tensor(vec![0f32; 0], pred_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value / n as f32,
+                    Reduction::Sum => g_value,
+                };
+                // `BackendOps` に対応メソッドを持たない（`tape::Op::
+                // L1Loss` doc 参照）ため常にホスト参照実装のみを経由
+                // する（`Op::MseLoss`／`Op::HuberLoss` の `Unsupported`
+                // フォールバック分岐と異なり、融合カーネル呼び出し自体
+                // が存在しない）。
+                let dpred_vec = l1_loss_vjp(pred_val, target_val, scale);
+                let dtarget_data: Vec<f32> = dpred_vec.iter().map(|&v| -v).collect();
+                let dpred_t = build_tensor(dpred_vec, pred_val.shape());
+                let dtarget_t = build_tensor(dtarget_data, pred_val.shape());
+                (dpred_t, dtarget_t)
+            };
+            vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::CrossEntropyLossWithOptions {
+            logits,
+            targets,
+            class_dim,
+            reduction,
+            options,
+        } => {
+            let logits_val = materialize_fallible(nodes, ops, logits)?;
+            let dlogits = cross_entropy_loss_with_options_vjp(
+                logits_val, &targets, class_dim, reduction, &options, upstream,
+            );
+            // `targets`／`options.class_weight` はいずれも非追跡のため
+            // 勾配寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
+            // CrossEntropyLossWithOptions` doc 参照）。
+            vec![(logits, dlogits)]
+        }
         Op::NllLoss {
             input,
             targets,
@@ -7561,6 +7609,410 @@ fn cross_entropy_loss_vjp(
     }
     let scaled: Vec<f32> = grad.iter().map(|&v| v * scale).collect();
     build_tensor(scaled, &shape)
+}
+
+/// `L1Loss{pred, target}` の要素ごとの劣勾配（`d = pred − target`。
+/// イシュー #2166）。`dPred[k] = scale·sign(d[k])`（`sign(0) = 0`、
+/// `NaN` はそのまま `NaN` を伝播）。`Op::L1Loss` 分岐が呼ぶ（`BackendOps`
+/// に対応メソッドがないため常にホスト計算。`tape::Op::L1Loss` doc
+/// 参照）。`dTarget = −dPred` は呼び出し元が単純な符号反転（新規
+/// カーネル起動なし）で求める（`Op::MseLoss` 分岐と同じパターン）。
+fn l1_loss_vjp(pred: &Tensor<f32>, target: &Tensor<f32>, scale: f32) -> Vec<f32> {
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    pred_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &t)| scale * l1_grad_sign(p - t))
+        .collect()
+}
+
+/// [`l1_loss_vjp`] が使う `sign` 関数（`sign(0) = 0`・`NaN` は `NaN` を
+/// 伝播。標準ライブラリの `f32::signum`（`0.0`/`-0.0` をそれぞれ
+/// `1.0`/`-1.0` に丸め `sign(0) = 0` 契約と異なる）を使わず手書きする
+/// 理由）。
+fn l1_grad_sign(d: f32) -> f32 {
+    if d.is_nan() {
+        f32::NAN
+    } else if d > 0.0 {
+        1.0
+    } else if d < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// `CrossEntropyLossWithOptions` の VJP（イシュー #2166）。
+/// `eval::cross_entropy_loss_with_options_forward` の数式（doc 参照）を
+/// クラス `c` について微分した
+/// `dx_c = s·[(1−ε)·w[t_s]·(p_c − 1{c==t_s}) + (ε/C)·(p_c·Σ_k w_k − w_c)]`
+/// （`p_c = softmax(logits)[c]`。`s` は `Mean` なら `g/W`〈`W` は forward
+/// と同じ非 ignore サンプルの重み和〉・`Sum` なら `g`〈`W` に依存
+/// しない〉。早期 return が 2 つある: ①全クラスの重み `Σ_k w_k` が
+/// 0（度外れケース。`Mean`／`Sum` とも勾配全体を 0 にする）、
+/// ②`Mean` かつ `W == 0`（`Σ_k w_k != 0` でも forward が損失 0.0
+/// を返す Mean 専用契約と対で勾配を 0 にする）。`Sum` は `W == 0`
+/// でも早期 return せず、`Σ_k w_k != 0`〈target クラスの重みだけが
+/// 0〉なら smoothing 項の非ゼロ寄与を保つ。doc 参照）
+/// を直接構成する。ignore されたサンプルの行は 0（`Op::
+/// CrossEntropyLossWithOptions` doc 参照）。`targets`／
+/// `options.class_weight` は非追跡のため戻り値は `logits` 側の勾配のみ
+/// （呼び出し元 `vjp()` の `CrossEntropyLossWithOptions` 分岐参照）。
+fn cross_entropy_loss_with_options_vjp(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    options: &crate::loss_ops::CrossEntropyOptions,
+    upstream: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積は数学的には無関係な次元（例:
+    // `usize::MAX`）を含みうり部分積単体で usize オーバーフローしうる
+    // （`eval::cross_entropy_loss_with_options_forward`・`softmax_along`
+    // と同型のガード。codex-review 指摘・PR #2283）。要素数 0 なら
+    // 勾配も要素なしの同 shape テンソルとして返す（forward が損失
+    // 0.0 を返すため勾配も寄与しない）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+
+    let softmax = eval::softmax_along(logits, class_dim);
+    let p = dense_vec(&softmax);
+    let target_data = eval::dense_vec_i32(targets);
+
+    let eps = options.label_smoothing_value() as f64;
+    let ignore_index = options.ignore_index_value();
+    let weights: Vec<f64> = match options.class_weight_value() {
+        Some(cw) => dense_vec(cw).iter().map(|&v| v as f64).collect(),
+        None => vec![1.0f64; axis_len],
+    };
+    let total_weight_all_classes: f64 = weights.iter().sum();
+
+    // `W`（forward と同じ「非 ignore サンプルの `w[t_s]` 総和」）を
+    // 独立に再計算する（`eval::cross_entropy_loss_with_options_
+    // forward` と同じ縮約順序・`f64` 蓄積）。`Mean` の分母として使う
+    // ほか、`Mean` 専用の `W == 0` 早期 return 判定にも使う（下記）。
+    let mut denom_w: f64 = 0.0;
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                continue;
+            }
+            if t >= 0 && (t as usize) < axis_len {
+                denom_w += weights[t as usize];
+            }
+        }
+    }
+
+    // 全クラスの重みが 0（`total_weight_all_classes == 0`。`weights`
+    // は非負値検証済みのためこれは各 `w_c == 0` と同値）は、`term1`・
+    // `term2` のいずれも数学的に 0 になる度外れなケースである。
+    // `p_c`（`logits` 由来）に `NaN`／`inf` が含まれていると
+    // `0 * NaN = NaN` で汚染されうるため、`s` を経由せず即座に要素
+    // すべて 0 の勾配テンソルを返す（`eval::cross_entropy_loss_with_
+    // options_forward` の「全クラス 0」契約と対）。
+    //
+    // これは `denom_w == 0`（target クラスの重み和 `W` のみが 0）とは
+    // 区別する。後者は他クラスの重みが非ゼロであれば `term2`
+    // （smoothing 項）が正当に非ゼロ寄与を持つため、`Sum` はそれを
+    // そのまま反映する必要がある（`denom_w == 0` 一律で勾配 0 に
+    // 潰すと smoothing 項由来の勾配を誤って消してしまう。
+    // codex-review 指摘・PR #2283）。
+    if total_weight_all_classes == 0.0 {
+        return build_tensor(vec![0f32; logits.numel()], &shape);
+    }
+
+    // `Mean` は `W`（`denom_w`）による正規化が本質的なため、`W == 0`
+    // は forward が損失 0.0（doc §2.2「Mean 専用の W == 0 契約」）を
+    // 返すのと対で勾配も 0 にする。ここも `s = 0.0` を経由して後続
+    // ループへ進めると、`p_c`（`logits` 由来）に `NaN`／`inf` が
+    // 含まれる場合 `0.0 * NaN = NaN` へ汚染されうるため（`total_
+    // weight_all_classes == 0` の早期 return と同型の問題）、`s` を
+    // 経由せず即座に要素すべて 0 の勾配テンソルを返す（advisor
+    // レビュー指摘・PR #2283）。`Sum` は `denom_w` に正規化を依存
+    // しないため下の通常経路で `term2`（smoothing 項）の非ゼロ寄与を
+    // 正しく反映する。
+    if reduction == Reduction::Mean && denom_w == 0.0 {
+        return build_tensor(vec![0f32; logits.numel()], &shape);
+    }
+
+    let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0) as f64;
+    let s = match reduction {
+        Reduction::Mean => g_value / denom_w,
+        Reduction::Sum => g_value,
+    };
+
+    let mut grad = vec![0f32; logits.numel()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                // ignore されたサンプルの行は 0 のまま（`Op::
+                // CrossEntropyLossWithOptions` doc 参照）。
+                continue;
+            }
+            let in_range = t >= 0 && (t as usize) < axis_len;
+            debug_assert!(
+                in_range,
+                "cross_entropy_loss_with_options_vjp: target 添字が範囲外（契約違反）"
+            );
+            if !in_range {
+                continue;
+            }
+            let w_t = weights[t as usize];
+            for (a, &w_a) in weights.iter().enumerate() {
+                let idx = (o * axis_len + a) * inner + i;
+                let p_c = p[idx] as f64;
+                let delta = if (t as usize) == a { 1.0 } else { 0.0 };
+                let term1 = (1.0 - eps) * w_t * (p_c - delta);
+                let term2 = (eps / axis_len as f64) * (p_c * total_weight_all_classes - w_a);
+                grad[idx] = (s * (term1 + term2)) as f32;
+            }
+        }
+    }
+    build_tensor(grad, &shape)
+}
+
+#[cfg(test)]
+mod cross_entropy_with_options_vjp_empty_tensor_overflow_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::Tensor;
+
+    // codex-review 指摘（PR #2283）の回帰検証: forward 側
+    // （`eval::cross_entropy_loss_with_options_forward`）と同型の
+    // 部分積オーバーフローが vjp 側にも存在した（`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積が `checked_numel` の吸収を経由
+    // しないため）。冒頭の空 shape 早期 return で panic せず、要素数
+    // 0 の勾配テンソルを返すことを確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_empty_tensor_with_overflow_prone_shape_does_not_panic() {
+        let shape = [0usize, 1, usize::MAX, usize::MAX];
+        let logits = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, usize::MAX])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().label_smoothing(0.1);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+        assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: `Mean` で非 ignore
+    // サンプルの重み和 `denom_w` が 0（全クラスの `class_weight` が 0）
+    // の場合、`s = g/denom_w` を経由すると `s = 0` になるものの、
+    // 後続ループで `logits` の `NaN` と乗算されると `0 * NaN = NaN`
+    // となり勾配が NaN 化しうる。`denom_w == 0` を検知した時点で
+    // 同 shape のゼロ勾配を早期 return することを確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_zero_denom_w_with_nan_logits_returns_zero_grad() {
+        // shape [1, 2]（1 サンプル・2 クラス）。全クラスの重みを 0 に
+        // することで denom_w = 0 を作り、logits に NaN を混入させる。
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "denom_w == 0 のとき勾配はゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: 上記テストと同条件
+    // （全クラス `class_weight` 0・`logits` に `NaN` 混入）を `Sum`
+    // reduction で確認する。修正前は `denom_w == 0` の早期 return が
+    // `Mean` にしか適用されておらず、`Sum` は `s = g` を経由して
+    // `term1 = (1-eps)*w_t*(p_c-delta)` の `w_t == 0` と `p_c`（`NaN`
+    // 混入の softmax 由来）の乗算で `0 * NaN = NaN` となり勾配が NaN
+    // 化していた（`docs/autodiff-loss-ops-decision.md` §2.2 の
+    // 「W == 0 は損失 0.0・勾配 0」契約に違反）。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_sum_reduction_zero_denom_w_with_nan_logits_returns_zero_grad()
+     {
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Sum,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "Sum reduction でも denom_w == 0 のとき勾配はゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証:
+    // `eval::cross_entropy_loss_with_options_forward` 側の同名テスト
+    // （`..._sum_reduction_zero_target_weight_nonzero_other_class_
+    // weight_keeps_smoothing_term`）と対になる勾配側の検証。
+    // `class_weight = [0, 1]`・正解クラス 0（`w_t == 0`）・他クラス
+    // （クラス 1）は重み非ゼロのため `Σ_c w_c == 1 != 0`（全クラス 0
+    // の度外れケースには該当しない）。`Sum` は `denom_w == 0` でも
+    // `s = g` を経由し、`term2`（smoothing 項）の非ゼロ寄与を
+    // 正しく残すことを確認する。
+    //
+    // 手計算（`logits = [0, 0]` → `p = [0.5, 0.5]`・
+    // `total_weight_all_classes = 1`・`eps = 0.2`・`g = 1.0`）:
+    // `term1 = 0`（`w_t == 0`）。
+    // `c = 0`: `term2 = (eps/C)*(p_0*Σw − w_0) = 0.1*(0.5*1 − 0) = 0.05`
+    // `c = 1`: `term2 = (eps/C)*(p_1*Σw − w_1) = 0.1*(0.5*1 − 1) = -0.05`
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_sum_reduction_zero_target_weight_nonzero_other_class_weight_keeps_smoothing_grad()
+     {
+        let logits = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Sum,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            (grad[0] - 0.05f32).abs() < 1e-5,
+            "class 0 の smoothing 勾配が期待値と一致しない: {grad:?}"
+        );
+        assert!(
+            (grad[1] - (-0.05f32)).abs() < 1e-5,
+            "class 1 の smoothing 勾配が期待値と一致しない: {grad:?}"
+        );
+    }
+
+    // advisor レビュー指摘（PR #2283）の回帰検証: `class_weight =
+    // [0, 1]`・target 0（`W == 0`）・`Σ_c w_c == 1 != 0`（全クラス 0
+    // には該当しない）のケースで `logits` に `NaN` が混入する場合。
+    // `Mean` は `denom_w == 0` を検知した時点で `s` を経由せず即座に
+    // ゼロ勾配を返す実装（`s = 0.0` を経由すると `p_c` の `NaN` との
+    // 乗算で `0.0 * NaN = NaN` へ汚染されるため）であることを確認
+    // する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_mean_reduction_zero_target_weight_nonzero_other_class_weight_with_nan_logits_returns_zero_grad_not_nan()
+     {
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "Mean は W == 0 のとき NaN logits 混入でも勾配は有限のゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
+    }
+
+    // 上記と同条件を `Mean` reduction で確認する: `W == 0` のため
+    // `Mean` は forward 側の Mean 専用契約（損失 0.0）と対で勾配も
+    // 全て 0 を返す（`Sum` とは異なる扱いになる点が今回の修正の
+    // 要点）。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_mean_reduction_zero_target_weight_nonzero_other_class_weight_returns_zero_grad()
+     {
+        let logits = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "Mean は W == 0 のとき勾配が全て 0 であるべき: {grad:?}"
+        );
+    }
 }
 
 /// `nll_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の

@@ -4229,6 +4229,320 @@ pub(crate) fn cross_entropy_loss(
     build_tensor(vec![loss], &[])
 }
 
+/// L1 損失 `|pred − target|` の縮約（スカラー出力。PyTorch `nn.L1Loss`
+/// 相当。イシュー #2166・親イシュー #2131）。shape 一致検査
+/// （`require_same_shape`）は呼び出し元（`crate::loss_ops::l1_loss`）が
+/// 済ませている前提。`mse_loss` とは異なり、`f64` アキュムレータで
+/// index 順に蓄積し 1 回だけ `f32` へ downcast する（`.claude/rules/
+/// coding-rust.md` の一般原則を新規損失 forward に適用する判断。
+/// 既存 `mse_loss`／`cross_entropy_loss` の `f32` 蓄積は R3〈既存経路
+/// 不変〉のため変更しない）。`numel == 0` は mean・sum とも 0.0
+/// （`mse_loss` と同じ規約）。要素に `NaN` を含む場合はそのまま
+/// 伝播する。
+pub(crate) fn l1_loss_forward(
+    pred: &Tensor<f32>,
+    target: &Tensor<f32>,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    let numel = pred_data.len();
+    let mut acc: f64 = 0.0;
+    for (&p, &t) in pred_data.iter().zip(target_data.iter()) {
+        acc += (p as f64 - t as f64).abs();
+    }
+    // `Mean` は `f64` の和を `f64` のまま `numel` で割ってから最後に
+    // 1 回だけ `f32` へ downcast する（除算後に `f32` へ変換すると、
+    // 例えば `pred=[f32::MAX, f32::MAX]`・`target=[0, 0]` のような
+    // 入力で和が `f32` の範囲を超えて `inf` になり、数学的には有限の
+    // 平均値が `inf` になってしまう。codex-review 指摘・イシュー
+    // #2166 PR #2283）。
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                (acc / numel as f64) as f32
+            }
+        }
+        crate::var::Reduction::Sum => acc as f32,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// label_smoothing・ignore_index・class_weight 付き CrossEntropy 損失の
+/// forward（イシュー #2166・親イシュー #2131）。`cross_entropy_loss`
+/// （既定オプション相当）の一般化で、PyTorch
+/// `aten/src/ATen/native/LossNLL.cpp` の label smoothing 実装に準拠
+/// する（意味論の正は `crate::loss_ops` モジュール doc §数値契約）。
+/// shape・値検査（`class_dim` 範囲・targets shape 一致・targets 添字
+/// 範囲・ε 範囲・class_weight shape／非負性）は呼び出し元
+/// （`crate::loss_ops::cross_entropy_loss_with`）が済ませている前提。
+///
+/// 記法（サンプル `s = (o, i)`、クラス `c`）: `lp_c = x_c − lse`
+/// （log-softmax、`lse` は既存 `cross_entropy_loss` と同じ max シフト
+/// 安定化）、`w_c` はクラス重み（`class_weight` 未指定は全クラス
+/// `1.0`）、`W = Σ_{非 ignore} w[t_s]`（`Mean` の分母）。
+/// `L_s = (1−ε)·w[t_s]·(−lp_{t_s}) + (ε/C)·Σ_c w_c·(−lp_c)`
+/// （ignore されたサンプルは寄与 0・`W` にも含めない）。
+/// `Mean` は `(Σ_s L_s) / W`、`Sum` は `Σ_s L_s`。全サンプル ignore、
+/// または `class_weight` の全クラス重み和（`Σ_c w_c`）が 0 のとき
+/// （`weights` は非負値検証済みのため各 `w_c == 0` と同値）は
+/// `Mean`／`Sum` いずれも損失 0.0 を返す（`mse_loss` の
+/// `n == 0 → 0.0` 規約と同型。PyTorch は `NaN` を返すため差分として
+/// `docs/autodiff-loss-ops-decision.md` に記録する）。`W == 0` だが
+/// `Σ_c w_c != 0`（target クラスの重みのみ 0）のときは `Sum` は
+/// `Σ_s L_s`（smoothing 項の非ゼロ寄与を反映）、`Mean` は
+/// `Σ_s L_s / 0` が未定義になるため 0.0 を返す（2026-09-26 是正・
+/// codex-review 指摘・PR #2283。詳細は同 doc §2.2）。蓄積は `f64`・
+/// index 順で行い最後に 1 回だけ `f32` へ downcast する。
+pub(crate) fn cross_entropy_loss_with_options_forward(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    options: &crate::loss_ops::CrossEntropyOptions,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積は数学的には無関係な次元（例:
+    // `usize::MAX`）を含みうり、`checked_numel`（`Tensor::new` 側）が
+    // 通した shape でも部分積単体では usize オーバーフローしうる
+    // （全体積は途中の 0 で吸収されるが部分積はそれを経由しない。
+    // `softmax_along` と同型のガード。codex-review 指摘・PR #2283）。
+    // 要素数 0 は非 ignore サンプルが存在しないため `W == 0` と同じ
+    // 扱いで損失 0.0 を返す（doc 参照）。
+    if shape.contains(&0) {
+        return build_tensor(vec![0.0f32], &[]);
+    }
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let data = dense_vec(logits);
+    let target_data = dense_vec_i32(targets);
+
+    let eps = options.label_smoothing_value() as f64;
+    let ignore_index = options.ignore_index_value();
+    let weights: Vec<f64> = match options.class_weight_value() {
+        Some(cw) => dense_vec(cw).iter().map(|&v| v as f64).collect(),
+        None => vec![1.0f64; axis_len],
+    };
+    // `Σ_c w_c`（全クラスの重み和。`weights` は非負値検証済み〈loss_ops
+    // の検査順序参照〉のためこれが 0 であることは全クラス `w_c == 0`
+    // と同値）。`denom_w`（target クラスの重み和 `W`）とは別物であり、
+    // 両者を混同すると「target クラスの重みだけが 0」なケース（他
+    // クラスは非ゼロ）で smoothing 項の寄与を誤って消してしまう
+    // （codex-review 指摘・PR #2283）。
+    let weights_sum_all_classes: f64 = weights.iter().sum();
+
+    let mut total_loss: f64 = 0.0;
+    let mut denom_w: f64 = 0.0;
+
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                continue;
+            }
+            let mut m = f32::NEG_INFINITY;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                m = nan_propagating_max(m, data[idx]);
+            }
+            let mut sum_exp: f64 = 0.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                sum_exp += ((data[idx] - m) as f64).exp();
+            }
+            let lse = m as f64 + sum_exp.ln();
+
+            // 呼び出し元（`crate::loss_ops::cross_entropy_loss_with`）が
+            // `0 <= t < axis_len`（`ignore_index` に一致する場合を除く）
+            // を検査済みの前提。範囲外は契約違反であり `unwrap()`/
+            // `expect()` を使わず `debug_assert!` で検知しつつ安全側
+            // （寄与 0）へフォールバックする（`cross_entropy_loss` と
+            // 同型の契約違反対応）。
+            let in_range = t >= 0 && (t as usize) < axis_len;
+            debug_assert!(
+                in_range,
+                "cross_entropy_loss_with_options_forward: target 添字が範囲外（契約違反）"
+            );
+            if !in_range {
+                continue;
+            }
+
+            let mut weighted_sum_neg_lp: f64 = 0.0;
+            for (a, &w_a) in weights.iter().enumerate() {
+                let idx = (o * axis_len + a) * inner + i;
+                let lp = data[idx] as f64 - lse;
+                weighted_sum_neg_lp += w_a * (-lp);
+            }
+
+            let w_t = weights[t as usize];
+            let lp_t = data[(o * axis_len + t as usize) * inner + i] as f64 - lse;
+            let loss_s =
+                (1.0 - eps) * w_t * (-lp_t) + (eps / axis_len as f64) * weighted_sum_neg_lp;
+            total_loss += loss_s;
+            denom_w += w_t;
+        }
+    }
+    // 全クラスの重みが 0（`Σ_c w_c == 0`。`weights` は非負値検証済み
+    // のためこれは各 `w_c == 0` と同値）は、`weighted_sum_neg_lp`・
+    // `w_t` のいずれの乗算経由でも損失が数学的に 0 になる度外れな
+    // ケースである。`logits` に `NaN` が混入していると `0.0 * NaN =
+    // NaN` で汚染されうるため、`total_loss` を経由せず即座に 0.0 を
+    // 返す（`Sum`／`Mean` 共通。doc §3「全クラス 0」契約）。
+    //
+    // これは `denom_w == 0`（target クラスの重み和 `W` のみが 0。
+    // 例: `class_weight = [0, 1]` で正解クラスが常にクラス 0）とは
+    // 区別する。後者は他クラスの重みが非ゼロであれば smoothing 項
+    // （`weighted_sum_neg_lp` 由来）が正当に非ゼロ寄与を持つため、
+    // `Sum` はそれをそのまま返す必要がある（`denom_w == 0` 一律で
+    // 0.0 に潰すと smoothing 項の寄与を誤って消してしまう。
+    // codex-review 指摘・PR #2283）。
+    if weights_sum_all_classes == 0.0 {
+        return build_tensor(vec![0.0f32], &[]);
+    }
+    let loss = match reduction {
+        // `Mean` は `W`（`denom_w`）による正規化が本質的なため、
+        // `W == 0` は `Σ_s L_s / 0` が数学的に未定義になる。
+        // `mse_loss` の `n == 0 → 0.0` と同型の安全側の約束として
+        // 0.0 を返す（doc §2.2「Mean 専用の W == 0 契約」）。
+        Reduction::Mean => {
+            if denom_w == 0.0 {
+                0.0f32
+            } else {
+                (total_loss / denom_w) as f32
+            }
+        }
+        // `Sum` は `denom_w`（target クラスの重み和）に正規化を
+        // 依存しないため、`W == 0` でも `total_loss`（smoothing 項の
+        // 非ゼロ寄与を含む正しい合計）をそのまま返す。
+        Reduction::Sum => total_loss as f32,
+    };
+    build_tensor(vec![loss], &[])
+}
+
+#[cfg(test)]
+mod cross_entropy_with_options_empty_tensor_overflow_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #2283）の回帰検証: `shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積は `softmax_along` と同様に
+    // オーバーフローしうる（`checked_numel` が通す `[0, 1, usize::MAX,
+    // usize::MAX]`・`class_dim=1` で `outer = 0`〈安全〉だが `inner =
+    // usize::MAX * usize::MAX` が overflow checks 有効時に panic
+    // していた）。冒頭の空 shape 早期 return で panic しないことを
+    // 確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_forward_empty_tensor_with_overflow_prone_shape_does_not_panic()
+     {
+        let shape = [0usize, 1, usize::MAX, usize::MAX];
+        let logits = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, usize::MAX])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().label_smoothing(0.1);
+        let out = cross_entropy_loss_with_options_forward(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+        );
+        assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: `class_weight` が全クラス
+    // 0（`denom_w == 0`）かつ `logits` に `NaN` が混入する場合、`Mean`
+    // は早期 return で 0.0 を返すが、修正前の `Sum` は `total_loss`
+    // （`0.0 * NaN = NaN` で汚染された値）をそのまま返しており
+    // `docs/autodiff-loss-ops-decision.md` §2.2 の「W == 0 は損失
+    // 0.0・勾配 0」契約に違反していた。`Sum` でも 0.0 を返すことを
+    // 確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_forward_sum_reduction_zero_denom_w_with_nan_logits_returns_zero_loss()
+     {
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+
+        let out =
+            cross_entropy_loss_with_options_forward(&logits, &targets, 1, Reduction::Sum, &options);
+
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: `class_weight = [0, 1]`
+    // で正解クラスが常にクラス 0（`w[t_s] == 0`）だが他クラス
+    // （クラス 1）の重みは非ゼロのケース。`denom_w`（`W = Σ w[t_s]`）
+    // は 0 になるが、`Σ_c w_c`（全クラスの重み和）は非ゼロのため
+    // 「全クラス 0」の度外れケースには該当しない。`label_smoothing`
+    // の smoothing 項はクラス 1 の重み経由で非ゼロ寄与を持つため、
+    // `Sum` は `denom_w == 0` でも一律 0.0 に潰さず `total_loss`
+    // （手計算: `logits = [0, 0]` で `p = [0.5, 0.5]`・
+    // `lp_0 = lp_1 = -ln(2)`・`loss = (eps/C)*w_1*ln(2)
+    // = 0.1 * ln(2)`）をそのまま返すことを確認する。修正前は
+    // `denom_w == 0` を全クラス 0 と同一視し、この smoothing 項の
+    // 寄与を誤って消していた。
+    #[test]
+    fn cross_entropy_loss_with_options_forward_sum_reduction_zero_target_weight_nonzero_other_class_weight_keeps_smoothing_term()
+     {
+        let logits = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+
+        let out =
+            cross_entropy_loss_with_options_forward(&logits, &targets, 1, Reduction::Sum, &options);
+
+        let expected = 0.1 * (2.0f64).ln();
+        let got = out.get(&[]).unwrap() as f64;
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "smoothing 項の非ゼロ寄与が保たれるべき: got={got}, expected={expected}"
+        );
+    }
+
+    // 上記と同条件を `Mean` reduction で確認する: `W == 0` のため
+    // `Mean` は §2.2 の Mean 専用契約（`Σ_s L_s / 0` は未定義なため
+    // 0.0 を返す）どおり 0.0 を返す（`Sum` とは異なる扱いになる点が
+    // 今回の修正の要点）。
+    #[test]
+    fn cross_entropy_loss_with_options_forward_mean_reduction_zero_target_weight_nonzero_other_class_weight_returns_zero_by_convention()
+     {
+        let logits = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+
+        let out = cross_entropy_loss_with_options_forward(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+        );
+
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
+}
+
 // =====================================================================
 // RNN／LSTM／GRU セル演算のホスト参照実装（イシュー #1647・設計
 // `docs/autodiff-rnn-cell-tape-design.md` 決定 1・1b・1c・5・12）。
