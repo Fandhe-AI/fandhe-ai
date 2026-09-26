@@ -2095,6 +2095,11 @@ impl<'t> Var<'t> {
     /// `AutodiffError::InvalidArgument`）→ ③実体化（層 1）→ ④forward
     /// 値計算（`eval::cross_entropy_loss`。`mse_loss_with` と同じく
     /// `BackendOps` に対応メソッドがないため融合対象外）→ ⑤ノード記録。
+    ///
+    /// 本メソッドのシグネチャ・数値経路は不変（イシュー #2166）。
+    /// label_smoothing・ignore_index・class_weight の各オプションは
+    /// `crate::loss_ops::cross_entropy_loss_with`（内部クレート限定。
+    /// facade 公開は承認待ち）で追加提供する。
     pub fn cross_entropy_loss(
         &self,
         targets: &Tensor<i32>,

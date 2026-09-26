@@ -10727,6 +10727,199 @@ fn workspace_declares_conv3d_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
+// イシュー #2161（親 #2131）: Dropout2d・AlphaDropout・EmbeddingBag の
+// facade 公開保留を検査するテスト群。`DropoutEmbeddingBagHoldDoctestGuard`
+// （`src/lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査に加え、
+// `compat::Sequential::add_dropout2d`／`add_alpha_dropout`／
+// `add_embedding_bag` の非宣言を持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-dropout-embedding-bag-decision.md` §6 参照。
+// =====================================================================
+
+/// `DropoutEmbeddingBagHoldDoctestGuard` の唯一の doctest ブロックが
+/// glob import するネスト `pub mod` 集合と、`src/lib.rs` の実際の
+/// `pub mod` 宣言集合が一致することを固定する（`spatial_layers_hold_
+/// doctest_globs_all_pub_modules` と同型。イシュー #2161）。
+#[test]
+fn dropout_embedding_bag_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DropoutEmbeddingBagHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "DropoutEmbeddingBagHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`dropout_embedding_bag_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの**glob 以外の本文**（`__fandhe_dropout_embedding_bag_hold_
+/// probe` モジュール・`__FandheDropoutEmbeddingBagAddProbe`／
+/// `__FandheDropoutEmbeddingBagVarProbe` トレイト定義・
+/// `compat::Sequential`／`Var` への実装・`__probe` 関数）が固定文言
+/// [`DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
+/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
+/// 拒否する。イシュー #2161）。
+#[test]
+fn dropout_embedding_bag_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DropoutEmbeddingBagHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY,
+        "DropoutEmbeddingBagHoldDoctestGuard の doctest ブロック本文\
+         （glob 以外）が固定文言 DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY\
+         からドリフトしている。正のプローブ（__fandhe_dropout_\
+         embedding_bag_hold_probe モジュール・\
+         __FandheDropoutEmbeddingBagAddProbe／\
+         __FandheDropoutEmbeddingBagVarProbe トレイト・__probe 関数）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`dropout_embedding_bag_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `DropoutEmbeddingBagHoldDoctestGuard` doc 内の唯一の doctest
+/// ブロックから、ネスト `pub mod` の glob import 行
+/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
+/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
+/// 含む）。
+const DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_dropout_embedding_bag_hold_probe {\n\
+\x20\x20\x20\x20pub struct Dropout2d;\n\
+\x20\x20\x20\x20pub struct AlphaDropout;\n\
+\x20\x20\x20\x20pub struct EmbeddingBag;\n\
+\x20\x20\x20\x20pub struct EmbeddingBagVars;\n\
+\x20\x20\x20\x20pub struct EmbeddingBagMode;\n\
+\x20\x20\x20\x20pub struct __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20pub fn add_dropout2d() -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_alpha_dropout() -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn add_embedding_bag() -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_dropout_embedding_bag_hold_probe::*;\n\
+\n\
+trait __FandheDropoutEmbeddingBagAddProbe {\n\
+\x20\x20\x20\x20fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+}\n\
+\n\
+impl __FandheDropoutEmbeddingBagAddProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandheDropoutEmbeddingBagVarProbe {\n\
+\x20\x20\x20\x20fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+\x20\x20\x20\x20fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheDropoutEmbeddingBagVarProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: Dropout2d,\n\
+\x20\x20\x20\x20_: AlphaDropout,\n\
+\x20\x20\x20\x20_: EmbeddingBag,\n\
+\x20\x20\x20\x20_: EmbeddingBagVars,\n\
+\x20\x20\x20\x20_: EmbeddingBagMode,\n\
+\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_dropout2d();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_alpha_dropout();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_embedding_bag();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_dropout2d(seq);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_dropout2d();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_alpha_dropout(seq);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_alpha_dropout();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_embedding_bag(seq);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_embedding_bag();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::dropout2d(v);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.dropout2d();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::alpha_dropout(v);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.alpha_dropout();\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::embedding_bag(v);\n\
+\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.embedding_bag();\n\
+}";
+
+/// `src/compat` 配下に `add_dropout2d`／`add_alpha_dropout`／
+/// `add_embedding_bag` の `pub fn` 宣言が存在しないことを固定する
+/// （イシュー #2161。`compat_sequential_does_not_expose_spatial_layer_
+/// add_methods` と同型。`docs/autodiff-dropout-embedding-bag-decision.md`
+/// §6 が未承認のまま対象外としている設計判断の固定）。
+#[test]
+fn compat_sequential_does_not_expose_dropout_embedding_bag_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = ["add_dropout2d", "add_alpha_dropout", "add_embedding_bag"];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for name in forbidden {
+            if contains_pub_fn_declaration(content, name) {
+                offenses.push(format!("{}: pub fn {name}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に Dropout2d／AlphaDropout／EmbeddingBag 系\
+         add_* が見つかった（承認スコープ〈#2161〉は Sequential への\
+         追加を認めていない）: {offenses:?}"
+    );
+}
+
+/// [`compat_sequential_does_not_expose_dropout_embedding_bag_add_methods`]
+/// の自己テスト（合成入力で検出できることを確認する）。
+#[test]
+fn compat_sequential_does_not_expose_dropout_embedding_bag_add_methods_detects_offense() {
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_dropout2d(&mut self, l: Dropout2d) {}",
+        "add_dropout2d"
+    ));
+    assert!(!contains_pub_fn_declaration(
+        "pub fn add_linear(&mut self, l: Linear) {}",
+        "add_dropout2d"
+    ));
+}
+
+// =====================================================================
 // イシュー #2163（親 #2131）: MultiheadAttention のオプション
 // （batch_first・kdim/vdim・key_padding_mask）の facade 公開保留を
 // 検査するテスト群。`MhaOptionsHoldDoctestGuard`（`src/lib.rs`）の
@@ -10885,7 +11078,6 @@ fn facade_does_not_reexport_multihead_attention_config() {
          している: {offending:?}"
     );
 }
-
 // =====================================================================
 // イシュー #2160（親 #2131）: AdaptiveMaxPool2d／AdaptiveMaxPool1d／
 // GlobalPool の facade 公開保留を検査するテスト群。
@@ -11212,3 +11404,298 @@ fn __probe(\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Gru::with_config(gru);\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = gru.with_config();\n\
 }";
+
+// =====================================================================
+// #2166（親 #2131）の facade 公開保留固定（`LossOpsHoldDoctestGuard`）。
+// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
+// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-loss-ops-decision.md` §5 参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `LossOpsHoldDoctestGuard` doc 内の
+/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`reduce_ops_hold_doctest_globs_all_pub_modules` の
+/// `LossOpsHoldDoctestGuard` 版）。
+#[test]
+fn loss_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "LossOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "LossOpsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`loss_ops_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`LOSS_OPS_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（`reduce_ops_hold_
+/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
+/// を骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn loss_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "LossOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, LOSS_OPS_HOLD_PROBE_BODY,
+        "LossOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 LOSS_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_loss_hold_probe モジュール・\
+         __FandheLossHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`loss_ops_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `LossOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const LOSS_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_loss_hold_probe {\n\
+\x20\x20\x20\x20pub mod loss_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn l1_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn cross_entropy_loss_with() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn cosine_embedding_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn margin_ranking_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn triplet_margin_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn poisson_nll_loss() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_loss_hold_probe::*;\n\
+\n\
+struct __FandheLossMarker;\n\
+\n\
+trait __FandheLossHoldProbe {\n\
+\x20\x20\x20\x20fn l1_loss(&self) -> __FandheLossMarker;\n\
+\x20\x20\x20\x20fn cross_entropy_loss_with(&self) -> __FandheLossMarker;\n\
+\x20\x20\x20\x20fn cosine_embedding_loss(&self) -> __FandheLossMarker;\n\
+\x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker;\n\
+\x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker;\n\
+\x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+}\n\
+\n\
+impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+}\n\
+\n\
+impl __FandheLossHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+\x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// `loss_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
+\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
+\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20loss_ops::l1_loss();\n\
+\x20\x20\x20\x20loss_ops::cross_entropy_loss_with();\n\
+\x20\x20\x20\x20loss_ops::cosine_embedding_loss();\n\
+\x20\x20\x20\x20loss_ops::margin_ranking_loss();\n\
+\x20\x20\x20\x20loss_ops::triplet_margin_loss();\n\
+\x20\x20\x20\x20loss_ops::poisson_nll_loss();\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::l1_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.l1_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::cross_entropy_loss_with(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.cross_entropy_loss_with();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::cosine_embedding_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.cosine_embedding_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::margin_ranking_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.margin_ranking_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::triplet_margin_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.triplet_margin_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::poisson_nll_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.poisson_nll_loss();\n\
+}\n\
+\n\
+fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tensor::l1_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.l1_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tensor::cosine_embedding_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.cosine_embedding_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tensor::margin_ranking_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.margin_ranking_loss();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tape::cross_entropy_loss_with(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.cross_entropy_loss_with();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tape::triplet_margin_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.triplet_margin_loss();\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Tape::poisson_nll_loss(x);\n\
+\x20\x20\x20\x20let _: __FandheLossMarker = x.poisson_nll_loss();\n\
+}";
+
+/// `l1_loss`・`cross_entropy_loss_with`（イシュー #2166）・
+/// `cosine_embedding_loss`・`margin_ranking_loss`・
+/// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167。6 個の
+/// 関数名）。[`facade_does_not_reexport_or_declare_loss_ops`]・
+/// [`workspace_declares_loss_ops_fn_names_only_in_allowed_locations`]
+/// が共用する。
+const LOSS_OPS_FN_NAMES: [&str; 6] = [
+    "l1_loss",
+    "cross_entropy_loss_with",
+    "cosine_embedding_loss",
+    "margin_ranking_loss",
+    "triplet_margin_loss",
+    "poisson_nll_loss",
+];
+
+/// facade src 全体（`crates/facade/src/**`）に、`loss_ops` を参照
+/// する `pub use`（`pub use fandhe_ai_autodiff::loss_ops;` 等の
+/// モジュール再エクスポート・別名含む）も、[`LOSS_OPS_FN_NAMES`]
+/// （2 個）の `fn` 宣言（可視性・宣言文脈を問わない。
+/// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
+/// 固定する（`LossOpsHoldDoctestGuard` の正のプローブと多層防御を
+/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
+/// reduce_ops` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_loss_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") && line_contains_identifier(trimmed, "loss_ops") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が `loss_ops` を識別子単位で含む",
+                    path.display()
+                ));
+            }
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in LOSS_OPS_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が loss_ops（イシュー #2166 の内部クレート限定\
+         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
+         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`LOSS_OPS_FN_NAMES`]
+/// （6 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_
+/// reduce_ops_fn_names_only_in_allowed_locations` と同型のインベン
+/// トリ）。
+///
+/// **期待集合**（着手前確認の再 grep で判明。実装計画「インベントリを
+/// 実測する」手順）: `l1_loss`・`cross_entropy_loss_with`（イシュー
+/// #2166）・`cosine_embedding_loss`・`margin_ranking_loss`・
+/// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167）は
+/// いずれも `crates/autodiff/src/loss_ops.rs` にのみ 1 件ずつ存在する。
+#[test]
+fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in LOSS_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("autodiff/src/loss_ops.rs::l1_loss", 1usize),
+        ("autodiff/src/loss_ops.rs::cross_entropy_loss_with", 1usize),
+        ("autodiff/src/loss_ops.rs::cosine_embedding_loss", 1usize),
+        ("autodiff/src/loss_ops.rs::margin_ranking_loss", 1usize),
+        ("autodiff/src/loss_ops.rs::triplet_margin_loss", 1usize),
+        ("autodiff/src/loss_ops.rs::poisson_nll_loss", 1usize),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の loss_ops 系 `fn` 宣言集合が\
+         期待（`crates/autodiff/src/loss_ops.rs` 6 件）と一致しない\
+         （過不足いずれも fail-closed に検出する。新たな定義元が\
+         見つかった場合、それが承認済みの実装なのか迂回経路の混入なのか\
+         を確認すること）: {found:?}"
+    );
+}

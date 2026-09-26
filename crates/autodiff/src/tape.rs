@@ -314,6 +314,89 @@ pub(crate) enum Op {
         class_dim: usize,
         reduction: crate::var::Reduction,
     },
+    /// L1 損失（`|pred − target|` の縮約。PyTorch `nn.L1Loss` 相当。
+    /// イシュー #2166・親イシュー #2131「PyTorch／TF 置き換えの API
+    /// 網羅」）。`MseLoss` と同型の融合パターンだが、`BackendOps` に
+    /// 対応メソッドを持たないため常にホスト参照実装（`eval` モジュール）
+    /// を経由し融合対象外とする（`push_eager`）。`pred`／`target` の
+    /// 両方が**追跡対象**（`MseLoss` と同じく `dTarget = −dPred`）。
+    /// `crate::loss_ops::l1_loss`（facade 非公開・内部クレート限定。
+    /// `docs/autodiff-loss-ops-decision.md` 参照）からのみ構築される。
+    L1Loss {
+        pred: NodeId,
+        target: NodeId,
+        reduction: crate::var::Reduction,
+    },
+    /// label_smoothing・ignore_index・class_weight 付き CrossEntropy
+    /// 損失（イシュー #2166・親イシュー #2131）。`Op::CrossEntropyLoss`
+    /// と同じく融合対象外・常に実体化済み（`push_eager`）。既定
+    /// オプション（`options.is_default()`）のときは
+    /// `crate::loss_ops::cross_entropy_loss_with` が本 variant を
+    /// 経由せず `Var::cross_entropy_loss`（`Op::CrossEntropyLoss`）へ
+    /// 丸ごと委譲するため、本 variant は非既定オプション指定時にのみ
+    /// 構築される（既存 `Op::CrossEntropyLoss` の数値経路は不変。
+    /// R3〈#2166 実装計画〉）。
+    ///
+    /// `targets`（クラス添字）・`class_weight`（クラス重み `[C]`。
+    /// 未指定は全クラス重み 1 相当）は `Op::CrossEntropyLoss.targets`
+    /// と同型の非追跡データのため `Var`／`NodeId` を持たず、`Op`
+    /// payload に直接埋め込む（勾配は `logits` の 1 系統のみ。
+    /// `grad.rs::vjp` の `CrossEntropyLossWithOptions` 分岐参照）。
+    CrossEntropyLossWithOptions {
+        logits: NodeId,
+        targets: Tensor<i32>,
+        class_dim: usize,
+        reduction: crate::var::Reduction,
+        options: crate::loss_ops::CrossEntropyOptions,
+    },
+    /// Cosine 類似度に基づく埋め込み損失（`CosineEmbeddingLoss`。PyTorch
+    /// `nn.CosineEmbeddingLoss` 相当。イシュー #2167・親イシュー #2131）。
+    /// `L1Loss` と同型の融合対象外パターンで常にホスト参照実装
+    /// （`eval::cosine_embedding_loss_forward`）を経由し実体化済み
+    /// （`push_eager`）。`x1`／`x2` は追跡対象、`y`（`+1`／`-1` の
+    /// ラベル。`crate::loss_ops::cosine_embedding_loss` が値検証済み）は
+    /// `CrossEntropyLoss::targets` と同型の非追跡データのため `Op`
+    /// payload に直接埋め込む（勾配は `x1`／`x2` の 2 系統のみ）。
+    CosineEmbeddingLoss {
+        x1: NodeId,
+        x2: NodeId,
+        y: Tensor<f32>,
+        margin: f32,
+        reduction: crate::var::Reduction,
+    },
+    /// マージンランキング損失（`MarginRankingLoss`。PyTorch
+    /// `nn.MarginRankingLoss` 相当。イシュー #2167）。`CosineEmbeddingLoss`
+    /// と同じ融合対象外パターン・非追跡 `y` の扱い。
+    MarginRankingLoss {
+        x1: NodeId,
+        x2: NodeId,
+        y: Tensor<f32>,
+        margin: f32,
+        reduction: crate::var::Reduction,
+    },
+    /// トリプレットマージン損失（`TripletMarginLoss`。PyTorch
+    /// `nn.TripletMarginLoss` 相当。イシュー #2167）。`anchor`・
+    /// `positive`・`negative` の 3 入力すべてが追跡対象（`L1Loss` の
+    /// 2 入力版を 3 入力に一般化した形。融合対象外・常に実体化済み）。
+    TripletMarginLoss {
+        anchor: NodeId,
+        positive: NodeId,
+        negative: NodeId,
+        options: crate::loss_ops::TripletMarginOptions,
+        reduction: crate::var::Reduction,
+    },
+    /// ポアソン負対数尤度損失（`PoissonNLLLoss`。PyTorch
+    /// `nn.PoissonNLLLoss` 相当。イシュー #2167）。`input`・`target` の
+    /// 両方が追跡対象（`target` は `KlDivLoss::target` と同型——値検査は
+    /// 行うが勾配は `full=true` の Stirling 項を含めて `dTarget` を
+    /// 定義する。`crate::loss_ops` モジュール doc §2.2「`dTarget` を
+    /// 必ず実装する」参照）。融合対象外・常に実体化済み。
+    PoissonNllLoss {
+        input: NodeId,
+        target: NodeId,
+        options: crate::loss_ops::PoissonNllOptions,
+        reduction: crate::var::Reduction,
+    },
     /// 負対数尤度損失（`NLLLoss`。イシュー #1738・親イシュー #1609
     /// 「損失関数の拡張」）。`MseLoss` と同じ融合パターン
     /// （`BackendOps::nll_loss`／`nll_loss_backward` 優先・`Unsupported`
@@ -1456,7 +1539,12 @@ impl Op {
             // 未対応の forward 経路（`LinearAct`／`MseLoss`／`BceLoss`
             // （イシュー #1737。`MseLoss` と同型の理由で非適格）／
             // `NllLoss`／`KlDivLoss`（イシュー #1738。同じく `MseLoss`
-            // と同型の理由で非適格）／`CrossEntropyLoss`／`RnnCell`／
+            // と同型の理由で非適格）／`CrossEntropyLoss`／`L1Loss`／
+            // `CrossEntropyLossWithOptions`（イシュー #2166。同型の
+            // 理由で非適格）／`CosineEmbeddingLoss`／
+            // `MarginRankingLoss`／`TripletMarginLoss`／
+            // `PoissonNllLoss`（イシュー #2167。同型の理由で非適格）／
+            // `RnnCell`／
             // `Inv`／`Solve`／`Det`／`Cholesky`／`MatrixNorm`／
             // `Softmax`／`LogSoftmax`／
             // `RmsNorm`／`LayerNorm`。merge 時に非網羅 match 是正で追加）は
@@ -1472,6 +1560,12 @@ impl Op {
             | Op::NllLoss { .. }
             | Op::KlDivLoss { .. }
             | Op::CrossEntropyLoss { .. }
+            | Op::L1Loss { .. }
+            | Op::CrossEntropyLossWithOptions { .. }
+            | Op::CosineEmbeddingLoss { .. }
+            | Op::MarginRankingLoss { .. }
+            | Op::TripletMarginLoss { .. }
+            | Op::PoissonNllLoss { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }
@@ -1679,8 +1773,31 @@ impl Op {
             | Op::Cumsum { input, .. }
             | Op::Cumprod { input, .. }
             | Op::CrossEntropyLoss { logits: input, .. }
+            | Op::CrossEntropyLossWithOptions { logits: input, .. }
             | Op::NllLoss { input, .. } => f(*input),
             Op::KlDivLoss { input, target, .. } => {
+                f(*input);
+                f(*target);
+            }
+            Op::L1Loss { pred, target, .. } => {
+                f(*pred);
+                f(*target);
+            }
+            Op::CosineEmbeddingLoss { x1, x2, .. } | Op::MarginRankingLoss { x1, x2, .. } => {
+                f(*x1);
+                f(*x2);
+            }
+            Op::TripletMarginLoss {
+                anchor,
+                positive,
+                negative,
+                ..
+            } => {
+                f(*anchor);
+                f(*positive);
+                f(*negative);
+            }
+            Op::PoissonNllLoss { input, target, .. } => {
                 f(*input);
                 f(*target);
             }
@@ -1941,6 +2058,12 @@ impl Op {
             | Op::HuberLoss { .. }
             | Op::BceLoss { .. }
             | Op::CrossEntropyLoss { .. }
+            | Op::L1Loss { .. }
+            | Op::CrossEntropyLossWithOptions { .. }
+            | Op::CosineEmbeddingLoss { .. }
+            | Op::MarginRankingLoss { .. }
+            | Op::TripletMarginLoss { .. }
+            | Op::PoissonNllLoss { .. }
             | Op::NllLoss { .. }
             | Op::KlDivLoss { .. }
             | Op::ResidentLeaf { .. }

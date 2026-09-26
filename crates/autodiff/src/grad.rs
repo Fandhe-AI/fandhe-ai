@@ -613,6 +613,155 @@ pub(crate) fn vjp(
             // CrossEntropyLoss` doc 参照）。
             vec![(logits, dlogits)]
         }
+        Op::L1Loss {
+            pred,
+            target,
+            reduction,
+        } => {
+            let pred_val = materialize_fallible(nodes, ops, pred)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = pred_val.numel();
+            let (dpred, dtarget) = if n == 0 {
+                // `Op::MseLoss` 分岐と同じゼロ除算回避（`scale` 計算前に
+                // 早期 return）。
+                let zeros = build_tensor(vec![0f32; 0], pred_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value / n as f32,
+                    Reduction::Sum => g_value,
+                };
+                // `BackendOps` に対応メソッドを持たない（`tape::Op::
+                // L1Loss` doc 参照）ため常にホスト参照実装のみを経由
+                // する（`Op::MseLoss`／`Op::HuberLoss` の `Unsupported`
+                // フォールバック分岐と異なり、融合カーネル呼び出し自体
+                // が存在しない）。
+                let dpred_vec = l1_loss_vjp(pred_val, target_val, scale);
+                let dtarget_data: Vec<f32> = dpred_vec.iter().map(|&v| -v).collect();
+                let dpred_t = build_tensor(dpred_vec, pred_val.shape());
+                let dtarget_t = build_tensor(dtarget_data, pred_val.shape());
+                (dpred_t, dtarget_t)
+            };
+            vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::CrossEntropyLossWithOptions {
+            logits,
+            targets,
+            class_dim,
+            reduction,
+            options,
+        } => {
+            let logits_val = materialize_fallible(nodes, ops, logits)?;
+            let dlogits = cross_entropy_loss_with_options_vjp(
+                logits_val, &targets, class_dim, reduction, &options, upstream,
+            );
+            // `targets`／`options.class_weight` はいずれも非追跡のため
+            // 勾配寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
+            // CrossEntropyLossWithOptions` doc 参照）。
+            vec![(logits, dlogits)]
+        }
+        Op::CosineEmbeddingLoss {
+            x1,
+            x2,
+            y,
+            margin,
+            reduction,
+        } => {
+            let x1_val = materialize_fallible(nodes, ops, x1)?;
+            let x2_val = materialize_fallible(nodes, ops, x2)?;
+            let n = if x1_val.shape().len() == 1 {
+                1
+            } else {
+                x1_val.shape()[0]
+            };
+            let (dx1, dx2) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], x1_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                cosine_embedding_loss_vjp(x1_val, x2_val, &y, margin, scale)
+            };
+            vec![(x1, dx1), (x2, dx2)]
+        }
+        Op::MarginRankingLoss {
+            x1,
+            x2,
+            y,
+            margin,
+            reduction,
+        } => {
+            let x1_val = materialize_fallible(nodes, ops, x1)?;
+            let x2_val = materialize_fallible(nodes, ops, x2)?;
+            let n = x1_val.numel();
+            let (dx1, dx2) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], x1_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                margin_ranking_loss_vjp(x1_val, x2_val, &y, margin, scale)
+            };
+            vec![(x1, dx1), (x2, dx2)]
+        }
+        Op::TripletMarginLoss {
+            anchor,
+            positive,
+            negative,
+            options,
+            reduction,
+        } => {
+            let anchor_val = materialize_fallible(nodes, ops, anchor)?;
+            let positive_val = materialize_fallible(nodes, ops, positive)?;
+            let negative_val = materialize_fallible(nodes, ops, negative)?;
+            let shape = anchor_val.shape();
+            let n = if shape.len() == 1 { 1 } else { shape[0] };
+            let (danchor, dpositive, dnegative) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], shape);
+                (zeros.clone(), zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                triplet_margin_loss_vjp(anchor_val, positive_val, negative_val, &options, scale)
+            };
+            vec![
+                (anchor, danchor),
+                (positive, dpositive),
+                (negative, dnegative),
+            ]
+        }
+        Op::PoissonNllLoss {
+            input,
+            target,
+            options,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = input_val.numel();
+            let (dinput, dtarget) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                poisson_nll_loss_vjp(input_val, target_val, &options, scale)
+            };
+            vec![(input, dinput), (target, dtarget)]
+        }
         Op::NllLoss {
             input,
             targets,
@@ -2874,12 +3023,32 @@ pub(crate) fn dropout_mask(shape: &[usize], p: f32) -> Result<Tensor<f32>, Autod
 /// （CPU／CUDA／Metal）で bit 同一の dropout forward が構造的に
 /// 成立する（`docs/compat-api-scope.md` の Embedding／SDPA／einsum と
 /// 同じ「既存演算への合成のみで `BackendOps` 非拡張」方針）。
+///
+/// # ドロップ位置のゼロ出力契約（PR #2281 codex-review 是正。イシュー
+/// #2161）
+///
+/// `mask` が `0.0` の位置は「ドロップされ、入力値に依存せず出力が
+/// `0.0` になる」という dropout の意味論上の契約を持つ。しかし単純な
+/// IEEE 乗算 `x * 0.0` は `x` が `NaN`／`±inf` のとき結果も `NaN` に
+/// なり契約を破る（[`crate::nn::dropout::AlphaDropout`] の `p == 1.0`
+/// 全ドロップ特例・[`crate::nn::dropout::Dropout2d`] の通常経路の
+/// いずれも、抽選結果としてチャネル全体が `mask == 0.0` になりうる。
+/// codex-review 指摘・PR #2281）。このため `ops.mul`／`eval::mul` の
+/// 乗算結果に対し [`zero_out_where_mask_is_zero`] を適用し、`mask ==
+/// 0.0` の位置を無条件で `0.0` へ上書きしてから返す。`mask != 0.0`
+/// の位置（keep 位置。`crate::grad::dropout_mask` 系が生成する
+/// スケール値は常に非ゼロの有限値）は乗算結果をそのまま使うため、
+/// 通常の dropout（部分的に keep する位置）の数値は変化しない。
+/// backward（`vjp()` 内 `Op::Dropout` 分岐 → [`vjp_elementwise_mul`]）
+/// は本関数を経由せず `upstream * mask` のまま変更しない——ドロップ
+/// 位置の勾配は `mask == 0.0` により構造的に `0.0` となるため
+/// （`upstream` が非有限の場合の扱いは本イシューのスコープ外）。
 pub(crate) fn dropout_with_fallback(
     ops: &dyn BackendOps,
     x: &Tensor<f32>,
     mask: &Tensor<f32>,
 ) -> Result<Tensor<f32>, AutodiffError> {
-    match ops.mul(x, mask) {
+    let v = match ops.mul(x, mask) {
         Ok(v) => {
             if v.shape() != x.shape() {
                 return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
@@ -2889,9 +3058,182 @@ pub(crate) fn dropout_with_fallback(
                     },
                 )));
             }
+            v
+        }
+        Err(BackendError::Unsupported(_)) => eval::mul(x, mask),
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    };
+    Ok(zero_out_where_mask_is_zero(&v, mask))
+}
+
+/// [`dropout_with_fallback`] の doc「ドロップ位置のゼロ出力契約」節
+/// 参照。`mask`（`v` と同 shape。呼び出し元が事前に検査済み）が
+/// `0.0` の位置を無条件で `0.0` へ上書きしたホスト側の新規テンソルを
+/// 返す（`v`／`mask` を `contiguous()` してから走査する。非 contiguous
+/// な view でも `as_slice()` が `None` を返さないようにするため）。
+fn zero_out_where_mask_is_zero(v: &Tensor<f32>, mask: &Tensor<f32>) -> Tensor<f32> {
+    let shape = v.shape().to_vec();
+    let v_c = v.contiguous();
+    let mask_c = mask.contiguous();
+    let data: Vec<f32> = match (v_c.as_slice(), mask_c.as_slice()) {
+        (Some(v_data), Some(mask_data)) => v_data
+            .iter()
+            .zip(mask_data.iter())
+            .map(|(&val, &m)| if m == 0.0 { 0.0 } else { val })
+            .collect(),
+        // `contiguous()` 直後の `as_slice()` は内部不変条件上つねに
+        // `Some` を返すはずだが（`build_tensor` doc 参照）、契約違反を
+        // panic ではなく安全側（ゼロ埋め）へ吸収する
+        // （`build_tensor` 自身の `unwrap_or_else` フォールバックと
+        // 同じ方針）。
+        _ => vec![0.0; shape.iter().product()],
+    };
+    build_tensor(data, &shape)
+}
+
+/// [`crate::nn::dropout::Dropout2d`] の forward が使うチャネル単位
+/// dropout マスク生成（イシュー #2161）。要素単位で抽選する
+/// [`dropout_mask`] と異なり、`shape`（`[N, C, H, W]`）のうち `[N, C]`
+/// 分だけ抽選し（RNG 消費は `N * C` 回で `torch.nn.Dropout2d` の
+/// feature-noise `[N, C, 1, 1]` と同じ回数）、その値をチャネル全体
+/// （`H * W` 要素）へホスト側で展開してから返す。
+///
+/// **展開が必須の理由**: [`Op::Dropout`] の VJP（`vjp()` 内
+/// `Op::Dropout { input, mask }` 分岐）は「`mask` と `input` が同
+/// shape」を前提に [`vjp_elementwise_mul`] を呼ぶため、`[N, C, 1, 1]`
+/// のままでは forward（`dropout_with_fallback` の `ops.mul` が
+/// broadcast する可能性）と backward の shape 契約が食い違う。ここで
+/// `[N, C, H, W]` へ展開した contiguous な実体を返すことで、
+/// [`crate::var::Var::dropout_with_mask`]（`Dropout` と共有する forward
+/// 入口）をそのまま再利用できる。
+///
+/// `shape` が呼び出し元（[`crate::nn::dropout::Dropout2d::forward`]）で
+/// 事前に rank 4 と検査済みであることが前提（本関数はその検査を
+/// 繰り返さない）。`p` は呼び出し元が `[0, 1]` の範囲かつ有限であると
+/// 検査済みの前提（[`dropout_mask`] と同じ契約）。
+pub(crate) fn feature_dropout_mask(shape: &[usize], p: f32) -> Result<Tensor<f32>, AutodiffError> {
+    debug_assert_eq!(
+        shape.len(),
+        4,
+        "feature_dropout_mask: shape must be rank 4 (got {shape:?})"
+    );
+    let n = shape[0];
+    let c = shape[1];
+    let h = shape[2];
+    let w = shape[3];
+    let channel_mask = dropout_mask(&[n, c], p)?;
+    let channel_data = channel_mask.as_slice().ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "feature_dropout_mask: dropout_mask の結果が contiguous でない（内部不変条件違反）"
+                .to_string(),
+        )
+    })?;
+    let hw = h.checked_mul(w).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "feature_dropout_mask: h ({h}) * w ({w}) overflowed usize"
+        ))
+    })?;
+    let numel = n
+        .checked_mul(c)
+        .and_then(|nc| nc.checked_mul(hw))
+        .ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "feature_dropout_mask: n * c * h * w overflowed usize".to_string(),
+            )
+        })?;
+    let mut data = Vec::with_capacity(numel);
+    for &m in channel_data {
+        data.extend(std::iter::repeat_n(m, hw));
+    }
+    Ok(build_tensor(data, shape))
+}
+
+/// [`crate::nn::dropout::AlphaDropout`] の forward が使う、ノイズ
+/// （マスク）と加算バイアスの同時生成（イシュー #2161）。ATen
+/// `aten/src/ATen/native/Dropout.cpp::_dropout_impl` の alpha 分岐と
+/// 同じ丸め順序（`a`／`alpha * a`／`alpha * a * p` を `f64` で計算して
+/// から**それぞれ 1 回だけ** `f32` へ narrow し、要素ごとの `noise`／
+/// `bias` は narrow 済みの `f32` 定数どうしの単純な演算で確定する）を
+/// 再現する。
+///
+/// - `noise`（keep 確率 `1 - p`。[`dropout_mask`] と同じ「`u >= p` で
+///   keep」規約）は keep 位置で `a`（narrow 済み `f32`）、drop 位置で
+///   `0.0`
+/// - `bias` は keep 位置で `alpha * a * p`（narrow 済み `f32` そのまま。
+///   `(1 - 1) * (alpha * a) + alpha * a * p` が `f32` の加算で厳密に
+///   `alpha * a * p` に一致するため追加の丸めは発生しない）、drop 位置
+///   で `-(alpha * a) + alpha * a * p`（narrow 済み `f32` 2 値の 1 回の
+///   `f32` 加算）
+///
+/// `p == 1.0` は `a` の分母 `(1 - p)` がゼロになり `a = inf` から
+/// `inf * 0 = NaN` が生じるため、呼び出し元
+/// （[`crate::nn::dropout::AlphaDropout`]）が本関数を呼ばずに専用の
+/// 全ゼロマスク経路（`b` を加えない）へ分岐する契約（本関数はこの
+/// 特例を扱わない）。`p` は呼び出し元が `[0, 1)` の範囲かつ有限である
+/// と検査済みの前提。
+pub(crate) fn alpha_dropout_mask_and_bias(
+    shape: &[usize],
+    p: f32,
+) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
+    // SELU 論文由来の固定定数（ATen 実装と同一値）。
+    const ALPHA: f64 = 1.7580993408473766;
+    let p64 = f64::from(p);
+    let a = 1.0 / ((ALPHA * ALPHA * p64 + 1.0) * (1.0 - p64)).sqrt();
+    let alpha_a = ALPHA * a;
+    let alpha_a_p = alpha_a * p64;
+    // ここで 1 回だけ f32 へ narrow する（doc「丸め順序」節）。
+    let a_f32 = a as f32;
+    let alpha_a_f32 = alpha_a as f32;
+    let alpha_a_p_f32 = alpha_a_p as f32;
+    let bias_drop = -alpha_a_f32 + alpha_a_p_f32;
+
+    let uniform = fandhe_ai_tensor_core::rng::rand(shape)
+        .map_err(AutodiffError::Shape)?
+        .contiguous();
+    let u = uniform.as_slice().ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "alpha_dropout_mask_and_bias: rng::rand の結果が contiguous でない（内部不変条件違反）"
+                .to_string(),
+        )
+    })?;
+    let mut noise = Vec::with_capacity(u.len());
+    let mut bias = Vec::with_capacity(u.len());
+    for &uv in u {
+        if uv >= p {
+            noise.push(a_f32);
+            bias.push(alpha_a_p_f32);
+        } else {
+            noise.push(0.0f32);
+            bias.push(bias_drop);
+        }
+    }
+    Ok((build_tensor(noise, shape), build_tensor(bias, shape)))
+}
+
+/// [`crate::nn::dropout::AlphaDropout::forward_host`]（tape 不要経路）
+/// が bias 加算に使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #2161）。tape 経路（`Var::add`）が呼ぶ `Op::Add` の VJP・
+/// forward と同じ単一 IEEE 加算を `ops.add` → `Unsupported` のときのみ
+/// `eval::add` で行う（[`dropout_with_fallback`] と同型。`b` は `y` と
+/// 同 shape のため broadcast は不要）。
+pub(crate) fn alpha_dropout_bias_add_with_fallback(
+    ops: &dyn BackendOps,
+    y: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.add(y, b) {
+        Ok(v) => {
+            if v.shape() != y.shape() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: y.shape().to_vec(),
+                    },
+                )));
+            }
             Ok(v)
         }
-        Err(BackendError::Unsupported(_)) => Ok(eval::mul(x, mask)),
+        Err(BackendError::Unsupported(_)) => Ok(eval::add(y, b)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
@@ -7397,6 +7739,626 @@ fn cross_entropy_loss_vjp(
     }
     let scaled: Vec<f32> = grad.iter().map(|&v| v * scale).collect();
     build_tensor(scaled, &shape)
+}
+
+/// `L1Loss{pred, target}` の要素ごとの劣勾配（`d = pred − target`。
+/// イシュー #2166）。`dPred[k] = scale·sign(d[k])`（`sign(0) = 0`、
+/// `NaN` はそのまま `NaN` を伝播）。`Op::L1Loss` 分岐が呼ぶ（`BackendOps`
+/// に対応メソッドがないため常にホスト計算。`tape::Op::L1Loss` doc
+/// 参照）。`dTarget = −dPred` は呼び出し元が単純な符号反転（新規
+/// カーネル起動なし）で求める（`Op::MseLoss` 分岐と同じパターン）。
+fn l1_loss_vjp(pred: &Tensor<f32>, target: &Tensor<f32>, scale: f32) -> Vec<f32> {
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    pred_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &t)| scale * l1_grad_sign(p - t))
+        .collect()
+}
+
+/// [`l1_loss_vjp`] が使う `sign` 関数（`sign(0) = 0`・`NaN` は `NaN` を
+/// 伝播。標準ライブラリの `f32::signum`（`0.0`/`-0.0` をそれぞれ
+/// `1.0`/`-1.0` に丸め `sign(0) = 0` 契約と異なる）を使わず手書きする
+/// 理由）。
+fn l1_grad_sign(d: f32) -> f32 {
+    if d.is_nan() {
+        f32::NAN
+    } else if d > 0.0 {
+        1.0
+    } else if d < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// `CosineEmbeddingLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// cosine_embedding_loss` doc の数式を `x1`／`x2` について微分する。
+/// `y[n] == 1.0` は符号反転（`dx1 = −s·d(cos)/d(x1)`）、`y[n] == -1.0`
+/// は hinge が有効（`cos − margin >= 0`。`clamp_min` の VJP 契約——
+/// 境界ちょうど 0 でも勾配を通す）なときのみ `dx1 = s·d(cos)/d(x1)` を
+/// 流す。`scale` は `Mean`／`Sum` 縮約済みの上流勾配係数（`f64`）。
+fn cosine_embedding_loss_vjp(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    y: &Tensor<f32>,
+    margin: f32,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>) {
+    const EPSILON: f64 = 1e-12;
+    let shape = x1.shape().to_vec();
+    let (n, d) = if shape.len() == 1 {
+        (1usize, shape[0])
+    } else {
+        (shape[0], shape[1])
+    };
+    let x1_data = dense_vec(x1);
+    let x2_data = dense_vec(x2);
+    let y_data = dense_vec(y);
+    let mut dx1 = vec![0f32; x1_data.len()];
+    let mut dx2 = vec![0f32; x1_data.len()];
+
+    for (i, &y_v) in y_data.iter().enumerate().take(n) {
+        let base = i * d;
+        let mut m1 = EPSILON;
+        let mut m2 = EPSILON;
+        let mut dot = 0.0f64;
+        for k in 0..d {
+            let a = x1_data[base + k] as f64;
+            let b = x2_data[base + k] as f64;
+            m1 += a * a;
+            m2 += b * b;
+            dot += a * b;
+        }
+        // forward（`eval::cosine_embedding_loss_forward`）と同じ理由で
+        // 各ノルムを先に `sqrt` してから乗じる（`(m1 * m2).sqrt()` の
+        // 中間積 overflow を避ける。codex-review 指摘・PR #2286）。
+        let denom = m1.sqrt() * m2.sqrt();
+        let cos = dot / denom;
+        let y_i = y_v as f64;
+        // `y == 1` は常に流す。`y == -1` は hinge（`cos − margin >= 0`）
+        // が有効なときのみ流す（`clamp_min` の VJP 契約）。
+        let coeff = if y_i > 0.0 {
+            -1.0
+        } else if cos - margin as f64 >= 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+        if coeff == 0.0 {
+            continue;
+        }
+        for k in 0..d {
+            let a = x1_data[base + k] as f64;
+            let b = x2_data[base + k] as f64;
+            let dcos_dx1 = b / denom - cos * a / m1;
+            let dcos_dx2 = a / denom - cos * b / m2;
+            dx1[base + k] = (scale * coeff * dcos_dx1) as f32;
+            dx2[base + k] = (scale * coeff * dcos_dx2) as f32;
+        }
+    }
+    (build_tensor(dx1, &shape), build_tensor(dx2, &shape))
+}
+
+/// `MarginRankingLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// margin_ranking_loss` doc の数式を微分する。hinge が有効
+/// （`raw = −y_i·(x1_i−x2_i)+margin >= 0`。`clamp_min` の VJP 契約）な
+/// 要素のみ `dx1_i = −s·y_i`・`dx2_i = +s·y_i` を流す。
+fn margin_ranking_loss_vjp(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    y: &Tensor<f32>,
+    margin: f32,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let x1_data = dense_vec(x1);
+    let x2_data = dense_vec(x2);
+    let y_data = dense_vec(y);
+    let numel = x1_data.len();
+    let mut dx1 = vec![0f32; numel];
+    let mut dx2 = vec![0f32; numel];
+    for i in 0..numel {
+        let y_i = y_data[i] as f64;
+        let raw = -y_i * (x1_data[i] as f64 - x2_data[i] as f64) + margin as f64;
+        if raw >= 0.0 {
+            dx1[i] = (-scale * y_i) as f32;
+            dx2[i] = (scale * y_i) as f32;
+        }
+    }
+    (build_tensor(dx1, x1.shape()), build_tensor(dx2, x1.shape()))
+}
+
+/// `TripletMarginLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// triplet_margin_loss` doc §「勾配」の配分規則
+/// （`eval::triplet_distance_stats`・`eval::p_norm_grad_f64` を再利用し
+/// forward と同じ距離統計を再計算する）をそのまま実装する。hinge が
+/// 無効な要素は寄与 0。
+fn triplet_margin_loss_vjp(
+    anchor: &Tensor<f32>,
+    positive: &Tensor<f32>,
+    negative: &Tensor<f32>,
+    options: &crate::loss_ops::TripletMarginOptions,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let shape = anchor.shape().to_vec();
+    let (n, d) = if shape.len() == 1 {
+        (1usize, shape[0])
+    } else {
+        (shape[0], shape[1])
+    };
+    let anchor_data: Vec<f64> = dense_vec(anchor).iter().map(|&v| v as f64).collect();
+    let positive_data: Vec<f64> = dense_vec(positive).iter().map(|&v| v as f64).collect();
+    let negative_data: Vec<f64> = dense_vec(negative).iter().map(|&v| v as f64).collect();
+    let p = options.p_value() as f64;
+    let eps = options.eps_value() as f64;
+    let margin = options.margin_value() as f64;
+    let swap = options.swap_value();
+
+    let mut danchor = vec![0f32; anchor_data.len()];
+    let mut dpositive = vec![0f32; anchor_data.len()];
+    let mut dnegative = vec![0f32; anchor_data.len()];
+
+    let params = eval::TripletDistanceParams { p, eps, swap };
+    for i in 0..n {
+        let base = i * d;
+        let (stats, diff_ap, diff_an, diff_pn) = eval::triplet_distance_stats(
+            &anchor_data,
+            &positive_data,
+            &negative_data,
+            base,
+            d,
+            &params,
+        );
+        // `neg_distance()` は分岐で `d_an`／`d_pn` を選ぶ（係数付き和
+        // `an_coeff·d_an + (1−an_coeff)·d_pn` だと `swap` 有効時に
+        // 一方が `inf`・係数が丁度 `0.0` でも `0.0 * inf = NaN` になる
+        // ため。forward〈`eval::triplet_margin_loss_forward`〉と同じ
+        // 判定にする。codex-review 指摘・PR #2286）。
+        let d_neg = stats.neg_distance();
+        let hinge_active = stats.d_ap - d_neg + margin >= 0.0;
+        if !hinge_active {
+            continue;
+        }
+        let g_ap = eval::p_norm_grad_f64(&diff_ap, p, stats.d_ap);
+        let g_an = eval::p_norm_grad_f64(&diff_an, p, stats.d_an);
+        let g_pn = if swap {
+            eval::p_norm_grad_f64(&diff_pn, p, stats.d_pn)
+        } else {
+            vec![0.0; d]
+        };
+        let c_an = stats.an_coeff;
+        let c_pn = 1.0 - stats.an_coeff;
+        for k in 0..d {
+            // `dL/da = g_ap − c_an·g_an`・`dL/dp = −g_ap − c_pn·g_pn`・
+            // `dL/dn = c_an·g_an + c_pn·g_pn`（モジュール doc「勾配」の
+            // 連鎖律導出。`diff_ap = a−p`・`diff_an = a−n`・
+            // `diff_pn = p−n` の係数を代入した結果）。
+            let da = g_ap[k] - c_an * g_an[k];
+            let dp = -g_ap[k] - c_pn * g_pn[k];
+            let dn = c_an * g_an[k] + c_pn * g_pn[k];
+            danchor[base + k] = (scale * da) as f32;
+            dpositive[base + k] = (scale * dp) as f32;
+            dnegative[base + k] = (scale * dn) as f32;
+        }
+    }
+    (
+        build_tensor(danchor, &shape),
+        build_tensor(dpositive, &shape),
+        build_tensor(dnegative, &shape),
+    )
+}
+
+/// `PoissonNllLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// poisson_nll_loss` doc の数式を微分する。`full = true` かつ
+/// `t > 1` の要素のみ `dt` に Stirling 項の微分を加える。
+fn poisson_nll_loss_vjp(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    options: &crate::loss_ops::PoissonNllOptions,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let numel = input_data.len();
+    let log_input = options.log_input_value();
+    let full = options.full_value();
+    let eps = options.eps_value() as f64;
+
+    let mut dinput = vec![0f32; numel];
+    let mut dtarget = vec![0f32; numel];
+    for i in 0..numel {
+        let x = input_data[i] as f64;
+        let t = target_data[i] as f64;
+        let (mut dx, mut dt) = if log_input {
+            (x.exp() - t, -x)
+        } else {
+            (1.0 - t / (x + eps), -(x + eps).ln())
+        };
+        if full && t > 1.0 {
+            dt += t.ln() + 0.5 / t;
+        }
+        dx *= scale;
+        dt *= scale;
+        dinput[i] = dx as f32;
+        dtarget[i] = dt as f32;
+    }
+    (
+        build_tensor(dinput, input.shape()),
+        build_tensor(dtarget, input.shape()),
+    )
+}
+
+/// `CrossEntropyLossWithOptions` の VJP（イシュー #2166）。
+/// `eval::cross_entropy_loss_with_options_forward` の数式（doc 参照）を
+/// クラス `c` について微分した
+/// `dx_c = s·[(1−ε)·w[t_s]·(p_c − 1{c==t_s}) + (ε/C)·(p_c·Σ_k w_k − w_c)]`
+/// （`p_c = softmax(logits)[c]`。`s` は `Mean` なら `g/W`〈`W` は forward
+/// と同じ非 ignore サンプルの重み和〉・`Sum` なら `g`〈`W` に依存
+/// しない〉。早期 return が 2 つある: ①全クラスの重み `Σ_k w_k` が
+/// 0（度外れケース。`Mean`／`Sum` とも勾配全体を 0 にする）、
+/// ②`Mean` かつ `W == 0`（`Σ_k w_k != 0` でも forward が損失 0.0
+/// を返す Mean 専用契約と対で勾配を 0 にする）。`Sum` は `W == 0`
+/// でも早期 return せず、`Σ_k w_k != 0`〈target クラスの重みだけが
+/// 0〉なら smoothing 項の非ゼロ寄与を保つ。doc 参照）
+/// を直接構成する。ignore されたサンプルの行は 0（`Op::
+/// CrossEntropyLossWithOptions` doc 参照）。`targets`／
+/// `options.class_weight` は非追跡のため戻り値は `logits` 側の勾配のみ
+/// （呼び出し元 `vjp()` の `CrossEntropyLossWithOptions` 分岐参照）。
+fn cross_entropy_loss_with_options_vjp(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    options: &crate::loss_ops::CrossEntropyOptions,
+    upstream: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積は数学的には無関係な次元（例:
+    // `usize::MAX`）を含みうり部分積単体で usize オーバーフローしうる
+    // （`eval::cross_entropy_loss_with_options_forward`・`softmax_along`
+    // と同型のガード。codex-review 指摘・PR #2283）。要素数 0 なら
+    // 勾配も要素なしの同 shape テンソルとして返す（forward が損失
+    // 0.0 を返すため勾配も寄与しない）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+
+    let softmax = eval::softmax_along(logits, class_dim);
+    let p = dense_vec(&softmax);
+    let target_data = eval::dense_vec_i32(targets);
+
+    let eps = options.label_smoothing_value() as f64;
+    let ignore_index = options.ignore_index_value();
+    let weights: Vec<f64> = match options.class_weight_value() {
+        Some(cw) => dense_vec(cw).iter().map(|&v| v as f64).collect(),
+        None => vec![1.0f64; axis_len],
+    };
+    let total_weight_all_classes: f64 = weights.iter().sum();
+
+    // `W`（forward と同じ「非 ignore サンプルの `w[t_s]` 総和」）を
+    // 独立に再計算する（`eval::cross_entropy_loss_with_options_
+    // forward` と同じ縮約順序・`f64` 蓄積）。`Mean` の分母として使う
+    // ほか、`Mean` 専用の `W == 0` 早期 return 判定にも使う（下記）。
+    let mut denom_w: f64 = 0.0;
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                continue;
+            }
+            if t >= 0 && (t as usize) < axis_len {
+                denom_w += weights[t as usize];
+            }
+        }
+    }
+
+    // 全クラスの重みが 0（`total_weight_all_classes == 0`。`weights`
+    // は非負値検証済みのためこれは各 `w_c == 0` と同値）は、`term1`・
+    // `term2` のいずれも数学的に 0 になる度外れなケースである。
+    // `p_c`（`logits` 由来）に `NaN`／`inf` が含まれていると
+    // `0 * NaN = NaN` で汚染されうるため、`s` を経由せず即座に要素
+    // すべて 0 の勾配テンソルを返す（`eval::cross_entropy_loss_with_
+    // options_forward` の「全クラス 0」契約と対）。
+    //
+    // これは `denom_w == 0`（target クラスの重み和 `W` のみが 0）とは
+    // 区別する。後者は他クラスの重みが非ゼロであれば `term2`
+    // （smoothing 項）が正当に非ゼロ寄与を持つため、`Sum` はそれを
+    // そのまま反映する必要がある（`denom_w == 0` 一律で勾配 0 に
+    // 潰すと smoothing 項由来の勾配を誤って消してしまう。
+    // codex-review 指摘・PR #2283）。
+    if total_weight_all_classes == 0.0 {
+        return build_tensor(vec![0f32; logits.numel()], &shape);
+    }
+
+    // `Mean` は `W`（`denom_w`）による正規化が本質的なため、`W == 0`
+    // は forward が損失 0.0（doc §2.2「Mean 専用の W == 0 契約」）を
+    // 返すのと対で勾配も 0 にする。ここも `s = 0.0` を経由して後続
+    // ループへ進めると、`p_c`（`logits` 由来）に `NaN`／`inf` が
+    // 含まれる場合 `0.0 * NaN = NaN` へ汚染されうるため（`total_
+    // weight_all_classes == 0` の早期 return と同型の問題）、`s` を
+    // 経由せず即座に要素すべて 0 の勾配テンソルを返す（advisor
+    // レビュー指摘・PR #2283）。`Sum` は `denom_w` に正規化を依存
+    // しないため下の通常経路で `term2`（smoothing 項）の非ゼロ寄与を
+    // 正しく反映する。
+    if reduction == Reduction::Mean && denom_w == 0.0 {
+        return build_tensor(vec![0f32; logits.numel()], &shape);
+    }
+
+    let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0) as f64;
+    let s = match reduction {
+        Reduction::Mean => g_value / denom_w,
+        Reduction::Sum => g_value,
+    };
+
+    let mut grad = vec![0f32; logits.numel()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            if ignore_index == Some(t) {
+                // ignore されたサンプルの行は 0 のまま（`Op::
+                // CrossEntropyLossWithOptions` doc 参照）。
+                continue;
+            }
+            let in_range = t >= 0 && (t as usize) < axis_len;
+            debug_assert!(
+                in_range,
+                "cross_entropy_loss_with_options_vjp: target 添字が範囲外（契約違反）"
+            );
+            if !in_range {
+                continue;
+            }
+            let w_t = weights[t as usize];
+            for (a, &w_a) in weights.iter().enumerate() {
+                let idx = (o * axis_len + a) * inner + i;
+                let p_c = p[idx] as f64;
+                let delta = if (t as usize) == a { 1.0 } else { 0.0 };
+                let term1 = (1.0 - eps) * w_t * (p_c - delta);
+                let term2 = (eps / axis_len as f64) * (p_c * total_weight_all_classes - w_a);
+                grad[idx] = (s * (term1 + term2)) as f32;
+            }
+        }
+    }
+    build_tensor(grad, &shape)
+}
+
+#[cfg(test)]
+mod cross_entropy_with_options_vjp_empty_tensor_overflow_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::Tensor;
+
+    // codex-review 指摘（PR #2283）の回帰検証: forward 側
+    // （`eval::cross_entropy_loss_with_options_forward`）と同型の
+    // 部分積オーバーフローが vjp 側にも存在した（`shape[..class_dim]`／
+    // `shape[class_dim+1..]` の部分積が `checked_numel` の吸収を経由
+    // しないため）。冒頭の空 shape 早期 return で panic せず、要素数
+    // 0 の勾配テンソルを返すことを確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_empty_tensor_with_overflow_prone_shape_does_not_panic() {
+        let shape = [0usize, 1, usize::MAX, usize::MAX];
+        let logits = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, usize::MAX])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().label_smoothing(0.1);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+        assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: `Mean` で非 ignore
+    // サンプルの重み和 `denom_w` が 0（全クラスの `class_weight` が 0）
+    // の場合、`s = g/denom_w` を経由すると `s = 0` になるものの、
+    // 後続ループで `logits` の `NaN` と乗算されると `0 * NaN = NaN`
+    // となり勾配が NaN 化しうる。`denom_w == 0` を検知した時点で
+    // 同 shape のゼロ勾配を早期 return することを確認する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_zero_denom_w_with_nan_logits_returns_zero_grad() {
+        // shape [1, 2]（1 サンプル・2 クラス）。全クラスの重みを 0 に
+        // することで denom_w = 0 を作り、logits に NaN を混入させる。
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "denom_w == 0 のとき勾配はゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証: 上記テストと同条件
+    // （全クラス `class_weight` 0・`logits` に `NaN` 混入）を `Sum`
+    // reduction で確認する。修正前は `denom_w == 0` の早期 return が
+    // `Mean` にしか適用されておらず、`Sum` は `s = g` を経由して
+    // `term1 = (1-eps)*w_t*(p_c-delta)` の `w_t == 0` と `p_c`（`NaN`
+    // 混入の softmax 由来）の乗算で `0 * NaN = NaN` となり勾配が NaN
+    // 化していた（`docs/autodiff-loss-ops-decision.md` §2.2 の
+    // 「W == 0 は損失 0.0・勾配 0」契約に違反）。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_sum_reduction_zero_denom_w_with_nan_logits_returns_zero_grad()
+     {
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（全クラス重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default().class_weight(class_weight);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Sum,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "Sum reduction でも denom_w == 0 のとき勾配はゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
+    }
+
+    // codex-review 指摘（PR #2283）の回帰検証:
+    // `eval::cross_entropy_loss_with_options_forward` 側の同名テスト
+    // （`..._sum_reduction_zero_target_weight_nonzero_other_class_
+    // weight_keeps_smoothing_term`）と対になる勾配側の検証。
+    // `class_weight = [0, 1]`・正解クラス 0（`w_t == 0`）・他クラス
+    // （クラス 1）は重み非ゼロのため `Σ_c w_c == 1 != 0`（全クラス 0
+    // の度外れケースには該当しない）。`Sum` は `denom_w == 0` でも
+    // `s = g` を経由し、`term2`（smoothing 項）の非ゼロ寄与を
+    // 正しく残すことを確認する。
+    //
+    // 手計算（`logits = [0, 0]` → `p = [0.5, 0.5]`・
+    // `total_weight_all_classes = 1`・`eps = 0.2`・`g = 1.0`）:
+    // `term1 = 0`（`w_t == 0`）。
+    // `c = 0`: `term2 = (eps/C)*(p_0*Σw − w_0) = 0.1*(0.5*1 − 0) = 0.05`
+    // `c = 1`: `term2 = (eps/C)*(p_1*Σw − w_1) = 0.1*(0.5*1 − 1) = -0.05`
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_sum_reduction_zero_target_weight_nonzero_other_class_weight_keeps_smoothing_grad()
+     {
+        let logits = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Sum,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            (grad[0] - 0.05f32).abs() < 1e-5,
+            "class 0 の smoothing 勾配が期待値と一致しない: {grad:?}"
+        );
+        assert!(
+            (grad[1] - (-0.05f32)).abs() < 1e-5,
+            "class 1 の smoothing 勾配が期待値と一致しない: {grad:?}"
+        );
+    }
+
+    // advisor レビュー指摘（PR #2283）の回帰検証: `class_weight =
+    // [0, 1]`・target 0（`W == 0`）・`Σ_c w_c == 1 != 0`（全クラス 0
+    // には該当しない）のケースで `logits` に `NaN` が混入する場合。
+    // `Mean` は `denom_w == 0` を検知した時点で `s` を経由せず即座に
+    // ゼロ勾配を返す実装（`s = 0.0` を経由すると `p_c` の `NaN` との
+    // 乗算で `0.0 * NaN = NaN` へ汚染されるため）であることを確認
+    // する。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_mean_reduction_zero_target_weight_nonzero_other_class_weight_with_nan_logits_returns_zero_grad_not_nan()
+     {
+        let logits = Tensor::<f32>::new(vec![f32::NAN, 1.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "Mean は W == 0 のとき NaN logits 混入でも勾配は有限のゼロであるべき（NaN 混入は不可）: {grad:?}"
+        );
+    }
+
+    // 上記と同条件を `Mean` reduction で確認する: `W == 0` のため
+    // `Mean` は forward 側の Mean 専用契約（損失 0.0）と対で勾配も
+    // 全て 0 を返す（`Sum` とは異なる扱いになる点が今回の修正の
+    // 要点）。
+    #[test]
+    fn cross_entropy_loss_with_options_vjp_mean_reduction_zero_target_weight_nonzero_other_class_weight_returns_zero_grad()
+     {
+        let logits = Tensor::<f32>::new(vec![0.0f32, 0.0f32], &[1usize, 2usize])
+            .expect("test fixture: logits テンソル構築");
+        let targets =
+            Tensor::<i32>::new(vec![0i32], &[1usize]).expect("test fixture: targets テンソル構築");
+        let class_weight = Tensor::<f32>::new(vec![0.0f32, 1.0f32], &[2usize])
+            .expect("test fixture: class_weight テンソル構築（正解クラスのみ重み 0）");
+        let options = crate::loss_ops::CrossEntropyOptions::default()
+            .class_weight(class_weight)
+            .label_smoothing(0.2);
+        let upstream =
+            Tensor::<f32>::new(vec![1.0f32], &[]).expect("test fixture: スカラー upstream 勾配");
+
+        let out = cross_entropy_loss_with_options_vjp(
+            &logits,
+            &targets,
+            1,
+            Reduction::Mean,
+            &options,
+            &upstream,
+        );
+
+        let grad = dense_vec(&out);
+        assert_eq!(grad.len(), 2);
+        assert!(
+            grad.iter().all(|&v| v == 0.0f32),
+            "Mean は W == 0 のとき勾配が全て 0 であるべき: {grad:?}"
+        );
+    }
 }
 
 /// `nll_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
