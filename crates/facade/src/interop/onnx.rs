@@ -62,8 +62,10 @@
 //!   `to_path` で export できるのは import 済みモデル（`OnnxModel`）の
 //!   みで、学習済み `Sequential`／`nn` から直接 `OnnxModel` を構築する
 //!   経路は [`OnnxModel::from_sequential`]（次節・#2037）を使う
-//! - allowlist（`interp` 対応 23 op・既定 domain）外のノードを含む
-//!   モデルは `from_bytes` では構築できても **export 時に**
+//! - export allowlist（既定 domain・23 op。イシュー #2186 で import 側
+//!   `interp` のディスパッチ表へ追加した 8 op は import 対応のみで本
+//!   allowlist は未拡張のため、import 対応 op の集合とは非対称）外の
+//!   ノードを含むモデルは `from_bytes` では構築できても **export 時に**
 //!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する（無言
 //!   skip しない）
 //!

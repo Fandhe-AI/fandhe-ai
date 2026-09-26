@@ -17,7 +17,7 @@ use fandhe_ai_onnx_interop::onnx::autograd::{
 };
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
-use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, ModelProto, NodeProto};
+use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, ModelProto, NodeProto, attribute_type};
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 
@@ -43,10 +43,14 @@ fn node_with_attrs(
     n
 }
 
+/// `r#type` を `INT` に設定した属性を組み立てる（`interp::attr_i64_typed`／
+/// `read_gemm_attrs`〈イシュー #2186〉の型検証を通す。`interp.rs` の
+/// `build_attr_i64_typed` と同じ理由）。
 fn attr_i64(name: &str, i: i64) -> AttributeProto {
     AttributeProto {
         name: name.to_string(),
         i,
+        r#type: attribute_type::INT,
         ..Default::default()
     }
 }
@@ -521,6 +525,24 @@ fn unsupported_op_is_rejected_fail_closed() {
     feeds.insert(
         "shape".to_string(),
         AutogradValue::Const(Value::I64(Tensor::new(vec![2], &[1]).unwrap())),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(err, AutogradError::UnsupportedInAutograd { .. }));
+}
+
+#[test]
+fn new_ext_op_from_issue_2186_is_rejected_fail_closed_in_autograd() {
+    // イシュー #2186 で `interp`（非勾配）に追加した 8 op（`Tanh` を代表
+    // 例とする）も、autograd 経路（本ファイル・#2078）では明示 fail-closed
+    // 腕へ追加済みで `UnsupportedInAutograd` を返す（`other =>` の一般
+    // `UnsupportedOp` に落ちない。`autograd.rs::dispatch_node` 参照）。
+    let graph = single_node_graph(node("Tanh", vec!["x"], vec!["y"]), vec!["x"], "y");
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "x".to_string(),
+        AutogradValue::Var(tape.var(&f32(vec![1.0, 2.0], &[2]))),
     );
     let err = bound.run(feeds).unwrap_err();
     assert!(matches!(err, AutogradError::UnsupportedInAutograd { .. }));

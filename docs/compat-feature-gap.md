@@ -167,10 +167,11 @@ jagged 2-D 入力は事前検証で拒否。`crates/facade/src/compat/array.rs:9
 
 ### 1.9 リポ内非公開（`onnx-interop`。crates.io 非公開・facade から到達不可）
 
-ONNX opset の一部演算がホスト参照実装として存在する（`crates/onnx-interop/src/onnx/interp.rs:824-845`）:
+ONNX opset の一部演算がホスト参照実装として存在する（`crates/onnx-interop/src/onnx/interp.rs`）:
 `Gemm`・`Relu`・`Sigmoid`・`Shape`・`Gather`・`Unsqueeze`・`Concat`・`Slice`・`Add`・`Mul`・`Div`・`Mod`・
 `Sqrt`・`Constant`・`Cast`・`Reshape`・`Squeeze`・`Transpose`・`MatMul`・`Softmax`・`Erf`・
-`LayerNormalization`。**これらは autograd（`Tape`/`Var`）に接続されておらず推論専用のグラフ解釈器**
+`LayerNormalization`・`Conv`（#2076）・`Clip`・`Tanh`・`Gelu`・`Where`・`Expand`・`ReduceMean`・`Pad`・
+`Resize`（#2186）。**これらは autograd（`Tape`/`Var`）に接続されておらず推論専用のグラフ解釈器**
 であり、`fandhe_ai`（facade）からは到達しない。`docs/compat-api-scope.md` の対象範囲外。
 
 ---

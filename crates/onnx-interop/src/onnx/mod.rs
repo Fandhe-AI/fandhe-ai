@@ -8,8 +8,13 @@
 //!   （`graph` の逆方向。イシュー #1772）。`build_model_proto` は `export_ops`
 //!   （内部 op -> `NodeProto` の意味論的マッピング。#1773）の
 //!   `check_exportable` を経由してから組み立てる。
-//! - `export_ops`: `interp` が対応する 23 op の逆マッピング（`ExportOp` ->
-//!   `NodeProto`。イシュー #1773）。`export` から `pub use` で再エクスポートする。
+//! - `export_ops`: export allowlist（`SUPPORTED_OP_TYPES`。イシュー #1773）
+//!   23 op の逆マッピング（`ExportOp` -> `NodeProto`）。`export` から
+//!   `pub use` で再エクスポートする。イシュー #2186 で `interp` の
+//!   ディスパッチ表に追加した 8 op（`Clip`／`Tanh`／`Gelu`／`Where`／
+//!   `Expand`／`ReduceMean`／`Pad`／`Resize`）は import 対応のみで
+//!   export 側（本 allowlist）へは未追加のため、import 対応 op の集合
+//!   と本 allowlist は非対称である（追跡候補。PR 本文参照）。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
 //!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し
 //!   （イシュー #2036。本モジュール自体は本クレート内部限定のまま
@@ -31,4 +36,9 @@ pub mod interp;
 // イシュー #2077）。`interp::run_with_ops` の内部実装詳細であり facade
 // 公開面には出さない。
 mod interp_device;
+// `interp` のディスパッチ表が委譲する追加 8 op（`Clip`／`Tanh`／`Gelu`／
+// `Where`／`Expand`／`ReduceMean`／`Pad`／`Resize`。イシュー #2186）。
+// `interp_device` と同じ位置づけの非公開実装詳細（`interp::run_impl`
+// のディスパッチ先であり facade 公開面には出さない）。
+mod interp_ext;
 pub mod proto;

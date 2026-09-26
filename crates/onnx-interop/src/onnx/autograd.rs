@@ -29,7 +29,9 @@
 //! 変換する——ここでのみ意図的に勾配を切断する。承認事項 4）。
 //!
 //! `Gather`・`Unsqueeze`・`Concat`・`Slice`・`Mod`・`Reshape`・`Squeeze`・
-//! `Transpose`（8 op）は本スコープでは未実装で、これらのノードに到達すると
+//! `Transpose`・`Clip`・`Tanh`・`Gelu`・`Where`・`Expand`・`ReduceMean`・
+//! `Pad`・`Resize`（イシュー #2186 で `interp`〈非勾配〉に追加した 8 op を
+//! 含む）は本スコープでは未実装で、これらのノードに到達すると
 //! [`AutogradError::UnsupportedInAutograd`] で fail-closed に拒否する
 //! （no-silent-skip 契約。`.claude/rules/coding-rust.md`）。view／shape 系
 //! 演算の勾配対応は後続スコープとして PR 本文に記録する
@@ -1238,12 +1240,10 @@ fn dispatch_node<'t>(
             let a = as_var(tape, env, node, input_name(node, 0)?)?;
             let b = as_var(tape, env, node, input_name(node, 1)?)?;
             let has_c = matches!(node.input.get(2), Some(n) if !n.is_empty());
-            let attrs = GemmAttrs {
-                alpha: attr_f32(node, "alpha", 1.0),
-                beta: attr_f32(node, "beta", 1.0),
-                trans_a: attr_i64(node, "transA", 0) != 0,
-                trans_b: attr_i64(node, "transB", 0) != 0,
-            };
+            // 属性の型検証込み読み取りは `interp::read_gemm_attrs` を共用する
+            // （イシュー #2186「Gemm の固め」節。forward は引き続き
+            // `ops::gemm`〈`GemmFn::forward` 経由〉のみが担う）。
+            let attrs = super::interp::read_gemm_attrs(node)?;
             let mut inputs = vec![a, b];
             if has_c {
                 inputs.push(as_var(tape, env, node, node.input[2].as_str())?);
@@ -1453,8 +1453,16 @@ fn dispatch_node<'t>(
         // Gather / Unsqueeze / Concat / Slice / Mod / Reshape / Squeeze / Transpose:
         // 本スコープ未実装（モジュール冒頭コメント参照）。定数専用の
         // "存在確認のみ" のショートカットも設けない（no-silent-skip 契約）。
+        // イシュー #2186 で追加した 8 op（`Clip`／`Tanh`／`Gelu`／`Where`／
+        // `Expand`／`ReduceMean`／`Pad`／`Resize`）も同じ理由（`interp_ext`
+        // への委譲は `Tape::new()`〈naive CPU 参照実装〉を新規に生成する形で
+        // 実装しており、呼び出し元の `tape`／`Var` を経由しないため autograd
+        // 経路には接続できない）で本スコープ外とする。`other =>` の一般
+        // `UnsupportedOp` に落とすと「未対応 op_type」と誤診断され interp
+        // 側の対応状況と矛盾するため、明示 fail-closed 腕へ追加する。
         "Gather" | "Unsqueeze" | "Concat" | "Slice" | "Mod" | "Reshape" | "Squeeze"
-        | "Transpose" => {
+        | "Transpose" | "Clip" | "Tanh" | "Gelu" | "Where" | "Expand" | "ReduceMean" | "Pad"
+        | "Resize" => {
             // 参照する入力が Const のみであっても、本 PR のスコープでは
             // 常に fail-closed とする（Const-only 最適化は将来の拡張余地として
             // 残すが、いま実装すると Var/Const 判定漏れが no-silent-skip
@@ -1462,8 +1470,8 @@ fn dispatch_node<'t>(
             let _ = require_const; // 将来の Const-only 経路実装で使用予定
             Err(unsupported(
                 node,
-                "本スコープ（#2078）では autograd 経路未実装。interp::run（非勾配）を使うか、\
-                 後続イシューでの拡張を待つ",
+                "本スコープ（#2078／#2186）では autograd 経路未実装。interp::run（非勾配）を\
+                 使うか、後続イシューでの拡張を待つ",
             ))
         }
         other => Err(InterpError::UnsupportedOp(other.to_string()).into()),

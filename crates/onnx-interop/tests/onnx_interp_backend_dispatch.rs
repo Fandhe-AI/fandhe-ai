@@ -38,7 +38,7 @@ use fandhe_ai_onnx_interop::onnx::graph::Graph;
 use fandhe_ai_onnx_interop::onnx::interp::{
     InterpError, Value, run, run_with_ops, run_with_ops_report,
 };
-use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto};
+use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto, attribute_type};
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, Device, ScalarBinaryOp, ScalarUnaryOp, Tensor,
 };
@@ -377,11 +377,13 @@ fn run_with_ops_gemm_alpha_beta_bias_reaches_device_and_matches_host() {
             AttributeProto {
                 name: "alpha".to_string(),
                 f: 2.0,
+                r#type: attribute_type::FLOAT,
                 ..Default::default()
             },
             AttributeProto {
                 name: "beta".to_string(),
                 f: 0.5,
+                r#type: attribute_type::FLOAT,
                 ..Default::default()
             },
         ],
@@ -725,4 +727,32 @@ fn scalar_unary_binary_enum_variants_are_reachable() {
     let _ = ScalarUnaryOp::Sqrt;
     let _ = ScalarUnaryOp::Relu;
     let _ = ScalarBinaryOp::Div;
+}
+
+#[test]
+fn run_with_ops_new_ext_ops_always_stay_on_host_regardless_of_dev_ops() {
+    // イシュー #2186 で追加した 8 op（`interp_ext`）は `Tape::new_with_ops`
+    // が要求する所有 `BackendOps` を借用 `Option<&dyn BackendOps>` から
+    // 構築できないため常にホスト実行になる（`interp_ext` 冒頭コメント）。
+    // `CpuBackendOps`（device 実行に成功しうる実装）を渡しても
+    // `host_nodes` に記録され、`run`（opt-in OFF）と bit 完全一致することを
+    // 固定化する。
+    let n = node("Tanh", "n_tanh", vec!["x"], vec!["y"]);
+    let graph = single_node_graph(n, &["x"]);
+    let ops = CpuBackendOps::new();
+
+    let mut feeds_on = HashMap::new();
+    feeds_on.extend([feed_f32("x", vec![0.0, 1.0, -1.0], &[3])]);
+    let (result_on, report) =
+        run_with_ops_report(&graph, feeds_on, &ops).expect("run_with_ops は成功するはず");
+    assert_eq!(report.host_nodes, vec!["n_tanh".to_string()]);
+    assert!(report.device_nodes.is_empty());
+
+    let mut feeds_off = HashMap::new();
+    feeds_off.extend([feed_f32("x", vec![0.0, 1.0, -1.0], &[3])]);
+    let result_off = run(&graph, feeds_off).expect("run は成功するはず");
+    assert_eq!(
+        as_f32_slice(&result_on["y"]),
+        as_f32_slice(&result_off["y"])
+    );
 }

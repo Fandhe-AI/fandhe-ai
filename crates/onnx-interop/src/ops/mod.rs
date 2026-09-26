@@ -14,8 +14,12 @@
 //! プレーンな Rust 構造体・スライスで受け取るため、decode 層（`AttributeProto` 等）の
 //! 実装順序に依存せず本モジュール単体でテスト・使用できる。インタープリタのディスパッチ
 //! （op 名 → 本モジュール関数の解決）は [`crate::onnx::interp`]（TASK-7.2b・#78、
-//! TASK-7.3 系 14 オペの結線は #274 で実装）が担い、全 22 オペがグラフ実行から
-//! 到達可能である。
+//! TASK-7.3 系 14 オペの結線は #274 で実装）が担う。`Conv`（#2076）に加え、
+//! イシュー #2186 で追加した 8 op（`Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
+//! `ReduceMean`／`Pad`／`Resize`）は本モジュールへは追加せず
+//! `fandhe_ai_autodiff::Var` の同名演算へ委譲する形で `interp` のディスパッチ表
+//! から到達可能である（`crate::onnx::interp_ext` 冒頭コメント参照。本モジュールの
+//! 対応 op 数を絶対数で記述せず、ディスパッチ表〈`interp::run_impl`〉を正とする）。
 
 mod activation;
 mod arith;
