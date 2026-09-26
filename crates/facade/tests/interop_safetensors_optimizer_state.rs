@@ -268,7 +268,7 @@ fn train_step(
         // シグネチャ（`Sgd::step` の 2 引数形とは異なる。`nn/optim/
         // mod.rs` doc「内部配置の不統一・シグネチャ差異」節）。
         let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
-            param_refs.into_iter().zip(grad_refs.into_iter()).collect();
+            param_refs.into_iter().zip(grad_refs).collect();
         (loss_value, opt.step(&pairs).unwrap())
     };
     model.apply_parameters(updated).unwrap();
