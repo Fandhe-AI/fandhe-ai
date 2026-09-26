@@ -33,6 +33,22 @@
 //!   へコミットする。closure が途中で `Err` を返しても
 //!   `n_iter`/`func_evals`/履歴/`d`/`t`/`prev_flat_grad` は呼び出し前
 //!   のまま残る。
+//! - **`max_eval` の解決**: `max_eval: None` の場合 `max_iter * 5 / 4`
+//!   （PyTorch と同じ整数除算）へ解決するが、`max_iter` に極端に大きい
+//!   値（例 `usize::MAX`）が渡されると乗算が overflow しうるため
+//!   `checked_mul` で検出し、overflow する場合は `Lbfgs::new` が
+//!   `InvalidArgument` を返す（本番経路 panic 禁止・
+//!   `.claude/rules/coding-rust.md`。イシュー #2197 レビュー是正・
+//!   discussion_r4110471294）。
+//! - **line search 予算・parity の finite 性検証**: [`LbfgsConfig::line_search_steps`]
+//!   の doc に記載のとおり、strong Wolfe の 1 回あたり closure 呼び出し
+//!   総数は初回評価を含めて `min(line_search_steps, max_eval -
+//!   current_evals)` を超えない。また、`LbfgsLineSearch::None`
+//!   （固定ステップ）・`StrongWolfe` いずれの経路でも、`x += t·d` で
+//!   更新した直後のパラメータに非有限値（overflow 由来の `inf`/`NaN`
+//!   等）が含まれる場合は closure を呼ぶ・呼ばないに関わらず
+//!   `InvalidArgument` を返し、`self` の状態は変更しない（イシュー
+//!   #2197 レビュー是正・discussion_r4110451838/r4110471293）。
 //! - 対象外: `maximize`・複素数パラメータ・parameter group・sparse
 //!   勾配。facade（`fandhe_ai::optim`）への公開・`compile()` 統合は
 //!   別イシュー #2198（ユーザー承認を要する facade 公開面拡張）。
@@ -83,7 +99,14 @@ pub struct LbfgsConfig {
     /// `min(line_search_steps, max_eval - current_evals)`
     /// （PyTorch は後者のみを渡す）。`line_search_steps >= max_eval`
     /// であれば PyTorch 側の項が常に支配し PyTorch と同一になる
-    /// （実装計画 §2.3）。
+    /// （実装計画 §2.3）。**この予算は `strong_wolfe` 内の初回評価
+    /// （PyTorch の逐語移植では無条件に 1 回発生する）も含む**（イシュー
+    /// #2197 レビュー是正・discussion_r4110471290/r4110451852）。つまり
+    /// 1 回の `step`/`step_closure` 呼び出しにおける line search 中の
+    /// closure 呼び出し総数は `min(line_search_steps, max_eval -
+    /// current_evals)` を超えない。この実効値が 0 の場合は初回評価も
+    /// 行わず closure を呼ばない（`max_eval: Some(1)` 等で予算が
+    /// 尽きている場合の fail-closed 契約）。
     pub line_search_steps: usize,
 }
 
@@ -103,8 +126,17 @@ impl Default for LbfgsConfig {
 }
 
 impl LbfgsConfig {
-    fn resolved_max_eval(&self) -> usize {
-        self.max_eval.unwrap_or(self.max_iter * 5 / 4)
+    /// `max_eval` を解決する。`None` の場合 `max_iter * 5 / 4`
+    /// （PyTorch と同じ整数除算）を `checked_mul` 経由で計算し、
+    /// overflow する場合は `None` を返す（`Lbfgs::new` が検出して
+    /// `InvalidArgument` にする。呼び出し元は本関数を検証目的でのみ
+    /// 使い、検証済み値は `Lbfgs::resolved_max_eval` フィールドに
+    /// キャッシュして再計算しない）。
+    fn resolved_max_eval(&self) -> Option<usize> {
+        match self.max_eval {
+            Some(v) => Some(v),
+            None => self.max_iter.checked_mul(5).map(|v| v / 4),
+        }
     }
 }
 
@@ -113,6 +145,13 @@ impl LbfgsConfig {
 /// 保持する。
 pub struct Lbfgs {
     config: LbfgsConfig,
+    /// `config.resolved_max_eval()` を `new()` で 1 度だけ検証・確定した
+    /// 値（`checked_mul` の overflow 検出込み）。`config.max_iter`/
+    /// `config.max_eval` は構築後に変更する手段がない（`set_lr` は
+    /// `lr` のみ書き換える）ため、以後の呼び出しは本フィールドを
+    /// 再計算なしで安全に使える（overflow 再検査・`unwrap`/`expect`
+    /// 不要。イシュー #2197 レビュー是正・discussion_r4110471294）。
+    resolved_max_eval: usize,
     /// 初回 `try_step_closure` 呼び出しで確定するパラメータスロットの
     /// shape 列。以後の呼び出しでスロット数・shape の一致を検査する
     /// （`AdamW` の `SlotState.shape` と同じ規律）。
@@ -149,10 +188,17 @@ impl Lbfgs {
                 config.max_iter
             )));
         }
-        if config.resolved_max_eval() < 1 {
+        let resolved_max_eval = config.resolved_max_eval().ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "Lbfgs::new: max_iter * 5 overflows usize (max_iter={}); \
+                 pass config.max_eval explicitly to avoid the derived \
+                 `max_iter * 5 / 4` computation",
+                config.max_iter
+            ))
+        })?;
+        if resolved_max_eval < 1 {
             return Err(AutodiffError::InvalidArgument(format!(
-                "Lbfgs::new: max_eval must resolve to >= 1, got {}",
-                config.resolved_max_eval()
+                "Lbfgs::new: max_eval must resolve to >= 1, got {resolved_max_eval}"
             )));
         }
         if !(config.tolerance_grad.is_finite() && config.tolerance_grad >= 0.0) {
@@ -181,6 +227,7 @@ impl Lbfgs {
         }
         Ok(Lbfgs {
             config,
+            resolved_max_eval,
             slot_shapes: Vec::new(),
             n_iter: 0,
             func_evals: 0,
@@ -339,7 +386,7 @@ impl Lbfgs {
         // `self._add_grad(t, d)` に相当）。
         let mut x = flatten_tensors(params);
 
-        let max_eval = self.config.resolved_max_eval();
+        let max_eval = self.resolved_max_eval;
         let mut current_evals = 1usize;
         let mut n_iter_local = 0usize;
         let mut loss = f64::from(orig_loss);
@@ -441,6 +488,7 @@ impl Lbfgs {
                     for k in 0..x.len() {
                         x[k] = f32::mul_add(new_t, d[k], x[k]);
                     }
+                    ensure_finite_params(&x)?;
                     t = new_t;
                     loss = f64::from(new_f);
                     flat_grad = new_g;
@@ -451,6 +499,18 @@ impl Lbfgs {
                     for k in 0..x.len() {
                         x[k] = f32::mul_add(t, d[k], x[k]);
                     }
+                    // 固定ステップ更新直後に非有限値混入を検査する
+                    // （closure 再評価の有無に関わらず。イシュー #2197
+                    // レビュー是正・discussion_r4110451838/r4110471293:
+                    // 最終反復〈`n_iter_local == max_iter`〉では closure
+                    // を再評価せず `x` をそのまま返していたため、有限
+                    // 入力でも overflow で `inf` な `x` を成功結果として
+                    // 返し得た）。異常時は `self` の状態を変更せず
+                    // `Err` を返す（本関数はここまでローカル作業コピー
+                    // のみを変更しており `self.*` へのコミットは関数末尾
+                    // でのみ行うため、ここで早期 return しても状態不変
+                    // 契約を満たす）。
+                    ensure_finite_params(&x)?;
                     if n_iter_local != self.config.max_iter {
                         let trial_params = unflatten_tensors(&x, &slot_shapes)?;
                         let (new_f, new_grads) = closure(&trial_params)?;
@@ -586,6 +646,23 @@ fn abs_max(a: &[f32]) -> f32 {
     a.iter().fold(0f32, |m, &x| m.max(x.abs()))
 }
 
+/// `x += t·d` 更新直後のフラット化パラメータに非有限値
+/// （overflow 由来の `inf`／`NaN`）が含まれないか検査する
+/// （`.claude/rules/security.md` A03。イシュー #2197 レビュー是正・
+/// discussion_r4110451838/r4110471293）。呼び出し元
+/// [`Lbfgs::try_step_closure`] はローカル作業コピー上で反復するため、
+/// ここで `Err` を返しても `self` の状態は変更されない。
+fn ensure_finite_params(x: &[f32]) -> Result<(), AutodiffError> {
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(AutodiffError::InvalidArgument(
+            "Lbfgs: parameter update x += t*d produced a non-finite value \
+             (likely overflow); state left unchanged"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// `_cubic_interpolate`（`torch/optim/lbfgs.py`）の逐語移植。
 fn cubic_interpolate(
     x1: f32,
@@ -674,6 +751,24 @@ where
     const C2: f32 = 0.9;
     const TOLERANCE_CHANGE: f32 = 1e-9;
 
+    // `max_ls` は本関数内で行う closure 呼び出し総数の予算（呼び出し元
+    // `min(line_search_steps, max_eval - current_evals)`。以下の初回
+    // 評価も含む。イシュー #2197 レビュー是正・
+    // discussion_r4110471290/r4110451852）。PyTorch の逐語移植は初回
+    // 評価を無条件に行うが、それでは予算 0（`max_eval` 到達済み）でも
+    // closure を呼んでしまい、`max_ls == 1` でも「初回 + bracket/zoom
+    // ループ 1 回」の計 2 回評価してしまう。予算を超えないよう、初回
+    // 評価も 1 回分として `max_ls` から差し引く。
+    if max_ls == 0 {
+        // 予算 0: closure を 1 回も呼ばず、ステップ未適用（`t = 0`）
+        // として現在値をそのまま返す。呼び出し元はこの `t = 0` を
+        // `x += 0·d` として適用するため実質的に no-op であり、直後の
+        // `current_evals >= max_eval` チェックで安全に反復を終える。
+        return Ok((f0, g0.to_vec(), 0.0, 0));
+    }
+    // 初回評価の 1 回分を差し引いた、bracket/zoom ループ側の残り予算。
+    let max_extra_ls = max_ls - 1;
+
     let d_norm = abs_max(d);
     let mut t = t0;
 
@@ -698,7 +793,7 @@ where
     let mut bracket_gtd = [0f32; 2];
     let mut bracket_len = 0usize;
 
-    while ls_iter < max_ls {
+    while ls_iter < max_extra_ls {
         if f_new > f0 + C1 * t * gtd0 || (ls_iter > 1 && f_new >= f_prev) {
             bracket_t = [t_prev, t];
             bracket_f = [f_prev, f_new];
@@ -749,7 +844,7 @@ where
         ls_iter += 1;
     }
 
-    if ls_iter == max_ls {
+    if ls_iter == max_extra_ls {
         bracket_t = [0.0, t];
         bracket_f = [f0, f_new];
         bracket_g = [g0.to_vec(), g_new.clone()];
@@ -779,7 +874,7 @@ where
     };
     let mut insuf_progress = false;
 
-    while !done && ls_iter < max_ls {
+    while !done && ls_iter < max_extra_ls {
         if (bracket_t[1] - bracket_t[0]).abs() * d_norm < TOLERANCE_CHANGE {
             break;
         }
@@ -1158,6 +1253,95 @@ mod tests {
             *call_count.get_mut() <= 2,
             "line_search_steps キャップが効いていない: calls={}",
             call_count.get_mut()
+        );
+    }
+
+    /// `max_iter` に `usize::MAX`・`max_eval: None` を渡すと
+    /// `max_iter * 5` の内部計算が overflow するため `Lbfgs::new` が
+    /// `InvalidArgument` を返すこと（`checked_mul` による fail-closed
+    /// 検出。イシュー #2197 レビュー是正・discussion_r4110471294）。
+    #[test]
+    fn rejects_max_iter_overflow_when_max_eval_unset() {
+        let cfg = LbfgsConfig {
+            max_iter: usize::MAX,
+            max_eval: None,
+            ..LbfgsConfig::default()
+        };
+        assert!(matches!(
+            Lbfgs::new(cfg),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+    }
+
+    /// `max_eval` を明示指定すれば `max_iter * 5` の派生計算自体を
+    /// 経由しないため、`max_iter` が極端に大きくても構築できること
+    /// （overflow 検出が派生パス限定であることの確認）。
+    #[test]
+    fn accepts_max_iter_overflow_prone_value_when_max_eval_set() {
+        let cfg = LbfgsConfig {
+            max_iter: usize::MAX,
+            max_eval: Some(5),
+            ..LbfgsConfig::default()
+        };
+        assert!(Lbfgs::new(cfg).is_ok());
+    }
+
+    /// `max_eval: Some(1)` の場合、strong Wolfe line search 側の予算が
+    /// 0 になり closure を追加評価しない（初回評価の 1 回のみで
+    /// 終える）こと（イシュー #2197 レビュー是正・
+    /// discussion_r4110471290/r4110451852）。
+    #[test]
+    fn strong_wolfe_respects_max_eval_one() {
+        let cfg = LbfgsConfig {
+            line_search: LbfgsLineSearch::StrongWolfe,
+            max_eval: Some(1),
+            ..LbfgsConfig::default()
+        };
+        let mut opt = Lbfgs::new(cfg).unwrap();
+        let param = t(vec![3.0], &[1]);
+        let call_count = std::cell::Cell::new(0usize);
+        let out = opt
+            .step_closure(&[param], |p| {
+                call_count.set(call_count.get() + 1);
+                let v = p[0].get(&[0]).unwrap();
+                (v * v, vec![t(vec![2.0 * v], &[1])])
+            })
+            .unwrap();
+        assert_eq!(call_count.get(), 1, "max_eval: Some(1) は初回評価のみ許す");
+        assert_eq!(opt.func_evals(), 1);
+        assert_eq!(
+            out[0].get(&[0]).unwrap(),
+            3.0,
+            "予算 0 で closure は呼ばれず更新も適用されない"
+        );
+    }
+
+    /// `LbfgsLineSearch::None`（固定ステップ）で `x += t*d` が overflow
+    /// して `inf` になる場合、closure 再評価の有無に関わらず `Err` を
+    /// 返し `self` の状態（`n_iter`/`func_evals`）が変化しないこと
+    /// （イシュー #2197 レビュー是正・
+    /// discussion_r4110451838/r4110471293）。`max_iter: 1` により
+    /// 最終反復（closure 再評価を省略する分岐）でのみ検出されることを
+    /// 確認する。
+    #[test]
+    fn rejects_non_finite_x_after_fixed_step_update() {
+        let cfg = LbfgsConfig {
+            line_search: LbfgsLineSearch::None,
+            lr: 3e38,
+            max_iter: 1,
+            ..LbfgsConfig::default()
+        };
+        let mut opt = Lbfgs::new(cfg).unwrap();
+        let param = t(vec![-3e38], &[1]);
+        // 勾配を定数 1.0 にして `d = -1.0`・`t = lr = 3e38` とし、
+        // `x = fma(3e38, -1.0, -3e38) = -inf` を発生させる。
+        let result = opt.step_closure(&[param], |_p| (0.0, vec![t(vec![1.0], &[1])]));
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+        assert_eq!(opt.n_iter(), 0, "エラー時は n_iter が呼び出し前のまま");
+        assert_eq!(
+            opt.func_evals(),
+            0,
+            "エラー時は func_evals が呼び出し前のまま"
         );
     }
 }
