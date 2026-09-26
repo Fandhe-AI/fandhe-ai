@@ -1005,6 +1005,16 @@ impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
 /// fail-closed で拒否する（OWASP A04。モジュール冒頭 OWASP 節）。
 pub const PREFETCH_MAX_WORKERS: usize = 64;
 
+/// [`PrefetchConfig::new`] が受け付ける `prefetch_depth` の上限（レビュー
+/// 指摘・イシュー #2183 コメント）。`prefetch_depth` は in-flight バッチ数の
+/// 上限であり投入窓のメモリ使用量に直結するため、`num_workers` と同様に
+/// 無制限の値を fail-closed で拒否する（OWASP A04。モジュール冒頭 OWASP
+/// 節）。値自体は `PREFETCH_MAX_WORKERS` と同じ 64（1 バッチあたりの
+/// メモリ量はデータセット依存のため、投入窓の「個数」を実用上有り得ない
+/// 大きさに達する前に拒否する目的の上限であり、両定数を一致させる
+/// 必然性はないが同一の枯渇対策という性質上揃えている）。
+pub const PREFETCH_MAX_DEPTH: usize = 64;
+
 /// マルチワーカー prefetch（イシュー #2183・親 #2131）の設定。
 /// [`PrefetchDataLoader::new`] に渡す。
 ///
@@ -1031,13 +1041,19 @@ impl PrefetchConfig {
     /// スレッド上で処理する。PyTorch `num_workers=0` と同じ意味〉に
     /// する）・`prefetch_depth`（in-flight で許容するバッチ数の上限。
     /// メモリ使用量はおおよそ `prefetch_depth` バッチ分に収まる）を
-    /// 検証してから構築する。`prefetch_depth == 0`（先読み無しは非対応）
-    /// または `num_workers` が [`PREFETCH_MAX_WORKERS`] を超える場合は
+    /// 検証してから構築する。`prefetch_depth == 0`（先読み無しは非対応）・
+    /// `prefetch_depth` が [`PREFETCH_MAX_DEPTH`] を超える・`num_workers`
+    /// が [`PREFETCH_MAX_WORKERS`] を超える場合は
     /// [`DataError::InvalidPrefetchConfig`]。
     pub fn new(num_workers: usize, prefetch_depth: usize) -> Result<Self, DataError> {
         if prefetch_depth == 0 {
             return Err(DataError::InvalidPrefetchConfig {
                 reason: "prefetch_depth はゼロにできない（先読み 0 バッチは非対応）",
+            });
+        }
+        if prefetch_depth > PREFETCH_MAX_DEPTH {
+            return Err(DataError::InvalidPrefetchConfig {
+                reason: "prefetch_depth が上限（PREFETCH_MAX_DEPTH）を超えている",
             });
         }
         if num_workers > PREFETCH_MAX_WORKERS {
@@ -2855,6 +2871,12 @@ mod tests {
             PrefetchConfig::new(PREFETCH_MAX_WORKERS + 1, 1).unwrap_err(),
             DataError::InvalidPrefetchConfig {
                 reason: "num_workers が上限（PREFETCH_MAX_WORKERS）を超えている",
+            }
+        );
+        assert_eq!(
+            PrefetchConfig::new(1, PREFETCH_MAX_DEPTH + 1).unwrap_err(),
+            DataError::InvalidPrefetchConfig {
+                reason: "prefetch_depth が上限（PREFETCH_MAX_DEPTH）を超えている",
             }
         );
         let cfg = PrefetchConfig::new(4, 8).unwrap();

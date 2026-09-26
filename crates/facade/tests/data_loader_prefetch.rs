@@ -20,7 +20,7 @@ use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::data::{DataLoader, DataLoaderConfig, TensorDataset};
 use fandhe_ai::optim::{Sgd, SgdConfig};
-use fandhe_ai_tensor_core::data::{PrefetchConfig, PrefetchDataLoader, RandomSampler, Sampler};
+use fandhe_ai_tensor_core::data::{PrefetchConfig, PrefetchDataLoader, RandomSampler};
 
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -111,13 +111,27 @@ fn prefetch_data_loader_matches_facade_data_loader_bit_identical() {
     }
 }
 
-/// fit 相当のミニバッチ学習ループを、逐次版 `DataLoader{shuffle=true}`
-/// と `PrefetchDataLoader(RandomSampler, workers=4)` の双方で同一
+/// fit 相当のミニバッチ学習ループを、逐次版 `SamplerDataLoader` と
+/// `PrefetchDataLoader(RandomSampler, workers=4)` の双方で同一
 /// `manual_seed` から回し、最終パラメータが bit 完全一致すること・
 /// loss が減少することを確認する（R5。`Sequential::fit` は経由しない
 /// ——`docs/tensor-core-data-prefetch-decision.md` §2.4 の facade 保留
 /// 方針に基づき、`compat::training::run_fit` への結線は承認事項として
 /// 対象外）。
+///
+/// # 検証する経路（レビュー指摘・イシュー #2183 コメント対応）
+///
+/// 以前は par 側が `RandomSampler::next_batch` で得た添字列だけを
+/// `train_with_indices`（逐次 `Dataset::batch` 呼び出し）へ渡しており、
+/// `PrefetchDataLoader` が実際に配分・reorder したバッチを学習ステップ
+/// へ使っていなかった（「添字列が一致する」ことしか検証できておらず、
+/// worker 経由のバッチ組み立てを学習ループに結線した場合の bit 一致は
+/// 未検証だった）。本テストは `PrefetchDataLoader::new((ds_x, ds_y),
+/// sampler, config)`（[`Dataset`] のタプル実装。モジュール冒頭
+/// 「決定性の契約」節）を直接学習ループへ結線し、`PrefetchBatches`
+/// が yield する `(x_batch, y_batch)` をそのまま forward/backward に
+/// 使うことで、実際に prefetch を使った学習の最終パラメータ一致を
+/// 検証する。
 #[test]
 fn prefetch_training_loop_matches_sequential_bit_identical_final_params() {
     let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -126,18 +140,15 @@ fn prefetch_training_loop_matches_sequential_bit_identical_final_params() {
     const SEED: u64 = 0x9999;
     let (x_data, y_data) = gen_dataset(0xABCD);
 
-    fn train_with_indices(
-        x_data: &Tensor<f32>,
-        y_data: &Tensor<f32>,
-        mut epoch_indices: impl FnMut() -> Vec<Vec<usize>>,
+    /// `epoch_batches` が 1 epoch 分の `(x_batch, y_batch)` 列を返す
+    /// クロージャを受け取り、そのまま forward/backward/step に使う。
+    /// 逐次版（`SamplerDataLoader`）・並列版（`PrefetchDataLoader`）の
+    /// どちらも同じこの関数へ「実データローダーが yield したバッチ」を
+    /// 渡すことで、ローダー実装の違いが学習結果へ影響しないことを
+    /// 検証する。
+    fn train_with_batches(
+        mut epoch_batches: impl FnMut() -> Vec<(Tensor<f32>, Tensor<f32>)>,
     ) -> (Vec<f32>, Vec<Vec<f32>>) {
-        use fandhe_ai_tensor_core::data::Dataset;
-
-        let ds_x = TensorDataset::new(x_data.clone())
-            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new(x) が失敗: {e}"));
-        let ds_y = TensorDataset::new(y_data.clone())
-            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new(y) が失敗: {e}"));
-
         let mut model = build_model();
         let mut sgd = Sgd::new(SgdConfig::new(0.05))
             .unwrap_or_else(|e| panic!("test fixture: Sgd::new が失敗した: {e}"));
@@ -146,14 +157,7 @@ fn prefetch_training_loop_matches_sequential_bit_identical_final_params() {
         for _ in 0..EPOCHS {
             let mut epoch_loss_sum = 0.0f32;
             let mut batch_count = 0usize;
-            for indices in epoch_indices() {
-                let x_batch = ds_x
-                    .batch(&indices)
-                    .unwrap_or_else(|e| panic!("test fixture: batch(x) が失敗: {e}"));
-                let y_batch = ds_y
-                    .batch(&indices)
-                    .unwrap_or_else(|e| panic!("test fixture: batch(y) が失敗: {e}"));
-
+            for (x_batch, y_batch) in epoch_batches() {
                 let updated = {
                     let tape = fandhe_ai::tape();
                     let bound = model.bind(&tape);
@@ -192,104 +196,58 @@ fn prefetch_training_loop_matches_sequential_bit_identical_final_params() {
         (epoch_losses, final_params)
     }
 
-    // 逐次版: `RandomSampler` を直接 epoch ごとに回し、添字列を確定
-    // させてから同じ `train_with_indices` へ渡す（`DataLoader{shuffle=
-    // true}` と bit 完全一致する添字列であることは他テストで固定済み）。
+    // 逐次版: `SamplerDataLoader((ds_x, ds_y), RandomSampler)` が yield
+    // する `(x_batch, y_batch)` をそのまま `train_with_batches` へ渡す。
     fandhe_ai::manual_seed(SEED);
-    let mut seq_sampler = RandomSampler::new(N, 4, false)
-        .unwrap_or_else(|e| panic!("test fixture: RandomSampler::new が失敗: {e}"));
-    let (seq_losses, seq_final) = train_with_indices(&x_data, &y_data, || {
-        seq_sampler
-            .start_epoch()
-            .unwrap_or_else(|e| panic!("test fixture: start_epoch が失敗: {e}"));
-        let mut out = Vec::new();
-        loop {
-            let batch = seq_sampler.next_batch();
-            if batch.is_empty() {
-                break;
-            }
-            out.push(batch);
-        }
-        out
-    });
-
-    // prefetch 版: `PrefetchDataLoader` から得た `Vec<usize>` を epoch
-    // ごとに eager 収集する（内部の分配・reorder が学習ループへ影響
-    // しないことの確認が目的のため、ここでは添字列そのものを比較する
-    // 経路と、実際に prefetch でバッチ化されたテンソルを直接学習に
-    // 使う経路の両方を検証する）。
-    fandhe_ai::manual_seed(SEED);
-    let mut par_sampler = RandomSampler::new(N, 4, false)
-        .unwrap_or_else(|e| panic!("test fixture: RandomSampler::new が失敗: {e}"));
-    let (par_losses, par_final) = train_with_indices(&x_data, &y_data, || {
-        par_sampler
-            .start_epoch()
-            .unwrap_or_else(|e| panic!("test fixture: start_epoch が失敗: {e}"));
-        let mut out = Vec::new();
-        loop {
-            let batch = par_sampler.next_batch();
-            if batch.is_empty() {
-                break;
-            }
-            out.push(batch);
-        }
-        out
-    });
-    assert_eq!(
-        seq_losses, par_losses,
-        "同一添字列（同一 manual_seed 下の RandomSampler）から学習した\
-         場合、逐次経路と PrefetchDataLoader が使う添字取得経路とで\
-         loss 系列が一致するはず（前段の添字列確定手順が同一のため）"
-    );
-    assert_eq!(
-        seq_final, par_final,
-        "最終パラメータが bit 完全一致するはず"
-    );
-
-    // 上記に加え、`PrefetchDataLoader` 自身が実際にバッチ化した
-    // テンソル列（worker 経由）が、逐次版 `SamplerDataLoader` 相当の
-    // 添字選択と一致することを、実データローダー経由で確認する
-    // （R2 の核心: 分配・reorder を経ても出力が変わらないこと）。
-    fandhe_ai::manual_seed(SEED);
-    let expected_batches: Vec<Vec<f32>> = {
-        let ds = TensorDataset::new(x_data.clone())
-            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new が失敗: {e}"));
+    let (seq_losses, seq_final) = {
+        let ds_x = TensorDataset::new(x_data.clone())
+            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new(x) が失敗: {e}"));
+        let ds_y = TensorDataset::new(y_data.clone())
+            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new(y) が失敗: {e}"));
         let sampler = RandomSampler::new(N, 4, false)
             .unwrap_or_else(|e| panic!("test fixture: RandomSampler::new が失敗: {e}"));
-        let mut loader = fandhe_ai_tensor_core::data::SamplerDataLoader::new(ds, sampler)
+        let mut loader = fandhe_ai_tensor_core::data::SamplerDataLoader::new((ds_x, ds_y), sampler)
             .unwrap_or_else(|e| panic!("test fixture: SamplerDataLoader::new が失敗: {e}"));
-        loader
-            .iter()
-            .map(|b| {
-                b.unwrap_or_else(|e| panic!("test fixture: batch が失敗: {e}"))
-                    .host_slice()
-                    .to_vec()
-            })
-            .collect()
+        train_with_batches(|| {
+            loader
+                .iter()
+                .map(|b| b.unwrap_or_else(|e| panic!("test fixture: batch が失敗: {e}")))
+                .collect()
+        })
     };
+
+    // prefetch 版: `PrefetchDataLoader((ds_x, ds_y), RandomSampler,
+    // workers=4)` が worker 経由で分配・組み立て・reorder したバッチを
+    // そのまま学習ステップへ使う（レビュー指摘対応。上記ドキュメント
+    // コメント「検証する経路」参照）。
     fandhe_ai::manual_seed(SEED);
-    let actual_batches: Vec<Vec<f32>> = {
-        let ds = TensorDataset::new(x_data)
-            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new が失敗: {e}"));
+    let (par_losses, par_final) = {
+        let ds_x = TensorDataset::new(x_data.clone())
+            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new(x) が失敗: {e}"));
+        let ds_y = TensorDataset::new(y_data.clone())
+            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new(y) が失敗: {e}"));
         let sampler = RandomSampler::new(N, 4, false)
             .unwrap_or_else(|e| panic!("test fixture: RandomSampler::new が失敗: {e}"));
         let config = PrefetchConfig::new(4, 4)
             .unwrap_or_else(|e| panic!("test fixture: PrefetchConfig::new が失敗: {e}"));
-        let mut loader = PrefetchDataLoader::new(ds, sampler, config)
+        let mut loader = PrefetchDataLoader::new((ds_x, ds_y), sampler, config)
             .unwrap_or_else(|e| panic!("test fixture: PrefetchDataLoader::new が失敗: {e}"));
-        loader
-            .iter()
-            .map(|b| {
-                b.unwrap_or_else(|e| panic!("test fixture: batch が失敗: {e}"))
-                    .host_slice()
-                    .to_vec()
-            })
-            .collect()
+        train_with_batches(|| {
+            loader
+                .iter()
+                .map(|b| b.unwrap_or_else(|e| panic!("test fixture: batch が失敗: {e}")))
+                .collect()
+        })
     };
     assert_eq!(
-        actual_batches, expected_batches,
-        "PrefetchDataLoader(workers=4) の実バッチ列が SamplerDataLoader と\
-         bit 完全一致するはず"
+        seq_losses, par_losses,
+        "SamplerDataLoader と PrefetchDataLoader(workers=4) の双方が\
+         yield した実バッチで学習した場合、loss 系列が一致するはず"
+    );
+    assert_eq!(
+        seq_final, par_final,
+        "PrefetchDataLoader(workers=4) のバッチで学習した最終パラメータが\
+         SamplerDataLoader 版と bit 完全一致するはず"
     );
 
     let first = seq_losses[0];
@@ -298,5 +256,4 @@ fn prefetch_training_loop_matches_sequential_bit_identical_final_params() {
         last < first,
         "ミニバッチ学習で loss が減少するはず: first={first} last={last}"
     );
-    let _ = y_data; // 使用済み（train_with_indices・上記ブロック内で消費）
 }
