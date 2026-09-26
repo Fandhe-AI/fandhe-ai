@@ -537,6 +537,24 @@ fn pad_rejects_negative_pads() {
 }
 
 #[test]
+fn pad_rejects_duplicate_axes() {
+    // axes 入力形で同一軸を重複指定（[0, 0]）すると `result[n]` への
+    // 代入が無言で後勝ち上書きされ、片方の pads 指定が消える。
+    // レビュー指摘対応（イシュー #2186）: 重複軸は InvalidAttribute で
+    // fail-closed に拒否する。
+    let n = node("Pad", "n", vec!["x", "pads", "", "axes"], vec!["y"]);
+    let g = single_node_graph(n, &["x", "pads", "axes"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0], &[1, 2]),
+        feed_i64("pads", vec![1, 1, 0, 0], &[4]),
+        feed_i64("axes", vec![0, 0], &[2]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "axes"));
+}
+
+#[test]
 fn pad_rejects_unsupported_mode() {
     let n = node_with_attrs(
         "Pad",
@@ -701,6 +719,68 @@ fn resize_rejects_non_integer_scale() {
     feeds.extend([
         feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
         feed_f32("scales", vec![1.0, 1.0, 1.5, 1.5], &[4]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "scales"));
+}
+
+#[test]
+fn resize_rejects_scale_overflowing_usize_multiplication() {
+    // レビュー指摘対応（イシュー #2186）: 非信頼な ONNX モデルの scales
+    // 入力が usize::MAX を超える巨大な整数値浮動小数点数（例: 1e30）だと
+    // `in_size * scale as usize` が usize 乗算オーバーフローを起こしうる
+    // （debug ビルドでは panic、release ではラップして誤った shape）。
+    // checked_mul による fail-closed 拒否を確認する。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![1.0, 1.0, 1e30, 1e30], &[4]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "scales"));
+}
+
+#[test]
+fn resize_rejects_scale_overflowing_checked_mul_below_usize_max_guard() {
+    // 上のテストは「usize::MAX を超える巨大な scale」の早期拒否ガードを
+    // 通る。本テストは `2^63`（f32 で厳密に表現可能・`usize::MAX` 未満）
+    // という早期ガードをすり抜ける値を使い、`in_size.checked_mul(scale)`
+    // 自体が usize 乗算オーバーフローを検出して None を返す経路
+    // （レビュー指摘の本丸）を直接確認する。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        // in_size(H)=2 のときの H 方向 scale を 2^63 にすると
+        // `2 * 2^63` が usize::MAX（2^64 - 1）を超えオーバーフローする。
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32(
+            "scales",
+            vec![1.0, 1.0, 9_223_372_036_854_775_808.0, 1.0],
+            &[4],
+        ),
     ]);
     let err = run(&g, feeds).unwrap_err();
     assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "scales"));

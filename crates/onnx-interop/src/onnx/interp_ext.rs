@@ -42,7 +42,7 @@
 //! `find_attr_unique`）を再利用し、無検証の `attr_i64s` 等は使わない
 //! （OWASP A03。`.claude/rules/security.md`）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fandhe_ai_autodiff::{Tape, Var};
 use fandhe_ai_tensor_core::{InterpolateMode, Tensor, broadcast_shape};
@@ -461,12 +461,25 @@ pub(super) fn compute_pad(
             });
         }
         let mut result = vec![(0usize, 0usize); rank];
+        // `axes` 入力で同一軸が重複指定される（例: [0, 0]）と、後勝ちで
+        // `result[n]` が無言上書きされ入力の一部意図が消える。本ファイルの
+        // 他の曖昧入力検出（`find_attr_unique` の複数出現・ReduceMean の
+        // attr/input 混在等）と同じ fail-closed 方針に揃え、重複軸は
+        // InvalidAttribute で拒否する（レビュー指摘対応）。
+        let mut seen_axes: HashSet<usize> = HashSet::with_capacity(axes_raw.len());
         for (i, &ax) in axes_raw.iter().enumerate() {
             let n = normalize_axis(ax, rank).ok_or(OpError::AxisOutOfRange {
                 op: "Pad",
                 axis: ax,
                 rank,
             })?;
+            if !seen_axes.insert(n) {
+                return Err(InterpError::InvalidAttribute {
+                    node: node.name.clone(),
+                    attr: "axes".to_string(),
+                    reason: format!("axes に重複した軸指定があります（軸: {n}）"),
+                });
+            }
             let before = pads_i64[i];
             let after = pads_i64[axes_raw.len() + i];
             if before < 0 || after < 0 {
@@ -738,7 +751,34 @@ fn resize_scale_to_out_size(
                 reason: format!("整数倍率のみ対応です（実際: {scale}）"),
             });
         }
-        Ok(in_size * scale as usize)
+        // `scale` は非信頼な ONNX モデルの `scales` 入力に由来するため、
+        // `usize::MAX` を超える巨大な整数値浮動小数点数（例: 1e30）でも
+        // `as usize` は素通しでキャストしてしまう（Rust の `as` は
+        // 飽和変換だが、直後の `in_size * scale_usize` が usize の乗算
+        // オーバーフローを起こしうる）。`checked_mul` で乗算そのものを
+        // fail-closed に拒否し、debug/release いずれのビルドでも
+        // panic・誤った出力 shape を生まないようにする（レビュー指摘対応）。
+        // `usize::MAX as f32` は丸めで 2^64 になり得るため `>` だと
+        // ちょうど 2^64 の scale を素通ししてしまう（`as usize` が
+        // `usize::MAX` へ飽和し、後続の `checked_mul` が偶然 in_size==1 等で
+        // 成立してしまう）。`>=` にして境界値も確実に拒否する。
+        if scale >= usize::MAX as f32 {
+            return Err(InterpError::InvalidAttribute {
+                node: node.name.clone(),
+                attr: attr.to_string(),
+                reason: format!("scales が大きすぎます（実際: {scale}）"),
+            });
+        }
+        let scale_usize = scale as usize;
+        in_size
+            .checked_mul(scale_usize)
+            .ok_or_else(|| InterpError::InvalidAttribute {
+                node: node.name.clone(),
+                attr: attr.to_string(),
+                reason: format!(
+                    "in_size({in_size}) と scales({scale}) の積が usize の範囲を超えます"
+                ),
+            })
     } else {
         let inv = 1.0 / scale;
         if inv.fract() != 0.0 {
