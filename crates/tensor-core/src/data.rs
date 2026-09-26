@@ -602,30 +602,16 @@ pub trait Sampler: Send {
     fn next_batch(&mut self) -> Vec<usize>;
 
     /// 1 epoch あたりのバッチ数（既知なら `Some`。既定は `None`）。
+    /// [`SamplerBatches::size_hint`]・[`HookedBatches::size_hint`] は
+    /// 本メソッドの戻り値（epoch 全体の静的総数）と、各イテレータ自身が
+    /// 追跡する「これまでに yield した数」の差分で残数を計算する
+    /// （レビュー指摘: イシュー #2182 review・PR #2310 codex-review
+    /// P2 是正）。カスタム `Sampler` 実装が進捗追跡用の別メソッドを
+    /// override する必要はなく、本メソッドだけを実装すれば途中経過・
+    /// epoch 終了後のどちらでも `Iterator::size_hint` の「残り要素数」
+    /// 契約（下限の非過大申告）を満たす。
     fn num_batches(&self) -> Option<usize> {
         None
-    }
-
-    /// 呼び出し時点での残りバッチ数（既知なら `Some`。既定は
-    /// [`Self::num_batches`] と同じ epoch 全体の総数を返す）。
-    /// カーソルで進捗を追跡する実装（[`SequentialSampler`]・
-    /// [`RandomSampler`]・[`WeightedRandomSampler`]）はこれを
-    /// override し、`next_batch` 消費後も正しい残数を返す
-    /// （`ExactSizeIterator`／`Iterator::size_hint` の「残り要素数」
-    /// 契約に合わせる。レビュー指摘: イシュー #2182 review・PR 内
-    /// 是正。[`SamplerBatches::size_hint`]・[`HookedBatches::
-    /// size_hint`] が本メソッドを使う）。
-    ///
-    /// カーソル追跡を持たないカスタム実装（既定のまま）では、
-    /// `next_batch` を消費しても本メソッドは epoch 全体の静的総数を
-    /// 返し続けるが、[`SamplerBatches::size_hint`]・[`HookedBatches::
-    /// size_hint`] は epoch 終了（`next_batch` が空 `Vec` を返した後）
-    /// を検知した時点で本メソッドの戻り値によらず `(0, Some(0))` を
-    /// 返すため、終了後に正の残数を報告し続けることはない（レビュー
-    /// 指摘: PR #2310 codex-review P2。正確な途中経過が必要なカスタム
-    /// 実装は本メソッドを override して残数を追跡すること）。
-    fn remaining_batches(&self) -> Option<usize> {
-        self.num_batches()
     }
 }
 
@@ -675,22 +661,6 @@ impl IndexBatcher {
     fn num_batches(&self, len: usize) -> usize {
         batch_count(len, self.batch_size, self.drop_last)
     }
-
-    /// 呼び出し時点でのカーソル位置を踏まえた「残りバッチ数」
-    /// （[`Batches::remaining_batches`] と同じ計算式）。[`Self::
-    /// num_batches`] は epoch 開始時の総数（カーソル非依存）のため、
-    /// `next_batch` 呼び出し後の `size_hint` にはこちらを使う
-    /// （レビュー指摘: イシュー #2182 review・PR 内是正）。
-    fn remaining_batches(&self) -> usize {
-        if self.cursor >= self.order.len() {
-            return 0;
-        }
-        batch_count(
-            self.order.len() - self.cursor,
-            self.batch_size,
-            self.drop_last,
-        )
-    }
 }
 
 /// 連番順（シャッフルなし）でバッチ添字を供給する（PyTorch
@@ -738,10 +708,6 @@ impl Sampler for SequentialSampler {
 
     fn num_batches(&self) -> Option<usize> {
         Some(self.batcher.num_batches(self.len))
-    }
-
-    fn remaining_batches(&self) -> Option<usize> {
-        Some(self.batcher.remaining_batches())
     }
 }
 
@@ -793,10 +759,6 @@ impl Sampler for RandomSampler {
 
     fn num_batches(&self) -> Option<usize> {
         Some(self.batcher.num_batches(self.len))
-    }
-
-    fn remaining_batches(&self) -> Option<usize> {
-        Some(self.batcher.remaining_batches())
     }
 }
 
@@ -887,10 +849,6 @@ impl Sampler for WeightedRandomSampler {
     fn num_batches(&self) -> Option<usize> {
         Some(self.batcher.num_batches(self.num_samples))
     }
-
-    fn remaining_batches(&self) -> Option<usize> {
-        Some(self.batcher.remaining_batches())
-    }
 }
 
 /// [`Sampler`] が返す添字列をそのまま [`Dataset::batch`] へ渡す
@@ -948,6 +906,7 @@ impl<D: Dataset> SamplerDataLoader<D> {
             sampler: self.sampler.as_mut(),
             pending_error,
             done: false,
+            yielded: 0,
         }
     }
 }
@@ -960,6 +919,14 @@ pub struct SamplerBatches<'a, D: Dataset> {
     sampler: &'a mut dyn Sampler,
     pending_error: Option<DataError>,
     done: bool,
+    /// これまでに yield したバッチ数（本イテレータ自身が追跡するカーソル。
+    /// イシュー #2182・PR #2310 codex-review P2 是正）。`size_hint` は
+    /// これと `Sampler::num_batches`（epoch 全体の静的総数）の差分で
+    /// 残数を計算する。カスタム `Sampler` が進捗追跡用の別メソッドを
+    /// 実装していなくても、途中経過・`done` 到達後のどちらでも
+    /// `Iterator::size_hint` の「残り要素数」契約（下限の非過大申告）を
+    /// 満たす。
+    yielded: usize,
 }
 
 impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
@@ -978,6 +945,7 @@ impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
             self.done = true;
             return None;
         }
+        self.yielded += 1;
         Some(self.dataset.batch(&indices))
     }
 
@@ -985,21 +953,23 @@ impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
         if self.pending_error.is_some() {
             return (1, Some(1));
         }
-        // `done` 到達後は `Sampler::remaining_batches` の戻り値を無視し
-        // 常に `(0, Some(0))` を返す（レビュー指摘: イシュー #2182
-        // review・PR #2310 codex-review P2）。`remaining_batches` の既定
-        // 実装は `num_batches()`（epoch 全体の静的総数）のままのため、
-        // `num_batches` のみ実装しカーソル追跡を持たないカスタム
-        // `Sampler` では、消費完了後もその静的値を返し続け
-        // `Iterator::size_hint` の「残り要素数」契約に反する。`done`
-        // フラグ（本イテレータが `next_batch` の空 `Vec` 番兵を検知済み）
-        // で上書きすることで、カスタム実装の追跡有無によらず終了後は
-        // 必ず `(0, Some(0))` を返す安全側の下限・上限にする。
+        // `done` 到達後は常に `(0, Some(0))` を返す（安全側の下限・上限。
+        // 下の `yielded` ベース計算でも `done` 時点では
+        // `num_batches() - yielded == 0` になるはずだが、`num_batches`
+        // を持たない〈`None`〉サンプラーでは下の分岐が `(0, None)` を
+        // 返してしまうため、`done` を明示的に先取りして必ず
+        // `(0, Some(0))` にする）。
         if self.done {
             return (0, Some(0));
         }
-        match self.sampler.remaining_batches() {
-            Some(n) => (n, Some(n)),
+        // 本イテレータが自ら追跡した `yielded` と `num_batches()`
+        // （epoch 全体の静的総数）の差分で残数を計算する（上記 doc
+        // コメント）。
+        match self.sampler.num_batches() {
+            Some(total) => {
+                let remaining = total.saturating_sub(self.yielded);
+                (remaining, Some(remaining))
+            }
             None => (0, None),
         }
     }
@@ -1163,6 +1133,7 @@ impl<T: Element> HookedDataLoader<T> {
             collate: self.collate.as_ref(),
             pending_error,
             done: false,
+            yielded: 0,
         }
     }
 }
@@ -1180,6 +1151,10 @@ pub struct HookedBatches<'a, T: Element> {
     collate: Option<&'a CollateFn<T>>,
     pending_error: Option<DataError>,
     done: bool,
+    /// [`SamplerBatches::yielded`] と同じ理由（同コメント参照。イシュー
+    /// #2182・PR #2310 codex-review P2 是正）で本イテレータ自身が
+    /// 追跡するカーソル。
+    yielded: usize,
 }
 
 impl<T: Element> Iterator for HookedBatches<'_, T> {
@@ -1198,13 +1173,28 @@ impl<T: Element> Iterator for HookedBatches<'_, T> {
             self.done = true;
             return None;
         }
+        self.yielded += 1;
         // fast path: transform も collate も未設定なら `Dataset::batch`
         // （`gather_rows`）へ直行し、追加のコピーを発生させない
         // （`HookedDataLoader` doc「処理順」節）。
         if self.transform.is_none() && self.collate.is_none() {
             return Some(self.dataset.batch(&indices));
         }
-        let mut samples: Vec<Tensor<T>> = Vec::with_capacity(indices.len());
+        // `indices` は任意の `Sampler` 実装が返す `Vec<usize>`（信頼境界
+        // 外の入力。A03/A04 対策）のため、`indices.len()` をそのまま
+        // `Vec<Tensor<T>>::with_capacity` へ渡すと `Tensor<T>` 要素の
+        // 容量計算（`indices.len() * size_of::<Tensor<T>>()`）が
+        // `isize::MAX` を超えた場合に `with_capacity` 自身が
+        // `capacity overflow` で panic する（本番経路 panic 禁止。
+        // `.claude/rules/coding-rust.md`）。他の確保前検査（本ファイル
+        // 各所の `checked_numel_for`）と同じ方式で先に検査し、
+        // 失敗時は型付きエラー（`DataError::Shape`）を返す（イシュー
+        // #2182・PR #2310 codex-review P1 是正）。
+        let capacity = match checked_numel_for::<Tensor<T>>(&[indices.len()]) {
+            Ok(n) => n,
+            Err(e) => return Some(Err(e.into())),
+        };
+        let mut samples: Vec<Tensor<T>> = Vec::with_capacity(capacity);
         for &idx in &indices {
             let sample = match self.dataset.sample_owned(idx) {
                 Ok(s) => s,
@@ -1230,13 +1220,19 @@ impl<T: Element> Iterator for HookedBatches<'_, T> {
         if self.pending_error.is_some() {
             return (1, Some(1));
         }
-        // `SamplerBatches::size_hint` と同じ理由（上記コメント）で
+        // `SamplerBatches::size_hint` と同じ理由（同コメント参照）で
         // `done` 到達後は `(0, Some(0))` を優先する。
         if self.done {
             return (0, Some(0));
         }
-        match self.sampler.remaining_batches() {
-            Some(n) => (n, Some(n)),
+        // 本イテレータが自ら追跡した `yielded` と `num_batches()` の
+        // 差分で残数を計算する（`SamplerBatches::size_hint` と同じ理由・
+        // 同コメント参照）。
+        match self.sampler.num_batches() {
+            Some(total) => {
+                let remaining = total.saturating_sub(self.yielded);
+                (remaining, Some(remaining))
+            }
             None => (0, None),
         }
     }
@@ -1839,7 +1835,7 @@ mod tests {
     #[test]
     fn hooked_batches_size_hint_reflects_partial_consumption() {
         // 上記 `SamplerBatches` 版と同じ契約を `HookedBatches` にも
-        // 適用する（同一の `Sampler::remaining_batches` を経由）。
+        // 適用する（同一の `yielded`／`num_batches()` 差分計算を経由）。
         let ds = TensorDataset::new(tensor_2d(10, 1)).unwrap();
         let mut loader =
             HookedDataLoader::new(ds, SequentialSampler::new(10, 4, false).unwrap()).unwrap();
@@ -1911,10 +1907,12 @@ mod tests {
         );
     }
 
-    /// `remaining_batches` を override せず既定実装（`num_batches` を
-    /// そのまま返す。カーソル非依存）のままにしたカスタム
-    /// [`Sampler`]。`num_batches` のみ実装し進捗追跡を持たない第三者
-    /// 実装を模する（レビュー指摘: PR #2310 codex-review P2）。
+    /// `num_batches`（epoch 全体の静的総数）のみを実装し、進捗追跡用の
+    /// カーソルを外部へ公開しないカスタム [`Sampler`]。`SamplerBatches`／
+    /// `HookedBatches` は自身の `yielded` カーソルと本メソッドの差分で
+    /// 残数を計算するため、このような第三者実装（`num_batches` 以外に
+    /// 進捗を問い合わせる手段を持たない実装）を模する（レビュー指摘:
+    /// PR #2310 codex-review P2）。
     struct StaticNumBatchesSampler {
         cursor: usize,
         total: usize,
@@ -1938,20 +1936,20 @@ mod tests {
         fn num_batches(&self) -> Option<usize> {
             Some(self.total)
         }
-        // `remaining_batches` は意図的に override しない（既定 =
-        // `num_batches` のまま。カーソル非依存の静的値）。
     }
 
     #[test]
-    fn size_hint_reports_zero_after_done_even_without_remaining_batches_override() {
-        // イシュー #2182 review 指摘（PR #2310 codex-review P2）: `Sampler`
-        // が `remaining_batches` を override せず（既定 = `num_batches`
-        // の静的値）に消費完了まで進んだ場合でも、`SamplerBatches::
+    fn size_hint_reports_zero_after_done_even_with_static_num_batches() {
+        // イシュー #2182 review 指摘（PR #2310 codex-review P2）:
+        // `num_batches`（epoch 全体の静的総数）しか持たないカスタム
+        // `Sampler` で消費完了まで進んだ場合でも、`SamplerBatches::
         // size_hint`／`HookedBatches::size_hint` は `done` 到達を検知して
         // `(0, Some(0))` を返す必要がある（`Iterator::size_hint` の
-        // 「残り要素数」契約）。override 無しだと `remaining_batches` は
-        // 消費後も `total`（ここでは 3）を返し続けるため、`done` クランプ
-        // がなければ本テストは失敗する。
+        // 「残り要素数」契約）。`done` クランプがなければ、`yielded ==
+        // num_batches()` になる（`saturating_sub` で 0 になる）ことに
+        // 依存するだけでは足りないケース（例えば `num_batches` が
+        // `yielded` より小さい値を返す壊れた実装）も含めて安全側に
+        // 倒すことを確認する。
         let ds = TensorDataset::new(tensor_2d(3, 1)).unwrap();
         let sampler = StaticNumBatchesSampler {
             cursor: 0,
@@ -1967,7 +1965,7 @@ mod tests {
         assert_eq!(
             batches.size_hint(),
             (0, Some(0)),
-            "done 後は remaining_batches の既定実装の戻り値によらず (0, Some(0)) を返すべき"
+            "done 後は num_batches() の静的値によらず (0, Some(0)) を返すべき"
         );
 
         let ds = TensorDataset::new(tensor_2d(3, 1)).unwrap();
@@ -1987,6 +1985,88 @@ mod tests {
             (0, Some(0)),
             "HookedBatches も done 後は (0, Some(0)) を返すべき"
         );
+    }
+
+    #[test]
+    fn size_hint_reflects_partial_consumption_with_static_num_batches() {
+        // イシュー #2182 review 指摘（PR #2310 codex-review P2）:
+        // `num_batches`（epoch 全体の静的総数）しか持たないカスタム
+        // `Sampler` でも、`SamplerBatches::size_hint`／`HookedBatches::
+        // size_hint` は `done` 到達前の途中経過で `Iterator::size_hint`
+        // の「残り要素数」契約（下限の非過大申告）を満たす必要がある。
+        // 本イテレータ自身が追跡する `yielded` カーソルと
+        // `num_batches()` の差分で残数を計算することで、カスタム
+        // `Sampler` の進捗追跡有無によらず消費 1 バッチごとに残数が
+        // 正しく減ることを確認する。
+        let ds = TensorDataset::new(tensor_2d(3, 1)).unwrap();
+        let sampler = StaticNumBatchesSampler {
+            cursor: 0,
+            total: 3,
+        };
+        let mut loader = SamplerDataLoader::new(ds, sampler).unwrap();
+        let mut batches = loader.iter();
+        assert_eq!(batches.size_hint(), (3, Some(3)));
+        assert!(batches.next().is_some());
+        assert_eq!(
+            batches.size_hint(),
+            (2, Some(2)),
+            "num_batches() の静的値（3）に引きずられず 1 消費後は 2 を返すべき"
+        );
+        assert!(batches.next().is_some());
+        assert_eq!(batches.size_hint(), (1, Some(1)));
+        assert!(batches.next().is_some());
+        assert_eq!(batches.size_hint(), (0, Some(0)));
+
+        let ds = TensorDataset::new(tensor_2d(3, 1)).unwrap();
+        let sampler = StaticNumBatchesSampler {
+            cursor: 0,
+            total: 3,
+        };
+        let mut loader = HookedDataLoader::new(ds, sampler).unwrap();
+        let mut batches = loader.iter();
+        assert_eq!(batches.size_hint(), (3, Some(3)));
+        assert!(batches.next().is_some());
+        assert_eq!(
+            batches.size_hint(),
+            (2, Some(2)),
+            "HookedBatches も同様に num_batches() の静的値に引きずられないべき"
+        );
+    }
+
+    #[test]
+    fn hooked_batches_capacity_guard_rejects_overflowing_indices_len_without_panicking() {
+        // イシュー #2182 review 指摘（PR #2310 codex-review P1）:
+        // `HookedBatches::next` の transform／collate 経路（本ファイル
+        // 上部の実装）は `indices.len()` をそのまま
+        // `Vec<Tensor<T>>::with_capacity` に渡すと、`Tensor<T>` の
+        // 容量計算（`indices.len() * size_of::<Tensor<T>>()`）が
+        // `isize::MAX` を超えた場合に `with_capacity` 自身が
+        // `capacity overflow` で panic する（本番経路 panic 禁止。
+        // `.claude/rules/coding-rust.md`）。`indices` は任意の
+        // `Sampler` 実装が返す信頼境界外の入力（A03/A04 対策）のため、
+        // これを実際に `Vec<usize>`（`usize::MAX` 要素）として実体化
+        // すると本テスト自体が OOM になる（`size_of::<Tensor<T>>()` は
+        // `usize` より大きく、確保前検査を経ない実測用の巨大 `Vec` は
+        // 検査対象の `Tensor<T>` 側よりさらに大きい実メモリを要求する
+        // ため）。よって `HookedBatches::next` が確保前検査に使う
+        // `checked_numel_for::<Tensor<T>>` を直接呼び出し、実アロケー
+        // ションを介さずに同じ入力（`indices.len() == usize::MAX`）で
+        // `panic` ではなく `Err(ShapeError::ElementCountOverflow)` を
+        // 返すことを検証する（本体コードとの乖離を防ぐため、本体側
+        //〈上記 `next()` 実装〉が使うのと同一の関数・同一の呼び出し
+        // 形〈`&[indices.len()]`〉で呼ぶ）。
+        let result = checked_numel_for::<Tensor<f32>>(&[usize::MAX]);
+        assert!(
+            matches!(result, Err(ShapeError::ElementCountOverflow)),
+            "capacity overflow は panic ではなく ElementCountOverflow を返すべき: {result:?}"
+        );
+        // `DataError` への変換（`next()` 内の `.into()`）も
+        // `DataError::Shape` に写ることを確認する。
+        let data_err: DataError = ShapeError::ElementCountOverflow.into();
+        assert!(matches!(
+            data_err,
+            DataError::Shape(ShapeError::ElementCountOverflow)
+        ));
     }
 
     /// `start_epoch` が常に失敗するカスタム [`Sampler`]。
