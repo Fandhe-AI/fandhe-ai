@@ -4692,6 +4692,116 @@ struct LrSchedulerExtHoldDoctestGuard;
 #[allow(dead_code)]
 struct LbfgsHoldDoctestGuard;
 
+/// イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）の
+/// facade 公開保留を固定する doctest 足場。`LbfgsHoldDoctestGuard`
+/// （#2198）と同型の、2 系統の否定ガードを 1 ブロックで兼ねる方式を
+/// 採る。
+///
+/// [`fandhe_ai_autodiff::nn::ExponentialMovingAverage`]（内部クレート
+/// 限定。`crates/autodiff/src/nn/ema.rs`。イシュー #2179）は facade
+/// （`fandhe_ai::optim` 等）から再エクスポートしておらず、`compat::
+/// FitConfig`（`fit(use_ema=true)` 相当のフィールド／メソッド追加）・
+/// `compat::Sequential`（EMA 適用・復元メソッド追加）への接続も未実装
+/// のまま保留する（`docs/autodiff-ema-decision.md` §4「承認事項」節。
+/// 親 #2131 の「facade 公開面拡張は設計判断記録 → 承認 → 実装の 2 段」
+/// 規則に基づく）。
+///
+/// 1. **型名の再エクスポート・独自宣言**（`OptimizerExtHoldDoctestGuard`
+///    と同じ glob 衝突方式）: facade の全 `pub mod` を glob import した
+///    スコープに、本ブロック内でのみ定義したローカル
+///    `__fandhe_ema_hold_probe::ExponentialMovingAverage` を導入し、
+///    それを引数に取る `__probe_type` 関数を書く。facade がどの経路
+///    でこの名前を公開しても、ローカル定義との glob 衝突（E0659 等）で
+///    コンパイルが失敗する。ソース走査ガードは `crates/facade/tests/
+///    api_surface.rs::facade_does_not_reexport_or_declare_ema_items`。
+/// 2. **`compat::FitConfig`／`compat::Sequential` への inherent メソッド
+///    追加**（`VarCustomHoldDoctestGuard`〈#2064〉と同じマーカー型
+///    トレイト方式）: ローカル `__FandheEmaHoldProbe` トレイト
+///    （`use_ema`／`ema_decay` という名前のメソッドを持つ）を両型へ
+///    実装し、メソッド形・型パス形の両方で呼び出す。facade がどちらか
+///    の型へ同名の inherent メソッドを追加すると、優先解決される
+///    inherent メソッドの戻り値の型がプローブの期待型と一致せず型
+///    不一致でコンパイルが失敗する（承認後の実際のメソッド名・シグ
+///    ネチャは `docs/autodiff-ema-decision.md` §5「承認後の facade
+///    仕様案」で未確定のため、本足場の `use_ema`／`ema_decay` は
+///    「これらの名前を持つ inherent メソッドが facade 型に生えたら
+///    検出する」という最小契約に留める）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// ema_hold_doctest_globs_all_pub_modules`・
+/// `ema_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_ema_items`）との多層防御の
+/// 位置づけは `docs/autodiff-ema-decision.md` §4 を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_ema_hold_probe {
+///     pub struct ExponentialMovingAverage;
+/// }
+/// use __fandhe_ema_hold_probe::*;
+///
+/// fn __probe_type(_: ExponentialMovingAverage) {}
+///
+/// struct __FandheEmaHoldMarker;
+///
+/// trait __FandheEmaHoldProbe {
+///     fn use_ema(&self) -> __FandheEmaHoldMarker;
+///     fn ema_decay(&self) -> __FandheEmaHoldMarker;
+/// }
+///
+/// impl __FandheEmaHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn use_ema(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+///     fn ema_decay(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+/// }
+///
+/// impl __FandheEmaHoldProbe for fandhe_ai::compat::Sequential {
+///     fn use_ema(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+///     fn ema_decay(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+/// }
+///
+/// fn __probe_fit_config(x: &fandhe_ai::compat::FitConfig) {
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::FitConfig::use_ema(x);
+///     let _: __FandheEmaHoldMarker = x.use_ema();
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::FitConfig::ema_decay(x);
+///     let _: __FandheEmaHoldMarker = x.ema_decay();
+/// }
+///
+/// fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::Sequential::use_ema(x);
+///     let _: __FandheEmaHoldMarker = x.use_ema();
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::Sequential::ema_decay(x);
+///     let _: __FandheEmaHoldMarker = x.ema_decay();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct EmaHoldDoctestGuard;
+
 /// イシュー #2169（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 /// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
 /// `OptimizerExtHoldDoctestGuard`（#2171）が型名の glob 衝突を使うのに
@@ -4779,3 +4889,273 @@ struct LbfgsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct CompileLossVariantsHoldDoctestGuard;
+
+/// イシュー #2178（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// `OptimizerExtHoldDoctestGuard`（#2171）と同型の「正のプローブ 1
+/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_callbacks_loggers_hold_probe::{CsvLogger, JsonLogger,
+/// CSVLogger, JSONLogger, LambdaCallback}` を導入し、5 個すべてと
+/// `&Callback` を引数に取る `__probe` 関数を書く。facade がどの経路
+/// （単一行・複数行・ネストした group での `pub use`・別名エクスポート・
+/// facade 独自の `struct`／`type` 宣言）でこれらの名前を公開しても、
+/// ローカル定義との glob 衝突（型名の場合。E0659 等）でコンパイルが
+/// 失敗する。`&Callback` を引数に含めることで `use fandhe_ai::compat::*;`
+/// の glob が効いていることも併せて確認する。
+///
+/// `CsvLogger`／`JsonLogger`／`LambdaCallback` は `compat::Callback`
+/// （`crates/facade/src/compat/callbacks.rs`。現行は `EarlyStopping`／
+/// `ModelCheckpoint`／`LrSchedule` の 3 variant のみ）へ追加する callback
+/// として設計記録済みだが、facade からの公開・`Callback` への variant
+/// 追加はいずれも未承認のため保留する。承認事項の位置づけ・完全な
+/// 公開 API 案は `docs/compat-callbacks-loggers-decision.md` §2・§3 を
+/// 参照。イシュー本文の表記 `CSVLogger`／`JSONLogger` も本プローブへ
+/// 含め、大文字表記での再エクスポート・独自宣言も検出できるようにする。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// callbacks_loggers_hold_doctest_globs_all_pub_modules`・
+/// `callbacks_loggers_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_callback_loggers`・
+/// `compat_callback_enum_variants_are_exactly_expected_while_2178_on_hold`）
+/// との多層防御の位置づけは decision doc §6 を参照。最後のテストは
+/// `Callback` enum の variant 集合そのものを直接走査する主防御であり、
+/// 型名の glob 衝突では検出できない enum variant 追加を検出する。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_callbacks_loggers_hold_probe {
+///     pub struct CsvLogger;
+///     pub struct JsonLogger;
+///     pub struct CSVLogger;
+///     pub struct JSONLogger;
+///     pub struct LambdaCallback;
+/// }
+/// use __fandhe_callbacks_loggers_hold_probe::*;
+///
+/// fn __probe(
+///     _: CsvLogger,
+///     _: JsonLogger,
+///     _: CSVLogger,
+///     _: JSONLogger,
+///     _: LambdaCallback,
+///     _: &Callback,
+/// ) {
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct CallbacksLoggersHoldDoctestGuard;
+
+/// イシュー #2177（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// `MhaOptionsHoldDoctestGuard`（#2163）と同型の「正のプローブ 1
+/// ブロック方式」を採る。
+///
+/// 候補の公開面は 2 種に分かれる: (a) まだ存在しない新規型 `FitWeights`
+/// （型名の glob 衝突プローブ）、(b) 既存の公開型 `fandhe_ai::compat::
+/// {FitConfig, Sequential}` へのメソッド追加（トレイトプローブ）。
+///
+/// (a) `__fandhe_fit_weighting_hold_probe::FitWeights` をローカル
+/// 宣言する。facade が同名の型を `pub use`／`pub struct`／`pub type` の
+/// いずれで公開しても、`use fandhe_ai::compat::*;` の glob が同名を
+/// 持ち込み、ローカル定義との衝突（E0659）でコンパイルが失敗する
+/// （`CsvLogger` 等〈`CallbacksLoggersHoldDoctestGuard`〉と同方式）。
+///
+/// (b) `validation_split`／`class_weight`／`sample_weight` を
+/// `fandhe_ai::compat::FitConfig` へ、`fit_with_weights`／
+/// `fit_weighted` を `fandhe_ai::compat::Sequential` へ実装する
+/// `__FandheFitWeightHoldProbe` トレイトの衝突プローブ（`
+/// __FandheMhaOptionsAddProbe` と同方式）。`class_weight`／
+/// `sample_weight` を `FitConfig` 側のプローブに含めるのは、受入基準の
+/// 字面（`FitConfig` へ直接フィールド追加）どおりに実装すると
+/// `#[derive(Copy, Eq)]`（`crates/facade/src/compat/training.rs:175`）
+/// と衝突し 0.9.0 非破壊契約に反するため、その禁止された実装経路
+/// 自体も検出対象に含める設計判断による（`docs/compat-fit-sample-
+/// weighting-decision.md` §2）。**UFCS 形のみ**（`fandhe_ai::compat::
+/// FitConfig::validation_split(cfg)` 等）で呼ぶ（`FitConfig` の
+/// ビルダーは値で `self` を取る inherent メソッド、`Sequential::fit*`
+/// は `&mut self` を取る inherent メソッドのため、メソッド呼び出し形
+/// だと inherent 側が優先解決され衝突を検出できない——
+/// `MhaOptionsHoldDoctestGuard` doc の同一理由）。本プローブの
+/// トレイトメソッドはいずれも引数なし `&self` のみを取るため、facade
+/// 側に実引数を要求する本物の実装が追加されれば UFCS 呼び出しの引数
+/// 個数・型が一致せずコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// fit_weighting_hold_doctest_globs_all_pub_modules`・
+/// `fit_weighting_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_fit_weighting_items`・
+/// `fit_config_keeps_copy_eq_for_0_9_0_compat`）との多層防御の位置
+/// づけは `docs/compat-fit-sample-weighting-decision.md` §7 を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_fit_weighting_hold_probe {
+///     pub struct FitWeights;
+/// }
+/// use __fandhe_fit_weighting_hold_probe::*;
+///
+/// struct __FandheFitWeightHoldMarker;
+///
+/// trait __FandheFitWeightHoldProbe {
+///     fn validation_split(&self) -> __FandheFitWeightHoldMarker;
+///     fn class_weight(&self) -> __FandheFitWeightHoldMarker;
+///     fn sample_weight(&self) -> __FandheFitWeightHoldMarker;
+///     fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker;
+///     fn fit_weighted(&self) -> __FandheFitWeightHoldMarker;
+/// }
+///
+/// impl __FandheFitWeightHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn validation_split(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn class_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn sample_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+/// }
+///
+/// impl __FandheFitWeightHoldProbe for fandhe_ai::compat::Sequential {
+///     fn validation_split(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn class_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn sample_weight(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+///     fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {
+///         __FandheFitWeightHoldMarker
+///     }
+/// }
+///
+/// fn __probe(_: FitWeights, cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::FitConfig::validation_split(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::FitConfig::class_weight(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::FitConfig::sample_weight(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::Sequential::fit_with_weights(seq);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::Sequential::fit_weighted(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct FitWeightingHoldDoctestGuard;
+
+/// イシュー #2180（親 #2131）の facade 公開保留を固定する doctest
+/// 足場。`FitWeightingHoldDoctestGuard` と同型の「正のプローブ 1 ブロック
+/// 方式」を採る: facade の全 `pub mod` を glob import したスコープに、
+/// 本ブロック内でのみ定義したローカル `__FandheGradAccumHoldProbe` を
+/// `fandhe_ai::compat::FitConfig` へ実装し、`accumulate_steps(self, n:
+/// u32) -> __FandheGradAccumHoldMarker` を呼ぶ。facade が `FitConfig`
+/// へ公開ビルダー `accumulate_steps`（どの引数・戻り値型であっても、
+/// 常にトレイトより inherent メソッドが優先される Rust の
+/// メソッド解決規則により）を追加すると、そちらが呼び出しを奪って
+/// `__FandheGradAccumHoldMarker` 型と一致せずコンパイルが失敗する。
+///
+/// 累積ロジック本体（`FitConfig.accumulate_steps` フィールド・
+/// `Sequential::run_fit` の窓処理）は実装済みで、保留対象は公開
+/// ビルダー 1 件のみ（`crates/facade/src/compat/training.rs::
+/// FitConfig` の型ドキュメント「勾配累積のウィンドウ幅」節参照）。
+/// テストからは `#[cfg(test)] pub(crate) fn
+/// FitConfig::with_accumulate_steps_for_test` 経由でのみ変更できる
+/// （命名を意図的に違え、下記ソース走査ガードとの衝突を避けている）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// grad_accumulation_hold_doctest_globs_all_pub_modules`・
+/// `grad_accumulation_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_declare_fit_config_accumulate_steps`）との多層防御
+/// の位置づけ・承認未取得の経緯は
+/// `docs/compat-grad-accumulation-decision.md` §5「承認事項」節を参照。
+///
+/// 承認（`FitConfig::accumulate_steps` 公開ビルダーの新設）を得た日が
+/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// struct __FandheGradAccumHoldMarker;
+///
+/// trait __FandheGradAccumHoldProbe {
+///     fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker;
+/// }
+///
+/// impl __FandheGradAccumHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker {
+///         let _ = n;
+///         __FandheGradAccumHoldMarker
+///     }
+/// }
+///
+/// fn __probe(cfg: fandhe_ai::compat::FitConfig) {
+///     let _: __FandheGradAccumHoldMarker =
+///         fandhe_ai::compat::FitConfig::accumulate_steps(cfg, 2);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct GradAccumulationHoldDoctestGuard;

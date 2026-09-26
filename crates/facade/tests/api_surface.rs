@@ -13100,6 +13100,274 @@ fn scan_optimizer_enum_variants_for_lbfgs_detects_each_category() {
 }
 
 // =====================================================================
+// イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）: EMA
+// （`ExponentialMovingAverage`）の facade 公開・`FitConfig`／
+// `Sequential` 接続の保留を検査するテスト群。`EmaHoldDoctestGuard`
+// （`src/lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査に加え、
+// facade src 全体への非再エクスポート・非独自宣言（型名）・非
+// inherent メソッド追加（`use_ema`／`ema_decay`）を固定する。承認事項
+// の位置づけは `docs/autodiff-ema-decision.md` §4 を参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `EmaHoldDoctestGuard` doc 内の唯一の
+/// doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`lbfgs_hold_doctest_globs_all_pub_modules` の `EmaHoldDoctestGuard`
+/// 版）。
+#[test]
+fn ema_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "EmaHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "EmaHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
+         いる（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`ema_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの**glob
+/// 以外の本文**（`__fandhe_ema_hold_probe` モジュール・`__probe_type`
+/// 関数・`__FandheEmaHoldProbe` トレイト・`FitConfig`／`Sequential`
+/// への実装・`__probe_fit_config`／`__probe_sequential` 関数）が固定
+/// 文言 [`EMA_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致することを
+/// 固定する（rustdoc の `# ` 隠し行・プローブの削除・別名への
+/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否
+/// する）。
+#[test]
+fn ema_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "EmaHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, EMA_HOLD_PROBE_BODY,
+        "EmaHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 EMA_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（型名 glob 衝突・inherent メソッド衝突の両方）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`ema_hold_doctest_probe_body_matches_fixed_contract`] が要求する
+/// 固定文言。`crates/facade/src/lib.rs` の `EmaHoldDoctestGuard` doc
+/// 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行
+/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
+/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
+const EMA_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_ema_hold_probe {\n\
+\x20\x20\x20\x20pub struct ExponentialMovingAverage;\n\
+}\n\
+use __fandhe_ema_hold_probe::*;\n\
+\n\
+fn __probe_type(_: ExponentialMovingAverage) {}\n\
+\n\
+struct __FandheEmaHoldMarker;\n\
+\n\
+trait __FandheEmaHoldProbe {\n\
+\x20\x20\x20\x20fn use_ema(&self) -> __FandheEmaHoldMarker;\n\
+\x20\x20\x20\x20fn ema_decay(&self) -> __FandheEmaHoldMarker;\n\
+}\n\
+\n\
+impl __FandheEmaHoldProbe for fandhe_ai::compat::FitConfig {\n\
+\x20\x20\x20\x20fn use_ema(&self) -> __FandheEmaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheEmaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn ema_decay(&self) -> __FandheEmaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheEmaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheEmaHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn use_ema(&self) -> __FandheEmaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheEmaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn ema_decay(&self) -> __FandheEmaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheEmaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_fit_config(x: &fandhe_ai::compat::FitConfig) {\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = fandhe_ai::compat::FitConfig::use_ema(x);\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = x.use_ema();\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = fandhe_ai::compat::FitConfig::ema_decay(x);\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = x.ema_decay();\n\
+}\n\
+\n\
+fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = fandhe_ai::compat::Sequential::use_ema(x);\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = x.use_ema();\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = fandhe_ai::compat::Sequential::ema_decay(x);\n\
+\x20\x20\x20\x20let _: __FandheEmaHoldMarker = x.ema_decay();\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_ema_items`]・その自己テストが
+/// 共用する検出本体。facade src 全体（`crates/facade/src/**`）の
+/// `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
+/// `ExponentialMovingAverage` を検出し（単一行・複数行・ネストした
+/// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
+/// 独自宣言を違反として返す（`scan_lbfgs_reexports_and_declarations`
+/// と同型）。加えて `EmaHoldDoctestGuard` のプローブ 2「inherent
+/// メソッド追加」に対応するソース走査として、`fn use_ema`／
+/// `fn ema_decay` 宣言（可視性・宣言文脈を問わない）も違反として返す
+/// （`facade_source_declares_no_custom_fn_in_any_context` と同型の
+/// 「定義元そのものを許さない」多層防御）。
+fn scan_ema_reexports_and_declarations(content: &str) -> Vec<String> {
+    const TYPE_NAMES: [&str; 1] = ["ExponentialMovingAverage"];
+    const METHOD_NAMES: [&str; 2] = ["use_ema", "ema_decay"];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens
+                .get(i + 1)
+                .map(|t| TYPE_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        if tokens[i] == "fn"
+            && tokens
+                .get(i + 1)
+                .map(|t| METHOD_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "fn {} 宣言",
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`ExponentialMovingAverage`
+/// を識別子単位で含む `pub use`（複数行・ネストした group・別名含む）
+/// も、facade 独自の `trait`／`struct`／`enum`／`type` 宣言も、
+/// `use_ema`／`ema_decay` という名前の `fn` 宣言（可視性・宣言文脈を
+/// 問わない）も存在しないことを固定する（`EmaHoldDoctestGuard` の
+/// 正のプローブと多層防御を成す最内層のソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_ema_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_ema_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が EMA（イシュー #2179。ExponentialMovingAverage／\
+         use_ema／ema_decay）を再エクスポート、または独自宣言している\
+         （`docs/autodiff-ema-decision.md` §4 承認事項が未取得のまま\
+         対象外としている設計判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_ema_reexports_and_declarations`]（[`facade_does_not_reexport_
+/// or_declare_ema_items`]）の自己テスト（正例・負例の合成入力）。
+#[test]
+fn facade_does_not_reexport_or_declare_ema_items_detects_each_category() {
+    // 正例: 単一行 pub use。
+    assert!(
+        !scan_ema_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::nn::ExponentialMovingAverage;"
+        )
+        .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_ema_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::nn::{\n    ExponentialMovingAverage,\n    Linear,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_ema_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::nn::ExponentialMovingAverage as Ema;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(
+        !scan_ema_reexports_and_declarations("pub struct ExponentialMovingAverage;").is_empty()
+    );
+    // 正例: inherent メソッド追加（fn use_ema）。
+    assert!(
+        !scan_ema_reexports_and_declarations(
+            "impl FitConfig {\n    pub fn use_ema(mut self, on: bool) -> Self {\n        self\n    }\n}"
+        )
+        .is_empty()
+    );
+    // 正例: inherent メソッド追加（fn ema_decay）。
+    assert!(
+        !scan_ema_reexports_and_declarations(
+            "impl FitConfig {\n    pub fn ema_decay(mut self, decay: f32) -> Self {\n        self\n    }\n}"
+        )
+        .is_empty()
+    );
+    // 負例: コメント中の出現。
+    assert!(
+        scan_ema_reexports_and_declarations("// pub use ...::ExponentialMovingAverage;").is_empty()
+    );
+    // 負例: 文字列リテラル中の出現。
+    assert!(
+        scan_ema_reexports_and_declarations("let s = \"ExponentialMovingAverage\";").is_empty()
+    );
+    // 負例: 非公開 use。
+    assert!(
+        scan_ema_reexports_and_declarations(
+            "use fandhe_ai_autodiff::nn::ExponentialMovingAverage;"
+        )
+        .is_empty()
+    );
+    // 負例: 無関係な pub use。
+    assert!(
+        scan_ema_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::AdamW;").is_empty()
+    );
+    // 負例: 無関係な fn 宣言。
+    assert!(scan_ema_reexports_and_declarations("pub fn use_dropout(&self) {}").is_empty());
+}
+
+// =====================================================================
 // LrSchedulerExtHoldDoctestGuard（イシュー #2176。親 #2131）の否定ガード
 // =====================================================================
 // `OptimizerExtHoldDoctestGuard`（#2171）と同型の 4 テスト構成。
@@ -13570,5 +13838,686 @@ fn collect_top_level_enum_variant_idents_detects_each_category() {
     assert_eq!(
         collect_top_level_enum_variant_idents(&tokens_no_trailing, 4),
         vec!["Mse".to_string(), "CrossEntropy".to_string()]
+    );
+}
+
+// =====================================================================
+// イシュー #2178（親 #2131）: callbacks（CsvLogger・JsonLogger・
+// LambdaCallback）の facade 公開保留を検査するテスト群。
+// `CallbacksLoggersHoldDoctestGuard`（`src/lib.rs`）の正のプローブの
+// ドリフト検査に加え、facade の再エクスポート・独自宣言の不在と
+// `compat::Callback` enum の variant 集合を固定する。承認事項の
+// 位置づけは `docs/compat-callbacks-loggers-decision.md` §2・§6 を参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `CallbacksLoggersHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// `CallbacksLoggersHoldDoctestGuard` 版）。
+#[test]
+fn callbacks_loggers_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "CallbacksLoggersHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "CallbacksLoggersHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`callbacks_loggers_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの**glob 以外の本文**（`__fandhe_callbacks_loggers_hold_probe`
+/// モジュール・`__probe` 関数）が固定文言
+/// [`CALLBACKS_LOGGERS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致する
+/// ことを固定する（rustdoc の `# ` 隠し行・プローブの削除・別名への
+/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn callbacks_loggers_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "CallbacksLoggersHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, CALLBACKS_LOGGERS_HOLD_PROBE_BODY,
+        "CallbacksLoggersHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 CALLBACKS_LOGGERS_HOLD_PROBE_BODY からドリフト\
+         している。正のプローブ（__fandhe_callbacks_loggers_hold_probe\
+         モジュール・__probe 関数）の削除・弱体化・隠し行の混入がないか\
+         確認すること。\n--- actual ---\n{actual}"
+    );
+}
+
+/// [`callbacks_loggers_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `CallbacksLoggersHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
+/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート
+/// 自体の `use fandhe_ai::*;` は本文に含む）。
+const CALLBACKS_LOGGERS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_callbacks_loggers_hold_probe {\n\
+\x20\x20\x20\x20pub struct CsvLogger;\n\
+\x20\x20\x20\x20pub struct JsonLogger;\n\
+\x20\x20\x20\x20pub struct CSVLogger;\n\
+\x20\x20\x20\x20pub struct JSONLogger;\n\
+\x20\x20\x20\x20pub struct LambdaCallback;\n\
+}\n\
+use __fandhe_callbacks_loggers_hold_probe::*;\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20_: CsvLogger,\n\
+\x20\x20\x20\x20_: JsonLogger,\n\
+\x20\x20\x20\x20_: CSVLogger,\n\
+\x20\x20\x20\x20_: JSONLogger,\n\
+\x20\x20\x20\x20_: LambdaCallback,\n\
+\x20\x20\x20\x20_: &Callback,\n\
+) {\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_callback_loggers`]・その
+/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/
+/// src/**`）の `pub use` から [`collect_pub_use_leaves`] で別名にする
+/// 前の葉を集め `CsvLogger`／`JsonLogger`／`CSVLogger`／`JSONLogger`／
+/// `LambdaCallback` を検出し（単一行・複数行・ネストした group・別名も
+/// 検出）、`trait`／`struct`／`enum`／`type` 直後の同名独自宣言、
+/// および `on_epoch_end` の `fn` 宣言を違反として返す
+/// （`scan_optimizer_ext_reexports_and_declarations` と同型。
+/// `LambdaCallback::on_epoch_end` はコンストラクタ用の関連関数のため
+/// `fn` 宣言の検出を追加する点が `scan_optimizer_ext_*` との差分）。
+fn scan_callback_loggers_reexports_and_declarations(content: &str) -> Vec<String> {
+    const TYPE_NAMES: [&str; 5] = [
+        "CsvLogger",
+        "JsonLogger",
+        "CSVLogger",
+        "JSONLogger",
+        "LambdaCallback",
+    ];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens
+                .get(i + 1)
+                .map(|t| TYPE_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    offending.extend(
+        (0..count_fn_declarations_by_name(&tokens, "on_epoch_end"))
+            .map(|_| "fn on_epoch_end 宣言".to_string()),
+    );
+
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、CsvLogger／JsonLogger／
+/// CSVLogger／JSONLogger／LambdaCallback（5 個の型名）を識別子単位で
+/// 含む `pub use`（複数行・ネストした group・別名含む）も、facade 独自の
+/// `trait`／`struct`／`enum`／`type` 宣言も、`on_epoch_end` の `fn`
+/// 宣言も存在しないことを固定する（`CallbacksLoggersHoldDoctestGuard`
+/// の正のプローブと多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_optimizer_ext_items` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_callback_loggers() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_callback_loggers_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が callbacks ロガー拡張（#2178。CsvLogger／\
+         JsonLogger／CSVLogger／JSONLogger／LambdaCallback）を再エクス\
+         ポート、または独自宣言している（`docs/compat-callbacks-loggers-\
+         decision.md` §2 承認事項が未取得のまま対象外としている設計\
+         判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_callback_loggers_reexports_and_declarations`]（[`facade_does_
+/// not_reexport_or_declare_callback_loggers`]）の自己テスト（正例・負例
+/// の合成入力）。
+#[test]
+fn facade_does_not_reexport_or_declare_callback_loggers_detects_each_category() {
+    // 正例: 単一行 pub use。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::CsvLogger;"
+        )
+        .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::{\n    JsonLogger,\n    LambdaCallback,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::CSVLogger as Foo;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(!scan_callback_loggers_reexports_and_declarations("pub struct JSONLogger;").is_empty());
+    // 正例: on_epoch_end の fn 宣言。
+    assert!(
+        !scan_callback_loggers_reexports_and_declarations(
+            "impl LambdaCallback { pub fn on_epoch_end() {} }"
+        )
+        .is_empty()
+    );
+    // 負例: コメント中の出現。
+    assert!(
+        scan_callback_loggers_reexports_and_declarations("// pub use ...::CsvLogger;").is_empty()
+    );
+    // 負例: 無関係な型・関数名。
+    assert!(
+        scan_callback_loggers_reexports_and_declarations(
+            "pub struct EarlyStopping; impl EarlyStopping { pub fn new() {} }"
+        )
+        .is_empty()
+    );
+}
+
+/// glob 衝突では enum variant の追加を検出できないため、`compat::
+/// Callback` enum（`crates/facade/src/compat/callbacks.rs`。現行は
+/// `EarlyStopping`／`ModelCheckpoint`／`LrSchedule` の 3 variant のみ）
+/// が、承認なしに `CsvLogger`／`JsonLogger`／`Lambda` 等の variant を
+/// 増やされていないことを固定する（`compat_loss_enum_variants_are_
+/// exactly_mse_and_cross_entropy` の `Callback` 版。イシュー #2178・
+/// `docs/compat-callbacks-loggers-decision.md` §6）。
+#[test]
+fn compat_callback_enum_variants_are_exactly_expected_while_2178_on_hold() {
+    let path = facade_crate_root().join("src/compat/callbacks.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+
+    // "pub" "enum" "Callback" "{" の完全一致列を数える（0 件・2 件以上は
+    // fail-closed で失敗させる: enum の削除・複数定義・別名への変更を
+    // 見逃さない）。
+    let mut match_starts: Vec<usize> = Vec::new();
+    for i in 0..tokens.len() {
+        if tokens.get(i).map(String::as_str) == Some("pub")
+            && tokens.get(i + 1).map(String::as_str) == Some("enum")
+            && tokens.get(i + 2).map(String::as_str) == Some("Callback")
+            && tokens.get(i + 3).map(String::as_str) == Some("{")
+        {
+            match_starts.push(i + 4);
+        }
+    }
+    assert_eq!(
+        match_starts.len(),
+        1,
+        "callbacks.rs 内の `pub enum Callback {{` 宣言がちょうど 1 件では\
+         ない（0 件: enum が削除・改名された。2 件以上: 重複定義。いずれも\
+         本テストが検査対象を見失っている）: {} 件",
+        match_starts.len()
+    );
+
+    let variants = collect_top_level_enum_variant_idents(&tokens, match_starts[0]);
+    assert_eq!(
+        variants,
+        vec![
+            "EarlyStopping".to_string(),
+            "ModelCheckpoint".to_string(),
+            "LrSchedule".to_string(),
+        ],
+        "compat::Callback の variant 集合が [\"EarlyStopping\",\
+         \"ModelCheckpoint\", \"LrSchedule\"] からドリフトしている\
+         （未承認のまま variant が追加された可能性。`docs/compat-\
+         callbacks-loggers-decision.md` §2 の承認事項参照）: {variants:?}"
+    );
+}
+
+// #2177（親 #2131）の facade 公開保留固定（`FitWeightingHoldDoctestGuard`）。
+// `CallbacksLoggersHoldDoctestGuard`（#2178）と同型の 4 テスト構成。
+
+/// `crates/facade/src/lib.rs` の `FitWeightingHoldDoctestGuard` doc 内の
+/// doctest が glob import する `pub mod` 集合が、`src/lib.rs` の実際の
+/// `pub mod` 宣言集合と一致することを固定する（`callbacks_loggers_hold_
+/// doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn fit_weighting_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "FitWeightingHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "FitWeightingHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`fit_weighting_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`FIT_WEIGHTING_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
+/// する改変を機械的に拒否する）。
+#[test]
+fn fit_weighting_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "FitWeightingHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, FIT_WEIGHTING_HOLD_PROBE_BODY,
+        "FitWeightingHoldDoctestGuard の doctest ブロック本文（glob 以外）\
+         が固定文言 FIT_WEIGHTING_HOLD_PROBE_BODY からドリフトしている。\
+         正のプローブ（__fandhe_fit_weighting_hold_probe モジュール・\
+         __FandheFitWeightHoldProbe トレイト・__probe 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。\n--- actual ---\n{actual}"
+    );
+}
+
+/// [`fit_weighting_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `FitWeightingHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体
+/// の `use fandhe_ai::*;` は本文に含む）。
+const FIT_WEIGHTING_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_fit_weighting_hold_probe {\n\
+\x20\x20\x20\x20pub struct FitWeights;\n\
+}\n\
+use __fandhe_fit_weighting_hold_probe::*;\n\
+\n\
+struct __FandheFitWeightHoldMarker;\n\
+\n\
+trait __FandheFitWeightHoldProbe {\n\
+\x20\x20\x20\x20fn validation_split(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn class_weight(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn sample_weight(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker;\n\
+\x20\x20\x20\x20fn fit_weighted(&self) -> __FandheFitWeightHoldMarker;\n\
+}\n\
+\n\
+impl __FandheFitWeightHoldProbe for fandhe_ai::compat::FitConfig {\n\
+\x20\x20\x20\x20fn validation_split(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn class_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn sample_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheFitWeightHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn validation_split(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn class_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn sample_weight(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_with_weights(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn fit_weighted(&self) -> __FandheFitWeightHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFitWeightHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(_: FitWeights, cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::validation_split(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::class_weight(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::sample_weight(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::fit_with_weights(seq);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::fit_weighted(seq);\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_fit_weighting_items`]・その
+/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/
+/// src/**`）の `pub use` から [`collect_pub_use_leaves`] で別名にする
+/// 前の葉を集め `FitWeights` を検出し（単一行・複数行・ネストした
+/// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
+/// 独自宣言、および `validation_split`／`class_weight`／
+/// `sample_weight`／`fit_with_weights`／`fit_weighted` の `fn` 宣言を
+/// 違反として返す（`scan_callback_loggers_reexports_and_declarations`
+/// と同型。`class_weight`／`sample_weight` を候補名に含めるのは、
+/// 受入基準の字面〈`FitConfig` へ直接フィールド追加〉どおりの禁止された
+/// 実装経路自体も検出対象に含めるため。`crates/autodiff/src/loss_ops.rs`
+/// 等の内部クレート側の既存 `class_weight` 言及は走査対象外〈facade の
+/// `src` のみを走査するため〉）。
+fn scan_fit_weighting_reexports_and_declarations(content: &str) -> Vec<String> {
+    const TYPE_NAMES: [&str; 1] = ["FitWeights"];
+    const FN_NAMES: [&str; 5] = [
+        "validation_split",
+        "class_weight",
+        "sample_weight",
+        "fit_with_weights",
+        "fit_weighted",
+    ];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens
+                .get(i + 1)
+                .map(|t| TYPE_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    for name in FN_NAMES {
+        offending.extend(
+            (0..count_fn_declarations_by_name(&tokens, name)).map(|_| format!("fn {name} 宣言")),
+        );
+    }
+
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`FitWeights`（型名）を
+/// 識別子単位で含む `pub use`（複数行・ネストした group・別名含む）も、
+/// facade 独自の `trait`／`struct`／`enum`／`type` 宣言も、
+/// `validation_split`／`class_weight`／`sample_weight`／
+/// `fit_with_weights`／`fit_weighted` の `fn` 宣言も存在しないことを
+/// 固定する（`FitWeightingHoldDoctestGuard` の正のプローブと多層防御を
+/// 成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_callback_loggers` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_fit_weighting_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_fit_weighting_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が fit() の重み付け拡張（#2177。FitWeights／\
+         validation_split／class_weight／sample_weight／\
+         fit_with_weights／fit_weighted）を再エクスポート、または\
+         独自宣言している（`docs/compat-fit-sample-weighting-decision.md`\
+         §2 承認事項が未取得のまま対象外としている設計判断に違反）: \
+         {offending:?}"
+    );
+}
+
+/// [`scan_fit_weighting_reexports_and_declarations`]（[`facade_does_not_
+/// reexport_or_declare_fit_weighting_items`]）の自己テスト（正例・負例
+/// の合成入力）。
+#[test]
+fn facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category() {
+    // 正例: 単一行 pub use（新規型）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::FitWeights;"
+        )
+        .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::{\n    FitConfig,\n    FitWeights,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::FitWeights as Foo;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(!scan_fit_weighting_reexports_and_declarations("pub struct FitWeights;").is_empty());
+    // 正例: validation_split の fn 宣言（ビルダー）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "impl FitConfig { pub fn validation_split(self, f: f32) -> Self { self } }"
+        )
+        .is_empty()
+    );
+    // 正例: 受入基準の字面どおりの禁止経路（FitConfig への class_weight
+    // フィールド追加想定の fn 宣言）。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "impl FitConfig { pub fn class_weight(self, w: HashMap<u32, f32>) -> Self { self } }"
+        )
+        .is_empty()
+    );
+    // 正例: fit_with_weights の fn 宣言。
+    assert!(
+        !scan_fit_weighting_reexports_and_declarations(
+            "impl Sequential { pub fn fit_with_weights(&mut self) {} }"
+        )
+        .is_empty()
+    );
+    // 負例: コメント中の出現。
+    assert!(
+        scan_fit_weighting_reexports_and_declarations("// pub use ...::FitWeights;").is_empty()
+    );
+    // 負例: 無関係な型・関数名。
+    assert!(
+        scan_fit_weighting_reexports_and_declarations(
+            "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
+        )
+        .is_empty()
+    );
+}
+
+/// `FitConfig` が `#[derive(Debug, Clone, Copy, PartialEq, Eq)]` を
+/// 維持していることを固定する（`crates/facade/src/compat/training.rs:
+/// 175`）。受入基準の字面（`HashMap<u32, f32>` の class_weight・
+/// `&[f32]` の sample_weight を直接フィールド追加）どおりに実装すると
+/// `Copy`（`HashMap` 保持）・`Eq`（`f32` 保持）のいずれかが外れ、
+/// crates.io 出荷済み `fandhe-ai =0.9.0` の公開 API 非破壊契約に反する
+/// （`docs/compat-fit-sample-weighting-decision.md` §2）。本テストは
+/// その非破壊契約（derive 維持）を正のガードとして直接固定する。
+#[test]
+fn fit_config_keeps_copy_eq_for_0_9_0_compat() {
+    fn assert_copy_eq<T: Copy + Eq>() {}
+    assert_copy_eq::<fandhe_ai::compat::FitConfig>();
+}
+
+// =====================================================================
+// #2180（親 #2131）の facade 公開保留固定
+// （`GradAccumulationHoldDoctestGuard`）。累積ロジック本体（`FitConfig.
+// accumulate_steps` フィールド・`Sequential::run_fit` の窓処理）は実装
+// 済みで、保留対象は公開ビルダー `FitConfig::accumulate_steps` の 1 件
+// のみ。`ParamGroupsHoldDoctestGuard`（#2173）と同型の 3 テスト構成
+// （型を伴わないため `pub use` 型名走査は不要で `facade_does_not_
+// reexport_or_declare_param_groups` より単純）。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `GradAccumulationHoldDoctestGuard` doc
+/// 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合
+/// と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
+#[test]
+fn grad_accumulation_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "GradAccumulationHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "GradAccumulationHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`grad_accumulation_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest ブロック
+/// の**glob 以外の本文**が固定文言 [`GRAD_ACCUMULATION_HOLD_PROBE_BODY`]
+/// と 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きにする
+/// 改変を機械的に拒否する）。
+#[test]
+fn grad_accumulation_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "GradAccumulationHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, GRAD_ACCUMULATION_HOLD_PROBE_BODY,
+        "GradAccumulationHoldDoctestGuard の doctest ブロック本文（glob 以外）\
+         が固定文言 GRAD_ACCUMULATION_HOLD_PROBE_BODY からドリフトしている。\
+         正のプローブ（__FandheGradAccumHoldProbe トレイト・__probe 関数）\
+         の削除・弱体化・隠し行の混入がないか確認すること。\n\
+         --- actual ---\n{actual}"
+    );
+}
+
+/// [`grad_accumulation_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `GradAccumulationHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const GRAD_ACCUMULATION_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+struct __FandheGradAccumHoldMarker;\n\
+\n\
+trait __FandheGradAccumHoldProbe {\n\
+\x20\x20\x20\x20fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker;\n\
+}\n\
+\n\
+impl __FandheGradAccumHoldProbe for fandhe_ai::compat::FitConfig {\n\
+\x20\x20\x20\x20fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20let _ = n;\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheGradAccumHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(cfg: fandhe_ai::compat::FitConfig) {\n\
+\x20\x20\x20\x20let _: __FandheGradAccumHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::accumulate_steps(cfg, 2);\n\
+}";
+
+/// facade src 全体（`crates/facade/src/**`）に `fn accumulate_steps`
+/// の宣言（可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`]
+/// と同じ検出契約）が存在しないことを固定する
+/// （`GradAccumulationHoldDoctestGuard` の正のプローブと多層防御を成す
+/// 最内層のソース走査ガード）。テスト専用セッター
+/// `FitConfig::with_accumulate_steps_for_test`（`crates/facade/src/
+/// compat/training.rs`）はこの名前とは異なる別名のため検出対象に
+/// 含まれない（意図的な命名回避。同ファイルの doc 参照）。
+#[test]
+fn facade_does_not_declare_fit_config_accumulate_steps() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let count = count_fn_declarations_by_name(&tokens, "accumulate_steps");
+        for _ in 0..count {
+            offending.push(format!("{}: fn accumulate_steps 宣言", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が `accumulate_steps` という名前の fn を宣言している\
+         （イシュー #2180。`FitConfig::accumulate_steps` 公開ビルダーは\
+         承認待ちのため未実装のはず。`docs/compat-grad-accumulation-\
+         decision.md` §5 参照）: {offending:?}"
     );
 }

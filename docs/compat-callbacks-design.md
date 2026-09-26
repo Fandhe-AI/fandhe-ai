@@ -388,6 +388,13 @@ facade 経由到達性を固定した。`fandhe_ai::optim`（`optim.rs`）は純
 
 ## 8. 対象外・切り出し候補
 
+- CSV／JSON ロガー（`CsvLogger`／`JsonLogger`）・`LambdaCallback`
+  （`on_epoch_end` ラムダ。ユーザー定義 callback とは異なり `&mut
+  Sequential` ではなく `&History` のみを渡す限定形）は #2178（親
+  #2131）で設計記録済み（`docs/compat-callbacks-loggers-decision.md`）
+  だが、facade 公開（`Callback` への 3 variant 追加を含む）は未承認
+  のため保留固定のみ実施した。下記「ユーザー定義 callback」とは
+  `&mut Sequential` を渡すか否かで区別される別項目である
 - ユーザー定義 callback（trait object による拡張点）
 - `ModelCheckpoint::restore_best_weights` 相当のビルダー・safetensors
   metadata（best 値・epoch）の埋め込み（`ModelCheckpoint` のファイル
