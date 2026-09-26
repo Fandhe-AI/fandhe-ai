@@ -14114,3 +14114,115 @@ fn fit_config_keeps_copy_eq_for_0_9_0_compat() {
     fn assert_copy_eq<T: Copy + Eq>() {}
     assert_copy_eq::<fandhe_ai::compat::FitConfig>();
 }
+
+// =====================================================================
+// #2180（親 #2131）の facade 公開保留固定
+// （`GradAccumulationHoldDoctestGuard`）。累積ロジック本体（`FitConfig.
+// accumulate_steps` フィールド・`Sequential::run_fit` の窓処理）は実装
+// 済みで、保留対象は公開ビルダー `FitConfig::accumulate_steps` の 1 件
+// のみ。`ParamGroupsHoldDoctestGuard`（#2173）と同型の 3 テスト構成
+// （型を伴わないため `pub use` 型名走査は不要で `facade_does_not_
+// reexport_or_declare_param_groups` より単純）。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `GradAccumulationHoldDoctestGuard` doc
+/// 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合
+/// と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
+#[test]
+fn grad_accumulation_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "GradAccumulationHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "GradAccumulationHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`grad_accumulation_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest ブロック
+/// の**glob 以外の本文**が固定文言 [`GRAD_ACCUMULATION_HOLD_PROBE_BODY`]
+/// と 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きにする
+/// 改変を機械的に拒否する）。
+#[test]
+fn grad_accumulation_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "GradAccumulationHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, GRAD_ACCUMULATION_HOLD_PROBE_BODY,
+        "GradAccumulationHoldDoctestGuard の doctest ブロック本文（glob 以外）\
+         が固定文言 GRAD_ACCUMULATION_HOLD_PROBE_BODY からドリフトしている。\
+         正のプローブ（__FandheGradAccumHoldProbe トレイト・__probe 関数）\
+         の削除・弱体化・隠し行の混入がないか確認すること。\n\
+         --- actual ---\n{actual}"
+    );
+}
+
+/// [`grad_accumulation_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `GradAccumulationHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const GRAD_ACCUMULATION_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+struct __FandheGradAccumHoldMarker;\n\
+\n\
+trait __FandheGradAccumHoldProbe {\n\
+\x20\x20\x20\x20fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker;\n\
+}\n\
+\n\
+impl __FandheGradAccumHoldProbe for fandhe_ai::compat::FitConfig {\n\
+\x20\x20\x20\x20fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20let _ = n;\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheGradAccumHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(cfg: fandhe_ai::compat::FitConfig) {\n\
+\x20\x20\x20\x20let _: __FandheGradAccumHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::accumulate_steps(cfg, 2);\n\
+}";
+
+/// facade src 全体（`crates/facade/src/**`）に `fn accumulate_steps`
+/// の宣言（可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`]
+/// と同じ検出契約）が存在しないことを固定する
+/// （`GradAccumulationHoldDoctestGuard` の正のプローブと多層防御を成す
+/// 最内層のソース走査ガード）。テスト専用セッター
+/// `FitConfig::with_accumulate_steps_for_test`（`crates/facade/src/
+/// compat/training.rs`）はこの名前とは異なる別名のため検出対象に
+/// 含まれない（意図的な命名回避。同ファイルの doc 参照）。
+#[test]
+fn facade_does_not_declare_fit_config_accumulate_steps() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let count = count_fn_declarations_by_name(&tokens, "accumulate_steps");
+        for _ in 0..count {
+            offending.push(format!("{}: fn accumulate_steps 宣言", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が `accumulate_steps` という名前の fn を宣言している\
+         （イシュー #2180。`FitConfig::accumulate_steps` 公開ビルダーは\
+         承認待ちのため未実装のはず。`docs/compat-grad-accumulation-\
+         decision.md` §5 参照）: {offending:?}"
+    );
+}

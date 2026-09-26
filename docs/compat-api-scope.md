@@ -930,6 +930,24 @@ variant 集合の完全一致）のみで、`compat::{callbacks, training, mod}.
 `Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。承認後の完全な
 公開 API 案は `docs/autodiff-ema-decision.md` §5 を参照。
 
+**保留記録（イシュー #2180・親 #2131）**: 勾配累積（`accumulate_steps`
+回の backward ごとに 1 回だけ `optimizer.step` するミニバッチ相当技法。
+PyTorch の gradient accumulation パターン相当）は `compat::FitConfig`
+（累積ロジック本体・`Sequential::run_fit` の窓処理）まで実装済み。
+公開ビルダー `FitConfig::accumulate_steps(n: u32)`（本節経路 2）は、
+親 #2131 の「設計判断記録 → 承認 → 実装の 2 段」規則（先例 #2171・
+#2173・#2176・#2178・#2179・#2198）に従い未承認のまま保留した。
+`accumulate_steps` フィールド自体・`#[cfg(test)]` 限定のテスト専用
+セッター（`FitConfig::with_accumulate_steps_for_test`）は既に存在し、
+`accumulate_steps == 1`（既定）は既存 `fit`／`fit_with_callbacks`／
+`fit_with_metrics` と bit 完全一致する（R3）。コード変更は
+`crates/facade/src/lib.rs::GradAccumulationHoldDoctestGuard`（正の
+プローブ doctest）＋`crates/facade/tests/api_surface.rs` の 3 テスト
+（doctest ドリフト検査 2 件・facade の `fn accumulate_steps` 宣言 0 件
+の否定ガード）のみで固定し、`Cargo.toml`／`Cargo.lock`・tolerance／
+baseline・`docs/spec/` は不変。承認後の完全な公開 API 案・数値契約は
+`docs/compat-grad-accumulation-decision.md` §5 を参照。
+
 **#2083 の設計記録は `docs/kv-cache-design.md` として完了した。**
 コード変更なし。KV キャッシュ（K-1）は既存 `Var` 演算（`cat`／
 `narrow`／`detach`・`nn/attention.rs` の `project`／`split_heads`／

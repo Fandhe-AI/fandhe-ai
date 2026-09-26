@@ -178,6 +178,24 @@ pub struct FitConfig {
     batch_size: usize,
     shuffle: bool,
     drop_last: bool,
+    /// 勾配累積のウィンドウ幅（イシュー #2180・親 #2131）。既定 `1`
+    /// （既存挙動と bit 完全一致。R3）。`1` より大きい場合、
+    /// [`Sequential::run_fit`] は `accumulate_steps` 回の backward ごとに
+    /// 1 回だけ `optimizer.step` → `apply_parameters` を行う（PyTorch の
+    /// `.grad +=` に相当する f32 逐次和で累積。正規化〈N で割る処理〉は
+    /// 行わない——大バッチ相当にしたい呼び出し元は学習率を `1/N` にする
+    /// 必要がある）。
+    ///
+    /// **公開ビルダーは未実装（承認待ち）**: `docs/compat-api-scope.md`
+    /// §5 経路 2 の facade 公開面拡張に該当するが、親 #2131・本イシュー
+    /// いずれにも承認コメントがないため、本フィールドを書き換える公開
+    /// ビルダー（`FitConfig::accumulate_steps`）は追加していない
+    /// （`crate::GradAccumulationHoldDoctestGuard` が機械的に固定する）。
+    /// 現状は `FitConfig::with_accumulate_steps_for_test`（`#[cfg(test)]`
+    /// 限定）経由でのみ変更でき、通常経路では常に `1`（既存挙動）のまま
+    /// 固定される。承認後の対応は
+    /// `docs/compat-grad-accumulation-decision.md` §5 を参照。
+    accumulate_steps: u32,
 }
 
 impl FitConfig {
@@ -187,7 +205,8 @@ impl FitConfig {
     ///
     /// 既定値: [`Self::shuffle`] は `false`（型ドキュメント冒頭の
     /// 「`shuffle` の既定値」節を参照）・[`Self::drop_last`] も `false`
-    /// （末尾の端数バッチも切り捨てずに使う）。
+    /// （末尾の端数バッチも切り捨てずに使う）・`accumulate_steps` は `1`
+    /// （型ドキュメント「勾配累積のウィンドウ幅」節参照）。
     ///
     /// `epochs == 0`／`batch_size == 0` はここでは検査しない
     /// （両者とも `usize` の有効値であり、この時点では「不正な引数」
@@ -202,6 +221,7 @@ impl FitConfig {
             batch_size,
             shuffle: false,
             drop_last: false,
+            accumulate_steps: 1,
         }
     }
 
@@ -218,6 +238,22 @@ impl FitConfig {
     /// への委譲）。
     pub fn drop_last(mut self, on: bool) -> Self {
         self.drop_last = on;
+        self
+    }
+
+    /// `accumulate_steps`（勾配累積のウィンドウ幅。型ドキュメント参照）を
+    /// テストからのみ書き換える（イシュー #2180）。公開ビルダーは
+    /// 未実装（承認待ち）のため、名前を意図的に公開想定の
+    /// `accumulate_steps` とは違えている——
+    /// `crates/facade/tests/api_surface.rs::
+    /// facade_does_not_declare_fit_config_accumulate_steps` のソース走査
+    /// （可視性を問わず `fn accumulate_steps` の宣言数を数える）と
+    /// 衝突させないため。`#[cfg(test)]` を付けるのは、テストからしか
+    /// 呼ばない `pub(crate)` 関数が `clippy -D warnings` の `dead_code`
+    /// に掛かるのを `#[allow]` なしで避けるため。
+    #[cfg(test)]
+    pub(crate) fn with_accumulate_steps_for_test(mut self, n: u32) -> Self {
+        self.accumulate_steps = n;
         self
     }
 }
@@ -532,6 +568,65 @@ fn not_compiled(method: &str) -> AutodiffError {
     AutodiffError::InvalidArgument(format!(
         "Sequential::{method}: compile() が呼ばれていない（optimizer／loss が未設定）"
     ))
+}
+
+/// 勾配累積（イシュー #2180）: `acc`（累積中の勾配。位置は
+/// [`Sequential::trainable_grads`] と同じ順序契約）へ `grads`（このマイクロ
+/// バッチの勾配）を要素ごとに f32 で逐次加算する（`acc[i] += grads[i]`。
+/// PyTorch `.grad +=` と同じ意味論——[`crate::Tape::backward_accumulate`]
+/// が使う `vjp_elementwise_add`〈f32 の `a + b`〉と同じ数値形式。
+/// `docs/autodiff-retain-graph-accumulate-decision.md`）。正規化（`N` で
+/// 割る処理）は行わない。
+///
+/// `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64` アキュムレータ」
+/// 原則は、カーネル内の行方向縮約（dw・bias・rstd 等、1 要素あたり多数の
+/// 項を畳み込む縮約）が対象であり、本関数は縮約済みの勾配テンソルを
+/// 高々 `accumulate_steps` 回（実用上小さい回数）だけ足すだけのホスト側
+/// 加算のため対象外——新たな `f64` アキュムレータ契約は導入しない。
+///
+/// 新しい `Vec` を組み立て終えてから `*acc` へ書き戻す（原子的。途中で
+/// shape 不一致等により失敗しても `acc` は変更前のまま残る）。
+fn accumulate_grads_into(
+    acc: &mut Vec<Tensor<f32>>,
+    grads: &[&Tensor<f32>],
+    method: &str,
+) -> Result<(), AutodiffError> {
+    if acc.len() != grads.len() {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: 勾配累積バッファの長さ ({}) が今回の \
+             勾配数 ({}) と一致しない（内部不変条件違反）",
+            acc.len(),
+            grads.len()
+        )));
+    }
+    let mut next: Vec<Tensor<f32>> = Vec::new();
+    next.try_reserve_exact(acc.len()).map_err(|e| {
+        AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: 勾配累積バッファの確保に失敗した: {e}"
+        ))
+    })?;
+    for (a, g) in acc.iter().zip(grads.iter()) {
+        if a.shape() != g.shape() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: 勾配累積の shape が一致しない \
+                 (累積側: {:?}, 今回: {:?})",
+                a.shape(),
+                g.shape()
+            )));
+        }
+        let a_slice = a.host_slice();
+        let g_slice = g.host_slice();
+        let mut summed: Vec<f32> = Vec::new();
+        summed.try_reserve_exact(a_slice.len()).map_err(|e| {
+            AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: 勾配累積の加算結果バッファの確保に失敗した: {e}"
+            ))
+        })?;
+        summed.extend(a_slice.iter().zip(g_slice.iter()).map(|(x, y)| x + y));
+        next.push(Tensor::new(summed, a.shape())?);
+    }
+    *acc = next;
+    Ok(())
 }
 
 impl Sequential {
@@ -854,6 +949,30 @@ impl Sequential {
                 "Sequential::{method}: epochs == 0"
             )));
         }
+        // (1.5) 勾配累積（イシュー #2180）の引数検査。`accumulate_steps
+        // == 0` はウィンドウ幅として意味を持たない（fail-closed）。
+        if config.accumulate_steps == 0 {
+            self.compiled = Some(compiled);
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: accumulate_steps == 0"
+            )));
+        }
+        // AMP（[`Self::compile_with_amp`]）と `accumulate_steps > 1` の
+        // 組み合わせは未実装（実装計画 §3.4「代替」方式）。AMP は
+        // `GradScaler::update` を「窓ごとに 1 回」呼ぶ必要があるが、
+        // 現在の実装は `accumulate_steps == 1` の場合と bit 同一を保つ
+        // ため各マイクロバッチで step／update するAMP 経路をそのまま
+        // 維持しており、`accumulate_steps > 1` と組み合わせると
+        // `scaler.update` が窓ごとではなくマイクロバッチごとに呼ばれて
+        // しまう（scale の意味論が崩れる）。fail-closed に拒否する。
+        if config.accumulate_steps > 1 && compiled.amp.is_some() {
+            self.compiled = Some(compiled);
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: accumulate_steps > 1 は \
+                 compile_with_amp（AMP）と併用できない（イシュー #2180 \
+                 スコープ外）"
+            )));
+        }
         if validation.is_none()
             && let Some(offending) = callbacks.iter().find(|cb| cb.requires_validation())
         {
@@ -1076,6 +1195,19 @@ impl Sequential {
                 // (2) バッチループ（[`Self::fit`] と同一の演算列）。
                 let mut weighted_sum = 0.0f64;
                 let mut count = 0usize;
+                // 勾配累積（イシュー #2180）: `acc` は累積中の勾配
+                // （[`Sequential::trainable_grads`] と同じ位置対応順序）・
+                // `micro` はこのウィンドウで処理したマイクロバッチ数。
+                // 各 epoch の開始時に必ず空の状態から始まり、ウィンドウの
+                // 境界（`micro == config.accumulate_steps`）または epoch
+                // 末の端数フラッシュで必ず消費し尽くされる（fit 呼び出し
+                // をまたいで持ち越さない）。`accumulate_steps == 1`
+                // （既定）のとき、1 マイクロバッチ目で常に境界へ到達する
+                // ため毎回 clone のみ（加算は一度も走らない）で
+                // `compiled.optimizer.step` を呼ぶ——既存の非累積経路と
+                // bit 完全一致する（R3）。
+                let mut acc: Option<Vec<Tensor<f32>>> = None;
+                let mut micro: u32 = 0;
 
                 for batch in &loader {
                     let (x_batch, y_batch) = match batch {
@@ -1184,16 +1316,105 @@ impl Sequential {
                                 Ok(v) => v,
                                 Err(e) => break 'epochs_block Err(e),
                             };
-                            let param_refs = self.trainable_parameters();
-                            match compiled.optimizer.step(&param_refs, &grad_refs) {
-                                Ok(v) => Some(v),
-                                Err(e) => break 'epochs_block Err(e),
+
+                            // 勾配累積（イシュー #2180）。AMP は
+                            // `accumulate_steps > 1` と併用できない
+                            // （引数検査で fail-closed 拒否済み）ため、
+                            // この分岐にのみ累積ロジックを持つ。
+                            micro += 1;
+                            if micro == 1 {
+                                // R3: 1 マイクロステップ目は clone のみ
+                                // （算術を一切行わない）。
+                                // `accumulate_steps == 1` のときは常に
+                                // ここで境界に到達し、加算は一度も
+                                // 起きないため既存経路と bit 同一になる。
+                                let mut cloned: Vec<Tensor<f32>> = Vec::new();
+                                if let Err(e) = cloned.try_reserve_exact(grad_refs.len()) {
+                                    break 'epochs_block Err(AutodiffError::InvalidArgument(
+                                        format!(
+                                            "Sequential::{method}: 勾配累積バッファの確保に\
+                                             失敗した: {e}"
+                                        ),
+                                    ));
+                                }
+                                cloned.extend(grad_refs.iter().map(|g| (*g).clone()));
+                                acc = Some(cloned);
+                            } else {
+                                let acc_buf = match acc.as_mut() {
+                                    Some(buf) => buf,
+                                    None => {
+                                        break 'epochs_block Err(AutodiffError::InvalidArgument(
+                                            format!(
+                                                "Sequential::{method}: 勾配累積バッファが\
+                                                 初期化されていない（内部不変条件違反）"
+                                            ),
+                                        ));
+                                    }
+                                };
+                                if let Err(e) = accumulate_grads_into(acc_buf, &grad_refs, method) {
+                                    break 'epochs_block Err(e);
+                                }
+                            }
+
+                            if micro == config.accumulate_steps {
+                                let param_refs = self.trainable_parameters();
+                                let acc_buf = match acc.as_ref() {
+                                    Some(buf) => buf,
+                                    None => {
+                                        break 'epochs_block Err(AutodiffError::InvalidArgument(
+                                            format!(
+                                                "Sequential::{method}: 勾配累積バッファが\
+                                                 初期化されていない（内部不変条件違反）"
+                                            ),
+                                        ));
+                                    }
+                                };
+                                let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
+                                let stepped = match compiled.optimizer.step(&param_refs, &acc_refs)
+                                {
+                                    Ok(v) => v,
+                                    Err(e) => break 'epochs_block Err(e),
+                                };
+                                acc = None;
+                                micro = 0;
+                                Some(stepped)
+                            } else {
+                                None
                             }
                         }
                     };
                     if let Some(updated) = updated
                         && let Err(e) = self.apply_parameters(updated)
                     {
+                        break 'epochs_block Err(e);
+                    }
+                }
+
+                // 勾配累積（イシュー #2180）: epoch 末の端数ウィンドウ
+                // flush。`micro > 0` は「`accumulate_steps` に満たない
+                // まま epoch が終わった」ことを表す（例: `N = 3` でバッチ
+                // 数 7 の場合、最後の 1 バッチ分）。validation・callbacks・
+                // `ModelCheckpoint`／`EarlyStopping` が epoch 末に必ず
+                // 更新済みのパラメータを見られるよう、ここで強制的に
+                // step する（fit 呼び出しをまたいで持ち越さない契約。
+                // 実装計画 §3.3「step の境界」参照）。
+                if micro > 0 {
+                    let param_refs = self.trainable_parameters();
+                    let acc_buf = match acc.as_ref() {
+                        Some(buf) => buf,
+                        None => {
+                            break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::{method}: 勾配累積バッファが初期化されていない\
+                                 （内部不変条件違反）"
+                            )));
+                        }
+                    };
+                    let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
+                    let stepped = match compiled.optimizer.step(&param_refs, &acc_refs) {
+                        Ok(v) => v,
+                        Err(e) => break 'epochs_block Err(e),
+                    };
+                    if let Err(e) = self.apply_parameters(stepped) {
                         break 'epochs_block Err(e);
                     }
                 }
@@ -1449,5 +1670,343 @@ impl Sequential {
             None => None,
         };
         Ok((avg_loss, metrics_result))
+    }
+}
+
+/// 勾配累積（`FitConfig::accumulate_steps`。イシュー #2180）の単体テスト。
+/// `FitConfig::with_accumulate_steps_for_test`（`#[cfg(test)]`
+/// 限定・`pub(crate)`）は本クレート内からしか呼べないため、
+/// `crates/facade/tests/*`（外部統合テストクレート）ではなくここに置く。
+#[cfg(test)]
+mod accumulate_tests {
+    use super::*;
+    const D_IN: usize = 3;
+    const D_HIDDEN: usize = 4;
+    const D_OUT: usize = 2;
+    const SEED_L1: u64 = 0xACC0_1111;
+    const SEED_L2: u64 = 0xACC0_2222;
+
+    fn build_model() -> Sequential {
+        Sequential::new()
+            .add_linear(D_IN, D_HIDDEN, SEED_L1)
+            .unwrap_or_else(|e| panic!("test fixture: 層 1 の構築に失敗: {e}"))
+            .add_relu()
+            .add_linear(D_HIDDEN, D_OUT, SEED_L2)
+            .unwrap_or_else(|e| panic!("test fixture: 層 2 の構築に失敗: {e}"))
+    }
+
+    /// 決定的な擬似乱数生成（splitmix64）。`bench_harness::rng` の RNG
+    /// 内部実装型は `crates/facade/tests/api_surface.rs::
+    /// facade_does_not_expose_rng_internal_types` が facade `src/` から
+    /// の参照を禁止するため、本テスト専用の局所実装で代替する。値域は
+    /// `(-0.5, 0.5)` に正規化する。
+    fn deterministic_fill(seed: u64, n: usize) -> Vec<f32> {
+        let mut state = seed;
+        (0..n)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                ((z >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
+            })
+            .collect()
+    }
+
+    /// `n` サンプル分の回帰データ（決定的シード生成。値そのものは
+    /// `data_loader.rs::gen_dataset` とは異なる局所実装〈上記
+    /// [`deterministic_fill`] 参照〉だが、シード駆動の決定性という
+    /// 性質は同じ）。
+    fn gen_regression_data(seed: u64, n: usize) -> (Tensor<f32>, Tensor<f32>) {
+        let x = deterministic_fill(seed, n * D_IN);
+        let y = deterministic_fill(seed ^ 0x5555_5555_5555_5555, n * D_OUT);
+        (
+            Tensor::new(x, &[n, D_IN])
+                .unwrap_or_else(|e| panic!("test fixture: x の shape 構築に失敗: {e}")),
+            Tensor::new(y, &[n, D_OUT])
+                .unwrap_or_else(|e| panic!("test fixture: y の shape 構築に失敗: {e}")),
+        )
+    }
+
+    fn params_bit_exact(a: &[&Tensor<f32>], b: &[&Tensor<f32>]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for (x, y) in a.iter().zip(b.iter()) {
+            let xd = x.host_slice();
+            let yd = y.host_slice();
+            if xd.len() != yd.len() {
+                return false;
+            }
+            if xd
+                .iter()
+                .zip(yd.iter())
+                .any(|(xv, yv)| xv.to_bits() != yv.to_bits())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    // =================================================================
+    // T1（R3）: accumulate_steps == 1 は既定の `fit` と bit 完全一致する。
+    // =================================================================
+    #[test]
+    fn accumulate_steps_one_matches_default_fit_bit_exact() {
+        const N: usize = 8;
+        let (x, y) = gen_regression_data(0xAAAA, N);
+
+        let mut default_model = build_model();
+        default_model
+            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+        let default_history = default_model
+            .fit(&x, &y, FitConfig::new(3, 2))
+            .unwrap_or_else(|e| panic!("default fit に失敗: {e}"));
+
+        let mut explicit_model = build_model();
+        explicit_model
+            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+        let explicit_config = FitConfig::new(3, 2).with_accumulate_steps_for_test(1);
+        let explicit_history = explicit_model
+            .fit(&x, &y, explicit_config)
+            .unwrap_or_else(|e| panic!("accumulate_steps=1 fit に失敗: {e}"));
+
+        assert_eq!(
+            default_history.loss, explicit_history.loss,
+            "accumulate_steps=1 の History.loss が既定の fit と bit 一致しない"
+        );
+        assert!(
+            params_bit_exact(
+                &default_model.trainable_parameters(),
+                &explicit_model.trainable_parameters()
+            ),
+            "accumulate_steps=1 の学習後パラメータが既定の fit と bit 一致しない"
+        );
+    }
+
+    // =================================================================
+    // T2（R2・端数 flush）: N=3・バッチ数 7（割り切れない構成）を、
+    // 独立に組んだ手動累積ループ（bind → forward → loss_for → backward
+    // → trainable_grads → f32 逐次和 → 境界 step → epoch 末 flush）と
+    // bit 完全一致で突き合わせる。
+    // =================================================================
+    #[test]
+    fn accumulate_steps_three_matches_manual_window_loop_bit_exact() {
+        const TOTAL: usize = 7;
+        const EPOCHS: usize = 2;
+        const LR: f32 = 0.05;
+        let (x, y) = gen_regression_data(0xBEEF, TOTAL);
+
+        let mut fit_model = build_model();
+        fit_model
+            .compile(Optimizer::Sgd(SgdConfig::new(LR)), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+        let config = FitConfig::new(EPOCHS, 1).with_accumulate_steps_for_test(3);
+        fit_model
+            .fit(&x, &y, config)
+            .unwrap_or_else(|e| panic!("accumulate_steps=3 fit に失敗: {e}"));
+
+        // 手動参照ループ: `fit` と同じ演算列を独立に組む（`batch_size=1`
+        // のため 1 マイクロバッチ = 1 サンプル）。
+        let mut manual_model = build_model();
+        let mut manual_optimizer = Sgd::new(SgdConfig::new(LR))
+            .unwrap_or_else(|e| panic!("test fixture: Sgd::new に失敗: {e}"));
+        let x_slice = x.host_slice();
+        let y_slice = y.host_slice();
+        for _epoch in 0..EPOCHS {
+            let mut acc: Option<Vec<Tensor<f32>>> = None;
+            let mut micro = 0u32;
+            for i in 0..TOTAL {
+                let x_row = Tensor::new(x_slice[i * D_IN..(i + 1) * D_IN].to_vec(), &[1, D_IN])
+                    .unwrap_or_else(|e| panic!("test fixture: x_row 構築に失敗: {e}"));
+                let y_row = Tensor::new(y_slice[i * D_OUT..(i + 1) * D_OUT].to_vec(), &[1, D_OUT])
+                    .unwrap_or_else(|e| panic!("test fixture: y_row 構築に失敗: {e}"));
+
+                let tape = crate::tape();
+                let bound = manual_model.bind(&tape);
+                let x_var = tape.var(&x_row);
+                let pred = bound
+                    .forward_with_precision(&tape, &x_var, None)
+                    .unwrap_or_else(|e| panic!("manual forward に失敗: {e}"));
+                let target_var = tape.var_no_grad(&y_row);
+                let loss_var = pred
+                    .mse_loss_with(&target_var, Reduction::Mean)
+                    .unwrap_or_else(|e| panic!("manual mse_loss_with に失敗: {e}"));
+                let grads = tape
+                    .backward(&loss_var)
+                    .unwrap_or_else(|e| panic!("manual backward に失敗: {e}"));
+                let grad_refs = bound
+                    .trainable_grads(&grads)
+                    .unwrap_or_else(|e| panic!("manual trainable_grads に失敗: {e}"));
+
+                micro += 1;
+                if micro == 1 {
+                    acc = Some(grad_refs.iter().map(|g| (*g).clone()).collect());
+                } else {
+                    let acc_buf = acc.as_mut().unwrap_or_else(|| {
+                        panic!("test fixture: 累積バッファが初期化されていない")
+                    });
+                    for (a, g) in acc_buf.iter_mut().zip(grad_refs.iter()) {
+                        let a_slice = a.host_slice();
+                        let g_slice = g.host_slice();
+                        let summed: Vec<f32> = a_slice
+                            .iter()
+                            .zip(g_slice.iter())
+                            .map(|(u, v)| u + v)
+                            .collect();
+                        *a = Tensor::new(summed, a.shape())
+                            .unwrap_or_else(|e| panic!("test fixture: 加算結果構築に失敗: {e}"));
+                    }
+                }
+
+                if micro == 3 || i == TOTAL - 1 {
+                    let param_refs = manual_model.trainable_parameters();
+                    let acc_buf = acc.as_ref().unwrap_or_else(|| {
+                        panic!("test fixture: 累積バッファが初期化されていない")
+                    });
+                    let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
+                    let updated = manual_optimizer
+                        .step(&param_refs, &acc_refs)
+                        .unwrap_or_else(|e| panic!("manual optimizer.step に失敗: {e}"));
+                    drop(param_refs);
+                    manual_model
+                        .apply_parameters(updated)
+                        .unwrap_or_else(|e| panic!("manual apply_parameters に失敗: {e}"));
+                    acc = None;
+                    micro = 0;
+                }
+            }
+        }
+
+        assert!(
+            params_bit_exact(
+                &fit_model.trainable_parameters(),
+                &manual_model.trainable_parameters()
+            ),
+            "accumulate_steps=3 の fit が独立な手動累積ループと bit 一致しない"
+        );
+    }
+
+    // =================================================================
+    // T3（大バッチ等価）: SGD（momentum なし）で、`batch_size=B・
+    // accumulate_steps=N・lr=lr0/N` の構成（累積側）と
+    // `batch_size=N*B・accumulate_steps=1・lr=lr0` の構成（大バッチ側）
+    // が同じ最終パラメータへ収束することを REQ-2 の統一複合判定
+    // （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
+    // `fandhe_ai_backend_cpu::parity::assert_parity` が使う既存定数
+    // `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD` をそのまま
+    // 再利用するだけで、新設・緩和ではない）で確認する。
+    //
+    // 数学的根拠: `Reduction::Mean` の MSE は 1 マイクロバッチ
+    // （サイズ B）の勾配平均 `(1/B)Σ_batch g` を計算する。累積側は
+    // これを N 回（重複なく `N*B` 件全体を分割）加算するため、境界での
+    // 累積勾配は `(1/B)Σ_all g`。大バッチ側は 1 バッチ（サイズ N*B）の
+    // 平均 `(1/(N*B))Σ_all g`。よって累積側の更新量 `(lr0/N)・(1/B)Σ_all
+    // g = (lr0/(N*B))Σ_all g` と、大バッチ側の更新量 `lr0・(1/(N*B))Σ_all
+    // g` は数学的に厳密に一致する（累積・大バッチいずれも和を取る順序が
+    // 異なるだけで、浮動小数の丸め順序差のみが REQ-2 判定対象）。
+    // =================================================================
+    #[test]
+    fn accumulate_matches_large_batch_equivalent_within_req2_tolerance() {
+        const B: usize = 2;
+        const N: u32 = 4;
+        const TOTAL: usize = B * N as usize;
+        const EPOCHS: usize = 3;
+        const LR0: f32 = 0.2;
+
+        let (x, y) = gen_regression_data(0xF00D, TOTAL);
+
+        let mut accum_model = build_model();
+        accum_model
+            .compile(Optimizer::Sgd(SgdConfig::new(LR0 / N as f32)), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile（累積側）に失敗: {e}"));
+        let accum_config = FitConfig::new(EPOCHS, B)
+            .drop_last(true)
+            .with_accumulate_steps_for_test(N);
+        accum_model
+            .fit(&x, &y, accum_config)
+            .unwrap_or_else(|e| panic!("累積側 fit に失敗: {e}"));
+
+        let mut large_batch_model = build_model();
+        large_batch_model
+            .compile(Optimizer::Sgd(SgdConfig::new(LR0)), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile（大バッチ側）に失敗: {e}"));
+        let large_batch_config = FitConfig::new(EPOCHS, TOTAL).drop_last(true);
+        large_batch_model
+            .fit(&x, &y, large_batch_config)
+            .unwrap_or_else(|e| panic!("大バッチ側 fit に失敗: {e}"));
+
+        let accum_params = accum_model.trainable_parameters();
+        let large_batch_params = large_batch_model.trainable_parameters();
+        assert_eq!(accum_params.len(), large_batch_params.len());
+        for (a, b) in accum_params.iter().zip(large_batch_params.iter()) {
+            let a_slice = a.host_slice();
+            let b_slice = b.host_slice();
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                "accumulate_matches_large_batch_equivalent_within_req2_tolerance",
+                &a_slice,
+                &b_slice,
+            );
+        }
+    }
+
+    // =================================================================
+    // T4: accumulate_steps == 0 は InvalidArgument（fail-closed）。
+    // compiled 状態・train/eval モードは変更前のまま維持される。
+    // =================================================================
+    #[test]
+    fn accumulate_steps_zero_is_rejected() {
+        let (x, y) = gen_regression_data(0xCCCC, 4);
+        let mut model = build_model();
+        model
+            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+
+        let prev_training = model.training();
+        let config = FitConfig::new(1, 4).with_accumulate_steps_for_test(0);
+        let err = model
+            .fit(&x, &y, config)
+            .expect_err("accumulate_steps == 0 は Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(
+            model.is_compiled(),
+            "エラー後も compiled 状態が維持されるはず"
+        );
+        assert_eq!(
+            model.training(),
+            prev_training,
+            "エラー後は呼び出し前の train/eval モードへ復元されるはず"
+        );
+    }
+
+    // =================================================================
+    // T5（AMP 併用拒否）: accumulate_steps > 1 は compile_with_amp と
+    // 併用できない（実装計画 §3.4「代替」方式。fail-closed）。
+    // =================================================================
+    #[test]
+    fn accumulate_steps_gt_one_rejected_with_amp() {
+        let (x, y) = gen_regression_data(0xDDDD, 4);
+        let mut model = build_model();
+        model
+            .compile_with_amp(
+                Optimizer::Sgd(SgdConfig::new(0.1)),
+                Loss::Mse,
+                AmpConfig::new(AmpDType::F16),
+            )
+            .unwrap_or_else(|e| panic!("test fixture: compile_with_amp に失敗: {e}"));
+
+        let config = FitConfig::new(1, 2).with_accumulate_steps_for_test(2);
+        let err = model
+            .fit(&x, &y, config)
+            .expect_err("accumulate_steps > 1 と AMP の併用は Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(
+            model.is_compiled(),
+            "エラー後も compiled 状態が維持されるはず"
+        );
     }
 }
