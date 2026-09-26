@@ -848,6 +848,41 @@ fn triplet_margin_loss_swap_selects_smaller_negative_distance() {
     assert!((scalar(&loss.to_tensor()) - 1.5).abs() < 1e-3);
 }
 
+// `swap` 有効時、`d_an`（anchor-negative 距離）が `inf`・`d_pn`
+// （positive-negative 距離）が有限だと、`d_neg` を係数付き和
+// `an_coeff·d_an + (1−an_coeff)·d_pn` で求める実装は `an_coeff=0.0`
+// でも `0.0 * inf = NaN` になり、有限な `d_pn` を選ぶべき `d_neg` が
+// NaN に汚染される欠陥があった（codex-review 指摘・PR #2286）。
+// `anchor` に `inf` を置くことで、`diff_an = anchor − negative` は
+// `inf` になる一方、`diff_pn = positive − negative`（anchor 非依存）
+// は有限のままという状況を作る。修正後は分岐で `d_neg = d_pn`
+// （有限）を選び、forward は `NaN` ではなく `inf`（`d_ap` も `inf`
+// になるため）を返し、backward も有限勾配を返す。
+#[test]
+fn triplet_margin_loss_swap_infinite_an_finite_pn_does_not_produce_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[f32::INFINITY, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let options = TripletMarginOptions::default().swap(true);
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    let got = scalar(&loss.to_tensor());
+    // `d_ap`・`d_an` は共に `inf`・`d_pn` は `0`（有限）。修正前は
+    // `d_neg` が `NaN` に汚染され `loss` も `NaN` になっていた。
+    assert!(!got.is_nan(), "got={got}（NaN であってはならない）");
+    assert!(got.is_infinite() && got > 0.0, "got={got}");
+
+    let grads = tape.backward(&loss).unwrap();
+    for (name, var) in [("anchor", &a), ("positive", &p), ("negative", &n)] {
+        let g = dense(grads.get(var).unwrap().expect("hinge 有効のため到達する"));
+        assert!(
+            g.iter().all(|v| !v.is_nan()),
+            "{name} の勾配に NaN が含まれる: grad={g:?}"
+        );
+    }
+}
+
 // 有効な `p`（`p >= 1.0` 制約を満たす `p=1024`）と現実的な差分値
 // （`|diff_i| <= 3`）でも、素直な `Σ|v_i|^p` の計算は `|v_i|^p` 自体が
 // `f64` の範囲を超えて overflow し、`d_ap`/`d_an` が `inf` になって

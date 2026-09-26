@@ -4621,16 +4621,42 @@ pub(crate) fn margin_ranking_loss_forward(
 
 /// `triplet_margin_loss_forward`／`triplet_margin_loss_vjp`（`grad.rs`）
 /// が共有する、サンプル 1 件分の距離統計（イシュー #2167）。
-/// `d_ap`／`d_an`／`d_pn`（`swap` 無効時は未使用）と、`d_neg` の
-/// 選択元を示す `an_coeff`（`d_neg = an_coeff·d_an + (1−an_coeff)·d_pn`。
-/// `swap` 無効時は常に `1.0`、有効時は `d_an <= d_pn` なら `1.0`・
-/// `d_an > d_pn` なら `0.0`・同値なら `0.5`——PyTorch `min.other` の
-/// 同値時 VJP 契約と同じ等分）を持つ。
+/// `d_ap`／`d_an`／`d_pn`（`swap` 無効時は未使用）と、勾配配分にのみ
+/// 使う係数 `an_coeff`（`swap` 無効時は常に `1.0`、有効時は
+/// `d_an <= d_pn` なら `1.0`・`d_an > d_pn` なら `0.0`・同値なら
+/// `0.5`——PyTorch `min.other` の同値時 VJP 契約と同じ等分）を持つ。
+/// `d_neg`（`min(d_an, d_pn)` 相当の実際の距離値）は [`Self::neg_distance`]
+/// で求める。`an_coeff·d_an + (1−an_coeff)·d_pn` という係数付き和では
+/// `swap` 有効時に `d_an`／`d_pn` の一方が `inf`・係数が丁度 `0.0` でも
+/// `0.0 * inf = NaN` になり、有限な距離を選ぶべき `d_neg` が NaN に
+/// 汚染される欠陥があった（codex-review 指摘・PR #2286。設計文書
+/// §2.4 の距離定義どおり、距離の選択自体は分岐で行い、係数は
+/// 勾配配分（`grad.rs::triplet_margin_loss_vjp` の `c_an`・`c_pn`）
+/// にのみ使う）。
 pub(crate) struct TripletDistanceStats {
     pub(crate) d_ap: f64,
     pub(crate) d_an: f64,
     pub(crate) d_pn: f64,
     pub(crate) an_coeff: f64,
+}
+
+impl TripletDistanceStats {
+    /// forward の hinge・VJP の `hinge_active` 判定で使う実際の負例
+    /// 距離（`swap` 無効時は常に `d_an`、有効時は `min(d_an, d_pn)`。
+    /// 同値時は `d_an == d_pn` が成立するためどちらを返しても同じ）。
+    /// `an_coeff`（`1.0`／`0.0`／`0.5` のいずれか厳密な定数）で分岐する
+    /// ことで、係数付き和で生じる `0.0 * inf = NaN` を避ける。
+    pub(crate) fn neg_distance(&self) -> f64 {
+        if self.an_coeff >= 1.0 {
+            self.d_an
+        } else if self.an_coeff <= 0.0 {
+            self.d_pn
+        } else {
+            // 同値ケース（`an_coeff == 0.5`）: `d_an == d_pn` なので
+            // どちらを返しても等価（両方 `inf` の場合を含む）。
+            self.d_an
+        }
+    }
 }
 
 /// `triplet_distance_stats` のスカラーオプション（`p`・`eps`・
@@ -4730,7 +4756,7 @@ pub(crate) fn triplet_margin_loss_forward(
             d,
             &params,
         );
-        let d_neg = stats.an_coeff * stats.d_an + (1.0 - stats.an_coeff) * stats.d_pn;
+        let d_neg = stats.neg_distance();
         // `.max(0.0)` は左辺が `NaN`（`p_norm_f64` の overflow 由来を
         // 含む）のとき `0.0` を返し hinge が黙って消えてしまうため、
         // `NaN` を伝播する [`nan_propagating_max_f64`] を使う

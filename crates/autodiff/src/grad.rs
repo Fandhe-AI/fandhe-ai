@@ -7881,7 +7881,12 @@ fn triplet_margin_loss_vjp(
             d,
             &params,
         );
-        let d_neg = stats.an_coeff * stats.d_an + (1.0 - stats.an_coeff) * stats.d_pn;
+        // `neg_distance()` は分岐で `d_an`／`d_pn` を選ぶ（係数付き和
+        // `an_coeff·d_an + (1−an_coeff)·d_pn` だと `swap` 有効時に
+        // 一方が `inf`・係数が丁度 `0.0` でも `0.0 * inf = NaN` になる
+        // ため。forward〈`eval::triplet_margin_loss_forward`〉と同じ
+        // 判定にする。codex-review 指摘・PR #2286）。
+        let d_neg = stats.neg_distance();
         let hinge_active = stats.d_ap - d_neg + margin >= 0.0;
         if !hinge_active {
             continue;
