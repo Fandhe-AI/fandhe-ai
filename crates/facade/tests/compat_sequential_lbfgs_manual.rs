@@ -101,38 +101,29 @@ fn gen_regression_data(
 }
 
 /// `compat::Sequential` 経由で `Lbfgs::try_step_closure` を 1 outer step
-/// 実行する共通ヘルパー。closure は現在の試行パラメータを
-/// `model.apply_parameters` で書き込んでから forward → loss →
-/// backward → `trainable_grads` を評価する（line search が 1 step 内で
-/// 複数回評価するため、closure は呼ばれるたびに独立した `Tape` を構築
-/// する）。
+/// 実行する共通ヘルパー本体。`eval` は「試行 params 書き込み済みの
+/// `model` から loss／勾配を評価する」処理のみを担い、snapshot 取得・
+/// 試行 params の書き込み・`Err` 時の snapshot 復元は本関数が一元的に
+/// 担う（fail-closed 復元契約 `docs/autodiff-lbfgs-decision.md` §8.3）。
 ///
-/// `Err` を返す場合（closure 自体の失敗・非有限値の検出）は、closure が
-/// 試行 params を書き込み済みの `model` を、呼び出し前の snapshot へ
-/// 必ず復元してからそのエラーを返す（facade 統合の承認後実装設計
-/// `docs/autodiff-lbfgs-decision.md` §8.3 の fail-closed 復元契約を、
-/// 保留経路の手動ループでも同じ形で固定する）。
-fn lbfgs_step_on_sequential(
+/// `eval` を差し替えることで、通常経路（[`lbfgs_step_on_sequential`]）と
+/// 障害注入経路（closure の 2 回目以降の評価でのみ失敗させるテスト）の
+/// 両方が**同一の復元経路**を通る（codex-review 指摘・PR #2300
+/// discussion: テスト内で復元ロジックを個別実装すると、本ヘルパーの
+/// `Err` 経路が復元を忘れても検出できないため、ヘルパー経由に統一する）。
+fn lbfgs_step_with_closure(
     model: &mut Sequential,
     opt: &mut Lbfgs,
-    x_data: &Tensor<f32>,
-    y_data: &Tensor<f32>,
+    mut eval: impl FnMut(
+        &mut Sequential,
+        &[Tensor<f32>],
+    ) -> Result<(f32, Vec<Tensor<f32>>), AutodiffError>,
 ) -> Result<f32, AutodiffError> {
     let snapshot: Vec<Tensor<f32>> = model.trainable_parameters().into_iter().cloned().collect();
 
     let result = opt.try_step_closure(&snapshot, |trial| {
         model.apply_parameters(trial.to_vec())?;
-        let tape = fandhe_ai::tape();
-        let bound = model.bind(&tape);
-        let x = tape.var(x_data);
-        let y = tape.var(y_data);
-        let pred = bound.forward(&tape, &x)?;
-        let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y)?;
-        let loss_value = scalar(&loss.to_tensor());
-        let grads = tape.backward(&loss)?;
-        let grad_refs = bound.trainable_grads(&grads)?;
-        let grads_owned: Vec<Tensor<f32>> = grad_refs.into_iter().cloned().collect();
-        Ok((loss_value, grads_owned))
+        eval(model, trial)
     });
 
     match result {
@@ -140,7 +131,7 @@ fn lbfgs_step_on_sequential(
             model.apply_parameters(updated)?;
             Ok(opt.last_loss().ok_or_else(|| {
                 AutodiffError::InvalidArgument(
-                    "lbfgs_step_on_sequential: last_loss unavailable after successful step"
+                    "lbfgs_step_with_closure: last_loss unavailable after successful step"
                         .to_string(),
                 )
             })?)
@@ -152,6 +143,34 @@ fn lbfgs_step_on_sequential(
             Err(err)
         }
     }
+}
+
+/// `compat::Sequential` 経由で `Lbfgs::try_step_closure` を 1 outer step
+/// 実行する共通ヘルパー（通常経路）。[`lbfgs_step_with_closure`] に、
+/// 現在の試行パラメータで forward → loss → backward →
+/// `trainable_grads` を評価する `eval` を渡すだけの薄いラッパー
+/// （line search が 1 step 内で複数回評価するため、`eval` は呼ばれる
+/// たびに独立した `Tape` を構築する）。snapshot 取得・`Err` 時の復元は
+/// [`lbfgs_step_with_closure`] が一元的に担う。
+fn lbfgs_step_on_sequential(
+    model: &mut Sequential,
+    opt: &mut Lbfgs,
+    x_data: &Tensor<f32>,
+    y_data: &Tensor<f32>,
+) -> Result<f32, AutodiffError> {
+    lbfgs_step_with_closure(model, opt, |model, _trial| {
+        let tape = fandhe_ai::tape();
+        let bound = model.bind(&tape);
+        let x = tape.var(x_data);
+        let y = tape.var(y_data);
+        let pred = bound.forward(&tape, &x)?;
+        let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y)?;
+        let loss_value = scalar(&loss.to_tensor());
+        let grads = tape.backward(&loss)?;
+        let grad_refs = bound.trainable_grads(&grads)?;
+        let grads_owned: Vec<Tensor<f32>> = grad_refs.into_iter().cloned().collect();
+        Ok((loss_value, grads_owned))
+    })
 }
 
 // =====================================================================
@@ -315,10 +334,14 @@ fn lbfgs_on_sequential_nan_input_fails_closed_and_restores_params() {
 /// 有限の loss／勾配を返して line search を先へ進ませる）。これにより
 /// 2 回目の呼び出し時点で `trial`（探索方向 `d` とステップ幅 `t` で
 /// 更新済みの試行パラメータ）が 1 回目の snapshot から**実際に乖離して
-/// いる**ことを確認してから `model.apply_parameters(trial)` を書き込み、
-/// その後に NaN を混入させて `InvalidArgument` を発生させる。
-/// `try_step_closure` が `Err` を返した後、`model.trainable_parameters()`
-/// が呼び出し前の snapshot と bit 完全一致することを検証する。
+/// いる**ことを確認できる。
+///
+/// snapshot 取得・試行 params の書き込み・`Err` 時の snapshot 復元は
+/// [`lbfgs_step_with_closure`]（[`lbfgs_step_on_sequential`] と同じ共通
+/// ヘルパー）に委ねる。本テストが検証したいのは「`lbfgs_step_on_sequential`
+/// の `Err` 経路が実際に復元を行うこと」であり、テスト内で復元ロジックを
+/// 個別実装すると、ヘルパー側の復元漏れをすり抜けてしまう（codex-review
+/// 指摘・PR #2300 discussion）。
 #[test]
 fn lbfgs_on_sequential_restores_params_after_trial_write_then_failure() {
     const D_IN: usize = 8;
@@ -342,13 +365,9 @@ fn lbfgs_on_sequential_restores_params_after_trial_write_then_failure() {
     let trial_diverged_before_failure = std::cell::Cell::new(false);
     let failure_call_index = std::cell::Cell::new(0u32);
 
-    let result = opt.try_step_closure(&snapshot_before, |trial| {
+    let result = lbfgs_step_with_closure(&mut model, &mut opt, |model, trial| {
         call_count.set(call_count.get() + 1);
         let n = call_count.get();
-
-        // `lbfgs_step_on_sequential` と同じ契約: closure は呼ばれる
-        // たびに必ず試行 params を書き込む。
-        model.apply_parameters(trial.to_vec())?;
 
         if n == 1 {
             // 1 回目（line search 開始前の初回評価）は有限の loss／
@@ -402,14 +421,9 @@ fn lbfgs_on_sequential_restores_params_after_trial_write_then_failure() {
         "2 回目以降の closure 呼び出しで NaN を返した場合も fail-closed に \
          InvalidArgument を返すはず: {result:?}"
     );
-    if result.is_err() {
-        // `lbfgs_step_on_sequential` と同じ復元契約（§8.3）:
-        // `try_step_closure` 自体は `model` を書き戻さないため、
-        // 呼び出し元が `Err` 経路で snapshot へ復元する。
-        model
-            .apply_parameters(snapshot_before.clone())
-            .expect("snapshot への復元は shape 変更なしのため必ず成功する");
-    }
+    // `lbfgs_step_with_closure` の `Err` 経路が snapshot 復元を担うため、
+    // ここでテスト側から追加の復元操作は行わない（復元自体を検証したい
+    // ため、共通ヘルパーの復元処理を経由させたまま以降の assert に進む）。
     assert!(
         failure_call_index.get() >= 2,
         "本テストの前提（失敗が 2 回目以降の closure 呼び出しで起きる \
