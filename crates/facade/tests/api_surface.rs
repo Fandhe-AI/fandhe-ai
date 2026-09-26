@@ -12697,3 +12697,247 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
          すること）: {found:?}"
     );
 }
+
+// =====================================================================
+// イシュー #2169（親 #2131）: `compat::Loss` enum への variant 追加
+// （BCE・BCEWithLogits・NLL・KLDiv・Huber・SmoothL1・L1）の facade
+// 公開保留を検査するテスト群。`CompileLossVariantsHoldDoctestGuard`
+// （`src/lib.rs`）の正のプローブのドリフト検査に加え、`compat::Loss`
+// 自体の variant 集合を固定する（`OptimizerExtHoldDoctestGuard` 系とは
+// 異なり facade 独自宣言・再エクスポートの検査ではなく、既存 enum への
+// variant 追加を検査する点が異なる）。承認事項の位置づけは `docs/
+// facade-compile-loss-variants-decision.md` §4・§5 を参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `CompileLossVariantsHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// `CompileLossVariantsHoldDoctestGuard` 版）。
+#[test]
+fn compile_loss_variants_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "CompileLossVariantsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "CompileLossVariantsHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`compile_loss_variants_hold_doctest_globs_all_pub_modules`] が
+/// glob import 集合の一致のみを固定するのに対し、本テストは doctest
+/// ブロックの**glob 以外の本文**（`__FandheLossVariantMarker`／
+/// `__FandheLossVariantHoldProbe`／`Loss` への impl／`__probe` 関数）が
+/// 固定文言 [`COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY`] と 1 行たりとも
+/// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの
+/// 削除・関連 const の弱体化等で正のプローブを骨抜きにする改変を
+/// 機械的に拒否する）。
+#[test]
+fn compile_loss_variants_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "CompileLossVariantsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY,
+        "CompileLossVariantsHoldDoctestGuard の doctest ブロック本文\
+         （glob 以外）が固定文言 COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY\
+         からドリフトしている。正のプローブ（__FandheLossVariantMarker・\
+         __FandheLossVariantHoldProbe・__probe 関数）の削除・弱体化・\
+         隠し行の混入がないか確認すること。\n--- actual ---\n{actual}"
+    );
+}
+
+/// [`compile_loss_variants_hold_doctest_probe_body_matches_fixed_
+/// contract`] が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `CompileLossVariantsHoldDoctestGuard` doc 内の唯一の doctest
+/// ブロックから、ネスト `pub mod` の glob import 行
+/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
+/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
+const COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+struct __FandheLossVariantMarker;\n\
+\n\
+#[allow(non_upper_case_globals)]\n\
+trait __FandheLossVariantHoldProbe {\n\
+\x20\x20\x20\x20const Bce: __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const BceWithLogits: __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const Nll: __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const KlDiv: __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const Huber: __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const SmoothL1: __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const L1: __FandheLossVariantMarker;\n\
+}\n\
+\n\
+impl __FandheLossVariantHoldProbe for Loss {\n\
+\x20\x20\x20\x20const Bce: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const BceWithLogits: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const Nll: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const KlDiv: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const Huber: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const SmoothL1: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
+\x20\x20\x20\x20const L1: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
+}\n\
+\n\
+fn __probe() {\n\
+\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::Bce;\n\
+\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::BceWithLogits;\n\
+\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::Nll;\n\
+\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::KlDiv;\n\
+\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::Huber;\n\
+\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::SmoothL1;\n\
+\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::L1;\n\
+}";
+
+/// `crates/facade/src/compat/training.rs` の `Loss` enum（`compat::
+/// Loss`。イシュー #1761 で新設・現行は `Mse`／`CrossEntropy` の 2
+/// variant のみ）が、承認なしに variant を増やされていないことを固定
+/// する（`CompileLossVariantsHoldDoctestGuard` の正のプローブは
+/// `Bce`／`BceWithLogits`／`Nll`／`KlDiv`／`Huber`／`SmoothL1`／`L1`
+/// の 7 名のみを型解決で検査するため、それ以外の名前の variant
+/// 〈例えば `BinaryCrossEntropy`〉が追加された場合はプローブに一切
+/// 触れず見逃す。本テストは `Loss` enum の variant 集合そのものを
+/// 直接走査することでこの穴を塞ぐ主防御。イシュー #2169・`docs/
+/// facade-compile-loss-variants-decision.md` §5）。
+#[test]
+fn compat_loss_enum_variants_are_exactly_mse_and_cross_entropy() {
+    let path = facade_crate_root().join("src/compat/training.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+
+    // "pub" "enum" "Loss" "{" の完全一致列を数える（0 件・2 件以上は
+    // fail-closed で失敗させる: enum の削除・複数定義・別名への変更を
+    // 見逃さない）。
+    let mut match_starts: Vec<usize> = Vec::new();
+    for i in 0..tokens.len() {
+        if tokens.get(i).map(String::as_str) == Some("pub")
+            && tokens.get(i + 1).map(String::as_str) == Some("enum")
+            && tokens.get(i + 2).map(String::as_str) == Some("Loss")
+            && tokens.get(i + 3).map(String::as_str) == Some("{")
+        {
+            match_starts.push(i + 4);
+        }
+    }
+    assert_eq!(
+        match_starts.len(),
+        1,
+        "training.rs 内の `pub enum Loss {{` 宣言がちょうど 1 件ではない\
+         （0 件: enum が削除・改名された。2 件以上: 重複定義。いずれも\
+         本テストが検査対象を見失っている）: {} 件",
+        match_starts.len()
+    );
+
+    let variants = collect_top_level_enum_variant_idents(&tokens, match_starts[0]);
+    assert_eq!(
+        variants,
+        vec!["Mse".to_string(), "CrossEntropy".to_string()],
+        "compat::Loss の variant 集合が [\"Mse\", \"CrossEntropy\"] から\
+         ドリフトしている（未承認のまま variant が追加された可能性。\
+         `docs/facade-compile-loss-variants-decision.md` §4 の承認事項\
+         参照）: {variants:?}"
+    );
+}
+
+/// [`compat_loss_enum_variants_are_exactly_mse_and_cross_entropy`] が
+/// 使う共通トークン走査。`tokens[start..]`（`pub enum <Name> {` の `{`
+/// 直後）から、対応する閉じ `}` までを brace 深さで追跡し、深さ 1 の
+/// 識別子トークンを variant 名として収集する（`#[...]` 属性・カンマは
+/// 読み飛ばす）。`Loss` は unit variant のみのため、tuple／struct
+/// variant の内部（`(...)`／`{...}`）は本関数の対象外——ネストした
+/// `{` は brace 深さのみを増減させ、内部の識別子は収集しない。
+fn collect_top_level_enum_variant_idents(tokens: &[String], start: usize) -> Vec<String> {
+    let mut depth = 1usize;
+    let mut i = start;
+    let mut variants = Vec::new();
+    let mut expect_variant_start = true;
+    while i < tokens.len() && depth > 0 {
+        match tokens[i].as_str() {
+            "{" => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            "}" => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            "#" => {
+                i += 1;
+                if tokens.get(i).map(String::as_str) == Some("[") {
+                    let mut bracket_depth = 1usize;
+                    i += 1;
+                    while i < tokens.len() && bracket_depth > 0 {
+                        match tokens[i].as_str() {
+                            "[" => bracket_depth += 1,
+                            "]" => bracket_depth -= 1,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            "," => {
+                expect_variant_start = true;
+                i += 1;
+                continue;
+            }
+            token => {
+                if depth == 1 && expect_variant_start {
+                    let is_ident = token
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_alphabetic() || c == '_')
+                        .unwrap_or(false);
+                    if is_ident {
+                        variants.push(token.to_string());
+                        expect_variant_start = false;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    variants
+}
+
+/// [`collect_top_level_enum_variant_idents`] の自己テスト（正例・負例
+/// の合成入力）。
+#[test]
+fn collect_top_level_enum_variant_idents_detects_each_category() {
+    let tokens = tokenize_including_punctuation("pub enum Loss { Mse , CrossEntropy , }");
+    // "pub" "enum" "Loss" "{" の直後（index 4）から走査する。
+    assert_eq!(
+        collect_top_level_enum_variant_idents(&tokens, 4),
+        vec!["Mse".to_string(), "CrossEntropy".to_string()]
+    );
+    // 属性付き variant（`#[non_exhaustive]` 相当のダミー属性）を読み
+    // 飛ばすこと。
+    let tokens_with_attr =
+        tokenize_including_punctuation("pub enum Loss { # [ foo ] Mse , CrossEntropy , }");
+    assert_eq!(
+        collect_top_level_enum_variant_idents(&tokens_with_attr, 4),
+        vec!["Mse".to_string(), "CrossEntropy".to_string()]
+    );
+    // 末尾カンマなしでも最後の variant を取りこぼさないこと。
+    let tokens_no_trailing = tokenize_including_punctuation("pub enum Loss { Mse , CrossEntropy }");
+    assert_eq!(
+        collect_top_level_enum_variant_idents(&tokens_no_trailing, 4),
+        vec!["Mse".to_string(), "CrossEntropy".to_string()]
+    );
+}
