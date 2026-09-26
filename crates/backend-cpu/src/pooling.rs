@@ -11,7 +11,12 @@
 //! 契約のため、本モジュール自身は呼び出し元が渡す `out_shape`
 //! （検査・確定済み）をそのまま信頼し shape の再検査は行わない
 //! （`im2col.rs` モジュール doc と同型の契約。二重検査境界は `ops.rs`
-//! 側が担う。`.claude/rules/security.md` A08）。
+//! 側が担う。`.claude/rules/security.md` A08）。**唯一の例外**は
+//! [`adaptive_max_pool2d`] の索引表現可能範囲検査（[`check_max_index_range`]。
+//! `H·W <= i32::MAX`）で、`out_shape`（`N` に依存し空バッチで積が
+//! `0` になりうる）では検出できない契約違反のため、`input` の
+//! `H`／`W` を直接見て `ops.rs`・本関数の双方で独立に検査する
+//! （codex-review・Cursor Bugbot 指摘・イシュー #2160）。
 //!
 //! 単一スレッド逐次実装（`gather_scatter.rs` の規律を踏襲。並列化は
 //! out-of-scope。設計 doc §10「CPU: 参照実装」）。`Tensor::get`
@@ -277,6 +282,26 @@ pub fn adaptive_avg_pool2d(
     Tensor::new(out, out_shape)
 }
 
+/// 索引の表現可能範囲検査（`H·W <= i32::MAX`。[`adaptive_max_pool2d`]
+/// の索引は `i32` のため。イシュー #2160）。`fandhe_ai_autodiff`
+/// クレート側の同名検査（`adaptive_max_pool_ops::
+/// check_max_index_range_shape`）と意図的に同一ロジックを複製する
+/// （本クレートは `autodiff` へ依存しないため単一情報源にできない。
+/// `.claude/rules/delegation-impl.md` のクレート境界に従う）。
+/// `crate::ops.rs::adaptive_max_pool2d`（`BackendOps` 実装。`ops.rs`
+/// が委譲前に呼ぶ）と本関数自身（多層防御。呼び出し元検査の迂回や
+/// 欠落に備える）の双方から呼ばれる（codex-review・Cursor Bugbot
+/// 指摘）。`N`（バッチ）や `out_numel`（出力が空かどうか）には一切
+/// 依存させない: 空バッチ（`N=0`）でも `H·W` が `i32::MAX` を超えて
+/// いれば拒否する。
+pub(crate) fn check_max_index_range(h: usize, w: usize) -> Result<(), ShapeError> {
+    let hw = h.checked_mul(w).ok_or(ShapeError::ElementCountOverflow)?;
+    if hw > i32::MAX as usize {
+        return Err(ShapeError::IndexRangeOverflow { index: hw });
+    }
+    Ok(())
+}
+
 /// [`fandhe_ai_tensor_core::BackendOps::adaptive_max_pool2d`] の CPU
 /// 実装本体（イシュー #2160）。`out_shape` は呼び出し元（`ops.rs`）が
 /// [`fandhe_ai_tensor_core::adaptive_pool2d_out_shape`] で検査・確定
@@ -291,6 +316,15 @@ pub fn adaptive_max_pool2d(
     input: &Tensor<f32>,
     out_shape: &[usize],
 ) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    // 出力が空（`out_numel == 0`。例: 空バッチ `N=0`）かどうかの早期
+    // return より前に索引範囲を検査する（codex-review 指摘・イシュー
+    // #2160）。`N=0` のとき `out_shape` の積は `0` になり `Hout`／
+    // `Wout` の検査（`adaptive_pool2d_out_shape` の `checked_numel_for`）
+    // をすり抜けるため、`N`／`out_numel` に依存しない `input` の
+    // `H·W` を直接検査する。
+    check_max_index_range(h_in, w_in)?;
     let out_numel: usize = out_shape.iter().product();
     if out_numel == 0 {
         return Ok((
@@ -298,8 +332,6 @@ pub fn adaptive_max_pool2d(
             Tensor::new(Vec::new(), out_shape)?,
         ));
     }
-    let in_shape = input.shape();
-    let (h_in, w_in) = (in_shape[2], in_shape[3]);
     let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
 
     let mut out_vals = vec![0f32; out_numel];
@@ -590,6 +622,24 @@ mod tests {
         let (values, index) = adaptive_max_pool2d(&input, &out_shape).unwrap();
         assert_eq!(values.shape(), &[0, 1, 2, 2]);
         assert_eq!(index.shape(), &[0, 1, 2, 2]);
+    }
+
+    #[test]
+    fn adaptive_max_pool2d_batch_zero_still_rejects_index_range_overflow() {
+        // 空バッチ（`N=0`）でも `H·W`（本テストでは `W` 単独）が
+        // `i32::MAX` を超えていれば、出力が空だからといって索引範囲
+        // 検査をすり抜けてはならない（codex-review 指摘・イシュー
+        // #2160）。`out_shape` の積は `N=0` のため `0` になり
+        // `adaptive_pool2d_out_shape` の `checked_numel_for` では
+        // 検出できない契約違反を、本関数が `input` の `H`／`W` を
+        // 直接見て拒否することを確認する。
+        let w = i32::MAX as usize + 1;
+        let input = Tensor::new(Vec::new(), &[0, 1, 1, w]).unwrap();
+        let out_shape =
+            fandhe_ai_tensor_core::adaptive_pool2d_out_shape(&[0, 1, 1, w], [1, 1]).unwrap();
+
+        let err = adaptive_max_pool2d(&input, &out_shape).unwrap_err();
+        assert!(matches!(err, ShapeError::IndexRangeOverflow { .. }));
     }
 
     #[test]

@@ -91,6 +91,46 @@ GlobalPool の行・命名の指定がないため、次のとおり定めた。
 パスが存在しない）。facade の `nn` は `pub mod rnn;` にのみ固定済み
 のため、型自体の glob 衝突プローブも不要。
 
+### 2.4 索引表現可能範囲検査（`H·W <= i32::MAX`）の全入口統一（codex-review 是正）
+
+`AdaptiveMaxPool2d`／`AdaptiveMaxPool1d`／`GlobalPool(Max)` の索引は
+`i32` のため、`H·W`（1d は `l`）が `i32::MAX` を超えると索引が表現
+不能になる。この検査は**出力が空かどうか（`out_numel == 0`。例:
+空バッチ `N=0`）の判定より前に、値・索引を返す全入口で行う**という
+一般原則を確定した（codex-review 指摘・PR #2280。3 回目の指摘のため
+本 PR で差分内の全入口を洗い出して統一した）。
+
+`out_shape`（`adaptive_pool2d_out_shape` が返す `[N, C, Hout, Wout]`）
+の積は `N=0` で `0` になり、`checked_numel_for` はこの積しか見ない
+ため `H·W` 自体の overflow を検出できない。したがって索引範囲検査は
+`N`／`out_numel` に一切依存させず、`input` の `H`／`W`（1d は `l`）を
+直接見て行う。
+
+- 検査ロジックの単一情報源は `adaptive_max_pool_ops::
+  check_max_index_range_shape`（`ShapeError` を直接返す）と、それを
+  `AutodiffError` へラップする `check_max_index_range`。`crate::eval`
+  （戻り値 `Result<_, ShapeError>`）と `crate::grad`／`crate::
+  nn::module`（戻り値 `Result<_, AutodiffError>`）の両方の文脈から
+  同一ロジックを共有する
+- 検査を行う入口（本 PR で確認・是正済み。すべて早期 return／
+  `input` の前処理〈reshape・contiguous 化〉より前）:
+  - `adaptive_max_pool_ops::adaptive_max_pool2d`／`adaptive_max_pool1d`
+    （tape 経路。既存）
+  - `nn::module::Module::forward_host`（`AdaptiveMaxPool2d`／
+    `AdaptiveMaxPool1d`／`GlobalPool` rank 4・rank 3 分岐。rank 3
+    分岐は本 PR で `x4` 構築より前へ移動）
+  - `crate::grad::adaptive_max_pool2d_with_fallback`（バックエンド
+    dispatch とホストフォールバックの合流点。本 PR で新規追加。
+    多層防御）
+  - `crate::eval::adaptive_max_pool2d`（ホスト参照実装本体。本 PR で
+    `out_numel == 0` の早期 return より前へ検査を追加）
+  - `backend-cpu::pooling::adaptive_max_pool2d`（CPU カーネル本体。
+    本 PR で新規追加。`fandhe_ai_autodiff` に依存できないため
+    `pooling::check_max_index_range` として同一ロジックを複製）
+  - `backend-cpu::ops.rs::CpuBackendOps::adaptive_max_pool2d`
+    （`BackendOps` trait 実装。本 PR で新規追加。`pooling::
+    adaptive_max_pool2d` への委譲より前に検査する多層防御）
+
 ## §3 契約（変更禁止・維持）
 
 - tolerance・baseline・`Cargo.toml` の依存・ガードレール閾値・
@@ -109,7 +149,16 @@ GlobalPool の行・命名の指定がないため、次のとおり定めた。
   adaptive_max_pool2d_default_is_unsupported`
 - `crates/backend-cpu/src/pooling.rs` の unit test（割り切れる縮小・
   重なり窓のタイ先勝ち・拡大・タイ・NaN 伝播・batch 0・非 contiguous
-  一致・`in % out == 0` のとき `max_pool2d` と bit 一致）
+  一致・`in % out == 0` のとき `max_pool2d` と bit 一致・空バッチでも
+  `H·W > i32::MAX` を `IndexRangeOverflow` で拒否する§2.4 回帰）
+- `crates/backend-cpu/tests/pooling_parity.rs::
+  backend_ops_adaptive_max_pool2d_rejects_index_range_overflow_on_empty_batch`
+  （`CpuBackendOps::adaptive_max_pool2d` 経由の同回帰）
+- `crates/autodiff/src/eval.rs::
+  adaptive_max_pool2d_host_fallback_tests::
+  rejects_index_range_overflow_on_empty_batch_before_early_return`
+  （ホスト参照実装本体の同回帰。`pub(crate)` のため crate 内 unit
+  test）
 - `crates/autodiff/tests/nn_adaptive_max_global_pool.rs`: 割り切れる
   形状での `MaxPool2d` との bit 一致・恒等写像・重なり窓の
   `scatter_add` 勾配・数値微分突合・1d≡2d reshape・

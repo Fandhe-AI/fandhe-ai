@@ -1978,6 +1978,17 @@ impl Module for GlobalPool {
             }
             3 => {
                 let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+                // tape 経路（`GlobalPool::forward` →
+                // `adaptive_max_pool_ops::adaptive_max_pool1d`）と同じ
+                // `l <= i32::MAX` 索引範囲検査（`h=1` 固定のため
+                // `hw == l`。codex-review・Cursor Bugbot 指摘・イシュー
+                // #2160）。`x4` の contiguous 化・reshape（`input` の
+                // 前処理）より前に検査を完了させる（`Var::
+                // adaptive_avg_pool1d` 等の規律と同型。孤立 view
+                // ノードを残さない）。
+                if matches!(self.mode(), GlobalPoolMode::Max) {
+                    crate::adaptive_max_pool_ops::check_max_index_range(1, l)?;
+                }
                 let x4 = input
                     .contiguous()
                     .reshape(&[n, c, 1, l])
@@ -1992,12 +2003,6 @@ impl Module for GlobalPool {
                         &out_shape4,
                     )?,
                     GlobalPoolMode::Max => {
-                        // tape 経路（`GlobalPool::forward` →
-                        // `adaptive_max_pool_ops::adaptive_max_pool1d`）と
-                        // 同じ `l <= i32::MAX` 索引範囲検査（`h=1` 固定の
-                        // ため `hw == l`。codex-review・Cursor Bugbot
-                        // 指摘・イシュー #2160）。
-                        crate::adaptive_max_pool_ops::check_max_index_range(1, l)?;
                         crate::grad::adaptive_max_pool2d_with_fallback(
                             ops,
                             &x4,

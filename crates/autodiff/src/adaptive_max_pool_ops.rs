@@ -32,25 +32,34 @@ use crate::grad::adaptive_max_pool2d_with_fallback;
 use crate::tape::{Op, materialize_fallible};
 use crate::var::Var;
 
-/// 索引の表現可能範囲検査（`H·W <= i32::MAX`。索引は `i32` のため）。
+/// 索引の表現可能範囲検査（`H·W <= i32::MAX`。索引は `i32` のため）の
+/// 本体。`ShapeError` を直接返すため、`AutodiffError` に変換できない
+/// 文脈（[`crate::eval::adaptive_max_pool2d`] のホスト参照実装。戻り値
+/// が `Result<_, ShapeError>`）からも共有できる単一情報源（codex-review・
+/// Cursor Bugbot 指摘・イシュー #2160）。判定は `N`（バッチ）や
+/// `out_numel`（出力が空かどうか）に一切依存させない: 空バッチ
+/// （`N=0`）でも `H·W` 自体が `i32::MAX` を超えていれば拒否する
+/// （出力が空だからといって索引が表現可能になるわけではないため）。
+pub(crate) fn check_max_index_range_shape(h: usize, w: usize) -> Result<(), ShapeError> {
+    let hw = h.checked_mul(w).ok_or(ShapeError::ElementCountOverflow)?;
+    if hw > i32::MAX as usize {
+        return Err(ShapeError::IndexRangeOverflow { index: hw });
+    }
+    Ok(())
+}
+
+/// [`check_max_index_range_shape`] の `AutodiffError` ラッパー。
 /// [`adaptive_max_pool2d`]／[`adaptive_max_pool1d`] の tape 経路
 /// （`Var::forward`）だけでなく、[`crate::nn::module::Module::forward_host`]
 /// の host 経路（`AdaptiveMaxPool2d`／`AdaptiveMaxPool1d`／
-/// `GlobalPool(Max)`）からも呼ばれる共通ヘルパー（codex-review・Cursor
-/// Bugbot 指摘・イシュー #2160）。host 経路がこの検査を欠くと、極端
-/// 形状（例: 空バッチかつ `H·W` が `i32::MAX` 超）で tape 経路は
+/// `GlobalPool(Max)`）・[`crate::grad::adaptive_max_pool2d_with_fallback`]
+/// からも呼ばれる共通ヘルパー（codex-review・Cursor Bugbot 指摘・
+/// イシュー #2160）。host 経路がこの検査を欠くと、極端形状（例: 空
+/// バッチかつ `H·W` が `i32::MAX` 超）で tape 経路は
 /// `IndexRangeOverflow` を返す一方 host 経路は成功してしまい、両経路の
 /// 契約が食い違う。
 pub(crate) fn check_max_index_range(h: usize, w: usize) -> Result<(), AutodiffError> {
-    let hw = h
-        .checked_mul(w)
-        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
-    if hw > i32::MAX as usize {
-        return Err(AutodiffError::Shape(ShapeError::IndexRangeOverflow {
-            index: hw,
-        }));
-    }
-    Ok(())
+    check_max_index_range_shape(h, w).map_err(AutodiffError::Shape)
 }
 
 /// 2 次元 adaptive max pooling（`torch.nn.AdaptiveMaxPool2d` 相当。

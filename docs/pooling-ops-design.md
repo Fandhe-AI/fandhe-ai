@@ -843,3 +843,10 @@ override 配線を追加した（`Pool2dParams` が兄弟イシュー #1728 で
   §12 と同じく承認待ちのまま対象外とし、
   `AdaptiveMaxGlobalPoolHoldDoctestGuard`（`crates/facade/src/lib.rs`）
   で多層固定した
+- **索引表現可能範囲検査（`H·W <= i32::MAX`）は、出力が空かどうか
+  （`out_numel == 0`。例: 空バッチ `N=0`）の判定より前に、値・索引を
+  返すすべての入口で行う**（codex-review 是正・PR #2280。詳細・入口
+  一覧は `docs/autodiff-adaptive-max-global-pool-decision.md` §2.4）。
+  `out_shape` の積は `N=0` で `0` になり `H·W` 自体の overflow を
+  検出できないため、`N`／`out_numel` に依存せず `input` の `H`／`W`
+  を直接見て検査する

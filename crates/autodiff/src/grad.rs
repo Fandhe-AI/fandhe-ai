@@ -3974,12 +3974,27 @@ pub(crate) fn adaptive_avg_pool2d_with_fallback(
 /// adaptive_max_pool2d` → `Unsupported` のときのみ `eval::
 /// adaptive_max_pool2d` へフォールバックし、他のエラーは伝播する
 /// （判定迂回経路を作らない）。
+///
+/// 呼び出し元（tape 経路の `adaptive_max_pool_ops`・host 経路の
+/// `nn::module::Module::forward_host`）は既にこの検査を経由済みだが、
+/// 本関数はバックエンド dispatch（CPU 以外の GPU バックエンドが将来
+/// `adaptive_max_pool2d` を実装した場合を含む）とホストフォールバック
+/// の唯一の合流点であるため、ここでも同じ `H·W <= i32::MAX` 検査を
+/// 独立に行う（`AutodiffError::Shape` へ正規化し、CPU バックエンド
+/// dispatch が返す `AutodiffError::Backend(ShapeMismatch(
+/// IndexRangeOverflow))` とエラー variant を揃える。codex-review 指摘・
+/// イシュー #2160）。
 pub(crate) fn adaptive_max_pool2d_with_fallback(
     ops: &dyn BackendOps,
     input: &Tensor<f32>,
     output_size: [usize; 2],
     out_shape: &[usize],
 ) -> Result<(Tensor<f32>, Tensor<i32>), AutodiffError> {
+    let in_shape = input.shape();
+    crate::adaptive_max_pool_ops::check_max_index_range(
+        in_shape.get(2).copied().unwrap_or(0),
+        in_shape.get(3).copied().unwrap_or(0),
+    )?;
     match ops.adaptive_max_pool2d(input, output_size) {
         Ok((values, index)) => {
             if values.shape() != out_shape || index.shape() != out_shape {
