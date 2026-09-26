@@ -3313,6 +3313,159 @@ fn workspace_declares_data_hooks_names_only_in_tensor_core_data() {
     );
 }
 
+/// マルチワーカー prefetch（イシュー #2183）の新規公開型 3 個。facade
+/// 公開は承認待ち（`docs/tensor-core-data-prefetch-decision.md` §2.4）
+/// のため、[`DATA_HOOKS_TYPE_NAMES`] と同じ多層防御方式で内部クレート
+/// 限定を固定する。fn 名は追加していない
+/// （`PrefetchConfig::new`／`num_workers`／`prefetch_depth`、
+/// `PrefetchDataLoader::new`／`dataset`／`config`／`num_batches`／
+/// `iter` はいずれも [`DATA_HOOKS_FN_NAMES`] 等の既存名と衝突しない
+/// ため、fn 名インベントリの対象外）。
+const PREFETCH_TYPE_NAMES: [&str; 3] = ["PrefetchConfig", "PrefetchDataLoader", "PrefetchBatches"];
+
+/// [`facade_does_not_reexport_or_declare_prefetch`]・その自己テストが
+/// 共用する検出本体（[`scan_data_hooks_reexports_and_declarations`] と
+/// 同型。fn 名インベントリを持たない点のみ異なる）。
+fn scan_prefetch_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if PREFETCH_TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && PREFETCH_TYPE_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、[`PREFETCH_TYPE_NAMES`]
+/// （3 個）を識別子単位で含む `pub use`（複数行・ネストした group・
+/// 別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type` 宣言も
+/// 存在しないことを固定する（`facade_does_not_reexport_or_declare_data_
+/// hooks` と同型の最内層ソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_prefetch() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_prefetch_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が DataLoader マルチワーカー prefetch（#2183 の\
+         PrefetchConfig・PrefetchDataLoader・PrefetchBatches。内部クレート\
+         限定の新規公開面。facade 公開は承認待ちのため対象外という設計\
+         判断に違反）を再エクスポートまたは独自宣言している: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`PREFETCH_TYPE_
+/// NAMES`]（3 個。トレイト／struct／type 宣言）の定義元集合を固定する
+/// （`workspace_declares_data_hooks_names_only_in_tensor_core_data` と
+/// 同型のインベントリ）。
+///
+/// **期待集合**（着手前確認のグレップで型名の衝突は 0 件だった。
+/// 実装後の実測ですべて `crates/tensor-core/src/data.rs` 1 箇所ずつに
+/// 定義された）。
+#[test]
+fn workspace_declares_prefetch_names_only_in_tensor_core_data() {
+    let crates_dir = workspace_crates_dir();
+    let mut found_types: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let mut i = 0usize;
+            while i < tokens.len() {
+                if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+                    && let Some(name) = tokens.get(i + 1)
+                    && PREFETCH_TYPE_NAMES.contains(&name.as_str())
+                {
+                    *found_types.entry(format!("{rel}::{name}")).or_insert(0) += 1;
+                }
+                i += 1;
+            }
+        });
+    }
+
+    let expected_types: std::collections::BTreeMap<String, usize> = [
+        (
+            "tensor-core/src/data.rs::PrefetchConfig".to_string(),
+            1usize,
+        ),
+        (
+            "tensor-core/src/data.rs::PrefetchDataLoader".to_string(),
+            1usize,
+        ),
+        (
+            "tensor-core/src/data.rs::PrefetchBatches".to_string(),
+            1usize,
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        found_types, expected_types,
+        "workspace 全体（crates/*/src/）の prefetch 型宣言集合が期待\
+         （tensor-core/src/data.rs に各 1 件）と一致しない（過不足いずれも\
+         fail-closed に検出する）: {found_types:?}"
+    );
+}
+
 /// Keras 風 `compile()`／`fit()`／`evaluate()`（イシュー #1761）の
 /// 新規公開型（`fandhe_ai::compat::{Loss, Optimizer, FitConfig,
 /// History}`）が `fandhe_ai` のみの import で構築でき、`FitTarget`
