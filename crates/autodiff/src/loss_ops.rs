@@ -851,19 +851,25 @@ pub fn poisson_nll_loss<'t>(
 /// `zero_infinity=false` かつ `nll_n=+∞` のとき、有効フレームの勾配は
 /// `NaN`（数学的に未定義。PyTorch も `NaN` を返す規約に合わせる）。
 ///
-/// **検査順序**（確保より前に全て終える。REQ-8・A03。本番経路で
-/// `unwrap()`／`expect()` は使わない）: ①`log_probs` が rank 3・`C>=1`
-/// → ②確保前のバイト数上限検査（`checked_bytes_for::<f32>`） →
-/// ③`options.blank < C` → ④`input_lengths.len()==N`・
-/// `target_lengths.len()==N` → ⑤各 `n` で `input_lengths[n] <= T` →
-/// ⑥`targets` の形式検査（パディング形式は shape `[N, S]`・
-/// `target_lengths[n] <= S`、連結形式は長さが `Σ target_lengths`
-/// と一致。`checked_add` で計算） → ⑦使われる範囲の全 target 値が
-/// `0 <= t < C` かつ `t != blank` → ⑧各 `n` で `L'_n = 2·tl_n+1` を
+/// **検査順序**（確保・全データ複製より前に全て終える。REQ-8・A03。
+/// 本番経路で `unwrap()`／`expect()` は使わない。2026-09-26 codex-review
+/// 是正〈PR #2292〉: `targets` の全データ複製〈`eval::dense_vec_i32`〉を
+/// 形式・長さ・オーバーフロー・バッファ上限検査の後段へ移し、確保前
+/// 検証より先に大きな不正入力を複製しないようにした）:
+/// ①`log_probs` が rank 3・`C>=1` → ②確保前のバイト数上限検査
+/// （`checked_bytes_for::<f32>`） → ③`options.blank < C` →
+/// ④`input_lengths.len()==N`・`target_lengths.len()==N` →
+/// ⑤各 `n` で `input_lengths[n] <= T` → ⑥`targets` の形式検査
+/// （shape／`numel()` のみ。複製なし。パディング形式は shape `[N, S]`・
+/// `target_lengths[n] <= S`、連結形式は `numel()` が `Σ target_lengths`
+/// と一致。`checked_add` で計算） → ⑧各 `n` で `L'_n = 2·tl_n+1` を
 /// `checked_mul`／`checked_add` で計算 → ⑨α／β バッファの確保前上限
-/// 検査（`checked_bytes_for::<f64>`） → ⑩実体化（層 1） → ⑪forward
-/// 値計算（`eval::ctc_loss_forward`。`BackendOps` に対応メソッドが
-/// ないため融合対象外） → ⑫ノード記録。
+/// 検査（`checked_bytes_for::<f64>`） → ⑦ここまで通過して初めて
+/// `targets` を 1 回だけ稠密化し、使われる範囲の全 target 値が
+/// `0 <= t < C` かつ `t != blank` であることを走査（サンプル別の
+/// 切り出しはこの複製結果を直接参照し、二重複製は行わない） →
+/// ⑩実体化（層 1） → ⑪forward 値計算（`eval::ctc_loss_forward`。
+/// `BackendOps` に対応メソッドがないため融合対象外） → ⑫ノード記録。
 #[allow(clippy::too_many_arguments)]
 pub fn ctc_loss<'t>(
     log_probs: &Var<'t>,
@@ -916,9 +922,11 @@ pub fn ctc_loss<'t>(
         }
     }
 
+    // targets の形式・長さ検査（⑥）は shape／numel のみで行い、値の
+    // 複製（`eval::dense_vec_i32`）はまだ行わない（REQ-8・A03。確保前
+    // 検証を全データ複製より先に終える。PR #2292 codex-review 是正）。
     let targets_shape = targets.shape();
-    let targets_data = eval::dense_vec_i32(targets);
-    match targets_shape.len() {
+    let s_for_padded = match targets_shape.len() {
         2 => {
             if targets_shape[0] != n {
                 return Err(AutodiffError::InvalidArgument(format!(
@@ -936,6 +944,7 @@ pub fn ctc_loss<'t>(
                     )));
                 }
             }
+            Some(s)
         }
         1 => {
             let expected_len: usize = target_lengths.iter().try_fold(0usize, |acc, &tl| {
@@ -945,13 +954,16 @@ pub fn ctc_loss<'t>(
                     )
                 })
             })?;
-            if targets_data.len() != expected_len {
+            // `targets.numel()` は shape 由来で複製を伴わない（`dense_vec_i32`
+            // による全データ複製は形式・長さ検査が済むまで行わない）。
+            if targets.numel() != expected_len {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "ctc_loss: targets（連結形式）の長さ（{}）が target_lengths の総和\
                      （{expected_len}）と一致しない",
-                    targets_data.len()
+                    targets.numel()
                 )));
             }
+            None
         }
         _ => {
             return Err(AutodiffError::InvalidArgument(format!(
@@ -960,20 +972,11 @@ pub fn ctc_loss<'t>(
                 targets_shape.len()
             )));
         }
-    }
+    };
 
-    let sample_targets = eval::ctc_sample_targets(targets, target_lengths);
-    for (n_idx, sample) in sample_targets.iter().enumerate() {
-        for &t in sample {
-            if t < 0 || (t as usize) >= c || (t as usize) == blank {
-                return Err(AutodiffError::InvalidArgument(format!(
-                    "ctc_loss: targets[{n_idx}] の要素 {t} が範囲 [0, {c}) を外れている、\
-                     または blank（{blank}）と一致している"
-                )));
-            }
-        }
-    }
-
+    // 拡張ラベル長・α／β バッファサイズの確保前上限検査（⑧⑨）も、
+    // target_lengths のみで完結し targets の複製を必要としないため、
+    // 値の走査・サンプル別の複製（⑦）より先に行う。
     let mut l_prime_max = 0usize;
     for (i, &tl) in target_lengths.iter().enumerate() {
         let l_prime = tl
@@ -988,6 +991,32 @@ pub fn ctc_loss<'t>(
         l_prime_max = l_prime_max.max(l_prime);
     }
     checked_bytes_for::<f64>(&[t_max, l_prime_max])?;
+
+    // ここまでの検証（形式・長さ・オーバーフロー・バッファ上限）を
+    // 全て通過して初めて targets を稠密化する（⑦。一度だけ複製し、
+    // `eval::ctc_sample_targets` を呼ばずサンプルごとの範囲をこの場で
+    // 直接切り出すことで二重複製を避ける）。値検査に使うのはこの
+    // 1 回の複製のみで、forward 本体（`eval::ctc_loss_forward`）は
+    // 独立に再稠密化する（他の損失 `Op` と同じ「都度再計算」設計）。
+    let targets_data = eval::dense_vec_i32(targets);
+    let mut offset = 0usize;
+    for (n_idx, &tl) in target_lengths.iter().enumerate() {
+        let start = match s_for_padded {
+            Some(s) => n_idx * s,
+            None => offset,
+        };
+        for &t in &targets_data[start..start + tl] {
+            if t < 0 || (t as usize) >= c || (t as usize) == blank {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "ctc_loss: targets[{n_idx}] の要素 {t} が範囲 [0, {c}) を外れている、\
+                     または blank（{blank}）と一致している"
+                )));
+            }
+        }
+        if s_for_padded.is_none() {
+            offset += tl;
+        }
+    }
 
     let log_probs_val = {
         let nodes = log_probs.tape().nodes.borrow();
