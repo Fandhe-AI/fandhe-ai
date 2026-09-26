@@ -152,8 +152,10 @@ LossOpsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs` の
 
 ## §6 スコープ外（out-of-scope-tracking.md）
 
-- `compat::Loss`（`compile()`）への L1・CE オプション対応は #2169 の
-  担当。本 PR では `crates/facade/src/compat/training.rs` を変更しない
+- `compat::Loss`（`compile()`）への L1・CE オプション対応は #2169 が
+  検討したが、facade 公開面の拡張が未承認のため保留と確定した
+  （`docs/facade-compile-loss-variants-decision.md`）。本 PR では
+  `crates/facade/src/compat/training.rs` を変更しない
 - GPU 専用カーネル（`BackendOps::l1_loss` 等の融合カーネル）は別
   イシュー。本 PR では起票しない（承認なしに Issue を作らない規約に
   従い、必要な場合は PR 上でユーザーに提案する）
