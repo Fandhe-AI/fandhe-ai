@@ -67,11 +67,15 @@
 //! 本モジュールはあくまで「optimizer 側に学習率を可変化する入口を
 //! 用意する」ところまでを担う。
 
+mod adadelta;
 mod adagrad;
 mod adam;
+mod adamax;
 mod adamw;
 mod lamb;
 mod lbfgs;
+mod nadam;
+mod radam;
 mod rmsprop;
 
 pub mod amp;
@@ -79,8 +83,10 @@ pub mod clip;
 pub mod lr_scheduler;
 pub mod reduce_lr_on_plateau;
 
+pub use adadelta::{Adadelta, AdadeltaConfig};
 pub use adagrad::{Adagrad, AdagradConfig};
 pub use adam::{Adam, AdamConfig};
+pub use adamax::{Adamax, AdamaxConfig};
 pub use adamw::{AdamW, AdamWConfig};
 pub use amp::{
     GradScaler, GradScalerConfig, UnscaleResult, has_non_finite, scale_grads, scale_loss,
@@ -93,6 +99,8 @@ pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, OneCycleAnneal,
     OneCycleLr, OneCycleLrConfig, StepLr,
 };
+pub use nadam::{NAdam, NAdamConfig};
+pub use radam::{RAdam, RAdamConfig};
 pub use reduce_lr_on_plateau::{
     PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
 };
@@ -206,3 +214,27 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // `compile()` 統合は別イシュー #2198（facade 公開面拡張はユーザー
 // 承認事項のため本イシューでは対応しない）。`DeviceParamStore` 非対応
 // （デバイス常駐化は親 #2172 のスコープ外）。
+
+// イシュー #2171（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+// 行内深掘り）」）: Adadelta（[`Adadelta`]・[`AdadeltaConfig`]。Zeiler,
+// 2012）・Adamax（[`Adamax`]・[`AdamaxConfig`]。Kingma & Ba, 2015
+// §7.1）・NAdam（[`NAdam`]・[`NAdamConfig`]。Dozat, 2016）・RAdam
+// （[`RAdam`]・[`RAdamConfig`]。Liu et al., 2019）を追加した。`AdamW`
+// （#194）・`RmsProp`／`Adagrad`（#1743）と同じく `Tape`／`Var`／
+// `BackendOps` に一切依存しない値型・純関数の optimizer であり、新規
+// `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は追加していない
+// （カーネルなし。詳細は各モジュール冒頭 doc）。演算順は実 PyTorch
+// 2.14.0+cpu の `torch/optim/{adadelta,adamax,nadam,radam}.py::
+// _single_tensor_*` を実装前に読んで確認済み（各 fixture README
+// 参照）。`crate::optim::device_store::DeviceParamStore::step` は
+// `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、
+// 本イシューでは対応する `BackendOps` メソッドを追加していないため
+// 4 種とも **`DeviceParamStore` 非対応**（ホスト `Tensor<f32>` を
+// 介した `step()` のみ）。
+//
+// **facade（`fandhe_ai::optim`）への公開は保留**（`AdamW`／`Adam`／
+// `RmsProp`／`Adagrad`／`LAMB` とは異なり、本イシューでは
+// `crates/facade/src/optim.rs` への追記を行っていない）。承認事項・
+// 保留固定の設計は `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-
+// decision.md` §8「承認事項」を参照（`crates/facade/src/lib.rs::
+// OptimizerExtHoldDoctestGuard` が正のプローブで固定する）。
