@@ -4926,6 +4926,212 @@ pub(crate) fn poisson_nll_loss_forward(
     build_tensor(vec![out], &[])
 }
 
+/// 対数空間での加算 `log(exp(a) + exp(b))`（CTC 損失。イシュー #2168）。
+/// `NaN`・`±inf` を明示的に扱う（`crate::loss_ops::ctc_loss` doc
+/// §2.3・`.claude/rules/coding-rust.md` に準ずる `f64` アキュムレータ
+/// 契約）: どちらかが `NaN` なら `NaN`（[`nan_propagating_max_f64`] と
+/// 同じ理由で `f64::max` に丸め込ませない）、両方 `-inf` なら `-inf`、
+/// どちらかが `+inf` なら `+inf`（`+inf - m` が `NaN` になるのを避ける。
+/// `log_probs` の値は検査しないため `+inf` が到達しうる）、それ以外は
+/// `m + ln(exp(a-m) + exp(b-m))`（`m` は大きい方）。
+pub(crate) fn log_add_exp_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a == f64::NEG_INFINITY && b == f64::NEG_INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    if a == f64::INFINITY || b == f64::INFINITY {
+        return f64::INFINITY;
+    }
+    let m = a.max(b);
+    m + ((a - m).exp() + (b - m).exp()).ln()
+}
+
+/// CTC 損失（イシュー #2168）の拡張ラベル列 `l' = [blank, l_1, blank,
+/// l_2, …, blank]`（長さ `2·sample_targets.len() + 1`）を構築する。
+/// forward（[`ctc_loss_forward`]）と VJP（`crate::grad::ctc_loss_vjp`）が
+/// 共有する。
+pub(crate) fn ctc_extended_labels(sample_targets: &[i32], blank: usize) -> Vec<i32> {
+    let blank = blank as i32;
+    let mut ext = Vec::with_capacity(sample_targets.len() * 2 + 1);
+    ext.push(blank);
+    for &t in sample_targets {
+        ext.push(t);
+        ext.push(blank);
+    }
+    ext
+}
+
+/// CTC 損失（イシュー #2168）の `targets`（パディング形式 `[N, S]` また
+/// は連結形式 `[Σ target_lengths]`。`crate::loss_ops::ctc_loss` が形式
+/// 検査済み）を、サンプルごとの `Vec<i32>`（長さ `target_lengths[n]`）に
+/// 分解する。forward・VJP の双方が独立に呼ぶ（`Op::CtcLoss` payload は
+/// 生の `Tensor<i32>` を保持し、この分解結果はキャッシュしない——他の
+/// 損失 `Op` と同じ「backward 時に再計算する」設計。値検査は呼び出し元
+/// が済ませている前提）。
+pub(crate) fn ctc_sample_targets(targets: &Tensor<i32>, target_lengths: &[usize]) -> Vec<Vec<i32>> {
+    let data = dense_vec_i32(targets);
+    let shape = targets.shape();
+    let n = target_lengths.len();
+    let mut out = Vec::with_capacity(n);
+    if shape.len() == 1 {
+        // 連結形式: target_lengths の累積オフセットで切り出す。
+        let mut offset = 0usize;
+        for &tl in target_lengths {
+            out.push(data[offset..offset + tl].to_vec());
+            offset += tl;
+        }
+    } else {
+        // パディング形式 [N, S]: 各行の先頭 target_lengths[n] 要素のみ
+        // 使う（パディング部分は無視する）。
+        let s = shape[1];
+        for (i, &tl) in target_lengths.iter().enumerate() {
+            let start = i * s;
+            out.push(data[start..start + tl].to_vec());
+        }
+    }
+    out
+}
+
+/// サンプル 1 件分の CTC 負対数尤度（`f64`）。前向き再帰 α のみを計算
+/// し、VJP に必要な β は計算しない（forward 専用。`crate::grad::
+/// ctc_loss_vjp` は独立に α・β 両方を再計算する）。`t_n == 0` の境界は
+/// `crate::loss_ops::ctc_loss` doc §2.3 の規約どおり先頭で分岐する。
+fn ctc_sample_nll(
+    log_probs_data: &[f32],
+    n_total: usize,
+    c: usize,
+    t_n: usize,
+    sample_idx: usize,
+    sample_targets: &[i32],
+    blank: usize,
+) -> f64 {
+    if t_n == 0 {
+        return if sample_targets.is_empty() {
+            0.0
+        } else {
+            f64::INFINITY
+        };
+    }
+    let ext = ctc_extended_labels(sample_targets, blank);
+    let blank_i32 = blank as i32;
+    let l_prime = ext.len();
+    let lp_at =
+        |t: usize, k: usize| -> f64 { log_probs_data[t * n_total * c + sample_idx * c + k] as f64 };
+
+    let mut alpha_prev = vec![f64::NEG_INFINITY; l_prime];
+    alpha_prev[0] = lp_at(0, ext[0] as usize);
+    if l_prime > 1 {
+        alpha_prev[1] = lp_at(0, ext[1] as usize);
+    }
+    for t in 1..t_n {
+        let mut alpha_cur = vec![f64::NEG_INFINITY; l_prime];
+        for s in 0..l_prime {
+            let mut acc = alpha_prev[s];
+            if s >= 1 {
+                acc = log_add_exp_f64(acc, alpha_prev[s - 1]);
+            }
+            if s >= 2 && ext[s] != blank_i32 && ext[s] != ext[s - 2] {
+                acc = log_add_exp_f64(acc, alpha_prev[s - 2]);
+            }
+            alpha_cur[s] = acc + lp_at(t, ext[s] as usize);
+        }
+        alpha_prev = alpha_cur;
+    }
+
+    let last = l_prime - 1;
+    if l_prime == 1 {
+        -alpha_prev[last]
+    } else {
+        -log_add_exp_f64(alpha_prev[last], alpha_prev[last - 1])
+    }
+}
+
+/// CTC 損失の forward（PyTorch `nn.CTCLoss` 相当。イシュー #2168）。
+/// 数式・境界規約（`T_n=0`・`zero_infinity`・reduction）は
+/// `crate::loss_ops::ctc_loss` doc 参照。shape・値検査は呼び出し元
+/// （`crate::loss_ops::ctc_loss`）が済ませている前提。
+pub(crate) fn ctc_loss_forward(
+    log_probs: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    input_lengths: &[usize],
+    target_lengths: &[usize],
+    options: &crate::loss_ops::CtcLossOptions,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let shape = log_probs.shape();
+    let (_, n, c) = (shape[0], shape[1], shape[2]);
+    let data = dense_vec(log_probs);
+    let blank = options.blank_value();
+    let zero_infinity = options.zero_infinity_value();
+    let sample_targets = ctc_sample_targets(targets, target_lengths);
+
+    let mut sum_terms: f64 = 0.0;
+    let mut sum_nll: f64 = 0.0;
+    for sample in 0..n {
+        let t_n = input_lengths[sample];
+        let tl_n = target_lengths[sample];
+        let mut nll = ctc_sample_nll(&data, n, c, t_n, sample, &sample_targets[sample], blank);
+        if zero_infinity && nll.is_infinite() && nll > 0.0 {
+            nll = 0.0;
+        }
+        sum_terms += nll / (tl_n.max(1) as f64);
+        sum_nll += nll;
+    }
+
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if n == 0 {
+                0.0
+            } else {
+                (sum_terms / n as f64) as f32
+            }
+        }
+        crate::var::Reduction::Sum => sum_nll as f32,
+    };
+    build_tensor(vec![out], &[])
+}
+
+#[cfg(test)]
+mod ctc_loss_forward_tests {
+    use super::*;
+
+    // `log_add_exp_f64` の境界（NaN・±inf・-inf 同士。イシュー #2168・
+    // advisor 指摘の NaN 罠回避）を固定する。
+    #[test]
+    fn log_add_exp_f64_propagates_nan() {
+        assert!(log_add_exp_f64(f64::NAN, 0.0).is_nan());
+        assert!(log_add_exp_f64(0.0, f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn log_add_exp_f64_both_neg_infinity_is_neg_infinity() {
+        assert_eq!(
+            log_add_exp_f64(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            f64::NEG_INFINITY
+        );
+    }
+
+    #[test]
+    fn log_add_exp_f64_pos_infinity_wins_without_nan() {
+        assert_eq!(log_add_exp_f64(f64::INFINITY, 1.0), f64::INFINITY);
+        assert_eq!(log_add_exp_f64(1.0, f64::INFINITY), f64::INFINITY);
+        assert_eq!(
+            log_add_exp_f64(f64::INFINITY, f64::NEG_INFINITY),
+            f64::INFINITY
+        );
+    }
+
+    #[test]
+    fn log_add_exp_f64_finite_matches_naive() {
+        let a = -1.0_f64;
+        let b = -2.0_f64;
+        let expected = (a.exp() + b.exp()).ln();
+        assert!((log_add_exp_f64(a, b) - expected).abs() < 1e-12);
+    }
+}
+
 #[cfg(test)]
 mod cross_entropy_with_options_empty_tensor_overflow_tests {
     use super::*;

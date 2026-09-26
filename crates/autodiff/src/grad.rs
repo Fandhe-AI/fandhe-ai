@@ -762,6 +762,33 @@ pub(crate) fn vjp(
             };
             vec![(input, dinput), (target, dtarget)]
         }
+        Op::CtcLoss {
+            log_probs,
+            targets,
+            input_lengths,
+            target_lengths,
+            options,
+            reduction,
+        } => {
+            let log_probs_val = materialize_fallible(nodes, ops, log_probs)?;
+            let shape = log_probs_val.shape();
+            let n = if shape.len() == 3 { shape[1] } else { 0 };
+            let dlog_probs = if n == 0 {
+                build_tensor(vec![0f32; log_probs_val.numel()], shape)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0) as f64;
+                ctc_loss_vjp(
+                    log_probs_val,
+                    &targets,
+                    &input_lengths,
+                    &target_lengths,
+                    &options,
+                    reduction,
+                    g_value,
+                )
+            };
+            vec![(log_probs, dlog_probs)]
+        }
         Op::NllLoss {
             input,
             targets,
@@ -8002,6 +8029,167 @@ fn poisson_nll_loss_vjp(
         build_tensor(dinput, input.shape()),
         build_tensor(dtarget, input.shape()),
     )
+}
+
+/// `CtcLoss` の VJP（イシュー #2168）。数式・β の規約（現フレームの
+/// emission を含めない設計。`docs/autodiff-ctc-design.md` §2.4）は
+/// `crate::loss_ops::ctc_loss` doc 参照。forward
+/// （`eval::ctc_loss_forward`）とは独立に α・β を再計算する（`α` のみの
+/// forward と共有しない——他の損失 `Op` と同じ「backward 時に再計算
+/// する」設計）。`g_value` は upstream スカラ（出力 shape `[]`）、
+/// reduction ごとのサンプル別スケール（`Mean` は
+/// `g_value/(N·max(tl_n,1))`、`Sum` は `g_value`）はここで計算する
+/// （サンプルごとに `tl_n` が異なり単一の `scale` に閉じないため、
+/// 他損失と異なり呼び出し元では計算しない）。
+#[allow(clippy::too_many_arguments)]
+fn ctc_loss_vjp(
+    log_probs: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    input_lengths: &[usize],
+    target_lengths: &[usize],
+    options: &crate::loss_ops::CtcLossOptions,
+    reduction: Reduction,
+    g_value: f64,
+) -> Tensor<f32> {
+    let shape = log_probs.shape().to_vec();
+    let (_, n, c) = (shape[0], shape[1], shape[2]);
+    let mut grad = vec![0f32; log_probs.numel()];
+    if n == 0 {
+        return build_tensor(grad, &shape);
+    }
+
+    let data = dense_vec(log_probs);
+    let blank = options.blank_value();
+    let blank_i32 = blank as i32;
+    let zero_infinity = options.zero_infinity_value();
+    let sample_targets = eval::ctc_sample_targets(targets, target_lengths);
+
+    for sample in 0..n {
+        let t_n = input_lengths[sample];
+        let tl_n = target_lengths[sample];
+        if t_n == 0 {
+            // `T_n=0` は α／β 行列を持てない（tl_n=0 の nll=0 も
+            // tl_n>0 の nll=+inf も、いずれも寄与するフレームが
+            // 存在しないため勾配は初期値の全 0 のまま）。
+            continue;
+        }
+        let ext = eval::ctc_extended_labels(&sample_targets[sample], blank);
+        let l_prime = ext.len();
+        let last = l_prime - 1;
+        let lp_at = |t: usize, k: usize| -> f64 { data[t * n * c + sample * c + k] as f64 };
+
+        // α: [0, t_n) x [0, l_prime)（forward と同じ再帰。
+        // `eval::ctc_loss_forward` とは独立に再計算する）。
+        let mut alpha = vec![vec![f64::NEG_INFINITY; l_prime]; t_n];
+        alpha[0][0] = lp_at(0, ext[0] as usize);
+        if l_prime > 1 {
+            alpha[0][1] = lp_at(0, ext[1] as usize);
+        }
+        for t in 1..t_n {
+            for s in 0..l_prime {
+                let mut acc = alpha[t - 1][s];
+                if s >= 1 {
+                    acc = eval::log_add_exp_f64(acc, alpha[t - 1][s - 1]);
+                }
+                if s >= 2 && ext[s] != blank_i32 && ext[s] != ext[s - 2] {
+                    acc = eval::log_add_exp_f64(acc, alpha[t - 1][s - 2]);
+                }
+                alpha[t][s] = acc + lp_at(t, ext[s] as usize);
+            }
+        }
+
+        let nll = if l_prime == 1 {
+            -alpha[t_n - 1][last]
+        } else {
+            -eval::log_add_exp_f64(alpha[t_n - 1][last], alpha[t_n - 1][last - 1])
+        };
+
+        if nll.is_nan() {
+            // `log_probs` 由来の `NaN` 伝播（値検査は行わない方針。
+            // `crate::loss_ops::ctc_loss` doc 参照）。
+            for t in 0..t_n {
+                for k in 0..c {
+                    grad[t * n * c + sample * c + k] = f32::NAN;
+                }
+            }
+            continue;
+        }
+        if nll.is_infinite() && nll > 0.0 {
+            if zero_infinity {
+                // このサンプルの寄与は損失・勾配とも 0（初期値のまま）。
+                continue;
+            }
+            // 整列不能・zero_infinity=false: 数学的に未定義のため
+            // 有効フレームの勾配を明示的に NaN とする（`exp(-inf+inf)`
+            // の NaN に暗黙に任せない。PyTorch も NaN を返す規約に
+            // 合わせる）。
+            for t in 0..t_n {
+                for k in 0..c {
+                    grad[t * n * c + sample * c + k] = f32::NAN;
+                }
+            }
+            continue;
+        }
+
+        // β: 現フレーム t の emission を α 側で 1 回のみ数えるよう、
+        // β_t(s) は「frames [t+1, t_n) だけを使った完了確率」と定義する
+        // （標準 Graves 規約——α・β 双方が現フレームを含み lcab から
+        // lp を 1 回引く——は lp=-inf で -inf-(-inf)=NaN になるため
+        // 不採用。`docs/autodiff-ctc-design.md` §2.4）。
+        let mut beta = vec![vec![f64::NEG_INFINITY; l_prime]; t_n];
+        beta[t_n - 1][last] = 0.0;
+        if l_prime > 1 {
+            beta[t_n - 1][last - 1] = 0.0;
+        }
+        for t in (0..t_n - 1).rev() {
+            for s in 0..l_prime {
+                let mut acc = lp_at(t + 1, ext[s] as usize) + beta[t + 1][s];
+                if s + 1 < l_prime {
+                    acc = eval::log_add_exp_f64(
+                        acc,
+                        lp_at(t + 1, ext[s + 1] as usize) + beta[t + 1][s + 1],
+                    );
+                }
+                if s + 2 < l_prime && ext[s + 2] != blank_i32 && ext[s + 2] != ext[s] {
+                    acc = eval::log_add_exp_f64(
+                        acc,
+                        lp_at(t + 1, ext[s + 2] as usize) + beta[t + 1][s + 2],
+                    );
+                }
+                beta[t][s] = acc;
+            }
+        }
+
+        let scale = match reduction {
+            Reduction::Mean => g_value / (n as f64 * (tl_n.max(1) as f64)),
+            Reduction::Sum => g_value,
+        };
+
+        for t in 0..t_n {
+            // `lcab_{t,k} = logsumexp_{s: ext[s]=k}(alpha[t][s]+beta[t][s])`。
+            // 同一クラス k が複数の拡張ラベル位置に現れうるため
+            // logaddexp で集約する（単純な max ではなく厳密な和）。
+            let mut lcab = vec![f64::NEG_INFINITY; c];
+            for s in 0..l_prime {
+                let k = ext[s] as usize;
+                let v = alpha[t][s] + beta[t][s];
+                lcab[k] = eval::log_add_exp_f64(lcab[k], v);
+            }
+            for (k, &lcab_k) in lcab.iter().enumerate() {
+                if lcab_k == f64::NEG_INFINITY {
+                    // このクラスはこの時刻で寄与しない（勾配 0 のまま）。
+                    continue;
+                }
+                // γ_{t,k} = exp(lcab − log P) = exp(lcab + nll)
+                // （`nll = −log P` なので `log P = −nll`）。
+                // ∂nll/∂lp[t,n,k] = −γ_{t,k}。
+                let gamma = (lcab_k + nll).exp();
+                grad[t * n * c + sample * c + k] = (-gamma * scale) as f32;
+            }
+        }
+    }
+
+    build_tensor(grad, &shape)
 }
 
 /// `CrossEntropyLossWithOptions` の VJP（イシュー #2166）。
