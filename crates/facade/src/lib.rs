@@ -4498,6 +4498,87 @@ struct OptimizerExtHoldDoctestGuard;
 #[allow(dead_code)]
 struct OptimizerStateDictHoldDoctestGuard;
 
+/// イシュー #2176（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
+/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// `OptimizerExtHoldDoctestGuard`（#2171）と同型の「正のプローブ 1
+/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_lr_scheduler_ext_hold_probe::{MultiStepLr,
+/// CosineAnnealingWarmRestarts, CyclicLr, LambdaLr, SequentialLr}` を
+/// 導入し、5 個すべてを引数に取る `__probe` 関数を書く。facade が
+/// どの経路（単一行・複数行・ネストした group での `pub use`・別名
+/// エクスポート・facade 独自の `struct`／`type` 宣言）でこれらの名前を
+/// 公開しても、ローカル定義との glob 衝突（型名の場合。E0659 等）で
+/// コンパイルが失敗する。
+///
+/// `MultiStepLr`・`CosineAnnealingWarmRestarts`・`CyclicLr`・
+/// `LambdaLr`・`SequentialLr` は `fandhe_ai_autodiff::nn::optim` に
+/// 実装済み（内部クレート限定。`crates/autodiff/src/nn/optim/
+/// lr_scheduler.rs`）だが、facade（`fandhe_ai::optim`）からの
+/// 再エクスポートは未承認のため保留する。`ConstantLr`／`StepLr`／
+/// `CosineAnnealingLr`／`ExponentialLr`／`LinearWarmupLr`／
+/// `OneCycleLr`（`OneCycleLrConfig`／`OneCycleAnneal` も含む）が
+/// `crates/facade/src/optim.rs` で素の再エクスポートを受けているのとは
+/// 対照的に、本 5 種は `optim.rs` へ一切追記しない（承認事項の位置づけ
+/// は `docs/autodiff-lr-scheduler-ext-decision.md` §8「承認事項」を
+/// 参照）。型（`struct`）のみが対象で、いずれも `compat::Sequential`／
+/// `Var` への inherent メソッド追加を伴わないため
+/// （`nn/optim/mod.rs` doc 参照）、トレイトプローブは不要——型名の
+/// 衝突のみで検出できる。`LambdaLr` は generic（`LambdaLr<F>`）だが、
+/// 型パラメータを持たないローカル `pub struct LambdaLr;` との衝突は
+/// 型引数の有無に関わらず名前解決の時点で発生するため、正のプローブは
+/// 非 generic な `struct` 宣言のままでよい。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// lr_scheduler_ext_hold_doctest_globs_all_pub_modules`・
+/// `lr_scheduler_ext_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_lr_scheduler_ext_items`）との
+/// 多層防御の位置づけは decision doc §8 を参照。既存の
+/// `optim_module_reexports_exactly_expected_surface`（`crates/facade/
+/// tests/api_surface.rs`）の期待集合は本イシューで変更していない
+/// （変更すれば同テストが検出する）。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_lr_scheduler_ext_hold_probe {
+///     pub struct MultiStepLr;
+///     pub struct CosineAnnealingWarmRestarts;
+///     pub struct CyclicLr;
+///     pub struct LambdaLr;
+///     pub struct SequentialLr;
+/// }
+/// use __fandhe_lr_scheduler_ext_hold_probe::*;
+///
+/// fn __probe(
+///     _: MultiStepLr,
+///     _: CosineAnnealingWarmRestarts,
+///     _: CyclicLr,
+///     _: LambdaLr,
+///     _: SequentialLr,
+/// ) {
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct LrSchedulerExtHoldDoctestGuard;
+
 /// イシュー #2198（親 #2172「LBFGS optimizer（Hessian 近似）の実装」・
 /// ルート #2131「PyTorch／TF 置き換えの API 網羅」）の facade 公開保留を
 /// 固定する doctest 足場。`OptimizerExtHoldDoctestGuard`（#2171）と同型の
