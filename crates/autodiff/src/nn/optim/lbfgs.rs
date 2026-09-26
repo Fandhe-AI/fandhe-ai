@@ -49,6 +49,24 @@
 //!   等）が含まれる場合は closure を呼ぶ・呼ばないに関わらず
 //!   `InvalidArgument` を返し、`self` の状態は変更しない（イシュー
 //!   #2197 レビュー是正・discussion_r4110451838/r4110471293）。
+//! - **入力・内部縮約の finite 性検証の拡張**（PR #2295 レビュー是正・
+//!   discussion_r4110471294/r4110528423 系）: 上記の「更新後の `x`」
+//!   検査に加え、次の各点も同じ `ensure_finite_slice`／`dot_f64` の
+//!   fail-closed 契約で検査する: (1) 呼び出し元が渡す入力 `params`
+//!   自体（closure 呼び出し前・shape 検証の直後）、(2) `f64`
+//!   アキュムレータを `f32` へ丸める全縮約 `dot_f64`（`ys`/`yy`/
+//!   two-loop の `al_i`/`be_i`/`gtd`/`gtd_new` の全呼び出し箇所。丸め
+//!   自体が `f32::MAX` を超えて `inf`/`-inf` になりうるため）、
+//!   (3) `h_diag = ys / yy` の除算結果、(4) 二段ループ recursion 後の
+//!   探索方向 `d`、(5) 初回ステップ幅の分母 `sum_abs =
+//!   Σ|flat_grad|` を `f32` へキャストした結果（overflow して `inf`
+//!   になると `1.0/inf == 0.0` で `t = 0` の no-op ステップとして
+//!   異常が握り潰され、そのまま成功終了してしまうマスキングを防ぐ）。
+//!   いずれも検出時は `self` の状態を変更せず `InvalidArgument` を
+//!   返す。**この拡張が変えるのは「異常系（従来は非有限値を検出
+//!   できず握り潰していた入力）の扱いのみ」であり、有限な入力に
+//!   対する `dot_f64` の `f32` 丸め自体・正常系の出力は変えない**
+//!   （既存の PyTorch 参照テストの期待値・許容誤差は不変）。
 //! - 対象外: `maximize`・複素数パラメータ・parameter group・sparse
 //!   勾配。facade（`fandhe_ai::optim`）への公開・`compile()` 統合は
 //!   別イシュー #2198（ユーザー承認を要する facade 公開面拡張）。
@@ -345,6 +363,15 @@ impl Lbfgs {
             }
         }
 
+        // 入力 `params` 自体の非有限値を closure 呼び出し前に検査する
+        // （codex-review 指摘・PR #2295 discussion_r4110451838 系の
+        // 横展開: 呼び出し元が既に非有限な値〈NaN/inf〉を渡した場合、
+        // これまでは無検査で closure に渡っていた）。ここで得た
+        // フラット化済み `x` はそのまま後続の作業コピー初期値として
+        // 再利用し、`flatten_tensors(params)` の再計算を避ける。
+        let mut x = flatten_tensors(params);
+        ensure_finite_slice("Lbfgs::try_step_closure: params", &x)?;
+
         // 初回 closure 評価（現在のパラメータそのものに対して評価する
         // ので x = flatten(params) を再構築する必要はない）。
         let mut func_evals = self.func_evals;
@@ -381,10 +408,10 @@ impl Lbfgs {
         // 読まれることはないため `self` へは保持しない）。
         let mut prev_loss: f64;
 
-        // `x`: 現在の実パラメータ値のフラット化。line search・固定
-        // ステップの各反復末尾で実際に更新される（PyTorch
-        // `self._add_grad(t, d)` に相当）。
-        let mut x = flatten_tensors(params);
+        // `x`（現在の実パラメータ値のフラット化。line search・固定
+        // ステップの各反復末尾で実際に更新される。PyTorch
+        // `self._add_grad(t, d)` に相当）は関数冒頭で検証済みの値を
+        // そのまま使う（上記 `ensure_finite_slice` 参照）。
 
         let max_eval = self.resolved_max_eval;
         let mut current_evals = 1usize;
@@ -420,25 +447,34 @@ impl Lbfgs {
                     .map(|(&g, &pg)| g - pg)
                     .collect();
                 let s: Vec<f32> = d.iter().map(|&di| di * t).collect();
-                let ys = dot_f64(&y, &s);
+                let ys = dot_f64("Lbfgs::try_step_closure: y·s (ys)", &y, &s)?;
                 if ys > 1e-10 {
                     if old_dirs.len() == self.config.history_size {
                         old_dirs.pop_front();
                         old_stps.pop_front();
                         ro.pop_front();
                     }
-                    let yy = dot_f64(&y, &y);
+                    let yy = dot_f64("Lbfgs::try_step_closure: y·y (yy)", &y, &y)?;
                     old_dirs.push_back(y);
                     old_stps.push_back(s);
                     ro.push_back(1.0 / ys);
                     h_diag = ys / yy;
+                    // `ys`/`yy` は dot_f64 の f32 overflow 検査を通過済みだが
+                    // 除算 `ys/yy` 自体が非有限になりうる（`yy` が極小の
+                    // 場合等）ため個別に検査する（P2 是正の横展開。codex-review
+                    // 指摘・PR #2295 discussion_r4110471294 系）。
+                    ensure_finite_slice(
+                        "Lbfgs::try_step_closure: h_diag (ys/yy)",
+                        std::slice::from_ref(&h_diag),
+                    )?;
                 }
 
                 let num_old = old_dirs.len();
                 let mut al = vec![0f32; num_old];
                 let mut q: Vec<f32> = flat_grad.iter().map(|&g| -g).collect();
                 for i in (0..num_old).rev() {
-                    let al_i = dot_f64(&old_stps[i], &q) * ro[i];
+                    let al_i = dot_f64("Lbfgs::try_step_closure: two-loop al_i", &old_stps[i], &q)?
+                        * ro[i];
                     al[i] = al_i;
                     for k in 0..q.len() {
                         q[k] = f32::mul_add(-al_i, old_dirs[i][k], q[k]);
@@ -446,13 +482,18 @@ impl Lbfgs {
                 }
                 let mut r: Vec<f32> = q.iter().map(|&qi| qi * h_diag).collect();
                 for i in 0..num_old {
-                    let be_i = dot_f64(&old_dirs[i], &r) * ro[i];
+                    let be_i = dot_f64("Lbfgs::try_step_closure: two-loop be_i", &old_dirs[i], &r)?
+                        * ro[i];
                     let coeff = al[i] - be_i;
                     for k in 0..r.len() {
                         r[k] = f32::mul_add(coeff, old_stps[i][k], r[k]);
                     }
                 }
                 d = r;
+                // 二段ループ（two-loop recursion）で求めた探索方向 `d` を
+                // 検査する（`al`/`be`/`h_diag` いずれかの経路経由で非有限が
+                // 混入していないことの最終確認。P2 是正の横展開）。
+                ensure_finite_slice("Lbfgs::try_step_closure: search direction d", &d)?;
             }
 
             prev_flat_grad = Some(flat_grad.clone());
@@ -460,12 +501,21 @@ impl Lbfgs {
 
             t = if n_iter_global == 1 {
                 let sum_abs = abs_sum_f64(&flat_grad) as f32;
+                // `Σ|flat_grad|` が f32 overflow して `inf` になる場合、
+                // 検査せずに進むと `1.0/inf == 0.0` により `t = 0` の
+                // no-op ステップとして異常を隠蔽したまま成功終了して
+                // しまう（マスキング防止。P2 是正の横展開・codex-review
+                // 指摘・PR #2295 discussion_r4110471294 系）。
+                ensure_finite_slice(
+                    "Lbfgs::try_step_closure: sum_abs(flat_grad) for initial step size",
+                    std::slice::from_ref(&sum_abs),
+                )?;
                 1.0f32.min(1.0 / sum_abs) * self.config.lr
             } else {
                 self.config.lr
             };
 
-            let gtd = dot_f64(&flat_grad, &d);
+            let gtd = dot_f64("Lbfgs::try_step_closure: g·d (gtd)", &flat_grad, &d)?;
             if gtd > -self.config.tolerance_change {
                 break;
             }
@@ -488,7 +538,7 @@ impl Lbfgs {
                     for k in 0..x.len() {
                         x[k] = f32::mul_add(new_t, d[k], x[k]);
                     }
-                    ensure_finite_params(&x)?;
+                    ensure_finite_slice("Lbfgs::try_step_closure: x += t*d (strong Wolfe)", &x)?;
                     t = new_t;
                     loss = f64::from(new_f);
                     flat_grad = new_g;
@@ -510,7 +560,7 @@ impl Lbfgs {
                     // のみを変更しており `self.*` へのコミットは関数末尾
                     // でのみ行うため、ここで早期 return しても状態不変
                     // 契約を満たす）。
-                    ensure_finite_params(&x)?;
+                    ensure_finite_slice("Lbfgs::try_step_closure: x += t*d (fixed step)", &x)?;
                     if n_iter_local != self.config.max_iter {
                         let trial_params = unflatten_tensors(&x, &slot_shapes)?;
                         let (new_f, new_grads) = closure(&trial_params)?;
@@ -624,13 +674,27 @@ fn unflatten_tensors(
 }
 
 /// `a·b` を `f64` アキュムレータで index 順に蓄積し最後に 1 回 `f32`
-/// へ丸める（縮約方針。冒頭 doc 参照）。
-fn dot_f64(a: &[f32], b: &[f32]) -> f32 {
+/// へ丸める（縮約方針。冒頭 doc 参照）。`f64` の縮約自体は事実上
+/// overflow しないが、最後の `f32` への丸めは overflow しうる（例:
+/// 巨大な勾配要素の内積 `g·d` が `f32::MAX` を超え `-inf`/`inf` に
+/// なる）。呼び出し元はいずれも縮約結果をスカラーとして以後の
+/// 判定・演算に使うため、ここで検査せずに非有限値を通すと
+/// `NaN > 閾値` は常に `false` になる、あるいは `inf` が後続の
+/// 演算へ伝播するといった形で異常が握り潰される（P2 是正・
+/// codex-review 指摘・PR #2295 discussion_r4110471294 系）。
+fn dot_f64(label: &str, a: &[f32], b: &[f32]) -> Result<f32, AutodiffError> {
     let mut acc = 0f64;
     for i in 0..a.len() {
         acc = f64::from(a[i]).mul_add(f64::from(b[i]), acc);
     }
-    acc as f32
+    let v = acc as f32;
+    if !v.is_finite() {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Lbfgs: {label} overflowed to a non-finite f32 value when \
+             rounding the f64 accumulator (acc={acc}); state left unchanged"
+        )));
+    }
+    Ok(v)
 }
 
 /// `Σ|a_i|` を `f64` アキュムレータで蓄積する（縮約方針）。
@@ -646,20 +710,24 @@ fn abs_max(a: &[f32]) -> f32 {
     a.iter().fold(0f32, |m, &x| m.max(x.abs()))
 }
 
-/// `x += t·d` 更新直後のフラット化パラメータに非有限値
-/// （overflow 由来の `inf`／`NaN`）が含まれないか検査する
-/// （`.claude/rules/security.md` A03。イシュー #2197 レビュー是正・
-/// discussion_r4110451838/r4110471293・discussion_r4110528423）。呼び出し元
-/// [`Lbfgs::try_step_closure`]・[`directional_evaluate`] はいずれもローカル
-/// 作業コピー上で反復するため、ここで `Err` を返しても `self` の状態は
-/// 変更されない。
-fn ensure_finite_params(x: &[f32]) -> Result<(), AutodiffError> {
+/// フラット化ベクトルに非有限値（overflow 由来の `inf`／`NaN`）が
+/// 含まれないか検査する汎用ヘルパー（`.claude/rules/security.md`
+/// A03。イシュー #2197 レビュー是正・
+/// discussion_r4110451838/r4110471293・discussion_r4110528423。PR #2295
+/// レビュー是正で `ensure_finite_params` から汎用化し検査対象を
+/// 拡張: 入力 `params`・`x += t·d` 更新後の `x`・二段ループ後の探索
+/// 方向 `d`・`h_diag`・初回ステップ計算の `sum_abs` 等の単一要素
+/// スカラーにも同じヘルパーを使う）。呼び出し元
+/// [`Lbfgs::try_step_closure`]・[`directional_evaluate`] はいずれも
+/// ローカル作業コピー上で反復するため、ここで `Err` を返しても
+/// `self` の状態は変更されない。`label` はエラーメッセージに検査
+/// 対象を記録し、複数の検査点を区別できるようにする。
+fn ensure_finite_slice(label: &str, x: &[f32]) -> Result<(), AutodiffError> {
     if x.iter().any(|v| !v.is_finite()) {
-        return Err(AutodiffError::InvalidArgument(
-            "Lbfgs: parameter update x += t*d produced a non-finite value \
-             (likely overflow); state left unchanged"
-                .to_string(),
-        ));
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Lbfgs: {label} contains a non-finite value (likely overflow); \
+             state left unchanged"
+        )));
     }
     Ok(())
 }
@@ -721,7 +789,7 @@ where
     // （codex-review 指摘・PR #2295 discussion_r4110528423。有限な初期パラメータ・
     // 勾配・学習率でも t が大きい場合は overflow しうるため、closure 呼び出し前に
     // 検証する必要がある）。
-    ensure_finite_params(&trial)?;
+    ensure_finite_slice("Lbfgs::directional_evaluate: trial = x + t*d", &trial)?;
     let trial_params = unflatten_tensors(&trial, slot_shapes)?;
     let (loss, grads) = closure(&trial_params)?;
     validate_closure_output(slot_shapes, loss, &grads)?;
@@ -780,7 +848,7 @@ where
 
     let (mut f_new, mut g_new) = directional_evaluate(closure, slot_shapes, x, t, d)?;
     let mut ls_func_evals = 1usize;
-    let mut gtd_new = dot_f64(&g_new, d);
+    let mut gtd_new = dot_f64("Lbfgs::strong_wolfe: g_new·d (gtd_new, initial)", &g_new, d)?;
 
     let mut t_prev = 0f32;
     let mut f_prev = f0;
@@ -846,7 +914,11 @@ where
         f_new = fe;
         g_new = ge;
         ls_func_evals += 1;
-        gtd_new = dot_f64(&g_new, d);
+        gtd_new = dot_f64(
+            "Lbfgs::strong_wolfe: g_new·d (gtd_new, bracket search)",
+            &g_new,
+            d,
+        )?;
         ls_iter += 1;
     }
 
@@ -917,7 +989,7 @@ where
         f_new = fe;
         g_new = ge;
         ls_func_evals += 1;
-        gtd_new = dot_f64(&g_new, d);
+        gtd_new = dot_f64("Lbfgs::strong_wolfe: g_new·d (gtd_new, zoom)", &g_new, d)?;
         ls_iter += 1;
 
         if f_new > f0 + C1 * t * gtd0 || f_new >= bracket_f[low_pos] {
@@ -1354,7 +1426,7 @@ mod tests {
     #[test]
     fn directional_evaluate_rejects_non_finite_trial_without_calling_closure() {
         // `trial = x + t·d` の overflow で非有限値が生じる場合、
-        // `unflatten_tensors`／`closure` 呼び出し前に `ensure_finite_params`
+        // `unflatten_tensors`／`closure` 呼び出し前に `ensure_finite_slice`
         // で弾くことを直接検証する（codex-review 指摘・PR #2295
         // discussion_r4110528423）。`directional_evaluate` は同一モジュール
         // 内 private のためテストから直接呼び出せる。
@@ -1374,5 +1446,88 @@ mod tests {
         );
         assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
         assert!(!called, "非有限な trial は closure 呼び出し前に弾かれる");
+    }
+
+    /// P1 是正: 呼び出し元が渡す入力 `params` 自体に非有限値（NaN）が
+    /// 含まれる場合、closure を 1 度も呼ばず `InvalidArgument` を返す
+    /// こと（codex-review 指摘・PR #2295 discussion。lbfgs.rs:345 付近）。
+    #[test]
+    fn rejects_non_finite_params_without_calling_closure() {
+        let mut opt = Lbfgs::new(LbfgsConfig::default()).unwrap();
+        let mut called = false;
+        let param = t(vec![f32::NAN], &[1]);
+        let result = opt.step_closure(&[param], |_p| {
+            called = true;
+            (0.0, vec![t(vec![1.0], &[1])])
+        });
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+        assert!(!called, "非有限な params では closure を呼んではならない");
+        assert_eq!(opt.n_iter(), 0);
+        assert_eq!(opt.func_evals(), 0);
+    }
+
+    /// P2 是正: `gtd = dot_f64(&flat_grad, &d)` の `f64 → f32` 丸めが
+    /// overflow して `-inf` になる場合を検出すること（lbfgs.rs:468
+    /// 付近）。初回反復は `d = -flat_grad` なので
+    /// `gtd = -Σ flat_grad_i²`。勾配要素を `3e19` にすると
+    /// `Σ flat_grad_i² = 9e38` は `f64` としては有限だが、符号反転後
+    /// `f32` へ丸めると `f32::MAX`（約 `3.4e38`）を超え `-inf` になる。
+    /// 是正前は `gtd.is_finite()` を検査しないため `NaN`/`inf` でも
+    /// `gtd > -tolerance_change` が `false` のまま line search へ進み
+    /// うる（`NaN` の場合は比較が常に `false` になり `break` が効かない
+    /// マスキング）。
+    #[test]
+    fn rejects_gtd_overflow_from_dot_f64_rounding() {
+        let mut opt = Lbfgs::new(LbfgsConfig::default()).unwrap();
+        let param = t(vec![1.0], &[1]);
+        let result = opt.step_closure(&[param], |_p| (0.0, vec![t(vec![3e19], &[1])]));
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+        assert_eq!(opt.n_iter(), 0, "エラー時は n_iter が呼び出し前のまま");
+        assert_eq!(
+            opt.func_evals(),
+            0,
+            "エラー時は func_evals が呼び出し前のまま（初回 closure 評価も \
+             ローカル作業コピー確定前のため未コミット）"
+        );
+    }
+
+    /// `dot_f64` 単体で `f64` アキュムレータの `f32` への丸めが
+    /// overflow する場合に `Err` を返すこと（P2 是正の縮約ヘルパー
+    /// 本体の直接検証。private のため同一モジュール内テストから
+    /// 呼び出す）。
+    #[test]
+    fn dot_f64_rejects_f32_rounding_overflow() {
+        let a = [3e19f32];
+        let b = [3e19f32];
+        let result = dot_f64("test: a·b", &a, &b);
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn dot_f64_accepts_finite_result() {
+        let a = [1.0f32, 2.0, 3.0];
+        let b = [4.0f32, 5.0, 6.0];
+        // 1*4 + 2*5 + 3*6 = 32（`f64` 縮約→`f32` 丸めが有限入力の正常系
+        // 出力を変えないことの確認。既存の縮約方針・丸め自体は不変）。
+        assert_eq!(dot_f64("test: a·b", &a, &b).unwrap(), 32.0);
+    }
+
+    /// P2 是正の横展開: 初回ステップ幅の分母 `sum_abs =
+    /// Σ|flat_grad|` を `f32` へキャストした結果が overflow する場合を
+    /// 検出すること。単一要素の勾配自体は `f32::MAX` 未満に収める
+    /// 必要があるため、`f64` 縮約後の合計が `f32::MAX` を超えるよう
+    /// 複数要素（各 `2e38`）の和で構成する（`h_diag`/`d` の非有限
+    /// ケースは、正常系での history 更新〈`ys > 1e-10`〉を経由しつつ
+    /// 二段ループの al/be/h_diag 経路のみを overflow させる入力の
+    /// 構成が複雑なため見送る。dot_f64／sum_abs の直接検査で縮約
+    /// overflow の検出経路自体は担保できている）。
+    #[test]
+    fn rejects_sum_abs_overflow_for_initial_step_size() {
+        let mut opt = Lbfgs::new(LbfgsConfig::default()).unwrap();
+        let param = t(vec![1.0, 1.0], &[2]);
+        let result = opt.step_closure(&[param], |_p| (0.0, vec![t(vec![2e38, 2e38], &[2])]));
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+        assert_eq!(opt.n_iter(), 0);
+        assert_eq!(opt.func_evals(), 0);
     }
 }
