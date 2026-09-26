@@ -204,12 +204,24 @@
 //! の `MhaOptionsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs`
 //! の否定ガードで固定。`docs/autodiff-mha-options-decision.md` §承認
 //! 事項）。
+//! イシュー #2179（親 #2131）で [`ExponentialMovingAverage`]（`ema`
+//! モジュール）を追加した。学習中にパラメータの shadow copy を保持し
+//! `update`／`update_named`／`update_from_module` で指数平滑更新、
+//! `apply`／`restore`（[`Module::load_state_dict`] へ委譲）で shadow
+//! 重みへ一時差し替え・復帰する。新規 `Op`／`BackendOps`／VJP／カーネル
+//! は追加しない（ホスト `Tensor<f32>` への要素ごとの `f32::mul_add`
+//! のみ）。facade（`fandhe_ai::optim` 再エクスポート・`compat::
+//! FitConfig` の `use_ema`／`ema_decay` 相当追加）は未承認のため保留
+//! する（`crates/facade/src/lib.rs` の `EmaHoldDoctestGuard`・
+//! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
+//! `docs/autodiff-ema-decision.md` §4 承認事項）。
 
 mod attention;
 mod batch_norm;
 mod container;
 mod conv;
 mod dropout;
+mod ema;
 mod embedding;
 mod embedding_bag;
 mod flatten;
@@ -247,6 +259,7 @@ pub use conv::{
     ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, conv2d_forward_low_precision,
 };
 pub use dropout::{AlphaDropout, Dropout, Dropout2d};
+pub use ema::ExponentialMovingAverage;
 pub use embedding::{Embedding, EmbeddingVars};
 pub use embedding_bag::{EmbeddingBag, EmbeddingBagMode, EmbeddingBagVars};
 pub use flatten::Flatten;

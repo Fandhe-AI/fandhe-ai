@@ -4556,6 +4556,116 @@ struct LrSchedulerExtHoldDoctestGuard;
 #[allow(dead_code)]
 struct LbfgsHoldDoctestGuard;
 
+/// イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）の
+/// facade 公開保留を固定する doctest 足場。`LbfgsHoldDoctestGuard`
+/// （#2198）と同型の、2 系統の否定ガードを 1 ブロックで兼ねる方式を
+/// 採る。
+///
+/// [`fandhe_ai_autodiff::nn::ExponentialMovingAverage`]（内部クレート
+/// 限定。`crates/autodiff/src/nn/ema.rs`。イシュー #2179）は facade
+/// （`fandhe_ai::optim` 等）から再エクスポートしておらず、`compat::
+/// FitConfig`（`fit(use_ema=true)` 相当のフィールド／メソッド追加）・
+/// `compat::Sequential`（EMA 適用・復元メソッド追加）への接続も未実装
+/// のまま保留する（`docs/autodiff-ema-decision.md` §4「承認事項」節。
+/// 親 #2131 の「facade 公開面拡張は設計判断記録 → 承認 → 実装の 2 段」
+/// 規則に基づく）。
+///
+/// 1. **型名の再エクスポート・独自宣言**（`OptimizerExtHoldDoctestGuard`
+///    と同じ glob 衝突方式）: facade の全 `pub mod` を glob import した
+///    スコープに、本ブロック内でのみ定義したローカル
+///    `__fandhe_ema_hold_probe::ExponentialMovingAverage` を導入し、
+///    それを引数に取る `__probe_type` 関数を書く。facade がどの経路
+///    でこの名前を公開しても、ローカル定義との glob 衝突（E0659 等）で
+///    コンパイルが失敗する。ソース走査ガードは `crates/facade/tests/
+///    api_surface.rs::facade_does_not_reexport_or_declare_ema_items`。
+/// 2. **`compat::FitConfig`／`compat::Sequential` への inherent メソッド
+///    追加**（`VarCustomHoldDoctestGuard`〈#2064〉と同じマーカー型
+///    トレイト方式）: ローカル `__FandheEmaHoldProbe` トレイト
+///    （`use_ema`／`ema_decay` という名前のメソッドを持つ）を両型へ
+///    実装し、メソッド形・型パス形の両方で呼び出す。facade がどちらか
+///    の型へ同名の inherent メソッドを追加すると、優先解決される
+///    inherent メソッドの戻り値の型がプローブの期待型と一致せず型
+///    不一致でコンパイルが失敗する（承認後の実際のメソッド名・シグ
+///    ネチャは `docs/autodiff-ema-decision.md` §5「承認後の facade
+///    仕様案」で未確定のため、本足場の `use_ema`／`ema_decay` は
+///    「これらの名前を持つ inherent メソッドが facade 型に生えたら
+///    検出する」という最小契約に留める）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// ema_hold_doctest_globs_all_pub_modules`・
+/// `ema_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_ema_items`）との多層防御の
+/// 位置づけは `docs/autodiff-ema-decision.md` §4 を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_ema_hold_probe {
+///     pub struct ExponentialMovingAverage;
+/// }
+/// use __fandhe_ema_hold_probe::*;
+///
+/// fn __probe_type(_: ExponentialMovingAverage) {}
+///
+/// struct __FandheEmaHoldMarker;
+///
+/// trait __FandheEmaHoldProbe {
+///     fn use_ema(&self) -> __FandheEmaHoldMarker;
+///     fn ema_decay(&self) -> __FandheEmaHoldMarker;
+/// }
+///
+/// impl __FandheEmaHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn use_ema(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+///     fn ema_decay(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+/// }
+///
+/// impl __FandheEmaHoldProbe for fandhe_ai::compat::Sequential {
+///     fn use_ema(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+///     fn ema_decay(&self) -> __FandheEmaHoldMarker {
+///         __FandheEmaHoldMarker
+///     }
+/// }
+///
+/// fn __probe_fit_config(x: &fandhe_ai::compat::FitConfig) {
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::FitConfig::use_ema(x);
+///     let _: __FandheEmaHoldMarker = x.use_ema();
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::FitConfig::ema_decay(x);
+///     let _: __FandheEmaHoldMarker = x.ema_decay();
+/// }
+///
+/// fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::Sequential::use_ema(x);
+///     let _: __FandheEmaHoldMarker = x.use_ema();
+///     let _: __FandheEmaHoldMarker = fandhe_ai::compat::Sequential::ema_decay(x);
+///     let _: __FandheEmaHoldMarker = x.ema_decay();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct EmaHoldDoctestGuard;
+
 /// イシュー #2169（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 /// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
 /// `OptimizerExtHoldDoctestGuard`（#2171）が型名の glob 衝突を使うのに
