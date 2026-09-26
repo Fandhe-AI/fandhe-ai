@@ -78,6 +78,28 @@ fn l1_loss_forward_mean_and_sum_match_analytic_value() {
     assert!((scalar(&sum.to_tensor()) - 2.5).abs() < 1e-6);
 }
 
+// `pred=[f32::MAX, f32::MAX]`・`target=[0, 0]` は `|diff|` の和が
+// `f32` の範囲を超えて `inf` になるが、平均は `f32::MAX` に収まる
+// 有限値（codex-review 指摘・イシュー #2166 PR #2283。`f64` の和を
+// `f64` のまま `numel` で割ってから 1 回だけ `f32` へ downcast する
+// 契約の回帰テスト）。
+#[test]
+fn l1_loss_mean_divides_in_f64_before_downcast_to_avoid_overflow() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let pred = tape.var(&f32_tensor(&[f32::MAX, f32::MAX], &[2]));
+    let target = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+
+    let mean = loss_ops::l1_loss(&pred, &target, Reduction::Mean).unwrap();
+    let got = scalar(&mean.to_tensor());
+    assert!(got.is_finite(), "mean は有限値であるべき: {got}");
+    assert!((got - f32::MAX).abs() < 1e-3 * f32::MAX, "got={got}");
+
+    // Sum は仕様どおり overflow して inf のままである（Mean のみが
+    // 除算順序の修正対象）。
+    let sum = loss_ops::l1_loss(&pred, &target, Reduction::Sum).unwrap();
+    assert!(scalar(&sum.to_tensor()).is_infinite());
+}
+
 #[test]
 fn l1_loss_empty_numel_returns_zero_for_mean_and_sum() {
     let tape = Tape::new_with_ops(common::naive_ops());

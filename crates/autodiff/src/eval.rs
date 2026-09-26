@@ -4251,16 +4251,21 @@ pub(crate) fn l1_loss_forward(
     for (&p, &t) in pred_data.iter().zip(target_data.iter()) {
         acc += (p as f64 - t as f64).abs();
     }
-    let total = acc as f32;
+    // `Mean` は `f64` の和を `f64` のまま `numel` で割ってから最後に
+    // 1 回だけ `f32` へ downcast する（除算後に `f32` へ変換すると、
+    // 例えば `pred=[f32::MAX, f32::MAX]`・`target=[0, 0]` のような
+    // 入力で和が `f32` の範囲を超えて `inf` になり、数学的には有限の
+    // 平均値が `inf` になってしまう。codex-review 指摘・イシュー
+    // #2166 PR #2283）。
     let out = match reduction {
         crate::var::Reduction::Mean => {
             if numel == 0 {
                 0.0
             } else {
-                total / numel as f32
+                (acc / numel as f64) as f32
             }
         }
-        crate::var::Reduction::Sum => total,
+        crate::var::Reduction::Sum => acc as f32,
     };
     build_tensor(vec![out], &[])
 }
