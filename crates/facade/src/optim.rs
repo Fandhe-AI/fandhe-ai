@@ -103,11 +103,17 @@
 //!   されている別軸の変更であり、本モジュールが提供するのは **ホスト
 //!   `Tensor<f32>` へ実体化済みの勾配**に対するスケーリング／unscale／
 //!   非有限検出のみである
-//! - **デバイス常駐更新経路（[`crate::DeviceParamStore`]／
-//!   [`crate::Tape::step_device_param_store`]）には unscale／非有限検出が
-//!   結線されていない**。AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／
-//!   [`crate::compat::SequentialVars::trainable_grads`]／
-//!   `Tape::param_grads_to_host` 経由）にのみ適用できる
+//! - **デバイス常駐更新経路（[`crate::DeviceParamStore`]）への結線は
+//!   イシュー #2181 で完了済み**（[`crate::Tape::
+//!   step_device_param_store_amp`]／[`crate::Tape::
+//!   step_device_param_store_adam_amp`]／[`crate::Tape::
+//!   step_device_param_store_adamw_amp`]。「デバイス常駐更新との違い」節
+//!   参照）。実装は既存 `Tape::param_grads_to_host`（イシュー #1479）で
+//!   スケール済み勾配をホストへ実体化してから unscale・非有限検出する
+//!   （CUDA／Metal 専用のデバイス側 unscale カーネルは持たない。ホスト
+//!   計算フォールバック）。SGD／Adam／AdamW の 3 optimizer 限定
+//!   （RmsProp／Adagrad／LAMB は未結線。デバイス常駐 step 自体の対応
+//!   状況は本 doc「RMSprop／Adagrad」節参照）
 //! - [`crate::optim::scale_loss`] は呼び出しごとにスカラー葉を 1 個
 //!   tape へ登録する（`Tape::leaf_count` に影響。`Tape::reset` をまたいで
 //!   蓄積しない契約は `nn::optim::amp::scale_loss` doc を参照）
@@ -185,8 +191,10 @@
 //! `docs/device-resident-update-design.md`）。`DeviceParamStore` は
 //! `Tape` を引数に取る状態機械であり本モジュールの値型群とは性質が
 //! 異なるため、意図的に本モジュールへは含めない（root 再エクスポート
-//! のまま）。AMP（[`crate::optim::GradScaler`]）もこの経路へは未結線（上記「AMP の
-//! 適用範囲」節参照）。[`crate::optim::Adam`]（coupled L2 weight decay。
+//! のまま）。AMP（[`crate::optim::GradScaler`]）はイシュー #2181 で
+//! `step_device_param_store_amp`／`_adam_amp`／`_adamw_amp` として
+//! 結線済み（上記「AMP の適用範囲」節参照）。[`crate::optim::Adam`]
+//! （coupled L2 weight decay。
 //! イシュー #1742）・[`crate::optim::AdamW`] は **イシュー #1959 で
 //! `DeviceParamStore` への結線を完了済み**（[`crate::Tape::
 //! step_device_param_store_adam`]／[`crate::Tape::

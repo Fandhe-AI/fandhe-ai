@@ -181,7 +181,7 @@ pub use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
 // （`optim.rs`）から利用者向けにも再エクスポート済みのため、ここでは
 // 型を参照するためだけの `use`（`pub use` ではない）とする。
 use fandhe_ai_autodiff::nn::optim::{
-    AdagradConfig, AdamConfig, AdamWConfig, LambConfig, RmsPropConfig,
+    AdagradConfig, AdamConfig, AdamWConfig, GradScaler, LambConfig, RmsPropConfig,
 };
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 // `VarHostView`（借用ビュー読み出し API。イシュー #1335）は 1 文 1 行を
@@ -421,6 +421,57 @@ impl Tape {
         config: &LambConfig,
     ) -> Result<(), BackendError> {
         store.step_lamb(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::step_amp`] への委譲入口（イシュー #2181。AMP
+    /// を常駐 step へ結線する。`docs/device-resident-update-design.md`
+    /// 追補）。`step_device_param_store`（SGD）と同じ理由の薄い委譲だが、
+    /// 戻り値は `Result<(), BackendError>` ではなく `Result<bool,
+    /// AutodiffError>`（内部で [`GradScaler::update`] も呼ぶため
+    /// `AutodiffError`。`bool` は「この step が非有限勾配により skip
+    /// されたか」）。
+    ///
+    /// 1 step の使い方: `scaler.scale_loss(&loss)` → `tape.
+    /// backward_device_param_store(&scaled, &store)`（`Op::
+    /// LinearResident` を含むグラフの場合。含まない場合は素の
+    /// [`Tape::backward`]）→ 本メソッド。戻り値 `true` は skip
+    /// （どのパラメータも更新されず、forward 登録のみ消費された）ことを
+    /// 示し、呼び出し元は次の step へそのまま進めばよい
+    /// （`crate::optim::GradScaler` doc「1 step の使い方」参照）。
+    pub fn step_device_param_store_amp(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &SgdConfig,
+        scaler: &mut GradScaler,
+    ) -> Result<bool, AutodiffError> {
+        store.step_amp(&self.0, grads, config, scaler)
+    }
+
+    /// [`DeviceParamStore::step_adam_amp`] への委譲入口（イシュー
+    /// #2181）。[`Self::step_device_param_store_amp`] と同じ理由の
+    /// 薄い委譲。
+    pub fn step_device_param_store_adam_amp(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &AdamConfig,
+        scaler: &mut GradScaler,
+    ) -> Result<bool, AutodiffError> {
+        store.step_adam_amp(&self.0, grads, config, scaler)
+    }
+
+    /// [`DeviceParamStore::step_adamw_amp`] への委譲入口（イシュー
+    /// #2181）。[`Self::step_device_param_store_amp`] と同じ理由の
+    /// 薄い委譲。
+    pub fn step_device_param_store_adamw_amp(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &AdamWConfig,
+        scaler: &mut GradScaler,
+    ) -> Result<bool, AutodiffError> {
+        store.step_adamw_amp(&self.0, grads, config, scaler)
     }
 
     /// [`DeviceParamStore::backward`] への委譲入口（イシュー #1022）。

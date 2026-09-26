@@ -1624,6 +1624,40 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - 新規 `Op`／`BackendOps` メソッド／VJP は追加していない（`scale_loss` は既存 `Var::mul` の合成のみ）。
 - 対象外事項の明記: (a) 真の混合精度（f16 forward・f32 master weight）は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外。(b) デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）には unscale／非有限検出が結線されておらず、AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／`SequentialVars::trainable_grads`／`Tape::param_grads_to_host` 経由）にのみ適用できる。
 - facade のみ import する統合テスト（`crates/facade/tests/optim_amp_train_loop.rs`）で、収束・1 step の勾配 bit 完全一致（scale_loss→backward→unscale と非スケール backward の勾配が `f32::to_bits()` で一致すること。CPU バックエンド）・非有限勾配時の skip／backoff を固定した。
+
+## 追補（イシュー #2181）
+
+上記「追補（イシュー #1722）」の対象外事項 (b)（デバイス常駐更新経路への
+unscale／非有限検出の未結線）を解消した。スナップショット本体は不変の
+まま、以下を追記する。
+
+- `fandhe_ai_autodiff::optim::device_store::amp`（新規子モジュール）に
+  `DeviceParamStore::step_amp`／`step_adam_amp`／`step_adamw_amp`（SGD・
+  Adam・AdamW の 3 optimizer 限定）を実装し、facade `Tape::
+  step_device_param_store_amp`／`_adam_amp`／`_adamw_amp` の薄い委譲で
+  公開した（RmsProp／Adagrad／LAMB は対象外のまま）。
+- 実装は既存 `step`／`step_adam`／`step_adamw`（更新フェーズ・CUDA Graph
+  capture・`poisoned` 遷移を含む）を 1 バイトも変更せず、`Tape::
+  param_grads_to_host`（#1479）でスケール済み勾配をホストへ実体化して
+  unscale・非有限検出した結果を合成 `Gradients`（`pub(crate)`
+  コンストラクタ）として既存メソッドへそのまま渡す方式を取った。新規
+  `BackendOps`／`MemoryOps` trait メソッドは追加していない（CUDA／Metal
+  はホスト計算フォールバックで到達する。デバイス側 unscale カーネルは
+  後続候補として記録するのみ）。
+- skip 時（非有限検出）は `step`／`step_adam`／`step_adamw` を一切呼ばず
+  （カーネル起動 0 回）、`abandon_pending_forward` で forward 登録のみを
+  消費する。`step_count`／`sgd_used`／`velocity`／`adam_state` は skip
+  では一切進めない（Adam の bias correction が `t` に依存するため）。
+- 単体テスト（`crates/autodiff/src/optim/device_store.rs::tests`）で
+  非 skip 経路のホスト参照 bit 完全一致・skip 時のパラメータ不変・
+  pending 消費・skip 後の次回 backward の鮮度判定を固定した。facade
+  統合テスト（`crates/facade/tests/device_param_store_amp_train.rs`）で
+  `scale == 1.0` 固定時の非 AMP 経路との per-step bit 完全一致（SGD／
+  Adam／AdamW）・overflow による skip／backoff を固定した。
+- fit（`compat::Sequential::fit`）への `use_amp` 追加・デバイス側 unscale
+  カーネルの実装は本イシューのスコープ外のまま（`docs/device-resident-
+  update-design.md` 追補「後続候補」参照）。
+
 ## 追補（イシュー #1740）
 
 上記「追補（イシュー #1731）」で「本イシューのスコープ外」としていた CUDA／Metal 専用カーネルを実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
