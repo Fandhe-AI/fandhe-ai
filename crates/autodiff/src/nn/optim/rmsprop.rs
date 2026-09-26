@@ -356,7 +356,7 @@ impl RmsProp {
 /// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
 impl super::OptimizerStateDict for RmsProp {
     fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
-        let mut out = HashMap::with_capacity(2 + self.states.len() * 3);
+        let mut out = HashMap::with_capacity(3 + self.states.len() * 3);
         out.insert(
             super::state_dict::marker_key("rmsprop"),
             Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
@@ -364,6 +364,10 @@ impl super::OptimizerStateDict for RmsProp {
         out.insert(
             super::state_dict::STEP_COUNT_KEY.to_string(),
             super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::NUM_SLOTS_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.states.len() as u64)?,
         );
         for (i, slot) in self.states.iter().enumerate() {
             out.insert(

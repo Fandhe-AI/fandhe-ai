@@ -43,6 +43,12 @@
 //!   - `beta2_pow_t.f64_u16x4`（`AdamW`・`Adam`・`Lamb`・`RAdam`・
 //!     `NAdam`）
 //!   - `mu_product`（shape `[1]` の生 f32。`NAdam` のみ）
+//!   - `num_slots.u64_u16x4`（全 9 種・必須）: スロット数を実在する
+//!     バッファキーの最大添字から推測するのではなく、独立したメタ
+//!     データとして保存・照合する（P0 レビュー指摘・イシュー #2174
+//!     PR #2304: 単一バッファ optimizer で末尾スロットの全バッファが
+//!     欠落しても `step_count` だけ進んだ状態で load が成功して
+//!     しまう問題への対応。下記「`load_state_dict` の検証順」節）
 //! - **スロットバッファ** `state.<i>.<buffer>`（`i` は 0 始まりの
 //!   呼び出し順スロット添字。バッファ名は各 optimizer の `SlotState`
 //!   フィールド名をそのまま使う: `AdamW`／`Adam`／`Lamb` は `m`・`v`、
@@ -76,17 +82,29 @@
 //!
 //! # `load_state_dict` の検証順（fail-closed・状態変更前に全件検証）
 //!
-//! 1. キー集合を照合する（期待キー = マーカー + スカラー +
-//!    `state.<i>.<buf>`〈`i` はスロット添字集合から復元〉と、実際の
-//!    キー集合の完全一致。欠落キー・余剰キーをそれぞれ昇順で全件
-//!    列挙する。`nn::module::Module::load_state_dict` と同じ書式）。
-//!    スロット添字は `state.<s>.<buf>` の `<s>` が
-//!    `s.parse::<usize>()` に成功し `i.to_string() == s` であるものだけ
-//!    から復元する（`01`・`+1` 等の非正規表記はこの時点で「期待キー」
-//!    に含まれず、結果として余剰キーとして検出される）。
-//! 2. マーカーの shape・値を検証する。
-//! 3. スカラーを復号・検証する。
-//! 4. スロットバッファの shape 一致（同一スロット内の全バッファ）を
+//! 1. `num_slots.u64_u16x4` を復号する（欠落は即 `Err`）。ここで得た
+//!    スロット数は、実在するバッファキーの最大添字から推測した値では
+//!    なく、[`state_dict`](OptimizerStateDict::state_dict) が独立に
+//!    書き出したメタデータそのものである（単一バッファ optimizer で
+//!    末尾スロットの全バッファが欠落しても検出できてしまう問題への
+//!    対応。P0 レビュー指摘・イシュー #2174 PR #2304）。続けて
+//!    `num_slots * バッファ本数` を checked 乗算し、オーバーフロー
+//!    または実際のキー総数（`state.len()`）を上回る場合は即 `Err` と
+//!    する（1 スロットにつき最低 1 本のバッファキーが実在しなければ
+//!    ならないため、正当な `state_dict` ではこの不等式は成立しない。
+//!    巨大な `num_slots` 1 件で `0..num_slots` の全走査・大量の文字列
+//!    生成を誘発する DoS を、`expected` 集合を構築する前に遮断する）。
+//! 2. キー集合を照合する（期待キー = マーカー + スカラー +
+//!    `num_slots` から復元した `0..num_slots` の `state.<i>.<buf>` と、
+//!    実際のキー集合の完全一致。欠落キー・余剰キーをそれぞれ昇順で
+//!    全件列挙する。`nn::module::Module::load_state_dict` と同じ
+//!    書式）。非正規表記（`01`・`+1` 等）のスロット添字キーは
+//!    `expected` 側に現れないため、結果として余剰キーとして検出
+//!    される。
+//! 3. マーカーの shape・値を検証する。
+//! 4. スカラー（`step_count`／`beta*_pow_t`／`mu_product`）を復号・
+//!    検証する。
+//! 5. スロットバッファの shape 一致（同一スロット内の全バッファ）を
 //!    検証し、[`crate::eval::dense_vec`] で論理 row-major 順の値を
 //!    読み出す（非 contiguous な view 入力にも対応するため）。
 //!
@@ -108,6 +126,13 @@ pub(crate) const FORMAT_VERSION: f32 = 1.0;
 
 /// `step_count`（`u64`）のキー名。
 pub(crate) const STEP_COUNT_KEY: &str = "step_count.u64_u16x4";
+/// スロット数（`u64`）のキー名。実在するバッファキーの最大添字から
+/// 推測するのではなく、独立した必須メタデータとして保存・照合する
+/// （P0 レビュー指摘・イシュー #2174 PR #2304: 末尾スロットの全
+/// バッファが欠落していても検出できない問題、および巨大添字 1 件で
+/// `0..num_slots` の全走査を誘発できる問題への対応。モジュール冒頭 doc
+/// 「キー配置」節）。
+pub(crate) const NUM_SLOTS_KEY: &str = "num_slots.u64_u16x4";
 /// `beta1_pow_t`（`f64`）のキー名。
 pub(crate) const BETA1_POW_T_KEY: &str = "beta1_pow_t.f64_u16x4";
 /// `beta2_pow_t`（`f64`）のキー名。
@@ -282,28 +307,6 @@ pub(crate) struct DecodedState {
     pub(crate) slots: Vec<DecodedSlot>,
 }
 
-/// `state.<idx>.<buf>` 形式のキーのうち、`<idx>` が
-/// `idx.to_string() == <idx>`（非正規表記〈`01`・`+1` 等〉を除く）を
-/// 満たすものだけからスロット添字集合を復元する（モジュール冒頭 doc
-/// 「`load_state_dict` の検証順」節「1.」）。
-fn canonical_slot_indices(state: &HashMap<String, Tensor<f32>>) -> BTreeSet<usize> {
-    let mut indices = BTreeSet::new();
-    for key in state.keys() {
-        let Some(rest) = key.strip_prefix("state.") else {
-            continue;
-        };
-        let Some((idx_str, _buf)) = rest.split_once('.') else {
-            continue;
-        };
-        if let Ok(idx) = idx_str.parse::<usize>()
-            && idx.to_string() == idx_str
-        {
-            indices.insert(idx);
-        }
-    }
-    indices
-}
-
 /// [`OptimizerStateDict::load_state_dict`] の実装本体。各 optimizer
 /// ファイルの `impl OptimizerStateDict` はハイパーパラメータ・状態
 /// フィールド名が異なるだけの薄い shim（`kind`・バッファ名集合・
@@ -321,18 +324,60 @@ pub(crate) fn decode_state_dict(
     has_beta2: bool,
     has_mu_product: bool,
 ) -> Result<DecodedState, AutodiffError> {
-    // 1. キー集合の完全一致検査（`Module::load_state_dict` と同じ
-    //    「欠落 → 余剰」の順・昇順列挙の書式）。
-    let slot_indices = canonical_slot_indices(state);
-    let num_slots = slot_indices.iter().next_back().map_or(0, |&max| max + 1);
-    // 添字が 0..num_slots で連続していない場合（欠番）は、下記の
-    // 期待キー集合が欠番スロットの全バッファを「欠落キー」として
-    // 自然に検出する（`slot_indices` に欠番があっても
-    // `expected` 側は 0..num_slots を総なめするため）。
+    // 1. `num_slots` を独立したメタデータとして先に復号する（実在する
+    //    バッファキーの最大添字からは推測しない）。欠落は他のキーの
+    //    整合性に関わらず即 `Err`（P0 レビュー指摘・イシュー #2174
+    //    PR #2304: 単一バッファ optimizer で末尾スロットの全バッファが
+    //    欠落しても検出できない問題への対応。モジュール冒頭 doc
+    //    「`load_state_dict` の検証順」節）。
+    let Some(num_slots_tensor) = state.get(NUM_SLOTS_KEY) else {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "OptimizerStateDict::load_state_dict（kind=`{kind}`）: missing key: `{NUM_SLOTS_KEY}`"
+        )));
+    };
+    let num_slots_u64 = decode_u16x4_tensor(NUM_SLOTS_KEY, num_slots_tensor)?;
+    let num_slots: usize = usize::try_from(num_slots_u64).map_err(|_| {
+        AutodiffError::InvalidArgument(format!(
+            "OptimizerStateDict::load_state_dict（kind=`{kind}`）: `{NUM_SLOTS_KEY}` value \
+             {num_slots_u64} does not fit in `usize` on this platform"
+        ))
+    })?;
 
+    // 添字だけで巨大ループ・巨大メモリ確保（さらには `usize::MAX` 付近
+    // での加算オーバーフロー）を誘発できないよう、`expected` 集合を
+    // 構築する前に checked 演算と入力規模の上限で弾く（P0 レビュー
+    // 指摘: 少数キーでも巨大な `num_slots` 1 件で `0..num_slots` の
+    // 全走査・大量の文字列生成を誘発できる問題への対応）。1 スロット
+    // につき `buffer_names.len()` 本以上のキーが実際に存在しなければ
+    // ならないため、`num_slots * buffer_names.len()` が実際のキー総数
+    // （`state.len()`）を超えることは正当な `state_dict` では構造上
+    // あり得ない。
+    let actual: BTreeSet<String> = state.keys().cloned().collect();
+    let expected_slot_key_count = num_slots.checked_mul(buffer_names.len()).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "OptimizerStateDict::load_state_dict（kind=`{kind}`）: `{NUM_SLOTS_KEY}` value \
+             {num_slots} is too large (slot key count overflow)"
+        ))
+    })?;
+    if expected_slot_key_count > actual.len() {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "OptimizerStateDict::load_state_dict（kind=`{kind}`）: `{NUM_SLOTS_KEY}` value \
+             {num_slots} is inconsistent with the number of provided keys ({}); a valid \
+             state_dict must contain at least {expected_slot_key_count} slot buffer keys",
+            actual.len()
+        )));
+    }
+
+    // 2. キー集合の完全一致検査（`Module::load_state_dict` と同じ
+    //    「欠落 → 余剰」の順・昇順列挙の書式）。`num_slots`（上記で
+    //    メタデータから確定済み）を用いて `0..num_slots` の
+    //    `state.<i>.<buf>` を機械的に列挙するため、末尾スロットの
+    //    全バッファ欠落・非正規表記の添字（`01`・`+1` 等）はいずれも
+    //    ここで「欠落キー」または「余剰キー」として検出される。
     let mut expected: BTreeSet<String> = BTreeSet::new();
     expected.insert(marker_key(kind));
     expected.insert(STEP_COUNT_KEY.to_string());
+    expected.insert(NUM_SLOTS_KEY.to_string());
     if has_beta1 {
         expected.insert(BETA1_POW_T_KEY.to_string());
     }
@@ -348,8 +393,6 @@ pub(crate) fn decode_state_dict(
         }
     }
 
-    let actual: BTreeSet<String> = state.keys().cloned().collect();
-
     let missing: Vec<&String> = expected.difference(&actual).collect();
     if !missing.is_empty() {
         return Err(AutodiffError::InvalidArgument(format!(
@@ -364,7 +407,7 @@ pub(crate) fn decode_state_dict(
         )));
     }
 
-    // 2. マーカー検証（種別違いの拒否）。
+    // 3. マーカー検証（種別違いの拒否）。
     // 直前のキー集合完全一致検査により必ず存在するため `if let` で
     // 安全に取り出す（`unwrap`/`expect` は使わない）。
     let Some(marker) = state.get(&marker_key(kind)) else {
@@ -375,7 +418,7 @@ pub(crate) fn decode_state_dict(
     };
     validate_marker(kind, marker)?;
 
-    // 3. スカラーの復号・検証。
+    // 4. スカラーの復号・検証。
     let Some(step_count_tensor) = state.get(STEP_COUNT_KEY) else {
         return Err(AutodiffError::InvalidArgument(format!(
             "OptimizerStateDict::load_state_dict（kind=`{kind}`）: internal error: \
@@ -438,7 +481,7 @@ pub(crate) fn decode_state_dict(
         None
     };
 
-    // 4. スロットバッファの shape 一致検査・論理 row-major 順の読み出し
+    // 5. スロットバッファの shape 一致検査・論理 row-major 順の読み出し
     //    （非 contiguous な view 入力にも対応するため `dense_vec` を
     //    使う。`crate::eval::dense_vec` doc 参照）。
     let mut slots: Vec<DecodedSlot> = Vec::with_capacity(num_slots);
@@ -557,35 +600,24 @@ mod tests {
         assert!(validate_pow_t_range("k", 1.0).is_ok());
     }
 
-    #[test]
-    fn canonical_slot_indices_rejects_non_canonical_forms() {
-        let mut state = HashMap::new();
-        state.insert(
-            "state.01.m".to_string(),
-            Tensor::new(vec![0.0], &[1]).unwrap(),
-        );
-        state.insert(
-            "state.+1.m".to_string(),
-            Tensor::new(vec![0.0], &[1]).unwrap(),
-        );
-        state.insert(
-            "state.2.m".to_string(),
-            Tensor::new(vec![0.0], &[1]).unwrap(),
-        );
-        let indices = canonical_slot_indices(&state);
-        assert_eq!(indices, BTreeSet::from([2]));
-    }
-
-    fn base_state(kind: &str) -> HashMap<String, Tensor<f32>> {
+    /// `num_slots` 個のスロット（キーはまだ挿入しない）を宣言した基礎
+    /// state を組み立てる（マーカー・`step_count`・`num_slots` メタ
+    /// データのみ）。呼び出し側がスロットバッファキーを追加・欠落
+    /// させて各検証パスを試験する。
+    fn base_state(kind: &str, num_slots: u64) -> HashMap<String, Tensor<f32>> {
         let mut state = HashMap::new();
         state.insert(marker_key(kind), Tensor::new(vec![1.0], &[1]).unwrap());
         state.insert(STEP_COUNT_KEY.to_string(), encode_u16x4_tensor(3).unwrap());
+        state.insert(
+            NUM_SLOTS_KEY.to_string(),
+            encode_u16x4_tensor(num_slots).unwrap(),
+        );
         state
     }
 
     #[test]
     fn decode_state_dict_empty_slots_roundtrip() {
-        let state = base_state("adamw");
+        let state = base_state("adamw", 0);
         let decoded = decode_state_dict("adamw", &state, &["m", "v"], false, false, false)
             .expect("空スロットは検証を通るはず");
         assert_eq!(decoded.step_count, 3);
@@ -593,14 +625,46 @@ mod tests {
     }
 
     #[test]
+    fn decode_state_dict_rejects_missing_num_slots_key() {
+        let mut state = base_state("adamw", 0);
+        state.remove(NUM_SLOTS_KEY);
+        let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn decode_state_dict_rejects_num_slots_inconsistent_with_key_count() {
+        // 少数キーしか無いのに `num_slots` だけ巨大な値を宣言する攻撃
+        // 入力（P0 レビュー指摘・イシュー #2174 PR #2304）。乗算自体は
+        // オーバーフローしない大きさ（`checked_mul` 自体は成功する）
+        // でも、`expected` 集合を構築する巨大ループへ入る前に拒否
+        // されることを固定する。
+        let state = base_state("adamw", 1_000_000);
+        let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn decode_state_dict_rejects_num_slots_overflowing_slot_key_count() {
+        // `num_slots * buffer_names.len()` が `usize` 乗算で
+        // オーバーフローする場合も、`usize::MAX` に極めて近い実際の
+        // キー総数を用意できない以上、上記の不整合検査で先に拒否
+        // される（checked 演算自体の非パニックも併せて固定する）。
+        let state = base_state("adamw", usize::MAX as u64);
+        let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
     fn decode_state_dict_detects_missing_and_unexpected_keys() {
-        let mut state = base_state("adamw");
+        // index 0 の `v` が欠落（`num_slots = 1` なので `state.0.v` は
+        // 期待キーに含まれる）。
+        let mut state = base_state("adamw", 1);
         state.insert(slot_key(0, "m"), Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
-        // `v` が欠落。
         let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 
-        let mut state2 = base_state("adamw");
+        let mut state2 = base_state("adamw", 0);
         state2.insert(
             "unexpected.key".to_string(),
             Tensor::new(vec![0.0], &[1]).unwrap(),
@@ -611,15 +675,35 @@ mod tests {
     }
 
     #[test]
+    fn decode_state_dict_rejects_non_canonical_slot_index() {
+        // `num_slots = 1` を宣言しつつ `state.0.*` の代わりに非正規
+        // 表記 `state.01.*` を挿入する。`state.0.*` は欠落キー、
+        // `state.01.*` は余剰キーとしてそれぞれ検出される（`num_slots`
+        // 由来の `expected` 集合には canonical な `state.0.*` しか
+        // 含まれないため）。
+        let mut state = base_state("adamw", 1);
+        state.insert(
+            "state.01.m".to_string(),
+            Tensor::new(vec![1.0, 2.0], &[2]).unwrap(),
+        );
+        state.insert(
+            "state.01.v".to_string(),
+            Tensor::new(vec![1.0, 2.0], &[2]).unwrap(),
+        );
+        let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
     fn decode_state_dict_rejects_marker_kind_mismatch() {
-        let state = base_state("adam");
+        let state = base_state("adam", 0);
         let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 
     #[test]
     fn decode_state_dict_rejects_slot_shape_mismatch() {
-        let mut state = base_state("adamw");
+        let mut state = base_state("adamw", 1);
         state.insert(slot_key(0, "m"), Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
         state.insert(
             slot_key(0, "v"),

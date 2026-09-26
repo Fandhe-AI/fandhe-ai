@@ -283,7 +283,7 @@ impl Adamax {
 /// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
 impl super::OptimizerStateDict for Adamax {
     fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
-        let mut out = HashMap::with_capacity(3 + self.states.len() * 2);
+        let mut out = HashMap::with_capacity(4 + self.states.len() * 2);
         out.insert(
             super::state_dict::marker_key("adamax"),
             Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
@@ -291,6 +291,10 @@ impl super::OptimizerStateDict for Adamax {
         out.insert(
             super::state_dict::STEP_COUNT_KEY.to_string(),
             super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::NUM_SLOTS_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.states.len() as u64)?,
         );
         out.insert(
             super::state_dict::BETA1_POW_T_KEY.to_string(),

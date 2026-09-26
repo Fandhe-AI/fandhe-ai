@@ -58,10 +58,14 @@ import されて初めて `.method()` 呼び出しが可能になる Rust の名
   許すが、本実装は安全側に逸脱する。`nn_optim_state_dict.rs::
   adam_state_dict_is_rejected_by_adamw_load_state_dict` で固定）
 - **スカラー状態**（ロスレス符号化。§2.2）:
-  `step_count.u64_u16x4`（全 9 種）・`beta1_pow_t.f64_u16x4`
-  （`AdamW`・`Adam`・`Lamb`・`RAdam`・`Adamax`）・
-  `beta2_pow_t.f64_u16x4`（`AdamW`・`Adam`・`Lamb`・`RAdam`・
-  `NAdam`）・`mu_product`（shape `[1]` の生 f32。`NAdam` のみ）
+  `step_count.u64_u16x4`（全 9 種）・`num_slots.u64_u16x4`（全 9 種・
+  必須。§2.3「単一バッファ optimizer の既知の限界」への是正として
+  PR #2304 で追加。実在するバッファキーの最大添字からスロット数を
+  推測するのではなく、独立したメタデータとして保存・照合する）・
+  `beta1_pow_t.f64_u16x4`（`AdamW`・`Adam`・`Lamb`・`RAdam`・
+  `Adamax`）・`beta2_pow_t.f64_u16x4`（`AdamW`・`Adam`・`Lamb`・
+  `RAdam`・`NAdam`）・`mu_product`（shape `[1]` の生 f32。`NAdam`
+  のみ）
 - **スロットバッファ** `state.<i>.<buffer>`。バッファ名の対応表
   （PyTorch 側の対応する状態名も併記）:
 
@@ -96,31 +100,45 @@ NaN を正規化しうる外部ツールを経由しても壊れない。復号�
 `crates/autodiff/src/nn/optim/state_dict.rs::decode_state_dict` に集約
 した:
 
-1. キー集合の完全一致検査（`Module::load_state_dict` と同じ「欠落 →
-   余剰」の順・昇順列挙の書式）。スロット添字は `state.<s>.<buf>` の
-   `<s>` が `s.parse::<usize>()` に成功し `i.to_string() == s` である
-   ものだけから復元する（`01`・`+1` 等は「余剰キー」として自然に
-   検出される。canonical でない添字は事前の特別扱い不要——期待
-   キー集合の生成にそもそも使わないため）
-2. マーカーの shape・値検証
-3. スカラーの復号・検証
-4. スロットバッファの shape 一致検査・[`crate::eval::dense_vec`] に
+1. `num_slots.u64_u16x4` を復号する（欠落は即 `Err`）。実在する
+   バッファキーの最大添字から推測するのではなく、`state_dict` が
+   独立に書き出したメタデータそのものを使う。続けて
+   `num_slots * バッファ本数` を checked 乗算し、オーバー
+   フローまたは実際のキー総数（`state.len()`）を上回る場合は即
+   `Err` とする（1 スロットにつき最低 1 本のバッファキーが実在
+   しなければならないため、正当な `state_dict` ではこの不等式は
+   成立しない。巨大な `num_slots` 1 件で `0..num_slots` の全走査・
+   大量の文字列生成を誘発する DoS を、期待キー集合を構築する前に
+   遮断する）
+2. キー集合の完全一致検査（`Module::load_state_dict` と同じ「欠落 →
+   余剰」の順・昇順列挙の書式）。期待キー集合は 1. で確定した
+   `num_slots` から `0..num_slots` の `state.<i>.<buf>` を機械的に
+   列挙して作るため、非正規表記（`01`・`+1` 等）の添字キーは
+   「余剰キー」として、末尾スロットの全バッファ欠落は「欠落キー」
+   として、いずれも検出される
+3. マーカーの shape・値検証
+4. スカラーの復号・検証
+5. スロットバッファの shape 一致検査・[`crate::eval::dense_vec`] に
    よる論理 row-major 順の読み出し（非 contiguous view にも対応）
 
 ここまでをすべてローカル変数（`DecodedState`）に閉じ込めてから、各
 optimizer の `load_state_dict` shim が最後に自身のフィールドを一括
 置換する。途中で `Err` の場合、状態は一切変わらない。
 
-**単一バッファ optimizer の既知の限界**（`Adagrad`（`state_sum` の
-みなど、1 スロットにつきバッファが 1 本しかない optimizer）:
-そのバッファキーが全て欠落した場合、スロットの存在自体を示す情報が
-消えるため、「そのスロットが最初から存在しなかった」のと区別できず、
-（他のスロットの添字がそれより大きい値で存在しない限り）検出されない
-まま state_dict が縮小する。複数バッファを持つ optimizer では、
-1 バッファだけ欠落してもスロットの存在自体は残る他バッファのキーから
-推定できるため区別できる。この限界はキー配置の設計上の帰結であり、
-`nn_optim_state_dict.rs` のテストはこの限界を踏まえた（2 スロット
-構成で対象外スロットの添字を保つ）形で書いている。
+**単一バッファ optimizer の既知の限界への是正（P0 レビュー指摘・
+イシュー #2174 PR #2304）**: 当初実装は `Adagrad`（`state_sum` のみ
+など、1 スロットにつきバッファが 1 本しかない optimizer）で「末尾
+スロットの全バッファが欠落すると、そのスロットが最初から存在
+しなかったのと区別できず、`step_count` だけ進んだ状態で load が
+成功してしまう」限界を持っていた（実在するバッファキーの最大添字
+から `num_slots` を推測していたため）。`num_slots` を独立した必須
+メタデータへ切り出したことで、この限界は解消済みである
+（`nn_optim_state_dict.rs::load_state_dict_rejects_trailing_slot_
+fully_missing_without_mutation` で固定）。あわせて、少数キーでも
+巨大な `num_slots` を宣言する攻撃入力を弾く checked arithmetic ＋
+入力規模の上限検査も導入した
+（`load_state_dict_rejects_oversized_num_slots_claim_without_
+mutation`）。
 
 ## §3 対象外ファイル
 

@@ -80,6 +80,7 @@ macro_rules! optimizer_state_dict_tests {
                 let mut expected = BTreeSet::new();
                 expected.insert(format!("__optimizer__.{}", $kind));
                 expected.insert("step_count.u64_u16x4".to_string());
+                expected.insert("num_slots.u64_u16x4".to_string());
                 if $has_beta1 {
                     expected.insert("beta1_pow_t.f64_u16x4".to_string());
                 }
@@ -195,11 +196,11 @@ macro_rules! optimizer_state_dict_tests {
             #[test]
             fn load_state_dict_rejects_missing_key_without_mutation() {
                 // 2 スロット（index 0・index 1）で学習させ、index 0 の
-                // バッファを 1 本だけ欠落させる。単一バッファしか持たない
-                // optimizer（`Adagrad` 等）でも「バッファを 1 本欠落
-                // させると canonical スロット添字集合からその添字自体が
-                // 消え、欠落が検出されない」問題を避けるため、index 1 の
-                // バッファ（欠落させない）を残して添字集合を保つ。
+                // バッファを 1 本だけ欠落させる。`num_slots` メタデータ
+                // （`state_dict` モジュール冒頭 doc「キー配置」節）が
+                // 独立に「2 スロットあるはず」を保持しているため、単一
+                // バッファしか持たない optimizer（`Adagrad` 等）でも
+                // index 1 側のバッファを残さずに検出できる。
                 let mut opt = new_opt();
                 let p0 = t(vec![1.0], &[1]);
                 let g0 = t(vec![0.1], &[1]);
@@ -210,6 +211,62 @@ macro_rules! optimizer_state_dict_tests {
 
                 let mut sd = opt.state_dict().unwrap();
                 sd.remove(&format!("state.0.{}", BUFFERS[0]));
+                let err = opt.load_state_dict(sd).unwrap_err();
+                assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+                assert_eq!(opt.step_count(), step_count_before);
+            }
+
+            #[test]
+            fn load_state_dict_rejects_trailing_slot_fully_missing_without_mutation() {
+                // P0 レビュー指摘（イシュー #2174 PR #2304）で固定した
+                // 是正: 末尾スロット（index 1）の全バッファを削除しても、
+                // `num_slots` メタデータが「2 スロットあるはず」を独立に
+                // 保持しているため、単一バッファ optimizer（`Adagrad`
+                // 等）を含めて必ず「欠落キー」として拒否される
+                // （旧実装は実在バッファキーの最大添字から `num_slots`
+                // を推測していたため、この入力は index 0 だけの
+                // state_dict として黙って受理されてしまっていた）。
+                let mut opt = new_opt();
+                let p0 = t(vec![1.0], &[1]);
+                let g0 = t(vec![0.1], &[1]);
+                let p1 = t(vec![1.0, 2.0], &[2]);
+                let g1 = t(vec![0.1, 0.1], &[2]);
+                opt.step(&[(&p0, &g0), (&p1, &g1)]).unwrap();
+                let step_count_before = opt.step_count();
+
+                let mut sd = opt.state_dict().unwrap();
+                for buf in BUFFERS {
+                    sd.remove(&format!("state.1.{buf}"));
+                }
+                let err = opt.load_state_dict(sd).unwrap_err();
+                assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+                assert_eq!(opt.step_count(), step_count_before);
+            }
+
+            #[test]
+            fn load_state_dict_rejects_oversized_num_slots_claim_without_mutation() {
+                // P0 レビュー指摘（イシュー #2174 PR #2304）で固定した
+                // 是正: `num_slots` メタデータへ実際のキー総数と整合
+                // しない巨大値を書き込む攻撃入力は、`expected` 集合を
+                // 構築する巨大ループへ入る前に拒否される。
+                let mut opt = new_opt();
+                let p = t(vec![1.0], &[1]);
+                let g = t(vec![0.1], &[1]);
+                opt.step(&[(&p, &g)]).unwrap();
+                let step_count_before = opt.step_count();
+
+                let mut sd = opt.state_dict().unwrap();
+                // `num_slots = 1_000_000`（下位から 16bit ずつ u16x4
+                // 符号化。`state_dict` モジュール冒頭 doc「符号化」節と
+                // 同じ形式）を直接組み立てる。`decode_u16x4_tensor` は
+                // 各語が有限・整数・`0.0..=65535.0` であることのみを
+                // 検証するため、この値は符号化としては正当だが、実際に
+                // 存在するキー数（1 ステップ・1 バッファ規模）とは
+                // 到底整合しない。
+                sd.insert(
+                    "num_slots.u64_u16x4".to_string(),
+                    t(vec![16960.0, 15.0, 0.0, 0.0], &[4]),
+                );
                 let err = opt.load_state_dict(sd).unwrap_err();
                 assert!(matches!(err, AutodiffError::InvalidArgument(_)));
                 assert_eq!(opt.step_count(), step_count_before);
