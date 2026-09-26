@@ -11941,6 +11941,8 @@ mod __fandhe_param_groups_hold_probe {\n\
 }\n\
 use __fandhe_param_groups_hold_probe::*;\n\
 \n\
+fn __probe_trait<T: ?Sized + ParamGroupStep>() {}\n\
+\n\
 struct __FandheParamGroupsMarker;\n\
 \n\
 trait __FandheParamGroupsCompileProbe {\n\
@@ -12400,6 +12402,303 @@ fn facade_does_not_reexport_or_declare_optimizer_ext_items_detects_each_category
             "pub use fandhe_ai_autodiff::nn::optim::AdamW;"
         )
         .is_empty()
+    );
+}
+
+// =====================================================================
+// イシュー #2174（親 #2131）: optimizer state_dict（save/load・
+// safetensors 経由）の facade 公開保留を検査するテスト群。
+// `OptimizerStateDictHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
+// 1 ブロック方式のドリフト検査に加え、facade src 全体への非再エクス
+// ポート・非独自宣言・workspace 全体の `fn state_dict`／
+// `fn load_state_dict` 宣言元インベントリを固定する。承認事項の位置
+// づけは `docs/autodiff-optimizer-state-dict-decision.md` §5 を参照。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `OptimizerStateDictHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
+/// 固定する（`param_groups_hold_doctest_globs_all_pub_modules` の
+/// `OptimizerStateDictHoldDoctestGuard` 版）。
+#[test]
+fn optimizer_state_dict_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerStateDictHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "OptimizerStateDictHoldDoctestGuard の doctest ブロックが glob\
+         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
+         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
+         すること。"
+    );
+}
+
+/// [`optimizer_state_dict_hold_doctest_globs_all_pub_modules`] が glob
+/// import 集合の一致のみを固定するのに対し、本テストは doctest ブロック
+/// の**glob 以外の本文**が固定文言
+/// [`OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
+/// することを固定する（rustdoc の `# ` 隠し行・プローブの削除・別名へ
+/// のシャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否
+/// する。イシュー #2174）。
+#[test]
+fn optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerStateDictHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY,
+        "OptimizerStateDictHoldDoctestGuard の doctest ブロック本文（glob\
+         以外）が固定文言 OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY から\
+         ドリフトしている。正のプローブ（__fandhe_optim_state_dict_hold_\
+         probe モジュール・__FandheOptimizerStateDictProbe トレイト・\
+         __probe 関数）の削除・弱体化・隠し行の混入がないか確認する\
+         こと。"
+    );
+}
+
+/// [`optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract`]
+/// が要求する固定文言。`crates/facade/src/lib.rs` の
+/// `OptimizerStateDictHoldDoctestGuard` doc 内の唯一の doctest ブロック
+/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
+/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート
+/// 自体の `use fandhe_ai::*;` は本文に含む）。
+const OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_optim_state_dict_hold_probe {\n\
+\x20\x20\x20\x20pub trait OptimizerStateDict {}\n\
+}\n\
+use __fandhe_optim_state_dict_hold_probe::*;\n\
+\n\
+fn __probe_trait<T: ?Sized + OptimizerStateDict>() {}\n\
+\n\
+struct __FandheOptimizerStateDictMarker;\n\
+\n\
+trait __FandheOptimizerStateDictProbe {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker;\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker;\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::AdamW {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Adam {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::RmsProp {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Adagrad {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Lamb {\n\
+\x20\x20\x20\x20fn state_dict(&self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheOptimizerStateDictMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(\n\
+\x20\x20\x20\x20adamw: &mut fandhe_ai::optim::AdamW,\n\
+\x20\x20\x20\x20adam: &mut fandhe_ai::optim::Adam,\n\
+\x20\x20\x20\x20rmsprop: &mut fandhe_ai::optim::RmsProp,\n\
+\x20\x20\x20\x20adagrad: &mut fandhe_ai::optim::Adagrad,\n\
+\x20\x20\x20\x20lamb: &mut fandhe_ai::optim::Lamb,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::AdamW::state_dict(adamw);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adamw.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::AdamW::load_state_dict(adamw);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adamw.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adam::state_dict(adam);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adam.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adam::load_state_dict(adam);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adam.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::RmsProp::state_dict(rmsprop);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = rmsprop.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::RmsProp::load_state_dict(rmsprop);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = rmsprop.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adagrad::state_dict(adagrad);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adagrad.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adagrad::load_state_dict(adagrad);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = adagrad.load_state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Lamb::state_dict(lamb);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = lamb.state_dict();\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Lamb::load_state_dict(lamb);\n\
+\x20\x20\x20\x20let _: __FandheOptimizerStateDictMarker = lamb.load_state_dict();\n\
+}";
+
+/// facade src 全体（`crates/facade/src/**`）に、`OptimizerStateDict`／
+/// `state_dict`（モジュール名としての識別子）を識別子単位で含む
+/// `pub use`（別名・ネストした group 経由含む）が存在しないことを
+/// 固定する（`OptimizerStateDictHoldDoctestGuard` の正のプローブと
+/// 多層防御を成す最内層のソース走査ガード。`facade_does_not_reexport_
+/// or_declare_param_groups` と同型）。`fn state_dict`／
+/// `fn load_state_dict` の宣言元は
+/// [`workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations`]
+/// が別途固定する（facade 側は許可集合に含まれないため、そちらが
+/// facade への追加も検出する）。
+#[test]
+fn facade_does_not_reexport_or_declare_optimizer_state_dict() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub use") {
+                for ident in ["OptimizerStateDict", "state_dict"] {
+                    if line_contains_identifier(trimmed, ident) {
+                        offending.push(format!(
+                            "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が optimizer state_dict（イシュー #2174 の内部\
+         クレート限定新規公開面。facade 公開は承認待ちのため対象外と\
+         いう設計判断に違反）を再エクスポートしている: {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、`fn state_dict`／
+/// `fn load_state_dict` の定義元集合を固定する
+/// （`workspace_declares_param_group_fn_names_only_in_allowed_locations`
+/// と同型のインベントリ）。
+///
+/// **期待集合**（着手前確認の再 grep で判明）: 既存 2 か所
+/// （`autodiff/src/nn/module.rs`〈`Module` trait 既定実装〉・
+/// `facade/src/compat/sequential.rs`〈`Sequential` inherent〉）に加え、
+/// 本イシュー（#2174）が追加した [`OptimizerStateDict`] trait 宣言
+/// （`autodiff/src/nn/optim/state_dict.rs`）と、9 optimizer ファイル
+/// （`adamw`・`adam`・`rmsprop`・`adagrad`・`lamb`・`adadelta`・
+/// `adamax`・`nadam`・`radam`）各 1 件ずつの impl。
+#[test]
+fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    const NAMES: [&str; 2] = ["state_dict", "load_state_dict"];
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("autodiff/src/nn/module.rs::state_dict", 1usize),
+        ("autodiff/src/nn/module.rs::load_state_dict", 1usize),
+        ("facade/src/compat/sequential.rs::state_dict", 1usize),
+        ("facade/src/compat/sequential.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/state_dict.rs::state_dict", 1usize),
+        (
+            "autodiff/src/nn/optim/state_dict.rs::load_state_dict",
+            1usize,
+        ),
+        ("autodiff/src/nn/optim/adamw.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adamw.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adam.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adam.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/rmsprop.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/rmsprop.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adagrad.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adagrad.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/lamb.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/lamb.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adadelta.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adadelta.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/adamax.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/adamax.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/nadam.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/nadam.rs::load_state_dict", 1usize),
+        ("autodiff/src/nn/optim/radam.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/radam.rs::load_state_dict", 1usize),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の state_dict／load_state_dict\
+         系 `fn` 宣言集合が期待と一致しない（過不足いずれも fail-closed\
+         に検出する。facade への新規宣言が紛れ込んでいないか、9\
+         optimizer 以外への実装漏れ・過剰実装がないかを含めて確認\
+         すること）: {found:?}"
     );
 }
 
@@ -14225,4 +14524,389 @@ fn facade_does_not_declare_fit_config_accumulate_steps() {
          承認待ちのため未実装のはず。`docs/compat-grad-accumulation-\
          decision.md` §5 参照）: {offending:?}"
     );
+}
+
+/// `crates/facade/src/lib.rs` 内の全 hold ガード doctest（`mod
+/// __fandhe_*_hold_probe { ... }` を `use <mod>::*;` で glob import する
+/// 正のプローブ方式のブロック）を横断走査し、各プローブモジュール内で
+/// `pub` 定義された名前（trait・struct・fn・enum・type・mod・const・
+/// static・use）が、その glob import 行より後ろの doctest 本文で
+/// 少なくとも 1 回**参照**されていることを検査する（イシュー #2304 の
+/// codex レビュー指摘: `OptimizerStateDictHoldDoctestGuard` の
+/// `OptimizerStateDict` トレイトが glob import されるだけで一度も
+/// 名前解決されず、facade がこの名前を再エクスポートしても glob 衝突
+/// 〈E0659〉は「その名前を実際に使ったときにだけ」発生するため検出
+/// できなかった欠陥。`ParamGroupsHoldDoctestGuard` の `ParamGroupStep`
+/// トレイトにも同型の欠陥が既存で存在した。本テストは同型の欠陥の
+/// 再発を機械的に防ぐ再発防止ガードであり、個々のガードの固定文言
+/// 契約〈`*_HOLD_PROBE_BODY` 系〉とは独立の横断監査を担う）。
+///
+/// 走査ロジックは `pub` 宣言行の単純な字句マッチと、doctest 本文の
+/// 識別子トークン化による部分文字列検査で行う（本テストは workspace
+/// 許容依存 8 区分に含まれない正規表現クレートを使わず、手書きの
+/// 字句走査で完結させる。deps-policy.md）。
+#[test]
+fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let audits = scan_hold_probe_blocks(&content);
+
+    // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32）以上
+    // であることを固定する。将来ブロックが追加された場合はこの下限を
+    // 上方修正する（削減時は本テストが個別に指摘する）。
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 32;
+    assert!(
+        audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
+        "hold ガード doctest のプローブモジュール検出数が既知の下限を\
+         下回っている（走査ロジック自体が壊れ空振りで通過している疑いが\
+         ある）: 検出数={}, 下限={MIN_KNOWN_PROBE_BLOCKS}",
+        audits.len()
+    );
+
+    // 全数照合: フェンス解析を介さない独立集計（`///` 行の単純な
+    // 行走査のみで `mod __fandhe_..._hold_probe {` を数える）と
+    // `audits.len()` が完全一致することを検査する。フェンス解析側
+    // （`scan_hold_probe_blocks_in_doc_run`／`scan_hold_probe_blocks_in_body`）
+    // に将来 quad-fence 誤検出のような飲み込みバグが再発しても、
+    // 件数の不一致として機械的に検出できるようにする（Cursor Bugbot
+    // 指摘・PR #2304。下限定数 `MIN_KNOWN_PROBE_BLOCKS` だけでは
+    // 「一部が飲み込まれても下限を上回る」ケースを見逃すため）。
+    let independent_count = count_hold_probe_mod_declarations_in_doc_comments(&content);
+    assert_eq!(
+        audits.len(),
+        independent_count,
+        "フェンス解析による走査件数（{}）と、フェンス解析を介さない\
+         独立集計（{independent_count}）が一致しない（フェンス走査が\
+         一部の `mod __fandhe_..._hold_probe {{ ... }}` を飲み込んで\
+         見落としている疑いがある）",
+        audits.len()
+    );
+
+    // 正のプローブ: 本テストが検出対象に含めるべき既知の 2 例
+    // （イシュー #2304 で修正した欠陥そのもの）が走査集合に含まれる
+    // ことを固定する。
+    let mod_names: std::collections::BTreeSet<&str> =
+        audits.iter().map(|a| a.mod_name.as_str()).collect();
+    for expected in [
+        "__fandhe_param_groups_hold_probe",
+        "__fandhe_optim_state_dict_hold_probe",
+    ] {
+        assert!(
+            mod_names.contains(expected),
+            "既知のプローブモジュール `{expected}` が走査対象に含まれて\
+             いない（走査ロジックのフェンス検出・mod 境界検出が壊れて\
+             いる疑いがある）"
+        );
+    }
+
+    let mut offenses: Vec<String> = Vec::new();
+    for audit in &audits {
+        for item in &audit.unreferenced_items {
+            offenses.push(format!(
+                "{}::{item}（glob import 後の doctest 本文で一度も\
+                 参照されていない。この名前は facade が公開しても glob\
+                 衝突を起こさず、保留固定として機能しない）",
+                audit.mod_name
+            ));
+        }
+    }
+    assert!(
+        offenses.is_empty(),
+        "hold ガード doctest のプローブモジュールに、glob import 後の\
+         本文で一度も参照されない `pub` 定義が存在する（明示的に参照する\
+         プローブ〈関数境界での型使用・`fn __probe_trait<T: ?Sized +\
+         Trait>() {{}}` 等〉を追加すること）: {offenses:?}"
+    );
+}
+
+/// [`hold_doctest_probe_blocks_reference_every_glob_imported_item`] の
+/// 走査結果 1 件（1 プローブモジュール分）。
+struct HoldProbeBlockAudit {
+    mod_name: String,
+    unreferenced_items: Vec<String>,
+}
+
+/// [`scan_hold_probe_blocks`] の全数照合用の独立集計。`lib.rs` の
+/// 全文（`content`）から `///` 行だけを単純に走査し、フェンス解析を
+/// 一切介さずに `mod __fandhe_..._hold_probe { ... }` 定義行の個数を
+/// 数える。フェンス解析（`scan_hold_probe_blocks_in_doc_run`）が
+/// quad-fence 誤検出等で一部の doctest を飲み込んでも、本関数は
+/// フェンス構造に依存しないためその影響を受けず、両者の件数比較で
+/// 飲み込みバグを検出できる（Cursor Bugbot 指摘・PR #2304）。
+fn count_hold_probe_mod_declarations_in_doc_comments(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|line| {
+            let Some(raw) = line.trim_start().strip_prefix("///") else {
+                return false;
+            };
+            let raw = raw.strip_prefix(' ').unwrap_or(raw);
+            let trimmed = raw.trim();
+            trimmed.starts_with("mod __fandhe")
+                && trimmed.ends_with("_hold_probe {")
+                && !trimmed.starts_with("pub mod")
+        })
+        .count()
+}
+
+/// `lib.rs` の全文（`content`）から、`///` doc コメントの連続領域に
+/// 現れる裸／タグ付きフェンスの doctest ブロックを走査し、各ブロック
+/// 内の `mod __fandhe_..._hold_probe { ... }` 定義 1 つにつき
+/// [`HoldProbeBlockAudit`] を 1 件生成する。
+fn scan_hold_probe_blocks(content: &str) -> Vec<HoldProbeBlockAudit> {
+    let mut audits = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        if !lines[i].trim_start().starts_with("///") {
+            i += 1;
+            continue;
+        }
+        // 連続する `///` 行 1 ラン分を doc テキストへ変換する。
+        let mut doc_lines: Vec<String> = Vec::new();
+        while i < lines.len() && lines[i].trim_start().starts_with("///") {
+            let raw = lines[i].trim_start();
+            let rest = raw.strip_prefix("///").unwrap_or(raw);
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            doc_lines.push(rest.to_string());
+            i += 1;
+        }
+        audits.extend(scan_hold_probe_blocks_in_doc_run(&doc_lines));
+    }
+    audits
+}
+
+/// [`scan_hold_probe_blocks`] が抽出した doc テキスト 1 ラン分から、
+/// フェンス区切りの doctest ブロックを抜き出し、各ブロック内の
+/// `mod __fandhe_..._hold_probe { ... }` を監査する。
+fn scan_hold_probe_blocks_in_doc_run(doc_lines: &[String]) -> Vec<HoldProbeBlockAudit> {
+    let mut audits = Vec::new();
+    let mut i = 0usize;
+    while i < doc_lines.len() {
+        let trimmed = doc_lines[i].trim_end();
+        // フェンス開始行の判定は「先頭の連続バッククォート数がちょうど
+        // 3」の場合に限る（extract_single_bare_fenced_doctest_block と
+        // 同じ判定基準に統一。Cursor Bugbot 指摘・PR #2304）。lib.rs の
+        // 地の文には quad-fence 引用記法（4 連続バッククォートで
+        // フェンス表記そのものをインライン引用する書き方。例:
+        // ```` ```compile_fail,E0599 ```` が地の文の 1 行に現れる形）が
+        // あり、「3 以上」で判定すると地の文を誤ってフェンス開始と
+        // 誤検出し、以降の doctest を丸ごと読み飛ばして監査から
+        // 漏らしてしまう（Cursor Bugbot 指摘・PR #2304。修正前はこの誤検出
+        // により後続プローブモジュールが監査対象から静かに脱落し
+        // うる構造上の欠陥だった）。
+        let leading_backticks = trimmed
+            .trim_start()
+            .chars()
+            .take_while(|&c| c == '`')
+            .count();
+        if leading_backticks != 3 {
+            i += 1;
+            continue;
+        }
+        // フェンス開始行を見つけた。閉じフェンス（前後トリム後
+        // "```"）まで本文を収集する。
+        let mut body: Vec<String> = Vec::new();
+        i += 1;
+        while i < doc_lines.len() && doc_lines[i].trim() != "```" {
+            body.push(doc_lines[i].clone());
+            i += 1;
+        }
+        // fail-closed: 閉じフェンスが見つからないまま doc ラン終端に
+        // 達した場合は、黙って終端扱いにせず panic する。閉じ忘れの
+        // まま本文欠落（body が途中で打ち切られる）を通過させると、
+        // フェンス内のプローブモジュールが不完全な形で監査され、
+        // 検出漏れを見逃す可能性があるため。
+        assert!(
+            i < doc_lines.len(),
+            "hold プローブ走査: doctest フェンスが閉じられていない\
+             （doc ラン終端に達した）。開始行付近の本文: {body:?}"
+        );
+        // 閉じフェンス自体を読み飛ばす。
+        i += 1;
+        audits.extend(scan_hold_probe_blocks_in_body(&body));
+    }
+    audits
+}
+
+/// doctest ブロック本文（フェンスを含まない）から
+/// `mod __fandhe_..._hold_probe { ... }` 定義を探し、`pub` 定義された
+/// 名前が対応する `use <mod>::*;` 行より後ろで参照されているかを判定
+/// する。1 ブロックに複数のプローブモジュール定義があっても全て拾う。
+fn scan_hold_probe_blocks_in_body(body: &[String]) -> Vec<HoldProbeBlockAudit> {
+    let mut audits = Vec::new();
+    let mut i = 0usize;
+    while i < body.len() {
+        let trimmed = body[i].trim();
+        let is_probe_mod_start = trimmed.starts_with("mod __fandhe")
+            && trimmed.ends_with("_hold_probe {")
+            && !trimmed.starts_with("pub mod");
+        if !is_probe_mod_start {
+            i += 1;
+            continue;
+        }
+        let mod_name = trimmed
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(" {"))
+            .unwrap_or_default()
+            .to_string();
+
+        // ブレース深さカウントで対応する閉じ行を探す（ネストした
+        // `pub mod` を含んでも壊れないよう、単純な文字列一致ではなく
+        // 深さで判定する）。
+        let mut depth: i32 = 1;
+        let mod_body_start = i + 1;
+        let mut mod_end = body.len();
+        let mut j = mod_body_start;
+        while j < body.len() {
+            let opens = body[j].matches('{').count() as i32;
+            let closes = body[j].matches('}').count() as i32;
+            depth += opens - closes;
+            if depth <= 0 {
+                mod_end = j;
+                break;
+            }
+            j += 1;
+        }
+
+        let mut items: Vec<String> = Vec::new();
+        for line in &body[mod_body_start..mod_end] {
+            let t = line.trim();
+            let Some(rest) = t.strip_prefix("pub ") else {
+                continue;
+            };
+            let mut tokens = rest.split_whitespace();
+            let Some(keyword) = tokens.next() else {
+                continue;
+            };
+            if !matches!(
+                keyword,
+                "trait" | "struct" | "fn" | "enum" | "type" | "mod" | "const" | "static" | "use"
+            ) {
+                continue;
+            }
+            let Some(name_raw) = tokens.next() else {
+                continue;
+            };
+            let name: String = name_raw
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                items.push(name);
+            }
+        }
+
+        // `use <mod_name>::*;` 行（glob import）をブロック全体から探す。
+        let use_line = format!("use {mod_name}::*;");
+        let use_idx = body.iter().position(|l| l.trim() == use_line);
+        let rest_tokens: std::collections::HashSet<String> = match use_idx {
+            Some(idx) => tokenize_identifiers(&body[(idx + 1)..].join("\n")),
+            None => std::collections::HashSet::new(),
+        };
+
+        let unreferenced_items: Vec<String> = items
+            .into_iter()
+            .filter(|name| !rest_tokens.contains(name))
+            .collect();
+
+        audits.push(HoldProbeBlockAudit {
+            mod_name,
+            unreferenced_items,
+        });
+
+        i = mod_end + 1;
+    }
+    audits
+}
+
+/// `text` を識別子トークン（英数字・アンダースコアの連続runs）へ分割
+/// した集合を返す（[`scan_hold_probe_blocks_in_body`] の参照検査用）。
+fn tokenize_identifiers(text: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            current.push(c);
+        } else if !current.is_empty() {
+            out.insert(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.insert(current);
+    }
+    out
+}
+
+/// 回帰テスト（PR #2304 Bugbot 指摘）: `scan_hold_probe_blocks_in_doc_run`
+/// が、quad-fence 引用記法（4 連続バッククォートでフェンス表記自体を
+/// インライン引用する地の文行）をフェンス開始と誤検出せず、その直後に
+/// 続く裸フェンスの hold プローブ doctest を正しく監査対象に含めること
+/// を確認する。修正前（「先頭バッククォート数が 3 以上」で判定する旧
+/// ロジック）では、quad-fence 引用行が誤ってフェンス開始とみなされ、
+/// 直後に現れる本物の裸フェンス開始行がその誤検出フェンスの「閉じ」と
+/// して消費されてしまい、後続の裸フェンス doctest ブロック
+/// （本テストの `__fandhe_regression_hold_probe`）が丸ごと走査から
+/// 脱落する（`scan_hold_probe_blocks_in_doc_run` が 0 件しか返さない）。
+#[test]
+fn scan_hold_probe_blocks_in_doc_run_survives_quad_fence_quotation_in_prose() {
+    // `doc_lines` は `scan_hold_probe_blocks` が `///` プレフィックスを
+    // 剥がした後の doc テキスト行相当（本テストはフェンス解析単体を
+    // 検査するため、`///` 剥がし処理を経由せず直接構築する）。
+    let doc_lines: Vec<String> = [
+        "地の文の説明。旧実装は 3 本の",
+        "```` ```compile_fail,E0599 ```` doctest ブロックだった。しかし",
+        "quad-fence 引用がここに現れる（本物のフェンス開始ではない）。",
+        "```",
+        "mod __fandhe_regression_hold_probe {",
+        "    pub trait RegressionProbeTrait {}",
+        "}",
+        "use __fandhe_regression_hold_probe::*;",
+        "fn __probe_unrelated() {}",
+        "```",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    let audits = scan_hold_probe_blocks_in_doc_run(&doc_lines);
+
+    assert_eq!(
+        audits.len(),
+        1,
+        "quad-fence 引用行の直後にある裸フェンスの hold プローブが\
+         走査から脱落している（quad-fence 誤検出の再発）: {}",
+        audits.len()
+    );
+    assert_eq!(audits[0].mod_name, "__fandhe_regression_hold_probe");
+    // `RegressionProbeTrait` は glob import 後の本文で一度も参照されて
+    // いないため、未参照として検出されるはずである（プローブとして
+    // 機能していることの確認）。
+    assert_eq!(
+        audits[0].unreferenced_items,
+        vec!["RegressionProbeTrait".to_string()],
+        "quad-fence 誤検出により本文の取り込み範囲がずれ、未参照判定が\
+         想定と異なる結果になっている"
+    );
+}
+
+/// 回帰テスト（PR #2304）: 裸フェンスが閉じられないまま doc ラン終端に
+/// 達した場合、`scan_hold_probe_blocks_in_doc_run` は黙って打ち切らず
+/// fail-closed に panic することを確認する。
+#[test]
+#[should_panic(expected = "doctest フェンスが閉じられていない")]
+fn scan_hold_probe_blocks_in_doc_run_panics_on_unclosed_fence() {
+    let doc_lines: Vec<String> = [
+        "```",
+        "mod __fandhe_unclosed_hold_probe {",
+        "    pub trait UnclosedProbeTrait {}",
+        "}",
+        "use __fandhe_unclosed_hold_probe::*;",
+        // 閉じフェンス "```" を意図的に省略する。
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    let _ = scan_hold_probe_blocks_in_doc_run(&doc_lines);
 }

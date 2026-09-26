@@ -78,6 +78,7 @@ mod nadam;
 pub(crate) mod param_group;
 mod radam;
 mod rmsprop;
+mod state_dict;
 
 pub mod amp;
 pub mod clip;
@@ -118,6 +119,7 @@ pub use reduce_lr_on_plateau::{
     PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
 };
 pub use rmsprop::{RmsProp, RmsPropConfig};
+pub use state_dict::OptimizerStateDict;
 
 // イシュー #1721: 損失スケーリング（`amp::scale_loss`/`amp::GradScaler::
 // scale_loss`）・unscale＋非有限検出（`amp::unscale_grads`/
@@ -271,6 +273,19 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 保留固定の設計は `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-
 // decision.md` §8「承認事項」を参照（`crates/facade/src/lib.rs::
 // OptimizerExtHoldDoctestGuard` が正のプローブで固定する）。
+
+// イシュー #2174（親 #2131）: optimizer state_dict（[`state_dict::
+// OptimizerStateDict`]。save/load・safetensors 経由）を追加した
+// （`state_dict` モジュール冒頭 doc「キー配置」「符号化」節参照）。
+// `AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・`Adadelta`・`Adamax`・
+// `NAdam`・`RAdam`（9 optimizer 全種）が実装する。既存 `step()`／
+// `step_with_slot_hparams` の演算列には一切触れていない（bit
+// ドリフトなし。新規 `Op`／`BackendOps`／カーネル／`unsafe`／依存は
+// 追加していない）。facade（`fandhe_ai::optim`）への公開は #2173
+// （param groups）と同じ理由で保留（`state_dict` モジュール冒頭 doc
+// 「facade 公開の保留」節・`crates/facade/src/lib.rs::
+// OptimizerStateDictHoldDoctestGuard`・
+// `docs/autodiff-optimizer-state-dict-decision.md` 参照）。
 
 // イシュー #2176（親 #2131）: LR scheduler 5 種（[`MultiStepLr`]・
 // [`CosineAnnealingWarmRestarts`]・[`CyclicLr`]・[`LambdaLr`]・

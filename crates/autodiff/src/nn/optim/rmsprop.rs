@@ -22,6 +22,8 @@
 //! 共通化による bit ドリフトを検出できないため。イシュー #1743
 //! 実装計画 §3.2）。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -238,6 +240,23 @@ impl RmsProp {
             }
         }
 
+        // イシュー #2174 PR #2304 codex-review P1 是正: `load_state_dict` は
+        // `step_count` の値域を検査せず、`step()` の到達可能な全域（`0..=
+        // u64::MAX`）をそのまま受理する（overflow 判定は本 `checked_add` に
+        // 一元化。`state_dict.rs` モジュール冒頭 doc「符号化」節）。この判定を
+        // `self.states` の遅延初期化より前に確定させ、Err 時に状態（`self.
+        // states`・`step_count`）が一切変化しないアトミック性を保証する
+        // （従来は states 初期化が先に実行され、初回 step かつ step_count が
+        // u64::MAX のときに空スロットが書き込まれたまま Err を返す部分更新が
+        // 起きていた）。
+        let next_step_count = self.step_count.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "RmsProp::step: step_count overflow: too many step() calls (or a restored step_count too \
+                 close to u64::MAX) for this optimizer to advance further"
+                    .to_string(),
+            )
+        })?;
+
         if self.states.is_empty() && !params_and_grads.is_empty() {
             self.states = params_and_grads
                 .iter()
@@ -250,7 +269,7 @@ impl RmsProp {
                 .collect();
         }
 
-        self.step_count += 1;
+        self.step_count = next_step_count;
 
         let alpha = self.config.alpha;
         let one_minus_alpha = 1.0 - alpha;
@@ -343,6 +362,77 @@ impl RmsProp {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "rmsprop"`・バッファ名
+/// `square_avg`／`grad_avg`／`momentum_buffer`（config に関係なく常に
+/// 3 本確保されているため、キー集合は config に依存しない）・
+/// `beta*_pow_t`／`mu_product` なし。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for RmsProp {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(3 + self.states.len() * 3);
+        out.insert(
+            super::state_dict::marker_key("rmsprop"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::NUM_SLOTS_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.states.len() as u64)?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "square_avg"),
+                Tensor::new(slot.square_avg.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "grad_avg"),
+                Tensor::new(slot.grad_avg.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "momentum_buffer"),
+                Tensor::new(slot.momentum_buffer.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded = super::state_dict::decode_state_dict(
+            "rmsprop",
+            &state,
+            &["square_avg", "grad_avg", "momentum_buffer"],
+            false,
+            false,
+            false,
+        )?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let square_avg = buffers.remove("square_avg").unwrap_or_default();
+                let grad_avg = buffers.remove("grad_avg").unwrap_or_default();
+                let momentum_buffer = buffers.remove("momentum_buffer").unwrap_or_default();
+                SlotState {
+                    shape,
+                    square_avg,
+                    grad_avg,
+                    momentum_buffer,
+                }
+            })
+            .collect();
+        self.step_count = decoded.step_count;
+        self.states = states;
+        Ok(())
     }
 }
 
