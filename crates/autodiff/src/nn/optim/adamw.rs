@@ -208,6 +208,23 @@ impl AdamW {
             )));
         }
 
+        // イシュー #2174 PR #2304 codex-review P1 是正: `load_state_dict` は
+        // `step_count` の値域を検査せず、`step()` の到達可能な全域（`0..=
+        // u64::MAX`）をそのまま受理する（overflow 判定は本 `checked_add` に
+        // 一元化。`state_dict.rs` モジュール冒頭 doc「符号化」節）。この判定を
+        // `self.states` の遅延初期化より前に確定させ、Err 時に状態（`self.
+        // states`・`step_count`）が一切変化しないアトミック性を保証する
+        // （従来は states 初期化が先に実行され、初回 step かつ step_count が
+        // u64::MAX のときに空スロットが書き込まれたまま Err を返す部分更新が
+        // 起きていた）。
+        let next_step_count = self.step_count.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "AdamW::step: step_count overflow: too many step() calls (or a restored step_count too \
+                 close to u64::MAX) for this optimizer to advance further"
+                    .to_string(),
+            )
+        })?;
+
         if self.states.is_empty() && !params_and_grads.is_empty() {
             self.states = params_and_grads
                 .iter()
@@ -250,19 +267,7 @@ impl AdamW {
             }
         }
 
-        // イシュー #2174 PR #2304 codex-review P0 是正: state_dict の復元は
-        // load 直後の 1 回分の headroom しか保証しない
-        // （`state_dict.rs::validate_step_count_headroom`）ため、2 回目以降の
-        // `step()` 呼び出しでも `step_count` の素朴な `+= 1` は overflow panic
-        // しうる。`checked_add` で確実に型付きエラーへ落とす（本番経路で
-        // panic しない。`.claude/rules/coding-rust.md`）。
-        self.step_count = self.step_count.checked_add(1).ok_or_else(|| {
-            AutodiffError::InvalidArgument(
-                "AdamW::step: step_count overflow: too many step() calls (or a restored step_count too \
-                 close to u64::MAX) for this optimizer to advance further"
-                    .to_string(),
-            )
-        })?;
+        self.step_count = next_step_count;
         self.beta1_pow_t *= self.config.beta1 as f64;
         self.beta2_pow_t *= self.config.beta2 as f64;
         let bias_correction1 = 1.0 - self.beta1_pow_t;
@@ -523,12 +528,13 @@ mod tests {
         assert!(matches!(result, Err(AutodiffError::Shape(_))));
     }
 
-    /// P0 レビュー指摘（イシュー #2174 PR #2304）の回帰検査:
+    /// P0/P1 レビュー指摘（イシュー #2174 PR #2304）の回帰検査:
     /// `state_dict` からの復元で `step_count` が `u64::MAX` 近傍に
-    /// なった状態を模し（`validate_step_count_headroom` は load 直後の
-    /// 1 回分しか保証しないため）、2 回目の `step()` で `self.
-    /// step_count += 1` の素朴な加算がオーバーフロー panic しないこと
-    /// （`checked_add` により型付きエラーへ落ちること）を固定する。
+    /// なった状態を模し、2 回目の `step()` で `self.step_count += 1`
+    /// の素朴な加算がオーバーフロー panic しないこと（`checked_add`
+    /// により型付きエラーへ落ちること）を固定する。`load_state_dict`
+    /// は `step_count` の値域を検査しないため、overflow 判定は本テスト
+    /// が固定する `step()` 側の `checked_add` にのみ依存する。
     #[test]
     fn step_returns_typed_error_instead_of_panicking_on_step_count_overflow() {
         let mut opt = AdamW::new(AdamWConfig::default()).unwrap();
@@ -537,13 +543,13 @@ mod tests {
         let grad = t(vec![0.1, 0.1], &[2]);
 
         // 1 回目: `step_count` が `u64::MAX - 1` → `u64::MAX` へ進み成功
-        // する（headroom 検証が保証する「load 直後の 1 回」に相当）。
+        // する。
         assert!(opt.step(&[(&param, &grad)]).is_ok());
         assert_eq!(opt.step_count(), u64::MAX);
 
         // 2 回目: `step_count` が既に `u64::MAX` のため素朴な `+= 1` なら
         // panic する。`checked_add` により panic せず型付きエラーを
-        // 返すことを確認する（headroom 検証の対象外の呼び出し）。
+        // 返すことを確認する。
         let result = opt.step(&[(&param, &grad)]);
         assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
     }

@@ -80,22 +80,22 @@
 //! する（初期値 `1.0` から `mu ∈ [0, beta1)` を逐次乗じる積のため。
 //! 有限性のみの検証では正常な逐次積では生じない負値・`f32::MAX` 等を
 //! 受理してしまう。P0 レビュー指摘・イシュー #2174 PR #2304）。
-//! `step_count` は復号後にさらに「load 直後の 1 回の `step()` 呼び出し
-//! （`NAdam` はさらに内部で `step + 1` を評価する）が確実に成功する」
-//! ことを検証する（`decode_u16x4_tensor` は `u64::MAX` を含む任意の値を
-//! ロスレスに受理できてしまうため。[`validate_step_count_headroom`]
-//! 参照）。**恒久的な panic 対策は各 optimizer の `step()` 側にある**:
-//! `self.step_count += 1` の素朴な加算は `checked_add` に置き換え済み
-//! （2 回目以降の呼び出しで `step_count` が `u64::MAX` 近傍に達しても
-//! panic せず `AutodiffError::InvalidArgument` を返す。`NAdam` の
-//! `step + 1` も `u64` 加算を経由しない `f64` 式へ変更済み）ため、本検証
-//! は「load 直後の 1 回」を超える呼び出し回数の安全性には**依存しない**
-//! （P0 レビュー指摘・イシュー #2174 PR #2304 の是正コミットで追加）。
-//! 本検証はあくまで load 時点の fail-early（型・値域の一次防御。復元
-//! 直後に `step()` できないほど step_count が近すぎる状態を早期に
-//! 拒否する）としての位置づけである。バッファ値（`m`・`v` 等）
-//! 自体は値域を検証しない（学習が生んだ値をそのまま bit 単位で復元
-//! することを優先する）。
+//! `step_count` は **値域を検査しない**（P1 レビュー指摘・イシュー
+//! #2174 PR #2304: 各 optimizer の `step()` は `step_count ==
+//! u64::MAX - 1` からの呼び出しに成功し、その結果生じた
+//! `step_count == u64::MAX` の状態を `state_dict()` で保存できる。
+//! load 側が `u64::MAX` を拒否すると、optimizer 自身が生成した
+//! state_dict を復元できず save/load の往復契約が破れる）。`step()`
+//! の到達可能な `step_count` の値域は `0..=u64::MAX`（`checked_add`
+//! で確定される）であり、`load_state_dict` の受理集合をこれと一致
+//! させる。overflow 判定は各 optimizer の `step()` 側の
+//! `self.step_count.checked_add(1)` に一元化されており（`step_count
+//! == u64::MAX` の状態を load した直後の `step()` は
+//! `AutodiffError::InvalidArgument` を返し、状態を一切変更しない。
+//! `NAdam` の `mu_next` 導出も `u64` 加算を経由しない `f64` 式のため
+//! 同様に安全）、`load_state_dict` 側で重複した早期検査を行わない。
+//! バッファ値（`m`・`v` 等）自体も値域を検証しない（学習が生んだ値を
+//! そのまま bit 単位で復元することを優先する）。
 //!
 //! # `load_state_dict` の検証順（fail-closed・状態変更前に全件検証）
 //!
@@ -284,46 +284,6 @@ pub(crate) fn validate_pow_t_range(key: &str, value: f64) -> Result<(), Autodiff
     Ok(())
 }
 
-/// `step_count` の値域検証（load 時点の fail-early 用。P0 レビュー
-/// 指摘・イシュー #2174 PR #2304: `decode_u16x4_tensor` は `u64::MAX`
-/// を含む任意のロスレス符号化値を正しく受理してしまうため、極端に
-/// 大きい `step_count` を無検証で受理すると復元直後の 1 回目の
-/// `step()` が直感的でない失敗をする可能性がある）。**panic 防止の
-/// 恒久対策ではない**: 9 optimizer すべての `step()` は `self.
-/// step_count` の加算を `checked_add` で行うため、本関数を経由しない
-/// 経路（`step()` を直接繰り返し呼ぶ通常の学習ループ）でも
-/// `step_count` が `u64::MAX` に達すれば panic せず型付きエラーを返す
-/// （是正コミットで追加）。本関数は「load 直後の 1 回の `step()` が
-/// 確実に成功する」という早期の利用者向けエラーメッセージを提供する
-/// ための一次検証に留める。
-pub(crate) fn validate_step_count_headroom(
-    kind: &str,
-    step_count: u64,
-    has_mu_product: bool,
-) -> Result<(), AutodiffError> {
-    // `NAdam`（`has_mu_product`）は `nadam.rs::step` が `mu_next` 導出で
-    // `step + 1` 相当の式を評価するため、他 8 optimizer より 1 回分
-    // 保守的な余裕（`u64::MAX - 2`）を要求する。もっとも `nadam.rs` の
-    // 当該式は `u64` 加算ではなく `(step as f64 + 1.0)` で評価するため
-    // `u64` オーバーフローはそもそも起きない（是正コミットで変更済み）。
-    // この余裕は panic 防止のためではなく、`load` 直後の 1 回の
-    // `step()` が安全に実行できることを保証する fail-early 側の
-    // 保守的な閾値として維持する。
-    let max_safe = if has_mu_product {
-        u64::MAX - 2
-    } else {
-        u64::MAX - 1
-    };
-    if step_count > max_safe {
-        return Err(AutodiffError::InvalidArgument(format!(
-            "OptimizerStateDict::load_state_dict（kind=`{kind}`）: `{STEP_COUNT_KEY}` value \
-             {step_count} is too large; the next `step()` call would overflow the internal \
-             `step_count` counter (maximum safely loadable value is {max_safe})"
-        )));
-    }
-    Ok(())
-}
-
 /// `mu_product`（`NAdam` 限定）の値域検証（P0 レビュー指摘・イシュー
 /// #2174 PR #2304）。初期値は `1.0` で、以降は `step()` のたびに
 /// `mu ∈ [0, beta1)`（`beta1 ∈ [0,1)` の正常な config）を乗じる逐次積
@@ -499,8 +459,11 @@ pub(crate) fn decode_state_dict(
              `{STEP_COUNT_KEY}` missing after key-set validation"
         )));
     };
+    // `step_count` は値域を検査しない（`load_state_dict` は `step()` の
+    // 到達可能な全域を受理する。モジュール冒頭 doc「符号化」節・
+    // イシュー #2174 PR #2304 P1 是正）。overflow 判定は `step()` 側の
+    // `checked_add` に一元化されている。
     let step_count = decode_u16x4_tensor(STEP_COUNT_KEY, step_count_tensor)?;
-    validate_step_count_headroom(kind, step_count, has_mu_product)?;
 
     let beta1_pow_t = if has_beta1 {
         let Some(t) = state.get(BETA1_POW_T_KEY) else {
@@ -687,27 +650,6 @@ mod tests {
         assert!(validate_mu_product_range("k", 0.5).is_ok());
     }
 
-    /// P0 レビュー指摘（イシュー #2174 PR #2304）: `decode_u16x4_tensor`
-    /// は `u64::MAX` を含む任意のロスレス符号化値を正しく受理するため、
-    /// 無検証だと極端に大きい `step_count` を load 時点でそのまま
-    /// 受理してしまう（panic 防止の恒久対策は `step()` 側の
-    /// `checked_add`。`validate_step_count_headroom` の doc 参照）。
-    /// `has_mu_product=false`（8 optimizer）は `u64::MAX - 1` まで、
-    /// `has_mu_product=true`（`NAdam`）は `u64::MAX - 2` まで load 直後の
-    /// 1 回の `step()` が安全に成功することを固定する。
-    #[test]
-    fn step_count_headroom_rejects_values_too_close_to_u64_max() {
-        assert!(validate_step_count_headroom("adamw", u64::MAX, false).is_err());
-        assert!(validate_step_count_headroom("adamw", u64::MAX - 1, false).is_ok());
-        assert!(validate_step_count_headroom("adamw", u64::MAX - 2, false).is_ok());
-        assert!(validate_step_count_headroom("adamw", 0, false).is_ok());
-
-        assert!(validate_step_count_headroom("nadam", u64::MAX, true).is_err());
-        assert!(validate_step_count_headroom("nadam", u64::MAX - 1, true).is_err());
-        assert!(validate_step_count_headroom("nadam", u64::MAX - 2, true).is_ok());
-        assert!(validate_step_count_headroom("nadam", 0, true).is_ok());
-    }
-
     /// `num_slots` 個のスロット（キーはまだ挿入しない）を宣言した基礎
     /// state を組み立てる（マーカー・`step_count`・`num_slots` メタ
     /// データのみ）。呼び出し側がスロットバッファキーを追加・欠落
@@ -732,29 +674,29 @@ mod tests {
         assert!(decoded.slots.is_empty());
     }
 
-    /// P0 レビュー指摘（イシュー #2174 PR #2304）: `step_count ==
-    /// u64::MAX` を `decode_state_dict` レベルで fail-closed に拒否
-    /// することを固定する（`decode_u16x4_tensor` 自体はロスレスに
-    /// 受理するため、`validate_step_count_headroom` の呼び出し漏れが
-    /// 無いことの回帰検査を兼ねる）。`has_mu_product=true`（NAdam
-    /// 相当）は `u64::MAX - 1` も拒否する。
+    /// P1 レビュー指摘（イシュー #2174 PR #2304）: `step_count ==
+    /// u64::MAX` は `step()` の到達可能な値（`step_count == u64::MAX -
+    /// 1` からの `checked_add` が成功した結果）であり、`decode_
+    /// state_dict` は fail-closed に拒否せず受理することを固定する
+    /// （`load_state_dict` は `step()` の到達可能な全域を受理する。
+    /// overflow 判定は `step()` 側の `checked_add` に一元化されて
+    /// いる）。`has_mu_product=true`（NAdam 相当）も同様に受理する。
     #[test]
-    fn decode_state_dict_rejects_step_count_at_u64_max() {
+    fn decode_state_dict_accepts_step_count_at_u64_max() {
         let mut state = base_state("adamw", 0);
         state.insert(
             STEP_COUNT_KEY.to_string(),
             encode_u16x4_tensor(u64::MAX).unwrap(),
         );
-        let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        let decoded = decode_state_dict("adamw", &state, &["m", "v"], false, false, false)
+            .expect("step_count == u64::MAX は受理されるはず");
+        assert_eq!(decoded.step_count, u64::MAX);
 
-        // has_mu_product=true（NAdam 相当）は `u64::MAX - 1` も拒否する
-        // （load 直後の 1 回の `step()` に対する保守的な追加の余裕。
-        // `validate_step_count_headroom` の doc 参照）。
+        // has_mu_product=true（NAdam 相当）も同様に受理する。
         let mut state_nadam = base_state("nadam", 0);
         state_nadam.insert(
             STEP_COUNT_KEY.to_string(),
-            encode_u16x4_tensor(u64::MAX - 1).unwrap(),
+            encode_u16x4_tensor(u64::MAX).unwrap(),
         );
         state_nadam.insert(
             BETA2_POW_T_KEY.to_string(),
@@ -764,7 +706,7 @@ mod tests {
             MU_PRODUCT_KEY.to_string(),
             Tensor::new(vec![1.0], &[1]).unwrap(),
         );
-        let err_nadam = decode_state_dict(
+        let decoded_nadam = decode_state_dict(
             "nadam",
             &state_nadam,
             &["exp_avg", "exp_avg_sq"],
@@ -772,8 +714,8 @@ mod tests {
             true,
             true,
         )
-        .unwrap_err();
-        assert!(matches!(err_nadam, AutodiffError::InvalidArgument(_)));
+        .expect("step_count == u64::MAX（NAdam）は受理されるはず");
+        assert_eq!(decoded_nadam.step_count, u64::MAX);
     }
 
     /// P0 レビュー指摘（イシュー #2174 PR #2304）: `mu_product`

@@ -240,6 +240,23 @@ impl RmsProp {
             }
         }
 
+        // イシュー #2174 PR #2304 codex-review P1 是正: `load_state_dict` は
+        // `step_count` の値域を検査せず、`step()` の到達可能な全域（`0..=
+        // u64::MAX`）をそのまま受理する（overflow 判定は本 `checked_add` に
+        // 一元化。`state_dict.rs` モジュール冒頭 doc「符号化」節）。この判定を
+        // `self.states` の遅延初期化より前に確定させ、Err 時に状態（`self.
+        // states`・`step_count`）が一切変化しないアトミック性を保証する
+        // （従来は states 初期化が先に実行され、初回 step かつ step_count が
+        // u64::MAX のときに空スロットが書き込まれたまま Err を返す部分更新が
+        // 起きていた）。
+        let next_step_count = self.step_count.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "RmsProp::step: step_count overflow: too many step() calls (or a restored step_count too \
+                 close to u64::MAX) for this optimizer to advance further"
+                    .to_string(),
+            )
+        })?;
+
         if self.states.is_empty() && !params_and_grads.is_empty() {
             self.states = params_and_grads
                 .iter()
@@ -252,19 +269,7 @@ impl RmsProp {
                 .collect();
         }
 
-        // イシュー #2174 PR #2304 codex-review P0 是正: state_dict の復元は
-        // load 直後の 1 回分の headroom しか保証しない
-        // （`state_dict.rs::validate_step_count_headroom`）ため、2 回目以降の
-        // `step()` 呼び出しでも `step_count` の素朴な `+= 1` は overflow panic
-        // しうる。`checked_add` で確実に型付きエラーへ落とす（本番経路で
-        // panic しない。`.claude/rules/coding-rust.md`）。
-        self.step_count = self.step_count.checked_add(1).ok_or_else(|| {
-            AutodiffError::InvalidArgument(
-                "RmsProp::step: step_count overflow: too many step() calls (or a restored step_count too \
-                 close to u64::MAX) for this optimizer to advance further"
-                    .to_string(),
-            )
-        })?;
+        self.step_count = next_step_count;
 
         let alpha = self.config.alpha;
         let one_minus_alpha = 1.0 - alpha;

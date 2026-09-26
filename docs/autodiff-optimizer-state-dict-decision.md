@@ -99,6 +99,23 @@ NaN を正規化しうる外部ツールを経由しても壊れない。復号�
 `beta*_pow_t` と同じ検証関数に統一済み）。バッファ値自体（`m`・`v` 等）
 は値域を検証しない。
 
+**`step_count` は load 時に値域を検査しない**（P1 レビュー指摘・
+イシュー #2174 PR #2304: 当初は「load 直後の 1 回の `step()` が確実に
+成功する」ことを保証する fail-early 検証〈`validate_step_count_
+headroom`〉として `step_count > u64::MAX - 1`〈`NAdam` は `u64::MAX -
+2`〉を拒否していたが、各 optimizer の `step()` は `step_count ==
+u64::MAX - 1` からの呼び出しに成功し、その結果生じた `step_count ==
+u64::MAX` の状態を `state_dict()` で保存できるため、load 側がそれを
+拒否すると optimizer 自身が生成した state_dict を復元できず save/
+load の往復契約が破れる。`load_state_dict` の受理集合は `step()` の
+到達可能な値域 `0..=u64::MAX` と一致させ、overflow 判定は各
+optimizer の `step()` 側の `self.step_count.checked_add(1)` に一元化
+した。`checked_add` の失敗時に状態が一切変わらないアトミック性を
+保証するため、9 optimizer すべての `step()` で `checked_add` の結果
+（新しい `step_count`）を、`self.states` の遅延初期化より前に計算し、
+失敗時は早期に `Err` を返す順序へ変更した。既存の「エラー時は
+`step_count`・状態が一切進まない」契約・テストは維持する）。
+
 ### 2.3 `load_state_dict` の検証順（fail-closed・状態変更前に全件検証）
 
 `crates/autodiff/src/nn/optim/state_dict.rs::decode_state_dict` に集約

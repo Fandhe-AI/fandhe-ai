@@ -23,6 +23,17 @@ fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
 }
 
+/// `nn::optim::state_dict::encode_bits_u16x4`（`pub(crate)` のため本
+/// 統合テストからは直接呼べない）と同じ符号化を逐語再現する。下位
+/// から 16bit ずつ 4 語に切り出し、各語を整数値の `f32` として
+/// `shape [4]` の `Tensor<f32>` に格納する。
+fn encode_u16x4(bits: u64) -> Tensor<f32> {
+    let words: Vec<f32> = (0..4)
+        .map(|i| (((bits >> (16 * i)) & 0xFFFF) as u32) as f32)
+        .collect();
+    t(words, &[4])
+}
+
 fn tensor_bits(tensor: &Tensor<f32>) -> (Vec<usize>, Vec<u32>) {
     let data = tensor
         .as_slice()
@@ -459,6 +470,104 @@ macro_rules! optimizer_state_dict_tests {
                 let mut b = new_opt();
                 b.load_state_dict(view_sd).unwrap();
                 assert_state_dicts_bit_equal(&sd, &b.state_dict().unwrap());
+            }
+
+            /// P1 レビュー指摘（イシュー #2174 PR #2304・未解決コメント）
+            /// の回帰検査: `step()` は `step_count == u64::MAX - 1` から
+            /// の呼び出しに成功し、その結果生じた `step_count ==
+            /// u64::MAX` の状態を `state_dict()` で保存できる。
+            /// `load_state_dict` がこれを拒否すると、optimizer 自身が
+            /// 生成した state_dict を復元できず save/load の往復契約が
+            /// 破れる。`step_count == u64::MAX - 1` を load → 1 回
+            /// `step()` → `step_count == u64::MAX` → `state_dict()` →
+            /// 新しい optimizer へ `load_state_dict()` → 再度
+            /// `state_dict()` が bit 一致する往復を固定する。
+            #[test]
+            fn step_count_u64_max_minus_one_roundtrips_after_one_step() {
+                let seed = new_opt();
+                let mut sd = seed
+                    .state_dict()
+                    .expect("test fixture: 未学習 state_dict は常に成功する");
+                sd.insert(
+                    "step_count.u64_u16x4".to_string(),
+                    encode_u16x4(u64::MAX - 1),
+                );
+
+                let mut opt = new_opt();
+                opt.load_state_dict(sd)
+                    .expect("step_count == u64::MAX - 1 は受理されるはず");
+                assert_eq!(opt.step_count(), u64::MAX - 1);
+
+                let p = t(vec![1.0, -2.0], &[2]);
+                let g = t(vec![0.1, -0.05], &[2]);
+                opt.step(&[(&p, &g)])
+                    .expect("step_count == u64::MAX - 1 からの 1 回の step() は成功するはず");
+                assert_eq!(opt.step_count(), u64::MAX);
+
+                let sd_after = opt.state_dict().unwrap();
+                let mut restored = new_opt();
+                restored
+                    .load_state_dict(sd_after.clone())
+                    .expect("step_count == u64::MAX の state_dict の load は成功するはず");
+                assert_eq!(restored.step_count(), u64::MAX);
+                assert_state_dicts_bit_equal(&sd_after, &restored.state_dict().unwrap());
+            }
+
+            /// P1 レビュー指摘（イシュー #2174 PR #2304・未解決コメント）
+            /// の回帰検査: `step_count == u64::MAX` を load した直後の
+            /// `step()` は `checked_add` の overflow により
+            /// `AutodiffError::InvalidArgument` を返し、状態
+            /// （`step_count`・スロットバッファ）を一切変更しない
+            /// （codex-review 指摘: 従来は `self.states` の遅延初期化が
+            /// `checked_add` より前に実行されており、空スロットから
+            /// の初回 step 失敗時に空スロットが書き込まれたまま残る
+            /// 部分更新が起きていた）。空スロット（初回 step 前）・
+            /// 既存スロットありの両パターンを固定する。
+            #[test]
+            fn step_after_loading_step_count_u64_max_fails_without_mutation() {
+                // パターン 1: 空スロット（初回 step 前）。
+                let seed = new_opt();
+                let mut sd_empty = seed
+                    .state_dict()
+                    .expect("test fixture: 未学習 state_dict は常に成功する");
+                sd_empty.insert("step_count.u64_u16x4".to_string(), encode_u16x4(u64::MAX));
+
+                let mut opt_empty = new_opt();
+                opt_empty
+                    .load_state_dict(sd_empty)
+                    .expect("step_count == u64::MAX は受理されるはず");
+                let before_empty = opt_empty.state_dict().unwrap();
+
+                let p = t(vec![1.0, -2.0], &[2]);
+                let g = t(vec![0.1, -0.05], &[2]);
+                let result_empty = opt_empty.step(&[(&p, &g)]);
+                assert!(matches!(
+                    result_empty,
+                    Err(AutodiffError::InvalidArgument(_))
+                ));
+                assert_eq!(opt_empty.step_count(), u64::MAX);
+                assert_state_dicts_bit_equal(&before_empty, &opt_empty.state_dict().unwrap());
+
+                // パターン 2: 既存スロットあり（1 回学習させてからスロット
+                // を保持したまま step_count のみ u64::MAX へ差し替える）。
+                let mut trained = new_opt();
+                trained.step(&[(&p, &g)]).unwrap();
+                let mut sd_trained = trained.state_dict().unwrap();
+                sd_trained.insert("step_count.u64_u16x4".to_string(), encode_u16x4(u64::MAX));
+
+                let mut opt_trained = new_opt();
+                opt_trained
+                    .load_state_dict(sd_trained)
+                    .expect("step_count == u64::MAX は受理されるはず");
+                let before_trained = opt_trained.state_dict().unwrap();
+
+                let result_trained = opt_trained.step(&[(&p, &g)]);
+                assert!(matches!(
+                    result_trained,
+                    Err(AutodiffError::InvalidArgument(_))
+                ));
+                assert_eq!(opt_trained.step_count(), u64::MAX);
+                assert_state_dicts_bit_equal(&before_trained, &opt_trained.state_dict().unwrap());
             }
         }
     };
