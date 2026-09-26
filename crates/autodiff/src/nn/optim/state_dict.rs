@@ -76,9 +76,17 @@
 //! `beta*_pow_t` は復号後にさらに「有限かつ `[0.0, 1.0]`」であることを
 //! 検証する（`beta ∈ [0,1)` なので正常な状態は必ずこの範囲に入る。
 //! 範囲外は bias correction のゼロ除算・負値を招くため）。`mu_product`
-//! は有限であることを検証する。バッファ値（`m`・`v` 等）自体は値域を
-//! 検証しない（学習が生んだ値をそのまま bit 単位で復元することを
-//! 優先する）。
+//! （`NAdam` 限定）も同様に「有限かつ `[0.0, 1.0]`」であることを検証
+//! する（初期値 `1.0` から `mu ∈ [0, beta1)` を逐次乗じる積のため。
+//! 有限性のみの検証では正常な逐次積では生じない負値・`f32::MAX` 等を
+//! 受理してしまう。P0 レビュー指摘・イシュー #2174 PR #2304）。
+//! `step_count` は復号後にさらに「次の 1 回の `step()` 呼び出しが
+//! `step_count += 1`〈`NAdam` はさらに `step + 1`〉でオーバーフロー
+//! しない」ことを検証する（`decode_u16x4_tensor` は `u64::MAX` を含む
+//! 任意の値をロスレスに受理できてしまうため。同レビュー指摘。
+//! [`validate_step_count_headroom`] 参照）。バッファ値（`m`・`v` 等）
+//! 自体は値域を検証しない（学習が生んだ値をそのまま bit 単位で復元
+//! することを優先する）。
 //!
 //! # `load_state_dict` の検証順（fail-closed・状態変更前に全件検証）
 //!
@@ -267,6 +275,56 @@ pub(crate) fn validate_pow_t_range(key: &str, value: f64) -> Result<(), Autodiff
     Ok(())
 }
 
+/// `step_count` の値域検証（P0 レビュー指摘・イシュー #2174 PR #2304:
+/// `decode_u16x4_tensor` は `u64::MAX` を含む任意のロスレス符号化値を
+/// 正しく受理するが、9 optimizer すべての `step()` は復元直後の呼び
+/// 出しで `self.step_count += 1` を実行するため、`step_count ==
+/// u64::MAX` を無検証で受理すると次の `step()` で加算オーバーフロー
+/// パニックを起こす。`NAdam`（`has_mu_product`）はさらに加算後の値へ
+/// `step + 1`〈`nadam.rs::step`〉を計算するため、加算 1 回分の追加の
+/// 余裕が要る。復元時点で「次の 1 回の `step()` が安全に実行できる」
+/// ことを状態変更前に検証し、超過は fail-closed で拒否する）。
+pub(crate) fn validate_step_count_headroom(
+    kind: &str,
+    step_count: u64,
+    has_mu_product: bool,
+) -> Result<(), AutodiffError> {
+    // NAdam は `self.step_count += 1` の後にさらに `step + 1` を計算
+    // する（`nadam.rs::step` の `mu_next` 導出）ため、加算 1 回分
+    // （`u64::MAX - 2`）の追加の余裕を要求する。他 8 optimizer は
+    // `self.step_count += 1` の 1 回のみのため `u64::MAX - 1` で足りる。
+    let max_safe = if has_mu_product {
+        u64::MAX - 2
+    } else {
+        u64::MAX - 1
+    };
+    if step_count > max_safe {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "OptimizerStateDict::load_state_dict（kind=`{kind}`）: `{STEP_COUNT_KEY}` value \
+             {step_count} is too large; the next `step()` call would overflow the internal \
+             `step_count` counter (maximum safely loadable value is {max_safe})"
+        )));
+    }
+    Ok(())
+}
+
+/// `mu_product`（`NAdam` 限定）の値域検証（P0 レビュー指摘・イシュー
+/// #2174 PR #2304）。初期値は `1.0` で、以降は `step()` のたびに
+/// `mu ∈ [0, beta1)`（`beta1 ∈ [0,1)` の正常な config）を乗じる逐次積
+/// のため、正常な状態は必ず `[0.0, 1.0]` に収まる。範囲外（負値・
+/// `f32::MAX` 等）を無検証で受理すると、次の `step()` の bias
+/// correction 分母（`1.0 - mu_product`）で符号反転・オーバーフローを
+/// 招く壊れた状態になる。
+pub(crate) fn validate_mu_product_range(key: &str, value: f32) -> Result<(), AutodiffError> {
+    if !(value.is_finite() && (0.0..=1.0).contains(&value)) {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "OptimizerStateDict::load_state_dict: `{key}` must be finite and in \
+             [0.0, 1.0], got {value}"
+        )));
+    }
+    Ok(())
+}
+
 /// 種別マーカー（`__optimizer__.<kind>`）の shape `[1]`・値
 /// [`FORMAT_VERSION`] を検証する（別種 optimizer の state を fail-closed
 /// で拒否する。モジュール冒頭 doc「キー配置」節）。
@@ -426,6 +484,7 @@ pub(crate) fn decode_state_dict(
         )));
     };
     let step_count = decode_u16x4_tensor(STEP_COUNT_KEY, step_count_tensor)?;
+    validate_step_count_headroom(kind, step_count, has_mu_product)?;
 
     let beta1_pow_t = if has_beta1 {
         let Some(t) = state.get(BETA1_POW_T_KEY) else {
@@ -470,12 +529,7 @@ pub(crate) fn decode_state_dict(
             )));
         }
         let value = dense_vec(t)[0];
-        if !value.is_finite() {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "OptimizerStateDict::load_state_dict（kind=`{kind}`）: `{MU_PRODUCT_KEY}` must \
-                 be finite, got {value}"
-            )));
-        }
+        validate_mu_product_range(MU_PRODUCT_KEY, value)?;
         Some(value)
     } else {
         None
@@ -600,6 +654,44 @@ mod tests {
         assert!(validate_pow_t_range("k", 1.0).is_ok());
     }
 
+    /// P0 レビュー指摘（イシュー #2174 PR #2304）: `mu_product` は
+    /// 有限性のみの検証では正常な逐次積では生じない負値・`f32::MAX`
+    /// 等を受理してしまう。値域 `[0.0, 1.0]` を外れる値・非有限値を
+    /// fail-closed で拒否し、正常範囲（境界含む）は受理することを
+    /// 固定する。
+    #[test]
+    fn mu_product_range_rejects_out_of_range() {
+        assert!(validate_mu_product_range("k", -0.1).is_err());
+        assert!(validate_mu_product_range("k", 1.5).is_err());
+        assert!(validate_mu_product_range("k", f32::MAX).is_err());
+        assert!(validate_mu_product_range("k", f32::NAN).is_err());
+        assert!(validate_mu_product_range("k", f32::INFINITY).is_err());
+        assert!(validate_mu_product_range("k", 0.0).is_ok());
+        assert!(validate_mu_product_range("k", 1.0).is_ok());
+        assert!(validate_mu_product_range("k", 0.5).is_ok());
+    }
+
+    /// P0 レビュー指摘（イシュー #2174 PR #2304）: `decode_u16x4_tensor`
+    /// は `u64::MAX` を含む任意のロスレス符号化値を正しく受理するが、
+    /// 9 optimizer すべての `step()` は復元直後の呼び出しで
+    /// `self.step_count += 1` を実行するため、無検証だと次の `step()`
+    /// で加算オーバーフローパニックを起こす。`has_mu_product=false`
+    /// （8 optimizer）は `u64::MAX - 1` まで、`has_mu_product=true`
+    /// （`NAdam`。`step + 1` をさらに計算するため 1 回分の余裕が
+    /// 追加で要る）は `u64::MAX - 2` まで安全であることを固定する。
+    #[test]
+    fn step_count_headroom_rejects_values_too_close_to_u64_max() {
+        assert!(validate_step_count_headroom("adamw", u64::MAX, false).is_err());
+        assert!(validate_step_count_headroom("adamw", u64::MAX - 1, false).is_ok());
+        assert!(validate_step_count_headroom("adamw", u64::MAX - 2, false).is_ok());
+        assert!(validate_step_count_headroom("adamw", 0, false).is_ok());
+
+        assert!(validate_step_count_headroom("nadam", u64::MAX, true).is_err());
+        assert!(validate_step_count_headroom("nadam", u64::MAX - 1, true).is_err());
+        assert!(validate_step_count_headroom("nadam", u64::MAX - 2, true).is_ok());
+        assert!(validate_step_count_headroom("nadam", 0, true).is_ok());
+    }
+
     /// `num_slots` 個のスロット（キーはまだ挿入しない）を宣言した基礎
     /// state を組み立てる（マーカー・`step_count`・`num_slots` メタ
     /// データのみ）。呼び出し側がスロットバッファキーを追加・欠落
@@ -622,6 +714,95 @@ mod tests {
             .expect("空スロットは検証を通るはず");
         assert_eq!(decoded.step_count, 3);
         assert!(decoded.slots.is_empty());
+    }
+
+    /// P0 レビュー指摘（イシュー #2174 PR #2304）: `step_count ==
+    /// u64::MAX` を `decode_state_dict` レベルで fail-closed に拒否
+    /// することを固定する（`decode_u16x4_tensor` 自体はロスレスに
+    /// 受理するため、`validate_step_count_headroom` の呼び出し漏れが
+    /// 無いことの回帰検査を兼ねる）。`has_mu_product=true`（NAdam
+    /// 相当）は `u64::MAX - 1` も拒否する。
+    #[test]
+    fn decode_state_dict_rejects_step_count_at_u64_max() {
+        let mut state = base_state("adamw", 0);
+        state.insert(
+            STEP_COUNT_KEY.to_string(),
+            encode_u16x4_tensor(u64::MAX).unwrap(),
+        );
+        let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        // has_mu_product=true（NAdam 相当）は `u64::MAX - 1` も拒否する
+        // （`step + 1` をさらに計算するため）。
+        let mut state_nadam = base_state("nadam", 0);
+        state_nadam.insert(
+            STEP_COUNT_KEY.to_string(),
+            encode_u16x4_tensor(u64::MAX - 1).unwrap(),
+        );
+        state_nadam.insert(
+            BETA2_POW_T_KEY.to_string(),
+            encode_f64_tensor(0.999).unwrap(),
+        );
+        state_nadam.insert(
+            MU_PRODUCT_KEY.to_string(),
+            Tensor::new(vec![1.0], &[1]).unwrap(),
+        );
+        let err_nadam = decode_state_dict(
+            "nadam",
+            &state_nadam,
+            &["exp_avg", "exp_avg_sq"],
+            false,
+            true,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(err_nadam, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// P0 レビュー指摘（イシュー #2174 PR #2304）: `mu_product`
+    /// （NAdam 限定）が有限性のみでなく値域 `[0.0, 1.0]` でも検証
+    /// されることを `decode_state_dict` レベルで固定する。
+    #[test]
+    fn decode_state_dict_rejects_mu_product_out_of_range() {
+        let mut state = base_state("nadam", 0);
+        state.insert(
+            BETA2_POW_T_KEY.to_string(),
+            encode_f64_tensor(0.999).unwrap(),
+        );
+        state.insert(
+            MU_PRODUCT_KEY.to_string(),
+            Tensor::new(vec![f32::MAX], &[1]).unwrap(),
+        );
+        let err = decode_state_dict(
+            "nadam",
+            &state,
+            &["exp_avg", "exp_avg_sq"],
+            false,
+            true,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let mut state_neg = base_state("nadam", 0);
+        state_neg.insert(
+            BETA2_POW_T_KEY.to_string(),
+            encode_f64_tensor(0.999).unwrap(),
+        );
+        state_neg.insert(
+            MU_PRODUCT_KEY.to_string(),
+            Tensor::new(vec![-1.0], &[1]).unwrap(),
+        );
+        let err_neg = decode_state_dict(
+            "nadam",
+            &state_neg,
+            &["exp_avg", "exp_avg_sq"],
+            false,
+            true,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(err_neg, AutodiffError::InvalidArgument(_)));
     }
 
     #[test]
