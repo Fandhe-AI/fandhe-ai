@@ -14563,6 +14563,25 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
         audits.len()
     );
 
+    // 全数照合: フェンス解析を介さない独立集計（`///` 行の単純な
+    // 行走査のみで `mod __fandhe_..._hold_probe {` を数える）と
+    // `audits.len()` が完全一致することを検査する。フェンス解析側
+    // （`scan_hold_probe_blocks_in_doc_run`／`scan_hold_probe_blocks_in_body`）
+    // に将来 quad-fence 誤検出のような飲み込みバグが再発しても、
+    // 件数の不一致として機械的に検出できるようにする（Cursor Bugbot
+    // 指摘・PR #2304。下限定数 `MIN_KNOWN_PROBE_BLOCKS` だけでは
+    // 「一部が飲み込まれても下限を上回る」ケースを見逃すため）。
+    let independent_count = count_hold_probe_mod_declarations_in_doc_comments(&content);
+    assert_eq!(
+        audits.len(),
+        independent_count,
+        "フェンス解析による走査件数（{}）と、フェンス解析を介さない\
+         独立集計（{independent_count}）が一致しない（フェンス走査が\
+         一部の `mod __fandhe_..._hold_probe {{ ... }}` を飲み込んで\
+         見落としている疑いがある）",
+        audits.len()
+    );
+
     // 正のプローブ: 本テストが検出対象に含めるべき既知の 2 例
     // （イシュー #2304 で修正した欠陥そのもの）が走査集合に含まれる
     // ことを固定する。
@@ -14607,6 +14626,29 @@ struct HoldProbeBlockAudit {
     unreferenced_items: Vec<String>,
 }
 
+/// [`scan_hold_probe_blocks`] の全数照合用の独立集計。`lib.rs` の
+/// 全文（`content`）から `///` 行だけを単純に走査し、フェンス解析を
+/// 一切介さずに `mod __fandhe_..._hold_probe { ... }` 定義行の個数を
+/// 数える。フェンス解析（`scan_hold_probe_blocks_in_doc_run`）が
+/// quad-fence 誤検出等で一部の doctest を飲み込んでも、本関数は
+/// フェンス構造に依存しないためその影響を受けず、両者の件数比較で
+/// 飲み込みバグを検出できる（Cursor Bugbot 指摘・PR #2304）。
+fn count_hold_probe_mod_declarations_in_doc_comments(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|line| {
+            let Some(raw) = line.trim_start().strip_prefix("///") else {
+                return false;
+            };
+            let raw = raw.strip_prefix(' ').unwrap_or(raw);
+            let trimmed = raw.trim();
+            trimmed.starts_with("mod __fandhe")
+                && trimmed.ends_with("_hold_probe {")
+                && !trimmed.starts_with("pub mod")
+        })
+        .count()
+}
+
 /// `lib.rs` の全文（`content`）から、`///` doc コメントの連続領域に
 /// 現れる裸／タグ付きフェンスの doctest ブロックを走査し、各ブロック
 /// 内の `mod __fandhe_..._hold_probe { ... }` 定義 1 つにつき
@@ -14642,27 +14684,46 @@ fn scan_hold_probe_blocks_in_doc_run(doc_lines: &[String]) -> Vec<HoldProbeBlock
     let mut i = 0usize;
     while i < doc_lines.len() {
         let trimmed = doc_lines[i].trim_end();
+        // フェンス開始行の判定は「先頭の連続バッククォート数がちょうど
+        // 3」の場合に限る（extract_single_bare_fenced_doctest_block と
+        // 同じ判定基準に統一。Cursor Bugbot 指摘・PR #2304）。lib.rs の
+        // 地の文には quad-fence 引用記法（4 連続バッククォートで
+        // フェンス表記そのものをインライン引用する書き方。例:
+        // ```` ```compile_fail,E0599 ```` が地の文の 1 行に現れる形）が
+        // あり、「3 以上」で判定すると地の文を誤ってフェンス開始と
+        // 誤検出し、以降の doctest を丸ごと読み飛ばして監査から
+        // 漏らしてしまう（Cursor Bugbot 指摘・PR #2304。修正前はこの誤検出
+        // により後続プローブモジュールが監査対象から静かに脱落し
+        // うる構造上の欠陥だった）。
         let leading_backticks = trimmed
             .trim_start()
             .chars()
             .take_while(|&c| c == '`')
             .count();
-        if leading_backticks < 3 {
+        if leading_backticks != 3 {
             i += 1;
             continue;
         }
-        // フェンス開始行を見つけた。閉じフェンス（トリム後 "```"）まで
-        // 本文を収集する。
+        // フェンス開始行を見つけた。閉じフェンス（前後トリム後
+        // "```"）まで本文を収集する。
         let mut body: Vec<String> = Vec::new();
         i += 1;
-        while i < doc_lines.len() && doc_lines[i].trim_end() != "```" {
+        while i < doc_lines.len() && doc_lines[i].trim() != "```" {
             body.push(doc_lines[i].clone());
             i += 1;
         }
-        // 閉じフェンス自体を読み飛ばす（見つからなければ doc_lines 終端）。
-        if i < doc_lines.len() {
-            i += 1;
-        }
+        // fail-closed: 閉じフェンスが見つからないまま doc ラン終端に
+        // 達した場合は、黙って終端扱いにせず panic する。閉じ忘れの
+        // まま本文欠落（body が途中で打ち切られる）を通過させると、
+        // フェンス内のプローブモジュールが不完全な形で監査され、
+        // 検出漏れを見逃す可能性があるため。
+        assert!(
+            i < doc_lines.len(),
+            "hold プローブ走査: doctest フェンスが閉じられていない\
+             （doc ラン終端に達した）。開始行付近の本文: {body:?}"
+        );
+        // 閉じフェンス自体を読み飛ばす。
+        i += 1;
         audits.extend(scan_hold_probe_blocks_in_body(&body));
     }
     audits
@@ -14775,4 +14836,77 @@ fn tokenize_identifiers(text: &str) -> std::collections::HashSet<String> {
         out.insert(current);
     }
     out
+}
+
+/// 回帰テスト（PR #2304 Bugbot 指摘）: `scan_hold_probe_blocks_in_doc_run`
+/// が、quad-fence 引用記法（4 連続バッククォートでフェンス表記自体を
+/// インライン引用する地の文行）をフェンス開始と誤検出せず、その直後に
+/// 続く裸フェンスの hold プローブ doctest を正しく監査対象に含めること
+/// を確認する。修正前（「先頭バッククォート数が 3 以上」で判定する旧
+/// ロジック）では、quad-fence 引用行が誤ってフェンス開始とみなされ、
+/// 直後に現れる本物の裸フェンス開始行がその誤検出フェンスの「閉じ」と
+/// して消費されてしまい、後続の裸フェンス doctest ブロック
+/// （本テストの `__fandhe_regression_hold_probe`）が丸ごと走査から
+/// 脱落する（`scan_hold_probe_blocks_in_doc_run` が 0 件しか返さない）。
+#[test]
+fn scan_hold_probe_blocks_in_doc_run_survives_quad_fence_quotation_in_prose() {
+    // `doc_lines` は `scan_hold_probe_blocks` が `///` プレフィックスを
+    // 剥がした後の doc テキスト行相当（本テストはフェンス解析単体を
+    // 検査するため、`///` 剥がし処理を経由せず直接構築する）。
+    let doc_lines: Vec<String> = [
+        "地の文の説明。旧実装は 3 本の",
+        "```` ```compile_fail,E0599 ```` doctest ブロックだった。しかし",
+        "quad-fence 引用がここに現れる（本物のフェンス開始ではない）。",
+        "```",
+        "mod __fandhe_regression_hold_probe {",
+        "    pub trait RegressionProbeTrait {}",
+        "}",
+        "use __fandhe_regression_hold_probe::*;",
+        "fn __probe_unrelated() {}",
+        "```",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    let audits = scan_hold_probe_blocks_in_doc_run(&doc_lines);
+
+    assert_eq!(
+        audits.len(),
+        1,
+        "quad-fence 引用行の直後にある裸フェンスの hold プローブが\
+         走査から脱落している（quad-fence 誤検出の再発）: {}",
+        audits.len()
+    );
+    assert_eq!(audits[0].mod_name, "__fandhe_regression_hold_probe");
+    // `RegressionProbeTrait` は glob import 後の本文で一度も参照されて
+    // いないため、未参照として検出されるはずである（プローブとして
+    // 機能していることの確認）。
+    assert_eq!(
+        audits[0].unreferenced_items,
+        vec!["RegressionProbeTrait".to_string()],
+        "quad-fence 誤検出により本文の取り込み範囲がずれ、未参照判定が\
+         想定と異なる結果になっている"
+    );
+}
+
+/// 回帰テスト（PR #2304）: 裸フェンスが閉じられないまま doc ラン終端に
+/// 達した場合、`scan_hold_probe_blocks_in_doc_run` は黙って打ち切らず
+/// fail-closed に panic することを確認する。
+#[test]
+#[should_panic(expected = "doctest フェンスが閉じられていない")]
+fn scan_hold_probe_blocks_in_doc_run_panics_on_unclosed_fence() {
+    let doc_lines: Vec<String> = [
+        "```",
+        "mod __fandhe_unclosed_hold_probe {",
+        "    pub trait UnclosedProbeTrait {}",
+        "}",
+        "use __fandhe_unclosed_hold_probe::*;",
+        // 閉じフェンス "```" を意図的に省略する。
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    let _ = scan_hold_probe_blocks_in_doc_run(&doc_lines);
 }
