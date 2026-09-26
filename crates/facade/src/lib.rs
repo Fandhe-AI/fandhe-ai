@@ -5322,3 +5322,100 @@ struct GradAccumulationHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct DataHooksHoldDoctestGuard;
+
+/// イシュー #2184（親 #2131）の facade 公開保留を固定する doctest
+/// 足場。`FitWeightingHoldDoctestGuard`（#2177）と同型の「正のプローブ
+/// 1 ブロック方式」を採る: facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカル型
+/// （`__fandhe_train_step_hold_probe::{TrainStepFn, TrainStepOptimizer,
+/// TrainStepOutput}`）と、`fandhe_ai::compat::FitConfig`／
+/// `fandhe_ai::compat::Sequential` への inherent メソッドを装うトレイト
+/// （`__FandheTrainStepHoldProbe`）を導入し、実際に使う名前・呼び出しを
+/// 書く。facade がどの経路（`pub use` による再エクスポート・型宣言・
+/// `train_step_fn`／`fit_with_train_step` という名前のメソッド追加）で
+/// これらの名前を公開しても、ローカル定義との glob 衝突（型名の場合。
+/// E0659 等）または呼び出しシグネチャの不一致（inherent メソッドが
+/// トレイトメソッドより優先解決されるため、本プローブの trait 経由
+/// 呼び出しが型・引数不一致でコンパイル失敗する）でエラーコードに
+/// 依存せずコンパイルが失敗する。
+///
+/// カスタム学習 step フック本体（`crates/facade/src/compat/
+/// training.rs::CustomStepHook`・`Sequential::run_fit` への配線）は
+/// 実装済みで、保留対象は facade 公開面 3 件（`TrainStepFn`／
+/// `TrainStepOptimizer`／`TrainStepOutput`・`Sequential::
+/// fit_with_train_step`）のみ。テストからは `#[cfg(test)] fn
+/// Sequential::fit_custom_step_for_test`（`crates/facade/src/compat/
+/// training.rs`）経由でのみ到達できる（命名を意図的に違え、下記
+/// ソース走査ガードとの衝突を避けている）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// train_step_hold_doctest_globs_all_pub_modules`・
+/// `train_step_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_train_step_items`）との多層
+/// 防御の位置づけ・承認未取得の経緯は
+/// `docs/compat-train-step-hook-decision.md` §5「承認事項」節を参照。
+///
+/// 承認（`TrainStepFn`／`TrainStepOptimizer`／`TrainStepOutput`・
+/// `Sequential::fit_with_train_step` の新設）を得た日が来たら、本
+/// モジュール・本 doctest 自体を削除する（ソース走査側の対応する否定
+/// ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_train_step_hold_probe {
+///     pub struct TrainStepFn;
+///     pub struct TrainStepOptimizer;
+///     pub struct TrainStepOutput;
+/// }
+/// use __fandhe_train_step_hold_probe::*;
+///
+/// struct __FandheTrainStepHoldMarker;
+///
+/// trait __FandheTrainStepHoldProbe {
+///     fn train_step_fn(&self) -> __FandheTrainStepHoldMarker;
+///     fn fit_with_train_step(&self) -> __FandheTrainStepHoldMarker;
+/// }
+///
+/// impl __FandheTrainStepHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn train_step_fn(&self) -> __FandheTrainStepHoldMarker {
+///         __FandheTrainStepHoldMarker
+///     }
+///     fn fit_with_train_step(&self) -> __FandheTrainStepHoldMarker {
+///         __FandheTrainStepHoldMarker
+///     }
+/// }
+///
+/// impl __FandheTrainStepHoldProbe for fandhe_ai::compat::Sequential {
+///     fn train_step_fn(&self) -> __FandheTrainStepHoldMarker {
+///         __FandheTrainStepHoldMarker
+///     }
+///     fn fit_with_train_step(&self) -> __FandheTrainStepHoldMarker {
+///         __FandheTrainStepHoldMarker
+///     }
+/// }
+///
+/// fn __probe_type(_: TrainStepFn, _: TrainStepOptimizer, _: TrainStepOutput) {}
+///
+/// fn __probe(cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheTrainStepHoldMarker =
+///         fandhe_ai::compat::FitConfig::train_step_fn(cfg);
+///     let _: __FandheTrainStepHoldMarker =
+///         fandhe_ai::compat::Sequential::fit_with_train_step(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct TrainStepHoldDoctestGuard;
