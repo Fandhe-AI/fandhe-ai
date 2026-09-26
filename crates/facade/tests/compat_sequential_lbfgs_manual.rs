@@ -68,6 +68,27 @@ fn build_model(d_in: usize, d_hidden: usize, d_out: usize) -> Sequential {
         .unwrap()
 }
 
+/// `model` の現在のパラメータで `x_data`／`y_data` に対する MSE loss を
+/// 評価する（forward のみ・`Tape` は使い捨て）。`lbfgs_step_on_sequential`
+/// が返す `opt.last_loss()` は L-BFGS の**その step の初回評価損失**
+/// （`orig_loss`。line search 開始前・更新前のパラメータでの損失）で
+/// あり、outer step 内の line search 更新後の損失ではない
+/// （`crates/autodiff/src/nn/optim/lbfgs.rs` の `try_step_closure` は
+/// `last_loss` を `orig_loss` にのみ設定する）。そのため収束判定で
+/// 「最後の outer step 後」の loss を見たい場合は、最後の
+/// `apply_parameters` 後に本関数で改めて評価しなければ、最後の step
+/// 内での改善（または悪化）を見逃す（codex-review 指摘・PR #2300
+/// discussion）。
+fn eval_loss(model: &Sequential, x_data: &Tensor<f32>, y_data: &Tensor<f32>) -> f32 {
+    let tape = fandhe_ai::tape();
+    let bound = model.bind(&tape);
+    let x = tape.var(x_data);
+    let y = tape.var(y_data);
+    let pred = bound.forward(&tape, &x).unwrap();
+    let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+    scalar(&loss.to_tensor())
+}
+
 fn gen_regression_data(
     d_in: usize,
     d_out: usize,
@@ -198,20 +219,18 @@ fn lbfgs_on_sequential_converges_mnist_shaped() {
     };
     let mut opt = Lbfgs::new(cfg).unwrap();
 
-    let initial_loss = {
-        let tape = fandhe_ai::tape();
-        let bound = model.bind(&tape);
-        let x = tape.var(&x_data);
-        let y = tape.var(&y_data);
-        let pred = bound.forward(&tape, &x).unwrap();
-        let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-        scalar(&loss.to_tensor())
-    };
+    let initial_loss = eval_loss(&model, &x_data, &y_data);
 
-    let mut final_loss = initial_loss;
     for _ in 0..OUTER_STEPS {
-        final_loss = lbfgs_step_on_sequential(&mut model, &mut opt, &x_data, &y_data).unwrap();
+        lbfgs_step_on_sequential(&mut model, &mut opt, &x_data, &y_data).unwrap();
     }
+
+    // 最後の outer step 完了後（`model` は最後の `apply_parameters` 済み
+    // モデル）の loss を改めて評価する。`lbfgs_step_on_sequential` の
+    // 戻り値（`opt.last_loss()` = その step の更新前損失）をそのまま
+    // 使うと、最後の step 内の更新による改善（または悪化）が判定に
+    // 反映されない（`eval_loss` の doc 参照）。
+    let final_loss = eval_loss(&model, &x_data, &y_data);
 
     assert!(
         final_loss < initial_loss * 0.5,
@@ -272,6 +291,158 @@ fn lbfgs_on_sequential_nan_input_fails_closed_and_restores_params() {
                 a.to_bits(),
                 b.to_bits(),
                 "NaN 失敗後に params が snapshot から変化している"
+            );
+        }
+    }
+}
+
+/// [`lbfgs_on_sequential_nan_input_fails_closed_and_restores_params`] は
+/// NaN を含む入力を最初から使うため、closure の**1 回目の評価**（trial ==
+/// 呼び出し時点の `params` そのもの。line search 開始前の初回評価）で
+/// 失敗する（`Lbfgs::try_step_closure` は初回評価直後に
+/// `validate_closure_output` で非有限値を検査するため。
+/// `crates/autodiff/src/nn/optim/lbfgs.rs` の該当箇所 doc 参照）。
+/// この経路では `model.apply_parameters(trial)` は呼ばれるが `trial` が
+/// snapshot と bit 完全一致のため、復元検証が「実質何も変えていない
+/// 状態への書き戻し」に留まり、line search が試行ステップ幅で
+/// パラメータを実際に動かした**後**に失敗した場合の復元経路
+/// （`docs/autodiff-lbfgs-decision.md` §8.3 の fail-closed 復元契約が
+/// 本来カバーする対象）を検証できていない（codex-review 指摘・PR #2300
+/// discussion）。
+///
+/// 本テストは strong Wolfe line search が**2 回目以降**に呼び出す
+/// closure 内でのみ NaN を混入させる（呼び出し回数を数え、1 回目は
+/// 有限の loss／勾配を返して line search を先へ進ませる）。これにより
+/// 2 回目の呼び出し時点で `trial`（探索方向 `d` とステップ幅 `t` で
+/// 更新済みの試行パラメータ）が 1 回目の snapshot から**実際に乖離して
+/// いる**ことを確認してから `model.apply_parameters(trial)` を書き込み、
+/// その後に NaN を混入させて `InvalidArgument` を発生させる。
+/// `try_step_closure` が `Err` を返した後、`model.trainable_parameters()`
+/// が呼び出し前の snapshot と bit 完全一致することを検証する。
+#[test]
+fn lbfgs_on_sequential_restores_params_after_trial_write_then_failure() {
+    const D_IN: usize = 8;
+    const D_HIDDEN: usize = 16;
+    const D_OUT: usize = 4;
+    const N: usize = 4;
+
+    let (x_data, y_data) = gen_regression_data(D_IN, D_OUT, N, 0xC0FF_EE50);
+    let mut model = build_model(D_IN, D_HIDDEN, D_OUT);
+    let snapshot_before: Vec<Tensor<f32>> =
+        model.trainable_parameters().into_iter().cloned().collect();
+
+    let cfg = LbfgsConfig {
+        line_search: LbfgsLineSearch::StrongWolfe,
+        max_iter: 20,
+        ..LbfgsConfig::default()
+    };
+    let mut opt = Lbfgs::new(cfg).unwrap();
+
+    let call_count = std::cell::Cell::new(0u32);
+    let trial_diverged_before_failure = std::cell::Cell::new(false);
+    let failure_call_index = std::cell::Cell::new(0u32);
+
+    let result = opt.try_step_closure(&snapshot_before, |trial| {
+        call_count.set(call_count.get() + 1);
+        let n = call_count.get();
+
+        // `lbfgs_step_on_sequential` と同じ契約: closure は呼ばれる
+        // たびに必ず試行 params を書き込む。
+        model.apply_parameters(trial.to_vec())?;
+
+        if n == 1 {
+            // 1 回目（line search 開始前の初回評価）は有限の loss／
+            // 勾配を返し、line search を先へ進ませる（`d`／`t` が
+            // 確定し 2 回目以降で trial が snapshot から乖離する）。
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+            let pred = bound.forward(&tape, &x)?;
+            let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y)?;
+            let loss_value = scalar(&loss.to_tensor());
+            let grads = tape.backward(&loss)?;
+            let grad_refs = bound.trainable_grads(&grads)?;
+            let grads_owned: Vec<Tensor<f32>> = grad_refs.into_iter().cloned().collect();
+            Ok((loss_value, grads_owned))
+        } else {
+            // 2 回目以降: trial が 1 回目の snapshot から実際に乖離して
+            // いることを確認してから、NaN を混入させた入力で forward し
+            // fail-closed（`InvalidArgument`）を誘発する。
+            let diverged = trial.iter().zip(snapshot_before.iter()).any(|(t, s)| {
+                let td = t.contiguous().as_slice().unwrap().to_vec();
+                let sd = s.contiguous().as_slice().unwrap().to_vec();
+                td.iter()
+                    .zip(sd.iter())
+                    .any(|(a, b)| a.to_bits() != b.to_bits())
+            });
+            trial_diverged_before_failure.set(diverged);
+            failure_call_index.set(n);
+
+            let mut x_nan_vec = x_data.contiguous().as_slice().unwrap().to_vec();
+            x_nan_vec[0] = f32::NAN;
+            let x_nan = tensor(x_nan_vec, &[N, D_IN]);
+
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_nan);
+            let y = tape.var(&y_data);
+            let pred = bound.forward(&tape, &x)?;
+            let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y)?;
+            let loss_value = scalar(&loss.to_tensor());
+            let grads = tape.backward(&loss)?;
+            let grad_refs = bound.trainable_grads(&grads)?;
+            let grads_owned: Vec<Tensor<f32>> = grad_refs.into_iter().cloned().collect();
+            Ok((loss_value, grads_owned))
+        }
+    });
+
+    assert!(
+        matches!(result, Err(AutodiffError::InvalidArgument(_))),
+        "2 回目以降の closure 呼び出しで NaN を返した場合も fail-closed に \
+         InvalidArgument を返すはず: {result:?}"
+    );
+    if result.is_err() {
+        // `lbfgs_step_on_sequential` と同じ復元契約（§8.3）:
+        // `try_step_closure` 自体は `model` を書き戻さないため、
+        // 呼び出し元が `Err` 経路で snapshot へ復元する。
+        model
+            .apply_parameters(snapshot_before.clone())
+            .expect("snapshot への復元は shape 変更なしのため必ず成功する");
+    }
+    assert!(
+        failure_call_index.get() >= 2,
+        "本テストの前提（失敗が 2 回目以降の closure 呼び出しで起きる \
+         こと）が崩れている: failure_call_index={}",
+        failure_call_index.get()
+    );
+    assert!(
+        trial_diverged_before_failure.get(),
+        "失敗直前の trial が snapshot と bit 完全一致のままだった（line \
+         search が実際にパラメータを動かした後の失敗経路を検証できて \
+         いない）"
+    );
+
+    // `try_step_closure` が `Err` を返した後も `self`（n_iter/func_evals）
+    // は不変（doc 契約）。
+    assert_eq!(opt.n_iter(), 0);
+    assert_eq!(opt.func_evals(), 0);
+
+    // モデルの trainable params は snapshot_before と bit 完全一致
+    // （2 回目以降の closure 呼び出しで実際に乖離した trial 値が書き
+    // 込まれた後も、fail-closed 復元により元の値へ戻ること）。
+    let snapshot_after = model.trainable_parameters();
+    assert_eq!(snapshot_before.len(), snapshot_after.len());
+    for (before, after) in snapshot_before.iter().zip(snapshot_after.iter()) {
+        let before_data = before.contiguous().as_slice().unwrap().to_vec();
+        let after_data = after.contiguous().as_slice().unwrap().to_vec();
+        assert_eq!(before_data.len(), after_data.len());
+        for (a, b) in before_data.iter().zip(after_data.iter()) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "trial 書き込み後の NaN 失敗後に params が snapshot から \
+                 変化している"
             );
         }
     }
