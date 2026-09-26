@@ -127,8 +127,22 @@ pub enum Callback {
      **手書き**にする（依存追加は行わない）
    - 出力は epoch オブジェクトの配列。キーは CSV の列名と同じで、
      ASCII 固定のためエスケープは不要
-   - 非有限値は有効な JSON で表現できないため `null` とする
    - 有限値は `f32` の `Display`（JSON の number 文法に合致する）
+   - 非有限値は Python `json` モジュール等で広く使われる非標準 JSON
+     拡張表記（クォートなしトークン `NaN`／`Infinity`／`-Infinity`）で
+     出力する。RFC 8259 の JSON 本体仕様には準拠しないが、
+     `json.loads`（Python の既定 `parse_constant`）・多くの JS 実装が
+     この表記を読み戻せる。CSV 側の `NaN`／`inf`／`-inf`（Rust
+     `Display`）とは字面が異なるため、読み戻し検証（§5）は
+     フォーマットごとに個別のトークン判定を使う（JSON 側は手書き
+     パーサに 3 値のリテラルトークン判定を組み込む。`serde_json` は
+     追加しない）。非有限値の読み戻し一致は §5 のとおり**値クラス一致**
+     （NaN／+Inf／-Inf の区別）で検証し、NaN の payload（元のビット
+     パターン）までは復元・検証しない（NaN の bit 表現は生成元の演算
+     経路に依存し一意に定まらないため。既存の Metal 実装の「NaN は
+     quiet NaN へ正規化しクラス一致で比較する」方針〈`.claude/rules/
+     coding-rust.md` の bias 勾配 Metal 実装節〉と同じ制約をここでも
+     踏襲する）
 6. **書き込みの原子性・truncate／append**
    - CSV: fit 開始時に開く。`append=false` なら truncate してヘッダを
      書き、`append=true` なら追記し、ファイルが空か存在しない場合だけ
@@ -139,6 +153,17 @@ pub enum Callback {
    - JSON: 配列全体を in-memory に持ち、epoch ごとに「一時ファイル＋
      `rename`」で全体を書き直す。途中クラッシュ時も正規パスには完全な
      JSON だけが残る
+   - JSON の `append=true` かつパスが既存の空でないファイルを指す
+     場合、fit 開始時にそのファイルを読み込み、手書き JSON パーサで
+     「オブジェクトの配列」であることを検証したうえで in-memory
+     配列の初期値とする。読み込んだ各要素がこれから書く列集合
+     （`epoch,loss,lr,...`）のキーを含むことも検査し、パース失敗・
+     トップレベルが配列でない・キー不足のいずれかがあれば #4-9 の
+     エラー写像に従い fail-closed で `Err` を返し fit を開始しない
+     （`compiled` は書き戻す）。検証を通れば、以後の epoch は
+     この配列へ追記して「一時ファイル＋rename」を続ける
+   - JSON の `append=false`、またはファイルが存在しない／空の場合は
+     空配列から開始する（CSV の truncate 相当）
    - 親ディレクトリがなければ `create_dir_all` で作る
      （`ModelCheckpoint::persist` と同型）
 7. **epoch 番号**: ロガーの `epoch` 列と Lambda の第 1 引数は fit ローカル
@@ -169,13 +194,18 @@ pub enum Callback {
 
 - 3 型を `fit_with_callbacks` に渡しても学習の演算列・`History` が
   bit 同一であること
-- CSV・JSON を読み戻し、`History` と bit 一致すること（非有限値の
-  表現を含む）
-- `append` の挙動
+- CSV・JSON を読み戻し、`History` と一致すること: 有限値は bit 一致、
+  非有限値は値クラス一致（NaN／+Inf／-Inf の区別。NaN の payload は
+  検証対象外）
+- `append` の挙動: CSV の追記・既存ファイルが空でなければヘッダ省略、
+  JSON の既存配列の読み込み・スキーマ検証・マージ（不正な既存
+  ファイルは fail-closed で `Err`）を含む
 - Lambda の呼び出し回数と引数
 - Lambda が `Err` を返したとき fit が打ち切られ、`compiled`／モードが
   復元されること
-- 保存先パスが不正なときの fail-closed
+- 保存先パスが不正なときの fail-closed（JSON append 時に既存ファイルが
+  不正な形式〈パース失敗・配列でない・キー不足〉のときの fail-closed
+  を含む）
 - `EarlyStopping` 停止 epoch でもロガーが書くこと
 - `crates/facade/tests/api_surface.rs` の保留ガードを正ガードへ
   置き換えること
