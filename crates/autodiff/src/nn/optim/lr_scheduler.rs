@@ -37,6 +37,17 @@
 //! 対象外（`OneCycleLr` モジュール doc 参照）。`cycle_momentum` 抜きの
 //! lr 系列のみを提供する。
 //!
+//! **#2176 で追加した 5 種**（[`MultiStepLr`]・
+//! [`CosineAnnealingWarmRestarts`]・[`CyclicLr`]・[`LambdaLr`]・
+//! [`SequentialLr`]）も式ベース（stateless 純関数）で表現できる
+//! PyTorch 準拠のスケジューラである。周期・段階の位置決定はいずれも
+//! 整数演算（`usize`／`u128`）で行い、浮動小数の `floor`／`log` は
+//! 使わない（`CosineAnnealingWarmRestarts` の doc「PyTorch との意図的な
+//! 相違」節参照）。facade（`fandhe_ai::optim`）への公開は本イシューでは
+//! 保留する（`crates/facade/src/lib.rs::LrSchedulerExtHoldDoctestGuard`・
+//! `docs/autodiff-lr-scheduler-ext-decision.md` §8「承認事項」参照。
+//! `Adadelta`／`Adamax`／`NAdam`／`RAdam`〈#2171〉と同型の保留）。
+//!
 //! いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する
 //! （`cos`／`powf` の libm 差による ULP 揺れを `f32` 直計算より抑える
 //! 精度方針。bit 同一契約は主張しない。`.claude/rules/coding-rust.md`
@@ -631,5 +642,413 @@ impl LrScheduler for OneCycleLr {
             .last()
             .map(|phase| phase.end_lr as f32)
             .unwrap_or(0.0)
+    }
+}
+
+/// PyTorch `torch.optim.lr_scheduler.MultiStepLR` と同一の milestone
+/// ベース階段減衰: `lr(step) = base_lr * gamma^n`（`n` は `milestones`
+/// のうち `step` 以下の個数。PyTorch の `bisect_right` 閉形式と同値）。
+pub struct MultiStepLr {
+    base_lr: f32,
+    /// 昇順ソート済み（重複は保持する。PyTorch が `Counter` で重複を
+    /// 多重に数える挙動を再現するため。`new` doc 参照）。
+    milestones: Vec<usize>,
+    gamma: f32,
+}
+
+impl MultiStepLr {
+    /// `base_lr` は有限かつ正、`gamma` は有限かつ正でなければならない
+    /// （`gamma > 1.0` は拒否しない。`StepLr`／`ExponentialLr` と同一の
+    /// 検査規則）。`milestones` は空でもよい（この場合は常に `base_lr`
+    /// を返す定数スケジューラになる）。`milestones` の重複はそのまま
+    /// 保持し、`step` 以下の milestone を**多重に**数える（PyTorch
+    /// `MultiStepLR.__init__` の `Counter(milestones)` が重複を許容する
+    /// 挙動と同値）。
+    ///
+    /// # Errors
+    ///
+    /// `base_lr`／`gamma` のいずれかが条件を満たさない場合は
+    /// `AutodiffError::InvalidArgument`（fail-closed）。
+    pub fn new(base_lr: f32, milestones: &[usize], gamma: f32) -> Result<Self, AutodiffError> {
+        if !base_lr.is_finite() || base_lr <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "base_lr は有限かつ正の値でなければならない: {base_lr}"
+            )));
+        }
+        if !gamma.is_finite() || gamma <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "gamma は有限かつ正の値でなければならない: {gamma}"
+            )));
+        }
+        let mut milestones = milestones.to_vec();
+        milestones.sort_unstable();
+        Ok(Self {
+            base_lr,
+            milestones,
+            gamma,
+        })
+    }
+}
+
+impl LrScheduler for MultiStepLr {
+    fn lr_at(&self, step: usize) -> f32 {
+        // `milestones` は昇順ソート済みのため `partition_point` で
+        // 「`step` 以下の個数」を直接求められる（`bisect_right(step)`
+        // と同値。個数を境界とする閉形式のため線形走査は不要）。
+        let count = self.milestones.partition_point(|&m| m <= step);
+        // `powi` ではなく `f64::powf` を使う（`count` が巨大な
+        // `milestones` 列でも `i32` へのキャストでラップしない。
+        // モジュール冒頭 doc の精度方針と同じ 1 回 downcast）。
+        (self.base_lr as f64 * (self.gamma as f64).powf(count as f64)) as f32
+    }
+}
+
+/// PyTorch `torch.optim.lr_scheduler.CosineAnnealingWarmRestarts` と
+/// 同一の周期リスタート付きコサインアニーリング:
+/// `lr(step) = eta_min + (base_lr - eta_min) * (1 + cos(π * t_cur / t_i)) / 2`
+/// （`t_cur`／`t_i` は現在の周期内の位置と周期長）。
+///
+/// # PyTorch との意図的な相違
+///
+/// PyTorch で epoch 引数を渡す経路（`step(epoch)`）は周期番号を
+/// `int(math.log(...))` の**浮動小数**で求めるため、`t_0=1, t_mult=10`
+/// 付近の境界で桁落ちにより周期を誤判定することがある（例:
+/// `epoch=111` で `log(1000, 10) = 2.9999...` となり `floor` で 1 つ
+/// 前の周期に丸まる）。本実装は `t_cur`／`t_i` を**整数演算**
+/// （`t_mult == 1` なら `usize` の剰余、それ以外は `u128` の
+/// `checked_add`／`checked_mul` で周期境界を順に進める）で求めるため、
+/// この誤判定を再現しない（PyTorch の引数なし `step()` による逐次更新
+/// 経路とは一致する。`docs/autodiff-lr-scheduler-ext-decision.md` 参照）。
+pub struct CosineAnnealingWarmRestarts {
+    base_lr: f32,
+    t_0: usize,
+    t_mult: usize,
+    eta_min: f32,
+}
+
+impl CosineAnnealingWarmRestarts {
+    /// `base_lr` は有限かつ正、`t_0` は 1 以上、`t_mult` は 1 以上、
+    /// `eta_min` は有限かつ `0 <= eta_min <= base_lr` でなければ
+    /// ならない（`CosineAnnealingLr::new` と同じ検査規則）。
+    ///
+    /// # Errors
+    ///
+    /// いずれかの条件を満たさない場合は `AutodiffError::InvalidArgument`
+    /// （fail-closed）。
+    pub fn new(
+        base_lr: f32,
+        t_0: usize,
+        t_mult: usize,
+        eta_min: f32,
+    ) -> Result<Self, AutodiffError> {
+        if !base_lr.is_finite() || base_lr <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "base_lr は有限かつ正の値でなければならない: {base_lr}"
+            )));
+        }
+        if t_0 == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "t_0 は 1 以上でなければならない".to_string(),
+            ));
+        }
+        if t_mult == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "t_mult は 1 以上でなければならない".to_string(),
+            ));
+        }
+        if !eta_min.is_finite() || eta_min < 0.0 || eta_min > base_lr {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "eta_min は有限かつ 0 以上 base_lr 以下でなければならない: \
+                 eta_min={eta_min} base_lr={base_lr}"
+            )));
+        }
+        Ok(Self {
+            base_lr,
+            t_0,
+            t_mult,
+            eta_min,
+        })
+    }
+
+    /// `step` が属する周期の `(t_cur, t_i)` を整数演算で求める（`new`
+    /// doc「PyTorch との意図的な相違」節参照）。`t_i`（周期長）は
+    /// `u128` で表現するため、`t_mult` による指数的な周期拡大が
+    /// `u128` の範囲を超える病的な設定（`step` が `usize::MAX` 付近
+    /// かつ `t_mult` が非常に大きい場合）でのみ overflow しうる。その
+    /// 場合は「現周期が `step` を含む」とみなし、`t_i` を実質無限大
+    /// （`u128::MAX`）として扱う（`t_cur/t_i` が 0 に近づき
+    /// `lr ≈ base_lr` を返す安全側の近似。呼び出し元がこのような
+    /// 極端な設定を使うことは通常ないため、この分岐は事実上到達
+    /// しない防御的経路である）。
+    fn cycle_position(&self, step: usize) -> (u128, u128) {
+        if self.t_mult == 1 {
+            let t_0 = self.t_0 as u128;
+            return ((step as u128) % t_0, t_0);
+        }
+        let step_u = step as u128;
+        let t_mult = self.t_mult as u128;
+        let mut start: u128 = 0;
+        let mut t_i: u128 = self.t_0 as u128;
+        loop {
+            match start.checked_add(t_i) {
+                Some(end) if step_u < end => return (step_u - start, t_i),
+                Some(end) => {
+                    start = end;
+                    match t_i.checked_mul(t_mult) {
+                        Some(next) => t_i = next,
+                        // 次周期長の計算が overflow: 事実上無限大の
+                        // 周期として扱う（doc 参照）。
+                        None => return (step_u - start, u128::MAX),
+                    }
+                }
+                // 周期境界の計算自体が overflow: 同上。
+                None => return (step_u - start, u128::MAX),
+            }
+        }
+    }
+}
+
+impl LrScheduler for CosineAnnealingWarmRestarts {
+    fn lr_at(&self, step: usize) -> f32 {
+        let (t_cur, t_i) = self.cycle_position(step);
+        let base_lr = self.base_lr as f64;
+        let eta_min = self.eta_min as f64;
+        // `t_i` は `new`／`cycle_position` の契約上必ず 1 以上
+        // （`t_0 >= 1` を構築時に検証済み。overflow 経路の
+        // `u128::MAX` も非ゼロ）のためゼロ除算にならない。
+        let phase = std::f64::consts::PI * (t_cur as f64) / (t_i as f64);
+        (eta_min + (base_lr - eta_min) * (1.0 + phase.cos()) / 2.0) as f32
+    }
+}
+
+/// PyTorch `torch.optim.lr_scheduler.CyclicLR`（`mode='triangular'`
+/// 固定）と同一の三角波サイクル: 周期内位置 `pos = step % (up + down)`
+/// として、`pos <= up` なら `scale = pos / up`（上昇フェーズ）、
+/// それ以外は `scale = (up + down - pos) / down`（下降フェーズ）を
+/// 用い `lr = base_lr + (max_lr - base_lr) * scale`。
+///
+/// PyTorch の `x = 1 + step/T - floor(1 + step/T)`（`T = up + down`
+/// の半周期換算）から導かれる式と代数的に同値である
+/// （`docs/autodiff-lr-scheduler-ext-decision.md` 参照）。
+/// `mode='triangular2'`／`'exp_range'`・`scale_fn`・`cycle_momentum`
+/// は対象外（後続イシューで拡張可能）。
+pub struct CyclicLr {
+    base_lr: f32,
+    max_lr: f32,
+    step_size_up: usize,
+    step_size_down: usize,
+}
+
+impl CyclicLr {
+    /// `base_lr` は有限かつ正、`max_lr` は有限かつ `base_lr` 以上、
+    /// `step_size_up` は 1 以上でなければならない。`step_size_down` は
+    /// `None` なら `step_size_up` と同じ値を使う（PyTorch の既定
+    /// `step_size_down=None` と同じ意味）。`Some(0)` は下降フェーズが
+    /// 存在しない退化設定として拒否する。
+    ///
+    /// # Errors
+    ///
+    /// 上記のいずれかの条件を満たさない場合、または
+    /// `step_size_up + step_size_down` が `usize` で overflow する場合は
+    /// `AutodiffError::InvalidArgument`（fail-closed。周期長の
+    /// overflow は `lr_at` 側の `%` 演算を未定義動作の手前で防ぐための
+    /// 事前検査）。
+    pub fn new(
+        base_lr: f32,
+        max_lr: f32,
+        step_size_up: usize,
+        step_size_down: Option<usize>,
+    ) -> Result<Self, AutodiffError> {
+        if !base_lr.is_finite() || base_lr <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "base_lr は有限かつ正の値でなければならない: {base_lr}"
+            )));
+        }
+        if !max_lr.is_finite() || max_lr < base_lr {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "max_lr は有限かつ base_lr 以上でなければならない: \
+                 max_lr={max_lr} base_lr={base_lr}"
+            )));
+        }
+        if step_size_up == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "step_size_up は 1 以上でなければならない".to_string(),
+            ));
+        }
+        let step_size_down = step_size_down.unwrap_or(step_size_up);
+        if step_size_down == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "step_size_down は 1 以上でなければならない\
+                 （下降フェーズが存在しない退化設定）"
+                    .to_string(),
+            ));
+        }
+        if step_size_up.checked_add(step_size_down).is_none() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "step_size_up + step_size_down が usize で overflow する: \
+                 step_size_up={step_size_up} step_size_down={step_size_down}"
+            )));
+        }
+        Ok(Self {
+            base_lr,
+            max_lr,
+            step_size_up,
+            step_size_down,
+        })
+    }
+}
+
+impl LrScheduler for CyclicLr {
+    fn lr_at(&self, step: usize) -> f32 {
+        // `new` で overflow しないことを検証済み。
+        let total = self.step_size_up + self.step_size_down;
+        let pos = step % total;
+        let scale = if pos <= self.step_size_up {
+            (pos as f64) / (self.step_size_up as f64)
+        } else {
+            ((total - pos) as f64) / (self.step_size_down as f64)
+        };
+        let base_lr = self.base_lr as f64;
+        let max_lr = self.max_lr as f64;
+        (base_lr + (max_lr - base_lr) * scale) as f32
+    }
+}
+
+/// PyTorch `torch.optim.lr_scheduler.LambdaLR` と同一の関数ベース
+/// スケジューラ: `lr(step) = base_lr * lr_lambda(step)`。
+///
+/// `lr_lambda` は `Box` 割り当てを要さない generic（`F: Fn(usize) ->
+/// f64`）として受け取る（呼び出し側の `Send`／`Sync` 性をそのまま
+/// 引き継げる）。PyTorch の `param_group` ごとの lambda リストは
+/// 対象外（単一 `base_lr` のみ）。
+///
+/// # 非有限な結果について
+///
+/// [`LrScheduler::lr_at`] は `Result` を返せない契約のため、
+/// `lr_lambda` が `NaN`／`Inf` を返した場合はそのまま `lr_at` の
+/// 返り値へ伝播する（`ExponentialLr` 等と同じ扱い。`nn::optim::mod`
+/// doc「学習率更新 API」節を参照。受け手の `LrSchedule`／`set_lr` が
+/// 既存の fail-closed 契約で拒否する）。
+pub struct LambdaLr<F>
+where
+    F: Fn(usize) -> f64,
+{
+    base_lr: f32,
+    lr_lambda: F,
+}
+
+impl<F> LambdaLr<F>
+where
+    F: Fn(usize) -> f64,
+{
+    /// `base_lr` は有限かつ正でなければならない（`lr_lambda` 自体は
+    /// 検査しない。呼び出し側の純粋関数契約に委ねる。`new` doc「非
+    /// 有限な結果について」節参照）。
+    ///
+    /// # Errors
+    ///
+    /// `base_lr` が条件を満たさない場合は
+    /// `AutodiffError::InvalidArgument`（fail-closed）。
+    pub fn new(base_lr: f32, lr_lambda: F) -> Result<Self, AutodiffError> {
+        if !base_lr.is_finite() || base_lr <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "base_lr は有限かつ正の値でなければならない: {base_lr}"
+            )));
+        }
+        Ok(Self { base_lr, lr_lambda })
+    }
+}
+
+impl<F> LrScheduler for LambdaLr<F>
+where
+    F: Fn(usize) -> f64,
+{
+    fn lr_at(&self, step: usize) -> f32 {
+        (self.base_lr as f64 * (self.lr_lambda)(step)) as f32
+    }
+}
+
+/// PyTorch `torch.optim.lr_scheduler.SequentialLR` と同一の段階連結:
+/// `milestones` で区切られた区間ごとに異なる [`LrScheduler`] を、
+/// その区間内では**局所 epoch**（区間開始 milestone からの相対 step。
+/// 区間先頭で 0 から再開する）で駆動する。
+///
+/// PyTorch は全段が同じ optimizer の `initial_lr` を共有する前提だが、
+/// 本実装は各段が自分の `base_lr` を独立に持つ（各段は独立に構築した
+/// [`LrScheduler`] のため）。PyTorch と同じ学習率系列を再現したい
+/// 場合は、呼び出し側が各段へ同じ `base_lr` を渡す。
+///
+/// 状態保持型の `ReduceLrOnPlateau` は所有権が
+/// `Box<dyn LrScheduler>` へ移り `step(metric)` を呼び出せなくなる
+/// ため（`LrScheduler::lr_at` のみを経由する）、実質的に非対応
+/// （`lr_at` は現在値を返すだけの `ConstantLr` 型の段として振る舞う。
+/// `nn/optim/mod.rs` doc「学習率更新 API」節参照）。
+pub struct SequentialLr {
+    schedulers: Vec<Box<dyn LrScheduler>>,
+    /// 狭義単調増加・先頭 1 以上（`new` doc 参照）。長さは
+    /// `schedulers.len() - 1`。
+    milestones: Vec<usize>,
+}
+
+impl SequentialLr {
+    /// `schedulers` は 1 個以上、`milestones.len() + 1 ==
+    /// schedulers.len()`、`milestones` は狭義単調増加かつ先頭が 1 以上
+    /// （先頭 0 は最初の段が長さ 0 になる退化設定のため拒否する）
+    /// でなければならない。
+    ///
+    /// # Errors
+    ///
+    /// 上記のいずれかの条件を満たさない場合は
+    /// `AutodiffError::InvalidArgument`（fail-closed）。
+    pub fn new(
+        schedulers: Vec<Box<dyn LrScheduler>>,
+        milestones: Vec<usize>,
+    ) -> Result<Self, AutodiffError> {
+        if schedulers.is_empty() {
+            return Err(AutodiffError::InvalidArgument(
+                "schedulers は 1 個以上でなければならない".to_string(),
+            ));
+        }
+        if milestones.len() + 1 != schedulers.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "milestones.len() + 1 は schedulers.len() と一致しなければ\
+                 ならない: milestones.len()={} schedulers.len()={}",
+                milestones.len(),
+                schedulers.len()
+            )));
+        }
+        if milestones.first() == Some(&0) {
+            return Err(AutodiffError::InvalidArgument(
+                "milestones の先頭は 1 以上でなければならない\
+                 （先頭 0 は最初の段が長さ 0 になる退化設定）"
+                    .to_string(),
+            ));
+        }
+        if !milestones.windows(2).all(|w| w[0] < w[1]) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "milestones は狭義単調増加でなければならない: {milestones:?}"
+            )));
+        }
+        Ok(Self {
+            schedulers,
+            milestones,
+        })
+    }
+}
+
+impl LrScheduler for SequentialLr {
+    fn lr_at(&self, step: usize) -> f32 {
+        // `milestones` は昇順（狭義単調増加）のため `partition_point`
+        // で「`step` を含む段の index」を直接求められる。
+        let idx = self.milestones.partition_point(|&m| m <= step);
+        let local = if idx == 0 {
+            step
+        } else {
+            // `milestones[idx-1] <= step` は `partition_point` の
+            // 定義から保証される（`idx` は `milestones[idx-1] <= step`
+            // を満たす最後の位置の直後）ため減算で underflow しない。
+            step - self.milestones[idx - 1]
+        };
+        self.schedulers[idx].lr_at(local)
     }
 }
