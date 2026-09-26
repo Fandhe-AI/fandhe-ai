@@ -98,6 +98,37 @@ impl Gradients {
     pub(crate) fn resident_fingerprint(&self) -> Option<(u64, u64, Option<u64>)> {
         self.resident_fingerprint
     }
+
+    /// AMP 常駐 step（`crate::optim::device_store::amp`。イシュー #2181）
+    /// 専用の合成コンストラクタ。unscale 済みのホスト勾配から、通常の
+    /// `Tape::backward`／`DeviceParamStore::backward` が返す形と同じ
+    /// `Gradients` を組み立てる（`pub(crate)` — `backward_impl` を経由
+    /// しない合成値のため公開 API 面には出さない）。
+    ///
+    /// `resident_fingerprint` は常に `None` に固定する: AMP は
+    /// `DeviceParamStore::param_grads_to_host` で resident 経由・host
+    /// 経由いずれの勾配も一度ホストへ実体化してから unscale する
+    /// （unscale はスケールされた値の除算であり、resident 直接書き込み
+    /// slot にも均一に適用する必要があるため）。合成後の `Gradients` を
+    /// `DeviceParamStore::step`／`step_adam_impl` へ渡すと、
+    /// `resident_filled_slots` は `resident_fingerprint` 不一致により
+    /// 常に「resident 経由なし」と判定し、host 経由の単一連結
+    /// アップロード経路（`any_resident == false`）を強制する。これは
+    /// 「既にホストへ実体化済みの値を再度 device 直接書き込み経路へ
+    /// 戻す意味がない」という設計上の意図であり、実装計画 §4.1 の
+    /// 「AMP では any_resident を forced false にする」契約そのもの。
+    pub(crate) fn synthetic(
+        tape_id: TapeId,
+        epoch: u64,
+        grads: Vec<Option<Tensor<f32>>>,
+    ) -> Gradients {
+        Gradients {
+            tape_id,
+            epoch,
+            grads,
+            resident_fingerprint: None,
+        }
+    }
 }
 
 impl Tape {

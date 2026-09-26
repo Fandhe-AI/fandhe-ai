@@ -112,6 +112,14 @@
 //! 検出されることが多い）。poison からの**回復**（`context_cache::
 //! invalidate_with` の呼び出し）は #1062 へ引き継いだままである。
 
+// AMP（自動混合精度）の常駐 step 結線（イシュー #2181）。`DeviceParamStore`
+// の `impl` を追加する子モジュール（`mod` 宣言をここへ置くのは他の
+// `pub`/`use` 宣言と同じ並びに揃えるため。子モジュールは親モジュール
+// （本ファイル）で定義された private フィールド・private fn へアクセス
+// できる——Rust の可視性は「定義モジュールとその子孫モジュール」単位の
+// ため（`amp.rs` モジュール冒頭コメント参照）。
+mod amp;
+
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -7352,5 +7360,202 @@ mod tests {
         if let Ok(plan) = plan {
             let _ = ops.run_fused(&plan, &[&a]);
         }
+    }
+
+    // --- AMP（イシュー #2181・`device_store/amp.rs`）単体テスト ---
+    //
+    // `step_amp`／`step_adam_amp`／`step_adamw_amp` は既存 `step`／
+    // `step_adam`／`step_adamw` へ委譲するだけの薄いラッパーのため
+    // （`device_store/amp.rs` モジュール doc「設計方針」参照）、ここでは
+    // 「非 skip 時にホスト参照（unscale 済み plain step）と bit 完全
+    // 一致する」「skip 時にパラメータ・optimizer 状態（Adam の bias
+    // correction を含む）を一切進めず、pending だけを消費する」
+    // 「skip 後の次回 backward・step が鮮度判定を誤らない」の 3 点を
+    // 固定する。カーネル起動回数の非後退（CUDA Graph capture 等）は
+    // 既存 `step_launches_sgd_kernel_exactly_once_regardless_of_param_count`
+    // が非委譲の生 `step()` を通じて既に保証済みのため重複させない。
+    use crate::nn::optim::amp::{GradScaler, GradScalerConfig};
+
+    #[test]
+    #[allow(deprecated)]
+    fn step_amp_sgd_non_skip_matches_host_reference_bit_exact() {
+        let tape = simple_tape(None);
+        let w = tensor(vec![1.0, 2.0], &[2]);
+        let mut amp_store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let amp_vars = amp_store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![0.0, 0.0], &[2]));
+        let loss = amp_vars[0].mse_loss(&target).unwrap();
+        let mut scaler = GradScaler::new(GradScalerConfig::default()).unwrap();
+        let scaled_loss = scaler.scale_loss(&loss).unwrap();
+        let grads = tape.backward(&scaled_loss).unwrap();
+        let config = SgdConfig::new(0.1);
+        let skipped = amp_store
+            .step_amp(&tape, &grads, &config, &mut scaler)
+            .unwrap();
+        assert!(!skipped);
+        // 非 skip では scale 自体は不変（`growth_interval` 既定 2000 に
+        // 未到達）。`growth_tracker` のみ 1 進む。
+        assert_eq!(scaler.scale(), GradScalerConfig::default().init_scale);
+        assert_eq!(scaler.growth_tracker(), 1);
+        let amp_result = amp_store.sync_to_host(&tape).unwrap();
+
+        // ホスト参照: 無 scale の loss から同一初期値・同一 config で
+        // plain `step()`（既存・無変更経路）を 1 回だけ適用する。
+        let ref_tape = simple_tape(None);
+        let ref_w = tensor(vec![1.0, 2.0], &[2]);
+        let mut ref_store = DeviceParamStore::new(&ref_tape, &[&ref_w]).unwrap();
+        let ref_vars = ref_store.register_resident_leaves(&ref_tape).unwrap();
+        let ref_target = ref_tape.var(&tensor(vec![0.0, 0.0], &[2]));
+        let ref_loss = ref_vars[0].mse_loss(&ref_target).unwrap();
+        let ref_grads = ref_tape.backward(&ref_loss).unwrap();
+        ref_store.step(&ref_tape, &ref_grads, &config).unwrap();
+        let ref_result = ref_store.sync_to_host(&ref_tape).unwrap();
+
+        assert_eq!(
+            amp_result[0].host_slice(),
+            ref_result[0].host_slice(),
+            "AMP 非 skip 経路がホスト参照（unscale 済み plain step）と bit 一致しない"
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn step_amp_skip_on_non_finite_leaves_params_and_step_count_unchanged_and_backoffs_scale() {
+        let tape = simple_tape(None);
+        let w = tensor(vec![1.0, 2.0], &[2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let vars = store.register_resident_leaves(&tape).unwrap();
+        // 巨大な target で backward 勾配自体を非有限（scale 後 f32 の
+        // 表現域を超える）にする。実運用の f16 forward overflow を模した
+        // 「scale 後に非有限になる」経路の代替（本モジュールは f16
+        // forward を扱わないため、host 計算のみで overflow を再現する）。
+        let target = tape.var(&tensor(vec![1.0e35, 1.0e35], &[2]));
+        let loss = vars[0].mse_loss(&target).unwrap();
+        let mut scaler = GradScaler::new(GradScalerConfig::default()).unwrap();
+        let scaled_loss = scaler.scale_loss(&loss).unwrap();
+        let grads = tape.backward(&scaled_loss).unwrap();
+
+        let before = store.sync_to_host(&tape).unwrap();
+        let skipped = store
+            .step_amp(&tape, &grads, &SgdConfig::new(0.1), &mut scaler)
+            .unwrap();
+        assert!(skipped, "巨大な勾配は非有限として skip されるはず");
+        let after = store.sync_to_host(&tape).unwrap();
+        assert_eq!(
+            before[0].host_slice(),
+            after[0].host_slice(),
+            "skip 時はどのパラメータも更新されてはならない"
+        );
+        assert_eq!(
+            scaler.scale(),
+            GradScalerConfig::default().init_scale * GradScalerConfig::default().backoff_factor,
+            "skip 後は scale が backoff_factor 倍される"
+        );
+        assert_eq!(scaler.growth_tracker(), 0);
+
+        // pending は skip 時に消費されるため、次回登録が
+        // `PendingForwardUnconsumed` にならず成功することで確認する
+        // （`abandon_pending_forward` と同じ契約。モジュール doc「skip
+        // 時の状態遷移契約」参照）。
+        let reregistered = store.register_resident_leaves(&tape);
+        assert!(
+            reregistered.is_ok(),
+            "skip は pending を消費し次回登録を妨げてはならない"
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn step_adam_amp_skip_does_not_touch_params_or_advance_state() {
+        // `MockDeviceOps`（既定）は `adam_step_device` を実装しない
+        // （`step_adam_unsupported_backend_does_not_poison_store` 参照）
+        // ため、本テストは「skip 経路がカーネルへ一切到達しないこと」を
+        // 実測できる（非 skip なら `Unsupported` エラーで即座に判明する）。
+        // Adam の bias correction（`t`）が skip 分だけ余計に進まない
+        // ことの厳密な bit 一致確認（`.claude/rules/coding-rust.md`
+        // 「テスト・ベンチ」）は、`adam_step_device` を実装する CPU
+        // バックエンド実機側の facade 結合テスト
+        // （`crates/facade/tests/device_param_store_amp_train.rs`）で行う。
+        let tape = simple_tape(None);
+        let w = tensor(vec![1.0, 2.0], &[2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let vars = store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![1.0e35, 1.0e35], &[2]));
+        let loss = vars[0].mse_loss(&target).unwrap();
+        let mut scaler = GradScaler::new(GradScalerConfig::default()).unwrap();
+        let scaled_loss = scaler.scale_loss(&loss).unwrap();
+        let grads = tape.backward(&scaled_loss).unwrap();
+        let config = AdamConfig {
+            lr: 0.1,
+            ..Default::default()
+        };
+
+        let before = store.sync_to_host(&tape).unwrap();
+        let skipped = store
+            .step_adam_amp(&tape, &grads, &config, &mut scaler)
+            .unwrap();
+        assert!(skipped, "巨大な勾配は非有限として skip されるはず");
+        let after = store.sync_to_host(&tape).unwrap();
+        assert_eq!(
+            before[0].host_slice(),
+            after[0].host_slice(),
+            "skip 時はどのパラメータも更新されてはならない"
+        );
+        assert_eq!(
+            scaler.scale(),
+            GradScalerConfig::default().init_scale * GradScalerConfig::default().backoff_factor
+        );
+
+        // pending 消費の確認（`step_amp` の同種テストと同じ契約）。
+        let reregistered = store.register_resident_leaves(&tape);
+        assert!(reregistered.is_ok());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn amp_skip_then_next_backward_step_still_fresh() {
+        // イシュー #2181 実装計画「4. 常駐 forward の後に `scale_loss` が
+        // スカラー葉を tape へ登録することの影響」・モジュール doc
+        // 「勾配の鮮度への影響（A08）」の固定テスト。resident 経由の
+        // 重み勾配充填（`fill_resident_weight_grad`）と host 経由の bias
+        // 勾配が混在する `linear_forward` 経路で、AMP skip の直後に
+        // 通常の（非 AMP）`step()` を行っても、`resident_filled_slots`
+        // が stale 判定にならず正しく更新できることを検証する。
+        let tape = Tape::new_with_ops(
+            Box::new(MockDeviceOps::resident_capable()) as Box<dyn BackendOps + Send>
+        );
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let b_init = tensor(vec![0.5, -0.5], &[2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init, &b_init]).unwrap();
+
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        // 非有限を誘発する巨大 target で 1 step 目を skip させる。
+        let huge_target = tape.var(&tensor(vec![1.0e35, 1.0e35], &[1, 2]));
+        let pred = store
+            .linear_forward(&tape, &x, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let loss = pred.mse_loss(&huge_target).unwrap();
+        let mut scaler = GradScaler::new(GradScalerConfig::default()).unwrap();
+        let scaled_loss = scaler.scale_loss(&loss).unwrap();
+        let grads = store.backward(&tape, &scaled_loss).unwrap();
+        let config = SgdConfig::new(0.1);
+        let skipped = store.step_amp(&tape, &grads, &config, &mut scaler).unwrap();
+        assert!(skipped);
+
+        // 2 step 目は通常 target・非 AMP の素の `step()`。skip の残留
+        // 状態（stale な鮮度判定・pending 不整合）があれば
+        // `resident_filled_slots` の誤判定または `TapeMismatch`／
+        // `PendingForwardUnconsumed` で失敗するはず。
+        let leaves2 = store.register_resident_params(&tape).unwrap();
+        let target2 = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred2 = store
+            .linear_forward(&tape, &x, &leaves2[0], Some(&leaves2[1]))
+            .unwrap();
+        let loss2 = pred2.mse_loss(&target2).unwrap();
+        let grads2 = store.backward(&tape, &loss2).unwrap();
+        store.step(&tape, &grads2, &config).unwrap();
+        let after = store.sync_to_host(&tape).unwrap();
+        assert_ne!(after[0].host_slice(), w_init.host_slice());
     }
 }

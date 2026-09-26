@@ -2238,3 +2238,65 @@ ratio）の状態バッファをデバイス常駐バッファとして保持し
   一致で突合。状態種別ガード・NaN `lr` 拒否も検証）。CUDA／Metal
   ネイティブカーネル・実機実測は対象外（`docs/perf/logs/
   optimizer-device-step-2175/README.md` に申し送り）。
+
+## AMP（自動混合精度）結線（イシュー #2181）
+
+- **背景**: `fandhe_ai_autodiff::nn::optim::amp`（`GradScaler`）は #1722
+  で facade 公開済みだったが、デバイス常駐 step（`DeviceParamStore::
+  step`／`step_adam`／`step_adamw`）には unscale・非有限検出が結線
+  されておらず、AMP はホスト `Tensor<f32>` 勾配経由の学習ループにのみ
+  適用できた（`crates/facade/src/optim.rs`「AMP の適用範囲」節）。
+- **設計方針**: 既存 `step`／`step_adam`／`step_adamw` の演算列（CUDA
+  Graph capture 分岐・`pending_backup` 復元・`poisoned` 遷移を含む）を
+  一切変更・複製しない。`DeviceParamStore::param_grads_to_host`
+  （#1479）でスケール済み勾配（resident 経由・host 経由いずれも）を
+  ホストへ実体化し、`crate::nn::optim::amp::unscale_grads` で unscale・
+  非有限検出したうえで、その結果を `crate::backward::Gradients::
+  synthetic`（`pub(crate)`。本イシューで新設。`resident_fingerprint`
+  は常に `None` に固定する）で通常の `Tape::backward` が返す形へ包み
+  直し、**既存の `step`／`step_adam`／`step_adamw` へそのまま渡す**。
+  `resident_fingerprint == None` により `resident_filled_slots` は常に
+  「resident 経由なし」と判定し `any_resident == false`（単一連結
+  バッファの新規アップロード）経路が強制される——AMP は unscale の
+  ためにどのみち一度ホストへ実体化するので、resident 直接書き込み
+  経路を再利用する意味がないという設計上の意図（実装は
+  `crates/autodiff/src/optim/device_store/amp.rs` モジュール doc
+  「設計方針」節を正とする）。
+- **公開 API**: `DeviceParamStore::step_amp`／`step_adam_amp`／
+  `step_adamw_amp`（`Result<bool, AutodiffError>`。`Ok(true)` は非有限
+  勾配による skip）と facade `Tape::step_device_param_store_amp`／
+  `_adam_amp`／`_adamw_amp` の薄い委譲 3 件のみ。新規公開型は追加して
+  いない。SGD／Adam／AdamW 限定（RmsProp／Adagrad／LAMB は未結線）。
+- **skip 時の状態遷移契約**: `step`／`step_adam`／`step_adamw` を一切
+  呼ばない（カーネル起動 0 回）。`abandon_pending_forward` で forward
+  登録のみを消費し、`step_count`／`sgd_used`／`velocity`／`adam_state`
+  は不変のまま（Adam の bias correction `t` を skip 分だけ余計に進め
+  ない）。`velocity`／`adam_m`／`adam_v` の遅延確保も既存メソッド内部
+  でしか行われないため、skip 時はどのバッファも確保しない。
+- **勾配の鮮度（A08）**: `resident_filled_slots` の鮮度判定は
+  `grads.resident_fingerprint()` と `backward_serial`／
+  `pending.generation` のその場の突合で決まり、`step()` 呼び出しが
+  状態を消費してフラグを立てる方式ではないため、AMP skip の直後に
+  次の backward・`step*` を呼んでも鮮度判定が stale になることはない
+  （追加のフラグクリアは不要。`amp_skip_then_next_backward_step_still_
+  fresh` 単体テストで固定）。
+- **新規の `BackendOps`／`MemoryOps` trait メソッドは追加していない**。
+  CUDA／Metal はデバイス側 unscale カーネルを持たないため、
+  `param_grads_to_host` によるホスト計算フォールバック（D2H → ホスト
+  unscale → 必要なら H2D）を経由する。性能目標は置かない。
+- **後続候補（本イシューのスコープ外）**: デバイス側 unscale・非有限
+  検出カーネル（`BackendOps` の拡張点追加）・fit（`compat::Sequential::
+  fit`）への常駐 AMP 経路の追加・RmsProp／Adagrad／LAMB への AMP 結線。
+  Issue 起票はユーザー承認事項のため本 PR では行わない
+  （`.claude/rules/out-of-scope-tracking.md`）。
+- **検証**: `crates/autodiff/src/optim/device_store.rs` 内 unit test
+  （`MockDeviceOps`。非 skip 経路のホスト参照 bit 完全一致〈SGD〉・
+  skip 時のパラメータ不変・pending 消費・鮮度非後退）・facade 統合
+  テスト `crates/facade/tests/device_param_store_amp_train.rs`
+  （`GradScalerConfig { init_scale: 1.0, growth_interval: u64::MAX, .. }`
+  固定時の非 AMP 経路との per-step bit 完全一致〈SGD／Adam／AdamW〉・
+  overflow による skip／backoff）。CUDA／Metal 実機実測は対象外
+  （`docs/perf/logs/device-param-store-amp-2181/README.md` に申し送り。
+  AMP 自体はホスト計算フォールバックのためバックエンド非依存だが、
+  Adam カーネル自体が CUDA／Metal で `Unsupported`〈CPU 実装のみ。
+  #1959 コメント参照〉という既存の別軸の制約はそのまま残る）。
