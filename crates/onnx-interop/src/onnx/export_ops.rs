@@ -1,9 +1,13 @@
 //! 内部 op（Rust ネイティブの属性表現）から `NodeProto`（op_type・属性）への
 //! 逆マッピング（イシュー #1773。`onnx::export` の層 A）。
 //!
-//! `onnx::interp` が `NodeProto` から読む 23 op（`interp.rs` の `run` ディスパッチ表。
-//! `Conv` はイシュー #2076 で追加）と対称になるよう、[`ExportOp`] は同じ 23 op を
-//! Rust ネイティブの属性表現（`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
+//! `onnx::interp` が `NodeProto` から読む import 対応 25 op（`interp.rs` の
+//! `run` ディスパッチ表。`Conv` はイシュー #2076 で追加・イシュー #2199 で
+//! `MaxPool`／`AveragePool` を追加・`Conv` に 1D 対応を追加）のうち、
+//! export allowlist は 23 op（`MaxPool`／`AveragePool` は import 専用で
+//! export 未対応。interp との対称性はイシュー #2199 で崩れた）。
+//! [`ExportOp`] はこの export allowlist の 23 op を Rust ネイティブの
+//! 属性表現（`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
 //! `attr_i64_required`／`attr_string` が読む値と同じ型）として保持する。属性は
 //! **常に全て書き出す**（既定値であっても省略しない。省略すると「属性欠落＝既定値」
 //! という対称性テストが空虚に pass してしまうため。唯一の例外は [`ExportOp::Transpose`]
@@ -44,9 +48,9 @@ pub enum ConstantAttr {
     Ints(Vec<i64>),
 }
 
-/// `interp.rs` が対応する 23 op を Rust ネイティブの属性表現として保持する。
-/// 入力・出力の名前列は [`ExportNode`] 側が持つ（`ExportOp` 自体は op_type と
-/// 属性のみの責務）。
+/// export allowlist の 23 op（モジュール冒頭コメント参照）を Rust
+/// ネイティブの属性表現として保持する。入力・出力の名前列は
+/// [`ExportNode`] 側が持つ（`ExportOp` 自体は op_type と属性のみの責務）。
 #[derive(Debug, Clone)]
 pub enum ExportOp {
     /// `Y = alpha * (A' @ B') + beta * C`。属性 4 つ（alpha／beta／transA／transB）。
@@ -159,9 +163,10 @@ pub struct ExportNode {
     pub outputs: Vec<String>,
 }
 
-/// `interp.rs` が対応する 23 op の `op_type` 一覧（[`ExportOp::op_type`] が返す
-/// 値の集合と同一）。`check_exportable` の allowlist として使う。両者のドリフトは
-/// `#[cfg(test)]` のドリフト検出テストで固定する。
+/// export allowlist の 23 op の `op_type` 一覧（[`ExportOp::op_type`] が返す
+/// 値の集合と同一。`interp.rs` の import 対応 25 op のうち `MaxPool`／
+/// `AveragePool` を除いたもの）。`check_exportable` の allowlist として
+/// 使う。両者のドリフトは `#[cfg(test)]` のドリフト検出テストで固定する。
 pub const SUPPORTED_OP_TYPES: &[&str] = &[
     "Gemm",
     "MatMul",

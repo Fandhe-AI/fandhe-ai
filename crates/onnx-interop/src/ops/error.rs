@@ -148,6 +148,16 @@ pub enum OpError {
     /// 本クレートの依存関係外〈`tensor-core` のみ・`OpError` は独立した
     /// エラー型〉のため `From` 実装ではなく明示変換で運ぶ）。
     ConvParamsInvalid { reason: String },
+
+    /// `MaxPool`／`AveragePool`（イシュー #2199・`pool.rs`）の属性が
+    /// ONNX 仕様上・本クレートの対応範囲上不正だった（`kernel_shape`
+    /// 欠落・長さ不一致・0 以下の要素・`pads` の長さ不一致・
+    /// `ceil_mode`／`count_include_pad`／`storage_order` が `{0,1}` 外・
+    /// `auto_pad` が `NOTSET` 以外・`AveragePool` の非単位 `dilations`・
+    /// 出力長計算のオーバーフロー・空窓等）。属性は外部モデル由来の
+    /// 入力のため計算前に検証する（OWASP A03。`.claude/rules/
+    /// security.md`）。`reason` に具体的な検証失敗理由を含める。
+    InvalidPoolAttribute { reason: String },
 }
 
 impl fmt::Display for OpError {
@@ -243,6 +253,9 @@ impl fmt::Display for OpError {
             }
             OpError::ConvParamsInvalid { reason } => {
                 write!(f, "Conv: invalid Conv2dParams ({reason})")
+            }
+            OpError::InvalidPoolAttribute { reason } => {
+                write!(f, "Pool: invalid attribute ({reason})")
             }
         }
     }

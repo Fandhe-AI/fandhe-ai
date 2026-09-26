@@ -12,9 +12,14 @@
 //! `Unsqueeze`／`Concat`／`Slice`）に加え、TASK-7.3 系 14 オペ（`Add`／`Mul`／`Div`／
 //! `Mod`／`Sqrt`／`Constant`／`Cast`／`Reshape`／`Squeeze`／`Transpose`／`MatMul`／
 //! `Softmax`／`Erf`／`LayerNormalization`）をイシュー #274 で結線した。イシュー
-//! #2076（親 #2034）で `Conv`（2 次元畳み込み）を追加し、全 23 オペがグラフ実行
-//! から到達可能（未対応 `op_type` は引き続き [`InterpError::UnsupportedOp`]
-//! で fail-closed に拒否し、無言 skip はしない）。
+//! #2076（親 #2034）で `Conv`（2 次元畳み込み）を追加し、イシュー #2199
+//! （親 #2185）で `MaxPool`／`AveragePool` を追加・`Conv` に 1D（`[N,C,L]`）
+//! 対応を追加した（`crate::ops::conv`）ことで、import 対応全 25 オペが
+//! グラフ実行から到達可能（未対応 `op_type` は引き続き
+//! [`InterpError::UnsupportedOp`] で fail-closed に拒否し、無言 skip は
+//! しない）。`MaxPool`／`AveragePool` は import 専用オペで export
+//! allowlist（`export_ops::SUPPORTED_OP_TYPES`。23 op で不変）には含まれ
+//! ない。
 //!
 //! ## 実行時値モデルと dtype の扱いについて
 //!
@@ -54,7 +59,9 @@ use half::f16;
 use super::graph::{Graph, GraphError, RawTensor};
 use super::interp_device;
 use super::proto::{AttributeProto, NodeProto, attribute_type};
-use crate::ops::{self, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, SliceParams};
+use crate::ops::{
+    self, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, PoolAttrs, SliceParams,
+};
 
 /// 実行時に env（変数束縛）へ格納される値。ONNX の `TensorProto.data_type` の
 /// うち本クレートが対応する 4 種類（`FLOAT`／`INT64`／`BOOL`／`FLOAT16`）に対応する
@@ -73,7 +80,8 @@ pub enum Value {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum InterpError {
-    /// ディスパッチ表（本モジュールが実装する全 22 オペ）に無い `op_type`。
+    /// ディスパッチ表（本モジュールが実装する import 対応全 25 オペ）に
+    /// 無い `op_type`。
     UnsupportedOp(String),
     /// ノードの入力名が env（feed／initializer／先行ノード出力の集合）に存在しない。
     /// `build_graph` はトポロジカル順を検証済みのため通常は到達しないが、
@@ -1093,6 +1101,76 @@ fn compute_conv(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value,
     Ok(Value::F32(ops::conv(x, w, b, &attrs)?))
 }
 
+/// `MaxPool(X)`（イシュー #2199・親 #2185。`ops::max_pool` の結線）。
+/// 入力数はちょうど 1（`Indices` 出力側の追加入力は無い）。属性は
+/// `Conv` と同じ型検証版ヘルパーで読む。`kernel_shape` は ONNX 仕様上
+/// 必須のため、欠落は [`InterpError::MissingAttribute`] で拒否する
+/// （`Conv` と異なり `W` からの形状推論元が無いため）。`Indices`
+/// （2 番目の任意出力）の宣言は [`require_single_output`]（呼び出し元
+/// `run_impl`）が単一出力を強制するため fail-closed に拒否される。
+fn compute_max_pool(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+    if node.input.len() != 1 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 1,
+            max: 1,
+            actual: node.input.len(),
+        });
+    }
+    let x = get_f32(env, node, input_name(node, 0)?)?;
+    let kernel_shape =
+        attr_ints_typed(node, "kernel_shape")?.ok_or_else(|| InterpError::MissingAttribute {
+            node: node.name.clone(),
+            attr: "kernel_shape".to_string(),
+        })?;
+    let attrs = PoolAttrs {
+        kernel_shape: kernel_shape.to_vec(),
+        strides: attr_ints_typed(node, "strides")?.unwrap_or(&[]).to_vec(),
+        pads: attr_ints_typed(node, "pads")?.unwrap_or(&[]).to_vec(),
+        dilations: attr_ints_typed(node, "dilations")?.unwrap_or(&[]).to_vec(),
+        ceil_mode: attr_i64_typed(node, "ceil_mode", 0)?,
+        count_include_pad: 0,
+        storage_order: attr_i64_typed(node, "storage_order", 0)?,
+        auto_pad: attr_string(node, "auto_pad", "NOTSET")?,
+    };
+    Ok(Value::F32(ops::max_pool(x, &attrs)?))
+}
+
+/// `AveragePool(X)`（イシュー #2199・親 #2185。`ops::average_pool` の
+/// 結線）。[`compute_max_pool`] と同型の検証順序。`count_include_pad`
+/// の ONNX 既定値は **`0`**（PyTorch `nn.AvgPool*` の既定 `true` とは
+/// 異なる。`ops::pool` モジュール doc §3.2 参照）。
+fn compute_average_pool(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+) -> Result<Value, InterpError> {
+    if node.input.len() != 1 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 1,
+            max: 1,
+            actual: node.input.len(),
+        });
+    }
+    let x = get_f32(env, node, input_name(node, 0)?)?;
+    let kernel_shape =
+        attr_ints_typed(node, "kernel_shape")?.ok_or_else(|| InterpError::MissingAttribute {
+            node: node.name.clone(),
+            attr: "kernel_shape".to_string(),
+        })?;
+    let attrs = PoolAttrs {
+        kernel_shape: kernel_shape.to_vec(),
+        strides: attr_ints_typed(node, "strides")?.unwrap_or(&[]).to_vec(),
+        pads: attr_ints_typed(node, "pads")?.unwrap_or(&[]).to_vec(),
+        dilations: attr_ints_typed(node, "dilations")?.unwrap_or(&[]).to_vec(),
+        ceil_mode: attr_i64_typed(node, "ceil_mode", 0)?,
+        count_include_pad: attr_i64_typed(node, "count_include_pad", 0)?,
+        storage_order: 0,
+        auto_pad: attr_string(node, "auto_pad", "NOTSET")?,
+    };
+    Ok(Value::F32(ops::average_pool(x, &attrs)?))
+}
+
 /// `node.output` が単一出力であることを検査し、その名前を返す（本モジュールが実装する
 /// 全オペは単一出力。`LayerNormalization` の任意出力 `Mean`／`InvStdDev` 宣言もここで
 /// 一律拒否する。実装計画 5.3 節・#274 実装計画スコープ外節）。
@@ -1166,9 +1244,11 @@ fn run_impl(
         // device::device_*` が `Ok(Some(_))` を返した場合）を採用したかを
         // 正確に表す（device 結線対象外の op は常に `false` で揃える。
         // 推測・近似ではなく `compute_*` の戻り値そのものから得る）。
-        // `Conv`（イシュー #2076）は device 実行の対象外（#2077／#2222 の
-        // 結線範囲は `interp_device` モジュール冒頭コメント参照）のため
-        // 常にホスト実装（`ops::conv`）で実行し `false` を報告する。
+        // `Conv`（イシュー #2076）・`MaxPool`／`AveragePool`（イシュー
+        // #2199）は device 実行の対象外（#2077／#2222 の結線範囲は
+        // `interp_device` モジュール冒頭コメント参照）のため常にホスト
+        // 実装（`ops::conv`／`ops::max_pool`／`ops::average_pool`）で
+        // 実行し `false` を報告する。
         let (out_value, used_device) = match node.op_type.as_str() {
             "Gemm" => compute_gemm(&env, node, dev_ops)?,
             "Relu" => compute_relu(&env, node, dev_ops)?,
@@ -1193,6 +1273,8 @@ fn run_impl(
             "Erf" => (compute_erf(&env, node)?, false),
             "LayerNormalization" => compute_layer_normalization(&env, node, dev_ops)?,
             "Conv" => (compute_conv(&env, node)?, false),
+            "MaxPool" => (compute_max_pool(&env, node)?, false),
+            "AveragePool" => (compute_average_pool(&env, node)?, false),
             other => return Err(InterpError::UnsupportedOp(other.to_string())),
         };
         if let Some(r) = report.as_deref_mut() {
@@ -2166,6 +2248,176 @@ mod tests {
         let result = compute_conv(&conv_feeds(), &n).unwrap();
         match result {
             Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    // --- MaxPool／AveragePool（イシュー #2199・親 #2185） ---
+
+    fn pool_feeds() -> StdHashMap<String, Value> {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]).unwrap()),
+        );
+        feeds
+    }
+
+    fn max_pool_node_with_attrs(extra: Vec<super::super::proto::AttributeProto>) -> NodeProto {
+        let mut attrs = vec![build_attr_ints_typed("kernel_shape", vec![2, 2])];
+        attrs.retain(|a| !extra.iter().any(|e| e.name == a.name));
+        attrs.extend(extra);
+        node_with_attrs("MaxPool", vec!["x"], vec!["y"], attrs)
+    }
+
+    #[test]
+    fn compute_max_pool_basic() {
+        let n = max_pool_node_with_attrs(vec![]);
+        let result = compute_max_pool(&pool_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[4.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_max_pool_missing_kernel_shape_rejected() {
+        let n = node("MaxPool", vec!["x"], vec!["y"]);
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::MissingAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_max_pool_rejects_two_inputs() {
+        let n = node_with_attrs(
+            "MaxPool",
+            vec!["x", "extra"],
+            vec!["y"],
+            vec![build_attr_ints_typed("kernel_shape", vec![2, 2])],
+        );
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 1,
+                max: 1,
+                actual: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_max_pool_rejects_kernel_shape_type_mismatch() {
+        let n = max_pool_node_with_attrs(vec![build_attr_string_typed("kernel_shape", "")]);
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_max_pool_rejects_duplicate_attribute() {
+        let mut n = max_pool_node_with_attrs(vec![]);
+        n.attribute
+            .push(build_attr_ints_typed("kernel_shape", vec![1, 1]));
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(err, InterpError::InvalidAttribute { .. }));
+    }
+
+    #[test]
+    fn compute_max_pool_ceil_mode_and_storage_order_accepted() {
+        let n = max_pool_node_with_attrs(vec![
+            build_attr_i64_typed("ceil_mode", 1),
+            build_attr_i64_typed("storage_order", 0),
+        ]);
+        let result = compute_max_pool(&pool_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[4.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_average_pool_default_count_include_pad_is_zero() {
+        // ONNX 既定は count_include_pad=0（PyTorch の既定 true とは異なる）。
+        // pads で non-trivial な divisor を確認する。
+        let n = node_with_attrs(
+            "AveragePool",
+            vec!["x"],
+            vec!["y"],
+            vec![
+                build_attr_ints_typed("kernel_shape", vec![1, 2]),
+                build_attr_ints_typed("strides", vec![1, 1]),
+                build_attr_ints_typed("pads", vec![0, 0, 0, 1]),
+            ],
+        );
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[1, 1, 1, 3]).unwrap()),
+        );
+        let result = compute_average_pool(&feeds, &n).unwrap();
+        match result {
+            // windows: (1,2)/2=1.5, (2,3)/2=2.5, (3,pad)/1=3.0
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[1.5, 2.5, 3.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_average_pool_missing_kernel_shape_rejected() {
+        let n = node("AveragePool", vec!["x"], vec!["y"]);
+        let err = compute_average_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::MissingAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_average_pool_i64_input_rejected() {
+        let n = node_with_attrs(
+            "AveragePool",
+            vec!["x"],
+            vec!["y"],
+            vec![build_attr_ints_typed("kernel_shape", vec![2, 2])],
+        );
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![1, 2, 3, 4], &[1, 1, 2, 2]).unwrap()),
+        );
+        let err = compute_average_pool(&feeds, &n).unwrap_err();
+        assert!(matches!(err, InterpError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn dispatch_max_pool_and_average_pool_via_run() {
+        // dispatch 表（`run_impl`）から `MaxPool`／`AveragePool` へ到達
+        // できることを `run` 経由で確認する（イシュー #2199）。
+        let max_node = max_pool_node_with_attrs(vec![]);
+        let g = empty_graph(vec![max_node], vec!["x"], vec!["y"]);
+        let result = run(&g, pool_feeds()).unwrap();
+        match &result["y"] {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[4.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+
+        let avg_node = node_with_attrs(
+            "AveragePool",
+            vec!["x"],
+            vec!["y"],
+            vec![build_attr_ints_typed("kernel_shape", vec![2, 2])],
+        );
+        let g2 = empty_graph(vec![avg_node], vec!["x"], vec!["y"]);
+        let result2 = run(&g2, pool_feeds()).unwrap();
+        match &result2["y"] {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.5]),
             _ => panic!("Value::F32 を期待"),
         }
     }

@@ -24,8 +24,11 @@
 //! `.claude/rules/coding-rust.md` の REQ-2 統一複合判定（バックエンド間
 //! 数値一致）とは別指標である（両者を混同しない）。
 //!
-//! 対応 op は 23 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭コメント
-//! 参照）。未対応 `op_type` は無言 skip せず [`OnnxError::UnsupportedOp`]
+//! import 対応 op は 25 種（`fandhe_ai_onnx_interop::onnx::interp`
+//! 冒頭コメント参照。イシュー #2199 で `MaxPool`／`AveragePool` を追加・
+//! `Conv` に 1D 対応を追加した。`MaxPool`／`AveragePool` は import 専用
+//! で export 未対応。次節「ONNX export」参照）。未対応 `op_type` は
+//! 無言 skip せず [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
 //! どおり同名 initializer を上書きする。`GraphProto.sparse_initializer` が
@@ -62,8 +65,10 @@
 //!   `to_path` で export できるのは import 済みモデル（`OnnxModel`）の
 //!   みで、学習済み `Sequential`／`nn` から直接 `OnnxModel` を構築する
 //!   経路は [`OnnxModel::from_sequential`]（次節・#2037）を使う
-//! - allowlist（`interp` 対応 23 op・既定 domain）外のノードを含む
-//!   モデルは `from_bytes` では構築できても **export 時に**
+//! - export allowlist（23 op・既定 domain。`interp` の import 対応 25 op
+//!   と非対称——`MaxPool`／`AveragePool` は import 専用で export
+//!   allowlist には含まれない。イシュー #2199）外のノードを含むモデルは
+//!   `from_bytes` では構築できても **export 時に**
 //!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する（無言
 //!   skip しない）
 //!

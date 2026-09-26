@@ -9,13 +9,19 @@
 //! `T: Element` でジェネリック化し、`Cast`（`cast`）は dtype ごとに型安全な変換関数を
 //! 個別に提供する（イシュー #274）。
 //!
+//! イシュー #2076（親 #2034）で `Conv`（2 次元畳み込み）を追加し、イシュー #2199
+//! （親 #2185）で `MaxPool`／`AveragePool`（`pool.rs`）を追加・`Conv` に 1D
+//! （`[N,C,L]`）対応を追加した（`conv.rs`）。`MaxPool`／`AveragePool` は import
+//! 専用オペで、export allowlist（`export_ops::SUPPORTED_OP_TYPES`。23 op で不変）
+//! には含まれない（`docs/onnx-model-zoo-parity.md` §5）。
+//!
 //! 各関数は「入力テンソル＋属性 → 出力テンソル」の単体演算に限定し、ONNX proto デコード
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
 //! プレーンな Rust 構造体・スライスで受け取るため、decode 層（`AttributeProto` 等）の
 //! 実装順序に依存せず本モジュール単体でテスト・使用できる。インタープリタのディスパッチ
 //! （op 名 → 本モジュール関数の解決）は [`crate::onnx::interp`]（TASK-7.2b・#78、
-//! TASK-7.3 系 14 オペの結線は #274 で実装）が担い、全 22 オペがグラフ実行から
-//! 到達可能である。
+//! TASK-7.3 系 14 オペの結線は #274 で実装）が担い、import 対応全 25 オペが
+//! グラフ実行から到達可能である。
 
 mod activation;
 mod arith;
@@ -28,6 +34,7 @@ mod gather;
 mod gemm;
 mod layer_norm;
 mod matmul;
+mod pool;
 mod shape_ops;
 mod shape_transform;
 mod slice;
@@ -47,6 +54,7 @@ pub use gather::gather;
 pub use gemm::{GemmAttrs, gemm};
 pub use layer_norm::{LayerNormAttrs, layer_normalization};
 pub use matmul::matmul;
+pub use pool::{PoolAttrs, average_pool, max_pool};
 pub use shape_ops::{shape, unsqueeze};
 pub use shape_transform::{reshape, squeeze, transpose};
 pub use slice::{SliceParams, slice};

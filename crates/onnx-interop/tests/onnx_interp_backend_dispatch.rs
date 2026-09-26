@@ -38,7 +38,7 @@ use fandhe_ai_onnx_interop::onnx::graph::Graph;
 use fandhe_ai_onnx_interop::onnx::interp::{
     InterpError, Value, run, run_with_ops, run_with_ops_report,
 };
-use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto};
+use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto, attribute_type};
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, Device, ScalarBinaryOp, ScalarUnaryOp, Tensor,
 };
@@ -714,6 +714,59 @@ fn scalar_binary_div_kind_matches_ops_semantics() {
     assert_eq!(ops.calls.borrow().as_slice(), &["scalar_binary"]);
     assert!(actual[0].is_infinite() && actual[0] > 0.0);
     assert!(actual[1].is_infinite() && actual[1] < 0.0);
+}
+
+#[test]
+fn run_with_ops_conv_1d_and_pool_stay_on_host() {
+    // `Conv`（1D）・`MaxPool`／`AveragePool`（イシュー #2199）は device
+    // 結線対象外（`interp_device` モジュール冒頭コメント）のため、
+    // `dev_ops` が `Some`（opt-in ON）でも常にホスト実装（`ops::conv`／
+    // `ops::max_pool`／`ops::average_pool`）で実行され `host_nodes` に
+    // 記録される。CUDA／Metal も同じホスト経路で到達可能であることの
+    // 根拠とする（実装計画 §4-8）。
+    let conv_node = node_with_attrs("Conv", "n_conv1d", vec!["x", "w"], vec!["y1"], vec![]);
+    let max_node = node_with_attrs(
+        "MaxPool",
+        "n_maxpool",
+        vec!["y1"],
+        vec!["y2"],
+        vec![AttributeProto {
+            name: "kernel_shape".to_string(),
+            ints: vec![2],
+            r#type: attribute_type::INTS,
+            ..Default::default()
+        }],
+    );
+    let graph = Graph {
+        nodes: vec![conv_node, max_node],
+        initializers: HashMap::new(),
+        inputs: vec!["x".to_string(), "w".to_string()],
+        outputs: vec!["y2".to_string()],
+    };
+    let ops = RecordingOps::new();
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 4]),
+        feed_f32("w", vec![1.0], &[1, 1, 1]),
+    ]);
+    let (result_on, report) =
+        run_with_ops_report(&graph, feeds, &ops).expect("run_with_ops_report は成功するはず");
+    assert_eq!(
+        report.host_nodes,
+        vec!["n_conv1d".to_string(), "n_maxpool".to_string()]
+    );
+    assert!(report.device_nodes.is_empty());
+
+    let mut feeds_off = HashMap::new();
+    feeds_off.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 4]),
+        feed_f32("w", vec![1.0], &[1, 1, 1]),
+    ]);
+    let result_off = run(&graph, feeds_off).expect("run（opt-in OFF）は成功するはず");
+    assert_eq!(
+        as_f32_slice(&result_on["y2"]),
+        as_f32_slice(&result_off["y2"])
+    );
 }
 
 /// `PoolStats`／`Ordering` 等の未使用 import が残らないための素通し

@@ -107,8 +107,9 @@ tolerance 自体は変更せず、必要なら spec リポへの提案（ユー�
 
 | op | 対応状況（HEAD） | 追跡先 |
 |---|---|---|
-| `Conv` | 対応済み（#2076）。`auto_pad`〈`mnist-12` が使う `SAME_UPPER`〉・group conv・pads／strides／dilations の一部組合せは未対応 | #2199（`auto_pad` は受け入れ条件に含まれず別追跡が必要） |
-| `MaxPool` | 未対応 | #2199 |
+| `Conv` | 対応済み（#2076）。1D（`[N,C,L]`）入力対応済み（#2199）。`auto_pad`〈`mnist-12` が使う `SAME_UPPER`〉・group conv・pads／strides／dilations の一部組合せは未対応 | #2199（`auto_pad` は受け入れ条件に含まれず別追跡が必要） |
+| `MaxPool` | 対応済み（#2199） | — |
+| `AveragePool` | 対応済み（#2199） | — |
 | `BatchNormalization` | 未対応 | #2200 |
 | `Flatten` | 未対応 | #2200 |
 | `GlobalAveragePool` | 未対応 | #2200 |
