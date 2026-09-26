@@ -23,7 +23,8 @@
 //! §8 参照）。
 
 use crate::optim::{
-    Adam, AdamConfig, AdamW, AdamWConfig, GradScaler, GradScalerConfig, Sgd, SgdConfig,
+    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, GradScaler, GradScalerConfig,
+    Lamb, LambConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig,
 };
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
@@ -136,12 +137,31 @@ pub enum Loss {
 /// `compile()` の `optimizer` 引数（既存 [`crate::optim`] の
 /// `*Config` 型を保持する variant のみ。ハイパーパラメータ検証は
 /// `compile()` 内で各 `*::new` へ委譲する）。
+///
+/// **`RmsProp`／`Adagrad`／`Lamb`（イシュー #2170・親 #2131）の LR
+/// スケジューラ非対応について**: [`crate::optim::RmsProp`]／
+/// [`crate::optim::Adagrad`]／[`crate::optim::Lamb`] は（`Sgd`／
+/// `AdamW`／`Adam` と異なり）`set_lr` を持たない値型のため、これら 3
+/// variant を compile した状態で [`super::callbacks::Callback::LrSchedule`]
+/// を含む `callbacks` を渡すと [`Sequential::fit_with_callbacks`] は
+/// `InvalidArgument` を返す（`OptimizerState::set_lr` doc 参照）。
+/// `set_lr` の追加は facade 公開面の拡張のためユーザー承認事項であり
+/// 本イシューのスコープ外（`docs/compat-api-scope.md` §1.3 参照）。
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Optimizer {
     Sgd(SgdConfig),
     AdamW(AdamWConfig),
     Adam(AdamConfig),
+    /// RMSprop（イシュー #1743・親 #1610。`docs/compat-api-scope.md`
+    /// §1.3）。LR スケジューラ非対応（本 enum doc 参照）。
+    RmsProp(RmsPropConfig),
+    /// Adagrad（イシュー #1743・親 #1610）。LR スケジューラ非対応
+    /// （本 enum doc 参照）。
+    Adagrad(AdagradConfig),
+    /// LAMB（layer-wise adaptive、イシュー #1744・親 #1610）。LR
+    /// スケジューラ非対応（本 enum doc 参照）。
+    Lamb(LambConfig),
 }
 
 /// `fit()` の構成（Keras `fit(epochs=, batch_size=, shuffle=)` の
@@ -344,27 +364,36 @@ impl FitTarget for i32 {
 }
 
 /// `compile()` で構築した optimizer 本体（[`crate::optim::Sgd`]／
-/// [`crate::optim::AdamW`]／[`crate::optim::Adam`] のいずれか）。
-/// 3 者は `step` のシグネチャが異なる（`Sgd::step` は位置対応スライス
-/// 2 本・`AdamW`／`Adam::step` はタプルスライス 1 本）ため、ここで
+/// [`crate::optim::AdamW`]／[`crate::optim::Adam`]／
+/// [`crate::optim::RmsProp`]／[`crate::optim::Adagrad`]／
+/// [`crate::optim::Lamb`] のいずれか。イシュー #2170 で後 3 者を追加）。
+/// 6 者は `step` のシグネチャが異なる（`Sgd::step` は位置対応スライス
+/// 2 本・他 5 者の `step` はタプルスライス 1 本）ため、ここで
 /// [`Sequential::trainable_parameters`]／`grad_refs` から共通の
 /// `Result<Vec<Tensor<f32>>, AutodiffError>` へ橋渡しする。
 enum OptimizerState {
     Sgd(Sgd),
     AdamW(AdamW),
     Adam(Adam),
+    RmsProp(RmsProp),
+    Adagrad(Adagrad),
+    Lamb(Lamb),
 }
 
 impl std::fmt::Debug for OptimizerState {
-    // `AdamW`／`Adam` は `Debug` を実装していない（内部の `m`／`v`
-    // モーメントバッファを丸ごと出力する `Debug` 導出をあえて設けて
-    // いない設計。`nn::optim::adamw`／`adam` 参照）ため、variant 名の
-    // みを出す非網羅的な `Debug` を手書きする（`derive` 不可）。
+    // `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb` は `Debug` を実装
+    // していない（内部のモーメント・累積バッファを丸ごと出力する
+    // `Debug` 導出をあえて設けていない設計。`nn::optim::{adamw, adam,
+    // rmsprop, adagrad, lamb}` 参照）ため、variant 名のみを出す
+    // 非網羅的な `Debug` を手書きする（`derive` 不可）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OptimizerState::Sgd(sgd) => f.debug_tuple("Sgd").field(sgd).finish(),
             OptimizerState::AdamW(_) => f.debug_tuple("AdamW").finish(),
             OptimizerState::Adam(_) => f.debug_tuple("Adam").finish(),
+            OptimizerState::RmsProp(_) => f.debug_tuple("RmsProp").finish(),
+            OptimizerState::Adagrad(_) => f.debug_tuple("Adagrad").finish(),
+            OptimizerState::Lamb(_) => f.debug_tuple("Lamb").finish(),
         }
     }
 }
@@ -375,15 +404,23 @@ impl OptimizerState {
             Optimizer::Sgd(config) => Ok(OptimizerState::Sgd(Sgd::new(config)?)),
             Optimizer::AdamW(config) => Ok(OptimizerState::AdamW(AdamW::new(config)?)),
             Optimizer::Adam(config) => Ok(OptimizerState::Adam(Adam::new(config)?)),
+            Optimizer::RmsProp(config) => Ok(OptimizerState::RmsProp(RmsProp::new(config)?)),
+            Optimizer::Adagrad(config) => Ok(OptimizerState::Adagrad(Adagrad::new(config)?)),
+            Optimizer::Lamb(config) => Ok(OptimizerState::Lamb(Lamb::new(config)?)),
         }
     }
 
-    /// 現在の学習率（LR scheduler 連携用。イシュー #1763）。
+    /// 現在の学習率（LR scheduler 連携用。イシュー #1763）。`RmsProp`／
+    /// `Adagrad`／`Lamb` は `set_lr` を持たないが `lr()`（`history.lr`
+    /// 記録用）は `config().lr` で常に取得できる。
     fn lr(&self) -> f32 {
         match self {
             OptimizerState::Sgd(sgd) => sgd.config().lr,
             OptimizerState::AdamW(adamw) => adamw.config().lr,
             OptimizerState::Adam(adam) => adam.config().lr,
+            OptimizerState::RmsProp(rmsprop) => rmsprop.config().lr,
+            OptimizerState::Adagrad(adagrad) => adagrad.config().lr,
+            OptimizerState::Lamb(lamb) => lamb.config().lr,
         }
     }
 
@@ -391,16 +428,34 @@ impl OptimizerState {
     /// イシュー #1763。`Sgd`／`AdamW`／`Adam::set_lr` doc の「PyTorch の
     /// `param_group["lr"]` 書き換えと同じ意味論」節を参照——momentum
     /// バッファ／moment 推定値／`step_count` は一切リセットしない）。
+    ///
+    /// **`RmsProp`／`Adagrad`／`Lamb`（イシュー #2170）**: いずれも
+    /// `set_lr` を持たない値型のため常に `InvalidArgument` を返す。
+    /// 呼び出し元 [`Sequential::fit_with_callbacks_named`] は「compiled
+    /// optimizer がこの 3 者かつ `callbacks` に
+    /// [`super::callbacks::Callback::LrSchedule`] を含む」場合を
+    /// バッチループ・モード変更より前の引数検査で既に拒否しているため、
+    /// 本 arm は通常到達しない防御的二重化（fail-closed）である。
     fn set_lr(&mut self, new_lr: f32) -> Result<(), AutodiffError> {
         match self {
             OptimizerState::Sgd(sgd) => sgd.set_lr(new_lr),
             OptimizerState::AdamW(adamw) => adamw.set_lr(new_lr),
             OptimizerState::Adam(adam) => adam.set_lr(new_lr),
+            OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_) => {
+                Err(AutodiffError::InvalidArgument(
+                    "OptimizerState::set_lr: RmsProp／Adagrad／Lamb は set_lr を \
+                     提供しないため LrSchedule callback と併用できない \
+                     （Sequential::fit_with_callbacks_named の引数検査で \
+                     通常は事前に拒否される）"
+                        .to_string(),
+                ))
+            }
         }
     }
 
     /// `params.len() != grads.len()` を各 `step` 実装（`Sgd::step` は
-    /// 検査済み）へ委譲する前に、`AdamW`／`Adam::step` が要求する
+    /// 検査済み）へ委譲する前に、タプルスライスを要求する 5 者
+    /// （`AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb::step`）が要求する
     /// `&[(&Tensor, &Tensor)]` への zip 変換自体が短い側で黙って
     /// 切り詰められてしまう（fail-closed 違反）のを防ぐため、ここで
     /// 明示的に事前検査する。
@@ -429,7 +484,33 @@ impl OptimizerState {
                     params.iter().copied().zip(grads.iter().copied()).collect();
                 adam.step(&pairs)
             }
+            OptimizerState::RmsProp(rmsprop) => {
+                let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
+                    params.iter().copied().zip(grads.iter().copied()).collect();
+                rmsprop.step(&pairs)
+            }
+            OptimizerState::Adagrad(adagrad) => {
+                let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
+                    params.iter().copied().zip(grads.iter().copied()).collect();
+                adagrad.step(&pairs)
+            }
+            OptimizerState::Lamb(lamb) => {
+                let pairs: Vec<(&Tensor<f32>, &Tensor<f32>)> =
+                    params.iter().copied().zip(grads.iter().copied()).collect();
+                lamb.step(&pairs)
+            }
         }
+    }
+
+    /// compiled optimizer が `set_lr` を持たない 3 者（`RmsProp`／
+    /// `Adagrad`／`Lamb`。イシュー #2170）かどうか（`callbacks` に
+    /// [`super::callbacks::Callback::LrSchedule`] が含まれる場合の
+    /// fail-closed 拒否判定に使う。`OptimizerState::set_lr` doc 参照）。
+    fn supports_lr_schedule(&self) -> bool {
+        !matches!(
+            self,
+            OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_)
+        )
     }
 }
 
@@ -644,6 +725,11 @@ impl Sequential {
     ///   [`super::callbacks::LrSchedule::plateau`] の既定）で
     ///   `validation.is_none()` の場合 → `InvalidArgument`
     ///   （train／eval モード変更前に検査するため復元は不要）
+    /// - compile 済み optimizer が `RmsProp`／`Adagrad`／`Lamb`
+    ///   （イシュー #2170。いずれも `set_lr` 非対応）で `callbacks` に
+    ///   [`super::callbacks::Callback::LrSchedule`] を含む場合 →
+    ///   `InvalidArgument`（train／eval モード変更前に検査するため
+    ///   復元は不要。[`Optimizer`] enum doc 参照）
     /// - `LrSchedule::advance`／`optimizer.set_lr` が失敗した場合
     ///   （例: ユーザー定義 `LrScheduler` が非有限値を返した）→
     ///   `restore_best_weights` を（該当すれば）適用したうえで、
@@ -776,6 +862,24 @@ impl Sequential {
                 "Sequential::{method}: callback {offending:?} は \
                  Monitor::ValLoss または Monitor::ValMetric を監視するが \
                  validation が None"
+            )));
+        }
+        // (2.05) LrSchedule × set_lr 非対応 optimizer の fail-closed
+        // 拒否（イシュー #2170）: `RmsProp`／`Adagrad`／`Lamb` は
+        // `set_lr` を提供しないため、`Callback::LrSchedule` と組み
+        // 合わせても黙って LR 更新が効かないまま学習が進んでしまう
+        // （`Optimizer` enum doc・`OptimizerState::set_lr` doc 参照）。
+        // モード変更・パラメータ更新より前に検査する。
+        if !compiled.optimizer.supports_lr_schedule()
+            && callbacks
+                .iter()
+                .any(|cb| matches!(cb, Callback::LrSchedule(_)))
+        {
+            self.compiled = Some(compiled);
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: compile() した optimizer（RmsProp／\
+                 Adagrad／Lamb のいずれか）は set_lr を提供しないため \
+                 Callback::LrSchedule と併用できない"
             )));
         }
         // (2.1) metrics（イシュー #2072）: validation set 上でのみ定義

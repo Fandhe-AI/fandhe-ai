@@ -33,7 +33,7 @@ metrics（accuracy・precision・recall・F1・confusion matrix）は
 
 ```rust
 pub enum Loss { Mse, CrossEntropy }               // #[non_exhaustive]
-pub enum Optimizer { Sgd(SgdConfig), AdamW(AdamWConfig), Adam(AdamConfig) } // #[non_exhaustive]
+pub enum Optimizer { Sgd(SgdConfig), AdamW(AdamWConfig), Adam(AdamConfig), RmsProp(RmsPropConfig), Adagrad(AdagradConfig), Lamb(LambConfig) } // #[non_exhaustive]（RmsProp/Adagrad/Lamb はイシュー #2170 で追加。LR スケジューラ非対応）
 pub struct FitConfig { .. }                        // epochs/batch_size/shuffle/drop_last
 pub struct History { pub loss: Vec<f32> }           // #[non_exhaustive]
 pub trait FitTarget: Element + private::Sealed { .. } // f32/i32 のみ実装
