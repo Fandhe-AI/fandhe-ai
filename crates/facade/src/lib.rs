@@ -4956,3 +4956,70 @@ struct CallbacksLoggersHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct FitWeightingHoldDoctestGuard;
+
+/// イシュー #2180（親 #2131）の facade 公開保留を固定する doctest
+/// 足場。`FitWeightingHoldDoctestGuard` と同型の「正のプローブ 1 ブロック
+/// 方式」を採る: facade の全 `pub mod` を glob import したスコープに、
+/// 本ブロック内でのみ定義したローカル `__FandheGradAccumHoldProbe` を
+/// `fandhe_ai::compat::FitConfig` へ実装し、`accumulate_steps(self, n:
+/// u32) -> __FandheGradAccumHoldMarker` を呼ぶ。facade が `FitConfig`
+/// へ公開ビルダー `accumulate_steps`（どの引数・戻り値型であっても、
+/// 常にトレイトより inherent メソッドが優先される Rust の
+/// メソッド解決規則により）を追加すると、そちらが呼び出しを奪って
+/// `__FandheGradAccumHoldMarker` 型と一致せずコンパイルが失敗する。
+///
+/// 累積ロジック本体（`FitConfig.accumulate_steps` フィールド・
+/// `Sequential::run_fit` の窓処理）は実装済みで、保留対象は公開
+/// ビルダー 1 件のみ（`crates/facade/src/compat/training.rs::
+/// FitConfig` の型ドキュメント「勾配累積のウィンドウ幅」節参照）。
+/// テストからは `#[cfg(test)] pub(crate) fn
+/// FitConfig::with_accumulate_steps_for_test` 経由でのみ変更できる
+/// （命名を意図的に違え、下記ソース走査ガードとの衝突を避けている）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// grad_accumulation_hold_doctest_globs_all_pub_modules`・
+/// `grad_accumulation_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_declare_fit_config_accumulate_steps`）との多層防御
+/// の位置づけ・承認未取得の経緯は
+/// `docs/compat-grad-accumulation-decision.md` §5「承認事項」節を参照。
+///
+/// 承認（`FitConfig::accumulate_steps` 公開ビルダーの新設）を得た日が
+/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// struct __FandheGradAccumHoldMarker;
+///
+/// trait __FandheGradAccumHoldProbe {
+///     fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker;
+/// }
+///
+/// impl __FandheGradAccumHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn accumulate_steps(self, n: u32) -> __FandheGradAccumHoldMarker {
+///         let _ = n;
+///         __FandheGradAccumHoldMarker
+///     }
+/// }
+///
+/// fn __probe(cfg: fandhe_ai::compat::FitConfig) {
+///     let _: __FandheGradAccumHoldMarker =
+///         fandhe_ai::compat::FitConfig::accumulate_steps(cfg, 2);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct GradAccumulationHoldDoctestGuard;

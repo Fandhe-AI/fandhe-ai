@@ -194,3 +194,13 @@ sample_weight・validation_split は #2177 で設計記録済み・facade 公開
   する（`fit_with_callbacks` と `compile_with_amp` は独立に組み合わせ
   可能。組み合わせ専用テストは追加していない——両者とも `run_fit`
   経由で `compiled.amp` を見るだけの直交した分岐のため）。
+
+## 5. 勾配累積（イシュー #2180）
+
+`FitConfig` へ非公開フィールド `accumulate_steps`（既定 `1`）を追加し、
+`run_fit` のバッチループを「`accumulate_steps` 回の backward ごとに
+1 回だけ `optimizer.step`／`apply_parameters` する」窓構造へ拡張した。
+`accumulate_steps == 1`（既定）は本節までの記述（1 マイクロバッチ
+ごとに step する経路）と bit 完全一致する。公開ビルダーは未承認のため
+保留し、AMP（4 節）との併用も未実装（fail-closed に拒否）。設計判断・
+承認事項の詳細は `docs/compat-grad-accumulation-decision.md` を参照。
