@@ -2025,6 +2025,27 @@ impl DeviceParamStore {
             return Err(BackendError::TapeMismatch);
         }
 
+        // 状態種別ガード（イシュー #2175 codex-review 指摘対応）:
+        // `step_rmsprop`／`step_adagrad`／`step_lamb` は成功時にそれぞれ
+        // `rmsprop_state`／`adagrad_state`／`lamb_state` を確定するが、
+        // 本 `step()`（SGD）はそれらの状態を検査せず、同じストアで次に
+        // SGD を実行できてしまっていた（`docs/device-resident-update-
+        // design.md` §「状態種別ガード」が定める「SGD・Adam 系・
+        // RmsProp・Adagrad・LAMB は互いに排他的」契約に違反）。Adam 系の
+        // みは既存契約（`sgd_used` doc コメント「Adam 使用後に `step()`
+        // を呼ぶこと自体は独立の SGD として動作する」）により意図的に
+        // 例外のため、ここでは含めない。RmsProp／Adagrad／LAMB の 3
+        // 状態のみを一律拒否し、stale な `state_sum`／`m`／`v` の
+        // 取り違えを構造的に防ぐ。
+        if self.rmsprop_state.is_some() || self.adagrad_state.is_some() || self.lamb_state.is_some()
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step: this store already has RmsProp/Adagrad/LAMB step \
+                 history; reconstruct the store to switch optimizers"
+                    .to_string(),
+            ));
+        }
+
         // ① 事前検証フェーズ: 全パラメータの勾配が揃っているか・shape が
         // 一致するかを、いずれのバッファも更新する前に検査する
         // （fail-closed。`SequentialVars::trainable_grads` と同じ方針）。
@@ -6338,6 +6359,96 @@ mod tests {
             matches!(err, BackendError::InvalidArgument(_)),
             "SGD 使用歴後の step_adam は InvalidArgument で拒否されなければならない: {err:?}"
         );
+    }
+
+    /// イシュー #2175 PR #2303 codex-review 指摘（P1）対応: `step_rmsprop`
+    /// ／`step_adagrad`／`step_lamb` はそれぞれ成功時に `rmsprop_state`／
+    /// `adagrad_state`／`lamb_state` を確定するが、`step()`（SGD）側に
+    /// それらを検査する対称ガードがないと同じストアで次に SGD を実行
+    /// できてしまい、`docs/device-resident-update-design.md` §「状態
+    /// 種別ガード」の「使用済みストアでは別 optimizer を一律拒否」契約
+    /// に違反する。3 状態それぞれを直接シミュレートし、以後の `step()`
+    /// 呼び出しが `BackendError::InvalidArgument` で拒否されることを
+    /// 確認する（Adam→SGD は既存契約により意図的に許可されているため
+    /// 本テストの対象外。`step_adam_after_sgd_is_rejected_even_with_
+    /// existing_adam_state` と対で参照）。
+    #[test]
+    fn step_after_rmsprop_adagrad_lamb_state_is_rejected() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+
+        // rmsprop_state 使用済みストアへの SGD は拒否される。
+        {
+            let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+            store.rmsprop_state = Some(RmsPropStoreState {
+                alpha: 0.99,
+                eps: 1e-8,
+                weight_decay: 0.0,
+                momentum: 0.0,
+                centered: false,
+            });
+            let leaves = store.register_resident_params(&tape).unwrap();
+            let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+            let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+            let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+            let loss = pred.mse_loss(&target).unwrap();
+            let grads = store.backward(&tape, &loss).unwrap();
+            let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
+            assert!(
+                matches!(err, BackendError::InvalidArgument(_)),
+                "rmsprop_state 使用済みストアへの step()（SGD）は \
+                 InvalidArgument で拒否されなければならない: {err:?}"
+            );
+        }
+
+        // adagrad_state 使用済みストアへの SGD は拒否される。
+        {
+            let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+            store.adagrad_state = Some(AdagradStoreState {
+                lr_decay: 0.0,
+                weight_decay: 0.0,
+                initial_accumulator_value: 0.0,
+                eps: 1e-10,
+                adagrad_step: 1,
+            });
+            let leaves = store.register_resident_params(&tape).unwrap();
+            let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+            let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+            let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+            let loss = pred.mse_loss(&target).unwrap();
+            let grads = store.backward(&tape, &loss).unwrap();
+            let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
+            assert!(
+                matches!(err, BackendError::InvalidArgument(_)),
+                "adagrad_state 使用済みストアへの step()（SGD）は \
+                 InvalidArgument で拒否されなければならない: {err:?}"
+            );
+        }
+
+        // lamb_state 使用済みストアへの SGD は拒否される。
+        {
+            let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+            store.lamb_state = Some(LambStoreState {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-6,
+                weight_decay: 0.0,
+                beta1_pow_t: 0.9,
+                beta2_pow_t: 0.999,
+            });
+            let leaves = store.register_resident_params(&tape).unwrap();
+            let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+            let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+            let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+            let loss = pred.mse_loss(&target).unwrap();
+            let grads = store.backward(&tape, &loss).unwrap();
+            let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
+            assert!(
+                matches!(err, BackendError::InvalidArgument(_)),
+                "lamb_state 使用済みストアへの step()（SGD）は \
+                 InvalidArgument で拒否されなければならない: {err:?}"
+            );
+        }
     }
 
     /// Cursor Bugbot 指摘対応（PR #2002 レビュー是正・イシュー #1959）:
