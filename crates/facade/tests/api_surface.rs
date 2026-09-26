@@ -12509,11 +12509,13 @@ fn __probe() {\n\
 /// `crates/facade/src/compat/training.rs` の `Loss` enum（`compat::
 /// Loss`。イシュー #1761 で新設・現行は `Mse`／`CrossEntropy` の 2
 /// variant のみ）が、承認なしに variant を増やされていないことを固定
-/// する（`CompileLossVariantsHoldDoctestGuard` の正のプローブが型
-/// レベルの解決順にしか反応せず、facade 内の別経路〈例えば `Loss` を
-/// 別ファイルへ複製して同名 enum を再定義する〉を見逃す穴を塞ぐ主防御。
-/// イシュー #2169・`docs/facade-compile-loss-variants-decision.md`
-/// §5）。
+/// する（`CompileLossVariantsHoldDoctestGuard` の正のプローブは
+/// `Bce`／`BceWithLogits`／`Nll`／`KlDiv`／`Huber`／`SmoothL1`／`L1`
+/// の 7 名のみを型解決で検査するため、それ以外の名前の variant
+/// 〈例えば `BinaryCrossEntropy`〉が追加された場合はプローブに一切
+/// 触れず見逃す。本テストは `Loss` enum の variant 集合そのものを
+/// 直接走査することでこの穴を塞ぐ主防御。イシュー #2169・`docs/
+/// facade-compile-loss-variants-decision.md` §5）。
 #[test]
 fn compat_loss_enum_variants_are_exactly_mse_and_cross_entropy() {
     let path = facade_crate_root().join("src/compat/training.rs");

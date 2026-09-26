@@ -87,8 +87,9 @@ KLDiv・Huber・SmoothL1・L1・CTC」と列挙しており、`BCEWithLogits` �
 
 `crates/facade/src/compat/training.rs` の `impl FitTarget for f32`／
 `impl FitTarget for i32` は現在 `Loss::Mse`／`Loss::CrossEntropy` を
-match する非網羅（同一クレート内 exhaustive match。`#[non_exhaustive]`
-は外部クレートにのみ効く）で書かれている。7 variant 追加時は両
+match する網羅的 match（wildcard なし。同一クレート内は
+`#[non_exhaustive]` の効果を受けず exhaustive match が要求されるため）
+で書かれている。7 variant 追加時は両
 `loss_for` の match を拡張する。
 
 - `f32` target 側（`impl FitTarget for f32`）:
