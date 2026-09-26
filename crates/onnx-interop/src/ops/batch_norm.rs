@@ -61,13 +61,20 @@ impl Default for BatchNormAttrs {
 /// 4. `scale`／`B`／`input_mean`／`input_var` の rank が 1 以外なら
 ///    [`OpError::RankMismatch`]、要素数が `C`（`x.shape()[1]`）と一致しな
 ///    ければ [`OpError::LengthMismatch`]（ブロードキャストは行わない）
-/// 5. `input_var` の各チャネル値が非負（`v < 0.0 || v.is_nan()` を拒否
-///    条件とし、負値・`NaN` の双方を同じ条件で弾く）でなければ
-///    [`OpError::InvalidBatchNormAttribute`]。`input_var` は ONNX モデル（外部入力）
-///    由来の値であり、負値をそのまま `sqrt` へ渡すと `rstd` が `NaN` に
-///    汚染され出力全体へ静かに伝播する（OWASP A03。`.claude/rules/
-///    security.md`。`x` 自体の `NaN` 伝播〈`nan_propagates` テスト〉とは
-///    異なり、こちらは属性値の事前検証で fail-closed に拒否する）
+/// 5. `input_var[ch] as f64 + epsilon as f64` が非負（`NaN` を含め、
+///    `sum < 0.0 || sum.is_nan()` を拒否条件とする）でなければ
+///    [`OpError::InvalidBatchNormAttribute`]。ONNX `BatchNormalization`
+///    は `sqrt(var + epsilon)` を計算式とするため、判定は `var` 単体で
+///    はなく `var + epsilon` に対して行う（`var` 単体の非負性で判定する
+///    と、PyTorch エクスポートモデルでよく見られる「running variance が
+///    浮動小数点誤差でわずかに負だが `epsilon` を加算すれば非負になる」
+///    有効なケースまで fail-closed に拒否してしまう。Cursor Bugbot
+///    指摘・イシュー #2200 PR #2312 レビュー）。`input_var` は ONNX
+///    モデル（外部入力）由来の値であり、`var + epsilon` が負のまま
+///    `sqrt` へ渡ると `rstd` が `NaN` に汚染され出力全体へ静かに伝播
+///    する（OWASP A03。`.claude/rules/security.md`。`x` 自体の `NaN`
+///    伝播〈`nan_propagates` テスト〉とは異なり、こちらは属性値の事前
+///    検証で fail-closed に拒否する）
 pub fn batch_normalization(
     x: &Tensor<f32>,
     scale: &Tensor<f32>,
@@ -161,19 +168,32 @@ pub fn batch_normalization(
         "BatchNormalization(input_var)",
     ))?;
 
-    // `input_var` は ONNX モデル（外部入力）由来の分散値。負値を検証せず
+    // `input_var` は ONNX モデル（外部入力）由来の分散値。ONNX
+    // `BatchNormalization` の計算式は `sqrt(var + epsilon)` であり、
+    // `var` 単体ではなく `var + epsilon` の非負性を検証する（`var` 単体
+    // で判定すると、PyTorch エクスポートモデルでよく見られる「running
+    // variance が浮動小数点誤差でわずかに負だが epsilon を加算すれば
+    // 非負になる」有効なケースまで fail-closed に拒否してしまう。
+    // Cursor Bugbot 指摘・イシュー #2200 PR #2312 レビュー）。検証せず
     // `sqrt` へ渡すと `rstd` が `NaN` になり出力全体が静かに汚染される
     // （OWASP A03。`.claude/rules/security.md`）ため、計算ループへ入る前に
-    // 全チャネルを検証する（`v >= 0.0` は `NaN` に対して常に偽になるため
-    // 負値・`NaN` の両方を同じ条件で拒否できる）。
+    // 全チャネルを検証する（`sum >= 0.0` は `NaN` に対して常に偽になる
+    // ため、`var` が `NaN` の場合も `sum` の `NaN` 判定で同じ条件で拒否
+    // できる）。`epsilon` は関数冒頭で既に有限・非負を検証済みのため、
+    // ここでの非有限化要因は `var` 側の `NaN`／`inf` のみである。
+    let eps_f64 = attrs.epsilon as f64;
     for (ch, &v) in var_slice.iter().enumerate() {
-        // `v < 0.0 || v.is_nan()` は `!(v >= 0.0)` と同値だが、`clippy::
-        // neg_cmp_op_on_partial_ord` を避けつつ「負値・NaN のどちらも拒否
-        // する」意図を明示する（`PartialOrd` の否定比較は非全順序型で
-        // 直感に反する場合があるため、`f32` でも明示形を使う）。
-        if v < 0.0 || v.is_nan() {
+        let sum = v as f64 + eps_f64;
+        // `sum < 0.0 || sum.is_nan()` は `!(sum >= 0.0)` と同値だが、
+        // `clippy::neg_cmp_op_on_partial_ord` を避けつつ「負値・NaN の
+        // どちらも拒否する」意図を明示する（`PartialOrd` の否定比較は
+        // 非全順序型で直感に反する場合があるため、明示形を使う）。
+        if sum < 0.0 || sum.is_nan() {
             return Err(OpError::InvalidBatchNormAttribute {
-                reason: format!("input_var[{ch}] は非負でなければならない（実際 {v}）"),
+                reason: format!(
+                    "input_var[{ch}] + epsilon は非負でなければならない（実際 var={v}, epsilon={}）",
+                    attrs.epsilon
+                ),
             });
         }
     }
@@ -389,6 +409,38 @@ mod tests {
         let var = Tensor::<f32>::new(vec![1.0, -0.5], &[2]).unwrap();
         let err = batch_normalization(&xt, &scale, &bias, &mean, &var, &BatchNormAttrs::default())
             .unwrap_err();
+        assert!(matches!(err, OpError::InvalidBatchNormAttribute { .. }));
+    }
+
+    #[test]
+    fn variance_rescued_by_epsilon_accepted() {
+        // `var` 単体はわずかに負だが `var + epsilon` は非負になる、PyTorch
+        // エクスポートモデルで一般的な有効ケースを受理することを確認する
+        // （Cursor Bugbot 指摘・イシュー #2200 PR #2312 レビュー。`var`
+        // 単体の非負性で判定すると誤って拒否してしまう回帰の防止）。
+        let xt = Tensor::<f32>::zeros(&[1, 2, 2, 2]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let bias = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let mean = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        // epsilon = 1e-5 に対し var = -1e-8 は `var + epsilon > 0` となる。
+        let var = Tensor::<f32>::new(vec![1.0, -1e-8], &[2]).unwrap();
+        let out = batch_normalization(&xt, &scale, &bias, &mean, &var, &BatchNormAttrs::default())
+            .unwrap();
+        assert!(out.as_slice().unwrap().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn variance_still_negative_after_epsilon_rejected() {
+        // `var + epsilon` が依然として負の場合は引き続き fail-closed で
+        // 拒否することを確認する（epsilon 加算で無条件に受理してしまう
+        // 退行の防止）。
+        let xt = Tensor::<f32>::zeros(&[1, 2, 2, 2]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0], &[2]).unwrap();
+        let bias = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let mean = Tensor::<f32>::new(vec![0.0, 0.0], &[2]).unwrap();
+        let var = Tensor::<f32>::new(vec![1.0, -0.5], &[2]).unwrap();
+        let attrs = BatchNormAttrs { epsilon: 1e-5 };
+        let err = batch_normalization(&xt, &scale, &bias, &mean, &var, &attrs).unwrap_err();
         assert!(matches!(err, OpError::InvalidBatchNormAttribute { .. }));
     }
 
