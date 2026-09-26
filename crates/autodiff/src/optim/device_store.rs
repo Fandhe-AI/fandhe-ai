@@ -119,14 +119,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, AdamStepConfig, AdamStepKind, BackendOps, DispatchFailureCell, SgdStepConfig,
-    Tensor,
+    Activation, AdagradStepConfig, AdamStepConfig, AdamStepKind, BackendOps, DispatchFailureCell,
+    LambStepConfig, RmsPropStepConfig, SgdStepConfig, Tensor,
 };
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
 use crate::eval::reduce_bias_grad_rows;
-use crate::nn::optim::{AdamConfig, AdamWConfig};
+use crate::nn::optim::{AdagradConfig, AdamConfig, AdamWConfig, LambConfig, RmsPropConfig};
 use crate::optim::sgd::SgdConfig;
 use crate::tape::{
     NodeId, Op, ResidentBiasTarget, ResidentFillOutcome, ResidentResolver, Tape, TapeId,
@@ -160,6 +160,44 @@ struct AdamHyperparams {
 #[derive(Debug, Clone, Copy)]
 struct AdamStoreState {
     kind: AdamStepKind,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    beta1_pow_t: f64,
+    beta2_pow_t: f64,
+}
+
+/// [`DeviceParamStore::step_rmsprop`] が確定する固定ハイパーパラメータ
+/// （イシュー #2175。`AdamStoreState` と同じ「`lr` のみ可変」設計）。
+/// `RmsPropStepConfig` と異なりステップ依存スカラーは持たない。
+#[derive(Debug, Clone, Copy)]
+struct RmsPropStoreState {
+    alpha: f32,
+    eps: f32,
+    weight_decay: f32,
+    momentum: f32,
+    centered: bool,
+}
+
+/// [`DeviceParamStore::step_adagrad`] が確定する固定ハイパーパラメータ・
+/// 専用 step カウンタ（イシュー #2175）。`DeviceParamStore::step_count`
+/// は SGD／Adam 系と共有されるため、`clr = lr / (1 + (step-1)*lr_decay)`
+/// の `step` は独立にカウントする（`nn::optim::adagrad::Adagrad::
+/// step_count` と同じ役割）。
+#[derive(Debug, Clone, Copy)]
+struct AdagradStoreState {
+    lr_decay: f32,
+    weight_decay: f32,
+    initial_accumulator_value: f32,
+    eps: f32,
+    adagrad_step: u64,
+}
+
+/// [`DeviceParamStore::step_lamb`] が確定する固定ハイパーパラメータ・
+/// `beta^t` 逐次積（イシュー #2175。`AdamStoreState` と同じ設計）。
+#[derive(Debug, Clone, Copy)]
+struct LambStoreState {
     beta1: f32,
     beta2: f32,
     eps: f32,
@@ -386,6 +424,28 @@ pub struct DeviceParamStore {
     /// `step_adamw` を混在させることは事前検証フェーズで拒否する
     /// （§「状態種別ガード」）。
     adam_state: Option<AdamStoreState>,
+    /// RmsProp（イシュー #2175）の二乗移動平均。`params` と同形の連結
+    /// バッファ。初回 `step_rmsprop` で遅延確保する。
+    rmsprop_square_avg: Option<DeviceBuffer<f32>>,
+    /// RmsProp の centered 用勾配移動平均（`config.centered` が `true`
+    /// の場合のみ遅延確保する）。
+    rmsprop_grad_avg: Option<DeviceBuffer<f32>>,
+    /// RmsProp の momentum buffer（`config.momentum > 0.0` の場合のみ
+    /// 遅延確保する）。
+    rmsprop_momentum: Option<DeviceBuffer<f32>>,
+    rmsprop_state: Option<RmsPropStoreState>,
+    /// Adagrad（イシュー #2175）の累積二乗和。`params` と同形の連結
+    /// バッファ。ホスト `Adagrad` と同じく `initial_accumulator_value`
+    /// で初期化する（`alloc_zeroed` は使わない）。
+    adagrad_state_sum: Option<DeviceBuffer<f32>>,
+    adagrad_state: Option<AdagradStoreState>,
+    /// LAMB（イシュー #2175）の 1 次モーメント（`m`）。`adam_m`／
+    /// `adam_v` とは独立に持つ（Adam 系と LAMB の混在は状態種別ガードで
+    /// 拒否するが、意味の分離を優先する）。
+    lamb_m: Option<DeviceBuffer<f32>>,
+    /// LAMB の 2 次モーメント（`v`）。`lamb_m` と対で確保する。
+    lamb_v: Option<DeviceBuffer<f32>>,
+    lamb_state: Option<LambStoreState>,
     step_count: u64,
     /// `step()`（SGD）が過去に少なくとも 1 回成功したかどうか
     /// （Cursor Bugbot 指摘対応・PR #2002 レビュー是正。イシュー
@@ -1182,6 +1242,15 @@ impl DeviceParamStore {
             adam_m: None,
             adam_v: None,
             adam_state: None,
+            rmsprop_square_avg: None,
+            rmsprop_grad_avg: None,
+            rmsprop_momentum: None,
+            rmsprop_state: None,
+            adagrad_state_sum: None,
+            adagrad_state: None,
+            lamb_m: None,
+            lamb_v: None,
+            lamb_state: None,
             step_count: 0,
             sgd_used: false,
             poisoned: AtomicBool::new(false),
@@ -1956,6 +2025,27 @@ impl DeviceParamStore {
             return Err(BackendError::TapeMismatch);
         }
 
+        // 状態種別ガード（イシュー #2175 codex-review 指摘対応）:
+        // `step_rmsprop`／`step_adagrad`／`step_lamb` は成功時にそれぞれ
+        // `rmsprop_state`／`adagrad_state`／`lamb_state` を確定するが、
+        // 本 `step()`（SGD）はそれらの状態を検査せず、同じストアで次に
+        // SGD を実行できてしまっていた（`docs/device-resident-update-
+        // design.md` §「状態種別ガード」が定める「SGD・Adam 系・
+        // RmsProp・Adagrad・LAMB は互いに排他的」契約に違反）。Adam 系の
+        // みは既存契約（`sgd_used` doc コメント「Adam 使用後に `step()`
+        // を呼ぶこと自体は独立の SGD として動作する」）により意図的に
+        // 例外のため、ここでは含めない。RmsProp／Adagrad／LAMB の 3
+        // 状態のみを一律拒否し、stale な `state_sum`／`m`／`v` の
+        // 取り違えを構造的に防ぐ。
+        if self.rmsprop_state.is_some() || self.adagrad_state.is_some() || self.lamb_state.is_some()
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step: this store already has RmsProp/Adagrad/LAMB step \
+                 history; reconstruct the store to switch optimizers"
+                    .to_string(),
+            ));
+        }
+
         // ① 事前検証フェーズ: 全パラメータの勾配が揃っているか・shape が
         // 一致するかを、いずれのバッファも更新する前に検査する
         // （fail-closed。`SequentialVars::trainable_grads` と同じ方針）。
@@ -2640,6 +2730,19 @@ impl DeviceParamStore {
                     .to_string(),
             ));
         }
+        // イシュー #2175 で追加した RmsProp／Adagrad／LAMB のいずれかが
+        // 既に使われているストアに対する Adam 系呼び出しも、SGD 履歴と
+        // 同じ理由（stale な状態の再利用防止）で一律拒否する（`step_
+        // rmsprop`／`step_adagrad`／`step_lamb` 側にも対称のガードを
+        // 設ける。§「状態種別ガード」）。
+        if self.rmsprop_state.is_some() || self.adagrad_state.is_some() || self.lamb_state.is_some()
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adam_impl: this store already has RmsProp/Adagrad/LAMB \
+                 step history; reconstruct the store to switch optimizers"
+                    .to_string(),
+            ));
+        }
         if let Some(state) = self.adam_state
             && (state.kind != kind
                 || state.beta1 != beta1
@@ -2870,6 +2973,788 @@ impl DeviceParamStore {
         // 状態確定: 更新フェーズが成功した後にのみ `beta_pow_t`
         // （更新済み `state`）・`step_count` を反映する。
         self.adam_state = Some(state);
+        self.step_count += 1;
+        Ok(())
+    }
+
+    /// デバイス常駐パラメータへ RmsProp の 1 step を適用する（イシュー
+    /// #2175・`docs/device-resident-update-design.md`）。`step_adam`／
+    /// `step_adamw` と同じ「①事前検証フェーズ→②更新フェーズ」構造を
+    /// 踏襲する。
+    ///
+    /// # 状態種別ガード
+    /// 初回呼び出しで `alpha`／`eps`／`weight_decay`／`momentum`／
+    /// `centered` を確定し、以後の呼び出しでの変更を拒否する（`lr` の
+    /// みが可変）。このストアが一度でも `step()`（SGD）・`step_adam`／
+    /// `step_adamw`・`step_adagrad`／`step_lamb` で使われたことがある
+    /// 場合は、以後の RmsProp 呼び出しを常に拒否する（`step_adam_impl`
+    /// の同種ガードと対称。stale な `square_avg`／`grad_avg`／
+    /// `momentum_buf` の再利用を防ぐ）。
+    pub fn step_rmsprop(
+        &mut self,
+        tape: &Tape,
+        grads: &Gradients,
+        config: &RmsPropConfig,
+    ) -> Result<(), BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+
+        // ホストの `RmsProp::new` と同一の検証をそのまま再利用する
+        // （手写しによる検証条件のドリフトを避けるため。イシュー #2175
+        // 実装計画 §2.3）。
+        crate::nn::optim::RmsProp::new(*config).map_err(|e| {
+            BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_rmsprop: invalid config: {e}"
+            ))
+        })?;
+        let RmsPropConfig {
+            lr,
+            alpha,
+            eps,
+            weight_decay,
+            momentum,
+            centered,
+        } = *config;
+
+        let Some(pending) = self.pending.as_ref() else {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_rmsprop: no pending forward registration (call \
+                 register_resident_params first)"
+                    .to_string(),
+            ));
+        };
+        if pending.tape_id != tape.id {
+            return Err(BackendError::TapeMismatch);
+        }
+        if pending.epoch != tape.epoch() {
+            return Err(BackendError::TapeMismatch);
+        }
+
+        if self.sgd_used {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_rmsprop: this store already has SGD step() history; \
+                 reconstruct the store to switch to RmsProp"
+                    .to_string(),
+            ));
+        }
+        if self.adam_state.is_some() || self.adagrad_state.is_some() || self.lamb_state.is_some() {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_rmsprop: this store already has Adam/AdamW/Adagrad/LAMB \
+                 step history; reconstruct the store to switch optimizers"
+                    .to_string(),
+            ));
+        }
+        if let Some(state) = self.rmsprop_state
+            && (state.alpha != alpha
+                || state.eps != eps
+                || state.weight_decay != weight_decay
+                || state.momentum != momentum
+                || state.centered != centered)
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_rmsprop: alpha/eps/weight_decay/momentum/centered \
+                 changed mid-training; reconstruct the store to change these settings (lr may \
+                 still be changed freely)"
+                    .to_string(),
+            ));
+        }
+
+        let vars: Vec<Var<'_>> = pending
+            .node_ids
+            .iter()
+            .map(|&id| Var::from_raw(tape, id))
+            .collect();
+        let resident_filled = self.resident_filled_slots(pending, grads);
+        let any_resident = resident_filled.iter().any(|&f| f);
+
+        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
+        for (i, var) in vars.iter().enumerate() {
+            if resident_filled[i] {
+                continue;
+            }
+            let grad = grads.get(var).map_err(|_| BackendError::TapeMismatch)?;
+            let grad = grad.ok_or_else(|| {
+                BackendError::MissingGradient(format!(
+                    "DeviceParamStore::step_rmsprop: parameter {i} has no gradient (loss \
+                     unreachable)"
+                ))
+            })?;
+            if grad.shape() != self.layout[i].shape.as_slice() {
+                return Err(BackendError::InvalidArgument(format!(
+                    "DeviceParamStore::step_rmsprop: gradient shape {:?} does not match \
+                     parameter {i} shape {:?}",
+                    grad.shape(),
+                    self.layout[i].shape
+                )));
+            }
+            if any_resident {
+                host_grads_for_staging.push((i, grad.clone()));
+            } else {
+                let contiguous = grad.contiguous();
+                flat_grad.extend_from_slice(contiguous.as_slice().unwrap_or(&[]));
+            }
+        }
+
+        let ops = tape.ops();
+        let mem = ops.memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::step_rmsprop: backend does not implement MemoryOps".to_string(),
+            )
+        })?;
+
+        if self.rmsprop_square_avg.is_none() {
+            self.rmsprop_square_avg = Some(mem.alloc_zeroed(&[self.total_numel])?);
+        }
+        if centered && self.rmsprop_grad_avg.is_none() {
+            self.rmsprop_grad_avg = Some(mem.alloc_zeroed(&[self.total_numel])?);
+        }
+        if momentum > 0.0 && self.rmsprop_momentum.is_none() {
+            self.rmsprop_momentum = Some(mem.alloc_zeroed(&[self.total_numel])?);
+        }
+
+        let state = self.rmsprop_state.unwrap_or(RmsPropStoreState {
+            alpha,
+            eps,
+            weight_decay,
+            momentum,
+            centered,
+        });
+        let step_config = RmsPropStepConfig {
+            lr,
+            alpha,
+            eps,
+            weight_decay,
+            momentum,
+            centered,
+        };
+
+        let pending_backup = self.pending.take();
+
+        macro_rules! rmsprop_bufs {
+            () => {{
+                let square_avg = self.rmsprop_square_avg.as_mut().ok_or_else(|| {
+                    BackendError::InvalidArgument(
+                        "DeviceParamStore::step_rmsprop: rmsprop_square_avg was None despite \
+                         being allocated earlier in this call（契約違反）"
+                            .to_string(),
+                    )
+                })?;
+                let grad_avg_opt = if centered {
+                    Some(self.rmsprop_grad_avg.as_mut().ok_or_else(|| {
+                        BackendError::InvalidArgument(
+                            "DeviceParamStore::step_rmsprop: rmsprop_grad_avg was None despite \
+                             being allocated earlier in this call（契約違反）"
+                                .to_string(),
+                        )
+                    })?)
+                } else {
+                    None
+                };
+                let momentum_opt = if momentum > 0.0 {
+                    Some(self.rmsprop_momentum.as_mut().ok_or_else(|| {
+                        BackendError::InvalidArgument(
+                            "DeviceParamStore::step_rmsprop: rmsprop_momentum was None despite \
+                             being allocated earlier in this call（契約違反）"
+                                .to_string(),
+                        )
+                    })?)
+                } else {
+                    None
+                };
+                (
+                    square_avg,
+                    fandhe_ai_tensor_core::RmsPropOptionalBuffers {
+                        grad_avg: grad_avg_opt,
+                        momentum_buf: momentum_opt,
+                    },
+                )
+            }};
+        }
+
+        if !any_resident {
+            let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
+                .map_err(BackendError::ShapeMismatch)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let grad_buf = match mem.upload(&grad_tensor) {
+                Ok(buf) => buf,
+                Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let (square_avg, optional) = rmsprop_bufs!();
+            if let Err(e) = ops.rmsprop_step_device_tracked(
+                &mut self.params,
+                &grad_buf,
+                square_avg,
+                optional,
+                &step_config,
+                &self.failure_token,
+            ) {
+                if matches!(
+                    e,
+                    BackendError::DeviceContextCaptureInProgress { .. }
+                        | BackendError::Unsupported(_)
+                ) {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        } else {
+            let mut staging_ref = self.grad_staging.borrow_mut();
+            let staging = staging_ref.as_mut().ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "DeviceParamStore::step_rmsprop: any_resident == true だが grad_staging が \
+                     None だった（契約違反）"
+                        .to_string(),
+                )
+            })?;
+            for (i, grad) in &host_grads_for_staging {
+                let offset = self.layout[*i].offset;
+                if let Err(e) = mem.upload_into(grad, &mut staging.buf, offset) {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            }
+            let (square_avg, optional) = rmsprop_bufs!();
+            if let Err(e) = ops.rmsprop_step_device_tracked(
+                &mut self.params,
+                &staging.buf,
+                square_avg,
+                optional,
+                &step_config,
+                &self.failure_token,
+            ) {
+                if matches!(
+                    e,
+                    BackendError::DeviceContextCaptureInProgress { .. }
+                        | BackendError::Unsupported(_)
+                ) {
+                    drop(staging_ref);
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+
+        self.rmsprop_state = Some(state);
+        self.step_count += 1;
+        Ok(())
+    }
+
+    /// デバイス常駐パラメータへ Adagrad の 1 step を適用する（イシュー
+    /// #2175）。`step_rmsprop` と同じ構造を踏襲する。
+    ///
+    /// # 状態種別ガード
+    /// 初回呼び出しで `lr_decay`／`weight_decay`／
+    /// `initial_accumulator_value`／`eps` を確定し、以後の変更を拒否
+    /// する（`lr` のみ可変）。SGD／Adam 系／RmsProp／LAMB のいずれかで
+    /// 使用済みのストアに対する呼び出しは常に拒否する。
+    pub fn step_adagrad(
+        &mut self,
+        tape: &Tape,
+        grads: &Gradients,
+        config: &AdagradConfig,
+    ) -> Result<(), BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+
+        crate::nn::optim::Adagrad::new(*config).map_err(|e| {
+            BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_adagrad: invalid config: {e}"
+            ))
+        })?;
+        let AdagradConfig {
+            lr,
+            lr_decay,
+            weight_decay,
+            initial_accumulator_value,
+            eps,
+        } = *config;
+
+        let Some(pending) = self.pending.as_ref() else {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adagrad: no pending forward registration (call \
+                 register_resident_params first)"
+                    .to_string(),
+            ));
+        };
+        if pending.tape_id != tape.id {
+            return Err(BackendError::TapeMismatch);
+        }
+        if pending.epoch != tape.epoch() {
+            return Err(BackendError::TapeMismatch);
+        }
+
+        if self.sgd_used {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adagrad: this store already has SGD step() history; \
+                 reconstruct the store to switch to Adagrad"
+                    .to_string(),
+            ));
+        }
+        if self.adam_state.is_some() || self.rmsprop_state.is_some() || self.lamb_state.is_some() {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adagrad: this store already has Adam/AdamW/RmsProp/LAMB \
+                 step history; reconstruct the store to switch optimizers"
+                    .to_string(),
+            ));
+        }
+        if let Some(state) = self.adagrad_state
+            && (state.lr_decay != lr_decay
+                || state.weight_decay != weight_decay
+                || state.initial_accumulator_value != initial_accumulator_value
+                || state.eps != eps)
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adagrad: lr_decay/weight_decay/\
+                 initial_accumulator_value/eps changed mid-training; reconstruct the store to \
+                 change these settings (lr may still be changed freely)"
+                    .to_string(),
+            ));
+        }
+
+        let vars: Vec<Var<'_>> = pending
+            .node_ids
+            .iter()
+            .map(|&id| Var::from_raw(tape, id))
+            .collect();
+        let resident_filled = self.resident_filled_slots(pending, grads);
+        let any_resident = resident_filled.iter().any(|&f| f);
+
+        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
+        for (i, var) in vars.iter().enumerate() {
+            if resident_filled[i] {
+                continue;
+            }
+            let grad = grads.get(var).map_err(|_| BackendError::TapeMismatch)?;
+            let grad = grad.ok_or_else(|| {
+                BackendError::MissingGradient(format!(
+                    "DeviceParamStore::step_adagrad: parameter {i} has no gradient (loss \
+                     unreachable)"
+                ))
+            })?;
+            if grad.shape() != self.layout[i].shape.as_slice() {
+                return Err(BackendError::InvalidArgument(format!(
+                    "DeviceParamStore::step_adagrad: gradient shape {:?} does not match \
+                     parameter {i} shape {:?}",
+                    grad.shape(),
+                    self.layout[i].shape
+                )));
+            }
+            if any_resident {
+                host_grads_for_staging.push((i, grad.clone()));
+            } else {
+                let contiguous = grad.contiguous();
+                flat_grad.extend_from_slice(contiguous.as_slice().unwrap_or(&[]));
+            }
+        }
+
+        let ops = tape.ops();
+        let mem = ops.memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::step_adagrad: backend does not implement MemoryOps".to_string(),
+            )
+        })?;
+
+        if self.adagrad_state_sum.is_none() {
+            let init = vec![initial_accumulator_value; self.total_numel];
+            let init_tensor =
+                Tensor::new(init, &[self.total_numel]).map_err(BackendError::ShapeMismatch)?;
+            self.adagrad_state_sum = Some(mem.upload(&init_tensor)?);
+        }
+
+        let mut state = self.adagrad_state.unwrap_or(AdagradStoreState {
+            lr_decay,
+            weight_decay,
+            initial_accumulator_value,
+            eps,
+            adagrad_step: 0,
+        });
+        state.adagrad_step += 1;
+        let step = state.adagrad_step;
+        let clr = (lr as f64 / (1.0 + (step - 1) as f64 * lr_decay as f64)) as f32;
+        let step_config = AdagradStepConfig {
+            clr,
+            eps,
+            weight_decay,
+        };
+
+        let pending_backup = self.pending.take();
+
+        if !any_resident {
+            let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
+                .map_err(BackendError::ShapeMismatch)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let grad_buf = match mem.upload(&grad_tensor) {
+                Ok(buf) => buf,
+                Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let Some(state_sum) = self.adagrad_state_sum.as_mut() else {
+                self.pending = pending_backup;
+                return Err(BackendError::InvalidArgument(
+                    "DeviceParamStore::step_adagrad: adagrad_state_sum was None despite being \
+                     allocated earlier in this call（契約違反）"
+                        .to_string(),
+                ));
+            };
+            if let Err(e) = ops.adagrad_step_device_tracked(
+                &mut self.params,
+                &grad_buf,
+                state_sum,
+                &step_config,
+                &self.failure_token,
+            ) {
+                if matches!(
+                    e,
+                    BackendError::DeviceContextCaptureInProgress { .. }
+                        | BackendError::Unsupported(_)
+                ) {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        } else {
+            let mut staging_ref = self.grad_staging.borrow_mut();
+            let staging = staging_ref.as_mut().ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "DeviceParamStore::step_adagrad: any_resident == true だが grad_staging が \
+                     None だった（契約違反）"
+                        .to_string(),
+                )
+            })?;
+            for (i, grad) in &host_grads_for_staging {
+                let offset = self.layout[*i].offset;
+                if let Err(e) = mem.upload_into(grad, &mut staging.buf, offset) {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            }
+            let Some(state_sum) = self.adagrad_state_sum.as_mut() else {
+                drop(staging_ref);
+                self.pending = pending_backup;
+                return Err(BackendError::InvalidArgument(
+                    "DeviceParamStore::step_adagrad: adagrad_state_sum was None despite being \
+                     allocated earlier in this call（契約違反）"
+                        .to_string(),
+                ));
+            };
+            if let Err(e) = ops.adagrad_step_device_tracked(
+                &mut self.params,
+                &staging.buf,
+                state_sum,
+                &step_config,
+                &self.failure_token,
+            ) {
+                if matches!(
+                    e,
+                    BackendError::DeviceContextCaptureInProgress { .. }
+                        | BackendError::Unsupported(_)
+                ) {
+                    drop(staging_ref);
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+
+        self.adagrad_state = Some(state);
+        self.step_count += 1;
+        Ok(())
+    }
+
+    /// デバイス常駐パラメータへ LAMB の 1 step を適用する（イシュー
+    /// #2175）。`step_adam_impl` と同じ構造を踏襲するが、layer-wise
+    /// trust ratio のため `segment_numels`（`self.layout` から導出）を
+    /// カーネルへ渡す点が異なる。
+    ///
+    /// # 非有限検出時の扱い
+    /// `ops.lamb_step_device_tracked` が返す [`BackendError::
+    /// InvalidArgument`]（非有限な `m`／`v`／norm／trust ratio の検出。
+    /// `LambStepConfig` doc 参照）は `param`／`m`／`v` を一切変更しない
+    /// no-op 失敗であり、`DeviceContextCaptureInProgress`／
+    /// `Unsupported` と同列に扱う（`pending` を復元し `poisoned` へ
+    /// 遷移させない。`beta_pow_t`／`step_count` もコミットしない。
+    /// `nn::optim::lamb` モジュール doc「非有限 norm の扱い
+    /// （fail-closed）」節と同じ理由: poison すると `sync_to_host` まで
+    /// 塞いでしまい、再試行可能性を失う）。
+    ///
+    /// # 状態種別ガード
+    /// 初回呼び出しで `beta1`／`beta2`／`eps`／`weight_decay` を確定し、
+    /// 以後の変更を拒否する（`lr` のみ可変）。SGD／Adam 系／RmsProp／
+    /// Adagrad のいずれかで使用済みのストアに対する呼び出しは常に
+    /// 拒否する。
+    pub fn step_lamb(
+        &mut self,
+        tape: &Tape,
+        grads: &Gradients,
+        config: &LambConfig,
+    ) -> Result<(), BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+
+        crate::nn::optim::Lamb::new(*config).map_err(|e| {
+            BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_lamb: invalid config: {e}"
+            ))
+        })?;
+        let LambConfig {
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } = *config;
+
+        let Some(pending) = self.pending.as_ref() else {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_lamb: no pending forward registration (call \
+                 register_resident_params first)"
+                    .to_string(),
+            ));
+        };
+        if pending.tape_id != tape.id {
+            return Err(BackendError::TapeMismatch);
+        }
+        if pending.epoch != tape.epoch() {
+            return Err(BackendError::TapeMismatch);
+        }
+
+        if self.sgd_used {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_lamb: this store already has SGD step() history; \
+                 reconstruct the store to switch to LAMB"
+                    .to_string(),
+            ));
+        }
+        if self.adam_state.is_some() || self.rmsprop_state.is_some() || self.adagrad_state.is_some()
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_lamb: this store already has Adam/AdamW/RmsProp/Adagrad \
+                 step history; reconstruct the store to switch optimizers"
+                    .to_string(),
+            ));
+        }
+        if let Some(state) = self.lamb_state
+            && (state.beta1 != beta1
+                || state.beta2 != beta2
+                || state.eps != eps
+                || state.weight_decay != weight_decay)
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_lamb: beta1/beta2/eps/weight_decay changed \
+                 mid-training; reconstruct the store to change these settings (lr may still be \
+                 changed freely)"
+                    .to_string(),
+            ));
+        }
+
+        let vars: Vec<Var<'_>> = pending
+            .node_ids
+            .iter()
+            .map(|&id| Var::from_raw(tape, id))
+            .collect();
+        let resident_filled = self.resident_filled_slots(pending, grads);
+        let any_resident = resident_filled.iter().any(|&f| f);
+
+        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
+        for (i, var) in vars.iter().enumerate() {
+            if resident_filled[i] {
+                continue;
+            }
+            let grad = grads.get(var).map_err(|_| BackendError::TapeMismatch)?;
+            let grad = grad.ok_or_else(|| {
+                BackendError::MissingGradient(format!(
+                    "DeviceParamStore::step_lamb: parameter {i} has no gradient (loss \
+                     unreachable)"
+                ))
+            })?;
+            if grad.shape() != self.layout[i].shape.as_slice() {
+                return Err(BackendError::InvalidArgument(format!(
+                    "DeviceParamStore::step_lamb: gradient shape {:?} does not match parameter \
+                     {i} shape {:?}",
+                    grad.shape(),
+                    self.layout[i].shape
+                )));
+            }
+            if any_resident {
+                host_grads_for_staging.push((i, grad.clone()));
+            } else {
+                let contiguous = grad.contiguous();
+                flat_grad.extend_from_slice(contiguous.as_slice().unwrap_or(&[]));
+            }
+        }
+
+        let ops = tape.ops();
+        let mem = ops.memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::step_lamb: backend does not implement MemoryOps".to_string(),
+            )
+        })?;
+
+        if self.lamb_m.is_none() {
+            self.lamb_m = Some(mem.alloc_zeroed(&[self.total_numel])?);
+        }
+        if self.lamb_v.is_none() {
+            self.lamb_v = Some(mem.alloc_zeroed(&[self.total_numel])?);
+        }
+
+        let mut state = self.lamb_state.unwrap_or(LambStoreState {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            beta1_pow_t: 1.0,
+            beta2_pow_t: 1.0,
+        });
+        state.beta1_pow_t *= beta1 as f64;
+        state.beta2_pow_t *= beta2 as f64;
+        let bias_correction1 = 1.0 - state.beta1_pow_t;
+        let bias_correction2 = 1.0 - state.beta2_pow_t;
+        let step_config = LambStepConfig {
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step_size: (lr as f64 / bias_correction1) as f32,
+            bias_correction2_sqrt: bias_correction2.sqrt() as f32,
+        };
+        let segment_numels: Vec<usize> = self.layout.iter().map(|l| l.numel).collect();
+
+        let pending_backup = self.pending.take();
+
+        // LAMB は `Unsupported`／`DeviceContextCaptureInProgress` に加え
+        // `InvalidArgument`（非有限検出。上記 doc コメント参照）も
+        // no-op 失敗として扱う。
+        let is_nonfatal = |e: &BackendError| {
+            matches!(e, BackendError::DeviceContextCaptureInProgress { .. })
+                || matches!(e, BackendError::Unsupported(_))
+                || matches!(e, BackendError::InvalidArgument(_))
+        };
+
+        if !any_resident {
+            let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
+                .map_err(BackendError::ShapeMismatch)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let grad_buf = match mem.upload(&grad_tensor) {
+                Ok(buf) => buf,
+                Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let (Some(m), Some(v)) = (self.lamb_m.as_mut(), self.lamb_v.as_mut()) else {
+                self.pending = pending_backup;
+                return Err(BackendError::InvalidArgument(
+                    "DeviceParamStore::step_lamb: lamb_m/lamb_v was None despite being \
+                     allocated earlier in this call（契約違反）"
+                        .to_string(),
+                ));
+            };
+            if let Err(e) = ops.lamb_step_device_tracked(
+                &mut self.params,
+                &grad_buf,
+                fandhe_ai_tensor_core::LambMoments { m, v },
+                &segment_numels,
+                &step_config,
+                &self.failure_token,
+            ) {
+                if is_nonfatal(&e) {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        } else {
+            let mut staging_ref = self.grad_staging.borrow_mut();
+            let staging = staging_ref.as_mut().ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "DeviceParamStore::step_lamb: any_resident == true だが grad_staging が \
+                     None だった（契約違反）"
+                        .to_string(),
+                )
+            })?;
+            for (i, grad) in &host_grads_for_staging {
+                let offset = self.layout[*i].offset;
+                if let Err(e) = mem.upload_into(grad, &mut staging.buf, offset) {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            }
+            let (Some(m), Some(v)) = (self.lamb_m.as_mut(), self.lamb_v.as_mut()) else {
+                drop(staging_ref);
+                self.pending = pending_backup;
+                return Err(BackendError::InvalidArgument(
+                    "DeviceParamStore::step_lamb: lamb_m/lamb_v was None despite being \
+                     allocated earlier in this call（契約違反）"
+                        .to_string(),
+                ));
+            };
+            if let Err(e) = ops.lamb_step_device_tracked(
+                &mut self.params,
+                &staging.buf,
+                fandhe_ai_tensor_core::LambMoments { m, v },
+                &segment_numels,
+                &step_config,
+                &self.failure_token,
+            ) {
+                if is_nonfatal(&e) {
+                    drop(staging_ref);
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+
+        self.lamb_state = Some(state);
         self.step_count += 1;
         Ok(())
     }
@@ -5476,6 +6361,96 @@ mod tests {
         );
     }
 
+    /// イシュー #2175 PR #2303 codex-review 指摘（P1）対応: `step_rmsprop`
+    /// ／`step_adagrad`／`step_lamb` はそれぞれ成功時に `rmsprop_state`／
+    /// `adagrad_state`／`lamb_state` を確定するが、`step()`（SGD）側に
+    /// それらを検査する対称ガードがないと同じストアで次に SGD を実行
+    /// できてしまい、`docs/device-resident-update-design.md` §「状態
+    /// 種別ガード」の「使用済みストアでは別 optimizer を一律拒否」契約
+    /// に違反する。3 状態それぞれを直接シミュレートし、以後の `step()`
+    /// 呼び出しが `BackendError::InvalidArgument` で拒否されることを
+    /// 確認する（Adam→SGD は既存契約により意図的に許可されているため
+    /// 本テストの対象外。`step_adam_after_sgd_is_rejected_even_with_
+    /// existing_adam_state` と対で参照）。
+    #[test]
+    fn step_after_rmsprop_adagrad_lamb_state_is_rejected() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+
+        // rmsprop_state 使用済みストアへの SGD は拒否される。
+        {
+            let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+            store.rmsprop_state = Some(RmsPropStoreState {
+                alpha: 0.99,
+                eps: 1e-8,
+                weight_decay: 0.0,
+                momentum: 0.0,
+                centered: false,
+            });
+            let leaves = store.register_resident_params(&tape).unwrap();
+            let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+            let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+            let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+            let loss = pred.mse_loss(&target).unwrap();
+            let grads = store.backward(&tape, &loss).unwrap();
+            let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
+            assert!(
+                matches!(err, BackendError::InvalidArgument(_)),
+                "rmsprop_state 使用済みストアへの step()（SGD）は \
+                 InvalidArgument で拒否されなければならない: {err:?}"
+            );
+        }
+
+        // adagrad_state 使用済みストアへの SGD は拒否される。
+        {
+            let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+            store.adagrad_state = Some(AdagradStoreState {
+                lr_decay: 0.0,
+                weight_decay: 0.0,
+                initial_accumulator_value: 0.0,
+                eps: 1e-10,
+                adagrad_step: 1,
+            });
+            let leaves = store.register_resident_params(&tape).unwrap();
+            let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+            let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+            let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+            let loss = pred.mse_loss(&target).unwrap();
+            let grads = store.backward(&tape, &loss).unwrap();
+            let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
+            assert!(
+                matches!(err, BackendError::InvalidArgument(_)),
+                "adagrad_state 使用済みストアへの step()（SGD）は \
+                 InvalidArgument で拒否されなければならない: {err:?}"
+            );
+        }
+
+        // lamb_state 使用済みストアへの SGD は拒否される。
+        {
+            let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+            store.lamb_state = Some(LambStoreState {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-6,
+                weight_decay: 0.0,
+                beta1_pow_t: 0.9,
+                beta2_pow_t: 0.999,
+            });
+            let leaves = store.register_resident_params(&tape).unwrap();
+            let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+            let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+            let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+            let loss = pred.mse_loss(&target).unwrap();
+            let grads = store.backward(&tape, &loss).unwrap();
+            let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
+            assert!(
+                matches!(err, BackendError::InvalidArgument(_)),
+                "lamb_state 使用済みストアへの step()（SGD）は \
+                 InvalidArgument で拒否されなければならない: {err:?}"
+            );
+        }
+    }
+
     /// Cursor Bugbot 指摘対応（PR #2002 レビュー是正・イシュー #1959）:
     /// `adam_step_device_tracked` が `BackendError::Unsupported`
     /// （`BackendOps::adam_step_device` の既定 fail-safe。`param`／
@@ -5514,6 +6489,185 @@ mod tests {
         // 実行できる（poison 由来の恒久拒否ではなく、その場限りの
         // no-op 失敗として扱われていることの確認）。
         store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
+    }
+
+    /// イシュー #2175: `rmsprop_step_device_tracked` が `BackendError::
+    /// Unsupported`（`MockDeviceOps` が `rmsprop_step_device` を実装
+    /// しないため既定 fail-safe を踏む）を返しても `poisoned` へ遷移
+    /// しない（`step_adam_unsupported_backend_does_not_poison_store` と
+    /// 同じ契約）。
+    #[test]
+    fn step_rmsprop_unsupported_backend_does_not_poison_store() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
+
+        let err = store
+            .step_rmsprop(&tape, &grads, &RmsPropConfig::default())
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "MockDeviceOps は rmsprop_step_device を実装しないため Unsupported のはず: {err:?}"
+        );
+        store.sync_to_host(&tape).unwrap();
+        store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
+    }
+
+    /// イシュー #2175: `adagrad_step_device_tracked` の `Unsupported` も
+    /// 同様に poison しない。
+    #[test]
+    fn step_adagrad_unsupported_backend_does_not_poison_store() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
+
+        let err = store
+            .step_adagrad(&tape, &grads, &AdagradConfig::default())
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "MockDeviceOps は adagrad_step_device を実装しないため Unsupported のはず: {err:?}"
+        );
+        store.sync_to_host(&tape).unwrap();
+        store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
+    }
+
+    /// イシュー #2175: `lamb_step_device_tracked` の `Unsupported` も
+    /// 同様に poison しない。
+    #[test]
+    fn step_lamb_unsupported_backend_does_not_poison_store() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
+
+        let err = store
+            .step_lamb(&tape, &grads, &LambConfig::default())
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "MockDeviceOps は lamb_step_device を実装しないため Unsupported のはず: {err:?}"
+        );
+        store.sync_to_host(&tape).unwrap();
+        store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
+    }
+
+    /// イシュー #2175: 状態種別ガード——`step_adam` 使用済みストアへの
+    /// `step_rmsprop`／`step_adagrad`／`step_lamb` 呼び出しは
+    /// `sgd_used` と同じ理由で一律拒否される（`step_adam_impl` 側にも
+    /// 対称のガードを追加済み）。
+    #[test]
+    fn step_rmsprop_after_adam_state_is_rejected() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        store.adam_state = Some(AdamStoreState {
+            kind: AdamStepKind::Coupled,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+            beta1_pow_t: 0.9,
+            beta2_pow_t: 0.999,
+        });
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
+
+        let err = store
+            .step_rmsprop(&tape, &grads, &RmsPropConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    /// イシュー #2175: 逆方向のガード——`step_rmsprop` 使用済みストア
+    /// への `step_adam` 呼び出しも一律拒否される（本 PR で
+    /// `step_adam_impl` に追加した対称ガード）。
+    #[test]
+    fn step_adam_after_rmsprop_state_is_rejected() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        store.rmsprop_state = Some(RmsPropStoreState {
+            alpha: 0.99,
+            eps: 1e-8,
+            weight_decay: 0.0,
+            momentum: 0.0,
+            centered: false,
+        });
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
+
+        let err = store
+            .step_adam(&tape, &grads, &AdamConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    /// イシュー #2175: `alpha` を初回 step 確定後に変更すると拒否される
+    /// （`lr` のみ可変という状態種別ガード契約）。
+    #[test]
+    fn step_rmsprop_rejects_alpha_change_mid_training() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+
+        // `MockDeviceOps` は rmsprop_step_device を実装しないため最初の
+        // 呼び出しは `Unsupported` を返すが、状態種別ガード自体は
+        // hparams 確定前（`rmsprop_state` が `None`）のため機能しない。
+        // ガードを検証するにはまず状態を直接シミュレートする。
+        store.rmsprop_state = Some(RmsPropStoreState {
+            alpha: 0.99,
+            eps: 1e-8,
+            weight_decay: 0.0,
+            momentum: 0.0,
+            centered: false,
+        });
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
+
+        let err = store
+            .step_rmsprop(
+                &tape,
+                &grads,
+                &RmsPropConfig {
+                    alpha: 0.5,
+                    ..RmsPropConfig::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
     }
 
     #[test]

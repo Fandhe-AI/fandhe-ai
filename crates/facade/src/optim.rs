@@ -149,11 +149,12 @@
 //! `rmsprop.rs`／`adagrad.rs`）から同じく素の再エクスポートで公開
 //! する。`AdamW`・[`crate::optim::Sgd`] と同じく `Tape`／`Var`／
 //! `BackendOps` に一切依存しない値型・純関数であり、新規 `Op`／
-//! `BackendOps` メソッド／`Var` メソッド／VJP は追加していない
-//! （カーネルなし）。位置対応契約（「呼び出し文脈」節）はそのまま
-//! 適用される。**`crate::DeviceParamStore` には未結線**（「デバイス
-//! 常駐更新との違い」節参照。RMSprop・Adagrad とも本 issue では対応
-//! する `BackendOps` メソッドを追加していないため非対応）。
+//! `Var` メソッド／VJP は追加していない（カーネルなし）。位置対応契約
+//! （「呼び出し文脈」節）はそのまま適用される。**`crate::
+//! DeviceParamStore` へは CPU 限定で結線済み**（イシュー #2175。
+//! [`crate::Tape::step_device_param_store_rmsprop`]／[`crate::Tape::
+//! step_device_param_store_adagrad`]。「デバイス常駐更新との違い」節
+//! 参照）。
 //!
 //! # ReduceLrOnPlateau（イシュー #1746・親 #1611）
 //!
@@ -192,10 +193,14 @@
 //! step_device_param_store_adamw`]。本モジュールの [`AdamConfig`]／
 //! [`AdamWConfig`] をそのまま渡せる。CPU 実装のみ・CUDA／Metal は
 //! `Unsupported` のまま。`nn::optim::adam` モジュール doc
-//! 「`DeviceParamStore` 結線済み」節）。[`crate::optim::Lamb`]（layer-wise
-//! trust ratio。イシュー #1744）も同様に `DeviceParamStore` へは未結線
-//! （パラメータテンソルごとの L2 norm reduction カーネルが未実装の
-//! ため。`nn::optim::lamb` モジュール doc「`DeviceParamStore` 非対応」節）。
+//! 「`DeviceParamStore` 結線済み」節）。[`crate::optim::RmsProp`]／
+//! [`crate::optim::Adagrad`]／[`crate::optim::Lamb`]（layer-wise
+//! trust ratio。イシュー #1744）も **イシュー #2175 で `DeviceParamStore`
+//! への結線を完了済み**（[`crate::Tape::step_device_param_store_rmsprop`]／
+//! [`crate::Tape::step_device_param_store_adagrad`]／[`crate::Tape::
+//! step_device_param_store_lamb`]。CPU 実装のみ・CUDA／Metal のネイティブ
+//! カーネルは後続イシューの対象。`nn::optim::{rmsprop,adagrad,lamb}`
+//! モジュール doc「`DeviceParamStore` 結線済み」節）。
 //!
 //! **LAMB（イシュー #1744・親 #1610）**: [`crate::optim::Lamb`]／
 //! [`crate::optim::LambConfig`] を `fandhe_ai_autodiff::nn::optim`
