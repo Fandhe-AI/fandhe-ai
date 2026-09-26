@@ -4187,7 +4187,10 @@ struct LossOpsHoldDoctestGuard;
 /// {ParamGroup, ParamGroupStep}` を導入する。facade がどの経路
 /// （単一行・複数行・ネストした group での `pub use`・別名エクスポート）
 /// でこれらの名前を公開しても、ローカル定義との glob 衝突（E0659）で
-/// コンパイルが失敗する。
+/// コンパイルが失敗する。glob 衝突は名前を実際に参照したときにだけ
+/// 発生するため（未参照のままでは検出できない。イシュー #2304 の
+/// レビュー指摘）、`ParamGroupStep` は `fn __probe_trait<T: ?Sized +
+/// ParamGroupStep>() {}` という generic 境界で明示的に参照する。
 ///
 /// あわせて `fandhe_ai::compat::Sequential::compile_with_param_groups`
 /// （承認事項の設計案「`compile()` とは別の param_groups 対応エントリ」）
@@ -4230,6 +4233,8 @@ struct LossOpsHoldDoctestGuard;
 ///     pub trait ParamGroupStep {}
 /// }
 /// use __fandhe_param_groups_hold_probe::*;
+///
+/// fn __probe_trait<T: ?Sized + ParamGroupStep>() {}
 ///
 /// struct __FandheParamGroupsMarker;
 ///
@@ -4405,7 +4410,11 @@ struct OptimizerExtHoldDoctestGuard;
 /// `__fandhe_optim_state_dict_hold_probe::OptimizerStateDict`（trait）を
 /// 導入する。facade がどの経路（単一行・複数行・ネストした group での
 /// `pub use`・別名エクスポート）でこの名前を公開しても、ローカル定義
-/// との glob 衝突（E0659）でコンパイルが失敗する。
+/// との glob 衝突（E0659）でコンパイルが失敗する。glob 衝突は名前を
+/// 実際に参照したときにだけ発生するため（未参照のままでは検出できない。
+/// イシュー #2304 のレビュー指摘）、`OptimizerStateDict` は
+/// `fn __probe_trait<T: ?Sized + OptimizerStateDict>() {}` という
+/// generic 境界で明示的に参照する。
 ///
 /// あわせて `fandhe_ai::optim::{AdamW, Adam, RmsProp, Adagrad, Lamb}::
 /// state_dict`／`load_state_dict`（`fandhe_ai_autodiff::nn::optim::
@@ -4447,6 +4456,8 @@ struct OptimizerExtHoldDoctestGuard;
 ///     pub trait OptimizerStateDict {}
 /// }
 /// use __fandhe_optim_state_dict_hold_probe::*;
+///
+/// fn __probe_trait<T: ?Sized + OptimizerStateDict>() {}
 ///
 /// struct __FandheOptimizerStateDictMarker;
 ///

@@ -11941,6 +11941,8 @@ mod __fandhe_param_groups_hold_probe {\n\
 }\n\
 use __fandhe_param_groups_hold_probe::*;\n\
 \n\
+fn __probe_trait<T: ?Sized + ParamGroupStep>() {}\n\
+\n\
 struct __FandheParamGroupsMarker;\n\
 \n\
 trait __FandheParamGroupsCompileProbe {\n\
@@ -12477,6 +12479,8 @@ mod __fandhe_optim_state_dict_hold_probe {\n\
 \x20\x20\x20\x20pub trait OptimizerStateDict {}\n\
 }\n\
 use __fandhe_optim_state_dict_hold_probe::*;\n\
+\n\
+fn __probe_trait<T: ?Sized + OptimizerStateDict>() {}\n\
 \n\
 struct __FandheOptimizerStateDictMarker;\n\
 \n\
@@ -14520,4 +14524,255 @@ fn facade_does_not_declare_fit_config_accumulate_steps() {
          承認待ちのため未実装のはず。`docs/compat-grad-accumulation-\
          decision.md` §5 参照）: {offending:?}"
     );
+}
+
+/// `crates/facade/src/lib.rs` 内の全 hold ガード doctest（`mod
+/// __fandhe_*_hold_probe { ... }` を `use <mod>::*;` で glob import する
+/// 正のプローブ方式のブロック）を横断走査し、各プローブモジュール内で
+/// `pub` 定義された名前（trait・struct・fn・enum・type・mod・const・
+/// static・use）が、その glob import 行より後ろの doctest 本文で
+/// 少なくとも 1 回**参照**されていることを検査する（イシュー #2304 の
+/// codex レビュー指摘: `OptimizerStateDictHoldDoctestGuard` の
+/// `OptimizerStateDict` トレイトが glob import されるだけで一度も
+/// 名前解決されず、facade がこの名前を再エクスポートしても glob 衝突
+/// 〈E0659〉は「その名前を実際に使ったときにだけ」発生するため検出
+/// できなかった欠陥。`ParamGroupsHoldDoctestGuard` の `ParamGroupStep`
+/// トレイトにも同型の欠陥が既存で存在した。本テストは同型の欠陥の
+/// 再発を機械的に防ぐ再発防止ガードであり、個々のガードの固定文言
+/// 契約〈`*_HOLD_PROBE_BODY` 系〉とは独立の横断監査を担う）。
+///
+/// 走査ロジックは `pub` 宣言行の単純な字句マッチと、doctest 本文の
+/// 識別子トークン化による部分文字列検査で行う（本テストは workspace
+/// 許容依存 8 区分に含まれない正規表現クレートを使わず、手書きの
+/// 字句走査で完結させる。deps-policy.md）。
+#[test]
+fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let audits = scan_hold_probe_blocks(&content);
+
+    // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32）以上
+    // であることを固定する。将来ブロックが追加された場合はこの下限を
+    // 上方修正する（削減時は本テストが個別に指摘する）。
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 32;
+    assert!(
+        audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
+        "hold ガード doctest のプローブモジュール検出数が既知の下限を\
+         下回っている（走査ロジック自体が壊れ空振りで通過している疑いが\
+         ある）: 検出数={}, 下限={MIN_KNOWN_PROBE_BLOCKS}",
+        audits.len()
+    );
+
+    // 正のプローブ: 本テストが検出対象に含めるべき既知の 2 例
+    // （イシュー #2304 で修正した欠陥そのもの）が走査集合に含まれる
+    // ことを固定する。
+    let mod_names: std::collections::BTreeSet<&str> =
+        audits.iter().map(|a| a.mod_name.as_str()).collect();
+    for expected in [
+        "__fandhe_param_groups_hold_probe",
+        "__fandhe_optim_state_dict_hold_probe",
+    ] {
+        assert!(
+            mod_names.contains(expected),
+            "既知のプローブモジュール `{expected}` が走査対象に含まれて\
+             いない（走査ロジックのフェンス検出・mod 境界検出が壊れて\
+             いる疑いがある）"
+        );
+    }
+
+    let mut offenses: Vec<String> = Vec::new();
+    for audit in &audits {
+        for item in &audit.unreferenced_items {
+            offenses.push(format!(
+                "{}::{item}（glob import 後の doctest 本文で一度も\
+                 参照されていない。この名前は facade が公開しても glob\
+                 衝突を起こさず、保留固定として機能しない）",
+                audit.mod_name
+            ));
+        }
+    }
+    assert!(
+        offenses.is_empty(),
+        "hold ガード doctest のプローブモジュールに、glob import 後の\
+         本文で一度も参照されない `pub` 定義が存在する（明示的に参照する\
+         プローブ〈関数境界での型使用・`fn __probe_trait<T: ?Sized +\
+         Trait>() {{}}` 等〉を追加すること）: {offenses:?}"
+    );
+}
+
+/// [`hold_doctest_probe_blocks_reference_every_glob_imported_item`] の
+/// 走査結果 1 件（1 プローブモジュール分）。
+struct HoldProbeBlockAudit {
+    mod_name: String,
+    unreferenced_items: Vec<String>,
+}
+
+/// `lib.rs` の全文（`content`）から、`///` doc コメントの連続領域に
+/// 現れる裸／タグ付きフェンスの doctest ブロックを走査し、各ブロック
+/// 内の `mod __fandhe_..._hold_probe { ... }` 定義 1 つにつき
+/// [`HoldProbeBlockAudit`] を 1 件生成する。
+fn scan_hold_probe_blocks(content: &str) -> Vec<HoldProbeBlockAudit> {
+    let mut audits = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        if !lines[i].trim_start().starts_with("///") {
+            i += 1;
+            continue;
+        }
+        // 連続する `///` 行 1 ラン分を doc テキストへ変換する。
+        let mut doc_lines: Vec<String> = Vec::new();
+        while i < lines.len() && lines[i].trim_start().starts_with("///") {
+            let raw = lines[i].trim_start();
+            let rest = raw.strip_prefix("///").unwrap_or(raw);
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            doc_lines.push(rest.to_string());
+            i += 1;
+        }
+        audits.extend(scan_hold_probe_blocks_in_doc_run(&doc_lines));
+    }
+    audits
+}
+
+/// [`scan_hold_probe_blocks`] が抽出した doc テキスト 1 ラン分から、
+/// フェンス区切りの doctest ブロックを抜き出し、各ブロック内の
+/// `mod __fandhe_..._hold_probe { ... }` を監査する。
+fn scan_hold_probe_blocks_in_doc_run(doc_lines: &[String]) -> Vec<HoldProbeBlockAudit> {
+    let mut audits = Vec::new();
+    let mut i = 0usize;
+    while i < doc_lines.len() {
+        let trimmed = doc_lines[i].trim_end();
+        let leading_backticks = trimmed
+            .trim_start()
+            .chars()
+            .take_while(|&c| c == '`')
+            .count();
+        if leading_backticks < 3 {
+            i += 1;
+            continue;
+        }
+        // フェンス開始行を見つけた。閉じフェンス（トリム後 "```"）まで
+        // 本文を収集する。
+        let mut body: Vec<String> = Vec::new();
+        i += 1;
+        while i < doc_lines.len() && doc_lines[i].trim_end() != "```" {
+            body.push(doc_lines[i].clone());
+            i += 1;
+        }
+        // 閉じフェンス自体を読み飛ばす（見つからなければ doc_lines 終端）。
+        if i < doc_lines.len() {
+            i += 1;
+        }
+        audits.extend(scan_hold_probe_blocks_in_body(&body));
+    }
+    audits
+}
+
+/// doctest ブロック本文（フェンスを含まない）から
+/// `mod __fandhe_..._hold_probe { ... }` 定義を探し、`pub` 定義された
+/// 名前が対応する `use <mod>::*;` 行より後ろで参照されているかを判定
+/// する。1 ブロックに複数のプローブモジュール定義があっても全て拾う。
+fn scan_hold_probe_blocks_in_body(body: &[String]) -> Vec<HoldProbeBlockAudit> {
+    let mut audits = Vec::new();
+    let mut i = 0usize;
+    while i < body.len() {
+        let trimmed = body[i].trim();
+        let is_probe_mod_start = trimmed.starts_with("mod __fandhe")
+            && trimmed.ends_with("_hold_probe {")
+            && !trimmed.starts_with("pub mod");
+        if !is_probe_mod_start {
+            i += 1;
+            continue;
+        }
+        let mod_name = trimmed
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(" {"))
+            .unwrap_or_default()
+            .to_string();
+
+        // ブレース深さカウントで対応する閉じ行を探す（ネストした
+        // `pub mod` を含んでも壊れないよう、単純な文字列一致ではなく
+        // 深さで判定する）。
+        let mut depth: i32 = 1;
+        let mod_body_start = i + 1;
+        let mut mod_end = body.len();
+        let mut j = mod_body_start;
+        while j < body.len() {
+            let opens = body[j].matches('{').count() as i32;
+            let closes = body[j].matches('}').count() as i32;
+            depth += opens - closes;
+            if depth <= 0 {
+                mod_end = j;
+                break;
+            }
+            j += 1;
+        }
+
+        let mut items: Vec<String> = Vec::new();
+        for line in &body[mod_body_start..mod_end] {
+            let t = line.trim();
+            let Some(rest) = t.strip_prefix("pub ") else {
+                continue;
+            };
+            let mut tokens = rest.split_whitespace();
+            let Some(keyword) = tokens.next() else {
+                continue;
+            };
+            if !matches!(
+                keyword,
+                "trait" | "struct" | "fn" | "enum" | "type" | "mod" | "const" | "static" | "use"
+            ) {
+                continue;
+            }
+            let Some(name_raw) = tokens.next() else {
+                continue;
+            };
+            let name: String = name_raw
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                items.push(name);
+            }
+        }
+
+        // `use <mod_name>::*;` 行（glob import）をブロック全体から探す。
+        let use_line = format!("use {mod_name}::*;");
+        let use_idx = body.iter().position(|l| l.trim() == use_line);
+        let rest_tokens: std::collections::HashSet<String> = match use_idx {
+            Some(idx) => tokenize_identifiers(&body[(idx + 1)..].join("\n")),
+            None => std::collections::HashSet::new(),
+        };
+
+        let unreferenced_items: Vec<String> = items
+            .into_iter()
+            .filter(|name| !rest_tokens.contains(name))
+            .collect();
+
+        audits.push(HoldProbeBlockAudit {
+            mod_name,
+            unreferenced_items,
+        });
+
+        i = mod_end + 1;
+    }
+    audits
+}
+
+/// `text` を識別子トークン（英数字・アンダースコアの連続runs）へ分割
+/// した集合を返す（[`scan_hold_probe_blocks_in_body`] の参照検査用）。
+fn tokenize_identifiers(text: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            current.push(c);
+        } else if !current.is_empty() {
+            out.insert(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.insert(current);
+    }
+    out
 }
