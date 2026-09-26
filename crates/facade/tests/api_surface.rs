@@ -12616,11 +12616,17 @@ fn facade_does_not_reexport_or_declare_lbfgs_items_detects_each_category() {
 /// までの間で中括弧の深さを追跡する。variant 名は深さ 1 に入った直後
 /// （開き `{` の直後）と、深さ 1 での `,` の直後にのみ現れる識別子と
 /// してのみ収集するため、variant の payload 型（`Lbfgs(LbfgsConfig)` の
-/// `LbfgsConfig` 等）や属性（`#[non_exhaustive]`／doc コメント。
-/// [`strip_comments_and_literals`] で事前に文字列リテラル・コメントは
-/// 除去済み）は対象に含まれない。`enum Optimizer` が 1 件も見つからない
-/// 場合は検査対象を見失ったこととして扱い、呼び出し元が fail-closed で
-/// panic する（戻り値 `None`）。
+/// `LbfgsConfig` 等）は対象に含まれない。doc コメント（`strip_comments_
+/// and_literals` で事前に除去済み）に加え、variant 直前の属性
+/// （`#[deprecated]` 等。`#` トークンから対応する `]` までを読み飛ばす。
+/// 属性の読み飛ばし中は variant 開始位置の判定を維持したままにするため、
+/// 属性付き variant（`#[deprecated]\nLbfgs(LbfgsConfig)` 等）も variant
+/// 名として正しく判定できる。イシュー #2198 の Codex レビュー指摘: 旧実装は
+/// `,` 直後の最初のトークンを無条件で variant 名扱いしていたため、属性の
+/// 先頭 `#` を variant 名候補として消費してしまい、続く実際の variant 名
+/// （`Lbfgs`）を検出できなかった）も読み飛ばして対象に含めない。
+/// `enum Optimizer` が 1 件も見つからない場合は検査対象を見失ったことと
+/// して扱い、呼び出し元が fail-closed で panic する（戻り値 `None`）。
 fn scan_optimizer_enum_variants_for_lbfgs(content: &str) -> Option<Vec<String>> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
@@ -12651,6 +12657,26 @@ fn scan_optimizer_enum_variants_for_lbfgs(content: &str) -> Option<Vec<String>> 
                     }
                     "," if depth == 1 => {
                         at_variant_start = true;
+                    }
+                    "#" if depth == 1 && at_variant_start => {
+                        // variant 直前の属性（`#[...]`）を読み飛ばす。
+                        // variant 名判定はまだ始まっていないため
+                        // at_variant_start は true のまま維持し、属性の
+                        // 次に続く実際の variant 名を取りこぼさない。
+                        j += 1;
+                        if tokens.get(j).map(String::as_str) == Some("[") {
+                            let mut bracket_depth: i32 = 1;
+                            j += 1;
+                            while j < tokens.len() && bracket_depth > 0 {
+                                match tokens[j].as_str() {
+                                    "[" => bracket_depth += 1,
+                                    "]" => bracket_depth -= 1,
+                                    _ => {}
+                                }
+                                j += 1;
+                            }
+                        }
+                        continue;
                     }
                     tok if depth == 1 && at_variant_start => {
                         if tok.eq_ignore_ascii_case("lbfgs") {
@@ -12752,5 +12778,28 @@ fn scan_optimizer_enum_variants_for_lbfgs_detects_each_category() {
     assert_eq!(
         scan_optimizer_enum_variants_for_lbfgs("pub struct Unrelated;"),
         None
+    );
+    // 正例: variant 自体に属性が付いている場合（イシュー #2198 Codex
+    // レビュー指摘の回帰防止）。属性の先頭 `#` を variant 名として誤検出
+    // せず、属性を読み飛ばした先の `Lbfgs` を正しく検出する。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { Sgd(SgdConfig), #[deprecated] Lbfgs(LbfgsConfig) }"
+        ),
+        Some(vec!["Lbfgs".to_string()])
+    );
+    // 正例: 属性付き variant が先頭（開き `{` の直後）にある場合。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { #[deprecated] Lbfgs(LbfgsConfig), Sgd(SgdConfig) }"
+        ),
+        Some(vec!["Lbfgs".to_string()])
+    );
+    // 負例: 属性付き variant だが Lbfgs ではない場合は誤検出しない。
+    assert_eq!(
+        scan_optimizer_enum_variants_for_lbfgs(
+            "pub enum Optimizer { #[deprecated] Sgd(SgdConfig) }"
+        ),
+        Some(vec![])
     );
 }
