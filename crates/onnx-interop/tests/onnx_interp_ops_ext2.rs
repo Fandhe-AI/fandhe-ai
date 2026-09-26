@@ -459,6 +459,45 @@ fn reduce_mean_empty_axes_input_with_noop_is_identity() {
 }
 
 #[test]
+fn reduce_mean_omitted_axes_with_noop_is_identity() {
+    // レビュー指摘対応（イシュー #2186 codex-review・PR #2313）: ONNX
+    // ReduceMean-18 仕様上 `noop_with_empty_axes` は axes が「空」（省略・
+    // 明示的な空リストのいずれも含む）の場合に適用される。axes を
+    // 完全に省略（属性・第 2 入力ともになし）した場合も恒等演算になる
+    // ことを確認する（`reduce_mean_empty_axes_input_with_noop_is_identity`
+    // は空リスト明示のケースのみをカバーしていた）。
+    let n = node_with_attrs(
+        "ReduceMean",
+        "n",
+        vec!["x"],
+        vec!["y"],
+        vec![attr_i64_typed("noop_with_empty_axes", 1)],
+    );
+    let g = single_node_graph(n, &["x"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[2, 2])]);
+    let result = run(&g, feeds).unwrap();
+    assert_close(&as_f32_vec(&result["y"]), &[1.0, 2.0, 3.0, 4.0], 1e-6);
+}
+
+#[test]
+fn reduce_mean_rejects_non_1d_axes_input() {
+    // レビュー指摘対応（codex-review P0。security.md A03）: axes 入力は
+    // ONNX 仕様上 1 次元テンソルでなければならない。shape [2,2]（要素数
+    // 4）が長さ 4 の 1 次元 axes として誤って受理されないことを確認する。
+    let n = node("ReduceMean", "n", vec!["x", "axes"], vec!["y"]);
+    let g = single_node_graph(n, &["x", "axes"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([feed_f32("x", vec![1.0; 16], &[2, 2, 2, 2])]);
+    feeds.insert(
+        "axes".to_string(),
+        Value::I64(Tensor::<i64>::new(vec![0, 1, 2, 3], &[2, 2]).unwrap()),
+    );
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "axes"));
+}
+
+#[test]
 fn reduce_mean_rejects_mixed_attr_and_input_axes() {
     let n = node_with_attrs(
         "ReduceMean",
@@ -555,6 +594,38 @@ fn pad_rejects_duplicate_axes() {
 }
 
 #[test]
+fn pad_rejects_non_1d_pads_input() {
+    // レビュー指摘対応（codex-review P0。security.md A03）: pads 入力は
+    // ONNX 仕様上 1 次元テンソルでなければならない。shape [2,2]（要素数
+    // 4）が長さ 4 の 1 次元 pads として誤って受理されないことを確認する。
+    let n = node("Pad", "n", vec!["x", "pads"], vec!["y"]);
+    let g = single_node_graph(n, &["x", "pads"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0], &[1, 2]),
+        feed_i64("pads", vec![0, 0, 0, 0], &[2, 2]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "pads"));
+}
+
+#[test]
+fn pad_rejects_non_1d_axes_input() {
+    // レビュー指摘対応（codex-review P0。security.md A03）: axes 入力も
+    // 同様に 1 次元テンソルでなければならない。
+    let n = node("Pad", "n", vec!["x", "pads", "", "axes"], vec!["y"]);
+    let g = single_node_graph(n, &["x", "pads", "axes"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_i64("pads", vec![0, 0, 0, 0], &[4]),
+        feed_i64("axes", vec![2, 3], &[1, 2]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "axes"));
+}
+
+#[test]
 fn pad_rejects_unsupported_mode() {
     let n = node_with_attrs(
         "Pad",
@@ -610,6 +681,111 @@ fn resize_nearest_asymmetric_floor_matches_integer_index_formula() {
         }
         other => panic!("Value::F32 を期待したが {other:?}"),
     }
+}
+
+#[test]
+fn resize_two_input_form_reads_second_input_as_scales() {
+    // レビュー指摘対応（codex-review P1・Cursor Bugbot High。イシュー
+    // #2186 PR #2313）: Resize-10 の 2 入力形式（`X`／`scales`）では
+    // 第 2 入力を `roi` ではなく `scales` として読む必要がある。従来は
+    // 常に第 2 入力を `roi` として検証していたため、正当な Resize-10
+    // 2 入力モデルの `scales`（例: [2.0] のような非空値）が roi 検証
+    // （空である必要がある）で誤って拒否されていた。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![1.0, 1.0, 2.0, 2.0], &[4]),
+    ]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => assert_eq!(t.shape(), &[1, 1, 4, 4]),
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn resize_rejects_non_1d_scales_input() {
+    // レビュー指摘対応（codex-review P0。security.md A03）: scales 入力
+    // は ONNX 仕様上 1 次元テンソルでなければならない。shape [2,2]
+    // （要素数 4）が長さ 4 の 1 次元 scales として誤って受理されない
+    // ことを確認する。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![attr_string_typed("mode", "nearest")],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![1.0, 1.0, 2.0, 2.0], &[2, 2]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "scales"));
+}
+
+#[test]
+fn resize_rejects_non_1d_sizes_input() {
+    // レビュー指摘対応（codex-review P0。security.md A03）: sizes 入力
+    // も同様に 1 次元テンソルでなければならない。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "", "sizes"],
+        vec!["y"],
+        vec![attr_string_typed("mode", "nearest")],
+    );
+    let g = single_node_graph(n, &["x", "sizes"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_i64("sizes", vec![1, 1, 4, 4], &[2, 2]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "sizes"));
+}
+
+#[test]
+fn resize_rejects_nc_axis_scale_near_but_not_exactly_one() {
+    // レビュー指摘対応（codex-review P1。イシュー #2186 PR #2313）:
+    // N/C 軸は非対応（サイズ変更しない前提）のため倍率は厳密に 1.0 で
+    // なければならない。旧実装は 1e-6 の許容差で判定していたため、
+    // 1 以外の倍率（例: 0.9999995）を受理しつつ実際には N/C サイズを
+    // 変更しない不整合が生じていた。厳密一致（`sv == 1.0`）で拒否
+    // されることを確認する。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![0.999_999_5, 1.0, 2.0, 2.0], &[4]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "scales"));
 }
 
 #[test]

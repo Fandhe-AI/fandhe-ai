@@ -336,7 +336,21 @@ pub(super) fn compute_reduce_mean(
     let noop_with_empty_axes = attr_i64_typed(node, "noop_with_empty_axes", 0)? != 0;
 
     let axes: Option<Vec<i64>> = if has_axes_input {
-        Some(i64_vec_and_shape(env, node, node.input[1].as_str())?.0)
+        let (axes_i64, axes_shape) = i64_vec_and_shape(env, node, node.input[1].as_str())?;
+        // ONNX 仕様上 axes 入力は 1 次元テンソル。rank を検証しないと
+        // 例えば shape [2,2] の入力が要素数 4 の 1 次元 axes として
+        // 誤って受理されてしまう（security.md A03。codex-review 指摘）。
+        if axes_shape.len() != 1 {
+            return Err(InterpError::InvalidAttribute {
+                node: node.name.clone(),
+                attr: "axes".to_string(),
+                reason: format!(
+                    "axes 入力は 1 次元でなければなりません（実際: rank {}）",
+                    axes_shape.len()
+                ),
+            });
+        }
+        Some(axes_i64)
     } else {
         attr_ints_typed(node, "axes")?.map(<[i64]>::to_vec)
     };
@@ -360,6 +374,12 @@ pub(super) fn compute_reduce_mean(
     };
 
     match axes {
+        // ONNX ReduceMean-18 仕様: `noop_with_empty_axes` は「axes が空」
+        // （省略〈attr 未設定・第 2 入力なし〉・明示的な空リストのいずれも
+        // 含む）場合に適用される。省略時のみ無条件に全軸縮約していたのは
+        // 仕様との不一致（codex-review 指摘）で、`Some(axes) if
+        // axes.is_empty()` 腕と同じ分岐にする。
+        None if noop_with_empty_axes => Ok(Value::F32(x.clone())),
         None => full_reduce(&v),
         Some(axes) if axes.is_empty() => {
             if noop_with_empty_axes {
@@ -434,7 +454,21 @@ pub(super) fn compute_pad(
         let v = attr_f32_typed(node, "value", 0.0)?;
         (pads, v, None)
     } else {
-        let (pads, _) = i64_vec_and_shape(env, node, input_name(node, 1)?)?;
+        let (pads, pads_shape) = i64_vec_and_shape(env, node, input_name(node, 1)?)?;
+        // ONNX 仕様上 pads 入力は 1 次元テンソル（長さ `2*rank` または
+        // `axes` 指定時 `2*axes.len()`）。rank を検証しないと shape
+        // [2,2] の入力が要素数 4 の 1 次元 pads として誤って受理されて
+        // しまう（security.md A03。codex-review 指摘）。
+        if pads_shape.len() != 1 {
+            return Err(InterpError::InvalidAttribute {
+                node: node.name.clone(),
+                attr: "pads".to_string(),
+                reason: format!(
+                    "pads 入力は 1 次元でなければなりません（実際: rank {}）",
+                    pads_shape.len()
+                ),
+            });
+        }
         let v = match node.input.get(2) {
             Some(name) if !name.is_empty() => {
                 scalar_f32(node, "constant_value", get_f32(env, node, name)?)?
@@ -442,7 +476,20 @@ pub(super) fn compute_pad(
             _ => 0.0,
         };
         let axes = match node.input.get(3) {
-            Some(name) if !name.is_empty() => Some(i64_vec_and_shape(env, node, name)?.0),
+            Some(name) if !name.is_empty() => {
+                let (axes_raw, axes_shape) = i64_vec_and_shape(env, node, name)?;
+                if axes_shape.len() != 1 {
+                    return Err(InterpError::InvalidAttribute {
+                        node: node.name.clone(),
+                        attr: "axes".to_string(),
+                        reason: format!(
+                            "axes 入力は 1 次元でなければなりません（実際: rank {}）",
+                            axes_shape.len()
+                        ),
+                    });
+                }
+                Some(axes_raw)
+            }
             _ => None,
         };
         (pads, v, axes)
@@ -557,7 +604,13 @@ pub(super) fn compute_resize(
     }
     let in_shape = x.shape().to_vec();
 
-    if let Some(name) = node.input.get(1).filter(|n| !n.is_empty()) {
+    // Resize-10 は 2 入力形式（`X`／`scales`）で `roi` を持たない。
+    // 常に第 2 入力（index 1）を `roi` として読むと、正当な Resize-10
+    // 2 入力モデルの `scales` が `roi` 検証に通されて誤って拒否される
+    // （Resize-11+ の 3〜4 入力形式〈`X`／`roi`／`scales`／`sizes`〉との
+    // 入力位置の違いを吸収する。codex-review・Cursor Bugbot 指摘）。
+    let is_two_input_form = node.input.len() == 2;
+    if !is_two_input_form && let Some(name) = node.input.get(1).filter(|n| !n.is_empty()) {
         let roi = get_f32(env, node, name)?;
         if roi.numel() != 0 {
             return Err(InterpError::InvalidAttribute {
@@ -568,8 +621,16 @@ pub(super) fn compute_resize(
         }
     }
 
-    let scales_name = node.input.get(2).filter(|n| !n.is_empty());
-    let sizes_name = node.input.get(3).filter(|n| !n.is_empty());
+    let scales_name = if is_two_input_form {
+        node.input.get(1).filter(|n| !n.is_empty())
+    } else {
+        node.input.get(2).filter(|n| !n.is_empty())
+    };
+    let sizes_name = if is_two_input_form {
+        None
+    } else {
+        node.input.get(3).filter(|n| !n.is_empty())
+    };
     // `(Some, Some)`（両方指定）・`(None, None)`（どちらも省略）は fail-closed
     // に拒否する。`match` の各腕が `name` を直接束縛するため、以降
     // `expect`／`unwrap`／`unreachable!` を使わずに分岐できる
@@ -577,6 +638,19 @@ pub(super) fn compute_resize(
     let (out_h, out_w) = match (scales_name, sizes_name) {
         (Some(name), None) => {
             let scales_t = get_f32(env, node, name)?.contiguous();
+            // ONNX 仕様上 scales 入力は 1 次元テンソル。rank を検証しない
+            // と shape [2,2] の入力が要素数 4 の 1 次元 scales として
+            // 誤って受理されてしまう（security.md A03。codex-review 指摘）。
+            if scales_t.rank() != 1 {
+                return Err(InterpError::InvalidAttribute {
+                    node: node.name.clone(),
+                    attr: "scales".to_string(),
+                    reason: format!(
+                        "scales 入力は 1 次元でなければなりません（実際: rank {}）",
+                        scales_t.rank()
+                    ),
+                });
+            }
             let s = scales_t
                 .as_slice()
                 .ok_or(OpError::NonContiguousInternal("Resize(scales)"))?;
@@ -588,7 +662,12 @@ pub(super) fn compute_resize(
                 });
             }
             for (i, &sv) in s.iter().take(2).enumerate() {
-                if (sv - 1.0).abs() > 1e-6 {
+                // N/C 軸は非対応（サイズ変更しない前提）のため、倍率は
+                // 厳密に 1.0 でなければならない。許容差判定（旧
+                // `(sv - 1.0).abs() > 1e-6`）だと 1 以外の倍率
+                // （例: 0.9999995）を受理しつつ実際には N/C サイズを
+                // 変更しない不整合が生じる（codex-review 指摘）。
+                if sv != 1.0 {
                     return Err(InterpError::InvalidAttribute {
                         node: node.name.clone(),
                         attr: "scales".to_string(),
@@ -603,7 +682,19 @@ pub(super) fn compute_resize(
             (out_h, out_w)
         }
         (None, Some(name)) => {
-            let (sizes, _) = i64_vec_and_shape(env, node, name)?;
+            let (sizes, sizes_shape) = i64_vec_and_shape(env, node, name)?;
+            // ONNX 仕様上 sizes 入力は 1 次元テンソル（rank 検証。上記
+            // scales と同じ理由。codex-review 指摘）。
+            if sizes_shape.len() != 1 {
+                return Err(InterpError::InvalidAttribute {
+                    node: node.name.clone(),
+                    attr: "sizes".to_string(),
+                    reason: format!(
+                        "sizes 入力は 1 次元でなければなりません（実際: rank {}）",
+                        sizes_shape.len()
+                    ),
+                });
+            }
             if sizes.len() != 4 {
                 return Err(InterpError::InvalidAttribute {
                     node: node.name.clone(),
