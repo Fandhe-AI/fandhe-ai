@@ -147,7 +147,8 @@ impl Sequential {
 - **入力検証（A03）**:
   - `sample_weight.len() == N`
   - 全重みが有限かつ非負
-  - class_weight のキーが `< C`（C は logits の第 1 軸）
+  - class_weight のキーが `< C`（logits は `[N, C]` 定義。C はクラス数で
+    logits の第 2 軸〈添字 1〉から取得する。第 1 軸〈添字 0〉はバッチ数 N）
   - 重み付き経路の係数テンソル確保前に、要素数・バイト数を
     `checked_*` で検査する
   - 違反はすべて、モード変更・パラメータ更新の前に `InvalidArgument`
