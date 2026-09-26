@@ -391,7 +391,10 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
 
 ## 11. スコープ外（`.claude/rules/out-of-scope-tracking.md` 対象）
 
-- MaxUnpool・LPPool・FractionalMaxPool・AdaptiveMaxPool
+- MaxUnpool・LPPool・FractionalMaxPool・~~AdaptiveMaxPool~~
+  **AdaptiveMaxPool2d／AdaptiveMaxPool1d／GlobalPool はイシュー #2160
+  で実装済み**（§17 参照。内部クレート限定・facade 公開は承認待ち。
+  MaxUnpool はスコープ外のまま）
 - 3d 版（`MaxPool3d` 等）
 - channels_last レイアウト
 - `ceil_mode = true`
@@ -818,3 +821,32 @@ override 配線を追加した（`Pool2dParams` が兄弟イシュー #1728 で
   実測済み〈#1902／#1903〉）として整備したが、本エージェント実行
   環境に到達手段がないため未実測のまま Mac／GB10 セッションへ
   申し送る。
+
+## 17. AdaptiveMaxPool2d・AdaptiveMaxPool1d・GlobalPool 実装記録（イシュー #2160）
+
+§11 で対象外としていた AdaptiveMaxPool を、GlobalPool（ONNX
+`GlobalAveragePool`／`GlobalMaxPool`・Keras `GlobalAveragePooling*`／
+`GlobalMaxPooling*` 相当）とあわせて実装した。MaxUnpool は §11 の
+とおり引き続きスコープ外。詳細な設計判断・承認事項は
+`docs/autodiff-adaptive-max-global-pool-decision.md` を正とし、本節
+では要点のみ記す。
+
+- 新規 `Op` は追加せず、既存 `Op::MaxPool2d`（VJP が `params` 非依存）
+  を forward 記録にそのまま再利用した
+- `GlobalPool(Avg)` は既存 `adaptive_avg_pool2d`／`adaptive_avg_pool1d`
+  にそのまま委譲するため、既存カーネル・数値契約は不変
+- `Var` に inherent メソッドを追加しない方針（§9 の踏襲）に加え、
+  forward 本体（`adaptive_max_pool_ops`）自体を非 `pub mod` にする
+  よりいっそう保守的な設計を採った（`docs/autodiff-adaptive-max-
+  global-pool-decision.md` §0 参照）
+- facade 公開（`compat::Sequential::add_adaptive_max_pool2d` 等）は
+  §12 と同じく承認待ちのまま対象外とし、
+  `AdaptiveMaxGlobalPoolHoldDoctestGuard`（`crates/facade/src/lib.rs`）
+  で多層固定した
+- **索引表現可能範囲検査（`H·W <= i32::MAX`）は、出力が空かどうか
+  （`out_numel == 0`。例: 空バッチ `N=0`）の判定より前に、値・索引を
+  返すすべての入口で行う**（codex-review 是正・PR #2280。詳細・入口
+  一覧は `docs/autodiff-adaptive-max-global-pool-decision.md` §2.4）。
+  `out_shape` の積は `N=0` で `0` になり `H·W` 自体の overflow を
+  検出できないため、`N`／`out_numel` に依存せず `input` の `H`／`W`
+  を直接見て検査する

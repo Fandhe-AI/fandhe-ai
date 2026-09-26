@@ -1191,6 +1191,14 @@ pub(crate) enum Op {
     /// `[N·C, H·W]`／`[N·C, Hout·Wout]` へ reshape し
     /// `d_input = scatter_add(zeros, dim=1, index, upstream)`（重なり
     /// 窓は `ScatterReduce::Add` の決定的集約契約に従う）。
+    ///
+    /// **adaptive max pooling（内部クレート限定・facade 未公開。
+    /// イシュー #2160）の forward もこの variant を記録する**:
+    /// `adaptive_max_pool_ops::adaptive_max_pool2d` は窓が
+    /// `Pool2dParams` ではなく [`fandhe_ai_tensor_core::
+    /// adaptive_window`] で決まる点のみ異なり、VJP は `params` に
+    /// 非依存（`input` shape と `index` のみで scatter_add が完結する）
+    /// ため、新規 variant を追加せず本 variant をそのまま共有する。
     MaxPool2d { input: NodeId, index: Tensor<i32> },
     /// `Var::avg_pool2d`（`torch.nn.functional.avg_pool2d` 相当。NCHW
     /// 固定。イシュー #1728・設計 `docs/pooling-ops-design.md` §7）。

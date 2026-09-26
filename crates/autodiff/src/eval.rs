@@ -3864,6 +3864,110 @@ pub(crate) fn adaptive_avg_pool2d(
     Ok(build_tensor(out, out_shape))
 }
 
+/// `Var::adaptive_max_pool2d`（内部クレート限定・facade 未公開。
+/// イシュー #2160）のホスト参照実装。`BackendOps::
+/// adaptive_max_pool2d` が `Unsupported` を返したときのみ
+/// `grad::adaptive_max_pool2d_with_fallback` から呼ばれる。窓は
+/// [`adaptive_window`]（[`adaptive_avg_pool2d`] と同じ forward／VJP
+/// 共有の単一情報源）が定める。タイ規則・NaN 伝播は [`max_pool2d`]
+/// と同一（先勝ち・`v > best || (v.is_nan() && !best.is_nan())`）。
+/// `backend-cpu::pooling::adaptive_max_pool2d` と意図的に同一
+/// アルゴリズムを複製する。
+pub(crate) fn adaptive_max_pool2d(
+    input: &Tensor<f32>,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    // 出力が空（`out_numel == 0`。例: 空バッチ `N=0`）かどうかの判定
+    // より前に索引範囲を検査する（codex-review 指摘・イシュー #2160）。
+    // `N=0` でも `H·W` が `i32::MAX` を超えていれば、tape 経路
+    // （`adaptive_max_pool_ops::check_max_index_range`）と同じ
+    // `IndexRangeOverflow` で拒否する契約を host 経路でも維持する。
+    crate::adaptive_max_pool_ops::check_max_index_range_shape(h_in, w_in)?;
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return Ok((
+            build_tensor(Vec::new(), out_shape),
+            build_index_tensor(Vec::new(), out_shape),
+        ));
+    }
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+
+    let mut out_vals = vec![0f32; out_numel];
+    let mut out_idx = vec![0i32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                let (h_start, h_end) =
+                    adaptive_window(oh, h_in, h_out).ok_or(ShapeError::ElementCountOverflow)?;
+                for ow in 0..w_out {
+                    let (w_start, w_end) =
+                        adaptive_window(ow, w_in, w_out).ok_or(ShapeError::ElementCountOverflow)?;
+                    let mut best: Option<(f32, usize)> = None;
+                    for h in h_start..h_end {
+                        for w in w_start..w_end {
+                            let v = input.get(&[n, c, h, w]).ok_or_else(|| {
+                                ShapeError::ShapeMismatch {
+                                    lhs: vec![n, c, h, w],
+                                    rhs: in_shape.to_vec(),
+                                }
+                            })?;
+                            let flat = h * w_in + w;
+                            best = Some(match best {
+                                None => (v, flat),
+                                Some((b, bi)) => {
+                                    if v > b || (v.is_nan() && !b.is_nan()) {
+                                        (v, flat)
+                                    } else {
+                                        (b, bi)
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    let (v, idx) = best.ok_or(ShapeError::ElementCountOverflow)?;
+                    let out_pos = ((n * c_ch + c) * h_out + oh) * w_out + ow;
+                    out_vals[out_pos] = v;
+                    out_idx[out_pos] = i32::try_from(idx)
+                        .map_err(|_| ShapeError::IndexRangeOverflow { index: idx })?;
+                }
+            }
+        }
+    }
+    Ok((
+        build_tensor(out_vals, out_shape),
+        build_index_tensor(out_idx, out_shape),
+    ))
+}
+
+#[cfg(test)]
+mod adaptive_max_pool2d_host_fallback_tests {
+    use super::*;
+
+    /// codex-review 指摘の回帰テスト（イシュー #2160）。空バッチ
+    /// （`N=0`）でも `H·W`（本テストでは `W` 単独）が `i32::MAX` を
+    /// 超えていれば索引が表現不能なため、出力が空（`out_numel == 0`）
+    /// だからといって早期 return で `Ok` を返してはならない。
+    /// `out_shape` の積は `N=0` により `0` になり
+    /// `adaptive_pool2d_out_shape`（`checked_numel_for` は出力側の
+    /// バイトサイズのみを見る）ではこの契約違反を検出できないため、
+    /// 本関数（ホスト参照実装。`grad::adaptive_max_pool2d_with_fallback`
+    /// が `BackendOps::adaptive_max_pool2d` の `Unsupported` 時のみ
+    /// 呼ぶ）が `input` の `H`／`W` を直接見て拒否することを確認する。
+    #[test]
+    fn rejects_index_range_overflow_on_empty_batch_before_early_return() {
+        let w = i32::MAX as usize + 1;
+        let input = Tensor::<f32>::new(Vec::new(), &[0, 1, 1, w]).unwrap();
+        // `out_shape` は `N=0` を反映した `[0, 1, 1, 1]`（積 0）。呼び
+        // 出し元 `grad::adaptive_max_pool2d_with_fallback` が
+        // `adaptive_pool2d_out_shape` で検査・確定した値を渡す契約を
+        // そのまま模す。
+        let err = adaptive_max_pool2d(&input, &[0, 1, 1, 1]).unwrap_err();
+        assert_eq!(err, ShapeError::IndexRangeOverflow { index: w });
+    }
+}
+
 /// 平坦化・totalOrder ソート・隣接重複除去のホスト参照実装
 /// （`torch.unique(input, sorted=True)` の values のみ。イシュー
 /// #1734）。`BackendOps::unique` が `Unsupported` を返したときのみ

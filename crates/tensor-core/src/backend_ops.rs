@@ -2669,6 +2669,43 @@ pub trait BackendOps {
         ))
     }
 
+    /// 2 次元 adaptive max pooling（`torch.nn.AdaptiveMaxPool2d`
+    /// 相当。NCHW 固定。イシュー #2160・設計 `docs/pooling-ops-
+    /// design.md` §11）。`input: [N, C, H, W]`・`output_size:
+    /// [Hout, Wout]`（`1` 以上）。出力 shape は [`crate::ops_shape::
+    /// adaptive_pool2d_out_shape`] が検査・確定する
+    /// `[N, C, Hout, Wout]`。戻り値は `(values, index)` で、
+    /// `index`（`(n,c)` 平面内 flat 添字 `h·W+w`）の意味論は
+    /// [`Self::max_pool2d`] と同一。
+    ///
+    /// 出力位置 `(oh, ow)` ごとの窓は [`Self::adaptive_avg_pool2d`]
+    /// と同じ動的窓式（[`crate::adaptive_window`] を forward／VJP
+    /// 双方が単一情報源として共有）。タイ規則・NaN 伝播は
+    /// [`Self::max_pool2d`] と同一（先勝ち更新・`v > best ||
+    /// (v.is_nan() && !best.is_nan())`）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::adaptive_avg_pool2d`] と同じ非破壊拡張・fail-safe。
+    /// 既定は [`BackendError::Unsupported`] を返し、
+    /// `fandhe_ai_autodiff` 側は `Unsupported` のときのみホスト参照
+    /// 実装（`fandhe_ai_autodiff::eval::adaptive_max_pool2d`）へ
+    /// フォールバックする。実装側でも `input.shape()`／
+    /// `output_size` を
+    /// [`crate::ops_shape::adaptive_pool2d_out_shape`] で再検査し、
+    /// 不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn adaptive_max_pool2d(
+        &self,
+        _input: &Tensor<f32>,
+        _output_size: [usize; 2],
+    ) -> Result<(Tensor<f32>, crate::tensor::Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "adaptive_max_pool2d: default fail-safe (no fused adaptive_max_pool2d kernel available)"
+                .into(),
+        ))
+    }
+
     /// `dim` 軸に沿って `index` が指す位置へ `src` の値を書き込む
     /// （`torch.scatter`／`torch.scatter_add` 相当。`reduce` で選択。
     /// イシュー #1776）。出力 shape は `input.shape()` と恒等
@@ -5297,6 +5334,19 @@ mod tests {
         let input = Tensor::new(vec![0.0; 16], &[1, 1, 4, 4]).unwrap();
 
         let result = ops.adaptive_avg_pool2d(&input, [2, 2]);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::adaptive_max_pool2d`] の既定実装が非破壊拡張の
+    /// fail-safe 契約（`Unsupported`）を満たすことを確認する
+    /// （イシュー #2160）。
+    #[test]
+    fn adaptive_max_pool2d_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![0.0; 16], &[1, 1, 4, 4]).unwrap();
+
+        let result = ops.adaptive_max_pool2d(&input, [2, 2]);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

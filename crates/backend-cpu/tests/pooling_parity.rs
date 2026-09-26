@@ -15,7 +15,7 @@
 use fandhe_ai_autodiff::Tape;
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{BackendOps, Pool2dParams, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, Pool2dParams, ShapeError, Tensor};
 
 /// `CpuBackendOps` の必須メソッドへ委譲しつつ、対象の pooling
 /// メソッドだけは意図的に override せずデフォルト（`Unsupported`）の
@@ -310,4 +310,25 @@ fn backend_ops_pooling_rejects_zero_spatial_axis() {
 
     let err3 = ops.adaptive_avg_pool2d(&input, [2, 2]).unwrap_err();
     assert!(matches!(err3, BackendError::ShapeMismatch(_)));
+}
+
+/// `CpuBackendOps::adaptive_max_pool2d`（`ops.rs` の `BackendOps`
+/// 実装）が、出力が空（`N=0`）でも索引範囲検査（`H·W <= i32::MAX`）
+/// を出力形状の早期 return より前に行い `IndexRangeOverflow` を
+/// 返すことを確認する（codex-review 指摘・イシュー #2160）。
+/// `H*W == i32::MAX + 1` のため `out_shape` の積（`N=0` により `0`）
+/// では検出できない契約違反を、`input` の `H`／`W` を直接見る検査が
+/// 拾うことを確かめる。データは空バッチのため確保しない
+/// （`Tensor::new` は numel 0 で `Vec::new()` を受理する）。
+#[test]
+fn backend_ops_adaptive_max_pool2d_rejects_index_range_overflow_on_empty_batch() {
+    let ops = CpuBackendOps::new();
+    let w = i32::MAX as usize + 1;
+    let input = t(Vec::new(), &[0, 1, 1, w]);
+
+    let err = ops.adaptive_max_pool2d(&input, [1, 1]).unwrap_err();
+    assert!(matches!(
+        err,
+        BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { .. })
+    ));
 }

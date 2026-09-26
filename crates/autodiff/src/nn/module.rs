@@ -43,7 +43,8 @@ use crate::nn::normalization::{GroupNorm, InstanceNorm, group_norm_forward_host}
 use crate::nn::padding::ZeroPad2d;
 use crate::nn::pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 use crate::nn::pooling::{
-    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
+    AvgPool2d, GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d,
 };
 use crate::nn::transformer::Transformer;
 use crate::nn::transformer_decoder_layer::TransformerDecoderLayer;
@@ -488,14 +489,15 @@ pub trait Module {
     }
 
     /// この層が Pooling（[`MaxPool2d`]／[`MaxPool1d`]／[`AvgPool2d`]／
-    /// [`AvgPool1d`]／[`AdaptiveAvgPool2d`]／[`AdaptiveAvgPool1d`]）
-    /// かどうか（イシュー #1957）。`as_relu` と同じ bool フック方式
-    /// （`docs/compat-api-scope.md` §1 の閉集合維持。用途が
+    /// [`AvgPool1d`]／[`AdaptiveAvgPool2d`]／[`AdaptiveAvgPool1d`]／
+    /// [`AdaptiveMaxPool2d`]／[`AdaptiveMaxPool1d`]／[`GlobalPool`]）
+    /// かどうか（イシュー #1957・#2160）。`as_relu` と同じ bool フック
+    /// 方式（`docs/compat-api-scope.md` §1 の閉集合維持。用途が
     /// `fandhe_ai_facade::compat::sequential::Sequential::
     /// contains_resident_unsupported_layer` の真偽判定のみであり
     /// 型付き参照を必要とする消費者が無いため、`as_conv2d` 等と異なり
     /// `Option<&T>` ではなく bool を返す）。既定は `false`
-    /// （Pooling 6 型のみオーバーライドする）。
+    /// （Pooling 9 型のみオーバーライドする）。
     fn is_pooling(&self) -> bool {
         false
     }
@@ -1865,6 +1867,199 @@ impl Module for AdaptiveAvgPool1d {
             crate::grad::adaptive_avg_pool2d_with_fallback(ops, &x4, output_size4, &out_shape4)?;
         let lout = out_shape4[3];
         values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+}
+
+/// `AdaptiveMaxPool2d::forward` への委譲（イシュー #2160）。
+/// `(values, index)` のうち `values` のみを返す（`MaxPool2d` と同型。
+/// 索引が必要な場合は `AdaptiveMaxPool2d::forward` を直接呼ぶ）。
+impl Module for AdaptiveMaxPool2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (values, _index) = AdaptiveMaxPool2d::forward(self, input)?;
+        Ok(values)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape();
+        let out_shape = adaptive_pool2d_out_shape(in_shape, self.output_size())
+            .map_err(AutodiffError::Shape)?;
+        // tape 経路（`AdaptiveMaxPool2d::forward` →
+        // `adaptive_max_pool_ops::adaptive_max_pool2d`）と同じ
+        // `H·W <= i32::MAX` 索引範囲検査（codex-review・Cursor Bugbot
+        // 指摘・イシュー #2160。索引は `i32` のため）。
+        crate::adaptive_max_pool_ops::check_max_index_range(
+            in_shape.get(2).copied().unwrap_or(0),
+            in_shape.get(3).copied().unwrap_or(0),
+        )?;
+        let (values, _index) = crate::grad::adaptive_max_pool2d_with_fallback(
+            ops,
+            input,
+            self.output_size(),
+            &out_shape,
+        )?;
+        Ok(values)
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+}
+
+/// `AdaptiveMaxPool1d::forward` への委譲（`AdaptiveAvgPool1d` と同型の
+/// reshape 併合。イシュー #2160）。
+impl Module for AdaptiveMaxPool1d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (values, _index) = AdaptiveMaxPool1d::forward(self, input)?;
+        Ok(values)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // tape 経路（`AdaptiveMaxPool1d::forward` →
+        // `adaptive_max_pool_ops::adaptive_max_pool1d`）と同じ
+        // `l <= i32::MAX` 索引範囲検査（`h=1` 固定のため `hw == l`。
+        // codex-review・Cursor Bugbot 指摘・イシュー #2160）。
+        crate::adaptive_max_pool_ops::check_max_index_range(1, l)?;
+        let x4 = input
+            .contiguous()
+            .reshape(&[n, c, 1, l])
+            .map_err(AutodiffError::Shape)?;
+        let output_size4 = [1, self.output_size_1d()];
+        let out_shape4 =
+            adaptive_pool2d_out_shape(&[n, c, 1, l], output_size4).map_err(AutodiffError::Shape)?;
+        let (values4, _index4) =
+            crate::grad::adaptive_max_pool2d_with_fallback(ops, &x4, output_size4, &out_shape4)?;
+        let lout = out_shape4[3];
+        values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+}
+
+/// `GlobalPool::forward` への委譲（イシュー #2160）。`Var::forward`
+/// と同じ rank 分岐（rank 4 → `[1,1]` の adaptive、rank 3 → `1` の
+/// adaptive）を `forward_host` 側でも再現し、`keepdims=false` なら
+/// 縮約確定後に `[N,C]` へ reshape する（`GlobalPool::forward` doc
+/// 参照）。
+impl Module for GlobalPool {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        GlobalPool::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape().to_vec();
+        let reduced = match in_shape.len() {
+            4 => {
+                let (n, c) = (in_shape[0], in_shape[1]);
+                let out_shape =
+                    adaptive_pool2d_out_shape(&in_shape, [1, 1]).map_err(AutodiffError::Shape)?;
+                let values = match self.mode() {
+                    GlobalPoolMode::Avg => crate::grad::adaptive_avg_pool2d_with_fallback(
+                        ops,
+                        input,
+                        [1, 1],
+                        &out_shape,
+                    )?,
+                    GlobalPoolMode::Max => {
+                        // tape 経路（`GlobalPool::forward` →
+                        // `adaptive_max_pool_ops::adaptive_max_pool2d`）と
+                        // 同じ `H·W <= i32::MAX` 索引範囲検査
+                        // （codex-review・Cursor Bugbot 指摘・イシュー
+                        // #2160）。
+                        crate::adaptive_max_pool_ops::check_max_index_range(
+                            in_shape.get(2).copied().unwrap_or(0),
+                            in_shape.get(3).copied().unwrap_or(0),
+                        )?;
+                        crate::grad::adaptive_max_pool2d_with_fallback(
+                            ops,
+                            input,
+                            [1, 1],
+                            &out_shape,
+                        )?
+                        .0
+                    }
+                };
+                if self.keepdims() {
+                    values
+                } else {
+                    values.reshape(&[n, c]).map_err(AutodiffError::Shape)?
+                }
+            }
+            3 => {
+                let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+                // tape 経路（`GlobalPool::forward` →
+                // `adaptive_max_pool_ops::adaptive_max_pool1d`）と同じ
+                // `l <= i32::MAX` 索引範囲検査（`h=1` 固定のため
+                // `hw == l`。codex-review・Cursor Bugbot 指摘・イシュー
+                // #2160）。`x4` の contiguous 化・reshape（`input` の
+                // 前処理）より前に検査を完了させる（`Var::
+                // adaptive_avg_pool1d` 等の規律と同型。孤立 view
+                // ノードを残さない）。
+                if matches!(self.mode(), GlobalPoolMode::Max) {
+                    crate::adaptive_max_pool_ops::check_max_index_range(1, l)?;
+                }
+                let x4 = input
+                    .contiguous()
+                    .reshape(&[n, c, 1, l])
+                    .map_err(AutodiffError::Shape)?;
+                let out_shape4 = adaptive_pool2d_out_shape(&[n, c, 1, l], [1, 1])
+                    .map_err(AutodiffError::Shape)?;
+                let values4 = match self.mode() {
+                    GlobalPoolMode::Avg => crate::grad::adaptive_avg_pool2d_with_fallback(
+                        ops,
+                        &x4,
+                        [1, 1],
+                        &out_shape4,
+                    )?,
+                    GlobalPoolMode::Max => {
+                        crate::grad::adaptive_max_pool2d_with_fallback(
+                            ops,
+                            &x4,
+                            [1, 1],
+                            &out_shape4,
+                        )?
+                        .0
+                    }
+                };
+                if self.keepdims() {
+                    values4.reshape(&[n, c, 1]).map_err(AutodiffError::Shape)?
+                } else {
+                    values4.reshape(&[n, c]).map_err(AutodiffError::Shape)?
+                }
+            }
+            actual => {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 4,
+                    actual,
+                }));
+            }
+        };
+        Ok(reduced)
     }
 
     fn is_pooling(&self) -> bool {
@@ -3264,9 +3459,9 @@ mod tests {
         );
     }
 
-    /// [`Module::is_pooling`] が Pooling 6 型でのみ `true` を返し、
+    /// [`Module::is_pooling`] が Pooling 9 型でのみ `true` を返し、
     /// 他の層（`Relu`・`Linear`）では既定の `false` のままであること
-    /// を確認する（イシュー #1957。`compat::Sequential::
+    /// を確認する（イシュー #1957・#2160。`compat::Sequential::
     /// contains_resident_unsupported_layer` の判定入口として使う
     /// フックのため、閉集合であることをここで固定する）。
     #[test]
@@ -3277,6 +3472,9 @@ mod tests {
         let avg_pool1d = AvgPool1d::new(2, None, 0, true).unwrap();
         let adaptive_avg_pool2d = AdaptiveAvgPool2d::new([2, 2]).unwrap();
         let adaptive_avg_pool1d = AdaptiveAvgPool1d::new(2).unwrap();
+        let adaptive_max_pool2d = AdaptiveMaxPool2d::new([2, 2]).unwrap();
+        let adaptive_max_pool1d = AdaptiveMaxPool1d::new(2).unwrap();
+        let global_pool = GlobalPool::new(GlobalPoolMode::Avg, true);
 
         assert!(Module::is_pooling(&max_pool2d));
         assert!(Module::is_pooling(&max_pool1d));
@@ -3284,6 +3482,9 @@ mod tests {
         assert!(Module::is_pooling(&avg_pool1d));
         assert!(Module::is_pooling(&adaptive_avg_pool2d));
         assert!(Module::is_pooling(&adaptive_avg_pool1d));
+        assert!(Module::is_pooling(&adaptive_max_pool2d));
+        assert!(Module::is_pooling(&adaptive_max_pool1d));
+        assert!(Module::is_pooling(&global_pool));
 
         assert!(!Module::is_pooling(&Relu));
         let linear = Linear::new(3, 2, true, 7).unwrap();

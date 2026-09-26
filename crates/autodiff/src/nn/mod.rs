@@ -262,7 +262,8 @@ pub use normalization::{
 pub use padding::ZeroPad2d;
 pub use pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 pub use pooling::{
-    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
+    AvgPool2d, GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d,
 };
 pub use rnn::{
     Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,
