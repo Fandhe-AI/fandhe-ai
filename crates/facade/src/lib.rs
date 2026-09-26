@@ -4238,7 +4238,10 @@ struct LossOpsHoldDoctestGuard;
 /// {ParamGroup, ParamGroupStep}` を導入する。facade がどの経路
 /// （単一行・複数行・ネストした group での `pub use`・別名エクスポート）
 /// でこれらの名前を公開しても、ローカル定義との glob 衝突（E0659）で
-/// コンパイルが失敗する。
+/// コンパイルが失敗する。glob 衝突は名前を実際に参照したときにだけ
+/// 発生するため（未参照のままでは検出できない。イシュー #2304 の
+/// レビュー指摘）、`ParamGroupStep` は `fn __probe_trait<T: ?Sized +
+/// ParamGroupStep>() {}` という generic 境界で明示的に参照する。
 ///
 /// あわせて `fandhe_ai::compat::Sequential::compile_with_param_groups`
 /// （承認事項の設計案「`compile()` とは別の param_groups 対応エントリ」）
@@ -4281,6 +4284,8 @@ struct LossOpsHoldDoctestGuard;
 ///     pub trait ParamGroupStep {}
 /// }
 /// use __fandhe_param_groups_hold_probe::*;
+///
+/// fn __probe_trait<T: ?Sized + ParamGroupStep>() {}
 ///
 /// struct __FandheParamGroupsMarker;
 ///
@@ -4447,6 +4452,148 @@ struct ParamGroupsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct OptimizerExtHoldDoctestGuard;
+
+/// イシュー #2174（親 #2131。設計正本 `docs/autodiff-optimizer-state-
+/// dict-decision.md` §5「承認事項」）の facade 公開保留を固定する
+/// doctest 足場。`ParamGroupsHoldDoctestGuard`（イシュー #2173）と同型の
+/// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を
+/// glob import したスコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_optim_state_dict_hold_probe::OptimizerStateDict`（trait）を
+/// 導入する。facade がどの経路（単一行・複数行・ネストした group での
+/// `pub use`・別名エクスポート）でこの名前を公開しても、ローカル定義
+/// との glob 衝突（E0659）でコンパイルが失敗する。glob 衝突は名前を
+/// 実際に参照したときにだけ発生するため（未参照のままでは検出できない。
+/// イシュー #2304 のレビュー指摘）、`OptimizerStateDict` は
+/// `fn __probe_trait<T: ?Sized + OptimizerStateDict>() {}` という
+/// generic 境界で明示的に参照する。
+///
+/// あわせて `fandhe_ai::optim::{AdamW, Adam, RmsProp, Adagrad, Lamb}::
+/// state_dict`／`load_state_dict`（`fandhe_ai_autodiff::nn::optim::
+/// OptimizerStateDict` の facade 側 inherent 再エクスポートに相当する
+/// 経路）も同じブロックで保留固定する（trait 経由のプローブ呼び出しが
+/// inherent メソッドの型・引数不一致でコンパイル失敗する。
+/// `ParamGroupsHoldDoctestGuard` の `__FandheParamGroupsStepProbe` と
+/// 同方式）。`compat::Sequential` は既存の inherent `state_dict`／
+/// `load_state_dict` を持つためプローブ対象にしない。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// optimizer_state_dict_hold_doctest_globs_all_pub_modules`・
+/// `optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_optimizer_state_dict`）との
+/// 多層防御の位置づけ・承認未取得の経緯は `docs/autodiff-optimizer-
+/// state-dict-decision.md` §5「承認事項」節を参照。
+///
+/// 承認（facade への `OptimizerStateDict` 再エクスポート・各型への
+/// inherent `state_dict`／`load_state_dict` 追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_optim_state_dict_hold_probe {
+///     pub trait OptimizerStateDict {}
+/// }
+/// use __fandhe_optim_state_dict_hold_probe::*;
+///
+/// fn __probe_trait<T: ?Sized + OptimizerStateDict>() {}
+///
+/// struct __FandheOptimizerStateDictMarker;
+///
+/// trait __FandheOptimizerStateDictProbe {
+///     fn state_dict(&self) -> __FandheOptimizerStateDictMarker;
+///     fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker;
+/// }
+///
+/// impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::AdamW {
+///     fn state_dict(&self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+///     fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+/// }
+///
+/// impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Adam {
+///     fn state_dict(&self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+///     fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+/// }
+///
+/// impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::RmsProp {
+///     fn state_dict(&self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+///     fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+/// }
+///
+/// impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Adagrad {
+///     fn state_dict(&self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+///     fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+/// }
+///
+/// impl __FandheOptimizerStateDictProbe for fandhe_ai::optim::Lamb {
+///     fn state_dict(&self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+///     fn load_state_dict(&mut self) -> __FandheOptimizerStateDictMarker {
+///         __FandheOptimizerStateDictMarker
+///     }
+/// }
+///
+/// fn __probe(
+///     adamw: &mut fandhe_ai::optim::AdamW,
+///     adam: &mut fandhe_ai::optim::Adam,
+///     rmsprop: &mut fandhe_ai::optim::RmsProp,
+///     adagrad: &mut fandhe_ai::optim::Adagrad,
+///     lamb: &mut fandhe_ai::optim::Lamb,
+/// ) {
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::AdamW::state_dict(adamw);
+///     let _: __FandheOptimizerStateDictMarker = adamw.state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::AdamW::load_state_dict(adamw);
+///     let _: __FandheOptimizerStateDictMarker = adamw.load_state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adam::state_dict(adam);
+///     let _: __FandheOptimizerStateDictMarker = adam.state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adam::load_state_dict(adam);
+///     let _: __FandheOptimizerStateDictMarker = adam.load_state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::RmsProp::state_dict(rmsprop);
+///     let _: __FandheOptimizerStateDictMarker = rmsprop.state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::RmsProp::load_state_dict(rmsprop);
+///     let _: __FandheOptimizerStateDictMarker = rmsprop.load_state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adagrad::state_dict(adagrad);
+///     let _: __FandheOptimizerStateDictMarker = adagrad.state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Adagrad::load_state_dict(adagrad);
+///     let _: __FandheOptimizerStateDictMarker = adagrad.load_state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Lamb::state_dict(lamb);
+///     let _: __FandheOptimizerStateDictMarker = lamb.state_dict();
+///     let _: __FandheOptimizerStateDictMarker = fandhe_ai::optim::Lamb::load_state_dict(lamb);
+///     let _: __FandheOptimizerStateDictMarker = lamb.load_state_dict();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct OptimizerStateDictHoldDoctestGuard;
 
 /// イシュー #2176（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 /// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
