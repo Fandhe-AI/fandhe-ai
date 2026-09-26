@@ -615,6 +615,15 @@ pub trait Sampler: Send {
     /// 契約に合わせる。レビュー指摘: イシュー #2182 review・PR 内
     /// 是正。[`SamplerBatches::size_hint`]・[`HookedBatches::
     /// size_hint`] が本メソッドを使う）。
+    ///
+    /// カーソル追跡を持たないカスタム実装（既定のまま）では、
+    /// `next_batch` を消費しても本メソッドは epoch 全体の静的総数を
+    /// 返し続けるが、[`SamplerBatches::size_hint`]・[`HookedBatches::
+    /// size_hint`] は epoch 終了（`next_batch` が空 `Vec` を返した後）
+    /// を検知した時点で本メソッドの戻り値によらず `(0, Some(0))` を
+    /// 返すため、終了後に正の残数を報告し続けることはない（レビュー
+    /// 指摘: PR #2310 codex-review P2。正確な途中経過が必要なカスタム
+    /// 実装は本メソッドを override して残数を追跡すること）。
     fn remaining_batches(&self) -> Option<usize> {
         self.num_batches()
     }
@@ -976,6 +985,19 @@ impl<D: Dataset> Iterator for SamplerBatches<'_, D> {
         if self.pending_error.is_some() {
             return (1, Some(1));
         }
+        // `done` 到達後は `Sampler::remaining_batches` の戻り値を無視し
+        // 常に `(0, Some(0))` を返す（レビュー指摘: イシュー #2182
+        // review・PR #2310 codex-review P2）。`remaining_batches` の既定
+        // 実装は `num_batches()`（epoch 全体の静的総数）のままのため、
+        // `num_batches` のみ実装しカーソル追跡を持たないカスタム
+        // `Sampler` では、消費完了後もその静的値を返し続け
+        // `Iterator::size_hint` の「残り要素数」契約に反する。`done`
+        // フラグ（本イテレータが `next_batch` の空 `Vec` 番兵を検知済み）
+        // で上書きすることで、カスタム実装の追跡有無によらず終了後は
+        // 必ず `(0, Some(0))` を返す安全側の下限・上限にする。
+        if self.done {
+            return (0, Some(0));
+        }
         match self.sampler.remaining_batches() {
             Some(n) => (n, Some(n)),
             None => (0, None),
@@ -1207,6 +1229,11 @@ impl<T: Element> Iterator for HookedBatches<'_, T> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.pending_error.is_some() {
             return (1, Some(1));
+        }
+        // `SamplerBatches::size_hint` と同じ理由（上記コメント）で
+        // `done` 到達後は `(0, Some(0))` を優先する。
+        if self.done {
+            return (0, Some(0));
         }
         match self.sampler.remaining_batches() {
             Some(n) => (n, Some(n)),
@@ -1881,6 +1908,84 @@ mod tests {
                 index: 9999,
                 len: 4
             }
+        );
+    }
+
+    /// `remaining_batches` を override せず既定実装（`num_batches` を
+    /// そのまま返す。カーソル非依存）のままにしたカスタム
+    /// [`Sampler`]。`num_batches` のみ実装し進捗追跡を持たない第三者
+    /// 実装を模する（レビュー指摘: PR #2310 codex-review P2）。
+    struct StaticNumBatchesSampler {
+        cursor: usize,
+        total: usize,
+    }
+
+    impl Sampler for StaticNumBatchesSampler {
+        fn start_epoch(&mut self) -> Result<(), DataError> {
+            self.cursor = 0;
+            Ok(())
+        }
+
+        fn next_batch(&mut self) -> Vec<usize> {
+            if self.cursor >= self.total {
+                return Vec::new();
+            }
+            let idx = self.cursor;
+            self.cursor += 1;
+            vec![idx]
+        }
+
+        fn num_batches(&self) -> Option<usize> {
+            Some(self.total)
+        }
+        // `remaining_batches` は意図的に override しない（既定 =
+        // `num_batches` のまま。カーソル非依存の静的値）。
+    }
+
+    #[test]
+    fn size_hint_reports_zero_after_done_even_without_remaining_batches_override() {
+        // イシュー #2182 review 指摘（PR #2310 codex-review P2）: `Sampler`
+        // が `remaining_batches` を override せず（既定 = `num_batches`
+        // の静的値）に消費完了まで進んだ場合でも、`SamplerBatches::
+        // size_hint`／`HookedBatches::size_hint` は `done` 到達を検知して
+        // `(0, Some(0))` を返す必要がある（`Iterator::size_hint` の
+        // 「残り要素数」契約）。override 無しだと `remaining_batches` は
+        // 消費後も `total`（ここでは 3）を返し続けるため、`done` クランプ
+        // がなければ本テストは失敗する。
+        let ds = TensorDataset::new(tensor_2d(3, 1)).unwrap();
+        let sampler = StaticNumBatchesSampler {
+            cursor: 0,
+            total: 3,
+        };
+        let mut loader = SamplerDataLoader::new(ds, sampler).unwrap();
+        let mut batches = loader.iter();
+        assert_eq!(batches.size_hint(), (3, Some(3)));
+        for _ in 0..3 {
+            assert!(batches.next().is_some());
+        }
+        assert!(batches.next().is_none());
+        assert_eq!(
+            batches.size_hint(),
+            (0, Some(0)),
+            "done 後は remaining_batches の既定実装の戻り値によらず (0, Some(0)) を返すべき"
+        );
+
+        let ds = TensorDataset::new(tensor_2d(3, 1)).unwrap();
+        let sampler = StaticNumBatchesSampler {
+            cursor: 0,
+            total: 3,
+        };
+        let mut loader = HookedDataLoader::new(ds, sampler).unwrap();
+        let mut batches = loader.iter();
+        assert_eq!(batches.size_hint(), (3, Some(3)));
+        for _ in 0..3 {
+            assert!(batches.next().is_some());
+        }
+        assert!(batches.next().is_none());
+        assert_eq!(
+            batches.size_hint(),
+            (0, Some(0)),
+            "HookedBatches も done 後は (0, Some(0)) を返すべき"
         );
     }
 
