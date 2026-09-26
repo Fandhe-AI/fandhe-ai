@@ -67,6 +67,31 @@
 //!   できず握り潰していた入力）の扱いのみ」であり、有限な入力に
 //!   対する `dot_f64` の `f32` 丸め自体・正常系の出力は変えない**
 //!   （既存の PyTorch 参照テストの期待値・許容誤差は不変）。
+//! - **固定ステップの `max_eval` 厳守**（PR #2295 codex-review 是正）:
+//!   `LbfgsLineSearch::None`（固定ステップ）は、`x += t·d` 更新直後の
+//!   反復末尾で closure を再評価し次反復の `loss`/`flat_grad` を得る。
+//!   PyTorch はこの再評価を無条件に行い、その**後**で
+//!   `current_evals >= max_eval` を検査して break する（`torch/optim/
+//!   lbfgs.py::step` 参照）ため、予算をちょうど使い切った直後の反復でも
+//!   もう 1 回 closure を評価しうる。本実装はこの再評価を `self` の
+//!   状態にコミットしない範囲でのみ使う（`opt_cond`/`loss_diff` 等の
+//!   break 判定にしか影響しない。`last_loss`/`prev_loss`/
+//!   `prev_flat_grad` はいずれも再評価前に確定済み）ため、
+//!   `current_evals >= max_eval`（または `t == 0.0`。下記）の時点で
+//!   再評価を省いても、パラメータ更新結果・次回 `step` 呼び出し時の
+//!   内部状態は変わらない。**`LbfgsConfig::max_eval` の doc が「1 回の
+//!   step あたりの closure 評価回数の上限」を厳密な契約として謳って
+//!   いる**ため、本実装は固定ステップでも予算をハード上限として扱い、
+//!   予算切れ後の 1 回追加評価を行わない（PyTorch との意図的な逸脱）。
+//! - **`t == 0.0` では line search を行わない**（PR #2295 codex-review
+//!   是正）: `t`（ステップ幅）は `lr == 0.0`（`Lbfgs::new`/`set_lr` は
+//!   許可する）、または初回反復の `min(1, 1/‖g‖₁) · lr` が underflow
+//!   した場合に `0.0` になりうる。`t == 0.0` の試行パラメータは現在値と
+//!   完全に一致するため、strong Wolfe の初回評価・固定ステップの
+//!   再評価はいずれも同一入力に対する無駄な closure 呼び出しになる。
+//!   本実装は `t == 0.0` を検出した時点で line search／再評価を行わず
+//!   反復を終える（closure を追加で呼ばない）。PyTorch の逐語移植は
+//!   この判定を持たず、`t == 0` でも closure を評価しうる。
 //! - 対象外: `maximize`・複素数パラメータ・parameter group・sparse
 //!   勾配。facade（`fandhe_ai::optim`）への公開・`compile()` 統合は
 //!   別イシュー #2198（ユーザー承認を要する facade 公開面拡張）。
@@ -552,27 +577,42 @@ impl Lbfgs {
             let mut ls_func_evals = 0usize;
             match self.config.line_search {
                 LbfgsLineSearch::StrongWolfe => {
-                    let max_ls = self.config.line_search_steps.min(max_eval - current_evals);
-                    let (new_f, new_g, new_t, ls_evals) = strong_wolfe(
-                        &mut closure,
-                        &slot_shapes,
-                        &x,
-                        t,
-                        &d,
-                        loss as f32,
-                        &flat_grad,
-                        gtd,
-                        max_ls,
-                    )?;
-                    for k in 0..x.len() {
-                        x[k] = f32::mul_add(new_t, d[k], x[k]);
+                    // `t == 0.0`（`lr == 0.0`、または初回ステップ幅の
+                    // `min(1, 1/‖g‖₁) · lr` が underflow した場合）は
+                    // 試行パラメータ `x + t·d` が現在の `x` と完全に
+                    // 一致するため、strong Wolfe の初回評価（`torch/
+                    // optim/lbfgs.py::_strong_wolfe` の逐語移植は無条件に
+                    // 1 回評価する）が同一入力への無駄な closure 呼び出し
+                    // になる（P2 是正・codex-review 指摘・PR #2295）。
+                    // `t == 0.0` のまま line search を呼ばず no-op として
+                    // 反復を終える（`x`/`loss`/`flat_grad` は不変・
+                    // `ls_func_evals` は 0 のまま）。
+                    if t != 0.0 {
+                        let max_ls = self.config.line_search_steps.min(max_eval - current_evals);
+                        let (new_f, new_g, new_t, ls_evals) = strong_wolfe(
+                            &mut closure,
+                            &slot_shapes,
+                            &x,
+                            t,
+                            &d,
+                            loss as f32,
+                            &flat_grad,
+                            gtd,
+                            max_ls,
+                        )?;
+                        for k in 0..x.len() {
+                            x[k] = f32::mul_add(new_t, d[k], x[k]);
+                        }
+                        ensure_finite_slice(
+                            "Lbfgs::try_step_closure: x += t*d (strong Wolfe)",
+                            &x,
+                        )?;
+                        t = new_t;
+                        loss = f64::from(new_f);
+                        flat_grad = new_g;
+                        ls_func_evals = ls_evals;
+                        opt_cond = abs_max(&flat_grad) <= self.config.tolerance_grad;
                     }
-                    ensure_finite_slice("Lbfgs::try_step_closure: x += t*d (strong Wolfe)", &x)?;
-                    t = new_t;
-                    loss = f64::from(new_f);
-                    flat_grad = new_g;
-                    ls_func_evals = ls_evals;
-                    opt_cond = abs_max(&flat_grad) <= self.config.tolerance_grad;
                 }
                 LbfgsLineSearch::None => {
                     for k in 0..x.len() {
@@ -590,7 +630,28 @@ impl Lbfgs {
                     // でのみ行うため、ここで早期 return しても状態不変
                     // 契約を満たす）。
                     ensure_finite_slice("Lbfgs::try_step_closure: x += t*d (fixed step)", &x)?;
-                    if n_iter_local != self.config.max_iter {
+                    // 再評価を省く 3 条件（いずれも「再評価結果が
+                    // break 前の判定にしか使われず、`self` へコミット
+                    // する状態〈`last_loss`/`prev_loss`/`prev_flat_grad`〉
+                    // は既に確定済み」という前提が成り立つ場合のみ）:
+                    // (1) PyTorch 同様、最終反復では再評価しない
+                    //     （`if n_iter != max_iter` 相当）。
+                    // (2) `max_eval` を厳密な上限として扱う（P1 是正・
+                    //     codex-review 指摘・PR #2295）: 予算を既に
+                    //     使い切っている場合、再評価しても
+                    //     `current_evals >= max_eval` により直後の
+                    //     break 判定へ渡るだけなので省いても結果は
+                    //     変わらない。PyTorch は再評価を先に行ってから
+                    //     この判定をするため、ここが唯一の意図的な
+                    //     逸脱点（doc 冒頭「意図的な逸脱」参照）。
+                    // (3) `t == 0.0`（P2 是正の横展開）: 更新後の `x` が
+                    //     更新前と一致するため再評価しても `loss`/
+                    //     `flat_grad` は変化せず無駄な closure 呼び出し
+                    //     になる。
+                    let skip_reeval = n_iter_local == self.config.max_iter
+                        || current_evals >= max_eval
+                        || t == 0.0;
+                    if !skip_reeval {
                         let trial_params = unflatten_tensors(&x, &slot_shapes)?;
                         let (new_f, new_grads) = closure(&trial_params)?;
                         validate_closure_output(&slot_shapes, new_f, &new_grads)?;
@@ -1558,5 +1619,109 @@ mod tests {
         assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
         assert_eq!(opt.n_iter(), 0);
         assert_eq!(opt.func_evals(), 0);
+    }
+
+    /// P1 是正: 固定ステップ・`max_eval: Some(1)`・`max_iter > 1`・
+    /// 初回勾配が未収束の設定で、初回評価が予算を使い切った直後の
+    /// 反復では再評価せず終了すること（`func_evals() == 1`）。
+    /// パラメータは 1 ステップ分（`t = min(1, 1/‖g‖₁) · lr`）更新
+    /// されていることも確認する（PR #2295 codex-review 指摘・
+    /// lbfgs.rs:593 付近）。
+    #[test]
+    fn fixed_step_respects_max_eval_one_without_reevaluating() {
+        let cfg = LbfgsConfig {
+            line_search: LbfgsLineSearch::None,
+            max_eval: Some(1),
+            max_iter: 5,
+            ..LbfgsConfig::default()
+        };
+        let mut opt = Lbfgs::new(cfg).unwrap();
+        let param = t(vec![3.0], &[1]);
+        let call_count = std::cell::Cell::new(0usize);
+        let out = opt
+            .step_closure(&[param], |p| {
+                call_count.set(call_count.get() + 1);
+                let v = p[0].get(&[0]).unwrap();
+                (v * v, vec![t(vec![2.0 * v], &[1])])
+            })
+            .unwrap();
+        assert_eq!(
+            call_count.get(),
+            1,
+            "max_eval: Some(1) は固定ステップでも初回評価のみ許す"
+        );
+        assert_eq!(opt.func_evals(), 1);
+        // grad = 2*3 = 6, sum_abs = 6, t = min(1, 1/6)*lr(1.0) = 1/6,
+        // d = -6 → x = 3 + (1/6)*(-6) = 2.0（1 ステップ分の更新）。
+        assert!(
+            (out[0].get(&[0]).unwrap() - 2.0).abs() < 1e-5,
+            "1 ステップ分のパラメータ更新が適用されていない: {}",
+            out[0].get(&[0]).unwrap()
+        );
+    }
+
+    /// P1 是正: 固定ステップで `max_eval: Some(k)` の評価回数上限が
+    /// 反復を重ねても超過しないこと（未収束な定勾配の目的関数で
+    /// `max_iter` を大きく取り、予算切れが `max_iter` 到達より先に
+    /// 起きる設定にする）。
+    #[test]
+    fn fixed_step_respects_max_eval_cap_across_iterations() {
+        let cfg = LbfgsConfig {
+            line_search: LbfgsLineSearch::None,
+            max_eval: Some(3),
+            max_iter: 10,
+            ..LbfgsConfig::default()
+        };
+        let mut opt = Lbfgs::new(cfg).unwrap();
+        let param = t(vec![10.0], &[1]);
+        let call_count = std::cell::Cell::new(0usize);
+        // 勾配を定数 5.0 にして最適条件（`tolerance_grad`）に到達させず、
+        // `max_eval` の上限のみで反復が打ち切られるようにする。
+        opt.step_closure(&[param], |p| {
+            call_count.set(call_count.get() + 1);
+            let v = p[0].get(&[0]).unwrap();
+            (5.0 * v, vec![t(vec![5.0], &[1])])
+        })
+        .unwrap();
+        assert!(
+            call_count.get() <= 3,
+            "max_eval: Some(3) を超えて closure が評価された: calls={}",
+            call_count.get()
+        );
+        assert!(opt.func_evals() <= 3);
+    }
+
+    /// P2 是正: `lr = 0.0`（`Lbfgs::new` は許可する）の場合、strong
+    /// Wolfe の初回評価自体が `t == 0.0` の同一パラメータへの無駄な
+    /// 呼び出しになるため line search を行わず、closure 呼び出し回数が
+    /// 1（初回評価のみ）・パラメータ不変であること（PR #2295
+    /// codex-review 指摘・lbfgs.rs:878 付近）。
+    #[test]
+    fn strong_wolfe_skips_search_when_lr_is_zero() {
+        let cfg = LbfgsConfig {
+            line_search: LbfgsLineSearch::StrongWolfe,
+            lr: 0.0,
+            ..LbfgsConfig::default()
+        };
+        let mut opt = Lbfgs::new(cfg).unwrap();
+        let param = t(vec![3.0], &[1]);
+        let call_count = std::cell::Cell::new(0usize);
+        let out = opt
+            .step_closure(&[param], |p| {
+                call_count.set(call_count.get() + 1);
+                let v = p[0].get(&[0]).unwrap();
+                (v * v, vec![t(vec![2.0 * v], &[1])])
+            })
+            .unwrap();
+        assert_eq!(
+            call_count.get(),
+            1,
+            "lr = 0.0 は t == 0.0 のため line search を行わず初回評価のみ"
+        );
+        assert_eq!(
+            out[0].get(&[0]).unwrap(),
+            3.0,
+            "t == 0.0 ではパラメータ不変"
+        );
     }
 }
