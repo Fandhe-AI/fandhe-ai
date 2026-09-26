@@ -4143,6 +4143,142 @@ struct TransformerDecoderHoldDoctestGuard;
 #[allow(dead_code)]
 struct LossOpsHoldDoctestGuard;
 
+/// イシュー #2173（親 #2131。設計正本
+/// `docs/autodiff-param-groups-decision.md` §5「承認事項」）の facade
+/// 公開保留を固定する doctest 足場。`RnnConfigHoldDoctestGuard`
+/// （イシュー #2164）と同型の「正のプローブ 1 ブロック方式」を採る:
+/// facade の全 `pub mod` を glob import したスコープに、本ブロック内
+/// でのみ定義したローカル `__fandhe_param_groups_hold_probe::
+/// {ParamGroup, ParamGroupStep}` を導入する。facade がどの経路
+/// （単一行・複数行・ネストした group での `pub use`・別名エクスポート）
+/// でこれらの名前を公開しても、ローカル定義との glob 衝突（E0659）で
+/// コンパイルが失敗する。
+///
+/// あわせて `fandhe_ai::compat::Sequential::compile_with_param_groups`
+/// （承認事項の設計案「`compile()` とは別の param_groups 対応エントリ」）
+/// と `fandhe_ai::optim::{Sgd, AdamW, Adam, RmsProp, Adagrad, Lamb}::
+/// step_with_groups`（`fandhe_ai_autodiff::nn::optim::ParamGroupStep`
+/// の facade 側 inherent 再エクスポートに相当する経路）も同じブロックで
+/// 保留固定する（trait 経由のプローブ呼び出しが inherent メソッドの
+/// 型・引数不一致でコンパイル失敗する。`RnnConfigHoldDoctestGuard` の
+/// `__FandheRnnConfigWithConfigProbe` と同方式）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// param_groups_hold_doctest_globs_all_pub_modules`・
+/// `param_groups_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_param_groups`）との多層防御の
+/// 位置づけ・承認未取得の経緯は
+/// `docs/autodiff-param-groups-decision.md` §5「承認事項」節を参照。
+///
+/// 承認（facade への `ParamGroup`／`ParamGroupStep` 再エクスポート・
+/// `compile_with_param_groups` 新設）を得た日が来たら、本モジュール・
+/// 本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
+/// 同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_param_groups_hold_probe {
+///     pub struct ParamGroup;
+///     pub trait ParamGroupStep {}
+/// }
+/// use __fandhe_param_groups_hold_probe::*;
+///
+/// struct __FandheParamGroupsMarker;
+///
+/// trait __FandheParamGroupsCompileProbe {
+///     fn compile_with_param_groups(&self) -> __FandheParamGroupsMarker;
+/// }
+///
+/// impl __FandheParamGroupsCompileProbe for fandhe_ai::compat::Sequential {
+///     fn compile_with_param_groups(&self) -> __FandheParamGroupsMarker {
+///         __FandheParamGroupsMarker
+///     }
+/// }
+///
+/// trait __FandheParamGroupsStepProbe {
+///     fn step_with_groups(&self) -> __FandheParamGroupsMarker;
+/// }
+///
+/// impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Sgd {
+///     fn step_with_groups(&self) -> __FandheParamGroupsMarker {
+///         __FandheParamGroupsMarker
+///     }
+/// }
+///
+/// impl __FandheParamGroupsStepProbe for fandhe_ai::optim::AdamW {
+///     fn step_with_groups(&self) -> __FandheParamGroupsMarker {
+///         __FandheParamGroupsMarker
+///     }
+/// }
+///
+/// impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Adam {
+///     fn step_with_groups(&self) -> __FandheParamGroupsMarker {
+///         __FandheParamGroupsMarker
+///     }
+/// }
+///
+/// impl __FandheParamGroupsStepProbe for fandhe_ai::optim::RmsProp {
+///     fn step_with_groups(&self) -> __FandheParamGroupsMarker {
+///         __FandheParamGroupsMarker
+///     }
+/// }
+///
+/// impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Adagrad {
+///     fn step_with_groups(&self) -> __FandheParamGroupsMarker {
+///         __FandheParamGroupsMarker
+///     }
+/// }
+///
+/// impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Lamb {
+///     fn step_with_groups(&self) -> __FandheParamGroupsMarker {
+///         __FandheParamGroupsMarker
+///     }
+/// }
+///
+/// fn __probe(
+///     _: ParamGroup,
+///     seq: &fandhe_ai::compat::Sequential,
+///     sgd: &fandhe_ai::optim::Sgd,
+///     adamw: &fandhe_ai::optim::AdamW,
+///     adam: &fandhe_ai::optim::Adam,
+///     rmsprop: &fandhe_ai::optim::RmsProp,
+///     adagrad: &fandhe_ai::optim::Adagrad,
+///     lamb: &fandhe_ai::optim::Lamb,
+/// ) {
+///     let _: __FandheParamGroupsMarker =
+///         fandhe_ai::compat::Sequential::compile_with_param_groups(seq);
+///     let _: __FandheParamGroupsMarker = seq.compile_with_param_groups();
+///     let _: __FandheParamGroupsMarker = fandhe_ai::optim::Sgd::step_with_groups(sgd);
+///     let _: __FandheParamGroupsMarker = sgd.step_with_groups();
+///     let _: __FandheParamGroupsMarker = fandhe_ai::optim::AdamW::step_with_groups(adamw);
+///     let _: __FandheParamGroupsMarker = adamw.step_with_groups();
+///     let _: __FandheParamGroupsMarker = fandhe_ai::optim::Adam::step_with_groups(adam);
+///     let _: __FandheParamGroupsMarker = adam.step_with_groups();
+///     let _: __FandheParamGroupsMarker = fandhe_ai::optim::RmsProp::step_with_groups(rmsprop);
+///     let _: __FandheParamGroupsMarker = rmsprop.step_with_groups();
+///     let _: __FandheParamGroupsMarker = fandhe_ai::optim::Adagrad::step_with_groups(adagrad);
+///     let _: __FandheParamGroupsMarker = adagrad.step_with_groups();
+///     let _: __FandheParamGroupsMarker = fandhe_ai::optim::Lamb::step_with_groups(lamb);
+///     let _: __FandheParamGroupsMarker = lamb.step_with_groups();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct ParamGroupsHoldDoctestGuard;
+
 /// イシュー #2171（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 /// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
 /// `KvCacheHoldDoctestGuard`（#2084）と同型の「正のプローブ 1 ブロック

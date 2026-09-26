@@ -218,6 +218,46 @@ impl Lamb {
         &mut self,
         params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 既定 config の `lr`／`weight_decay` を全スロットへ一様に適用
+        // する `SlotHparams` 列を組んで委譲する（イシュー #2173。
+        // `step_with_slot_hparams` doc「`step()` との bit 一致契約」
+        // 参照）。
+        let hparams = vec![
+            super::SlotHparams {
+                lr: self.config.lr,
+                weight_decay: self.config.weight_decay,
+            };
+            params_and_grads.len()
+        ];
+        self.step_with_slot_hparams(params_and_grads, &hparams)
+    }
+
+    /// [`Lamb::step`] の実装本体（イシュー #2173。param groups 対応の
+    /// ため `lr`／`weight_decay` をスロット単位の [`super::SlotHparams`]
+    /// として受け取る形へ抽出した）。`hparams[i]` はスロット `i`
+    /// （`params_and_grads[i]`）へ適用する `lr`／`weight_decay`
+    /// （trust ratio の計算式内の `lr` 参照も含め、全てスロット単位の
+    /// `hp.lr` へ差し替える。モジュール doc「実装形」節の `s_i`／`t_i`／
+    /// `f` はいずれも `lr` に依存するため）。
+    ///
+    /// **`step()` との bit 一致契約**: `hparams` の全要素が
+    /// `self.config.lr`／`self.config.weight_decay` と等しいとき、
+    /// 本メソッドの出力は [`Lamb::step`] 単体の出力と bit 完全一致
+    /// する。`beta1`／`beta2`／`eps` はグループで上書きしない共有
+    /// ハイパーパラメータのまま（モジュール doc「追加しないもの」節）。
+    pub(crate) fn step_with_slot_hparams(
+        &mut self,
+        params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
+        hparams: &[super::SlotHparams],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        if hparams.len() != params_and_grads.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Lamb::step_with_slot_hparams: hparams.len() ({}) != params_and_grads.len() ({})",
+                hparams.len(),
+                params_and_grads.len()
+            )));
+        }
+
         // 検証フェーズ（状態変更なし。`self.states` の遅延初期化も
         // 行わない）: `grad.shape() == param.shape()` はスロット数・
         // 既存状態を一切参照せず判定できるため先に全ペアを検証する
@@ -257,9 +297,6 @@ impl Lamb {
         let bias_correction1 = 1.0 - beta1_pow_t;
         let bias_correction2 = 1.0 - beta2_pow_t;
         let bias_correction2_sqrt = bias_correction2.sqrt() as f32;
-        let step_size = (self.config.lr as f64 / bias_correction1) as f32;
-        let lr = self.config.lr;
-        let weight_decay = self.config.weight_decay;
 
         // 計算フェーズ（状態変更なし）: 全スロットの新 m/v/t/trust
         // ratio をスクラッチへ計算する。いずれかのスロットで非有限
@@ -274,6 +311,12 @@ impl Lamb {
 
         let mut scratch: Vec<Scratch> = Vec::with_capacity(params_and_grads.len());
         for (idx, (param, grad)) in params_and_grads.iter().enumerate() {
+            // スロット単位の `lr`／`weight_decay`（既定グループでは
+            // `self.config.lr`／`self.config.weight_decay` と同値になる。
+            // イシュー #2173）。
+            let lr = hparams[idx].lr;
+            let weight_decay = hparams[idx].weight_decay;
+            let step_size = (lr as f64 / bias_correction1) as f32;
             let param_data = dense_vec_ref(param);
             let grad_data = dense_vec_ref(grad);
             let existing = self.states.get(idx);
