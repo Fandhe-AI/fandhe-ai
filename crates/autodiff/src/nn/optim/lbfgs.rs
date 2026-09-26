@@ -129,7 +129,6 @@ pub struct Lbfgs {
     ro: VecDeque<f32>,
     h_diag: f32,
     prev_flat_grad: Option<Vec<f32>>,
-    prev_loss: Option<f64>,
     /// 直近 `step` 呼び出しの初回評価損失（PyTorch `step()` の戻り値
     /// `orig_loss` に相当）。
     last_loss: Option<f32>,
@@ -192,7 +191,6 @@ impl Lbfgs {
             ro: VecDeque::new(),
             h_diag: 1.0,
             prev_flat_grad: None,
-            prev_loss: None,
             last_loss: None,
         })
     }
@@ -331,7 +329,10 @@ impl Lbfgs {
         let mut ro = self.ro.clone();
         let mut h_diag = self.h_diag;
         let mut prev_flat_grad = self.prev_flat_grad.clone();
-        let mut prev_loss = self.prev_loss;
+        // ループ内で毎反復上書きしてから同一反復内でのみ読む作業用
+        // スカラー（`prev_flat_grad` と異なり `step()` 呼び出しをまたいで
+        // 読まれることはないため `self` へは保持しない）。
+        let mut prev_loss: f64;
 
         // `x`: 現在の実パラメータ値のフラット化。line search・固定
         // ステップの各反復末尾で実際に更新される（PyTorch
@@ -358,10 +359,14 @@ impl Lbfgs {
                 ro.clear();
                 h_diag = 1.0;
             } else {
-                let prev_g = prev_flat_grad.as_ref().expect(
-                    "invariant: prev_flat_grad は n_iter_global > 1 の時点で必ず Some\
-                     （直前の反復で必ず設定されるため）",
-                );
+                let prev_g = prev_flat_grad.as_ref().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "Lbfgs::try_step_closure: n_iter_global > 1 の時点で \
+                         prev_flat_grad が None（直前の反復で必ず設定される \
+                         内部不変条件違反。ロジック変更時の退行検出用）"
+                            .to_string(),
+                    )
+                })?;
                 let y: Vec<f32> = flat_grad
                     .iter()
                     .zip(prev_g.iter())
@@ -404,7 +409,7 @@ impl Lbfgs {
             }
 
             prev_flat_grad = Some(flat_grad.clone());
-            prev_loss = Some(loss);
+            prev_loss = loss;
 
             t = if n_iter_global == 1 {
                 let sum_abs = abs_sum_f64(&flat_grad) as f32;
@@ -462,8 +467,7 @@ impl Lbfgs {
             func_evals += ls_func_evals as u64;
 
             let dt_max = d.iter().fold(0f32, |m, &di| m.max((di * t).abs()));
-            let loss_diff =
-                (loss - prev_loss.expect("prev_loss は直前で必ず Some に設定済み")).abs();
+            let loss_diff = (loss - prev_loss).abs();
             if n_iter_local == self.config.max_iter {
                 break;
             }
@@ -493,7 +497,6 @@ impl Lbfgs {
         self.ro = ro;
         self.h_diag = h_diag;
         self.prev_flat_grad = prev_flat_grad;
-        self.prev_loss = prev_loss;
         self.last_loss = Some(orig_loss);
 
         Ok(out)
@@ -650,6 +653,8 @@ where
 /// 判定は常に PyTorch 既定値を使う）。
 ///
 /// 戻り値は `(損失, 勾配, 採用した step size, ls_func_evals)`。
+// `torch/optim/lbfgs.py::_strong_wolfe` の逐語移植（本ファイル冒頭 doc
+// 参照）のため、引数を構造体へまとめず PyTorch 側と 1 対 1 対応させる。
 #[allow(clippy::too_many_arguments)]
 fn strong_wolfe<F>(
     closure: &mut F,
@@ -954,7 +959,7 @@ mod tests {
     fn rejects_slot_count_change_after_first_step() {
         let mut opt = Lbfgs::new(LbfgsConfig::default()).unwrap();
         let param = t(vec![1.0], &[1]);
-        opt.step_closure(&[param.clone()], |p| {
+        opt.step_closure(std::slice::from_ref(&param), |p| {
             let g = t(vec![2.0 * p[0].get(&[0]).unwrap()], &[1]);
             (p[0].get(&[0]).unwrap().powi(2), vec![g])
         })
@@ -1107,7 +1112,7 @@ mod tests {
         let mut opt = Lbfgs::new(cfg).unwrap();
         let param = t(vec![3.0], &[1]);
         let out = opt
-            .step_closure(&[param.clone()], |p| {
+            .step_closure(std::slice::from_ref(&param), |p| {
                 let v = p[0].get(&[0]).unwrap();
                 (v * v, vec![t(vec![2.0 * v], &[1])])
             })
@@ -1150,7 +1155,7 @@ mod tests {
         // 初回評価 1 回 + line search 最大 1 回（`line_search_steps` の
         // キャップ）で高々 2 回。
         assert!(
-            call_count.get_mut().to_owned() <= 2,
+            *call_count.get_mut() <= 2,
             "line_search_steps キャップが効いていない: calls={}",
             call_count.get_mut()
         );
