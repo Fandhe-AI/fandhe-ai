@@ -4362,6 +4362,84 @@ struct ParamGroupsHoldDoctestGuard;
 #[allow(dead_code)]
 struct OptimizerExtHoldDoctestGuard;
 
+/// イシュー #2198（親 #2172「LBFGS optimizer（Hessian 近似）の実装」・
+/// ルート #2131「PyTorch／TF 置き換えの API 網羅」）の facade 公開保留を
+/// 固定する doctest 足場。`OptimizerExtHoldDoctestGuard`（#2171）と同型の
+/// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_lbfgs_hold_probe::{Lbfgs, LbfgsConfig, LbfgsLineSearch}` を
+/// 導入し、3 個すべてを引数に取る `__probe` 関数を書く。facade がどの
+/// 経路（単一行・複数行・ネストした group での `pub use`・別名
+/// エクスポート・facade 独自の `struct`／`type` 宣言）でこれらの名前を
+/// 公開しても、ローカル定義との glob 衝突（E0659 等）でコンパイルが
+/// 失敗する。
+///
+/// `Lbfgs`（L-BFGS。Hessian 近似）は `fandhe_ai_autodiff::nn::optim` に
+/// 実装済み（内部クレート限定。`crates/autodiff/src/nn/optim/lbfgs.rs`。
+/// イシュー #2197）だが、facade（`fandhe_ai::optim`）からの再エクスポート
+/// および `compat::Sequential::compile()` の `Optimizer` enum への
+/// variant 追加は未承認のため保留する（`docs/autodiff-lbfgs-decision.md`
+/// §7 承認事項）。
+///
+/// 本足場は 2 系統の否定ガードを兼ねる。
+///
+/// 1. **型名の再エクスポート・独自宣言**（`OptimizerExtHoldDoctestGuard`
+///    と同じ機構）: 下記の正のプローブと、ソース走査ガード
+///    （`crates/facade/tests/api_surface.rs::
+///    lbfgs_hold_doctest_globs_all_pub_modules`・
+///    `lbfgs_hold_doctest_probe_body_matches_fixed_contract`・
+///    `facade_does_not_reexport_or_declare_lbfgs_items`）。
+/// 2. **`compat::Optimizer` enum への `Lbfgs` variant 追加**（型名の
+///    再エクスポートを伴わない enum variant 追加は 1. の走査では検出
+///    できないため、下記の入れ子 `__fandhe_lbfgs_variant_probe` モジュール
+///    で `Optimizer` の variant 名前空間を glob import し、ローカル定義
+///    との衝突で検出する）と対応するソース走査ガード
+///    （`crates/facade/tests/api_surface.rs::
+///    compat_optimizer_enum_has_no_lbfgs_variant`）。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える。承認後の実装設計は decision doc §8 を参照）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_lbfgs_hold_probe {
+///     pub struct Lbfgs;
+///     pub struct LbfgsConfig;
+///     pub struct LbfgsLineSearch;
+/// }
+/// use __fandhe_lbfgs_hold_probe::*;
+///
+/// fn __probe(_: Lbfgs, _: LbfgsConfig, _: LbfgsLineSearch) {}
+///
+/// mod __fandhe_lbfgs_variant_probe {
+///     mod __local {
+///         pub struct Lbfgs;
+///     }
+///     use self::__local::*;
+///     use ::fandhe_ai::compat::Optimizer::*;
+///     fn __probe_variant() {
+///         let _: Lbfgs = Lbfgs;
+///     }
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct LbfgsHoldDoctestGuard;
+
 /// イシュー #2169（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 /// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
 /// `OptimizerExtHoldDoctestGuard`（#2171）が型名の glob 衝突を使うのに
