@@ -33,6 +33,8 @@
 //! `adamw.rs` とは異なり、PyTorch の state dtype に合わせて `f32` で
 //! 持つ）。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -204,6 +206,23 @@ impl NAdam {
             }
         }
 
+        // イシュー #2174 PR #2304 codex-review P1 是正: `load_state_dict` は
+        // `step_count` の値域を検査せず、`step()` の到達可能な全域（`0..=
+        // u64::MAX`）をそのまま受理する（overflow 判定は本 `checked_add` に
+        // 一元化。`state_dict.rs` モジュール冒頭 doc「符号化」節）。この判定を
+        // `self.states` の遅延初期化より前に確定させ、Err 時に状態（`self.
+        // states`・`step_count`）が一切変化しないアトミック性を保証する
+        // （従来は states 初期化が先に実行され、初回 step かつ step_count が
+        // u64::MAX のときに空スロットが書き込まれたまま Err を返す部分更新が
+        // 起きていた）。
+        let next_step_count = self.step_count.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "NAdam::step: step_count overflow: too many step() calls (or a restored step_count too \
+                 close to u64::MAX) for this optimizer to advance further"
+                    .to_string(),
+            )
+        })?;
+
         if self.states.is_empty() && !params_and_grads.is_empty() {
             self.states = params_and_grads
                 .iter()
@@ -215,7 +234,7 @@ impl NAdam {
                 .collect();
         }
 
-        self.step_count += 1;
+        self.step_count = next_step_count;
         let step = self.step_count;
         self.beta2_pow_t *= self.config.beta2 as f64;
         let bc2 = (1.0 - self.beta2_pow_t) as f32;
@@ -235,8 +254,16 @@ impl NAdam {
         // `powf` を使い f64 で計算してから f32 へ落とす（`adamw.rs` の
         // 逐次積〈`beta.powi`〉とは異なり、`momentum_decay` が非整数の
         // 実数指数を要するため）。
+        // `step + 1` を `u64` のまま加算すると `step == u64::MAX` で
+        // オーバーフローしうる（`load_state_dict` は `step_count` の
+        // 値域を検査せず `step()` の到達可能な全域〈`0..=u64::MAX`〉を
+        // 受理するため）。panic しないよう、この式自体を `f64` 加算に
+        // 倒して u64 オーバーフロー経路を構造的に消しておく。この規模
+        // の `step` では `f64` の丸め誤差が支配的で `+1` の寄与は
+        // 無視できるため数値的な意味も変わらない。
         let mu = beta1 as f64 * (1.0 - 0.5 * 0.96f64.powf(step as f64 * momentum_decay));
-        let mu_next = beta1 as f64 * (1.0 - 0.5 * 0.96f64.powf((step + 1) as f64 * momentum_decay));
+        let mu_next =
+            beta1 as f64 * (1.0 - 0.5 * 0.96f64.powf((step as f64 + 1.0) * momentum_decay));
         self.mu_product *= mu as f32;
         let mu_product = self.mu_product;
         let mu_product_next = mu_product * mu_next as f32;
@@ -294,6 +321,81 @@ impl NAdam {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "nadam"`・バッファ名
+/// `exp_avg`／`exp_avg_sq`・`beta2_pow_t`／`mu_product` あり
+/// （`beta1_pow_t` なし。NAdam は `beta1` の bias correction を
+/// `mu_product` で表現する）。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for NAdam {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(5 + self.states.len() * 2);
+        out.insert(
+            super::state_dict::marker_key("nadam"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::NUM_SLOTS_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.states.len() as u64)?,
+        );
+        out.insert(
+            super::state_dict::BETA2_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta2_pow_t)?,
+        );
+        out.insert(
+            super::state_dict::MU_PRODUCT_KEY.to_string(),
+            Tensor::new(vec![self.mu_product], &[1])?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "exp_avg"),
+                Tensor::new(slot.exp_avg.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "exp_avg_sq"),
+                Tensor::new(slot.exp_avg_sq.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded = super::state_dict::decode_state_dict(
+            "nadam",
+            &state,
+            &["exp_avg", "exp_avg_sq"],
+            false,
+            true,
+            true,
+        )?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let exp_avg = buffers.remove("exp_avg").unwrap_or_default();
+                let exp_avg_sq = buffers.remove("exp_avg_sq").unwrap_or_default();
+                SlotState {
+                    shape,
+                    exp_avg,
+                    exp_avg_sq,
+                }
+            })
+            .collect();
+        self.step_count = decoded.step_count;
+        self.beta2_pow_t = decoded.beta2_pow_t.unwrap_or(1.0);
+        self.mu_product = decoded.mu_product.unwrap_or(1.0);
+        self.states = states;
+        Ok(())
     }
 }
 
@@ -518,5 +620,34 @@ mod tests {
 
         opt.set_lr(0.001).unwrap();
         assert_eq!(opt.step_count(), 1);
+    }
+
+    /// P0/P1 レビュー指摘（イシュー #2174 PR #2304）の回帰検査:
+    /// `state_dict` からの復元で `step_count` が `u64::MAX` 近傍になった
+    /// 状態を模し、2 回目の `step()` で `self.step_count += 1` の素朴な
+    /// 加算がオーバーフロー panic しないこと（`checked_add` により
+    /// 型付きエラーへ落ちること）を固定する。`NAdam` は `mu_next`
+    /// 導出で `step + 1` 相当の式をさらに評価するが、`u64` 加算を
+    /// 経由しない `f64` 式のため overflow せず、`load_state_dict` は
+    /// `step_count` の値域を検査しない（`step()` の到達可能な全域を
+    /// 受理する）。
+    #[test]
+    fn step_returns_typed_error_instead_of_panicking_on_step_count_overflow() {
+        let mut opt = NAdam::new(NAdamConfig::default()).unwrap();
+        opt.step_count = u64::MAX - 1;
+        let param = t(vec![0.5], &[1]);
+        let grad = t(vec![0.3], &[1]);
+
+        // 1 回目: `step_count` が `u64::MAX - 1` → `u64::MAX` へ進み
+        // 成功する（`mu_next` 導出の `(step as f64 + 1.0)` も `u64`
+        // 加算を経由しないため overflow しない）。
+        assert!(opt.step(&[(&param, &grad)]).is_ok());
+        assert_eq!(opt.step_count(), u64::MAX);
+
+        // 2 回目: `step_count` が既に `u64::MAX` のため素朴な `+= 1` なら
+        // panic する。`checked_add` により panic せず型付きエラーを
+        // 返すことを確認する。
+        let result = opt.step(&[(&param, &grad)]);
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
     }
 }

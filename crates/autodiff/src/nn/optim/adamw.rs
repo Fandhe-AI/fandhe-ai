@@ -13,6 +13,8 @@
 //! 既存の不変更新パターン（`tests/nn_train_convergence.rs`）にそのまま
 //! 差し込める。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -206,6 +208,23 @@ impl AdamW {
             )));
         }
 
+        // イシュー #2174 PR #2304 codex-review P1 是正: `load_state_dict` は
+        // `step_count` の値域を検査せず、`step()` の到達可能な全域（`0..=
+        // u64::MAX`）をそのまま受理する（overflow 判定は本 `checked_add` に
+        // 一元化。`state_dict.rs` モジュール冒頭 doc「符号化」節）。この判定を
+        // `self.states` の遅延初期化より前に確定させ、Err 時に状態（`self.
+        // states`・`step_count`）が一切変化しないアトミック性を保証する
+        // （従来は states 初期化が先に実行され、初回 step かつ step_count が
+        // u64::MAX のときに空スロットが書き込まれたまま Err を返す部分更新が
+        // 起きていた）。
+        let next_step_count = self.step_count.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "AdamW::step: step_count overflow: too many step() calls (or a restored step_count too \
+                 close to u64::MAX) for this optimizer to advance further"
+                    .to_string(),
+            )
+        })?;
+
         if self.states.is_empty() && !params_and_grads.is_empty() {
             self.states = params_and_grads
                 .iter()
@@ -248,7 +267,7 @@ impl AdamW {
             }
         }
 
-        self.step_count += 1;
+        self.step_count = next_step_count;
         self.beta1_pow_t *= self.config.beta1 as f64;
         self.beta2_pow_t *= self.config.beta2 as f64;
         let bias_correction1 = 1.0 - self.beta1_pow_t;
@@ -303,6 +322,72 @@ impl AdamW {
         }
 
         Ok(out)
+    }
+}
+
+/// [`super::OptimizerStateDict`]（イシュー #2174。`state_dict` モジュール
+/// 冒頭 doc「キー配置」節）。`kind = "adamw"`・バッファ名 `m`／`v`・
+/// `beta1_pow_t`／`beta2_pow_t` あり・`mu_product` なし。検証本体は
+/// `super::state_dict::decode_state_dict` へ委譲する薄い shim。
+impl super::OptimizerStateDict for AdamW {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out = HashMap::with_capacity(5 + self.states.len() * 2);
+        out.insert(
+            super::state_dict::marker_key("adamw"),
+            Tensor::new(vec![super::state_dict::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            super::state_dict::STEP_COUNT_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.step_count)?,
+        );
+        out.insert(
+            super::state_dict::NUM_SLOTS_KEY.to_string(),
+            super::state_dict::encode_u16x4_tensor(self.states.len() as u64)?,
+        );
+        out.insert(
+            super::state_dict::BETA1_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta1_pow_t)?,
+        );
+        out.insert(
+            super::state_dict::BETA2_POW_T_KEY.to_string(),
+            super::state_dict::encode_f64_tensor(self.beta2_pow_t)?,
+        );
+        for (i, slot) in self.states.iter().enumerate() {
+            out.insert(
+                super::state_dict::slot_key(i, "m"),
+                Tensor::new(slot.m.clone(), &slot.shape)?,
+            );
+            out.insert(
+                super::state_dict::slot_key(i, "v"),
+                Tensor::new(slot.v.clone(), &slot.shape)?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let decoded =
+            super::state_dict::decode_state_dict("adamw", &state, &["m", "v"], true, true, false)?;
+        let states = decoded
+            .slots
+            .into_iter()
+            .map(|(shape, mut buffers)| {
+                let m = buffers.remove("m").unwrap_or_default();
+                let v = buffers.remove("v").unwrap_or_default();
+                SlotState { shape, m, v }
+            })
+            .collect();
+        // ここまでの検証（`decode_state_dict`）を全件通過した後にのみ
+        // 自身のフィールドを一括代入する（途中で `Err` の場合 `self` は
+        // 一切変わらない。`state_dict` モジュール冒頭 doc「検証順」節）。
+        self.step_count = decoded.step_count;
+        self.beta1_pow_t = decoded.beta1_pow_t.unwrap_or(1.0);
+        self.beta2_pow_t = decoded.beta2_pow_t.unwrap_or(1.0);
+        self.states = states;
+        Ok(())
     }
 }
 
@@ -441,6 +526,32 @@ mod tests {
         let grad2 = t(vec![0.1, 0.1, 0.1], &[3]);
         let result = opt.step(&[(&param2, &grad2)]);
         assert!(matches!(result, Err(AutodiffError::Shape(_))));
+    }
+
+    /// P0/P1 レビュー指摘（イシュー #2174 PR #2304）の回帰検査:
+    /// `state_dict` からの復元で `step_count` が `u64::MAX` 近傍に
+    /// なった状態を模し、2 回目の `step()` で `self.step_count += 1`
+    /// の素朴な加算がオーバーフロー panic しないこと（`checked_add`
+    /// により型付きエラーへ落ちること）を固定する。`load_state_dict`
+    /// は `step_count` の値域を検査しないため、overflow 判定は本テスト
+    /// が固定する `step()` 側の `checked_add` にのみ依存する。
+    #[test]
+    fn step_returns_typed_error_instead_of_panicking_on_step_count_overflow() {
+        let mut opt = AdamW::new(AdamWConfig::default()).unwrap();
+        opt.step_count = u64::MAX - 1;
+        let param = t(vec![1.0, 2.0], &[2]);
+        let grad = t(vec![0.1, 0.1], &[2]);
+
+        // 1 回目: `step_count` が `u64::MAX - 1` → `u64::MAX` へ進み成功
+        // する。
+        assert!(opt.step(&[(&param, &grad)]).is_ok());
+        assert_eq!(opt.step_count(), u64::MAX);
+
+        // 2 回目: `step_count` が既に `u64::MAX` のため素朴な `+= 1` なら
+        // panic する。`checked_add` により panic せず型付きエラーを
+        // 返すことを確認する。
+        let result = opt.step(&[(&param, &grad)]);
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
     }
 
     /// decoupled 性の直接確認: 勾配が常に 0 のとき `m`/`v` は 0 のまま
