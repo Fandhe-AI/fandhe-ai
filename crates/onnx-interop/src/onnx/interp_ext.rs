@@ -50,9 +50,9 @@ use half::f16;
 
 use super::interp::{
     InterpError, Value, attr_f32_typed, attr_i64_typed, attr_ints_typed, attr_string, autodiff_err,
-    find_attr_unique, get_bool, get_f32, get_value, i64_vec_and_shape, input_name,
+    check_attr_type, find_attr_unique, get_bool, get_f32, get_value, i64_vec_and_shape, input_name,
 };
-use super::proto::NodeProto;
+use super::proto::{NodeProto, attribute_type};
 use crate::ops::{OpError, normalize_axis};
 
 /// `Expand`／`Resize` が実体化（`contiguous()`／`interpolate()`）する
@@ -113,6 +113,29 @@ fn check_expand_output_bytes<T>(node: &NodeProto, out_shape: &[usize]) -> Result
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
         .ok_or(ShapeError::ElementCountOverflow)?;
     check_materialize_bytes(node, "shape", numel, std::mem::size_of::<T>())
+}
+
+/// `ReduceMean` 専用の `axes`（INTS 型属性）読み取り。共通の
+/// [`attr_ints_typed`] は INTS 属性が存在しつつ要素が空の場合を
+/// 一律で拒否する（`Conv` 系属性では空リストが「省略」との無言
+/// fallback 抜け道になるため。`interp.rs::attr_ints_typed` doc
+/// 参照）が、ReduceMean-18 の `axes` は明示的な空リストが
+/// `noop_with_empty_axes` に従う有効な入力（恒等／全軸縮約）で
+/// あり、`attr_ints_typed` を再利用すると到達不能な分岐になって
+/// いた（codex-review P1・Cursor Bugbot 重複指摘。イシュー #2313）。
+/// 型検証（`AttributeType == INTS`）は共有しつつ空リストのみ許容
+/// する専用ヘルパとして分離する。
+fn attr_ints_typed_allow_empty<'a>(
+    node: &'a NodeProto,
+    name: &str,
+) -> Result<Option<&'a [i64]>, InterpError> {
+    match find_attr_unique(node, name)? {
+        None => Ok(None),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::INTS, "INTS")?;
+            Ok(Some(a.ints.as_slice()))
+        }
+    }
 }
 
 /// 単一入力（`node.input[0]`）を要求する op 共通の入力数検査。
@@ -277,6 +300,21 @@ pub(super) fn compute_where(
     let cond = get_bool(env, node, input_name(node, 0)?)?;
     let x = get_f32(env, node, input_name(node, 1)?)?;
     let y = get_f32(env, node, input_name(node, 2)?)?;
+    // `Var::where_cond` は `cond`／`x`／`y` を 3 入力ぶん双方向
+    // ブロードキャストして `out_shape` へ実体化する（`ab_shape =
+    // broadcast_shape(x, y)` → `out_shape = broadcast_shape(ab_shape,
+    // cond)`。`crates/autodiff/src/var.rs::Var::where_cond` doc と同じ
+    // 手順を事前に再現し、実体化前に確保バイト数の上限を検査する
+    // （`Expand`／`Resize` と同じ [`check_materialize_bytes`]。小さな
+    // 入力形状〈例 `[N,1]`／`[1,N]`〉からの N^2 要素確保でプロセス
+    // メモリを枯渇させられる。イシュー #2313 codex-review 指摘）。
+    let ab_shape = broadcast_shape(x.shape(), y.shape())?;
+    let out_shape = broadcast_shape(&ab_shape, cond.shape())?;
+    let out_numel = out_shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    check_materialize_bytes(node, "cond/X/Y", out_numel, std::mem::size_of::<f32>())?;
     let tape = Tape::new();
     let a = tape.var_no_grad(x);
     let b = tape.var_no_grad(y);
@@ -417,7 +455,7 @@ pub(super) fn compute_reduce_mean(
         }
         Some(axes_i64)
     } else {
-        attr_ints_typed(node, "axes")?.map(<[i64]>::to_vec)
+        attr_ints_typed_allow_empty(node, "axes")?.map(<[i64]>::to_vec)
     };
 
     let tape = Tape::new();
@@ -646,6 +684,23 @@ pub(super) fn compute_pad(
         }
         result
     };
+
+    // `Var::pad` が実体化する出力テンソルの確保バイト数を事前検査する
+    // （`Expand`／`Resize` と同じ [`check_materialize_bytes`]。`pairs`
+    // は非信頼な外部 ONNX の `pads` 属性・入力に由来するため、少量の
+    // 入力からでも巨大な出力 shape を指定してプロセスメモリを枯渇
+    // させられる。イシュー #2313 codex-review 指摘）。
+    let out_numel = x
+        .shape()
+        .iter()
+        .zip(pairs.iter())
+        .try_fold(1usize, |acc, (&dim, &(before, after))| {
+            dim.checked_add(before)
+                .and_then(|v| v.checked_add(after))
+                .and_then(|v| acc.checked_mul(v))
+        })
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    check_materialize_bytes(node, "pads", out_numel, std::mem::size_of::<f32>())?;
 
     let tape = Tape::new();
     let out = tape
@@ -980,5 +1035,134 @@ fn resize_scale_to_out_size(
             });
         }
         Ok(in_size / divisor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::proto::{AttributeProto, attribute_type};
+    use super::*;
+
+    fn node(op_type: &str, input: Vec<&str>) -> NodeProto {
+        NodeProto {
+            input: input.into_iter().map(String::from).collect(),
+            output: vec!["y".to_string()],
+            name: format!("n_{op_type}"),
+            op_type: op_type.to_string(),
+            attribute: vec![],
+            domain: String::new(),
+        }
+    }
+
+    fn attr_ints_typed_proto(name: &str, ints: Vec<i64>) -> AttributeProto {
+        AttributeProto {
+            name: name.to_string(),
+            ints,
+            r#type: attribute_type::INTS,
+            ..Default::default()
+        }
+    }
+
+    fn env_f32(name: &str, t: Tensor<f32>) -> HashMap<String, Value> {
+        let mut env = HashMap::new();
+        env.insert(name.to_string(), Value::F32(t));
+        env
+    }
+
+    /// `Pad` の `pads`（attr 形）が指す出力 shape が
+    /// [`MAX_MATERIALIZE_BYTES`] を超える場合、`Var::pad` を呼ぶ前に
+    /// 拒否する（codex-review P0 是正の回帰テスト。イシュー #2313）。
+    /// 「オーバーフローはしないが数 GB 規模」の確保を実際に試みる
+    /// アロケーションでは検証しない——小さな入力（`[1]`）から巨大な
+    /// `pads`（片側 4 GiB 要素分）を指定するだけで検出できる契約を
+    /// 検証する。
+    #[test]
+    fn pad_rejects_output_exceeding_materialize_limit() {
+        let env = env_f32("x", Tensor::<f32>::zeros(&[1]).unwrap());
+        let huge = (MAX_MATERIALIZE_BYTES / 4 + 1) as i64; // f32 4 バイト分の余裕を超える要素数
+        let mut n = node("Pad", vec!["x"]);
+        n.attribute = vec![
+            attr_ints_typed_proto("pads", vec![0, huge]),
+            AttributeProto {
+                name: "value".to_string(),
+                f: 0.0,
+                r#type: attribute_type::FLOAT,
+                ..Default::default()
+            },
+        ];
+        let err = compute_pad(&env, &n).expect_err("巨大な pads は拒否されるべき");
+        match err {
+            InterpError::InvalidAttribute { attr, .. } => assert_eq!(attr, "pads"),
+            other => panic!("InvalidAttribute を期待したが {other:?} だった"),
+        }
+    }
+
+    /// `Where` が 3 入力の双方向ブロードキャスト後 shape を
+    /// [`Var::where_cond`] へ渡す前に検査し、`N^2` 規模の巨大な
+    /// 出力を要求する `[N,1]`／`[1,N]` の組合せを拒否する
+    /// （codex-review P0 是正の回帰テスト。イシュー #2313）。
+    #[test]
+    fn where_rejects_broadcast_output_exceeding_materialize_limit() {
+        // f32 換算で MAX_MATERIALIZE_BYTES を超える N を選ぶ
+        // （N^2 * 4 バイト > MAX_MATERIALIZE_BYTES）。
+        let n_dim = (MAX_MATERIALIZE_BYTES / 4).isqrt() + 2;
+        let cond = Tensor::<bool>::full(&[1], true).unwrap();
+        let x = Tensor::<f32>::zeros(&[n_dim, 1]).unwrap();
+        let y = Tensor::<f32>::zeros(&[1, n_dim]).unwrap();
+        let mut env: HashMap<String, Value> = HashMap::new();
+        env.insert("cond".to_string(), Value::Bool(cond));
+        env.insert("x".to_string(), Value::F32(x));
+        env.insert("y".to_string(), Value::F32(y));
+        let n = node("Where", vec!["cond", "x", "y"]);
+        let err = compute_where(&env, &n).expect_err("巨大な broadcast 出力は拒否されるべき");
+        match err {
+            InterpError::InvalidAttribute { .. } => {}
+            other => panic!("InvalidAttribute を期待したが {other:?} だった"),
+        }
+    }
+
+    /// `ReduceMean` の空の `axes` INTS 属性（`noop_with_empty_axes=0`
+    /// 既定）は全軸縮約として扱われる（`attr_ints_typed` の一律拒否に
+    /// 阻まれ到達不能だった分岐の回帰テスト。codex-review P1・Cursor
+    /// Bugbot 重複指摘。イシュー #2313）。
+    #[test]
+    fn reduce_mean_empty_axes_attr_with_noop_zero_reduces_all_axes() {
+        let env = env_f32(
+            "x",
+            Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap(),
+        );
+        let mut n = node("ReduceMean", vec!["x"]);
+        n.attribute = vec![attr_ints_typed_proto("axes", vec![])];
+        let out = compute_reduce_mean(&env, &n).expect("空 axes は全軸縮約として受理されるべき");
+        let Value::F32(t) = out else {
+            panic!("F32 を期待した");
+        };
+        assert_eq!(t.shape(), [1usize, 1]);
+        assert_eq!(t.get(&[0, 0]), Some(2.5));
+    }
+
+    /// `ReduceMean` の空の `axes` INTS 属性は `noop_with_empty_axes=1`
+    /// のとき恒等（入力をそのまま返す）として扱われる。
+    #[test]
+    fn reduce_mean_empty_axes_attr_with_noop_one_is_identity() {
+        let env = env_f32(
+            "x",
+            Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap(),
+        );
+        let mut n = node("ReduceMean", vec!["x"]);
+        n.attribute = vec![
+            attr_ints_typed_proto("axes", vec![]),
+            AttributeProto {
+                name: "noop_with_empty_axes".to_string(),
+                i: 1,
+                r#type: attribute_type::INT,
+                ..Default::default()
+            },
+        ];
+        let out = compute_reduce_mean(&env, &n).expect("空 axes は恒等として受理されるべき");
+        let Value::F32(t) = out else {
+            panic!("F32 を期待した");
+        };
+        assert_eq!(t.shape(), [2usize, 2]);
     }
 }
