@@ -1542,6 +1542,56 @@ fn ctc_loss_propagates_nan() {
 }
 
 #[test]
+fn ctc_loss_unreachable_state_plus_infinite_log_prob_does_not_become_nan() {
+    // イシュー #2168 PR #2292 codex-review 指摘の再現ケース。`log_probs`
+    // は値検査しない契約（`+inf` を受け付ける）ため、到達不能状態
+    // （累積対数確率 `-inf`）に `+inf` の emission が乗ると素朴な加算
+    // `acc + lp` は `-inf + inf = NaN` になる。target=[1]・blank=0・
+    // T=2（拡張ラベル列 `[blank, 1, blank]` は長さ 3 で `t_n=2` では
+    // 整列不能）で、frame0 の label クラスを `-inf`（状態 1 を強制的に
+    // 不可能にする）・frame1 の blank クラスを `+inf` にすると、
+    // 状態 2（`ext[2]=blank`）の α 遷移が `acc(-inf) + lp(+inf)` を
+    // 踏む。`eval::ctc_add_emission`（`crate::grad::ctc_loss_vjp` の
+    // α・β も共有）による修正後は到達不能状態を `-inf` のまま維持し
+    // `NaN` にならない。
+    let t_max = 2;
+    let c = 2;
+    let lp_data = [
+        -0.5f32,
+        f32::NEG_INFINITY, // frame0: blank=-0.5, label=-inf
+        f32::INFINITY,
+        -0.3, // frame1: blank=+inf, label=-0.3
+    ];
+    let targets = i32_tensor(&[1], &[1, 1]);
+    let options = CtcLossOptions::default();
+    let actual = ctc_forward_sum(&lp_data, t_max, 1, c, &targets, &[t_max], &[1], &options);
+    assert!(
+        !actual.is_nan(),
+        "到達不能状態への +inf 加算で NaN になってはならない: {actual}"
+    );
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let log_probs = tape.var(&f32_tensor(&lp_data, &[t_max, 1, c]));
+    let loss = loss_ops::ctc_loss(
+        &log_probs,
+        &targets,
+        &[t_max],
+        &[1],
+        &options,
+        Reduction::Sum,
+    )
+    .unwrap();
+    assert!(!scalar(&loss.to_tensor()).is_nan());
+
+    let grads = tape.backward(&loss).unwrap();
+    let d = dense(grads.get(&log_probs).unwrap().expect("到達する"));
+    assert!(
+        d.iter().all(|v| !v.is_nan()),
+        "VJP の α・β 計算でも到達不能状態からの NaN は生じない: {d:?}"
+    );
+}
+
+#[test]
 fn ctc_loss_empty_batch_is_zero_and_does_not_panic() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let log_probs = tape.var(&f32_tensor(&[], &[3, 0, 2]));

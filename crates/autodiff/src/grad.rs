@@ -8094,7 +8094,7 @@ fn ctc_loss_vjp(
                 if s >= 2 && ext[s] != blank_i32 && ext[s] != ext[s - 2] {
                     acc = eval::log_add_exp_f64(acc, alpha[t - 1][s - 2]);
                 }
-                alpha[t][s] = acc + lp_at(t, ext[s] as usize);
+                alpha[t][s] = eval::ctc_add_emission(acc, lp_at(t, ext[s] as usize));
             }
         }
 
@@ -8143,17 +8143,23 @@ fn ctc_loss_vjp(
         }
         for t in (0..t_n - 1).rev() {
             for s in 0..l_prime {
-                let mut acc = lp_at(t + 1, ext[s] as usize) + beta[t + 1][s];
+                let mut acc = eval::ctc_add_emission(lp_at(t + 1, ext[s] as usize), beta[t + 1][s]);
                 if s + 1 < l_prime {
                     acc = eval::log_add_exp_f64(
                         acc,
-                        lp_at(t + 1, ext[s + 1] as usize) + beta[t + 1][s + 1],
+                        eval::ctc_add_emission(
+                            lp_at(t + 1, ext[s + 1] as usize),
+                            beta[t + 1][s + 1],
+                        ),
                     );
                 }
                 if s + 2 < l_prime && ext[s + 2] != blank_i32 && ext[s + 2] != ext[s] {
                     acc = eval::log_add_exp_f64(
                         acc,
-                        lp_at(t + 1, ext[s + 2] as usize) + beta[t + 1][s + 2],
+                        eval::ctc_add_emission(
+                            lp_at(t + 1, ext[s + 2] as usize),
+                            beta[t + 1][s + 2],
+                        ),
                     );
                 }
                 beta[t][s] = acc;
@@ -8172,7 +8178,14 @@ fn ctc_loss_vjp(
             let mut lcab = vec![f64::NEG_INFINITY; c];
             for s in 0..l_prime {
                 let k = ext[s] as usize;
-                let v = alpha[t][s] + beta[t][s];
+                // `alpha[t][s]` が到達不能（`-inf`）なら、`beta[t][s]`
+                // が `+inf` の emission に汚染されて `+inf` になって
+                // いても `lcab` への寄与は `-inf`（このクラスへの寄与
+                // なし）のまま維持する必要がある（`eval::
+                // ctc_add_emission` と同じ「`-inf` は加算相手を問わず
+                // 支配する」規約。素朴な `+` だと `-inf + inf = NaN`
+                // になる。イシュー #2168 codex-review 指摘の類型）。
+                let v = eval::ctc_add_emission(alpha[t][s], beta[t][s]);
                 lcab[k] = eval::log_add_exp_f64(lcab[k], v);
             }
             for (k, &lcab_k) in lcab.iter().enumerate() {

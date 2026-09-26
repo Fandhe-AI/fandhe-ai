@@ -4948,6 +4948,29 @@ pub(crate) fn log_add_exp_f64(a: f64, b: f64) -> f64 {
     m + ((a - m).exp() + (b - m).exp()).ln()
 }
 
+/// CTC の前向き／後ろ向き再帰で「到達不能状態（累積対数確率 `-inf`）を
+/// 表す項に、もう一方の対数値（emission の対数確率、または α・β の
+/// 積み上げ値）を加算する」箇所専用のヘルパー（forward
+/// [`ctc_sample_nll`]・VJP `crate::grad::ctc_loss_vjp` の α 再帰・β 再帰・
+/// `lcab`〈α+β〉集約のいずれも共有する）。`log_probs` は値検査せず
+/// `+inf` も受け付ける契約（`crate::loss_ops::ctc_loss` doc §2.3）の
+/// ため、その `+inf` は β の再帰や `alpha+beta` を経由して間接的にも
+/// 伝播しうる。素朴な `a + b` は到達不能状態（`a == -inf` または
+/// `b == -inf`）に `+inf` 側の項が乗ると `-inf + inf = NaN` になりうる
+/// （イシュー #2168 codex-review 指摘。`T=2`・ラベル 1 個のケースで
+/// 再現）。`-inf`（不可能）はどちらの引数にあっても結果を支配すると
+/// みなし、加算前に明示的に `-inf` を返して `NaN` を回避する。`NaN` は
+/// 通常どおり伝播する。
+pub(crate) fn ctc_add_emission(acc: f64, lp: f64) -> f64 {
+    if acc.is_nan() || lp.is_nan() {
+        return f64::NAN;
+    }
+    if acc == f64::NEG_INFINITY || lp == f64::NEG_INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    acc + lp
+}
+
 /// CTC 損失（イシュー #2168）の拡張ラベル列 `l' = [blank, l_1, blank,
 /// l_2, …, blank]`（長さ `2·sample_targets.len() + 1`）を構築する。
 /// forward（[`ctc_loss_forward`]）と VJP（`crate::grad::ctc_loss_vjp`）が
@@ -5035,7 +5058,7 @@ fn ctc_sample_nll(
             if s >= 2 && ext[s] != blank_i32 && ext[s] != ext[s - 2] {
                 acc = log_add_exp_f64(acc, alpha_prev[s - 2]);
             }
-            alpha_cur[s] = acc + lp_at(t, ext[s] as usize);
+            alpha_cur[s] = ctc_add_emission(acc, lp_at(t, ext[s] as usize));
         }
         alpha_prev = alpha_cur;
     }
