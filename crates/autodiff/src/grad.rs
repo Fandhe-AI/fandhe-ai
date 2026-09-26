@@ -661,6 +661,107 @@ pub(crate) fn vjp(
             // CrossEntropyLossWithOptions` doc 参照）。
             vec![(logits, dlogits)]
         }
+        Op::CosineEmbeddingLoss {
+            x1,
+            x2,
+            y,
+            margin,
+            reduction,
+        } => {
+            let x1_val = materialize_fallible(nodes, ops, x1)?;
+            let x2_val = materialize_fallible(nodes, ops, x2)?;
+            let n = if x1_val.shape().len() == 1 {
+                1
+            } else {
+                x1_val.shape()[0]
+            };
+            let (dx1, dx2) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], x1_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                cosine_embedding_loss_vjp(x1_val, x2_val, &y, margin, scale)
+            };
+            vec![(x1, dx1), (x2, dx2)]
+        }
+        Op::MarginRankingLoss {
+            x1,
+            x2,
+            y,
+            margin,
+            reduction,
+        } => {
+            let x1_val = materialize_fallible(nodes, ops, x1)?;
+            let x2_val = materialize_fallible(nodes, ops, x2)?;
+            let n = x1_val.numel();
+            let (dx1, dx2) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], x1_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                margin_ranking_loss_vjp(x1_val, x2_val, &y, margin, scale)
+            };
+            vec![(x1, dx1), (x2, dx2)]
+        }
+        Op::TripletMarginLoss {
+            anchor,
+            positive,
+            negative,
+            options,
+            reduction,
+        } => {
+            let anchor_val = materialize_fallible(nodes, ops, anchor)?;
+            let positive_val = materialize_fallible(nodes, ops, positive)?;
+            let negative_val = materialize_fallible(nodes, ops, negative)?;
+            let shape = anchor_val.shape();
+            let n = if shape.len() == 1 { 1 } else { shape[0] };
+            let (danchor, dpositive, dnegative) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], shape);
+                (zeros.clone(), zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                triplet_margin_loss_vjp(anchor_val, positive_val, negative_val, &options, scale)
+            };
+            vec![
+                (anchor, danchor),
+                (positive, dpositive),
+                (negative, dnegative),
+            ]
+        }
+        Op::PoissonNllLoss {
+            input,
+            target,
+            options,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = input_val.numel();
+            let (dinput, dtarget) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = match reduction {
+                    Reduction::Mean => g_value as f64 / n as f64,
+                    Reduction::Sum => g_value as f64,
+                };
+                poisson_nll_loss_vjp(input_val, target_val, &options, scale)
+            };
+            vec![(input, dinput), (target, dtarget)]
+        }
         Op::NllLoss {
             input,
             targets,
@@ -7641,6 +7742,222 @@ fn l1_grad_sign(d: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// `CosineEmbeddingLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// cosine_embedding_loss` doc の数式を `x1`／`x2` について微分する。
+/// `y[n] == 1.0` は符号反転（`dx1 = −s·d(cos)/d(x1)`）、`y[n] == -1.0`
+/// は hinge が有効（`cos − margin >= 0`。`clamp_min` の VJP 契約——
+/// 境界ちょうど 0 でも勾配を通す）なときのみ `dx1 = s·d(cos)/d(x1)` を
+/// 流す。`scale` は `Mean`／`Sum` 縮約済みの上流勾配係数（`f64`）。
+fn cosine_embedding_loss_vjp(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    y: &Tensor<f32>,
+    margin: f32,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>) {
+    const EPSILON: f64 = 1e-12;
+    let shape = x1.shape().to_vec();
+    let (n, d) = if shape.len() == 1 {
+        (1usize, shape[0])
+    } else {
+        (shape[0], shape[1])
+    };
+    let x1_data = dense_vec(x1);
+    let x2_data = dense_vec(x2);
+    let y_data = dense_vec(y);
+    let mut dx1 = vec![0f32; x1_data.len()];
+    let mut dx2 = vec![0f32; x1_data.len()];
+
+    for (i, &y_v) in y_data.iter().enumerate().take(n) {
+        let base = i * d;
+        let mut m1 = EPSILON;
+        let mut m2 = EPSILON;
+        let mut dot = 0.0f64;
+        for k in 0..d {
+            let a = x1_data[base + k] as f64;
+            let b = x2_data[base + k] as f64;
+            m1 += a * a;
+            m2 += b * b;
+            dot += a * b;
+        }
+        // forward（`eval::cosine_embedding_loss_forward`）と同じ理由で
+        // 各ノルムを先に `sqrt` してから乗じる（`(m1 * m2).sqrt()` の
+        // 中間積 overflow を避ける。codex-review 指摘・PR #2286）。
+        let denom = m1.sqrt() * m2.sqrt();
+        let cos = dot / denom;
+        let y_i = y_v as f64;
+        // `y == 1` は常に流す。`y == -1` は hinge（`cos − margin >= 0`）
+        // が有効なときのみ流す（`clamp_min` の VJP 契約）。
+        let coeff = if y_i > 0.0 {
+            -1.0
+        } else if cos - margin as f64 >= 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+        if coeff == 0.0 {
+            continue;
+        }
+        for k in 0..d {
+            let a = x1_data[base + k] as f64;
+            let b = x2_data[base + k] as f64;
+            let dcos_dx1 = b / denom - cos * a / m1;
+            let dcos_dx2 = a / denom - cos * b / m2;
+            dx1[base + k] = (scale * coeff * dcos_dx1) as f32;
+            dx2[base + k] = (scale * coeff * dcos_dx2) as f32;
+        }
+    }
+    (build_tensor(dx1, &shape), build_tensor(dx2, &shape))
+}
+
+/// `MarginRankingLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// margin_ranking_loss` doc の数式を微分する。hinge が有効
+/// （`raw = −y_i·(x1_i−x2_i)+margin >= 0`。`clamp_min` の VJP 契約）な
+/// 要素のみ `dx1_i = −s·y_i`・`dx2_i = +s·y_i` を流す。
+fn margin_ranking_loss_vjp(
+    x1: &Tensor<f32>,
+    x2: &Tensor<f32>,
+    y: &Tensor<f32>,
+    margin: f32,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let x1_data = dense_vec(x1);
+    let x2_data = dense_vec(x2);
+    let y_data = dense_vec(y);
+    let numel = x1_data.len();
+    let mut dx1 = vec![0f32; numel];
+    let mut dx2 = vec![0f32; numel];
+    for i in 0..numel {
+        let y_i = y_data[i] as f64;
+        let raw = -y_i * (x1_data[i] as f64 - x2_data[i] as f64) + margin as f64;
+        if raw >= 0.0 {
+            dx1[i] = (-scale * y_i) as f32;
+            dx2[i] = (scale * y_i) as f32;
+        }
+    }
+    (build_tensor(dx1, x1.shape()), build_tensor(dx2, x1.shape()))
+}
+
+/// `TripletMarginLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// triplet_margin_loss` doc §「勾配」の配分規則
+/// （`eval::triplet_distance_stats`・`eval::p_norm_grad_f64` を再利用し
+/// forward と同じ距離統計を再計算する）をそのまま実装する。hinge が
+/// 無効な要素は寄与 0。
+fn triplet_margin_loss_vjp(
+    anchor: &Tensor<f32>,
+    positive: &Tensor<f32>,
+    negative: &Tensor<f32>,
+    options: &crate::loss_ops::TripletMarginOptions,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let shape = anchor.shape().to_vec();
+    let (n, d) = if shape.len() == 1 {
+        (1usize, shape[0])
+    } else {
+        (shape[0], shape[1])
+    };
+    let anchor_data: Vec<f64> = dense_vec(anchor).iter().map(|&v| v as f64).collect();
+    let positive_data: Vec<f64> = dense_vec(positive).iter().map(|&v| v as f64).collect();
+    let negative_data: Vec<f64> = dense_vec(negative).iter().map(|&v| v as f64).collect();
+    let p = options.p_value() as f64;
+    let eps = options.eps_value() as f64;
+    let margin = options.margin_value() as f64;
+    let swap = options.swap_value();
+
+    let mut danchor = vec![0f32; anchor_data.len()];
+    let mut dpositive = vec![0f32; anchor_data.len()];
+    let mut dnegative = vec![0f32; anchor_data.len()];
+
+    let params = eval::TripletDistanceParams { p, eps, swap };
+    for i in 0..n {
+        let base = i * d;
+        let (stats, diff_ap, diff_an, diff_pn) = eval::triplet_distance_stats(
+            &anchor_data,
+            &positive_data,
+            &negative_data,
+            base,
+            d,
+            &params,
+        );
+        // `neg_distance()` は分岐で `d_an`／`d_pn` を選ぶ（係数付き和
+        // `an_coeff·d_an + (1−an_coeff)·d_pn` だと `swap` 有効時に
+        // 一方が `inf`・係数が丁度 `0.0` でも `0.0 * inf = NaN` になる
+        // ため。forward〈`eval::triplet_margin_loss_forward`〉と同じ
+        // 判定にする。codex-review 指摘・PR #2286）。
+        let d_neg = stats.neg_distance();
+        let hinge_active = stats.d_ap - d_neg + margin >= 0.0;
+        if !hinge_active {
+            continue;
+        }
+        let g_ap = eval::p_norm_grad_f64(&diff_ap, p, stats.d_ap);
+        let g_an = eval::p_norm_grad_f64(&diff_an, p, stats.d_an);
+        let g_pn = if swap {
+            eval::p_norm_grad_f64(&diff_pn, p, stats.d_pn)
+        } else {
+            vec![0.0; d]
+        };
+        let c_an = stats.an_coeff;
+        let c_pn = 1.0 - stats.an_coeff;
+        for k in 0..d {
+            // `dL/da = g_ap − c_an·g_an`・`dL/dp = −g_ap − c_pn·g_pn`・
+            // `dL/dn = c_an·g_an + c_pn·g_pn`（モジュール doc「勾配」の
+            // 連鎖律導出。`diff_ap = a−p`・`diff_an = a−n`・
+            // `diff_pn = p−n` の係数を代入した結果）。
+            let da = g_ap[k] - c_an * g_an[k];
+            let dp = -g_ap[k] - c_pn * g_pn[k];
+            let dn = c_an * g_an[k] + c_pn * g_pn[k];
+            danchor[base + k] = (scale * da) as f32;
+            dpositive[base + k] = (scale * dp) as f32;
+            dnegative[base + k] = (scale * dn) as f32;
+        }
+    }
+    (
+        build_tensor(danchor, &shape),
+        build_tensor(dpositive, &shape),
+        build_tensor(dnegative, &shape),
+    )
+}
+
+/// `PoissonNllLoss` の VJP（イシュー #2167）。`crate::loss_ops::
+/// poisson_nll_loss` doc の数式を微分する。`full = true` かつ
+/// `t > 1` の要素のみ `dt` に Stirling 項の微分を加える。
+fn poisson_nll_loss_vjp(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    options: &crate::loss_ops::PoissonNllOptions,
+    scale: f64,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let numel = input_data.len();
+    let log_input = options.log_input_value();
+    let full = options.full_value();
+    let eps = options.eps_value() as f64;
+
+    let mut dinput = vec![0f32; numel];
+    let mut dtarget = vec![0f32; numel];
+    for i in 0..numel {
+        let x = input_data[i] as f64;
+        let t = target_data[i] as f64;
+        let (mut dx, mut dt) = if log_input {
+            (x.exp() - t, -x)
+        } else {
+            (1.0 - t / (x + eps), -(x + eps).ln())
+        };
+        if full && t > 1.0 {
+            dt += t.ln() + 0.5 / t;
+        }
+        dx *= scale;
+        dt *= scale;
+        dinput[i] = dx as f32;
+        dtarget[i] = dt as f32;
+    }
+    (
+        build_tensor(dinput, input.shape()),
+        build_tensor(dtarget, input.shape()),
+    )
 }
 
 /// `CrossEntropyLossWithOptions` の VJP（イシュー #2166）。

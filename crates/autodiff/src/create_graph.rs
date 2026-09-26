@@ -58,7 +58,9 @@
 //! `Contiguous`・`Where` を拡張済み（[`scalar_unary_replayable`]／
 //! [`scalar_binary_replayable`] 参照）。`MaskedFill`・`Gather`・
 //! `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss`・`L1Loss`・
-//! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）
+//! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
+//! `CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`・
+//! `PoissonNllLoss`（イシュー #2167。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路

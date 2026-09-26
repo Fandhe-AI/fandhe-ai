@@ -23,6 +23,11 @@
 //!   「`BackendOps` の融合カーネル優先・`Unsupported` のみホスト
 //!   参照実装へフォールバック」パターンの実体は `Var` 側にあり、
 //!   ここでは呼ぶだけ。
+//! - #2167（親イシュー #2131）で距離ベースの損失 3 種
+//!   （`CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`）
+//!   と `PoissonNllLoss` を追加した。`L1Loss` と同じく `crate::loss_ops`
+//!   の自由関数（`Var` に委譲メソッドを持たない。facade 非公開）を
+//!   呼ぶだけの薄いラッパー。
 //!
 //! `Reduction`（mean/sum 縮約）は MSE・CrossEntropy の両損失で共有する
 //! ため `crate::var::Reduction`（#190 が定義）をそのまま再利用し、
@@ -32,7 +37,7 @@ use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 use crate::loss_ops;
-pub use crate::loss_ops::CrossEntropyOptions;
+pub use crate::loss_ops::{CrossEntropyOptions, PoissonNllOptions, TripletMarginOptions};
 pub use crate::var::Reduction;
 use crate::var::Var;
 
@@ -369,6 +374,154 @@ impl KlDivLoss {
     }
 }
 
+/// Cosine 類似度に基づく埋め込み損失。`crate::loss_ops::
+/// cosine_embedding_loss` の薄いラッパー（PyTorch
+/// `nn.CosineEmbeddingLoss` 相当。イシュー #2167）。`Default` は
+/// `margin = 0.0`・`Reduction::Mean`（PyTorch 既定と一致）。
+#[derive(Debug, Clone, Copy)]
+pub struct CosineEmbeddingLoss {
+    pub margin: f32,
+    pub reduction: Reduction,
+}
+
+impl Default for CosineEmbeddingLoss {
+    fn default() -> Self {
+        CosineEmbeddingLoss {
+            margin: 0.0,
+            reduction: Reduction::Mean,
+        }
+    }
+}
+
+impl CosineEmbeddingLoss {
+    /// マージン・縮約種別を指定して構築する。
+    pub fn new(margin: f32, reduction: Reduction) -> Self {
+        CosineEmbeddingLoss { margin, reduction }
+    }
+
+    /// `x1`・`x2`（追跡対象）と `y`（`+1`／`-1` ラベル・非追跡）から
+    /// 損失を計算する。検査の実体は `crate::loss_ops::
+    /// cosine_embedding_loss` 側にあり、ここでは呼び出すだけ。
+    pub fn forward<'t>(
+        &self,
+        x1: &Var<'t>,
+        x2: &Var<'t>,
+        y: &Tensor<f32>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        loss_ops::cosine_embedding_loss(x1, x2, y, self.margin, self.reduction)
+    }
+}
+
+/// マージンランキング損失。`crate::loss_ops::margin_ranking_loss` の
+/// 薄いラッパー（PyTorch `nn.MarginRankingLoss` 相当。イシュー
+/// #2167）。`Default` は `margin = 0.0`・`Reduction::Mean`（PyTorch
+/// 既定と一致）。
+#[derive(Debug, Clone, Copy)]
+pub struct MarginRankingLoss {
+    pub margin: f32,
+    pub reduction: Reduction,
+}
+
+impl Default for MarginRankingLoss {
+    fn default() -> Self {
+        MarginRankingLoss {
+            margin: 0.0,
+            reduction: Reduction::Mean,
+        }
+    }
+}
+
+impl MarginRankingLoss {
+    /// マージン・縮約種別を指定して構築する。
+    pub fn new(margin: f32, reduction: Reduction) -> Self {
+        MarginRankingLoss { margin, reduction }
+    }
+
+    /// `x1`・`x2`（追跡対象）と `y`（`+1`／`-1` ラベル・非追跡）から
+    /// 損失を計算する。検査の実体は `crate::loss_ops::
+    /// margin_ranking_loss` 側にあり、ここでは呼び出すだけ。
+    pub fn forward<'t>(
+        &self,
+        x1: &Var<'t>,
+        x2: &Var<'t>,
+        y: &Tensor<f32>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        loss_ops::margin_ranking_loss(x1, x2, y, self.margin, self.reduction)
+    }
+}
+
+/// トリプレットマージン損失。`crate::loss_ops::triplet_margin_loss` の
+/// 薄いラッパー（PyTorch `nn.TripletMarginLoss` 相当。イシュー
+/// #2167）。`Default` は [`TripletMarginOptions::default`]（PyTorch
+/// 既定: `margin=1.0`・`p=2.0`・`eps=1e-6`・`swap=false`）・
+/// `Reduction::Mean`。
+#[derive(Debug, Clone)]
+pub struct TripletMarginLoss {
+    options: TripletMarginOptions,
+    reduction: Reduction,
+}
+
+impl Default for TripletMarginLoss {
+    fn default() -> Self {
+        TripletMarginLoss {
+            options: TripletMarginOptions::default(),
+            reduction: Reduction::Mean,
+        }
+    }
+}
+
+impl TripletMarginLoss {
+    /// オプション・縮約種別を指定して構築する。
+    pub fn new(options: TripletMarginOptions, reduction: Reduction) -> Self {
+        TripletMarginLoss { options, reduction }
+    }
+
+    /// `anchor`・`positive`・`negative`（いずれも追跡対象）から損失を
+    /// 計算する。検査の実体は `crate::loss_ops::triplet_margin_loss`
+    /// 側にあり、ここでは呼び出すだけ。
+    pub fn forward<'t>(
+        &self,
+        anchor: &Var<'t>,
+        positive: &Var<'t>,
+        negative: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        loss_ops::triplet_margin_loss(anchor, positive, negative, &self.options, self.reduction)
+    }
+}
+
+/// ポアソン負対数尤度損失。`crate::loss_ops::poisson_nll_loss` の薄い
+/// ラッパー（PyTorch `nn.PoissonNLLLoss` 相当。イシュー #2167）。
+/// `Default` は [`PoissonNllOptions::default`]（PyTorch 既定:
+/// `log_input=true`・`full=false`・`eps=1e-8`）・`Reduction::Mean`。
+#[derive(Debug, Clone)]
+pub struct PoissonNllLoss {
+    options: PoissonNllOptions,
+    reduction: Reduction,
+}
+
+impl Default for PoissonNllLoss {
+    fn default() -> Self {
+        PoissonNllLoss {
+            options: PoissonNllOptions::default(),
+            reduction: Reduction::Mean,
+        }
+    }
+}
+
+impl PoissonNllLoss {
+    /// オプション・縮約種別を指定して構築する。
+    pub fn new(options: PoissonNllOptions, reduction: Reduction) -> Self {
+        PoissonNllLoss { options, reduction }
+    }
+
+    /// `input`・`target`（いずれも追跡対象）から損失を計算する。
+    /// 検査の実体は `crate::loss_ops::poisson_nll_loss` 側にあり、
+    /// ここでは呼び出すだけ。
+    pub fn forward<'t>(&self, input: &Var<'t>, target: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        loss_ops::poisson_nll_loss(input, target, &self.options, self.reduction)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! `nn::loss::MseLoss::forward` が、対応する `Var` メソッド直接呼び
@@ -647,6 +800,124 @@ mod tests {
         assert_eq!(
             dense_vec(&via_module.to_tensor()),
             dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    /// [`CosineEmbeddingLoss::default`]・[`MarginRankingLoss::default`]・
+    /// [`TripletMarginLoss::default`]・[`PoissonNllLoss::default`] が
+    /// PyTorch 既定値と一致することを固定する（イシュー #2167）。
+    #[test]
+    fn distance_and_poisson_defaults_match_pytorch() {
+        let cos = CosineEmbeddingLoss::default();
+        assert_eq!(cos.margin, 0.0);
+        assert_eq!(cos.reduction, Reduction::Mean);
+
+        let mr = MarginRankingLoss::default();
+        assert_eq!(mr.margin, 0.0);
+        assert_eq!(mr.reduction, Reduction::Mean);
+
+        let triplet = TripletMarginLoss::default();
+        assert_eq!(triplet.reduction, Reduction::Mean);
+        assert_eq!(triplet.options.margin_value(), 1.0);
+        assert_eq!(triplet.options.p_value(), 2.0);
+        assert_eq!(triplet.options.eps_value(), 1e-6);
+        assert!(!triplet.options.swap_value());
+
+        let poisson = PoissonNllLoss::default();
+        assert_eq!(poisson.reduction, Reduction::Mean);
+        assert!(poisson.options.log_input_value());
+        assert!(!poisson.options.full_value());
+        assert_eq!(poisson.options.eps_value(), 1e-8);
+    }
+
+    /// `nn::loss::CosineEmbeddingLoss::forward` が `crate::loss_ops::
+    /// cosine_embedding_loss` 直接呼び出しと同一の値を返すことを確認
+    /// する（「薄いラッパー性」の担保。イシュー #2167）。
+    #[test]
+    fn cosine_embedding_loss_forward_matches_free_fn() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x1 = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, 0.0], &[2]).unwrap());
+        let x2 = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![0.0, 1.0], &[2]).unwrap());
+        let y = fandhe_ai_tensor_core::Tensor::new(vec![1.0], &[]).unwrap();
+
+        let via_module = CosineEmbeddingLoss::default()
+            .forward(&x1, &x2, &y)
+            .unwrap();
+        let via_fn =
+            crate::loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_fn.to_tensor())
+        );
+    }
+
+    /// `nn::loss::MarginRankingLoss::forward` が `crate::loss_ops::
+    /// margin_ranking_loss` 直接呼び出しと同一の値を返すことを確認
+    /// する（イシュー #2167）。
+    #[test]
+    fn margin_ranking_loss_forward_matches_free_fn() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x1 = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, -1.0], &[2]).unwrap());
+        let x2 = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![0.0, 0.0], &[2]).unwrap());
+        let y = fandhe_ai_tensor_core::Tensor::new(vec![1.0, -1.0], &[2]).unwrap();
+
+        let via_module = MarginRankingLoss::new(0.5, Reduction::Sum)
+            .forward(&x1, &x2, &y)
+            .unwrap();
+        let via_fn =
+            crate::loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.5, Reduction::Sum).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_fn.to_tensor())
+        );
+    }
+
+    /// `nn::loss::TripletMarginLoss::forward` が `crate::loss_ops::
+    /// triplet_margin_loss` 直接呼び出しと同一の値を返すことを確認
+    /// する（イシュー #2167）。
+    #[test]
+    fn triplet_margin_loss_forward_matches_free_fn() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![0.0, 0.0], &[2]).unwrap());
+        let p = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, 0.0], &[2]).unwrap());
+        let n = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![0.0, 3.0], &[2]).unwrap());
+        let options = TripletMarginOptions::default();
+
+        let via_module = TripletMarginLoss::new(TripletMarginOptions::default(), Reduction::Sum)
+            .forward(&a, &p, &n)
+            .unwrap();
+        let via_fn =
+            crate::loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_fn.to_tensor())
+        );
+    }
+
+    /// `nn::loss::PoissonNllLoss::forward` が `crate::loss_ops::
+    /// poisson_nll_loss` 直接呼び出しと同一の値を返すことを確認する
+    /// （イシュー #2167）。
+    #[test]
+    fn poisson_nll_loss_forward_matches_free_fn() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let input = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![0.1, -0.2, 0.5, 0.0], &[2, 2]).unwrap());
+        let target = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, 2.0, 0.0, 3.0], &[2, 2]).unwrap());
+        let options = PoissonNllOptions::default();
+
+        let via_module = PoissonNllLoss::new(PoissonNllOptions::default(), Reduction::Sum)
+            .forward(&input, &target)
+            .unwrap();
+        let via_fn =
+            crate::loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Sum).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_fn.to_tensor())
         );
     }
 }

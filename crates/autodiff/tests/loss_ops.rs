@@ -13,14 +13,26 @@
 //! - `nn::loss::L1Loss`／`CrossEntropyLoss::forward_with` が自由関数
 //!   直接呼び出しと bit 一致する薄いラッパーであること。
 //!
+//! イシュー #2167（親 #2131）で距離ベースの損失 3 種
+//! （`cosine_embedding_loss`・`margin_ranking_loss`・
+//! `triplet_margin_loss`）と `poisson_nll_loss` の受け入れ条件検証を
+//! 追加した（§9〜§12）。各損失: forward 解析値・`n == 0`・エラー経路
+//! （shape 不一致・クロステープ・`y` の `±1` 制約・オプション値検査）・
+//! kink を避けた点での数値微分突合。
+//!
 //! 判定基準（backward）: 承認済み複合判定「相対誤差 1e-2 または絶対
 //! 誤差 1e-3」＋`τ=1e-4`（`crates/autodiff/tests/nn_cross_entropy.rs`・
 //! `nn_loss.rs` と同一パラメータを再利用。新規閾値は導入しない）。
 
 mod common;
 
-use fandhe_ai_autodiff::loss_ops::{self, CrossEntropyOptions};
-use fandhe_ai_autodiff::nn::loss::{CrossEntropyLoss, L1Loss};
+use fandhe_ai_autodiff::loss_ops::{
+    self, CrossEntropyOptions, PoissonNllOptions, TripletMarginOptions,
+};
+use fandhe_ai_autodiff::nn::loss::{
+    CosineEmbeddingLoss, CrossEntropyLoss, L1Loss, MarginRankingLoss, PoissonNllLoss,
+    TripletMarginLoss,
+};
 use fandhe_ai_autodiff::{AutodiffError, Reduction, Tape};
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
@@ -561,7 +573,582 @@ fn cross_entropy_target_out_of_range_not_matching_ignore_index_is_err() {
 }
 
 // =====================================================================
-// 8. `nn::loss` の薄いラッパー性
+// 9. CosineEmbedding 損失（イシュー #2167）
+// =====================================================================
+
+// x1=[1,0]・x2=[0,1] は直交（cos=0）。y=1 → loss=1-0=1。
+#[test]
+fn cosine_embedding_loss_forward_matches_analytic_value() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[0.0, 1.0], &[2]));
+    let y = f32_tensor(&[1.0], &[]);
+
+    let loss = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.5, Reduction::Mean).unwrap();
+    assert!((scalar(&loss.to_tensor()) - 1.0).abs() < 1e-5);
+}
+
+// y=-1・cos=0 < margin(0.5) → hinge 無効 → loss=0。
+#[test]
+fn cosine_embedding_loss_negative_label_below_margin_is_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[0.0, 1.0], &[2]));
+    let y = f32_tensor(&[-1.0], &[]);
+
+    let loss = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.5, Reduction::Mean).unwrap();
+    assert!(scalar(&loss.to_tensor()).abs() < 1e-6);
+}
+
+// 同方向の極端な大きさのベクトル（`f32::MAX`）は cos ≈ 1 のはずで、
+// `y == 1` の損失（`1 - cos`）は 0 に近い有限値になるべき
+// （codex-review 指摘・PR #2286。`(m1 * m2).sqrt()` の中間積 overflow
+// 経路の回帰）。
+#[test]
+fn cosine_embedding_loss_extreme_magnitude_same_direction_stays_finite() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[f32::MAX, f32::MAX], &[2]));
+    let x2 = tape.var(&f32_tensor(&[f32::MAX, f32::MAX], &[2]));
+    let y = f32_tensor(&[1.0], &[]);
+
+    let loss = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap();
+    let got = scalar(&loss.to_tensor());
+    assert!(got.is_finite(), "got={got}");
+    assert!(
+        got.abs() < 1e-3,
+        "cos は約 1 のはずで loss は約 0: got={got}"
+    );
+}
+
+// `NaN` を含む入力（`y == -1` の hinge 分岐）は損失も `NaN` を伝播
+// すべきで、`f64::max(0.0)` の NaN 消失により黙って 0 に潰れては
+// ならない（codex-review 指摘・PR #2286）。
+#[test]
+fn cosine_embedding_loss_negative_label_nan_input_propagates_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[f32::NAN, 0.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let y = f32_tensor(&[-1.0], &[]);
+
+    let loss = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.5, Reduction::Mean).unwrap();
+    assert!(scalar(&loss.to_tensor()).is_nan());
+}
+
+#[test]
+fn cosine_embedding_loss_empty_batch_is_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[], &[0, 3]));
+    let x2 = tape.var(&f32_tensor(&[], &[0, 3]));
+    let y = f32_tensor(&[], &[0]);
+
+    let mean = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap();
+    assert_eq!(scalar(&mean.to_tensor()), 0.0);
+    let sum = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Sum).unwrap();
+    assert_eq!(scalar(&sum.to_tensor()), 0.0);
+}
+
+#[test]
+fn cosine_embedding_loss_rejects_y_shape_mismatch() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[1.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let x2 = tape.var(&f32_tensor(&[1.0, 0.0, 0.0, 1.0], &[2, 2]));
+    let y = f32_tensor(&[1.0], &[]); // rank 2 入力には [N] が必要
+
+    let err = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+}
+
+#[test]
+fn cosine_embedding_loss_rejects_non_pm_one_label() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[0.0, 1.0], &[2]));
+    let y = f32_tensor(&[0.5], &[]);
+
+    let err = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn cosine_embedding_loss_rejects_cross_tape() {
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape_a.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let x2 = tape_b.var(&f32_tensor(&[0.0, 1.0], &[2]));
+    let y = f32_tensor(&[1.0], &[]);
+
+    let err = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::TapeMismatch));
+}
+
+#[test]
+fn cosine_embedding_loss_grad_matches_numeric_central_difference() {
+    // kink（cos == margin）から離れた fixture、rank 2（N=2, D=3）。
+    let x1_data = vec![1.0f32, 2.0, -0.5, 0.3, -1.2, 0.7];
+    let x2_data = vec![0.4f32, -0.6, 1.1, -0.9, 0.2, 1.5];
+    let x2 = f32_tensor(&x2_data, &[2, 3]);
+    let y = f32_tensor(&[1.0, -1.0], &[2]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1_var = tape.var(&f32_tensor(&x1_data, &[2, 3]));
+    let x2_var = tape.var(&x2);
+    let loss = loss_ops::cosine_embedding_loss(&x1_var, &x2_var, &y, 0.2, Reduction::Mean).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let analytic = dense(grads.get(&x1_var).unwrap().expect("x1 は loss に到達する"));
+
+    let eval_loss = |data: &[f32]| -> f64 {
+        let t = Tape::new_with_ops(common::naive_ops());
+        let a = t.var(&f32_tensor(data, &[2, 3]));
+        let b = t.var(&x2);
+        let l = loss_ops::cosine_embedding_loss(&a, &b, &y, 0.2, Reduction::Mean).unwrap();
+        dense(&l.to_tensor())[0] as f64
+    };
+    let mut data = x1_data.clone();
+    for i in 0..data.len() {
+        let orig = data[i] as f64;
+        data[i] = (orig + H) as f32;
+        let lp = eval_loss(&data);
+        data[i] = (orig - H) as f32;
+        let lm = eval_loss(&data);
+        data[i] = orig as f32;
+        let numeric = ((lp - lm) / (2.0 * H)) as f32;
+        assert_close(&format!("cosine_embedding_grad[{i}]"), analytic[i], numeric);
+    }
+}
+
+// =====================================================================
+// 10. MarginRanking 損失（イシュー #2167）
+// =====================================================================
+
+// raw = -y*(x1-x2)+margin = -1*(2-1)+0.5 = -0.5 → hinge 無効 → 0。
+// raw = -(-1)*(1-3)+0.5 = -1.5 → hinge 無効(<0) → 0。両方 0 で合計 0。
+#[test]
+fn margin_ranking_loss_forward_matches_analytic_value() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[2.0, 1.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[1.0, 3.0], &[2]));
+    let y = f32_tensor(&[1.0, -1.0], &[2]);
+
+    let loss = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.5, Reduction::Sum).unwrap();
+    assert!(scalar(&loss.to_tensor()).abs() < 1e-6);
+}
+
+// `NaN` を含む入力は `raw` を `NaN` にし、損失も `NaN` を伝播すべきで、
+// `f64::max(0.0)` の NaN 消失により黙って 0 に潰れてはならない
+// （codex-review 指摘・PR #2286）。
+#[test]
+fn margin_ranking_loss_nan_input_propagates_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[f32::NAN], &[1]));
+    let x2 = tape.var(&f32_tensor(&[1.0], &[1]));
+    let y = f32_tensor(&[1.0], &[1]);
+
+    let loss = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.5, Reduction::Mean).unwrap();
+    assert!(scalar(&loss.to_tensor()).is_nan());
+}
+
+#[test]
+fn margin_ranking_loss_empty_is_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[], &[0]));
+    let x2 = tape.var(&f32_tensor(&[], &[0]));
+    let y = f32_tensor(&[], &[0]);
+
+    let mean = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap();
+    assert_eq!(scalar(&mean.to_tensor()), 0.0);
+}
+
+#[test]
+fn margin_ranking_loss_rejects_non_pm_one_label() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[1.0], &[1]));
+    let x2 = tape.var(&f32_tensor(&[0.0], &[1]));
+    let y = f32_tensor(&[2.0], &[1]);
+
+    let err = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn margin_ranking_loss_rejects_shape_mismatch() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[1.0, 2.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[1.0, 2.0, 3.0], &[3]));
+    let y = f32_tensor(&[1.0, 1.0], &[2]);
+
+    let err = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.0, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+}
+
+#[test]
+fn margin_ranking_loss_grad_matches_numeric_central_difference() {
+    // 活性・非活性が混在する fixture（kink から離れた点）。
+    let x1_data = vec![2.0f32, 0.0, -1.0, 3.0];
+    let x2_data = vec![0.5f32, 1.0, 1.5, -2.0];
+    let x2 = f32_tensor(&x2_data, &[4]);
+    let y = f32_tensor(&[1.0, -1.0, 1.0, -1.0], &[4]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1_var = tape.var(&f32_tensor(&x1_data, &[4]));
+    let x2_var = tape.var(&x2);
+    let loss = loss_ops::margin_ranking_loss(&x1_var, &x2_var, &y, 0.3, Reduction::Mean).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let analytic = dense(grads.get(&x1_var).unwrap().expect("x1 は loss に到達する"));
+
+    let eval_loss = |data: &[f32]| -> f64 {
+        let t = Tape::new_with_ops(common::naive_ops());
+        let a = t.var(&f32_tensor(data, &[4]));
+        let b = t.var(&x2);
+        let l = loss_ops::margin_ranking_loss(&a, &b, &y, 0.3, Reduction::Mean).unwrap();
+        dense(&l.to_tensor())[0] as f64
+    };
+    let mut data = x1_data.clone();
+    for i in 0..data.len() {
+        let orig = data[i] as f64;
+        data[i] = (orig + H) as f32;
+        let lp = eval_loss(&data);
+        data[i] = (orig - H) as f32;
+        let lm = eval_loss(&data);
+        data[i] = orig as f32;
+        let numeric = ((lp - lm) / (2.0 * H)) as f32;
+        assert_close(&format!("margin_ranking_grad[{i}]"), analytic[i], numeric);
+    }
+}
+
+// =====================================================================
+// 11. TripletMargin 損失（イシュー #2167）
+// =====================================================================
+
+// a=[0,0]・p=[1,0]（d_ap=1）・n=[0,4]（d_an=4）・margin=1 →
+// loss = max(0, 1-4+1) = 0。
+#[test]
+fn triplet_margin_loss_forward_matches_analytic_value() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 4.0], &[2]));
+    let options = TripletMarginOptions::default();
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    assert!(scalar(&loss.to_tensor()).abs() < 1e-4);
+}
+
+#[test]
+fn triplet_margin_loss_swap_selects_smaller_negative_distance() {
+    // d_ap=1・d_an=10（swap 無効なら loss=max(0,1-10+1)=0）。
+    // swap 有効で d_pn=0.5 のとき d_neg=min(10,0.5)=0.5 →
+    // loss=max(0,1-0.5+1)=1.5。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[1.0, 0.5], &[2]));
+    let options = TripletMarginOptions::default().swap(true);
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    assert!((scalar(&loss.to_tensor()) - 1.5).abs() < 1e-3);
+}
+
+// `swap` 有効時、`d_an`（anchor-negative 距離）が `inf`・`d_pn`
+// （positive-negative 距離）が有限だと、`d_neg` を係数付き和
+// `an_coeff·d_an + (1−an_coeff)·d_pn` で求める実装は `an_coeff=0.0`
+// でも `0.0 * inf = NaN` になり、有限な `d_pn` を選ぶべき `d_neg` が
+// NaN に汚染される欠陥があった（codex-review 指摘・PR #2286）。
+// `anchor` に `inf` を置くことで、`diff_an = anchor − negative` は
+// `inf` になる一方、`diff_pn = positive − negative`（anchor 非依存）
+// は有限のままという状況を作る。修正後は分岐で `d_neg = d_pn`
+// （有限）を選び、forward は `NaN` ではなく `inf`（`d_ap` も `inf`
+// になるため）を返し、backward も有限勾配を返す。
+#[test]
+fn triplet_margin_loss_swap_infinite_an_finite_pn_does_not_produce_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[f32::INFINITY, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let options = TripletMarginOptions::default().swap(true);
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    let got = scalar(&loss.to_tensor());
+    // `d_ap`・`d_an` は共に `inf`・`d_pn` は `0`（有限）。修正前は
+    // `d_neg` が `NaN` に汚染され `loss` も `NaN` になっていた。
+    assert!(!got.is_nan(), "got={got}（NaN であってはならない）");
+    assert!(got.is_infinite() && got > 0.0, "got={got}");
+
+    let grads = tape.backward(&loss).unwrap();
+    for (name, var) in [("anchor", &a), ("positive", &p), ("negative", &n)] {
+        let g = dense(grads.get(var).unwrap().expect("hinge 有効のため到達する"));
+        assert!(
+            g.iter().all(|v| !v.is_nan()),
+            "{name} の勾配に NaN が含まれる: grad={g:?}"
+        );
+    }
+}
+
+// 有効な `p`（`p >= 1.0` 制約を満たす `p=1024`）と現実的な差分値
+// （`|diff_i| <= 3`）でも、素直な `Σ|v_i|^p` の計算は `|v_i|^p` 自体が
+// `f64` の範囲を超えて overflow し、`d_ap`/`d_an` が `inf` になって
+// `inf - inf = NaN` の損失・勾配を生む欠陥があった（codex-review 指摘・
+// PR #2286）。overflow-safe なスケール形（`p_norm_f64`）への修正で
+// forward・backward とも有限値を維持することを確認する。
+#[test]
+fn triplet_margin_loss_large_p_stays_finite_for_forward_and_backward() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[3.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 1.0], &[2]));
+    let options = TripletMarginOptions::default().p(1024.0);
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    let got = scalar(&loss.to_tensor());
+    // p=1024 では p ノルムは実質 L∞（最大要素の絶対値）に収束するため
+    // d_ap≈3・d_an≈1・loss=max(0, 3-1+margin(1.0))≈3。
+    assert!(got.is_finite(), "got={got}");
+    assert!((got - 3.0).abs() < 1e-2, "got={got}");
+
+    let grads = tape.backward(&loss).unwrap();
+    for var in [&a, &p, &n] {
+        let g = dense(grads.get(var).unwrap().expect("hinge 有効のため到達する"));
+        assert!(g.iter().all(|v| v.is_finite()), "grad={g:?}");
+    }
+}
+
+#[test]
+fn triplet_margin_loss_rejects_non_finite_p() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[0.0], &[1]));
+    let p = tape.var(&f32_tensor(&[1.0], &[1]));
+    let n = tape.var(&f32_tensor(&[2.0], &[1]));
+    let options = TripletMarginOptions::default().p(0.5);
+
+    let err = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn triplet_margin_loss_rejects_shape_mismatch() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[1.0, 0.0, 0.0], &[3]));
+    let n = tape.var(&f32_tensor(&[0.0, 4.0], &[2]));
+    let options = TripletMarginOptions::default();
+
+    let err = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+}
+
+// `NaN` を含む入力は距離統計を `NaN` にし、損失も `NaN` を伝播すべきで、
+// `f64::max(0.0)` の NaN 消失により黙って 0 に潰れてはならない
+// （codex-review 指摘・PR #2286）。
+#[test]
+fn triplet_margin_loss_nan_input_propagates_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[f32::NAN, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 4.0], &[2]));
+    let options = TripletMarginOptions::default();
+
+    let loss = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+    assert!(scalar(&loss.to_tensor()).is_nan());
+}
+
+#[test]
+fn triplet_margin_loss_grad_matches_numeric_central_difference() {
+    let a_data = vec![0.2f32, -0.3, 1.1, 0.4, -0.7, 0.9];
+    let p_data = vec![1.0f32, 0.5, -0.2, 0.1, 0.3, -0.4];
+    let n_data = vec![-0.5f32, 1.2, 0.6, -0.9, 1.0, 0.2];
+    let p_t = f32_tensor(&p_data, &[2, 3]);
+    let n_t = f32_tensor(&n_data, &[2, 3]);
+    let options = TripletMarginOptions::default().margin(0.5);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a_var = tape.var(&f32_tensor(&a_data, &[2, 3]));
+    let p_var = tape.var(&p_t);
+    let n_var = tape.var(&n_t);
+    let loss =
+        loss_ops::triplet_margin_loss(&a_var, &p_var, &n_var, &options, Reduction::Mean).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let analytic = dense(
+        grads
+            .get(&a_var)
+            .unwrap()
+            .expect("anchor は loss に到達する"),
+    );
+
+    let eval_loss = |data: &[f32]| -> f64 {
+        let t = Tape::new_with_ops(common::naive_ops());
+        let a = t.var(&f32_tensor(data, &[2, 3]));
+        let p = t.var(&p_t);
+        let n = t.var(&n_t);
+        let l = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Mean).unwrap();
+        dense(&l.to_tensor())[0] as f64
+    };
+    let mut data = a_data.clone();
+    for i in 0..data.len() {
+        let orig = data[i] as f64;
+        data[i] = (orig + H) as f32;
+        let lp = eval_loss(&data);
+        data[i] = (orig - H) as f32;
+        let lm = eval_loss(&data);
+        data[i] = orig as f32;
+        let numeric = ((lp - lm) / (2.0 * H)) as f32;
+        assert_close(
+            &format!("triplet_margin_grad_anchor[{i}]"),
+            analytic[i],
+            numeric,
+        );
+    }
+}
+
+// =====================================================================
+// 12. PoissonNLL 損失（イシュー #2167）
+// =====================================================================
+
+// log_input=true・x=0・t=1 → loss = exp(0) - 1*0 = 1。
+#[test]
+fn poisson_nll_loss_log_input_forward_matches_analytic_value() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&f32_tensor(&[0.0], &[1]));
+    let target = tape.var(&f32_tensor(&[1.0], &[1]));
+    let options = PoissonNllOptions::default();
+
+    let loss = loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Sum).unwrap();
+    assert!((scalar(&loss.to_tensor()) - 1.0).abs() < 1e-5);
+}
+
+// log_input=false・x=1・t=2・eps=0 → loss = 1 - 2*ln(1) = 1。
+#[test]
+fn poisson_nll_loss_non_log_input_forward_matches_analytic_value() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&f32_tensor(&[1.0], &[1]));
+    let target = tape.var(&f32_tensor(&[2.0], &[1]));
+    let options = PoissonNllOptions::default().log_input(false).eps(0.0);
+
+    let loss = loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Sum).unwrap();
+    assert!((scalar(&loss.to_tensor()) - 1.0).abs() < 1e-5);
+}
+
+// full=true・t=1 は Stirling 項が寄与しない（t>1 のみ）。
+#[test]
+fn poisson_nll_loss_full_term_skips_target_equal_one() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&f32_tensor(&[0.0], &[1]));
+    let target = tape.var(&f32_tensor(&[1.0], &[1]));
+    let base_options = PoissonNllOptions::default();
+    let full_options = PoissonNllOptions::default().full(true);
+
+    let base = loss_ops::poisson_nll_loss(&input, &target, &base_options, Reduction::Sum).unwrap();
+    let full = loss_ops::poisson_nll_loss(&input, &target, &full_options, Reduction::Sum).unwrap();
+    assert!((scalar(&base.to_tensor()) - scalar(&full.to_tensor())).abs() < 1e-6);
+}
+
+// full=true・t=e（e>1）で Stirling 項が非ゼロ寄与を持つ。
+#[test]
+fn poisson_nll_loss_full_term_contributes_when_target_greater_than_one() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&f32_tensor(&[0.0], &[1]));
+    let target = tape.var(&f32_tensor(&[2.0], &[1]));
+    let base_options = PoissonNllOptions::default();
+    let full_options = PoissonNllOptions::default().full(true);
+
+    let base = loss_ops::poisson_nll_loss(&input, &target, &base_options, Reduction::Sum).unwrap();
+    let full = loss_ops::poisson_nll_loss(&input, &target, &full_options, Reduction::Sum).unwrap();
+    assert!(scalar(&full.to_tensor()) > scalar(&base.to_tensor()) + 1e-3);
+}
+
+#[test]
+fn poisson_nll_loss_empty_is_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&f32_tensor(&[], &[0]));
+    let target = tape.var(&f32_tensor(&[], &[0]));
+    let options = PoissonNllOptions::default();
+
+    let mean = loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Mean).unwrap();
+    assert_eq!(scalar(&mean.to_tensor()), 0.0);
+}
+
+#[test]
+fn poisson_nll_loss_rejects_negative_eps() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&f32_tensor(&[0.0], &[1]));
+    let target = tape.var(&f32_tensor(&[1.0], &[1]));
+    let options = PoissonNllOptions::default().log_input(false).eps(-1.0);
+
+    let err = loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Mean).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn poisson_nll_loss_grad_matches_numeric_central_difference_log_input_full() {
+    let input_data = vec![0.2f32, -0.3, 0.5, 0.1];
+    // `t == 1.0` は `full` 項の Stirling マスク境界（`t > 1` のみ寄与）
+    // に一致する kink のため避ける（`l1_loss` の kink 回避方針と同じ）。
+    let target_data = vec![2.5f32, 0.5, 3.0, 1.3];
+    let target = f32_tensor(&target_data, &[4]);
+    let options = PoissonNllOptions::default().full(true);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input_var = tape.var(&f32_tensor(&input_data, &[4]));
+    let target_var = tape.var(&target);
+    let loss =
+        loss_ops::poisson_nll_loss(&input_var, &target_var, &options, Reduction::Mean).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let d_input = dense(
+        grads
+            .get(&input_var)
+            .unwrap()
+            .expect("input は loss に到達する"),
+    );
+    let d_target = dense(
+        grads
+            .get(&target_var)
+            .unwrap()
+            .expect("target は loss に到達する（full 項の dTarget を含む）"),
+    );
+
+    let eval_loss_input = |data: &[f32]| -> f64 {
+        let t = Tape::new_with_ops(common::naive_ops());
+        let i = t.var(&f32_tensor(data, &[4]));
+        let tg = t.var(&target);
+        let l = loss_ops::poisson_nll_loss(&i, &tg, &options, Reduction::Mean).unwrap();
+        dense(&l.to_tensor())[0] as f64
+    };
+    let mut data = input_data.clone();
+    for i in 0..data.len() {
+        let orig = data[i] as f64;
+        data[i] = (orig + H) as f32;
+        let lp = eval_loss_input(&data);
+        data[i] = (orig - H) as f32;
+        let lm = eval_loss_input(&data);
+        data[i] = orig as f32;
+        let numeric = ((lp - lm) / (2.0 * H)) as f32;
+        assert_close(&format!("poisson_nll_grad_input[{i}]"), d_input[i], numeric);
+    }
+
+    let eval_loss_target = |data: &[f32]| -> f64 {
+        let t = Tape::new_with_ops(common::naive_ops());
+        let i = t.var(&f32_tensor(&input_data, &[4]));
+        let tg = t.var(&f32_tensor(data, &[4]));
+        let l = loss_ops::poisson_nll_loss(&i, &tg, &options, Reduction::Mean).unwrap();
+        dense(&l.to_tensor())[0] as f64
+    };
+    let mut tdata = target_data.clone();
+    for i in 0..tdata.len() {
+        let orig = tdata[i] as f64;
+        tdata[i] = (orig + H) as f32;
+        let lp = eval_loss_target(&tdata);
+        tdata[i] = (orig - H) as f32;
+        let lm = eval_loss_target(&tdata);
+        tdata[i] = orig as f32;
+        let numeric = ((lp - lm) / (2.0 * H)) as f32;
+        assert_close(
+            &format!("poisson_nll_grad_target[{i}]"),
+            d_target[i],
+            numeric,
+        );
+    }
+}
+
+// =====================================================================
+// 13. `nn::loss` の薄いラッパー性
 // =====================================================================
 
 #[test]
@@ -591,6 +1178,63 @@ fn nn_cross_entropy_forward_with_matches_free_function_directly() {
     let via_module = module.forward_with(&x, &targets, &options).unwrap();
     let via_free =
         loss_ops::cross_entropy_loss_with(&x, &targets, 1, Reduction::Mean, &options).unwrap();
+
+    assert_eq!(dense(&via_module.to_tensor()), dense(&via_free.to_tensor()));
+}
+
+#[test]
+fn nn_cosine_embedding_loss_forward_matches_free_function_directly() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[0.0, 1.0], &[2]));
+    let y = f32_tensor(&[1.0], &[]);
+
+    let module = CosineEmbeddingLoss::new(0.2, Reduction::Mean);
+    let via_module = module.forward(&x1, &x2, &y).unwrap();
+    let via_free = loss_ops::cosine_embedding_loss(&x1, &x2, &y, 0.2, Reduction::Mean).unwrap();
+
+    assert_eq!(dense(&via_module.to_tensor()), dense(&via_free.to_tensor()));
+}
+
+#[test]
+fn nn_margin_ranking_loss_forward_matches_free_function_directly() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&f32_tensor(&[2.0, 1.0], &[2]));
+    let x2 = tape.var(&f32_tensor(&[1.0, 3.0], &[2]));
+    let y = f32_tensor(&[1.0, -1.0], &[2]);
+
+    let module = MarginRankingLoss::new(0.5, Reduction::Sum);
+    let via_module = module.forward(&x1, &x2, &y).unwrap();
+    let via_free = loss_ops::margin_ranking_loss(&x1, &x2, &y, 0.5, Reduction::Sum).unwrap();
+
+    assert_eq!(dense(&via_module.to_tensor()), dense(&via_free.to_tensor()));
+}
+
+#[test]
+fn nn_triplet_margin_loss_forward_matches_free_function_directly() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let a = tape.var(&f32_tensor(&[0.0, 0.0], &[2]));
+    let p = tape.var(&f32_tensor(&[1.0, 0.0], &[2]));
+    let n = tape.var(&f32_tensor(&[0.0, 4.0], &[2]));
+    let options = TripletMarginOptions::default();
+
+    let module = TripletMarginLoss::new(TripletMarginOptions::default(), Reduction::Sum);
+    let via_module = module.forward(&a, &p, &n).unwrap();
+    let via_free = loss_ops::triplet_margin_loss(&a, &p, &n, &options, Reduction::Sum).unwrap();
+
+    assert_eq!(dense(&via_module.to_tensor()), dense(&via_free.to_tensor()));
+}
+
+#[test]
+fn nn_poisson_nll_loss_forward_matches_free_function_directly() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&f32_tensor(&[0.1, -0.2], &[2]));
+    let target = tape.var(&f32_tensor(&[1.0, 2.0], &[2]));
+    let options = PoissonNllOptions::default().full(true);
+
+    let module = PoissonNllLoss::new(PoissonNllOptions::default().full(true), Reduction::Sum);
+    let via_module = module.forward(&input, &target).unwrap();
+    let via_free = loss_ops::poisson_nll_loss(&input, &target, &options, Reduction::Sum).unwrap();
 
     assert_eq!(dense(&via_module.to_tensor()), dense(&via_free.to_tensor()));
 }
