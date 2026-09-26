@@ -1275,7 +1275,28 @@ where
                         let Ok((k, idx)) = task else {
                             break;
                         };
-                        let result = dataset.batch(&idx);
+                        // `dataset.batch` 内の panic を `catch_unwind` で
+                        // 捕捉し、位置 `k` の結果として型付きエラーを
+                        // 送る（レビュー指摘・イシュー #2183 コメント）。
+                        // 捕捉しないと当該 worker のスレッドが panic で
+                        // 終了し、その worker の `result_tx` クローンだけ
+                        // が drop される。`task_tx`（consumer 側）はまだ
+                        // 生きているため他の worker は `task_rx.recv()`
+                        // でブロックし続け、`result_tx` も全クローンが
+                        // 尽きない限り `Err` にならない
+                        // （`num_workers >= 2` では恒久的にハングする。
+                        // `num_workers == 1` のみ「唯一の送信側が尽きる」
+                        // ため偶然 `WorkerFailed` 経路が機能していた）。
+                        // `catch_unwind` で panic をこの位置のエラーへ
+                        // 変換すればスレッドは終了せず次のタスクへ進める
+                        // ため、`num_workers` に依らず必ず結果が届く。
+                        let result =
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                dataset.batch(&idx)
+                            })) {
+                                Ok(result) => result,
+                                Err(_) => Err(DataError::WorkerFailed { batch_index: k }),
+                            };
                         if result_tx.send((k, result)).is_err() {
                             break;
                         }
@@ -2920,6 +2941,90 @@ mod tests {
         // 資源を正しく解放していることの確認）。
         let count = loader.iter().filter(|b| b.is_ok()).count();
         assert_eq!(count, 50);
+    }
+
+    /// `Dataset::batch` が特定の添字集合に対して panic する `Dataset`
+    /// （`prefetch_worker_panic_in_batch_does_not_hang_with_multiple_
+    /// workers` 専用の回帰再現フィクスチャ）。
+    struct PanicOnceDataset {
+        inner: TensorDataset<f32>,
+        panic_at: usize,
+    }
+
+    impl Dataset for PanicOnceDataset {
+        type Batch = Tensor<f32>;
+
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+
+        fn batch(&self, indices: &[usize]) -> Result<Self::Batch, DataError> {
+            if indices == [self.panic_at] {
+                panic!("PanicOnceDataset: 意図的な panic（テスト用フィクスチャ）");
+            }
+            self.inner.batch(indices)
+        }
+    }
+
+    /// レビュー指摘（イシュー #2183）の回帰固定: worker が `Dataset::batch`
+    /// 内で panic すると、`catch_unwind` 導入前は `num_workers >= 2` の
+    /// 場合に限り当該位置の結果が二度と届かず `PrefetchBatches::next` が
+    /// 恒久的にハングしていた（該当 worker の `result_tx` クローンだけが
+    /// drop され、`task_tx` が生きている他の worker は `recv()` でブロック
+    /// し続けるため）。`catch_unwind` 導入後は `num_workers` に依らず
+    /// panic 位置で 1 回だけ `DataError::WorkerFailed` を返し、前後の
+    /// バッチは正常に届く（epoch は打ち切らない。`prefetch_error_
+    /// position_matches_sequential` と同じ「`Dataset::batch` の `Err` は
+    /// `Sampler` の枯渇と独立」契約）。
+    #[test]
+    fn prefetch_worker_panic_in_batch_does_not_hang_with_multiple_workers() {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // 意図した panic のメッセージを抑制する。
+        let outcome = std::panic::catch_unwind(|| {
+            // `num_workers >= 2` が回帰の再現条件（`num_workers == 1` は
+            // 唯一の worker の送信側が尽きるため偶然ハングしなかった）。
+            for workers in [2usize, 4] {
+                let ds = PanicOnceDataset {
+                    inner: TensorDataset::new(tensor_2d(8, 1)).unwrap(),
+                    panic_at: 3,
+                };
+                let cfg = PrefetchConfig::new(workers, 2).unwrap();
+                let mut loader =
+                    PrefetchDataLoader::new(ds, SequentialSampler::new(8, 1, false).unwrap(), cfg)
+                        .unwrap();
+                let results: Vec<Result<usize, DataError>> = loader
+                    .iter()
+                    .map(|b| b.map(|t| t.host_slice()[0] as usize))
+                    .collect();
+                assert_eq!(
+                    results.len(),
+                    8,
+                    "workers={workers}: 全 8 バッチが届くはず（ハングしていない証拠）"
+                );
+                assert_eq!(
+                    results.iter().filter(|r| r.is_err()).count(),
+                    1,
+                    "workers={workers}: panic した 1 バッチのみ Err のはず"
+                );
+                match &results[3] {
+                    Err(DataError::WorkerFailed { batch_index }) => {
+                        assert_eq!(*batch_index, 3, "workers={workers}");
+                    }
+                    other => panic!("workers={workers}: 位置 3 は WorkerFailed のはずが {other:?}"),
+                }
+                for (i, result) in results.iter().enumerate() {
+                    if i != 3 {
+                        assert_eq!(
+                            *result.as_ref().unwrap(),
+                            i,
+                            "workers={workers}: 位置 {i} の値が逐次実行と不一致"
+                        );
+                    }
+                }
+            }
+        });
+        std::panic::set_hook(previous_hook);
+        outcome.unwrap();
     }
 
     #[test]
