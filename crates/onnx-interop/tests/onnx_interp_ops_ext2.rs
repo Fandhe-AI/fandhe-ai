@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use fandhe_ai_onnx_interop::onnx::graph::Graph;
 use fandhe_ai_onnx_interop::onnx::interp::{InterpError, Value, run};
 use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto, attribute_type};
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 // ---- グラフ構築ヘルパ（`onnx_interp_backend_dispatch.rs` と同型） ----
 
@@ -393,6 +393,31 @@ fn expand_rejects_negative_shape_element() {
     ]);
     let err = run(&g, feeds).unwrap_err();
     assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "shape"));
+}
+
+#[test]
+fn expand_rejects_output_byte_size_overflow_instead_of_panicking() {
+    // codex-review 指摘（PR #2313・イシュー #2186）: `broadcast_shape` は
+    // 要素数積の `usize` オーバーフローのみを検査し、型ごとの確保バイト数
+    // までは見ない。小さい入力（`[1]`）を極端に大きい shape へ拡張すると、
+    // 要素数積自体は `usize` に収まっても `f32`（4 バイト）換算のバイト数が
+    // `Vec` の allocation 上限（`isize::MAX` バイト）を超え、`contiguous()`
+    // 内部の `Vec::with_capacity` が capacity overflow で panic し得た
+    // （本番経路 panic 禁止方針 `.claude/rules/coding-rust.md` に反する）。
+    // `check_expand_output_bytes` 導入後は型付きエラーを返すことを確認する。
+    let huge = isize::MAX as usize / 4 + 1;
+    let n = node("Expand", "n", vec!["data", "shape"], vec!["y"]);
+    let g = single_node_graph(n, &["data", "shape"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("data", vec![1.0], &[1]),
+        feed_i64("shape", vec![huge as i64], &[1]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(
+        err,
+        InterpError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 // ================= ReduceMean =================

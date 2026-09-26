@@ -1237,13 +1237,42 @@ fn dispatch_node<'t>(
 ) -> Result<AutogradValue<'t>, AutogradError> {
     match node.op_type.as_str() {
         "Gemm" => {
-            let a = as_var(tape, env, node, input_name(node, 0)?)?;
-            let b = as_var(tape, env, node, input_name(node, 1)?)?;
+            // 入力数検査・旧 opset `broadcast=0` 検査は `interp::compute_gemm`
+            // と同じ検査関数を共用する（codex-review 指摘。イシュー #2186
+            // PR #2313。従来は interp 経路にしか無く、同一 ONNX ノードで
+            // interp が拒否する入力を autograd 経路が受理し得た）。この
+            // 検査は `Const` 入力（`Value::F32`）を前提とするため、`Var`
+            // （勾配追跡対象）入力の場合は shape 検査を経ずそのまま
+            // `GemmFn` へ進む（`Var` 入力自体が #2078 スコープ外として
+            // 別経路で拒否されるため、ここで shape だけ検査しても
+            // 二重の複雑さを増すだけで安全側には効かない）。
+            super::interp::validate_gemm_arity(node)?;
+            let a_name = input_name(node, 0)?;
+            let b_name = input_name(node, 1)?;
             let has_c = matches!(node.input.get(2), Some(n) if !n.is_empty());
             // 属性の型検証込み読み取りは `interp::read_gemm_attrs` を共用する
             // （イシュー #2186「Gemm の固め」節。forward は引き続き
             // `ops::gemm`〈`GemmFn::forward` 経由〉のみが担う）。
             let attrs = super::interp::read_gemm_attrs(node)?;
+            // `A`／`B`／`C` がいずれも `Const(Value::F32)`（`Var` 勾配追跡
+            // 対象ではない）場合のみ shape 検査する。`Var` 入力は #2078
+            // スコープ外として `as_var` 側で別途拒否されるため、ここで
+            // shape 検査を試みても安全側には効かず、無検証で通す。
+            if let AutogradValue::Const(Value::F32(a_t)) = get_env(env, node, a_name)?
+                && let AutogradValue::Const(Value::F32(b_t)) = get_env(env, node, b_name)?
+            {
+                let c_t = if has_c {
+                    match get_env(env, node, node.input[2].as_str())? {
+                        AutogradValue::Const(Value::F32(t)) => Some(t),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                super::interp::validate_gemm_broadcast(node, a_t, b_t, c_t, &attrs)?;
+            }
+            let a = as_var(tape, env, node, a_name)?;
+            let b = as_var(tape, env, node, b_name)?;
             let mut inputs = vec![a, b];
             if has_c {
                 inputs.push(as_var(tape, env, node, node.input[2].as_str())?);

@@ -590,11 +590,11 @@ fn gemm_output_mn(a: &Tensor<f32>, b: &Tensor<f32>, attrs: &GemmAttrs) -> Option
     Some((m, n))
 }
 
-fn compute_gemm(
-    env: &HashMap<String, Value>,
-    node: &NodeProto,
-    dev_ops: Option<&dyn BackendOps>,
-) -> Result<(Value, bool), InterpError> {
+/// `Gemm` の入力数検査（2〜3 個。第 3 入力 `C` は任意）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （codex-review 指摘。イシュー #2186 PR #2313。従来 autograd 経路には
+/// この検査が無く、4 個以上の余剰入力を無検証で受理し得た）。
+pub(super) fn validate_gemm_arity(node: &NodeProto) -> Result<(), InterpError> {
     if node.input.len() < 2 || node.input.len() > 3 {
         return Err(InterpError::InputArityMismatch {
             node: node.name.clone(),
@@ -603,23 +603,29 @@ fn compute_gemm(
             actual: node.input.len(),
         });
     }
-    let a = get_f32(env, node, input_name(node, 0)?)?;
-    let b = get_f32(env, node, input_name(node, 1)?)?;
-    let c = match node.input.get(2) {
-        Some(name) if !name.is_empty() => Some(get_f32(env, node, name)?),
-        _ => None,
-    };
-    let attrs = read_gemm_attrs(node)?;
+    Ok(())
+}
 
-    // 旧 opset（Gemm-6 以前）の `broadcast`（INT）属性: 省略または非 0 は
-    // 現行 opset 相当のユニ方向ブロードキャストをそのまま許容する。`0` は
-    // 「ブロードキャストしない」意味であり、`C` が正確に `[M, N]` の場合の
-    // みを受理する（旧仕様。`ops::gemm` は常にブロードキャストするため、
-    // ここで shape 一致を明示検査してから委譲する。イシュー #2186）。
+/// 旧 opset（Gemm-6 以前）の `broadcast`（INT）属性検査。省略または非 0 は
+/// 現行 opset 相当のユニ方向ブロードキャストをそのまま許容する。`0` は
+/// 「ブロードキャストしない」意味であり、`C` が正確に `[M, N]` の場合の
+/// みを受理する（旧仕様。`ops::gemm` は常にブロードキャストするため、
+/// ここで shape 一致を明示検査してから委譲する）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （codex-review 指摘。イシュー #2186 PR #2313。従来 autograd 経路の
+/// `GemmFn` はこの検査を経ず、interp が拒否する `broadcast=0` かつ `C`
+/// 形状不一致のノードを受理し得た）。
+pub(super) fn validate_gemm_broadcast(
+    node: &NodeProto,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    c: Option<&Tensor<f32>>,
+    attrs: &GemmAttrs,
+) -> Result<(), InterpError> {
     let broadcast_flag = attr_i64_typed(node, "broadcast", 1)?;
     if broadcast_flag == 0
         && let Some(c_t) = c
-        && let Some((m, n)) = gemm_output_mn(a, b, &attrs)
+        && let Some((m, n)) = gemm_output_mn(a, b, attrs)
         && c_t.shape() != [m, n]
     {
         return Err(InterpError::InvalidAttribute {
@@ -632,6 +638,23 @@ fn compute_gemm(
             ),
         });
     }
+    Ok(())
+}
+
+fn compute_gemm(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
+    validate_gemm_arity(node)?;
+    let a = get_f32(env, node, input_name(node, 0)?)?;
+    let b = get_f32(env, node, input_name(node, 1)?)?;
+    let c = match node.input.get(2) {
+        Some(name) if !name.is_empty() => Some(get_f32(env, node, name)?),
+        _ => None,
+    };
+    let attrs = read_gemm_attrs(node)?;
+    validate_gemm_broadcast(node, a, b, c, &attrs)?;
 
     // opt-in ON（`dev_ops` が `Some`）のときのみ device 経路を試みる。
     // `Ok(None)`（未対応 shape・`Unsupported`）はホスト実装へそのまま

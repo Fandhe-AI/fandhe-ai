@@ -45,7 +45,8 @@
 use std::collections::{HashMap, HashSet};
 
 use fandhe_ai_autodiff::{Tape, Var};
-use fandhe_ai_tensor_core::{InterpolateMode, Tensor, broadcast_shape};
+use fandhe_ai_tensor_core::{InterpolateMode, ShapeError, Tensor, broadcast_shape};
+use half::f16;
 
 use super::interp::{
     InterpError, Value, attr_f32_typed, attr_i64_typed, attr_ints_typed, attr_string, autodiff_err,
@@ -53,6 +54,37 @@ use super::interp::{
 };
 use super::proto::NodeProto;
 use crate::ops::{OpError, normalize_axis};
+
+/// `shape` を要素型 `T` で実体化した場合のバイトサイズが `Vec` の
+/// allocation 上限（`isize::MAX` バイト）に収まるかを事前検査する
+/// （`tensor-core::checked_numel_for` と同じ検査だが `pub(crate)` の
+/// ため本クレートから直接呼べず複製する。codex-review P0 是正・
+/// イシュー #2186）。
+///
+/// `Expand` の `shape` 入力は ONNX という非信頼な外部データそのもの
+/// （OWASP A03）で、`broadcast_shape` は要素数積の `usize` オーバー
+/// フローのみ検査し型ごとの確保バイト数は見ない。小さな入力を
+/// 極端に大きい出力 shape へ拡張する攻撃的入力に対し、`contiguous()`
+/// （内部で `Vec::with_capacity(numel)` を呼ぶ）が要素サイズ込みの
+/// バイト数で capacity overflow して panic するのを防ぐため、
+/// `F32`／`I64`／`Bool`／`F16` の 4 腕すべてでこの関数を経由してから
+/// 実体化する。
+fn check_expand_output_bytes<T>(out_shape: &[usize]) -> Result<(), InterpError> {
+    let numel = out_shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size > 0 {
+        let bytes = numel
+            .checked_mul(elem_size)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        if bytes > isize::MAX as usize {
+            return Err(ShapeError::ElementCountOverflow.into());
+        }
+    }
+    Ok(())
+}
 
 /// 単一入力（`node.input[0]`）を要求する op 共通の入力数検査。
 fn require_single_input(node: &NodeProto) -> Result<(), InterpError> {
@@ -273,6 +305,7 @@ pub(super) fn compute_expand(
     match get_value(env, node, data_name)? {
         Value::F32(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
+            check_expand_output_bytes::<f32>(&out_shape)?;
             let tape = Tape::new();
             let out = tape
                 .var_no_grad(t)
@@ -282,14 +315,17 @@ pub(super) fn compute_expand(
         }
         Value::I64(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
+            check_expand_output_bytes::<i64>(&out_shape)?;
             Ok(Value::I64(t.broadcast_to(&out_shape)?.contiguous()))
         }
         Value::Bool(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
+            check_expand_output_bytes::<bool>(&out_shape)?;
             Ok(Value::Bool(t.broadcast_to(&out_shape)?.contiguous()))
         }
         Value::F16(t) => {
             let out_shape = broadcast_shape(t.shape(), &target_shape)?;
+            check_expand_output_bytes::<f16>(&out_shape)?;
             Ok(Value::F16(t.broadcast_to(&out_shape)?.contiguous()))
         }
     }

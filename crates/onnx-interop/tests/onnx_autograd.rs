@@ -290,6 +290,72 @@ fn gemm_forward_bit_identical_with_trans_b_and_bias() {
     }
 }
 
+#[test]
+fn gemm_rejects_arity_outside_two_to_three_in_autograd() {
+    // codex-review 指摘（PR #2313・イシュー #2186）: `interp::compute_gemm`
+    // には入力数検査（2〜3 個）があったが autograd 経路（本ファイル）には
+    // 無く、余剰入力（4 個以上）を無検証で受理し得た。`validate_gemm_arity`
+    // 共用化後は同じ `InputArityMismatch` を返すことを確認する。
+    let graph = single_node_graph(node("Gemm", vec!["a"], vec!["y"]), vec!["a"], "y");
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "a".to_string(),
+        AutogradValue::Var(tape.var(&f32(vec![1.0], &[1, 1]))),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(
+        err,
+        AutogradError::Interp(interp::InterpError::InputArityMismatch {
+            min: 2,
+            max: 3,
+            actual: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn gemm_broadcast_zero_requires_c_shape_exactly_mn_in_autograd() {
+    // codex-review 指摘（PR #2313・イシュー #2186）: 旧 opset `broadcast=0`
+    // の `C` 形状検証は interp 経路にのみ存在し、同一 ONNX ノードで interp
+    // が拒否する `C` ブロードキャストを autograd（`GemmFn`）は受理し得た。
+    // `validate_gemm_broadcast` 共用化後、`Const`（`Var` 非追跡）入力では
+    // interp と同じ `InvalidAttribute` を返すことを確認する。
+    let graph = single_node_graph(
+        node_with_attrs(
+            "Gemm",
+            vec!["a", "b", "c"],
+            vec!["y"],
+            vec![attr_i64("broadcast", 0)],
+        ),
+        vec!["a", "b", "c"],
+        "y",
+    );
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "a".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[1, 2]))),
+    );
+    feeds.insert(
+        "b".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[2, 1]))),
+    );
+    feeds.insert(
+        "c".to_string(),
+        // [1] は出力 [1, 1] と異なる（broadcast=0 では不可）。
+        AutogradValue::Const(Value::F32(f32(vec![1.0], &[1]))),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(
+        err,
+        AutogradError::Interp(interp::InterpError::InvalidAttribute { attr, .. }) if attr == "broadcast"
+    ));
+}
+
 // ================= model.onnx end-to-end =================
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
