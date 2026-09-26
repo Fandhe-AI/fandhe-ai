@@ -1,6 +1,6 @@
 //! `fandhe_ai::interop::onnx::OnnxModel` 経由の `GlobalAveragePool`／
 //! `BatchNormalization`／`Flatten` import・実行を検証する（イシュー
-//! #2200・親 #2185）。
+//! #2200・親 #2185。export 側の対称化はイシュー #2187・親 #2186）。
 //!
 //! **本ファイルは `interop_onnx_internal_parity.rs` と同じく意図的に
 //! `fandhe_ai` と `fandhe_ai_onnx_interop` の両方を import する**（合成
@@ -15,15 +15,17 @@
 //! 2. `compat::Sequential`（`add_adaptive_avg_pool2d([1,1])`．
 //!    `add_flatten(1,3)`）の `predict` が、GAP → Flatten の ONNX モデルを
 //!    `OnnxModel` 経由で実行した結果と bit 一致すること
-//! 3. **非対称性**: 同じモデルで `from_bytes`／`run` は成功するが
-//!    `to_bytes` は `OnnxError::UnsupportedOp` になること（export
-//!    allowlist が 23 のままであることを固定する）
+//! 3. **往復（イシュー #2187 で非対称性テストから書き換え）**: `from_bytes`
+//!    → `to_bytes` → `from_bytes` → `run` の結果が、元モデルの `run` 結果と
+//!    bit 一致すること（export allowlist が import と対称〈26 op〉に
+//!    なったため）。`to_bytes` を 2 回呼んだバイト列が同一であること
+//!    （決定性。`export.rs` モジュール冒頭コメントの契約）も確認する
 
 use std::collections::HashMap;
 
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::interop::onnx::{OnnxError, OnnxExportOptions, OnnxModel, OnnxValue};
+use fandhe_ai::interop::onnx::{OnnxExportOptions, OnnxModel, OnnxValue};
 
 use fandhe_ai_onnx_interop::onnx::graph::build_graph;
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
@@ -212,10 +214,11 @@ fn facade_global_average_pool_flatten_matches_compat_sequential_predict() {
 }
 
 #[test]
-fn facade_import_succeeds_but_export_rejects_global_average_pool_and_flatten() {
-    // 非対称性テスト: import（`from_bytes`／`run`）は成功するが、export
-    // （`to_bytes`）は export allowlist（23 op）外のため
-    // `OnnxError::UnsupportedOp` で拒否される（イシュー #2200）。
+fn facade_global_average_pool_flatten_export_roundtrip_matches_original_run_bit_exact() {
+    // イシュー #2187 で `GlobalAveragePool`／`Flatten` が export allowlist に
+    // 追加され import（26 op）と対称になったため、旧 `facade_import_
+    // succeeds_but_export_rejects_global_average_pool_and_flatten`
+    // （非対称性テスト）を往復成功の正のテストへ書き換える。
     let nodes = vec![
         node("GlobalAveragePool", "gap", vec!["x"], vec!["gap_out"]),
         node("Flatten", "flatten", vec!["gap_out"], vec!["y"]),
@@ -238,21 +241,43 @@ fn facade_import_succeeds_but_export_rejects_global_average_pool_and_flatten() {
 
     let facade_model =
         OnnxModel::from_bytes(&bytes).expect("from_bytes は成功するはず（import 対応済み）");
+    let x = Tensor::<f32>::new(
+        (0..(2 * 3 * 3)).map(|v| (v as f32) * 0.3 - 1.0).collect(),
+        &[1, 2, 3, 3],
+    )
+    .unwrap();
+
     let mut feeds = HashMap::new();
-    feeds.insert(
-        "x".to_string(),
-        OnnxValue::F32(Tensor::<f32>::zeros(&[1, 2, 3, 3]).unwrap()),
-    );
-    assert!(
-        facade_model.run(feeds).is_ok(),
-        "GlobalAveragePool -> Flatten の run は成功するはず"
+    feeds.insert("x".to_string(), OnnxValue::F32(x.clone()));
+    let original_out = as_f32(
+        &facade_model
+            .run(feeds)
+            .expect("GlobalAveragePool -> Flatten の run は成功するはず")["y"],
     );
 
-    let err = facade_model
+    // `to_bytes` の決定性: 同一モデルへの複数回呼び出しは同一バイト列
+    // （`export.rs` モジュール冒頭コメントの契約。initializer 名ソート・
+    // `raw_data` のみ書き出しにより決定的）。
+    let exported_bytes_1 = facade_model
         .to_bytes(&OnnxExportOptions::default())
-        .unwrap_err();
-    assert!(
-        matches!(&err, OnnxError::UnsupportedOp { op_type } if op_type == "GlobalAveragePool"),
-        "export は最初の未対応 op（GlobalAveragePool）で拒否されるはずだが {err:?}"
+        .expect("to_bytes は成功するはず（export allowlist が import と対称化済み）");
+    let exported_bytes_2 = facade_model
+        .to_bytes(&OnnxExportOptions::default())
+        .expect("to_bytes は成功するはず");
+    assert_eq!(
+        exported_bytes_1, exported_bytes_2,
+        "to_bytes は同一モデルに対し決定的（同一バイト列）のはず"
     );
+
+    let reimported =
+        OnnxModel::from_bytes(&exported_bytes_1).expect("再 from_bytes は成功するはず");
+    let mut feeds2 = HashMap::new();
+    feeds2.insert("x".to_string(), OnnxValue::F32(x));
+    let roundtrip_out = as_f32(
+        &reimported
+            .run(feeds2)
+            .expect("再 import 後の run も成功するはず")["y"],
+    );
+
+    assert_bit_identical(&original_out, &roundtrip_out);
 }

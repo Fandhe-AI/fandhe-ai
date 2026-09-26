@@ -14,8 +14,10 @@ decision.md` §14）。
 
 ## 0. スコープ境界
 
-- 本 issue の対象は「`interp.rs` が読む 23 op の逆方向（内部 op -> `NodeProto`）」
-  のみ。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し（`compat::Sequential`／
+- 本 issue（#1773）の対象は「`interp.rs` が読む当時の 23 op の逆方向（内部
+  op -> `NodeProto`）」のみ。イシュー #2187 で `BatchNormalization`／
+  `GlobalAveragePool`／`Flatten` の 3 op を追加し、import（26 op）と対称化
+  した（§8 参照）。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し（`compat::Sequential`／
   `nn` -> `ExportNode`）は #1653 のスコープのまま対象外（#2018 でも実装しない）。
   facade 公開可否自体は #1775 が判断済みで、#2018 で
   `OnnxModel::to_bytes`／`to_path`（import 済みモデルの roundtrip export
@@ -68,10 +70,14 @@ decision.md` §14）。
 | Constant | 3 | なし | value〈TENSOR〉／value_float〈FLOAT〉／value_floats〈FLOATS〉／value_int〈INT〉／value_ints〈INTS〉のいずれか 1 つ | `compute_constant` |
 | LayerNormalization | 3 | X, Scale, [B] | axis: INT=-1 / epsilon: FLOAT=1e-5 | `compute_layer_normalization` |
 | Conv | 3 | X, W, [B] | auto_pad: STRING="NOTSET" / dilations: INTS=[1,1] / group: INT=1 / kernel_shape: INTS（`W.shape()[2..4]`） / pads: INTS=[0,0,0,0] / strides: INTS=[1,1] | `compute_conv` |
+| BatchNormalization | 3 | X, scale, B, input_mean, input_var（全 5 入力必須） | epsilon: FLOAT=1e-5 / momentum: FLOAT=0.9（推論では未使用。`interp` は型検証のみ） / training_mode: INT=0（常に 0 を書く。`spatial` は opset 9 で廃止済みのため書かない） | `compute_batch_normalization` |
+| GlobalAveragePool | 3 | X | なし | `compute_global_average_pool` |
+| Flatten | 3 | input | axis: INT=1 | `compute_flatten` |
 
 Tier 1（必須・受入条件）・Tier 2（`slice_repro.onnx` fixture roundtrip に必要）・
-Tier 3（推奨・全実装済み）。23 op すべて実装済み（削減なし。`Conv` はイシュー
-#2076・親 #2034 で追加）。
+Tier 3（推奨・全実装済み）。26 op すべて実装済み（`Conv` はイシュー #2076・
+親 #2034、`BatchNormalization`／`GlobalAveragePool`／`Flatten` はイシュー
+#2187・親 #2186〈import 側 #2200・親 #2185 の逆写像〉で追加）。
 
 ## 3. `Constant` の `value`（TENSOR）契約
 
@@ -226,3 +232,37 @@ op マッピング表自体（§2）は変更しない。
   `OnnxModel::from_sequential(&Sequential)`（§15.7 承認事項 3）は
   イシュー #2037 で `graph_from_layers` への薄い委譲として実装済み
   （`docs/facade-onnx-export-exposure-decision.md` §17）。
+
+## 8. イシュー #2187 追補（E1・E2 の逆写像。CNN 系 3 op を追加・import と対称化）
+
+イシュー #2200・親 #2185（import 側 E1）が `interp.rs` へ `GlobalAveragePool`・
+`BatchNormalization`・`Flatten` を追加したことで生じていた import／export の
+非対称（§0・`onnx/mod.rs` モジュール冒頭コメント旧稿）を、本イシューで export
+側（`export_ops.rs`）へも 3 op を追加して解消した。§2 の対応表に統合済み。
+
+- **対称化の範囲は「マージ済みの import PR」のみ**: 計画時点（2026-09-26）で
+  E2（Gemm 変種・Clip・Tanh・Gelu・Where・Expand・ReduceMean・Pad・Resize。
+  親 #2186・PR #2313）と Pool 系（MaxPool・AveragePool・Conv 1D。親 #2185・
+  PR #2314）はいずれも import 側が未マージ（open）だったため、本イシューの
+  export 追加対象からは除外した（`.claude/rules/out-of-scope-tracking.md`
+  の「未実装のフェーズは PR 本文に残作業として記録し完了扱いにしない」方針
+  に従う）。E2・Pool 系の export 対応は、それぞれの import 側 PR がマージ
+  された後の別イシューで追う。
+- **`BatchNormalization` の `momentum` 属性**: `ops::BatchNormAttrs`
+  （`crates/onnx-interop/src/ops/batch_norm.rs`）は推論に使わない
+  `momentum` を保持しない設計のため、export 側の `ExportOp::
+  BatchNormalization { epsilon, momentum }` は `momentum` を variant 自身の
+  フィールドとして独立に持つ（`ops` の数値意味論を汚さないための分離。
+  `interp.rs::compute_batch_normalization` は型検証のみ行い値を捨てる）。
+  `training_mode` は export 側が常に `0`（推論モード）を書く（`interp` は
+  `0` 以外を拒否するため export 側が別の値を作ることはない）。`spatial`
+  （opset 9 で廃止済みの属性）は書かない（`interp` は省略時に `1` とみなす）。
+- **`GlobalAveragePool`**: 属性なし・入力 1 個のみ。`interp.rs::compute_
+  global_average_pool` と 1 対 1 対応。
+- **`Flatten`**: 属性 `axis`（INT。ONNX 仕様の既定値 `1`）のみ。`Reshape`
+  等と異なり attr/入力の opset 別形態分岐はない。
+- 3 op とも `ops::*` の直接呼び出しと bit 完全一致することを
+  `crates/onnx-interop/tests/onnx_export_ops.rs` で固定する
+  （`batch_normalization_exports_epsilon_momentum_training_mode_and_matches_
+  direct_call`／`global_average_pool_exports_no_attributes_and_matches_
+  direct_call`／`flatten_exports_axis_attribute_and_matches_direct_call`）。
