@@ -180,9 +180,70 @@ fn pool_out_axis_len(
     Ok(out)
 }
 
+/// 1 出力位置 `out_idx` について、有効タップ（パディング領域外の入力
+/// 位置）を持つ窓添字 `ki` の連続範囲 `(ki_min, ki_max)`（両端含む）を
+/// 算術的に求める。有効タップが 1 つも無ければ `None`。
+///
+/// `window_input_pos` は `ih = out_idx*s + ki*d - pb` を計算するが、
+/// `0 <= ih < in_len` を満たす `ki` の集合は `d > 0` である限り
+/// （`ki*d` が非減少なので）常に連続範囲になる。この事実を使い、
+/// **`kernel_shape`（`k`）に依存しない `O(1)` の範囲計算**へ数式変形する
+/// （`checked_*` 演算の連鎖のみで `as` キャストは行わない。REQ-8・
+/// OWASP A03。`window_input_pos` と同型の安全側フォールバック方針）。
+///
+/// これにより 1 出力位置あたりの反復回数は `kernel_shape`／`pads` の値に
+/// 関わらず `min(kernel_shape, in_len/dilation + 1)` 相当に収まり、外部
+/// 属性由来の巨大な `kernel_shape`・`pads`（例: `kernel_shape=
+/// 1_000_000_000`・`pad_begin=999_999_999`）を与えても [`axis_windows_nonempty`]
+/// 自体や呼び出し元の直接ループ（[`max_pool`]／[`average_pool`]）が
+/// `kernel_shape` に比例した反復を行わない（イシュー #2199 codex-review
+/// 指摘: 事前検証だけで約 10 億回反復する DoS 相当の停止を修正）。
+///
+/// 返す範囲は `ki_min <= ki_max` の昇順であり、呼び出し元がこの範囲を
+/// そのまま `ki_min..=ki_max` として昇順走査すれば、従来の `0..k`
+/// 走査と同じ「`kh`／`kw` 外側・内側の row-major」順序・タイ規則・NaN
+/// 規則を保つ（モジュール doc の bit 完全一致契約は不変）。
+fn valid_tap_range(
+    out_idx: usize,
+    stride: usize,
+    kernel: usize,
+    dilation: usize,
+    pad_begin: usize,
+    in_len: usize,
+) -> Option<(usize, usize)> {
+    let base = out_idx.checked_mul(stride)?;
+    // 上限: base + ki*dilation - pad_begin < in_len
+    //   ⇔ ki*dilation < pad_begin + in_len - base
+    // base が `pad_begin + in_len` を超える場合は全タップが入力より
+    // 右側に外れるため有効タップなし（`checked_sub` の `None` で表現）。
+    let hi_exclusive = pad_begin.checked_add(in_len)?.checked_sub(base)?;
+    if hi_exclusive == 0 {
+        return None;
+    }
+    let ki_max_by_hi = (hi_exclusive - 1) / dilation;
+    // 下限: base + ki*dilation >= pad_begin ⇔ ki*dilation >= pad_begin - base
+    // base >= pad_begin なら ki=0 から既に条件を満たす。
+    let ki_min = match pad_begin.checked_sub(base) {
+        None | Some(0) => 0,
+        Some(lo) => lo.div_ceil(dilation),
+    };
+    if ki_min > ki_max_by_hi || ki_min >= kernel {
+        return None;
+    }
+    let ki_max = ki_max_by_hi.min(kernel - 1);
+    Some((ki_min, ki_max))
+}
+
 /// 軸 `out_len` の全出力位置が少なくとも 1 つの有効タップ（パディング
 /// 領域外の入力位置）を持つことを検証する（空窓の `max` を未定義に
-/// せず、また `AveragePool` の 0 除算を未然に防ぐ。§3.1）。
+/// せず、`count_include_pad=0` の `AveragePool` の 0 除算を未然に防ぐ。
+/// §3.1）。`count_include_pad=1` の `AveragePool` はこの検査の対象外
+/// （呼び出し元 [`average_pool`] 参照。空窓でも divisor は padded 座標
+/// 基準で計算され 0 除算にならない。Bugbot 指摘 #2199 対応: 全タップが
+/// padding の窓を ONNX 上正当な `0` 平均として受理する）。
+///
+/// [`valid_tap_range`] の `O(1)` 判定を使うため、本関数の反復回数は
+/// `out_len` のみに依存し `kernel_shape` の大きさに影響されない。
 fn axis_windows_nonempty(
     out_len: usize,
     k: usize,
@@ -191,13 +252,7 @@ fn axis_windows_nonempty(
     pb: usize,
     in_len: usize,
 ) -> bool {
-    (0..out_len).all(|out_idx| {
-        (0..k).any(|ki| {
-            window_input_pos(out_idx, s, ki, d, pb)
-                .map(|v| v < in_len)
-                .unwrap_or(false)
-        })
-    })
+    (0..out_len).all(|out_idx| valid_tap_range(out_idx, s, k, d, pb, in_len).is_some())
 }
 
 /// `[usize; 2]` 属性（`kernel_shape`／`strides`／`dilations`）を軸数
@@ -464,34 +519,45 @@ pub fn max_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpErr
     for ni in 0..n {
         for ci in 0..c {
             for oh in 0..h_out {
+                // H 軸の有効タップ範囲は `ow` に依存しないため `oh` ループの
+                // 外で 1 度だけ求める（[`valid_tap_range`] は `O(1)`）。
+                let h_range = valid_tap_range(oh, sh, kh, dh, ph_b, h_in);
                 for ow in 0..w_out {
                     let mut best: Option<f32> = None;
-                    for khi in 0..kh {
-                        let Some(ih) =
-                            window_input_pos(oh, sh, khi, dh, ph_b).filter(|&v| v < h_in)
-                        else {
-                            continue;
-                        };
-                        for kwi in 0..kw {
-                            let Some(iw) =
-                                window_input_pos(ow, sw, kwi, dw, pw_b).filter(|&v| v < w_in)
+                    if let Some((h_lo, h_hi)) = h_range
+                        && let Some((w_lo, w_hi)) = valid_tap_range(ow, sw, kw, dw, pw_b, w_in)
+                    {
+                        // 反復回数は `h_hi-h_lo+1`／`w_hi-w_lo+1`（高々
+                        // `in_len/dilation + 1`）に収まり、`kernel_shape`
+                        // の値そのもの（外部 ONNX 属性）には依存しない
+                        // （DoS 対策。イシュー #2199 codex-review 指摘）。
+                        for khi in h_lo..=h_hi {
+                            let Some(ih) =
+                                window_input_pos(oh, sh, khi, dh, ph_b).filter(|&v| v < h_in)
                             else {
                                 continue;
                             };
-                            let x_idx = ((ni * c + ci) * h_in + ih) * w_in + iw;
-                            let v = *x_slice
-                                .get(x_idx)
-                                .ok_or(OpError::NonContiguousInternal("MaxPool(X read)"))?;
-                            best = Some(match best {
-                                None => v,
-                                Some(b) => {
-                                    if v > b || (v.is_nan() && !b.is_nan()) {
-                                        v
-                                    } else {
-                                        b
+                            for kwi in w_lo..=w_hi {
+                                let Some(iw) =
+                                    window_input_pos(ow, sw, kwi, dw, pw_b).filter(|&v| v < w_in)
+                                else {
+                                    continue;
+                                };
+                                let x_idx = ((ni * c + ci) * h_in + ih) * w_in + iw;
+                                let v = *x_slice
+                                    .get(x_idx)
+                                    .ok_or(OpError::NonContiguousInternal("MaxPool(X read)"))?;
+                                best = Some(match best {
+                                    None => v,
+                                    Some(b) => {
+                                        if v > b || (v.is_nan() && !b.is_nan()) {
+                                            v
+                                        } else {
+                                            b
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                     }
                     // `axis_windows_nonempty` の事前検査により到達しないはず
@@ -521,7 +587,14 @@ pub fn max_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpErr
 }
 
 /// `AveragePool(X)` を計算する（イシュー #2199）。検証は [`max_pool`]
-/// と同順序だが、`dilations` はすべて 1 のみ受理する（§3.1）。
+/// とほぼ同順序だが、`dilations` はすべて 1 のみ受理し（§3.1）、空窓
+/// 検査（`axis_windows_nonempty`）は `count_include_pad=0` の場合のみ
+/// 行う。`count_include_pad=1` では全タップが padding の窓（空窓）も
+/// ONNX 上正当（divisor は padded 座標基準で計算され `acc=0` のまま
+/// `0` を返す）であり、空窓を一律拒否すると当該窓を含む import 全体を
+/// 誤って拒否してしまうため（Bugbot 指摘 #2199 対応。`count_include_pad=1`
+/// のとき divisor が 0 にならないことは `pool_out_axis_len` の出力長
+/// 調整規則（最後の窓が padded 範囲内で始まる）から保証される）。
 ///
 /// 数値契約: 有効タップを `kh` 外側・`kw` 内側の row-major で `f64` へ
 /// 逐次加算し `(acc / divisor as f64) as f32` で 1 回だけ downcast する
@@ -530,6 +603,9 @@ pub fn max_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpErr
 /// `count_include_pad=0` なら有効タップ数、`count_include_pad=1` なら
 /// 軸ごとの `min(out_idx*stride + kernel, in_len+pad_begin+pad_end) -
 /// out_idx*stride` の積（ceil モードのはみ出し分を含めない。§3.1）。
+/// 有効タップの走査は `valid_tap_range` が返す `O(1)` 範囲に限るため、
+/// `max_pool` と同様に `kernel_shape` の値そのものには反復回数が依存
+/// しない（DoS 対策。イシュー #2199 codex-review 指摘）。
 pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpError> {
     const OP: &str = "AveragePool";
     let (x4, kh, kw, sh, sw, dh, dw, ph_b, ph_e, pw_b, pw_e, is_1d) =
@@ -563,15 +639,21 @@ pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, O
         },
         ceil_mode,
     )?;
-    if !axis_windows_nonempty(h_out, kh, sh, dh, ph_b, h_in) {
-        return Err(OpError::InvalidPoolAttribute {
-            reason: format!("{OP}: H 軸に有効タップを持たない出力窓が存在する"),
-        });
-    }
-    if !axis_windows_nonempty(w_out, kw, sw, dw, pw_b, w_in) {
-        return Err(OpError::InvalidPoolAttribute {
-            reason: format!("{OP}: W 軸に有効タップを持たない出力窓が存在する"),
-        });
+    // `count_include_pad=1` では divisor が padded 座標基準で計算され
+    // 空窓でも 0 除算にならないため、空窓検査は `count_include_pad=0`
+    // （divisor=valid_count のため空窓が 0 除算に直結する）の場合のみ
+    // 行う（Bugbot 指摘 #2199 対応。関数 doc 参照）。
+    if !count_include_pad {
+        if !axis_windows_nonempty(h_out, kh, sh, dh, ph_b, h_in) {
+            return Err(OpError::InvalidPoolAttribute {
+                reason: format!("{OP}: H 軸に有効タップを持たない出力窓が存在する"),
+            });
+        }
+        if !axis_windows_nonempty(w_out, kw, sw, dw, pw_b, w_in) {
+            return Err(OpError::InvalidPoolAttribute {
+                reason: format!("{OP}: W 軸に有効タップを持たない出力窓が存在する"),
+            });
+        }
     }
 
     let x_slice = x4
@@ -615,6 +697,10 @@ pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, O
                     .ok_or(OpError::InvalidPoolAttribute {
                         reason: format!("{OP}: H 軸の divisor 計算がオーバーフローした"),
                     })?;
+                // H 軸の有効タップ範囲（`ow` に依存しないため `oh` ループの
+                // 外で 1 度だけ求める。`count_include_pad=1` では空窓
+                // （`None`）もありうる。[`valid_tap_range`] doc 参照）。
+                let h_range = valid_tap_range(oh, sh, kh, dh, ph_b, h_in);
                 for ow in 0..w_out {
                     let w_start = ow.checked_mul(sw).ok_or(OpError::InvalidPoolAttribute {
                         reason: format!("{OP}: W 軸の窓開始位置計算がオーバーフローした"),
@@ -629,24 +715,31 @@ pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, O
 
                     let mut acc: f64 = 0.0;
                     let mut valid_count: usize = 0;
-                    for khi in 0..kh {
-                        let Some(ih) =
-                            window_input_pos(oh, sh, khi, dh, ph_b).filter(|&v| v < h_in)
-                        else {
-                            continue;
-                        };
-                        for kwi in 0..kw {
-                            let Some(iw) =
-                                window_input_pos(ow, sw, kwi, dw, pw_b).filter(|&v| v < w_in)
+                    // 反復回数は `kernel_shape` の値そのものに依存せず
+                    // `h_range`／`w_range` の幅（高々 `in_len/dilation+1`）
+                    // に収まる（DoS 対策。イシュー #2199 codex-review 指摘）。
+                    if let Some((h_lo, h_hi)) = h_range
+                        && let Some((w_lo, w_hi)) = valid_tap_range(ow, sw, kw, dw, pw_b, w_in)
+                    {
+                        for khi in h_lo..=h_hi {
+                            let Some(ih) =
+                                window_input_pos(oh, sh, khi, dh, ph_b).filter(|&v| v < h_in)
                             else {
                                 continue;
                             };
-                            let x_idx = ((ni * c + ci) * h_in + ih) * w_in + iw;
-                            let v = *x_slice
-                                .get(x_idx)
-                                .ok_or(OpError::NonContiguousInternal("AveragePool(X read)"))?;
-                            acc += f64::from(v);
-                            valid_count += 1;
+                            for kwi in w_lo..=w_hi {
+                                let Some(iw) =
+                                    window_input_pos(ow, sw, kwi, dw, pw_b).filter(|&v| v < w_in)
+                                else {
+                                    continue;
+                                };
+                                let x_idx = ((ni * c + ci) * h_in + ih) * w_in + iw;
+                                let v = *x_slice
+                                    .get(x_idx)
+                                    .ok_or(OpError::NonContiguousInternal("AveragePool(X read)"))?;
+                                acc += f64::from(v);
+                                valid_count += 1;
+                            }
                         }
                     }
                     let divisor = if count_include_pad {
@@ -658,9 +751,13 @@ pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, O
                     } else {
                         valid_count
                     };
-                    // `axis_windows_nonempty` の事前検査により到達しない
-                    // はずだが、契約違反時に panic せず型付きエラーで拒否
-                    // する（REQ-8・A08）。
+                    // `count_include_pad=0` では `axis_windows_nonempty` の
+                    // 事前検査により到達しないはずだが、契約違反時に panic
+                    // せず型付きエラーで拒否する（REQ-8・A08）。
+                    // `count_include_pad=1` では空窓自体は正当（`acc=0`）
+                    // だが、`divisor` が 0 になるのは [`pool_out_axis_len`]
+                    // の出力長調整規則違反時のみで理論上到達しない
+                    // フォールバックである。
                     if divisor == 0 {
                         return Err(OpError::InvalidPoolAttribute {
                             reason: format!("{OP}: divisor が 0 になった（空窓）"),
@@ -976,17 +1073,75 @@ mod tests {
 
     #[test]
     fn empty_window_rejected() {
-        // kernel が入力全体より大きく、パディングも無いため窓が空になる。
-        let x = Tensor::<f32>::zeros(&[1, 1, 1, 2]).unwrap();
+        // W 軸: kernel=1・pad_begin=1 のため out_idx=0 の窓が padding のみ
+        // となり空になる（padded_w=1+1+0=2 -> out_w=2、out_idx=0 は
+        // window_input_pos(0,1,0,1,1)= 0-1 でアンダーフロー -> 無効）。
+        // Bugbot 指摘 #2199: 以前の同名テストは実際には空窓を生成せず
+        // `is_ok()` を assert しており契約を検証していなかった。
+        let x = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
         let attrs = PoolAttrs {
-            kernel_shape: vec![1, 2],
-            strides: vec![1, 5],
+            kernel_shape: vec![1, 1],
+            pads: vec![0, 1, 0, 0],
             ..PoolAttrs::default()
         };
-        // stride=5 の場合 out_len = (2-2)/5+1 = 1（1 出力のみ）で窓自体は
-        // 空にならないため、代わりに huge pad で意図的に空窓を作る。
-        let y = max_pool(&x, &attrs);
-        assert!(y.is_ok());
+        let err = max_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn average_pool_empty_window_count_include_pad_false_rejected() {
+        // `empty_window_rejected` と同じ空窓（W 軸 out_idx=0）。
+        // `count_include_pad=0` では divisor=valid_count のため 0 除算に
+        // 直結する空窓を事前検査で拒否する。
+        let x = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, 1],
+            pads: vec![0, 1, 0, 0],
+            count_include_pad: 0,
+            ..PoolAttrs::default()
+        };
+        let err = average_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn average_pool_empty_window_count_include_pad_true_accepted() {
+        // Bugbot 指摘 #2199: `count_include_pad=1` では全タップが padding
+        // の窓も ONNX 上正当（divisor は padded 座標基準・acc=0 のため
+        // 結果は 0）であり、一律拒否は誤り。
+        let x = Tensor::<f32>::new(vec![5.0], &[1, 1, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, 1],
+            pads: vec![0, 1, 0, 0],
+            count_include_pad: 1,
+            ..PoolAttrs::default()
+        };
+        let y = average_pool(&x, &attrs).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1, 2]);
+        // out_idx=0: 完全 padding 窓 -> 0/divisor(1) = 0。
+        assert_eq!(y.get(&[0, 0, 0, 0]).unwrap(), 0.0);
+        // out_idx=1: window_input_pos(1,1,0,1,1)=0 -> 有効タップ 1 個 (5.0)。
+        assert_eq!(y.get(&[0, 0, 0, 1]).unwrap(), 5.0);
+    }
+
+    #[test]
+    fn max_pool_huge_kernel_shape_with_single_valid_tap_completes_fast() {
+        // イシュー #2199 codex-review 指摘の再現ケース: kernel_shape が
+        // 約 10 億でも、事前検査（`axis_windows_nonempty`）・直接ループの
+        // 双方が `kernel_shape` に比例した反復を行わない（`O(1)`
+        // `valid_tap_range` 経由）ため、テストが実用時間で完了する。
+        // W: k=1_000_000_000, pad_begin=999_999_999, in_len=1
+        // -> padded_w = 1_000_000_000 = eff_w のため出力長 1、
+        //    有効タップは ki=999_999_999 のみ。
+        let x = Tensor::<f32>::new(vec![7.0], &[1, 1, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, 1_000_000_000],
+            pads: vec![0, 999_999_999, 0, 0],
+            ..PoolAttrs::default()
+        };
+        let y = max_pool(&x, &attrs).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1, 1]);
+        assert_eq!(y.get(&[0, 0, 0, 0]).unwrap(), 7.0);
     }
 
     #[test]
