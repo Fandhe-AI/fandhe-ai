@@ -55,6 +55,20 @@ optimizer は学習率更新 API を持たないため LR スケジューラ結�
   責務であり、autodiff 側はあくまで「optimizer に学習率を可変化する
   入口を用意する」ところまでを担う
 
+**`RmsProp`／`Adagrad`／`Lamb`（イシュー #2170）は `set_lr` 未提供**:
+`compat::Optimizer` enum へ #2170 で追加した上記 3 variant は、
+`fandhe_ai_autodiff::nn::optim::{RmsProp, Adagrad, Lamb}` が
+`Sgd`／`AdamW`／`Adam` と異なり `set_lr` を持たない値型であるため、
+`Callback::LrSchedule` と組み合わせられない。`compat::training::
+Sequential::fit_with_callbacks_named` は「compiled optimizer がこの
+3 者かつ `callbacks` に `Callback::LrSchedule` を含む」場合を
+バッチループより前の引数検査で `AutodiffError::InvalidArgument`
+として fail-closed に拒否する（`OptimizerState::set_lr` 側にも同文面の
+防御的二重化がある）。`RmsProp`／`Adagrad`／`Lamb::set_lr` の追加
+（facade 公開面拡張のためユーザー承認事項）は本イシューのスコープ外
+であり、承認後に別イシューで LR スケジューラ結線を解禁する想定
+（`docs/compat-api-scope.md` §1.3 参照）。
+
 ## 3. 公開 API（`fandhe_ai::compat`。すべて `crates/facade/src/compat/callbacks.rs`）
 
 ```rust

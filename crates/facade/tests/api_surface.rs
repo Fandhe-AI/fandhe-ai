@@ -2975,6 +2975,11 @@ fn fit_types_are_reachable_via_facade_only() {
     let _loss_ce = Loss::CrossEntropy;
 
     let _optimizer = Optimizer::Sgd(fandhe_ai::optim::SgdConfig::new(0.1));
+    // イシュー #2170: RmsProp／Adagrad／Lamb variant の facade 経由
+    // 到達性（facade のみ import での構築可能性）を固定する。
+    let _optimizer_rmsprop = Optimizer::RmsProp(fandhe_ai::optim::RmsPropConfig::default());
+    let _optimizer_adagrad = Optimizer::Adagrad(fandhe_ai::optim::AdagradConfig::default());
+    let _optimizer_lamb = Optimizer::Lamb(fandhe_ai::optim::LambConfig::default());
 
     let config = FitConfig::new(3, 2).shuffle(true).drop_last(true);
     assert_eq!(config, FitConfig::new(3, 2).shuffle(true).drop_last(true));
