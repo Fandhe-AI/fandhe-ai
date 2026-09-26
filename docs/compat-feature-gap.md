@@ -1901,6 +1901,19 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - **`DeviceParamStore` 非対応**: `crate::optim::device_store::DeviceParamStore::step` は `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、`Lamb` は結線されていない（`AdamW`／`Adam` も同様）。LAMB のデバイス常駐化にはパラメータテンソルごとの L2 norm reduction カーネルと trust ratio 適用カーネル（3 バックエンド）が必要で本イシューの対象外。
 - 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`AdamW`／`Adam` と同じく `Tape`／`Var`／`BackendOps` に依存しない値型・純関数）。
 
+## #2171 の追補（`Adadelta`／`Adamax`／`NAdam`／`RAdam`）
+
+§2.9 の `RMSprop`／`Adagrad`（既に #1743 で「なし」から実装済みへ更新済み）に続き、PyTorch `torch.optim.{Adadelta, Adamax, NAdam, RAdam}` 相当の欠落を解消した（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の行内深掘り）」）。
+
+- `fandhe_ai_autodiff::nn::optim::{adadelta, adamax, nadam, radam}`（`Adadelta`／`AdadeltaConfig`・`Adamax`／`AdamaxConfig`・`NAdam`／`NAdamConfig`・`RAdam`／`RAdamConfig`）を追加した（`crates/autodiff/src/nn/optim/{adadelta,adamax,nadam,radam}.rs`）。`AdamW`（#194）・`RmsProp`／`Adagrad`（#1743）を鏡写しにした別実装であり、内部ループの共通化は行わない（統一複合判定では共通化による bit ドリフトを検出できないため）。
+- いずれも `Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数（`(param, grad)` の参照列を受け取り更新後 `Tensor<f32>` の列を返す）であり、新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は追加していない（カーネルなし）。
+- 演算順は実 PyTorch 2.14.0+cpu の `torch/optim/{adadelta,adamax,nadam,radam}.py::_single_tensor_*` を実装前に読んで確認済み（各 fixture README 参照）。`Adadelta` は eps を sqrt の内側に加算する点が `RmsProp`（sqrt の後）と逆。`Adamax` の `exp_inf` 更新は `torch.maximum` 相当の NaN 伝播版 max を自前実装（`f32::max` の NaN 無視挙動は不使用）。`NAdam`／`RAdam` の bias correction 係数（`mu`／`mu_next`・`rho_t` 等）は `f64`（`powf` による実数指数）で計算し最後に `f32` へ downcast する（PyTorch の Python float 演算を再現。`AdamW` の逐次積 `beta.powi` とは異なる）。
+- 正しさの検証は VJP・parity テストの字義どおりの適用ができないため、実 PyTorch 2.14.0+cpu 実行値 fixture（`tests/fixtures/{adadelta,adamax,nadam,radam}-pytorch-reference/`）との統一複合判定（`.claude/rules/coding-rust.md` 既存 tolerance。緩和なし）・閉形式（t=1）一致・決定性（bit 完全一致）で行う（`tests/nn_optim_{adadelta,adamax,nadam,radam}.rs`）。`RAdam` は `rho_t`（近似 SMA 長）の rectified／non-rectified 分岐境界を fixture 生成時に assert 済み（10 step 以内に両分岐を通り、境界 5.0 から `1e-3` 以上離れる。README 参照）。
+- **facade（`fandhe_ai::optim`）への公開は未承認のため保留**（`AdamW`／`Adam`／`RmsProp`／`Adagrad`／`LAMB` とは異なり、`crates/facade/src/optim.rs` への追記を一切行っていない）。保留固定は `crates/facade/src/lib.rs::OptimizerExtHoldDoctestGuard`（正のプローブ 1 ブロック方式）・`crates/facade/tests/api_surface.rs`（`optimizer_ext_hold_doctest_*`・`facade_does_not_reexport_or_declare_optimizer_ext_items*`）の多層防御で担保する。承認事項は `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md` §8 参照。
+- facade 側のテスト（`crates/facade/tests/compat_sequential_optim_ext.rs`。`fandhe_ai_autodiff` を直接 import する契約）で、`compat::Sequential` の手動 step ループと `nn::Linear` 直組みの手動ループが 4 種すべてで bit 完全一致すること・loss が減少することを確認済み。
+- **`DeviceParamStore` 非対応**: `crate::optim::device_store::DeviceParamStore::step` は `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、本 4 種は結線されていない。ホスト `Tensor<f32>` を介した `step()` のみを提供する。
+- `compile()`（`compat::Optimizer` enum）への統合・param groups（#2173）・`maximize`／`foreach`／`capturable`／`differentiable`・複素数パラメータは対象外（親 #2131 配下の別イシュー、または一般に対象外）。
+
 ## 追補（イシュー #1745）
 
 §2.10 の `CosineAnnealingLR`・`ExponentialLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
