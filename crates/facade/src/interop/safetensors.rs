@@ -78,11 +78,15 @@
 //!
 //! `compat::callbacks::ModelCheckpoint` からの薄いラッパー結線
 //! （[`crate::compat::ModelCheckpoint::to_file`]）は #2073 で実装済み。
-//! `compat::Sequential` へのファイル保存ラッパー（`Sequential::save`／
-//! `load` 等）は引き続き本モジュールのスコープ外（案 A は素の
-//! 再エクスポートのみ）のまま。`docs/compat-callbacks-design.md` §8
-//! 参照。F32 以外の dtype・入力サイズ上限の導入・`st_load`／`st_save`
-//! 本体ロジックの変更も対象外。
+//! `compat::Sequential` の層構成シリアライズ（manifest.json ＋
+//! safetensors の組み合わせによる `save_model`／`load_model`）は、
+//! イシュー #2188（親 #2131）で承認後の設計を
+//! `docs/compat-model-io-decision.md` §5 に記録し、facade 公開面は
+//! ユーザー承認待ちで保留した（`src/lib.rs::ModelIoHoldDoctestGuard`＋
+//! `tests/api_surface.rs` の 4 テストで機械固定。本モジュール自体への
+//! 変更はなく、案 A の素の再エクスポートのみのまま）。F32 以外の
+//! dtype・入力サイズ上限の導入・`st_load`／`st_save` 本体ロジックの
+//! 変更も対象外。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。
 // `tests/api_surface.rs::interop_safetensors_reexports_exactly_expected_surface`

@@ -15329,6 +15329,550 @@ fn facade_does_not_reexport_or_declare_train_step_items_detects_each_category() 
     );
 }
 
+// =====================================================================
+// #2188（親 #2131）の facade 公開保留固定（`ModelIoHoldDoctestGuard`）。
+// 層構成シリアライズ（`save_model`／`load_model`）は本番の呼び出し元が
+// 存在しないため内部ロジックも実装していない（`TrainStepHoldDoctestGuard`
+// 〈#2184〉・`GradAccumulationHoldDoctestGuard`〈#2180〉とは異なり本体
+// コードの変更なし）。`TrainStepHoldDoctestGuard`（#2184）と同型の 4
+// テスト構成に加え、`workspace_declares_optimizer_state_dict_fn_names_
+// only_in_allowed_locations` と同型の workspace 全体インベントリ
+// （期待集合は空）を第 4 テストとして持つ。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `ModelIoHoldDoctestGuard` doc 内の
+/// doctest が glob import する `pub mod` 集合が、`src/lib.rs` の実際の
+/// `pub mod` 宣言集合と一致することを固定する（`train_step_hold_doctest_
+/// globs_all_pub_modules` と同型）。
+#[test]
+fn model_io_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "ModelIoHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "ModelIoHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`model_io_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`MODEL_IO_HOLD_PROBE_BODY`] と 1 行
+/// たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
+/// する改変を機械的に拒否する）。
+#[test]
+fn model_io_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "ModelIoHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, MODEL_IO_HOLD_PROBE_BODY,
+        "ModelIoHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 MODEL_IO_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_model_io_hold_probe モジュール・\
+         __FandheModelIoHoldProbe トレイト・__probe_* 関数群）の削除・\
+         弱体化・隠し行の混入がないか確認すること。\n--- actual ---\n{actual}"
+    );
+}
+
+/// [`model_io_hold_doctest_probe_body_matches_fixed_contract`] が要求
+/// する固定文言。`crates/facade/src/lib.rs` の `ModelIoHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
+/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
+const MODEL_IO_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_model_io_hold_probe {\n\
+\x20\x20\x20\x20pub mod model_io {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn save_model() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn load_model() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn save_model() {}\n\
+\x20\x20\x20\x20pub fn load_model() {}\n\
+\x20\x20\x20\x20pub struct ModelIoError;\n\
+}\n\
+use __fandhe_model_io_hold_probe::*;\n\
+\n\
+struct __FandheModelIoHoldMarker;\n\
+\n\
+trait __FandheModelIoHoldProbe {\n\
+\x20\x20\x20\x20fn save_model(&self) -> __FandheModelIoHoldMarker;\n\
+\x20\x20\x20\x20fn load_model(&self) -> __FandheModelIoHoldMarker;\n\
+\x20\x20\x20\x20fn save(&self) -> __FandheModelIoHoldMarker;\n\
+\x20\x20\x20\x20fn load(&self) -> __FandheModelIoHoldMarker;\n\
+}\n\
+\n\
+impl __FandheModelIoHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn save_model(&self) -> __FandheModelIoHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load_model(&self) -> __FandheModelIoHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn save(&self) -> __FandheModelIoHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load(&self) -> __FandheModelIoHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_module_path() {\n\
+\x20\x20\x20\x20model_io::save_model();\n\
+\x20\x20\x20\x20model_io::load_model();\n\
+}\n\
+\n\
+fn __probe_free_fn() {\n\
+\x20\x20\x20\x20save_model();\n\
+\x20\x20\x20\x20load_model();\n\
+}\n\
+\n\
+fn __probe_error_type() {\n\
+\x20\x20\x20\x20let _ = ModelIoError;\n\
+}\n\
+\n\
+fn __probe_inherent_method(seq: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::save_model(seq);\n\
+\x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::load_model(seq);\n\
+\x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::save(seq);\n\
+\x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::load(seq);\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_model_io`]・その自己テストが
+/// 共用する検出本体。facade src 全体（`crates/facade/src/**`）の
+/// `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
+/// `model_io`／`save_model`／`load_model`／`ModelIoError` を検出し
+/// （単一行・複数行・ネストした group・別名も検出）、`trait`／
+/// `struct`／`enum`／`type` 直後の `ModelIoError` 独自宣言、`mod
+/// model_io` 宣言、`save_model`／`load_model` の `fn` 宣言、および
+/// `impl Sequential { .. }`／`impl <Trait> for Sequential { .. }`
+/// ブロック内の `fn save`／`fn load` 宣言（[`scan_sequential_alt_
+/// save_load_impls`]。`docs/compat-model-io-decision.md` §2 の代替案
+/// `Sequential::save(&self, dir)`／`Sequential::load(dir)` を検出する。
+/// PR #2317 review 指摘: `_model` 接尾辞ありの 2 名だけを走査しており
+/// 代替名を見逃していた）を違反として返す
+/// （`scan_train_step_reexports_and_declarations` と同型。`fn` 宣言の
+/// 定義元インベントリは
+/// [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
+/// が workspace 全体で別途固定する）。
+fn scan_model_io_reexports_and_declarations(content: &str) -> Vec<String> {
+    const REEXPORT_LEAF_NAMES: [&str; 4] = ["model_io", "save_model", "load_model", "ModelIoError"];
+    const FN_NAMES: [&str; 2] = ["save_model", "load_model"];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if REEXPORT_LEAF_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if tokens[i] == "ModelIoError"
+            && i > 0
+            && matches!(tokens[i - 1].as_str(), "trait" | "struct" | "enum" | "type")
+        {
+            offending.push(format!("{} ModelIoError 宣言", tokens[i - 1]));
+        }
+        if tokens[i] == "mod" && tokens.get(i + 1).map(String::as_str) == Some("model_io") {
+            offending.push("mod model_io 宣言".to_string());
+        }
+        i += 1;
+    }
+
+    for name in FN_NAMES {
+        offending.extend(
+            (0..count_fn_declarations_by_name(&tokens, name)).map(|_| format!("fn {name} 宣言")),
+        );
+    }
+
+    offending.extend(scan_sequential_alt_save_load_impls(content));
+
+    offending
+}
+
+/// `impl Sequential { .. }`／`impl <Trait> for Sequential { .. }`
+/// ブロック内に限定して `fn save`／`fn load` 宣言を検出する
+/// （`docs/compat-model-io-decision.md` §2 の代替公開 API 案
+/// `Sequential::save(&self, dir)`／`Sequential::load(dir)` を facade が
+/// 追加したことを検出する。PR #2317 review 指摘）。`save`／`load` は
+/// ワークスペース内に無関係な既存宣言（例:
+/// `crates/facade/src/model.rs::ModelRegistry::load`）があるため、
+/// グローバルな `fn` 名走査（[`count_fn_declarations_by_name`] を素朴に
+/// 適用する形）では誤検出する。`impl` ヘッダ（`impl` から本体開始 `{`
+/// の直前まで）のトークン列に識別子 `Sequential` を含む場合に限り、
+/// その impl 本体（対応する閉じ `}` まで深さカウントで走査）だけを
+/// 対象に `fn save`／`fn load` を数える。
+///
+/// 本関数自体は呼び出し元が渡した走査対象（文字列 `content`）にのみ
+/// 依存し `Sequential` 型の一意性を前提にしない。呼び出し元
+/// （[`facade_does_not_reexport_or_declare_model_io`]）が
+/// `crates/facade/src/**` に限定して呼ぶのは型の一意性ゆえではなく
+/// **依存方向**が理由: 本イシューが対象とする公開型
+/// `fandhe_ai::compat::Sequential`（facade クレート `fandhe-ai` で定義）
+/// を名指しできるのは facade に依存するクレートだけだが、facade を
+/// 依存する workspace クレートは存在しない（`crates/*/Cargo.toml` に
+/// package 名 `fandhe-ai` への依存宣言なし）ため、facade 外のクレートは
+/// そもそも `impl ... for Sequential` の `Sequential` としてこの公開型を
+/// 参照できない。ワークスペース内には識別子 `Sequential` を持つ別の
+/// 内部専用型（`crates/autodiff/src/compat/sequential.rs`・
+/// `crates/autodiff/src/nn/container.rs`。facade から非再エクスポート）
+/// も存在するが、これらは本イシューの対象型ではないため、facade 限定の
+/// 走査で公開面の保留固定としては十分。ワークスペース全体（他クレートの
+/// 同名内部型を含む）を横断する定義元インベントリは別テスト
+/// [`workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations`]
+/// が本関数を再利用して担う。
+fn scan_sequential_alt_save_load_impls(content: &str) -> Vec<String> {
+    const ALT_FN_NAMES: [&str; 2] = ["save", "load"];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] != "impl" {
+            i += 1;
+            continue;
+        }
+        let mut header_end = i + 1;
+        while header_end < tokens.len() && tokens[header_end] != "{" {
+            header_end += 1;
+        }
+        let is_sequential_impl = tokens[i + 1..header_end].iter().any(|t| t == "Sequential");
+        if !is_sequential_impl || header_end >= tokens.len() {
+            i = header_end + 1;
+            continue;
+        }
+        // 対応する閉じ `}` まで深さカウントで走査する（ネストした
+        // ブロック・関数本体の `{`／`}` も跨いで対応を取る）。
+        let mut depth = 0usize;
+        let mut j = header_end;
+        let mut body_end = tokens.len();
+        while j < tokens.len() {
+            match tokens[j].as_str() {
+                "{" => depth += 1,
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = j;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let body_tokens = &tokens[header_end..body_end.min(tokens.len())];
+        for name in ALT_FN_NAMES {
+            offending.extend(
+                (0..count_fn_declarations_by_name(body_tokens, name))
+                    .map(|_| format!("impl Sequential 内の fn {name} 宣言")),
+            );
+        }
+        i = body_end + 1;
+    }
+
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`model_io`（モジュール
+/// 名）・`save_model`／`load_model`（自由関数名）・`ModelIoError`（型名）
+/// を識別子単位で含む `pub use`（複数行・ネストした group・別名含む）
+/// も、`mod model_io` 宣言も、facade 独自の `ModelIoError`
+/// `trait`／`struct`／`enum`／`type` 宣言も、`save_model`／
+/// `load_model` の `fn` 宣言も存在しないことを固定する
+/// （`ModelIoHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
+/// ソース走査ガード。`facade_does_not_reexport_or_declare_train_step_
+/// items` と同型）。`save_model`／`load_model` の定義元インベントリは
+/// [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
+/// が workspace 全体で別途固定する。
+#[test]
+fn facade_does_not_reexport_or_declare_model_io() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_model_io_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が層構成シリアライズ（#2188。model_io／\
+         save_model／load_model／ModelIoError）を再エクスポート、または\
+         独自宣言している（`docs/compat-model-io-decision.md` §2 承認\
+         事項が未取得のまま対象外としている設計判断に違反）: \
+         {offending:?}"
+    );
+}
+
+/// [`scan_model_io_reexports_and_declarations`]
+/// （[`facade_does_not_reexport_or_declare_model_io`]）の自己テスト
+/// （正例・負例の合成入力）。
+#[test]
+fn facade_does_not_reexport_or_declare_model_io_detects_each_category() {
+    // 正例: 単一行 pub use（モジュール再エクスポート）。
+    assert!(
+        !scan_model_io_reexports_and_declarations("pub use fandhe_ai_facade::compat::model_io;")
+            .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::{\n    FitConfig,\n    save_model,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::ModelIoError as Foo;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(!scan_model_io_reexports_and_declarations("pub struct ModelIoError;").is_empty());
+    // 正例: mod model_io 宣言。
+    assert!(!scan_model_io_reexports_and_declarations("pub mod model_io {}").is_empty());
+    // 正例: save_model の fn 宣言。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "impl Sequential { pub fn save_model(&self) {} }"
+        )
+        .is_empty()
+    );
+    // 正例: load_model の fn 宣言。
+    assert!(
+        !scan_model_io_reexports_and_declarations("pub fn load_model() -> Sequential { todo!() }")
+            .is_empty()
+    );
+    // 正例: `impl Sequential { fn save }`（§2 代替案の inherent メソッド）。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "impl Sequential { pub fn save(&self, dir: &Path) -> Result<(), ModelIoError> { todo!() } }"
+        )
+        .is_empty()
+    );
+    // 正例: `impl Sequential { fn load }`（§2 代替案の inherent メソッド）。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "impl Sequential { pub fn load(dir: &Path) -> Result<Sequential, ModelIoError> { todo!() } }"
+        )
+        .is_empty()
+    );
+    // 正例: `impl <Trait> for Sequential { fn save }`。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "impl ModelIo for Sequential { fn save(&self, dir: &Path) { todo!() } }"
+        )
+        .is_empty()
+    );
+    // 負例: コメント中の出現。
+    assert!(scan_model_io_reexports_and_declarations("// pub use ...::save_model;").is_empty());
+    // 負例: 無関係な型・関数名。
+    assert!(
+        scan_model_io_reexports_and_declarations(
+            "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
+        )
+        .is_empty()
+    );
+    // 負例: 無関係な型への `fn load`（`Sequential` を含まない impl。
+    // `ModelRegistry::load` 相当の既存宣言を誤検出しないことを固定する）。
+    assert!(
+        scan_model_io_reexports_and_declarations(
+            "impl ModelRegistry { pub fn load(&self, name: &str) -> Result<(), Error> { todo!() } }"
+        )
+        .is_empty()
+    );
+    // 負例: `Sequential` を含む impl でも `save`／`load` 以外の関数名。
+    assert!(
+        scan_model_io_reexports_and_declarations("impl Sequential { pub fn forward(&self) {} }")
+            .is_empty()
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、`fn save_model`／
+/// `fn load_model` の定義元集合を固定する
+/// （`workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_
+/// locations` と同型のインベントリ）。
+///
+/// **期待集合**（着手前確認の再 grep で判明）: `save_model`／
+/// `load_model` という名前の `fn` 宣言は workspace 全体
+/// （`crates/*/src/`）に 1 件も存在しない（承認前のため未実装。
+/// `docs/compat-model-io-decision.md` §0）。承認後の実装では
+/// `facade/src/compat/model_io.rs` へ期待集合を差し替える。
+#[test]
+fn workspace_declares_model_io_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    const NAMES: [&str; 2] = ["save_model", "load_model"];
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の save_model／load_model 系\
+         `fn` 宣言集合が期待（空集合）と一致しない（承認前に本番実装が\
+         紛れ込んだ可能性がある。過不足いずれも fail-closed に検出\
+         する）: {found:?}"
+    );
+}
+
+/// [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
+/// （`save_model`／`load_model` の定義元インベントリ）を、
+/// `docs/compat-model-io-decision.md` §2 の代替公開 API 案
+/// `Sequential::save(&self, dir)`／`Sequential::load(dir)` にも横展開した
+/// 第 3 層。[`facade_does_not_reexport_or_declare_model_io`]（第 2 層）は
+/// `crates/facade/src/**` に走査対象を限定しているため（`Sequential` は
+/// facade でのみ公開され、facade を依存する workspace クレートが存在しない
+/// ため facade 外から `impl ... for Sequential` を書けない。PR #2317
+/// review 再確認時の指摘: 「`Sequential` 型はこのワークスペースで facade
+/// にのみ定義される」という以前の理由づけは誤りで、実際には
+/// `crates/autodiff/src/compat/sequential.rs`・
+/// `crates/autodiff/src/nn/container.rs` にも同名の別型 `Sequential` が
+/// 存在する。ただしこれらは facade から再エクスポートされない内部専用型
+/// であり本イシューの対象外の型のため、第 2 層の走査範囲限定自体は妥当。
+/// 正しい制約は「型の一意性」ではなく「依存方向」: workspace 内のどの
+/// クレートも `fandhe-ai`（facade）package に依存していないため、facade
+/// 外のクレートは facade の `compat::Sequential` を名指しできず、
+/// `impl ... for` 節にも書けない）、facade の走査だけでは「承認前に
+/// 本番実装がどこか別クレートへ迂回的に紛れ込んでいないか」という
+/// ワークスペース全体の定義元インベントリという第 3 層の役割を満たさない。
+/// 本テストは [`scan_sequential_alt_save_load_impls`]
+/// （`Sequential` を含む `impl` ヘッダ配下に限定した `fn save`／`fn load`
+/// 宣言の検出。ワークスペース内の無関係な `save`／`load`〈例:
+/// `ModelRegistry::load`〉を誤検出しない）を `crates/*/src/` 全体へ適用し、
+/// 期待集合（空集合）との完全一致を固定する。
+///
+/// **期待集合**（着手前確認の再 grep で判明。2026-09-27）: ワークスペース内
+/// に識別子 `Sequential` を含む `impl` ブロックは facade（本イシュー対象の
+/// `compat::Sequential`）に加え、autodiff 内部専用の 2 型
+/// （`crates/autodiff/src/compat/sequential.rs::Sequential`・
+/// `crates/autodiff/src/nn/container.rs::Sequential`）にも存在するが、
+/// いずれにも `fn save`／`fn load` 宣言はなく空集合。承認後は facade 側の
+/// 期待集合を `facade/src/compat/model_io.rs` へ差し替える。
+#[test]
+fn workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let offenses = scan_sequential_alt_save_load_impls(content);
+            if !offenses.is_empty() {
+                let rel = path
+                    .strip_prefix(&crates_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                *found.entry(rel).or_insert(0) += offenses.len();
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の `impl Sequential {{ .. }}`／\
+         `impl <Trait> for Sequential {{ .. }}` 内 fn save／fn load 宣言\
+         集合が期待（空集合）と一致しない（承認前に代替 API\
+         〈`Sequential::save`／`Sequential::load`〉の実装が facade 外へ\
+         紛れ込んだ、または facade 側で追加された可能性がある。過不足\
+         いずれも fail-closed に検出する）: {found:?}"
+    );
+}
+
 /// `crates/facade/src/lib.rs` 内の全 hold ガード doctest（`mod
 /// __fandhe_*_hold_probe { ... }` を `use <mod>::*;` で glob import する
 /// 正のプローブ方式のブロック）を横断走査し、各プローブモジュール内で
