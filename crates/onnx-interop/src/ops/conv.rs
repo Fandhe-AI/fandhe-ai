@@ -48,6 +48,41 @@
 use fandhe_ai_tensor_core::{Conv2dParams, ShapeError, Tensor, conv2d_out_shape};
 
 use super::error::OpError;
+use super::{MAX_UNTRUSTED_OUTPUT_ELEMENTS, output_elements_within_bound};
+
+/// `Conv` が実際に確保する出力バッファの総要素数（`n * cout * hout * wout`）を
+/// [`MAX_UNTRUSTED_OUTPUT_ELEMENTS`] で上限検査する（DoS 対策。PR #2314
+/// レビュー指摘 P0 で `pool.rs::ensure_pool_out_bound` として `MaxPool`／
+/// `AveragePool` へ導入した検査を `Conv` へも横展開する。同じ定数を再利用し、
+/// 新規の閾値は発明しない）。
+///
+/// [`Conv2dParams::new`]（`crates/tensor-core/src/backend_ops.rs`）は
+/// 「`padding` は上限なし（`Pool2dParams` と異なり `padding <= kernel/2` を
+/// 要求しない）」ため、`kernel_shape` が重みテンソルの実データサイズで
+/// 小さく自然に上限されていても、`pads`（テンソルを伴わない整数属性）だけで
+/// `hout`／`wout` を任意に増幅できる（例: `kernel_shape=[1,1]`・
+/// 大きな `pads` の組み合わせで `[1,64,1,1]` 入力から巨大な `hout*wout` を
+/// 要求できる。`pool.rs::ensure_pool_out_bound` doc 参照）。
+/// [`checked_conv_out_buffer_len`] は `usize` オーバーフローのみを拒否し、
+/// オーバーフローしない範囲の巨大な出力サイズは通過させてしまうため、
+/// 本関数を [`conv2d_out_shape`] で `hout`／`wout` を得た直後・
+/// [`checked_conv_out_buffer_len`]／直接計算ループへ進む前に呼ぶ
+/// （`Conv2dParams::new`／`conv2d_out_shape` の既存の検査順序・`reason`
+/// 文字列〈`model_zoo_parity.rs` 等がバイト単位で照合する〉には影響しない
+/// 位置に追加する）。
+fn ensure_conv_out_bound(n: usize, cout: usize, hout: usize, wout: usize) -> Result<(), OpError> {
+    if output_elements_within_bound(&[n, cout, hout, wout]) {
+        Ok(())
+    } else {
+        Err(OpError::InvalidConvAttribute {
+            reason: format!(
+                "Conv: 出力バッファの総要素数（n={n} * cout={cout} * hout={hout} * \
+                 wout={wout}）が上限 {MAX_UNTRUSTED_OUTPUT_ELEMENTS} を超える \
+                 （`pads` に起因する巨大な出力サイズは DoS 対策として拒否する）"
+            ),
+        })
+    }
+}
 
 /// 出力バッファ長 `n * cout * hout * wout` を `checked_mul` の連鎖で検査する。
 ///
@@ -480,6 +515,11 @@ fn conv_2d(
     let [ph, pw] = pads;
     let [dh, dw] = dilations;
 
+    // `hout`／`wout` は `pads`（非信頼な ONNX 属性）で増幅されうるため、
+    // `checked_conv_out_buffer_len`（オーバーフロー検査のみ）・直接計算
+    // ループ・出力バッファ確保へ進む前に総出力要素数を上限検査する
+    // （DoS 対策。`ensure_conv_out_bound` doc 参照）。
+    ensure_conv_out_bound(n, cout, hout, wout)?;
     let out_buf_len = checked_conv_out_buffer_len(n, cout, hout, wout)?;
     let mut out = vec![0f32; out_buf_len];
     for ni in 0..n {
@@ -598,6 +638,38 @@ mod tests {
         assert_eq!(y.get(&[0, 0, 0, 1]).unwrap(), 8.0);
         assert_eq!(y.get(&[0, 0, 1, 0]).unwrap(), 12.0);
         assert_eq!(y.get(&[0, 0, 1, 1]).unwrap(), 14.0);
+    }
+
+    #[test]
+    fn small_spatial_but_large_cout_and_pads_rejected() {
+        // PR #2314 レビュー指摘（P0）の横展開: `Conv` の `pads` は
+        // `Conv2dParams::new` が上限を課さない属性のため（`padding は上限
+        // なし」doc 参照）、`kernel_shape` が重みテンソルの実データサイズ
+        // （本ケースでは 1x1・64 要素と小さい）で自然に上限されていても、
+        // `pads` だけで `hout`／`wout` を増幅できる。`hout * wout`
+        // （空間軸のみの積）は上限を大きく下回るが、`n * cout` を掛けた
+        // 実際の確保サイズ（`ensure_conv_out_bound` の検査対象）は上限を
+        // 超える組み合わせを選ぶ。
+        //
+        // kernel=1x1・pad=512 対称 -> hout=wout=1+2*512=1025
+        // （1025^2=1,050,625 は上限 2^26=67,108,864 を大きく下回るが、
+        // cout=64 を掛けた 67,240,000 は上限を超える）。
+        let x = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
+        let w = Tensor::<f32>::zeros(&[64, 1, 1, 1]).unwrap();
+        let attrs = ConvAttrs {
+            pads: vec![512, 512, 512, 512],
+            ..ConvAttrs::default()
+        };
+        let err = conv(&x, &w, None, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidConvAttribute { .. }));
+    }
+
+    #[test]
+    fn ensure_conv_out_bound_accepts_at_cap_and_rejects_over_cap() {
+        assert!(ensure_conv_out_bound(1, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS).is_ok());
+        assert!(ensure_conv_out_bound(1, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS + 1).is_err());
+        // オーバーフローも上限超過として拒否する。
+        assert!(ensure_conv_out_bound(1, 1, usize::MAX, 2).is_err());
     }
 
     #[test]

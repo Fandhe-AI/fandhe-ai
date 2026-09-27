@@ -37,6 +37,7 @@
 use fandhe_ai_tensor_core::Tensor;
 
 use super::error::OpError;
+use super::{MAX_UNTRUSTED_OUTPUT_ELEMENTS, output_elements_within_bound};
 
 /// `MaxPool`／`AveragePool` の属性。ONNX Pool-13 系仕様の
 /// `auto_pad`／`ceil_mode`／`dilations`／`kernel_shape`／`pads`／
@@ -249,7 +250,7 @@ fn valid_tap_range(
 /// 自然に上限される。`conv.rs` 参照）と異なり `MaxPool`／`AveragePool`
 /// には対応する重みテンソルが無く攻撃者が任意の大きさを指定できるため、
 /// 呼び出し元（[`max_pool`]／[`average_pool`]）は本関数を呼ぶ前に
-/// [`ensure_spatial_out_bound`] で `out_len` の積を上限検査する（イシュー
+/// [`ensure_pool_out_bound`] で総出力要素数を上限検査する（イシュー
 /// #2199 codex-review 指摘: 本関数を `kernel_shape` 非依存の `O(1)`
 /// 判定にしても `out_len` 自体が `pads` 経由で約 10 億に達し得るため
 /// 事前検証・後続の直接計算ループの双方が長時間停止する。`out_len` の
@@ -265,41 +266,50 @@ fn axis_windows_nonempty(
     (0..out_len).all(|out_idx| valid_tap_range(out_idx, s, k, d, pb, in_len).is_some())
 }
 
-/// `MaxPool`／`AveragePool` の空間出力要素数（`h_out * w_out`）の上限
-/// （DoS 対策の安全弁。イシュー #2199 codex-review 指摘）。
+/// `MaxPool`／`AveragePool` が実際に確保する出力バッファの総要素数
+/// （`n * c * h_out * w_out`）を [`super::MAX_UNTRUSTED_OUTPUT_ELEMENTS`]
+/// で上限検査し、超える属性の組み合わせを [`OpError::InvalidPoolAttribute`]
+/// で拒否する（DoS 対策の安全弁。イシュー #2199 codex-review 指摘）。
 ///
 /// `Conv` の `kernel_shape` は重みテンソルの実データサイズで自然に上限
-/// されるが（`conv.rs:502` 「上限は課さない」coment 参照）、`MaxPool`／
-/// `AveragePool` の `kernel_shape`／`pads` はテンソルを伴わない整数属性
-/// のため攻撃者が任意の大きさを与えられる（例:
+/// されるが（`conv.rs` の `Conv2dParams::new` doc「padding は上限なし」
+/// 参照）、`MaxPool`／`AveragePool` の `kernel_shape`／`pads` はテンソルを
+/// 伴わない整数属性のため攻撃者が任意の大きさを与えられる（例:
 /// `kernel_shape=[1_000_000_000]`・`pads=[999_999_999, 999_999_999]`・
 /// `strides=[1]`・`in_len=1` → `out_len` ≈ 1_000_000_000）。この場合
 /// [`axis_windows_nonempty`] の `O(out_len)` 走査だけでなく、後続の
 /// 直接計算ループ・出力バッファ確保（`vec![0f32; out_len]`）も同じ
 /// `out_len` に比例するため、`axis_windows_nonempty` 単体を `O(1)` に
 /// しても DoS は閉じない。よって出力規模そのものを計算の入口で
-/// 制限する（レビュー指摘の 2 案のうち「出力規模を計算前に制限する」
-/// 案を採用。`2^26`〈約 6700 万〉は実在の CNN 空間出力（例:
-/// 8192×8192 特徴マップ相当）を十分に超える一方、`O(1)` 判定を
-/// この上限回数繰り返しても数十〜数百 ms 程度に収まる）。
-const MAX_POOL_SPATIAL_OUT_ELEMENTS: usize = 1 << 26;
-
-/// [`MAX_POOL_SPATIAL_OUT_ELEMENTS`] を超える空間出力（`h_out * w_out`）
-/// を要求する属性の組み合わせを [`OpError::InvalidPoolAttribute`] で
-/// 拒否する。[`max_pool`]／[`average_pool`] は [`pool_out_axis_len`] で
-/// `h_out`／`w_out` を求めた直後・[`axis_windows_nonempty`] や
-/// 直接計算ループへ進む前に必ず本関数を呼ぶ（呼び出し順序は両関数の
-/// doc コメント「検証順序」を参照）。
-fn ensure_spatial_out_bound(op: &'static str, h_out: usize, w_out: usize) -> Result<(), OpError> {
-    match h_out.checked_mul(w_out) {
-        Some(total) if total <= MAX_POOL_SPATIAL_OUT_ELEMENTS => Ok(()),
-        _ => Err(OpError::InvalidPoolAttribute {
+/// 制限する。
+///
+/// **`h_out * w_out`（空間軸のみ）ではなく `n * c * h_out * w_out`
+/// （実際に確保する全軸の積）を検査する**（PR #2314 レビュー指摘 P0:
+/// 導入当初の実装は空間軸のみを検査しており、`[1, 64, 1, 1]` のような
+/// 小さい入力に対しても `n * c`（本例では 64 倍）を掛けた実際の確保
+/// サイズは無検査のままだったため、`count_include_pad=1` の
+/// `AveragePool` と大きな `pads` の組み合わせで空間出力要素数が上限
+/// ぎりぎり（`h_out * w_out <= 2^26`）に収まりながら、`n * c` 倍した
+/// 実際の確保サイズ（約 16 GiB）が上限を大きく超えるケースを見逃して
+/// いた）。
+fn ensure_pool_out_bound(
+    op: &'static str,
+    n: usize,
+    c: usize,
+    h_out: usize,
+    w_out: usize,
+) -> Result<(), OpError> {
+    if output_elements_within_bound(&[n, c, h_out, w_out]) {
+        Ok(())
+    } else {
+        Err(OpError::InvalidPoolAttribute {
             reason: format!(
-                "{op}: 空間出力要素数（{h_out} * {w_out}）が上限 \
-                 {MAX_POOL_SPATIAL_OUT_ELEMENTS} を超える（`kernel_shape`／\
-                 `pads` に起因する巨大な出力サイズは DoS 対策として拒否する）"
+                "{op}: 出力バッファの総要素数（n={n} * c={c} * h_out={h_out} * \
+                 w_out={w_out}）が上限 {MAX_UNTRUSTED_OUTPUT_ELEMENTS} を超える \
+                 （`kernel_shape`／`pads` に起因する巨大な出力サイズは DoS \
+                 対策として拒否する）"
             ),
-        }),
+        })
     }
 }
 
@@ -503,7 +513,7 @@ fn validate_and_lift(
 /// `X` の rank（3 または 4）→ `kernel_shape`（必須）／`strides`／
 /// `dilations`／`pads` の属性検査 → `ceil_mode`／`storage_order` の
 /// `{0,1}` 検査 → 出力長計算（`pool_out_axis_len`）→ 空間出力規模の
-/// 上限検査（`ensure_spatial_out_bound`。DoS 対策）→ 空窓検査
+/// 上限検査（`ensure_pool_out_bound`。DoS 対策）→ 空窓検査
 /// （`axis_windows_nonempty`）→ 直接ループでの計算。1 つでも失敗すれば
 /// 以降の計算を行わない（`.claude/rules/security.md` A08）。
 ///
@@ -543,10 +553,10 @@ pub fn max_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpErr
         ceil_mode,
     )?;
     // `axis_windows_nonempty`／直接計算ループ・出力バッファ確保のいずれも
-    // `h_out`／`w_out` に比例するため、それらへ進む前に空間出力規模を
-    // 上限検査する（DoS 対策。関数群 doc の「検証順序」・
-    // `ensure_spatial_out_bound` doc 参照）。
-    ensure_spatial_out_bound(OP, h_out, w_out)?;
+    // `n * c * h_out * w_out` に比例するため、それらへ進む前に総出力
+    // 要素数を上限検査する（DoS 対策。関数群 doc の「検証順序」・
+    // `ensure_pool_out_bound` doc 参照）。
+    ensure_pool_out_bound(OP, n, c, h_out, w_out)?;
     if !axis_windows_nonempty(h_out, kh, sh, dh, ph_b, h_in) {
         return Err(OpError::InvalidPoolAttribute {
             reason: format!("{OP}: H 軸に有効タップを持たない出力窓が存在する"),
@@ -660,8 +670,8 @@ pub fn max_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpErr
 /// 有効タップの走査は `valid_tap_range` が返す `O(1)` 範囲に限るため、
 /// `max_pool` と同様に `kernel_shape` の値そのものには反復回数が依存
 /// しない。加えて `h_out * w_out`（空間出力規模）自体も
-/// `ensure_spatial_out_bound` で上限検査する（`max_pool` と同型の DoS
-/// 対策。イシュー #2199 codex-review 指摘。`ensure_spatial_out_bound`
+/// `ensure_pool_out_bound` で上限検査する（`max_pool` と同型の DoS
+/// 対策。イシュー #2199 codex-review 指摘。`ensure_pool_out_bound`
 /// doc 参照）。
 pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, OpError> {
     const OP: &str = "AveragePool";
@@ -697,10 +707,10 @@ pub fn average_pool(x: &Tensor<f32>, attrs: &PoolAttrs) -> Result<Tensor<f32>, O
         ceil_mode,
     )?;
     // `count_include_pad` の値に関わらず、後続の直接計算ループ・出力
-    // バッファ確保は `h_out`／`w_out` に比例するため、空窓検査の分岐
-    // より前に空間出力規模を上限検査する（DoS 対策。
-    // `ensure_spatial_out_bound` doc 参照）。
-    ensure_spatial_out_bound(OP, h_out, w_out)?;
+    // バッファ確保は `n * c * h_out * w_out` に比例するため、空窓検査の
+    // 分岐より前に総出力要素数を上限検査する（DoS 対策。
+    // `ensure_pool_out_bound` doc 参照）。
+    ensure_pool_out_bound(OP, n, c, h_out, w_out)?;
     // `count_include_pad=1` では divisor が padded 座標基準で計算され
     // 空窓でも 0 除算にならないため、空窓検査は `count_include_pad=0`
     // （divisor=valid_count のため空窓が 0 除算に直結する）の場合のみ
@@ -1214,7 +1224,7 @@ mod tests {
         // 本テストは指摘そのものの属性（in_len=1・kernel_shape=
         // 1_000_000_000・pad_begin=pad_end=999_999_999・stride=1）を使い、
         // `out_len` が約 10 億に達する組み合わせを再現する。
-        // `ensure_spatial_out_bound` が `axis_windows_nonempty`／直接計算
+        // `ensure_pool_out_bound` が `axis_windows_nonempty`／直接計算
         // ループへ進む前に拒否するため、`#[test]` の既定タイムアウト内で
         // 完了する（修正前は約 10 億回の走査で長時間停止した）。
         let x = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
@@ -1232,7 +1242,7 @@ mod tests {
         // 上記 `max_pool` 版と同型。`count_include_pad=1`（既定）は
         // `axis_windows_nonempty` を呼ばないが、直接計算ループ・出力
         // バッファ確保が `out_len` に比例するため、こちらも
-        // `ensure_spatial_out_bound` で同じ属性を拒否できることを検証する。
+        // `ensure_pool_out_bound` で同じ属性を拒否できることを検証する。
         let x = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
         let attrs = PoolAttrs {
             kernel_shape: vec![1, 1_000_000_000],
@@ -1244,13 +1254,59 @@ mod tests {
     }
 
     #[test]
-    fn ensure_spatial_out_bound_accepts_at_cap_and_rejects_over_cap() {
-        // `ensure_spatial_out_bound` の境界値検査（実際の pool 計算経路
-        // からは独立にユニットテストする）。
-        assert!(ensure_spatial_out_bound("Test", 1, MAX_POOL_SPATIAL_OUT_ELEMENTS).is_ok());
-        assert!(ensure_spatial_out_bound("Test", 1, MAX_POOL_SPATIAL_OUT_ELEMENTS + 1).is_err());
+    fn ensure_pool_out_bound_accepts_at_cap_and_rejects_over_cap() {
+        // `ensure_pool_out_bound` の境界値検査（実際の pool 計算経路
+        // からは独立にユニットテストする）。`n * c` を 1 に固定した場合は
+        // 従来の「空間軸のみ」の検査と一致する。
+        assert!(ensure_pool_out_bound("Test", 1, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS).is_ok());
+        assert!(ensure_pool_out_bound("Test", 1, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS + 1).is_err());
         // オーバーフローも上限超過として拒否する。
-        assert!(ensure_spatial_out_bound("Test", usize::MAX, 2).is_err());
+        assert!(ensure_pool_out_bound("Test", 1, 1, usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn max_pool_small_spatial_but_large_channel_count_rejected() {
+        // PR #2314 レビュー指摘（P0）の再現ケース: `h_out * w_out`
+        // （空間軸のみの積）は上限を大きく下回るが、`n * c` を掛けた
+        // 実際の確保サイズ（`ensure_pool_out_bound` の検査対象）は上限を
+        // 超える。`kernel_shape`／`pads` を対称に選び、全出力窓が入力の
+        // 唯一の実データ（座標 0）を含むようにする（`valid_tap_range` が
+        // 全 `out_idx` で non-empty を返す構成。空窓検査
+        //〈`axis_windows_nonempty`〉で先に拒否されないことを保証する
+        // ための選択）ことで、修正前の実装では
+        // `axis_windows_nonempty`（`O(out_len)`。ここでは高々 100 万強で
+        // 高速に完了する）を通過したうえで `vec![0f32; n*c*h_out*w_out]`
+        // （本ケースでは約 2.7 億バイト = 約 256 MiB）を確保しようとした。
+        const P: usize = 1 << 20; // 1_048_576
+        const K: usize = P + 1;
+        let x = Tensor::<f32>::zeros(&[1, 64, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, K as i64],
+            pads: vec![0, P as i64, 0, P as i64],
+            ..PoolAttrs::default()
+        };
+        let err = max_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn average_pool_small_spatial_but_large_channel_count_rejected() {
+        // `max_pool_small_spatial_but_large_channel_count_rejected` と同型
+        // だが、レビュー指摘の実例どおり `count_include_pad=1`
+        // （空窓も正当な `0` 平均として受理する設定）を使う。空窓検査を
+        // 経由しない経路でも `ensure_pool_out_bound` が確保前に拒否する
+        // ことを確認する。
+        const P: usize = 1 << 20; // 1_048_576
+        const K: usize = P + 1;
+        let x = Tensor::<f32>::zeros(&[1, 64, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, K as i64],
+            pads: vec![0, P as i64, 0, P as i64],
+            count_include_pad: 1,
+            ..PoolAttrs::default()
+        };
+        let err = average_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
     }
 
     #[test]

@@ -69,6 +69,33 @@ pub use shape_transform::{flatten, reshape, squeeze, transpose};
 pub use slice::{SliceParams, slice};
 pub use softmax::softmax;
 
+/// 非信頼な ONNX 属性（`pads`／`kernel_shape` 等の整数属性で、対応する
+/// 実データテンソルによる自然な上限を持たないもの）に由来する出力バッファの
+/// 総要素数の実用上限（イシュー #2199 codex-review 指摘。PR #2314 レビュー
+/// 指摘 P0: `MaxPool`／`AveragePool`〈`pool.rs`〉は導入当初 `h_out * w_out`
+/// のみを上限検査しており、`n * c` を掛けた実際の確保サイズは無検査だった
+/// ため、`[1, 64, 1, 1]` のような小さい入力でも `n * c` 倍〈約 64 倍〉の
+/// メモリを要求できた。本定数は `pool.rs::MAX_POOL_SPATIAL_OUT_ELEMENTS`
+/// として導入された値をそのまま流用し（新規の閾値を発明しない。閾値変更は
+/// ユーザー承認事項。`.claude/rules/deps-policy.md` 相当の運用方針）、
+/// 確保対象の**全軸の積**（`n * c * h_out * w_out` 等）を検査する対象へ
+/// 一般化する。`Conv`（`conv.rs`）の `pads` も `Conv2dParams::new` が
+/// 「padding は上限なし（pooling と異なり `padding <= kernel/2` を要求
+/// しない）」ため同種の増幅が可能であり、同じ定数で `n * cout * hout *
+/// wout` を検査する（`.claude/rules/security.md` A03）。
+pub(crate) const MAX_UNTRUSTED_OUTPUT_ELEMENTS: usize = 1 << 26;
+
+/// `dims` の積（出力バッファの総要素数）を `checked_mul` の連鎖で求め、
+/// [`MAX_UNTRUSTED_OUTPUT_ELEMENTS`] 以下かどうかを判定する。オーバー
+/// フロー（各軸の積が `usize` の範囲を超える）も上限超過として扱う
+/// （fail-closed。`pool.rs::ensure_pool_out_bound`／`conv.rs` から呼ばれる）。
+pub(crate) fn output_elements_within_bound(dims: &[usize]) -> bool {
+    match dims.iter().copied().try_fold(1usize, usize::checked_mul) {
+        Some(total) => total <= MAX_UNTRUSTED_OUTPUT_ELEMENTS,
+        None => false,
+    }
+}
+
 /// ONNX の負軸表記（`axis < 0` の場合 `axis + rank`）を正規化し、`[0, rank)` の範囲を
 /// 検査する。範囲外の場合は `None`（呼び出し元が `op` 名を添えて `OpError::AxisOutOfRange`
 /// を構築する）。全オペ（`Gather`／`Unsqueeze`／`Concat`／`Slice`）が共有する規則
@@ -80,6 +107,40 @@ pub(crate) fn normalize_axis(axis: i64, rank: usize) -> Option<usize> {
         None
     } else {
         Some(normalized as usize)
+    }
+}
+
+#[cfg(test)]
+mod output_elements_within_bound_tests {
+    use super::{MAX_UNTRUSTED_OUTPUT_ELEMENTS, output_elements_within_bound};
+
+    #[test]
+    fn accepts_at_cap_and_rejects_over_cap() {
+        assert!(output_elements_within_bound(&[
+            1,
+            MAX_UNTRUSTED_OUTPUT_ELEMENTS
+        ]));
+        assert!(!output_elements_within_bound(&[
+            1,
+            MAX_UNTRUSTED_OUTPUT_ELEMENTS + 1
+        ]));
+    }
+
+    #[test]
+    fn checks_the_product_of_all_axes_not_just_a_subset() {
+        // `n * c` を含めた全軸の積を検査する（単一軸のみ・部分軸のみの
+        // 検査では見逃す組み合わせ。PR #2314 レビュー指摘 P0 の再現条件）。
+        let n = 1;
+        let c = 64;
+        let h_out = 1;
+        let w_out = MAX_UNTRUSTED_OUTPUT_ELEMENTS / 32; // h_out*w_out 単体は上限未満
+        assert!(output_elements_within_bound(&[n, 1, h_out, w_out]));
+        assert!(!output_elements_within_bound(&[n, c, h_out, w_out]));
+    }
+
+    #[test]
+    fn overflow_is_rejected() {
+        assert!(!output_elements_within_bound(&[usize::MAX, 2]));
     }
 }
 
