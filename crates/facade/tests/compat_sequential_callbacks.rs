@@ -20,7 +20,7 @@ use fandhe_ai::optim::{
     LrScheduler, PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, Sgd, SgdConfig, StepLr,
     ThresholdMode,
 };
-use fandhe_ai::{AutodiffError, Tensor};
+use fandhe_ai::{AutodiffError, ShapeError, Tensor};
 
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -790,5 +790,47 @@ fn early_stopping_restore_best_weights_survives_mid_fit_error() {
         "epoch 途中のコールバックエラーで fit が失敗しても \
          restore_best_weights が適用されるはずが、\
          best（epoch 0）のパラメータへ復元されていない"
+    );
+}
+
+// =====================================================================
+// 17. イシュー #2249: 確保失敗（巨大 epochs）は非アロケーションな
+//    `Shape(ElementCountOverflow)` を返し、復元経路（compile 済み状態・
+//    train／eval モード）も機能する。`validation_data` ありで
+//    `fit_with_callbacks` 経由の到達性を確認する。
+// =====================================================================
+
+#[test]
+fn fit_with_callbacks_rejects_huge_epochs_without_panicking() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let (x_val, y_val) = gen_regression_data(SEED_VAL);
+
+    let mut model = build_model();
+    model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.05)), Loss::Mse)
+        .unwrap();
+    let was_training = model.training();
+
+    let err = model
+        .fit_with_callbacks(
+            &x,
+            &y,
+            FitConfig::new(usize::MAX, N),
+            Some((&x_val, &y_val)),
+            &mut [],
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+    assert!(
+        model.is_compiled(),
+        "Err 後も compile 済み状態が維持されること"
+    );
+    assert_eq!(
+        model.training(),
+        was_training,
+        "Err 後も train／eval モードが呼び出し前の値へ復元されること"
     );
 }
