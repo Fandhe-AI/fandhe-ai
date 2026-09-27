@@ -3,7 +3,7 @@
 - イシュー #2244（親 #2243「HF hub 連携クレートの設計判断記録と依存追加の承認申請」・Phase 親 #2131）
 - **コード変更なし・依存追加なし**。本 doc は設計案の記録であり、確定はユーザー承認後
 - 基準コミット: 作業ブランチ作成時点の `origin/main`（`9fe4b523`。2026-09-27）
-- 結論の要約: 本 doc は §1〜§3 に境界と API 案を記す設計案であり、正式決定ではない。§4〜§6 は兄弟イシュー #2245（認証トークン・セキュリティ）・#2246（他ライブラリ対応表・承認事項一覧）が追記する予約節
+- 結論の要約: 本 doc は §1〜§3 に境界と API 案を記す設計案であり、正式決定ではない。**§4（認証トークン・セキュリティ）は #2245 で追記済み**。§5・§6（他ライブラリ対応表・承認事項一覧）は兄弟イシュー #2246 が追記する予約節
 
 ## 1. 背景
 
@@ -21,7 +21,7 @@
 | #2087 | ローカルモデルレジストリ（`ModelRegistry`） | 実装済み |
 | #2088 | 汎用 HTTPS 取得（`download`／`download_with`） | 設計記録のみ。依存 2 件は未承認、未実装 |
 | 本 #2244 | クレート境界・取得 API 案 | 設計のみ（本 doc） |
-| #2245 | 認証トークン・セキュリティ設計 | 本 doc §4 へ追記予定 |
+| #2245 | 認証トークン・セキュリティ設計 | 本 doc §4 に追記済み |
 | #2246 | 他ライブラリ対応表・承認事項一覧 | 本 doc §5・§6 へ追記予定 |
 
 **前提チェーン**: 本 doc の API 案（§3）は、facade 側の汎用 HTTPS 取得（#2088）がユーザー承認・実装されるまで実装に着手できない。#2088 が提供する `download_with` 相当の機能に依存する設計であるため、本 doc の記述は現時点では机上案に留まる。
@@ -41,7 +41,7 @@
 | ファイル一覧の取得 | 別クレート |
 | HF の `resolve` 形式 URL の組み立て | 別クレート |
 | キャッシュキーへの写像（§3.3） | 別クレート |
-| push 系・認証・dataset／space リポ | いずれにも入れない（対象外。認証は §4／#2245） |
+| push 系・認証・dataset／space リポ | いずれにも入れない（対象外。認証トークンの供給・秘匿契約・private repo 扱いは §4 で整理済み。初期状態は private/gated repo を fail-closed の非対応とする〈§4.1〉） |
 
 ### 2.2 依存方向
 
@@ -190,13 +190,128 @@ branch から sha への対応を覚えておく refs 相当の永続化は**ス
 ### 3.6 セキュリティ上の前提（境界レベルのみ。詳細は §4／#2245）
 
 - `repo_id`・`revision`・`filename` は fail-closed で検証する（§3.2）
-- キャッシュ書き込みは facade の dirfd 契約に任せ、別クレートではファイル I/O をしない
+- キャッシュ書き込みは facade の dirfd 契約に任せ、別クレートではファイル I/O をしない。**唯一の例外はトークンファイルの読み取り**であり、読み取り専用・キャッシュルート外限定の条件付きで許容する（§4.1）
 - HTTPS 限定はリダイレクト先にも及び、TLS 検証を無効化するオプションは設けない（`docs/model-download-design.md` §6 を継承）
 - サーバーが返すハッシュ（etag 系）は信頼根にせず、真正性の根拠は呼び出し側が渡す pin とする
 
-## 4. 認証トークンとセキュリティ設計（#2245 で追記）
+## 4. 認証トークンとセキュリティ設計（#2245）
 
-（予約節。#2245 のマージにより本節へ追記される）
+**コード変更なし・依存追加なし**。本節も §1〜§3 と同じく設計案の記録であり、確定と案を明示的に区別する。HF 固有の外部仕様は §3.5 と同じ扱いとし、一次出典 URL を確認できた項目にはその URL を付け、確認できなかった項目は「外部仕様・要確認」と明記して断定しない。
+
+### 4.1 認証トークン
+
+**供給経路と優先順位（案）**: 明示引数（例 `HfHub::with_token(HfToken)` 相当）＞ 環境変数 ＞ トークンファイル、の順で解決する。
+
+- 環境変数名は `HF_TOKEN`（新しい既定名）と `HUGGING_FACE_HUB_TOKEN`（旧名）の 2 種、トークンファイルの既定パスは `$HF_HOME/token`（`HF_TOKEN_PATH` による上書きを許容）、暗黙トークン送信の無効化スイッチは `HF_HUB_DISABLE_IMPLICIT_TOKEN` 相当を、huggingface_hub 互換の案として挙げる。出典候補: https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables 。本 doc 作成時点では実装イシュー側での確認を要する「外部仕様・要確認」として扱う
+- **暗黙トークン（環境変数・ファイル由来）を送るかどうか**は次の 2 案を記録する
+  - (i) 常に送る（huggingface_hub の既定と同型）
+  - (ii) 明示 opt-in の場合だけ送る
+  - **推奨は (ii)**。安全側に倒し、公開 repo 取得で意図せずトークンを送らないようにする
+
+**トークンファイルの読み取り条件**（§3.6「別クレートはファイル I/O をしない」の唯一の例外。読み取り専用かつキャッシュルート外限定）:
+
+- 最終要素は `std::os::unix::fs::OpenOptionsExt::custom_flags(O_NOFOLLOW)` 相当で開き、symlink を拒否する。std の範囲内で実現できる見込みだが、`O_NOFOLLOW` 定数の取得に `libc` が要るかは実装時に確認する。要る場合は依存追加として承認事項へ回す（§4.4）
+- サイズ上限（例: 数 KiB。既定値は実装イシューで確定）を設ける
+- Unix では所有者とパーミッション（group/other 読み取り可を拒否するか警告にとどめるか）を案として記録し、実装イシューで推奨を確定する
+- 非 Unix（Windows 等）の扱いは fail-closed（非対応）か別経路を用意するかを案とし、`docs/facade-model-registry-decision.md` §14 の Windows fail-closed 方針との整合を確認する
+
+**トークン値の検証（A03 ヘッダインジェクション対策）**: 前後の空白だけを除去したあと、印字可能 ASCII 以外（CR/LF・NUL・制御文字）を含むものや空文字列を、接続前に拒否する。
+
+**秘匿契約（確定させたい契約として記述）**:
+
+- `HfToken` newtype を設け、`Debug` は手書きで伏字（例 `HfToken(<redacted>)`）にする。`Display`・`Serialize` は実装しない
+- `HfError` のどのバリアントにもトークン値を含めない
+- ログ・進捗コールバック・facade のキャッシュメタデータ（`download.json` 相当）にもトークン値を書かない
+- トークンは送信対象の `Authorization` ヘッダ構築時にのみ参照する
+- メモリ上のゼロ化（zeroize）は許容依存 9 区分に該当クレートが無いため保証しない。これは残留リスクとして明記し、本節でも新規依存は追加しない
+
+**private repo の扱い**: facade の `download_with`／`DownloadOptions`（`docs/model-download-design.md` §5）にはヘッダを渡す経路が無く、さらに同 §6 の A09 節は `user:pass@host` 形式の URL を拒否する。したがって現行設計のままでは、トークンを転送処理に届けられないという構造上の制約がある。選択肢を次のとおり記録する。
+
+- (α) `DownloadOptions` に「送信先ホストに束縛された Bearer 資格情報」を追加する（facade 公開面の拡張 → 承認事項）
+- (β) 別クレートが自前の HTTP クライアントで転送し、facade 側に「検証済みバイト列をキャッシュへ書き込む」入口を追加する（facade 公開面の拡張 → 承認事項）
+- (γ) 承認までは private／gated repo を fail-closed の非対応にする
+
+**推奨は、初期状態を (γ) とし、(α)／(β) の選択をユーザー承認の分岐として残すこと**。トークンを HF JSON API（revision 解決・ファイル一覧）にだけ付けられるかは §2.3 案 A の HTTP 経路に依存するため、この点も承認判断時に併記する。
+
+**応答コードの扱い**: private／gated／存在しない repo に対する 401・403・404 の返り方は「外部仕様・要確認」として記録する。区別できない場合でも、エラーはトークンを含まない型付き `HfError`（例: `Unauthorized`／`NotFound`／`Gated`）で fail-closed にする。
+
+**private 内容のキャッシュ権限（残留リスクと申し送り）**: `docs/model-download-design.md` §6 (a) の `mkdirat(..., 0o755)` のままだと、共有キャッシュ上で private repo の内容が他ユーザーから読める。private 内容については 0o700 ディレクトリと 0o600 ファイルとする案を、#2088 実装イシューへの申し送りおよび facade 側の承認事項として記録する（§4.5）。
+
+### 4.2 セキュリティ設計（OWASP Top 10 対応表の形で）
+
+**取得先ホストの固定と HTTPS 限定（A02／A05／A10）**:
+
+- API と `resolve` の接続先は `https://huggingface.co` に固定する。利用者がベース URL を任意に差し替える口（エンドポイント上書き）は初期スコープ外とする。ミラー対応は `docs/model-download-design.md` §10 に倣う
+- リダイレクト先は、HTTPS であることに加えて、ホストの allowlist（`huggingface.co` と CDN 系ドメイン。CDN ドメイン名は §3.5 の 5 番目の項目と同じく要確認）で検証する
+- リダイレクト回数に上限を設ける
+- **ホストが変わるリダイレクトでは、`Authorization` ヘッダを必ず除去する**
+- TLS 検証を無効化するオプションは設けない（`docs/model-download-design.md` §6 を継承）
+
+**ホスト検証をどこで実行するか**: facade（`docs/model-download-design.md`）はリダイレクト追従を持つが、検証はスキームだけである。そのため次の案を記録する。
+
+- (a) facade にリダイレクト方針のフック、またはホスト allowlist 入力を追加する（facade 公開面の拡張 → 承認事項）
+- (b) 別クレートが自前クライアントでリダイレクトを 1 段ずつ解決し、最終 URL を facade に渡す
+
+**(b) を採る場合の必須契約（facade へ渡した後のリダイレクトも検証する）**: facade（`docs/model-download-design.md`）はリダイレクト追従を持つがスキーム検証のみでホスト allowlist を適用しない。そのため (b) で別クレートが検証済みの最終 URL を渡しても、facade がその応答をさらにリダイレクトとして追従すると、別クレート側の allowlist を経由せず任意の HTTPS ホストへ接続しうる。`DownloadOptions`（§5。2026-09-24 追記）にはリダイレクト追従を無効化する上書き口が現状無く、タイムアウト・サイズ上限・リダイレクト回数と同様に実装側の既定値に固定されている。したがって、この抜け道を塞ぐ手段はどちらも facade 公開面の拡張を伴い、(a) と同じく承認事項になる。(b) を単独では採用せず、次のいずれかを実装イシューでの必須契約として (a) 側の承認事項に含める。
+
+- (b-1) facade 側にリダイレクト追従の無効化スイッチ（`DownloadOptions` への非破壊追加）を設け、別クレートから渡された最終 URL 1 本にのみ接続し、その応答が返すリダイレクトには追従しないようにする
+- (b-2) facade 側の追従リダイレクトにも別クレートと同一のホスト allowlist を適用する
+
+(b-1)／(b-2) のどちらも満たさない場合は (b) を単独の解決策として採用しない（fail-closed）。推奨は実装イシューで確定するが、(b) を採る場合の注意も記録する: 署名付き CDN URL には有効期限があり、クエリ文字列が資格情報と同等の機微情報であることに留意する。
+
+**署名付き URL は資格情報と同等に扱う（A09）**: CDN の署名付きクエリを、エラー（`ModelError::Http { url }` 相当）・進捗・`download.json.url` に残さないことを要求する。クエリを除去（redaction）し、保存する URL は `resolve` URL とする。これを #2088 実装イシューへの申し送りとして記録する（§4.5）。
+
+**パスと revision の検証（A01／A03）**:
+
+- 第 1 層（別クレート）は文字列検証とする
+  - `repo_id` と `filename` の規則は §3.2 を参照
+  - `revision` は ref 名（`/` を含みうる。`refs/pr/N` 等）を URL の path 要素にするとき、パーセントエンコードする
+  - NUL・制御文字・`..`・先頭 `/` は拒否する
+- **構造上の保証**: branch／tag 名はパス要素にしない。キャッシュキーに入るのは解決済みの 40 桁 16 進 commit sha だけである（§3.3 候補 1）。このため、revision 文字列からキャッシュルートを脱出する経路は型の上で存在しない。サーバーが返した commit sha も 40 桁 16 進検証を通してから使う
+- 第 2 層は facade の dirfd 契約（`docs/model-download-design.md` §6 (a)〜(d)。`openat2`／`O_NOFOLLOW|O_DIRECTORY`・`mkdirat` の段階的作成）とする。別クレートはキャッシュに対して I/O を行わず、この層に完全に委ねる（§3.6 の例外を除く）
+
+**ハッシュ検証の必須化（A08）**:
+
+- 案 1（**推奨**）: HF 側の取得オプションで `Sha256Pin` を型レベルの必須引数とし、facade `download_with` に必ず pin を渡す
+- 案 2: 呼び出し側 pin が無い場合、HF API が返す LFS sha256 を整合性検出のみの pin として使う。「真正性ではない」と明記する（§3.6「サーバーのハッシュは信頼根にしない」と整合させる）
+- いずれの案でも、ハッシュ無しで取得を完了する経路は作らない。呼び出し側 pin と API が返す sha256 が不一致なら拒否する（fail-closed）
+
+**その他**: 依存（A06）は §6（#2246）の承認に委ねる。ログを出す依存は作らない（A09。`docs/model-download-design.md` と同様）。SSRF の責務範囲はホスト固定により `docs/model-download-design.md` の一般ケースより狭い。
+
+### 4.3 テスト方針（実装イシューの受け入れ基準案）
+
+**ネットワーク非依存（CI で実行）**:
+
+- トークン供給元の優先順位解決は、環境変数とファイルの参照を注入可能なクロージャまたはトレイトとして設計する。edition 2024 では `std::env::set_var` が `unsafe` で並列テストと相性が悪いため、プロセス環境そのものは変更しない
+- トークンファイルについて、symlink 拒否・サイズ上限・パーミッション検査（`#[cfg(unix)]`）・CR/LF や制御文字を含むトークンの拒否をテストする
+- センチネル文字列のトークン（本物に見えないダミー値。例 `<token>` 相当）を使い、全 `HfError` バリアントの `Display`／`Debug`・`HfToken` の `Debug`・進捗出力・書き込まれた manifest にセンチネルが現れないことを検査する
+- リダイレクト方針（ホスト allowlist 判定・ホストが変わったときの `Authorization` 除去・回数上限・https 以外の拒否）を純関数の表駆動テストにする
+- `repo_id`・`revision`・`filename` の許可と拒否を表駆動で検査する。サーバーが返した sha の 40 桁 16 進検証もテストする
+- ローカル `TcpListener` の平文 HTTP モックは、`docs/model-download-design.md` §8「テスト経路の分離」と同様にスキーム検査より下の transport 層だけに使う。これで `Authorization` ヘッダがホスト固定先にだけ付くこと、別ホストへのリダイレクトで付かないことを確認する
+- pin 必須化が型または実行時に効いていることを確認する（pin 無しでは取得 API を呼べない、または接続前に拒否される）
+
+**`#[ignore]` の実通信**: 公開 repo の revision 解決・ファイル一覧・取得を扱う。private repo の取得は手動実行時に環境変数からトークンを与える。CI では実行しない（**workflow へ secrets を追加しない**。`.claude/rules/ci.md` の fork PR 対策）。実通信テストのログにトークンや署名付き URL を出さない。
+
+### 4.4 #2245 由来の承認事項（列挙のみ・未実施）
+
+- facade 公開面の拡張
+  - (α) ホストに束縛された資格情報を `DownloadOptions` に追加する
+  - (β) 検証済みバイト列の書き込み入口を追加する
+  - リダイレクト方針のフック、ホスト allowlist 入力、またはリダイレクト追従の無効化スイッチ（(b-1)／(b-2)。§4.2「ホスト検証をどこで実行するか」）を追加する
+- private 内容のキャッシュ権限（0o700／0o600）を facade 側の契約として変更すること
+- 別クレートの HTTP 経路（§2.3）に関わる依存
+- `O_NOFOLLOW` 定数取得のための OS 呼び出しラッパー（必要な場合のみ。`docs/model-download-design.md` §7 の該当項目と共有できるかは実装時に確認する）
+- 新規 `unsafe` は不要の見込みである（トークンファイル読み取りは std の `OpenOptionsExt` の範囲で実現できる見込みのため）
+- 網羅的な一覧化は §6（#2246）を正とし、本節には書かない
+
+### 4.5 #2088 実装イシューへの申し送り
+
+- 署名付き URL のクエリ除去（エラー・進捗・`download.json`）
+- private 内容のパーミッション（0o700／0o600）
+- ホスト固定とリダイレクト方針の受け渡し
+- `Authorization` ヘッダの受け渡し経路（(α) を採った場合）
+
+これらは `docs/model-download-design.md` 自体を編集せず、本節に記録するに留める。
 
 ## 5. 他ライブラリ対応表（#2246 で追記）
 
@@ -211,10 +326,10 @@ branch から sha への対応を覚えておく refs 相当の永続化は**ス
 ### スコープ外
 
 - push（アップロード）系 API
-- 認証トークン（§4／#2245）
 - 依存の詳細な列挙とライセンス実測（§6／#2246）
 - dataset／space リポ
 - 分割 safetensors と `config.json` の取り扱い（§3.3）
+- private／gated repo の取得（§4.1 の推奨は初期状態 (γ) の fail-closed 非対応。(α)／(β) の選択は承認事項）
 - 実装そのもの
 
 ### 未決事項
@@ -223,6 +338,11 @@ branch から sha への対応を覚えておく refs 相当の永続化は**ス
 - オフライン時の revision 解決（§3.3）
 - 公開区分（§2.4）
 - HTTP 経路の選択（§2.3）
+- 認証トークンの環境変数名・トークンファイル既定パス・暗黙送信無効化スイッチの外部仕様確認（§4.1）
+- 401／403／404 の返り方の外部仕様確認（§4.1）
+- CDN リダイレクト先ドメインの allowlist 確定（§4.2）
+- private repo 対応方式（(α)／(β)）の選択（§4.1）
+- ハッシュ検証の pin 必須化案（案 1／案 2）の確定（§4.2）
 
 ## 8. 出典一覧
 
@@ -230,4 +350,4 @@ branch から sha への対応を覚えておく refs 相当の永続化は**ス
 - 規約: `.claude/rules/deps-policy.md`・`.claude/rules/security.md`
 - コード: `crates/facade/src/model.rs`（`ModelRegistry` 公開面）・`crates/facade/tests/api_surface.rs`（依存形状固定テスト）
 - イシュー: #2243・#2244・#2245・#2246・#2088・#2087・#2194
-- 外部 URL: https://docs.pytorch.org/docs/2.14/hub.html （PyTorch Hub）・https://huggingface.co/docs/huggingface_hub/guides/integrations （huggingface_hub integrations）・https://huggingface.co/docs/hub/keras （Keras at HF）・https://huggingface.co/docs/hub/api （HF Hub API ドキュメント）
+- 外部 URL: https://docs.pytorch.org/docs/2.14/hub.html （PyTorch Hub）・https://huggingface.co/docs/huggingface_hub/guides/integrations （huggingface_hub integrations）・https://huggingface.co/docs/hub/keras （Keras at HF）・https://huggingface.co/docs/hub/api （HF Hub API ドキュメント）・https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables （huggingface_hub 環境変数リファレンス。トークン供給経路の案の出典。§4.1）
