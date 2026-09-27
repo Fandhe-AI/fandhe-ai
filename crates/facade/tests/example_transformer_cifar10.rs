@@ -20,7 +20,9 @@ use std::sync::{Mutex, OnceLock};
 
 use fandhe_ai::optim::{Adam, AdamConfig};
 use fandhe_ai::{AutodiffError, Tensor};
-use reference_module::{ReferenceModule, accuracy, fit_epochs, sub_tensor_f32};
+use reference_module::{
+    ReferenceModule, Trainable, accuracy, fit_epochs, predict_in_eval, sub_tensor_f32,
+};
 use synthetic_cifar::{IMG_C, IMG_H, IMG_W, NUM_CLASSES, synthetic_cifar10, to_row_tokens};
 use transformer::{Transformer, TransformerConfig};
 
@@ -190,6 +192,28 @@ fn transformer_forward_rejects_wrong_input_shape() {
     ));
 }
 
+#[test]
+fn transformer_train_step_forces_train_mode() {
+    // `resnet_train_step_forces_train_mode` と同じ観点（Codex レビュー
+    // 指摘・イシュー #2202 PR #2325）。`TransformerEncoderLayer` 自体は
+    // mode 依存層を持たないが、`ReferenceModule` の呼び出し規律を
+    // モデル間で統一する契約として検証する。
+    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
+    let mut model = Transformer::new(config, 0x1234_0006).unwrap();
+    ReferenceModule::set_training(&mut model, false);
+    assert!(!ReferenceModule::is_training(&model));
+
+    let (x, y) = synthetic_tokens(4, 0x1234_0007);
+    let mut opt = Adam::new(AdamConfig::default()).unwrap();
+
+    model.train_step(&x, &y, &mut opt).unwrap();
+    assert!(
+        ReferenceModule::is_training(&model),
+        "train_step は eval モードのモデルに対しても冒頭で train \
+         モードを強制する契約"
+    );
+}
+
 // ---------------------------------------------------------------------
 // AC4: 10 epoch 学習後の held-out 精度 50% 以上（事前登録した判定式。
 // main.rs::check_ac4 と同じ判定式・係数。テストは debug ビルドの実行
@@ -216,7 +240,10 @@ fn transformer_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy() {
     let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     let mut model = Transformer::new(config, 0x7777_7777).unwrap();
     let sample_batch = sub_tensor_f32(&x_train, 0, BATCH_SIZE).unwrap();
-    let sample_pred = model.predict(&sample_batch).unwrap();
+    // `predict_in_eval` で呼び出し前のモードを保存・復元する
+    // （`resnet_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy`
+    // と同じ方針。Codex レビュー指摘・イシュー #2202 PR #2325）。
+    let sample_pred = predict_in_eval(&mut model, &sample_batch).unwrap();
     assert_eq!(sample_pred.shape(), &[BATCH_SIZE, NUM_CLASSES]);
 
     let mut opt = Adam::new(AdamConfig {

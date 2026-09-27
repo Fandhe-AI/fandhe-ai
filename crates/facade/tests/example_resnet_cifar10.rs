@@ -26,7 +26,9 @@ use std::sync::{Mutex, OnceLock};
 
 use fandhe_ai::optim::{Adam, AdamConfig};
 use fandhe_ai::{AutodiffError, Tensor};
-use reference_module::{ReferenceModule, Trainable, accuracy, fit_epochs, sub_tensor_f32};
+use reference_module::{
+    ReferenceModule, Trainable, accuracy, fit_epochs, predict_in_eval, sub_tensor_f32,
+};
 use resnet::{ResNet, ResNetBlock};
 use synthetic_cifar::{IMG_C, IMG_H, IMG_W, NUM_CLASSES, synthetic_cifar10, to_row_tokens};
 
@@ -210,6 +212,80 @@ fn resnet_predict_shape_and_eval_determinism() {
     );
 }
 
+/// `predict_in_eval` が BatchNorm の running stats を汚染しないことの
+/// 正のプローブ（イシュー #2202 PR #2325 レビュー指摘）。
+///
+/// 単に「`predict_in_eval` 前後で eval 出力が一致する」だけでは、
+/// そもそも train モードの forward が running stats に影響しないなら
+/// 自明に成立してしまう（否定ガードの空振り）。そこで 3 体の同一構成
+/// （同一 seed）モデルを用意し、
+/// 1. `baseline`: 構築直後に一度も推論を行わず eval へ切り替えてから
+///    predict する
+/// 2. `polluted`: 修正前の bug パターン（構築直後・train モードのまま
+///    `model.predict(x)` を直接呼ぶ）を再現したのち eval へ切り替えて
+///    predict する
+/// 3. `fixed`: `predict_in_eval`（shape 確認用の想定呼び出し）を挟んだ
+///    のち eval へ切り替えて predict する
+///
+/// `baseline != polluted` を先に確認することで「train モードの predict
+/// が running stats を実際に書き換える」という前提（レビュー指摘の
+/// 根拠）を検証し、そのうえで `baseline == fixed` を確認することで
+/// `predict_in_eval` がその汚染を防ぐことを検証する。
+#[test]
+fn predict_in_eval_prevents_batchnorm_running_stats_pollution() {
+    const SEED: u64 = 0x1234_5678_9ABC_DEF0;
+    let mut rng = SplitMix64(0xBEEF_0000_CAFE_0001);
+    let mut src = || rng.next_u64();
+    let (flat, _labels) = synthetic_cifar10(4, &mut src).unwrap();
+    let x = image_tensor(flat, 4);
+
+    let mut baseline = ResNet::new(8, 4, NUM_CLASSES, SEED).unwrap();
+    ReferenceModule::set_training(&mut baseline, false);
+    let baseline_out = baseline
+        .predict(&x)
+        .unwrap()
+        .contiguous()
+        .as_slice()
+        .unwrap()
+        .to_vec();
+
+    let mut polluted = ResNet::new(8, 4, NUM_CLASSES, SEED).unwrap();
+    // 修正前の bug パターン: 構築直後（training の既定値 true）のまま
+    // 直接 predict を呼ぶ（BatchNorm が train モードの forward を実行
+    // し running stats を更新する）。
+    let _ = polluted.predict(&x).unwrap();
+    ReferenceModule::set_training(&mut polluted, false);
+    let polluted_out = polluted
+        .predict(&x)
+        .unwrap()
+        .contiguous()
+        .as_slice()
+        .unwrap()
+        .to_vec();
+    assert_ne!(
+        baseline_out, polluted_out,
+        "train モードの predict が BatchNorm running stats を実際に \
+         書き換えることの前提確認（この前提が崩れているとレビュー \
+         指摘自体が成立しない）"
+    );
+
+    let mut fixed = ResNet::new(8, 4, NUM_CLASSES, SEED).unwrap();
+    let _ = predict_in_eval(&mut fixed, &x).unwrap();
+    ReferenceModule::set_training(&mut fixed, false);
+    let fixed_out = fixed
+        .predict(&x)
+        .unwrap()
+        .contiguous()
+        .as_slice()
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        baseline_out, fixed_out,
+        "predict_in_eval は running stats を汚染しない（呼び出し前後で \
+         モードを保存・復元し、eval モードで forward するため）"
+    );
+}
+
 // ---------------------------------------------------------------------
 // `synthetic_cifar::to_row_tokens`（Transformer 側の行トークン化）の
 // 形状・並べ替え検証。ResNet テストは行トークン化を使わないが、
@@ -344,9 +420,12 @@ fn sub_tensor_f32_and_i32_reject_start_plus_len_overflow() {
 /// logits（`[1, len*num_classes]`）を返す偽モデル（`accuracy` の shape
 /// 完全一致検査を、要素数一致だけでは検出できないケースとして再現する
 /// ためのテスト専用 fixture。Codex レビュー指摘・イシュー #2202
-/// PR #2325）。
+/// PR #2325）。`training` は実フィールドとして保持する（`accuracy` が
+/// エラー経路でも呼び出し前のモードへ正しく復元することを検証する
+/// ため。ダミーの no-op `set_training` では検証できない）。
 struct FlatLogitsModel {
     num_classes: usize,
+    training: bool,
 }
 
 impl ReferenceModule for FlatLogitsModel {
@@ -367,7 +446,13 @@ impl ReferenceModule for FlatLogitsModel {
         Vec::new()
     }
 
-    fn set_training(&mut self, _training: bool) {}
+    fn set_training(&mut self, training: bool) {
+        self.training = training;
+    }
+
+    fn is_training(&self) -> bool {
+        self.training
+    }
 }
 
 #[test]
@@ -376,6 +461,7 @@ fn accuracy_rejects_logits_shape_mismatch_with_matching_element_count() {
 
     let mut model = FlatLogitsModel {
         num_classes: NUM_CLASSES,
+        training: true,
     };
     let x = image_tensor(vec![0.0f32; 4 * IMG_C * IMG_H * IMG_W], 4);
     let y = labels_tensor(vec![0, 1, 2, 3], 4);
@@ -384,6 +470,38 @@ fn accuracy_rejects_logits_shape_mismatch_with_matching_element_count() {
         accuracy(&mut model, &x, &y, 4, NUM_CLASSES),
         Err(AutodiffError::InvalidArgument(_))
     ));
+    // エラー経路でも accuracy 呼び出し前のモード（train）へ復元される
+    // ことを検証する（Codex レビュー指摘・イシュー #2202 PR #2325）。
+    assert!(
+        ReferenceModule::is_training(&model),
+        "accuracy のエラー経路後も呼び出し前の training モードへ復元される契約"
+    );
+}
+
+#[test]
+fn accuracy_restores_original_training_mode_after_success() {
+    use reference_module::accuracy;
+
+    // train モードから呼んだ場合。
+    let mut model_train = FlatLogitsModel {
+        num_classes: NUM_CLASSES,
+        training: true,
+    };
+    let x = image_tensor(vec![0.0f32; 4 * IMG_C * IMG_H * IMG_W], 4);
+    let y = labels_tensor(vec![0, 1, 2, 3], 4);
+    // このモデルは shape 不一致で必ず Err を返すが、モード復元は
+    // 成功・失敗いずれの経路でも共通の実装（`model.set_training`
+    // を呼んでから結果を返す）のため、eval モードから呼んだ場合も
+    // 併せて検証する。
+    let _ = accuracy(&mut model_train, &x, &y, 4, NUM_CLASSES);
+    assert!(ReferenceModule::is_training(&model_train));
+
+    let mut model_eval = FlatLogitsModel {
+        num_classes: NUM_CLASSES,
+        training: false,
+    };
+    let _ = accuracy(&mut model_eval, &x, &y, 4, NUM_CLASSES);
+    assert!(!ReferenceModule::is_training(&model_eval));
 }
 
 #[test]
@@ -418,6 +536,31 @@ fn resnet_train_step_rejects_wrong_input_shape() {
     ));
 }
 
+#[test]
+fn resnet_train_step_forces_train_mode() {
+    // `train_step` は `Trainable`（pub trait）のメソッドとして
+    // `fit_epochs` の内部ループを経由せず直接呼び出せる。eval モードの
+    // モデルへ直接呼んでも、冒頭で train モードへ強制されることを
+    // 検証する（Codex レビュー指摘・イシュー #2202 PR #2325）。
+    let mut model = ResNet::new(8, 4, NUM_CLASSES, 0x1234_0006).unwrap();
+    ReferenceModule::set_training(&mut model, false);
+    assert!(!ReferenceModule::is_training(&model));
+
+    let mut rng = SplitMix64(0x1234_0007);
+    let mut src = || rng.next_u64();
+    let (flat, labels) = synthetic_cifar10(4, &mut src).unwrap();
+    let x = image_tensor(flat, 4);
+    let y = labels_tensor(labels, 4);
+    let mut opt = Adam::new(AdamConfig::default()).unwrap();
+
+    model.train_step(&x, &y, &mut opt).unwrap();
+    assert!(
+        ReferenceModule::is_training(&model),
+        "train_step は eval モードのモデルに対しても冒頭で train \
+         モードを強制する契約"
+    );
+}
+
 // ---------------------------------------------------------------------
 // AC4: 10 epoch 学習後の held-out 精度 50% 以上（事前登録した判定式。
 // main.rs::check_ac4 と同じ判定式・係数。テストは debug ビルドの実行
@@ -450,9 +593,11 @@ fn resnet_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy() {
     let y_test = labels_tensor(test_labels, N_TEST);
 
     let mut model = ResNet::new(8, 4, NUM_CLASSES, 0xD00D_D00D).unwrap();
-    // 学習前の predict 疎通確認（main.rs run_resnet と同じ手順）。
+    // 学習前の predict 疎通確認（main.rs run_resnet と同じ手順。
+    // `predict_in_eval` で BatchNorm running stats の汚染を防ぐ。
+    // Codex レビュー指摘・イシュー #2202 PR #2325）。
     let sample_batch = sub_tensor_f32(&x_train, 0, BATCH_SIZE).unwrap();
-    let sample_pred = model.predict(&sample_batch).unwrap();
+    let sample_pred = predict_in_eval(&mut model, &sample_batch).unwrap();
     assert_eq!(sample_pred.shape(), &[BATCH_SIZE, NUM_CLASSES]);
 
     let mut opt = Adam::new(AdamConfig {

@@ -176,6 +176,14 @@ impl ReferenceModule for ResNetBlock {
             }
         }
     }
+
+    /// `main`（常に存在）の `training` フラグを代表値として返す
+    /// （`set_training` が `main`／`shortcut` を常に同時に切り替える
+    /// ため、両者は一致する契約。`ReferenceModule::is_training` doc
+    /// 参照）。
+    fn is_training(&self) -> bool {
+        self.main.training()
+    }
 }
 
 /// CIFAR 版 ResNet（`depth = 6n + 2`）。`stem` → `blocks`（3 ステージ
@@ -360,6 +368,12 @@ impl ReferenceModule for ResNet {
             ReferenceModule::set_training(block, training);
         }
     }
+
+    /// `stem`（常に存在）の `training` フラグを代表値として返す
+    /// （`ResNetBlock::is_training` と同じ考え方）。
+    fn is_training(&self) -> bool {
+        self.stem.training()
+    }
 }
 
 impl Trainable for ResNet {
@@ -389,6 +403,16 @@ impl Trainable for ResNet {
                  {input_shape:?}）"
             )));
         }
+
+        // `train_step` は `fit_epochs` の内部ループからだけでなく trait
+        // メソッドとして直接呼び出しうる（`Trainable` は pub trait）。
+        // eval モードのモデルへ直接呼ぶと BatchNorm が eval math（running
+        // stats のみ使用・更新なし）のまま backward することになり、
+        // 学習として意味をなさない。冒頭で train モードを明示する
+        // （`fit_epochs` はループ前に一度呼ぶだけのため、`train_step`
+        // 単体呼び出しの契約としてここでも明示する。Codex レビュー
+        // 指摘・イシュー #2202 PR #2325）。
+        ReferenceModule::set_training(self, true);
 
         let (loss_value, updated) = {
             let tape = fandhe_ai::tape();

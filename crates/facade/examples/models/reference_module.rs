@@ -27,7 +27,8 @@ use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
 ///
 /// `forward`（推論用。`compat::Sequential::forward` への委譲チェーン）・
 /// `named_parameters`（階層名付きパラメータ一覧）・`set_training`
-/// （BatchNorm の train/eval 切替の伝播）の 3 メソッドに限定する。
+/// （BatchNorm の train/eval 切替の伝播）・`is_training`（現在の
+/// training モード照会。`set_training` と対）の 4 メソッドに限定する。
 /// 学習ステップ（backward・optimizer 適用）は複合モデルの構造ごとに
 /// 演算列が異なる（`ResNetBlock` 単体には自然な loss がない）ため、
 /// 本 trait には含めず [`Trainable`]（モデル本体限定）に分離する。
@@ -47,6 +48,17 @@ pub trait ReferenceModule {
     /// （`BatchNorm` の running stats 更新可否を切り替える。
     /// `compat::Sequential::train`／`eval` への委譲）。
     fn set_training(&mut self, training: bool);
+
+    /// 現在の training モードを返す（`set_training` が全部品へ一様に
+    /// 伝播する契約〈`ResNetBlock`／`ResNet`／`Transformer` の各
+    /// `set_training` 実装参照〉に基づき、いずれか 1 部品
+    /// （`ResNetBlock::main`／`ResNet::stem`／`Transformer::embed`）の
+    /// `compat::Sequential::training()` を読むだけで代表値になる。
+    /// `set_training` 以外に内部の `training` フラグを直接変更する
+    /// 経路が無いことが前提。[`predict_in_eval`]／[`accuracy`] が
+    /// 一時的な eval 切替の前後でモードを保存・復元するために使う
+    /// （Codex レビュー指摘・イシュー #2202 PR #2325）。
+    fn is_training(&self) -> bool;
 }
 
 /// [`ReferenceModule`] に学習ステップを追加した trait。モデル本体
@@ -161,6 +173,31 @@ pub fn scalar_of(t: &Tensor<f32>) -> Result<f32, AutodiffError> {
             "scalar_of: loss テンソルの shape が [] ではない".to_string(),
         )
     })
+}
+
+/// eval モードで `x` を推論し `Tensor<f32>` を返す（`ResNet::predict`／
+/// `Transformer::predict` 相当の shape 確認・疎通確認向け）。呼び出し
+/// 前の training モードを保存し、eval で `forward` した後、成功・失敗
+/// いずれの経路でも呼び出し前のモードへ復元する。
+///
+/// `ResNet::predict`／`Transformer::predict`（`&self` を取り、現在の
+/// モードをそのまま使う。`compat::Sequential::predict` と同じ
+/// 「モード切り替えなし」契約）を、モデル構築直後（`training` の既定値
+/// `true`）に shape 確認目的で呼ぶと、`BatchNorm` が train モードの
+/// forward を実行し running stats を汚染してしまう。この関数はその
+/// 呼び出しパターンを置き換える、呼び出し側の規律に頼らない安全な
+/// 代替（Codex レビュー指摘・イシュー #2202 PR #2325）。
+pub fn predict_in_eval<M: ReferenceModule>(
+    model: &mut M,
+    x: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let original_training = model.is_training();
+    model.set_training(false);
+    let tape = fandhe_ai::tape();
+    let xv = tape.var(x);
+    let result = model.forward(&tape, &xv).map(|y| y.to_tensor());
+    model.set_training(original_training);
+    result
 }
 
 /// `x`（`[N, ...]`）の先頭軸から `[start, start+len)` 行を切り出した
@@ -309,7 +346,10 @@ pub fn fit_epochs<M: Trainable>(
     Ok(history)
 }
 
-/// eval モードで `x`／`y` 全件に対する正解率を計算する。
+/// eval モードで `x`／`y` 全件に対する正解率を計算する。呼び出し前の
+/// training モードを保存し、成功・失敗いずれの経路でも復元する
+/// （`predict_in_eval` と同じ方針。Codex レビュー指摘・イシュー #2202
+/// PR #2325）。
 pub fn accuracy<M: ReferenceModule>(
     model: &mut M,
     x: &Tensor<f32>,
@@ -363,7 +403,29 @@ pub fn accuracy<M: ReferenceModule>(
         }
     }
 
+    // eval モードで評価する。呼び出し前のモードを保存し、成功・失敗
+    // いずれの経路でも復元する（`accuracy_in_eval` へ `?` で
+    // 早期リターンさせず、戻り値を `result` に受けてから復元する
+    // ことで、エラー経路を含め必ず復元させる。Codex レビュー指摘・
+    // イシュー #2202 PR #2325。`predict_in_eval` と同じ方針）。
+    let original_training = model.is_training();
     model.set_training(false);
+    let result = accuracy_in_eval(model, x, y, n, batch_size, num_classes);
+    model.set_training(original_training);
+    result
+}
+
+/// [`accuracy`] の評価ループ本体（モデルが既に eval モードに設定され、
+/// 入力（`x`／`y`／`batch_size`／`num_classes`）が検証済みであることを
+/// 前提とする private ヘルパー）。
+fn accuracy_in_eval<M: ReferenceModule>(
+    model: &mut M,
+    x: &Tensor<f32>,
+    y: &Tensor<i32>,
+    n: usize,
+    batch_size: usize,
+    num_classes: usize,
+) -> Result<f32, AutodiffError> {
     let mut correct = 0usize;
     let mut start = 0;
     while start < n {

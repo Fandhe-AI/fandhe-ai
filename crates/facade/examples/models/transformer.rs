@@ -285,6 +285,16 @@ impl ReferenceModule for Transformer {
             self.head.eval();
         }
     }
+
+    /// `embed`（常に存在）の `training` フラグを代表値として返す
+    /// （`resnet.rs::ResNetBlock::is_training` と同じ考え方。ただし
+    /// `TransformerEncoderLayer` は post-norm・dropout 結線なしで
+    /// mode 依存層を持たないため、このフラグ自体は数値挙動に影響
+    /// しない。`ReferenceModule::is_training` doc・イシュー #2202
+    /// PR #2325 参照）。
+    fn is_training(&self) -> bool {
+        self.embed.training()
+    }
 }
 
 impl Trainable for Transformer {
@@ -308,6 +318,11 @@ impl Trainable for Transformer {
                 self.config.seq_len, self.config.in_features
             )));
         }
+        // `ResNet::train_step` と同じ理由で train モードを明示する
+        // （`TransformerEncoderLayer` 自体は mode 依存層を持たないが、
+        // trait 契約としてモデル間で統一する。Codex レビュー指摘・
+        // イシュー #2202 PR #2325）。
+        ReferenceModule::set_training(self, true);
         let n = shape[0];
         // `forward` と同じ理由で `n * seq_len` を明示検査する（Codex
         // レビュー指摘・イシュー #2202 PR #2325）。

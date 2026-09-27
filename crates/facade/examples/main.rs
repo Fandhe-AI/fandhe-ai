@@ -23,7 +23,7 @@ mod transformer;
 
 use fandhe_ai::Tensor;
 use fandhe_ai::optim::{Adam, AdamConfig};
-use reference_module::{ReferenceModule, accuracy, fit_epochs, sub_tensor_f32};
+use reference_module::{ReferenceModule, accuracy, fit_epochs, predict_in_eval, sub_tensor_f32};
 use resnet::ResNet;
 use synthetic_cifar::{IMG_C, IMG_H, IMG_W, NUM_CLASSES, synthetic_cifar10, to_row_tokens};
 use transformer::{Transformer, TransformerConfig};
@@ -133,8 +133,14 @@ fn run_resnet() -> Result<(), Box<dyn std::error::Error>> {
             .count()
     );
     // 学習前の predict 出力 shape を確認しておく（推論経路の疎通確認）。
+    // `ResNet::predict`（モード切り替えなし）を構築直後（training の
+    // 既定値 true）に直接呼ぶと、BatchNorm が train モードの forward
+    // を実行し running stats を汚染してしまう。`predict_in_eval` で
+    // 一時的に eval へ切り替え、呼び出し前のモード（ここでは既定の
+    // train）へ復元してから `fit_epochs` を開始する（Codex レビュー
+    // 指摘・イシュー #2202 PR #2325）。
     let sample_batch = sub_tensor_f32(&x_train, 0, BATCH_SIZE)?;
-    let sample_pred = model.predict(&sample_batch)?;
+    let sample_pred = predict_in_eval(&mut model, &sample_batch)?;
     println!(
         "初期状態の ResNet::predict 出力 shape: {:?}",
         sample_pred.shape()
@@ -160,6 +166,18 @@ fn run_resnet() -> Result<(), Box<dyn std::error::Error>> {
     }
     let test_acc = accuracy(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES)?;
     println!("ResNet held-out accuracy = {test_acc:.4}");
+    // 学習後、`ResNet::predict`（モード切り替えなし契約。モジュール doc
+    // 参照）を eval モードへ明示的に切り替えてから呼ぶ（`*_predict_
+    // shape_and_eval_determinism` テストと同じ呼び出し規律。冒頭の
+    // shape 確認〈`predict_in_eval`〉とは異なり、ここでは呼び出し後の
+    // モードを気にする後続処理が無いため、単純に eval へ切り替える
+    // だけでよい）。
+    ReferenceModule::set_training(&mut model, false);
+    let final_pred = model.predict(&sample_batch)?;
+    println!(
+        "学習後（eval）の ResNet::predict 出力 shape: {:?}",
+        final_pred.shape()
+    );
     check_ac4("ResNet", &history, test_acc)
 }
 
@@ -192,8 +210,12 @@ fn run_transformer() -> Result<(), Box<dyn std::error::Error>> {
         seen_config.num_classes
     );
     // 学習前の predict 出力 shape を確認しておく（推論経路の疎通確認）。
+    // `ResNet` と同じ理由で `predict_in_eval` を使う（`Transformer`
+    // 自体は mode 依存層を持たないが、`ReferenceModule` の呼び出し
+    // 規律をモデル間で統一する。Codex レビュー指摘・イシュー #2202
+    // PR #2325）。
     let sample_batch = sub_tensor_f32(&x_train, 0, BATCH_SIZE)?;
-    let sample_pred = model.predict(&sample_batch)?;
+    let sample_pred = predict_in_eval(&mut model, &sample_batch)?;
     println!(
         "初期状態の Transformer::predict 出力 shape: {:?}",
         sample_pred.shape()
@@ -213,6 +235,14 @@ fn run_transformer() -> Result<(), Box<dyn std::error::Error>> {
     }
     let test_acc = accuracy(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES)?;
     println!("Transformer held-out accuracy = {test_acc:.4}");
+    // `run_resnet` と同じ理由で、学習後の `Transformer::predict` は
+    // eval モードへ明示的に切り替えてから呼ぶ。
+    ReferenceModule::set_training(&mut model, false);
+    let final_pred = model.predict(&sample_batch)?;
+    println!(
+        "学習後（eval）の Transformer::predict 出力 shape: {:?}",
+        final_pred.shape()
+    );
     check_ac4("Transformer", &history, test_acc)
 }
 
