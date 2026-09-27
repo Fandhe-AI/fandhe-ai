@@ -254,13 +254,21 @@ Transformer（画像の行をトークン化する非 ViT 構成）の設計判�
 
 `facade` は `Var::cross_entropy_loss` の `Reduction` 引数を
 再エクスポートしていない（`docs/compat-api-scope.md`）。公開パス
-だけで mean cross-entropy を得るため、正解位置が `1/N`・それ以外が
-`0` の one-hot 定数（`tape.var` で tape に載せるだけの非学習対象）を
-`log_softmax` の出力と掛けて総和を取ることで、スカラー乗算 op を
-使わずに mean 相当を実現した
+だけで mean cross-entropy を得るため、`log_softmax` の出力から
+`Var::gather` で正解クラスの log-probability のみを選択し、
+`1/N` の定数（`tape.var` で tape に載せるだけの非学習対象）を掛けて
+総和を取ることで、スカラー乗算 op を使わずに mean 相当を実現した
 （`crates/facade/examples/models/reference_module.rs::
 cross_entropy_mean`）。この定数への勾配は `Trainable::train_step` が
 モデル内部パラメータだけを `trainable_grads` で抽出するため無視される。
+
+当初は正解位置が `1/N`・それ以外が `0` の one-hot 定数を
+`log_softmax` の出力と要素積してから総和する実装だったが、
+`log_softmax` が非正解クラスに返す `-inf` と one-hot の `0` の積が
+`0 * -inf = NaN` になり、正解クラスの loss が有限でも合計が NaN
+汚染されうる不具合があった（イシュー #2202 PR #2325 レビュー
+指摘）。`gather` で正解クラスの列のみを選択する現行実装は非正解
+クラスの値に一切触れないため、この経路の NaN 汚染は起きない。
 
 ### 10.5 合成 CIFAR-10 相当データ（実 CIFAR-10 ではない）
 

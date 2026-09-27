@@ -60,16 +60,21 @@ pub trait Trainable: ReferenceModule {
     ) -> Result<f32, AutodiffError>;
 }
 
-/// mean cross-entropy loss（`-mean(sum(onehot(y) * log_softmax(logits))))`）。
+/// mean cross-entropy loss（`-mean(gather(log_softmax(logits), y)))`）。
 ///
 /// `facade` は `Reduction`（`Var::cross_entropy_loss` の引数）を
 /// 再エクスポートしていないため（`docs/compat-api-scope.md`）、
-/// 公開パスだけで呼べる形へ書き下ろす。`onehot_scaled` は正解位置が
-/// `1/N`・それ以外が `0` の `[N, C]` 定数（`tape.var` で tape に載せる
-/// だけの非学習対象。`Trainable::train_step` はモデル内部パラメータ
-/// だけを `trainable_grads` で抽出するため、この定数への勾配は無視
-/// される）とすることで、スカラー乗算 op を使わずに mean 相当を
-/// 実現する（`docs/reference-models-decision.md` #2202 節参照）。
+/// 公開パスだけで呼べる形へ書き下ろす。正解クラスの log-probability
+/// のみを [`Var::gather`] で選択する（one-hot との要素積で非正解
+/// クラスを消す方式は、`log_softmax` が非正解クラスに返す `-inf` と
+/// one-hot の `0` の積が `0 * -inf = NaN` になり、正解クラスの loss
+/// が有限でも合計が NaN 汚染されうるため採らない。イシュー #2202
+/// PR #2325 レビュー指摘）。`weight_var` は `1/N` の `[N, 1]`
+/// 定数（`tape.var` で tape に載せるだけの非学習対象。
+/// `Trainable::train_step` はモデル内部パラメータだけを
+/// `trainable_grads` で抽出するため、この定数への勾配は無視される）
+/// とすることで、スカラー乗算 op を使わずに mean 相当を実現する
+/// （`docs/reference-models-decision.md` #2202 節参照）。
 pub fn cross_entropy_mean<'t>(
     tape: &'t Tape,
     logits: &Var<'t>,
@@ -94,8 +99,8 @@ pub fn cross_entropy_mean<'t>(
         ));
     }
 
-    let mut onehot = vec![0.0f32; n * num_classes];
-    for i in 0..n {
+    let mut target_idx = vec![0i32; n];
+    for (i, slot) in target_idx.iter_mut().enumerate() {
         let t = targets.get(&[i]).ok_or_else(|| {
             AutodiffError::InvalidArgument(format!(
                 "cross_entropy_mean: targets[{i}] の読み出しに失敗した"
@@ -106,17 +111,27 @@ pub fn cross_entropy_mean<'t>(
                 "cross_entropy_mean: targets[{i}]={t} が [0, {num_classes}) の範囲外"
             )));
         }
-        onehot[i * num_classes + t as usize] = 1.0 / n as f32;
+        *slot = t;
     }
-    let onehot_tensor = Tensor::new(onehot, &[n, num_classes]).map_err(|e| {
+    let target_idx_tensor = Tensor::new(target_idx, &[n, 1]).map_err(|e| {
         AutodiffError::InvalidArgument(format!(
-            "cross_entropy_mean: onehot テンソル構築に失敗: {e}"
+            "cross_entropy_mean: target_idx テンソル構築に失敗: {e}"
         ))
     })?;
-    let onehot_var = tape.var(&onehot_tensor);
+
+    let weight = vec![1.0f32 / n as f32; n];
+    let weight_tensor = Tensor::new(weight, &[n, 1]).map_err(|e| {
+        AutodiffError::InvalidArgument(format!(
+            "cross_entropy_mean: weight テンソル構築に失敗: {e}"
+        ))
+    })?;
+    let weight_var = tape.var(&weight_tensor);
 
     let log_probs = logits.log_softmax(1)?;
-    let weighted = log_probs.mul(&onehot_var)?;
+    // 正解クラスの log-probability のみを選択（non-target の -inf を
+    // 経由しないため、non-target の乗算由来の NaN 汚染が起きない）。
+    let selected = log_probs.gather(1, &target_idx_tensor)?;
+    let weighted = selected.mul(&weight_var)?;
     let summed = weighted.sum(None)?;
     summed.neg()
 }

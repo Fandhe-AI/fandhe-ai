@@ -81,6 +81,12 @@ fn check_ac4(name: &str, history: &[f32], test_acc: f32) -> Result<(), Box<dyn s
         )
         .into());
     }
+    // `test_acc < 0.5` は NaN に対し false と評価され AC4 判定を誤って
+    // 通過させるため、下限比較の前に有限性を検査する
+    // （イシュー #2202 PR #2325 レビュー指摘）。
+    if !test_acc.is_finite() {
+        return Err(format!("{name}: held-out 精度が非有限（実測: {test_acc}）").into());
+    }
     if test_acc < 0.5 {
         return Err(format!(
             "{name}: held-out 精度が判定式の下限 0.50 を下回った（実測: {test_acc:.4}）"
