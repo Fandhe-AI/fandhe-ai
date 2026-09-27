@@ -35,8 +35,12 @@ pub trait ReferenceModule {
     /// 外部 `Tape` 上で推論用 forward を計算する。
     fn forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
 
-    /// PyTorch 風の階層名（例: `"layer1.0.main.0.weight"`）付きの
-    /// パラメータ一覧を返す。
+    /// PyTorch 風の階層名付きのパラメータ一覧を返す。命名規則の
+    /// 対応関係は実装ごとに異なる: 例えば `resnet.rs::ResNet` は
+    /// PyTorch の `layer1`/`layer2`/`layer3`（ステージ別に 0 起点で
+    /// 再カウント）ではなく、全 block を通した単一の 0 起点連番
+    /// `i` で `"layer.{i}.main.0.weight"` のように命名する（stage
+    /// 番号は名前に現れない。`ResNet::named_parameters` 参照）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)>;
 
     /// 内部の全 `compat::Sequential` 部品へ train/eval モードを伝える
@@ -299,6 +303,18 @@ pub fn accuracy<M: ReferenceModule>(
         }
         for i in 0..len {
             let row = &flat[i * num_classes..(i + 1) * num_classes];
+            // 非有限（NaN・inf）の logits を検出する（Codex レビュー指摘。
+            // `v > best_val` は NaN に対して常に false を返すため、NaN
+            // 汚染された行を無検査のまま通すと best_idx が初期値 0 の
+            // ままクラス 0 の予測として誤って「正解」判定されうる
+            // （AC4 の `check_ac4` と同様、非有限値を握り潰さず fail-fast
+            // する方針。cross_entropy 側の NaN 対策は `d5e86226` 参照）。
+            if let Some((idx, &v)) = row.iter().enumerate().find(|&(_, &v)| !v.is_finite()) {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "accuracy: logits[{}][{idx}] が非有限（{v}）",
+                    start + i
+                )));
+            }
             let mut best_idx = 0usize;
             let mut best_val = row[0];
             for (idx, &v) in row.iter().enumerate().skip(1) {
