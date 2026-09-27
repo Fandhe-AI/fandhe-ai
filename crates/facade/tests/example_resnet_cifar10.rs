@@ -131,6 +131,18 @@ fn resnet_rejects_invalid_args() {
     ));
 }
 
+#[test]
+fn resnet_rejects_width_multiplication_overflow() {
+    // width * 4（stage3 の出力チャネル数）が usize をオーバーフローする
+    // width を渡すと、`checked_mul` が `InvalidArgument` を返す
+    // （Codex レビュー指摘・イシュー #2202 PR #2325）。
+    let huge_width = usize::MAX / 3;
+    assert!(matches!(
+        ResNet::new(8, huge_width, NUM_CLASSES, 1),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
 // ---------------------------------------------------------------------
 // AC3 代替: `ResNetBlock`・`ResNet` の両方が `ReferenceModule` を実装
 // すること（block 単体の named_parameters・forward も検証）。
@@ -278,6 +290,72 @@ fn sub_tensor_i32_rejects_rank_2_input() {
     let y = Tensor::new(vec![0i32, 1, 2, 3], &[2, 2]).unwrap();
     assert!(matches!(
         sub_tensor_i32(&y, 0, 1),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn sub_tensor_f32_and_i32_reject_start_plus_len_overflow() {
+    use reference_module::{sub_tensor_f32, sub_tensor_i32};
+
+    // start・len がいずれも usize::MAX 近傍で、素の `+` では usize を
+    // オーバーフローして本来の境界検査（> n）を素通りしうる組合せ
+    // （Codex レビュー指摘・イシュー #2202 PR #2325）。
+    let x = image_tensor(vec![0.0f32; 4 * IMG_C * IMG_H * IMG_W], 4);
+    assert!(matches!(
+        sub_tensor_f32(&x, usize::MAX - 1, 2),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+
+    let y = labels_tensor(vec![0, 1, 2, 3], 4);
+    assert!(matches!(
+        sub_tensor_i32(&y, usize::MAX - 1, 2),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
+/// `ReferenceModule::forward` が要素数は一致するが shape が異なる
+/// logits（`[1, len*num_classes]`）を返す偽モデル（`accuracy` の shape
+/// 完全一致検査を、要素数一致だけでは検出できないケースとして再現する
+/// ためのテスト専用 fixture。Codex レビュー指摘・イシュー #2202
+/// PR #2325）。
+struct FlatLogitsModel {
+    num_classes: usize,
+}
+
+impl ReferenceModule for FlatLogitsModel {
+    fn forward<'t>(
+        &self,
+        tape: &'t fandhe_ai::Tape,
+        x: &fandhe_ai::Var<'t>,
+    ) -> Result<fandhe_ai::Var<'t>, AutodiffError> {
+        let batch = x.to_tensor().shape()[0];
+        let data = vec![0.0f32; batch * self.num_classes];
+        // 正しい [batch, num_classes] ではなく [1, batch*num_classes]
+        // （要素数は同じだが shape が異なる）を返す。
+        let t = Tensor::new(data, &[1, batch * self.num_classes]).unwrap();
+        Ok(tape.var(&t))
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        Vec::new()
+    }
+
+    fn set_training(&mut self, _training: bool) {}
+}
+
+#[test]
+fn accuracy_rejects_logits_shape_mismatch_with_matching_element_count() {
+    use reference_module::accuracy;
+
+    let mut model = FlatLogitsModel {
+        num_classes: NUM_CLASSES,
+    };
+    let x = image_tensor(vec![0.0f32; 4 * IMG_C * IMG_H * IMG_W], 4);
+    let y = labels_tensor(vec![0, 1, 2, 3], 4);
+
+    assert!(matches!(
+        accuracy(&mut model, &x, &y, 4, NUM_CLASSES),
         Err(AutodiffError::InvalidArgument(_))
     ));
 }

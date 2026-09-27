@@ -108,6 +108,23 @@ fn transformer_rejects_invalid_args() {
     ));
 }
 
+#[test]
+fn transformer_rejects_seq_len_times_embed_dim_overflow() {
+    // `TransformerConfig` の各フィールドは pub のため、`cifar10` を
+    // 経由しない直接構築でも `seq_len * embed_dim`
+    // （位置符号テンソルの要素数）のオーバーフローを `Transformer::new`
+    // が検出する必要がある（Codex レビュー指摘・イシュー #2202
+    // PR #2325。`ResNet::new` の `width * 2`／`width * 4` と同型の
+    // 横展開）。
+    let mut config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    config.embed_dim = usize::MAX / 4;
+    config.num_heads = 1;
+    assert!(matches!(
+        Transformer::new(config, 1),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
 // ---------------------------------------------------------------------
 // AC3 代替: `Transformer` が `ReferenceModule` を実装すること
 // （named_parameters の階層名・forward の shape・有限性）。

@@ -214,16 +214,38 @@ impl ResNet {
             )));
         }
         let n = (depth - 2) / 6;
+        // `width` は `ResNet::new` の公開引数（呼び出し元が任意の usize
+        // を渡せる）であり、`width * 2`・`width * 4`（stage2/3 の出力
+        // チャネル数）は debug では panic・release では wrap-around して
+        // 誤ったチャネル数のまま構築が進みうる。`checked_mul` で表現
+        // できない場合は `InvalidArgument` にする（Codex レビュー
+        // 指摘・イシュー #2202 PR #2325）。`3 * n`（block 総数。`Vec::
+        // with_capacity` の容量ヒント）も同じ理由で検査する。
+        let width_x2 = width.checked_mul(2).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "ResNet::new: width（{width}）* 2 が usize の範囲を超える"
+            ))
+        })?;
+        let width_x4 = width.checked_mul(4).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "ResNet::new: width（{width}）* 4 が usize の範囲を超える"
+            ))
+        })?;
+        let total_blocks = 3usize.checked_mul(n).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "ResNet::new: block 総数（3 * n。n={n}）が usize の範囲を超える"
+            ))
+        })?;
 
         let stem = Sequential::new()
             .add_conv2d(3, width, [3, 3], [1, 1], [1, 1], [1, 1], 1, seed)?
             .add_batch_norm2d(width, BN_EPS, BN_MOMENTUM)?
             .add_relu();
 
-        let mut blocks = Vec::with_capacity(3 * n);
+        let mut blocks = Vec::with_capacity(total_blocks);
         let mut in_channels = width;
         let mut seed_ctr = seed.wrapping_add(10);
-        for (stage_idx, &out_channels) in [width, width * 2, width * 4].iter().enumerate() {
+        for (stage_idx, &out_channels) in [width, width_x2, width_x4].iter().enumerate() {
             for block_idx in 0..n {
                 let stride = if stage_idx > 0 && block_idx == 0 {
                     2
@@ -244,7 +266,7 @@ impl ResNet {
         let head = Sequential::new()
             .add_adaptive_avg_pool2d([1, 1])?
             .add_flatten(1, 3)
-            .add_linear(width * 4, num_classes, seed_ctr)?;
+            .add_linear(width_x4, num_classes, seed_ctr)?;
 
         Ok(ResNet {
             stem,

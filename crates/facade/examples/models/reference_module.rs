@@ -179,10 +179,21 @@ pub fn sub_tensor_f32(
         ));
     }
     let n = full_shape[0];
-    if start + len > n {
+    // `start + len` を `checked_add` で検査する。素の `+` は
+    // `start`・`len` が両方巨大な値のとき usize をオーバーフローし、
+    // debug では panic・release ではラップアラウンドして本来の境界
+    // 検査（`> n`）を素通りしてしまう（Codex レビュー指摘・イシュー
+    // #2202 PR #2325。`sub_tensor_f32`／`sub_tensor_i32` は直接呼び出し
+    // 可能な `pub fn` のため、呼び出し元が `fit_epochs`／`accuracy` の
+    // 内部ループに限らない前提で検証する）。
+    let end_idx = start.checked_add(len).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "sub_tensor_f32: start（{start}）と len（{len}）の和が usize の範囲を超える"
+        ))
+    })?;
+    if end_idx > n {
         return Err(AutodiffError::InvalidArgument(format!(
-            "sub_tensor_f32: [{start}, {}) が先頭軸の長さ {n} を超える",
-            start + len
+            "sub_tensor_f32: [{start}, {end_idx}) が先頭軸の長さ {n} を超える"
         )));
     }
     let item_len: usize = full_shape[1..].iter().product();
@@ -217,17 +228,23 @@ pub fn sub_tensor_i32(
         )));
     }
     let n = y_shape[0];
-    if start + len > n {
+    // `sub_tensor_f32` と同じ理由で `checked_add` を使う（Codex レビュー
+    // 指摘・イシュー #2202 PR #2325）。
+    let end_idx = start.checked_add(len).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "sub_tensor_i32: start（{start}）と len（{len}）の和が usize の範囲を超える"
+        ))
+    })?;
+    if end_idx > n {
         return Err(AutodiffError::InvalidArgument(format!(
-            "sub_tensor_i32: [{start}, {}) が先頭軸の長さ {n} を超える",
-            start + len
+            "sub_tensor_i32: [{start}, {end_idx}) が先頭軸の長さ {n} を超える"
         )));
     }
     let contiguous = y.contiguous();
     let flat = contiguous.as_slice().ok_or_else(|| {
         AutodiffError::InvalidArgument("sub_tensor_i32: contiguous() 直後は必ず Some".to_string())
     })?;
-    Tensor::new(flat[start..start + len].to_vec(), &[len]).map_err(|e| {
+    Tensor::new(flat[start..end_idx].to_vec(), &[len]).map_err(|e| {
         AutodiffError::InvalidArgument(format!("sub_tensor_i32: テンソル再構築に失敗: {e}"))
     })
 }
@@ -358,17 +375,23 @@ pub fn accuracy<M: ReferenceModule>(
         let xv = tape.var(&xb);
         let logits = model.forward(&tape, &xv)?;
         let out = logits.to_tensor();
+        // 要素数だけを見ると、rank・各軸長が異なる shape でも積が同じ
+        // なら通ってしまう（例: [len*num_classes] や [num_classes, len]
+        // でも要素数は一致する）。shape そのものを `[len, num_classes]`
+        // と完全一致検証する（Codex レビュー指摘・イシュー #2202
+        // PR #2325。`cross_entropy_mean` の logits shape 検証と同じ
+        // 方針）。
+        let out_shape = out.shape().to_vec();
+        if out_shape != [len, num_classes] {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "accuracy: logits の shape は [{len}, {num_classes}] である必要がある \
+                 （実際: {out_shape:?}）"
+            )));
+        }
         let contiguous = out.contiguous();
         let flat = contiguous.as_slice().ok_or_else(|| {
             AutodiffError::InvalidArgument("accuracy: contiguous() 直後は必ず Some".to_string())
         })?;
-        if flat.len() != len * num_classes {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "accuracy: logits 要素数（{}）が期待値（{}）と一致しない",
-                flat.len(),
-                len * num_classes
-            )));
-        }
         for i in 0..len {
             let row = &flat[i * num_classes..(i + 1) * num_classes];
             // 非有限（NaN・inf）の logits を検出する（Codex レビュー指摘。

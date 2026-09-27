@@ -133,6 +133,23 @@ impl Transformer {
                 config.embed_dim, config.num_heads
             )));
         }
+        // `seq_len * embed_dim`（位置符号テンソルの要素数）を事前検査
+        // する。`config` は呼び出し元が任意の usize を設定できる公開
+        // フィールド構造体のため、素の乗算は debug で panic・release
+        // で wrap-around しうる（wrap-around した場合、`vec![0.0;
+        // wrapped_len]` の確保サイズと後段の `pos * embed_dim + i`
+        // インデックス計算が食い違い、index out of bounds を招く）。
+        // Codex レビュー指摘（`ResNet::new` の `width * 2`／`width * 4`
+        // と同型の横展開）・イシュー #2202 PR #2325。
+        config
+            .seq_len
+            .checked_mul(config.embed_dim)
+            .ok_or_else(|| {
+                AutodiffError::InvalidArgument(format!(
+                    "Transformer::new: seq_len（{}）* embed_dim（{}）が usize の範囲を超える",
+                    config.seq_len, config.embed_dim
+                ))
+            })?;
 
         let embed = Sequential::new().add_linear(config.in_features, config.embed_dim, seed)?;
 
