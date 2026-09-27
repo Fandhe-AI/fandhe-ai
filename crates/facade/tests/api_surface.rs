@@ -16821,3 +16821,335 @@ fn facade_does_not_reexport_or_declare_generate_items_detects_each_category() {
         .is_empty()
     );
 }
+
+// =====================================================================
+// PredictBatchesHoldDoctestGuard（イシュー #2192・親 #2131）:
+// `NpyIoHoldDoctestGuard`（#2189）系のテスト（`npy_io_hold_doctest_
+// globs_all_pub_modules`／`npy_io_hold_doctest_probe_body_matches_fixed_
+// contract`／`facade_does_not_reexport_or_declare_npy_io`／
+// `workspace_declares_npy_io_names_only_in_allowed_locations`）を鏡写し
+// にする。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `PredictBatchesHoldDoctestGuard` doc 内
+/// の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`npy_io_hold_doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn predict_batches_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "PredictBatchesHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "PredictBatchesHoldDoctestGuard の doctest ブロックが glob import\
+         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
+         している（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`predict_batches_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**が固定文言 [`PREDICT_BATCHES_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（`npy_io_hold_doctest_probe_
+/// body_matches_fixed_contract` と同じ理由: rustdoc の `# ` 隠し行・
+/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きにする
+/// 改変を機械的に拒否する）。
+#[test]
+fn predict_batches_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "PredictBatchesHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, PREDICT_BATCHES_HOLD_PROBE_BODY,
+        "PredictBatchesHoldDoctestGuard の doctest ブロック本文（glob 以外）\
+         が固定文言 PREDICT_BATCHES_HOLD_PROBE_BODY からドリフトしている。\
+         正のプローブ（__fandhe_predict_batches_hold_probe モジュール・\
+         __FandhePredictBatchesHoldProbe トレイト・__probe_* 関数）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`predict_batches_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の
+/// `PredictBatchesHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
+/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
+/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
+/// `use fandhe_ai::*;` は本文に含む）。
+const PREDICT_BATCHES_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_predict_batches_hold_probe {\n\
+\x20\x20\x20\x20pub struct PhaseMetrics;\n\
+\x20\x20\x20\x20pub fn get_phase_metrics() {}\n\
+\x20\x20\x20\x20pub fn current_phase_metrics() {}\n\
+\x20\x20\x20\x20pub fn reset_phase_metrics() {}\n\
+\x20\x20\x20\x20pub mod inference {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_predict_batches_hold_probe::*;\n\
+\n\
+struct __FandhePredictBatchesHoldMarker;\n\
+\n\
+trait __FandhePredictBatchesHoldProbe {\n\
+\x20\x20\x20\x20fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker;\n\
+\x20\x20\x20\x20fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;\n\
+\x20\x20\x20\x20fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;\n\
+}\n\
+\n\
+impl __FandhePredictBatchesHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePredictBatchesHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePredictBatchesHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandhePredictBatchesHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_free_fns(_: PhaseMetrics) {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20get_phase_metrics();\n\
+\x20\x20\x20\x20current_phase_metrics();\n\
+\x20\x20\x20\x20reset_phase_metrics();\n\
+\x20\x20\x20\x20inference::__mark();\n\
+}\n\
+\n\
+fn __probe_sequential(seq: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandhePredictBatchesHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::predict_batches(seq);\n\
+\x20\x20\x20\x20let _: __FandhePredictBatchesHoldMarker = seq.get_phase_metrics();\n\
+\x20\x20\x20\x20let _: __FandhePredictBatchesHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::current_phase_metrics(seq);\n\
+}";
+
+/// fn 名 4 個（イシュー #2192）。[`scan_predict_batches_reexports_and_declarations`]・
+/// [`workspace_declares_predict_batches_fn_names_nowhere`] が共用する。
+const PREDICT_BATCHES_FN_NAMES: [&str; 4] = [
+    "predict_batches",
+    "get_phase_metrics",
+    "current_phase_metrics",
+    "reset_phase_metrics",
+];
+
+/// [`facade_does_not_reexport_or_declare_predict_batches_items`]・その
+/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/src/**`）
+/// の `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
+/// `PhaseMetrics` を検出し（単一行・複数行・ネストした group・別名も
+/// 検出）、`trait`／`struct`／`enum`／`type` 直後の `PhaseMetrics` 独自
+/// 宣言、[`PREDICT_BATCHES_FN_NAMES`]（4 個）の `fn` 宣言（可視性・宣言
+/// 文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出契約）、
+/// `pub mod inference` 宣言（facade 独自の `inference` 公開モジュール
+/// 新設）を違反として返す（`scan_npy_io_reexports_and_declarations` と
+/// 同型。`pub mod inference` 検出のみ追加）。
+fn scan_predict_batches_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if leaf == "PhaseMetrics" {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens.get(i + 1).map(String::as_str) == Some("PhaseMetrics")
+        {
+            offending.push(format!("{} PhaseMetrics 宣言", tokens[i]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && tokens.get(i + 2).map(String::as_str) == Some("inference")
+        {
+            offending.push("pub mod inference 宣言".to_string());
+        }
+        i += 1;
+    }
+
+    for fn_name in PREDICT_BATCHES_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`PhaseMetrics` を識別子
+/// 単位で含む `pub use`（複数行・ネストした group・別名含む）も、facade
+/// 独自の `trait`／`struct`／`enum`／`type` 宣言も、
+/// [`PREDICT_BATCHES_FN_NAMES`]（`predict_batches`／`get_phase_metrics`／
+/// `current_phase_metrics`／`reset_phase_metrics`）の `fn` 宣言も、
+/// `pub mod inference` 宣言も存在しないことを固定する
+/// （`PredictBatchesHoldDoctestGuard` の正のプローブと多層防御を成す
+/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_npy_io`
+/// と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_predict_batches_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_predict_batches_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面がバッチ推論・phase 計測（#2192 の\
+         `predict_batches`／`PhaseMetrics`／`get_phase_metrics`／\
+         `current_phase_metrics`／`reset_phase_metrics`／`pub mod\
+         inference`。内部実装限定の新規公開面。facade 公開は承認待ちの\
+         ため対象外という設計判断に違反）を再エクスポート、独自宣言、\
+         または同名の fn／pub mod を宣言している: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_predict_batches_items`] の自己
+/// テスト（各違反カテゴリの合成ソースを検出できることを固定する。
+/// `facade_does_not_reexport_or_declare_model_io_detects_each_category`
+/// と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_predict_batches_items_detects_each_category() {
+    // 正例: 単一行 pub use。
+    assert!(
+        !scan_predict_batches_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::PhaseMetrics;"
+        )
+        .is_empty()
+    );
+    // 正例: 複数行 pub use（group）。
+    assert!(
+        !scan_predict_batches_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::{\n    Sequential,\n    PhaseMetrics,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: 別名 pub use。
+    assert!(
+        !scan_predict_batches_reexports_and_declarations(
+            "pub use fandhe_ai_facade::compat::PhaseMetrics as Foo;"
+        )
+        .is_empty()
+    );
+    // 正例: 独自 struct 宣言。
+    assert!(
+        !scan_predict_batches_reexports_and_declarations("pub struct PhaseMetrics;").is_empty()
+    );
+    // 正例: predict_batches の fn 宣言。
+    assert!(
+        !scan_predict_batches_reexports_and_declarations(
+            "impl Sequential { pub fn predict_batches(&self) {} }"
+        )
+        .is_empty()
+    );
+    // 正例: get_phase_metrics の fn 宣言。
+    assert!(
+        !scan_predict_batches_reexports_and_declarations(
+            "pub fn get_phase_metrics() -> PhaseMetrics { todo!() }"
+        )
+        .is_empty()
+    );
+    // 正例: pub mod inference 宣言。
+    assert!(!scan_predict_batches_reexports_and_declarations("pub mod inference {}").is_empty());
+    // 負例: コメント中の出現。
+    assert!(
+        scan_predict_batches_reexports_and_declarations("// pub use ...::predict_batches;")
+            .is_empty()
+    );
+    // 負例: 無関係な型・関数名。
+    assert!(
+        scan_predict_batches_reexports_and_declarations(
+            "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
+        )
+        .is_empty()
+    );
+    // 負例: 非公開 `mod inference`（facade 内部実装。本イシューの内部
+    // 実装が使う `mod inference;` そのものは違反ではない）。
+    assert!(scan_predict_batches_reexports_and_declarations("mod inference;").is_empty());
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、
+/// [`PREDICT_BATCHES_FN_NAMES`]（4 個）の `fn` 宣言が**どこにも存在しない
+/// こと**を固定する（`workspace_declares_npy_io_names_only_in_allowed_
+/// locations` と異なり、本イシューは facade 内部実装が `#[cfg(test)]`
+/// 限定のメソッド〈`Sequential::run_loader_inference` 等〉のみで、上記
+/// 4 名は一切使わない設計のため、期待集合は空）。
+#[test]
+fn workspace_declares_predict_batches_fn_names_nowhere() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in PREDICT_BATCHES_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    assert!(
+        found.is_empty(),
+        "workspace 全体（crates/*/src/）に predict_batches／\
+         get_phase_metrics／current_phase_metrics／reset_phase_metrics\
+         のいずれかの `fn` 宣言が見つかった（期待集合は空。#2192 の内部\
+         実装はこれらの名前を一切使わない設計のため、見つかった場合は\
+         承認済みの実装か迂回経路の混入かを確認すること）: {found:?}"
+    );
+}
