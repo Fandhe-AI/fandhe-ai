@@ -68,10 +68,18 @@
 //!   みで、学習済み `Sequential`／`nn` から直接 `OnnxModel` を構築する
 //!   経路は [`OnnxModel::from_sequential`]（次節・#2037）を使う
 //! - export allowlist（26 op・既定 domain。イシュー #2187 で
-//!   `GlobalAveragePool`／`BatchNormalization`／`Flatten` を追加し import
-//!   （26 op）と対称化）外のノードを含むモデルは `from_bytes` では構築
-//!   できても **export 時に** [`OnnxError::UnsupportedOp`] により
-//!   fail-closed に拒否する（無言 skip しない。イシュー #2200・#2187）
+//!   `GlobalAveragePool`／`BatchNormalization`／`Flatten` を追加し
+//!   #2200 導入時点の import 対応 26 op と対称化した）外のノードを含む
+//!   モデルは `from_bytes` では構築できても **export 時に**
+//!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する
+//!   （無言 skip しない。イシュー #2200・#2187）。import 対応は本 PR
+//!   （イシュー #2186）で `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
+//!   `ReduceMean`／`Pad`／`Resize` の 8 op を追加し 34 op へ拡大したが、
+//!   `interp` のディスパッチ表への追加のみで本 export allowlist は
+//!   未拡張のまま（26 op）。この 8 op を含むモデルは import はできても
+//!   export では [`OnnxError::UnsupportedOp`] になる非対称が残る
+//!   （追跡: 別イシューでの export 側拡張が必要。out-of-scope-tracking.md
+//!   に従いユーザー承認を得たうえで Issue 化する）
 //!
 //! ## `Sequential` からの export（イシュー #2037・親 #2034）
 //!
