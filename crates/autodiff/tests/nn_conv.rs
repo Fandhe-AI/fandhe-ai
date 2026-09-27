@@ -192,7 +192,10 @@ fn conv1d_from_parameters_rejects_wrong_rank() {
 /// `checked_mul` を素通りするが、f32 4 バイト換算で `1<<63` バイトと
 /// なり 64-bit の `isize::MAX`（`2^63 - 1`）を超える。本番経路 panic
 /// 禁止（`.claude/rules/coding-rust.md`）のため `Err` を返す契約を
-/// 固定する（panic せず `Err` が返ること自体が検証対象）。
+/// 固定する（panic せず `Err` が返ること自体が検証対象）。返り値は
+/// イシュー #2248 で `InvalidArgument` から非アロケーションな
+/// `Shape(ShapeError::ElementCountOverflow)` へ変更した（確保失敗の
+/// 報告経路自体で新たな `String` 確保を行わないため）。
 #[test]
 fn conv2d_new_rejects_weight_allocation_exceeding_isize_max() {
     let err = err_of(Conv2d::new(
@@ -206,7 +209,10 @@ fn conv2d_new_rejects_weight_allocation_exceeding_isize_max() {
         false,
         0,
     ));
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 /// [`conv2d_new_rejects_weight_allocation_exceeding_isize_max`] の
@@ -214,7 +220,10 @@ fn conv2d_new_rejects_weight_allocation_exceeding_isize_max() {
 #[test]
 fn conv1d_new_rejects_weight_allocation_exceeding_isize_max() {
     let err = err_of(Conv1d::new(1usize << 61, 1, 1, 1, 0, 1, 1, false, 0));
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 // --- 2. 決定性・初期化 ---
@@ -551,6 +560,32 @@ fn conv_transpose2d_new_rejects_in_channels_not_divisible_by_groups() {
         0,
     ));
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// [`conv2d_new_rejects_weight_allocation_exceeding_isize_max`] の
+/// `ConvTranspose2d` 版（イシュー #2248）。`weight_numel = in_channels *
+/// cout_g * kH * kW = (1<<61) * 1 * 1 * 1 = 1<<61` は `checked_mul` を
+/// 素通りするが f32 4 バイト換算で `1<<63` バイトとなり `isize::MAX` を
+/// 超える。`checked_uniform_init`（`nn::init` 共有版）が非アロケーション
+/// な `Shape(ElementCountOverflow)` を返すことを確認する。
+#[test]
+fn conv_transpose2d_new_rejects_weight_allocation_exceeding_isize_max() {
+    let err = err_of(ConvTranspose2d::new(
+        1usize << 61,
+        1,
+        [1, 1],
+        [1, 1],
+        [0, 0],
+        [0, 0],
+        [1, 1],
+        1,
+        false,
+        0,
+    ));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 #[test]

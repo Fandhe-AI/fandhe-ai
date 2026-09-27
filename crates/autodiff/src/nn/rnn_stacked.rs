@@ -47,7 +47,7 @@
 use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
-use crate::nn::init::{RNN_STACK_SEED_SALT, derive_seed};
+use crate::nn::init::{RNN_STACK_SEED_SALT, alloc_failed, derive_seed};
 use crate::nn::module::Module;
 use crate::nn::rnn::{
     GruCell, GruCellVars, LstmCell, LstmCellVars, RnnCell, RnnCellVars, forward_not_supported,
@@ -327,8 +327,10 @@ impl StackedRnn {
     /// `input_size`・`hidden_size`・`bias`・`seed`・`config` から構築
     /// する。エラー条件: [`RnnConfig::validate`] の失敗、
     /// `num_layers*num_directions`／`num_directions*hidden_size` の
-    /// overflow、`cells` 確保失敗（`try_reserve_exact`）、個々の
-    /// `RnnCell::new` の失敗（`input_size==0`／`hidden_size==0`）。
+    /// overflow、`cells` 確保失敗（`try_reserve_exact`。非アロケーション
+    /// な `AutodiffError::Shape(ShapeError::ElementCountOverflow)` を
+    /// 返す。イシュー #2248）、個々の `RnnCell::new` の失敗
+    /// （`input_size==0`／`hidden_size==0`）。
     pub fn new(
         input_size: usize,
         hidden_size: usize,
@@ -339,11 +341,9 @@ impl StackedRnn {
         let (total_cells, stacked_input_size) = validate_stack_config(&config, hidden_size)?;
         let num_directions = config.num_directions();
         let mut cells = Vec::new();
-        cells.try_reserve_exact(total_cells).map_err(|err| {
-            AutodiffError::InvalidArgument(format!(
-                "StackedRnn::new: {total_cells} 個分のセルを確保できません: {err}"
-            ))
-        })?;
+        cells
+            .try_reserve_exact(total_cells)
+            .map_err(|_| alloc_failed())?;
         for layer in 0..config.num_layers {
             let layer_input = if layer == 0 {
                 input_size
@@ -415,7 +415,7 @@ impl StackedRnn {
 
         // 層 0 の入力（forward・reverse 双方で共有する葉）。
         let mut layer_in: Vec<Var<'t>> = {
-            let mut v = reserve_outputs(t_len, "StackedRnn::forward_seq")?;
+            let mut v = reserve_outputs(t_len)?;
             for t in 0..t_len {
                 let x_t = slice_timestep(x, t, b_dim, d_dim)?;
                 v.push(tape.var(&x_t));
@@ -423,13 +423,12 @@ impl StackedRnn {
             v
         };
 
-        let mut h_n = reserve_outputs(total_cells, "StackedRnn::forward_seq")?;
+        let mut h_n = reserve_outputs(total_cells)?;
         h_n.resize(
             total_cells,
             tape.var(&Tensor::zeros(&[b_dim, self.hidden_size])?),
         );
-        let mut params =
-            reserve_outputs::<RnnCellVars<'t>>(total_cells, "StackedRnn::forward_seq")?;
+        let mut params = reserve_outputs::<RnnCellVars<'t>>(total_cells)?;
         // `RnnCellVars` は `bind` の戻り値であり `Default` を持たない
         // ため、`h_n` のような `resize` 埋めではなく最終的に index 順で
         // 詰め替える（各 index を一度だけ埋める）。
@@ -445,14 +444,13 @@ impl StackedRnn {
                     Some(s) => s[k],
                     None => tape.var(&Tensor::zeros(&[b_dim, self.hidden_size])?),
                 };
-                let mut step_outputs = reserve_outputs(t_len, "StackedRnn::forward_seq")?;
+                let mut step_outputs = reserve_outputs(t_len)?;
                 let time_order: Box<dyn Iterator<Item = usize>> = if direction == 0 {
                     Box::new(0..t_len)
                 } else {
                     Box::new((0..t_len).rev())
                 };
-                let mut ordered: Vec<(usize, Var<'t>)> =
-                    reserve_outputs(t_len, "StackedRnn::forward_seq")?;
+                let mut ordered: Vec<(usize, Var<'t>)> = reserve_outputs(t_len)?;
                 for t in time_order {
                     h = vars.forward(&layer_in[t], &h)?;
                     ordered.push((t, h));
@@ -464,7 +462,7 @@ impl StackedRnn {
                 dir_outputs.push(step_outputs);
             }
 
-            let mut layer_out = reserve_outputs(t_len, "StackedRnn::forward_seq")?;
+            let mut layer_out = reserve_outputs(t_len)?;
             if num_directions == 1 {
                 layer_out.extend(dir_outputs.into_iter().next().unwrap_or_default());
             } else {
@@ -475,7 +473,7 @@ impl StackedRnn {
                 }
             }
 
-            let mut dropped = reserve_outputs(t_len, "StackedRnn::forward_seq")?;
+            let mut dropped = reserve_outputs(t_len)?;
             for out in layer_out {
                 dropped.push(apply_interlayer_dropout(
                     out,
@@ -590,7 +588,7 @@ impl Module for StackedRnn {
             validate_seq_input(input, self.input_size, "StackedRnn::forward_host")?;
         let num_directions = self.config.num_directions();
 
-        let mut layer_in: Vec<Tensor<f32>> = reserve_outputs(t_len, "StackedRnn::forward_host")?;
+        let mut layer_in: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
         for t in 0..t_len {
             layer_in.push(slice_timestep(input, t, b_dim, d_dim)?);
         }
@@ -605,8 +603,7 @@ impl Module for StackedRnn {
                     )
                 })?;
                 let mut h = Tensor::zeros(&[b_dim, self.hidden_size])?;
-                let mut ordered: Vec<(usize, Tensor<f32>)> =
-                    reserve_outputs(t_len, "StackedRnn::forward_host")?;
+                let mut ordered: Vec<(usize, Tensor<f32>)> = reserve_outputs(t_len)?;
                 let time_order: Box<dyn Iterator<Item = usize>> = if direction == 0 {
                     Box::new(0..t_len)
                 } else {
@@ -620,8 +617,7 @@ impl Module for StackedRnn {
                 dir_outputs.push(ordered.into_iter().map(|(_, v)| v).collect());
             }
 
-            let mut layer_out: Vec<Tensor<f32>> =
-                reserve_outputs(t_len, "StackedRnn::forward_host")?;
+            let mut layer_out: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
             if num_directions == 1 {
                 layer_out.extend(dir_outputs.into_iter().next().unwrap_or_default());
             } else {
@@ -642,7 +638,7 @@ impl Module for StackedRnn {
 
             let apply_dropout =
                 self.training && self.config.dropout > 0.0 && layer + 1 < self.config.num_layers;
-            let mut dropped: Vec<Tensor<f32>> = reserve_outputs(t_len, "StackedRnn::forward_host")?;
+            let mut dropped: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
             for out in layer_out {
                 if apply_dropout {
                     let mask = crate::grad::dropout_mask(out.shape(), self.config.dropout)?;
@@ -684,11 +680,9 @@ impl StackedGru {
         let (total_cells, stacked_input_size) = validate_stack_config(&config, hidden_size)?;
         let num_directions = config.num_directions();
         let mut cells = Vec::new();
-        cells.try_reserve_exact(total_cells).map_err(|err| {
-            AutodiffError::InvalidArgument(format!(
-                "StackedGru::new: {total_cells} 個分のセルを確保できません: {err}"
-            ))
-        })?;
+        cells
+            .try_reserve_exact(total_cells)
+            .map_err(|_| alloc_failed())?;
         for layer in 0..config.num_layers {
             let layer_input = if layer == 0 {
                 input_size
@@ -751,7 +745,7 @@ impl StackedGru {
         validate_state_len(h0, total_cells, "h0", "StackedGru::forward_seq")?;
 
         let mut layer_in: Vec<Var<'t>> = {
-            let mut v = reserve_outputs(t_len, "StackedGru::forward_seq")?;
+            let mut v = reserve_outputs(t_len)?;
             for t in 0..t_len {
                 let x_t = slice_timestep(x, t, b_dim, d_dim)?;
                 v.push(tape.var(&x_t));
@@ -759,13 +753,12 @@ impl StackedGru {
             v
         };
 
-        let mut h_n = reserve_outputs(total_cells, "StackedGru::forward_seq")?;
+        let mut h_n = reserve_outputs(total_cells)?;
         h_n.resize(
             total_cells,
             tape.var(&Tensor::zeros(&[b_dim, self.hidden_size])?),
         );
-        let mut params =
-            reserve_outputs::<GruCellVars<'t>>(total_cells, "StackedGru::forward_seq")?;
+        let mut params = reserve_outputs::<GruCellVars<'t>>(total_cells)?;
         let mut params_slots: Vec<Option<GruCellVars<'t>>> =
             (0..total_cells).map(|_| None).collect();
 
@@ -783,8 +776,7 @@ impl StackedGru {
                 } else {
                     Box::new((0..t_len).rev())
                 };
-                let mut ordered: Vec<(usize, Var<'t>)> =
-                    reserve_outputs(t_len, "StackedGru::forward_seq")?;
+                let mut ordered: Vec<(usize, Var<'t>)> = reserve_outputs(t_len)?;
                 for t in time_order {
                     h = vars.forward(&layer_in[t], &h)?;
                     ordered.push((t, h));
@@ -796,7 +788,7 @@ impl StackedGru {
                 dir_outputs.push(step_outputs);
             }
 
-            let mut layer_out = reserve_outputs(t_len, "StackedGru::forward_seq")?;
+            let mut layer_out = reserve_outputs(t_len)?;
             if num_directions == 1 {
                 layer_out.extend(dir_outputs.into_iter().next().unwrap_or_default());
             } else {
@@ -807,7 +799,7 @@ impl StackedGru {
                 }
             }
 
-            let mut dropped = reserve_outputs(t_len, "StackedGru::forward_seq")?;
+            let mut dropped = reserve_outputs(t_len)?;
             for out in layer_out {
                 dropped.push(apply_interlayer_dropout(
                     out,
@@ -916,7 +908,7 @@ impl Module for StackedGru {
             validate_seq_input(input, self.input_size, "StackedGru::forward_host")?;
         let num_directions = self.config.num_directions();
 
-        let mut layer_in: Vec<Tensor<f32>> = reserve_outputs(t_len, "StackedGru::forward_host")?;
+        let mut layer_in: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
         for t in 0..t_len {
             layer_in.push(slice_timestep(input, t, b_dim, d_dim)?);
         }
@@ -931,8 +923,7 @@ impl Module for StackedGru {
                     )
                 })?;
                 let mut h = Tensor::zeros(&[b_dim, self.hidden_size])?;
-                let mut ordered: Vec<(usize, Tensor<f32>)> =
-                    reserve_outputs(t_len, "StackedGru::forward_host")?;
+                let mut ordered: Vec<(usize, Tensor<f32>)> = reserve_outputs(t_len)?;
                 let time_order: Box<dyn Iterator<Item = usize>> = if direction == 0 {
                     Box::new(0..t_len)
                 } else {
@@ -946,8 +937,7 @@ impl Module for StackedGru {
                 dir_outputs.push(ordered.into_iter().map(|(_, v)| v).collect());
             }
 
-            let mut layer_out: Vec<Tensor<f32>> =
-                reserve_outputs(t_len, "StackedGru::forward_host")?;
+            let mut layer_out: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
             if num_directions == 1 {
                 layer_out.extend(dir_outputs.into_iter().next().unwrap_or_default());
             } else {
@@ -968,7 +958,7 @@ impl Module for StackedGru {
 
             let apply_dropout =
                 self.training && self.config.dropout > 0.0 && layer + 1 < self.config.num_layers;
-            let mut dropped: Vec<Tensor<f32>> = reserve_outputs(t_len, "StackedGru::forward_host")?;
+            let mut dropped: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
             for out in layer_out {
                 if apply_dropout {
                     let mask = crate::grad::dropout_mask(out.shape(), self.config.dropout)?;
@@ -1009,11 +999,9 @@ impl StackedLstm {
         let (total_cells, stacked_input_size) = validate_stack_config(&config, hidden_size)?;
         let num_directions = config.num_directions();
         let mut cells = Vec::new();
-        cells.try_reserve_exact(total_cells).map_err(|err| {
-            AutodiffError::InvalidArgument(format!(
-                "StackedLstm::new: {total_cells} 個分のセルを確保できません: {err}"
-            ))
-        })?;
+        cells
+            .try_reserve_exact(total_cells)
+            .map_err(|_| alloc_failed())?;
         for layer in 0..config.num_layers {
             let layer_input = if layer == 0 {
                 input_size
@@ -1080,7 +1068,7 @@ impl StackedLstm {
         validate_state_len(c0, total_cells, "c0", "StackedLstm::forward_seq")?;
 
         let mut layer_in: Vec<Var<'t>> = {
-            let mut v = reserve_outputs(t_len, "StackedLstm::forward_seq")?;
+            let mut v = reserve_outputs(t_len)?;
             for t in 0..t_len {
                 let x_t = slice_timestep(x, t, b_dim, d_dim)?;
                 v.push(tape.var(&x_t));
@@ -1088,18 +1076,17 @@ impl StackedLstm {
             v
         };
 
-        let mut h_n = reserve_outputs(total_cells, "StackedLstm::forward_seq")?;
+        let mut h_n = reserve_outputs(total_cells)?;
         h_n.resize(
             total_cells,
             tape.var(&Tensor::zeros(&[b_dim, self.hidden_size])?),
         );
-        let mut c_n = reserve_outputs(total_cells, "StackedLstm::forward_seq")?;
+        let mut c_n = reserve_outputs(total_cells)?;
         c_n.resize(
             total_cells,
             tape.var(&Tensor::zeros(&[b_dim, self.hidden_size])?),
         );
-        let mut params =
-            reserve_outputs::<LstmCellVars<'t>>(total_cells, "StackedLstm::forward_seq")?;
+        let mut params = reserve_outputs::<LstmCellVars<'t>>(total_cells)?;
         let mut params_slots: Vec<Option<LstmCellVars<'t>>> =
             (0..total_cells).map(|_| None).collect();
 
@@ -1121,8 +1108,7 @@ impl StackedLstm {
                 } else {
                     Box::new((0..t_len).rev())
                 };
-                let mut ordered: Vec<(usize, Var<'t>)> =
-                    reserve_outputs(t_len, "StackedLstm::forward_seq")?;
+                let mut ordered: Vec<(usize, Var<'t>)> = reserve_outputs(t_len)?;
                 for t in time_order {
                     let (h_t, c_t) = vars.forward(&layer_in[t], &h, &c)?;
                     h = h_t;
@@ -1137,7 +1123,7 @@ impl StackedLstm {
                 dir_outputs.push(step_outputs);
             }
 
-            let mut layer_out = reserve_outputs(t_len, "StackedLstm::forward_seq")?;
+            let mut layer_out = reserve_outputs(t_len)?;
             if num_directions == 1 {
                 layer_out.extend(dir_outputs.into_iter().next().unwrap_or_default());
             } else {
@@ -1148,7 +1134,7 @@ impl StackedLstm {
                 }
             }
 
-            let mut dropped = reserve_outputs(t_len, "StackedLstm::forward_seq")?;
+            let mut dropped = reserve_outputs(t_len)?;
             for out in layer_out {
                 dropped.push(apply_interlayer_dropout(
                     out,
@@ -1260,7 +1246,7 @@ impl Module for StackedLstm {
             validate_seq_input(input, self.input_size, "StackedLstm::forward_host")?;
         let num_directions = self.config.num_directions();
 
-        let mut layer_in: Vec<Tensor<f32>> = reserve_outputs(t_len, "StackedLstm::forward_host")?;
+        let mut layer_in: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
         for t in 0..t_len {
             layer_in.push(slice_timestep(input, t, b_dim, d_dim)?);
         }
@@ -1276,8 +1262,7 @@ impl Module for StackedLstm {
                 })?;
                 let mut h = Tensor::zeros(&[b_dim, self.hidden_size])?;
                 let mut c = Tensor::zeros(&[b_dim, self.hidden_size])?;
-                let mut ordered: Vec<(usize, Tensor<f32>)> =
-                    reserve_outputs(t_len, "StackedLstm::forward_host")?;
+                let mut ordered: Vec<(usize, Tensor<f32>)> = reserve_outputs(t_len)?;
                 let time_order: Box<dyn Iterator<Item = usize>> = if direction == 0 {
                     Box::new(0..t_len)
                 } else {
@@ -1293,8 +1278,7 @@ impl Module for StackedLstm {
                 dir_outputs.push(ordered.into_iter().map(|(_, v)| v).collect());
             }
 
-            let mut layer_out: Vec<Tensor<f32>> =
-                reserve_outputs(t_len, "StackedLstm::forward_host")?;
+            let mut layer_out: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
             if num_directions == 1 {
                 layer_out.extend(dir_outputs.into_iter().next().unwrap_or_default());
             } else {
@@ -1315,8 +1299,7 @@ impl Module for StackedLstm {
 
             let apply_dropout =
                 self.training && self.config.dropout > 0.0 && layer + 1 < self.config.num_layers;
-            let mut dropped: Vec<Tensor<f32>> =
-                reserve_outputs(t_len, "StackedLstm::forward_host")?;
+            let mut dropped: Vec<Tensor<f32>> = reserve_outputs(t_len)?;
             for out in layer_out {
                 if apply_dropout {
                     let mask = crate::grad::dropout_mask(out.shape(), self.config.dropout)?;
