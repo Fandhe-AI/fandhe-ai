@@ -411,11 +411,15 @@ fn build_output(
 ///
 /// `input_ids` の rank が 1／2 以外、`T == 0`、`B == 0`、
 /// `config.max_length < T`、`B * config.max_length` が `usize` を
-/// オーバーフローする、`config` 自体が矛盾している（[`GenerateConfig::
-/// validate`]）、`model.forward_step` の戻り shape が期待
-/// （`[B, L_new, V]`・`V` はステップ間で不変）と食い違う、logits に
-/// 非有限値が含まれる、のいずれかで `Err` を返す。`model.forward_step`
-/// 自身が返すエラーはそのまま伝播する。
+/// オーバーフローするか出力バッファ（`Vec<i32>`）の確保バイト数が
+/// `Vec` allocation 上限（`isize::MAX` バイト）を超える、`config`
+/// 自体が矛盾している（`GenerateConfig::validate`）、
+/// `model.forward_step` の戻り shape が期待（`[B, L_new, V]`・`V` は
+/// ステップ間で不変）と食い違う、サンプリングに使う位置（`sample_step`
+/// が検査する末尾位置 `L_new - 1`。prefill では prompt 末尾、decode
+/// では新規 1 トークン自身——サンプリングに使わない他位置の logits は
+/// 検査対象外）の logits に非有限値が含まれる、のいずれかで `Err` を
+/// 返す。`model.forward_step` 自身が返すエラーはそのまま伝播する。
 pub fn generate<M: AutoregressiveModel + ?Sized>(
     model: &M,
     input_ids: &Tensor<i32>,
@@ -452,12 +456,30 @@ pub fn generate<M: AutoregressiveModel + ?Sized>(
     }
     // 出力要素数を事前に検証する（`.claude/rules/security.md` A04
     // 「出力バッファは checked_mul で overflow を検出する」）。
-    b.checked_mul(config.max_length).ok_or_else(|| {
+    let total_elems = b.checked_mul(config.max_length).ok_or_else(|| {
         AutodiffError::InvalidArgument(format!(
             "generate: B({b}) * max_length({}) が usize をオーバーフローした",
             config.max_length
         ))
     })?;
+    // `checked_mul` は `usize` オーバーフローしか検出せず、`b == 1`・
+    // 短い prompt・`max_length == usize::MAX` のような入力（積が
+    // `usize` に収まる）を素通りさせる。この後 `Vec::with_capacity`
+    // （`rows` の各行・`build_output` の `flat`。いずれも要素型は
+    // `i32`）が実際に確保するバイト数が `Vec` allocation 上限
+    // （`isize::MAX` バイト）を超えると capacity overflow で panic
+    // する（本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
+    // に反する。codex-review 指摘・PR #2324 是正。他クレートの同型
+    // 検査は `tensor-core::checked_numel_for`・`backend-cpu::linalg::
+    // checked_numel_for` 等を参照）。確保前にバイト数も検証し、
+    // 確保不能な場合は型付きエラーとして返す。
+    let total_bytes = total_elems.checked_mul(std::mem::size_of::<i32>());
+    if !matches!(total_bytes, Some(bytes) if bytes <= isize::MAX as usize) {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "generate: 出力バッファ（B({b}) * max_length({}) 要素・i32）の確保バイト数が Vec の allocation 上限（isize::MAX バイト）を超える",
+            config.max_length
+        )));
+    }
 
     let prompt_contig = input_ids.contiguous();
     let prompt_slice = prompt_contig.host_slice();

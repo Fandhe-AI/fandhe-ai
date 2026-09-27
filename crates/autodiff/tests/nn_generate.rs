@@ -252,6 +252,24 @@ fn generate_rejects_empty_batch() {
     assert!(generate(&model, &prompt, &config).is_err());
 }
 
+/// `B(=1) * max_length(=usize::MAX)` は `usize::checked_mul` を
+/// オーバーフローせずに素通りするが、出力バッファ（`Vec<i32>`）として
+/// 確保するバイト数（`usize::MAX * 4`）は `Vec` allocation 上限
+/// （`isize::MAX` バイト）を大きく超える。是正前はこの入力で
+/// `Vec::with_capacity` が capacity overflow で panic した
+/// （codex-review 指摘・PR #2324。本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md`）。是正後は `forward_step` を一切
+/// 呼ばず `AutodiffError::InvalidArgument` を返すことを確認する
+/// （`b == 1`・短い prompt という P1 指摘の再現条件そのもの）。
+#[test]
+fn generate_rejects_max_length_that_overflows_output_buffer_bytes() {
+    let model = TinyCausalLm::new(Some(2));
+    let prompt = prompt_2d(vec![0, 1], 1, 2);
+    let config = GenerateConfig::new(usize::MAX, SamplingStrategy::Greedy);
+    let err = generate(&model, &prompt, &config).expect_err("確保不能な max_length は Err");
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
 #[test]
 fn generate_rejects_rank0_and_rank3_input() {
     let model = TinyCausalLm::new(Some(2));

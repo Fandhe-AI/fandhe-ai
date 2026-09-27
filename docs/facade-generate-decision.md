@@ -89,12 +89,21 @@ K-1（autodiff 内部実装）／K-2（facade 公開）2 段構成と同型の�
   `temperature` の有限性・正値、`strategy` とフィールドの整合、`TopK`
   の `k >= 1` を fail-closed で拒否する。`validate_top_k_le_vocab` は
   prefill で確定した `vocab_size` に対する `k` の上限を拒否する。
-  `sample_step` は logits の非有限値（`NaN`／`inf`）混入を明示的に
-  検出し `Err` を返す（モデル実装のバグがサンプリング側に伝播しない
-  ようにする）。
+  `sample_step` はサンプリングに使う末尾位置（`L_new - 1`。prefill
+  では prompt 末尾、decode では新規 1 トークン自身）の logits の
+  非有限値（`NaN`／`inf`）混入を明示的に検出し `Err` を返す（モデル
+  実装のバグがサンプリング側に伝播しないようにする。サンプリングに
+  使わない他位置の logits は検査対象外——codex-review 指摘・
+  PR #2324 で契約を明確化）。
 - **A04（安全でない設計）**: 出力バッファの確保前に `b.checked_mul
-  (config.max_length)` で `usize` オーバーフローを検出する
-  （`.claude/rules/security.md` A04 方針）。`validate_forward_step_
+  (config.max_length)` で `usize` オーバーフローを検出し、さらに
+  積（要素数）の `i32` 換算バイト数が `Vec` allocation 上限
+  （`isize::MAX` バイト）に収まるかも検証する（`checked_mul` は
+  `usize` オーバーフローしか検出せず、`b == 1`・短い prompt・
+  `max_length == usize::MAX` のような入力は素通りするため、この
+  バイト数検証を追加しないと後続の `Vec::with_capacity` が capacity
+  overflow で panic しうる。`.claude/rules/security.md` A04 方針・
+  codex-review 指摘・PR #2324 是正）。`validate_forward_step_
   output` は `AutoregressiveModel::forward_step` の戻り shape を毎
   ステップ検査し、モデル実装のバグで shape がステップ間で変化しても
   `generate` が誤ったオフセットで host メモリを読まないようにする
