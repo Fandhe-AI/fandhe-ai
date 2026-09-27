@@ -257,17 +257,14 @@ fn diag_1d_to_2d<'t>(
         return Ok(diag_square);
     }
     // `N = n + k_abs` の確保前サイズ検査（codex-review 指摘と同型・
-    // イシュー #2144）: `Var::pad`（`pad_out_shape`）は `usize`
-    // オーバーフローのみを検査し、`checked_numel_for` の実用上限は
-    // `isize::MAX` バイト（約 8 EiB）であって `MAX_INDEX_ALLOC_BYTES`
-    // （1 GiB）ほど厳しくない。さらに `eval::pad`（バックエンドが
-    // `Unsupported` を返した場合のホスト参照実装）は `out_shape` が
-    // 空を含むかの検査（`in_shape.contains(&0)`）より**先に**
-    // `vec![value; out_numel]` を確保するため、`n == 0`（本経路に
-    // 到達する空入力）でも `diagonal` だけに比例した巨大確保へ入り
-    // うる。`n` は既に `checked_axis_len_as_i32` で `i32` 範囲に収まる
-    // ことを確認済みのため `checked_add` は失敗しないが、`N * N` は
-    // 依然オーバーフロー・実用上限双方を検査する必要がある。
+    // イシュー #2144。イシュー #2264 で `Var::pad` 自身も確保前に
+    // 同じ `checked_index_alloc_len` 検査を持つようになったため、
+    // 本検査は二重化して冗長だが安全側として残す）: `n` は既に
+    // `checked_axis_len_as_i32` で `i32` 範囲に収まることを確認済み
+    // のため `checked_add` は失敗しないが、`N * N` は依然オーバー
+    // フロー・実用上限双方を検査する必要がある（`Var::pad` 側の
+    // 検査だけに依存せず、本関数自身の呼び出し前提〈`n`／`k_abs`
+    // から `N` を導出する式〉を明示するため維持する）。
     let n_padded = n
         .checked_add(k_abs)
         .ok_or(ShapeError::ElementCountOverflow)

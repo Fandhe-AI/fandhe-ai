@@ -9,6 +9,19 @@
 //! 側の二重検査が fail-closed 境界。`.claude/rules/security.md` A08。
 //! `gather_scatter.rs` モジュール doc と同型の契約）。
 //!
+//! **確保前サイズの実用上限（イシュー #2264）**: 本 crate（`backend-cpu`）
+//! は `autodiff` に依存できないため（アーキテクチャ境界。
+//! `architecture_boundaries.rs`）、`autodiff::rearrange_ops::
+//! checked_index_alloc_len`（1 GiB）のような実用上限は本モジュールに
+//! 持ち込まない。1 GiB の実用上限検査は、唯一の公開呼び出し元
+//! `fandhe_ai_autodiff::Var::pad` が確保前に行う（`out_numel` を実際に
+//! 確保する前に `Err` で拒否する）。本モジュール自身は要素数積の
+//! `usize` オーバーフロー検査に加え、`Vec::try_reserve_exact` で
+//! アロケータの確保失敗・`isize::MAX` バイトを超える capacity
+//! overflow を明示的な `Err`（`ShapeError::ElementCountOverflow`）
+//! として返す（`handle_alloc_error` による abort を避ける
+//! fail-closed。`.claude/rules/security.md` サービス拒否対策）。
+//!
 //! 出力の各要素は「`input` 内部位置ならそのままコピー・パディング
 //! 領域なら `value`」の 2 分岐のみで決まる純粋なコピー演算（算術を
 //! 含まない）のため、数値契約は 3 バックエンド間 **bit 完全一致**
@@ -60,6 +73,12 @@ fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
 /// 全域 `value` で埋めて返す（`gather` と異なり pad は「入力が空でも
 /// 出力は非空になりうる」演算のため、`autodiff::eval::pad` と同じ
 /// 順序でこの 2 ケースを扱う）。
+///
+/// **確保失敗の扱い（イシュー #2264）**: `out_numel` 要素の確保は
+/// `Vec::try_reserve_exact` で行い、アロケータの確保失敗・capacity
+/// overflow（`isize::MAX` バイト超）を `Err(ShapeError::
+/// ElementCountOverflow)` として返す（本モジュール doc「確保前サイズの
+/// 実用上限」節参照）。
 pub fn pad(
     input: &Tensor<f32>,
     pads: &[(usize, usize)],
@@ -73,7 +92,9 @@ pub fn pad(
     let in_shape = input.shape();
     let in_is_empty = in_shape.contains(&0);
 
-    let mut out = Vec::with_capacity(out_numel);
+    let mut out: Vec<f32> = Vec::new();
+    out.try_reserve_exact(out_numel)
+        .map_err(|_| ShapeError::ElementCountOverflow)?;
     for flat in 0..out_numel {
         let coords = unravel(flat, out_shape);
         if in_is_empty {
@@ -110,6 +131,24 @@ pub fn pad(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `out_shape` の総バイト数が `isize::MAX` を超える場合、
+    /// `Vec::try_reserve_exact` がアロケータを実際には呼ばずに
+    /// 決定的に `CapacityOverflow` を返すことを確認する（イシュー
+    /// #2264）。overcommit 設定に依存する確保成否のテストではない
+    /// （`1usize << 62` は f32 4 バイト換算で `isize::MAX`〈64bit では
+    /// 約 8 EiB〉を確実に超えるため、どの環境でも同じ結果になる）。
+    /// `pad_out_shape` を経由せず `out_shape` を直接渡す（本関数は
+    /// 呼び出し元が検査済みの `out_shape` をそのまま信頼する契約の
+    /// ため、意図的に契約の境界を直接突く）。
+    #[test]
+    fn pad_capacity_overflow_returns_err_instead_of_abort() {
+        let x = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+        let pads = [(1usize << 62, 0usize)];
+        let out_shape = [1usize << 62];
+        let err = pad(&x, &pads, 0.0, &out_shape).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
 
     #[test]
     fn pad_1d_basic() {

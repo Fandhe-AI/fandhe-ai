@@ -178,6 +178,46 @@ fn cpu_pad_backward_matches_naive_reference() {
     );
 }
 
+// --- 確保前拒否（イシュー #2264） ---
+
+/// CPU 経路（`fandhe_ai::tape()`・`CpuBackendOps::pad` →
+/// `backend-cpu::constant_pad::pad`）で、空入力の長さ 0 の軸へ巨大な
+/// pad 幅を足すと確保前に `Err`（`ElementCountOverflow`）が返ることを
+/// 確認する。`Var::pad` の確保前検査（`checked_index_alloc_len`）が
+/// `backend-cpu` の確保に到達する前に拒否するため、本テストは
+/// `backend-cpu` 側の `try_reserve_exact` 経路を単独では検証しない
+/// （その検証は `constant_pad.rs` の単体テストが担う）。
+#[test]
+fn cpu_pad_huge_width_on_empty_input_is_rejected_before_alloc() {
+    let cpu_tape = fandhe_ai::tape();
+    let x = cpu_tape.make_var(&Tensor::new(Vec::new(), &[1, 0]).expect("valid tensor"));
+    let err = x.pad(&[(0, 0), (1usize << 40, 0)], 0.0).unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::Shape(
+            fandhe_ai_tensor_core::ShapeError::ElementCountOverflow
+        )
+    ));
+}
+
+/// NaiveOps 経路（`fandhe_ai_autodiff::Tape::new()` → `ops.pad` が
+/// `Unsupported` を返し `eval::pad` ホスト参照実装へフォールバック）
+/// でも同じ確保前検査（`Var::pad` の `checked_index_alloc_len`）で
+/// 拒否されることを確認する。`eval::pad` 自身は失敗しない確保
+/// （`vec![value; out_numel]`）のため、この検査が唯一の防波堤。
+#[test]
+fn naive_pad_huge_width_on_empty_input_is_rejected_before_alloc() {
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x = naive_tape.make_var(&Tensor::new(Vec::new(), &[1, 0]).expect("valid tensor"));
+    let err = x.pad(&[(0, 0), (1usize << 40, 0)], 0.0).unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::Shape(
+            fandhe_ai_tensor_core::ShapeError::ElementCountOverflow
+        )
+    ));
+}
+
 // --- 実機横断（`#[ignore]`。Metal／CUDA） ---
 
 fn pad_forward_on(device: Device) -> Tensor<f32> {

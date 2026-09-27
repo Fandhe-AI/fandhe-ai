@@ -3271,7 +3271,9 @@ pub(crate) fn alpha_dropout_bias_add_with_fallback(
 /// フォールバックし、それ以外のエラーは伝播する（判定迂回経路を
 /// 作らない）。バックエンド実装が返した出力 shape を `out_shape` と
 /// 照合し、不一致は `AutodiffError::Backend(BackendError::
-/// ShapeMismatch(..))` を返す。
+/// ShapeMismatch(..))` を返す。`out_shape` は唯一の呼び出し元
+/// `Var::pad` が実用上限（1 GiB。`rearrange_ops::checked_index_alloc_len`）
+/// まで確保前検査済み（イシュー #2264）。
 pub(crate) fn pad_with_fallback(
     ops: &dyn BackendOps,
     input: &Tensor<f32>,
