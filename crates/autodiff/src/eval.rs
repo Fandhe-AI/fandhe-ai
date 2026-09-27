@@ -2142,9 +2142,9 @@ pub(crate) fn pad(
     }
     let rank = out_shape.len();
     let out_numel: usize = out_shape.iter().product();
-    // 事前条件（本関数 doc）の開発時検出: 呼び出し元 `Var::pad` が
-    // 確保前に検査済みのはず（release では消える。本番経路の
-    // panic 禁止規約には抵触しない）。
+    // 事前条件（本関数 doc）の開発時検出: 唯一の呼び出し元
+    // `grad::pad_with_fallback` が確保前に検査済みのはず（release
+    // では消える。本番経路の panic 禁止規約には抵触しない）。
     debug_assert!(
         crate::rearrange_ops::checked_index_alloc_len(out_numel).is_ok(),
         "eval::pad: out_numel が確保前検査の上限を超えている（呼び出し元が \
