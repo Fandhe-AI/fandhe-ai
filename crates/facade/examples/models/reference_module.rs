@@ -202,6 +202,11 @@ pub fn fit_epochs<M: Trainable>(
         ));
     }
     let n = x.shape()[0];
+    if n == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "fit_epochs: x は空であってはならない".to_string(),
+        ));
+    }
     if y.shape() != [n] {
         return Err(AutodiffError::InvalidArgument(format!(
             "fit_epochs: x の先頭軸長 {n} と y の shape {:?} が一致しない",
@@ -240,6 +245,11 @@ pub fn accuracy<M: ReferenceModule>(
     if batch_size == 0 {
         return Err(AutodiffError::InvalidArgument(
             "accuracy: batch_size は 0 より大きい必要がある".to_string(),
+        ));
+    }
+    if num_classes == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "accuracy: num_classes は 0 より大きい必要がある".to_string(),
         ));
     }
     let n = x.shape()[0];
