@@ -246,6 +246,12 @@ mod error;
 mod eval;
 pub mod extremum_ops;
 pub mod f64_autograd;
+// LLM 推論向け自己回帰生成ループ（イシュー #2191。`nn` とは別の推論
+// ループ層のためトップレベルに置く。`activation_ops`／
+// `topk_unique_ops` と同型）。facade（`fandhe_ai`）への公開は
+// `pub fn generate`／`GenerateConfig` の署名がユーザー承認事項のため
+// 保留する（`docs/facade-generate-decision.md`）。
+pub mod generate;
 mod grad;
 pub mod indexing_ops;
 mod layout;

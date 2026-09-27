@@ -16524,3 +16524,300 @@ fn workspace_declares_npy_io_names_only_in_allowed_locations() {
          {found:?}"
     );
 }
+
+// --- generate()（イシュー #2191）の facade 公開保留固定 ---------------
+
+/// `generate()` 自己回帰ループ（イシュー #2191。設計正本
+/// `docs/facade-generate-decision.md`）の facade 公開（`inference::
+/// generate`／`GenerateConfig`／`SamplingStrategy`／`AutoregressiveModel`
+/// 相当）は未承認のため保留する。`facade_does_not_expose_kv_cache_
+/// stateful_attention` と同型の否定ガード: facade の src/ に①`fn
+/// generate` 宣言（可視性・宣言文脈を問わず。[`declares_fn_named`]
+/// 参照）、②`GenerateConfig`／`SamplingStrategy`／
+/// `AutoregressiveModel` を識別子単位で含む `pub use` 行、のいずれも
+/// 存在しないことを固定する。承認取得後に薄い委譲 `pub fn`／
+/// 再エクスポートを追加する際は本テストを正ガードへ更新すること。
+///
+/// 本テストは多層防御の最内層（1 行単位の直列走査）であり、`src/lib.rs`
+/// の `GenerateHoldDoctestGuard`（正のプローブ doctest）・
+/// `facade_does_not_reexport_or_declare_generate_items`（トークン方式。
+/// 複数行・別名・独自宣言を検出）と多層で保留を固定する
+/// （`docs/facade-generate-decision.md` §8）。workspace 全体（facade
+/// 以外のクレート内部の private 宣言も含む）の名前インベントリは、
+/// facade 到達可能性の保証と無関係な内部宣言まで固定してしまうため
+/// 採用しない（KvCache §10.1 の codex-review 指摘・PR #2252 と同じ理由。
+/// `crates/self-repair` に `fn generate` トレイトメソッドが複数ある）。
+#[test]
+fn facade_does_not_expose_generate_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if declares_fn_named(content, "generate") {
+            offending.push(format!("{}: `fn generate` 宣言", path.display()));
+        }
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            for ident in ["GenerateConfig", "SamplingStrategy", "AutoregressiveModel"] {
+                if line_contains_identifier(trimmed, ident) {
+                    offending.push(format!(
+                        "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が generate()（#2191。`generate`／`GenerateConfig`／\
+         `SamplingStrategy`／`AutoregressiveModel`）を公開している\
+         （`docs/facade-generate-decision.md` §8 が未取得のまま対象外と\
+         している設計判断に違反）: {offending:?}"
+    );
+}
+
+/// `GenerateHoldDoctestGuard` の唯一の doctest ブロックが glob import する
+/// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が
+/// 一致することを固定する（`kv_cache_hold_doctest_globs_all_pub_modules`
+/// と同型）。
+#[test]
+fn generate_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "GenerateHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "GenerateHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`generate_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの **glob
+/// 以外の本文**が固定文言 [`GENERATE_HOLD_PROBE_BODY`] と 1 行たりとも
+/// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
+/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
+/// 拒否する）。
+#[test]
+fn generate_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "GenerateHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, GENERATE_HOLD_PROBE_BODY,
+        "GenerateHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 GENERATE_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_generate_hold_probe モジュール・\
+         __FandheGenerateHoldProbe トレイト・各 __probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`generate_hold_doctest_probe_body_matches_fixed_contract`] が要求
+/// する固定文言。`crates/facade/src/lib.rs` の `GenerateHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
+/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
+/// 含む）。
+const GENERATE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_generate_hold_probe {\n\
+\x20\x20\x20\x20pub mod inference {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn generate() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub struct GenerateConfig;\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub struct SamplingStrategy;\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub struct AutoregressiveModel;\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn generate() {}\n\
+\x20\x20\x20\x20pub struct GenerateConfig;\n\
+\x20\x20\x20\x20pub struct SamplingStrategy;\n\
+\x20\x20\x20\x20pub struct AutoregressiveModel;\n\
+}\n\
+use __fandhe_generate_hold_probe::*;\n\
+\n\
+struct __FandheGenerateHoldMarker;\n\
+\n\
+trait __FandheGenerateHoldProbe {\n\
+\x20\x20\x20\x20fn generate(&self) -> __FandheGenerateHoldMarker;\n\
+}\n\
+\n\
+impl __FandheGenerateHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn generate(&self) -> __FandheGenerateHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheGenerateHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheGenerateHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn generate(&self) -> __FandheGenerateHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheGenerateHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_module_path() {\n\
+\x20\x20\x20\x20inference::generate();\n\
+\x20\x20\x20\x20let _ = inference::GenerateConfig;\n\
+\x20\x20\x20\x20let _ = inference::SamplingStrategy;\n\
+\x20\x20\x20\x20let _ = inference::AutoregressiveModel;\n\
+}\n\
+\n\
+fn __probe_free_fn() {\n\
+\x20\x20\x20\x20generate();\n\
+\x20\x20\x20\x20let _ = GenerateConfig;\n\
+\x20\x20\x20\x20let _ = SamplingStrategy;\n\
+\x20\x20\x20\x20let _ = AutoregressiveModel;\n\
+}\n\
+\n\
+fn __probe_inherent_method(tape: &fandhe_ai::Tape, seq: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheGenerateHoldMarker = fandhe_ai::Tape::generate(tape);\n\
+\x20\x20\x20\x20let _: __FandheGenerateHoldMarker = fandhe_ai::compat::Sequential::generate(seq);\n\
+\x20\x20\x20\x20let _: __FandheGenerateHoldMarker = tape.generate();\n\
+\x20\x20\x20\x20let _: __FandheGenerateHoldMarker = seq.generate();\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_generate_items`]・その自己
+/// テストが共用する検出本体。facade src 全体（`crates/facade/src/**`）
+/// の `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を
+/// 集め `GenerateConfig`／`SamplingStrategy`／`AutoregressiveModel` を
+/// 検出し（単一行・複数行・ネストした group・別名も検出）、`trait`／
+/// `struct`／`enum`／`type` 直後の同名独自宣言、`generate` の `fn` 宣言
+/// （可視性・宣言文脈を問わない）を違反として返す。
+fn scan_generate_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if matches!(
+                    leaf.as_str(),
+                    "GenerateConfig" | "SamplingStrategy" | "AutoregressiveModel"
+                ) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && matches!(
+                tokens.get(i + 1).map(String::as_str),
+                Some("GenerateConfig") | Some("SamplingStrategy") | Some("AutoregressiveModel")
+            )
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    let count = count_fn_declarations_by_name(&tokens, "generate");
+    if count > 0 {
+        offending.push(format!("`fn generate` 宣言が {count} 件"));
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`GenerateConfig`／
+/// `SamplingStrategy`／`AutoregressiveModel` を識別子単位で含む
+/// `pub use`（複数行・ネストした group・別名含む）も、facade 独自の
+/// `trait`／`struct`／`enum`／`type` 宣言も、`generate` の `fn` 宣言も
+/// 存在しないことを固定する（`GenerateHoldDoctestGuard` の正のプローブと
+/// 多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_kv_cache_items` と同型で、既存の
+/// 1 行単位走査 `facade_does_not_expose_generate_items` の穴〈複数行
+/// `pub use`・facade 独自宣言〉を塞ぐ）。
+#[test]
+fn facade_does_not_reexport_or_declare_generate_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_generate_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が generate()（#2191。`GenerateConfig`／\
+         `SamplingStrategy`／`AutoregressiveModel`／`generate`）を\
+         再エクスポート、独自宣言、または同名の fn を宣言している\
+         （`docs/facade-generate-decision.md` §8 が未取得のまま対象外と\
+         している設計判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_generate_reexports_and_declarations`]（[`facade_does_not_
+/// reexport_or_declare_generate_items`]）の自己テスト（正例・負例の
+/// 合成入力）。単一行・複数行・別名・独自宣言・fn 宣言の各正例と、
+/// コメントや文字列リテラル中の出現・非公開 `use` の負例を検証する。
+#[test]
+fn facade_does_not_reexport_or_declare_generate_items_detects_each_category() {
+    // 正例: 単一行 pub use。
+    assert!(
+        !scan_generate_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::generate::GenerateConfig;"
+        )
+        .is_empty()
+    );
+    // 正例: 複数行 pub use（複数行グループ再エクスポートの穴）。
+    assert!(
+        !scan_generate_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::generate::{\n    SamplingStrategy,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: ネストした group・別名。
+    assert!(
+        !scan_generate_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::{generate::{AutoregressiveModel as ARM}};"
+        )
+        .is_empty()
+    );
+    // 正例: facade 独自宣言。
+    assert!(!scan_generate_reexports_and_declarations("pub struct GenerateConfig;").is_empty());
+    assert!(
+        !scan_generate_reexports_and_declarations("pub type SamplingStrategy = u8;").is_empty()
+    );
+    // 正例: fn 宣言（可視性を問わない）。
+    assert!(!scan_generate_reexports_and_declarations("pub fn generate() -> u8 { 0 }").is_empty());
+
+    // 負例: 非公開 import。
+    assert!(
+        scan_generate_reexports_and_declarations(
+            "use fandhe_ai_autodiff::generate::GenerateConfig;"
+        )
+        .is_empty()
+    );
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(
+        scan_generate_reexports_and_declarations(
+            "// pub use fandhe_ai_autodiff::generate::GenerateConfig;\n\
+             let s = \"GenerateConfig\";"
+        )
+        .is_empty()
+    );
+}

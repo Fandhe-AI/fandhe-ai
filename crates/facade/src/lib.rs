@@ -5635,3 +5635,109 @@ struct NpyIoHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct ModelIoHoldDoctestGuard;
+
+/// イシュー #2191（`generate()` 自己回帰ループ）の facade 公開保留を
+/// 固定する doctest 足場。`KvCacheHoldDoctestGuard`（#2084）と同型の
+/// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
+/// import したスコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_generate_hold_probe::{inference::{generate, GenerateConfig,
+/// SamplingStrategy, AutoregressiveModel}, generate, GenerateConfig,
+/// SamplingStrategy, AutoregressiveModel}` を導入し、実際に使う関数を
+/// 書く。facade がどの経路（`pub mod inference` 配下・crate ルート直下の
+/// 自由関数・別名エクスポート・facade 独自の `struct`／`trait` 宣言・
+/// `Tape`／`compat::Sequential` への inherent メソッド追加）でこれらの
+/// 名前を公開しても、ローカル定義との glob 衝突（型・モジュール名の
+/// 場合。E0659 等）または呼び出しシグネチャの不一致（inherent メソッドが
+/// トレイトメソッドより優先解決されるため、本プローブの trait 経由
+/// 呼び出しが型・引数不一致でコンパイル失敗する）でエラーコードに
+/// 依存せずコンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// facade_does_not_expose_generate_items`〈直列 1 行走査。内側の層として
+/// 維持〉・`facade_does_not_reexport_or_declare_generate_items`〈トークン
+/// 方式。複数行・別名・独自宣言を検出〉）との多層防御の位置づけ・
+/// 承認未取得の経緯・承認依頼用の事前設計は
+/// `docs/facade-generate-decision.md` §8「承認事項」を参照。
+///
+/// `workspace` 全体（facade 以外のクレート内部の private 宣言も含む）の
+/// 名前インベントリは、KvCache（#2084 §10.1）が codex-review 指摘
+/// （無関係な内部宣言まで固定してしまう）を受けて撤回した経緯と同じ
+/// 理由（`crates/self-repair` に `fn generate` を持つトレイトが複数
+/// あるため）で採用しない（`docs/facade-generate-decision.md` §7）。
+///
+/// facade 公開（承認事項: `docs/facade-generate-decision.md` §8）が
+/// ユーザー承認され実施する日が来たら、本モジュール・本 doctest 自体を
+/// 削除する（ソース走査側の対応する否定ガードも同時に正ガードへ
+/// 置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_generate_hold_probe {
+///     pub mod inference {
+///         pub fn generate() {}
+///         pub struct GenerateConfig;
+///         pub struct SamplingStrategy;
+///         pub struct AutoregressiveModel;
+///     }
+///     pub fn generate() {}
+///     pub struct GenerateConfig;
+///     pub struct SamplingStrategy;
+///     pub struct AutoregressiveModel;
+/// }
+/// use __fandhe_generate_hold_probe::*;
+///
+/// struct __FandheGenerateHoldMarker;
+///
+/// trait __FandheGenerateHoldProbe {
+///     fn generate(&self) -> __FandheGenerateHoldMarker;
+/// }
+///
+/// impl __FandheGenerateHoldProbe for fandhe_ai::Tape {
+///     fn generate(&self) -> __FandheGenerateHoldMarker {
+///         __FandheGenerateHoldMarker
+///     }
+/// }
+///
+/// impl __FandheGenerateHoldProbe for fandhe_ai::compat::Sequential {
+///     fn generate(&self) -> __FandheGenerateHoldMarker {
+///         __FandheGenerateHoldMarker
+///     }
+/// }
+///
+/// fn __probe_module_path() {
+///     inference::generate();
+///     let _ = inference::GenerateConfig;
+///     let _ = inference::SamplingStrategy;
+///     let _ = inference::AutoregressiveModel;
+/// }
+///
+/// fn __probe_free_fn() {
+///     generate();
+///     let _ = GenerateConfig;
+///     let _ = SamplingStrategy;
+///     let _ = AutoregressiveModel;
+/// }
+///
+/// fn __probe_inherent_method(tape: &fandhe_ai::Tape, seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheGenerateHoldMarker = fandhe_ai::Tape::generate(tape);
+///     let _: __FandheGenerateHoldMarker = fandhe_ai::compat::Sequential::generate(seq);
+///     let _: __FandheGenerateHoldMarker = tape.generate();
+///     let _: __FandheGenerateHoldMarker = seq.generate();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct GenerateHoldDoctestGuard;
