@@ -15,10 +15,13 @@ use std::collections::HashMap;
 use fandhe_ai::Tensor;
 use fandhe_ai::interop::onnx::{OnnxError, OnnxExportOptions, OnnxModel, OnnxValue};
 
+use fandhe_ai_autodiff::nn::{Conv2d, MaxPool2d, Module};
+use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_onnx_interop::onnx::graph::build_graph;
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
 use fandhe_ai_onnx_interop::onnx::proto::{
-    self, AttributeProto, GraphProto, ModelProto, NodeProto, ValueInfoProto, attribute_type,
+    self, AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, ValueInfoProto,
+    attribute_type, data_type,
 };
 
 fn attr_ints(name: &str, ints: Vec<i64>) -> AttributeProto {
@@ -237,5 +240,120 @@ fn max_pool_import_succeeds_but_export_is_unsupported() {
     match err {
         OnnxError::UnsupportedOp { op_type } => assert_eq!(op_type, "MaxPool"),
         other => panic!("OnnxError::UnsupportedOp を期待したが {other:?}"),
+    }
+}
+
+// --- 公開 API 経由の Conv->MaxPool 2 ノードグラフ（codex-review 指摘。PR #2314
+//     レビュー）: 本ファイルの既存テストは Conv・MaxPool を別々の単一ノード
+//     モデルでしか確認しておらず、Conv の出力を Pool へ渡す結線を公開 API
+//     （`OnnxModel::from_bytes`／`run`）経由で固定化するテストが無かった。
+//     期待値は facade 内部の decode 経路ではなく `fandhe_ai_autodiff::nn::
+//     Conv2d`／`MaxPool2d::forward_host`（独立実装）の連結結果と突合する ---
+
+fn conv2d_initializer(name: &str, t: &fandhe_ai_tensor_core::Tensor<f32>) -> TensorProto {
+    TensorProto {
+        dims: t.shape().iter().map(|&d| d as i64).collect(),
+        data_type: data_type::FLOAT,
+        float_data: t.contiguous().as_slice().unwrap().to_vec(),
+        name: name.to_string(),
+        ..Default::default()
+    }
+}
+
+/// `Conv(x, w, b) -> MaxPool(conv_out)` の 2 ノード `ModelProto`（`w`／`b` は
+/// initializer。`x` のみ feed で与える）。
+fn build_conv2d_then_max_pool_model(
+    conv: &Conv2d,
+    kernel_shape: Vec<i64>,
+    strides: Vec<i64>,
+) -> ModelProto {
+    let conv_node = NodeProto {
+        input: vec!["x".to_string(), "w".to_string(), "b".to_string()],
+        output: vec!["conv_out".to_string()],
+        name: "n_conv".to_string(),
+        op_type: "Conv".to_string(),
+        attribute: vec![
+            attr_ints("kernel_shape", vec![3, 3]),
+            attr_ints("strides", vec![1, 1]),
+            attr_ints("pads", vec![1, 1, 1, 1]),
+            attr_ints("dilations", vec![1, 1]),
+        ],
+        domain: String::new(),
+    };
+    let pool_node = NodeProto {
+        input: vec!["conv_out".to_string()],
+        output: vec!["y".to_string()],
+        name: "n_pool".to_string(),
+        op_type: "MaxPool".to_string(),
+        attribute: vec![
+            attr_ints("kernel_shape", kernel_shape),
+            attr_ints("strides", strides),
+        ],
+        domain: String::new(),
+    };
+    ModelProto {
+        graph: Some(GraphProto {
+            node: vec![conv_node, pool_node],
+            name: "conv2d_then_max_pool_test".to_string(),
+            initializer: vec![
+                conv2d_initializer("w", conv.weight()),
+                conv2d_initializer("b", conv.bias().unwrap()),
+            ],
+            input: vec![value_info("x")],
+            output: vec![value_info("y")],
+            value_info: vec![],
+            sparse_initializer: vec![],
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn conv2d_then_max_pool_via_public_api_matches_nn_forward_host_chain() {
+    // Conv2d(2->3,k3,s1,p1) -> MaxPool2d(k2,s2) を `OnnxModel::from_bytes`／
+    // `run`（facade の公開 API のみ）経由で実行し、`nn::Conv2d`・
+    // `nn::MaxPool2d::forward_host`（独立実装。`CpuBackendOps` 経由）を
+    // 連結した参照値と突合する。Conv を含むため REQ-2 統一複合判定
+    // （`.claude/rules/coding-rust.md`「バックエンド構成」節）に相当する
+    // 許容誤差で比較する（`assert_parity` は onnx-interop 側の
+    // 対応テストで用いており、facade 側は依存を増やさず同型の許容誤差を
+    // 直接計算する）。
+    let conv = Conv2d::new(2, 3, [3, 3], [1, 1], [1, 1], [1, 1], 1, true, 500).unwrap();
+    let shape = [1usize, 2, 8, 8];
+    let numel: usize = shape.iter().product();
+    let x_data: Vec<f32> = (0..numel).map(|v| (v as f32) * 0.05 - 2.0).collect();
+    let x = Tensor::<f32>::new(x_data.clone(), &shape).unwrap();
+
+    let model = build_conv2d_then_max_pool_model(&conv, vec![2, 2], vec![2, 2]);
+    let bytes = proto::encode_model(&model);
+    let facade_model = OnnxModel::from_bytes(&bytes).expect("from_bytes は成功するはず");
+
+    let mut feeds = HashMap::new();
+    feeds.insert("x".to_string(), OnnxValue::F32(x.clone()));
+    let result = facade_model.run(feeds).expect("run は成功するはず");
+    let facade_out = match &result["y"] {
+        OnnxValue::F32(t) => t.clone(),
+        other => panic!("OnnxValue::F32 を期待したが {other:?}"),
+    };
+
+    let ops = CpuBackendOps::new();
+    let conv_out = conv.forward_host(&ops, &x).unwrap();
+    let nn_max = MaxPool2d::new([2, 2], Some([2, 2]), [0, 0], [1, 1]).unwrap();
+    let reference = nn_max.forward_host(&ops, &conv_out).unwrap();
+
+    assert_eq!(facade_out.shape(), reference.shape());
+    let a = facade_out.contiguous();
+    let b = reference.contiguous();
+    let a_slice = a.as_slice().unwrap();
+    let b_slice = b.as_slice().unwrap();
+    assert_eq!(a_slice.len(), b_slice.len());
+    for (i, (x, y)) in a_slice.iter().zip(b_slice.iter()).enumerate() {
+        let abs_err = (x - y).abs();
+        let rel_err = abs_err / (y.abs() + 1e-6);
+        // REQ-2 統一複合判定（相対誤差 1e-3 未満 または絶対誤差 1e-5 未満）。
+        assert!(
+            rel_err < 1e-3 || abs_err < 1e-5,
+            "index={i} facade={x} reference={y} abs_err={abs_err} rel_err={rel_err}"
+        );
     }
 }

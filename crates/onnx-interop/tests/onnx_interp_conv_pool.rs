@@ -28,10 +28,18 @@
 //! ceil_mode=1・非対称 pads は `nn::*` 側に対応が無いため、手計算した
 //! 期待値との bit 一致で確認する。
 
+use std::collections::HashMap;
+
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_autodiff::nn::{AvgPool1d, AvgPool2d, Conv1d, Conv2d, MaxPool1d, MaxPool2d, Module};
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_onnx_interop::onnx::graph::build_graph;
+use fandhe_ai_onnx_interop::onnx::interp::{Value, run};
+use fandhe_ai_onnx_interop::onnx::proto::{
+    self, AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, ValueInfoProto,
+    attribute_type, data_type,
+};
 use fandhe_ai_onnx_interop::ops::{ConvAttrs, PoolAttrs, average_pool, conv, max_pool};
 use fandhe_ai_tensor_core::Tensor;
 
@@ -268,5 +276,207 @@ fn composite_cnn_chain_matches_nn_within_req2() {
         "複合 CNN（Conv->MaxPool->Conv->AveragePool）: ops 連結 vs nn 連結",
         &dense(&y4),
         &dense(&n4),
+    );
+}
+
+// --- decode_model -> build_graph -> interp::run の連結経路（codex-review 指摘。
+//     PR #2314 レビュー。`composite_cnn_chain_matches_nn_within_req2` は
+//     `ops::*` を手動連結するのみで decode 層を経由しないため、Conv の出力を
+//     Pool へ渡す結線が「シリアライズ済みグラフ（protobuf バイト列）→ decode
+//     → build_graph → run」の経路上で機能することを別途固定する ---
+
+/// [`Tensor<f32>`] を dense（contiguous）データのまま ONNX `TensorProto`
+/// initializer へ変換する（`Conv2d::weight`／`bias` の shape・レイアウトは
+/// ONNX `Conv` の `W`／`B` 入力とそのまま一致するため転置は不要。
+/// `crates/facade/tests/interop_onnx_conv_pool_import.rs` の initializer
+/// 構築と同型）。
+fn tensor_to_initializer(name: &str, t: &Tensor<f32>) -> TensorProto {
+    TensorProto {
+        dims: t.shape().iter().map(|&d| d as i64).collect(),
+        data_type: data_type::FLOAT,
+        float_data: dense(t),
+        name: name.to_string(),
+        ..Default::default()
+    }
+}
+
+fn attr_ints(name: &str, ints: Vec<i64>) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        ints,
+        r#type: attribute_type::INTS,
+        ..Default::default()
+    }
+}
+
+fn attr_int(name: &str, i: i64) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        i,
+        r#type: attribute_type::INT,
+        ..Default::default()
+    }
+}
+
+fn value_info(name: &str) -> ValueInfoProto {
+    ValueInfoProto {
+        name: name.to_string(),
+    }
+}
+
+/// `Conv(x, w, b) -> <pool_op_type>(conv_out)` の 2 ノード `ModelProto` を
+/// 組み立てる（`w`／`b` は initializer として埋め込み、`x` のみ feed で
+/// 与える）。`pool_attrs` は `MaxPool`／`AveragePool` 共通の属性列。
+#[allow(clippy::too_many_arguments)]
+fn build_conv_then_pool_model(
+    conv_weight: &Tensor<f32>,
+    conv_bias: &Tensor<f32>,
+    conv_attrs: &ConvAttrs,
+    pool_op_type: &str,
+    pool_attrs_attribute: Vec<AttributeProto>,
+) -> ModelProto {
+    let conv_node = NodeProto {
+        input: vec!["x".to_string(), "w".to_string(), "b".to_string()],
+        output: vec!["conv_out".to_string()],
+        name: "n_conv".to_string(),
+        op_type: "Conv".to_string(),
+        attribute: vec![
+            attr_ints("kernel_shape", conv_attrs.kernel_shape.clone()),
+            attr_ints("strides", conv_attrs.strides.clone()),
+            attr_ints("pads", conv_attrs.pads.clone()),
+            attr_ints("dilations", conv_attrs.dilations.clone()),
+            attr_int("group", conv_attrs.group),
+        ],
+        domain: String::new(),
+    };
+    let pool_node = NodeProto {
+        input: vec!["conv_out".to_string()],
+        output: vec!["y".to_string()],
+        name: "n_pool".to_string(),
+        op_type: pool_op_type.to_string(),
+        attribute: pool_attrs_attribute,
+        domain: String::new(),
+    };
+    ModelProto {
+        graph: Some(GraphProto {
+            node: vec![conv_node, pool_node],
+            name: "conv_then_pool_test".to_string(),
+            initializer: vec![
+                tensor_to_initializer("w", conv_weight),
+                tensor_to_initializer("b", conv_bias),
+            ],
+            input: vec![value_info("x")],
+            output: vec![value_info("y")],
+            value_info: vec![],
+            sparse_initializer: vec![],
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn conv_maxpool_serialized_graph_matches_nn_within_req2() {
+    // Conv(2->4,k3,s1,p1) -> MaxPool(k2,s2)。ModelProto を組み立てて
+    // `proto::encode_model` でバイト列化し、`proto::decode_model` から
+    // `build_graph`・`interp::run` へ渡す（実際の `.onnx` バイト列取り込みと
+    // 同じ経路）。期待値は `ops::*` の手動連結ではなく、`nn::Conv2d`／
+    // `nn::MaxPool2d::forward_host`（独立実装。backend-cpu 参照経路）の
+    // 連結結果と突合する。
+    let conv = Conv2d::new(2, 4, [3, 3], [1, 1], [1, 1], [1, 1], 1, true, 300).unwrap();
+    let x = rand_tensor(&[1, 2, 8, 8], 10);
+
+    let conv_attrs = ConvAttrs {
+        kernel_shape: vec![3, 3],
+        strides: vec![1, 1],
+        pads: vec![1, 1, 1, 1],
+        dilations: vec![1, 1],
+        group: 1,
+        auto_pad: String::new(),
+    };
+    let model = build_conv_then_pool_model(
+        conv.weight(),
+        conv.bias().unwrap(),
+        &conv_attrs,
+        "MaxPool",
+        vec![
+            attr_ints("kernel_shape", vec![2, 2]),
+            attr_ints("strides", vec![2, 2]),
+        ],
+    );
+    let bytes = proto::encode_model(&model);
+    let decoded = proto::decode_model(&bytes).expect("decode_model は成功するはず");
+    let graph = build_graph(&decoded).expect("build_graph は成功するはず");
+
+    let mut feeds = HashMap::new();
+    feeds.insert("x".to_string(), Value::F32(x.clone()));
+    let result = run(&graph, feeds).expect("run は成功するはず");
+    let interp_out = match &result["y"] {
+        Value::F32(t) => t.clone(),
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    };
+
+    let ops = CpuBackendOps::new();
+    let conv_out = conv.forward_host(&ops, &x).unwrap();
+    let nn_max = MaxPool2d::new([2, 2], Some([2, 2]), [0, 0], [1, 1]).unwrap();
+    let reference = nn_max.forward_host(&ops, &conv_out).unwrap();
+
+    assert_eq!(interp_out.shape(), reference.shape());
+    assert_parity(
+        "decode_model->build_graph->run（Conv->MaxPool） vs nn::Conv2d->MaxPool2d::forward_host",
+        &dense(&interp_out),
+        &dense(&reference),
+    );
+}
+
+#[test]
+fn conv_averagepool_serialized_graph_matches_nn_within_req2() {
+    // Conv(3->2,k3,s1,p1) -> AveragePool(k2,s2,count_include_pad=1)。
+    // `conv_maxpool_serialized_graph_matches_nn_within_req2` と同型だが
+    // pool 種別を AveragePool に差し替え、`count_include_pad` 属性（INT 型）
+    // の decode 経由での結線も併せて固定化する。
+    let conv = Conv2d::new(3, 2, [3, 3], [1, 1], [1, 1], [1, 1], 1, true, 400).unwrap();
+    let x = rand_tensor(&[2, 3, 8, 8], 11);
+
+    let conv_attrs = ConvAttrs {
+        kernel_shape: vec![3, 3],
+        strides: vec![1, 1],
+        pads: vec![1, 1, 1, 1],
+        dilations: vec![1, 1],
+        group: 1,
+        auto_pad: String::new(),
+    };
+    let model = build_conv_then_pool_model(
+        conv.weight(),
+        conv.bias().unwrap(),
+        &conv_attrs,
+        "AveragePool",
+        vec![
+            attr_ints("kernel_shape", vec![2, 2]),
+            attr_ints("strides", vec![2, 2]),
+            attr_int("count_include_pad", 1),
+        ],
+    );
+    let bytes = proto::encode_model(&model);
+    let decoded = proto::decode_model(&bytes).expect("decode_model は成功するはず");
+    let graph = build_graph(&decoded).expect("build_graph は成功するはず");
+
+    let mut feeds = HashMap::new();
+    feeds.insert("x".to_string(), Value::F32(x.clone()));
+    let result = run(&graph, feeds).expect("run は成功するはず");
+    let interp_out = match &result["y"] {
+        Value::F32(t) => t.clone(),
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    };
+
+    let ops = CpuBackendOps::new();
+    let conv_out = conv.forward_host(&ops, &x).unwrap();
+    let nn_avg = AvgPool2d::new([2, 2], Some([2, 2]), [0, 0], true).unwrap();
+    let reference = nn_avg.forward_host(&ops, &conv_out).unwrap();
+
+    assert_eq!(interp_out.shape(), reference.shape());
+    assert_parity(
+        "decode_model->build_graph->run（Conv->AveragePool） vs nn::Conv2d->AvgPool2d::forward_host",
+        &dense(&interp_out),
+        &dense(&reference),
     );
 }
