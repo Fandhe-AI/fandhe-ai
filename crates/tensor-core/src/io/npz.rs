@@ -18,6 +18,35 @@
 //! （無圧縮）のみに限定する（`np.savez` と同じ。`np.savez_compressed`
 //! 相当の DEFLATE 圧縮書き出しは対象外。`docs/tensor-core-npy-npz-io-
 //! decision.md` 参照）。
+//!
+//! ## 構造検証の方針（PR #2318 レビュー指摘・P0 監査。ZIP パーサの
+//! 既知の脆弱性チェックリストに基づく全数監査で確定した決定事項）
+//!
+//! - **メンバのデータ領域は非重複・central directory 開始位置
+//!   （`cd_offset`）より前**であることを要求する（`read_npz_bytes` の
+//!   1.5 パス目・`member_data_range`）。central directory は zip64 EOCD
+//!   レコード（zip64 使用時）または通常 EOCD（不使用時）より前である
+//!   ことも要求する（`resolve_eocd_counts` の `metadata_start`）。
+//! - **メンバ同士・メンバと central directory の間の未使用バイト
+//!   （padding）は許容する**。読み飛ばすだけで内容の解釈には使わない
+//!   ため安全上無害（CPython `zipfile`／`np.load` も同様に許容する）。
+//! - **EOCD シグネチャ候補が複数ある場合は拒否する**（`find_eocd`）。
+//!   コメント本文に偽の EOCD 様バイト列を埋め込む攻撃を想定した
+//!   fail-closed 判定であり、真の ZIP では発生しない。
+//! - **ファイル先頭・EOCD 直後の余剰バイト（self-extracting stub の
+//!   prepend／コメント欄超過の append）は補正しない**。central
+//!   directory・local header のオフセットはすべてファイル先頭からの
+//!   絶対オフセットとして解釈するため、prepend されたアーカイブは
+//!   オフセット不整合で自然に拒否される（自己解凍形式のような prepend
+//!   を許容する特別な補正ロジックは持たない）。
+//! - **エントリ名は `/`・`\` を含んでいてもよい**（`is_directory` 判定
+//!   は名前が `/`／`\` で終わるかどうかのみで行い、途中に含まれる場合は
+//!   階層的なメンバ名として扱う）。メンバ名はホスト側の `HashMap` キー
+//!   としてのみ使われファイルシステムパスとしては解釈しないため、
+//!   `..`・絶対パス表記を含んでいてもパストラバーサルは成立しない。
+//!   書き出し側（`write_npz_bytes`）は `/`・`\` を含むキーを
+//!   `InvalidEntryName` で拒否するため、自前書き出し→読み込みの往復に
+//!   影響はない。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -64,12 +93,14 @@ const MAX_MEMBER_DECOMPRESSED_BYTES: u64 = super::MAX_FILE_READ_BYTES;
 /// 単一メンバの上限（[`MAX_MEMBER_DECOMPRESSED_BYTES`]）を満たす複数の
 /// メンバを束ねて `HashMap` へ蓄積すると、アーカイブ自体は
 /// `MAX_FILE_READ_BYTES` の範囲内でも合計メモリ消費がその何倍にも
-/// なりうる（`read_member_bytes` は各エントリを独立に確保するため、
-/// 圧縮データの重複〈同一 local header を指す複数 central directory
-/// エントリ〉があっても「圧縮サイズ合計 ≤ アーカイブサイズ」は伸長後
-/// 合計サイズの上界にならない）。メンバ単体と同じ
-/// `MAX_FILE_READ_BYTES` を桁の基準として累積上限にも流用する
-/// （PR #2318 レビュー指摘・P0）。
+/// なりうる。メンバ単体と同じ `MAX_FILE_READ_BYTES` を桁の基準として
+/// 累積上限にも流用する（PR #2318 レビュー指摘・P0）。**多層防御**:
+/// 「同一 local header を指す複数 central directory エントリ」による
+/// 圧縮データの重複自体は、`read_npz_bytes` の構造検証パス（メンバの
+/// データ領域が互いに重ならないことの検証。`member_data_range` 参照）が
+/// 別途拒否する（PR #2318 レビュー指摘・P0 監査）ため、本上限が主に
+/// 防ぐのは「互いに重ならない多数の正当なメンバの宣言サイズ合計が
+/// 大きすぎる」ケースである。
 const MAX_TOTAL_DECOMPRESSED_BYTES: u64 = super::MAX_FILE_READ_BYTES;
 
 /// バイト列（`.npz` ファイルの内容そのもの）から名前付きテンソル集合を
@@ -77,16 +108,25 @@ const MAX_TOTAL_DECOMPRESSED_BYTES: u64 = super::MAX_FILE_READ_BYTES;
 /// `HashMap` は返さない（fail-closed。`.claude/rules/security.md` A08）。
 pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyError> {
     let eocd = find_eocd(bytes)?;
-    let (entry_count, cd_offset, cd_size) = resolve_eocd_counts(bytes, &eocd)?;
+    let (entry_count, cd_offset, cd_size, metadata_start) = resolve_eocd_counts(bytes, &eocd)?;
     if entry_count > MAX_ENTRIES {
         return Err(NpyError::InvalidZip("エントリ数が上限を超える"));
     }
     let cd_end = cd_offset
         .checked_add(cd_size)
         .ok_or(NpyError::InvalidZip("central directory の範囲が不正"))?;
-    if cd_end > bytes.len() {
+    // central directory の宣言範囲（`[cd_offset, cd_end)`）は、ファイル
+    // 範囲内であることに加え、末尾の構造領域（zip64 を使わない場合は
+    // 通常 EOCD、zip64 の場合は zip64 EOCD レコード）の開始位置
+    // （`metadata_start`）より前に完全に収まらなければならない。
+    // `cd_end > bytes.len()` のみの検査では、central directory が
+    // EOCD／zip64 EOCD レコード・locator と重なって解析されるのを
+    // 防げない（A03。PR #2318 レビュー指摘・P0。`resolve_eocd_counts`
+    // 参照）。`metadata_start <= bytes.len()` は常に成り立つため、この
+    // 検査は従来の `cd_end > bytes.len()` 検査を包含する。
+    if cd_end > metadata_start {
         return Err(NpyError::InvalidZip(
-            "central directory がファイル範囲外を指す",
+            "central directory が EOCD／zip64 EOCD 領域と重なる",
         ));
     }
 
@@ -153,6 +193,48 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
         return Err(NpyError::InvalidZip(
             "central directory の走査終了位置が宣言範囲と不一致",
         ));
+    }
+
+    // 1.5 パス目: 各メンバの構造的なバイト範囲（`[local header 開始,
+    // 圧縮データ終端)`）を求め、(a) central directory の開始位置
+    // （`cd_offset`）より前に完全に収まること・(b) メンバ同士で重ならない
+    // ことを検証する。central directory を「宣言範囲内で正しく解析
+    // できる」ことは既に確認済みだが、それだけでは細工した
+    // `local_header_offset`／`compressed_size` により、あるメンバの
+    // データ領域が central directory 自体や他メンバのデータ領域と重なる
+    // ことを防げない（CRC・npy 内容さえ整合させれば受理されてしまう。
+    // A03。PR #2318 レビュー指摘・P0）。範囲計算は
+    // [`member_data_range`] に委譲し、本関数は境界・重複判定のみを行う
+    // （メンバ同士の隙間〈padding〉自体は許容する。zipfile／np.load も
+    // 読み飛ばすだけで安全上無害なため）。
+    let mut ranges: Vec<(usize, usize, &str)> = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let (start, end) = member_data_range(bytes, entry).map_err(|e| NpyError::Entry {
+            name: entry.name.clone(),
+            source: Box::new(e),
+        })?;
+        if end > cd_offset {
+            return Err(NpyError::Entry {
+                name: entry.name.clone(),
+                source: Box::new(NpyError::InvalidZip(
+                    "メンバのデータ領域が central directory の開始位置を超える",
+                )),
+            });
+        }
+        ranges.push((start, end, entry.name.as_str()));
+    }
+    ranges.sort_unstable_by_key(|&(start, _, _)| start);
+    for w in ranges.windows(2) {
+        let (_, prev_end, _) = w[0];
+        let (next_start, _, next_name) = w[1];
+        if next_start < prev_end {
+            return Err(NpyError::Entry {
+                name: next_name.to_string(),
+                source: Box::new(NpyError::InvalidZip(
+                    "メンバのデータ領域が他のメンバと重なる",
+                )),
+            });
+        }
     }
 
     // 2 パス目: 1 パス目で伸長後サイズ上限を通過したエントリのみを
@@ -224,6 +306,13 @@ struct EocdInfo {
 }
 
 /// ファイル末尾から EOCD シグネチャ（`PK\x05\x06`）を後方探索する。
+///
+/// 探索窓（`EOCD_SEARCH_WINDOW`）全体を走査し、シグネチャ＋コメント長
+/// 整合の両方を満たす候補が複数存在する場合は「一意に真の EOCD を
+/// 決定できない」として fail-closed に拒否する（細工したコメント本文に
+/// 偽の EOCD 様バイト列を埋め込む攻撃を想定。`.claude/rules/security.md`
+/// A03。PR #2318 レビュー指摘・P0 監査）。真の ZIP は EOCD がファイル末尾
+/// 側に 1 つだけ存在するため、正常系への影響はない。
 fn find_eocd(bytes: &[u8]) -> Result<EocdInfo, NpyError> {
     if bytes.len() < EOCD_FIXED_SIZE {
         return Err(NpyError::InvalidZip("ファイルが短すぎて EOCD が存在しない"));
@@ -231,6 +320,7 @@ fn find_eocd(bytes: &[u8]) -> Result<EocdInfo, NpyError> {
     let search_start = bytes
         .len()
         .saturating_sub(EOCD_SEARCH_WINDOW.min(bytes.len()));
+    let mut candidates: Vec<usize> = Vec::new();
     let mut i = bytes.len() - EOCD_FIXED_SIZE;
     loop {
         if read_u32_le(bytes, i, "EOCD 探索中の範囲外アクセス").ok() == Some(EOCD_SIG) {
@@ -238,7 +328,7 @@ fn find_eocd(bytes: &[u8]) -> Result<EocdInfo, NpyError> {
             // （データ本体にたまたま同じ 4 バイトが出現する場合）を除く。
             let comment_len = read_u16_le(bytes, i + 20, "EOCD comment 長").unwrap_or(u16::MAX);
             if i + EOCD_FIXED_SIZE + comment_len as usize == bytes.len() {
-                return Ok(EocdInfo { offset: i });
+                candidates.push(i);
             }
         }
         if i == search_start {
@@ -246,14 +336,30 @@ fn find_eocd(bytes: &[u8]) -> Result<EocdInfo, NpyError> {
         }
         i -= 1;
     }
-    Err(NpyError::InvalidZip(
-        "EOCD（end of central directory）が見つからない",
-    ))
+    match candidates.len() {
+        0 => Err(NpyError::InvalidZip(
+            "EOCD（end of central directory）が見つからない",
+        )),
+        1 => Ok(EocdInfo {
+            offset: candidates[0],
+        }),
+        _ => Err(NpyError::InvalidZip(
+            "EOCD シグネチャ候補が複数あり一意に決定できない",
+        )),
+    }
 }
 
 /// EOCD（および必要なら zip64 EOCD）からエントリ数・central directory の
-/// オフセット・サイズを解決する。
-fn resolve_eocd_counts(bytes: &[u8], eocd: &EocdInfo) -> Result<(usize, usize, usize), NpyError> {
+/// オフセット・サイズ・central directory が収まらなければならない上限
+/// （`metadata_start`）を解決する。`metadata_start` は zip64 を使わない
+/// 場合は通常 EOCD の開始位置、zip64 を使う場合は zip64 EOCD レコードの
+/// 開始位置であり、central directory の宣言範囲がこれらの構造領域と
+/// 重ならないことを呼び出し元（`read_npz_bytes`）が検証するために使う
+/// （A03。PR #2318 レビュー指摘・P0 監査）。
+fn resolve_eocd_counts(
+    bytes: &[u8],
+    eocd: &EocdInfo,
+) -> Result<(usize, usize, usize, usize), NpyError> {
     let o = eocd.offset;
     let disk_number = read_u16_le(bytes, o + 4, "EOCD disk number")?;
     let cd_start_disk = read_u16_le(bytes, o + 6, "EOCD cd start disk")?;
@@ -269,10 +375,14 @@ fn resolve_eocd_counts(bytes: &[u8], eocd: &EocdInfo) -> Result<(usize, usize, u
     let needs_zip64 =
         entries_total == u16::MAX || cd_size_32 == u32::MAX || cd_offset_32 == u32::MAX;
     if !needs_zip64 {
+        // 非 zip64 経路の `metadata_start` は通常 EOCD の開始位置
+        // （`o`）。central directory の宣言範囲はこれより前に収まら
+        // なければならない（`read_npz_bytes` 側の検証）。
         return Ok((
             entries_total as usize,
             cd_offset_32 as usize,
             cd_size_32 as usize,
+            o,
         ));
     }
 
@@ -330,13 +440,67 @@ fn resolve_eocd_counts(bytes: &[u8], eocd: &EocdInfo) -> Result<(usize, usize, u
     }
     let cd_size = read_u64_le(bytes, zip64_eocd_offset + 40, "zip64 EOCD cd size")?;
     let cd_offset = read_u64_le(bytes, zip64_eocd_offset + 48, "zip64 EOCD cd offset")?;
+
+    // 通常 EOCD 側のフィールドが sentinel（zip64 経路への切り替え値）で
+    // ない場合、zip64 EOCD レコードから解決した値と一致することを要求
+    // する。`needs_zip64` は 3 フィールドのいずれか 1 つが sentinel なら
+    // 真になるため、sentinel でない残りのフィールドを無条件に無視して
+    // zip64 側の値で上書きすると、細工した非 sentinel フィールドが
+    // 実際には使われない不整合を見逃す（A03。PR #2318 レビュー指摘・
+    // P0 監査）。
+    if entries_total != u16::MAX && entries_total as u64 != entries {
+        return Err(NpyError::InvalidZip(
+            "EOCD のエントリ数が zip64 EOCD と不一致",
+        ));
+    }
+    if cd_size_32 != u32::MAX && cd_size_32 as u64 != cd_size {
+        return Err(NpyError::InvalidZip(
+            "EOCD の central directory サイズが zip64 EOCD と不一致",
+        ));
+    }
+    if cd_offset_32 != u32::MAX && cd_offset_32 as u64 != cd_offset {
+        return Err(NpyError::InvalidZip(
+            "EOCD の central directory オフセットが zip64 EOCD と不一致",
+        ));
+    }
+
+    // zip64 EOCD レコードの「固定部分＋可変長 extensible data sector」の
+    // 宣言終端（`zip64_eocd_offset + 12 + record_size`。record_size は
+    // シグネチャ 4 バイト＋サイズフィールド 8 バイトを除いた残りの長さ。
+    // APPNOTE.TXT 4.3.14）が zip64 EOCD locator の開始位置
+    // （`locator_offset`）を超えないことを検証する。この検査がないと、
+    // 細工した `record_size` により zip64 EOCD レコードが locator・
+    // 通常 EOCD の領域まで「正当な構造」として重なって解釈されうる
+    // （A03。PR #2318 レビュー指摘・P0 監査）。固定部分は 56 バイト
+    // （シグネチャからで数えて）のため `record_size` は 44 以上でなければ
+    // ならない。
+    let record_size = read_u64_le(bytes, zip64_eocd_offset + 4, "zip64 EOCD レコードサイズ")?;
+    if record_size < 44 {
+        return Err(NpyError::InvalidZip(
+            "zip64 EOCD レコードサイズが固定部分より小さい",
+        ));
+    }
+    let record_end = zip64_eocd_offset
+        .checked_add(12)
+        .and_then(|v| v.checked_add(usize::try_from(record_size).ok()?))
+        .ok_or(NpyError::InvalidZip("zip64 EOCD レコードの終端が不正"))?;
+    if record_end > locator_offset {
+        return Err(NpyError::InvalidZip(
+            "zip64 EOCD レコードが locator と重なる",
+        ));
+    }
+
     let entries = usize::try_from(entries)
         .map_err(|_| NpyError::InvalidZip("zip64 エントリ数が usize 範囲を超える"))?;
     let cd_size = usize::try_from(cd_size)
         .map_err(|_| NpyError::InvalidZip("zip64 cd size が usize 範囲を超える"))?;
     let cd_offset = usize::try_from(cd_offset)
         .map_err(|_| NpyError::InvalidZip("zip64 cd offset が usize 範囲を超える"))?;
-    Ok((entries, cd_offset, cd_size))
+    // zip64 経路の `metadata_start` は zip64 EOCD レコードの開始位置。
+    // central directory はレコード・locator・通常 EOCD のいずれよりも
+    // 前に収まらなければならない（レコード・locator・通常 EOCD は
+    // ここまでの検査で互いに重ならない連続領域であることを確認済み）。
+    Ok((entries, cd_offset, cd_size, zip64_eocd_offset))
 }
 
 /// central directory の 1 エントリを `pos` から解析し、次エントリの
@@ -489,6 +653,44 @@ fn npz_member_key(name: &str) -> Result<String, NpyError> {
 /// 引き続き遮断する）。
 fn local_size_field_matches(local_field: u32, actual: u64) -> bool {
     local_field == u32::MAX || u64::from(local_field) == actual
+}
+
+/// central directory エントリが指す local header から、メンバの構造的な
+/// バイト範囲 `[local header 開始, 圧縮データ終端)` を求める。
+///
+/// 名前・flags・method・CRC・サイズが central directory と一致することの
+/// 検証は行わない（それは [`read_member_bytes`] が担う）。本関数は
+/// `read_npz_bytes` の 1.5 パス目が central directory の宣言範囲・他
+/// メンバとの重なりを判定するためだけに、local header の固定長部分
+/// （シグネチャ・name/extra 長）のみを読む（A03。PR #2318 レビュー
+/// 指摘・P0）。
+fn member_data_range(bytes: &[u8], entry: &CentralDirEntry) -> Result<(usize, usize), NpyError> {
+    let local_offset = usize::try_from(entry.local_header_offset)
+        .map_err(|_| NpyError::InvalidZip("local header offset が usize 範囲を超える"))?;
+    if read_u32_le(bytes, local_offset, "local header シグネチャ")? != LOCAL_FILE_HEADER_SIG {
+        return Err(NpyError::InvalidZip("local header シグネチャが不一致"));
+    }
+    let name_len = read_u16_le(bytes, local_offset + 26, "local header name length")? as usize;
+    let extra_len = read_u16_le(bytes, local_offset + 28, "local header extra length")? as usize;
+    let data_start = local_offset
+        .checked_add(30)
+        .and_then(|v| v.checked_add(name_len))
+        .and_then(|v| v.checked_add(extra_len))
+        .ok_or(NpyError::InvalidZip("local header のデータ開始位置が不正"))?;
+    let compressed_size = usize::try_from(entry.compressed_size)
+        .map_err(|_| NpyError::InvalidZip("compressed size が usize 範囲を超える"))?;
+    let data_end = data_start
+        .checked_add(compressed_size)
+        .ok_or(NpyError::InvalidZip("メンバのデータ終端が不正"))?;
+    // データ終端がファイル範囲内にあることも確認する（`slice_at` による
+    // 検証は `read_member_bytes` 側でも行うが、本関数はそれより前の
+    // 構造検証パスで呼ばれるため、ここでも fail-closed に確認する）。
+    if data_end > bytes.len() {
+        return Err(NpyError::InvalidZip(
+            "メンバのデータ領域がファイル範囲外を指す",
+        ));
+    }
+    Ok((local_offset, data_end))
 }
 
 /// 1 メンバを local header 経由で読み取り、伸長・CRC 検証したうえで
@@ -1414,6 +1616,210 @@ mod tests {
         let back = read_npz_bytes(&zip).unwrap();
         assert_eq!(back["x"].host_slice().to_vec(), vec![1.0f32; 40]);
     }
+
+    #[test]
+    fn rejects_member_data_overlapping_central_directory() {
+        // P0（codex-review・npz.rs:579 未解決指摘）: central directory の
+        // 宣言 `compressed_size`／`uncompressed_size` を細工し、メンバの
+        // データ領域が central directory 自体の開始位置まで食い込む
+        // ケースを拒否することを確認する（当初の指摘の再現テスト）。
+        // 本検査は 2 パス目（伸長・CRC 検証）より前の構造検証パスで
+        // 発火するため、CRC・npy 内容の整合は不要。
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Tensor::new(vec![1.0], &[1]).unwrap());
+        let bytes = write_npz_bytes(&m).unwrap();
+
+        let cd_sig = CENTRAL_DIR_HEADER_SIG.to_le_bytes();
+        let cd_pos = bytes
+            .windows(4)
+            .position(|w| w == cd_sig)
+            .expect("central directory シグネチャが見つかる");
+        let mut tampered = bytes.clone();
+        // compressed size（CD ヘッダ +20）を、central directory・EOCD の
+        // 領域まで確実に食い込む大きさへ書き換える。
+        let oversized = bytes.len() as u32;
+        tampered[cd_pos + 20..cd_pos + 24].copy_from_slice(&oversized.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        match err {
+            Err(NpyError::Entry { name, source }) => {
+                assert_eq!(name, "a.npy");
+                assert!(
+                    matches!(*source, NpyError::InvalidZip(_)),
+                    "central directory との重なりが InvalidZip として拒否されなかった: {source:?}"
+                );
+            }
+            other => panic!("central directory と重なるメンバが拒否されなかった: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_member_data_overlapping_another_member() {
+        // P0（codex-review・npz.rs:579 未解決指摘）: central directory の
+        // `local_header_offset` を細工し、あるメンバのデータ領域が別の
+        // メンバのデータ領域と重なるケースを拒否することを確認する。
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Tensor::new(vec![1.0], &[1]).unwrap());
+        m.insert("b".to_string(), Tensor::new(vec![2.0], &[1]).unwrap());
+        let bytes = write_npz_bytes(&m).unwrap();
+
+        let cd_sig = CENTRAL_DIR_HEADER_SIG.to_le_bytes();
+        let first_cd_pos = bytes
+            .windows(4)
+            .position(|w| w == cd_sig)
+            .expect("1 番目の central directory シグネチャが見つかる");
+        let second_cd_pos = bytes
+            .windows(4)
+            .rposition(|w| w == cd_sig)
+            .expect("2 番目の central directory シグネチャが見つかる");
+        assert_ne!(first_cd_pos, second_cd_pos);
+
+        // 1 番目（sort 順で "a"）の local_header_offset（CD ヘッダ +42）を
+        // 読み取り、2 番目（"b"）の local_header_offset へ同じ値を書き込む
+        // ことで、2 つのメンバが同一の local header・データ領域を指す
+        // ようにする。
+        let first_local_offset = u32::from_le_bytes(
+            bytes[first_cd_pos + 42..first_cd_pos + 46]
+                .try_into()
+                .unwrap(),
+        );
+        let mut tampered = bytes.clone();
+        tampered[second_cd_pos + 42..second_cd_pos + 46]
+            .copy_from_slice(&first_local_offset.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::Entry { .. })),
+            "メンバ間のデータ領域の重なりが拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_central_directory_overlapping_eocd() {
+        // P0（codex-review・npz.rs:579 未解決指摘の関連監査）: central
+        // directory の宣言範囲（`cd_offset..cd_offset+cd_size`）を、
+        // ファイル全体には収まるが通常 EOCD の領域へ食い込む大きさに
+        // 細工した場合に拒否されることを確認する。旧実装は
+        // `cd_end > bytes.len()` のみを検査していたため、この細工は
+        // ファイル範囲内に収まる限り見逃されていた。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let eocd_sig = EOCD_SIG.to_le_bytes();
+        let eocd_pos = bytes
+            .windows(4)
+            .rposition(|w| w == eocd_sig)
+            .expect("EOCD シグネチャが見つかる");
+        let mut tampered = bytes.clone();
+        let orig_cd_size =
+            u32::from_le_bytes(tampered[eocd_pos + 12..eocd_pos + 16].try_into().unwrap());
+        // cd_size を、EOCD の固定部分の範囲内（+4 バイト）まで食い込む
+        // 大きさへ増やす。EOCD は常にファイル末尾の 22 バイトのため、
+        // この程度の増加でも `bytes.len()` は超えない。
+        tampered[eocd_pos + 12..eocd_pos + 16].copy_from_slice(&(orig_cd_size + 4).to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::InvalidZip(_))),
+            "central directory と EOCD の重なりが拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_eocd_candidates() {
+        // P0（codex-review・npz.rs:579 未解決指摘の関連監査。EOCD 探索の
+        // 曖昧性）: コメント本文に、それ自身も「シグネチャ＋コメント長
+        // 整合」を満たす偽の EOCD 様バイト列を埋め込むと、末尾から最初に
+        // 見つかった候補だけを無条件に信頼する実装では偽陽性が起き得る。
+        // 真の EOCD の次に読み取り可能な第二の候補が存在する場合は
+        // 一意に決定できないとして拒否することを確認する。
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Tensor::new(vec![1.0], &[1]).unwrap());
+        let bytes = write_npz_bytes(&m).unwrap();
+
+        let true_eocd_pos = bytes.len() - EOCD_FIXED_SIZE;
+        assert_eq!(
+            &bytes[true_eocd_pos..true_eocd_pos + 4],
+            &EOCD_SIG.to_le_bytes()
+        );
+
+        // 偽の EOCD（22 バイト固定部分。comment_len=0 で自身の直後を
+        // ファイル終端とする）をコメント末尾に置き、その手前に任意の
+        // padding を挟む。
+        let padding_len = 10usize;
+        let fake_eocd_len = EOCD_FIXED_SIZE;
+        let new_comment_len = (padding_len + fake_eocd_len) as u16;
+
+        let mut tampered = bytes[..true_eocd_pos + 20].to_vec();
+        tampered.extend_from_slice(&new_comment_len.to_le_bytes()); // 真の EOCD の comment_len
+        tampered.extend(std::iter::repeat_n(0u8, padding_len));
+        tampered.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        tampered.extend(std::iter::repeat_n(0u8, 16)); // 偽 EOCD の残りの固定フィールド
+        tampered.extend_from_slice(&0u16.to_le_bytes()); // 偽 EOCD の comment_len = 0
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::InvalidZip(_))),
+            "曖昧な EOCD 候補が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_zip64_entries_mismatch_with_non_sentinel_eocd_field() {
+        // P0（codex-review・npz.rs:579 未解決指摘の関連監査。zip64
+        // sentinel／非 sentinel フィールドの一貫性）: 通常 EOCD の
+        // `entries_total` が zip64 プレースホルダ（`u16::MAX`）でない
+        // 場合、zip64 EOCD レコードから解決したエントリ数と一致しなければ
+        // ならないことを確認する。
+        let zip = zip64_multi_disk_tests::build_zip64_npz(0, 1, 0, 0);
+        let eocd_sig = EOCD_SIG.to_le_bytes();
+        let eocd_pos = zip
+            .windows(4)
+            .rposition(|w| w == eocd_sig)
+            .expect("通常 EOCD シグネチャが見つかる");
+        assert_eq!(
+            u16::from_le_bytes([zip[eocd_pos + 10], zip[eocd_pos + 11]]),
+            u16::MAX
+        );
+        let mut tampered = zip.clone();
+        // entries_total（sentinel ではない値）を、zip64 EOCD レコードの
+        // 実エントリ数（1）と矛盾する値へ書き換える。`entries_this_disk`
+        // （+8）も同じ値に揃えないと、それより手前の
+        // `entries_this_disk != entries_total` によるマルチディスク検査
+        // （本テストの対象ではない）が先に発火してしまう。
+        tampered[eocd_pos + 8..eocd_pos + 10].copy_from_slice(&3u16.to_le_bytes());
+        tampered[eocd_pos + 10..eocd_pos + 12].copy_from_slice(&3u16.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::InvalidZip(_))),
+            "EOCD と zip64 EOCD のエントリ数不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_zip64_eocd_record_overlapping_locator() {
+        // P0（codex-review・npz.rs:579 未解決指摘の関連監査）: zip64 EOCD
+        // レコードの「レコードサイズ」フィールドを細工し、レコードの
+        // 宣言終端が zip64 EOCD locator の領域まで食い込む場合に拒否
+        // されることを確認する。
+        let zip = zip64_multi_disk_tests::build_zip64_npz(0, 1, 0, 0);
+        let zip64_eocd_sig = ZIP64_EOCD_SIG.to_le_bytes();
+        let zip64_eocd_pos = zip
+            .windows(4)
+            .position(|w| w == zip64_eocd_sig)
+            .expect("zip64 EOCD シグネチャが見つかる");
+        let mut tampered = zip.clone();
+        // レコードサイズ（zip64 EOCD +4、本来 44）を、locator の領域まで
+        // 確実に食い込む大きさへ書き換える。
+        let oversized_record_size = zip.len() as u64;
+        tampered[zip64_eocd_pos + 4..zip64_eocd_pos + 12]
+            .copy_from_slice(&oversized_record_size.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::InvalidZip(_))),
+            "zip64 EOCD レコードと locator の重なりが拒否されなかった: {err:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1425,8 +1831,10 @@ mod zip64_multi_disk_tests {
     /// マルチディスクフィールド（PR #2318 レビュー指摘・P2）の検証を
     /// 単体でテストするため、4 つのフィールドを引数で差し替えられる
     /// ようにしてある。すべて「単一ディスク」を示す値（0, 1, 0, 0）を
-    /// 渡せば正常に読み込める構成になる。
-    fn build_zip64_npz(
+    /// 渡せば正常に読み込める構成になる。`pub(super)` は `tests` モジュール
+    /// （同じ `npz` モジュールの兄弟。zip64 sentinel／locator 重なりの
+    /// 追加検証テストから再利用するため）から呼べるようにするため。
+    pub(super) fn build_zip64_npz(
         locator_disk: u32,
         locator_total_disks: u32,
         zip64_this_disk: u32,
