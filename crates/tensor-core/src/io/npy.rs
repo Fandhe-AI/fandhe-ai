@@ -452,6 +452,17 @@ fn parse_shape_tuple(
                 continue;
             }
             Some(b')') => {
+                // rank 1 は Python のタプルリテラルとして `(3,)` が正で
+                // `(3)` は単一整数（タプルではない）。numpy が書き出す
+                // shape は常に `(3,)` 形式のため、末尾カンマなしの
+                // rank 1（要素 1 個のまま `,` を経ずに `)` へ到達した
+                // 場合）は誤受理せず拒否する（PR #2318 レビュー指摘・
+                // P2。npy.rs:454）。
+                if dims.len() == 1 {
+                    return Err(NpyError::InvalidHeader(
+                        "shape が rank 1 の場合は `(N,)` のように末尾カンマが必要",
+                    ));
+                }
                 *pos += 1;
                 break;
             }
@@ -531,6 +542,21 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(h1.shape, vec![3]);
+    }
+
+    #[test]
+    fn rejects_rank1_shape_without_trailing_comma() {
+        // P2（codex-review。npy.rs:454）: Python では `(3)` は単一整数
+        // リテラルでありタプルではない（`(3,)` が rank1 タプル）。numpy
+        // が書き出す shape は常に `(3,)` 形式のため、末尾カンマなしの
+        // `(3)` を rank1 shape として誤受理しないことを確認する。
+        let err = parse_header(&header_str_from(
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (3), }",
+        ));
+        assert!(
+            matches!(err, Err(NpyError::InvalidHeader(_))),
+            "末尾カンマなしの rank1 shape が拒否されなかった"
+        );
     }
 
     #[test]

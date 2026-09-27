@@ -3,9 +3,18 @@
 //!
 //! `io`（親モジュール）の doc を参照。本ファイルは ZIP コンテナの
 //! 解析（EOCD／zip64／central directory／local header）と生成を担う。
-//! **central directory を正とする**（`np.savez` の local header は
-//! サイズ欄が `0xFFFFFFFF` の zip64 プレースホルダのため、シグネチャ
-//! 確認とヘッダ長読み飛ばしにしか使わない）。書き出しは STORED
+//! **central directory を正とする**。**実測**（CPython 3.x
+//! `zipfile`・numpy 2.3.5 `np.savez` はいずれも `force_zip64=True` で
+//! local header を書くため、`np.savez` の local header は実サイズの
+//! 大小に関わらず常に size 欄が `0xFFFFFFFF` の zip64 プレースホルダに
+//! なる（central directory 側は zip64 extra を伴わない literal な
+//! 実サイズのまま。scratchpad での実測で確認済み）。このため size
+//! 欄は「シグネチャ確認とヘッダ長読み飛ばし」に加え central directory
+//! との照合にも使うが、プレースホルダの場合は照合をスキップし
+//! central directory 側を無条件に正とする（`read_member` の
+//! `local_size_field_matches` 参照）。method／flags／CRC はプレース
+//! ホルダを持たないため central directory と厳密一致することを
+//! 要求する（PR #2318 レビュー指摘・P0）。書き出しは STORED
 //! （無圧縮）のみに限定する（`np.savez` と同じ。`np.savez_compressed`
 //! 相当の DEFLATE 圧縮書き出しは対象外。`docs/tensor-core-npy-npz-io-
 //! decision.md` 参照）。
@@ -321,11 +330,41 @@ fn parse_zip64_extra(extra: &[u8]) -> Result<Vec<u64>, NpyError> {
 
 /// central directory エントリ名から npz キー（末尾 `.npy` を除いたもの）
 /// を導出する。
+///
+/// 末尾 `.npy` の有無を無視して正規化する（旧実装）と、`"a"` と
+/// `"a.npy"` のように異なるメンバ名が同一キーへ縮退し得た
+/// （`write_npz_bytes` は常にキーへ `.npy` を 1 回付与するため
+/// 自前書き出し→読み込みの往復では起きないが、外部で組み立てた ZIP
+/// を読む経路では起き得る。PR #2318 レビュー指摘・P1）。`.npy`
+/// サフィックスを持たないメンバ名は npz の実体ではない（`np.savez` は
+/// すべてのメンバへ `.npy` を付与する）ため拒否し、キー導出を
+/// `write_npz_bytes` の逆写像として全単射に保つ。
 fn npz_member_key(name: &str) -> Result<String, NpyError> {
     if name.is_empty() || name.contains('\0') {
         return Err(NpyError::InvalidEntryName);
     }
-    Ok(name.strip_suffix(".npy").unwrap_or(name).to_string())
+    name.strip_suffix(".npy")
+        .map(str::to_string)
+        .ok_or(NpyError::InvalidEntryName)
+}
+
+/// local header の 32bit size フィールドと、central directory から
+/// （必要なら zip64 extra 経由で）解決済みの実サイズ（`u64`）が一致する
+/// ことを確認する。**実測（CPython 3.x `zipfile`／`numpy` 2.3.5.
+/// `np.savez` はいずれも `force_zip64=True` で local header を書くため、
+/// 実サイズが `u32::MAX` を大きく下回る小さな配列でも local header の
+/// size フィールドは無条件に `0xFFFFFFFF` のプレースホルダになる**
+/// （実サイズは central directory 側の zip64 extra にのみ書かれる。
+/// 「実サイズが u32 を超える場合に限りプレースホルダを許容」という
+/// 一見自然な条件では、この無条件プレースホルダ書式のため真正の
+/// `np.savez` 出力を全て拒否してしまう。scratchpad での実測で確認
+/// 済み）。このためプレースホルダは実サイズに関わらず常に許容し、
+/// プレースホルダでない場合のみ central directory の実サイズとの
+/// 厳密一致を要求する（method／flags／CRC ほど強い検証にはならないが、
+/// 非プレースホルダ値を central directory と矛盾する値へ細工する経路は
+/// 引き続き遮断する）。
+fn local_size_field_matches(local_field: u32, actual: u64) -> bool {
+    local_field == u32::MAX || u64::from(local_field) == actual
 }
 
 /// 1 メンバを local header 経由で読み取り、伸長・CRC 検証したうえで
@@ -336,6 +375,13 @@ fn read_member(bytes: &[u8], entry: &CentralDirEntry) -> Result<Tensor<f32>, Npy
     if read_u32_le(bytes, local_offset, "local header シグネチャ")? != LOCAL_FILE_HEADER_SIG {
         return Err(NpyError::InvalidZip("local header シグネチャが不一致"));
     }
+    let local_flags = read_u16_le(bytes, local_offset + 6, "local header flags")?;
+    let local_method = read_u16_le(bytes, local_offset + 8, "local header method")?;
+    let local_crc = read_u32_le(bytes, local_offset + 14, "local header CRC")?;
+    let local_compressed_size =
+        read_u32_le(bytes, local_offset + 18, "local header compressed size")?;
+    let local_uncompressed_size =
+        read_u32_le(bytes, local_offset + 22, "local header uncompressed size")?;
     let name_len = read_u16_le(bytes, local_offset + 26, "local header name length")? as usize;
     let extra_len = read_u16_le(bytes, local_offset + 28, "local header extra length")? as usize;
     let name_start = local_offset + 30;
@@ -349,6 +395,40 @@ fn read_member(bytes: &[u8], entry: &CentralDirEntry) -> Result<Tensor<f32>, Npy
     if local_name_bytes != entry.name.as_bytes() {
         return Err(NpyError::InvalidZip(
             "local header のファイル名が central directory と不一致",
+        ));
+    }
+    // local header と central directory の圧縮方式・flags・CRC・サイズを
+    // 照合する。ファイル名一致のみでは、central directory が指す
+    // `local_header_offset` の先の local header が「名前は central
+    // directory と同じだが method／flags／CRC／サイズだけ異なる」よう
+    // 細工されたケースを見逃す（central directory を正として読み進める
+    // 設計を裏から崩す改ざんが成立し得る。A03。PR #2318 レビュー
+    // 指摘・P0）。サイズは zip64 プレースホルダ（`0xFFFFFFFF`。
+    // `np.savez` が zip64 を使う場合の local header の仕様）のみ例外的に
+    // 許容する（本ファイル冒頭 doc コメント参照）。
+    if local_flags != entry.flags {
+        return Err(NpyError::InvalidZip(
+            "local header の flags が central directory と不一致",
+        ));
+    }
+    if local_method != entry.method {
+        return Err(NpyError::InvalidZip(
+            "local header の圧縮方式が central directory と不一致",
+        ));
+    }
+    if local_crc != entry.crc32 {
+        return Err(NpyError::InvalidZip(
+            "local header の CRC が central directory と不一致",
+        ));
+    }
+    if !local_size_field_matches(local_compressed_size, entry.compressed_size) {
+        return Err(NpyError::InvalidZip(
+            "local header の圧縮サイズが central directory と不一致",
+        ));
+    }
+    if !local_size_field_matches(local_uncompressed_size, entry.uncompressed_size) {
+        return Err(NpyError::InvalidZip(
+            "local header の非圧縮サイズが central directory と不一致",
         ));
     }
     let data_start = name_start + name_len + extra_len;
@@ -636,6 +716,219 @@ mod tests {
         assert!(
             matches!(err, Err(NpyError::Entry { .. })),
             "local header 名の不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_local_header_method_mismatch() {
+        // P0（codex-review・PR #2318）: local header の圧縮方式が
+        // central directory と異なる場合に拒否されることを確認する。
+        // 先頭エントリの local header method フィールド（オフセット
+        // +8、STORED=0）を DEFLATE（8）へ書き換える。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let mut tampered = bytes.clone();
+        assert_eq!(u16::from_le_bytes([tampered[8], tampered[9]]), 0);
+        tampered[8..10].copy_from_slice(&8u16.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::Entry { .. })),
+            "local header method の不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_local_header_flags_mismatch() {
+        // P0（codex-review・PR #2318）: local header の flags が
+        // central directory と異なる場合に拒否されることを確認する。
+        // 先頭エントリの local header flags（オフセット +6）へ未使用
+        // ビット（bit 5）を立てる。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let mut tampered = bytes.clone();
+        assert_eq!(u16::from_le_bytes([tampered[6], tampered[7]]), 0);
+        tampered[6..8].copy_from_slice(&0x0020u16.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::Entry { .. })),
+            "local header flags の不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_local_header_crc_mismatch() {
+        // P0（codex-review・PR #2318）: local header の CRC が
+        // central directory と異なる場合に拒否されることを確認する
+        // （central directory 側の CRC は伸長後データと一致したままの
+        // ため、local header 側だけを書き換えて不一致を作る）。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let mut tampered = bytes.clone();
+        let local_crc_pos = 14;
+        let orig = u32::from_le_bytes(
+            tampered[local_crc_pos..local_crc_pos + 4]
+                .try_into()
+                .unwrap(),
+        );
+        tampered[local_crc_pos..local_crc_pos + 4]
+            .copy_from_slice(&(orig ^ 0xFFFF_FFFF).to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::Entry { .. })),
+            "local header CRC の不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_local_header_size_mismatch() {
+        // P0（codex-review・PR #2318）: local header の
+        // compressed/uncompressed size が central directory と異なる
+        // 場合に拒否されることを確認する（オフセット +18／+22）。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let mut tampered = bytes.clone();
+        let orig = u32::from_le_bytes(tampered[18..22].try_into().unwrap());
+        tampered[18..22].copy_from_slice(&(orig + 1).to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::Entry { .. })),
+            "local header size の不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_local_header_zip64_size_placeholder_even_for_small_entry() {
+        // P0 追加検証（`local_size_field_matches` の実装形。PR #2318
+        // レビュー是正時の実測）: 実測（CPython 3.13 `zipfile`・numpy
+        // 2.3.5 `np.savez`）では、実サイズが `u32::MAX` を大きく下回る
+        // 小さな配列であっても `force_zip64=True` で local header を
+        // 書くため local header の compressed/uncompressed size は
+        // 常に `0xFFFFFFFF` のプレースホルダになる（central directory
+        // 側は zip64 extra なしの literal な小さい値のまま）。
+        // 「実サイズが u32 を超える場合に限りプレースホルダを許容」と
+        // いう一見自然な条件では真正の `np.savez` 出力を全て拒否して
+        // しまうため、プレースホルダは実サイズに関わらず常に許容
+        // することを確認する（手組みの ZIP で numpy と同型の local
+        // header を再現する）。
+        let npy = write_npy_bytes(&Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap()).unwrap();
+        let crc = crc32(&npy);
+        let name = b"a.npy";
+        let size = npy.len() as u32;
+
+        let mut zip = Vec::new();
+        zip.extend_from_slice(&LOCAL_FILE_HEADER_SIG.to_le_bytes());
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version needed (zip64)
+        zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+        zip.extend_from_slice(&0u16.to_le_bytes()); // method = STORED
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0x0021u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        // numpy 実測と同じく、実サイズが u32 に収まっていても local
+        // header 側は zip64 プレースホルダのまま。
+        zip.extend_from_slice(&u32::MAX.to_le_bytes()); // compressed size
+        zip.extend_from_slice(&u32::MAX.to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra length（zip64 extra は省略）
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(&npy);
+
+        let cd_start = zip.len() as u32;
+        zip.extend_from_slice(&CENTRAL_DIR_HEADER_SIG.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0x0021u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        // central directory 側は numpy 実測どおり literal な実サイズ
+        // （zip64 extra なし）。
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u32.to_le_bytes());
+        zip.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+        zip.extend_from_slice(name);
+        let cd_size = zip.len() as u32 - cd_start;
+
+        zip.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&cd_size.to_le_bytes());
+        zip.extend_from_slice(&cd_start.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+
+        let back = read_npz_bytes(&zip).unwrap();
+        assert_eq!(back["a"].host_slice().to_vec(), vec![1.0f32, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn rejects_member_name_without_npy_suffix() {
+        // P1（codex-review・PR #2318）: `.npy` サフィックスを持たない
+        // メンバ名は npz キーとして受理しない（末尾除去による正規化が
+        // `"a"` と `"a.npy"` のような異なるメンバ名を同一キーへ縮退させ
+        // 得たため。`npz_member_key` のドキュメントコメント参照）。
+        // 手組みの ZIP で `.npy` を持たない単一メンバを構成し拒否される
+        // ことを確認する。
+        let npy = write_npy_bytes(&Tensor::new(vec![1.0f32], &[1]).unwrap()).unwrap();
+        let crc = crc32(&npy);
+        let name = b"a";
+        let mut zip = Vec::new();
+        let local_offset = 0u32;
+        zip.extend_from_slice(&LOCAL_FILE_HEADER_SIG.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // method = STORED
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0x0021u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&(npy.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(npy.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(&npy);
+
+        let cd_start = zip.len() as u32;
+        zip.extend_from_slice(&CENTRAL_DIR_HEADER_SIG.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0x0021u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&(npy.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(npy.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u32.to_le_bytes());
+        zip.extend_from_slice(&local_offset.to_le_bytes());
+        zip.extend_from_slice(name);
+        let cd_size = zip.len() as u32 - cd_start;
+
+        zip.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&cd_size.to_le_bytes());
+        zip.extend_from_slice(&cd_start.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+
+        let err = read_npz_bytes(&zip);
+        assert!(
+            matches!(err, Err(NpyError::InvalidEntryName)),
+            "`.npy` サフィックスなしのメンバ名が拒否されなかった: {err:?}"
         );
     }
 
