@@ -90,6 +90,18 @@
 //! `FusionGraph`／`detect_fusion` は本クレート内では `plan.rs` の
 //! `#[cfg(test)]`（`from_segment` の単体テスト）からのみ使用される。
 //!
+//! `io`（イシュー #2189・親 #2131）は `Tensor<f32>` の NumPy 互換
+//! `.npy`／`.npz` 形式読み書きをホスト側専用で提供する（[`io::npy`]・
+//! [`io::npz`]・[`io::NpyError`]）。完全自作コア方針（REQ-1）に従い
+//! ZIP コンテナ解析・CRC-32・DEFLATE 伸長を自作し（[`io::crc32`]・
+//! [`io::inflate`] はいずれも `pub(crate)`）、依存は追加しない。GPU
+//! カーネル・演算グラフ（`Op`／`BackendOps`）とは無関係な、ホスト常駐
+//! テンソルに閉じた IO である。facade への公開（`Tensor` への
+//! inherent メソッド追加、または `interop`／`tensor_io` 配下の自由
+//! 関数としての再エクスポート）は承認待ちのため保留中
+//! （`crates/facade/src/lib.rs::NpyIoHoldDoctestGuard`・
+//! `docs/tensor-core-npy-npz-io-decision.md`）。
+//!
 //! `layout`（`backend-metal` 専用モジュール〈#1040〉の 2 次元 view 転置
 //! 分類・先頭次元 collapse）は、イシュー #1046 で `autodiff::eval::matmul`
 //! と共用するため一時的に本クレートへ移設したが、`pub mod layout` が
@@ -161,6 +173,7 @@ mod element;
 mod error;
 mod fusion;
 pub mod interpolate;
+pub mod io;
 mod low_precision;
 pub mod memory_stats;
 mod ops_shape;
