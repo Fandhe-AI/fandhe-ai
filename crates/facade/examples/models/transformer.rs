@@ -127,7 +127,7 @@ impl Transformer {
                     .to_string(),
             ));
         }
-        if config.embed_dim % config.num_heads != 0 {
+        if !config.embed_dim.is_multiple_of(config.num_heads) {
             return Err(AutodiffError::InvalidArgument(format!(
                 "Transformer::new: embed_dim（{}）は num_heads（{}）で割り切れる必要がある",
                 config.embed_dim, config.num_heads

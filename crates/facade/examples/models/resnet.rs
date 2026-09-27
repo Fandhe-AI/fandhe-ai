@@ -207,7 +207,7 @@ impl ResNet {
                 "ResNet::new: width・num_classes はいずれも 0 より大きい必要がある".to_string(),
             ));
         }
-        if depth < 8 || (depth - 2) % 6 != 0 {
+        if depth < 8 || !(depth - 2).is_multiple_of(6) {
             return Err(AutodiffError::InvalidArgument(format!(
                 "ResNet::new: depth は 6n+2（n >= 1。8, 14, 20, ...）である必要がある \
                  （実際: {depth}）"

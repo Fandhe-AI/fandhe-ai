@@ -71,7 +71,11 @@ fn check_ac4(name: &str, history: &[f32], test_acc: f32) -> Result<(), Box<dyn s
     if !history.iter().all(|v| v.is_finite()) {
         return Err(format!("{name}: 学習中に非有限の loss が発生した: {history:?}").into());
     }
-    if !(history.last().copied().unwrap_or(f32::INFINITY) < history[0]) {
+    let last = history.last().copied().unwrap_or(f32::INFINITY);
+    if !matches!(
+        last.partial_cmp(&history[0]),
+        Some(std::cmp::Ordering::Less)
+    ) {
         return Err(format!(
             "{name}: 最終 epoch の loss が初回 epoch の loss を下回らなかった: {history:?}"
         )
