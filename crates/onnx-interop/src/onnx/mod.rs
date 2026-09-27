@@ -11,14 +11,17 @@
 //!   （内部 op -> `NodeProto` の意味論的マッピング。#1773）の
 //!   `check_exportable` を経由してから組み立てる。
 //! - `export_ops`: `interp` が対応する 34 op のうち export allowlist（`SUPPORTED_OP_TYPES`。
-//!   イシュー #1773）に含まれる 23 op の逆マッピング（`ExportOp` -> `NodeProto`）。`export`
+//!   イシュー #1773）に含まれる 26 op の逆マッピング（`ExportOp` -> `NodeProto`）。`export`
 //!   から `pub use` で再エクスポートする。**import（`interp`）と export（`export_ops`）
 //!   の対応 op 数は非対称**（イシュー #2200 で `GlobalAveragePool`／`BatchNormalization`／
-//!   `Flatten` を、イシュー #2186 で `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
-//!   `ReduceMean`／`Pad`／`Resize` を import 側のみ追加した一方、export allowlist は
-//!   23 op のまま拡張していない。これらを含むグラフの export は
-//!   `OnnxError::UnsupportedOp` で拒否される〈無言 skip しない〉。`tests/onnx_export_ops.rs`
-//!   参照。export 側拡張は追跡候補。PR 本文参照）。
+//!   `Flatten` を import・export 双方へ追加し対称化した〈#2187〉一方、イシュー #2186
+//!   （E2・PR #2313）で `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／`ReduceMean`／
+//!   `Pad`／`Resize` を import 側のみ追加したため、export allowlist は 26 op のまま
+//!   拡張していない。これらを含むグラフの export は `OnnxError::UnsupportedOp` で
+//!   拒否される〈無言 skip しない〉。この非対称は計画時点で `docs/
+//!   onnx-export-op-mapping.md` §8 が想定済みの残作業であり〈E2 の export 側 PR
+//!   マージ後に別イシューで追う〉、本 PR〈#2313〉のスコープには含めない。
+//!   `tests/onnx_export_ops.rs` 参照）。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
 //!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し
 //!   （イシュー #2036。本モジュール自体は本クレート内部限定のまま

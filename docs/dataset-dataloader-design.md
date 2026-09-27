@@ -231,10 +231,35 @@ decision.md` を正とする。要点のみ記す:
 - facade（`fandhe_ai::data`）への再エクスポートは未承認のまま保留
   （`crates/facade/src/lib.rs::DataHooksHoldDoctestGuard`）。§10 の
   6 型再エクスポートは不変。
-- 上記 §9 の残る対象外（`num_workers` 並列プリフェッチ・
-  `pin_memory`・iterable-style dataset・`ConcatDataset`／`Subset`／
-  `random_split`・タプルデータセットでのサンプル単位フック）は引き
-  続き対象外。「マルチワーカー prefetch」の追跡先イシュー番号は
+- 上記 §9 の残る対象外（`num_workers` 並列プリフェッチのみ #2183 で
+  実装。§12。`pin_memory`・iterable-style dataset・`ConcatDataset`／
+  `Subset`／`random_split`・タプルデータセットでのサンプル単位フック）
+  は引き続き対象外。「マルチワーカー prefetch」の追跡先イシュー番号は
   issue #2182 本文の誤記（実際には無関係の #2181。`docs/tensor-core-
   data-sampler-hooks-decision.md` §6 参照）であり、正しい追跡先は
-  未起票のまま。
+  #2183 だった。
+
+## 12. 追補（#2183）: マルチワーカー prefetch
+
+上記 §9・§11 の対象外欄に挙げていた「`num_workers` 並列プリフェッチ」
+を #2183 で実装した。設計判断・性能実測は `docs/tensor-core-data-
+prefetch-decision.md`・`docs/perf/logs/data-loader-prefetch-2183/
+README.md` を正とする。要点のみ記す:
+
+- `tensor-core::data` に `PrefetchConfig`（`num_workers`／
+  `prefetch_depth` の検証付き設定）・`PrefetchDataLoader<D>`（`Sampler`
+  の添字を worker スレッドへ分配して並列に `Dataset::batch` を実行し、
+  結果を呼び出し順に並べ直す）・`PrefetchBatches<D>`（そのイテレータ）
+  を新設した。`rayon` ではなく `std::thread`／`std::sync::mpsc` を
+  使う（依存追加は承認事項のため未実施）。
+- 出力列は同一の `Sampler` を使う `SamplerDataLoader` と、任意の
+  `(num_workers, prefetch_depth)` の組み合わせで bit 完全一致する
+  （決定性契約。前提は `Dataset::batch` が添字だけで決まる純関数で
+  あること）。
+- facade（`fandhe_ai::data`）への再エクスポート、`Sequential::fit`
+  （`compat::training::run_fit`）への結線はいずれも未承認のまま保留
+  （承認事項。`docs/tensor-core-data-prefetch-decision.md` §8）。
+- 上記 §9 の残る対象外（`pin_memory`・iterable-style dataset・
+  `ConcatDataset`／`Subset`／`random_split`・タプルデータセットでの
+  サンプル単位フック・transform／collate フックの並列化・persistent
+  workers・GPU DMA prefetch）は引き続き対象外。
