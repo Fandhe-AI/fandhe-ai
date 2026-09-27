@@ -11,9 +11,14 @@
 //!
 //! - 属性なし: `CpuBackendOps`（`Tape::new_with_ops`）を使うモデルと
 //!   `NaiveOps`（`Tape::new()`）を使うモデルとで、同一 prompt・同一
-//!   `GenerateConfig`（Greedy）の生成 token 列が一致することを検証する。
+//!   `GenerateConfig`（Greedy・TopK）の生成 token 列が一致することを
+//!   検証する。token 列一致だけでは同じ token が選ばれつつ logits が
+//!   REQ-2 の統一複合判定から外れるケースを見逃すため（codex-review
+//!   指摘・PR #2324）、`generate()` が実際に辿った token 列を
+//!   `replay_capturing_logits` で再生し、各 `forward_step` の logits も
+//!   `assert_parity` で突合する。
 //! - `#[ignore]`: Metal／CUDA バックエンドを使うモデルと CPU の生成
-//!   token 列を突合する（実機必須）。
+//!   token 列・各 `forward_step` の logits を突合する（実機必須）。
 
 use fandhe_ai_autodiff::generate::{
     AutoregressiveModel, GenerateConfig, SamplingStrategy, generate,
@@ -220,6 +225,51 @@ fn run_greedy_capturing_logits<M: AutoregressiveModel>(
     (ids, step_logits)
 }
 
+/// `generate()` が実際に選んだ token 列（`generated_ids`。prompt を
+/// 含む・呼び出し元は事前に `cpu_out == naive_out` を確認済みの前提）
+/// をそのまま各 `forward_step` へ再投入し（`generate()` 本体の
+/// prefill／decode ループと同じ呼び出し回数・同じ入力 token）、
+/// ステップごとの生 logits を返す。
+///
+/// [`run_greedy_capturing_logits`] は独自に Greedy で次 token を選び
+/// 直す（`SamplingStrategy` に依存しない実機〈Metal／CUDA〉向けの
+/// 再導出）のに対し、本関数は `generate()` が辿った経路をそのまま
+/// 再生するため `SamplingStrategy::TopK`／`Temperature` の乱数選択
+/// ロジック（`sample_step`・`Generator::multinomial` 等はいずれも
+/// `pub(crate)`／内部実装のためテストクレートから直接再現できない）を
+/// 再実装せずに済む。codex-review 指摘（PR #2324・イシュー #2191）:
+/// CPU 間比較（`cpu_backend_ops_matches_naive_ops_for_greedy_
+/// generation`／`..._top_k_generation_with_same_seed`）が最終 token 列
+/// のみを突合しており、同じ token が選ばれても logits が REQ-2 の
+/// 統一複合判定の許容誤差を超えて異なっていても検出できない不足を
+/// 埋める。
+fn replay_capturing_logits<M: AutoregressiveModel>(
+    model: &M,
+    prompt: &Tensor<i32>,
+    generated_ids: &[i32],
+) -> Vec<Vec<f32>> {
+    let prompt_len = prompt.shape()[0];
+    let mut caches: Vec<KvCache> = (0..model.num_kv_layers()).map(|_| KvCache::new()).collect();
+    let mut step_logits: Vec<Vec<f32>> = Vec::new();
+
+    let prompt_ids = Tensor::new(generated_ids[..prompt_len].to_vec(), &[1, prompt_len])
+        .expect("fixture: prompt_len は generated_ids の長さ以下");
+    let logits = model.forward_step(&prompt_ids, &mut caches).unwrap();
+    step_logits.push(logits.contiguous().host_slice().into_owned());
+
+    // decode: 実際に生成された token を 1 つずつ再投入する（末尾の
+    // token は generate() の decode ループでも forward_step へ渡され
+    // ないため対象外——`run_greedy_capturing_logits` と同じ呼び出し
+    // 回数になる）。
+    for &id in &generated_ids[prompt_len..generated_ids.len() - 1] {
+        let step_ids = Tensor::new(vec![id], &[1, 1]).unwrap();
+        let logits = model.forward_step(&step_ids, &mut caches).unwrap();
+        step_logits.push(logits.contiguous().host_slice().into_owned());
+    }
+
+    step_logits
+}
+
 #[test]
 fn cpu_backend_ops_matches_naive_ops_for_greedy_generation() {
     let prompt = prompt_1d(vec![0, 1, 2]);
@@ -231,11 +281,27 @@ fn cpu_backend_ops_matches_naive_ops_for_greedy_generation() {
     let cpu_out = generate(&cpu_model, &prompt, &config).unwrap();
     let naive_out = generate(&naive_model, &prompt, &config).unwrap();
 
+    let cpu_ids: Vec<i32> = cpu_out.contiguous().host_slice().into_owned();
+    let naive_ids: Vec<i32> = naive_out.contiguous().host_slice().into_owned();
     assert_eq!(
-        cpu_out.contiguous().host_slice().into_owned(),
-        naive_out.contiguous().host_slice().into_owned(),
+        cpu_ids, naive_ids,
         "CpuBackendOps と NaiveOps で generate() の token 列が一致しない"
     );
+
+    // token 列一致だけでは logits 自体の乖離を見逃すため（codex-review
+    // 指摘・PR #2324）、generate() が辿った token 列を再生して各
+    // forward_step の logits を REQ-2 の統一複合判定（`assert_parity`）
+    // で突合する。
+    let cpu_logits = replay_capturing_logits(&cpu_model, &prompt, &cpu_ids);
+    let naive_logits = replay_capturing_logits(&naive_model, &prompt, &cpu_ids);
+    assert_eq!(cpu_logits.len(), naive_logits.len());
+    for (step, (c, n)) in cpu_logits.iter().zip(naive_logits.iter()).enumerate() {
+        assert_parity(
+            &format!("generate step {step}: CpuBackendOps vs NaiveOps logits (Greedy)"),
+            c,
+            n,
+        );
+    }
 }
 
 #[test]
@@ -249,12 +315,28 @@ fn cpu_backend_ops_matches_naive_ops_for_top_k_generation_with_same_seed() {
     let cpu_out = generate(&cpu_model, &prompt, &config).unwrap();
     let naive_out = generate(&naive_model, &prompt, &config).unwrap();
 
+    let cpu_ids: Vec<i32> = cpu_out.contiguous().host_slice().into_owned();
+    let naive_ids: Vec<i32> = naive_out.contiguous().host_slice().into_owned();
     assert_eq!(
-        cpu_out.contiguous().host_slice().into_owned(),
-        naive_out.contiguous().host_slice().into_owned(),
+        cpu_ids, naive_ids,
         "CpuBackendOps と NaiveOps で generate()（TopK・同一 seed）の \
          token 列が一致しない"
     );
+
+    // token 列一致だけでは logits 自体の乖離を見逃すため（codex-review
+    // 指摘・PR #2324）、generate() が辿った token 列を再生して各
+    // forward_step の logits を REQ-2 の統一複合判定（`assert_parity`）
+    // で突合する。
+    let cpu_logits = replay_capturing_logits(&cpu_model, &prompt, &cpu_ids);
+    let naive_logits = replay_capturing_logits(&naive_model, &prompt, &cpu_ids);
+    assert_eq!(cpu_logits.len(), naive_logits.len());
+    for (step, (c, n)) in cpu_logits.iter().zip(naive_logits.iter()).enumerate() {
+        assert_parity(
+            &format!("generate step {step}: CpuBackendOps vs NaiveOps logits (TopK seed 77)"),
+            c,
+            n,
+        );
+    }
 }
 
 // --- 実機横断（`#[ignore]`。Metal／CUDA。CPU と token 列を突合）--------
