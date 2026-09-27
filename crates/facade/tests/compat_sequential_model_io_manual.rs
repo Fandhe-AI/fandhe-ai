@@ -36,24 +36,48 @@ use fandhe_ai::compat::Sequential;
 use fandhe_ai::interop::safetensors::{load_safetensors_f32, save_safetensors_f32};
 use fandhe_ai::{AutodiffError, Tensor};
 
-/// テストごとに衝突しない一時ディレクトリ（プロセス ID + テスト名）を
-/// 作り、`Drop` で必ず削除する（`interop_safetensors_roundtrip.rs` の
-/// `temp_dir_for` と同型だが、こちらは呼び出し側の `unwrap` パニックが
-/// 途中で発生しても確実に片付くよう `Drop` ガードにした）。
+/// テストごとに衝突しない一時ディレクトリを新規作成し、`Drop` で必ず
+/// 削除する（`interop_safetensors_roundtrip.rs` の `temp_dir_for` と
+/// 同じ目的だが、命名方式・作成 API は異なる。こちらは呼び出し側の
+/// `unwrap` パニックが途中で発生しても確実に片付くよう `Drop` ガード
+/// にした）。
+///
+/// 名前はプロセス ID・生成時刻（ナノ秒）・プロセス内カウンタ・テスト名
+/// を組み合わせた一意名とし、`create_dir`（`create_dir_all` と異なり
+/// 既存パスには `AlreadyExists` で失敗する）で新規作成できたパスだけを
+/// 保持する。事前の `remove_dir_all` は行わない（codex-review 指摘。
+/// PID だけの予測可能な固定名だと、前回異常終了の残骸削除のつもりで
+/// 無関係な既存ディレクトリ・ファイルを削除しうるため）。
 struct TempDirGuard {
     path: std::path::PathBuf,
 }
 
 impl TempDirGuard {
     fn new(test_name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "fandhe-ai-model-io-manual-{}-{test_name}",
-            std::process::id()
-        ));
-        // 前回異常終了の残骸があれば消してから作り直す。
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        Self { path }
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        let base = std::env::temp_dir();
+        let pid = std::process::id();
+        // 有限回のリトライで一意名を確定する。同一プロセス内カウンタと
+        // ナノ秒時刻・pid の組で、通常運用では初回で成功する。
+        for attempt in 0..64u32 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock はエポック以降である前提")
+                .as_nanos();
+            let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let candidate = base.join(format!(
+                "fandhe-ai-model-io-manual-{pid}-{nanos}-{seq}-{test_name}"
+            ));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => return Self { path: candidate },
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    panic!("attempt {attempt}: 一時ディレクトリ作成に失敗: {err}")
+                }
+            }
+        }
+        panic!("一時ディレクトリの一意名確定に規定回数以内で失敗した");
     }
 
     fn join(&self, name: &str) -> std::path::PathBuf {
