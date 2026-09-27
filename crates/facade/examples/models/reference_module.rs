@@ -160,6 +160,11 @@ pub fn sub_tensor_f32(
     len: usize,
 ) -> Result<Tensor<f32>, AutodiffError> {
     let full_shape = x.shape();
+    if full_shape.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "sub_tensor_f32: x の rank は 1 以上である必要がある（スカラーは不可）".to_string(),
+        ));
+    }
     let n = full_shape[0];
     if start + len > n {
         return Err(AutodiffError::InvalidArgument(format!(
@@ -187,7 +192,13 @@ pub fn sub_tensor_i32(
     start: usize,
     len: usize,
 ) -> Result<Tensor<i32>, AutodiffError> {
-    let n = y.shape()[0];
+    let y_shape = y.shape();
+    if y_shape.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "sub_tensor_i32: y の rank は 1 以上である必要がある（スカラーは不可）".to_string(),
+        ));
+    }
+    let n = y_shape[0];
     if start + len > n {
         return Err(AutodiffError::InvalidArgument(format!(
             "sub_tensor_i32: [{start}, {}) が先頭軸の長さ {n} を超える",
@@ -220,7 +231,13 @@ pub fn fit_epochs<M: Trainable>(
             "fit_epochs: epochs・batch_size はいずれも 0 より大きい必要がある".to_string(),
         ));
     }
-    let n = x.shape()[0];
+    let x_shape = x.shape();
+    if x_shape.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "fit_epochs: x の rank は 1 以上である必要がある（スカラーは不可）".to_string(),
+        ));
+    }
+    let n = x_shape[0];
     if n == 0 {
         return Err(AutodiffError::InvalidArgument(
             "fit_epochs: x は空であってはならない".to_string(),
@@ -236,19 +253,23 @@ pub fn fit_epochs<M: Trainable>(
     model.set_training(true);
     let mut history = Vec::with_capacity(epochs);
     for _ in 0..epochs {
+        // 各バッチの mean loss（`cross_entropy_mean` はバッチ内平均）に
+        // バッチサイズ `len` を掛けて標本合計へ戻し、epoch 終端でまとめて
+        // 処理標本数 `n` で割ることで epoch loss を標本平均にする
+        // （batch_size が n を割り切らない場合、最終バッチが小さいと
+        // バッチ数単純平均では過大評価になるため。Codex レビュー指摘・
+        // イシュー #2202 PR #2325）。
         let mut total = 0.0f32;
-        let mut count = 0usize;
         let mut start = 0;
         while start < n {
             let len = batch_size.min(n - start);
             let xb = sub_tensor_f32(x, start, len)?;
             let yb = sub_tensor_i32(y, start, len)?;
             let loss = model.train_step(&xb, &yb, opt)?;
-            total += loss;
-            count += 1;
+            total += loss * len as f32;
             start += len;
         }
-        history.push(total / count as f32);
+        history.push(total / n as f32);
     }
     Ok(history)
 }
@@ -271,7 +292,13 @@ pub fn accuracy<M: ReferenceModule>(
             "accuracy: num_classes は 0 より大きい必要がある".to_string(),
         ));
     }
-    let n = x.shape()[0];
+    let x_shape = x.shape();
+    if x_shape.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "accuracy: x の rank は 1 以上である必要がある（スカラーは不可）".to_string(),
+        ));
+    }
+    let n = x_shape[0];
     if n == 0 {
         return Err(AutodiffError::InvalidArgument(
             "accuracy: x は空であってはならない".to_string(),
