@@ -215,7 +215,7 @@ impl HostStaging {
     }
 }
 
-/// [`HostStagingCache::take`]／[`put`](HostStagingCache::put) の呼び出し
+/// `HostStagingCache::take`／`put` の呼び出し
 /// 回数・キャッシュ状態を集計する診断用スナップショット（テスト・
 /// 実機診断向け。`pub` だが値の生成は本モジュール限定）。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

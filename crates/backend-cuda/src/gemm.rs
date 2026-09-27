@@ -820,7 +820,7 @@ pub(crate) fn validate_tiled_pipeline_k_bound(k: u32) -> Result<(), CudaError> {
 }
 
 /// tiled f32 経路（[`CudaGemm::run_tiled_f32`]／[`CudaGemm::launch_tiled_f32`]／
-/// [`CudaGemm::launch_tiled_f32_resident`] の 3 入口）が実際にどちらの
+/// `CudaGemm::launch_tiled_f32_resident` の 3 入口）が実際にどちらの
 /// カーネルへ分岐したかを表す（観測用の可観測 API。
 /// `wmma_tf32_staged_swizzle_group_width` と同型。イシュー #1137）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -912,8 +912,8 @@ fn tiled_pipeline_descriptor() -> Result<CudaKernelDescriptor, CudaError> {
 
 /// [`TiledPipelineFunction`] が保持するタイル構成タグ（イシュー #1343）。
 ///
-/// [`CudaGemm::select_tiled_f32_kernel`]（本番既定経路）・
-/// [`tiled_pipeline_launch_config`]（grid/block 構成の導出）がこのタグを
+/// `CudaGemm::select_tiled_f32_kernel`（本番既定経路）・
+/// `tiled_pipeline_launch_config`（grid/block 構成の導出）がこのタグを
 /// 見て起動 config を決める。64×64（既存・#1033）と 128×64（本イシュー・
 /// #1343）はブロックタイル寸法・スレッド当たり担当要素数が異なり、
 /// `LaunchConfig` の grid_dim が別式になるため、`TiledPipelineFunction` に
@@ -928,7 +928,7 @@ pub enum TiledPipelineTile {
     /// `kernels_tiled_pipeline_128x64::gemm_tiled_pipeline_128x64_f32`
     /// （128×64×16・8×4 レジスタブロック・A フラグメント XOR スウィズル。
     /// イシュー #1343。本番結線は
-    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] で opt-in ゲート）。
+    /// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED` で opt-in ゲート）。
     Bm128Bn64,
 }
 
@@ -1218,16 +1218,16 @@ pub(crate) fn persistent_tile_count(
 ///   `CudaSlice<u32>`。[`CudaGemm::launch_tiled_pipeline_persistent_f32`]
 ///   が起動直前にストリーム順序でゼロ化する。ハンドルへ封じ込めることで
 ///   呼び出し元が毎回確保し直すコストを避ける。`func` と同じ `CudaDevice`
-///   （[`compile_tiled_pipeline_persistent_variant`]）から確保するため、
+///   （`compile_tiled_pipeline_persistent_variant`）から確保するため、
 ///   `context_ptr` の一致検証がこのバッファの context も暗黙に保証する。
-/// - `num_sms`／`blocks_per_sm`: grid サイズ（[`persistent_grid_blocks`]）
+/// - `num_sms`／`blocks_per_sm`: grid サイズ（`persistent_grid_blocks`）
 ///   の算出に使う実測 SM 数・SM あたり占有可能 block 数（またはホスト
 ///   指定値）。
 /// - `tile`（イシュー #1347 追加）: [`TiledPipelineTile`] タグ。
-///   [`persistent_tile_count`]／[`persistent_block_threads`]・
+///   `persistent_tile_count`／`persistent_block_threads`・
 ///   [`CudaGemm::launch_tiled_pipeline_persistent_f32`] の起動 config
-///   導出が、64×64（[`compile_tiled_pipeline_persistent_variant`]）・
-///   128×64（[`compile_tiled_pipeline_persistent_128x64_variant`]）の
+///   導出が、64×64（`compile_tiled_pipeline_persistent_variant`）・
+///   128×64（`compile_tiled_pipeline_persistent_128x64_variant`）の
 ///   どちらでコンパイルされたハンドルかをこのタグで判別する
 ///   （`TiledPipelineFunction` が同じ理由でタグを保持するのと同型。
 ///   `kernels_tiled_pipeline_128x64.rs` 冒頭コメント「位置づけ」参照）。
@@ -1255,7 +1255,7 @@ impl PersistentTiledPipelineFunction {
         self.tile
     }
 
-    /// このハンドルの起動 grid が使う実測 SM 数（[`persistent_grid_blocks`]
+    /// このハンドルの起動 grid が使う実測 SM 数（`persistent_grid_blocks`
     /// の引数）。ベンチが解決済み grid 容量を表示するための診断用
     /// アクセサ（イシュー #1347。128×64 が「smem 制約で 2 block/SM」と
     /// 主張するモジュールコメント〈`kernels_tiled_pipeline_128x64.rs`
@@ -2479,8 +2479,8 @@ impl CudaGemm {
     ///
     /// 返す [`CudaGemm`] は [`new`](Self::new) が返すものと同一の型・API
     /// （`run_wmma_tf32` 含む）を持ち、grid/block 構成・形状検証・整列
-    /// 判定（[`wmma_tf32_staged_alignment_ok`]）・K 上限検証
-    /// （[`validate_wmma_tf32_staged_k_bound`]）はブロックタイル定数
+    /// 判定（`wmma_tf32_staged_alignment_ok`）・K 上限検証
+    /// （`validate_wmma_tf32_staged_k_bound`）はブロックタイル定数
     /// （`WMMA_TF32_STAGED_BLOCK_M`/`_N`）を変更しないため共有できる
     /// （swizzle はブロックがどの `(m_block, n_block)` を担当するかの
     /// 割り当てのみを変え、各出力要素のアキュムレート順序・ブロックあたり
@@ -2646,7 +2646,7 @@ impl CudaGemm {
     /// A/A 誤認を防ぐ fail-closed 判断）。
     ///
     /// `a_pad`/`b_pad` の妥当性検査（4 要素倍数・下限・SMEM 予算内）は
-    /// [`kernels_wmma_opt::wmma_tf32_f32_staged_source_with_pads`] が
+    /// `kernels_wmma_opt::wmma_tf32_f32_staged_source_with_pads` が
     /// 経由する `validate_wmma_tf32_staged_config` に委譲する。
     ///
     /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
@@ -2738,8 +2738,8 @@ impl CudaGemm {
     /// TASK-11.1d（#63）で追加された opt 版（`Self::wmma_tf32_opt`）は
     /// 未計測だった。本コンストラクタは `run_wmma_tf32` の 3 段選択から
     /// staged 経路を除外することで、公開 API を経由しつつ常に opt 版が
-    /// 選ばれる状態を作る（[`new_without_tf32_staged_swizzle`]・
-    /// [`new_with_tf32_staged_swizzle`] と同じ「`new` で通常構築した後に
+    /// 選ばれる状態を作る（`new_without_tf32_staged_swizzle`・
+    /// `new_with_tf32_staged_swizzle` と同じ「`new` で通常構築した後に
     /// スロットを差し替える」設計）。
     ///
     /// 手順: [`new`](Self::new) で通常構築した後、`wmma_tf32_staged`／
@@ -2992,7 +2992,7 @@ impl CudaGemm {
         tiled_f32_kernel_kind(self.tiled_pipeline.is_some(), 0, n, k)
     }
 
-    /// [`Self::select_tiled_f32_kernel`] が実際に選ぶタイル構成
+    /// `Self::select_tiled_f32_kernel` が実際に選ぶタイル構成
     /// （[`TiledPipelineTile`]）を、起動を伴わずに照会する（イシュー
     /// #1344。`tiled_f32_kernel_for` の一段詳細版——`Pipeline` と判定
     /// された場合に 64×64／128×64 のどちらへ分岐するかまで返す）。
@@ -3004,7 +3004,7 @@ impl CudaGemm {
     ///
     /// **実起動との整合（codex-review P2 指摘・PR #1385）**: `Pipeline`
     /// と判定された場合の分岐先は、`select_tiled_f32_kernel` と同じ
-    /// [`Self::select_tiled_pipeline_handle`] を呼んで得たハンドル自身の
+    /// `Self::select_tiled_pipeline_handle` を呼んで得たハンドル自身の
     /// `tile()` タグを返す（閾値を独立に再計算しない）。これにより、
     /// `new_with_tiled_pipeline_128x64`（第 1 スロット自体が 128×64 へ
     /// 差し替わっている診断インスタンス）に対して閾値未満の形状
@@ -3031,8 +3031,8 @@ impl CudaGemm {
         }
     }
 
-    /// [`Self::tiled_pipeline_128x64`] スロット（第 2 スロット。
-    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が `true` の場合の
+    /// `Self::tiled_pipeline_128x64` スロット（第 2 スロット。
+    /// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED` が `true` の場合の
     /// み `Self::new` が追加コンパイルする）が実際にコンパイル済みかを
     /// 返す（`tiled_pipeline_available` の 128×64 版。イシュー #1344・
     /// codex-review P2 指摘・PR #1385。テストが「本番結線が有効か」
@@ -3360,8 +3360,8 @@ impl CudaGemm {
     }
 
     /// 128×64×16 pipeline カーネル（イシュー #1343）の任意ステージ数
-    /// （[`kernels_tiled_pipeline_128x64::TP128_MIN_STAGES`]..=
-    /// [`kernels_tiled_pipeline_128x64::TP128_MAX_STAGES`]）変種を
+    /// （`kernels_tiled_pipeline_128x64::TP128_MIN_STAGES`..=
+    /// `kernels_tiled_pipeline_128x64::TP128_MAX_STAGES`）変種を
     /// オンデマンドでコンパイルする（[`Self::compile_tiled_pipeline_variant`]
     /// の 128×64 版。`examples/gemm_tiled_pipeline_bench.rs` の段数比較・
     /// A/B 計測用途。`&self` を取らない理由・公開面ゲートの理由は同メソッド
@@ -3403,7 +3403,7 @@ impl CudaGemm {
     /// `&self` を取らず `device` のみから完結し、本番オブジェクト
     /// （[`new`](Self::new)）の初期化コストには一切影響しない）。
     ///
-    /// `blocks_per_sm`: grid サイズ（[`persistent_grid_blocks`]）の SM
+    /// `blocks_per_sm`: grid サイズ（`persistent_grid_blocks`）の SM
     /// あたり block 数。`Some(v)`（`v >= 1`）は明示指定（`Some(1)` は
     /// 「grid = SM 数」を意味する。イシュー #1346 の受け入れ条件が挙げる
     /// 構成）。`Some(0)` は `CudaError::InvalidKernelConfig` を返す
@@ -3421,7 +3421,7 @@ impl CudaGemm {
     /// （[`PersistentTiledPipelineFunction`] ドキュメンテーションコメント
     /// 参照）。
     ///
-    /// 実装本体は [`compile_tiled_pipeline_persistent_generic`]（イシュー
+    /// 実装本体は `compile_tiled_pipeline_persistent_generic`（イシュー
     /// #1347 で 128×64 版〈[`Self::compile_tiled_pipeline_persistent_128x64_variant`]〉
     /// と共通化した private ヘルパー）へ委譲する薄いラッパー。
     ///
@@ -3467,7 +3467,7 @@ impl CudaGemm {
     /// [`new`](Self::new) が保持する既定 3 stage の `Self::tiled_pipeline`
     /// が実際にどちらのタイル構成（[`TiledPipelineTile`]）でコンパイル
     /// されているかを返す（既定は常に `Some(Bm64Bn64)`。
-    /// [`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`] が有効化されない限り
+    /// `TILED_PIPELINE_128X64_PRODUCTION_ENABLED` が有効化されない限り
     /// `Bm128Bn64` にはならない。[`Self::new_with_tiled_pipeline_128x64`]
     /// 経由で構築したインスタンスでは `Some(Bm128Bn64)` になる。cp.async
     /// 非対応環境等でコンパイル自体に失敗している場合は `None`。診断・
@@ -3480,15 +3480,15 @@ impl CudaGemm {
     }
 
     /// [`Self::new`] と同じ手順で構築したうえで、`tiled_pipeline` スロット
-    /// を 128×64 版（イシュー #1343。[`compile_tiled_pipeline_128x64`]）へ
+    /// を 128×64 版（イシュー #1343。`compile_tiled_pipeline_128x64`）へ
     /// 差し替えた診断専用インスタンスを返す。
     ///
-    /// `run_tiled_f32` 系 3 入口（[`Self::select_tiled_f32_kernel`]）は
+    /// `run_tiled_f32` 系 3 入口（`Self::select_tiled_f32_kernel`）は
     /// `self.tiled_pipeline` を直接参照するため、本コンストラクタで得た
     /// インスタンスに対しては cp.async 16 バイト整列形状（`n % 4 == 0 &&
     /// k % 4 == 0`）で自動的に 128×64 カーネルへ分岐する（#1344 の GB10
     /// 実機比較・`tests/cpu_cuda_tiled_pipeline_parity.rs` の bit 一致
-    /// 自己検証が使う経路）。[`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`]
+    /// 自己検証が使う経路）。`TILED_PIPELINE_128X64_PRODUCTION_ENABLED`
     /// の値には依存しない（常に 128×64 をコンパイルする明示的な opt-in
     /// 経路であり、本番既定 [`Self::new`] の挙動は変えない）。
     ///
@@ -3682,10 +3682,10 @@ impl CudaGemm {
     /// ム内順序実行契約により、この memset はカーネル起動より必ず先に
     /// GPU 上で完了する。明示的な同期は不要。#1013 と同じ前提）。
     ///
-    /// grid サイズは [`persistent_grid_blocks`]（`func.num_sms` ×
+    /// grid サイズは `persistent_grid_blocks`（`func.num_sms` ×
     /// `func.blocks_per_sm`、出力タイル総数
-    /// [`persistent_tile_count`] に頭打ち）で決まり、ブロック次元は
-    /// [`kernels_tiled_pipeline::TP_BLOCK_THREADS`] 固定 1 次元（非
+    /// `persistent_tile_count` に頭打ち）で決まり、ブロック次元は
+    /// `kernels_tiled_pipeline::TP_BLOCK_THREADS` 固定 1 次元（非
     /// persistent 版と同じスレッド分解契約。`kernels_tiled_pipeline.rs`
     /// 参照）。
     ///
@@ -6284,7 +6284,7 @@ mod tma_tiled_pipeline {
     impl CudaGemm {
         /// TMA 版カーネル（[`kernels_tiled_pipeline::tiled_pipeline_tma_
         /// f32_source`]）を `device` 上でコンパイルする（既定
-        /// [`kernels_tiled_pipeline::TP_DEFAULT_STAGES`] 段数固定。任意
+        /// `kernels_tiled_pipeline::TP_DEFAULT_STAGES` 段数固定。任意
         /// 段数が必要な場合は将来 `_with_stages` 版を追加する想定。本
         /// issue のスコープでは既定段数のみ提供する）。
         ///
@@ -6351,7 +6351,7 @@ mod tma_tiled_pipeline {
         /// そのまま no-op になる〉とは異なり、TMA 版はテンソルマップ構築
         /// 時に `global_cols`/`global_rows`（K 由来次元）へ `0` を渡せない
         /// ため〈`TmaBoxSpec::validate` の fail-closed ゼロ次元拒否〉、
-        /// [`TmaTiledPipelineMapsKind::ZeroK`] として保持し、起動時
+        /// `TmaTiledPipelineMapsKind::ZeroK` として保持し、起動時
         /// （[`Self::launch_tiled_pipeline_tma_f32_prepared`]）に
         /// `c_dev` を明示的に `memset_zeros` して「+0.0 を store する」
         /// 契約を代替する）。

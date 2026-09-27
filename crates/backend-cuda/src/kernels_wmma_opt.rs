@@ -1167,7 +1167,7 @@ const _: () = assert!(
 
 /// [`WmmaTf32StagedKernelConfig`] で展開したソースを
 /// [`wmma_tf32_f32_staged_source`] が 1 回だけキャッシュして返す
-/// （[`wmma_tf32_f32_opt_source`] と同じ方針）。
+/// （`wmma_tf32_f32_opt_source` と同じ方針）。
 pub fn wmma_tf32_f32_staged_source() -> &'static str {
     &WMMA_TF32_F32_STAGED_SOURCE
 }
@@ -1372,7 +1372,7 @@ pub fn wmma_tf32_f32_staged_source_with_pads(
 
 /// [`render_wmma_tf32_staged`] に渡す構成値（イシュー #500）。
 ///
-/// 既存 [`WmmaOptKernelConfig`]（TF32 opt・f16 opt 共通）へ `stages`
+/// 既存 `WmmaOptKernelConfig`（TF32 opt・f16 opt 共通）へ `stages`
 /// フィールドを追加する代替案は採らず、staged 専用の独立した struct と
 /// した（実装計画 3.1 節。共有 struct へフィールドを追加すると、本ファイル
 /// 内の f16 opt・TF32 opt 双方の既存 `WmmaOptKernelConfig { .. }` リテラル
@@ -1387,20 +1387,20 @@ pub struct WmmaTf32StagedKernelConfig {
     /// 共有メモリ K タイル幅。
     pub k_tile: u32,
     /// `cp.async` multi-stage pipelining のステージ数（`>= 2` 必須。
-    /// [`WMMA_TF32_STAGED_STAGES`] 直下コメント参照）。
+    /// `WMMA_TF32_STAGED_STAGES` 直下コメント参照）。
     pub stages: u32,
     /// A タイル（`as_tile[STAGES][BLOCK_M][A_PAD]`）の行幅（パディング後。
-    /// イシュー #743。既定値は [`WMMA_TF32_STAGED_A_PAD`]）。SMEM バンク
+    /// イシュー #743。既定値は `WMMA_TF32_STAGED_A_PAD`）。SMEM バンク
     /// コンフリクト計測のため config フィールド化してあるが、本番経路
     /// （[`default_tf32_staged`](Self::default_tf32_staged)）は従来の
     /// 定数値のまま byte 完全一致で展開する
     /// （`wmma_tf32_staged_default_config_render_is_byte_identical_to_production_source`
-    /// が回帰検査する）。[`validate_wmma_tf32_staged_padding`] が
+    /// が回帰検査する）。`validate_wmma_tf32_staged_padding` が
     /// `k_tile` との整合・4 要素倍数・余剰上限を fail-closed 検査する。
     pub a_pad: u32,
     /// B タイル（`bs_tile[STAGES][K_TILE][B_PAD]`）の行幅（パディング後。
     /// イシュー #743）。`a_pad` と同じ契約。既定値は
-    /// [`WMMA_TF32_STAGED_B_PAD`]。
+    /// `WMMA_TF32_STAGED_B_PAD`。
     pub b_pad: u32,
     /// M 次元の焼き込み方式。
     pub dim_m: DimSpec,
@@ -1413,7 +1413,7 @@ pub struct WmmaTf32StagedKernelConfig {
 impl WmmaTf32StagedKernelConfig {
     /// TF32 opt-staged カーネルの既定構成（Rust 側タイル定数と同一値。
     /// 全次元 `Dynamic`）。`a_pad`/`b_pad` は
-    /// [`WMMA_TF32_STAGED_A_PAD`]/[`WMMA_TF32_STAGED_B_PAD`]（本番経路の
+    /// `WMMA_TF32_STAGED_A_PAD`/`WMMA_TF32_STAGED_B_PAD`（本番経路の
     /// 唯一の真実源）をそのまま採用するため、本関数が返す構成の展開結果は
     /// イシュー #743 のパディング config 化の前後で byte 完全一致を保つ。
     pub fn default_tf32_staged() -> Self {
@@ -1430,7 +1430,7 @@ impl WmmaTf32StagedKernelConfig {
         }
     }
 
-    /// [`WmmaOptKernelConfig::validate_launch_shape`] と同じ設計。
+    /// `WmmaOptKernelConfig::validate_launch_shape` と同じ設計。
     #[allow(dead_code)] // 理由は WmmaOptKernelConfig::validate_launch_shape と同じ
     pub fn validate_launch_shape(&self, m: u32, n: u32, k: u32) -> Result<(), CudaError> {
         self.dim_m.matches_launch_dim(m)?;
@@ -1439,7 +1439,7 @@ impl WmmaTf32StagedKernelConfig {
         Ok(())
     }
 
-    /// [`WmmaOptKernelConfig::launch_config`] と同じ設計（`stages` は
+    /// `WmmaOptKernelConfig::launch_config` と同じ設計（`stages` は
     /// grid/block 次元に影響しない。共有メモリは静的宣言のため
     /// `shared_mem_bytes` は常に 0）。
     #[allow(dead_code)] // 理由は WmmaOptKernelConfig::launch_config と同じ
@@ -1461,7 +1461,7 @@ impl WmmaTf32StagedKernelConfig {
 
 /// [`render_wmma_tf32_staged`] が返す、展開済み TF32 opt-staged カーネル
 /// ソースと展開元 [`WmmaTf32StagedKernelConfig`] を 1 個にまとめた
-/// descriptor（[`RenderedWmmaTf32OptKernel`] と同じ設計）。
+/// descriptor（`RenderedWmmaTf32OptKernel` と同じ設計）。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RenderedWmmaTf32StagedKernel {
@@ -1470,7 +1470,7 @@ pub struct RenderedWmmaTf32StagedKernel {
 }
 
 impl RenderedWmmaTf32StagedKernel {
-    /// [`RenderedWmmaTf32OptKernel::compile`] と同じ設計。固定エント
+    /// `RenderedWmmaTf32OptKernel::compile` と同じ設計。固定エント
     /// リポイント `"gemm_wmma_tf32_staged"`。
     #[allow(dead_code)]
     pub fn compile(
@@ -1496,7 +1496,7 @@ impl RenderedWmmaTf32StagedKernel {
 
 /// [`RenderedWmmaTf32StagedKernel::compile`] が返す、コンパイル済み
 /// `CudaFunction` と展開元 [`WmmaTf32StagedKernelConfig`] を不可分に
-/// 束ねた descriptor（[`CompiledWmmaTf32OptKernel`] と同じ設計）。
+/// 束ねた descriptor（`CompiledWmmaTf32OptKernel` と同じ設計）。
 #[allow(dead_code)]
 pub struct CompiledWmmaTf32StagedKernel {
     func: cudarc::driver::CudaFunction,
@@ -1504,9 +1504,9 @@ pub struct CompiledWmmaTf32StagedKernel {
 }
 
 impl CompiledWmmaTf32StagedKernel {
-    /// [`CompiledWmmaTf32OptKernel::launch_tf32`] と同じ検証手順・同じ
+    /// `CompiledWmmaTf32OptKernel::launch_tf32` と同じ検証手順・同じ
     /// no-op early return 契約に加え、cp.async 16 バイト整列制約
-    /// （[`crate::gemm::wmma_tf32_staged_alignment_ok`]）を fail-closed で
+    /// （`crate::gemm::wmma_tf32_staged_alignment_ok`）を fail-closed で
     /// 検証する。
     ///
     /// `gemm.rs::run_wmma_tf32`（3 段フォールバックの経路選択）は同じ
@@ -1928,8 +1928,8 @@ fn render_wmma_tf32_staged_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> String
 }
 
 /// [`WmmaTf32StagedKernelConfig`] を TF32 opt-staged カーネルソースへ展開
-/// する（イシュー #500。[`render_wmma_tf32_opt`] と同じ設計）。展開前に
-/// [`validate_wmma_tf32_staged_config`] で SMEM 予算・倍数関係・スレッド数
+/// する（イシュー #500。`render_wmma_tf32_opt` と同じ設計）。展開前に
+/// `validate_wmma_tf32_staged_config` で SMEM 予算・倍数関係・スレッド数
 /// 上限を fail-closed 検査する。
 #[allow(dead_code)]
 pub fn render_wmma_tf32_staged(
@@ -1945,12 +1945,12 @@ pub fn render_wmma_tf32_staged(
 /// TF32 opt-staged 動的共有メモリ変種（`WMMA_TF32_STAGED_DYNAMIC_SMEM=1`）
 /// が要求する共有メモリバイト数を計算する単一ソース（イシュー #742）。
 ///
-/// [`WMMA_TF32_F32_STAGED_BODY`] の dyn 分岐は c_tile をステージバッファ
+/// `WMMA_TF32_F32_STAGED_BODY` の dyn 分岐は c_tile をステージバッファ
 /// 先頭へエイリアスする（同分岐のコメント参照）ため、所要量は
 /// `max(stages 段の as_tile+bs_tile 合計, c_tile)` であり、単純合算
-/// （static 側 [`validate_wmma_tf32_staged_config`] の
+/// （static 側 `validate_wmma_tf32_staged_config` の
 /// `stage_bytes_a + stage_bytes_b + c_tile_bytes`）とは異なる。
-/// [`validate_wmma_tf32_staged_dyn_config`]（起動前検証）と
+/// `validate_wmma_tf32_staged_dyn_config`（起動前検証）と
 /// `examples/gemm_wmma_tf32_staged_stages_bench.rs`（occupancy 概算表示。
 /// `internal-diagnostics` feature 配下の `diagnostics` モジュール経由）の
 /// 両方がこの関数を単一ソースとして呼ぶ。
@@ -2100,7 +2100,7 @@ fn render_wmma_tf32_staged_dyn_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> St
 /// メモリ変種**ソースへ展開する（イシュー #742。`internal-diagnostics`
 /// feature 配下の段数スイープ計測専用。[`render_wmma_tf32_staged`] の
 /// 本番経路には一切関与しない）。展開前に
-/// [`validate_wmma_tf32_staged_dyn_config`] で `optin_budget_bytes` に
+/// `validate_wmma_tf32_staged_dyn_config` で `optin_budget_bytes` に
 /// 対する動的 SMEM 予算・倍数関係・スレッド数上限を fail-closed 検査する。
 #[allow(dead_code)]
 pub fn render_wmma_tf32_staged_dyn(

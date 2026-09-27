@@ -493,10 +493,10 @@ pub fn specialized_mma_descriptor(
 /// コンパイル済み `mma_f16` カーネルを保持し、複数回の起動へ再利用可能
 /// にする公開ハンドル（イシュー #531 実装計画 §3.1・§3.2 点 3）。
 ///
-/// [`RenderedMmaKernel`]／[`CompiledMmaKernel`] 型自体は非公開のまま
+/// `RenderedMmaKernel`／`CompiledMmaKernel` 型自体は非公開のまま
 /// 維持する（PR #643 codex-review 対応で確立した型レベル封じ込め設計。
 /// カーネルソース・`CudaFunction` を crate 外へ渡さない）。本ハンドルは
-/// [`CompiledMmaKernel`] を非公開フィールドとして内部に保持するだけの
+/// `CompiledMmaKernel` を非公開フィールドとして内部に保持するだけの
 /// 薄いラッパーであり、[`Self::launch_f16`] 以外に内部状態へ到達する
 /// 経路を持たない。
 ///
@@ -530,7 +530,7 @@ pub fn specialized_mma_descriptor(
 /// ["internal-diagnostics"]` を指定し、`cargo test --all-features`
 /// （CI の test ジョブ・`make test` が使うコマンド）でのみビルド・実行
 /// される。feature 無効時は crate 外部からはもちろん crate 内部からも
-/// 到達不能になるため `#[allow(dead_code)]` は不要（[`dim_specs_for`]
+/// 到達不能になるため `#[allow(dead_code)]` は不要（`dim_specs_for`
 /// のように dead-code 解析が誤検知する状況ではなくなった）。
 ///
 /// `stream` は [`Self::compile`] 実行時（NVRTC コンパイル・
@@ -561,18 +561,18 @@ pub struct SpecializedMmaKernelHandle {
 
 #[cfg(feature = "internal-diagnostics")]
 impl SpecializedMmaKernelHandle {
-    /// `shape`・`compiled` から特化 config を構築し（[`specialized_mma_config`]）
-    /// NVRTC コンパイルまで完了させる（[`RenderedMmaKernel::compile`]）。
+    /// `shape`・`compiled` から特化 config を構築し（`specialized_mma_config`）
+    /// NVRTC コンパイルまで完了させる（`RenderedMmaKernel::compile`）。
     /// コンパイルに使った `device` の `stream`（`Arc<CudaStream>`）を
     /// ハンドル内に保持し、以降の [`Self::launch_f16`] 呼び出しは常に
     /// この `stream`（延いては同一 `CudaContext`）でのみ起動する
     /// （本 struct ドキュメンテーションコメント参照）。
     ///
     /// `compiled` が `Dynamic` としている次元は `shape` の対応する値が
-    /// 何であっても焼き込みに影響しない（[`dim_specs_for`] 参照）ため、
+    /// 何であっても焼き込みに影響しない（`dim_specs_for` 参照）ため、
     /// `STATIC_NK`（M=Dynamic）を渡す場合の `shape.m` は任意の非ゼロ値で
     /// よい（後続 [`Self::launch_f16`] が実際の起動ごとの M を渡す）。
-    /// `Static` 化された次元に `0` を渡すと [`specialized_mma_config`]
+    /// `Static` 化された次元に `0` を渡すと `specialized_mma_config`
     /// 内部の `render_mma_f16`（`kernels_mma::validate_mma_kernel_config`）
     /// が fail-closed で拒否する（[`run_specialized_mma_f16`] ドキュメン
     /// テーションコメント「no-op 形状」参照）。
@@ -598,7 +598,7 @@ impl SpecializedMmaKernelHandle {
     }
 
     /// コンパイル済みカーネルを `a`/`b`/`m`/`n`/`k` で起動する（先行検証
-    /// → H2D 転送 → [`CompiledMmaKernel::launch_f16`] → D2H 回収）。
+    /// → H2D 転送 → `CompiledMmaKernel::launch_f16` → D2H 回収）。
     ///
     /// 転送・出力確保より前に `self.cfg.validate_launch_shape`・
     /// `crate::gemm::validate_gemm_dims`（host 側スライス長）で早期
@@ -607,7 +607,7 @@ impl SpecializedMmaKernelHandle {
     /// 無効な起動引数でも GPU 転送・確保〈OOM 等〉が先に発生しえた）。
     /// これは `run_specialized_mma_f16` が呼び出し前に `validate_gemm_dims`
     /// を行うのと同型の多層防御であり、device 側バッファ長・アライメント・
-    /// grid/k タイル境界の最終検証は引き続き [`CompiledMmaKernel::launch_f16`]
+    /// grid/k タイル境界の最終検証は引き続き `CompiledMmaKernel::launch_f16`
     /// （唯一の真実源）が担う。本メソッドはその検証を複製・代替しない。
     /// `Dynamic` 次元は起動ごとに異なる値を許容しうるため、同一ハンドルへ
     /// 複数回呼べる設計とする。
@@ -697,15 +697,15 @@ impl SpecializedMmaKernelHandle {
 /// no-op 形状（`m==0 || n==0`）・`k==0` の早期 return は
 /// `gemm_mma.rs::CudaMmaGemm::run_f16` と同一契約とする。`compiled` が
 /// 対象次元を `Static` 化している場合、`Static(0)` は
-/// [`specialized_mma_config`] 内部の `render_mma_f16`（`kernels_mma::
+/// `specialized_mma_config` 内部の `render_mma_f16`（`kernels_mma::
 /// validate_mma_kernel_config`）が fail-closed で拒否するため、
 /// コンパイルへ進む前にここで no-op 判定を済ませる必要がある
 /// （`CudaMmaGemm::run_f16` は既定 config が全次元 `Dynamic` のため
 /// この制約を持たないが、本関数は `compiled` 次第で `Static(0)` に
 /// 到達しうる点が異なる）。
 ///
-/// 形状検証（`validate_gemm_dims`・[`crate::gemm_mma::validate_mma_alignment`]・
-/// [`crate::gemm_mma::validate_mma_grid_bounds`]）も `CudaMmaGemm::run_f16`
+/// 形状検証（`validate_gemm_dims`・`crate::gemm_mma::validate_mma_alignment`・
+/// `crate::gemm_mma::validate_mma_grid_bounds`）も `CudaMmaGemm::run_f16`
 /// と同一手順・同一関数を再利用し、判定ロジックを複製しない。
 ///
 /// テスト・ベンチからのみ呼ばれる。[`SpecializedMmaKernelHandle`] と
@@ -1858,7 +1858,7 @@ impl CudaGemmAuto {
     /// `docs/dispatch-rules-design.md` §5.6 判定規則 7）。
     ///
     /// `MMA_PRIORITY_PRODUCTION_ENABLED` は `true`（#1191 で有効化
-    /// 済み。[`MMA_PRIORITY_PRODUCTION_ENABLED`] docblock 参照）であり、
+    /// 済み。`MMA_PRIORITY_PRODUCTION_ENABLED` docblock 参照）であり、
     /// `self.mma` が `Some` かつ整列形状であれば `Mma` を返す（非整列
     /// 形状・`mma` 未構築時は `Wmma`／`Tiled` を返す）。いずれの値でも
     /// `run_f16` が実際に呼ぶ実装と常に一致する（`run_f16` も同じ

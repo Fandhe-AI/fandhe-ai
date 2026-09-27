@@ -2026,7 +2026,7 @@ fn replace_source_anchor(
     Ok(src.replacen(anchor, replacement, 1))
 }
 
-/// [`derive_mma_block_tile_layout`] が返す、候補ブロックタイル・段数・warp
+/// `derive_mma_block_tile_layout` が返す、候補ブロックタイル・段数・warp
 /// タイル構成から導出したカーネル起動パラメータの束（イシュー #840）。
 ///
 /// `mma_f16_source_with_block_tile`（下記）のカーネルソース展開と、
@@ -2034,7 +2034,7 @@ fn replace_source_anchor(
 /// `internal-diagnostics` feature 限定）のカーネル起動（`threads`・
 /// `smem_bytes`・opt-in 動的 SMEM 要否判定）の両方が本構造体を経由する
 /// ことで、ブロックスレッド数・共有メモリバイト数の算出式が 1 箇所
-/// （[`derive_mma_block_tile_layout`]）にのみ存在する状態を保つ
+/// （`derive_mma_block_tile_layout`）にのみ存在する状態を保つ
 /// （実装計画「レイアウト導出ヘルパー」節: 「既存
 /// `mma_f16_source_with_block_tile` 内部の SMEM 式を共有化し二重定義を
 /// 作らない」）。
@@ -2069,7 +2069,7 @@ pub struct MmaBlockTileLayout {
 }
 
 impl MmaBlockTileLayout {
-    /// `smem_bytes` が静的 48KiB 上限（[`MMA_STATIC_SMEM_LIMIT_BYTES`]）を
+    /// `smem_bytes` が静的 48KiB 上限（`MMA_STATIC_SMEM_LIMIT_BYTES`）を
     /// 超え、`extern __shared__`（opt-in 動的 SMEM）変種を要求するか。
     #[allow(dead_code)] // 理由は Self と同じ（非公開モジュール）
     pub fn needs_dynamic_smem(&self) -> bool {
@@ -2247,7 +2247,7 @@ pub(crate) fn derive_mma_block_tile_layout(
 /// （`kernels_wmma_opt.rs::validate_wmma_tf32_staged_dyn_config` と同じ
 /// 「ハードコード定数ではなく呼び出し元供給」の方針）。
 ///
-/// - 静的共有メモリ予算（[`MMA_STATIC_SMEM_LIMIT_BYTES`]・48KiB）以下:
+/// - 静的共有メモリ予算（`MMA_STATIC_SMEM_LIMIT_BYTES`・48KiB）以下:
 ///   本番と同じ静的 `__shared__` 配列宣言のまま候補ソースを返す
 ///   （`needs_dynamic_smem=false`。呼び出し元は `mma_ptx_dump` の
 ///   `dump_ptx` に渡すだけで `ptxas -v` 計測できる）。
@@ -2537,7 +2537,7 @@ impl RenderedMmaF16BlockTileKernel {
     /// （`kernels_wmma_opt.rs::RenderedWmmaTf32StagedDynKernel::compile` と
     /// 同じ「必要時のみ opt-in する」方針）。
     ///
-    /// プロセス内 LRU／ディスクキャッシュ（[`RenderedMmaKernel::compile`]
+    /// プロセス内 LRU／ディスクキャッシュ（`RenderedMmaKernel::compile`
     /// の 3 段フォールバック）は使わない: 本 A/B ランナーは候補ごとに
     /// 1 回だけコンパイルすればよく（計測対象は起動後のカーネル実行時間の
     /// み）、キャッシュ層を経由する複雑さを避ける（`gemm_wmma_tf32_staged_
@@ -2588,7 +2588,7 @@ impl RenderedMmaF16BlockTileKernel {
 /// [`RenderedMmaF16BlockTileKernel`] を返す（イシュー #840）。
 ///
 /// `mma_f16_source_with_block_tile`（ソース文字列のみを返す既存 API。
-/// #804）の結果と、その展開に使った [`derive_mma_block_tile_layout`] の
+/// #804）の結果と、その展開に使った `derive_mma_block_tile_layout` の
 /// 結果を 1 個の descriptor へ束ねる薄いラッパー。`optin_budget_bytes`
 /// 超過時は `mma_f16_source_with_block_tile` と同じ理由で
 /// `CudaError::InvalidKernelConfig` を返す（呼び出し元
@@ -2620,7 +2620,7 @@ pub fn render_mma_f16_block_tile(
 
 /// 診断専用（`internal-diagnostics` feature 限定。イシュー #855）:
 /// [`render_mma_f16_block_tile`] と同じ候補パラメータで、
-/// [`mma_f16_source_with_block_tile_forced_dynamic_smem`] を使い
+/// `mma_f16_source_with_block_tile_forced_dynamic_smem` を使い
 /// `extern __shared__` 動的 SMEM 変換を強制適用した
 /// [`RenderedMmaF16BlockTileKernel`] を返す（`uses_dynamic_smem=true`
 /// 固定。`compile`/`launch_f16` が起動側 opt-in 設定・
@@ -2718,7 +2718,7 @@ pub struct CompiledMmaF16BlockTileKernel {
 }
 
 impl CompiledMmaF16BlockTileKernel {
-    /// [`CompiledMmaKernel::launch_f16`] と同じ検証手順（`validate_launch_
+    /// `CompiledMmaKernel::launch_f16` と同じ検証手順（`validate_launch_
     /// shape` 相当は候補生成時に固定済みのため不要・`validate_gemm_dims`／
     /// `validate_output_len`／no-op 早期 return／`validate_mma_alignment`／
     /// grid y 上限検査／K タイル境界検査）に加え、`LaunchConfig.

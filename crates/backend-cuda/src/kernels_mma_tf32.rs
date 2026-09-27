@@ -658,9 +658,9 @@ extern "C" __global__ void gemm_mma_tf32(
 ///   `bm`/`bn` の倍数制約は 4（f16 版は 8）。
 /// - `A_PAD`/`B_PAD` は `BK+4`/`BN+4`（f16 版は `BK+8`/`BN+8`。要素サイズが
 ///   4B〈f32〉であるためパディング加算量も異なる。本ファイル
-///   [`MMA_TF32_A_PAD`]/[`MMA_TF32_B_PAD`] 定数直下コメント参照）。
+///   `MMA_TF32_A_PAD`/`MMA_TF32_B_PAD` 定数直下コメント参照）。
 /// - 共有メモリ 1 要素あたり 4B（f32。f16 版は 2B）のため SMEM 予算式の
-///   乗数が異なる（[`MMA_TF32_SHARED_MEM_BYTES`] 定数と同じ式）。
+///   乗数が異なる（`MMA_TF32_SHARED_MEM_BYTES` 定数と同じ式）。
 /// - `#define` 名前空間は `MMA_TF32_*` 接頭辞（f16 版は無接頭辞の
 ///   `BM`/`BN`/`STAGES` 等）。
 ///
@@ -677,7 +677,7 @@ extern "C" __global__ void gemm_mma_tf32(
 /// `optin_budget_bytes` は呼び出し元がデバイス実測値
 /// （`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`）から渡す。
 ///
-/// - 静的共有メモリ予算（[`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`]・
+/// - 静的共有メモリ予算（`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`・
 ///   48KiB）以下: 本番と同じ静的 `__shared__` 配列宣言のまま候補ソース
 ///   を返す。
 /// - 静的予算超・`optin_budget_bytes` 以下: `as_tile`/`bs_tile` の静的
@@ -928,7 +928,7 @@ fn replace_source_anchor(
     Ok(src.replacen(anchor, replacement, 1))
 }
 
-/// [`derive_mma_tf32_block_tile_layout`] が返す、候補ブロックタイル・段数・
+/// `derive_mma_tf32_block_tile_layout` が返す、候補ブロックタイル・段数・
 /// warp タイル構成から導出したカーネル起動パラメータの束（イシュー #841。
 /// `kernels_mma.rs::MmaBlockTileLayout` の TF32 版）。
 ///
@@ -937,7 +937,7 @@ fn replace_source_anchor(
 /// `internal-diagnostics` feature 限定）のカーネル起動（`threads`・
 /// `smem_bytes`・opt-in 動的 SMEM 要否判定）の両方が本構造体を経由する
 /// ことで、ブロックスレッド数・共有メモリバイト数の算出式が 1 箇所
-/// （[`derive_mma_tf32_block_tile_layout`]）にのみ存在する状態を保つ
+/// （`derive_mma_tf32_block_tile_layout`）にのみ存在する状態を保つ
 /// （`kernels_mma.rs::MmaBlockTileLayout` と同じ「単一の真実源」方針）。
 #[allow(dead_code)] // 理由は mma_tf32_source_with_block_tile と同じ（非公開モジュール）
 #[derive(Debug, Clone, Copy)]
@@ -972,7 +972,7 @@ pub struct MmaTf32BlockTileLayout {
 
 impl MmaTf32BlockTileLayout {
     /// `smem_bytes` が静的 48KiB 上限
-    /// （[`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`]。f16 版・TF32
+    /// （`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`。f16 版・TF32
     /// 版で共通の CUDA 既定上限のため定数を共有する）を超え、
     /// `extern __shared__`（opt-in 動的 SMEM）変種を要求するか。
     #[allow(dead_code)] // 理由は Self と同じ（非公開モジュール）
@@ -1187,7 +1187,7 @@ impl RenderedMmaTf32BlockTileKernel {
 /// [`RenderedMmaTf32BlockTileKernel`] を返す（イシュー #841）。
 ///
 /// [`mma_tf32_source_with_block_tile`]（ソース文字列のみを返す既存 API。
-/// #806）の結果と、その展開に使った [`derive_mma_tf32_block_tile_layout`]
+/// #806）の結果と、その展開に使った `derive_mma_tf32_block_tile_layout`
 /// の結果を 1 個の descriptor へ束ねる薄いラッパー（`kernels_mma.rs::
 /// render_mma_f16_block_tile` と同型）。`optin_budget_bytes` 超過時は
 /// [`mma_tf32_source_with_block_tile`] と同じ理由で
@@ -1262,7 +1262,7 @@ fn validate_mma_tf32_k_tile_bound(k: u32, bk: u32) -> Result<(), CudaError> {
 }
 
 impl CompiledMmaTf32BlockTileKernel {
-    /// [`CudaMmaTf32Gemm::launch_tf32`]（`crate::gemm_mma_tf32`）と同じ
+    /// `CudaMmaTf32Gemm::launch_tf32`（`crate::gemm_mma_tf32`）と同じ
     /// 検証手順（`validate_gemm_dims`／`validate_output_len`／no-op 早期
     /// return／`validate_mma_tf32_alignment`／grid y 上限検査／K タイル
     /// 境界検査）に加え、`LaunchConfig.shared_mem_bytes` へ
