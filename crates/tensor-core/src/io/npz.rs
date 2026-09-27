@@ -197,13 +197,43 @@ fn resolve_eocd_counts(bytes: &[u8], eocd: &EocdInfo) -> Result<(usize, usize, u
             "zip64 EOCD locator シグネチャが不一致",
         ));
     }
+    // zip64 EOCD locator のマルチディスクフィールド（PR #2318 レビュー
+    // 指摘・P2）: 「zip64 EOCD を含むディスク番号」（offset 4）と
+    // 「ディスク総数」（offset 16）。本 IO は単一ディスク ZIP のみを
+    // 対象とする契約（EOCD 側の disk_number／cd_start_disk 検証と同じ
+    // 契約）のため、ここが単一ディスクを示さない値なら
+    // `UnsupportedZipFeature` で拒否する（黙って central directory の
+    // 内容を誤って解釈しない）。
+    let zip64_locator_disk = read_u32_le(bytes, locator_offset + 4, "zip64 EOCD locator disk")?;
+    let zip64_total_disks =
+        read_u32_le(bytes, locator_offset + 16, "zip64 EOCD locator total disks")?;
+    if zip64_locator_disk != 0 || zip64_total_disks != 1 {
+        return Err(NpyError::UnsupportedZipFeature("マルチディスク ZIP"));
+    }
     let zip64_eocd_offset = read_u64_le(bytes, locator_offset + 8, "zip64 EOCD offset")?;
     let zip64_eocd_offset = usize::try_from(zip64_eocd_offset)
         .map_err(|_| NpyError::InvalidZip("zip64 EOCD offset が usize 範囲を超える"))?;
     if read_u32_le(bytes, zip64_eocd_offset, "zip64 EOCD シグネチャ")? != ZIP64_EOCD_SIG {
         return Err(NpyError::InvalidZip("zip64 EOCD シグネチャが不一致"));
     }
+    // zip64 EOCD 本体のマルチディスクフィールド（同 P2 指摘）: 「このディスク
+    // の番号」（offset 16）・「central directory 開始ディスク番号」
+    // （offset 20）・「このディスク上のエントリ数」（offset 24）。単一
+    // ディスク契約のもとでは「このディスク上のエントリ数」は「総エントリ数」
+    // （offset 32）と一致するはずであり、一致しなければマルチディスク
+    // 構成として拒否する。
+    let zip64_this_disk = read_u32_le(bytes, zip64_eocd_offset + 16, "zip64 EOCD this disk")?;
+    let zip64_cd_start_disk =
+        read_u32_le(bytes, zip64_eocd_offset + 20, "zip64 EOCD cd start disk")?;
+    let entries_this_disk = read_u64_le(
+        bytes,
+        zip64_eocd_offset + 24,
+        "zip64 EOCD entries (this disk)",
+    )?;
     let entries = read_u64_le(bytes, zip64_eocd_offset + 32, "zip64 EOCD entries")?;
+    if zip64_this_disk != 0 || zip64_cd_start_disk != 0 || entries_this_disk != entries {
+        return Err(NpyError::UnsupportedZipFeature("マルチディスク ZIP"));
+    }
     let cd_size = read_u64_le(bytes, zip64_eocd_offset + 40, "zip64 EOCD cd size")?;
     let cd_offset = read_u64_le(bytes, zip64_eocd_offset + 48, "zip64 EOCD cd offset")?;
     let entries = usize::try_from(entries)
@@ -481,7 +511,17 @@ fn read_member(bytes: &[u8], entry: &CentralDirEntry) -> Result<Tensor<f32>, Npy
 /// 直列化する。キーを昇順に並べ、決定的な出力にする
 /// （`docs/tensor-core-npy-npz-io-decision.md` §3.6）。
 pub fn write_npz_bytes(map: &HashMap<String, Tensor<f32>>) -> Result<Vec<u8>, NpyError> {
-    if map.len() > u16::MAX as usize {
+    // `entries_total` は EOCD 内で 16bit 幅（u16）で書く（本関数の末尾で
+    // `central_records.len() as u16` として書く箇所を参照）。本 IO は
+    // zip64 EOCD／locator を書き出さない STORED 限定実装のため、
+    // `u16::MAX`（0xFFFF）は書き出せない。この値は ZIP 仕様上
+    // 「zip64 EOCD を参照せよ」というプレースホルダのため、
+    // `resolve_eocd_counts`（読み込み側）は `entries_total == u16::MAX`
+    // を見た時点で存在しない zip64 EOCD locator を要求し失敗する
+    // （PR #2318 レビュー指摘・P1。往復契約〈write → read〉が壊れるため
+    // `u16::MAX` 件"以上"を一律で拒否する。安全な上限は `u16::MAX - 1`
+    // 件）。
+    if map.len() >= u16::MAX as usize {
         return Err(NpyError::TooManyEntries);
     }
     let mut keys: Vec<&String> = map.keys().collect();
@@ -943,6 +983,40 @@ mod tests {
         assert!(matches!(err, Err(NpyError::InvalidEntryName)));
     }
 
+    /// `u16::MAX`（65535）件は EOCD の `entries_total` フィールド（u16 幅）に
+    /// 書くと zip64 プレースホルダ値と衝突し、`read_npz_bytes` が存在しない
+    /// zip64 EOCD locator を要求して失敗する（往復契約が破れる）。
+    /// `write_npz_bytes` はこの件数を `TooManyEntries` で拒否しなければ
+    /// ならない（PR #2318 レビュー指摘・P1）。
+    #[test]
+    fn rejects_u16_max_entries_on_write() {
+        let mut m = HashMap::new();
+        for i in 0..(u16::MAX as usize) {
+            m.insert(format!("t{i}"), Tensor::new(vec![1.0], &[1]).unwrap());
+        }
+        assert_eq!(m.len(), u16::MAX as usize);
+        let err = write_npz_bytes(&m);
+        assert!(
+            matches!(err, Err(NpyError::TooManyEntries)),
+            "u16::MAX 件書き出しが拒否されなかった: {err:?}"
+        );
+    }
+
+    /// `u16::MAX - 1` 件（境界の直下）は zip64 プレースホルダと衝突しない
+    /// ため書き出しが成功し、`read_npz_bytes` で往復できることを確認する
+    /// （PR #2318 レビュー指摘・P1 の回帰防止）。
+    #[test]
+    fn round_trips_max_allowed_entries() {
+        let n = u16::MAX as usize - 1;
+        let mut m = HashMap::new();
+        for i in 0..n {
+            m.insert(format!("t{i}"), Tensor::new(vec![1.0], &[1]).unwrap());
+        }
+        let bytes = write_npz_bytes(&m).expect("u16::MAX - 1 件の書き出しは成功するはず");
+        let read_back = read_npz_bytes(&bytes).expect("u16::MAX - 1 件の読み込みは成功するはず");
+        assert_eq!(read_back.len(), n);
+    }
+
     #[test]
     fn rejects_truncated_eocd() {
         let bytes = write_npz_bytes(&sample_map()).unwrap();
@@ -1080,5 +1154,154 @@ mod tests {
 
         let back = read_npz_bytes(&zip).unwrap();
         assert_eq!(back["x"].host_slice().to_vec(), vec![1.0f32; 40]);
+    }
+}
+
+#[cfg(test)]
+mod zip64_multi_disk_tests {
+    use super::*;
+
+    /// zip64 EOCD 経路（locator + zip64 EOCD レコード + 通常 EOCD の
+    /// センチネル値）を持つ、単一メンバ "a" の npz を手組みする。
+    /// マルチディスクフィールド（PR #2318 レビュー指摘・P2）の検証を
+    /// 単体でテストするため、4 つのフィールドを引数で差し替えられる
+    /// ようにしてある。すべて「単一ディスク」を示す値（0, 1, 0, 0）を
+    /// 渡せば正常に読み込める構成になる。
+    fn build_zip64_npz(
+        locator_disk: u32,
+        locator_total_disks: u32,
+        zip64_this_disk: u32,
+        zip64_cd_start_disk: u32,
+    ) -> Vec<u8> {
+        let npy = write_npy_bytes(&Tensor::new(vec![1.0f32], &[1]).unwrap()).unwrap();
+        let crc = crc32(&npy);
+        let name = b"a.npy";
+        let size = npy.len() as u32;
+
+        let mut zip = Vec::new();
+        let local_offset = 0u32;
+        zip.extend_from_slice(&LOCAL_FILE_HEADER_SIG.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // method = STORED
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0x0021u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(&npy);
+
+        let cd_start = zip.len() as u32;
+        zip.extend_from_slice(&CENTRAL_DIR_HEADER_SIG.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0x0021u16.to_le_bytes());
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u32.to_le_bytes());
+        zip.extend_from_slice(&local_offset.to_le_bytes());
+        zip.extend_from_slice(name);
+        let cd_size = (zip.len() as u32 - cd_start) as u64;
+        let cd_start = cd_start as u64;
+
+        // zip64 EOCD レコード（56 バイト固定長部分。extensible data
+        // sector は付与しない）。
+        let zip64_eocd_offset = zip.len() as u64;
+        zip.extend_from_slice(&ZIP64_EOCD_SIG.to_le_bytes());
+        zip.extend_from_slice(&44u64.to_le_bytes()); // レコードサイズ（本体 - 12）
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version made by
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version needed
+        zip.extend_from_slice(&zip64_this_disk.to_le_bytes());
+        zip.extend_from_slice(&zip64_cd_start_disk.to_le_bytes());
+        zip.extend_from_slice(&1u64.to_le_bytes()); // entries (this disk)
+        zip.extend_from_slice(&1u64.to_le_bytes()); // entries (total)
+        zip.extend_from_slice(&cd_size.to_le_bytes());
+        zip.extend_from_slice(&cd_start.to_le_bytes());
+
+        // zip64 EOCD locator（固定 20 バイト）。
+        zip.extend_from_slice(&ZIP64_EOCD_LOCATOR_SIG.to_le_bytes());
+        zip.extend_from_slice(&locator_disk.to_le_bytes());
+        zip.extend_from_slice(&zip64_eocd_offset.to_le_bytes());
+        zip.extend_from_slice(&locator_total_disks.to_le_bytes());
+
+        // 通常 EOCD（entries_total = u16::MAX がセンチネルとして zip64
+        // 経路を発火させる。cd_size／cd_offset はセンチネルにせず実値の
+        // まま置き、zip64 経路は entries_total だけで判定させる）。
+        zip.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&u16::MAX.to_le_bytes());
+        zip.extend_from_slice(&u16::MAX.to_le_bytes());
+        zip.extend_from_slice(&(cd_size as u32).to_le_bytes());
+        zip.extend_from_slice(&(cd_start as u32).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+
+        zip
+    }
+
+    #[test]
+    fn reads_zip64_eocd_with_valid_single_disk_fields() {
+        let zip = build_zip64_npz(0, 1, 0, 0);
+        let back = read_npz_bytes(&zip).expect("単一ディスクの zip64 EOCD は読み込めるはず");
+        assert_eq!(back["a"].host_slice().to_vec(), vec![1.0f32]);
+    }
+
+    #[test]
+    fn rejects_zip64_locator_non_single_disk() {
+        // locator の「zip64 EOCD を含むディスク番号」が 0 以外
+        // （PR #2318 レビュー指摘・P2）。
+        let zip = build_zip64_npz(1, 1, 0, 0);
+        let err = read_npz_bytes(&zip);
+        assert!(
+            matches!(err, Err(NpyError::UnsupportedZipFeature(_))),
+            "zip64 locator の非単一ディスクが拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_zip64_locator_total_disks_not_one() {
+        // locator の「ディスク総数」が 1 以外（PR #2318 レビュー指摘・P2）。
+        let zip = build_zip64_npz(0, 2, 0, 0);
+        let err = read_npz_bytes(&zip);
+        assert!(
+            matches!(err, Err(NpyError::UnsupportedZipFeature(_))),
+            "zip64 locator のディスク総数不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_zip64_eocd_this_disk_nonzero() {
+        // zip64 EOCD 本体の「このディスクの番号」が 0 以外
+        // （PR #2318 レビュー指摘・P2）。
+        let zip = build_zip64_npz(0, 1, 1, 0);
+        let err = read_npz_bytes(&zip);
+        assert!(
+            matches!(err, Err(NpyError::UnsupportedZipFeature(_))),
+            "zip64 EOCD のこのディスク番号不一致が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_zip64_eocd_cd_start_disk_nonzero() {
+        // zip64 EOCD 本体の「central directory 開始ディスク番号」が
+        // 0 以外（PR #2318 レビュー指摘・P2）。
+        let zip = build_zip64_npz(0, 1, 0, 1);
+        let err = read_npz_bytes(&zip);
+        assert!(
+            matches!(err, Err(NpyError::UnsupportedZipFeature(_))),
+            "zip64 EOCD の central directory 開始ディスク番号不一致が拒否されなかった: {err:?}"
+        );
     }
 }
