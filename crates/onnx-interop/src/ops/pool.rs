@@ -113,8 +113,8 @@ struct PoolAxisParams {
 /// + pe`。`padded >= eff`（少なくとも 1 個の完全な窓が padded 範囲に収まる）
 /// なら `floor` 時は `(padded-eff)/stride + 1`、`ceil` 時は
 /// `ceil((padded-eff)/stride) + 1` を求めたうえで、`(out-1)·stride >=
-/// in_len + pb` なら `out -= 1`（最後の窓が入力内または左パディング内で
-/// 始まらない場合は除外する。PyTorch・新しい ONNX 仕様の規則。§3.1）。
+///   in_len + pb` なら `out -= 1`（最後の窓が入力内または左パディング内で
+///   始まらない場合は除外する。PyTorch・新しい ONNX 仕様の規則。§3.1）。
 ///
 /// **`padded < eff`（完全な窓が 1 個も収まらない）場合**、ONNX／PyTorch の
 /// 出力長公式は符号付きの分子 `padded - eff`（本実装では `deficit = eff -
