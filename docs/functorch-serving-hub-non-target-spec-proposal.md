@@ -1,6 +1,6 @@
-# forward-mode AD・関数変換・サービング基盤・特定ハブ連携の非目標明記提案（(b) 形式提案文案・実装しない）（#2194）
+# forward-mode AD・関数変換・サービング基盤の非目標と特定モデルハブ連携のコア非搭載の明記提案（(b) 形式提案文案・実装しない）（#2194）
 
-基準コミット: `9fe4b5231ad53883e4aff072e44a589ac548baaf`（2026-09-27）。`docs/spec` submodule ポインタ `e43704a7baefd1489d3f1716571064ab65c5eed6`。`file_path:line` は同コミット時点のもの。後続の変更で行番号がずれる可能性があるため、参照する際は当該コミット、または近傍のコミットで再確認すること。
+基準コミット: `9fe4b5231ad53883e4aff072e44a589ac548baaf`（2026-09-27）。`docs/spec` submodule ポインタ `e43704a7baefd1489d3f1716571064ab65c5eed6`。`file_path:line` は同コミット時点のもの。後続の変更で行番号がずれる可能性があるため、参照する際は当該コミット、または近傍のコミットで再確認すること。rebase 後の再確認（`origin/main` `34a2f98a`。§1.2）で、基準コミット以降に main へ入った決定との整合を取り直した。`docs/spec` submodule ポインタは不変で、本 doc が引用する `file_path:line`（`docs/spec/04-requirements.md:233`・`crates/autodiff/src/create_graph.rs:268`・`crates/facade/src/model.rs:464`）は `34a2f98a` でも同じ行を指す。
 
 ## §0 結論（最初に読む）
 
@@ -8,7 +8,8 @@
 - 追記先は REQ-9「引き続き対象外」列挙（`docs/spec/04-requirements.md:233`）である。
 - sparse／complex は同列挙に既記載のため（`docs/tensor-core-sparse-complex-decision.md` §3。#1633）、**本提案では spec 改定を行わず、新規 spec issue を起票しない**。既存の統合引用に留める。
 - §5 の spec (b) 形式提案文案は**起票していない**（未実施。§6 の承認事項 1 を参照）。
-- 以下は本提案に含めない: トークナイザ（`docs/tokenizer-non-target-spec-proposal.md`・#2086）、言語バインディング・TensorFlow SavedModel 形式（#2193）、分散学習・量子化の網羅対応（既存の除外事項。従属関係のみ §3-C で言及する）。
+- 以下は本提案に含めない: トークナイザ（`docs/tokenizer-non-target-spec-proposal.md`・#2086）、言語バインディング・TensorFlow SavedModel 形式（`docs/python-binding-tf-format-non-target-spec-proposal.md`・#2193）、分散学習・量子化の網羅対応（既存の除外事項。従属関係のみ §3-C で言及する）。
+- 特定モデルハブ（Hugging Face Hub）連携は「非目標」ではない。main の既存決定（`docs/model-distribution-design.md` §5・`docs/hf-hub-integration-design.md` §5／§6.2）はこれを**コア（facade）外の別クレート等で扱う設計対象**としている。本提案が spec へ明記するのは「コアへ組み込まない」ことだけであり、別クレートの新設・形態・依存は実装リポ側の承認事項（`docs/hf-hub-integration-design.md` §6.1）として先取りしない。
 
 ## §1 位置づけ
 
@@ -16,7 +17,7 @@
 
 「(b) 形式」とは、実装リポ側の doc を出典として、spec 側には短い規定だけを追記する提案形式を指す（先例: `docs/tokenizer-non-target-spec-proposal.md`〈#2086〉・`docs/ddp-grade-up-conditions.md`・`docs/spec-proposal-req2-candle-parity-tolerance.md`）。案 (a)（spec 本体の要件・判定式そのものを改定する形式）とは対になる。
 
-### イシュー本文の前提と、リポジトリ実態の不一致（是正して確定する）
+### §1.1 イシュー本文の前提と、リポジトリ実態の不一致（是正して確定する）
 
 イシュー本文は「4 件の決定記録が forward-mode AD・vmap・functorch・HTTP サービングを各々非対応と明記済み」という前提に立つが、実測すると次の食い違いがある。本 doc は是正後の文言を採用する。
 
@@ -26,8 +27,20 @@
 | `docs/autodiff-higher-order-grad-decision.md` §3 が forward-mode 非対応の根拠 | 同 doc §4・§5 の案 C（forward-over-reverse の JVP。HVP 限定）は、段階 1 の代替案として記録されている。forward-mode を否定していない。HVP は reverse-over-reverse の `Tape::backward_create_graph`（`crates/autodiff/src/create_graph.rs:268`。内部クレート限定・facade 公開は #2063 承認事項待ち）で提供済み | 非目標は「**利用者向けの汎用 forward-mode AD API**」（`torch.func.jvp`／`jacfwd`／`torch.autograd.forward_ad` 相当）に限定する。案 C（HVP 用途の内部 JVP）は妨げないと明記する |
 | `docs/autodiff-graph-optimization-scope-decision.md` §4-5 区分 B が根拠 | 同 doc に vmap・functorch の記述はない。関連づけられるのは区分 C（汎用 JIT／トレース再コンパイル・グラフ書き換えは非目標）のみ | vmap・`torch.func` の合成関数変換は、区分 C と同型の「プログラム変換」として位置づける（区分 B は引用しない） |
 | `docs/facade-inference-serving-scope-decision.md` §4 が HTTP 非対応の根拠 | 該当記述は §5.1 案 C と §6（KV キャッシュ行の「明確に非目標とするもの」） | §5.1／§6 を引用する |
-| 「モデルハブ非対応」 | `docs/model-distribution-design.md` §5（ユーザー決定 2026-09-24「他ライブラリと同じにする」）は、汎用の HTTPS ダウンロード＋ローカルキャッシュ＋ハッシュ検証を**コアの責務**（`ModelRegistry` は `crates/facade/src/model.rs:464` に実装済み。リモート取得は #2088 の設計記録のみ）とし、特定ハブ（Hugging Face Hub）連携は**コア外の別クレート**（#2243。OPEN）に分離している | 「特定モデルハブ（HF Hub 等）連携を facade（コア）へ組み込まない。提供する場合は別クレート（#2243。依存追加・workspace 追加はユーザー承認）」と書く。「モデルハブ非対応」という一括表現は用いない |
+| 「モデルハブ非対応」 | `docs/model-distribution-design.md` §5（ユーザー決定 2026-09-24「他ライブラリと同じにする」）は、汎用の HTTPS ダウンロード＋ローカルキャッシュ＋ハッシュ検証を**コアの責務**（`ModelRegistry` は `crates/facade/src/model.rs:464` に実装済み。リモート取得は #2088 の設計記録のみ）とし、特定ハブ（Hugging Face Hub）連携は**コア外の別クレート（または opt-in の別経路）**に分離している。別クレートの境界・API 案・認証／セキュリティ・他ライブラリ対応表は `docs/hf-hub-integration-design.md`（#2243 配下 #2244〜#2246。設計記録は完了し #2243 はクローズ済み。同 doc §6.1 の承認事項 21 件はすべて未取得） | 「特定モデルハブ（HF Hub 等）連携を facade（コア）へ組み込まない。提供する場合はコア外（別クレート等。形態・依存追加・workspace 追加・公開区分は実装リポ側のユーザー承認事項）」と書く。「モデルハブ非対応」という一括表現は用いない |
 | functorch は「研究段階技術のため stable ライブラリ対象外」 | PyTorch 2.x の `torch.func` は安定 API 系統であり、この表現は事実として裏付けがない | 「研究段階」とは書かない。理由はリポジトリ契約（§3-A）で構成する |
+
+### §1.2 rebase 後の再確認: ドラフト作成後に main へ入った決定との整合（`origin/main` `34a2f98a`）
+
+基準コミット `9fe4b523` 以降に main へ入った決定と本 doc を突合した。**main 側の決定を正**とし、本 doc の文言を次のとおり揃えた（他 doc は編集していない）。
+
+| main 側の決定（出典） | 本 doc で見つかった食い違い・重複 | 本 doc の扱い |
+|---|---|---|
+| HF hub 連携クレートの境界・API 案・認証／セキュリティ・他ライブラリ対応表・承認事項一覧（`docs/hf-hub-integration-design.md`。#2244／#2245／#2246・PR #2323／#2326／#2327。親 #2243 はクローズ済み） | 初版はタイトルで「特定ハブ連携の非目標」と表現していたが、main 側では HF Hub 連携は非目標ではなく**コア外の設計対象**（§2 境界・§3 API 案）である。また #2243 を「OPEN」と記載していた | タイトル・§0・§3-D・§5 文案を「**コア（facade）非搭載**」に統一した。同 doc §6.2「#2194 への申し送り」の文言（「モデルハブ: コア（facade）では非対応。特定ハブ連携は別クレートで提供する（汎用 URL 取得＋キャッシュ＋ハッシュ検証はコアの責務〈#2088〉）」）を中核として採用した。ただし「別クレートで提供する」は同 doc §6.1 の承認事項（項 8 workspace 追加・項 10 公開区分・項 12 `docs/compat-api-scope.md` §0 との整合）が未取得のため、spec 文案では「提供する場合はコア外」と条件形にして先取りしない（§5・§6 項 5） |
+| モデル配布機構（`docs/model-distribution-design.md` §5。#2082・#2242 系列。ユーザー決定 2026-09-24「他ライブラリと同じにする」） | 食い違いなし。同 §5 は「別クレート（または opt-in の別経路）」と書いており、初版は「別クレート」のみだった | 「別クレート等」「別クレート（または opt-in の別経路）」と表現を揃えた |
+| Python バインディング・TF 形式の非目標提案（`docs/python-binding-tf-format-non-target-spec-proposal.md`。#2193・PR #2321） | 重複なし（同 doc は言語バインディング・TF 系形式に閉じる）。ただし同 doc §4 文案末尾は「HTTP サービング・モデルハブ（実装リポ #1962）も別提案候補」、§6 は「HTTP サービング・モデルハブは #1962 で整理済み」としている。`docs/facade-inference-serving-scope-decision.md`（#1962）にはモデルハブの記述がない（`docs/hf-hub-integration-design.md` §6.2 が既に指摘済み） | 同 doc がいう「別提案候補」が本提案に当たる。モデルハブ部分の出典は #1962 ではなく `docs/model-distribution-design.md` §5・`docs/hf-hub-integration-design.md` §5 とする。同 doc の修正は本イシューのスコープ外（`docs/hf-hub-integration-design.md` §6.2 と同じ扱い）とし、編集しない。言語バインディングは #2193 の提案へ参照で委ね、本提案では扱わない |
+| `generate()` 自己回帰ループ（`docs/facade-generate-decision.md`。#2191・PR #2324）・バッチ推論 API（`docs/facade-predict-batches-phase-metrics-decision.md`。#2192・PR #2322） | 初版の「対象範囲内」列挙（KV キャッシュ・`predict`／`predict_resident`）に含まれていなかった。いずれも内部実装済み・**facade 公開は未承認のため保留** | §3-C・§5 文案の「対象範囲内（非目標に巻き込まない）」列挙へ追加した。facade 公開済みとは書かない |
+| `Op` enum の variant 数 | 初版は「現行 69 variant」としていたが、69 は `docs/autodiff-higher-order-grad-decision.md` §2 時点の値であり、`34a2f98a` の `crates/autodiff/src/tape.rs` `Op` enum は約 90 variant に増えている | 「同 doc §2 時点で 69 variant。以降も拡大が続いている」に改めた（二重保守コストの論拠は強まる方向で、結論は不変） |
 
 ## §2 事実（出典付き。基準コミット `9fe4b5231a` で再実行）
 
@@ -44,7 +57,7 @@
 ### A. 汎用 forward-mode AD API・vmap・`torch.func` 合成関数変換
 
 1. **AD 実行モデルの単一系統性**: AD 実行モデルは reverse-mode テープ＋VJP の単一系統である。2 つ目の AD モード（JVP 規則を全 `Op` へ追加すること）は `Op`／`BackendOps` の横断拡張になり、`docs/autodiff-higher-order-grad-decision.md` §10 と同型の承認事項に当たる。
-2. **二重保守コスト**: 2 系統の AD を並行維持すると、`Op`（現行 69 variant。`docs/autodiff-higher-order-grad-decision.md` §5）全体に JVP と VJP の二重保守コストが恒久的に生じる。数値契約（FMA 契約・`f64` アキュムレータ契約・REQ-2 統一複合判定）も 2 系統分定義する必要が生まれる。
+2. **二重保守コスト**: 2 系統の AD を並行維持すると、`Op`（`docs/autodiff-higher-order-grad-decision.md` §2・§5 時点で 69 variant。以降も拡大が続いている〈§1.2〉）全体に JVP と VJP の二重保守コストが恒久的に生じる。数値契約（FMA 契約・`f64` アキュムレータ契約・REQ-2 統一複合判定）も 2 系統分定義する必要が生まれる。
 3. **プログラム変換としての vmap**: vmap・`torch.func` の合成関数変換はプログラム変換であり、`docs/autodiff-graph-optimization-scope-decision.md` §5 区分 C（汎用 JIT／トレース再コンパイル・グラフ書き換えは非目標）と同型の構造を持つ。
 4. **HVP・高階微分は対象範囲内**: HVP・高階微分は Tier 2（高階微分）として reverse-over-reverse で対象範囲内にある。案 C（HVP 用途の内部 JVP。`docs/autodiff-higher-order-grad-decision.md` §4・§5）は本非目標の対象に含めない。
 
@@ -62,21 +75,24 @@
 2. HTTP スタックは許容依存 9 区分（`.claude/rules/deps-policy.md`）の外にあり、未承認の新規区分に当たる（`docs/model-download-design.md`・`docs/model-distribution-design.md` §4）。
 3. ネットワーク入力を受ける面（OWASP A03／A05 の攻撃面）を新設することになる。
 4. 量子化 KV は独立項目にせず、既存の除外事項「分散学習・量子化の網羅対応」（Won't・条件付き）に従属する。
+5. 他言語からサービング層を呼ぶための言語バインディング（Python 拡張モジュール等）は本提案で扱わず、`docs/python-binding-tf-format-non-target-spec-proposal.md`（#2193）の非目標へ参照で委ねる。
 
-次のものは対象範囲内として明記し、非目標に巻き込まない: KV キャッシュ（`docs/kv-cache-design.md`。#2084 実装済み・内部クレート）、`Sequential::predict`／`predict_resident`。
+次のものは対象範囲内として明記し、非目標に巻き込まない: KV キャッシュ（`docs/kv-cache-design.md`。#2084 実装済み・内部クレート）、`Sequential::predict`／`predict_resident`、`generate()` 自己回帰ループ（`docs/facade-generate-decision.md`。#2191。`crates/autodiff/src/generate.rs` に実装済み・facade 公開は未承認のため保留）、バッチ推論 API `predict_batches`・phase 計測（`docs/facade-predict-batches-phase-metrics-decision.md`。#2192。内部実装済み・facade 公開は未承認のため保留）。
 
 ### D. 特定モデルハブ連携のコア非搭載
 
-`docs/model-distribution-design.md` §5 の方針を引用する: 汎用 HTTPS 取得＋ローカルレジストリ（`ModelRegistry`）はコア、Hugging Face Hub 等の特定ハブ連携はコア外の別クレート（#2243）。
+`docs/model-distribution-design.md` §5 の方針（正本）を引用する: 汎用 HTTPS 取得＋ローカルキャッシュ＋ハッシュ検証（`ModelRegistry`・#2088）はコアの責務、Hugging Face Hub 等の特定ハブ連携はコアに入れず、別クレート（または opt-in の別経路）の責務。
 
-PyTorch（`torch.hub`／`huggingface_hub`）、TensorFlow/Keras（`tf.keras.utils.get_file`／`tensorflow_hub`）と同型の分離である（出典 URL は `docs/model-distribution-design.md` §5 を参照）。#2246 の申し送り（「コア非対応・別クレートで提供」）に揃える。
+本項は**非目標ではない**。特定ハブ連携そのものは `docs/hf-hub-integration-design.md`（#2244〜#2246）で境界・API 案・認証／セキュリティ・承認事項まで設計済みの対象であり、本提案が spec へ明記するのは「コア（facade）へ組み込まない」という境界だけである。文言は同 doc §6.2「#2194 への申し送り」に揃える。ただし別クレートの新設・公開区分（crates.io 公開なら `docs/compat-api-scope.md` §0「`facade` が唯一のサポートされる公開 API 面」との整合が問題になる）・依存追加は同 doc §6.1 の承認事項（項 1〜21。すべて未取得）であり、spec 文案では「提供する場合はコア外」という条件形に留めて先取りしない。
+
+PyTorch（`torch.hub`／`huggingface_hub`）、TensorFlow/Keras（`tf.keras.utils.get_file`／`tensorflow_hub`）と同型の分離である（出典 URL は `docs/model-distribution-design.md` §5、詳細な対応表は `docs/hf-hub-integration-design.md` §5.1・§5.2）。
 
 ## §4 代替手段
 
 - **A**: reverse-mode AD（`Tape::backward`）。HVP は `Tape::backward_create_graph`。バッチ化は明示的なバッチ次元（batched matmul・einsum batch・broadcast）で行う。関数変換が必須の研究用途は Python の PyTorch `torch.func` で行い、成果を safetensors／ONNX で持ち込む（REQ-7 の相互運用経路）。
 - **B**: 実部・虚部の 2 テンソル分解（`docs/tensor-core-sparse-complex-decision.md` §5 案 D・FFT 設計）。sparse は dense 化してから使う。
 - **C**: 利用者のアプリ側で `predict`／`Sequential::predict_resident` を自前の HTTP サーバに組み込む。前段にリバースプロキシを置く。ONNX export（`OnnxModel::to_bytes`）で外部推論サーバへ持ち出す。
-- **D**: 汎用 HTTPS 取得＋`ModelRegistry`（リモート取得機構は依存承認待ち）、または別クレート（#2243、承認後）。
+- **D**: 汎用 HTTPS 取得＋`ModelRegistry`（リモート取得機構は依存承認待ち。`docs/model-download-design.md` §7）、またはコア外の HF hub 連携クレート（`docs/hf-hub-integration-design.md`。§6.1 の承認後）。それまでは利用者が Python の `huggingface_hub` 等で取得した safetensors を `ModelRegistry`／safetensors 読込で使う（`docs/huggingface-safetensors-interop-guide.md`）。
 
 ## §5 spec (b) 形式提案文案（起票用 draft。未起票）
 
@@ -110,11 +126,14 @@ REQ-9「引き続き対象外」列挙（該当箇所）の末尾へ、次の 3 
 
 > サービング基盤（HTTP サーバ／スケジューラ・paged attention・連続
 > バッチング・speculative decoding。自作コア範囲外・許容依存区分外の
-> HTTP スタックを要するため。KV キャッシュ・推論 API 自体は対象範囲内）
+> HTTP スタックを要するため。KV キャッシュ・推論 API〈`predict` 系・
+> 自己回帰生成ループ〉自体は対象範囲内）
 
 > 特定モデルハブ（Hugging Face Hub 等）連携のコア組み込み（汎用 HTTPS
 > 取得＋ローカルキャッシュ＋ハッシュ検証はコアの責務。特定ハブ API への
-> 特化はコア外の別クレートで提供する）
+> 特化はコアへ持ち込まず、提供する場合はコア外〈別クレート等。形態・
+> 依存は実装リポ側の承認事項〉とする。連携そのものを非目標とするもの
+> ではない）
 
 ## 既記載項目の確認（sparse／complex。変更なし・新規 issue なし）
 
@@ -134,7 +153,8 @@ spec issue も起票しない。
 3. 特定モデルハブ連携: PyTorch（`torch.hub`／`huggingface_hub`）・
    TensorFlow/Keras（`tf.keras.utils.get_file`／`tensorflow_hub`）と同型に、
    汎用取得はコア・特定ハブ API への特化は別パッケージという分離を踏襲
-   する。
+   する。コア外での提供形態（別クレートの新設・公開区分・依存追加）は
+   実装リポ側で設計済み・承認待ちであり、本提案はその可否を定めない。
 
 ## 受け入れ基準への影響
 
@@ -149,19 +169,23 @@ spec issue も起票しない。
 
 - forward-mode AD／vmap: 利用者需要と `Op`／`BackendOps` 拡張の承認。
 - サービング基盤: HTTP 依存区分の承認と REQ-1 範囲の再定義。
-- 特定モデルハブ連携: #2243 の承認。
+- 特定モデルハブ連携（コア外での提供）: 実装リポ `docs/hf-hub-integration-design.md` §6.1 の承認事項の承認（コアへの組み込み自体は再開対象としない）。
 
 ## 実装リポ側との取り決め
 
 本提案が spec 側で承認・マージされるまで、実装リポは上記 3 項目の実装・
-外部依存の追加を起票・実装しない。
+外部依存の追加を起票・実装しない。特定モデルハブ連携のコア外提供は
+コア組み込みに当たらないため本取り決めの対象外であり、実装リポ側の
+既存の承認手続き（`docs/hf-hub-integration-design.md` §6.1）に従う。
 
 ## スコープ境界
 
 トークナイザ（別提案。実装リポ #2086）・言語バインディング／TensorFlow
 SavedModel 形式（実装リポ #2193）とは独立した項目であり、起票順に依存
-しない。KV キャッシュ・推論 API（`predict`／`predict_resident`）・高階
-微分（HVP）は対象範囲内であり本提案に含めない。
+しない。#2193 の提案が「別提案候補」としている HTTP サービング・
+モデルハブは本提案が扱う。KV キャッシュ・推論 API（`predict`／
+`predict_resident`・`predict_batches`・自己回帰生成ループ `generate()`）・
+高階微分（HVP）は対象範囲内であり本提案に含めない。
 
 ## 添付文書
 
@@ -169,6 +193,7 @@ SavedModel 形式（実装リポ #2193）とは独立した項目であり、起
 - 実装リポ `docs/autodiff-graph-optimization-scope-decision.md`（区分 C の記録）
 - 実装リポ `docs/facade-inference-serving-scope-decision.md`（サービング基盤非目標の記録）
 - 実装リポ `docs/model-distribution-design.md`（特定モデルハブ分離の記録）
+- 実装リポ `docs/hf-hub-integration-design.md`（コア外の HF hub 連携クレートの設計案・承認事項一覧）
 - 実装リポ `docs/tensor-core-sparse-complex-decision.md`（sparse／complex 既記載の確認元）
 - 実装リポ `docs/functorch-serving-hub-non-target-spec-proposal.md`（#2194。本提案の起票元）
 ````
@@ -178,7 +203,8 @@ SavedModel 形式（実装リポ #2193）とは独立した項目であり、起
 1. spec リポ（Fandhe-AI/fandhe-ai-spec）への §5 提案の起票可否（`gh issue create -R Fandhe-AI/fandhe-ai-spec`）。
 2. #2086（トークナイザ）・#2193（言語バインディング／TF 形式）の文案と束ねて起票するか、個別に起票するか（既定は個別）。
 3. REQ-9「引き続き対象外」列挙ではなく、除外事項（格上げ条件表付き・Won't 件数変更）として扱うか（既定は「引き続き対象外」列挙）。
-4. 将来、案 C（HVP 用途を超える内部 JVP 拡張）・HTTP 依存区分・#2243 別クレートを採る場合の各承認。いずれも本提案では実施しない。
+4. 将来、案 C（HVP 用途を超える内部 JVP 拡張）・HTTP 依存区分・HF hub 連携の別クレート（`docs/hf-hub-integration-design.md` §6.1）を採る場合の各承認。いずれも本提案では実施しない。
+5. HF hub 連携を crates.io 公開の別クレートとする場合の `docs/compat-api-scope.md` §0「`facade` が唯一のサポートされる公開 API 面」との整合（`docs/hf-hub-integration-design.md` §6.1 項 12。同 §6.2 が本イシューへ申し送った論点）。§5 文案は「提供する場合はコア外」という条件形に留めており、この判断を先取りしない。
 
 承認後の経路（後続作業。本イシューでは実施しない）: spec マージ → `docs/spec` submodule 追従 → `docs/compat-api-scope.md` §2 の該当 bullet の移設・追記（同 doc §5 経路 1）。
 
@@ -205,7 +231,11 @@ SavedModel 形式（実装リポ #2193）とは独立した項目であり、起
 | `docs/autodiff-higher-order-grad-decision.md` §4／§5／§10 | forward-over-reverse 案 C（HVP 限定 JVP）・二重保守コストの整理 |
 | `docs/autodiff-graph-optimization-scope-decision.md` §5 区分 C | 汎用 JIT・グラフ書き換え非目標の記録 |
 | `docs/facade-inference-serving-scope-decision.md` §5.1／§6 | サービング基盤非目標・KV キャッシュ対象範囲内の記録 |
-| `docs/model-distribution-design.md` §4／§5 | HTTP クライアント依存未承認・特定ハブ連携のコア外分離 |
+| `docs/model-distribution-design.md` §4／§5 | HTTP クライアント依存未承認・特定ハブ連携のコア外分離（正本） |
+| `docs/hf-hub-integration-design.md` §2／§5／§6.1／§6.2 | HF hub 連携クレートの境界・他ライブラリ対応表・承認事項一覧・#2194 への申し送り（#2244〜#2246） |
+| `docs/python-binding-tf-format-non-target-spec-proposal.md` §4／§6 | 言語バインディング・TF 系形式の非目標（#2193）。HTTP サービング・モデルハブを別提案候補とする記述 |
+| `docs/facade-generate-decision.md` | `generate()` 自己回帰ループ（#2191。内部実装済み・facade 公開保留） |
+| `docs/facade-predict-batches-phase-metrics-decision.md` | バッチ推論 API・phase 計測（#2192。内部実装済み・facade 公開保留） |
 | `docs/tensor-core-sparse-complex-decision.md` §3／§6 | sparse／complex 既記載の spec 整合確認・段階 0 の記録 |
 | `docs/kv-cache-design.md` | KV キャッシュの対象範囲内確定（#2084） |
 | `crates/autodiff/src/create_graph.rs:268` | `Tape::backward_create_graph`（HVP 提供済み） |
