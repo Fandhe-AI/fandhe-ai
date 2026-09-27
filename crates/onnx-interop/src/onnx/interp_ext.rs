@@ -717,6 +717,16 @@ pub(super) fn compute_pad(
 /// `nearest_mode` の組合せは実装計画 §2.3 の表を正とする（それ以外は
 /// [`InterpError::InvalidAttribute`] で fail-closed に拒否し、
 /// `reason` に代替手段〈`sizes` 入力を使う等〉の手掛かりを含める）。
+///
+/// `axes`（opset 18+ の INTS 属性。省略時は暗黙に `0..rank`＝NCHW 順）は
+/// `scales`／`sizes` の各要素が対応する軸を明示指定できる。属性を読まず
+/// 常に NCHW 固定順で `scales[2]`／`scales[3]` を H／W とみなすと、
+/// `axes` で軸順を入れ替えたモデル（例: `axes=[3, 2]` で W／H の順に
+/// `scales` を渡す）に対して誤った出力 shape を返してしまうため、
+/// `axes` を正規化（負値解決・範囲・重複検査）したうえで `scales`／
+/// `sizes` の要素を軸ごとに写像してから N／C 軸の倍率固定・H／W 軸の
+/// 出力サイズ導出を行う（fail-closed。`security.md` A03・イシュー #2313
+/// codex-review 指摘）。
 pub(super) fn compute_resize(
     env: &HashMap<String, Value>,
     node: &NodeProto,
@@ -738,6 +748,36 @@ pub(super) fn compute_resize(
         });
     }
     let in_shape = x.shape().to_vec();
+    let rank = in_shape.len();
+
+    // `axes`（opset 18+ INTS 属性）: `scales`／`sizes` の各要素が対応する
+    // 軸を明示指定する。省略時は暗黙に軸 `0..rank`（N,C,H,W の順）と
+    // みなす（既存の固定 NCHW 前提と同じ）。`Pad` の `axes` 入力
+    // （上記）と同じ fail-closed 方針（負値正規化・範囲外・重複拒否）を
+    // 適用する（security.md A03・イシュー #2313 codex-review 指摘）。
+    let axes: Vec<usize> = match attr_ints_typed(node, "axes")? {
+        Some(raw) => {
+            let mut seen_axes: HashSet<usize> = HashSet::with_capacity(raw.len());
+            let mut normalized = Vec::with_capacity(raw.len());
+            for &ax in raw {
+                let n = normalize_axis(ax, rank).ok_or(OpError::AxisOutOfRange {
+                    op: "Resize",
+                    axis: ax,
+                    rank,
+                })?;
+                if !seen_axes.insert(n) {
+                    return Err(InterpError::InvalidAttribute {
+                        node: node.name.clone(),
+                        attr: "axes".to_string(),
+                        reason: format!("axes に重複した軸指定があります（軸: {n}）"),
+                    });
+                }
+                normalized.push(n);
+            }
+            normalized
+        }
+        None => (0..rank).collect(),
+    };
 
     // Resize-10 は 2 入力形式（`X`／`scales`）で `roi` を持たない。
     // 常に第 2 入力（index 1）を `roi` として読むと、正当な Resize-10
@@ -789,14 +829,28 @@ pub(super) fn compute_resize(
             let s = scales_t
                 .as_slice()
                 .ok_or(OpError::NonContiguousInternal("Resize(scales)"))?;
-            if s.len() != 4 {
+            // `scales` の長さは `axes` の長さ（`axes` 省略時は rank）と
+            // 一致しなければならない（ONNX 仕様。`axes` により部分軸のみ
+            // 指定する形も許容する）。
+            if s.len() != axes.len() {
                 return Err(InterpError::InvalidAttribute {
                     node: node.name.clone(),
                     attr: "scales".to_string(),
-                    reason: format!("scales は長さ 4（NCHW）が必要です（実際: {}）", s.len()),
+                    reason: format!(
+                        "scales の長さは axes の長さ（{}）と一致する必要があります（実際: {}）",
+                        axes.len(),
+                        s.len()
+                    ),
                 });
             }
-            for (i, &sv) in s.iter().take(2).enumerate() {
+            // `axes[i]` が対応する軸へ `s[i]` を写像する（`axes` 省略時は
+            // `axes == [0, 1, .., rank-1]` のため従来の NCHW 固定順と同じ
+            // 結果になる）。`axes` に含まれない軸は倍率 1.0（変更なし）。
+            let mut scale_by_axis = vec![1.0f32; rank];
+            for (&ax, &sv) in axes.iter().zip(s.iter()) {
+                scale_by_axis[ax] = sv;
+            }
+            for (i, &sv) in scale_by_axis.iter().take(2).enumerate() {
                 // N/C 軸は非対応（サイズ変更しない前提）のため、倍率は
                 // 厳密に 1.0 でなければならない。許容差判定（旧
                 // `(sv - 1.0).abs() > 1e-6`）だと 1 以外の倍率
@@ -812,8 +866,8 @@ pub(super) fn compute_resize(
                     });
                 }
             }
-            let out_h = resize_scale_to_out_size(node, "scales", s[2], in_shape[2])?;
-            let out_w = resize_scale_to_out_size(node, "scales", s[3], in_shape[3])?;
+            let out_h = resize_scale_to_out_size(node, "scales", scale_by_axis[2], in_shape[2])?;
+            let out_w = resize_scale_to_out_size(node, "scales", scale_by_axis[3], in_shape[3])?;
             (out_h, out_w)
         }
         (None, Some(name)) => {
@@ -830,28 +884,39 @@ pub(super) fn compute_resize(
                     ),
                 });
             }
-            if sizes.len() != 4 {
+            // `sizes` も `scales` と同じく `axes` の長さと一致する必要が
+            // ある（上記コメント参照）。
+            if sizes.len() != axes.len() {
                 return Err(InterpError::InvalidAttribute {
                     node: node.name.clone(),
                     attr: "sizes".to_string(),
-                    reason: format!("sizes は長さ 4（NCHW）が必要です（実際: {}）", sizes.len()),
+                    reason: format!(
+                        "sizes の長さは axes の長さ（{}）と一致する必要があります（実際: {}）",
+                        axes.len(),
+                        sizes.len()
+                    ),
                 });
             }
-            if sizes[0] as usize != in_shape[0] || sizes[1] as usize != in_shape[1] {
+            // `axes` に含まれない軸は既定で入力サイズのまま（変更なし）。
+            let mut size_by_axis: Vec<i64> = in_shape.iter().map(|&d| d as i64).collect();
+            for (&ax, &sv) in axes.iter().zip(sizes.iter()) {
+                size_by_axis[ax] = sv;
+            }
+            if size_by_axis[0] as usize != in_shape[0] || size_by_axis[1] as usize != in_shape[1] {
                 return Err(InterpError::InvalidAttribute {
                     node: node.name.clone(),
                     attr: "sizes".to_string(),
                     reason: "N/C 軸の sizes は入力の N/C と一致する必要があります".to_string(),
                 });
             }
-            if sizes[2] < 0 || sizes[3] < 0 {
+            if size_by_axis[2] < 0 || size_by_axis[3] < 0 {
                 return Err(InterpError::InvalidAttribute {
                     node: node.name.clone(),
                     attr: "sizes".to_string(),
                     reason: "H/W 軸の sizes は非負である必要があります".to_string(),
                 });
             }
-            (sizes[2] as usize, sizes[3] as usize)
+            (size_by_axis[2] as usize, size_by_axis[3] as usize)
         }
         (Some(_), Some(_)) | (None, None) => {
             return Err(InterpError::InvalidAttribute {

@@ -1122,6 +1122,204 @@ fn resize_rejects_rank_other_than_four() {
     assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "X"));
 }
 
+#[test]
+fn resize_axes_reversed_order_reflects_swapped_h_w_scales() {
+    // codex-review P0 指摘（イシュー #2313）: `compute_resize` は `axes`
+    // 属性を読まず `scales`／`sizes` を常に NCHW 順として解釈していた。
+    // `axes=[3, 2]`（W, H の順）で `scales=[3.0, 2.0]`（W 倍率 3・H 倍率 2）
+    // を渡すモデルに対し、軸順を正しく反映して H×3→6・W×2→4 ではなく
+    // H×2→4・W×3→6 になることを固定する（axes を無視すると誤って
+    // 逆の shape [1,1,6,4] を返してしまう）。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+            attr_ints_typed("axes", vec![3, 2]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        // axes=[3, 2] なので scales[0] は軸 3（W）用・scales[1] は軸 2
+        // （H）用: W 倍率 3・H 倍率 2。
+        feed_f32("scales", vec![3.0, 2.0], &[2]),
+    ]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => assert_eq!(t.shape(), &[1, 1, 4, 6], "H×2=4・W×3=6 であるはず"),
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn resize_axes_default_order_matches_implicit_nchw() {
+    // `axes` 省略時は暗黙に `[0, 1, 2, 3]`（NCHW 順）とみなされる。
+    // 明示的に `axes=[0, 1, 2, 3]` を渡した場合と省略時が同じ結果になる
+    // ことを固定する（axes 対応導入によるデフォルト経路の非後退確認）。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+            attr_ints_typed("axes", vec![0, 1, 2, 3]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![1.0, 1.0, 2.0, 2.0], &[4]),
+    ]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => assert_eq!(t.shape(), &[1, 1, 4, 4]),
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn resize_axes_partial_hw_only_leaves_scales_len_two() {
+    // `axes=[2, 3]`（H・W のみ）指定時は `scales` の長さも 2 でよい
+    // （N/C 軸は暗黙に倍率 1.0 のまま）。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+            attr_ints_typed("axes", vec![2, 3]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![2.0, 2.0], &[2]),
+    ]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => assert_eq!(t.shape(), &[1, 1, 4, 4]),
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn resize_axes_negative_values_normalize_like_pad() {
+    // 負の軸指定（`-1` == 軸 3・`-2` == 軸 2）を正規化して受理する
+    // （`Pad` の `axes` 入力と同じ `normalize_axis` を再利用）。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+            attr_ints_typed("axes", vec![-1, -2]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        // axes=[-1, -2] == [3, 2]（W, H）: W 倍率 3・H 倍率 2。
+        feed_f32("scales", vec![3.0, 2.0], &[2]),
+    ]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => assert_eq!(t.shape(), &[1, 1, 4, 6]),
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn resize_rejects_duplicate_axes() {
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_ints_typed("axes", vec![2, 2]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![2.0, 2.0], &[2]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "axes"));
+}
+
+#[test]
+fn resize_rejects_axes_out_of_range() {
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_ints_typed("axes", vec![4]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![2.0], &[1]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    // `normalize_axis` の範囲外は `OpError::AxisOutOfRange` 経由で
+    // `InterpError::Op` へ包まれる（`Pad` の同型検査と同じ経路。
+    // `crates/onnx-interop/src/onnx/interp.rs::From<OpError> for InterpError`）。
+    assert!(matches!(
+        err,
+        InterpError::Op(fandhe_ai_onnx_interop::ops::OpError::AxisOutOfRange { op: "Resize", .. })
+    ));
+}
+
+#[test]
+fn resize_rejects_scales_len_mismatched_with_axes() {
+    // `axes` の長さと `scales` の長さが一致しない場合は fail-closed に
+    // 拒否する（`axes=[2, 3]` に対し `scales` が長さ 1 のみ）。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_ints_typed("axes", vec![2, 3]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![2.0], &[1]),
+    ]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "scales"));
+}
+
 // ================= Gemm の固め（イシュー #2186） =================
 
 #[test]
