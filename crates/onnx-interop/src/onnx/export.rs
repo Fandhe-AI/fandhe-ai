@@ -14,12 +14,14 @@
 //!   意味論的な逆マッピングは #1773 のスコープ（`export_ops` モジュール）。
 //!   `build_model_proto` は `export_ops::check_exportable` で
 //!   `graph.nodes`（decode 由来・または #1773 以降に手組みされた `NodeProto`）が
-//!   `interp.rs` 対応 26 op の allowlist（`export_ops::SUPPORTED_OP_TYPES`。
-//!   #2187 で `Conv`〈#2076〉に続き `BatchNormalization`／
-//!   `GlobalAveragePool`／`Flatten`〈#2200〉の逆写像を追加し import と対称
-//!   化。E2〈#2313〉・Pool 系〈#2314〉は未マージのため引き続き export
-//!   allowlist 外）・既定 opset（`domain` が空文字列）に収まっているかを
-//!   fail-closed に検査してから組み立てる（詳細対応表は
+//!   `interp.rs` 対応 34 op のうち export allowlist（`export_ops::
+//!   SUPPORTED_OP_TYPES`。26 op。#2187 で `Conv`〈#2076〉に続き
+//!   `BatchNormalization`／`GlobalAveragePool`／`Flatten`〈#2200〉の逆写像を
+//!   追加し import と対称化。E2〈本 PR #2313 で `interp` へ追加した
+//!   `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／`ReduceMean`／`Pad`／
+//!   `Resize`〉・Pool 系〈#2314〉は export 側 PR 未着手のため引き続き
+//!   export allowlist 外）・既定 opset（`domain` が空文字列）に収まって
+//!   いるかを fail-closed に検査してから組み立てる（詳細対応表は
 //!   `docs/onnx-export-op-mapping.md`）。
 //! - import -> export -> import の構造一致 roundtrip テスト・未対応 op の
 //!   fail-closed 確認は `tests/onnx_export_roundtrip.rs` で固定済み（#1774）。
@@ -88,8 +90,9 @@ pub enum ExportError {
         expected_elements: usize,
         actual_elements: usize,
     },
-    /// `op_type` が `export_ops::SUPPORTED_OP_TYPES`（`interp.rs` 対応 26 op。
-    /// #2187 時点）に含まれない、または `domain` が既定 opset（空文字列）以外
+    /// `op_type` が `export_ops::SUPPORTED_OP_TYPES`（`interp.rs` 対応 34 op
+    /// のうち 26 op。#2187 時点）に含まれない、または `domain` が既定
+    /// opset（空文字列）以外
     /// （`export_ops::check_exportable`。イシュー #1773 の層 B）。
     UnsupportedOp {
         node_name: String,
@@ -367,8 +370,9 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
 /// パイプライン全体）・将来の codegen。組み立て自体（`graph.nodes` を
 /// `GraphProto.node` へ詰める処理）は機械的な素通しのみで、op_type の意味論
 /// には関与しないが、組み立てに先立ち `export_ops::check_exportable`
-/// （イシュー #1773 の層 B）で `graph.nodes` が `interp.rs` 対応 26 op の
-/// allowlist・既定 opset（`domain` が空文字列）に収まっているかを fail-closed
+/// （イシュー #1773 の層 B）で `graph.nodes` が export allowlist（`interp.rs`
+/// 対応 34 op のうち 26 op）・既定 opset（`domain` が空文字列）に収まって
+/// いるかを fail-closed
 /// に検査する（無言 skip はしない。`security.md` A03）。
 pub fn build_model_proto(
     graph: &Graph,
