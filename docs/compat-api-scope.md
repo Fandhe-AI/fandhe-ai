@@ -980,6 +980,32 @@ TrainStepHoldDoctestGuard`（正のプローブ doctest）＋
 baseline・`docs/spec/` は不変。承認後の完全な公開 API 案・数値契約は
 `docs/compat-train-step-hook-decision.md` §5 を参照。
 
+**保留記録（イシュー #2188・親 #2131）**: `compat::Sequential` の層構成
+シリアライズ（Keras `model.save()`／`load_model()` 相当。層構成＋
+パラメータ＋`compile()` 状態の一括保存）は、本イシューに本番の
+呼び出し元が存在しないため、`accumulate_steps`（#2180）・
+`train_step_fn`（#2184）とは異なり**内部ロジックすら実装していない**
+（先行実装すると `clippy -D warnings` の `dead_code` に抵触するため。
+`docs/compat-model-io-decision.md` §0）。facade 公開面 2 件
+（`fandhe_ai::compat::{save_model, load_model}`）・型 1 件
+（`ModelIoError`。本節経路 2）は、親 #2131 の「設計判断記録 → 承認 →
+実装の 2 段」規則（先例 #2171・#2173・#2176・#2178・#2179・#2180・
+#2184・#2198）に従い未承認のまま保留した。コード変更は
+`crates/facade/src/lib.rs::ModelIoHoldDoctestGuard`（正のプローブ
+doctest。モジュール `model_io`・自由関数 `save_model`／`load_model`・
+型 `ModelIoError`・`Sequential` への inherent メソッドの 4 経路を同時に
+検出する）と `crates/facade/tests/api_surface.rs` の 4 テスト（doctest
+ドリフト検査 2 件・facade の再エクスポート／独自宣言の否定ガードとその
+自己テスト・workspace 全体の `save_model`／`load_model` 定義元
+インベントリ〈期待集合は空〉）のみで、本番コード（`compat/
+{sequential,training,mod}.rs`・`interop/safetensors.rs` のモジュール
+doc 更新を除く）は不変。公開 API のみで組める手動 roundtrip テスト
+（`crates/facade/tests/compat_sequential_model_io_manual.rs`）で
+`state_dict`／`load_state_dict`／`interop::safetensors` 経由の bit
+完全一致を先行検証した。承認後の完全な公開 API 案・ファイル形式・
+意味論・検証計画は `docs/compat-model-io-decision.md` §2・§4〜§6 を
+参照。
+
 **#2083 の設計記録は `docs/kv-cache-design.md` として完了した。**
 コード変更なし。KV キャッシュ（K-1）は既存 `Var` 演算（`cat`／
 `narrow`／`detach`・`nn/attention.rs` の `project`／`split_heads`／
