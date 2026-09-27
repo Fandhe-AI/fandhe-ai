@@ -81,8 +81,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - export allowlist（26 op・既定 domain。`GlobalAveragePool`／
   `BatchNormalization`／`Flatten` を含む）外のノードを含むモデルは、
   `from_bytes` では構築できても `to_bytes`／`to_path` の時点で
-  `OnnxError::UnsupportedOp` により拒否されます。import 対応は 28 op
-  で、`MaxPool`／`AveragePool`（イシュー #2199）は import のみ対応です。
+  `OnnxError::UnsupportedOp` により拒否されます。import 対応は 36 op
+  で、`MaxPool`／`AveragePool`（イシュー #2199）・`Clip`／`Tanh`／
+  `Gelu`／`Where`／`Expand`／`ReduceMean`／`Pad`／`Resize`（イシュー
+  #2186）は import のみ対応（export 側は未対応のため export allowlist
+  には含まれません）。
 
 ### `Sequential` からの export の最小コード例
 

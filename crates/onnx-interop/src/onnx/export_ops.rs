@@ -1,14 +1,16 @@
 //! 内部 op（Rust ネイティブの属性表現）から `NodeProto`（op_type・属性）への
 //! 逆マッピング（イシュー #1773。`onnx::export` の層 A）。
 //!
-//! `onnx::interp` が `NodeProto` から読む import 対応 28 op（`interp.rs` の
-//! `run` ディスパッチ表。`Conv` はイシュー #2076・`BatchNormalization`／
-//! `GlobalAveragePool`／`Flatten` はイシュー #2200 で追加、イシュー #2199 で
-//! `MaxPool`／`AveragePool` を追加・`Conv` に 1D 対応を追加）のうち、
-//! export allowlist は 26 op（`MaxPool`／`AveragePool` は import 専用で
-//! export 未対応。interp との対称性はイシュー #2199 で崩れた）。
-//! [`ExportOp`] はこの export allowlist の 26 op を Rust ネイティブの
-//! 属性表現（`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
+//! `onnx::interp` の `run` ディスパッチ表が対応する import 対応 36 op
+//! （`Conv` はイシュー #2076・`BatchNormalization`／`GlobalAveragePool`／
+//! `Flatten` はイシュー #2200、`MaxPool`／`AveragePool` はイシュー #2199
+//! （`Conv` に 1D 対応追加を含む）で追加）のうち、`export` allowlist
+//! （既定 domain・26 op）は `MaxPool`／`AveragePool`（import 専用。
+//! interp との対称性はイシュー #2199 で崩れた）・E2〈イシュー #2186・
+//! `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／`ReduceMean`／`Pad`／`Resize`〉
+//! を含まない（export 側未対応のため allowlist 外）。[`ExportOp`] は
+//! この export allowlist の 26 op を Rust ネイティブの属性表現
+//! （`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
 //! `attr_i64_required`／`attr_string` が読む値と同じ型）として保持する。属性は
 //! **常に全て書き出す**（既定値であっても省略しない。省略すると「属性欠落＝既定値」
 //! という対称性テストが空虚に pass してしまうため。唯一の例外は [`ExportOp::Transpose`]

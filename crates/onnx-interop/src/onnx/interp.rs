@@ -16,11 +16,13 @@
 //! （親 #2185）で `GlobalAveragePool`／`BatchNormalization`／`Flatten`
 //! （CNN 系モデル対応）を追加し、イシュー #2199（親 #2185）で `MaxPool`／
 //! `AveragePool` を追加・`Conv` に 1D（`[N,C,L]`）対応を追加した
-//! （`crate::ops::conv`）ことで、import 対応全 28 オペがグラフ実行から
-//! 到達可能（未対応 `op_type` は引き続き [`InterpError::UnsupportedOp`]
-//! で fail-closed に拒否し、無言 skip はしない）。`MaxPool`／`AveragePool`
-//! は import 専用オペで export allowlist（`export_ops::SUPPORTED_OP_TYPES`。
-//! 23 op で不変）には含まれない。
+//! （`crate::ops::conv`）。さらにイシュー #2186（親 #2185）で `Gemm`／`Clip`／
+//! 活性化（`Tanh`／`Gelu`）・演算（`Where`／`Expand`／`ReduceMean`／`Pad`／
+//! `Resize`）8 op（`interp_ext` 経由。常にホスト実行）を追加したことで、
+//! import 対応全 36 オペがグラフ実行から到達可能（未対応 `op_type` は
+//! 引き続き [`InterpError::UnsupportedOp`] で fail-closed に拒否し、
+//! 無言 skip はしない）。`MaxPool`／`AveragePool` は import 専用オペで
+//! export allowlist（`export_ops::SUPPORTED_OP_TYPES`）には含まれない。
 //!
 //! ## 実行時値モデルと dtype の扱いについて
 //!
@@ -59,6 +61,7 @@ use half::f16;
 
 use super::graph::{Graph, GraphError, RawTensor};
 use super::interp_device;
+use super::interp_ext;
 use super::proto::{AttributeProto, NodeProto, attribute_type};
 use crate::ops::{
     self, BatchNormAttrs, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, PoolAttrs,
@@ -82,7 +85,7 @@ pub enum Value {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum InterpError {
-    /// ディスパッチ表（本モジュールが実装する import 対応全 28 オペ）に
+    /// ディスパッチ表（本モジュールが実装する import 対応全 36 オペ）に
     /// 無い `op_type`。
     UnsupportedOp(String),
     /// ノードの入力名が env（feed／initializer／先行ノード出力の集合）に存在しない。
@@ -152,6 +155,16 @@ pub enum InterpError {
     /// `ShapeMismatch` はホスト実装へフォールバックするため本 variant に
     /// はならない（GPU 故障を隠蔽しない fail-closed 方針。OWASP A08）。
     Backend { node: String, message: String },
+    /// `interp_ext`（イシュー #2186。`Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
+    /// `ReduceMean`／`Pad`／`Resize`）が委譲する `fandhe_ai_autodiff::Var`
+    /// 演算が返したエラー。`AutodiffError::Shape` は既存の
+    /// [`InterpError::Shape`]（`tensor-core::ShapeError` 直接ラップ）へ写す
+    /// ことで shape 系エラーの窓口を一本化し（`autodiff_err` 参照）、それ以外
+    /// の `AutodiffError` variant のみ本 variant として透過する。
+    Autodiff {
+        node: String,
+        source: fandhe_ai_autodiff::AutodiffError,
+    },
 }
 
 impl fmt::Display for InterpError {
@@ -209,6 +222,9 @@ impl fmt::Display for InterpError {
             InterpError::Backend { node, message } => {
                 write!(f, "ノード '{node}': device 実行エラー: {message}")
             }
+            InterpError::Autodiff { node, source } => {
+                write!(f, "ノード '{node}': autodiff エラー: {source}")
+            }
         }
     }
 }
@@ -230,6 +246,21 @@ impl From<ShapeError> for InterpError {
 impl From<GraphError> for InterpError {
     fn from(e: GraphError) -> Self {
         InterpError::Graph(e)
+    }
+}
+
+/// `fandhe_ai_autodiff::AutodiffError` を `InterpError` へ変換する（`interp_ext`
+/// の全 `compute_*` が共用。イシュー #2186）。`AutodiffError::Shape` のみ
+/// 既存の [`InterpError::Shape`] へ写し（`tensor-core::ShapeError` の
+/// 窓口を一本化）、それ以外は [`InterpError::Autodiff`] としてそのまま
+/// 透過する（`From` にしない理由: ノード名を伝える文脈が必要なため）。
+pub(super) fn autodiff_err(node: &str, e: fandhe_ai_autodiff::AutodiffError) -> InterpError {
+    match e {
+        fandhe_ai_autodiff::AutodiffError::Shape(s) => InterpError::Shape(s),
+        other => InterpError::Autodiff {
+            node: node.to_string(),
+            source: other,
+        },
     }
 }
 
@@ -264,7 +295,7 @@ fn raw_to_value(raw: &RawTensor) -> Result<Value, InterpError> {
 /// `node.input[idx]` を取得する。ONNX は省略可能入力を空文字列で表す規約
 /// （`onnx/graph.rs` と同じ規約）のため、範囲外・空文字列のいずれも
 /// [`InterpError::MissingInput`] として扱う。
-fn input_name(node: &NodeProto, idx: usize) -> Result<&str, InterpError> {
+pub(super) fn input_name(node: &NodeProto, idx: usize) -> Result<&str, InterpError> {
     node.input
         .get(idx)
         .map(String::as_str)
@@ -275,7 +306,7 @@ fn input_name(node: &NodeProto, idx: usize) -> Result<&str, InterpError> {
         })
 }
 
-fn get_value<'a>(
+pub(super) fn get_value<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -286,7 +317,7 @@ fn get_value<'a>(
     })
 }
 
-fn get_f32<'a>(
+pub(super) fn get_f32<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -300,7 +331,7 @@ fn get_f32<'a>(
     }
 }
 
-fn get_i64<'a>(
+pub(super) fn get_i64<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -319,7 +350,7 @@ fn get_i64<'a>(
 /// `Slice` の `starts`/`ends`/`axes`/`steps`・`Reshape` の `shape` 等、`ops::*` の
 /// スライス引数へそのまま渡せる形。値は shape 問い合わせ結果・インデックス列等の
 /// 小規模データのため、参照を返す代わりに複製するコストは無視できる）。
-fn i64_vec_and_shape(
+pub(super) fn i64_vec_and_shape(
     env: &HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -332,7 +363,7 @@ fn i64_vec_and_shape(
     Ok((data.to_vec(), tc.shape().to_vec()))
 }
 
-fn attr_f32(node: &NodeProto, name: &str, default: f32) -> f32 {
+pub(super) fn attr_f32(node: &NodeProto, name: &str, default: f32) -> f32 {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -340,7 +371,7 @@ fn attr_f32(node: &NodeProto, name: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-fn attr_i64(node: &NodeProto, name: &str, default: i64) -> i64 {
+pub(super) fn attr_i64(node: &NodeProto, name: &str, default: i64) -> i64 {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -348,7 +379,7 @@ fn attr_i64(node: &NodeProto, name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-fn attr_i64_required(node: &NodeProto, name: &str) -> Result<i64, InterpError> {
+pub(super) fn attr_i64_required(node: &NodeProto, name: &str) -> Result<i64, InterpError> {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -361,7 +392,7 @@ fn attr_i64_required(node: &NodeProto, name: &str) -> Result<i64, InterpError> {
 
 /// `Unsqueeze`／`Squeeze`（opset<13）・`Transpose` の `axes`/`perm` 属性
 /// （`AttributeProto.ints`）を読む。
-fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
+pub(super) fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -373,7 +404,7 @@ fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
 /// ている場合、どちらを採用すべきかは ONNX 仕様上一意に決まらないため、無言で
 /// 先頭／末尾いずれかを採用せず [`InterpError::InvalidAttribute`] で fail-closed
 /// に拒否する（OWASP A03。外部フォーマット由来の曖昧な入力を検証せずに通さない）。
-fn find_attr_unique<'a>(
+pub(super) fn find_attr_unique<'a>(
     node: &'a NodeProto,
     name: &str,
 ) -> Result<Option<&'a AttributeProto>, InterpError> {
@@ -401,7 +432,7 @@ fn find_attr_unique<'a>(
 /// 型として送り `ints` を空のまま残す）が「省略された」場合と区別できず、
 /// 無言で ONNX 既定値へ fallback してしまう（OWASP A03。外部 ONNX モデルは
 /// 非信頼な入力）。
-fn check_attr_type(
+pub(super) fn check_attr_type(
     node: &NodeProto,
     attr: &AttributeProto,
     expected: i32,
@@ -433,7 +464,10 @@ fn check_attr_type(
 /// も非空の値のみ書き出す。空 `ints` を許すと `.unwrap_or(&[])` 経由で
 /// 「省略」時と同じ既定値 fallback に合流してしまい、`r#type` 検証だけでは
 /// 塞げない同型の無言 fallback 抜け道になる）。
-fn attr_ints_typed<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a [i64]>, InterpError> {
+pub(super) fn attr_ints_typed<'a>(
+    node: &'a NodeProto,
+    name: &str,
+) -> Result<Option<&'a [i64]>, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(None),
         Some(a) => {
@@ -453,7 +487,11 @@ fn attr_ints_typed<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a [i6
 /// `Conv` の `group`（INT 型属性）を読む。属性が省略されていれば `default`
 /// を返し、存在する場合は `r#type == INT` であることを検証してから `i` を
 /// 返す（`attr_ints_typed` と同型の型検証。イシュー #2076 codex-review 指摘）。
-fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, InterpError> {
+pub(super) fn attr_i64_typed(
+    node: &NodeProto,
+    name: &str,
+    default: i64,
+) -> Result<i64, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(default),
         Some(a) => {
@@ -463,11 +501,19 @@ fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, Int
     }
 }
 
-/// `BatchNormalization` の `epsilon`／`momentum`（FLOAT 型属性。イシュー
-/// #2200）を読む。`attr_i64_typed` と同型の型検証（`attr_f32`／`attr_i64`
-/// の無検証版は使わない）。属性が省略されていれば `default` を返し、
-/// 存在する場合は `r#type == FLOAT` であることを検証してから `f` を返す。
-fn attr_f32_typed(node: &NodeProto, name: &str, default: f32) -> Result<f32, InterpError> {
+/// FLOAT 型属性を読む（`attr_i64_typed` と同型の型検証。`attr_f32`／
+/// `attr_i64` の無検証版は使わない）。属性が省略されていれば `default` を
+/// 返し、存在する場合は `r#type == FLOAT` であることを検証してから `f` を
+/// 返す。`Gemm` の `alpha`／`beta`（イシュー #2186。FLOAT 型偽装〈例: INT 型
+/// で送り `f` をゼロ値のまま残す〉から保護する。OWASP A03）と
+/// `BatchNormalization` の `epsilon`／`momentum`（イシュー #2200）の双方から
+/// 使う共通ヘルパーで、`interp_ext`（`Clip` の `min`／`max` 等）からも
+/// `pub(super)` で参照する。
+pub(super) fn attr_f32_typed(
+    node: &NodeProto,
+    name: &str,
+    default: f32,
+) -> Result<f32, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(default),
         Some(a) => {
@@ -496,7 +542,11 @@ fn attr_f32_typed(node: &NodeProto, name: &str, default: f32) -> Result<f32, Int
 /// 非対称になり、`check_attr_type` の型検証だけでは塞げない同型の無言
 /// fallback 抜け道になる。属性自体が存在しない場合のみ `default`
 /// （`"NOTSET"`）を適用する。
-fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, InterpError> {
+pub(super) fn attr_string(
+    node: &NodeProto,
+    name: &str,
+    default: &str,
+) -> Result<String, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(default.to_string()),
         Some(a) => {
@@ -517,23 +567,121 @@ fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, In
     }
 }
 
+/// `Gemm` の `alpha`／`beta`（FLOAT）・`transA`／`transB`（INT）属性を型検証
+/// 込みで読む（イシュー #2186「Gemm の固め」節）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （forward の数値計算は引き続き `ops::gemm` のみが担う。属性読み取りの
+/// 二重実装〈autograd 旧実装の無検証版〉を解消する）。
+pub(super) fn read_gemm_attrs(node: &NodeProto) -> Result<GemmAttrs, InterpError> {
+    Ok(GemmAttrs {
+        alpha: attr_f32_typed(node, "alpha", 1.0)?,
+        beta: attr_f32_typed(node, "beta", 1.0)?,
+        trans_a: attr_i64_typed(node, "transA", 0)? != 0,
+        trans_b: attr_i64_typed(node, "transB", 0)? != 0,
+    })
+}
+
+/// `attrs` 適用後の `A'`／`B'`（`trans_a`／`trans_b` 反映後の 2 次元 shape）
+/// から出力 `[M, N]` を導出する。`a`／`b` の rank 検証自体は `ops::gemm` が
+/// 行う（`OpError::RankMismatch`）ため、ここでは rank 2 を前提にできない
+/// 呼び出し元向けに `None` を返し、後続の `ops::gemm` 呼び出しへ検証を委ねる
+/// （`compute_gemm` の旧 opset `broadcast=0` 検査専用の補助。イシュー #2186）。
+fn gemm_output_mn(
+    a_shape: &[usize],
+    b_shape: &[usize],
+    attrs: &GemmAttrs,
+) -> Option<(usize, usize)> {
+    if a_shape.len() != 2 || b_shape.len() != 2 {
+        return None;
+    }
+    let m = if attrs.trans_a {
+        a_shape[1]
+    } else {
+        a_shape[0]
+    };
+    let n = if attrs.trans_b {
+        b_shape[0]
+    } else {
+        b_shape[1]
+    };
+    Some((m, n))
+}
+
+/// `Gemm` の入力数検査（2〜3 個。第 3 入力 `C` は任意）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （codex-review 指摘。イシュー #2186 PR #2313。従来 autograd 経路には
+/// この検査が無く、4 個以上の余剰入力を無検証で受理し得た）。
+pub(super) fn validate_gemm_arity(node: &NodeProto) -> Result<(), InterpError> {
+    if node.input.len() < 2 || node.input.len() > 3 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 2,
+            max: 3,
+            actual: node.input.len(),
+        });
+    }
+    Ok(())
+}
+
+/// 旧 opset（Gemm-6 以前）の `broadcast`（INT）属性検査。省略または非 0 は
+/// 現行 opset 相当のユニ方向ブロードキャストをそのまま許容する。`0` は
+/// 「ブロードキャストしない」意味であり、`C` が正確に `[M, N]` の場合の
+/// みを受理する（旧仕様。`ops::gemm` は常にブロードキャストするため、
+/// ここで shape 一致を明示検査してから委譲する）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （codex-review 指摘。イシュー #2186 PR #2313。従来 autograd 経路の
+/// `GemmFn` はこの検査を経ず、interp が拒否する `broadcast=0` かつ `C`
+/// 形状不一致のノードを受理し得た）。
+///
+/// **shape のみを受け取る（`Tensor<f32>` を要求しない）設計**（Cursor
+/// Bugbot 指摘・イシュー #2313）: `autograd::dispatch_node` の `Gemm` 腕は
+/// `A`／`B`／`C` が `Const`（`Value::F32`）だけでなく `Var`（勾配追跡
+/// 対象。通常の学習経路で常用される）でも受理するため、`Tensor<f32>` の
+/// 参照を要求する signature だと `C` が `Var` の場合に検査そのものを
+/// 呼べず、`interp` が拒否する `broadcast=0` かつ shape 不一致のノードを
+/// autograd 経路が黙って受理してしまう。shape の抽出（`Var` は
+/// `Var::value().shape()` 経由）を呼び出し側の責務にすることで、
+/// `Const`／`Var` いずれの入力でも同じ検査を適用できる。
+pub(super) fn validate_gemm_broadcast(
+    node: &NodeProto,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    c_shape: Option<&[usize]>,
+    attrs: &GemmAttrs,
+) -> Result<(), InterpError> {
+    let broadcast_flag = attr_i64_typed(node, "broadcast", 1)?;
+    if broadcast_flag == 0
+        && let Some(c_shape) = c_shape
+        && let Some((m, n)) = gemm_output_mn(a_shape, b_shape, attrs)
+        && c_shape != [m, n]
+    {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: "broadcast".to_string(),
+            reason: format!(
+                "broadcast=0 のとき C の shape は出力 [{m}, {n}] と一致する必要があります \
+                 （実際: {c_shape:?}）"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn compute_gemm(
     env: &HashMap<String, Value>,
     node: &NodeProto,
     dev_ops: Option<&dyn BackendOps>,
 ) -> Result<(Value, bool), InterpError> {
+    validate_gemm_arity(node)?;
     let a = get_f32(env, node, input_name(node, 0)?)?;
     let b = get_f32(env, node, input_name(node, 1)?)?;
     let c = match node.input.get(2) {
         Some(name) if !name.is_empty() => Some(get_f32(env, node, name)?),
         _ => None,
     };
-    let attrs = GemmAttrs {
-        alpha: attr_f32(node, "alpha", 1.0),
-        beta: attr_f32(node, "beta", 1.0),
-        trans_a: attr_i64(node, "transA", 0) != 0,
-        trans_b: attr_i64(node, "transB", 0) != 0,
-    };
+    let attrs = read_gemm_attrs(node)?;
+    validate_gemm_broadcast(node, a.shape(), b.shape(), c.map(Tensor::shape), &attrs)?;
+
     // opt-in ON（`dev_ops` が `Some`）のときのみ device 経路を試みる。
     // `Ok(None)`（未対応 shape・`Unsupported`）はホスト実装へそのまま
     // フォールバックし、opt-in OFF（`dev_ops` が `None`）時の経路・出力は
@@ -747,7 +895,7 @@ fn compute_slice(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value
     }
 }
 
-fn get_bool<'a>(
+pub(super) fn get_bool<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -761,7 +909,7 @@ fn get_bool<'a>(
     }
 }
 
-fn get_f16<'a>(
+pub(super) fn get_f16<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -1407,6 +1555,18 @@ fn run_impl(
             "BatchNormalization" => (compute_batch_normalization(&env, node)?, false),
             "GlobalAveragePool" => (compute_global_average_pool(&env, node)?, false),
             "Flatten" => (compute_flatten(&env, node)?, false),
+            // イシュー #2186: 常にホスト実行（`interp_ext` 冒頭コメント
+            // 参照。`Tape::new_with_ops` が要求する所有 `BackendOps` を
+            // 借用 `Option<&dyn BackendOps>` から構築できないため device
+            // 経路には接続しない）。
+            "Clip" => (interp_ext::compute_clip(&env, node)?, false),
+            "Tanh" => (interp_ext::compute_tanh(&env, node)?, false),
+            "Gelu" => (interp_ext::compute_gelu(&env, node)?, false),
+            "Where" => (interp_ext::compute_where(&env, node)?, false),
+            "Expand" => (interp_ext::compute_expand(&env, node)?, false),
+            "ReduceMean" => (interp_ext::compute_reduce_mean(&env, node)?, false),
+            "Pad" => (interp_ext::compute_pad(&env, node)?, false),
+            "Resize" => (interp_ext::compute_resize(&env, node)?, false),
             other => return Err(InterpError::UnsupportedOp(other.to_string())),
         };
         if let Some(r) = report.as_deref_mut() {

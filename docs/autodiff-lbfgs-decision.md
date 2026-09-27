@@ -20,10 +20,15 @@ line search 中の複数回評価を表現できないため、呼び出し元�
 
 facade（`fandhe_ai::optim`）への公開・`compile()` 統合は**別イシュー
 #2198**（facade 公開面拡張はユーザー承認事項。親 #2131 の「facade 公開
-面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則）として保留する。
-#2198 は着手時点でも承認未取得のため保留固定（多層ガード）で
-`Closes` している。保留の詳細・再開条件は §7、承認後の実装設計は §8 を
-参照。
+面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則）で扱う。着手時点
+（2026-09-26）は承認未取得のため保留固定（多層ガード）で `Closes`
+していたが、**2026-09-27 に所有者が facade 公開面拡張を承認**
+（`compat::Optimizer::Lbfgs(LbfgsConfig)` variant・`LbfgsConfig` の
+facade 再エクスポート・`compile()`/`fit()` 統合の 3 点。#2172 コメント）
+し、実装済みである。`Lbfgs`（optimizer 本体）・`LbfgsLineSearch`
+（line search 方式選択）は承認範囲外のまま非公開を維持する。保留の
+詳細・再開条件は §7、承認前の実装設計（事前提示）は §8、承認後の
+実装記録は §9 を参照。
 
 ## §1 使い方
 
@@ -164,15 +169,28 @@ f32 テンソル演算に合わせ `f32`。`|loss - prev_loss| < tolerance_chang
 
 ## §6 スコープ外
 
-- facade（`fandhe_ai::optim`）への公開・`compat::Sequential::compile()`
-  との統合は別イシュー **#2198**（facade 公開面拡張はユーザー承認
-  事項。§7・§8 参照）
+- facade（`fandhe_ai::optim`）への `LbfgsConfig` 再エクスポート・
+  `compat::Sequential::compile()` との統合は別イシュー **#2198**
+  （facade 公開面拡張はユーザー承認事項）で 2026-09-27 に承認・実装
+  済み（§9 参照）。`Lbfgs`（optimizer 本体）・`LbfgsLineSearch`
+  （line search 方式選択）自体の facade 再エクスポートは承認範囲外の
+  まま**引き続きスコープ外**（§7・§9 参照）
 - `crate::optim::device_store::DeviceParamStore` 常駐経路への対応
 - param groups（`nn::optim::param_group::ParamGroupStep`。#2173）への
   対応
 - `maximize`・複素数パラメータ・sparse 勾配（§3 参照）
 
-## §7 facade 公開・`compile()` 統合の保留（#2198）
+## §7 facade 公開・`compile()` 統合の保留（#2198。2026-09-26 時点の記録）
+
+**2026-09-27 追記**: 本節は着手時点（2026-09-26）の保留記録であり
+歴史的経緯として残す。2026-09-27 に所有者が `compat::Optimizer::
+Lbfgs(LbfgsConfig)` variant・`LbfgsConfig` の facade 再エクスポート・
+`compile()`/`fit()` 統合を承認し実装済みである（承認範囲は §9 が
+提示する 3 点のみで、本節が示す「3 型すべての再エクスポート」より
+狭い）。`Lbfgs`／`LbfgsLineSearch` は引き続き非公開（下記の保留ガードは
+この 2 型のみを対象とする形へ縮小済み。`compat_optimizer_enum_has_no_
+lbfgs_variant` は variant 追加自体が承認されたため
+`compat_optimizer_enum_has_lbfgs_variant`〈正のガード〉へ反転した）。
 
 イシュー #2198（親 #2172・ルート #2131）は facade 公開面の拡張
 （`compat::Optimizer::Lbfgs(LbfgsConfig)` variant の追加・
@@ -250,3 +268,135 @@ PR #2252）と同様に、多層防御のガード（保留固定）＋ドキュ
   存在を固定する正ガードへ置き換える。`optim_module_reexports_
   exactly_expected_surface` の期待集合に `Lbfgs`／`LbfgsConfig`／
   `LbfgsLineSearch` を追加する。
+
+## §9 承認後の実装記録（2026-09-27。イシュー #2172 コメント）
+
+所有者が facade 公開面の拡張を明示承認した
+（https://github.com/Fandhe-AI/fandhe-ai/issues/2172#issuecomment-5852299614）。
+**承認範囲は次の 3 点のみ**であり、§8 が事前提示した「`Lbfgs`／
+`LbfgsConfig`／`LbfgsLineSearch` の 3 型すべてを再エクスポートする」案
+より狭い:
+
+1. `compat::Optimizer::Lbfgs(LbfgsConfig)` variant の追加
+2. `LbfgsConfig` 型のみの facade 再エクスポート（`fandhe_ai::optim`）
+3. `compile()`/`fit()` への LBFGS 統合
+
+`Lbfgs`（optimizer 本体。closure 駆動）・`LbfgsLineSearch`（line search
+方式選択）は承認事項に含まれないため、引き続き非公開のまま
+`LbfgsHoldDoctestGuard`（`crates/facade/src/lib.rs`。プローブを
+`{Lbfgs, LbfgsLineSearch}` の 2 型のみへ縮小）＋`crates/facade/tests/
+api_surface.rs` のソース走査（`facade_does_not_reexport_or_declare_
+lbfgs_items`。`NAMES` から `LbfgsConfig` を除外）で固定する。
+`compat::Optimizer` enum への variant 追加自体は承認済みとなったため、
+旧`compat_optimizer_enum_has_no_lbfgs_variant`（否定ガード）は
+`compat_optimizer_enum_has_lbfgs_variant`（variant がちょうど 1 個
+存在することを固定する正のガード）へ反転した。
+
+### 実装内容
+
+- `crates/facade/src/optim.rs`: `pub use fandhe_ai_autodiff::nn::
+  optim::LbfgsConfig;`（単一識別子・波括弧なし。rustfmt が `{X}` を
+  `X` へ整形するため、`tests/api_surface.rs::
+  optim_module_reexports_exactly_expected_surface` の走査を単一識別子
+  形にも対応するよう拡張した）。
+- `crates/facade/src/compat/training.rs`:
+  - `Optimizer::Lbfgs(LbfgsConfig)` variant を追加（非破壊。
+    `#[non_exhaustive]` enum への variant 追加）。
+  - `OptimizerState::Lbfgs(Lbfgs)`（`Lbfgs` は `fandhe_ai_autodiff::nn::
+    optim::Lbfgs` を crate 内部専用に直接 import。facade からは一切
+    再エクスポートしない）。`new`／`lr`／`set_lr`（`Lbfgs::set_lr` へ
+    委譲。`supports_lr_schedule` は `true`）／`step`（closure 経由の
+    ため到達しない防御的 `InvalidArgument`）の 4 か所へ 1 arm ずつ
+    追加。
+  - `Sequential::run_fit` のバッチ処理: `OptimizerState::Lbfgs` を
+    検出した場合のみ非公開ヘルパー `lbfgs_batch_step` へ分岐する。
+    手順は §8 の事前設計どおり——`trainable_parameters()` の snapshot
+    化 → `Lbfgs::try_step_closure`（closure 内で `apply_parameters
+    (trial)` → `forward_with_precision`（AMP 非対応のため常に
+    `None`）→ `T::loss_for` → `tape.backward` → `trainable_grads` の
+    owned clone）→ `Err` なら `apply_parameters(snapshot)` で復元して
+    からエラーを返す → `Ok` なら `apply_parameters(updated)` し
+    `History::loss` へ `lbfgs.last_loss()`（初回評価損失）を記録する。
+  - **AMP 非対応**: `compile_with_amp(Optimizer::Lbfgs(_), …)` は
+    `OptimizerState::new`／`GradScaler::new` を呼ぶ前に
+    `InvalidArgument` を返し `self.compiled` を変更しない
+    （construct-before-assign）。
+  - **非対応の組み合わせ（fail-closed 拒否。§8 の事前設計を踏襲）**:
+    `FitConfig` の `accumulate_steps > 1`、カスタム学習 step フック
+    （イシュー #2184。フックは `&Sequential`〈不変参照〉しか受け取ら
+    ないため trial パラメータ書き込みを駆動できない）。両者とも
+    `fit_with_callbacks_named` の引数検査（モード変更・バッチループ
+    より前）で拒否する。
+  - **未対応のまま残る組み合わせ**: `OptimizerStateDict`（#2304）・
+    param groups（#2173）はいずれも facade 側で別途保留中（未承認）の
+    ため、`Optimizer::Lbfgs` 固有の追加対応は行っていない（両者の保留
+    解除時に横断的に対応する）。
+- **facade のみで使う場合の既知の制約**: `LbfgsLineSearch` を facade
+  から名指しできないため、`fandhe_ai` のみに依存する利用者は
+  `LbfgsConfig::line_search` を明示指定できず、既定の固定ステップ
+  （`LbfgsLineSearch::None`）のみで L-BFGS を使うことになる。strong
+  Wolfe line search が必要な場合は引き続き `fandhe_ai_autodiff` への
+  直接依存が必要（`crates/facade/tests/compat_sequential_lbfgs_
+  manual.rs`）。
+
+### `lbfgs_batch_step` の失敗時復元契約のテスト（codex-review 指摘・PR #2319）
+
+§8 の「`run_fit` のバッチ処理」節が予定する「`Err` の場合は必ず
+`apply_parameters(snapshot)` で復元してからエラーを返す」契約は、
+実装時点では `crates/facade/tests/compat_sequential_lbfgs_manual.rs`
+（内部 import 契約ファイル。closure を独自に組んで `Lbfgs::
+try_step_closure` を直接呼ぶ手動ループ）でのみ検証しており、facade の
+`compile()`/`fit()` 経由（`lbfgs_batch_step`）の失敗時復元は未検証
+だった（PR #2319 codex-review P2 指摘）。
+
+`crates/facade/src/compat/training.rs::lbfgs_fit_failure_tests::
+lbfgs_fit_restores_params_and_keeps_compiled_after_multi_eval_failure`
+（crate 内部の `#[cfg(test)]`。`lbfgs_batch_step` が非公開のため
+外部統合テストクレートからは到達不能）を追加し、次を固定した:
+
+- 極端に大きい `lr`（`1e30`）・`max_iter: 2` により、固定ステップの
+  1 回目の closure 評価（元パラメータ・有限）は成功し、`x += t·d`
+  更新後の 2 回目の評価で MSE loss が `f32::MAX` を超えて `inf` になる
+  （決定的に再現可能。乱数の偶然性に依存しない）。
+- `fit` がこの `InvalidArgument`（"closure returned non-finite loss"）
+  を返す。
+- `Sequential::trainable_parameters()` が `fit` 呼び出し前の snapshot
+  と bit 完全一致で復元される（closure が既に trial パラメータを
+  書き込んだ後の失敗であることをエラーメッセージで確認済み）。
+- `Sequential::is_compiled()` が維持される。
+- 同じモデルに対する `evaluate` が失敗前と同一の損失を返す（パラメータ
+  復元の間接確認）・再 `compile`（正常な `lr`）後の `fit` が成功する
+  （compiled 状態・モデル状態が壊れていないことの確認）。
+
+**§8 の予定と実装の食い違いの有無**: 上記検証の結果、§8 が記述する
+復元契約（`Err` → `apply_parameters(snapshot)`）は実装と完全に一致して
+おり、§8 側の記述を訂正する必要はなかった。
+
+### 学習曲線検証（残る受入条件の充足）
+
+`crates/facade/tests/compat_sequential_fit_lbfgs.rs::
+fit_lbfgs_learning_curve_matches_or_beats_sgd` が、MNIST 実寸を使った
+合成回帰（`D_IN=784`・`D_HIDDEN=16`・`D_OUT=10`・`N=32`・フルバッチ・
+`Loss::Mse`。CI 実行時間〈debug ビルドで数十秒以内目安〉を考慮し
+`N`／`D_HIDDEN`／`epochs`／`max_iter` を縮小する一方、`D_IN`／`D_OUT`
+は MNIST の実寸を使う）で `compile()`/`fit()`（`epochs=3`）を通じ
+L-BFGS（固定ステップ・`lr=0.2`・`max_iter=20`）と SGD（`lr=0.05`）を
+同一初期重みから学習し、`evaluate()` の最終損失を比較する。実測値
+（2026-09-27・debug ビルド・`cargo test -p fandhe-ai --test
+compat_sequential_fit_lbfgs -- --nocapture`）:
+
+| optimizer | history.loss（epoch 1〜3） | 最終 evaluate 損失 | 所要時間 |
+|---|---|---|---|
+| L-BFGS（固定ステップ） | `[0.3956, 0.0673, 0.0319]` | `0.0205` | 約 1.04s |
+| SGD | `[0.3956, 0.3832, 0.3719]` | `0.362` | 約 4.3ms |
+
+テストバイナリ全体（ビルド含む）の所要時間は約 10.5s（`time` 実測）で
+あり、CI タイムアウト（`test-timeout-minutes: 20`）に対し十分な余裕が
+ある。
+
+L-BFGS は 1 epoch（= 1 outer step。フルバッチ）あたり `max_iter=20`
+回までの内部反復を行うため、同じ `epochs` 数でも SGD より大きく損失が
+下がる（PyTorch の一般的な L-BFGS 運用と同じ——`step` を epoch ごとに
+1 回呼び `max_iter` を大きく取る）。所要時間が SGD よりかなり長いのも
+同じ理由（内部反復あたり 1 回の forward／backward）で想定どおり。
+

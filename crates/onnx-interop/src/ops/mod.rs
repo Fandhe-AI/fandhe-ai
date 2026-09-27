@@ -25,8 +25,13 @@
 //! （op 名 → 本モジュール関数の解決）は [`crate::onnx::interp`]（TASK-7.2b・#78、
 //! TASK-7.3 系 14 オペの結線は #274・`Conv` の結線は #2076・`GlobalAveragePool`／
 //! `BatchNormalization`／`Flatten` の結線は #2200・`MaxPool`／`AveragePool` の
-//! 結線は #2199 で実装）が担い、import 対応全 28 オペがグラフ実行から到達可能
-//! である。
+//! 結線は #2199 で実装）が担う。これらに加え、イシュー #2186 で追加した 8 op
+//! （`Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／`ReduceMean`／`Pad`／`Resize`）
+//! は本モジュールへは追加せず `fandhe_ai_autodiff::Var` の同名演算へ委譲する形で
+//! `interp` のディスパッチ表から到達可能である（`crate::onnx::interp_ext` 冒頭
+//! コメント参照。本モジュールの対応 op 数を絶対数で記述せず、ディスパッチ表
+//! 〈`interp::run_impl`〉を正とする。import 対応全 36 オペがグラフ実行から
+//! 到達可能）。
 
 mod activation;
 mod arith;

@@ -113,7 +113,7 @@ tolerance 自体は変更せず、必要なら spec リポへの提案（ユー�
 | `BatchNormalization` | 対応済み（#2200）。推論時（`training_mode` 非対応）の `scale`/`B`/`mean`/`var` 全入力形のみ | #2200 |
 | `Flatten` | 対応済み（#2200） | #2200 |
 | `GlobalAveragePool` | 対応済み（#2200） | #2200 |
-| `Clip`（min/max 入力形） | 未対応 | #2186 |
+| `Clip`（min/max 入力形） | 対応済み（#2186。attr 形〈opset 6〉・入力形〈opset 11+〉の両方） | tier B（mobilenetv2-12 の ReLU6 相当）は Conv 側の `auto_pad`／group conv（#2199）で先に停止するため end-to-end parity 到達は未確認 |
 | `Dropout`（推論時 identity） | 未対応 | 追跡先なし（起票候補。`docs/perf/logs/onnx-model-zoo-parity-2081/README.md` §「未対応 op の追跡」） |
 | group／depthwise conv（`Conv` の `group` 属性） | 未対応 | #2199（Phase 2 と明記されており本 issue 選定モデルの `mobilenetv2-12` に必須） |
 | `auto_pad`（`SAME_UPPER` 等） | 未対応 | 追跡先なし（起票候補。同上） |
