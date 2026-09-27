@@ -7247,6 +7247,14 @@ fn std_vjp(
 ///   NaN／ゼロ分岐構造を踏襲。`norm > 0.0` は NaN に対して常に偽になる
 ///   ため、この分岐がないと NaN が黙って 0 として扱われ数値異常が
 ///   隠れる）。
+///
+/// **事前条件（呼び出し元が満たす）**: 本関数は backward パスでのみ
+/// 呼ばれ、`input`（forward の `x`）・`g`（forward の出力 `out_shape`
+/// と同じ shape を持つ上流勾配）はいずれも forward 側（`Var::norm`）の
+/// `checked_bytes_for::<f32>` による確保前検証を経て構築済みの
+/// テンソルであるため、本関数を新たに検査する必要はない（forward が
+/// 拒否する shape は tape に push されないため backward にも到達しない。
+/// `logsumexp_vjp` と同型の契約。イシュー #2287）。
 fn vector_norm_vjp(
     input: &Tensor<f32>,
     ord: VectorNormOrd,

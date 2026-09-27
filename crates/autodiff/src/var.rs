@@ -27,6 +27,7 @@ use fandhe_ai_tensor_core::{
     scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
+use crate::bool_ops::checked_bytes_for;
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
@@ -5477,6 +5478,20 @@ impl<'t> Var<'t> {
     /// （`BackendOps::vector_norm` → `Unsupported` のときのみ
     /// `eval::vector_norm_along`）。空縮約（`n == 0`）は
     /// [`AutodiffError::InvalidArgument`]。
+    ///
+    /// **確保前のバイト数上限検査（`checked_bytes_for`。イシュー
+    /// #2287）**: 小さなストレージを巨大な shape へ `broadcast_to`
+    /// した view を渡すと、`materialize_fallible`（実体化）・
+    /// `BackendOps::vector_norm` 委譲・`eval::vector_norm_along`
+    /// フォールバックのいずれも無検査で `Vec` を確保するため、
+    /// capacity overflow panic になりうる（本番経路 panic 禁止規約
+    /// `.claude/rules/coding-rust.md`・REQ-8）。`out_shape` が求まった
+    /// 直後・`n` の計算（`dim=None` の `shape.iter().product()`。無検査
+    /// では overflow しうる）より前に、入力 shape・`out_shape` の
+    /// 両方を検査することで、後続のあらゆる分岐（backend 委譲・eval
+    /// フォールバック・VJP）を一律に守る（`reduce_ops::
+    /// ensure_alloc_fits_f32` と同じ契約。`crate::reduce_ops` モジュール
+    /// doc 参照）。
     pub(crate) fn norm(
         &self,
         ord: VectorNormOrd,
@@ -5484,6 +5499,8 @@ impl<'t> Var<'t> {
     ) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
         let out_shape = reduce_out_shape(&shape, dim)?;
+        checked_bytes_for::<f32>(&shape)?;
+        checked_bytes_for::<f32>(&out_shape)?;
         let n = match dim {
             None => shape.iter().product(),
             Some(axis) => shape[axis],

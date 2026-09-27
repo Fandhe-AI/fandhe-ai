@@ -201,7 +201,13 @@ bit 不一致を実測確認済み。`vector_norm_p` は `n = 3・CHUNK + 17`
   broadcast shape を委譲前に拒否できる**（委譲先自体は改修していない
   ため、委譲先を直接呼ぶ既存の `Var::norm_l1`／`norm_l2`／`Var::norm`
   経由の呼び出しには本検査は及ばない。この残存範囲は §5 のスコープ外
-  候補のまま）。
+  候補のまま）。**2026-09-27 追記（イシュー #2287・是正済み）**:
+  委譲先 `Var::norm`（`norm_l1`／`norm_l2` の共通実装。`var.rs`）自体
+  も入口で `checked_bytes_for::<f32>` による確保前検査を持つよう是正
+  した。これにより `norm_p` を経由しない `Var::norm_l1`／`norm_l2`
+  直接呼び出しの残存範囲も塞がれ、上記の「委譲先を直接呼ぶ既存の
+  呼び出しには本検査は及ばない」という限定は解消済み（§5 の該当
+  スコープ外候補も是正済みへ更新）。
 - 回帰テストは `crates/backend-cpu/src/reduction.rs` の
   `logsumexp_vector_norm_p_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
   `logsumexp_vector_norm_p_full_reduce_rejects_huge_broadcast_input_without_panicking`
@@ -328,13 +334,31 @@ tape()`〈`CpuBackendOps`〉経由でも同じ検査が dispatch 前に効くこ
 - keepdim 版・複数軸版（`*_dims`）: 対象外。
 - CUDA・Metal の実機 parity 実測: 申し送り（`docs/perf/logs/
   reduce-ops-2147/README.md`）。
-- `Var::norm`（`norm_l1`／`norm_l2`。`var.rs`）・
+- ~~`Var::norm`（`norm_l1`／`norm_l2`。`var.rs`）・
   `eval::vector_norm_along`（`eval.rs:637-638` の `dense_vec`＋
   `vec![0f32; outer * inner]`）は §2.4 追記 2 と同種（小さな
   ストレージを巨大な shape へ broadcast した view で確保前検査が
   ない）だが、イシュー #1723 の既存経路であり本 PR（#2147・PR
   #2263）の差分外のため未修正。将来の是正候補として記録のみ
-  （codex-review 指摘・PR #2263 レビュー時点）。
+  （codex-review 指摘・PR #2263 レビュー時点）。~~
+  **2026-09-27 是正済み（イシュー #2287）**: `Var::norm` 入口に
+  `checked_bytes_for::<f32>(&shape)`／`checked_bytes_for::
+  <f32>(&out_shape)` を追加し、`materialize_fallible`・
+  `BackendOps::vector_norm` 委譲・`eval::vector_norm_along`
+  フォールバック・VJP（`grad::vector_norm_vjp`）のすべてを一律に
+  守る形へ是正した。あわせて `backend-cpu::reduction::vector_norm`
+  にも `checked_alloc_numel_f32`（`logsumexp`／`vector_norm_p` と
+  同型）を追加し、`BackendOps::vector_norm` を直接呼ぶ経路も多層
+  防御で守る。回帰テストは `backend-cpu::reduction::
+  vector_norm_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
+  `vector_norm_full_reduce_rejects_huge_broadcast_input_without_panicking`
+  （backend-cpu 直接）、`crates/autodiff/tests/var_norm.rs::
+  norm_l1_l2_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
+  `norm_l1_l2_full_reduce_rejects_huge_broadcast_input_without_panicking`
+  （`NaiveOps` 経由の eval フォールバック）、`crates/facade/tests/
+  var_norm_backend_parity.rs::
+  cpu_norm_l2_rejects_huge_broadcast_before_dispatch`（CPU tape 経由の
+  代表 1 件）。
 
 ## §6 承認事項（未承認として列挙）
 

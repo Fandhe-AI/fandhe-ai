@@ -625,8 +625,17 @@ pub(crate) fn std_along(
 /// フォールバック。イシュー #1723）。[`var_along`] と同じ
 /// `outer`／`axis_len`／`inner` 分解で、出力要素ごとに `f64` 累積し
 /// L2 のみ最後に `sqrt` してから 1 回だけ `f32` へ downcast する
-/// （`n == 0` の検査は呼び出し元 `Var::norm_l1`／`norm_l2` が済ませて
-/// いる前提）。
+/// （`n == 0` の検査は呼び出し元 `Var::norm`（`norm_l1`／`norm_l2` の
+/// 共通実装）が済ませている前提）。
+///
+/// **事前条件（呼び出し元が満たす）**: `dense_vec(input)`（`input.shape()`
+/// を実体化）・`vec![0f32; outer * inner]`（`out_shape` を確保）は
+/// いずれも無検査のため、呼び出し元 `Var::norm` が
+/// `checked_bytes_for::<f32>(&shape)`／`checked_bytes_for::
+/// <f32>(&out_shape)` で確保前検証済みであること（本モジュール冒頭
+/// コメント「shape が既に整合していることを前提とし `ShapeError` を
+/// 返さない」契約のとおり、本関数自体は境界検査を行わない。
+/// `logsumexp_along` と同型の契約。イシュー #2287）。
 pub(crate) fn vector_norm_along(
     input: &Tensor<f32>,
     ord: VectorNormOrd,

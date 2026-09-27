@@ -18,7 +18,7 @@
 mod common;
 
 use fandhe_ai_autodiff::{AutodiffError, Tape};
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 const H: f64 = 1e-3;
 
@@ -121,6 +121,54 @@ fn norm_l1_empty_reduction_is_invalid_argument() {
     let x = tape.var(&t(Vec::new(), &[0]));
     let err = x.norm_l1(None).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+// --- `Var::norm`（`norm_l1`／`norm_l2`）の確保前バイト数上限検査
+// （イシュー #2287。`NaiveOps` 経路——`BackendOps::vector_norm` 既定
+// `Unsupported` → `eval::vector_norm_along` フォールバック——での
+// 回帰。`backend-cpu::reduction::vector_norm_*_rejects_huge_broadcast_*`
+// と同じ fixture・同じ理由）。
+
+#[test]
+fn norm_l1_l2_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+    // （軸 1 は実軸〈長さ 4・非空縮約〉、軸 0 は broadcast で巨大）。
+    let base = t(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]);
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = tape.var(&huge);
+
+    let err = x.norm_l1(Some(1)).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+    let err = x.norm_l2(Some(1)).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+}
+
+#[test]
+fn norm_l1_l2_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // base shape [1] を broadcast して [1usize << 61] にする
+    // （非 contiguous・全縮約〈dim=None〉）。
+    let base = t(vec![1.0], &[1]);
+    let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+    let x = tape.var(&huge);
+
+    let err = x.norm_l1(None).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+    let err = x.norm_l2(None).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 // =====================================================================
