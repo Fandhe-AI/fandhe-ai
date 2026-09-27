@@ -55,9 +55,9 @@ fn labels_tensor(labels: Vec<i32>, n: usize) -> Tensor<i32> {
 fn synthetic_tokens(n: usize, seed: u64) -> (Tensor<f32>, Tensor<i32>) {
     let mut rng = SplitMix64(seed);
     let mut src = || rng.next_u64();
-    let (flat, labels) = synthetic_cifar10(n, &mut src);
+    let (flat, labels) = synthetic_cifar10(n, &mut src).unwrap();
     (
-        token_tensor(to_row_tokens(&flat, n), n),
+        token_tensor(to_row_tokens(&flat, n).unwrap(), n),
         labels_tensor(labels, n),
     )
 }
@@ -68,7 +68,7 @@ fn synthetic_tokens(n: usize, seed: u64) -> (Tensor<f32>, Tensor<i32>) {
 
 #[test]
 fn transformer_config_cifar10_preset() {
-    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     assert_eq!(config.seq_len, IMG_H);
     assert_eq!(config.in_features, IMG_C * IMG_W);
     assert_eq!(config.embed_dim, 16);
@@ -84,7 +84,7 @@ fn transformer_config_cifar10_preset() {
 
 #[test]
 fn transformer_rejects_invalid_args() {
-    let mut config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let mut config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     // embed_dim が num_heads で割り切れない。
     let mut bad = config;
     bad.num_heads = 3;
@@ -100,7 +100,7 @@ fn transformer_rejects_invalid_args() {
         Err(AutodiffError::InvalidArgument(_))
     ));
 
-    let mut config2 = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let mut config2 = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     config2.num_classes = 0;
     assert!(matches!(
         Transformer::new(config2, 1),
@@ -116,13 +116,22 @@ fn transformer_rejects_seq_len_times_embed_dim_overflow() {
     // が検出する必要がある（Codex レビュー指摘・イシュー #2202
     // PR #2325。`ResNet::new` の `width * 2`／`width * 4` と同型の
     // 横展開）。
-    let mut config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let mut config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     config.embed_dim = usize::MAX / 4;
     config.num_heads = 1;
     assert!(matches!(
         Transformer::new(config, 1),
         Err(AutodiffError::InvalidArgument(_))
     ));
+}
+
+#[test]
+fn transformer_config_cifar10_rejects_embed_dim_doubling_overflow() {
+    // `embed_dim * 2`（`dim_feedforward`／`mlp_hidden`）が usize を
+    // オーバーフローする embed_dim を渡すと `cifar10` 自体が
+    // `InvalidArgument` を返す（Codex レビュー指摘・イシュー #2202
+    // PR #2325）。
+    assert!(TransformerConfig::cifar10(usize::MAX, 1, 1, NUM_CLASSES).is_err());
 }
 
 // ---------------------------------------------------------------------
@@ -132,7 +141,7 @@ fn transformer_rejects_seq_len_times_embed_dim_overflow() {
 
 #[test]
 fn transformer_implements_reference_module() {
-    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     let model = Transformer::new(config, 0x2468_ACE0).unwrap();
     let params = ReferenceModule::named_parameters(&model);
     assert!(params.iter().any(|(n, _)| n.starts_with("embed.")));
@@ -143,7 +152,7 @@ fn transformer_implements_reference_module() {
 #[test]
 fn transformer_predict_shape_and_eval_determinism() {
     let (x, _y) = synthetic_tokens(4, 0xAAAA_1111_BBBB_2222);
-    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     let mut model = Transformer::new(config, 0x1357_9BDF).unwrap();
     ReferenceModule::set_training(&mut model, false);
 
@@ -169,7 +178,7 @@ fn transformer_predict_shape_and_eval_determinism() {
 
 #[test]
 fn transformer_forward_rejects_wrong_input_shape() {
-    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     let model = Transformer::new(config, 0x1111_2222).unwrap();
     // [N, seq_len, in_features] ではなく rank 2 を渡す。
     let bad_x = Tensor::new(vec![0.0f32; 4 * 16], &[4, 16]).unwrap();
@@ -204,7 +213,7 @@ fn transformer_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy() {
     let (x_train, y_train) = synthetic_tokens(N_TRAIN, 0xABCD_EF01_2345_6789);
     let (x_test, y_test) = synthetic_tokens(N_TEST, 0x1357_9BDF_2468_ACE0);
 
-    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES);
+    let config = TransformerConfig::cifar10(16, 2, 1, NUM_CLASSES).unwrap();
     let mut model = Transformer::new(config, 0x7777_7777).unwrap();
     let sample_batch = sub_tensor_f32(&x_train, 0, BATCH_SIZE).unwrap();
     let sample_pred = model.predict(&sample_batch).unwrap();

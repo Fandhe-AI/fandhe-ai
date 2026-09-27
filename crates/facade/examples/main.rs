@@ -109,10 +109,10 @@ fn run_resnet() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== ResNet(depth=8, width=8) を合成 CIFAR-10 相当データで学習 ==");
     let mut rng = SplitMix64(0xC0FF_EE00_ABCD_1234);
     let mut train_src = || rng.next_u64();
-    let (train_flat, train_labels) = synthetic_cifar10(N_TRAIN, &mut train_src);
+    let (train_flat, train_labels) = synthetic_cifar10(N_TRAIN, &mut train_src)?;
     let mut rng_test = SplitMix64(0xFEED_BEEF_0011_2233);
     let mut test_src = || rng_test.next_u64();
-    let (test_flat, test_labels) = synthetic_cifar10(N_TEST, &mut test_src);
+    let (test_flat, test_labels) = synthetic_cifar10(N_TEST, &mut test_src)?;
 
     let x_train = image_tensor(train_flat, N_TRAIN)?;
     let y_train = labels_tensor(train_labels, N_TRAIN)?;
@@ -169,17 +169,17 @@ fn run_transformer() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut rng = SplitMix64(0xABCD_EF01_2345_6789);
     let mut train_src = || rng.next_u64();
-    let (train_flat, train_labels) = synthetic_cifar10(N_TRAIN, &mut train_src);
+    let (train_flat, train_labels) = synthetic_cifar10(N_TRAIN, &mut train_src)?;
     let mut rng_test = SplitMix64(0x1357_9BDF_2468_ACE0);
     let mut test_src = || rng_test.next_u64();
-    let (test_flat, test_labels) = synthetic_cifar10(N_TEST, &mut test_src);
+    let (test_flat, test_labels) = synthetic_cifar10(N_TEST, &mut test_src)?;
 
-    let x_train = token_tensor(to_row_tokens(&train_flat, N_TRAIN), N_TRAIN)?;
+    let x_train = token_tensor(to_row_tokens(&train_flat, N_TRAIN)?, N_TRAIN)?;
     let y_train = labels_tensor(train_labels, N_TRAIN)?;
-    let x_test = token_tensor(to_row_tokens(&test_flat, N_TEST), N_TEST)?;
+    let x_test = token_tensor(to_row_tokens(&test_flat, N_TEST)?, N_TEST)?;
     let y_test = labels_tensor(test_labels, N_TEST)?;
 
-    let config = TransformerConfig::cifar10(32, 4, 2, NUM_CLASSES);
+    let config = TransformerConfig::cifar10(32, 4, 2, NUM_CLASSES)?;
     let mut model = Transformer::new(config, 0x7777_7777)?;
     let seen_config = model.config();
     println!(

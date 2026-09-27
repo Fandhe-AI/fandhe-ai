@@ -17,6 +17,8 @@
 //! `bench_harness::rng::Xorshift64Star`、`main.rs` は依存追加なしの
 //! 局所 PRNG を注入する）。
 
+use fandhe_ai::AutodiffError;
+
 /// チャネル数（RGB）。
 pub const IMG_C: usize = 3;
 /// 画像の高さ。
@@ -55,15 +57,40 @@ fn class_pattern(class: usize, c: usize, h: usize, w: usize) -> f32 {
     (base + channel_bias).clamp(0.0, 1.0)
 }
 
+/// `n * IMG_C * IMG_H * IMG_W`（1 サンプルあたりの平坦要素数 × サンプル
+/// 数）を `checked_mul` で検証する（`synthetic_cifar10`・`to_row_tokens`
+/// 共用。`n` は呼び出し元が渡す公開引数のため、素の `*` は debug では
+/// panic・release では wrap-around して誤ったサイズのまま構築が進み
+/// うる。Codex レビュー指摘・イシュー #2202 PR #2325。`IMG_C`／`IMG_H`／
+/// `IMG_W` はモジュール内定数〈32・32・3〉のため `IMG_C*IMG_H*IMG_W` 自体
+/// は現実的にオーバーフローしないが、`n` との積は検査する）。
+fn checked_total_elements(n: usize) -> Result<usize, AutodiffError> {
+    IMG_C
+        .checked_mul(IMG_H)
+        .and_then(|v| v.checked_mul(IMG_W))
+        .and_then(|per_sample| n.checked_mul(per_sample))
+        .ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "n（{n}）* IMG_C（{IMG_C}）* IMG_H（{IMG_H}）* IMG_W（{IMG_W}）が usize の範囲を超える"
+            ))
+        })
+}
+
 /// 合成 CIFAR-10 相当のサンプル `n` 件を生成する（`[N, 3, 32, 32]` 相当の
 /// 行優先平坦データ・巡回ラベル `i % NUM_CLASSES`）。
 ///
 /// `next_u64` は乱数源（呼び出し元が注入。本ファイル自体は PRNG を
 /// 持たない）。サンプルごとに平行移動幅（`±3px`。巡回シフトで境界を
 /// 折り返す）とチャネル・画素ごとの一様ノイズ（振幅 `±0.1`）を
-/// この関数から引く。
-pub fn synthetic_cifar10(n: usize, next_u64: &mut impl FnMut() -> u64) -> (Vec<f32>, Vec<i32>) {
-    let mut data = Vec::with_capacity(n * IMG_C * IMG_H * IMG_W);
+/// この関数から引く。`n * IMG_C * IMG_H * IMG_W` が usize の範囲を超える
+/// 場合は `InvalidArgument` を返す（Codex レビュー指摘・イシュー #2202
+/// PR #2325）。
+pub fn synthetic_cifar10(
+    n: usize,
+    next_u64: &mut impl FnMut() -> u64,
+) -> Result<(Vec<f32>, Vec<i32>), AutodiffError> {
+    let total = checked_total_elements(n)?;
+    let mut data = Vec::with_capacity(total);
     let mut labels = Vec::with_capacity(n);
     for i in 0..n {
         let class = i % NUM_CLASSES;
@@ -82,7 +109,7 @@ pub fn synthetic_cifar10(n: usize, next_u64: &mut impl FnMut() -> u64) -> (Vec<f
         }
         labels.push(class as i32);
     }
-    (data, labels)
+    Ok((data, labels))
 }
 
 /// `[N, 3, 32, 32]`（`(n, c, h, w)` 行優先）を `[N, 32, 96]`
@@ -93,9 +120,23 @@ pub fn synthetic_cifar10(n: usize, next_u64: &mut impl FnMut() -> u64) -> (Vec<f
 /// 拒否するため（`crates/autodiff/src/var.rs`）、この並べ替えは
 /// `Var::permute` ではなく tape に入れる前にホスト側の `Vec<f32>` を
 /// 並べ替えて行う（`docs/reference-models-decision.md` #2202 節参照）。
-pub fn to_row_tokens(flat: &[f32], n: usize) -> Vec<f32> {
-    debug_assert_eq!(flat.len(), n * IMG_C * IMG_H * IMG_W);
-    let mut out = vec![0.0f32; n * IMG_H * IMG_C * IMG_W];
+///
+/// `flat.len()` が `n * IMG_C * IMG_H * IMG_W` と一致することを実行時
+/// 検証する（従来は `debug_assert_eq!` のみで、release ビルドでは
+/// 検証されず、`flat` が短すぎれば index out of bounds で panic・
+/// 長すぎれば余剰を黙って捨てたまま構築が進んでいた。Codex レビュー
+/// 指摘・イシュー #2202 PR #2325）。
+pub fn to_row_tokens(flat: &[f32], n: usize) -> Result<Vec<f32>, AutodiffError> {
+    let expected_len = checked_total_elements(n)?;
+    if flat.len() != expected_len {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "to_row_tokens: flat.len()（{}）が期待値（n*IMG_C*IMG_H*IMG_W={expected_len}）と \
+             一致しない",
+            flat.len()
+        )));
+    }
+    // 並べ替え（permutation）のため出力要素数も同じ expected_len。
+    let mut out = vec![0.0f32; expected_len];
     for ni in 0..n {
         for c in 0..IMG_C {
             for h in 0..IMG_H {
@@ -107,5 +148,5 @@ pub fn to_row_tokens(flat: &[f32], n: usize) -> Vec<f32> {
             }
         }
     }
-    out
+    Ok(out)
 }

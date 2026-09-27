@@ -65,22 +65,34 @@ impl TransformerConfig {
     /// `mlp_hidden` は `embed_dim * 2` に固定する（学習可能パラメータ数を
     /// 小さく保ち、debug ビルドでのテスト所要時間予算に収める狙い。
     /// `docs/reference-models-decision.md` #2202 節参照）。
+    ///
+    /// `embed_dim` は呼び出し元が任意の usize を渡せる公開引数のため、
+    /// `embed_dim * 2` を `checked_mul` で検証する（素の `*` は debug で
+    /// panic・release では wrap-around して誤った `dim_feedforward`／
+    /// `mlp_hidden` のまま `TransformerConfig` を構築しうる。Codex
+    /// レビュー指摘・イシュー #2202 PR #2325。`ResNet::new` の
+    /// `width * 2`／`width * 4` と同型の横展開）。
     pub fn cifar10(
         embed_dim: usize,
         num_heads: usize,
         num_layers: usize,
         num_classes: usize,
-    ) -> Self {
-        TransformerConfig {
+    ) -> Result<Self, AutodiffError> {
+        let ffn_dim = embed_dim.checked_mul(2).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "TransformerConfig::cifar10: embed_dim（{embed_dim}）* 2 が usize の範囲を超える"
+            ))
+        })?;
+        Ok(TransformerConfig {
             seq_len: 32,
             in_features: 96,
             embed_dim,
             num_heads,
             num_layers,
-            dim_feedforward: embed_dim * 2,
-            mlp_hidden: embed_dim * 2,
+            dim_feedforward: ffn_dim,
+            mlp_hidden: ffn_dim,
             num_classes,
-        }
+        })
     }
 }
 
@@ -217,8 +229,18 @@ impl ReferenceModule for Transformer {
             )));
         }
         let n = shape[0];
+        // `n * seq_len`（embed 前の flatten 後の行数）を明示検査する。
+        // `n` は実際に確保済みの `x` の shape に由来し実用上は暗黙に
+        // 上界されるが、安全論証に頼らず全ての積を明示検査する方針
+        // （Codex レビュー指摘・イシュー #2202 PR #2325）。
+        let flat_rows = n.checked_mul(self.config.seq_len).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "Transformer::forward: n（{n}）* seq_len（{}）が usize の範囲を超える",
+                self.config.seq_len
+            ))
+        })?;
 
-        let flat = x.reshape(&[n * self.config.seq_len, self.config.in_features])?;
+        let flat = x.reshape(&[flat_rows, self.config.in_features])?;
         let embedded = self.embed.forward(tape, &flat)?;
         let embedded = embedded.reshape(&[n, self.config.seq_len, self.config.embed_dim])?;
 
@@ -287,6 +309,14 @@ impl Trainable for Transformer {
             )));
         }
         let n = shape[0];
+        // `forward` と同じ理由で `n * seq_len` を明示検査する（Codex
+        // レビュー指摘・イシュー #2202 PR #2325）。
+        let flat_rows = n.checked_mul(self.config.seq_len).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "Transformer::train_step: n（{n}）* seq_len（{}）が usize の範囲を超える",
+                self.config.seq_len
+            ))
+        })?;
 
         let (loss_value, updated) = {
             let tape = fandhe_ai::tape();
@@ -296,7 +326,7 @@ impl Trainable for Transformer {
             let encoder_bound = self.encoder.bind(&tape);
             let head_bound = self.head.bind(&tape);
 
-            let flat = xv.reshape(&[n * self.config.seq_len, self.config.in_features])?;
+            let flat = xv.reshape(&[flat_rows, self.config.in_features])?;
             let embedded = embed_bound.forward(&tape, &flat)?;
             let embedded = embedded.reshape(&[n, self.config.seq_len, self.config.embed_dim])?;
             let pos_var = tape.var(&self.pos_encoding);

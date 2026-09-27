@@ -184,7 +184,7 @@ fn resnet_block_and_model_implement_reference_module() {
 fn resnet_predict_shape_and_eval_determinism() {
     let mut rng = SplitMix64(0xAAAA_BBBB_CCCC_DDDD);
     let mut src = || rng.next_u64();
-    let (flat, _labels) = synthetic_cifar10(4, &mut src);
+    let (flat, _labels) = synthetic_cifar10(4, &mut src).unwrap();
     let x = image_tensor(flat, 4);
 
     let mut model = ResNet::new(8, 4, NUM_CLASSES, 0x9999_AAAA).unwrap();
@@ -224,7 +224,7 @@ fn to_row_tokens_reorders_chw_to_hcw() {
     let n = 2;
     // [N, C, H, W] = [2, 3, 32, 32] の連番データ。
     let flat: Vec<f32> = (0..n * IMG_C * IMG_H * IMG_W).map(|i| i as f32).collect();
-    let rows = to_row_tokens(&flat, n);
+    let rows = to_row_tokens(&flat, n).unwrap();
     assert_eq!(rows.len(), n * IMG_H * IMG_C * IMG_W);
 
     // 元 index (ni, c, h, w) の値は変わらず、並び順だけ (ni, h, c, w) に
@@ -238,6 +238,32 @@ fn to_row_tokens_reorders_chw_to_hcw() {
         let dst = ((ni * IMG_H + h) * IMG_C + c) * IMG_W + w;
         assert_eq!(rows[dst], flat[src]);
     }
+}
+
+#[test]
+fn to_row_tokens_rejects_length_mismatch() {
+    let n = 2;
+    let expected = n * IMG_C * IMG_H * IMG_W;
+
+    // 過多（release でも余剰を黙って捨てず検出する。Codex レビュー
+    // 指摘・イシュー #2202 PR #2325）。
+    let too_long: Vec<f32> = vec![0.0f32; expected + 1];
+    assert!(to_row_tokens(&too_long, n).is_err());
+
+    // 不足（従来は index out of bounds で panic していた）。
+    let too_short: Vec<f32> = vec![0.0f32; expected - 1];
+    assert!(to_row_tokens(&too_short, n).is_err());
+}
+
+#[test]
+fn synthetic_cifar10_rejects_element_count_overflow() {
+    // n * IMG_C * IMG_H * IMG_W が usize をオーバーフローする n を渡すと
+    // `InvalidArgument` を返す（Codex レビュー指摘・イシュー #2202
+    // PR #2325）。
+    let huge_n = usize::MAX / (IMG_C * IMG_H * IMG_W) + 1;
+    let mut rng = SplitMix64(1);
+    let mut src = || rng.next_u64();
+    assert!(synthetic_cifar10(huge_n, &mut src).is_err());
 }
 
 // ---------------------------------------------------------------------
@@ -254,7 +280,7 @@ fn accuracy_rejects_label_shape_mismatch() {
     let mut model = ResNet::new(8, 4, NUM_CLASSES, 0x1234_0001).unwrap();
     let mut rng = SplitMix64(0x1234_0002);
     let mut src = || rng.next_u64();
-    let (flat, _labels) = synthetic_cifar10(4, &mut src);
+    let (flat, _labels) = synthetic_cifar10(4, &mut src).unwrap();
     let x = image_tensor(flat, 4);
     // y の要素数が x の先頭軸長（4）より多い（余剰ラベル）。
     let y = labels_tensor(vec![0, 1, 2, 3, 4], 5);
@@ -272,7 +298,7 @@ fn accuracy_rejects_out_of_range_label() {
     let mut model = ResNet::new(8, 4, NUM_CLASSES, 0x1234_0003).unwrap();
     let mut rng = SplitMix64(0x1234_0004);
     let mut src = || rng.next_u64();
-    let (flat, _labels) = synthetic_cifar10(4, &mut src);
+    let (flat, _labels) = synthetic_cifar10(4, &mut src).unwrap();
     let x = image_tensor(flat, 4);
     // NUM_CLASSES 未満でなければならないラベルに範囲外の値を混ぜる。
     let y = labels_tensor(vec![0, 1, 2, NUM_CLASSES as i32], 4);
@@ -413,10 +439,10 @@ fn resnet_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy() {
 
     let mut rng = SplitMix64(0xC0FF_EE00_1234_5678);
     let mut train_src = || rng.next_u64();
-    let (train_flat, train_labels) = synthetic_cifar10(N_TRAIN, &mut train_src);
+    let (train_flat, train_labels) = synthetic_cifar10(N_TRAIN, &mut train_src).unwrap();
     let mut rng_test = SplitMix64(0xFEED_BEEF_8765_4321);
     let mut test_src = || rng_test.next_u64();
-    let (test_flat, test_labels) = synthetic_cifar10(N_TEST, &mut test_src);
+    let (test_flat, test_labels) = synthetic_cifar10(N_TEST, &mut test_src).unwrap();
 
     let x_train = image_tensor(train_flat, N_TRAIN);
     let y_train = labels_tensor(train_labels, N_TRAIN);
