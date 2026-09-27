@@ -5400,7 +5400,11 @@ impl<'t> Var<'t> {
     /// `n <= correction` の場合は [`AutodiffError::InvalidArgument`]
     /// （`NaN`／`inf` を黙って返さない安全側の判断。PyTorch の
     /// `NaN`／`inf` 返却とは意図的に異なる。`docs/spec/` の対象外の
-    /// 独自安全策）。
+    /// 独自安全策）。巨大な shape（`broadcast_to` 由来の view 等）で
+    /// 確保上限（`isize::MAX` バイト）を超える場合は、実体化・
+    /// backend 委譲・eval フォールバックのいずれよりも前に
+    /// `AutodiffError::Shape(ShapeError::ElementCountOverflow)` を
+    /// 返す（`var_std_out_shape_checked` doc 参照。イシュー #2288）。
     pub fn var(&self, dim: Option<usize>, correction: usize) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
         let out_shape = var_std_out_shape_checked(&shape, dim, correction, "Var::var")?;
@@ -5459,7 +5463,9 @@ impl<'t> Var<'t> {
     ///
     /// **エラー契約**: [`Var::var`] と同じ（縮約対象の要素数 `n` が
     /// `0` または `n <= correction` の場合は
-    /// [`AutodiffError::InvalidArgument`]）。
+    /// [`AutodiffError::InvalidArgument`]・巨大な shape で確保上限を
+    /// 超える場合は `AutodiffError::Shape(ShapeError::
+    /// ElementCountOverflow)`。イシュー #2288）。
     pub fn std(&self, dim: Option<usize>, correction: usize) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
         let out_shape = var_std_out_shape_checked(&shape, dim, correction, "Var::std")?;
@@ -5765,6 +5771,53 @@ fn require_square(shape: &[usize], op_name: &str) -> Result<usize, AutodiffError
 /// `NaN`／`inf` 返却とは意図的に異なる。`docs/spec/` の対象外の
 /// 独自安全策）。`op_name` はエラーメッセージに埋め込む呼び出し元の
 /// 演算名（`"Var::var"`／`"Var::std"`）。
+///
+/// **判定順序（空縮約・自由度不足 → 確保前検査。イシュー #2287・
+/// #2288。`Var::norm` の同種是正〈PR #2332〉と同じ理由）**: 空縮約
+/// （`n == 0`）・自由度不足（`n <= correction`）の判定を、確保前の
+/// バイト数上限検査（[`checked_bytes_for`]）より**前**に行う。
+/// `out_shape` は `dim` で指定した縮約対象軸を取り除いた形状のため、
+/// 縮約対象軸の長さが小さくても（あるいは 0 でも）、`broadcast_to`
+/// 由来の巨大な他軸を持つ `out_shape` になりうる（例:
+/// `shape=[1, 1]` を `[1usize << 61, 1]` へ broadcast し
+/// `dim=Some(1)`・`correction=1` を渡すと、縮約対象軸 `shape[1] == 1`
+/// は自由度不足（`n=1 <= correction=1`）だが `out_shape == [1usize <<
+/// 61]` は確保前検査で拒否される桁）。確保前検査を先に呼ぶと、この
+/// 場合に従来契約の `AutodiffError::InvalidArgument`（自由度不足）
+/// ではなく確保前検査由来の `ShapeError::ElementCountOverflow` を
+/// 返してしまい、既存のエラー契約を破る。よって
+/// 空縮約・自由度不足のいずれかに該当する場合は確保前検査を経由せず
+/// `InvalidArgument` を返し、いずれにも該当しない場合にのみ確保前
+/// 検査へ進む。
+///
+/// `n`（`dim=None` の全要素数）は `shape.iter().product()`（無検査の
+/// 乗算）ではなく `checked_mul` で計算する——`Tensor` の不変条件
+/// （`broadcast_to`／`new` が `checked_numel` を通す）により現状は
+/// overflow しないが、本関数は shape を直接受け取るため防御的に
+/// checked 化する。overflow した場合は自由度不足になりえない
+/// （`n` が有限の `correction` を必ず超える）桁のため、その場で
+/// `ElementCountOverflow` を返す（いずれにせよ後続の確保前検査でも
+/// 拒否される）。
+///
+/// **確保前のバイト数上限検査（`checked_bytes_for`。イシュー
+/// #2287・#2288）**: 小さなストレージを巨大な shape へ
+/// `broadcast_to` した view を渡すと、`materialize_fallible`
+/// （実体化）・`BackendOps::var` 委譲・`eval::var_along`／
+/// `std_along`（内部で `eval::var_f64_along` の `Vec<f64>` 中間
+/// バッファを確保する）フォールバック・VJP（`grad::var_vjp`／
+/// `std_vjp`）のいずれも無検査で `Vec` を確保するため、capacity
+/// overflow panic になりうる（本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md`・REQ-8）。入力 shape は `f32` 換算
+/// （`materialize_fallible`・VJP の入力サイズ `f32` バッファを守る）、
+/// 出力 shape は `f64` 換算（`eval::var_f64_along` の `Vec<f64>` 中間
+/// バッファを守る。`f64` 検査は `f32` 換算の出力検査を包含する）で
+/// それぞれ検査する——`Var::norm`（`f32` のみで足りる。中間バッファが
+/// `f32` のため）との差分は、`var`／`std` が `eval` 側に `f64` の
+/// 中間バッファを持つ点である。`backend-cpu::reduction::var` 自体は
+/// `f64` の中間バッファを `Vec` として確保しない（出力要素ごとの
+/// スタックローカル `f64` アキュムレータのみ）ため、backend-cpu 側の
+/// 確保前検査は `f32` 換算の `checked_alloc_numel_f32` のみで足りる
+/// （`crates/backend-cpu/src/reduction.rs::var` 参照）。
 fn var_std_out_shape_checked(
     shape: &[usize],
     dim: Option<usize>,
@@ -5773,7 +5826,10 @@ fn var_std_out_shape_checked(
 ) -> Result<Vec<usize>, AutodiffError> {
     let out_shape = reduce_out_shape(shape, dim)?;
     let n = match dim {
-        None => shape.iter().product(),
+        None => shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?,
         Some(axis) => shape[axis],
     };
     if n == 0 {
@@ -5786,7 +5842,54 @@ fn var_std_out_shape_checked(
             "{op_name}: 自由度不足（n={n} <= correction={correction}）"
         )));
     }
+    checked_bytes_for::<f32>(shape)?;
+    checked_bytes_for::<f64>(&out_shape)?;
     Ok(out_shape)
+}
+
+/// [`var_std_out_shape_checked`] の `f64` 境界を、確保を一切行わずに
+/// ヘルパを直接呼んで検証する（イシュー #2288）。
+///
+/// `checked_bytes_for::<f32>` の境界（`Var::norm` の #2287 で既に
+/// カバー済み）とは異なる「`f32` 換算では通るが `f64` 換算では
+/// `isize::MAX` バイトを超える」境界を確認する: 出力 shape
+/// `[2^60]` は `f32` 換算で `2^62` バイト（`isize::MAX ≈ 2^63 - 1`
+/// 未満のため通る）、`f64` 換算で `2^63` バイト
+/// （`isize::MAX` を超えるため拒否される）。
+///
+/// 統合テスト（`tests/var_norm.rs`）に置かない理由: この境界に当たる
+/// fixture は入力 shape も `[2^60, 1]` 等の巨大 broadcast になり
+/// `f32` 換算で `2^62` バイト相当となるため、`f64` 検査が無ければ
+/// `f64` の確保（`eval::var_f64_along` の `Vec<f64>`）より先に
+/// `dense_vec(input)` の `f32` 確保自体は通ってしまい、実際に
+/// `vec![0f64; ...]` の確保を試みてテストプロセスごと abort（capacity
+/// overflow panic）しうる。ヘルパ単体を直接呼べば確保を一切行わずに
+/// 境界だけを検証できる。
+#[cfg(test)]
+mod var_std_out_shape_checked_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_output_shape_that_overflows_f64_byte_limit_but_not_f32() {
+        // dim=Some(1): 出力 shape は縮約対象軸（軸 1）を取り除いた
+        // `[2^60]`。`correction=0` なら `n = shape[1] = 1`
+        // に対し `n <= correction` は偽（自由度不足にならない）。
+        let shape = [1usize << 60, 1];
+        let err = var_std_out_shape_checked(&shape, Some(1), 0, "test").unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn accepts_output_shape_within_f32_and_f64_byte_limits() {
+        // 比較用: `f32`／`f64` いずれの換算でも `isize::MAX` バイト
+        // 未満に収まる小さな shape は通る。
+        let shape = [16usize, 4];
+        let out_shape = var_std_out_shape_checked(&shape, Some(1), 0, "test").unwrap();
+        assert_eq!(out_shape, vec![16]);
+    }
 }
 
 /// バックエンド実装（`BackendOps::linalg_*`）の戻り値 shape が契約

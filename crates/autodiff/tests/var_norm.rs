@@ -193,6 +193,94 @@ fn norm_l1_l2_full_reduce_rejects_huge_broadcast_input_without_panicking() {
     ));
 }
 
+// --- `Var::var`／`Var::std` の確保前バイト数上限検査（イシュー
+// #2288。`norm_l1`／`norm_l2` の上記回帰テストと同じ fixture・同じ
+// 理由。`NaiveOps` 経路——`BackendOps::var` 既定 `Unsupported` →
+// `eval::var_along`／`std_along` フォールバック——での回帰）。
+
+#[test]
+fn var_std_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+    // （軸 1 は実軸〈長さ 4・自由度十分〉、軸 0 は broadcast で巨大）。
+    let base = t(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]);
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = tape.var(&huge);
+
+    let err = x.var(Some(1), 1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+    let err = x.std(Some(1), 1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+}
+
+#[test]
+fn var_std_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // base shape [1] を broadcast して [1usize << 61] にする
+    // （非 contiguous・全縮約〈dim=None〉）。
+    let base = t(vec![1.0], &[1]);
+    let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+    let x = tape.var(&huge);
+
+    let err = x.var(None, 1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+    let err = x.std(None, 1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+}
+
+// 縮約対象軸自体は空（`n == 0`）だが、`out_shape`（縮約対象軸を
+// 取り除いた残りの軸）が `broadcast_to` 由来で巨大というケース
+// （`norm_l1_l2_axis_reduce_empty_reduction_with_huge_broadcast_out_
+// shape_is_invalid_argument` と同型。判定順序〈空縮約 → 確保前検査〉
+// の回帰防止）。
+#[test]
+fn var_std_axis_reduce_empty_reduction_with_huge_broadcast_out_shape_is_invalid_argument() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // base shape [1, 0] を broadcast して [1usize << 61, 0] にする
+    // （軸 1 は実軸だが長さ 0 で空縮約、軸 0 は broadcast で巨大）。
+    let base = t(Vec::new(), &[1, 0]);
+    let huge = base.broadcast_to(&[1usize << 61, 0]).unwrap();
+    let x = tape.var(&huge);
+
+    let err = x.var(Some(1), 1).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let err = x.std(Some(1), 1).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+// 縮約対象軸自体は自由度不足（`n <= correction`）だが、`out_shape` が
+// `broadcast_to` 由来で巨大というケース。入力は `[1usize << 61, 1]`
+// で `f32` 換算 2^63 バイトのためバイト数検査にも落ちる shape だが、
+// 自由度不足の判定が確保前検査より先であることを確認する（判定順序
+// の区別）。
+#[test]
+fn var_std_insufficient_dof_with_huge_broadcast_shape_is_invalid_argument() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // base shape [1, 1] を broadcast して [1usize << 61, 1] にする
+    // （軸 1 は実軸だが長さ 1 で自由度不足〈correction=1〉、軸 0 は
+    // broadcast で巨大）。
+    let base = t(vec![1.0], &[1, 1]);
+    let huge = base.broadcast_to(&[1usize << 61, 1]).unwrap();
+    let x = tape.var(&huge);
+
+    let err = x.var(Some(1), 1).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let err = x.std(Some(1), 1).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
 // =====================================================================
 // 数値微分突合（中央差分。`tests/backward.rs::numeric_grad` と同方式・
 // 同許容誤差〈H=1e-3・相対 1e-2 または絶対 1e-3〉）。
