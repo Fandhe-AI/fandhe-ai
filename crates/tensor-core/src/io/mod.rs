@@ -121,6 +121,17 @@ pub enum NpyError {
     /// 細工されたファイルを丸ごと確保してから拒否することはない
     /// （`.claude/rules/security.md` A03/A04/A05）。
     FileTooLarge { len: u64, max: u64 },
+
+    /// npz メンバの宣言済み伸長後サイズ（`uncompressed_size`。central
+    /// directory 由来）、またはアーカイブ全体の累積伸長後サイズが
+    /// 上限を超える。`inflate` の確保（`Vec::try_reserve_exact`）前に
+    /// 検査するため、小さい圧縮入力から巨大な出力バッファを実際に
+    /// 確保することはない（`crates::io::npz::MAX_MEMBER_DECOMPRESSED_
+    /// BYTES`／`MAX_TOTAL_DECOMPRESSED_BYTES`。`inflate::inflate` の
+    /// 圧縮比検査〈`InvalidDeflate`〉とは別軸の絶対上限。
+    /// `.claude/rules/security.md` A03/A04/A05。PR #2318 レビュー
+    /// 指摘・P0）。
+    DecompressedSizeExceeded { len: u64, max: u64 },
 }
 
 impl fmt::Display for NpyError {
@@ -160,6 +171,10 @@ impl fmt::Display for NpyError {
             NpyError::FileTooLarge { len, max } => {
                 write!(f, "ファイルサイズ {len} バイトが上限 {max} バイトを超える")
             }
+            NpyError::DecompressedSizeExceeded { len, max } => write!(
+                f,
+                "npz 伸長後サイズ {len} バイトが上限 {max} バイトを超える"
+            ),
         }
     }
 }

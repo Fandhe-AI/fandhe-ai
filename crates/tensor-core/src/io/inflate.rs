@@ -48,6 +48,17 @@ const CODE_LENGTH_ORDER: [usize; 19] = [
 /// 前に拒否する（`.claude/rules/security.md` A04/A05）。
 const MAX_COMPRESSION_RATIO: u64 = 1032;
 
+/// `expected_len`（伸長後サイズ）の絶対上限。呼び出し元
+/// （`io::npz::read_member_bytes`）は central directory の宣言値
+/// （`entry.uncompressed_size`）を `io::npz::MAX_MEMBER_DECOMPRESSED_
+/// BYTES` と既に突き合わせているが、本関数はそれに依存せず単独でも
+/// 安全であるよう同じ絶対上限をここでも検査する（多層防御。将来 npz
+/// 以外の呼び出し元が追加され、呼び出し前チェックを書き忘れても
+/// 伸長爆弾を防げるようにする。`.claude/rules/security.md`
+/// A04/A05。PR #2318 レビュー指摘・P0）。値は `io::MAX_FILE_READ_BYTES`
+/// と同じ桁（新規閾値を持ち込まない）。
+const MAX_INFLATE_OUTPUT_BYTES: u64 = super::MAX_FILE_READ_BYTES;
+
 /// LSB ファーストでビット列を読み取るリーダ。範囲外アクセスは
 /// `NpyError::InvalidDeflate` を返す（`panic` しない）。
 struct BitReader<'a> {
@@ -108,6 +119,15 @@ impl<'a> BitReader<'a> {
             .ok_or(NpyError::InvalidDeflate("stored ブロックが入力範囲外"))?;
         self.byte_pos = end;
         Ok(slice)
+    }
+
+    /// 現在位置までに消費したバイト数（ビット位置をバイト境界へ切り上げ）。
+    /// `inflate` が `BFINAL` ブロック読み終わり後にストリーム終端検査
+    /// （PR #2318 レビュー指摘・P2）で使う。最終バイトの未使用上位ビット
+    /// （パディング）は RFC 1951 上ゼロが保証されないため、値そのものは
+    /// 検査せず消費バイト数の一致のみを見る。
+    fn consumed_bytes(&self) -> usize {
+        self.byte_pos + usize::from(self.bit_pos != 0)
     }
 }
 
@@ -361,10 +381,28 @@ fn decode_block(
 /// 伸長する。宣言サイズと異なる場合、不正な符号・距離・ブロック型を
 /// 検出した場合はすべて `NpyError::InvalidDeflate` を返す。
 ///
-/// 伸長爆弾対策として、確保前に `expected_len` が `data.len()` から
-/// 導かれる理論上の圧縮比上限を超えないか検査する
-/// （`.claude/rules/security.md` A04/A05）。
+/// 伸長爆弾対策として、確保前に 2 段の検査を行う（`.claude/rules/
+/// security.md` A04/A05）:
+/// 1. `expected_len` の絶対上限検査（[`MAX_INFLATE_OUTPUT_BYTES`]）。
+///    呼び出し元の宣言値検査（`io::npz::MAX_MEMBER_DECOMPRESSED_BYTES`）
+///    に依存しない独立の防御線
+/// 2. `expected_len` が `data.len()` から導かれる理論上の圧縮比上限
+///    （[`MAX_COMPRESSION_RATIO`]）を超えないかの検査。圧縮入力自体が
+///    小さければ、1. の絶対上限を下回っていても不合理な伸長率は拒否する
+///
+/// ストリーム終端検査（PR #2318 レビュー指摘・P2）: `BFINAL` ブロックを
+/// 読み終えた時点でビット位置をバイト境界へ切り上げた消費バイト数が
+/// `data.len()`（ZIP の `compressed_size`＝raw DEFLATE ストリーム長。
+/// `io::npz::read_member_bytes` が central directory の宣言値ちょうどに
+/// 切り出して渡す）と一致することを要求する。出力長のみを照合すると、
+/// 宣言された圧縮領域の末尾に付け足された任意の余剰バイト（CRC は伸長後
+/// データのみが対象のため検出できない）を黙って受理してしまう。
 pub(crate) fn inflate(data: &[u8], expected_len: usize) -> Result<Vec<u8>, NpyError> {
+    if expected_len as u64 > MAX_INFLATE_OUTPUT_BYTES {
+        return Err(NpyError::InvalidDeflate(
+            "宣言された伸長後サイズが絶対上限を超える",
+        ));
+    }
     let max_plausible = (data.len() as u64)
         .saturating_mul(MAX_COMPRESSION_RATIO)
         .saturating_add(1024);
@@ -419,6 +457,16 @@ pub(crate) fn inflate(data: &[u8], expected_len: usize) -> Result<Vec<u8>, NpyEr
     if out.len() != expected_len {
         return Err(NpyError::InvalidDeflate("伸長後サイズが宣言値と一致しない"));
     }
+    // ストリーム終端検査（P2）: `BFINAL` を読み終えた消費バイト数が
+    // 入力全体と一致することを要求する。パディングビット自体の値は
+    // RFC 1951 上ゼロが保証されないため検査しない（`consumed_bytes` の
+    // doc comment参照）。宣言済み圧縮領域の末尾に余剰バイトを付加した
+    // 細工ストリームを拒否する。
+    if reader.consumed_bytes() != data.len() {
+        return Err(NpyError::InvalidDeflate(
+            "BFINAL ブロック後に入力の余剰バイトが残っている",
+        ));
+    }
     Ok(out)
 }
 
@@ -441,6 +489,31 @@ mod tests {
         bits.push_bytes(payload);
         let out = inflate(&bits.finish(), payload.len()).unwrap();
         assert_eq!(out, payload);
+    }
+
+    /// P2（PR #2318 レビュー指摘）: `BFINAL` ブロックを読み終えた後に
+    /// 入力へ余剰バイトを付け足しても、出力長の一致だけでは検出できない
+    /// （CRC は伸長後データのみが対象のため）。ストリーム終端検査
+    /// （消費バイト数と入力長の一致）で拒否されることを確認する。
+    #[test]
+    fn rejects_trailing_bytes_after_bfinal() {
+        let payload = b"hello, npz!";
+        let len = payload.len() as u16;
+        let nlen = !len;
+        let mut bits = BitAccumulator::new();
+        bits.push_bit(1); // final
+        bits.push_bits(0, 2); // type 0 = stored
+        bits.align_to_byte();
+        bits.push_bytes(&len.to_le_bytes());
+        bits.push_bytes(&nlen.to_le_bytes());
+        bits.push_bytes(payload);
+        let mut data = bits.finish();
+        data.push(0xff); // 宣言された圧縮領域の末尾に余剰バイトを付加
+        let err = inflate(&data, payload.len());
+        assert!(
+            matches!(err, Err(NpyError::InvalidDeflate(_))),
+            "余剰バイト付き入力が拒否されなかった: {err:?}"
+        );
     }
 
     /// 出力上限（`expected_len`）を超える stored ブロックは拒否する。

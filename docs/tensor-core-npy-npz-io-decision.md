@@ -75,6 +75,29 @@ Tensor, ...};` で `Tensor` を再エクスポートしているため、inheren
   部分的な `HashMap` は返さない）
 - 圧縮方式は STORED（0）・DEFLATE（8）のみ対応。それ以外は
   `UnsupportedCompression`
+- **伸長後サイズ上限（PR #2318 レビュー指摘・P0）**: central directory
+  の宣言 `uncompressed_size` が `MAX_MEMBER_DECOMPRESSED_BYTES`
+  （＝単体ファイルの読み込み上限 `MAX_FILE_READ_BYTES`。1 GiB）を
+  超えるメンバ、またはアーカイブ全体の宣言サイズ累積が
+  `MAX_TOTAL_DECOMPRESSED_BYTES`（同じく 1 GiB。新規閾値を持ち込まず
+  既存ポリシーを流用）を超える場合は `DecompressedSizeExceeded` で
+  拒否する。`read_npz_bytes` は central directory を 2 パスで扱う:
+  1 パス目で全エントリを解析し宣言範囲・上記上限を検査し、2 パス目で
+  初めて `read_member_bytes`／`inflate`（＝出力バッファの実確保）を
+  呼ぶ。DEFLATE の圧縮比上限（`inflate::MAX_COMPRESSION_RATIO`）は
+  圧縮入力に対する相対値に過ぎず、圧縮入力自体がアーカイブサイズ上限
+  いっぱいまで大きい場合は理論上数百 GiB 級の出力を許してしまうため、
+  絶対値の上限を別途設けた。`inflate` 自身にも同じ絶対上限
+  （`inflate::MAX_INFLATE_OUTPUT_BYTES`）を多層防御として持たせている
+  （`crates/tensor-core/src/io/npz.rs`
+  `MAX_MEMBER_DECOMPRESSED_BYTES`／`MAX_TOTAL_DECOMPRESSED_BYTES`）
+- **DEFLATE ストリーム終端検査（PR #2318 レビュー指摘・P2）**:
+  `inflate` は `BFINAL` ブロックを読み終えた時点で、ビット位置を
+  バイト境界へ切り上げた消費バイト数が入力全体（ZIP の
+  `compressed_size`）と一致することを要求する（不一致は
+  `InvalidDeflate`）。出力長のみを照合すると、宣言された圧縮領域の
+  末尾に付加した任意の余剰バイトを検出できない（CRC は伸長後データ
+  のみが対象のため）
 
 ## 6. 書き出しの制限（対象外事項）
 

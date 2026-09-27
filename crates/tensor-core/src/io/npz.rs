@@ -43,6 +43,35 @@ const EOCD_SEARCH_WINDOW: usize = EOCD_FIXED_SIZE + u16::MAX as usize;
 /// npz エントリ数の上限（過大な central directory 走査を防ぐ）。
 const MAX_ENTRIES: usize = 65535;
 
+/// npz 1 メンバあたりの伸長後（デコンプレス後）サイズ上限。
+///
+/// 単体の `.npy` ファイルとして許容されるサイズ（`super::
+/// MAX_FILE_READ_BYTES`）を npz メンバ 1 件の伸長後サイズにもそのまま
+/// 適用する（新たな閾値を持ち込まず既存ポリシーを流用するだけ、という
+/// 位置づけ。`docs/tensor-core-npy-npz-io-decision.md` 参照）。central
+/// directory の `uncompressed_size`（宣言値）をこの上限と突き合わせ、
+/// `inflate` が出力バッファを確保する**前**に拒否する。DEFLATE の
+/// 圧縮比上限（`inflate::MAX_COMPRESSION_RATIO`）は圧縮入力サイズに対する
+/// 相対的な理論値に過ぎず、圧縮入力自体がアーカイブサイズ上限
+/// （`super::MAX_FILE_READ_BYTES`）いっぱいまで大きい場合は数百 GiB 級の
+/// 出力を理論上許してしまうため、絶対値での上限が別途必要
+/// （`.claude/rules/security.md` A03/A04/A05。PR #2318 レビュー指摘・
+/// P0）。
+const MAX_MEMBER_DECOMPRESSED_BYTES: u64 = super::MAX_FILE_READ_BYTES;
+
+/// npz アーカイブ全体（全メンバ合計）の伸長後サイズ上限。
+///
+/// 単一メンバの上限（[`MAX_MEMBER_DECOMPRESSED_BYTES`]）を満たす複数の
+/// メンバを束ねて `HashMap` へ蓄積すると、アーカイブ自体は
+/// `MAX_FILE_READ_BYTES` の範囲内でも合計メモリ消費がその何倍にも
+/// なりうる（`read_member_bytes` は各エントリを独立に確保するため、
+/// 圧縮データの重複〈同一 local header を指す複数 central directory
+/// エントリ〉があっても「圧縮サイズ合計 ≤ アーカイブサイズ」は伸長後
+/// 合計サイズの上界にならない）。メンバ単体と同じ
+/// `MAX_FILE_READ_BYTES` を桁の基準として累積上限にも流用する
+/// （PR #2318 レビュー指摘・P0）。
+const MAX_TOTAL_DECOMPRESSED_BYTES: u64 = super::MAX_FILE_READ_BYTES;
+
 /// バイト列（`.npz` ファイルの内容そのもの）から名前付きテンソル集合を
 /// 読み取る。1 メンバでも失敗すれば全体を失敗させ、部分的な
 /// `HashMap` は返さない（fail-closed。`.claude/rules/security.md` A08）。
@@ -61,8 +90,19 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
         ));
     }
 
-    let mut result = HashMap::with_capacity(entry_count);
+    // 1 パス目: central directory 全エントリを解析し、宣言範囲・伸長後
+    // サイズ上限（メンバ単体・累積）を検証する。`read_member_bytes`／
+    // `inflate`（＝出力バッファの実確保）は 2 パス目まで一切呼ばない
+    // ため、宣言値の時点で上限超過と分かるメンバについて確保が発生する
+    // ことはない（PR #2318 レビュー指摘・P0）。累積サイズは「この
+    // アーカイブから読み取る全メンバの宣言サイズ合計」であり、1 パス目
+    // で全件を先に集計してから 2 パス目の実読み込みへ進むことで、
+    // 後続エントリの累積超過を先頭側のメンバの実読み込みより前に検出
+    // できる（先頭側のメンバの実読み込みが〈本来は無関係な理由で〉
+    // 先に失敗し累積検査の意図がテストできなくなることを避ける）。
+    let mut entries: Vec<CentralDirEntry> = Vec::with_capacity(entry_count);
     let mut pos = cd_offset;
+    let mut total_decompressed: u64 = 0;
     for _ in 0..entry_count {
         // central directory の宣言範囲（`cd_end`）内でのみエントリを
         // 解析する。細工した `cd_size`／`entry_count` により宣言範囲外
@@ -81,6 +121,44 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
             ));
         }
         pos = next_pos;
+
+        // メンバ単体・累積の伸長後サイズ上限検査（PR #2318 レビュー
+        // 指摘・P0）。central directory の宣言値だけで判定するため、
+        // 上限超過となるメンバの出力バッファを実際に確保することはない。
+        // ディレクトリエントリ（`entry.is_directory`）も 2 パス目で
+        // `read_member_bytes` を経由するため同じ検査を適用する。
+        if entry.uncompressed_size > MAX_MEMBER_DECOMPRESSED_BYTES {
+            return Err(NpyError::Entry {
+                name: entry.name.clone(),
+                source: Box::new(NpyError::DecompressedSizeExceeded {
+                    len: entry.uncompressed_size,
+                    max: MAX_MEMBER_DECOMPRESSED_BYTES,
+                }),
+            });
+        }
+        total_decompressed = total_decompressed
+            .checked_add(entry.uncompressed_size)
+            .filter(|&total| total <= MAX_TOTAL_DECOMPRESSED_BYTES)
+            .ok_or(NpyError::DecompressedSizeExceeded {
+                len: total_decompressed.saturating_add(entry.uncompressed_size),
+                max: MAX_TOTAL_DECOMPRESSED_BYTES,
+            })?;
+
+        entries.push(entry);
+    }
+    // 走査終了位置が central directory の宣言終端と厳密に一致すること
+    // を確認する（entry_count だけを信頼せず、宣言範囲全体が実際の
+    // エントリ列で過不足なく埋まっていることを検証する）。
+    if pos != cd_end {
+        return Err(NpyError::InvalidZip(
+            "central directory の走査終了位置が宣言範囲と不一致",
+        ));
+    }
+
+    // 2 パス目: 1 パス目で伸長後サイズ上限を通過したエントリのみを
+    // 実際に読み込む（local header 照合・伸長・CRC 検証）。
+    let mut result = HashMap::with_capacity(entry_count);
+    for entry in &entries {
         if entry.is_directory {
             // ディレクトリエントリも central directory／local header の
             // 構造的整合性（名前・flags・method・CRC・サイズの一致）は
@@ -90,7 +168,7 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
             // 受理されてしまう（PR #2318 レビュー指摘・P2）。ディレクトリ
             // は本来データを持たないため、検証後の内容が非空であれば
             // 拒否する。
-            let decompressed = read_member_bytes(bytes, &entry).map_err(|e| NpyError::Entry {
+            let decompressed = read_member_bytes(bytes, entry).map_err(|e| NpyError::Entry {
                 name: entry.name.clone(),
                 source: Box::new(e),
             })?;
@@ -108,19 +186,11 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
         if result.contains_key(&key) {
             return Err(NpyError::DuplicateEntry { name: key });
         }
-        let tensor = read_member(bytes, &entry).map_err(|e| NpyError::Entry {
+        let tensor = read_member(bytes, entry).map_err(|e| NpyError::Entry {
             name: key.clone(),
             source: Box::new(e),
         })?;
         result.insert(key, tensor);
-    }
-    // 走査終了位置が central directory の宣言終端と厳密に一致すること
-    // を確認する（entry_count だけを信頼せず、宣言範囲全体が実際の
-    // エントリ列で過不足なく埋まっていることを検証する）。
-    if pos != cd_end {
-        return Err(NpyError::InvalidZip(
-            "central directory の走査終了位置が宣言範囲と不一致",
-        ));
     }
     Ok(result)
 }
@@ -871,6 +941,116 @@ mod tests {
             other => {
                 panic!("非空データを持つディレクトリ偽装エントリが拒否されなかった: {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn rejects_member_declared_size_exceeding_member_cap() {
+        // P0（PR #2318 レビュー指摘）: central directory の宣言
+        // `uncompressed_size` がメンバ単体上限
+        // （`MAX_MEMBER_DECOMPRESSED_BYTES`）を超える場合、
+        // `read_member_bytes`／`inflate` を呼び出す前（＝出力バッファを
+        // 確保する前）に `DecompressedSizeExceeded` で拒否されることを
+        // 確認する。圧縮データ自体は 1 要素の小さな npy のままであり、
+        // 実際の伸長を試みれば `CrcMismatch`／`InvalidDeflate` 等の別
+        // エラーになるはずだが、本検査はそれより前に発火する。
+        let mut m = HashMap::new();
+        m.insert("x".to_string(), Tensor::new(vec![1.0], &[1]).unwrap());
+        let bytes = write_npz_bytes(&m).unwrap();
+
+        let cd_sig = CENTRAL_DIR_HEADER_SIG.to_le_bytes();
+        let cd_pos = bytes
+            .windows(4)
+            .position(|w| w == cd_sig)
+            .expect("central directory シグネチャが見つかる");
+        let mut tampered = bytes.clone();
+        let oversized = (MAX_MEMBER_DECOMPRESSED_BYTES + 1) as u32;
+        tampered[cd_pos + 24..cd_pos + 28].copy_from_slice(&oversized.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        match err {
+            Err(NpyError::Entry { name, source }) => {
+                assert_eq!(name, "x.npy");
+                match *source {
+                    NpyError::DecompressedSizeExceeded { len, max } => {
+                        assert_eq!(len, oversized as u64);
+                        assert_eq!(max, MAX_MEMBER_DECOMPRESSED_BYTES);
+                    }
+                    other => panic!("DecompressedSizeExceeded ではない: {other:?}"),
+                }
+            }
+            other => panic!("メンバ単体上限超過が拒否されなかった: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_cumulative_declared_size_exceeding_total_cap() {
+        // P0（PR #2318 レビュー指摘）: 個々のメンバはメンバ単体上限
+        // （`MAX_MEMBER_DECOMPRESSED_BYTES`）以内でも、アーカイブ全体の
+        // 累積宣言サイズが `MAX_TOTAL_DECOMPRESSED_BYTES` を超える場合に
+        // 2 番目のメンバで拒否されることを確認する（1 番目単体では
+        // 上限ちょうどのため許容される）。
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Tensor::new(vec![1.0], &[1]).unwrap());
+        m.insert("b".to_string(), Tensor::new(vec![2.0], &[1]).unwrap());
+        let bytes = write_npz_bytes(&m).unwrap();
+
+        let cd_sig = CENTRAL_DIR_HEADER_SIG.to_le_bytes();
+        let first_cd_pos = bytes
+            .windows(4)
+            .position(|w| w == cd_sig)
+            .expect("1 番目の central directory シグネチャが見つかる");
+        let second_cd_pos = bytes
+            .windows(4)
+            .rposition(|w| w == cd_sig)
+            .expect("2 番目の central directory シグネチャが見つかる");
+        assert_ne!(first_cd_pos, second_cd_pos);
+
+        let mut tampered = bytes.clone();
+        // 1 番目のメンバはちょうど上限（単体では許容される）。
+        let at_cap = MAX_MEMBER_DECOMPRESSED_BYTES as u32;
+        tampered[first_cd_pos + 24..first_cd_pos + 28].copy_from_slice(&at_cap.to_le_bytes());
+        // 2 番目は小さい宣言値だが、累積では上限を超える。
+        let small = 1u32;
+        tampered[second_cd_pos + 24..second_cd_pos + 28].copy_from_slice(&small.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::DecompressedSizeExceeded { .. })),
+            "累積上限超過が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_directory_entry_declared_size_exceeding_member_cap() {
+        // P0（PR #2318 レビュー指摘）: ディレクトリエントリ
+        // （`rejects_directory_entry_with_non_empty_data` と同じ
+        // 偽装手法で名前末尾を `/` にしたエントリ）も
+        // `read_member_bytes` を経由するため、メンバ単体上限検査を
+        // 迂回できないことを確認する。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let mut tampered = bytes.clone();
+        assert_eq!(&tampered[30..35], b"a.npy");
+        tampered[30..35].copy_from_slice(b"a.np/");
+
+        let cd_sig = CENTRAL_DIR_HEADER_SIG.to_le_bytes();
+        let cd_pos = bytes
+            .windows(4)
+            .position(|w| w == cd_sig)
+            .expect("central directory シグネチャが見つかる");
+        let cd_name_start = cd_pos + 46;
+        assert_eq!(&tampered[cd_name_start..cd_name_start + 5], b"a.npy");
+        tampered[cd_name_start..cd_name_start + 5].copy_from_slice(b"a.np/");
+        let oversized = (MAX_MEMBER_DECOMPRESSED_BYTES + 1) as u32;
+        tampered[cd_pos + 24..cd_pos + 28].copy_from_slice(&oversized.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        match err {
+            Err(NpyError::Entry { name, source }) => {
+                assert_eq!(name, "a.np/");
+                assert!(matches!(*source, NpyError::DecompressedSizeExceeded { .. }));
+            }
+            other => panic!("ディレクトリ偽装エントリの上限超過が拒否されなかった: {other:?}"),
         }
     }
 
