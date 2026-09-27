@@ -114,6 +114,13 @@ pub enum NpyError {
     /// （不正なブロック型・over-subscribed Huffman 符号・距離が出力
     /// 範囲外・宣言長との不一致等）。理由は静的な文字列に限定する。
     InvalidDeflate(&'static str),
+
+    /// `load_npy`／`load_npz` が読み込む外部ファイルのサイズが
+    /// `MAX_FILE_READ_BYTES` を超える。ヘッダ・central directory の
+    /// 内容を解析する前に `std::fs::metadata` で検査するため、巨大・
+    /// 細工されたファイルを丸ごと確保してから拒否することはない
+    /// （`.claude/rules/security.md` A03/A04/A05）。
+    FileTooLarge { len: u64, max: u64 },
 }
 
 impl fmt::Display for NpyError {
@@ -150,6 +157,9 @@ impl fmt::Display for NpyError {
             NpyError::EntryTooLarge => write!(f, "npz エントリのサイズが上限を超える"),
             NpyError::TooManyEntries => write!(f, "npz エントリ数が上限を超える"),
             NpyError::InvalidDeflate(reason) => write!(f, "DEFLATE ストリームが不正: {reason}"),
+            NpyError::FileTooLarge { len, max } => {
+                write!(f, "ファイルサイズ {len} バイトが上限 {max} バイトを超える")
+            }
         }
     }
 }
@@ -175,6 +185,50 @@ impl From<ShapeError> for NpyError {
     fn from(e: ShapeError) -> Self {
         NpyError::Shape(e)
     }
+}
+
+/// `load_npy`／`load_npz` が読み込みを許容する外部ファイルサイズ上限
+/// （1 GiB）。`crates/onnx-interop/examples/model_zoo_probe.rs::
+/// MAX_READ_BYTES` と同じ脅威モデル（巨大・細工されたファイルを検証前に
+/// 丸ごと `std::fs::read` するとメモリ枯渇につながる。A03/A04/A05）に
+/// 対する同一方針の値。ONNX モデルと同様、`.npy`／`.npz` も学習済み
+/// 重みを保持しうる外部バイナリファイルであり、桁数の目安を共有する。
+pub(crate) const MAX_FILE_READ_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 外部 `.npy`／`.npz` ファイルを、サイズ検証前に丸ごと確保しない形で
+/// 読み込む（`load_npy`／`load_npz` の唯一の読み込み経路）。
+///
+/// `std::fs::metadata(path)` でサイズ検査した後に `std::fs::read(path)` で
+/// パスを再度開くと、両呼び出しの間にファイル（または symlink 先）を
+/// 差し替えられて上限検査を迂回される TOCTOU が生じる
+/// （`crates/onnx-interop/examples/model_zoo_probe.rs::read_file_bounded`
+/// と同型の対策）。検査対象と読み込み対象を同一の `File` ハンドルに
+/// 固定するため一度だけ `open` し、そのハンドルに対して `metadata` 取得と
+/// `MAX_FILE_READ_BYTES + 1` バイトまでの読み込みを行う。実読込量が
+/// 上限を超えた場合も fail-closed で拒否する（事前の `len` 検査と実
+/// 読込量検査の二重防御。事前の `len` が小さくても読み込み中にファイルが
+/// 伸長される可能性への保険を兼ねる）。
+pub(crate) fn read_file_bounded(path: &std::path::Path) -> Result<Vec<u8>, NpyError> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > MAX_FILE_READ_BYTES {
+        return Err(NpyError::FileTooLarge {
+            len,
+            max: MAX_FILE_READ_BYTES,
+        });
+    }
+
+    let mut buf = Vec::new();
+    let read_len = file.take(MAX_FILE_READ_BYTES + 1).read_to_end(&mut buf)? as u64;
+    if read_len > MAX_FILE_READ_BYTES {
+        return Err(NpyError::FileTooLarge {
+            len: read_len,
+            max: MAX_FILE_READ_BYTES,
+        });
+    }
+    Ok(buf)
 }
 
 /// ヘッダ・ZIP メタデータ解析の境界付き読み取りヘルパ（`pub(crate)`）。

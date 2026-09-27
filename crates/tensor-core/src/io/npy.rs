@@ -157,8 +157,12 @@ pub fn read_npy_bytes(bytes: &[u8]) -> Result<Tensor<f32>, NpyError> {
 }
 
 /// `path` の npy ファイルを読み込む。
+///
+/// ファイル全体を検証前に無条件で確保しないよう、`super::
+/// read_file_bounded`（サイズ上限検査つき・TOCTOU 対策済み）を経由する
+/// （`.claude/rules/security.md` A03/A04/A05。PR #2318 レビュー指摘）。
 pub fn load_npy<P: AsRef<Path>>(path: P) -> Result<Tensor<f32>, NpyError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = super::read_file_bounded(path.as_ref())?;
     read_npy_bytes(&bytes)
 }
 

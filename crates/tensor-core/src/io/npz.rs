@@ -82,6 +82,26 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
         }
         pos = next_pos;
         if entry.is_directory {
+            // ディレクトリエントリも central directory／local header の
+            // 構造的整合性（名前・flags・method・CRC・サイズの一致）は
+            // 検証する。名前だけを見て無条件に読み飛ばすと、データを
+            // 持つエントリを「ディレクトリ名」（末尾 `/` 等）に偽装した
+            // 細工 ZIP が、local header との不一致を一切検査されずに
+            // 受理されてしまう（PR #2318 レビュー指摘・P2）。ディレクトリ
+            // は本来データを持たないため、検証後の内容が非空であれば
+            // 拒否する。
+            let decompressed = read_member_bytes(bytes, &entry).map_err(|e| NpyError::Entry {
+                name: entry.name.clone(),
+                source: Box::new(e),
+            })?;
+            if !decompressed.is_empty() {
+                return Err(NpyError::Entry {
+                    name: entry.name.clone(),
+                    source: Box::new(NpyError::InvalidZip(
+                        "ディレクトリエントリに非空データが含まれる",
+                    )),
+                });
+            }
             continue;
         }
         let key = npz_member_key(&entry.name)?;
@@ -106,8 +126,12 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
 }
 
 /// `path` の npz ファイルを読み込む。
+///
+/// ファイル全体を検証前に無条件で確保しないよう、`super::
+/// read_file_bounded`（サイズ上限検査つき・TOCTOU 対策済み）を経由する
+/// （`.claude/rules/security.md` A03/A04/A05。PR #2318 レビュー指摘）。
 pub fn load_npz<P: AsRef<Path>>(path: P) -> Result<HashMap<String, Tensor<f32>>, NpyError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = super::read_file_bounded(path.as_ref())?;
     read_npz_bytes(&bytes)
 }
 
@@ -398,8 +422,23 @@ fn local_size_field_matches(local_field: u32, actual: u64) -> bool {
 }
 
 /// 1 メンバを local header 経由で読み取り、伸長・CRC 検証したうえで
-/// `Tensor<f32>` として解釈する。
+/// `Tensor<f32>` として解釈する。構造的検証・伸長・CRC 検証自体は
+/// [`read_member_bytes`] に委譲し、本関数は npy 解釈のみを担う
+/// （ディレクトリエントリも [`read_member_bytes`] 側の検証を共用する
+/// ため。PR #2318 レビュー指摘・P2）。
 fn read_member(bytes: &[u8], entry: &CentralDirEntry) -> Result<Tensor<f32>, NpyError> {
+    let decompressed = read_member_bytes(bytes, entry)?;
+    read_npy_bytes(&decompressed)
+}
+
+/// central directory の 1 エントリを local header 経由で読み取り、
+/// name／flags／method／CRC／サイズの central directory との整合性を
+/// 検証したうえで伸長・CRC 照合済みの生データを返す（npy 解釈はしない。
+/// 通常メンバ・ディレクトリエントリの両方から呼ばれる共通経路）。
+fn read_member_bytes<'a>(
+    bytes: &'a [u8],
+    entry: &CentralDirEntry,
+) -> Result<std::borrow::Cow<'a, [u8]>, NpyError> {
     let local_offset = usize::try_from(entry.local_header_offset)
         .map_err(|_| NpyError::InvalidZip("local header offset が usize 範囲を超える"))?;
     if read_u32_le(bytes, local_offset, "local header シグネチャ")? != LOCAL_FILE_HEADER_SIG {
@@ -504,7 +543,7 @@ fn read_member(bytes: &[u8], entry: &CentralDirEntry) -> Result<Tensor<f32>, Npy
         });
     }
 
-    read_npy_bytes(&decompressed)
+    Ok(decompressed)
 }
 
 /// 名前付きテンソル集合を npz（ZIP、STORED のみ）形式のバイト列へ
@@ -793,6 +832,46 @@ mod tests {
             matches!(err, Err(NpyError::Entry { .. })),
             "local header flags の不一致が拒否されなかった: {err:?}"
         );
+    }
+
+    #[test]
+    fn rejects_directory_entry_with_non_empty_data() {
+        // P2（codex-review・PR #2318）: 名前が `/` で終わる「ディレクトリ
+        // エントリ」は central directory・local header の構造検証を経ずに
+        // 無条件で読み飛ばされていた。データを持つ通常エントリの名前
+        // 末尾だけをディレクトリ名（`/` 終端）に偽装した ZIP が、内容の
+        // 整合性検査を一切受けずに受理されないことを確認する。
+        //
+        // 先頭エントリ（sort 順で "a"）の名前 "a.npy"（local header
+        // オフセット 30、central directory は "a.npy" シグネチャの
+        // 直後）の末尾 1 バイトのみを `/` へ書き換え、名前の長さを
+        // 変えずに `is_directory` 判定（`ends_with('/')`）だけを反転
+        // させる。中身（圧縮データ・CRC）は変えないため、ディレクトリ
+        // と自称しつつ非空データを持つ矛盾したエントリになる。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let mut tampered = bytes.clone();
+        assert_eq!(&tampered[30..35], b"a.npy");
+        tampered[30..35].copy_from_slice(b"a.np/");
+
+        let cd_sig = CENTRAL_DIR_HEADER_SIG.to_le_bytes();
+        let cd_pos = bytes
+            .windows(4)
+            .position(|w| w == cd_sig)
+            .expect("central directory シグネチャが見つかる");
+        let cd_name_start = cd_pos + 46;
+        assert_eq!(&tampered[cd_name_start..cd_name_start + 5], b"a.npy");
+        tampered[cd_name_start..cd_name_start + 5].copy_from_slice(b"a.np/");
+
+        let err = read_npz_bytes(&tampered);
+        match err {
+            Err(NpyError::Entry { name, source }) => {
+                assert_eq!(name, "a.np/");
+                assert!(matches!(*source, NpyError::InvalidZip(_)));
+            }
+            other => {
+                panic!("非空データを持つディレクトリ偽装エントリが拒否されなかった: {other:?}")
+            }
+        }
     }
 
     #[test]
