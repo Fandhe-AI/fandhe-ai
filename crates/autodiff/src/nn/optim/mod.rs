@@ -225,10 +225,14 @@ pub use state_dict::OptimizerStateDict;
 // `(損失, 勾配列)`」を返す closure を受け取り内部で複数回評価する形と
 // した（`torch.optim.LBFGS.step(closure)` 相当）。新規 `Op`／
 // `BackendOps` メソッド／`Var`／VJP は追加していない（ホスト側の値型・
-// 純関数。カーネルなし）。facade（`fandhe_ai::optim`）への公開・
-// `compile()` 統合は別イシュー #2198（facade 公開面拡張はユーザー
-// 承認事項のため本イシューでは対応しない）。`DeviceParamStore` 非対応
-// （デバイス常駐化は親 #2172 のスコープ外）。
+// 純関数。カーネルなし）。facade（`fandhe_ai::optim`）への `LbfgsConfig`
+// 再エクスポート・`compile()`/`fit()` 統合は別イシュー #2198 で
+// 2026-09-27 ユーザー承認（#2172 コメント）を得て実装済み
+// （`crates/facade/src/optim.rs`・`crates/facade/src/compat/
+// training.rs::OptimizerState::Lbfgs`）。`Lbfgs`（本体）・
+// `LbfgsLineSearch`（line search 方式選択）自体の facade 再エクスポートは
+// 承認範囲外のまま非公開を維持する（`docs/autodiff-lbfgs-decision.md`
+// §9）。`DeviceParamStore` 非対応（デバイス常駐化は親 #2172 のスコープ外）。
 
 // イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）
 // を追加した（`param_group` モジュール冒頭 doc 参照）。`ParamGroup`／

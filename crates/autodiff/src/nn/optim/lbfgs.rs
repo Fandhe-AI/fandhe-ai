@@ -93,8 +93,13 @@
 //!   反復を終える（closure を追加で呼ばない）。PyTorch の逐語移植は
 //!   この判定を持たず、`t == 0` でも closure を評価しうる。
 //! - 対象外: `maximize`・複素数パラメータ・parameter group・sparse
-//!   勾配。facade（`fandhe_ai::optim`）への公開・`compile()` 統合は
-//!   別イシュー #2198（ユーザー承認を要する facade 公開面拡張）。
+//!   勾配。facade（`fandhe_ai::optim`）への `LbfgsConfig` 再エクスポート・
+//!   `compile()`/`fit()` 統合は別イシュー #2198 で 2026-09-27 ユーザー
+//!   承認（#2172 コメント）を得て実装済み（`crates/facade/src/optim.rs`・
+//!   `crates/facade/src/compat/training.rs::OptimizerState::Lbfgs`）。
+//!   `Lbfgs`（本体）・`LbfgsLineSearch`（line search 方式選択）自体の
+//!   facade 再エクスポートは承認範囲外のまま非公開を維持する
+//!   （`docs/autodiff-lbfgs-decision.md` §9）。
 //!
 //! # 数値型の方針
 //!
