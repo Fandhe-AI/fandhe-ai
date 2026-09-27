@@ -1160,7 +1160,7 @@ lib.rs::FitWeightingHoldDoctestGuard`（正のプローブ doctest）＋
 `pub use` する公開面拡張を前提としているが、#2201・親 #2190 のいずれにも
 所有者の明示承認コメントが確認できなかったため、`crates/facade/src/` は
 一切変更していない。他の保留エントリ（#2198・#2177 等）と異なり、本
-issue では公開面へ到達しかねないコード自体を`crates/facade/src/`へ
+issue では公開面へ到達しかねないコード自体を `crates/facade/src/` へ
 書いていない（`Mlp`／`LeNet` は `crates/facade/examples/models/`
 配下の**利用者コード**として実装し、`compat::Sequential::add_*` の
 組み合わせのみで構成した）ため、`HoldDoctestGuard` 方式の否定ガードは
