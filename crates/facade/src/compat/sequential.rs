@@ -900,7 +900,15 @@ impl Sequential {
         };
 
         let mut outputs: Vec<Tensor<f32>> = Vec::new();
-        let mut iter = loader.iter();
+        // `DataLoader::iter()` はサンプル順列（`order`。shuffle 時は
+        // `shuffled_indices`、非 shuffle 時は `(0..n).collect()`）を
+        // 構築するため、件数比例のコストを持つ（`fandhe_ai_tensor_core::
+        // data::DataLoader::iter`）。設計記録 §2.1 は `DataLoad` フェーズ
+        // の計測範囲を「`DataLoader::iter`／`Batches::next` の呼び出し」
+        // と定義しているため、`iter()` 自体の呼び出しも計測区間へ含める
+        // （codex-review 指摘・PR #2322。以前は `iter()` を計測開始前に
+        // 呼んでおり、この構築コストが phase 集計から漏れていた）。
+        let mut iter = rec.record(InferencePhase::DataLoad, || loader.iter());
         loop {
             let next = rec.record(InferencePhase::DataLoad, || iter.next());
             let Some(batch_result) = next else {
@@ -3562,9 +3570,11 @@ mod tests {
     }
 
     /// (g): phase 計測——`Forward.calls == batches`・
-    /// `DataLoad.calls == batches + 1`（枯渇を告げる最後の `None` も
-    /// 1 回の `DataLoad` 計測に含まれる）・tape 不要経路では
-    /// `TapeBuild.calls == 0`・`DeviceTransfer.calls == 0`。
+    /// `DataLoad.calls == batches + 2`（`DataLoader::iter()` 自体の
+    /// 呼び出し 1 回〈サンプル順列の構築。codex-review 指摘・PR #2322〉と
+    /// 枯渇を告げる最後の `None` の 1 回も `DataLoad` 計測に含まれる）・
+    /// tape 不要経路では `TapeBuild.calls == 0`・
+    /// `DeviceTransfer.calls == 0`。
     #[test]
     fn run_loader_inference_records_phase_stats_for_tape_free_path() {
         crate::inference::batch::clear_inference_phase_stats();
@@ -3584,6 +3594,16 @@ mod tests {
                 .phase(crate::inference::batch::InferencePhase::Forward)
                 .calls(),
             3
+        );
+        // `DataLoad.calls == batches + 2`: `DataLoader::iter()` 自体の
+        // 呼び出し 1 回（サンプル順列の構築コストを計測区間へ含める。
+        // codex-review 指摘・PR #2322）+ バッチ 3 回分の `Batches::next`
+        // + 枯渇を告げる最後の `None` の 1 回。
+        assert_eq!(
+            stats
+                .phase(crate::inference::batch::InferencePhase::DataLoad)
+                .calls(),
+            5
         );
         assert_eq!(
             stats

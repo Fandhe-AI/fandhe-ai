@@ -171,9 +171,12 @@ predict` と同じ既存契約を維持する。バッチ単体の `predict` と
   `batches() == 0` になること
   （`run_loader_inference_on_empty_loader_returns_empty_vec`）
 - **(g)（R2・R4）**: phase 計測——tape 不要経路で `Forward.calls ==
-  batches`・`DataLoad.calls == batches + 1`（反復終了を告げる最後の
-  `None` も 1 回の `DataLoad` 計測に含まれる）・`TapeBuild.calls ==
-  0`・`DeviceTransfer.calls == 0`（N=5・batch_size=2 の 3 バッチ構成。
+  batches`・`DataLoad.calls == batches + 2`（`DataLoader::iter()`
+  自体の呼び出し 1 回〈サンプル順列の構築コストを計測区間へ含める。
+  codex-review 指摘・PR #2322〉+ 反復終了を告げる最後の `None` の
+  1 回。以前は `iter()` を計測開始前に呼んでおり、この構築コストが
+  phase 集計から漏れていた）・`TapeBuild.calls == 0`・
+  `DeviceTransfer.calls == 0`（N=5・batch_size=2 の 3 バッチ構成。
   `run_loader_inference_records_phase_stats_for_tape_free_path`）
 - `PhaseStat::add`・`saturating_sub`・`InferencePhaseStats::since`・
   `merge`・thread-local の分離（別スレッドの累計が漏れ伝わらない
