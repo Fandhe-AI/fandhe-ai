@@ -218,6 +218,28 @@
 //! `nn::optim::lamb` モジュール doc 参照）。`step()` シグネチャは
 //! `AdamW::step`／`Adam::step` と同一（`&[(&Tensor<f32>, &Tensor<f32>)]`
 //! を受け取り更新後 `Tensor<f32>` の列を返す）。
+//!
+//! # L-BFGS（イシュー #2172 コメント・2026-09-27 所有者承認）
+//!
+//! [`crate::optim::LbfgsConfig`]（ハイパーパラメータのみ）を
+//! `fandhe_ai_autodiff::nn::optim` から再エクスポートする。
+//! [`crate::compat::Optimizer::Lbfgs`] へそのまま渡し、
+//! [`crate::compat::Sequential::compile`]／[`crate::compat::Sequential::fit`]
+//! が内部で `Lbfgs::try_step_closure` を駆動する（`compat::training`
+//! モジュール doc「L-BFGS（closure 駆動 optimizer）」節参照）。
+//!
+//! **承認範囲の非対称性**: L-BFGS optimizer 本体
+//! （`fandhe_ai_autodiff::nn::optim::Lbfgs`）と line search 方式選択
+//! （`LbfgsLineSearch`）は本モジュールへ再エクスポートしていない
+//! （承認事項に含まれないため）。この結果、`fandhe_ai` のみに依存する
+//! 利用者は [`crate::compat::Sequential::compile`] 経由でしか L-BFGS を
+//! 使えず、かつ `LbfgsConfig::line_search` を明示的に指定できない
+//! （型を名指しできないため）——既定値 `LbfgsConfig::default()` の
+//! 固定ステップ（`line_search_fn=None` 相当）のみが選べる。
+//! strong Wolfe line search を使う手動 closure ループが必要な場合は
+//! 引き続き `fandhe_ai_autodiff` への直接依存が必要（`crates/facade/tests/
+//! compat_sequential_lbfgs_manual.rs` 参照）。詳細は
+//! `docs/autodiff-lbfgs-decision.md` §9。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
@@ -230,6 +252,15 @@ pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
+// イシュー #2172 コメント（2026-09-27 所有者承認）: L-BFGS の `*Config`
+// 型のみを再エクスポートする（`Lbfgs`〈closure 駆動の optimizer 本体〉・
+// `LbfgsLineSearch`〈line search 方式選択〉は承認範囲外のまま内部クレート
+// 限定を維持する。`crates/facade/src/lib.rs::LbfgsHoldDoctestGuard`・
+// `docs/autodiff-lbfgs-decision.md` §9 参照）。単一識別子のみのため
+// `{...}` 波括弧は rustfmt が剥がすが、本行 1 件のみ波括弧なしの
+// `pub use` 形を許容するよう `tests/api_surface.rs::
+// optim_module_reexports_exactly_expected_surface` の走査を拡張済み。
+pub use fandhe_ai_autodiff::nn::optim::LbfgsConfig;
 pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};
 pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
 pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};
