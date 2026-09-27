@@ -346,7 +346,7 @@ huggingface_hub（Python）の `hf_hub_download(repo_id, filename, revision)` [^
 | `repo_id`（`namespace/name` 形式の文字列） | `HfRepoId::parse` が返す `HfRepoId` 型（§3.1） | 検証規則（allowlist・長さ・`..`・`--` の扱い）は §3.2 に規定。文字列そのままではなく検証済み型を経由する |
 | `filename`（リポジトリ内の相対パス） | `HfHub::download` の `filename: &str` 引数（§3.1） | huggingface_hub はキャッシュキーに `filename` を含む（`snapshots/<sha>/<filename>` 相当）のに対し、本設計は `ModelRegistry` の単一ファイル制約（§3.3）により `filename` をキャッシュキーへ反映しない。このため §3.3 で記録済みの是正案 A（`filename` を単一許容値へ限定）／B（`filename` を `name` の符号化へ組み込む）のいずれかを実装イシューで確定する必要がある（未確定のまま） |
 | `revision`（branch・tag・commit sha のいずれも可の文字列。既定 `"main"`） | `Revision`（`enum { CommitSha(String), Ref(String) }`）を `Revision::parse` で構築し、`resolve_revision` で commit sha へ解決（§3.1） | huggingface_hub は revision を型で区別しないが、本設計は型で区別する案としている。区別せず一括で ref 解決を試みる方が近い可能性もあり、HF 側の branch／tag 解決経路が同一かは外部仕様・要確認（§3.5） |
-| （戻り値）取得済みファイルのローカルパス | `CachedModel { name, version }`（§3.1） | huggingface_hub はファイルパスを直接返すのに対し、本設計は `ModelRegistry` のキー（`name`／`version`）を返し、パス解決は `ModelRegistry::load` に委ねる。§3.3 の是正が未確定な間は `filename` が戻り値に含まれない制約が残る |
+| （戻り値）取得済みファイルのローカルパス | `CachedModel { name, version }`（§3.1） | huggingface_hub はファイルパスを直接返すのに対し、本設計は `ModelRegistry` のキー（`name`／`version`）を返す。`ModelRegistry::load(name, version)`（実装済み・`crates/facade/src/model.rs:648`）はローカルパスを返す API ではなく、そのキーで safetensors を読み込んで `HashMap<String, Tensor<f32>>`（重みそのもの）を返す。ローカルパスを直接取得する API は現状存在しない。§3.3 の是正が未確定な間は `filename` が戻り値に含まれない制約が残る |
 
 ### 5.3 差分・非対応
 
