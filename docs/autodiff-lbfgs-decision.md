@@ -339,6 +339,39 @@ lbfgs_items`。`NAMES` から `LbfgsConfig` を除外）で固定する。
   直接依存が必要（`crates/facade/tests/compat_sequential_lbfgs_
   manual.rs`）。
 
+### `lbfgs_batch_step` の失敗時復元契約のテスト（codex-review 指摘・PR #2319）
+
+§8 の「`run_fit` のバッチ処理」節が予定する「`Err` の場合は必ず
+`apply_parameters(snapshot)` で復元してからエラーを返す」契約は、
+実装時点では `crates/facade/tests/compat_sequential_lbfgs_manual.rs`
+（内部 import 契約ファイル。closure を独自に組んで `Lbfgs::
+try_step_closure` を直接呼ぶ手動ループ）でのみ検証しており、facade の
+`compile()`/`fit()` 経由（`lbfgs_batch_step`）の失敗時復元は未検証
+だった（PR #2319 codex-review P2 指摘）。
+
+`crates/facade/src/compat/training.rs::lbfgs_fit_failure_tests::
+lbfgs_fit_restores_params_and_keeps_compiled_after_multi_eval_failure`
+（crate 内部の `#[cfg(test)]`。`lbfgs_batch_step` が非公開のため
+外部統合テストクレートからは到達不能）を追加し、次を固定した:
+
+- 極端に大きい `lr`（`1e30`）・`max_iter: 2` により、固定ステップの
+  1 回目の closure 評価（元パラメータ・有限）は成功し、`x += t·d`
+  更新後の 2 回目の評価で MSE loss が `f32::MAX` を超えて `inf` になる
+  （決定的に再現可能。乱数の偶然性に依存しない）。
+- `fit` がこの `InvalidArgument`（"closure returned non-finite loss"）
+  を返す。
+- `Sequential::trainable_parameters()` が `fit` 呼び出し前の snapshot
+  と bit 完全一致で復元される（closure が既に trial パラメータを
+  書き込んだ後の失敗であることをエラーメッセージで確認済み）。
+- `Sequential::is_compiled()` が維持される。
+- 同じモデルに対する `evaluate` が失敗前と同一の損失を返す（パラメータ
+  復元の間接確認）・再 `compile`（正常な `lr`）後の `fit` が成功する
+  （compiled 状態・モデル状態が壊れていないことの確認）。
+
+**§8 の予定と実装の食い違いの有無**: 上記検証の結果、§8 が記述する
+復元契約（`Err` → `apply_parameters(snapshot)`）は実装と完全に一致して
+おり、§8 側の記述を訂正する必要はなかった。
+
 ### 学習曲線検証（残る受入条件の充足）
 
 `crates/facade/tests/compat_sequential_fit_lbfgs.rs::

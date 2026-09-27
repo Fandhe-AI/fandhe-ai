@@ -190,10 +190,10 @@ pub enum Optimizer {
     /// 「パラメータ列 → `(損失, 勾配列)`」を返す closure を内部で複数回
     /// 評価する形（1 step あたり勾配評価 1 回を前提とする既存 optimizer
     /// とは API 形状が異なる。`lbfgs.rs` モジュール doc 参照）。
-    /// [`Sequential::run_fit`] はこの variant のみ既定バッチ処理
-    /// （`forward → backward → optimizer.step`）を迂回し、専用ヘルパー
-    /// `lbfgs_batch_step` へ分岐する（本ファイル「L-BFGS（closure 駆動
-    /// optimizer）」節参照）。
+    /// `Sequential::run_fit`（内部専用。facade 公開 API ではない）は
+    /// この variant のみ既定バッチ処理（`forward → backward →
+    /// optimizer.step`）を迂回し、専用ヘルパー `lbfgs_batch_step` へ
+    /// 分岐する（本ファイル「L-BFGS（closure 駆動 optimizer）」節参照）。
     ///
     /// **非対応の組み合わせ（いずれも fail-closed に `InvalidArgument`）**:
     /// [`Sequential::compile_with_amp`]（AMP。損失スケーリングが closure
@@ -3021,5 +3021,200 @@ mod train_step_tests {
             )
             .expect_err("shape の違うパラメータ更新は Err のはず");
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+}
+
+/// `Sequential::run_fit` の `OptimizerState::Lbfgs` 分岐（`lbfgs_batch_step`）
+/// の失敗時復元契約を固定する単体テスト（codex-review 指摘・PR #2319:
+/// closure を 1 回以上評価した後に失敗する経路の復元・`compiled` 状態
+/// 維持・再度 fit/evaluate 可能であることが未検証だった）。
+///
+/// `lbfgs_batch_step` は crate 内部専用の非公開関数（`pub` にできない
+/// 契約はない——単に facade 公開面に含めない設計。`compat::training::
+/// Optimizer::Lbfgs` doc 参照）のため、外部統合テストクレート
+/// （`crates/facade/tests/*`）からは到達できず、本ファイル内の
+/// `#[cfg(test)]` から `Sequential::fit`（公開 API）経由で間接的に
+/// 検証する。
+#[cfg(test)]
+mod lbfgs_fit_failure_tests {
+    use super::*;
+
+    const D_IN: usize = 3;
+    const D_HIDDEN: usize = 4;
+    const D_OUT: usize = 2;
+    const N: usize = 4;
+    const SEED_L1: u64 = 0x1BF6_1111;
+    const SEED_L2: u64 = 0x1BF6_2222;
+
+    fn build_model() -> Sequential {
+        Sequential::new()
+            .add_linear(D_IN, D_HIDDEN, SEED_L1)
+            .unwrap_or_else(|e| panic!("test fixture: 層 1 の構築に失敗: {e}"))
+            .add_relu()
+            .add_linear(D_HIDDEN, D_OUT, SEED_L2)
+            .unwrap_or_else(|e| panic!("test fixture: 層 2 の構築に失敗: {e}"))
+    }
+
+    /// [`accumulate_tests::deterministic_fill`] と同型の局所実装
+    /// （splitmix64。値域 `(-0.5, 0.5)`）。
+    fn deterministic_fill(seed: u64, n: usize) -> Vec<f32> {
+        let mut state = seed;
+        (0..n)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                ((z >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
+            })
+            .collect()
+    }
+
+    fn gen_regression_data(seed: u64) -> (Tensor<f32>, Tensor<f32>) {
+        let x = deterministic_fill(seed, N * D_IN);
+        let y = deterministic_fill(seed ^ 0x5555_5555_5555_5555, N * D_OUT);
+        (
+            Tensor::new(x, &[N, D_IN])
+                .unwrap_or_else(|e| panic!("test fixture: x の shape 構築に失敗: {e}")),
+            Tensor::new(y, &[N, D_OUT])
+                .unwrap_or_else(|e| panic!("test fixture: y の shape 構築に失敗: {e}")),
+        )
+    }
+
+    fn params_bit_exact(a: &[&Tensor<f32>], b: &[&Tensor<f32>]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        a.iter().zip(b.iter()).all(|(x, y)| {
+            let xd = x.contiguous();
+            let yd = y.contiguous();
+            let xs = xd.as_slice().expect("test fixture: contiguous 化済み");
+            let ys = yd.as_slice().expect("test fixture: contiguous 化済み");
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+        })
+    }
+
+    /// `docs/autodiff-lbfgs-decision.md` §8「`run_fit` のバッチ処理」節が
+    /// 予定する復元契約: L-BFGS の 1 outer step 内で closure を 2 回以上
+    /// 評価した後（＝ 1 回目の評価は成功し、内部反復の固定ステップ更新後
+    /// の 2 回目以降の評価で失敗する）に `Lbfgs::try_step_closure` が
+    /// `Err` を返した場合、`lbfgs_batch_step` は
+    /// （1）`fit` 呼び出しが `Err` を返す・
+    /// （2）`Sequential::trainable_parameters()` が `fit` 呼び出し前
+    ///    （この step 開始前と同じ。1 epoch・フルバッチのため両者は
+    ///    一致する）と bit 完全一致で復元される・
+    /// （3）`Sequential::is_compiled()` が維持される・
+    /// （4）同じモデルで再度 `fit`／`evaluate` が呼び出し可能である
+    /// ことを満たす。
+    ///
+    /// **決定的な失敗誘発の仕組み**: `LbfgsConfig::line_search`
+    /// （既定 `LbfgsLineSearch::None`。固定ステップ）でも、固定ステップの
+    /// 反復は「`x += t·d` 更新直後の反復末尾で closure を再評価し次反復の
+    /// `loss`／`flat_grad` を得る」契約（`lbfgs.rs` モジュール doc）を
+    /// 持つため `max_iter >= 2` で closure が複数回呼ばれる。極端に大きい
+    /// `lr`（`1e30`）を与えると、1 回目の評価（元のパラメータ・有限）で
+    /// 得た勾配方向へ 1 回目のステップを踏んだ時点でパラメータが桁違いに
+    /// 巨大化する（それ自体はまだ有限）。この巨大パラメータで forward
+    /// した 2 回目の closure 評価は、MSE loss の二乗項が `f32::MAX`
+    /// （約 3.4e38）を超えて `inf` になる（`(1e30)^2 = 1e60`）ため
+    /// 非有限となり、`Lbfgs` 内部の closure 戻り値検証（`lbfgs.rs`
+    /// モジュール doc「closure 戻り値の検証」節）が `InvalidArgument` を
+    /// 返す。パラメータ自体（`x += t·d` 直後の値）は有限のままのため、
+    /// `Lbfgs::try_step_closure` はこの巨大パラメータで closure を実際に
+    /// 呼び出す（`lbfgs_batch_step` の closure が
+    /// `model.apply_parameters(trial)` を実行してから forward する）ため、
+    /// 「trial 書き込み後の失敗」という復元経路を確実に踏む。
+    #[test]
+    fn lbfgs_fit_restores_params_and_keeps_compiled_after_multi_eval_failure() {
+        let (x, y) = gen_regression_data(0x1BF6_D474);
+        let mut model = build_model();
+        model
+            .compile(
+                Optimizer::Lbfgs(LbfgsConfig {
+                    lr: 1e30,
+                    max_iter: 2,
+                    ..LbfgsConfig::default()
+                }),
+                Loss::Mse,
+            )
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+
+        let snapshot_before: Vec<Tensor<f32>> =
+            model.trainable_parameters().into_iter().cloned().collect();
+        let eval_before = model
+            .evaluate(&x, &y, N)
+            .unwrap_or_else(|e| panic!("test fixture: 事前 evaluate に失敗: {e}"));
+
+        let result = model.fit(&x, &y, FitConfig::new(1, N));
+        let err = result.expect_err(
+            "極端に大きい lr による非有限 loss は Lbfgs::try_step_closure を \
+             Err にするはず（テスト前提が崩れている場合はここで失敗する）",
+        );
+        assert!(
+            matches!(err, AutodiffError::InvalidArgument(_)),
+            "非有限 loss の検出は InvalidArgument のはず: {err:?}"
+        );
+        // テスト前提の固定: 失敗が 1 回目の closure 評価（元パラメータ・
+        // 有限）ではなく、固定ステップ更新後の 2 回目以降の評価
+        // （非有限 loss）で起きていることをエラーメッセージで確認する
+        // （`Lbfgs::try_step_closure` の非有限検出メッセージは
+        // `lbfgs.rs` 側で "closure returned non-finite loss" を含む）。
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite loss"),
+            "想定した失敗経路（2 回目以降の closure 評価での非有限 loss \
+             検出）ではない可能性がある: {msg}"
+        );
+
+        // (2) パラメータは fit 呼び出し前と bit 完全一致で復元される
+        // （trial 書き込み〈`model.apply_parameters(trial)`〉が発生した
+        // 後の失敗でも、`lbfgs_batch_step` の Err 経路が
+        // `model.apply_parameters(snapshot)` で元へ戻すため）。
+        let snapshot_after = model.trainable_parameters();
+        assert_eq!(snapshot_before.len(), snapshot_after.len());
+        let before_refs: Vec<&Tensor<f32>> = snapshot_before.iter().collect();
+        assert!(
+            params_bit_exact(&before_refs, &snapshot_after),
+            "L-BFGS closure 失敗後にパラメータが fit 呼び出し前の snapshot \
+             から変化している"
+        );
+
+        // (3) compiled 状態が維持される。
+        assert!(
+            model.is_compiled(),
+            "L-BFGS closure 失敗後も is_compiled() が true のまま維持される \
+             はず"
+        );
+
+        // (4) 同じモデルで再度 evaluate が呼べ、パラメータ復元により
+        // fit 呼び出し前と同じ損失が得られる（bit 完全一致は要求しない
+        // ——evaluate 自体は決定的だが余分な許容誤差を持ち込まないため
+        // 数値比較で十分）。
+        let eval_after = model
+            .evaluate(&x, &y, N)
+            .unwrap_or_else(|e| panic!("L-BFGS closure 失敗後の evaluate に失敗: {e}"));
+        assert_eq!(
+            eval_before, eval_after,
+            "パラメータが復元されているなら fit 前後で evaluate の損失は \
+             完全一致するはず"
+        );
+
+        // (4) 続けて正常な学習率で fit を再実行できる（compiled 状態が
+        // 壊れていないことの追加確認。`Lbfgs` 内部状態〈n_iter 等〉は
+        // 失敗時不変契約により初回呼び出し前のまま残っているため、
+        // 新しい outer step として正常に走る）。
+        model
+            .compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: 再 compile に失敗: {e}"));
+        let history = model
+            .fit(&x, &y, FitConfig::new(1, N))
+            .unwrap_or_else(|e| panic!("再 compile 後の fit に失敗: {e}"));
+        assert_eq!(history.loss.len(), 1);
+        assert!(history.loss[0].is_finite());
     }
 }
