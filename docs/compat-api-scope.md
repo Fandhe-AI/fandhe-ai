@@ -1188,7 +1188,20 @@ lib.rs::FitWeightingHoldDoctestGuard`（正のプローブ doctest）＋
 `bool`）。実装記録は `docs/device-resident-update-design.md` 追補・
 `crates/autodiff/src/optim/device_store/amp.rs` モジュール doc を参照。
 
-## 6. 出典一覧
+**#2201（参照モデル定義 API。`Mlp`／`LeNet`）は経路 2 未適用のまま
+承認待ちで保留した。** イシュー本文は `Mlp`／`LeNet` 型を facade から
+`pub use` する公開面拡張を前提としているが、#2201・親 #2190 のいずれにも
+所有者の明示承認コメントが確認できなかったため、`crates/facade/src/` は
+一切変更していない。他の保留エントリ（#2198・#2177 等）と異なり、本
+issue では公開面へ到達しかねないコード自体を `crates/facade/src/` へ
+書いていない（`Mlp`／`LeNet` は `crates/facade/examples/models/`
+配下の**利用者コード**として実装し、`compat::Sequential::add_*` の
+組み合わせのみで構成した）ため、`HoldDoctestGuard` 方式の否定ガードは
+追加していない——ガードで守るべき「facade 側の保留対象コード」自体が
+存在しないため（ソース走査の否定ガードのみを追加する設計は #2212 の
+レビューで受け入れられなかった前例と同じ判断軸）。承認取得後の移行手順
+（`src/models/` への移設・`pub mod models`／`pub use`・本物の doctest
+への切り替え）は `docs/reference-models-decision.md` §5 を参照。
 
 | 出典 | 内容 |
 |------|------|
