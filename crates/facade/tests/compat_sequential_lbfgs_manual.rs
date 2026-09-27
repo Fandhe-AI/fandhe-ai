@@ -1,18 +1,25 @@
-//! イシュー #2198（親 #2172「LBFGS」・ルート #2131）の facade 公開保留
-//! （`crates/facade/src/lib.rs::LbfgsHoldDoctestGuard`）下での受け入れ
-//! 条件の部分的な裏付け: 公開 API の `compat::Sequential`（`bind`／
-//! `forward`／`trainable_parameters`／`trainable_grads`／
-//! `apply_parameters`）と、`fandhe_ai_autodiff::nn::optim::{Lbfgs,
-//! LbfgsConfig, LbfgsLineSearch}`（**内部 import**。facade
-//! 再エクスポートは未承認のため保留中）で組んだ手動 closure ループを
-//! 検証する。
+//! イシュー #2198（親 #2172「LBFGS」・ルート #2131）配下、公開 API の
+//! `compat::Sequential`（`bind`／`forward`／`trainable_parameters`／
+//! `trainable_grads`／`apply_parameters`）と `fandhe_ai_autodiff::nn::
+//! optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch}`（**内部 import**）で
+//! 組んだ手動 closure ループの検証。
 //!
-//! **本ファイルは `fandhe_ai_autodiff::nn::optim::Lbfgs` を直接 import
-//! する契約ファイル**であり（`compat_sequential_optim_ext.rs` と同型の
+//! **2026-09-27 所有者承認（#2172 コメント）による位置づけの変化**:
+//! 承認事項は `compat::Optimizer::Lbfgs(LbfgsConfig)` variant・
+//! `LbfgsConfig` の facade 再エクスポート・`compile()`/`fit()` 統合の
+//! 3 点に限られ、`Lbfgs`（optimizer 本体。closure 駆動）・
+//! `LbfgsLineSearch`（line search 方式選択）は引き続き承認範囲外で
+//! facade 未再エクスポートのまま（`crates/facade/src/lib.rs::
+//! LbfgsHoldDoctestGuard` が機械固定する）。このため**本ファイルは
+//! 引き続き `fandhe_ai_autodiff::nn::optim::Lbfgs` を直接 import する
+//! 契約ファイル**であり（`compat_sequential_optim_ext.rs` と同型の
 //! 位置づけ）、facade 再エクスポートのみを使う契約のテストファイルへ
-//! 混入させない。承認後（`docs/autodiff-lbfgs-decision.md` §8）に
-//! `compile()`／`fit()` 統合を実装する際は、facade 再エクスポート版の
-//! 別ファイル（`compat_sequential_fit_lbfgs.rs` 想定）を新設する。
+//! 混入させない。`compile()`／`fit()` 統合（`LbfgsConfig` のみを使う
+//! facade-only 契約）は別ファイル `compat_sequential_fit_lbfgs.rs` へ
+//! 実装した。両ファイルの関係: 本ファイルは strong Wolfe line search
+//! （facade からは選べない）を使う手動ループの受け入れ裏付けを、
+//! `compat_sequential_fit_lbfgs.rs` は facade `compile()`/`fit()` 経由の
+//! 固定ステップ（既定 `LbfgsLineSearch::None`）の学習曲線検証を担う。
 //!
 //! **数値判定の規律**: 収束判定は既存様式（最終 loss が初期 loss から
 //! 十分減少すること）を踏襲し、新規の許容誤差は設けない

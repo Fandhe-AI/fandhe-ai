@@ -34,10 +34,19 @@
 
 use crate::optim::{
     Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, GradScaler, GradScalerConfig,
-    Lamb, LambConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig,
+    Lamb, LambConfig, LbfgsConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig,
 };
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
+// イシュー #2172 コメント（2026-09-27 承認）: `Lbfgs`（optimizer 本体）
+// 自体は facade 再エクスポートの承認範囲外（`crate::optim::LbfgsConfig`
+// のみ承認済み。`optim.rs` 冒頭コメント「L-BFGS」節参照）のため、
+// `OptimizerState` 内部実装専用に内部クレートから直接 import する
+// （非 `pub use`。`tests/api_surface.rs::
+// facade_does_not_reexport_or_declare_lbfgs_items` が facade 側の
+// 再エクスポート・独自宣言のみを検査するため、この内部専用 `use` は
+// 検査対象外——`Lbfgs` は本ファイルの外へ一切公開しない）。
+use fandhe_ai_autodiff::nn::optim::Lbfgs;
 use fandhe_ai_tensor_core::Element;
 use fandhe_ai_tensor_core::ScalarDType;
 use fandhe_ai_tensor_core::data::{DataLoader, DataLoaderConfig, TensorDataset};
@@ -172,6 +181,39 @@ pub enum Optimizer {
     /// LAMB（layer-wise adaptive、イシュー #1744・親 #1610）。LR
     /// スケジューラ非対応（本 enum doc 参照）。
     Lamb(LambConfig),
+    /// L-BFGS（closure・strong Wolfe line search。イシュー #2197・親
+    /// #2172。2026-09-27 所有者承認〈#2172 コメント〉で本 variant・
+    /// `LbfgsConfig` の facade 再エクスポート・`compile()`/`fit()` 統合を
+    /// 実装した）。
+    ///
+    /// 他 6 者と異なり、`fandhe_ai_autodiff::nn::optim::Lbfgs` は
+    /// 「パラメータ列 → `(損失, 勾配列)`」を返す closure を内部で複数回
+    /// 評価する形（1 step あたり勾配評価 1 回を前提とする既存 optimizer
+    /// とは API 形状が異なる。`lbfgs.rs` モジュール doc 参照）。
+    /// `Sequential::run_fit`（内部専用。facade 公開 API ではない）は
+    /// この variant のみ既定バッチ処理（`forward → backward →
+    /// optimizer.step`）を迂回し、専用ヘルパー `lbfgs_batch_step` へ
+    /// 分岐する（本ファイル「L-BFGS（closure 駆動 optimizer）」節参照）。
+    ///
+    /// **非対応の組み合わせ（いずれも fail-closed に `InvalidArgument`）**:
+    /// [`Sequential::compile_with_amp`]（AMP。損失スケーリングが closure
+    /// 複数回評価と両立しないため）・`FitConfig` の `accumulate_steps >
+    /// 1`（勾配累積のウィンドウ処理が closure ベースの outer step と
+    /// 意味的に合わないため）・カスタム学習 step フック（フックは
+    /// `&Sequential`〈不変参照〉しか受け取らないため、trial パラメータを
+    /// 書き込む closure を内部で駆動できない）。`Callback::LrSchedule`
+    /// は [`Lbfgs::set_lr`] へ委譲できるため対応する。`OptimizerStateDict`
+    /// （#2304）・param groups（#2173）は facade 側がいずれも別途保留中
+    /// のため、本 variant 固有の追加対応は不要（保留解除時に横断対応
+    /// する）。
+    ///
+    /// **facade のみで使う場合の制約**: `fandhe_ai_autodiff::nn::optim::
+    /// {Lbfgs, LbfgsLineSearch}` 自体は承認範囲外のため facade 未
+    /// 再エクスポート——`LbfgsConfig::line_search` を明示的に
+    /// `LbfgsLineSearch::StrongWolfe` へ変更できず、既定の固定ステップ
+    /// （`LbfgsLineSearch::None` 相当）のみが選べる（`crate::optim`
+    /// モジュール doc「L-BFGS」節参照）。
+    Lbfgs(LbfgsConfig),
 }
 
 /// `fit()` の構成（Keras `fit(epochs=, batch_size=, shuffle=)` の
@@ -412,11 +454,16 @@ impl FitTarget for i32 {
 /// `compile()` で構築した optimizer 本体（[`crate::optim::Sgd`]／
 /// [`crate::optim::AdamW`]／[`crate::optim::Adam`]／
 /// [`crate::optim::RmsProp`]／[`crate::optim::Adagrad`]／
-/// [`crate::optim::Lamb`] のいずれか。イシュー #2170 で後 3 者を追加）。
-/// 6 者は `step` のシグネチャが異なる（`Sgd::step` は位置対応スライス
-/// 2 本・他 5 者の `step` はタプルスライス 1 本）ため、ここで
-/// [`Sequential::trainable_parameters`]／`grad_refs` から共通の
-/// `Result<Vec<Tensor<f32>>, AutodiffError>` へ橋渡しする。
+/// [`crate::optim::Lamb`]／`Lbfgs`〈内部クレート限定。イシュー #2172〉
+/// のいずれか。イシュー #2170 で `RmsProp`／`Adagrad`／`Lamb` を、
+/// イシュー #2172 で `Lbfgs` を追加）。先頭 6 者は `step` のシグネチャが
+/// 異なる（`Sgd::step` は位置対応スライス 2 本・他 5 者の `step` は
+/// タプルスライス 1 本）ため、ここで [`Sequential::trainable_parameters`]／
+/// `grad_refs` から共通の `Result<Vec<Tensor<f32>>, AutodiffError>` へ
+/// 橋渡しする。`Lbfgs` はさらに異なり、`step`（本 impl）経由では更新
+/// できず closure 駆動の `lbfgs_batch_step`（本ファイル下部）のみが
+/// 呼べる——[`Sequential::run_fit`] がバッチ処理の入口で分岐するため
+/// （本モジュール冒頭 doc 参照）。
 enum OptimizerState {
     Sgd(Sgd),
     AdamW(AdamW),
@@ -424,14 +471,16 @@ enum OptimizerState {
     RmsProp(RmsProp),
     Adagrad(Adagrad),
     Lamb(Lamb),
+    Lbfgs(Lbfgs),
 }
 
 impl std::fmt::Debug for OptimizerState {
-    // `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb` は `Debug` を実装
-    // していない（内部のモーメント・累積バッファを丸ごと出力する
-    // `Debug` 導出をあえて設けていない設計。`nn::optim::{adamw, adam,
-    // rmsprop, adagrad, lamb}` 参照）ため、variant 名のみを出す
-    // 非網羅的な `Debug` を手書きする（`derive` 不可）。
+    // `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Lbfgs` は `Debug` を
+    // 実装していない（内部のモーメント・累積バッファ・L-BFGS 履歴を
+    // 丸ごと出力する `Debug` 導出をあえて設けていない設計。
+    // `nn::optim::{adamw, adam, rmsprop, adagrad, lamb, lbfgs}` 参照）
+    // ため、variant 名のみを出す非網羅的な `Debug` を手書きする
+    // （`derive` 不可）。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OptimizerState::Sgd(sgd) => f.debug_tuple("Sgd").field(sgd).finish(),
@@ -440,6 +489,7 @@ impl std::fmt::Debug for OptimizerState {
             OptimizerState::RmsProp(_) => f.debug_tuple("RmsProp").finish(),
             OptimizerState::Adagrad(_) => f.debug_tuple("Adagrad").finish(),
             OptimizerState::Lamb(_) => f.debug_tuple("Lamb").finish(),
+            OptimizerState::Lbfgs(_) => f.debug_tuple("Lbfgs").finish(),
         }
     }
 }
@@ -453,12 +503,14 @@ impl OptimizerState {
             Optimizer::RmsProp(config) => Ok(OptimizerState::RmsProp(RmsProp::new(config)?)),
             Optimizer::Adagrad(config) => Ok(OptimizerState::Adagrad(Adagrad::new(config)?)),
             Optimizer::Lamb(config) => Ok(OptimizerState::Lamb(Lamb::new(config)?)),
+            Optimizer::Lbfgs(config) => Ok(OptimizerState::Lbfgs(Lbfgs::new(config)?)),
         }
     }
 
     /// 現在の学習率（LR scheduler 連携用。イシュー #1763）。`RmsProp`／
     /// `Adagrad`／`Lamb` は `set_lr` を持たないが `lr()`（`history.lr`
-    /// 記録用）は `config().lr` で常に取得できる。
+    /// 記録用）は `config().lr` で常に取得できる。`Lbfgs` も
+    /// `config().lr` で取得できる（`Lbfgs::set_lr` あり）。
     fn lr(&self) -> f32 {
         match self {
             OptimizerState::Sgd(sgd) => sgd.config().lr,
@@ -467,6 +519,7 @@ impl OptimizerState {
             OptimizerState::RmsProp(rmsprop) => rmsprop.config().lr,
             OptimizerState::Adagrad(adagrad) => adagrad.config().lr,
             OptimizerState::Lamb(lamb) => lamb.config().lr,
+            OptimizerState::Lbfgs(lbfgs) => lbfgs.config().lr,
         }
     }
 
@@ -474,6 +527,8 @@ impl OptimizerState {
     /// イシュー #1763。`Sgd`／`AdamW`／`Adam::set_lr` doc の「PyTorch の
     /// `param_group["lr"]` 書き換えと同じ意味論」節を参照——momentum
     /// バッファ／moment 推定値／`step_count` は一切リセットしない）。
+    /// `Lbfgs::set_lr`（イシュー #2172）も同じ意味論（`n_iter`／履歴／
+    /// `d`／`t` 等は不変）。
     ///
     /// **`RmsProp`／`Adagrad`／`Lamb`（イシュー #2170）**: いずれも
     /// `set_lr` を持たない値型のため常に `InvalidArgument` を返す。
@@ -487,6 +542,7 @@ impl OptimizerState {
             OptimizerState::Sgd(sgd) => sgd.set_lr(new_lr),
             OptimizerState::AdamW(adamw) => adamw.set_lr(new_lr),
             OptimizerState::Adam(adam) => adam.set_lr(new_lr),
+            OptimizerState::Lbfgs(lbfgs) => lbfgs.set_lr(new_lr),
             OptimizerState::RmsProp(_) | OptimizerState::Adagrad(_) | OptimizerState::Lamb(_) => {
                 Err(AutodiffError::InvalidArgument(
                     "OptimizerState::set_lr: RmsProp／Adagrad／Lamb は set_lr を \
@@ -505,6 +561,14 @@ impl OptimizerState {
     /// `&[(&Tensor, &Tensor)]` への zip 変換自体が短い側で黙って
     /// 切り詰められてしまう（fail-closed 違反）のを防ぐため、ここで
     /// 明示的に事前検査する。
+    ///
+    /// **`Lbfgs`（イシュー #2172）は本メソッド経由では更新できない**
+    /// （closure 駆動の `try_step_closure` のみが更新経路のため、
+    /// `(param, grad)` の 1 回評価を前提とする本メソッドのシグネチャに
+    /// 収まらない）。[`Sequential::run_fit`] は `OptimizerState::Lbfgs`
+    /// を検出した時点でバッチ処理そのものを `lbfgs_batch_step` へ分岐
+    /// させ、本メソッドを一切呼ばないため、この arm は通常到達しない
+    /// 防御的フォールバック（fail-closed。黙って no-op にしない）。
     fn step(
         &mut self,
         params: &[&Tensor<f32>],
@@ -545,6 +609,13 @@ impl OptimizerState {
                     params.iter().copied().zip(grads.iter().copied()).collect();
                 lamb.step(&pairs)
             }
+            OptimizerState::Lbfgs(_) => Err(AutodiffError::InvalidArgument(
+                "OptimizerState::step: Lbfgs は closure 駆動の \
+                 try_step_closure のみで更新するため、この汎用 step 経由の \
+                 呼び出しには非対応（Sequential::run_fit は Lbfgs 専用の \
+                 lbfgs_batch_step 経路へ分岐する）"
+                    .to_string(),
+            )),
         }
     }
 
@@ -552,6 +623,7 @@ impl OptimizerState {
     /// `Adagrad`／`Lamb`。イシュー #2170）かどうか（`callbacks` に
     /// [`super::callbacks::Callback::LrSchedule`] が含まれる場合の
     /// fail-closed 拒否判定に使う。`OptimizerState::set_lr` doc 参照）。
+    /// `Lbfgs`（イシュー #2172）は `set_lr` を持つため対応（`true`）。
     fn supports_lr_schedule(&self) -> bool {
         !matches!(
             self,
@@ -672,6 +744,82 @@ fn accumulate_grads_into(
     Ok(())
 }
 
+/// L-BFGS（イシュー #2172・親 #2131。2026-09-27 所有者承認）: 1 バッチ
+/// あたりの outer step を 1 回実行する（[`Sequential::run_fit`] の
+/// `OptimizerState::Lbfgs` 分岐から呼ばれる）。
+///
+/// 手順（`docs/autodiff-lbfgs-decision.md` §9・`crates/facade/tests/
+/// compat_sequential_lbfgs_manual.rs::lbfgs_step_with_closure` と同じ
+/// fail-closed 復元契約）:
+///
+/// 1. [`Sequential::trainable_parameters`] を snapshot として保持する。
+/// 2. `lbfgs.try_step_closure` へ snapshot と closure を渡す。closure は
+///    呼ばれるたびに `model.apply_parameters(trial)`（trial パラメータの
+///    書き込み）→ `bind` → `forward_with_precision`（AMP 非対応のため
+///    低精度 dtype は常に `None`）→ `T::loss_for` → `tape.backward` →
+///    `trainable_grads` の owned clone、を行い `(損失, 勾配列)` を返す
+///    （既存の非 L-BFGS 経路と同じ演算列。`nn::Dropout`／`BatchNorm` の
+///    RNG・running stats は closure 評価のたびに更新される——PyTorch と
+///    同じ意味論であり拒否しない。`compat::training::Optimizer::Lbfgs`
+///    doc「Dropout／BatchNorm」相当の注記）。
+/// 3. `Ok(updated)`: `model.apply_parameters(updated)` を行い、
+///    `lbfgs.last_loss()`（その step の**初回評価**損失。PyTorch
+///    `orig_loss` 相当）を返す。
+/// 4. `Err(e)`: closure が既に trial パラメータを書き込んでいる可能性が
+///    あるため、必ず `model.apply_parameters(snapshot)` で復元してから
+///    `e` を返す（trainable params のみ復元——running stats は他
+///    optimizer の失敗経路と同じく復元しない）。
+fn lbfgs_batch_step<T: FitTarget>(
+    model: &mut Sequential,
+    lbfgs: &mut Lbfgs,
+    loss: Loss,
+    x_batch: &Tensor<f32>,
+    y_batch: &Tensor<T>,
+    method: &str,
+) -> Result<f32, AutodiffError> {
+    let snapshot: Vec<Tensor<f32>> = model.trainable_parameters().into_iter().cloned().collect();
+
+    let result = lbfgs.try_step_closure(&snapshot, |trial| {
+        model.apply_parameters(trial.to_vec())?;
+        let tape = crate::tape();
+        let bound = model.bind(&tape);
+        let x_var = tape.var(x_batch);
+        let pred = bound.forward_with_precision(&tape, &x_var, None)?;
+        let loss_var = T::loss_for(loss, &tape, &pred, y_batch)?;
+        let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: loss の shape が [] ではない\
+                 （loss 演算の契約違反）"
+            ))
+        })?;
+        let grads = tape.backward(&loss_var)?;
+        let grad_refs = bound.trainable_grads(&grads)?;
+        let grads_owned: Vec<Tensor<f32>> = grad_refs.into_iter().cloned().collect();
+        Ok((loss_scalar, grads_owned))
+    });
+
+    match result {
+        Ok(updated) => {
+            model.apply_parameters(updated)?;
+            lbfgs.last_loss().ok_or_else(|| {
+                AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: Lbfgs::try_step_closure 成功後に \
+                     last_loss が None（内部不変条件違反）"
+                ))
+            })
+        }
+        Err(err) => {
+            // closure が既に試行パラメータを書き込んでいる可能性が
+            // あるため、元のエラーを返す前に snapshot へ復元する
+            // （fail-closed。復元自体が失敗した場合は復元エラーを
+            // 優先して返す——`self.compiled` 書き戻し等、他の復元処理と
+            // 同じ「復元不能は隠さず表に出す」方針）。
+            model.apply_parameters(snapshot)?;
+            Err(err)
+        }
+    }
+}
+
 impl Sequential {
     /// optimizer／loss を設定する（Keras `model.compile(optimizer, loss)`
     /// 相当）。ハイパーパラメータ検証（`lr < 0.0` 等）は各
@@ -736,6 +884,26 @@ impl Sequential {
         loss: Loss,
         amp: AmpConfig,
     ) -> Result<(), AutodiffError> {
+        // イシュー #2172（L-BFGS）: AMP（損失スケーリング・非有限検出）は
+        // closure 駆動の `Lbfgs::try_step_closure`（1 outer step 内で
+        // forward／backward を複数回やり直す）と両立しない
+        // （`GradScaler` は「1 step = 1 回の scale_loss→backward→unscale」
+        // を前提とするが、L-BFGS の 1 outer step は複数回評価するため
+        // scale／unscale をどの評価に適用するかが定義できない。PyTorch の
+        // `GradScaler` も closure 型 `LBFGS` を公式に非対応としている）。
+        // `OptimizerState::new`／`GradScaler::new` を呼ぶ前に拒否し、
+        // 失敗時 `self.compiled` を変更しない（construct-before-assign。
+        // `Self::compile_with_amp` doc 冒頭の契約と同じ）。
+        if matches!(optimizer, Optimizer::Lbfgs(_)) {
+            return Err(AutodiffError::InvalidArgument(
+                "Sequential::compile_with_amp: Optimizer::Lbfgs は AMP \
+                 （損失スケーリング）と併用できない（イシュー #2172。\
+                 closure 駆動の outer step 内で forward／backward を \
+                 複数回評価するため scale／unscale の適用箇所が定義でき \
+                 ない）"
+                    .to_string(),
+            ));
+        }
         let optimizer_state = OptimizerState::new(optimizer)?;
         let scaler = GradScaler::new(amp.grad_scaler)?;
         self.compiled = Some(Compiled {
@@ -1043,6 +1211,33 @@ impl Sequential {
                  （イシュー #2184）"
             )));
         }
+        // (1.7) L-BFGS（イシュー #2172）の組み合わせ検査。いずれも
+        // fail-closed（`compat::training::Optimizer::Lbfgs` doc「非対応の
+        // 組み合わせ」節参照）:
+        // - `accumulate_steps > 1`: L-BFGS の 1 outer step は closure を
+        //   複数回評価して 1 回のパラメータ更新を行う独自のウィンドウ
+        //   処理を内包しており、マイクロバッチ勾配の逐次加算という
+        //   `accumulate_steps` の意味論とかみ合わない。
+        // - カスタム学習 step フック: フックのシグネチャは `&Sequential`
+        //   （不変参照）しかモデルへ渡さないため、trial パラメータを
+        //   都度書き込む L-BFGS の closure（`model.apply_parameters`
+        //   に `&mut Sequential` を要求する）をフック内から駆動できない。
+        if config.accumulate_steps > 1 && matches!(compiled.optimizer, OptimizerState::Lbfgs(_)) {
+            self.compiled = Some(compiled);
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: accumulate_steps > 1 は \
+                 Optimizer::Lbfgs と併用できない（イシュー #2172）"
+            )));
+        }
+        if custom_step.is_some() && matches!(compiled.optimizer, OptimizerState::Lbfgs(_)) {
+            self.compiled = Some(compiled);
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: カスタム学習 step フックは \
+                 Optimizer::Lbfgs と併用できない（イシュー #2172。フックは \
+                 &Sequential〈不変参照〉しか受け取らず closure 駆動の \
+                 trial パラメータ書き込みを実行できない）"
+            )));
+        }
         if validation.is_none()
             && let Some(offending) = callbacks.iter().find(|cb| cb.requires_validation())
         {
@@ -1322,6 +1517,36 @@ impl Sequential {
                         weighted_sum += loss_scalar as f64 * n_batch as f64;
                         count += n_batch;
                         updated_from_hook
+                    } else if let OptimizerState::Lbfgs(lbfgs) = &mut compiled.optimizer {
+                        // L-BFGS（イシュー #2172）: `lbfgs_batch_step` が
+                        // snapshot 取得・closure 駆動の outer step・
+                        // 成功時の `apply_parameters`／失敗時の snapshot
+                        // 復元までを一元的に担う（`compat::training::
+                        // Optimizer::Lbfgs` doc 参照）。AMP・勾配累積との
+                        // 併用は引数検査で fail-closed 拒否済みのため、
+                        // この分岐で `compiled.amp`／`micro`／`acc` へ
+                        // 触れることはない（`compiled.amp` は
+                        // `compile_with_amp` が `Optimizer::Lbfgs` を拒否
+                        // するため常に `None`）。
+                        let loss_scalar = match lbfgs_batch_step(
+                            self,
+                            lbfgs,
+                            compiled.loss,
+                            &x_batch,
+                            &y_batch,
+                            method,
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        };
+                        weighted_sum += loss_scalar as f64 * n_batch as f64;
+                        count += n_batch;
+                        // パラメータは `lbfgs_batch_step` 内で既に
+                        // `apply_parameters` 済みのため、本ループ末尾の
+                        // 共通 `apply_parameters` 呼び出し（`updated` が
+                        // `Some` の場合のみ実行）を起動しないよう `None`
+                        // を返す。
+                        None
                     } else {
                         let tape = crate::tape();
                         let bound = self.bind(&tape);
@@ -2134,6 +2359,33 @@ mod accumulate_tests {
             "エラー後も compiled 状態が維持されるはず"
         );
     }
+
+    // =================================================================
+    // T6（L-BFGS 併用拒否。イシュー #2172）: accumulate_steps > 1 は
+    // Optimizer::Lbfgs とも併用できない（`FitConfig::
+    // with_accumulate_steps_for_test` が `#[cfg(test)]` 限定のため、
+    // 外部統合テストクレート `crates/facade/tests/
+    // compat_sequential_fit_lbfgs.rs` ではなくここに置く。上記
+    // `accumulate_steps_gt_one_rejected_with_amp` と同型）。
+    // =================================================================
+    #[test]
+    fn accumulate_steps_gt_one_rejected_with_lbfgs() {
+        let (x, y) = gen_regression_data(0x1BF65, 4);
+        let mut model = build_model();
+        model
+            .compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+
+        let config = FitConfig::new(1, 2).with_accumulate_steps_for_test(2);
+        let err = model
+            .fit(&x, &y, config)
+            .expect_err("accumulate_steps > 1 と Optimizer::Lbfgs の併用は Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(
+            model.is_compiled(),
+            "エラー後も compiled 状態が維持されるはず"
+        );
+    }
 }
 
 /// カスタム学習 step フック（イシュー #2184・親 #2131）の単体テスト。
@@ -2643,6 +2895,46 @@ mod train_step_tests {
         );
     }
 
+    /// T5c（イシュー #2172）: カスタム学習 step フックは
+    /// `Optimizer::Lbfgs` とも併用できない（fail-closed。フックは
+    /// `&Sequential`〈不変参照〉しか受け取らず、trial パラメータを
+    /// 書き込む L-BFGS closure をフック内から駆動できないため）。
+    #[test]
+    fn custom_step_rejected_with_lbfgs() {
+        const N: usize = 4;
+        const BATCH: usize = 2;
+        let (x, y) = gen_regression_data(0x7570_1CCC, N);
+
+        let mut model = build_model();
+        model
+            .compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+        let before: Vec<Tensor<f32>> = model.trainable_parameters().into_iter().cloned().collect();
+
+        let mut hook = default_step_hook;
+        let err = model
+            .fit_custom_step_for_test(
+                &x,
+                &y,
+                FitConfig::new(1, BATCH),
+                None,
+                &mut [],
+                &[],
+                &mut hook,
+            )
+            .expect_err("カスタム学習 step フックと Optimizer::Lbfgs の併用は Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(
+            model.is_compiled(),
+            "エラー後も compiled 状態が維持されるはず"
+        );
+        let before_refs: Vec<&Tensor<f32>> = before.iter().collect();
+        assert!(
+            params_bit_exact(&before_refs, &model.trainable_parameters()),
+            "拒否されたはずのフックでパラメータが変化してしまった"
+        );
+    }
+
     /// T6: validation・callbacks（`EarlyStopping`）併用時も
     /// `val_loss` が埋まり、callbacks が動く（学習側の演算列はフックが
     /// 決めるが、validation フェーズは既存の `run_evaluate` 経路の
@@ -2729,5 +3021,200 @@ mod train_step_tests {
             )
             .expect_err("shape の違うパラメータ更新は Err のはず");
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+}
+
+/// `Sequential::run_fit` の `OptimizerState::Lbfgs` 分岐（`lbfgs_batch_step`）
+/// の失敗時復元契約を固定する単体テスト（codex-review 指摘・PR #2319:
+/// closure を 1 回以上評価した後に失敗する経路の復元・`compiled` 状態
+/// 維持・再度 fit/evaluate 可能であることが未検証だった）。
+///
+/// `lbfgs_batch_step` は crate 内部専用の非公開関数（`pub` にできない
+/// 契約はない——単に facade 公開面に含めない設計。`compat::training::
+/// Optimizer::Lbfgs` doc 参照）のため、外部統合テストクレート
+/// （`crates/facade/tests/*`）からは到達できず、本ファイル内の
+/// `#[cfg(test)]` から `Sequential::fit`（公開 API）経由で間接的に
+/// 検証する。
+#[cfg(test)]
+mod lbfgs_fit_failure_tests {
+    use super::*;
+
+    const D_IN: usize = 3;
+    const D_HIDDEN: usize = 4;
+    const D_OUT: usize = 2;
+    const N: usize = 4;
+    const SEED_L1: u64 = 0x1BF6_1111;
+    const SEED_L2: u64 = 0x1BF6_2222;
+
+    fn build_model() -> Sequential {
+        Sequential::new()
+            .add_linear(D_IN, D_HIDDEN, SEED_L1)
+            .unwrap_or_else(|e| panic!("test fixture: 層 1 の構築に失敗: {e}"))
+            .add_relu()
+            .add_linear(D_HIDDEN, D_OUT, SEED_L2)
+            .unwrap_or_else(|e| panic!("test fixture: 層 2 の構築に失敗: {e}"))
+    }
+
+    /// [`accumulate_tests::deterministic_fill`] と同型の局所実装
+    /// （splitmix64。値域 `(-0.5, 0.5)`）。
+    fn deterministic_fill(seed: u64, n: usize) -> Vec<f32> {
+        let mut state = seed;
+        (0..n)
+            .map(|_| {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                ((z >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
+            })
+            .collect()
+    }
+
+    fn gen_regression_data(seed: u64) -> (Tensor<f32>, Tensor<f32>) {
+        let x = deterministic_fill(seed, N * D_IN);
+        let y = deterministic_fill(seed ^ 0x5555_5555_5555_5555, N * D_OUT);
+        (
+            Tensor::new(x, &[N, D_IN])
+                .unwrap_or_else(|e| panic!("test fixture: x の shape 構築に失敗: {e}")),
+            Tensor::new(y, &[N, D_OUT])
+                .unwrap_or_else(|e| panic!("test fixture: y の shape 構築に失敗: {e}")),
+        )
+    }
+
+    fn params_bit_exact(a: &[&Tensor<f32>], b: &[&Tensor<f32>]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        a.iter().zip(b.iter()).all(|(x, y)| {
+            let xd = x.contiguous();
+            let yd = y.contiguous();
+            let xs = xd.as_slice().expect("test fixture: contiguous 化済み");
+            let ys = yd.as_slice().expect("test fixture: contiguous 化済み");
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+        })
+    }
+
+    /// `docs/autodiff-lbfgs-decision.md` §8「`run_fit` のバッチ処理」節が
+    /// 予定する復元契約: L-BFGS の 1 outer step 内で closure を 2 回以上
+    /// 評価した後（＝ 1 回目の評価は成功し、内部反復の固定ステップ更新後
+    /// の 2 回目以降の評価で失敗する）に `Lbfgs::try_step_closure` が
+    /// `Err` を返した場合、`lbfgs_batch_step` は
+    /// （1）`fit` 呼び出しが `Err` を返す・
+    /// （2）`Sequential::trainable_parameters()` が `fit` 呼び出し前
+    ///    （この step 開始前と同じ。1 epoch・フルバッチのため両者は
+    ///    一致する）と bit 完全一致で復元される・
+    /// （3）`Sequential::is_compiled()` が維持される・
+    /// （4）同じモデルで再度 `fit`／`evaluate` が呼び出し可能である
+    /// ことを満たす。
+    ///
+    /// **決定的な失敗誘発の仕組み**: `LbfgsConfig::line_search`
+    /// （既定 `LbfgsLineSearch::None`。固定ステップ）でも、固定ステップの
+    /// 反復は「`x += t·d` 更新直後の反復末尾で closure を再評価し次反復の
+    /// `loss`／`flat_grad` を得る」契約（`lbfgs.rs` モジュール doc）を
+    /// 持つため `max_iter >= 2` で closure が複数回呼ばれる。極端に大きい
+    /// `lr`（`1e30`）を与えると、1 回目の評価（元のパラメータ・有限）で
+    /// 得た勾配方向へ 1 回目のステップを踏んだ時点でパラメータが桁違いに
+    /// 巨大化する（それ自体はまだ有限）。この巨大パラメータで forward
+    /// した 2 回目の closure 評価は、MSE loss の二乗項が `f32::MAX`
+    /// （約 3.4e38）を超えて `inf` になる（`(1e30)^2 = 1e60`）ため
+    /// 非有限となり、`Lbfgs` 内部の closure 戻り値検証（`lbfgs.rs`
+    /// モジュール doc「closure 戻り値の検証」節）が `InvalidArgument` を
+    /// 返す。パラメータ自体（`x += t·d` 直後の値）は有限のままのため、
+    /// `Lbfgs::try_step_closure` はこの巨大パラメータで closure を実際に
+    /// 呼び出す（`lbfgs_batch_step` の closure が
+    /// `model.apply_parameters(trial)` を実行してから forward する）ため、
+    /// 「trial 書き込み後の失敗」という復元経路を確実に踏む。
+    #[test]
+    fn lbfgs_fit_restores_params_and_keeps_compiled_after_multi_eval_failure() {
+        let (x, y) = gen_regression_data(0x1BF6_D474);
+        let mut model = build_model();
+        model
+            .compile(
+                Optimizer::Lbfgs(LbfgsConfig {
+                    lr: 1e30,
+                    max_iter: 2,
+                    ..LbfgsConfig::default()
+                }),
+                Loss::Mse,
+            )
+            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+
+        let snapshot_before: Vec<Tensor<f32>> =
+            model.trainable_parameters().into_iter().cloned().collect();
+        let eval_before = model
+            .evaluate(&x, &y, N)
+            .unwrap_or_else(|e| panic!("test fixture: 事前 evaluate に失敗: {e}"));
+
+        let result = model.fit(&x, &y, FitConfig::new(1, N));
+        let err = result.expect_err(
+            "極端に大きい lr による非有限 loss は Lbfgs::try_step_closure を \
+             Err にするはず（テスト前提が崩れている場合はここで失敗する）",
+        );
+        assert!(
+            matches!(err, AutodiffError::InvalidArgument(_)),
+            "非有限 loss の検出は InvalidArgument のはず: {err:?}"
+        );
+        // テスト前提の固定: 失敗が 1 回目の closure 評価（元パラメータ・
+        // 有限）ではなく、固定ステップ更新後の 2 回目以降の評価
+        // （非有限 loss）で起きていることをエラーメッセージで確認する
+        // （`Lbfgs::try_step_closure` の非有限検出メッセージは
+        // `lbfgs.rs` 側で "closure returned non-finite loss" を含む）。
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-finite loss"),
+            "想定した失敗経路（2 回目以降の closure 評価での非有限 loss \
+             検出）ではない可能性がある: {msg}"
+        );
+
+        // (2) パラメータは fit 呼び出し前と bit 完全一致で復元される
+        // （trial 書き込み〈`model.apply_parameters(trial)`〉が発生した
+        // 後の失敗でも、`lbfgs_batch_step` の Err 経路が
+        // `model.apply_parameters(snapshot)` で元へ戻すため）。
+        let snapshot_after = model.trainable_parameters();
+        assert_eq!(snapshot_before.len(), snapshot_after.len());
+        let before_refs: Vec<&Tensor<f32>> = snapshot_before.iter().collect();
+        assert!(
+            params_bit_exact(&before_refs, &snapshot_after),
+            "L-BFGS closure 失敗後にパラメータが fit 呼び出し前の snapshot \
+             から変化している"
+        );
+
+        // (3) compiled 状態が維持される。
+        assert!(
+            model.is_compiled(),
+            "L-BFGS closure 失敗後も is_compiled() が true のまま維持される \
+             はず"
+        );
+
+        // (4) 同じモデルで再度 evaluate が呼べ、パラメータ復元により
+        // fit 呼び出し前と同じ損失が得られる（bit 完全一致は要求しない
+        // ——evaluate 自体は決定的だが余分な許容誤差を持ち込まないため
+        // 数値比較で十分）。
+        let eval_after = model
+            .evaluate(&x, &y, N)
+            .unwrap_or_else(|e| panic!("L-BFGS closure 失敗後の evaluate に失敗: {e}"));
+        assert_eq!(
+            eval_before, eval_after,
+            "パラメータが復元されているなら fit 前後で evaluate の損失は \
+             完全一致するはず"
+        );
+
+        // (4) 続けて正常な学習率で fit を再実行できる（compiled 状態が
+        // 壊れていないことの追加確認。`Lbfgs` 内部状態〈n_iter 等〉は
+        // 失敗時不変契約により初回呼び出し前のまま残っているため、
+        // 新しい outer step として正常に走る）。
+        model
+            .compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
+            .unwrap_or_else(|e| panic!("test fixture: 再 compile に失敗: {e}"));
+        let history = model
+            .fit(&x, &y, FitConfig::new(1, N))
+            .unwrap_or_else(|e| panic!("再 compile 後の fit に失敗: {e}"));
+        assert_eq!(history.loss.len(), 1);
+        assert!(history.loss[0].is_finite());
     }
 }
