@@ -49,8 +49,8 @@ use fandhe_ai_tensor_core::{InterpolateMode, ShapeError, Tensor, broadcast_shape
 use half::f16;
 
 use super::interp::{
-    InterpError, Value, attr_f32_typed, attr_i64_typed, attr_ints_typed, attr_string, autodiff_err,
-    check_attr_type, find_attr_unique, get_bool, get_f32, get_value, i64_vec_and_shape, input_name,
+    InterpError, Value, attr_f32_typed, attr_i64_typed, attr_string, autodiff_err, check_attr_type,
+    find_attr_unique, get_bool, get_f32, get_value, i64_vec_and_shape, input_name,
 };
 use super::proto::{NodeProto, attribute_type};
 use crate::ops::{OpError, normalize_axis};
@@ -115,14 +115,28 @@ fn check_expand_output_bytes<T>(node: &NodeProto, out_shape: &[usize]) -> Result
     check_materialize_bytes(node, "shape", numel, std::mem::size_of::<T>())
 }
 
-/// `ReduceMean` 専用の `axes`（INTS 型属性）読み取り。共通の
-/// [`attr_ints_typed`] は INTS 属性が存在しつつ要素が空の場合を
-/// 一律で拒否する（`Conv` 系属性では空リストが「省略」との無言
-/// fallback 抜け道になるため。`interp.rs::attr_ints_typed` doc
-/// 参照）が、ReduceMean-18 の `axes` は明示的な空リストが
-/// `noop_with_empty_axes` に従う有効な入力（恒等／全軸縮約）で
-/// あり、`attr_ints_typed` を再利用すると到達不能な分岐になって
-/// いた（codex-review P1・Cursor Bugbot 重複指摘。イシュー #2313）。
+/// 空の INTS 属性が合法な op（`ReduceMean`／`Pad`／`Resize`）専用の
+/// 共有読み取りヘルパ。共通の `attr_ints_typed` は INTS 属性が
+/// 存在しつつ要素が空の場合を一律で拒否する（`Conv` 系属性では
+/// 空リストが「省略」との無言 fallback 抜け道になるため。
+/// `interp.rs::attr_ints_typed` doc 参照）が、以下の op は明示的な
+/// 空リストが「省略」とは異なる有効な入力として扱われる（それぞれ
+/// 呼び出し元で長さ検証を別途行い、不正な長さは拒否する）:
+///
+/// - `ReduceMean-18` の `axes`: `noop_with_empty_axes` に従う恒等／
+///   全軸縮約（codex-review P1・Cursor Bugbot 重複指摘。イシュー
+///   #2313）
+/// - `Pad`（attr 形）の `pads`: rank 0（スカラー）入力では合法な
+///   長さが `2*rank == 0` になる。呼び出し元の `pads.len() != 2 *
+///   rank` 検査（不正な長さは既存どおり拒否）と対になって初めて
+///   安全（`attr_ints_typed` のままだと rank 0 の正当な Pad-2 ノード
+///   まで一律拒否してしまう。入力形〈第 2 入力〉は既に空 1-D
+///   `pads` を受理しており、attr 形との受理範囲の非対称だった。
+///   Cursor Bugbot 指摘。イシュー #2313）
+/// - `Resize`（opset 18+）の `axes`: 空リストは `scales`／`sizes` の
+///   長さ 0 と対になる恒等 resize（`scale_by_axis`／`size_by_axis`
+///   が既定値のまま残るため N/C 軸検査を含め安全）
+///
 /// 型検証（`AttributeType == INTS`）は共有しつつ空リストのみ許容
 /// する専用ヘルパとして分離する。
 fn attr_ints_typed_allow_empty<'a>(
@@ -566,9 +580,17 @@ pub(super) fn compute_pad(
     }
 
     let (pads_i64, value, axes): (Vec<i64>, f32, Option<Vec<i64>>) = if has_pads_attr {
-        // `find_attr_unique` で存在確認済みのため `attr_ints_typed` は
-        // 必ず `Some` を返す（`unwrap_or_default` は到達しない防御）。
-        let pads = attr_ints_typed(node, "pads")?.unwrap_or_default().to_vec();
+        // `find_attr_unique` で存在確認済みのため `Some` が必ず返る
+        // （`unwrap_or_default` は到達しない防御）。rank 0（スカラー）
+        // 入力では合法な `pads` 長が `2*rank == 0` になるため、空の
+        // INTS を一律拒否する `attr_ints_typed` ではなく
+        // [`attr_ints_typed_allow_empty`] を使う（入力形は既に空 1-D
+        // `pads` を受理しており非対称だった。Cursor Bugbot 指摘。
+        // イシュー #2313）。不正な長さは後続の `pads_i64.len() != 2 *
+        // rank` 検査で引き続き拒否される。
+        let pads = attr_ints_typed_allow_empty(node, "pads")?
+            .unwrap_or_default()
+            .to_vec();
         let v = attr_f32_typed(node, "value", 0.0)?;
         (pads, v, None)
     } else {
@@ -755,7 +777,11 @@ pub(super) fn compute_resize(
     // みなす（既存の固定 NCHW 前提と同じ）。`Pad` の `axes` 入力
     // （上記）と同じ fail-closed 方針（負値正規化・範囲外・重複拒否）を
     // 適用する（security.md A03・イシュー #2313 codex-review 指摘）。
-    let axes: Vec<usize> = match attr_ints_typed(node, "axes")? {
+    // 空の `axes`（0 個の軸を対象とする恒等 resize）は `scales`／
+    // `sizes` の長さ 0 と対になる合法な入力のため
+    // [`attr_ints_typed_allow_empty`] で読む（`attr_ints_typed` の
+    // 一律拒否は Pad と同種の非対称を生む。イシュー #2313）。
+    let axes: Vec<usize> = match attr_ints_typed_allow_empty(node, "axes")? {
         Some(raw) => {
             let mut seen_axes: HashSet<usize> = HashSet::with_capacity(raw.len());
             let mut normalized = Vec::with_capacity(raw.len());

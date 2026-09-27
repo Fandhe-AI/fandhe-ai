@@ -713,6 +713,91 @@ fn pad_rejects_unsupported_mode() {
     assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "mode"));
 }
 
+#[test]
+fn pad_attr_form_rank0_input_with_empty_pads_is_identity() {
+    // rank 0（スカラー）入力では合法な `pads` 長が `2*rank == 0` になる
+    // ため、空の INTS 属性を受理できなければならない（`attr_ints_typed`
+    // の一律拒否が正当な Pad-2 スカラーノードまで拒否していた不具合の
+    // 回帰テスト。Cursor Bugbot 指摘・イシュー #2313）。
+    let n = node_with_attrs(
+        "Pad",
+        "n",
+        vec!["x"],
+        vec!["y"],
+        vec![attr_ints_typed("pads", vec![])],
+    );
+    let g = single_node_graph(n, &["x"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([feed_f32("x", vec![7.0], &[])]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => {
+            assert_eq!(t.shape(), &[] as &[usize]);
+            assert_close(t.contiguous().as_slice().unwrap(), &[7.0], 1e-6);
+        }
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn pad_input_form_rank0_input_with_empty_pads_is_identity() {
+    // 入力形（第 2 入力）は既に空 1-D `pads`（shape `[0]`）を受理して
+    // いた。attr 形との受理範囲の非対称を解消したことの対称性確認。
+    let n = node("Pad", "n", vec!["x", "pads"], vec!["y"]);
+    let g = single_node_graph(n, &["x", "pads"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![7.0], &[]),
+        feed_i64("pads", vec![], &[0]),
+    ]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => {
+            assert_eq!(t.shape(), &[] as &[usize]);
+            assert_close(t.contiguous().as_slice().unwrap(), &[7.0], 1e-6);
+        }
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn pad_attr_form_rejects_non_empty_pads_on_rank0_input() {
+    // 空 `pads` の受理が `allow_empty` の穴（任意の長さの黙認）に
+    // ならないことを確認する: rank 0 では合法な長さは 0 のみで、
+    // `2*rank(0)` 以外の長さは引き続き拒否される。
+    let n = node_with_attrs(
+        "Pad",
+        "n",
+        vec!["x"],
+        vec!["y"],
+        vec![attr_ints_typed("pads", vec![1, 1])],
+    );
+    let g = single_node_graph(n, &["x"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([feed_f32("x", vec![7.0], &[])]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "pads"));
+}
+
+#[test]
+fn pad_attr_form_rejects_empty_pads_on_rank1_input() {
+    // rank 1 では合法な長さは `2*rank == 2` のみであり、空 `pads` は
+    // 引き続き拒否される（`allow_empty` は「空を無条件許容」ではなく
+    // 「長さ検証を後段に委ねる」だけであることの確認）。
+    let n = node_with_attrs(
+        "Pad",
+        "n",
+        vec!["x"],
+        vec!["y"],
+        vec![attr_ints_typed("pads", vec![])],
+    );
+    let g = single_node_graph(n, &["x"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([feed_f32("x", vec![1.0, 2.0], &[2])]);
+    let err = run(&g, feeds).unwrap_err();
+    assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "pads"));
+}
+
 // ================= Resize =================
 
 #[test]
@@ -1266,6 +1351,44 @@ fn resize_rejects_duplicate_axes() {
     ]);
     let err = run(&g, feeds).unwrap_err();
     assert!(matches!(err, InterpError::InvalidAttribute { attr, .. } if attr == "axes"));
+}
+
+#[test]
+fn resize_empty_axes_attr_with_empty_scales_is_identity() {
+    // 空の `axes`（0 個の軸を対象）は `scales` 長 0 と対になる恒等
+    // resize として受理されなければならない（`Pad` の rank-0 `pads` と
+    // 同じ「空リストが省略とは異なる合法な入力」ケース。イシュー
+    // #2313）。
+    let n = node_with_attrs(
+        "Resize",
+        "n",
+        vec!["x", "", "scales"],
+        vec!["y"],
+        vec![
+            attr_string_typed("mode", "nearest"),
+            attr_string_typed("coordinate_transformation_mode", "asymmetric"),
+            attr_string_typed("nearest_mode", "floor"),
+            attr_ints_typed("axes", vec![]),
+        ],
+    );
+    let g = single_node_graph(n, &["x", "scales"]);
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]),
+        feed_f32("scales", vec![], &[0]),
+    ]);
+    let result = run(&g, feeds).unwrap();
+    match &result["y"] {
+        Value::F32(t) => {
+            assert_eq!(t.shape(), &[1, 1, 2, 2]);
+            assert_close(
+                t.contiguous().as_slice().unwrap(),
+                &[1.0, 2.0, 3.0, 4.0],
+                1e-6,
+            );
+        }
+        other => panic!("Value::F32 を期待したが {other:?}"),
+    }
 }
 
 #[test]
