@@ -2115,6 +2115,20 @@ pub(crate) fn masked_fill(x: &Tensor<f32>, mask: &Tensor<f32>, value: f32) -> Te
 /// 書き込む——バックエンド間 bit 完全一致契約。`.claude/rules/
 /// coding-rust.md` 数値契約節参照）。
 ///
+/// **事前条件（唯一の呼び出し元が保証する。イシュー #2264）**:
+/// `out_shape` の総要素数は、唯一の呼び出し元 `grad::pad_with_fallback`
+/// が本関数の呼び出しより前に `crate::rearrange_ops::
+/// checked_index_alloc_len`（1 GiB 上限）で検査済みである
+/// （`pad_with_fallback` は `Var::pad`／`ZeroPad2d::forward_host` の
+/// どちらから呼ばれても検査を経由する唯一の確保前チェックポイント
+/// ——レビュー是正: 以前は `Var::pad` 側のみが検査しており
+/// `forward_host` が `pad_with_fallback` を直接呼ぶ経路で検査を
+/// 迂回できたため、検査を `pad_with_fallback` 自身へ移設した）。
+/// 本関数自身は失敗しない確保（`vec![value; out_numel]`）を行うため、
+/// 事前条件が破られると確保失敗が `Err` にならず abort しうる——
+/// 本関数を新しい呼び出し元から直接呼ぶ場合は、呼び出し元が確保前に
+/// 同じ検査を行うこと（`pad_with_fallback` 経由を推奨）。
+///
 /// レイアウト分解: 出力を全域 `value` で初期化した後、`input` の
 /// 各「行」（最終軸を除く多次元添字ごとの最内軸スライス）を
 /// `before` オフセット分だけ平行移動した出力位置へ `copy_from_slice`
@@ -2137,6 +2151,14 @@ pub(crate) fn pad(
     }
     let rank = out_shape.len();
     let out_numel: usize = out_shape.iter().product();
+    // 事前条件（本関数 doc）の開発時検出: 唯一の呼び出し元
+    // `grad::pad_with_fallback` が確保前に検査済みのはず（release
+    // では消える。本番経路の panic 禁止規約には抵触しない）。
+    debug_assert!(
+        crate::rearrange_ops::checked_index_alloc_len(out_numel).is_ok(),
+        "eval::pad: out_numel が確保前検査の上限を超えている（呼び出し元が \
+         checked_index_alloc_len を経由していない契約違反の疑い）"
+    );
     let mut out = vec![value; out_numel];
     let in_shape = input.shape().to_vec();
     if in_shape.contains(&0) {

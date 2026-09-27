@@ -1921,6 +1921,50 @@ fn pad_element_count_overflow_is_rejected() {
         AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
     ));
 }
+
+/// (e-3) エラー経路: 実用上限（1 GiB。`rearrange_ops::
+/// checked_index_alloc_len`）を超える巨大な pad 幅は、`usize`
+/// オーバーフローしていなくても確保前に `Err`（`ElementCountOverflow`）
+/// で拒否される（イシュー #2264）。空入力 `[1, 0]` の長さ 0 の軸
+/// （axis 1）へ `1usize << 40` を足すと出力は `[1, 2^40]`（2^40 要素
+/// = 4 TiB）となり非空になる——`pads = [(1 << 40, 0), (0, 0)]`（axis 0
+/// への pad）では出力の全体積が 0 のまま確保が起きないため、意図的に
+/// 長さ 0 の軸へ pad する形にしている（計画メモ「例示入力についての
+/// 注意」参照）。`Tape::len()` が呼び出し前後で変わらないこと
+/// （実体化・ノード追加より前に拒否されること）もあわせて確認する。
+#[test]
+fn pad_huge_width_on_empty_input_is_rejected_before_alloc() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::new(), &[1, 0]));
+    let len_before = tape.len();
+    let err = x.pad(&[(0, 0), (1usize << 40, 0)], 0.0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+    ));
+    assert_eq!(
+        tape.len(),
+        len_before,
+        "確保前に拒否されるため tape にノードは積まれない"
+    );
+}
+
+/// (e-4) 境界テスト: 実用上限ちょうど（1 GiB を実際に確保する）の
+/// 成功側は CI のメモリ負荷を避けるため追加せず、上限をわずかに
+/// 超える非空入力のケースで確保前拒否を確認する（イシュー #2264）。
+/// 入力 `[1]` に `pads = [(0, (1 << 28))]` を渡すと出力は
+/// `[(1 << 28) + 1]`（1 GiB + 4 バイト = `checked_index_alloc_len` の
+/// 上限をちょうど 4 バイト超える）要素になる。
+#[test]
+fn pad_just_over_practical_limit_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0], &[1]));
+    let err = x.pad(&[(0, 1usize << 28)], 0.0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+    ));
+}
 // --- one_hot（非微分演算。イシュー #1755） ---
 
 /// ①forward 解析値: index `[[0,2],[1,1]]`・`num_classes=3` →

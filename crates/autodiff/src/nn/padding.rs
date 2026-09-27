@@ -160,6 +160,32 @@ mod tests {
         assert!(layer.forward(&x5).is_err());
     }
 
+    /// エラー経路（イシュー #2264 レビュー是正）: `ZeroPad2d::
+    /// forward_host`（tape 不要の推論経路。`Var::pad` を経由せず
+    /// `pad_with_fallback` を直接呼ぶ）に巨大な pad 幅を渡しても、
+    /// `Var::pad` 経由の `pad_huge_width_on_empty_input_is_rejected_
+    /// before_alloc`（`tests/backward.rs`）と同じく確保前に
+    /// `Err`（`ElementCountOverflow`）で拒否される。`pad_with_fallback`
+    /// が呼び出し元を問わない確保前検査を持つことの直接確認
+    /// （`eval::pad` の失敗しない確保 `vec![value; out_numel]` へ
+    /// 到達させない）。長さ 0 の軸（rank 3 の `H` 軸）へ巨大な
+    /// `top`／`bottom` を足すことで、他の次元同士の積オーバーフロー
+    /// を避けつつ出力を非空にする（`backward.rs` の意図的な入力設計と
+    /// 同型）。
+    #[test]
+    fn forward_host_rejects_huge_padding_before_alloc() {
+        let host_ops = crate::test_support::test_ops();
+        let x = Tensor::new(Vec::new(), &[1, 0, 1]).unwrap();
+        // padding = [left, right, top, bottom]。rank 3 は末尾 2 軸
+        // （H, W）へ適用されるため、top=1<<40 が H 軸（長さ 0）へ乗る。
+        let layer = ZeroPad2d::new([0, 0, 1usize << 40, 0]);
+        let err = layer.forward_host(host_ops.as_ref(), &x).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+        ));
+    }
+
     #[test]
     fn forward_host_matches_forward() {
         let tape = Tape::new_with_ops(crate::test_support::test_ops());

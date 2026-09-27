@@ -3082,17 +3082,45 @@ impl<'t> Var<'t> {
     /// 検査順序: ①[`fandhe_ai_tensor_core::pad_out_shape`]（`pads.len()
     /// == rank`・各軸の `before`／`after` 加算オーバーフロー・
     /// 出力要素数積オーバーフローを検査し `out_shape` を確定。違反は
-    /// `AutodiffError::Shape`）→ ②`self` を層 1 で実体化（`RefCell`
-    /// 借用を閉じてから push。`Var::gather` と同じ「実体化してから
-    /// フォールバックへ渡す」方針）→ ③`pad_with_fallback`
-    /// （`ops.pad` → `Unsupported` のときのみホスト参照実装
-    /// `eval::pad` へフォールバック）→ ④戻り shape 検証
-    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`
-    /// （非融合・常実体化。`value` は forward 記録値へ焼き込み済みの
-    /// ため `Op::Pad` 自身は保持しない）。
+    /// `AutodiffError::Shape`）→ ①'確保前の実用上限検査（`out_shape`
+    /// の総要素数を `crate::rearrange_ops::checked_index_alloc_len`
+    /// へ渡す。`size_of::<i32>() == size_of::<f32>() == 4` のため
+    /// 添字ベクタ向けの 1 GiB 上限がそのまま `f32` 出力の確保前
+    /// バイト数検査として転用できる——`Var::diag` の 1-D→2-D 経路
+    /// 〈`matrix_ops::diag_1d_to_2d`〉と同じ線引き・イシュー
+    /// #2264。ここで拒否すれば ②以降の実体化・確保に進まないため、
+    /// `eval::pad`／`backend-cpu::constant_pad::pad` の確保
+    /// （後者は `try_reserve_exact` で二重に fail-closed だが、
+    /// ホスト参照実装 `eval::pad` は失敗しない確保のため本検査が
+    /// 早期防波堤——③`pad_with_fallback` 側でも同じ検査を再実行する
+    /// ため、ここでの拒否は「実体化前に早く落とす」最適化であり
+    /// 唯一の防波堤ではない。イシュー #2264 レビュー是正: `Var::pad`
+    /// を経由しない呼び出し元〈`ZeroPad2d::forward_host` 等〉のために
+    /// `pad_with_fallback` 自身が呼び出し元を問わない確保前検査を持つ）
+    /// を実際に起動する前に巨大な pad 幅を `Err` で拒否する）→
+    /// ②`self` を層 1 で実体化（`RefCell` 借用を閉じてから push。
+    /// `Var::gather` と同じ「実体化してからフォールバックへ渡す」
+    /// 方針）→ ③`pad_with_fallback`（`ops.pad` → `Unsupported` の
+    /// ときのみホスト参照実装 `eval::pad` へフォールバック。確保前
+    /// 上限検査もここで再実行する——唯一の確保前チェックポイント）
+    /// → ④戻り shape 検証（`.claude/rules/security.md` A08）→
+    /// ⑤`push_eager`（非融合・常実体化。`value` は forward 記録値へ
+    /// 焼き込み済みのため `Op::Pad` 自身は保持しない）。
     pub fn pad(&self, pads: &[(usize, usize)], value: f32) -> Result<Var<'t>, AutodiffError> {
         let in_shape = self.shape();
         let out_shape = pad_out_shape(&in_shape, pads).map_err(AutodiffError::Shape)?;
+
+        // `out_shape.iter().product()` ではなく `try_fold` の
+        // `checked_mul` 畳み込みで求める（`pad_out_shape` が既に
+        // 成功していれば途中の部分積が overflow しないことは
+        // 保証されているが、防御的に `iter().product()` の暗黙
+        // wrapping に依存しない。`diag_1d_to_2d` と同じ方針）。
+        let out_numel = out_shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(AutodiffError::Shape)?;
+        crate::rearrange_ops::checked_index_alloc_len(out_numel)?;
 
         let input_val = {
             let nodes = self.tape.nodes.borrow();
