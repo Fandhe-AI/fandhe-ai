@@ -302,6 +302,21 @@ cpu_norm_p_two_rejects_huge_broadcast_before_delegating`（`fandhe_ai::
 tape()`〈`CpuBackendOps`〉経由でも同じ検査が dispatch 前に効くことを
 確認する facade 経路の代表 1 件）。
 
+**統一契約に対する例外（2026-09-27 追記・イシュー #2288）**:
+`Var::var`／`Var::std` の入口ヘルパ `var_std_out_shape_checked` は、
+出力 shape を `f32` 換算ではなく `f64` 換算（`checked_bytes_for::
+<f64>`）で検査する。理由は `eval::var_f64_along`（`Var::std` は常に、
+`Var::var` は CUDA／Metal 等 `BackendOps::var` 未実装バックエンドの
+フォールバックで経由する）が `f64` の中間バッファ
+（`vec![0f64; outer * inner]`）を確保するためであり、`ensure_
+alloc_fits_f32` が前提とする「中間バッファはいずれも `f32`」という
+仮定が成り立たない。`f64` 換算の検査は同じ要素数に対する `f32` 換算
+の検査を包含する（`f64` は `f32` の 2 倍のバイト数を要求するため）。
+`backend-cpu::reduction::var` 自体は出力要素ごとのスタックローカル
+`f64` アキュムレータのみで `Vec<f64>` を確保しないため、backend-cpu
+側の確保前検査は従来どおり `f32` 換算の `checked_alloc_numel_f32` で
+足りる。
+
 ## §3 数値契約（まとめ）
 
 | 演算 | forward | backward |
@@ -358,6 +373,49 @@ tape()`〈`CpuBackendOps`〉経由でも同じ検査が dispatch 前に効くこ
   （`NaiveOps` 経由の eval フォールバック）、`crates/facade/tests/
   var_norm_backend_parity.rs::
   cpu_norm_l2_rejects_huge_broadcast_before_dispatch`（CPU tape 経由の
+  代表 1 件）。
+- `Var::var`／`Var::std`（`var.rs`）・`eval::var_f64_along`／
+  `var_along`／`std_along`・`backend-cpu::reduction::var` の確保前検査
+  欠落（#2287 の調査で見つかった同類型）:
+  **2026-09-27 是正済み（イシュー #2288）**。`Var::var`／`Var::std`
+  共通の入口ヘルパ `var_std_out_shape_checked` に確保前検査を追加し、
+  判定順序を「空縮約・自由度不足（`InvalidArgument`）→ 入力 shape の
+  `checked_bytes_for::<f32>` → 出力 shape の `checked_bytes_for::
+  <f64>`」の順に整理した（空縮約・自由度不足を確保前検査より先に
+  判定するのは `Var::norm` の是正〈上記〉と同じ理由: `out_shape` が
+  `broadcast_to` 由来で巨大でも、縮約対象軸自体が空／自由度不足なら
+  従来契約の `InvalidArgument` を優先する）。出力 shape を `f64` 換算
+  （`f32` 換算の検査を包含する）で検査するのは、`Var::norm` と異なり
+  `eval::var_f64_along` が `Vec<f64>` の中間バッファ（`vec![0f64;
+  outer * inner]`）を確保するためである（§2.6 末尾の追記参照）。
+  `dim=None` の縮約対象要素数 `n` も無検査の `shape.iter().product()`
+  から `checked_mul`（`try_fold`）へ変更し、`Tensor` の不変条件が
+  破れた場合の防御を強化した。あわせて `backend-cpu::reduction::var`
+  にも `checked_alloc_numel_f32`（`vector_norm` と同型）を追加し、
+  `BackendOps::var` を直接呼ぶ経路も多層防御で守る（backend-cpu 側の
+  `var` 自体は `f64` の中間バッファを `Vec` として確保しないため
+  `f32` 換算の検査のみで足りる）。`eval::var_f64_along`／`var_along`／
+  `std_along`（`grad::var_vjp`／`std_vjp` も同様）には「呼び出し元
+  （`Var::var`／`Var::std`）で検査済み」という事前条件 doc を追加し、
+  forward が拒否する shape は tape に push されないため backward にも
+  到達しないことを明記した。
+  回帰テストは `crates/autodiff/tests/var_norm.rs::
+  var_std_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
+  `var_std_full_reduce_rejects_huge_broadcast_input_without_panicking`／
+  `var_std_axis_reduce_empty_reduction_with_huge_broadcast_out_shape_is_invalid_argument`／
+  `var_std_insufficient_dof_with_huge_broadcast_shape_is_invalid_argument`
+  （`NaiveOps` 経由の eval フォールバック。判定順序の区別を含む）、
+  `crates/autodiff/src/var.rs` の `#[cfg(test)] mod
+  var_std_out_shape_checked_tests`（`f32` 換算では通るが `f64` 換算
+  では `isize::MAX` バイトを超える境界をヘルパ単体で直接検証。確保を
+  伴う統合テストにするとテストプロセスごと abort するため単体テスト
+  限定）、`backend-cpu::reduction::
+  var_axis_reduce_rejects_huge_broadcast_output_without_panicking`／
+  `var_full_reduce_rejects_huge_broadcast_input_without_panicking`／
+  `var_axis_reduce_empty_reduction_with_huge_broadcast_out_shape_is_empty_reduction`／
+  `var_insufficient_dof_with_huge_broadcast_shape_is_insufficient_degrees_of_freedom`
+  （backend-cpu 直接）、`crates/facade/tests/var_norm_backend_parity.rs::
+  cpu_var_std_reject_huge_broadcast_before_dispatch`（CPU tape 経由の
   代表 1 件）。
 
 ## §6 承認事項（未承認として列挙）

@@ -7121,6 +7121,17 @@ fn extremum_even_split_vjp(
 /// `(n − correction)` による除算はすべて `f64` のまま保持し、最後に
 /// 1 回だけ `f32` へ downcast する（縮約値を先に `f32` へ戻すと、
 /// 有限の `f32` 入力でも乗算結果が overflow しうるため）。
+///
+/// **事前条件（呼び出し元が満たす。イシュー #2288）**: 本関数は
+/// backward パスでのみ呼ばれ、`input`（forward の `x`）・`g`
+/// （forward の出力 `out_shape` と同じ shape を持つ上流勾配）は
+/// いずれも forward 側（`Var::var`）の `var_std_out_shape_checked`
+/// による確保前検証（`checked_bytes_for::<f32>`／`checked_bytes_for::
+/// <f64>`）を経て構築済みのテンソルであるため、本関数を新たに検査
+/// する必要はない（forward が拒否する shape は tape に push されない
+/// ため backward にも到達しない。`vector_norm_vjp` と同型の契約）。
+/// 確保するのは入力サイズ・出力サイズの `f32` バッファのみで、
+/// どちらも forward の検査に包含される。
 fn var_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
@@ -7187,6 +7198,11 @@ fn var_vjp(
 /// 挙動——`Var::sqrt` の `y == 0` 規約により `0.0 / 0.0 = NaN` を
 /// 返す——とは意図的に異なる（`Var::std` の doc「数値規約」参照。
 /// codex-review 指摘。PR #1826 レビュー是正）。
+///
+/// **事前条件（呼び出し元が満たす。イシュー #2288）**: [`var_vjp`]
+/// と同じ（forward 側 `Var::std` の `var_std_out_shape_checked` で
+/// 確保前検証済み。forward が拒否する shape は backward にも到達
+/// しない）。
 fn std_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,

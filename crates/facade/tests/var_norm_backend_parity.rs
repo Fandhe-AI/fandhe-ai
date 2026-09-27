@@ -231,6 +231,26 @@ fn cpu_norm_l2_rejects_huge_broadcast_before_dispatch() {
     ));
 }
 
+/// (i) CPU tape 上で `Var::var`／`Var::std` が、小さなストレージを
+/// 巨大な shape へ `broadcast_to` した view に対し、
+/// `CpuBackendOps::var` への委譲より前に確保前検査で拒否することを
+/// 確認する（イシュー #2288。(h) と同型）。
+#[test]
+fn cpu_var_std_reject_huge_broadcast_before_dispatch() {
+    let tape = tape_for(Device::Cpu).unwrap();
+    let base = tensor(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]);
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = tape.var(&huge);
+    assert!(matches!(
+        x.var(Some(1), 1),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+    assert!(matches!(
+        x.std(Some(1), 1),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+}
+
 /// テンソル同士の統一複合判定（`reduce_backend_parity.rs` と同じ方式。
 /// REQ-2 の唯一の実体である [`fandhe_ai_backend_cpu::assert_parity`]
 /// へ委譲する）。

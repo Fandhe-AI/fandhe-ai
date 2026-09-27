@@ -293,8 +293,8 @@ pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
 /// doc〉を踏襲する）。
 ///
 /// **動機**: `logsumexp`／`vector_norm_p`／`vector_norm`（イシュー
-/// #2287 で追加）は小さなストレージを巨大な shape へ broadcast した
-/// view を受け取りうる。`outer *
+/// #2287 で追加）・`var`（イシュー #2288 で追加）は小さなストレージ
+/// を巨大な shape へ broadcast した view を受け取りうる。`outer *
 /// inner`（軸指定側の出力要素数）や `a.numel()`（全縮約・非
 /// contiguous 側の入力要素数）は `usize` の積としては収まっても、
 /// `f32` 換算のバイト数が `isize::MAX` を超えることがあり、その
@@ -583,6 +583,20 @@ fn axis_reduce_vector_norm(a: &Tensor<f32>, axis: usize, kind: NormKind) -> Vec<
 /// は全要素数）が `0` の場合は [`ReduceError::EmptyReduction`]、
 /// `n <= correction` の場合は [`ReduceError::InsufficientDegreesOfFreedom`]
 /// を返す。
+///
+/// **確保前のバイト数上限検査（`checked_alloc_numel_f32`。イシュー
+/// #2288）**: `vector_norm`（イシュー #2287）と同じ理由・同じ位置で、
+/// 小さなストレージを巨大な shape へ broadcast した view に対する
+/// `gather_elements`（非 contiguous 全縮約）・`axis_reduce_var`
+/// の `.collect()`（軸指定）の確保前に、要素数積の `usize`
+/// オーバーフロー・`Vec` allocation 上限（`isize::MAX` バイト）超過を
+/// 型付きエラーで拒否する（本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md`）。本関数の中間バッファ（`var_slice`
+/// ／`axis_reduce_var` の `f64` アキュムレータ）はいずれも出力要素
+/// ごとのスタックローカル変数であり `Vec` として確保しないため、
+/// `f32` 換算の検査のみで足りる（`autodiff::var.rs::
+/// var_std_out_shape_checked` が入口で `f64` 出力検査も行う eval 側
+/// 〈`Vec<f64>` 中間バッファを持つ〉との違い）。
 pub fn var(
     a: &Tensor<f32>,
     dim: Option<usize>,
@@ -603,7 +617,16 @@ pub fn var(
         None => {
             let total = match a.as_slice() {
                 Some(slice) => var_slice(slice, correction),
-                None => var_slice(&gather_elements(a), correction),
+                None => {
+                    // 非 contiguous（`gather_elements` が実体化する）
+                    // 経路のみ確保前検査する。`as_slice()` が `Some` の
+                    // 場合は既に実体化済みのスライスを走査するだけで
+                    // 新規確保がないため検査不要（`vector_norm` の
+                    // `None` 分岐と同じ理由。
+                    // [`checked_alloc_numel_f32`] doc「動機」参照）。
+                    checked_alloc_numel_f32(a.shape())?;
+                    var_slice(&gather_elements(a), correction)
+                }
             };
             vec![total]
         }
@@ -614,6 +637,14 @@ pub fn var(
             outer
                 .checked_mul(inner)
                 .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            // `axis_reduce_var` の `.collect()` は `out_shape`
+            // （`outer * inner` 要素）と同じサイズの `Vec<f32>` を確保
+            // する。直上の `checked_mul` は要素数積のオーバーフロー
+            // のみを検査するため、確保可能バイト数（`isize::MAX`
+            // 上限）は別途検査する（`vector_norm` の `Some(axis)`
+            // 分岐と同じ理由。[`checked_alloc_numel_f32`] doc「動機」
+            // 参照）。
+            checked_alloc_numel_f32(&out_shape)?;
             axis_reduce_var(a, axis, correction)
         }
     };
@@ -1580,6 +1611,72 @@ mod tests {
                 ReduceError::Shape(ShapeError::ElementCountOverflow)
             ));
         }
+    }
+
+    // --- `var` の確保前バイト数上限検査（イシュー #2288。
+    // `vector_norm` と同型の fixture・同じ理由）。
+
+    #[test]
+    fn var_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+        // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+        // （軸 1 は実軸〈長さ 4・自由度十分〉、軸 0 は broadcast で
+        // 巨大）。dim=Some(1) で縮約すると out_shape=[1usize << 61]
+        // となり、`vector_norm` と同じ理由で f32 換算バイト数が
+        // isize::MAX を超える。
+        let base = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+
+        let err = var(&huge, Some(1), 1).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn var_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+        // base shape [1] を broadcast して [1usize << 61] にする
+        // （非 contiguous・全縮約〈dim=None〉。`as_slice()` が `None`
+        // を返すため `gather_elements` 経路に入る）。
+        let base = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+        assert!(huge.as_slice().is_none(), "fixture は非 contiguous のはず");
+
+        let err = var(&huge, None, 1).expect_err("確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn var_axis_reduce_empty_reduction_with_huge_broadcast_out_shape_is_empty_reduction() {
+        // 縮約対象軸自体は空（n == 0）だが out_shape が broadcast 由来
+        // で巨大というケース。空縮約判定が確保前検査より先であること
+        // を確認する（`n == 0`／`n <= correction` の判定順序は元々
+        // 確保前検査より先にあるため、本テストは既存順序の回帰防止）。
+        let base = Tensor::<f32>::new(Vec::new(), &[1, 0]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61, 0]).unwrap();
+
+        let err = var(&huge, Some(1), 1).expect_err("空縮約で拒否されるはず");
+        assert!(matches!(err, ReduceError::EmptyReduction { op: "var" }));
+    }
+
+    #[test]
+    fn var_insufficient_dof_with_huge_broadcast_shape_is_insufficient_degrees_of_freedom() {
+        // 縮約対象軸自体は自由度不足（n <= correction）だが out_shape
+        // が broadcast 由来で巨大というケース。
+        let base = Tensor::<f32>::new(vec![1.0], &[1, 1]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61, 1]).unwrap();
+
+        let err = var(&huge, Some(1), 1).expect_err("自由度不足で拒否されるはず");
+        assert!(matches!(
+            err,
+            ReduceError::InsufficientDegreesOfFreedom {
+                n: 1,
+                correction: 1
+            }
+        ));
     }
 
     #[test]

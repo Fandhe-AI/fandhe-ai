@@ -550,6 +550,14 @@ fn reduce_outer_axis_inner(shape: &[usize], dim: Option<usize>) -> (usize, usize
 /// 関数は shape が既に整合していることを前提とする契約〈モジュール
 /// 冒頭コメント〉に従い検査しない）。戻り値は `outer * inner` 要素の
 /// `f64` ベクタ（`out_shape` への詰め直しは呼び出し元が行う）。
+///
+/// **事前条件（呼び出し元が満たす。イシュー #2288）**: `dense_vec
+/// (input)`（`input.shape()` を実体化）は、呼び出し元
+/// `var_std_out_shape_checked`（`var.rs`）が
+/// `checked_bytes_for::<f32>(shape)` で検査済みである。
+/// `vec![0f64; outer * inner]`（`f64` 中間バッファ）は、同ヘルパが
+/// `checked_bytes_for::<f64>(out_shape)` で検査済みである。本関数
+/// 自体は境界検査を行わない（モジュール冒頭の契約どおり）。
 fn var_f64_along(input: &Tensor<f32>, dim: Option<usize>, correction: usize) -> Vec<f64> {
     let shape = input.shape();
     let (outer, axis_len, inner) = reduce_outer_axis_inner(shape, dim);
@@ -583,6 +591,9 @@ fn var_f64_along(input: &Tensor<f32>, dim: Option<usize>, correction: usize) -> 
 /// downcast する（`.claude/rules/coding-rust.md`「正規化統計は要素を
 /// 先に `f64` へ昇格してから二乗し、最後に 1 回だけ `f32` へ downcast
 /// する」契約）。
+///
+/// **事前条件**: [`var_f64_along`] と同じ（呼び出し元 `Var::var` の
+/// `var_std_out_shape_checked` で検査済み。イシュー #2288）。
 pub(crate) fn var_along(
     input: &Tensor<f32>,
     dim: Option<usize>,
@@ -607,6 +618,9 @@ pub(crate) fn var_along(
 /// で計算してから、最後に 1 回だけ `f32` へ downcast する——`sqrt` を
 /// 挟むことで分散段階の overflow を回避できる（`std` は分散よりも
 /// 小さい値域に収まるため）。
+///
+/// **事前条件**: [`var_f64_along`] と同じ（呼び出し元 `Var::std` の
+/// `var_std_out_shape_checked` で検査済み。イシュー #2288）。
 pub(crate) fn std_along(
     input: &Tensor<f32>,
     dim: Option<usize>,
