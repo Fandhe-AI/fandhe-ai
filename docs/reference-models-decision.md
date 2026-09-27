@@ -1,8 +1,9 @@
-# 参照モデル定義（`Mlp`・`LeNet`）の設計判断記録
+# 参照モデル定義（`Mlp`・`LeNet`・`ResNet`・`Transformer`）の設計判断記録
 
 イシュー #2201（親 #2190）で実装した PyTorch 定番モデル 2 種
 （MLP・LeNet）の参照実装に関する配置・保留事項・PyTorch 対応・
-事前登録した学習判定式の記録。
+事前登録した学習判定式の記録。イシュー #2202（親 #2190）で追加した
+ResNet・Transformer は §10 にまとめる。
 
 ## 1. 目的と位置づけ
 
@@ -14,7 +15,8 @@
   - MNIST 規模の学習が収束する方向に進むことを、あらかじめ決めた判定式で
     確かめる。
 - 親 #2190（torchvision／torchtext 相当の最小セットの提供）のうち、本
-  イシューは MLP・LeNet を受け持つ。ResNet・Transformer は #2202 の担当。
+  イシューは MLP・LeNet を受け持つ。ResNet・Transformer は #2202
+  （§10）で追加済み。
 
 ## 2. 配置（`crates/facade/examples/models/` を選んだ理由）
 
@@ -177,9 +179,153 @@ Metal での facade parity 実測・`docs/perf/logs/` への申し送りは不�
 
 ## 9. スコープ外
 
-- ResNet・Transformer の参照モデル定義（#2202）。
 - 重み初期化方式の詳細検討（#2140）。
 - 事前学習済み重みのロード（#2082）。
-- facade 公開面拡張・本物の doctest への切り替え（§3。承認後に別途
-  対応。起票自体もユーザー承認を得てから行う。
+- facade 公開面拡張・本物の doctest への切り替え（§3・§10.2。承認後に
+  別途対応。起票自体もユーザー承認を得てから行う。
   `.claude/rules/out-of-scope-tracking.md`）。
+- Vision Transformer・Attention の性能最適化（#2202 スコープ外。§10）。
+
+## 10. #2202（`ResNet`・`Transformer`）
+
+イシュー #2202（親 #2190）で追加した ResNet（CIFAR 版 `6n+2` 構成）・
+Transformer（画像の行をトークン化する非 ViT 構成）の設計判断・保留
+事項・判定式の記録。§1〜§9 の MLP・LeNet と同じ制約・同じ配置方針
+（`crates/facade/examples/models/`）を踏襲する。
+
+### 10.1 配置・取り込み方
+
+- `resnet.rs`・`transformer.rs`・`reference_module.rs`・
+  `synthetic_cifar.rs` はいずれも `crates/facade/examples/models/`
+  配下に置き、`mlp.rs`／`lenet.rs` と同じ理由で**単独完結**とする
+  （`super::reference_module` への参照のみ許容）。
+- **取り込み方**: `reference_models.rs`（#2201）が `mod models;`
+  経由で `examples/models/mod.rs` を使うのに対し、本イシューの学習
+  script は `crates/facade/examples/main.rs`（イシュー本文が名指しした
+  ファイル名。`cargo run -p fandhe-ai --example main` で実行）とし、
+  `examples/models/mod.rs` は**経由しない**。`main.rs` は
+  `#[path = "models/reference_module.rs"] mod reference_module;` の
+  ように 4 ファイル（`reference_module`・`resnet`・`synthetic_cifar`・
+  `transformer`）を個別に `#[path]` 取り込みする。統合テスト
+  （`crates/facade/tests/example_resnet_cifar10.rs`・
+  `crates/facade/tests/example_transformer_cifar10.rs`）も同じ 3
+  ファイル（`reference_module`・`synthetic_cifar` + 自分のモデル
+  ファイル）を同じ `mod` 識別子名で `#[path]` 取り込みする。これは
+  `resnet.rs`／`transformer.rs` 内部の `super::reference_module::…`
+  参照が、取り込み元（`main.rs` でも各テストでも）に依らず同じ
+  相対パスで解決できるようにするための契約であり、`examples/models/
+  mod.rs` は #2201 の 2 ファイル（`mlp`・`lenet`）専用のまま変更して
+  いない。
+- `compat::Sequential` は直列専用の合成 API のため、ResNet の
+  residual 加算（`main(x) + shortcut(x)`）・Transformer の位置符号
+  加算（`embed(x) + pos_encoding`）はいずれも `compat::Sequential`
+  単体では表現できない。両モデルとも複数の `Sequential` 部品
+  （`ResNet`: `stem`／`blocks: Vec<ResNetBlock>`／`head`。
+  `Transformer`: `embed`／`encoder`／`head` + 非学習の位置符号
+  `Tensor`）を保持するラッパー構造体とし、部品間の加算・活性化だけを
+  手組みする設計にした。
+
+### 10.2 保留事項（facade 公開面拡張・doctest）
+
+- イシュー #2202 の承認事項節は `ResNetBlock`・`ResNet`・
+  `Transformer` の facade 公開面拡張（`pub use`）を挙げているが、
+  本 PR の作業時点で所有者の明示承認コメントは確認できなかった。
+  §3.1（MLP・LeNet）と同じ理由（`docs/compat-api-scope.md` §5
+  「範囲拡張の手続き」経路 2）により保留し、`crates/facade/src/` は
+  変更していない。`HoldDoctestGuard` 方式の否定ガードも同じ理由
+  （守るべき対象コードが facade 側に無い）で追加していない。
+- doctest 代替も §3.2 と同じ理由（`examples/` は `cargo test --doc`
+  対象外）で、統合テスト 2 本と runnable example（`cargo run -p
+  fandhe-ai --example main`）で代替する。
+
+### 10.3 `compat::Sequential` は直列専用（設計制約の明記）
+
+`ResNetBlock::forward`／`ResNet::forward`・`Transformer::forward` が
+`Var::add`（residual・位置符号加算）を手組みしているのは、
+`compat::Sequential::add_*` が単一の入力を単一の出力へ直列変換する
+層しか結線できず、分岐（shortcut）や外部定数との加算を表現する API
+を持たないため。学習時も同様に、各部品を `bind(&tape)` した
+`SequentialVars`（BatchNorm running stats 更新を伴う train forward）
+を使い、部品間の加算・活性化・cross entropy・backward・optimizer 適用
+までを `train_step` 内で手組みしている（`compat::Sequential::fit`
+一括 API は使えない）。
+
+### 10.4 `cross_entropy_mean`（facade 非公開の `Reduction` を避ける書き方）
+
+`facade` は `Var::cross_entropy_loss` の `Reduction` 引数を
+再エクスポートしていない（`docs/compat-api-scope.md`）。公開パス
+だけで mean cross-entropy を得るため、`log_softmax` の出力から
+`Var::gather` で正解クラスの log-probability のみを選択し、
+`1/N` の定数（`tape.var` で tape に載せるだけの非学習対象）を掛けて
+総和を取ることで、スカラー乗算 op を使わずに mean 相当を実現した
+（`crates/facade/examples/models/reference_module.rs::
+cross_entropy_mean`）。この定数への勾配は `Trainable::train_step` が
+モデル内部パラメータだけを `trainable_grads` で抽出するため無視される。
+
+当初は正解位置が `1/N`・それ以外が `0` の one-hot 定数を
+`log_softmax` の出力と要素積してから総和する実装だったが、
+`log_softmax` が非正解クラスに返す `-inf` と one-hot の `0` の積が
+`0 * -inf = NaN` になり、正解クラスの loss が有限でも合計が NaN
+汚染されうる不具合があった（イシュー #2202 PR #2325 レビュー
+指摘）。`gather` で正解クラスの列のみを選択する現行実装は非正解
+クラスの値に一切触れないため、この経路の NaN 汚染は起きない。
+
+### 10.5 合成 CIFAR-10 相当データ（実 CIFAR-10 ではない）
+
+- §6（合成 MNIST）と同じ方針で、実 CIFAR-10 は同梱せずネットワーク
+  取得も行わない。`crates/facade/examples/models/synthetic_cifar.rs`
+  がクラスごとに周波数・向き・チャネルバイアスが異なる正弦波縞
+  パターンへ、サンプルごとの巡回平行移動（`±3px`）と一様ノイズ
+  （振幅 `±0.1`）を乗せて `[N, 3, 32, 32]` 相当の行優先平坦データを
+  生成する。
+- `Transformer` 向けに `to_row_tokens` が `[N, 3, 32, 32]`
+  （`(n, c, h, w)` 行優先）を `[N, 32, 96]`（`(n, h, c, w)` 順。1 行を
+  1 トークン、チャネルを特徴次元へ連結）へ並べ替える。`Var::reshape`
+  は非 contiguous な入力を拒否する（`crates/autodiff/src/var.rs`）
+  ため、この並べ替えは `Var::permute` ではなくホスト側の `Vec<f32>`
+  を tape に入れる前に並べ替える方式にした。
+
+### 10.6 事前登録した判定式（AC4）と実測結果
+
+手順（§7 と同型。判定式は結果を見る前に固定し、FAIL しても緩めない）:
+
+1. モデルを固定シードで構築する。
+2. 固定シードの `SplitMix64`（依存追加なしの局所 PRNG。`main.rs` は
+   `bench_harness`〈非公開クレート〉を import できないため、
+   `bench_harness::rng::Xorshift64Star` の代わりに使う）で train／
+   test の合成データを生成する。
+3. `Adam` で `EPOCHS` epoch 学習する（`fit_epochs`。shuffle しない
+   固定順ミニバッチ）。
+4. held-out（test）データで `accuracy` を計算する。
+
+判定（`main.rs::check_ac4`）: 全 epoch の loss が有限・最終 epoch の
+loss が初回 epoch の loss を下回る・held-out 精度が **0.50 以上**。
+調整してよいのは判定式を確定する前の合成データの設計・N・batch
+size・学習率だけであり、epoch 数（10。イシュー受け入れ条件が固定）・
+判定式の係数（0.50）自体は変更していない。tolerance・baseline・
+ガードレール閾値には一切触れていない。
+
+| モデル | 構成 | N_train/N_test | batch_size | optimizer | epoch 数 | 実測 held-out 精度 | 判定 |
+|---|---|---|---|---|---|---|---|
+| `ResNet`（`main.rs`） | depth=8, width=8 | 64/32 | 16 | Adam(lr=5e-3) | 10 | 1.0000 | pass |
+| `Transformer`（`main.rs`） | embed_dim=32, heads=4, layers=2 | 64/32 | 16 | Adam(lr=5e-3) | 10 | 0.9062 | pass |
+| `ResNet`（統合テスト） | depth=8, width=4 | 32/16 | 8 | Adam(lr=8e-3) | 10 | ≥0.50（fail-closed 判定。実測は実行のたびに変動しうるため表には最小構成のみ記載） | pass |
+| `Transformer`（統合テスト） | embed_dim=16, heads=2, layers=1 | 32/16 | 8 | Adam(lr=5e-3) | 10 | ≥0.50（同上） | pass |
+
+統合テスト（`crates/facade/tests/example_resnet_cifar10.rs`・
+`example_transformer_cifar10.rs`）は debug ビルドの実行時間予算
+（CI `rust-ci / cargo test` ジョブの 20 分枠。`.claude/rules/ci.md`）
+に収めるため、`main.rs` より小さい構成（`width`／`embed_dim`・
+`num_layers`・データ件数を縮小）を使う。調整対象は §7 と同じ「判定式
+確定前のデータ設計・N・batch size・学習率」のみで、epoch 数（10）・
+判定係数（0.50）は変更していない。実測ではローカル環境で
+`example_resnet_cifar10.rs`（6 テスト。10 epoch 学習テストを含む）が
+約 18 秒・`example_transformer_cifar10.rs`（6 テスト）が 1 秒未満で
+完了しており、CI 予算に十分収まる。
+
+### 10.7 GPU parity（該当なし）
+
+§8 と同じ理由（新しい演算・カーネルを追加していない。既存の
+`compat::Sequential::add_*`・`Var::add`／`relu`／`mean`／`reshape` の
+組み合わせのみ）で、CUDA／Metal での facade parity 実測・
+`docs/perf/logs/` への申し送りは不要と判断した。
