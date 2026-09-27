@@ -15491,13 +15491,26 @@ fn scan_model_io_reexports_and_declarations(content: &str) -> Vec<String> {
 /// 適用する形）では誤検出する。`impl` ヘッダ（`impl` から本体開始 `{`
 /// の直前まで）のトークン列に識別子 `Sequential` を含む場合に限り、
 /// その impl 本体（対応する閉じ `}` まで深さカウントで走査）だけを
-/// 対象に `fn save`／`fn load` を数える。`Sequential` 型はこのワーク
-/// スペースでは `crates/facade` にのみ定義されており、Rust の孤児
-/// ルール（impl コヒーレンス）上、他クレートから `Sequential` への
-/// トレイト impl は当該トレイトが facade 依存先クレートに定義された
-/// 場合に限られる（facade を依存する workspace クレートは存在しない）
-/// ため、本走査は `crates/facade/src/**`（本関数の呼び出し元が渡す
-/// 走査対象）に限定して問題ない。
+/// 対象に `fn save`／`fn load` を数える。
+///
+/// 本関数自体は呼び出し元が渡した走査対象（文字列 `content`）にのみ
+/// 依存し `Sequential` 型の一意性を前提にしない。呼び出し元
+/// （[`facade_does_not_reexport_or_declare_model_io`]）が
+/// `crates/facade/src/**` に限定して呼ぶのは型の一意性ゆえではなく
+/// **依存方向**が理由: 本イシューが対象とする公開型
+/// `fandhe_ai::compat::Sequential`（facade クレート `fandhe-ai` で定義）
+/// を名指しできるのは facade に依存するクレートだけだが、facade を
+/// 依存する workspace クレートは存在しない（`crates/*/Cargo.toml` に
+/// package 名 `fandhe-ai` への依存宣言なし）ため、facade 外のクレートは
+/// そもそも `impl ... for Sequential` の `Sequential` としてこの公開型を
+/// 参照できない。ワークスペース内には識別子 `Sequential` を持つ別の
+/// 内部専用型（`crates/autodiff/src/compat/sequential.rs`・
+/// `crates/autodiff/src/nn/container.rs`。facade から非再エクスポート）
+/// も存在するが、これらは本イシューの対象型ではないため、facade 限定の
+/// 走査で公開面の保留固定としては十分。ワークスペース全体（他クレートの
+/// 同名内部型を含む）を横断する定義元インベントリは別テスト
+/// [`workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations`]
+/// が本関数を再利用して担う。
 fn scan_sequential_alt_save_load_impls(content: &str) -> Vec<String> {
     const ALT_FN_NAMES: [&str; 2] = ["save", "load"];
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
@@ -15731,6 +15744,93 @@ fn workspace_declares_model_io_fn_names_only_in_allowed_locations() {
          `fn` 宣言集合が期待（空集合）と一致しない（承認前に本番実装が\
          紛れ込んだ可能性がある。過不足いずれも fail-closed に検出\
          する）: {found:?}"
+    );
+}
+
+/// [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
+/// （`save_model`／`load_model` の定義元インベントリ）を、
+/// `docs/compat-model-io-decision.md` §2 の代替公開 API 案
+/// `Sequential::save(&self, dir)`／`Sequential::load(dir)` にも横展開した
+/// 第 3 層。[`facade_does_not_reexport_or_declare_model_io`]（第 2 層）は
+/// `crates/facade/src/**` に走査対象を限定しているため（`Sequential` は
+/// facade でのみ公開され、facade を依存する workspace クレートが存在しない
+/// ため facade 外から `impl ... for Sequential` を書けない。PR #2317
+/// review 再確認時の指摘: 「`Sequential` 型はこのワークスペースで facade
+/// にのみ定義される」という以前の理由づけは誤りで、実際には
+/// `crates/autodiff/src/compat/sequential.rs`・
+/// `crates/autodiff/src/nn/container.rs` にも同名の別型 `Sequential` が
+/// 存在する。ただしこれらは facade から再エクスポートされない内部専用型
+/// であり本イシューの対象外の型のため、第 2 層の走査範囲限定自体は妥当。
+/// 正しい制約は「型の一意性」ではなく「依存方向」: workspace 内のどの
+/// クレートも `fandhe-ai`（facade）package に依存していないため、facade
+/// 外のクレートは facade の `compat::Sequential` を名指しできず、
+/// `impl ... for` 節にも書けない）、facade の走査だけでは「承認前に
+/// 本番実装がどこか別クレートへ迂回的に紛れ込んでいないか」という
+/// ワークスペース全体の定義元インベントリという第 3 層の役割を満たさない。
+/// 本テストは [`scan_sequential_alt_save_load_impls`]
+/// （`Sequential` を含む `impl` ヘッダ配下に限定した `fn save`／`fn load`
+/// 宣言の検出。ワークスペース内の無関係な `save`／`load`〈例:
+/// `ModelRegistry::load`〉を誤検出しない）を `crates/*/src/` 全体へ適用し、
+/// 期待集合（空集合）との完全一致を固定する。
+///
+/// **期待集合**（着手前確認の再 grep で判明。2026-09-27）: ワークスペース内
+/// に識別子 `Sequential` を含む `impl` ブロックは facade（本イシュー対象の
+/// `compat::Sequential`）に加え、autodiff 内部専用の 2 型
+/// （`crates/autodiff/src/compat/sequential.rs::Sequential`・
+/// `crates/autodiff/src/nn/container.rs::Sequential`）にも存在するが、
+/// いずれにも `fn save`／`fn load` 宣言はなく空集合。承認後は facade 側の
+/// 期待集合を `facade/src/compat/model_io.rs` へ差し替える。
+#[test]
+fn workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let offenses = scan_sequential_alt_save_load_impls(content);
+            if !offenses.is_empty() {
+                let rel = path
+                    .strip_prefix(&crates_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                *found.entry(rel).or_insert(0) += offenses.len();
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の `impl Sequential {{ .. }}`／\
+         `impl <Trait> for Sequential {{ .. }}` 内 fn save／fn load 宣言\
+         集合が期待（空集合）と一致しない（承認前に代替 API\
+         〈`Sequential::save`／`Sequential::load`〉の実装が facade 外へ\
+         紛れ込んだ、または facade 側で追加された可能性がある。過不足\
+         いずれも fail-closed に検出する）: {found:?}"
     );
 }
 

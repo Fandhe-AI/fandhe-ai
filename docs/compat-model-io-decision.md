@@ -161,7 +161,18 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 - **定義元インベントリ**（同ファイル::
   `workspace_declares_model_io_fn_names_only_in_allowed_locations`）:
   workspace 全体（`crates/*/src/`）で `save_model`／`load_model` の
-  `fn` 宣言が 0 件であることを固定する。
+  `fn` 宣言が 0 件であることを固定する。§2 代替案（`Sequential::save`／
+  `Sequential::load`）向けには、同ファイル::
+  `workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_
+  locations` が対応する（PR #2317 review 再確認で追加。`Sequential` を
+  含む `impl` ヘッダ配下に限定した `fn save`／`fn load` 宣言を workspace
+  全体〈`crates/*/src/`〉へ横断走査し 0 件を固定する。ソース走査層が
+  `crates/facade/src/**` に限定できるのは型の一意性ではなく依存方向
+  ゆえ〈`fandhe-ai`〈facade〉package に依存する workspace クレートが
+  存在しない〉ためであり、ワークスペース全体を横断する定義元
+  インベントリという第 3 層の役割は別途この専用テストが担う。詳細は
+  `crates/facade/tests/api_surface.rs::scan_sequential_alt_save_load_impls`
+  のドキュメンテーションコメントを正とする）。
 - 承認後は、doctest・ソース走査を撤去して正ガード（実際の公開面の
   固定テスト）へ置き換え、インベントリの期待集合を
   `facade/src/compat/model_io.rs` へ差し替える。
@@ -206,3 +217,20 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 宣言を検出する `scan_sequential_alt_save_load_impls`）の双方を拡張し、
 §2 の 2 案いずれが未承認のまま追加されても保留ガードが検出する状態に
 是正した。
+
+**再開条件の再確認時の追加是正**: 上記の是正直後は、3 層目（定義元
+インベントリ）が `save_model`／`load_model` の 2 名のみを workspace
+全体で検査しており、代替案の `save`／`load` は 2 層目（`crates/facade/
+src/**` 限定のソース走査）にしか反映されていなかった。ソース走査層の
+コメントにも「`Sequential` 型はこのワークスペースでは facade にのみ
+定義される」という誤った理由づけが残っていた（実際には
+`crates/autodiff/src/compat/sequential.rs`・`crates/autodiff/src/nn/
+container.rs` にも同名の別型 `Sequential` が存在する。ただしいずれも
+facade から再エクスポートされない内部専用型で本イシューの対象外）。
+正しい理由は依存方向（`fandhe-ai`〈facade〉package に依存する
+workspace クレートが存在しないため、facade 外から公開型
+`compat::Sequential` を名指しできない）である。この誤りを是正した
+うえで、`workspace_declares_sequential_alt_save_load_fn_names_only_in_
+allowed_locations`（`crates/facade/tests/api_surface.rs`）を新設し、
+`scan_sequential_alt_save_load_impls` を workspace 全体（`crates/*/
+src/`）へ適用して 3 層目にも代替案を横展開した。
