@@ -116,7 +116,7 @@ pub use fandhe_ai_tensor_core::data::{
 ## 6. 対象外（out-of-scope。`out-of-scope-tracking.md` に従い記録）
 
 - タプルデータセットでのサンプル単位 transform／collate（§1.2 のトレードオフ。成分ごとの型を持つフックは型設計が別途必要）。
-- マルチワーカー prefetch・persistent workers。**イシュー本文のスコープ外欄が追跡先として挙げる「#2181」は番号の誤記**（#2181 は実際には AMP の `DeviceParamStore` 結線〈PR #2309 でマージ済み・クローズ済み〉であり無関係）。正しい追跡先は本 PR 時点で未起票（Issue の新規起票はユーザー承認事項のため本 PR では行わない）。
+- マルチワーカー prefetch は #2183 で実装済み（`docs/tensor-core-data-prefetch-decision.md`）。persistent workers は #2183 でも対象外のまま。**イシュー本文のスコープ外欄が追跡先として挙げる「#2181」は番号の誤記**（#2181 は実際には AMP の `DeviceParamStore` 結線〈PR #2309 でマージ済み・クローズ済み〉であり無関係）。正しい追跡先は #2183 だった。
 - `DistributedSampler`（分散学習向け sampler）・iterable-style dataset・`pin_memory`。
 - facade 公開（§0・§5 参照。ユーザー承認待ち）。
 

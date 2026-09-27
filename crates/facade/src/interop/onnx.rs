@@ -28,8 +28,9 @@
 //! コメント参照。イシュー #2200 で `GlobalAveragePool`／
 //! `BatchNormalization`／`Flatten`、イシュー #2199 で `MaxPool`／
 //! `AveragePool` を追加・`Conv` に 1D 対応を追加した）。export allowlist は
-//! 23 種のまま非対称（下記「ONNX export」節参照。`MaxPool`／`AveragePool`
-//! は import 専用で export 未対応）。未対応 `op_type` は無言 skip せず
+//! イシュー #2187 で 26 種へ拡大した（下記「ONNX export」節参照）が、
+//! `MaxPool`／`AveragePool` の 2 op は import 専用のため export 非対応の
+//! まま残る（import・export 非対称）。未対応 `op_type` は無言 skip せず
 //! [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
@@ -67,12 +68,13 @@
 //!   `to_path` で export できるのは import 済みモデル（`OnnxModel`）の
 //!   みで、学習済み `Sequential`／`nn` から直接 `OnnxModel` を構築する
 //!   経路は [`OnnxModel::from_sequential`]（次節・#2037）を使う
-//! - export allowlist（23 op・既定 domain。import 対応 28 op のうち
-//!   `GlobalAveragePool`／`BatchNormalization`／`Flatten`（イシュー
-//!   #2200）・`MaxPool`／`AveragePool`（イシュー #2199）の 5 op を
-//!   含まない）外のノードを含むモデルは `from_bytes` では構築できても
-//!   **export 時に** [`OnnxError::UnsupportedOp`] により fail-closed に
-//!   拒否する（無言 skip しない）
+//! - export allowlist（26 op・既定 domain。イシュー #2187 で
+//!   `GlobalAveragePool`／`BatchNormalization`／`Flatten` を追加したが、
+//!   import 対応 28 op のうち `MaxPool`／`AveragePool`（イシュー #2199）の
+//!   2 op は import 専用のため export allowlist に含まない）外のノードを
+//!   含むモデルは `from_bytes` では構築できても **export 時に**
+//!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する（無言
+//!   skip しない。イシュー #2200・#2187）
 //!
 //! ## `Sequential` からの export（イシュー #2037・親 #2034）
 //!

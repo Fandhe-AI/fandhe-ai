@@ -1,12 +1,13 @@
 //! 内部 op（Rust ネイティブの属性表現）から `NodeProto`（op_type・属性）への
 //! 逆マッピング（イシュー #1773。`onnx::export` の層 A）。
 //!
-//! `onnx::interp` が `NodeProto` から読む import 対応 25 op（`interp.rs` の
-//! `run` ディスパッチ表。`Conv` はイシュー #2076 で追加・イシュー #2199 で
+//! `onnx::interp` が `NodeProto` から読む import 対応 28 op（`interp.rs` の
+//! `run` ディスパッチ表。`Conv` はイシュー #2076・`BatchNormalization`／
+//! `GlobalAveragePool`／`Flatten` はイシュー #2200 で追加、イシュー #2199 で
 //! `MaxPool`／`AveragePool` を追加・`Conv` に 1D 対応を追加）のうち、
-//! export allowlist は 23 op（`MaxPool`／`AveragePool` は import 専用で
+//! export allowlist は 26 op（`MaxPool`／`AveragePool` は import 専用で
 //! export 未対応。interp との対称性はイシュー #2199 で崩れた）。
-//! [`ExportOp`] はこの export allowlist の 23 op を Rust ネイティブの
+//! [`ExportOp`] はこの export allowlist の 26 op を Rust ネイティブの
 //! 属性表現（`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
 //! `attr_i64_required`／`attr_string` が読む値と同じ型）として保持する。属性は
 //! **常に全て書き出す**（既定値であっても省略しない。省略すると「属性欠落＝既定値」
@@ -48,7 +49,7 @@ pub enum ConstantAttr {
     Ints(Vec<i64>),
 }
 
-/// export allowlist の 23 op（モジュール冒頭コメント参照）を Rust
+/// export allowlist の 26 op（モジュール冒頭コメント参照）を Rust
 /// ネイティブの属性表現として保持する。入力・出力の名前列は
 /// [`ExportNode`] 側が持つ（`ExportOp` 自体は op_type と属性のみの責務）。
 #[derive(Debug, Clone)]
@@ -118,6 +119,23 @@ pub enum ExportOp {
     /// export したグラフでは `auto_pad` は常に `"NOTSET"`（非空の明示値）
     /// または省略のいずれかであり、空 STRING が書き出されることはない。
     Conv(ConvAttrs),
+    /// `BatchNormalization(X, scale, B, input_mean, input_var)`（イシュー
+    /// #2187・親 #2186〈E1 の逆写像〉。`interp.rs::compute_batch_
+    /// normalization` の逆方向）。入力はちょうど 5（省略不可。`interp` 側
+    /// と同じ fail-closed 契約）。属性は `epsilon`（FLOAT）・`momentum`
+    /// （FLOAT。`ops::BatchNormAttrs` は推論に使わないため保持しない値。
+    /// `interp` は型検証のみ行い捨てるため、この variant がフィールドと
+    /// して持つ）・`training_mode`（INT。常に `0` を書く。`interp` は
+    /// `0` 以外を拒否するため export 側が非 0 を作ることはない）の 3 つ。
+    /// `spatial`（opset 9 で廃止済みの属性）は書かない（`interp` は省略時
+    /// に `1` とみなし、それ以外の値は拒否するため書く意味がない）。
+    BatchNormalization { epsilon: f32, momentum: f32 },
+    /// `GlobalAveragePool(X)`（イシュー #2187・親 #2186。`interp.rs::
+    /// compute_global_average_pool` の逆方向）。入力はちょうど 1。属性なし。
+    GlobalAveragePool,
+    /// `Flatten(input, axis=1)`（イシュー #2187・親 #2186。`interp.rs::
+    /// compute_flatten` の逆方向）。入力はちょうど 1。属性 `axis`（INT）。
+    Flatten { axis: i64 },
 }
 
 impl ExportOp {
@@ -147,6 +165,9 @@ impl ExportOp {
             ExportOp::Constant(_) => "Constant",
             ExportOp::LayerNormalization(_) => "LayerNormalization",
             ExportOp::Conv(_) => "Conv",
+            ExportOp::BatchNormalization { .. } => "BatchNormalization",
+            ExportOp::GlobalAveragePool => "GlobalAveragePool",
+            ExportOp::Flatten { .. } => "Flatten",
         }
     }
 }
@@ -163,8 +184,8 @@ pub struct ExportNode {
     pub outputs: Vec<String>,
 }
 
-/// export allowlist の 23 op の `op_type` 一覧（[`ExportOp::op_type`] が返す
-/// 値の集合と同一。`interp.rs` の import 対応 25 op のうち `MaxPool`／
+/// export allowlist の 26 op の `op_type` 一覧（[`ExportOp::op_type`] が返す
+/// 値の集合と同一。`interp.rs` の import 対応 28 op のうち `MaxPool`／
 /// `AveragePool` を除いたもの）。`check_exportable` の allowlist として
 /// 使う。両者のドリフトは `#[cfg(test)]` のドリフト検出テストで固定する。
 pub const SUPPORTED_OP_TYPES: &[&str] = &[
@@ -191,6 +212,9 @@ pub const SUPPORTED_OP_TYPES: &[&str] = &[
     "Constant",
     "LayerNormalization",
     "Conv",
+    "BatchNormalization",
+    "GlobalAveragePool",
+    "Flatten",
 ];
 
 fn attr_float(name: &str, value: f32) -> AttributeProto {
@@ -354,7 +378,7 @@ fn build_node(
         op_type: op_type.to_string(),
         attribute,
         // 既定 opset（"" = ai.onnx）限定。`check_exportable` が受理する domain と
-        // 揃える（本モジュールは既定 opset の 23 op のみ書き出す）。
+        // 揃える（本モジュールは既定 opset の 26 op のみ書き出す）。
         domain: String::new(),
     }
 }
@@ -643,6 +667,58 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
                 attribute.push(attr_ints("strides", &attrs.strides));
             }
             Ok(build_node(node, op_type, attribute))
+        }
+        ExportOp::BatchNormalization { epsilon, momentum } => {
+            // `interp.rs::compute_batch_normalization` は入力数をちょうど 5
+            // に固定する（省略不可。同関数 doc 参照）ため、export 側も同じ
+            // 範囲で fail-closed に検査する。
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                5,
+                5,
+                false,
+            )?;
+            Ok(build_node(
+                node,
+                op_type,
+                vec![
+                    attr_float("epsilon", *epsilon),
+                    attr_float("momentum", *momentum),
+                    // `training_mode` は常に `0`（推論モード）を書く。
+                    // `interp` は `0` 以外を `InvalidBatchNormAttribute` で
+                    // 拒否するため、export 側がそれ以外の値を作ることは
+                    // ない（`spatial` は opset 9 で廃止済みのため書かない。
+                    // `interp` は省略時に `1` とみなす）。
+                    attr_int("training_mode", 0),
+                ],
+            ))
+        }
+        ExportOp::GlobalAveragePool => {
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                1,
+                false,
+            )?;
+            Ok(build_node(node, op_type, Vec::new()))
+        }
+        ExportOp::Flatten { axis } => {
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                1,
+                false,
+            )?;
+            Ok(build_node(node, op_type, vec![attr_int("axis", *axis)]))
         }
     }
 }

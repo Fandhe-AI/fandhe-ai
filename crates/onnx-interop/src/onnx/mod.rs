@@ -11,11 +11,13 @@
 //!   `check_exportable` を経由してから組み立てる。
 //! - `export_ops`: `interp` が対応する 28 op のうち export allowlist に含まれる
 //!   ものの逆マッピング（`ExportOp` -> `NodeProto`。イシュー #1773）。`export` から
-//!   `pub use` で再エクスポートする。**import（`interp`）と export（`export_ops`）
-//!   の対応 op 数は非対称**（イシュー #2200 で `GlobalAveragePool`／
-//!   `BatchNormalization`／`Flatten`、イシュー #2199 で `MaxPool`／`AveragePool`
-//!   を import へ追加した一方、export allowlist は 23 op のまま。これら 5 op は
-//!   import のみ対応し、これらを含むグラフの export は
+//!   `pub use` で再エクスポートする。**import（`interp`）と export
+//!   （`export_ops`）の対応 op 数は非対称**（イシュー #2200 で import が
+//!   26 op へ拡大した際に生じた非対称〈`GlobalAveragePool`／
+//!   `BatchNormalization`／`Flatten` が import のみ対応〉は、イシュー #2187
+//!   で export 側へも追加して解消済み。一方イシュー #2199 で import へ
+//!   追加した `MaxPool`／`AveragePool` は export allowlist（26 op）に
+//!   含まれず、import のみ対応のまま残る。これらを含むグラフの export は
 //!   `OnnxError::UnsupportedOp` で拒否される。`tests/onnx_export_ops.rs`
 //!   参照）。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`

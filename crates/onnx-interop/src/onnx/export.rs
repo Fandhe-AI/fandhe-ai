@@ -14,11 +14,14 @@
 //!   意味論的な逆マッピングは #1773 のスコープ（`export_ops` モジュール）。
 //!   `build_model_proto` は `export_ops::check_exportable` で
 //!   `graph.nodes`（decode 由来・または #1773 以降に手組みされた `NodeProto`）が
-//!   export allowlist（`export_ops::SUPPORTED_OP_TYPES`。23 op。`interp.rs`
-//!   の import 対応 25 op のうち `MaxPool`／`AveragePool`〈イシュー #2199。
-//!   import 専用〉を除いたもの）・既定 opset（`domain` が空文字列）に
-//!   収まっているかを fail-closed に検査してから組み立てる（詳細対応表は
+//!   export allowlist（`export_ops::SUPPORTED_OP_TYPES`。26 op。#2187 で
+//!   `Conv`〈#2076〉に続き `BatchNormalization`／`GlobalAveragePool`／
+//!   `Flatten`〈#2200〉の逆写像を追加し、`interp.rs` の import 対応 28 op の
+//!   うち `MaxPool`／`AveragePool`〈イシュー #2199。import 専用〉を除いた
+//!   もの）・既定 opset（`domain` が空文字列）に収まっているかを
+//!   fail-closed に検査してから組み立てる（詳細対応表は
 //!   `docs/onnx-export-op-mapping.md`）。
+
 //! - import -> export -> import の構造一致 roundtrip テスト・未対応 op の
 //!   fail-closed 確認は `tests/onnx_export_roundtrip.rs` で固定済み（#1774）。
 //! - facade 公開は #1775 で publish 承認取得後の段階 0 として整理し、
@@ -87,7 +90,7 @@ pub enum ExportError {
         actual_elements: usize,
     },
     /// `op_type` が `export_ops::SUPPORTED_OP_TYPES`（export allowlist の
-    /// 23 op。`MaxPool`／`AveragePool` 等の import 専用 op を含まない）に
+    /// 26 op。`MaxPool`／`AveragePool` 等の import 専用 op を含まない）に
     /// 含まれない、または `domain` が既定 opset（空文字列）以外
     /// （`export_ops::check_exportable`。イシュー #1773 の層 B）。
     UnsupportedOp {
@@ -366,7 +369,7 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
 /// パイプライン全体）・将来の codegen。組み立て自体（`graph.nodes` を
 /// `GraphProto.node` へ詰める処理）は機械的な素通しのみで、op_type の意味論
 /// には関与しないが、組み立てに先立ち `export_ops::check_exportable`
-/// （イシュー #1773 の層 B）で `graph.nodes` が `interp.rs` 対応 23 op の
+/// （イシュー #1773 の層 B）で `graph.nodes` が `interp.rs` 対応 26 op の
 /// allowlist・既定 opset（`domain` が空文字列）に収まっているかを fail-closed
 /// に検査する（無言 skip はしない。`security.md` A03）。`interp.rs` 対応
 /// 25 op（イシュー #2199）のうち `MaxPool`／`AveragePool` は import 専用の
