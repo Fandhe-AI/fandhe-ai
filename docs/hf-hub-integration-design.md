@@ -3,7 +3,7 @@
 - イシュー #2244（親 #2243「HF hub 連携クレートの設計判断記録と依存追加の承認申請」・Phase 親 #2131）
 - **コード変更なし・依存追加なし**。本 doc は設計案の記録であり、確定はユーザー承認後
 - 基準コミット: 作業ブランチ作成時点の `origin/main`（`9fe4b523`。2026-09-27）
-- 結論の要約: 本 doc は §1〜§3 に境界と API 案を記す設計案であり、正式決定ではない。**§4（認証トークン・セキュリティ）は #2245 で追記済み**。§5・§6（他ライブラリ対応表・承認事項一覧）は兄弟イシュー #2246 が追記する予約節
+- 結論の要約: 本 doc は §1〜§3 に境界と API 案を記す設計案であり、正式決定ではない。**§4（認証トークン・セキュリティ）は #2245 で追記済み・§5・§6（他ライブラリ対応表・承認事項一覧）は #2246 で追記済み**
 
 ## 1. 背景
 
@@ -22,7 +22,7 @@
 | #2088 | 汎用 HTTPS 取得（`download`／`download_with`） | 設計記録のみ。依存 2 件は未承認、未実装 |
 | 本 #2244 | クレート境界・取得 API 案 | 設計のみ（本 doc） |
 | #2245 | 認証トークン・セキュリティ設計 | 本 doc §4 に追記済み |
-| #2246 | 他ライブラリ対応表・承認事項一覧 | 本 doc §5・§6 へ追記予定 |
+| #2246 | 他ライブラリ対応表・承認事項一覧 | 本 doc §5・§6 へ追記済み |
 
 **前提チェーン**: 本 doc の API 案（§3）は、facade 側の汎用 HTTPS 取得（#2088）がユーザー承認・実装されるまで実装に着手できない。#2088 が提供する `download_with` 相当の機能に依存する設計であるため、本 doc の記述は現時点では机上案に留まる。
 
@@ -139,7 +139,7 @@ impl HfHub {
 enum HfError { /* ... */ }
 ```
 
-huggingface_hub（Python）の `hf_hub_download(repo_id, filename, revision)` との対応関係をこの位置に記す想定である。
+huggingface_hub（Python）の `hf_hub_download(repo_id, filename, revision)` との対応関係をこの位置に記す想定である（§5.2 に記載）。
 
 HF 側では branch と tag が同じ ref 解決経路になる見込みであるため、上記スケッチでは型で区別しない案としている。この根拠は**外部仕様・要確認**（§3.5）であり、断定しない。
 
@@ -313,20 +313,98 @@ branch から sha への対応を覚えておく refs 相当の永続化は**ス
 
 これらは `docs/model-download-design.md` 自体を編集せず、本節に記録するに留める。
 
-## 5. 他ライブラリ対応表（#2246 で追記）
+## 5. 他ライブラリ対応表（#2246）
 
-（予約節。#2246 のマージにより本節へ追記される）
+本節の正本は `docs/model-distribution-design.md` §5「HF hub 連携の方針（#2082 のスコープ外・ユーザー決定 2026-09-24）」であり、本節はその詳細な対応表である。分離方針（汎用取得・キャッシュ・pin 検証はコア／HF hub 固有処理は別クレート）が PyTorch・TensorFlow/Keras の既存分離と同型であることを、出典 URL 付きで示す。
 
-## 6. 承認事項（#2246 で追記）
+### 5.1 観点別対応表
 
-（予約節。#2246 のマージにより、本 doc §2.6 の境界関連項目を含めて承認事項が一覧化される）
+| 観点 | PyTorch | TensorFlow/Keras | 本設計（fandhe-ai） |
+|---|---|---|---|
+| コア側の汎用 URL 取得＋キャッシュ | `torch.hub.load_state_dict_from_url`（`torch.hub.load` が内部で使用。`~/.cache/torch/hub/checkpoints`）[^1] | `tf.keras.utils.get_file`（`~/.keras` キャッシュ）[^2] | facade `ModelRegistry`（実装済み・#2087）＋ #2088 の `download`／`download_with` 案（未承認・未実装） |
+| ハッシュ検証 | `load_state_dict_from_url` の `check_hash`（ファイル名の SHA256 prefix とダウンロード結果を突合）[^1] | `get_file` の `file_hash` 引数（`md5`／`sha256` を指定可能）[^2] | `Sha256Pin` を型レベルの必須引数とする案（§4.2 案 1・#2088 §5） |
+| ハブ連携の提供元 | コア（`torch` 本体）ではなく別パッケージ `huggingface_hub` | コア（`tf.keras`）ではなく別パッケージ `tensorflow_hub`。Keras 3 の `hf://` は利用者が `huggingface_hub` を別途インストールする構成で Keras 本体の必須依存ではない[^2][^3] | facade（コア）ではなく別クレート（本 doc §2） |
+| HF Hub 連携の入口 | `PyTorchModelHubMixin`（`from_pretrained`／`save_pretrained`／`push_to_hub`）[^4] | Keras 3 `hf://<repo_id>` によるモデル読込・KerasHub の `from_preset`（設定・語彙込みの preset 一式を取得）[^3][^5] | `HfHub::download`（§3.1 疑似シグネチャ）案 |
+| HF Hub 連携の低レベル取得 API | `hf_hub_download(repo_id, filename, revision, ...)`。個別ファイル 1 本をキャッシュへ取得する[^6] | （同上。`huggingface_hub` を介して同じ API を利用） | `HfHub::download`（§3.1） |
+| revision 指定 | `hf_hub_download` の `revision` 引数（branch・tag・commit sha のいずれも可）[^6] | 同左 | `Revision`（`CommitSha`／`Ref`）から `resolve_revision` で commit sha へ解決（§3.1・§3.3） |
+| 認証トークン | `huggingface_hub` の `token` 引数・`HF_TOKEN` 環境変数・トークンファイル | 同左 | §4.1 に記載済み（本節では重複記載しない） |
+| キャッシュ配置 | `huggingface_hub` 独自のキャッシュレイアウト（`blobs`／`snapshots`／`refs`。外部仕様・本 doc では未実測） | 同左（`huggingface_hub` 経由） | `ModelRegistry` の `<name>/<version>` 単一ファイル配置（§3.3 候補 1。`blobs`／`snapshots`／`refs` 相当は持たない） |
+
+[^1]: https://docs.pytorch.org/docs/2.14/hub.html
+[^2]: https://www.tensorflow.org/api_docs/python/tf/keras/utils/get_file
+[^3]: https://huggingface.co/docs/hub/keras
+[^4]: https://huggingface.co/docs/huggingface_hub/package_reference/mixins
+[^5]: https://keras.io/keras_hub/ （KerasHub `from_preset`。preset の内訳・API 詳細は外部仕様・要確認。§5.3 も参照）
+[^6]: https://huggingface.co/docs/huggingface_hub/guides/download （`tensorflow_hub` パッケージ自体の一次ドキュメントは https://www.tensorflow.org/hub を候補としたが、tfhub.dev は 2023-11 に Kaggle Models へ移行済み〈`docs/model-distribution-design.md` §5 出典〉のため個別取得 API の対応関係は huggingface_hub 側の記述に委ねる）
+
+### 5.2 API 対応表
+
+huggingface_hub（Python）の `hf_hub_download(repo_id, filename, revision)` [^6] と、本設計の疑似シグネチャ（§3.1。「この位置に記す想定である」と記載していた箇所を本節で回収する）との対応は次のとおり。
+
+| `hf_hub_download` 引数 | 本設計での対応 | 差分・注記 |
+|---|---|---|
+| `repo_id`（`namespace/name` 形式の文字列） | `HfRepoId::parse` が返す `HfRepoId` 型（§3.1） | 検証規則（allowlist・長さ・`..`・`--` の扱い）は §3.2 に規定。文字列そのままではなく検証済み型を経由する |
+| `filename`（リポジトリ内の相対パス） | `HfHub::download` の `filename: &str` 引数（§3.1） | huggingface_hub はキャッシュキーに `filename` を含む（`snapshots/<sha>/<filename>` 相当）のに対し、本設計は `ModelRegistry` の単一ファイル制約（§3.3）により `filename` をキャッシュキーへ反映しない。このため §3.3 で記録済みの是正案 A（`filename` を単一許容値へ限定）／B（`filename` を `name` の符号化へ組み込む）のいずれかを実装イシューで確定する必要がある（未確定のまま） |
+| `revision`（branch・tag・commit sha のいずれも可の文字列。既定 `"main"`） | `Revision`（`enum { CommitSha(String), Ref(String) }`）を `Revision::parse` で構築し、`resolve_revision` で commit sha へ解決（§3.1） | huggingface_hub は revision を型で区別しないが、本設計は型で区別する案としている。区別せず一括で ref 解決を試みる方が近い可能性もあり、HF 側の branch／tag 解決経路が同一かは外部仕様・要確認（§3.5） |
+| （戻り値）取得済みファイルのローカルパス | `CachedModel { name, version }`（§3.1） | huggingface_hub はファイルパスを直接返すのに対し、本設計は `ModelRegistry` のキー（`name`／`version`）を返し、パス解決は `ModelRegistry::load` に委ねる。§3.3 の是正が未確定な間は `filename` が戻り値に含まれない制約が残る |
+
+### 5.3 差分・非対応
+
+次はいずれも本設計（facade コア・HF hub 連携別クレートとも）の対象外とする。§2.1 の責務分割表・§7 のスコープ外と整合させて記す。
+
+- **push 系（アップロード）API**: `huggingface_hub` の `push_to_hub`・`upload_file` 等に相当する機能。読み取り専用（取得のみ）に限定する（§2.1）
+- **dataset／space リポジトリ**: `repo_type` が `model` 以外のリポジトリへの対応
+- **分割 safetensors・`config.json` の取り扱い**: `ModelRegistry` は `<cache_dir>/<name>/<version>/model.safetensors` の単一ファイルしか扱わない（§3.3「単一ファイル制約」）。index json と複数 shard から成る分割 checkpoint、`config.json`、サブフォルダはいずれも対象外
+- **private／gated repo**: 初期状態は fail-closed の非対応（§4.1 の推奨 (γ)）。(α)／(β) の選択は承認事項
+- **「モデル定義まで含む」配布形態（KerasHub preset 等）**: KerasHub の `from_preset` は重みに加えトークナイザ・前処理設定・モデルアーキテクチャ定義までを一括取得する[^5]。本設計はモデル定義（`compat::Sequential` 構築ロジック）を含まず、重みファイル（safetensors）の取得＋`docs/huggingface-safetensors-interop-guide.md` §3 のレイアウト対応表による手動復元に限定する（§3.4）
+
+## 6. 承認事項（#2246）
+
+本節は HF hub 連携クレートに関する承認事項の正本であり、`docs/model-distribution-design.md` §2.6・§4.4 に個別に記載されていた項目をここへ一覧化する。**本節に記載の事項はすべて未取得・未実施**である（本 doc §1 の前提状態表と同じ扱い）。実施（依存追加・クレート新設・facade 公開面拡張等）は本 doc では一切行わない。
+
+### 6.1 承認事項一覧
+
+| # | 区分 | 承認事項 | 出所 | #2088 §7 との関係 | 備考 |
+|---|---|---|---|---|---|
+| 1 | 依存追加 | HTTP クライアント＋TLS スタックを別クレートの依存として追加すること（§2.3 案 A） | §2.3・§2.6-8 | #2088 §7-1（第 10 区分相当）と**同じクレート選定・同じ deps-policy 区分を再利用しうるが、承認単位は別**。`docs/model-download-design.md` §3 の候補（`ureq`／`minreq`／`attohttpc`。`reqwest` は非推奨）を参照する | 依存宣言そのものは #2088 とは別のクレート（別 `Cargo.toml`）に対するものであり、#2088 の承認が本項の承認を兼ねない |
+| 2 | 依存追加 | 証明書ストア（`webpki-roots`／`rustls-native-certs`）・`ring` のライセンス式確認（`cargo tree` 実測） | §2.3 | #2088 §3 の実測対象と共有 | 承認後に実測。推定で適合と記述しない（deps-policy.md） |
+| 3 | 依存追加 | OS 呼び出しラッパー（`libc`／`rustix`）をトークンファイル読み取り（`O_NOFOLLOW`）用に追加すること（必要な場合のみ） | §4.1・§4.4 | #2088 §7-5（第 11 区分相当）と区分を共有しうるが、要否は実装時に確認する | `std::os::unix::fs::OpenOptionsExt::custom_flags` の範囲で完結する可能性もあり、その場合は新規依存不要 |
+| 4 | 依存追加（不要の確認） | JSON 解析は `serde`／`serde_json`（既存の許容区分）を workspace 固定版のまま使う。新規区分は不要 | §2.6-8 | 該当なし | URL のパーセントエンコードは新規依存にせず自作する（依存を増やさない） |
+| 5 | 依存追加（見送り） | `zeroize` は追加しない（メモリ上のゼロ化は保証しない残留リスクとして据え置く） | §4.1 | 該当なし | 新規依存の追加を伴わない現状維持の確認事項 |
+| 6 | 依存追加（非推奨の確認） | crates.io の既存 `hf-hub` クレートを依存として使う案は非推奨（§2.5）。依存ツリー・ライセンスは未実測のまま | §2.5 | 該当なし | 独自キャッシュ・HTTP スタックを持ち facade の pin 検証・dirfd 契約を迂回するため |
+| 7 | 依存追加（運用影響） | 上記 1〜3 の依存追加に伴う `.claude/rules/deps-policy.md` の区分追加・`docs/license-matrix.md` の行追加・`deny.toml`・`scripts/check-forbidden-deps.sh` への影響 | §2.6-8 | #2088 §7-3 と同じ運用 | 依存追加とセットで行う（deps-policy.md） |
+| 8 | workspace 追加 | 新規クレートをルート `Cargo.toml` の `members` へ追加すること（ディレクトリ名・`[package] name` の決定を含む） | §2.6-1・§2.6-2 | 該当なし | ディレクトリ名案は `crates/hf-hub`（§2.4） |
+| 9 | workspace 追加（運用影響） | 上記 8 に伴う CLAUDE.md「想定クレート 10 個＋docs-site」記述の更新、`.claude/rules/delegation-impl.md` の委譲マッピング（担当 builder）の更新 | §2.4 | 該当なし | 承認後に実施 |
+| 10 | 公開範囲 | crates.io 公開の要否（8 件目・`fandhe-ai-` prefix）／`publish = false`／workspace 外の 3 択（§2.4） | §2.4・§2.6-3 | 該当なし | 公開する場合は名前の空き確認（第三者の `hf-hub` と衝突しないか）を承認後に `docs/crates-io-naming-decision.md` の手順で実施。現時点で未実測 |
+| 11 | 公開範囲（運用影響） | crates.io 公開を選ぶ場合の `release-all.yml`・`docs/crates-io-publishing-order.md` への追加 | §2.4 | 該当なし | 上記 10 の決定に従属 |
+| 12 | 公開範囲 | `docs/compat-api-scope.md` §0「facade が唯一のサポートされる公開 API 面」との整合の扱い（crates.io 公開を選ぶ場合、2 つ目の公開面が生じる） | §2.4・§2.6-6 | 該当なし | #2194 への申し送り（§6.2）とも関連 |
+| 13 | HTTP 経路 | HTTP 経路の選択（§2.3 案 A〈推奨〉／案 B／案 C） | §2.3・§2.6-4 | 案 A 採用時は依存が上記 1 と重なる | 推奨は案 A。確定はユーザー承認による |
+| 14 | facade 公開面拡張（前提共有） | #2088 §7-2（`download_with`・`DownloadOptions`・`Sha256Pin` 等）は本設計の前提として共有する | §2・§4 | #2088 §7-2 と**共有**（別クレートはこの機能に依存する設計） | #2088 自体が未承認のため、本設計の実装着手も #2088 承認・実装を待つ（本 doc §1「前提チェーン」） |
+| 15 | facade 公開面拡張 | §2.3 案 B を採る場合のみ: facade が「HTTPS GET でバイト列／JSON を返す」プリミティブを公開すること | §2.3 | 該当なし | 案 A 推奨のため通常は不要 |
+| 16 | facade 公開面拡張 | §4.1 (α)：`DownloadOptions` にホストへ束縛された Bearer 資格情報を追加すること | §4.1・§4.4 | 該当なし | private repo 対応の選択肢の 1 つ |
+| 17 | facade 公開面拡張 | §4.1 (β)：別クレートが自前 HTTP クライアントで転送し、facade 側に「検証済みバイト列をキャッシュへ書き込む」入口を追加すること | §4.1・§4.4 | 該当なし | private repo 対応の選択肢のもう 1 つ |
+| 18 | facade 公開面拡張 | §4.2 のリダイレクト方針フック・ホスト allowlist 入力、または追従無効化スイッチ（(b-1)／(b-2)） | §4.2・§4.4 | 該当なし | (b) を単独採用する場合の必須契約（§4.2） |
+| 19 | facade 公開面拡張 | private 内容のキャッシュ権限を 0o700（ディレクトリ）／0o600（ファイル）へ変更すること | §4.1・§4.5 | #2088 実装イシューへの申し送り（§4.5）と対応 | 現行の `mkdirat(..., 0o755)` のままだと共有キャッシュ上で private repo 内容が他ユーザーから読める（残留リスク） |
+| 20 | 新規 `unsafe` | 新規 `unsafe` は不要の見込み（トークンファイル読み取りは std の `OpenOptionsExt` の範囲で実現できる見込みのため） | §2.6-7・§4.4 | 該当なし | 「承認不要」の確認ではなく、実装時に不要と判明すれば承認事項から外れることの記録 |
+| 21 | 実装着手 | 承認後の実装イシューの起票（`.claude/rules/out-of-scope-tracking.md` により起票自体もユーザー承認が必要） | §2.6-9 | #2088 §7-4 と同じ運用 | 本 doc・本イシューでは起票しない |
+
+**#2088 の位置づけについての注記**: #2088 はイシューとしてはクローズ済みだが、`docs/model-download-design.md` §7 の承認事項は本 doc §1 の前提状態表と同じく「未取得」として扱う（同 doc は編集しない）。
+
+### 6.2 #2194 への申し送り
+
+`docs/spec/` 提案の起草に着手する際、次の文言整合を確認するよう申し送る（本節は記録のみであり、#2194 へのコメント・spec 側の編集はここでは行わない）。
+
+- 提案する文言: 「モデルハブ: コア（facade）では非対応。特定ハブ（Hugging Face Hub）連携は別クレートで提供する（汎用 URL 取得＋キャッシュ＋ハッシュ検証はコアの責務〈#2088〉）」
+- 根拠の所在: `docs/model-distribution-design.md` §5 と本 doc §5
+- **気づいた不整合**: `docs/python-binding-tf-format-non-target-spec-proposal.md` §6 は「モデルハブは #1962（`docs/facade-inference-serving-scope-decision.md`）で整理済み」としているが、同 doc（`facade-inference-serving-scope-decision.md`）にはモデルハブの記述が見当たらない（見出し・本文ともに hub／ハブの記載なし）。#2194 の起草時は `model-distribution-design.md` §5 と本 doc を参照するよう申し送る。当該 doc（`python-binding-tf-format-non-target-spec-proposal.md`）の修正はスコープ外とし、本節への記録にとどめる
 
 ## 7. スコープ外・未決事項
 
 ### スコープ外
 
 - push（アップロード）系 API
-- 依存の詳細な列挙とライセンス実測（§6／#2246）
+- 依存の詳細な列挙（§6／#2246 で完了済み）
+- 依存のライセンス実測（承認後の実装イシューで実施。`docs/model-download-design.md` §8-1 と同じ手順）
 - dataset／space リポ
 - 分割 safetensors と `config.json` の取り扱い（§3.3）
 - private／gated repo の取得（§4.1 の推奨は初期状態 (γ) の fail-closed 非対応。(α)／(β) の選択は承認事項）
@@ -336,8 +414,8 @@ branch から sha への対応を覚えておく refs 相当の永続化は**ス
 
 - HF 命名規則の確認（§3.2）
 - オフライン時の revision 解決（§3.3）
-- 公開区分（§2.4）
-- HTTP 経路の選択（§2.3）
+- 公開区分（§2.4・§6）
+- HTTP 経路の選択（§2.3・§6）
 - 認証トークンの環境変数名・トークンファイル既定パス・暗黙送信無効化スイッチの外部仕様確認（§4.1）
 - 401／403／404 の返り方の外部仕様確認（§4.1）
 - CDN リダイレクト先ドメインの allowlist 確定（§4.2）
@@ -350,4 +428,4 @@ branch から sha への対応を覚えておく refs 相当の永続化は**ス
 - 規約: `.claude/rules/deps-policy.md`・`.claude/rules/security.md`
 - コード: `crates/facade/src/model.rs`（`ModelRegistry` 公開面）・`crates/facade/tests/api_surface.rs`（依存形状固定テスト）
 - イシュー: #2243・#2244・#2245・#2246・#2088・#2087・#2194
-- 外部 URL: https://docs.pytorch.org/docs/2.14/hub.html （PyTorch Hub）・https://huggingface.co/docs/huggingface_hub/guides/integrations （huggingface_hub integrations）・https://huggingface.co/docs/hub/keras （Keras at HF）・https://huggingface.co/docs/hub/api （HF Hub API ドキュメント）・https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables （huggingface_hub 環境変数リファレンス。トークン供給経路の案の出典。§4.1）
+- 外部 URL: https://docs.pytorch.org/docs/2.14/hub.html （PyTorch Hub）・https://huggingface.co/docs/huggingface_hub/guides/integrations （huggingface_hub integrations）・https://huggingface.co/docs/hub/keras （Keras at HF）・https://huggingface.co/docs/hub/api （HF Hub API ドキュメント）・https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables （huggingface_hub 環境変数リファレンス。トークン供給経路の案の出典。§4.1）・https://www.tensorflow.org/api_docs/python/tf/keras/utils/get_file （`tf.keras.utils.get_file`。§5.1）・https://blog.tensorflow.org/2023/03/tensorflow-hub-kaggle.html （tfhub.dev の Kaggle Models 移行。§5.1）・https://huggingface.co/docs/huggingface_hub/package_reference/mixins （`PyTorchModelHubMixin`。§5.1）・https://huggingface.co/docs/huggingface_hub/guides/download （`hf_hub_download`。§5.1・§5.2）・https://keras.io/keras_hub/ （KerasHub `from_preset`。§5.1・§5.3。preset 内訳の詳細は外部仕様・要確認）
