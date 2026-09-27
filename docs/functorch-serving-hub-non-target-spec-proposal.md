@@ -7,7 +7,7 @@
 - **コード変更なし**（`crates/**`・`Cargo.toml`／`Cargo.lock`・`docs/spec/`〈正本 submodule〉・tolerance／baseline・ガードレール閾値は一切変更していない）。
 - 追記先は REQ-9「引き続き対象外」列挙（`docs/spec/04-requirements.md:233`）である。
 - sparse／complex は同列挙に既記載のため（`docs/tensor-core-sparse-complex-decision.md` §3。#1633）、**本提案では spec 改定を行わず、新規 spec issue を起票しない**。既存の統合引用に留める。
-- §4 の spec (b) 形式提案文案は**起票していない**（未実施。§5 の承認事項 1 を参照）。
+- §5 の spec (b) 形式提案文案は**起票していない**（未実施。§6 の承認事項 1 を参照）。
 - 以下は本提案に含めない: トークナイザ（`docs/tokenizer-non-target-spec-proposal.md`・#2086）、言語バインディング・TensorFlow SavedModel 形式（#2193）、分散学習・量子化の網羅対応（既存の除外事項。従属関係のみ §3-C で言及する）。
 
 ## §1 位置づけ
