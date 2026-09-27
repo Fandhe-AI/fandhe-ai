@@ -26,7 +26,7 @@ use fandhe_ai_tensor_core::{ShapeError, Tensor};
 use crate::error::AutodiffError;
 use crate::eval::dense_vec_i32;
 use crate::nn::embedding::ids_from_f32;
-use crate::nn::init::{WEIGHT_SEED_SALT, derive_seed, try_normal_init};
+use crate::nn::init::{WEIGHT_SEED_SALT, alloc_failed, derive_seed, try_normal_init};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -71,8 +71,10 @@ pub struct EmbeddingBag {
 impl EmbeddingBag {
     /// [`crate::nn::embedding::Embedding::new`] と同じ構築規律（決定的
     /// シードで `N(0, 1)` 初期化・`padding_idx` 行はゼロ初期化・要素数
-    /// 乗算 overflow／確保失敗を `checked_mul`／`try_normal_init` で
-    /// 型付きエラー化）に `mode` を加えたもの。
+    /// 乗算 overflow は `checked_mul` で意味論エラー〈`InvalidArgument`〉
+    /// 化・確保失敗〈`try_normal_init`〉は非アロケーションな
+    /// `AutodiffError::Shape(ShapeError::ElementCountOverflow)` 化。
+    /// イシュー #2248）に `mode` を加えたもの。
     pub fn new(
         num_embeddings: usize,
         embedding_dim: usize,
@@ -99,13 +101,8 @@ impl EmbeddingBag {
             ))
         })?;
         let weight_seed = derive_seed(seed, WEIGHT_SEED_SALT);
-        let mut weight_data = try_normal_init(weight_len, weight_seed).map_err(|err| {
-            AutodiffError::InvalidArgument(format!(
-                "EmbeddingBag::new: weight (num_embeddings={num_embeddings}, \
-                 embedding_dim={embedding_dim}, len={weight_len}) 分のバッファを確保できません: \
-                 {err}"
-            ))
-        })?;
+        let mut weight_data =
+            try_normal_init(weight_len, weight_seed).map_err(|_| alloc_failed())?;
         if let Some(p) = padding_idx {
             let start = p * embedding_dim;
             let end = start + embedding_dim;
@@ -543,6 +540,25 @@ mod tests {
             panic!("padding_idx 範囲外は Err を返すはず")
         };
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// [`crate::nn::embedding::tests::
+    /// new_rejects_allocation_too_large_without_panicking`] の
+    /// `EmbeddingBag` 版（イシュー #2248）。`weight_len = num_embeddings *
+    /// embedding_dim = 1 * isize::MAX` は `checked_mul` を素通りするが
+    /// f32 4 バイト換算で `isize::MAX` を超え `try_normal_init` が
+    /// panic せず `Err` を返す。返り値が非アロケーションな
+    /// `Shape(ShapeError::ElementCountOverflow)` であることを確認する。
+    #[test]
+    fn new_rejects_allocation_too_large_without_panicking() {
+        let Err(err) = EmbeddingBag::new(1, isize::MAX as usize, EmbeddingBagMode::Sum, None, 42)
+        else {
+            panic!("確保不能なほど大きい weight は Err を返すはず")
+        };
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
     }
 
     #[test]

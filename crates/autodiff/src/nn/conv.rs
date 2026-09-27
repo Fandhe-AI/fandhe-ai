@@ -33,31 +33,9 @@ use fandhe_ai_tensor_core::{
 use crate::conv3d_ops;
 use crate::error::AutodiffError;
 use crate::grad::{conv_transpose2d_with_fallback, conv2d_with_fallback, conv3d_with_fallback};
-use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, try_uniform_init};
+use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, checked_uniform_init, derive_seed};
 use crate::tape::Tape;
 use crate::var::Var;
-
-/// [`try_uniform_init`] の `Err`（`TryReserveError`）を
-/// [`AutodiffError::InvalidArgument`] へ変換する重み初期化共通ヘルパー
-/// （`nn::rnn::checked_uniform_init` と同型。イシュー #1770
-/// codex-review P1 指摘: `checked_mul` による `usize` オーバーフロー
-/// 検査だけでは `Vec<f32>` の `isize::MAX` バイト制限を検査できず、
-/// `uniform_init` 内の `collect()` が capacity overflow で panic
-/// しうる。本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。
-/// `field_name` はエラーメッセージにどのパラメータ（`weight`／
-/// `bias`）の確保に失敗したかを残すためのラベル。
-fn checked_uniform_init(
-    len: usize,
-    bound: f32,
-    seed: u64,
-    field_name: &str,
-) -> Result<Vec<f32>, AutodiffError> {
-    try_uniform_init(len, bound, seed).map_err(|err| {
-        AutodiffError::InvalidArgument(format!(
-            "{field_name}: len={len} 要素分のバッファを確保できません: {err}"
-        ))
-    })
-}
 
 /// Conv2d 層のパラメータ本体。`weight` は `[out_channels, in_channels /
 /// groups, kH, kW]`（PyTorch `nn.Conv2d.weight` と同じレイアウト。
@@ -159,14 +137,12 @@ impl Conv2d {
                     "Conv2d::new: weight element count overflows usize".to_string(),
                 )
             })?;
-        let weight_data =
-            checked_uniform_init(weight_numel, bound, weight_seed, "Conv2d::new: weight")?;
+        let weight_data = checked_uniform_init(weight_numel, bound, weight_seed)?;
         let weight = Tensor::new(weight_data, &[out_channels, cin_g, kh, kw])?;
 
         let bias = if bias {
             let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
-            let bias_data =
-                checked_uniform_init(out_channels, bound, bias_seed, "Conv2d::new: bias")?;
+            let bias_data = checked_uniform_init(out_channels, bound, bias_seed)?;
             Some(Tensor::new(bias_data, &[out_channels])?)
         } else {
             None
@@ -620,18 +596,12 @@ impl ConvTranspose2d {
                     "ConvTranspose2d::new: weight element count overflows usize".to_string(),
                 )
             })?;
-        let weight_data = checked_uniform_init(
-            weight_numel,
-            bound,
-            weight_seed,
-            "ConvTranspose2d::new: weight",
-        )?;
+        let weight_data = checked_uniform_init(weight_numel, bound, weight_seed)?;
         let weight = Tensor::new(weight_data, &[in_channels, cout_g, kh, kw])?;
 
         let bias = if bias {
             let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
-            let bias_data =
-                checked_uniform_init(out_channels, bound, bias_seed, "ConvTranspose2d::new: bias")?;
+            let bias_data = checked_uniform_init(out_channels, bound, bias_seed)?;
             Some(Tensor::new(bias_data, &[out_channels])?)
         } else {
             None
@@ -1073,14 +1043,12 @@ impl Conv1d {
                     "Conv1d::new: weight element count overflows usize".to_string(),
                 )
             })?;
-        let weight_data =
-            checked_uniform_init(weight_numel, bound, weight_seed, "Conv1d::new: weight")?;
+        let weight_data = checked_uniform_init(weight_numel, bound, weight_seed)?;
         let weight = Tensor::new(weight_data, &[out_channels, cin_g, kernel_size])?;
 
         let bias = if bias {
             let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
-            let bias_data =
-                checked_uniform_init(out_channels, bound, bias_seed, "Conv1d::new: bias")?;
+            let bias_data = checked_uniform_init(out_channels, bound, bias_seed)?;
             Some(Tensor::new(bias_data, &[out_channels])?)
         } else {
             None
@@ -1484,14 +1452,12 @@ impl Conv3d {
                     "Conv3d::new: weight element count overflows usize".to_string(),
                 )
             })?;
-        let weight_data =
-            checked_uniform_init(weight_numel, bound, weight_seed, "Conv3d::new: weight")?;
+        let weight_data = checked_uniform_init(weight_numel, bound, weight_seed)?;
         let weight = Tensor::new(weight_data, &[out_channels, cin_g, kd, kh, kw])?;
 
         let bias = if bias {
             let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
-            let bias_data =
-                checked_uniform_init(out_channels, bound, bias_seed, "Conv3d::new: bias")?;
+            let bias_data = checked_uniform_init(out_channels, bound, bias_seed)?;
             Some(Tensor::new(bias_data, &[out_channels])?)
         } else {
             None
@@ -1898,18 +1864,12 @@ impl ConvTranspose1d {
                     "ConvTranspose1d::new: weight element count overflows usize".to_string(),
                 )
             })?;
-        let weight_data = checked_uniform_init(
-            weight_numel,
-            bound,
-            weight_seed,
-            "ConvTranspose1d::new: weight",
-        )?;
+        let weight_data = checked_uniform_init(weight_numel, bound, weight_seed)?;
         let weight = Tensor::new(weight_data, &[in_channels, cout_g, kernel_size])?;
 
         let bias = if bias {
             let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
-            let bias_data =
-                checked_uniform_init(out_channels, bound, bias_seed, "ConvTranspose1d::new: bias")?;
+            let bias_data = checked_uniform_init(out_channels, bound, bias_seed)?;
             Some(Tensor::new(bias_data, &[out_channels])?)
         } else {
             None

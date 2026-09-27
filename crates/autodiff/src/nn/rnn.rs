@@ -31,8 +31,8 @@ use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor, gemm_out_shape, requ
 
 use crate::error::AutodiffError;
 use crate::nn::init::{
-    BIAS_HH_SEED_SALT, BIAS_SEED_SALT, WEIGHT_HH_SEED_SALT, WEIGHT_SEED_SALT, derive_seed,
-    try_uniform_init,
+    BIAS_HH_SEED_SALT, BIAS_SEED_SALT, WEIGHT_HH_SEED_SALT, WEIGHT_SEED_SALT, alloc_failed,
+    checked_uniform_init, derive_seed,
 };
 use crate::nn::module::{Module, strip_child_prefix};
 use crate::tape::Tape;
@@ -96,12 +96,12 @@ fn build_gate_params(
 
     let w_ih_seed = derive_seed(seed, WEIGHT_SEED_SALT);
     let weight_ih = Tensor::new(
-        checked_uniform_init(w_ih_len, bound, w_ih_seed, "weight_ih")?,
+        checked_uniform_init(w_ih_len, bound, w_ih_seed)?,
         &[input_size, gh],
     )?;
     let w_hh_seed = derive_seed(seed, WEIGHT_HH_SEED_SALT);
     let weight_hh = Tensor::new(
-        checked_uniform_init(w_hh_len, bound, w_hh_seed, "weight_hh")?,
+        checked_uniform_init(w_hh_len, bound, w_hh_seed)?,
         &[hidden_size, gh],
     )?;
 
@@ -110,11 +110,11 @@ fn build_gate_params(
         let b_hh_seed = derive_seed(seed, BIAS_HH_SEED_SALT);
         (
             Some(Tensor::new(
-                checked_uniform_init(gh, bound, b_ih_seed, "bias_ih")?,
+                checked_uniform_init(gh, bound, b_ih_seed)?,
                 &[gh],
             )?),
             Some(Tensor::new(
-                checked_uniform_init(gh, bound, b_hh_seed, "bias_hh")?,
+                checked_uniform_init(gh, bound, b_hh_seed)?,
                 &[gh],
             )?),
         )
@@ -123,24 +123,6 @@ fn build_gate_params(
     };
 
     Ok((weight_ih, weight_hh, bias_ih, bias_hh))
-}
-
-/// `try_uniform_init` の `Err`（`TryReserveError`）を
-/// [`AutodiffError::InvalidArgument`] へ変換する `build_gate_params`
-/// 共通ヘルパー。`field_name` はエラーメッセージにどのパラメータ
-/// （`weight_ih`／`weight_hh`／`bias_ih`／`bias_hh`）の確保に失敗したか
-/// を残すためのラベル（イシュー #1647 codex-review P1 指摘）。
-fn checked_uniform_init(
-    len: usize,
-    bound: f32,
-    seed: u64,
-    field_name: &str,
-) -> Result<Vec<f32>, AutodiffError> {
-    try_uniform_init(len, bound, seed).map_err(|err| {
-        AutodiffError::InvalidArgument(format!(
-            "{field_name}: len={len} 要素分のバッファを確保できません: {err}"
-        ))
-    })
 }
 
 /// `gates * hidden`（ゲート幅）を `checked_mul` で検証する共通実装。
@@ -309,15 +291,17 @@ pub(super) fn validate_seq_input(
 /// そのまま呼ぶと確保不能な `t_len` で本番経路が capacity overflow
 /// panic する（`.claude/rules/coding-rust.md` 本番経路 panic 禁止。
 /// イシュー #1647 codex-review P1 指摘）。`try_reserve_exact` で
-/// 確保可否を先に確認し、失敗時は panic させず
-/// [`AutodiffError::InvalidArgument`] へ変換して呼び出し元へ返す。
-pub(super) fn reserve_outputs<T>(t_len: usize, op_name: &str) -> Result<Vec<T>, AutodiffError> {
+/// 確保可否を先に確認し、失敗時は panic させず非アロケーションな
+/// [`alloc_failed`] へ変換して呼び出し元へ返す（以前は `op_name` 付き
+/// `format!` で `AutodiffError::InvalidArgument` を構築していたが、
+/// 確保失敗の*報告*経路自体が新たな `String` 確保を伴う構造だった
+/// ため `nn::init::alloc_failed` と同じ理由で非アロケーション化した。
+/// イシュー #2248）。
+pub(super) fn reserve_outputs<T>(t_len: usize) -> Result<Vec<T>, AutodiffError> {
     let mut outputs = Vec::new();
-    outputs.try_reserve_exact(t_len).map_err(|err| {
-        AutodiffError::InvalidArgument(format!(
-            "{op_name}: T={t_len} 分の出力バッファを確保できません: {err}"
-        ))
-    })?;
+    outputs
+        .try_reserve_exact(t_len)
+        .map_err(|_| alloc_failed())?;
     Ok(outputs)
 }
 
@@ -746,7 +730,7 @@ impl Rnn {
             Some(v) => *v,
             None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
         };
-        let mut outputs = reserve_outputs(t_len, "Rnn::forward_seq")?;
+        let mut outputs = reserve_outputs(t_len)?;
         for t in 0..t_len {
             let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
             let x_t = tape.var(&x_t_tensor);
@@ -823,7 +807,7 @@ impl Module for Rnn {
             validate_seq_input(input, self.cell.input_size(), "Rnn::forward_host")?;
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
-        let mut outputs = reserve_outputs(t_len, "Rnn::forward_host")?;
+        let mut outputs = reserve_outputs(t_len)?;
         for t in 0..t_len {
             let x_t = slice_timestep(input, t, b_dim, d_dim)?;
             h = self.cell.forward_host(ops, &x_t, &h)?;
@@ -1183,7 +1167,7 @@ impl Lstm {
             Some(v) => *v,
             None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
         };
-        let mut outputs = reserve_outputs(t_len, "Lstm::forward_seq")?;
+        let mut outputs = reserve_outputs(t_len)?;
         for t in 0..t_len {
             let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
             let x_t = tape.var(&x_t_tensor);
@@ -1260,7 +1244,7 @@ impl Module for Lstm {
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
         let mut c = Tensor::zeros(&[b_dim, hidden])?;
-        let mut outputs = reserve_outputs(t_len, "Lstm::forward_host")?;
+        let mut outputs = reserve_outputs(t_len)?;
         for t in 0..t_len {
             let x_t = slice_timestep(input, t, b_dim, d_dim)?;
             let (h_t, c_t) = self.cell.forward_host(ops, &x_t, &h, &c)?;
@@ -1592,7 +1576,7 @@ impl Gru {
             Some(v) => *v,
             None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
         };
-        let mut outputs = reserve_outputs(t_len, "Gru::forward_seq")?;
+        let mut outputs = reserve_outputs(t_len)?;
         for t in 0..t_len {
             let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
             let x_t = tape.var(&x_t_tensor);
@@ -1662,7 +1646,7 @@ impl Module for Gru {
             validate_seq_input(input, self.cell.input_size(), "Gru::forward_host")?;
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
-        let mut outputs = reserve_outputs(t_len, "Gru::forward_host")?;
+        let mut outputs = reserve_outputs(t_len)?;
         for t in 0..t_len {
             let x_t = slice_timestep(input, t, b_dim, d_dim)?;
             h = self.cell.forward_host(ops, &x_t, &h)?;

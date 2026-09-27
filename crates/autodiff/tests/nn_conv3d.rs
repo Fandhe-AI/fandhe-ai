@@ -127,6 +127,32 @@ fn conv3d_new_rejects_zero_stride_dilation_groups() {
     ));
 }
 
+/// `nn_conv.rs::conv2d_new_rejects_weight_allocation_exceeding_isize_max`
+/// の `Conv3d` 版（イシュー #2248）。`weight_numel = out_channels * cin_g
+/// * kD * kH * kW = 1 * (1<<61) * 1 * 1 * 1 = 1<<61` は `checked_mul` を
+/// 素通りするが f32 4 バイト換算で `1<<63` バイトとなり `isize::MAX` を
+/// 超える。`checked_uniform_init`（`nn::init` 共有版）が panic せず
+/// 非アロケーションな `Shape(ElementCountOverflow)` を返すことを
+/// 確認する。
+#[test]
+fn conv3d_new_rejects_weight_allocation_exceeding_isize_max() {
+    let err = err_of(Conv3d::new(
+        1usize << 61,
+        1,
+        [1, 1, 1],
+        [1, 1, 1],
+        [0, 0, 0],
+        [1, 1, 1],
+        1,
+        false,
+        0,
+    ));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+}
+
 #[test]
 fn conv3d_from_parameters_rejects_wrong_rank() {
     let w = t(vec![0.0; 4], &[1, 1, 2, 2]);

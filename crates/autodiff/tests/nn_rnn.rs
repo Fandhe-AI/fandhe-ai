@@ -10,9 +10,12 @@
 
 mod common;
 
-use fandhe_ai_autodiff::nn::{Gru, GruCell, Lstm, LstmCell, Module, Rnn, RnnCell};
+use fandhe_ai_autodiff::nn::{
+    Gru, GruCell, Lstm, LstmCell, Module, Rnn, RnnCell, RnnConfig, StackedGru, StackedLstm,
+    StackedRnn,
+};
 use fandhe_ai_autodiff::{AutodiffError, GateParams, Tape, Var};
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -1792,7 +1795,10 @@ fn forward_seq_rejects_zero_length_sequence() {
 /// panic する（本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。
 /// `reserve_outputs`（`try_reserve_exact` 経由）へ切替後は panic せず
 /// 型付きエラーを返すことを、`Rnn`／`Lstm`／`Gru` の
-/// `forward_seq`／`forward_host` 全 6 経路で確認する。
+/// `forward_seq`／`forward_host` 全 6 経路で確認する。返り値はイシュー
+/// #2248 で `InvalidArgument` から非アロケーションな
+/// `Shape(ShapeError::ElementCountOverflow)` へ変更した（確保失敗の
+/// 報告経路自体で新たな `String` 確保〈`format!`〉を行わないため）。
 #[test]
 fn forward_seq_and_forward_host_reject_unreservable_sequence_length_instead_of_panicking() {
     // 要素数 0（`b_dim=0`）のまま `t_len=usize::MAX` を許す不正 shape。
@@ -1803,33 +1809,51 @@ fn forward_seq_and_forward_host_reject_unreservable_sequence_length_instead_of_p
     let err = rnn
         .forward_seq(&tape, &huge_t_zero_batch, None)
         .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
     let err = rnn
         .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
         .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 
     let lstm = Lstm::new(D, HID, true, 1).unwrap();
     let tape = Tape::new_with_ops(common::naive_ops());
     let err = lstm
         .forward_seq(&tape, &huge_t_zero_batch, None, None)
         .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
     let err = lstm
         .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
         .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 
     let gru = Gru::new(D, HID, true, 1).unwrap();
     let tape = Tape::new_with_ops(common::naive_ops());
     let err = gru
         .forward_seq(&tape, &huge_t_zero_batch, None)
         .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
     let err = gru
         .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
         .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 /// codex-review P1 指摘の回帰テスト（PRRT_kwDOTuUCJc6hydZU）:
@@ -1843,36 +1867,41 @@ fn forward_seq_and_forward_host_reject_unreservable_sequence_length_instead_of_p
 /// `isize::MAX`（`2^63 - 1`）を超える。`try_uniform_init` へ是正する前は
 /// `uniform_init` 内部の `collect()` が capacity overflow で panic して
 /// いた（本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。是正後は
-/// panic せず `AutodiffError::InvalidArgument` を返すことを、
-/// `RnnCell`／`LstmCell`／`GruCell` の共通ヘルパー
-/// （`build_gate_params`）経由で確認する。
+/// panic せず非アロケーションな `AutodiffError::Shape(ShapeError::
+/// ElementCountOverflow)` を返すことを、`RnnCell`／`LstmCell`／
+/// `GruCell` の共通ヘルパー（`build_gate_params`）経由で確認する
+/// （返り値はイシュー #2248 で `InvalidArgument` から変更: 確保失敗の
+/// 報告経路自体で新たな `String` 確保を行わないため）。
 #[test]
 fn rnn_lstm_gru_new_reject_unallocatable_init_capacity_instead_of_panicking() {
     let huge_input: usize = 1usize << 61;
 
     let err = RnnCell::new(huge_input, 1, false, 0).unwrap_err();
     assert!(
-        matches!(err, AutodiffError::InvalidArgument(_)),
-        "RnnCell::new: 確保不能な初期化容量を InvalidArgument で拒否することを期待したが {err:?} だった"
+        matches!(err, AutodiffError::Shape(ShapeError::ElementCountOverflow)),
+        "RnnCell::new: 確保不能な初期化容量を Shape(ElementCountOverflow) で拒否することを期待したが {err:?} だった"
     );
 
     let err = LstmCell::new(huge_input, 1, false, 0).unwrap_err();
     assert!(
-        matches!(err, AutodiffError::InvalidArgument(_)),
-        "LstmCell::new: 確保不能な初期化容量を InvalidArgument で拒否することを期待したが {err:?} だった"
+        matches!(err, AutodiffError::Shape(ShapeError::ElementCountOverflow)),
+        "LstmCell::new: 確保不能な初期化容量を Shape(ElementCountOverflow) で拒否することを期待したが {err:?} だった"
     );
 
     let err = GruCell::new(huge_input, 1, false, 0).unwrap_err();
     assert!(
-        matches!(err, AutodiffError::InvalidArgument(_)),
-        "GruCell::new: 確保不能な初期化容量を InvalidArgument で拒否することを期待したが {err:?} だった"
+        matches!(err, AutodiffError::Shape(ShapeError::ElementCountOverflow)),
+        "GruCell::new: 確保不能な初期化容量を Shape(ElementCountOverflow) で拒否することを期待したが {err:?} だった"
     );
 
     // bias=true 経路（bias_ih／bias_hh の確保）も同型ヘルパーを通るが、
     // bias 側の長さは `gh`（ここでは `gates`）のみで小さいため、この
     // ケースでは weight_ih／weight_hh 側の確保失敗が先に検出される。
     let err = RnnCell::new(huge_input, 1, true, 0).unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 /// codex-review P1 指摘の回帰テスト（PRRT_kwDOTuUCJc6hyyyK）:
@@ -1930,4 +1959,45 @@ fn forward_seq_and_forward_host_reject_input_width_mismatch_before_zero_state_al
         .forward_host(common::naive_ops().as_ref(), &d_mismatched_huge_batch)
         .unwrap_err();
     assert!(matches!(err, AutodiffError::Shape(_)));
+}
+
+/// [`forward_seq_and_forward_host_reject_unreservable_sequence_length_instead_of_panicking`]
+/// の `StackedRnn`／`StackedGru`／`StackedLstm` 版（イシュー #2248）。
+/// `reserve_outputs`（`nn::rnn` 共有版。`nn::rnn_stacked` から `cells`
+/// 確保とは独立に呼ばれる）が `forward_host` の `layer_in` バッファ確保
+/// 経路で共有される契約を確認する。`config` は既定
+/// （`num_layers=1`・`bidirectional=false`）のため `cells` 自体の確保
+/// （`total_cells=1`）は失敗せず、`validate_seq_input` を通過した
+/// `t_len=usize::MAX`（要素数 0 の `[usize::MAX, 0, D]`）が
+/// `reserve_outputs(t_len)` で拒否されることを検証する。
+#[test]
+fn stacked_forward_host_rejects_unreservable_sequence_length_instead_of_panicking() {
+    let huge_t_zero_batch = t(Vec::new(), &[usize::MAX, 0, D]);
+
+    let rnn = StackedRnn::new(D, HID, true, 1, RnnConfig::new()).unwrap();
+    let err = rnn
+        .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+
+    let gru = StackedGru::new(D, HID, true, 1, RnnConfig::new()).unwrap();
+    let err = gru
+        .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+
+    let lstm = StackedLstm::new(D, HID, true, 1, RnnConfig::new()).unwrap();
+    let err = lstm
+        .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }

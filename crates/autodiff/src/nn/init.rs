@@ -111,6 +111,21 @@ pub(crate) fn try_uniform_init(
     Ok(values)
 }
 
+/// [`try_uniform_init`] の `Err`（`TryReserveError`）を非アロケーションな
+/// [`alloc_failed`] へ写す共有ヘルパー（`nn::conv`・`nn::rnn` 共有。以前は
+/// 両モジュールがそれぞれ `field_name` 付きのローカル版を持ち
+/// `AutodiffError::InvalidArgument(format!(..))` へ変換していたが、確保
+/// 失敗の*報告*経路自体で新たな `String` 確保を行う構造だったため
+/// `alloc_failed` と同じ理由で非アロケーション化した。イシュー #2248・
+/// PR #2239 で確立した `alloc_failed` パターンの横展開）。
+pub(crate) fn checked_uniform_init(
+    len: usize,
+    bound: f32,
+    seed: u64,
+) -> Result<Vec<f32>, AutodiffError> {
+    try_uniform_init(len, bound, seed).map_err(|_| alloc_failed())
+}
+
 /// `Embedding::new`（`nn/embedding.rs`）から呼ばれる重み初期化本体
 /// （イシュー #1604）。PyTorch `nn.Embedding` の既定初期化
 /// （`N(0, 1)`。標準正規分布）に整合させる。Box–Muller 変換
@@ -335,7 +350,23 @@ fn invalid_argument(message: impl Into<String>) -> AutodiffError {
 /// これらは確保失敗の最中に発生するものではなく、システムが実メモリ
 /// 枯渇状態にあるとは限らないタイミングで発生するため、診断メッセ
 /// ージを保持する価値の方が上回る。
-fn alloc_failed() -> AutodiffError {
+///
+/// **他モジュールへの適用範囲拡張（イシュー #2248）**: `nn::conv`
+/// （`checked_uniform_init` 経由の weight／bias 確保失敗）・`nn::rnn`
+/// （`checked_uniform_init`・`reserve_outputs`）・`nn::rnn_stacked`
+/// （`StackedRnn`／`StackedGru`／`StackedLstm::new` の `cells` 確保）・
+/// `nn::embedding`（`Embedding::new` の `try_normal_init` 失敗）・
+/// `nn::embedding_bag`（`EmbeddingBag::new` の `try_normal_init` 失敗）
+/// も同じ「`TryReserveError` を診断メッセージなしで非アロケーション
+/// なエラーへ写す」類型に属するため本関数を再利用する。一方、これら
+/// モジュールの `checked_mul` による `usize` オーバーフロー検出
+/// （`fan_in`・`weight_numel`・`gh`／`w_ih_len`／`w_hh_len`・
+/// `checked_gate_width`・`weight_len`・`validate_stack_config` 等）は
+/// 純粋な算術オーバーフロー検出であり `TryReserveError` を経由しない
+/// ため、本関数の適用範囲外のまま [`invalid_argument`] を使い続ける
+/// （境界の判断根拠は `docs/facade-nn-init-exposure-decision.md`
+/// 該当節）。
+pub(crate) fn alloc_failed() -> AutodiffError {
     AutodiffError::Shape(ShapeError::ElementCountOverflow)
 }
 

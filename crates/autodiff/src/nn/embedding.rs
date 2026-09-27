@@ -29,7 +29,7 @@
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
-use crate::nn::init::{WEIGHT_SEED_SALT, derive_seed, try_normal_init};
+use crate::nn::init::{WEIGHT_SEED_SALT, alloc_failed, derive_seed, try_normal_init};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -71,8 +71,12 @@ impl Embedding {
     /// で行い、要素数乗算が overflow しなくても確保バイト数が
     /// `isize::MAX` を超える場合（例:
     /// `Embedding::new(1, isize::MAX as usize, ..)`）に panic せず
-    /// `AutodiffError::InvalidArgument` を返す（codex-review P1
-    /// 指摘）。
+    /// 非アロケーションな `AutodiffError::Shape(ShapeError::
+    /// ElementCountOverflow)` を返す（codex-review P1 指摘。返り値は
+    /// イシュー #2248 で `InvalidArgument` から変更: 確保失敗の
+    /// *報告*経路自体で新たな `String` 確保〈`format!`〉を行う構造
+    /// だったため、`nn::init::alloc_failed` と同じ理由で非アロケー
+    /// ション化した）。
     pub fn new(
         num_embeddings: usize,
         embedding_dim: usize,
@@ -106,12 +110,8 @@ impl Embedding {
         // 先に検証するため、`weight_len` の乗算自体は overflow しなく
         // ても確保バイト数が `isize::MAX` を超える場合に panic せず
         // `Err` を返す（イシュー #1604 codex-review P1 指摘）。
-        let mut weight_data = try_normal_init(weight_len, weight_seed).map_err(|err| {
-            AutodiffError::InvalidArgument(format!(
-                "Embedding::new: weight (num_embeddings={num_embeddings}, embedding_dim={embedding_dim}, \
-                 len={weight_len}) 分のバッファを確保できません: {err}"
-            ))
-        })?;
+        let mut weight_data =
+            try_normal_init(weight_len, weight_seed).map_err(|_| alloc_failed())?;
         if let Some(p) = padding_idx {
             let start = p * embedding_dim;
             let end = start + embedding_dim;
@@ -410,7 +410,10 @@ mod tests {
         let Err(err) = Embedding::new(1, isize::MAX as usize, None, 42) else {
             panic!("確保不能なほど大きい weight は Err を返すはず")
         };
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
     }
 
     #[test]

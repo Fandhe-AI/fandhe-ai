@@ -19,7 +19,7 @@ use fandhe_ai_autodiff::nn::{
     UpsampleSize, ZeroPad2d, summary,
 };
 use fandhe_ai_autodiff::{AutodiffError, Tape};
-use fandhe_ai_tensor_core::{InterpolateMode, Tensor};
+use fandhe_ai_tensor_core::{InterpolateMode, ShapeError, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -98,6 +98,32 @@ fn conv_transpose1d_groups_greater_than_one_forward_succeeds() {
 fn conv_transpose1d_new_rejects_output_padding_ge_stride() {
     let err = err_of(ConvTranspose1d::new(1, 1, 3, 2, 0, 2, 1, 1, false, 1));
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// `nn_conv.rs::conv2d_new_rejects_weight_allocation_exceeding_isize_max`
+/// の `ConvTranspose1d` 版（イシュー #2248）。`weight_numel = in_channels
+/// * cout_g * k = (1<<61) * 1 * 1 = 1<<61` は `checked_mul` を素通りする
+/// が f32 4 バイト換算で `1<<63` バイトとなり `isize::MAX` を超える。
+/// `checked_uniform_init`（`nn::init` 共有版）が panic せず非アロケー
+/// ションな `Shape(ElementCountOverflow)` を返すことを確認する。
+#[test]
+fn conv_transpose1d_new_rejects_weight_allocation_exceeding_isize_max() {
+    let err = err_of(ConvTranspose1d::new(
+        1usize << 61,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        false,
+        0,
+    ));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
 }
 
 #[test]
