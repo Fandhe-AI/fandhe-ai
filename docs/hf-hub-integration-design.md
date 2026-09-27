@@ -128,7 +128,11 @@ impl HfHub {
         rev: &CommitSha,
         filename: &str,
         options: DownloadOptions,
-    ) -> Result<CachedModel, HfError>; // CachedModel { name, version }
+    ) -> Result<CachedModel, HfError>; // CachedModel { name, version }。
+    // filename はキャッシュキー（name/version）に反映されない（§3.3 参照）ため、
+    // 同一 repo・commit 内で異なる filename を渡す呼び出しはキャッシュ衝突になりうる。
+    // §3.3 の是正方針（filename を単一許容値へ限定する案）が確定するまで、
+    // 本シグネチャの filename 引数はこの制約付きの案として扱う
 }
 
 // #[non_exhaustive]。facade の ModelError を内部で包む
@@ -159,6 +163,11 @@ HF 側の命名規則（区切りに使う `--` が repo 名に出現しうる�
 branch から sha への対応を覚えておく refs 相当の永続化は**スコープ外**とする（毎回解決するか、呼び出し側が sha を保持する）。オフライン時の扱いは §7 の未決事項に挙げる。
 
 **単一ファイル制約**: `ModelRegistry` は `<cache_dir>/<name>/<version>/model.safetensors` の単一ファイルしか扱わない（`docs/model-distribution-design.md` §2.1）。このため `config.json`、分割 safetensors（index json と複数 shard）、サブフォルダ、safetensors 以外のファイルは本案の対象外とする。将来これらを扱う場合、`ModelRegistry` 自体の拡張が必要になり、それは facade 公開面拡張の承認事項（§2.6 項 5 相当）になる。
+
+**キャッシュキーへの `filename` 反映（要是正・codex レビュー指摘）**: 候補 1 の `name`（repo_id 由来）・`version`（commit sha）は `filename` に由来しないため、`HfHub::download` が任意の `filename` を受け取れる §3.1 のスケッチのままでは、同一 repo・同一 commit 内の異なる safetensors ファイル（例: 分割 checkpoint の複数 shard 名を許してしまった場合）が同じ `<name>/<version>/model.safetensors` へ書き込まれ、後から取得した方が先の内容を無言で上書きする。返却する `CachedModel { name, version }` にも `filename` が含まれないため、呼び出し側はどのファイルがキャッシュされているか区別できない。是正方針は次の 2 択のいずれかとし、実装イシューで確定する（本 doc は設計判断記録であり、ここでは選択肢を提示するに留め断定しない）:
+  - **是正案 A（推奨）**: `download` が受理する `filename` を単一の許容値（`ModelRegistry` の単一ファイル制約に合わせた canonical な safetensors ファイル名。例: リポジトリ内で解決したメインの safetensors ファイル 1 つのみ）に限定し、それ以外の `filename` は fail-closed で拒否する。単一ファイル制約（前段落）と整合し、キャッシュキーの衝突が構造的に発生しない
+  - **是正案 B**: `filename` を検証済みの形で `name` の符号化（`hf--<namespace>--<repo>--<filename の符号化>` 等）へ衝突なく組み込み、`CachedModel` にも `filename` を含めて返す。複数ファイルの共存キャッシュを許すが、区切り文字の一意性（§3.2 の要確認事項）に依存する分だけ検証が複雑になる
+  いずれの案でも、`CachedModel` から実際にキャッシュされたファイルを一意に特定できることを受け入れ条件とする。
 
 ### 3.4 safetensors 読込への接続
 
