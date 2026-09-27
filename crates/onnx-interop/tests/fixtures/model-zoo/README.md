@@ -41,11 +41,13 @@ tar.gz 自体〈26,741 B〉はコミットせず展開後のファイルのみ�
     （shape `[1,10]`）
   - op ヒストグラム: `Add×3・Conv×2・MatMul×1・MaxPool×2・Relu×2・Reshape×2`
   - 実行結果（HEAD。`decode → build_graph → run` 全経路）:
-    `Conv` 自体はイシュー #2076 で実装済みだが、`InterpError::Op(OpError::
-    InvalidConvAttribute)` で止まる（本モデルが使う `auto_pad="SAME_UPPER"`
-    は未対応。追跡先はイシュー #2199。#2199 の受け入れ条件は pads／strides／
-    dilations のみで `auto_pad` には触れていないため、`auto_pad` 対応は
-    別途追跡が必要 — `docs/onnx-model-zoo-parity.md` §5 参照）
+    `Conv` 自体はイシュー #2076 で実装済み、`MaxPool` もイシュー #2199 で
+    対応済みだが、`InterpError::Op(OpError::InvalidConvAttribute)` で
+    止まる（本モデルが使う `auto_pad="SAME_UPPER"` は未対応。#2199 の
+    受け入れ条件は pads／strides／dilations のみで `auto_pad` には
+    触れていないため、`auto_pad` 対応は別途追跡が必要 — `docs/onnx-
+    model-zoo-parity.md` §5 参照）。Conv が `MaxPool` より先に停止するため
+    停止点自体は #2199 実装前後で変わらない
 
 ## tier B（非コミット。`ONNX_INTEROP_MODEL_ZOO_DIR` 経由の `#[ignore]` テスト）
 

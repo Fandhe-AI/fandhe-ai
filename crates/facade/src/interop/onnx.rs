@@ -24,12 +24,13 @@
 //! `.claude/rules/coding-rust.md` の REQ-2 統一複合判定（バックエンド間
 //! 数値一致）とは別指標である（両者を混同しない）。
 //!
-//! import 対応 op は 26 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭
+//! import 対応 op は 28 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭
 //! コメント参照。イシュー #2200 で `GlobalAveragePool`／
-//! `BatchNormalization`／`Flatten` を追加）。export allowlist もイシュー
-//! #2187 で 26 種へ拡大し import と対称になった（下記「ONNX export」節
-//! 参照。E2 の 8 op・MaxPool／AveragePool は import 側 PR 未マージのため
-//! 引き続き import・export とも非対応）。未対応 `op_type` は無言 skip せず
+//! `BatchNormalization`／`Flatten`、イシュー #2199 で `MaxPool`／
+//! `AveragePool` を追加・`Conv` に 1D 対応を追加した）。export allowlist は
+//! イシュー #2187 で 26 種へ拡大した（下記「ONNX export」節参照）が、
+//! `MaxPool`／`AveragePool` の 2 op は import 専用のため export 非対応の
+//! まま残る（import・export 非対称）。未対応 `op_type` は無言 skip せず
 //! [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
@@ -72,11 +73,12 @@
 //!   #2200 導入時点の import 対応 26 op と対称化した）外のノードを含む
 //!   モデルは `from_bytes` では構築できても **export 時に**
 //!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する
-//!   （無言 skip しない。イシュー #2200・#2187）。import 対応は本 PR
-//!   （イシュー #2186）で `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
-//!   `ReduceMean`／`Pad`／`Resize` の 8 op を追加し 34 op へ拡大したが、
+//!   （無言 skip しない。イシュー #2200・#2187）。import 対応はその後
+//!   イシュー #2186 で `Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
+//!   `ReduceMean`／`Pad`／`Resize` の 8 op、イシュー #2199 で
+//!   `MaxPool`／`AveragePool` の 2 op を追加し 36 op へ拡大したが、
 //!   `interp` のディスパッチ表への追加のみで本 export allowlist は
-//!   未拡張のまま（26 op）。この 8 op を含むモデルは import はできても
+//!   未拡張のまま（26 op）。この 10 op を含むモデルは import はできても
 //!   export では [`OnnxError::UnsupportedOp`] になる非対称が残る
 //!   （追跡: 別イシューでの export 側拡張が必要。out-of-scope-tracking.md
 //!   に従いユーザー承認を得たうえで Issue 化する）
