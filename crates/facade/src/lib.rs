@@ -4681,39 +4681,37 @@ struct LrSchedulerExtHoldDoctestGuard;
 /// 固定する doctest 足場。`OptimizerExtHoldDoctestGuard`（#2171）と同型の
 /// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_lbfgs_hold_probe::{Lbfgs, LbfgsConfig, LbfgsLineSearch}` を
-/// 導入し、3 個すべてを引数に取る `__probe` 関数を書く。facade がどの
-/// 経路（単一行・複数行・ネストした group での `pub use`・別名
-/// エクスポート・facade 独自の `struct`／`type` 宣言）でこれらの名前を
-/// 公開しても、ローカル定義との glob 衝突（E0659 等）でコンパイルが
-/// 失敗する。
+/// `__fandhe_lbfgs_hold_probe::{Lbfgs, LbfgsLineSearch}` を導入し、2 個
+/// すべてを引数に取る `__probe` 関数を書く。facade がどの経路（単一行・
+/// 複数行・ネストした group での `pub use`・別名エクスポート・facade
+/// 独自の `struct`／`type` 宣言）でこれらの名前を公開しても、ローカル
+/// 定義との glob 衝突（E0659 等）でコンパイルが失敗する。
 ///
-/// `Lbfgs`（L-BFGS。Hessian 近似）は `fandhe_ai_autodiff::nn::optim` に
-/// 実装済み（内部クレート限定。`crates/autodiff/src/nn/optim/lbfgs.rs`。
-/// イシュー #2197）だが、facade（`fandhe_ai::optim`）からの再エクスポート
-/// および `compat::Sequential::compile()` の `Optimizer` enum への
-/// variant 追加は未承認のため保留する（`docs/autodiff-lbfgs-decision.md`
-/// §7 承認事項）。
+/// **2026-09-27 所有者承認（#2172 コメント）による範囲縮小**: 承認事項は
+/// `compat::Optimizer::Lbfgs(LbfgsConfig)` variant の追加・`LbfgsConfig`
+/// 型の facade 再エクスポート・`compile()`/`fit()` 統合の 3 点に限られ、
+/// `Lbfgs`（L-BFGS optimizer 本体。closure 駆動）・`LbfgsLineSearch`
+/// （line search 方式選択）の再エクスポートは含まれない。このため
+/// `LbfgsConfig` は本足場のプローブから外し（`crates/facade/src/optim.rs`
+/// が実際に再エクスポート済み）、`compat::Optimizer` enum への variant
+/// 追加を検出していた入れ子 `__fandhe_lbfgs_variant_probe` モジュール
+/// （旧 2 系統目の否定ガード）は、variant 追加自体が承認済みとなり
+/// 不要になったため削除した（対応する正のテストは
+/// `crates/facade/tests/api_surface.rs::compat_optimizer_enum_has_lbfgs_variant`
+/// へ置き換えた）。本足場は残る 2 型（`Lbfgs`／`LbfgsLineSearch`）の
+/// 非公開のみを固定する（`Lbfgs`（L-BFGS。Hessian 近似）は
+/// `fandhe_ai_autodiff::nn::optim` に実装済み〈内部クレート限定。
+/// `crates/autodiff/src/nn/optim/lbfgs.rs`。イシュー #2197〉）。
 ///
-/// 本足場は 2 系統の否定ガードを兼ねる。
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// lbfgs_hold_doctest_globs_all_pub_modules`・
+/// `lbfgs_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_lbfgs_items`）と多層防御を成す。
 ///
-/// 1. **型名の再エクスポート・独自宣言**（`OptimizerExtHoldDoctestGuard`
-///    と同じ機構）: 下記の正のプローブと、ソース走査ガード
-///    （`crates/facade/tests/api_surface.rs::
-///    lbfgs_hold_doctest_globs_all_pub_modules`・
-///    `lbfgs_hold_doctest_probe_body_matches_fixed_contract`・
-///    `facade_does_not_reexport_or_declare_lbfgs_items`）。
-/// 2. **`compat::Optimizer` enum への `Lbfgs` variant 追加**（型名の
-///    再エクスポートを伴わない enum variant 追加は 1. の走査では検出
-///    できないため、下記の入れ子 `__fandhe_lbfgs_variant_probe` モジュール
-///    で `Optimizer` の variant 名前空間を glob import し、ローカル定義
-///    との衝突で検出する）と対応するソース走査ガード
-///    （`crates/facade/tests/api_surface.rs::
-///    compat_optimizer_enum_has_no_lbfgs_variant`）。
-///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える。承認後の実装設計は decision doc §8 を参照）。
+/// `Lbfgs`／`LbfgsLineSearch` の facade 公開（追加のユーザー承認）が
+/// されたら、本モジュール・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える。詳細は
+/// `docs/autodiff-lbfgs-decision.md` §9）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -4732,23 +4730,11 @@ struct LrSchedulerExtHoldDoctestGuard;
 ///
 /// mod __fandhe_lbfgs_hold_probe {
 ///     pub struct Lbfgs;
-///     pub struct LbfgsConfig;
 ///     pub struct LbfgsLineSearch;
 /// }
 /// use __fandhe_lbfgs_hold_probe::*;
 ///
-/// fn __probe(_: Lbfgs, _: LbfgsConfig, _: LbfgsLineSearch) {}
-///
-/// mod __fandhe_lbfgs_variant_probe {
-///     mod __local {
-///         pub struct Lbfgs;
-///     }
-///     use self::__local::*;
-///     use ::fandhe_ai::compat::Optimizer::*;
-///     fn __probe_variant() {
-///         let _: Lbfgs = Lbfgs;
-///     }
-/// }
+/// fn __probe(_: Lbfgs, _: LbfgsLineSearch) {}
 /// ```
 #[cfg(doctest)]
 #[allow(dead_code)]

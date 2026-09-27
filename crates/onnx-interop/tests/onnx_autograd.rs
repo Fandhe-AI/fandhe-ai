@@ -17,7 +17,7 @@ use fandhe_ai_onnx_interop::onnx::autograd::{
 };
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
-use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, ModelProto, NodeProto};
+use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, ModelProto, NodeProto, attribute_type};
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 
@@ -43,10 +43,14 @@ fn node_with_attrs(
     n
 }
 
+/// `r#type` を `INT` に設定した属性を組み立てる（`interp::attr_i64_typed`／
+/// `read_gemm_attrs`〈イシュー #2186〉の型検証を通す。`interp.rs` の
+/// `build_attr_i64_typed` と同じ理由）。
 fn attr_i64(name: &str, i: i64) -> AttributeProto {
     AttributeProto {
         name: name.to_string(),
         i,
+        r#type: attribute_type::INT,
         ..Default::default()
     }
 }
@@ -286,6 +290,116 @@ fn gemm_forward_bit_identical_with_trans_b_and_bias() {
     }
 }
 
+#[test]
+fn gemm_rejects_arity_outside_two_to_three_in_autograd() {
+    // codex-review 指摘（PR #2313・イシュー #2186）: `interp::compute_gemm`
+    // には入力数検査（2〜3 個）があったが autograd 経路（本ファイル）には
+    // 無く、余剰入力（4 個以上）を無検証で受理し得た。`validate_gemm_arity`
+    // 共用化後は同じ `InputArityMismatch` を返すことを確認する。
+    let graph = single_node_graph(node("Gemm", vec!["a"], vec!["y"]), vec!["a"], "y");
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "a".to_string(),
+        AutogradValue::Var(tape.var(&f32(vec![1.0], &[1, 1]))),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(
+        err,
+        AutogradError::Interp(interp::InterpError::InputArityMismatch {
+            min: 2,
+            max: 3,
+            actual: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn gemm_broadcast_zero_requires_c_shape_exactly_mn_in_autograd() {
+    // codex-review 指摘（PR #2313・イシュー #2186）: 旧 opset `broadcast=0`
+    // の `C` 形状検証は interp 経路にのみ存在し、同一 ONNX ノードで interp
+    // が拒否する `C` ブロードキャストを autograd（`GemmFn`）は受理し得た。
+    // `validate_gemm_broadcast` 共用化後、`Const`（`Var` 非追跡）入力では
+    // interp と同じ `InvalidAttribute` を返すことを確認する。
+    let graph = single_node_graph(
+        node_with_attrs(
+            "Gemm",
+            vec!["a", "b", "c"],
+            vec!["y"],
+            vec![attr_i64("broadcast", 0)],
+        ),
+        vec!["a", "b", "c"],
+        "y",
+    );
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "a".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[1, 2]))),
+    );
+    feeds.insert(
+        "b".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[2, 1]))),
+    );
+    feeds.insert(
+        "c".to_string(),
+        // [1] は出力 [1, 1] と異なる（broadcast=0 では不可）。
+        AutogradValue::Const(Value::F32(f32(vec![1.0], &[1]))),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(
+        err,
+        AutogradError::Interp(interp::InterpError::InvalidAttribute { attr, .. }) if attr == "broadcast"
+    ));
+}
+
+#[test]
+fn gemm_broadcast_zero_requires_c_shape_exactly_mn_when_c_is_var() {
+    // Cursor Bugbot 指摘是正（イシュー #2313）: 旧実装は `A`／`B`／`C` が
+    // いずれも `Const(Value::F32)` の場合のみ shape 検査しており、`C` が
+    // `Var`（勾配追跡対象。Gemm は autograd 対応 op のため通常の学習
+    // 経路で `C`〈bias〉も trainable な `Var` として渡ることが多い）だと
+    // 不在扱いになって検査が素通りしていた。`A`／`B` を `Const`、`C` を
+    // `Var` にした場合でも interp と同じ `InvalidAttribute` を返す
+    // ことを確認する（このテストが旧実装では通らなかった＝検査が
+    // 効いていなかったことの再現）。
+    let graph = single_node_graph(
+        node_with_attrs(
+            "Gemm",
+            vec!["a", "b", "c"],
+            vec!["y"],
+            vec![attr_i64("broadcast", 0)],
+        ),
+        vec!["a", "b", "c"],
+        "y",
+    );
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "a".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[1, 2]))),
+    );
+    feeds.insert(
+        "b".to_string(),
+        AutogradValue::Const(Value::F32(f32(vec![1.0, 2.0], &[2, 1]))),
+    );
+    feeds.insert(
+        // [1] は出力 [1, 1] と異なる（broadcast=0 では不可）。`Const` では
+        // なく `Var`（勾配追跡対象）として渡す点が上記テストとの違い。
+        "c".to_string(),
+        AutogradValue::Var(tape.var(&f32(vec![1.0], &[1]))),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(
+        err,
+        AutogradError::Interp(interp::InterpError::InvalidAttribute { attr, .. }) if attr == "broadcast"
+    ));
+}
+
 // ================= model.onnx end-to-end =================
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
@@ -521,6 +635,24 @@ fn unsupported_op_is_rejected_fail_closed() {
     feeds.insert(
         "shape".to_string(),
         AutogradValue::Const(Value::I64(Tensor::new(vec![2], &[1]).unwrap())),
+    );
+    let err = bound.run(feeds).unwrap_err();
+    assert!(matches!(err, AutogradError::UnsupportedInAutograd { .. }));
+}
+
+#[test]
+fn new_ext_op_from_issue_2186_is_rejected_fail_closed_in_autograd() {
+    // イシュー #2186 で `interp`（非勾配）に追加した 8 op（`Tanh` を代表
+    // 例とする）も、autograd 経路（本ファイル・#2078）では明示 fail-closed
+    // 腕へ追加済みで `UnsupportedInAutograd` を返す（`other =>` の一般
+    // `UnsupportedOp` に落ちない。`autograd.rs::dispatch_node` 参照）。
+    let graph = single_node_graph(node("Tanh", vec!["x"], vec!["y"]), vec!["x"], "y");
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "x".to_string(),
+        AutogradValue::Var(tape.var(&f32(vec![1.0, 2.0], &[2]))),
     );
     let err = bound.run(feeds).unwrap_err();
     assert!(matches!(err, AutogradError::UnsupportedInAutograd { .. }));

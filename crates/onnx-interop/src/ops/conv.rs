@@ -1,16 +1,30 @@
-//! ONNX `Conv`（2 次元畳み込み。opset-13 系）オペ（イシュー #2076・親
-//! #2034）。
+//! ONNX `Conv`（1 次元・2 次元畳み込み。opset-13 系）オペ（イシュー
+//! #2076・親 #2034。1D 対応はイシュー #2199・親 #2185）。
 //!
 //! `onnx::export_nn`（`crates/onnx-interop/src/onnx/export_nn.rs`）が
 //! `fandhe_ai_autodiff::nn::Conv2d` を [`super::super::onnx::export_ops::
 //! ExportOp::Conv`] へ写像する際の逆写像（interp 側）として、22 op の
 //! allowlist（`export_ops::SUPPORTED_OP_TYPES`）と interp のディスパッチ表
 //! （`onnx::interp::run`）が対称になるよう新設した 23 番目の op（`docs/
-//! onnx-export-op-mapping.md` §2・§7）。
+//! onnx-export-op-mapping.md` §2・§7）。イシュー #2199 で `MaxPool`／
+//! `AveragePool`（`pool.rs`）を追加した際、export allowlist との対称性は
+//! 崩れた（両オペは import 専用。export は未対応）。
 //!
-//! `X: [N, Cin, H, W]`・`W: [Cout, Cin/group, kH, kW]`（PyTorch
-//! `nn.Conv2d.weight` と同じレイアウト。`fandhe_ai_autodiff::nn::Conv2d`
-//! と同一。`crates/autodiff/src/nn/conv.rs`）・`B`（省略可）: `[Cout]`。
+//! `X: [N, Cin, H, W]`（2D）または `[N, Cin, L]`（1D。イシュー #2199）・
+//! `W: [Cout, Cin/group, kH, kW]`（2D）／`[Cout, Cin/group, k]`（1D。
+//! PyTorch `nn.Conv2d.weight`／`nn.Conv1d.weight` と同じレイアウト。
+//! `fandhe_ai_autodiff::nn::Conv2d` と同一。`crates/autodiff/src/nn/
+//! conv.rs`）・`B`（省略可）: `[Cout]`。
+//!
+//! 1D 入力は `conv_1d`（本モジュール内 private 関数のため intra-doc
+//! link ではなくコードスパンで参照する）が属性を 1D 長（`kernel_shape`／`strides`／
+//! `dilations` 長 1・`pads` 長 2〈対称のみ〉）で検証してから
+//! `[N,Cin,1,L]`／`[Cout,Cin/g,1,k]` へ持ち上げ、2D 経路（`conv_2d`）を
+//! 再利用する（実装計画 §3。**2D 経路の検証順序・`reason` 文字列は
+//! バイト単位で不変**——`model_zoo_parity.rs`・`interop_onnx_model_
+//! zoo.rs` が `auto_pad` 等のエラー文言を完全一致で照合しているため。
+//! 1D 固有の検証〈`kernel_shape`／`pads` 長・対称性〉は 2D 経路へ委譲
+//! する前に本モジュールが行う）。
 //!
 //! 形状検査は本クレート独自に二重実装せず、2 段の既存関数へ委譲する:
 //! [`fandhe_ai_tensor_core::Conv2dParams::new`]（`kernel_size`／`stride`／
@@ -34,6 +48,41 @@
 use fandhe_ai_tensor_core::{Conv2dParams, ShapeError, Tensor, conv2d_out_shape};
 
 use super::error::OpError;
+use super::{MAX_UNTRUSTED_OUTPUT_ELEMENTS, output_elements_within_bound};
+
+/// `Conv` が実際に確保する出力バッファの総要素数（`n * cout * hout * wout`）を
+/// [`MAX_UNTRUSTED_OUTPUT_ELEMENTS`] で上限検査する（DoS 対策。PR #2314
+/// レビュー指摘 P0 で `pool.rs::ensure_pool_out_bound` として `MaxPool`／
+/// `AveragePool` へ導入した検査を `Conv` へも横展開する。同じ定数を再利用し、
+/// 新規の閾値は発明しない）。
+///
+/// [`Conv2dParams::new`]（`crates/tensor-core/src/backend_ops.rs`）は
+/// 「`padding` は上限なし（`Pool2dParams` と異なり `padding <= kernel/2` を
+/// 要求しない）」ため、`kernel_shape` が重みテンソルの実データサイズで
+/// 小さく自然に上限されていても、`pads`（テンソルを伴わない整数属性）だけで
+/// `hout`／`wout` を任意に増幅できる（例: `kernel_shape=[1,1]`・
+/// 大きな `pads` の組み合わせで `[1,64,1,1]` 入力から巨大な `hout*wout` を
+/// 要求できる。`pool.rs::ensure_pool_out_bound` doc 参照）。
+/// [`checked_conv_out_buffer_len`] は `usize` オーバーフローのみを拒否し、
+/// オーバーフローしない範囲の巨大な出力サイズは通過させてしまうため、
+/// 本関数を [`conv2d_out_shape`] で `hout`／`wout` を得た直後・
+/// [`checked_conv_out_buffer_len`]／直接計算ループへ進む前に呼ぶ
+/// （`Conv2dParams::new`／`conv2d_out_shape` の既存の検査順序・`reason`
+/// 文字列〈`model_zoo_parity.rs` 等がバイト単位で照合する〉には影響しない
+/// 位置に追加する）。
+fn ensure_conv_out_bound(n: usize, cout: usize, hout: usize, wout: usize) -> Result<(), OpError> {
+    if output_elements_within_bound(&[n, cout, hout, wout]) {
+        Ok(())
+    } else {
+        Err(OpError::InvalidConvAttribute {
+            reason: format!(
+                "Conv: 出力バッファの総要素数（n={n} * cout={cout} * hout={hout} * \
+                 wout={wout}）が上限 {MAX_UNTRUSTED_OUTPUT_ELEMENTS} を超える \
+                 （`pads` に起因する巨大な出力サイズは DoS 対策として拒否する）"
+            ),
+        })
+    }
+}
 
 /// 出力バッファ長 `n * cout * hout * wout` を `checked_mul` の連鎖で検査する。
 ///
@@ -175,7 +224,171 @@ fn parse_pads(values: &[i64]) -> Result<[usize; 2], OpError> {
     Ok([v[0], v[1]])
 }
 
-/// `Conv(X, W, [B])` を計算する。
+/// `Conv(X, W, [B])` を計算する（イシュー #2199 実装計画 §3 の 1D
+/// 対応入口）。`X` の rank で 1D（`conv_1d`。本モジュール内 private
+/// 関数のため intra-doc link ではなくコードスパンで参照する。
+/// `rank == 3`）／2D（`conv_2d`。それ以外）へディスパッチする。rank
+/// 5 以上・rank 0〜2
+/// は 2D 経路（既存の `RankMismatch { op: "Conv(X)", expected: 4, .. }`）
+/// へそのまま流し、無言 fallback をしない（`W` の rank 検査は各経路が
+/// 個別に行う）。
+pub fn conv(
+    x: &Tensor<f32>,
+    w: &Tensor<f32>,
+    b: Option<&Tensor<f32>>,
+    attrs: &ConvAttrs,
+) -> Result<Tensor<f32>, OpError> {
+    if x.rank() == 3 {
+        conv_1d(x, w, b, attrs)
+    } else {
+        conv_2d(x, w, b, attrs)
+    }
+}
+
+/// `Conv` の 1D（`[N, Cin, L]`）入力を受理する。属性を 1D 長
+/// （`kernel_shape`／`strides`／`dilations` 長 1・`pads` 長 2〈対称の
+/// み〉）で検証してから `[N,Cin,1,L]`／`[Cout,Cin/g,1,k]` へ持ち上げ、
+/// 2D 経路（`conv_2d`。intra-doc link ではなくコードスパンで参照する）を
+/// 再利用する（モジュール doc 参照）。検証順序:
+/// `W` の rank（3）→ `kernel_shape` 長・一致検査（指定されている場合）
+/// → `strides`／`dilations`／`pads`（1D 長）→ 持ち上げ → `conv_2d`
+/// 呼び出し → 出力を `[N,Cout,Lout]` へ戻す。
+fn conv_1d(
+    x: &Tensor<f32>,
+    w: &Tensor<f32>,
+    b: Option<&Tensor<f32>>,
+    attrs: &ConvAttrs,
+) -> Result<Tensor<f32>, OpError> {
+    if w.rank() != 3 {
+        return Err(OpError::RankMismatch {
+            op: "Conv(W)",
+            expected: 3,
+            actual: w.rank(),
+        });
+    }
+    let w_shape = w.shape();
+    let (cout, cin_g, k) = (w_shape[0], w_shape[1], w_shape[2]);
+
+    if !attrs.kernel_shape.is_empty() {
+        if attrs.kernel_shape.len() != 1 {
+            return Err(OpError::InvalidConvAttribute {
+                reason: format!(
+                    "Conv: `kernel_shape`（1D）の長さは 1 でなければならない（実際 {}）",
+                    attrs.kernel_shape.len()
+                ),
+            });
+        }
+        let given =
+            usize::try_from(attrs.kernel_shape[0]).map_err(|_| OpError::InvalidConvAttribute {
+                reason: format!(
+                    "Conv: `kernel_shape[0]`（1D）は非負でなければならない（実際 {}）",
+                    attrs.kernel_shape[0]
+                ),
+            })?;
+        if given != k {
+            return Err(OpError::InvalidConvAttribute {
+                reason: format!(
+                    "Conv: `kernel_shape` [{given}]（1D）が重み shape [k]={k} と一致しない"
+                ),
+            });
+        }
+    }
+
+    let stride = parse_scalar_1d("strides", &attrs.strides, 1)?;
+    let dilation = parse_scalar_1d("dilations", &attrs.dilations, 1)?;
+    let pad = parse_pads_1d(&attrs.pads)?;
+
+    let x_shape = x.shape();
+    let (n, cin, l) = (x_shape[0], x_shape[1], x_shape[2]);
+    let x4 = x
+        .contiguous()
+        .reshape(&[n, cin, 1, l])
+        .map_err(OpError::from)?;
+    let w4 = w
+        .contiguous()
+        .reshape(&[cout, cin_g, 1, k])
+        .map_err(OpError::from)?;
+
+    let to_i64 = |name: &'static str, v: usize| {
+        i64::try_from(v).map_err(|_| OpError::InvalidConvAttribute {
+            reason: format!("Conv: `{name}`（1D 持ち上げ）が i64 範囲を超える（実際 {v}）"),
+        })
+    };
+    let k_i64 = to_i64("kernel_shape", k)?;
+    let stride_i64 = to_i64("strides", stride)?;
+    let dilation_i64 = to_i64("dilations", dilation)?;
+    let pad_i64 = to_i64("pads", pad)?;
+
+    let attrs2d = ConvAttrs {
+        kernel_shape: vec![1, k_i64],
+        strides: vec![1, stride_i64],
+        pads: vec![0, pad_i64, 0, pad_i64],
+        dilations: vec![1, dilation_i64],
+        group: attrs.group,
+        auto_pad: attrs.auto_pad.clone(),
+    };
+    let y4 = conv_2d(&x4, &w4, b, &attrs2d)?;
+    let y_shape = y4.shape().to_vec();
+    let (yn, ycout, ylout) = (y_shape[0], y_shape[1], y_shape[3]);
+    y4.reshape(&[yn, ycout, ylout]).map_err(OpError::from)
+}
+
+/// `strides`／`dilations`（1D。長さ 1）を読む。空なら `default`、長さ
+/// 1 以外または `i64 -> usize` 変換に失敗する要素があれば
+/// [`OpError::InvalidConvAttribute`]（`parse_pair` の 1D 版。intra-doc
+/// link ではなくコードスパンで参照する。2D 経路
+/// の `reason` 文字列を変更しないため独立した関数にする）。
+fn parse_scalar_1d(name: &'static str, values: &[i64], default: usize) -> Result<usize, OpError> {
+    if values.is_empty() {
+        return Ok(default);
+    }
+    if values.len() != 1 {
+        return Err(OpError::InvalidConvAttribute {
+            reason: format!(
+                "Conv: `{name}`（1D）の長さは 1 でなければならない（実際 {}）",
+                values.len()
+            ),
+        });
+    }
+    usize::try_from(values[0]).map_err(|_| OpError::InvalidConvAttribute {
+        reason: format!(
+            "Conv: `{name}[0]`（1D）は非負でなければならない（実際 {}）",
+            values[0]
+        ),
+    })
+}
+
+/// `pads`（1D。ONNX 軸順 `[begin, end]`）を読み、対称パディングの単一
+/// 値を返す（`parse_pads` の 1D 版。intra-doc link ではなくコードスパン
+/// で参照する）。空なら `0`。長さ 2・非負性・
+/// 対称性（`begin == end`）を検査する。
+fn parse_pads_1d(values: &[i64]) -> Result<usize, OpError> {
+    if values.is_empty() {
+        return Ok(0);
+    }
+    if values.len() != 2 {
+        return Err(OpError::InvalidConvAttribute {
+            reason: format!(
+                "Conv: `pads`（1D）の長さは 2 でなければならない（実際 {}）",
+                values.len()
+            ),
+        });
+    }
+    let mut v = [0usize; 2];
+    for (i, &x) in values.iter().enumerate() {
+        v[i] = usize::try_from(x).map_err(|_| OpError::InvalidConvAttribute {
+            reason: format!("Conv: `pads[{i}]`（1D）は非負でなければならない（実際 {x}）"),
+        })?;
+    }
+    if v[0] != v[1] {
+        return Err(OpError::InvalidConvAttribute {
+            reason: format!("Conv: `pads`（1D）は対称（begin == end）のみ対応する（実際 {v:?}）"),
+        });
+    }
+    Ok(v[0])
+}
+
+/// `Conv(X, W, [B])` の 2D（`[N, Cin, H, W]`）本体。
 ///
 /// 検証順序: `auto_pad` → `X`／`W` の rank（4）→ `strides`／`dilations`／
 /// `pads` の属性検査（`parse_pair`／`parse_pads`。本モジュール内 private
@@ -185,7 +398,7 @@ fn parse_pads(values: &[i64]) -> Result<[usize; 2], OpError> {
 /// （`Cin`／`Cout`／`groups` 整合・出力要素数検査）→ `B` の rank／長さ
 /// 検査 → 直接ループでの計算。1 つでも失敗すれば以降の計算を行わない
 /// （`.claude/rules/security.md` A08 の部分実行禁止と同じ規律）。
-pub fn conv(
+fn conv_2d(
     x: &Tensor<f32>,
     w: &Tensor<f32>,
     b: Option<&Tensor<f32>>,
@@ -302,6 +515,11 @@ pub fn conv(
     let [ph, pw] = pads;
     let [dh, dw] = dilations;
 
+    // `hout`／`wout` は `pads`（非信頼な ONNX 属性）で増幅されうるため、
+    // `checked_conv_out_buffer_len`（オーバーフロー検査のみ）・直接計算
+    // ループ・出力バッファ確保へ進む前に総出力要素数を上限検査する
+    // （DoS 対策。`ensure_conv_out_bound` doc 参照）。
+    ensure_conv_out_bound(n, cout, hout, wout)?;
     let out_buf_len = checked_conv_out_buffer_len(n, cout, hout, wout)?;
     let mut out = vec![0f32; out_buf_len];
     for ni in 0..n {
@@ -423,6 +641,38 @@ mod tests {
     }
 
     #[test]
+    fn small_spatial_but_large_cout_and_pads_rejected() {
+        // PR #2314 レビュー指摘（P0）の横展開: `Conv` の `pads` は
+        // `Conv2dParams::new` が上限を課さない属性のため（`padding は上限
+        // なし」doc 参照）、`kernel_shape` が重みテンソルの実データサイズ
+        // （本ケースでは 1x1・64 要素と小さい）で自然に上限されていても、
+        // `pads` だけで `hout`／`wout` を増幅できる。`hout * wout`
+        // （空間軸のみの積）は上限を大きく下回るが、`n * cout` を掛けた
+        // 実際の確保サイズ（`ensure_conv_out_bound` の検査対象）は上限を
+        // 超える組み合わせを選ぶ。
+        //
+        // kernel=1x1・pad=512 対称 -> hout=wout=1+2*512=1025
+        // （1025^2=1,050,625 は上限 2^26=67,108,864 を大きく下回るが、
+        // cout=64 を掛けた 67,240,000 は上限を超える）。
+        let x = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
+        let w = Tensor::<f32>::zeros(&[64, 1, 1, 1]).unwrap();
+        let attrs = ConvAttrs {
+            pads: vec![512, 512, 512, 512],
+            ..ConvAttrs::default()
+        };
+        let err = conv(&x, &w, None, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidConvAttribute { .. }));
+    }
+
+    #[test]
+    fn ensure_conv_out_bound_accepts_at_cap_and_rejects_over_cap() {
+        assert!(ensure_conv_out_bound(1, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS).is_ok());
+        assert!(ensure_conv_out_bound(1, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS + 1).is_err());
+        // オーバーフローも上限超過として拒否する。
+        assert!(ensure_conv_out_bound(1, 1, usize::MAX, 2).is_err());
+    }
+
+    #[test]
     fn asymmetric_kernel_catches_transposed_pads() {
         // `ph != pw`（非対称 kernel_shape を伴う入力）で pads 順を検証する。
         // X: [1,1,1,4] (H=1, W=4), kernel [1,3] (kH=1, kW=3), padding [0,1] (pH=0, pW=1).
@@ -475,7 +725,27 @@ mod tests {
 
     #[test]
     fn rank_mismatch_rejected() {
+        // イシュー #2199 で `X` rank 3 は 1D 経路（`conv_1d`）へディスパッチ
+        // されるようになったため、期待エラーは `Conv(W)`（1D は `W` rank 3
+        // を要求する）へ変わる（実装計画 §4 に明記された想定更新）。
         let x = Tensor::<f32>::zeros(&[1, 1, 2]).unwrap();
+        let w = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
+        let err = conv(&x, &w, None, &ConvAttrs::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::RankMismatch {
+                op: "Conv(W)",
+                expected: 3,
+                actual: 4,
+            }
+        ));
+    }
+
+    #[test]
+    fn rank5_input_rejected_via_2d_path() {
+        // rank 5 は 1D（rank 3）にも該当しないため 2D 経路へ流れ、既存の
+        // `Conv(X)` rank 検査で拒否される。
+        let x = Tensor::<f32>::zeros(&[1, 1, 1, 2, 2]).unwrap();
         let w = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
         let err = conv(&x, &w, None, &ConvAttrs::default()).unwrap_err();
         assert!(matches!(
@@ -483,7 +753,108 @@ mod tests {
             OpError::RankMismatch {
                 op: "Conv(X)",
                 expected: 4,
-                actual: 3,
+                actual: 5,
+            }
+        ));
+    }
+
+    #[test]
+    fn conv1d_identity_kernel_no_padding() {
+        // X: [1,1,4] = [1,2,3,4], W: [1,1,1] = [2.0] -> Y = 2*X
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 4]).unwrap();
+        let w = Tensor::<f32>::new(vec![2.0], &[1, 1, 1]).unwrap();
+        let y = conv(&x, &w, None, &ConvAttrs::default()).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 4]);
+        assert_eq!(y.get(&[0, 0, 0]).unwrap(), 2.0);
+        assert_eq!(y.get(&[0, 0, 3]).unwrap(), 8.0);
+    }
+
+    #[test]
+    fn conv1d_matches_2d_lift_with_same_weights() {
+        // Conv1d(X,W) と、同じ重みを 2D へ持ち上げた Conv2d(X',W') が
+        // bit 一致することを確認する（実装計画 §3.3 の bit 一致主張の 1 つ）。
+        let x1d = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5]).unwrap();
+        let w1d = Tensor::<f32>::new(vec![1.0, 0.0, -1.0], &[1, 1, 3]).unwrap();
+        let attrs1d = ConvAttrs {
+            pads: vec![1, 1],
+            ..ConvAttrs::default()
+        };
+        let y1d = conv(&x1d, &w1d, None, &attrs1d).unwrap();
+
+        let x2d = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 1, 5]).unwrap();
+        let w2d = Tensor::<f32>::new(vec![1.0, 0.0, -1.0], &[1, 1, 1, 3]).unwrap();
+        let attrs2d = ConvAttrs {
+            pads: vec![0, 1, 0, 1],
+            ..ConvAttrs::default()
+        };
+        let y2d = conv(&x2d, &w2d, None, &attrs2d).unwrap();
+
+        assert_eq!(y1d.shape(), &[1, 1, 5]);
+        assert_eq!(y2d.shape(), &[1, 1, 1, 5]);
+        for i in 0..5 {
+            assert_eq!(
+                y1d.get(&[0, 0, i]).unwrap(),
+                y2d.get(&[0, 0, 0, i]).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn conv1d_bias_stride_dilation_group() {
+        // group=2 で Cin=2,Cout=2, stride=2, dilation=1, bias あり。
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 2, 3]).unwrap();
+        let w = Tensor::<f32>::new(vec![10.0, 100.0], &[2, 1, 1]).unwrap();
+        let bias = Tensor::<f32>::new(vec![1.0, 2.0], &[2]).unwrap();
+        let attrs = ConvAttrs {
+            strides: vec![2],
+            group: 2,
+            ..ConvAttrs::default()
+        };
+        let y = conv(&x, &w, Some(&bias), &attrs).unwrap();
+        // channel0 (group0): x=[1,2,3] stride2 -> taps [1,3]*10 + bias1 = [11, 31]
+        assert_eq!(y.shape(), &[1, 2, 2]);
+        assert_eq!(y.get(&[0, 0, 0]).unwrap(), 1.0 * 10.0 + 1.0);
+        assert_eq!(y.get(&[0, 0, 1]).unwrap(), 3.0 * 10.0 + 1.0);
+        // channel1 (group1): x=[4,5,6] stride2 -> taps [4,6]*100 + bias2
+        assert_eq!(y.get(&[0, 1, 0]).unwrap(), 4.0 * 100.0 + 2.0);
+        assert_eq!(y.get(&[0, 1, 1]).unwrap(), 6.0 * 100.0 + 2.0);
+    }
+
+    #[test]
+    fn conv1d_asymmetric_pads_rejected() {
+        let x = Tensor::<f32>::zeros(&[1, 1, 4]).unwrap();
+        let w = Tensor::<f32>::zeros(&[1, 1, 1]).unwrap();
+        let attrs = ConvAttrs {
+            pads: vec![0, 1],
+            ..ConvAttrs::default()
+        };
+        let err = conv(&x, &w, None, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidConvAttribute { .. }));
+    }
+
+    #[test]
+    fn conv1d_kernel_shape_length_mismatch_rejected() {
+        let x = Tensor::<f32>::zeros(&[1, 1, 4]).unwrap();
+        let w = Tensor::<f32>::zeros(&[1, 1, 1]).unwrap();
+        let attrs = ConvAttrs {
+            kernel_shape: vec![1, 1],
+            ..ConvAttrs::default()
+        };
+        let err = conv(&x, &w, None, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidConvAttribute { .. }));
+    }
+
+    #[test]
+    fn conv1d_weight_rank_mismatch_rejected() {
+        let x = Tensor::<f32>::zeros(&[1, 1, 4]).unwrap();
+        let w = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
+        let err = conv(&x, &w, None, &ConvAttrs::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::RankMismatch {
+                op: "Conv(W)",
+                expected: 3,
+                actual: 4,
             }
         ));
     }

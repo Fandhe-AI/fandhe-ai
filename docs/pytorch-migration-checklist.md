@@ -66,8 +66,13 @@ ONNX（`prost` による protobuf デコードのみ許容）を自作テンソ�
 - [ ] 対応オペ範囲: 初期 8 オペ（`Gemm`/`Relu`/`Sigmoid`/`Shape`/`Gather`/`Unsqueeze`/
       `Concat`/`Slice`）に加え、Transformer 対応に必要な残 14 種別（`Add`/`Cast`/`Constant`/
       `Div`/`Erf`/`LayerNormalization`/`MatMul`/`Mod`/`Mul`/`Reshape`/`Softmax`/`Sqrt`/`Squeeze`/
-      `Transpose`）が実装済み（合計 22 種別、`crates/onnx-interop/src/ops/`）。`transformer.onnx`
+      `Transpose`）・`Conv`（#2076）が実装済み。`transformer.onnx`
       の end-to-end 推論は `tests/onnx_transformer_e2e.rs`（TASK-7.4a・#301）で実測済み
+- [ ] Gemm 変種・活性化・演算オペ（#2186）: `Clip`（attr 形／入力形）・`Tanh`・
+      `Gelu`（`none`／`tanh` 近似）・`Where`・`Expand`・`ReduceMean`・`Pad`
+      （constant モード）・`Resize`（nearest／bilinear の一部組合せ）が
+      `interp::run()` から実行可能（`fandhe_ai_autodiff::Var` への委譲。
+      常にホスト実行）
 - [ ] 動的境界 Slice パターン（v1 `burn-onnx` の失敗パターン、`tracel-ai/burn#5295`）は
       自前インタープリタで対応済み（`tests/onnx_slice_dynamic_bounds.rs`）
 - [ ] 未対応の `op_type` を含むグラフを渡すと `InterpError::UnsupportedOp` で拒否される

@@ -14,9 +14,15 @@
 //! `Softmax`／`Erf`／`LayerNormalization`）をイシュー #274 で結線した。イシュー
 //! #2076（親 #2034）で `Conv`（2 次元畳み込み）を追加し、イシュー #2200
 //! （親 #2185）で `GlobalAveragePool`／`BatchNormalization`／`Flatten`
-//! （CNN 系モデル対応）を追加し、全 26 オペがグラフ実行から到達可能
-//! （未対応 `op_type` は引き続き [`InterpError::UnsupportedOp`]
-//! で fail-closed に拒否し、無言 skip はしない）。
+//! （CNN 系モデル対応）を追加し、イシュー #2199（親 #2185）で `MaxPool`／
+//! `AveragePool` を追加・`Conv` に 1D（`[N,C,L]`）対応を追加した
+//! （`crate::ops::conv`）。さらにイシュー #2186（親 #2185）で `Gemm`／`Clip`／
+//! 活性化（`Tanh`／`Gelu`）・演算（`Where`／`Expand`／`ReduceMean`／`Pad`／
+//! `Resize`）8 op（`interp_ext` 経由。常にホスト実行）を追加したことで、
+//! import 対応全 36 オペがグラフ実行から到達可能（未対応 `op_type` は
+//! 引き続き [`InterpError::UnsupportedOp`] で fail-closed に拒否し、
+//! 無言 skip はしない）。`MaxPool`／`AveragePool` は import 専用オペで
+//! export allowlist（`export_ops::SUPPORTED_OP_TYPES`）には含まれない。
 //!
 //! ## 実行時値モデルと dtype の扱いについて
 //!
@@ -55,9 +61,11 @@ use half::f16;
 
 use super::graph::{Graph, GraphError, RawTensor};
 use super::interp_device;
+use super::interp_ext;
 use super::proto::{AttributeProto, NodeProto, attribute_type};
 use crate::ops::{
-    self, BatchNormAttrs, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, SliceParams,
+    self, BatchNormAttrs, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, PoolAttrs,
+    SliceParams,
 };
 
 /// 実行時に env（変数束縛）へ格納される値。ONNX の `TensorProto.data_type` の
@@ -77,7 +85,8 @@ pub enum Value {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum InterpError {
-    /// ディスパッチ表（本モジュールが実装する全 26 オペ）に無い `op_type`。
+    /// ディスパッチ表（本モジュールが実装する import 対応全 36 オペ）に
+    /// 無い `op_type`。
     UnsupportedOp(String),
     /// ノードの入力名が env（feed／initializer／先行ノード出力の集合）に存在しない。
     /// `build_graph` はトポロジカル順を検証済みのため通常は到達しないが、
@@ -146,6 +155,16 @@ pub enum InterpError {
     /// `ShapeMismatch` はホスト実装へフォールバックするため本 variant に
     /// はならない（GPU 故障を隠蔽しない fail-closed 方針。OWASP A08）。
     Backend { node: String, message: String },
+    /// `interp_ext`（イシュー #2186。`Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
+    /// `ReduceMean`／`Pad`／`Resize`）が委譲する `fandhe_ai_autodiff::Var`
+    /// 演算が返したエラー。`AutodiffError::Shape` は既存の
+    /// [`InterpError::Shape`]（`tensor-core::ShapeError` 直接ラップ）へ写す
+    /// ことで shape 系エラーの窓口を一本化し（`autodiff_err` 参照）、それ以外
+    /// の `AutodiffError` variant のみ本 variant として透過する。
+    Autodiff {
+        node: String,
+        source: fandhe_ai_autodiff::AutodiffError,
+    },
 }
 
 impl fmt::Display for InterpError {
@@ -203,6 +222,9 @@ impl fmt::Display for InterpError {
             InterpError::Backend { node, message } => {
                 write!(f, "ノード '{node}': device 実行エラー: {message}")
             }
+            InterpError::Autodiff { node, source } => {
+                write!(f, "ノード '{node}': autodiff エラー: {source}")
+            }
         }
     }
 }
@@ -224,6 +246,21 @@ impl From<ShapeError> for InterpError {
 impl From<GraphError> for InterpError {
     fn from(e: GraphError) -> Self {
         InterpError::Graph(e)
+    }
+}
+
+/// `fandhe_ai_autodiff::AutodiffError` を `InterpError` へ変換する（`interp_ext`
+/// の全 `compute_*` が共用。イシュー #2186）。`AutodiffError::Shape` のみ
+/// 既存の [`InterpError::Shape`] へ写し（`tensor-core::ShapeError` の
+/// 窓口を一本化）、それ以外は [`InterpError::Autodiff`] としてそのまま
+/// 透過する（`From` にしない理由: ノード名を伝える文脈が必要なため）。
+pub(super) fn autodiff_err(node: &str, e: fandhe_ai_autodiff::AutodiffError) -> InterpError {
+    match e {
+        fandhe_ai_autodiff::AutodiffError::Shape(s) => InterpError::Shape(s),
+        other => InterpError::Autodiff {
+            node: node.to_string(),
+            source: other,
+        },
     }
 }
 
@@ -258,7 +295,7 @@ fn raw_to_value(raw: &RawTensor) -> Result<Value, InterpError> {
 /// `node.input[idx]` を取得する。ONNX は省略可能入力を空文字列で表す規約
 /// （`onnx/graph.rs` と同じ規約）のため、範囲外・空文字列のいずれも
 /// [`InterpError::MissingInput`] として扱う。
-fn input_name(node: &NodeProto, idx: usize) -> Result<&str, InterpError> {
+pub(super) fn input_name(node: &NodeProto, idx: usize) -> Result<&str, InterpError> {
     node.input
         .get(idx)
         .map(String::as_str)
@@ -269,7 +306,7 @@ fn input_name(node: &NodeProto, idx: usize) -> Result<&str, InterpError> {
         })
 }
 
-fn get_value<'a>(
+pub(super) fn get_value<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -280,7 +317,7 @@ fn get_value<'a>(
     })
 }
 
-fn get_f32<'a>(
+pub(super) fn get_f32<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -294,7 +331,7 @@ fn get_f32<'a>(
     }
 }
 
-fn get_i64<'a>(
+pub(super) fn get_i64<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -313,7 +350,7 @@ fn get_i64<'a>(
 /// `Slice` の `starts`/`ends`/`axes`/`steps`・`Reshape` の `shape` 等、`ops::*` の
 /// スライス引数へそのまま渡せる形。値は shape 問い合わせ結果・インデックス列等の
 /// 小規模データのため、参照を返す代わりに複製するコストは無視できる）。
-fn i64_vec_and_shape(
+pub(super) fn i64_vec_and_shape(
     env: &HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -326,7 +363,7 @@ fn i64_vec_and_shape(
     Ok((data.to_vec(), tc.shape().to_vec()))
 }
 
-fn attr_f32(node: &NodeProto, name: &str, default: f32) -> f32 {
+pub(super) fn attr_f32(node: &NodeProto, name: &str, default: f32) -> f32 {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -334,7 +371,7 @@ fn attr_f32(node: &NodeProto, name: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-fn attr_i64(node: &NodeProto, name: &str, default: i64) -> i64 {
+pub(super) fn attr_i64(node: &NodeProto, name: &str, default: i64) -> i64 {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -342,7 +379,7 @@ fn attr_i64(node: &NodeProto, name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-fn attr_i64_required(node: &NodeProto, name: &str) -> Result<i64, InterpError> {
+pub(super) fn attr_i64_required(node: &NodeProto, name: &str) -> Result<i64, InterpError> {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -355,7 +392,7 @@ fn attr_i64_required(node: &NodeProto, name: &str) -> Result<i64, InterpError> {
 
 /// `Unsqueeze`／`Squeeze`（opset<13）・`Transpose` の `axes`/`perm` 属性
 /// （`AttributeProto.ints`）を読む。
-fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
+pub(super) fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
     node.attribute
         .iter()
         .find(|a| a.name == name)
@@ -367,7 +404,7 @@ fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
 /// ている場合、どちらを採用すべきかは ONNX 仕様上一意に決まらないため、無言で
 /// 先頭／末尾いずれかを採用せず [`InterpError::InvalidAttribute`] で fail-closed
 /// に拒否する（OWASP A03。外部フォーマット由来の曖昧な入力を検証せずに通さない）。
-fn find_attr_unique<'a>(
+pub(super) fn find_attr_unique<'a>(
     node: &'a NodeProto,
     name: &str,
 ) -> Result<Option<&'a AttributeProto>, InterpError> {
@@ -395,7 +432,7 @@ fn find_attr_unique<'a>(
 /// 型として送り `ints` を空のまま残す）が「省略された」場合と区別できず、
 /// 無言で ONNX 既定値へ fallback してしまう（OWASP A03。外部 ONNX モデルは
 /// 非信頼な入力）。
-fn check_attr_type(
+pub(super) fn check_attr_type(
     node: &NodeProto,
     attr: &AttributeProto,
     expected: i32,
@@ -427,7 +464,10 @@ fn check_attr_type(
 /// も非空の値のみ書き出す。空 `ints` を許すと `.unwrap_or(&[])` 経由で
 /// 「省略」時と同じ既定値 fallback に合流してしまい、`r#type` 検証だけでは
 /// 塞げない同型の無言 fallback 抜け道になる）。
-fn attr_ints_typed<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a [i64]>, InterpError> {
+pub(super) fn attr_ints_typed<'a>(
+    node: &'a NodeProto,
+    name: &str,
+) -> Result<Option<&'a [i64]>, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(None),
         Some(a) => {
@@ -447,7 +487,11 @@ fn attr_ints_typed<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a [i6
 /// `Conv` の `group`（INT 型属性）を読む。属性が省略されていれば `default`
 /// を返し、存在する場合は `r#type == INT` であることを検証してから `i` を
 /// 返す（`attr_ints_typed` と同型の型検証。イシュー #2076 codex-review 指摘）。
-fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, InterpError> {
+pub(super) fn attr_i64_typed(
+    node: &NodeProto,
+    name: &str,
+    default: i64,
+) -> Result<i64, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(default),
         Some(a) => {
@@ -457,11 +501,19 @@ fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, Int
     }
 }
 
-/// `BatchNormalization` の `epsilon`／`momentum`（FLOAT 型属性。イシュー
-/// #2200）を読む。`attr_i64_typed` と同型の型検証（`attr_f32`／`attr_i64`
-/// の無検証版は使わない）。属性が省略されていれば `default` を返し、
-/// 存在する場合は `r#type == FLOAT` であることを検証してから `f` を返す。
-fn attr_f32_typed(node: &NodeProto, name: &str, default: f32) -> Result<f32, InterpError> {
+/// FLOAT 型属性を読む（`attr_i64_typed` と同型の型検証。`attr_f32`／
+/// `attr_i64` の無検証版は使わない）。属性が省略されていれば `default` を
+/// 返し、存在する場合は `r#type == FLOAT` であることを検証してから `f` を
+/// 返す。`Gemm` の `alpha`／`beta`（イシュー #2186。FLOAT 型偽装〈例: INT 型
+/// で送り `f` をゼロ値のまま残す〉から保護する。OWASP A03）と
+/// `BatchNormalization` の `epsilon`／`momentum`（イシュー #2200）の双方から
+/// 使う共通ヘルパーで、`interp_ext`（`Clip` の `min`／`max` 等）からも
+/// `pub(super)` で参照する。
+pub(super) fn attr_f32_typed(
+    node: &NodeProto,
+    name: &str,
+    default: f32,
+) -> Result<f32, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(default),
         Some(a) => {
@@ -490,7 +542,11 @@ fn attr_f32_typed(node: &NodeProto, name: &str, default: f32) -> Result<f32, Int
 /// 非対称になり、`check_attr_type` の型検証だけでは塞げない同型の無言
 /// fallback 抜け道になる。属性自体が存在しない場合のみ `default`
 /// （`"NOTSET"`）を適用する。
-fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, InterpError> {
+pub(super) fn attr_string(
+    node: &NodeProto,
+    name: &str,
+    default: &str,
+) -> Result<String, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(default.to_string()),
         Some(a) => {
@@ -511,23 +567,121 @@ fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, In
     }
 }
 
+/// `Gemm` の `alpha`／`beta`（FLOAT）・`transA`／`transB`（INT）属性を型検証
+/// 込みで読む（イシュー #2186「Gemm の固め」節）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （forward の数値計算は引き続き `ops::gemm` のみが担う。属性読み取りの
+/// 二重実装〈autograd 旧実装の無検証版〉を解消する）。
+pub(super) fn read_gemm_attrs(node: &NodeProto) -> Result<GemmAttrs, InterpError> {
+    Ok(GemmAttrs {
+        alpha: attr_f32_typed(node, "alpha", 1.0)?,
+        beta: attr_f32_typed(node, "beta", 1.0)?,
+        trans_a: attr_i64_typed(node, "transA", 0)? != 0,
+        trans_b: attr_i64_typed(node, "transB", 0)? != 0,
+    })
+}
+
+/// `attrs` 適用後の `A'`／`B'`（`trans_a`／`trans_b` 反映後の 2 次元 shape）
+/// から出力 `[M, N]` を導出する。`a`／`b` の rank 検証自体は `ops::gemm` が
+/// 行う（`OpError::RankMismatch`）ため、ここでは rank 2 を前提にできない
+/// 呼び出し元向けに `None` を返し、後続の `ops::gemm` 呼び出しへ検証を委ねる
+/// （`compute_gemm` の旧 opset `broadcast=0` 検査専用の補助。イシュー #2186）。
+fn gemm_output_mn(
+    a_shape: &[usize],
+    b_shape: &[usize],
+    attrs: &GemmAttrs,
+) -> Option<(usize, usize)> {
+    if a_shape.len() != 2 || b_shape.len() != 2 {
+        return None;
+    }
+    let m = if attrs.trans_a {
+        a_shape[1]
+    } else {
+        a_shape[0]
+    };
+    let n = if attrs.trans_b {
+        b_shape[0]
+    } else {
+        b_shape[1]
+    };
+    Some((m, n))
+}
+
+/// `Gemm` の入力数検査（2〜3 個。第 3 入力 `C` は任意）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （codex-review 指摘。イシュー #2186 PR #2313。従来 autograd 経路には
+/// この検査が無く、4 個以上の余剰入力を無検証で受理し得た）。
+pub(super) fn validate_gemm_arity(node: &NodeProto) -> Result<(), InterpError> {
+    if node.input.len() < 2 || node.input.len() > 3 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 2,
+            max: 3,
+            actual: node.input.len(),
+        });
+    }
+    Ok(())
+}
+
+/// 旧 opset（Gemm-6 以前）の `broadcast`（INT）属性検査。省略または非 0 は
+/// 現行 opset 相当のユニ方向ブロードキャストをそのまま許容する。`0` は
+/// 「ブロードキャストしない」意味であり、`C` が正確に `[M, N]` の場合の
+/// みを受理する（旧仕様。`ops::gemm` は常にブロードキャストするため、
+/// ここで shape 一致を明示検査してから委譲する）。`interp::compute_gemm`・
+/// `autograd::dispatch_node`（`"Gemm"` 腕）の双方が共用する単一情報源
+/// （codex-review 指摘。イシュー #2186 PR #2313。従来 autograd 経路の
+/// `GemmFn` はこの検査を経ず、interp が拒否する `broadcast=0` かつ `C`
+/// 形状不一致のノードを受理し得た）。
+///
+/// **shape のみを受け取る（`Tensor<f32>` を要求しない）設計**（Cursor
+/// Bugbot 指摘・イシュー #2313）: `autograd::dispatch_node` の `Gemm` 腕は
+/// `A`／`B`／`C` が `Const`（`Value::F32`）だけでなく `Var`（勾配追跡
+/// 対象。通常の学習経路で常用される）でも受理するため、`Tensor<f32>` の
+/// 参照を要求する signature だと `C` が `Var` の場合に検査そのものを
+/// 呼べず、`interp` が拒否する `broadcast=0` かつ shape 不一致のノードを
+/// autograd 経路が黙って受理してしまう。shape の抽出（`Var` は
+/// `Var::value().shape()` 経由）を呼び出し側の責務にすることで、
+/// `Const`／`Var` いずれの入力でも同じ検査を適用できる。
+pub(super) fn validate_gemm_broadcast(
+    node: &NodeProto,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    c_shape: Option<&[usize]>,
+    attrs: &GemmAttrs,
+) -> Result<(), InterpError> {
+    let broadcast_flag = attr_i64_typed(node, "broadcast", 1)?;
+    if broadcast_flag == 0
+        && let Some(c_shape) = c_shape
+        && let Some((m, n)) = gemm_output_mn(a_shape, b_shape, attrs)
+        && c_shape != [m, n]
+    {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: "broadcast".to_string(),
+            reason: format!(
+                "broadcast=0 のとき C の shape は出力 [{m}, {n}] と一致する必要があります \
+                 （実際: {c_shape:?}）"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn compute_gemm(
     env: &HashMap<String, Value>,
     node: &NodeProto,
     dev_ops: Option<&dyn BackendOps>,
 ) -> Result<(Value, bool), InterpError> {
+    validate_gemm_arity(node)?;
     let a = get_f32(env, node, input_name(node, 0)?)?;
     let b = get_f32(env, node, input_name(node, 1)?)?;
     let c = match node.input.get(2) {
         Some(name) if !name.is_empty() => Some(get_f32(env, node, name)?),
         _ => None,
     };
-    let attrs = GemmAttrs {
-        alpha: attr_f32(node, "alpha", 1.0),
-        beta: attr_f32(node, "beta", 1.0),
-        trans_a: attr_i64(node, "transA", 0) != 0,
-        trans_b: attr_i64(node, "transB", 0) != 0,
-    };
+    let attrs = read_gemm_attrs(node)?;
+    validate_gemm_broadcast(node, a.shape(), b.shape(), c.map(Tensor::shape), &attrs)?;
+
     // opt-in ON（`dev_ops` が `Some`）のときのみ device 経路を試みる。
     // `Ok(None)`（未対応 shape・`Unsupported`）はホスト実装へそのまま
     // フォールバックし、opt-in OFF（`dev_ops` が `None`）時の経路・出力は
@@ -741,7 +895,7 @@ fn compute_slice(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value
     }
 }
 
-fn get_bool<'a>(
+pub(super) fn get_bool<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -755,7 +909,7 @@ fn get_bool<'a>(
     }
 }
 
-fn get_f16<'a>(
+pub(super) fn get_f16<'a>(
     env: &'a HashMap<String, Value>,
     node: &NodeProto,
     name: &str,
@@ -1111,6 +1265,76 @@ fn compute_conv(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value,
     Ok(Value::F32(ops::conv(x, w, b, &attrs)?))
 }
 
+/// `MaxPool(X)`（イシュー #2199・親 #2185。`ops::max_pool` の結線）。
+/// 入力数はちょうど 1（`Indices` 出力側の追加入力は無い）。属性は
+/// `Conv` と同じ型検証版ヘルパーで読む。`kernel_shape` は ONNX 仕様上
+/// 必須のため、欠落は [`InterpError::MissingAttribute`] で拒否する
+/// （`Conv` と異なり `W` からの形状推論元が無いため）。`Indices`
+/// （2 番目の任意出力）の宣言は [`require_single_output`]（呼び出し元
+/// `run_impl`）が単一出力を強制するため fail-closed に拒否される。
+fn compute_max_pool(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+    if node.input.len() != 1 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 1,
+            max: 1,
+            actual: node.input.len(),
+        });
+    }
+    let x = get_f32(env, node, input_name(node, 0)?)?;
+    let kernel_shape =
+        attr_ints_typed(node, "kernel_shape")?.ok_or_else(|| InterpError::MissingAttribute {
+            node: node.name.clone(),
+            attr: "kernel_shape".to_string(),
+        })?;
+    let attrs = PoolAttrs {
+        kernel_shape: kernel_shape.to_vec(),
+        strides: attr_ints_typed(node, "strides")?.unwrap_or(&[]).to_vec(),
+        pads: attr_ints_typed(node, "pads")?.unwrap_or(&[]).to_vec(),
+        dilations: attr_ints_typed(node, "dilations")?.unwrap_or(&[]).to_vec(),
+        ceil_mode: attr_i64_typed(node, "ceil_mode", 0)?,
+        count_include_pad: 0,
+        storage_order: attr_i64_typed(node, "storage_order", 0)?,
+        auto_pad: attr_string(node, "auto_pad", "NOTSET")?,
+    };
+    Ok(Value::F32(ops::max_pool(x, &attrs)?))
+}
+
+/// `AveragePool(X)`（イシュー #2199・親 #2185。`ops::average_pool` の
+/// 結線）。[`compute_max_pool`] と同型の検証順序。`count_include_pad`
+/// の ONNX 既定値は **`0`**（PyTorch `nn.AvgPool*` の既定 `true` とは
+/// 異なる。`ops::pool` モジュール doc §3.2 参照）。
+fn compute_average_pool(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+) -> Result<Value, InterpError> {
+    if node.input.len() != 1 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 1,
+            max: 1,
+            actual: node.input.len(),
+        });
+    }
+    let x = get_f32(env, node, input_name(node, 0)?)?;
+    let kernel_shape =
+        attr_ints_typed(node, "kernel_shape")?.ok_or_else(|| InterpError::MissingAttribute {
+            node: node.name.clone(),
+            attr: "kernel_shape".to_string(),
+        })?;
+    let attrs = PoolAttrs {
+        kernel_shape: kernel_shape.to_vec(),
+        strides: attr_ints_typed(node, "strides")?.unwrap_or(&[]).to_vec(),
+        pads: attr_ints_typed(node, "pads")?.unwrap_or(&[]).to_vec(),
+        dilations: attr_ints_typed(node, "dilations")?.unwrap_or(&[]).to_vec(),
+        ceil_mode: attr_i64_typed(node, "ceil_mode", 0)?,
+        count_include_pad: attr_i64_typed(node, "count_include_pad", 0)?,
+        storage_order: 0,
+        auto_pad: attr_string(node, "auto_pad", "NOTSET")?,
+    };
+    Ok(Value::F32(ops::average_pool(x, &attrs)?))
+}
+
 /// `BatchNormalization(X, scale, B, input_mean, input_var)`（イシュー
 /// #2200・親 #2185。`ops::batch_normalization` の結線）。推論モードのみ
 /// 対応する（`ops/batch_norm.rs` モジュール doc 参照。学習モードは
@@ -1297,9 +1521,10 @@ fn run_impl(
         // 正確に表す（device 結線対象外の op は常に `false` で揃える。
         // 推測・近似ではなく `compute_*` の戻り値そのものから得る）。
         // `Conv`（イシュー #2076）・`BatchNormalization`／
-        // `GlobalAveragePool`／`Flatten`（イシュー #2200）は device 実行の
-        // 対象外（#2077／#2222 の結線範囲は `interp_device` モジュール
-        // 冒頭コメント参照）のため常にホスト実装（`ops::*`）で実行し
+        // `GlobalAveragePool`／`Flatten`（イシュー #2200）・`MaxPool`／
+        // `AveragePool`（イシュー #2199）は device 実行の対象外
+        // （#2077／#2222 の結線範囲は `interp_device` モジュール冒頭
+        // コメント参照）のため常にホスト実装（`ops::*`）で実行し
         // `false` を報告する。
         let (out_value, used_device) = match node.op_type.as_str() {
             "Gemm" => compute_gemm(&env, node, dev_ops)?,
@@ -1325,9 +1550,23 @@ fn run_impl(
             "Erf" => (compute_erf(&env, node)?, false),
             "LayerNormalization" => compute_layer_normalization(&env, node, dev_ops)?,
             "Conv" => (compute_conv(&env, node)?, false),
+            "MaxPool" => (compute_max_pool(&env, node)?, false),
+            "AveragePool" => (compute_average_pool(&env, node)?, false),
             "BatchNormalization" => (compute_batch_normalization(&env, node)?, false),
             "GlobalAveragePool" => (compute_global_average_pool(&env, node)?, false),
             "Flatten" => (compute_flatten(&env, node)?, false),
+            // イシュー #2186: 常にホスト実行（`interp_ext` 冒頭コメント
+            // 参照。`Tape::new_with_ops` が要求する所有 `BackendOps` を
+            // 借用 `Option<&dyn BackendOps>` から構築できないため device
+            // 経路には接続しない）。
+            "Clip" => (interp_ext::compute_clip(&env, node)?, false),
+            "Tanh" => (interp_ext::compute_tanh(&env, node)?, false),
+            "Gelu" => (interp_ext::compute_gelu(&env, node)?, false),
+            "Where" => (interp_ext::compute_where(&env, node)?, false),
+            "Expand" => (interp_ext::compute_expand(&env, node)?, false),
+            "ReduceMean" => (interp_ext::compute_reduce_mean(&env, node)?, false),
+            "Pad" => (interp_ext::compute_pad(&env, node)?, false),
+            "Resize" => (interp_ext::compute_resize(&env, node)?, false),
             other => return Err(InterpError::UnsupportedOp(other.to_string())),
         };
         if let Some(r) = report.as_deref_mut() {
@@ -2303,6 +2542,176 @@ mod tests {
         let result = compute_conv(&conv_feeds(), &n).unwrap();
         match result {
             Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    // --- MaxPool／AveragePool（イシュー #2199・親 #2185） ---
+
+    fn pool_feeds() -> StdHashMap<String, Value> {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]).unwrap()),
+        );
+        feeds
+    }
+
+    fn max_pool_node_with_attrs(extra: Vec<super::super::proto::AttributeProto>) -> NodeProto {
+        let mut attrs = vec![build_attr_ints_typed("kernel_shape", vec![2, 2])];
+        attrs.retain(|a| !extra.iter().any(|e| e.name == a.name));
+        attrs.extend(extra);
+        node_with_attrs("MaxPool", vec!["x"], vec!["y"], attrs)
+    }
+
+    #[test]
+    fn compute_max_pool_basic() {
+        let n = max_pool_node_with_attrs(vec![]);
+        let result = compute_max_pool(&pool_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[4.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_max_pool_missing_kernel_shape_rejected() {
+        let n = node("MaxPool", vec!["x"], vec!["y"]);
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::MissingAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_max_pool_rejects_two_inputs() {
+        let n = node_with_attrs(
+            "MaxPool",
+            vec!["x", "extra"],
+            vec!["y"],
+            vec![build_attr_ints_typed("kernel_shape", vec![2, 2])],
+        );
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 1,
+                max: 1,
+                actual: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_max_pool_rejects_kernel_shape_type_mismatch() {
+        let n = max_pool_node_with_attrs(vec![build_attr_string_typed("kernel_shape", "")]);
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_max_pool_rejects_duplicate_attribute() {
+        let mut n = max_pool_node_with_attrs(vec![]);
+        n.attribute
+            .push(build_attr_ints_typed("kernel_shape", vec![1, 1]));
+        let err = compute_max_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(err, InterpError::InvalidAttribute { .. }));
+    }
+
+    #[test]
+    fn compute_max_pool_ceil_mode_and_storage_order_accepted() {
+        let n = max_pool_node_with_attrs(vec![
+            build_attr_i64_typed("ceil_mode", 1),
+            build_attr_i64_typed("storage_order", 0),
+        ]);
+        let result = compute_max_pool(&pool_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[4.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_average_pool_default_count_include_pad_is_zero() {
+        // ONNX 既定は count_include_pad=0（PyTorch の既定 true とは異なる）。
+        // pads で non-trivial な divisor を確認する。
+        let n = node_with_attrs(
+            "AveragePool",
+            vec!["x"],
+            vec!["y"],
+            vec![
+                build_attr_ints_typed("kernel_shape", vec![1, 2]),
+                build_attr_ints_typed("strides", vec![1, 1]),
+                build_attr_ints_typed("pads", vec![0, 0, 0, 1]),
+            ],
+        );
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[1, 1, 1, 3]).unwrap()),
+        );
+        let result = compute_average_pool(&feeds, &n).unwrap();
+        match result {
+            // windows: (1,2)/2=1.5, (2,3)/2=2.5, (3,pad)/1=3.0
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[1.5, 2.5, 3.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_average_pool_missing_kernel_shape_rejected() {
+        let n = node("AveragePool", vec!["x"], vec!["y"]);
+        let err = compute_average_pool(&pool_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::MissingAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_average_pool_i64_input_rejected() {
+        let n = node_with_attrs(
+            "AveragePool",
+            vec!["x"],
+            vec!["y"],
+            vec![build_attr_ints_typed("kernel_shape", vec![2, 2])],
+        );
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![1, 2, 3, 4], &[1, 1, 2, 2]).unwrap()),
+        );
+        let err = compute_average_pool(&feeds, &n).unwrap_err();
+        assert!(matches!(err, InterpError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn dispatch_max_pool_and_average_pool_via_run() {
+        // dispatch 表（`run_impl`）から `MaxPool`／`AveragePool` へ到達
+        // できることを `run` 経由で確認する（イシュー #2199）。
+        let max_node = max_pool_node_with_attrs(vec![]);
+        let g = empty_graph(vec![max_node], vec!["x"], vec!["y"]);
+        let result = run(&g, pool_feeds()).unwrap();
+        match &result["y"] {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[4.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+
+        let avg_node = node_with_attrs(
+            "AveragePool",
+            vec!["x"],
+            vec!["y"],
+            vec![build_attr_ints_typed("kernel_shape", vec![2, 2])],
+        );
+        let g2 = empty_graph(vec![avg_node], vec!["x"], vec!["y"]);
+        let result2 = run(&g2, pool_feeds()).unwrap();
+        match &result2["y"] {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.5]),
             _ => panic!("Value::F32 を期待"),
         }
     }

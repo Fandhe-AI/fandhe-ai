@@ -38,7 +38,7 @@ use fandhe_ai_onnx_interop::onnx::graph::Graph;
 use fandhe_ai_onnx_interop::onnx::interp::{
     InterpError, Value, run, run_with_ops, run_with_ops_report,
 };
-use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto};
+use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto, attribute_type};
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, Device, ScalarBinaryOp, ScalarUnaryOp, Tensor,
 };
@@ -377,11 +377,13 @@ fn run_with_ops_gemm_alpha_beta_bias_reaches_device_and_matches_host() {
             AttributeProto {
                 name: "alpha".to_string(),
                 f: 2.0,
+                r#type: attribute_type::FLOAT,
                 ..Default::default()
             },
             AttributeProto {
                 name: "beta".to_string(),
                 f: 0.5,
+                r#type: attribute_type::FLOAT,
                 ..Default::default()
             },
         ],
@@ -716,6 +718,59 @@ fn scalar_binary_div_kind_matches_ops_semantics() {
     assert!(actual[1].is_infinite() && actual[1] < 0.0);
 }
 
+#[test]
+fn run_with_ops_conv_1d_and_pool_stay_on_host() {
+    // `Conv`（1D）・`MaxPool`／`AveragePool`（イシュー #2199）は device
+    // 結線対象外（`interp_device` モジュール冒頭コメント）のため、
+    // `dev_ops` が `Some`（opt-in ON）でも常にホスト実装（`ops::conv`／
+    // `ops::max_pool`／`ops::average_pool`）で実行され `host_nodes` に
+    // 記録される。CUDA／Metal も同じホスト経路で到達可能であることの
+    // 根拠とする（実装計画 §4-8）。
+    let conv_node = node_with_attrs("Conv", "n_conv1d", vec!["x", "w"], vec!["y1"], vec![]);
+    let max_node = node_with_attrs(
+        "MaxPool",
+        "n_maxpool",
+        vec!["y1"],
+        vec!["y2"],
+        vec![AttributeProto {
+            name: "kernel_shape".to_string(),
+            ints: vec![2],
+            r#type: attribute_type::INTS,
+            ..Default::default()
+        }],
+    );
+    let graph = Graph {
+        nodes: vec![conv_node, max_node],
+        initializers: HashMap::new(),
+        inputs: vec!["x".to_string(), "w".to_string()],
+        outputs: vec!["y2".to_string()],
+    };
+    let ops = RecordingOps::new();
+    let mut feeds = HashMap::new();
+    feeds.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 4]),
+        feed_f32("w", vec![1.0], &[1, 1, 1]),
+    ]);
+    let (result_on, report) =
+        run_with_ops_report(&graph, feeds, &ops).expect("run_with_ops_report は成功するはず");
+    assert_eq!(
+        report.host_nodes,
+        vec!["n_conv1d".to_string(), "n_maxpool".to_string()]
+    );
+    assert!(report.device_nodes.is_empty());
+
+    let mut feeds_off = HashMap::new();
+    feeds_off.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 4]),
+        feed_f32("w", vec![1.0], &[1, 1, 1]),
+    ]);
+    let result_off = run(&graph, feeds_off).expect("run（opt-in OFF）は成功するはず");
+    assert_eq!(
+        as_f32_slice(&result_on["y2"]),
+        as_f32_slice(&result_off["y2"])
+    );
+}
+
 /// `PoolStats`／`Ordering` 等の未使用 import が残らないための素通し
 /// （`ScalarUnaryOp`／`ScalarBinaryOp` の再エクスポート面を直接参照する
 /// ことで、facade 側 `interp_device` の enum 選択が誤っていないかも
@@ -725,6 +780,34 @@ fn scalar_unary_binary_enum_variants_are_reachable() {
     let _ = ScalarUnaryOp::Sqrt;
     let _ = ScalarUnaryOp::Relu;
     let _ = ScalarBinaryOp::Div;
+}
+
+#[test]
+fn run_with_ops_new_ext_ops_always_stay_on_host_regardless_of_dev_ops() {
+    // イシュー #2186 で追加した 8 op（`interp_ext`）は `Tape::new_with_ops`
+    // が要求する所有 `BackendOps` を借用 `Option<&dyn BackendOps>` から
+    // 構築できないため常にホスト実行になる（`interp_ext` 冒頭コメント）。
+    // `CpuBackendOps`（device 実行に成功しうる実装）を渡しても
+    // `host_nodes` に記録され、`run`（opt-in OFF）と bit 完全一致することを
+    // 固定化する。
+    let n = node("Tanh", "n_tanh", vec!["x"], vec!["y"]);
+    let graph = single_node_graph(n, &["x"]);
+    let ops = CpuBackendOps::new();
+
+    let mut feeds_on = HashMap::new();
+    feeds_on.extend([feed_f32("x", vec![0.0, 1.0, -1.0], &[3])]);
+    let (result_on, report) =
+        run_with_ops_report(&graph, feeds_on, &ops).expect("run_with_ops は成功するはず");
+    assert_eq!(report.host_nodes, vec!["n_tanh".to_string()]);
+    assert!(report.device_nodes.is_empty());
+
+    let mut feeds_off = HashMap::new();
+    feeds_off.extend([feed_f32("x", vec![0.0, 1.0, -1.0], &[3])]);
+    let result_off = run(&graph, feeds_off).expect("run は成功するはず");
+    assert_eq!(
+        as_f32_slice(&result_on["y"]),
+        as_f32_slice(&result_off["y"])
+    );
 }
 
 // ---- イシュー #2200: BatchNormalization／GlobalAveragePool／Flatten は
