@@ -292,8 +292,9 @@ pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
 /// リポジトリの既存パターン〈`backend-cpu::ops.rs` の同名関数
 /// doc〉を踏襲する）。
 ///
-/// **動機**: `logsumexp`／`vector_norm_p` は小さなストレージを
-/// 巨大な shape へ broadcast した view を受け取りうる。`outer *
+/// **動機**: `logsumexp`／`vector_norm_p`／`vector_norm`（イシュー
+/// #2287 で追加）は小さなストレージを巨大な shape へ broadcast した
+/// view を受け取りうる。`outer *
 /// inner`（軸指定側の出力要素数）や `a.numel()`（全縮約・非
 /// contiguous 側の入力要素数）は `usize` の積としては収まっても、
 /// `f32` 換算のバイト数が `isize::MAX` を超えることがあり、その
@@ -626,6 +627,15 @@ pub fn var(
 ///
 /// 縮約対象の要素数が `0` の場合は [`ReduceError::EmptyReduction`] を
 /// 返す（`var` と対称な「空縮約は明示エラー」の方針）。
+///
+/// **確保前のバイト数上限検査（`checked_alloc_numel_f32`。イシュー
+/// #2287）**: `logsumexp`／`vector_norm_p` と同じ理由・同じ位置で、
+/// 小さなストレージを巨大な shape へ broadcast した view に対する
+/// `gather_elements`（非 contiguous 全縮約）・`axis_reduce_vector_norm`
+/// の `.collect()`（軸指定）の確保前に、要素数積の `usize`
+/// オーバーフロー・`Vec` allocation 上限（`isize::MAX` バイト）超過を
+/// 型付きエラーで拒否する（本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md`）。
 pub fn vector_norm(
     a: &Tensor<f32>,
     ord: VectorNormOrd,
@@ -644,7 +654,16 @@ pub fn vector_norm(
         None => {
             let total = match a.as_slice() {
                 Some(slice) => vector_norm_slice(slice, kind),
-                None => vector_norm_slice(&gather_elements(a), kind),
+                None => {
+                    // 非 contiguous（`gather_elements` が実体化する）
+                    // 経路のみ確保前検査する。`as_slice()` が `Some` の
+                    // 場合は既に実体化済みのスライスを走査するだけで
+                    // 新規確保がないため検査不要（`logsumexp` の
+                    // `None` 分岐と同じ理由。
+                    // [`checked_alloc_numel_f32`] doc「動機」参照）。
+                    checked_alloc_numel_f32(a.shape())?;
+                    vector_norm_slice(&gather_elements(a), kind)
+                }
             };
             vec![total]
         }
@@ -655,6 +674,13 @@ pub fn vector_norm(
             outer
                 .checked_mul(inner)
                 .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            // `axis_reduce_vector_norm` の `.collect()` は `out_shape`
+            // （`outer * inner` 要素）と同じサイズの `Vec<f32>` を確保
+            // する。直上の `checked_mul` は要素数積のオーバーフロー
+            // のみを検査するため、確保可能バイト数（`isize::MAX`
+            // 上限）は別途検査する（`logsumexp` の `Some(axis)` 分岐と
+            // 同じ理由。[`checked_alloc_numel_f32`] doc「動機」参照）。
+            checked_alloc_numel_f32(&out_shape)?;
             axis_reduce_vector_norm(a, axis, kind)
         }
     };
@@ -1514,6 +1540,46 @@ mod tests {
             err,
             ReduceError::Shape(ShapeError::ElementCountOverflow)
         ));
+    }
+
+    // --- `vector_norm`（L1／L2）の確保前バイト数上限検査（イシュー
+    // #2287。`logsumexp`／`vector_norm_p` と同型の fixture・同じ理由）。
+
+    #[test]
+    fn vector_norm_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
+        // base shape [1, 4] を broadcast して [1usize << 61, 4] にする
+        // （軸 1 は実軸〈長さ 4・非空縮約〉、軸 0 は broadcast で巨大）。
+        // dim=Some(1) で縮約すると out_shape=[1usize << 61] となり、
+        // 要素数積（2^61）自体は usize に収まるが f32 換算バイト数
+        // （2^61 * 4 = 2^63）が isize::MAX（2^63 - 1）を 1 超える。
+        let base = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+
+        for ord in [VectorNormOrd::L1, VectorNormOrd::L2] {
+            let err = vector_norm(&huge, ord, Some(1)).expect_err("確保前に拒否されるはず");
+            assert!(matches!(
+                err,
+                ReduceError::Shape(ShapeError::ElementCountOverflow)
+            ));
+        }
+    }
+
+    #[test]
+    fn vector_norm_full_reduce_rejects_huge_broadcast_input_without_panicking() {
+        // base shape [1] を broadcast して [1usize << 61] にする
+        // （非 contiguous・全縮約〈dim=None〉。`as_slice()` が `None`
+        // を返すため `gather_elements` 経路に入る）。
+        let base = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 61]).unwrap();
+        assert!(huge.as_slice().is_none(), "fixture は非 contiguous のはず");
+
+        for ord in [VectorNormOrd::L1, VectorNormOrd::L2] {
+            let err = vector_norm(&huge, ord, None).expect_err("確保前に拒否されるはず");
+            assert!(matches!(
+                err,
+                ReduceError::Shape(ShapeError::ElementCountOverflow)
+            ));
+        }
     }
 
     #[test]

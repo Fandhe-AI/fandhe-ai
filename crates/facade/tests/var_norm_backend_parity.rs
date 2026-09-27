@@ -16,7 +16,7 @@
 //! cargo test -p fandhe-ai --release --test var_norm_backend_parity -- --ignored --nocapture
 //! ```
 
-use fandhe_ai::{Device, Tensor, tape_for};
+use fandhe_ai::{AutodiffError, Device, ShapeError, Tensor, tape_for};
 
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).unwrap()
@@ -212,6 +212,23 @@ fn run_device_parity(device: Device, unavailable_msg: &str) {
             assert_parity_tensors(dev_da, cpu_da, &format!("{label} backward: dim={dim:?}"));
         }
     }
+}
+
+/// (h) CPU tape 上で `Var::norm_l2` が、小さなストレージを巨大な
+/// shape へ `broadcast_to` した view に対し、`CpuBackendOps` への
+/// 委譲より前に確保前検査で拒否することを確認する（イシュー #2287。
+/// `reduce_ops_backend_parity.rs::
+/// cpu_norm_p_two_rejects_huge_broadcast_before_delegating` と同型）。
+#[test]
+fn cpu_norm_l2_rejects_huge_broadcast_before_dispatch() {
+    let tape = tape_for(Device::Cpu).unwrap();
+    let base = tensor(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]);
+    let huge = base.broadcast_to(&[1usize << 61, 4]).unwrap();
+    let x = tape.var(&huge);
+    assert!(matches!(
+        x.norm_l2(Some(1)),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
 }
 
 /// テンソル同士の統一複合判定（`reduce_backend_parity.rs` と同じ方式。

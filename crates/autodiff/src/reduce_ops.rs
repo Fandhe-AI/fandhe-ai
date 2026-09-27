@@ -107,7 +107,13 @@
 //!    が独自に確保前検査を持たない場合は本関数の検査を迂回していた
 //!    （是正: 共有ヘルパ `ensure_alloc_fits_f32` を導入し、全 5 入口
 //!    の冒頭・全分岐より前に呼ぶ形へ統一。codex-review 新規指摘 2 件・
-//!    PR #2263）。
+//!    PR #2263）。**2026-09-27 追記（イシュー #2287）**: 上記「委譲先が
+//!    独自に確保前検査を持たない場合」の委譲先自体（`Var::norm`。
+//!    `norm_l1`／`norm_l2` の共通実装）も、入口で `checked_bytes_for`
+//!    による確保前検査を持つよう是正済み。これにより `norm_p` の
+//!    `ensure_alloc_fits_f32`（多層防御として維持）を経由しない
+//!    直接呼び出し（`x.norm_l1(dim)`／`x.norm_l2(dim)`）も、単独で
+//!    巨大 broadcast view を fail-closed に拒否する。
 
 use fandhe_ai_tensor_core::{BackendError, Tensor, reduce_out_shape};
 
@@ -147,7 +153,8 @@ fn reduce_axis_len(shape: &[usize], dim: Option<usize>) -> usize {
 /// `p ∈ {1.0, 2.0}` の委譲が検査より前にあり、委譲先
 /// `Var::norm_l1`／`norm_l2`〈本 PR の差分外の既存経路〉が
 /// 確保前検査を欠いていた場合に迂回されていた。codex-review 新規
-/// 指摘 2 件・PR #2263）。
+/// 指摘 2 件・PR #2263。**委譲先自体は #2287 で入口検査を持つよう
+/// 是正済み**）。
 ///
 /// `prod` の `dim=None` 経路（`reshape([n])` → `cumprod(0)`）・
 /// `Some(axis)` 経路（`cumprod(axis)`）はいずれも入力と同じ要素数の
@@ -445,7 +452,9 @@ pub fn all<'t>(x: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError
 /// codex-review 新規指摘・PR #2263。委譲そのもの〈`Var::norm_l1`／
 /// `norm_l2`／`Var::norm` 本体〉の改修は既存 API のためスコープ外だが、
 /// 委譲前に本関数が検査することで巨大 broadcast shape は委譲前に
-/// 拒否される）。
+/// 拒否される。**2026-09-27 追記（イシュー #2287）**: `Var::norm` 本体
+/// も入口検査を持つよう是正済みのため、現在は本関数の検査と委譲先の
+/// 検査の 2 重防御になっている）。
 pub fn norm_p<'t>(x: &Var<'t>, p: f32, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
     let shape = x.shape();
     let out_shape = reduce_out_shape(&shape, dim)?;
