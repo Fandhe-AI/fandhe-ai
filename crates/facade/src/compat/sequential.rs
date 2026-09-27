@@ -908,8 +908,12 @@ impl Sequential {
             };
             let batch = batch_result.map_err(to_invalid_arg)?;
             let input = batch.inference_input();
+            // サンプル数は入力バッチの先頭軸（バッチ軸）から求める。
+            // 出力の先頭軸は層構成（leading axis を変える層・rank-0
+            // 出力を返す層等）に依存し、実際に消費した入力行数と食い
+            // 違いうるため使わない（codex-review 指摘・PR #2322）。
+            let samples = input.shape().first().copied().unwrap_or(1) as u64;
             let output = self.predict_recorded(input, rec)?;
-            let samples = output.shape().first().copied().unwrap_or(1) as u64;
             rec.record_batch(samples);
             if outputs.try_reserve(1).is_err() {
                 return Err(AutodiffError::InvalidArgument(
@@ -3594,6 +3598,37 @@ mod tests {
             0
         );
         assert_eq!(stats.total().calls(), 1);
+    }
+
+    /// (g'): 出力の先頭軸が入力バッチ軸と一致しない層（`add_flatten(0,
+    /// 1)` で `[N, F]` を `[N*F]` の 1 次元へ潰す）を含む場合でも、
+    /// `samples()` が実際に消費した入力行数（バッチ軸）を返すこと。
+    /// 出力側の先頭軸（`N*F`）から誤って算出すると値が食い違う
+    /// （codex-review 指摘・PR #2322。`docs/facade-predict-batches-
+    /// phase-metrics-decision.md` §3 のサンプル数定義を参照）。
+    #[test]
+    fn run_loader_inference_counts_samples_from_input_batch_axis_not_output_shape() {
+        crate::inference::batch::clear_inference_phase_stats();
+        // `add_flatten(0, 1)` は全軸を 1 軸へ潰すため、出力の先頭軸は
+        // `N * F`（この構成では `5 * 6 = 30`）になり、入力バッチ軸
+        // （`N = 5`）とは異なる値になる。
+        let model = Sequential::new()
+            .add_linear(4, 6, SEED1)
+            .unwrap()
+            .add_flatten(0, 1);
+        let features = make_features(5);
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        assert_eq!(outputs.len(), 3);
+        // 出力の先頭軸が入力バッチ軸と食い違うことの前提確認
+        // （バッチサイズ 2 の入力に対し出力先頭軸は 2*6=12 になる）。
+        assert_eq!(outputs[0].shape().first().copied(), Some(12));
+
+        let stats = crate::inference::batch::inference_phase_stats_snapshot();
+        assert_eq!(stats.batches(), 3);
+        assert_eq!(stats.samples(), 5);
     }
 
     /// (h): `Embedding` を含み `forward_host` 未対応でフォールバックする
