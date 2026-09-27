@@ -2001,3 +2001,39 @@ fn stacked_forward_host_rejects_unreservable_sequence_length_instead_of_panickin
         AutodiffError::Shape(ShapeError::ElementCountOverflow)
     ));
 }
+
+/// `nn_conv.rs::conv2d_new_rejects_weight_allocation_exceeding_isize_max`
+/// の `StackedRnn`／`StackedGru`／`StackedLstm` 版（イシュー #2248・
+/// Review 指摘）。
+/// `stacked_forward_host_rejects_unreservable_sequence_length_instead_of_panicking`
+/// が確認する `reserve_outputs` 経由の確保失敗とは異なり、`new` 内の
+/// `cells.try_reserve_exact(total_cells)` 自体が失敗する経路を確認
+/// する。`RnnConfig::new().with_num_layers(1usize << 60)` は
+/// `validate_stack_config` の `checked_mul`（`num_layers *
+/// num_directions`、既定 `num_directions=1`）を素通りするが、
+/// `total_cells = 1<<60` はセル型 1 個分のサイズを乗じると
+/// `isize::MAX` を超えるため `try_reserve_exact` が失敗し、
+/// `checked_uniform_init` と同じく非アロケーションな
+/// `Shape(ElementCountOverflow)` を返す。
+#[test]
+fn stacked_new_rejects_cells_allocation_exceeding_isize_max() {
+    let config = RnnConfig::new().with_num_layers(1usize << 60);
+
+    let err = StackedRnn::new(D, HID, true, 0, config).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+
+    let err = StackedGru::new(D, HID, true, 0, config).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+
+    let err = StackedLstm::new(D, HID, true, 0, config).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+}

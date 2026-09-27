@@ -101,11 +101,12 @@ fn conv_transpose1d_new_rejects_output_padding_ge_stride() {
 }
 
 /// `nn_conv.rs::conv2d_new_rejects_weight_allocation_exceeding_isize_max`
-/// の `ConvTranspose1d` 版（イシュー #2248）。`weight_numel = in_channels
-/// * cout_g * k = (1<<61) * 1 * 1 = 1<<61` は `checked_mul` を素通りする
-/// が f32 4 バイト換算で `1<<63` バイトとなり `isize::MAX` を超える。
-/// `checked_uniform_init`（`nn::init` 共有版）が panic せず非アロケー
-/// ションな `Shape(ElementCountOverflow)` を返すことを確認する。
+/// の `ConvTranspose1d` 版（イシュー #2248）。
+/// `weight_numel = in_channels * cout_g * k = (1<<61) * 1 * 1 = 1<<61`
+/// は `checked_mul` を素通りするが f32 4 バイト換算で `1<<63` バイト
+/// となり `isize::MAX` を超える。`checked_uniform_init`（`nn::init`
+/// 共有版）が panic せず非アロケーションな `Shape(ElementCountOverflow)`
+/// を返すことを確認する。
 #[test]
 fn conv_transpose1d_new_rejects_weight_allocation_exceeding_isize_max() {
     let err = err_of(ConvTranspose1d::new(
