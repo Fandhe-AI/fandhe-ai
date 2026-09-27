@@ -353,6 +353,23 @@ step が `--workspace` にせず `--lib` 限定にしている理由（guardrail
 2 クレートへ限定することで不要なリスクを避けた。`make doc-warnings` で
 ローカル再現できるようにした（ci.yml と同一コマンドを共用）。
 
+**追記（イシュー #2289）**: 上記の検査はいずれも既定 features のみを見るため、
+`backend-cuda` の `internal-diagnostics` feature（診断・ベンチ専用 API を
+既定の公開面から外す可視性ゲート）を有効にした場合の rustdoc エラー
+（97 件・`public documentation for X links to private item Y` 91 件・
+`unresolved link to X` 6 件）は検出できていなかった。修正方針は上記の方針 1
+と同じ（`` [`foo`] `` → `` `foo` ``。`#[allow(rustdoc::...)]`・
+`--document-private-items`・リンク先の public 化のいずれも用いない）。
+Linux ホスト step（既定 features 分と同じ step 内）に
+`cargo doc -p fandhe-ai-backend-cuda --all-features --no-deps --locked` を
+追加し、feature ゲート付き公開面も検査対象に加えた（`make doc-warnings` にも
+同一コマンドを追加。`backend-cuda` の feature は `internal-diagnostics` のみ
+のため `--all-features` と `--features internal-diagnostics` は同義）。
+`backend-metal` にも同種の feature ゲートがあるが、Linux ホストでは
+`--all-features` で警告 0 件・macOS cfg 限定項目はコンパイル対象外のため
+`--target aarch64-apple-darwin --all-features` の組み合わせは本イシューの
+スコープ外（別途追跡の候補）。
+
 ## 9. release ワークフローによる公開手順（#884）
 
 イシュー #884 で追加した `.github/workflows/release.yml`（workflow_dispatch

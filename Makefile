@@ -266,12 +266,17 @@ endif
 # 再現手順を一本化する。cfg（aarch64 NEON vs x86 AVX・macOS 限定モジュール）により
 # 警告集合がターゲットごとに異なるため両方をゲートする
 # （docs/crates-io-publishing-order.md「公開前検証手順と実測記録」参照）。
+# 3 行目（イシュー #2289）: backend-cuda の `internal-diagnostics` feature 有効時
+# は診断・ベンチ専用の feature ゲート付き `pub` 項目が公開面へ入り rustdoc の
+# 検査対象になるため、既定 features 分（1 行目）とは別に検査する
+# （docs/crates-io-publishing-order.md §8.5）。
 .PHONY: doc-warnings
-doc-warnings: ## cargo doc -D warnings を Linux ホスト分・aarch64-apple-darwin クロス分の両方で検証する
+doc-warnings: ## cargo doc -D warnings を Linux ホスト分・aarch64-apple-darwin クロス分・backend-cuda internal-diagnostics feature 有効時の 3 通りで検証する
 ifdef HAS_CARGO
 	rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 	RUSTDOCFLAGS="-D warnings" cargo doc -p fandhe-ai-backend-metal -p fandhe-ai-backend-cpu --no-deps --locked --target aarch64-apple-darwin
+	RUSTDOCFLAGS="-D warnings" cargo doc -p fandhe-ai-backend-cuda --all-features --no-deps --locked
 else
 	@echo "skip: Cargo.toml 未追加のため doc-warnings をスキップ"
 endif
