@@ -16,7 +16,7 @@ use fandhe_ai::compat::{
     Monitor, MonitorMode, Optimizer, Sequential,
 };
 use fandhe_ai::optim::{SgdConfig, StepLr};
-use fandhe_ai::{AutodiffError, Tensor};
+use fandhe_ai::{AutodiffError, ShapeError, Tensor};
 
 const N: usize = 24;
 const D_IN: usize = 4;
@@ -400,6 +400,47 @@ fn fit_with_metrics_rejects_val_metric_not_in_requested_metrics() {
         )
         .unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+// イシュー #2249: 確保失敗（巨大 epochs）は非アロケーションな
+// `Shape(ElementCountOverflow)` を返し、復元経路（compile 済み状態・
+// train／eval モード）も機能する。分類 target（`Tensor<i32>`）・
+// `Loss::CrossEntropy`・validation あり・metrics 非空で
+// `fit_with_metrics` 経由の到達性を確認する。
+#[test]
+fn fit_with_metrics_rejects_huge_epochs_without_panicking() {
+    let (x, y) = gen_classification_data(SEED_DATA, D_OUT);
+    let (x_val, y_val) = gen_classification_data(SEED_VAL, D_OUT);
+
+    let mut model = build_model();
+    model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let was_training = model.training();
+
+    let err = model
+        .fit_with_metrics(
+            &x,
+            &y,
+            FitConfig::new(usize::MAX, N),
+            Some((&x_val, &y_val)),
+            &mut [],
+            &ALL_METRICS,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
+    assert!(
+        model.is_compiled(),
+        "Err 後も compile 済み状態が維持されること"
+    );
+    assert_eq!(
+        model.training(),
+        was_training,
+        "Err 後も train／eval モードが呼び出し前の値へ復元されること"
+    );
 }
 
 #[test]

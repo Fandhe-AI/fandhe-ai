@@ -70,3 +70,28 @@ pub use callbacks::{Callback, EarlyStopping, LrSchedule, ModelCheckpoint, Monito
 pub use metrics::{Metrics, MetricsResult};
 pub use sequential::{Sequential, SequentialVars};
 pub use training::{AmpConfig, AmpDType, FitConfig, FitTarget, History, Loss, Optimizer};
+
+/// `TryReserveError`（`Vec::try_reserve_exact` 等の確保失敗）を
+/// 非アロケーションなエラーへ写す共有ヘルパー（`training`・`metrics`
+/// から `super::alloc_failed()` で参照する）。
+///
+/// 確保失敗を検出した直後に `format!` で新しい `String` を確保して
+/// 報告すると、実メモリ枯渇時には報告経路そのものが
+/// `handle_alloc_error` 経由で abort しうる（「確保失敗は panic／abort
+/// せず `Err` で伝播する」契約を報告経路自身が破ることになる）。
+/// `AutodiffError::Shape(ShapeError::ElementCountOverflow)` は unit
+/// variant でヒープ確保を一切伴わないため、この経路の返り値として使う。
+///
+/// 意味論・パターンの出典: `fandhe_ai_autodiff::nn::init::alloc_failed`
+/// （PR #2239・イシュー #2248）。autodiff 版は `pub(crate)` で facade
+/// からは参照できないため、同じ意味論を facade 側にも複製する
+/// （イシュー #2249）。
+///
+/// **適用範囲**: `Vec::try_reserve`／`try_reserve_exact` の失敗
+/// （`TryReserveError`）経由のみ。`checked_mul` によるオーバーフロー
+/// 検出や、長さ不一致・shape 不一致等の意味論エラーは診断メッセージを
+/// 保持する価値が上回るため対象外とし、従来どおり
+/// `AutodiffError::InvalidArgument(String)` を使い続ける。
+fn alloc_failed() -> crate::AutodiffError {
+    crate::AutodiffError::Shape(crate::ShapeError::ElementCountOverflow)
+}

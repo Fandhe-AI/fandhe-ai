@@ -700,7 +700,12 @@ type CustomStepHook<'h, T> = dyn FnMut(
 /// 加算のため対象外——新たな `f64` アキュムレータ契約は導入しない。
 ///
 /// 新しい `Vec` を組み立て終えてから `*acc` へ書き戻す（原子的。途中で
-/// shape 不一致等により失敗しても `acc` は変更前のまま残る）。
+/// shape 不一致等により失敗しても `acc` は変更前のまま残る）。累積
+/// バッファ・加算結果バッファの確保（`try_reserve_exact`）が失敗した
+/// 場合は非アロケーションな `AutodiffError::Shape(ShapeError::
+/// ElementCountOverflow)`（`super::alloc_failed`。イシュー #2249）を
+/// 返す。長さ不一致・shape 不一致（内部不変条件違反）は引き続き
+/// `InvalidArgument` を使う。
 fn accumulate_grads_into(
     acc: &mut Vec<Tensor<f32>>,
     grads: &[&Tensor<f32>],
@@ -715,11 +720,8 @@ fn accumulate_grads_into(
         )));
     }
     let mut next: Vec<Tensor<f32>> = Vec::new();
-    next.try_reserve_exact(acc.len()).map_err(|e| {
-        AutodiffError::InvalidArgument(format!(
-            "Sequential::{method}: 勾配累積バッファの確保に失敗した: {e}"
-        ))
-    })?;
+    next.try_reserve_exact(acc.len())
+        .map_err(|_| super::alloc_failed())?;
     for (a, g) in acc.iter().zip(grads.iter()) {
         if a.shape() != g.shape() {
             return Err(AutodiffError::InvalidArgument(format!(
@@ -732,11 +734,9 @@ fn accumulate_grads_into(
         let a_slice = a.host_slice();
         let g_slice = g.host_slice();
         let mut summed: Vec<f32> = Vec::new();
-        summed.try_reserve_exact(a_slice.len()).map_err(|e| {
-            AutodiffError::InvalidArgument(format!(
-                "Sequential::{method}: 勾配累積の加算結果バッファの確保に失敗した: {e}"
-            ))
-        })?;
+        summed
+            .try_reserve_exact(a_slice.len())
+            .map_err(|_| super::alloc_failed())?;
         summed.extend(a_slice.iter().zip(g_slice.iter()).map(|(x, y)| x + y));
         next.push(Tensor::new(summed, a.shape())?);
     }
@@ -1025,6 +1025,12 @@ impl Sequential {
     /// # エラー
     ///
     /// [`Self::fit`] の既存エラー契約に加え:
+    /// - `config.epochs` が巨大で `History`（`loss`／`val_loss`／`lr`／
+    ///   `val_metrics`）や勾配累積バッファの確保に失敗した場合（イシュー
+    ///   #2249）→ 非アロケーションな `AutodiffError::Shape(ShapeError::
+    ///   ElementCountOverflow)`（`super::alloc_failed`。以前の
+    ///   `InvalidArgument(String)` から変更）。train／eval モードの
+    ///   復元・`compiled` の書き戻しは他のエラーと同様に行われる
     /// - `callbacks` のいずれかが `monitor == Monitor::ValLoss`
     ///   （[`super::callbacks::EarlyStopping`]／
     ///   [`super::callbacks::ModelCheckpoint`] の既定・
@@ -1382,50 +1388,36 @@ impl Sequential {
         // `Vec::with_capacity` は capacity overflow（`config.epochs`
         // が巨大・`usize::MAX` 近辺等）で panic する（本番経路の panic
         // 禁止。`.claude/rules/security.md` A03 の精神）。`try_reserve_exact`
-        // で失敗可能にし、確保失敗は `InvalidArgument` へマッピングして
+        // で失敗可能にし、確保失敗は非アロケーションな
+        // `AutodiffError::Shape(ShapeError::ElementCountOverflow)`
+        // （[`super::alloc_failed`]。イシュー #2249）へマッピングして
         // 呼び出し元（[`Self::fit_with_callbacks`]）の既存復元経路
-        // （train／eval モード巻き戻し・`compiled` 復元）へ返す。
+        // （train／eval モード巻き戻し・`compiled` 復元）へ返す。確保
+        // 失敗の*報告*自体が新たなヒープ確保（`format!` の `String`）を
+        // 行わないようにするため、診断メッセージは持たせない。
         let mut loss = Vec::new();
-        loss.try_reserve_exact(config.epochs).map_err(|e| {
-            AutodiffError::InvalidArgument(format!(
-                "Sequential::{method}: History.loss 用の確保に失敗した \
-                 (epochs={}): {e}",
-                config.epochs
-            ))
-        })?;
+        loss.try_reserve_exact(config.epochs)
+            .map_err(|_| super::alloc_failed())?;
         // `val_loss` は `validation.is_some()` のときのみ epochs 分
         // 確保する（`None` の場合は空のまま。`History::val_loss` doc
         // 参照）。
         let mut val_loss = Vec::new();
         if validation.is_some() {
-            val_loss.try_reserve_exact(config.epochs).map_err(|e| {
-                AutodiffError::InvalidArgument(format!(
-                    "Sequential::{method}: History.val_loss 用の確保に失敗した \
-                     (epochs={}): {e}",
-                    config.epochs
-                ))
-            })?;
+            val_loss
+                .try_reserve_exact(config.epochs)
+                .map_err(|_| super::alloc_failed())?;
         }
         let mut lr = Vec::new();
-        lr.try_reserve_exact(config.epochs).map_err(|e| {
-            AutodiffError::InvalidArgument(format!(
-                "Sequential::{method}: History.lr 用の確保に失敗した \
-                 (epochs={}): {e}",
-                config.epochs
-            ))
-        })?;
+        lr.try_reserve_exact(config.epochs)
+            .map_err(|_| super::alloc_failed())?;
         // `val_metrics` は `validation.is_some() && !metrics.is_empty()`
         // のときのみ epochs 分確保する（`History::val_metrics` doc
         // 参照）。
         let mut val_metrics = Vec::new();
         if validation.is_some() && !metrics.is_empty() {
-            val_metrics.try_reserve_exact(config.epochs).map_err(|e| {
-                AutodiffError::InvalidArgument(format!(
-                    "Sequential::{method}: History.val_metrics 用の確保に失敗した \
-                     (epochs={}): {e}",
-                    config.epochs
-                ))
-            })?;
+            val_metrics
+                .try_reserve_exact(config.epochs)
+                .map_err(|_| super::alloc_failed())?;
         }
         let mut history = History {
             loss,
@@ -1648,13 +1640,8 @@ impl Sequential {
                                 // ここで境界に到達し、加算は一度も
                                 // 起きないため既存経路と bit 同一になる。
                                 let mut cloned: Vec<Tensor<f32>> = Vec::new();
-                                if let Err(e) = cloned.try_reserve_exact(grad_refs.len()) {
-                                    break 'epochs_block Err(AutodiffError::InvalidArgument(
-                                        format!(
-                                            "Sequential::{method}: 勾配累積バッファの確保に\
-                                             失敗した: {e}"
-                                        ),
-                                    ));
+                                if cloned.try_reserve_exact(grad_refs.len()).is_err() {
+                                    break 'epochs_block Err(super::alloc_failed());
                                 }
                                 cloned.extend(grad_refs.iter().map(|g| (*g).clone()));
                                 acc = Some(cloned);

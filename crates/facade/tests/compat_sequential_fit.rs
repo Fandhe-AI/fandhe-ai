@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential};
 use fandhe_ai::optim::{AdamWConfig, Sgd, SgdConfig};
-use fandhe_ai::{AutodiffError, Tensor};
+use fandhe_ai::{AutodiffError, ShapeError, Tensor};
 
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -342,20 +342,32 @@ fn fit_rejects_huge_epochs_without_panicking() {
     // （本番経路の panic 禁止。`.claude/rules/security.md` A03 の精神）。
     // `try_reserve_exact` への切替後は panic せず型付きエラーを返し、
     // 呼び出し元の復元経路（compile 済み状態の維持）も機能することを
-    // 確認する。
+    // 確認する。イシュー #2249 で確保失敗の報告経路を非アロケーション化
+    // したため、返る variant は `InvalidArgument(String)` から
+    // `Shape(ShapeError::ElementCountOverflow)` へ変わった（公開面の
+    // 挙動変更。PR 本文参照）。
     let (x, y) = gen_regression_data(SEED_DATA);
     let mut model = build_model();
     model
         .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
         .unwrap();
+    let was_training = model.training();
 
     let err = model
         .fit(&x, &y, FitConfig::new(usize::MAX, N))
         .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ElementCountOverflow)
+    ));
     assert!(
         model.is_compiled(),
         "Err 後も compile 済み状態が維持されること"
+    );
+    assert_eq!(
+        model.training(),
+        was_training,
+        "Err 後も train／eval モードが呼び出し前の値へ復元されること"
     );
 }
 

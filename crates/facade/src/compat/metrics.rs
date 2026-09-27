@@ -152,7 +152,11 @@ pub(super) struct ConfusionAccumulator {
 impl ConfusionAccumulator {
     /// `num_classes == 0` または `num_classes * num_classes` が
     /// `usize` で表現できない場合は `InvalidArgument`（`checked_mul`。
-    /// 巨大クラス数での panic／OOM を避ける fail-closed 検査）。
+    /// 巨大クラス数での panic／OOM を避ける fail-closed 検査）。混同
+    /// 行列 `counts` の確保（`try_reserve_exact`）自体が失敗した場合は
+    /// 非アロケーションな `AutodiffError::Shape(ShapeError::
+    /// ElementCountOverflow)`（`super::alloc_failed`。イシュー #2249）
+    /// を返す（`checked_mul` 失敗の意味論エラーとは区別する）。
     pub(super) fn new(num_classes: usize) -> Result<Self, AutodiffError> {
         if num_classes == 0 {
             return Err(AutodiffError::InvalidArgument(
@@ -165,11 +169,9 @@ impl ConfusionAccumulator {
             ))
         })?;
         let mut counts = Vec::new();
-        counts.try_reserve_exact(cells).map_err(|e| {
-            AutodiffError::InvalidArgument(format!(
-                "MetricsResult: 混同行列（cells={cells}）用の確保に失敗した: {e}"
-            ))
-        })?;
+        counts
+            .try_reserve_exact(cells)
+            .map_err(|_| super::alloc_failed())?;
         counts.resize(cells, 0u64);
         Ok(ConfusionAccumulator {
             num_classes,
@@ -434,5 +436,28 @@ mod tests {
         let result = MetricsResult::compute(&[Metrics::Accuracy], &logits, &target)
             .expect("test fixture: compute は成功するはず");
         assert_eq!(result.accuracy, Some(1.0));
+    }
+
+    /// イシュー #2249: 混同行列 `counts`（`u64 * cells` バイト）の確保
+    /// 失敗は非アロケーションな `Shape(ElementCountOverflow)` を返す
+    /// （`checked_mul` によるオーバーフロー検出とは別経路）。
+    /// `num_classes = 2^31` は `cells = num_classes * num_classes = 2^62`
+    /// が `checked_mul` を通過するが、`counts: Vec<u64>` の総バイト数
+    /// （`2^62 * 8 = 2^65`）が 64bit `isize::MAX` を超えるため
+    /// `try_reserve_exact` が `CapacityOverflow` を決定的に返す
+    /// （32bit ターゲットでは `checked_mul` 側で先に `InvalidArgument`
+    /// になるため `cfg` で分離する）。
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn new_rejects_huge_num_classes_without_panicking() {
+        // `ConfusionAccumulator` は `Debug` を実装しない（内部専用型）
+        // ため `unwrap_err()` は使えず、`match` で確認する。
+        match ConfusionAccumulator::new(1usize << 31) {
+            Ok(_) => panic!("test fixture: 確保失敗を期待したが成功した"),
+            Err(err) => assert!(matches!(
+                err,
+                AutodiffError::Shape(crate::ShapeError::ElementCountOverflow)
+            )),
+        }
     }
 }

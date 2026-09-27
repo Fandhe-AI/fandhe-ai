@@ -357,7 +357,12 @@ facade 経由到達性を固定した。`fandhe_ai::optim`（`optim.rs`）は純
   検査。NaN は決して「改善」と判定しない。`Monitor::ValLoss` ×
   `validation` なしは早期 `InvalidArgument`。`History` の `Vec` は
   `try_reserve_exact` で capacity overflow panic を回避
-  （`val_loss`／`lr` も `loss` と同じ方式）。本番経路に `unwrap`／
+  （`val_loss`／`lr` も `loss` と同じ方式）。確保失敗時の返り値は
+  非アロケーションな `AutodiffError::Shape(ShapeError::
+  ElementCountOverflow)`（イシュー #2249。以前は確保失敗の報告経路
+  自体が新たな `String` 確保を行う `InvalidArgument(String)` だった
+  ため、実メモリ枯渇時に報告経路自身が abort しうる構造だった）。
+  本番経路に `unwrap`／
   `expect` を置いていない。**`ModelCheckpoint::to_file`（#2073）**:
   保存先パスは呼び出し側がプロセス内で渡す引数であり、シェル展開・
   外部文字列の連結は行わない（`Path::parent()`／`join` は
