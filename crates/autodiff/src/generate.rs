@@ -119,7 +119,7 @@ impl GenerateConfig {
 
     /// 温度を上書きする（`TopK` ＋温度の組み合わせ用。HF の
     /// `top_k` ＋ `temperature` 相当）。`Greedy`／`Temperature` に対して
-    /// 呼ぶと [`Self::validate`] が矛盾として拒否する（`Greedy` は
+    /// 呼ぶと `Self::validate`（非公開）が矛盾として拒否する（`Greedy` は
     /// `temperature == 1.0` 固定、`Temperature(t)` は `t` 自身が唯一の
     /// 温度値であるため）。
     pub fn with_temperature(mut self, temperature: f32) -> GenerateConfig {
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn validate_forward_step_output_rejects_shape_mismatch() {
-        let logits = Tensor::new(vec![0.0f32; 2 * 1 * 3], &[2, 1, 3]).unwrap();
+        let logits = Tensor::new(vec![0.0f32; 2 * 3], &[2, 1, 3]).unwrap();
         assert!(validate_forward_step_output(&logits, 3, 1).is_err());
         assert!(validate_forward_step_output(&logits, 2, 2).is_err());
     }
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn validate_forward_step_output_returns_vocab_on_success() {
-        let logits = Tensor::new(vec![0.0f32; 1 * 2 * 5], &[1, 2, 5]).unwrap();
+        let logits = Tensor::new(vec![0.0f32; 2 * 5], &[1, 2, 5]).unwrap();
         assert_eq!(validate_forward_step_output(&logits, 1, 2).unwrap(), 5);
     }
 }
