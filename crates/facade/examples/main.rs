@@ -68,6 +68,15 @@ fn labels_tensor(labels: Vec<i32>, n: usize) -> Result<Tensor<i32>, Box<dyn std:
 /// 全 epoch の loss が有限・最終 epoch の loss が初回より小さい・
 /// held-out 精度が 0.50 以上。
 fn check_ac4(name: &str, history: &[f32], test_acc: f32) -> Result<(), Box<dyn std::error::Error>> {
+    // `history[0]` を後段で直接参照するため、空の history を先に拒否する
+    // （`fit_epochs` は `epochs == 0` を拒否するため通常は空にならないが、
+    // `check_ac4` 単体を呼ぶ側の契約としても空データを明示的にエラー
+    // にする。`unwrap_or(INFINITY)` は `last` の半分のガードにしか
+    // ならず `history[0]` の panic は防げない。イシュー #2202 PR #2325
+    // レビュー方針の横展開）。
+    if history.is_empty() {
+        return Err(format!("{name}: 学習履歴（history）が空である").into());
+    }
     if !history.iter().all(|v| v.is_finite()) {
         return Err(format!("{name}: 学習中に非有限の loss が発生した: {history:?}").into());
     }
@@ -207,23 +216,93 @@ fn run_transformer() -> Result<(), Box<dyn std::error::Error>> {
     check_ac4("Transformer", &history, test_acc)
 }
 
-/// CLI 引数は `resnet|transformer|all`（完全一致の allowlist）のみを
-/// 受け付ける（`.claude/rules/security.md` A03「シェル呼び出しで
-/// ユーザー入力を直接展開しない」——本 example はシェル呼び出しも
-/// ファイル I/O も行わないが、allowlist 外の入力は usage を出して
-/// 非 0 終了する fail-closed 方針を踏襲する）。
+/// CLI が受理する実行モード（`resnet|transformer|all` の完全一致
+/// allowlist。[`parse_mode`] の戻り値）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Resnet,
+    Transformer,
+    All,
+}
+
+/// CLI 引数（`std::env::args().skip(1)` 相当の位置引数列）から
+/// [`Mode`] を決定する（`.claude/rules/security.md` A03「シェル呼び出し
+/// でユーザー入力を直接展開しない」——本 example はシェル呼び出しも
+/// ファイル I/O も行わないが、allowlist 外の入力・余分な引数は usage
+/// を返す fail-closed 方針を踏襲する）。第 2 引数以降が存在する場合
+/// （`main resnet unexpected` 等）も拒否する（`resnet|transformer|all`
+/// のみを受け付ける契約と、実装が第 1 引数しか見ていなかった不一致を
+/// 解消する。Codex レビュー指摘・イシュー #2202 PR #2325）。
+/// 引数無しは `all` 相当（既定モード）として受理する。
+fn parse_mode(args: &[String]) -> Result<Mode, String> {
+    if args.is_empty() {
+        return Ok(Mode::All);
+    }
+    if args.len() > 1 {
+        return Err(format!(
+            "usage: main [resnet|transformer|all]（余分な引数: {:?}）",
+            &args[1..]
+        ));
+    }
+    match args[0].as_str() {
+        "resnet" => Ok(Mode::Resnet),
+        "transformer" => Ok(Mode::Transformer),
+        "all" => Ok(Mode::All),
+        other => Err(format!(
+            "usage: main [resnet|transformer|all]（不明な引数: '{other}'）"
+        )),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "all".to_string());
-    match arg.as_str() {
-        "resnet" => run_resnet(),
-        "transformer" => run_transformer(),
-        "all" => {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = match parse_mode(&args) {
+        Ok(mode) => mode,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(1);
+        }
+    };
+    match mode {
+        Mode::Resnet => run_resnet(),
+        Mode::Transformer => run_transformer(),
+        Mode::All => {
             run_resnet()?;
             run_transformer()
         }
-        other => {
-            eprintln!("usage: main [resnet|transformer|all]（不明な引数: '{other}'）");
-            std::process::exit(1);
-        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Mode, parse_mode};
+
+    #[test]
+    fn parse_mode_accepts_allowlist() {
+        assert_eq!(parse_mode(&[]).unwrap(), Mode::All);
+        assert_eq!(parse_mode(&["resnet".to_string()]).unwrap(), Mode::Resnet);
+        assert_eq!(
+            parse_mode(&["transformer".to_string()]).unwrap(),
+            Mode::Transformer
+        );
+        assert_eq!(parse_mode(&["all".to_string()]).unwrap(), Mode::All);
+    }
+
+    #[test]
+    fn parse_mode_rejects_unknown_first_argument() {
+        assert!(parse_mode(&["bogus".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_mode_rejects_extra_arguments() {
+        // `main resnet unexpected` のように allowlist に一致する第 1
+        // 引数があっても、第 2 引数以降が存在すれば拒否する
+        // （Codex レビュー指摘・イシュー #2202 PR #2325）。
+        assert!(parse_mode(&["resnet".to_string(), "unexpected".to_string()]).is_err());
+    }
+
+    #[test]
+    fn check_ac4_rejects_empty_history() {
+        assert!(super::check_ac4("test", &[], 0.9).is_err());
     }
 }

@@ -353,6 +353,21 @@ impl Trainable for ResNet {
         y: &Tensor<i32>,
         opt: &mut Adam,
     ) -> Result<f32, AutodiffError> {
+        // `ResNet::forward` と同じ入力 shape 契約をここでも検証する
+        // （`train_step` は `forward` を経由せず直接 `stem_bound.forward`
+        // を呼ぶため、検証しないと不正な shape が bind 後の演算列の
+        // どこかで初めて失敗し、エラーメッセージが分かりにくくなる。
+        // `Transformer::train_step` は同型の検証を持つが `ResNet::
+        // train_step` は欠けていた非対称性。Codex レビュー指摘・
+        // イシュー #2202 PR #2325）。
+        let input_shape = x.shape();
+        if input_shape.len() != 4 || input_shape[1] != 3 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "ResNet::train_step: 入力 shape は [N, 3, H, W] である必要がある（実際: \
+                 {input_shape:?}）"
+            )));
+        }
+
         let (loss_value, updated) = {
             let tape = fandhe_ai::tape();
             let xv = tape.var(x);

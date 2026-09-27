@@ -131,6 +131,19 @@ pub fn cross_entropy_mean<'t>(
     })?;
     let weight_var = tape.var(&weight_tensor);
 
+    // logits の shape が [n, num_classes] であることを事前検証する
+    // （検証しないと、列数の異なる logits でも in-range な target_idx
+    // なら gather がそのまま通り、誤った列から loss を計算した結果が
+    // 静かに成立してしまう。Codex レビュー指摘・イシュー #2202
+    // PR #2325）。
+    let logits_shape = logits.to_tensor().shape().to_vec();
+    if logits_shape != [n, num_classes] {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "cross_entropy_mean: logits の shape は [{n}, {num_classes}] である必要がある \
+             （実際: {logits_shape:?}）"
+        )));
+    }
+
     let log_probs = logits.log_softmax(1)?;
     // 正解クラスの log-probability のみを選択（non-target の -inf を
     // 経由しないため、non-target の乗算由来の NaN 汚染が起きない）。
@@ -193,10 +206,15 @@ pub fn sub_tensor_i32(
     len: usize,
 ) -> Result<Tensor<i32>, AutodiffError> {
     let y_shape = y.shape();
-    if y_shape.is_empty() {
-        return Err(AutodiffError::InvalidArgument(
-            "sub_tensor_i32: y の rank は 1 以上である必要がある（スカラーは不可）".to_string(),
-        ));
+    // ドキュメント上の契約（「常に rank 1」）に合わせ rank を厳密に
+    // 検査する。`is_empty()`（rank >= 1 の検査）のままだと rank 2 以上
+    // の y でも通ってしまい、後段の `flat[start..start+len]` が誤った
+    // 要素をスライスして返す（Codex レビュー指摘・イシュー #2202
+    // PR #2325）。
+    if y_shape.len() != 1 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "sub_tensor_i32: y の rank は 1 である必要がある（実際: {y_shape:?}）"
+        )));
     }
     let n = y_shape[0];
     if start + len > n {
@@ -303,6 +321,29 @@ pub fn accuracy<M: ReferenceModule>(
         return Err(AutodiffError::InvalidArgument(
             "accuracy: x は空であってはならない".to_string(),
         ));
+    }
+    // `fit_epochs` と同様、評価ループの前にラベルの shape を検証する
+    // （検証しないと、ラベルが x より多い場合に末尾を無視したまま
+    // 正解率を返し、対応関係のずれを検出できない。Codex レビュー
+    // 指摘・イシュー #2202 PR #2325）。
+    if y.shape() != [n] {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "accuracy: x の先頭軸長 {n} と y の shape {:?} が一致しない",
+            y.shape()
+        )));
+    }
+    // ラベルの範囲外検査も評価ループの前に一括で行う（forward の
+    // コストを払う前に入力不備を検出する。`cross_entropy_mean` の
+    // range 検証と同じ方針）。
+    for i in 0..n {
+        let label = y.get(&[i]).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!("accuracy: y[{i}] の読み出しに失敗した"))
+        })?;
+        if label < 0 || (label as usize) >= num_classes {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "accuracy: y[{i}]={label} が [0, {num_classes}) の範囲外"
+            )));
+        }
     }
 
     model.set_training(false);

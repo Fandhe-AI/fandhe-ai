@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 
 use fandhe_ai::optim::{Adam, AdamConfig};
 use fandhe_ai::{AutodiffError, Tensor};
-use reference_module::{ReferenceModule, accuracy, fit_epochs, sub_tensor_f32};
+use reference_module::{ReferenceModule, Trainable, accuracy, fit_epochs, sub_tensor_f32};
 use resnet::{ResNet, ResNetBlock};
 use synthetic_cifar::{IMG_C, IMG_H, IMG_W, NUM_CLASSES, synthetic_cifar10, to_row_tokens};
 
@@ -226,6 +226,92 @@ fn to_row_tokens_reorders_chw_to_hcw() {
         let dst = ((ni * IMG_H + h) * IMG_C + c) * IMG_W + w;
         assert_eq!(rows[dst], flat[src]);
     }
+}
+
+// ---------------------------------------------------------------------
+// reference_module.rs の入力契約検証（イシュー #2202 PR #2325 レビュー
+// 指摘の横展開。`resnet.rs`・`main.rs` の取り込み元に依存しない
+// `reference_module` 単体の契約検証のため、共有ファイルの契約検証を
+// 一箇所に集める `to_row_tokens` と同じ方針でここに置く）。
+// ---------------------------------------------------------------------
+
+#[test]
+fn accuracy_rejects_label_shape_mismatch() {
+    use reference_module::accuracy;
+
+    let mut model = ResNet::new(8, 4, NUM_CLASSES, 0x1234_0001).unwrap();
+    let mut rng = SplitMix64(0x1234_0002);
+    let mut src = || rng.next_u64();
+    let (flat, _labels) = synthetic_cifar10(4, &mut src);
+    let x = image_tensor(flat, 4);
+    // y の要素数が x の先頭軸長（4）より多い（余剰ラベル）。
+    let y = labels_tensor(vec![0, 1, 2, 3, 4], 5);
+
+    assert!(matches!(
+        accuracy(&mut model, &x, &y, 4, NUM_CLASSES),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn accuracy_rejects_out_of_range_label() {
+    use reference_module::accuracy;
+
+    let mut model = ResNet::new(8, 4, NUM_CLASSES, 0x1234_0003).unwrap();
+    let mut rng = SplitMix64(0x1234_0004);
+    let mut src = || rng.next_u64();
+    let (flat, _labels) = synthetic_cifar10(4, &mut src);
+    let x = image_tensor(flat, 4);
+    // NUM_CLASSES 未満でなければならないラベルに範囲外の値を混ぜる。
+    let y = labels_tensor(vec![0, 1, 2, NUM_CLASSES as i32], 4);
+
+    assert!(matches!(
+        accuracy(&mut model, &x, &y, 4, NUM_CLASSES),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn sub_tensor_i32_rejects_rank_2_input() {
+    use reference_module::sub_tensor_i32;
+
+    let y = Tensor::new(vec![0i32, 1, 2, 3], &[2, 2]).unwrap();
+    assert!(matches!(
+        sub_tensor_i32(&y, 0, 1),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn cross_entropy_mean_rejects_logits_column_mismatch() {
+    use reference_module::cross_entropy_mean;
+
+    let tape = fandhe_ai::tape();
+    // targets は [0, NUM_CLASSES) の範囲内だが、logits の列数が
+    // num_classes（NUM_CLASSES）と一致しない（NUM_CLASSES - 1 列）。
+    let logits_data = vec![0.0f32; 4 * (NUM_CLASSES - 1)];
+    let logits_tensor = Tensor::new(logits_data, &[4, NUM_CLASSES - 1]).unwrap();
+    let logits = tape.var(&logits_tensor);
+    let targets = labels_tensor(vec![0, 1, 0, 1], 4);
+
+    assert!(matches!(
+        cross_entropy_mean(&tape, &logits, &targets, NUM_CLASSES),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn resnet_train_step_rejects_wrong_input_shape() {
+    let mut model = ResNet::new(8, 4, NUM_CLASSES, 0x1234_0005).unwrap();
+    // [N, 3, H, W] ではなく rank 2 を渡す。
+    let bad_x = Tensor::new(vec![0.0f32; 4 * 16], &[4, 16]).unwrap();
+    let y = labels_tensor(vec![0, 1, 2, 3], 4);
+    let mut opt = Adam::new(AdamConfig::default()).unwrap();
+
+    assert!(matches!(
+        model.train_step(&bad_x, &y, &mut opt),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
 }
 
 // ---------------------------------------------------------------------
