@@ -40,7 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use fandhe_ai_onnx_interop::onnx::export::{
-    ExportError, ExportOptions, SUPPORTED_OP_TYPES, build_model_proto, encode_tensor,
+    ExportError, ExportNode, ExportOp, ExportOptions, SUPPORTED_OP_TYPES, build_model_proto,
+    encode_tensor, to_node_proto,
 };
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, RawTensor, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{Value, run};
@@ -953,4 +954,140 @@ fn exported_model_of_supported_ops_passes_check_exportable_for_all_fixtures() {
             );
         }
     }
+}
+
+// ==== (F) イシュー #2187: CNN 系 3 op（BatchNormalization・GlobalAveragePool・
+//         Flatten）を含む手組みグラフの総合 roundtrip ====
+//
+// 上記 fixture（model.onnx・slice_repro.onnx・transformer.onnx）はいずれも
+// `Gemm`／`Relu`／`Softmax` 系のみで CNN 系 op を含まないため、本節は
+// `ExportOp` から手組みした `Graph`（fixture ファイル非依存）で
+// `BatchNormalization -> Relu -> GlobalAveragePool -> Flatten` という
+// CNN 出力ヘッド相当のグラフを export -> 再 import し、構造一致・不動点性・
+// `interp::run` の bit 同一を確認する（既存 (A)〜(D) 節と同じ 3 観点を
+// CNN 系 op で追加する。`MaxPool`／`AveragePool`／`Conv` 1D・E2 系 op は
+// 親イシュー #2185／#2186 の import 側 PR が未マージのため対象外
+// 〈`docs/onnx-export-op-mapping.md` §8 参照〉）。
+
+fn build_bn_relu_gap_flatten_graph() -> Graph {
+    let bn_node = ExportNode {
+        name: "bn".to_string(),
+        op: ExportOp::BatchNormalization {
+            epsilon: 1e-5,
+            momentum: 0.9,
+        },
+        inputs: vec![
+            "x".to_string(),
+            "scale".to_string(),
+            "bias".to_string(),
+            "mean".to_string(),
+            "var".to_string(),
+        ],
+        outputs: vec!["bn_out".to_string()],
+    };
+    let relu_node = ExportNode {
+        name: "relu".to_string(),
+        op: ExportOp::Relu,
+        inputs: vec!["bn_out".to_string()],
+        outputs: vec!["relu_out".to_string()],
+    };
+    let gap_node = ExportNode {
+        name: "gap".to_string(),
+        op: ExportOp::GlobalAveragePool,
+        inputs: vec!["relu_out".to_string()],
+        outputs: vec!["gap_out".to_string()],
+    };
+    let flatten_node = ExportNode {
+        name: "flatten".to_string(),
+        op: ExportOp::Flatten { axis: 1 },
+        inputs: vec!["gap_out".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+
+    let nodes = vec![
+        to_node_proto(&bn_node).expect("bn to_node_proto は成功するはず"),
+        to_node_proto(&relu_node).expect("relu to_node_proto は成功するはず"),
+        to_node_proto(&gap_node).expect("gap to_node_proto は成功するはず"),
+        to_node_proto(&flatten_node).expect("flatten to_node_proto は成功するはず"),
+    ];
+
+    let c = 3usize;
+    let scale: Vec<f32> = (0..c).map(|i| 1.0 + i as f32 * 0.1).collect();
+    let bias: Vec<f32> = (0..c).map(|i| i as f32 * 0.05).collect();
+    let mean: Vec<f32> = (0..c).map(|i| i as f32 * 0.2 - 1.0).collect();
+    let var: Vec<f32> = vec![1.0; c];
+
+    let mut initializers = HashMap::new();
+    initializers.insert(
+        "scale".to_string(),
+        RawTensor::F32 {
+            data: scale,
+            shape: vec![c as i64],
+        },
+    );
+    initializers.insert(
+        "bias".to_string(),
+        RawTensor::F32 {
+            data: bias,
+            shape: vec![c as i64],
+        },
+    );
+    initializers.insert(
+        "mean".to_string(),
+        RawTensor::F32 {
+            data: mean,
+            shape: vec![c as i64],
+        },
+    );
+    initializers.insert(
+        "var".to_string(),
+        RawTensor::F32 {
+            data: var,
+            shape: vec![c as i64],
+        },
+    );
+
+    Graph {
+        nodes,
+        initializers,
+        inputs: vec!["x".to_string()],
+        outputs: vec!["y".to_string()],
+    }
+}
+
+#[test]
+fn cnn_head_onnx_roundtrip_is_structurally_identical_bit_exact() {
+    let graph = build_bn_relu_gap_flatten_graph();
+    let (_exported, _bytes, rebuilt) = export_roundtrip(&graph);
+    assert_graph_structurally_identical(&graph, &rebuilt);
+
+    let op_types: Vec<&str> = rebuilt.nodes.iter().map(|n| n.op_type.as_str()).collect();
+    assert_eq!(
+        op_types,
+        vec!["BatchNormalization", "Relu", "GlobalAveragePool", "Flatten"],
+        "比較が空虚でないことの担保（fixture README 相当の既知構造固定）"
+    );
+}
+
+#[test]
+fn cnn_head_onnx_exported_model_is_a_fixed_point_of_export() {
+    assert_export_is_fixed_point(&build_bn_relu_gap_flatten_graph());
+}
+
+#[test]
+fn cnn_head_onnx_exported_model_runs_bit_identical_to_import_source() {
+    let graph = build_bn_relu_gap_flatten_graph();
+    let (_exported, _bytes, rebuilt) = export_roundtrip(&graph);
+
+    let (n, c, h, w) = (2usize, 3usize, 4usize, 4usize);
+    let x_data: Vec<f32> = (0..(n * c * h * w)).map(|v| v as f32 * 0.1 - 2.0).collect();
+
+    assert_run_bit_identical(&graph, &rebuilt, move || {
+        let mut feeds = HashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::new(x_data.clone(), &[n, c, h, w]).unwrap()),
+        );
+        feeds
+    });
 }

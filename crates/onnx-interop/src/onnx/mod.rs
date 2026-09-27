@@ -9,14 +9,17 @@
 //!   （`graph` の逆方向。イシュー #1772）。`build_model_proto` は `export_ops`
 //!   （内部 op -> `NodeProto` の意味論的マッピング。#1773）の
 //!   `check_exportable` を経由してから組み立てる。
-//! - `export_ops`: `interp` が対応する 23 op のうち export allowlist に含まれる
+//! - `export_ops`: `interp` が対応する 26 op のうち export allowlist に含まれる
 //!   ものの逆マッピング（`ExportOp` -> `NodeProto`。イシュー #1773）。`export` から
-//!   `pub use` で再エクスポートする。**import（`interp`）と export（`export_ops`）
-//!   の対応 op 数は非対称**（イシュー #2200 で import が 26 op へ拡大した一方、
-//!   export allowlist は 23 op のまま。`GlobalAveragePool`／`BatchNormalization`／
-//!   `Flatten` は import のみ対応し、これらを含むグラフの export は
-//!   `OnnxError::UnsupportedOp` で拒否される。`tests/onnx_export_ops.rs`
-//!   参照）。
+//!   `pub use` で再エクスポートする。**import（`interp`）と export
+//!   （`export_ops`）は 26 op で対称**（イシュー #2200 で import が 26 op へ
+//!   拡大した際に生じた非対称〈`GlobalAveragePool`／`BatchNormalization`／
+//!   `Flatten` が import のみ対応〉を、イシュー #2187 で export 側へも
+//!   追加して解消済み。`tests/onnx_export_ops.rs` の
+//!   `supported_op_types_are_all_reachable_in_interp_dispatch_table` が
+//!   対称性を fail-closed に固定する。E2 の 8 op〈#2313〉・MaxPool／
+//!   AveragePool〈#2314〉は import 側 PR が未マージのため、export 側も
+//!   未対応のまま残る〈#2187 実装計画 §0 参照〉）。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
 //!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し
 //!   （イシュー #2036。本モジュール自体は本クレート内部限定のまま
