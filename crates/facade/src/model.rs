@@ -324,7 +324,9 @@ pub enum ModelError {
     /// safetensors デコード失敗（`crate::interop::safetensors::LoadError`
     /// を連鎖。ヘッダ不整合・未対応 dtype・shape 不整合等）。
     Load(LoadError),
-    /// 上記以外の I/O 失敗（存在確認時の権限エラー等）。
+    /// 上記以外の I/O 失敗（存在確認時の権限エラー等）。読み込み
+    /// バッファの確保失敗（[`std::io::ErrorKind::OutOfMemory`]。
+    /// `reserve_read_buffer`）はその一例。
     Io(std::io::Error),
 }
 
@@ -406,6 +408,33 @@ fn enforce_size_limit(name: &str, version: &str, len: u64, max: u64) -> Result<(
     } else {
         Ok(())
     }
+}
+
+/// 読み込みバッファ（[`ModelRegistry::load_with_limit`] が
+/// safetensors ファイル全体を読み込む先）を `capacity_hint` バイトで
+/// 事前確保する。本番では `capacity_hint` に
+/// `usize::try_from(..).unwrap_or(usize::MAX)` 由来の値（`u64` が
+/// `usize` に収まらない場合の飽和）も渡りうる。
+///
+/// 確保失敗（`Vec::try_reserve` の `Err`）は
+/// [`ModelError::Io`]`(`[`std::io::Error::from`]`(`
+/// [`std::io::ErrorKind::OutOfMemory`]`))` で返す。
+/// `std::io::Error::other` は元エラーを `Box<dyn Error>` として
+/// ヒープに確保する（Custom 表現）ため、実メモリ枯渇時にはエラーを
+/// 構築すること自体が確保失敗しうる（「確保失敗は panic／abort では
+/// なく `Err` で伝播する」契約を報告経路自体が破ってしまう）。対して
+/// `io::Error::from(ErrorKind)` は Simple 表現でヒープ確保なしに
+/// 構築できるため、確保失敗の報告経路として安全に使える。要求
+/// サイズ等の診断情報は失われるが、`ErrorKind::OutOfMemory` だけで
+/// 失敗理由は呼び出し元に伝わり、確保失敗の報告で再確保しないことを
+/// 優先する。autodiff 側の `nn::init::alloc_failed()`／
+/// `eval::linalg::alloc_failed()`（PR #2239）と同じ類型（#2250）。
+fn reserve_read_buffer(capacity_hint: usize) -> Result<Vec<u8>, ModelError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve(capacity_hint)
+        .map_err(|_| ModelError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)))?;
+    Ok(bytes)
 }
 
 /// 既定キャッシュディレクトリを `home` から純粋に導出する（環境変数の
@@ -679,13 +708,10 @@ impl ModelRegistry {
         // を毎回丸ごと事前確保すると小さい正規ファイルの読み込みでも
         // 無駄に大きな割り当てが発生するため、実測値を優先しつつ
         // `try_reserve` で割り当て失敗を panic ではなく型付きエラーへ
-        // 変換する。
+        // 変換する（実体は `reserve_read_buffer`）。
         let observed_len = file.metadata().map_err(ModelError::Io)?.len();
         let capacity_hint = usize::try_from(observed_len.min(limit)).unwrap_or(usize::MAX);
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve(capacity_hint)
-            .map_err(|e| ModelError::Io(std::io::Error::other(e)))?;
+        let mut bytes = reserve_read_buffer(capacity_hint)?;
         file.by_ref()
             .take(limit)
             .read_to_end(&mut bytes)
@@ -763,6 +789,38 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 確保失敗（`TryReserveError`）が `ModelError::Io` の
+    /// `ErrorKind::OutOfMemory` へヒープ確保なしで写ることを検証する
+    /// （#2250）。`usize::MAX` は本番の
+    /// `usize::try_from(..).unwrap_or(usize::MAX)` 由来の飽和値と同じ
+    /// であり、合成的でない実経路の入力。`Vec<u8>` は要素サイズ 1
+    /// バイトのため `usize::MAX` バイトの確保要求は `isize::MAX` を
+    /// 超え、`try_reserve` はアロケータへ実際に触れる前に
+    /// `TryReserveErrorKind::CapacityOverflow` を返す（32／64bit・
+    /// 実メモリ量に依存しない決定的な失敗経路）。
+    #[test]
+    fn reserve_read_buffer_maps_alloc_failure_to_out_of_memory() {
+        let err = reserve_read_buffer(usize::MAX).unwrap_err();
+        match err {
+            ModelError::Io(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::OutOfMemory);
+                // `io::Error::other` はペイロードを `Some(..)` で
+                // 保持する（Custom 表現）。ここが `None` であることが
+                // 「ヒープ確保なしで構築した」Simple 表現である証拠
+                // （旧実装〈`io::Error::other`〉との弁別）。
+                assert!(e.get_ref().is_none());
+            }
+            other => panic!("ModelError::Io を期待したが {other:?} だった"),
+        }
+    }
+
+    #[test]
+    fn reserve_read_buffer_succeeds_for_small_capacity() {
+        let bytes = reserve_read_buffer(16).expect("小さい確保要求は成功するべき");
+        assert!(bytes.capacity() >= 16);
+        assert_eq!(bytes.len(), 0);
+    }
 
     #[test]
     fn enforce_size_limit_accepts_within_bound() {
