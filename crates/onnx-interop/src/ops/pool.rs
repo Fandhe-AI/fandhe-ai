@@ -325,6 +325,22 @@ fn axis_windows_nonempty(
 /// ぎりぎり（`h_out * w_out <= 2^26`）に収まりながら、`n * c` 倍した
 /// 実際の確保サイズ（約 16 GiB）が上限を大きく超えるケースを見逃して
 /// いた）。
+///
+/// **加えて `h_out`／`w_out` を個別にも同じ上限で検査する**（PR #2314
+/// レビュー指摘 P0 その 2: `n * c * h_out * w_out` という積のみの検査は
+/// `n == 0` または `c == 0` の場合に積そのものが 0 になり、`h_out`／
+/// `w_out` がどれだけ巨大でも通過してしまう。例えば `X=[0, 1, 1]`・
+/// `kernel_shape=[1_000_000_001]`・`pads=[1_000_000_000,
+/// 1_000_000_000]`・`stride=1` では出力バッファの確保自体は不要
+/// （`n=0`）だが、直後に呼ばれる [`axis_windows_nonempty`]
+/// （`MaxPool` は常に・`AveragePool` は `count_include_pad=0` の場合に
+/// `n`／`c` の値に関わらず必ず呼ばれる。呼び出し元 [`max_pool`]／
+/// [`average_pool`] 参照）が `out_len`〈本例で約 10 億〉に比例する
+/// 反復を行い長時間停止する。総積の検査だけでは `n`／`c` という
+/// ゼロ因子で無効化されるため、`axis_windows_nonempty` の反復回数を
+/// 実際に支配する `h_out`／`w_out` 単体を独立に上限検査することで
+/// このゼロ次元バイパスを閉じる（新規の閾値は発明せず、既存の
+/// [`MAX_UNTRUSTED_OUTPUT_ELEMENTS`] をそのまま流用する）。
 fn ensure_pool_out_bound(
     op: &'static str,
     n: usize,
@@ -332,15 +348,20 @@ fn ensure_pool_out_bound(
     h_out: usize,
     w_out: usize,
 ) -> Result<(), OpError> {
-    if output_elements_within_bound(&[n, c, h_out, w_out]) {
+    let within_bound = output_elements_within_bound(&[n, c, h_out, w_out])
+        && output_elements_within_bound(&[h_out])
+        && output_elements_within_bound(&[w_out]);
+    if within_bound {
         Ok(())
     } else {
         Err(OpError::InvalidPoolAttribute {
             reason: format!(
                 "{op}: 出力バッファの総要素数（n={n} * c={c} * h_out={h_out} * \
+                 w_out={w_out}）または軸ごとの出力長（h_out={h_out}／\
                  w_out={w_out}）が上限 {MAX_UNTRUSTED_OUTPUT_ELEMENTS} を超える \
                  （`kernel_shape`／`pads` に起因する巨大な出力サイズは DoS \
-                 対策として拒否する）"
+                 対策として拒否する。`n`／`c` が 0 の場合でも軸ごとの上限は \
+                 独立に適用する）"
             ),
         })
     }
@@ -1414,6 +1435,87 @@ mod tests {
         let attrs = PoolAttrs {
             kernel_shape: vec![1, K as i64],
             pads: vec![0, P as i64, 0, P as i64],
+            count_include_pad: 1,
+            ..PoolAttrs::default()
+        };
+        let err = average_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn ensure_pool_out_bound_rejects_huge_axis_even_when_n_or_c_is_zero() {
+        // PR #2314 レビュー指摘（P0 その 2）の再現条件をユニットテストで
+        // 直接検証する: `n * c * h_out * w_out` という積のみの検査では
+        // `n == 0`（または `c == 0`）のとき積そのものが 0 になり、
+        // `h_out`／`w_out` がどれだけ巨大でも通過してしまう。
+        assert!(ensure_pool_out_bound("Test", 0, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS + 1).is_err());
+        assert!(ensure_pool_out_bound("Test", 1, 0, MAX_UNTRUSTED_OUTPUT_ELEMENTS + 1, 1).is_err());
+        // n・c がともに 0 でも同様に軸長単体で拒否される。
+        assert!(ensure_pool_out_bound("Test", 0, 0, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS + 1).is_err());
+        // 上限ちょうどは `n`／`c` が 0 でも通過する（fail-closed の過剰拒否
+        // ではないことの確認）。
+        assert!(ensure_pool_out_bound("Test", 0, 1, 1, MAX_UNTRUSTED_OUTPUT_ELEMENTS).is_ok());
+    }
+
+    #[test]
+    fn max_pool_zero_batch_with_huge_pads_rejected_fast() {
+        // PR #2314 レビュー指摘（P0 その 2）の再現ケースそのもの:
+        // `X=[0, 1, 1]`（N=0）・`kernel_shape=[1_000_000_001]`・
+        // `pads=[1_000_000_000, 1_000_000_000]`・`stride=1`。出力バッファの
+        // 確保は不要（N=0）だが、修正前は直後の `axis_windows_nonempty`
+        // が `w_out`（約 10 億）に比例する反復を行い長時間停止した。
+        // `ensure_pool_out_bound` が軸長単体を検査することで、確保が
+        // 不要なケースでも `#[test]` の既定タイムアウト内に fail-closed に
+        // 拒否されることを確認する。
+        let x = Tensor::<f32>::zeros(&[0, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1_000_000_001],
+            pads: vec![1_000_000_000, 1_000_000_000],
+            ..PoolAttrs::default()
+        };
+        let err = max_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn max_pool_zero_channel_with_huge_pads_rejected_fast() {
+        // 上記の `C == 0` 版（`X=[1, 0, 1]`）。`n * c` は同じく 0 になる。
+        let x = Tensor::<f32>::zeros(&[1, 0, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1_000_000_001],
+            pads: vec![1_000_000_000, 1_000_000_000],
+            ..PoolAttrs::default()
+        };
+        let err = max_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn average_pool_zero_batch_with_huge_pads_rejected_fast_count_include_pad_false() {
+        // `AveragePool`（`count_include_pad=0`。既定）版。この分岐は
+        // `axis_windows_nonempty` を `n`／`c` の値に関わらず必ず呼ぶため
+        // `max_pool` と同じ穴を持つ。
+        let x = Tensor::<f32>::zeros(&[0, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1_000_000_001],
+            pads: vec![1_000_000_000, 1_000_000_000],
+            ..PoolAttrs::default()
+        };
+        let err = average_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn average_pool_zero_batch_with_huge_pads_rejected_fast_count_include_pad_true() {
+        // `count_include_pad=1` 版。この分岐は `axis_windows_nonempty` を
+        // 呼ばないが、`ensure_pool_out_bound` の軸長単体検査は分岐に
+        // 関わらず先に評価されるため、こちらも fail-closed に拒否される
+        // ことを確認する（`n * c * h_out * w_out == 0` のため後続の直接
+        // ループ自体は本来無害だが、検査自体は分岐前に走る設計を保つ）。
+        let x = Tensor::<f32>::zeros(&[0, 1, 1]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1_000_000_001],
+            pads: vec![1_000_000_000, 1_000_000_000],
             count_include_pad: 1,
             ..PoolAttrs::default()
         };
