@@ -20,6 +20,7 @@ use fandhe_ai_autodiff::generate::{
 };
 use fandhe_ai_autodiff::nn::{KvCache, LinearVars, MultiheadAttentionVars};
 use fandhe_ai_autodiff::{AutodiffError, Tape};
+use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_tensor_core::Tensor;
 
 const V: usize = 5;
@@ -158,6 +159,67 @@ fn prompt_1d(data: Vec<i32>) -> Tensor<i32> {
     Tensor::new(data, &[len]).unwrap()
 }
 
+/// タイの最小 index を選ぶ最大値添字（`generate.rs::greedy_argmax` と
+/// 同じタイ規約。同モジュールの実体は `pub(crate)` のため本テストでは
+/// 独立に再実装する）。
+fn greedy_argmax(row: &[f32]) -> usize {
+    let mut best_idx = 0usize;
+    let mut best_val = row[0];
+    for (idx, &v) in row.iter().enumerate().skip(1) {
+        if v > best_val {
+            best_val = v;
+            best_idx = idx;
+        }
+    }
+    best_idx
+}
+
+/// `generate()` の Greedy 経路を `AutoregressiveModel::forward_step`
+/// 単位で手動再実装し（rank1・`B == 1` 限定。既存テストの prompt は
+/// すべて `prompt_1d` のためこの前提で十分）、各ステップの生 logits
+/// （host `Vec<f32>`。shape `[1, l_new, V]` をそのままフラット化した
+/// もの）を token 列とあわせて返す。
+///
+/// codex-review 指摘（PR #2324・イシュー #2191）: 既存のバックエンド
+/// 横断比較（`metal_backend_ops_matches_cpu_backend_ops_for_greedy_
+/// generation`・`cuda_backend_ops_matches_cpu_backend_ops_for_greedy_
+/// generation`）は最終 token 列のみを突合しており、同じ token が
+/// 選ばれれば logits が REQ-2 の統一複合判定の許容誤差を超えて
+/// 異なっていても検出できない。本関数はその不足を埋めるため、
+/// `generate()` の呼び出しに加えてこの手動ループでも同一 prompt を
+/// 流し、ステップごとの logits を呼び出し元へ返す（呼び出し元が
+/// [`assert_parity`] でバックエンド間の logits 数値一致を検証する）。
+fn run_greedy_capturing_logits<M: AutoregressiveModel>(
+    model: &M,
+    prompt: &Tensor<i32>,
+    max_length: usize,
+) -> (Vec<i32>, Vec<Vec<f32>>) {
+    let prompt_len = prompt.shape()[0];
+    let mut caches: Vec<KvCache> = (0..model.num_kv_layers()).map(|_| KvCache::new()).collect();
+    let mut ids: Vec<i32> = prompt.contiguous().host_slice().into_owned();
+    let mut step_logits: Vec<Vec<f32>> = Vec::new();
+
+    let prompt_ids = Tensor::new(ids.clone(), &[1, prompt_len]).unwrap();
+    let logits = model.forward_step(&prompt_ids, &mut caches).unwrap();
+    let logits_flat: Vec<f32> = logits.contiguous().host_slice().into_owned();
+    let vocab = logits.shape()[2];
+    let last_row = &logits_flat[(prompt_len - 1) * vocab..prompt_len * vocab];
+    let mut next_id = greedy_argmax(last_row) as i32;
+    step_logits.push(logits_flat);
+    ids.push(next_id);
+
+    while ids.len() < max_length {
+        let step_ids = Tensor::new(vec![next_id], &[1, 1]).unwrap();
+        let logits = model.forward_step(&step_ids, &mut caches).unwrap();
+        let logits_flat: Vec<f32> = logits.contiguous().host_slice().into_owned();
+        next_id = greedy_argmax(&logits_flat) as i32;
+        step_logits.push(logits_flat);
+        ids.push(next_id);
+    }
+
+    (ids, step_logits)
+}
+
 #[test]
 fn cpu_backend_ops_matches_naive_ops_for_greedy_generation() {
     let prompt = prompt_1d(vec![0, 1, 2]);
@@ -203,6 +265,7 @@ fn cpu_backend_ops_matches_naive_ops_for_top_k_generation_with_same_seed() {
 fn metal_backend_ops_matches_cpu_backend_ops_for_greedy_generation() {
     let prompt = prompt_1d(vec![0, 1, 2]);
     let config = GenerateConfig::new(8, SamplingStrategy::Greedy);
+    let max_length = config.max_length;
 
     let metal_model = BackendParametrizedLm::new(TapeBackend::Metal);
     let cpu_model = BackendParametrizedLm::new(TapeBackend::Cpu);
@@ -215,6 +278,20 @@ fn metal_backend_ops_matches_cpu_backend_ops_for_greedy_generation() {
         cpu_out.contiguous().host_slice().into_owned(),
         "Metal と CPU で generate() の token 列が一致しない"
     );
+
+    // token 列一致だけでは logits 自体の乖離を見逃すため（codex-review
+    // 指摘・PR #2324）、各 forward_step の logits を REQ-2 の統一複合
+    // 判定（`assert_parity`）で突合する。
+    let (metal_ids, metal_logits) = run_greedy_capturing_logits(&metal_model, &prompt, max_length);
+    let (cpu_ids, cpu_logits) = run_greedy_capturing_logits(&cpu_model, &prompt, max_length);
+    assert_eq!(
+        metal_ids, cpu_ids,
+        "Metal と CPU で手動 Greedy ループの token 列が一致しない"
+    );
+    assert_eq!(metal_logits.len(), cpu_logits.len());
+    for (step, (m, c)) in metal_logits.iter().zip(cpu_logits.iter()).enumerate() {
+        assert_parity(&format!("generate step {step}: Metal vs CPU logits"), m, c);
+    }
 }
 
 #[test]
@@ -222,6 +299,7 @@ fn metal_backend_ops_matches_cpu_backend_ops_for_greedy_generation() {
 fn cuda_backend_ops_matches_cpu_backend_ops_for_greedy_generation() {
     let prompt = prompt_1d(vec![0, 1, 2]);
     let config = GenerateConfig::new(8, SamplingStrategy::Greedy);
+    let max_length = config.max_length;
 
     let cuda_model = BackendParametrizedLm::new(TapeBackend::Cuda);
     let cpu_model = BackendParametrizedLm::new(TapeBackend::Cpu);
@@ -234,4 +312,18 @@ fn cuda_backend_ops_matches_cpu_backend_ops_for_greedy_generation() {
         cpu_out.contiguous().host_slice().into_owned(),
         "CUDA と CPU で generate() の token 列が一致しない"
     );
+
+    // token 列一致だけでは logits 自体の乖離を見逃すため（codex-review
+    // 指摘・PR #2324）、各 forward_step の logits を REQ-2 の統一複合
+    // 判定（`assert_parity`）で突合する。
+    let (cuda_ids, cuda_logits) = run_greedy_capturing_logits(&cuda_model, &prompt, max_length);
+    let (cpu_ids, cpu_logits) = run_greedy_capturing_logits(&cpu_model, &prompt, max_length);
+    assert_eq!(
+        cuda_ids, cpu_ids,
+        "CUDA と CPU で手動 Greedy ループの token 列が一致しない"
+    );
+    assert_eq!(cuda_logits.len(), cpu_logits.len());
+    for (step, (g, c)) in cuda_logits.iter().zip(cpu_logits.iter()).enumerate() {
+        assert_parity(&format!("generate step {step}: CUDA vs CPU logits"), g, c);
+    }
 }

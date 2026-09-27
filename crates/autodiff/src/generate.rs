@@ -242,6 +242,15 @@ pub trait AutoregressiveModel {
 /// を返す（イシュー #2191 セキュリティ考慮: モデル実装のバグで shape が
 /// ステップ間で変化しても [`generate`] が誤ったオフセットで host メモリを
 /// 読まないようにする fail-closed 検査）。
+///
+/// 併せて `vocab_size <= i32::MAX` を全戦略共通で検証する（codex-review
+/// 指摘・PR #2324 是正。公開 API の token id は `Tensor<i32>` のため、
+/// [`greedy_argmax`] が返す `usize` 添字を `sample_step` で `as i32` へ
+/// 変換する箇所〈Greedy〉が `V > i32::MAX` で負値へ折り返り、次の
+/// `forward_step` へ不正な token id を渡しうる。TopK／Temperature も
+/// 添字を `i32` の `Tensor` へ書き戻すため同じ契約を共有する。この検査は
+/// prefill・decode 双方の呼び出しを通る本関数に置くことで、全戦略・
+/// 全ステップで漏れなく適用される）。
 fn validate_forward_step_output(
     logits: &Tensor<f32>,
     expected_batch: usize,
@@ -266,7 +275,21 @@ fn validate_forward_step_output(
             "generate: AutoregressiveModel::forward_step の語彙サイズ（末尾軸）が 0".to_string(),
         ));
     }
+    validate_vocab_le_i32_max(vocab)?;
     Ok(vocab)
+}
+
+/// `vocab_size <= i32::MAX` を検証する（[`validate_forward_step_output`]
+/// から呼ばれる。巨大な `vocab` を伴う実 `Tensor` を確保せずに境界値を
+/// 単体テストできるよう、判定だけを独立した純粋関数として切り出す）。
+fn validate_vocab_le_i32_max(vocab: usize) -> Result<(), AutodiffError> {
+    if vocab > i32::MAX as usize {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "generate: AutoregressiveModel::forward_step の語彙サイズ（末尾軸 {vocab}）が \
+             i32::MAX を超えている（token id は Tensor<i32> のため表現できない）"
+        )));
+    }
+    Ok(())
 }
 
 /// タイの最小 index を選ぶ最大値添字（`Var::argmax` と同じタイ規約。
@@ -742,5 +765,17 @@ mod tests {
     fn validate_forward_step_output_returns_vocab_on_success() {
         let logits = Tensor::new(vec![0.0f32; 2 * 5], &[1, 2, 5]).unwrap();
         assert_eq!(validate_forward_step_output(&logits, 1, 2).unwrap(), 5);
+    }
+
+    #[test]
+    fn validate_vocab_le_i32_max_accepts_i32_max() {
+        assert!(validate_vocab_le_i32_max(i32::MAX as usize).is_ok());
+    }
+
+    #[test]
+    fn validate_vocab_le_i32_max_rejects_i32_max_plus_one() {
+        // codex-review 指摘（PR #2324）: `V > i32::MAX` を fail-closed で
+        // 拒否する（Greedy の `as i32` 変換が負値へ折り返るのを防ぐ）。
+        assert!(validate_vocab_le_i32_max(i32::MAX as usize + 1).is_err());
     }
 }
