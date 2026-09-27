@@ -3265,15 +3265,25 @@ pub(crate) fn alpha_dropout_bias_add_with_fallback(
     }
 }
 
-/// [`Op::Pad`] の forward（`Var::pad`）が使う「バックエンド実装 →
+/// [`Op::Pad`] の forward（`Var::pad`）・`ZeroPad2d::forward_host`
+/// （tape 不要の推論経路）双方が使う「バックエンド実装 →
 /// フォールバック」ヘルパー（イシュー #1756）。[`masked_fill_with_fallback`]
 /// と同型: `ops.pad` → `Unsupported` のときのみ `eval::pad` へ
 /// フォールバックし、それ以外のエラーは伝播する（判定迂回経路を
 /// 作らない）。バックエンド実装が返した出力 shape を `out_shape` と
 /// 照合し、不一致は `AutodiffError::Backend(BackendError::
-/// ShapeMismatch(..))` を返す。`out_shape` は唯一の呼び出し元
-/// `Var::pad` が実用上限（1 GiB。`rearrange_ops::checked_index_alloc_len`）
-/// まで確保前検査済み（イシュー #2264）。
+/// ShapeMismatch(..))` を返す。
+///
+/// **確保前上限検査はここで行う（イシュー #2264 レビュー是正）**:
+/// `out_shape` の総要素数を `rearrange_ops::checked_index_alloc_len`
+/// （1 GiB 上限）へ渡し、超過時は実体化・`eval::pad` の失敗しない
+/// 確保（`vec![value; out_numel]`）に到達する前に `Err` で拒否する。
+/// 以前は `Var::pad` 呼び出し元側でのみ検査しており、`eval::pad` 側は
+/// 「唯一の呼び出し元が検査済み」という契約に依存していたが、
+/// `ZeroPad2d::forward_host` が本関数を直接呼ぶ第 2 の呼び出し元と
+/// なったため契約が破られていた（codex／cursor bugbot 指摘）。
+/// 呼び出し元を問わず本関数を唯一の確保前チェックポイントとする
+/// ことで、新しい呼び出し元が増えても迂回できない構造にする。
 pub(crate) fn pad_with_fallback(
     ops: &dyn BackendOps,
     input: &Tensor<f32>,
@@ -3281,6 +3291,13 @@ pub(crate) fn pad_with_fallback(
     value: f32,
     out_shape: &[usize],
 ) -> Result<Tensor<f32>, AutodiffError> {
+    let out_numel = out_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)
+        .map_err(AutodiffError::Shape)?;
+    crate::rearrange_ops::checked_index_alloc_len(out_numel)?;
+
     match ops.pad(input, pads, value) {
         Ok(v) => {
             if v.shape() != out_shape {

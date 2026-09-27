@@ -3091,15 +3091,20 @@ impl<'t> Var<'t> {
     /// `eval::pad`／`backend-cpu::constant_pad::pad` の確保
     /// （後者は `try_reserve_exact` で二重に fail-closed だが、
     /// ホスト参照実装 `eval::pad` は失敗しない確保のため本検査が
-    /// 唯一の防波堤）を実際に起動する前に巨大な pad 幅を `Err` で
-    /// 拒否する）→ ②`self` を層 1 で実体化（`RefCell`
-    /// 借用を閉じてから push。`Var::gather` と同じ「実体化してから
-    /// フォールバックへ渡す」方針）→ ③`pad_with_fallback`
-    /// （`ops.pad` → `Unsupported` のときのみホスト参照実装
-    /// `eval::pad` へフォールバック）→ ④戻り shape 検証
-    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`
-    /// （非融合・常実体化。`value` は forward 記録値へ焼き込み済みの
-    /// ため `Op::Pad` 自身は保持しない）。
+    /// 早期防波堤——③`pad_with_fallback` 側でも同じ検査を再実行する
+    /// ため、ここでの拒否は「実体化前に早く落とす」最適化であり
+    /// 唯一の防波堤ではない。イシュー #2264 レビュー是正: `Var::pad`
+    /// を経由しない呼び出し元〈`ZeroPad2d::forward_host` 等〉のために
+    /// `pad_with_fallback` 自身が呼び出し元を問わない確保前検査を持つ）
+    /// を実際に起動する前に巨大な pad 幅を `Err` で拒否する）→
+    /// ②`self` を層 1 で実体化（`RefCell` 借用を閉じてから push。
+    /// `Var::gather` と同じ「実体化してからフォールバックへ渡す」
+    /// 方針）→ ③`pad_with_fallback`（`ops.pad` → `Unsupported` の
+    /// ときのみホスト参照実装 `eval::pad` へフォールバック。確保前
+    /// 上限検査もここで再実行する——唯一の確保前チェックポイント）
+    /// → ④戻り shape 検証（`.claude/rules/security.md` A08）→
+    /// ⑤`push_eager`（非融合・常実体化。`value` は forward 記録値へ
+    /// 焼き込み済みのため `Op::Pad` 自身は保持しない）。
     pub fn pad(&self, pads: &[(usize, usize)], value: f32) -> Result<Var<'t>, AutodiffError> {
         let in_shape = self.shape();
         let out_shape = pad_out_shape(&in_shape, pads).map_err(AutodiffError::Shape)?;
