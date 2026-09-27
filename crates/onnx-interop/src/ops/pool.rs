@@ -110,13 +110,33 @@ struct PoolAxisParams {
 /// 1 軸分の出力長を ONNX Pool 系仕様の式で計算する。
 ///
 /// `eff = dilation·(kernel-1)+1`（実効カーネル幅）・`padded = in_len + pb
-/// + pe`。`floor` 時は `(padded-eff)/stride + 1`、`ceil` 時は
+/// + pe`。`padded >= eff`（少なくとも 1 個の完全な窓が padded 範囲に収まる）
+/// なら `floor` 時は `(padded-eff)/stride + 1`、`ceil` 時は
 /// `ceil((padded-eff)/stride) + 1` を求めたうえで、`(out-1)·stride >=
-///   in_len + pb` なら `out -= 1`（最後の窓が入力内または左パディング内で
+/// in_len + pb` なら `out -= 1`（最後の窓が入力内または左パディング内で
 /// 始まらない場合は除外する。PyTorch・新しい ONNX 仕様の規則。§3.1）。
-/// すべて `checked_*` 演算で行い、`in_len == 0`・`padded < eff`・
-/// オーバーフロー・出力長 0 はいずれも [`OpError::InvalidPoolAttribute`]
-///   で拒否する。
+///
+/// **`padded < eff`（完全な窓が 1 個も収まらない）場合**、ONNX／PyTorch の
+/// 出力長公式は符号付きの分子 `padded - eff`（本実装では `deficit = eff -
+/// padded > 0` として扱う）を使う: `floor` モードは常に無効（`floor(-deficit
+/// /stride) + 1 <= 0`）だが、**`ceil` モードは `deficit < stride` の場合に
+/// 限り出力長 1 の部分窓を許容する**（`ceil(-deficit/stride) + 1 = 1 -
+/// floor(deficit/stride)` であり、`deficit < stride` なら
+/// `floor(deficit/stride) == 0` で出力長 1、`deficit >= stride` なら
+/// `floor(deficit/stride) >= 1` で出力長 0 以下になり無効）。PyTorch
+/// `pooling_output_shape_pad_lr`（`floor((in+pl+pr-d·(k-1)-1+(ceil?s-1:0))
+/// /s)+1` の符号付き整数除算）と同値の式変形であり、`floor((n+s-1)/s) ==
+/// ceil(n/s)`（任意の整数 `n`）から導かれる。再現例: `in_len=2・kernel=3・
+/// stride=2・pads=0・ceil_mode=1` では `eff=3・padded=2・deficit=1<stride=2`
+/// のため出力長 1（PR #2314 codex-review 指摘: 修正前は `padded < eff` を
+/// ceil_mode の値に関わらず無条件でエラーにしており、この部分窓を誤って
+/// 拒否していた）。この経路は `eff`／`padded` から `usize` の
+/// `checked_sub` で `deficit` を求めるのみで、符号付き型・`as` キャストは
+/// 一切使わない（`.claude/rules/security.md` A03・モジュール doc の
+/// `checked_*` 方針を踏襲）。
+///
+/// いずれの経路でも `in_len == 0`・オーバーフロー・（調整後の）出力長 0 は
+/// [`OpError::InvalidPoolAttribute`] で拒否する。
 ///
 /// 引数は [`PoolAxisParams`]（軸ごとの `kernel`／`stride`／`dilation`／
 /// `pad_begin`／`pad_end` をまとめた小構造体。clippy::too_many_arguments
@@ -145,25 +165,38 @@ fn pool_out_axis_len(
         .checked_add(pb)
         .and_then(|v| v.checked_add(pe))
         .ok_or_else(|| overflow("padded 入力長"))?;
-    if padded < eff {
-        return Err(OpError::InvalidPoolAttribute {
-            reason: format!("{op}: 実効カーネル幅 {eff} が padded 入力長 {padded} を超える"),
-        });
-    }
-    let numerator = padded - eff;
-    let mut out = if ceil_mode {
-        let q = numerator / s;
-        let r = numerator % s;
-        let ceil_q = if r == 0 {
-            q
+    let mut out = if padded >= eff {
+        let numerator = padded - eff;
+        if ceil_mode {
+            let q = numerator / s;
+            let r = numerator % s;
+            let ceil_q = if r == 0 {
+                q
+            } else {
+                q.checked_add(1).ok_or_else(|| overflow("ceil 商"))?
+            };
+            ceil_q.checked_add(1).ok_or_else(|| overflow("出力長"))?
         } else {
-            q.checked_add(1).ok_or_else(|| overflow("ceil 商"))?
-        };
-        ceil_q.checked_add(1).ok_or_else(|| overflow("出力長"))?
+            (numerator / s)
+                .checked_add(1)
+                .ok_or_else(|| overflow("出力長"))?
+        }
+    } else if ceil_mode {
+        // `padded < eff`: floor モードは常に無効（下の `!ceil_mode` 分岐で
+        // 拒否）だが、ceil モードは `deficit = eff - padded` が `stride`
+        // 未満なら出力長 1 の部分窓を許容する（関数 doc の符号付き公式の
+        // 導出を参照）。`deficit >= stride` の場合は 0 を返し、後続の
+        // `out == 0` 検査に委ねる（`checked_sub` は `padded < eff` により
+        // 必ず成功する）。
+        let deficit = eff.checked_sub(padded).ok_or_else(|| overflow("deficit"))?;
+        if deficit < s { 1 } else { 0 }
     } else {
-        (numerator / s)
-            .checked_add(1)
-            .ok_or_else(|| overflow("出力長"))?
+        return Err(OpError::InvalidPoolAttribute {
+            reason: format!(
+                "{op}: 実効カーネル幅 {eff} が padded 入力長 {padded} を超える \
+                 （floor モードでは完全な窓が 1 個も収まらないため無効）"
+            ),
+        });
     };
     if ceil_mode {
         let bound = in_len.checked_add(pb).ok_or_else(|| overflow("境界"))?;
@@ -961,6 +994,85 @@ mod tests {
         let y_ceil = max_pool(&x, &ceil_attrs).unwrap();
         assert_eq!(y_floor.shape(), &[1, 1, 1, 3]);
         assert_eq!(y_ceil.shape(), &[1, 1, 1, 3]);
+    }
+
+    #[test]
+    fn max_pool_ceil_mode_accepts_partial_window_when_kernel_exceeds_padded() {
+        // PR #2314 codex-review 指摘の再現ケース: L=2, k=3, s=2, pad=0。
+        // eff=(3-1)*1+1=3 > padded=2（`padded < eff`）だが、ceil モードでは
+        // deficit=eff-padded=1 < stride=2 のため出力長 1 の部分窓を許容
+        // する（`pool_out_axis_len` doc の符号付き公式導出を参照）。
+        // 有効タップは ki=0,1（ih=0,1）のみで ki=2 は `ih=2 >= in_len=2`
+        // のため窓外（`valid_tap_range` が `ki_max=1` に切り詰める）。
+        // PyTorch 参照: `F.max_pool2d(torch.tensor([[[[1.,2.]]]]),
+        // kernel_size=(1,3), stride=(1,2), ceil_mode=True)` は
+        // `tensor([[[[2.]]]])`（出力 shape `[1,1,1,1]`）を返す。
+        let x = Tensor::<f32>::new(vec![1.0, 2.0], &[1, 1, 1, 2]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, 3],
+            strides: vec![1, 2],
+            ceil_mode: 1,
+            ..PoolAttrs::default()
+        };
+        let y = max_pool(&x, &attrs).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1, 1]);
+        assert_eq!(y.get(&[0, 0, 0, 0]).unwrap(), 2.0);
+    }
+
+    #[test]
+    fn average_pool_ceil_mode_accepts_partial_window_when_kernel_exceeds_padded() {
+        // `max_pool_ceil_mode_accepts_partial_window_when_kernel_exceeds_padded`
+        // と同一形状。`count_include_pad=0`（既定）では divisor=有効タップ数
+        // (2) のため (1+2)/2=1.5。PyTorch 参照:
+        // `F.avg_pool2d(torch.tensor([[[[1.,2.]]]]), kernel_size=(1,3),
+        // stride=(1,2), ceil_mode=True, count_include_pad=False)` は
+        // `tensor([[[[1.5]]]])` を返す。
+        let x = Tensor::<f32>::new(vec![1.0, 2.0], &[1, 1, 1, 2]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, 3],
+            strides: vec![1, 2],
+            ceil_mode: 1,
+            count_include_pad: 0,
+            ..PoolAttrs::default()
+        };
+        let y = average_pool(&x, &attrs).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1, 1]);
+        assert_eq!(y.get(&[0, 0, 0, 0]).unwrap(), 1.5);
+    }
+
+    #[test]
+    fn max_pool_floor_mode_rejects_kernel_exceeding_padded() {
+        // 同じ属性（L=2, k=3, s=2, pad=0）で `ceil_mode=0`（既定）の場合は
+        // 従来どおり無効（floor モードは完全な窓が 1 個も収まらない
+        // `padded < eff` を常に拒否する。`pool_out_axis_len` doc 参照）。
+        // PyTorch 参照: 同形状で `ceil_mode=False` は
+        // `RuntimeError: Given input size: (1x1x2). Calculated output
+        // size: (1x1x0). Output size is too small` を送出する。
+        let x = Tensor::<f32>::new(vec![1.0, 2.0], &[1, 1, 1, 2]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, 3],
+            strides: vec![1, 2],
+            ..PoolAttrs::default()
+        };
+        let err = max_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
+    }
+
+    #[test]
+    fn max_pool_ceil_mode_rejects_when_deficit_reaches_stride() {
+        // L=2, k=4, s=2, pad=0: eff=4, padded=2, deficit=2 == stride=2。
+        // `deficit < stride` を満たさないため ceil モードでも無効
+        // （`pool_out_axis_len` doc: `deficit >= stride` は
+        // `floor(deficit/stride) >= 1` となり出力長 0 以下）。
+        let x = Tensor::<f32>::new(vec![1.0, 2.0], &[1, 1, 1, 2]).unwrap();
+        let attrs = PoolAttrs {
+            kernel_shape: vec![1, 4],
+            strides: vec![1, 2],
+            ceil_mode: 1,
+            ..PoolAttrs::default()
+        };
+        let err = max_pool(&x, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::InvalidPoolAttribute { .. }));
     }
 
     #[test]
