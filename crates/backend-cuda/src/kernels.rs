@@ -677,7 +677,7 @@ extern "C" __global__ void gemm_wmma_tf32(
 }
 "#;
 
-/// [`TILED_F32`] のアンカー 2 行（`row`/`col` のグローバル添字計算）を、
+/// `TILED_F32` のアンカー 2 行（`row`/`col` のグローバル添字計算）を、
 /// `swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
 /// `group_width` の M 方向グルーピング remap）へ差し替えた変種ソースを
 /// 生成する（イシュー #1034。f16 `mma.sync` 経路の #499・TF32 opt-staged

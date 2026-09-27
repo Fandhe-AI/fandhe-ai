@@ -445,11 +445,19 @@ jobs:
       # （docs/crates-io-publishing-order.md「公開前検証手順と実測記録」参照）。
       # `--no-deps` は依存クレート自体の doc 生成をスキップするがメタデータ
       # ビルドは要るため、上の cargo build/check 群と同じくリンクなしで成立する。
+      # 2 行目（イシュー #2289）: backend-cuda の `internal-diagnostics` feature
+      # は診断・ベンチ専用 API を既定の公開面から外す可視性ゲートで、有効化する
+      # と feature ゲート付き `pub` 項目が到達可能になり rustdoc の検査対象へ
+      # 入る。既定 features（1 行目）のみでは検査されないため、公開面として
+      # 到達しうる feature 組合せを個別に検査する（docs/crates-io-publishing-
+      # order.md §8.5）。
       - name: cargo doc（rustdoc 警告ゲート・Linux ホスト）
         if: steps.detect.outputs.has_cargo == 'true'
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --locked
+        run: |
+          cargo doc --workspace --no-deps --locked
+          cargo doc -p fandhe-ai-backend-cuda --all-features --no-deps --locked
 
       # macOS ターゲット分は `--workspace` にしない: guardrail の `[[bin]]`
       # がリンクを要求すると macOS クロスリンカ非搭載の Linux runner 上で

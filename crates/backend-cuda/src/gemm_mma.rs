@@ -402,7 +402,7 @@ impl CudaMmaGemm {
         })
     }
 
-    /// `device` 上で、swizzle 変種と同じ [`check_min_compute_capability`]・
+    /// `device` 上で、swizzle 変種と同じ `check_min_compute_capability`・
     /// NVRTC コンパイル手順で、**swizzle remap を適用しない base カーネル**
     /// （`kernels_mma::mma_f16_source()`）を NVRTC コンパイルし保持する
     /// ハンドルを構築する。
@@ -451,7 +451,7 @@ impl CudaMmaGemm {
     /// 格納し、`launch_f16` はサイズ判定を経ずに常にそれを起動する）。
     ///
     /// [`new`](Self::new) と同じ cc ゲート・NVRTC コンパイル手順を共有し
-    /// （[`check_min_compute_capability`]）、コンパイルするソース文字列
+    /// （`check_min_compute_capability`）、コンパイルするソース文字列
     /// のみが `kernels_mma::MMA_F16`（変更なし）から
     /// `kernels_mma::mma_f16_source_with_swizzle(group_width)`（M 方向
     /// ブロック割り当てを remap した変種）へ変わる。返す
@@ -821,7 +821,7 @@ impl CudaMmaGemm {
     /// [`Self::launch_f16`] の公開シグネチャを `&GuardedSlice<f16>` へ
     /// 変更した際、crate 外の `SyncDeviceBuffer` 由来 C バッファ（
     /// `GuardedSlice::new` が `pub(crate)` のため crate 外からは包めない）
-    /// を渡す経路が失われたため新設した。本体は [`Self::launch_f16_views`]
+    /// を渡す経路が失われたため新設した。本体は `Self::launch_f16_views`
     /// を共有し、検証・SAFETY 根拠は [`Self::launch_f16`] と同一。
     #[cfg(feature = "internal-diagnostics")]
     pub fn launch_f16_c_raw(

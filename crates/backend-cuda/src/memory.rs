@@ -777,7 +777,7 @@ where
     }
 }
 
-/// [`readback_with`] を `ReadbackDest::Fresh`／`PretouchedFresh` の両方で
+/// `readback_with` を `ReadbackDest::Fresh`／`PretouchedFresh` の両方で
 /// crate 外部（実機 `#[ignore]` テスト）から直接呼べるようにする診断専用
 /// 入口（イシュー #1437）。`ReadbackDest`／`readback_with` 自体は
 /// `pub(crate)` のままシグネチャへは出さず、`bool` フラグで戦略を選ぶ
@@ -1308,7 +1308,7 @@ impl CudaMemory {
     /// [`MemoryOps::with_host_view`]（`Device` 配置分岐）と同じ D2H・
     /// `f` 呼び出し手順を踏みつつ、`self.host_staging`（本番既定種別で
     /// 固定された共有キャッシュ）を経由せず、呼び出しごとに指定
-    /// `kind` で [`HostStaging::alloc`] を直接呼ぶ（キャッシュに
+    /// `kind` で `HostStaging::alloc` を直接呼ぶ（キャッシュに
     /// 登録しないため統計〈[`Self::host_staging_stats`]〉には現れず、
     /// `kind` ごとの独立比較を単純にする）。`None`（空バッファ）・
     /// `Managed` 配置は種別に依存しないため [`MemoryOps::

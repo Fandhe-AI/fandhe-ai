@@ -75,7 +75,7 @@
 
 use crate::error::CudaError;
 
-/// GEMM カーネル変種。[`select_f32_gemm_variant`] が選ぶのは `Simple`・
+/// GEMM カーネル変種。`select_f32_gemm_variant` が選ぶのは `Simple`・
 /// `DoubleBuffer` の 2 種のみ（`SplitK` はイシュー #1100 で選択候補から
 /// 撤退した。本モジュール冒頭「SplitK 撤退の判断」参照）。
 ///
@@ -99,7 +99,7 @@ pub enum GemmVariantKind {
     /// から撤退。カーネル・型自体は `run_split_k_forced`〈診断専用〉が
     /// 引き続き参照するため保持する）。
     SplitK {
-        /// K 方向の分割数。常に 2 以上 [`SPLITK_MAX_SPLITS`] 以下の 2 冪。
+        /// K 方向の分割数。常に 2 以上 `SPLITK_MAX_SPLITS` 以下の 2 冪。
         num_splits: u32,
     },
 }

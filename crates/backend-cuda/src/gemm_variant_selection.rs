@@ -289,7 +289,7 @@ impl CudaGemmF32VariantSelection {
     /// 到達しない SplitK カーネル自体の数値・決定性検証（`tests/
     /// gemm_f32_variants.rs`）・spec 側の parity 契約再検討に備えた足場
     /// として公開する。`num_splits` の cap 検査（`gemm_variant::
-    /// validate_split_k_launch`）は内部の [`Self::run_split_k`] が行う。
+    /// validate_split_k_launch`）は内部の `Self::run_split_k` が行う。
     /// 妥当な `num_splits` は [`Self::recommend_split_count`] が
     /// `Some(num_splits)` で返す（`None` は分割の意義がない = 呼ばない
     /// べきことを表す。`Some` の値は常にこの引数の検証を通る）。
