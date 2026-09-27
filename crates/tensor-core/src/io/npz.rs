@@ -55,7 +55,22 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
     let mut result = HashMap::with_capacity(entry_count);
     let mut pos = cd_offset;
     for _ in 0..entry_count {
+        // central directory の宣言範囲（`cd_end`）内でのみエントリを
+        // 解析する。細工した `cd_size`／`entry_count` により宣言範囲外
+        // を central directory エントリとして読み取れてしまうのを防ぐ
+        // （A03。PR #2318 レビュー指摘・P0）。固定長ヘッダ分（46 バイ
+        // ト）すら `cd_end` に収まらない位置から解析を始めない。
+        if pos.checked_add(46).is_none_or(|end| end > cd_end) {
+            return Err(NpyError::InvalidZip(
+                "central directory エントリが宣言範囲を超える",
+            ));
+        }
         let (entry, next_pos) = parse_central_directory_entry(bytes, pos)?;
+        if next_pos > cd_end {
+            return Err(NpyError::InvalidZip(
+                "central directory エントリが宣言範囲を超える",
+            ));
+        }
         pos = next_pos;
         if entry.is_directory {
             continue;
@@ -69,6 +84,14 @@ pub fn read_npz_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor<f32>>, NpyE
             source: Box::new(e),
         })?;
         result.insert(key, tensor);
+    }
+    // 走査終了位置が central directory の宣言終端と厳密に一致すること
+    // を確認する（entry_count だけを信頼せず、宣言範囲全体が実際の
+    // エントリ列で過不足なく埋まっていることを検証する）。
+    if pos != cd_end {
+        return Err(NpyError::InvalidZip(
+            "central directory の走査終了位置が宣言範囲と不一致",
+        ));
     }
     Ok(result)
 }
@@ -315,7 +338,20 @@ fn read_member(bytes: &[u8], entry: &CentralDirEntry) -> Result<Tensor<f32>, Npy
     }
     let name_len = read_u16_le(bytes, local_offset + 26, "local header name length")? as usize;
     let extra_len = read_u16_le(bytes, local_offset + 28, "local header extra length")? as usize;
-    let data_start = local_offset + 30 + name_len + extra_len;
+    let name_start = local_offset + 30;
+    let local_name_bytes = slice_at(bytes, name_start, name_len, "local header ファイル名")?;
+    // local header と central directory のファイル名を照合する。
+    // central directory を正として読み進めるだけでは、ファイル名の
+    // 異なる local header が指すデータを central directory 側のキー
+    // として誤って受理してしまう（central directory の
+    // `local_header_offset` を細工した ZIP で名前差し替え攻撃が成立
+    // する。A03。PR #2318 レビュー指摘・P0）。
+    if local_name_bytes != entry.name.as_bytes() {
+        return Err(NpyError::InvalidZip(
+            "local header のファイル名が central directory と不一致",
+        ));
+    }
+    let data_start = name_start + name_len + extra_len;
 
     let compressed_size = usize::try_from(entry.compressed_size)
         .map_err(|_| NpyError::InvalidZip("compressed size が usize 範囲を超える"))?;
@@ -332,16 +368,23 @@ fn read_member(bytes: &[u8], entry: &CentralDirEntry) -> Result<Tensor<f32>, Npy
         ));
     }
 
-    let decompressed: Vec<u8> = match entry.method {
+    // STORED（無圧縮）は `bytes` 内の借用スライスをそのまま使い、
+    // npy ヘッダ・shape の検証（`read_npy_bytes`）前に全体を複製しない
+    // （`compressed` は既に `slice_at` で `bytes` の実サイズ範囲内である
+    // ことを検証済みだが、検証前の無条件複製そのものが不要なメモリ
+    // 確保でありコストとなる。A03/A04/A05。PR #2318 レビュー指摘・
+    // P0）。DEFLATE（method=8）は伸長结果を新規に確保する必要がある
+    // ため `inflate` 側でのみ確保する。
+    let decompressed: std::borrow::Cow<'_, [u8]> = match entry.method {
         0 => {
             if compressed_size != uncompressed_size {
                 return Err(NpyError::InvalidZip(
                     "STORED エントリの圧縮サイズと非圧縮サイズが不一致",
                 ));
             }
-            compressed.to_vec()
+            std::borrow::Cow::Borrowed(compressed)
         }
-        8 => inflate(compressed, uncompressed_size)?,
+        8 => std::borrow::Cow::Owned(inflate(compressed, uncompressed_size)?),
         other => return Err(NpyError::UnsupportedCompression { method: other }),
     };
 
@@ -365,8 +408,8 @@ pub fn write_npz_bytes(map: &HashMap<String, Tensor<f32>>) -> Result<Vec<u8>, Np
     keys.sort();
 
     let mut out = Vec::new();
-    // (name, crc, compressed_size, local_header_offset)
-    let mut central_records: Vec<(String, u32, u32, u32)> = Vec::with_capacity(keys.len());
+    // (name, crc, compressed_size, local_header_offset, flags)
+    let mut central_records: Vec<(String, u32, u32, u32, u16)> = Vec::with_capacity(keys.len());
 
     for key in &keys {
         validate_entry_name(key)?;
@@ -375,13 +418,20 @@ pub fn write_npz_bytes(map: &HashMap<String, Tensor<f32>>) -> Result<Vec<u8>, Np
         let size = u32::try_from(npy_bytes.len()).map_err(|_| NpyError::EntryTooLarge)?;
         let crc = crc32(&npy_bytes);
         let local_header_offset = u32::try_from(out.len()).map_err(|_| NpyError::EntryTooLarge)?;
+        // general purpose flag bit 11（EFS。Language Encoding Flag）:
+        // ファイル名が UTF-8 であることを明示する。`validate_entry_name`
+        // は非 ASCII キーを許容するため、これを立てないと Python
+        // zipfile／`np.load` はファイル名を CP437 としてデコードし、
+        // 非 ASCII メンバ名が往復しない（PR #2318 レビュー指摘。
+        // Bugbot・Medium。APPNOTE.TXT 4.4.4）。
+        let flags: u16 = if entry_name.is_ascii() { 0 } else { 0x0800 };
 
-        // local header: version needed(20)・flags(0)・method(0=STORED)・
+        // local header: version needed(20)・flags・method(0=STORED)・
         // DOS 時刻 1980-01-01 00:00:00（time=0, date=0x0021）・CRC・
         // compressed/uncompressed size（STORED なので同一）・extra なし。
         out.extend_from_slice(&LOCAL_FILE_HEADER_SIG.to_le_bytes());
         out.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        out.extend_from_slice(&0u16.to_le_bytes()); // flags
+        out.extend_from_slice(&flags.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // method = STORED
         out.extend_from_slice(&0u16.to_le_bytes()); // mod time
         out.extend_from_slice(&0x0021u16.to_le_bytes()); // mod date = 1980-01-01
@@ -393,15 +443,15 @@ pub fn write_npz_bytes(map: &HashMap<String, Tensor<f32>>) -> Result<Vec<u8>, Np
         out.extend_from_slice(entry_name.as_bytes());
         out.extend_from_slice(&npy_bytes);
 
-        central_records.push((entry_name, crc, size, local_header_offset));
+        central_records.push((entry_name, crc, size, local_header_offset, flags));
     }
 
     let cd_start = u32::try_from(out.len()).map_err(|_| NpyError::EntryTooLarge)?;
-    for (name, crc, size, local_offset) in &central_records {
+    for (name, crc, size, local_offset, flags) in &central_records {
         out.extend_from_slice(&CENTRAL_DIR_HEADER_SIG.to_le_bytes());
         out.extend_from_slice(&20u16.to_le_bytes()); // version made by
         out.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        out.extend_from_slice(&0u16.to_le_bytes()); // flags
+        out.extend_from_slice(&flags.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // method = STORED
         out.extend_from_slice(&0u16.to_le_bytes()); // mod time
         out.extend_from_slice(&0x0021u16.to_le_bytes()); // mod date
@@ -490,6 +540,103 @@ mod tests {
             assert_eq!(got.shape(), v.shape());
             assert_eq!(got.host_slice().to_vec(), v.host_slice().to_vec());
         }
+    }
+
+    #[test]
+    fn write_then_read_roundtrip_non_ascii_key() {
+        // Bugbot 指摘（Medium）: 非 ASCII キーは UTF-8 名フラグ（bit 11）
+        // を立てないと Python zipfile／`np.load` が CP437 としてデコード
+        // し往復しない。書き出しバイト列の flags を直接検査したうえで
+        // 読み込みも正しく往復することを確認する。
+        let mut m = HashMap::new();
+        m.insert("café".to_string(), Tensor::new(vec![1.0], &[1]).unwrap());
+        let bytes = write_npz_bytes(&m).unwrap();
+
+        // local header の flags（オフセット +6、先頭エントリのため
+        // local_offset=0）に bit 11（0x0800）が立っていることを確認。
+        let local_flags = u16::from_le_bytes([bytes[6], bytes[7]]);
+        assert_eq!(local_flags & 0x0800, 0x0800);
+
+        // central directory 側の flags（ヘッダ +8）も同様に確認。
+        let cd_sig = CENTRAL_DIR_HEADER_SIG.to_le_bytes();
+        let cd_pos = bytes
+            .windows(4)
+            .position(|w| w == cd_sig)
+            .expect("central directory シグネチャが見つかる");
+        let cd_flags = u16::from_le_bytes([bytes[cd_pos + 8], bytes[cd_pos + 9]]);
+        assert_eq!(cd_flags & 0x0800, 0x0800);
+
+        let back = read_npz_bytes(&bytes).unwrap();
+        assert_eq!(back["café"].host_slice().to_vec(), vec![1.0f32]);
+    }
+
+    #[test]
+    fn rejects_central_directory_entry_beyond_declared_range() {
+        // P0（codex-review。npz.rs:58）: `cd_end` の宣言範囲を超えて
+        // central directory エントリを解析しないことを確認する。
+        // entry_count を実際のエントリ数より過大に偽装し、2 番目の
+        // 走査が `cd_end` を超えたところで fail-closed に拒否される
+        // ことを検証する（EOCD の entries フィールドを書き換える）。
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Tensor::new(vec![1.0], &[1]).unwrap());
+        let bytes = write_npz_bytes(&m).unwrap();
+
+        let eocd_sig = EOCD_SIG.to_le_bytes();
+        let eocd_pos = bytes
+            .windows(4)
+            .rposition(|w| w == eocd_sig)
+            .expect("EOCD シグネチャが見つかる");
+        let mut tampered = bytes.clone();
+        // entries (this disk) と entries (total) を実際の 1 から 2 へ
+        // 水増しする（disk_number 系一致検査を通すため両方書き換え）。
+        tampered[eocd_pos + 8..eocd_pos + 10].copy_from_slice(&2u16.to_le_bytes());
+        tampered[eocd_pos + 10..eocd_pos + 12].copy_from_slice(&2u16.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::InvalidZip(_))),
+            "宣言範囲外エントリが拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_central_directory_undersized_declared_range() {
+        // P0（codex-review。npz.rs:58）: `cd_size` を実際より小さく偽装
+        // し、固定長ヘッダ（46 バイト）すら `cd_end` に収まらない場合に
+        // 拒否されることを確認する。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let eocd_sig = EOCD_SIG.to_le_bytes();
+        let eocd_pos = bytes
+            .windows(4)
+            .rposition(|w| w == eocd_sig)
+            .expect("EOCD シグネチャが見つかる");
+        let mut tampered = bytes.clone();
+        // cd size フィールド（EOCD +12）を極端に小さい値へ書き換える。
+        tampered[eocd_pos + 12..eocd_pos + 16].copy_from_slice(&4u32.to_le_bytes());
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::InvalidZip(_))),
+            "過小な cd_size が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_local_header_name_mismatch() {
+        // P0（codex-review。npz.rs:318）: local header のファイル名が
+        // central directory と異なる場合に拒否されることを確認する。
+        // 先頭エントリ（sort 順で "a"）の local header 名（オフセット
+        // 30、"a.npy" の 5 バイト）を同じ長さの別名へ書き換える。
+        let bytes = write_npz_bytes(&sample_map()).unwrap();
+        let mut tampered = bytes.clone();
+        assert_eq!(&tampered[30..35], b"a.npy");
+        tampered[30..35].copy_from_slice(b"x.npy");
+
+        let err = read_npz_bytes(&tampered);
+        assert!(
+            matches!(err, Err(NpyError::Entry { .. })),
+            "local header 名の不一致が拒否されなかった: {err:?}"
+        );
     }
 
     #[test]

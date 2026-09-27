@@ -162,6 +162,27 @@ pub fn load_npy<P: AsRef<Path>>(path: P) -> Result<Tensor<f32>, NpyError> {
     read_npy_bytes(&bytes)
 }
 
+/// ヘッダ長フィールドに書き込む値（`dict` 本体長 + パディング + 改行）
+/// を計算する。NumPy の `_wrap_header`（`numpy/lib/format.py`）と同一の
+/// 計算式にする必要がある。
+///
+/// パディング量は「64 引く（X を 64 で割った余り）」で、X（magic +
+/// version + len フィールド + 辞書 + 改行の合計）が既に 64 の倍数の
+/// ときも 0 ではなく 64（1 ブロック丸ごと）を返す仕様である（少なくと
+/// も 1 バイトの空白と改行を保証するための意図的な非対称）。単純な
+/// 「64 の倍数へ切り上げ」実装（`div_ceil` ベース）はこの境界で 0
+/// パディングを返し `np.save` と食い違っていた（PR #2318 レビュー
+/// 指摘。Bugbot）。
+///
+/// `dict_len` は shape の桁数に依存し、巨大な shape でこの境界に達し
+/// うる（実際にそのサイズの `Tensor` を構築せずに済むよう、この関数を
+/// `write_npy_bytes` から分離してテストから直接呼べるようにしてある）。
+fn header_len_for(dict_len: usize, len_field_size: usize) -> usize {
+    let unpadded_total = 6 + 2 + len_field_size + dict_len + 1;
+    let pad_len = 64 - (unpadded_total % 64);
+    dict_len + 1 + pad_len
+}
+
 /// `t`（C 順に実体化して）を npy 形式のバイト列へ直列化する。
 ///
 /// 出力は NumPy `np.save` の C 順 `<f4` 出力と**バイト完全一致**する
@@ -178,15 +199,11 @@ pub fn write_npy_bytes(t: &Tensor<f32>) -> Result<Vec<u8>, NpyError> {
     // なるよう空白で埋める。通常は v1.0（headerlen が u16）を使い、
     // パディング後の header_len が u16 上限を超える場合のみ v2.0（u32）
     // にする（NumPy `_write_array_header` と同じ規則）。
-    let header_len_for = |len_field_size: usize| -> usize {
-        let unpadded_total = 6 + 2 + len_field_size + dict.len() + 1;
-        unpadded_total.div_ceil(64) * 64 - 6 - 2 - len_field_size
-    };
-    let v1_header_len = header_len_for(2);
+    let v1_header_len = header_len_for(dict.len(), 2);
     let (major, minor, len_field_size, header_len) = if v1_header_len <= u16::MAX as usize {
         (1u8, 0u8, 2usize, v1_header_len)
     } else {
-        (2u8, 0u8, 4usize, header_len_for(4))
+        (2u8, 0u8, 4usize, header_len_for(dict.len(), 4))
     };
 
     let pad_len = header_len - dict.len() - 1;
@@ -552,6 +569,57 @@ mod tests {
             "{'descr': '<f4', 'fortran_order': False, 'shape': (99999999999999999999999,), }",
         ));
         assert!(matches!(err, Err(NpyError::InvalidHeader(_))));
+    }
+
+    #[test]
+    fn header_len_for_matches_numpy_wrap_header_boundary() {
+        // PR #2318 レビュー指摘（Bugbot）: パディング前のヘッダ長
+        // （unpadded_total）がちょうど 64 の倍数になる場合、`div_ceil`
+        // ベースの旧実装は pad_len=0 を返し `np.save`（`_wrap_header`）
+        // と食い違っていた。境界を作る dict 長（実際に構築するには
+        // 61 桁の shape 数字が要るため、`header_len_for` を直接呼んで
+        // 検証する）で pad_len が 0 ではなく 64 になることを確認する。
+        // dict_len=53 のとき unpadded_total = 6+2+2+53+1 = 64（ちょうど
+        // 境界）。
+        let dict_len = 53;
+        let len_field_size = 2;
+        assert_eq!((6 + 2 + len_field_size + dict_len + 1) % 64, 0);
+        let header_len = header_len_for(dict_len, len_field_size);
+        let pad_len = header_len - dict_len - 1;
+        assert_eq!(
+            pad_len, 64,
+            "unpadded_total が 64 の倍数のとき pad_len は 64 でなければならない（0 は np.save と不一致）"
+        );
+
+        // 非境界の通常ケース（従来どおり 1..64 の範囲で正しく求まる）。
+        for dict_len in 0..300usize {
+            let header_len = header_len_for(dict_len, len_field_size);
+            let total = 6 + 2 + len_field_size + header_len;
+            assert_eq!(total % 64, 0, "dict_len={dict_len} で全体長が非整合");
+            let pad_len = header_len - dict_len - 1;
+            assert!(
+                (1..=64).contains(&pad_len),
+                "dict_len={dict_len} で pad_len={pad_len} が [1, 64] の範囲外"
+            );
+        }
+    }
+
+    #[test]
+    fn write_npy_bytes_header_always_64_byte_aligned() {
+        // 実際の write_npy_bytes 経路（`Tensor` → shape 文字列 → dict
+        // 長）でも、多数の rank-1 shape に対しヘッダ全体長が常に 64 の
+        // 倍数になることを回帰確認する（配線の健全性チェック）。
+        for n in 0..300usize {
+            let t = Tensor::new(vec![0.0f32; n], &[n]).unwrap();
+            let bytes = write_npy_bytes(&t).unwrap();
+            let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+            let prefix_total = 10 + header_len; // magic(6)+ver(2)+len_field(2)
+            assert_eq!(
+                prefix_total % 64,
+                0,
+                "n={n} でヘッダ全体長が 64 の倍数でない"
+            );
+        }
     }
 
     #[test]
