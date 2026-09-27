@@ -152,6 +152,12 @@ pub mod interop;
 ///    `docs/facade-model-registry-decision.md` 参照）。
 pub mod model;
 
+/// バッチ推論（DataLoader 反復 `predict`）・推論フェーズ計測の内部実装
+/// （イシュー #2192・親 #2131）。facade 公開は承認待ちのため**非公開**
+/// （`pub mod` にしない）。詳細は [`inference::batch`] モジュール doc・
+/// `docs/facade-predict-batches-phase-metrics-decision.md` を参照。
+mod inference;
+
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
 // （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。
@@ -5635,3 +5641,104 @@ struct NpyIoHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct ModelIoHoldDoctestGuard;
+
+/// イシュー #2192（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `NpyIoHoldDoctestGuard`（#2189）と同型の「正のプローブ 1 ブロック
+/// 方式」を採る: facade の全 `pub mod` を glob import したスコープに、
+/// 本ブロック内でのみ定義したローカル
+/// `__fandhe_predict_batches_hold_probe::{PhaseMetrics, get_phase_metrics,
+/// current_phase_metrics, reset_phase_metrics, inference::__mark}` を
+/// 導入し、実際に使う名前・呼び出しを書く。facade がどの経路（`pub use`
+/// による再エクスポート・型宣言・`Sequential` への `predict_batches`／
+/// `get_phase_metrics`／`current_phase_metrics` inherent メソッド追加・
+/// `pub mod inference` の新設）でこれらの名前を公開しても、ローカル定義
+/// との glob 衝突（自由関数・モジュール名・型名の場合。E0659 等）または
+/// 呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッドより
+/// 優先解決されるため、本プローブの trait 経由呼び出しが型・引数不一致で
+/// コンパイル失敗する）でエラーコードに依存せずコンパイルが失敗する。
+///
+/// `crate::inference::batch`（DataLoader 反復推論・phase 計測の内部実装。
+/// `#[cfg(test)]` 限定で `Sequential::run_loader_inference` から到達
+/// 可能）は実装済みで、保留対象は facade 公開面 3 件（`predict_batches`・
+/// `PhaseMetrics`（`get_phase_metrics`／`current_phase_metrics`／
+/// `reset_phase_metrics` を含む計測アクセサ一式）・`pub mod inference`
+/// の新設）のみ。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// predict_batches_hold_doctest_globs_all_pub_modules`・
+/// `predict_batches_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_predict_batches_items`・
+/// `workspace_declares_predict_batches_fn_names_nowhere`）との多層防御の
+/// 位置づけ・承認未取得の経緯は `docs/facade-predict-batches-phase-
+/// metrics-decision.md` §5「承認事項」節を参照。
+///
+/// 承認（`predict_batches`・`PhaseMetrics` 一式・`pub mod inference` の
+/// 新設）を得た日が来たら、本モジュール・本 doctest 自体を削除する
+/// （ソース走査側の対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_predict_batches_hold_probe {
+///     pub struct PhaseMetrics;
+///     pub fn get_phase_metrics() {}
+///     pub fn current_phase_metrics() {}
+///     pub fn reset_phase_metrics() {}
+///     pub mod inference {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_predict_batches_hold_probe::*;
+///
+/// struct __FandhePredictBatchesHoldMarker;
+///
+/// trait __FandhePredictBatchesHoldProbe {
+///     fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker;
+///     fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;
+///     fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;
+/// }
+///
+/// impl __FandhePredictBatchesHoldProbe for fandhe_ai::compat::Sequential {
+///     fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker {
+///         __FandhePredictBatchesHoldMarker
+///     }
+///     fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {
+///         __FandhePredictBatchesHoldMarker
+///     }
+///     fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {
+///         __FandhePredictBatchesHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: PhaseMetrics) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     get_phase_metrics();
+///     current_phase_metrics();
+///     reset_phase_metrics();
+///     inference::__mark();
+/// }
+///
+/// fn __probe_sequential(seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandhePredictBatchesHoldMarker =
+///         fandhe_ai::compat::Sequential::predict_batches(seq);
+///     let _: __FandhePredictBatchesHoldMarker = seq.get_phase_metrics();
+///     let _: __FandhePredictBatchesHoldMarker =
+///         fandhe_ai::compat::Sequential::current_phase_metrics(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct PredictBatchesHoldDoctestGuard;

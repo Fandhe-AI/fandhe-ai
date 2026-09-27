@@ -98,6 +98,13 @@
 
 use std::collections::HashMap;
 
+#[cfg(test)]
+use crate::data::{DataError, DataLoader, Dataset};
+use crate::inference::batch::{InferencePhase, NoopPhaseRecorder, PhaseRecorder};
+#[cfg(test)]
+use crate::inference::batch::{
+    LoaderInferenceInput, TimingPhaseRecorder, merge_inference_phase_stats,
+};
 use crate::{
     AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, ResidentLeaf, Tape,
     Tensor, Var,
@@ -655,6 +662,30 @@ impl Sequential {
     /// `nn::Dropout` モジュール doc「train／eval と `predict`／
     /// `forward_host` の整合」参照）。
     pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+        self.predict_recorded(input, &mut NoopPhaseRecorder)
+    }
+
+    /// [`Self::predict`] の本体（イシュー #2192・親 #2131。旧
+    /// `Self::predict` 本体をここへ移設し、`predict` 自体は
+    /// `NoopPhaseRecorder` を渡すだけの 1 行にした）。`rec` へ
+    /// [`crate::inference::batch::InferencePhase::TapeBuild`]／
+    /// `Forward` の計測点を差し込む——[`Self::predict`] は
+    /// `NoopPhaseRecorder`（オーバーヘッドなし）を渡し、
+    /// `Sequential::run_loader_inference`（`crate::inference::batch`）は
+    /// `TimingPhaseRecorder` を渡してバッチ推論の内訳を集計する。
+    /// 単一本体にすることで、両呼び出し元の分岐論理（tape 要否判定・
+    /// フォールバック構造）が乖離しないことを構造で保証する。
+    ///
+    /// **フォールバック時の計測**: tape 不要経路が `Unsupported` を返し
+    /// 旧経路（tape 経路）へフォールバックした場合、`Forward` は
+    /// 実際に行った試行の回数として 2 回計上される（1 回目は
+    /// `Unsupported` に終わった tape 不要経路の試行、2 回目は
+    /// フォールバック先）。
+    pub(crate) fn predict_recorded<R: PhaseRecorder>(
+        &self,
+        input: &Tensor<f32>,
+        rec: &mut R,
+    ) -> Result<Tensor<f32>, AutodiffError> {
         // イシュー #1760・Cursor Bugbot 指摘是正: tape 不要経路
         // （`predict_tape_free`）は層を先頭から順に `forward_host`
         // していくため、`Embedding`／`MultiheadAttention`（`forward_host`
@@ -679,23 +710,35 @@ impl Sequential {
             .iter()
             .all(|layer| layer.supports_forward_host())
         {
-            return self.predict_via_tape(input);
+            return self.predict_via_tape(input, rec);
         }
-        match self.predict_tape_free(input) {
+        match self.predict_tape_free(input, rec) {
             Err(AutodiffError::Backend(BackendError::Unsupported(_))) => {
-                self.predict_via_tape(input)
+                self.predict_via_tape(input, rec)
             }
             other => other,
         }
     }
 
     /// 旧経路（`Tape` 上で `forward` を実行し `to_tensor()` で実体化する。
-    /// TASK-9.4 当初実装）。[`Self::predict`] のフォールバック先。
-    fn predict_via_tape(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
-        let tape = crate::tape();
-        let input_var = tape.var(input);
-        let output = self.forward(&tape, &input_var)?;
-        Ok(output.to_tensor())
+    /// TASK-9.4 当初実装）。[`Self::predict_recorded`] のフォールバック先。
+    /// `TapeBuild` フェーズは `crate::tape()`（`Tape` 構築のみ）を、
+    /// `Forward` フェーズは `tape.var(..)`・`forward`・`to_tensor()` を
+    /// 一括で計測する（`Var<'_>` が `tape` を借用するため、`tape` の
+    /// 構築とそれ以降を同一クロージャに収めると借用検査が通らない。
+    /// `tape.var(..)` を `Forward` 側へ寄せることで各フェーズの
+    /// `calls` が「呼び出し 1 回につき 1」の単純な意味論を保つ）。
+    fn predict_via_tape<R: PhaseRecorder>(
+        &self,
+        input: &Tensor<f32>,
+        rec: &mut R,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let tape = rec.record(InferencePhase::TapeBuild, crate::tape);
+        rec.record(InferencePhase::Forward, || {
+            let input_var = tape.var(input);
+            let output = self.forward(&tape, &input_var)?;
+            Ok(output.to_tensor())
+        })
     }
 
     /// tape 不要経路（イシュー #1028）。`Tape`／`Var` を一切構築せず、
@@ -706,10 +749,17 @@ impl Sequential {
     /// テスト側で `CountingOps`（本ファイル下部のテストモジュール）を
     /// 注入し、`Linear` → `ReLU` の融合結線が実際に `gemm_bias_act` を
     /// 呼んでいることを機械検証するため（公開シグネチャ自体は変えない。
-    /// `predict_with_ops` を公開面へ復活させるものではない）。
-    fn predict_tape_free(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+    /// `predict_with_ops` を公開面へ復活させるものではない）。tape が
+    /// 不要な経路のため `TapeBuild` は計測しない（`calls == 0` のまま）。
+    fn predict_tape_free<R: PhaseRecorder>(
+        &self,
+        input: &Tensor<f32>,
+        rec: &mut R,
+    ) -> Result<Tensor<f32>, AutodiffError> {
         let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
-        self.predict_tape_free_with_ops(&ops, input)
+        rec.record(InferencePhase::Forward, || {
+            self.predict_tape_free_with_ops(&ops, input)
+        })
     }
 
     /// [`Self::predict_tape_free`] の本体（イシュー #1218・`docs/perf/
@@ -764,6 +814,123 @@ impl Sequential {
             }
         }
         Ok(current)
+    }
+
+    /// `DataLoader` を全バッチ反復し [`Self::predict_recorded`] を呼び、
+    /// バッチごとの出力を順に `Vec` へ蓄積して返す（イシュー #2192・親
+    /// #2131。R1）。facade 公開は保留のため `pub(crate)` 限定
+    /// （`crate::PredictBatchesHoldDoctestGuard` doc・`docs/facade-
+    /// predict-batches-phase-metrics-decision.md` §5）。
+    ///
+    /// **モード切り替えなし**: [`Self::predict`] と同じく `training`
+    /// フラグを暗黙に変更しない（バッチ単体の `predict` と bit 一致
+    /// させることが受入条件のため。呼び出し側が必要なら先に
+    /// [`Self::eval`] を呼ぶ）。
+    ///
+    /// **`shuffle=true` を拒否する理由**: 出力順がデータセット順と
+    /// 対応しなくなるうえ、`Batches::next` がグローバル RNG を消費し
+    /// 呼び出し元の RNG 状態を暗黙に変える（`fandhe_ai_tensor_core::data`
+    /// モジュール doc「shuffle=false はグローバル RNG を消費しない」
+    /// 契約の消費者側への波及）。fail-closed に `InvalidArgument` へ
+    /// 写像する。
+    ///
+    /// **出力 `Vec` の確保**: `Dataset::len()` は実装者が任意の値
+    /// （`usize::MAX` を含む）を返しうる非信頼入力として扱う
+    /// （`.claude/rules/security.md` A03）。`Vec::with_capacity` は
+    /// capacity overflow で panic するため使わず、`Vec::new()` から
+    /// 逐次 `push` する（`compat/training.rs` の `try_reserve_exact`
+    /// パターンとは異なり、バッチ数の事前見積り自体を信頼しない設計）。
+    ///
+    /// **phase 計測**: `total` はこの呼び出し全体（成功・失敗いずれも）
+    /// を計測し、途中で失敗した場合もそれまでの計測値を失わないよう
+    /// 呼び出しスレッドの thread-local 累計へ `merge` してから返す
+    /// （`crate::inference::batch::merge_inference_phase_stats`）。
+    ///
+    /// **`#[cfg(test)]` 限定の理由**: facade の既存公開 API はまだ本
+    /// メソッドを呼ばないため（`predict_batches` 相当の facade 公開面は
+    /// 承認待ち。`crate::PredictBatchesHoldDoctestGuard` doc 参照）、
+    /// 無条件で `pub(crate)` にすると通常ビルド（`cargo build`／
+    /// `cargo clippy`）で `dead_code` lint に抵触する。`compat/
+    /// training.rs::Sequential::fit_custom_step_for_test`（イシュー
+    /// #2184）と同じ「テスト経由でのみ到達可能にする」方式を踏襲する
+    /// （`crate::inference::batch` モジュール doc も参照）。承認され
+    /// facade 公開面（`pub fn predict_batches` 等）から呼ばれるように
+    /// なった時点で本属性を外す。
+    #[cfg(test)]
+    pub(crate) fn run_loader_inference<D>(
+        &self,
+        loader: &DataLoader<D>,
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError>
+    where
+        D: Dataset,
+        D::Batch: LoaderInferenceInput,
+    {
+        let started = std::time::Instant::now();
+        let mut rec = TimingPhaseRecorder::default();
+        let result = self.run_loader_inference_inner(loader, &mut rec);
+        rec.record_total(started.elapsed());
+        merge_inference_phase_stats(&rec.into_stats());
+        result
+    }
+
+    /// [`Self::run_loader_inference`] の本体（`total` フェーズの計測・
+    /// thread-local への merge を外側に切り出すための分離）。呼び出し元
+    /// と同じ理由で `#[cfg(test)]` 限定。
+    #[cfg(test)]
+    fn run_loader_inference_inner<D>(
+        &self,
+        loader: &DataLoader<D>,
+        rec: &mut TimingPhaseRecorder,
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError>
+    where
+        D: Dataset,
+        D::Batch: LoaderInferenceInput,
+    {
+        if loader.config().shuffle {
+            return Err(AutodiffError::InvalidArgument(
+                "Sequential::run_loader_inference: shuffle=true の DataLoader は\
+                 出力順の対応が崩れ暗黙に RNG を消費するため受理しない\
+                 （shuffle=false の DataLoader を使うこと）"
+                    .to_string(),
+            ));
+        }
+
+        let to_invalid_arg = |e: DataError| {
+            AutodiffError::InvalidArgument(format!("Sequential::run_loader_inference: {e}"))
+        };
+
+        let mut outputs: Vec<Tensor<f32>> = Vec::new();
+        // `DataLoader::iter()` はサンプル順列（`order`。shuffle 時は
+        // `shuffled_indices`、非 shuffle 時は `(0..n).collect()`）を
+        // 構築するため、件数比例のコストを持つ（`fandhe_ai_tensor_core::
+        // data::DataLoader::iter`）。設計記録 §2.1 は `DataLoad` フェーズ
+        // の計測範囲を「`DataLoader::iter`／`Batches::next` の呼び出し」
+        // と定義しているため、`iter()` 自体の呼び出しも計測区間へ含める
+        // （codex-review 指摘・PR #2322。以前は `iter()` を計測開始前に
+        // 呼んでおり、この構築コストが phase 集計から漏れていた）。
+        let mut iter = rec.record(InferencePhase::DataLoad, || loader.iter());
+        loop {
+            let next = rec.record(InferencePhase::DataLoad, || iter.next());
+            let Some(batch_result) = next else {
+                break;
+            };
+            let batch = batch_result.map_err(to_invalid_arg)?;
+            let input = batch.inference_input();
+            // サンプル数は入力バッチの先頭軸（バッチ軸）から求める。
+            // 出力の先頭軸は層構成（leading axis を変える層・rank-0
+            // 出力を返す層等）に依存し、実際に消費した入力行数と食い
+            // 違いうるため使わない（codex-review 指摘・PR #2322）。
+            let samples = input.shape().first().copied().unwrap_or(1) as u64;
+            let output = self.predict_recorded(input, rec)?;
+            rec.record_batch(samples);
+            if outputs.try_reserve(1).is_err() {
+                return Err(AutodiffError::InvalidArgument(
+                    "Sequential::run_loader_inference: 出力 Vec への確保に失敗した".to_string(),
+                ));
+            }
+            outputs.push(output);
+        }
+        Ok(outputs)
     }
 
     /// 学習ステップの入口（#294）。このステップの `tape` へ全 `Linear`
@@ -2183,6 +2350,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::{DataLoaderConfig, TensorDataset};
 
     const SEED1: u64 = 1001;
     const SEED2: u64 = 2002;
@@ -2317,7 +2485,9 @@ mod tests {
             let input = Tensor::new(input_data, &[batch, 8]).unwrap();
 
             let via_tape_fast = model.predict(&input).unwrap();
-            let via_tape_slow = model.predict_via_tape(&input).unwrap();
+            let via_tape_slow = model
+                .predict_via_tape(&input, &mut NoopPhaseRecorder)
+                .unwrap();
 
             assert_eq!(
                 via_tape_fast.shape(),
@@ -2357,7 +2527,9 @@ mod tests {
             let input = Tensor::new(input_data, &[batch, 8]).unwrap();
 
             let via_tape_fast = model.predict(&input).unwrap();
-            let via_tape_slow = model.predict_via_tape(&input).unwrap();
+            let via_tape_slow = model
+                .predict_via_tape(&input, &mut NoopPhaseRecorder)
+                .unwrap();
 
             assert_eq!(
                 via_tape_fast.shape(),
@@ -2388,7 +2560,9 @@ mod tests {
         let input = Tensor::new(vec![0.1_f32, -0.2, 0.3, -0.4], &[1, 4]).unwrap();
 
         let fast = model.predict(&input).unwrap();
-        let slow = model.predict_via_tape(&input).unwrap();
+        let slow = model
+            .predict_via_tape(&input, &mut NoopPhaseRecorder)
+            .unwrap();
 
         assert_eq!(dense_vec(&fast), dense_vec(&slow));
     }
@@ -3255,5 +3429,291 @@ mod tests {
         // 位置対応契約: leaves は weight のみ（1 層目）+ weight/bias
         // （2 層目）の 3 要素のはず。
         assert_eq!(leaves.len(), 3);
+    }
+
+    // =====================================================================
+    // `run_loader_inference`（イシュー #2192・親 #2131。R1〜R4）: 実装計画
+    // §2.2〜§2.3 の受入項目のうちバックエンド非依存で検証可能な範囲を
+    // カバーする。facade 公開は保留のため `pub(crate)` のまま同一クレート
+    // 内テストから直接呼ぶ。
+    // =====================================================================
+
+    fn mlp_model() -> Sequential {
+        Sequential::new()
+            .add_linear(4, 6, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(6, 2, SEED2)
+            .unwrap()
+    }
+
+    fn make_features(n: usize) -> Tensor<f32> {
+        let data: Vec<f32> = (0..n * 4).map(|i| (i as f32) * 0.01 - 0.2).collect();
+        Tensor::new(data, &[n, 4]).unwrap()
+    }
+
+    /// (a)(b): バッチごとの出力が、同じ行を単体 `predict` した結果と
+    /// bit 完全一致すること（端数ありでも成立）。
+    #[test]
+    fn run_loader_inference_matches_predict_per_batch_bit_exact() {
+        let model = mlp_model();
+        let features = make_features(7);
+        let dataset = TensorDataset::new(features.clone()).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(3)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        assert_eq!(
+            outputs.len(),
+            3,
+            "7 件を batch_size=3 で反復すると 3 バッチ"
+        );
+
+        let rows: Vec<usize> = vec![3, 3, 1];
+        let mut offset = 0usize;
+        for (batch_out, rows_in_batch) in outputs.iter().zip(rows) {
+            let slice_data: Vec<f32> = (0..rows_in_batch * 4)
+                .map(|i| dense_vec(&features)[offset * 4 + i])
+                .collect();
+            let slice = Tensor::new(slice_data, &[rows_in_batch, 4]).unwrap();
+            let expected = model.predict(&slice).unwrap();
+            assert_eq!(
+                dense_vec(batch_out),
+                dense_vec(&expected),
+                "バッチ単位の出力が単体 predict と bit 一致しない（offset={offset}）"
+            );
+            offset += rows_in_batch;
+        }
+    }
+
+    /// (c): `(x, y)` タプルのデータセットでラベルが無視されること。
+    #[test]
+    fn run_loader_inference_ignores_labels_in_tuple_dataset() {
+        let model = mlp_model();
+        let features = make_features(4);
+        let labels = Tensor::<i32>::new(vec![0, 1, 0, 1], &[4]).unwrap();
+        let x_dataset = TensorDataset::new(features.clone()).unwrap();
+        let y_dataset = TensorDataset::new(labels).unwrap();
+        let loader = DataLoader::new((x_dataset, y_dataset), DataLoaderConfig::new(2)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        let plain_loader = DataLoader::new(
+            TensorDataset::new(features).unwrap(),
+            DataLoaderConfig::new(2),
+        )
+        .unwrap();
+        let plain_outputs = model.run_loader_inference(&plain_loader).unwrap();
+
+        assert_eq!(outputs.len(), plain_outputs.len());
+        for (a, b) in outputs.iter().zip(plain_outputs.iter()) {
+            assert_eq!(dense_vec(a), dense_vec(b));
+        }
+    }
+
+    /// (d): `drop_last=true` で端数バッチが捨てられること。
+    #[test]
+    fn run_loader_inference_respects_drop_last() {
+        let model = mlp_model();
+        let features = make_features(7);
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(3).drop_last(true)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        assert_eq!(
+            outputs.len(),
+            2,
+            "drop_last=true で端数 1 件のバッチは捨てられる"
+        );
+    }
+
+    /// (e): `shuffle=true` を `InvalidArgument` で拒否し、RNG を消費
+    /// しないこと。
+    #[test]
+    fn run_loader_inference_rejects_shuffle_without_consuming_rng() {
+        fandhe_ai_tensor_core::rng::manual_seed(42);
+        let before: Vec<f32> = fandhe_ai_tensor_core::rng::rand(&[4])
+            .unwrap()
+            .host_slice()
+            .to_vec();
+
+        fandhe_ai_tensor_core::rng::manual_seed(42);
+        let model = mlp_model();
+        let features = make_features(4);
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2).shuffle(true)).unwrap();
+        let err = model.run_loader_inference(&loader).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let after: Vec<f32> = fandhe_ai_tensor_core::rng::rand(&[4])
+            .unwrap()
+            .host_slice()
+            .to_vec();
+        assert_eq!(
+            before, after,
+            "shuffle=true の拒否経路がグローバル RNG を消費してはならない"
+        );
+    }
+
+    /// (f): 空の loader が `Ok(vec![])` を返し `batches=0` になること。
+    #[test]
+    fn run_loader_inference_on_empty_loader_returns_empty_vec() {
+        crate::inference::batch::clear_inference_phase_stats();
+        let model = mlp_model();
+        let features = Tensor::<f32>::new(Vec::new(), &[0, 4]).unwrap();
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        assert!(outputs.is_empty());
+
+        let stats = crate::inference::batch::inference_phase_stats_snapshot();
+        assert_eq!(stats.batches(), 0);
+    }
+
+    /// (g): phase 計測——`Forward.calls == batches`・
+    /// `DataLoad.calls == batches + 2`（`DataLoader::iter()` 自体の
+    /// 呼び出し 1 回〈サンプル順列の構築。codex-review 指摘・PR #2322〉と
+    /// 枯渇を告げる最後の `None` の 1 回も `DataLoad` 計測に含まれる）・
+    /// tape 不要経路では `TapeBuild.calls == 0`・
+    /// `DeviceTransfer.calls == 0`。
+    #[test]
+    fn run_loader_inference_records_phase_stats_for_tape_free_path() {
+        crate::inference::batch::clear_inference_phase_stats();
+        let model = mlp_model();
+        let features = make_features(5);
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        assert_eq!(outputs.len(), 3);
+
+        let stats = crate::inference::batch::inference_phase_stats_snapshot();
+        assert_eq!(stats.batches(), 3);
+        assert_eq!(stats.samples(), 5);
+        assert_eq!(
+            stats
+                .phase(crate::inference::batch::InferencePhase::Forward)
+                .calls(),
+            3
+        );
+        // `DataLoad.calls == batches + 2`: `DataLoader::iter()` 自体の
+        // 呼び出し 1 回（サンプル順列の構築コストを計測区間へ含める。
+        // codex-review 指摘・PR #2322）+ バッチ 3 回分の `Batches::next`
+        // + 枯渇を告げる最後の `None` の 1 回。
+        assert_eq!(
+            stats
+                .phase(crate::inference::batch::InferencePhase::DataLoad)
+                .calls(),
+            5
+        );
+        assert_eq!(
+            stats
+                .phase(crate::inference::batch::InferencePhase::TapeBuild)
+                .calls(),
+            0
+        );
+        assert_eq!(
+            stats
+                .phase(crate::inference::batch::InferencePhase::DeviceTransfer)
+                .calls(),
+            0
+        );
+        assert_eq!(stats.total().calls(), 1);
+    }
+
+    /// (g'): 出力の先頭軸が入力バッチ軸と一致しない層（`add_flatten(0,
+    /// 1)` で `[N, F]` を `[N*F]` の 1 次元へ潰す）を含む場合でも、
+    /// `samples()` が実際に消費した入力行数（バッチ軸）を返すこと。
+    /// 出力側の先頭軸（`N*F`）から誤って算出すると値が食い違う
+    /// （codex-review 指摘・PR #2322。`docs/facade-predict-batches-
+    /// phase-metrics-decision.md` §3 のサンプル数定義を参照）。
+    #[test]
+    fn run_loader_inference_counts_samples_from_input_batch_axis_not_output_shape() {
+        crate::inference::batch::clear_inference_phase_stats();
+        // `add_flatten(0, 1)` は全軸を 1 軸へ潰すため、出力の先頭軸は
+        // `N * F`（この構成では `5 * 6 = 30`）になり、入力バッチ軸
+        // （`N = 5`）とは異なる値になる。
+        let model = Sequential::new()
+            .add_linear(4, 6, SEED1)
+            .unwrap()
+            .add_flatten(0, 1);
+        let features = make_features(5);
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        assert_eq!(outputs.len(), 3);
+        // 出力の先頭軸が入力バッチ軸と食い違うことの前提確認
+        // （バッチサイズ 2 の入力に対し出力先頭軸は 2*6=12 になる）。
+        assert_eq!(outputs[0].shape().first().copied(), Some(12));
+
+        let stats = crate::inference::batch::inference_phase_stats_snapshot();
+        assert_eq!(stats.batches(), 3);
+        assert_eq!(stats.samples(), 5);
+    }
+
+    /// (h): `Embedding` を含み `forward_host` 未対応でフォールバックする
+    /// モデルでは `TapeBuild.calls == batches` になること。
+    #[test]
+    fn run_loader_inference_records_tape_build_when_falling_back() {
+        crate::inference::batch::clear_inference_phase_stats();
+        let model = Sequential::new().add_embedding(8, 4, None, SEED1).unwrap();
+        let indices = Tensor::<f32>::new(vec![0.0, 1.0, 2.0, 3.0], &[4, 1]).unwrap();
+        let dataset = TensorDataset::new(indices).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2)).unwrap();
+
+        let outputs = model.run_loader_inference(&loader).unwrap();
+        assert_eq!(outputs.len(), 2);
+
+        let stats = crate::inference::batch::inference_phase_stats_snapshot();
+        assert_eq!(
+            stats
+                .phase(crate::inference::batch::InferencePhase::TapeBuild)
+                .calls(),
+            2
+        );
+    }
+
+    /// (i): before/after の `since` が飽和減算で 2 回目の実行分だけを
+    /// 返すこと。
+    #[test]
+    fn run_loader_inference_since_returns_only_the_second_run_delta() {
+        crate::inference::batch::clear_inference_phase_stats();
+        let model = mlp_model();
+        let features = make_features(4);
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2)).unwrap();
+
+        model.run_loader_inference(&loader).unwrap();
+        let before = crate::inference::batch::inference_phase_stats_snapshot();
+        model.run_loader_inference(&loader).unwrap();
+        let after = crate::inference::batch::inference_phase_stats_snapshot();
+
+        let delta = after.since(&before);
+        assert_eq!(delta.batches(), 2);
+        assert_eq!(delta.samples(), 4);
+    }
+
+    /// (k): 別スレッドで実行した計測が呼び出しスレッドへ漏れないこと
+    /// （thread-local の意味論。`inference::batch` 側のユニットテストと
+    /// 補完し合う、`Sequential` 経由の end-to-end 確認）。
+    #[test]
+    fn run_loader_inference_phase_stats_do_not_leak_across_threads() {
+        crate::inference::batch::clear_inference_phase_stats();
+        let model = mlp_model();
+        let features = make_features(2);
+        let dataset = TensorDataset::new(features).unwrap();
+        let loader = DataLoader::new(dataset, DataLoaderConfig::new(2)).unwrap();
+        model.run_loader_inference(&loader).unwrap();
+
+        let other_thread_batches = std::thread::spawn(|| {
+            crate::inference::batch::inference_phase_stats_snapshot().batches()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other_thread_batches, 0);
+
+        let this_thread_batches =
+            crate::inference::batch::inference_phase_stats_snapshot().batches();
+        assert_eq!(this_thread_batches, 1);
     }
 }
