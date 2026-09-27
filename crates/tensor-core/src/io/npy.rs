@@ -187,14 +187,14 @@ fn header_len_for(dict_len: usize, len_field_size: usize) -> usize {
     dict_len + 1 + pad_len
 }
 
-/// `t`（C 順に実体化して）を npy 形式のバイト列へ直列化する。
+/// `shape` から npy ヘッダのレイアウト（バージョン・ヘッダ長フィールド幅・
+/// ヘッダ本体長・dict 文字列）を計算する純粋関数。
 ///
-/// 出力は NumPy `np.save` の C 順 `<f4` 出力と**バイト完全一致**する
-/// ことを目標とする（`docs/tensor-core-npy-npz-io-decision.md` §3.4）。
-/// 非 contiguous な view（transpose・narrow 等）は `host_slice()` で
-/// C 順に実体化してから書く。
-pub fn write_npy_bytes(t: &Tensor<f32>) -> Result<Vec<u8>, NpyError> {
-    let shape = t.shape();
+/// `write_npy_bytes`（実際にバイト列を組み立てる）と `npy_encoded_len`
+/// （バイト列を組み立てずに総出力長だけを見積もる）の双方から呼ばれ、
+/// 計算式を 1 箇所にまとめることで両者が食い違う（drift する）ことを
+/// 防ぐ。
+fn npy_header_layout(shape: &[usize]) -> (u8, u8, usize, usize, String) {
     let shape_str = format_shape_tuple(shape);
     let dict = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_str}, }}");
 
@@ -204,14 +204,79 @@ pub fn write_npy_bytes(t: &Tensor<f32>) -> Result<Vec<u8>, NpyError> {
     // パディング後の header_len が u16 上限を超える場合のみ v2.0（u32）
     // にする（NumPy `_write_array_header` と同じ規則）。
     let v1_header_len = header_len_for(dict.len(), 2);
-    let (major, minor, len_field_size, header_len) = if v1_header_len <= u16::MAX as usize {
-        (1u8, 0u8, 2usize, v1_header_len)
+    if v1_header_len <= u16::MAX as usize {
+        (1u8, 0u8, 2usize, v1_header_len, dict)
     } else {
-        (2u8, 0u8, 4usize, header_len_for(dict.len(), 4))
-    };
+        (2u8, 0u8, 4usize, header_len_for(dict.len(), 4), dict)
+    }
+}
+
+/// `write_npy_bytes` が `shape` に対して実際に生成する総バイト長を、
+/// `Tensor` のデータを一切確保・シリアライズせずに shape だけから
+/// 見積もる純粋関数。読み込み側（`read_npy_bytes`）が課す上限
+/// （`MAX_RANK`・`MAX_HEADER_SIZE`・shape 要素数積・バイト長の `usize`
+/// 範囲検査）を、書き込み側でも同じ定数・同じ計算式で事前検証するために
+/// 使う（`write_npy_bytes` 自身に加え、`npz::write_npz_bytes` の
+/// 事前検証パスからも呼ばれる。PR #2318 レビュー指摘・P2〈npz.rs:848。
+/// npz の合計伸長後サイズ上限を書き出し側が検証していなかった〉の是正）。
+///
+/// これが実データを触らない純粋関数であることにより、境界値
+/// （ちょうど上限／上限+1）を 1 GiB 相当の `Tensor` を実際に確保せずに
+/// 単体テストできる（`.claude/rules/coding-rust.md` テスト・ベンチ節の
+/// 意図に沿う）。
+pub(crate) fn npy_encoded_len(shape: &[usize]) -> Result<u64, NpyError> {
+    if shape.len() > MAX_RANK {
+        return Err(NpyError::InvalidHeader("shape の rank が上限を超える"));
+    }
+    let (_major, _minor, len_field_size, header_len, _dict) = npy_header_layout(shape);
+    // rank ≤ MAX_RANK（64）である限り dict 文字列長は高々 1500 バイト
+    // 程度に収まり `MAX_HEADER_SIZE`（10000）を超えることは実際には
+    // ないが、将来 `MAX_RANK`／`MAX_HEADER_SIZE` の値がずれても
+    // fail-closed であり続けるよう、読み込み側と同じ検査をここでも行う
+    // （定数を複製せず、`MAX_HEADER_SIZE` をそのまま参照する）。
+    if header_len > MAX_HEADER_SIZE {
+        return Err(NpyError::HeaderTooLarge {
+            len: header_len,
+            max: MAX_HEADER_SIZE,
+        });
+    }
+    let numel: u64 = shape
+        .iter()
+        .try_fold(1u64, |acc, &d| acc.checked_mul(d as u64))
+        .ok_or(NpyError::InvalidHeader(
+            "shape 要素数積が usize 範囲を超える",
+        ))?;
+    let data_len = numel.checked_mul(4).ok_or(NpyError::InvalidHeader(
+        "shape のバイト長が usize 範囲を超える",
+    ))?;
+    let prefix_len = 6u64 + 2 + len_field_size as u64 + header_len as u64;
+    prefix_len
+        .checked_add(data_len)
+        .ok_or(NpyError::InvalidHeader(
+            "npy 出力の総バイト長が u64 範囲を超える",
+        ))
+}
+
+/// `t`（C 順に実体化して）を npy 形式のバイト列へ直列化する。
+///
+/// 出力は NumPy `np.save` の C 順 `<f4` 出力と**バイト完全一致**する
+/// ことを目標とする（`docs/tensor-core-npy-npz-io-decision.md` §3.4）。
+/// 非 contiguous な view（transpose・narrow 等）は `host_slice()` で
+/// C 順に実体化してから書く。
+///
+/// 出力全体が `super::MAX_FILE_READ_BYTES`（`load_npy` が読み込みを
+/// 許容する上限）を超える場合は、`fs::write` の前に `save_npy` が
+/// `FileTooLarge` で拒否する（本関数の呼び出し元。`.npy` バイト列
+/// 単体には NumPy 仕様上の総サイズ上限はないため、本関数自体は shape・
+/// ヘッダの上限（`npy_encoded_len` 経由の `MAX_RANK`／
+/// `MAX_HEADER_SIZE`）のみを検査する）。
+pub fn write_npy_bytes(t: &Tensor<f32>) -> Result<Vec<u8>, NpyError> {
+    let shape = t.shape();
+    let predicted_len = npy_encoded_len(shape)?;
+    let (major, minor, len_field_size, header_len, dict) = npy_header_layout(shape);
 
     let pad_len = header_len - dict.len() - 1;
-    let mut out = Vec::with_capacity(6 + 2 + len_field_size + header_len + t.numel() * 4);
+    let mut out = Vec::with_capacity(predicted_len as usize);
     out.extend_from_slice(&MAGIC);
     out.push(major);
     out.push(minor);
@@ -234,8 +299,23 @@ pub fn write_npy_bytes(t: &Tensor<f32>) -> Result<Vec<u8>, NpyError> {
 
 /// `t` を `path` へ npy 形式で書き出す。バイト列をメモリ上で組み立てて
 /// から `std::fs::write` する（原子的な書き込みではない）。
+///
+/// `write_npy_bytes` の出力全体が `super::MAX_FILE_READ_BYTES` を超える
+/// 場合は `fs::write` の前に `FileTooLarge` で拒否し、部分ファイルを
+/// 残さない。`load_npy` が `read_file_bounded` で課すファイルサイズ上限を
+/// 書き出し側にも適用することで、自前書き出し→読み込みの往復契約を保つ
+/// （PR #2318 レビュー指摘・P2〈npz.rs:848〉是正の一環。npy 単体は
+/// `write_npy_bytes` 自体には総サイズ上限がないため、ここで初めて
+/// `load_npy` の入口と同じ定数を適用する）。
 pub fn save_npy<P: AsRef<Path>>(t: &Tensor<f32>, path: P) -> Result<(), NpyError> {
     let bytes = write_npy_bytes(t)?;
+    let len = bytes.len() as u64;
+    if len > super::MAX_FILE_READ_BYTES {
+        return Err(NpyError::FileTooLarge {
+            len,
+            max: super::MAX_FILE_READ_BYTES,
+        });
+    }
     std::fs::write(path, bytes)?;
     Ok(())
 }
@@ -742,5 +822,93 @@ mod tests {
         bytes.extend_from_slice(&(-2.5f32).to_bits().to_be_bytes());
         let t = read_npy_bytes(&bytes).unwrap();
         assert_eq!(t.host_slice().to_vec(), vec![1.5, -2.5]);
+    }
+
+    // PR #2318 レビュー指摘・P2（npz.rs:848）の是正で追加した
+    // `npy_encoded_len`／rank 上限の writer 側検証に対するテスト群。
+    // 「reader が課す制約を writer も同じ定数で検証する」往復契約を
+    // 固定する（`.claude/rules/coding-rust.md` テスト・ベンチ節）。
+
+    #[test]
+    fn npy_encoded_len_matches_write_npy_bytes_actual_len() {
+        // 見積り関数（shape のみを見る純粋関数）と実際のシリアライズ
+        // 結果が食い違わないことを、複数の小さな shape で確認する
+        // （`write_npy_bytes` 内の `debug_assert_eq!` と同じ契約を、通常
+        // テストの範囲でも直接検証する）。
+        for shape in [vec![], vec![0usize], vec![3], vec![2, 3], vec![1; MAX_RANK]] {
+            let numel: usize = shape.iter().product();
+            let t = Tensor::new(vec![0.0f32; numel], &shape).unwrap();
+            let predicted = npy_encoded_len(&shape).unwrap();
+            let actual = write_npy_bytes(&t).unwrap();
+            assert_eq!(
+                predicted,
+                actual.len() as u64,
+                "shape={shape:?} で予測長と実出力長が不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn write_npy_bytes_accepts_rank_at_max_and_rejects_rank_above_max() {
+        // reader（`parse_shape_tuple` の `MAX_RANK` 検査）が rank ≤ 64
+        // までしか受理しないため、writer も同じ定数で rank 65 以上を
+        // 事前に拒否しなければ「書き出せるが読み込めない」往復不能な
+        // 出力になる（本 PR の是正対象。要素数は 1 のまま rank だけを
+        // 動かすため、実データの確保量は無視できるほど小さい）。
+        let at_max = vec![1usize; MAX_RANK];
+        let t_ok = Tensor::new(vec![0.0f32; 1], &at_max).unwrap();
+        assert!(write_npy_bytes(&t_ok).is_ok());
+
+        let above_max = vec![1usize; MAX_RANK + 1];
+        let t_over = Tensor::new(vec![0.0f32; 1], &above_max).unwrap();
+        let err = write_npy_bytes(&t_over);
+        assert!(
+            matches!(err, Err(NpyError::InvalidHeader(_))),
+            "rank が上限を超える shape が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn npy_encoded_len_exact_file_size_boundary_without_allocating_data() {
+        // `save_npy` が `super::MAX_FILE_READ_BYTES`（1 GiB）超過を
+        // 拒否する境界を、実際に 1 GiB 相当の `Tensor` を確保せずに
+        // 検証する。`npy_encoded_len` は shape（`&[usize]`）のみを見る
+        // 純粋関数であり、rank-1 の 1 要素スライスに対する呼び出しは
+        // 巨大な実データを一切割り当てない。
+        //
+        // 9 桁の要素数（今回の対象領域）では、同じ桁数を持つ n に対する
+        // header 長は不変（shape 文字列長が桁数だけに依存するため）。
+        // これを利用して、まず適当な 9 桁の n でヘッダ込みの固定長
+        // （prefix_len）を求め、その固定長から目標総バイト長ちょうどに
+        // なる n を厳密に逆算する。
+        let target = super::super::MAX_FILE_READ_BYTES;
+        let probe_n: u64 = 268_435_456; // 9 桁（target/4 の概算）
+        let probe_len = npy_encoded_len(&[probe_n as usize]).unwrap();
+        let prefix_len = probe_len - probe_n * 4;
+        assert_eq!(
+            (target - prefix_len) % 4,
+            0,
+            "prefix_len は 64 バイト境界のため 4 の倍数のはず"
+        );
+        let n_at_cap = ((target - prefix_len) / 4) as usize;
+        // 桁数が想定どおり 9 桁のままであること（逆算の前提条件）。
+        assert_eq!(n_at_cap.to_string().len(), probe_n.to_string().len());
+
+        let len_at_cap = npy_encoded_len(&[n_at_cap]).unwrap();
+        assert_eq!(len_at_cap, target, "ちょうど上限になる n の逆算が外れた");
+
+        let len_over_cap = npy_encoded_len(&[n_at_cap + 1]).unwrap();
+        assert_eq!(
+            len_over_cap,
+            target + 4,
+            "n+1（4 バイト分の 1 要素増）で総バイト長が 4 だけ増えるはず"
+        );
+        // `npy_encoded_len` 自体は shape・ヘッダの上限だけを検査し、
+        // ファイルサイズ上限（`MAX_FILE_READ_BYTES`）は呼び出し元
+        // （`write_npy_bytes`／`save_npy`）が単純な数値比較で適用する
+        // （実データを持たないここでは、その比較対象になる正しい
+        // 総バイト長が求まることまでを検証する）。
+        assert!(len_at_cap <= target);
+        assert!(len_over_cap > target);
     }
 }

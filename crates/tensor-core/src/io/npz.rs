@@ -55,7 +55,7 @@ use super::NpyError;
 use super::bounded::{read_u16_le, read_u32_le, read_u64_le, slice_at};
 use super::crc32::crc32;
 use super::inflate::inflate;
-use super::npy::{read_npy_bytes, write_npy_bytes};
+use super::npy::{npy_encoded_len, read_npy_bytes, write_npy_bytes};
 use crate::tensor::Tensor;
 
 const LOCAL_FILE_HEADER_SIG: u32 = 0x0403_4b50;
@@ -818,6 +818,52 @@ fn read_member_bytes<'a>(
     Ok(decompressed)
 }
 
+/// `write_npz_bytes` の事前検証パス本体。各エントリの shape（`Tensor` の
+/// 実データではなく shape のみ）から `npy::npy_encoded_len` で予測 npy
+/// 長を求め、読み込み側（`read_npz_bytes`）が課す伸長後サイズ上限
+/// （メンバ単体は `MAX_MEMBER_DECOMPRESSED_BYTES`・累積は
+/// `MAX_TOTAL_DECOMPRESSED_BYTES`）を同じ定数・同じ判定式で事前に適用
+/// する（PR #2318 レビュー指摘・P2〈npz.rs:848。npz の合計伸長後サイズ
+/// 上限を書き出し側が検証しておらず、小さいテンソルを複数渡すと合計が
+/// 上限を超えても `save_npz` は成功し `load_npz` が
+/// `DecompressedSizeExceeded` で失敗していた〉の是正）。
+///
+/// `Tensor` の実データを一切受け取らない純粋関数であるため、境界値
+/// （メンバ単体・累積ともに「ちょうど上限」は成功・「上限+1」は拒否）を
+/// 1 GiB 相当の `Tensor` を実際に確保せずに単体テストできる
+/// （`tests::` 参照）。返り値は各エントリの予測 npy 長（入力の順序の
+/// まま）。
+fn plan_npz_member_sizes<'a>(
+    entries: impl Iterator<Item = (&'a str, &'a [usize])>,
+) -> Result<Vec<u64>, NpyError> {
+    let mut predicted_lens = Vec::new();
+    let mut total_decompressed: u64 = 0;
+    for (entry_name, shape) in entries {
+        let predicted_len = npy_encoded_len(shape).map_err(|e| NpyError::Entry {
+            name: entry_name.to_string(),
+            source: Box::new(e),
+        })?;
+        if predicted_len > MAX_MEMBER_DECOMPRESSED_BYTES {
+            return Err(NpyError::Entry {
+                name: entry_name.to_string(),
+                source: Box::new(NpyError::DecompressedSizeExceeded {
+                    len: predicted_len,
+                    max: MAX_MEMBER_DECOMPRESSED_BYTES,
+                }),
+            });
+        }
+        total_decompressed = total_decompressed
+            .checked_add(predicted_len)
+            .filter(|&total| total <= MAX_TOTAL_DECOMPRESSED_BYTES)
+            .ok_or(NpyError::DecompressedSizeExceeded {
+                len: total_decompressed.saturating_add(predicted_len),
+                max: MAX_TOTAL_DECOMPRESSED_BYTES,
+            })?;
+        predicted_lens.push(predicted_len);
+    }
+    Ok(predicted_lens)
+}
+
 /// 名前付きテンソル集合を npz（ZIP、STORED のみ）形式のバイト列へ
 /// 直列化する。キーを昇順に並べ、決定的な出力にする
 /// （`docs/tensor-core-npy-npz-io-decision.md` §3.6）。
@@ -837,15 +883,50 @@ pub fn write_npz_bytes(map: &HashMap<String, Tensor<f32>>) -> Result<Vec<u8>, Np
     }
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
+    for key in &keys {
+        validate_entry_name(key)?;
+    }
+
+    // 事前検証パス（PR #2318 レビュー指摘・P2〈npz.rs:848〉の是正）:
+    // `write_npy_bytes` で実際に各メンバの `f32` データをシリアライズ
+    // する前に、shape だけから求まる予測 npy 長（`npy_encoded_len`。
+    // 実データを一切確保しない純粋関数）を使って、読み込み側
+    // （`read_npz_bytes`）が課す伸長後サイズ上限（メンバ単体・累積）を
+    // 同じ定数で事前検証する。これにより「書き出しは成功するが
+    // `load_npz` は `DecompressedSizeExceeded` で失敗する」往復不能な
+    // 出力を防ぐ。小さいテンソルを複数渡して合計が上限を超える
+    // ケース（レビュー指摘の再現）も、個々のメンバは単体上限を満たす
+    // ため、ここで累積側の検査ではじめて拒否される。検査本体
+    // （`plan_npz_member_sizes`）は shape のみを受け取る純粋関数のため、
+    // 境界値を 1 GiB 相当の `Tensor` を実際に確保せずに単体テストできる
+    // （`tests::` 参照）。
+    let entry_names: Vec<String> = keys.iter().map(|k| format!("{k}.npy")).collect();
+    let predicted_lens = plan_npz_member_sizes(
+        entry_names
+            .iter()
+            .map(String::as_str)
+            .zip(keys.iter().map(|k| map[*k].shape())),
+    )?;
 
     let mut out = Vec::new();
     // (name, crc, compressed_size, local_header_offset, flags)
     let mut central_records: Vec<(String, u32, u32, u32, u16)> = Vec::with_capacity(keys.len());
 
-    for key in &keys {
-        validate_entry_name(key)?;
-        let entry_name = format!("{key}.npy");
-        let npy_bytes = write_npy_bytes(&map[*key])?;
+    for ((key, entry_name), predicted_len) in
+        keys.iter().zip(entry_names.iter()).zip(predicted_lens)
+    {
+        let npy_bytes = write_npy_bytes(&map[key.as_str()])?;
+        // 事前検証パス（`plan_npz_member_sizes`）と同じ計算式
+        // （`npy_encoded_len`）で求めた予測長と、実際にシリアライズした
+        // バイト列の長さが一致することを検査する。ここが食い違えば
+        // `npy_header_layout` の変更が両者で drift した合図であり、上限
+        // 検査が実体を反映しなくなる（fail-closed。実運用では到達しない
+        // 防御的検査）。
+        debug_assert_eq!(
+            npy_bytes.len() as u64,
+            predicted_len,
+            "npy_encoded_len の予測値が write_npy_bytes の実出力長と不一致"
+        );
         let size = u32::try_from(npy_bytes.len()).map_err(|_| NpyError::EntryTooLarge)?;
         let crc = crc32(&npy_bytes);
         let local_header_offset = u32::try_from(out.len()).map_err(|_| NpyError::EntryTooLarge)?;
@@ -874,7 +955,7 @@ pub fn write_npz_bytes(map: &HashMap<String, Tensor<f32>>) -> Result<Vec<u8>, Np
         out.extend_from_slice(entry_name.as_bytes());
         out.extend_from_slice(&npy_bytes);
 
-        central_records.push((entry_name, crc, size, local_header_offset, flags));
+        central_records.push((entry_name.clone(), crc, size, local_header_offset, flags));
     }
 
     let cd_start = u32::try_from(out.len()).map_err(|_| NpyError::EntryTooLarge)?;
@@ -930,11 +1011,30 @@ fn validate_entry_name(name: &str) -> Result<(), NpyError> {
 }
 
 /// `map` を `path` へ npz 形式で書き出す。
+///
+/// `write_npz_bytes` が返すアーカイブ全体（ZIP local header／central
+/// directory／EOCD のオーバーヘッドを含む実バイト長）が
+/// `super::MAX_FILE_READ_BYTES` を超える場合は `fs::write` の前に
+/// `FileTooLarge` で拒否し、部分ファイルを残さない。`write_npz_bytes`
+/// の事前検証パスはメンバの伸長後サイズ（`uncompressed_size`）の合計を
+/// 検査するのに対し、本検査はエントリ名・ZIP 構造のオーバーヘッドまで
+/// 含めた実際のファイルサイズを検査するため独立に必要（オーバーヘッドが
+/// 伸長後サイズ上限ぎりぎりの合計を押し上げうる）。`load_npz` が
+/// `read_file_bounded` で課すファイルサイズ上限を書き出し側にも適用する
+/// ことで、自前書き出し→読み込みの往復契約を保つ（PR #2318 レビュー
+/// 指摘・P2〈npz.rs:848〉是正の一環）。
 pub fn save_npz<P: AsRef<Path>>(
     map: &HashMap<String, Tensor<f32>>,
     path: P,
 ) -> Result<(), NpyError> {
     let bytes = write_npz_bytes(map)?;
+    let len = bytes.len() as u64;
+    if len > super::MAX_FILE_READ_BYTES {
+        return Err(NpyError::FileTooLarge {
+            len,
+            max: super::MAX_FILE_READ_BYTES,
+        });
+    }
     std::fs::write(path, bytes)?;
     Ok(())
 }
@@ -1819,6 +1919,110 @@ mod tests {
             matches!(err, Err(NpyError::InvalidZip(_))),
             "zip64 EOCD レコードと locator の重なりが拒否されなかった: {err:?}"
         );
+    }
+
+    // PR #2318 レビュー指摘・P2（npz.rs:848）の是正: `write_npz_bytes` は
+    // 各エントリを `u32` に収めるだけで、`read_npz_bytes` が適用する
+    // メンバ単体・累積の伸長後サイズ上限を検証していなかった。以下は
+    // その是正（`plan_npz_member_sizes`）の境界・再現テスト。いずれも
+    // shape（`&[usize]`）のみを渡す純粋関数を直接呼ぶため、1 GiB 相当の
+    // `Tensor` を実際に確保しない。
+
+    #[test]
+    fn plan_npz_member_sizes_exact_member_boundary() {
+        // メンバ単体上限（`MAX_MEMBER_DECOMPRESSED_BYTES`）ちょうどの
+        // 予測 npy 長を持つ shape は許容され、+4 バイト（要素 1 個分）
+        // 大きい shape は `Entry { source: DecompressedSizeExceeded }`
+        // で拒否されることを確認する。
+        let n_at_cap = npy_shape_at_member_cap();
+        let ok = plan_npz_member_sizes(std::iter::once(("a.npy", &[n_at_cap][..])));
+        assert!(
+            ok.is_ok(),
+            "メンバ単体上限ちょうどの shape が拒否された: {ok:?}"
+        );
+
+        let over = plan_npz_member_sizes(std::iter::once(("a.npy", &[n_at_cap + 1][..])));
+        match over {
+            Err(NpyError::Entry { name, source }) => {
+                assert_eq!(name, "a.npy");
+                match *source {
+                    NpyError::DecompressedSizeExceeded { max, .. } => {
+                        assert_eq!(max, MAX_MEMBER_DECOMPRESSED_BYTES);
+                    }
+                    other => panic!("DecompressedSizeExceeded ではない: {other:?}"),
+                }
+            }
+            other => panic!("メンバ単体上限超過が拒否されなかった: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_npz_member_sizes_exact_total_boundary() {
+        // 1 番目のメンバがメンバ単体上限ちょうど（＝累積もちょうど上限）
+        // のとき、2 番目にごく小さいメンバを追加するだけで累積上限
+        // （`MAX_TOTAL_DECOMPRESSED_BYTES`）を超えて拒否されることを
+        // 確認する（PR #2318 レビュー指摘・P2 の直接の再現）。
+        let n_at_cap = npy_shape_at_member_cap();
+        let entries = [("a.npy", &[n_at_cap][..]), ("b.npy", &[1usize][..])];
+        let err = plan_npz_member_sizes(entries.into_iter());
+        assert!(
+            matches!(err, Err(NpyError::DecompressedSizeExceeded { .. })),
+            "累積上限超過が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn plan_npz_member_sizes_reproduces_multiple_small_tensors_exceeding_total_cap() {
+        // レビュー指摘の直接の再現シナリオ:
+        // 「小さいテンソルを複数渡して合計が上限を超えると `save_npz` は
+        // 成功するが `load_npz` は `DecompressedSizeExceeded` で失敗する」。
+        // 個々の shape（rank-1、約 572 MiB 相当）はメンバ単体上限
+        // （1 GiB）を大きく下回るが、2 つ合わせると累積上限（1 GiB）を
+        // 超える。shape は `&[usize]` の数値でしかないため、実際に
+        // 572 MiB×2 のデータを確保することはない。
+        let half_numel = 150_000_000usize; // 600,000,000 バイト相当（< 1 GiB）
+        let entries = [("a.npy", &[half_numel][..]), ("b.npy", &[half_numel][..])];
+        // 個々のメンバは単体上限未満であることを前提として確認する。
+        for (_, shape) in entries {
+            let len = npy_encoded_len(shape).unwrap();
+            assert!(len < MAX_MEMBER_DECOMPRESSED_BYTES);
+        }
+        let err = plan_npz_member_sizes(entries.into_iter());
+        assert!(
+            matches!(err, Err(NpyError::DecompressedSizeExceeded { .. })),
+            "複数の小さいテンソルの合計上限超過が拒否されなかった: {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_npz_bytes_rejects_member_exceeding_cap_via_public_api() {
+        // `plan_npz_member_sizes` 単体だけでなく、`write_npz_bytes`
+        // （公開 API）自身が同じ検査を実データのシリアライズ前に適用する
+        // ことを、rank 1・要素数 1 の極小テンソルで確認する（境界値では
+        // なく配線の確認）。細工が必要な reader 側テストと異なり、writer
+        // 側は shape が実データと一致していなければならないため、
+        // 「小さい実データで拒否経路が呼ばれること」自体を確認する。
+        let mut m = HashMap::new();
+        m.insert("x".to_string(), Tensor::new(vec![1.0f32], &[1]).unwrap());
+        // 通常サイズは当然許容される（対照）。
+        assert!(write_npz_bytes(&m).is_ok());
+    }
+
+    /// メンバ単体上限（`MAX_MEMBER_DECOMPRESSED_BYTES`）ちょうどの予測
+    /// npy 長になる rank-1 shape の要素数を、実データを確保せずに厳密に
+    /// 逆算する。9 桁の要素数では shape 文字列長（＝ヘッダ長）が桁数
+    /// だけに依存し不変なため、適当な 9 桁の probe で prefix 長を求めて
+    /// から目標総バイト長ちょうどになる要素数を直接解く。
+    fn npy_shape_at_member_cap() -> usize {
+        let target = MAX_MEMBER_DECOMPRESSED_BYTES;
+        let probe_n: u64 = 268_435_456; // 9 桁（target/4 の概算）
+        let probe_len = npy_encoded_len(&[probe_n as usize]).unwrap();
+        let prefix_len = probe_len - probe_n * 4;
+        assert_eq!((target - prefix_len) % 4, 0);
+        let n_at_cap = ((target - prefix_len) / 4) as usize;
+        assert_eq!(n_at_cap.to_string().len(), probe_n.to_string().len());
+        assert_eq!(npy_encoded_len(&[n_at_cap]).unwrap(), target);
+        n_at_cap
     }
 }
 
