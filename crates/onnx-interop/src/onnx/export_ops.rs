@@ -1,10 +1,13 @@
 //! 内部 op（Rust ネイティブの属性表現）から `NodeProto`（op_type・属性）への
 //! 逆マッピング（イシュー #1773。`onnx::export` の層 A）。
 //!
-//! `onnx::interp` が `NodeProto` から読む 26 op（`interp.rs` の `run` ディスパッチ表。
-//! `Conv` はイシュー #2076・`BatchNormalization`／`GlobalAveragePool`／
-//! `Flatten` はイシュー #2200 で追加）と対称になるよう、[`ExportOp`] は同じ
-//! 26 op を Rust ネイティブの属性表現（`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
+//! `onnx::interp` の `run` ディスパッチ表が対応する 34 op のうち、`export`
+//! allowlist（既定 domain・26 op。`Conv` はイシュー #2076・
+//! `BatchNormalization`／`GlobalAveragePool`／`Flatten` はイシュー #2200 で
+//! 追加。E2〈イシュー #2186・`Clip`／`Tanh`／`Gelu`／`Where`／`Expand`／
+//! `ReduceMean`／`Pad`／`Resize`〉は export 側未対応のため allowlist 外）と
+//! 対称になる範囲で、[`ExportOp`] は同じ 26 op を
+//! Rust ネイティブの属性表現（`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
 //! `attr_i64_required`／`attr_string` が読む値と同じ型）として保持する。属性は
 //! **常に全て書き出す**（既定値であっても省略しない。省略すると「属性欠落＝既定値」
 //! という対称性テストが空虚に pass してしまうため。唯一の例外は [`ExportOp::Transpose`]
