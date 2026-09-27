@@ -5479,19 +5479,38 @@ impl<'t> Var<'t> {
     /// `eval::vector_norm_along`）。空縮約（`n == 0`）は
     /// [`AutodiffError::InvalidArgument`]。
     ///
+    /// **空縮約判定を確保前検査より先に行う（codex-review P1 是正・
+    /// イシュー #2287）**: 空縮約（`n == 0`）の判定は、確保前のバイト数
+    /// 上限検査（`checked_bytes_for`）より**前**に行う。`out_shape` は
+    /// `dim` で指定した縮約対象軸を取り除いた形状のため、縮約対象軸の
+    /// 長さが 0（空縮約）であっても、`broadcast_to` 由来の巨大な他軸を
+    /// 持つ `out_shape` になりうる（例: `shape=[1, 0]` を `[1usize <<
+    /// 61, 0]` へ broadcast し `dim=Some(1)` を渡すと、縮約対象軸
+    /// `shape[1] == 0` で空縮約だが `out_shape == [1usize << 61]` は
+    /// 確保前検査で拒否される桁）。`checked_bytes_for(&out_shape)` を
+    /// 空縮約判定より先に呼ぶと、この場合に従来契約の
+    /// `AutodiffError::InvalidArgument` ではなく確保前検査由来の
+    /// `ShapeError::ElementCountOverflow` を返してしまい、空縮約
+    /// エラー契約を破る。空縮約なら確保前検査を経由せずに
+    /// `InvalidArgument` を返し、非空縮約の場合にのみ確保前検査へ進む。
+    ///
+    /// 空縮約判定自体（`dim=None` の全軸走査を含む）は要素の積を計算
+    /// せず「いずれかの軸が 0 か」を線形走査で判定するため、`usize` の
+    /// 乗算オーバーフローを経由しない（0 を含む積は必ず 0 になり
+    /// オーバーフローしないが、判定のためだけに積を計算する意味が
+    /// ないため積算自体を行わない）。
+    ///
     /// **確保前のバイト数上限検査（`checked_bytes_for`。イシュー
     /// #2287）**: 小さなストレージを巨大な shape へ `broadcast_to`
     /// した view を渡すと、`materialize_fallible`（実体化）・
     /// `BackendOps::vector_norm` 委譲・`eval::vector_norm_along`
     /// フォールバックのいずれも無検査で `Vec` を確保するため、
     /// capacity overflow panic になりうる（本番経路 panic 禁止規約
-    /// `.claude/rules/coding-rust.md`・REQ-8）。`out_shape` が求まった
-    /// 直後・`n` の計算（`dim=None` の `shape.iter().product()`。無検査
-    /// では overflow しうる）より前に、入力 shape・`out_shape` の
-    /// 両方を検査することで、後続のあらゆる分岐（backend 委譲・eval
-    /// フォールバック・VJP）を一律に守る（`reduce_ops::
-    /// ensure_alloc_fits_f32` と同じ契約。`crate::reduce_ops` モジュール
-    /// doc 参照）。
+    /// `.claude/rules/coding-rust.md`・REQ-8）。空縮約判定の直後・
+    /// 非空縮約の場合に限り、入力 shape・`out_shape` の両方を検査する
+    /// ことで、後続のあらゆる分岐（backend 委譲・eval フォールバック・
+    /// VJP）を一律に守る（`reduce_ops::ensure_alloc_fits_f32` と同じ
+    /// 契約。`crate::reduce_ops` モジュール doc 参照）。
     pub(crate) fn norm(
         &self,
         ord: VectorNormOrd,
@@ -5499,17 +5518,17 @@ impl<'t> Var<'t> {
     ) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
         let out_shape = reduce_out_shape(&shape, dim)?;
-        checked_bytes_for::<f32>(&shape)?;
-        checked_bytes_for::<f32>(&out_shape)?;
-        let n = match dim {
-            None => shape.iter().product(),
-            Some(axis) => shape[axis],
+        let is_empty_reduction = match dim {
+            None => shape.contains(&0),
+            Some(axis) => shape[axis] == 0,
         };
-        if n == 0 {
+        if is_empty_reduction {
             return Err(AutodiffError::InvalidArgument(format!(
                 "Var::norm: 縮約対象の要素数が 0（dim={dim:?}）"
             )));
         }
+        checked_bytes_for::<f32>(&shape)?;
+        checked_bytes_for::<f32>(&out_shape)?;
         let input_val = {
             let nodes = self.tape.nodes.borrow();
             materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()

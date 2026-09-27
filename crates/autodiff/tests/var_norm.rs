@@ -150,6 +150,28 @@ fn norm_l1_l2_axis_reduce_rejects_huge_broadcast_output_without_panicking() {
     ));
 }
 
+// codex-review P1 是正（イシュー #2287・PR #2332）: 縮約対象軸自体は
+// 空（`n == 0`）だが、`out_shape`（縮約対象軸を取り除いた残りの軸）が
+// `broadcast_to` 由来で巨大というケース。確保前検査
+// （`checked_bytes_for`）を空縮約判定より先に呼ぶと、従来契約の
+// `AutodiffError::InvalidArgument` ではなく確保前検査由来の
+// `ShapeError::ElementCountOverflow` を返してしまう（`Var::norm` が
+// `out_shape` を確保前検査より先に空縮約判定する是正の回帰防止）。
+#[test]
+fn norm_l1_l2_axis_reduce_empty_reduction_with_huge_broadcast_out_shape_is_invalid_argument() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // base shape [1, 0] を broadcast して [1usize << 61, 0] にする
+    // （軸 1 は実軸だが長さ 0 で空縮約、軸 0 は broadcast で巨大）。
+    let base = t(Vec::new(), &[1, 0]);
+    let huge = base.broadcast_to(&[1usize << 61, 0]).unwrap();
+    let x = tape.var(&huge);
+
+    let err = x.norm_l1(Some(1)).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let err = x.norm_l2(Some(1)).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
 #[test]
 fn norm_l1_l2_full_reduce_rejects_huge_broadcast_input_without_panicking() {
     let tape = Tape::new_with_ops(common::naive_ops());
