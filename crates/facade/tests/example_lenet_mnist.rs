@@ -32,7 +32,7 @@ fn lenet_structure_matches_pytorch_reference() {
     assert_eq!(model.num_classes(), NUM_CLASSES);
 
     let named = model.sequential().named_parameters();
-    let map = model.pytorch_param_map();
+    let map = model.pytorch_param_map().unwrap();
     assert_eq!(named.len(), map.len());
     assert_eq!(
         named.len(),
@@ -148,4 +148,23 @@ fn lenet_synthetic_mnist_one_epoch_loss_halves() {
         "1 epoch 後の loss は学習前の 50% 以下であること（事前登録した判定式。\
          before={before}, after={after}）"
     );
+}
+
+// ---------------------------------------------------------------------
+// codex-review 指摘（イシュー #2201 PR #2320）: pytorch_param_map の
+// 整合検査（mlp.rs 側と同じ観点。LeNet には dropout 引数がないため
+// 検証観点は sequential_mut() 経由の不整合検出のみ）。
+// ---------------------------------------------------------------------
+
+#[test]
+fn lenet_pytorch_param_map_detects_sequential_mut_replacement() {
+    let mut model = LeNet::new(NUM_CLASSES, 1).unwrap();
+    // sequential_mut() 経由で内部 Sequential を全く別の構成へ差し替える
+    // と、構成値から計算した対応表と実パラメータが不整合になる。
+    // pytorch_param_map() はこれを検出して Err を返すこと。
+    *model.sequential_mut() = fandhe_ai::compat::Sequential::new();
+    assert!(matches!(
+        model.pytorch_param_map(),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
 }

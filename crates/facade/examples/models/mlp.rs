@@ -113,6 +113,15 @@ impl Mlp {
                     .to_string(),
             ));
         }
+        // `hidden_dims` が空だとループ内の `add_dropout(dropout)` が
+        // 一度も呼ばれず `Dropout::new` の検証（有限性・[0, 1] 範囲）を
+        // 経由しないため、コンストラクタの入口で常に検証する
+        // （codex-review 指摘・イシュー #2201 PR #2320）。
+        if !dropout.is_finite() || !(0.0..=1.0).contains(&dropout) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Mlp::new: dropout must be finite and in [0, 1], got {dropout}"
+            )));
+        }
 
         let mut model = Sequential::new();
         let mut prev = input_dim;
@@ -157,6 +166,18 @@ impl Mlp {
     }
 
     /// [`Mlp::sequential`] の可変版（`compile`・`train`・`eval` 用）。
+    ///
+    /// # 契約（重要）
+    ///
+    /// [`Mlp::pytorch_param_map`] は [`Mlp::new`]／[`Mlp::with_seed`] の
+    /// 構成値から重み対応表を再計算する（実パラメータからの逆算による
+    /// トートロジー化を避けるため）。この可変参照経由で内部
+    /// `Sequential` の層構成そのものを差し替えると、対応表が実際の
+    /// パラメータと不整合になりうる（codex-review 指摘・イシュー #2201
+    /// PR #2320）。[`Mlp::pytorch_param_map`] は呼び出しのたびに
+    /// `named_parameters()` と突き合わせて検証するため、差し替え後の
+    /// 呼び出しは `Err` になる。本メソッドは `compile`・`train`・`eval`
+    /// 等のモード切替・学習系 API 呼び出し用に限定して使うこと。
     pub fn sequential_mut(&mut self) -> &mut Sequential {
         &mut self.model
     }
@@ -164,8 +185,12 @@ impl Mlp {
     /// PyTorch 参照定義との層ごとの重み対応表（AC5）。`fandhe_shape` は
     /// [`Mlp::new`] の構成値（`input_dim`／`hidden_dims`／`output_dim`）
     /// から計算し、実パラメータの shape は読み返さない（対応表の検証を
-    /// トートロジーにしないため）。
-    pub fn pytorch_param_map(&self) -> Vec<MlpParamMap> {
+    /// トートロジーにしないため）。そのうえで [`Sequential::named_parameters`]
+    /// と突き合わせ、キー集合・shape が完全一致することを検証する
+    /// （[`Mlp::sequential_mut`] 経由で内部構成が差し替えられていた
+    /// 場合に不整合を検出するため。codex-review 指摘・イシュー #2201
+    /// PR #2320）。
+    pub fn pytorch_param_map(&self) -> Result<Vec<MlpParamMap>, AutodiffError> {
         let mut dims = Vec::with_capacity(self.hidden_dims.len() + 2);
         dims.push(self.input_dim);
         dims.extend(self.hidden_dims.iter().copied());
@@ -192,7 +217,43 @@ impl Mlp {
                 transpose: false,
             });
         }
-        out
+
+        let actual = self.model.named_parameters();
+        if actual.len() != out.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Mlp::pytorch_param_map: 対応表のエントリ数（{}）が実パラメータ数\
+                 （{}）と一致しない（sequential_mut() 経由で内部構成が\
+                 差し替えられた可能性がある）",
+                out.len(),
+                actual.len()
+            )));
+        }
+        for entry in &out {
+            let found = actual
+                .iter()
+                .find(|(key, _)| *key == entry.fandhe_key)
+                .ok_or_else(|| {
+                    AutodiffError::InvalidArgument(format!(
+                        "Mlp::pytorch_param_map: キー '{}' が実パラメータに\
+                         存在しない（sequential_mut() 経由で内部構成が\
+                         差し替えられた可能性がある）",
+                        entry.fandhe_key
+                    ))
+                })?;
+            if found.1.shape() != entry.fandhe_shape.as_slice() {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Mlp::pytorch_param_map: キー '{}' の shape が対応表\
+                     （{:?}）と実パラメータ（{:?}）で不一致\
+                     （sequential_mut() 経由で内部構成が差し替えられた\
+                     可能性がある）",
+                    entry.fandhe_key,
+                    entry.fandhe_shape,
+                    found.1.shape()
+                )));
+            }
+        }
+
+        Ok(out)
     }
 
     /// 構成値（`dropout` 確率）を返す（example・テストの表示用）。

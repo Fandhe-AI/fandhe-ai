@@ -73,7 +73,7 @@ fn run_mlp() -> Result<(), Box<dyn std::error::Error>> {
 
     print_param_map(
         "Mlp <-> PyTorch nn.Sequential(Linear, ReLU, Dropout, ...)",
-        eval_mlp.pytorch_param_map().into_iter().map(|m| {
+        eval_mlp.pytorch_param_map()?.into_iter().map(|m| {
             (
                 m.fandhe_key,
                 m.pytorch_key,
@@ -107,7 +107,7 @@ fn run_lenet() -> Result<(), Box<dyn std::error::Error>> {
 
     print_param_map(
         "LeNet <-> PyTorch Conv2d(1,6,5) -> Conv2d(6,16,5) -> Linear(256,120) -> Linear(120,10)",
-        eval_lenet.pytorch_param_map().into_iter().map(|m| {
+        eval_lenet.pytorch_param_map()?.into_iter().map(|m| {
             (
                 m.fandhe_key,
                 m.pytorch_key,

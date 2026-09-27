@@ -117,6 +117,17 @@ impl LeNet {
     }
 
     /// [`LeNet::sequential`] の可変版。
+    ///
+    /// # 契約（重要）
+    ///
+    /// `mlp.rs` の `Mlp::sequential_mut` と同じ契約: 本メソッド経由で
+    /// 内部 `Sequential` の層構成を差し替えると
+    /// [`LeNet::pytorch_param_map`] の対応表と実パラメータが不整合に
+    /// なりうる（codex-review 指摘・イシュー #2201 PR #2320）。
+    /// [`LeNet::pytorch_param_map`] は呼び出しのたびに
+    /// `named_parameters()` と突き合わせて検証するため、差し替え後の
+    /// 呼び出しは `Err` になる。本メソッドは `compile`・`train`・`eval`
+    /// 等のモード切替・学習系 API 呼び出し用に限定して使うこと。
     pub fn sequential_mut(&mut self) -> &mut Sequential {
         &mut self.model
     }
@@ -130,9 +141,13 @@ impl LeNet {
     /// [`LeNet::new`] の構成値（本モジュール doc 固定の PyTorch 参照
     /// 定義）から直接書き下ろす（`named_parameters()` からの逆算はしない。
     /// `mlp.rs` の `Mlp::pytorch_param_map` と同じ非トートロジー方針）。
-    pub fn pytorch_param_map(&self) -> Vec<LeNetParamMap> {
+    /// そのうえで `named_parameters()` と突き合わせ、キー集合・shape が
+    /// 完全一致することを検証する（[`LeNet::sequential_mut`] 経由で
+    /// 内部構成が差し替えられていた場合に不整合を検出するため。
+    /// codex-review 指摘・イシュー #2201 PR #2320）。
+    pub fn pytorch_param_map(&self) -> Result<Vec<LeNetParamMap>, AutodiffError> {
         let c = self.num_classes;
-        vec![
+        let out = vec![
             LeNetParamMap {
                 fandhe_key: "0.weight".to_string(),
                 pytorch_key: "conv1.weight".to_string(),
@@ -189,6 +204,43 @@ impl LeNet {
                 pytorch_shape: vec![c],
                 transpose: false,
             },
-        ]
+        ];
+
+        let actual = self.model.named_parameters();
+        if actual.len() != out.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "LeNet::pytorch_param_map: 対応表のエントリ数（{}）が実\
+                 パラメータ数（{}）と一致しない（sequential_mut() 経由で\
+                 内部構成が差し替えられた可能性がある）",
+                out.len(),
+                actual.len()
+            )));
+        }
+        for entry in &out {
+            let found = actual
+                .iter()
+                .find(|(key, _)| *key == entry.fandhe_key)
+                .ok_or_else(|| {
+                    AutodiffError::InvalidArgument(format!(
+                        "LeNet::pytorch_param_map: キー '{}' が実パラメータに\
+                         存在しない（sequential_mut() 経由で内部構成が\
+                         差し替えられた可能性がある）",
+                        entry.fandhe_key
+                    ))
+                })?;
+            if found.1.shape() != entry.fandhe_shape.as_slice() {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "LeNet::pytorch_param_map: キー '{}' の shape が対応表\
+                     （{:?}）と実パラメータ（{:?}）で不一致\
+                     （sequential_mut() 経由で内部構成が差し替えられた\
+                     可能性がある）",
+                    entry.fandhe_key,
+                    entry.fandhe_shape,
+                    found.1.shape()
+                )));
+            }
+        }
+
+        Ok(out)
     }
 }

@@ -45,7 +45,7 @@ fn mlp_structure_matches_pytorch_reference() {
     assert_eq!(model.dropout(), 0.2);
 
     let named = model.sequential().named_parameters();
-    let map = model.pytorch_param_map();
+    let map = model.pytorch_param_map().unwrap();
 
     // named_parameters() は weight → bias の層順（モジュール doc の順序
     // 契約）。対応表も同じ順で weight/bias を積んでいるため、そのまま
@@ -181,4 +181,48 @@ fn mlp_synthetic_mnist_one_epoch_loss_halves() {
         "1 epoch 後の loss は学習前の 50% 以下であること（事前登録した判定式。\
          before={before}, after={after}）"
     );
+}
+
+// ---------------------------------------------------------------------
+// codex-review 指摘（イシュー #2201 PR #2320）: dropout 検証・
+// pytorch_param_map の整合検査。
+// ---------------------------------------------------------------------
+
+#[test]
+fn mlp_new_validates_dropout_even_with_empty_hidden_dims() {
+    // hidden_dims が空だとループ内の add_dropout(dropout) が一度も
+    // 呼ばれないため、コンストラクタの入口検証が効いているかをここで
+    // 直接確認する（`Dropout::new` の検証を経由しない経路）。
+    assert!(matches!(
+        Mlp::new(IMAGE_LEN, &[], NUM_CLASSES, f32::NAN),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        Mlp::new(IMAGE_LEN, &[], NUM_CLASSES, 1.5),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        Mlp::new(IMAGE_LEN, &[], NUM_CLASSES, -0.1),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+
+    // 隠れ層なし・有効な dropout は成功し、対応表は入力層 1 層分のみ。
+    let model = Mlp::new(IMAGE_LEN, &[], NUM_CLASSES, 0.5).unwrap();
+    let map = model.pytorch_param_map().unwrap();
+    assert_eq!(map.len(), 2);
+    assert_eq!(map[0].fandhe_key, "0.weight");
+    assert_eq!(map[1].fandhe_key, "0.bias");
+}
+
+#[test]
+fn mlp_pytorch_param_map_detects_sequential_mut_replacement() {
+    let mut model = Mlp::new(IMAGE_LEN, &[256, 128], NUM_CLASSES, 0.2).unwrap();
+    // sequential_mut() 経由で内部 Sequential を全く別の構成へ差し替える
+    // と、構成値から計算した対応表と実パラメータが不整合になる。
+    // pytorch_param_map() はこれを検出して Err を返すこと。
+    *model.sequential_mut() = fandhe_ai::compat::Sequential::new();
+    assert!(matches!(
+        model.pytorch_param_map(),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
 }
