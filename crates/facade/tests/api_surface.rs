@@ -15372,6 +15372,8 @@ struct __FandheModelIoHoldMarker;\n\
 trait __FandheModelIoHoldProbe {\n\
 \x20\x20\x20\x20fn save_model(&self) -> __FandheModelIoHoldMarker;\n\
 \x20\x20\x20\x20fn load_model(&self) -> __FandheModelIoHoldMarker;\n\
+\x20\x20\x20\x20fn save(&self) -> __FandheModelIoHoldMarker;\n\
+\x20\x20\x20\x20fn load(&self) -> __FandheModelIoHoldMarker;\n\
 }\n\
 \n\
 impl __FandheModelIoHoldProbe for fandhe_ai::compat::Sequential {\n\
@@ -15379,6 +15381,12 @@ impl __FandheModelIoHoldProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn load_model(&self) -> __FandheModelIoHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn save(&self) -> __FandheModelIoHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn load(&self) -> __FandheModelIoHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheModelIoHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -15402,6 +15410,10 @@ fn __probe_inherent_method(seq: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::save_model(seq);\n\
 \x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::load_model(seq);\n\
+\x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::save(seq);\n\
+\x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::load(seq);\n\
 }";
 
 /// [`facade_does_not_reexport_or_declare_model_io`]・その自己テストが
@@ -15410,9 +15422,15 @@ fn __probe_inherent_method(seq: &fandhe_ai::compat::Sequential) {\n\
 /// `model_io`／`save_model`／`load_model`／`ModelIoError` を検出し
 /// （単一行・複数行・ネストした group・別名も検出）、`trait`／
 /// `struct`／`enum`／`type` 直後の `ModelIoError` 独自宣言、`mod
-/// model_io` 宣言、および `save_model`／`load_model` の `fn` 宣言を
-/// 違反として返す（`scan_train_step_reexports_and_declarations` と
-/// 同型。`fn` 宣言の定義元インベントリは
+/// model_io` 宣言、`save_model`／`load_model` の `fn` 宣言、および
+/// `impl Sequential { .. }`／`impl <Trait> for Sequential { .. }`
+/// ブロック内の `fn save`／`fn load` 宣言（[`scan_sequential_alt_
+/// save_load_impls`]。`docs/compat-model-io-decision.md` §2 の代替案
+/// `Sequential::save(&self, dir)`／`Sequential::load(dir)` を検出する。
+/// PR #2317 review 指摘: `_model` 接尾辞ありの 2 名だけを走査しており
+/// 代替名を見逃していた）を違反として返す
+/// （`scan_train_step_reexports_and_declarations` と同型。`fn` 宣言の
+/// 定義元インベントリは
 /// [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
 /// が workspace 全体で別途固定する）。
 fn scan_model_io_reexports_and_declarations(content: &str) -> Vec<String> {
@@ -15455,6 +15473,79 @@ fn scan_model_io_reexports_and_declarations(content: &str) -> Vec<String> {
         offending.extend(
             (0..count_fn_declarations_by_name(&tokens, name)).map(|_| format!("fn {name} 宣言")),
         );
+    }
+
+    offending.extend(scan_sequential_alt_save_load_impls(content));
+
+    offending
+}
+
+/// `impl Sequential { .. }`／`impl <Trait> for Sequential { .. }`
+/// ブロック内に限定して `fn save`／`fn load` 宣言を検出する
+/// （`docs/compat-model-io-decision.md` §2 の代替公開 API 案
+/// `Sequential::save(&self, dir)`／`Sequential::load(dir)` を facade が
+/// 追加したことを検出する。PR #2317 review 指摘）。`save`／`load` は
+/// ワークスペース内に無関係な既存宣言（例:
+/// `crates/facade/src/model.rs::ModelRegistry::load`）があるため、
+/// グローバルな `fn` 名走査（[`count_fn_declarations_by_name`] を素朴に
+/// 適用する形）では誤検出する。`impl` ヘッダ（`impl` から本体開始 `{`
+/// の直前まで）のトークン列に識別子 `Sequential` を含む場合に限り、
+/// その impl 本体（対応する閉じ `}` まで深さカウントで走査）だけを
+/// 対象に `fn save`／`fn load` を数える。`Sequential` 型はこのワーク
+/// スペースでは `crates/facade` にのみ定義されており、Rust の孤児
+/// ルール（impl コヒーレンス）上、他クレートから `Sequential` への
+/// トレイト impl は当該トレイトが facade 依存先クレートに定義された
+/// 場合に限られる（facade を依存する workspace クレートは存在しない）
+/// ため、本走査は `crates/facade/src/**`（本関数の呼び出し元が渡す
+/// 走査対象）に限定して問題ない。
+fn scan_sequential_alt_save_load_impls(content: &str) -> Vec<String> {
+    const ALT_FN_NAMES: [&str; 2] = ["save", "load"];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] != "impl" {
+            i += 1;
+            continue;
+        }
+        let mut header_end = i + 1;
+        while header_end < tokens.len() && tokens[header_end] != "{" {
+            header_end += 1;
+        }
+        let is_sequential_impl = tokens[i + 1..header_end].iter().any(|t| t == "Sequential");
+        if !is_sequential_impl || header_end >= tokens.len() {
+            i = header_end + 1;
+            continue;
+        }
+        // 対応する閉じ `}` まで深さカウントで走査する（ネストした
+        // ブロック・関数本体の `{`／`}` も跨いで対応を取る）。
+        let mut depth = 0usize;
+        let mut j = header_end;
+        let mut body_end = tokens.len();
+        while j < tokens.len() {
+            match tokens[j].as_str() {
+                "{" => depth += 1,
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = j;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let body_tokens = &tokens[header_end..body_end.min(tokens.len())];
+        for name in ALT_FN_NAMES {
+            offending.extend(
+                (0..count_fn_declarations_by_name(body_tokens, name))
+                    .map(|_| format!("impl Sequential 内の fn {name} 宣言")),
+            );
+        }
+        i = body_end + 1;
     }
 
     offending
@@ -15530,6 +15621,27 @@ fn facade_does_not_reexport_or_declare_model_io_detects_each_category() {
         !scan_model_io_reexports_and_declarations("pub fn load_model() -> Sequential { todo!() }")
             .is_empty()
     );
+    // 正例: `impl Sequential { fn save }`（§2 代替案の inherent メソッド）。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "impl Sequential { pub fn save(&self, dir: &Path) -> Result<(), ModelIoError> { todo!() } }"
+        )
+        .is_empty()
+    );
+    // 正例: `impl Sequential { fn load }`（§2 代替案の inherent メソッド）。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "impl Sequential { pub fn load(dir: &Path) -> Result<Sequential, ModelIoError> { todo!() } }"
+        )
+        .is_empty()
+    );
+    // 正例: `impl <Trait> for Sequential { fn save }`。
+    assert!(
+        !scan_model_io_reexports_and_declarations(
+            "impl ModelIo for Sequential { fn save(&self, dir: &Path) { todo!() } }"
+        )
+        .is_empty()
+    );
     // 負例: コメント中の出現。
     assert!(scan_model_io_reexports_and_declarations("// pub use ...::save_model;").is_empty());
     // 負例: 無関係な型・関数名。
@@ -15538,6 +15650,19 @@ fn facade_does_not_reexport_or_declare_model_io_detects_each_category() {
             "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
         )
         .is_empty()
+    );
+    // 負例: 無関係な型への `fn load`（`Sequential` を含まない impl。
+    // `ModelRegistry::load` 相当の既存宣言を誤検出しないことを固定する）。
+    assert!(
+        scan_model_io_reexports_and_declarations(
+            "impl ModelRegistry { pub fn load(&self, name: &str) -> Result<(), Error> { todo!() } }"
+        )
+        .is_empty()
+    );
+    // 負例: `Sequential` を含む impl でも `save`／`load` 以外の関数名。
+    assert!(
+        scan_model_io_reexports_and_declarations("impl Sequential { pub fn forward(&self) {} }")
+            .is_empty()
     );
 }
 

@@ -5438,6 +5438,15 @@ struct TrainStepHoldDoctestGuard;
 /// ため、本プローブの trait 経由呼び出しが型・引数不一致でコンパイル
 /// 失敗する）でエラーコードに依存せずコンパイルが失敗する。
 ///
+/// `docs/compat-model-io-decision.md` §2 は代替公開 API 案として
+/// `Sequential::save(&self, dir)`／`Sequential::load(dir)`（`_model`
+/// 接尾辞なしの inherent メソッド）も併記しているため、本トレイトは
+/// `save_model`／`load_model` に加えて `save`／`load` も
+/// `__FandheModelIoHoldProbe` のメソッドとして持つ（PR #2317 review
+/// 指摘: 旧版は `_model` 接尾辞ありの 2 名だけを検出しており、代替名
+/// `Sequential::save`／`Sequential::load` を facade が追加しても本
+/// プローブ・`api_surface.rs` のソース走査のいずれも検出できなかった）。
+///
 /// **本イシューは内部ロジックすら実装しない**（`TrainStepHoldDoctestGuard`
 /// 〈#2184〉・`GradAccumulationHoldDoctestGuard`〈#2180〉が内部ロジックを
 /// 実装済みのまま facade 公開のみを保留したのとは異なり、`save_model`／
@@ -5490,6 +5499,8 @@ struct TrainStepHoldDoctestGuard;
 /// trait __FandheModelIoHoldProbe {
 ///     fn save_model(&self) -> __FandheModelIoHoldMarker;
 ///     fn load_model(&self) -> __FandheModelIoHoldMarker;
+///     fn save(&self) -> __FandheModelIoHoldMarker;
+///     fn load(&self) -> __FandheModelIoHoldMarker;
 /// }
 ///
 /// impl __FandheModelIoHoldProbe for fandhe_ai::compat::Sequential {
@@ -5497,6 +5508,12 @@ struct TrainStepHoldDoctestGuard;
 ///         __FandheModelIoHoldMarker
 ///     }
 ///     fn load_model(&self) -> __FandheModelIoHoldMarker {
+///         __FandheModelIoHoldMarker
+///     }
+///     fn save(&self) -> __FandheModelIoHoldMarker {
+///         __FandheModelIoHoldMarker
+///     }
+///     fn load(&self) -> __FandheModelIoHoldMarker {
 ///         __FandheModelIoHoldMarker
 ///     }
 /// }
@@ -5520,6 +5537,10 @@ struct TrainStepHoldDoctestGuard;
 ///         fandhe_ai::compat::Sequential::save_model(seq);
 ///     let _: __FandheModelIoHoldMarker =
 ///         fandhe_ai::compat::Sequential::load_model(seq);
+///     let _: __FandheModelIoHoldMarker =
+///         fandhe_ai::compat::Sequential::save(seq);
+///     let _: __FandheModelIoHoldMarker =
+///         fandhe_ai::compat::Sequential::load(seq);
 /// }
 /// ```
 #[cfg(doctest)]

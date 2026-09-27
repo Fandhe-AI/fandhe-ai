@@ -194,3 +194,15 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 イシュー #2188（または親 #2131）に、所有者による §2 の承認コメントが
 付くこと。承認後は、別イシューか同イシューの再開で「§4〜§6 の実装 →
 保留ガードの撤去」を 1 PR で行う。
+
+**保留ガードの適用範囲の是正（PR #2317 review 指摘）**: 当初の
+`ModelIoHoldDoctestGuard`・`api_surface.rs` のソース走査は §2 の主案
+（`save_model`／`load_model`）のみを検出対象としており、同じ §2 が
+併記する代替案 `Sequential::save(&self, dir)`／`Sequential::load(dir)`
+（`_model` 接尾辞なしの inherent メソッド）を検出できていなかった。
+指摘を受け、正のプローブ（`__FandheModelIoHoldProbe` トレイトへの
+`save`／`load` メソッド追加）とソース走査（`impl Sequential { .. }`／
+`impl <Trait> for Sequential { .. }` ブロック内の `fn save`／`fn load`
+宣言を検出する `scan_sequential_alt_save_load_impls`）の双方を拡張し、
+§2 の 2 案いずれが未承認のまま追加されても保留ガードが検出する状態に
+是正した。
