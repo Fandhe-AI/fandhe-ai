@@ -269,9 +269,10 @@ version migration。
   §13）: 検証をすべて終えてから書き込みに入る。`create_dir_all` →
   世代 ID を採番し `save_safetensors_f32_to_bytes`（既存・副作用なし）
   で得たバイト列を、`create_new`（§13「一時ファイル作成」）で
-  `model.<gen>.safetensors` へ直接書く（衝突時のみ `<gen>` を再生成して
-  再試行。§12.3 手順 1） → その `<gen>`・実バイト数を含む
-  `manifest.json` を `create_new` 一時ファイル＋`rename` して書く
+  `model.<gen>.safetensors` へ直接書く（衝突時は既存エントリに触れず
+  `<gen>` を再生成して再試行。上限 8 回。§12.3 手順 1） → その `<gen>`・
+  実バイト数を含む `manifest.json` を `create_new` 一時ファイル＋`rename`
+  して書く（一時ファイル名の衝突時も同じ上限で再試行する。§12.3 手順 2）
   （**この manifest の rename が唯一のコミット点**。safetensors 側は
   世代 ID が一意なため上書きされることがなく、manifest がそれを参照した
   時点で既に完全な内容で存在する）。**`save_model` は `dir` の既存内容を
@@ -330,9 +331,26 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 シンボリックリンク（`dir` 直下）である場合に拒否すること／非通常
 ファイル（Unix ソケット・FIFO）である場合に拒否すること／検査後に
 シンボリックリンクへ差し替えられた場合（TOCTOU）に拒否すること。
-`save_model` は一時ファイル・最終ファイル名の位置に既存のシンボリック
-リンク（有効・dangling いずれも）が存在する場合に追従・上書きせず
-`Err` を返すこと（`create_new` の効果を確認する）。**削除しない契約**
+`save_model` の一時ファイル・最終ファイル名の位置に既存のシンボリック
+リンク（有効・dangling いずれも）が存在する場合の挙動は、§12.3 手順 1・2
+の再試行方式（PR #2317 review 指摘〈P2〉の是正）に合わせ次の 2 ケースで
+検証する（テストでは世代 ID・一時ファイル名の生成を差し替え可能な内部
+フックで衝突を注入する）:
+
+1. **一部の候補が衝突しても再試行の上限内に収まる場合**: `save_model` は
+   衝突した既存のシンボリックリンクに追従・上書きせず（`create_new` が
+   `AlreadyExists` を返すのみで、リンク自体にも参照先にも一切触れない）、
+   別の世代 ID・一時ファイル名で保存に成功する。この場合、衝突を起こした
+   シンボリックリンク自身は変更・削除されずそのまま残る。
+2. **再試行の上限（8 回。[`MAX_TMP_NAME_ATTEMPTS`]。§12.3 手順 1）に
+   達してもなお全候補が衝突する場合**: `save_model` は `Err` を返し、
+   `dir` の既存エントリ（衝突を起こしたシンボリックリンクを含む）は
+   一切変更されない。
+
+また、既存 `manifest.json` がシンボリックリンクである場合、`save_model`
+はそのリンクエントリ自体を新しい通常ファイルへ `rename` で置換し、
+リンクの参照先ファイルには一切書き込まないこと（§12.3 手順 2 是正）を
+検証する。**削除しない契約**
 （§13.0・§13.6）については、再保存前に存在していた旧世代の
 `model.<gen>.safetensors`（直前の manifest が参照していたもの）と、
 無関係な命名規則一致ファイル（テストが手動で作成した「よそ者」の
@@ -545,6 +563,32 @@ src/st_save.rs`・`crates/facade/tests/model_registry.rs`）との対応も
 表を新設 §13.5 に、削除の唯一の例外（自己所有一時ファイル）の安全な
 削除手順を新設 §13.6 に記録した。
 
+**世代ファイル衝突時の契約と検証計画の食い違いの是正（PR #2317 review・
+2026-09-27・P2）**: §12.3 手順 1 は `model.<gen>.safetensors` の
+`create_new` が `AlreadyExists` を返した場合に世代 ID を再生成して
+再試行すると定める一方、当時の §6 検証計画は「最終ファイル名に既存の
+シンボリックリンクがある場合に `save_model` が `Err` を返す」ことを
+要求しており、シンボリックリンクも `AlreadyExists` を引き起こすため
+両者は同時に満たせなかった（指摘の要約）。設計自体（衝突時は既存
+エントリに一切触れずに再試行し、上限到達後にのみ `Err` を返す）を
+正としたうえで §6 を是正し、(1) 再試行の上限内で成功する場合（衝突した
+既存エントリは不変のまま、別世代で保存に成功する）と (2) 全再試行が
+衝突する場合（`Err` を返し、既存エントリは不変）の 2 ケースへ書き換えた
+（テストは世代 ID・一時ファイル名生成を差し替え可能な内部フックで衝突を
+注入する）。再試行の上限回数は新規の数値を発明せず、リポジトリ内の同型
+パターン（`create_new` 衝突時に次の候補名へ retry する一時ファイル
+作成）である `crates/docs-site/src/build.rs::write_file_creating_parent`
+の `MAX_TMP_NAME_ATTEMPTS`（8 回）にそのまま揃えた（旧版の「上限 5 回」は
+出典のない値だったため置き換えた）。同じ是正の一環として、固定名
+`manifest.json` 側の一時ファイル作成にも同じ粒度（衝突時の再試行・
+同一上限）を明記し、既存 `manifest.json` がシンボリックリンクである
+場合に `rename` がリンクエントリ自体を置換し参照先へは書き込まないこと
+（POSIX `rename(2)` の宛先非追従の性質）も §12.3 手順 2・§13.3 へ明記した。
+この是正のために文書内の全手順（save・load・一時ファイル・削除・各
+検証段階）と §6 の検証計画を突き合わせ、他に食い違いがないことを
+確認した（対照表は PR 説明・レビュー記録側に記載し、本文には結論のみを
+反映する）。
+
 ## 11. 状態復元契約の棚卸し（A。PR #2317 review 指摘 1 の是正に伴う全数確認）
 
 §1 の「compile 状態復元契約」（層構成・重み・optimizer・loss・AMP を
@@ -636,24 +680,74 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    既存ファイルへの追従書き込み」も「衝突」も同時に防げるため、
    一時ファイル＋`rename` という中間段階自体が不要と判断した——rename
    を挟む旧案は、rename 先の衝突検出という点では `create_new` 直書きと
-   同じ保証しか持たず、手順が 1 段増えるだけだった）。`create_new` が
-   `AlreadyExists` を返した場合（衝突。天文学的に低確率）は新しい
-   `<gen>` を再生成して再試行する（上限 5 回。それでも衝突する場合は
-   `ModelIoError::Io` で fail-closed）。部分書き込みで失敗した場合、
-   このファイルは以後どの manifest からも参照されない孤立ファイルとして
-   残る（§13.6「削除所有権」。自動削除はしない）。
+   同じ保証しか持たず、手順が 1 段増えるだけだった）。**`create_new` が
+   `AlreadyExists` を返した場合（既存エントリの種類は問わない——通常
+   ファイル・シンボリックリンク〈有効・dangling いずれも〉・ディレクトリ・
+   特殊ファイルのいずれであっても同じ `AlreadyExists` になる。天文学的に
+   低確率）は、その既存エントリには一切触れず（読まない・削除しない・
+   追従しない）、新しい `<gen>` を再生成して再試行する**（上限
+   [`MAX_TMP_NAME_ATTEMPTS`]〈8 回〉——新たに数値を決めず、リポジトリ内の
+   同型パターン〈`create_new` が衝突したら次の候補名を生成して再試行する
+   一時ファイル作成〉である `crates/docs-site/src/build.rs::
+   write_file_creating_parent` の `MAX_TMP_NAME_ATTEMPTS` にそのまま揃える。
+   上限に達してもなお衝突する場合は `ModelIoError::Io` で fail-closed とし
+   `dir` の既存エントリは不変のまま返す——PR #2317 review 指摘（P2）の
+   是正。§6「承認後の検証計画」・§13.3 の対応行も本節と同じ挙動に揃える）。
+   部分書き込みで失敗した場合、このファイルは以後どの manifest からも
+   参照されない孤立ファイルとして残る（§13.6「削除所有権」。自動削除は
+   しない）。
 2. **manifest に世代情報を追加する**（§4 のスキーマへ
    `"safetensors_file"`〈文字列。`model.<32桁16進>.safetensors` の
    完全一致パターンのみ許可——パス区切り文字を含む値は load 側で即
    `Err`〉と `"safetensors_bytes"`〈u64。保存直後に実際に書き込んだ
    バイト数〉を追加）。manifest 自体は固定名 `manifest.json` のまま、
-   手順 1 と同じ `create_new` ヘルパーで一時ファイル＋`rename` する
-   （PR #2317 review 再々確認・指摘 1 の是正。旧版は `st_save.rs` と
-   同型の `std::fs::write` ベースの一時ファイル作成だったため、同じ
-   追従書き込みの欠陥を持っていた）。
+   一時ファイル＋`rename` を使う（PR #2317 review 再々確認・指摘 1 の
+   是正。旧版は `st_save.rs` と同型の `std::fs::write` ベースの一時
+   ファイル作成だったため、同じ追従書き込みの欠陥を持っていた）。
+   **一時ファイル名の衝突時の扱いは手順 1（safetensors の世代 ID
+   衝突）と同じ粒度に揃える**（PR #2317 review 指摘〈P2〉の是正。
+   一時ファイル名は `.manifest.json.tmp-{pid}-{カウンタ}-{nanos}`
+   〈`crates/docs-site/src/build.rs::write_file_creating_parent` の
+   命名パターンと同型。プロセス内 `AtomicU64` カウンタ＋
+   `SystemTime::now()` のナノ秒＋`std::process::id()` を連結し、同一
+   プロセス内の並行呼び出し・過去の残骸との衝突を避ける〉とし、
+   `create_new` が `AlreadyExists` を返した場合は既存エントリに触れず
+   次の候補名を生成して再試行する（上限は手順 1 と同一の
+   [`MAX_TMP_NAME_ATTEMPTS`]〈8 回〉。上限に達してもなお衝突する場合は
+   `ModelIoError::Io` で fail-closed とし、書き込み前の状態のまま
+   返す）。一時ファイルの作成に成功した後の書き込み・`rename` の
+   扱いは変更しない。
+   **`rename` の置換先（固定名 `manifest.json`）が既存のシンボリック
+   リンクである場合の挙動**（PR #2317 review 指摘〈P2〉の是正で明記。
+   §13.3 に対応行を追加）: `std::fs::rename`（POSIX `rename(2)`相当）は
+   宛先のディレクトリエントリ自体を置き換えるのであって、宛先が
+   シンボリックリンクであってもリンクの参照先を辿って書き込むことは
+   ない。したがって既存 `manifest.json` がシンボリックリンクであっても、
+   `rename` はそのリンクエントリ自体を新しい通常ファイルへ置換するのみで、
+   リンクの参照先ファイルには一切触れない・書き込まない。これは §13.2
+   の読み取り側 no-follow 手順（シンボリックリンクを拒否する）とは
+   対象が異なる（読み取り側は「シンボリックリンク越しに他のファイルを
+   開いてしまう」ことが脅威だが、`rename` の置換先としてのシンボリック
+   リンクは常に置換対象のエントリそのものであり、リンク先への意図しない
+   書き込みという脅威が構造的に存在しない）ため、書き込み側でこのケースを
+   拒否する理由はなく、通常の置換として扱ってよい（既存の通常ファイルの
+   置換と同じ「最後に勝った manifest が有効になる」正常な更新経路。
+   §12.3 手順 6）。**この宛先非追従の性質は Linux／macOS の POSIX
+   `rename(2)` について確認したものであり、Windows の `MoveFileExW`
+   （reparse point〈シンボリックリンク／junction〉が置換先にある場合の
+   挙動）は本設計では個別に検証しない**。§12.3 手順 8 は `save_model`
+   自体を全 OS で動作対象とする非対称性を認めているが、これは
+   `create_new`（Rust std が Windows でも「既存パスがあれば `Err`」を
+   保証する）の契約にのみ基づくものであり、本項が主張する「`rename` は
+   宛先シンボリックリンクの参照先を辿らない」という保証は Linux／macOS
+   限定の記述として扱う（Windows 上での `manifest.json` の rename 先が
+   reparse point だった場合の厳密な挙動は承認事項として残す）。
 3. **manifest の rename が唯一のコミット点である根拠**: 手順 1 の
-   safetensors rename が完了した時点で、その世代のファイルは完全な
-   内容で存在し、かつ**同名で上書きされることが二度とない**（世代 ID
+   `create_new` による `model.<gen>.safetensors` への直接書き込みが
+   完了した時点で（PR #2317 review 再々確認・指摘 1 の是正により、
+   この書き込みは tmp＋rename を経由しない直接書き込みへ変更済み——
+   §12.3 手順 1）、その世代のファイルは完全な内容で存在し、かつ**同名で
+   上書きされることが二度とない**（世代 ID
    が一意なため）。したがって manifest の rename が成功した時点
    （または、それより前に古い manifest が指す旧世代を読んだ時点）の
    いずれでも、load は必ず「manifest が指す safetensors ファイルが
@@ -845,7 +939,8 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 | シンボリックリンク（葉ファイル。`manifest.json`／`model.<gen>.safetensors`） | 読み込み | §13.2 の no-follow 手順（`symlink_metadata` 事前拒否 → `O_NOFOLLOW` オープン → `fstat` dev/ino 照合） | `crates/facade/src/model.rs::open_leaf_no_follow`・`resolve_model_file`／`crates/facade/tests/model_registry.rs::load_rejects_symlinked_leaf_file_escaping_root` |
 | シンボリックリンク（対象ディレクトリ自身 `dir`） | 読み込み・書き込み共通 | 許容する（`dir` 自体が symlink であることは脅威モデル外。§13.1） | `model_registry.rs::load_succeeds_when_root_itself_is_a_symlink` |
 | シンボリックリンク（途中のパス要素） | — | 該当なし（`dir` 直下 1 段のみを扱うレイアウトのため中間ディレクトリが存在しない。§13.1） | — |
-| シンボリックリンク（一時ファイル名の位置に事前配置） | 書き込み | `create_new`（`O_EXCL` 相当。存在すれば symlink か否かを問わず `Err`）で作成し、追従書き込みを構造的に防ぐ | 新設（§2 item 5・§12.3 手順 1〜2） |
+| シンボリックリンク（一時ファイル名・最終ファイル名の位置に事前配置） | 書き込み | `create_new`（`O_EXCL` 相当。存在すれば symlink か否かを問わず `Err`）で作成し追従書き込みを構造的に防ぐ。衝突時は既存エントリに触れず新しい候補名で再試行する（上限 [`MAX_TMP_NAME_ATTEMPTS`]〈8 回〉。上限到達後もなお衝突する場合のみ `Err` を返し、既存エントリは不変） | 新設（§2 item 5・§12.3 手順 1〜2。PR #2317 review 指摘〈P2〉の是正） |
+| シンボリックリンク（固定名 `manifest.json` への `rename` 置換先。Linux／macOS の POSIX `rename(2)` 限定） | 書き込み | `rename` は宛先ディレクトリエントリ自体を置換するのみで宛先シンボリックリンクの参照先を辿らないため、リンクエントリを新しい通常ファイルへ安全に置換できる（参照先ファイルには書き込まない）。読み取り側 no-follow 手順とは対象が異なる別種の安全性のため拒否は不要。Windows の `MoveFileExW`（reparse point が置換先の場合）は個別に検証しておらず承認事項として残す | 新設（§12.3 手順 2。PR #2317 review 指摘〈P2〉の是正） |
 | ハードリンク | 読み込み・書き込み共通 | 対象外として受容（攻撃者が作成できるのは同一ファイルシステム上の既存ファイルへのリンクのみで、所有者・権限チェックを伴わない本モジュールの脅威モデル外） | `model.rs` モジュール doc「対象外として残る経路」節の理由をそのまま踏襲 |
 | 特殊ファイル（FIFO・Unix ソケット・デバイス） | 読み込み | `symlink_metadata`／`fstat` の両方で `is_file() == true` を要求し拒否。`O_NONBLOCK` で FIFO への差し替えによる無期限ブロックも防ぐ | `model.rs::open_leaf_no_follow`／`model_registry.rs::load_rejects_non_regular_leaf_unix_socket` |
 | 特殊ファイル（削除候補） | 削除 | **該当なし**（PR #2317 review 再確認・2026-09-27 第 2 回是正で自動削除機能自体を撤回。§13.0・§13.6） | — |
@@ -859,7 +954,7 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 | 読み込みサイズ上限（manifest） | 読み込み | **信頼できる固定上限**（コード定数。§2 item 4・承認事項）に `fstat` 実長を比較してから読み取りに入る。`take(fstat 実長 + 1)` で確保・パース前に検証（§13.2 手順 4〜5） | §8 A03 |
 | 読み込みサイズ上限（safetensors ヘッダ長・データ長） | 読み込み | まず `fstat` 実長を**信頼できる固定上限**（`MAX_MODEL_FILE_BYTES`。§2 item 4）と比較して拒否判定し、通過後に非信頼値である manifest の `safetensors_bytes` との**一致**を確認する（§12.3 手順 4）。`safetensors_bytes` 自体を確保量の根拠にはしない。safetensors 自体のヘッダ検証は既存 `load_safetensors_f32_from_bytes` に一元化（複製・迂回しない） | `crate::interop::safetensors`（`onnx-interop::st_load`） |
 | 削除の所有権 | 削除 | **`save_model`／`load_model` は `dir` 内の既存ファイルを自動削除しない**（§13.0・§13.6）。旧世代・無関係ファイルはいずれも残存し、これは明示的に受容する残余コストとして API doc に記載する。所有が証明できる自己一時ファイル（作成時に得た fd を保持したまま同一呼び出し内で失敗した場合）のみ例外的に削除する | 新設（PR #2317 review 再確認・2026-09-27 第 2 回是正で自動削除機能を撤回） |
-| 一時ファイル（作成方式） | 書き込み | `manifest.json` は `create_new` 一時ファイル＋`rename`（既存なら失敗）。`model.<gen>.safetensors` は世代 ID の一意性を利用し**最終ファイル名へ直接 `create_new`**（tmp／rename を経由しない。§12.3 手順 1） | 新設。`st_save.rs` の `std::fs::write` ベース一時ファイル作成は踏襲しない（§12.3 手順 1 是正理由） |
+| 一時ファイル（作成方式） | 書き込み | `manifest.json` は `create_new` 一時ファイル（衝突時は既存エントリに触れず新しい候補名で再試行。上限 [`MAX_TMP_NAME_ATTEMPTS`]〈8 回〉。§12.3 手順 2）＋`rename`。`model.<gen>.safetensors` は世代 ID の一意性を利用し**最終ファイル名へ直接 `create_new`**（tmp／rename を経由しない。衝突時の再試行は同じ上限。§12.3 手順 1） | 新設。`st_save.rs` の `std::fs::write` ベース一時ファイル作成は踏襲しない（§12.3 手順 1 是正理由）。再試行上限は `crates/docs-site/src/build.rs::write_file_creating_parent` の `MAX_TMP_NAME_ATTEMPTS` に揃える（PR #2317 review 指摘〈P2〉の是正） |
 | 一時ファイル（異常終了時の残骸） | 書き込み | **manifest の一時ファイルのみ**、`rename` 失敗時に限り、作成時に得た `File` ハンドルの `fstat` と削除直前の `symlink_metadata` の `(dev, ino)` が一致することを確認したうえで best-effort 削除する（§13.6「自己所有一時ファイルの削除」。差し替えを検出した場合は削除しない）。`model.<gen>.safetensors` は tmp を経由しないため、この経路の残骸自体が発生しない（部分書き込み失敗時は最終ファイル名のまま孤立するのみ）。プロセスクラッシュによる manifest 一時ファイルの残骸は削除主体が存在しないため残り続け、これも受容する | `st_save.rs`「rename 失敗時の tmp ファイル削除は best-effort」と同方針 |
 | 同時保存・読込中の書込み | 読み込み・書き込み共通 | 「同一ディレクトリへの並行 `save_model`／`load_model` はサポート対象外」と明示し受容する（§12.3 手順 6〜7） | `st_save.rs:185`「同一 path への並行書き込みはサポート対象外」と同型 |
 
