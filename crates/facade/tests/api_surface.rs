@@ -15674,3 +15674,270 @@ fn scan_hold_probe_blocks_in_doc_run_panics_on_unclosed_fence() {
 
     let _ = scan_hold_probe_blocks_in_doc_run(&doc_lines);
 }
+// =====================================================================
+// NpyIoHoldDoctestGuard（イシュー #2189・親 #2131）: `RngDistributionsHold
+// DoctestGuard`（#2156）系のテスト（`rng_distributions_hold_doctest_
+// globs_all_pub_modules`／`rng_distributions_hold_doctest_probe_body_
+// matches_fixed_contract`／`facade_does_not_reexport_or_declare_rng_
+// distributions`／`workspace_declares_rng_distribution_names_only_in_
+// allowed_locations`）を鏡写しにする。
+// =====================================================================
+
+/// `crates/facade/src/lib.rs` の `NpyIoHoldDoctestGuard` doc 内の唯一の
+/// doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`rng_distributions_hold_doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn npy_io_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "NpyIoHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "NpyIoHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`npy_io_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの**glob 以外
+/// の本文**が固定文言 [`NPY_IO_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（`rng_distributions_hold_doctest_probe_body_
+/// matches_fixed_contract` と同じ理由: rustdoc の `# ` 隠し行・プローブの
+/// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
+/// 機械的に拒否する）。
+#[test]
+fn npy_io_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "NpyIoHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, NPY_IO_HOLD_PROBE_BODY,
+        "NpyIoHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 NPY_IO_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_npy_io_hold_probe モジュール・\
+         __FandheNpyIoHoldProbe トレイト・__probe_* 関数）の削除・\
+         弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`npy_io_hold_doctest_probe_body_matches_fixed_contract`] が要求する
+/// 固定文言。`crates/facade/src/lib.rs` の `NpyIoHoldDoctestGuard` doc 内
+/// の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行
+/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
+/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
+const NPY_IO_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_npy_io_hold_probe {\n\
+\x20\x20\x20\x20pub struct NpyError;\n\
+\x20\x20\x20\x20pub fn load_npy() {}\n\
+\x20\x20\x20\x20pub fn save_npy() {}\n\
+\x20\x20\x20\x20pub fn load_npz() {}\n\
+\x20\x20\x20\x20pub fn save_npz() {}\n\
+\x20\x20\x20\x20pub mod npy {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub mod npz {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_npy_io_hold_probe::*;\n\
+\n\
+struct __FandheNpyIoHoldMarker;\n\
+\n\
+trait __FandheNpyIoHoldProbe {\n\
+\x20\x20\x20\x20fn load_npy(&self) -> __FandheNpyIoHoldMarker;\n\
+\x20\x20\x20\x20fn save_npy(&self) -> __FandheNpyIoHoldMarker;\n\
+\x20\x20\x20\x20fn load_npz(&self) -> __FandheNpyIoHoldMarker;\n\
+\x20\x20\x20\x20fn save_npz(&self) -> __FandheNpyIoHoldMarker;\n\
+}\n\
+\n\
+impl __FandheNpyIoHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn load_npy(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }\n\
+\x20\x20\x20\x20fn save_npy(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }\n\
+\x20\x20\x20\x20fn load_npz(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }\n\
+\x20\x20\x20\x20fn save_npz(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }\n\
+}\n\
+\n\
+fn __probe_free_fns(_: NpyError) {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20load_npy();\n\
+\x20\x20\x20\x20save_npy();\n\
+\x20\x20\x20\x20load_npz();\n\
+\x20\x20\x20\x20save_npz();\n\
+\x20\x20\x20\x20npy::__mark();\n\
+\x20\x20\x20\x20npz::__mark();\n\
+}\n\
+\n\
+fn __probe_tensor(x: &fandhe_ai::Tensor<f32>) {\n\
+\x20\x20\x20\x20let _: __FandheNpyIoHoldMarker = fandhe_ai::Tensor::load_npy(x);\n\
+\x20\x20\x20\x20let _: __FandheNpyIoHoldMarker = x.save_npy();\n\
+\x20\x20\x20\x20let _: __FandheNpyIoHoldMarker = fandhe_ai::Tensor::load_npz(x);\n\
+\x20\x20\x20\x20let _: __FandheNpyIoHoldMarker = x.save_npz();\n\
+}";
+
+/// fn 名 4 個（イシュー #2189）。[`scan_npy_io_reexports_and_declarations`]・
+/// [`workspace_declares_npy_io_names_only_in_allowed_locations`] が共用
+/// する。
+const NPY_IO_FN_NAMES: [&str; 4] = ["load_npy", "save_npy", "load_npz", "save_npz"];
+
+/// [`facade_does_not_reexport_or_declare_npy_io`]・その自己テストが共用
+/// する検出本体。facade src 全体（`crates/facade/src/**`）の `pub use`
+/// から [`collect_pub_use_leaves`] で別名にする前の葉を集め `NpyError`
+/// を検出し（単一行・複数行・ネストした group・別名も検出）、
+/// `trait`／`struct`／`enum`／`type` 直後の `NpyError` 独自宣言、
+/// [`NPY_IO_FN_NAMES`]（4 個）の `fn` 宣言（可視性・宣言文脈を問わない。
+/// [`count_fn_declarations_by_name`] と同じ検出契約）を違反として返す
+/// （`scan_rng_distributions_reexports_and_declarations` と同型）。
+fn scan_npy_io_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if leaf == "NpyError" {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens.get(i + 1).map(String::as_str) == Some("NpyError")
+        {
+            offending.push(format!("{} NpyError 宣言", tokens[i]));
+        }
+        i += 1;
+    }
+
+    for fn_name in NPY_IO_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`NpyError` を識別子単位
+/// で含む `pub use`（複数行・ネストした group・別名含む）も、facade
+/// 独自の `trait`／`struct`／`enum`／`type` 宣言も、[`NPY_IO_FN_NAMES`]
+/// （`load_npy`／`save_npy`／`load_npz`／`save_npz`）の `fn` 宣言も
+/// 存在しないことを固定する（`NpyIoHoldDoctestGuard` の正のプローブと
+/// 多層防御を成す最内層のソース走査ガード。
+/// `facade_does_not_reexport_or_declare_rng_distributions` と同型）。
+#[test]
+fn facade_does_not_reexport_or_declare_npy_io() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_npy_io_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が npy/npz 読み書き（#2189 の `load_npy`／\
+         `save_npy`／`load_npz`／`save_npz`／`NpyError`。内部クレート限定の\
+         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
+         違反）を再エクスポート、独自宣言、または同名の fn を宣言している: \
+         {offending:?}"
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`NPY_IO_FN_NAMES`]
+/// （4 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_rng_
+/// distribution_names_only_in_allowed_locations` と同型のインベントリ）。
+///
+/// **期待集合**（実装後の実測で `crates/tensor-core/src/io/npy.rs` に
+/// `load_npy`／`save_npy`、`crates/tensor-core/src/io/npz.rs` に
+/// `load_npz`／`save_npz` が各 1 件ずつ追加された）:
+/// - `tensor-core/src/io/npy.rs::load_npy` = 1
+/// - `tensor-core/src/io/npy.rs::save_npy` = 1
+/// - `tensor-core/src/io/npz.rs::load_npz` = 1
+/// - `tensor-core/src/io/npz.rs::save_npz` = 1
+#[test]
+fn workspace_declares_npy_io_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in NPY_IO_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("tensor-core/src/io/npy.rs::load_npy".to_string(), 1usize),
+        ("tensor-core/src/io/npy.rs::save_npy".to_string(), 1usize),
+        ("tensor-core/src/io/npz.rs::load_npz".to_string(), 1usize),
+        ("tensor-core/src/io/npz.rs::save_npz".to_string(), 1usize),
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の load_npy／save_npy／load_npz／\
+         save_npz `fn` 宣言集合が期待（tensor-core/src/io/npy.rs・\
+         tensor-core/src/io/npz.rs に各 1 件ずつ）と一致しない（過不足\
+         いずれも fail-closed に検出する。新たな定義元が見つかった場合、\
+         それが承認済みの実装なのか迂回経路の混入なのかを確認すること）: \
+         {found:?}"
+    );
+}

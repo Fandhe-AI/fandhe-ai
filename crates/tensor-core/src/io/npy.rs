@@ -1,0 +1,648 @@
+//! NumPy `.npy` 形式（単一配列）の読み書き（イシュー #2189）。
+//!
+//! `io`（親モジュール）の doc を参照。本ファイルは npy のヘッダ
+//! （magic・バージョン・`descr`／`fortran_order`／`shape` 辞書）の
+//! 解析・生成と、`Tensor<f32>` との相互変換を担う。ヘッダ辞書は
+//! 汎用 Python リテラルパーサではなく、受理する形（3 キー固定・
+//! 決まった値の型）だけを扱う**専用の最小パーサ**で解析する
+//! （`.claude/rules/security.md` A03。任意コード評価に相当する経路を
+//! 作らない）。
+
+use std::path::Path;
+
+use super::NpyError;
+use crate::tensor::Tensor;
+
+/// npy magic（先頭 6 バイト）。
+const MAGIC: [u8; 6] = [0x93, b'N', b'U', b'M', b'P', b'Y'];
+
+/// NumPy `_MAX_HEADER_SIZE` 相当のヘッダ長上限（バイト）。ヘッダ長
+/// フィールドを偽装した過大確保（`.claude/rules/security.md` A04/A05）を
+/// 防ぐため、スライス取得前に検査する。
+const MAX_HEADER_SIZE: usize = 10000;
+
+/// npy ヘッダの `shape` タプルが取りうる rank の上限。異常に長い
+/// タプル文字列によるパース処理の肥大化を防ぐ。
+const MAX_RANK: usize = 64;
+
+/// npy ヘッダ辞書のパース結果。
+struct Header {
+    descr: String,
+    fortran_order: bool,
+    shape: Vec<usize>,
+}
+
+/// バイト列（`.npy` ファイルの内容そのもの）から `Tensor<f32>` を
+/// 読み取る。
+///
+/// 手順（`docs/tensor-core-npy-npz-io-decision.md` §3.3 準拠）:
+/// 1. magic・バージョンを検証する
+/// 2. ヘッダ長フィールド（v1: u16、v2/v3: u32）を読み、上限・範囲を
+///    検査してからヘッダ本体を取り出す
+/// 3. ヘッダ辞書を専用パーサで解析する
+/// 4. dtype（`<f4`／`>f4` のみ対応）に応じてバイト列を `f32` へ変換する
+/// 5. `fortran_order` なら逆順 shape で構築後 `permute` + `contiguous`
+///    で C 順に変換する
+pub fn read_npy_bytes(bytes: &[u8]) -> Result<Tensor<f32>, NpyError> {
+    if bytes.len() < 8 || bytes[0..6] != MAGIC {
+        return Err(NpyError::InvalidMagic);
+    }
+    let major = bytes[6];
+    let minor = bytes[7];
+    let (header_len_field_size, header_len) = match (major, minor) {
+        (1, 0) => {
+            let raw = bytes.get(8..10).ok_or(NpyError::HeaderTooLarge {
+                len: 0,
+                max: MAX_HEADER_SIZE,
+            })?;
+            (2usize, u16::from_le_bytes([raw[0], raw[1]]) as usize)
+        }
+        (2, 0) | (3, 0) => {
+            let raw = bytes.get(8..12).ok_or(NpyError::HeaderTooLarge {
+                len: 0,
+                max: MAX_HEADER_SIZE,
+            })?;
+            (
+                4usize,
+                u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize,
+            )
+        }
+        _ => return Err(NpyError::UnsupportedVersion { major, minor }),
+    };
+    if header_len > MAX_HEADER_SIZE {
+        return Err(NpyError::HeaderTooLarge {
+            len: header_len,
+            max: MAX_HEADER_SIZE,
+        });
+    }
+    let header_start = 8 + header_len_field_size;
+    let header_end = header_start
+        .checked_add(header_len)
+        .ok_or(NpyError::HeaderTooLarge {
+            len: header_len,
+            max: MAX_HEADER_SIZE,
+        })?;
+    let header_bytes = bytes
+        .get(header_start..header_end)
+        .ok_or(NpyError::HeaderTooLarge {
+            len: header_len,
+            max: MAX_HEADER_SIZE,
+        })?;
+    // v1/v2 は ASCII（latin1 のうち非 ASCII は本パーサの受理形に現れない
+    // ため実質 ASCII）、v3 は UTF-8 として検証する。
+    let header_str = std::str::from_utf8(header_bytes)
+        .map_err(|_| NpyError::InvalidHeader("ヘッダが有効な UTF-8/ASCII ではない"))?;
+    if major == 1 && !header_str.is_ascii() {
+        return Err(NpyError::InvalidHeader(
+            "v1.0 ヘッダに非 ASCII バイトが含まれる",
+        ));
+    }
+
+    let header = parse_header(header_str)?;
+    let data_bytes = &bytes[header_end..];
+
+    let big_endian = match header.descr.as_str() {
+        "<f4" => false,
+        ">f4" => true,
+        other => {
+            return Err(NpyError::UnsupportedDtype {
+                descr: other.chars().take(64).collect(),
+            });
+        }
+    };
+
+    let numel: usize = header.shape.iter().try_fold(1usize, |acc, &d| {
+        acc.checked_mul(d).ok_or(NpyError::InvalidHeader(
+            "shape 要素数積が usize 範囲を超える",
+        ))
+    })?;
+    let expected_bytes = numel.checked_mul(4).ok_or(NpyError::InvalidHeader(
+        "shape のバイト長が usize 範囲を超える",
+    ))?;
+    if data_bytes.len() != expected_bytes {
+        return Err(NpyError::DataLengthMismatch {
+            expected: expected_bytes,
+            actual: data_bytes.len(),
+        });
+    }
+
+    let mut data = Vec::with_capacity(numel);
+    let (chunks, _remainder) = data_bytes.as_chunks::<4>();
+    for chunk in chunks {
+        // NaN のペイロード・±inf・-0.0・非正規化数を保持するため、
+        // ビットパターンをそのまま読み取るだけで算術は通さない。
+        let bits = if big_endian {
+            u32::from_be_bytes(*chunk)
+        } else {
+            u32::from_le_bytes(*chunk)
+        };
+        data.push(f32::from_bits(bits));
+    }
+
+    if header.fortran_order && header.shape.len() > 1 {
+        // Fortran（列優先）順のデータを、逆順 shape で一旦構築してから
+        // `permute` で軸を逆転し `contiguous()` で C 順に実体化する
+        // （値のコピーのみで bit は変えない）。
+        let rank = header.shape.len();
+        let mut rev_shape: Vec<usize> = header.shape.clone();
+        rev_shape.reverse();
+        let mut rev_perm: Vec<usize> = (0..rank).collect();
+        rev_perm.reverse();
+        let t = Tensor::new(data, &rev_shape)?;
+        let permuted = t.permute(&rev_perm)?;
+        Ok(permuted.contiguous())
+    } else {
+        Ok(Tensor::new(data, &header.shape)?)
+    }
+}
+
+/// `path` の npy ファイルを読み込む。
+pub fn load_npy<P: AsRef<Path>>(path: P) -> Result<Tensor<f32>, NpyError> {
+    let bytes = std::fs::read(path)?;
+    read_npy_bytes(&bytes)
+}
+
+/// `t`（C 順に実体化して）を npy 形式のバイト列へ直列化する。
+///
+/// 出力は NumPy `np.save` の C 順 `<f4` 出力と**バイト完全一致**する
+/// ことを目標とする（`docs/tensor-core-npy-npz-io-decision.md` §3.4）。
+/// 非 contiguous な view（transpose・narrow 等）は `host_slice()` で
+/// C 順に実体化してから書く。
+pub fn write_npy_bytes(t: &Tensor<f32>) -> Result<Vec<u8>, NpyError> {
+    let shape = t.shape();
+    let shape_str = format_shape_tuple(shape);
+    let dict = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_str}, }}");
+
+    // NumPy `_wrap_header` と同じ計算: magic(6) + version(2) + headerlen
+    // フィールド + ヘッダ本体（末尾 `\n` を含む）の合計が 64 の倍数に
+    // なるよう空白で埋める。通常は v1.0（headerlen が u16）を使い、
+    // パディング後の header_len が u16 上限を超える場合のみ v2.0（u32）
+    // にする（NumPy `_write_array_header` と同じ規則）。
+    let header_len_for = |len_field_size: usize| -> usize {
+        let unpadded_total = 6 + 2 + len_field_size + dict.len() + 1;
+        unpadded_total.div_ceil(64) * 64 - 6 - 2 - len_field_size
+    };
+    let v1_header_len = header_len_for(2);
+    let (major, minor, len_field_size, header_len) = if v1_header_len <= u16::MAX as usize {
+        (1u8, 0u8, 2usize, v1_header_len)
+    } else {
+        (2u8, 0u8, 4usize, header_len_for(4))
+    };
+
+    let pad_len = header_len - dict.len() - 1;
+    let mut out = Vec::with_capacity(6 + 2 + len_field_size + header_len + t.numel() * 4);
+    out.extend_from_slice(&MAGIC);
+    out.push(major);
+    out.push(minor);
+    if len_field_size == 2 {
+        out.extend_from_slice(&(header_len as u16).to_le_bytes());
+    } else {
+        out.extend_from_slice(&(header_len as u32).to_le_bytes());
+    }
+    out.extend_from_slice(dict.as_bytes());
+    out.extend(std::iter::repeat_n(b' ', pad_len));
+    out.push(b'\n');
+
+    let host = t.host_slice();
+    out.reserve(host.len() * 4);
+    for &v in host.iter() {
+        out.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// `t` を `path` へ npy 形式で書き出す。バイト列をメモリ上で組み立てて
+/// から `std::fs::write` する（原子的な書き込みではない）。
+pub fn save_npy<P: AsRef<Path>>(t: &Tensor<f32>, path: P) -> Result<(), NpyError> {
+    let bytes = write_npy_bytes(t)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// shape を NumPy の tuple repr（`()`／`(3,)`／`(2, 3)`）へ整形する。
+fn format_shape_tuple(shape: &[usize]) -> String {
+    match shape.len() {
+        0 => "()".to_string(),
+        1 => format!("({},)", shape[0]),
+        _ => {
+            let joined = shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({joined})")
+        }
+    }
+}
+
+/// npy ヘッダ辞書の専用最小パーサ。
+///
+/// 受理する形（`docs/tensor-core-npy-npz-io-decision.md` §3.3）:
+/// `{` キー `:` 値 (`,` キー `:` 値)* `,`? `}` の後ろに空白と `\n` のみ。
+/// キーは `descr`／`fortran_order`／`shape` の 3 つで、順不同・各 1 回
+/// ずつ必須。未知キー・重複・欠落はすべて `InvalidHeader`。
+fn parse_header(header_str: &str) -> Result<Header, NpyError> {
+    let bytes = header_str.as_bytes();
+    let mut pos = 0usize;
+
+    skip_ws(bytes, &mut pos);
+    expect_byte(bytes, &mut pos, b'{')?;
+
+    let mut descr: Option<String> = None;
+    let mut fortran_order: Option<bool> = None;
+    let mut shape: Option<Vec<usize>> = None;
+
+    loop {
+        skip_ws(bytes, &mut pos);
+        if peek(bytes, pos) == Some(b'}') {
+            pos += 1;
+            break;
+        }
+        let key = parse_quoted_string(header_str, bytes, &mut pos)?;
+        skip_ws(bytes, &mut pos);
+        expect_byte(bytes, &mut pos, b':')?;
+        skip_ws(bytes, &mut pos);
+        match key.as_str() {
+            "descr" => {
+                if descr.is_some() {
+                    return Err(NpyError::InvalidHeader("descr キーが重複している"));
+                }
+                descr = Some(parse_quoted_string(header_str, bytes, &mut pos)?);
+            }
+            "fortran_order" => {
+                if fortran_order.is_some() {
+                    return Err(NpyError::InvalidHeader("fortran_order キーが重複している"));
+                }
+                fortran_order = Some(parse_bool_literal(bytes, &mut pos)?);
+            }
+            "shape" => {
+                if shape.is_some() {
+                    return Err(NpyError::InvalidHeader("shape キーが重複している"));
+                }
+                shape = Some(parse_shape_tuple(header_str, bytes, &mut pos)?);
+            }
+            _ => return Err(NpyError::InvalidHeader("未知のヘッダキー")),
+        }
+        skip_ws(bytes, &mut pos);
+        match peek(bytes, pos) {
+            Some(b',') => {
+                pos += 1;
+                continue;
+            }
+            Some(b'}') => {
+                pos += 1;
+                break;
+            }
+            _ => {
+                return Err(NpyError::InvalidHeader(
+                    "キー・値の後ろに `,` または `}` が必要",
+                ));
+            }
+        }
+    }
+
+    // `}` 以降は空白のみで、末尾はちょうど 1 つの `\n`（本モジュールが
+    // 追加確認済みのパディング契約。埋め込み改行による多重ヘッダ偽装を
+    // 防ぐ。`.claude/rules/security.md` A03）。
+    let tail = &bytes[pos..];
+    if tail.iter().any(|&b| b != b' ' && b != b'\n') {
+        return Err(NpyError::InvalidHeader(
+            "`}` の後ろに空白・改行以外の文字がある",
+        ));
+    }
+    if tail.iter().filter(|&&b| b == b'\n').count() != 1 || tail.last() != Some(&b'\n') {
+        return Err(NpyError::InvalidHeader(
+            "ヘッダの終端が単一の `\\n` ではない",
+        ));
+    }
+
+    let descr = descr.ok_or(NpyError::InvalidHeader("descr キーが欠落している"))?;
+    let fortran_order =
+        fortran_order.ok_or(NpyError::InvalidHeader("fortran_order キーが欠落している"))?;
+    let shape = shape.ok_or(NpyError::InvalidHeader("shape キーが欠落している"))?;
+
+    Ok(Header {
+        descr,
+        fortran_order,
+        shape,
+    })
+}
+
+fn peek(bytes: &[u8], pos: usize) -> Option<u8> {
+    bytes.get(pos).copied()
+}
+
+fn skip_ws(bytes: &[u8], pos: &mut usize) {
+    while matches!(
+        peek(bytes, *pos),
+        Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+    ) {
+        *pos += 1;
+    }
+}
+
+fn expect_byte(bytes: &[u8], pos: &mut usize, expected: u8) -> Result<(), NpyError> {
+    if peek(bytes, *pos) == Some(expected) {
+        *pos += 1;
+        Ok(())
+    } else {
+        Err(NpyError::InvalidHeader("期待するトークンが見つからない"))
+    }
+}
+
+/// シングル／ダブルクォートの文字列リテラルを解析する（エスケープは
+/// 扱わない。`descr`／キー名にクォート文字・バックスラッシュは
+/// 現れないため必要十分）。
+fn parse_quoted_string(
+    header_str: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+) -> Result<String, NpyError> {
+    let quote = match peek(bytes, *pos) {
+        Some(b'\'') | Some(b'"') => bytes[*pos],
+        _ => {
+            return Err(NpyError::InvalidHeader(
+                "文字列リテラルが `'` または `\"` で始まらない",
+            ));
+        }
+    };
+    let start = *pos + 1;
+    let mut i = start;
+    while i < bytes.len() && bytes[i] != quote {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return Err(NpyError::InvalidHeader("文字列リテラルが閉じていない"));
+    }
+    let s = header_str
+        .get(start..i)
+        .ok_or(NpyError::InvalidHeader(
+            "文字列リテラルが有効な UTF-8 境界にない",
+        ))?
+        .to_string();
+    *pos = i + 1;
+    Ok(s)
+}
+
+fn parse_bool_literal(bytes: &[u8], pos: &mut usize) -> Result<bool, NpyError> {
+    if bytes[*pos..].starts_with(b"True") {
+        *pos += 4;
+        Ok(true)
+    } else if bytes[*pos..].starts_with(b"False") {
+        *pos += 5;
+        Ok(false)
+    } else {
+        Err(NpyError::InvalidHeader(
+            "fortran_order の値が True/False ではない",
+        ))
+    }
+}
+
+fn parse_shape_tuple(
+    header_str: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+) -> Result<Vec<usize>, NpyError> {
+    expect_byte(bytes, pos, b'(')?;
+    let mut dims = Vec::new();
+    loop {
+        skip_ws(bytes, pos);
+        if peek(bytes, *pos) == Some(b')') {
+            *pos += 1;
+            break;
+        }
+        let start = *pos;
+        while matches!(peek(bytes, *pos), Some(b) if b.is_ascii_digit()) {
+            *pos += 1;
+        }
+        if *pos == start {
+            return Err(NpyError::InvalidHeader("shape の要素が非負整数ではない"));
+        }
+        let digits = header_str.get(start..*pos).ok_or(NpyError::InvalidHeader(
+            "shape の要素が有効な UTF-8 境界にない",
+        ))?;
+        let dim: usize = digits
+            .parse()
+            .map_err(|_| NpyError::InvalidHeader("shape の要素が usize 範囲を超える"))?;
+        dims.push(dim);
+        if dims.len() > MAX_RANK {
+            return Err(NpyError::InvalidHeader("shape の rank が上限を超える"));
+        }
+        skip_ws(bytes, pos);
+        match peek(bytes, *pos) {
+            Some(b',') => {
+                *pos += 1;
+                continue;
+            }
+            Some(b')') => {
+                *pos += 1;
+                break;
+            }
+            _ => {
+                return Err(NpyError::InvalidHeader(
+                    "shape の要素の後ろに `,` または `)` が必要",
+                ));
+            }
+        }
+    }
+    Ok(dims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_v1_bytes(dict: &str) -> Vec<u8> {
+        let unpadded = 6 + 2 + 2 + dict.len() + 1;
+        let padded = unpadded.div_ceil(64) * 64;
+        let header_len = padded - 6 - 2 - 2;
+        let pad = header_len - dict.len() - 1;
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC);
+        out.push(1);
+        out.push(0);
+        out.extend_from_slice(&(header_len as u16).to_le_bytes());
+        out.extend_from_slice(dict.as_bytes());
+        out.extend(std::iter::repeat_n(b' ', pad));
+        out.push(b'\n');
+        out
+    }
+
+    fn header_str_from(dict: &str) -> String {
+        let bytes = make_v1_bytes(dict);
+        let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        String::from_utf8(bytes[10..10 + header_len].to_vec()).unwrap()
+    }
+
+    #[test]
+    fn parses_key_order_variations() {
+        let h1 = parse_header(&header_str_from(
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (2, 3), }",
+        ))
+        .unwrap();
+        assert_eq!(h1.descr, "<f4");
+        assert!(!h1.fortran_order);
+        assert_eq!(h1.shape, vec![2, 3]);
+
+        let h2 = parse_header(&header_str_from(
+            "{'shape': (2, 3), 'descr': '<f4', 'fortran_order': False}",
+        ))
+        .unwrap();
+        assert_eq!(h2.shape, vec![2, 3]);
+    }
+
+    #[test]
+    fn parses_whitespace_variations() {
+        let h = parse_header(&header_str_from(
+            "{'descr':'<f4','fortran_order':True,'shape':(3,)}",
+        ))
+        .unwrap();
+        assert!(h.fortran_order);
+        assert_eq!(h.shape, vec![3]);
+    }
+
+    #[test]
+    fn parses_rank0_and_rank1_and_trailing_comma_shapes() {
+        let h0 = parse_header(&header_str_from(
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (), }",
+        ))
+        .unwrap();
+        assert_eq!(h0.shape, Vec::<usize>::new());
+
+        let h1 = parse_header(&header_str_from(
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (3,), }",
+        ))
+        .unwrap();
+        assert_eq!(h1.shape, vec![3]);
+    }
+
+    #[test]
+    fn rejects_invalid_token() {
+        let err = parse_header(&header_str_from(
+            "{'descr': '<f4', 'fortran_order': maybe, 'shape': (2,), }",
+        ));
+        assert!(matches!(err, Err(NpyError::InvalidHeader(_))));
+    }
+
+    #[test]
+    fn rejects_duplicate_key() {
+        let err = parse_header(&header_str_from(
+            "{'descr': '<f4', 'descr': '<f4', 'fortran_order': False, 'shape': (2,), }",
+        ));
+        assert!(matches!(err, Err(NpyError::InvalidHeader(_))));
+    }
+
+    #[test]
+    fn rejects_missing_key() {
+        let err = parse_header(&header_str_from("{'descr': '<f4', 'shape': (2,), }"));
+        assert!(matches!(err, Err(NpyError::InvalidHeader(_))));
+    }
+
+    #[test]
+    fn rejects_unknown_key() {
+        let err = parse_header(&header_str_from(
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (2,), 'extra': 1, }",
+        ));
+        assert!(matches!(err, Err(NpyError::InvalidHeader(_))));
+    }
+
+    #[test]
+    fn rejects_integer_overflow_in_shape() {
+        let err = parse_header(&header_str_from(
+            "{'descr': '<f4', 'fortran_order': False, 'shape': (99999999999999999999999,), }",
+        ));
+        assert!(matches!(err, Err(NpyError::InvalidHeader(_))));
+    }
+
+    #[test]
+    fn rank0_roundtrip_via_write_and_read() {
+        let t = Tensor::new(vec![1.5f32], &[]).unwrap();
+        let bytes = write_npy_bytes(&t).unwrap();
+        let back = read_npy_bytes(&bytes).unwrap();
+        assert_eq!(back.shape(), &[] as &[usize]);
+        assert_eq!(back.host_slice().to_vec(), vec![1.5f32]);
+    }
+
+    #[test]
+    fn empty_array_roundtrip() {
+        let t = Tensor::new(Vec::<f32>::new(), &[0, 4]).unwrap();
+        let bytes = write_npy_bytes(&t).unwrap();
+        let back = read_npy_bytes(&bytes).unwrap();
+        assert_eq!(back.shape(), &[0, 4]);
+        assert!(back.host_slice().is_empty());
+    }
+
+    #[test]
+    fn write_then_read_preserves_bits() {
+        let vals = vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.0f32, 1.0f32];
+        let t = Tensor::new(vals.clone(), &[5]).unwrap();
+        let bytes = write_npy_bytes(&t).unwrap();
+        let back = read_npy_bytes(&bytes).unwrap();
+        let back_slice = back.host_slice();
+        for (a, b) in vals.iter().zip(back_slice.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_dtype() {
+        let dict = "{'descr': '<f8', 'fortran_order': False, 'shape': (2,), }";
+        let bytes = make_v1_bytes(dict);
+        let mut full = bytes.clone();
+        full.extend(std::iter::repeat_n(0u8, 16));
+        let err = read_npy_bytes(&full);
+        assert!(matches!(err, Err(NpyError::UnsupportedDtype { .. })));
+    }
+
+    #[test]
+    fn rejects_data_length_mismatch() {
+        let dict = "{'descr': '<f4', 'fortran_order': False, 'shape': (2,), }";
+        let bytes = make_v1_bytes(dict);
+        let mut full = bytes.clone();
+        full.extend(std::iter::repeat_n(0u8, 4)); // 1 要素分しかない（期待 2 要素 = 8 バイト）
+        let err = read_npy_bytes(&full);
+        assert!(matches!(err, Err(NpyError::DataLengthMismatch { .. })));
+    }
+
+    #[test]
+    fn rejects_invalid_magic() {
+        let err = read_npy_bytes(b"NOTNUMPYxxxxxxxx");
+        assert!(matches!(err, Err(NpyError::InvalidMagic)));
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(9);
+        bytes.push(9);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        let err = read_npy_bytes(&bytes);
+        assert!(matches!(err, Err(NpyError::UnsupportedVersion { .. })));
+    }
+
+    #[test]
+    fn fortran_order_roundtrip_matches_c_order() {
+        // C 順 [[1,2,3],[4,5,6]] を Fortran 順のバイト列（列優先: 1,4,2,5,3,6）
+        // として手組みし、読み込み後に C 順と一致することを確認する。
+        let dict = "{'descr': '<f4', 'fortran_order': True, 'shape': (2, 3), }";
+        let mut bytes = make_v1_bytes(dict);
+        let col_major: [f32; 6] = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0];
+        for v in col_major {
+            bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        let t = read_npy_bytes(&bytes).unwrap();
+        assert_eq!(t.shape(), &[2, 3]);
+        assert_eq!(t.host_slice().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn big_endian_roundtrip() {
+        let dict = "{'descr': '>f4', 'fortran_order': False, 'shape': (2,), }";
+        let mut bytes = make_v1_bytes(dict);
+        bytes.extend_from_slice(&1.5f32.to_bits().to_be_bytes());
+        bytes.extend_from_slice(&(-2.5f32).to_bits().to_be_bytes());
+        let t = read_npy_bytes(&bytes).unwrap();
+        assert_eq!(t.host_slice().to_vec(), vec![1.5, -2.5]);
+    }
+}
