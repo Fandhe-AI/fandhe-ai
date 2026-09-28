@@ -247,7 +247,7 @@ eager 実行。
 |---|---|---|---|---|---|---|---|
 | candle | forward | 2 | 2〈broadcast_add〉+ 1〈relu〉= 3 | 0 | — | 各演算が新規 `Storage` を確保（in-place API 極小） | forward 内では発生せず |
 | candle | loss | 0 | sub 1・sqr 1 | mean_all 1 | — | 同上 | — |
-| candle | backward | **4**（dX 含む） | Broadcast 逆伝播 1（squeeze 込み）・Relu 逆伝播相当 4・Sqr 逆伝播相当 3 | mean_all 逆伝播（未読解・未確定） | — | 各 VJP が新規 `Tensor` を確保し `grads.or_insert`/`add` で蓄積 | — |
+| candle | backward | **4**（dX 含む） | Broadcast 逆伝播 2（b1・b2 各 1・squeeze 込み）・Relu 逆伝播相当 4・Sqr 逆伝播相当 3 | mean_all 逆伝播（未読解・未確定） | — | 各 VJP が新規 `Tensor` を確保し `grads.or_insert`/`add` で蓄積 | — |
 | candle | 更新 | 0 | `mul`1・`sub`1・`Var::set`1（storage 書換か差替かは未確認§4 外）×4 | — | 4 パラメータ分 | — | — |
 | candle | step 末尾 | — | — | — | — | — | `to_scalar`（1 回） |
 | burn | forward | 2 | add 2・relu 1（+ `clone` 4：w1/b1/w2/b2 の参照複製） | 0 | — | `clone` は Arc 参照カウントで実コピーではない可能性が高いが未確認（未確定） | forward 内では発生せず |
