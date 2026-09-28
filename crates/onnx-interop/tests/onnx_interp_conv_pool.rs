@@ -28,15 +28,16 @@
 //! ceil_mode=1・非対称 pads は `nn::*` 側に対応が無いため、手計算した
 //! 期待値との bit 一致で確認する。
 
-// bench-harness（決定的シードユーティリティ）は cfg(unix) 限定の
-// dev-dependency（Cargo.toml。Windows 対応イシュー #2349）のため、
-// 本ファイル全体を unix 限定にする（Windows 側の external data テストは
-// `tests/onnx_external_data.rs` の cfg(windows) 側に分離済み）。
-#![cfg(unix)]
+// 決定的シード PRNG は `bench_harness::rng::Xorshift64Star` ではなく
+// `support::Xorshift64Star`（同一アルゴリズムの複製）を使う。理由は
+// `tests/support/mod.rs` 冒頭ドキュメント参照（`bench-harness` の
+// `backend-cuda` 依存が非 unix ターゲットで `compile_error!` になるため、
+// 本クレートの CPU のみで完結するテストを Windows でも動かせるよう依存を
+// 切り離した。codex-review 指摘 `PRRT_kwDOTuUCJc6mzcKf`・PR #2351）。
+mod support;
 
 use std::collections::HashMap;
 
-use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_autodiff::nn::{AvgPool1d, AvgPool2d, Conv1d, Conv2d, MaxPool1d, MaxPool2d, Module};
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cpu::parity::assert_parity;
@@ -48,6 +49,7 @@ use fandhe_ai_onnx_interop::onnx::proto::{
 };
 use fandhe_ai_onnx_interop::ops::{ConvAttrs, PoolAttrs, average_pool, conv, max_pool};
 use fandhe_ai_tensor_core::Tensor;
+use support::Xorshift64Star;
 
 fn dense(t: &Tensor<f32>) -> Vec<f32> {
     t.contiguous().as_slice().unwrap().to_vec()

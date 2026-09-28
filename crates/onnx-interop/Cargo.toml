@@ -108,15 +108,17 @@ serde_json.workspace = true
 # 承認フロー対象外）。
 fandhe-ai-backend-cpu = { path = "../backend-cpu" }
 
-# `bench-harness` は `crates/backend-cuda`（NVRTC キャッシュの fd pin。
-# `crates/backend-cuda/src/nvrtc.rs`）へ通常依存で連結しており、同ファイルは
-# 非 unix ターゲットで `compile_error!` を発する（#509／PR #677。openat・
-# /proc/self/fd 等 unix 系 API への TOCTOU 対策依存のため非 unix 向けフォール
-# バックを提供しない設計）。external data（イシュー #2347・#2349）の Windows
-# 対応で `cargo check -p fandhe-ai-onnx-interop --tests --target
-# x86_64-pc-windows-msvc` を型検査可能にするため、`bench-harness`
-# dev-dependency を `cfg(unix)` 限定へ切り出す（Windows では `Xorshift64Star`
-# 等の決定的シードユーティリティを使うテストは cfg(unix) 側に閉じる。
-# `tests/*.rs` 側の `#![cfg(unix)]` と対になる）。
-[target.'cfg(unix)'.dev-dependencies]
-bench-harness = { path = "../bench-harness" }
+# `bench-harness` dev-dependency は使わない（codex-review 指摘
+# `PRRT_kwDOTuUCJc6mzcKf`・PR #2351 是正）。`bench-harness` は
+# `crates/backend-cuda`（NVRTC キャッシュの fd pin。`crates/backend-cuda/
+# src/nvrtc.rs`）へ通常依存で連結しており、同ファイルは非 unix ターゲット
+# で `compile_error!` を発する（#509／PR #677。openat・/proc/self/fd 等
+# unix 系 API への TOCTOU 対策依存のため非 unix 向けフォールバックを
+# 持たない設計）。かつて `bench-harness` を `cfg(unix)` 限定
+# dev-dependency として切り出し、利用側の `tests/*.rs` を丸ごと
+# `#![cfg(unix)]` にしていたが、これは CPU のみで完結する既存テスト
+# （学習チェックポイント・ONNX export/import parity 等）を Windows から
+# 丸ごと除外するテスト弱体化になっていた。`bench-harness` が提供して
+# いたのは決定的シード PRNG（`rng::Xorshift64Star`）のみのため、
+# `tests/support/mod.rs`（アルゴリズムを差分なしで複製）へ切り出し、
+# 本 dev-dependency 自体を削除した。

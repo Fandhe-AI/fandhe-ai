@@ -13,20 +13,21 @@
 //! `export_nn.rs` モジュール冒頭ドキュメント「bit 一致契約の前提」節の
 //! とおり、GEMM 出力に厳密な `±0.0` が現れない入力を用いる（`Relu` の
 //! `max(0.0, x)` が `±0.0` 同士では実装依存になりうるため）。乱数生成器
-//! （`bench_harness::rng::Xorshift64Star`）の出力は `[-1.0, 1.0)` の
+//! （`support::Xorshift64Star`。`tests/support/mod.rs`）の出力は `[-1.0, 1.0)` の
 //! 浮動小数点であり、有限次元の内積がちょうど `±0.0` になる確率は
 //! 実用上ゼロ（本テストで使う全形状・全シードで実際に発生しないことを
 //! 確認済み）。NaN／inf を生む値も使わない。
 
-// bench-harness（決定的シードユーティリティ）は cfg(unix) 限定の
-// dev-dependency（Cargo.toml。Windows 対応イシュー #2349）のため、
-// 本ファイル全体を unix 限定にする（Windows 側の external data テストは
-// `tests/onnx_external_data.rs` の cfg(windows) 側に分離済み）。
-#![cfg(unix)]
+// 決定的シード PRNG は `bench_harness::rng::Xorshift64Star` ではなく
+// `support::Xorshift64Star`（同一アルゴリズムの複製）を使う。理由は
+// `tests/support/mod.rs` 冒頭ドキュメント参照（`bench-harness` の
+// `backend-cuda` 依存が非 unix ターゲットで `compile_error!` になるため、
+// 本クレートの CPU のみで完結するテストを Windows でも動かせるよう依存を
+// 切り離した。codex-review 指摘 `PRRT_kwDOTuUCJc6mzcKf`・PR #2351）。
+mod support;
 
 use std::collections::{HashMap, HashSet};
 
-use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_autodiff::Tape;
 use fandhe_ai_autodiff::nn::activation::{Relu, Tanh};
 use fandhe_ai_autodiff::nn::{Linear, Module, RmsNorm, Sequential};
@@ -38,6 +39,7 @@ use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
 use fandhe_ai_onnx_interop::onnx::proto::ModelProto;
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
+use support::Xorshift64Star;
 
 // ---- テストユーティリティ ----
 
