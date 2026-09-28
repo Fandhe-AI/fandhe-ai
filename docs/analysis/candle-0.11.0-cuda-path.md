@@ -61,9 +61,19 @@ CUDA graph capture 可否・stream priority 等の細部は `new_stream()` と�
 
 cuBLAS handle は `from_context_and_stream`（`device.rs:392-410`）内で
 `CudaBlas::new(stream.clone())` により **1 回だけ**生成し `Arc` で共有する。
-本リポジトリも同様に ordinal ごとに単一の `(ctx, stream)` ペアをキャッシュする
-（`crates/backend-cuda/src/device.rs:104` `STREAM_KIND_CACHE`）ため、この点は
-構造的に同型。
+本リポジトリの `STREAM_KIND_CACHE`（`crates/backend-cuda/src/device.rs:104`
+`resolve_stream_kind_for`）は `StreamKind::{Legacy, Created}` で挙動が分かれ、
+両者を一括りに「単一の `(ctx, stream)` ペアをキャッシュ」と呼ぶのは不正確
+である。`Created` の場合のみ 1 回目に生成した `Arc<CudaContext>`・
+`Arc<CudaStream>` の組をキャッシュへ保持し、以後の呼び出しへそのまま共有
+する（candle の cuBLAS handle 共有と同型なのはこちらの分岐のみ）。既定の
+`Legacy` の場合はストリーム**種別**の決定（この ordinal は Legacy である
+という事実）だけをキャッシュし、`ctx`・`stream` 本体は毎回の呼び出しで
+`CudaContext::new(ordinal)` → `ctx.default_stream()` により新規に取得し
+直す（`ctx.default_stream()` はどの `CudaContext` インスタンスから呼んでも
+プロセス内で単一の NULL stream を指すため、`ctx` が呼び出しごとに別
+インスタンスでも問題にならない。`crates/backend-cuda/src/device.rs` の
+`resolve_stream_kind_for` 内コメント参照）。
 
 ## §4 cuBLAS dispatch 層（到達限界）
 
