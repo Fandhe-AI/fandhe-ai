@@ -331,6 +331,7 @@ readout）のみという構造（§6）と対照的である。
 | fresh cpu: `predict` | §3 の forward（candle/burn/PyTorch はいずれも CPU では forward 呼び出しがそのまま演算列） | ライブラリ固有寄り |
 | fresh gpu: `leaf_register` | 対応なし（3 者は入力をハーネス側で 1 回アップロード済みで毎反復の「登録」呼び出しを持たない。§3 のとおり 3 者の入力アップロードは計測窓外） | ハーネス・計測境界由来（fandhe fresh gpu 固有の毎反復登録） |
 | fresh gpu: `forward` | §3 の forward。fandhe 固有の「`Linear::bind` の重み clone + H2D を毎反復含む」（README 該当行）という点は 3 者の「パラメータ常駐」（§3 windows outside）と対照的 | ライブラリ固有（演算列は対応するが、fandhe fresh gpu のみ毎反復パラメータ H2D を含む） |
+| fresh gpu: `to_tensor` | 対応なし相当（3 者は `forward` の出力をホストへ持ち出す際、`host_copy` 相当の 1 回の呼び出し〈candle `to_vec2`／burn `into_data().to_vec`／PyTorch `.cpu().numpy()`〉が実体化とコピーを同時に行うため、fandhe の「遅延 elementwise の実体化」だけを切り出す独立区間を 3 者は持たない。区間定義は `scripts/bench/framework-compare/README.md`「`infer --phases`」節 fresh gpu 行（`out.to_tensor()`）を正とする） | ハーネス・計測境界由来（fandhe 固有の遅延 elementwise グラフを `forward` 内に保持し、`host_copy` 直前に強制実体化する設計。§7.1 の `loss_readout` と同種のハーネス境界） |
 | reuse: `predict_resident` | §3 の forward（3 者は常にこの「常駐」形に近い） | ライブラリ固有寄り |
 | fresh/reuse 共通: `host_copy`／`checksum`／`iter_total` | §3 のホスト実体化＋checksum 計算（candle `to_vec2`+`flat_map`、burn `into_data().to_vec`、PyTorch `.cpu().numpy()`+`np.cumsum` ※`bench_py.py::checksum`） | ライブラリ固有（実装は異なるが役割は 1 対 1 対応） |
 
