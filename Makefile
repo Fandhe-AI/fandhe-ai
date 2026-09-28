@@ -462,7 +462,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests doc-warnings test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests check-cross-windows-interop doc-warnings test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）
