@@ -224,6 +224,8 @@ fn synthetic_model_with_unknown_initializer_data_type_is_rejected_via_facade() {
         float_data: vec![],
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let node = NodeProto {
         input: vec!["w".to_string()],
@@ -272,6 +274,8 @@ fn synthetic_model_with_negative_dim_is_rejected_as_invalid_model_via_facade() {
         float_data: vec![],
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = ModelProto {
         opset_import: Vec::new(),
@@ -731,4 +735,64 @@ fn from_sequential_to_bytes_initializers_match_state_dict_bit_exact() {
             );
         }
     }
+}
+
+/// A6（イシュー #2347）: `data_location = EXTERNAL` を持つ initializer の
+/// バイト列を、facade の `OnnxModel::from_bytes`／`from_path` へそのまま
+/// 渡した場合、external data 対応（`onnx::external_data`。facade へは
+/// 非公開）を経由しないため従来どおり `OnnxError::InvalidModel` で拒否
+/// されることを固定する（`onnx::graph::decode_tensor` は `data_location`／
+/// `external_data` を一切参照しないという不変条件の facade 経由での確認。
+/// `crates/onnx-interop/tests/onnx_external_data.rs::
+/// bytes_entry_point_still_rejects_external_data_model` の facade 版）。
+#[test]
+fn facade_rejects_external_data_model_bytes_and_path() {
+    let t = TensorProto {
+        dims: vec![1],
+        data_type: data_type::FLOAT,
+        float_data: Vec::new(),
+        int64_data: Vec::new(),
+        name: "w".to_string(),
+        raw_data: Vec::new(),
+        external_data: vec![proto::StringStringEntryProto {
+            key: "location".to_string(),
+            value: "w.onnx.data".to_string(),
+        }],
+        data_location: 1,
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: Vec::new(),
+            name: "g".to_string(),
+            initializer: vec![t],
+            input: Vec::new(),
+            output: Vec::new(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    };
+    let bytes = proto::encode_model(&model);
+
+    let err = OnnxModel::from_bytes(&bytes).expect_err("external data モデルは拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
+        "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
+    );
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "facade-onnx-external-data-a6-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let onnx_path = tmp_dir.join("model.onnx");
+    std::fs::write(&onnx_path, &bytes).unwrap();
+    let err = OnnxModel::from_path(&onnx_path).expect_err("external data モデルは拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
+        "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

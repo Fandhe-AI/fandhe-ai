@@ -95,6 +95,13 @@ pub enum GraphError {
     /// `tensor_name` は先頭要素の `values.name`（非信頼入力のため空文字列もありうる）、
     /// `count` は sparse initializer の総数。
     SparseInitializerNotSupported { tensor_name: String, count: usize },
+    /// external data（`TensorProto.data_location`/`external_data`。イシュー
+    /// #2347）の検証・読み込みに失敗した。`external_data::
+    /// resolve_external_data`／`external_data::build_graph_with_external_data`
+    /// 経由でのみ発生する（バイト列入口の `build_graph` 自体は
+    /// `data_location`/`external_data` を一切参照しないため、この variant を
+    /// 返すことはない。A6）。
+    ExternalData(super::external_data::ExternalDataError),
 }
 
 impl fmt::Display for GraphError {
@@ -174,6 +181,7 @@ impl fmt::Display for GraphError {
                     "sparse_initializer は非対応（tensor={tensor_name}・count={count}）: sparse テンソルは対象外のため fail-closed に拒否"
                 )
             }
+            GraphError::ExternalData(e) => write!(f, "{e}"),
         }
     }
 }

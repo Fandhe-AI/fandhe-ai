@@ -226,6 +226,19 @@ pub struct AttributeProto {
 
 /// テンソル（initializer／定数）の protobuf 表現。`graph::decode_tensor` が
 /// `RawTensor` へ復号する前段。
+///
+/// `external_data`（tag=13）・`data_location`（tag=14）はイシュー #2347
+/// （external data 対応）で追加した。PyTorch の既定 exporter
+/// （`torch.onnx.export(..., dynamo=True)`）は initializer を external data
+/// （`data_location = EXTERNAL` + `.onnx.data` への `location`/`offset`/
+/// `length`）として出力するため、これを宣言しないと prost が無言でスキップし
+/// `graph::decode_tensor` が「data が一つも埋まっていない」として拒否する
+/// （`external_data::resolve_external_data` が呼ばれる `graph::
+/// build_graph_with_external_data` 経由の入口でのみこれらのフィールドを
+/// 解釈し、それ以外の decode 経路〈`decode_model` → `build_graph` の
+/// バイト列入口〉は従来どおり `raw_data`/`float_data`/`int64_data` のみを
+/// 見て `data_location`/`external_data` を一切参照しない。イシュー #2347
+/// A6・`external_data` モジュール冒頭コメント参照）。
 #[derive(Clone, PartialEq, Message)]
 pub struct TensorProto {
     #[prost(int64, repeated, tag = "1")]
@@ -240,6 +253,30 @@ pub struct TensorProto {
     pub name: String,
     #[prost(bytes, tag = "9")]
     pub raw_data: Vec<u8>,
+    /// external data の位置情報（`key`/`value` の組。許容キーは `location`
+    /// （必須）・`offset`・`length`。`checksum` は本クレートでは非対応で
+    /// fail-closed に拒否する。`data_location == EXTERNAL` のときのみ
+    /// 意味を持つ（`external_data::resolve_external_data` 参照）。
+    #[prost(message, repeated, tag = "13")]
+    pub external_data: Vec<StringStringEntryProto>,
+    /// `data_location::DEFAULT`（inline）または `data_location::EXTERNAL`
+    /// （`external_data` 参照が必要）。それ以外の値は
+    /// `ExternalDataError::InvalidDataLocation` で拒否する
+    /// （`external_data::resolve_external_data` 経由の場合のみ）。
+    #[prost(int32, tag = "14")]
+    pub data_location: i32,
+}
+
+/// `TensorProto.external_data` の 1 エントリ（key/value 文字列の組）。
+/// フィールド番号の出典は本モジュール冒頭コメントと同じ `onnx==1.23.0`
+/// 同梱の `onnx/onnx.proto`（`StringStringEntryProto{ key: string tag=1,
+/// value: string tag=2 }`）。イシュー #2347。
+#[derive(Clone, PartialEq, Message)]
+pub struct StringStringEntryProto {
+    #[prost(string, tag = "1")]
+    pub key: String,
+    #[prost(string, tag = "2")]
+    pub value: String,
 }
 
 /// グラフ入出力の名前（型情報 `TypeProto` は未使用のため意図的に定義しない）。
@@ -259,6 +296,16 @@ pub mod data_type {
     pub const INT64: i32 = 7;
     pub const BOOL: i32 = 9;
     pub const FLOAT16: i32 = 10;
+}
+
+/// onnx.proto3 `TensorProto.DataLocation`。イシュー #2347（external data
+/// 対応）。`external_data::resolve_external_data` のみが参照する。
+pub mod data_location {
+    /// `raw_data`／`float_data`／`int64_data` にインラインで値を持つ（既定）。
+    pub const DEFAULT: i32 = 0;
+    /// `external_data`（`location`/`offset`/`length`）が指す外部ファイルに
+    /// 値を持つ。
+    pub const EXTERNAL: i32 = 1;
 }
 
 /// onnx.proto3 `AttributeProto.AttributeType`（本クレートが書き出す値のみ抜粋）。

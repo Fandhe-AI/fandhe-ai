@@ -1357,3 +1357,20 @@ PredictBatchesHoldDoctestGuard`（正のプローブ doctest）と
 | イシュー #986（本文書 §0 の暫定注記削除・確定入口統合） | 本イシュー |
 | spec リポ `Fandhe-AI/fandhe-ai-spec` PR #59 | REQ-9 の 2026-08-29 追記（マージ済み。merge commit `64364b4bf7e46f91f07d779b2d1c4d14adbd4e48`） |
 | PR #988 | `docs/spec` submodule ポインタ更新（イシュー #985 の実装 PR） |
+
+**#2347（ONNX external data のパス入力 import 入口 `onnx::external_data::
+build_graph_with_external_data` の facade 公開）は経路 2 未適用のまま
+承認待ちで保留した。** 実装自体は `onnx-interop` 内部限定モジュール
+`onnx::external_data`（`pub mod` だが facade からは到達しない。
+`onnx-interop` は publish 承認済みだが facade への新規再エクスポートは
+別事項）として完了済み。`crates/facade/src/interop/onnx.rs::
+OnnxModel::from_path` は `std::fs::read` → `from_bytes` のままで、
+external data（`.onnx.data` companion ファイル）を持つモデルは従来どおり
+`OnnxError::InvalidModel` で拒否される（`crates/facade/tests/
+interop_onnx_internal_parity.rs::
+facade_rejects_external_data_model_bytes_and_path` で固定）。
+`crates/facade/src/**` は一切変更していない。承認取得後の移行は、
+`OnnxModel` にパス入力（基点ディレクトリ＋合計サイズ上限）を受け取る
+新規メソッドを追加する形を想定する（詳細は `docs/
+onnx-external-data-decision.md`・`docs/facade-onnx-import-exposure-
+decision.md` 追補節を参照）。

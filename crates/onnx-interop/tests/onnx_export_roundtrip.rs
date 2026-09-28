@@ -594,6 +594,8 @@ fn typed_data_initializer_roundtrips_to_raw_data_bit_exact() {
                     int64_data: Vec::new(),
                     name: "w".to_string(),
                     raw_data: Vec::new(),
+                    external_data: Vec::new(),
+                    data_location: 0,
                 },
                 TensorProto {
                     dims: vec![3],
@@ -602,6 +604,8 @@ fn typed_data_initializer_roundtrips_to_raw_data_bit_exact() {
                     int64_data: vec![i64::MIN, 0, i64::MAX],
                     name: "i".to_string(),
                     raw_data: Vec::new(),
+                    external_data: Vec::new(),
+                    data_location: 0,
                 },
             ],
             input: Vec::new(),

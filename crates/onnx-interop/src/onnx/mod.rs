@@ -38,6 +38,11 @@ pub mod autograd;
 pub mod export;
 pub mod export_nn;
 pub mod export_ops;
+// external data（外部 `.data` ファイル）の initializer／Constant 属性テンソル
+// 読み込みに fail-closed で対応する新しい import 入口（イシュー #2347）。
+// `onnx-interop` 内部限定（facade へは非公開。承認待ち事項は
+// `docs/compat-api-scope.md` §5 参照）。
+pub mod external_data;
 pub mod graph;
 pub mod interp;
 // `interp` から呼ばれる `BackendOps` 経由の device 実行ヘルパ（非公開。

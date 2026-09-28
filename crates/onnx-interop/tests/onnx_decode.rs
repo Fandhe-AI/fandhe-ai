@@ -184,6 +184,8 @@ fn raw_data_len_mismatch_is_rejected() {
         int64_data: vec![],
         name: "bad_tensor".to_string(),
         raw_data: vec![0, 0, 0, 0],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("raw_data 長不整合は拒否されるはず");
@@ -215,6 +217,8 @@ fn bool_tensor_raw_data_decodes_nonzero_as_true() {
         int64_data: vec![],
         name: "bool_tensor".to_string(),
         raw_data: vec![0x00, 0x01, 0x02],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let graph = build_graph(&model).expect("BOOL raw_data の復号は成功するはず");
@@ -238,6 +242,8 @@ fn bool_tensor_raw_data_byte_len_mismatch_is_rejected() {
         int64_data: vec![],
         name: "bad_bool_tensor".to_string(),
         raw_data: vec![0x00, 0x01, 0x00],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("BOOL raw_data 長不整合は拒否されるはず");
@@ -272,6 +278,8 @@ fn float16_tensor_raw_data_decodes_little_endian_pairs() {
         int64_data: vec![],
         name: "f16_tensor".to_string(),
         raw_data,
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let graph = build_graph(&model).expect("FLOAT16 raw_data の復号は成功するはず");
@@ -294,6 +302,8 @@ fn negative_dim_is_rejected() {
         int64_data: vec![],
         name: "neg_dim_tensor".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("負の dim は拒否されるはず");
@@ -315,6 +325,8 @@ fn unknown_data_type_is_rejected() {
         int64_data: vec![],
         name: "unknown_dtype_tensor".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("未対応 data_type は拒否されるはず");
@@ -342,6 +354,8 @@ fn element_count_overflow_is_rejected() {
         int64_data: vec![],
         name: "overflow_tensor".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("要素数オーバーフローは拒否されるはず");
@@ -368,6 +382,8 @@ fn byte_length_multiply_overflow_is_rejected() {
         int64_data: vec![],
         name: "byte_overflow_tensor".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("バイト長オーバーフローは拒否されるはず");
@@ -394,6 +410,8 @@ fn empty_data_with_nonzero_dims_is_rejected_not_silently_accepted() {
         int64_data: vec![],
         name: "empty_but_nonzero_dims_tensor".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("空データ・非ゼロ dims は拒否されるはず");
@@ -423,6 +441,8 @@ fn truly_empty_tensor_dims_zero_is_still_accepted() {
         int64_data: vec![],
         name: "truly_empty_tensor".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let graph = build_graph(&model).expect("dims=[0] の空テンソルは受理されるはず");
@@ -448,6 +468,8 @@ fn raw_data_takes_precedence_over_typed_float_data() {
         int64_data: vec![],
         name: "both_fields".to_string(),
         raw_data: 9.0f32.to_le_bytes().to_vec(),
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let graph = build_graph(&model).expect("build_graph は成功するはず");
@@ -469,6 +491,8 @@ fn raw_data_takes_precedence_over_typed_int64_data() {
         int64_data: vec![1],
         name: "both_fields_i64".to_string(),
         raw_data: 9i64.to_le_bytes().to_vec(),
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = model_with_single_initializer(t);
     let graph = build_graph(&model).expect("build_graph は成功するはず");
@@ -492,6 +516,8 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
         int64_data: vec![],
         name: "dup".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let t2 = TensorProto {
         dims: vec![1],
@@ -500,6 +526,8 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
         int64_data: vec![],
         name: "dup".to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = ModelProto {
         opset_import: Vec::new(),
@@ -667,6 +695,8 @@ fn node_output_shadowing_initializer_name_is_rejected() {
         float_data: vec![1.0],
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = ModelProto {
         opset_import: Vec::new(),
@@ -808,6 +838,8 @@ fn graph_input_name_matching_initializer_name_is_accepted() {
         float_data: vec![1.0],
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = ModelProto {
         opset_import: Vec::new(),
@@ -975,6 +1007,8 @@ fn dense_initializer_tensor(name: &str) -> TensorProto {
         int64_data: vec![],
         name: name.to_string(),
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     }
 }
 
@@ -1711,6 +1745,8 @@ fn attribute_proto_round_trips_with_tensor_field() {
             int64_data: vec![7],
             name: "const_t".to_string(),
             raw_data: vec![],
+            external_data: Vec::new(),
+            data_location: 0,
         }),
         floats: vec![],
         ints: vec![],

@@ -1323,3 +1323,249 @@ fn reduction_baselines_are_well_formed() {
         );
     }
 }
+
+// ============================================================================
+// external data（外部 `.data` ファイル）fixture 突合（イシュー #2347）
+// ============================================================================
+//
+// `tests/fixtures/pytorch-onnx-external-data/`（PyTorch dynamo exporter の
+// external data を再 inline 化しない生出力。`README.md` 参照）を
+// `onnx::external_data::build_graph_with_external_data` 経由で読み込み、
+// 上記の `Req7BaselineNonRegression` 判定（`REDUCTION_BASELINES` の
+// 既存 `(case_name, "dynamo")` 行をそのまま再利用する。external data
+// 経由でも計算経路自体は inline 経路と同一で出力は bit 一致するため。
+// §4.5 参照）を適用する。
+
+use fandhe_ai_onnx_interop::onnx::external_data::{
+    ExternalDataOptions, build_graph_with_external_data,
+};
+
+const EXTERNAL_DATA_CASE_NAMES: &[&str] =
+    &["conv2d_basic", "conv2d_nobias", "conv2d_stride_dil_group"];
+
+fn external_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pytorch-onnx-external-data")
+}
+
+#[derive(Deserialize)]
+struct ExternalManifestEntry {
+    was_external_data: bool,
+    external_initializers: Vec<ExternalManifestInitializer>,
+    op_types: Vec<String>,
+    /// このスクリプト自身が生成した重みに対する参照入出力（`README.md`
+    /// 「実測結果」節参照。`../pytorch-onnx-cnn-ops/reference.json` は
+    /// 再利用しない——同じ `deterministic_seed`／`CASES` でも torch の
+    /// マイナーバージョン内パッチ差・生成環境差で重み初期化の実際の bit
+    /// 列が再現しないことを実測で確認したため、常に自己完結ペアで判定
+    /// する）。
+    input: TensorRecord,
+    output: TensorRecord,
+}
+
+#[derive(Deserialize)]
+struct ExternalManifestInitializer {
+    name: String,
+    data_type: i32,
+    #[serde(default)]
+    location: Option<String>,
+}
+
+fn load_external_manifest() -> HashMap<String, ExternalManifestEntry> {
+    let bytes = read_file_bounded(&external_fixture_root().join("manifest.json"));
+    serde_json::from_slice(&bytes).expect("manifest.json の parse に失敗した")
+}
+
+/// 1 ケース分の external data fixture を実際に読み込み・実行し、
+/// [`diff_stats`] と同じ判定材料（`DiffStats`）を得る。参照入出力は
+/// `manifest.json`（このスクリプト自身が生成した重みに対する自己完結
+/// 参照値。[`ExternalManifestEntry`] のコメント参照）を使う。
+fn compute_external_case_stats(case_name: &str, entry: &ExternalManifestEntry) -> DiffStats {
+    let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+    let bytes = read_file_bounded(&model_path);
+    let model = proto::decode_model(&bytes)
+        .unwrap_or_else(|e| panic!("{case_name}: external fixture decode 失敗: {e}"));
+    let graph = build_graph_with_external_data(
+        &model,
+        &external_fixture_root(),
+        &ExternalDataOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("{case_name}: external data 解決に失敗: {e}"));
+
+    let input_tensor = tensor_from_record(&entry.input);
+    let mut feeds: HashMap<String, Value> = HashMap::new();
+    feeds.insert("x".to_string(), Value::F32(input_tensor));
+    let result =
+        run(&graph, feeds).unwrap_or_else(|e| panic!("{case_name}: external data run 失敗: {e}"));
+    let actual = match result.get("y") {
+        Some(Value::F32(t)) => t,
+        other => panic!("{case_name}: 出力が F32 以外／欠落: {other:?}"),
+    };
+    let expected_tensor = tensor_from_record(&entry.output);
+    assert_eq!(
+        actual.shape(),
+        expected_tensor.shape(),
+        "{case_name}: 出力 shape 不一致"
+    );
+    diff_stats(
+        actual.as_slice().expect("as_slice 失敗"),
+        expected_tensor.as_slice().expect("as_slice 失敗"),
+    )
+}
+
+/// 1. external data 経由で計算した出力が、`manifest.json` に記録した
+///    自己完結参照出力（PyTorch がこのスクリプトの重みに対して計算した
+///    値）と一致すること（縮約系 op `Conv` を含むため REQ-7 事前固定式
+///    `fail_count == 0` を要求する。Conv は結合順序差により bit 完全一致は
+///    目標にできないため `Req7BaselineNonRegression` と同じ必須条件のみを
+///    適用し、baseline 非後退判定は自己完結 fixture のため対象外とする——
+///    baseline は「実機実測でゼロ fail が成立する固定 fixture」に対して
+///    のみ意味を持つが、本 fixture は生成ごとに重みが変わりうるため
+///    ceiling を固定できない）。
+/// 2. initializer の bit 完全一致（external data 経由での読み込み値 vs
+///    `.onnx.data` ファイルの生バイト列を直接 f32 として解釈した値）。
+///    実装計画 §4.5 の 1・3 をまとめたもの（2 は `.data` ファイルへの直接
+///    突合に置き換え。時間制約により `conv2d_*` 3 ケースへ限定——
+///    `README.md`「実測結果」節参照）。
+#[test]
+fn external_data_fixture_matches_self_contained_reference() {
+    let manifest = load_external_manifest();
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let entry = manifest
+            .get(case_name)
+            .unwrap_or_else(|| panic!("manifest.json に '{case_name}' が無い"));
+
+        // 1. REQ-7 事前固定式（fail_count == 0）を必須条件として適用する。
+        let stats = compute_external_case_stats(case_name, entry);
+        assert_eq!(
+            stats.fail_count, 0,
+            "{case_name}: REQ-7 事前固定式 fail_count が 0 でない（total={} \
+             max_abs_diff={:?} max_rel_err={:?} mean_abs_diff={:?}）",
+            stats.total, stats.max_abs_diff, stats.max_rel_err, stats.mean_abs_diff
+        );
+
+        // 2. initializer の bit 完全一致（external data 経由 vs `.onnx.data`
+        //    の生バイト列を直接解釈した値）。
+        let ext_model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+        let ext_bytes = read_file_bounded(&ext_model_path);
+        let ext_model = proto::decode_model(&ext_bytes).expect("external decode 失敗");
+        let ext_graph = build_graph_with_external_data(
+            &ext_model,
+            &external_fixture_root(),
+            &ExternalDataOptions::default(),
+        )
+        .expect("external data 解決失敗");
+
+        for init in &entry.external_initializers {
+            let data_path = external_fixture_root().join(
+                init.location
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{case_name}: location が無い")),
+            );
+            let raw = read_file_bounded(&data_path);
+            let expected: Vec<f32> = raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            match ext_graph.initializers.get(&init.name) {
+                Some(RawTensor::F32 { data, .. }) => assert_eq!(
+                    data, &expected,
+                    "{case_name}: initializer '{}' が .data ファイルの生バイト列と bit 一致しない",
+                    init.name
+                ),
+                other => panic!(
+                    "{case_name}: initializer '{}' が RawTensor::F32 でない: {other:?}",
+                    init.name
+                ),
+            }
+        }
+    }
+}
+
+/// 3. fixture が実際に external data 経路を通っていることの検査
+///    （manifest とデコード後の proto の両方から数える。実装計画 §4.5-4）。
+#[test]
+fn external_data_fixture_actually_uses_external_path() {
+    let manifest = load_external_manifest();
+    let mut total_external_f32 = 0usize;
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let entry = manifest
+            .get(case_name)
+            .unwrap_or_else(|| panic!("manifest.json に '{case_name}' が無い"));
+        assert!(
+            entry.was_external_data,
+            "{case_name}: manifest 上 external data ではない"
+        );
+        assert!(
+            !entry.external_initializers.is_empty(),
+            "{case_name}: manifest 上 external な initializer が 0 件"
+        );
+        for init in &entry.external_initializers {
+            assert_eq!(
+                init.data_type,
+                proto::data_type::FLOAT,
+                "{case_name}: 期待は FLOAT"
+            );
+            assert!(init.location.is_some(), "{case_name}: location が無い");
+            total_external_f32 += 1;
+        }
+        assert_eq!(
+            entry.op_types,
+            vec!["Conv".to_string()],
+            "{case_name}: op_types 不一致"
+        );
+
+        // proto を実際に decode して data_location=EXTERNAL のテンソルが
+        // 存在することも確認する（manifest 側の記録だけに依存しない）。
+        let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+        let bytes = read_file_bounded(&model_path);
+        let model = proto::decode_model(&bytes).expect("decode 失敗");
+        let g = model.graph.as_ref().expect("graph が無い");
+        let n_external = g
+            .initializer
+            .iter()
+            .filter(|t| {
+                t.data_location == fandhe_ai_onnx_interop::onnx::proto::data_location::EXTERNAL
+            })
+            .count();
+        assert!(
+            n_external >= 1,
+            "{case_name}: decode した proto に external initializer が無い"
+        );
+    }
+    assert!(
+        total_external_f32 >= 1,
+        "F32（Conv の weight）が external な fixture が 1 件も無い（A1 要件）"
+    );
+    // 本 fixture 群では INT64 の shape 定数は 16〜24 バイトと小さく external
+    // にならなかった（`gen_external.py` コメント・`README.md` 参照。実測に
+    // 基づき §4.5-4 の要件を調整済み）。
+}
+
+/// 4. A6 の回帰: external データを持つ `.onnx` をバイト列入口
+///    （`decode_model` -> `build_graph`）へ渡した場合、従来どおり
+///    `GraphError::RawDataByteLenMismatch` になることを確認する
+///    （`onnx_external_data.rs::bytes_entry_point_still_rejects_external_data_model`
+///    の実 fixture 版）。
+#[test]
+fn external_data_fixture_bytes_entry_point_still_rejects() {
+    use fandhe_ai_onnx_interop::onnx::graph::GraphError;
+
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+        let bytes = read_file_bounded(&model_path);
+        let model = proto::decode_model(&bytes).expect("decode 失敗");
+        let result = build_graph(&model);
+        assert!(
+            matches!(
+                result,
+                Err(GraphError::RawDataByteLenMismatch {
+                    actual_bytes: 0,
+                    ..
+                })
+            ),
+            "{case_name}: バイト列入口が external data モデルを拒否しなかった（A6 回帰）: {result:?}"
+        );
+    }
+}

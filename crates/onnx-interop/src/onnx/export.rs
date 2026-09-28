@@ -275,6 +275,9 @@ impl Default for ExportOptions {
 /// バイト列へ変換する（長さ・形状検証の先行。`security.md` A03）。
 ///
 /// 契約: 常に `raw_data` のみへ書き出す（モジュール冒頭コメント参照）。
+/// `data_location` は常に `DEFAULT`（inline）・`external_data` は常に空
+/// のまま書き出す（external data での export はイシュー #2347 のスコープ外。
+/// `docs/onnx-external-data-decision.md` §スコープ外の事項）。
 pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, ExportError> {
     match tensor {
         RawTensor::F32 { data, shape } => {
@@ -297,6 +300,8 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
                 int64_data: Vec::new(),
                 name: name.to_string(),
                 raw_data,
+                external_data: Vec::new(),
+                data_location: super::proto::data_location::DEFAULT,
             })
         }
         RawTensor::I64 { data, shape } => {
@@ -319,6 +324,8 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
                 int64_data: Vec::new(),
                 name: name.to_string(),
                 raw_data,
+                external_data: Vec::new(),
+                data_location: super::proto::data_location::DEFAULT,
             })
         }
         RawTensor::Bool { data, shape } => {
@@ -340,6 +347,8 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
                 int64_data: Vec::new(),
                 name: name.to_string(),
                 raw_data,
+                external_data: Vec::new(),
+                data_location: super::proto::data_location::DEFAULT,
             })
         }
         RawTensor::F16 { data, shape } => {
@@ -362,6 +371,8 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
                 int64_data: Vec::new(),
                 name: name.to_string(),
                 raw_data,
+                external_data: Vec::new(),
+                data_location: super::proto::data_location::DEFAULT,
             })
         }
     }

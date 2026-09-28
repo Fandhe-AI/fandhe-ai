@@ -61,6 +61,17 @@ external data 出力」自体が、本クレートが意図的に非対応とす
 （inline 化後の 19 ケース × 2 exporter = 38 通りすべてで `run` が成功
 した。下表参照）。
 
+**external data 非対応はイシュー #2347 で対応済み**: 新規モジュール
+`onnx::external_data`（`onnx-interop` 内部限定。基点ディレクトリを受け
+取る新入口 `build_graph_with_external_data`）が、上記の生 dynamo 出力
+（再 inline 化しない external data 付き `.onnx` + `.onnx.data`）を
+fail-closed に検証・読み込めるようにした。バイト列入口（本 fixture が
+使う `decode_model` → `build_graph`）自体は変更しておらず、
+`RawDataByteLenMismatch` で拒否する挙動は不変（回帰テストで固定済み）。
+生の external data 出力に対する専用 fixture は
+`crates/onnx-interop/tests/fixtures/pytorch-onnx-external-data/` を参照
+（決定記録は `docs/onnx-external-data-decision.md`）。
+
 ## ケース × exporter × 実際の op 列（実測）
 
 `torch.onnx.export` は同じ PyTorch モジュールでも exporter によって
