@@ -131,7 +131,10 @@ fn validate_layer_parameters(
 
 /// `validate_layer_parameters` の `*Vars`（テープ登録済み）版。加えて
 /// 5 子層すべてが同一 `Tape` に属することを検査する
-/// （`Var::check_same_tape`）。
+/// （`Var::check_same_tape`）。`linear1`／`linear2` の `bias`（`Some` の
+/// 場合）も対象に含み、Tape 一致に加えて `[dim_feedforward]`／
+/// `[d_model]` の形状も検証する（イシュー #2296。decoder 側は PR
+/// #2282 で対応済み）。
 fn validate_layer_vars<'t>(
     self_attn: &MultiheadAttentionVars<'t>,
     linear1: &LinearVars<'t>,
@@ -153,6 +156,17 @@ fn validate_layer_vars<'t>(
     }
     self_attn.q.weight.check_same_tape(&linear1.weight)?;
     self_attn.q.weight.check_same_tape(&linear2.weight)?;
+    // `linear1.bias`／`linear2.bias` は `LinearVars` の全 pub フィールドの
+    // ため、`bind` を経由しない別 Tape の bias を literal 構築で差し込め
+    // てしまう（#2296。decoder 側は codex-review 指摘・PR #2282 で対応
+    // 済み）。weight と同じ「代表 weight と照合」方式（`MultiheadAttentionVars::new`
+    // 参照）で Tape 一致を検査する。
+    if let Some(b) = &linear1.bias {
+        self_attn.q.weight.check_same_tape(b)?;
+    }
+    if let Some(b) = &linear2.bias {
+        self_attn.q.weight.check_same_tape(b)?;
+    }
     if let Some(w) = &norm1.weight {
         self_attn.q.weight.check_same_tape(w)?;
     }
@@ -183,11 +197,35 @@ fn validate_layer_vars<'t>(
     }
     let dim_feedforward = l1_shape[1];
 
+    // `linear1.bias` は `Linear::from_parameters`／`Linear::set_parameter`
+    // が Tensor 経路では検証済みだが、`LinearVars` の literal 構築（bind
+    // 非経由）はこの検証を通らない。厳密な rank 1 一致（broadcast 不可）
+    // を構築時に検査する（decoder 側 `validate_ffn_and_norms` と同じ方針。
+    // #2296）。
+    if let Some(b) = &linear1.bias
+        && b.shape().as_slice() != [dim_feedforward]
+    {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: b.shape(),
+            rhs: vec![dim_feedforward],
+        }));
+    }
+
     let l2_shape = linear2.weight.shape();
     if l2_shape.as_slice() != [dim_feedforward, d_model] {
         return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
             lhs: l2_shape,
             rhs: vec![dim_feedforward, d_model],
+        }));
+    }
+
+    // `linear2.bias` も同様（`[d_model]` 厳密一致）。#2296。
+    if let Some(b) = &linear2.bias
+        && b.shape().as_slice() != [d_model]
+    {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: b.shape(),
+            rhs: vec![d_model],
         }));
     }
 
@@ -821,6 +859,139 @@ mod tests {
                     panic!("rank != 2 の linear1.weight は Err を返すはず（shape={bad_shape:?}）")
                 }
             }
+        }
+    }
+
+    /// `TransformerEncoderLayerVars::new` は `linear1.bias` の `Tape`
+    /// 一致を検証すべきである（`LinearVars` は全 pub フィールドのため
+    /// `bind` を経由しない別 Tape の bias を literal 構築で差し込める。
+    /// #2296。decoder 側は PR #2282 で対応済み）。
+    #[test]
+    fn new_vars_rejects_linear1_bias_on_different_tape() {
+        let tape = Tape::new();
+        let other_tape = Tape::new();
+        let self_attn = MultiheadAttention::new(D_MODEL, NUM_HEADS, true, 1)
+            .unwrap()
+            .bind(&tape);
+        let mut linear1 = Linear::new(D_MODEL, DIM_FF, true, 3).unwrap().bind(&tape);
+        linear1.bias = Some(other_tape.var(&Tensor::new(vec![0.0f32; DIM_FF], &[DIM_FF]).unwrap()));
+        let linear2 = Linear::new(DIM_FF, D_MODEL, true, 4).unwrap().bind(&tape);
+        let norm1 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let norm2 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let result = TransformerEncoderLayerVars::new(
+            self_attn,
+            linear1,
+            linear2,
+            norm1,
+            norm2,
+            FeedForwardActivation::Relu,
+        );
+        match result {
+            Err(AutodiffError::TapeMismatch) => {}
+            Err(other) => panic!("TapeMismatch を期待したが別の Err: {other:?}"),
+            Ok(_) => panic!("別 Tape の linear1.bias は Err を返すはず"),
+        }
+    }
+
+    /// 同上（`linear2.bias` を別 `Tape` にしたケース）。#2296。
+    #[test]
+    fn new_vars_rejects_linear2_bias_on_different_tape() {
+        let tape = Tape::new();
+        let other_tape = Tape::new();
+        let self_attn = MultiheadAttention::new(D_MODEL, NUM_HEADS, true, 1)
+            .unwrap()
+            .bind(&tape);
+        let linear1 = Linear::new(D_MODEL, DIM_FF, true, 3).unwrap().bind(&tape);
+        let mut linear2 = Linear::new(DIM_FF, D_MODEL, true, 4).unwrap().bind(&tape);
+        linear2.bias =
+            Some(other_tape.var(&Tensor::new(vec![0.0f32; D_MODEL], &[D_MODEL]).unwrap()));
+        let norm1 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let norm2 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let result = TransformerEncoderLayerVars::new(
+            self_attn,
+            linear1,
+            linear2,
+            norm1,
+            norm2,
+            FeedForwardActivation::Relu,
+        );
+        match result {
+            Err(AutodiffError::TapeMismatch) => {}
+            Err(other) => panic!("TapeMismatch を期待したが別の Err: {other:?}"),
+            Ok(_) => panic!("別 Tape の linear2.bias は Err を返すはず"),
+        }
+    }
+
+    /// `linear1.bias` の形状不一致（`[dim_feedforward]` と食い違う
+    /// shape）は構築時に `ShapeMismatch` で拒否される（#2296）。
+    #[test]
+    fn new_vars_rejects_linear1_bias_shape_mismatch() {
+        let tape = Tape::new();
+        let self_attn = MultiheadAttention::new(D_MODEL, NUM_HEADS, true, 1)
+            .unwrap()
+            .bind(&tape);
+        let mut linear1 = Linear::new(D_MODEL, DIM_FF, true, 3).unwrap().bind(&tape);
+        linear1.bias =
+            Some(tape.var(&Tensor::new(vec![0.0f32; DIM_FF + 1], &[DIM_FF + 1]).unwrap()));
+        let linear2 = Linear::new(DIM_FF, D_MODEL, true, 4).unwrap().bind(&tape);
+        let norm1 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let norm2 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let result = TransformerEncoderLayerVars::new(
+            self_attn,
+            linear1,
+            linear2,
+            norm1,
+            norm2,
+            FeedForwardActivation::Relu,
+        );
+        match result {
+            Err(AutodiffError::Shape(ShapeError::ShapeMismatch { .. })) => {}
+            Err(other) => panic!("Shape(ShapeMismatch) を期待したが別の Err: {other:?}"),
+            Ok(_) => panic!("形状不一致の linear1.bias は Err を返すはず"),
+        }
+    }
+
+    /// 同上（`linear2.bias` の形状不一致）。#2296。
+    #[test]
+    fn new_vars_rejects_linear2_bias_shape_mismatch() {
+        let tape = Tape::new();
+        let self_attn = MultiheadAttention::new(D_MODEL, NUM_HEADS, true, 1)
+            .unwrap()
+            .bind(&tape);
+        let linear1 = Linear::new(D_MODEL, DIM_FF, true, 3).unwrap().bind(&tape);
+        let mut linear2 = Linear::new(DIM_FF, D_MODEL, true, 4).unwrap().bind(&tape);
+        linear2.bias =
+            Some(tape.var(&Tensor::new(vec![0.0f32; D_MODEL + 1], &[D_MODEL + 1]).unwrap()));
+        let norm1 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let norm2 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+            .unwrap()
+            .bind(&tape);
+        let result = TransformerEncoderLayerVars::new(
+            self_attn,
+            linear1,
+            linear2,
+            norm1,
+            norm2,
+            FeedForwardActivation::Relu,
+        );
+        match result {
+            Err(AutodiffError::Shape(ShapeError::ShapeMismatch { .. })) => {}
+            Err(other) => panic!("Shape(ShapeMismatch) を期待したが別の Err: {other:?}"),
+            Ok(_) => panic!("形状不一致の linear2.bias は Err を返すはず"),
         }
     }
 
