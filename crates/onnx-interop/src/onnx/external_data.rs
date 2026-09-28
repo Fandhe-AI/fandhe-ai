@@ -617,6 +617,7 @@ mod no_follow_open {
     /// `base_dir` 外への脱出は既に閉じている）。`libc` は `SYS_openat2`・
     /// `open_how`・`RESOLVE_*` 定数は提供するが `openat2()` の関数
     /// ラッパー自体は未提供のため `libc::syscall` 経由で呼ぶ。
+    #[cfg(target_os = "linux")]
     pub(super) enum Openat2Outcome {
         Opened(File),
         Failed(io::Error, bool /* is_symlink */),
@@ -942,14 +943,18 @@ fn plan(
         }
     }
 
-    // `base_dir` のディレクトリ fd を 1 度だけ開き、以後の全テンソルが
-    // `resolve_and_open` 経由でこの fd を再利用する（呼び出しごとに開き
-    // 直さない）。非 unix では `resolve_and_open` が
-    // `base_dir_canonical: &Path` を直接受け取り常に拒否するため不要。
+    // `base_dir` のディレクトリ fd は遅延で 1 度だけ開き、以後の全テンソル
+    // が `resolve_and_open` 経由でこの fd を再利用する（呼び出しごとに
+    // 開き直さない）。external なテンソルが 1 件も無いモデル（`from_path`
+    // 経由の通常モデル import を含む）では一切開かない: `std::fs::read`
+    // は親ディレクトリの実行〈x〉権限のみを要求するのに対し
+    // `open(O_DIRECTORY)` は読み取り〈r〉権限を要求するため、無条件に
+    // 開くと「実行のみ許可のディレクトリに置かれた external data 非使用
+    // モデル」が `from_path` で読めなくなる後退を招く（advisor 指摘）。
+    // 非 unix では `resolve_and_open` が `base_dir_canonical: &Path` を
+    // 直接受け取り常に拒否するため不要。
     #[cfg(unix)]
-    let base_dir_file = no_follow_open::open_base_dir(base_dir_canonical).map_err(|e| {
-        GraphError::ExternalData(ExternalDataError::InvalidBaseDir { kind: e.kind() })
-    })?;
+    let mut base_dir_file: Option<File> = None;
 
     let mut files: HashMap<FileKey, OpenFile> = HashMap::new();
     let mut regions: HashMap<FileKey, Vec<(u64, u64, String)>> = HashMap::new();
@@ -1040,8 +1045,22 @@ fn plan(
             })?;
 
         #[cfg(unix)]
-        let (opened, normalized_rel) = resolve_and_open(&tensor_name, &base_dir_file, &location)
-            .map_err(GraphError::ExternalData)?;
+        let (opened, normalized_rel) = {
+            // 最初の external テンソルに到達した時点でのみ `base_dir` の
+            // ディレクトリ fd を開く（上のコメント参照。遅延オープン）。
+            if base_dir_file.is_none() {
+                let f = no_follow_open::open_base_dir(base_dir_canonical).map_err(|e| {
+                    GraphError::ExternalData(ExternalDataError::InvalidBaseDir { kind: e.kind() })
+                })?;
+                base_dir_file = Some(f);
+            }
+            let f = base_dir_file.as_ref().ok_or(GraphError::ExternalData(
+                ExternalDataError::Internal {
+                    reason: "plan: base_dir_file が None のまま resolve_and_open へ到達した",
+                },
+            ))?;
+            resolve_and_open(&tensor_name, f, &location).map_err(GraphError::ExternalData)?
+        };
         #[cfg(not(unix))]
         let (opened, normalized_rel) =
             resolve_and_open(&tensor_name, base_dir_canonical, &location)
@@ -1208,7 +1227,18 @@ fn load(
                     kind: e.kind(),
                 })
             })?;
-        let mut buf = vec![0u8; entry.length as usize];
+        // `entry.length` は `u64`。32bit ターゲット等 `usize` が 64bit
+        // 未満の環境では `as usize` の暗黙切り捨てで確保サイズが縮み
+        // `read_exact` が誤った短いバッファへ書き込みうるため、
+        // `checked` 変換で明示的に拒否する（`plan` の `total_requested`
+        // 上限検査より前ではなく後段だが、変換自体の健全性は独立した
+        // 契約のため個別に検査する）。
+        let buf_len = usize::try_from(entry.length).map_err(|_| {
+            GraphError::ExternalData(ExternalDataError::Internal {
+                reason: "load: entry.length が usize の範囲を超える",
+            })
+        })?;
+        let mut buf = vec![0u8; buf_len];
         opened.file.read_exact(&mut buf).map_err(|e| {
             GraphError::ExternalData(ExternalDataError::Io {
                 tensor_name: cap_name(&entry.tensor_name),
