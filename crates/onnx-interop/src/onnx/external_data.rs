@@ -192,6 +192,16 @@ pub enum ExternalDataError {
     /// initializer 名が重複している（I/O の前に検出する。`graph::
     /// build_graph` の `DuplicateInitializerName` と同一の欠陥クラス）。
     DuplicateInitializerName { tensor_name: String },
+    /// `resolve_and_open` の TOCTOU 非後退実装（ディレクトリ fd 起点の
+    /// `O_NOFOLLOW` 追跡拒否オープン）が Linux／macOS 限定であり、それ
+    /// 以外の unix ではフラグ定数値を実機実測できていないため安全に
+    /// 実装できない。旧来の `symlink_metadata` 検証 → `canonicalize` →
+    /// `File::open` 再解決経路は検証とオープンの間にシンボリックリンク
+    /// 差し替えの窓が残るため、REQ-1 の完全自作コア方針・security.md
+    /// の A08（自己修復ループが取り込む変更の整合性）と同じ fail-closed
+    /// 原則に従い、対応不能なプラットフォームでは external data の読み
+    /// 込みそのものを拒否する（P0・PRRT_kwDOTuUCJc6mk30J 是正）。
+    UnsupportedPlatformForSecureResolve { tensor_name: String },
     /// 内部不変条件違反（本来発生しないはずの状態）。`coding-rust.md`
     /// の「本番経路で `unwrap()`/`expect()` を使わない」方針に従い、
     /// `panic!`／`unreachable!`／`.expect()` の代わりにこの型付きエラーで
@@ -283,6 +293,12 @@ impl fmt::Display for ExternalDataError {
             ExternalDataError::DuplicateInitializerName { tensor_name } => {
                 write!(f, "initializer 名の重複（tensor={tensor_name}）")
             }
+            ExternalDataError::UnsupportedPlatformForSecureResolve { tensor_name } => write!(
+                f,
+                "external data の安全な解決（TOCTOU 非後退のディレクトリ fd 起点オープン）が \
+                 このプラットフォームでは未対応のため拒否（tensor={tensor_name}）: Linux／macOS \
+                 以外では external data 読み込みをサポートしない"
+            ),
             ExternalDataError::Internal { reason } => {
                 write!(f, "external_data 内部不変条件違反: {reason}")
             }
@@ -389,6 +405,14 @@ mod no_follow_open {
         pub const O_DIRECTORY: i32 = 0o200_000;
         pub const O_NOFOLLOW: i32 = 0o400_000;
         pub const O_CLOEXEC: i32 = 0o2_000_000;
+        // `open(2)`/`openat(2)` に付与すると、対象が FIFO（named pipe）
+        // であっても他端の読み書き待ちでブロックしない（Linux
+        // `open_flags` の一般契約）。通常ファイル・ディレクトリの
+        // open には影響しない（無視される）ため、全 open 呼び出しに
+        // 無条件で付与できる（Cursor Bugbot 指摘: base_dir 内に FIFO が
+        // 混入すると `is_file()` チェックより前の `open` 自体が無期限に
+        // ハングし得た）。
+        pub const O_NONBLOCK: i32 = 0o4_000;
     }
     #[cfg(target_os = "macos")]
     mod flags {
@@ -396,8 +420,11 @@ mod no_follow_open {
         pub const O_DIRECTORY: i32 = 0x0010_0000;
         pub const O_NOFOLLOW: i32 = 0x0000_0100;
         pub const O_CLOEXEC: i32 = 0x0100_0000;
+        // Linux 側と同じ理由（FIFO open のハング防止）。Darwin
+        // `sys/fcntl.h` の値。
+        pub const O_NONBLOCK: i32 = 0x0000_0004;
     }
-    use flags::{O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY};
+    use flags::{O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_RDONLY};
 
     // ELOOP（"too many levels of symbolic links"）: Linux/macOS 共通で
     // `O_NOFOLLOW` 指定時に対象がシンボリックリンクだと返る errno。
@@ -418,7 +445,7 @@ mod no_follow_open {
     // `pub(super)` で公開し、値を二重管理しない。
     pub(super) const ENOTDIR: i32 = 20;
 
-    // SAFETY契約: `openat` は POSIX 標準関数で、std バイナリには常に libc が
+    // SAFETY: `openat` は POSIX 標準関数で、std バイナリには常に libc が
     // リンクされているため crate 追加なしに呼び出せる。呼び出し側
     // （`openat_no_follow`）が引数の有効性（fd の生存・C 文字列の NUL 終端）
     // を保証する。
@@ -444,10 +471,19 @@ mod no_follow_open {
     fn openat_no_follow(dir: &File, name: &std::ffi::OsStr, want_dir: bool) -> io::Result<File> {
         let c_name = CString::new(name.as_bytes())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // `O_NONBLOCK` を無条件で付与する（High・Cursor Bugbot 指摘）:
+        // `base_dir` 配下に FIFO（named pipe）等の特殊ファイルが置かれて
+        // いた場合、`O_NONBLOCK` 抜きの `open`/`openat` は対向の
+        // reader/writer が現れるまで無期限にブロックし得る。`is_file()`
+        // による種別検証は open 成功後にしか行えないため、open 自体が
+        // ハングすると検証に到達できない。通常ファイル・ディレクトリの
+        // open には副作用が無い（POSIX: `O_NONBLOCK` は FIFO・キャラクタ
+        // デバイス・ソケットにのみ意味を持つ）ため、中間ディレクトリ・
+        // 最終ファイルのどちらの open にも無条件で付与してよい。
         let flags = if want_dir {
-            O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
         } else {
-            O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+            O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
         };
         // SAFETY: `dir.as_raw_fd()` はこの呼び出しの間生存している `dir` が
         // 所有する有効な open ディレクトリ fd。`c_name` は
@@ -573,88 +609,42 @@ fn resolve_and_open(
     ))
 }
 
-/// [`resolve_and_open`] の Linux／macOS 以外向けフォールバック実装。
-/// `symlink_metadata` による逐次検証 → `canonicalize` → `File::open` と
-/// パスから再オープンする（旧実装のまま）。CI ビルド対象
-/// （linux・aarch64-apple-darwin）はいずれも上の `no_follow_open` 経路を
-/// 使うため、本フォールバックは実測未検証の他 unix 向けの保守的な
-/// 代替実装であり、TOCTOU 窓の完全な排除は保証しない（コメントに明記して
-/// 既知の制約として残す）。
+/// [`resolve_and_open`] の Linux／macOS 以外向け実装。
+///
+/// 旧実装は `symlink_metadata` による逐次検証 → `canonicalize` →
+/// `File::open` とパスから再オープンしており、検証とオープンの間の窓で
+/// シンボリックリンクを差し替えられると `base_dir` 外のファイルを開き得た
+/// （P0・discussion 指摘・PRRT_kwDOTuUCJc6mk30J）。上の `no_follow_open`
+/// モジュール（ディレクトリ fd 起点の `O_NOFOLLOW` 追跡拒否オープン）は
+/// `openat` のフラグ定数値（`O_DIRECTORY`／`O_NOFOLLOW`／`O_CLOEXEC`／
+/// `O_NONBLOCK`）が OS ごとに異なり、CI ビルド対象（linux・
+/// aarch64-apple-darwin）以外では実機実測できていないため、誤った値を
+/// 使うと検査そのものが無意味になるか未定義動作になりかねない。
+///
+/// 「実測できない環境では弱い実装にフォールバックする」のではなく、
+/// `security.md` の A08（整合性の迂回経路を作らない）・本 crate の
+/// fail-closed 方針（イシュー #2347 タイトルのとおり external data
+/// 読み込みは fail-closed 前提）に従い、**この関数は常に拒否する**。
+/// Linux／macOS 以外で external data を安全に読み込む対応が必要になった
+/// 場合は、対象 OS のフラグ値を実機実測したうえで `no_follow_open` の
+/// `cfg` 対象へ追加する（`docs/onnx-external-data-decision.md` 参照）。
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn resolve_and_open(
     tensor_name: &str,
-    base_dir_canonical: &Path,
+    _base_dir_canonical: &Path,
     loc: &str,
 ) -> Result<(OpenFile, PathBuf), ExternalDataError> {
-    let parts =
-        validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
-            tensor_name: cap_name(tensor_name),
-            reason,
-        })?;
-
-    let mut cur = base_dir_canonical.to_path_buf();
-    for part in &parts {
-        cur.push(part);
-        let meta = std::fs::symlink_metadata(&cur).map_err(|e| ExternalDataError::Io {
-            tensor_name: cap_name(tensor_name),
-            kind: e.kind(),
-        })?;
-        if meta.file_type().is_symlink() {
-            return Err(ExternalDataError::InvalidLocation {
-                tensor_name: cap_name(tensor_name),
-                reason: LocationRejectReason::Symlink,
-            });
-        }
-        if !meta.is_dir() && !meta.is_file() {
-            return Err(ExternalDataError::InvalidLocation {
-                tensor_name: cap_name(tensor_name),
-                reason: LocationRejectReason::NotRegularFile,
-            });
-        }
-    }
-
-    let canonical = cur.canonicalize().map_err(|e| ExternalDataError::Io {
+    // `location` の文法検証自体は OS 非依存で安全に行えるため、
+    // 診断上の一貫性のため先に行う（結果は使わず、後続の fail-closed
+    // 判定を先取りしない）。
+    let _ = validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
         tensor_name: cap_name(tensor_name),
-        kind: e.kind(),
+        reason,
     })?;
-    if !canonical.starts_with(base_dir_canonical) {
-        return Err(ExternalDataError::InvalidLocation {
-            tensor_name: cap_name(tensor_name),
-            reason: LocationRejectReason::OutsideBaseDir,
-        });
-    }
 
-    let file = File::open(&canonical).map_err(|e| ExternalDataError::Io {
+    Err(ExternalDataError::UnsupportedPlatformForSecureResolve {
         tensor_name: cap_name(tensor_name),
-        kind: e.kind(),
-    })?;
-    let meta = file.metadata().map_err(|e| ExternalDataError::Io {
-        tensor_name: cap_name(tensor_name),
-        kind: e.kind(),
-    })?;
-    if !meta.is_file() {
-        return Err(ExternalDataError::InvalidLocation {
-            tensor_name: cap_name(tensor_name),
-            reason: LocationRejectReason::NotRegularFile,
-        });
-    }
-
-    #[cfg(unix)]
-    let dev_ino = {
-        use std::os::unix::fs::MetadataExt;
-        (meta.dev(), meta.ino())
-    };
-
-    let normalized_rel: PathBuf = parts.iter().collect();
-    Ok((
-        OpenFile {
-            file,
-            len: meta.len(),
-            #[cfg(unix)]
-            dev_ino,
-        },
-        normalized_rel,
-    ))
+    })
 }
 
 /// ASCII 数字のみからなる非空文字列として `u64` を解釈する（符号・空白・

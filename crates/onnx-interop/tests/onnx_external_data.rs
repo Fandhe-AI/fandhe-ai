@@ -1164,3 +1164,69 @@ fn bytes_entry_point_still_rejects_external_data_model() {
         })
     ));
 }
+
+/// `base_dir` 内に FIFO（named pipe）が置かれていても `open`/`openat` が
+/// ハングしないことを確認する（High・Cursor Bugbot 指摘
+/// PRRT_kwDOTuUCJc6mk6-d の回帰テスト）。`O_NONBLOCK` 抜きの
+/// `open`（`O_NOFOLLOW` のみ）は対向の reader/writer が現れるまで
+/// 無期限にブロックし得るため、`build_graph_with_external_data` を
+/// 別スレッドで呼び出し `recv_timeout` で有界に待つ（回帰が再発しても
+/// テストプロセスごと無期限ハングさせないための防御。本 crate 本体には
+/// この有界待ちは無く、修正そのものが `open` 呼び出し自体を
+/// ノンブロッキングにする）。CI ビルド対象（linux・aarch64-apple-darwin）
+/// のみ対象（`no_follow_open` 経路。他 unix は `UnsupportedPlatformFor
+/// SecureResolve` で即座に拒否されるため本シナリオ自体が発生しない）。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn fifo_location_does_not_hang_open() {
+    // `mkfifo(2)` は POSIX 標準関数で std がリンクする libc に常に存在する
+    // ため、production コードの `openat` 直接呼び出しと同じ方針
+    // （`libc` crate を追加しない）でテストからも `extern "C"` 経由で
+    // 呼ぶ。
+    unsafe extern "C" {
+        fn mkfifo(pathname: *const std::os::raw::c_char, mode: u32) -> i32;
+    }
+
+    let dir = TempDir::new("fifo-hang");
+    let fifo_path = dir.path().join("pipe.data");
+    let c_path = std::ffi::CString::new(fifo_path.as_os_str().as_encoded_bytes())
+        .expect("パスに NUL は含まれない");
+    // SAFETY: `c_path` はこの呼び出しの間生存する有効な NUL 終端 C 文字列。
+    // `mkfifo` は POSIX 標準関数で、失敗時は errno を設定し負値を返す
+    // だけであり、他のメモリ安全性への影響はない。
+    let rc = unsafe { mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(
+        rc,
+        0,
+        "mkfifo に失敗した: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let t = external_tensor("x", vec![1], data_type::FLOAT, "pipe.data", None, Some("4"));
+    let model = model_with_initializer(t);
+    let base_dir = dir.path().to_path_buf();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result =
+            build_graph_with_external_data(&model, &base_dir, &ExternalDataOptions::default());
+        // 受信側が既にタイムアウトして関数を抜けている場合は send が
+        // 失敗し得るが、その場合はテスト側が既に fail 済みのため無視する。
+        let _ = tx.send(result);
+    });
+
+    let result = rx.recv_timeout(std::time::Duration::from_secs(10)).expect(
+        "build_graph_with_external_data が FIFO の open で無期限に \
+             ハングした（O_NONBLOCK 欠落の回帰）",
+    );
+    let err = assert_external_err(result);
+    // FIFO は通常ファイルではないため、open 自体は成功し得ても
+    // （ノンブロッキングであれば）`is_file()` 検証で拒否される。
+    assert!(matches!(
+        err,
+        ExternalDataError::InvalidLocation {
+            reason: LocationRejectReason::NotRegularFile,
+            ..
+        }
+    ));
+}

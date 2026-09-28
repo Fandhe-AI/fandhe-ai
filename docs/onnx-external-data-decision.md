@@ -111,10 +111,12 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      **再解決しない**ため、検証と実際のオープン対象が fd レベルで
      一致することが構造的に保証される（2026-09-28・#2347 P0 是正・
      PR #2348 コードレビュー対応。5 節参照）。CI ビルド対象外の他 unix
-     ターゲットのみ、旧実装（`symlink_metadata` 逐次検証 →
-     `canonicalize` → `File::open`。経路の途中を含めシンボリックリンクを
-     拒否し、解決結果を canonicalize 済み `base_dir` で `starts_with`
-     しなければ拒否する）にフォールバックする。
+     ターゲットでは、`openat` のフラグ定数値（`O_DIRECTORY`／
+     `O_NOFOLLOW`／`O_CLOEXEC`／`O_NONBLOCK`）を実機実測できておらず
+     誤った値では検査自体が無意味になるため、**旧実装へのフォールバック
+     は行わず常に `UnsupportedPlatformForSecureResolve` で拒否する**
+     （fail-closed。2026-09-28・PR #2348 レビュー是正で旧
+     `symlink_metadata` 検証フォールバックを撤去。5 節参照）。
    - ファイルを開いてサイズを取り、`offset + length` がファイル長を
      超えないこと・`length` が dims/data_type から導出した期待バイト長
      （`element_count` × 要素サイズ。FLOAT=4／INT64=8／BOOL=1／
@@ -152,9 +154,25 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   を直接呼ぶ実装（Linux／macOS 限定。フラグ定数値を手書きし、std が
   リンクする libc を crate 追加なしに利用する）へ是正し、Linux／macOS
   （CI ビルド対象）ではこの TOCTOU 窓を構造的に排除した（4 節参照）。
-  CI ビルド対象外の他 unix ターゲットに限り、旧実装（経路文字列の
-  再解決）へフォールバックするため、そちらのみ本節の窓が残る
-  （パス 2 直前のファイル長・dev/ino 再照合による縮小のみ）。
+  当初は CI ビルド対象外の他 unix ターゲットに限り旧実装（経路文字列の
+  再解決）へフォールバックしていたが、フォールバック実装自体が同種の
+  TOCTOU を抱えたままであるという追加指摘（P0・PRRT_kwDOTuUCJc6mk30J）
+  を受け、フォールバックを撤去して常に拒否する方針へ変更した
+  （`resolve_and_open` の非 linux/macos 版。`ExternalDataError::
+  UnsupportedPlatformForSecureResolve`）。対象 OS のフラグ値を実機実測
+  できないまま弱い実装を残すより、その OS では機能自体を提供しない
+  ほうが本 issue の fail-closed 方針（タイトル参照）に整合すると判断
+  した。Linux／macOS 以外で external data 読み込みが必要になった場合は、
+  対象 OS のフラグ定数値を実機実測したうえで `no_follow_open` の `cfg`
+  対象へ追加する（新規対応は別 issue）。
+- **O_NONBLOCK 未指定によるハングの是正（2026-09-28・Cursor Bugbot
+  High 指摘 PRRT_kwDOTuUCJc6mk6-d）**: `no_follow_open::openat_no_follow`
+  は `O_NOFOLLOW` のみを指定しており、`base_dir` 配下に FIFO（named
+  pipe）等の特殊ファイルが置かれていた場合、`is_file()` による種別
+  検証より前の `open`/`openat` 自体が対向の reader/writer 待ちで無期限
+  にブロックし得た。中間ディレクトリ・最終ファイルいずれの `openat`
+  呼び出しにも `O_NONBLOCK` を無条件で付与するよう是正した（通常
+  ファイル・ディレクトリの open には副作用が無い POSIX の性質を利用）。
 - `base_dir` 自体の信頼は呼び出し元の責務とする（呼び出し元が与える
   信頼済み入力として扱い、location 側だけを fail-closed に検証する）。
 - `checksum` の検証（SHA-1）は本 issue のスコープ外（依存を追加でき
