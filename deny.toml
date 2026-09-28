@@ -37,7 +37,7 @@ include-dev = true
 # （docs/license-matrix.md 6 節の個別判断）。コピーレフト単独ライセンス
 # （GPL/LGPL/MPL 等）は列挙しないため、将来の推移的依存混入は fail-closed で検出される。
 #
-# 本 allow リストは本体 workspace の直接依存 9 区分（第 1〜8・第 10 区分）の適合基準（MIT OR Apache-2.0 系）を緩和するものではない。
+# 本 allow リストは本体 workspace の直接依存として許容する 9 区分（第 1〜8・第 10 区分）の適合基準（MIT OR Apache-2.0 系）を緩和するものではない。
 # あくまで推移的依存の実測結果を運用化したものであり、allow リストの変更は
 # license-matrix.md の更新とセットでユーザー承認を経る（REQ-5・deps-policy.md）。
 allow = [
