@@ -92,7 +92,7 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 
 - **依存禁止リストのクレート混入**（`burn` 系一式・`cubecl`・`candle`・`tch`・
   `ndarray`。直接・推移を問わない。ただし `scripts/bench/framework-compare/` 配下
-  〈第 10 区分〈旧称: 第 9 区分〉の適用範囲拡張。承認済み比較対象 burn 0.21.0・candle-core 0.11.0 と
+  〈第 9 区分の適用範囲拡張。承認済み比較対象 burn 0.21.0・candle-core 0.11.0 と
   その推移的依存ツリーとしての意図的保持。2026-08-28 ユーザー承認・PR #915・
   `docs/framework-compare-harness-decision.md`。`scripts/check-forbidden-deps.sh`
   lock-all の専用 fail-closed 契約検査〈`[workspace]` 隔離・承認済みピンのドリフト
@@ -104,7 +104,7 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   rayon / half / criterion〈dev 限定〉/ libc〈cfg(unix) 限定〉/ ベンチ比較対象〈matrixmultiply・gemm〉）
   以外の依存追加**、または許容依存でも `=x.y.z` 完全固定でないバージョン指定・
   `docs/license-matrix.md` 更新やユーザー承認の記録を伴わない依存追加・更新: **P1**。
-  第 10 区分（ベンチ比較対象。旧称: 第 9 区分。`matrixmultiply`・`gemm`、および
+  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`、および
   適用範囲拡張の `candle-core`・`burn`〈推移的依存ツリー込み〉）は
   `scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立 Cargo
   プロジェクト）・`scripts/bench/framework-compare/`（独自の `[workspace]` を持つ

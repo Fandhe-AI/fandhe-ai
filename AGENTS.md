@@ -42,7 +42,7 @@ prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先�
   `=x.y.z` 完全固定でないバージョン指定、`docs/license-matrix.md` 更新・ユーザー承認
   記録を伴わない依存追加・更新は P1（A06。`deny.toml` の licenses / sources /
   advisories / bans 検査と `scripts/check-forbidden-deps.sh` が機械検査する）。
-  第 10 区分（ベンチ比較対象。旧称: 第 9 区分。`matrixmultiply`・`gemm`、および
+  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`、および
   適用範囲拡張の `candle-core`・`burn`〈推移的依存ツリー込み〉）は
   `scripts/bench/oss-gemm-compare/`・`scripts/bench/framework-compare/`
   （いずれも独立 Cargo プロジェクト／workspace。本体 workspace 外）

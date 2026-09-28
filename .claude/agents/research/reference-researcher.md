@@ -14,7 +14,7 @@ tools: [Read, Grep, Glob, Bash, WebFetch, WebSearch]
 - `cudarc`（Driver API・NVRTC・dynamic-loading・f16 feature）・CUDA（DGX Spark GB10 / sm_121）の仕様調査
 - `objc2`・`objc2-foundation`・`objc2-metal`（MSL・`simdgroup_matrix`・`simdgroup_multiply_accumulate`）の仕様調査
 - `safetensors`・ONNX（`prost` による protobuf デコード・手書き derive）の相互運用仕様調査・PyTorch との数値比較仕様
-- 許容依存クレート（deps-policy.md の 8 区分）のライセンス・バージョン調査（`docs/license-matrix.md` の根拠収集）
+- 許容依存クレート（deps-policy.md の 9 区分）のライセンス・バージョン調査（`docs/license-matrix.md` の根拠収集）
 
 ## 調査の優先順
 

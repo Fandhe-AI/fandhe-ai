@@ -19,7 +19,7 @@ tools: [Read, Grep, Glob, Edit, Write, Bash]
 ## 実装原則
 
 - **完全自作コア**とし、禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）のクレートを参照・導入しない（REQ-1）
-- 依存は deps-policy.md の許容 8 区分のみ。新規追加はユーザー承認必須
+- 依存は deps-policy.md の許容 9 区分のみ。新規追加はユーザー承認必須
 - shape 検査はバッチ次元を型に載せない（可変バッチ推論と衝突するため。REQ-10）
 - `.claude/rules/coding-rust.md`・`code-comment-style.md` に準拠する
 - 受け入れ基準（`docs/spec/04-requirements.md`）に対応するテストを同一変更に含める
