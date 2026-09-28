@@ -164,8 +164,27 @@
 //!    2026-09-28 ユーザー承認）の定数・`syscall` を使うことでこの
 //!    プラットフォーム差異を自作せず解消する。
 //!
-//!    **非 unix（Windows 等）**: `openat`／`openat2` 相当の安全な経路
-//!    解決手段を持たないため、`resolve_and_open` は常に
+//!    **Windows（イシュー #2349）**: std に `openat` 相当（ディレクトリ
+//!    ハンドル起点の相対オープン）が無いため、`base_dir` から解決対象
+//!    ファイルまでの全祖先ディレクトリのハンドルを開いたまま保持する
+//!    （`win_contained_open::BaseDirHandle`。rename・削除・reparse point 化
+//!    に必要な DELETE アクセスを共有モードから外して拒否し、reparse
+//!    point 化に必要な「対象ディレクトリが空であること」〈NTFS〉を
+//!    保持中の子ハンドルが妨げる）ことで、経路文字列を都度再解決する
+//!    `CreateFileW` の限界を補う。各ハンドルは開いた直後に自身の属性
+//!    照会で reparse point（シンボリックリンク・junction 等）を検出して
+//!    拒否する。`FILE_SHARE_DELETE` を含めない共有モード・
+//!    `FILE_FLAG_OPEN_REPARSE_POINT`（最終成分を追跡させない）を使う。
+//!    実体識別子（dev/ino 相当の `file_index`）・変更時刻（`change_time`）は
+//!    std が安定化していない（1.98.1 実測）ため、`FileKey` はパスベース
+//!    （`cfg(not(unix))` 共通実装）、`FileSnapshot` は
+//!    `file_attributes`／`creation_time`／`last_write_time` を使う（unix の
+//!    ctime ほど強い変更検知ではない。詳細・残存リスクは
+//!    `docs/onnx-external-data-decision.md` 5 節）。
+//!
+//!    **それ以外（wasm32 等）**: `openat`／`openat2`・Windows 封じ込め
+//!    オープンのいずれの安全な経路解決手段も持たないため、
+//!    `resolve_and_open` は常に
 //!    [`ExternalDataError::UnsupportedPlatformForSecureResolve`] で拒否
 //!    する（fail-closed。`docs/onnx-external-data-decision.md` 5 節）。
 //!
@@ -267,6 +286,27 @@ pub enum LocationRejectReason {
     Symlink,
     NotRegularFile,
     OutsideBaseDir,
+    /// Windows 版 `resolve_and_open`（`win_contained_open`）が、開いた
+    /// ハンドル自身の属性照会で reparse point（シンボリックリンク・
+    /// junction のいずれも区別せず検出する。`file_type().is_symlink()` は
+    /// AppExecLink・cloud files 等の一部 reparse タグを認識しないため、
+    /// 属性ビット `FILE_ATTRIBUTE_REPARSE_POINT` で判定する）を検出した
+    /// 場合に返す（イシュー #2349）。unix の [`LocationRejectReason::
+    /// Symlink`] に相当する Windows 版。
+    ReparsePoint,
+    /// Windows の代替データストリーム記法（`name:stream`）を拒否する
+    /// （字句検査。イシュー #2349）。unix ではファイル名として正当な
+    /// ため本検査は `cfg(windows)` でのみ配線する（R5: unix の受理範囲は
+    /// 変えない）。
+    AlternateDataStream,
+    /// Windows の予約デバイス名（`CON`／`PRN`／`AUX`／`NUL`／`COM0`〜`COM9`／
+    /// `LPT0`〜`LPT9`〈上付き数字を含む〉／`CONIN$`／`CONOUT$`）を拒否する
+    /// （大文字小文字を区別せず、拡張子・末尾の空白/ドットを除いた基底名で
+    /// 判定。イシュー #2349）。
+    ReservedDeviceName,
+    /// Windows で無効な成分名（末尾のドット・空白、または `<>"|?*` ・
+    /// 制御文字を含む）を拒否する（イシュー #2349）。
+    InvalidComponentName,
 }
 
 impl fmt::Display for LocationRejectReason {
@@ -282,6 +322,14 @@ impl fmt::Display for LocationRejectReason {
             LocationRejectReason::Symlink => "経路にシンボリックリンクを含む",
             LocationRejectReason::NotRegularFile => "通常ファイルではない",
             LocationRejectReason::OutsideBaseDir => "base_dir の外へ解決される",
+            LocationRejectReason::ReparsePoint => {
+                "経路に reparse point（シンボリックリンク・junction 等）を含む"
+            }
+            LocationRejectReason::AlternateDataStream => "代替データストリーム（:）を含む",
+            LocationRejectReason::ReservedDeviceName => "Windows の予約デバイス名",
+            LocationRejectReason::InvalidComponentName => {
+                "Windows で無効な文字、または末尾のドット・空白を含む"
+            }
         };
         write!(f, "{s}")
     }
@@ -357,18 +405,19 @@ pub enum ExternalDataError {
     /// initializer 名が重複している（I/O の前に検出する。`graph::
     /// build_graph` の `DuplicateInitializerName` と同一の欠陥クラス）。
     DuplicateInitializerName { tensor_name: String },
-    /// `resolve_and_open` の TOCTOU 非後退実装（`libc` 経由の `openat2`／
-    /// ディレクトリ fd 起点の `O_NOFOLLOW` 追跡拒否オープン）は `cfg(unix)`
-    /// 全般（Linux／macOS／その他 unix）で提供済みであり、拒否対象は
-    /// **unix 以外**（Windows 等。`libc` がリンクされずディレクトリ fd
-    /// 起点の no-follow open 手段を持たない）のみである。旧来の
-    /// `symlink_metadata` 検証 → `canonicalize` → `File::open` 再解決経路は
-    /// 検証とオープンの間にシンボリックリンク差し替えの窓が残るため、
-    /// REQ-1 の完全自作コア方針・security.md の A08（自己修復ループが
-    /// 取り込む変更の整合性）と同じ fail-closed 原則に従い、対応不能な
-    /// プラットフォームでは external data の読み込みそのものを拒否する
-    /// （P0・PRRT_kwDOTuUCJc6mk30J 是正）。非 unix（Windows 等）への対応は
-    /// イシュー #2349 で追跡中。
+    /// `resolve_and_open` の TOCTOU 非後退実装は `cfg(unix)` 全般
+    /// （`libc` 経由の `openat2`／ディレクトリ fd 起点の `O_NOFOLLOW`
+    /// 追跡拒否オープン。Linux／macOS／その他 unix）に加え、`cfg(windows)`
+    /// （`win_contained_open`。祖先ディレクトリのハンドル連鎖保持＋開いた
+    /// ハンドル自身の reparse point 属性検査。イシュー #2349）でも提供
+    /// 済みであり、拒否対象は**unix でも Windows でもないプラットフォーム**
+    /// （wasm32-unknown-unknown 等。安全な経路解決手段そのものが無い）
+    /// のみである。旧来の `symlink_metadata` 検証 → `canonicalize` →
+    /// `File::open` 再解決経路は検証とオープンの間にシンボリックリンク
+    /// 差し替えの窓が残るため、REQ-1 の完全自作コア方針・security.md の
+    /// A08（自己修復ループが取り込む変更の整合性）と同じ fail-closed
+    /// 原則に従い、対応不能なプラットフォームでは external data の
+    /// 読み込みそのものを拒否する（P0・PRRT_kwDOTuUCJc6mk30J 是正）。
     UnsupportedPlatformForSecureResolve { tensor_name: String },
     /// external data の読み込みバッファ、または external 由来 initializer の
     /// 復号先（`RawTensor` の要素 Vec）の確保に失敗した（A04 資源枯渇対策。
@@ -478,10 +527,9 @@ impl fmt::Display for ExternalDataError {
             }
             ExternalDataError::UnsupportedPlatformForSecureResolve { tensor_name } => write!(
                 f,
-                "external data の安全な解決（TOCTOU 非後退のディレクトリ fd 起点オープン）が \
-                 このプラットフォームでは未対応のため拒否（tensor={tensor_name}）: unix 以外\
-                 （Windows 等）では external data 読み込みをサポートしない（イシュー #2349 で\
-                 対応を追跡中）"
+                "external data の安全な解決（TOCTOU 非後退の封じ込めオープン）が \
+                 このプラットフォームでは未対応のため拒否（tensor={tensor_name}）: unix・\
+                 Windows 以外（wasm32 等）では external data 読み込みをサポートしない"
             ),
             ExternalDataError::AllocationFailed { tensor_name, bytes } => write!(
                 f,
@@ -528,7 +576,17 @@ fn validate_location_string(loc: &str) -> Result<Vec<&std::ffi::OsStr>, Location
     let mut parts = Vec::new();
     for component in Path::new(loc).components() {
         match component {
-            Component::Normal(part) => parts.push(part),
+            Component::Normal(part) => {
+                // Windows 固有の字句検査（ADS・予約デバイス名・禁止文字・
+                // 末尾のドット/空白。イシュー #2349）。配線は `cfg(windows)`
+                // 限定とし、unix での受理範囲（例: `a:b` は unix では正当な
+                // ファイル名）は変えない（R5）。
+                #[cfg(windows)]
+                if let Some(reason) = windows_component_reject_reason(part) {
+                    return Err(reason);
+                }
+                parts.push(part)
+            }
             Component::CurDir => {}
             Component::RootDir | Component::Prefix(_) => {
                 return Err(LocationRejectReason::Absolute);
@@ -537,6 +595,156 @@ fn validate_location_string(loc: &str) -> Result<Vec<&std::ffi::OsStr>, Location
         }
     }
     Ok(parts)
+}
+
+/// Windows 向け成分の字句検査（イシュー #2349）。ADS（代替データ
+/// ストリーム。`name:stream`）・予約デバイス名・禁止文字・末尾のドット/
+/// 空白を拒否する。`cfg(any(windows, test))` を付けているため、Linux でも
+/// `#[cfg(test)]` ビルドには含まれ単体テストできる（本体ビルドでは
+/// Windows 限定）。呼び出し配線は [`validate_location_string`] 内の
+/// `cfg(windows)` のみで、unix の受理範囲は変えない（R5）。
+#[cfg(any(windows, test))]
+fn windows_component_reject_reason(part: &std::ffi::OsStr) -> Option<LocationRejectReason> {
+    // `part` は `loc: &str` から作った `Path` の `Component::Normal` の
+    // 部分文字列であり、常に有効な UTF-8（`to_str()` は必ず `Some`）。
+    let s = part.to_str()?;
+    if s.contains(':') {
+        return Some(LocationRejectReason::AlternateDataStream);
+    }
+    if s.ends_with('.') || s.ends_with(' ') {
+        return Some(LocationRejectReason::InvalidComponentName);
+    }
+    if s.chars()
+        .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 0x20)
+    {
+        return Some(LocationRejectReason::InvalidComponentName);
+    }
+    if windows_is_reserved_device_name(s) {
+        return Some(LocationRejectReason::ReservedDeviceName);
+    }
+    None
+}
+
+/// `s` が Windows の予約デバイス名かどうかを判定する（大文字小文字を
+/// 区別せず、拡張子〈最初の `.` より後〉を除いた基底名で判定）。対象は
+/// `CON`／`PRN`／`AUX`／`NUL`／`COM0`〜`COM9`（上付き数字 `¹²³` の
+/// `COM¹`〜`COM³` を含む）／`LPT0`〜`LPT9`（同上）／`CONIN$`／`CONOUT$`
+/// （MS Learn "Naming Files, Paths, and Namespaces" の予約名一覧）。
+#[cfg(any(windows, test))]
+fn windows_is_reserved_device_name(s: &str) -> bool {
+    let base = s.split('.').next().unwrap_or(s);
+    let upper = base.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    for prefix in ["COM", "LPT"] {
+        let Some(rest) = upper.strip_prefix(prefix) else {
+            continue;
+        };
+        let mut chars = rest.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            continue;
+        };
+        if c.is_ascii_digit() || matches!(c, '¹' | '²' | '³') {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`windows_component_reject_reason`] の単体テスト（イシュー #2349）。
+/// 対象関数自体は `cfg(any(windows, test))` のため Linux の `cfg(test)`
+/// ビルドでも実体があり、Windows 実機を使わずに Linux CI で検証できる
+/// （計画 §5 ステップ 2）。
+#[cfg(test)]
+mod windows_lexical_tests {
+    use std::ffi::OsStr;
+
+    use super::{LocationRejectReason, windows_component_reject_reason};
+
+    fn reject(name: &str) -> Option<LocationRejectReason> {
+        windows_component_reject_reason(OsStr::new(name))
+    }
+
+    #[test]
+    fn reserved_device_names_are_rejected() {
+        for name in [
+            "CON",
+            "con",
+            "PRN",
+            "AUX",
+            "NUL",
+            "con.txt",
+            "COM1.data",
+            "LPT9",
+            "COM¹",
+            "CONIN$",
+            "CONOUT$",
+        ] {
+            assert!(
+                reject(name).is_some(),
+                "{name}: 予約デバイス名として拒否されるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn alternate_data_stream_is_rejected() {
+        assert_eq!(
+            reject("a:b"),
+            Some(LocationRejectReason::AlternateDataStream)
+        );
+    }
+
+    #[test]
+    fn trailing_dot_or_space_is_rejected() {
+        assert_eq!(
+            reject("x."),
+            Some(LocationRejectReason::InvalidComponentName)
+        );
+        assert_eq!(
+            reject("x "),
+            Some(LocationRejectReason::InvalidComponentName)
+        );
+        // "NUL." は拡張子除去前の末尾ドットで先に InvalidComponentName に
+        // 分類される（`windows_component_reject_reason` 内の判定順）。
+        assert_eq!(
+            reject("NUL."),
+            Some(LocationRejectReason::InvalidComponentName)
+        );
+    }
+
+    #[test]
+    fn forbidden_characters_are_rejected() {
+        assert!(reject("a*b").is_some());
+        assert!(reject("a?b").is_some());
+        assert!(reject("a<b").is_some());
+        assert!(reject("a>b").is_some());
+        assert!(reject("a\"b").is_some());
+        assert!(reject("a|b").is_some());
+        assert!(reject("a\u{1}b").is_some(), "制御文字は拒否されるはず");
+    }
+
+    #[test]
+    fn ordinary_names_are_accepted() {
+        for name in [
+            "CONSOLE",
+            "COM10",
+            "model.onnx.data",
+            "weights.bin",
+            "a",
+            "foo.bar.baz",
+        ] {
+            assert_eq!(
+                reject(name),
+                None,
+                "{name}: 通常のファイル名は拒否されないはず"
+            );
+        }
+    }
 }
 
 /// ファイル実体の同一性・無変更性を照合するための `fstat` スナップショット。
@@ -560,8 +768,8 @@ fn validate_location_string(loc: &str) -> Result<Vec<&std::ffi::OsStr>, Location
 /// モジュール doc「TOCTOU の論拠」節・`docs/onnx-external-data-decision.md`
 /// 5 節を参照。
 ///
-/// 非 unix では `resolve_and_open` が常に拒否しファイルを開かないため、
-/// 型の形だけを揃える長さのみを持つ。
+/// unix・Windows 以外（`resolve_and_open` が常に拒否しファイルを開かない
+/// プラットフォーム）では、型の形だけを揃える長さのみを持つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileSnapshot {
     len: u64,
@@ -577,6 +785,20 @@ struct FileSnapshot {
     mtime: i64,
     #[cfg(unix)]
     mtime_nsec: i64,
+    /// Windows 版（イシュー #2349）。dev/ino 相当（`file_index`）・ctime
+    /// 相当（`change_time`）は `std::os::windows::fs::MetadataExt` が
+    /// 1.98.1 時点で安定化していないため使えない（計画段階の実測）。その
+    /// ため実体識別は `FileKey`（パスベース。`file_key_for` の
+    /// `cfg(not(unix))` 共通実装）に委ね、本 snapshot は利用者が
+    /// `SetFileTime` 等で書き換え可能な属性・作成時刻・更新時刻のみで
+    /// 変化検知する（unix の ctime ほど強い保証ではない残存リスク。
+    /// `docs/onnx-external-data-decision.md` 5 節）。
+    #[cfg(windows)]
+    file_attributes: u32,
+    #[cfg(windows)]
+    creation_time: u64,
+    #[cfg(windows)]
+    last_write_time: u64,
 }
 
 impl FileSnapshot {
@@ -596,9 +818,24 @@ impl FileSnapshot {
         }
     }
 
-    /// 非 unix 版（長さのみ）。`resolve_and_open` が常に拒否するため実行時
-    /// には到達しないが、`load` の照合コードを cfg で分岐させずに共通化する。
-    #[cfg(not(unix))]
+    /// Windows 版。ハンドル自身に対する属性照会（`File::metadata` ->
+    /// `GetFileInformationByHandle` 相当）の結果から作る（経路文字列を
+    /// 再解決しない。unix 版と同じ契約）。
+    #[cfg(windows)]
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        use std::os::windows::fs::MetadataExt;
+        FileSnapshot {
+            len: meta.len(),
+            file_attributes: meta.file_attributes(),
+            creation_time: meta.creation_time(),
+            last_write_time: meta.last_write_time(),
+        }
+    }
+
+    /// unix・Windows 以外向け（長さのみ）。`resolve_and_open` が常に拒否
+    /// するため実行時には到達しないが、`load` の照合コードを cfg で
+    /// 分岐させずに共通化する。
+    #[cfg(not(any(unix, windows)))]
     fn from_metadata(meta: &std::fs::Metadata) -> Self {
         FileSnapshot { len: meta.len() }
     }
@@ -901,16 +1138,320 @@ mod no_follow_open {
     }
 }
 
+/// Windows 向け封じ込め open（イシュー #2349）。unix の [`no_follow_open`]
+/// （dirfd 起点の `openat`／`openat2`）と同じ役割を Windows で果たす。
+///
+/// Windows の std にはディレクトリハンドル起点の相対オープン（`openat`
+/// 相当。`NtCreateFile` の `RootDirectory`）が無く、`File::open` は常に
+/// フルパスの `CreateFileW` になる（`FILE_FLAG_OPEN_REPARSE_POINT` が効く
+/// のは最終成分だけで、途中の junction は辿ってしまう）。そのため本
+/// モジュールは次の 2 つの手段を組み合わせて TOCTOU を閉じる
+/// （`docs/onnx-external-data-decision.md` 5 節が設計判断の正。1 経路の
+/// 残存リスクも同節参照）:
+///
+/// 1. **祖先チェーンのハンドル保持**: `base_dir`（ボリュームルートから）
+///    までの各ディレクトリ成分を開いたまま保持する（[`open_base_dir_handle`]
+///    が返す [`super::BaseDirHandle`]）。対象を rename・削除するには
+///    DELETE アクセスで開く必要があり、共有モードから `FILE_SHARE_DELETE`
+///    を外すことで保持中の成分は他プロセスから rename・削除できない。
+///    また NTFS では reparse point 化に対象ディレクトリが空であることを
+///    要求するため、保持中の次成分を含むディレクトリは reparse point 化
+///    できない。
+/// 2. **開いた直後の属性検査**: 各ハンドルを開いた直後に、そのハンドル
+///    自身（パスではない）に対する属性照会で reparse point 属性
+///    （`FILE_ATTRIBUTE_REPARSE_POINT`）を検査する。判定は
+///    `file_type().is_symlink()`（シンボリックリンク・マウントポイントの
+///    タグしか認識せず AppExecLink・cloud files 等を素通りさせる）では
+///    なく属性ビットで行う。
+///
+/// 定数は Win32 SDK ヘッダ（`winnt.h`／`winbase.h`。MS Learn
+/// "CreateFileA/W"・"File Security and Access Rights"・"File Access Rights
+/// Constants"）の値を手書きする。Linux の `O_*` フラグと異なり Win32 API
+/// の定数は x86_64／aarch64 で ABI が固定されアーキテクチャ間で値が
+/// 変わらないため、`libc` 相当の crate を追加せず std の
+/// `OpenOptionsExt` へ渡すだけで済み `unsafe` を要しない。
+#[cfg(windows)]
+mod win_contained_open {
+    use std::ffi::OsStr;
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::path::{Component, Path, PathBuf, Prefix};
+
+    // winnt.h（`CreateFileW` の `dwShareMode`）。`FILE_SHARE_DELETE` は
+    // 意図的に含めない: 本モジュールの TOCTOU 防止は「保持中のハンドルは
+    // 他プロセスから rename・削除できない」ことに依存するため。
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+    // winbase.h（`CreateFileW` の `dwFlagsAndAttributes`）。
+    // `FILE_FLAG_BACKUP_SEMANTICS` はディレクトリを開くために必要
+    // （MS Learn "CreateFileA/W"）。`FILE_FLAG_OPEN_REPARSE_POINT` は
+    // reparse point の最終成分をそのまま開かせ（追跡させない）、開いた
+    // 直後の属性検査で検出可能にする。
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // winnt.h（`GetFileInformationByHandle` 等が返す `dwFileAttributes`）。
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+    // winnt.h（`CreateFileW` の `dwDesiredAccess`）。共有モードの判定に
+    // 参加するアクセス権（read／execute／write／delete 系）を含める必要が
+    // ある。`FILE_READ_ATTRIBUTES` 単独は共有モード判定に参加しないため、
+    // execute 系の `FILE_TRAVERSE`（`FILE_EXECUTE` と同値）を必ず含める
+    // （MS Learn "File Access Rights Constants"）。一般的な ACL で
+    // `FILE_TRAVERSE` が拒否される場合に `FILE_LIST_DIRECTORY` へ切り替える
+    // べきかは実機での確認事項とする（計画 §3.4。PR 申し送り）。
+    const FILE_TRAVERSE: u32 = 0x0000_0020;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const GENERIC_READ: u32 = 0x8000_0000;
+
+    const DIR_ACCESS_MODE: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+    const DIR_SHARE_MODE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // 最終ファイル成分にも `FILE_FLAG_BACKUP_SEMANTICS` を付ける（計画 §3.4
+    // の表は最終成分に `FILE_FLAG_OPEN_REPARSE_POINT` のみを挙げていたが、
+    // 実装時に判明した必須の追加。CVE 相当の実害ではなく起動失敗の是正）:
+    // `location` がディレクトリ・junction（ディレクトリ属性を持つ reparse
+    // point）を指す場合、`CreateFileW` は `FILE_FLAG_BACKUP_SEMANTICS`
+    // 無しでは `ERROR_ACCESS_DENIED` で **open 自体が失敗する**（MS Learn
+    // "CreateFileA/W" の Directories 節。Rust std の `File::open` がディレク
+    // トリに対して os error 5 を返す既知の挙動と同根）。open 自体が失敗
+    // すると、その後に続く「開いたハンドルの属性を見て reparse
+    // point／非ファイルとして分類する」という本モジュールの契約
+    // （`directory_as_location_is_rejected`・
+    // `junction_as_final_directory_component_is_rejected` が要求する
+    // `NotRegularFile`／`ReparsePoint`）を果たせず、単なる `Io` 拒否に
+    // 縮退してしまう。`FILE_FLAG_BACKUP_SEMANTICS` は通常ファイルの open
+    // には副作用が無い（`SeBackupPrivilege` を持たない呼び出し元でも
+    // 通常のアクセスチェックへフォールバックする）ため、最終成分にも
+    // 無条件で付与し、unix 版と同じ「まず open→属性で分類」の順序を保つ。
+    const FINAL_CUSTOM_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
+    const DIR_CUSTOM_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
+
+    /// ディレクトリ成分（`is_dir = true`）または最終ファイル成分
+    /// （`is_dir = false`）を、モジュール doc の共有モード・フラグで
+    /// 開く。`.read(true)` は `access_mode` が上書きするため実効を
+    /// 持たないが、`OpenOptions` の一般契約（read/write のいずれかを
+    /// 要求する経路がある）に備えて明示しておく。
+    fn open_component(path: &Path, is_dir: bool) -> io::Result<File> {
+        let mut opts = OpenOptions::new();
+        opts.read(true);
+        if is_dir {
+            opts.access_mode(DIR_ACCESS_MODE)
+                .share_mode(DIR_SHARE_MODE)
+                .custom_flags(DIR_CUSTOM_FLAGS);
+        } else {
+            opts.access_mode(GENERIC_READ)
+                .share_mode(FILE_SHARE_READ)
+                .custom_flags(FINAL_CUSTOM_FLAGS);
+        }
+        opts.open(path)
+    }
+
+    /// `handle` 自身（パスではない）に対する属性照会で reparse point
+    /// 属性を検査する。
+    fn is_reparse_point(handle: &File) -> io::Result<bool> {
+        Ok(handle.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+    }
+
+    /// [`resolve_and_open`] の失敗理由。呼び出し元（`super::
+    /// resolve_and_open`）が `ExternalDataError::InvalidLocation` の
+    /// `reason`（`ReparsePoint`／`NotRegularFile`）と `Io` を区別できる
+    /// よう、単なる `(io::Error, bool)` ではなく 3 分岐にする（reparse
+    /// point 検出と「open は成功したが通常ファイルではない」検出を、
+    /// いずれも `io::Error` の種別へ押し込めずに表現するため）。
+    pub(super) enum OpenError {
+        Reparse,
+        NotRegularFile,
+        Io(io::Error),
+    }
+
+    impl From<io::Error> for OpenError {
+        fn from(e: io::Error) -> Self {
+            OpenError::Io(e)
+        }
+    }
+
+    /// `base_dir_canonical`（`Path::canonicalize` が返す verbatim 絶対パス
+    /// `\\?\C:\...`）を受け取り、ボリュームルートから `base_dir` までの
+    /// 各ディレクトリ成分を開いて [`super::BaseDirHandle`] として返す
+    /// （モジュール doc 1.）。`VerbatimDisk`（`\\?\C:\`）以外の先頭成分
+    /// （UNC・Volume GUID 等）は拒否する: UNC はサーバ側で junction が
+    /// 評価され共有モードの意味論も異なり、Volume GUID パスはフォルダに
+    /// マウントされたボリュームを経由しうるため（計画 §3.3）。
+    pub(super) fn open_base_dir_handle(
+        base_dir_canonical: &Path,
+    ) -> io::Result<super::BaseDirHandle> {
+        let mut components = base_dir_canonical.components();
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        };
+        if !matches!(prefix.kind(), Prefix::VerbatimDisk(_)) {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        if !matches!(components.next(), Some(Component::RootDir)) {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+
+        // verbatim パスは `/` を区切り文字として扱わないため、文字列連結
+        // ではなく `PathBuf::push` で `\` 区切りに連結する（計画 §3.3）。
+        let mut cur_path = PathBuf::from(prefix.as_os_str());
+        cur_path.push(Component::RootDir.as_os_str());
+        let mut chain = Vec::new();
+
+        // ボリュームルート自身（`\\?\C:\`）も祖先チェーンへ含めて開く
+        // （計画 §3.3「ボリュームルートから base_dir までの各成分」）。
+        let root_handle = open_component(&cur_path, true)?;
+        if is_reparse_point(&root_handle)? {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        if !root_handle.metadata()?.is_dir() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        chain.push(root_handle);
+
+        for comp in components {
+            let Component::Normal(name) = comp else {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            };
+            cur_path.push(name);
+            let handle = open_component(&cur_path, true)?;
+            if is_reparse_point(&handle)? {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
+            if !handle.metadata()?.is_dir() {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
+            chain.push(handle);
+        }
+
+        // 不変条件検査（fail-closed。coding-rust.md の本番経路
+        // `unwrap`/`expect` 禁止と同じ理由で `debug_assert!` ではなく
+        // 型付きエラーで表面化させる）: `cur_path` は
+        // `PathBuf::push(Component::RootDir.as_os_str())` を含む逐次連結で
+        // `base_dir_canonical` を再構築したものであり、両者が一致しない
+        // 場合は `PathBuf::push` の prefix/root 特殊処理（本関数冒頭
+        // コメント参照）への前提が崩れている。
+        if cur_path != base_dir_canonical {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+
+        Ok(super::BaseDirHandle {
+            base: cur_path,
+            chain,
+        })
+    }
+
+    /// [`super::resolve_and_open`] の Windows 実装本体。`base_dir`
+    /// （[`open_base_dir_handle`] が返した祖先チェーン）を起点に `parts`
+    /// をフルパスの逐次オープンで辿る。dirfd 起点の相対オープンが無い
+    /// ため、途中成分ごとに本 location 専用の祖先ハンドルを一時的に保持
+    /// し、最終ファイルを開いた後の事後チェックが終わるまで rename・
+    /// 削除・reparse point 化を防ぐ（モジュール doc 1.〜2.）。失敗理由は
+    /// [`OpenError`]（`Reparse`／`NotRegularFile`／`Io`）で呼び出し元
+    /// （`super::resolve_and_open`）へそのまま伝える。
+    pub(super) fn resolve_and_open(
+        base_dir: &super::BaseDirHandle,
+        parts: &[&OsStr],
+    ) -> Result<super::OpenFile, OpenError> {
+        if parts.is_empty() {
+            return Err(OpenError::Io(io::Error::from(io::ErrorKind::InvalidInput)));
+        }
+        let last_idx = parts.len() - 1;
+        let mut cur_path = base_dir.base.clone();
+        // 本 location（`parts`）専用の途中ディレクトリハンドル。
+        // `base_dir.chain`（`plan`／`load` を通して保持）とは別に、この
+        // 呼び出しの間だけ保持し、最終ファイルの事後チェックが終わったら
+        // 破棄する。
+        let mut held: Vec<File> = Vec::new();
+
+        for (i, part) in parts.iter().enumerate() {
+            cur_path.push(part);
+            let is_dir_component = i != last_idx;
+            // ディレクトリ・junction（ディレクトリ属性を持つ reparse
+            // point）成分は `FILE_FLAG_BACKUP_SEMANTICS`（`open_component`
+            // が最終成分にも付与済み）が無いと open 自体が
+            // `ERROR_ACCESS_DENIED` で失敗しうる（`FINAL_CUSTOM_FLAGS`
+            // 定義コメント参照）。open が失敗した場合は「開いたハンドルの
+            // 属性で reparse point／非ディレクトリ・非ファイルを分類する」
+            // 通常経路に到達できないため、そのまま `Io` として伝える
+            // （実運用ではまず起きない想定だが fail-closed に拒否する）。
+            let handle = open_component(&cur_path, is_dir_component)?;
+            let attrs = handle.metadata()?;
+            if attrs.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(OpenError::Reparse);
+            }
+            if is_dir_component {
+                if !attrs.is_dir() {
+                    return Err(OpenError::NotRegularFile);
+                }
+                held.push(handle);
+                continue;
+            }
+
+            if !attrs.is_file() {
+                return Err(OpenError::NotRegularFile);
+            }
+
+            // 事後チェック（モジュール doc 2.）: 最終ファイルを開いた後に、
+            // `base_dir.chain`（祖先チェーン全体）＋本 location 専用に
+            // 新規で開いた途中ディレクトリ（`held`）の全ハンドルの属性を
+            // 再取得し、reparse point が付いていないことを確認する。
+            for anc in base_dir.chain.iter().chain(held.iter()) {
+                let m = anc.metadata()?;
+                if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(OpenError::Reparse);
+                }
+            }
+
+            let snapshot = super::FileSnapshot::from_metadata(&attrs);
+            // `held`（本 location 専用の途中ディレクトリハンドル）は事後
+            // チェックを終えたのでここで drop する（呼び出し元は最終
+            // ファイルのハンドルのみを使う。モジュール doc 1. の保持は
+            // `base_dir.chain` が引き続き担う）。
+            drop(held);
+            return Ok(super::OpenFile {
+                file: handle,
+                snapshot,
+            });
+        }
+
+        Err(OpenError::Io(io::Error::from(io::ErrorKind::InvalidInput)))
+    }
+}
+
 /// `base_dir` を起点に external data を解決するためのハンドル。unix では
 /// [`no_follow_open::open_base_dir`] が開いたディレクトリ fd（`plan`・
 /// `load` を通して 1 つだけ保持する）。
 #[cfg(unix)]
 type BaseDirHandle = File;
 
-/// 非 unix では安全な経路解決手段を持たず `resolve_and_open` が常に拒否
-/// するため、何も開かないゼロサイズのマーカーとする（`plan`／`load` の
-/// 制御フローを unix と共通化するためだけに存在する）。
-#[cfg(not(unix))]
+/// Windows 版（イシュー #2349）。ボリュームルートから `base_dir` までの
+/// 祖先ディレクトリのハンドル連鎖（`win_contained_open::open_base_dir_handle`
+/// が開く。`plan`・`load` を通して 1 つだけ保持する）。std に `openat`
+/// 相当（ディレクトリハンドル起点の相対オープン）が無いため、unix の
+/// ディレクトリ fd 単体とは異なり祖先全体を保持する構成になる
+/// （`win_contained_open` モジュール doc「TOCTOU の根拠」節）。
+#[cfg(windows)]
+struct BaseDirHandle {
+    /// `base_dir` の正規化済み verbatim 絶対パス（`Path::canonicalize` が
+    /// 返す `\\?\C:\...` 形式）。`resolve_and_open` がこの下へ `location` の
+    /// 各成分を `PathBuf::push` で連結する起点。
+    base: PathBuf,
+    /// ボリュームルート（`\\?\C:\`）から `base` までの各ディレクトリ
+    /// 成分を開いたまま保持するハンドル（先頭がボリュームルート、末尾が
+    /// `base` 自身）。DELETE を含まない共有モードで開くため、保持している
+    /// 間はこれらの成分を他プロセスから rename・削除できない
+    /// （`win_contained_open` モジュール doc 1.）。
+    chain: Vec<File>,
+}
+
+/// unix・Windows 以外では安全な経路解決手段を持たず `resolve_and_open` が
+/// 常に拒否するため、何も開かないゼロサイズのマーカーとする
+/// （`plan`／`load` の制御フローを unix・Windows と共通化するためだけに
+/// 存在する）。
+#[cfg(not(any(unix, windows)))]
 struct BaseDirHandle;
 
 /// `base_dir_canonical` を external data 解決の起点として開く。`plan` が
@@ -922,7 +1463,14 @@ fn open_base_dir_handle(base_dir_canonical: &Path) -> Result<BaseDirHandle, Exte
         .map_err(|e| ExternalDataError::InvalidBaseDir { kind: e.kind() })
 }
 
-#[cfg(not(unix))]
+/// Windows 版。[`win_contained_open::open_base_dir_handle`] へ委譲する。
+#[cfg(windows)]
+fn open_base_dir_handle(base_dir_canonical: &Path) -> Result<BaseDirHandle, ExternalDataError> {
+    win_contained_open::open_base_dir_handle(base_dir_canonical)
+        .map_err(|e| ExternalDataError::InvalidBaseDir { kind: e.kind() })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_base_dir_handle(_base_dir_canonical: &Path) -> Result<BaseDirHandle, ExternalDataError> {
     Ok(BaseDirHandle)
 }
@@ -995,24 +1543,49 @@ fn resolve_and_open(
     })
 }
 
-/// [`resolve_and_open`] の非 unix（Windows 等）向け実装。
+/// Windows 版（イシュー #2349）。[`win_contained_open::resolve_and_open`]
+/// （祖先ディレクトリのハンドル連鎖保持＋開いたハンドル自身の reparse
+/// point 属性検査による封じ込めオープン）へ委譲し、結果を
+/// [`ExternalDataError`] へ写像する。パス 1（`plan`）の初回解決と、
+/// パス 2（`load`）の読み込み用再 open の両方から同じ `base_dir_file` を
+/// 起点に呼ばれる契約は unix 版と同じ。
+#[cfg(windows)]
+fn resolve_and_open(
+    tensor_name: &str,
+    base_dir_file: &BaseDirHandle,
+    parts: &[&std::ffi::OsStr],
+) -> Result<OpenFile, ExternalDataError> {
+    win_contained_open::resolve_and_open(base_dir_file, parts).map_err(|e| match e {
+        win_contained_open::OpenError::Reparse => ExternalDataError::InvalidLocation {
+            tensor_name: cap_name(tensor_name),
+            reason: LocationRejectReason::ReparsePoint,
+        },
+        win_contained_open::OpenError::NotRegularFile => ExternalDataError::InvalidLocation {
+            tensor_name: cap_name(tensor_name),
+            reason: LocationRejectReason::NotRegularFile,
+        },
+        win_contained_open::OpenError::Io(e) => ExternalDataError::Io {
+            tensor_name: cap_name(tensor_name),
+            kind: e.kind(),
+        },
+    })
+}
+
+/// [`resolve_and_open`] の unix・Windows 以外向け実装。
 ///
-/// `openat`／`openat2` 相当の、ディレクトリ fd 起点でシンボリックリンクを
-/// 拒否しながら経路解決する安全な手段を持たないため、`security.md` の
-/// A08（整合性の迂回経路を作らない）・本 crate の fail-closed 方針
-/// （イシュー #2347 タイトルのとおり external data 読み込みは fail-closed
-/// 前提）に従い、**この関数は常にファイルを開かず拒否する**。非 unix で
-/// external data を安全に読み込む対応はイシュー #2349 で追跡中（対象 OS
-/// の安全な no-follow open 手段。例: Windows の
-/// `FILE_FLAG_OPEN_REPARSE_POINT` ベースの実装。`docs/
-/// onnx-external-data-decision.md` 参照）。
+/// `openat`／`openat2`・Windows 封じ込めオープンのいずれの、ディレクトリ
+/// ハンドル起点でシンボリックリンク／reparse point を拒否しながら経路
+/// 解決する安全な手段も持たないため、`security.md` の A08（整合性の
+/// 迂回経路を作らない）・本 crate の fail-closed 方針（イシュー #2347
+/// タイトルのとおり external data 読み込みは fail-closed 前提）に従い、
+/// **この関数は常にファイルを開かず拒否する**。
 ///
 /// `location` の文法検証（`Path::components()` 等の OS 非依存な範囲）は
-/// unix と共通に呼び出し元（`plan`）が本関数より前に行う: 文字列自体が
-/// 不正（絶対パス・`..`・NUL 等）な場合は具体的な理由を持つ
+/// unix・Windows と共通に呼び出し元（`plan`）が本関数より前に行う:
+/// 文字列自体が不正（絶対パス・`..`・NUL 等）な場合は具体的な理由を持つ
 /// `InvalidLocation` が先に返り、文法上は正当な `location` のみが本関数へ
 /// 到達して `UnsupportedPlatformForSecureResolve` になる。
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn resolve_and_open(
     tensor_name: &str,
     _base_dir: &BaseDirHandle,

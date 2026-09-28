@@ -28,6 +28,12 @@
 //! ceil_mode=1・非対称 pads は `nn::*` 側に対応が無いため、手計算した
 //! 期待値との bit 一致で確認する。
 
+// bench-harness（決定的シードユーティリティ）は cfg(unix) 限定の
+// dev-dependency（Cargo.toml。Windows 対応イシュー #2349）のため、
+// 本ファイル全体を unix 限定にする（Windows 側の external data テストは
+// `tests/onnx_external_data.rs` の cfg(windows) 側に分離済み）。
+#![cfg(unix)]
+
 use std::collections::HashMap;
 
 use bench_harness::rng::Xorshift64Star;

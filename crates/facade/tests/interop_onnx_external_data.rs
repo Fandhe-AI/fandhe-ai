@@ -19,14 +19,27 @@
 //! OR 複合判定とは別指標）。
 //!
 //! **プラットフォーム前提（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
-//! 対応）**: `from_path` の external data 実解決（`openat`／`openat2`
-//! 相当の安全な no-follow open）は unix でのみ成功する
-//! （`fandhe_ai_onnx_interop::onnx::external_data::ExternalDataError::
-//! UnsupportedPlatformForSecureResolve`）。よって解決成功を前提とする
+//! 対応。2026-09-28 イシュー #2349 で訂正）**: `onnx-interop` の
+//! external data 実解決（封じ込めオープン）は unix・Windows の両方で
+//! 成功する（`fandhe_ai_onnx_interop::onnx::external_data` モジュール
+//! doc 参照）。しかし **facade（本クレート `fandhe-ai`）自体は Windows
+//! ではビルドできない**: facade は `backend-cuda` へ無条件依存し、
+//! `crates/backend-cuda/src/nvrtc.rs` は非 unix ターゲットで
+//! `compile_error!` を発する（#509／PR #677。NVRTC キャッシュの fd pin
+//! による TOCTOU 対策が `openat`・`/proc/self/fd` 等 unix 系 API に
+//! 依存するため非 unix 向けフォールバックを提供しない設計）。したがって
+//! `OnnxModel::from_path` の Windows 対応は本 crate（`onnx-interop`）側の
+//! 対応だけでは完結せず、facade 経由の到達性は本ファイルでは検証できない
+//! （backend-cuda の Windows 対応は別イシューでの起票候補。イシュー
+//! #2349 PR 参照）。解決成功を前提とする
 //! [`from_path_resolves_external_data_and_matches_manifest_reference`]
-//! は `cfg(unix)` 限定とし、非 unix 契約（`InvalidModel` で拒否される
-//! こと）は同関数の `cfg(not(unix))` 版が固定する。`from_bytes` は
-//! external data 経由をそもそも通らないため
+//! は `cfg(unix)` 限定のままとし、`cfg(not(any(unix, windows)))` 版
+//! （`InvalidModel` で拒否されることの契約）は facade がビルドできる
+//! unix・Windows 以外の環境（将来 backend-cuda が対応した場合）向けに
+//! 残す（`not(unix)` のままだと、facade が将来 Windows でビルドできる
+//! ようになった時点で「Windows では拒否される」という誤った契約を
+//! 固定してしまう。onnx-interop 自体は既に Windows へ対応済みのため）。
+//! `from_bytes` は external data 経由をそもそも通らないため
 //! [`from_bytes_still_rejects_external_data_fixture`] は OS 非依存のまま
 //! 全プラットフォームで実行する。
 
@@ -171,14 +184,21 @@ fn from_bytes_still_rejects_external_data_fixture() {
 }
 
 /// [`from_path_resolves_external_data_and_matches_manifest_reference`]
-/// の非 unix（Windows 等）契約版（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
-/// 対応）。非 unix では external data の実解決手段を持たないため、
-/// companion `.onnx.data` が実在する fixture であっても `from_path` は
-/// 常に `OnnxError::InvalidModel`（`ExternalDataError::
+/// の非 unix 契約版（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW… 対応。
+/// 2026-09-28 イシュー #2349 で訂正）。facade は Windows ではビルド
+/// できないため（ファイル冒頭コメント参照）、本テストが実際に走るのは
+/// facade がビルドできる非 unix 環境（現状存在しない。将来 backend-cuda
+/// が対応した場合の回帰防止として残す）に限られる。その環境で
+/// external data の実解決手段を持たない場合、companion `.onnx.data` が
+/// 実在する fixture であっても `from_path` は常に
+/// `OnnxError::InvalidModel`（`ExternalDataError::
 /// UnsupportedPlatformForSecureResolve` 由来。`map_graph_error` の
-/// catch-all 分岐）で拒否されることを固定する（ファイル冒頭コメント
-/// 参照。Windows 対応はイシュー #2349 で追跡中）。
-#[cfg(not(unix))]
+/// catch-all 分岐）で拒否されることを固定する。`onnx-interop`
+/// （external_data 自体）は Windows でも解決に対応済みのため、本テストは
+/// `cfg(not(any(unix, windows)))` に限る（facade が将来 Windows で
+/// ビルドできるようになった場合に、この「非対応」契約テストが誤って
+/// 成功を期待しない側で固定されるのを防ぐ）。
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn from_path_rejects_external_data_fixture_as_unsupported_platform_when_not_unix() {
     let root = external_data_fixture_root();

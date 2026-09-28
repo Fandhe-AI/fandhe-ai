@@ -41,6 +41,12 @@
 //! 全テストは CPU のみで完結するため実機（CUDA/Metal）非依存であり
 //! `#[ignore]` 分離は行わない。
 
+// bench-harness（決定的シードユーティリティ）は cfg(unix) 限定の
+// dev-dependency（Cargo.toml。Windows 対応イシュー #2349）のため、
+// 本ファイル全体を unix 限定にする（Windows 側の external data テストは
+// `tests/onnx_external_data.rs` の cfg(windows) 側に分離済み）。
+#![cfg(unix)]
+
 use std::collections::HashMap;
 
 use fandhe_ai_autodiff::Tape;

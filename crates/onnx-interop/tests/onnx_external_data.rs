@@ -17,9 +17,10 @@ use fandhe_ai_onnx_interop::onnx::external_data::{
     ExternalDataError, ExternalDataOptions, LocationRejectReason, build_graph_with_external_data,
 };
 use fandhe_ai_onnx_interop::onnx::graph::{GraphError, build_graph};
-// `RawTensor` は実解決に成功した際の initializer 値検査（cfg(unix) 限定の
-// テストのみ）で使う。非 unix ビルドでは未使用になるため揃えて cfg する。
-#[cfg(unix)]
+// `RawTensor` は実解決に成功した際の initializer 値検査（external data の
+// 実解決が成功する unix・Windows 限定のテストのみ）で使う。それ以外の
+// ビルドでは未使用になるため揃えて cfg する（イシュー #2349）。
+#[cfg(any(unix, windows))]
 use fandhe_ai_onnx_interop::onnx::graph::RawTensor;
 use fandhe_ai_onnx_interop::onnx::proto::{
     GraphProto, ModelProto, StringStringEntryProto, TensorProto, data_location, data_type,
@@ -157,7 +158,7 @@ fn assert_external_err(
 
 // --- 正常系 ---
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn f32_external_tensor_loads_and_matches_bit_exact_inline() {
     let dir = TempDir::new("f32-basic");
@@ -181,7 +182,7 @@ fn f32_external_tensor_loads_and_matches_bit_exact_inline() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn int64_external_tensor_loads() {
     let dir = TempDir::new("i64-basic");
@@ -209,7 +210,7 @@ fn int64_external_tensor_loads() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn bool_and_f16_external_tensors_load() {
     let dir = TempDir::new("bool-f16");
@@ -252,7 +253,7 @@ fn bool_and_f16_external_tensors_load() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn omitted_length_reads_to_eof() {
     let dir = TempDir::new("omit-length");
@@ -275,7 +276,7 @@ fn omitted_length_reads_to_eof() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn offset_selects_correct_region_in_shared_file() {
     let dir = TempDir::new("shared-offset");
@@ -507,7 +508,7 @@ fn symlink_escaping_base_dir_via_absolute_target_is_rejected() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn missing_file_is_io_not_found() {
     let dir = TempDir::new("missing-file");
@@ -527,7 +528,7 @@ fn missing_file_is_io_not_found() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn directory_as_location_is_rejected() {
     let dir = TempDir::new("dir-as-loc");
@@ -617,7 +618,7 @@ fn empty_offset_is_rejected() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn u64_overflow_length_is_rejected() {
     assert!(matches!(
@@ -629,7 +630,7 @@ fn u64_overflow_length_is_rejected() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn offset_plus_length_overflow_is_rejected() {
     let dir = TempDir::new("offset-overflow");
@@ -651,7 +652,7 @@ fn offset_plus_length_overflow_is_rejected() {
     assert!(matches!(err, ExternalDataError::RangeOutOfFile { .. }));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn range_exceeding_file_length_is_rejected() {
     let dir = TempDir::new("range-exceed");
@@ -673,7 +674,7 @@ fn range_exceeding_file_length_is_rejected() {
     assert!(matches!(err, ExternalDataError::RangeOutOfFile { .. }));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn length_mismatch_with_expected_bytes_is_rejected() {
     let dir = TempDir::new("length-mismatch");
@@ -703,7 +704,7 @@ fn length_mismatch_with_expected_bytes_is_rejected() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn huge_length_is_rejected_before_allocation() {
     let dir = TempDir::new("huge-length");
@@ -727,7 +728,7 @@ fn huge_length_is_rejected_before_allocation() {
     assert!(matches!(err, ExternalDataError::RangeOutOfFile { .. }));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn total_size_limit_is_enforced() {
     let dir = TempDir::new("total-limit");
@@ -753,7 +754,7 @@ fn total_size_limit_is_enforced() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn external_file_count_limit_is_enforced() {
     // サイズ 0 のテンソルを別々の空ファイルへ分散させても
@@ -801,7 +802,7 @@ fn external_file_count_limit_is_enforced() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn external_file_count_limit_allows_shared_file_reuse() {
     // 同一ファイルを複数テンソルが参照する通常の分割形式（1 ファイルを
@@ -1003,7 +1004,7 @@ fn many_small_external_files_do_not_exhaust_fd_limit_in_child_process() {
 
 // --- 異常系: 重複・重なり（A5） ---
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn overlapping_regions_in_same_file_are_rejected() {
     let dir = TempDir::new("overlap");
@@ -1051,7 +1052,7 @@ fn overlapping_regions_in_same_file_are_rejected() {
 /// `OverlappingRegion` として拒否されないことを確認する（レビュー対応:
 /// 0 バイト読み込みが誤って区間重複として扱われていた不具合の回帰
 /// テスト。#2347）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn zero_length_region_inside_existing_region_is_not_overlapping() {
     let dir = TempDir::new("zero-length-overlap");
@@ -1090,7 +1091,7 @@ fn zero_length_region_inside_existing_region_is_not_overlapping() {
 /// はパス文字列としても `Path::components()` 正規化後も異なるが実体は
 /// 同一のファイルであり、`file_key_for` の dev/ino ベースキーでのみ
 /// 検出できる）を参照。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn overlapping_regions_via_equivalent_location_spelling_are_rejected() {
     let dir = TempDir::new("overlap-spelling");
@@ -1195,7 +1196,7 @@ fn overlapping_regions_via_hard_link_are_rejected() {
     assert!(matches!(err, ExternalDataError::OverlappingRegion { .. }));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn duplicate_identical_region_is_rejected() {
     let dir = TempDir::new("dup-region");
@@ -1241,13 +1242,13 @@ fn duplicate_identical_region_is_rejected() {
 /// 1 ファイルに重ならない長さ 1 の区間を指定するテンソルの本数（codex P0
 /// 回帰テスト用）。旧実装（テンソルごとに同一ファイルの既存区間を全走査）
 /// では約 N²/2 ≒ 12.5 億回の区間比較になる規模。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MANY_REGIONS_COUNT: usize = 50_000;
 
 /// `MANY_REGIONS_COUNT` 本の BOOL テンソル（dims=[1]・1 バイト）が 1 つの
 /// `.data` ファイルの `[i, i+1)` を 1 件ずつ参照するモデルを作る（テンソル
 /// は位置の逆順に並べ、入力順と位置順を一致させない）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn many_unit_regions_model(extra: Option<TensorProto>) -> ModelProto {
     let mut tensors: Vec<TensorProto> = (0..MANY_REGIONS_COUNT)
         .rev()
@@ -1272,7 +1273,7 @@ fn many_unit_regions_model(extra: Option<TensorProto>) -> ModelProto {
 /// `max_total_bytes` も短い区間の合計しか制限しないため、上限では抑え
 /// られない入力）。実時間の閾値では判定せず、件数を大きく取って既定の
 /// テストタイムアウト内に通ること自体と、全値の正しさで確認する。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn many_non_overlapping_unit_regions_in_one_file_resolve() {
     let dir = TempDir::new("many-unit-regions");
@@ -1293,7 +1294,7 @@ fn many_non_overlapping_unit_regions_in_one_file_resolve() {
 /// 上と同じ多数区間の入力に、中ほどの区間と 1 バイトだけ重なるテンソルを
 /// 1 件足すと `OverlappingRegion` で拒否し、重なる 2 テンソルの名前を
 /// 報告する（ソート＋走査への置き換えで検出漏れが無いことの確認）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn one_overlap_among_many_unit_regions_is_rejected_with_names() {
     let dir = TempDir::new("many-unit-regions-overlap");
@@ -1523,7 +1524,7 @@ fn nonexistent_base_dir_is_rejected() {
 
 // --- Constant 属性テンソル（A1: run まで通す） ---
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn constant_attribute_tensor_external_data_resolves_and_runs() {
     use fandhe_ai_onnx_interop::onnx::interp::run;
@@ -1603,17 +1604,18 @@ fn bytes_entry_point_still_rejects_external_data_model() {
     let model = model_with_initializer(t);
 
     // build_graph_with_external_data 経由なら成功することの対照確認。
-    // 実解決の成功は unix 限定（非 unix では `resolve_and_open` が常に
-    // `UnsupportedPlatformForSecureResolve` で fail-closed 拒否する。
-    // `external_data.rs` モジュール doc「非 unix（Windows 等）」節）ため、
-    // 対照確認部分だけを cfg で分け、非 unix ではその拒否契約を検査する
-    // （Cursor Bugbot 指摘・PR #2348 対応。下の `from_bytes` 側の A6 回帰
-    // 検査は external data 解決を経由しないため OS 非依存のまま実行する）。
+    // 実解決の成功は unix・Windows 限定（それ以外では `resolve_and_open` が
+    // 常に `UnsupportedPlatformForSecureResolve` で fail-closed 拒否する。
+    // `external_data.rs` モジュール doc「それ以外（wasm32 等）」節）ため、
+    // 対照確認部分だけを cfg で分け、それ以外ではその拒否契約を検査する
+    // （Cursor Bugbot 指摘・PR #2348 対応・イシュー #2349 で Windows へ拡張。
+    // 下の `from_bytes` 側の A6 回帰検査は external data 解決を経由しない
+    // ため OS 非依存のまま実行する）。
     let ext_result =
         build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     ext_result.expect("external data 経路は成功するはず");
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     assert!(matches!(
         assert_external_err(ext_result),
         ExternalDataError::UnsupportedPlatformForSecureResolve { .. }
@@ -1703,12 +1705,12 @@ fn fifo_location_does_not_hang_open() {
 /// companion ファイルの実在有無やパス文法の正当性に関わらず、常に
 /// `ExternalDataError::UnsupportedPlatformForSecureResolve` で fail-closed
 /// に拒否されることを固定する（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
-/// 対応。`external_data.rs` モジュール doc「非 unix（Windows 等）」節
-/// 参照。Windows 対応はイシュー #2349 で追跡中）。base_dir・companion
-/// ファイルはいずれも実在させない（非 unix の `resolve_and_open` は
-/// `location` の文字列検証のみ行い、ファイルの open を一切試みないため
-/// 実在は不要）。
-#[cfg(not(unix))]
+/// 対応。`external_data.rs` モジュール doc「それ以外（wasm32 等）」節
+/// 参照。Windows 対応はイシュー #2349 で実装済みのため対象から外れる）。
+/// base_dir・companion ファイルはいずれも実在させない（unix・Windows 以外の
+/// `resolve_and_open` は `location` の文字列検証のみ行い、ファイルの open を
+/// 一切試みないため実在は不要）。
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn external_data_is_rejected_as_unsupported_platform_when_not_unix() {
     let dir = TempDir::new("non-unix-unsupported");
@@ -1732,12 +1734,13 @@ fn external_data_is_rejected_as_unsupported_platform_when_not_unix() {
     ));
 }
 
-/// 非 unix 契約テスト（`location` の文法検証は OS 非依存で resolve より
-/// 前に行われるため、非 unix でも `UnsupportedPlatformForSecureResolve`
-/// ではなく具体的な `InvalidLocation` が返ることを固定する。unix 版の
+/// unix・Windows 以外向け契約テスト（`location` の文法検証は OS 非依存で
+/// resolve より前に行われるため、unix・Windows 以外でも
+/// `UnsupportedPlatformForSecureResolve` ではなく具体的な
+/// `InvalidLocation` が返ることを固定する。unix 版の
 /// `symlink_escaping_base_dir_via_absolute_target_is_rejected` 等と対照的
 /// に、こちらはファイルシステムへ一切触れない構文検証のみの契約）。
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn absolute_location_is_rejected_before_platform_check_on_non_unix() {
     assert_eq!(
@@ -1754,7 +1757,7 @@ fn absolute_location_is_rejected_before_platform_check_on_non_unix() {
 /// （所有権ベースの `build_graph_owned` + 失敗可能確保の復号）が、旧経路
 /// （複製 → `resolve_external_data` → バイト列入口と同じ `build_graph`）と
 /// 完全に同じ `Graph` を返すことを固定する（`Graph: PartialEq`）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn owned_build_matches_resolve_then_build_graph() {
     use fandhe_ai_onnx_interop::onnx::external_data::resolve_external_data;
@@ -1899,7 +1902,7 @@ fn owned_build_matches_resolve_then_build_graph() {
 /// 所有権ベースの構築でも、`build_graph` と同じ検証エラーを返す（ここでは
 /// external initializer の復号後に行うトポロジ検証の失敗）。検証ロジックを
 /// 共有していることの回帰。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn owned_build_keeps_topology_validation() {
     use fandhe_ai_onnx_interop::onnx::proto::ValueInfoProto;
@@ -2020,7 +2023,7 @@ fn sparse_file_unallocatable_tensor_returns_allocation_failed_instead_of_abort()
 // --- 実行経路・export 経路のメモリ確保（PR #2348 codex P0 是正 2 回目） ---
 
 /// `name` を出力する `Constant` ノード（`value` 属性に `t`）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn constant_node(
     name: &str,
     output: &str,
@@ -2043,7 +2046,7 @@ fn constant_node(
 }
 
 /// ノード列・initializer・グラフ出力を指定したモデル。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn model_with(
     nodes: Vec<fandhe_ai_onnx_interop::onnx::proto::NodeProto>,
     initializers: Vec<TensorProto>,
@@ -2073,7 +2076,7 @@ fn model_with(
 
 /// 実行時値を dtype・shape・要素の bit 列へ正規化する（NaN を含む f32／f16
 /// も bit 単位で比較するため）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn value_bits(
     v: &fandhe_ai_onnx_interop::onnx::interp::Value,
 ) -> (&'static str, Vec<usize>, Vec<u64>) {
@@ -2124,7 +2127,7 @@ fn value_bits(
 /// 置き換えた後も数値結果が不変であることの回帰テスト）。あわせて export
 /// （`build_model_proto` → `try_encode_model`）が inline モデルの export と
 /// 同一バイト列になることも確認する。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn external_constant_attributes_run_bit_identical_to_inline_across_runs() {
     use fandhe_ai_onnx_interop::onnx::export::{
@@ -2468,4 +2471,264 @@ fn runtime_allocation_failures_are_typed_errors_under_address_space_limit() {
              stdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
+}
+
+// --- Windows 向け封じ込めオープン（イシュー #2349。`win_contained_open`） ---
+//
+// このブロックのテストは `#[cfg(windows)]` のため Windows 実機・Windows
+// ターゲット CI（`ci.yml` の `cargo clippy（onnx-interop の external
+// data・Windows ターゲット）` ステップ）でのみコンパイル・実行される。
+// Linux CI ではコンパイル対象にすら入らない。実機での実行結果は
+// `docs/onnx-external-data-decision.md` §8 の申し送りを参照。
+
+/// junction（`mklink /J`）が最終成分（ディレクトリを指す）・途中成分の
+/// いずれにあっても `ReparsePoint` で拒否されることを確認する（計画
+/// §5.3。`win_contained_open` モジュール doc 2. の事後チェックの回帰）。
+#[cfg(windows)]
+fn make_junction(link: &Path, target: &Path) {
+    let status = std::process::Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &link.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .status()
+        .expect("mklink の起動に失敗した");
+    assert!(status.success(), "mklink /J が失敗した: {status:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn junction_intermediate_component_is_rejected() {
+    let dir = TempDir::new("win-junction-mid");
+    let real_dir = dir.path().join("real_dir");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::fs::write(real_dir.join("f.data"), [0u8; 4]).unwrap();
+    let link_dir = dir.path().join("link_dir");
+    make_junction(&link_dir, &real_dir);
+
+    let t = external_tensor(
+        "x",
+        vec![1],
+        data_type::FLOAT,
+        "link_dir/f.data",
+        None,
+        Some("4"),
+    );
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(matches!(
+        err,
+        ExternalDataError::InvalidLocation {
+            reason: LocationRejectReason::ReparsePoint,
+            ..
+        }
+    ));
+}
+
+/// 最終成分自体が junction（ディレクトリを指す）の場合の拒否。junction は
+/// ディレクトリを指すため `location` はそのディレクトリ内のファイルを指す
+/// 形にし、junction 自体を途中成分として辿らせる（ファイルへの junction は
+/// Windows に存在しないため、この形が最終成分＝junction の唯一の到達経路）。
+#[cfg(windows)]
+#[test]
+fn junction_as_final_directory_component_is_rejected() {
+    let dir = TempDir::new("win-junction-final-dir");
+    let real_dir = dir.path().join("real_dir");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    let link_dir = dir.path().join("link_dir");
+    make_junction(&link_dir, &real_dir);
+
+    // junction 自体をディレクトリとして参照する（内部のファイルではなく
+    // junction 自体が最終成分になるよう、junction の中身は空のままにする）。
+    let t = external_tensor("x", vec![1], data_type::FLOAT, "link_dir", None, Some("4"));
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    // junction はディレクトリ属性も reparse point 属性も持つため、
+    // 実装の検査順序次第で `ReparsePoint` または `NotRegularFile` の
+    // いずれかになりうる（`win_contained_open::resolve_and_open` は
+    // reparse point 属性を最初に検査するため `ReparsePoint` を期待する）。
+    assert!(matches!(
+        err,
+        ExternalDataError::InvalidLocation {
+            reason: LocationRejectReason::ReparsePoint,
+            ..
+        }
+    ));
+}
+
+/// シンボリックリンク（最終成分）の拒否。作成には
+/// `SeCreateSymbolicLinkPrivilege` または Windows の開発者モードが要るため
+/// 通常 CI では走らない。
+#[cfg(windows)]
+#[test]
+#[ignore = "要 SeCreateSymbolicLinkPrivilege または開発者モード（Windows 実機限定）"]
+fn symlink_final_component_is_rejected_on_windows() {
+    let dir = TempDir::new("win-symlink-final");
+    let real = dir.write_file("real.onnx.data", &[0u8; 4]);
+    let link = dir.path().join("link.onnx.data");
+    std::os::windows::fs::symlink_file(&real, &link).expect("symlink_file の作成に失敗した");
+
+    let t = external_tensor(
+        "x",
+        vec![1],
+        data_type::FLOAT,
+        "link.onnx.data",
+        None,
+        Some("4"),
+    );
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(matches!(
+        err,
+        ExternalDataError::InvalidLocation {
+            reason: LocationRejectReason::ReparsePoint,
+            ..
+        }
+    ));
+}
+
+/// シンボリックリンク（途中成分）の拒否。作成の権限要件は上記と同じ。
+#[cfg(windows)]
+#[test]
+#[ignore = "要 SeCreateSymbolicLinkPrivilege または開発者モード（Windows 実機限定）"]
+fn symlink_intermediate_component_is_rejected_on_windows() {
+    let dir = TempDir::new("win-symlink-mid");
+    let real_dir = dir.path().join("real_dir");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::fs::write(real_dir.join("f.data"), [0u8; 4]).unwrap();
+    let link_dir = dir.path().join("link_dir");
+    std::os::windows::fs::symlink_dir(&real_dir, &link_dir).expect("symlink_dir の作成に失敗した");
+
+    let t = external_tensor(
+        "x",
+        vec![1],
+        data_type::FLOAT,
+        "link_dir/f.data",
+        None,
+        Some("4"),
+    );
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(matches!(
+        err,
+        ExternalDataError::InvalidLocation {
+            reason: LocationRejectReason::ReparsePoint,
+            ..
+        }
+    ));
+}
+
+/// Windows 固有の字句検査（代替データストリーム・予約デバイス名・禁止
+/// 文字・末尾のドット/空白）が `build_graph_with_external_data` の pass 1
+/// （ファイルシステムへ一切触れない構文検証）で拒否されることを確認する
+/// （`windows_component_reject_reason` の単体テスト
+/// 〈`external_data.rs::windows_lexical_tests`〉の統合版）。
+#[cfg(windows)]
+#[test]
+fn windows_lexical_rejections_via_full_pipeline() {
+    assert_eq!(
+        expect_location_reject("a.data:stream", vec![1]),
+        LocationRejectReason::AlternateDataStream
+    );
+    assert_eq!(
+        expect_location_reject("CON", vec![1]),
+        LocationRejectReason::ReservedDeviceName
+    );
+    assert_eq!(
+        expect_location_reject("nul.data", vec![1]),
+        LocationRejectReason::ReservedDeviceName
+    );
+    assert_eq!(
+        expect_location_reject("COM1.data", vec![1]),
+        LocationRejectReason::ReservedDeviceName
+    );
+    assert_eq!(
+        expect_location_reject("x.", vec![1]),
+        LocationRejectReason::InvalidComponentName
+    );
+    assert_eq!(
+        expect_location_reject("a*b", vec![1]),
+        LocationRejectReason::InvalidComponentName
+    );
+}
+
+/// 他プロセス（相当。同一プロセス内の別ハンドル）が external data ファイル
+/// を書き込みハンドルで開いている間、`build_graph_with_external_data` が
+/// 共有違反で `Io` として fail-closed に拒否することを確認する
+/// （`win_contained_open` の最終成分の共有モードが `FILE_SHARE_READ` のみ
+/// であることの回帰。計画 §5.3）。
+#[cfg(windows)]
+#[test]
+fn write_handle_causes_sharing_violation_rejection() {
+    let dir = TempDir::new("win-share-violation");
+    let path = dir.write_file("w.onnx.data", &[0u8; 4]);
+    // 書き込みアクセス（`GENERIC_WRITE`）を持つハンドルを保持したまま
+    // 読み込みを試みる。Rust std の既定共有モード（`FILE_SHARE_READ |
+    // FILE_SHARE_WRITE | FILE_SHARE_DELETE`）はこのハンドル自体は寛容だが、
+    // 競合判定は双方向で行われる: `resolve_and_open` の最終ファイル open
+    // （`win_contained_open::open_component`）は `FILE_SHARE_READ` のみを
+    // 要求するため（`FILE_SHARE_WRITE` を含まない）、このハンドルが持つ
+    // `GENERIC_WRITE` アクセスと衝突し `ERROR_SHARING_VIOLATION` になる
+    // （MS Learn "CreateFileA/W" の共有モード判定規則: 新規 open の
+    // 共有モードが既存ハンドルのアクセス権を許容しない場合に失敗する）。
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("書き込みハンドルの取得に失敗した");
+
+    let t = external_tensor(
+        "x",
+        vec![1],
+        data_type::FLOAT,
+        "w.onnx.data",
+        None,
+        Some("4"),
+    );
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(
+        matches!(err, ExternalDataError::Io { .. }),
+        "共有違反は Io として拒否されるはずだが: {err:?}"
+    );
+}
+
+/// UNC パス（`\\localhost\C$\...`）を `base_dir` に指定すると
+/// `InvalidBaseDir` で拒否されることを確認する（計画 §3.3・§5.3。管理
+/// 共有の有効化状態に依存するため通常 CI では走らない）。
+#[cfg(windows)]
+#[test]
+#[ignore = "管理共有（C$）の設定に依存する（Windows 実機限定）"]
+fn unc_base_dir_is_rejected() {
+    let unc = Path::new(r"\\localhost\C$\Windows\Temp");
+    let t = external_tensor("x", vec![1], data_type::FLOAT, "f.data", None, Some("4"));
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        unc,
+        &ExternalDataOptions::default(),
+    ));
+    assert!(matches!(err, ExternalDataError::InvalidBaseDir { .. }));
 }

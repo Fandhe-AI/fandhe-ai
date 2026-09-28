@@ -21,6 +21,12 @@
 //! 同一 `eps` として両実装が一致することをテストする（一般入力での一致は
 //! 数学的に成立しないため要求しない）。
 
+// bench-harness（決定的シードユーティリティ）は cfg(unix) 限定の
+// dev-dependency（Cargo.toml。Windows 対応イシュー #2349）のため、
+// 本ファイル全体を unix 限定にする（Windows 側の external data テストは
+// `tests/onnx_external_data.rs` の cfg(windows) 側に分離済み）。
+#![cfg(unix)]
+
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32;
