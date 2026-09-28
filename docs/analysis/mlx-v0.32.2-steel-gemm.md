@@ -229,7 +229,7 @@ ultra チップ向けにさらにタイルを変える」実装であり、NAX �
 | `docs/perf/metal-gemm-n4096-kernel-gap.md` §13（イシュー #1143） | classic 未収録構成 `(32,64,16,1,2)`（`CANDIDATES[8]`）を M4 Max 実機で追加測定した結果、劣後のため不採用・`select` 変更なし | **§4 の「完全一致」は構造上の一致であり、性能面では既に REJECT 済み**。Phase 3 で再実験する価値は低い（未試行候補には含めない） |
 | `docs/perf/metal-gemm-n4096-kernel-gap.md` §7〜§19（E1〜E9） | unroll・特殊化・フラグメントロード・協調ロード・タイルクラス分割・`CANDIDATES[9]`（`(64,64,32,2,2)`。bk=32）・`CANDIDATES[10]`（`(128,64,16,2,2)`。128 幅タイル）の実機実測。いずれも本番選択構成に対し REJECT または未組み込み | classic 6 構成には `bk=32` の形状自体は存在する（`(64,32,32,2,2)`。§4）が、`CANDIDATES[9]` とは `bn`（32 対 64）が異なり完全一致しない。`bm=128` の構成（`CANDIDATES[10]`）は classic 6 構成に同型のものが存在しない（§4 の上限記述のとおり classic の `bm` 最大は 64）。NAX 側にも両候補と同型の構成はない。MLX 側との直接対応はないが、「本実装独自候補は測定済みかつ大半 REJECT」という前提は変わらない |
 | `docs/backend-metal-mpp-tensor-decision.md`（#1326） | Metal 4 `tensor<>`＋MPP `matmul2d`（NAX が使うのと同じ API 系統）の可用性・純カーネル時間 A/B を M4 Max 実機で検証（採否は未確定のまま整理） | NAX 経路自体（`mpp::tensor_ops::matmul2d`）と同じ MPP API 系統を対象にした既存調査であり、本 doc の§5 NAX 経路解析と技術的に重なる。#1326 は「採否の結論は出さない」整理のみで、§3 再訪条件（M5 実機必須）は本 doc でも不変 |
-| `docs/backend-metal-splitk-decision.md`・`docs/perf/metal-gemm-splitk-*.md` | 自作 split-K（f32・2 パス）の A/B・本番結線（実行時トグル opt-in・既定 `true`） | MLX 側の `steel_gemm_splitk_nax.metal`（§6・main HEAD 限定・2 行差分のみで詳細未解析）とは別実装。直接比較は未実施（未試行候補として§10 に列挙） |
+| `docs/backend-metal-splitk-decision.md`・`docs/perf/metal-gemm-splitk-*.md` | 自作 split-K（f32・2 パス）の A/B・本番結線（実行時トグル opt-in・既定 `true`） | MLX 側の `steel_gemm_splitk_nax.metal`（#549 時点から存在する既存経路。main HEAD での変更は 2 行差分のみで詳細未解析。§2・§7）とは別実装。直接比較は未実施（未試行候補として§10 に列挙） |
 | `docs/backend-metal-async-copy-decision.md`（#546）・`docs/backend-metal-aligned-load-decision.md`・`docs/backend-metal-morton-mapping-decision.md` | 非公開 AIR intrinsic 不採用・アラインメント特化ロード不採用・Morton マッピング不採用 | NAX 経路（MPP API）は「API 公開性」の観点では #546 と性質が異なる（§9 の #549 記述を継承）。本 doc はこの整理を覆さない |
 | PR #2355（`docs/analysis/candle-metal-01.md`。マージ前） | candle Metal GEMM のタイル選択・スウィズル・同期方式を `tile::CANDIDATES`／`select_for_device` と対比。cand0 実験で差の主因はタイル選択でなくカーネル本体と結論 | 対象ライブラリが異なる（candle vs MLX）ため直接の重複はないが、「本番選択構成と特定候補を揃えた A/B」という調査方法論は共通。Phase 3 での横断比較の参考にできる |
 
@@ -238,8 +238,11 @@ ultra チップ向けにさらにタイルを変える」実装であり、NAX �
 - Ultra チップ向け専用タイル分岐（§6）は DGX Spark／M4 Max のいずれの
   実機検証環境にも該当しない（Ultra チップは未保有）ため、実証手段が
   ない。§3 再訪条件と同型の「実機なし」制約
-- NAX split-K（`steel_gemm_splitk_nax.metal`。main HEAD 限定）と自作
-  split-K（`docs/backend-metal-splitk-decision.md`）の設計対比は未実施
+- NAX split-K（`steel_gemm_splitk_nax.metal`。#549 時点から存在する
+  既存経路で main HEAD での変更は 2 行差分のみ）と自作 split-K
+  （`docs/backend-metal-splitk-decision.md`）の設計対比は未実施。
+  gather nax とは異なり本実装に対応する仕組み（自作 split-K）が
+  あるため、Phase 3 の設計対比候補として扱う
 - gather 系 GEMM（`steel_gemm_gather*.h`）は本実装の GEMM 経路に対応物
   がなく比較対象外
 
@@ -271,7 +274,8 @@ ultra チップ向けにさらにタイルを変える」実装であり、NAX �
   `select_for_device` の選択ロジックの対比は未実施
 - Ultra チップ専用分岐（main HEAD 限定）は実機なしのため検証不能。
   実機入手時の再訪候補として記録するのみ
-- NAX split-K・gather nax は本実装に対応する仕組みがなく比較対象外
+- NAX split-K は自作 split-K との設計対比が未実施（§8・上記引き継ぎ
+  候補に計上）。gather nax は本実装に対応する仕組みがなく比較対象外
 
 ### 対象外（PR 本文に記録）
 
