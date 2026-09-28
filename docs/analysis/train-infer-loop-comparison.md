@@ -315,17 +315,18 @@ fresh との差分のみ記す（`tape_build`/`leaf_register`/`loss_readout`/
 |---|---|---|
 | `forward_resident` | §3 の forward（パラメータがデバイス常駐のまま演算する点は 3 者の通常経路と一致） | ライブラリ固有寄り（fresh の `forward` より 3 者の実態に近い——3 者はそもそも常にパラメータ常駐） |
 | `backward` | 7.1 と同じ | ライブラリ固有 |
-| `device_update` | §3 の更新式全体（3 者ともデバイス上でパラメータ更新を完結する点が fandhe reuse と一致するのはパラメータ更新の**演算自体**に限る。fandhe reuse の `device_update`〈`tape.step_device_param_store`〉自体は「grad H2D + デバイス上 SGD 発行」と定義され（`scripts/bench/framework-compare/README.md`「`train --phases`」節 `device_update` 行）、更新演算とは別に勾配の H2D 転送が同区間に残る。CPU のみ #1212 以降 `Op::LinearResident` の weight 勾配がデバイス常駐 staging へ backward 内で直接書き込み済みのため本フェーズの H2D は bias 等の勾配分のみに縮小し、CUDA／Metal は同ハーネス（framework-compare が固定する `fandhe-ai` 版）では resident 化未対応のため全パラメータ分の勾配 H2D が毎 step 残る。3 者はそもそもパラメータ・勾配ともデバイス常駐で更新完結するためこの H2D 相当区間を持たない）。 | ライブラリ固有寄り（reuse は fresh より 3 者のループ構造に近いが、勾配 H2D の残存はハーネス側の `fandhe-ai` 版固有事情の混在。§8 の差分候補で詳述） |
+| `device_update` | §3 の更新式全体（3 者ともデバイス上でパラメータ更新を完結する点が fandhe reuse と一致するのはパラメータ更新の**演算自体**に限る。fandhe reuse の `device_update`〈`tape.step_device_param_store`〉自体は「grad H2D + デバイス上 SGD 発行」と定義され（`scripts/bench/framework-compare/README.md`「`train --phases`」節 `device_update` 行）、更新演算とは別に勾配の H2D 転送が残り得る区間である。残存量はバックエンドの resident 対応状況（weight／bias 各勾配ごとの slot 対応）に依存し、`docs/device-resident-update-design.md` の対応表（CPU: weight `Some`／bias `None`、CUDA〈#1559〉: weight `Some`／bias `None`、Metal〈#1555+#1566〉: weight `Some`／bias `Some`）が正——3 者いずれも weight 勾配は resident のため H2D 対象は bias 等の縮約勾配のみ（CPU／CUDA）または皆無（Metal）に絞られる。framework-compare の `README.md` 側の記述（「CUDA／Metal は未対応のため全パラメータぶん H2D する」）はこの対応表と食い違っており、本 doc の時間予算では pin 済み `fandhe-ai =0.9.0` 実ソース側の突合を CUDA（`fandhe-ai-backend-cuda-0.9.0/src/ops.rs::gemm_fp32_strict_into` がオーバーライド済みで weight resident と確認）のみに留めたため、Metal 側・README 側の食い違いの原因特定は Phase 3 へ引き継ぐ未確定事項とする。3 者はそもそもパラメータ・勾配ともデバイス常駐で更新完結するため、fandhe 側に残る H2D 相当区間自体を持たない）。 | ライブラリ固有寄り（reuse は fresh より 3 者のループ構造に近いが、勾配 H2D の残存量はバックエンド resident 対応状況依存。§8・§9 参照） |
 
 **構造的非対称の要約**: fandhe **fresh** は `leaf_register`（入力の毎 step
 登録）・`param_readout`/`apply_params`（パラメータのホスト往復）という 3 者に
 存在しない区間を持つのに対し、fandhe **reuse**（`forward_resident`・
 `device_update`）は 3 者の「パラメータ常駐・デバイス上更新」という既定の
 ループ構造に近づく。ただし reuse の `device_update` は演算（デバイス上 SGD
-発行）自体は 3 者と一致する一方、**勾配の H2D 転送は更新演算とは別に同区間へ
-残存する**（CUDA／Metal は全パラメータ分、CPU も bias 等の分。上表参照）ため、
-「パラメータ常駐・デバイス上更新」への一致は演算のみに限られ完全な同型では
-ない。**`loss_readout` が backward の前に同期を強制する**
+発行）自体は 3 者と一致する一方、**勾配の H2D 転送が更新演算とは別に残り
+得る**（バックエンドの weight／bias resident 対応状況に依存。上表・
+`docs/device-resident-update-design.md` 参照）ため、「パラメータ常駐・
+デバイス上更新」への一致は演算のみに限られ完全な同型ではない。**`loss_readout`
+が backward の前に同期を強制する**
 （README「同期待ちを独立区間にできない理由」節）点は fresh・reuse 共通の
 fandhe 固有構造で、3 者は同期点が step 末尾の 1 か所（loss/出力の host
 readout）のみという構造（§6）と対照的である。
@@ -388,6 +389,16 @@ H2D→カーネル→D2H という前提（README 記載）を持つ一方、比
   数えていない（`Op::Reduce`・`UnaryOp::Relu` 以外の周辺 variant）。
 - **candle `Var::set` が storage 差し替えかコピーか**（§5 表）: `variable.rs`
   は本 doc の時間予算内で読めていない。
+- **`device_update` の勾配 H2D 残存量の CUDA／Metal 側食い違い**（§7.2）:
+  `scripts/bench/framework-compare/README.md` は「CUDA／Metal は resident
+  未対応で全パラメータぶん H2D」と記すが、`docs/device-resident-update-design.md`
+  の対応表は CUDA・Metal とも weight 勾配は resident（bias のみ CUDA は
+  host・Metal は #1566 以降 resident）と記す。本 doc では pin 済み
+  `fandhe-ai-backend-cuda =0.9.0` の実ソース（`ops.rs::gemm_fp32_strict_into`
+  がオーバーライド済み）で CUDA weight resident のみ確認し、Metal 側は
+  実ソース未確認（macOS 環境が本 doc の作業環境にないため）。README 側の
+  記述がどの時点の状態を指すか（記述更新漏れの可能性を含む）の特定は
+  行っていない。
 - **burn `Tensor::clone()` の実コスト**（参照カウントのみか実データコピーか。
   §5・§6 表）: `burn-tensor` の `TensorPrimitive`／backend 実装まで確認して
   いない。
