@@ -195,10 +195,13 @@ b_type: TF32, cd_type: F32, m: 16, n: 16, k: 8 }); }` という条件を持つ
 が `SimpleCyclicCmma`（Cmma・`requires_accelerator() == true`）を選ぶ限り、
 入力が f32 であれば常にこの経路を通って TF32 へ降格される。**ユーザー側
 から TF32 降格を無効化する公開スイッチは `cubek-matmul`／`burn-cubecl` の
-読み取り範囲では確認できなかった**（`Strategy::SimpleCyclicMma`（Mma・
-PTX 直接発行）や `TileMatmulKind::Register`（非 Tensor Core）へ明示的に
-切り替えれば TF32 降格を避けられるが、`Strategy::Auto`／`MatmulStrategy::
-default()` の既定経路にはその選択肢がない）
+読み取り範囲では確認できなかった**（§5.1 のとおり `TileMatmulKind::Mma`
+も `requires_accelerator() == true` であり `Strategy::SimpleCyclicMma`
+（Mma・PTX 直接発行）へ切り替えても降格条件は変わらず TF32 降格を避け
+られない。`TileMatmulKind::Register`（非 Tensor Core・
+`requires_accelerator() == false`）へ明示的に切り替えれば TF32 降格を
+避けられるが、`Strategy::Auto`／`MatmulStrategy::default()` の既定経路
+にはその選択肢がない）
 
 ### 5.3 自作 `CudaGemmPrecision` との対比
 
