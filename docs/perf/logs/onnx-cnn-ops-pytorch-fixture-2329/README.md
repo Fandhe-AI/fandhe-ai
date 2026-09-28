@@ -88,9 +88,9 @@ codex-review 指摘対応で fixture の入力形状を `7x7` から `6x6` へ�
 | R1 | 対象 6 op ごとに `torch.onnx.export` 実生成 `.onnx` をコミット | 達成。19 ケース × 2 exporter = 38 ファイル（272 KB） |
 | R2 | initializer と `state_dict` の bit 一致 | 達成。全ケース `assert_r2_initializers_match_state_dict` で bit 完全一致検証済み |
 | R3 | 純粋な選択・形状操作（MaxPool・Flatten）の bit 完全一致 | 達成。全ケースで `bit_mismatch=0` |
-| R4 | 縮約系の実測記録・暫定判定 | 達成（本ファイル上表）。**最終判定方式はユーザー承認待ち** |
+| R4 | 縮約系の実測記録・暫定判定 | 実測記録は完了（本ファイル上表）。ただし縮約系（Conv・AveragePool・BatchNormalization・`gap*`／`ReduceMean` 経路）は bit 一致しないケースが多く、暫定 REQ-7 判定（`Req7Provisional`）で全ケース pass を確認したのみ。**この暫定判定を最終判定方式として採用するかはユーザー承認待ちであり、R4 は未確定**（達成とは言わない） |
 | R5 | import 失敗・非対応ケースの列挙 | 下記「R5: import 非対応ケース」参照 |
-| R6 | #2185 の受け入れ条件との対応 | 本節 |
+| R6 | #2185 の受け入れ条件（「PyTorch の ONNX export を import して bit 同一を確認する」）との対応 | **一部未達**。純粋な選択・形状操作系（MaxPool・Flatten。R3）は bit 同一を達成したが、縮約系（R4）は bit 同一ではなく `Req7Provisional` という暫定基準で pass 扱いにしている。すなわち #2185 の受け入れ条件を縮約系についてはそのままの形では満たせておらず、暫定基準への切り替え可否はユーザー承認待ち（上記「承認待ち事項」1.）。承認が得られるまで R6 は縮約系について未確定のまま据え置く |
 
 ## R5: import 非対応ケース
 
