@@ -502,7 +502,7 @@ set_cuda_onnx_gpu_execution_enabled`／`set_metal_onnx_gpu_execution_enabled`
 詳細は `docs/onnx-gpu-execution-decision.md` を正とする（本節は追補ポイン
 タのみ）。
 
-## 15. 追補（イシュー #2347・2026-09-28）: external data パス入力 import 入口は facade 非公開のまま
+## 15. 追補（イシュー #2347・2026-09-28）: external data パス入力 import 入口を `from_path` へ公開済み
 
 §6.3(a) の「要素数・総バイト数の上限設定を設計要件として追加検討する
 必要がある」に対応する形で、`onnx-interop` 内部限定モジュール
@@ -510,17 +510,23 @@ set_cuda_onnx_gpu_execution_enabled`／`set_metal_onnx_gpu_execution_enabled`
 基点ディレクトリ `base_dir` を受け取り external data
 〈`TensorProto.data_location`／`external_data`〉を fail-closed に検証・
 読み込みする新入口）を実装した。`ExternalDataOptions::max_total_bytes`
-（既定 4 GiB。**暫定値・ユーザー承認待ち**）が確保前検査の上限として、
-`ExternalDataOptions::max_external_files`（既定 4096。**暫定値・
-ユーザー承認待ち**）が distinct ファイル数（fd 枯渇対策。A04）の
-上限として機能する（詳細は `docs/onnx-external-data-decision.md`）。
+（2026-09-28 ユーザー承認により既定 **64 GiB** へ改定。当初の 4 GiB
+暫定値から更新）が確保前検査の上限として、`ExternalDataOptions::
+max_external_files`（既定 4096。本改定の対象外で暫定値のまま）が
+distinct ファイル数（fd 枯渇対策。A04）の上限として機能する（詳細は
+`docs/onnx-external-data-decision.md`）。
 
-**facade 公開は今回のスコープに含めない**（承認待ちのまま保留。
-`docs/compat-api-scope.md` §5 の該当段落を参照）。`OnnxModel::from_path`
-は `std::fs::read` → `from_bytes` のまま変更しておらず、external data
-を持つモデルは従来どおり `OnnxError::InvalidModel` で拒否される
-（A6 の不変条件。`crates/facade/tests/interop_onnx_internal_parity.rs::
-facade_rejects_external_data_model_bytes_and_path` で固定）。パス入力を
-受け取る新規メソッド（例: `OnnxModel::from_path_with_external_data`
-相当）を facade へ追加するかどうかは、§6.1 と同じ「所有者の明示承認」を
-要する経路 2 の対象として、本追補では確定させない。
+**facade 公開は 2026-09-28 にユーザー承認を得て実施済み**
+（`docs/compat-api-scope.md` §5 の該当段落を解消）。新規メソッドの追加
+ではなく、**既存 API `OnnxModel::from_path` を external data 対応へ
+拡張**した（`std::fs::read` → protobuf デコード →
+`build_graph_with_external_data`。基点ディレクトリはモデルファイルの
+親ディレクトリ、オプションは `ExternalDataOptions::default()`）。
+`OnnxModel::from_bytes` は従来どおり変更しておらず、external data を
+持つモデルは従来どおり `OnnxError::InvalidModel` で拒否される（A6 の
+不変条件。`crates/facade/tests/interop_onnx_internal_parity.rs::
+facade_from_bytes_rejects_external_data_model_from_path_attempts_
+resolution` で固定）。`from_path` が実際に external data を解決できる
+ことの正例は `crates/facade/tests/interop_onnx_external_data.rs::
+from_path_resolves_external_data_and_matches_manifest_reference`
+（PyTorch dynamo exporter 生出力 fixture 使用）を参照。

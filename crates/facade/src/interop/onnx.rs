@@ -143,6 +143,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto};
 use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
+use fandhe_ai_onnx_interop::onnx::external_data::{
+    ExternalDataOptions, build_graph_with_external_data,
+};
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{
     InterpError, Value as InterpValue, run as interp_run, run_with_ops as interp_run_with_ops,
@@ -230,11 +233,42 @@ impl OnnxModel {
     }
 
     /// ファイルパスから `.onnx` モデルを読み込む（`std::fs::read` →
-    /// [`OnnxModel::from_bytes`]。パスをシェル展開・連結せずそのまま
-    /// 渡す）。
+    /// protobuf デコード → [`fandhe_ai_onnx_interop::onnx::external_data::
+    /// build_graph_with_external_data`]。パスをシェル展開・連結せず
+    /// そのまま渡す）。
+    ///
+    /// **external data 対応**（イシュー #2347・2026-09-28 ユーザー承認）:
+    /// [`OnnxModel::from_bytes`] と異なり、`data_location = EXTERNAL` の
+    /// initializer／Constant 属性テンソル（PyTorch の既定 exporter
+    /// `torch.onnx.export(..., dynamo=True)` が出力する companion
+    /// `.onnx.data` ファイル参照）を解決して読み込める。解決の基点
+    /// ディレクトリ（`base_dir`）は `path` の親ディレクトリ（`path` が
+    /// カレントディレクトリ相対の単純なファイル名で親コンポーネントを
+    /// 持たない場合は `.`）とし、`ExternalDataOptions::default()`
+    /// （合計サイズ上限 64 GiB・distinct ファイル数上限 4096）を使う。
+    /// external data を持たないモデルは従来どおり読み込める（`.onnx`
+    /// 本体のみのモデルは [`OnnxModel::from_bytes`] と同じグラフ構築
+    /// 経路〈`onnx::graph::build_graph`〉へ委譲される。`build_graph_
+    /// with_external_data` は external テンソルが 0 件の場合
+    /// `resolve_external_data` が早期 `Ok(())` を返すため `raw_data` の
+    /// 書き換えを一切行わない）。
+    ///
+    /// [`OnnxModel::from_bytes`] は external data を非対応のまま
+    /// fail-closed に拒否する（`GraphError::RawDataByteLenMismatch`。
+    /// 挙動不変。`onnx::external_data` モジュール冒頭コメント「不変条件」
+    /// 節・回帰テスト参照）。
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OnnxError> {
-        let bytes = std::fs::read(path.as_ref()).map_err(OnnxError::Io)?;
-        Self::from_bytes(&bytes)
+        let path = path.as_ref();
+        let bytes = std::fs::read(path).map_err(OnnxError::Io)?;
+        let model = decode_model(&bytes).map_err(map_decode_error)?;
+        let base_dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let graph =
+            build_graph_with_external_data(&model, base_dir, &ExternalDataOptions::default())
+                .map_err(map_graph_error)?;
+        Ok(Self { graph })
     }
 
     /// 学習済み [`crate::compat::Sequential`] から [`OnnxModel`] を構築

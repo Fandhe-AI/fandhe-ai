@@ -737,16 +737,27 @@ fn from_sequential_to_bytes_initializers_match_state_dict_bit_exact() {
     }
 }
 
-/// A6（イシュー #2347）: `data_location = EXTERNAL` を持つ initializer の
-/// バイト列を、facade の `OnnxModel::from_bytes`／`from_path` へそのまま
-/// 渡した場合、external data 対応（`onnx::external_data`。facade へは
-/// 非公開）を経由しないため従来どおり `OnnxError::InvalidModel` で拒否
-/// されることを固定する（`onnx::graph::decode_tensor` は `data_location`／
-/// `external_data` を一切参照しないという不変条件の facade 経由での確認。
-/// `crates/onnx-interop/tests/onnx_external_data.rs::
+/// A6（イシュー #2347・2026-09-28 `from_path` の external data 対応化に
+/// 伴い改訂）: `data_location = EXTERNAL` を持つ initializer のバイト列を
+/// facade の `OnnxModel::from_bytes` へそのまま渡した場合、external data
+/// 対応（`onnx::external_data`。`from_bytes` からは経由しない）を経由
+/// しないため従来どおり `OnnxError::InvalidModel`（`RawDataByteLenMismatch`
+/// 系）で拒否されることを固定する（`onnx::graph::decode_tensor` は
+/// `data_location`／`external_data` を一切参照しないという不変条件の
+/// facade 経由での確認。`crates/onnx-interop/tests/onnx_external_data.rs::
 /// bytes_entry_point_still_rejects_external_data_model` の facade 版）。
+///
+/// `OnnxModel::from_path` は 2026-09-28 のユーザー承認で external data
+/// 対応へ拡張済み（`docs/facade-onnx-import-exposure-decision.md` §6.3）
+/// のため、本テストの `from_path` 側は「companion `.onnx.data` が実在
+/// しない場合は解決を試みたうえで I/O エラーとして拒否される」ことを
+/// 確認する（`RawDataByteLenMismatch` とは異なるエラー種別になる点が
+/// `from_bytes` との挙動差）。`from_path` が実際に external data を解決
+/// できることの正例は `tests/interop_onnx_external_data.rs::
+/// from_path_resolves_external_data_and_matches_manifest_reference` を
+/// 参照。
 #[test]
-fn facade_rejects_external_data_model_bytes_and_path() {
+fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution() {
     let t = TensorProto {
         dims: vec![1],
         data_type: data_type::FLOAT,
@@ -789,10 +800,14 @@ fn facade_rejects_external_data_model_bytes_and_path() {
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let onnx_path = tmp_dir.join("model.onnx");
     std::fs::write(&onnx_path, &bytes).unwrap();
-    let err = OnnxModel::from_path(&onnx_path).expect_err("external data モデルは拒否されるはず");
+    // companion `w.onnx.data` を用意していないため、`from_path` は
+    // external data 解決を試みたうえで見つからず拒否される
+    // （`RawDataByteLenMismatch` ではなく I/O エラー系。`from_bytes` との
+    // 挙動差そのものが本テストの確認対象）。
+    let err = OnnxModel::from_path(&onnx_path).expect_err("companion ファイル不在で拒否されるはず");
     assert!(
-        matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
-        "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
+        !matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
+        "from_path は from_bytes と異なりバイト長不整合以外のエラーになるはず: {err:?}"
     );
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
