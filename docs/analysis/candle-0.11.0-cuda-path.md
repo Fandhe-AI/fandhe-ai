@@ -60,16 +60,25 @@ CUDA graph capture 可否・stream priority 等の細部は `new_stream()` と�
 **差分候補**として §9 へ引き継ぐ。
 
 cuBLAS handle は `from_context_and_stream`（`device.rs:392-410`）内で
-`CudaBlas::new(stream.clone())` により **1 回だけ**生成し `Arc` で共有する。
+`CudaBlas::new(stream.clone())` により、`Device::new_cuda(0)` の 1 呼び出し
+（＝ 1 `Device` インスタンス）ごとに **1 回だけ**生成し、その `Device`
+インスタンス内で `Arc` 共有する。candle 側は呼び出しをまたいだキャッシュは
+持たず、`Device::new_cuda(0)` を再度呼べば `CudaContext::new(ordinal)` から
+再生成される。
+
 本リポジトリの `STREAM_KIND_CACHE`（`crates/backend-cuda/src/device.rs:104`
-`resolve_stream_kind_for`）は `StreamKind::{Legacy, Created}` で挙動が分かれ、
-両者を一括りに「単一の `(ctx, stream)` ペアをキャッシュ」と呼ぶのは不正確
-である。`Created` の場合のみ 1 回目に生成した `Arc<CudaContext>`・
-`Arc<CudaStream>` の組をキャッシュへ保持し、以後の呼び出しへそのまま共有
-する（candle の cuBLAS handle 共有と同型なのはこちらの分岐のみ）。既定の
-`Legacy` の場合はストリーム**種別**の決定（この ordinal は Legacy である
-という事実）だけをキャッシュし、`ctx`・`stream` 本体は毎回の呼び出しで
-`CudaContext::new(ordinal)` → `ctx.default_stream()` により新規に取得し
+の `static`。解決本体は同ファイルの `resolve_stream_kind_for`）は
+`StreamKind::{Legacy, Created}` で挙動が分かれ、両者を一括りに「単一の
+`(ctx, stream)` ペアをキャッシュ」と呼ぶのは不正確である。`Created` の
+場合のみ、当該 ordinal に対して**最初に** `CudaDevice::new` が呼ばれた
+時点で生成した `Arc<CudaContext>`・`Arc<CudaStream>` の組をキャッシュへ
+保持し、以後その ordinal への `CudaDevice::new` 呼び出し全てへ同じ
+`Arc` をそのまま共有する（プロセス内・ordinal 単位で永続する点は candle
+の「`Device` インスタンス内で 1 回だけ生成」とは範囲が異なり、単純な
+同型ではない）。既定の `Legacy` の場合はストリーム**種別**の決定
+（この ordinal は Legacy であるという事実）だけをキャッシュし、`ctx`・
+`stream` 本体は毎回の呼び出しで `CudaContext::new(ordinal)` →
+`ctx.default_stream()` により新規に取得し
 直す（`ctx.default_stream()` はどの `CudaContext` インスタンスから呼んでも
 プロセス内で単一の NULL stream を指すため、`ctx` が呼び出しごとに別
 インスタンスでも問題にならない。`crates/backend-cuda/src/device.rs` の
