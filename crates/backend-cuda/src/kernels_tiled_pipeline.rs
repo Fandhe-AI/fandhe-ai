@@ -96,6 +96,11 @@
 
 use std::sync::LazyLock;
 
+// イシュー #2299: `CudaError` を返す関数はいずれも unit test または
+// `internal-diagnostics` feature 限定（ステージ数可変のオンデマンド生成
+// 系）のため、feature 無効かつ非 test ビルドでは import 自体が dead
+// code になる。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 use crate::error::CudaError;
 
 /// ブロックタイル M（C の行方向。64）。
@@ -237,6 +242,7 @@ static TILED_PIPELINE_F32_SOURCE: LazyLock<String> =
 /// （`examples/gemm_tiled_pipeline_bench.rs`）が 3 vs 4 stage を比較する
 /// ためにオンデマンドで呼ぶ（実装計画 §5「stages=4 版はベンチ用途に限り
 /// オンデマンドでコンパイルする」）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
     if !(TP_MIN_STAGES..=TP_MAX_STAGES).contains(&stages) {
         return Err(CudaError::InvalidKernelConfig {
@@ -299,6 +305,7 @@ fn render_source(stages: u32) -> String {
 /// [`TP_CP_ASYNC_HELPER`]／[`TP_TILE_CORE`] を共有し、CTA→出力タイルの
 /// 割り当て部分（[`TP_KERNEL_PERSISTENT_PREFIX`]／
 /// [`TP_KERNEL_PERSISTENT_SUFFIX`]）のみが異なる。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 fn render_persistent_source(stages: u32) -> String {
     format!(
         "{defines}{helper}{prefix}{core}{suffix}",
@@ -317,10 +324,12 @@ fn render_persistent_source(stages: u32) -> String {
 /// からのみ呼ばれる（`new` 自体は本番既定経路のためコンパイルしない。
 /// [`TP_KERNEL_PERSISTENT_PREFIX`] ドキュメンテーションコメント「位置
 /// づけ・非結線」参照）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_persistent_f32_source() -> &'static str {
     &TILED_PIPELINE_PERSISTENT_F32_SOURCE
 }
 
+#[cfg(any(test, feature = "internal-diagnostics"))]
 static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
     LazyLock::new(|| render_persistent_source(TP_DEFAULT_STAGES));
 
@@ -328,6 +337,7 @@ static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
 /// 版カーネルソースを生成する（[`tiled_pipeline_f32_source_with_stages`]
 /// の persistent 版。`examples/gemm_tiled_pipeline_persistent_bench.rs`
 /// が段数比較のためオンデマンドで呼ぶ）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_persistent_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
     if !(TP_MIN_STAGES..=TP_MAX_STAGES).contains(&stages) {
         return Err(CudaError::InvalidKernelConfig {
@@ -593,6 +603,7 @@ const TP_KERNEL_SUFFIX: &str = "}\n";
 ///   [`TP_TILE_CORE`] 内で完結する（drain `wait_group 0` により次
 ///   タイル開始時点で未完了の cp.async グループが残らない）ため、
 ///   タイル境界をまたいでも会計が破綻しない。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_persistent_f32(
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -658,6 +669,7 @@ const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_til
 /// の drain barrier 直後にタイル取得ループの `}` を、続けて関数の `}`
 /// を閉じる。非 persistent 版の [`TP_KERNEL_SUFFIX`] とは異なる文字列
 /// になる）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
 
 // =====================================================================
@@ -708,6 +720,7 @@ const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
 ///   （`.claude/rules/coding-rust.md`）ためカーネル側でも `partials` への
 ///   書き込み直前に `slot * (TP_BM*TP_BN) + local` を本値と突き合わせる
 ///   （[`TP_SK_TILE_CORE`] 参照）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_streamk_f32(
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -824,6 +837,7 @@ const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipel
 ///   同一スロットへの書き手は本サブレンジのみ。境界外要素は cp.async の
 ///   ゼロ充填ロード由来の 0 が書かれるだけで、[`TP_SK_FIXUP_KERNEL`] の
 ///   guarded store が読み捨てる）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_SK_TILE_CORE: &str = r#"            int tid = threadIdx.x;
             int num_threads = blockDim.x;
             int tx = tid % TP_THREADS_X;
@@ -962,6 +976,7 @@ const TP_SK_TILE_CORE: &str = r#"            int tid = threadIdx.x;
 
 /// [`TP_SK_KERNEL_PREFIX`]／[`TP_SK_TILE_CORE`] の `for (int sub ...)`
 /// ループ・タイル取得 `for (;;)` ループ・関数を閉じる（`}}}\n`）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_SK_KERNEL_SUFFIX: &str = "        }\n    }\n}\n";
 
 /// [`TP_SK_FIXUP_KERNEL`] のブロックあたりスレッド数（1 タイル分の
@@ -976,6 +991,7 @@ const TP_SK_KERNEL_SUFFIX: &str = "        }\n    }\n}\n";
 /// `TP_SK_FIXUP_KERNEL` 内のリテラルも合わせて変更すること。
 /// `tiled_pipeline_streamk_fixup_block_dim_matches_kernel_source_literal`
 /// が両者の食い違いを検出する）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub const TP_SK_FIXUP_BLOCK_THREADS: u32 = 256;
 
 /// Stream-K fixup カーネル（部分和の固定順序直列還元。イシュー #1358）。
@@ -1033,6 +1049,7 @@ pub const TP_SK_FIXUP_BLOCK_THREADS: u32 = 256;
 /// ブロックあたりスレッド数は [`TP_SK_FIXUP_BLOCK_THREADS`] 固定
 /// （`crate::gemm::CudaGemm::launch_tiled_pipeline_streamk_f32` の
 /// `block_dim` と単一の真実源を共有する）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_SK_FIXUP_KERNEL: &str = r#"
 extern "C" __global__ void gemm_tiled_pipeline_streamk_fixup_f32(
     const float* __restrict__ partials,
@@ -1102,6 +1119,7 @@ extern "C" __global__ void gemm_tiled_pipeline_streamk_fixup_f32(
 /// は（LRU がヒットしていれば）モジュール再コンパイルなしで
 /// `func_name` 違いの関数ロードのみになる
 /// （`crate::gemm::CudaGemm::compile_tiled_pipeline_streamk_variant` 参照）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 fn render_streamk_source(stages: u32) -> String {
     format!(
         "{defines}{helper}{prefix}{core}{suffix}{fixup}",
@@ -1117,16 +1135,19 @@ fn render_streamk_source(stages: u32) -> String {
 /// ステージ数（[`TP_DEFAULT_STAGES`]）固定の Stream-K 版カーネルソース。
 /// 初回アクセス時に 1 回だけレンダーし、以降はキャッシュ済み文字列参照を
 /// 返す（[`tiled_pipeline_persistent_f32_source`] と同じ判断）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_streamk_f32_source() -> &'static str {
     &TILED_PIPELINE_STREAMK_F32_SOURCE
 }
 
+#[cfg(any(test, feature = "internal-diagnostics"))]
 static TILED_PIPELINE_STREAMK_F32_SOURCE: LazyLock<String> =
     LazyLock::new(|| render_streamk_source(TP_DEFAULT_STAGES));
 
 /// 任意のステージ数（[`TP_MIN_STAGES`]..=[`TP_MAX_STAGES`]）の Stream-K
 /// 版ソースをオンデマンド生成する（[`tiled_pipeline_persistent_f32_source_with_stages`]
 /// と同じ範囲検証）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_streamk_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
     if !(TP_MIN_STAGES..=TP_MAX_STAGES).contains(&stages) {
         return Err(CudaError::InvalidKernelConfig {
@@ -1200,6 +1221,7 @@ pub const TP_TMA_A_BOX_BYTES: u32 = TP_BM * TP_BK * 4;
 /// （`TP_BK*TP_BN*4`）。
 pub const TP_TMA_B_BOX_BYTES: u32 = TP_BK * TP_BN * 4;
 /// 1 ステージあたりの mbarrier `expect_tx`（A+B 合計転送予定バイト数）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub const TP_TMA_EXPECT_TX_BYTES: u32 = TP_TMA_A_BOX_BYTES + TP_TMA_B_BOX_BYTES;
 /// TMA box の smem 側整列（バイト）。`tests/tma_probe_real_device.rs`
 /// の既存プローブは `CUtensorMap` の ABI 整列要件として
@@ -1217,11 +1239,13 @@ pub const TP_TMA_EXPECT_TX_BYTES: u32 = TP_TMA_A_BOX_BYTES + TP_TMA_B_BOX_BYTES;
 /// 512 バイト境界に確実に整列することを機械保証する（`None` 腕は恒等
 /// アクセスのためこの整列に依存しないが、`B64` 腕の仮説検証を整列崩れ
 /// による誤帰属から守るため両腕とも同じ整列で確保する）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub const TP_TMA_SMEM_ALIGN: u32 = 1024;
 /// mbarrier ポーリングの上限回数（`tests/tma_probe_real_device.rs::
 /// TMA_POLL_LIMIT` と同値。実測チューニング値ではなくハング防止の
 /// 安全マージン。本ファイル冒頭コメント「REQ-8」節と同じ fail-closed
 /// 方針: 上限到達時はタイムアウトとして NaN センチネルへ切り替える）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub const TP_TMA_POLL_LIMIT: u32 = 1_000_000;
 
 // コンパイル時契約検査。A box の内側次元（K 方向）バイト幅が 64B
@@ -1262,6 +1286,7 @@ const _: () = assert!(
 /// `internal-diagnostics` feature 限定 opt-in API のパラメータとしての
 /// み露出する（本番既定経路は非到達）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub enum TmaSwizzleA {
     /// 恒等アクセス（正しさ確認用の fail-safe ベースライン）。
     None,
@@ -1270,6 +1295,7 @@ pub enum TmaSwizzleA {
     B64,
 }
 
+#[cfg(any(test, feature = "internal-diagnostics"))]
 impl TmaSwizzleA {
     /// カーネルソースへ埋め込む `#define TP_TMA_SWZ_A_MODE` の値
     /// （`0`＝`None`・`1`＝`B64`）。
@@ -1305,6 +1331,7 @@ pub fn tma_swizzled_chunk_a(row: u32, kk: u32) -> u32 {
 
 /// [`render_tma_source`] 用の TMA 固有 `#define` 群
 /// （[`render_defines`] が生成する共通定義に続けて連結する）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 fn render_tma_defines(swizzle: TmaSwizzleA) -> String {
     format!(
         "#define TP_TMA_A_BOX_BYTES {a_box}\n\
@@ -1324,6 +1351,7 @@ fn render_tma_defines(swizzle: TmaSwizzleA) -> String {
 }
 
 /// TMA 版カーネルソース全文を生成する（[`render_source`] の TMA 版）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn render_tma_source(stages: u32, swizzle: TmaSwizzleA) -> String {
     format!(
         "{defines}{tma_defines}{helper}{prefix}{core}{suffix}",
@@ -1345,6 +1373,7 @@ pub fn render_tma_source(stages: u32, swizzle: TmaSwizzleA) -> String {
 /// TMA_PROBE_KERNEL_CTA` 冒頭の typedef と同一（NVRTC は `cuda.h` を
 /// 同梱しないため代替が必要という同じ理由。当該ファイルのコメント
 /// 参照）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_TMA_HELPER: &str = r#"
 typedef struct __align__(128) {
     unsigned long long opaque[16];
@@ -1367,6 +1396,7 @@ typedef struct __align__(128) {
 /// （REQ-8・A03。設計 doc §7）。`a`/`b`（生ポインタ）はカーネル内で
 /// 読まないが、cudarc のバッファ使用追跡を既存 cp.async 版と同じに保つ
 /// ため引数に残す。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_TMA_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_tma_f32(
     const __grid_constant__ CUtensorMap a_map,
     const __grid_constant__ CUtensorMap b_map,
@@ -1419,6 +1449,7 @@ const TP_TMA_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_tm
 ///   load_stage` となる `STAGES` 反復前の読み取り）を読み終えている
 ///   ことを保証する（[`TP_TILE_CORE`] の cp.async 版と同じ論証の
 ///   TMA 版）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_TMA_TILE_CORE: &str = r#"    int tid = threadIdx.x;
     int tx = tid % TP_THREADS_X;
     int ty = tid / TP_THREADS_X;
@@ -1581,6 +1612,7 @@ const TP_TMA_TILE_CORE: &str = r#"    int tid = threadIdx.x;
 "#;
 
 /// TMA 版カーネル関数の閉じ括弧。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP_TMA_SUFFIX: &str = "}\n";
 
 /// 本番結線が既定でコンパイルする [`TP_DEFAULT_STAGES`] 固定・`None`／
@@ -1588,6 +1620,7 @@ const TP_TMA_SUFFIX: &str = "}\n";
 /// feature 限定 opt-in API 〈`crate::gemm::CudaGemm::
 /// compile_tiled_pipeline_tma_variant`〉からのみ呼ばれる。`new` 自体は
 /// 本番既定経路のためコンパイルしない）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_tma_f32_source(swizzle: TmaSwizzleA) -> &'static str {
     match swizzle {
         TmaSwizzleA::None => &TILED_PIPELINE_TMA_F32_SOURCE_NONE,
@@ -1595,8 +1628,10 @@ pub fn tiled_pipeline_tma_f32_source(swizzle: TmaSwizzleA) -> &'static str {
     }
 }
 
+#[cfg(any(test, feature = "internal-diagnostics"))]
 static TILED_PIPELINE_TMA_F32_SOURCE_NONE: LazyLock<String> =
     LazyLock::new(|| render_tma_source(TP_DEFAULT_STAGES, TmaSwizzleA::None));
+#[cfg(any(test, feature = "internal-diagnostics"))]
 static TILED_PIPELINE_TMA_F32_SOURCE_B64: LazyLock<String> =
     LazyLock::new(|| render_tma_source(TP_DEFAULT_STAGES, TmaSwizzleA::B64));
 

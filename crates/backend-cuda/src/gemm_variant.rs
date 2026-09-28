@@ -98,6 +98,14 @@ pub enum GemmVariantKind {
     /// variant`] は本バリアントを返さない**（イシュー #1100 で選択候補
     /// から撤退。カーネル・型自体は `run_split_k_forced`〈診断専用〉が
     /// 引き続き参照するため保持する）。
+    ///
+    /// イシュー #2299: 本モジュールは unit test からも `any(test,
+    /// feature)` で参照されるが、本バリアントを構築するのは
+    /// `internal-diagnostics` feature 限定の `run_split_k_forced`
+    /// （`gemm_variant_selection.rs`）のみで、unit test（`matches!` に
+    /// よる非該当の確認のみ）は構築しない。feature 無効時は never
+    /// constructed のため feature 限定で個別に gate する。
+    #[cfg(feature = "internal-diagnostics")]
     SplitK {
         /// K 方向の分割数。常に 2 以上 `SPLITK_MAX_SPLITS` 以下の 2 冪。
         num_splits: u32,
@@ -326,6 +334,22 @@ pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), Cu
 mod tests {
     use super::*;
 
+    // イシュー #2299: `GemmVariantKind::SplitK` は `internal-diagnostics`
+    // feature 限定で gate 済み（本モジュール冒頭「SplitK 撤退の判断」参照）。
+    // 「SplitK が選ばれない」ことを検証する下記テストは feature 無効時も
+    // 実行したいが、feature 無効ビルドではバリアント自体が存在せず
+    // `matches!` パターンが解決できない。feature ごとに実装を分けた
+    // ヘルパーへ判定を委譲し、feature 無効時は常に `false`（SplitK は
+    // そもそも存在しないので非該当）を返す。
+    #[cfg(feature = "internal-diagnostics")]
+    fn is_split_k(variant: GemmVariantKind) -> bool {
+        matches!(variant, GemmVariantKind::SplitK { .. })
+    }
+    #[cfg(not(feature = "internal-diagnostics"))]
+    fn is_split_k(_variant: GemmVariantKind) -> bool {
+        false
+    }
+
     // --- num_sms 判定不能・境界条件は常に Simple ---
 
     #[test]
@@ -380,7 +404,7 @@ mod tests {
         let variant = select_f32_gemm_variant(128, 128, 512, Some(64), true);
         // k=512 は SPLITK_MIN_K(1024) 未満だった旧条件でも非該当だった
         // 形状だが、撤退後は SplitK 自体がそもそも選ばれない。
-        assert!(!matches!(variant, GemmVariantKind::SplitK { .. }));
+        assert!(!is_split_k(variant));
     }
 
     #[test]
@@ -389,7 +413,7 @@ mod tests {
         // のため旧条件でも K 支配形状ではなかった。撤退後は SplitK が
         // そもそも選ばれない。
         let variant = select_f32_gemm_variant(128, 128, 100, Some(64), true);
-        assert!(!matches!(variant, GemmVariantKind::SplitK { .. }));
+        assert!(!is_split_k(variant));
     }
 
     #[test]

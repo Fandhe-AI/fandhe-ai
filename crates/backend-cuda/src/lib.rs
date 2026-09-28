@@ -326,7 +326,16 @@ pub mod graph;
 // `gemm.rs` の opt-in コンストラクタ（`internal-diagnostics` feature
 // 限定）から参照される。本番既定経路（`CudaGemm::new`）へは未結線
 // （実装計画 §3・§8 参照）。
+// イシュー #2299: 純関数の大半はモジュール自身の unit test からも呼ばれる
+// ため、feature 無効時の `cargo test`（build-no-cuda-toolkit ジョブ・
+// 検証ゲート）でも網羅を保つ必要がある。`any(test, feature)` で両モジュール
+// を gate し、feature が無効でも unit test 経路ではコンパイル対象にする
+// （`internal-diagnostics` 無効時に unit test からも到達しない個別項目
+// 〈`GemmVariantKind::SplitK` 等〉は、モジュール内で項目単位に feature の
+// みの cfg を重ねて絞り込む）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 mod gemm_variant;
+#[cfg(any(test, feature = "internal-diagnostics"))]
 mod kernels_gemm_variants;
 // イシュー #1035: 上記 2 モジュールを実際に NVRTC コンパイル・起動する
 // opt-in 実行経路。`internal-diagnostics` feature（既定 off）限定

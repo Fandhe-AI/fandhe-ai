@@ -27,7 +27,13 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream};
+use cudarc::driver::{CudaFunction, CudaStream};
+// イシュー #2299: `CudaSlice` は診断専用入口（`launch_tf32x3_c_raw`／
+// `download_f32_raw`。`internal-diagnostics` feature 限定）でのみ型として
+// 現れる。feature 無効時は import 自体が dead code になるため、
+// `gemm_mma.rs` と同じ判断で import を feature 個別に gate する。
+#[cfg(feature = "internal-diagnostics")]
+use cudarc::driver::CudaSlice;
 
 use crate::context_cache;
 use crate::device::CudaDevice;
