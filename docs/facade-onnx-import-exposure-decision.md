@@ -513,7 +513,9 @@ set_cuda_onnx_gpu_execution_enabled`／`set_metal_onnx_gpu_execution_enabled`
 （2026-09-28 ユーザー承認により既定 **64 GiB** へ改定。当初の 4 GiB
 暫定値から更新）が確保前検査の上限として、`ExternalDataOptions::
 max_external_files`（既定 4096。2026-09-28 ユーザー承認で正式な既定値として確定）が
-distinct ファイル数（fd 枯渇対策。A04）の上限として機能する（詳細は
+distinct ファイル数（open／`fstat` 回数の有界化。A04。external data
+ファイルのハンドルは 1 つずつ開いて閉じるため同時保持 fd 数はこの値に
+依存しない〈PR #2348 codex P1 是正〉）の上限として機能する（詳細は
 `docs/onnx-external-data-decision.md`）。
 
 **facade 公開は 2026-09-28 にユーザー承認を得て実施済み**

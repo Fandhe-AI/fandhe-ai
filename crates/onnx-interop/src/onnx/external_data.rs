@@ -318,8 +318,8 @@ pub enum ExternalDataError {
     /// の「本番経路で `unwrap()`/`expect()` を使わない」方針に従い、
     /// `panic!`／`unreachable!`／`.expect()` の代わりにこの型付きエラーで
     /// 表面化させる（`plan` と `load`／書き戻しの間の内部不変条件——
-    /// `plan` が登録したファイルキー・slot は `load`／書き戻し時にも
-    /// 存在するはず——が崩れた場合のみ到達する）。
+    /// `plan` が記録した location 添字・slot・`base_dir` ハンドルは
+    /// `load`／書き戻し時にも有効なはず——が崩れた場合のみ到達する）。
     Internal { reason: &'static str },
 }
 
@@ -510,8 +510,8 @@ struct OpenFile {
 /// 呼び出し自体が検証後の再解決だった）。
 ///
 /// `base_dir` のディレクトリ fd は [`open_base_dir`] で 1 度だけ開き、
-/// `plan` が全テンソル分を通して再利用する（呼び出しごとに開き直さない。
-/// advisor 指摘）。
+/// `plan`（全テンソル分の初回解決）と `load`（location ごとの再 open）が
+/// 通して再利用する（呼び出しごとに開き直さない。advisor 指摘）。
 #[cfg(unix)]
 mod no_follow_open {
     use std::ffi::{CString, OsStr};
@@ -525,8 +525,8 @@ mod no_follow_open {
     use std::os::unix::io::{AsRawFd, FromRawFd};
     use std::path::Path;
 
-    /// `base_dir_canonical` をディレクトリ fd として 1 度だけ開く。`plan`
-    /// が全 external テンソル分を通してこの fd を再利用する。`O_NONBLOCK`
+    /// `base_dir_canonical` をディレクトリ fd として 1 度だけ開く。`plan`・
+    /// `load` が全 external テンソル分を通してこの fd を再利用する。`O_NONBLOCK`
     /// は FIFO 混入時の無期限ハング防止（下記 `openat_no_follow` と同じ
     /// 理由）。`OpenOptionsExt::custom_flags` は安全な std API のため
     /// `unsafe` を要しない。
