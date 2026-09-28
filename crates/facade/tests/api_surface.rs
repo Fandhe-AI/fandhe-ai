@@ -5390,6 +5390,9 @@ fn __probe(_: &dyn Module, _: ModuleList, _: &Sequential) {}";
 /// 許容する。別名（`as Layer` 等）の前のソース側の葉で判定するため、
 /// `pub use fandhe_ai_autodiff::nn::Module as Layer;` のような別名
 /// 再エクスポートも検出する。
+///
+/// #2133 のクローズ後も承認は得られておらず、#2338 で保留を再追跡中
+/// （`docs/facade-nn-module-exposure-decision.md` §13）。
 #[test]
 fn facade_does_not_reexport_nn_module_or_containers() {
     let src_dir = facade_crate_root().join("src");
@@ -5491,6 +5494,9 @@ fn facade_does_not_reexport_nn_module_or_containers_detects_each_category() {
 /// {..., Module, ...}`（非公開 import）・`Box<dyn Module>`（型参照）・
 /// `compat/sequential.rs` 自身の `pub struct Sequential` は正当な既存形
 /// のため許容する。
+///
+/// #2133 のクローズ後も承認は得られておらず、#2338 で保留を再追跡中
+/// （`docs/facade-nn-module-exposure-decision.md` §13）。
 #[test]
 fn facade_declares_no_nn_module_items() {
     let src_dir = facade_crate_root().join("src");
@@ -5581,6 +5587,9 @@ fn facade_declares_no_nn_module_items_detects_each_category() {
 /// `compat_sequential_does_not_expose_rnn_add_methods` と同型。
 /// `docs/facade-nn-module-exposure-decision.md` §9 で `add_module` は
 /// スコープ外と明記済み）。
+///
+/// #2133 のクローズ後も承認は得られておらず、#2338 で保留を再追跡中
+/// （`docs/facade-nn-module-exposure-decision.md` §13）。
 #[test]
 fn compat_sequential_does_not_expose_module_add_methods() {
     let compat_dir = facade_crate_root().join("src/compat");

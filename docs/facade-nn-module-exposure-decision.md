@@ -286,3 +286,103 @@ modules`）も #2133 の保留を部分的に担っていることを doc commen
 本 PR のマージで #2133 は COMPLETED となる（前例 #2063・#2064 と同じ）。
 承認取得後は本節の事前提示に基づき、新規イシュー（または #2133 の
 reopen）で経路 B（公開実施）を別 PR で行う。
+
+## 13. facade 公開の再追跡記録（イシュー #2338）
+
+確認日時 2026-09-28・main HEAD `d1b2dd47`（`git checkout -B` 時点の
+`origin/main`）。イシュー #2338「`nn::Module`・`ModuleList` の facade
+公開が未実施のまま #2133 がクローズされた件を追跡し直す」の実装着手
+時に、承認状況を再確認した。
+
+### 13.1 確認結果（承認は存在しない）
+
+`gh issue view` で #2131・#2132・#2133・#2338 のコメントを確認した:
+
+| issue | コメント数 | 内容 |
+|---|---|---|
+| #2131（親） | 0 | ― |
+| #2132（本 doc の対応 issue） | 0 | ― |
+| #2133（実装。クローズ済み） | 1 | 所有者が付けた「未実施分は #2338 で追跡します」の定型コメント 1 件のみ。§10 承認事項への言及はなし |
+| #2338（本イシュー） | 0 | ― |
+
+PR #2230（#2132 の設計記録 PR）のコメント・レビューも確認した。
+コメント 0 件・レビュー 5 件はすべて `github-actions`（codex-review）
+による自動レビューで、所有者による明示的な承認コメントは存在しない。
+
+§10 承認事項 1〜6 の状況は次のとおり、いずれも未承認のまま変わって
+いない。
+
+| # | 承認事項 | 状況 |
+|---|---|---|
+| 1 | 案 B の採否（または案 A／D の指名） | 未承認 |
+| 2 | facade trait の defaulted メソッド集合（6 件）と命名契約の踏襲 | 未承認 |
+| 3 | facade 側 `ModuleList`／`Sequential` の新設可否 | 未承認 |
+| 4 | 独自層 → autodiff コンテナ橋渡しの方式 | 未承認 |
+| 5 | #2133 本文の実装形更新 | 未承認 |
+| 6 | #2134／#2137 への鏡写し要件 | 未承認 |
+
+### 13.2 #2133 クローズの経緯（是正）
+
+#2133 は「誤ってクローズされた」のではなく、PR #2233 によって
+**意図的に** COMPLETED としてクローズされた。これは前例 #2063
+（PR #2208）・#2064（PR #2212）と同じ運用（保留固定を機械的なガード
+で完了させ、承認待ち事項は doc へ事前提示として記録したうえで issue
+自体は閉じる）であり、本 doc §12 末尾にもその方針が明記されている。
+
+実際の欠陥は運用そのものではなく、**この運用の結果として「facade
+公開面拡張がユーザー承認待ちである」ことを追跡する open な issue が
+残らなかったこと**である。#2338 はその追跡先として機能する。今後
+同様の保留 PR で issue をクローズする際は、承認待ち事項を追う別の
+open issue（今回でいう #2338）を残すか、親 issue（#2131）側に承認
+待ち一覧を集約する運用が望ましい。
+
+### 13.3 #2338 の AC3 と本 doc §1.3・§5 の矛盾
+
+#2338 の受入条件 3（AC3）は「`Module`・`ModuleList` を facade へ
+再エクスポートする」（案 A）という文言のままである。しかし本 doc
+§1.3・§5 は案 A を **不採用**と判定済みである
+（`Module::forward` が生の `fandhe_ai_autodiff::Tape` を引数に取る
+ため、`fandhe-ai` のみに依存する利用者は `impl Module for MyLayer`
+を書けない構造制約による）。
+
+したがって、承認事項 1（§10）が承認された場合の実装形は AC3 の文言
+どおりの素の再エクスポートではなく、**案 B**（facade 独自の薄い
+trait とコンテナの新設。§5・§6）になる見込みである。本節はこの
+矛盾を記録するのみとし、AC3 の文言を書き換えて「解消」する対応は
+行わない（イシュー本文の編集は本 doc の対象外）。
+
+### 13.4 保留固定の検証結果（HEAD `d1b2dd47` で合格）
+
+§12 の否定ガード群が HEAD でも有効であることを、本イシューの実装
+着手時に再実行して確認した（全件 pass）:
+
+- `cargo test -p fandhe-ai --test api_surface`（`nn_module`／
+  `facade_declares_no_nn_module`／`compat_sequential_does_not_expose_
+  module_add`／`nn_mod_declares_only_rnn_submodule` を含む対象テスト
+  群）: `facade_does_not_reexport_nn_module_or_containers`（+
+  `_detects_each_category`）・`facade_declares_no_nn_module_items`
+  （+ `_detects_each_category`）・`compat_sequential_does_not_expose_
+  module_add_methods`（+ `_detects_offense`）・
+  `nn_module_hold_doctest_globs_all_pub_modules`・
+  `nn_module_hold_doctest_probe_body_matches_fixed_contract`・
+  `nn_mod_declares_only_rnn_submodule` の計 11 件すべて pass
+- `cargo test -p fandhe-ai --doc`: `NnModuleHoldDoctestGuard` を含む
+  46 件の doctest すべて pass
+
+1 件も fail していないため、ガードの退行是正は不要だった。
+
+### 13.5 承認取得後に実施する変更範囲
+
+§12 末尾の「承認取得後（経路 B）に実施する変更範囲」をそのまま参照
+する（本節では重複して書かない）。本イシュー（#2338）でもコード
+変更（`crates/facade/src/**`・`crates/autodiff/src/**`）は一切行わず、
+`crates/facade/tests/api_surface.rs` の対象 3 テストの doc コメントへ
+本節への参照を 1 行追記したのみである。
+
+### 13.6 本 PR での #2338 の扱い
+
+本 PR は #2338 を **close しない**。§13.2 で記録したとおり、
+「承認待ち事項を追跡する open な issue が消える」という #2338 発生
+の原因そのものを再発させないための判断であり、前例（#2063・#2064
+→ #2133）の運用から意図的に外れる。PR 本文にもこの判断理由を明記
+する。
