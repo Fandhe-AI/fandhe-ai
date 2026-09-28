@@ -850,3 +850,56 @@ override 配線を追加した（`Pool2dParams` が兄弟イシュー #1728 で
   `out_shape` の積は `N=0` で `0` になり `H·W` 自体の overflow を
   検出できないため、`N`／`out_numel` に依存せず `input` の `H`／`W`
   を直接見て検査する
+
+## 18. `max_pool2d` の索引域検査是正（イシュー #2297）
+
+§17 で `adaptive_max_pool2d` に確定した一般原則（索引表現可能範囲
+検査は出力が空かどうかの判定より前に、`N`／`out_numel` に依存せず
+`input` の `H`／`W` を直接見て行う）を、`max_pool2d`（CPU
+`backend-cpu::ops::CpuBackendOps::max_pool2d`・`backend-cpu::
+pooling::max_pool2d`、CUDA `backend-cuda::ops::CudaBackendOps::
+max_pool2d`、Metal `backend-metal::ops::MetalBackendOps::
+max_pool2d`）にも横展開した。是正前は 3 バックエンドとも「出力が
+空（例: 空バッチ `N=0`）なら空テンソルを即返す」早期 return が索引域
+検査より前にあり、tape 経路 `Var::max_pool2d`（`pool2d_out_shape` の
+直後に `H·W` を検査）と契約が食い違っていた。
+
+- **CPU**: `backend-cpu::pooling::max_pool2d` 本体・`ops.rs::
+  CpuBackendOps::max_pool2d` の双方で、既存の `pooling::
+  check_max_index_range`（`adaptive_max_pool2d` と共用）を早期
+  return より前に呼ぶよう変更した（新規関数の追加なし）
+- **CUDA／Metal**: 既存のカーネル API 層の索引域検査
+  （CUDA `pooling::validate_index_domain`・Metal `pooling_model::
+  derive_pool_dims` の `plane_in > i32::MAX` 検査）は同じ条件を
+  `CudaError::PoolingSizeLimitExceeded`／`PoolingPrepareError::
+  SizeLimitExceeded` へ写像し、`ops.rs::map_pooling_error` 経由で
+  `BackendError::Unsupported`（ホストフォールバック向け）へ落とす
+  設計のため、そのままでは CPU・tape 経路と同じ `ShapeError`
+  （`ElementCountOverflow`／`IndexRangeOverflow`）にならない。この
+  ため CPU の `check_max_index_range` と同じ条件・同じ 2 variant を
+  返す純関数を各クレートへ複製した（`backend-cuda::pooling::
+  check_max_index_range`・`backend-metal::pooling_model::
+  check_max_index_range`。本クレートはいずれも `backend-cpu` へ
+  依存しないため単一情報源にできず、`.claude/rules/delegation-
+  impl.md` のクレート境界に従い複製する）。`ops.rs::max_pool2d` が
+  `pool2d_out_shape` の直後・出力が空かどうかの早期 return より前で
+  この新関数を呼ぶ。カーネル API 層の既存検査（`validate_index_
+  domain`・`derive_pool_dims`）はそのまま残し多層防御とする
+- **観測可能な変化**: CUDA／Metal の `max_pool2d` を直接呼び、非空で
+  `H·W > i32::MAX` の入力を渡した場合の結果が `Unsupported` から
+  `IndexRangeOverflow` に変わる（索引域外の入力なので契約の範囲内・
+  確保前に止まるため安全側）。`Var::max_pool2d` 経由では事前検査に
+  より従来も `IndexRangeOverflow` だったため、利用者から見た変化は
+  ない
+- **対象外**: `avg_pool2d`／`adaptive_avg_pool2d` は索引を返さない
+  ため本是正の対象外（CUDA／Metal の avg 系は無変更）
+- **スコープ外（`.claude/rules/out-of-scope-tracking.md` 対象）**:
+  autodiff 側にも同じ類型が残っている。`crates/autodiff/src/nn/
+  module.rs::MaxPool2d::forward_host`／`MaxPool1d::forward_host` は
+  `H·W` を事前検査せずに `grad::max_pool2d_with_fallback` へ渡す。
+  `grad::max_pool2d_with_fallback` には `adaptive_max_pool2d_with_
+  fallback` が #2280 で得た合流点の検査がない。`eval::max_pool2d`
+  も早期 return が先にある。本 PR で CPU／CUDA／Metal 経由の
+  `forward_host` は backend 側で拒否されるようになるが、
+  `Unsupported` を返すバックエンドから入るホストフォールバック
+  経路には残る

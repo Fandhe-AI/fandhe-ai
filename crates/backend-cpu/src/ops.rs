@@ -1908,9 +1908,16 @@ impl BackendOps for CpuBackendOps {
     }
 
     /// `BackendOps::max_pool2d` の CPU 実装（イシュー #1728）。
-    /// [`pool2d_out_shape`] で `input.shape()`／`params` を再検査して
-    /// から `pooling::max_pool2d` へ委譲する（`im2col`／`col2im` と
-    /// 同じ二重検査方針）。
+    /// [`pool2d_out_shape`] で `input.shape()`／`params` を再検査し、
+    /// さらに `pooling::check_max_index_range`（非公開）で
+    /// `H·W <= i32::MAX`（索引は `i32` のため）を検査してから
+    /// `pooling::max_pool2d` へ委譲する（`im2col`／`col2im` と同じ
+    /// 二重検査方針）。索引範囲検査は `out_shape`（`N` に依存し
+    /// 空バッチで積が `0` になりうる）より前に `input` の `H`／`W`
+    /// を直接見て行う（`N=0` でも `H·W` が `i32::MAX` 超なら拒否する
+    /// 契約を tape 経路・`adaptive_max_pool2d` と揃える。イシュー
+    /// #2297）。`pooling::max_pool2d` 自身も同じ検査を独立に行う
+    /// 多層防御（`pooling.rs` モジュール doc 参照）。
     fn max_pool2d(
         &self,
         input: &Tensor<f32>,
@@ -1918,6 +1925,12 @@ impl BackendOps for CpuBackendOps {
     ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
         let out_shape =
             pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        let in_shape = input.shape();
+        pooling::check_max_index_range(
+            in_shape.get(2).copied().unwrap_or(0),
+            in_shape.get(3).copied().unwrap_or(0),
+        )
+        .map_err(BackendError::ShapeMismatch)?;
         pooling::max_pool2d(input, params, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 

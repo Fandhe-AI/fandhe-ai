@@ -162,6 +162,49 @@ fn compute_out_len(
     })
 }
 
+/// 索引の表現可能範囲検査（`H·W <= i32::MAX`。`BackendOps::
+/// max_pool2d` の索引は `Tensor<i32>` のため。イシュー #2297）。
+/// [`derive_pool_dims`] の `plane_in > i32::MAX` 検査は同じ条件を
+/// `PoolingPrepareError::SizeLimitExceeded` へ写像し `ops.rs::
+/// map_pooling_error` 経由で `BackendError::Unsupported`（ホスト
+/// フォールバック向け）へ落とすのに対し、本関数は
+/// `backend-cpu::pooling::check_max_index_range`・`backend-cuda::
+/// pooling::check_max_index_range`・tape 経路（`Var::max_pool2d`）と
+/// 同じ `ShapeError`（`ElementCountOverflow`／`IndexRangeOverflow`）を
+/// そのまま返す。`ops.rs::max_pool2d`（macOS 限定）が
+/// `pool2d_out_shape` の直後・出力が空（`out_shape.contains(&0)`）
+/// かどうかの早期 return より前で呼ぶことで、空バッチ（`N=0`）でも
+/// `H·W` が `i32::MAX` を超える契約違反を見逃さない（`out_shape` の
+/// 積は `N=0` のとき `0` になり `pool2d_out_shape` の
+/// `checked_numel_for` では検出できないため。`docs/pooling-ops-
+/// design.md` §17 参照）。[`derive_pool_dims`] の `plane_in` 検査は
+/// そのまま残し多層防御とする（本ファイルは `cfg(target_os =
+/// "macos")` を付けないため Linux でもこの多層防御をテストできる）。
+/// 本クレートは `backend-cpu`／`backend-cuda` へ依存しないため単一
+/// 情報源にできず、同一ロジックを意図的に複製する
+/// （`.claude/rules/delegation-impl.md` のクレート境界に従う）。
+// 呼び出し元 `ops.rs::max_pool2d` は `cfg(target_os = "macos")` 限定
+// のため、非 macOS（Linux 本実装環境・CI）の通常ビルドでは本関数は
+// テスト経由でのみ使われ dead_code 判定される（`generic_cache.rs`
+// 等の同型ファイルが `#![cfg_attr(not(target_os = "macos"),
+// allow(dead_code))]` をファイル冒頭に置くのと同じ理由。本ファイルは
+// 他の大半の関数が Linux でもテストから直接使われクロスプラット
+// フォームで検証されるため、ファイル全体ではなく本関数単体に限定して
+// 適用する）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn check_max_index_range(
+    h: usize,
+    w: usize,
+) -> Result<(), fandhe_ai_tensor_core::ShapeError> {
+    let hw = h
+        .checked_mul(w)
+        .ok_or(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)?;
+    if hw > i32::MAX as usize {
+        return Err(fandhe_ai_tensor_core::ShapeError::IndexRangeOverflow { index: hw });
+    }
+    Ok(())
+}
+
 /// `MaxPool2d`／`AvgPool2d` の起動前検証・[`PoolDims`] 導出
 /// （`docs/pooling-ops-design.md` §3／§4 の全ゲートを逐語実装）。
 /// `in_shape` は `[N, C, H, W]`（rank 4 以外は `InvalidShape`。1d は
@@ -1126,5 +1169,52 @@ mod tests {
             adaptive_avg_pool2d_soft_f64(&x, &dims),
             Err(PoolingPrepareError::InvalidShape { .. })
         ));
+    }
+
+    // --- `check_max_index_range`（イシュー #2297）: `ops.rs::
+    // max_pool2d`（macOS 限定）が出力が空かどうかの早期 return より
+    // 前に呼ぶ索引域検査本体。本ファイルは `cfg(target_os = "macos")`
+    // を付けないため、Linux（本リポジトリの実装・CI 環境）でも
+    // 検査本体・カーネル API 層の多層防御（`derive_pool_dims` の
+    // `plane_in` 検査）の双方を固定できる。---
+
+    #[test]
+    fn check_max_index_range_accepts_i32_max() {
+        // `H*W == i32::MAX` ちょうどは境界内。
+        assert!(check_max_index_range(1, i32::MAX as usize).is_ok());
+    }
+
+    #[test]
+    fn check_max_index_range_rejects_i32_max_plus_one() {
+        let err = check_max_index_range(1, i32::MAX as usize + 1).unwrap_err();
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::ShapeError::IndexRangeOverflow { .. }
+        ));
+    }
+
+    #[test]
+    fn check_max_index_range_rejects_element_count_overflow() {
+        // `h*w` 自体が `usize` の乗算で overflow するケース
+        // （`i32::MAX` 超過とは別のエラー variant で拒否する）。
+        let err = check_max_index_range(usize::MAX, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::ShapeError::ElementCountOverflow
+        ));
+    }
+
+    /// カーネル API 層（`derive_pool_dims`）の既存索引域検査（多層
+    /// 防御）を Linux で固定する: 空バッチ（`N=0`）でも `plane_in`
+    /// （`H·W`。本テストでは `W` 単独）が `i32::MAX` を超えていれば
+    /// `SizeLimitExceeded` を返す。`derive_pool_dims` は `out_shape`
+    /// の積（`N` 依存）ではなく `h_in`／`w_in` を直接見るため、
+    /// `N=0` でも本検査は独立に成立する。
+    #[test]
+    fn derive_pool_dims_rejects_index_range_overflow_on_empty_batch() {
+        let w = i32::MAX as usize + 1;
+        let err = derive_pool_dims(&[0, 1, 1, w], (1, 1), (1, 1), (0, 0), (1, 1), false, true)
+            .unwrap_err();
+        assert!(matches!(err, PoolingPrepareError::SizeLimitExceeded { .. }));
     }
 }
