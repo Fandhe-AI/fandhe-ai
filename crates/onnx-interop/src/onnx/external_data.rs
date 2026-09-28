@@ -14,10 +14,24 @@
 //! 空）で拒否される。本モジュールは、外部ファイルを解決する基点
 //! ディレクトリ（`base_dir`）を受け取る新しい入口
 //! （[`build_graph_with_external_data`]）を提供し、`ModelProto` を複製した
-//! うえで external なテンソルを `raw_data` へ inline 化してから、変更して
-//! いない `graph::build_graph` へ渡す（「全参照を検証 → 範囲を限定して
-//! 読込 → raw_data へ inline 化 → 既存の build_graph」という設計。
-//! `docs/onnx-external-data-decision.md` が設計判断の正）。
+//! うえで external なテンソルを `raw_data` へ inline 化してから、
+//! `graph::build_graph` と検証ロジックを共有する所有権ベースの
+//! `graph::build_graph_owned` へ渡す（「全参照を検証 → 範囲を限定して
+//! 読込 → raw_data へ inline 化 → build_graph と同一の検証でグラフ構築」
+//! という設計。external テンソルが 0 件なら `graph::build_graph` へ
+//! そのまま渡す。`docs/onnx-external-data-decision.md` が設計判断の正）。
+//!
+//! ## メモリ確保（PR #2348 codex P0 是正。security.md A04）
+//!
+//! external data 由来の長さから行う確保（区間の読み込みバッファ・
+//! initializer の復号先）はすべて `Vec::try_reserve_exact` による失敗可能
+//! 確保とし、失敗は [`ExternalDataError::AllocationFailed`] で返す
+//! （`max_total_bytes` の既定値 64 GiB は利用可能メモリを超えうるため、
+//! 小さな `.onnx` と疎ファイルでも巨大な単一テンソルを宣言できる。無条件
+//! 確保〈`vec![..; n]`・`collect`〉は失敗時にプロセスを abort させる）。
+//! `max_total_bytes` は読み込む raw バイト列の予算であり、読み込み経路の
+//! ピークは最大でおよそ `max_total_bytes` ＋ 最大テンソル 1 個分
+//! （`docs/onnx-external-data-decision.md` 4.3 節）。
 //!
 //! ## 不変条件（A6・回帰テスト対象）
 //!
@@ -50,13 +64,13 @@
 //!    `base_dir` fd 起点の `openat2`／逐次 `openat(O_NOFOLLOW)`）→ 開いた
 //!    ハンドルの `FileKey`・`FileSnapshot` をパス 1 の記録と完全一致で
 //!    再照合 → その location を参照する全テンソルの区間だけを
-//!    `read_exact`（`.data` ファイル全体は読まない。各区間の直前にも同じ
-//!    ハンドルへ `fstat` を取り直して同じ照合を行う）→ close」を逐次に
+//!    `read_region` で読む（`.data` ファイル全体は読まない。各区間の直前にも
+//!    同じハンドルへ `fstat` を取り直して同じ照合を行う）→ close」を逐次に
 //!    行う。再照合の不一致は [`ExternalDataError::FileChangedDuringLoad`]
-//!    とする（fail-closed）。ただし最後の照合を通過した直後〜`read_exact`
-//!    の間に truncate された場合は、照合ではなく `read_exact` の
-//!    `UnexpectedEof` として [`ExternalDataError::Io`] で拒否される（別
-//!    variant だが fail-closed。下記「TOCTOU の論拠」節）。
+//!    とする（fail-closed）。ただし最後の照合を通過した直後〜読み込みの
+//!    間に truncate された場合は、照合ではなく `read_region` の読み込み
+//!    不足（`UnexpectedEof`）として [`ExternalDataError::Io`] で拒否される
+//!    （別 variant だが fail-closed。下記「TOCTOU の論拠」節）。
 //!
 //! ## ハンドル非保持の構成（PR #2348 codex P1 是正）
 //!
@@ -110,8 +124,8 @@
 //! 増やす方向にしか働かず見逃しを生まない。
 //!
 //! 照合と読み込みの間の残存窓（旧構成と同じ）: 各区間の直前の照合を通過
-//! した直後〜`read_exact` の間に truncate されると、`read_exact` が
-//! `UnexpectedEof` を返し [`ExternalDataError::Io`]（`FileChangedDuringLoad`
+//! した直後〜読み込みの間に truncate されると、`read_region` が読み込み
+//! 不足を `UnexpectedEof` として返し [`ExternalDataError::Io`]（`FileChangedDuringLoad`
 //! ではない別 variant）で fail-closed に拒否される。同じ窓で同じ長さの
 //! まま in-place 書き換えされた場合は検出できない（旧構成のハンドル保持
 //! でも同一で、`base_dir` 配下のファイルへの書き込み権を前提とする）。
@@ -207,6 +221,13 @@ pub struct ExternalDataOptions {
     /// 1 モデルあたりの external data 合計バイト数の上限。超過は
     /// [`ExternalDataError::TotalSizeLimitExceeded`] で拒否する（確保の
     /// 前に検査するため、この上限を超える `length` はメモリを確保しない）。
+    ///
+    /// 読み込み経路の raw バッファ合計の予算であり、変換後テンソルを含めた
+    /// 読み込み中のピークは最大でおよそ本値 ＋ 最大テンソル 1 個分になる
+    /// （`docs/onnx-external-data-decision.md` 4.3 節）。上限以内でも確保
+    /// できない場合は [`ExternalDataError::AllocationFailed`] で返す（abort
+    /// しない）。利用可能メモリが既定値（64 GiB）より小さい環境では、
+    /// 呼び出し元が本値を下げて渡すこと。
     pub max_total_bytes: u64,
     /// 1 モデルあたりに参照を許す external data ファイル数
     /// （実体単位・`FileKey` で畳み込んだ後の distinct 数）の上限。
@@ -322,7 +343,7 @@ pub enum ExternalDataError {
     /// パス 2 で再 open したハンドル（または各区間の読み込み直前に同じ
     /// ハンドルへ取り直した `fstat`）のファイル長・実体識別子・変更時刻
     /// （Unix では dev/ino・ctime・mtime）がパス 1 の記録と食い違った
-    /// （TOCTOU 検知）。照合通過直後〜`read_exact` の間の truncate は本
+    /// （TOCTOU 検知）。照合通過直後〜読み込みの間の truncate は本
     /// variant ではなく `Io`（`UnexpectedEof`）で拒否される。
     FileChangedDuringLoad { tensor_name: String },
     /// `base_dir` の canonicalize に失敗した。
@@ -343,6 +364,17 @@ pub enum ExternalDataError {
     /// （P0・PRRT_kwDOTuUCJc6mk30J 是正）。非 unix（Windows 等）への対応は
     /// イシュー #2349 で追跡中。
     UnsupportedPlatformForSecureResolve { tensor_name: String },
+    /// external data の読み込みバッファ、または external 由来 initializer の
+    /// 復号先（`RawTensor` の要素 Vec）の確保に失敗した（A04 資源枯渇対策。
+    /// PR #2348 codex P0 是正）。`bytes` は確保しようとしたバイト数。
+    ///
+    /// `max_total_bytes`（既定 64 GiB）以内の宣言長であっても、小さな
+    /// `.onnx` と疎ファイルから利用可能メモリを超える単一テンソルを宣言
+    /// できるため、確保は `Vec::try_reserve_exact` による失敗可能確保とし、
+    /// 失敗をプロセス終了（`handle_alloc_error` による abort）ではなく本
+    /// variant で返す。`usize` へ変換できない長さ（32bit ターゲット）や
+    /// `isize::MAX` を超える長さも確保を試みる前に本 variant で拒否する。
+    AllocationFailed { tensor_name: String, bytes: u64 },
     /// 内部不変条件違反（本来発生しないはずの状態）。`coding-rust.md`
     /// の「本番経路で `unwrap()`/`expect()` を使わない」方針に従い、
     /// `panic!`／`unreachable!`／`.expect()` の代わりにこの型付きエラーで
@@ -444,6 +476,10 @@ impl fmt::Display for ExternalDataError {
                  このプラットフォームでは未対応のため拒否（tensor={tensor_name}）: unix 以外\
                  （Windows 等）では external data 読み込みをサポートしない（イシュー #2349 で\
                  対応を追跡中）"
+            ),
+            ExternalDataError::AllocationFailed { tensor_name, bytes } => write!(
+                f,
+                "external data 用メモリの確保に失敗（tensor={tensor_name}）: bytes={bytes}"
             ),
             ExternalDataError::Internal { reason } => {
                 write!(f, "external_data 内部不変条件違反: {reason}")
@@ -1016,6 +1052,157 @@ fn element_size(tensor_name: &str, data_type: i32) -> Result<u64, GraphError> {
     }
 }
 
+/// 要素数 `count` の空 `Vec<T>` を失敗可能確保（`try_reserve_exact`）で
+/// 用意する（PR #2348 codex P0 是正。security.md A04）。
+///
+/// external data 由来の長さは `plan` で `max_total_bytes` 以内に抑えられて
+/// いるが、既定上限（64 GiB）は利用可能メモリを超えうるため、`vec![..; n]`・
+/// `Vec::with_capacity(n)`・`collect` のような無条件確保（失敗時は
+/// `handle_alloc_error` でプロセスが abort する）を使わず、失敗を
+/// [`ExternalDataError::AllocationFailed`] として返す。`count *
+/// size_of::<T>()` が `isize::MAX` を超える場合、`try_reserve_exact` は
+/// アロケータを呼ばずに `CapacityOverflow` で失敗するため、巨大な宣言長も
+/// 確保を試みる前に同じ variant で拒否される。`bytes` は診断用の要求
+/// バイト数（`u64` で飽和計算）。
+fn try_alloc_vec<T>(tensor_name: &str, count: usize) -> Result<Vec<T>, ExternalDataError> {
+    let mut v: Vec<T> = Vec::new();
+    v.try_reserve_exact(count)
+        .map_err(|_| ExternalDataError::AllocationFailed {
+            tensor_name: cap_name(tensor_name),
+            bytes: (count as u64).saturating_mul(std::mem::size_of::<T>() as u64),
+        })?;
+    Ok(v)
+}
+
+/// `load` が 1 区間（`length` バイト）を読み込むための空バッファを失敗可能
+/// 確保で用意する（容量は `length` ちょうど・長さ 0）。`length` が `usize`
+/// に収まらない場合（32bit ターゲットで `max_total_bytes` を大きく設定した
+/// 場合等）も内部不変条件違反ではなく「このプロセスでは確保できない
+/// サイズ」として [`ExternalDataError::AllocationFailed`] を返す。
+fn alloc_region_buf(tensor_name: &str, length: u64) -> Result<Vec<u8>, ExternalDataError> {
+    let len = usize::try_from(length).map_err(|_| ExternalDataError::AllocationFailed {
+        tensor_name: cap_name(tensor_name),
+        bytes: length,
+    })?;
+    try_alloc_vec::<u8>(tensor_name, len)
+}
+
+/// `file` の現在位置から `length` バイトを、[`alloc_region_buf`] で失敗可能
+/// 確保したバッファへ読み込む（`load` の 1 区間分）。
+///
+/// ゼロ初期化（`vec![0u8; n]` → `read_exact`）による二重書き込みを避け、
+/// かつ未初期化メモリを `unsafe` で扱わないため、`Read::take(length)` で
+/// 読み込み量を `length` に制限したうえで `read_to_end` へ渡す。容量は
+/// 事前に `length` ちょうど確保済みで、`read_to_end` は容量ちょうどまで
+/// 埋まった時点で小さなスタック上の探査読み込みにより EOF を確かめてから
+/// 返るため再確保しない（`Take` の上限で EOF になる。単体テスト
+/// `read_region_fills_exact_capacity_without_realloc` で容量不変を実測
+/// 固定）。`File` に直接 `read_to_end` しない理由: `File` 向けの特殊化は
+/// 残りファイル長を基に追加確保しうるため、上限を `length` に縛る `Take`
+/// を必ず挟む。
+///
+/// 読み込めたバイト数が `length` に満たない（照合通過直後〜読み込みの間に
+/// truncate された等）場合は、旧実装（`read_exact`）と同じ
+/// `ExternalDataError::Io { kind: UnexpectedEof }` で fail-closed に拒否する
+/// （モジュール doc「TOCTOU の論拠」節の契約を維持）。
+fn read_region<R: Read>(
+    file: &mut R,
+    tensor_name: &str,
+    length: u64,
+) -> Result<Vec<u8>, ExternalDataError> {
+    let mut buf = alloc_region_buf(tensor_name, length)?;
+    let io_err = |kind: std::io::ErrorKind| ExternalDataError::Io {
+        tensor_name: cap_name(tensor_name),
+        kind,
+    };
+    let read = file
+        .take(length)
+        .read_to_end(&mut buf)
+        .map_err(|e| io_err(e.kind()))?;
+    if read as u64 != length {
+        return Err(io_err(std::io::ErrorKind::UnexpectedEof));
+    }
+    Ok(buf)
+}
+
+/// external data から inline 化した initializer 1 件を、失敗可能確保で
+/// `RawTensor` へ復号する（`build_graph_with_external_data` 専用。PR #2348
+/// codex P0 是正）。
+///
+/// `graph::decode_tensor`（バイト列入口と共有。A6 により 1 バイトも変更
+/// しない）は `collect` による無条件確保で要素 Vec を作るため、external
+/// data 由来の巨大テンソルでは確保失敗がプロセス abort になる。本関数は
+/// 同じ変換（リトルエンディアン。BOOL は 1 バイト/要素・非ゼロ→true）を
+/// [`try_alloc_vec`] で確保した Vec へ行い、`t.raw_data` を
+/// `mem::take` で取り出して復号直後に解放する（raw と復号後の要素 Vec が
+/// 同時に存在するのは当該テンソル 1 件分だけになる）。
+///
+/// 長さ・形状の検証は `plan` で済んでいる（`element_count` による dims の
+/// 非負性・積のオーバーフロー拒否、`length == expected_bytes`、`data_type`
+/// が [`element_size`] の 4 型のいずれか）。本関数はそれを前提にしつつ、
+/// 防御的にバイト長と要素サイズの整合（`as_chunks` の余り）を再検査し、
+/// 崩れていれば `Internal` で返す。`decode_tensor` との出力一致は単体テスト
+/// `try_decode_matches_decode_tensor_for_all_dtypes` で固定する。
+fn try_decode_external_initializer(
+    t: &mut TensorProto,
+) -> Result<super::graph::RawTensor, GraphError> {
+    use super::graph::RawTensor;
+    use super::proto::data_type;
+
+    let raw = std::mem::take(&mut t.raw_data);
+    let name = t.name.as_str();
+    let shape = t.dims.clone();
+    let decoded = match t.data_type {
+        dt if dt == data_type::FLOAT => RawTensor::F32 {
+            data: try_decode_le::<4, f32>(name, &raw, f32::from_le_bytes)?,
+            shape,
+        },
+        dt if dt == data_type::INT64 => RawTensor::I64 {
+            data: try_decode_le::<8, i64>(name, &raw, i64::from_le_bytes)?,
+            shape,
+        },
+        dt if dt == data_type::BOOL => RawTensor::Bool {
+            data: try_decode_le::<1, bool>(name, &raw, |b| b[0] != 0)?,
+            shape,
+        },
+        dt if dt == data_type::FLOAT16 => RawTensor::F16 {
+            data: try_decode_le::<2, half::f16>(name, &raw, half::f16::from_le_bytes)?,
+            shape,
+        },
+        other => {
+            return Err(GraphError::UnknownDataType {
+                tensor_name: t.name.clone(),
+                data_type: other,
+            });
+        }
+    };
+    // `raw` はここで解放される（復号後の要素 Vec だけが残る）。
+    drop(raw);
+    Ok(decoded)
+}
+
+/// `raw` を `N` バイトずつのリトルエンディアン要素として `conv` で変換し、
+/// [`try_alloc_vec`] で確保した Vec へ詰める。`raw.len()` が `N` の倍数で
+/// ない場合は `plan` の長さ検証が崩れた内部不変条件違反として `Internal`
+/// を返す（余りを黙って切り捨てない）。
+fn try_decode_le<const N: usize, T>(
+    tensor_name: &str,
+    raw: &[u8],
+    conv: impl Fn([u8; N]) -> T,
+) -> Result<Vec<T>, GraphError> {
+    let (chunks, rest) = raw.as_chunks::<N>();
+    if !rest.is_empty() {
+        return Err(GraphError::ExternalData(ExternalDataError::Internal {
+            reason: "try_decode_le: raw_data のバイト長が要素サイズの倍数ではない",
+        }));
+    }
+    let mut out =
+        try_alloc_vec::<T>(tensor_name, chunks.len()).map_err(GraphError::ExternalData)?;
+    // 容量は `chunks.len()` ちょうど確保済みのため、`extend` は再確保しない。
+    out.extend(chunks.iter().map(|b| conv(*b)));
+    Ok(out)
+}
+
 /// `file_ids`（`plan` 内。区間の重複検査もこのキーで畳み込んだファイル単位で行う）のファイル識別キー。overlap 検出・
 /// distinct ファイル数の計数が「同一ファイル実体」を正しく畳み込めるよう、
 /// パス文字列ではなくファイルの実体識別子を使う（Cursor Bugbot 指摘・
@@ -1537,8 +1724,9 @@ fn find_overlap(regions: &mut [Region]) -> Option<(usize, usize)> {
 /// 照合の不一致は [`ExternalDataError::FileChangedDuringLoad`]、再 open
 /// 自体の失敗（削除による `NotFound`・シンボリックリンクへの差し替え等）は
 /// パス 1 と同じ variant（`Io`／`InvalidLocation`）、照合通過直後〜
-/// `read_exact` の間の truncate は `read_exact` の `UnexpectedEof`
-/// （`Io`）でいずれも fail-closed に拒否する。戻り値は `entries` と同じ
+/// 読み込みの間の truncate は [`read_region`] の読み込み不足
+/// （`Io { kind: UnexpectedEof }`）、区間バッファの確保失敗は
+/// [`ExternalDataError::AllocationFailed`] でいずれも fail-closed に拒否する。戻り値は `entries` と同じ
 /// 順序・同じ件数。
 fn load(
     entries: &[LoadPlanEntry],
@@ -1607,8 +1795,8 @@ fn load(
             // パス 1 の記録と同じ全フィールド照合を行う（同一ハンドルでも
             // 読み込み中の truncate・in-place 書き込み等は起こりうるため。
             // ctime／mtime を含めることで同じ長さのままの書き換えも検出
-            // する）。この照合を通過した直後〜`read_exact` の間の変更は
-            // 残存窓であり、truncate なら `read_exact` の `UnexpectedEof`
+            // する）。この照合を通過した直後〜読み込みの間の変更は
+            // 残存窓であり、truncate なら `read_region` の `UnexpectedEof`
             // として `ExternalDataError::Io` で fail-closed になる（モジュール
             // doc「TOCTOU の論拠」節）。
             let meta = opened.file.metadata().map_err(|e| {
@@ -1633,24 +1821,16 @@ fn load(
                         kind: e.kind(),
                     })
                 })?;
-            // `entry.length` は `u64`。32bit ターゲット等 `usize` が 64bit
-            // 未満の環境では `as usize` の暗黙切り捨てで確保サイズが縮み
-            // `read_exact` が誤った短いバッファへ書き込みうるため、
-            // `checked` 変換で明示的に拒否する（`plan` の `total_requested`
-            // 上限検査より前ではなく後段だが、変換自体の健全性は独立した
-            // 契約のため個別に検査する）。
-            let buf_len = usize::try_from(entry.length).map_err(|_| {
-                GraphError::ExternalData(ExternalDataError::Internal {
-                    reason: "load: entry.length が usize の範囲を超える",
-                })
-            })?;
-            let mut buf = vec![0u8; buf_len];
-            opened.file.read_exact(&mut buf).map_err(|e| {
-                GraphError::ExternalData(ExternalDataError::Io {
-                    tensor_name: cap_name(&entry.tensor_name),
-                    kind: e.kind(),
-                })
-            })?;
+            // 区間バッファは失敗可能確保で用意する（PR #2348 codex P0 是正。
+            // 旧実装の `vec![0u8; buf_len]` は確保失敗でプロセスが abort
+            // しえた。`max_total_bytes` 以内でも既定 64 GiB は利用可能
+            // メモリを超えうる）。`usize` へ変換できない長さ・`isize::MAX`
+            // 超の長さも確保前に `AllocationFailed` で拒否し、読み込み不足は
+            // 旧実装と同じ `Io { kind: UnexpectedEof }` になる
+            // （[`read_region`]）。確保は上の照合を通過した後に限る
+            // （変化を検知したファイルのためには確保しない）。
+            let buf = read_region(&mut opened.file, &entry.tensor_name, entry.length)
+                .map_err(GraphError::ExternalData)?;
             let slot = out.get_mut(entry_idx).ok_or(GraphError::ExternalData(
                 ExternalDataError::Internal {
                     reason: "load: entry 添字が out の範囲外",
@@ -1680,18 +1860,41 @@ fn load(
 /// canonicalize してから使う（失敗は [`ExternalDataError::InvalidBaseDir`]）。
 /// `base_dir` 自体は呼び出し元が与える信頼済み入力として扱う（location
 /// 側だけを fail-closed に検証する。モジュール冒頭コメント参照）。
+///
+/// **読み込み経路のメモリ予算**: `options.max_total_bytes` は本関数が確保
+/// する raw バッファ（全 external テンソルの `raw_data` の合計）の予算で
+/// あり、`plan` がファイル内容を読む前・1 バイトも確保する前に判定する。
+/// 各バッファは失敗可能確保（[`ExternalDataError::AllocationFailed`]）で
+/// 用意する。利用可能メモリが既定上限（64 GiB）より小さい環境では、
+/// 呼び出し元が `max_total_bytes` を下げて渡すこと（変換後テンソルを
+/// 含めたピーク見積もりは `docs/onnx-external-data-decision.md` 4.3 節）。
+/// 本関数の後に `graph::build_graph` を呼ぶと、external 由来 initializer の
+/// 復号（`decode_tensor` の `collect`）が無条件確保になる。グラフ構築まで
+/// 行う場合は、復号も失敗可能確保で行う [`build_graph_with_external_data`]
+/// を使うこと。
 pub fn resolve_external_data(
     model: &mut ModelProto,
     base_dir: &Path,
     options: &ExternalDataOptions,
 ) -> Result<(), GraphError> {
+    resolve_external_data_slots(model, base_dir, options).map(|_| ())
+}
+
+/// [`resolve_external_data`] の本体。inline 化したテンソルの所在（slot）を
+/// `plan` の列挙順で返す（[`build_graph_with_external_data`] が external
+/// 由来の initializer だけを失敗可能確保で復号するために使う）。
+fn resolve_external_data_slots(
+    model: &mut ModelProto,
+    base_dir: &Path,
+    options: &ExternalDataOptions,
+) -> Result<Vec<TensorSlot>, GraphError> {
     let base_dir_canonical = base_dir.canonicalize().map_err(|e| {
         GraphError::ExternalData(ExternalDataError::InvalidBaseDir { kind: e.kind() })
     })?;
 
     let (entries, locations, base_dir_file) = plan(model, &base_dir_canonical, options)?;
     if entries.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let loaded = load(
         &entries,
@@ -1718,7 +1921,9 @@ pub fn resolve_external_data(
         .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
             reason: "entries が非空なのに model.graph が None",
         }))?;
+    let mut slots = Vec::with_capacity(entries.len());
     for (entry, bytes) in entries.into_iter().zip(loaded) {
+        slots.push(entry.slot);
         let target: &mut TensorProto = match entry.slot {
             TensorSlot::Initializer(idx) => g.initializer.get_mut(idx).ok_or(
                 GraphError::ExternalData(ExternalDataError::Internal {
@@ -1738,22 +1943,58 @@ pub fn resolve_external_data(
         target.data_location = data_location::DEFAULT;
         target.external_data.clear();
     }
-    Ok(())
+    Ok(slots)
 }
 
-/// `ModelProto` を複製し external data を inline 化してから
-/// `graph::build_graph` へ渡す新しい import 入口（イシュー #2347）。
+/// `ModelProto` を複製し external data を inline 化してから内部グラフを
+/// 構築する新しい import 入口（イシュー #2347）。`base_dir` は external な
+/// `location` の解決基点。
 ///
-/// `graph::build_graph`（バイト列入口が経由する既存関数）自体は変更しない
-/// （A6）。`base_dir` は external な `location` の解決基点。
+/// external テンソルが 1 件も無いモデルは、従来どおりバイト列入口と同じ
+/// `graph::build_graph` へそのまま渡す（`resolve_external_data` は
+/// external テンソルが 0 件なら `raw_data` を一切書き換えない）。
+///
+/// external テンソルを 1 件以上持つモデルは、複製を所有権ごと
+/// `graph::build_graph_owned` へ渡す（PR #2348 codex P0 是正）。
+/// `build_graph` と同じ検証（sparse 拒否・initializer 名重複・トポロジ・
+/// グラフ出力）を同じ順序で行いつつ、(a) external 由来の initializer は
+/// `try_decode_external_initializer` で失敗可能確保により復号し、raw を
+/// 復号直後に解放する（`graph::decode_tensor` の `collect` による無条件確保
+/// ＝確保失敗時の abort を external 由来の巨大テンソルで踏まない。
+/// `decode_tensor` 自体は A6 により変更しない）、(b) inline の initializer
+/// は従来どおり `decode_tensor` で復号する（入力バイト列長で有界）、
+/// (c) ノード列は clone せず move する（external 由来の Constant 属性
+/// テンソルの `raw_data` を 2 重に持たない）。結果の `Graph` は
+/// `resolve_external_data` → `build_graph` の旧経路と同一（統合テスト
+/// `owned_build_matches_resolve_then_build_graph` で固定）。
 pub fn build_graph_with_external_data(
     model: &ModelProto,
     base_dir: &Path,
     options: &ExternalDataOptions,
 ) -> Result<super::graph::Graph, GraphError> {
     let mut cloned = model.clone();
-    resolve_external_data(&mut cloned, base_dir, options)?;
-    super::graph::build_graph(&cloned)
+    let slots = resolve_external_data_slots(&mut cloned, base_dir, options)?;
+    if slots.is_empty() {
+        return super::graph::build_graph(&cloned);
+    }
+    let initializer_count = cloned.graph.as_ref().map_or(0, |g| g.initializer.len());
+    let mut external_initializer = vec![false; initializer_count];
+    for slot in slots {
+        if let TensorSlot::Initializer(idx) = slot {
+            *external_initializer
+                .get_mut(idx)
+                .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                    reason: "build_graph_with_external_data: initializer slot が範囲外",
+                }))? = true;
+        }
+    }
+    super::graph::build_graph_owned(cloned, |idx, init| {
+        if external_initializer.get(idx).copied().unwrap_or(false) {
+            try_decode_external_initializer(init)
+        } else {
+            super::graph::decode_tensor(init)
+        }
+    })
 }
 
 /// `no_follow_open` の 2 方式（Linux 限定 `openat2` と unix 全般の逐次
@@ -2166,5 +2407,170 @@ mod tests {
             load(&entries, &locations, base_dir_file.as_ref(), &base),
             "同一 inode の同長 in-place 上書き",
         );
+    }
+
+    /// `plan` で検証済みの計画の `length` を `isize::MAX + 1` へ書き換えて
+    /// `load` へ渡すと、区間バッファを確保しようとする前に
+    /// `AllocationFailed` で拒否される（PR #2348 codex P0 是正。旧実装の
+    /// `vec![0u8; n]` は同じ入力で abort しえた）。`plan` の上限検査を
+    /// 通過した後の `load` 単体の確保経路を、実確保せずに検証する。
+    #[test]
+    fn load_rejects_unallocatable_length_as_allocation_failed() {
+        let dir = UnitTestDir::new("load-alloc");
+        std::fs::write(dir.path().join("w.data"), f32_bytes([1.0, 2.0])).unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let model = single_external_model("w.data");
+        let (mut entries, locations, base_dir_file) =
+            plan(&model, &base, &ExternalDataOptions::default()).expect("plan は成功するはず");
+        let huge = isize::MAX as u64 + 1;
+        entries[0].length = huge;
+        match load(&entries, &locations, base_dir_file.as_ref(), &base) {
+            Err(GraphError::ExternalData(ExternalDataError::AllocationFailed {
+                tensor_name,
+                bytes,
+            })) => {
+                assert_eq!(tensor_name, "w");
+                assert_eq!(bytes, huge);
+            }
+            other => panic!("AllocationFailed を期待したが {other:?}"),
+        }
+    }
+}
+
+/// 失敗可能確保のヘルパ（[`try_alloc_vec`]・[`alloc_region_buf`]・
+/// [`read_region`]）と、external 由来 initializer の失敗可能復号
+/// （[`try_decode_external_initializer`]）の単体テスト（PR #2348 codex P0
+/// 是正）。数十 GiB の実確保は CI で危険なため行わず、`isize::MAX` 超の
+/// 要求（`try_reserve_exact` がアロケータを呼ばずに `CapacityOverflow` で
+/// 失敗する）で失敗経路を決定的に検証する。ファイル I/O を伴わないため全
+/// プラットフォームで実行する。
+#[cfg(test)]
+mod alloc_tests {
+    use super::{
+        ExternalDataError, alloc_region_buf, read_region, try_alloc_vec,
+        try_decode_external_initializer,
+    };
+    use crate::onnx::graph::{GraphError, decode_tensor};
+    use crate::onnx::proto::{TensorProto, data_type};
+
+    fn assert_alloc_failed<T: std::fmt::Debug>(
+        r: Result<T, ExternalDataError>,
+        expected_bytes: u64,
+    ) {
+        match r {
+            Err(ExternalDataError::AllocationFailed { tensor_name, bytes }) => {
+                assert_eq!(tensor_name, "t");
+                assert_eq!(bytes, expected_bytes);
+            }
+            other => panic!("AllocationFailed を期待したが {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_alloc_vec_reports_capacity_overflow_as_allocation_failed() {
+        assert_alloc_failed(try_alloc_vec::<u8>("t", usize::MAX), usize::MAX as u64);
+        // 要素数自体は `isize::MAX` 未満でも、バイト数が溢れれば同様に拒否し、
+        // 診断用 `bytes` は飽和計算する。
+        let count = usize::MAX / 2;
+        assert_alloc_failed(
+            try_alloc_vec::<f32>("t", count),
+            (count as u64).saturating_mul(4),
+        );
+        let ok = try_alloc_vec::<f32>("t", 16).expect("小さな確保は成功するはず");
+        assert!(ok.is_empty() && ok.capacity() >= 16);
+    }
+
+    #[test]
+    fn alloc_region_buf_rejects_lengths_beyond_isize_max_before_allocating() {
+        let over = isize::MAX as u64 + 1;
+        assert_alloc_failed(alloc_region_buf("t", over), over);
+        assert_alloc_failed(alloc_region_buf("t", u64::MAX), u64::MAX);
+        let ok = alloc_region_buf("t", 8).expect("小さな確保は成功するはず");
+        assert!(ok.is_empty() && ok.capacity() >= 8);
+    }
+
+    /// `read_region` は事前確保した容量ちょうどまで埋め、`read_to_end` が
+    /// 再確保しない（容量が変わらない）ことを実測で固定する（std 内部の
+    /// 探査読み込みの挙動に依存するため、記憶ではなくテストで押さえる）。
+    /// 余分なバイトは読まない（`Take` の上限）。
+    #[test]
+    fn read_region_fills_exact_capacity_without_realloc() {
+        for len in [0usize, 1, 31, 32, 33, 4096, 70_000] {
+            let src: Vec<u8> = (0..len + 5).map(|i| (i % 251) as u8).collect();
+            let mut cur = std::io::Cursor::new(src.clone());
+            let buf = read_region(&mut cur, "t", len as u64).expect("読み込みは成功するはず");
+            assert_eq!(buf.as_slice(), &src[..len], "len={len}");
+            let expected_cap = alloc_region_buf("t", len as u64).unwrap().capacity();
+            assert_eq!(buf.capacity(), expected_cap, "len={len}: 再確保された");
+            assert_eq!(cur.position(), len as u64, "len={len}: 余分に読んだ");
+        }
+    }
+
+    /// 読み込めたバイト数が要求に満たない（truncate 等）場合は、旧実装の
+    /// `read_exact` と同じ `Io { kind: UnexpectedEof }` で拒否する。
+    #[test]
+    fn read_region_short_read_is_unexpected_eof() {
+        let mut cur = std::io::Cursor::new(vec![1u8, 2, 3]);
+        match read_region(&mut cur, "t", 8) {
+            Err(ExternalDataError::Io { tensor_name, kind }) => {
+                assert_eq!(tensor_name, "t");
+                assert_eq!(kind, std::io::ErrorKind::UnexpectedEof);
+            }
+            other => panic!("Io(UnexpectedEof) を期待したが {other:?}"),
+        }
+    }
+
+    fn tensor(name: &str, dt: i32, dims: Vec<i64>, raw: Vec<u8>) -> TensorProto {
+        TensorProto {
+            dims,
+            data_type: dt,
+            name: name.to_string(),
+            raw_data: raw,
+            ..Default::default()
+        }
+    }
+
+    /// 失敗可能復号は 4 型すべてで `graph::decode_tensor`（バイト列入口と
+    /// 共有・A6 で不変）と同じ `RawTensor` を返し、raw を取り出して解放する。
+    #[test]
+    fn try_decode_matches_decode_tensor_for_all_dtypes() {
+        let f32_raw: Vec<u8> = [1.5f32, -0.0, f32::INFINITY, f32::MIN_POSITIVE]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let i64_raw: Vec<u8> = [i64::MIN, -1, 0, 42]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let f16_raw: Vec<u8> = [0.5f32, -65504.0, 6.0e-8]
+            .iter()
+            .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+            .collect();
+        let cases = [
+            tensor("f", data_type::FLOAT, vec![2, 2], f32_raw),
+            tensor("i", data_type::INT64, vec![4], i64_raw),
+            tensor("b", data_type::BOOL, vec![5], vec![0, 1, 2, 128, 255]),
+            tensor("h", data_type::FLOAT16, vec![3], f16_raw),
+            tensor("empty", data_type::FLOAT, vec![0], Vec::new()),
+        ];
+        for t in cases {
+            let expected = decode_tensor(&t).expect("decode_tensor は成功するはず");
+            let mut owned = t.clone();
+            let got =
+                try_decode_external_initializer(&mut owned).expect("失敗可能復号は成功するはず");
+            assert_eq!(got, expected, "tensor={}", t.name);
+            assert!(owned.raw_data.is_empty(), "tensor={}: raw が残った", t.name);
+        }
+    }
+
+    /// バイト長が要素サイズの倍数でない（`plan` の検証が崩れた）場合は余りを
+    /// 黙って切り捨てず `Internal` で拒否する。
+    #[test]
+    fn try_decode_rejects_partial_element_as_internal() {
+        let mut t = tensor("f", data_type::FLOAT, vec![1], vec![0u8; 5]);
+        assert!(matches!(
+            try_decode_external_initializer(&mut t),
+            Err(GraphError::ExternalData(ExternalDataError::Internal { .. }))
+        ));
     }
 }

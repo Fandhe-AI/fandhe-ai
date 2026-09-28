@@ -257,6 +257,17 @@ impl OnnxModel {
     /// `resolve_external_data` が早期 `Ok(())` を返すため `raw_data` の
     /// 書き換えを一切行わない）。
     ///
+    /// **メモリ**（PR #2348 codex P0 是正）: external data の読み込み
+    /// バッファ・復号先はすべて失敗可能確保であり、確保に失敗した場合は
+    /// プロセスを終了させず [`OnnxError::Io`]（`ErrorKind::OutOfMemory`）
+    /// を返す。合計サイズ上限（64 GiB）は読み込む raw バイト列の予算で、
+    /// 読み込み中のピークは最大でおよそ「上限 ＋ 最大テンソル 1 個分」
+    /// （`docs/onnx-external-data-decision.md` 4.3 節）。本関数は既定
+    /// オプション固定で上限を変更できない（利用可能メモリがそれより小さい
+    /// 環境で予算を下げる公開手段は未提供。同節）。Linux の
+    /// overcommit 設定等により、確保自体は成功した後のページ実コミット時に
+    /// OS がプロセスを終了させる可能性は残る。
+    ///
     /// [`OnnxModel::from_bytes`] は external data を非対応のまま
     /// fail-closed に拒否する（`GraphError::RawDataByteLenMismatch`。
     /// 挙動不変。`onnx::external_data` モジュール冒頭コメント「不変条件」
@@ -265,6 +276,9 @@ impl OnnxModel {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(OnnxError::Io)?;
         let model = decode_model(&bytes).map_err(map_decode_error)?;
+        // デコード後は `.onnx` 本体のバイト列を参照しないため、external
+        // data の読み込み（ピークメモリが最大になる区間）より前に解放する。
+        drop(bytes);
         let base_dir = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
@@ -460,6 +474,8 @@ pub enum OnnxError {
     /// ファイル I/O 失敗（[`OnnxModel::from_path`] でのモデル本体読み込み
     /// 失敗・external data 解決中の companion `.onnx.data` ファイルの
     /// 欠落／権限エラー等〈`ExternalDataError::Io`。イシュー #2347〉、
+    /// external data の読み込みバッファ・復号先のメモリ確保失敗
+    /// 〈`ExternalDataError::AllocationFailed`。`ErrorKind::OutOfMemory`〉、
     /// または [`OnnxModel::to_path`] での書き込み失敗）。これらを区別する
     /// 専用 variant は設けず（薄いラッパー原則。`std::io::Error` 自体は
     /// 操作の別を保持しない）、[`fmt::Display`] 側で「I/O 失敗」と中立に
@@ -593,6 +609,18 @@ fn map_graph_error(e: GraphError) -> OnnxError {
         GraphError::ExternalData(ExternalDataError::Io { kind, .. }) => {
             OnnxError::Io(std::io::Error::from(kind))
         }
+        // external data の読み込みバッファ・復号先の確保失敗（PR #2348
+        // codex P0 是正で abort から型付きエラーへ変更）は、既存の
+        // `OnnxError::Io`（`ErrorKind::OutOfMemory`）へ写像する（新規
+        // variant は追加しない）。同じ `from_path` 内の `std::fs::read` が
+        // `.onnx` 本体の確保失敗を std の `try_reserve` 規約どおり
+        // `Io(OutOfMemory)` で返すため、どちらの確保失敗も利用者が
+        // `kind() == OutOfMemory` で一様に判別できる。`InvalidModel` へ
+        // 畳み込むと資源不足を「モデル不正」と誤分類するため採らない。
+        // `tensor_name`・`bytes` は上の `Io` 写像と同じ理由で落ちる。
+        GraphError::ExternalData(ExternalDataError::AllocationFailed { .. }) => {
+            OnnxError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory))
+        }
         other => OnnxError::InvalidModel {
             message: other.to_string(),
         },
@@ -644,5 +672,54 @@ fn map_export_error(e: ExportError) -> OnnxError {
         other => OnnxError::InvalidModel {
             message: other.to_string(),
         },
+    }
+}
+
+/// `map_graph_error` の external data 分岐の写像単体テスト（実確保・実
+/// ファイル I/O を伴わずに写像規則だけを固定する）。
+#[cfg(test)]
+mod map_graph_error_tests {
+    use super::{ExternalDataError, GraphError, OnnxError, map_graph_error};
+
+    /// 確保失敗（PR #2348 codex P0 是正）は `InvalidModel` ではなく
+    /// `Io(ErrorKind::OutOfMemory)` へ写像される（`std::fs::read` の確保
+    /// 失敗と同じ判別方法を利用者へ提供する）。
+    #[test]
+    fn allocation_failed_maps_to_io_out_of_memory() {
+        let e = map_graph_error(GraphError::ExternalData(
+            ExternalDataError::AllocationFailed {
+                tensor_name: "w".to_string(),
+                bytes: 1 << 40,
+            },
+        ));
+        match e {
+            OnnxError::Io(io) => assert_eq!(io.kind(), std::io::ErrorKind::OutOfMemory),
+            other => panic!("OnnxError::Io(OutOfMemory) を期待したが {other:?}"),
+        }
+    }
+
+    /// 既存の `ExternalDataError::Io` 写像（kind 保持）は不変。
+    #[test]
+    fn external_io_error_keeps_kind() {
+        let e = map_graph_error(GraphError::ExternalData(ExternalDataError::Io {
+            tensor_name: "w".to_string(),
+            kind: std::io::ErrorKind::NotFound,
+        }));
+        match e {
+            OnnxError::Io(io) => assert_eq!(io.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("OnnxError::Io(NotFound) を期待したが {other:?}"),
+        }
+    }
+
+    /// それ以外の external data エラーは従来どおり `InvalidModel`。
+    #[test]
+    fn other_external_errors_map_to_invalid_model() {
+        let e = map_graph_error(GraphError::ExternalData(
+            ExternalDataError::TotalSizeLimitExceeded {
+                limit: 8,
+                requested: 16,
+            },
+        ));
+        assert!(matches!(e, OnnxError::InvalidModel { .. }), "{e:?}");
     }
 }

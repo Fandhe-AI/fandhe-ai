@@ -44,10 +44,16 @@ import 入口を `onnx-interop` 内部に新設し、外部参照を fail-closed
     data ファイルは常に 1 つで、4096 がプロセスの fd 上限（例: soft
     limit 1024）を上回っても `EMFILE` は生じない（PR #2348 codex P1 是正）。
 - `pub fn resolve_external_data(model: &mut ModelProto, base_dir: &Path, options: &ExternalDataOptions) -> Result<(), GraphError>`
-  — in-place で external なテンソルを `raw_data` へ inline 化する。
+  — in-place で external なテンソルを `raw_data` へ inline 化する
+    （読み込みバッファは失敗可能確保。グラフ構築まで行う場合は、復号も
+    失敗可能確保になる `build_graph_with_external_data` を使う。4.3 節）。
 - `pub fn build_graph_with_external_data(model: &ModelProto, base_dir: &Path, options: &ExternalDataOptions) -> Result<Graph, GraphError>`
-  — `model.clone()` → `resolve_external_data` → 変更していない
-    `graph::build_graph` の順に呼ぶ新しい import 入口。
+  — `model.clone()` → `resolve_external_data` 相当の inline 化 → グラフ
+    構築の順に呼ぶ新しい import 入口。external テンソルが 0 件なら
+    `graph::build_graph` へそのまま渡し、1 件以上なら `build_graph` と
+    検証ロジックを共有する所有権ベースの `graph::build_graph_owned`
+    （external 由来 initializer を失敗可能確保で復号・ノード列を move）へ
+    渡す（2026-09-28・PR #2348 codex P0 是正。4.3 節）。
 - `GraphError` に variant `ExternalData(ExternalDataError)` を 1 つだけ
   追加した（`crates/onnx-interop/src/onnx/graph.rs`）。
 - `ExternalDataError`（`#[non_exhaustive]`・`Debug`/`Clone`/`PartialEq`/`Eq`）
@@ -57,6 +63,7 @@ import 入口を `onnx-interop` 内部に新設し、外部参照を fail-closed
   `LengthMismatch`／`OverlappingRegion`／`TotalSizeLimitExceeded`／
   `TooManyExternalFiles`／`Io`／`FileChangedDuringLoad`／`InvalidBaseDir`／
   `DuplicateInitializerName`／`UnsupportedPlatformForSecureResolve`／
+  `AllocationFailed`（2026-09-28・PR #2348 codex P0 是正で追加。4.3 節）／
   `Internal` の variant を持つ。診断文字列（`tensor_name`／`key`）は
   `proto::cap_sparse_tensor_diag_name`（256 バイト上限）を再利用して
   切り詰める。ホストの絶対パス・canonicalize 後のパスはいずれの
@@ -173,13 +180,15 @@ pass することを確認済み（prost は既定値のスカラーと空の re
    ハンドル自身の `FileKey`〈dev, ino〉・`FileSnapshot`（ファイル長・
    unix では dev/ino・ctime・mtime）をパス 1 の記録と完全一致で照合
    （`ensure_unchanged`）→ その location を参照する全テンソルの区間だけを
-   `read_exact`（`.data` ファイル全体は読まない）→ close」を逐次に行う。
+   読む（`read_region`。`.data` ファイル全体は読まない。4.3 節）→ close」
+   を逐次に行う。
    各区間の読み込み直前にも同じハンドルへ `fstat` を取り直して同じ照合を
    行う。照合の不一致は `FileChangedDuringLoad`、再 open 自体の失敗
    （削除による `NotFound`・シンボリックリンクへの差し替え等）はパス 1 と
    同じ variant（`Io`／`InvalidLocation`）でいずれも fail-closed に拒否
-   する。**ただし最後の照合を通過した直後〜`read_exact` の間に truncate
-   された場合は、照合ではなく `read_exact` の `UnexpectedEof` として
+   する。**ただし最後の照合を通過した直後〜読み込みの間に truncate
+   された場合は、照合ではなく `read_region` の読み込み不足
+   （`UnexpectedEof`）として
    `ExternalDataError::Io` で拒否される**（`FileChangedDuringLoad` とは
    別 variant だが fail-closed。2026-09-28・PR #2348 security-auditor
    P2-2。同じ窓での同長 in-place 書き換えの扱いは 5 節）。
@@ -273,7 +282,138 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 （Constant の `value` 等）も含む（`enumerate_tensors`）。サブグラフ属性
 （`g`/`graphs`）は `proto::AttributeProto` に未定義のため対象外。
 
+### 4.3 メモリ確保の失敗可能化と読み込み経路のメモリ予算（2026-09-28・PR #2348 codex P0 是正）
+
+- **指摘**（HEAD 33b942a6 へのレビュー）: `load` は検証済みの
+  `entry.length` に対して `vec![0u8; buf_len]` で一度に確保していた。
+  `max_total_bytes` の既定値は 64 GiB であり、小さな `.onnx` と疎ファイル
+  から数十 GiB の単一テンソルを宣言できるため、利用可能メモリが足りない
+  環境では型付きエラーを返す前に確保失敗（`handle_alloc_error`）で
+  プロセスが終了しうる（security.md A04）。
+- **採用した方式**:
+  1. `load` の区間バッファは `external_data.rs::read_region` で確保する:
+     `alloc_region_buf`（`usize::try_from` ＋ `Vec::try_reserve_exact`）で
+     容量ちょうどの空 Vec を用意し、`Read::take(length)` を挟んだ
+     `read_to_end` で埋める（ゼロ初期化の二重書き込みを避け、未初期化
+     メモリを `unsafe` で扱わない。容量ちょうどまで埋まると std は
+     スタック上の探査読み込みで EOF を確かめて再確保しないことを単体
+     テストで実測固定）。`File` に直接 `read_to_end` しない（`File` の
+     特殊化は残りファイル長で追加確保しうる）。読み込み不足は旧実装の
+     `read_exact` と同じ `Io { kind: UnexpectedEof }`（4 節 2.・5 節の truncate
+     に関する記述は機構名を `read_region` へ更新済み）。確保は従来どおり
+     `ensure_unchanged` の照合通過後に限る。
+  2. 確保失敗は新 variant `ExternalDataError::AllocationFailed {
+     tensor_name, bytes }` で返す。`usize` へ変換できない長さ（32bit
+     ターゲット）も、旧実装の `Internal` ではなく本 variant とする
+     （内部不変条件違反ではなく「このプロセスでは確保できないサイズ」の
+     ため）。`isize::MAX` 超の要求は `try_reserve_exact` がアロケータを
+     呼ばずに `CapacityOverflow` で失敗するため、確保を試みる前に拒否
+     される。
+  3. `build_graph_with_external_data` は、external テンソルを 1 件以上
+     持つモデルを所有権ベースの新関数 `graph::build_graph_owned`
+     （`pub(super)`）で構築する。`build_graph` の検証本体（sparse 拒否・
+     initializer 名重複・トポロジ・グラフ出力）を `reject_sparse_
+     initializers`／`insert_initializer`／`validate_topology` へ抽出して
+     両者で共有し（検証ロジックを二重実装しない。検査順序・エラー
+     variant は不変）、(a) external 由来の initializer は
+     `try_decode_external_initializer`（`try_alloc_vec` で確保した Vec へ
+     `decode_tensor` と同じリトルエンディアン変換。BOOL は非ゼロ→true）で
+     復号し、`raw_data` を `mem::take` して復号直後に解放する、(b) inline
+     の initializer は従来どおり `decode_tensor`（入力バイト列長で有界）、
+     (c) ノード列は clone せず move する（external 由来の Constant 属性
+     テンソルの `raw_data` を 2 重に持たない）。external テンソルが 0 件の
+     モデルは従来どおり `build_graph` へそのまま渡す。
+  4. facade `map_graph_error` は `AllocationFailed` を既存の
+     `OnnxError::Io(ErrorKind::OutOfMemory)` へ写像する（新規 variant
+     なし）。同じ `from_path` 内の `std::fs::read` が `.onnx` 本体の確保
+     失敗を std の `try_reserve` 規約どおり `Io(OutOfMemory)` で返すため、
+     どちらの確保失敗も利用者が `kind() == OutOfMemory` で一様に判別
+     できる。`InvalidModel` へ畳み込むと資源不足を「モデル不正」と誤分類
+     するため採らない。`tensor_name`・`bytes` は既存の `Io` 写像と同じく
+     落ちる。あわせて `from_path` はデコード後に `.onnx` 本体のバイト列を
+     解放してから external data の読み込みへ進む。
+- **A6 との関係**: `graph::decode_tensor` は変更していない（3 節の
+  不変条件は維持。失敗可能復号は external 入口専用の別関数）。
+  `graph::build_graph` は検証ヘルパの抽出のみで挙動不変（既存テスト
+  すべて無変更で pass）。所有権ベースの構築結果が旧経路（複製 →
+  `resolve_external_data` → `build_graph`）と同一の `Graph` になることを
+  `tests/onnx_external_data.rs::owned_build_matches_resolve_then_build_
+  graph`（4 dtype の external initializer・inline〈`raw_data`／
+  `float_data`〉・external Constant 属性を併せ持つモデル）で固定した。
+- **同類型の洗い出し**（未信頼の宣言値〈`length`・dims の積〉から無条件
+  確保している箇所。external data 読み込み結果がテンソルへ変換される
+  までの全経路と facade `OnnxModel::from_path` を対象）:
+
+  | 箇所 | 確保方式（是正前） | 判定 | 対応 |
+  |------|------------------|------|------|
+  | `external_data.rs::load` の区間バッファ | `vec![0u8; length]` | external 由来で巨大化しうる | `read_region`（`try_reserve_exact` ＋ `take().read_to_end`）へ |
+  | `graph::build_graph` → `decode_tensor` の要素 Vec（external 由来 initializer） | `collect`（正確なサイズヒントによる無条件確保） | external 由来で巨大化しうる（raw と同時に存在し 2 倍） | `build_graph_owned` ＋ `try_decode_external_initializer`（失敗可能確保・raw を復号直後に解放） |
+  | `graph::build_graph` の `g.node.clone()`（external 由来の Constant 属性テンソルの `raw_data`） | clone（無条件確保） | external 由来で巨大化しうる | `build_graph_owned` で move（確保自体を無くす） |
+  | `build_graph_with_external_data` の `model.clone()` | clone | 複製時点で external テンソルの `raw_data` は空（`plan` が inline データ非空を拒否）。`.onnx` 本体の長さで有界 | 対象外 |
+  | `plan` の各 Vec／HashMap・`load` の `by_location`／`out`・`resolve_external_data_slots` の slot 列・external initializer 判定の `vec![false; n]` | 無条件確保 | テンソル件数（`.onnx` 本体で有界）に比例し宣言長に依存しない | 対象外 |
+  | `enumerate_tensors`・`decode_tensor` の `dims.clone()`／名前の複製 | 無条件確保 | `.onnx` 本体で有界 | 対象外 |
+  | `decode_tensor` の inline 由来 `raw_data`／`float_data`／`int64_data`（バイト列入口・external 入口の inline 分） | `collect`／`clone` | 入力バイト列長で有界（dims 積は `raw_data` 長との照合**後**にのみ確保に使う。照合前確保なし） | 対象外（A6 により不変） |
+  | facade `from_path` の `std::fs::read` | std 内部で `try_with_capacity` | 既に失敗可能（`Io(OutOfMemory)`） | 対象外（デコード後に解放する変更のみ） |
+  | `interp::compute_constant`（`decode_tensor` ＋ `raw_to_value` の `data.clone()`）・`interp::run` が実行ごとに initializer を env へ clone | `collect`／clone | external 由来で巨大化しうるが**実行（`run`）経路**であり読み込み経路ではない | 本 P0 の範囲外。7 節の起票候補 |
+  | `onnx::autograd` の Constant 属性復号（`decode_tensor`） | `collect` | 同上（学習実行経路） | 本 P0 の範囲外。7 節の起票候補 |
+  | `resolve_external_data`（pub）を直接呼び、続けて `build_graph` を呼ぶ利用者 | 読み込みは失敗可能、復号は `decode_tensor` の `collect` | 復号側は無条件確保のまま | 推奨入口は `build_graph_with_external_data`（doc に明記）。`resolve_external_data` の契約（raw inline）は不変 |
+
+- **ピークメモリ見積もり**（`N` = external data 合計（≤
+  `max_total_bytes`）、`L_max` = 最大の external initializer、`S` =
+  `.onnx` 本体の長さ）:
+  - 是正前: 全 raw（`N`）が複製モデル内に残ったまま `build_graph` が全
+    initializer を復号し（＋`N`）、さらにノード列の clone で Constant
+    属性の raw を複製するため、最大でおよそ `2N`（＋Constant 分）＋
+    `O(S)`。いずれも無条件確保。
+  - 是正後: 読み込み完了時点で raw `N`、以後 initializer を 1 件ずつ復号
+    して直後に raw を解放するため、ピークはおよそ `N + L_max + O(S)`
+    （`O(S)` は デコード済み `ModelProto` と複製の 2 つ分）。最悪（単一の
+    巨大テンソル）で `2 × max_total_bytes`。構築後の `Graph` の保持量は
+    およそ `N`（復号済み initializer ＋ Constant 属性の raw）。
+  - 実行時（範囲外。参考）: `interp::run` は実行ごとに initializer を
+    env へ clone するため ＋`N`（Constant 属性は実行時に復号 ＋ clone で
+    一時的に ＋`2 ×` 当該分）。
+- **低メモリ環境での運用**: `onnx-interop` の `build_graph_with_external_
+  data`／`resolve_external_data` を直接呼ぶ利用者は、`ExternalDataOptions
+  { max_total_bytes, .. }` を利用可能メモリに合わせて下げて渡せる
+  （既存オプション。上限既定値 64 GiB 自体は変更しない。疎ファイルで
+  4 GiB の単一テンソルを宣言したモデルが下げた予算で確保前に拒否される
+  ことを `sparse_file_huge_tensor_is_rejected_by_lowered_budget_before_
+  allocation` で固定）。一方 facade `OnnxModel::from_path` は
+  `ExternalDataOptions::default()` 固定で、facade 利用者が予算を下げる
+  公開手段は無い（公開 API 面を変えないため本 P0 では追加しない。7 節の
+  起票候補）。この場合も確保失敗は abort ではなく
+  `OnnxError::Io(OutOfMemory)` になる。
+- **回帰テスト**: 数十 GiB の実確保は CI で危険なため行わない。
+  `external_data.rs::alloc_tests`（`try_alloc_vec`／`alloc_region_buf` の
+  `usize::MAX`・`isize::MAX + 1`・`u64::MAX` 要求が `AllocationFailed`、
+  `read_region` が容量ちょうどまで埋め再確保しないこと・読み込み不足が
+  `UnexpectedEof`、`try_decode_external_initializer` が 4 型で
+  `decode_tensor` と同一の `RawTensor` を返し raw を解放すること、余り
+  バイトの `Internal` 拒否）、`external_data.rs::tests::load_rejects_
+  unallocatable_length_as_allocation_failed`（`plan` 済み計画の
+  `length` を `isize::MAX + 1` に書き換えた `load` が確保前に
+  `AllocationFailed`）、統合テスト 4 件（上記の同一性・`owned_build_
+  keeps_topology_validation`・下げた予算での疎ファイル拒否・
+  `sparse_file_unallocatable_tensor_returns_allocation_failed_instead_of_
+  abort`〈指摘の再現経路そのもの: 4 TiB の疎ファイル＋4 TiB の単一
+  テンソル＋`max_total_bytes = u64::MAX` で `AllocationFailed` が返る。
+  Linux・`vm.overcommit_memory` が 0／2 の環境限定。区間バッファの確保を
+  `vec![0u8; n]` へ戻す変異でテストプロセスが SIGABRT で落ちることを
+  確認済み〉）、facade `interop::onnx::
+  map_graph_error_tests`（`AllocationFailed` → `Io(OutOfMemory)`）。
+
 ## 5. 残るリスク（受容済み）
+
+- **確保成功後のページ実コミット時の OOM（2026-09-28・PR #2348 codex P0
+  是正に伴い明記）**: 失敗可能確保（4.3 節）が型付きエラーにできるのは、
+  アロケータが確保要求そのものを拒否した場合（アドレス空間不足・
+  `isize::MAX` 超・overcommit ヒューリスティックによる拒否等）に限る。
+  Linux の `vm.overcommit_memory=1` 等で確保要求が成功した場合、読み込み
+  でページを実際に書き込む時点で OS の OOM killer がプロセスを終了させ
+  うる。これはユーザー空間の確保 API では検知できないため受容し、緩和は
+  呼び出し側が `max_total_bytes` を利用可能メモリに合わせて下げることで
+  行う（4.3 節「低メモリ環境での運用」）。
 
 - **2026-09-28 更新（`libc` 導入・`openat2` 採用による是正。PR #2348 codex
   レビュー discussion_r4119392011・PRRT_kwDOTuUCJc6mkUsI・
@@ -350,8 +490,8 @@ pass することを確認済み（prost は既定値のスカラーと空の re
     粗いクロック（tick 刻み・数 ms）を使う場合はその刻み内の再作成で
     通過しうる。
   - **照合と読み込みの間の残存窓（旧構成と同じ）**: 各区間の直前の照合を
-    通過した直後〜`read_exact` の間に truncate されると `read_exact` の
-    `UnexpectedEof` として `ExternalDataError::Io` で fail-closed に拒否
+    通過した直後〜読み込みの間に truncate されると `read_region` の
+    読み込み不足（`UnexpectedEof`）として `ExternalDataError::Io` で fail-closed に拒否
     される（4 節 2.）。同じ窓で同じ長さのまま in-place 書き換えされた
     場合は検出できないが、これは旧構成（ハンドル保持）でも同一で、
     `base_dir` 配下のファイル自体への書き込み権を前提とする。
@@ -389,6 +529,15 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   で書き出す契約は不変。
 - `checksum`（SHA-1）の検証。
 - `max_external_files` の既定値（4096）の承認（6 節）。
+- （2026-09-28・PR #2348 codex P0 是正に伴う起票候補。4.3 節）facade
+  `OnnxModel::from_path` から `max_total_bytes` を下げる公開手段（現状は
+  `ExternalDataOptions::default()` 固定。公開 API 面の追加にはユーザー
+  承認が要る）。
+- （同上）実行経路の確保: `interp::run` が実行ごとに initializer を env
+  へ clone する処理、`interp::compute_constant`／`onnx::autograd` の
+  Constant 属性テンソル復号（`decode_tensor` の `collect`＋`raw_to_value`
+  の clone）は、external data 由来で巨大化しうる無条件確保のまま
+  （読み込み経路ではないため本 P0 の範囲外）。
 
 自動運転中はユーザー承認を取れないため Issue は起票せず、本節と PR 本文に
 起票候補として記録する。
@@ -396,7 +545,7 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 ## 8. テスト・実測
 
 - 合成入力の網羅テスト: `crates/onnx-interop/tests/onnx_external_data.rs`
-  （unix で 50 テスト＋非 unix 契約テスト 2 件。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
+  （unix で 54 テスト〈うち Linux 限定 1 件〉＋非 unix 契約テスト 2 件。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
   隣接区間・Constant 属性テンソル〉・異常系〈A2〜A5 のパス検証・数値検証・
   重複検証・キー検証・A6 回帰〉。base_dir 外へのシンボリックリンク脱出
   〈`symlink_escaping_base_dir_via_absolute_target_is_rejected`〉を含む）。
@@ -414,7 +563,8 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   Linux 限定の `/proc/self/limits` 読み取りで、macOS 等では確認が
   空振りしていた）。
   単体テストは `crates/onnx-interop/src/onnx/external_data.rs::tests`
-  （6 テスト）: `openat2`／逐次 `openat(O_NOFOLLOW)` フォールバックの
+  （7 テスト。うち 1 件は 4.3 節の `load_rejects_unallocatable_length_
+  as_allocation_failed`）: `openat2`／逐次 `openat(O_NOFOLLOW)` フォールバックの
   両方式の直接検証（2 テスト）と、パス 1／パス 2 間の差し替え検知
   （5 節。PR #2348 security-auditor P2-1）の 4 テスト——照合関数
   `ensure_unchanged` が長さ・dev・ino・ctime（秒／ナノ秒）・mtime（秒／
@@ -426,8 +576,11 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   ぞれ `load` が拒否すること。区間重複検査（4.2 節。codex P0 是正）の
   回帰テストは統合テスト 2 件（`many_non_overlapping_unit_regions_in_
   one_file_resolve`・`one_overlap_among_many_unit_regions_is_rejected_
-  with_names`。上記 50 テストに含む）と、全プラットフォームで実行する
-  単体テスト `external_data.rs::overlap_tests`（7 テスト）。
+  with_names`。上記 54 テストに含む）と、全プラットフォームで実行する
+  単体テスト `external_data.rs::overlap_tests`（7 テスト）。メモリ確保の
+  失敗可能化（4.3 節）の回帰テストは全プラットフォームで実行する
+  `external_data.rs::alloc_tests`（6 テスト）・統合テスト 4 件（上記 54
+  テストに含む）・facade `interop::onnx::map_graph_error_tests`（3 テスト）。
 - PyTorch 実生成 fixture: `crates/onnx-interop/tests/fixtures/
   pytorch-onnx-external-data/`・`tests/onnx_interp_pytorch_cnn_fixture.rs`
   の `external_data_fixture_*` 3 テスト＋

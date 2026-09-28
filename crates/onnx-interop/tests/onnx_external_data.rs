@@ -1745,3 +1745,274 @@ fn absolute_location_is_rejected_before_platform_check_on_non_unix() {
         LocationRejectReason::Absolute
     );
 }
+
+// --- 確保の失敗可能化・所有権ベースのグラフ構築（PR #2348 codex P0 是正） ---
+
+/// external 由来の initializer（FLOAT／INT64／BOOL／FLOAT16）・inline の
+/// initializer（`raw_data` と `float_data` の両形式）・external な Constant
+/// 属性テンソルを併せ持つモデルで、`build_graph_with_external_data`
+/// （所有権ベースの `build_graph_owned` + 失敗可能確保の復号）が、旧経路
+/// （複製 → `resolve_external_data` → バイト列入口と同じ `build_graph`）と
+/// 完全に同じ `Graph` を返すことを固定する（`Graph: PartialEq`）。
+#[cfg(unix)]
+#[test]
+fn owned_build_matches_resolve_then_build_graph() {
+    use fandhe_ai_onnx_interop::onnx::external_data::resolve_external_data;
+    use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto, ValueInfoProto};
+
+    let dir = TempDir::new("owned-equivalence");
+    let mut shared = Vec::new();
+    for v in [1.5f32, -2.25, 3.0, f32::MIN_POSITIVE] {
+        shared.extend_from_slice(&v.to_le_bytes());
+    }
+    let f32_len = shared.len();
+    for v in [i64::MIN, -1, 0, i64::MAX] {
+        shared.extend_from_slice(&v.to_le_bytes());
+    }
+    let i64_end = shared.len();
+    // BOOL は非ゼロ→true（2・255 も true）。
+    shared.extend_from_slice(&[0u8, 1, 2, 255]);
+    let bool_end = shared.len();
+    for v in [0.5f32, -65504.0, 1.0e-4] {
+        shared.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+    }
+    let f16_end = shared.len();
+    for v in [9.0f32, 10.0] {
+        shared.extend_from_slice(&v.to_le_bytes());
+    }
+    let const_end = shared.len();
+    dir.write_file("all.onnx.data", &shared);
+
+    let s = |n: usize| n.to_string();
+    let f32_t = external_tensor(
+        "wf",
+        vec![2, 2],
+        data_type::FLOAT,
+        "all.onnx.data",
+        Some("0"),
+        Some(&s(f32_len)),
+    );
+    let i64_t = external_tensor(
+        "wi",
+        vec![4],
+        data_type::INT64,
+        "all.onnx.data",
+        Some(&s(f32_len)),
+        Some(&s(i64_end - f32_len)),
+    );
+    let bool_t = external_tensor(
+        "wb",
+        vec![4],
+        data_type::BOOL,
+        "./all.onnx.data",
+        Some(&s(i64_end)),
+        Some(&s(bool_end - i64_end)),
+    );
+    let f16_t = external_tensor(
+        "wh",
+        vec![3],
+        data_type::FLOAT16,
+        "all.onnx.data",
+        Some(&s(bool_end)),
+        Some(&s(f16_end - bool_end)),
+    );
+    let inline_raw = TensorProto {
+        dims: vec![1],
+        data_type: data_type::FLOAT,
+        name: "inline_raw".to_string(),
+        raw_data: 4.0f32.to_le_bytes().to_vec(),
+        ..Default::default()
+    };
+    let inline_typed = TensorProto {
+        dims: vec![2],
+        data_type: data_type::FLOAT,
+        name: "inline_typed".to_string(),
+        float_data: vec![5.0, 6.0],
+        ..Default::default()
+    };
+    let const_t = external_tensor(
+        "",
+        vec![2],
+        data_type::FLOAT,
+        "all.onnx.data",
+        Some(&s(f16_end)),
+        Some(&s(const_end - f16_end)),
+    );
+    let node = NodeProto {
+        input: Vec::new(),
+        output: vec!["c".to_string()],
+        name: "n_const".to_string(),
+        op_type: "Constant".to_string(),
+        attribute: vec![AttributeProto {
+            name: "value".to_string(),
+            f: 0.0,
+            i: 0,
+            s: Vec::new(),
+            t: Some(const_t),
+            floats: Vec::new(),
+            ints: Vec::new(),
+            r#type: 4,
+        }],
+        domain: String::new(),
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![node],
+            name: "g".to_string(),
+            initializer: vec![f32_t, inline_raw, i64_t, bool_t, inline_typed, f16_t],
+            input: Vec::new(),
+            output: vec![ValueInfoProto {
+                name: "c".to_string(),
+            }],
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    };
+
+    let options = ExternalDataOptions::default();
+    let owned = build_graph_with_external_data(&model, dir.path(), &options)
+        .expect("所有権ベースの構築は成功するはず");
+    let mut resolved = model.clone();
+    resolve_external_data(&mut resolved, dir.path(), &options).expect("resolve は成功するはず");
+    let reference = build_graph(&resolved).expect("旧経路の build_graph は成功するはず");
+    assert_eq!(owned, reference);
+
+    // 値そのものも確認する（両経路が同じ誤りを共有していないことの補強）。
+    match owned.initializers.get("wb") {
+        Some(RawTensor::Bool { data, .. }) => {
+            assert_eq!(data.as_slice(), &[false, true, true, true])
+        }
+        other => panic!("RawTensor::Bool を期待: {other:?}"),
+    }
+    match owned.initializers.get("wi") {
+        Some(RawTensor::I64 { data, shape }) => {
+            assert_eq!(data.as_slice(), &[i64::MIN, -1, 0, i64::MAX]);
+            assert_eq!(shape.as_slice(), &[4]);
+        }
+        other => panic!("RawTensor::I64 を期待: {other:?}"),
+    }
+}
+
+/// 所有権ベースの構築でも、`build_graph` と同じ検証エラーを返す（ここでは
+/// external initializer の復号後に行うトポロジ検証の失敗）。検証ロジックを
+/// 共有していることの回帰。
+#[cfg(unix)]
+#[test]
+fn owned_build_keeps_topology_validation() {
+    use fandhe_ai_onnx_interop::onnx::proto::ValueInfoProto;
+
+    let dir = TempDir::new("owned-topology");
+    dir.write_file("w.onnx.data", &1.0f32.to_le_bytes());
+    let t = external_tensor("w", vec![1], data_type::FLOAT, "w.onnx.data", None, None);
+    let mut model = model_with_initializer(t);
+    if let Some(g) = model.graph.as_mut() {
+        g.output.push(ValueInfoProto {
+            name: "missing".to_string(),
+        });
+    }
+    let err = build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default())
+        .expect_err("未生成のグラフ出力は拒否されるはず");
+    assert_eq!(
+        err,
+        GraphError::UnknownGraphOutput {
+            tensor_name: "missing".to_string()
+        }
+    );
+}
+
+/// 疎ファイル（`File::set_len` で 4 GiB へ伸ばした実データ 0 バイトの
+/// ファイル）に対し、4 GiB の単一 FLOAT テンソルを宣言した小さなモデルは、
+/// `max_total_bytes` を下げて渡せば読み込み・確保の前に
+/// `TotalSizeLimitExceeded` で拒否される（低メモリ環境で呼び出し側が予算を
+/// 下げる運用の回帰。実確保は一切しない）。64bit ターゲット限定（32bit
+/// では dims の積が `usize` を超え `ElementCountOverflow` になるため）。
+#[cfg(all(unix, target_pointer_width = "64"))]
+#[test]
+fn sparse_file_huge_tensor_is_rejected_by_lowered_budget_before_allocation() {
+    let dir = TempDir::new("sparse-huge");
+    let path = dir.write_file("big.onnx.data", &[]);
+    let file_len: u64 = 1 << 32;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(file_len)
+        .expect("疎ファイルの作成（set_len）に失敗した");
+    let t = external_tensor(
+        "big",
+        vec![1 << 30],
+        data_type::FLOAT,
+        "big.onnx.data",
+        Some("0"),
+        Some(&file_len.to_string()),
+    );
+    let model = model_with_initializer(t);
+    let options = ExternalDataOptions {
+        max_total_bytes: 1 << 30,
+        ..ExternalDataOptions::default()
+    };
+    let err = assert_external_err(build_graph_with_external_data(&model, dir.path(), &options));
+    assert_eq!(
+        err,
+        ExternalDataError::TotalSizeLimitExceeded {
+            limit: 1 << 30,
+            requested: file_len,
+        }
+    );
+}
+
+/// codex P0 の再現経路そのもの: 小さな `.onnx` 相当のモデルと疎ファイル
+/// （4 TiB へ `set_len` した実データ 0 バイトのファイル）で 4 TiB の単一
+/// FLOAT テンソルを宣言し、`max_total_bytes` を事実上無制限にして上限検査を
+/// 通過させると、`load` の区間バッファ確保が失敗し、プロセスを終了させずに
+/// `AllocationFailed` を返す（是正前の `vec![0u8; n]` では同じ入力で
+/// テストプロセスごと abort した）。
+///
+/// 確保要求がアロケータに拒否されることを前提にするため、Linux の
+/// `vm.overcommit_memory` が 0（ヒューリスティック。物理メモリ＋スワップを
+/// 明らかに超える要求を拒否）または 2（厳格）の環境でのみ実行する。1
+/// （常に許可）では確保が成功し 4 TiB の読み込みへ進みうるため実行しない
+/// （確保成功後のページ実コミット時の OOM は受容済みの残存リスク。
+/// `docs/onnx-external-data-decision.md` 5 節）。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn sparse_file_unallocatable_tensor_returns_allocation_failed_instead_of_abort() {
+    let mode = std::fs::read_to_string("/proc/sys/vm/overcommit_memory").unwrap_or_default();
+    if !matches!(mode.trim(), "0" | "2") {
+        eprintln!("vm.overcommit_memory={:?} のため実行しない", mode.trim());
+        return;
+    }
+    let dir = TempDir::new("sparse-unallocatable");
+    let path = dir.write_file("huge.onnx.data", &[]);
+    let file_len: u64 = 1 << 42;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(file_len)
+        .expect("疎ファイルの作成（set_len）に失敗した");
+    let t = external_tensor(
+        "huge",
+        vec![1 << 40],
+        data_type::FLOAT,
+        "huge.onnx.data",
+        Some("0"),
+        Some(&file_len.to_string()),
+    );
+    let model = model_with_initializer(t);
+    let options = ExternalDataOptions {
+        max_total_bytes: u64::MAX,
+        ..ExternalDataOptions::default()
+    };
+    let err = assert_external_err(build_graph_with_external_data(&model, dir.path(), &options));
+    assert_eq!(
+        err,
+        ExternalDataError::AllocationFailed {
+            tensor_name: "huge".to_string(),
+            bytes: file_len,
+        }
+    );
+}

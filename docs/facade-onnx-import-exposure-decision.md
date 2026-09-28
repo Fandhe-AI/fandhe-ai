@@ -532,3 +532,13 @@ resolution` で固定）。`from_path` が実際に external data を解決で�
 ことの正例は `crates/facade/tests/interop_onnx_external_data.rs::
 from_path_resolves_external_data_and_matches_manifest_reference`
 （PyTorch dynamo exporter 生出力 fixture 使用）を参照。
+
+**確保失敗の写像（2026-09-28・PR #2348 codex P0 是正）**: external data
+の読み込みバッファ・復号先の確保を失敗可能化し、`onnx-interop` 内部の
+新 variant `ExternalDataError::AllocationFailed` を facade では既存の
+`OnnxError::Io`（`ErrorKind::OutOfMemory`）へ写像する（公開 variant の
+追加なし。同じ `from_path` 内の `std::fs::read` による `.onnx` 本体の
+確保失敗と同じ判別方法になる）。`from_path` は `ExternalDataOptions::
+default()` 固定のため、facade 利用者が `max_total_bytes` を下げる公開
+手段は無い（起票候補。詳細・ピークメモリ見積もりは
+`docs/onnx-external-data-decision.md` 4.3 節・7 節）。
