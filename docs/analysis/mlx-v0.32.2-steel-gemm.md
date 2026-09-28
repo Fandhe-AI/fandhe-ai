@@ -57,11 +57,15 @@ Phase 3（#2098「負けセル分析・原因帰属」）の入力として使�
    世代ゲート条件（macOS/OS 26.2 以上・`gen>=17`〈phone は 18〉）は
    変わっていない（§5）
 4. **`main` HEAD（タグ以降・未リリース）では、NAX 経路に Ultra チップ
-   （`devc == 'd'`）向けの専用タイル分岐・split-K nax 対応・gather nax
-   対応が追加されている**。これは #549・v0.32.2 のいずれにも存在しない
-   新規差分だが、**チップ「サイズ」区分（base/pro・max・ultra）の分岐で
-   あり、Neural Accelerator の世代ゲート（`get_architecture_gen()`）とは
-   別軸**である点に注意（§6）
+   （`devc == 'd'`）向けの専用タイル分岐が新規追加されている**。これは
+   #549・v0.32.2 のいずれにも存在しない新規差分であり、**チップ「サイズ」
+   区分（base/pro・max・ultra）の分岐であり、Neural Accelerator の世代
+   ゲート（`get_architecture_gen()`）とは別軸**である点に注意（§6）。
+   一方 **split-K nax（`steel_gemm_splitk_nax.metal`）・gather nax
+   （`steel_gemm_gather_nax.h`）は #549 時点から既に存在する既存経路
+   であり、main HEAD での変更は新規追加ではなく既存実装への軽微な変更
+   （split-K nax は 2 行差分）・リファクタリング（gather nax）にとどまる
+   （§6・§7 の「原型のみ → リファクタリング」参照）
 5. **ライセンスは MIT 単独**（`Copyright © 2023 Apple Inc.`）。GitHub API
    の SPDX も `MIT`。Issue #2096 の受入条件にある「MIT・Apache-2.0
    dual」は実測で裏付けられなかった（§9）
