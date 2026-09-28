@@ -121,6 +121,13 @@ struct ExporterRecord {
     op_types: Option<Vec<String>>,
     #[serde(default)]
     name_map: Option<HashMap<String, String>>,
+    /// `name_map` に対応が見つからなかった initializer 名（`gen_reference.
+    /// py::export_one` が「隠さず unmapped として記録する」方針で書き出す
+    /// フィールド。R2 検査で `graph.initializers` の全件が `name_map` と
+    /// 本フィールドのいずれかに過不足なく属することを検証するために使う
+    /// レビュー指摘対応。イシュー #2329 PR #2343）。
+    #[serde(default)]
+    unmapped_initializers: Option<Vec<String>>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -187,6 +194,26 @@ fn raw_f32(t: &RawTensor) -> Option<(&[f32], &[i64])> {
 /// shape 定数等、モデルパラメータではない initializer）は対象外
 /// （`gen_reference.py::export_one` の値ベース対応付けの生成時コメント
 /// 参照）。
+///
+/// **網羅性検査（codex-review 指摘対応。イシュー #2329 PR #2343）**:
+/// `name_map` のみを検査する素朴な実装は、対応表が空・一部欠落していても
+/// 何も検査せず素通りしてしまう（R2 の「重みの bit 一致」を実質検証しない
+/// blind spot）。これを防ぐため、値の突合に先立って次の 2 点を fail-closed
+/// に検証する。
+/// 1. `name_map` の値（`state_dict` キー側）が `case.state_dict` の全キーと
+///    重複なく一対一対応すること（`state_dict` の重みが 1 つも漏れず・
+///    2 重に数えられず検査対象になることの保証）。ただし `*.num_batches_
+///    tracked`（`nn.BatchNorm*d` が eval 時には参照しない整数バッファで、
+///    ONNX グラフへ export されない PyTorch 既知の仕様。実測で
+///    `bn*_eval*` ケース全件が該当）は本検査の対象から除外する
+///    （`gen_reference.py::tensor_record` が dtype を問わず `f32` へ
+///    キャストして記録するため、除外しないと ONNX 側に対応物が存在しない
+///    バッファまで bit 一致検査対象に含めることを要求してしまい誤検知に
+///    なる）
+/// 2. `graph.initializers` の全キーが `name_map`（検査対象）と
+///    `unmapped_initializers`（意図的に対象外と記録済み）のいずれか一方に
+///    過不足なく属すること（初期化子が静かに検査対象からも記録からも
+///    漏れるのを防ぐ）
 fn assert_r2_initializers_match_state_dict(
     graph: &fandhe_ai_onnx_interop::onnx::graph::Graph,
     case: &CaseRecord,
@@ -198,6 +225,69 @@ fn assert_r2_initializers_match_state_dict(
         .name_map
         .as_ref()
         .unwrap_or_else(|| panic!("{case_name} [{exporter_name}]: name_map が無い"));
+
+    // 検査 1: name_map の値（state_dict キー）が state_dict の全キーと
+    // 重複なく一対一対応することを検査する（bijection）。これにより
+    // name_map が空・一部欠落しているケースは state_dict が非空である限り
+    // ここで fail する（素通りを防ぐ）。
+    let mut mapped_sd_keys: Vec<&String> = name_map.values().collect();
+    mapped_sd_keys.sort();
+    let mapped_sd_keys_unique_count = {
+        let mut dedup = mapped_sd_keys.clone();
+        dedup.dedup();
+        dedup.len()
+    };
+    assert_eq!(
+        mapped_sd_keys.len(),
+        mapped_sd_keys_unique_count,
+        "{case_name} [{exporter_name}]: name_map の値（state_dict キー）に重複がある: \
+         {mapped_sd_keys:?}"
+    );
+    // `num_batches_tracked` は nn.BatchNorm*d の eval 時未使用バッファで
+    // ONNX へ export されない（PyTorch 既知の仕様）ため、必須対応の対象
+    // から除外する（このコメント直上のドキュメンテーションコメント参照）。
+    let mut state_dict_keys: Vec<&String> = case
+        .state_dict
+        .keys()
+        .filter(|k| !k.ends_with(".num_batches_tracked") && *k != "num_batches_tracked")
+        .collect();
+    state_dict_keys.sort();
+    assert_eq!(
+        mapped_sd_keys, state_dict_keys,
+        "{case_name} [{exporter_name}]: name_map の対応先（state_dict キー集合。\
+         num_batches_tracked を除く）が case.state_dict の全キーと一致しない \
+         （漏れ・過剰のいずれか）。mapped={mapped_sd_keys:?} state_dict={state_dict_keys:?}"
+    );
+
+    // 検査 2: graph.initializers の全キーが name_map（検査対象）と
+    // unmapped_initializers（意図的に対象外と記録済み）のいずれか一方に
+    // 過不足なく属することを検査する（初期化子の静かな取りこぼしを防ぐ）。
+    let unmapped = exporter
+        .unmapped_initializers
+        .as_ref()
+        .unwrap_or_else(|| panic!("{case_name} [{exporter_name}]: unmapped_initializers が無い"));
+    let mut accounted: Vec<&String> = name_map.keys().chain(unmapped.iter()).collect();
+    accounted.sort();
+    let accounted_unique_count = {
+        let mut dedup = accounted.clone();
+        dedup.dedup();
+        dedup.len()
+    };
+    assert_eq!(
+        accounted.len(),
+        accounted_unique_count,
+        "{case_name} [{exporter_name}]: name_map と unmapped_initializers の間で \
+         initializer 名が重複している: {accounted:?}"
+    );
+    let mut graph_init_names: Vec<&String> = graph.initializers.keys().collect();
+    graph_init_names.sort();
+    assert_eq!(
+        accounted, graph_init_names,
+        "{case_name} [{exporter_name}]: graph.initializers の全件が name_map・\
+         unmapped_initializers のいずれにも過不足なく属さない（取りこぼし検出）。\
+         accounted={accounted:?} graph={graph_init_names:?}"
+    );
+
     for (onnx_name, sd_key) in name_map {
         let raw = graph.initializers.get(onnx_name).unwrap_or_else(|| {
             panic!(
