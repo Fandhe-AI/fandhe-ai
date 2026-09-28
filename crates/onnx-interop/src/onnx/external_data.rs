@@ -38,15 +38,57 @@
 //!    data ファイル数の上限**（[`ExternalDataOptions::
 //!    max_external_files`]。合計バイト数の上限はサイズ 0 のテンソルを
 //!    大量の異なる空ファイルへ分散させる入力に対しては無力なため、
-//!    ファイルを開いた直後・`files` へ登録する前に別途検査する。fd 枯渇
-//!    対策。#2347 P0 是正・PR #2348 コードレビュー対応・
-//!    PRRT_kwDOTuUCJc6mlxhy）をすべて検証する。1 件でも失敗すれば `Err`
-//!    を返しファイルは一切読まない（A04 資源枯渇対策）。
-//! 2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、パス 1 で
-//!    開いたファイルハンドルを再利用して該当区間だけを `read_exact` する
-//!    （`.data` ファイル全体は読まない）。読み込み直前に `metadata().len()`
-//!    （Unix では dev/ino も）をパス 1 の記録と再照合し、不一致は
-//!    [`ExternalDataError::FileChangedDuringLoad`] とする。
+//!    ファイルを開いた直後・既知ファイル集合へ登録する前に別途検査する。
+//!    #2347 P0 是正・PR #2348 コードレビュー対応・PRRT_kwDOTuUCJc6mlxhy）
+//!    をすべて検証する。1 件でも失敗すれば `Err` を返しファイルは一切
+//!    読まない（A04 資源枯渇対策）。**パス 1 はファイルハンドルを保持
+//!    しない**: 各 location を安全 open → ハンドルに対する `fstat` で
+//!    `FileKey`（dev/ino）とファイル長だけを記録 → 直ちに close する。
+//! 2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、正規化済み
+//!    location ごとに 1 ファイルずつ「パス 1 と同じ安全 open（同じ
+//!    `base_dir` fd 起点の `openat2`／逐次 `openat(O_NOFOLLOW)`）→ 開いた
+//!    ハンドルの `FileKey`・ファイル長をパス 1 の記録と再照合 → その
+//!    location を参照する全テンソルの区間だけを `read_exact`（`.data`
+//!    ファイル全体は読まない）→ close」を逐次に行う。再照合の不一致は
+//!    [`ExternalDataError::FileChangedDuringLoad`] とする（fail-closed）。
+//!
+//! ## ハンドル非保持の構成（PR #2348 codex P1 是正）
+//!
+//! 旧構成はパス 1 で開いた distinct ファイルのハンドルをすべて保持した
+//! ままパス 2 で再利用していたため、`max_external_files` の既定値
+//! （4096。ユーザー承認済みで下げない）が一般的なプロセスの fd 上限
+//! （例: soft limit 1024）を上回り、小さなファイルを多数参照する
+//! モデルでは `TooManyExternalFiles` に到達する前に `EMFILE` が発生して
+//! 同一プロセスのほかの I/O にも影響し得た。現構成で同時に保持する fd は
+//! `base_dir` のディレクトリ fd と、処理中の external data ファイル 1 つ
+//! （パス 1 の `fstat` 中またはパス 2 の読み込み中）の高々 2 つ
+//! （`openat2` 非対応時の逐次方式では経路途中のディレクトリ fd が一時的
+//! に 1 つ加わる）であり、external data のファイル数に依存しない。
+//!
+//! 「単一パスでファイルごとに検証・読み込み・close を進める」構成は
+//! 採らない: `length` 省略時の読み込み長は `file_len - offset` で確定する
+//! ためファイルを開かずに総量上限（`max_total_bytes`）・ファイル数上限を
+//! 判定できず、単一パスでは上限超過を途中まで読んでから検出する構成に
+//! なるためである。検証パス（ハンドル非保持）と読み込みパスを分け、
+//! 読み込みパスで再 open した直後にハンドル自身の `FileKey`・長さを
+//! 検証パスの記録と照合する。
+//!
+//! **TOCTOU の論拠**: 読み込みは常に「パス 2 で安全 open し、その
+//! ハンドル自身に対する `fstat` で `FileKey`〈dev, ino〉とファイル長が
+//! パス 1 の記録と一致したハンドル」からのみ行い、経路文字列を
+//! 再解決しない（再 open も `base_dir` fd 起点・シンボリックリンク拒否の
+//! 同じ手段）。したがって (1) `base_dir` 外・シンボリックリンク経由の
+//! ファイルは読まない、(2) 読む実体はパス 1 で当該 location について
+//! 検証した実体（dev/ino）と同一で、長さもパス 1 の区間検証の前提と
+//! 同一、(3) 読み込み量はパス 1 で上限検査済みの区間に有界、の 3 点は
+//! 旧構成（ハンドル保持）と同じく保証される。パス間でハンドルを保持
+//! しないことで inode 番号の再利用の窓が生じるが、(a) パス 1 内で別
+//! ファイルが同じ dev/ino を得ても `FileKey` の併合は重複区間検出を
+//! 増やす方向にしか働かず見逃しを生まない、(b) パス 2 の dev/ino・長さ
+//! 照合を通過する差し替えは `base_dir` への書き込み権を持つ者による
+//! 同一 inode の in-place 改変（旧構成でも防御対象外）と同等の能力で
+//! しか起こせない、ため受容する（`docs/onnx-external-data-decision.md`
+//! 4 節・5 節）。
 //!
 //!    **経路解決方式（unix 全般。イシュー #2347 是正版）**: パス 1 の
 //!    ファイル解決は `base_dir` を 1 度だけディレクトリ fd として開き
@@ -111,15 +153,19 @@ use super::proto::{ModelProto, TensorProto, cap_sparse_tensor_diag_name, data_lo
 /// 参照する。
 pub const DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
-/// 1 モデルあたりに同時オープンを許す external data ファイル数（実体単位。
+/// 1 モデルあたりに参照を許す external data ファイル数（実体単位。
 /// `FileKey` で畳み込んだ後の distinct 数）の既定上限。
 ///
 /// `max_total_bytes` はバイト数のみを制限するため、要素数 0（サイズ 0）の
 /// テンソルを大量に並べ、それぞれが別々の空ファイルを `location` で参照
-/// するモデルに対しては合計サイズが 0 のまま歯止めが効かず、`plan` が
-/// 開いたファイルハンドルだけがプロセスの fd 上限に達しうる（security.md
-/// A04・AGENTS.md「外部フォーマットのパース検証」。#2347 P0 是正・
-/// PR #2348 コードレビュー対応・PRRT_kwDOTuUCJc6mlxhy）。この上限は
+/// するモデルに対しては合計サイズが 0 のまま歯止めが効かず、open／`fstat`
+/// の回数が無制限に増えうる（security.md A04・AGENTS.md「外部フォーマット
+/// のパース検証」。#2347 P0 是正・PR #2348 コードレビュー対応・
+/// PRRT_kwDOTuUCJc6mlxhy）。なお本上限は同時保持 fd 数の上限ではない:
+/// `plan`／`load` は external data ファイルのハンドルを 1 つずつ開いては
+/// 閉じるため、同時保持 fd 数はこの値に依存せず有界（モジュール doc
+/// 「ハンドル非保持の構成」節。PR #2348 codex P1 是正）であり、4096 が
+/// プロセスの fd 上限（例: 1024）を上回っても `EMFILE` は生じない。この上限は
 /// distinct なファイル実体（`FileKey`）の数を制限するため、1 ファイルを
 /// 複数テンソルが参照する通常の分割形式（同一 `.onnx.data` を initializer
 /// 群が共有する構成）は 1 件としてしか数えない。
@@ -136,11 +182,12 @@ pub struct ExternalDataOptions {
     /// [`ExternalDataError::TotalSizeLimitExceeded`] で拒否する（確保の
     /// 前に検査するため、この上限を超える `length` はメモリを確保しない）。
     pub max_total_bytes: u64,
-    /// 1 モデルあたりに同時オープンを許す external data ファイル数
+    /// 1 モデルあたりに参照を許す external data ファイル数
     /// （実体単位・`FileKey` で畳み込んだ後の distinct 数）の上限。
     /// 超過は [`ExternalDataError::TooManyExternalFiles`] で拒否する
-    /// （ファイルを開いた直後・`files` へ登録する前に検査するため、この
-    /// 上限を超えて開いたハンドルを溜め込まない）。
+    /// （パス 1 でファイルを開いて `FileKey` を得た直後・既知ファイル集合へ
+    /// 登録する前に検査する。いずれのパスもハンドルを 1 つずつ開いては
+    /// 閉じるため、同時保持 fd 数はこの値に依存しない）。
     pub max_external_files: usize,
 }
 
@@ -246,8 +293,8 @@ pub enum ExternalDataError {
         tensor_name: String,
         kind: std::io::ErrorKind,
     },
-    /// パス 2 の読み込み直前にファイル長（Unix では dev/ino も）がパス 1 の
-    /// 記録と食い違った（TOCTOU 検知）。
+    /// パス 2 で再 open したハンドルのファイル長・実体識別子（Unix では
+    /// dev/ino）がパス 1 の記録と食い違った（TOCTOU 検知）。
     FileChangedDuringLoad { tensor_name: String },
     /// `base_dir` の canonicalize に失敗した。
     InvalidBaseDir { kind: std::io::ErrorKind },
@@ -421,8 +468,11 @@ fn validate_location_string(loc: &str) -> Result<Vec<&std::ffi::OsStr>, Location
     Ok(parts)
 }
 
-/// 開いたファイルとパス 1 時点のメタデータ（パス 2 の TOCTOU 再照合・
-/// 読み込みの両方に使う）。
+/// [`resolve_and_open`] が開いたファイルと、そのハンドル自身に対する
+/// `fstat` で得たメタデータ。パス 1（`plan`）では `FileKey`・長さを記録
+/// した直後に破棄（close）し、パス 2（`load`）では再 open した同型の値を
+/// パス 1 の記録と照合してから読み込みに使う（どちらのパスも本型を
+/// コレクションへ溜め込まない。モジュール doc「ハンドル非保持の構成」節）。
 struct OpenFile {
     file: File,
     len: u64,
@@ -697,6 +747,32 @@ mod no_follow_open {
     }
 }
 
+/// `base_dir` を起点に external data を解決するためのハンドル。unix では
+/// [`no_follow_open::open_base_dir`] が開いたディレクトリ fd（`plan`・
+/// `load` を通して 1 つだけ保持する）。
+#[cfg(unix)]
+type BaseDirHandle = File;
+
+/// 非 unix では安全な経路解決手段を持たず `resolve_and_open` が常に拒否
+/// するため、何も開かないゼロサイズのマーカーとする（`plan`／`load` の
+/// 制御フローを unix と共通化するためだけに存在する）。
+#[cfg(not(unix))]
+struct BaseDirHandle;
+
+/// `base_dir_canonical` を external data 解決の起点として開く。`plan` が
+/// 最初の external テンソルに到達した時点でのみ呼ぶ（遅延オープン。
+/// `plan` 内コメント参照）。
+#[cfg(unix)]
+fn open_base_dir_handle(base_dir_canonical: &Path) -> Result<BaseDirHandle, ExternalDataError> {
+    no_follow_open::open_base_dir(base_dir_canonical)
+        .map_err(|e| ExternalDataError::InvalidBaseDir { kind: e.kind() })
+}
+
+#[cfg(not(unix))]
+fn open_base_dir_handle(_base_dir_canonical: &Path) -> Result<BaseDirHandle, ExternalDataError> {
+    Ok(BaseDirHandle)
+}
+
 /// `base_dir_file`（[`no_follow_open::open_base_dir`] が開いたディレクトリ
 /// fd）を起点に、既に検証済みの `parts`（[`validate_location_string`] の
 /// 戻り値。`plan` が呼び出し元で 1 度だけ検証し、同一 location への
@@ -705,16 +781,15 @@ mod no_follow_open {
 /// 含めシンボリックリンクを拒否し、`openat2`／`O_NOFOLLOW` による
 /// ディレクトリハンドル連鎖オープンで「検証した経路そのもの」を開くことを
 /// 保証する（A2・P0 対応。discussion_r4119392011・イシュー #2347）。
-/// 返り値の第 2 要素は `plan` が `file_key_for` のフォールバック（dev/ino
-/// を持たないプラットフォーム。実質使われない。下記コメント参照）・
-/// location キャッシュのキーとして使う、`parts` から再構築した正規化済み
-/// 相対パス。
+/// パス 1（`plan`）の初回解決と、パス 2（`load`）の読み込み用再 open の
+/// 両方から同じ `base_dir_file` を起点に呼ばれる（再 open でも経路文字列を
+/// 再解決せず、同じシンボリックリンク拒否手段を使う）。
 #[cfg(unix)]
 fn resolve_and_open(
     tensor_name: &str,
-    base_dir_file: &File,
+    base_dir_file: &BaseDirHandle,
     parts: &[&std::ffi::OsStr],
-) -> Result<(OpenFile, PathBuf), ExternalDataError> {
+) -> Result<OpenFile, ExternalDataError> {
     #[cfg(target_os = "linux")]
     let open_result = match no_follow_open::open_chain_openat2(base_dir_file, parts) {
         no_follow_open::Openat2Outcome::Opened(f) => Ok(f),
@@ -763,15 +838,11 @@ fn resolve_and_open(
     use std::os::unix::fs::MetadataExt;
     let dev_ino = (meta.dev(), meta.ino());
 
-    let normalized_rel: PathBuf = parts.iter().collect();
-    Ok((
-        OpenFile {
-            file,
-            len: meta.len(),
-            dev_ino,
-        },
-        normalized_rel,
-    ))
+    Ok(OpenFile {
+        file,
+        len: meta.len(),
+        dev_ino,
+    })
 }
 
 /// [`resolve_and_open`] の非 unix（Windows 等）向け実装。
@@ -785,24 +856,18 @@ fn resolve_and_open(
 /// の安全な no-follow open 手段。例: Windows の
 /// `FILE_FLAG_OPEN_REPARSE_POINT` ベースの実装。`docs/
 /// onnx-external-data-decision.md` 参照）。
+///
+/// `location` の文法検証（`Path::components()` 等の OS 非依存な範囲）は
+/// unix と共通に呼び出し元（`plan`）が本関数より前に行う: 文字列自体が
+/// 不正（絶対パス・`..`・NUL 等）な場合は具体的な理由を持つ
+/// `InvalidLocation` が先に返り、文法上は正当な `location` のみが本関数へ
+/// 到達して `UnsupportedPlatformForSecureResolve` になる。
 #[cfg(not(unix))]
 fn resolve_and_open(
     tensor_name: &str,
-    _base_dir_canonical: &Path,
-    loc: &str,
-) -> Result<(OpenFile, PathBuf), ExternalDataError> {
-    // `location` の文法検証（`Path::components()` 等の OS 非依存な範囲）は
-    // 先に行い、結果は `?` でそのまま使う: 文字列自体が不正
-    // （絶対パス・`..`・NUL 等）な場合は具体的な理由を持つ
-    // `InvalidLocation` を返し、文法上は正当な `location` であっても
-    // 本プラットフォームでは安全に解決できないため、検証を通過した
-    // 場合のみ次の行で `UnsupportedPlatformForSecureResolve`
-    // （fail-closed。イシュー #2349 で対応を追跡中）を返す。
-    validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
-        tensor_name: cap_name(tensor_name),
-        reason,
-    })?;
-
+    _base_dir: &BaseDirHandle,
+    _parts: &[&std::ffi::OsStr],
+) -> Result<OpenFile, ExternalDataError> {
     Err(ExternalDataError::UnsupportedPlatformForSecureResolve {
         tensor_name: cap_name(tensor_name),
     })
@@ -888,9 +953,26 @@ fn file_key_for(base_dir_canonical: &Path, _opened: &OpenFile, normalized_rel: &
 struct LoadPlanEntry {
     slot: TensorSlot,
     tensor_name: String,
-    file_key: FileKey,
+    /// `plan` が返す `PlannedLocation` 列への添字（どの location から
+    /// 読むか）。
+    location_idx: usize,
     offset: u64,
     length: u64,
+}
+
+/// パス 1 で検証した distinct な正規化済み location 1 件分の記録。
+/// ファイルハンドルは保持せず、パス 2 の再 open 時に照合する識別情報
+/// （`FileKey`・ファイル長）と、再 open に使う検証済みの正規化済み相対
+/// パスだけを持つ（モジュール doc「ハンドル非保持の構成」節）。
+struct PlannedLocation {
+    /// [`validate_location_string`] が返した `Normal` 成分列を連結した
+    /// 正規化済み相対パス（`CurDir` 除去済み・`..`／絶対パスを含まない）。
+    /// パス 2 は `rel.iter()` で成分列へ戻して `resolve_and_open` へ渡す。
+    rel: PathBuf,
+    /// パス 1 で開いたハンドルの実体識別子。
+    key: FileKey,
+    /// パス 1 で開いたハンドルの `fstat` で得たファイル長。
+    len: u64,
 }
 
 /// external なテンソルの所在（`ModelProto` 内の位置）。パス 2 の mutable
@@ -940,13 +1022,25 @@ fn enumerate_tensors(model: &ModelProto) -> Vec<(TensorSlot, String, &TensorProt
     out
 }
 
+/// `plan` の戻り値: 検証済みの読み込み計画・distinct location の記録・
+/// （external テンソルが 1 件以上あった場合のみ）`base_dir` ハンドル。
+type Plan = (
+    Vec<LoadPlanEntry>,
+    Vec<PlannedLocation>,
+    Option<BaseDirHandle>,
+);
+
 /// パス 1: 全 external テンソルを検証する（ファイル内容は読まない）。
-/// 検証済みの読み込み計画と、開いたファイルハンドルのキャッシュを返す。
+/// 検証済みの読み込み計画・distinct location ごとの識別情報
+/// （`FileKey`・ファイル長）・`base_dir` ハンドルを返す。external data
+/// ファイルのハンドルは location ごとに開いて `fstat` した直後に close
+/// し、戻り値にも含めない（同時保持 fd 数をファイル数に依存させない。
+/// PR #2348 codex P1 是正）。
 fn plan(
     model: &ModelProto,
     base_dir_canonical: &Path,
     options: &ExternalDataOptions,
-) -> Result<(Vec<LoadPlanEntry>, HashMap<FileKey, OpenFile>), GraphError> {
+) -> Result<Plan, GraphError> {
     // initializer 名の重複は I/O の前に拒否する（A5）。
     if let Some(g) = model.graph.as_ref() {
         let mut seen = std::collections::HashSet::new();
@@ -969,25 +1063,29 @@ fn plan(
     // `open(O_DIRECTORY)` は読み取り〈r〉権限を要求するため、無条件に
     // 開くと「実行のみ許可のディレクトリに置かれた external data 非使用
     // モデル」が `from_path` で読めなくなる後退を招く（advisor 指摘）。
-    // 非 unix では `resolve_and_open` が `base_dir_canonical: &Path` を
-    // 直接受け取り常に拒否するため不要。
-    #[cfg(unix)]
-    let mut base_dir_file: Option<File> = None;
+    // 非 unix の `BaseDirHandle` は何も開かないマーカーで、
+    // `resolve_and_open` が常に拒否する。パス 2（`load`）の再 open も同じ
+    // ハンドルを起点にするため、戻り値としてそのまま返す。
+    let mut base_dir_file: Option<BaseDirHandle> = None;
 
     // 正規化済み location（`Path::components()` の `Normal` 列。
     // `validate_location_string` の戻り値から再構築した相対パス）から
-    // 既に解決済みの [`FileKey`] へのキャッシュ。**同一の location 文字列**
-    // を複数のテンソルが参照する通常の分割形式（1 ファイルを initializer
-    // 群が共有する構成）で、2 件目以降の `resolve_and_open`（`openat2` 等の
-    // システムコール）を省略するために使う。安全性は変えない: 異なる
-    // location 文字列がハードリンク等で同一実体を指す場合は、この
-    // キャッシュではヒットせず必ず個別に開いて `file_key_for`（dev/ino）で
-    // 判定する既存の畳み込み・overlap 検出をそのまま経由する（レビュー
-    // 対応。#2347）。
-    #[cfg(unix)]
-    let mut location_cache: HashMap<PathBuf, FileKey> = HashMap::new();
+    // 既に解決済みの `locations` の添字へのキャッシュ。**同一の location
+    // 文字列**を複数のテンソルが参照する通常の分割形式（1 ファイルを
+    // initializer 群が共有する構成）で、2 件目以降の `resolve_and_open`
+    // （`openat2` 等のシステムコール）を省略し、パス 2 でもその location を
+    // 1 回の再 open でまとめて読めるようにするために使う。安全性は変え
+    // ない: 異なる location 文字列がハードリンク等で同一実体を指す場合は、
+    // このキャッシュではヒットせず必ず個別に開いて `file_key_for`
+    // （dev/ino）で判定する既存の畳み込み・overlap 検出をそのまま経由する
+    // （レビュー対応。#2347）。
+    let mut location_cache: HashMap<PathBuf, usize> = HashMap::new();
+    let mut locations: Vec<PlannedLocation> = Vec::new();
 
-    let mut files: HashMap<FileKey, OpenFile> = HashMap::new();
+    // distinct なファイル実体（`FileKey`）の集合。`max_external_files` の
+    // 判定にのみ使い、ハンドルは保持しない（旧構成の `files: HashMap<
+    // FileKey, OpenFile>` を置き換えた。PR #2348 codex P1 是正）。
+    let mut known_keys: std::collections::HashSet<FileKey> = std::collections::HashSet::new();
     let mut regions: HashMap<FileKey, Vec<(u64, u64, String)>> = HashMap::new();
     let mut entries = Vec::new();
     let mut total_requested: u64 = 0;
@@ -1075,19 +1173,18 @@ fn plan(
                 tensor_name: tensor_name.clone(),
             })?;
 
-        // `file_key`／`file_len` の解決。`to_insert` は新規に開いたハンドル
-        // （`files` へ後で登録する。location キャッシュがヒットした場合は
-        // `None` — 既に `files` に存在するハンドルをそのまま再利用し、
-        // このテンソルのためには一切 open しない）。
-        #[cfg(unix)]
-        let (file_key, file_len, to_insert): (FileKey, u64, Option<OpenFile>) = {
+        // `file_key`／`file_len` の解決。location キャッシュがヒットした
+        // 場合はパス 1 で既に記録した識別情報を再利用し、このテンソルの
+        // ためには一切 open しない。ミスした場合のみ安全 open →
+        // ハンドル自身の `fstat` で `FileKey`・長さを記録 → 直ちに close
+        // する（ハンドルはどこにも格納しない。PR #2348 codex P1 是正）。
+        let (location_idx, file_key, file_len): (usize, FileKey, u64) = {
             // 最初の external テンソルに到達した時点でのみ `base_dir` の
-            // ディレクトリ fd を開く（上のコメント参照。遅延オープン）。
+            // ハンドルを開く（上のコメント参照。遅延オープン）。
             if base_dir_file.is_none() {
-                let f = no_follow_open::open_base_dir(base_dir_canonical).map_err(|e| {
-                    GraphError::ExternalData(ExternalDataError::InvalidBaseDir { kind: e.kind() })
-                })?;
-                base_dir_file = Some(f);
+                base_dir_file = Some(
+                    open_base_dir_handle(base_dir_canonical).map_err(GraphError::ExternalData)?,
+                );
             }
             let f = base_dir_file.as_ref().ok_or(GraphError::ExternalData(
                 ExternalDataError::Internal {
@@ -1096,11 +1193,13 @@ fn plan(
             ))?;
 
             // `location` の検証（文字列段階＋`Path::components()`）は
-            // ここで 1 度だけ行い、`resolve_and_open`（本体のオープン処理）
-            // へは検証済みの `parts` を渡す。正規化済み相対パスを
-            // `location_cache` のキーにすることで、`foo.data`／
-            // `./foo.data` のような表記ゆれも同一キーへ畳み込む
-            // （`file_key_for` の表記ゆれ畳み込みと同じ設計）。
+            // ここで 1 度だけ行い（unix・非 unix 共通。非 unix でも
+            // 文法不正は `UnsupportedPlatformForSecureResolve` より先に
+            // 具体的な `InvalidLocation` として返す）、`resolve_and_open`
+            // （本体のオープン処理）へは検証済みの `parts` を渡す。正規化
+            // 済み相対パスを `location_cache` のキーにすることで、
+            // `foo.data`／`./foo.data` のような表記ゆれも同一キーへ畳み
+            // 込む（`file_key_for` の表記ゆれ畳み込みと同じ設計）。
             let parts = validate_location_string(&location).map_err(|reason| {
                 GraphError::ExternalData(ExternalDataError::InvalidLocation {
                     tensor_name: cap_name(&tensor_name),
@@ -1109,35 +1208,35 @@ fn plan(
             })?;
             let normalized_rel: PathBuf = parts.iter().collect();
 
-            if let Some(cached_key) = location_cache.get(&normalized_rel) {
-                // 同一 location への 2 件目以降: 既に開いたハンドルの
-                // 長さを再利用し、`openat2`／`openat` を再実行しない
+            if let Some(&cached_idx) = location_cache.get(&normalized_rel) {
+                // 同一 location への 2 件目以降: パス 1 で記録済みの
+                // 識別情報を再利用し、`openat2`／`openat` を再実行しない
                 // （安全性は変えない。上の `location_cache` 定義コメント
                 // 参照）。
-                let len = files
-                    .get(cached_key)
-                    .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
-                        reason: "plan: location_cache のキーが files に存在しない",
-                    }))?
-                    .len;
-                (cached_key.clone(), len, None)
+                let planned = locations.get(cached_idx).ok_or(GraphError::ExternalData(
+                    ExternalDataError::Internal {
+                        reason: "plan: location_cache の添字が locations の範囲外",
+                    },
+                ))?;
+                (cached_idx, planned.key.clone(), planned.len)
             } else {
-                let (opened, _normalized_rel_from_open) =
+                let opened =
                     resolve_and_open(&tensor_name, f, &parts).map_err(GraphError::ExternalData)?;
                 let key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
                 let len = opened.len;
-                location_cache.insert(normalized_rel, key.clone());
-                (key, len, Some(opened))
+                // ここで close する（明示 drop。以後このハンドルは使わず、
+                // パス 2 は再 open したハンドルを `key`・`len` と照合して
+                // から読む）。
+                drop(opened);
+                let idx = locations.len();
+                locations.push(PlannedLocation {
+                    rel: normalized_rel.clone(),
+                    key: key.clone(),
+                    len,
+                });
+                location_cache.insert(normalized_rel, idx);
+                (idx, key, len)
             }
-        };
-        #[cfg(not(unix))]
-        let (file_key, file_len, to_insert): (FileKey, u64, Option<OpenFile>) = {
-            let (opened, normalized_rel) =
-                resolve_and_open(&tensor_name, base_dir_canonical, &location)
-                    .map_err(GraphError::ExternalData)?;
-            let key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
-            let len = opened.len;
-            (key, len, Some(opened))
         };
 
         let length = match length_raw {
@@ -1194,13 +1293,10 @@ fn plan(
         // 数のみを制限するため、サイズ 0 のテンソルを大量の異なるファイルへ
         // 分散させると合計サイズは 0 のままファイルハンドルだけが増え、
         // プロセスの fd 上限に達しうる（#2347 P0 是正・PR #2348 コード
-        // レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。`to_insert`（この反復で
-        // 新規に開いたハンドル。location キャッシュがヒットした場合は
-        // `None` で既に `files` 登録済み）が既知の `file_key` でなければ、
-        // `files` へ登録する前にここで拒否する。拒否時は `to_insert` を
-        // どこにも格納しないためスコープを抜ける際に close される
-        // （ハンドルの蓄積を防ぐ）。
-        if !files.contains_key(&file_key) && files.len() >= options.max_external_files {
+        // レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。`file_key` が既知の実体で
+        // なければ、`known_keys` へ登録する前にここで拒否する（ハンドルは
+        // 上で既に close 済みのため、この判定自体は fd を消費しない）。
+        if !known_keys.contains(&file_key) && known_keys.len() >= options.max_external_files {
             return Err(GraphError::ExternalData(
                 ExternalDataError::TooManyExternalFiles {
                     limit: options.max_external_files,
@@ -1230,87 +1326,162 @@ fn plan(
             interval_list.push((offset, end, tensor_name.clone()));
         }
 
-        if let Some(opened) = to_insert {
-            files.entry(file_key.clone()).or_insert(opened);
-        }
+        known_keys.insert(file_key);
 
         entries.push(LoadPlanEntry {
             slot,
             tensor_name,
-            file_key,
+            location_idx,
             offset,
             length,
         });
     }
 
-    Ok((entries, files))
+    Ok((entries, locations, base_dir_file))
 }
 
-/// パス 2: パス 1 が確定した計画に従い、該当区間だけを読み込む。TOCTOU
-/// 再照合（ファイル長・Unix では dev/ino）を読み込み直前に行う。
+/// パス 2: パス 1 が確定した計画に従い、該当区間だけを読み込む。
+///
+/// 正規化済み location ごとに「`base_dir` ハンドル起点の安全な再 open
+/// （[`resolve_and_open`]。パス 1 と同じシンボリックリンク拒否手段）→
+/// 開いたハンドル自身の `FileKey`・ファイル長をパス 1 の記録と照合 →
+/// その location を参照する全テンソルの区間だけを読む → close」を 1 件
+/// ずつ逐次に行い、同時に開く external data ファイルは常に 1 つに保つ
+/// （PR #2348 codex P1 是正。モジュール doc「ハンドル非保持の構成」節）。
+/// 照合の不一致は [`ExternalDataError::FileChangedDuringLoad`]、再 open
+/// 自体の失敗（削除による `NotFound`・シンボリックリンクへの差し替え等）は
+/// パス 1 と同じ variant（`Io`／`InvalidLocation`）でいずれも fail-closed
+/// に拒否する。戻り値は `entries` と同じ順序・同じ件数。
 fn load(
     entries: &[LoadPlanEntry],
-    files: &mut HashMap<FileKey, OpenFile>,
+    locations: &[PlannedLocation],
+    base_dir: Option<&BaseDirHandle>,
+    base_dir_canonical: &Path,
 ) -> Result<Vec<Vec<u8>>, GraphError> {
-    let mut out: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-    for entry in entries.iter() {
-        let opened = files
-            .get_mut(&entry.file_key)
+    let base_dir = base_dir.ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+        reason: "load: entries が非空なのに base_dir ハンドルが無い",
+    }))?;
+
+    // location ごとに、それを参照する `entries` の添字をまとめる（読み込み
+    // 順を location 単位へ並べ替えても、結果は `out[entry_idx]` へ格納する
+    // ため戻り値の順序は `entries` のまま）。
+    let mut by_location: Vec<Vec<usize>> = vec![Vec::new(); locations.len()];
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        by_location
+            .get_mut(entry.location_idx)
             .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
-                reason: "load: plan が登録したファイルキーが files に存在しない",
-            }))?;
-        let meta = opened.file.metadata().map_err(|e| {
-            GraphError::ExternalData(ExternalDataError::Io {
-                tensor_name: cap_name(&entry.tensor_name),
-                kind: e.kind(),
-            })
-        })?;
-        let len_ok = meta.len() == opened.len;
-        #[cfg(unix)]
-        let ident_ok = {
-            use std::os::unix::fs::MetadataExt;
-            (meta.dev(), meta.ino()) == opened.dev_ino
+                reason: "load: entry.location_idx が locations の範囲外",
+            }))?
+            .push(entry_idx);
+    }
+
+    let mut out: Vec<Option<Vec<u8>>> = (0..entries.len()).map(|_| None).collect();
+    for (planned, entry_indices) in locations.iter().zip(by_location.iter()) {
+        let Some(&first_idx) = entry_indices.first() else {
+            // `plan` は location を記録した反復で必ず 1 件の entry も
+            // 追加する（途中で失敗すれば `Err` で抜ける）ため到達しない。
+            // 参照の無い location は開く必要が無いので読み飛ばす。
+            continue;
         };
-        #[cfg(not(unix))]
-        let ident_ok = true;
-        if !len_ok || !ident_ok {
+        let first_name = entries
+            .get(first_idx)
+            .map(|e| e.tensor_name.as_str())
+            .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                reason: "load: entry 添字が entries の範囲外",
+            }))?;
+
+        let parts: Vec<&std::ffi::OsStr> = planned.rel.iter().collect();
+        let mut opened =
+            resolve_and_open(first_name, base_dir, &parts).map_err(GraphError::ExternalData)?;
+        // 再 open したハンドル自身の識別子・長さをパス 1 の記録と照合する
+        // （経路文字列ではなくハンドルに対する `fstat` の結果。不一致なら
+        // 1 バイトも読まずに拒否する）。
+        let key_now = file_key_for(base_dir_canonical, &opened, &planned.rel);
+        if key_now != planned.key || opened.len != planned.len {
             return Err(GraphError::ExternalData(
                 ExternalDataError::FileChangedDuringLoad {
-                    tensor_name: cap_name(&entry.tensor_name),
+                    tensor_name: cap_name(first_name),
                 },
             ));
         }
 
-        opened
-            .file
-            .seek(SeekFrom::Start(entry.offset))
-            .map_err(|e| {
+        for &entry_idx in entry_indices {
+            let entry = entries.get(entry_idx).ok_or(GraphError::ExternalData(
+                ExternalDataError::Internal {
+                    reason: "load: entry 添字が entries の範囲外",
+                },
+            ))?;
+            // 各区間の読み込み直前にも同じハンドルの長さ・識別子を再照合
+            // する（同一ハンドルでも読み込み中の truncate 等は起こりうる
+            // ため。旧構成と同じ粒度の検査を維持する）。
+            let meta = opened.file.metadata().map_err(|e| {
                 GraphError::ExternalData(ExternalDataError::Io {
                     tensor_name: cap_name(&entry.tensor_name),
                     kind: e.kind(),
                 })
             })?;
-        // `entry.length` は `u64`。32bit ターゲット等 `usize` が 64bit
-        // 未満の環境では `as usize` の暗黙切り捨てで確保サイズが縮み
-        // `read_exact` が誤った短いバッファへ書き込みうるため、
-        // `checked` 変換で明示的に拒否する（`plan` の `total_requested`
-        // 上限検査より前ではなく後段だが、変換自体の健全性は独立した
-        // 契約のため個別に検査する）。
-        let buf_len = usize::try_from(entry.length).map_err(|_| {
-            GraphError::ExternalData(ExternalDataError::Internal {
-                reason: "load: entry.length が usize の範囲を超える",
-            })
-        })?;
-        let mut buf = vec![0u8; buf_len];
-        opened.file.read_exact(&mut buf).map_err(|e| {
-            GraphError::ExternalData(ExternalDataError::Io {
-                tensor_name: cap_name(&entry.tensor_name),
-                kind: e.kind(),
-            })
-        })?;
-        out.push(buf);
+            let len_ok = meta.len() == planned.len;
+            #[cfg(unix)]
+            let ident_ok = {
+                use std::os::unix::fs::MetadataExt;
+                (meta.dev(), meta.ino()) == opened.dev_ino
+            };
+            #[cfg(not(unix))]
+            let ident_ok = true;
+            if !len_ok || !ident_ok {
+                return Err(GraphError::ExternalData(
+                    ExternalDataError::FileChangedDuringLoad {
+                        tensor_name: cap_name(&entry.tensor_name),
+                    },
+                ));
+            }
+
+            opened
+                .file
+                .seek(SeekFrom::Start(entry.offset))
+                .map_err(|e| {
+                    GraphError::ExternalData(ExternalDataError::Io {
+                        tensor_name: cap_name(&entry.tensor_name),
+                        kind: e.kind(),
+                    })
+                })?;
+            // `entry.length` は `u64`。32bit ターゲット等 `usize` が 64bit
+            // 未満の環境では `as usize` の暗黙切り捨てで確保サイズが縮み
+            // `read_exact` が誤った短いバッファへ書き込みうるため、
+            // `checked` 変換で明示的に拒否する（`plan` の `total_requested`
+            // 上限検査より前ではなく後段だが、変換自体の健全性は独立した
+            // 契約のため個別に検査する）。
+            let buf_len = usize::try_from(entry.length).map_err(|_| {
+                GraphError::ExternalData(ExternalDataError::Internal {
+                    reason: "load: entry.length が usize の範囲を超える",
+                })
+            })?;
+            let mut buf = vec![0u8; buf_len];
+            opened.file.read_exact(&mut buf).map_err(|e| {
+                GraphError::ExternalData(ExternalDataError::Io {
+                    tensor_name: cap_name(&entry.tensor_name),
+                    kind: e.kind(),
+                })
+            })?;
+            let slot = out.get_mut(entry_idx).ok_or(GraphError::ExternalData(
+                ExternalDataError::Internal {
+                    reason: "load: entry 添字が out の範囲外",
+                },
+            ))?;
+            *slot = Some(buf);
+        }
+        // `opened` はこの反復の末尾で drop（close）される。次の location の
+        // open より前に閉じるため、同時に開く external data ファイルは 1 つ。
+        drop(opened);
     }
-    Ok(out)
+
+    out.into_iter()
+        .map(|b| {
+            b.ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                reason: "load: 読み込まれなかった entry が残っている",
+            }))
+        })
+        .collect()
 }
 
 /// `model` に含まれる external なテンソル（initializer・Constant 属性
@@ -1330,11 +1501,16 @@ pub fn resolve_external_data(
         GraphError::ExternalData(ExternalDataError::InvalidBaseDir { kind: e.kind() })
     })?;
 
-    let (entries, mut files) = plan(model, &base_dir_canonical, options)?;
+    let (entries, locations, base_dir_file) = plan(model, &base_dir_canonical, options)?;
     if entries.is_empty() {
         return Ok(());
     }
-    let loaded = load(&entries, &mut files)?;
+    let loaded = load(
+        &entries,
+        &locations,
+        base_dir_file.as_ref(),
+        &base_dir_canonical,
+    )?;
     if loaded.len() != entries.len() {
         return Err(GraphError::ExternalData(ExternalDataError::Internal {
             reason: "load の戻り値件数が entries と一致しない",

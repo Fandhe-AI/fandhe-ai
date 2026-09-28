@@ -835,6 +835,159 @@ fn external_file_count_limit_allows_shared_file_reuse() {
     assert_eq!(graph.initializers.len(), 2);
 }
 
+// --- fd 予算（PR #2348 codex P1 是正の回帰テスト） ---
+
+/// fd 予算テストで参照させる distinct な external data ファイル数。子
+/// プロセスの fd soft limit（[`FD_BUDGET_SOFT_LIMIT`]）を大きく上回り、
+/// かつ既定の `max_external_files`（4096）以内の本数にする: 旧構成（パス 1
+/// で開いたハンドルをすべて保持）ならこの本数で確実に `EMFILE`
+/// （`ExternalDataError::Io`）になり、`TooManyExternalFiles` には
+/// 到達しない。
+#[cfg(unix)]
+const FD_BUDGET_FILE_COUNT: usize = 512;
+
+/// 子プロセスへ課す fd の soft limit（`ulimit -S -n`）。テストハーネス
+/// 自身・標準入出力・`base_dir` fd 等を含めても十分に動作し、かつ
+/// [`FD_BUDGET_FILE_COUNT`] を大きく下回る値。
+#[cfg(unix)]
+const FD_BUDGET_SOFT_LIMIT: usize = 64;
+
+/// 親テストが子プロセスへ「fd 制限下の子として実行中」であることを
+/// 伝える環境変数。
+#[cfg(unix)]
+const FD_BUDGET_CHILD_ENV: &str = "FANDHE_ONNX_EXTERNAL_DATA_FD_BUDGET_CHILD";
+
+/// Linux で現在プロセスが開いている fd 数を `/proc/self/fd` から数える
+/// （`read_dir` 自身が開くディレクトリ fd を 1 件含むが、前後比較では
+/// 相殺される）。
+#[cfg(target_os = "linux")]
+fn count_open_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("/proc/self/fd を列挙できない")
+        .count()
+}
+
+/// Linux で現在プロセスの fd soft limit を `/proc/self/limits` から読む。
+#[cfg(target_os = "linux")]
+fn nofile_soft_limit() -> Option<usize> {
+    let limits = std::fs::read_to_string("/proc/self/limits").ok()?;
+    let line = limits.lines().find(|l| l.starts_with("Max open files"))?;
+    line.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// 小さな external data ファイルを多数（[`FD_BUDGET_FILE_COUNT`] 本・
+/// すべて別ファイル）参照するモデルが解決でき、全 initializer が正しい
+/// 値になることを検査する。
+///
+/// 通常の `cargo test` では fd 制限を課さない機能テストとして動き、
+/// [`many_small_external_files_do_not_exhaust_fd_limit_in_child_process`]
+/// から fd soft limit を下げた子プロセスとして起動された場合は、(1) 制限が
+/// 実際に効いていること（Linux のみ `/proc/self/limits` で確認）、
+/// (2) 制限を大きく超える本数のファイルを `EMFILE` なしで読めること、
+/// (3) 解決の前後で開いている fd 数が増えていないこと（Linux のみ。
+/// 子は `--test-threads=1` のため他テストの fd と混ざらない）も検査する。
+/// `plan`／`load` が external data ファイルのハンドルを 1 つずつ開いては
+/// 閉じ、同時保持数をファイル数に依存させないこと（`external_data.rs`
+/// モジュール doc「ハンドル非保持の構成」節）の回帰テスト。
+#[cfg(unix)]
+#[test]
+fn many_small_external_files_load_with_bounded_open_handles() {
+    let in_child = std::env::var_os(FD_BUDGET_CHILD_ENV).is_some();
+    #[cfg(target_os = "linux")]
+    if in_child {
+        let soft = nofile_soft_limit().expect("/proc/self/limits から soft limit を読めない");
+        assert_eq!(
+            soft, FD_BUDGET_SOFT_LIMIT,
+            "子プロセスに fd soft limit が適用されていない（テストが空振りになる）"
+        );
+    }
+
+    let dir = TempDir::new("fd-budget-many-files");
+    let mut tensors = Vec::with_capacity(FD_BUDGET_FILE_COUNT);
+    for i in 0..FD_BUDGET_FILE_COUNT {
+        let location = format!("w{i}.data");
+        dir.write_file(&location, &(i as f32).to_le_bytes());
+        tensors.push(external_tensor(
+            &format!("w{i}"),
+            vec![1],
+            data_type::FLOAT,
+            &location,
+            None,
+            Some("4"),
+        ));
+    }
+    let model = model_with_initializers(tensors);
+
+    #[cfg(target_os = "linux")]
+    let fds_before = count_open_fds();
+    let graph = build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default())
+        .unwrap_or_else(|e| {
+            panic!(
+                "{FD_BUDGET_FILE_COUNT} 本の小さな external data ファイルは fd を枯渇させずに \
+                 解決できるはず（in_child={in_child}）: {e:?}"
+            )
+        });
+    #[cfg(target_os = "linux")]
+    if in_child {
+        let fds_after = count_open_fds();
+        assert!(
+            fds_after <= fds_before,
+            "解決後に fd が残っている（before={fds_before} after={fds_after}）"
+        );
+    }
+
+    assert_eq!(graph.initializers.len(), FD_BUDGET_FILE_COUNT);
+    for i in 0..FD_BUDGET_FILE_COUNT {
+        match graph.initializers.get(&format!("w{i}")) {
+            Some(RawTensor::F32 { data, .. }) => assert_eq!(data, &vec![i as f32]),
+            other => panic!("w{i}: RawTensor::F32 を期待: {other:?}"),
+        }
+    }
+}
+
+/// [`many_small_external_files_load_with_bounded_open_handles`] を、fd の
+/// soft limit を [`FD_BUDGET_SOFT_LIMIT`] へ下げた子プロセスで実行する
+/// （PR #2348 codex P1 是正の回帰テスト）。`RLIMIT_NOFILE` はプロセス全体
+/// に効くため、テストプロセス自身ではなく `sh -c 'ulimit -S -n …; exec …'`
+/// 経由で起動した子プロセス（同じテストバイナリ）にだけ課す（`unsafe`・
+/// 追加依存なし）。フィルタ不一致で 0 件実行のまま exit 0 になる空振りを
+/// 防ぐため、子の出力に `1 passed` が含まれることも確認する。
+#[cfg(unix)]
+#[test]
+fn many_small_external_files_do_not_exhaust_fd_limit_in_child_process() {
+    if std::env::var_os(FD_BUDGET_CHILD_ENV).is_some() {
+        // 子プロセス内では再帰起動しない（子は `--exact` で上のテストだけを
+        // 実行するため通常は到達しないが、防御的に抜ける）。
+        return;
+    }
+    let exe = std::env::current_exe().expect("テストバイナリのパスを取得できない");
+    let output = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -S -n {FD_BUDGET_SOFT_LIMIT} && exec \"$0\" \"$@\""
+        ))
+        .arg(&exe)
+        .arg("many_small_external_files_load_with_bounded_open_handles")
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .arg("--nocapture")
+        .env(FD_BUDGET_CHILD_ENV, "1")
+        .output()
+        .expect("子プロセスを起動できない");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "fd soft limit={FD_BUDGET_SOFT_LIMIT} の子プロセスで {FD_BUDGET_FILE_COUNT} 本の \
+         external data 解決が失敗した（status={:?}）\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "子プロセスで対象テストが実行されていない（空振り）\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
 // --- 異常系: 重複・重なり（A5） ---
 
 #[cfg(unix)]

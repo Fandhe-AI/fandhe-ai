@@ -36,10 +36,13 @@ import 入口を `onnx-interop` 内部に新設し、外部参照を fail-closed
     （2026-09-28 ユーザー承認。当初の暫定値 4096 を正式な既定値として確定）。distinct な external
     data ファイル実体（[`FileKey`] で畳み込んだ後の数）の上限で、
     `max_total_bytes` がバイト数のみを制限する隙間（サイズ 0 のテンソルを
-    大量の異なるファイルへ分散させるとファイルハンドルだけが増え fd 上限
-    に達しうる。A04 資源枯渇対策）を塞ぐ。超過は `ExternalDataError::
+    大量の異なるファイルへ分散させると open／`fstat` の回数だけが無制限に
+    増えうる。A04 資源枯渇対策）を塞ぐ。超過は `ExternalDataError::
     TooManyExternalFiles` で拒否する（#2347 P0 是正・PR #2348 コード
-    レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。
+    レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。**本上限は同時保持 fd 数の
+    上限ではない**: 4 節のハンドル非保持構成により同時に開く external
+    data ファイルは常に 1 つで、4096 がプロセスの fd 上限（例: soft
+    limit 1024）を上回っても `EMFILE` は生じない（PR #2348 codex P1 是正）。
 - `pub fn resolve_external_data(model: &mut ModelProto, base_dir: &Path, options: &ExternalDataOptions) -> Result<(), GraphError>`
   — in-place で external なテンソルを `raw_data` へ inline 化する。
 - `pub fn build_graph_with_external_data(model: &ModelProto, base_dir: &Path, options: &ExternalDataOptions) -> Result<Graph, GraphError>`
@@ -145,19 +148,60 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      overflow した時点）で `TotalSizeLimitExceeded` とする。確保より
      前に検査するため、巨大な `length` でメモリを確保することはない。
    - distinct な external data ファイル実体（`FileKey`。dev/ino ベース）
-     の数を `ExternalDataOptions::max_external_files` と比較し、`files`
-     マップへ登録する前（＝ファイルを開いた直後）に超過を検査する。
-     `max_total_bytes` はバイト数のみを制限するため、サイズ 0 の
-     テンソルを大量の異なる空ファイルへ分散させる入力は合計サイズを
-     常に 0 に保ったままファイルハンドルだけを増やしプロセスの fd
-     上限に達しうる。この検査で `TooManyExternalFiles` として拒否する
-     （2026-09-28・#2347 P0 是正・PR #2348 コードレビュー対応・
+     の数を `ExternalDataOptions::max_external_files` と比較し、既知
+     ファイル集合（`known_keys`）へ登録する前（＝ファイルを開いて
+     `FileKey` を得た直後）に超過を検査する。`max_total_bytes` はバイト
+     数のみを制限するため、サイズ 0 のテンソルを大量の異なる空ファイルへ
+     分散させる入力は合計サイズを常に 0 に保ったまま open／`fstat` の
+     回数だけを増やしうる。この検査で `TooManyExternalFiles` として拒否
+     する（2026-09-28・#2347 P0 是正・PR #2348 コードレビュー対応・
      PRRT_kwDOTuUCJc6mlxhy）。
-2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、パス 1 で開いた
-   ファイルハンドルを再利用して該当区間だけを `read_exact` する
-   （`.data` ファイル全体は読まない）。読み込み直前に `metadata().len()`
-   （Unix では dev/ino も）をパス 1 の記録と再照合し、不一致は
-   `FileChangedDuringLoad` とする（TOCTOU の窓を縮める）。
+   - **パス 1 はファイルハンドルを保持しない**（2026-09-28・PR #2348
+     codex P1 是正）: distinct な正規化済み location ごとに安全 open →
+     ハンドル自身の `fstat` で `FileKey`・ファイル長だけを記録
+     （`PlannedLocation`）→ 直ちに close する。同一 location を複数
+     テンソルが参照する場合は location キャッシュで 2 件目以降の open を
+     省略し、異なる location 名が同一実体（ハードリンク等）を指す場合は
+     個別に開いた `FileKey` で畳み込んで重複区間検出を行う（意味論は旧
+     構成と同一。長さ 0 の区間は重複検査の対象外）。
+2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、正規化済み
+   location ごとに 1 ファイルずつ「パス 1 と同じ安全 open（同じ
+   `base_dir` fd 起点の `openat2`／逐次 `openat(O_NOFOLLOW)`）→ 開いた
+   ハンドル自身の `FileKey`〈dev, ino〉・ファイル長をパス 1 の記録と
+   照合 → その location を参照する全テンソルの区間だけを `read_exact`
+   （`.data` ファイル全体は読まない）→ close」を逐次に行う。照合の
+   不一致は `FileChangedDuringLoad`、再 open 自体の失敗（削除による
+   `NotFound`・シンボリックリンクへの差し替え等）はパス 1 と同じ variant
+   （`Io`／`InvalidLocation`）でいずれも fail-closed に拒否する。各区間の
+   読み込み直前にも同じハンドルの長さ・dev/ino を再照合する。
+
+### 4.1 ハンドル非保持の構成（2026-09-28・PR #2348 codex P1 是正）
+
+- **指摘**: 旧構成はパス 1 で開いた distinct ファイルのハンドルをすべて
+  保持したままパス 2 で再利用していた。`max_external_files` の既定値
+  4096（ユーザー承認済み）は一般的なプロセスの fd 上限（例: soft limit
+  1024）を上回るため、小さなファイルを多数参照するモデルでは
+  `TooManyExternalFiles` に到達する前に `EMFILE` が発生し、同一プロセスの
+  ほかの I/O にも影響し得た。
+- **採用した構成**: 上限値（4096）は下げず、「検証パス（ハンドル非保持）
+  と読み込みパス（location ごとに再 open → 照合 → 読込 → close）の分離」
+  とした。同時に保持する fd は `base_dir` のディレクトリ fd と処理中の
+  external data ファイル 1 つの高々 2 つ（`openat2` 非対応時の逐次方式
+  では経路途中のディレクトリ fd が一時的に 1 つ加わる）で、ファイル数に
+  依存しない。
+- **不採用とした構成**: 「単一パスでファイルごとに検証・読み込み・close
+  を進める」構成。`length` 省略時の読み込み長は `file_len - offset` で
+  確定するためファイルを開かずに総量上限・ファイル数上限を判定できず、
+  単一パスでは上限超過を途中まで読んでから検出することになる（「1 件でも
+  検証に失敗すればファイルは一切読まない」という 1. の契約を崩す）。
+- **TOCTOU の論拠**: 読み込みは常に「パス 2 で安全 open し、そのハンドル
+  自身に対する `fstat` の `FileKey`〈dev, ino〉・ファイル長がパス 1 の
+  記録と一致したハンドル」からのみ行い、経路文字列を再解決しない（再
+  open も `base_dir` fd 起点・シンボリックリンク拒否の同じ手段）。よって
+  (1) `base_dir` 外・シンボリックリンク経由のファイルは読まない、(2) 読む
+  実体はパス 1 で当該 location について検証した実体と同一で長さも同一、
+  (3) 読み込み量はパス 1 で上限検査済みの区間に有界、の 3 点は旧構成と
+  同じく保証される。残る差分（inode 番号再利用の窓）は 5 節に記す。
 
 読み込んだバイト列は `raw_data` へ書き戻し、`data_location = DEFAULT`・
 `external_data` は空にする（パス 2 完了後にのみ書き戻す。検証・読み込み
@@ -216,6 +260,16 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   呼び出しにも `O_NONBLOCK` を無条件で付与するよう是正した（通常
   ファイル・ディレクトリの open には副作用が無い POSIX の性質を利用）。
   `openat2` 経路（`open_how.flags`）にも同じ理由で無条件付与する。
+- **パス間でハンドルを保持しないことによる inode 番号再利用の窓
+  （2026-09-28・PR #2348 codex P1 是正に伴い受容）**: パス 1 で close した
+  ファイルが削除され、その inode 番号が別ファイルに再利用される窓が
+  生じる。(a) パス 1 内で別ファイルが同じ dev/ino を得ても `FileKey` の
+  併合は重複区間検出を増やす方向（fail-closed 側）にしか働かず見逃しを
+  生まない。(b) パス 2 の dev/ino・長さ照合を通過する差し替えは
+  `base_dir` への書き込み権を持つ者による同一 inode の in-place 改変
+  （旧構成でも防御対象外）と同等の能力でしか起こせない。いずれも
+  `base_dir` 配下・非シンボリックリンク・検査済み区間内の有界読み込み
+  という保証を崩さないため受容する。
 - `base_dir` 自体の信頼は呼び出し元の責務とする（呼び出し元が与える
   信頼済み入力として扱い、location 側だけを fail-closed に検証する）。
 - `checksum` の検証（SHA-1）は本 issue のスコープ外（依存を追加でき
@@ -252,10 +306,19 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 ## 8. テスト・実測
 
 - 合成入力の網羅テスト: `crates/onnx-interop/tests/onnx_external_data.rs`
-  （45 テスト。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
+  （unix で 48 テスト＋非 unix 契約テスト 2 件。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
   隣接区間・Constant 属性テンソル〉・異常系〈A2〜A5 のパス検証・数値検証・
   重複検証・キー検証・A6 回帰〉。base_dir 外へのシンボリックリンク脱出
   〈`symlink_escaping_base_dir_via_absolute_target_is_rejected`〉を含む）。
+  ハンドル非保持構成（4.1 節）の回帰テストとして
+  `many_small_external_files_load_with_bounded_open_handles`（512 本の
+  別ファイルを参照するモデルの解決・値検査。Linux では解決前後の
+  `/proc/self/fd` 件数の非増加も検査）と、それを fd soft limit 64 の
+  子プロセス（`sh -c 'ulimit -S -n 64; exec …'`。テストプロセス自身の
+  rlimit は変えない）で実行する
+  `many_small_external_files_do_not_exhaust_fd_limit_in_child_process`
+  を置く（`cfg(unix)`。旧構成では子プロセスが `Io { kind:
+  TooManyOpenFiles }` で失敗することを実測確認済み）。
   `openat2`／逐次 `openat(O_NOFOLLOW)` フォールバックの両方式を直接検証
   する単体テストは `crates/onnx-interop/src/onnx/external_data.rs::tests`
   （2 テスト）。
