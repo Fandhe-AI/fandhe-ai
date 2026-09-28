@@ -49,8 +49,9 @@
 //! roundtrip export ラッパーである（`docs/facade-onnx-export-exposure-
 //! decision.md` §4 案 B。承認事項は同 doc §10・#2018 承認コメント）。
 //! `fandhe_ai_onnx_interop::onnx::export::build_model_proto`（allowlist
-//! による fail-closed 検査込み）→ `onnx::proto::encode_model` への薄い
-//! 委譲のみで、以下を doc として明記する:
+//! による fail-closed 検査込み）→ `onnx::export::try_encode_model`
+//! （`onnx::proto::encode_model` と同一バイト列の失敗可能確保版。PR #2348
+//! codex P0 是正）への薄い委譲のみで、以下を doc として明記する:
 //!
 //! - `value_info` は常に空。本クレート内 roundtrip は bit 同一で保証する
 //!   が、`onnx.checker` 等の外部ツールでの厳密な妥当性検証は保証しない
@@ -126,7 +127,11 @@
 //! 重複／SSA／トポロジカル順検証）と `onnx::interp::run` の
 //! no-silent-skip 契約をそのまま通す（迂回・複製しない）。`from_path` は
 //! パスを `std::fs::read` へそのまま渡すのみでシェル展開・パス連結は
-//! 行わない。入力総バイト数・要素数の明示上限は導入していない
+//! 行わない（external data 解決の基点ディレクトリ〈`base_dir`〉も `path`
+//! の親ディレクトリをそのまま使うのみで、こちらもシェル展開・パス連結は
+//! 行わない。external data 自体の非信頼入力検証は `onnx::external_data`
+//! の 2 パス設計〈`docs/onnx-external-data-decision.md`〉に迂回・複製せず
+//! 委譲する）。入力総バイト数・要素数の明示上限は導入していない
 //! （`build_graph` の長さ整合検査がバイト長を初期入力長で抑える。値の
 //! 決定にユーザー承認が要るため本 issue のスコープ外。
 //! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。`from_bytes`
@@ -141,13 +146,18 @@ use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto};
+use fandhe_ai_onnx_interop::onnx::export::{
+    ExportError, ExportOptions, build_model_proto, try_encode_model,
+};
 use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
+use fandhe_ai_onnx_interop::onnx::external_data::{
+    ExternalDataError, ExternalDataOptions, build_graph_with_external_data,
+};
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{
     InterpError, Value as InterpValue, run as interp_run, run_with_ops as interp_run_with_ops,
 };
-use fandhe_ai_onnx_interop::onnx::proto::{DecodeModelError, decode_model, encode_model};
+use fandhe_ai_onnx_interop::onnx::proto::{DecodeModelError, decode_model};
 use fandhe_ai_tensor_core::f16;
 
 use crate::Device;
@@ -230,11 +240,56 @@ impl OnnxModel {
     }
 
     /// ファイルパスから `.onnx` モデルを読み込む（`std::fs::read` →
-    /// [`OnnxModel::from_bytes`]。パスをシェル展開・連結せずそのまま
-    /// 渡す）。
+    /// protobuf デコード → [`fandhe_ai_onnx_interop::onnx::external_data::
+    /// build_graph_with_external_data`]。パスをシェル展開・連結せず
+    /// そのまま渡す）。
+    ///
+    /// **external data 対応**（イシュー #2347・2026-09-28 ユーザー承認）:
+    /// [`OnnxModel::from_bytes`] と異なり、`data_location = EXTERNAL` の
+    /// initializer／Constant 属性テンソル（PyTorch の既定 exporter
+    /// `torch.onnx.export(..., dynamo=True)` が出力する companion
+    /// `.onnx.data` ファイル参照）を解決して読み込める。解決の基点
+    /// ディレクトリ（`base_dir`）は `path` の親ディレクトリ（`path` が
+    /// カレントディレクトリ相対の単純なファイル名で親コンポーネントを
+    /// 持たない場合は `.`）とし、`ExternalDataOptions::default()`
+    /// （合計サイズ上限 64 GiB・distinct ファイル数上限 4096）を使う。
+    /// external data を持たないモデルは従来どおり読み込める（`.onnx`
+    /// 本体のみのモデルは [`OnnxModel::from_bytes`] と同じグラフ構築
+    /// 経路〈`onnx::graph::build_graph`〉へ委譲される。`build_graph_
+    /// with_external_data` は external テンソルが 0 件の場合
+    /// `resolve_external_data` が早期 `Ok(())` を返すため `raw_data` の
+    /// 書き換えを一切行わない）。
+    ///
+    /// **メモリ**（PR #2348 codex P0 是正）: external data の読み込み
+    /// バッファ・復号先はすべて失敗可能確保であり、確保に失敗した場合は
+    /// プロセスを終了させず [`OnnxError::Io`]（`ErrorKind::OutOfMemory`）
+    /// を返す。合計サイズ上限（64 GiB）は読み込む raw バイト列の予算で、
+    /// 読み込み中のピークは最大でおよそ「上限 ＋ 最大テンソル 1 個分」
+    /// （`docs/onnx-external-data-decision.md` 4.3 節）。本関数は既定
+    /// オプション固定で上限を変更できない（利用可能メモリがそれより小さい
+    /// 環境で予算を下げる公開手段は未提供。同節）。Linux の
+    /// overcommit 設定等により、確保自体は成功した後のページ実コミット時に
+    /// OS がプロセスを終了させる可能性は残る。
+    ///
+    /// [`OnnxModel::from_bytes`] は external data を非対応のまま
+    /// fail-closed に拒否する（`GraphError::RawDataByteLenMismatch`。
+    /// 挙動不変。`onnx::external_data` モジュール冒頭コメント「不変条件」
+    /// 節・回帰テスト参照）。
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OnnxError> {
-        let bytes = std::fs::read(path.as_ref()).map_err(OnnxError::Io)?;
-        Self::from_bytes(&bytes)
+        let path = path.as_ref();
+        let bytes = std::fs::read(path).map_err(OnnxError::Io)?;
+        let model = decode_model(&bytes).map_err(map_decode_error)?;
+        // デコード後は `.onnx` 本体のバイト列を参照しないため、external
+        // data の読み込み（ピークメモリが最大になる区間）より前に解放する。
+        drop(bytes);
+        let base_dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let graph =
+            build_graph_with_external_data(&model, base_dir, &ExternalDataOptions::default())
+                .map_err(map_graph_error)?;
+        Ok(Self { graph })
     }
 
     /// 学習済み [`crate::compat::Sequential`] から [`OnnxModel`] を構築
@@ -276,6 +331,13 @@ impl OnnxModel {
     /// 自体を [`OnnxError::Execution`] として fail-closed に拒否する
     /// （ホストへの黙示フォールバックはしない。OWASP A08。`docs/
     /// onnx-gpu-execution-decision.md` §3.4）。
+    ///
+    /// **メモリ**（PR #2348 codex P0 是正）: 実行ごとに initializer を
+    /// 実行時値へ複製する処理と `Constant` 属性テンソルの復号は失敗可能
+    /// 確保であり、確保に失敗した場合はプロセスを終了させず
+    /// [`OnnxError::Io`]（`ErrorKind::OutOfMemory`）を返す（external data
+    /// 由来の巨大なテンソルを持つモデル向け。演算カーネルの出力確保は
+    /// 対象外）。
     pub fn run(
         &self,
         feeds: HashMap<String, OnnxValue>,
@@ -308,13 +370,17 @@ impl OnnxModel {
     /// export」節参照）。
     ///
     /// `fandhe_ai_onnx_interop::onnx::export::build_model_proto`（allowlist
-    /// による fail-closed 検査を含む）→ `proto::encode_model` への委譲の
+    /// による fail-closed 検査を含む）→ `export::try_encode_model`
+    /// （`proto::encode_model` と同一バイト列の失敗可能確保版）への委譲の
     /// み。allowlist 外 op を含む場合は [`OnnxError::UnsupportedOp`] を
-    /// 返す（無言 skip しない）。
+    /// 返す（無言 skip しない）。external data 由来の巨大なテンソルを含む
+    /// モデル（[`OnnxModel::from_path`]）でバイト列の確保に失敗した場合は
+    /// プロセスを終了させず [`OnnxError::Io`]（`ErrorKind::OutOfMemory`）を
+    /// 返す（PR #2348 codex P0 是正）。
     pub fn to_bytes(&self, options: &OnnxExportOptions) -> Result<Vec<u8>, OnnxError> {
         let model =
             build_model_proto(&self.graph, &options.to_internal()).map_err(map_export_error)?;
-        Ok(encode_model(&model))
+        try_encode_model(&model).map_err(map_export_error)
     }
 
     /// [`OnnxModel::to_bytes`] の結果をファイルパスへ書き出す（`to_bytes`
@@ -419,11 +485,19 @@ fn interp_value_to_onnx(v: InterpValue) -> OnnxValue {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum OnnxError {
-    /// ファイル I/O 失敗（[`OnnxModel::from_path`] での読み込み失敗、または
-    /// [`OnnxModel::to_path`] での書き込み失敗）。読み込み・書き込みを
-    /// 区別する専用 variant は設けず（薄いラッパー原則。`std::io::Error`
-    /// 自体は操作の別を保持しない）、[`fmt::Display`] 側で「I/O 失敗」と
-    /// 中立に表現する。
+    /// ファイル I/O 失敗（[`OnnxModel::from_path`] でのモデル本体読み込み
+    /// 失敗・external data 解決中の companion `.onnx.data` ファイルの
+    /// 欠落／権限エラー等〈`ExternalDataError::Io`。イシュー #2347〉、
+    /// external data の読み込みバッファ・復号先のメモリ確保失敗
+    /// 〈`ExternalDataError::AllocationFailed`。`ErrorKind::OutOfMemory`〉、
+    /// [`OnnxModel::run`] での initializer の実行時値・`Constant` 属性
+    /// テンソルの確保失敗〈`InterpError::AllocationFailed`。同〉、
+    /// [`OnnxModel::to_bytes`]／[`OnnxModel::to_path`] での export 用
+    /// バイト列の確保失敗〈`ExportError::AllocationFailed`。同〉、
+    /// または [`OnnxModel::to_path`] での書き込み失敗）。これらを区別する
+    /// 専用 variant は設けず（薄いラッパー原則。`std::io::Error` 自体は
+    /// 操作の別を保持しない）、[`fmt::Display`] 側で「I/O 失敗」と中立に
+    /// 表現する。
     Io(std::io::Error),
     /// protobuf デコード失敗（壊れたバイト列等）。`prost::DecodeError` は
     /// `Display` 文字列のみを保持する（`prost` 型を公開面に出さない）。
@@ -541,6 +615,30 @@ fn map_graph_error(e: GraphError) -> OnnxError {
         GraphError::SparseInitializerNotSupported { tensor_name, count } => {
             OnnxError::SparseInitializerNotSupported { tensor_name, count }
         }
+        // external data 解決中（`OnnxModel::from_path`）の I/O エラー
+        // （companion `.onnx.data` ファイルの欠落・権限エラー等）は、
+        // 利用者が型で判別できるよう既存の `OnnxError::Io`（`std::fs::read`
+        // 失敗と同じ variant。新規 variant は追加しない）へ写像する
+        // （レビュー対応。以前は他の `ExternalDataError` 同様
+        // `InvalidModel` へ畳み込まれ I/O 失敗と判別できなかった）。
+        // `tensor_name` は `std::io::Error` に保持できないため落ちる
+        // （`OnnxError::Io` は `std::fs::read` の I/O 失敗も同じ理由で
+        // メッセージ以外のコンテキストを持たない設計であり整合する）。
+        GraphError::ExternalData(ExternalDataError::Io { kind, .. }) => {
+            OnnxError::Io(std::io::Error::from(kind))
+        }
+        // external data の読み込みバッファ・復号先の確保失敗（PR #2348
+        // codex P0 是正で abort から型付きエラーへ変更）は、既存の
+        // `OnnxError::Io`（`ErrorKind::OutOfMemory`）へ写像する（新規
+        // variant は追加しない）。同じ `from_path` 内の `std::fs::read` が
+        // `.onnx` 本体の確保失敗を std の `try_reserve` 規約どおり
+        // `Io(OutOfMemory)` で返すため、どちらの確保失敗も利用者が
+        // `kind() == OutOfMemory` で一様に判別できる。`InvalidModel` へ
+        // 畳み込むと資源不足を「モデル不正」と誤分類するため採らない。
+        // `tensor_name`・`bytes` は上の `Io` 写像と同じ理由で落ちる。
+        GraphError::ExternalData(ExternalDataError::AllocationFailed { .. }) => {
+            OnnxError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory))
+        }
         other => OnnxError::InvalidModel {
             message: other.to_string(),
         },
@@ -557,6 +655,16 @@ fn map_interp_error(e: InterpError) -> OnnxError {
         // モデル構築時と同じ写像規則（未対応 dtype は名指し・それ以外は
         // InvalidModel）を適用する。
         InterpError::Graph(graph_err) => map_graph_error(graph_err),
+        // 実行時値（initializer の複製・`Constant` 属性テンソルの復号）の
+        // 確保失敗（PR #2348 codex P0 是正で abort から型付きエラーへ変更）
+        // は、読み込み時の確保失敗（`map_graph_error` の
+        // `ExternalDataError::AllocationFailed` 分岐）と同じ既存の
+        // `OnnxError::Io(ErrorKind::OutOfMemory)` へ写像する（新規 variant
+        // なし）。`Execution { message }` へ畳み込むと利用者が資源不足を
+        // 型で判別できず、読み込み時と実行時で判別方法が分かれるため採らない。
+        InterpError::AllocationFailed { .. } => {
+            OnnxError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory))
+        }
         other => OnnxError::Execution {
             message: other.to_string(),
         },
@@ -589,8 +697,95 @@ fn map_export_error(e: ExportError) -> OnnxError {
             index,
             layer_kind: layer_kind.to_string(),
         },
+        // export 用バイト列の確保失敗（PR #2348 codex P0 是正）は、読み込み・
+        // 実行時の確保失敗と同じ既存の `OnnxError::Io(OutOfMemory)` へ写像する
+        // （新規 variant なし。`InvalidModel` へ畳み込むと資源不足を「モデル
+        // 不正」と誤分類するため採らない）。
+        ExportError::AllocationFailed { .. } => {
+            OnnxError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory))
+        }
         other => OnnxError::InvalidModel {
             message: other.to_string(),
         },
+    }
+}
+
+/// `map_graph_error` の external data 分岐と、実行時・export 時の確保失敗
+/// （`map_interp_error`／`map_export_error`）の写像単体テスト（実確保・実
+/// ファイル I/O を伴わずに写像規則だけを固定する）。
+#[cfg(test)]
+mod map_graph_error_tests {
+    use super::{
+        ExportError, ExternalDataError, GraphError, InterpError, OnnxError, map_export_error,
+        map_graph_error, map_interp_error,
+    };
+
+    fn assert_out_of_memory(e: OnnxError) {
+        match e {
+            OnnxError::Io(io) => assert_eq!(io.kind(), std::io::ErrorKind::OutOfMemory),
+            other => panic!("OnnxError::Io(OutOfMemory) を期待したが {other:?}"),
+        }
+    }
+
+    /// 実行時値の確保失敗（`InterpError::AllocationFailed`。PR #2348 codex P0
+    /// 是正）は読み込み時と同じ `Io(OutOfMemory)` へ写像される。
+    #[test]
+    fn interp_allocation_failed_maps_to_io_out_of_memory() {
+        assert_out_of_memory(map_interp_error(InterpError::AllocationFailed {
+            tensor_name: "w".to_string(),
+            bytes: 1 << 40,
+        }));
+    }
+
+    /// export 用バイト列の確保失敗（`ExportError::AllocationFailed`）も同じ
+    /// `Io(OutOfMemory)` へ写像される。
+    #[test]
+    fn export_allocation_failed_maps_to_io_out_of_memory() {
+        assert_out_of_memory(map_export_error(ExportError::AllocationFailed {
+            tensor_name: "w".to_string(),
+            bytes: 1 << 40,
+        }));
+    }
+
+    /// 確保失敗（PR #2348 codex P0 是正）は `InvalidModel` ではなく
+    /// `Io(ErrorKind::OutOfMemory)` へ写像される（`std::fs::read` の確保
+    /// 失敗と同じ判別方法を利用者へ提供する）。
+    #[test]
+    fn allocation_failed_maps_to_io_out_of_memory() {
+        let e = map_graph_error(GraphError::ExternalData(
+            ExternalDataError::AllocationFailed {
+                tensor_name: "w".to_string(),
+                bytes: 1 << 40,
+            },
+        ));
+        match e {
+            OnnxError::Io(io) => assert_eq!(io.kind(), std::io::ErrorKind::OutOfMemory),
+            other => panic!("OnnxError::Io(OutOfMemory) を期待したが {other:?}"),
+        }
+    }
+
+    /// 既存の `ExternalDataError::Io` 写像（kind 保持）は不変。
+    #[test]
+    fn external_io_error_keeps_kind() {
+        let e = map_graph_error(GraphError::ExternalData(ExternalDataError::Io {
+            tensor_name: "w".to_string(),
+            kind: std::io::ErrorKind::NotFound,
+        }));
+        match e {
+            OnnxError::Io(io) => assert_eq!(io.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("OnnxError::Io(NotFound) を期待したが {other:?}"),
+        }
+    }
+
+    /// それ以外の external data エラーは従来どおり `InvalidModel`。
+    #[test]
+    fn other_external_errors_map_to_invalid_model() {
+        let e = map_graph_error(GraphError::ExternalData(
+            ExternalDataError::TotalSizeLimitExceeded {
+                limit: 8,
+                requested: 16,
+            },
+        ));
+        assert!(matches!(e, OnnxError::InvalidModel { .. }), "{e:?}");
     }
 }

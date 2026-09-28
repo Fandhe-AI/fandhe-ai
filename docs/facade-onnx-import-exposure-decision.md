@@ -501,3 +501,60 @@ set_cuda_onnx_gpu_execution_enabled`／`set_metal_onnx_gpu_execution_enabled`
 経由の device 実行を試みる。設計判断・op 別結線表・parity 契約・承認事項の
 詳細は `docs/onnx-gpu-execution-decision.md` を正とする（本節は追補ポイン
 タのみ）。
+
+## 15. 追補（イシュー #2347・2026-09-28）: external data パス入力 import 入口を `from_path` へ公開済み
+
+§6.3(a) の「要素数・総バイト数の上限設定を設計要件として追加検討する
+必要がある」に対応する形で、`onnx-interop` 内部限定モジュール
+`onnx::external_data`（`onnx::graph::build_graph_with_external_data`。
+基点ディレクトリ `base_dir` を受け取り external data
+〈`TensorProto.data_location`／`external_data`〉を fail-closed に検証・
+読み込みする新入口）を実装した。`ExternalDataOptions::max_total_bytes`
+（2026-09-28 ユーザー承認により既定 **64 GiB** へ改定。当初の 4 GiB
+暫定値から更新）が確保前検査の上限として、`ExternalDataOptions::
+max_external_files`（既定 4096。2026-09-28 ユーザー承認で正式な既定値として確定）が
+distinct ファイル数（open／`fstat` 回数の有界化。A04。external data
+ファイルのハンドルは 1 つずつ開いて閉じるため同時保持 fd 数はこの値に
+依存しない〈PR #2348 codex P1 是正〉）の上限として機能する（詳細は
+`docs/onnx-external-data-decision.md`）。
+
+**facade 公開は 2026-09-28 にユーザー承認を得て実施済み**
+（`docs/compat-api-scope.md` §5 の該当段落を解消）。新規メソッドの追加
+ではなく、**既存 API `OnnxModel::from_path` を external data 対応へ
+拡張**した（`std::fs::read` → protobuf デコード →
+`build_graph_with_external_data`。基点ディレクトリはモデルファイルの
+親ディレクトリ、オプションは `ExternalDataOptions::default()`）。
+`OnnxModel::from_bytes` は従来どおり変更しておらず、external data を
+持つモデルは従来どおり `OnnxError::InvalidModel` で拒否される（A6 の
+不変条件。`crates/facade/tests/interop_onnx_internal_parity.rs::
+facade_from_bytes_rejects_external_data_model_from_path_attempts_
+resolution` で固定）。`from_path` が実際に external data を解決できる
+ことの正例は `crates/facade/tests/interop_onnx_external_data.rs::
+from_path_resolves_external_data_and_matches_manifest_reference`
+（PyTorch dynamo exporter 生出力 fixture 使用）を参照。
+
+**確保失敗の写像（2026-09-28・PR #2348 codex P0 是正）**: external data
+の読み込みバッファ・復号先の確保を失敗可能化し、`onnx-interop` 内部の
+新 variant `ExternalDataError::AllocationFailed` を facade では既存の
+`OnnxError::Io`（`ErrorKind::OutOfMemory`）へ写像する（公開 variant の
+追加なし。同じ `from_path` 内の `std::fs::read` による `.onnx` 本体の
+確保失敗と同じ判別方法になる）。`from_path` は `ExternalDataOptions::
+default()` 固定のため、facade 利用者が `max_total_bytes` を下げる公開
+手段は無い（起票候補。詳細・ピークメモリ見積もりは
+`docs/onnx-external-data-decision.md` 4.3 節・7 節）。
+
+**実行時・export 時の確保失敗の写像（2026-09-28・PR #2348 codex P0
+是正 2 回目）**: `OnnxModel::run` が実行ごとに initializer を実行時値へ
+複製する処理と `Constant` 属性テンソルの復号、`OnnxModel::to_bytes`／
+`to_path` の export 用バイト列（initializer の `raw_data`・`Constant`
+属性テンソルの複製・モデル全体の encode 結果）も失敗可能確保とした。
+`onnx-interop` 内部の新 variant `InterpError::AllocationFailed`（`map_
+interp_error`）・`ExportError::AllocationFailed`（`map_export_error`）は、
+読み込み時と同じ既存の `OnnxError::Io`（`ErrorKind::OutOfMemory`）へ
+写像する（公開 variant の追加なし）。既存の実行時 fallback
+`OnnxError::Execution { message }` へ畳み込まない理由: 文字列しか持たず
+資源不足を型で判別できないうえ、読み込み時（`Io(OutOfMemory)`）と実行時
+で判別方法が分かれるため。`OnnxError::Io` の doc コメントへ対象経路を
+追記した（doc のみの変更で公開 API 面は不変）。演算カーネルの出力確保は
+一般の推論メモリとして対象外（`docs/onnx-external-data-decision.md`
+4.3 節の洗い出し表）。

@@ -30,6 +30,12 @@
 //!   decision.md`）。[`onnx::proto::decode_model`]／[`onnx::proto::encode_model`]
 //!   は facade が本クレートの `prost` 依存を直接持たずに ONNX バイト列を
 //!   復号・書き出しできるようにする薄い入口（同 issue）。
+//!   [`onnx::external_data`] は ONNX external data（外部 `.onnx.data`
+//!   ファイル）の initializer 読み込みに fail-closed で対応する
+//!   `onnx-interop` 内部限定の入口（モジュール自体は facade へ再エクス
+//!   ポートしないが、`fandhe-ai::interop::onnx::OnnxModel::from_path`
+//!   〈2026-09-28 ユーザー承認・実施済み〉が薄く委譲して呼ぶ。イシュー
+//!   #2347）。
 //! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82 / TASK-7.3b・#83 / TASK-7.3c・#84 /
 //!   TASK-7.3d・#85）: ONNX オペを `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
 //!   8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`）に

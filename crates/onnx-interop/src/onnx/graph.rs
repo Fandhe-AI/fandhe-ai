@@ -95,6 +95,13 @@ pub enum GraphError {
     /// `tensor_name` は先頭要素の `values.name`（非信頼入力のため空文字列もありうる）、
     /// `count` は sparse initializer の総数。
     SparseInitializerNotSupported { tensor_name: String, count: usize },
+    /// external data（`TensorProto.data_location`/`external_data`。イシュー
+    /// #2347）の検証・読み込みに失敗した。`external_data::
+    /// resolve_external_data`／`external_data::build_graph_with_external_data`
+    /// 経由でのみ発生する（バイト列入口の `build_graph` 自体は
+    /// `data_location`/`external_data` を一切参照しないため、この variant を
+    /// 返すことはない。A6）。
+    ExternalData(super::external_data::ExternalDataError),
 }
 
 impl fmt::Display for GraphError {
@@ -174,6 +181,7 @@ impl fmt::Display for GraphError {
                     "sparse_initializer は非対応（tensor={tensor_name}・count={count}）: sparse テンソルは対象外のため fail-closed に拒否"
                 )
             }
+            GraphError::ExternalData(e) => write!(f, "{e}"),
         }
     }
 }
@@ -430,9 +438,80 @@ pub(crate) fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
 /// 呼び出し元は #78（インタープリタ基盤）・将来の codegen。initializer の復号
 /// （`decode_tensor`）とノード列のトポロジカル順検証をここで完結させ、後段は
 /// 「グラフは既に妥当である」前提で実装できるようにする。
+///
+/// 検証本体（sparse 拒否・initializer 名重複・トポロジ・グラフ出力）は
+/// external data 入口専用の `build_graph_owned` と共有する
+/// （`reject_sparse_initializers`・`insert_initializer`・
+/// `validate_topology`。検証ロジックを二重実装しない）。本関数の挙動
+/// （検査順序・エラー variant）は共有化の前後で変わらない。
 pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
     let g: &GraphProto = model.graph.as_ref().ok_or(GraphError::NoGraph)?;
+    reject_sparse_initializers(g)?;
 
+    let mut initializers = HashMap::new();
+    for init in &g.initializer {
+        let decoded = decode_tensor(init)?;
+        insert_initializer(&mut initializers, &init.name, decoded)?;
+    }
+    validate_topology(g, &initializers)?;
+
+    Ok(Graph {
+        nodes: g.node.clone(),
+        initializers,
+        inputs: g.input.iter().map(|v| v.name.clone()).collect(),
+        outputs: g.output.iter().map(|v| v.name.clone()).collect(),
+    })
+}
+
+/// external data 入口（`external_data::build_graph_with_external_data`）
+/// 専用の、`ModelProto` を所有権ごと受け取るグラフ構築（PR #2348 codex P0
+/// 是正）。
+///
+/// [`build_graph`] と同じ検証を同じ順序で行う（sparse 拒否 → initializer を
+/// 入力順に復号・名前重複検査 → トポロジ・グラフ出力検証）。違いは 2 点:
+/// (1) initializer の復号を呼び出し元のクロージャ `decode_init(添字,
+/// &mut TensorProto)` に委ねる（external 由来の initializer は失敗可能確保で
+/// 復号し raw を即解放する。[`decode_tensor`] 自体は A6 により変更しない）。
+/// 復号後は各 initializer の inline データを解放する（`model` は消費される
+/// ため `Graph` から参照されない）。(2) ノード列を clone せず move する
+/// （external data から inline 化した Constant 属性テンソルの `raw_data` を
+/// 2 重に持たない）。
+pub(super) fn build_graph_owned<F>(
+    model: ModelProto,
+    mut decode_init: F,
+) -> Result<Graph, GraphError>
+where
+    F: FnMut(usize, &mut TensorProto) -> Result<RawTensor, GraphError>,
+{
+    let mut g: GraphProto = model.graph.ok_or(GraphError::NoGraph)?;
+    reject_sparse_initializers(&g)?;
+
+    let mut initializers = HashMap::new();
+    for (idx, init) in g.initializer.iter_mut().enumerate() {
+        let decoded = decode_init(idx, init)?;
+        // 復号済みの inline データは以後参照しないため、ここで解放して
+        // raw と復号後の要素 Vec が全 initializer 分同時に残らないようにする。
+        init.raw_data = Vec::new();
+        init.float_data = Vec::new();
+        init.int64_data = Vec::new();
+        insert_initializer(&mut initializers, &init.name, decoded)?;
+    }
+    validate_topology(&g, &initializers)?;
+
+    let inputs = g.input.iter().map(|v| v.name.clone()).collect();
+    let outputs = g.output.iter().map(|v| v.name.clone()).collect();
+    Ok(Graph {
+        nodes: g.node,
+        initializers,
+        inputs,
+        outputs,
+    })
+}
+
+/// `GraphProto.sparse_initializer` が非空なら fail-closed に拒否する
+/// （[`build_graph`]・[`build_graph_owned`] 共通。initializer の decode より
+/// 前に呼ぶ）。
+fn reject_sparse_initializers(g: &GraphProto) -> Result<(), GraphError> {
     // sparse_initializer（tag=15）は非対応。dense initializer の decode より
     // 前に検査し、中身を一切解釈せず存在だけで fail-closed に拒否する（長さ・
     // 形状検証を先行させる原則と同じ。no-silent-skip 契約・A03／A08。#2079）。
@@ -453,19 +532,31 @@ pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
             count: g.sparse_initializer.len(),
         });
     }
+    Ok(())
+}
 
-    // `HashMap::insert` は同名キーを後勝ちで無言上書きするため、事前に重複を
-    // 検出して拒否する（不正な ONNX モデル。Bugbot 指摘・no-silent-skip 契約）。
-    let mut initializers = HashMap::new();
-    for init in &g.initializer {
-        let decoded = decode_tensor(init)?;
-        if initializers.insert(init.name.clone(), decoded).is_some() {
-            return Err(GraphError::DuplicateInitializerName {
-                tensor_name: init.name.clone(),
-            });
-        }
+/// 復号済み initializer を名前で登録する。`HashMap::insert` は同名キーを
+/// 後勝ちで無言上書きするため、重複を検出して拒否する（不正な ONNX モデル。
+/// Bugbot 指摘・no-silent-skip 契約）。
+fn insert_initializer(
+    initializers: &mut HashMap<String, RawTensor>,
+    name: &str,
+    decoded: RawTensor,
+) -> Result<(), GraphError> {
+    if initializers.insert(name.to_string(), decoded).is_some() {
+        return Err(GraphError::DuplicateInitializerName {
+            tensor_name: name.to_string(),
+        });
     }
+    Ok(())
+}
 
+/// トポロジカル順・名前衝突・グラフ出力の検証（[`build_graph`]・
+/// [`build_graph_owned`] 共通。全 initializer の復号・登録後に呼ぶ）。
+fn validate_topology(
+    g: &GraphProto,
+    initializers: &HashMap<String, RawTensor>,
+) -> Result<(), GraphError> {
     // トポロジカル順の検証: 既に生成済み（initializer またはグラフ入力・前段
     // ノード出力）の名前集合を逐次拡張しながら、各ノードの入力がすべて既知か
     // 確認する。ONNX は省略可能入力を空文字列で表す規約のためスキップする。
@@ -541,11 +632,5 @@ pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
             });
         }
     }
-
-    Ok(Graph {
-        nodes: g.node.clone(),
-        initializers,
-        inputs: g.input.iter().map(|v| v.name.clone()).collect(),
-        outputs: g.output.iter().map(|v| v.name.clone()).collect(),
-    })
+    Ok(())
 }

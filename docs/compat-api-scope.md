@@ -1357,3 +1357,21 @@ PredictBatchesHoldDoctestGuard`（正のプローブ doctest）と
 | イシュー #986（本文書 §0 の暫定注記削除・確定入口統合） | 本イシュー |
 | spec リポ `Fandhe-AI/fandhe-ai-spec` PR #59 | REQ-9 の 2026-08-29 追記（マージ済み。merge commit `64364b4bf7e46f91f07d779b2d1c4d14adbd4e48`） |
 | PR #988 | `docs/spec` submodule ポインタ更新（イシュー #985 の実装 PR） |
+
+**#2347（ONNX external data のパス入力 import 入口 `onnx::external_data::
+build_graph_with_external_data` の facade 公開）は 2026-09-28 にユーザー
+承認を得て実施済み。** 新規メソッドの追加ではなく、既存 API
+`crates/facade/src/interop/onnx.rs::OnnxModel::from_path` を external
+data 対応へ拡張する形（`std::fs::read` → protobuf デコード →
+`build_graph_with_external_data`。基点ディレクトリはモデルファイルの
+親ディレクトリ、オプションは `ExternalDataOptions::default()`）を採用
+した。`OnnxModel::from_bytes` は変更しておらず、external data
+（`.onnx.data` companion ファイル）を持つモデルは従来どおり
+`OnnxError::InvalidModel` で拒否される（`crates/facade/tests/
+interop_onnx_internal_parity.rs::
+facade_from_bytes_rejects_external_data_model_from_path_attempts_
+resolution` で固定）。`from_path` が実際に external data を解決できる
+ことの正例は `crates/facade/tests/interop_onnx_external_data.rs::
+from_path_resolves_external_data_and_matches_manifest_reference` を
+参照（詳細は `docs/onnx-external-data-decision.md`・`docs/
+facade-onnx-import-exposure-decision.md` §15 を参照）。

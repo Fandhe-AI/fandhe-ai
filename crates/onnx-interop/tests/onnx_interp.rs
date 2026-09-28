@@ -305,6 +305,8 @@ fn run_feed_overrides_initializer_pre_ir4_pattern() {
         float_data: vec![100.0],
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let node = NodeProto {
         input: vec!["x".to_string()],

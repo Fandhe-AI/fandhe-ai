@@ -1323,3 +1323,513 @@ fn reduction_baselines_are_well_formed() {
         );
     }
 }
+
+// ============================================================================
+// external data（外部 `.data` ファイル）fixture 突合（イシュー #2347）
+// ============================================================================
+//
+// `tests/fixtures/pytorch-onnx-external-data/`（PyTorch dynamo exporter の
+// external data を再 inline 化しない生出力。`README.md` 参照）を
+// `onnx::external_data::build_graph_with_external_data` 経由で読み込み、
+// #2329 の `Req7BaselineNonRegression`（`REDUCTION_BASELINES`）と**同じ
+// 仕組み**（ケース集合の完全一致検査・`fail_count == 0` を必須条件とした
+// うえで `total`／`max_abs_diff`／`max_rel_err`／`mean_abs_diff` の実測値
+// そのものを ceiling とする fail-closed 非後退判定）を、本 fixture 専用の
+// `EXTERNAL_DATA_BASELINES` で適用する（2026-09-28 ユーザー承認・レビュー
+// 対応）。`REDUCTION_BASELINES` の既存行を再利用しない
+// （`pytorch-onnx-cnn-ops` fixture と `pytorch-onnx-external-data` fixture
+// は生成のたびに重みの実際の bit 列が変わりうる別個のコミット済み
+// fixture〈[`ExternalManifestEntry`] のコメント参照〉のため、たとえ
+// `case_name` が同じでも重み・参照出力は独立している。テーブルを分離する
+// ことで、どちらの fixture を再生成しても互いの baseline を巻き込まずに
+// 更新できる）。
+
+// external data の実解決（`build_graph_with_external_data`）は unix
+// でのみ成功する（`ExternalDataError::UnsupportedPlatformForSecureResolve`
+// の doc 参照）。この import・`compute_external_case_stats`・
+// baseline 非後退判定ヘルパは実解決に成功することを前提とする
+// `external_data_fixture_matches_self_contained_reference` 専用のため
+// `cfg(unix)` で揃える（Cursor Bugbot 指摘対応。他の external data
+// fixture テスト——`external_data_fixture_actually_uses_external_path`・
+// `external_data_fixture_bytes_entry_point_still_rejects`・
+// `external_data_baselines_are_well_formed`——は decode／manifest 参照・
+// 静的テーブル検査のみで実解決を行わないため OS 非依存のまま維持する）。
+#[cfg(unix)]
+use fandhe_ai_onnx_interop::onnx::external_data::{
+    ExternalDataOptions, build_graph_with_external_data,
+};
+
+/// external data 経由の fixture がある 3 ケース（いずれも `Conv` を含み、
+/// 432／288 バイトの重み initializer が external になる。`README.md`
+/// 「実測結果」節参照）。
+///
+/// **`MaxPool`／`Flatten` 等のパラメータを持たない op のケース
+/// （`pytorch-onnx-cnn-ops` fixture 側に存在する `maxpool2d_*`・
+/// `flatten_*` 等）はここに含まれない**: これらの op は学習可能な重み
+/// （`initializer`）を一切持たないため、PyTorch dynamo exporter が
+/// external data として切り出す対象（`TensorProto.data_location =
+/// EXTERNAL` を持ちうる initializer）自体が存在せず、external data 経由
+/// で import する意味のあるケースを構成できない（`gen_external.py` が
+/// `pytorch-onnx-cnn-ops` の 19 ケース全件に dynamo export を試みた際も、
+/// 実際に initializer が external になったのは `Conv` 系の重みのみだった
+/// という実測に基づく。`docs/onnx-external-data-decision.md` §8・
+/// fixture 側 `README.md`「実測結果」節も参照）。
+const EXTERNAL_DATA_CASE_NAMES: &[&str] =
+    &["conv2d_basic", "conv2d_nobias", "conv2d_stride_dil_group"];
+
+fn external_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pytorch-onnx-external-data")
+}
+
+#[derive(Deserialize)]
+struct ExternalManifestEntry {
+    was_external_data: bool,
+    external_initializers: Vec<ExternalManifestInitializer>,
+    op_types: Vec<String>,
+    /// このスクリプト自身が生成した重みに対する参照入出力（`README.md`
+    /// 「実測結果」節参照。`../pytorch-onnx-cnn-ops/reference.json` は
+    /// 再利用しない——同じ `deterministic_seed`／`CASES` でも torch の
+    /// マイナーバージョン内パッチ差・生成環境差で重み初期化の実際の bit
+    /// 列が再現しないことを実測で確認したため、常に自己完結ペアで判定
+    /// する）。
+    input: TensorRecord,
+    output: TensorRecord,
+}
+
+#[derive(Deserialize)]
+struct ExternalManifestInitializer {
+    name: String,
+    data_type: i32,
+    #[serde(default)]
+    location: Option<String>,
+}
+
+fn load_external_manifest() -> HashMap<String, ExternalManifestEntry> {
+    let bytes = read_file_bounded(&external_fixture_root().join("manifest.json"));
+    serde_json::from_slice(&bytes).expect("manifest.json の parse に失敗した")
+}
+
+/// 1 ケース分の external data fixture を実際に読み込み・実行し、
+/// [`diff_stats`] と同じ判定材料（`DiffStats`）を得る。参照入出力は
+/// `manifest.json`（このスクリプト自身が生成した重みに対する自己完結
+/// 参照値。[`ExternalManifestEntry`] のコメント参照）を使う。
+///
+/// `build_graph_with_external_data` の実解決は unix でのみ成功するため
+/// `cfg(unix)` 限定（上の import コメント参照）。
+#[cfg(unix)]
+fn compute_external_case_stats(case_name: &str, entry: &ExternalManifestEntry) -> DiffStats {
+    let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+    let bytes = read_file_bounded(&model_path);
+    let model = proto::decode_model(&bytes)
+        .unwrap_or_else(|e| panic!("{case_name}: external fixture decode 失敗: {e}"));
+    let graph = build_graph_with_external_data(
+        &model,
+        &external_fixture_root(),
+        &ExternalDataOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("{case_name}: external data 解決に失敗: {e}"));
+
+    let input_tensor = tensor_from_record(&entry.input);
+    let mut feeds: HashMap<String, Value> = HashMap::new();
+    feeds.insert("x".to_string(), Value::F32(input_tensor));
+    let result =
+        run(&graph, feeds).unwrap_or_else(|e| panic!("{case_name}: external data run 失敗: {e}"));
+    let actual = match result.get("y") {
+        Some(Value::F32(t)) => t,
+        other => panic!("{case_name}: 出力が F32 以外／欠落: {other:?}"),
+    };
+    let expected_tensor = tensor_from_record(&entry.output);
+    assert_eq!(
+        actual.shape(),
+        expected_tensor.shape(),
+        "{case_name}: 出力 shape 不一致"
+    );
+    let stats = diff_stats(
+        actual.as_slice().expect("as_slice 失敗"),
+        expected_tensor.as_slice().expect("as_slice 失敗"),
+    );
+    // `run_case` と同型の実測値ログ（`EXTERNAL_DATA_BASELINES` の再測定時に
+    // `--nocapture` で拾う。イシュー #2347・§4 レビュー対応）。
+    eprintln!(
+        "{case_name} [external-data]: total={} req7_fail_count={} max_abs_diff={:?} \
+         max_rel_err={:?} mean_abs_diff={:?}",
+        stats.total, stats.fail_count, stats.max_abs_diff, stats.max_rel_err, stats.mean_abs_diff,
+    );
+    stats
+}
+
+/// external data fixture（`EXTERNAL_DATA_CASE_NAMES`）1 ケース分の記録済み
+/// 実測上限 baseline（`ReductionBaseline`／`REDUCTION_BASELINES` と同型・
+/// 別テーブル。モジュール冒頭コメント参照）。`exporter_name` フィールドを
+/// 持たない（本 fixture 群は dynamo exporter の生出力のみで `ts` 変種を
+/// 持たないため。`ReductionBaseline` との構造差はこの 1 点のみ）。
+#[derive(Debug, Clone, Copy)]
+struct ExternalDataBaseline {
+    case_name: &'static str,
+    total: usize,
+    baseline_fail_count: usize,
+    baseline_max_abs_diff_ceiling: f32,
+    baseline_max_rel_err_ceiling: f32,
+    baseline_mean_abs_diff_ceiling: f64,
+}
+
+/// 記録済み baseline 一覧（3 行 = `EXTERNAL_DATA_CASE_NAMES` の 3 ケース）。
+///
+/// 出典: 本レビュー対応時に `cargo test -p fandhe-ai-onnx-interop --test \
+/// onnx_interp_pytorch_cnn_fixture external_data_fixture_matches_self_
+/// contained_reference -- --nocapture --test-threads=1` で実測した値
+/// （`compute_external_case_stats` の `eprintln!` 出力。2026-09-28）。
+/// fixture はリポジトリにコミット済みの固定バイト列（`.onnx`／`.onnx.data`
+/// ・`manifest.json` とも再生成しない限り不変）のため、`REDUCTION_
+/// BASELINES` と同じく CI・ローカルを問わず単一の値で成立する。
+static EXTERNAL_DATA_BASELINES: &[ExternalDataBaseline] = &[
+    ExternalDataBaseline {
+        case_name: "conv2d_basic",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ExternalDataBaseline {
+        case_name: "conv2d_nobias",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ExternalDataBaseline {
+        case_name: "conv2d_stride_dil_group",
+        total: 100,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 3.731_992_1e-6,
+        baseline_mean_abs_diff_ceiling: 3.0193477869033815e-8,
+    },
+];
+
+/// `case_name` に対応する [`ExternalDataBaseline`] を引く。未登録ケースは
+/// fail-closed に panic する（`find_reduction_baseline` と同型。黙って
+/// skip しない）。`compute_external_case_stats` 経由でのみ使うため
+/// `cfg(unix)` 限定（上の import コメント参照）。
+#[cfg(unix)]
+#[track_caller]
+fn find_external_data_baseline(case_name: &str) -> &'static ExternalDataBaseline {
+    EXTERNAL_DATA_BASELINES
+        .iter()
+        .find(|b| b.case_name == case_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "{case_name}: EXTERNAL_DATA_BASELINES に行が無い（baseline の追加は \
+                 実測値のみ・人間承認必須。未登録ケースを黙って通過させない）"
+            )
+        })
+}
+
+/// [`ExternalDataBaseline`] に対する fail-closed 非後退判定
+/// （`assert_no_reduction_baseline_regression` と同型）。
+/// `external_data_fixture_matches_self_contained_reference` 専用のため
+/// `cfg(unix)` 限定（上の import コメント参照）。
+#[cfg(unix)]
+#[track_caller]
+fn assert_no_external_data_baseline_regression(
+    case_name: &str,
+    stats: &DiffStats,
+    baseline: &ExternalDataBaseline,
+) {
+    assert_eq!(
+        stats.total, baseline.total,
+        "{case_name}: 比較対象の要素数が baseline({}) と一致しない（形状・\
+         比較対象がずれている可能性）",
+        baseline.total,
+    );
+    assert!(
+        stats.fail_count <= baseline.baseline_fail_count,
+        "{case_name}: baseline 非後退契約 FAIL — fail_count が後退しました \
+         (actual={}, baseline={})",
+        stats.fail_count,
+        baseline.baseline_fail_count,
+    );
+    assert!(
+        stats.max_abs_diff <= baseline.baseline_max_abs_diff_ceiling,
+        "{case_name}: baseline 非後退契約 FAIL — max_abs_diff が後退しました \
+         (actual={:?}, ceiling={:?})",
+        stats.max_abs_diff,
+        baseline.baseline_max_abs_diff_ceiling,
+    );
+    assert!(
+        stats.max_rel_err <= baseline.baseline_max_rel_err_ceiling,
+        "{case_name}: baseline 非後退契約 FAIL — max_rel_err が後退しました \
+         (actual={:?}, ceiling={:?})",
+        stats.max_rel_err,
+        baseline.baseline_max_rel_err_ceiling,
+    );
+    assert!(
+        stats.mean_abs_diff <= baseline.baseline_mean_abs_diff_ceiling,
+        "{case_name}: baseline 非後退契約 FAIL — mean_abs_diff が後退しました \
+         (actual={:?}, ceiling={:?})",
+        stats.mean_abs_diff,
+        baseline.baseline_mean_abs_diff_ceiling,
+    );
+}
+
+/// `EXTERNAL_DATA_BASELINES` の構造的整合性を検査する
+/// （`reduction_baselines_are_well_formed` と同型）。
+#[test]
+fn external_data_baselines_are_well_formed() {
+    let mut case_keys: Vec<&str> = EXTERNAL_DATA_CASE_NAMES.to_vec();
+    case_keys.sort_unstable();
+
+    let mut baseline_keys: Vec<&str> = EXTERNAL_DATA_BASELINES
+        .iter()
+        .map(|b| b.case_name)
+        .collect();
+    baseline_keys.sort_unstable();
+    let baseline_keys_unique_count = {
+        let mut dedup = baseline_keys.clone();
+        dedup.dedup();
+        dedup.len()
+    };
+    assert_eq!(
+        baseline_keys.len(),
+        baseline_keys_unique_count,
+        "EXTERNAL_DATA_BASELINES に重複行がある: {baseline_keys:?}"
+    );
+    assert_eq!(
+        case_keys, baseline_keys,
+        "EXTERNAL_DATA_BASELINES と EXTERNAL_DATA_CASE_NAMES が不一致（取りこぼし・過剰のいずれか）"
+    );
+
+    for b in EXTERNAL_DATA_BASELINES {
+        assert!(b.total > 0, "{}: baseline.total が 0", b.case_name);
+        assert_eq!(
+            b.baseline_fail_count, 0,
+            "{}: baseline_fail_count が 0 以外（REQ-7 式は必須条件のため baseline \
+             側も 0 のみを許容する）",
+            b.case_name
+        );
+        assert!(
+            b.baseline_max_abs_diff_ceiling.is_finite() && b.baseline_max_abs_diff_ceiling >= 0.0,
+            "{}: baseline_max_abs_diff_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.baseline_max_abs_diff_ceiling
+        );
+        assert!(
+            b.baseline_max_rel_err_ceiling.is_finite() && b.baseline_max_rel_err_ceiling >= 0.0,
+            "{}: baseline_max_rel_err_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.baseline_max_rel_err_ceiling
+        );
+        assert!(
+            b.baseline_mean_abs_diff_ceiling.is_finite() && b.baseline_mean_abs_diff_ceiling >= 0.0,
+            "{}: baseline_mean_abs_diff_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.baseline_mean_abs_diff_ceiling
+        );
+    }
+}
+
+/// 1. external data 経由で計算した出力が、`manifest.json` に記録した
+///    自己完結参照出力（PyTorch がこのスクリプトの重みに対して計算した
+///    値）と一致すること（縮約系 op `Conv` を含むため REQ-7 事前固定式
+///    `fail_count == 0` を要求したうえで、`EXTERNAL_DATA_BASELINES` による
+///    fail-closed 非後退判定〈`total`／`max_abs_diff`／`max_rel_err`／
+///    `mean_abs_diff` の実測値そのものを ceiling とする〉も適用する
+///    （#2329 の `Req7BaselineNonRegression` と同じ判定方式。2026-09-28
+///    ユーザー承認。モジュール冒頭コメント参照）。
+/// 2. initializer の bit 完全一致（external data 経由での読み込み値 vs
+///    `.onnx.data` ファイルの生バイト列を直接 f32 として解釈した値）。
+///    実装計画 §4.5 の 1・3 をまとめたもの（2 は `.data` ファイルへの直接
+///    突合に置き換え。時間制約により `conv2d_*` 3 ケースへ限定——
+///    `README.md`「実測結果」節参照）。
+///
+/// `build_graph_with_external_data` の実解決は unix でのみ成功する
+/// （`ExternalDataError::UnsupportedPlatformForSecureResolve`）ため
+/// `cfg(unix)` 限定（Cursor Bugbot 指摘対応・PRRT_kwDOTuUCJc6mrW…。
+/// 上の import コメント参照）。
+#[cfg(unix)]
+#[test]
+fn external_data_fixture_matches_self_contained_reference() {
+    let manifest = load_external_manifest();
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let entry = manifest
+            .get(case_name)
+            .unwrap_or_else(|| panic!("manifest.json に '{case_name}' が無い"));
+
+        // 1. REQ-7 事前固定式（fail_count == 0）を必須条件として適用した
+        //    うえで、baseline 非後退判定（EXTERNAL_DATA_BASELINES）を課す。
+        let stats = compute_external_case_stats(case_name, entry);
+        assert_eq!(
+            stats.fail_count, 0,
+            "{case_name}: REQ-7 事前固定式 fail_count が 0 でない（total={} \
+             max_abs_diff={:?} max_rel_err={:?} mean_abs_diff={:?}）",
+            stats.total, stats.max_abs_diff, stats.max_rel_err, stats.mean_abs_diff
+        );
+        let baseline = find_external_data_baseline(case_name);
+        assert_no_external_data_baseline_regression(case_name, &stats, baseline);
+
+        // 2. initializer の bit 完全一致（external data 経由 vs `.onnx.data`
+        //    の生バイト列を直接解釈した値）。
+        let ext_model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+        let ext_bytes = read_file_bounded(&ext_model_path);
+        let ext_model = proto::decode_model(&ext_bytes).expect("external decode 失敗");
+        let ext_graph = build_graph_with_external_data(
+            &ext_model,
+            &external_fixture_root(),
+            &ExternalDataOptions::default(),
+        )
+        .expect("external data 解決失敗");
+
+        for init in &entry.external_initializers {
+            let data_path = external_fixture_root().join(
+                init.location
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{case_name}: location が無い")),
+            );
+            let raw = read_file_bounded(&data_path);
+            let expected: Vec<f32> = raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            match ext_graph.initializers.get(&init.name) {
+                Some(RawTensor::F32 { data, .. }) => assert_eq!(
+                    data, &expected,
+                    "{case_name}: initializer '{}' が .data ファイルの生バイト列と bit 一致しない",
+                    init.name
+                ),
+                other => panic!(
+                    "{case_name}: initializer '{}' が RawTensor::F32 でない: {other:?}",
+                    init.name
+                ),
+            }
+        }
+    }
+}
+
+/// [`external_data_fixture_matches_self_contained_reference`] の非 unix
+/// 契約テスト（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW… 対応）。非 unix
+/// では `openat`／`openat2` 相当の安全な経路解決手段を持たないため、
+/// `build_graph_with_external_data` はファイルの実在有無に関わらず常に
+/// `ExternalDataError::UnsupportedPlatformForSecureResolve` で fail-closed
+/// に拒否する（`external_data.rs` モジュール doc「非 unix（Windows 等）」
+/// 節参照。Windows 対応はイシュー #2349 で追跡中）。fixture 自体（`.onnx`
+/// 本体）は実在するコミット済みファイルを使うが、companion `.onnx.data`
+/// には一切アクセスしない（非 unix の `resolve_and_open` は `location`
+/// の文字列検証のみ行い、実ファイルの open を試みないため）。
+#[cfg(not(unix))]
+#[test]
+fn external_data_fixture_rejected_as_unsupported_platform_when_not_unix() {
+    use fandhe_ai_onnx_interop::onnx::external_data::{ExternalDataError, ExternalDataOptions};
+
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+        let bytes = read_file_bounded(&model_path);
+        let model = proto::decode_model(&bytes)
+            .unwrap_or_else(|e| panic!("{case_name}: external fixture decode 失敗: {e}"));
+        let err = fandhe_ai_onnx_interop::onnx::external_data::build_graph_with_external_data(
+            &model,
+            &external_fixture_root(),
+            &ExternalDataOptions::default(),
+        )
+        .expect_err("非 unix では external data 解決が成功してはならない");
+        assert!(
+            matches!(
+                err,
+                fandhe_ai_onnx_interop::onnx::graph::GraphError::ExternalData(
+                    ExternalDataError::UnsupportedPlatformForSecureResolve { .. }
+                )
+            ),
+            "{case_name}: UnsupportedPlatformForSecureResolve を期待したが: {err:?}"
+        );
+    }
+}
+
+/// 3. fixture が実際に external data 経路を通っていることの検査
+///    （manifest とデコード後の proto の両方から数える。実装計画 §4.5-4）。
+#[test]
+fn external_data_fixture_actually_uses_external_path() {
+    let manifest = load_external_manifest();
+    let mut total_external_f32 = 0usize;
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let entry = manifest
+            .get(case_name)
+            .unwrap_or_else(|| panic!("manifest.json に '{case_name}' が無い"));
+        assert!(
+            entry.was_external_data,
+            "{case_name}: manifest 上 external data ではない"
+        );
+        assert!(
+            !entry.external_initializers.is_empty(),
+            "{case_name}: manifest 上 external な initializer が 0 件"
+        );
+        for init in &entry.external_initializers {
+            assert_eq!(
+                init.data_type,
+                proto::data_type::FLOAT,
+                "{case_name}: 期待は FLOAT"
+            );
+            assert!(init.location.is_some(), "{case_name}: location が無い");
+            total_external_f32 += 1;
+        }
+        assert_eq!(
+            entry.op_types,
+            vec!["Conv".to_string()],
+            "{case_name}: op_types 不一致"
+        );
+
+        // proto を実際に decode して data_location=EXTERNAL のテンソルが
+        // 存在することも確認する（manifest 側の記録だけに依存しない）。
+        let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+        let bytes = read_file_bounded(&model_path);
+        let model = proto::decode_model(&bytes).expect("decode 失敗");
+        let g = model.graph.as_ref().expect("graph が無い");
+        let n_external = g
+            .initializer
+            .iter()
+            .filter(|t| {
+                t.data_location == fandhe_ai_onnx_interop::onnx::proto::data_location::EXTERNAL
+            })
+            .count();
+        assert!(
+            n_external >= 1,
+            "{case_name}: decode した proto に external initializer が無い"
+        );
+    }
+    assert!(
+        total_external_f32 >= 1,
+        "F32（Conv の weight）が external な fixture が 1 件も無い（A1 要件）"
+    );
+    // 本 fixture 群では INT64 の shape 定数は 16〜24 バイトと小さく external
+    // にならなかった（`gen_external.py` コメント・`README.md` 参照。実測に
+    // 基づき §4.5-4 の要件を調整済み）。
+}
+
+/// 4. A6 の回帰: external データを持つ `.onnx` をバイト列入口
+///    （`decode_model` -> `build_graph`）へ渡した場合、従来どおり
+///    `GraphError::RawDataByteLenMismatch` になることを確認する
+///    （`onnx_external_data.rs::bytes_entry_point_still_rejects_external_data_model`
+///    の実 fixture 版）。
+#[test]
+fn external_data_fixture_bytes_entry_point_still_rejects() {
+    use fandhe_ai_onnx_interop::onnx::graph::GraphError;
+
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
+        let bytes = read_file_bounded(&model_path);
+        let model = proto::decode_model(&bytes).expect("decode 失敗");
+        let result = build_graph(&model);
+        assert!(
+            matches!(
+                result,
+                Err(GraphError::RawDataByteLenMismatch {
+                    actual_bytes: 0,
+                    ..
+                })
+            ),
+            "{case_name}: バイト列入口が external data モデルを拒否しなかった（A6 回帰）: {result:?}"
+        );
+    }
+}

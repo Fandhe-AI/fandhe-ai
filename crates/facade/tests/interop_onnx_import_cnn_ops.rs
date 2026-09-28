@@ -41,6 +41,8 @@ fn f32_tensor_proto(name: &str, data: Vec<f32>, dims: Vec<i64>) -> TensorProto {
         float_data: data,
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     }
 }
 

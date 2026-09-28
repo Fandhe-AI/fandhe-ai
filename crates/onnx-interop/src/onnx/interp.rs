@@ -136,7 +136,9 @@ pub enum InterpError {
     /// 通常到達しない防御的経路。
     Shape(ShapeError),
     /// `Constant` の `value`（TENSOR 型）属性が保持する `TensorProto` の復号エラー。
-    /// `onnx::graph::decode_tensor` をそのまま透過する。
+    /// `onnx::graph::decode_tensor` と同じ variant をそのまま透過する（復号自体は
+    /// 失敗可能確保版の `decode_constant_tensor` が行い、確保失敗は
+    /// [`InterpError::AllocationFailed`] になる）。
     Graph(GraphError),
     /// STRING 属性（`Conv` の `auto_pad`。イシュー #2076）が UTF-8 として不正
     /// だった。`AttributeProto.s: Vec<u8>` は任意バイト列を許容するため、
@@ -165,6 +167,18 @@ pub enum InterpError {
         node: String,
         source: fandhe_ai_autodiff::AutodiffError,
     },
+    /// 実行時値の用意に必要なテンソル本体の確保に失敗した（PR #2348 codex
+    /// P0 是正。security.md A04）。対象は (a) [`run`] 系が実行ごとに
+    /// initializer（`RawTensor`）を実行時値（[`Value`]）へ複製する処理、
+    /// (b) `Constant` の `value`（TENSOR）属性の復号。external data 由来の
+    /// テンソルは `.onnx` 本体が小さくても宣言長（既定上限 64 GiB）まで
+    /// 巨大化しうるため、無条件確保（失敗時にプロセスが abort する）を
+    /// 使わず本 variant で返す。演算カーネル（`ops::*`）の出力確保は対象外
+    /// （`docs/onnx-external-data-decision.md` 4.3 節）。`tensor_name` は
+    /// initializer 名、`Constant` では属性テンソルの `name`（空なら
+    /// `"{ノード名}:value"`。ノード名も空なら `op_type`。読み込み段と同じ
+    /// 規則）。`bytes` は要求バイト数。
+    AllocationFailed { tensor_name: String, bytes: u64 },
 }
 
 impl fmt::Display for InterpError {
@@ -225,6 +239,10 @@ impl fmt::Display for InterpError {
             InterpError::Autodiff { node, source } => {
                 write!(f, "ノード '{node}': autodiff エラー: {source}")
             }
+            InterpError::AllocationFailed { tensor_name, bytes } => write!(
+                f,
+                "テンソルの実行時値を確保できない（tensor={tensor_name}・要求 {bytes} バイト）"
+            ),
         }
     }
 }
@@ -264,32 +282,104 @@ pub(super) fn autodiff_err(node: &str, e: fandhe_ai_autodiff::AutodiffError) -> 
     }
 }
 
+/// `fallible_alloc::AllocFailure` → [`InterpError::AllocationFailed`]
+/// （`onnx::autograd` も同じ写像を使う）。
+pub(super) fn alloc_failure_to_interp(f: super::fallible_alloc::AllocFailure) -> InterpError {
+    InterpError::AllocationFailed {
+        tensor_name: f.tensor_name,
+        bytes: f.bytes,
+    }
+}
+
+/// initializer の要素列 `data` を失敗可能確保で複製する（`data.to_vec()` と
+/// 同じ要素列。`fallible_alloc::try_clone_slice` の失敗を
+/// [`InterpError::AllocationFailed`] へ写像する。`onnx::autograd` も共有）。
+pub(super) fn clone_elems<T: Clone>(name: &str, data: &[T]) -> Result<Vec<T>, InterpError> {
+    super::fallible_alloc::try_clone_slice(name, data).map_err(alloc_failure_to_interp)
+}
+
 /// `RawTensor`（`graph::build_graph` が復号した initializer）を実行時値へ変換する。
 /// `build_graph` が dims の非負性・要素数整合を検証済みのため通常は失敗しないが、
 /// `Tensor::new` の結果を `unwrap()` せず型付きエラーで伝播する（coding-rust.md）。
-fn raw_to_value(raw: &RawTensor) -> Result<Value, InterpError> {
+///
+/// `Graph` は initializer を `RawTensor`（`Vec` 所有）で保持し、`Tensor::new`
+/// は `Vec` を所有で受けるため、実行ごとに要素列を 1 回複製する（`Graph` を
+/// 借用のまま複数回 `run` できる契約のため）。external data 由来の
+/// initializer は宣言長で巨大化しうるため、複製は失敗可能確保
+/// （`fallible_alloc::try_clone_slice`）で行い、失敗は
+/// [`InterpError::AllocationFailed`] で返す（PR #2348 codex P0 是正。複製
+/// される値は `clone` と同一で数値結果は不変）。`name` は診断用の
+/// initializer 名。
+fn raw_to_value(name: &str, raw: &RawTensor) -> Result<Value, InterpError> {
     match raw {
         RawTensor::F32 { data, shape } => {
             let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-            let t = Tensor::new(data.clone(), &shape_usize)?;
+            let t = Tensor::new(clone_elems(name, data)?, &shape_usize)?;
             Ok(Value::F32(t))
         }
         RawTensor::I64 { data, shape } => {
             let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-            let t = Tensor::new(data.clone(), &shape_usize)?;
+            let t = Tensor::new(clone_elems(name, data)?, &shape_usize)?;
             Ok(Value::I64(t))
         }
         RawTensor::Bool { data, shape } => {
             let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-            let t = Tensor::new(data.clone(), &shape_usize)?;
+            let t = Tensor::new(clone_elems(name, data)?, &shape_usize)?;
             Ok(Value::Bool(t))
         }
         RawTensor::F16 { data, shape } => {
             let shape_usize: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-            let t = Tensor::new(data.clone(), &shape_usize)?;
+            let t = Tensor::new(clone_elems(name, data)?, &shape_usize)?;
             Ok(Value::F16(t))
         }
     }
+}
+
+/// 所有する `RawTensor` を実行時値へ move で変換する（要素列を複製しない。
+/// `Constant` 属性テンソルの復号結果用）。`raw_to_value` と同じ shape 変換・
+/// `Tensor::new` の検証を行う。
+fn raw_into_value(raw: RawTensor) -> Result<Value, InterpError> {
+    fn usize_shape(shape: &[i64]) -> Vec<usize> {
+        shape.iter().map(|&d| d as usize).collect()
+    }
+    Ok(match raw {
+        RawTensor::F32 { data, shape } => Value::F32(Tensor::new(data, &usize_shape(&shape))?),
+        RawTensor::I64 { data, shape } => Value::I64(Tensor::new(data, &usize_shape(&shape))?),
+        RawTensor::Bool { data, shape } => Value::Bool(Tensor::new(data, &usize_shape(&shape))?),
+        RawTensor::F16 { data, shape } => Value::F16(Tensor::new(data, &usize_shape(&shape))?),
+    })
+}
+
+/// `Constant` の `value`（TENSOR）属性 `t` を実行時値へ復号する（`interp`
+/// と `onnx::autograd` の `Constant` 腕が共有）。
+///
+/// external data から inline 化した属性テンソルの `raw_data` は宣言長で
+/// 巨大化しうるため、`graph::decode_tensor`（`collect` による無条件確保。
+/// A6 により不変）ではなく失敗可能確保版の `fallible_alloc::
+/// try_decode_tensor` で復号し、得た `Vec` を `Tensor` へ move する（旧実装は
+/// `decode_tensor` の結果を `raw_to_value` でさらに複製しており一時的に
+/// 2 倍を要した。PR #2348 codex P0 是正）。検証エラーは従来どおり
+/// [`InterpError::Graph`]（`decode_tensor` と同じ variant）、確保失敗は
+/// [`InterpError::AllocationFailed`]。変換は `decode_tensor` と同一で数値
+/// 結果は不変。
+///
+/// 復号済みテンソルを読み込み時に `Graph` へ保持する方式は採らない:
+/// `Graph` は initializer と同じく `RawTensor`（`Vec` 所有）でしか保持
+/// できず実行時の `Tensor` 化で結局 1 回複製が要る（実行時ピークは本方式と
+/// 同じ）うえ、`export::build_model_proto` がノード列の `raw_data` を
+/// そのまま書き出す契約のため raw を解放できず常駐量が 2 倍になるため
+/// （`docs/onnx-external-data-decision.md` 4.3 節）。
+pub(super) fn decode_constant_tensor(
+    node: &NodeProto,
+    t: &super::proto::TensorProto,
+) -> Result<Value, InterpError> {
+    use super::fallible_alloc::{TryDecodeError, try_decode_tensor};
+    let label = super::fallible_alloc::attr_tensor_label(node, "value", t);
+    let raw = try_decode_tensor(t, &label).map_err(|e| match e {
+        TryDecodeError::Graph(g) => InterpError::Graph(g),
+        TryDecodeError::Alloc(f) => alloc_failure_to_interp(f),
+    })?;
+    raw_into_value(raw)
 }
 
 /// `node.input[idx]` を取得する。ONNX は省略可能入力を空文字列で表す規約
@@ -1035,8 +1125,8 @@ fn compute_sqrt(
 
 /// `Constant(value|value_float|value_floats|value_int|value_ints) -> y`。
 /// ONNX Constant-13 仕様は排他的な属性群を定義する。`value`（`TENSOR`）は
-/// `onnx::graph::decode_tensor` を再利用し `raw_to_value` で `Value` 化する
-/// （dtype に応じ `F32`／`I64`／`Bool`／`F16` のいずれにもなりうる）。`value_int`／
+/// `decode_constant_tensor`（`graph::decode_tensor` と同じ検証・変換の
+/// 失敗可能確保版）で `Value` 化する（dtype に応じ `F32`／`I64`／`Bool`／`F16` のいずれにもなりうる）。`value_int`／
 /// `value_ints` は `Value::I64` を構築する（`ops::constant`〈f32 専用〉では扱えない
 /// ため、この 2 属性のみ本関数内で直接処理する）。属性が一つも見つからない場合は
 /// [`InterpError::MissingAttribute`]（`attr` は代表として `"value"` を報告）で
@@ -1050,8 +1140,7 @@ fn compute_constant(node: &NodeProto) -> Result<Value, InterpError> {
                 node: node.name.clone(),
                 attr: "value".to_string(),
             })?;
-        let raw = super::graph::decode_tensor(t)?;
-        return raw_to_value(&raw);
+        return decode_constant_tensor(node, t);
     }
     if let Some(attr) = node.attribute.iter().find(|a| a.name == "value_float") {
         return Ok(Value::F32(ops::constant(&ConstantValue::Float(attr.f))?));
@@ -1507,7 +1596,8 @@ fn run_impl(
     let mut env: HashMap<String, Value> =
         HashMap::with_capacity(graph.initializers.len() + feeds.len());
     for (k, v) in &graph.initializers {
-        env.insert(k.clone(), raw_to_value(v)?);
+        // 実行ごとの複製は失敗可能確保（`raw_to_value` doc 参照）。
+        env.insert(k.clone(), raw_to_value(k, v)?);
     }
     for (k, v) in feeds {
         // feed が initializer を上書きする（ONNX のデフォルト値セマンティクス。
@@ -1760,17 +1850,23 @@ mod tests {
 
     #[test]
     fn raw_to_value_converts_all_dtypes() {
-        let f = raw_to_value(&RawTensor::F32 {
-            data: vec![1.0, 2.0],
-            shape: vec![2],
-        })
+        let f = raw_to_value(
+            "t",
+            &RawTensor::F32 {
+                data: vec![1.0, 2.0],
+                shape: vec![2],
+            },
+        )
         .unwrap();
         assert!(matches!(f, Value::F32(_)));
 
-        let i = raw_to_value(&RawTensor::I64 {
-            data: vec![1, 2, 3],
-            shape: vec![3],
-        })
+        let i = raw_to_value(
+            "t",
+            &RawTensor::I64 {
+                data: vec![1, 2, 3],
+                shape: vec![3],
+            },
+        )
         .unwrap();
         match i {
             Value::I64(t) => {
@@ -1780,17 +1876,23 @@ mod tests {
             _ => panic!("Value::I64 を期待"),
         }
 
-        let b = raw_to_value(&RawTensor::Bool {
-            data: vec![true, false],
-            shape: vec![2],
-        })
+        let b = raw_to_value(
+            "t",
+            &RawTensor::Bool {
+                data: vec![true, false],
+                shape: vec![2],
+            },
+        )
         .unwrap();
         assert!(matches!(b, Value::Bool(_)));
 
-        let h = raw_to_value(&RawTensor::F16 {
-            data: vec![f16::from_f32(1.5)],
-            shape: vec![1],
-        })
+        let h = raw_to_value(
+            "t",
+            &RawTensor::F16 {
+                data: vec![f16::from_f32(1.5)],
+                shape: vec![1],
+            },
+        )
         .unwrap();
         assert!(matches!(h, Value::F16(_)));
     }

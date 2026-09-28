@@ -12,9 +12,12 @@
 # 外部依存ゼロの自作 SSG（nav.toml パーサー + CLI）であり [workspace.dependencies] へは
 # 一切影響しない。
 #
-# 許容依存 8 区分（.claude/rules/deps-policy.md）は下記 [workspace.dependencies] で
-# =x.y.z 完全固定として一元導入済み（TASK-1.1b・イシュー #5）。8 区分以外の新規追加・
-# 既存依存のバージョン更新は本ファイルで行わず、ユーザー承認を経た別イシューで対応する。
+# 本体 workspace の直接依存として許容する 9 区分（第 1〜8・第 10 区分。
+# .claude/rules/deps-policy.md。第 9 区分はベンチ比較対象の独立ハーネス限定で本体
+# workspace には入らない）は下記 [workspace.dependencies] で =x.y.z 完全固定として
+# 一元導入済み（TASK-1.1b・イシュー #5。第 10 区分の libc はイシュー #2347・PR #2348 で
+# 追加）。これら以外の新規追加・既存依存のバージョン更新は本ファイルで行わず、
+# ユーザー承認を経た別イシューで対応する。
 #
 # バックエンド切替は feature フラグなしの cfg ベース構成（PoC-v2-5 実証構成。REQ-2）を
 # ライブラリの正式な切替機構として採用する（TASK-2.1a・イシュー #49）。`cudarc`（CUDA）は
@@ -99,7 +102,8 @@ publish = false
 # keywords / categories / description のみ）。
 repository = "https://github.com/Fandhe-AI/fandhe-ai"
 
-# 許容依存 8 区分（.claude/rules/deps-policy.md）を =x.y.z 完全固定で一元定義する。
+# 本体 workspace の直接依存として許容する 9 区分（第 1〜8・第 10 区分。
+# .claude/rules/deps-policy.md）を =x.y.z 完全固定で一元定義する。
 # 各クレートは `<name>.workspace = true` で参照し、バージョン更新はこのテーブルのみを
 # 変更すれば全クレートに反映される（TASK-1.1b。イシュー #5）。
 #
@@ -157,3 +161,13 @@ half = "=2.7.1"
 # ベンチ計測基盤（bench-harness）。dev-dependencies 限定（deps-policy.md）。
 # PoC 未使用のため crates.io 最新 stable をそのまま採用する。
 criterion = "=0.8.2"
+# OS FFI（第 10 区分。REQ-7・イシュー #2347）。`onnx-interop` の external data 安全なファイル
+# オープン（`openat`／`openat2`）用途に限定し、`crates/onnx-interop/Cargo.toml` の
+# `[target.'cfg(unix)'.dependencies]` でのみ参照する（`objc2` 系と同じ target cfg
+# 分離パターン）。手書きの `openat` フラグ定数（`O_DIRECTORY`／`O_NOFOLLOW` 等）は
+# Linux では CPU アーキテクチャごとに値が異なり、x86 専用の値のまま aarch64 Linux
+# （DGX Spark GB10）でビルドするとシンボリックリンク拒否が機能しない実装バグを
+# 生んでいたため、libc の定数・`syscall` 経由の `openat2` を使う（2026-09-28
+# ユーザー承認）。`Cargo.lock` に既存の推移的依存として存在するバージョンに合わせて
+# 固定する。
+libc = "=0.2.189"

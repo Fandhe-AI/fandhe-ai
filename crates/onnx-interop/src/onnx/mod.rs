@@ -28,6 +28,14 @@
 //!   （イシュー #2036。本モジュール自体は本クレート内部限定のまま
 //!   facade へ再エクスポートしないが、facade
 //!   `OnnxModel::from_sequential`〈イシュー #2037〉が薄く委譲して呼ぶ）。
+//! - `external_data`: ONNX external data（外部 `.onnx.data` ファイル）の
+//!   initializer／Constant 属性テンソル読み込みに fail-closed で対応する
+//!   新しい import 入口（`build_graph_with_external_data`。イシュー
+//!   #2347）。本モジュール自体は本クレート内部限定のまま facade へ
+//!   再エクスポートしないが、facade `OnnxModel::from_path`（2026-09-28
+//!   ユーザー承認・実施済み）が薄く委譲して呼ぶ（`export_nn` と同型の
+//!   公開方針。`docs/compat-api-scope.md` §5・`docs/facade-onnx-import-
+//!   exposure-decision.md` §15 参照）。
 //!
 //! 8 オペ実装は #79（`crate::ops`）、PoC 数値突合テストは #80
 //! （`tests/onnx_poc_v2_6_match.rs`・`tests/onnx_slice_dynamic_bounds.rs`）で追加済み。
@@ -38,6 +46,18 @@ pub mod autograd;
 pub mod export;
 pub mod export_nn;
 pub mod export_ops;
+// external data（外部 `.data` ファイル）の initializer／Constant 属性テンソル
+// 読み込みに fail-closed で対応する新しい import 入口（イシュー #2347）。
+// 本モジュール自体は本クレート内部限定のまま facade へ再エクスポートしない
+// が、facade `OnnxModel::from_path`（2026-09-28 ユーザー承認・実施済み）が
+// 薄く委譲して呼ぶ（`docs/compat-api-scope.md` §5 参照）。
+pub mod external_data;
+// テンソル本体（external data の宣言長・dims の積で巨大化しうるバッファ）の
+// 失敗可能確保ヘルパ（非公開。PR #2348 codex P0 是正。security.md A04）。
+// 読み込み（`external_data`）・実行（`interp`／`autograd`）・export
+// （`export`）の各経路が共有し、確保失敗を各モジュールの型付きエラーへ
+// 写像する（`docs/onnx-external-data-decision.md` 4.3 節）。
+mod fallible_alloc;
 pub mod graph;
 pub mod interp;
 // `interp` から呼ばれる `BackendOps` 経由の device 実行ヘルパ（非公開。

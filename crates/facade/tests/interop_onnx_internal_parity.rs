@@ -224,6 +224,8 @@ fn synthetic_model_with_unknown_initializer_data_type_is_rejected_via_facade() {
         float_data: vec![],
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let node = NodeProto {
         input: vec!["w".to_string()],
@@ -272,6 +274,8 @@ fn synthetic_model_with_negative_dim_is_rejected_as_invalid_model_via_facade() {
         float_data: vec![],
         int64_data: vec![],
         raw_data: vec![],
+        external_data: Vec::new(),
+        data_location: 0,
     };
     let model = ModelProto {
         opset_import: Vec::new(),
@@ -731,4 +735,160 @@ fn from_sequential_to_bytes_initializers_match_state_dict_bit_exact() {
             );
         }
     }
+}
+
+/// A6（イシュー #2347・2026-09-28 `from_path` の external data 対応化に
+/// 伴い改訂）: `data_location = EXTERNAL` を持つ initializer のバイト列を
+/// facade の `OnnxModel::from_bytes` へそのまま渡した場合、external data
+/// 対応（`onnx::external_data`。`from_bytes` からは経由しない）を経由
+/// しないため従来どおり `OnnxError::InvalidModel`（`RawDataByteLenMismatch`
+/// 系）で拒否されることを固定する（`onnx::graph::decode_tensor` は
+/// `data_location`／`external_data` を一切参照しないという不変条件の
+/// facade 経由での確認。`crates/onnx-interop/tests/onnx_external_data.rs::
+/// bytes_entry_point_still_rejects_external_data_model` の facade 版）。
+///
+/// `OnnxModel::from_path` は 2026-09-28 のユーザー承認で external data
+/// 対応へ拡張済み（`docs/facade-onnx-import-exposure-decision.md` §6.3）
+/// のため、本テストの `from_path` 側は「companion `.onnx.data` が実在
+/// しない場合は解決を試みたうえで I/O エラーとして拒否される」ことを
+/// 確認する（`RawDataByteLenMismatch` とは異なるエラー種別になる点が
+/// `from_bytes` との挙動差）。`from_path` が実際に external data を解決
+/// できることの正例は `tests/interop_onnx_external_data.rs::
+/// from_path_resolves_external_data_and_matches_manifest_reference` を
+/// 参照。
+///
+/// **`cfg(unix)` 限定**（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
+/// 対応）: `from_path` の external data 解決は unix でのみ実際にファイル
+/// を開こうと試みるため、companion 欠落が `OnnxError::Io(NotFound)` に
+/// なるのは unix の契約である。非unix の契約は
+/// [`facade_from_bytes_rejects_external_data_model_from_path_rejects_
+/// unsupported_platform_on_non_unix`] が固定する。
+#[cfg(unix)]
+#[test]
+fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution() {
+    let t = TensorProto {
+        dims: vec![1],
+        data_type: data_type::FLOAT,
+        float_data: Vec::new(),
+        int64_data: Vec::new(),
+        name: "w".to_string(),
+        raw_data: Vec::new(),
+        external_data: vec![proto::StringStringEntryProto {
+            key: "location".to_string(),
+            value: "w.onnx.data".to_string(),
+        }],
+        data_location: 1,
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: Vec::new(),
+            name: "g".to_string(),
+            initializer: vec![t],
+            input: Vec::new(),
+            output: Vec::new(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    };
+    let bytes = proto::encode_model(&model);
+
+    let err = OnnxModel::from_bytes(&bytes).expect_err("external data モデルは拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
+        "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
+    );
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "facade-onnx-external-data-a6-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let onnx_path = tmp_dir.join("model.onnx");
+    std::fs::write(&onnx_path, &bytes).unwrap();
+    // companion `w.onnx.data` を用意していないため、`from_path` は
+    // external data 解決を試みたうえで見つからず拒否される
+    // （`RawDataByteLenMismatch` ではなく I/O エラー系。`from_bytes` との
+    // 挙動差そのものが本テストの確認対象）。`ExternalDataError::Io` は
+    // `map_graph_error` が `OnnxError::Io`（既存 variant。新規 variant は
+    // 追加しない）へ写像するため、利用者が `OnnxError::InvalidModel`
+    // ではなく型で I/O 失敗を判別できることも固定する（レビュー対応。
+    // イシュー #2347）。
+    let err = OnnxModel::from_path(&onnx_path).expect_err("companion ファイル不在で拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
+        "companion ファイル不在は OnnxError::Io(NotFound) を期待したが: {err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+/// 上記テストの非 unix（Windows 等）契約版（Cursor Bugbot 指摘・
+/// PRRT_kwDOTuUCJc6mrW… 対応）。非 unix では `onnx::external_data::
+/// resolve_and_open` が `openat`／`openat2` 相当の安全な経路解決手段を
+/// 持たないため companion ファイルの実在有無に関わらず常に
+/// `ExternalDataError::UnsupportedPlatformForSecureResolve` で拒否され、
+/// これは facade の `map_graph_error` の catch-all 分岐（`ExternalDataError::
+/// Io` 以外はすべて `InvalidModel` へ写像。`map_graph_error` 本体参照）
+/// により `OnnxError::InvalidModel` として観測される（`OnnxError::Io`
+/// **ではない**点が unix 版との違い）。`from_bytes` はプラットフォーム
+/// を問わず external data 経由をそもそも通らないため挙動不変のまま
+/// 共通で確認する。Windows 対応はイシュー #2349 で追跡中。
+#[cfg(not(unix))]
+#[test]
+fn facade_from_bytes_rejects_external_data_model_from_path_rejects_unsupported_platform_on_non_unix()
+ {
+    let t = TensorProto {
+        dims: vec![1],
+        data_type: data_type::FLOAT,
+        float_data: Vec::new(),
+        int64_data: Vec::new(),
+        name: "w".to_string(),
+        raw_data: Vec::new(),
+        external_data: vec![proto::StringStringEntryProto {
+            key: "location".to_string(),
+            value: "w.onnx.data".to_string(),
+        }],
+        data_location: 1,
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: Vec::new(),
+            name: "g".to_string(),
+            initializer: vec![t],
+            input: Vec::new(),
+            output: Vec::new(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    };
+    let bytes = proto::encode_model(&model);
+
+    let err = OnnxModel::from_bytes(&bytes).expect_err("external data モデルは拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
+        "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
+    );
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "facade-onnx-external-data-a6-non-unix-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let onnx_path = tmp_dir.join("model.onnx");
+    std::fs::write(&onnx_path, &bytes).unwrap();
+    // companion ファイルを用意しない: 非 unix では実在有無に関わらず
+    // UnsupportedPlatformForSecureResolve（→ InvalidModel）で拒否される
+    // ことがこのテストの確認対象そのものであるため。
+    let err = OnnxModel::from_path(&onnx_path).expect_err("非 unix では常に拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::InvalidModel { .. }),
+        "非 unix では OnnxError::InvalidModel（UnsupportedPlatformForSecureResolve 由来）を \
+         期待したが: {err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
