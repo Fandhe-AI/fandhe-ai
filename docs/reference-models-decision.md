@@ -233,7 +233,8 @@ Transformer（画像の行をトークン化する非 ViT 構成）の設計判�
   §3.1（MLP・LeNet）と同じ理由（`docs/compat-api-scope.md` §5
   「範囲拡張の手続き」経路 2）により保留し、`crates/facade/src/` は
   変更していない。`HoldDoctestGuard` 方式の否定ガードも同じ理由
-  （守るべき対象コードが facade 側に無い）で追加していない。
+  （守るべき対象コードが facade 側に無い）で追加していない
+  （`docs/compat-api-scope.md` §5 追記）。
 - doctest 代替も §3.2 と同じ理由（`examples/` は `cargo test --doc`
   対象外）で、統合テスト 2 本と runnable example（`cargo run -p
   fandhe-ai --example main`）で代替する。
