@@ -1331,15 +1331,38 @@ fn reduction_baselines_are_well_formed() {
 // `tests/fixtures/pytorch-onnx-external-data/`（PyTorch dynamo exporter の
 // external data を再 inline 化しない生出力。`README.md` 参照）を
 // `onnx::external_data::build_graph_with_external_data` 経由で読み込み、
-// 上記の `Req7BaselineNonRegression` 判定（`REDUCTION_BASELINES` の
-// 既存 `(case_name, "dynamo")` 行をそのまま再利用する。external data
-// 経由でも計算経路自体は inline 経路と同一で出力は bit 一致するため。
-// §4.5 参照）を適用する。
+// #2329 の `Req7BaselineNonRegression`（`REDUCTION_BASELINES`）と**同じ
+// 仕組み**（ケース集合の完全一致検査・`fail_count == 0` を必須条件とした
+// うえで `total`／`max_abs_diff`／`max_rel_err`／`mean_abs_diff` の実測値
+// そのものを ceiling とする fail-closed 非後退判定）を、本 fixture 専用の
+// `EXTERNAL_DATA_BASELINES` で適用する（2026-09-28 ユーザー承認・レビュー
+// 対応）。`REDUCTION_BASELINES` の既存行を再利用しない
+// （`pytorch-onnx-cnn-ops` fixture と `pytorch-onnx-external-data` fixture
+// は生成のたびに重みの実際の bit 列が変わりうる別個のコミット済み
+// fixture〈[`ExternalManifestEntry`] のコメント参照〉のため、たとえ
+// `case_name` が同じでも重み・参照出力は独立している。テーブルを分離する
+// ことで、どちらの fixture を再生成しても互いの baseline を巻き込まずに
+// 更新できる）。
 
 use fandhe_ai_onnx_interop::onnx::external_data::{
     ExternalDataOptions, build_graph_with_external_data,
 };
 
+/// external data 経由の fixture がある 3 ケース（いずれも `Conv` を含み、
+/// 432／288 バイトの重み initializer が external になる。`README.md`
+/// 「実測結果」節参照）。
+///
+/// **`MaxPool`／`Flatten` 等のパラメータを持たない op のケース
+/// （`pytorch-onnx-cnn-ops` fixture 側に存在する `maxpool2d_*`・
+/// `flatten_*` 等）はここに含まれない**: これらの op は学習可能な重み
+/// （`initializer`）を一切持たないため、PyTorch dynamo exporter が
+/// external data として切り出す対象（`TensorProto.data_location =
+/// EXTERNAL` を持ちうる initializer）自体が存在せず、external data 経由
+/// で import する意味のあるケースを構成できない（`gen_external.py` が
+/// `pytorch-onnx-cnn-ops` の 19 ケース全件に dynamo export を試みた際も、
+/// 実際に initializer が external になったのは `Conv` 系の重みのみだった
+/// という実測に基づく。`docs/onnx-external-data-decision.md` §8・
+/// fixture 側 `README.md`「実測結果」節も参照）。
 const EXTERNAL_DATA_CASE_NAMES: &[&str] =
     &["conv2d_basic", "conv2d_nobias", "conv2d_stride_dil_group"];
 
@@ -1406,21 +1429,195 @@ fn compute_external_case_stats(case_name: &str, entry: &ExternalManifestEntry) -
         expected_tensor.shape(),
         "{case_name}: 出力 shape 不一致"
     );
-    diff_stats(
+    let stats = diff_stats(
         actual.as_slice().expect("as_slice 失敗"),
         expected_tensor.as_slice().expect("as_slice 失敗"),
-    )
+    );
+    // `run_case` と同型の実測値ログ（`EXTERNAL_DATA_BASELINES` の再測定時に
+    // `--nocapture` で拾う。イシュー #2347・§4 レビュー対応）。
+    eprintln!(
+        "{case_name} [external-data]: total={} req7_fail_count={} max_abs_diff={:?} \
+         max_rel_err={:?} mean_abs_diff={:?}",
+        stats.total, stats.fail_count, stats.max_abs_diff, stats.max_rel_err, stats.mean_abs_diff,
+    );
+    stats
+}
+
+/// external data fixture（`EXTERNAL_DATA_CASE_NAMES`）1 ケース分の記録済み
+/// 実測上限 baseline（`ReductionBaseline`／`REDUCTION_BASELINES` と同型・
+/// 別テーブル。モジュール冒頭コメント参照）。`exporter_name` フィールドを
+/// 持たない（本 fixture 群は dynamo exporter の生出力のみで `ts` 変種を
+/// 持たないため。`ReductionBaseline` との構造差はこの 1 点のみ）。
+#[derive(Debug, Clone, Copy)]
+struct ExternalDataBaseline {
+    case_name: &'static str,
+    total: usize,
+    baseline_fail_count: usize,
+    baseline_max_abs_diff_ceiling: f32,
+    baseline_max_rel_err_ceiling: f32,
+    baseline_mean_abs_diff_ceiling: f64,
+}
+
+/// 記録済み baseline 一覧（3 行 = `EXTERNAL_DATA_CASE_NAMES` の 3 ケース）。
+///
+/// 出典: 本レビュー対応時に `cargo test -p fandhe-ai-onnx-interop --test \
+/// onnx_interp_pytorch_cnn_fixture external_data_fixture_matches_self_
+/// contained_reference -- --nocapture --test-threads=1` で実測した値
+/// （`compute_external_case_stats` の `eprintln!` 出力。2026-09-28）。
+/// fixture はリポジトリにコミット済みの固定バイト列（`.onnx`／`.onnx.data`
+/// ・`manifest.json` とも再生成しない限り不変）のため、`REDUCTION_
+/// BASELINES` と同じく CI・ローカルを問わず単一の値で成立する。
+static EXTERNAL_DATA_BASELINES: &[ExternalDataBaseline] = &[
+    ExternalDataBaseline {
+        case_name: "conv2d_basic",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ExternalDataBaseline {
+        case_name: "conv2d_nobias",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ExternalDataBaseline {
+        case_name: "conv2d_stride_dil_group",
+        total: 100,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 3.731_992_1e-6,
+        baseline_mean_abs_diff_ceiling: 3.0193477869033815e-8,
+    },
+];
+
+/// `case_name` に対応する [`ExternalDataBaseline`] を引く。未登録ケースは
+/// fail-closed に panic する（`find_reduction_baseline` と同型。黙って
+/// skip しない）。
+#[track_caller]
+fn find_external_data_baseline(case_name: &str) -> &'static ExternalDataBaseline {
+    EXTERNAL_DATA_BASELINES
+        .iter()
+        .find(|b| b.case_name == case_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "{case_name}: EXTERNAL_DATA_BASELINES に行が無い（baseline の追加は \
+                 実測値のみ・人間承認必須。未登録ケースを黙って通過させない）"
+            )
+        })
+}
+
+/// [`ExternalDataBaseline`] に対する fail-closed 非後退判定
+/// （`assert_no_reduction_baseline_regression` と同型）。
+#[track_caller]
+fn assert_no_external_data_baseline_regression(
+    case_name: &str,
+    stats: &DiffStats,
+    baseline: &ExternalDataBaseline,
+) {
+    assert_eq!(
+        stats.total, baseline.total,
+        "{case_name}: 比較対象の要素数が baseline({}) と一致しない（形状・\
+         比較対象がずれている可能性）",
+        baseline.total,
+    );
+    assert!(
+        stats.fail_count <= baseline.baseline_fail_count,
+        "{case_name}: baseline 非後退契約 FAIL — fail_count が後退しました \
+         (actual={}, baseline={})",
+        stats.fail_count,
+        baseline.baseline_fail_count,
+    );
+    assert!(
+        stats.max_abs_diff <= baseline.baseline_max_abs_diff_ceiling,
+        "{case_name}: baseline 非後退契約 FAIL — max_abs_diff が後退しました \
+         (actual={:?}, ceiling={:?})",
+        stats.max_abs_diff,
+        baseline.baseline_max_abs_diff_ceiling,
+    );
+    assert!(
+        stats.max_rel_err <= baseline.baseline_max_rel_err_ceiling,
+        "{case_name}: baseline 非後退契約 FAIL — max_rel_err が後退しました \
+         (actual={:?}, ceiling={:?})",
+        stats.max_rel_err,
+        baseline.baseline_max_rel_err_ceiling,
+    );
+    assert!(
+        stats.mean_abs_diff <= baseline.baseline_mean_abs_diff_ceiling,
+        "{case_name}: baseline 非後退契約 FAIL — mean_abs_diff が後退しました \
+         (actual={:?}, ceiling={:?})",
+        stats.mean_abs_diff,
+        baseline.baseline_mean_abs_diff_ceiling,
+    );
+}
+
+/// `EXTERNAL_DATA_BASELINES` の構造的整合性を検査する
+/// （`reduction_baselines_are_well_formed` と同型）。
+#[test]
+fn external_data_baselines_are_well_formed() {
+    let mut case_keys: Vec<&str> = EXTERNAL_DATA_CASE_NAMES.to_vec();
+    case_keys.sort_unstable();
+
+    let mut baseline_keys: Vec<&str> = EXTERNAL_DATA_BASELINES
+        .iter()
+        .map(|b| b.case_name)
+        .collect();
+    baseline_keys.sort_unstable();
+    let baseline_keys_unique_count = {
+        let mut dedup = baseline_keys.clone();
+        dedup.dedup();
+        dedup.len()
+    };
+    assert_eq!(
+        baseline_keys.len(),
+        baseline_keys_unique_count,
+        "EXTERNAL_DATA_BASELINES に重複行がある: {baseline_keys:?}"
+    );
+    assert_eq!(
+        case_keys, baseline_keys,
+        "EXTERNAL_DATA_BASELINES と EXTERNAL_DATA_CASE_NAMES が不一致（取りこぼし・過剰のいずれか）"
+    );
+
+    for b in EXTERNAL_DATA_BASELINES {
+        assert!(b.total > 0, "{}: baseline.total が 0", b.case_name);
+        assert_eq!(
+            b.baseline_fail_count, 0,
+            "{}: baseline_fail_count が 0 以外（REQ-7 式は必須条件のため baseline \
+             側も 0 のみを許容する）",
+            b.case_name
+        );
+        assert!(
+            b.baseline_max_abs_diff_ceiling.is_finite() && b.baseline_max_abs_diff_ceiling >= 0.0,
+            "{}: baseline_max_abs_diff_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.baseline_max_abs_diff_ceiling
+        );
+        assert!(
+            b.baseline_max_rel_err_ceiling.is_finite() && b.baseline_max_rel_err_ceiling >= 0.0,
+            "{}: baseline_max_rel_err_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.baseline_max_rel_err_ceiling
+        );
+        assert!(
+            b.baseline_mean_abs_diff_ceiling.is_finite() && b.baseline_mean_abs_diff_ceiling >= 0.0,
+            "{}: baseline_mean_abs_diff_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.baseline_mean_abs_diff_ceiling
+        );
+    }
 }
 
 /// 1. external data 経由で計算した出力が、`manifest.json` に記録した
 ///    自己完結参照出力（PyTorch がこのスクリプトの重みに対して計算した
 ///    値）と一致すること（縮約系 op `Conv` を含むため REQ-7 事前固定式
-///    `fail_count == 0` を要求する。Conv は結合順序差により bit 完全一致は
-///    目標にできないため `Req7BaselineNonRegression` と同じ必須条件のみを
-///    適用し、baseline 非後退判定は自己完結 fixture のため対象外とする——
-///    baseline は「実機実測でゼロ fail が成立する固定 fixture」に対して
-///    のみ意味を持つが、本 fixture は生成ごとに重みが変わりうるため
-///    ceiling を固定できない）。
+///    `fail_count == 0` を要求したうえで、`EXTERNAL_DATA_BASELINES` による
+///    fail-closed 非後退判定〈`total`／`max_abs_diff`／`max_rel_err`／
+///    `mean_abs_diff` の実測値そのものを ceiling とする〉も適用する
+///    （#2329 の `Req7BaselineNonRegression` と同じ判定方式。2026-09-28
+///    ユーザー承認。モジュール冒頭コメント参照）。
 /// 2. initializer の bit 完全一致（external data 経由での読み込み値 vs
 ///    `.onnx.data` ファイルの生バイト列を直接 f32 として解釈した値）。
 ///    実装計画 §4.5 の 1・3 をまとめたもの（2 は `.data` ファイルへの直接
@@ -1434,7 +1631,8 @@ fn external_data_fixture_matches_self_contained_reference() {
             .get(case_name)
             .unwrap_or_else(|| panic!("manifest.json に '{case_name}' が無い"));
 
-        // 1. REQ-7 事前固定式（fail_count == 0）を必須条件として適用する。
+        // 1. REQ-7 事前固定式（fail_count == 0）を必須条件として適用した
+        //    うえで、baseline 非後退判定（EXTERNAL_DATA_BASELINES）を課す。
         let stats = compute_external_case_stats(case_name, entry);
         assert_eq!(
             stats.fail_count, 0,
@@ -1442,6 +1640,8 @@ fn external_data_fixture_matches_self_contained_reference() {
              max_abs_diff={:?} max_rel_err={:?} mean_abs_diff={:?}）",
             stats.total, stats.max_abs_diff, stats.max_rel_err, stats.mean_abs_diff
         );
+        let baseline = find_external_data_baseline(case_name);
+        assert_no_external_data_baseline_regression(case_name, &stats, baseline);
 
         // 2. initializer の bit 完全一致（external data 経由 vs `.onnx.data`
         //    の生バイト列を直接解釈した値）。

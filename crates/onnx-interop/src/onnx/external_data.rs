@@ -254,15 +254,18 @@ pub enum ExternalDataError {
     /// initializer 名が重複している（I/O の前に検出する。`graph::
     /// build_graph` の `DuplicateInitializerName` と同一の欠陥クラス）。
     DuplicateInitializerName { tensor_name: String },
-    /// `resolve_and_open` の TOCTOU 非後退実装（ディレクトリ fd 起点の
-    /// `O_NOFOLLOW` 追跡拒否オープン）が Linux／macOS 限定であり、それ
-    /// 以外の unix ではフラグ定数値を実機実測できていないため安全に
-    /// 実装できない。旧来の `symlink_metadata` 検証 → `canonicalize` →
-    /// `File::open` 再解決経路は検証とオープンの間にシンボリックリンク
-    /// 差し替えの窓が残るため、REQ-1 の完全自作コア方針・security.md
-    /// の A08（自己修復ループが取り込む変更の整合性）と同じ fail-closed
-    /// 原則に従い、対応不能なプラットフォームでは external data の読み
-    /// 込みそのものを拒否する（P0・PRRT_kwDOTuUCJc6mk30J 是正）。
+    /// `resolve_and_open` の TOCTOU 非後退実装（`libc` 経由の `openat2`／
+    /// ディレクトリ fd 起点の `O_NOFOLLOW` 追跡拒否オープン）は `cfg(unix)`
+    /// 全般（Linux／macOS／その他 unix）で提供済みであり、拒否対象は
+    /// **unix 以外**（Windows 等。`libc` がリンクされずディレクトリ fd
+    /// 起点の no-follow open 手段を持たない）のみである。旧来の
+    /// `symlink_metadata` 検証 → `canonicalize` → `File::open` 再解決経路は
+    /// 検証とオープンの間にシンボリックリンク差し替えの窓が残るため、
+    /// REQ-1 の完全自作コア方針・security.md の A08（自己修復ループが
+    /// 取り込む変更の整合性）と同じ fail-closed 原則に従い、対応不能な
+    /// プラットフォームでは external data の読み込みそのものを拒否する
+    /// （P0・PRRT_kwDOTuUCJc6mk30J 是正）。非 unix（Windows 等）への対応は
+    /// イシュー #2349 で追跡中。
     UnsupportedPlatformForSecureResolve { tensor_name: String },
     /// 内部不変条件違反（本来発生しないはずの状態）。`coding-rust.md`
     /// の「本番経路で `unwrap()`/`expect()` を使わない」方針に従い、
@@ -362,8 +365,9 @@ impl fmt::Display for ExternalDataError {
             ExternalDataError::UnsupportedPlatformForSecureResolve { tensor_name } => write!(
                 f,
                 "external data の安全な解決（TOCTOU 非後退のディレクトリ fd 起点オープン）が \
-                 このプラットフォームでは未対応のため拒否（tensor={tensor_name}）: Linux／macOS \
-                 以外では external data 読み込みをサポートしない"
+                 このプラットフォームでは未対応のため拒否（tensor={tensor_name}）: unix 以外\
+                 （Windows 等）では external data 読み込みをサポートしない（イシュー #2349 で\
+                 対応を追跡中）"
             ),
             ExternalDataError::Internal { reason } => {
                 write!(f, "external_data 内部不変条件違反: {reason}")
@@ -694,37 +698,35 @@ mod no_follow_open {
 }
 
 /// `base_dir_file`（[`no_follow_open::open_base_dir`] が開いたディレクトリ
-/// fd）を起点に `location` を検証しながら解決し、ファイルを開く。経路の
-/// 途中を含めシンボリックリンクを拒否し、`openat2`／`O_NOFOLLOW` による
+/// fd）を起点に、既に検証済みの `parts`（[`validate_location_string`] の
+/// 戻り値。`plan` が呼び出し元で 1 度だけ検証し、同一 location への
+/// 2 件目以降の呼び出しをキャッシュで省略できるようにするため、検証を
+/// 呼び出し元へ分離してある）を解決してファイルを開く。経路の途中を
+/// 含めシンボリックリンクを拒否し、`openat2`／`O_NOFOLLOW` による
 /// ディレクトリハンドル連鎖オープンで「検証した経路そのもの」を開くことを
 /// 保証する（A2・P0 対応。discussion_r4119392011・イシュー #2347）。
 /// 返り値の第 2 要素は `plan` が `file_key_for` のフォールバック（dev/ino
-/// を持たないプラットフォーム。実質使われない。下記コメント参照）で使う、
-/// `parts` から再構築した正規化済み相対パス。
+/// を持たないプラットフォーム。実質使われない。下記コメント参照）・
+/// location キャッシュのキーとして使う、`parts` から再構築した正規化済み
+/// 相対パス。
 #[cfg(unix)]
 fn resolve_and_open(
     tensor_name: &str,
     base_dir_file: &File,
-    loc: &str,
+    parts: &[&std::ffi::OsStr],
 ) -> Result<(OpenFile, PathBuf), ExternalDataError> {
-    let parts =
-        validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
-            tensor_name: cap_name(tensor_name),
-            reason,
-        })?;
-
     #[cfg(target_os = "linux")]
-    let open_result = match no_follow_open::open_chain_openat2(base_dir_file, &parts) {
+    let open_result = match no_follow_open::open_chain_openat2(base_dir_file, parts) {
         no_follow_open::Openat2Outcome::Opened(f) => Ok(f),
         no_follow_open::Openat2Outcome::Failed(e, is_symlink) => Err((e, is_symlink)),
         // `openat2` 未対応環境（古いカーネル・seccomp 等）: 成分ごと逐次
         // `openat(O_NOFOLLOW)` 方式へフォールバックする。
         no_follow_open::Openat2Outcome::Unsupported => {
-            no_follow_open::open_chain_component_walk(base_dir_file, &parts)
+            no_follow_open::open_chain_component_walk(base_dir_file, parts)
         }
     };
     #[cfg(not(target_os = "linux"))]
-    let open_result = no_follow_open::open_chain_component_walk(base_dir_file, &parts);
+    let open_result = no_follow_open::open_chain_component_walk(base_dir_file, parts);
 
     let file = open_result.map_err(|(e, is_symlink)| {
         if is_symlink {
@@ -778,20 +780,25 @@ fn resolve_and_open(
 /// 拒否しながら経路解決する安全な手段を持たないため、`security.md` の
 /// A08（整合性の迂回経路を作らない）・本 crate の fail-closed 方針
 /// （イシュー #2347 タイトルのとおり external data 読み込みは fail-closed
-/// 前提）に従い、**この関数は常に拒否する**。非 unix で external data を
-/// 安全に読み込む対応が必要になった場合は、対象 OS の安全な no-follow
-/// open 手段（例: Windows の `FILE_FLAG_OPEN_REPARSE_POINT` ベースの実装）
-/// を個別に設計する（`docs/onnx-external-data-decision.md` 参照）。
+/// 前提）に従い、**この関数は常にファイルを開かず拒否する**。非 unix で
+/// external data を安全に読み込む対応はイシュー #2349 で追跡中（対象 OS
+/// の安全な no-follow open 手段。例: Windows の
+/// `FILE_FLAG_OPEN_REPARSE_POINT` ベースの実装。`docs/
+/// onnx-external-data-decision.md` 参照）。
 #[cfg(not(unix))]
 fn resolve_and_open(
     tensor_name: &str,
     _base_dir_canonical: &Path,
     loc: &str,
 ) -> Result<(OpenFile, PathBuf), ExternalDataError> {
-    // `location` の文法検証自体は OS 非依存で安全に行えるため、
-    // 診断上の一貫性のため先に行う（結果は使わず、後続の fail-closed
-    // 判定を先取りしない）。
-    let _ = validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
+    // `location` の文法検証（`Path::components()` 等の OS 非依存な範囲）は
+    // 先に行い、結果は `?` でそのまま使う: 文字列自体が不正
+    // （絶対パス・`..`・NUL 等）な場合は具体的な理由を持つ
+    // `InvalidLocation` を返し、文法上は正当な `location` であっても
+    // 本プラットフォームでは安全に解決できないため、検証を通過した
+    // 場合のみ次の行で `UnsupportedPlatformForSecureResolve`
+    // （fail-closed。イシュー #2349 で対応を追跡中）を返す。
+    validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
         tensor_name: cap_name(tensor_name),
         reason,
     })?;
@@ -845,10 +852,21 @@ fn element_size(tensor_name: &str, data_type: i32) -> Result<u64, GraphError> {
 /// ハードリンクのように**文字列としても正規化後の経路としても異なるが
 /// 実体は同一のファイル**は別キーになり overlap 検出をすり抜ける。
 /// dev/ino をキーにすることでこの実体単位の同一性を保証する）。
+///
+/// newtype（`(u64, u64)`／`PathBuf` の型エイリアスではなく専用構造体）に
+/// する理由: 型エイリアスのままだと Unix 版は `(u64, u64)`（`Copy`）・
+/// それ以外は `PathBuf`（非 `Copy`）と cfg で `Copy` 性が変わり、複数箇所
+/// で必要な `.clone()` が環境依存で clippy `clone_on_copy`（`-D warnings`
+/// 対象）に触れて `#[allow]` が要った。`Clone` のみ導出する newtype に
+/// することで、どちらの cfg でも `.clone()` が常に非自明な複製となり
+/// `#[allow]` そのものが不要になる（レビュー指摘: `#[allow(clippy::
+/// clone_on_copy)]` を型設計で解消する）。
 #[cfg(unix)]
-type FileKey = (u64, u64);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileKey(u64, u64);
 #[cfg(not(unix))]
-type FileKey = PathBuf;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileKey(PathBuf);
 
 /// `opened`（`resolve_and_open` が返したハンドル）から [`FileKey`] を
 /// 作る。Unix では dev/ino（`OpenFile::dev_ino`）を使い、シンボリックリンク
@@ -859,11 +877,11 @@ type FileKey = PathBuf;
 /// 使う（ハードリンク識別はできないが、表記ゆれの畳み込みは維持する）。
 #[cfg(unix)]
 fn file_key_for(_base_dir_canonical: &Path, opened: &OpenFile, _normalized_rel: &Path) -> FileKey {
-    opened.dev_ino
+    FileKey(opened.dev_ino.0, opened.dev_ino.1)
 }
 #[cfg(not(unix))]
 fn file_key_for(base_dir_canonical: &Path, _opened: &OpenFile, normalized_rel: &Path) -> FileKey {
-    base_dir_canonical.join(normalized_rel)
+    FileKey(base_dir_canonical.join(normalized_rel))
 }
 
 /// パス 1 で確定した「どこから何バイト読むか」の 1 件分。
@@ -956,6 +974,19 @@ fn plan(
     #[cfg(unix)]
     let mut base_dir_file: Option<File> = None;
 
+    // 正規化済み location（`Path::components()` の `Normal` 列。
+    // `validate_location_string` の戻り値から再構築した相対パス）から
+    // 既に解決済みの [`FileKey`] へのキャッシュ。**同一の location 文字列**
+    // を複数のテンソルが参照する通常の分割形式（1 ファイルを initializer
+    // 群が共有する構成）で、2 件目以降の `resolve_and_open`（`openat2` 等の
+    // システムコール）を省略するために使う。安全性は変えない: 異なる
+    // location 文字列がハードリンク等で同一実体を指す場合は、この
+    // キャッシュではヒットせず必ず個別に開いて `file_key_for`（dev/ino）で
+    // 判定する既存の畳み込み・overlap 検出をそのまま経由する（レビュー
+    // 対応。#2347）。
+    #[cfg(unix)]
+    let mut location_cache: HashMap<PathBuf, FileKey> = HashMap::new();
+
     let mut files: HashMap<FileKey, OpenFile> = HashMap::new();
     let mut regions: HashMap<FileKey, Vec<(u64, u64, String)>> = HashMap::new();
     let mut entries = Vec::new();
@@ -1044,8 +1075,12 @@ fn plan(
                 tensor_name: tensor_name.clone(),
             })?;
 
+        // `file_key`／`file_len` の解決。`to_insert` は新規に開いたハンドル
+        // （`files` へ後で登録する。location キャッシュがヒットした場合は
+        // `None` — 既に `files` に存在するハンドルをそのまま再利用し、
+        // このテンソルのためには一切 open しない）。
         #[cfg(unix)]
-        let (opened, normalized_rel) = {
+        let (file_key, file_len, to_insert): (FileKey, u64, Option<OpenFile>) = {
             // 最初の external テンソルに到達した時点でのみ `base_dir` の
             // ディレクトリ fd を開く（上のコメント参照。遅延オープン）。
             if base_dir_file.is_none() {
@@ -1059,18 +1094,57 @@ fn plan(
                     reason: "plan: base_dir_file が None のまま resolve_and_open へ到達した",
                 },
             ))?;
-            resolve_and_open(&tensor_name, f, &location).map_err(GraphError::ExternalData)?
+
+            // `location` の検証（文字列段階＋`Path::components()`）は
+            // ここで 1 度だけ行い、`resolve_and_open`（本体のオープン処理）
+            // へは検証済みの `parts` を渡す。正規化済み相対パスを
+            // `location_cache` のキーにすることで、`foo.data`／
+            // `./foo.data` のような表記ゆれも同一キーへ畳み込む
+            // （`file_key_for` の表記ゆれ畳み込みと同じ設計）。
+            let parts = validate_location_string(&location).map_err(|reason| {
+                GraphError::ExternalData(ExternalDataError::InvalidLocation {
+                    tensor_name: cap_name(&tensor_name),
+                    reason,
+                })
+            })?;
+            let normalized_rel: PathBuf = parts.iter().collect();
+
+            if let Some(cached_key) = location_cache.get(&normalized_rel) {
+                // 同一 location への 2 件目以降: 既に開いたハンドルの
+                // 長さを再利用し、`openat2`／`openat` を再実行しない
+                // （安全性は変えない。上の `location_cache` 定義コメント
+                // 参照）。
+                let len = files
+                    .get(cached_key)
+                    .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                        reason: "plan: location_cache のキーが files に存在しない",
+                    }))?
+                    .len;
+                (cached_key.clone(), len, None)
+            } else {
+                let (opened, _normalized_rel_from_open) =
+                    resolve_and_open(&tensor_name, f, &parts).map_err(GraphError::ExternalData)?;
+                let key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
+                let len = opened.len;
+                location_cache.insert(normalized_rel, key.clone());
+                (key, len, Some(opened))
+            }
         };
         #[cfg(not(unix))]
-        let (opened, normalized_rel) =
-            resolve_and_open(&tensor_name, base_dir_canonical, &location)
-                .map_err(GraphError::ExternalData)?;
+        let (file_key, file_len, to_insert): (FileKey, u64, Option<OpenFile>) = {
+            let (opened, normalized_rel) =
+                resolve_and_open(&tensor_name, base_dir_canonical, &location)
+                    .map_err(GraphError::ExternalData)?;
+            let key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
+            let len = opened.len;
+            (key, len, Some(opened))
+        };
 
         let length = match length_raw {
             Some(raw) => {
                 parse_decimal_u64(&raw, &tensor_name, "length").map_err(GraphError::ExternalData)?
             }
-            None => opened.len.checked_sub(offset).ok_or_else(|| {
+            None => file_len.checked_sub(offset).ok_or_else(|| {
                 GraphError::ExternalData(ExternalDataError::RangeOutOfFile {
                     tensor_name: cap_name(&tensor_name),
                 })
@@ -1082,7 +1156,7 @@ fn plan(
                 tensor_name: cap_name(&tensor_name),
             })
         })?;
-        if end > opened.len {
+        if end > file_len {
             return Err(GraphError::ExternalData(
                 ExternalDataError::RangeOutOfFile {
                     tensor_name: cap_name(&tensor_name),
@@ -1116,27 +1190,16 @@ fn plan(
             ));
         }
 
-        // ファイルキー: `location` の生文字列を `base_dir` へ連結した
-        // ものではなく、ファイルの実体識別子（[`FileKey`]。Unix では
-        // dev/ino）を使う。生文字列を直接連結すると `foo.data`／
-        // `./foo.data`／`foo.data/` のような表記ゆれに加え、ハードリンク
-        // のように経路としては異なるが実体が同一のファイルも別キーに
-        // なり、overlap 検出（下記）・ハンドル再利用の両方が同一ファイル
-        // を見落とす（Cursor Bugbot 指摘・PR #2348 review thread
-        // `PRRT_kwDOTuUCJc6mkYTr`）。`file_key_for` が dev/ino を優先し、それが取れない
-        // プラットフォームでのみ `normalized_rel`（`resolve_and_open` が
-        // `Path::components()` から再構築した正規化済み相対パス）へ
-        // フォールバックする。
-        let file_key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
-
         // distinct ファイル数の上限検査（A04）: `max_total_bytes` はバイト
         // 数のみを制限するため、サイズ 0 のテンソルを大量の異なるファイルへ
         // 分散させると合計サイズは 0 のままファイルハンドルだけが増え、
         // プロセスの fd 上限に達しうる（#2347 P0 是正・PR #2348 コード
-        // レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。`opened`（この反復で新規に
-        // 開いたハンドル）が既知の `file_key` でなければ、`files` へ登録する
-        // 前にここで拒否する。拒否時は `opened` をどこにも格納しないため
-        // スコープを抜ける際に close される（ハンドルの蓄積を防ぐ）。
+        // レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。`to_insert`（この反復で
+        // 新規に開いたハンドル。location キャッシュがヒットした場合は
+        // `None` で既に `files` 登録済み）が既知の `file_key` でなければ、
+        // `files` へ登録する前にここで拒否する。拒否時は `to_insert` を
+        // どこにも格納しないためスコープを抜ける際に close される
+        // （ハンドルの蓄積を防ぐ）。
         if !files.contains_key(&file_key) && files.len() >= options.max_external_files {
             return Err(GraphError::ExternalData(
                 ExternalDataError::TooManyExternalFiles {
@@ -1145,31 +1208,31 @@ fn plan(
             ));
         }
 
-        // `FileKey` は Unix では `(u64, u64)`（`Copy`）、それ以外では
-        // `PathBuf`（非 `Copy`）と cfg で型が変わる（上記型エイリアス
-        // 参照）ため、`.clone()` は環境依存で clippy の
-        // `clone_on_copy`（`-D warnings` 対象）に触れ得る。3 箇所で同じ
-        // キーを使う必要がある（`regions`・`files` への登録＋
-        // `LoadPlanEntry` への格納）ための意図的な複製であり、
-        // `#[allow]` はこの cfg 依存の型差分に限定する。
-        #[allow(clippy::clone_on_copy)]
-        let region_key = file_key.clone();
-        let interval_list = regions.entry(region_key).or_default();
-        for (s, e, other_name) in interval_list.iter() {
-            if offset < *e && *s < end {
-                return Err(GraphError::ExternalData(
-                    ExternalDataError::OverlappingRegion {
-                        tensor_name: cap_name(&tensor_name),
-                        other_tensor_name: cap_name(other_name),
-                    },
-                ));
+        // 同一ファイル内の読み込み区間の重複検出。`length == 0` のテンソル
+        // （1 バイトも読まない）は区間としての幅を持たないため対象外とする
+        // （`offset` がファイル長以内であることは上の `end > file_len`
+        // 検査で既に検証済み。レビュー対応: 0 バイト読み込みが既存区間の
+        // 内側の offset を指すだけで誤って `OverlappingRegion` になって
+        // いた不具合の是正。#2347）。
+        if length > 0 {
+            let region_key = file_key.clone();
+            let interval_list = regions.entry(region_key).or_default();
+            for (s, e, other_name) in interval_list.iter() {
+                if offset < *e && *s < end {
+                    return Err(GraphError::ExternalData(
+                        ExternalDataError::OverlappingRegion {
+                            tensor_name: cap_name(&tensor_name),
+                            other_tensor_name: cap_name(other_name),
+                        },
+                    ));
+                }
             }
+            interval_list.push((offset, end, tensor_name.clone()));
         }
-        interval_list.push((offset, end, tensor_name.clone()));
 
-        #[allow(clippy::clone_on_copy)]
-        let files_key = file_key.clone();
-        files.entry(files_key).or_insert(opened);
+        if let Some(opened) = to_insert {
+            files.entry(file_key.clone()).or_insert(opened);
+        }
 
         entries.push(LoadPlanEntry {
             slot,

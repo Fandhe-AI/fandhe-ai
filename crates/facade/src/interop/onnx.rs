@@ -126,7 +126,11 @@
 //! 重複／SSA／トポロジカル順検証）と `onnx::interp::run` の
 //! no-silent-skip 契約をそのまま通す（迂回・複製しない）。`from_path` は
 //! パスを `std::fs::read` へそのまま渡すのみでシェル展開・パス連結は
-//! 行わない。入力総バイト数・要素数の明示上限は導入していない
+//! 行わない（external data 解決の基点ディレクトリ〈`base_dir`〉も `path`
+//! の親ディレクトリをそのまま使うのみで、こちらもシェル展開・パス連結は
+//! 行わない。external data 自体の非信頼入力検証は `onnx::external_data`
+//! の 2 パス設計〈`docs/onnx-external-data-decision.md`〉に迂回・複製せず
+//! 委譲する）。入力総バイト数・要素数の明示上限は導入していない
 //! （`build_graph` の長さ整合検査がバイト長を初期入力長で抑える。値の
 //! 決定にユーザー承認が要るため本 issue のスコープ外。
 //! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。`from_bytes`
@@ -144,7 +148,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto};
 use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
 use fandhe_ai_onnx_interop::onnx::external_data::{
-    ExternalDataOptions, build_graph_with_external_data,
+    ExternalDataError, ExternalDataOptions, build_graph_with_external_data,
 };
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{
@@ -453,11 +457,13 @@ fn interp_value_to_onnx(v: InterpValue) -> OnnxValue {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum OnnxError {
-    /// ファイル I/O 失敗（[`OnnxModel::from_path`] での読み込み失敗、または
-    /// [`OnnxModel::to_path`] での書き込み失敗）。読み込み・書き込みを
-    /// 区別する専用 variant は設けず（薄いラッパー原則。`std::io::Error`
-    /// 自体は操作の別を保持しない）、[`fmt::Display`] 側で「I/O 失敗」と
-    /// 中立に表現する。
+    /// ファイル I/O 失敗（[`OnnxModel::from_path`] でのモデル本体読み込み
+    /// 失敗・external data 解決中の companion `.onnx.data` ファイルの
+    /// 欠落／権限エラー等〈`ExternalDataError::Io`。イシュー #2347〉、
+    /// または [`OnnxModel::to_path`] での書き込み失敗）。これらを区別する
+    /// 専用 variant は設けず（薄いラッパー原則。`std::io::Error` 自体は
+    /// 操作の別を保持しない）、[`fmt::Display`] 側で「I/O 失敗」と中立に
+    /// 表現する。
     Io(std::io::Error),
     /// protobuf デコード失敗（壊れたバイト列等）。`prost::DecodeError` は
     /// `Display` 文字列のみを保持する（`prost` 型を公開面に出さない）。
@@ -574,6 +580,18 @@ fn map_graph_error(e: GraphError) -> OnnxError {
         },
         GraphError::SparseInitializerNotSupported { tensor_name, count } => {
             OnnxError::SparseInitializerNotSupported { tensor_name, count }
+        }
+        // external data 解決中（`OnnxModel::from_path`）の I/O エラー
+        // （companion `.onnx.data` ファイルの欠落・権限エラー等）は、
+        // 利用者が型で判別できるよう既存の `OnnxError::Io`（`std::fs::read`
+        // 失敗と同じ variant。新規 variant は追加しない）へ写像する
+        // （レビュー対応。以前は他の `ExternalDataError` 同様
+        // `InvalidModel` へ畳み込まれ I/O 失敗と判別できなかった）。
+        // `tensor_name` は `std::io::Error` に保持できないため落ちる
+        // （`OnnxError::Io` は `std::fs::read` の I/O 失敗も同じ理由で
+        // メッセージ以外のコンテキストを持たない設計であり整合する）。
+        GraphError::ExternalData(ExternalDataError::Io { kind, .. }) => {
+            OnnxError::Io(std::io::Error::from(kind))
         }
         other => OnnxError::InvalidModel {
             message: other.to_string(),

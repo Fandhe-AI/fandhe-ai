@@ -860,6 +860,39 @@ fn overlapping_regions_in_same_file_are_rejected() {
     assert!(matches!(err, ExternalDataError::OverlappingRegion { .. }));
 }
 
+/// `length == 0` のテンソル（1 バイトも読まない）は区間としての幅を
+/// 持たないため、既存の非ゼロ長区間の内側の `offset` を指していても
+/// `OverlappingRegion` として拒否されないことを確認する（レビュー対応:
+/// 0 バイト読み込みが誤って区間重複として扱われていた不具合の回帰
+/// テスト。#2347）。
+#[test]
+fn zero_length_region_inside_existing_region_is_not_overlapping() {
+    let dir = TempDir::new("zero-length-overlap");
+    dir.write_file("f.data", &[0u8; 16]);
+    let t_a = external_tensor(
+        "a",
+        vec![2],
+        data_type::FLOAT,
+        "f.data",
+        Some("0"),
+        Some("8"),
+    );
+    // offset=4 は t_a の区間 [0, 8) の内側だが、length=0 のため 1 バイトも
+    // 読まない（dims=[0] で expected_bytes も 0 になる）。
+    let t_b = external_tensor(
+        "b",
+        vec![0],
+        data_type::FLOAT,
+        "f.data",
+        Some("4"),
+        Some("0"),
+    );
+    let model = model_with_initializers(vec![t_a, t_b]);
+    let graph = build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default())
+        .expect("length=0 のテンソルは既存区間の内側でも overlap 拒否されないはず");
+    assert_eq!(graph.initializers.len(), 2);
+}
+
 /// 同一ファイルを指す `location` の表記ゆれ（`f.data`／`./f.data`）が
 /// overlap 検出・ハンドル再利用を欺かないことの契約保証テスト（Cursor
 /// Bugbot 指摘・PR #2348 review thread `PRRT_kwDOTuUCJc6mkYTr`）。

@@ -803,11 +803,15 @@ fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution()
     // companion `w.onnx.data` を用意していないため、`from_path` は
     // external data 解決を試みたうえで見つからず拒否される
     // （`RawDataByteLenMismatch` ではなく I/O エラー系。`from_bytes` との
-    // 挙動差そのものが本テストの確認対象）。
+    // 挙動差そのものが本テストの確認対象）。`ExternalDataError::Io` は
+    // `map_graph_error` が `OnnxError::Io`（既存 variant。新規 variant は
+    // 追加しない）へ写像するため、利用者が `OnnxError::InvalidModel`
+    // ではなく型で I/O 失敗を判別できることも固定する（レビュー対応。
+    // イシュー #2347）。
     let err = OnnxModel::from_path(&onnx_path).expect_err("companion ファイル不在で拒否されるはず");
     assert!(
-        !matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
-        "from_path は from_bytes と異なりバイト長不整合以外のエラーになるはず: {err:?}"
+        matches!(&err, OnnxError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
+        "companion ファイル不在は OnnxError::Io(NotFound) を期待したが: {err:?}"
     );
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

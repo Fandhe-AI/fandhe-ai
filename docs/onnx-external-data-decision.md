@@ -23,20 +23,21 @@ import 入口を `onnx-interop` 内部に新設し、外部参照を fail-closed
 検証してから読み込むことである。**バイト列入力の既存入口の挙動は一切
 変えない**（不変条件。3 節参照）。
 
-## 2. API 形状（`onnx-interop` 内部限定。facade へは公開しない）
+## 2. API 形状（`onnx-interop` 内部限定。facade `OnnxModel::from_path` から利用）
 
 新規モジュール `crates/onnx-interop/src/onnx/external_data.rs`（`onnx::mod`
 から `pub mod external_data;`）:
 
 - `pub struct ExternalDataOptions { pub max_total_bytes: u64, pub max_external_files: usize }`
-  - `Default` の既定値は `DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES = 4 GiB`
-    （**暫定値・ユーザー承認待ち**。変更は定数 1 行の書き換えで済む）。
+  - `Default` の既定値は `DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES = 64 GiB`
+    （2026-09-28 ユーザー承認。当初の 4 GiB 暫定値から改定済み。変更は
+    定数 1 行の書き換えで済む。6 節参照）。
   - `max_external_files` の既定値は `DEFAULT_MAX_EXTERNAL_FILES = 4096`
-    （**暫定値・ユーザー承認待ち**。同一の扱い）。distinct な external data
-    ファイル実体（[`FileKey`] で畳み込んだ後の数）の上限で、`max_total_bytes`
-    がバイト数のみを制限する隙間（サイズ 0 のテンソルを大量の異なる
-    ファイルへ分散させるとファイルハンドルだけが増え fd 上限に達しうる。
-    A04 資源枯渇対策）を塞ぐ。超過は `ExternalDataError::
+    （本改定の対象外で**暫定値のまま**。同一の扱い）。distinct な external
+    data ファイル実体（[`FileKey`] で畳み込んだ後の数）の上限で、
+    `max_total_bytes` がバイト数のみを制限する隙間（サイズ 0 のテンソルを
+    大量の異なるファイルへ分散させるとファイルハンドルだけが増え fd 上限
+    に達しうる。A04 資源枯渇対策）を塞ぐ。超過は `ExternalDataError::
     TooManyExternalFiles` で拒否する（#2347 P0 是正・PR #2348 コード
     レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。
 - `pub fn resolve_external_data(model: &mut ModelProto, base_dir: &Path, options: &ExternalDataOptions) -> Result<(), GraphError>`
@@ -81,7 +82,7 @@ external data を持つモデルをバイト列入口へ渡した場合の挙動
 - `crates/onnx-interop/tests/onnx_interp_pytorch_cnn_fixture.rs::
   external_data_fixture_bytes_entry_point_still_rejects`（実 fixture 版）
 - `crates/facade/tests/interop_onnx_internal_parity.rs::
-  facade_rejects_external_data_model_bytes_and_path`（facade 経由）
+  facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution`（facade 経由）
 
 既存の export バイト一致・roundtrip テスト（`tests/onnx_export_roundtrip.rs`・
 `crates/facade/tests/interop_onnx_internal_parity.rs`）もすべて無変更で
@@ -204,7 +205,8 @@ pass することを確認済み（prost は既定値のスカラーと空の re
     行わない。
   - **非 unix**（Windows 等）: 上記の安全な経路解決手段を持たないため、
     `resolve_and_open` は常に `UnsupportedPlatformForSecureResolve` で
-    拒否する（fail-closed のまま変更なし）。
+    拒否する（fail-closed のまま変更なし）。Windows 対応はイシュー
+    #2349 で追跡中。
 - **O_NONBLOCK 未指定によるハングの是正（2026-09-28・Cursor Bugbot
   High 指摘 PRRT_kwDOTuUCJc6mk6-d）**: `no_follow_open::openat_no_follow`
   は `O_NOFOLLOW` のみを指定しており、`base_dir` 配下に FIFO（named
@@ -250,16 +252,32 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 ## 8. テスト・実測
 
 - 合成入力の網羅テスト: `crates/onnx-interop/tests/onnx_external_data.rs`
-  （39 テスト。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
+  （45 テスト。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
   隣接区間・Constant 属性テンソル〉・異常系〈A2〜A5 のパス検証・数値検証・
-  重複検証・キー検証・A6 回帰〉）。
+  重複検証・キー検証・A6 回帰〉。base_dir 外へのシンボリックリンク脱出
+  〈`symlink_escaping_base_dir_via_absolute_target_is_rejected`〉を含む）。
+  `openat2`／逐次 `openat(O_NOFOLLOW)` フォールバックの両方式を直接検証
+  する単体テストは `crates/onnx-interop/src/onnx/external_data.rs::tests`
+  （2 テスト）。
 - PyTorch 実生成 fixture: `crates/onnx-interop/tests/fixtures/
   pytorch-onnx-external-data/`・`tests/onnx_interp_pytorch_cnn_fixture.rs`
-  の `external_data_fixture_*` 3 テスト（実測記録は `docs/perf/logs/
+  の `external_data_fixture_*` 3 テスト＋
+  `external_data_baselines_are_well_formed`（実測記録は `docs/perf/logs/
   onnx-external-data-pytorch-fixture-2347/README.md`・fixture 側の
-  `README.md` を正とする）。
+  `README.md` を正とする）。`external_data_fixture_matches_self_contained_
+  reference` は REQ-7 事前固定式（`fail_count == 0`）に加え、#2329 の
+  `Req7BaselineNonRegression` と同じ仕組み（`EXTERNAL_DATA_BASELINES`。
+  `total`／`max_abs_diff`／`max_rel_err`／`mean_abs_diff` の実測値
+  そのものを ceiling とする fail-closed 非後退判定）を適用する
+  （2026-09-28 ユーザー承認。コミット済みの固定 fixture は重みが変わら
+  ないため baseline を張れる。`pytorch-onnx-cnn-ops` 側の
+  `REDUCTION_BASELINES` とは別テーブル——両 fixture は独立に再生成
+  されうるため）。`MaxPool`／`Flatten` 等のパラメータを持たない op は
+  external data になる initializer 自体を持たないため、external data
+  fixture のケース集合には含まれない（`EXTERNAL_DATA_CASE_NAMES` の
+  doc コメント参照）。
 - facade A6 回帰: `crates/facade/tests/interop_onnx_internal_parity.rs::
-  facade_rejects_external_data_model_bytes_and_path`。
+  facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution`。
 
 ## 9. OWASP Top 10 観点
 
