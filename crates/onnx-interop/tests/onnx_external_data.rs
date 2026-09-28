@@ -16,7 +16,11 @@ use std::path::{Path, PathBuf};
 use fandhe_ai_onnx_interop::onnx::external_data::{
     ExternalDataError, ExternalDataOptions, LocationRejectReason, build_graph_with_external_data,
 };
-use fandhe_ai_onnx_interop::onnx::graph::{GraphError, RawTensor, build_graph};
+use fandhe_ai_onnx_interop::onnx::graph::{GraphError, build_graph};
+// `RawTensor` は実解決に成功した際の initializer 値検査（cfg(unix) 限定の
+// テストのみ）で使う。非 unix ビルドでは未使用になるため揃えて cfg する。
+#[cfg(unix)]
+use fandhe_ai_onnx_interop::onnx::graph::RawTensor;
 use fandhe_ai_onnx_interop::onnx::proto::{
     GraphProto, ModelProto, StringStringEntryProto, TensorProto, data_location, data_type,
 };
@@ -153,6 +157,7 @@ fn assert_external_err(
 
 // --- 正常系 ---
 
+#[cfg(unix)]
 #[test]
 fn f32_external_tensor_loads_and_matches_bit_exact_inline() {
     let dir = TempDir::new("f32-basic");
@@ -176,6 +181,7 @@ fn f32_external_tensor_loads_and_matches_bit_exact_inline() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn int64_external_tensor_loads() {
     let dir = TempDir::new("i64-basic");
@@ -203,6 +209,7 @@ fn int64_external_tensor_loads() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn bool_and_f16_external_tensors_load() {
     let dir = TempDir::new("bool-f16");
@@ -245,6 +252,7 @@ fn bool_and_f16_external_tensors_load() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn omitted_length_reads_to_eof() {
     let dir = TempDir::new("omit-length");
@@ -267,6 +275,7 @@ fn omitted_length_reads_to_eof() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn offset_selects_correct_region_in_shared_file() {
     let dir = TempDir::new("shared-offset");
@@ -498,6 +507,7 @@ fn symlink_escaping_base_dir_via_absolute_target_is_rejected() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn missing_file_is_io_not_found() {
     let dir = TempDir::new("missing-file");
@@ -517,6 +527,7 @@ fn missing_file_is_io_not_found() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn directory_as_location_is_rejected() {
     let dir = TempDir::new("dir-as-loc");
@@ -606,6 +617,7 @@ fn empty_offset_is_rejected() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn u64_overflow_length_is_rejected() {
     assert!(matches!(
@@ -617,6 +629,7 @@ fn u64_overflow_length_is_rejected() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn offset_plus_length_overflow_is_rejected() {
     let dir = TempDir::new("offset-overflow");
@@ -638,6 +651,7 @@ fn offset_plus_length_overflow_is_rejected() {
     assert!(matches!(err, ExternalDataError::RangeOutOfFile { .. }));
 }
 
+#[cfg(unix)]
 #[test]
 fn range_exceeding_file_length_is_rejected() {
     let dir = TempDir::new("range-exceed");
@@ -659,6 +673,7 @@ fn range_exceeding_file_length_is_rejected() {
     assert!(matches!(err, ExternalDataError::RangeOutOfFile { .. }));
 }
 
+#[cfg(unix)]
 #[test]
 fn length_mismatch_with_expected_bytes_is_rejected() {
     let dir = TempDir::new("length-mismatch");
@@ -688,6 +703,7 @@ fn length_mismatch_with_expected_bytes_is_rejected() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn huge_length_is_rejected_before_allocation() {
     let dir = TempDir::new("huge-length");
@@ -711,6 +727,7 @@ fn huge_length_is_rejected_before_allocation() {
     assert!(matches!(err, ExternalDataError::RangeOutOfFile { .. }));
 }
 
+#[cfg(unix)]
 #[test]
 fn total_size_limit_is_enforced() {
     let dir = TempDir::new("total-limit");
@@ -736,6 +753,7 @@ fn total_size_limit_is_enforced() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn external_file_count_limit_is_enforced() {
     // サイズ 0 のテンソルを別々の空ファイルへ分散させても
@@ -783,6 +801,7 @@ fn external_file_count_limit_is_enforced() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn external_file_count_limit_allows_shared_file_reuse() {
     // 同一ファイルを複数テンソルが参照する通常の分割形式（1 ファイルを
@@ -818,6 +837,7 @@ fn external_file_count_limit_allows_shared_file_reuse() {
 
 // --- 異常系: 重複・重なり（A5） ---
 
+#[cfg(unix)]
 #[test]
 fn overlapping_regions_in_same_file_are_rejected() {
     let dir = TempDir::new("overlap");
@@ -865,6 +885,7 @@ fn overlapping_regions_in_same_file_are_rejected() {
 /// `OverlappingRegion` として拒否されないことを確認する（レビュー対応:
 /// 0 バイト読み込みが誤って区間重複として扱われていた不具合の回帰
 /// テスト。#2347）。
+#[cfg(unix)]
 #[test]
 fn zero_length_region_inside_existing_region_is_not_overlapping() {
     let dir = TempDir::new("zero-length-overlap");
@@ -903,6 +924,7 @@ fn zero_length_region_inside_existing_region_is_not_overlapping() {
 /// はパス文字列としても `Path::components()` 正規化後も異なるが実体は
 /// 同一のファイルであり、`file_key_for` の dev/ino ベースキーでのみ
 /// 検出できる）を参照。
+#[cfg(unix)]
 #[test]
 fn overlapping_regions_via_equivalent_location_spelling_are_rejected() {
     let dir = TempDir::new("overlap-spelling");
@@ -1007,6 +1029,7 @@ fn overlapping_regions_via_hard_link_are_rejected() {
     assert!(matches!(err, ExternalDataError::OverlappingRegion { .. }));
 }
 
+#[cfg(unix)]
 #[test]
 fn duplicate_identical_region_is_rejected() {
     let dir = TempDir::new("dup-region");
@@ -1245,6 +1268,7 @@ fn nonexistent_base_dir_is_rejected() {
 
 // --- Constant 属性テンソル（A1: run まで通す） ---
 
+#[cfg(unix)]
 #[test]
 fn constant_attribute_tensor_external_data_resolves_and_runs() {
     use fandhe_ai_onnx_interop::onnx::interp::run;
@@ -1407,4 +1431,51 @@ fn fifo_location_does_not_hang_open() {
             ..
         }
     ));
+}
+
+/// 非 unix（Windows 等）契約テスト: external data を含むモデルは、
+/// companion ファイルの実在有無やパス文法の正当性に関わらず、常に
+/// `ExternalDataError::UnsupportedPlatformForSecureResolve` で fail-closed
+/// に拒否されることを固定する（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
+/// 対応。`external_data.rs` モジュール doc「非 unix（Windows 等）」節
+/// 参照。Windows 対応はイシュー #2349 で追跡中）。base_dir・companion
+/// ファイルはいずれも実在させない（非 unix の `resolve_and_open` は
+/// `location` の文字列検証のみ行い、ファイルの open を一切試みないため
+/// 実在は不要）。
+#[cfg(not(unix))]
+#[test]
+fn external_data_is_rejected_as_unsupported_platform_when_not_unix() {
+    let dir = TempDir::new("non-unix-unsupported");
+    let t = external_tensor(
+        "x",
+        vec![1],
+        data_type::FLOAT,
+        "f.data",
+        Some("0"),
+        Some("4"),
+    );
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(matches!(
+        err,
+        ExternalDataError::UnsupportedPlatformForSecureResolve { .. }
+    ));
+}
+
+/// 非 unix 契約テスト（`location` の文法検証は OS 非依存で resolve より
+/// 前に行われるため、非 unix でも `UnsupportedPlatformForSecureResolve`
+/// ではなく具体的な `InvalidLocation` が返ることを固定する。unix 版の
+/// `symlink_escaping_base_dir_via_absolute_target_is_rejected` 等と対照的
+/// に、こちらはファイルシステムへ一切触れない構文検証のみの契約）。
+#[cfg(not(unix))]
+#[test]
+fn absolute_location_is_rejected_before_platform_check_on_non_unix() {
+    assert_eq!(
+        expect_location_reject("/abs/path.data", vec![1]),
+        LocationRejectReason::Absolute
+    );
 }

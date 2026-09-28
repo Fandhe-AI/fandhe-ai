@@ -756,6 +756,14 @@ fn from_sequential_to_bytes_initializers_match_state_dict_bit_exact() {
 /// できることの正例は `tests/interop_onnx_external_data.rs::
 /// from_path_resolves_external_data_and_matches_manifest_reference` を
 /// 参照。
+///
+/// **`cfg(unix)` 限定**（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
+/// 対応）: `from_path` の external data 解決は unix でのみ実際にファイル
+/// を開こうと試みるため、companion 欠落が `OnnxError::Io(NotFound)` に
+/// なるのは unix の契約である。非unix の契約は
+/// [`facade_from_bytes_rejects_external_data_model_from_path_rejects_
+/// unsupported_platform_on_non_unix`] が固定する。
+#[cfg(unix)]
 #[test]
 fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution() {
     let t = TensorProto {
@@ -812,6 +820,75 @@ fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution()
     assert!(
         matches!(&err, OnnxError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
         "companion ファイル不在は OnnxError::Io(NotFound) を期待したが: {err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+/// 上記テストの非 unix（Windows 等）契約版（Cursor Bugbot 指摘・
+/// PRRT_kwDOTuUCJc6mrW… 対応）。非 unix では `onnx::external_data::
+/// resolve_and_open` が `openat`／`openat2` 相当の安全な経路解決手段を
+/// 持たないため companion ファイルの実在有無に関わらず常に
+/// `ExternalDataError::UnsupportedPlatformForSecureResolve` で拒否され、
+/// これは facade の `map_graph_error` の catch-all 分岐（`ExternalDataError::
+/// Io` 以外はすべて `InvalidModel` へ写像。`map_graph_error` 本体参照）
+/// により `OnnxError::InvalidModel` として観測される（`OnnxError::Io`
+/// **ではない**点が unix 版との違い）。`from_bytes` はプラットフォーム
+/// を問わず external data 経由をそもそも通らないため挙動不変のまま
+/// 共通で確認する。Windows 対応はイシュー #2349 で追跡中。
+#[cfg(not(unix))]
+#[test]
+fn facade_from_bytes_rejects_external_data_model_from_path_rejects_unsupported_platform_on_non_unix()
+ {
+    let t = TensorProto {
+        dims: vec![1],
+        data_type: data_type::FLOAT,
+        float_data: Vec::new(),
+        int64_data: Vec::new(),
+        name: "w".to_string(),
+        raw_data: Vec::new(),
+        external_data: vec![proto::StringStringEntryProto {
+            key: "location".to_string(),
+            value: "w.onnx.data".to_string(),
+        }],
+        data_location: 1,
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: Vec::new(),
+            name: "g".to_string(),
+            initializer: vec![t],
+            input: Vec::new(),
+            output: Vec::new(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    };
+    let bytes = proto::encode_model(&model);
+
+    let err = OnnxModel::from_bytes(&bytes).expect_err("external data モデルは拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::InvalidModel { message } if message.contains("raw_data バイト長不整合")),
+        "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
+    );
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "facade-onnx-external-data-a6-non-unix-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let onnx_path = tmp_dir.join("model.onnx");
+    std::fs::write(&onnx_path, &bytes).unwrap();
+    // companion ファイルを用意しない: 非 unix では実在有無に関わらず
+    // UnsupportedPlatformForSecureResolve（→ InvalidModel）で拒否される
+    // ことがこのテストの確認対象そのものであるため。
+    let err = OnnxModel::from_path(&onnx_path).expect_err("非 unix では常に拒否されるはず");
+    assert!(
+        matches!(&err, OnnxError::InvalidModel { .. }),
+        "非 unix では OnnxError::InvalidModel（UnsupportedPlatformForSecureResolve 由来）を \
+         期待したが: {err:?}"
     );
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

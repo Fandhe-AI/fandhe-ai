@@ -17,12 +17,31 @@
 //! （`tests/interop_onnx_import.rs` と同じ方針）。判定式は REQ-7 事前固定
 //! 基準 `abs_err / (|ref| + 1e-6) <= 1e-3`（REQ-2 バックエンド間数値一致
 //! OR 複合判定とは別指標）。
+//!
+//! **プラットフォーム前提（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
+//! 対応）**: `from_path` の external data 実解決（`openat`／`openat2`
+//! 相当の安全な no-follow open）は unix でのみ成功する
+//! （`fandhe_ai_onnx_interop::onnx::external_data::ExternalDataError::
+//! UnsupportedPlatformForSecureResolve`）。よって解決成功を前提とする
+//! [`from_path_resolves_external_data_and_matches_manifest_reference`]
+//! は `cfg(unix)` 限定とし、非 unix 契約（`InvalidModel` で拒否される
+//! こと）は同関数の `cfg(not(unix))` 版が固定する。`from_bytes` は
+//! external data 経由をそもそも通らないため
+//! [`from_bytes_still_rejects_external_data_fixture`] は OS 非依存のまま
+//! 全プラットフォームで実行する。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
+use fandhe_ai::interop::onnx::OnnxModel;
+// external data の実解決を伴うテスト（cfg(unix) 限定。ファイル冒頭
+// コメント参照）専用の import。非 unix ビルドでは未使用になるため
+// 揃えて cfg する。
+#[cfg(unix)]
 use fandhe_ai::Tensor;
-use fandhe_ai::interop::onnx::{OnnxModel, OnnxValue};
+#[cfg(unix)]
+use fandhe_ai::interop::onnx::OnnxValue;
+#[cfg(unix)]
+use std::collections::HashMap;
 
 const EXTERNAL_DATA_CASE_NAMES: &[&str] =
     &["conv2d_basic", "conv2d_nobias", "conv2d_stride_dil_group"];
@@ -38,6 +57,9 @@ fn external_data_fixture_root() -> PathBuf {
 /// `Tensor<f32>` へ復元する（`onnx_interp_pytorch_cnn_fixture.rs::
 /// tensor_from_record` と同型。要素数一致を先に検証してから
 /// `f32::from_bits` で復元する。A03）。
+/// `from_path_resolves_external_data_and_matches_manifest_reference`
+/// 専用のため `cfg(unix)` 限定（ファイル冒頭コメント参照）。
+#[cfg(unix)]
 fn tensor_from_manifest(record: &serde_json::Value) -> Tensor<f32> {
     let shape: Vec<usize> = record["shape"]
         .as_array()
@@ -74,6 +96,9 @@ fn tensor_from_manifest(record: &serde_json::Value) -> Tensor<f32> {
 /// 出力が `manifest.json` の自己完結参照出力（このスクリプト自身が生成
 /// した重みに対する PyTorch 参照値。`README.md`「実測結果」節参照）と
 /// REQ-7 事前固定基準で一致することを確認する。
+///
+/// **`cfg(unix)` 限定**（ファイル冒頭コメント参照）。
+#[cfg(unix)]
 #[test]
 fn from_path_resolves_external_data_and_matches_manifest_reference() {
     let root = external_data_fixture_root();
@@ -141,6 +166,32 @@ fn from_bytes_still_rejects_external_data_fixture() {
             format!("{err}").contains("raw_data バイト長不整合")
                 || format!("{err:?}").contains("RawDataByteLenMismatch"),
             "{case_name}: RawDataByteLenMismatch 系のエラーを期待したが: {err:?}"
+        );
+    }
+}
+
+/// [`from_path_resolves_external_data_and_matches_manifest_reference`]
+/// の非 unix（Windows 等）契約版（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
+/// 対応）。非 unix では external data の実解決手段を持たないため、
+/// companion `.onnx.data` が実在する fixture であっても `from_path` は
+/// 常に `OnnxError::InvalidModel`（`ExternalDataError::
+/// UnsupportedPlatformForSecureResolve` 由来。`map_graph_error` の
+/// catch-all 分岐）で拒否されることを固定する（ファイル冒頭コメント
+/// 参照。Windows 対応はイシュー #2349 で追跡中）。
+#[cfg(not(unix))]
+#[test]
+fn from_path_rejects_external_data_fixture_as_unsupported_platform_when_not_unix() {
+    let root = external_data_fixture_root();
+    for &case_name in EXTERNAL_DATA_CASE_NAMES {
+        let model_path = root.join(format!("{case_name}_dynamo.onnx"));
+        let err = OnnxModel::from_path(&model_path)
+            .expect_err(&format!("{case_name}: 非 unix では拒否されるはず"));
+        assert!(
+            matches!(
+                &err,
+                fandhe_ai::interop::onnx::OnnxError::InvalidModel { .. }
+            ),
+            "{case_name}: 非 unix では OnnxError::InvalidModel を期待したが: {err:?}"
         );
     }
 }
