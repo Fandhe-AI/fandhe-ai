@@ -43,14 +43,20 @@
 //!    をすべて検証する。1 件でも失敗すれば `Err` を返しファイルは一切
 //!    読まない（A04 資源枯渇対策）。**パス 1 はファイルハンドルを保持
 //!    しない**: 各 location を安全 open → ハンドルに対する `fstat` で
-//!    `FileKey`（dev/ino）とファイル長だけを記録 → 直ちに close する。
+//!    `FileKey`（dev/ino）と `FileSnapshot`（ファイル長・unix では
+//!    dev/ino・ctime・mtime）だけを記録 → 直ちに close する。
 //! 2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、正規化済み
 //!    location ごとに 1 ファイルずつ「パス 1 と同じ安全 open（同じ
 //!    `base_dir` fd 起点の `openat2`／逐次 `openat(O_NOFOLLOW)`）→ 開いた
-//!    ハンドルの `FileKey`・ファイル長をパス 1 の記録と再照合 → その
-//!    location を参照する全テンソルの区間だけを `read_exact`（`.data`
-//!    ファイル全体は読まない）→ close」を逐次に行う。再照合の不一致は
-//!    [`ExternalDataError::FileChangedDuringLoad`] とする（fail-closed）。
+//!    ハンドルの `FileKey`・`FileSnapshot` をパス 1 の記録と完全一致で
+//!    再照合 → その location を参照する全テンソルの区間だけを
+//!    `read_exact`（`.data` ファイル全体は読まない。各区間の直前にも同じ
+//!    ハンドルへ `fstat` を取り直して同じ照合を行う）→ close」を逐次に
+//!    行う。再照合の不一致は [`ExternalDataError::FileChangedDuringLoad`]
+//!    とする（fail-closed）。ただし最後の照合を通過した直後〜`read_exact`
+//!    の間に truncate された場合は、照合ではなく `read_exact` の
+//!    `UnexpectedEof` として [`ExternalDataError::Io`] で拒否される（別
+//!    variant だが fail-closed。下記「TOCTOU の論拠」節）。
 //!
 //! ## ハンドル非保持の構成（PR #2348 codex P1 是正）
 //!
@@ -70,25 +76,45 @@
 //! ためファイルを開かずに総量上限（`max_total_bytes`）・ファイル数上限を
 //! 判定できず、単一パスでは上限超過を途中まで読んでから検出する構成に
 //! なるためである。検証パス（ハンドル非保持）と読み込みパスを分け、
-//! 読み込みパスで再 open した直後にハンドル自身の `FileKey`・長さを
-//! 検証パスの記録と照合する。
+//! 読み込みパスで再 open した直後にハンドル自身の `FileKey`・
+//! `FileSnapshot` を検証パスの記録と照合する。
 //!
 //! **TOCTOU の論拠**: 読み込みは常に「パス 2 で安全 open し、その
-//! ハンドル自身に対する `fstat` で `FileKey`〈dev, ino〉とファイル長が
-//! パス 1 の記録と一致したハンドル」からのみ行い、経路文字列を
-//! 再解決しない（再 open も `base_dir` fd 起点・シンボリックリンク拒否の
-//! 同じ手段）。したがって (1) `base_dir` 外・シンボリックリンク経由の
-//! ファイルは読まない、(2) 読む実体はパス 1 で当該 location について
-//! 検証した実体（dev/ino）と同一で、長さもパス 1 の区間検証の前提と
-//! 同一、(3) 読み込み量はパス 1 で上限検査済みの区間に有界、の 3 点は
-//! 旧構成（ハンドル保持）と同じく保証される。パス間でハンドルを保持
-//! しないことで inode 番号の再利用の窓が生じるが、(a) パス 1 内で別
-//! ファイルが同じ dev/ino を得ても `FileKey` の併合は重複区間検出を
-//! 増やす方向にしか働かず見逃しを生まない、(b) パス 2 の dev/ino・長さ
-//! 照合を通過する差し替えは `base_dir` への書き込み権を持つ者による
-//! 同一 inode の in-place 改変（旧構成でも防御対象外）と同等の能力で
-//! しか起こせない、ため受容する（`docs/onnx-external-data-decision.md`
-//! 4 節・5 節）。
+//! ハンドル自身に対する `fstat` で `FileKey`〈dev, ino〉とファイル長・
+//! ctime・mtime（秒＋ナノ秒。unix）がパス 1 の記録と完全一致した
+//! ハンドル」からのみ行い、経路文字列を再解決しない（再 open も
+//! `base_dir` fd 起点・シンボリックリンク拒否の同じ手段）。したがって
+//! (1) `base_dir` 外・シンボリックリンク経由のファイルは読まない、
+//! (2) 読む実体はパス 1 で当該 location について検証した実体と同一
+//! （照合できる範囲。下記の残存リスク参照）で、長さもパス 1 の区間検証の
+//! 前提と同一、(3) 読み込み量はパス 1 で上限検査済みの区間に有界、の 3 点を
+//! 保証する。
+//!
+//! パス間でハンドルを保持しないことで、旧構成（ハンドル保持）には無かった
+//! 差し替えの窓が生じる: パス 1 の close 後に元ファイルを unlink → 同じ
+//! 長さの別ファイルを作成すると、ファイルシステムによっては inode 番号が
+//! 再利用され dev/ino・長さが一致しうる。これは `base_dir` 配下の
+//! ディレクトリ書き込み権（unlink／create）だけで起こせるため、dev/ino・
+//! 長さの照合だけでは防げない（PR #2348 security-auditor P2-1）。そこで
+//! ctime・mtime も照合する: 新しく作られた inode の ctime は作成時刻になり、
+//! 同一 inode の in-place 改変（write・truncate・chmod・link 等）でも ctime
+//! は更新される。ctime はユーザー空間から任意の値へ設定できない
+//! （`utimensat` で mtime を書き戻す操作自体が ctime を更新する）ため、照合を
+//! 通過する差し替えには「ディレクトリ書き込み権 ＋ inode 番号の再利用 ＋
+//! 長さ一致 ＋ ctime 一致」、すなわち**ファイルシステム／カーネルの
+//! タイムスタンプ粒度内（秒単位の粒度を持つファイルシステムでは同一秒内、
+//! ナノ秒表現でもカーネルの粗いクロック刻み〈数 ms〉内）での再作成**が
+//! 必要になる。この粒度内の再作成は残存リスクとして受容する
+//! （`docs/onnx-external-data-decision.md` 5 節）。なお (a) パス 1 内で
+//! 別ファイルが同じ dev/ino を得ても `FileKey` の併合は重複区間検出を
+//! 増やす方向にしか働かず見逃しを生まない。
+//!
+//! 照合と読み込みの間の残存窓（旧構成と同じ）: 各区間の直前の照合を通過
+//! した直後〜`read_exact` の間に truncate されると、`read_exact` が
+//! `UnexpectedEof` を返し [`ExternalDataError::Io`]（`FileChangedDuringLoad`
+//! ではない別 variant）で fail-closed に拒否される。同じ窓で同じ長さの
+//! まま in-place 書き換えされた場合は検出できない（旧構成のハンドル保持
+//! でも同一で、`base_dir` 配下のファイルへの書き込み権を前提とする）。
 //!
 //!    **経路解決方式（unix 全般。イシュー #2347 是正版）**: パス 1 の
 //!    ファイル解決は `base_dir` を 1 度だけディレクトリ fd として開き
@@ -293,8 +319,11 @@ pub enum ExternalDataError {
         tensor_name: String,
         kind: std::io::ErrorKind,
     },
-    /// パス 2 で再 open したハンドルのファイル長・実体識別子（Unix では
-    /// dev/ino）がパス 1 の記録と食い違った（TOCTOU 検知）。
+    /// パス 2 で再 open したハンドル（または各区間の読み込み直前に同じ
+    /// ハンドルへ取り直した `fstat`）のファイル長・実体識別子・変更時刻
+    /// （Unix では dev/ino・ctime・mtime）がパス 1 の記録と食い違った
+    /// （TOCTOU 検知）。照合通過直後〜`read_exact` の間の truncate は本
+    /// variant ではなく `Io`（`UnexpectedEof`）で拒否される。
     FileChangedDuringLoad { tensor_name: String },
     /// `base_dir` の canonicalize に失敗した。
     InvalidBaseDir { kind: std::io::ErrorKind },
@@ -468,16 +497,99 @@ fn validate_location_string(loc: &str) -> Result<Vec<&std::ffi::OsStr>, Location
     Ok(parts)
 }
 
-/// [`resolve_and_open`] が開いたファイルと、そのハンドル自身に対する
-/// `fstat` で得たメタデータ。パス 1（`plan`）では `FileKey`・長さを記録
-/// した直後に破棄（close）し、パス 2（`load`）では再 open した同型の値を
-/// パス 1 の記録と照合してから読み込みに使う（どちらのパスも本型を
-/// コレクションへ溜め込まない。モジュール doc「ハンドル非保持の構成」節）。
-struct OpenFile {
-    file: File,
+/// ファイル実体の同一性・無変更性を照合するための `fstat` スナップショット。
+///
+/// パス 1（`plan`）で開いたハンドル自身の `fstat` から取り、
+/// [`PlannedLocation::snapshot`] として記録する。パス 2（`load`）は再 open
+/// したハンドルの値、および各区間の読み込み直前に同じハンドルへ取り直した
+/// 値を [`ensure_unchanged`] で記録と**全フィールド完全一致**で照合する。
+///
+/// unix では dev/ino・長さに加えて ctime／mtime（秒＋ナノ秒）を持つ
+/// （PR #2348 security-auditor P2-1 是正）。dev/ino・長さだけでは、パス 1 の
+/// close 後に元ファイルを unlink → 同じ長さの別ファイルを作成 → inode 番号が
+/// 再利用される経路（`base_dir` 配下のディレクトリ書き込み権〈unlink／
+/// create〉だけで起こせる）を検出できない。新しい inode の ctime は作成
+/// 時刻になり、in-place 改変（write・truncate・chmod・link 等）でも ctime が
+/// 更新されるため、ctime を照合に加えることでいずれも検出できる。ctime は
+/// ユーザー空間から任意の値へ設定できない（`utimensat` で mtime を書き戻す
+/// 操作自体が ctime を更新する）ため照合の要は ctime で、mtime は補助で
+/// ある。atime は読み込みだけで更新されうる（relatime 等）ため含めない
+/// （誤検知を避ける）。残存リスク（同一 ctime 粒度内での再作成）は
+/// モジュール doc「TOCTOU の論拠」節・`docs/onnx-external-data-decision.md`
+/// 5 節を参照。
+///
+/// 非 unix では `resolve_and_open` が常に拒否しファイルを開かないため、
+/// 型の形だけを揃える長さのみを持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSnapshot {
     len: u64,
     #[cfg(unix)]
-    dev_ino: (u64, u64),
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+    #[cfg(unix)]
+    mtime: i64,
+    #[cfg(unix)]
+    mtime_nsec: i64,
+}
+
+impl FileSnapshot {
+    /// ハンドル自身に対する `fstat`（`File::metadata`）の結果から作る
+    /// （経路文字列を再解決しない）。
+    #[cfg(unix)]
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        FileSnapshot {
+            len: meta.len(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+        }
+    }
+
+    /// 非 unix 版（長さのみ）。`resolve_and_open` が常に拒否するため実行時
+    /// には到達しないが、`load` の照合コードを cfg で分岐させずに共通化する。
+    #[cfg(not(unix))]
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        FileSnapshot { len: meta.len() }
+    }
+}
+
+/// パス 2（`load`）の照合: `now`（再 open 直後、または各区間の読み込み
+/// 直前に同じハンドルへ取り直した `fstat`）が `planned`（パス 1 の記録）と
+/// 全フィールド一致しなければ [`ExternalDataError::FileChangedDuringLoad`]
+/// で拒否する（fail-closed）。比較ロジックを単体テスト可能にするため
+/// `load` から切り出してある。
+fn ensure_unchanged(
+    tensor_name: &str,
+    planned: &FileSnapshot,
+    now: &FileSnapshot,
+) -> Result<(), ExternalDataError> {
+    if planned == now {
+        Ok(())
+    } else {
+        Err(ExternalDataError::FileChangedDuringLoad {
+            tensor_name: cap_name(tensor_name),
+        })
+    }
+}
+
+/// [`resolve_and_open`] が開いたファイルと、そのハンドル自身に対する
+/// `fstat` で得たスナップショット。パス 1（`plan`）では `FileKey`・
+/// スナップショットを記録した直後に破棄（close）し、パス 2（`load`）では
+/// 再 open した同型の値をパス 1 の記録と照合してから読み込みに使う（どちらの
+/// パスも本型をコレクションへ溜め込まない。モジュール doc「ハンドル非保持の
+/// 構成」節）。
+struct OpenFile {
+    file: File,
+    snapshot: FileSnapshot,
 }
 
 /// ディレクトリ fd（`base_dir` を開いたハンドル）を起点に `location` を
@@ -835,13 +947,9 @@ fn resolve_and_open(
         });
     }
 
-    use std::os::unix::fs::MetadataExt;
-    let dev_ino = (meta.dev(), meta.ino());
-
     Ok(OpenFile {
         file,
-        len: meta.len(),
-        dev_ino,
+        snapshot: FileSnapshot::from_metadata(&meta),
     })
 }
 
@@ -934,7 +1042,7 @@ struct FileKey(u64, u64);
 struct FileKey(PathBuf);
 
 /// `opened`（`resolve_and_open` が返したハンドル）から [`FileKey`] を
-/// 作る。Unix では dev/ino（`OpenFile::dev_ino`）を使い、シンボリックリンク
+/// 作る。Unix では dev/ino（`OpenFile::snapshot` の `dev`／`ino`）を使い、シンボリックリンク
 /// や表記ゆれだけでなくハードリンクも実体単位で同一キーへ畳み込む。
 /// dev/ino を持たない他プラットフォームでは `normalized_rel`
 /// （`resolve_and_open` が `Path::components()` から再構築した正規化済み
@@ -942,7 +1050,7 @@ struct FileKey(PathBuf);
 /// 使う（ハードリンク識別はできないが、表記ゆれの畳み込みは維持する）。
 #[cfg(unix)]
 fn file_key_for(_base_dir_canonical: &Path, opened: &OpenFile, _normalized_rel: &Path) -> FileKey {
-    FileKey(opened.dev_ino.0, opened.dev_ino.1)
+    FileKey(opened.snapshot.dev, opened.snapshot.ino)
 }
 #[cfg(not(unix))]
 fn file_key_for(base_dir_canonical: &Path, _opened: &OpenFile, normalized_rel: &Path) -> FileKey {
@@ -962,8 +1070,9 @@ struct LoadPlanEntry {
 
 /// パス 1 で検証した distinct な正規化済み location 1 件分の記録。
 /// ファイルハンドルは保持せず、パス 2 の再 open 時に照合する識別情報
-/// （`FileKey`・ファイル長）と、再 open に使う検証済みの正規化済み相対
-/// パスだけを持つ（モジュール doc「ハンドル非保持の構成」節）。
+/// （`FileKey`・[`FileSnapshot`]〈長さ・unix では dev/ino・ctime・mtime〉）と、
+/// 再 open に使う検証済みの正規化済み相対パスだけを持つ（モジュール doc
+/// 「ハンドル非保持の構成」節）。
 struct PlannedLocation {
     /// [`validate_location_string`] が返した `Normal` 成分列を連結した
     /// 正規化済み相対パス（`CurDir` 除去済み・`..`／絶対パスを含まない）。
@@ -971,8 +1080,9 @@ struct PlannedLocation {
     rel: PathBuf,
     /// パス 1 で開いたハンドルの実体識別子。
     key: FileKey,
-    /// パス 1 で開いたハンドルの `fstat` で得たファイル長。
-    len: u64,
+    /// パス 1 で開いたハンドルの `fstat` スナップショット（ファイル長は
+    /// `snapshot.len`）。パス 2 は [`ensure_unchanged`] でこれと照合する。
+    snapshot: FileSnapshot,
 }
 
 /// external なテンソルの所在（`ModelProto` 内の位置）。パス 2 の mutable
@@ -1218,24 +1328,24 @@ fn plan(
                         reason: "plan: location_cache の添字が locations の範囲外",
                     },
                 ))?;
-                (cached_idx, planned.key.clone(), planned.len)
+                (cached_idx, planned.key.clone(), planned.snapshot.len)
             } else {
                 let opened =
                     resolve_and_open(&tensor_name, f, &parts).map_err(GraphError::ExternalData)?;
                 let key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
-                let len = opened.len;
+                let snapshot = opened.snapshot;
                 // ここで close する（明示 drop。以後このハンドルは使わず、
-                // パス 2 は再 open したハンドルを `key`・`len` と照合して
-                // から読む）。
+                // パス 2 は再 open したハンドルを `key`・`snapshot` と照合
+                // してから読む）。
                 drop(opened);
                 let idx = locations.len();
                 locations.push(PlannedLocation {
                     rel: normalized_rel.clone(),
                     key: key.clone(),
-                    len,
+                    snapshot,
                 });
                 location_cache.insert(normalized_rel, idx);
-                (idx, key, len)
+                (idx, key, snapshot.len)
             }
         };
 
@@ -1344,14 +1454,17 @@ fn plan(
 ///
 /// 正規化済み location ごとに「`base_dir` ハンドル起点の安全な再 open
 /// （[`resolve_and_open`]。パス 1 と同じシンボリックリンク拒否手段）→
-/// 開いたハンドル自身の `FileKey`・ファイル長をパス 1 の記録と照合 →
+/// 開いたハンドル自身の `FileKey`・[`FileSnapshot`] をパス 1 の記録と
+/// 照合（[`ensure_unchanged`]。各区間の読み込み直前にも再照合）→
 /// その location を参照する全テンソルの区間だけを読む → close」を 1 件
 /// ずつ逐次に行い、同時に開く external data ファイルは常に 1 つに保つ
 /// （PR #2348 codex P1 是正。モジュール doc「ハンドル非保持の構成」節）。
 /// 照合の不一致は [`ExternalDataError::FileChangedDuringLoad`]、再 open
 /// 自体の失敗（削除による `NotFound`・シンボリックリンクへの差し替え等）は
-/// パス 1 と同じ variant（`Io`／`InvalidLocation`）でいずれも fail-closed
-/// に拒否する。戻り値は `entries` と同じ順序・同じ件数。
+/// パス 1 と同じ variant（`Io`／`InvalidLocation`）、照合通過直後〜
+/// `read_exact` の間の truncate は `read_exact` の `UnexpectedEof`
+/// （`Io`）でいずれも fail-closed に拒否する。戻り値は `entries` と同じ
+/// 順序・同じ件数。
 fn load(
     entries: &[LoadPlanEntry],
     locations: &[PlannedLocation],
@@ -1393,17 +1506,21 @@ fn load(
         let parts: Vec<&std::ffi::OsStr> = planned.rel.iter().collect();
         let mut opened =
             resolve_and_open(first_name, base_dir, &parts).map_err(GraphError::ExternalData)?;
-        // 再 open したハンドル自身の識別子・長さをパス 1 の記録と照合する
-        // （経路文字列ではなくハンドルに対する `fstat` の結果。不一致なら
-        // 1 バイトも読まずに拒否する）。
+        // 再 open したハンドル自身の識別子・スナップショット（長さ・unix
+        // では dev/ino・ctime・mtime）をパス 1 の記録と照合する（経路文字列
+        // ではなくハンドルに対する `fstat` の結果。不一致なら 1 バイトも
+        // 読まずに拒否する）。`FileKey` の比較は非 unix のフォールバック
+        // キー（正規化済みパス）も含めた実体同一性の照合として残す。
         let key_now = file_key_for(base_dir_canonical, &opened, &planned.rel);
-        if key_now != planned.key || opened.len != planned.len {
+        if key_now != planned.key {
             return Err(GraphError::ExternalData(
                 ExternalDataError::FileChangedDuringLoad {
                     tensor_name: cap_name(first_name),
                 },
             ));
         }
+        ensure_unchanged(first_name, &planned.snapshot, &opened.snapshot)
+            .map_err(GraphError::ExternalData)?;
 
         for &entry_idx in entry_indices {
             let entry = entries.get(entry_idx).ok_or(GraphError::ExternalData(
@@ -1411,30 +1528,26 @@ fn load(
                     reason: "load: entry 添字が entries の範囲外",
                 },
             ))?;
-            // 各区間の読み込み直前にも同じハンドルの長さ・識別子を再照合
-            // する（同一ハンドルでも読み込み中の truncate 等は起こりうる
-            // ため。旧構成と同じ粒度の検査を維持する）。
+            // 各区間の読み込み直前にも同じハンドルへ `fstat` を取り直し、
+            // パス 1 の記録と同じ全フィールド照合を行う（同一ハンドルでも
+            // 読み込み中の truncate・in-place 書き込み等は起こりうるため。
+            // ctime／mtime を含めることで同じ長さのままの書き換えも検出
+            // する）。この照合を通過した直後〜`read_exact` の間の変更は
+            // 残存窓であり、truncate なら `read_exact` の `UnexpectedEof`
+            // として `ExternalDataError::Io` で fail-closed になる（モジュール
+            // doc「TOCTOU の論拠」節）。
             let meta = opened.file.metadata().map_err(|e| {
                 GraphError::ExternalData(ExternalDataError::Io {
                     tensor_name: cap_name(&entry.tensor_name),
                     kind: e.kind(),
                 })
             })?;
-            let len_ok = meta.len() == planned.len;
-            #[cfg(unix)]
-            let ident_ok = {
-                use std::os::unix::fs::MetadataExt;
-                (meta.dev(), meta.ino()) == opened.dev_ino
-            };
-            #[cfg(not(unix))]
-            let ident_ok = true;
-            if !len_ok || !ident_ok {
-                return Err(GraphError::ExternalData(
-                    ExternalDataError::FileChangedDuringLoad {
-                        tensor_name: cap_name(&entry.tensor_name),
-                    },
-                ));
-            }
+            ensure_unchanged(
+                &entry.tensor_name,
+                &planned.snapshot,
+                &FileSnapshot::from_metadata(&meta),
+            )
+            .map_err(GraphError::ExternalData)?;
 
             opened
                 .file
@@ -1683,5 +1796,217 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- パス 1／パス 2 間の差し替え検知（PR #2348 security-auditor P2-1） ---
+    //
+    // `plan` と `load` の間に割り込めるのは内部関数を直接呼べる本単体
+    // テストだけのため、ここで検査する（統合テスト `tests/
+    // onnx_external_data.rs` は公開入口しか呼べない）。
+
+    use super::{
+        ExternalDataError, ExternalDataOptions, FileSnapshot, ensure_unchanged, load, plan,
+    };
+    use crate::onnx::graph::GraphError;
+    use crate::onnx::proto::{
+        GraphProto, ModelProto, StringStringEntryProto, TensorProto, data_location, data_type,
+    };
+
+    /// 照合前後の差分を 1 フィールドずつ作るための基準スナップショット。
+    fn base_snapshot() -> FileSnapshot {
+        FileSnapshot {
+            len: 8,
+            dev: 1,
+            ino: 42,
+            ctime: 1_700_000_000,
+            ctime_nsec: 123_456_789,
+            mtime: 1_700_000_000,
+            mtime_nsec: 123_456_789,
+        }
+    }
+
+    fn assert_changed(result: Result<(), ExternalDataError>, what: &str) {
+        match result {
+            Err(ExternalDataError::FileChangedDuringLoad { tensor_name }) => {
+                assert_eq!(tensor_name, "w", "{what}: tensor_name が伝播していない");
+            }
+            other => panic!("{what}: FileChangedDuringLoad を期待したが {other:?}"),
+        }
+    }
+
+    /// `ensure_unchanged` は全フィールド一致のときだけ通し、長さ・dev・
+    /// ino・ctime（秒／ナノ秒）・mtime（秒／ナノ秒）のいずれか 1 つでも
+    /// 異なれば `FileChangedDuringLoad` で拒否する。とくに dev/ino・長さが
+    /// 一致し ctime だけが異なるケース（unlink → 同じ長さで再作成 → inode
+    /// 番号再利用）を拒否することが P2-1 是正の要である。
+    #[test]
+    fn ensure_unchanged_rejects_any_single_field_difference() {
+        let planned = base_snapshot();
+        assert!(ensure_unchanged("w", &planned, &planned).is_ok());
+
+        let cases: [(&str, FileSnapshot); 7] = [
+            ("len", FileSnapshot { len: 9, ..planned }),
+            ("dev", FileSnapshot { dev: 2, ..planned }),
+            ("ino", FileSnapshot { ino: 43, ..planned }),
+            (
+                "ctime",
+                FileSnapshot {
+                    ctime: planned.ctime + 1,
+                    ..planned
+                },
+            ),
+            (
+                "ctime_nsec",
+                FileSnapshot {
+                    ctime_nsec: planned.ctime_nsec + 1,
+                    ..planned
+                },
+            ),
+            (
+                "mtime",
+                FileSnapshot {
+                    mtime: planned.mtime + 1,
+                    ..planned
+                },
+            ),
+            (
+                "mtime_nsec",
+                FileSnapshot {
+                    mtime_nsec: planned.mtime_nsec + 1,
+                    ..planned
+                },
+            ),
+        ];
+        for (what, now) in cases {
+            assert_changed(ensure_unchanged("w", &planned, &now), what);
+        }
+    }
+
+    /// `location` の FLOAT テンソル `w`（dims=[2]・8 バイト）を 1 件だけ
+    /// external data として持つモデル。
+    fn single_external_model(location: &str) -> ModelProto {
+        let entry = |k: &str, v: &str| StringStringEntryProto {
+            key: k.to_string(),
+            value: v.to_string(),
+        };
+        let t = TensorProto {
+            dims: vec![2],
+            data_type: data_type::FLOAT,
+            name: "w".to_string(),
+            external_data: vec![entry("location", location), entry("length", "8")],
+            data_location: data_location::EXTERNAL,
+            ..Default::default()
+        };
+        ModelProto {
+            ir_version: 8,
+            graph: Some(GraphProto {
+                name: "g".to_string(),
+                initializer: vec![t],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn f32_bytes(vals: [f32; 2]) -> Vec<u8> {
+        vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// カーネルのファイルタイムスタンプは粗いクロック刻み（数 ms）で更新
+    /// されうるため、`plan` の記録と差し替え後の ctime／mtime が同一刻み
+    /// に収まって偶然一致しないよう、差し替え前に待つ。競合の再現待ちでは
+    /// なく、タイムスタンプ粒度を跨ぐための待機（同一粒度内の差し替えは
+    /// モジュール doc に記す受容済みの残存リスク）。
+    fn wait_past_timestamp_granularity() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    fn assert_load_rejected_as_changed(result: Result<Vec<Vec<u8>>, GraphError>, what: &str) {
+        match result {
+            Err(GraphError::ExternalData(ExternalDataError::FileChangedDuringLoad {
+                tensor_name,
+            })) => assert_eq!(tensor_name, "w"),
+            Err(other) => panic!("{what}: FileChangedDuringLoad を期待したが {other:?}"),
+            Ok(bytes) => panic!("{what}: 差し替え後のファイルを読んでしまった: {bytes:?}"),
+        }
+    }
+
+    /// 差し替えなしの対照: `plan` → `load` がそのまま元の内容を返す
+    /// （下の差し替えテストが harness の不備で空振りしていないことの確認）。
+    #[test]
+    fn plan_then_load_without_change_succeeds() {
+        let dir = UnitTestDir::new("no-change");
+        std::fs::write(dir.path().join("w.data"), f32_bytes([1.0, 2.0])).unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let model = single_external_model("w.data");
+        let (entries, locations, base_dir_file) =
+            plan(&model, &base, &ExternalDataOptions::default()).expect("plan は成功するはず");
+        wait_past_timestamp_granularity();
+        let loaded = load(&entries, &locations, base_dir_file.as_ref(), &base)
+            .expect("差し替えなしの load は成功するはず");
+        assert_eq!(loaded, vec![f32_bytes([1.0, 2.0])]);
+    }
+
+    /// `plan` の後に元ファイルを unlink し、同じ長さの別ファイルを同じ名前で
+    /// 作成すると `load` が `FileChangedDuringLoad` で拒否する。inode 番号が
+    /// 再利用された場合は dev/ino・長さが一致し ctime／mtime だけが差し替えを
+    /// 検出し、再利用されなかった場合は dev/ino が検出する（どちらでも
+    /// 拒否されればよい）。
+    #[test]
+    fn unlink_and_recreate_same_length_between_plan_and_load_is_rejected() {
+        let dir = UnitTestDir::new("unlink-recreate");
+        let path = dir.path().join("w.data");
+        std::fs::write(&path, f32_bytes([1.0, 2.0])).unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let model = single_external_model("w.data");
+        let (entries, locations, base_dir_file) =
+            plan(&model, &base, &ExternalDataOptions::default()).expect("plan は成功するはず");
+
+        wait_past_timestamp_granularity();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, f32_bytes([7.0, 8.0])).unwrap();
+
+        assert_load_rejected_as_changed(
+            load(&entries, &locations, base_dir_file.as_ref(), &base),
+            "unlink → 同長の別ファイル作成",
+        );
+    }
+
+    /// `plan` の後に同じ inode を長さを変えずに in-place で書き換えると
+    /// `load` が `FileChangedDuringLoad` で拒否する。dev/ino・長さは変わら
+    /// ないため、ctime／mtime 照合の追加前（dev/ino・長さのみの照合）は
+    /// 書き換え後の内容を黙って読んでいた経路である。
+    #[test]
+    fn in_place_same_length_overwrite_between_plan_and_load_is_rejected() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = UnitTestDir::new("in-place");
+        let path = dir.path().join("w.data");
+        std::fs::write(&path, f32_bytes([1.0, 2.0])).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let model = single_external_model("w.data");
+        let (entries, locations, base_dir_file) =
+            plan(&model, &base, &ExternalDataOptions::default()).expect("plan は成功するはず");
+
+        wait_past_timestamp_granularity();
+        {
+            // truncate せず先頭から同じ長さを上書きする（同一 inode・同一長）。
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.write_all(&f32_bytes([7.0, 8.0])).unwrap();
+            f.sync_all().unwrap();
+        }
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.len()),
+            (after.dev(), after.ino(), after.len()),
+            "前提: in-place 上書きでは dev/ino・長さが変わらない"
+        );
+
+        assert_load_rejected_as_changed(
+            load(&entries, &locations, base_dir_file.as_ref(), &base),
+            "同一 inode の同長 in-place 上書き",
+        );
     }
 }

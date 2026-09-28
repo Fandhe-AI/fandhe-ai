@@ -158,7 +158,8 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      PRRT_kwDOTuUCJc6mlxhy）。
    - **パス 1 はファイルハンドルを保持しない**（2026-09-28・PR #2348
      codex P1 是正）: distinct な正規化済み location ごとに安全 open →
-     ハンドル自身の `fstat` で `FileKey`・ファイル長だけを記録
+     ハンドル自身の `fstat` で `FileKey` と `FileSnapshot`（ファイル長・
+     unix では dev/ino・ctime・mtime〈秒＋ナノ秒〉）だけを記録
      （`PlannedLocation`）→ 直ちに close する。同一 location を複数
      テンソルが参照する場合は location キャッシュで 2 件目以降の open を
      省略し、異なる location 名が同一実体（ハードリンク等）を指す場合は
@@ -167,13 +168,19 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、正規化済み
    location ごとに 1 ファイルずつ「パス 1 と同じ安全 open（同じ
    `base_dir` fd 起点の `openat2`／逐次 `openat(O_NOFOLLOW)`）→ 開いた
-   ハンドル自身の `FileKey`〈dev, ino〉・ファイル長をパス 1 の記録と
-   照合 → その location を参照する全テンソルの区間だけを `read_exact`
-   （`.data` ファイル全体は読まない）→ close」を逐次に行う。照合の
-   不一致は `FileChangedDuringLoad`、再 open 自体の失敗（削除による
-   `NotFound`・シンボリックリンクへの差し替え等）はパス 1 と同じ variant
-   （`Io`／`InvalidLocation`）でいずれも fail-closed に拒否する。各区間の
-   読み込み直前にも同じハンドルの長さ・dev/ino を再照合する。
+   ハンドル自身の `FileKey`〈dev, ino〉・`FileSnapshot`（ファイル長・
+   unix では dev/ino・ctime・mtime）をパス 1 の記録と完全一致で照合
+   （`ensure_unchanged`）→ その location を参照する全テンソルの区間だけを
+   `read_exact`（`.data` ファイル全体は読まない）→ close」を逐次に行う。
+   各区間の読み込み直前にも同じハンドルへ `fstat` を取り直して同じ照合を
+   行う。照合の不一致は `FileChangedDuringLoad`、再 open 自体の失敗
+   （削除による `NotFound`・シンボリックリンクへの差し替え等）はパス 1 と
+   同じ variant（`Io`／`InvalidLocation`）でいずれも fail-closed に拒否
+   する。**ただし最後の照合を通過した直後〜`read_exact` の間に truncate
+   された場合は、照合ではなく `read_exact` の `UnexpectedEof` として
+   `ExternalDataError::Io` で拒否される**（`FileChangedDuringLoad` とは
+   別 variant だが fail-closed。2026-09-28・PR #2348 security-auditor
+   P2-2。同じ窓での同長 in-place 書き換えの扱いは 5 節）。
 
 ### 4.1 ハンドル非保持の構成（2026-09-28・PR #2348 codex P1 是正）
 
@@ -195,13 +202,17 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   単一パスでは上限超過を途中まで読んでから検出することになる（「1 件でも
   検証に失敗すればファイルは一切読まない」という 1. の契約を崩す）。
 - **TOCTOU の論拠**: 読み込みは常に「パス 2 で安全 open し、そのハンドル
-  自身に対する `fstat` の `FileKey`〈dev, ino〉・ファイル長がパス 1 の
-  記録と一致したハンドル」からのみ行い、経路文字列を再解決しない（再
-  open も `base_dir` fd 起点・シンボリックリンク拒否の同じ手段）。よって
-  (1) `base_dir` 外・シンボリックリンク経由のファイルは読まない、(2) 読む
-  実体はパス 1 で当該 location について検証した実体と同一で長さも同一、
-  (3) 読み込み量はパス 1 で上限検査済みの区間に有界、の 3 点は旧構成と
-  同じく保証される。残る差分（inode 番号再利用の窓）は 5 節に記す。
+  自身に対する `fstat` の `FileKey`〈dev, ino〉・ファイル長・ctime・mtime
+  がパス 1 の記録と完全一致したハンドル」からのみ行い、経路文字列を
+  再解決しない（再 open も `base_dir` fd 起点・シンボリックリンク拒否の
+  同じ手段）。よって (1) `base_dir` 外・シンボリックリンク経由のファイルは
+  読まない、(2) 読む実体はパス 1 で当該 location について検証した実体と
+  同一（照合できる範囲。5 節の残存リスク参照）で長さも同一、(3) 読み
+  込み量はパス 1 で上限検査済みの区間に有界、の 3 点を保証する。ハンドル
+  非保持に伴い旧構成には無かった差し替えの窓（unlink → 同長の別ファイル
+  作成 → inode 番号再利用）が生じるため、ctime・mtime を照合に加えて
+  これを塞ぐ（2026-09-28・PR #2348 security-auditor P2-1。残存条件は
+  5 節）。
 
 読み込んだバイト列は `raw_data` へ書き戻し、`data_location = DEFAULT`・
 `external_data` は空にする（パス 2 完了後にのみ書き戻す。検証・読み込み
@@ -261,15 +272,43 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   ファイル・ディレクトリの open には副作用が無い POSIX の性質を利用）。
   `openat2` 経路（`open_how.flags`）にも同じ理由で無条件付与する。
 - **パス間でハンドルを保持しないことによる inode 番号再利用の窓
-  （2026-09-28・PR #2348 codex P1 是正に伴い受容）**: パス 1 で close した
-  ファイルが削除され、その inode 番号が別ファイルに再利用される窓が
-  生じる。(a) パス 1 内で別ファイルが同じ dev/ino を得ても `FileKey` の
-  併合は重複区間検出を増やす方向（fail-closed 側）にしか働かず見逃しを
-  生まない。(b) パス 2 の dev/ino・長さ照合を通過する差し替えは
-  `base_dir` への書き込み権を持つ者による同一 inode の in-place 改変
-  （旧構成でも防御対象外）と同等の能力でしか起こせない。いずれも
-  `base_dir` 配下・非シンボリックリンク・検査済み区間内の有界読み込み
-  という保証を崩さないため受容する。
+  （2026-09-28・PR #2348 codex P1 是正に伴い発生。同日 security-auditor
+  P2-1 で記述を訂正し ctime／mtime 照合を追加）**: パス 1 で close した
+  ファイルを unlink し、同じ長さの別ファイルを同じ名前で作成すると、
+  ファイルシステムによっては inode 番号が再利用され dev/ino・長さが
+  一致しうる。当初の記述は「dev/ino・長さ照合を通過する差し替えは
+  同一 inode の in-place 改変と同等の能力でしか起こせない」としていたが
+  不正確で、実際には `base_dir` 配下の**ディレクトリ書き込み権
+  （unlink／create）だけ**で起こしうる（旧構成はハンドルを保持していた
+  ためこの窓自体が無かった）。是正として `PlannedLocation` に ctime・
+  mtime（`st_ctime`＋`st_ctime_nsec`・`st_mtime`＋`st_mtime_nsec`。
+  `std::os::unix::fs::MetadataExt`）を記録し、パス 2 の再 open 直後と
+  各区間の読み込み直前の照合で完全一致を要求する（不一致は
+  `FileChangedDuringLoad`）。新しく作られた inode の ctime は作成時刻に
+  なり、同一 inode の in-place 改変（write・truncate・chmod・link 等）でも
+  ctime は更新される。ctime はユーザー空間から任意の値へ設定できない
+  （`utimensat` で mtime を書き戻す操作自体が ctime を更新する）ため照合の
+  要は ctime で、mtime は補助である（atime は読み込みだけで更新されうる
+  ため照合しない）。
+  - **残存リスク（受容）**: 照合を通過する差し替えには「ディレクトリ
+    書き込み権 ＋ inode 番号の再利用 ＋ 長さ一致 ＋ ctime 一致」が必要
+    で、ctime 一致は**ファイルシステム／カーネルのタイムスタンプ粒度内
+    での再作成**を意味する。秒単位の粒度しか持たないファイルシステム
+    （一部の古い形式・ネットワークファイルシステム等）では同一秒内、
+    ナノ秒表現を持つファイルシステムでもカーネルがタイムスタンプに
+    粗いクロック（tick 刻み・数 ms）を使う場合はその刻み内の再作成で
+    通過しうる。
+  - **照合と読み込みの間の残存窓（旧構成と同じ）**: 各区間の直前の照合を
+    通過した直後〜`read_exact` の間に truncate されると `read_exact` の
+    `UnexpectedEof` として `ExternalDataError::Io` で fail-closed に拒否
+    される（4 節 2.）。同じ窓で同じ長さのまま in-place 書き換えされた
+    場合は検出できないが、これは旧構成（ハンドル保持）でも同一で、
+    `base_dir` 配下のファイル自体への書き込み権を前提とする。
+  - (a) パス 1 内で別ファイルが同じ dev/ino を得ても `FileKey` の併合は
+    重複区間検出を増やす方向（fail-closed 側）にしか働かず見逃しを
+    生まない。
+  - いずれも `base_dir` 配下・非シンボリックリンク・検査済み区間内の
+    有界読み込みという保証は崩さないため、上記の残存リスクを受容する。
 - `base_dir` 自体の信頼は呼び出し元の責務とする（呼び出し元が与える
   信頼済み入力として扱い、location 側だけを fail-closed に検証する）。
 - `checksum` の検証（SHA-1）は本 issue のスコープ外（依存を追加でき
@@ -318,10 +357,22 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   rlimit は変えない）で実行する
   `many_small_external_files_do_not_exhaust_fd_limit_in_child_process`
   を置く（`cfg(unix)`。旧構成では子プロセスが `Io { kind:
-  TooManyOpenFiles }` で失敗することを実測確認済み）。
-  `openat2`／逐次 `openat(O_NOFOLLOW)` フォールバックの両方式を直接検証
-  する単体テストは `crates/onnx-interop/src/onnx/external_data.rs::tests`
-  （2 テスト）。
+  TooManyOpenFiles }` で失敗することを実測確認済み）。子プロセスへ soft
+  limit が実際に適用されていることの確認は `getrlimit(RLIMIT_NOFILE)`
+  で unix 共通に行う（2026-09-28・PR #2348 security-auditor P2-3。旧実装は
+  Linux 限定の `/proc/self/limits` 読み取りで、macOS 等では確認が
+  空振りしていた）。
+  単体テストは `crates/onnx-interop/src/onnx/external_data.rs::tests`
+  （6 テスト）: `openat2`／逐次 `openat(O_NOFOLLOW)` フォールバックの
+  両方式の直接検証（2 テスト）と、パス 1／パス 2 間の差し替え検知
+  （5 節。PR #2348 security-auditor P2-1）の 4 テスト——照合関数
+  `ensure_unchanged` が長さ・dev・ino・ctime（秒／ナノ秒）・mtime（秒／
+  ナノ秒）のいずれか 1 フィールドの差でも `FileChangedDuringLoad` に
+  すること、`plan` → `load` の対照（差し替えなしで成功）、`plan` 後の
+  unlink → 同長の別ファイル作成、`plan` 後の同一 inode・同長の in-place
+  上書き（dev/ino・長さが不変で ctime／mtime だけが検出する経路。照合を
+  dev/ino・長さのみに戻すと本テストが失敗することを変異確認済み）をそれ
+  ぞれ `load` が拒否すること。
 - PyTorch 実生成 fixture: `crates/onnx-interop/tests/fixtures/
   pytorch-onnx-external-data/`・`tests/onnx_interp_pytorch_cnn_fixture.rs`
   の `external_data_fixture_*` 3 テスト＋

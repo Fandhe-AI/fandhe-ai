@@ -867,12 +867,26 @@ fn count_open_fds() -> usize {
         .count()
 }
 
-/// Linux で現在プロセスの fd soft limit を `/proc/self/limits` から読む。
-#[cfg(target_os = "linux")]
-fn nofile_soft_limit() -> Option<usize> {
-    let limits = std::fs::read_to_string("/proc/self/limits").ok()?;
-    let line = limits.lines().find(|l| l.starts_with("Max open files"))?;
-    line.split_whitespace().nth(3)?.parse().ok()
+/// 現在プロセスの fd soft limit（`RLIMIT_NOFILE` の `rlim_cur`）を
+/// `getrlimit(2)` で読む（unix 共通。Linux 限定の `/proc/self/limits` に
+/// 依存しないことで macOS 等でも子プロセスへの制限適用を確認できる。PR
+/// #2348 security-auditor P2-3）。`libc` は本クレートの `cfg(unix)` 限定の
+/// 通常依存（deps-policy.md 第 10 区分）で、統合テストからも参照できる。
+#[cfg(unix)]
+fn nofile_soft_limit() -> std::io::Result<libc::rlim_t> {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `&mut rl` はこの呼び出しの間生存する、初期化済みの
+    // `libc::rlimit` への排他参照で、`getrlimit(2)` は成功時にのみこの
+    // 出力バッファへ書き込む。`RLIMIT_NOFILE` は POSIX 定義の有効な資源
+    // 種別。戻り値 0 を確認してから `rl` を読む。
+    let ret = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(rl.rlim_cur)
 }
 
 /// 小さな external data ファイルを多数（[`FD_BUDGET_FILE_COUNT`] 本・
@@ -882,7 +896,7 @@ fn nofile_soft_limit() -> Option<usize> {
 /// 通常の `cargo test` では fd 制限を課さない機能テストとして動き、
 /// [`many_small_external_files_do_not_exhaust_fd_limit_in_child_process`]
 /// から fd soft limit を下げた子プロセスとして起動された場合は、(1) 制限が
-/// 実際に効いていること（Linux のみ `/proc/self/limits` で確認）、
+/// 実際に効いていること（unix 共通。`getrlimit(RLIMIT_NOFILE)` で確認）、
 /// (2) 制限を大きく超える本数のファイルを `EMFILE` なしで読めること、
 /// (3) 解決の前後で開いている fd 数が増えていないこと（Linux のみ。
 /// 子は `--test-threads=1` のため他テストの fd と混ざらない）も検査する。
@@ -893,11 +907,10 @@ fn nofile_soft_limit() -> Option<usize> {
 #[test]
 fn many_small_external_files_load_with_bounded_open_handles() {
     let in_child = std::env::var_os(FD_BUDGET_CHILD_ENV).is_some();
-    #[cfg(target_os = "linux")]
     if in_child {
-        let soft = nofile_soft_limit().expect("/proc/self/limits から soft limit を読めない");
+        let soft = nofile_soft_limit().expect("getrlimit(RLIMIT_NOFILE) で soft limit を読めない");
         assert_eq!(
-            soft, FD_BUDGET_SOFT_LIMIT,
+            soft, FD_BUDGET_SOFT_LIMIT as libc::rlim_t,
             "子プロセスに fd soft limit が適用されていない（テストが空振りになる）"
         );
     }
