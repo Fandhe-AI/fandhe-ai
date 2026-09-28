@@ -292,7 +292,7 @@ fandhe の phase 名は `scripts/bench/framework-compare/README.md`「`train
 
 | fandhe phase | 対応する比較対象側の処理 | 分類 |
 |---|---|---|
-| `tape_build` | 対応なし（candle/burn/PyTorch はテープ／グラフを毎 step 新規構築しない。candle は `Var` 自体がグラフ状態を持たず forward 呼び出しごとに演算グラフが暗黙に組まれる。burn は `require_grad()` 済みテンソルの参照からグラフが暗黙に組まれる。PyTorch も同様） | ハーネス・計測境界由来（fandhe の明示的 `Tape` API 設計に起因し、3 者に対応物がない） |
+| `tape_build` | 対応なし（candle/burn/PyTorch に明示的なテープ作成 API はないが、forward 中にグラフを毎 step 構築する。candle は `Var` 自体がグラフ状態を持たず forward 呼び出しごとに演算グラフが暗黙に組まれる。burn は `require_grad()` 済みテンソルの参照からグラフが暗黙に組まれる。PyTorch も同様） | ハーネス・計測境界由来（fandhe の明示的 `Tape` API 設計に起因し、3 者に対応物がない） |
 | `leaf_register` | 対応なし相当（3 者とも「テープへの登録」という別呼び出しはなく、forward 内の演算呼び出し自体が入力を暗黙にグラフへ組み込む） | ハーネス・計測境界由来 |
 | `forward` | §3 の forward 手順（matmul×2・broadcast/add×2・relu×1。3 者共通の演算列） | ライブラリ固有寄り（演算列自体は 1 対 1 対応するが、fandhe は matmul 即時・elementwise 遅延という独自の実行契約を持つ） |
 | `loss_readout` | 対応なし相当（3 者は loss を計算するがこの時点で明示的な「実体化」呼び出しはない——host readout は step 末尾の 1 回のみ） | ハーネス・計測境界由来（fandhe は遅延 elementwise を backward 前に強制実体化する設計。§8 の差分候補） |
