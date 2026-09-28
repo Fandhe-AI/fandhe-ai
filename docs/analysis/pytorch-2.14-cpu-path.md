@@ -49,8 +49,10 @@ v2.14.0 の CPU 経路をソースコード（GitHub API 経由の読み取り�
   ベンチ形状（BATCH=64・784→256→10。要素数は最大 64×784=50176、多くは
   64×256=16384 以下）ではほぼ全ての要素ごと演算が直列実行される見込み。
   CPU アロケータ（`c10/core/impl/alloc_cpu.cpp`）はキャッシュを持たず
-  `posix_memalign` 等を呼び出しごとに直接行う（64B アライメント。
-  `c10/core/alignment.h:15`）
+  `posix_memalign` 等を呼び出しごとに直接行う（アライメントは
+  `c10/core/alignment.h` の `gAlignment` がプラットフォーム別に分岐し
+  x86_64 系は 64B・その他は 16B。**M4・GB10 はいずれも arm64 のため
+  16B**。詳細は §7.2 参照）
 - ベンチで測定した PyTorch train 0.20 ms（M4）・367 µs（GB10）は
   `nn.Linear`（addmm 融合）ではなく **`x @ w1 + b1` の分離 mm＋add**
   （`docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py:105-114`）を
