@@ -145,7 +145,7 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 
 依存の追加・更新は必ずユーザー承認を経て行う（`.claude/rules/deps-policy.md`）。承認後の実施手順:
 
-1. **判断理由の記録**: 許容依存 9 区分以外を新規追加する場合、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
+1. **判断理由の記録**: 許容依存 10 区分（`.claude/rules/deps-policy.md`）に列挙されていないクレートを追加する場合（新しい区分を設ける場合を含む）、および既存区分へ新たなクレートを加える場合のいずれも、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
 2. **バージョン固定**: `Cargo.toml` で `=x.y.z` 完全固定とし、`Cargo.lock` を同一コミットでコミットする
 3. **`docs/license-matrix.md` の同時更新**: 新規・更新する依存のライセンスを確認し、`docs/license-matrix.md`（未作成の場合は同一 PR で作成）を更新する。MPL-2.0 等コピーレフトの推移的混入は推定で記述せず、有効化しうる feature 組合せごとの `cargo tree` 実測で個別に適合確認する
 4. **CI 検査の確認**: `deps-forbidden` ジョブ（禁止リストの `Cargo.lock` 機械検査）・`deny` ジョブ（`deny.toml` によるライセンス監査）が green であることを確認する

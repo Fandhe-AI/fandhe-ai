@@ -10,7 +10,7 @@ REQ-1（`docs/spec/04-requirements.md:61` のライセンス要件）・`.claude
 - 旧 issue #2 の教訓により、**feature 除外による回避を推定で記述しない**。有効化しうる feature 組合せごとに `cargo tree` を実測し、個別に適合確認する（本ファイル 3〜4 節）
 - MPL-2.0 等コピーレフトの推移的混入は実測で監視する（6 節）
 
-## 2. 直接依存 9 区分の可否表
+## 2. 直接依存 9 区分（第 1〜8・第 10 区分）の可否表
 
 crates.io の `license` フィールドを `cargo metadata --locked` 経由で実確認した（実測方法は 7 節）。
 
@@ -19,7 +19,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | CUDA | `cudarc` | `=0.19.8`（`driver`/`nvrtc`/`dynamic-loading`/`cuda-13000`/`f16`） | MIT OR Apache-2.0 | 可 | a, d, e（`docs/spec/01-brainstorm.md:181`）。ドライバ FFI の自作は unsafe 面積増のみで差別化にならない |
 | Metal | `objc2` | `=0.6.4` | MIT | 可 | a, d, e |
 | Metal | `objc2-foundation` | `=0.3.2` | MIT | 可 | a, d, e |
-| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存 9 区分の適合基準（MIT OR Apache-2.0 系）と両立する |
+| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存 9 区分（第 1〜8・第 10 区分）の適合基準（MIT OR Apache-2.0 系）と両立する |
 | 相互運用 | `safetensors` | `=0.7.0` | Apache-2.0 | 可 | c, e（`docs/spec/01-brainstorm.md:183`）。ワイヤフォーマット処理のみに使用（テンソルへのマッピングは自作）。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | 相互運用 | `prost` | `=0.14.4` | Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:184`）。protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | シリアライズ | `serde` | `=1.0.229`（`derive`） | MIT OR Apache-2.0 | 可 | a。構造化データのシリアライズ |
@@ -199,7 +199,7 @@ fail-closed で適用される。
 第 9 区分（ベンチ比較対象）として正式に許容された依存であり、監査対象外の例外
 ではなく、`scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立
 Cargo プロジェクト）限定で正式に統制される依存として扱う。本表 2 節「直接依存
-9 区分」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
+9 区分（第 1〜8・第 10 区分）」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
 指し、第 9 区分は別枠として本節で扱う。
 
 本表 4〜5 節（`cargo tree`／`cargo metadata` 実測）はルート `Cargo.lock` を対象と
