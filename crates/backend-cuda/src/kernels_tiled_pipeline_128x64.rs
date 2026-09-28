@@ -136,6 +136,10 @@
 
 use std::sync::LazyLock;
 
+// イシュー #2299: `kernels_tiled_pipeline.rs` と同じ理由で import を
+// `any(test, feature)` gate する（`CudaError` を返す関数はいずれも
+// unit test または `internal-diagnostics` feature 限定）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 use crate::error::CudaError;
 
 /// ブロックタイル M（C の行方向。128。`kernels_tiled_pipeline::TP_BM`
@@ -317,6 +321,7 @@ static TILED_PIPELINE_128X64_F32_SOURCE: LazyLock<String> =
 /// カーネルソースを生成する（`kernels_tiled_pipeline::
 /// tiled_pipeline_f32_source_with_stages` と同じ位置づけ。
 /// `examples/gemm_tiled_pipeline_bench.rs` が段数比較に使う）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_128x64_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
     if !(TP128_MIN_STAGES..=TP128_MAX_STAGES).contains(&stages) {
         return Err(CudaError::InvalidKernelConfig {
@@ -377,6 +382,7 @@ fn render_source(stages: u32) -> String {
 /// CTA→出力タイルの割り当て部分（[`TP128_KERNEL_PERSISTENT_PREFIX`]／
 /// [`TP128_KERNEL_PERSISTENT_SUFFIX`]）のみが異なる
 /// （`kernels_tiled_pipeline.rs::render_persistent_source` と同型）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 fn render_persistent_source(stages: u32) -> String {
     format!(
         "{defines}{helper}{prefix}{core}{suffix}",
@@ -396,10 +402,12 @@ fn render_persistent_source(stages: u32) -> String {
 /// からのみ呼ばれる。GB10 実機での純カーネル時間比較・形状条件付き結線
 /// の可否判断は本イシュー（#1347）が担う
 /// （`docs/perf/cuda-gemm-tiled-pipeline-persistent.md`）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_128x64_persistent_f32_source() -> &'static str {
     &TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE
 }
 
+#[cfg(any(test, feature = "internal-diagnostics"))]
 static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
     LazyLock::new(|| render_persistent_source(TP128_DEFAULT_STAGES));
 
@@ -408,6 +416,7 @@ static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
 /// （[`tiled_pipeline_128x64_f32_source_with_stages`] の persistent 版。
 /// `examples/gemm_tiled_pipeline_persistent_bench.rs` が段数比較のため
 /// オンデマンドで呼ぶ）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
     stages: u32,
 ) -> Result<String, CudaError> {
@@ -692,6 +701,7 @@ const TP128_KERNEL_SUFFIX: &str = "}\n";
 ///   [`TP128_TILE_CORE`] 内で完結する（drain `wait_group 0` により次
 ///   タイル開始時点で未完了の cp.async グループが残らない）ため、
 ///   タイル境界をまたいでも会計が破綻しない。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -760,6 +770,7 @@ const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_
 /// を閉じる。非 persistent 版の [`TP128_KERNEL_SUFFIX`] とは異なる文字列
 /// になる。`kernels_tiled_pipeline.rs::TP_KERNEL_PERSISTENT_SUFFIX` と
 /// 同型）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
 
 #[cfg(test)]

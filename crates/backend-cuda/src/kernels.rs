@@ -728,6 +728,12 @@ extern "C" __global__ void gemm_wmma_tf32(
 /// `mma_f16_source_with_swizzle` と同じ fail-closed 契約。本関数自体は
 /// `internal-diagnostics` feature 限定の opt-in 入口のみから呼ばれるが、
 /// 契約を弱めない）。
+///
+/// イシュー #2299: 本番の呼び出し元（`gemm.rs::new_with_tiled_f32_swizzle`）
+/// は `internal-diagnostics` feature 限定だが、本関数自体は GPU 非依存
+/// の純粋なソース生成関数のため unit test（下部）からも feature 無効時
+/// に検証する。`any(test, feature)` gate。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
     if group_width < 2 {
         return Err(crate::error::CudaError::InvalidShape {

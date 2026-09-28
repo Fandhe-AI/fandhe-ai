@@ -209,6 +209,11 @@ extern "C" __global__ void gemm_splitk_partial_f32(
 /// `num_splits` 回の逐次加算を行う（`num_splits <=
 /// gemm_variant::SPLITK_MAX_SPLITS`〈32〉と小さく、smem 二段パイプライン
 /// を要するほどの反復回数ではないための簡略化）。
+///
+/// イシュー #2299: 唯一の利用箇所 `gemm_variant_selection.rs` が
+/// `internal-diagnostics` feature 限定モジュールのため、feature 無効時は
+/// unit test からも到達せず dead code になる。feature で gate する。
+#[cfg(feature = "internal-diagnostics")]
 pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
 
 /// split-K GEMM 第 2 カーネル（縮約。イシュー #1035）。

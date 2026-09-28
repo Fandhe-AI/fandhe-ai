@@ -80,6 +80,12 @@ endif
 lint: ## cargo clippy -D warnings（lint ゲート）
 ifdef HAS_CARGO
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
+# イシュー #2299: `--workspace --all-features` だけでは backend-cuda の
+# `internal-diagnostics` feature が常に有効化されるため、feature 無効
+# （既定ビルド）時のみ表面化する dead code をローカルで再現できない
+# （ci.yml `build-no-cuda-toolkit` ジョブと同じ理由。同ジョブのコメント
+# 参照）。CI と同じ条件をローカルでも再現するため 1 行追加する。
+	cargo clippy -p fandhe-ai-backend-cuda --all-targets -- -D warnings
 else
 	@echo "skip: Cargo.toml 未追加のため lint をスキップ"
 endif
