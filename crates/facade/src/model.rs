@@ -57,7 +57,7 @@
 //! ファイル（FIFO・ソケット・デバイス等）の受理・上限なしのメモリ
 //! 確保（手順 5〜6）をすべて防ぐ（同じく
 //! codex-review 指摘・PR #2226。当初案は「検査後の open までの TOCTOU
-//! は許容依存 9 区分に無い `libc` 直接依存が要るため対象外」としていた
+//! は当時の許容依存区分に無い `libc` 直接依存が要るため対象外」としていた
 //! が、`libc` クレートを追加せずとも `std::os::unix::fs::OpenOptionsExt`
 //! （`custom_flags`）で `O_NOFOLLOW`／`O_NONBLOCK` の生値を渡せるため、
 //! この判断は撤回し下記の対策へ差し替えた）:
@@ -195,8 +195,9 @@ const MAX_MODEL_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// `open_leaf_no_follow` が付与する生の `open(2)` flag 値（Linux
 /// （x86_64／aarch64 限定。下記 `O_NOFOLLOW` 節参照）／macOS のみ。
-/// 許容依存 9 区分に `libc` が無いため、カーネル UAPI ヘッダ由来の
-/// 固定値を直接埋め込む。`std::os::unix::fs::OpenOptionsExt::
+/// `facade` は `libc` を直接依存に持たない（許容依存第 10 区分の `libc` は
+/// `onnx-interop` の external data 用途限定。`.claude/rules/deps-policy.md`）
+/// ため、カーネル UAPI ヘッダ由来の固定値を直接埋め込む。`std::os::unix::fs::OpenOptionsExt::
 /// custom_flags` はこの生値をそのまま `open` システムコールへ渡す）。
 #[cfg(all(
     target_os = "linux",
@@ -251,8 +252,9 @@ mod open_flags {
 /// 付与する。
 ///
 /// それ以外の OS（Windows 等）向けの安全な no-follow 実装は未導入
-/// （codex-review 指摘・PR #2226。許容依存 9 区分に `libc`／
-/// `windows-sys` の直接依存が無いため、`FILE_FLAG_OPEN_REPARSE_POINT`
+/// （codex-review 指摘・PR #2226。`facade` は `libc`（許容依存第 10 区分は
+/// `onnx-interop` の external data 用途限定）／`windows-sys` を直接依存に
+/// 持たないため、`FILE_FLAG_OPEN_REPARSE_POINT`
 /// 相当の生 flag 値を安全に組み立てる手段が確立していない）。
 /// フォールバックとして無防備な `File::open` を使うと、呼び出し元の
 /// 識別子一致検査（`dev`／`ino`）が `#[cfg(unix)]` 限定で Windows では

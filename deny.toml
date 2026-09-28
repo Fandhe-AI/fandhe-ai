@@ -37,7 +37,7 @@ include-dev = true
 # （docs/license-matrix.md 6 節の個別判断）。コピーレフト単独ライセンス
 # （GPL/LGPL/MPL 等）は列挙しないため、将来の推移的依存混入は fail-closed で検出される。
 #
-# 本 allow リストは直接依存 9 区分の適合基準（MIT OR Apache-2.0 系）を緩和するものではない。
+# 本 allow リストは本体 workspace の直接依存として許容する 9 区分（第 1〜8・第 10 区分）の適合基準（MIT OR Apache-2.0 系）を緩和するものではない。
 # あくまで推移的依存の実測結果を運用化したものであり、allow リストの変更は
 # license-matrix.md の更新とセットでユーザー承認を経る（REQ-5・deps-policy.md）。
 allow = [
@@ -67,7 +67,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # （`deny = [...]` の明示リストは現時点で持たない。追加する場合は
 # `deny = [{ crate = "<name>", reason = "..." }]` 形式で理由を記録し、レビューを必須とする）。
 
-# 同一クレートの複数バージョン混入の検出。許容依存 9 区分を `=x.y.z` 完全固定する
+# 同一クレートの複数バージョン混入の検出。本体 workspace の許容直接依存（第 1〜8・第 10 区分）を `=x.y.z` 完全固定する
 # 本リポジトリの deps-policy.md 方針では重複は原則発生しない前提だが、推移的依存
 # 経由の重複は依存元側の追随を待つほかなく "deny" ではノイズが上回るため、
 # local-llm-server（PR #571）と同じく警告に留めて CI ログで増加傾向を観測する
@@ -75,7 +75,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 multiple-versions = "warn"
 
 # バージョン要求 `*` の依存宣言を拒否する（バージョン無指定はサプライチェーン上
-# 任意の最新版を受け入れる宣言であり、許容依存 9 区分の `=x.y.z` 完全固定方針
+# 任意の最新版を受け入れる宣言であり、本体 workspace の許容直接依存（第 1〜8・第 10 区分）の `=x.y.z` 完全固定方針
 # （deps-policy.md）に反するため fail-closed で弾く）。
 wildcards = "deny"
 # ワークスペース内クレートのうち非公開（`publish = false`。workspace 継承）の

@@ -79,7 +79,7 @@ fandhe-ai-autodiff = { path = "../autodiff", version = "=0.9.0" }
 # external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）に
 # 使う。`cfg(unix)` 限定（`crates/backend-metal/Cargo.toml` の
 # `[target.'cfg(target_os = "macos")'.dependencies]` と同型の target cfg 分離
-# パターン。deps-policy.md「OS FFI」区分）。Windows 等の非 unix ではリンクされない
+# パターン。deps-policy.md 第 10 区分「OS FFI」）。Windows 等の非 unix ではリンクされない
 # ため、同プラットフォームの external data 読み込みは
 # `ExternalDataError::UnsupportedPlatformForSecureResolve` で fail-closed に拒否
 # したまま変わらない（`crates/onnx-interop/src/onnx/external_data.rs` 冒頭コメント
