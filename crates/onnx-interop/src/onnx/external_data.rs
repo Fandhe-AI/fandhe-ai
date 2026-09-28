@@ -1175,19 +1175,28 @@ mod no_follow_open {
 ///    タグしか認識せず AppExecLink・cloud files 等を素通りさせる）では
 ///    なく属性ビットで行う。
 /// 3. **最終ハンドルの実所在検証**（[`final_real_path`]・
-///    [`is_within_base_dir`]）: 1.〜2. は「保持中の成分自身」の破壊的操作
-///    は防ぐが、`open_component` は途中成分・最終成分のいずれもフルパス
-///    文字列で `CreateFileW` するため、まだ held に積んでいない・保持の
-///    対象外の途中ディレクトリを一時的に reparse point 化 → 次の成分を
-///    その reparse point 経由で開かせる → 事後の属性再検査（2.）が走る前に
-///    元へ戻す、という flip-and-revert には 1.〜2. だけでは対応できない
+///    [`verify_final_path_within_base_dir`]）: 1.〜2. は「保持中の成分
+///    自身」の破壊的操作は防ぐが、`open_component` は途中成分・最終成分の
+///    いずれもフルパス文字列で `CreateFileW` するため、保持中（`held`）の
+///    ディレクトリであっても、共有モードが許す書き込みアクセスで
+///    別ハンドルから同一オブジェクトへ reparse タグを立てる（削除・
+///    rename を伴わないため 1. の防御が及ばない）→ 以後のフルパス文字列
+///    解決（`held` のハンドル経由ではなく毎回ファイルシステム名前空間を
+///    再解決する）がその reparse point を中間成分として追跡してしまう →
+///    事後の属性再検査（2.）が走る前に reparse タグを外して元へ戻す、
+///    という flip-and-revert には 1.〜2. だけでは対応できない
 ///    （codex-review 指摘 `PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`・
 ///    PR #2351）。最終ファイルを開いた直後に、そのハンドル自身が実際に
 ///    指しているオブジェクトの所在を `GetFinalPathNameByHandleW` で
 ///    （経路文字列の再解決ではなくハンドル起点の逆引きで）取得し、
-///    `base_dir` 配下・想定した深さから外れていないかを検証する。この
-///    検証はハンドルが指すオブジェクトそのものに基づくため、reparse
-///    point を事後に元へ戻しても偽装できない。
+///    `base_dir` から「想定した深さで解決されているか」という深さ数値
+///    だけでなく、**`held` 各エントリ自身の実所在（同じくハンドル起点の
+///    逆引き）と対応づけて**検証する（P0 是正・codex-review 指摘
+///    `PRRT_kwDOTuUCJc6m0J-L`・PR #2351。深さだけの比較は `base_dir`
+///    配下の同じ深さの別ディレクトリへ着地した場合を見逃す）。加えて
+///    ボリューム識別子（`file_identity`）の突き合わせで別ボリュームへの
+///    着地も拒否する。この検証はいずれもハンドルが指すオブジェクトその
+///    ものに基づくため、reparse point を事後に元へ戻しても偽装できない。
 ///
 /// 定数は Win32 SDK ヘッダ（`winnt.h`／`winbase.h`。MS Learn
 /// "CreateFileA/W"・"File Security and Access Rights"・"File Access Rights
@@ -1399,24 +1408,81 @@ mod win_contained_open {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
-    /// `real`（[`final_real_path`] が返す、最終ファイルハンドルの実際の
-    /// 所在）が `base`（`BaseDirHandle::base`。ボリュームルートから検証
-    /// 済みの verbatim 絶対パス）配下へ、`parts` と同じ深さで解決されて
-    /// いることを確認する。途中成分の junction 化・差し替え（TOCTOU）は
-    /// 事後の属性再検査を「元に戻してから」すり抜けうるが、実際に開かれた
-    /// ハンドルが指すオブジェクトの所在（本関数の入力）はすり替えられない
-    /// （モジュール doc「TOCTOU の根拠」節 3.）。深さ（`parts.len()`）まで
-    /// 一致させるのは、大小文字・8.3 短縮名等の表記ゆれで成分名そのものを
-    /// 厳密比較すると正当なモデルを誤検知しうるため（NTFS は既定で大小
-    /// 文字を区別しない）で、`starts_with` 単独（文字列プレフィックス
-    /// ではなく `Path` コンポーネント単位）に加えて深さも見ることで
-    /// `base_dir` から真に `parts.len()` 階層降りた位置に着地したことを
-    /// 保証する。
-    fn is_within_base_dir(base: &Path, parts: &[&OsStr], real: &Path) -> bool {
-        match real.strip_prefix(base) {
-            Ok(rel) => rel.components().count() == parts.len(),
-            Err(_) => false,
+    /// `handle`（最終ファイル）が実際に `base_dir`（[`super::BaseDirHandle`]。
+    /// ボリュームルートから検証済みの祖先チェーンを保持）配下へ、`held`
+    /// （本 location 専用に開いた途中ディレクトリハンドル。`resolve_and_open`
+    /// が `parts` の走査で積む）を実際に経由して着地したことを検証する。
+    ///
+    /// **P0 是正（codex-review 指摘 `PRRT_kwDOTuUCJc6m0J-L`・PR #2351）**:
+    /// 旧実装は `real`（[`final_real_path`] が返す実所在）を `base` からの
+    /// 深さ（成分数）だけで判定していた。これは、`base_dir` 配下の
+    /// 「同じ深さの別ディレクトリ」（例: 成分 `A` を一時的に `base_dir`
+    /// 直下の別ディレクトリ `B` への junction に差し替えて最終ファイルを
+    /// 開かせ、祖先再検査（モジュール doc 2.）が走る前に `A` を元へ戻す
+    /// flip-and-revert）を見逃す。`A` は既に `held` へ積まれ保持済みの
+    /// ハンドルであり、その実体（カーネルオブジェクト）は差し替えられない
+    /// ため、`A` 自身に junction タグを立てても `held` に積んだハンドル
+    /// そのものは同じオブジェクトを指し続ける。本関数はこの性質を使い、
+    /// `held[i]` 自身の実所在（`final_real_path(&held[i])`）を
+    /// `real_path`（`handle` の実所在）の対応する深さの祖先成分列と
+    /// 突き合わせる。両者はいずれも `GetFinalPathNameByHandleW` の同一
+    /// フラグでの出力同士の比較のため、大小文字・8.3 短縮名等の表記ゆれ
+    /// （NTFS は既定で大小文字を区別しない）に依らず安全に比較できる
+    /// （`parts`〈呼び出し元が渡す生のパス文字列〉とは比較しない）。
+    /// 加えてボリューム識別子（[`file_identity`] の
+    /// `volume_serial_number`）を `handle` と `base_dir` の祖先チェーン先頭
+    /// （ボリュームルートハンドル）とで突き合わせ、ボリュームマウント
+    /// ポイント経由で別ボリュームへ着地した場合（`GetFinalPathNameByHandleW`
+    /// の `VOLUME_NAME_DOS` 出力がドライブレターの無いボリュームでどう
+    /// 振る舞うかは実機未検証のため、文字列比較だけに依存しない）も拒否
+    /// する。
+    fn verify_final_path_within_base_dir(
+        base_dir: &super::BaseDirHandle,
+        held: &[File],
+        handle: &File,
+        real_path: &Path,
+    ) -> io::Result<bool> {
+        let Some(root) = base_dir.chain.first() else {
+            // 不変条件検査（fail-closed）: `open_base_dir_handle` は
+            // ボリュームルートハンドルを無条件で `chain` の先頭へ積むため
+            // 空にはならない。万一崩れていた場合は判定不能として拒否する。
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        };
+        let (final_volume, _) = file_identity(handle)?;
+        let (root_volume, _) = file_identity(root)?;
+        if final_volume != root_volume {
+            return Ok(false);
         }
+
+        let real_rel = match real_path.strip_prefix(&base_dir.base) {
+            Ok(rel) => rel,
+            Err(_) => return Ok(false),
+        };
+        // 深さ（成分数）は `held`（途中ディレクトリ。`parts` の最終成分を
+        // 除いた分）＋最終ファイル自身の 1 成分。
+        if real_rel.components().count() != held.len() + 1 {
+            return Ok(false);
+        }
+
+        for (i, anc) in held.iter().enumerate() {
+            let anc_real = final_real_path(anc)?;
+            let anc_rel = match anc_real.strip_prefix(&base_dir.base) {
+                Ok(rel) => rel,
+                Err(_) => return Ok(false),
+            };
+            // `anc_rel`（`held[i]` 自身の実所在）が `real_rel`（最終
+            // ファイルの実所在）の先頭 i+1 成分と一致し、かつ `anc_rel`
+            // 自身の深さもちょうど i+1 であることを要求する。深さも見る
+            // のは、`anc_rel` が `real_rel` の先頭 i+1 成分と偶然前方一致
+            // しつつ実際には異なる深さのオブジェクトである退化ケースを
+            // 排除するため。
+            let matches_prefix = anc_rel.components().eq(real_rel.components().take(i + 1));
+            if !matches_prefix || anc_rel.components().count() != i + 1 {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     /// ディレクトリ成分（`is_dir = true`）または最終ファイル成分
@@ -1456,9 +1522,10 @@ mod win_contained_open {
         Reparse,
         NotRegularFile,
         /// 最終ファイルハンドルの実際の所在（[`final_real_path`]）が
-        /// `base_dir` 配下・想定した深さから外れていた（TOCTOU 是正。
-        /// [`is_within_base_dir`] のドキュメント参照。codex-review 指摘
-        /// `PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`・PR #2351）。
+        /// `base_dir` 配下・`held` の実所在と対応する経路から外れていた
+        /// （TOCTOU 是正。[`verify_final_path_within_base_dir`] の
+        /// ドキュメント参照。codex-review 指摘 `PRRT_kwDOTuUCJc6my2IX`・
+        /// `PRRT_kwDOTuUCJc6mzcKZ`・`PRRT_kwDOTuUCJc6m0J-L`・PR #2351）。
         EscapedBaseDir,
         Io(io::Error),
     }
@@ -1604,15 +1671,16 @@ mod win_contained_open {
             // 事後チェック（モジュール doc「TOCTOU の根拠」節 3.）: 上の
             // 祖先再検査は「元に戻された（flip-and-revert）」reparse point
             // 化を見逃しうる（codex-review 指摘 `PRRT_kwDOTuUCJc6my2IX`・
-            // `PRRT_kwDOTuUCJc6mzcKZ`・PR #2351）。祖先ハンドルの属性では
-            // なく、実際に開かれた `handle` 自身が指すオブジェクトの所在を
-            // `GetFinalPathNameByHandleW` で逆引きし、`base_dir` 配下・
-            // 想定した深さ（`parts.len()`）から外れていないかを確認する。
-            // reparse point 化を伴わない偽装は成立しない（`handle` は
-            // `open_component` が実際に `CreateFileW` で解決したオブジェクト
-            // を指しており、以後のファイルシステム操作では変わらない）。
+            // `PRRT_kwDOTuUCJc6mzcKZ`・`PRRT_kwDOTuUCJc6m0J-L`・PR #2351）。
+            // 祖先ハンドルの属性ではなく、実際に開かれた `handle` 自身が
+            // 指すオブジェクトの所在を `GetFinalPathNameByHandleW` で
+            // 逆引きし、`held`（本 location 専用に保持中の各祖先ハンドル）
+            // 自身の実所在と対応づけて検証する（`is_within_base_dir` の
+            // 深さのみの比較では、`base_dir` 配下の同じ深さの別
+            // ディレクトリへ着地した場合を見逃すため。
+            // [`verify_final_path_within_base_dir`] のドキュメント参照）。
             let real_path = final_real_path(&handle)?;
-            if !is_within_base_dir(&base_dir.base, parts, &real_path) {
+            if !verify_final_path_within_base_dir(base_dir, &held, &handle, &real_path)? {
                 return Err(OpenError::EscapedBaseDir);
             }
 

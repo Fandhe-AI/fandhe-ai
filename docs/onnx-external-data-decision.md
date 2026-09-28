@@ -732,24 +732,41 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
    したがって、既存の writer ハンドルがあれば open 自体が失敗し、保持
    している間は新しい writer も開けない（unix より強い保証）。
 5. **最終ハンドルの実所在検証（2026-09-28 codex-review 是正・PR #2351 で
-   追加）**: 1.〜4. だけでは「まだ held に積んでいない途中ディレクトリ・
-   最深ディレクトリを一時的に reparse point 化 → こちらの open がそれを
-   辿る → 事後チェック（2.）が走る前に元へ戻す」という flip-and-revert
+   追加・同 PR のレビューで 2 度是正）**: 1.〜4. だけでは「held に積んで
+   いるディレクトリであっても、共有モードが許す書き込みアクセスで別
+   ハンドルから同一オブジェクトへ reparse タグを立てる（削除・rename を
+   伴わないため 1. の防御が及ばない）→ 以後のフルパス文字列解決（`held`
+   のハンドル経由ではなく毎回ファイルシステム名前空間を再解決する）が
+   その reparse point を中間成分として追跡してしまう → 事後チェック
+   （2.）が走る前に reparse タグを外して元へ戻す」という flip-and-revert
    （旧 (a) の残存リスク）を検出できなかった（codex-review 指摘
    `PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`）。最終ファイルを
    開いた直後に、`GetFinalPathNameByHandleW`（winbase.h。std 未対応の
    ため kernel32.dll への手書き `extern "system"` 宣言で直接呼ぶ）で
-   「そのハンドルが実際に指しているオブジェクトの所在」を取得し、
-   `base_dir` 配下・想定した深さから外れていないかを検証する
-   （`win_contained_open::final_real_path`／`is_within_base_dir`）。この
-   検証はハンドルが指すオブジェクトそのものに基づく逆引きであり、経路
-   文字列の再解決ではないため、reparse point を事後に元へ戻しても偽装
-   できない。
+   「そのハンドルが実際に指しているオブジェクトの所在」を取得する
+   （`win_contained_open::final_real_path`）。初版はこれを `base_dir`
+   配下・想定した**深さ（成分数）だけ**で判定していたが、`base_dir`
+   配下の「同じ深さの別ディレクトリ」へ着地した場合（例: 成分 `A` を
+   同じ深さの別ディレクトリ `B` への junction へ一時的に差し替えて最終
+   ファイルを開かせ、事後チェックが走る前に `A` を元へ戻す）を見逃す
+   欠陥が残っていた（P0 是正・codex-review 指摘
+   `PRRT_kwDOTuUCJc6m0J-L`・PR #2351）。是正版
+   （`win_contained_open::verify_final_path_within_base_dir`）は、深さだけ
+   でなく `held`（本 location 専用に保持中の各祖先ディレクトリハンドル）
+   自身の実所在（同じく `final_real_path` によるハンドル起点の逆引き）を
+   最終ファイルの実所在と成分単位で対応づけ、加えてボリューム識別子
+   （`file_identity` の `volume_serial_number`）を `base_dir` の
+   ボリュームルートハンドルと突き合わせる。いずれもハンドルが指す
+   オブジェクトそのものに基づく逆引きであり、経路文字列の再解決では
+   ないため、reparse point を事後に元へ戻しても偽装できない。
 
 **残るリスク**:
 
-- (a) 「最深ディレクトリの flip-and-revert 競合」は上記 5. で閉じた
-  （2026-09-28・PR #2351）。
+- (a) 「最深ディレクトリの flip-and-revert 競合」は上記 5. の初版
+  （深さのみの判定）で一旦閉じたが、`base_dir` 配下の同じ深さの別
+  ディレクトリへの着地を見逃す欠陥が残っており、held ハンドルとの対応
+  づけ・ボリューム識別子の突き合わせで最終的に閉じた
+  （2026-09-28・PR #2351。codex-review 指摘 `PRRT_kwDOTuUCJc6m0J-L`）。
 - (b) **snapshot の弱さ**: `FileSnapshot`（4.6 節）の時刻フィールドは
   `SetFileTime` で利用者が書き換え可能なため、pass 1・pass 2 間の
   差し替え検出は unix の ctime より弱い。ただし封じ込め（`base_dir`
@@ -932,10 +949,22 @@ no-silent-skip 契約）。`unsafe` は `no_follow_open`（`cfg(unix)` 限定）
 呼び出しに限定して使用する（2026-09-28・#2347 是正で `libc =0.2.189`
 〈`.claude/rules/deps-policy.md`「OS FFI」区分〉を導入。呼び出し箇所には
 `coding-rust.md` 準拠の `// SAFETY:` コメントを付与済み。5 節参照）。
-**Windows 版（`win_contained_open`。イシュー #2349）は `unsafe` を一切
-使わない**（std の `OpenOptionsExt::{access_mode, share_mode,
-custom_flags}` と `MetadataExt` のみで完結する安全な API のみで構成。
-4.6 節）。依存の追加（`windows-sys` 等）もない。A01（パストラバーサル）
-は 4.6 節の祖先ハンドル保持・reparse point 属性検査・`base_dir` の
-`VerbatimDisk` 限定で対処し、字句検査（ADS・予約デバイス名・禁止文字）は
-A03 の一部として Windows 固有の非信頼入力検証に位置づける。
+**Windows 版（`win_contained_open`。イシュー #2349）は `unsafe` を
+kernel32.dll への手書き `extern "system"` 宣言（`GetFileInformationByHandle`・
+`GetFinalPathNameByHandleW`）の呼び出し箇所 2 か所に限定する**（依存の
+追加〈`windows-sys` 等〉はしない。4.6 節「FileKey・FileSnapshot」・
+「最終ハンドルの実所在検証」参照）。ディレクトリ祖先チェーンの走査・
+reparse point 属性検査そのものは std の
+`OpenOptionsExt::{access_mode, share_mode, custom_flags}` と
+`MetadataExt` のみで完結する安全な API で構成するが、`file_index`／
+`volume_serial_number`（`FileKey` の実体識別）・実所在の逆引き
+（TOCTOU 是正の flip-and-revert 対策。PR #2351 codex-review 指摘
+`PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`・`PRRT_kwDOTuUCJc6m0J-L`）
+は std が 1.98.1 時点で未安定化のため、この 2 関数のみ `unsafe` な FFI
+呼び出しで直接叩く（`.claude/rules/coding-rust.md`「`unsafe` は FFI
+境界等の必要最小限に留め、理由をコメントで明記」に準拠。呼び出し箇所には
+`// SAFETY:` コメントを付与済み）。A01（パストラバーサル）は 4.6 節の
+祖先ハンドル保持・reparse point 属性検査・`base_dir` の `VerbatimDisk`
+限定・最終ハンドルの実所在検証（`held` 各エントリとの対応づけ）で対処し、
+字句検査（ADS・予約デバイス名・禁止文字）は A03 の一部として Windows
+固有の非信頼入力検証に位置づける。
