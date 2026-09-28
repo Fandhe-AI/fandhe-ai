@@ -115,12 +115,27 @@ pub enum HostStagingKind {
     /// （#1336〜#1438）。`internal-diagnostics` feature 限定の
     /// `new_with_host_staging_kind` 経由で A/B 比較用の対照腕として
     /// 明示選択できる。
+    ///
+    /// イシュー #2299: `HostStagingKind` の `pub use` 再 export
+    /// （`lib.rs`）自体が `internal-diagnostics` feature 限定のため、
+    /// feature 無効時は本 variant を crate 外部から構築する経路がなく、
+    /// `HostStaging::Pageable` と同じ理由で `any(test, feature)` gate
+    /// する（`alloc` の `match kind` はこの型の gate に伴って feature・
+    /// test いずれも無効なビルドでは `Pinned` 単一腕の網羅的 match に
+    /// 縮退する）。
+    #[cfg(any(test, feature = "internal-diagnostics"))]
     Pageable,
 }
 
 /// ホストステージングバッファ本体（種別ごとの実データを保持する）。
 pub(crate) enum HostStaging {
     Pinned(PinnedHostSlice<f32>),
+    /// イシュー #2299: 本番既定 `HOST_STAGING_KIND` は `Pinned` 固定
+    /// （イシュー #1478）で、`Pageable` を選ぶ経路は `internal-
+    /// diagnostics` feature 限定の `new_with_host_staging_kind` と、
+    /// 本ファイル下部の unit test（`HostStagingCache::new(HostStagingKind::
+    /// Pageable)` 経由）のみ。`any(test, feature)` で gate する。
+    #[cfg(any(test, feature = "internal-diagnostics"))]
     Pageable(Vec<f32>),
 }
 
@@ -128,6 +143,7 @@ impl HostStaging {
     fn len(&self) -> usize {
         match self {
             HostStaging::Pinned(p) => p.len(),
+            #[cfg(any(test, feature = "internal-diagnostics"))]
             HostStaging::Pageable(v) => v.len(),
         }
     }
@@ -143,6 +159,7 @@ impl HostStaging {
     pub(crate) fn as_host_slice_mut(&mut self) -> &mut dyn HostSlice<f32> {
         match self {
             HostStaging::Pinned(p) => p,
+            #[cfg(any(test, feature = "internal-diagnostics"))]
             HostStaging::Pageable(v) => v,
         }
     }
@@ -157,6 +174,7 @@ impl HostStaging {
     pub(crate) fn as_slice(&self) -> Result<&[f32], CudaError> {
         match self {
             HostStaging::Pinned(p) => Ok(p.as_slice()?),
+            #[cfg(any(test, feature = "internal-diagnostics"))]
             HostStaging::Pageable(v) => Ok(v.as_slice()),
         }
     }
@@ -173,6 +191,7 @@ impl HostStaging {
     pub(crate) fn as_mut_slice(&mut self) -> Result<&mut [f32], CudaError> {
         match self {
             HostStaging::Pinned(p) => Ok(p.as_mut_slice()?),
+            #[cfg(any(test, feature = "internal-diagnostics"))]
             HostStaging::Pageable(v) => Ok(v.as_mut_slice()),
         }
     }
@@ -186,6 +205,11 @@ impl HostStaging {
         numel: usize,
     ) -> Result<Self, CudaError> {
         match kind {
+            // イシュー #2299: `HostStagingKind::Pageable`（`kind` の型）
+            // 自体が `any(test, feature)` gate 済みのため、feature・test
+            // いずれも無効な既定ビルドではこの腕は元々コンパイル対象外
+            // （`match` は `Pinned` 単一腕のみの網羅的 match に縮退する）。
+            #[cfg(any(test, feature = "internal-diagnostics"))]
             HostStagingKind::Pageable => {
                 // 事前タッチ（ゼロ初期化確保）: #1146 P5「事前タッチ済み
                 // 再利用 Vec」相当。確保直後に全要素へ書き込むため、初回
@@ -275,6 +299,11 @@ impl HostStagingCache {
     /// たびに `self.stats.cached_bytes` を個別更新するのではなく、
     /// 読み出し時に `self.cached_bytes`（唯一の真実源）から合成する
     /// （2 箇所を独立更新して drift させない設計）。
+    ///
+    /// イシュー #2299: 本番の呼び出し元（`CudaMemory::host_staging_stats`）
+    /// は `internal-diagnostics` feature 限定だが、unit test からも
+    /// キャッシュ挙動の検証に使うため `any(test, feature)` gate。
+    #[cfg(any(test, feature = "internal-diagnostics"))]
     pub(crate) fn stats(&self) -> HostStagingStats {
         HostStagingStats {
             cached_bytes: self.cached_bytes,
@@ -496,8 +525,14 @@ impl H2dStagingCache {
         }
     }
 
-    /// 統計スナップショット（[`HostStagingCache::stats`] と同じ
-    /// 「`cached_bytes` は唯一の真実源から合成する」設計）。
+    /// 統計スナップショット（`HostStagingCache::stats`（`pub(crate)`。
+    /// feature 無効・非 test ビルドでは gate されて存在しないため
+    /// doc link 化しない）と同じ「`cached_bytes` は唯一の真実源から
+    /// 合成する」設計）。
+    ///
+    /// イシュー #2299: `HostStagingCache::stats` と同じ理由で
+    /// `any(test, feature)` gate。
+    #[cfg(any(test, feature = "internal-diagnostics"))]
     pub(crate) fn stats(&self) -> HostStagingStats {
         HostStagingStats {
             cached_bytes: self.cached_bytes,
@@ -620,6 +655,7 @@ pub(crate) fn upload_new(
     staging.as_mut_slice()?.copy_from_slice(data);
     let result = match &staging {
         HostStaging::Pinned(p) => stream.clone_htod(p)?,
+        #[cfg(any(test, feature = "internal-diagnostics"))]
         HostStaging::Pageable(v) => stream.clone_htod(v.as_slice())?,
     };
     put_back_h2d(cache, numel, generation, staging);
@@ -650,6 +686,7 @@ pub(crate) fn upload_into<Dst: DevicePtrMut<f32>>(
     staging.as_mut_slice()?.copy_from_slice(data);
     match &staging {
         HostStaging::Pinned(p) => stream.memcpy_htod(p, dst)?,
+        #[cfg(any(test, feature = "internal-diagnostics"))]
         HostStaging::Pageable(v) => stream.memcpy_htod(v.as_slice(), dst)?,
     }
     put_back_h2d(cache, numel, generation, staging);

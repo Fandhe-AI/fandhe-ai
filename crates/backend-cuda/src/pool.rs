@@ -316,6 +316,11 @@ impl<T: PoolDtype> PooledCudaHandle<T> {
     /// TiledPipelineFunction` 検証・`CudaError::
     /// TiledPipelineContextMismatch` と同型の対処。`CudaError::
     /// PooledBufferContextMismatch` ドキュメンテーションコメント参照）。
+    ///
+    /// イシュー #2299: 唯一の利用箇所（`gemm_mma.rs::launch_f16_pooled`／
+    /// `download_f16_pooled`）はいずれも `internal-diagnostics` feature
+    /// 限定のため、feature 無効時は dead code。
+    #[cfg(feature = "internal-diagnostics")]
     pub(crate) fn context(&self) -> &Arc<CudaContext> {
         self.handle.context()
     }
@@ -712,6 +717,11 @@ impl CudaAllocator {
     /// `0..m*n` の全要素を必ず 1 回書き切り C を読まないことを確認済み
     /// （`docs/backend-cuda-pool-allocator-decision.md` §4「`mma_f16`
     /// 適用確認」）。
+    ///
+    /// イシュー #2299: 唯一の呼び出し元（`gemm_mma.rs::
+    /// alloc_output_f16_pooled`）は `internal-diagnostics` feature
+    /// 限定のため、feature 無効時は dead code。
+    #[cfg(feature = "internal-diagnostics")]
     pub(crate) fn alloc_uninit_f16(
         &self,
         numel: usize,
@@ -727,6 +737,11 @@ impl CudaAllocator {
     /// `driver/safe/core.rs`）は `dst.len() == src.len()` として常に
     /// 成立する。転送失敗時は統計を明示的に巻き戻す（`alloc_zeroed` の
     /// memset 失敗時の巻き戻しと同型）。
+    ///
+    /// イシュー #2299: 唯一の呼び出し元（`gemm_mma.rs::upload_f16_pooled`）
+    /// は `internal-diagnostics` feature 限定のため、feature 無効時は
+    /// dead code。
+    #[cfg(feature = "internal-diagnostics")]
     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
         let mut handle = self.alloc_uninit::<f16>(src.len())?;
         if let Err(e) = self.stream.memcpy_htod(src, &mut handle.as_view_mut()) {

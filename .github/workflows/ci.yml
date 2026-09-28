@@ -589,6 +589,28 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo test --workspace --locked
 
+      # イシュー #2299: workspace は resolver = "3" のため
+      # `cargo clippy -p <crate> --all-features` は選択した crate の
+      # feature のみ有効化し、依存として入る backend-cuda は既定 feature
+      # （`internal-diagnostics` 無効）でビルドされる。診断専用の feature
+      # ゲート項目に cfg が付いていないと、この構成でのみ dead code 警告
+      # が出て `-p fandhe-ai-autodiff`／`-p fandhe-ai-backend-cpu`／
+      # `-p fandhe-ai`（facade）等の単体 clippy が `-D warnings` で失敗
+      # する（`--workspace` では backend-cuda の feature も有効になるため
+      # 気づけない）。本ステップは「既定 feature の backend-cuda」という
+      # 本ジョブの主題（toolkit 非搭載環境で成立するビルド構成）と一致する
+      # ため、新規ジョブを立てず既存ジョブへのステップ追加とする
+      # （`.claude/rules/ci.md`「ワークフロー設計」節の運用上の注意:
+      # ジョブ新設は ruleset `main-protection` の required contexts 更新
+      # 〈人間承認〉を要するため避ける）。1 コマンドで lib・lib test
+      # （feature 無効）の両方を検査でき、依存側 `-p X --all-features`
+      # の失敗も同じ lib のビルド結果に起因するため本ステップ 1 つで
+      # 足りる。target キャッシュキーには既に clippy 版数が入っている
+      # （イシュー #917）ため追加のキャッシュ設定は不要。
+      - name: cargo clippy（backend-cuda・internal-diagnostics 無効）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo clippy -p fandhe-ai-backend-cuda --all-targets --locked -- -D warnings
+
   # --------------------------------------------------
   # 依存禁止リストの機械検査（TASK-1.2・REQ-1）。
   # Cargo.lock を対象に、禁止クレート（burn 系一式・cubecl・candle・tch・ndarray。

@@ -14,8 +14,15 @@
 use std::sync::Arc;
 
 use cudarc::driver::{
-    CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
+    CudaFunction, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
 };
+// イシュー #2299: `CudaSlice` は診断専用入口（`launch_f16_c_raw`／
+// `download_f16_raw`。`internal-diagnostics` feature 限定）でのみ型として
+// 現れる。feature 無効時は import 自体が dead code になるため import を
+// feature で個別に gate する（他の import と同じ `use` 文にまとめると
+// feature 無効時に import 全体を dead code 扱いできず解消できない）。
+#[cfg(feature = "internal-diagnostics")]
+use cudarc::driver::CudaSlice;
 use half::f16;
 
 use crate::context_cache;

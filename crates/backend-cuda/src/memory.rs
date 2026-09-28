@@ -615,6 +615,13 @@ pub(crate) enum ReadbackDest {
     /// 現行方式（`clone_dtoh` が内部で `Vec::with_capacity` +
     /// `set_len` により確保する未初期化 `Vec`）。挙動・bit 出力とも
     /// 本イシュー導入前と完全に同一。
+    ///
+    /// イシュー #2299: 本番既定 `READBACK_DEST` は常に
+    /// `PretouchedFresh` で、本 variant を選ぶのは診断専用入口
+    /// （`readback_f32_diag`／`readback_f16_diag`。`internal-
+    /// diagnostics` feature 限定）のみ・unit test からの直接構築も
+    /// ない。feature で gate する。
+    #[cfg(feature = "internal-diagnostics")]
     Fresh,
     /// 事前タッチ済み `Vec`（[`pretouched_host_vec`]）へ `memcpy_dtoh`
     /// する方式。宛先の全バイトが `memcpy_dtoh` 呼び出し前に一度
@@ -763,6 +770,7 @@ where
     Src: DevicePtr<T>,
 {
     match dest {
+        #[cfg(feature = "internal-diagnostics")]
         ReadbackDest::Fresh => {
             let host = stream.clone_dtoh(dev)?;
             stream.synchronize()?;

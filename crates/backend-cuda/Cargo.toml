@@ -104,6 +104,21 @@ half.workspace = true
 # `required-features` 経由で本 feature を要求する。deps-policy.md「バックエンド
 # 切替は feature フラグなしの cfg ベース」はバックエンド選択（CUDA/Metal/CPU）に
 # 関する規約であり、本 feature は内部診断専用ツールの可視性制御であって対象外。
+#
+# イシュー #2299: 本 feature 限定の診断経路からしか使われない項目（診断
+# 専用関数・型・定数）には、既定ビルド（本 feature 無効）で dead code
+# 警告が出ないよう cfg を付ける。判断基準は次の 2 層:
+#   - unit test からも使う純関数・純データ型（本 feature の有無に依らず
+#     `cfg(test)` ビルドで実測・検証したい対象）→
+#     `#[cfg(any(test, feature = "internal-diagnostics"))]`
+#   - 診断専用入口（`internal-diagnostics` feature 限定の pub fn 等）から
+#     しか使わない項目 → `#[cfg(feature = "internal-diagnostics")]`
+# `#[allow(dead_code)]` 等で警告を黙らせることはしない（cfg で「そもそも
+# コンパイル対象にしない」ことで解消する。`.claude/rules/coding-rust.md`
+# 「コード品質」節）。`cargo clippy -p fandhe-ai-backend-cuda --all-targets
+# -- -D warnings`（feature 無効。CI `build-no-cuda-toolkit` ジョブ）と
+# `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+# の両方が警告 0 件であることを維持する。
 internal-diagnostics = []
 
 [[example]]

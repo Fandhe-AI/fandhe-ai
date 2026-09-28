@@ -396,6 +396,11 @@ pub struct CudaGemm {
     tiled_pipeline_128x64: Option<TiledPipelineFunction>,
     /// `tiled_pipeline_128x64` が `None` の場合の失敗理由。
     /// `tiled_pipeline_error` と同じ理由で文字列化して保持する。
+    /// イシュー #2299: 本番経路では失敗理由を読む箇所がなく
+    /// （`tiled_pipeline_128x64` の有無だけを見て分岐する）、読むのは
+    /// `internal-diagnostics` feature 限定の診断経路のみのため、feature
+    /// 無効時は dead code。フィールド自体を feature で gate する。
+    #[cfg(feature = "internal-diagnostics")]
     tiled_pipeline_128x64_error: Option<String>,
     /// イシュー #1214。VJP 専用 NT/TN 転置入口（`run_tiled_f32_nt`／
     /// `run_tiled_f32_tn`／`launch_tiled_f32_resident_nt`）が使う GPU 側
@@ -974,27 +979,40 @@ pub enum TiledPipelineTile {
 /// を強参照し続けるため（cudarc 0.19.8 `driver::safe::core::CudaFunction`
 /// の `module` フィールド）、本型が生存する間はポインタが指す
 /// `CudaContext` の再利用（ABA）は起こらない。
-pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+// イシュー #2299: `context_ptr` は `launch_tiled_pipeline_f32`（ベンチ
+// 専用の常駐 API。`internal-diagnostics` feature 限定）が起動直前の
+// context 一致検証にのみ使い、本番既定経路（`select_tiled_pipeline_handle`
+// 等）は読まない。タプルフィールドのまま個別に cfg を付けると後続
+// フィールドの添字がずれるため、名前付きフィールドへ変更したうえで
+// `context_ptr` フィールドのみ feature で gate する（`func`／`tile` は
+// 本番既定経路からも読むため無条件）。
+pub struct TiledPipelineFunction {
+    func: CudaFunction,
+    #[cfg(feature = "internal-diagnostics")]
+    context_ptr: usize,
+    tile: TiledPipelineTile,
+}
 
 impl TiledPipelineFunction {
     /// 起動に使う内部の [`CudaFunction`] を返す。本モジュール限定
     /// （呼び出し元が生ハンドルを取り出して検証を迂回できないようにする
     /// ため `pub(crate)` に留める）。
     fn as_cuda_function(&self) -> &CudaFunction {
-        &self.0
+        &self.func
     }
 
     /// 生成元 `CudaDevice` の `Arc<CudaContext>` ポインタ同一性識別子。
     /// [`CudaGemm::launch_tiled_pipeline_f32`] が起動直前の context 一致
     /// 検証に使う（型ドキュメントコメント参照）。
+    #[cfg(feature = "internal-diagnostics")]
     fn context_ptr(&self) -> usize {
-        self.1
+        self.context_ptr
     }
 
     /// このハンドルが保持するタイル構成タグ（[`TiledPipelineTile`]）。
     /// [`Self::launch_config`] が grid/block 構成を導出するために使う。
     fn tile(&self) -> TiledPipelineTile {
-        self.2
+        self.tile
     }
 
     /// このハンドルのタイル構成に対応する [`LaunchConfig`] を導出する
@@ -1021,12 +1039,17 @@ fn compile_tiled_pipeline(device: &CudaDevice) -> Result<TiledPipelineFunction, 
         kernels_tiled_pipeline::tiled_pipeline_f32_source(),
         "gemm_tiled_pipeline_f32",
     )?;
+    // イシュー #2299: `context_ptr` は `internal-diagnostics` feature 限定の
+    // 診断経路のみが読むため、feature 無効時は `let` ごと未使用ローカルに
+    // なる。フィールド初期化子とあわせて `let` 自体も feature で gate する。
+    #[cfg(feature = "internal-diagnostics")]
     let context_ptr = Arc::as_ptr(device.context()) as usize;
-    Ok(TiledPipelineFunction(
+    Ok(TiledPipelineFunction {
         func,
+        #[cfg(feature = "internal-diagnostics")]
         context_ptr,
-        TiledPipelineTile::Bm64Bn64,
-    ))
+        tile: TiledPipelineTile::Bm64Bn64,
+    })
 }
 
 /// 128×64×16 pipeline カーネル（イシュー #1343）の
@@ -1060,12 +1083,16 @@ fn compile_tiled_pipeline_128x64(device: &CudaDevice) -> Result<TiledPipelineFun
         kernels_tiled_pipeline_128x64::tiled_pipeline_128x64_f32_source(),
         "gemm_tiled_pipeline_128x64_f32",
     )?;
+    // イシュー #2299: `compile_tiled_pipeline` と同じ理由で `let` を
+    // feature gate する。
+    #[cfg(feature = "internal-diagnostics")]
     let context_ptr = Arc::as_ptr(device.context()) as usize;
-    Ok(TiledPipelineFunction(
+    Ok(TiledPipelineFunction {
         func,
+        #[cfg(feature = "internal-diagnostics")]
         context_ptr,
-        TiledPipelineTile::Bm128Bn64,
-    ))
+        tile: TiledPipelineTile::Bm128Bn64,
+    })
 }
 
 /// 128×64×16 pipeline カーネル（イシュー #1343・#1344）の本番結線スイッチ。
@@ -1150,6 +1177,12 @@ pub(crate) fn tiled_pipeline_tile_kind(has_128x64: bool, n: u32, k: u32) -> Tile
 /// を避ける fail-soft な安全弁。`compile_tiled_pipeline_persistent_variant`
 /// が `blocks_per_sm == 0` を事前に拒否するため、実際には `num_sms == 0`
 /// のような環境要因でのみこの安全弁に到達しうる）。
+///
+/// イシュー #2299: 本番の呼び出し元（`launch_tiled_pipeline_persistent_f32`）
+/// は `internal-diagnostics` feature 限定だが、本関数自体は GPU 非依存の
+/// 純関数であるため unit test（下部 `#[cfg(test)]` モジュール）からも
+/// feature 無効時に検証する。`any(test, feature)` で両ビルドに含める。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm: u32) -> u32 {
     let capacity = num_sms.saturating_mul(blocks_per_sm);
     capacity.min(num_tiles).max(1)
@@ -1170,6 +1203,11 @@ pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm
 /// `launch_tiled_pipeline_persistent_f32`）が早期 return で処理するため
 /// 本関数には到達しないが、独立関数として `0` を返す契約にしておく
 /// （`u64::from(m) - 1` の桁あふれを避けるため）。
+///
+/// イシュー #2299: `persistent_grid_blocks` と同じ理由で `any(test,
+/// feature)` gate（本番の呼び出し元は `internal-diagnostics` feature
+/// 限定だが、純関数自体は unit test から feature 無効時も検証する）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub(crate) fn persistent_tile_count(
     tile: TiledPipelineTile,
     m: u32,
@@ -1237,6 +1275,12 @@ pub(crate) fn persistent_tile_count(
 /// （128×64・イシュー #1347）のみ（いずれも `internal-diagnostics`
 /// feature 限定の opt-in API。本番既定経路 [`CudaGemm::new`] は本型を
 /// 一切生成しない＝コンパイルコストなし）。
+///
+/// イシュー #2299: 生成手段・利用箇所（`launch_tiled_pipeline_persistent_f32`・
+/// `run_tiled_pipeline_persistent_f32`）はすべて既に `internal-diagnostics`
+/// feature でゲート済みのため、feature 無効時は本型自体が never
+/// constructed（dead code）になる。型定義ごと feature で gate する。
+#[cfg(feature = "internal-diagnostics")]
 pub struct PersistentTiledPipelineFunction {
     func: CudaFunction,
     context_ptr: usize,
@@ -1246,6 +1290,7 @@ pub struct PersistentTiledPipelineFunction {
     tile: TiledPipelineTile,
 }
 
+#[cfg(feature = "internal-diagnostics")]
 impl PersistentTiledPipelineFunction {
     /// このハンドルが保持するタイル構成タグ（[`TiledPipelineTile`]）。
     /// GB10 実機ベンチ（`examples/gemm_tiled_pipeline_persistent_bench.rs`）
@@ -1480,6 +1525,11 @@ fn tiled_pipeline_launch_config(tile: TiledPipelineTile, m: u32, n: u32) -> Laun
 /// 関数を単一の真実源として使う。現状どちらのタイルも 256 だが、
 /// `tiled_pipeline_launch_config` と同じ理由で「値が偶然一致している」
 /// ことに暗黙に依存せず、タグ経由で明示的に導出する）。
+///
+/// イシュー #2299: 呼び出し元 2 箇所（`compile_tiled_pipeline_persistent_
+/// generic`・`launch_tiled_pipeline_persistent_f32`）はいずれも
+/// `internal-diagnostics` feature 限定のため、feature 無効時は dead code。
+#[cfg(feature = "internal-diagnostics")]
 fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
     match tile {
         TiledPipelineTile::Bm64Bn64 => kernels_tiled_pipeline::TP_BLOCK_THREADS,
@@ -1512,7 +1562,12 @@ fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
 /// `kernels_tiled_pipeline::TP_SK_KERNEL_PREFIX`（private const。doc link 化しない）
 /// ドキュメンテーション
 /// コメント「決定性の根拠」参照。
+// イシュー #2299: 生成関数 `streamk_plan` の本番呼び出し元は
+// `internal-diagnostics` feature 限定の起動経路だが、本構造体・
+// `streamk_plan` 自体は GPU 非依存の純データ・純関数のため unit test
+// からも feature 無効時に検証する（`any(test, feature)`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub struct StreamKPlan {
     /// 出力タイル総数 `T`（`persistent_tile_count`（private fn）と同じ
     /// `ceil(m/TP_BM) * ceil(n/TP_BN)`）。
@@ -1539,6 +1594,7 @@ pub struct StreamKPlan {
     pub total_units: u32,
 }
 
+#[cfg(any(test, feature = "internal-diagnostics"))]
 impl StreamKPlan {
     /// 残タイルの K 分割が実際に発生する（`remainder_tiles > 0`）かを
     /// 返す。`false` の場合、[`CudaGemm::launch_tiled_pipeline_streamk_f32`]
@@ -1574,6 +1630,9 @@ impl StreamKPlan {
 /// が `i32::MAX` を超える場合は `CudaError::InvalidShape` で拒否する
 /// （REQ-8・fail-closed。`persistent_tile_count` の同種オーバーフロー
 /// 防止と同じ判断）。
+///
+/// イシュー #2299: `StreamKPlan` と同じ理由で `any(test, feature)` gate。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub(crate) fn streamk_plan(
     num_tiles: u32,
     grid_capacity: u32,
@@ -1677,6 +1736,10 @@ pub(crate) fn streamk_plan(
 /// `u64` 中間値を `i32::MAX` 以下（カーネル `int` 引数として安全に渡せる
 /// 範囲）で `u32` へ変換する。[`persistent_tile_count`] の同種オーバー
 /// フロー検査と同じ判断（REQ-8・fail-closed）。
+///
+/// イシュー #2299: `StreamKPlan`／`streamk_plan` と同じ理由で
+/// `any(test, feature)` gate。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 fn u32_from_u64_bounded(value: u64, context: &str) -> Result<u32, CudaError> {
     if value > u64::from(i32::MAX as u32) {
         return Err(CudaError::InvalidShape {
@@ -1712,6 +1775,12 @@ fn u32_from_u64_bounded(value: u64, context: &str) -> Result<u32, CudaError> {
 ///   不要。実装計画 §3.1 点 6・advisor 指摘）。
 /// - `num_sms`／`blocks_per_sm`: [`PersistentTiledPipelineFunction`] と
 ///   同じ意味（`grid_capacity = num_sms * blocks_per_sm`）。
+///
+/// イシュー #2299: 生成手段（`compile_tiled_pipeline_streamk_variant`）・
+/// 利用箇所（`launch_tiled_pipeline_streamk_f32`・
+/// `run_tiled_pipeline_streamk_f32`）はすべて `internal-diagnostics`
+/// feature 限定のため、feature 無効時は本型自体が dead code。
+#[cfg(feature = "internal-diagnostics")]
 pub struct StreamKTiledPipelineFunction {
     sk_func: CudaFunction,
     fixup_func: CudaFunction,
@@ -1722,6 +1791,7 @@ pub struct StreamKTiledPipelineFunction {
     blocks_per_sm: u32,
 }
 
+#[cfg(feature = "internal-diagnostics")]
 impl StreamKTiledPipelineFunction {
     /// このハンドルの起動 grid 容量（`num_sms * blocks_per_sm`。
     /// [`StreamKPlan::grid_capacity`] に渡す値）。ベンチ・実機自己検証
@@ -2395,6 +2465,12 @@ impl CudaGemm {
         // `select_tiled_f32_kernel` の分岐先とも完全不変。GB10 実機での
         // 純カーネル時間比較・形状条件付き結線の可否判断は
         // `docs/perf/cuda-gemm-tiled-pipeline.md`「#1344」節参照）。
+        // イシュー #2299: `tiled_pipeline_128x64_error` フィールドは
+        // `internal-diagnostics` feature 限定の診断経路のみが読むため、
+        // feature 無効時は `let` の右辺・変数ごと feature で分ける
+        // （`Result::ok()` で `Option<TiledPipelineFunction>` だけを
+        // 残し、失敗理由の文字列化は行わない）。
+        #[cfg(feature = "internal-diagnostics")]
         let (tiled_pipeline_128x64, tiled_pipeline_128x64_error) =
             if TILED_PIPELINE_128X64_PRODUCTION_ENABLED {
                 match compile_tiled_pipeline_128x64(device) {
@@ -2404,6 +2480,12 @@ impl CudaGemm {
             } else {
                 (None, None)
             };
+        #[cfg(not(feature = "internal-diagnostics"))]
+        let tiled_pipeline_128x64 = if TILED_PIPELINE_128X64_PRODUCTION_ENABLED {
+            compile_tiled_pipeline_128x64(device).ok()
+        } else {
+            None
+        };
 
         // イシュー #1214: VJP 専用 NT/TN 転置入口の smem 転置カーネル。
         // 上記 `wmma_tf32`／`tiled_pipeline` 系と同じ fail-soft 方針
@@ -2439,6 +2521,7 @@ impl CudaGemm {
             tiled_pipeline,
             tiled_pipeline_error,
             tiled_pipeline_128x64,
+            #[cfg(feature = "internal-diagnostics")]
             tiled_pipeline_128x64_error,
             transpose_smem_f32,
             transpose_smem_f32_error,
@@ -3352,11 +3435,11 @@ impl CudaGemm {
         )?;
         let func = load_function_cached(device, descriptor, &source, "gemm_tiled_pipeline_f32")?;
         let context_ptr = Arc::as_ptr(device.context()) as usize;
-        Ok(TiledPipelineFunction(
+        Ok(TiledPipelineFunction {
             func,
             context_ptr,
-            TiledPipelineTile::Bm64Bn64,
-        ))
+            tile: TiledPipelineTile::Bm64Bn64,
+        })
     }
 
     /// 128×64×16 pipeline カーネル（イシュー #1343）の任意ステージ数
@@ -3390,11 +3473,11 @@ impl CudaGemm {
             "gemm_tiled_pipeline_128x64_f32",
         )?;
         let context_ptr = Arc::as_ptr(device.context()) as usize;
-        Ok(TiledPipelineFunction(
+        Ok(TiledPipelineFunction {
             func,
             context_ptr,
-            TiledPipelineTile::Bm128Bn64,
-        ))
+            tile: TiledPipelineTile::Bm128Bn64,
+        })
     }
 
     /// persistent タイルキュー版 pipeline カーネル（イシュー #1346）の
