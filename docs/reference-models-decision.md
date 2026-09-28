@@ -329,3 +329,46 @@ size・学習率だけであり、epoch 数（10。イシュー受け入れ条�
 `compat::Sequential::add_*`・`Var::add`／`relu`／`mean`／`reshape` の
 組み合わせのみ）で、CUDA／Metal での facade parity 実測・
 `docs/perf/logs/` への申し送りは不要と判断した。
+
+### 10.8 `ReferenceModule`（examples 限定 trait）と facade `nn::Module` の関係（事前評価）
+
+イシュー #2338 は「`ReferenceModule` を使った代替が本 doc §10 に
+書かれている」ことを前提としていたが、`docs/reference-models-decision.md`
+本文には `ReferenceModule` という語は一度も出現しない（grep で確認
+済み）。実際に `ReferenceModule` が定義・言及されているのは
+`crates/facade/examples/models/reference_module.rs` 冒頭コメントと
+`docs/README.md` の索引行のみである。本節はこの前提の食い違いを
+記録したうえで、`ReferenceModule` と facade `nn::Module`（§10 承認
+事項 1・案 B。`docs/facade-nn-module-exposure-decision.md` §5・§6）
+との事前対応関係を整理する。
+
+**(a) 代替の事実と理由**: `reference_module.rs` 冒頭コメントに明記
+のとおり、facade の `nn::Module` は #2133 以降も承認待ちで保留中
+（`crates/facade/src/lib.rs::NnModuleHoldDoctestGuard`）であり、
+examples から内部の `fandhe_ai_autodiff::nn::Module` を impl する
+ことも公開パス限定の方針により行わない。`ReferenceModule`／
+`Trainable` は、この 2 つの制約の下で PyTorch `nn.Module` に似せた
+層積層を示すための **examples 限定**の代替 trait である
+（`crates/facade/examples/models/reference_module.rs:1-21`）。
+
+**(b) 案 B との事前対応表**（`docs/facade-nn-module-exposure-decision.md`
+§5・§6・§10 承認事項 2）:
+
+| `ReferenceModule`／`Trainable` のメソッド | 案 B の対応 | 一致度 |
+|---|---|---|
+| `forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>` | required method `forward`（§6 利用例） | シグネチャが同一 |
+| `named_parameters(&self) -> Vec<(String, &Tensor<f32>)>` | defaulted メソッド `named_parameters`（§10 承認事項 2） | 名前・意味論とも同じ |
+| `set_training(&mut self, training: bool)` | defaulted メソッド `set_training`（同上） | 名前・意味論とも同じ |
+| `is_training(&self) -> bool` | defaulted メソッド `training`（同上） | 意味論は同じだが**名前が異なる**（`is_training` vs `training`） |
+| （なし。`set_parameter`／`state_dict`／`load_state_dict` は `ReferenceModule` に未実装） | defaulted メソッド `set_parameter`／`state_dict`／`load_state_dict`（同上） | `ReferenceModule` 側に対応なし |
+| `Trainable::train_step(&mut self, x, y, opt: &mut Adam) -> Result<f32, AutodiffError>` | 対応なし（案 B は required／defaulted のいずれにも学習ステップを含まない。§6） | `Trainable` 固有。移行しても examples 側に残る見込み |
+
+**(c) 結論（事前評価のみ・確定は承認後）**: 案 B が §10 で承認されれ
+ば、`forward`・`named_parameters`・`set_training` の 3 メソッドは
+シグネチャ・命名とも一致するためほぼ機械的に寄せられる見込みである。
+`is_training` → `training` の改名と、`Trainable::train_step`（案 B
+に対応なしのため examples 側に残る）だけが単純な置き換えでは済まない
+差分になる。本節は評価のみであり、`ReferenceModule` から facade
+`nn::Module` への実際の移行・置き換えは、案 B の採否が承認されたのち
+に別イシューで行う（§9 のスコープ外一覧・`docs/facade-nn-module-
+exposure-decision.md` §13.5 の「承認取得後に実施する変更範囲」参照）。
