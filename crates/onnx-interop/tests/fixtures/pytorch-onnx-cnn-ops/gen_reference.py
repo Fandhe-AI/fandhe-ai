@@ -249,8 +249,15 @@ CASES = [
     ("maxpool1d_basic", MaxPool1dBasic, (1, 3, 9)),
     ("avgpool2d_include_pad", AvgPool2dIncludePad, (1, 3, 8, 8)),
     ("avgpool2d_exclude_pad", AvgPool2dExcludePad, (1, 3, 8, 8)),
-    ("avgpool2d_ceil_overhang_incl", AvgPool2dCeilOverhangIncl, (1, 3, 7, 7)),
-    ("avgpool2d_ceil_overhang_excl", AvgPool2dCeilOverhangExcl, (1, 3, 7, 7)),
+    # kernel 3・stride 2・padding 1・ceil_mode=True の入力形状は 6x6 とする（7x7 では
+    # ceil_mode が生む最終窓の右端・下端が padded 領域の終端と一致するのみで、
+    # padded 領域からのはみ出し〈overhang〉を伴わない。6x6 は floor_mode に対し
+    # ceil_mode が窓を 1 行・1 列増やし、その最終窓が padded 領域（6+2*1=8）を
+    # 越えるため divisor クリップ規則を実際に踏む。イシュー #2329 PR #2343
+    # codex-review 指摘・2026-09-28 実測で確認済み: divisor_override=9（クリップ
+    # 無効化）との出力差が 7x7 では 0、6x6 では非ゼロ）
+    ("avgpool2d_ceil_overhang_incl", AvgPool2dCeilOverhangIncl, (1, 3, 6, 6)),
+    ("avgpool2d_ceil_overhang_excl", AvgPool2dCeilOverhangExcl, (1, 3, 6, 6)),
     ("avgpool1d_basic", AvgPool1dBasic, (1, 3, 9)),
     ("gap2d", Gap2d, (1, 3, 7, 9)),
     ("gap1d", Gap1d, (1, 3, 9)),

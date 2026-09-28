@@ -58,8 +58,9 @@ REQ-7 事前固定式 `abs_err / (|ref| + 1e-6) <= 1e-3` での fail 要素数�
 | `maxpool1d_basic` | ts/dynamo | `MaxPool` | 0/15 | 0 | 0 | BitExact |
 | `avgpool2d_include_pad` | ts/dynamo | `AveragePool` | 31/48 | 5.96e-8 | 4.21e-6 | Req7Provisional（暫定 pass） |
 | `avgpool2d_exclude_pad` | ts/dynamo | `AveragePool` | 30/48 | 5.96e-8 | 1.25e-6 | Req7Provisional（暫定 pass） |
-| `avgpool2d_ceil_overhang_incl` | ts/dynamo | `AveragePool` | 18/48 | 2.98e-8 | 1.63e-7 | Req7Provisional（暫定 pass） |
-| `avgpool2d_ceil_overhang_excl` | ts/dynamo | `AveragePool` | 19/48 | 5.96e-8 | 2.60e-6 | Req7Provisional（暫定 pass） |
+| `avgpool2d_ceil_overhang_incl` | ts | `AveragePool` | 19/48 | 5.96e-8 | 6.19e-7 | Req7Provisional（暫定 pass） |
+| `avgpool2d_ceil_overhang_incl` | dynamo | `AveragePool` | 19/48 | 5.96e-8 | 6.19e-7 | Req7Provisional（暫定 pass） |
+| `avgpool2d_ceil_overhang_excl` | ts/dynamo | `AveragePool` | 22/48 | 1.19e-7 | 6.80e-6 | Req7Provisional（暫定 pass） |
 | `avgpool1d_basic` | ts/dynamo | `AveragePool` | 6/15 | 1.19e-7 | 1.08e-7 | Req7Provisional（暫定 pass） |
 | `gap2d` | ts | `GlobalAveragePool` | 1/3 | 3.73e-9 | 6.67e-8 | Req7Provisional（暫定 pass） |
 | `gap2d` | dynamo | `ReduceMean` | 3/3 | 1.49e-8 | 2.00e-7 | Req7Provisional（暫定 pass） |
@@ -75,8 +76,10 @@ REQ-7 事前固定式 `abs_err / (|ref| + 1e-6) <= 1e-3` での fail 要素数�
 
 **全 38 ケース×exporter の組で `req7_fail_count=0`**（暫定 REQ-7 判定でも
 fail するケースは実測で無かった）。`max_rel_err` の最大値は
-`avgpool2d_include_pad` の `4.2e-6` で、閾値 `1e-3` に対して十分な余裕が
-ある。
+`avgpool2d_ceil_overhang_excl` の `6.80e-6`（イシュー #2329 PR #2343
+codex-review 指摘対応で fixture の入力形状を `7x7` から `6x6` へ変更し
+再実測。旧実測では `avgpool2d_include_pad` の `4.2e-6` が最大だった）で、
+閾値 `1e-3` に対して十分な余裕がある。
 
 ## R1〜R6 との対応（受け入れ基準チェック）
 
@@ -120,11 +123,17 @@ inline へ変換してからコミットしている（詳細はフィクスチ�
 ## AveragePool の `count_include_pad`／`ceil_mode` divisor クリップ規則の実証
 
 `avgpool2d_ceil_overhang_incl`／`avgpool2d_ceil_overhang_excl`（入力
-`7x7`・kernel `3x3`・stride `2`・padding `1`・`ceil_mode=1`。出力窓が
+`6x6`・kernel `3x3`・stride `2`・padding `1`・`ceil_mode=1`。出力窓が
 入力+padding 領域からはみ出す形状）は、`ops::pool` モジュール doc が
 記録する「PyTorch／ONNX Runtime 準拠の padded 座標でのクリップ規則」を
-実証する目的で構成した。実測ではいずれも暫定 REQ-7 判定を通過して
-おり（`max_rel_err` はそれぞれ `1.63e-7`・`2.60e-6`）、この divisor
+実証する目的で構成した。入力形状は当初 `7x7` だったが、この形状では
+`ceil_mode` が生む最終窓の右端・下端が padded 領域（7+2*1=9）の終端に
+一致するのみで実際にははみ出さず、divisor クリップ規則を実証できて
+いなかった（イシュー #2329 PR #2343 codex-review 指摘・2026-09-28
+`6x6` へ修正。`6x6` は floor_mode の 3x3 出力に対し `ceil_mode` が
+4x4 出力へ 1 行・1 列増やし、その最終窓が padded 領域〈6+2*1=8〉を
+実際に越える）。実測ではいずれも暫定 REQ-7 判定を通過しており
+（`max_rel_err` はそれぞれ `6.19e-7`・`6.80e-6`）、この divisor
 規則が PyTorch 実行値と整合することを確認した。
 
 ## GPU 実機 parity が構造的に N/A である根拠

@@ -112,16 +112,24 @@ dynamo が分解した `ReduceMean`／`Unsqueeze`／`Squeeze`／`Reshape` はい
   （`abs_err / (|ref| + 1e-6) <= 1e-3`）を**暫定**適用する
   （`Expectation::Req7Provisional`）。**この暫定適用は最終判定方式として
   ユーザー承認を得たものではない**。全ケースが暫定 REQ-7 判定でも fail
-  せず通過した（実測の `max_rel_err` は最大でも `avgpool2d_include_pad`
-  の `4.2e-6` 程度で、1e-3 の閾値に対して十分な余裕がある。詳細な実測値は
+  せず通過した（実測の `max_rel_err` は最大でも `avgpool2d_ceil_overhang_excl`
+  の `6.80e-6` 程度で、1e-3 の閾値に対して十分な余裕がある。詳細な実測値は
   `docs/perf/logs/onnx-cnn-ops-pytorch-fixture-2329/README.md` を参照）。
 
 ## `count_include_pad`／`ceil_mode` の divisor クリップ規則の実証
 
 `avgpool2d_ceil_overhang_incl`／`avgpool2d_ceil_overhang_excl`
-（入力 `7x7`・kernel `3x3`・stride `2`・padding `1`・`ceil_mode=1`）は、
+（入力 `6x6`・kernel `3x3`・stride `2`・padding `1`・`ceil_mode=1`）は、
 出力窓が入力+padding 領域からはみ出す（右端・下端）ケースを狙って
-構成した。実測では両ケースとも暫定 REQ-7 判定を通過しており、
+構成した。入力形状は当初 `7x7` だったが、この形状では `ceil_mode`
+が生む最終窓の右端・下端が padded 領域（7+2*1=9）の終端に一致するのみで
+実際にははみ出さず、divisor クリップ規則を実証できていなかった
+（イシュー #2329 PR #2343 codex-review 指摘・2026-09-28 修正）。`6x6`
+は floor_mode（3x3 出力）に対し `ceil_mode` が窓を 4x4 出力へ 1 行・
+1 列増やし、その最終窓が padded 領域（6+2*1=8）を越えるため実際に
+クリップが発生する（`divisor_override` で強制クリップ無効化した出力
+との差分が非ゼロであることを実測確認済み。`7x7` では同じ比較の差分が
+ゼロだった）。実測では両ケースとも暫定 REQ-7 判定を通過しており、
 `ops::pool` モジュール doc が記録する「PyTorch／ONNX Runtime 準拠の
 padded 座標でのクリップ規則」が PyTorch 実行値と整合することを
 実証した。
@@ -143,45 +151,45 @@ bit パターンが一致する `state_dict` エントリを探索）で行っ�
 
 ```
 005953d44a6e15fb4df0e60782056b0660897706ac4c72379bf5b641e8d78c2c  avgpool2d_exclude_pad_dynamo.onnx
-02e18455c7c23d281cb64c19a4ec2fdd446680905bbbb35a0c6106084d10dbb3  avgpool2d_ceil_overhang_incl_ts.onnx
 060eb0aea53a199a76370b3010dbfa1ee77ef17ee00128fb1df431538ba40fe9  maxpool2d_basic_ts.onnx
 0ba69cc7c791726b167dcb29427d47b7e05214d3b22bd0c67b1a847dff53aca8  avgpool2d_include_pad_ts.onnx
+1128eccb16d09e34e2c5ee89dc6cf5f8a3de8248f6f1d83bc16bd28832692eab  avgpool2d_ceil_overhang_excl_dynamo.onnx
 1da92f41d55cec5e31183d07e25b897dfafb01deb0e4b937e304a16b354171fc  conv1d_basic_dynamo.onnx
 2229d01aae1916a69bcc2f4126ae5baefabd77bca4cb27fa7bb09aa10e4f7cdd  flatten_default_dynamo.onnx
 27d129e22c6c594f21016487b1bb02be925b0538f62414a5db364974373738fc  gap2d_dynamo.onnx
 28a974354afc7377c595885e33a56b6baad52f0425361f2abcb90344abcbbe4f  gap1d_dynamo.onnx
+2bb359aba5326fc932f29e8cb0e26661dc74a632ad8a95390d5ec51d2ceb6550  gen_reference.py
 367085732674305654584ba45845fd7a8c535b8d21d00f38c5c5d22006381285  conv1d_basic_ts.onnx
 397ce80626f7eb00f766fd35ff8da8bc6c7acff5ac96545ffd0cce2cf7dffa3f  conv2d_stride_dil_group_ts.onnx
 43746486a1f834c9a85ad99e8e781ff0058a1008b68c41890bef0d2afbdb66c3  bn2d_eval_dynamo.onnx
 438eaf0469d4467b7d8e3e99a919be562b8f0968f3ddfdad756e7daafe0bc0a0  maxpool2d_basic_dynamo.onnx
 468d8267afab96dfdc533ec99d4ade1de0223df9770f0a92727c8ce4df3b5cf3  flatten_default_ts.onnx
 499964f2598a6d666c20dfe4c5d621cc270a3294fb4a03f6d48bf1d416ce044b  maxpool2d_pad_dil_ceil_dynamo.onnx
+672aa6c77938b7185a02c71ad90793c95f4ee7a314f99912230735976e7da6fa  reference.json
 67bfb98449322f19b0925025ae3c724ad69ee758c1eddb0a01537b3872335444  gap2d_ts.onnx
+68ea0d4a8f710a1771649de626fdfd8bb56a378f37fcad28b57c8f1a58a978cb  avgpool2d_ceil_overhang_excl_ts.onnx
 6e7c6176316915a3e47272d3d17091d8cb237fa9c37f3aa0b002baf741095f35  gap1d_ts.onnx
 70ccbe0110c7cb6165af565cbeff7906467376248c567636f7a8ea859194137d  bn1d_eval_ts.onnx
 774ecefd246a476ff778ed8be2c9da5176c246f0948e4d29c7f0850b1607065f  flatten_start2_ts.onnx
 7e361f9559b692b987d178c1919bceec3ef47989977da4b6bcfdc5852f4180f1  conv2d_basic_ts.onnx
 8236f2c6553ba90992288cde01ebd74e1929382eed4fcc5214c0bf746fb462d4  maxpool2d_pad_dil_ceil_ts.onnx
 8c45258c677bbc826763e91db6f814f84822c95c6a527e690698c944aa7e6cc5  bn2d_eval_eps_dynamo.onnx
-90260b26df62052fbd74fba57b1bfb8dab3c6afb9bee7447b8294343bd34da3e  avgpool2d_ceil_overhang_excl_ts.onnx
 90b6e0ea7b8a644305c17cb9a85ff6ee107a6afc507e49e0eebe0e6df933580f  avgpool1d_basic_dynamo.onnx
 97936bb034e104bad927452850e69ca7ec10079f5c9736d87e146c1f236d8222  bn2d_eval_eps_ts.onnx
 97c958872308dfa3ee26a71ceedf9d66c5801f898add907f270017e8f1dcbc23  maxpool1d_basic_dynamo.onnx
 9c2766126ce399dc0b3af45e6ed253ba5ea3c5d304811648c50e58f0edd34cd4  conv2d_basic_dynamo.onnx
 a65a00b7f8b9150e0b12d7e6204701628b1942b98db7b0937ff93920be2877c7  flatten_start2_dynamo.onnx
-afff8052a10e32713d30d75ec9ffde0a2d646cab6e8345459cf480baec0bef56  avgpool2d_ceil_overhang_incl_dynamo.onnx
-b7a43e3c6191290bb6fea1d1c8f79b88dd10255eb7267e4084529f9191e9c83f  reference.json
+ac9bf7808c386b3833fe9687075767083d5dd955e7092d3244265ba6ac02027b  avgpool2d_ceil_overhang_incl_ts.onnx
 bc5511f7710d3c4dc5c0051f20e2aa9a568dc33a83ccd277915b930e12bca639  avgpool2d_include_pad_dynamo.onnx
 c83e383ee90a1806f8f5a7a04b93177acd6e2d422c02e07cc67a1725bfb3a301  bn1d_eval_dynamo.onnx
 cd3429efbaee2bcfe7ff6ef530c0d5231d59018cc40dc7769af41fee355427e1  maxpool1d_basic_ts.onnx
 cfc806d1b4495f5557c83fb44f0ccf3922fa4bc333e85083c0ff6d0dc35ae841  avgpool2d_exclude_pad_ts.onnx
 da1fda04a3bf30a57f5b27df4bba48a0cc0f88c06a2eeea97c5835861c77b0b7  conv2d_nobias_ts.onnx
-dc719fb62410d6b16f472c9ac0cad74194bbc666cfb9139c4be677ac8ae3c14b  gen_reference.py
 de09f29219bf124760113ca13a35b1b4a80025b384063293dfd2285b4f10b28f  avgpool1d_basic_ts.onnx
 e38c75fe9b8c3abd43425325836049791046740c1cdeb31783885f410884e5fd  conv2d_stride_dil_group_dynamo.onnx
+e7d62c9f3dc08e2f1f2bf9e633e631112e07c67166c9f524bbc720cbb082ff56  avgpool2d_ceil_overhang_incl_dynamo.onnx
 fb687fcf22bf1ce068bb70386a93ce03afb3eaeed9e727c9446ce749018eae39  bn2d_eval_ts.onnx
 fb68937cc64b693c7388f73ab488167d2046f3ef6d43f88b516de6966d69c1bc  conv2d_nobias_dynamo.onnx
-fbee54fb40aa2f69e8b8f00a3de91424bf88564646fd63265e602ae21a6ada92  avgpool2d_ceil_overhang_excl_dynamo.onnx
 ```
 
 ## 再生成手順
