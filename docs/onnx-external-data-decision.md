@@ -103,11 +103,18 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      ONNX 仕様どおり EOF まで（`file_len - offset`。checked）と解釈する。
    - `location` は文字列段階（空・NUL・4096 バイト超過・`\`・ドライブ
      文字接頭辞）と `Path::components()`（`RootDir`/`Prefix`/`ParentDir`
-     をすべて拒否）の両方で検証する。`base_dir` を起点にコンポーネント
-     を 1 つずつ連結しながら各段で `symlink_metadata` を取り、経路の
-     途中を含めシンボリックリンクを拒否する。解決結果を
-     `canonicalize` し、canonicalize 済み `base_dir` で `starts_with`
-     しなければ拒否する（多層防御）。
+     をすべて拒否）の両方で検証する。Linux／macOS（CI ビルド対象）では
+     `base_dir` を開いたディレクトリ fd を起点に、検証済みの各パス成分を
+     `openat(dirfd, name, O_NOFOLLOW)` で逐次オープンし、得られた fd を
+     次段の起点にする（`crates/onnx-interop/src/onnx/external_data.rs::
+     no_follow_open`）。経路文字列を`canonicalize`／`File::open`で
+     **再解決しない**ため、検証と実際のオープン対象が fd レベルで
+     一致することが構造的に保証される（2026-09-28・#2347 P0 是正・
+     PR #2348 コードレビュー対応。5 節参照）。CI ビルド対象外の他 unix
+     ターゲットのみ、旧実装（`symlink_metadata` 逐次検証 →
+     `canonicalize` → `File::open`。経路の途中を含めシンボリックリンクを
+     拒否し、解決結果を canonicalize 済み `base_dir` で `starts_with`
+     しなければ拒否する）にフォールバックする。
    - ファイルを開いてサイズを取り、`offset + length` がファイル長を
      超えないこと・`length` が dims/data_type から導出した期待バイト長
      （`element_count` × 要素サイズ。FLOAT=4／INT64=8／BOOL=1／
@@ -134,10 +141,20 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 
 ## 5. 残るリスク（受容済み）
 
-- std では `O_NOFOLLOW` 相当を使えない（`libc` を追加できないため）。
-  そのためモデルのディレクトリへ書き込める攻撃者による TOCTOU 競合は
-  完全には排除できない。パス 2 直前のファイル長・dev/ino 再照合が
-  この窓を縮める多層防御である。
+- **2026-09-28 更新（PR #2348 codex レビュー discussion_r4119392011 P0
+  是正）**: 当初は「std に `O_NOFOLLOW` 相当が無く、`libc` crate も
+  deps-policy.md の許容依存 9 区分に含まれないため追加できない」ことを
+  理由に、`symlink_metadata` 検証後 `canonicalize` → `File::open` と
+  経路文字列を再解決する実装を採用しており、検証とオープンの間に
+  シンボリックリンク差し替え（TOCTOU）が起こり得る窓が残っていた。
+  この節はその残存リスクとして記録していたが、`libc` crate を追加
+  せず（新規外部依存を増やさず）`extern "C"` で `openat`/`O_NOFOLLOW`
+  を直接呼ぶ実装（Linux／macOS 限定。フラグ定数値を手書きし、std が
+  リンクする libc を crate 追加なしに利用する）へ是正し、Linux／macOS
+  （CI ビルド対象）ではこの TOCTOU 窓を構造的に排除した（4 節参照）。
+  CI ビルド対象外の他 unix ターゲットに限り、旧実装（経路文字列の
+  再解決）へフォールバックするため、そちらのみ本節の窓が残る
+  （パス 2 直前のファイル長・dev/ino 再照合による縮小のみ）。
 - `base_dir` 自体の信頼は呼び出し元の責務とする（呼び出し元が与える
   信頼済み入力として扱い、location 側だけを fail-closed に検証する）。
 - `checksum` の検証（SHA-1）は本 issue のスコープ外（依存を追加でき

@@ -715,6 +715,120 @@ fn overlapping_regions_in_same_file_are_rejected() {
     assert!(matches!(err, ExternalDataError::OverlappingRegion { .. }));
 }
 
+/// 同一ファイルを指す `location` の表記ゆれ（`f.data`／`./f.data`）が
+/// overlap 検出・ハンドル再利用を欺かないことの契約保証テスト（Cursor
+/// Bugbot 指摘・PR #2348 review thread `PRRT_kwDOTuUCJc6mkYTr`）。
+/// `Path` の `Eq`/`Hash` はコンポーネント単位のため、この表記ゆれ自体は
+/// 旧実装（`base_dir.join(location)` の生文字列連結キー）でも実は畳み
+/// 込まれていた（`Path` の実装詳細に依存した偶然の回避）。より厳密な
+/// 回帰は [`overlapping_regions_via_hard_link_are_rejected`]（ハードリンク
+/// はパス文字列としても `Path::components()` 正規化後も異なるが実体は
+/// 同一のファイルであり、`file_key_for` の dev/ino ベースキーでのみ
+/// 検出できる）を参照。
+#[test]
+fn overlapping_regions_via_equivalent_location_spelling_are_rejected() {
+    let dir = TempDir::new("overlap-spelling");
+    dir.write_file("f.data", &[0u8; 16]);
+    let t_a = external_tensor(
+        "a",
+        vec![1],
+        data_type::FLOAT,
+        "f.data",
+        Some("0"),
+        Some("4"),
+    );
+    // `t_b` は `t_a` と同一ファイルへ表記だけを変えて（先頭に `./` を付与）
+    // 重なる区間（offset=2, length=4 は offset=0, length=4 と重なる）を
+    // 指す。正規化前の文字列結合キーだと "f.data" と "./f.data" が別ファイル
+    // 扱いになり、この重複が検出できなかった。
+    let t_b = external_tensor(
+        "b",
+        vec![1],
+        data_type::FLOAT,
+        "./f.data",
+        Some("2"),
+        Some("4"),
+    );
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: Vec::new(),
+            name: "g".to_string(),
+            initializer: vec![t_a, t_b],
+            input: Vec::new(),
+            output: Vec::new(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    };
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(matches!(err, ExternalDataError::OverlappingRegion { .. }));
+}
+
+/// 経路としては異なる（正規化後も異なる文字列の）が実体が同一のファイル
+/// （ハードリンク）を 2 つの `location` から参照した場合でも overlap を
+/// 検出することを確認する（Cursor Bugbot 指摘・PR #2348 review thread
+/// `PRRT_kwDOTuUCJc6mkYTr` への厳密な回帰。旧実装
+/// （`base_dir.join(location)` の生文字列連結キー、または `parts` から
+/// 再構築した正規化済み相対パスをキーにする案）はどちらも「経路」だけ
+/// を見るため、`f.data` と `alias.data`（`std::fs::hard_link` で作った
+/// 同一 inode のハードリンク）を異なるファイルとして扱い、この重複を
+/// 見落とす。`file_key_for` の dev/ino ベースキーはファイルの実体
+/// そのもので同一性判定するため、この経路のみ検出できる）。
+#[cfg(unix)]
+#[test]
+fn overlapping_regions_via_hard_link_are_rejected() {
+    let dir = TempDir::new("overlap-hardlink");
+    let real = dir.write_file("f.data", &[0u8; 16]);
+    let alias = dir.path().join("alias.data");
+    std::fs::hard_link(&real, &alias).expect("hard_link の作成に失敗した");
+
+    let t_a = external_tensor(
+        "a",
+        vec![1],
+        data_type::FLOAT,
+        "f.data",
+        Some("0"),
+        Some("4"),
+    );
+    // `t_b` は `t_a` と同一 inode（ハードリンク）を異なる `location`
+    // 文字列（`alias.data`）で参照し、重なる区間を指す。
+    let t_b = external_tensor(
+        "b",
+        vec![1],
+        data_type::FLOAT,
+        "alias.data",
+        Some("2"),
+        Some("4"),
+    );
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: Vec::new(),
+            name: "g".to_string(),
+            initializer: vec![t_a, t_b],
+            input: Vec::new(),
+            output: Vec::new(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    };
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(matches!(err, ExternalDataError::OverlappingRegion { .. }));
+}
+
 #[test]
 fn duplicate_identical_region_is_rejected() {
     let dir = TempDir::new("dup-region");

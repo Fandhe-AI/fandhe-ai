@@ -40,9 +40,18 @@
 //!    開いたファイルハンドルを再利用して該当区間だけを `read_exact` する
 //!    （`.data` ファイル全体は読まない）。読み込み直前に `metadata().len()`
 //!    （Unix では dev/ino も）をパス 1 の記録と再照合し、不一致は
-//!    [`ExternalDataError::FileChangedDuringLoad`] とする（TOCTOU の窓を
-//!    縮める。std に `O_NOFOLLOW` 相当が無いため完全な排除はできない。
-//!    残るリスクは `docs/onnx-external-data-decision.md` に記録）。
+//!    [`ExternalDataError::FileChangedDuringLoad`] とする。
+//!    Linux／macOS（CI ビルド対象）では、そもそもパス 1 のファイル解決
+//!    自体が `openat(O_NOFOLLOW)` によるディレクトリハンドル連鎖
+//!    （`no_follow_open` モジュール）で行われ、検証済みの fd をそのまま
+//!    保持するため経路文字列の再解決が発生せず、シンボリックリンク差し替え
+//!    による TOCTOU 窓は構造的に生じない（`docs/
+//!    onnx-external-data-decision.md` の残タスクを解消。#2347 P0 是正・
+//!    PR #2348 コードレビュー対応）。上記 CI 対象外の他 unix
+//!    ターゲットのみ `symlink_metadata` 逐次検証 → `canonicalize` →
+//!    `File::open` という経路文字列再解決のフォールバック実装を使い、
+//!    この場合に限り本節の窓（`metadata().len()` 再照合による縮小のみ）が
+//!    残る。
 //!
 //! `checksum` キーは黙って無視せず [`ExternalDataError::
 //! ChecksumUnsupported`] で fail-closed に拒否する（依存を追加できないため
@@ -335,14 +344,248 @@ struct OpenFile {
     dev_ino: (u64, u64),
 }
 
+/// ディレクトリハンドル（fd）を起点に `O_NOFOLLOW` で各パス成分を逐次
+/// オープンする実装（P0 対応。discussion_r4119392011）。
+///
+/// 旧実装は `symlink_metadata` で各段を検証したうえで `canonicalize` →
+/// `File::open(&canonical)` とパス文字列から**再度**ファイルを開いていた。
+/// この「検証」と「再オープン」の間に窓（TOCTOU）があり、検証後・オープン
+/// 前にファイルシステム上でディレクトリ成分がシンボリックリンクへ
+/// 差し替えられると、検証済みのはずの経路が `base_dir` の外を指す実体を
+/// 開いてしまい得た。
+///
+/// 本実装は経路を文字列として再解決しない。`base_dir` を開いた
+/// ディレクトリ fd を起点に、各パス成分を `openat(dirfd, name,
+/// O_NOFOLLOW)` でその fd に対して相対的に開き、得られた fd をそのまま
+/// 次段の起点にする。`O_NOFOLLOW` により対象がシンボリックリンクなら
+/// `ELOOP` で即座に失敗するため、検証済みの fd 連鎖以外を辿る余地が
+/// 生じない（カーネルが 1 段のパス解決をアトミックに行うことに依拠する。
+/// `docs/onnx-external-data-decision.md` に残タスクとして記録していた
+/// 「std に `O_NOFOLLOW` 相当が無いため完全な排除はできない」という制約は
+/// 本実装（std を経由せず `extern "C"` で `openat` を直接呼ぶ）で解消する）。
+///
+/// Linux／macOS 限定（CI ビルド対象〈`cargo build (linux /
+/// aarch64-apple-darwin)`〉と同一。フラグ定数値が OS ごとに異なるため、
+/// 実測未検証の他 unix では使わない。対象外の target では下方の
+/// `#[cfg(not(any(target_os = "linux", target_os = "macos")))]` 版の
+/// `resolve_and_open`（従来実装）にフォールバックする）。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod no_follow_open {
+    use std::ffi::{CString, c_char, c_int};
+    use std::fs::File;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::Path;
+
+    // `openat(2)` のフラグ値（`libc` crate 相当の定数を手書き。本クレートは
+    // 許容依存 9 区分〈deps-policy.md〉に `libc` を含まないためユーザー
+    // 承認なしに追加できない。std がリンクする libc は常に存在するため、
+    // 新規クレート依存を増やさず `extern "C"` で直接呼ぶ）。値は OS ごとの
+    // `fcntl.h` 定義に一致させる。
+    #[cfg(target_os = "linux")]
+    mod flags {
+        pub const O_RDONLY: i32 = 0;
+        pub const O_DIRECTORY: i32 = 0o200_000;
+        pub const O_NOFOLLOW: i32 = 0o400_000;
+        pub const O_CLOEXEC: i32 = 0o2_000_000;
+    }
+    #[cfg(target_os = "macos")]
+    mod flags {
+        pub const O_RDONLY: i32 = 0x0000_0000;
+        pub const O_DIRECTORY: i32 = 0x0010_0000;
+        pub const O_NOFOLLOW: i32 = 0x0000_0100;
+        pub const O_CLOEXEC: i32 = 0x0100_0000;
+    }
+    use flags::{O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_RDONLY};
+
+    // ELOOP（"too many levels of symbolic links"）: Linux/macOS 共通で
+    // `O_NOFOLLOW` 指定時に対象がシンボリックリンクだと返る errno。
+    #[cfg(target_os = "linux")]
+    const ELOOP: i32 = 40;
+    #[cfg(target_os = "macos")]
+    const ELOOP: i32 = 62;
+    // ENOTDIR（"not a directory"）: Linux／macOS 共通で 20。`O_DIRECTORY|
+    // O_NOFOLLOW` で開いた対象がシンボリックリンクだった場合、カーネルは
+    // `ELOOP` ではなく `ENOTDIR` を返す（実機実測。シンボリックリンクは
+    // 「ディレクトリではない」ためこちらが優先される）。この値は「対象が
+    // シンボリックリンク」と「対象が単なる非ディレクトリの通常ファイル」の
+    // 両方で返るため、下の [`open_chain_no_follow`] は診断用の
+    // `symlink_metadata`（open 失敗**後**の分類専用。安全性判断には使わず、
+    // 既に fail-closed で拒否済みの結果をどちらのエラー種別として
+    // 報告するかにのみ使う）で判別する。呼び出し元（外側の
+    // `resolve_and_open`）も同じ値で `NotRegularFile` 判定を行うため
+    // `pub(super)` で公開し、値を二重管理しない。
+    pub(super) const ENOTDIR: i32 = 20;
+
+    // SAFETY契約: `openat` は POSIX 標準関数で、std バイナリには常に libc が
+    // リンクされているため crate 追加なしに呼び出せる。呼び出し側
+    // （`openat_no_follow`）が引数の有効性（fd の生存・C 文字列の NUL 終端）
+    // を保証する。
+    unsafe extern "C" {
+        // POSIX の実プロトタイプは `int openat(int, const char *, int, ...)`
+        // （`O_CREAT` 指定時のみ第 4 引数 `mode_t` を使う可変長引数）。
+        // 固定 3 引数で宣言すると、可変長引数呼び出し規約が固定引数と
+        // 異なる ABI（Apple arm64 等）で不一致になり得るため、シグネチャを
+        // 可変長引数のまま宣言する（呼び出し側は `O_CREAT` を渡さないため
+        // 可変長引数を実際には渡さない）。
+        fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
+    }
+
+    /// シンボリックリンク検知（`ELOOP`）かどうかを判定する。
+    fn is_eloop(e: &io::Error) -> bool {
+        e.raw_os_error() == Some(ELOOP)
+    }
+
+    /// `dir` に対して相対的に `name`（単一パス成分。`..`／`/` を含まない
+    /// `Path::components()` の `Normal`由来の値のみを渡す前提）を
+    /// `O_NOFOLLOW` で開く。`want_dir` が true なら `O_DIRECTORY` を付け、
+    /// 対象がディレクトリでなければ失敗する。
+    fn openat_no_follow(dir: &File, name: &std::ffi::OsStr, want_dir: bool) -> io::Result<File> {
+        let c_name = CString::new(name.as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let flags = if want_dir {
+            O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        } else {
+            O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+        };
+        // SAFETY: `dir.as_raw_fd()` はこの呼び出しの間生存している `dir` が
+        // 所有する有効な open ディレクトリ fd。`c_name` は
+        // `CString::new` が NUL 終端を保証した有効な C 文字列で、この
+        // 呼び出しの間生存する。返り値が非負なら新規に確保された fd の
+        // 所有権を呼び出し元へ渡す契約（POSIX `openat(2)`）であり、
+        // `File::from_raw_fd` で即座に `File` へ委譲することで二重解放・
+        // リークを防ぐ。
+        let fd = unsafe { openat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: 直前の `openat` が返した非負 fd は呼び出し元がここで
+        // 一意に所有権を得る新規 fd であり、他のどのコードもまだ
+        // 参照していない。
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    /// `base_dir` を起点に `parts` を 1 段ずつ `O_NOFOLLOW` で辿り、最終
+    /// ファイルの fd を得る。中間段は `O_DIRECTORY` 付きで開くためディレクトリ
+    /// でなければ失敗し、途中経路のシンボリックリンクは `ELOOP` で拒否される。
+    /// エラーはシンボリックリンク検知か否かを呼び出し元が判別できるよう
+    /// `(io::Error, bool /* is_symlink */)` を返す。
+    pub(super) fn open_chain_no_follow(
+        base_dir: &Path,
+        parts: &[&std::ffi::OsStr],
+    ) -> Result<File, (io::Error, bool)> {
+        if parts.is_empty() {
+            return Err((io::Error::from(io::ErrorKind::InvalidInput), false));
+        }
+        // `base_dir` はモジュール冒頭コメントのとおり呼び出し元が与える
+        // 信頼済み入力（`resolve_external_data` が canonicalize 済みの値を
+        // 渡す）のため、素直に `File::open` する。
+        let mut dir = File::open(base_dir).map_err(|e| (e, false))?;
+        let last_idx = parts.len() - 1;
+        // エラー分類専用（診断用）の累積パス。実際のファイルオープンには
+        // 使わない（オープンは常に `dir` の fd を起点にした `openat` 経由）。
+        let mut accumulated = base_dir.to_path_buf();
+        for (i, part) in parts.iter().enumerate() {
+            accumulated.push(part);
+            let want_dir = i != last_idx;
+            match openat_no_follow(&dir, part, want_dir) {
+                Ok(next) => dir = next,
+                Err(e) => {
+                    let is_sym = is_eloop(&e)
+                        || (want_dir
+                            && e.raw_os_error() == Some(ENOTDIR)
+                            && std::fs::symlink_metadata(&accumulated)
+                                .map(|m| m.file_type().is_symlink())
+                                .unwrap_or(false));
+                    return Err((e, is_sym));
+                }
+            }
+        }
+        Ok(dir)
+    }
+}
+
 /// `base_dir` を起点に `location` を検証しながら解決し、ファイルを開く。
-/// 経路の途中を含めシンボリックリンクを拒否し、解決結果が `base_dir` の
-/// 外に出ないことを canonicalize で多層防御する（A2）。
+/// 経路の途中を含めシンボリックリンクを拒否し、`O_NOFOLLOW` によるディレクトリ
+/// ハンドル連鎖オープン（[`no_follow_open::open_chain_no_follow`]）で
+/// 「検証した経路そのもの」を開くことを保証する（A2・P0 対応。
+/// discussion_r4119392011）。返り値の第 2 要素は `plan` が `file_key_for`
+/// のフォールバック（dev/ino を持たないプラットフォーム）で使う、
+/// `parts` から再構築した正規化済み相対パス。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn resolve_and_open(
     tensor_name: &str,
     base_dir_canonical: &Path,
     loc: &str,
-) -> Result<OpenFile, ExternalDataError> {
+) -> Result<(OpenFile, PathBuf), ExternalDataError> {
+    let parts =
+        validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
+            tensor_name: cap_name(tensor_name),
+            reason,
+        })?;
+
+    let file = no_follow_open::open_chain_no_follow(base_dir_canonical, &parts).map_err(
+        |(e, is_symlink)| {
+            if is_symlink {
+                ExternalDataError::InvalidLocation {
+                    tensor_name: cap_name(tensor_name),
+                    reason: LocationRejectReason::Symlink,
+                }
+            } else if e.kind() == std::io::ErrorKind::NotADirectory
+                || e.raw_os_error() == Some(no_follow_open::ENOTDIR)
+            {
+                ExternalDataError::InvalidLocation {
+                    tensor_name: cap_name(tensor_name),
+                    reason: LocationRejectReason::NotRegularFile,
+                }
+            } else {
+                ExternalDataError::Io {
+                    tensor_name: cap_name(tensor_name),
+                    kind: e.kind(),
+                }
+            }
+        },
+    )?;
+
+    let meta = file.metadata().map_err(|e| ExternalDataError::Io {
+        tensor_name: cap_name(tensor_name),
+        kind: e.kind(),
+    })?;
+    if !meta.is_file() {
+        return Err(ExternalDataError::InvalidLocation {
+            tensor_name: cap_name(tensor_name),
+            reason: LocationRejectReason::NotRegularFile,
+        });
+    }
+
+    use std::os::unix::fs::MetadataExt;
+    let dev_ino = (meta.dev(), meta.ino());
+
+    let normalized_rel: PathBuf = parts.iter().collect();
+    Ok((
+        OpenFile {
+            file,
+            len: meta.len(),
+            dev_ino,
+        },
+        normalized_rel,
+    ))
+}
+
+/// [`resolve_and_open`] の Linux／macOS 以外向けフォールバック実装。
+/// `symlink_metadata` による逐次検証 → `canonicalize` → `File::open` と
+/// パスから再オープンする（旧実装のまま）。CI ビルド対象
+/// （linux・aarch64-apple-darwin）はいずれも上の `no_follow_open` 経路を
+/// 使うため、本フォールバックは実測未検証の他 unix 向けの保守的な
+/// 代替実装であり、TOCTOU 窓の完全な排除は保証しない（コメントに明記して
+/// 既知の制約として残す）。
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn resolve_and_open(
+    tensor_name: &str,
+    base_dir_canonical: &Path,
+    loc: &str,
+) -> Result<(OpenFile, PathBuf), ExternalDataError> {
     let parts =
         validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
             tensor_name: cap_name(tensor_name),
@@ -350,7 +593,7 @@ fn resolve_and_open(
         })?;
 
     let mut cur = base_dir_canonical.to_path_buf();
-    for part in parts {
+    for part in &parts {
         cur.push(part);
         let meta = std::fs::symlink_metadata(&cur).map_err(|e| ExternalDataError::Io {
             tensor_name: cap_name(tensor_name),
@@ -402,12 +645,16 @@ fn resolve_and_open(
         (meta.dev(), meta.ino())
     };
 
-    Ok(OpenFile {
-        file,
-        len: meta.len(),
-        #[cfg(unix)]
-        dev_ino,
-    })
+    let normalized_rel: PathBuf = parts.iter().collect();
+    Ok((
+        OpenFile {
+            file,
+            len: meta.len(),
+            #[cfg(unix)]
+            dev_ino,
+        },
+        normalized_rel,
+    ))
 }
 
 /// ASCII 数字のみからなる非空文字列として `u64` を解釈する（符号・空白・
@@ -445,11 +692,41 @@ fn element_size(tensor_name: &str, data_type: i32) -> Result<u64, GraphError> {
     }
 }
 
+/// `files`／`regions`（`plan` 内）のファイル識別キー。overlap 検出・
+/// ファイルハンドル再利用が「同一ファイル実体」を正しく畳み込めるよう、
+/// パス文字列ではなくファイルの実体識別子を使う（Cursor Bugbot 指摘・
+/// PR #2348 review thread `PRRT_kwDOTuUCJc6mkYTr`: `base_dir.join(location)` という `location` の
+/// 生文字列連結をキーにすると、`Path` の `Eq`/`Hash` はコンポーネント
+/// 単位のため `foo.data`／`./foo.data` の表記ゆれ自体は畳み込まれるが、
+/// ハードリンクのように**文字列としても正規化後の経路としても異なるが
+/// 実体は同一のファイル**は別キーになり overlap 検出をすり抜ける。
+/// dev/ino をキーにすることでこの実体単位の同一性を保証する）。
+#[cfg(unix)]
+type FileKey = (u64, u64);
+#[cfg(not(unix))]
+type FileKey = PathBuf;
+
+/// `opened`（`resolve_and_open` が返したハンドル）から [`FileKey`] を
+/// 作る。Unix では dev/ino（`OpenFile::dev_ino`）を使い、シンボリックリンク
+/// や表記ゆれだけでなくハードリンクも実体単位で同一キーへ畳み込む。
+/// dev/ino を持たない他プラットフォームでは `normalized_rel`
+/// （`resolve_and_open` が `Path::components()` から再構築した正規化済み
+/// 相対パス）を `base_dir_canonical` へ連結した値をフォールバックキーに
+/// 使う（ハードリンク識別はできないが、表記ゆれの畳み込みは維持する）。
+#[cfg(unix)]
+fn file_key_for(_base_dir_canonical: &Path, opened: &OpenFile, _normalized_rel: &Path) -> FileKey {
+    opened.dev_ino
+}
+#[cfg(not(unix))]
+fn file_key_for(base_dir_canonical: &Path, _opened: &OpenFile, normalized_rel: &Path) -> FileKey {
+    base_dir_canonical.join(normalized_rel)
+}
+
 /// パス 1 で確定した「どこから何バイト読むか」の 1 件分。
 struct LoadPlanEntry {
     slot: TensorSlot,
     tensor_name: String,
-    file_key: PathBuf,
+    file_key: FileKey,
     offset: u64,
     length: u64,
 }
@@ -507,7 +784,7 @@ fn plan(
     model: &ModelProto,
     base_dir_canonical: &Path,
     options: &ExternalDataOptions,
-) -> Result<(Vec<LoadPlanEntry>, HashMap<PathBuf, OpenFile>), GraphError> {
+) -> Result<(Vec<LoadPlanEntry>, HashMap<FileKey, OpenFile>), GraphError> {
     // initializer 名の重複は I/O の前に拒否する（A5）。
     if let Some(g) = model.graph.as_ref() {
         let mut seen = std::collections::HashSet::new();
@@ -522,8 +799,8 @@ fn plan(
         }
     }
 
-    let mut files: HashMap<PathBuf, OpenFile> = HashMap::new();
-    let mut regions: HashMap<PathBuf, Vec<(u64, u64, String)>> = HashMap::new();
+    let mut files: HashMap<FileKey, OpenFile> = HashMap::new();
+    let mut regions: HashMap<FileKey, Vec<(u64, u64, String)>> = HashMap::new();
     let mut entries = Vec::new();
     let mut total_requested: u64 = 0;
 
@@ -610,8 +887,9 @@ fn plan(
                 tensor_name: tensor_name.clone(),
             })?;
 
-        let opened = resolve_and_open(&tensor_name, base_dir_canonical, &location)
-            .map_err(GraphError::ExternalData)?;
+        let (opened, normalized_rel) =
+            resolve_and_open(&tensor_name, base_dir_canonical, &location)
+                .map_err(GraphError::ExternalData)?;
 
         let length = match length_raw {
             Some(raw) => {
@@ -663,16 +941,28 @@ fn plan(
             ));
         }
 
-        // ファイルキー: canonicalize 済みパス（`resolve_and_open` が返した
-        // ハンドルの実体を特定するため、パスではなくファイルの
-        // metadata から再構築せず、単純に `location` 解決の入力に
-        // 使った canonical パスを都度計算するのは二重コストになるため、
-        // ここでは `resolve_and_open` 呼び出し直後に得られる情報のみで
-        // 十分なキーを作る: base_dir + location 文字列の組はファイル
-        // 実体と 1:1（symlink を拒否済みのため）なので、これをキーにする。
-        let file_key = base_dir_canonical.join(&location);
-
-        let interval_list = regions.entry(file_key.clone()).or_default();
+        // ファイルキー: `location` の生文字列を `base_dir` へ連結した
+        // ものではなく、ファイルの実体識別子（[`FileKey`]。Unix では
+        // dev/ino）を使う。生文字列を直接連結すると `foo.data`／
+        // `./foo.data`／`foo.data/` のような表記ゆれに加え、ハードリンク
+        // のように経路としては異なるが実体が同一のファイルも別キーに
+        // なり、overlap 検出（下記）・ハンドル再利用の両方が同一ファイル
+        // を見落とす（Cursor Bugbot 指摘・PR #2348 review thread
+        // `PRRT_kwDOTuUCJc6mkYTr`）。`file_key_for` が dev/ino を優先し、それが取れない
+        // プラットフォームでのみ `normalized_rel`（`resolve_and_open` が
+        // `Path::components()` から再構築した正規化済み相対パス）へ
+        // フォールバックする。
+        let file_key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
+        // `FileKey` は Unix では `(u64, u64)`（`Copy`）、それ以外では
+        // `PathBuf`（非 `Copy`）と cfg で型が変わる（上記型エイリアス
+        // 参照）ため、`.clone()` は環境依存で clippy の
+        // `clone_on_copy`（`-D warnings` 対象）に触れ得る。3 箇所で同じ
+        // キーを使う必要がある（`regions`・`files` への登録＋
+        // `LoadPlanEntry` への格納）ための意図的な複製であり、
+        // `#[allow]` はこの cfg 依存の型差分に限定する。
+        #[allow(clippy::clone_on_copy)]
+        let region_key = file_key.clone();
+        let interval_list = regions.entry(region_key).or_default();
         for (s, e, other_name) in interval_list.iter() {
             if offset < *e && *s < end {
                 return Err(GraphError::ExternalData(
@@ -685,7 +975,9 @@ fn plan(
         }
         interval_list.push((offset, end, tensor_name.clone()));
 
-        files.entry(file_key.clone()).or_insert(opened);
+        #[allow(clippy::clone_on_copy)]
+        let files_key = file_key.clone();
+        files.entry(files_key).or_insert(opened);
 
         entries.push(LoadPlanEntry {
             slot,
@@ -703,7 +995,7 @@ fn plan(
 /// 再照合（ファイル長・Unix では dev/ino）を読み込み直前に行う。
 fn load(
     entries: &[LoadPlanEntry],
-    files: &mut HashMap<PathBuf, OpenFile>,
+    files: &mut HashMap<FileKey, OpenFile>,
 ) -> Result<Vec<Vec<u8>>, GraphError> {
     let mut out: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for entry in entries.iter() {
