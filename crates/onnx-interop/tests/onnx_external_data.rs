@@ -1501,8 +1501,21 @@ fn bytes_entry_point_still_rejects_external_data_model() {
     let model = model_with_initializer(t);
 
     // build_graph_with_external_data 経由なら成功することの対照確認。
-    build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default())
-        .expect("external data 経路は成功するはず");
+    // 実解決の成功は unix 限定（非 unix では `resolve_and_open` が常に
+    // `UnsupportedPlatformForSecureResolve` で fail-closed 拒否する。
+    // `external_data.rs` モジュール doc「非 unix（Windows 等）」節）ため、
+    // 対照確認部分だけを cfg で分け、非 unix ではその拒否契約を検査する
+    // （Cursor Bugbot 指摘・PR #2348 対応。下の `from_bytes` 側の A6 回帰
+    // 検査は external data 解決を経由しないため OS 非依存のまま実行する）。
+    let ext_result =
+        build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default());
+    #[cfg(unix)]
+    ext_result.expect("external data 経路は成功するはず");
+    #[cfg(not(unix))]
+    assert!(matches!(
+        assert_external_err(ext_result),
+        ExternalDataError::UnsupportedPlatformForSecureResolve { .. }
+    ));
 
     // バイト列入口（decode_model -> build_graph）は data_location を一切
     // 参照しないため、external データを持つモデルは raw_data・float_data
