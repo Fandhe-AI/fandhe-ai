@@ -37,6 +37,26 @@ cargo test -p fandhe-ai-onnx-interop --test onnx_interp_pytorch_cnn_fixture -- -
 39 テスト（19 ケース × 2 exporter + 期待値表整合性検査 1 件）すべて
 pass。
 
+**縮約系の bit 同一（親 #2185 の受け入れ条件）を直接検査する
+`#[ignore]` テストが別途ある**（codex-review 指摘対応。イシュー #2329
+PR #2343。レビュースレッド `PRRT_kwDOTuUCJc6mhmHL`・
+`PRRT_kwDOTuUCJc6mhpBB`）:
+
+```bash
+cargo test -p fandhe-ai-onnx-interop --test onnx_interp_pytorch_cnn_fixture -- --ignored
+```
+
+上記通常 39 テストの `Req7Provisional`（`fail_count == 0`）による pass
+は、REQ-7 事前固定式に対する fail-closed な回帰ガードに過ぎず、
+親 #2185 の「bit 同一」受け入れ条件そのものの合格を意味しない。
+`reduction_ops_bit_exact_acceptance_pending_approval`
+（`crates/onnx-interop/tests/onnx_interp_pytorch_cnn_fixture.rs`）は
+`Req7Provisional` の全 23 ケース × exporter について
+`bit_mismatch_count == 0` を直接検査し、**実測時点で 23/23 件 fail する
+（意図的に red）**。判定方式（下記「承認待ち事項」1. の採否）が確定し
+`Expectation` 表・本ファイルが更新されるまで、このテストを削除・
+green 化してはならない。
+
 ## ケース × exporter の実測結果
 
 `--nocapture` の `op_types=`／`bit_mismatch=`／`max_abs_diff=`／

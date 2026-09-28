@@ -378,6 +378,14 @@ enum Expectation {
     /// 実測で bit 一致したケースは [`Self::BitExact`] へ固定し、しなかった
     /// ケースのみ本 variant で REQ-7 暫定判定にフォールバックする
     /// （最終判定方式はユーザー承認待ち。モジュール doc 参照）。
+    ///
+    /// **本 variant の pass は親 #2185 の受け入れ条件（bit 同一）の合格を
+    /// 意味しない**（codex-review 指摘。イシュー #2329 PR #2343）。ここでの
+    /// `fail_count == 0` は REQ-7 事前固定式に対する fail-closed な回帰
+    /// ガードに過ぎない。bit 同一そのものを検査する受け入れテストは
+    /// [`reduction_ops_bit_exact_acceptance_pending_approval`]（`#[ignore]`。
+    /// 判定方式のユーザー承認が下りるまで意図的に red のまま維持する）が
+    /// 別途担う。
     Req7Provisional,
 }
 
@@ -501,8 +509,14 @@ fn expectation_table_matches_reference_cases() {
     );
 }
 
-/// 1 ケース・1 exporter を decode → build_graph → run → 判定まで実行する。
-fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation: Expectation) {
+/// 1 ケース・1 exporter を decode → build_graph → run し、[`DiffStats`]
+/// までを計算する（判定方式に依存しない共通部分）。[`run_case`]（通常の
+/// per-expectation 判定）と [`reduction_ops_bit_exact_acceptance_pending_
+/// approval`]（縮約系の bit 一致を直接検査する、ユーザー承認待ちの受け入れ
+/// 判定テスト）の双方から呼ばれる単一の真実源（レビュー指摘対応。イシュー
+/// #2329 PR #2343。判定ロジックを重複実装すると decode／run 経路がズレる
+/// リスクがあるため一本化する）。
+fn compute_case_stats(case_name: &str, exporter_name: &str, case: &CaseRecord) -> DiffStats {
     let exporter = case
         .exporters
         .get(exporter_name)
@@ -589,6 +603,19 @@ fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation
         stats.fail_count
     );
 
+    stats
+}
+
+/// 1 ケース・1 exporter を decode → build_graph → run → 判定まで実行する。
+/// 判定は [`compute_case_stats`] が返す [`DiffStats`] に対して
+/// [`Expectation`] ごとの合否基準を適用する（縮約系の bit 一致そのものの
+/// 検査は [`reduction_ops_bit_exact_acceptance_pending_approval`] が別途
+/// 担う。本関数の `Req7Provisional` 分岐は REQ-7 事前固定式の回帰ガードに
+/// 過ぎず、親 #2185 の「bit 同一」受け入れ条件そのものではない点に注意
+/// ——モジュール doc「判定方式についての注記」参照）。
+fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation: Expectation) {
+    let stats = compute_case_stats(case_name, exporter_name, case);
+
     match expectation {
         Expectation::BitExact => {
             assert_eq!(
@@ -598,10 +625,15 @@ fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation
             );
         }
         Expectation::Req7Provisional => {
+            // fail-closed な回帰ガード（REQ-7 事前固定式。tolerance は緩めない
+            // `.claude/rules/coding-rust.md`）。ここでの pass は親 #2185 の
+            // 「bit 同一」受け入れ条件そのものの合格ではない——その検査は
+            // `reduction_ops_bit_exact_acceptance_pending_approval`（#[ignore]。
+            // ユーザー承認待ち）が別途担う。
             assert_eq!(
                 stats.fail_count, 0,
-                "{case_name} [{exporter_name}]: 暫定 REQ-7 判定でも fail \
-                 （max_rel_err={}）。tolerance は緩めない（`.claude/rules/\
+                "{case_name} [{exporter_name}]: 暫定 REQ-7 判定（回帰ガード）でも \
+                 fail（max_rel_err={}）。tolerance は緩めない（`.claude/rules/\
                  coding-rust.md`）。ユーザー判断が必要",
                 stats.max_rel_err
             );
@@ -699,3 +731,70 @@ fixture_test!(flatten_default_ts, "flatten_default", "ts");
 fixture_test!(flatten_default_dynamo, "flatten_default", "dynamo");
 fixture_test!(flatten_start2_ts, "flatten_start2", "ts");
 fixture_test!(flatten_start2_dynamo, "flatten_start2", "dynamo");
+
+/// 縮約系（`Expectation::Req7Provisional` の全ケース）が親 #2185 の受け入れ
+/// 条件（PyTorch 出力との **bit 同一**）を満たすかどうかを直接検査する。
+///
+/// `run_case` の `Req7Provisional` 分岐（REQ-7 事前固定式による fail-closed
+/// な回帰ガード）は、bit 不一致があっても `fail_count == 0` であれば通過
+/// してしまうため、それを親 #2185 の受け入れ条件の合格として扱ってはならない
+/// という codex-review 指摘（イシュー #2329 PR #2343。レビュースレッド
+/// `PRRT_kwDOTuUCJc6mhmHL`・`PRRT_kwDOTuUCJc6mhpBB`）への対応として本テストを
+/// 新設する。本テストは `EXPECTATIONS`（単一の真実源）から `Req7Provisional`
+/// エントリを直接読み、`compute_case_stats` の `bit_mismatch_count` を検査
+/// することで、判定方式（bit 同一 or REQ-7 暫定）が未確定な現状を「実行可能な
+/// 形の失敗」として可視化する。
+///
+/// `#[ignore]` にする理由: 通常 CI（`cargo test`）でこのテストを red のまま
+/// 走らせると `rust-ci / cargo test` が恒常的に fail し続け、無関係な PR の
+/// マージを妨げてしまう。他方で本テストを削除・`assert` の弱体化（無条件
+/// pass 化）をすると、bit 同一未達という事実そのものが CI から見えなくなる。
+/// このため「デフォルトでは走らないが `cargo test -- --ignored` で明示的に
+/// 実行すれば実際に red になる」形で残す（`.claude/rules/coding-rust.md` の
+/// 実機依存テストの `#[ignore]` 分離とは異なる用途だが、同じ属性を「意図的に
+/// 走らせない・理由を明示する」目的で流用する）。判定方式（REQ-7 暫定を最終
+/// 受け入れ条件とするか、bit 同一を維持するか）についてユーザー承認が下り、
+/// `Expectation` 表・モジュール doc が更新されるまでは本テストを削除・
+/// green 化しない（実測記録: `docs/perf/logs/onnx-cnn-ops-pytorch-fixture-
+/// 2329/README.md`）。
+#[test]
+#[ignore = "縮約系の受け入れ判定方式（bit 同一 or REQ-7 暫定）はユーザー承認待ち\
+            （#2329・親 #2185）。cargo test -- --ignored で実行すると現状 red \
+            になることを確認できる"]
+fn reduction_ops_bit_exact_acceptance_pending_approval() {
+    let doc = load_reference();
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for &(case_name, exporter_name, expectation) in EXPECTATIONS {
+        if expectation != Expectation::Req7Provisional {
+            continue;
+        }
+        checked += 1;
+        let case = doc
+            .cases
+            .get(case_name)
+            .unwrap_or_else(|| panic!("reference.json に '{case_name}' が無い"));
+        let stats = compute_case_stats(case_name, exporter_name, case);
+        if stats.bit_mismatch_count != 0 {
+            failures.push(format!(
+                "{case_name} [{exporter_name}]: bit_mismatch={} max_abs_diff={} \
+                 max_rel_err={}",
+                stats.bit_mismatch_count, stats.max_abs_diff, stats.max_rel_err
+            ));
+        }
+    }
+    assert!(
+        checked > 0,
+        "EXPECTATIONS に Req7Provisional エントリが 1 件も無い（検査が空振り \
+         していないことの保証。テーブル改変時の取りこぼし検出）"
+    );
+    assert!(
+        failures.is_empty(),
+        "縮約系の bit 同一（親 #2185 の受け入れ条件）が未達（{}/{} 件 fail）。\
+         判定方式のユーザー承認が下りるまで本テストは red のまま維持する。\
+         詳細:\n{}",
+        failures.len(),
+        checked,
+        failures.join("\n")
+    );
+}
