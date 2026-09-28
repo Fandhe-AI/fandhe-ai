@@ -223,12 +223,20 @@ ic 並列）を推奨案としたが、**2026-09-28 時点で結線されてい�
   までは本 doc では読み切っていない（§9）。詳細設計は
   `docs/cpu-gemm-2d-dynamic-partition-design.md`・実測 A/B は
   `docs/perf/cpu-gemm-2d-dynamic-partition-ab.md` を参照
-- **スレッド数**: `TwoDDynamic` 経路は `rayon::current_num_threads()` をそのまま
-  使う想定（`TWO_D_DYNAMIC_PRODUCTION_ENABLED` 分岐では `effective_num_threads`
-  の呼び出しが見当たらない。`else` 側〈行パネル分割・非本番〉のみが
-  `crate::thread_limit::effective_num_threads(rayon::current_num_threads())`
-  を呼ぶ。`mod.rs:805` 付近）。すなわち **`TwoDDynamic` は P/E コアを区別せず
-  rayon の既定スレッド数（通常は全論理コア数）をそのまま使う**
+- **スレッド数**: `TwoDDynamic` 経路自体（`dispatch_two_d_dynamic`）は
+  `effective_num_threads`（コア種別ベースの P/E 限定）を呼ばず、`else` 側
+  〈行パネル分割・非本番〉のみが `crate::thread_limit::effective_num_threads
+  (rayon::current_num_threads())` を呼ぶ（`mod.rs:805` 付近）。この意味で
+  `TwoDDynamic` は P/E コアを区別しない。**ただし本番の実効スレッド数は
+  常に `rayon::current_num_threads()` そのままとは限らない**: `TwoDDynamic`
+  は `crate::small_shape_thread_cap::run_capped`（§5.3 冒頭）でラップされて
+  おり、対象 CPU が P/E 非対称と判定され（`ELIGIBLE`）・`RAYON_NUM_THREADS`
+  未指定・現行プールのスレッド数が `SMALL_SHAPE_CAP_THREADS` を上回り・
+  仕事量（`m,n,k`）が `should_cap` の閾値未満、の全条件を満たす小形状では
+  専用の小さい `rayon::ThreadPool`（`SMALL_SHAPE_CAP_THREADS` 本固定）へ
+  差し替えて実行する（`small_shape_thread_cap.rs:222-246`。#1575）。この
+  条件に該当しない形状・非該当プラットフォームでは従来どおり現行プールの
+  `rayon::current_num_threads()` がそのまま使われる
 - `thread_limit::BIG_CORE_LIMIT_ENABLED`（P コア限定への単一 const ゲート）は
   **`false`（`thread_limit.rs:112`）で無効**。この機構自体は candle の
   `perf_core_count()` P コア限定と構造的に同型だが、イシュー #1364 の実機実測
@@ -239,10 +247,10 @@ ic 並列）を推奨案としたが、**2026-09-28 時点で結線されてい�
 
 | 項目 | gemm crate（candle 経由） | 自作本番（`TwoDDynamic`） |
 |------|---------------------------|---------------------------|
-| 並列化しきい値 | `m*n_chunk*k_chunk < 48*48*256` で直列化 | 未確認（`should_serialize`。`mod.rs:269`。詳細は §9） |
+| 並列化しきい値 | `m*n_chunk*k_chunk < 48*48*256` で直列化 | **本番未結線**（[`should_serialize`] は `#[cfg(test)]` 限定・本番入口はこの判定を呼ばない。実際の直列化条件は未確認。`mod.rs:269`） |
 | ジョブ空間 | m×n の 2D ミニチャンク→1D job id | 「2D」を明示する命名（`TwoDDynamic`）だが内部詳細未確認 |
 | 分配方式 | 静的 `base/rem` 連続区間（動的取得なし） | 命名上は動的（`TWO_D_JOBS_PER_WORKER` によるワーカーあたり複数ジョブ） |
-| スレッド数 | P コア数（macOS）or 全物理コア（非 macOS）。RAYON_NUM_THREADS で上書き可 | rayon 既定（通常は全論理コア。P/E 区別なし。`BIG_CORE_LIMIT_ENABLED=false`） |
+| スレッド数 | P コア数（macOS）or 全物理コア（非 macOS）。RAYON_NUM_THREADS で上書き可 | 既定は rayon の現行プールのスレッド数（P/E 区別なし。`BIG_CORE_LIMIT_ENABLED=false`）だが、小形状かつ P/E 非対称機判定時は `small_shape_thread_cap::run_capped` が専用の小さいプール（`SMALL_SHAPE_CAP_THREADS` 本）へ差し替える（§5.3） |
 | P コア優先化 | スレッド数限定 + QoS 引き上げの 2 重 | 機構はあるが無効化済み（#1364 REJECT） |
 
 ## 6. 自作との差分表まとめ（R4）
@@ -256,8 +264,8 @@ ic 並列）を推奨案としたが、**2026-09-28 時点で結線されてい�
 | RHS pack 共有 | 1 回 pack → 全スレッド共有読み出し | #565 時点は非共有（2D 動的後の実態は §9 へ） | §4.1・§4.3 |
 | pack バッファ確保 | `dyn_stack::MemBuffer` を呼び出しあたり 1 回 | panel バッファ直接書き込み（#554） | §4.1・§4.3 |
 | ジョブ分配 | 静的 `base/rem` 連続区間 | 命名上は動的（`TwoDDynamic`。詳細未確認） | §5.1・§5.3 |
-| スレッド数方針 | macOS で P コア数限定 + QoS 引き上げ（既定 ON） | rayon 既定（P/E 区別なし。P コア限定機構は #1364 で REJECT 済み） | §5.2・§5.3 |
-| 並列化しきい値 | `m*n_chunk*k_chunk < 48*48*256` | `should_serialize`（詳細未確認） | §5.1・`mod.rs:269` |
+| スレッド数方針 | macOS で P コア数限定 + QoS 引き上げ（既定 ON） | 既定は rayon 現行プールのスレッド数（P/E 区別なし。P コア限定機構〈`BIG_CORE_LIMIT_ENABLED`〉は #1364 で REJECT 済み）。ただし小形状 + P/E 非対称機判定時は `small_shape_thread_cap::run_capped` が専用の小さいプールへ差し替える | §5.2・§5.3 |
+| 並列化しきい値 | `m*n_chunk*k_chunk < 48*48*256` | **本番未結線**（`should_serialize` は `#[cfg(test)]` 限定。実際の直列化条件は未確認） | §5.1・§5.4・`mod.rs:269` |
 | amx（Apple 専用命令）経路 | crate には存在するが feature 未有効化・M4 では brand 判定的にも到達不能 | 該当機構なし（NEON のみ） | §3.3 |
 | C 書き込み（staging） | 未確認（本 doc 範囲外） | 未確認（本 doc 範囲外） | §9 |
 | 転置入力の扱い | `gemm@0.19.0:src/gemm.rs` の `do_transpose`（dst 列優先/行優先で lhs/rhs を入れ替え）（L179-223） | `GemmTranspose::Nn` 固定引数を持つ API（`dispatch_two_d_dynamic` 呼び出し引数） | §3.1（`gemm.rs`）・`mod.rs:797` |
@@ -270,9 +278,13 @@ ic 並列）を推奨案としたが、**2026-09-28 時点で結線されてい�
 ### 7.1 仮説 A: P コア限定スレッド方針の差
 
 candle は macOS で既定 P コア数（M4 Max: 12）のみを使い、ワーカースレッドの QoS も
-引き上げる（§5.2）。自作 `TwoDDynamic` は rayon 既定（M4 Max: 16 論理コア＝P12+E4）
-をそのまま使い、E コアも並列ワーカーに含める。E コアがボトルネックスレッドになる
-「ストラグラー」効果で全体のジョブ完了が遅延する可能性がある。
+引き上げる（§5.2）。自作 `TwoDDynamic` は既定では rayon 現行プールのスレッド数
+（M4 Max: 16 論理コア＝P12+E4）をそのまま使い、E コアも並列ワーカーに含める（ただし
+小形状 + P/E 非対称機判定時は `small_shape_thread_cap::run_capped` が
+`SMALL_SHAPE_CAP_THREADS`〈6〉本の専用プールへ差し替える。§5.3・§5.4。本仮説の
+対象形状〈N=256/1024/2048〉がこの cap 条件〈`should_cap`〉に該当するかは本 doc では
+確認していない）。E コアがボトルネックスレッドになる「ストラグラー」効果で全体の
+ジョブ完了が遅延する可能性がある。
 
 - **既存実測との整合**: イシュー #1364 の on/off 比較（`docs/perf/cpu-gemm-default-thread-limit.md`
   §6.2）では、**Apple M4 Max 単体では P コア限定が 0.80〜0.91 倍（改善）**だった
