@@ -74,10 +74,12 @@ in-repo コードのため逐語引用可能で、取得・削除の対象外。
 
 1. `model.forward(x.clone())`（`Mlp::forward`。L200-203）:
    `relu(x.matmul(w1) + b1)` → `.matmul(w2) + b2`
-   （`clone()` 4 回〈w1/b1/w2/b2 の参照カウント複製。§4.2〉・matmul 2 回・
+   （`clone()` 5 回〈呼び出し側の `x.clone()` 1 回 + `Mlp::forward` 内の
+   w1/b1/w2/b2 の参照カウント複製 4 回。§4.2〉・matmul 2 回・
    add 2 回・relu 1 回）
 2. `let diff = pred - y.clone(); let loss = (diff.clone() * diff).mean();`
-   （sub 1 回・`clone` 1 回・mul 1 回・mean 1 回）
+   （sub 1 回・`clone` 2 回〈`y.clone()`・`diff.clone()`〉・mul 1 回・
+   mean 1 回）
 3. `loss.backward()`（`Gradients` を返す。§4.2）
 4. 4 パラメータそれぞれに `model.<p>.grad(&grads)` で勾配取得 → クロージャ
    `step`: `p.inner() - g.mul_scalar(LR)` → `Tensor::from_inner(..).require_grad()`
@@ -247,11 +249,11 @@ eager 実行。
 |---|---|---|---|---|---|---|---|
 | candle | forward | 2 | 2〈broadcast_add〉+ 1〈relu〉= 3 | 0 | — | 各演算が新規 `Storage` を確保（in-place API 極小） | forward 内では発生せず |
 | candle | loss | 0 | sub 1・sqr 1 | mean_all 1 | — | 同上 | — |
-| candle | backward | **4**（dX 含む） | Broadcast 逆伝播 2（b1・b2 各 1・squeeze 込み）・Relu 逆伝播相当 4・Sqr 逆伝播相当 3 | mean_all 逆伝播（未読解・未確定） | — | 各 VJP が新規 `Tensor` を確保し `grads.or_insert`/`add` で蓄積 | — |
+| candle | backward | **4**（dX 含む） | Broadcast 逆伝播 4（b1・b2 各 `sum_keepdim`+`squeeze` の 2 演算）・Relu 逆伝播相当 4・Sqr 逆伝播相当 3 | mean_all 逆伝播（未読解・未確定） | — | 各 VJP が新規 `Tensor` を確保し `grads.or_insert`/`add` で蓄積 | — |
 | candle | 更新 | 0 | `mul`1・`sub`1・`Var::set`1（storage 書換か差替かは未確認§4 外）×4 | — | 4 パラメータ分 | — | — |
 | candle | step 末尾 | — | — | — | — | — | `to_scalar`（1 回） |
-| burn | forward | 2 | add 2・relu 1（+ `clone` 4：w1/b1/w2/b2 の参照複製） | 0 | — | `clone` は Arc 参照カウントで実コピーではない可能性が高いが未確認（未確定） | forward 内では発生せず |
-| burn | loss | 0 | sub 1・mul 1（`diff*diff`）+ `clone` 1 | mean 1 | — | — | — |
+| burn | forward | 2 | add 2・relu 1（+ `clone` 5：呼び出し側 `x.clone()` 1 + w1/b1/w2/b2 の参照複製 4） | 0 | — | `clone` は Arc 参照カウントで実コピーではない可能性が高いが未確認（未確定） | forward 内では発生せず |
+| burn | loss | 0 | sub 1・mul 1（`diff*diff`）+ `clone` 2（`y.clone()`・`diff.clone()`） | mean 1 | — | — | — |
 | burn | backward | **3**（dX 省略） | Add 逆伝播〈broadcast_shape〉2・Relu／Mul 逆伝播（未読解・未確定） | mean 逆伝播（未読解・未確定） | — | — | — |
 | burn | 更新 | 0 | `mul_scalar`1・`sub`1・`from_inner`+`require_grad`1（グラフノード新規生成）×4 | — | 4 パラメータ分 | 新規グラフノード生成が毎 step 発生（`from_inner().require_grad()`） | — |
 | burn | step 末尾 | — | — | — | — | — | `into_scalar`（1 回） |
