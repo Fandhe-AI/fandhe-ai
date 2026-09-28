@@ -101,19 +101,24 @@ dynamo が分解した `ReduceMean`／`Unsqueeze`／`Squeeze`／`Reshape` はい
 ## 判定方式・実測結果
 
 `tests/onnx_interp_pytorch_cnn_fixture.rs` モジュール doc の「判定方式に
-ついての注記」を正とする。要約:
+ついての注記」・`docs/onnx-pytorch-fixture-reduction-parity-judgment-
+decision.md` を正とする（2026-09-28 ユーザー承認で正式方式へ移行）。要約:
 
 - **選択・形状操作**（`MaxPool`・`Flatten`）: フォールバックなしの bit
-  完全一致のみを要求する。全ケースで成立（実測）。
+  完全一致のみを要求する（`Expectation::BitExact`）。全ケースで成立（実測）。
 - **縮約系**（`Conv`・`AveragePool`・`GlobalAveragePool`・
-  `BatchNormalization`）: 実測で bit 一致したケース（`conv2d_basic`・
-  `conv2d_nobias`（ts/dynamo 双方）・`gap1d`〈`ts` のみ〉）は
-  `Expectation::BitExact` として固定した。それ以外は REQ-7 事前固定式
-  （`abs_err / (|ref| + 1e-6) <= 1e-3`）を**暫定**適用する
-  （`Expectation::Req7Provisional`）。**この暫定適用は最終判定方式として
-  ユーザー承認を得たものではない**。全ケースが暫定 REQ-7 判定でも fail
-  せず通過した（実測の `max_rel_err` は最大でも `avgpool2d_ceil_overhang_excl`
-  の `6.80e-6` 程度で、1e-3 の閾値に対して十分な余裕がある。詳細な実測値は
+  `BatchNormalization`。dynamo 分解経路の `ReduceMean` を含む）: bit 完全
+  一致は結合順序差により原理的に目標にできないため受け入れ条件から外し、
+  REQ-7 事前固定式（`abs_err / (|ref| + 1e-6) <= 1e-3` の `fail_count == 0`）
+  と、ケースごとの実測上限 baseline（`REDUCTION_BASELINES`）への fail-closed
+  非後退判定を併用する（`Expectation::Req7BaselineNonRegression`。実測で
+  bit 一致したケース〈`conv2d_basic`・`conv2d_nobias`（ts/dynamo 双方）・
+  `gap1d`〈`ts` のみ〉〉も含め全 14 ケース × 2 exporter = 28 行を baseline
+  へ記録済み——実測で bit 一致したケースは ceiling を `0` として記録し、
+  成立した厳しさをそのまま非後退契約に固定する）。全ケースが REQ-7 式・
+  baseline 双方を通過した（実測の `max_rel_err` は最大でも
+  `avgpool2d_ceil_overhang_excl` の `6.80e-6` 程度で、1e-3 の閾値に対して
+  十分な余裕がある。詳細な実測値は
   `docs/perf/logs/onnx-cnn-ops-pytorch-fixture-2329/README.md` を参照）。
 
 ## `count_include_pad`／`ceil_mode` の divisor クリップ規則の実証
@@ -129,10 +134,10 @@ dynamo が分解した `ReduceMean`／`Unsqueeze`／`Squeeze`／`Reshape` はい
 1 列増やし、その最終窓が padded 領域（6+2*1=8）を越えるため実際に
 クリップが発生する（`divisor_override` で強制クリップ無効化した出力
 との差分が非ゼロであることを実測確認済み。`7x7` では同じ比較の差分が
-ゼロだった）。実測では両ケースとも暫定 REQ-7 判定を通過しており、
-`ops::pool` モジュール doc が記録する「PyTorch／ONNX Runtime 準拠の
-padded 座標でのクリップ規則」が PyTorch 実行値と整合することを
-実証した。
+ゼロだった）。実測では両ケースとも REQ-7 式・baseline 双方の判定を
+通過しており、`ops::pool` モジュール doc が記録する「PyTorch／ONNX
+Runtime 準拠の padded 座標でのクリップ規則」が PyTorch 実行値と整合する
+ことを実証した。
 
 ## R2: initializer と `state_dict` の対応
 

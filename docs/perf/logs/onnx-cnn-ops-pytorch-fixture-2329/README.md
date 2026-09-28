@@ -3,8 +3,8 @@
 ## 位置づけ
 
 親 #2185（Conv・Pool・BN・Flatten の ONNX import 拡大）は「PyTorch の
-ONNX export を import して bit 同一を確認する」という受け入れ条件を
-持っていたが、子 #2199（PR #2314）・#2200（PR #2312）の実装環境には
+ONNX export を import して bit 同一を確認する」という受け入れ条件チェック
+ボックスを持っていたが、子 #2199（PR #2314）・#2200（PR #2312）の実装環境には
 `torch` が無かったため、`fandhe_ai_autodiff::nn::*::forward_host` との
 **内部突合**（自作 export → 自作 import の自己整合）で代替されていた
 （`docs/perf/logs/onnx-conv-pool-import-2199/README.md`「torch 実生成
@@ -13,6 +13,19 @@ fixture による突合の未実施」節）。本イシューでは `torch==2.1
 https://download.pytorch.org/whl/cpu torch`）へ導入し、
 `torch.onnx.export` が実生成した ONNX を import → 実行 → PyTorch 参照値
 との突合を実施した。
+
+**2026-09-28 ユーザー承認で判定方式を正式化**: 縮約系（`Conv`・
+`AveragePool`・`GlobalAveragePool`・`BatchNormalization`）は PyTorch CPU
+実行系との結合順序差により bit 完全一致を原理的に目標にできないため、
+bit 同一を縮約系の受け入れ条件から外し、REQ-7 事前固定式
+（`abs_err / (|ref| + 1e-6) <= 1e-3` の `fail_count == 0`。必須条件として
+維持）とケースごとの実測上限 baseline への fail-closed 非後退判定を併用
+する方式へ正式移行した（`docs/onnx-pytorch-fixture-reduction-parity-
+judgment-decision.md` が決定記録の正）。`#2185` の受け入れ条件チェック
+ボックスの表現は実装リポ issue 側の記述であり `docs/spec/04-requirements.md`
+REQ-7 自体は bit 同一を要求していないため、本改定は spec の緩和ではなく
+実装リポ issue の受け入れ条件を spec の定めに整合させる変更である
+（詳細は決定記録 §1）。
 
 fixture・生成環境・exporter ごとの op 列・sha256 の詳細は
 `crates/onnx-interop/tests/fixtures/pytorch-onnx-cnn-ops/README.md`
@@ -28,78 +41,91 @@ fixture・生成環境・exporter ごとの op 列・sha256 の詳細は
   再生成しても `reference.json` は sha256 完全一致することを 2 回連続
   生成で確認済み
 
+## 判定側（Rust テスト）の実行環境・決定性
+
+`cargo test -p fandhe-ai-onnx-interop --test onnx_interp_pytorch_cnn_fixture`
+は x86_64 Linux（このリポジトリの CI・ローカル worktree ともに GitHub
+ホステッド `ubuntu-latest` 相当・x86_64）で実行した。計算経路
+（`ops::conv`／`ops::pool`／`ops::batch_norm`／`ops::global_average_pool`・
+dynamo 分解経路の `ReduceMean`〈`interp_ext::compute_reduce_mean` →
+`fandhe_ai_autodiff::Var::mean` → `default_ops::NaiveOps::sum` →
+`autodiff::eval::sum` の `Iterator::sum`〉）はいずれも `rayon`・SIMD
+intrinsics・`is_x86_feature_detected!` 等のランタイム分岐を含まない
+単純な逐次ループ（`f32::mul_add`／`f64` 蓄積、走査順は入力の row-major
+順に固定）であることをソースで確認済み（`crates/onnx-interop/src/ops/
+conv.rs`・`pool.rs`・`batch_norm.rs`・`global_average_pool.rs`・
+`crates/autodiff/src/eval.rs::sum`）。`fandhe-ai-onnx-interop` クレート
+自体も `rayon` に依存しない（`Cargo.toml` に `rayon` の記載なし）。
+したがって本ページの baseline は CPU feature 差・スレッド数差による
+揺れが生じず、CI・ローカルを問わず単一の値で成立する（経路ごとに
+baseline を分ける必要はない）。
+
 ## テスト実行コマンド
 
 ```bash
 cargo test -p fandhe-ai-onnx-interop --test onnx_interp_pytorch_cnn_fixture -- --nocapture
 ```
 
-39 テスト（19 ケース × 2 exporter + 期待値表整合性検査 1 件）すべて
-pass。
-
-**縮約系の bit 同一（親 #2185 の受け入れ条件）を直接検査する
-`#[ignore]` テストが別途ある**（codex-review 指摘対応。イシュー #2329
-PR #2343。レビュースレッド `PRRT_kwDOTuUCJc6mhmHL`・
-`PRRT_kwDOTuUCJc6mhpBB`）:
-
-```bash
-cargo test -p fandhe-ai-onnx-interop --test onnx_interp_pytorch_cnn_fixture -- --ignored
-```
-
-上記通常 39 テストの `Req7Provisional`（`fail_count == 0`）による pass
-は、REQ-7 事前固定式に対する fail-closed な回帰ガードに過ぎず、
-親 #2185 の「bit 同一」受け入れ条件そのものの合格を意味しない。
-`reduction_ops_bit_exact_acceptance_pending_approval`
-（`crates/onnx-interop/tests/onnx_interp_pytorch_cnn_fixture.rs`）は
-`Req7Provisional` の全 23 ケース × exporter について
-`bit_mismatch_count == 0` を直接検査し、**実測時点で 23/23 件 fail する
-（意図的に red）**。判定方式（下記「承認待ち事項」1. の採否）が確定し
-`Expectation` 表・本ファイルが更新されるまで、このテストを削除・
-green 化してはならない。
+40 テスト（19 ケース × 2 exporter + 期待値表整合性検査 1 件 + baseline
+整合性検査 1 件）すべて pass。`#[ignore]` テストは 0 件（縮約系の
+「bit 同一」受け入れ条件は本改定で正式に廃止されたため、それを直接
+検査する `#[ignore]` テストは削除した——`make test-ignored`
+〈`cargo test --workspace -- --ignored`〉が常時 fail する状態を残さない）。
 
 ## ケース × exporter の実測結果
 
 `--nocapture` の `op_types=`／`bit_mismatch=`／`max_abs_diff=`／
-`max_rel_err=`／`req7_fail_count=` 出力を転記する（`req7_fail_count` は
-REQ-7 事前固定式 `abs_err / (|ref| + 1e-6) <= 1e-3` での fail 要素数）。
+`max_rel_err=`／`req7_fail_count=`／`mean_abs_diff=` 出力を転記する
+（`req7_fail_count` は REQ-7 事前固定式
+`abs_err / (|ref| + 1e-6) <= 1e-3` での fail 要素数）。**baseline 列は
+`REDUCTION_BASELINES`（`crates/onnx-interop/tests/
+onnx_interp_pytorch_cnn_fixture.rs`）へ記録した ceiling で、実測値
+そのもの（余裕係数なし）**。BitExact 判定のケース（MaxPool・Flatten）は
+baseline を持たない（bit 完全一致のみを要求する別方式のため）。
 
-| ケース | exporter | 実際の op 列 | bit_mismatch | max_abs_diff | max_rel_err | 判定 |
-|---|---|---|---|---|---|---|
-| `conv2d_basic` | ts | `Conv` | 0/256 | 0 | 0 | BitExact |
-| `conv2d_basic` | dynamo | `Conv` | 0/256 | 0 | 0 | BitExact |
-| `conv2d_stride_dil_group` | ts | `Conv` | 63/100 | 1.19e-7 | 2.80e-6 | Req7Provisional（暫定 pass） |
-| `conv2d_stride_dil_group` | dynamo | `Conv` | 63/100 | 1.19e-7 | 2.80e-6 | Req7Provisional（暫定 pass） |
-| `conv2d_nobias` | ts | `Conv` | 0/256 | 0 | 0 | BitExact |
-| `conv2d_nobias` | dynamo | `Conv` | 0/256 | 0 | 0 | BitExact |
-| `conv1d_basic` | ts | `Conv` | 7/20 | 1.19e-7 | 4.26e-6 | Req7Provisional（暫定 pass） |
-| `conv1d_basic` | dynamo | `Conv` | 7/20 | 1.19e-7 | 4.26e-6 | Req7Provisional（暫定 pass） |
-| `maxpool2d_basic` | ts/dynamo | `MaxPool` | 0/48 | 0 | 0 | BitExact |
-| `maxpool2d_pad_dil_ceil` | ts/dynamo | `MaxPool` | 0/48 | 0 | 0 | BitExact |
-| `maxpool1d_basic` | ts/dynamo | `MaxPool` | 0/15 | 0 | 0 | BitExact |
-| `avgpool2d_include_pad` | ts/dynamo | `AveragePool` | 31/48 | 5.96e-8 | 4.21e-6 | Req7Provisional（暫定 pass） |
-| `avgpool2d_exclude_pad` | ts/dynamo | `AveragePool` | 30/48 | 5.96e-8 | 1.25e-6 | Req7Provisional（暫定 pass） |
-| `avgpool2d_ceil_overhang_incl` | ts | `AveragePool` | 19/48 | 5.96e-8 | 6.19e-7 | Req7Provisional（暫定 pass） |
-| `avgpool2d_ceil_overhang_incl` | dynamo | `AveragePool` | 19/48 | 5.96e-8 | 6.19e-7 | Req7Provisional（暫定 pass） |
-| `avgpool2d_ceil_overhang_excl` | ts/dynamo | `AveragePool` | 22/48 | 1.19e-7 | 6.80e-6 | Req7Provisional（暫定 pass） |
-| `avgpool1d_basic` | ts/dynamo | `AveragePool` | 6/15 | 1.19e-7 | 1.08e-7 | Req7Provisional（暫定 pass） |
-| `gap2d` | ts | `GlobalAveragePool` | 1/3 | 3.73e-9 | 6.67e-8 | Req7Provisional（暫定 pass） |
-| `gap2d` | dynamo | `ReduceMean` | 3/3 | 1.49e-8 | 2.00e-7 | Req7Provisional（暫定 pass） |
-| `gap1d` | ts | `GlobalAveragePool` | 0/3 | 0 | 0 | BitExact |
-| `gap1d` | dynamo | `Unsqueeze, ReduceMean, Squeeze` | 2/3 | 5.96e-8 | 9.23e-8 | Req7Provisional（暫定 pass） |
-| `bn2d_eval` | ts/dynamo | `BatchNormalization` | 54/150 | 4.77e-7 | 9.01e-7 | Req7Provisional（暫定 pass） |
-| `bn2d_eval_eps` | ts/dynamo | `BatchNormalization` | 83/150 | 2.38e-7 | 6.06e-7 | Req7Provisional（暫定 pass） |
-| `bn1d_eval` | ts/dynamo | `BatchNormalization` | 22/42 | 1.19e-7 | 1.29e-7 | Req7Provisional（暫定 pass） |
-| `flatten_default` | ts | `Flatten` | 0/120 | 0 | 0 | BitExact |
-| `flatten_default` | dynamo | `Reshape` | 0/120 | 0 | 0 | BitExact |
-| `flatten_start2` | ts | `Shape, Constant×4, Slice, Concat, Reshape` | 0/120 | 0 | 0 | BitExact |
-| `flatten_start2` | dynamo | `Reshape` | 0/120 | 0 | 0 | BitExact |
+| ケース | exporter | 実際の op 列 | total | fail_count | max_abs_diff | max_rel_err | mean_abs_diff | 判定方式 |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| `conv2d_basic` | ts | `Conv` | 256 | 0 | 0 | 0 | 0 | Req7BaselineNonRegression |
+| `conv2d_basic` | dynamo | `Conv` | 256 | 0 | 0 | 0 | 0 | Req7BaselineNonRegression |
+| `conv2d_stride_dil_group` | ts | `Conv` | 100 | 0 | 1.1920929e-7 | 2.7999095e-6 | 3.3006072044372556e-8 | Req7BaselineNonRegression |
+| `conv2d_stride_dil_group` | dynamo | `Conv` | 100 | 0 | 1.1920929e-7 | 2.7999095e-6 | 3.3006072044372556e-8 | Req7BaselineNonRegression |
+| `conv2d_nobias` | ts | `Conv` | 256 | 0 | 0 | 0 | 0 | Req7BaselineNonRegression |
+| `conv2d_nobias` | dynamo | `Conv` | 256 | 0 | 0 | 0 | 0 | Req7BaselineNonRegression |
+| `conv1d_basic` | ts | `Conv` | 20 | 0 | 1.1920929e-7 | 4.256559e-6 | 1.862645149230957e-8 | Req7BaselineNonRegression |
+| `conv1d_basic` | dynamo | `Conv` | 20 | 0 | 1.1920929e-7 | 4.256559e-6 | 1.862645149230957e-8 | Req7BaselineNonRegression |
+| `maxpool2d_basic` | ts/dynamo | `MaxPool` | 48 | — | 0 | 0 | — | BitExact |
+| `maxpool2d_pad_dil_ceil` | ts/dynamo | `MaxPool` | 48 | — | 0 | 0 | — | BitExact |
+| `maxpool1d_basic` | ts/dynamo | `MaxPool` | 15 | — | 0 | 0 | — | BitExact |
+| `avgpool2d_include_pad` | ts/dynamo | `AveragePool` | 48 | 0 | 5.9604645e-8 | 4.206918e-6 | 1.3812496035825461e-8 | Req7BaselineNonRegression |
+| `avgpool2d_exclude_pad` | ts/dynamo | `AveragePool` | 48 | 0 | 5.9604645e-8 | 1.2547697e-6 | 1.415416287879149e-8 | Req7BaselineNonRegression |
+| `avgpool2d_ceil_overhang_incl` | ts/dynamo | `AveragePool` | 48 | 0 | 5.9604645e-8 | 6.191493e-7 | 9.216212977965673e-9 | Req7BaselineNonRegression |
+| `avgpool2d_ceil_overhang_excl` | ts/dynamo | `AveragePool` | 48 | 0 | 1.1920929e-7 | 6.8043673e-6 | 1.5056381622950237e-8 | Req7BaselineNonRegression |
+| `avgpool1d_basic` | ts/dynamo | `AveragePool` | 15 | 0 | 1.1920929e-7 | 1.0836598e-7 | 1.5397866566975913e-8 | Req7BaselineNonRegression |
+| `gap2d` | ts | `GlobalAveragePool` | 3 | 0 | 3.7252903e-9 | 6.6650045e-8 | 1.241763432820638e-9 | Req7BaselineNonRegression |
+| `gap2d` | dynamo | `ReduceMean` | 3 | 0 | 1.4901161e-8 | 1.9995015e-7 | 1.1175870895385742e-8 | Req7BaselineNonRegression |
+| `gap1d` | ts | `GlobalAveragePool` | 3 | 0 | 0 | 0 | 0 | Req7BaselineNonRegression |
+| `gap1d` | dynamo | `Unsqueeze, ReduceMean, Squeeze` | 3 | 0 | 5.9604645e-8 | 9.2281624e-8 | 2.9802322387695313e-8 | Req7BaselineNonRegression |
+| `bn2d_eval` | ts/dynamo | `BatchNormalization` | 150 | 0 | 4.7683716e-7 | 9.008323e-7 | 2.966572841008504e-8 | Req7BaselineNonRegression |
+| `bn2d_eval_eps` | ts/dynamo | `BatchNormalization` | 150 | 0 | 2.3841858e-7 | 6.0607965e-7 | 3.9380975067615506e-8 | Req7BaselineNonRegression |
+| `bn1d_eval` | ts/dynamo | `BatchNormalization` | 42 | 0 | 1.1920929e-7 | 1.2867288e-7 | 2.9979717163812546e-8 | Req7BaselineNonRegression |
+| `flatten_default` | ts | `Flatten` | 120 | — | 0 | 0 | — | BitExact |
+| `flatten_default` | dynamo | `Reshape` | 120 | — | 0 | 0 | — | BitExact |
+| `flatten_start2` | ts | `Shape, Constant×4, Slice, Concat, Reshape` | 120 | — | 0 | 0 | — | BitExact |
+| `flatten_start2` | dynamo | `Reshape` | 120 | — | 0 | 0 | — | BitExact |
 
-**全 38 ケース×exporter の組で `req7_fail_count=0`**（暫定 REQ-7 判定でも
+**全 38 ケース×exporter の組で `req7_fail_count=0`**（REQ-7 事前固定式で
 fail するケースは実測で無かった）。`max_rel_err` の最大値は
 `avgpool2d_ceil_overhang_excl` の `6.80e-6`（イシュー #2329 PR #2343
 codex-review 指摘対応で fixture の入力形状を `7x7` から `6x6` へ変更し
 再実測。旧実測では `avgpool2d_include_pad` の `4.2e-6` が最大だった）で、
 閾値 `1e-3` に対して十分な余裕がある。
+
+`REDUCTION_BASELINES` は縮約系 14 ケース × 2 exporter = 28 行を記録して
+おり、上表の `total`／`fail_count`／`max_abs_diff`／`max_rel_err`／
+`mean_abs_diff` 列と完全一致する（ceiling = 実測値そのもの。
+`reduction_baselines_are_well_formed` テストが `EXPECTATIONS` の
+`Req7BaselineNonRegression` エントリとの集合完全一致・ceiling の有限性・
+非負性を機械検査する）。
 
 ## R1〜R6 との対応（受け入れ基準チェック）
 
@@ -108,9 +134,9 @@ codex-review 指摘対応で fixture の入力形状を `7x7` から `6x6` へ�
 | R1 | 対象 6 op ごとに `torch.onnx.export` 実生成 `.onnx` をコミット | 達成。19 ケース × 2 exporter = 38 ファイル（272 KB） |
 | R2 | initializer と `state_dict` の bit 一致 | 達成。全ケース `assert_r2_initializers_match_state_dict` で bit 完全一致検証済み |
 | R3 | 純粋な選択・形状操作（MaxPool・Flatten）の bit 完全一致 | 達成。全ケースで `bit_mismatch=0` |
-| R4 | 縮約系の実測記録・暫定判定 | 実測記録は完了（本ファイル上表）。ただし縮約系（Conv・AveragePool・BatchNormalization・`gap*`／`ReduceMean` 経路）は bit 一致しないケースが多く、暫定 REQ-7 判定（`Req7Provisional`）で全ケース pass を確認したのみ。**この暫定判定を最終判定方式として採用するかはユーザー承認待ちであり、R4 は未確定**（達成とは言わない） |
+| R4 | 縮約系の実測記録・判定 | **達成**。縮約系（Conv・AveragePool・GlobalAveragePool・BatchNormalization・`ReduceMean` 経路）は REQ-7 事前固定式（必須条件）＋ケースごとの実測上限 baseline への fail-closed 非後退判定の併用方式で判定する（2026-09-28 ユーザー承認）。全 28 行が baseline と完全一致で pass |
 | R5 | import 失敗・非対応ケースの列挙 | 下記「R5: import 非対応ケース」参照 |
-| R6 | #2185 の受け入れ条件（「PyTorch の ONNX export を import して bit 同一を確認する」）との対応 | **一部未達**。純粋な選択・形状操作系（MaxPool・Flatten。R3）は bit 同一を達成したが、縮約系（R4）は bit 同一ではなく `Req7Provisional` という暫定基準で pass 扱いにしている。すなわち #2185 の受け入れ条件を縮約系についてはそのままの形では満たせておらず、暫定基準への切り替え可否はユーザー承認待ち（下記「承認待ち事項」1.）。承認が得られるまで R6 は縮約系について未確定のまま据え置く |
+| R6 | #2185 の受け入れ条件との対応 | **達成**（受け入れ条件を正式改定）。純粋な選択・形状操作系（MaxPool・Flatten。R3）は bit 同一を維持する。縮約系（R4）は bit 同一を受け入れ条件から外し、REQ-7 式＋baseline 非後退判定へ正式移行した（2026-09-28 ユーザー承認・`docs/onnx-pytorch-fixture-reduction-parity-judgment-decision.md`）。#2185 のチェックボックス文言はこの改定に合わせて別途更新する |
 
 ## R5: import 非対応ケース
 
@@ -131,8 +157,8 @@ inline のままだったことから、閾値はごく小さい模様）。本�
 （`gen_reference.py::export_one`）が export 直後に external data を
 inline へ変換してからコミットしている（詳細はフィクスチャ README
 「exporter」節）。**external data サポート自体の要否（実装するか、
-非対応のまま維持するか）はユーザー判断に委ねる**（修正するか別 issue に
-するかは本 PR のスコープ外）。
+非対応のまま維持するか）は別イシューで対応予定**（ユーザー決定済み。
+main セッションが起票する）。
 
 これ以外に import が失敗した exporter 出力・op_type の組み合わせは
 無かった。dynamo exporter が `GlobalAveragePool` を `ReduceMean`
@@ -152,9 +178,9 @@ inline へ変換してからコミットしている（詳細はフィクスチ�
 いなかった（イシュー #2329 PR #2343 codex-review 指摘・2026-09-28
 `6x6` へ修正。`6x6` は floor_mode の 3x3 出力に対し `ceil_mode` が
 4x4 出力へ 1 行・1 列増やし、その最終窓が padded 領域〈6+2*1=8〉を
-実際に越える）。実測ではいずれも暫定 REQ-7 判定を通過しており
-（`max_rel_err` はそれぞれ `6.19e-7`・`6.80e-6`）、この divisor
-規則が PyTorch 実行値と整合することを確認した。
+実際に越える）。実測ではいずれも REQ-7 式・baseline 双方の判定を
+通過しており（`max_rel_err` はそれぞれ `6.19e-7`・`6.80e-6`）、この
+divisor 規則が PyTorch 実行値と整合することを確認した。
 
 ## GPU 実機 parity が構造的に N/A である根拠
 
@@ -183,11 +209,12 @@ BatchNormalization・GlobalAveragePool・Flatten へ横展開しても構造は
 1736/`・`docs/perf/logs/conv-realdevice-1771/` 等）を出発点にできる
 見込みである。
 
-## 承認待ち事項（まとめ）
+## 対応済み事項（まとめ）
 
-1. **暫定 REQ-7 判定の適用**: 縮約系の一部ケースで bit 一致しなかったため
-   既存の REQ-7 事前固定式を暫定適用した（tolerance の新設・緩和ではなく
-   既存式の再利用）。最終判定方式としての採否はユーザー承認事項。
+1. **REQ-7 式＋baseline 非後退判定の正式採用**: 縮約系の受け入れ条件を
+   bit 同一から REQ-7 式＋baseline 非後退判定の併用方式へ正式改定した
+   （2026-09-28 ユーザー承認。決定記録は
+   `docs/onnx-pytorch-fixture-reduction-parity-judgment-decision.md`）。
 2. **external data 非対応**: dynamo exporter の既定挙動（external data）
-   への対応要否（実装するか、非対応のまま維持し fixture 側で inline 化
-   する運用を継続するか）はユーザー判断事項。
+   への対応要否は別イシューで対応予定（ユーザー決定済み）。本 PR では
+   fixture 側で inline 化する運用を継続する。

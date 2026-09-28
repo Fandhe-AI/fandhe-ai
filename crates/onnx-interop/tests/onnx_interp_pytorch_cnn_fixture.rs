@@ -13,20 +13,40 @@
 //! グラフ表現に対する import の到達性の実証。CI はコミット済み fixture の
 //! みを読み、torch には依存しない）。
 //!
-//! ## 判定方式についての注記（REQ-2・REQ-7 との混同禁止）
+//! ## 判定方式についての注記（REQ-2・REQ-7 との混同禁止。2026-09-28
+//! ユーザー承認で正式方式へ移行）
 //!
-//! 縮約系（`Conv`・`AveragePool`・`GlobalAveragePool`・`BatchNormalization`）
-//! の結合順序（PyTorch CPU 実行系 vs 本クレートの直接ループ）は異なるため
-//! bit 完全一致は主張しない。実測で bit 一致したケースは [`Expectation::
-//! BitExact`] として固定する（厳しい側。`f32::mul_add`／`f64` 縮約は決定的
-//! なため CI・実機で結果は揺れない）。bit 一致しなかったケースは
-//! `tests/model_zoo_parity.rs` と同じ **REQ-7 事前固定式**
-//! `abs_err / (|ref| + 1e-6) <= 1e-3` を暫定適用する
-//! （[`Expectation::Req7Provisional`]）。**この暫定適用は最終判定方式として
-//! ユーザー承認を得たものではない**——実測ログ（`docs/perf/logs/
-//! onnx-cnn-ops-pytorch-fixture-2329/README.md`）と PR 本文に「最終判定
-//! 方式は承認待ち」と明記する。`ParityBaseline` のような実測上限 baseline
-//! は本ファイルでは新設しない（新設には人間承認が必要なため）。
+//! 縮約系（`Conv`・`AveragePool`・`GlobalAveragePool`・`BatchNormalization`。
+//! dynamo 分解経路の `ReduceMean` を含む）の結合順序（PyTorch CPU 実行系
+//! vs 本クレートの直接ループ）は異なるため、bit 完全一致は原理的に目標に
+//! できない——PyTorch 参照値との **bit 同一**は縮約系の受け入れ条件から
+//! 外す（元は #2185 の受け入れ条件チェックボックスが要求していたが、
+//! `docs/spec/04-requirements.md` REQ-7 自体は「相対誤差 1e-3 以内」を
+//! 求めるのみで bit 同一は要求していない。すなわち本改定は spec の緩和では
+//! なく、実装リポ側 issue の受け入れ条件を spec の定めに整合させる変更
+//! ——`docs/onnx-pytorch-fixture-reduction-parity-judgment-decision.md`
+//! 参照）。
+//!
+//! 縮約系の判定は次の **併用方式**（[`Expectation::Req7BaselineNonRegression`]）
+//! で行う:
+//! 1. `tests/model_zoo_parity.rs` と同じ **REQ-7 事前固定式**
+//!    `abs_err / (|ref| + 1e-6) <= 1e-3` の `fail_count == 0`
+//!    を必須条件として維持する（tolerance 自体は変更しない）
+//! 2. その上で、ケースごとの実測上限 baseline（[`ReductionBaseline`]・
+//!    `REDUCTION_BASELINES`）に対する fail-closed 非後退判定
+//!    （`total` 完全一致・`fail_count`／`max_abs_diff`／`max_rel_err`／
+//!    `mean_abs_diff` のいずれも記録済み ceiling 以下）を行う。ceiling は
+//!    実測値そのもの（余裕係数なし）であり、baseline の追加・更新は実測値
+//!    のみ・人間承認必須（`crates/backend-cuda/tests/common/
+//!    parity_baseline.rs::ParityBaseline` と同じ fail-closed 設計）
+//!
+//! 純粋な選択・形状操作（`MaxPool`・`Flatten`）は従来どおり
+//! [`Expectation::BitExact`]（フォールバックなしの bit 一致のみ）を維持
+//! する。縮約系 op（[`REDUCTION_OP_TYPES`]）を含む演算列と含まない演算列の
+//! どちらへ各 [`Expectation`] を適用するかは
+//! [`assert_expectation_matches_op_types`] が構造的に検査し、表の書き換え
+//! による無断緩和（縮約系ケースを `BitExact` 側へ、あるいはその逆へ誤って
+//! 動かす類の変更）を機械的に検知する。
 //!
 //! `.claude/rules/coding-rust.md` の REQ-2 バックエンド間数値一致 OR 複合
 //! 判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）とは別指標であり、
@@ -34,6 +54,23 @@
 //! （`onnx::interp::run`。`interp.rs` のディスパッチ表で対象 6 op はすべて
 //! `(compute_*(..)?, false)` = 常にホスト実行）のため REQ-2 の対象外
 //! （構造的 N/A。`docs/onnx-model-zoo-parity.md` §4 と同じ理由）。
+//!
+//! ## 計算経路の決定性（CPU feature 検出との無関係性）
+//!
+//! 本ファイルが経由する計算（`ops::conv`／`ops::pool`／`ops::batch_norm`／
+//! `ops::global_average_pool`・dynamo 分解経路の `ReduceMean`
+//! 〈`onnx::interp_ext::compute_reduce_mean` → `fandhe_ai_autodiff::Var::
+//! mean` → `default_ops::NaiveOps::sum` → `autodiff::eval::sum` の
+//! `Iterator::sum`〉）はいずれも `rayon`・SIMD intrinsics・
+//! `is_x86_feature_detected!` 等のランタイム分岐を含まない単純な逐次
+//! ループ（`f32::mul_add`／`f64` 蓄積。走査順は入力の row-major 順に固定）
+//! である。`fandhe-ai-onnx-interop` クレート自体も `rayon` に依存しない
+//! （`backend-cpu` の AVX2/AVX-512/NEON 系 SIMD カーネル・ランタイム CPU
+//! feature 検出はこのクレートから到達しない）。したがって本ファイルの
+//! baseline は CI（GitHub ホステッド `ubuntu-latest`・x86_64）・ローカル
+//! （x86_64）を問わず単一の値で成立し、実行環境の CPU feature 差・
+//! スレッド数差による揺れは生じない（経路ごとに baseline を分ける必要は
+//! ない）。
 //!
 //! ## 純粋な選択・形状操作（bit 一致のみを許容）
 //!
@@ -325,20 +362,29 @@ fn assert_r2_initializers_match_state_dict(
     }
 }
 
-/// 出力の突合結果（bit 不一致要素数・max_abs_diff・max_rel_err）。
+/// 出力の突合結果（bit 不一致要素数・max_abs_diff・max_rel_err・
+/// mean_abs_diff）。`mean_abs_diff` は `f64` で蓄積してから要素数で割る
+/// （`crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline`
+/// の `baseline_mean_abs_diff_ceiling` と同じ「集計値は `f64` で確定して
+/// から比較する」設計）。
 struct DiffStats {
+    /// 比較対象の総要素数（`ReductionBaseline::total` との完全一致検査に使う）。
+    total: usize,
     fail_count: usize,
     bit_mismatch_count: usize,
     max_abs_diff: f32,
     max_rel_err: f32,
+    mean_abs_diff: f64,
 }
 
 fn diff_stats(actual: &[f32], expected: &[f32]) -> DiffStats {
     assert_eq!(actual.len(), expected.len(), "要素数不一致");
+    let total = actual.len();
     let mut fail_count = 0usize;
     let mut bit_mismatch_count = 0usize;
     let mut max_abs_diff = 0.0f32;
     let mut max_rel_err = 0.0f32;
+    let mut abs_diff_sum = 0.0f64;
     for (&a, &e) in actual.iter().zip(expected.iter()) {
         if a.to_bits() != e.to_bits() {
             bit_mismatch_count += 1;
@@ -347,6 +393,7 @@ fn diff_stats(actual: &[f32], expected: &[f32]) -> DiffStats {
         if abs_diff.is_finite() && abs_diff > max_abs_diff {
             max_abs_diff = abs_diff;
         }
+        abs_diff_sum += f64::from(abs_diff);
         let rel_err = abs_diff / (e.abs() + 1e-6);
         if rel_err.is_finite() {
             if rel_err > max_rel_err {
@@ -361,32 +408,52 @@ fn diff_stats(actual: &[f32], expected: &[f32]) -> DiffStats {
             fail_count += 1;
         }
     }
+    let mean_abs_diff = abs_diff_sum / total as f64;
     DiffStats {
+        total,
         fail_count,
         bit_mismatch_count,
         max_abs_diff,
         max_rel_err,
+        mean_abs_diff,
     }
 }
 
-/// 出力の判定方式。モジュール doc「判定方式についての注記」参照。
+/// 縮約を伴う演算（PyTorch 実行系との結合順序差により bit 完全一致を
+/// 目標にできない op 種別）。[`Expectation`] の割当が [`EXPECTATIONS`] の
+/// 表書き換えで無断に緩和・厳格化されていないかを
+/// [`assert_expectation_matches_op_types`] が機械検査する際の判定基準
+/// として使う（モジュール doc「判定方式についての注記」参照）。
+const REDUCTION_OP_TYPES: &[&str] = &[
+    "Conv",
+    "AveragePool",
+    "GlobalAveragePool",
+    "BatchNormalization",
+    "ReduceMean",
+];
+
+/// 出力の判定方式。モジュール doc「判定方式についての注記」参照
+/// （2026-09-28 ユーザー承認で正式方式へ移行）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Expectation {
     /// 選択・形状操作（`MaxPool`・`Flatten`）。フォールバックなしの bit 一致のみ。
+    /// 縮約系 op（[`REDUCTION_OP_TYPES`]）を一切含まない演算列にのみ適用する。
     BitExact,
-    /// 縮約系（`Conv`・`AveragePool`・`GlobalAveragePool`・`BatchNormalization`）。
-    /// 実測で bit 一致したケースは [`Self::BitExact`] へ固定し、しなかった
-    /// ケースのみ本 variant で REQ-7 暫定判定にフォールバックする
-    /// （最終判定方式はユーザー承認待ち。モジュール doc 参照）。
+    /// 縮約系（`Conv`・`AveragePool`・`GlobalAveragePool`・
+    /// `BatchNormalization`。dynamo 分解経路の `ReduceMean` を含む）。
+    /// PyTorch 実行系との結合順序差により bit 完全一致は原理的に目標に
+    /// できないため、縮約系の受け入れ条件から bit 同一を外し、次の併用
+    /// 方式で判定する（2026-09-28 ユーザー承認）:
     ///
-    /// **本 variant の pass は親 #2185 の受け入れ条件（bit 同一）の合格を
-    /// 意味しない**（codex-review 指摘。イシュー #2329 PR #2343）。ここでの
-    /// `fail_count == 0` は REQ-7 事前固定式に対する fail-closed な回帰
-    /// ガードに過ぎない。bit 同一そのものを検査する受け入れテストは
-    /// [`reduction_ops_bit_exact_acceptance_pending_approval`]（`#[ignore]`。
-    /// 判定方式のユーザー承認が下りるまで意図的に red のまま維持する）が
-    /// 別途担う。
-    Req7Provisional,
+    /// 1. REQ-7 事前固定式 `abs_err / (|ref| + 1e-6) <= 1e-3` の
+    ///    `fail_count == 0`（必須条件。tolerance は変更しない）
+    /// 2. ケースごとの実測上限 baseline（[`ReductionBaseline`]）に対する
+    ///    fail-closed 非後退判定（`total`・`fail_count`・`max_abs_diff`・
+    ///    `max_rel_err`・`mean_abs_diff` のいずれも記録済み値を超えないこと）
+    ///
+    /// 縮約系 op を 1 つ以上含む演算列にのみ適用する
+    /// （[`assert_expectation_matches_op_types`] 参照）。
+    Req7BaselineNonRegression,
 }
 
 /// `(case_name, exporter_name) -> Expectation` の期待値表。
@@ -396,73 +463,125 @@ enum Expectation {
 /// [`expectation_table_matches_reference_cases`] で検査し、取りこぼしを
 /// fail-closed に止める。
 const EXPECTATIONS: &[(&str, &str, Expectation)] = &[
-    // 実測で bit 一致（厳しい側へ固定。モジュール doc §5.4 の方針）。
-    ("conv2d_basic", "ts", Expectation::BitExact),
-    ("conv2d_basic", "dynamo", Expectation::BitExact),
+    // `Conv` は縮約系（REDUCTION_OP_TYPES）のため Req7BaselineNonRegression
+    // を適用する（bit 一致は縮約系の受け入れ条件から外れた。モジュール doc
+    // 「判定方式についての注記」参照）。実測で bit 一致したケースも baseline
+    // の ceiling を 0 として記録する（緩和ではなく、成立した厳しさをそのまま
+    // 非後退契約に固定する）。
+    ("conv2d_basic", "ts", Expectation::Req7BaselineNonRegression),
+    (
+        "conv2d_basic",
+        "dynamo",
+        Expectation::Req7BaselineNonRegression,
+    ),
     (
         "conv2d_stride_dil_group",
         "ts",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
     (
         "conv2d_stride_dil_group",
         "dynamo",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
-    ("conv2d_nobias", "ts", Expectation::BitExact),
-    ("conv2d_nobias", "dynamo", Expectation::BitExact),
-    ("conv1d_basic", "ts", Expectation::Req7Provisional),
-    ("conv1d_basic", "dynamo", Expectation::Req7Provisional),
+    (
+        "conv2d_nobias",
+        "ts",
+        Expectation::Req7BaselineNonRegression,
+    ),
+    (
+        "conv2d_nobias",
+        "dynamo",
+        Expectation::Req7BaselineNonRegression,
+    ),
+    ("conv1d_basic", "ts", Expectation::Req7BaselineNonRegression),
+    (
+        "conv1d_basic",
+        "dynamo",
+        Expectation::Req7BaselineNonRegression,
+    ),
     ("maxpool2d_basic", "ts", Expectation::BitExact),
     ("maxpool2d_basic", "dynamo", Expectation::BitExact),
     ("maxpool2d_pad_dil_ceil", "ts", Expectation::BitExact),
     ("maxpool2d_pad_dil_ceil", "dynamo", Expectation::BitExact),
     ("maxpool1d_basic", "ts", Expectation::BitExact),
     ("maxpool1d_basic", "dynamo", Expectation::BitExact),
-    ("avgpool2d_include_pad", "ts", Expectation::Req7Provisional),
+    (
+        "avgpool2d_include_pad",
+        "ts",
+        Expectation::Req7BaselineNonRegression,
+    ),
     (
         "avgpool2d_include_pad",
         "dynamo",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
-    ("avgpool2d_exclude_pad", "ts", Expectation::Req7Provisional),
+    (
+        "avgpool2d_exclude_pad",
+        "ts",
+        Expectation::Req7BaselineNonRegression,
+    ),
     (
         "avgpool2d_exclude_pad",
         "dynamo",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
     (
         "avgpool2d_ceil_overhang_incl",
         "ts",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
     (
         "avgpool2d_ceil_overhang_incl",
         "dynamo",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
     (
         "avgpool2d_ceil_overhang_excl",
         "ts",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
     (
         "avgpool2d_ceil_overhang_excl",
         "dynamo",
-        Expectation::Req7Provisional,
+        Expectation::Req7BaselineNonRegression,
     ),
-    ("avgpool1d_basic", "ts", Expectation::Req7Provisional),
-    ("avgpool1d_basic", "dynamo", Expectation::Req7Provisional),
-    ("gap2d", "ts", Expectation::Req7Provisional),
-    ("gap2d", "dynamo", Expectation::Req7Provisional),
-    ("gap1d", "ts", Expectation::BitExact),
-    ("gap1d", "dynamo", Expectation::Req7Provisional),
-    ("bn2d_eval", "ts", Expectation::Req7Provisional),
-    ("bn2d_eval", "dynamo", Expectation::Req7Provisional),
-    ("bn2d_eval_eps", "ts", Expectation::Req7Provisional),
-    ("bn2d_eval_eps", "dynamo", Expectation::Req7Provisional),
-    ("bn1d_eval", "ts", Expectation::Req7Provisional),
-    ("bn1d_eval", "dynamo", Expectation::Req7Provisional),
+    (
+        "avgpool1d_basic",
+        "ts",
+        Expectation::Req7BaselineNonRegression,
+    ),
+    (
+        "avgpool1d_basic",
+        "dynamo",
+        Expectation::Req7BaselineNonRegression,
+    ),
+    ("gap2d", "ts", Expectation::Req7BaselineNonRegression),
+    ("gap2d", "dynamo", Expectation::Req7BaselineNonRegression),
+    ("gap1d", "ts", Expectation::Req7BaselineNonRegression),
+    ("gap1d", "dynamo", Expectation::Req7BaselineNonRegression),
+    ("bn2d_eval", "ts", Expectation::Req7BaselineNonRegression),
+    (
+        "bn2d_eval",
+        "dynamo",
+        Expectation::Req7BaselineNonRegression,
+    ),
+    (
+        "bn2d_eval_eps",
+        "ts",
+        Expectation::Req7BaselineNonRegression,
+    ),
+    (
+        "bn2d_eval_eps",
+        "dynamo",
+        Expectation::Req7BaselineNonRegression,
+    ),
+    ("bn1d_eval", "ts", Expectation::Req7BaselineNonRegression),
+    (
+        "bn1d_eval",
+        "dynamo",
+        Expectation::Req7BaselineNonRegression,
+    ),
     ("flatten_default", "ts", Expectation::BitExact),
     ("flatten_default", "dynamo", Expectation::BitExact),
     ("flatten_start2", "ts", Expectation::BitExact),
@@ -510,12 +629,9 @@ fn expectation_table_matches_reference_cases() {
 }
 
 /// 1 ケース・1 exporter を decode → build_graph → run し、[`DiffStats`]
-/// までを計算する（判定方式に依存しない共通部分）。[`run_case`]（通常の
-/// per-expectation 判定）と [`reduction_ops_bit_exact_acceptance_pending_
-/// approval`]（縮約系の bit 一致を直接検査する、ユーザー承認待ちの受け入れ
-/// 判定テスト）の双方から呼ばれる単一の真実源（レビュー指摘対応。イシュー
-/// #2329 PR #2343。判定ロジックを重複実装すると decode／run 経路がズレる
-/// リスクがあるため一本化する）。
+/// までを計算する（判定方式に依存しない共通部分）。[`run_case`] から呼ばれる
+/// 単一の真実源（レビュー指摘対応。イシュー #2329 PR #2343。判定ロジックを
+/// 重複実装すると decode／run 経路がズレるリスクがあるため一本化する）。
 fn compute_case_stats(case_name: &str, exporter_name: &str, case: &CaseRecord) -> DiffStats {
     let exporter = case
         .exporters
@@ -593,27 +709,66 @@ fn compute_case_stats(case_name: &str, exporter_name: &str, case: &CaseRecord) -
     let stats = diff_stats(actual_slice, expected_slice);
 
     eprintln!(
-        "{case_name} [{exporter_name}]: op_types={:?} bit_mismatch={}/{} max_abs_diff={} \
-         max_rel_err={} req7_fail_count={}",
+        "{case_name} [{exporter_name}]: op_types={:?} bit_mismatch={}/{} max_abs_diff={:?} \
+         max_rel_err={:?} req7_fail_count={} mean_abs_diff={:?}",
         exporter.op_types,
         stats.bit_mismatch_count,
         actual_slice.len(),
         stats.max_abs_diff,
         stats.max_rel_err,
-        stats.fail_count
+        stats.fail_count,
+        stats.mean_abs_diff,
     );
 
     stats
 }
 
+/// [`Expectation`] の割当が [`EXPECTATIONS`] の表書き換えで無断に緩和・
+/// 厳格化されていないかを機械検査する（`op_types` 列に縮約系 op
+/// （[`REDUCTION_OP_TYPES`]）を 1 つでも含む場合は
+/// [`Expectation::Req7BaselineNonRegression`]、含まない場合は
+/// [`Expectation::BitExact`] でなければならない）。表の手動編集で縮約系
+/// ケースを `BitExact` 側へ動かす・あるいは純粋な選択・形状操作ケースを
+/// `Req7BaselineNonRegression` 側へ動かす、という双方向の書き換えミスを
+/// fail-closed に検出する（レビュー指摘の再発防止。「R2 対応表が空でも
+/// 通過する」「op_types が未検査」と同型の構造的な見逃しを防ぐ狙い）。
+fn assert_expectation_matches_op_types(
+    case_name: &str,
+    exporter_name: &str,
+    expectation: Expectation,
+    op_types: &[String],
+) {
+    let has_reduction_op = op_types
+        .iter()
+        .any(|op| REDUCTION_OP_TYPES.contains(&op.as_str()));
+    match expectation {
+        Expectation::BitExact => assert!(
+            !has_reduction_op,
+            "{case_name} [{exporter_name}]: 縮約系 op（{op_types:?}）を含む演算列に \
+             Expectation::BitExact が割り当てられている（EXPECTATIONS の誤り。縮約系は \
+             Req7BaselineNonRegression を使うこと）"
+        ),
+        Expectation::Req7BaselineNonRegression => assert!(
+            has_reduction_op,
+            "{case_name} [{exporter_name}]: 縮約系 op を含まない演算列（{op_types:?}）に \
+             Expectation::Req7BaselineNonRegression が割り当てられている（EXPECTATIONS の \
+             誤り。純粋な選択・形状操作は BitExact を使うこと）"
+        ),
+    }
+}
+
 /// 1 ケース・1 exporter を decode → build_graph → run → 判定まで実行する。
 /// 判定は [`compute_case_stats`] が返す [`DiffStats`] に対して
-/// [`Expectation`] ごとの合否基準を適用する（縮約系の bit 一致そのものの
-/// 検査は [`reduction_ops_bit_exact_acceptance_pending_approval`] が別途
-/// 担う。本関数の `Req7Provisional` 分岐は REQ-7 事前固定式の回帰ガードに
-/// 過ぎず、親 #2185 の「bit 同一」受け入れ条件そのものではない点に注意
-/// ——モジュール doc「判定方式についての注記」参照）。
+/// [`Expectation`] ごとの合否基準を適用する（モジュール doc「判定方式に
+/// ついての注記」参照。2026-09-28 ユーザー承認で正式方式へ移行）。
 fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation: Expectation) {
+    let op_types = case
+        .exporters
+        .get(exporter_name)
+        .and_then(|e| e.op_types.as_ref())
+        .unwrap_or_else(|| panic!("{case_name} [{exporter_name}]: op_types が無い"));
+    assert_expectation_matches_op_types(case_name, exporter_name, expectation, op_types);
+
     let stats = compute_case_stats(case_name, exporter_name, case);
 
     match expectation {
@@ -624,19 +779,22 @@ fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation
                  選択・形状操作でフォールバックは許容しない）"
             );
         }
-        Expectation::Req7Provisional => {
-            // fail-closed な回帰ガード（REQ-7 事前固定式。tolerance は緩めない
-            // `.claude/rules/coding-rust.md`）。ここでの pass は親 #2185 の
-            // 「bit 同一」受け入れ条件そのものの合格ではない——その検査は
-            // `reduction_ops_bit_exact_acceptance_pending_approval`（#[ignore]。
-            // ユーザー承認待ち）が別途担う。
+        Expectation::Req7BaselineNonRegression => {
+            // 必須条件 1: REQ-7 事前固定式（tolerance は緩めない
+            // `.claude/rules/coding-rust.md`）。fail-closed な回帰ガードで
+            // あり、これ単独では非後退契約にならない（baseline 判定を
+            // 併用する）。
             assert_eq!(
                 stats.fail_count, 0,
-                "{case_name} [{exporter_name}]: 暫定 REQ-7 判定（回帰ガード）でも \
-                 fail（max_rel_err={}）。tolerance は緩めない（`.claude/rules/\
+                "{case_name} [{exporter_name}]: REQ-7 事前固定式で fail \
+                 （max_rel_err={}）。tolerance は緩めない（`.claude/rules/\
                  coding-rust.md`）。ユーザー判断が必要",
                 stats.max_rel_err
             );
+            // 必須条件 2: ケースごとの実測上限 baseline に対する fail-closed
+            // 非後退判定（モジュール doc「判定方式についての注記」参照）。
+            let baseline = find_reduction_baseline(case_name, exporter_name);
+            assert_no_reduction_baseline_regression(case_name, exporter_name, &stats, baseline);
         }
     }
 }
@@ -732,69 +890,436 @@ fixture_test!(flatten_default_dynamo, "flatten_default", "dynamo");
 fixture_test!(flatten_start2_ts, "flatten_start2", "ts");
 fixture_test!(flatten_start2_dynamo, "flatten_start2", "dynamo");
 
-/// 縮約系（`Expectation::Req7Provisional` の全ケース）が親 #2185 の受け入れ
-/// 条件（PyTorch 出力との **bit 同一**）を満たすかどうかを直接検査する。
+// ==== 縮約系（Expectation::Req7BaselineNonRegression）の実測上限 baseline ====
+//
+// `crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline` と
+// 同じ fail-closed 設計（実測値のみ・追加更新は人間承認必須・ケース集合の
+// 完全一致検査・NaN／負値拒否）を、ONNX PyTorch fixture 突合向けに移植する。
+// tolerance 定数の変更ではなく、REQ-7 事前固定式を通過した後の集計結果
+// （fail_count・max_abs_diff・max_rel_err・mean_abs_diff）が既知の実測値
+// から悪化していないかを見る非後退の上限である
+// （`.claude/rules/coding-rust.md` の「勾配の長軸縮約」節とは無関係の
+// 別契約）。
+
+/// 縮約系 1 ケース・1 exporter の記録済み実測上限 baseline。
 ///
-/// `run_case` の `Req7Provisional` 分岐（REQ-7 事前固定式による fail-closed
-/// な回帰ガード）は、bit 不一致があっても `fail_count == 0` であれば通過
-/// してしまうため、それを親 #2185 の受け入れ条件の合格として扱ってはならない
-/// という codex-review 指摘（イシュー #2329 PR #2343。レビュースレッド
-/// `PRRT_kwDOTuUCJc6mhmHL`・`PRRT_kwDOTuUCJc6mhpBB`）への対応として本テストを
-/// 新設する。本テストは `EXPECTATIONS`（単一の真実源）から `Req7Provisional`
-/// エントリを直接読み、`compute_case_stats` の `bit_mismatch_count` を検査
-/// することで、判定方式（bit 同一 or REQ-7 暫定）が未確定な現状を「実行可能な
-/// 形の失敗」として可視化する。
+/// ceiling は実測値そのもの（余裕係数を掛けない。`docs/onnx-pytorch-fixture-
+/// reduction-parity-judgment-decision.md` 2026-09-28 ユーザー承認）。
+/// `baseline_fail_count` は REQ-7 事前固定式での fail 要素数であり、
+/// `run_case` が別途 `stats.fail_count == 0` を必須条件として検査済みの
+/// ため本 baseline でも常に `0` を要求する（`reduction_baselines_are_well_
+/// formed` が機械検査する）。
+#[derive(Debug, Clone, Copy)]
+struct ReductionBaseline {
+    case_name: &'static str,
+    exporter_name: &'static str,
+    total: usize,
+    baseline_fail_count: usize,
+    baseline_max_abs_diff_ceiling: f32,
+    baseline_max_rel_err_ceiling: f32,
+    baseline_mean_abs_diff_ceiling: f64,
+}
+
+/// 記録済み baseline 一覧（28 行 = 縮約系 14 ケース × 2 exporter）。
 ///
-/// `#[ignore]` にする理由: 通常 CI（`cargo test`）でこのテストを red のまま
-/// 走らせると `rust-ci / cargo test` が恒常的に fail し続け、無関係な PR の
-/// マージを妨げてしまう。他方で本テストを削除・`assert` の弱体化（無条件
-/// pass 化）をすると、bit 同一未達という事実そのものが CI から見えなくなる。
-/// このため「デフォルトでは走らないが `cargo test -- --ignored` で明示的に
-/// 実行すれば実際に red になる」形で残す（`.claude/rules/coding-rust.md` の
-/// 実機依存テストの `#[ignore]` 分離とは異なる用途だが、同じ属性を「意図的に
-/// 走らせない・理由を明示する」目的で流用する）。判定方式（REQ-7 暫定を最終
-/// 受け入れ条件とするか、bit 同一を維持するか）についてユーザー承認が下り、
-/// `Expectation` 表・モジュール doc が更新されるまでは本テストを削除・
-/// green 化しない（実測記録: `docs/perf/logs/onnx-cnn-ops-pytorch-fixture-
-/// 2329/README.md`）。
+/// 出典: 本 PR 作成時に `cargo test -p fandhe-ai-onnx-interop --test \
+/// onnx_interp_pytorch_cnn_fixture -- --nocapture --test-threads=1` で実測
+/// した値（`docs/perf/logs/onnx-cnn-ops-pytorch-fixture-2329/README.md` に
+/// 転記済み）。計算経路は CPU feature 検出・`rayon` 並列に依存しない決定的
+/// 逐次ループのため、CI（ubuntu-latest x86_64）・ローカル（x86_64）を問わず
+/// 単一の値で成立する（モジュール doc「計算経路の決定性」参照）。
+static REDUCTION_BASELINES: &[ReductionBaseline] = &[
+    ReductionBaseline {
+        case_name: "conv2d_basic",
+        exporter_name: "ts",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ReductionBaseline {
+        case_name: "conv2d_basic",
+        exporter_name: "dynamo",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ReductionBaseline {
+        case_name: "conv2d_stride_dil_group",
+        exporter_name: "ts",
+        total: 100,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 2.799_909_5e-6,
+        baseline_mean_abs_diff_ceiling: 3.3006072044372556e-8,
+    },
+    ReductionBaseline {
+        case_name: "conv2d_stride_dil_group",
+        exporter_name: "dynamo",
+        total: 100,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 2.799_909_5e-6,
+        baseline_mean_abs_diff_ceiling: 3.3006072044372556e-8,
+    },
+    ReductionBaseline {
+        case_name: "conv2d_nobias",
+        exporter_name: "ts",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ReductionBaseline {
+        case_name: "conv2d_nobias",
+        exporter_name: "dynamo",
+        total: 256,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ReductionBaseline {
+        case_name: "conv1d_basic",
+        exporter_name: "ts",
+        total: 20,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 4.256_559e-6,
+        baseline_mean_abs_diff_ceiling: 1.862645149230957e-8,
+    },
+    ReductionBaseline {
+        case_name: "conv1d_basic",
+        exporter_name: "dynamo",
+        total: 20,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 4.256_559e-6,
+        baseline_mean_abs_diff_ceiling: 1.862645149230957e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_include_pad",
+        exporter_name: "ts",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 5.960_464_5e-8,
+        baseline_max_rel_err_ceiling: 4.206_918e-6,
+        baseline_mean_abs_diff_ceiling: 1.3812496035825461e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_include_pad",
+        exporter_name: "dynamo",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 5.960_464_5e-8,
+        baseline_max_rel_err_ceiling: 4.206_918e-6,
+        baseline_mean_abs_diff_ceiling: 1.3812496035825461e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_exclude_pad",
+        exporter_name: "ts",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 5.960_464_5e-8,
+        baseline_max_rel_err_ceiling: 1.254_769_7e-6,
+        baseline_mean_abs_diff_ceiling: 1.415416287879149e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_exclude_pad",
+        exporter_name: "dynamo",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 5.960_464_5e-8,
+        baseline_max_rel_err_ceiling: 1.254_769_7e-6,
+        baseline_mean_abs_diff_ceiling: 1.415416287879149e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_ceil_overhang_incl",
+        exporter_name: "ts",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 5.960_464_5e-8,
+        baseline_max_rel_err_ceiling: 6.191_493e-7,
+        baseline_mean_abs_diff_ceiling: 9.216212977965673e-9,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_ceil_overhang_incl",
+        exporter_name: "dynamo",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 5.960_464_5e-8,
+        baseline_max_rel_err_ceiling: 6.191_493e-7,
+        baseline_mean_abs_diff_ceiling: 9.216212977965673e-9,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_ceil_overhang_excl",
+        exporter_name: "ts",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 6.804_367_3e-6,
+        baseline_mean_abs_diff_ceiling: 1.5056381622950237e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool2d_ceil_overhang_excl",
+        exporter_name: "dynamo",
+        total: 48,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 6.804_367_3e-6,
+        baseline_mean_abs_diff_ceiling: 1.5056381622950237e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool1d_basic",
+        exporter_name: "ts",
+        total: 15,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 1.083_659_8e-7,
+        baseline_mean_abs_diff_ceiling: 1.5397866566975913e-8,
+    },
+    ReductionBaseline {
+        case_name: "avgpool1d_basic",
+        exporter_name: "dynamo",
+        total: 15,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 1.083_659_8e-7,
+        baseline_mean_abs_diff_ceiling: 1.5397866566975913e-8,
+    },
+    ReductionBaseline {
+        case_name: "gap2d",
+        exporter_name: "ts",
+        total: 3,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 3.725_290_3e-9,
+        baseline_max_rel_err_ceiling: 6.665_004_5e-8,
+        baseline_mean_abs_diff_ceiling: 1.241763432820638e-9,
+    },
+    ReductionBaseline {
+        case_name: "gap2d",
+        exporter_name: "dynamo",
+        total: 3,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.490_116_1e-8,
+        baseline_max_rel_err_ceiling: 1.999_501_5e-7,
+        baseline_mean_abs_diff_ceiling: 1.1175870895385742e-8,
+    },
+    ReductionBaseline {
+        case_name: "gap1d",
+        exporter_name: "ts",
+        total: 3,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 0.0,
+        baseline_max_rel_err_ceiling: 0.0,
+        baseline_mean_abs_diff_ceiling: 0.0,
+    },
+    ReductionBaseline {
+        case_name: "gap1d",
+        exporter_name: "dynamo",
+        total: 3,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 5.960_464_5e-8,
+        baseline_max_rel_err_ceiling: 9.228_162_4e-8,
+        baseline_mean_abs_diff_ceiling: 2.9802322387695313e-8,
+    },
+    ReductionBaseline {
+        case_name: "bn2d_eval",
+        exporter_name: "ts",
+        total: 150,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 4.768_371_6e-7,
+        baseline_max_rel_err_ceiling: 9.008_323e-7,
+        baseline_mean_abs_diff_ceiling: 2.966572841008504e-8,
+    },
+    ReductionBaseline {
+        case_name: "bn2d_eval",
+        exporter_name: "dynamo",
+        total: 150,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 4.768_371_6e-7,
+        baseline_max_rel_err_ceiling: 9.008_323e-7,
+        baseline_mean_abs_diff_ceiling: 2.966572841008504e-8,
+    },
+    ReductionBaseline {
+        case_name: "bn2d_eval_eps",
+        exporter_name: "ts",
+        total: 150,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 2.384_185_8e-7,
+        baseline_max_rel_err_ceiling: 6.060_796_5e-7,
+        baseline_mean_abs_diff_ceiling: 3.9380975067615506e-8,
+    },
+    ReductionBaseline {
+        case_name: "bn2d_eval_eps",
+        exporter_name: "dynamo",
+        total: 150,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 2.384_185_8e-7,
+        baseline_max_rel_err_ceiling: 6.060_796_5e-7,
+        baseline_mean_abs_diff_ceiling: 3.9380975067615506e-8,
+    },
+    ReductionBaseline {
+        case_name: "bn1d_eval",
+        exporter_name: "ts",
+        total: 42,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 1.286_728_8e-7,
+        baseline_mean_abs_diff_ceiling: 2.9979717163812546e-8,
+    },
+    ReductionBaseline {
+        case_name: "bn1d_eval",
+        exporter_name: "dynamo",
+        total: 42,
+        baseline_fail_count: 0,
+        baseline_max_abs_diff_ceiling: 1.192_092_9e-7,
+        baseline_max_rel_err_ceiling: 1.286_728_8e-7,
+        baseline_mean_abs_diff_ceiling: 2.9979717163812546e-8,
+    },
+];
+
+/// `(case_name, exporter_name)` に対応する [`ReductionBaseline`] を引く。
+/// 未登録ケースは fail-closed に panic する（黙って skip しない）。
+#[track_caller]
+fn find_reduction_baseline(case_name: &str, exporter_name: &str) -> &'static ReductionBaseline {
+    REDUCTION_BASELINES
+        .iter()
+        .find(|b| b.case_name == case_name && b.exporter_name == exporter_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "{case_name} [{exporter_name}]: REDUCTION_BASELINES に行が無い \
+                 （baseline の追加は実測値のみ・人間承認必須。未登録ケースを \
+                 黙って通過させない）"
+            )
+        })
+}
+
+/// [`ReductionBaseline`] に対する fail-closed 非後退判定。
+/// `crates/backend-cuda/tests/common/parity_baseline.rs::
+/// assert_no_parity_regression` と同型（total 完全一致・fail_count／
+/// max_abs_diff／max_rel_err／mean_abs_diff のいずれも記録済み値以下）。
+#[track_caller]
+fn assert_no_reduction_baseline_regression(
+    case_name: &str,
+    exporter_name: &str,
+    stats: &DiffStats,
+    baseline: &ReductionBaseline,
+) {
+    assert_eq!(
+        stats.total, baseline.total,
+        "{case_name} [{exporter_name}]: 比較対象の要素数が baseline({}) と \
+         一致しない（形状・比較対象がずれている可能性）",
+        baseline.total,
+    );
+    assert!(
+        stats.fail_count <= baseline.baseline_fail_count,
+        "{case_name} [{exporter_name}]: baseline 非後退契約 FAIL — fail_count が \
+         後退しました (actual={}, baseline={})",
+        stats.fail_count,
+        baseline.baseline_fail_count,
+    );
+    assert!(
+        stats.max_abs_diff <= baseline.baseline_max_abs_diff_ceiling,
+        "{case_name} [{exporter_name}]: baseline 非後退契約 FAIL — max_abs_diff が \
+         後退しました (actual={:?}, ceiling={:?})",
+        stats.max_abs_diff,
+        baseline.baseline_max_abs_diff_ceiling,
+    );
+    assert!(
+        stats.max_rel_err <= baseline.baseline_max_rel_err_ceiling,
+        "{case_name} [{exporter_name}]: baseline 非後退契約 FAIL — max_rel_err が \
+         後退しました (actual={:?}, ceiling={:?})",
+        stats.max_rel_err,
+        baseline.baseline_max_rel_err_ceiling,
+    );
+    assert!(
+        stats.mean_abs_diff <= baseline.baseline_mean_abs_diff_ceiling,
+        "{case_name} [{exporter_name}]: baseline 非後退契約 FAIL — mean_abs_diff が \
+         後退しました (actual={:?}, ceiling={:?})",
+        stats.mean_abs_diff,
+        baseline.baseline_mean_abs_diff_ceiling,
+    );
+}
+
+/// `REDUCTION_BASELINES` の構造的整合性を検査する（`ParityBaseline` と同じ
+/// fail-closed 設計。実機実測系の baseline とは異なり通常 CI で常時実行
+/// できるため `#[ignore]` を付けない）。
+///
+/// 1. `(case_name, exporter_name)` の集合が `EXPECTATIONS` の
+///    `Req7BaselineNonRegression` エントリと過不足なく一致する（重複行・
+///    取りこぼしの検出）
+/// 2. 各行の `baseline_fail_count == 0`（REQ-7 式は `run_case` 側で必須条件
+///    として別途検査済みのため、baseline 側の記録も 0 以外を許さない）
+/// 3. 各行の ceiling は有限・非負（NaN・負値の混入を拒否）
+/// 4. 各行の `total > 0`
 #[test]
-#[ignore = "縮約系の受け入れ判定方式（bit 同一 or REQ-7 暫定）はユーザー承認待ち\
-            （#2329・親 #2185）。cargo test -- --ignored で実行すると現状 red \
-            になることを確認できる"]
-fn reduction_ops_bit_exact_acceptance_pending_approval() {
-    let doc = load_reference();
-    let mut failures: Vec<String> = Vec::new();
-    let mut checked = 0usize;
-    for &(case_name, exporter_name, expectation) in EXPECTATIONS {
-        if expectation != Expectation::Req7Provisional {
-            continue;
-        }
-        checked += 1;
-        let case = doc
-            .cases
-            .get(case_name)
-            .unwrap_or_else(|| panic!("reference.json に '{case_name}' が無い"));
-        let stats = compute_case_stats(case_name, exporter_name, case);
-        if stats.bit_mismatch_count != 0 {
-            failures.push(format!(
-                "{case_name} [{exporter_name}]: bit_mismatch={} max_abs_diff={} \
-                 max_rel_err={}",
-                stats.bit_mismatch_count, stats.max_abs_diff, stats.max_rel_err
-            ));
-        }
+fn reduction_baselines_are_well_formed() {
+    let mut expectation_keys: Vec<(&str, &str)> = EXPECTATIONS
+        .iter()
+        .filter(|(_, _, e)| *e == Expectation::Req7BaselineNonRegression)
+        .map(|(c, e, _)| (*c, *e))
+        .collect();
+    expectation_keys.sort_unstable();
+
+    let mut baseline_keys: Vec<(&str, &str)> = REDUCTION_BASELINES
+        .iter()
+        .map(|b| (b.case_name, b.exporter_name))
+        .collect();
+    baseline_keys.sort_unstable();
+    let baseline_keys_unique_count = {
+        let mut dedup = baseline_keys.clone();
+        dedup.dedup();
+        dedup.len()
+    };
+    assert_eq!(
+        baseline_keys.len(),
+        baseline_keys_unique_count,
+        "REDUCTION_BASELINES に重複行がある: {baseline_keys:?}"
+    );
+    assert_eq!(
+        expectation_keys, baseline_keys,
+        "REDUCTION_BASELINES と EXPECTATIONS の Req7BaselineNonRegression \
+         エントリが不一致（取りこぼし・過剰のいずれか）"
+    );
+
+    for b in REDUCTION_BASELINES {
+        assert!(
+            b.total > 0,
+            "{} [{}]: baseline.total が 0",
+            b.case_name,
+            b.exporter_name
+        );
+        assert_eq!(
+            b.baseline_fail_count, 0,
+            "{} [{}]: baseline_fail_count が 0 以外（REQ-7 式は必須条件のため \
+             baseline 側も 0 のみを許容する）",
+            b.case_name, b.exporter_name
+        );
+        assert!(
+            b.baseline_max_abs_diff_ceiling.is_finite() && b.baseline_max_abs_diff_ceiling >= 0.0,
+            "{} [{}]: baseline_max_abs_diff_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.exporter_name,
+            b.baseline_max_abs_diff_ceiling
+        );
+        assert!(
+            b.baseline_max_rel_err_ceiling.is_finite() && b.baseline_max_rel_err_ceiling >= 0.0,
+            "{} [{}]: baseline_max_rel_err_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.exporter_name,
+            b.baseline_max_rel_err_ceiling
+        );
+        assert!(
+            b.baseline_mean_abs_diff_ceiling.is_finite() && b.baseline_mean_abs_diff_ceiling >= 0.0,
+            "{} [{}]: baseline_mean_abs_diff_ceiling が非有限または負値: {:?}",
+            b.case_name,
+            b.exporter_name,
+            b.baseline_mean_abs_diff_ceiling
+        );
     }
-    assert!(
-        checked > 0,
-        "EXPECTATIONS に Req7Provisional エントリが 1 件も無い（検査が空振り \
-         していないことの保証。テーブル改変時の取りこぼし検出）"
-    );
-    assert!(
-        failures.is_empty(),
-        "縮約系の bit 同一（親 #2185 の受け入れ条件）が未達（{}/{} 件 fail）。\
-         判定方式のユーザー承認が下りるまで本テストは red のまま維持する。\
-         詳細:\n{}",
-        failures.len(),
-        checked,
-        failures.join("\n")
-    );
 }
