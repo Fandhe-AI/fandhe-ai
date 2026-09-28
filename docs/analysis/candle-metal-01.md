@@ -228,7 +228,7 @@ epilogue・`use_out_source`・axpby 相当のフラグは通常の matmul（`Op:
 | E5 fine barrier（`docs/perf/metal-gemm-fine-barrier-ab.md`） | 判定不可・既定 OFF 維持 | 単一バッファ・2 回 barrier/反復（§5） | candle の barrier 粒度（ロード前後の 2 回）は自作 opt-in 版と厳密一致していない可能性があり未検証 |
 | E5 tgid swizzle（`docs/perf/metal-gemm-tgid-swizzle-ab.md`） | 判定不可・既定 OFF 維持 | `swizzle_log = 0` 固定で実質無効（§4.1） | candle も無効なので優位要因ではない（確認済み） |
 | E6 タイルクラス分割（`docs/perf/metal-gemm-n4096-kernel-gap.md` §3／§12） | §12.4 採否判断 | — | 既存記録参照 |
-| E7 `(64,64,32,2,2)` 候補（#1329/#1330） | `docs/perf/metal-gemm-n4096-kernel-gap.md` §13.5／§14.5 採否判断 | candle には `bk=32` の構成なし（§3.1） | — |
+| E7 `(64,64,32,2,2)` 候補（#1329/#1330） | `docs/perf/metal-gemm-n4096-kernel-gap.md` §13.5／§14.5 採否判断 | candle には `bk=32` の構成自体はある（`TILE_64_32_32_2_2`＝`(64,32,32,2,2)`。§3.1）が、E7 の `(64,64,32,2,2)` と bm／bn まで完全一致する構成はない | — |
 | E8 `(128,64,16,2,2)` 候補（#1325/#1331/#1332） | `docs/perf/metal-gemm-n4096-kernel-gap.md` §15.6／§16.5 採否判断 | candle には `bm=128` の構成なし（§3.1） | — |
 | E9 hfrag（`docs/perf/metal-gemm-hfrag-candidate.md`・`docs/perf/metal-gemm-n4096-kernel-gap.md` §17） | 既存記録参照 | — | — |
 | split-K（`docs/backend-metal-splitk-decision.md`） | 既存記録参照 | candle は split-K 未使用（`should_use_split_k` が `#[allow(dead_code)]`。§1） | candle も split-K を使わないため優位要因ではない |
