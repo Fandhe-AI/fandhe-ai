@@ -332,3 +332,25 @@ fn backend_ops_adaptive_max_pool2d_rejects_index_range_overflow_on_empty_batch()
         BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { .. })
     ));
 }
+
+/// `CpuBackendOps::max_pool2d`（`ops.rs` の `BackendOps` 実装）が、
+/// 出力が空（`N=0`）でも索引範囲検査（`H·W <= i32::MAX`）を出力形状
+/// の早期 return より前に行い `IndexRangeOverflow` を返すことを
+/// 確認する（`adaptive_max_pool2d` と同型の契約是正・イシュー
+/// #2297）。`H*W == i32::MAX + 1` のため `out_shape` の積（`N=0` に
+/// より `0`）では検出できない契約違反を、`input` の `H`／`W` を
+/// 直接見る検査が拾うことを確かめる。データは空バッチのため確保
+/// しない（`Tensor::new` は numel 0 で `Vec::new()` を受理する）。
+#[test]
+fn backend_ops_max_pool2d_rejects_index_range_overflow_on_empty_batch() {
+    let ops = CpuBackendOps::new();
+    let w = i32::MAX as usize + 1;
+    let input = t(Vec::new(), &[0, 1, 1, w]);
+    let params = Pool2dParams::new([1, 1], None, [0, 0], [1, 1]).unwrap();
+
+    let err = ops.max_pool2d(&input, &params).unwrap_err();
+    assert!(matches!(
+        err,
+        BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { .. })
+    ));
+}

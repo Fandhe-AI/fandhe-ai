@@ -4520,14 +4520,26 @@ impl BackendOps for MetalBackendOps {
 
     /// `BackendOps::max_pool2d` の Metal 実装（イシュー #1730・
     /// 追従イシュー。#1607 ツリー）。[`pool2d_out_shape`] で
-    /// `input.shape()`／`params` を再検査してから `pooling::
-    /// MetalPooling::run_max_pool2d_f32` へ委譲する（`im2col` と同じ
-    /// 二重検査方針。`.contiguous()` 前の `checked_bytes_for` も
-    /// `im2col`／`interpolate` と同型で適用し、非空入力の要素数積が
-    /// `isize::MAX` バイト相当を超える場合の `.contiguous()` 側
-    /// capacity overflow panic を未然に防ぐ。Cursor Bugbot 指摘の
-    /// 是正・PR #1888）。`索引` テンソルの dtype は `i32` 固定
-    /// （`crate::pooling::MetalPooling::run_max_pool2d_f32` doc 参照）。
+    /// `input.shape()`／`params` を再検査し、さらに
+    /// `pooling_model::check_max_index_range`（非公開）で
+    /// `H·W <= i32::MAX`（索引は `i32` のため）を検査してから
+    /// `pooling::MetalPooling::run_max_pool2d_f32` へ委譲する
+    /// （`im2col` と同じ二重検査方針。`.contiguous()` 前の
+    /// `checked_bytes_for` も `im2col`／`interpolate` と同型で適用し、
+    /// 非空入力の要素数積が `isize::MAX` バイト相当を超える場合の
+    /// `.contiguous()` 側 capacity overflow panic を未然に防ぐ。
+    /// Cursor Bugbot 指摘の是正・PR #1888）。`索引` テンソルの dtype
+    /// は `i32` 固定（`crate::pooling::MetalPooling::
+    /// run_max_pool2d_f32` doc 参照）。
+    ///
+    /// 索引範囲検査は出力が空（`out_shape.contains(&0)`）かどうかの
+    /// 早期 return より前に `input` の `H`／`W` を直接見て行う（`N=0`
+    /// でも `H·W` が `i32::MAX` 超なら拒否する契約を CPU・CUDA・
+    /// tape 経路と揃える。イシュー #2297）。`pooling::
+    /// MetalPooling::run_max_pool2d_f32` が内部で呼ぶ
+    /// `pooling_model::derive_pool_dims` の `plane_in` 検査はそのまま
+    /// 残り多層防御となる（`pooling_model::check_max_index_range`
+    /// doc 参照）。
     fn max_pool2d(
         &self,
         input: &Tensor<f32>,
@@ -4535,6 +4547,12 @@ impl BackendOps for MetalBackendOps {
     ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
         let out_shape =
             pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        let in_shape_for_index_check = input.shape();
+        crate::pooling_model::check_max_index_range(
+            in_shape_for_index_check.get(2).copied().unwrap_or(0),
+            in_shape_for_index_check.get(3).copied().unwrap_or(0),
+        )
+        .map_err(BackendError::ShapeMismatch)?;
         if out_shape.contains(&0) {
             return Ok((
                 Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
@@ -5495,6 +5513,31 @@ mod tests {
         assert_eq!(values.as_slice().unwrap().len(), 0);
     }
 
+    /// 空バッチ（`N=0`）でも `H·W`（本テストでは `W` 単独）が
+    /// `i32::MAX` を超えていれば、出力が空だからといって索引範囲
+    /// 検査（`pooling_model::check_max_index_range`）をすり抜けては
+    /// ならない（CPU・CUDA・tape 経路と同型の契約是正・イシュー
+    /// #2297）。`out_shape` の積は `N=0` のため `0` になり
+    /// `pool2d_out_shape` の `checked_numel_for` では検出できない
+    /// 契約違反を、`input` の `H`／`W` を直接見る検査が拾うことを
+    /// 確認する。データは空バッチのため確保しない（Metal コンテキスト
+    /// 非接触。このファイル自体が `cfg(target_os = "macos")` 限定の
+    /// ため macOS 上でのみ実行される。Linux での多層防御固定は
+    /// `pooling_model::tests::derive_pool_dims_rejects_index_range_
+    /// overflow_on_empty_batch` を参照）。
+    #[test]
+    fn max_pool2d_rejects_index_range_overflow_on_empty_batch_without_touching_device() {
+        let w = i32::MAX as usize + 1;
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 1, w]).unwrap();
+        let params = Pool2dParams::new([1, 1], None, [0, 0], [1, 1]).unwrap();
+        let ops = MetalBackendOps::new();
+        let err = ops.max_pool2d(&x, &params).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { .. })
+        ));
+    }
+
     #[test]
     fn avg_pool2d_returns_empty_for_zero_batch_without_touching_device() {
         let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
@@ -5549,11 +5592,25 @@ mod tests {
     // `bytes = numel * size_of::<f32>() = 2usize.pow(63)` が
     // `isize::MAX`（`2usize.pow(63) - 1`）をちょうど 1 超えることで
     // 検査対象の分岐（バイトサイズ超過）を確実に通す。
+    // `max_pool2d` のみ他 2 関数と異なる fixture を使う（イシュー
+    // #2297）。`pooling_model::check_max_index_range` が
+    // `pool2d_out_shape` の直後・確保前検査より前に効くようになった
+    // ため、上記の `H = 1usize << 59` のままだと `H*W = 2^59*4 =
+    // 2^61 > i32::MAX` で `IndexRangeOverflow` になってしまい、本来
+    // 検出したい `checked_bytes_for` の確保前検査
+    // （`ElementCountOverflow`）へ到達しない。そこで N・C 軸を
+    // `1<<16` ずつに広げつつ H 軸は `1<<30`（`H*W=2^30 <= i32::MAX`
+    // で索引域検査は通過）に抑え、入力側の総バイト数
+    // （`numel=2^62`・`bytes=2^64` で `usize` overflow）だけを
+    // 溢れさせる。出力 shape は `[2^16, 2^16, 1, 1]`（`numel=2^32`）
+    // で `pool2d_out_shape` 自体は overflow しない。
     #[test]
     fn max_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
-        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
-        let huge = base.broadcast_to(&[1, 1, 1usize << 59, 4]).unwrap();
-        let params = Pool2dParams::new([1usize << 59, 1], None, [0, 0], [1, 1]).unwrap();
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize, 1, 1, 1]).unwrap();
+        let huge = base
+            .broadcast_to(&[1usize << 16, 1usize << 16, 1usize << 30, 1])
+            .unwrap();
+        let params = Pool2dParams::new([1usize << 30, 1], None, [0, 0], [1, 1]).unwrap();
         let ops = MetalBackendOps::new();
         let err = ops
             .max_pool2d(&huge, &params)
