@@ -48,10 +48,13 @@
 //!    による TOCTOU 窓は構造的に生じない（`docs/
 //!    onnx-external-data-decision.md` の残タスクを解消。#2347 P0 是正・
 //!    PR #2348 コードレビュー対応）。上記 CI 対象外の他 unix
-//!    ターゲットのみ `symlink_metadata` 逐次検証 → `canonicalize` →
-//!    `File::open` という経路文字列再解決のフォールバック実装を使い、
-//!    この場合に限り本節の窓（`metadata().len()` 再照合による縮小のみ）が
-//!    残る。
+//!    ターゲットでは `openat` のフラグ定数値を実機実測できておらず
+//!    誤った値では検査自体が無意味になるため、旧 `symlink_metadata`
+//!    逐次検証 → `canonicalize` → `File::open` という経路文字列再解決の
+//!    フォールバック実装（同種の TOCTOU 窓が残っていた）は撤去済みで、
+//!    `resolve_and_open` は常に
+//!    [`ExternalDataError::UnsupportedPlatformForSecureResolve`] で拒否
+//!    する（fail-closed。`docs/onnx-external-data-decision.md` 5 節）。
 //!
 //! `checksum` キーは黙って無視せず [`ExternalDataError::
 //! ChecksumUnsupported`] で fail-closed に拒否する（依存を追加できないため
@@ -384,7 +387,10 @@ struct OpenFile {
 /// aarch64-apple-darwin)`〉と同一。フラグ定数値が OS ごとに異なるため、
 /// 実測未検証の他 unix では使わない。対象外の target では下方の
 /// `#[cfg(not(any(target_os = "linux", target_os = "macos")))]` 版の
-/// `resolve_and_open`（従来実装）にフォールバックする）。
+/// `resolve_and_open` が常に
+/// [`ExternalDataError::UnsupportedPlatformForSecureResolve`] で拒否する
+/// （旧経路文字列再解決フォールバックは同種の TOCTOU 窓が残るため撤去
+/// 済み。`docs/onnx-external-data-decision.md` 5 節）。
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod no_follow_open {
     use std::ffi::{CString, c_char, c_int};

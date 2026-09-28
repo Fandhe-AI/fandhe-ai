@@ -216,4 +216,8 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 4 節の 2 パス設計・5 節の残るリスクを参照。要点は `security.md` A03
 （外部フォーマットのパース検証を長さ・形状の検証が先行する）・A04
 （確保の前に合計上限を検査する）・A08（`checksum` を黙って無視しない・
-no-silent-skip 契約）。`unsafe` は使用していない。
+no-silent-skip 契約）。`unsafe` は `no_follow_open`（Linux／macOS 限定）の
+`openat` FFI 呼び出しに限定して使用する（2026-09-28・#2347 P0 是正で導入。
+`libc` crate が許容依存 9 区分に含まれないため std がリンクする libc を
+`extern "C"` で直接呼ぶ。呼び出し箇所には `coding-rust.md` 準拠の
+`// SAFETY:` コメントを付与済み。5 節参照）。
