@@ -9,7 +9,7 @@
 - macOS arm64（M4 Max）向け公式 wheel は `.bazelrc` の `release_macos_arm64` config に `mkl_aarch64` 系 `--define` が一切現れず、`INTEL_MKL` マクロが未定義になるため `IsMklEnabled()` は常に `false`（確定。§4）。M4 Max の TF CPU GEMM は oneDNN op-rewrite を経由しない。
 - Linux aarch64（GB10）向け公式 wheel は `release_arm64_linux` config が `mkl_aarch64_threadpool` を経由し `build_with_mkl_aarch64=true` → `INTEL_MKL` 定義（確定。§5）。ただし上記の Neoverse V1 専用判定により既定は OFF 寄りと推測される（推定）。
 - **GB10 実測では CPU GEMM（N=256〜2048）・train・infer の全マッチセルで fandhe-ai 0.8.0 が TensorFlow 2.21.0・SciPy 1.18.1 を上回っている**（§10 表 1）。N=4096 は fandhe-ai 側の CPU 実測データが存在せず比較不能。
-- **M4 Max では N=256 の CPU GEMM で fandhe-ai がわずかに負ける**（107.4 GFLOPS 対 TF 129 GFLOPS・SciPy 121 GFLOPS）。train・infer では SciPy に負ける（infer は TF には勝つ）。負けセルは N=256 GEMM・train・infer の 3 種（§10 表 2）。**train・infer の判定は fandhe-ai の `reuse` モード値を採用した場合のもので、`fresh` モード値を採ると train は TF に対して「勝ち」に転じる（§10 表 2 直後の注記）。**
+- **M4 Max では N=256 の CPU GEMM で fandhe-ai がわずかに負ける**（107.4 GFLOPS 対 TF 129 GFLOPS・SciPy 121 GFLOPS）。train・infer では SciPy に負ける（TF には両方とも勝つ）。負けセルは N=256 GEMM・train・infer の 3 種（§10 表 2）。**表 2 の train・infer は fandhe-ai 側を `fresh` モード値で統一している**（GEMM 行・表 1〈GB10〉と計測条件をそろえるため。fandhe-ai の `reuse` モード値を使う旧版の判定〈train は TF に対しても僅差で負け〉は §10 表 2 直後の注記を参照）。
 - SciPy の BLAS リンク先は wheels.yml のビルドマトリクスから macOS arm64 で openblas 変種と accelerate 変種の**両方**がビルドされることまでは確定できたが、PyPI へ実際に公開される変種の断定はワークフロー読み取りだけでは不可能（§8・§11）。
 - コードの持ち込みはなし。結論と `path:line`・タグ固定 URL のみを記録する。
 
@@ -143,11 +143,11 @@ TF（Eigen `ThreadPoolDevice` またはビルド構成次第で oneDNN `dnnl_sge
 | train | 64 | 0.892 ms | 2.720 ms | 1.198 ms | fandhe-ai 勝ち |
 | infer | 64 | 0.178 ms | 0.913 ms | 0.600 ms | fandhe-ai 勝ち |
 
-GB10 では本解析範囲のマッチセルすべてで fandhe-ai が両 FW を上回る（**負けセルなし**）。全行 `parity_fail_count: 0`（判定可能）。
+GB10 では本解析範囲のマッチセルすべてで fandhe-ai が両 FW を上回る（**負けセルなし**）。`gemm` 行は全行 `parity_fail_count: 0`（判定可能。出典 JSONL の `gemm` 行のみが同フィールドを持つ）。`train`／`infer` 行の出典 JSONL（`results-dgx-py-0.8.0.jsonl`）には `parity_fail_count` フィールド自体が存在せず（fandhe-ai 側 `train`／`infer` 出力にも同様に存在しない設計）、判定不能（parity 検査の対象外）である——ゼロ fail の記述は `gemm` 行に限る。
 
 ### 表 2: M4 Max（TF 2.16.2・SciPy 1.18.1 は `gen_1988.py::M4_PY` 転記値・fandhe-ai は `results-m4max-0.8.0.jsonl`）
 
-出典: `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py::M4_PY`（TF／SciPy。2026-09-12 ページからの転記と明記されている）・`scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl`（fandhe-ai。fresh モード）。
+出典: `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py::M4_PY`（TF／SciPy。2026-09-12 ページからの転記と明記されている。`mode: fresh` で記録。[`gen_1988.py#L101-L107`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）・`scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl`（fandhe-ai。`fresh` モード。表 1〈GB10〉・本表の GEMM 行と計測条件をそろえるため train・infer も `fresh` で統一する）。
 
 | タスク | N | fandhe-ai (GFLOPS / ms) | TensorFlow 2.16.2 | SciPy 1.18.1 | 判定 |
 |---|---|---|---|---|---|
@@ -155,12 +155,12 @@ GB10 では本解析範囲のマッチセルすべてで fandhe-ai が両 FW を
 | gemm | 512 | 420.8 GF | 282 GF | 227 GF | fandhe-ai 勝ち |
 | gemm | 1024 | 739.2 GF | 471 GF | 372 GF | fandhe-ai 勝ち |
 | gemm | 2048 | 999.4 GF | 699 GF | 470 GF | fandhe-ai 勝ち |
-| train | 64 | 1.000 ms（reuse） | 0.96 ms | 0.31 ms | **fandhe-ai 負け（対 SciPy。対 TF はほぼ同着でわずかに負け）** |
-| infer | 64 | 0.195 ms（reuse） | 0.266 ms | 0.164 ms | **fandhe-ai 負け（対 SciPy のみ。対 TF は勝ち）** |
+| train | 64 | 0.835 ms（fresh） | 0.96 ms | 0.31 ms | **fandhe-ai 負け（対 SciPy のみ。対 TF は勝ち）** |
+| infer | 64 | 0.178 ms（fresh） | 0.266 ms | 0.164 ms | **fandhe-ai 負け（対 SciPy のみ。対 TF は勝ち）** |
 
-M4 Max は N=256 GEMM・train・infer の 3 セルで負け（train は TF に対しても僅差で負け）。0.9.0 版の M4 実測 JSONL は本リポジトリに未収録（Mac 側の実測申し送り事項。MEMORY.md 記載どおり）のため、0.8.0 データを参照値として使用している。
+M4 Max は N=256 GEMM・train・infer の 3 セルで負け（いずれも対 SciPy のみで、対 TF はすべて勝ち）。0.9.0 版の M4 実測 JSONL は本リポジトリに未収録（Mac 側の実測申し送り事項。MEMORY.md 記載どおり）のため、0.8.0 データを参照値として使用している。
 
-**train・infer セルのモード選択について（注記）**: 表 2 の train・infer は fandhe-ai の `reuse` モード値（train 1.000ms・infer 0.195ms）を採用している。同じ JSONL には `fresh` モード値（train 0.835ms・infer 0.178ms）も存在し、`fresh` を採ると train は TF 2.16.2（0.96ms）に対して「勝ち」に転じる（0.835ms < 0.96ms）。`reuse` を主指標とした根拠は `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py`（`me = data.get((..., 'reuse'))` としてスコアボードの主表示列に採用し、`fresh` は参考列として併記する既存の集計規約。[`gen_1988.py#L146-L147`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）に倣ったもので、表 1（GB10）が train・infer を含め fandhe-ai・TF・SciPy とも `fresh` 同士で統一しているのとはモード選択の基準が異なる。この注記が §1 サマリの「train は TF に対しても僅差で負け」という結論の前提（`reuse` 採用）を明示する。
+**train・infer セルのモード選択について（注記）**: 本表の train・infer は fandhe-ai 側を `fresh` モード値（train 0.835ms・infer 0.178ms）で統一している。理由は GEMM 行（本表・表 1 とも `fresh`）・表 1（GB10。train・infer を含め fandhe-ai・TF・SciPy とも `fresh` 同士）と計測条件をそろえるため。参考として、同じ JSONL には fandhe-ai の `reuse` モード値（train 1.000ms・infer 0.195ms）も存在し、`docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py` のスコアボード本体は `reuse` を主表示列に採用している（`me = data.get((..., 'reuse'))`。[`gen_1988.py#L146-L147`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）が、TF／SciPy 側の値（`M4_PY`）は `fresh` としてのみ記録されており `reuse` 相当の値がそもそも存在しない（transcribed 転記データのため実測が 1 モードのみ）。`reuse` 値を採用すると train は TF 2.16.2（0.96ms）に対しても僅差で負けに転じる（1.000ms > 0.96ms）が、本 doc は fandhe-ai・TF・SciPy 間で計測条件（`fresh` 同士）をそろえることを優先し、上表を主判定として採用する。
 
 ## §11 限界・申し送り
 
