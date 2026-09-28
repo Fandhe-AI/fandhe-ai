@@ -175,12 +175,21 @@
 //!    照会で reparse point（シンボリックリンク・junction 等）を検出して
 //!    拒否する。`FILE_SHARE_DELETE` を含めない共有モード・
 //!    `FILE_FLAG_OPEN_REPARSE_POINT`（最終成分を追跡させない）を使う。
-//!    実体識別子（dev/ino 相当の `file_index`）・変更時刻（`change_time`）は
-//!    std が安定化していない（1.98.1 実測）ため、`FileKey` はパスベース
-//!    （`cfg(not(unix))` 共通実装）、`FileSnapshot` は
-//!    `file_attributes`／`creation_time`／`last_write_time` を使う（unix の
-//!    ctime ほど強い変更検知ではない。詳細・残存リスクは
-//!    `docs/onnx-external-data-decision.md` 5 節）。
+//!    さらに最終ファイルを開いた直後、そのハンドル自身が実際に指す
+//!    オブジェクトの所在を `GetFinalPathNameByHandleW` で逆引きし
+//!    `base_dir` 配下・想定した深さであることを検証する（属性再検査を
+//!    「元に戻してから」すり抜ける flip-and-revert 型 TOCTOU 対策。
+//!    2026-09-28 codex-review 是正・PR #2351。`win_contained_open` モジュール
+//!    doc「TOCTOU の根拠」節 3.）。実体識別子（dev/ino 相当）は
+//!    `(dwVolumeSerialNumber, nFileIndex)`（`GetFileInformationByHandle`）を
+//!    使う。std の `file_index`／`volume_serial_number`
+//!    （`windows_by_handle`）・`GetFinalPathNameByHandleW` 相当はいずれも
+//!    1.98.1 時点で未安定化のため、kernel32.dll への手書き `extern
+//!    "system"` 宣言（`win_contained_open` 内。`unsafe` を FFI 境界に限定）
+//!    で直接呼ぶ。変更時刻は `change_time`（同じく未安定化）の代わりに
+//!    `FileSnapshot` が `file_attributes`／`creation_time`／
+//!    `last_write_time` を使う（unix の ctime ほど強い変更検知ではない。
+//!    詳細・残存リスクは `docs/onnx-external-data-decision.md` 5 節）。
 //!
 //!    **それ以外（wasm32 等）**: `openat`／`openat2`・Windows 封じ込め
 //!    オープンのいずれの安全な経路解決手段も持たないため、
@@ -1145,9 +1154,11 @@ mod no_follow_open {
 /// 相当。`NtCreateFile` の `RootDirectory`）が無く、`File::open` は常に
 /// フルパスの `CreateFileW` になる（`FILE_FLAG_OPEN_REPARSE_POINT` が効く
 /// のは最終成分だけで、途中の junction は辿ってしまう）。そのため本
-/// モジュールは次の 2 つの手段を組み合わせて TOCTOU を閉じる
-/// （`docs/onnx-external-data-decision.md` 5 節が設計判断の正。1 経路の
-/// 残存リスクも同節参照）:
+/// モジュールは次の 3 つの手段を組み合わせて TOCTOU を閉じる
+/// （`docs/onnx-external-data-decision.md` 5 節が設計判断の正。2026-09-28
+/// codex-review 是正〈PR #2351〉で 3. を追加し、1.〜2. のみでは残っていた
+/// 「途中成分・最終ディレクトリを reparse point 化してから即座に元へ
+/// 戻す」flip-and-revert 型 TOCTOU を閉じた）:
 ///
 /// 1. **祖先チェーンのハンドル保持**: `base_dir`（ボリュームルートから）
 ///    までの各ディレクトリ成分を開いたまま保持する（[`open_base_dir_handle`]
@@ -1163,19 +1174,43 @@ mod no_follow_open {
 ///    `file_type().is_symlink()`（シンボリックリンク・マウントポイントの
 ///    タグしか認識せず AppExecLink・cloud files 等を素通りさせる）では
 ///    なく属性ビットで行う。
+/// 3. **最終ハンドルの実所在検証**（[`final_real_path`]・
+///    [`is_within_base_dir`]）: 1.〜2. は「保持中の成分自身」の破壊的操作
+///    は防ぐが、`open_component` は途中成分・最終成分のいずれもフルパス
+///    文字列で `CreateFileW` するため、まだ held に積んでいない・保持の
+///    対象外の途中ディレクトリを一時的に reparse point 化 → 次の成分を
+///    その reparse point 経由で開かせる → 事後の属性再検査（2.）が走る前に
+///    元へ戻す、という flip-and-revert には 1.〜2. だけでは対応できない
+///    （codex-review 指摘 `PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`・
+///    PR #2351）。最終ファイルを開いた直後に、そのハンドル自身が実際に
+///    指しているオブジェクトの所在を `GetFinalPathNameByHandleW` で
+///    （経路文字列の再解決ではなくハンドル起点の逆引きで）取得し、
+///    `base_dir` 配下・想定した深さから外れていないかを検証する。この
+///    検証はハンドルが指すオブジェクトそのものに基づくため、reparse
+///    point を事後に元へ戻しても偽装できない。
 ///
 /// 定数は Win32 SDK ヘッダ（`winnt.h`／`winbase.h`。MS Learn
 /// "CreateFileA/W"・"File Security and Access Rights"・"File Access Rights
-/// Constants"）の値を手書きする。Linux の `O_*` フラグと異なり Win32 API
-/// の定数は x86_64／aarch64 で ABI が固定されアーキテクチャ間で値が
-/// 変わらないため、`libc` 相当の crate を追加せず std の
-/// `OpenOptionsExt` へ渡すだけで済み `unsafe` を要しない。
+/// Constants"・"GetFileInformationByHandle function"・
+/// "GetFinalPathNameByHandleW function"）の値・シグネチャを手書きする。
+/// Linux の `O_*` フラグと異なり Win32 API の定数は x86_64／aarch64 で
+/// ABI が固定されアーキテクチャ間で値が変わらないため、`libc` 相当の
+/// crate を追加しない（`.claude/rules/deps-policy.md`）。定数・
+/// `OpenOptionsExt` 経由の呼び出しは std のみで `unsafe` を要しないが、
+/// 3. の実体識別（[`file_identity`]）・実所在検証
+/// （[`final_real_path`]）は std が未安定化の API
+/// （`file_index`／`volume_serial_number`〈`windows_by_handle`〉・
+/// `GetFinalPathNameByHandleW` 相当）に依存するため、kernel32.dll への
+/// 手書き `extern "system"` 宣言（`unsafe`。FFI 境界に限定。
+/// `.claude/rules/coding-rust.md`）で直接呼ぶ。
 #[cfg(windows)]
 mod win_contained_open {
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString, c_void};
     use std::fs::{File, OpenOptions};
     use std::io;
+    use std::os::windows::ffi::OsStringExt;
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
     use std::path::{Component, Path, PathBuf, Prefix};
 
     // winnt.h（`CreateFileW` の `dwShareMode`）。`FILE_SHARE_DELETE` は
@@ -1229,6 +1264,161 @@ mod win_contained_open {
     const FINAL_CUSTOM_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
     const DIR_CUSTOM_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
 
+    // winbase.h（`GetFinalPathNameByHandleW` の `dwFlags`）。両方とも値 0
+    // （既定）で、`Path::canonicalize`（std 内部実装が同じ API を同じ既定
+    // フラグで呼ぶ）が返す verbatim 絶対パスと同じ表記形式
+    // （`\\?\C:\...`・正規化済み・DOS ドライブレター形式）を得るために
+    // 明示しておく（値の意味を自明にするための命名であり、実効値は
+    // 変えない）。
+    const FILE_NAME_NORMALIZED: u32 = 0x0;
+    const VOLUME_NAME_DOS: u32 = 0x0;
+    const GET_FINAL_PATH_FLAGS: u32 = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+
+    /// `GetFileInformationByHandle`（winbase.h）が書き込む構造体
+    /// （`BY_HANDLE_FILE_INFORMATION`）を 1:1 再現する。C ABI ヘッダの
+    /// フィールド順序・型幅（`u32`／`FILETIME` は winnt.h の 32bit ペア）を
+    /// そのまま踏襲し、`#[repr(C)]` でレイアウトを固定する。
+    #[repr(C)]
+    struct RawFiletime {
+        dw_low_date_time: u32,
+        dw_high_date_time: u32,
+    }
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: RawFiletime,
+        last_access_time: RawFiletime,
+        last_write_time: RawFiletime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    // SAFETY: この `extern "system"` 宣言は kernel32.dll が公開する Win32
+    // API（`GetFileInformationByHandle`／`GetFinalPathNameByHandleW`。
+    // MS Learn "GetFileInformationByHandle function"・
+    // "GetFinalPathNameByHandleW function"）のシグネチャと一致させている
+    // （戻り値・引数の型幅・呼び出し規約 `extern "system"` は winbase.h の
+    // 宣言と 1:1 対応する）。std は `file_index`／`volume_serial_number`
+    // （`windows_by_handle`）・`GetFinalPathNameByHandleW` 相当のいずれも
+    // 1.98.1 時点で安定化していないため（本モジュール冒頭ドキュメント
+    // 参照）、新規クレートを追加せず（`.claude/rules/deps-policy.md`。
+    // kernel32.dll は Windows の全プロセスが常にリンクする基盤 DLL のため
+    // `libc`（unix 側。第 10 区分）のような動的ロードも不要）手書き
+    // `extern` で直接呼ぶ。`unsafe` は本ブロックが宣言する 2 関数の呼び
+    // 出し箇所（[`file_identity`]・[`final_real_path`]）に限定する
+    // （`.claude/rules/coding-rust.md`「`unsafe` は FFI 境界等の必要
+    // 最小限に留め、理由をコメントで明記」）。
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            h_file: *mut c_void,
+            lp_file_information: *mut ByHandleFileInformation,
+        ) -> i32;
+
+        fn GetFinalPathNameByHandleW(
+            h_file: *mut c_void,
+            lp_sz_file_path: *mut u16,
+            cch_file_path: u32,
+            dw_flags: u32,
+        ) -> u32;
+    }
+
+    /// `file` の実体識別子（`(dwVolumeSerialNumber, nFileIndex)`。unix の
+    /// `(dev, ino)` 相当）を、ハンドル自身への `GetFileInformationByHandle`
+    /// 照会で得る（経路文字列を再解決しない）。P0 是正
+    /// （codex-review 指摘 `PRRT_kwDOTuUCJc6my2Ie`・PR #2351）: `FileKey` を
+    /// 経路文字列ベースのままにすると、ハードリンク・NTFS 8.3 短縮名等の
+    /// 別名パスで同一ファイルを参照する `location` が異なるキーへ分散し、
+    /// [`super::OverlappingRegion`] 検証（区間重複検査）をすり抜けるため。
+    pub(super) fn file_identity(file: &File) -> io::Result<(u32, u64)> {
+        // SAFETY: `handle` はこの呼び出しの生存期間中有効な `File` から
+        // 取得した生ハンドル。`info` は `size_of::<ByHandleFileInformation>()`
+        // 分の初期化済み（`zeroed`）バッファで、`GetFileInformationByHandle`
+        // は自身の構造体サイズを超えて書き込まない契約（MS Learn）。
+        // 戻り値 0 は失敗を意味し、その場合 `info` の内容は使わず
+        // `io::Error::last_os_error()` を返す。
+        let handle = file.as_raw_handle();
+        let mut info = std::mem::MaybeUninit::<ByHandleFileInformation>::zeroed();
+        let ok = unsafe { GetFileInformationByHandle(handle, info.as_mut_ptr()) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: 上の呼び出しが非 0（成功）を返したため、`info` は
+        // `GetFileInformationByHandle` によって完全に初期化済み。
+        let info = unsafe { info.assume_init() };
+        let index = ((info.file_index_high as u64) << 32) | info.file_index_low as u64;
+        Ok((info.volume_serial_number, index))
+    }
+
+    /// `file` が指すオブジェクトの「今開いているハンドルそのものが実際に
+    /// 参照している」正規化済み絶対パスを `GetFinalPathNameByHandleW` で
+    /// 取得する（経路文字列の再解決ではなく、ハンドルが指すオブジェクトを
+    /// 起点に OS が逆引きする）。[`resolve_and_open`] が最終ファイルを
+    /// 開いた直後に呼び、`base_dir` 配下へ実際に着地したことを検証する
+    /// （P0 是正 ×2。codex-review 指摘 `PRRT_kwDOTuUCJc6my2IX`・
+    /// `PRRT_kwDOTuUCJc6mzcKZ`・PR #2351。モジュール doc「TOCTOU の根拠」
+    /// 節 3. 参照）。
+    fn final_real_path(file: &File) -> io::Result<PathBuf> {
+        let handle = file.as_raw_handle();
+        // 初回は MAX_PATH で試し、不足なら API が返す必要長へ拡張して
+        // 再試行する（MS Learn "GetFinalPathNameByHandleW function" の
+        // 契約: バッファ不足時は必要文字数〈終端 NUL 込み〉を返す）。
+        // 反復回数に上限を設け、想定外の戻り値の反復（本来起きない）で
+        // 無限ループに陥らないようにする（fail-closed。
+        // `.claude/rules/coding-rust.md`「本番経路で `unwrap()`/`expect()`
+        // を使わない」と同じ精神で、ここでは無限ループを避ける）。
+        let mut buf: Vec<u16> = vec![0u16; 260];
+        for _ in 0..8 {
+            // SAFETY: `buf` は `buf.len()` 個の `u16` を保持する有効な
+            // バッファで、`cch_file_path` に `buf.len()` を渡すため API が
+            // バッファ長を超えて書き込むことはない。`handle` は呼び出し元
+            // `file` の生存期間中有効。
+            let n = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    GET_FINAL_PATH_FLAGS,
+                )
+            };
+            if n == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let n = n as usize;
+            if n < buf.len() {
+                buf.truncate(n);
+                return Ok(PathBuf::from(OsString::from_wide(&buf)));
+            }
+            // バッファ不足: `n` は終端 NUL を含む必要文字数。
+            buf.resize(n, 0);
+        }
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    /// `real`（[`final_real_path`] が返す、最終ファイルハンドルの実際の
+    /// 所在）が `base`（`BaseDirHandle::base`。ボリュームルートから検証
+    /// 済みの verbatim 絶対パス）配下へ、`parts` と同じ深さで解決されて
+    /// いることを確認する。途中成分の junction 化・差し替え（TOCTOU）は
+    /// 事後の属性再検査を「元に戻してから」すり抜けうるが、実際に開かれた
+    /// ハンドルが指すオブジェクトの所在（本関数の入力）はすり替えられない
+    /// （モジュール doc「TOCTOU の根拠」節 3.）。深さ（`parts.len()`）まで
+    /// 一致させるのは、大小文字・8.3 短縮名等の表記ゆれで成分名そのものを
+    /// 厳密比較すると正当なモデルを誤検知しうるため（NTFS は既定で大小
+    /// 文字を区別しない）で、`starts_with` 単独（文字列プレフィックス
+    /// ではなく `Path` コンポーネント単位）に加えて深さも見ることで
+    /// `base_dir` から真に `parts.len()` 階層降りた位置に着地したことを
+    /// 保証する。
+    fn is_within_base_dir(base: &Path, parts: &[&OsStr], real: &Path) -> bool {
+        match real.strip_prefix(base) {
+            Ok(rel) => rel.components().count() == parts.len(),
+            Err(_) => false,
+        }
+    }
+
     /// ディレクトリ成分（`is_dir = true`）または最終ファイル成分
     /// （`is_dir = false`）を、モジュール doc の共有モード・フラグで
     /// 開く。`.read(true)` は `access_mode` が上書きするため実効を
@@ -1257,13 +1447,19 @@ mod win_contained_open {
 
     /// [`resolve_and_open`] の失敗理由。呼び出し元（`super::
     /// resolve_and_open`）が `ExternalDataError::InvalidLocation` の
-    /// `reason`（`ReparsePoint`／`NotRegularFile`）と `Io` を区別できる
-    /// よう、単なる `(io::Error, bool)` ではなく 3 分岐にする（reparse
-    /// point 検出と「open は成功したが通常ファイルではない」検出を、
-    /// いずれも `io::Error` の種別へ押し込めずに表現するため）。
+    /// `reason`（`ReparsePoint`／`NotRegularFile`／`OutsideBaseDir`）と
+    /// `Io` を区別できるよう、単なる `(io::Error, bool)` ではなく複数分岐に
+    /// する（reparse point 検出・「open は成功したが通常ファイルではない」
+    /// 検出・「実際に開かれたハンドルが `base_dir` の外を指していた」検出
+    /// を、いずれも `io::Error` の種別へ押し込めずに表現するため）。
     pub(super) enum OpenError {
         Reparse,
         NotRegularFile,
+        /// 最終ファイルハンドルの実際の所在（[`final_real_path`]）が
+        /// `base_dir` 配下・想定した深さから外れていた（TOCTOU 是正。
+        /// [`is_within_base_dir`] のドキュメント参照。codex-review 指摘
+        /// `PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`・PR #2351）。
+        EscapedBaseDir,
         Io(io::Error),
     }
 
@@ -1403,6 +1599,21 @@ mod win_contained_open {
                 if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                     return Err(OpenError::Reparse);
                 }
+            }
+
+            // 事後チェック（モジュール doc「TOCTOU の根拠」節 3.）: 上の
+            // 祖先再検査は「元に戻された（flip-and-revert）」reparse point
+            // 化を見逃しうる（codex-review 指摘 `PRRT_kwDOTuUCJc6my2IX`・
+            // `PRRT_kwDOTuUCJc6mzcKZ`・PR #2351）。祖先ハンドルの属性では
+            // なく、実際に開かれた `handle` 自身が指すオブジェクトの所在を
+            // `GetFinalPathNameByHandleW` で逆引きし、`base_dir` 配下・
+            // 想定した深さ（`parts.len()`）から外れていないかを確認する。
+            // reparse point 化を伴わない偽装は成立しない（`handle` は
+            // `open_component` が実際に `CreateFileW` で解決したオブジェクト
+            // を指しており、以後のファイルシステム操作では変わらない）。
+            let real_path = final_real_path(&handle)?;
+            if !is_within_base_dir(&base_dir.base, parts, &real_path) {
+                return Err(OpenError::EscapedBaseDir);
             }
 
             let snapshot = super::FileSnapshot::from_metadata(&attrs);
@@ -1563,6 +1774,10 @@ fn resolve_and_open(
         win_contained_open::OpenError::NotRegularFile => ExternalDataError::InvalidLocation {
             tensor_name: cap_name(tensor_name),
             reason: LocationRejectReason::NotRegularFile,
+        },
+        win_contained_open::OpenError::EscapedBaseDir => ExternalDataError::InvalidLocation {
+            tensor_name: cap_name(tensor_name),
+            reason: LocationRejectReason::OutsideBaseDir,
         },
         win_contained_open::OpenError::Io(e) => ExternalDataError::Io {
             tensor_name: cap_name(tensor_name),
@@ -1795,37 +2010,77 @@ fn try_decode_le<const N: usize, T>(
 /// 単位のため `foo.data`／`./foo.data` の表記ゆれ自体は畳み込まれるが、
 /// ハードリンクのように**文字列としても正規化後の経路としても異なるが
 /// 実体は同一のファイル**は別キーになり overlap 検出をすり抜ける。
-/// dev/ino をキーにすることでこの実体単位の同一性を保証する）。
+/// dev/ino をキーにすることでこの実体単位の同一性を保証する）。Windows も
+/// 同じ理由でパスベースキーを廃止した（P0 是正。codex-review 指摘
+/// `PRRT_kwDOTuUCJc6my2Ie`・PR #2351: ハードリンク・NTFS 8.3 短縮名等の
+/// 別名パスで同一ファイルを参照されると、パスベースキーでは別ファイル
+/// 扱いになり `OverlappingRegion` 検証をすり抜けていた）。
 ///
-/// newtype（`(u64, u64)`／`PathBuf` の型エイリアスではなく専用構造体）に
-/// する理由: 型エイリアスのままだと Unix 版は `(u64, u64)`（`Copy`）・
-/// それ以外は `PathBuf`（非 `Copy`）と cfg で `Copy` 性が変わり、複数箇所
-/// で必要な `.clone()` が環境依存で clippy `clone_on_copy`（`-D warnings`
-/// 対象）に触れて `#[allow]` が要った。`Clone` のみ導出する newtype に
-/// することで、どちらの cfg でも `.clone()` が常に非自明な複製となり
-/// `#[allow]` そのものが不要になる（レビュー指摘: `#[allow(clippy::
+/// newtype（`(u64, u64)`／`(u32, u64)`／`PathBuf` の型エイリアスではなく
+/// 専用構造体）にする理由: 型エイリアスのままだと cfg ごとに `Copy` 性が
+/// 変わり（`(u64, u64)`／`(u32, u64)` は `Copy`・`PathBuf` は非 `Copy`）、
+/// 複数箇所で必要な `.clone()` が環境依存で clippy `clone_on_copy`
+/// （`-D warnings` 対象）に触れて `#[allow]` が要った。`Clone` のみ導出する
+/// newtype にすることで、どの cfg でも `.clone()` が常に非自明な複製と
+/// なり `#[allow]` そのものが不要になる（レビュー指摘: `#[allow(clippy::
 /// clone_on_copy)]` を型設計で解消する）。
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FileKey(u64, u64);
-#[cfg(not(unix))]
+/// Windows 版: `(dwVolumeSerialNumber, nFileIndex)`（unix の
+/// `(dev, ino)` 相当。[`win_contained_open::file_identity`] が
+/// `GetFileInformationByHandle` で取得する）。
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileKey(u32, u64);
+#[cfg(not(any(unix, windows)))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FileKey(PathBuf);
 
 /// `opened`（`resolve_and_open` が返したハンドル）から [`FileKey`] を
-/// 作る。Unix では dev/ino（`OpenFile::snapshot` の `dev`／`ino`）を使い、シンボリックリンク
-/// や表記ゆれだけでなくハードリンクも実体単位で同一キーへ畳み込む。
-/// dev/ino を持たない他プラットフォームでは `normalized_rel`
-/// （`resolve_and_open` が `Path::components()` から再構築した正規化済み
-/// 相対パス）を `base_dir_canonical` へ連結した値をフォールバックキーに
-/// 使う（ハードリンク識別はできないが、表記ゆれの畳み込みは維持する）。
+/// 作る。Unix では dev/ino（`OpenFile::snapshot` の `dev`／`ino`）を使い、
+/// Windows では `(dwVolumeSerialNumber, nFileIndex)`
+/// （[`win_contained_open::file_identity`]）を使う。いずれもシンボリック
+/// リンク・junction や表記ゆれだけでなくハードリンクも実体単位で同一
+/// キーへ畳み込む。両者とも実体識別子を持たない他プラットフォームでは
+/// `normalized_rel`（`resolve_and_open` が `Path::components()` から
+/// 再構築した正規化済み相対パス）を `base_dir_canonical` へ連結した値を
+/// フォールバックキーに使う（ハードリンク識別はできないが、表記ゆれの
+/// 畳み込みは維持する）。Windows の実体識別子取得は kernel32.dll への
+/// FFI 呼び出し（`win_contained_open::file_identity`）を経るため失敗しうる
+/// （`Result` を返す。unix・フォールバックの他 2 分岐は既存情報からのみ
+/// 構築するため失敗しない）。
 #[cfg(unix)]
-fn file_key_for(_base_dir_canonical: &Path, opened: &OpenFile, _normalized_rel: &Path) -> FileKey {
-    FileKey(opened.snapshot.dev, opened.snapshot.ino)
+fn file_key_for(
+    _tensor_name: &str,
+    _base_dir_canonical: &Path,
+    opened: &OpenFile,
+    _normalized_rel: &Path,
+) -> Result<FileKey, ExternalDataError> {
+    Ok(FileKey(opened.snapshot.dev, opened.snapshot.ino))
 }
-#[cfg(not(unix))]
-fn file_key_for(base_dir_canonical: &Path, _opened: &OpenFile, normalized_rel: &Path) -> FileKey {
-    FileKey(base_dir_canonical.join(normalized_rel))
+#[cfg(windows)]
+fn file_key_for(
+    tensor_name: &str,
+    _base_dir_canonical: &Path,
+    opened: &OpenFile,
+    _normalized_rel: &Path,
+) -> Result<FileKey, ExternalDataError> {
+    win_contained_open::file_identity(&opened.file)
+        .map(|(volume_serial_number, file_index)| FileKey(volume_serial_number, file_index))
+        .map_err(|e| ExternalDataError::Io {
+            tensor_name: cap_name(tensor_name),
+            kind: e.kind(),
+        })
+}
+#[cfg(not(any(unix, windows)))]
+fn file_key_for(
+    _tensor_name: &str,
+    base_dir_canonical: &Path,
+    _opened: &OpenFile,
+    normalized_rel: &Path,
+) -> Result<FileKey, ExternalDataError> {
+    Ok(FileKey(base_dir_canonical.join(normalized_rel)))
 }
 
 /// パス 1 で確定した「どこから何バイト読むか」の 1 件分。
@@ -2107,7 +2362,8 @@ fn plan(
             } else {
                 let opened =
                     resolve_and_open(&tensor_name, f, &parts).map_err(GraphError::ExternalData)?;
-                let key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
+                let key = file_key_for(&tensor_name, base_dir_canonical, &opened, &normalized_rel)
+                    .map_err(GraphError::ExternalData)?;
                 let snapshot = opened.snapshot;
                 // ここで close する（明示 drop。以後このハンドルは使わず、
                 // パス 2 は再 open したハンドルを `key`・`snapshot` と照合
@@ -2354,11 +2610,13 @@ fn load(
         let mut opened =
             resolve_and_open(first_name, base_dir, &parts).map_err(GraphError::ExternalData)?;
         // 再 open したハンドル自身の識別子・スナップショット（長さ・unix
-        // では dev/ino・ctime・mtime）をパス 1 の記録と照合する（経路文字列
-        // ではなくハンドルに対する `fstat` の結果。不一致なら 1 バイトも
-        // 読まずに拒否する）。`FileKey` の比較は非 unix のフォールバック
-        // キー（正規化済みパス）も含めた実体同一性の照合として残す。
-        let key_now = file_key_for(base_dir_canonical, &opened, &planned.rel);
+        // では dev/ino・ctime・mtime・Windows では volume serial／
+        // file index）をパス 1 の記録と照合する（経路文字列ではなく
+        // ハンドルに対する照会の結果。不一致なら 1 バイトも読まずに拒否
+        // する）。`FileKey` の比較は unix・Windows でも実体単位の同一性
+        // 照合として残す（`file_key_for` ドキュメント参照）。
+        let key_now = file_key_for(first_name, base_dir_canonical, &opened, &planned.rel)
+            .map_err(GraphError::ExternalData)?;
         if key_now != planned.key {
             return Err(GraphError::ExternalData(
                 ExternalDataError::FileChangedDuringLoad {

@@ -566,16 +566,30 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   Linux の `O_*` フラグ（CPU アーキテクチャごとに値が異なり、旧実装の
   手書き値誤りの原因になった。4 節参照）と異なり、Win32 API の定数は
   x86_64／aarch64 で ABI が固定され値が変わらないため、`libc` 相当の
-  crate を追加せず std の `OpenOptionsExt` へ渡すだけで済み `unsafe` を
-  要しない。
-- **FileKey・FileSnapshot**: dev/ino 相当（`file_index`）・ctime 相当
-  （`change_time`）は `std::os::windows::fs::MetadataExt` が 1.98.1
-  時点で安定化していないため使えない（計画段階の実測。`file_attributes`／
-  `creation_time`／`last_access_time`／`last_write_time`／`file_size` は
-  安定）。そのため `FileKey` はパスベース（`cfg(not(unix))` 共通実装。
-  ハードリンクの別名をまたいだ重複区間の検出は失われる。5 節の残存
-  リスク参照）、`FileSnapshot` は `file_attributes`／`creation_time`／
-  `last_write_time` を使う（unix の ctime ほど強い変更検知ではない）。
+  crate を追加せず std の `OpenOptionsExt` へ渡すだけで済み、この部分は
+  `unsafe` を要しない（下記「FileKey・FileSnapshot」節・「最終ハンドルの
+  実所在検証」〈5 節「Windows 版の残存リスク」項目 5〉は std が未安定化の
+  API に依存するため kernel32.dll への手書き `extern "system"` 宣言を使い、
+  `unsafe` を FFI 境界〈2 関数の呼び出し箇所のみ〉に限定する）。
+- **FileKey・FileSnapshot（2026-09-28 codex-review 是正・PR #2351 で更新）**:
+  dev/ino 相当（`file_index`）・volume serial number
+  （`volume_serial_number`）・ctime 相当（`change_time`）は
+  `std::os::windows::fs::MetadataExt` が 1.98.1 時点で安定化していない
+  （`windows_by_handle`／`windows_change_time` の nightly-only feature。
+  `file_attributes`／`creation_time`／`last_access_time`／
+  `last_write_time`／`file_size` は安定）。当初はこれを理由に `FileKey`
+  をパスベースにしていたが、ハードリンク・NTFS 8.3 短縮名等の別名パスで
+  同一ファイルを参照する `location` が異なるキーへ分散し
+  `OverlappingRegion` 検証をすり抜ける欠陥だったため（codex-review 指摘
+  `PRRT_kwDOTuUCJc6my2Ie`）、kernel32.dll の `GetFileInformationByHandle`
+  （winbase.h）への手書き `extern "system"` 宣言（`unsafe` を FFI 境界に
+  限定。第三のクレート追加は不要——kernel32.dll は Windows の全プロセスが
+  常にリンクする基盤 DLL）で直接呼び、`(dwVolumeSerialNumber,
+  nFileIndex)` を実体識別子として使うよう是正した
+  （`win_contained_open::file_identity`）。`FileSnapshot` は引き続き
+  `file_attributes`／`creation_time`／`last_write_time` を使う
+  （`change_time` 未安定化のため。unix の ctime ほど強い変更検知では
+  ない）。
 - **location の字句検査（`windows_component_reject_reason`。
   `cfg(any(windows, test))`。Linux でも `cfg(test)` ビルドに含まれ単体
   テスト可能）**: 代替データストリーム（`name:stream`）・予約デバイス名
@@ -717,28 +731,33 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
 4. **読み込みの窓**: 読み込みハンドルは書き込み共有を拒否している。
    したがって、既存の writer ハンドルがあれば open 自体が失敗し、保持
    している間は新しい writer も開けない（unix より強い保証）。
+5. **最終ハンドルの実所在検証（2026-09-28 codex-review 是正・PR #2351 で
+   追加）**: 1.〜4. だけでは「まだ held に積んでいない途中ディレクトリ・
+   最深ディレクトリを一時的に reparse point 化 → こちらの open がそれを
+   辿る → 事後チェック（2.）が走る前に元へ戻す」という flip-and-revert
+   （旧 (a) の残存リスク）を検出できなかった（codex-review 指摘
+   `PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`）。最終ファイルを
+   開いた直後に、`GetFinalPathNameByHandleW`（winbase.h。std 未対応の
+   ため kernel32.dll への手書き `extern "system"` 宣言で直接呼ぶ）で
+   「そのハンドルが実際に指しているオブジェクトの所在」を取得し、
+   `base_dir` 配下・想定した深さから外れていないかを検証する
+   （`win_contained_open::final_real_path`／`is_within_base_dir`）。この
+   検証はハンドルが指すオブジェクトそのものに基づく逆引きであり、経路
+   文字列の再解決ではないため、reparse point を事後に元へ戻しても偽装
+   できない。
 
-**受容する残存リスク**（これらを受容するか、`GetFinalPathNameByHandleW`
-／`NtCreateFile(RootDirectory)`〈`unsafe` の追加が必要〉で閉じるかは
-ユーザー判断事項。PR 本文参照）:
+**残るリスク**:
 
-- (a) **最深ディレクトリの flip-and-revert 競合**: 「最深ディレクトリを
-  空にする → junction 化する → こちらの open がそれを辿る → 攻撃者が
-  元に戻す」を open の瞬間の窓内で完遂されると、事後チェックでも検出
-  できない（元に戻されていない場合のみ検出できる）。unix 側の
-  「`base_dir` 配下への書き込み権と精密なタイミングを要する競合」
-  （上記のタイムスタンプ粒度内再作成）と同じ類型の残存リスクとして
-  受容する。
+- (a) 「最深ディレクトリの flip-and-revert 競合」は上記 5. で閉じた
+  （2026-09-28・PR #2351）。
 - (b) **snapshot の弱さ**: `FileSnapshot`（4.6 節）の時刻フィールドは
   `SetFileTime` で利用者が書き換え可能なため、pass 1・pass 2 間の
   差し替え検出は unix の ctime より弱い。ただし封じ込め（`base_dir`
   配下・reparse なし・区間は有界）は snapshot に依存しない（pass 2 は
   同じ封じ込め手順で開き直し、書き込み共有を拒否した状態で読むため）。
-- (c) **実体同一性の欠如**: `FileKey` がパスベースのため、大文字小文字
-  違い・8.3 短縮名・ハードリンクの別名をまたいだ重複区間の検出が
-  失われる。影響は `max_total_bytes` の範囲内に収まり、
-  `max_external_files` の数え方は過大カウント側（fail-closed 側）に
-  倒れる。
+- (c) 「実体同一性の欠如（`FileKey` パスベース）」は上記「FileKey・
+  FileSnapshot」節の是正（`(dwVolumeSerialNumber, nFileIndex)` への
+  切替）で閉じた（2026-09-28・PR #2351）。
 - (d) NTFS 以外（ReFS・exFAT 等）で「reparse point 化には空ディレクトリ
   が必要」という規則が成り立つかは未確認（Windows 実機での確認事項）。
 - **可用性への副作用**: 読み込み中は祖先ディレクトリを rename・削除
