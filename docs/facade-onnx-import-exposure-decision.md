@@ -510,8 +510,10 @@ set_cuda_onnx_gpu_execution_enabled`／`set_metal_onnx_gpu_execution_enabled`
 基点ディレクトリ `base_dir` を受け取り external data
 〈`TensorProto.data_location`／`external_data`〉を fail-closed に検証・
 読み込みする新入口）を実装した。`ExternalDataOptions::max_total_bytes`
-（既定 4 GiB。**暫定値・ユーザー承認待ち**）が確保前検査の上限として
-機能する（詳細は `docs/onnx-external-data-decision.md`）。
+（既定 4 GiB。**暫定値・ユーザー承認待ち**）が確保前検査の上限として、
+`ExternalDataOptions::max_external_files`（既定 4096。**暫定値・
+ユーザー承認待ち**）が distinct ファイル数（fd 枯渇対策。A04）の
+上限として機能する（詳細は `docs/onnx-external-data-decision.md`）。
 
 **facade 公開は今回のスコープに含めない**（承認待ちのまま保留。
 `docs/compat-api-scope.md` §5 の該当段落を参照）。`OnnxModel::from_path`

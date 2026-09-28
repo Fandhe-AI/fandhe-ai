@@ -28,9 +28,17 @@ import 入口を `onnx-interop` 内部に新設し、外部参照を fail-closed
 新規モジュール `crates/onnx-interop/src/onnx/external_data.rs`（`onnx::mod`
 から `pub mod external_data;`）:
 
-- `pub struct ExternalDataOptions { pub max_total_bytes: u64 }`
+- `pub struct ExternalDataOptions { pub max_total_bytes: u64, pub max_external_files: usize }`
   - `Default` の既定値は `DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES = 4 GiB`
     （**暫定値・ユーザー承認待ち**。変更は定数 1 行の書き換えで済む）。
+  - `max_external_files` の既定値は `DEFAULT_MAX_EXTERNAL_FILES = 4096`
+    （**暫定値・ユーザー承認待ち**。同一の扱い）。distinct な external data
+    ファイル実体（[`FileKey`] で畳み込んだ後の数）の上限で、`max_total_bytes`
+    がバイト数のみを制限する隙間（サイズ 0 のテンソルを大量の異なる
+    ファイルへ分散させるとファイルハンドルだけが増え fd 上限に達しうる。
+    A04 資源枯渇対策）を塞ぐ。超過は `ExternalDataError::
+    TooManyExternalFiles` で拒否する（#2347 P0 是正・PR #2348 コード
+    レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。
 - `pub fn resolve_external_data(model: &mut ModelProto, base_dir: &Path, options: &ExternalDataOptions) -> Result<(), GraphError>`
   — in-place で external なテンソルを `raw_data` へ inline 化する。
 - `pub fn build_graph_with_external_data(model: &ModelProto, base_dir: &Path, options: &ExternalDataOptions) -> Result<Graph, GraphError>`
@@ -42,9 +50,10 @@ import 入口を `onnx-interop` 内部に新設し、外部参照を fail-closed
   は `InvalidDataLocation`／`InconsistentDataFields`／`MissingLocationKey`／
   `DuplicateKey`／`UnknownKey`／`ChecksumUnsupported`／`InvalidLocation`
   （`LocationRejectReason` 付き）／`InvalidNumber`／`RangeOutOfFile`／
-  `LengthMismatch`／`OverlappingRegion`／`TotalSizeLimitExceeded`／`Io`／
-  `FileChangedDuringLoad`／`InvalidBaseDir`／`DuplicateInitializerName` の
-  variant を持つ。診断文字列（`tensor_name`／`key`）は
+  `LengthMismatch`／`OverlappingRegion`／`TotalSizeLimitExceeded`／
+  `TooManyExternalFiles`／`Io`／`FileChangedDuringLoad`／`InvalidBaseDir`／
+  `DuplicateInitializerName`／`UnsupportedPlatformForSecureResolve`／
+  `Internal` の variant を持つ。診断文字列（`tensor_name`／`key`）は
   `proto::cap_sparse_tensor_diag_name`（256 バイト上限）を再利用して
   切り詰める。ホストの絶対パス・canonicalize 後のパスはいずれの
   variant にも含めない（security.md A05）。
@@ -127,6 +136,15 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      `ExternalDataOptions::max_total_bytes` を超えた時点（または
      overflow した時点）で `TotalSizeLimitExceeded` とする。確保より
      前に検査するため、巨大な `length` でメモリを確保することはない。
+   - distinct な external data ファイル実体（`FileKey`。dev/ino ベース）
+     の数を `ExternalDataOptions::max_external_files` と比較し、`files`
+     マップへ登録する前（＝ファイルを開いた直後）に超過を検査する。
+     `max_total_bytes` はバイト数のみを制限するため、サイズ 0 の
+     テンソルを大量の異なる空ファイルへ分散させる入力は合計サイズを
+     常に 0 に保ったままファイルハンドルだけを増やしプロセスの fd
+     上限に達しうる。この検査で `TooManyExternalFiles` として拒否する
+     （2026-09-28・#2347 P0 是正・PR #2348 コードレビュー対応・
+     PRRT_kwDOTuUCJc6mlxhy）。
 2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、パス 1 で開いた
    ファイルハンドルを再利用して該当区間だけを `read_exact` する
    （`.data` ファイル全体は読まない）。読み込み直前に `metadata().len()`
@@ -186,6 +204,9 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 - `ExternalDataOptions::max_total_bytes` の既定値（4 GiB）は暫定値で
   あり、ユーザー承認が必要（`DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES` の
   1 行変更で調整可能）。
+- `ExternalDataOptions::max_external_files` の既定値（4096）も同様に
+  暫定値でありユーザー承認が必要（`DEFAULT_MAX_EXTERNAL_FILES` の 1 行
+  変更で調整可能）。
 
 ## 7. スコープ外の事項（`.claude/rules/out-of-scope-tracking.md`）
 

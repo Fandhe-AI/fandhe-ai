@@ -125,6 +125,23 @@ fn model_with_initializer(t: TensorProto) -> ModelProto {
     }
 }
 
+fn model_with_initializers(ts: Vec<TensorProto>) -> ModelProto {
+    ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: Vec::new(),
+            name: "g".to_string(),
+            initializer: ts,
+            input: Vec::new(),
+            output: Vec::new(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    }
+}
+
 fn assert_external_err(
     result: Result<fandhe_ai_onnx_interop::onnx::graph::Graph, GraphError>,
 ) -> ExternalDataError {
@@ -663,12 +680,95 @@ fn total_size_limit_is_enforced() {
         Some("16"),
     );
     let model = model_with_initializer(t);
-    let options = ExternalDataOptions { max_total_bytes: 8 };
+    let options = ExternalDataOptions {
+        max_total_bytes: 8,
+        ..ExternalDataOptions::default()
+    };
     let err = assert_external_err(build_graph_with_external_data(&model, dir.path(), &options));
     assert!(matches!(
         err,
         ExternalDataError::TotalSizeLimitExceeded { limit: 8, .. }
     ));
+}
+
+#[test]
+fn external_file_count_limit_is_enforced() {
+    // サイズ 0 のテンソルを別々の空ファイルへ分散させても
+    // `max_total_bytes`（合計バイト数）はすり抜けるため、distinct ファイル
+    // 数の上限（`max_external_files`）で拒否されることを確認する
+    // （A04 資源枯渇対策。PR #2348 コードレビュー対応・
+    // PRRT_kwDOTuUCJc6mlxhy）。
+    let dir = TempDir::new("file-count-limit");
+    dir.write_file("a.data", &[]);
+    dir.write_file("b.data", &[]);
+    dir.write_file("c.data", &[]);
+    let t_a = external_tensor(
+        "a",
+        vec![0],
+        data_type::FLOAT,
+        "a.data",
+        Some("0"),
+        Some("0"),
+    );
+    let t_b = external_tensor(
+        "b",
+        vec![0],
+        data_type::FLOAT,
+        "b.data",
+        Some("0"),
+        Some("0"),
+    );
+    let t_c = external_tensor(
+        "c",
+        vec![0],
+        data_type::FLOAT,
+        "c.data",
+        Some("0"),
+        Some("0"),
+    );
+    let model = model_with_initializers(vec![t_a, t_b, t_c]);
+    let options = ExternalDataOptions {
+        max_external_files: 2,
+        ..ExternalDataOptions::default()
+    };
+    let err = assert_external_err(build_graph_with_external_data(&model, dir.path(), &options));
+    assert!(matches!(
+        err,
+        ExternalDataError::TooManyExternalFiles { limit: 2 }
+    ));
+}
+
+#[test]
+fn external_file_count_limit_allows_shared_file_reuse() {
+    // 同一ファイルを複数テンソルが参照する通常の分割形式（1 ファイルを
+    // initializer 群が共有する構成）は、distinct ファイル数としては 1 件
+    // としてしか数えないため、上限に抵触しないことを確認する。
+    let dir = TempDir::new("file-count-limit-shared");
+    dir.write_file("shared.data", &[0u8; 8]);
+    let t_a = external_tensor(
+        "a",
+        vec![1],
+        data_type::FLOAT,
+        "shared.data",
+        Some("0"),
+        Some("4"),
+    );
+    let t_b = external_tensor(
+        "b",
+        vec![1],
+        data_type::FLOAT,
+        "shared.data",
+        Some("4"),
+        Some("4"),
+    );
+    let model = model_with_initializers(vec![t_a, t_b]);
+    let options = ExternalDataOptions {
+        max_external_files: 1,
+        ..ExternalDataOptions::default()
+    };
+    let graph = build_graph_with_external_data(&model, dir.path(), &options)
+        .expect("同一ファイル共有は distinct ファイル数 1 件のため上限内");
+    assert_eq!(graph.initializers.len(), 2);
 }
 
 // --- 異常系: 重複・重なり（A5） ---

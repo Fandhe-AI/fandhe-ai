@@ -34,8 +34,14 @@
 //!    `location` のパス安全性（絶対パス・`..`・symlink・base_dir 外への
 //!    脱出を拒否）・`offset`／`length` の文法と範囲・期待バイト長との一致・
 //!    重複区間・**外部データ合計の上限**（[`ExternalDataOptions::
-//!    max_total_bytes`]。確保の前に検査する）をすべて検証する。1 件でも
-//!    失敗すれば `Err` を返しファイルは一切読まない（A04 資源枯渇対策）。
+//!    max_total_bytes`]。確保の前に検査する）・**distinct な external
+//!    data ファイル数の上限**（[`ExternalDataOptions::
+//!    max_external_files`]。合計バイト数の上限はサイズ 0 のテンソルを
+//!    大量の異なる空ファイルへ分散させる入力に対しては無力なため、
+//!    ファイルを開いた直後・`files` へ登録する前に別途検査する。fd 枯渇
+//!    対策。#2347 P0 是正・PR #2348 コードレビュー対応・
+//!    PRRT_kwDOTuUCJc6mlxhy）をすべて検証する。1 件でも失敗すれば `Err`
+//!    を返しファイルは一切読まない（A04 資源枯渇対策）。
 //! 2. **パス 2（`load`）**: パス 1 が全件成功した場合のみ、パス 1 で
 //!    開いたファイルハンドルを再利用して該当区間だけを `read_exact` する
 //!    （`.data` ファイル全体は読まない）。読み込み直前に `metadata().len()`
@@ -82,6 +88,24 @@ use super::proto::{ModelProto, TensorProto, cap_sparse_tensor_diag_name, data_lo
 /// 参照する。
 pub const DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// 1 モデルあたりに同時オープンを許す external data ファイル数（実体単位。
+/// `FileKey` で畳み込んだ後の distinct 数）の既定上限。
+///
+/// `max_total_bytes` はバイト数のみを制限するため、要素数 0（サイズ 0）の
+/// テンソルを大量に並べ、それぞれが別々の空ファイルを `location` で参照
+/// するモデルに対しては合計サイズが 0 のまま歯止めが効かず、`plan` が
+/// 開いたファイルハンドルだけがプロセスの fd 上限に達しうる（security.md
+/// A04・AGENTS.md「外部フォーマットのパース検証」。#2347 P0 是正・
+/// PR #2348 コードレビュー対応・PRRT_kwDOTuUCJc6mlxhy）。この上限は
+/// distinct なファイル実体（`FileKey`）の数を制限するため、1 ファイルを
+/// 複数テンソルが参照する通常の分割形式（同一 `.onnx.data` を initializer
+/// 群が共有する構成）は 1 件としてしか数えない。
+///
+/// **暫定値・ユーザー承認待ち**（`max_total_bytes` と同じ扱い。イシュー
+/// #2347 計画 §2「承認待ちの事項」）。変更は本定数 1 行の書き換えで済む。
+/// `ExternalDataOptions::default()` が参照する。
+pub const DEFAULT_MAX_EXTERNAL_FILES: usize = 4096;
+
 /// [`resolve_external_data`] の挙動を制御するオプション。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalDataOptions {
@@ -89,12 +113,19 @@ pub struct ExternalDataOptions {
     /// [`ExternalDataError::TotalSizeLimitExceeded`] で拒否する（確保の
     /// 前に検査するため、この上限を超える `length` はメモリを確保しない）。
     pub max_total_bytes: u64,
+    /// 1 モデルあたりに同時オープンを許す external data ファイル数
+    /// （実体単位・`FileKey` で畳み込んだ後の distinct 数）の上限。
+    /// 超過は [`ExternalDataError::TooManyExternalFiles`] で拒否する
+    /// （ファイルを開いた直後・`files` へ登録する前に検査するため、この
+    /// 上限を超えて開いたハンドルを溜め込まない）。
+    pub max_external_files: usize,
 }
 
 impl Default for ExternalDataOptions {
     fn default() -> Self {
         ExternalDataOptions {
             max_total_bytes: DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES,
+            max_external_files: DEFAULT_MAX_EXTERNAL_FILES,
         }
     }
 }
@@ -182,6 +213,11 @@ pub enum ExternalDataError {
     },
     /// external data の合計サイズが上限を超えた。
     TotalSizeLimitExceeded { limit: u64, requested: u64 },
+    /// distinct な external data ファイル数（実体単位）が上限を超えた。
+    /// `max_total_bytes` はバイト数のみを制限するため、サイズ 0 のテンソル
+    /// を大量に異なるファイルへ分散させる攻撃はバイト数の上限をすり抜ける
+    /// （A04 資源枯渇対策。`ExternalDataOptions::max_external_files`）。
+    TooManyExternalFiles { limit: usize },
     /// ファイル I/O の失敗（`NotFound`／権限エラー等）。
     Io {
         tensor_name: String,
@@ -279,6 +315,10 @@ impl fmt::Display for ExternalDataError {
             ExternalDataError::TotalSizeLimitExceeded { limit, requested } => write!(
                 f,
                 "external data 合計サイズが上限を超過: limit={limit} requested={requested}"
+            ),
+            ExternalDataError::TooManyExternalFiles { limit } => write!(
+                f,
+                "external data ファイル数（実体単位）が上限を超過: limit={limit}"
             ),
             ExternalDataError::Io { tensor_name, kind } => {
                 write!(
@@ -949,6 +989,23 @@ fn plan(
         // `Path::components()` から再構築した正規化済み相対パス）へ
         // フォールバックする。
         let file_key = file_key_for(base_dir_canonical, &opened, &normalized_rel);
+
+        // distinct ファイル数の上限検査（A04）: `max_total_bytes` はバイト
+        // 数のみを制限するため、サイズ 0 のテンソルを大量の異なるファイルへ
+        // 分散させると合計サイズは 0 のままファイルハンドルだけが増え、
+        // プロセスの fd 上限に達しうる（#2347 P0 是正・PR #2348 コード
+        // レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。`opened`（この反復で新規に
+        // 開いたハンドル）が既知の `file_key` でなければ、`files` へ登録する
+        // 前にここで拒否する。拒否時は `opened` をどこにも格納しないため
+        // スコープを抜ける際に close される（ハンドルの蓄積を防ぐ）。
+        if !files.contains_key(&file_key) && files.len() >= options.max_external_files {
+            return Err(GraphError::ExternalData(
+                ExternalDataError::TooManyExternalFiles {
+                    limit: options.max_external_files,
+                },
+            ));
+        }
+
         // `FileKey` は Unix では `(u64, u64)`（`Copy`）、それ以外では
         // `PathBuf`（非 `Copy`）と cfg で型が変わる（上記型エイリアス
         // 参照）ため、`.clone()` は環境依存で clippy の
