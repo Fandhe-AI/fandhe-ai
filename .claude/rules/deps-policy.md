@@ -1,13 +1,13 @@
 # 依存管理規約（REQ-1 v2）
 
-## 許容依存 9 区分（これ以外の追加はユーザー承認必須）
+## 許容依存 10 区分（これ以外の追加はユーザー承認必須）
 
-第 1〜8 区分は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存。
-第 9 区分（ベンチ比較対象）は `scripts/bench/oss-gemm-compare/` および
-`scripts/bench/framework-compare/`（適用範囲拡張。下表参照）限定であり本体
-workspace には入らない。CLAUDE.md 等で本体依存の区分数を指して「8 区分」と記述
-している箇所は、指している対象（本体 workspace の直接依存）が第 9 区分と異なる
-ため矛盾しない。本 PR ではそれらの記述を変更しない。
+第 1〜8 区分と第 10 区分は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の
+直接依存。第 9 区分（ベンチ比較対象）は `scripts/bench/oss-gemm-compare/`
+および `scripts/bench/framework-compare/`（適用範囲拡張。下表参照）限定であり
+本体 workspace には入らない。CLAUDE.md 等で本体依存の区分数を指して「9 区分」
+と記述している箇所は、本体 workspace の直接依存が第 1〜8 区分と第 10 区分の
+合計 9 区分であることを指しており矛盾しない。
 
 | 区分 | クレート | 条件 |
 |------|---------|------|
@@ -21,6 +21,7 @@ workspace には入らない。CLAUDE.md 等で本体依存の区分数を指し
 | ベンチ | `criterion` | `dev-dependencies` 限定 |
 | ベンチ比較対象（フレームワーク横並び） | `candle-core`・`burn`（およびその推移的依存ツリー。禁止リスト掲載クレートの推移的混入を含む） | **`scripts/bench/framework-compare/`（独自の `[workspace]` を持つ独立 Cargo workspace。本体 workspace 外）限定**の第 9 区分の適用範囲拡張。`=x.y.z` 完全固定（`candle-core =0.11.0`・`burn =0.21.0`・`fandhe-ai =0.9.0`〈crates.io 公開版の自社クレート。2026-09-17 公開・v0.9.0 リリースサイクルで `=0.8.0` から更新〉）で、同 workspace の `Cargo.lock` をコミットして再現性を確保する。目的はフレームワーク横並びベンチ（GEMM / MLP 学習 / 推論）の比較対象であり、比較対象という性質上、同 workspace の `Cargo.lock` には依存禁止リストのクレート（`candle-*`・`burn-*`・`cubecl`・`ndarray`・`tch` 等）が**意図的に含まれる**。このため同 workspace の `Cargo.lock` には禁止リスト grep（`check_lock`）を適用せず、代わりに `scripts/check-forbidden-deps.sh lock-all` が**専用の fail-closed 契約検査**（`check_framework_compare`: Cargo.lock の存在・`Cargo.toml` の独自 `[workspace]` 宣言〈本体 workspace への構造的非混入〉・承認済みピン〈burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.9.0〉のドリフト検出（各エントリの `source = "registry+…crates.io-index"` 必須化を含む。path/git 依存への差し替えを fail-closed 検出。イシュー #982）・各メンバー crate の直接依存 allowlist〈承認済み比較対象の完全固定 + bench-common の path 依存のみ。`tch` 等の直接依存追加・非完全固定に加え、`@=` 付き承認済みエントリの `path`/`git`/`registry`/`rev`/`branch`/`tag`/`package` キーによる非 registry 取得元差し替えを fail-closed 検出。イシュー #982〉・セクションヘッダ allowlist〈`[dev-dependencies]`・`[build-dependencies]`・`[target.'cfg'.dependencies]`・`[dependencies.<crate>]` 等の代替依存宣言経路をセクション単位で遮断〉・workspace `members` 宣言の完全一致・配下 Cargo.toml ファイル集合の一致〈未登録 member crate の追加を遮断〉）を毎回実行する。本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート `Cargo.lock`・`cargo tree` 検査が fail-closed に検出する。専用 `scripts/bench/framework-compare/deny.toml`（advisories / bans / licenses / sources。本 workspace 限定の allow 追加は MPL-2.0・CC0-1.0・BSL-1.0）による依存監査を CI（`ci.yml` の `deps-forbidden` ジョブ）の必須ステップとして実行する。**上記条件（独立 workspace・完全固定・専用契約検査・専用 deny.toml の CI 監査）を満たさない追加・変更、承認済みピン・allow リスト・検査の変更は通常どおりユーザー承認が必要。現行ピンは `fandhe-ai =0.9.0`（ピン更新も都度ユーザー承認）。承認履歴は `docs/framework-compare-harness-decision.md` を正とする。設計判断・ライセンス実測は `docs/framework-compare-harness-decision.md`・`docs/license-matrix.md` 8b 節を出典として参照する** |
 | ベンチ比較対象（OSS GEMM） | `matrixmultiply`・`gemm` | `scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立 Cargo プロジェクト）限定。`=x.y.z` 完全固定（`matrixmultiply =0.3.11`・`gemm =0.19.0`）。本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）への追加は禁止（依存禁止リスト検査とは別に、この限定はレビューで担保する）。同ハーネスの `Cargo.lock` も依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）の対象とし、`scripts/check-forbidden-deps.sh` の走査対象へ含める。本パッケージ専用の `deny.toml`（`scripts/bench/oss-gemm-compare/deny.toml`。allow リストは本区分と同一方針）による `cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --locked check --config scripts/bench/oss-gemm-compare/deny.toml licenses sources` を CI（`.github/workflows/ci.yml` の `deps-forbidden` ジョブ）へ必須ステップとして組み込む。条件を満たさない追加・変更は通常どおりユーザー承認が必要。2026-08-20 ユーザー承認（イシュー #755）。設計判断・実測記録（ライセンス実測値を含む）は PR #770 で記録される `docs/oss-comparison-harness-decision.md`（イシュー #755）を出典として参照する |
+| OS FFI（第 10 区分） | `libc` | `onnx-interop` の external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`。`crates/onnx-interop/src/onnx/external_data.rs`）用途に限定（依存の実追加・同ファイルは PR #2348 で導入。本区分の新設は依存追加に先立って本規約へ確定させる）。`[target.'cfg(unix)'.dependencies]` で `cfg(unix)` 限定（Windows 等の非 unix ではリンクされない）。`=0.2.189` 完全固定。手書きの `openat` フラグ定数（`O_DIRECTORY`／`O_NOFOLLOW` 等）は Linux では arch ごとに値が異なり（例: x86 は `O_DIRECTORY=0o200000`・aarch64 は `O_DIRECTORY=0o40000`）、手書き値のまま aarch64 Linux（DGX Spark GB10）でビルドするとシンボリックリンク拒否が機能しない実装バグを生んでいたため、libc の定数・`syscall` 経由の `openat2`（`SYS_openat2`／`open_how`／`RESOLVE_BENEATH` 等）を使う。2026-09-28 ユーザー承認。本体 workspace の直接依存として第 10 区分に位置づける（第 9 区分〈ベンチ比較対象〉とは無関係。既存の第 1〜9 区分の番号・名称は変更しない） |
 
 ## 依存禁止リスト（CI で機械検査。TASK-1.2）
 
