@@ -51,3 +51,12 @@ AvgPool2d}::forward_host` を突合する方式で代替した（`onnx_interp_co
 pool.rs` モジュール冒頭コメント §3.3 参照）。torch 実生成 fixture による
 突合は今後の課題として申し送る（ユーザー承認なしに Issue は起票しない。
 `.claude/rules/out-of-scope-tracking.md`）。
+
+**追記（イシュー #2329・親 #2185）**: 上記の未実施は #2329 で解消した。
+`torch==2.14.0+cpu` を使い捨て venv に導入し、`torch.onnx.export` が実際に
+出力する ONNX グラフ（Conv・MaxPool・AveragePool に加え、BatchNormalization
+・GlobalAveragePool・Flatten も対象に含めて拡大）による fixture 突合を
+`crates/onnx-interop/tests/fixtures/pytorch-onnx-cnn-ops/`・
+`crates/onnx-interop/tests/onnx_interp_pytorch_cnn_fixture.rs` として追加
+した。実測記録は `docs/perf/logs/onnx-cnn-ops-pytorch-fixture-2329/
+README.md` を参照。

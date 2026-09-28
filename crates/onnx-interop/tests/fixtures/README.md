@@ -105,3 +105,14 @@ onnx::interp::run` の全経路 end-to-end 推論を実行し、PyTorch 参照�
 `model-zoo/README.md` を参照する（本節から二重管理しない）。`mnist-12` の
 展開済みファイルのみコミット済み、他 3 モデルは `ONNX_INTEROP_MODEL_ZOO_DIR`
 経由の非コミット fixture。
+
+## `pytorch-onnx-cnn-ops/`（イシュー #2329・親 #2185）
+
+`torch.onnx.export` が実生成した Conv・MaxPool・AveragePool・
+GlobalAveragePool・BatchNormalization・Flatten の ONNX fixture（TorchScript
+exporter・dynamo exporter の両方）。生成環境・exporter ごとの op 列・sha256・
+判定方式・再生成手順は `pytorch-onnx-cnn-ops/README.md` を参照する（本節から
+二重管理しない）。`tests/onnx_interp_cnn_ops.rs`（#2200）・
+`tests/onnx_interp_conv_pool.rs`（#2199）の内部突合（自作 export → 自作
+import の自己整合）を補完し、PyTorch が実際に出す ONNX 表現への到達性を
+実証する。
