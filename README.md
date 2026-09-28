@@ -138,7 +138,7 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 以下はライブラリを clone してコントリビュートする開発者向けの情報です（利用者は上記の
 「インストール」「最小コード例」だけで十分です）。
 
-- 依存は許容 9 区分のみを `=x.y.z` 完全固定で管理する。うち第 1〜8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）は本体 workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義し、第 9 区分（`matrixmultiply`／`gemm`。OSS GEMM ベンチ比較対象）は `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト）限定で本体 workspace への混入を禁止する（詳細 → [`.claude/rules/deps-policy.md`](.claude/rules/deps-policy.md)）
+- 依存は許容 10 区分のみを `=x.y.z` 完全固定で管理する。うち第 1〜9 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`／`libc`〈`cfg(unix)` 限定〉）は本体 workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義し、第 10 区分（`matrixmultiply`／`gemm`。OSS GEMM ベンチ比較対象）は `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト）限定で本体 workspace への混入を禁止する（詳細 → [`.claude/rules/deps-policy.md`](.claude/rules/deps-policy.md)）
 - 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査
 
 ### 依存追加・更新フロー

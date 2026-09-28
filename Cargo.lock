@@ -283,6 +283,7 @@ dependencies = [
  "fandhe-ai-backend-metal",
  "fandhe-ai-onnx-interop",
  "fandhe-ai-tensor-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -342,6 +343,7 @@ dependencies = [
  "fandhe-ai-backend-cpu",
  "fandhe-ai-tensor-core",
  "half",
+ "libc",
  "prost",
  "safetensors",
  "serde",

@@ -1,7 +1,7 @@
 # ライセンス可否表（TASK-1.3）
 
 REQ-1（`docs/spec/04-requirements.md:61` のライセンス要件）・`.claude/rules/deps-policy.md`
-に基づき、許容依存 8 区分（直接依存）とその推移的依存の可否を記録する。
+に基づき、許容依存 10 区分（直接依存）とその推移的依存の可否を記録する。
 `docs/spec/01-brainstorm.md:149-163` の判断軸 a〜e に基づく境界判断も参照する。
 
 ## 1. 目的・適合基準
@@ -10,7 +10,7 @@ REQ-1（`docs/spec/04-requirements.md:61` のライセンス要件）・`.claude
 - 旧 issue #2 の教訓により、**feature 除外による回避を推定で記述しない**。有効化しうる feature 組合せごとに `cargo tree` を実測し、個別に適合確認する（本ファイル 3〜4 節）
 - MPL-2.0 等コピーレフトの推移的混入は実測で監視する（6 節）
 
-## 2. 直接依存 8 区分の可否表
+## 2. 直接依存 9 区分の可否表
 
 crates.io の `license` フィールドを `cargo metadata --locked` 経由で実確認した（実測方法は 7 節）。
 
@@ -19,7 +19,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | CUDA | `cudarc` | `=0.19.8`（`driver`/`nvrtc`/`dynamic-loading`/`cuda-13000`/`f16`） | MIT OR Apache-2.0 | 可 | a, d, e（`docs/spec/01-brainstorm.md:181`）。ドライバ FFI の自作は unsafe 面積増のみで差別化にならない |
 | Metal | `objc2` | `=0.6.4` | MIT | 可 | a, d, e |
 | Metal | `objc2-foundation` | `=0.3.2` | MIT | 可 | a, d, e |
-| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存 8 区分の適合基準（MIT OR Apache-2.0 系）と両立する |
+| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存 9 区分の適合基準（MIT OR Apache-2.0 系）と両立する |
 | 相互運用 | `safetensors` | `=0.7.0` | Apache-2.0 | 可 | c, e（`docs/spec/01-brainstorm.md:183`）。ワイヤフォーマット処理のみに使用（テンソルへのマッピングは自作）。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | 相互運用 | `prost` | `=0.14.4` | Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:184`）。protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | シリアライズ | `serde` | `=1.0.229`（`derive`） | MIT OR Apache-2.0 | 可 | a。構造化データのシリアライズ |
@@ -27,6 +27,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | CPU 並列 | `rayon` | `=1.12.0` | MIT OR Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:185`）。PoC-v2-1 で naive/blocked 比 約 6〜8.5 倍改善を実測 |
 | 数値型 | `half` | `=2.7.1` | MIT OR Apache-2.0 | 可 | a |
 | ベンチ | `criterion` | `=0.8.2` | Apache-2.0 OR MIT | 可 | c。`dev-dependencies` 限定（deps-policy.md） |
+| OS FFI | `libc` | `=0.2.189` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（`crates.io` `license` フィールド）。`onnx-interop` の external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）用途に限定し `[target.'cfg(unix)'.dependencies]` で `cfg(unix)` 限定。手書きの `openat` フラグ定数は Linux で CPU アーキテクチャごとに値が異なり、x86 専用の値のまま aarch64 Linux でビルドするとシンボリックリンク拒否が機能しない実装バグを生んでいたため、自作せず libc の定数・`syscall` を使う（ドライバ FFI 同様、この領域の自作は unsafe 面積増のみで安全性の向上にならない） |
 
 すべて MIT OR Apache-2.0 系（`objc2-metal` のみ三重ライセンス）であり、商用配布・改変・再頒布に適合する。
 
@@ -123,15 +124,15 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - 対象 `Cargo.lock` のコミット SHA: `65dea84463472db78ab5dfcb7205b69cf43f4c1b`（origin/main）
 - `cargo metadata --locked --format-version 1` で `zerocopy`／`zerocopy-derive` の `version`・`license` を抽出し、両パッケージとも `v0.8.56`・`BSD-2-Clause OR Apache-2.0 OR MIT`（6 節記載の `v0.8.55` から**バージョンのみ更新、ライセンス式は不変**）であることを確認した。実行後 `git status --porcelain Cargo.lock` で差分がないことを確認した（依存・バージョン自体は変更していない）
 
-## 8a. 本表（1〜8 節）の直接の走査対象外にある第 9 区分の監査（OSS 直接比較ハーネス。イシュー #755）
+## 8a. 本表（1〜8 節）の直接の走査対象外にある第 10 区分（旧称: 第 9 区分）の監査（OSS 直接比較ハーネス。イシュー #755）
 
 `scripts/bench/oss-gemm-compare/`（本体 workspace 外の独立 Cargo プロジェクト）の
-`matrixmultiply`・`gemm` crate は、許容依存第 9 区分（ベンチ比較対象）として
+`matrixmultiply`・`gemm` crate は、許容依存第 10 区分（ベンチ比較対象）として
 2026-08-20 に条件付きユーザー承認済みの依存であり、本表 1〜8 節・`deny.toml`
 （ルート）の走査対象（本体 workspace の依存グラフ）には含まれないが、監査対象
 外の例外ではなく本節（8a）と 9 節で正式に統制する（詳細は 9 節を参照）。適用範囲の
-定義・ユーザー承認条件は `.claude/rules/deps-policy.md`「許容依存 9 区分」表の
-第 9 区分の行（PR #772 で先行して整備）を正とし、本節では二重管理しない。allow
+定義・ユーザー承認条件は `.claude/rules/deps-policy.md`「許容依存 10 区分」表の
+第 10 区分の行（PR #772 で先行して整備）を正とし、本節では二重管理しない。allow
 リストの実体は本表と二重管理せず `scripts/bench/oss-gemm-compare/deny.toml`
 冒頭コメントを参照する。設計判断の詳細は `docs/oss-comparison-harness-decision.md`
 （イシュー #755）を参照。
@@ -150,13 +151,13 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 
 いずれも deny.toml の `[licenses] allow` リスト（MIT・Apache-2.0 等。本表 2 節と同一方針）の範囲内であることを `cargo deny check licenses` が機械検査済み。推移的依存（`gemm-common`・`gemm-f32`・`pulp`・`dyn-stack` 等）を含む全域監査は同コマンドの `sources` 検査と合わせて CI（`ci.yml` の `deps-forbidden` ジョブ「OSS 直接比較ハーネスのライセンス監査」ステップ）で毎回再実行し、本表への転記のみに依拠しない（cargo-deny の fail-closed 機械検査が一次情報源）。
 
-### 8b. 第 9 区分の適用範囲拡張の監査（フレームワーク横並びベンチ。PR #915）
+### 8b. 第 10 区分の適用範囲拡張の監査（フレームワーク横並びベンチ。PR #915）
 
 `scripts/bench/framework-compare/`（本体 workspace 外の独立 Cargo workspace）の
 `burn`・`candle-core`・`fandhe-ai`（crates.io 公開版の自社クレート）は、許容依存
-第 9 区分（ベンチ比較対象）の適用範囲拡張として 2026-08-28 にユーザー承認済み
+第 10 区分（ベンチ比較対象）の適用範囲拡張として 2026-08-28 にユーザー承認済み
 （承認記録・設計判断は `docs/framework-compare-harness-decision.md`）。適用範囲の
-定義は `.claude/rules/deps-policy.md`「許容依存 9 区分」表を正とし本節では二重管理
+定義は `.claude/rules/deps-policy.md`「許容依存 10 区分」表を正とし本節では二重管理
 しない。allow リストの実体は `scripts/bench/framework-compare/deny.toml` 冒頭
 コメントを参照する（比較対象の推移的依存に含まれる MPL-2.0・CC0-1.0・BSL-1.0 を
 **本 workspace 限定**で許容。ルート `deny.toml`・本表 2 節の適合基準は変更しない）。
@@ -192,27 +193,27 @@ fail-closed で適用される。
 - MPL-2.0 等コピーレフト混入の監視は CI の `deny` ジョブ（`cargo deny --locked check licenses sources`）で継続する
 - `deny.toml` の `[licenses]` は `include-dev = true` を明示する。既定値（`false`）のままだと `criterion`（`bench-harness` の `dev-dependencies` 限定）とその推移的依存サブツリーがライセンス監査から漏れ、本表が前提とする「Cargo.lock 全域」（3 節・4 節 #4）の実測スコープと不整合になる（PR #211 Bugbot 指摘）
 
-## 9. 第 9 区分（ベンチ比較対象。OSS 直接比較ハーネス。イシュー #755）
+## 9. 第 10 区分（ベンチ比較対象。OSS 直接比較ハーネス。イシュー #755）
 
-`matrixmultiply`・`gemm` は `.claude/rules/deps-policy.md`「許容依存 9 区分」表の
-第 9 区分（ベンチ比較対象）として正式に許容された依存であり、監査対象外の例外
+`matrixmultiply`・`gemm` は `.claude/rules/deps-policy.md`「許容依存 10 区分」表の
+第 10 区分（ベンチ比較対象）として正式に許容された依存であり、監査対象外の例外
 ではなく、`scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立
 Cargo プロジェクト）限定で正式に統制される依存として扱う。本表 2 節「直接依存
-8 区分」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
-指し、第 9 区分は別枠として本節で扱う。
+9 区分」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
+指し、第 10 区分は別枠として本節で扱う。
 
 本表 4〜5 節（`cargo tree`／`cargo metadata` 実測）はルート `Cargo.lock` を対象と
-するため、この独立プロジェクトの依存グラフには及ばない。そのため第 9 区分の
+するため、この独立プロジェクトの依存グラフには及ばない。そのため第 10 区分の
 ライセンス監査は、本パッケージ専用の `scripts/bench/oss-gemm-compare/deny.toml`
 （allow リストは本表 2 節と同一方針）を用い、CI（`ci.yml` の `deps-forbidden`
 ジョブ）で `cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml
 --locked check --config scripts/bench/oss-gemm-compare/deny.toml licenses sources`
-を実行することを必須条件とする（`.claude/rules/deps-policy.md` 第 9 区分の行を
+を実行することを必須条件とする（`.claude/rules/deps-policy.md` 第 10 区分の行を
 参照）。同ハーネスの `Cargo.lock` は依存禁止リスト検査（`scripts/check-forbidden-deps.sh`）
 の走査対象にも含める。
 
 **本節時点では `scripts/bench/oss-gemm-compare/` はリポジトリに未追加**であり、
-上記の CI 監査ステップ・依存禁止リスト検査の対象化は、第 9 区分を実際に導入する
+上記の CI 監査ステップ・依存禁止リスト検査の対象化は、第 10 区分を実際に導入する
 PR（イシュー #755・PR #770）がマージされる際の必須条件として課す。`matrixmultiply`・
 `gemm` の実ライセンス実測値は、PR #770 で記録される
 `docs/oss-comparison-harness-decision.md`（イシュー #755）を出典として参照する

@@ -76,6 +76,17 @@ half.workspace = true
 # 間 path 依存の公開要件。`docs/crates-io-publishing-order.md`）。
 fandhe-ai-autodiff = { path = "../autodiff", version = "=0.9.0" }
 
+# external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）に
+# 使う。`cfg(unix)` 限定（`crates/backend-metal/Cargo.toml` の
+# `[target.'cfg(target_os = "macos")'.dependencies]` と同型の target cfg 分離
+# パターン。deps-policy.md「OS FFI」区分）。Windows 等の非 unix ではリンクされない
+# ため、同プラットフォームの external data 読み込みは
+# `ExternalDataError::UnsupportedPlatformForSecureResolve` で fail-closed に拒否
+# したまま変わらない（`crates/onnx-interop/src/onnx/external_data.rs` 冒頭コメント
+# 参照）。
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # 参照値 JSON（`tests/fixtures/pytorch-reference/st_reference.json`・
 # `weight_shapes.json`）の読込に使う。`serde`/`serde_json` は workspace で
