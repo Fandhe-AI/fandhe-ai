@@ -28,6 +28,11 @@
 //!   （イシュー #2036。本モジュール自体は本クレート内部限定のまま
 //!   facade へ再エクスポートしないが、facade
 //!   `OnnxModel::from_sequential`〈イシュー #2037〉が薄く委譲して呼ぶ）。
+//! - `external_data`: ONNX external data（外部 `.onnx.data` ファイル）の
+//!   initializer／Constant 属性テンソル読み込みに fail-closed で対応する
+//!   新しい import 入口（`build_graph_with_external_data`。イシュー
+//!   #2347）。`onnx-interop` 内部限定（facade へは非公開。承認待ち事項は
+//!   `docs/compat-api-scope.md` §5 参照）。
 //!
 //! 8 オペ実装は #79（`crate::ops`）、PoC 数値突合テストは #80
 //! （`tests/onnx_poc_v2_6_match.rs`・`tests/onnx_slice_dynamic_bounds.rs`）で追加済み。

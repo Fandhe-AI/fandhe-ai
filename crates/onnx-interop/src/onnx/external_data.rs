@@ -183,6 +183,13 @@ pub enum ExternalDataError {
     /// initializer 名が重複している（I/O の前に検出する。`graph::
     /// build_graph` の `DuplicateInitializerName` と同一の欠陥クラス）。
     DuplicateInitializerName { tensor_name: String },
+    /// 内部不変条件違反（本来発生しないはずの状態）。`coding-rust.md`
+    /// の「本番経路で `unwrap()`/`expect()` を使わない」方針に従い、
+    /// `panic!`／`unreachable!`／`.expect()` の代わりにこの型付きエラーで
+    /// 表面化させる（`plan` と `load`／書き戻しの間の内部不変条件——
+    /// `plan` が登録したファイルキー・slot は `load`／書き戻し時にも
+    /// 存在するはず——が崩れた場合のみ到達する）。
+    Internal { reason: &'static str },
 }
 
 impl fmt::Display for ExternalDataError {
@@ -267,6 +274,9 @@ impl fmt::Display for ExternalDataError {
             ExternalDataError::DuplicateInitializerName { tensor_name } => {
                 write!(f, "initializer 名の重複（tensor={tensor_name}）")
             }
+            ExternalDataError::Internal { reason } => {
+                write!(f, "external_data 内部不変条件違反: {reason}")
+            }
         }
     }
 }
@@ -278,9 +288,13 @@ fn cap_name(name: &str) -> String {
     cap_sparse_tensor_diag_name(name.as_bytes())
 }
 
-/// `location` 文字列を文字列段階で検証する（`Path::components` へ渡す前の
-/// 事前フィルタ）。
-fn validate_location_string(loc: &str) -> Result<(), LocationRejectReason> {
+/// `location` 文字列を検証し、`base_dir` へ 1 段ずつ連結できる正規
+/// コンポーネント列（`CurDir` は除去済み）を返す（`Path::components` の
+/// 判定結果をそのまま返すことで、呼び出し元〈`resolve_and_open`〉が
+/// 「ここには `Normal` しか来ないはず」という前提を `unreachable!` で
+/// 表現せずに済む。`coding-rust.md` の本番経路 `unwrap`/`expect` 禁止と
+/// 同じ理由で `unreachable!` も避ける）。
+fn validate_location_string(loc: &str) -> Result<Vec<&std::ffi::OsStr>, LocationRejectReason> {
     if loc.is_empty() {
         return Err(LocationRejectReason::Empty);
     }
@@ -298,16 +312,18 @@ fn validate_location_string(loc: &str) -> Result<(), LocationRejectReason> {
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return Err(LocationRejectReason::DrivePrefix);
     }
+    let mut parts = Vec::new();
     for component in Path::new(loc).components() {
         match component {
-            Component::Normal(_) | Component::CurDir => {}
+            Component::Normal(part) => parts.push(part),
+            Component::CurDir => {}
             Component::RootDir | Component::Prefix(_) => {
                 return Err(LocationRejectReason::Absolute);
             }
             Component::ParentDir => return Err(LocationRejectReason::ParentDir),
         }
     }
-    Ok(())
+    Ok(parts)
 }
 
 /// 開いたファイルとパス 1 時点のメタデータ（パス 2 の TOCTOU 再照合・
@@ -327,19 +343,14 @@ fn resolve_and_open(
     base_dir_canonical: &Path,
     loc: &str,
 ) -> Result<OpenFile, ExternalDataError> {
-    validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
-        tensor_name: cap_name(tensor_name),
-        reason,
-    })?;
+    let parts =
+        validate_location_string(loc).map_err(|reason| ExternalDataError::InvalidLocation {
+            tensor_name: cap_name(tensor_name),
+            reason,
+        })?;
 
     let mut cur = base_dir_canonical.to_path_buf();
-    for component in Path::new(loc).components() {
-        let part = match component {
-            Component::Normal(part) => part,
-            Component::CurDir => continue,
-            // validate_location_string で既に拒否済み。
-            _ => unreachable!("validate_location_string が事前に拒否する"),
-        };
+    for part in parts {
         cur.push(part);
         let meta = std::fs::symlink_metadata(&cur).map_err(|e| ExternalDataError::Io {
             tensor_name: cap_name(tensor_name),
@@ -693,10 +704,14 @@ fn plan(
 fn load(
     entries: &[LoadPlanEntry],
     files: &mut HashMap<PathBuf, OpenFile>,
-) -> Result<HashMap<usize, Vec<u8>>, GraphError> {
-    let mut out: HashMap<usize, Vec<u8>> = HashMap::new();
-    for (i, entry) in entries.iter().enumerate() {
-        let opened = files.get_mut(&entry.file_key).expect("plan が登録済み");
+) -> Result<Vec<Vec<u8>>, GraphError> {
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let opened = files
+            .get_mut(&entry.file_key)
+            .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                reason: "load: plan が登録したファイルキーが files に存在しない",
+            }))?;
         let meta = opened.file.metadata().map_err(|e| {
             GraphError::ExternalData(ExternalDataError::Io {
                 tensor_name: cap_name(&entry.tensor_name),
@@ -735,8 +750,7 @@ fn load(
                 kind: e.kind(),
             })
         })?;
-        out.insert(i, buf);
-        let _ = &entry.slot; // slot は呼び出し元 resolve_external_data で使用
+        out.push(buf);
     }
     Ok(out)
 }
@@ -762,22 +776,41 @@ pub fn resolve_external_data(
     if entries.is_empty() {
         return Ok(());
     }
-    let mut loaded = load(&entries, &mut files)?;
+    let loaded = load(&entries, &mut files)?;
+    if loaded.len() != entries.len() {
+        return Err(GraphError::ExternalData(ExternalDataError::Internal {
+            reason: "load の戻り値件数が entries と一致しない",
+        }));
+    }
 
     // パス 2 完了後にのみ書き戻す（検証・読み込みが全件成功した場合限定）。
+    // `entries` が非空の場合、`plan` は `enumerate_tensors` が返した
+    // 実在の slot からのみ `entries` を構築しているため、ここで
+    // `model.graph` は必ず `Some`（`enumerate_tensors` は graph が
+    // `None` なら空 Vec を返す）。`unwrap`/`expect` の代わりに
+    // `ok_or_else` で型付きエラーとして表面化させる（内部不変条件が
+    // 崩れた場合のみ到達する防御的分岐）。
     let g = model
         .graph
         .as_mut()
-        .expect("plan が非空なら graph は Some のはず");
-    for (i, entry) in entries.iter().enumerate() {
-        let bytes = loaded.remove(&i).expect("load が全件書き込み済み");
+        .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+            reason: "entries が非空なのに model.graph が None",
+        }))?;
+    for (entry, bytes) in entries.into_iter().zip(loaded) {
         let target: &mut TensorProto = match entry.slot {
-            TensorSlot::Initializer(idx) => &mut g.initializer[idx],
-            TensorSlot::NodeAttrTensor { node_idx, attr_idx } => g.node[node_idx].attribute
-                [attr_idx]
-                .t
-                .as_mut()
-                .expect("enumerate_tensors が Some の場合のみ登録"),
+            TensorSlot::Initializer(idx) => g.initializer.get_mut(idx).ok_or(
+                GraphError::ExternalData(ExternalDataError::Internal {
+                    reason: "書き戻し先の initializer index が範囲外",
+                }),
+            )?,
+            TensorSlot::NodeAttrTensor { node_idx, attr_idx } => g
+                .node
+                .get_mut(node_idx)
+                .and_then(|n| n.attribute.get_mut(attr_idx))
+                .and_then(|a| a.t.as_mut())
+                .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                    reason: "書き戻し先の attribute テンソルが見つからない",
+                }))?,
         };
         target.raw_data = bytes;
         target.data_location = data_location::DEFAULT;

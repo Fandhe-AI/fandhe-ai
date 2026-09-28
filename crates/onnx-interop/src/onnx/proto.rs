@@ -30,6 +30,14 @@
 //! この例外により本モジュールが宣言するメッセージ数は 7 から 9 になった
 //! （`SparseTensorProto` に加え、下記の `SparseTensorValueName` probe 型）。
 //!
+//! **external data 対応（イシュー #2347）**: `TensorProto.external_data`
+//! （tag=13）・`data_location`（tag=14）と新規メッセージ
+//! `StringStringEntryProto` を追加し、宣言するメッセージ数は 9 から 10 に
+//! なった。この 2 フィールドは意図的な未定義の例外ではなく、
+//! `onnx::external_data`（`onnx-interop` 内部限定モジュール）だけが解釈する
+//! 通常の宣言である（詳細は `TensorProto` のドキュメンテーションコメント・
+//! `docs/onnx-external-data-decision.md` 参照）。
+//!
 //! **メモリ増幅対策（イシュー #2079 codex-review 指摘。2026-09-22 是正）**:
 //! `sparse_initializer` を無条件に `Vec<SparseTensorProto>` として decode 対象に
 //! 含めると、非信頼入力の `values`/`indices`（`TensorProto`）の `raw_data`・
