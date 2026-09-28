@@ -535,18 +535,24 @@ fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation
     // 実行が別演算列へ回帰しても、参照出力さえ一致すれば fixture テストが検出でき
     // ない状態だった）。ここで実際に decode した `graph.nodes` の `op_type` 列と
     // 突合し、fixture が意図した op 列のまま保たれていることを検証する。
-    if let Some(expected_op_types) = &exporter.op_types {
-        let actual_op_types: Vec<&str> = graph.nodes.iter().map(|n| n.op_type.as_str()).collect();
-        let expected_op_types_ref: Vec<&str> =
-            expected_op_types.iter().map(|s| s.as_str()).collect();
-        assert_eq!(
-            actual_op_types, expected_op_types_ref,
-            "{case_name} [{exporter_name}]: decode したグラフの op_type 列が \
-             reference.json の記録と一致しない（対象 op の実行経路が別の演算列へ \
-             置き換わっている可能性）。actual={actual_op_types:?} \
-             expected={expected_op_types_ref:?}"
-        );
-    }
+    // `op_types` 欠落を無言で検査省略しない（既出の R2 initializer 対応表が空でも
+    // 通過していた指摘と同型の「無言 skip」を避けるため、現行 39 レコード全件が
+    // 値を持つ前提を `unwrap_or_else` で強制する。欠落は生成側の問題として fail）。
+    let expected_op_types = exporter.op_types.as_ref().unwrap_or_else(|| {
+        panic!(
+            "{case_name} [{exporter_name}]: reference.json に op_types が無い \
+             （生成側の問題のため fixture を再生成すること）"
+        )
+    });
+    let actual_op_types: Vec<&str> = graph.nodes.iter().map(|n| n.op_type.as_str()).collect();
+    let expected_op_types_ref: Vec<&str> = expected_op_types.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        actual_op_types, expected_op_types_ref,
+        "{case_name} [{exporter_name}]: decode したグラフの op_type 列が \
+         reference.json の記録と一致しない（対象 op の実行経路が別の演算列へ \
+         置き換わっている可能性）。actual={actual_op_types:?} \
+         expected={expected_op_types_ref:?}"
+    );
 
     assert_r2_initializers_match_state_dict(&graph, case, exporter, case_name, exporter_name);
 
