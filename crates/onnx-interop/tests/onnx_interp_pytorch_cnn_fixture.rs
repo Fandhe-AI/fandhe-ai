@@ -371,6 +371,22 @@ const EXPECTATIONS: &[(&str, &str, Expectation)] = &[
     ("flatten_start2", "dynamo", Expectation::BitExact),
 ];
 
+/// `(case_name, exporter_name)` に対応する [`Expectation`] を `EXPECTATIONS`
+/// から引く単一の真実源（レビュー指摘対応。イシュー #2329）。
+/// `fixture_test!` マクロはこの関数を経由するため、各テスト関数呼び出し側で
+/// `Expectation` を個別に指定する必要がなくなり、表の更新とテストの判定方式が
+/// 構造的にズレなくなる（表を更新してもマクロ呼び出し側の引数を直し忘れて
+/// 検出されない、という取りこぼし経路を排除する）。
+fn expectation_for(case_name: &str, exporter_name: &str) -> Expectation {
+    EXPECTATIONS
+        .iter()
+        .find(|(c, e, _)| *c == case_name && *e == exporter_name)
+        .unwrap_or_else(|| {
+            panic!("EXPECTATIONS に '{case_name}' [{exporter_name}] のエントリが無い")
+        })
+        .2
+}
+
 /// 期待値表と `reference.json` のケース集合が過不足なく一致することを
 /// 検査する（`model_zoo_parity.rs` の思想と同じ。ケースの取りこぼしを
 /// fail-closed に止める）。
@@ -478,8 +494,13 @@ fn run_case(case_name: &str, exporter_name: &str, case: &CaseRecord, expectation
     }
 }
 
+/// `(case_name, exporter_name)` の 2 引数のみを取る。判定方式（[`Expectation`]）
+/// は呼び出し側で個別指定せず、[`expectation_for`] 経由で `EXPECTATIONS`
+/// （単一の真実源）から引く（レビュー指摘対応。イシュー #2329。以前は
+/// 呼び出し側にも `Expectation` を渡していたため、表を更新してもここを
+/// 直し忘れると検出されないズレが生じ得た）。
 macro_rules! fixture_test {
-    ($fn_name:ident, $case_name:literal, $exporter_name:literal, $expectation:expr) => {
+    ($fn_name:ident, $case_name:literal, $exporter_name:literal) => {
         #[test]
         fn $fn_name() {
             let doc = load_reference();
@@ -487,221 +508,79 @@ macro_rules! fixture_test {
                 .cases
                 .get($case_name)
                 .unwrap_or_else(|| panic!("reference.json に '{}' が無い", $case_name));
-            run_case($case_name, $exporter_name, case, $expectation);
+            let expectation = expectation_for($case_name, $exporter_name);
+            run_case($case_name, $exporter_name, case, expectation);
         }
     };
 }
 
-fixture_test!(conv2d_basic_ts, "conv2d_basic", "ts", Expectation::BitExact);
-fixture_test!(
-    conv2d_basic_dynamo,
-    "conv2d_basic",
-    "dynamo",
-    Expectation::BitExact
-);
-fixture_test!(
-    conv2d_stride_dil_group_ts,
-    "conv2d_stride_dil_group",
-    "ts",
-    Expectation::Req7Provisional
-);
+fixture_test!(conv2d_basic_ts, "conv2d_basic", "ts");
+fixture_test!(conv2d_basic_dynamo, "conv2d_basic", "dynamo");
+fixture_test!(conv2d_stride_dil_group_ts, "conv2d_stride_dil_group", "ts");
 fixture_test!(
     conv2d_stride_dil_group_dynamo,
     "conv2d_stride_dil_group",
-    "dynamo",
-    Expectation::Req7Provisional
+    "dynamo"
 );
-fixture_test!(
-    conv2d_nobias_ts,
-    "conv2d_nobias",
-    "ts",
-    Expectation::BitExact
-);
-fixture_test!(
-    conv2d_nobias_dynamo,
-    "conv2d_nobias",
-    "dynamo",
-    Expectation::BitExact
-);
-fixture_test!(
-    conv1d_basic_ts,
-    "conv1d_basic",
-    "ts",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    conv1d_basic_dynamo,
-    "conv1d_basic",
-    "dynamo",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    maxpool2d_basic_ts,
-    "maxpool2d_basic",
-    "ts",
-    Expectation::BitExact
-);
-fixture_test!(
-    maxpool2d_basic_dynamo,
-    "maxpool2d_basic",
-    "dynamo",
-    Expectation::BitExact
-);
-fixture_test!(
-    maxpool2d_pad_dil_ceil_ts,
-    "maxpool2d_pad_dil_ceil",
-    "ts",
-    Expectation::BitExact
-);
+fixture_test!(conv2d_nobias_ts, "conv2d_nobias", "ts");
+fixture_test!(conv2d_nobias_dynamo, "conv2d_nobias", "dynamo");
+fixture_test!(conv1d_basic_ts, "conv1d_basic", "ts");
+fixture_test!(conv1d_basic_dynamo, "conv1d_basic", "dynamo");
+fixture_test!(maxpool2d_basic_ts, "maxpool2d_basic", "ts");
+fixture_test!(maxpool2d_basic_dynamo, "maxpool2d_basic", "dynamo");
+fixture_test!(maxpool2d_pad_dil_ceil_ts, "maxpool2d_pad_dil_ceil", "ts");
 fixture_test!(
     maxpool2d_pad_dil_ceil_dynamo,
     "maxpool2d_pad_dil_ceil",
-    "dynamo",
-    Expectation::BitExact
+    "dynamo"
 );
-fixture_test!(
-    maxpool1d_basic_ts,
-    "maxpool1d_basic",
-    "ts",
-    Expectation::BitExact
-);
-fixture_test!(
-    maxpool1d_basic_dynamo,
-    "maxpool1d_basic",
-    "dynamo",
-    Expectation::BitExact
-);
-fixture_test!(
-    avgpool2d_include_pad_ts,
-    "avgpool2d_include_pad",
-    "ts",
-    Expectation::Req7Provisional
-);
+fixture_test!(maxpool1d_basic_ts, "maxpool1d_basic", "ts");
+fixture_test!(maxpool1d_basic_dynamo, "maxpool1d_basic", "dynamo");
+fixture_test!(avgpool2d_include_pad_ts, "avgpool2d_include_pad", "ts");
 fixture_test!(
     avgpool2d_include_pad_dynamo,
     "avgpool2d_include_pad",
-    "dynamo",
-    Expectation::Req7Provisional
+    "dynamo"
 );
-fixture_test!(
-    avgpool2d_exclude_pad_ts,
-    "avgpool2d_exclude_pad",
-    "ts",
-    Expectation::Req7Provisional
-);
+fixture_test!(avgpool2d_exclude_pad_ts, "avgpool2d_exclude_pad", "ts");
 fixture_test!(
     avgpool2d_exclude_pad_dynamo,
     "avgpool2d_exclude_pad",
-    "dynamo",
-    Expectation::Req7Provisional
+    "dynamo"
 );
 fixture_test!(
     avgpool2d_ceil_overhang_incl_ts,
     "avgpool2d_ceil_overhang_incl",
-    "ts",
-    Expectation::Req7Provisional
+    "ts"
 );
 fixture_test!(
     avgpool2d_ceil_overhang_incl_dynamo,
     "avgpool2d_ceil_overhang_incl",
-    "dynamo",
-    Expectation::Req7Provisional
+    "dynamo"
 );
 fixture_test!(
     avgpool2d_ceil_overhang_excl_ts,
     "avgpool2d_ceil_overhang_excl",
-    "ts",
-    Expectation::Req7Provisional
+    "ts"
 );
 fixture_test!(
     avgpool2d_ceil_overhang_excl_dynamo,
     "avgpool2d_ceil_overhang_excl",
-    "dynamo",
-    Expectation::Req7Provisional
+    "dynamo"
 );
-fixture_test!(
-    avgpool1d_basic_ts,
-    "avgpool1d_basic",
-    "ts",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    avgpool1d_basic_dynamo,
-    "avgpool1d_basic",
-    "dynamo",
-    Expectation::Req7Provisional
-);
-fixture_test!(gap2d_ts, "gap2d", "ts", Expectation::Req7Provisional);
-fixture_test!(
-    gap2d_dynamo,
-    "gap2d",
-    "dynamo",
-    Expectation::Req7Provisional
-);
-fixture_test!(gap1d_ts, "gap1d", "ts", Expectation::BitExact);
-fixture_test!(
-    gap1d_dynamo,
-    "gap1d",
-    "dynamo",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    bn2d_eval_ts,
-    "bn2d_eval",
-    "ts",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    bn2d_eval_dynamo,
-    "bn2d_eval",
-    "dynamo",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    bn2d_eval_eps_ts,
-    "bn2d_eval_eps",
-    "ts",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    bn2d_eval_eps_dynamo,
-    "bn2d_eval_eps",
-    "dynamo",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    bn1d_eval_ts,
-    "bn1d_eval",
-    "ts",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    bn1d_eval_dynamo,
-    "bn1d_eval",
-    "dynamo",
-    Expectation::Req7Provisional
-);
-fixture_test!(
-    flatten_default_ts,
-    "flatten_default",
-    "ts",
-    Expectation::BitExact
-);
-fixture_test!(
-    flatten_default_dynamo,
-    "flatten_default",
-    "dynamo",
-    Expectation::BitExact
-);
-fixture_test!(
-    flatten_start2_ts,
-    "flatten_start2",
-    "ts",
-    Expectation::BitExact
-);
-fixture_test!(
-    flatten_start2_dynamo,
-    "flatten_start2",
-    "dynamo",
-    Expectation::BitExact
-);
+fixture_test!(avgpool1d_basic_ts, "avgpool1d_basic", "ts");
+fixture_test!(avgpool1d_basic_dynamo, "avgpool1d_basic", "dynamo");
+fixture_test!(gap2d_ts, "gap2d", "ts");
+fixture_test!(gap2d_dynamo, "gap2d", "dynamo");
+fixture_test!(gap1d_ts, "gap1d", "ts");
+fixture_test!(gap1d_dynamo, "gap1d", "dynamo");
+fixture_test!(bn2d_eval_ts, "bn2d_eval", "ts");
+fixture_test!(bn2d_eval_dynamo, "bn2d_eval", "dynamo");
+fixture_test!(bn2d_eval_eps_ts, "bn2d_eval_eps", "ts");
+fixture_test!(bn2d_eval_eps_dynamo, "bn2d_eval_eps", "dynamo");
+fixture_test!(bn1d_eval_ts, "bn1d_eval", "ts");
+fixture_test!(bn1d_eval_dynamo, "bn1d_eval", "dynamo");
+fixture_test!(flatten_default_ts, "flatten_default", "ts");
+fixture_test!(flatten_default_dynamo, "flatten_default", "dynamo");
+fixture_test!(flatten_start2_ts, "flatten_start2", "ts");
+fixture_test!(flatten_start2_dynamo, "flatten_start2", "dynamo");
