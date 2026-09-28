@@ -226,6 +226,10 @@ RAdam, RAdamConfig};` を追加、`api_surface.rs` の
 - `compile()`（`compat::Optimizer` enum）への統合（#2170 系）。
 - param groups（#2173。タイトルは "param groups" であり、実装計画
   立案時に一時誤認していた「CUDA／Metal 常駐実装」ではない）。
+  本 4 種への `ParamGroupStep` 実装はイシュー #2298（親 #2131）で対応
+  済み（`crates/autodiff/src/nn/optim/param_group.rs`。内部クレート
+  限定のまま facade 非公開。`docs/autodiff-param-groups-decision.md`
+  §8 参照）。
 - `DeviceParamStore` への結線（§7 参照）。
 - `maximize`／`foreach`／`capturable`／`differentiable`。
 - 複素数パラメータ。

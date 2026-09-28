@@ -2,10 +2,13 @@
 //!
 //! `torch.optim.Optimizer.param_groups` 相当の機能を、既存 optimizer
 //! （[`super::AdamW`]・[`super::Adam`]・[`super::RmsProp`]・
-//! [`super::Adagrad`]・[`super::Lamb`]・`crate::optim::Sgd`）へ後付けする。
-//! [`ParamGroup`] はパラメータ集合（スロット添字列）ごとの `lr`／
-//! `weight_decay` の上書き値を表す純データ型で、[`ParamGroupStep`] は
-//! 各 optimizer が `step_with_groups` を実装するための trait である。
+//! [`super::Adagrad`]・[`super::Lamb`]・`crate::optim::Sgd`・
+//! [`super::Adadelta`]・[`super::Adamax`]・[`super::NAdam`]・
+//! [`super::RAdam`]）へ後付けする（後半 4 種はイシュー #2298・親
+//! #2131 で追加。前半 6 種は #2173）。[`ParamGroup`] はパラメータ集合
+//! （スロット添字列）ごとの `lr`／`weight_decay` の上書き値を表す純
+//! データ型で、[`ParamGroupStep`] は各 optimizer が `step_with_groups`
+//! を実装するための trait である。
 //!
 //! **facade 非公開**（現時点）: 親イシュー #2131 は「facade 公開面の
 //! 拡張は設計判断記録 → 承認 → 実装の 2 段」と定めており、本イシュー・
@@ -62,15 +65,24 @@
 //! - optimizer 固有のハイパーパラメータ（`beta`／`eps`／`momentum`／
 //!   `nesterov`／`lr_decay`／trust ratio 等）のグループ上書き
 //! - `crate::optim::device_store::DeviceParamStore` 常駐経路の group 対応
+//! - [`super::NAdam`]／[`super::RAdam`] の `decoupled_weight_decay`
+//!   （decoupled／coupled 切り替え）のグループ上書き。この値は
+//!   optimizer の config が定める意味のまま [`ParamGroup`] の
+//!   `weight_decay` に適用され、グループ側では切り替えない（イシュー
+//!   #2298。各 optimizer の `step_with_slot_hparams` doc 参照）
 
 use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 
+use super::adadelta::Adadelta;
 use super::adagrad::Adagrad;
 use super::adam::Adam;
+use super::adamax::Adamax;
 use super::adamw::AdamW;
 use super::lamb::Lamb;
+use super::nadam::NAdam;
+use super::radam::RAdam;
 use super::rmsprop::RmsProp;
 use crate::optim::Sgd;
 
@@ -359,6 +371,91 @@ impl ParamGroupStep for Sgd {
             "Sgd",
         )?;
         self.step_with_slot_hparams(params, grads, &hparams)
+    }
+}
+
+// イシュー #2298（親 #2131）: 以下 4 impl（Adadelta／Adamax／NAdam／
+// RAdam）は #2171 で追加された optimizer への横展開。呼び出し順は
+// 上記 6 impl と同一（`check_len_matches` → `resolve_slot_hparams` →
+// `zip_params_grads` → `step_with_slot_hparams`）。
+
+impl ParamGroupStep for Adadelta {
+    fn step_with_groups(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+        groups: &[ParamGroup],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        check_len_matches("Adadelta", params, grads)?;
+        let hparams = resolve_slot_hparams(
+            groups,
+            params.len(),
+            self.config().lr,
+            self.config().weight_decay,
+            "Adadelta",
+        )?;
+        let pairs = zip_params_grads(params, grads);
+        self.step_with_slot_hparams(&pairs, &hparams)
+    }
+}
+
+impl ParamGroupStep for Adamax {
+    fn step_with_groups(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+        groups: &[ParamGroup],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        check_len_matches("Adamax", params, grads)?;
+        let hparams = resolve_slot_hparams(
+            groups,
+            params.len(),
+            self.config().lr,
+            self.config().weight_decay,
+            "Adamax",
+        )?;
+        let pairs = zip_params_grads(params, grads);
+        self.step_with_slot_hparams(&pairs, &hparams)
+    }
+}
+
+impl ParamGroupStep for NAdam {
+    fn step_with_groups(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+        groups: &[ParamGroup],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        check_len_matches("NAdam", params, grads)?;
+        let hparams = resolve_slot_hparams(
+            groups,
+            params.len(),
+            self.config().lr,
+            self.config().weight_decay,
+            "NAdam",
+        )?;
+        let pairs = zip_params_grads(params, grads);
+        self.step_with_slot_hparams(&pairs, &hparams)
+    }
+}
+
+impl ParamGroupStep for RAdam {
+    fn step_with_groups(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+        groups: &[ParamGroup],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        check_len_matches("RAdam", params, grads)?;
+        let hparams = resolve_slot_hparams(
+            groups,
+            params.len(),
+            self.config().lr,
+            self.config().weight_decay,
+            "RAdam",
+        )?;
+        let pairs = zip_params_grads(params, grads);
+        self.step_with_slot_hparams(&pairs, &hparams)
     }
 }
 
