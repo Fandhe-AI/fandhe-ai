@@ -1643,28 +1643,26 @@ fn bytes_entry_point_still_rejects_external_data_model() {
 /// 別スレッドで呼び出し `recv_timeout` で有界に待つ（回帰が再発しても
 /// テストプロセスごと無期限ハングさせないための防御。本 crate 本体には
 /// この有界待ちは無く、修正そのものが `open` 呼び出し自体を
-/// ノンブロッキングにする）。CI ビルド対象（linux・aarch64-apple-darwin）
-/// のみ対象（`no_follow_open` 経路。他 unix は `UnsupportedPlatformFor
-/// SecureResolve` で即座に拒否されるため本シナリオ自体が発生しない）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// ノンブロッキングにする）。unix 全般（`no_follow_open` 経路。Linux は
+/// `openat2`／逐次 `openat`、macOS・その他 unix は逐次 `openat`）が対象で、
+/// 非 unix は `UnsupportedPlatformForSecureResolve` で即座に拒否されるため
+/// 本シナリオ自体が発生しない。
+#[cfg(unix)]
 #[test]
 fn fifo_location_does_not_hang_open() {
-    // `mkfifo(2)` は POSIX 標準関数で std がリンクする libc に常に存在する
-    // ため、production コードの `openat` 直接呼び出しと同じ方針
-    // （`libc` crate を追加しない）でテストからも `extern "C"` 経由で
-    // 呼ぶ。
-    unsafe extern "C" {
-        fn mkfifo(pathname: *const std::os::raw::c_char, mode: u32) -> i32;
-    }
+    // `mkfifo(2)` は production コードと同じく `libc` crate（本クレートの
+    // `cfg(unix)` 限定依存。deps-policy.md 第 10 区分）経由で呼ぶ
+    // （`mode_t` の幅は OS ごとに異なる〈Linux は u32・macOS は u16〉ため
+    // 手書きの `extern "C"` 宣言は使わない）。
 
     let dir = TempDir::new("fifo-hang");
     let fifo_path = dir.path().join("pipe.data");
     let c_path = std::ffi::CString::new(fifo_path.as_os_str().as_encoded_bytes())
         .expect("パスに NUL は含まれない");
     // SAFETY: `c_path` はこの呼び出しの間生存する有効な NUL 終端 C 文字列。
-    // `mkfifo` は POSIX 標準関数で、失敗時は errno を設定し負値を返す
+    // `libc::mkfifo` は POSIX 標準関数で、失敗時は errno を設定し負値を返す
     // だけであり、他のメモリ安全性への影響はない。
-    let rc = unsafe { mkfifo(c_path.as_ptr(), 0o600) };
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
     assert_eq!(
         rc,
         0,
