@@ -235,7 +235,7 @@ epilogue・`use_out_source`・axpby 相当のフラグは通常の matmul（`Op:
 | thread_elements（`docs/perf/metal-gemm-thread-elements-candidate.md`） | 既存記録参照（本番未結線・#1694 で REJECT 確定） | — | — |
 | NAX 経路（`docs/backend-metal-mlx-classic-nax-decision.md`） | NAX（`MetalPerformancePrimitives`）不採用 | candle も NAX を使わず `mlx_gemm.metal` の手書きカーネルを使う（cuBLAS/MPS/MPP フォールバックが無いことと整合。§2） | — |
 | MPP tensor ops（`docs/backend-metal-mpp-tensor-decision.md`） | 既存記録参照 | 同上（NAX と同じ理由で不使用） | — |
-| smem XOR swizzle（`COOP_SMEM_SWIZZLE`） | `docs/perf/metal-gemm-coop-load-candidates.md` 等 | candle には無い（§4.2） | candle に無い自作固有の最適化のため差分候補から除外（自作の優位要因の可能性はあるが劣後原因ではない） |
+| smem XOR swizzle（`COOP_SMEM_SWIZZLE`） | `docs/perf/metal-gemm-coop-load-candidates.md` 等 | candle には無い（§4.2） | candle に無い自作固有の最適化のため差分候補としては除外するが、劣後要因かどうかは candle との比較からは判断できず未検証（§6 未試行の差分候補 3.） |
 | async copy（`docs/backend-metal-async-copy-decision.md`） | 既存記録参照 | candle のロードは `load_unsafe`／`load_safe`（同期的な vector load。§5）で async copy 相当は確認できず | 未試行の差分候補 |
 | serpentine（`docs/perf/metal-gemm-serpentine-ab.md`） | 既存記録参照 | — | — |
 | morton mapping（`docs/backend-metal-morton-mapping-decision.md`） | 既存記録参照 | — | — |
@@ -250,8 +250,10 @@ epilogue・`use_out_source`・axpby 相当のフラグは通常の matmul（`Op:
    条件付き gating を実装済みだが常時 ON の効果は未測定。§6 表）。
 2. candle のロード方式（`load_unsafe`／`load_safe`。REQ-8 の制約下で境界検査を保った
    まま vector load の形をどこまで近づけられるか）。
-3. smem XOR swizzle と E3 フラグメントロードの組合せ（candle は両方とも持たないため、
-   自作のこの組合せが劣後要因ではないことは確認済みだが、優位要因になっているかは未検証）。
+3. smem XOR swizzle と E3 フラグメントロードの組合せ（candle は両方とも持たない。この
+   組合せ自体は未試行であり、candle が両者を持たないという事実だけからは自作のこの
+   組合せが劣後要因かどうか・優位要因になっているかのいずれも判断できない。A/B 実測後に
+   判断する）。
 4. async copy（candle 側の確認された不在と、自作の既存決定記録との突合の深掘り）。
 
 ## §7 既存 doc との不整合の記録
