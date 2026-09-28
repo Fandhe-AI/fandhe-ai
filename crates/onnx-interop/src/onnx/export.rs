@@ -147,6 +147,51 @@ pub enum ExportError {
     /// （`layer{i}`／`layer{i}_out`／`{i}.weight`／`{i}.bias`）では構造上
     /// 発生し得ないが、設計要件として fail-closed に検査する（§3.1）。
     DuplicateTensorName { name: String },
+    /// export 用のバイト列（initializer の `raw_data`・`Constant` 属性テンソル
+    /// の複製・モデル全体の encode 結果）の確保に失敗した（PR #2348 codex P0
+    /// 是正。security.md A04）。external data 由来のテンソル（facade
+    /// `OnnxModel::from_path` で読み込んだモデル）は `.onnx` 本体が小さくても
+    /// 宣言長（既定上限 64 GiB）まで巨大化しうるため、無条件確保（失敗時に
+    /// プロセスが abort する）を使わず本 variant で返す。`tensor_name` は
+    /// テンソル名（名前の無い `Constant` 属性テンソルは `"{ノード名}:{属性名}"`〈ノード名が空なら `op_type`〉、
+    /// モデル全体の encode では [`ENCODED_MODEL_LABEL`]）、`bytes` は要求
+    /// バイト数。
+    AllocationFailed { tensor_name: String, bytes: u64 },
+}
+
+/// [`try_encode_model`] の確保失敗時に [`ExportError::AllocationFailed`] の
+/// `tensor_name` へ入れる診断名（テンソル単位ではなくモデル全体のバイト列）。
+pub const ENCODED_MODEL_LABEL: &str = "<encoded ModelProto>";
+
+/// `fallible_alloc::AllocFailure` → [`ExportError::AllocationFailed`]。
+fn alloc_failure_to_export(f: super::fallible_alloc::AllocFailure) -> ExportError {
+    ExportError::AllocationFailed {
+        tensor_name: f.tensor_name,
+        bytes: f.bytes,
+    }
+}
+
+/// `data` を要素ごとにリトルエンディアン `N` バイトへ直列化した `raw_data` を、
+/// 失敗可能確保（容量ちょうど）で作る（[`encode_tensor`] の 4 dtype 共通。
+/// 旧実装の `Vec::with_capacity`／`collect` と同じバイト列）。
+fn encode_le<const N: usize, T: Copy>(
+    name: &str,
+    data: &[T],
+    to_bytes: impl Fn(T) -> [u8; N],
+) -> Result<Vec<u8>, ExportError> {
+    let len = data
+        .len()
+        .checked_mul(N)
+        .ok_or_else(|| ExportError::AllocationFailed {
+            tensor_name: name.to_string(),
+            bytes: (data.len() as u64).saturating_mul(N as u64),
+        })?;
+    let mut raw_data =
+        super::fallible_alloc::try_alloc_vec::<u8>(name, len).map_err(alloc_failure_to_export)?;
+    for &v in data {
+        raw_data.extend_from_slice(&to_bytes(v));
+    }
+    Ok(raw_data)
 }
 
 impl fmt::Display for ExportError {
@@ -216,6 +261,10 @@ impl fmt::Display for ExportError {
             ExportError::DuplicateTensorName { name } => {
                 write!(f, "テンソル名の重複: {name}")
             }
+            ExportError::AllocationFailed { tensor_name, bytes } => write!(
+                f,
+                "export 用バイト列を確保できない（tensor={tensor_name}・要求 {bytes} バイト）"
+            ),
         }
     }
 }
@@ -274,6 +323,11 @@ impl Default for ExportOptions {
 /// （`element_count`）を先に行い、実データ長との一致を確認してから初めて
 /// バイト列へ変換する（長さ・形状検証の先行。`security.md` A03）。
 ///
+/// `raw_data` は失敗可能確保で作り、確保失敗は
+/// [`ExportError::AllocationFailed`] で返す（external data 由来の巨大な
+/// initializer で abort しない。PR #2348 codex P0 是正。バイト列は旧実装と
+/// 同一）。
+///
 /// 契約: 常に `raw_data` のみへ書き出す（モジュール冒頭コメント参照）。
 /// `data_location` は常に `DEFAULT`（inline）・`external_data` は常に空
 /// のまま書き出す（external data での export はイシュー #2347 のスコープ外。
@@ -289,10 +343,7 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
                     actual_elements: data.len(),
                 });
             }
-            let mut raw_data = Vec::with_capacity(data.len() * 4);
-            for v in data {
-                raw_data.extend_from_slice(&v.to_le_bytes());
-            }
+            let raw_data = encode_le::<4, _>(name, data, f32::to_le_bytes)?;
             Ok(TensorProto {
                 dims: shape.clone(),
                 data_type: super::proto::data_type::FLOAT,
@@ -313,10 +364,7 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
                     actual_elements: data.len(),
                 });
             }
-            let mut raw_data = Vec::with_capacity(data.len() * 8);
-            for v in data {
-                raw_data.extend_from_slice(&v.to_le_bytes());
-            }
+            let raw_data = encode_le::<8, _>(name, data, i64::to_le_bytes)?;
             Ok(TensorProto {
                 dims: shape.clone(),
                 data_type: super::proto::data_type::INT64,
@@ -339,7 +387,7 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
             }
             // decode 側（`graph::decode_tensor` BOOL 分岐）の `b != 0` と対称に
             // 1 バイト/要素・0/1 で書き出す（ONNX/NumPy の bool テンソル慣習）。
-            let raw_data: Vec<u8> = data.iter().map(|&b| u8::from(b)).collect();
+            let raw_data = encode_le::<1, bool>(name, data, |b| [u8::from(b)])?;
             Ok(TensorProto {
                 dims: shape.clone(),
                 data_type: super::proto::data_type::BOOL,
@@ -360,10 +408,7 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
                     actual_elements: data.len(),
                 });
             }
-            let mut raw_data = Vec::with_capacity(data.len() * 2);
-            for v in data {
-                raw_data.extend_from_slice(&v.to_le_bytes());
-            }
+            let raw_data = encode_le::<2, _>(name, data, half::f16::to_le_bytes)?;
             Ok(TensorProto {
                 dims: shape.clone(),
                 data_type: super::proto::data_type::FLOAT16,
@@ -421,8 +466,14 @@ pub fn build_model_proto(
         .map(|name| ValueInfoProto { name: name.clone() })
         .collect();
 
+    // ノード列の複製は `Constant` 属性テンソル本体だけを失敗可能確保で行う
+    // （external data から inline 化した属性テンソルの `raw_data` は宣言長で
+    // 巨大化しうるため。`Clone::clone` と同値。PR #2348 codex P0 是正）。
+    let node =
+        super::fallible_alloc::try_clone_nodes(&graph.nodes).map_err(alloc_failure_to_export)?;
+
     let graph_proto = GraphProto {
-        node: graph.nodes.clone(),
+        node,
         name: options.graph_name.clone(),
         initializer,
         input,
@@ -443,4 +494,146 @@ pub fn build_model_proto(
             version: options.opset_version,
         }],
     })
+}
+
+/// `ModelProto` を protobuf バイト列へ encode する（`proto::encode_model` の
+/// 失敗可能確保版。facade `OnnxModel::to_bytes`／`to_path` が使う）。
+///
+/// `proto::encode_model`（`Message::encode_to_vec`）は `encoded_len()` 分を
+/// 無条件確保するため、external data 由来の巨大なテンソルを含むモデルでは
+/// 確保失敗でプロセスが abort しうる。本関数は同じ `encoded_len()` 分を
+/// `try_reserve_exact` で確保してから `Message::encode` で書き込む
+/// （`encode_to_vec` と同じ「容量 `encoded_len()` の Vec へ書き込む」手順の
+/// ため出力バイト列は同一。単体テスト `try_encode_model_matches_encode_model`
+/// で固定）。確保失敗は [`ExportError::AllocationFailed`]（`tensor_name` は
+/// [`ENCODED_MODEL_LABEL`]）。容量は確保済みのため `encode` の容量不足
+/// エラーは通常到達しないが、`unwrap` せず同じ variant で返す。
+pub fn try_encode_model(model: &ModelProto) -> Result<Vec<u8>, ExportError> {
+    use prost::Message;
+    let len = model.encoded_len();
+    let mut buf = super::fallible_alloc::try_alloc_vec::<u8>(ENCODED_MODEL_LABEL, len)
+        .map_err(alloc_failure_to_export)?;
+    model
+        .encode(&mut buf)
+        .map_err(|e| ExportError::AllocationFailed {
+            tensor_name: ENCODED_MODEL_LABEL.to_string(),
+            bytes: e.required_capacity() as u64,
+        })?;
+    Ok(buf)
+}
+
+/// 失敗可能確保へ置き換えた export 経路（[`encode_tensor`]・
+/// [`try_encode_model`]）が旧実装と同一のバイト列を返すこと、および確保
+/// 失敗注入（`isize::MAX` 超の要求）が型付きエラーになることの単体テスト
+/// （PR #2348 codex P0 是正）。
+#[cfg(test)]
+mod alloc_tests {
+    use super::*;
+    use crate::onnx::proto::{AttributeProto, NodeProto, encode_model};
+
+    /// 旧実装（`Vec::with_capacity` ＋ `extend_from_slice`／`collect`）と
+    /// 同じ直列化を独立に書き、`encode_tensor` の `raw_data` と比較する。
+    #[test]
+    fn encode_tensor_raw_data_matches_previous_serialization() {
+        let f = RawTensor::F32 {
+            data: vec![1.5, -0.0, f32::NAN, f32::NEG_INFINITY],
+            shape: vec![2, 2],
+        };
+        let i = RawTensor::I64 {
+            data: vec![i64::MIN, 0, i64::MAX],
+            shape: vec![3],
+        };
+        let b = RawTensor::Bool {
+            data: vec![true, false, true],
+            shape: vec![3],
+        };
+        let h = RawTensor::F16 {
+            data: vec![half::f16::from_f32(0.25), half::f16::NAN],
+            shape: vec![2],
+        };
+        let expect = |t: &RawTensor| -> Vec<u8> {
+            match t {
+                RawTensor::F32 { data, .. } => data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                RawTensor::I64 { data, .. } => data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                RawTensor::Bool { data, .. } => data.iter().map(|&v| u8::from(v)).collect(),
+                RawTensor::F16 { data, .. } => data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            }
+        };
+        for (name, t) in [("f", &f), ("i", &i), ("b", &b), ("h", &h)] {
+            let proto = encode_tensor(name, t).unwrap();
+            assert_eq!(proto.raw_data, expect(t), "{name}");
+            assert_eq!(proto.raw_data.capacity(), proto.raw_data.len(), "{name}");
+        }
+    }
+
+    #[test]
+    fn encode_le_reports_unallocatable_length() {
+        // `usize::MAX / 8 + 1` 要素 × 8 バイトは `usize` を超えるため
+        // （確保を試みる前に）`AllocationFailed` になる。要素そのものは
+        // 用意できないので、長さだけを持つ ZST スライスで要求長を作る。
+        let zsts = vec![(); usize::MAX / 8 + 1];
+        let err = encode_le::<8, ()>("big", &zsts, |_| [0u8; 8]).unwrap_err();
+        assert_eq!(
+            err,
+            ExportError::AllocationFailed {
+                tensor_name: "big".to_string(),
+                bytes: ((usize::MAX / 8 + 1) as u64).saturating_mul(8),
+            }
+        );
+        // `usize` に収まるが `isize::MAX` を超える要求も確保前に拒否される。
+        let zsts = vec![(); (isize::MAX as usize) / 2 + 1];
+        let err = encode_le::<2, ()>("half", &zsts, |_| [0u8; 2]).unwrap_err();
+        assert!(matches!(
+            err,
+            ExportError::AllocationFailed { ref tensor_name, .. } if tensor_name == "half"
+        ));
+    }
+
+    /// `try_encode_model` と `proto::encode_model`（`encode_to_vec`）の出力が
+    /// バイト単位で一致すること（external data から inline 化した形の
+    /// `Constant` 属性テンソル・initializer を含むモデル）。
+    #[test]
+    fn try_encode_model_matches_encode_model() {
+        let mut initializers = std::collections::HashMap::new();
+        initializers.insert(
+            "w".to_string(),
+            RawTensor::F32 {
+                data: vec![1.0, 2.0, 3.0],
+                shape: vec![3],
+            },
+        );
+        let const_tensor = TensorProto {
+            dims: vec![2],
+            data_type: super::super::proto::data_type::INT64,
+            float_data: Vec::new(),
+            int64_data: Vec::new(),
+            name: String::new(),
+            raw_data: [5i64, -6].iter().flat_map(|v| v.to_le_bytes()).collect(),
+            external_data: Vec::new(),
+            data_location: super::super::proto::data_location::DEFAULT,
+        };
+        let graph = Graph {
+            nodes: vec![NodeProto {
+                input: Vec::new(),
+                output: vec!["c".to_string()],
+                name: "n_const".to_string(),
+                op_type: "Constant".to_string(),
+                attribute: vec![AttributeProto {
+                    name: "value".to_string(),
+                    t: Some(const_tensor),
+                    r#type: super::super::proto::attribute_type::TENSOR,
+                    ..Default::default()
+                }],
+                domain: String::new(),
+            }],
+            initializers,
+            inputs: Vec::new(),
+            outputs: vec!["c".to_string(), "w".to_string()],
+        };
+        let model = build_model_proto(&graph, &ExportOptions::default()).unwrap();
+        assert_eq!(model.graph.as_ref().unwrap().node, graph.nodes);
+        let bytes = try_encode_model(&model).unwrap();
+        assert_eq!(bytes, encode_model(&model));
+        assert_eq!(bytes.capacity(), bytes.len());
+    }
 }

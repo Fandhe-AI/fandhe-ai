@@ -247,7 +247,7 @@ impl<'g, 't> BoundGraph<'g, 't> {
         let mut init = HashMap::with_capacity(graph.initializers.len());
         let mut params = HashMap::new();
         for (name, raw) in &graph.initializers {
-            let value = raw_to_value(raw)?;
+            let value = raw_to_value(name, raw)?;
             match value {
                 Value::F32(t) => {
                     let trainable = options
@@ -369,31 +369,49 @@ impl<'g, 't> BoundGraph<'g, 't> {
 }
 
 /// [`super::graph::RawTensor`]（initializer の復号結果）を [`Value`] へ変換
-/// する。`interp::raw_to_value`（module-private）とロジックは同一だが、
-/// 本モジュールから private 関数を呼べないため小さく複製する（interp.rs 自体は
-/// 変更しない方針。#2078 実装計画からの縮小: `ValueLookup` 汎用化リファクタは
-/// 見送り、既存の安定した interp.rs に触れず新モジュールのみで完結させた）。
-fn raw_to_value(raw: &RawTensor) -> Result<Value, AutogradError> {
-    let (shape_i64, value): (&[i64], Value) = match raw {
-        RawTensor::F32 { data, shape } => (
-            shape,
-            Value::F32(Tensor::new(data.clone(), &to_usize_shape(shape))?),
-        ),
-        RawTensor::I64 { data, shape } => (
-            shape,
-            Value::I64(Tensor::new(data.clone(), &to_usize_shape(shape))?),
-        ),
-        RawTensor::Bool { data, shape } => (
-            shape,
-            Value::Bool(Tensor::new(data.clone(), &to_usize_shape(shape))?),
-        ),
-        RawTensor::F16 { data, shape } => (
-            shape,
-            Value::F16(Tensor::new(data.clone(), &to_usize_shape(shape))?),
-        ),
+/// する（`bind` 時に initializer ごと 1 回）。`interp::raw_to_value`
+/// （module-private）と同じ変換だが、エラー variant（`Tensor::new` の shape
+/// 不整合は [`AutogradError::Shape`]）を本モジュールの従来どおりに保つため
+/// 小さく複製する。
+///
+/// 要素列の複製は `interp` と同じく失敗可能確保（`fallible_alloc::
+/// try_clone_slice`。`interp::clone_elems` 経由）で行い、失敗は `AutogradError::Interp(
+/// InterpError::AllocationFailed)` で返す（external data 由来の巨大な
+/// initializer で abort しない。PR #2348 codex P0 是正。複製される値は
+/// `clone` と同一）。`name` は診断用の initializer 名。
+fn raw_to_value(name: &str, raw: &RawTensor) -> Result<Value, AutogradError> {
+    use super::interp::clone_elems;
+    let value = match raw {
+        RawTensor::F32 { data, shape } => Value::F32(Tensor::new(
+            clone_elems(name, data)?,
+            &to_usize_shape(shape),
+        )?),
+        RawTensor::I64 { data, shape } => Value::I64(Tensor::new(
+            clone_elems(name, data)?,
+            &to_usize_shape(shape),
+        )?),
+        RawTensor::Bool { data, shape } => Value::Bool(Tensor::new(
+            clone_elems(name, data)?,
+            &to_usize_shape(shape),
+        )?),
+        RawTensor::F16 { data, shape } => Value::F16(Tensor::new(
+            clone_elems(name, data)?,
+            &to_usize_shape(shape),
+        )?),
     };
-    let _ = shape_i64; // shape は Tensor::new 内で再利用済み（可読性のため変数だけ残す）
     Ok(value)
+}
+
+/// 所有する `RawTensor` を [`Value`] へ move で変換する（`Constant` 属性
+/// テンソルの復号結果用。要素列を複製しない）。shape 不整合は
+/// [`raw_to_value`] と同じく [`AutogradError::Shape`]。
+fn raw_into_value(raw: RawTensor) -> Result<Value, AutogradError> {
+    Ok(match raw {
+        RawTensor::F32 { data, shape } => Value::F32(Tensor::new(data, &to_usize_shape(&shape))?),
+        RawTensor::I64 { data, shape } => Value::I64(Tensor::new(data, &to_usize_shape(&shape))?),
+        RawTensor::Bool { data, shape } => Value::Bool(Tensor::new(data, &to_usize_shape(&shape))?),
+        RawTensor::F16 { data, shape } => Value::F16(Tensor::new(data, &to_usize_shape(&shape))?),
+    })
 }
 
 fn to_usize_shape(shape: &[i64]) -> Vec<usize> {
@@ -1457,8 +1475,19 @@ fn dispatch_node<'t>(
                         node: node.name.clone(),
                         attr: "value".to_string(),
                     })?;
-                let raw = super::graph::decode_tensor(t)?;
-                Ok(AutogradValue::Const(raw_to_value(&raw)?))
+                // `interp::decode_constant_tensor` と同じく失敗可能確保で復号し
+                // move で `Value` 化する（external data 由来の巨大な属性テンソルで
+                // abort しない。PR #2348 codex P0 是正）。検証エラーは従来どおり
+                // `decode_tensor` と同じ `GraphError`（→ `Interp(Graph)`）。
+                let label = super::fallible_alloc::attr_tensor_label(node, "value", t);
+                let raw =
+                    super::fallible_alloc::try_decode_tensor(t, &label).map_err(|e| match e {
+                        super::fallible_alloc::TryDecodeError::Graph(g) => AutogradError::from(g),
+                        super::fallible_alloc::TryDecodeError::Alloc(f) => {
+                            AutogradError::from(super::interp::alloc_failure_to_interp(f))
+                        }
+                    })?;
+                Ok(AutogradValue::Const(raw_into_value(raw)?))
             } else if let Some(attr) = node.attribute.iter().find(|a| a.name == "value_float") {
                 Ok(AutogradValue::Const(Value::F32(ops::constant(
                     &ConstantValue::Float(attr.f),

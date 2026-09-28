@@ -52,6 +52,12 @@ pub mod export_ops;
 // が、facade `OnnxModel::from_path`（2026-09-28 ユーザー承認・実施済み）が
 // 薄く委譲して呼ぶ（`docs/compat-api-scope.md` §5 参照）。
 pub mod external_data;
+// テンソル本体（external data の宣言長・dims の積で巨大化しうるバッファ）の
+// 失敗可能確保ヘルパ（非公開。PR #2348 codex P0 是正。security.md A04）。
+// 読み込み（`external_data`）・実行（`interp`／`autograd`）・export
+// （`export`）の各経路が共有し、確保失敗を各モジュールの型付きエラーへ
+// 写像する（`docs/onnx-external-data-decision.md` 4.3 節）。
+mod fallible_alloc;
 pub mod graph;
 pub mod interp;
 // `interp` から呼ばれる `BackendOps` 経由の device 実行ヘルパ（非公開。

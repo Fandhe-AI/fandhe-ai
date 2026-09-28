@@ -31,7 +31,13 @@
 //! 確保〈`vec![..; n]`・`collect`〉は失敗時にプロセスを abort させる）。
 //! `max_total_bytes` は読み込む raw バイト列の予算であり、読み込み経路の
 //! ピークは最大でおよそ `max_total_bytes` ＋ 最大テンソル 1 個分
-//! （`docs/onnx-external-data-decision.md` 4.3 節）。
+//! （`docs/onnx-external-data-decision.md` 4.3 節）。確保ヘルパ本体は
+//! 読み込み後の実行経路（`interp::run` の initializer 複製・`Constant`
+//! 属性テンソルの復号）・export 経路と共有する非公開モジュール
+//! `onnx::fallible_alloc` にあり、本モジュールはその失敗を
+//! `ExternalDataError::AllocationFailed` へ写像する（実行経路は
+//! `InterpError::AllocationFailed`、export 経路は
+//! `ExportError::AllocationFailed`。同節 5.）。
 //!
 //! ## 不変条件（A6・回帰テスト対象）
 //!
@@ -1064,14 +1070,21 @@ fn element_size(tensor_name: &str, data_type: i32) -> Result<u64, GraphError> {
 /// アロケータを呼ばずに `CapacityOverflow` で失敗するため、巨大な宣言長も
 /// 確保を試みる前に同じ variant で拒否される。`bytes` は診断用の要求
 /// バイト数（`u64` で飽和計算）。
+///
+/// 確保本体は読み込み・実行・export 経路で共有する
+/// `fallible_alloc::try_alloc_vec` に委譲し、本関数は失敗を external data の
+/// 型付きエラーへ写像する（テンソル名は他の `ExternalDataError` と同じく
+/// [`cap_name`] で上限付きにする）。
 fn try_alloc_vec<T>(tensor_name: &str, count: usize) -> Result<Vec<T>, ExternalDataError> {
-    let mut v: Vec<T> = Vec::new();
-    v.try_reserve_exact(count)
-        .map_err(|_| ExternalDataError::AllocationFailed {
-            tensor_name: cap_name(tensor_name),
-            bytes: (count as u64).saturating_mul(std::mem::size_of::<T>() as u64),
-        })?;
-    Ok(v)
+    super::fallible_alloc::try_alloc_vec::<T>(tensor_name, count).map_err(alloc_failure_to_external)
+}
+
+/// `fallible_alloc::AllocFailure` → [`ExternalDataError::AllocationFailed`]。
+fn alloc_failure_to_external(f: super::fallible_alloc::AllocFailure) -> ExternalDataError {
+    ExternalDataError::AllocationFailed {
+        tensor_name: cap_name(&f.tensor_name),
+        bytes: f.bytes,
+    }
 }
 
 /// `load` が 1 区間（`length` バイト）を読み込むための空バッファを失敗可能
@@ -1190,17 +1203,15 @@ fn try_decode_le<const N: usize, T>(
     raw: &[u8],
     conv: impl Fn([u8; N]) -> T,
 ) -> Result<Vec<T>, GraphError> {
-    let (chunks, rest) = raw.as_chunks::<N>();
-    if !rest.is_empty() {
+    if !raw.len().is_multiple_of(N) {
         return Err(GraphError::ExternalData(ExternalDataError::Internal {
             reason: "try_decode_le: raw_data のバイト長が要素サイズの倍数ではない",
         }));
     }
-    let mut out =
-        try_alloc_vec::<T>(tensor_name, chunks.len()).map_err(GraphError::ExternalData)?;
-    // 容量は `chunks.len()` ちょうど確保済みのため、`extend` は再確保しない。
-    out.extend(chunks.iter().map(|b| conv(*b)));
-    Ok(out)
+    // 変換・失敗可能確保は実行経路（`Constant` 属性テンソルの復号）と共有する
+    // `fallible_alloc::decode_le_into` に委譲する（余りが無いことは直上で検査済み）。
+    super::fallible_alloc::decode_le_into::<N, T>(tensor_name, raw, conv)
+        .map_err(|f| GraphError::ExternalData(alloc_failure_to_external(f)))
 }
 
 /// `file_ids`（`plan` 内。区間の重複検査もこのキーで畳み込んだファイル単位で行う）のファイル識別キー。overlap 検出・

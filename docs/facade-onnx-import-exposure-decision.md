@@ -542,3 +542,19 @@ from_path_resolves_external_data_and_matches_manifest_reference`
 default()` 固定のため、facade 利用者が `max_total_bytes` を下げる公開
 手段は無い（起票候補。詳細・ピークメモリ見積もりは
 `docs/onnx-external-data-decision.md` 4.3 節・7 節）。
+
+**実行時・export 時の確保失敗の写像（2026-09-28・PR #2348 codex P0
+是正 2 回目）**: `OnnxModel::run` が実行ごとに initializer を実行時値へ
+複製する処理と `Constant` 属性テンソルの復号、`OnnxModel::to_bytes`／
+`to_path` の export 用バイト列（initializer の `raw_data`・`Constant`
+属性テンソルの複製・モデル全体の encode 結果）も失敗可能確保とした。
+`onnx-interop` 内部の新 variant `InterpError::AllocationFailed`（`map_
+interp_error`）・`ExportError::AllocationFailed`（`map_export_error`）は、
+読み込み時と同じ既存の `OnnxError::Io`（`ErrorKind::OutOfMemory`）へ
+写像する（公開 variant の追加なし）。既存の実行時 fallback
+`OnnxError::Execution { message }` へ畳み込まない理由: 文字列しか持たず
+資源不足を型で判別できないうえ、読み込み時（`Io(OutOfMemory)`）と実行時
+で判別方法が分かれるため。`OnnxError::Io` の doc コメントへ対象経路を
+追記した（doc のみの変更で公開 API 面は不変）。演算カーネルの出力確保は
+一般の推論メモリとして対象外（`docs/onnx-external-data-decision.md`
+4.3 節の洗い出し表）。

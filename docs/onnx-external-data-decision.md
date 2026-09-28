@@ -282,7 +282,7 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 （Constant の `value` 等）も含む（`enumerate_tensors`）。サブグラフ属性
 （`g`/`graphs`）は `proto::AttributeProto` に未定義のため対象外。
 
-### 4.3 メモリ確保の失敗可能化と読み込み経路のメモリ予算（2026-09-28・PR #2348 codex P0 是正）
+### 4.3 メモリ確保の失敗可能化とメモリ予算（読み込み・実行・export 経路。2026-09-28・PR #2348 codex P0 是正 2 回）
 
 - **指摘**（HEAD 33b942a6 へのレビュー）: `load` は検証済みの
   `entry.length` に対して `vec![0u8; buf_len]` で一度に確保していた。
@@ -332,6 +332,74 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      するため採らない。`tensor_name`・`bytes` は既存の `Io` 写像と同じく
      落ちる。あわせて `from_path` はデコード後に `.onnx` 本体のバイト列を
      解放してから external data の読み込みへ進む。
+  5. **実行経路・export 経路（2026-09-28・PR #2348 codex P0 是正 2 回目）**:
+     指摘（`Constant` 属性テンソルが実行時に `interp::compute_constant` の
+     `decode_tensor`〈`collect`〉で無条件に復号され、既定上限 64 GiB 内の
+     小さな `.onnx` と巨大な外部ファイルでメモリ不足時に abort しうる）を
+     受け、同類型を実行経路・export 経路まで洗い出して一括で是正した
+     （下表）。確保ヘルパは読み込み・実行・export の 3 経路で共有する
+     非公開モジュール `onnx::fallible_alloc` へ集約した（`try_alloc_vec`・
+     `try_clone_slice`・`decode_le_into`・`try_decode_tensor`・
+     `try_clone_nodes`。`external_data` の `try_alloc_vec`／`try_decode_le`
+     はこれへ委譲する薄いラッパー）。
+     - `Constant` 属性テンソルの復号（`interp::decode_constant_tensor`・
+       `autograd` の `Constant` 腕）は `fallible_alloc::try_decode_tensor`
+       で行い、得た `Vec` を `Tensor` へ **move** する（旧実装は
+       `decode_tensor` の結果を `raw_to_value` でさらに複製しており、実行
+       ごとに一時 2 倍を要した。是正後は 1 倍）。`try_decode_tensor` は
+       「`raw_data` 非空 かつ対応 4 型」の場合だけ `decode_tensor` と同じ
+       順序で検証（`element_count` → `checked_mul` → 長さ照合）して同じ
+       変換を行い、それ以外（typed data・空 raw・未知 dtype）は
+       `decode_tensor` へ委譲する（検証ロジックの並行実装を最小にする。
+       Ok・Err〈`RawDataByteLenMismatch`・`NegativeDim`・`ElementCount
+       Overflow`・`UnknownDataType` 等〉とも `decode_tensor` と同じ結果に
+       なることを単体テストで固定）。`decode_tensor` 自体は A6 により不変。
+     - `interp::run` が実行ごとに initializer を実行時値へ複製する処理
+       （`raw_to_value`）・`autograd::BoundGraph::bind` の同じ処理は
+       `try_clone_slice`（`try_reserve_exact` ＋ `extend_from_slice`）で
+       行う。
+     - export（`export::build_model_proto`）はノード列の複製を
+       `try_clone_nodes`（属性テンソル本体だけ失敗可能確保。構造体
+       リテラルの全フィールド列挙でフィールド追加も検出）、`encode_tensor`
+       の `raw_data` を失敗可能確保で作り、モデル全体の encode は新関数
+       `export::try_encode_model`（`encoded_len()` 分を `try_reserve_exact`
+       → `Message::encode`。`encode_to_vec` と同じ手順のため出力バイト列は
+       同一）で行う。facade `OnnxModel::to_bytes` は `proto::encode_model`
+       の代わりにこれを使う（`encode_model` 自体は既存シグネチャのまま
+       残す）。
+     - 新 variant: `InterpError::AllocationFailed { tensor_name, bytes }`・
+       `ExportError::AllocationFailed { tensor_name, bytes }`（いずれも
+       `#[non_exhaustive]` の内部 enum。`autograd` は既存の
+       `AutogradError::Interp` 経由で同じ variant を返す）。
+       `InterpError::Graph(GraphError::ExternalData(AllocationFailed))` の
+       再利用は、inline 由来テンソルにも external data のエラーを返す
+       ことになるため採らない。facade は両者を読み込み時と同じ既存の
+       `OnnxError::Io(ErrorKind::OutOfMemory)` へ写像する（公開 variant
+       追加なし。`Execution { message }` へ畳み込むと資源不足を型で判別
+       できず、読み込み時と実行時で判別方法が分かれるため採らない。
+       `docs/facade-onnx-import-exposure-decision.md` §15）。
+     - **読み込み時に復号済みテンソルを `Graph` へ保持する方式は採らない**:
+       (a) `Graph` は pub フィールドの構造体で、`initializers` と同じく
+       `RawTensor`（`Vec` 所有）でしか保持できない。`Tensor::new` は
+       `Vec` を所有で受けるため、`Graph` を借用のまま複数回 `run` できる
+       契約の下では実行時の `Tensor` 化で結局 1 回複製が要り、実行時
+       ピークは本方式（実行時に失敗可能復号して move）と同じになる。
+       (b) `export::build_model_proto` はノード列の `raw_data` をそのまま
+       書き出す契約のため、復号済みを保持すると raw を解放できず常駐量が
+       2 倍になる（raw を解放すると export の再エンコード経路が別途要る）。
+       (c) `Graph` へのフィールド追加は構造体リテラルで構築している
+       約 12 箇所（テスト・`export_nn`）の変更を伴う。initializer の
+       実行ごとの複製の回避（`Arc` 共有）も同じ (a) の理由で
+       `tensor-core` の `Tensor` 構築 API か `RawTensor` の表現を変える
+       必要があり、本 P0 の範囲では失敗可能確保で是正する。
+     - 数値不変: 置き換えたヘルパは確保方式だけを変え、書き込む値は
+       `clone`／`decode_tensor`／旧 `encode_tensor`／`encode_to_vec` と
+       同一。external data 由来の `Constant` 属性テンソル（4 dtype）と
+       initializer を持つモデルの推論結果が同じ値を inline で持つモデルと
+       bit 一致し、同じ `Graph` での 3 回の `run` で不変であること、export
+       バイト列が inline モデルの export と同一であることを統合テストで
+       固定した（8 節）。既存の PyTorch 実生成 fixture（`external_data_
+       fixture_*`）も無変更で pass する。
 - **A6 との関係**: `graph::decode_tensor` は変更していない（3 節の
   不変条件は維持。失敗可能復号は external 入口専用の別関数）。
   `graph::build_graph` は検証ヘルパの抽出のみで挙動不変（既存テスト
@@ -342,7 +410,10 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   `float_data`〉・external Constant 属性を併せ持つモデル）で固定した。
 - **同類型の洗い出し**（未信頼の宣言値〈`length`・dims の積〉から無条件
   確保している箇所。external data 読み込み結果がテンソルへ変換される
-  までの全経路と facade `OnnxModel::from_path` を対象）:
+  までの全経路と facade `OnnxModel::from_path` を対象とし、2 回目の是正
+  〈5.〉で読み込み後の実行経路〈`interp::run`・`onnx::autograd`〉と
+  export 経路〈`export::build_model_proto`・facade `OnnxModel::to_bytes`／
+  `to_path`〉へ拡げた）:
 
   | 箇所 | 確保方式（是正前） | 判定 | 対応 |
   |------|------------------|------|------|
@@ -354,8 +425,16 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   | `enumerate_tensors`・`decode_tensor` の `dims.clone()`／名前の複製 | 無条件確保 | `.onnx` 本体で有界 | 対象外 |
   | `decode_tensor` の inline 由来 `raw_data`／`float_data`／`int64_data`（バイト列入口・external 入口の inline 分） | `collect`／`clone` | 入力バイト列長で有界（dims 積は `raw_data` 長との照合**後**にのみ確保に使う。照合前確保なし） | 対象外（A6 により不変） |
   | facade `from_path` の `std::fs::read` | std 内部で `try_with_capacity` | 既に失敗可能（`Io(OutOfMemory)`） | 対象外（デコード後に解放する変更のみ） |
-  | `interp::compute_constant`（`decode_tensor` ＋ `raw_to_value` の `data.clone()`）・`interp::run` が実行ごとに initializer を env へ clone | `collect`／clone | external 由来で巨大化しうるが**実行（`run`）経路**であり読み込み経路ではない | 本 P0 の範囲外。7 節の起票候補 |
-  | `onnx::autograd` の Constant 属性復号（`decode_tensor`） | `collect` | 同上（学習実行経路） | 本 P0 の範囲外。7 節の起票候補 |
+  | `interp::compute_constant`（`decode_tensor` の `collect` ＋ `raw_to_value` の `data.clone()`。実行ごと一時 2 倍） | `collect`／clone | external 由来で巨大化しうる（実行経路。codex P0 2 回目の指摘箇所） | 5.: `decode_constant_tensor`（`try_decode_tensor` で失敗可能復号し `Tensor` へ move。一時 1 倍） |
+  | `interp::run_impl` が実行ごとに initializer を env へ変換（`raw_to_value` の `data.clone()`） | clone | external 由来で巨大化しうる（実行ごと ＋1 倍） | 5.: `try_clone_slice`（複製自体は `Graph` 借用・`Vec` 所有の構造上残す。上記の不採用理由） |
+  | `onnx::autograd` の `Constant` 腕（`decode_tensor` ＋ `raw_to_value` の clone） | `collect`／clone | 同上（学習実行経路） | 5.: `try_decode_tensor` ＋ move |
+  | `onnx::autograd::BoundGraph::bind` の initializer 変換（`raw_to_value` の clone） | clone | external 由来で巨大化しうる（bind ごと 1 回） | 5.: `try_clone_slice` |
+  | `export::build_model_proto` の `graph.nodes.clone()`（external 由来の `Constant` 属性テンソルの `raw_data`） | clone | external 由来で巨大化しうる（facade `to_bytes`／`to_path` から到達） | 5.: `try_clone_nodes` |
+  | `export::encode_tensor` の `raw_data`（`Vec::with_capacity`／BOOL は `collect`） | 無条件確保 | 同上（initializer 1 件ごと） | 5.: `encode_le`（`try_alloc_vec`） |
+  | `proto::encode_model`（`encode_to_vec`）の全体バイト列 | 無条件確保 | 同上（モデル全体） | 5.: facade は `export::try_encode_model` を使う（`encode_model` は既存シグネチャのまま残す） |
+  | `tape.var(&t)`／`var_no_grad`（`autograd::bind`）・`run` 結果の `env.get(..).cloned()`・`BoundGraph::run` の `init` 複製・facade の `OnnxValue` 変換 | `Tensor` の clone | `Arc<Storage>` のポインタ複製のみ（要素列を複製しない） | 対象外 |
+  | 演算カーネル（`ops::*`・`interp_ext`）の出力確保・`interp_device` のオペランド準備（`contiguous()` 等） | 無条件確保 | 一般の推論メモリ（op の結果テンソル・演算用の作業領域）。external data 固有ではなく、入力 feed の shape でも同様に巨大化しうる | 対象外（本件の範囲外。確保失敗時の挙動は推論エンジン全体の方針として扱う） |
+  | `interp::compute_constant` の `value_floats`／`value_ints`（`attr.floats.clone()`／`attr.ints.clone()`）・`graph::decode_tensor` の typed data 分岐 | clone | `.onnx` 本体の長さで有界（external data にならない） | 対象外 |
   | `resolve_external_data`（pub）を直接呼び、続けて `build_graph` を呼ぶ利用者 | 読み込みは失敗可能、復号は `decode_tensor` の `collect` | 復号側は無条件確保のまま | 推奨入口は `build_graph_with_external_data`（doc に明記）。`resolve_external_data` の契約（raw inline）は不変 |
 
 - **ピークメモリ見積もり**（`N` = external data 合計（≤
@@ -370,9 +449,15 @@ pass することを確認済み（prost は既定値のスカラーと空の re
     （`O(S)` は デコード済み `ModelProto` と複製の 2 つ分）。最悪（単一の
     巨大テンソル）で `2 × max_total_bytes`。構築後の `Graph` の保持量は
     およそ `N`（復号済み initializer ＋ Constant 属性の raw）。
-  - 実行時（範囲外。参考）: `interp::run` は実行ごとに initializer を
-    env へ clone するため ＋`N`（Constant 属性は実行時に復号 ＋ clone で
-    一時的に ＋`2 ×` 当該分）。
+  - 実行時（5. の是正後。いずれも失敗可能確保）: `interp::run` は実行
+    ごとに initializer を env へ複製するため ＋`N`（initializer 分）、
+    `Constant` 属性テンソルは実行時に失敗可能復号して move するため
+    ＋`1 ×` 当該分（是正前は復号 ＋ clone で一時 `2 ×`）。確保失敗は
+    `InterpError::AllocationFailed`（facade では `Io(OutOfMemory)`）。
+  - export 時（5. の是正後）: `Graph`（およそ `N`）に加え、`ModelProto`
+    （initializer の `raw_data` ＋ ノード列の複製でおよそ `N`）と encode
+    結果（およそ `N`）で最大およそ `3N`。確保失敗は
+    `ExportError::AllocationFailed`（facade では `Io(OutOfMemory)`）。
 - **低メモリ環境での運用**: `onnx-interop` の `build_graph_with_external_
   data`／`resolve_external_data` を直接呼ぶ利用者は、`ExternalDataOptions
   { max_total_bytes, .. }` を利用可能メモリに合わせて下げて渡せる
@@ -402,11 +487,48 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   `vec![0u8; n]` へ戻す変異でテストプロセスが SIGABRT で落ちることを
   確認済み〉）、facade `interop::onnx::
   map_graph_error_tests`（`AllocationFailed` → `Io(OutOfMemory)`）。
+  5.（実行経路・export 経路）の回帰テスト:
+  - 単体（全プラットフォーム）: `onnx::fallible_alloc::tests`（`usize::
+    MAX`・`isize::MAX` 超の要求が確保前に `AllocFailure`、`try_clone_slice`
+    の bit 一致と容量ちょうど、`try_decode_tensor` と `decode_tensor` の
+    Ok／Err 一致〈4 dtype・typed data・空テンソル・長さ不一致・負の dim・
+    乗算オーバーフロー・未知 dtype〉、`try_clone_nodes` と `clone` の
+    一致）、`onnx::export::alloc_tests`（`encode_tensor` の `raw_data` が
+    旧直列化と同一、`encode_le` の確保不能長が `AllocationFailed`、
+    `try_encode_model` と `encode_model` のバイト列一致）、facade
+    `map_graph_error_tests` の `interp_allocation_failed_maps_to_io_out_
+    of_memory`・`export_allocation_failed_maps_to_io_out_of_memory`。
+  - 統合（実確保失敗。Linux・64bit）: `tests/onnx_external_data.rs::
+    runtime_allocation_failures_are_typed_errors_under_address_space_
+    limit`。同じテストバイナリを子プロセスとして起動し（`runtime_
+    allocation_failure_child`）、64 MiB の external テンソル（疎ファイル）
+    を読み込んだ後に `setrlimit(RLIMIT_AS)` でアドレス空間の soft limit
+    を「現在の `VmSize` ＋ テンソルの半分」へ下げ、テンソル 1 個分の
+    追加確保を要する 4 シナリオ（`initializer`: `run` の initializer
+    複製／`constant`: `run` の `Constant` 属性テンソル復号／`autograd`:
+    `BoundGraph::bind`／`export`: `build_model_proto`）がいずれも
+    `AllocationFailed`（テンソル名・要求バイト数つき）になることを
+    検査する。`vm.overcommit_memory` の設定に依存しない。確保ヘルパを
+    無条件確保（`Vec::with_capacity`）へ戻す変異で 4 シナリオとも子が
+    SIGABRT（`memory allocation of 67108864 bytes failed`）で落ちることを
+    確認済み。
+  - 統合（読み込み段）: `sparse_file_unallocatable_constant_attribute_
+    returns_allocation_failed`（4 TiB の疎ファイルで 4 TiB の `Constant`
+    属性テンソルを宣言すると、属性テンソルの slot も `load` の区間
+    バッファで `AllocationFailed` になる。**実行時の復号には到達しない**
+    ため実行時経路の検証は上記の子プロセステストが担う。ゲートは既存の
+    疎ファイルテストと同じ Linux・overcommit 0／2・64bit）。
+  - 数値不変: `external_constant_attributes_run_bit_identical_to_inline_
+    across_runs`（external 由来の `Constant` 属性テンソル 4 dtype〈NaN・
+    `-0.0`・非正規化数・BOOL の非ゼロ値を含む〉と initializer の推論結果
+    が inline モデルと bit 一致・3 回の `run` で不変・export バイト列が
+    inline モデルの export と同一）。
 
 ## 5. 残るリスク（受容済み）
 
 - **確保成功後のページ実コミット時の OOM（2026-09-28・PR #2348 codex P0
-  是正に伴い明記）**: 失敗可能確保（4.3 節）が型付きエラーにできるのは、
+  是正に伴い明記。実行経路・export 経路〈4.3 節 5.〉にも同じく適用）**:
+  失敗可能確保（4.3 節）が型付きエラーにできるのは、
   アロケータが確保要求そのものを拒否した場合（アドレス空間不足・
   `isize::MAX` 超・overcommit ヒューリスティックによる拒否等）に限る。
   Linux の `vm.overcommit_memory=1` 等で確保要求が成功した場合、読み込み
@@ -526,18 +648,22 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 ## 7. スコープ外の事項（`.claude/rules/out-of-scope-tracking.md`）
 
 - external data での export（`onnx::export`）。常に inline（`raw_data`）
-  で書き出す契約は不変。
+  で書き出す契約は不変（export 用バイト列の確保は 4.3 節 5. で失敗可能
+  確保へ是正済み）。
 - `checksum`（SHA-1）の検証。
 - `max_external_files` の既定値（4096）の承認（6 節）。
 - （2026-09-28・PR #2348 codex P0 是正に伴う起票候補。4.3 節）facade
   `OnnxModel::from_path` から `max_total_bytes` を下げる公開手段（現状は
   `ExternalDataOptions::default()` 固定。公開 API 面の追加にはユーザー
   承認が要る）。
-- （同上）実行経路の確保: `interp::run` が実行ごとに initializer を env
-  へ clone する処理、`interp::compute_constant`／`onnx::autograd` の
-  Constant 属性テンソル復号（`decode_tensor` の `collect`＋`raw_to_value`
-  の clone）は、external data 由来で巨大化しうる無条件確保のまま
-  （読み込み経路ではないため本 P0 の範囲外）。
+- （解消済み・2026-09-28・PR #2348 codex P0 是正 2 回目）実行経路の確保
+  （`interp::run` の initializer 複製、`interp::compute_constant`／
+  `onnx::autograd` の `Constant` 属性テンソル復号）は 4.3 節 5. で
+  失敗可能確保へ是正した（export 経路も同時に是正）。`Graph` を借用の
+  まま複数回 `run` する契約の下で initializer の実行ごとの複製自体を
+  無くす（`Arc` 共有）には `tensor-core` の `Tensor` 構築 API か
+  `RawTensor` の表現の変更が要るため、必要になった時点で別途扱う
+  （現状は失敗可能確保で abort しない）。
 
 自動運転中はユーザー承認を取れないため Issue は起票せず、本節と PR 本文に
 起票候補として記録する。
@@ -545,7 +671,7 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 ## 8. テスト・実測
 
 - 合成入力の網羅テスト: `crates/onnx-interop/tests/onnx_external_data.rs`
-  （unix で 54 テスト〈うち Linux 限定 1 件〉＋非 unix 契約テスト 2 件。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
+  （unix で 58 テスト〈うち Linux 限定 4 件〉＋非 unix 契約テスト 2 件。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
   隣接区間・Constant 属性テンソル〉・異常系〈A2〜A5 のパス検証・数値検証・
   重複検証・キー検証・A6 回帰〉。base_dir 外へのシンボリックリンク脱出
   〈`symlink_escaping_base_dir_via_absolute_target_is_rejected`〉を含む）。
@@ -576,11 +702,21 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   ぞれ `load` が拒否すること。区間重複検査（4.2 節。codex P0 是正）の
   回帰テストは統合テスト 2 件（`many_non_overlapping_unit_regions_in_
   one_file_resolve`・`one_overlap_among_many_unit_regions_is_rejected_
-  with_names`。上記 54 テストに含む）と、全プラットフォームで実行する
+  with_names`。上記 58 テストに含む）と、全プラットフォームで実行する
   単体テスト `external_data.rs::overlap_tests`（7 テスト）。メモリ確保の
   失敗可能化（4.3 節）の回帰テストは全プラットフォームで実行する
-  `external_data.rs::alloc_tests`（6 テスト）・統合テスト 4 件（上記 54
-  テストに含む）・facade `interop::onnx::map_graph_error_tests`（3 テスト）。
+  `external_data.rs::alloc_tests`（6 テスト）・統合テスト 4 件（上記 58
+  テストに含む）・facade `interop::onnx::map_graph_error_tests`（5 テスト。
+  うち 2 件は 4.3 節 5. の実行時・export 時の写像）。実行経路・export
+  経路の失敗可能化（4.3 節 5.）の回帰テストは、全プラットフォームで
+  実行する `onnx::fallible_alloc::tests`（4 テスト）・`onnx::export::
+  alloc_tests`（3 テスト）と統合テスト 4 件（上記 58 テストに含む。
+  `external_constant_attributes_run_bit_identical_to_inline_across_runs`
+  〈unix〉・`sparse_file_unallocatable_constant_attribute_returns_
+  allocation_failed`・`runtime_allocation_failures_are_typed_errors_
+  under_address_space_limit` とその子プロセス本体
+  `runtime_allocation_failure_child`〈いずれも Linux・64bit〉。内容は
+  4.3 節の回帰テスト欄）。
 - PyTorch 実生成 fixture: `crates/onnx-interop/tests/fixtures/
   pytorch-onnx-external-data/`・`tests/onnx_interp_pytorch_cnn_fixture.rs`
   の `external_data_fixture_*` 3 テスト＋

@@ -2016,3 +2016,456 @@ fn sparse_file_unallocatable_tensor_returns_allocation_failed_instead_of_abort()
         }
     );
 }
+
+// --- 実行経路・export 経路のメモリ確保（PR #2348 codex P0 是正 2 回目） ---
+
+/// `name` を出力する `Constant` ノード（`value` 属性に `t`）。
+#[cfg(unix)]
+fn constant_node(
+    name: &str,
+    output: &str,
+    t: TensorProto,
+) -> fandhe_ai_onnx_interop::onnx::proto::NodeProto {
+    use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, NodeProto, attribute_type};
+    NodeProto {
+        input: Vec::new(),
+        output: vec![output.to_string()],
+        name: name.to_string(),
+        op_type: "Constant".to_string(),
+        attribute: vec![AttributeProto {
+            name: "value".to_string(),
+            t: Some(t),
+            r#type: attribute_type::TENSOR,
+            ..Default::default()
+        }],
+        domain: String::new(),
+    }
+}
+
+/// ノード列・initializer・グラフ出力を指定したモデル。
+#[cfg(unix)]
+fn model_with(
+    nodes: Vec<fandhe_ai_onnx_interop::onnx::proto::NodeProto>,
+    initializers: Vec<TensorProto>,
+    outputs: &[&str],
+) -> ModelProto {
+    use fandhe_ai_onnx_interop::onnx::proto::ValueInfoProto;
+    ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: nodes,
+            name: "g".to_string(),
+            initializer: initializers,
+            input: Vec::new(),
+            output: outputs
+                .iter()
+                .map(|n| ValueInfoProto {
+                    name: n.to_string(),
+                })
+                .collect(),
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: Vec::new(),
+    }
+}
+
+/// 実行時値を dtype・shape・要素の bit 列へ正規化する（NaN を含む f32／f16
+/// も bit 単位で比較するため）。
+#[cfg(unix)]
+fn value_bits(
+    v: &fandhe_ai_onnx_interop::onnx::interp::Value,
+) -> (&'static str, Vec<usize>, Vec<u64>) {
+    use fandhe_ai_onnx_interop::onnx::interp::Value;
+    match v {
+        Value::F32(t) => {
+            let c = t.contiguous();
+            let bits = c
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|x| u64::from(x.to_bits()))
+                .collect();
+            ("f32", t.shape().to_vec(), bits)
+        }
+        Value::I64(t) => {
+            let c = t.contiguous();
+            let bits = c.as_slice().unwrap().iter().map(|x| *x as u64).collect();
+            ("i64", t.shape().to_vec(), bits)
+        }
+        Value::Bool(t) => {
+            let c = t.contiguous();
+            let bits = c
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|x| u64::from(*x))
+                .collect();
+            ("bool", t.shape().to_vec(), bits)
+        }
+        Value::F16(t) => {
+            let c = t.contiguous();
+            let bits = c
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|x| u64::from(x.to_bits()))
+                .collect();
+            ("f16", t.shape().to_vec(), bits)
+        }
+    }
+}
+
+/// external data 由来の `Constant` 属性テンソル（4 dtype）と initializer を
+/// 持つモデルの推論結果が、同じ値を inline で持つモデル（バイト列入口と同じ
+/// `build_graph`）と bit 単位で一致し、同じ `Graph` で複数回 `run` しても
+/// 結果が変わらないこと（実行時の復号・initializer 複製を失敗可能確保へ
+/// 置き換えた後も数値結果が不変であることの回帰テスト）。あわせて export
+/// （`build_model_proto` → `try_encode_model`）が inline モデルの export と
+/// 同一バイト列になることも確認する。
+#[cfg(unix)]
+#[test]
+fn external_constant_attributes_run_bit_identical_to_inline_across_runs() {
+    use fandhe_ai_onnx_interop::onnx::export::{
+        ExportOptions, build_model_proto, try_encode_model,
+    };
+    use fandhe_ai_onnx_interop::onnx::interp::run;
+    use fandhe_ai_onnx_interop::onnx::proto::encode_model;
+
+    let f32_raw: Vec<u8> = [1.5f32, -0.0, f32::NAN, f32::MIN_POSITIVE]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let i64_raw: Vec<u8> = [i64::MIN, -1, 0, i64::MAX]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let bool_raw: Vec<u8> = vec![0, 1, 2, 255];
+    let f16_raw: Vec<u8> = [half::f16::from_f32(0.25), half::f16::NAN]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let w_raw: Vec<u8> = [3.0f32, -4.5]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+
+    // 1 つの `.data` ファイルへ連結し、offset で各テンソルを指す。
+    // （ノード名〈空なら initializer〉, 出力名, dtype, dims, 生バイト列）
+    let parts = [
+        ("n_f", "cf", data_type::FLOAT, vec![2, 2], &f32_raw),
+        ("n_i", "ci", data_type::INT64, vec![4], &i64_raw),
+        ("n_b", "cb", data_type::BOOL, vec![4], &bool_raw),
+        ("n_h", "ch", data_type::FLOAT16, vec![2], &f16_raw),
+        ("", "w", data_type::FLOAT, vec![2], &w_raw),
+    ];
+    let dir = TempDir::new("constant-bit-identical");
+    let mut blob = Vec::new();
+    let mut ext_nodes = Vec::new();
+    let mut inline_nodes = Vec::new();
+    let mut ext_inits = Vec::new();
+    let mut inline_inits = Vec::new();
+    for (node_name, out, dt, dims, raw) in parts {
+        let offset = blob.len().to_string();
+        let length = raw.len().to_string();
+        blob.extend_from_slice(raw);
+        let tensor_name = if node_name.is_empty() { out } else { "" };
+        let ext = external_tensor(
+            tensor_name,
+            dims.clone(),
+            dt,
+            "all.onnx.data",
+            Some(&offset),
+            Some(&length),
+        );
+        let mut inline = ext.clone();
+        inline.external_data.clear();
+        inline.data_location = data_location::DEFAULT;
+        inline.raw_data = raw.clone();
+        if node_name.is_empty() {
+            ext_inits.push(ext);
+            inline_inits.push(inline);
+        } else {
+            ext_nodes.push(constant_node(node_name, out, ext));
+            inline_nodes.push(constant_node(node_name, out, inline));
+        }
+    }
+    dir.write_file("all.onnx.data", &blob);
+    let outputs = ["cf", "ci", "cb", "ch", "w"];
+    let ext_model = model_with(ext_nodes, ext_inits, &outputs);
+    let inline_model = model_with(inline_nodes, inline_inits, &outputs);
+
+    let ext_graph =
+        build_graph_with_external_data(&ext_model, dir.path(), &ExternalDataOptions::default())
+            .expect("external data の解決は成功するはず");
+    let inline_graph = build_graph(&inline_model).expect("inline モデルの構築は成功するはず");
+
+    let reference = run(&inline_graph, std::collections::HashMap::new()).unwrap();
+    for round in 0..3 {
+        let out = run(&ext_graph, std::collections::HashMap::new())
+            .unwrap_or_else(|e| panic!("run {round} 回目が失敗した: {e:?}"));
+        assert_eq!(out.len(), outputs.len());
+        for name in outputs {
+            assert_eq!(
+                value_bits(&out[name]),
+                value_bits(&reference[name]),
+                "run {round} 回目の出力 {name} が inline モデルと bit 一致しない"
+            );
+        }
+    }
+
+    let options = ExportOptions::default();
+    let ext_bytes = try_encode_model(&build_model_proto(&ext_graph, &options).unwrap()).unwrap();
+    let inline_proto = build_model_proto(&inline_graph, &options).unwrap();
+    assert_eq!(ext_bytes, encode_model(&inline_proto));
+}
+
+/// codex P0（2 回目）の指摘経路のうち読み込み段: 疎ファイル（4 TiB）で
+/// 4 TiB の `Constant` 属性テンソルを宣言すると、属性テンソルの slot も
+/// initializer と同じ `load` の区間バッファ（失敗可能確保）で
+/// `AllocationFailed` になりプロセスは終了しない。**実行時の復号には到達
+/// しない**（raw の読み込みで先に止まる）ため、実行時経路は
+/// [`runtime_allocation_failures_are_typed_errors_under_address_space_limit`]
+/// が別に検証する。ゲート（Linux・`vm.overcommit_memory` 0／2・64bit）は
+/// [`sparse_file_unallocatable_tensor_returns_allocation_failed_instead_of_abort`]
+/// と同じ。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn sparse_file_unallocatable_constant_attribute_returns_allocation_failed() {
+    let mode = std::fs::read_to_string("/proc/sys/vm/overcommit_memory").unwrap_or_default();
+    if !matches!(mode.trim(), "0" | "2") {
+        eprintln!("vm.overcommit_memory={:?} のため実行しない", mode.trim());
+        return;
+    }
+    let dir = TempDir::new("sparse-unallocatable-constant");
+    let path = dir.write_file("huge.onnx.data", &[]);
+    let file_len: u64 = 1 << 42;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(file_len)
+        .expect("疎ファイルの作成（set_len）に失敗した");
+    let t = external_tensor(
+        "",
+        vec![1 << 40],
+        data_type::FLOAT,
+        "huge.onnx.data",
+        Some("0"),
+        Some(&file_len.to_string()),
+    );
+    let model = model_with(vec![constant_node("n_const", "y", t)], Vec::new(), &["y"]);
+    let options = ExternalDataOptions {
+        max_total_bytes: u64::MAX,
+        ..ExternalDataOptions::default()
+    };
+    let err = assert_external_err(build_graph_with_external_data(&model, dir.path(), &options));
+    assert_eq!(
+        err,
+        ExternalDataError::AllocationFailed {
+            tensor_name: "n_const:value".to_string(),
+            bytes: file_len,
+        }
+    );
+}
+
+/// [`runtime_allocation_failure_child`] を子プロセスとして起動したことを
+/// 示す環境変数（値はシナリオ名）。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const RUNTIME_ALLOC_CHILD_ENV: &str = "FANDHE_ONNX_RUNTIME_ALLOC_CHILD";
+
+/// 子プロセスで読み込む external テンソルの大きさ（バイト）。読み込み済みの
+/// 状態から「さらに同じ大きさを 1 回確保する」実行時処理だけを、アドレス
+/// 空間上限（`RLIMIT_AS`）で失敗させる。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const RUNTIME_ALLOC_TENSOR_BYTES: u64 = 64 << 20;
+
+/// 現在プロセスの仮想メモリ量（`/proc/self/status` の `VmSize`。バイト）。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn vm_size_bytes() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
+    let line = status
+        .lines()
+        .find(|l| l.starts_with("VmSize:"))
+        .expect("VmSize 行が無い");
+    let kib: u64 = line
+        .trim_start_matches("VmSize:")
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .expect("VmSize を数値として読めない");
+    kib * 1024
+}
+
+/// 現在プロセスのアドレス空間 soft limit を `soft` へ下げる（hard limit は
+/// 変えない）。hard limit がそれより小さい場合は hard limit を使う。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn lower_address_space_soft_limit(soft: u64) {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `&mut rl` はこの呼び出しの間生存する初期化済み `libc::rlimit`
+    // への排他参照で、`getrlimit(2)` は成功時にのみ書き込む。`RLIMIT_AS` は
+    // 有効な資源種別。戻り値 0 を確認してから `rl` を読む。
+    let ret = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut rl) };
+    assert_eq!(ret, 0, "getrlimit(RLIMIT_AS) に失敗した");
+    let new = libc::rlimit {
+        rlim_cur: (soft as libc::rlim_t).min(rl.rlim_max),
+        rlim_max: rl.rlim_max,
+    };
+    // SAFETY: `&new` はこの呼び出しの間生存する初期化済み `libc::rlimit`
+    // への共有参照で、`setrlimit(2)` は読むだけ。soft ≤ hard を満たす値を
+    // 渡すため hard limit の引き上げ（特権が要る）にはならない。
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_AS, &new) };
+    assert_eq!(ret, 0, "setrlimit(RLIMIT_AS) に失敗した");
+}
+
+/// 子プロセス側の本体（親テスト
+/// [`runtime_allocation_failures_are_typed_errors_under_address_space_limit`]
+/// から `RUNTIME_ALLOC_CHILD_ENV` 付きで起動された場合のみ動く。通常の
+/// `cargo test` では何もせず pass する）。
+///
+/// [`RUNTIME_ALLOC_TENSOR_BYTES`] の external テンソル（疎ファイル。読み込み
+/// で 0 が実コミットされる）を `build_graph_with_external_data` で読み込んだ
+/// 後、アドレス空間の soft limit を「現在の `VmSize` ＋ テンソルの半分」へ
+/// 下げ、テンソル 1 個分の追加確保を要する処理を実行する:
+///
+/// - `initializer`: `interp::run` が initializer を実行時値へ複製する
+/// - `constant`: `interp::run` が `Constant` 属性テンソルを復号する
+/// - `autograd`: `BoundGraph::bind` が initializer を実行時値へ複製する
+/// - `export`: `export::build_model_proto` が initializer をバイト列化する
+///
+/// いずれも `AllocationFailed`（テンソル名・要求バイト数つき）になり、
+/// プロセスは終了しないこと。是正前（無条件の `clone`／`collect`）は
+/// 同じ入力で子プロセスが SIGABRT で落ちる。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn runtime_allocation_failure_child() {
+    use fandhe_ai_onnx_interop::onnx::autograd::{AutogradError, BindOptions, BoundGraph};
+    use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto};
+    use fandhe_ai_onnx_interop::onnx::interp::{InterpError, run};
+
+    let Some(scenario) = std::env::var_os(RUNTIME_ALLOC_CHILD_ENV) else {
+        return;
+    };
+    let scenario = scenario.to_string_lossy().into_owned();
+    let n = RUNTIME_ALLOC_TENSOR_BYTES;
+    let dir = TempDir::new("runtime-alloc-child");
+    let path = dir.write_file("big.onnx.data", &[]);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(n)
+        .unwrap();
+    let dims = vec![(n / 4) as i64];
+    let length = n.to_string();
+    let model = if scenario == "constant" {
+        let t = external_tensor(
+            "",
+            dims,
+            data_type::FLOAT,
+            "big.onnx.data",
+            None,
+            Some(&length),
+        );
+        model_with(vec![constant_node("n_const", "y", t)], Vec::new(), &["y"])
+    } else {
+        let t = external_tensor(
+            "w",
+            dims,
+            data_type::FLOAT,
+            "big.onnx.data",
+            None,
+            Some(&length),
+        );
+        model_with(Vec::new(), vec![t], &["w"])
+    };
+    let graph = build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default())
+        .expect("読み込みは上限を下げる前に成功するはず");
+
+    // 被検対象でない準備（`Tape`・export オプション）は上限を下げる前に
+    // 済ませ、上限下では「テンソル 1 個分の追加確保を要する処理」だけを
+    // 実行する（無関係な初期化の確保失敗で誤検知しないため）。
+    let tape = fandhe_ai_autodiff::Tape::new();
+    let export_options = ExportOptions::default();
+
+    lower_address_space_soft_limit(vm_size_bytes() + n / 2);
+
+    let (expected_name, got) = match scenario.as_str() {
+        "initializer" => match run(&graph, std::collections::HashMap::new()) {
+            Err(InterpError::AllocationFailed { tensor_name, bytes }) => {
+                ("w", (tensor_name, bytes))
+            }
+            other => panic!("InterpError::AllocationFailed を期待したが {other:?}"),
+        },
+        "constant" => match run(&graph, std::collections::HashMap::new()) {
+            Err(InterpError::AllocationFailed { tensor_name, bytes }) => {
+                ("n_const:value", (tensor_name, bytes))
+            }
+            other => panic!("InterpError::AllocationFailed を期待したが {other:?}"),
+        },
+        "autograd" => match BoundGraph::bind(&graph, &tape, &BindOptions::default()) {
+            Err(AutogradError::Interp(InterpError::AllocationFailed { tensor_name, bytes })) => {
+                ("w", (tensor_name, bytes))
+            }
+            Err(other) => panic!("AllocationFailed を期待したが {other:?}"),
+            Ok(_) => panic!("AllocationFailed を期待したが bind が成功した"),
+        },
+        "export" => match build_model_proto(&graph, &export_options) {
+            Err(ExportError::AllocationFailed { tensor_name, bytes }) => {
+                ("w", (tensor_name, bytes))
+            }
+            other => panic!("ExportError::AllocationFailed を期待したが {other:?}"),
+        },
+        other => panic!("未知のシナリオ: {other}"),
+    };
+    assert_eq!(got, (expected_name.to_string(), n));
+}
+
+/// 実行経路（`interp::run` の initializer 複製・`Constant` 属性テンソルの
+/// 復号・`autograd` の bind）と export 経路の失敗可能確保を、実際の確保
+/// 失敗で検証する（PR #2348 codex P0 是正 2 回目の回帰テスト）。
+///
+/// 確保失敗はアドレス空間上限（`RLIMIT_AS`）で起こすため
+/// `vm.overcommit_memory` の設定に依存しない。`RLIMIT_AS` はプロセス全体に
+/// 効くため、同じテストバイナリを子プロセスとして起動し
+/// [`runtime_allocation_failure_child`] だけを `--exact` で実行する（テスト
+/// プロセス自身の上限は変えない）。子が異常終了（是正前の abort）した場合・
+/// 対象テストが実行されなかった場合（空振り）はいずれも失敗にする。
+/// `RLIMIT_AS` が確保要求を拒否することを前提にするため Linux 限定（macOS は
+/// `RLIMIT_AS` を強制しない）。
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn runtime_allocation_failures_are_typed_errors_under_address_space_limit() {
+    if std::env::var_os(RUNTIME_ALLOC_CHILD_ENV).is_some() {
+        return;
+    }
+    let exe = std::env::current_exe().expect("テストバイナリのパスを取得できない");
+    for scenario in ["initializer", "constant", "autograd", "export"] {
+        let output = std::process::Command::new(&exe)
+            .arg("runtime_allocation_failure_child")
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(RUNTIME_ALLOC_CHILD_ENV, scenario)
+            .output()
+            .expect("子プロセスを起動できない");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "シナリオ {scenario}: アドレス空間上限下の子プロセスが失敗した（status={:?}。\
+             abort なら確保が無条件のまま）\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "シナリオ {scenario}: 子プロセスで対象テストが実行されていない（空振り）\n\
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
