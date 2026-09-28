@@ -12622,13 +12622,14 @@ fn facade_does_not_reexport_or_declare_param_groups() {
 /// （`workspace_declares_loss_ops_fn_names_only_in_allowed_locations`
 /// と同型のインベントリ）。
 ///
-/// **期待集合**（着手前確認の再 grep で判明。実装計画「インベントリを
-/// 実測する」手順）: `step_with_groups`（trait 宣言 1 件 + impl 6 件、
+/// **期待集合**（イシュー #2298 で `Adadelta`／`Adamax`／`NAdam`／
+/// `RAdam` の 4 impl・4 `step_with_slot_hparams` を追加。着手前確認の
+/// 再 grep で判明）: `step_with_groups`（trait 宣言 1 件 + impl 10 件、
 /// いずれも `crates/autodiff/src/nn/optim/param_group.rs`）・
 /// `resolve_slot_hparams`（同ファイルに 1 件）・`step_with_slot_hparams`
 /// （`adamw.rs`・`adam.rs`・`rmsprop.rs`・`adagrad.rs`・`lamb.rs`・
-/// `optim/sgd.rs` に各 1 件）・`compile_with_param_groups`（0 件。
-/// 承認待ちのため未実装）。
+/// `optim/sgd.rs`・`adadelta.rs`・`adamax.rs`・`nadam.rs`・`radam.rs` に
+/// 各 1 件）・`compile_with_param_groups`（0 件。承認待ちのため未実装）。
 #[test]
 fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -12684,7 +12685,7 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
     let expected: std::collections::BTreeMap<String, usize> = [
         (
             "autodiff/src/nn/optim/param_group.rs::step_with_groups",
-            7usize,
+            11usize,
         ),
         (
             "autodiff/src/nn/optim/param_group.rs::resolve_slot_hparams",
@@ -12711,6 +12712,22 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
             1usize,
         ),
         ("autodiff/src/optim/sgd.rs::step_with_slot_hparams", 1usize),
+        (
+            "autodiff/src/nn/optim/adadelta.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/adamax.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/nadam.rs::step_with_slot_hparams",
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/optim/radam.rs::step_with_slot_hparams",
+            1usize,
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
