@@ -9,7 +9,7 @@
 - macOS arm64（M4 Max）向け公式 wheel は `.bazelrc` の `release_macos_arm64` config に `mkl_aarch64` 系 `--define` が一切現れず、`INTEL_MKL` マクロが未定義になるため `IsMklEnabled()` は常に `false`（確定。§4）。M4 Max の TF CPU GEMM は oneDNN op-rewrite を経由しない。
 - Linux aarch64（GB10）向け公式 wheel は `release_arm64_linux` config が `mkl_aarch64_threadpool` を経由し `build_with_mkl_aarch64=true` → `INTEL_MKL` 定義（確定。§5）。ただし上記の Neoverse V1 専用判定により既定は OFF 寄りと推測される（推定）。
 - **GB10 実測では CPU GEMM（N=256〜2048）・train・infer の全マッチセルで fandhe-ai 0.8.0 が TensorFlow 2.21.0・SciPy 1.18.1 を上回っている**（§10 表 1）。N=4096 は fandhe-ai 側の CPU 実測データが存在せず比較不能。
-- **M4 Max では N=256 の CPU GEMM で fandhe-ai がわずかに負ける**（107.4 GFLOPS 対 TF 129 GFLOPS・SciPy 121 GFLOPS）。train・infer では SciPy に負ける（infer は TF には勝つ）。負けセルは N=256 GEMM・train・infer の 3 種（§10 表 2）。
+- **M4 Max では N=256 の CPU GEMM で fandhe-ai がわずかに負ける**（107.4 GFLOPS 対 TF 129 GFLOPS・SciPy 121 GFLOPS）。train・infer では SciPy に負ける（infer は TF には勝つ）。負けセルは N=256 GEMM・train・infer の 3 種（§10 表 2）。**train・infer の判定は fandhe-ai の `reuse` モード値を採用した場合のもので、`fresh` モード値を採ると train は TF に対して「勝ち」に転じる（§10 表 2 直後の注記）。**
 - SciPy の BLAS リンク先は wheels.yml のビルドマトリクスから macOS arm64 で openblas 変種と accelerate 変種の**両方**がビルドされることまでは確定できたが、PyPI へ実際に公開される変種の断定はワークフロー読み取りだけでは不可能（§8・§11）。
 - コードの持ち込みはなし。結論と `path:line`・タグ固定 URL のみを記録する。
 
@@ -109,7 +109,7 @@ eager 実行（`tf.matmul` 直接呼び出し）のスレッドプールが `Ini
 
 ### §8.4 スレッド（スコープ外）
 
-SciPy 自身はスレッド数を決めない。リンク先 BLAS が決める（OpenBLAS: `OPENBLAS_NUM_THREADS`／`OMP_NUM_THREADS`、Accelerate: `VECLIB_MAXIMUM_THREADS`）。BLAS ライブラリ内部の既定スレッド数導出ロジックはスコープ外（Eigen／oneDNN／ACL／OpenBLAS／Accelerate の内部実装に踏み込まない方針。§0）。`threadpoolctl` は SciPy がスレッドプール検出に対応していることの指摘に留める。
+SciPy 自身はスレッド数を決めない。リンク先 BLAS が決める（OpenBLAS: `OPENBLAS_NUM_THREADS`／`OMP_NUM_THREADS`、Accelerate: `VECLIB_MAXIMUM_THREADS`）。BLAS ライブラリ内部の既定スレッド数導出ロジックはスコープ外（Eigen／oneDNN／ACL／OpenBLAS／Accelerate の内部実装に踏み込まない方針。冒頭「読み取り解析のみ」の方針および §11 の非目標記載を参照）。`threadpoolctl` は SciPy がスレッドプール検出に対応していることの指摘に留める。
 
 ### §8.5 train／infer セルの注記
 
@@ -160,6 +160,8 @@ GB10 では本解析範囲のマッチセルすべてで fandhe-ai が両 FW を
 
 M4 Max は N=256 GEMM・train・infer の 3 セルで負け（train は TF に対しても僅差で負け）。0.9.0 版の M4 実測 JSONL は本リポジトリに未収録（Mac 側の実測申し送り事項。MEMORY.md 記載どおり）のため、0.8.0 データを参照値として使用している。
 
+**train・infer セルのモード選択について（注記）**: 表 2 の train・infer は fandhe-ai の `reuse` モード値（train 1.000ms・infer 0.195ms）を採用している。同じ JSONL には `fresh` モード値（train 0.835ms・infer 0.178ms）も存在し、`fresh` を採ると train は TF 2.16.2（0.96ms）に対して「勝ち」に転じる（0.835ms < 0.96ms）。`reuse` を主指標とした根拠は `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py`（`me = data.get((..., 'reuse'))` としてスコアボードの主表示列に採用し、`fresh` は参考列として併記する既存の集計規約。[`gen_1988.py#L146-L147`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）に倣ったもので、表 1（GB10）が train・infer を含め fandhe-ai・TF・SciPy とも `fresh` 同士で統一しているのとはモード選択の基準が異なる。この注記が §1 サマリの「train は TF に対しても僅差で負け」という結論の前提（`reuse` 採用）を明示する。
+
 ## §11 限界・申し送り
 
 - 到達範囲はディスパッチ層まで。Eigen の contraction 実装本体・oneDNN（`dnnl_sgemm`）内部・Arm Compute Library・OpenBLAS・Accelerate の内部カーネル実装には踏み込んでいない。
@@ -198,4 +200,4 @@ M4 Max は N=256 GEMM・train・infer の 3 セルで負け（train は TF に�
 
 ### 既存記録との突合結果（Step 6）
 
-`docs/perf/cpu-gemm-default-thread-limit.md`・`cpu-gemm-small-shape-thread-cap.md`・`cpu-gemm-gb10-affinity-ab.md`・`cpu-gemm-blocking-sweep.md`・`cpu-gemm-2d-dynamic-*.md`・`cpu-gemm-ic-dynamic-variant.md`・`cpu-gemm-sme-fmopa-microkernel.md`・`cpu-gemm-neon-b-laneq-fma.md`・`cpu-gemm-prefetch-decision.md`・`cpu-gemm-b-packing-sharing-decision.md`・`cpu-matmul-fixed-cost-impl.md`・`cpu-mse-backward-sequential-threshold.md`・`cpu-gemm-candle-*.md` はいずれも fandhe-ai 自身の CPU GEMM 最適化記録であり、TensorFlow／SciPy のディスパッチ経路そのものを扱ったものではないため、本 doc の差分候補（§5 の Neoverse V1 判定・§8.2 の f2py コピー有無）と重複する既存判定は確認できなかった（`git grep -l -E "REJECT|undetermined|判定不能" -- docs` によるスコープ全体の突合を含む）。Phase 3（#2098）への入力として §11 の各項目をそのまま引き継ぐ。
+`docs/perf/cpu-gemm-default-thread-limit.md`・`docs/perf/cpu-gemm-small-shape-thread-cap.md`・`docs/perf/cpu-gemm-gb10-affinity-ab.md`・`docs/perf/cpu-gemm-blocking-sweep.md`・`docs/perf/cpu-gemm-2d-dynamic-variant.md`・`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`・`docs/perf/cpu-gemm-ic-dynamic-variant.md`・`docs/perf/cpu-gemm-sme-fmopa-microkernel.md`・`docs/perf/cpu-gemm-neon-b-laneq-fma.md`・`docs/perf/cpu-matmul-fixed-cost-impl.md`・`docs/perf/cpu-mse-backward-sequential-threshold.md`・`docs/perf/cpu-gemm-candle-cpu-retune.md`・`docs/perf/cpu-gemm-candle-gate-remeasurement.md`（以上 `docs/perf/` 配下）・`docs/cpu-gemm-prefetch-decision.md`・`docs/cpu-gemm-b-packing-sharing-decision.md`・`docs/cpu-gemm-2d-dynamic-partition-design.md`（以上 `docs/perf/` ではなく `docs/` 直下）はいずれも fandhe-ai 自身の CPU GEMM 最適化記録であり、TensorFlow／SciPy のディスパッチ経路そのものを扱ったものではないため、本 doc の差分候補（§5 の Neoverse V1 判定・§8.2 の f2py コピー有無）と重複する既存判定は確認できなかった（`git grep -l -E "REJECT|undetermined|判定不能" -- docs` によるスコープ全体の突合を含む）。Phase 3（#2098）への入力として §11 の各項目をそのまま引き継ぐ。
