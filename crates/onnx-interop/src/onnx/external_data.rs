@@ -47,18 +47,37 @@
 //!    （`.data` ファイル全体は読まない）。読み込み直前に `metadata().len()`
 //!    （Unix では dev/ino も）をパス 1 の記録と再照合し、不一致は
 //!    [`ExternalDataError::FileChangedDuringLoad`] とする。
-//!    Linux／macOS（CI ビルド対象）では、そもそもパス 1 のファイル解決
-//!    自体が `openat(O_NOFOLLOW)` によるディレクトリハンドル連鎖
-//!    （`no_follow_open` モジュール）で行われ、検証済みの fd をそのまま
-//!    保持するため経路文字列の再解決が発生せず、シンボリックリンク差し替え
-//!    による TOCTOU 窓は構造的に生じない（`docs/
-//!    onnx-external-data-decision.md` の残タスクを解消。#2347 P0 是正・
-//!    PR #2348 コードレビュー対応）。上記 CI 対象外の他 unix
-//!    ターゲットでは `openat` のフラグ定数値を実機実測できておらず
-//!    誤った値では検査自体が無意味になるため、旧 `symlink_metadata`
-//!    逐次検証 → `canonicalize` → `File::open` という経路文字列再解決の
-//!    フォールバック実装（同種の TOCTOU 窓が残っていた）は撤去済みで、
-//!    `resolve_and_open` は常に
+//!
+//!    **経路解決方式（unix 全般。イシュー #2347 是正版）**: パス 1 の
+//!    ファイル解決は `base_dir` を 1 度だけディレクトリ fd として開き
+//!    （`no_follow_open::open_base_dir`）、以後の全テンソルがその fd を
+//!    起点に `location` を解決する。**Linux** では `openat2(2)`
+//!    （`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS`。
+//!    `no_follow_open::open_chain_openat2`）で経路解決全体を 1 回の
+//!    システムコールとしてカーネルへアトミックに封じ込めさせる。
+//!    `openat2` が未対応（`ENOSYS`／`EPERM`。古いカーネル・seccomp 等）の
+//!    場合のみ、成分ごと逐次 `openat(O_NOFOLLOW)` で辿る方式
+//!    （`no_follow_open::open_chain_component_walk`）へフォールバックする。
+//!    **macOS・その他 unix**（`openat2` 非対応）では常に逐次方式を使う。
+//!    いずれの方式も検証済みの fd をそのまま保持し経路文字列を**一切**
+//!    再解決しないため（診断用のシンボリックリンク判別も、既に開いた
+//!    親ディレクトリ fd を起点にした単一コンポーネントの `fstatat`
+//!    〈`AT_SYMLINK_NOFOLLOW`〉のみを使う）、シンボリックリンク差し替えに
+//!    よる TOCTOU 窓は構造的に生じない（P0 是正: PRRT_kwDOTuUCJc6mkUsI・
+//!    PRRT_kwDOTuUCJc6mk30J。`docs/onnx-external-data-decision.md` の
+//!    残タスクを解消）。
+//!
+//!    旧実装は `openat` のフラグ定数（`O_DIRECTORY`／`O_NOFOLLOW` 等）を
+//!    OS ごとに手書きしていたが、Linux では同じ定数でも CPU アーキテク
+//!    チャごとに値が異なり（例: x86 は `O_DIRECTORY=0o200000`・aarch64 は
+//!    `O_DIRECTORY=0o40000`）、手書き値のまま aarch64 Linux（DGX Spark
+//!    GB10）でビルドするとシンボリックリンク拒否が機能しない実装バグを
+//!    生んでいた。`libc`（`.claude/rules/deps-policy.md`「OS FFI」区分。
+//!    2026-09-28 ユーザー承認）の定数・`syscall` を使うことでこの
+//!    プラットフォーム差異を自作せず解消する。
+//!
+//!    **非 unix（Windows 等）**: `openat`／`openat2` 相当の安全な経路
+//!    解決手段を持たないため、`resolve_and_open` は常に
 //!    [`ExternalDataError::UnsupportedPlatformForSecureResolve`] で拒否
 //!    する（fail-closed。`docs/onnx-external-data-decision.md` 5 節）。
 //!
@@ -68,9 +87,13 @@
 //!
 //! ## facade への公開範囲
 //!
-//! 本モジュールは `onnx-interop` 内部限定であり facade へは公開しない
-//! （承認待ち事項。`docs/compat-api-scope.md` §5・`docs/
-//! facade-onnx-import-exposure-decision.md` 追補節）。
+//! `crate::facade::interop::onnx::OnnxModel::from_path`（本クレート外部）
+//! が [`build_graph_with_external_data`] へ委譲する形で 2026-09-28 に
+//! 公開済み（`docs/facade-onnx-import-exposure-decision.md` §6.3・
+//! `docs/compat-api-scope.md` §5 の承認待ち事項を解消。イシュー #2347）。
+//! [`resolve_external_data`]・[`ExternalDataOptions`] 自体は本モジュール
+//! （`onnx-interop` 内部限定）のままであり、facade 側は既定オプション
+//! （[`ExternalDataOptions::default`]）を渡すラッパーに徹する。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -81,12 +104,12 @@ use std::path::{Component, Path, PathBuf};
 use super::graph::{GraphError, element_count};
 use super::proto::{ModelProto, TensorProto, cap_sparse_tensor_diag_name, data_location};
 
-/// external data の合計サイズ上限の既定値（4 GiB）。
+/// external data の合計サイズ上限の既定値（64 GiB）。
 ///
-/// **暫定値・ユーザー承認待ち**（イシュー #2347 計画 §2「承認待ちの事項」）。
+/// 2026-09-28 ユーザー承認（イシュー #2347。当初の 4 GiB 暫定値から改定）。
 /// 変更は本定数 1 行の書き換えで済む。`ExternalDataOptions::default()` が
 /// 参照する。
-pub const DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// 1 モデルあたりに同時オープンを許す external data ファイル数（実体単位。
 /// `FileKey` で畳み込んだ後の distinct 数）の既定上限。
@@ -403,118 +426,113 @@ struct OpenFile {
     dev_ino: (u64, u64),
 }
 
-/// ディレクトリハンドル（fd）を起点に `O_NOFOLLOW` で各パス成分を逐次
-/// オープンする実装（P0 対応。discussion_r4119392011）。
+/// ディレクトリ fd（`base_dir` を開いたハンドル）を起点に `location` を
+/// シンボリックリンク拒否で解決してファイルを開く実装（P0 対応。
+/// discussion_r4119392011・イシュー #2347 是正版）。
 ///
-/// 旧実装は `symlink_metadata` で各段を検証したうえで `canonicalize` →
-/// `File::open(&canonical)` とパス文字列から**再度**ファイルを開いていた。
-/// この「検証」と「再オープン」の間に窓（TOCTOU）があり、検証後・オープン
-/// 前にファイルシステム上でディレクトリ成分がシンボリックリンクへ
-/// 差し替えられると、検証済みのはずの経路が `base_dir` の外を指す実体を
-/// 開いてしまい得た。
+/// 旧実装は手書きの `extern "C"` 宣言と手書きの `openat` フラグ定数を
+/// 使っていたが、Linux では同じ定数でも CPU アーキテクチャごとに値が
+/// 異なり（例: x86 は `O_DIRECTORY=0o200000`・aarch64 は
+/// `O_DIRECTORY=0o40000`）、x86 向けの値のまま aarch64 Linux（DGX Spark
+/// GB10）でビルドするとシンボリックリンク拒否が機能しない実装バグを
+/// 生んでいた。本実装は `libc`（`.claude/rules/deps-policy.md`「OS FFI」
+/// 区分。2026-09-28 ユーザー承認）の定数・関数を使い、この種の値の取り
+/// 違えを自作せず解消する。
 ///
-/// 本実装は経路を文字列として再解決しない。`base_dir` を開いた
-/// ディレクトリ fd を起点に、各パス成分を `openat(dirfd, name,
-/// O_NOFOLLOW)` でその fd に対して相対的に開き、得られた fd をそのまま
-/// 次段の起点にする。`O_NOFOLLOW` により対象がシンボリックリンクなら
-/// `ELOOP` で即座に失敗するため、検証済みの fd 連鎖以外を辿る余地が
-/// 生じない（カーネルが 1 段のパス解決をアトミックに行うことに依拠する。
-/// `docs/onnx-external-data-decision.md` に残タスクとして記録していた
-/// 「std に `O_NOFOLLOW` 相当が無いため完全な排除はできない」という制約は
-/// 本実装（std を経由せず `extern "C"` で `openat` を直接呼ぶ）で解消する）。
+/// 経路は文字列として再解決しない。**Linux** は `openat2(2)`
+/// （[`open_chain_openat2`]。`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+/// RESOLVE_NO_MAGICLINKS`）で経路解決全体をカーネルへ 1 回のシステム
+/// コールとしてアトミックに封じ込めさせる。`openat2` が未対応
+/// （`ENOSYS`／`EPERM`）の場合のみ、成分ごと逐次 `openat(dirfd, name,
+/// O_NOFOLLOW)` で辿る [`open_chain_component_walk`] へフォールバックする
+/// （**macOS・その他 unix**〈`openat2` 非対応〉では常にこちらを使う）。
+/// いずれの方式も、対象がシンボリックリンクなら `ELOOP` で即座に失敗する
+/// ため検証済みの fd 連鎖以外を辿る余地が生じない。エラー分類用の診断
+/// （シンボリックリンクか否かの判別）も、既に開いた親ディレクトリ fd を
+/// 起点にした単一コンポーネントの `fstatat(AT_SYMLINK_NOFOLLOW)` のみを
+/// 使い、`symlink_metadata`／`canonicalize` によるパス文字列の再解決は
+/// 一切行わない（P0 是正: PRRT_kwDOTuUCJc6mkUsI・PRRT_kwDOTuUCJc6mk30J。
+/// 旧実装はここで累積パス文字列 `symlink_metadata` を呼んでおり、その
+/// 呼び出し自体が検証後の再解決だった）。
 ///
-/// Linux／macOS 限定（CI ビルド対象〈`cargo build (linux /
-/// aarch64-apple-darwin)`〉と同一。フラグ定数値が OS ごとに異なるため、
-/// 実測未検証の他 unix では使わない。対象外の target では下方の
-/// `#[cfg(not(any(target_os = "linux", target_os = "macos")))]` 版の
-/// `resolve_and_open` が常に
-/// [`ExternalDataError::UnsupportedPlatformForSecureResolve`] で拒否する
-/// （旧経路文字列再解決フォールバックは同種の TOCTOU 窓が残るため撤去
-/// 済み。`docs/onnx-external-data-decision.md` 5 節）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// `base_dir` のディレクトリ fd は [`open_base_dir`] で 1 度だけ開き、
+/// `plan` が全テンソル分を通して再利用する（呼び出しごとに開き直さない。
+/// advisor 指摘）。
+#[cfg(unix)]
 mod no_follow_open {
-    use std::ffi::{CString, c_char, c_int};
+    use std::ffi::{CString, OsStr};
     use std::fs::File;
     use std::io;
+    #[cfg(target_os = "linux")]
+    use std::mem::size_of;
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::{AsRawFd, FromRawFd};
     use std::path::Path;
 
-    // `openat(2)` のフラグ値（`libc` crate 相当の定数を手書き。本クレートは
-    // 許容依存 9 区分〈deps-policy.md〉に `libc` を含まないためユーザー
-    // 承認なしに追加できない。std がリンクする libc は常に存在するため、
-    // 新規クレート依存を増やさず `extern "C"` で直接呼ぶ）。値は OS ごとの
-    // `fcntl.h` 定義に一致させる。
-    #[cfg(target_os = "linux")]
-    mod flags {
-        pub const O_RDONLY: i32 = 0;
-        pub const O_DIRECTORY: i32 = 0o200_000;
-        pub const O_NOFOLLOW: i32 = 0o400_000;
-        pub const O_CLOEXEC: i32 = 0o2_000_000;
-        // `open(2)`/`openat(2)` に付与すると、対象が FIFO（named pipe）
-        // であっても他端の読み書き待ちでブロックしない（Linux
-        // `open_flags` の一般契約）。通常ファイル・ディレクトリの
-        // open には影響しない（無視される）ため、全 open 呼び出しに
-        // 無条件で付与できる（Cursor Bugbot 指摘: base_dir 内に FIFO が
-        // 混入すると `is_file()` チェックより前の `open` 自体が無期限に
-        // ハングし得た）。
-        pub const O_NONBLOCK: i32 = 0o4_000;
-    }
-    #[cfg(target_os = "macos")]
-    mod flags {
-        pub const O_RDONLY: i32 = 0x0000_0000;
-        pub const O_DIRECTORY: i32 = 0x0010_0000;
-        pub const O_NOFOLLOW: i32 = 0x0000_0100;
-        pub const O_CLOEXEC: i32 = 0x0100_0000;
-        // Linux 側と同じ理由（FIFO open のハング防止）。Darwin
-        // `sys/fcntl.h` の値。
-        pub const O_NONBLOCK: i32 = 0x0000_0004;
-    }
-    use flags::{O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_RDONLY};
-
-    // ELOOP（"too many levels of symbolic links"）: Linux/macOS 共通で
-    // `O_NOFOLLOW` 指定時に対象がシンボリックリンクだと返る errno。
-    #[cfg(target_os = "linux")]
-    const ELOOP: i32 = 40;
-    #[cfg(target_os = "macos")]
-    const ELOOP: i32 = 62;
-    // ENOTDIR（"not a directory"）: Linux／macOS 共通で 20。`O_DIRECTORY|
-    // O_NOFOLLOW` で開いた対象がシンボリックリンクだった場合、カーネルは
-    // `ELOOP` ではなく `ENOTDIR` を返す（実機実測。シンボリックリンクは
-    // 「ディレクトリではない」ためこちらが優先される）。この値は「対象が
-    // シンボリックリンク」と「対象が単なる非ディレクトリの通常ファイル」の
-    // 両方で返るため、下の [`open_chain_no_follow`] は診断用の
-    // `symlink_metadata`（open 失敗**後**の分類専用。安全性判断には使わず、
-    // 既に fail-closed で拒否済みの結果をどちらのエラー種別として
-    // 報告するかにのみ使う）で判別する。呼び出し元（外側の
-    // `resolve_and_open`）も同じ値で `NotRegularFile` 判定を行うため
-    // `pub(super)` で公開し、値を二重管理しない。
-    pub(super) const ENOTDIR: i32 = 20;
-
-    // SAFETY: `openat` は POSIX 標準関数で、std バイナリには常に libc が
-    // リンクされているため crate 追加なしに呼び出せる。呼び出し側
-    // （`openat_no_follow`）が引数の有効性（fd の生存・C 文字列の NUL 終端）
-    // を保証する。
-    unsafe extern "C" {
-        // POSIX の実プロトタイプは `int openat(int, const char *, int, ...)`
-        // （`O_CREAT` 指定時のみ第 4 引数 `mode_t` を使う可変長引数）。
-        // 固定 3 引数で宣言すると、可変長引数呼び出し規約が固定引数と
-        // 異なる ABI（Apple arm64 等）で不一致になり得るため、シグネチャを
-        // 可変長引数のまま宣言する（呼び出し側は `O_CREAT` を渡さないため
-        // 可変長引数を実際には渡さない）。
-        fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
+    /// `base_dir_canonical` をディレクトリ fd として 1 度だけ開く。`plan`
+    /// が全 external テンソル分を通してこの fd を再利用する。`O_NONBLOCK`
+    /// は FIFO 混入時の無期限ハング防止（下記 `openat_no_follow` と同じ
+    /// 理由）。`OpenOptionsExt::custom_flags` は安全な std API のため
+    /// `unsafe` を要しない。
+    pub(super) fn open_base_dir(base_dir_canonical: &Path) -> io::Result<File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(base_dir_canonical)
     }
 
-    /// シンボリックリンク検知（`ELOOP`）かどうかを判定する。
+    /// シンボリックリンク検知（`ELOOP`）かどうかを判定する。Linux／macOS
+    /// 共通で POSIX が規定する errno のため `libc::ELOOP` をそのまま使う
+    /// （アーキテクチャ間の値の取り違えは `libc` が吸収する）。
     fn is_eloop(e: &io::Error) -> bool {
-        e.raw_os_error() == Some(ELOOP)
+        e.raw_os_error() == Some(libc::ELOOP)
+    }
+
+    /// `dir`（親ディレクトリ fd）に対して相対的な単一コンポーネント
+    /// `name` の種別を診断する（シンボリックリンクか否か）。
+    /// `open_chain_component_walk` が `ENOTDIR`（「シンボリックリンクを
+    /// `O_DIRECTORY` 付きで開いた」場合と「単なる非ディレクトリの通常
+    /// ファイルを `O_DIRECTORY` 付きで開いた」場合の両方で返り得る）の
+    /// どちらのエラー種別として報告するかの分類にのみ使う診断専用の
+    /// 関数。`dir` は呼び出し元が既に検証済みの親ディレクトリ fd であり、
+    /// `fstatat(AT_SYMLINK_NOFOLLOW)` は `name` 単一コンポーネントのみを
+    /// その fd に対して相対的に見るため、経路文字列の再解決（TOCTOU 窓）
+    /// を伴わない。
+    fn is_symlink_component(dir: &File, name: &OsStr) -> bool {
+        let Ok(c_name) = CString::new(name.as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `zeroed()` で得る `libc::stat` はすべてのフィールドが
+        // ビット表現 0 でも有効な値になる POD 構造体（POSIX の `stat`
+        // 構造体は整数・配列フィールドのみで構成され、`0` 埋めのままでも
+        // 不変条件を持たない）。`fstatat` は成功時のみこのバッファへ書き
+        // 込むため、`ret == 0` を確認してから中身を読む下の判定は健全。
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `dir.as_raw_fd()` はこの呼び出しの間生存している `dir`
+        // が所有する有効な open ディレクトリ fd。`c_name` は直前の
+        // `CString::new` が NUL 終端を保証した有効な C 文字列でこの
+        // 呼び出しの間生存する。`&mut st` は上で初期化済みの有効な出力
+        // バッファへの排他参照。本関数は結果の真偽のみを診断（エラー
+        // 種別の分類）に使い、安全性判断（fail-closed 拒否の可否）には
+        // 使わない。
+        let ret = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                c_name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        ret == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK
     }
 
     /// `dir` に対して相対的に `name`（単一パス成分。`..`／`/` を含まない
-    /// `Path::components()` の `Normal`由来の値のみを渡す前提）を
+    /// `Path::components()` の `Normal` 由来の値のみを渡す前提）を
     /// `O_NOFOLLOW` で開く。`want_dir` が true なら `O_DIRECTORY` を付け、
     /// 対象がディレクトリでなければ失敗する。
-    fn openat_no_follow(dir: &File, name: &std::ffi::OsStr, want_dir: bool) -> io::Result<File> {
+    fn openat_no_follow(dir: &File, name: &OsStr, want_dir: bool) -> io::Result<File> {
         let c_name = CString::new(name.as_bytes())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         // `O_NONBLOCK` を無条件で付与する（High・Cursor Bugbot 指摘）:
@@ -527,18 +545,20 @@ mod no_follow_open {
         // デバイス・ソケットにのみ意味を持つ）ため、中間ディレクトリ・
         // 最終ファイルのどちらの open にも無条件で付与してよい。
         let flags = if want_dir {
-            O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
+            libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
         } else {
-            O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
         };
         // SAFETY: `dir.as_raw_fd()` はこの呼び出しの間生存している `dir` が
         // 所有する有効な open ディレクトリ fd。`c_name` は
         // `CString::new` が NUL 終端を保証した有効な C 文字列で、この
-        // 呼び出しの間生存する。返り値が非負なら新規に確保された fd の
-        // 所有権を呼び出し元へ渡す契約（POSIX `openat(2)`）であり、
+        // 呼び出しの間生存する。`libc::openat` は POSIX 標準の可変長引数
+        // 関数だが本呼び出しは `O_CREAT` を渡さないため可変長引数は
+        // 実際には使わない。返り値が非負なら新規に確保された fd の所有権
+        // を呼び出し元へ渡す契約（POSIX `openat(2)`）であり、
         // `File::from_raw_fd` で即座に `File` へ委譲することで二重解放・
         // リークを防ぐ。
-        let fd = unsafe { openat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -548,57 +568,142 @@ mod no_follow_open {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    /// `base_dir` を起点に `parts` を 1 段ずつ `O_NOFOLLOW` で辿り、最終
-    /// ファイルの fd を得る。中間段は `O_DIRECTORY` 付きで開くためディレクトリ
-    /// でなければ失敗し、途中経路のシンボリックリンクは `ELOOP` で拒否される。
-    /// エラーはシンボリックリンク検知か否かを呼び出し元が判別できるよう
-    /// `(io::Error, bool /* is_symlink */)` を返す。
-    pub(super) fn open_chain_no_follow(
-        base_dir: &Path,
-        parts: &[&std::ffi::OsStr],
+    /// `base_dir`（[`open_base_dir`] が開いたディレクトリ fd）を起点に
+    /// `parts` を 1 段ずつ `O_NOFOLLOW` で辿り、最終ファイルの fd を得る
+    /// （`openat2` 非対応環境向けのフォールバック方式。macOS・その他
+    /// unix では常にこちらを使う）。中間段は `O_DIRECTORY` 付きで開く
+    /// ためディレクトリでなければ失敗し、途中経路のシンボリックリンクは
+    /// `ELOOP` で拒否される。エラーはシンボリックリンク検知か否かを
+    /// 呼び出し元が判別できるよう `(io::Error, bool /* is_symlink */)`
+    /// を返す。
+    pub(super) fn open_chain_component_walk(
+        base_dir: &File,
+        parts: &[&OsStr],
     ) -> Result<File, (io::Error, bool)> {
         if parts.is_empty() {
             return Err((io::Error::from(io::ErrorKind::InvalidInput), false));
         }
-        // `base_dir` はモジュール冒頭コメントのとおり呼び出し元が与える
-        // 信頼済み入力（`resolve_external_data` が canonicalize 済みの値を
-        // 渡す）のため、素直に `File::open` する。
-        let mut dir = File::open(base_dir).map_err(|e| (e, false))?;
         let last_idx = parts.len() - 1;
-        // エラー分類専用（診断用）の累積パス。実際のファイルオープンには
-        // 使わない（オープンは常に `dir` の fd を起点にした `openat` 経由）。
-        let mut accumulated = base_dir.to_path_buf();
+        // 直前段の fd。最初の反復は呼び出し元が既に開いた `base_dir` を
+        // 起点にし、以後は毎段 `openat_no_follow` が返す新規 fd に置き
+        // 換わる（経路文字列ではなく fd を起点に辿る）。
+        let mut dir_owned: Option<File> = None;
         for (i, part) in parts.iter().enumerate() {
-            accumulated.push(part);
             let want_dir = i != last_idx;
-            match openat_no_follow(&dir, part, want_dir) {
-                Ok(next) => dir = next,
+            let current: &File = dir_owned.as_ref().unwrap_or(base_dir);
+            match openat_no_follow(current, part, want_dir) {
+                Ok(next) => dir_owned = Some(next),
                 Err(e) => {
                     let is_sym = is_eloop(&e)
                         || (want_dir
-                            && e.raw_os_error() == Some(ENOTDIR)
-                            && std::fs::symlink_metadata(&accumulated)
-                                .map(|m| m.file_type().is_symlink())
-                                .unwrap_or(false));
+                            && e.raw_os_error() == Some(libc::ENOTDIR)
+                            && is_symlink_component(current, part));
                     return Err((e, is_sym));
                 }
             }
         }
-        Ok(dir)
+        // `parts` は上で非空を確認済みのため、ループは必ず 1 回以上
+        // `dir_owned` へ書き込んでから正常終了する。`unwrap()` の代わりに
+        // 型付きエラーで表面化させる（coding-rust.md「本番経路で
+        // unwrap/expect を使わない」。到達しないはずの防御的分岐）。
+        dir_owned.ok_or((io::Error::from(io::ErrorKind::InvalidInput), false))
+    }
+
+    /// Linux 限定: `openat2(2)`（`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+    /// RESOLVE_NO_MAGICLINKS`）で経路解決全体をカーネルへ 1 回のシステム
+    /// コールとしてアトミックに封じ込めさせる。`RESOLVE_NO_XDEV` は
+    /// 意図的に付与しない（bind mount 越しのモデルディレクトリ配置を
+    /// 壊さないため。`RESOLVE_BENEATH` と `RESOLVE_NO_SYMLINKS` だけで
+    /// `base_dir` 外への脱出は既に閉じている）。`libc` は `SYS_openat2`・
+    /// `open_how`・`RESOLVE_*` 定数は提供するが `openat2()` の関数
+    /// ラッパー自体は未提供のため `libc::syscall` 経由で呼ぶ。
+    pub(super) enum Openat2Outcome {
+        Opened(File),
+        Failed(io::Error, bool /* is_symlink */),
+        /// `openat2` 自体が未対応（`ENOSYS`／`EPERM`。古いカーネル・
+        /// seccomp 等）。呼び出し元は [`open_chain_component_walk`] へ
+        /// フォールバックする。
+        Unsupported,
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn open_chain_openat2(base_dir: &File, parts: &[&OsStr]) -> Openat2Outcome {
+        if parts.is_empty() {
+            return Openat2Outcome::Failed(io::Error::from(io::ErrorKind::InvalidInput), false);
+        }
+        let mut rel: Vec<u8> = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                rel.push(b'/');
+            }
+            rel.extend_from_slice(part.as_bytes());
+        }
+        let Ok(c_rel) = CString::new(rel) else {
+            return Openat2Outcome::Failed(io::Error::from(io::ErrorKind::InvalidInput), false);
+        };
+        // `libc::open_how` は `#[non_exhaustive]`（将来のカーネル ABI
+        // 拡張に備えたフィールド追加余地）のため構造体リテラルで直接
+        // 構築できない。POSIX の `open_how` は整数フィールドのみで構成
+        // され `0` 埋めのままでも不変条件を持たない POD 構造体のため、
+        // ゼロ初期化してから既知フィールドのみを設定する（下の
+        // `is_symlink_component` の `libc::stat` ゼロ初期化と同じ根拠）。
+        // SAFETY: `libc::open_how` はビット表現 0 が有効な値になる POD
+        // 構造体（整数フィールドのみ・不変条件なし）。
+        let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+        how.flags = (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64;
+        how.resolve =
+            libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
+        // rename race 等による一時的な `EAGAIN` のみ有限回再試行する
+        // （`openat2(2)` man page: 経路解決が再試行を要して中断された
+        // 場合に返る）。無限ループ化を避けるため上限を設ける。
+        for _attempt in 0..4 {
+            // SAFETY: `base_dir.as_raw_fd()` は生存している有効な
+            // ディレクトリ fd。`c_rel` はこの呼び出しの間生存する有効な
+            // C 文字列。`&how` は正しく初期化された `open_how`（POSIX
+            // `openat2(2)` が要求するレイアウト）への参照で、第 4 引数に
+            // 渡す構造体サイズ（`size_of::<libc::open_how>()`）も一致
+            // する。返り値が非負なら新規に確保された fd の所有権をこの
+            // 呼び出し元が唯一取得する契約（`openat2(2)`）であり、
+            // `File::from_raw_fd` で即座に `File` へ委譲することで
+            // 二重解放・リークを防ぐ。
+            let ret = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    base_dir.as_raw_fd(),
+                    c_rel.as_ptr(),
+                    &how as *const libc::open_how,
+                    size_of::<libc::open_how>(),
+                )
+            };
+            if ret >= 0 {
+                // SAFETY: 上記と同じ根拠（直前の syscall が返した非負 fd
+                // の所有権をここで一意に取得する）。
+                return Openat2Outcome::Opened(unsafe { File::from_raw_fd(ret as i32) });
+            }
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::ENOSYS) | Some(libc::EPERM) => return Openat2Outcome::Unsupported,
+                Some(libc::EAGAIN) => continue,
+                Some(libc::ELOOP) => return Openat2Outcome::Failed(e, true),
+                _ => return Openat2Outcome::Failed(e, false),
+            }
+        }
+        Openat2Outcome::Failed(io::Error::from(io::ErrorKind::WouldBlock), false)
     }
 }
 
-/// `base_dir` を起点に `location` を検証しながら解決し、ファイルを開く。
-/// 経路の途中を含めシンボリックリンクを拒否し、`O_NOFOLLOW` によるディレクトリ
-/// ハンドル連鎖オープン（[`no_follow_open::open_chain_no_follow`]）で
-/// 「検証した経路そのもの」を開くことを保証する（A2・P0 対応。
-/// discussion_r4119392011）。返り値の第 2 要素は `plan` が `file_key_for`
-/// のフォールバック（dev/ino を持たないプラットフォーム）で使う、
+/// `base_dir_file`（[`no_follow_open::open_base_dir`] が開いたディレクトリ
+/// fd）を起点に `location` を検証しながら解決し、ファイルを開く。経路の
+/// 途中を含めシンボリックリンクを拒否し、`openat2`／`O_NOFOLLOW` による
+/// ディレクトリハンドル連鎖オープンで「検証した経路そのもの」を開くことを
+/// 保証する（A2・P0 対応。discussion_r4119392011・イシュー #2347）。
+/// 返り値の第 2 要素は `plan` が `file_key_for` のフォールバック（dev/ino
+/// を持たないプラットフォーム。実質使われない。下記コメント参照）で使う、
 /// `parts` から再構築した正規化済み相対パス。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 fn resolve_and_open(
     tensor_name: &str,
-    base_dir_canonical: &Path,
+    base_dir_file: &File,
     loc: &str,
 ) -> Result<(OpenFile, PathBuf), ExternalDataError> {
     let parts =
@@ -607,28 +712,39 @@ fn resolve_and_open(
             reason,
         })?;
 
-    let file = no_follow_open::open_chain_no_follow(base_dir_canonical, &parts).map_err(
-        |(e, is_symlink)| {
-            if is_symlink {
-                ExternalDataError::InvalidLocation {
-                    tensor_name: cap_name(tensor_name),
-                    reason: LocationRejectReason::Symlink,
-                }
-            } else if e.kind() == std::io::ErrorKind::NotADirectory
-                || e.raw_os_error() == Some(no_follow_open::ENOTDIR)
-            {
-                ExternalDataError::InvalidLocation {
-                    tensor_name: cap_name(tensor_name),
-                    reason: LocationRejectReason::NotRegularFile,
-                }
-            } else {
-                ExternalDataError::Io {
-                    tensor_name: cap_name(tensor_name),
-                    kind: e.kind(),
-                }
+    #[cfg(target_os = "linux")]
+    let open_result = match no_follow_open::open_chain_openat2(base_dir_file, &parts) {
+        no_follow_open::Openat2Outcome::Opened(f) => Ok(f),
+        no_follow_open::Openat2Outcome::Failed(e, is_symlink) => Err((e, is_symlink)),
+        // `openat2` 未対応環境（古いカーネル・seccomp 等）: 成分ごと逐次
+        // `openat(O_NOFOLLOW)` 方式へフォールバックする。
+        no_follow_open::Openat2Outcome::Unsupported => {
+            no_follow_open::open_chain_component_walk(base_dir_file, &parts)
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let open_result = no_follow_open::open_chain_component_walk(base_dir_file, &parts);
+
+    let file = open_result.map_err(|(e, is_symlink)| {
+        if is_symlink {
+            ExternalDataError::InvalidLocation {
+                tensor_name: cap_name(tensor_name),
+                reason: LocationRejectReason::Symlink,
             }
-        },
-    )?;
+        } else if e.kind() == std::io::ErrorKind::NotADirectory
+            || e.raw_os_error() == Some(libc::ENOTDIR)
+        {
+            ExternalDataError::InvalidLocation {
+                tensor_name: cap_name(tensor_name),
+                reason: LocationRejectReason::NotRegularFile,
+            }
+        } else {
+            ExternalDataError::Io {
+                tensor_name: cap_name(tensor_name),
+                kind: e.kind(),
+            }
+        }
+    })?;
 
     let meta = file.metadata().map_err(|e| ExternalDataError::Io {
         tensor_name: cap_name(tensor_name),
@@ -655,26 +771,17 @@ fn resolve_and_open(
     ))
 }
 
-/// [`resolve_and_open`] の Linux／macOS 以外向け実装。
+/// [`resolve_and_open`] の非 unix（Windows 等）向け実装。
 ///
-/// 旧実装は `symlink_metadata` による逐次検証 → `canonicalize` →
-/// `File::open` とパスから再オープンしており、検証とオープンの間の窓で
-/// シンボリックリンクを差し替えられると `base_dir` 外のファイルを開き得た
-/// （P0・discussion 指摘・PRRT_kwDOTuUCJc6mk30J）。上の `no_follow_open`
-/// モジュール（ディレクトリ fd 起点の `O_NOFOLLOW` 追跡拒否オープン）は
-/// `openat` のフラグ定数値（`O_DIRECTORY`／`O_NOFOLLOW`／`O_CLOEXEC`／
-/// `O_NONBLOCK`）が OS ごとに異なり、CI ビルド対象（linux・
-/// aarch64-apple-darwin）以外では実機実測できていないため、誤った値を
-/// 使うと検査そのものが無意味になるか未定義動作になりかねない。
-///
-/// 「実測できない環境では弱い実装にフォールバックする」のではなく、
-/// `security.md` の A08（整合性の迂回経路を作らない）・本 crate の
-/// fail-closed 方針（イシュー #2347 タイトルのとおり external data
-/// 読み込みは fail-closed 前提）に従い、**この関数は常に拒否する**。
-/// Linux／macOS 以外で external data を安全に読み込む対応が必要になった
-/// 場合は、対象 OS のフラグ値を実機実測したうえで `no_follow_open` の
-/// `cfg` 対象へ追加する（`docs/onnx-external-data-decision.md` 参照）。
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// `openat`／`openat2` 相当の、ディレクトリ fd 起点でシンボリックリンクを
+/// 拒否しながら経路解決する安全な手段を持たないため、`security.md` の
+/// A08（整合性の迂回経路を作らない）・本 crate の fail-closed 方針
+/// （イシュー #2347 タイトルのとおり external data 読み込みは fail-closed
+/// 前提）に従い、**この関数は常に拒否する**。非 unix で external data を
+/// 安全に読み込む対応が必要になった場合は、対象 OS の安全な no-follow
+/// open 手段（例: Windows の `FILE_FLAG_OPEN_REPARSE_POINT` ベースの実装）
+/// を個別に設計する（`docs/onnx-external-data-decision.md` 参照）。
+#[cfg(not(unix))]
 fn resolve_and_open(
     tensor_name: &str,
     _base_dir_canonical: &Path,
@@ -835,6 +942,15 @@ fn plan(
         }
     }
 
+    // `base_dir` のディレクトリ fd を 1 度だけ開き、以後の全テンソルが
+    // `resolve_and_open` 経由でこの fd を再利用する（呼び出しごとに開き
+    // 直さない）。非 unix では `resolve_and_open` が
+    // `base_dir_canonical: &Path` を直接受け取り常に拒否するため不要。
+    #[cfg(unix)]
+    let base_dir_file = no_follow_open::open_base_dir(base_dir_canonical).map_err(|e| {
+        GraphError::ExternalData(ExternalDataError::InvalidBaseDir { kind: e.kind() })
+    })?;
+
     let mut files: HashMap<FileKey, OpenFile> = HashMap::new();
     let mut regions: HashMap<FileKey, Vec<(u64, u64, String)>> = HashMap::new();
     let mut entries = Vec::new();
@@ -923,6 +1039,10 @@ fn plan(
                 tensor_name: tensor_name.clone(),
             })?;
 
+        #[cfg(unix)]
+        let (opened, normalized_rel) = resolve_and_open(&tensor_name, &base_dir_file, &location)
+            .map_err(GraphError::ExternalData)?;
+        #[cfg(not(unix))]
         let (opened, normalized_rel) =
             resolve_and_open(&tensor_name, base_dir_canonical, &location)
                 .map_err(GraphError::ExternalData)?;
@@ -1177,4 +1297,122 @@ pub fn build_graph_with_external_data(
     let mut cloned = model.clone();
     resolve_external_data(&mut cloned, base_dir, options)?;
     super::graph::build_graph(&cloned)
+}
+
+/// `no_follow_open` の 2 方式（Linux 限定 `openat2` と unix 全般の逐次
+/// `openat(O_NOFOLLOW)` フォールバック）を直接呼び出す単体テスト。
+/// `resolve_and_open` は Linux では既定で `openat2` 側を優先するため、
+/// `openat2` が未対応（`ENOSYS`／`EPERM`）にならない通常の開発・CI 環境
+/// では統合テスト（`tests/onnx_external_data.rs`）だけではフォールバック
+/// 関数（`open_chain_component_walk`）自体が実行されない。ここで両関数を
+/// 直接呼び、フォールバック経路も独立して検証する。
+#[cfg(all(test, unix))]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::no_follow_open;
+
+    /// テスト専用の一時ディレクトリ（`tests/onnx_external_data.rs::
+    /// TempDir` と同型。本ファイルはユニットテストのため独立実装する）。
+    struct UnitTestDir(std::path::PathBuf);
+
+    impl UnitTestDir {
+        fn new(name: &str) -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "onnx-interop-external-data-unit-{}-{name}-{n}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("一時ディレクトリの作成に失敗した");
+            UnitTestDir(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for UnitTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 両方式（`open_chain_component_walk`・Linux では `open_chain_openat2`
+    /// も）が、通常ファイルへの正常な多段解決を成功させることを確認する。
+    #[test]
+    fn both_strategies_open_normal_nested_file() {
+        let dir = UnitTestDir::new("normal");
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/f.data"), [1u8, 2, 3, 4]).unwrap();
+        let base_dir_file = no_follow_open::open_base_dir(dir.path()).expect("base_dir open 失敗");
+
+        let parts: Vec<&OsStr> = vec![OsStr::new("sub"), OsStr::new("f.data")];
+
+        let walked = no_follow_open::open_chain_component_walk(&base_dir_file, &parts)
+            .expect("component_walk は成功するはず");
+        assert_eq!(
+            std::io::Read::bytes(walked)
+                .map(|b| b.unwrap())
+                .collect::<Vec<u8>>(),
+            vec![1, 2, 3, 4]
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            match no_follow_open::open_chain_openat2(&base_dir_file, &parts) {
+                no_follow_open::Openat2Outcome::Opened(f) => {
+                    assert_eq!(
+                        std::io::Read::bytes(f)
+                            .map(|b| b.unwrap())
+                            .collect::<Vec<u8>>(),
+                        vec![1, 2, 3, 4]
+                    );
+                }
+                // 本 CI 環境の kernel が openat2 非対応の場合のみ許容する
+                // （`ENOSYS`/`EPERM`。`resolve_and_open` 側は
+                // `open_chain_component_walk` へフォールバックする経路と
+                // 同じ判定）。
+                no_follow_open::Openat2Outcome::Unsupported => {}
+                no_follow_open::Openat2Outcome::Failed(e, is_symlink) => {
+                    panic!("openat2 が失敗した（is_symlink={is_symlink}）: {e}")
+                }
+            }
+        }
+    }
+
+    /// 両方式が、経路途中のシンボリックリンクを `ELOOP` 系の失敗として
+    /// 拒否することを確認する（`is_symlink` フラグが true になること）。
+    #[test]
+    fn both_strategies_reject_symlink_component() {
+        let dir = UnitTestDir::new("symlink");
+        std::fs::write(dir.path().join("real.data"), [9u8; 4]).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real.data"), dir.path().join("link.data"))
+            .unwrap();
+        let base_dir_file = no_follow_open::open_base_dir(dir.path()).expect("base_dir open 失敗");
+
+        let parts: Vec<&OsStr> = vec![OsStr::new("link.data")];
+
+        let (_e, is_symlink) = no_follow_open::open_chain_component_walk(&base_dir_file, &parts)
+            .expect_err("component_walk はシンボリックリンクを拒否するはず");
+        assert!(
+            is_symlink,
+            "component_walk: is_symlink フラグが立っていない"
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            match no_follow_open::open_chain_openat2(&base_dir_file, &parts) {
+                no_follow_open::Openat2Outcome::Failed(_e, is_symlink) => {
+                    assert!(is_symlink, "openat2: is_symlink フラグが立っていない");
+                }
+                no_follow_open::Openat2Outcome::Unsupported => {}
+                no_follow_open::Openat2Outcome::Opened(_) => {
+                    panic!("openat2 がシンボリックリンクを開いてしまった（TOCTOU 回帰）")
+                }
+            }
+        }
+    }
 }

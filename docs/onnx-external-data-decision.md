@@ -112,20 +112,27 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      ONNX 仕様どおり EOF まで（`file_len - offset`。checked）と解釈する。
    - `location` は文字列段階（空・NUL・4096 バイト超過・`\`・ドライブ
      文字接頭辞）と `Path::components()`（`RootDir`/`Prefix`/`ParentDir`
-     をすべて拒否）の両方で検証する。Linux／macOS（CI ビルド対象）では
-     `base_dir` を開いたディレクトリ fd を起点に、検証済みの各パス成分を
-     `openat(dirfd, name, O_NOFOLLOW)` で逐次オープンし、得られた fd を
-     次段の起点にする（`crates/onnx-interop/src/onnx/external_data.rs::
-     no_follow_open`）。経路文字列を`canonicalize`／`File::open`で
-     **再解決しない**ため、検証と実際のオープン対象が fd レベルで
-     一致することが構造的に保証される（2026-09-28・#2347 P0 是正・
-     PR #2348 コードレビュー対応。5 節参照）。CI ビルド対象外の他 unix
-     ターゲットでは、`openat` のフラグ定数値（`O_DIRECTORY`／
-     `O_NOFOLLOW`／`O_CLOEXEC`／`O_NONBLOCK`）を実機実測できておらず
-     誤った値では検査自体が無意味になるため、**旧実装へのフォールバック
-     は行わず常に `UnsupportedPlatformForSecureResolve` で拒否する**
-     （fail-closed。2026-09-28・PR #2348 レビュー是正で旧
-     `symlink_metadata` 検証フォールバックを撤去。5 節参照）。
+     をすべて拒否）の両方で検証する。**unix 全般**（Linux／macOS／その他
+     unix）では `base_dir` を 1 度だけディレクトリ fd として開き
+     （`no_follow_open::open_base_dir`。全テンソル分を通して再利用する）、
+     検証済みの `location` をその fd 起点で解決する
+     （`crates/onnx-interop/src/onnx/external_data.rs::no_follow_open`。
+     2026-09-28・イシュー #2347 是正版）。**Linux** では `openat2(2)`
+     （`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS`。
+     `open_chain_openat2`）で経路解決全体を 1 回のシステムコールとして
+     カーネルへアトミックに封じ込めさせる。`openat2` が未対応
+     （`ENOSYS`／`EPERM`。古いカーネル・seccomp 等）の場合のみ、成分
+     ごと逐次 `openat(dirfd, name, O_NOFOLLOW)` で辿る方式
+     （`open_chain_component_walk`）へフォールバックする。**macOS・その他
+     unix**（`openat2` 非対応）では常にこの逐次方式を使う。いずれの方式
+     も経路文字列を`canonicalize`／`File::open`／`symlink_metadata`で
+     **再解決しない**（エラー分類用の診断も、既に開いた親ディレクトリ fd
+     を起点にした単一コンポーネントの `fstatat(AT_SYMLINK_NOFOLLOW)` の
+     みを使う）ため、検証と実際のオープン対象が fd レベルで一致すること
+     が構造的に保証される。**非 unix**（Windows 等）は `openat`／
+     `openat2` 相当の安全な経路解決手段を持たないため、`resolve_and_open`
+     は常に `UnsupportedPlatformForSecureResolve` で拒否する
+     （fail-closed。5 節参照）。
    - ファイルを開いてサイズを取り、`offset + length` がファイル長を
      超えないこと・`length` が dims/data_type から導出した期待バイト長
      （`element_count` × 要素サイズ。FLOAT=4／INT64=8／BOOL=1／
@@ -161,28 +168,43 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 
 ## 5. 残るリスク（受容済み）
 
-- **2026-09-28 更新（PR #2348 codex レビュー discussion_r4119392011 P0
-  是正）**: 当初は「std に `O_NOFOLLOW` 相当が無く、`libc` crate も
-  deps-policy.md の許容依存 9 区分に含まれないため追加できない」ことを
-  理由に、`symlink_metadata` 検証後 `canonicalize` → `File::open` と
-  経路文字列を再解決する実装を採用しており、検証とオープンの間に
-  シンボリックリンク差し替え（TOCTOU）が起こり得る窓が残っていた。
-  この節はその残存リスクとして記録していたが、`libc` crate を追加
-  せず（新規外部依存を増やさず）`extern "C"` で `openat`/`O_NOFOLLOW`
-  を直接呼ぶ実装（Linux／macOS 限定。フラグ定数値を手書きし、std が
-  リンクする libc を crate 追加なしに利用する）へ是正し、Linux／macOS
-  （CI ビルド対象）ではこの TOCTOU 窓を構造的に排除した（4 節参照）。
-  当初は CI ビルド対象外の他 unix ターゲットに限り旧実装（経路文字列の
-  再解決）へフォールバックしていたが、フォールバック実装自体が同種の
-  TOCTOU を抱えたままであるという追加指摘（P0・PRRT_kwDOTuUCJc6mk30J）
-  を受け、フォールバックを撤去して常に拒否する方針へ変更した
-  （`resolve_and_open` の非 linux/macos 版。`ExternalDataError::
-  UnsupportedPlatformForSecureResolve`）。対象 OS のフラグ値を実機実測
-  できないまま弱い実装を残すより、その OS では機能自体を提供しない
-  ほうが本 issue の fail-closed 方針（タイトル参照）に整合すると判断
-  した。Linux／macOS 以外で external data 読み込みが必要になった場合は、
-  対象 OS のフラグ定数値を実機実測したうえで `no_follow_open` の `cfg`
-  対象へ追加する（新規対応は別 issue）。
+- **2026-09-28 更新（`libc` 導入・`openat2` 採用による是正。PR #2348 codex
+  レビュー discussion_r4119392011・PRRT_kwDOTuUCJc6mkUsI・
+  PRRT_kwDOTuUCJc6mk30J の P0 是正）**: 当初は「std に `O_NOFOLLOW`
+  相当が無く、`libc` crate も deps-policy.md の許容依存区分に含まれない
+  ため追加できない」ことを理由に、`symlink_metadata` 検証後
+  `canonicalize` → `File::open` と経路文字列を再解決する実装、続いて
+  手書き `extern "C"` 宣言＋手書き `openat` フラグ定数（`O_DIRECTORY`等）
+  による実装を採用していた。後者は Linux では同じ定数でも CPU
+  アーキテクチャごとに値が異なり（x86 は `O_DIRECTORY=0o200000`・
+  aarch64 は `O_DIRECTORY=0o40000`）、x86 向けの値のまま aarch64 Linux
+  （DGX Spark GB10）でビルドするとシンボリックリンク拒否が機能しない
+  実装バグを生んでいた。また旧実装は診断用の分類に累積パス文字列への
+  `symlink_metadata` 呼び出しを使っており、これ自体が「検証済みの経路を
+  文字列として再解決する」構造で TOCTOU 窓の類型に該当した。
+  2026-09-28 にユーザー承認を得て `libc =0.2.189`（`cfg(unix)` 限定。
+  `.claude/rules/deps-policy.md`「OS FFI」区分）を導入し、次の設計へ
+  是正した:
+  - **Linux**: `openat2(2)`（`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+    RESOLVE_NO_MAGICLINKS`）で経路解決全体を 1 回のシステムコールとして
+    カーネルへアトミックに封じ込めさせる（`no_follow_open::
+    open_chain_openat2`。`libc::syscall(libc::SYS_openat2, ...)` 経由。
+    `libc` は `open_how`／`SYS_openat2`／`RESOLVE_*` 定数は提供するが
+    `openat2()` 関数ラッパー自体は未提供のため）。`openat2` 未対応
+    （`ENOSYS`／`EPERM`）の場合のみ次のフォールバックへ委譲する。
+  - **フォールバック（macOS・その他 unix は常にこちら）**: 成分ごと逐次
+    `openat(dirfd, name, O_NOFOLLOW)` で辿る（`open_chain_component_walk`）。
+    `libc` の定数（`O_DIRECTORY`／`O_NOFOLLOW`／`O_CLOEXEC`／
+    `O_NONBLOCK`／`ELOOP`／`ENOTDIR` 等）を使うことで、OS・アーキテク
+    チャごとの値の違いは `libc` クレートが吸収する（自作の手書き定数を
+    廃止）。
+  - **診断（エラー種別の分類）**: 既に開いた親ディレクトリ fd を起点に
+    した単一コンポーネントの `fstatat(AT_SYMLINK_NOFOLLOW)`
+    （`is_symlink_component`）のみを使い、パス文字列の再解決を一切
+    行わない。
+  - **非 unix**（Windows 等）: 上記の安全な経路解決手段を持たないため、
+    `resolve_and_open` は常に `UnsupportedPlatformForSecureResolve` で
+    拒否する（fail-closed のまま変更なし）。
 - **O_NONBLOCK 未指定によるハングの是正（2026-09-28・Cursor Bugbot
   High 指摘 PRRT_kwDOTuUCJc6mk6-d）**: `no_follow_open::openat_no_follow`
   は `O_NOFOLLOW` のみを指定しており、`base_dir` 配下に FIFO（named
@@ -191,21 +213,28 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   にブロックし得た。中間ディレクトリ・最終ファイルいずれの `openat`
   呼び出しにも `O_NONBLOCK` を無条件で付与するよう是正した（通常
   ファイル・ディレクトリの open には副作用が無い POSIX の性質を利用）。
+  `openat2` 経路（`open_how.flags`）にも同じ理由で無条件付与する。
 - `base_dir` 自体の信頼は呼び出し元の責務とする（呼び出し元が与える
   信頼済み入力として扱い、location 側だけを fail-closed に検証する）。
 - `checksum` の検証（SHA-1）は本 issue のスコープ外（依存を追加でき
   ないため）。拒否することで no-silent-skip 契約を守る。
 
-## 6. facade 公開・合計上限の既定値（承認待ち）
+## 6. facade 公開・合計上限の既定値
 
-- facade へのパス入力 import 入口の公開可否は未確定のまま保留した
-  （`docs/compat-api-scope.md` §5・`docs/facade-onnx-import-exposure-
-  decision.md` §15）。
-- `ExternalDataOptions::max_total_bytes` の既定値（4 GiB）は暫定値で
-  あり、ユーザー承認が必要（`DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES` の
-  1 行変更で調整可能）。
-- `ExternalDataOptions::max_external_files` の既定値（4096）も同様に
-  暫定値でありユーザー承認が必要（`DEFAULT_MAX_EXTERNAL_FILES` の 1 行
+- **facade へのパス入力 import 入口の公開（2026-09-28 ユーザー承認・
+  実施済み）**: 既存 API `crate::facade::interop::onnx::OnnxModel::
+  from_path`（新規 API 名の追加ではない）を external data 対応へ拡張
+  した。モデルファイルの親ディレクトリを `base_dir` とし、既定の
+  `ExternalDataOptions::default()` を使う。`OnnxModel::from_bytes` は
+  従来どおり external data を fail-closed 拒否する（挙動不変。回帰
+  テストで固定）。`docs/facade-onnx-import-exposure-decision.md` §6.3・
+  `docs/compat-api-scope.md` §5 の承認待ち記録を解消した。
+- `ExternalDataOptions::max_total_bytes` の既定値は 2026-09-28
+  ユーザー承認により 4 GiB から **64 GiB** へ改定した
+  （`DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES`。`options` で変更可能な
+  ままであることは不変）。
+- `ExternalDataOptions::max_external_files` の既定値（4096）は本改定の
+  対象外で暫定値のまま据え置く（`DEFAULT_MAX_EXTERNAL_FILES` の 1 行
   変更で調整可能）。
 
 ## 7. スコープ外の事項（`.claude/rules/out-of-scope-tracking.md`）
@@ -213,7 +242,7 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 - external data での export（`onnx::export`）。常に inline（`raw_data`）
   で書き出す契約は不変。
 - `checksum`（SHA-1）の検証。
-- facade へのパス入力 import 入口の公開（承認待ち。6 節）。
+- `max_external_files` の既定値（4096）の承認（6 節）。
 
 自動運転中はユーザー承認を取れないため Issue は起票せず、本節と PR 本文に
 起票候補として記録する。
@@ -237,8 +266,8 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 4 節の 2 パス設計・5 節の残るリスクを参照。要点は `security.md` A03
 （外部フォーマットのパース検証を長さ・形状の検証が先行する）・A04
 （確保の前に合計上限を検査する）・A08（`checksum` を黙って無視しない・
-no-silent-skip 契約）。`unsafe` は `no_follow_open`（Linux／macOS 限定）の
-`openat` FFI 呼び出しに限定して使用する（2026-09-28・#2347 P0 是正で導入。
-`libc` crate が許容依存 9 区分に含まれないため std がリンクする libc を
-`extern "C"` で直接呼ぶ。呼び出し箇所には `coding-rust.md` 準拠の
-`// SAFETY:` コメントを付与済み。5 節参照）。
+no-silent-skip 契約）。`unsafe` は `no_follow_open`（`cfg(unix)` 限定）の
+`libc::openat`／`libc::fstatat`／`libc::syscall(SYS_openat2, ...)` FFI
+呼び出しに限定して使用する（2026-09-28・#2347 是正で `libc =0.2.189`
+〈`.claude/rules/deps-policy.md`「OS FFI」区分〉を導入。呼び出し箇所には
+`coding-rust.md` 準拠の `// SAFETY:` コメントを付与済み。5 節参照）。

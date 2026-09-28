@@ -453,6 +453,51 @@ fn symlink_intermediate_component_is_rejected() {
     ));
 }
 
+/// symlink が `base_dir` の**外**（別の一時ディレクトリ）を指していても、
+/// ターゲットへ到達する前に「経路成分がシンボリックリンクである」こと
+/// 自体で拒否されることを確認する（aarch64 Linux の `openat` フラグ定数
+/// 取り違えバグ類型の回帰テスト。イシュー #2347。旧手書き定数実装では
+/// aarch64 で `O_NOFOLLOW`/`O_DIRECTORY` の値が x86 の値のまま化けており
+/// シンボリックリンク拒否自体が機能していなかった——本テストはターゲット
+/// の中身ではなく拒否理由〈`LocationRejectReason::Symlink`〉と、
+/// `base_dir` 外のファイル内容が読み込み結果に混入しないことの両方を
+/// 検査することで、この類型のプラットフォーム定数バグを再発検知する）。
+#[cfg(unix)]
+#[test]
+fn symlink_escaping_base_dir_via_absolute_target_is_rejected() {
+    let dir = TempDir::new("symlink-escape");
+    let outside = TempDir::new("symlink-escape-outside");
+    // base_dir 外の秘密データ（読み込まれてはならない）。
+    let secret = outside.write_file("secret.data", &[0xAAu8; 4]);
+    let link = dir.path().join("link.onnx.data");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+    let t = external_tensor(
+        "x",
+        vec![1],
+        data_type::FLOAT,
+        "link.onnx.data",
+        None,
+        Some("4"),
+    );
+    let model = model_with_initializer(t);
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    assert!(
+        matches!(
+            err,
+            ExternalDataError::InvalidLocation {
+                reason: LocationRejectReason::Symlink,
+                ..
+            }
+        ),
+        "symlink 経由の base_dir 脱出が Symlink 以外の理由で扱われた: {err:?}"
+    );
+}
+
 #[test]
 fn missing_file_is_io_not_found() {
     let dir = TempDir::new("missing-file");
