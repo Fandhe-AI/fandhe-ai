@@ -48,7 +48,8 @@ tolerance・baseline・`Cargo.toml`・ガードレール閾値・`docs/spec/` �
 `candle-core-0.11.0/src/metal_backend/mod.rs:1730` の `fn matmul` は、`self.dtype` が
 `F32`／`F16`／`BF16` のとき常に `candle_metal_kernels::call_mlx_gemm` を呼ぶ
 （`candle-core-0.11.0/src/metal_backend/mod.rs:1753`）。それ以外の dtype は
-`mlx matmul doesn't support {dtype:?}` エラーで拒否する。
+未対応 dtype を報告するエラーを返して拒否する（`candle-core-0.11.0/src/metal_backend/mod.rs`
+の `fn matmul` 内、非対応 dtype 分岐）。
 **cuBLAS／MPS／MPP へのフォールバック判定は存在しない**（該当コードなし。確認完了）。
 
 `call_mlx_gemm`（`candle-metal-kernels-0.11.0/src/kernels/mlx_gemm.rs:453`）は
@@ -208,8 +209,8 @@ padding: candle は `tgp_padding_a = tgp_padding_b = 16 / sizeof(T)`
 外す形はそのままでは自作へ採用できない**（`docs/backend-metal-aligned-load-decision.md`
 参照。自作は align 済みタイルでも手動境界チェックを維持する方針）。
 
-unroll: candle は `STEEL_PRAGMA_UNROLL`（`mlx_gemm.metal:10` の
-`#define STEEL_PRAGMA_UNROLL _Pragma("clang loop unroll(full)")`）をロード・MMA の内側
+unroll: candle は `STEEL_PRAGMA_UNROLL`（`mlx_gemm.metal:10` で定義されるマクロで、
+full unroll を指示する clang の loop pragma に展開される）をロード・MMA の内側
 ループに多用する（`mlx_gemm.metal:125-178` 等）。自作側の対応する実験は E1
 （`docs/perf/metal-gemm-n4096-kernel-gap.md` §7・#1188/#1282/#1284）。
 
