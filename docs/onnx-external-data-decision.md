@@ -142,7 +142,9 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      （`element_count` × 要素サイズ。FLOAT=4／INT64=8／BOOL=1／
      FLOAT16=2）と一致することを検証する。
    - 同一ファイル内の読み込み区間の重複（同一区間の二重参照を含む）を
-     拒否する。initializer 名の重複は I/O の前に拒否する。
+     拒否する（全テンソルの計画後にファイル単位のソート＋走査で
+     O(n log n) に判定する。4.2 節）。initializer 名の重複は I/O の前に
+     拒否する。
    - 全テンソルの `length` を `checked_add` で積み上げ、
      `ExternalDataOptions::max_total_bytes` を超えた時点（または
      overflow した時点）で `TotalSizeLimitExceeded` とする。確保より
@@ -213,6 +215,55 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   作成 → inode 番号再利用）が生じるため、ctime・mtime を照合に加えて
   これを塞ぐ（2026-09-28・PR #2348 security-auditor P2-1。残存条件は
   5 節）。
+
+### 4.2 区間重複検査の計算量（2026-09-28・PR #2348 codex P0 是正）
+
+- **指摘**: 旧実装はテンソルを 1 件計画するたびに、同一ファイルの既存
+  区間を全走査して重なりを調べていた。1 つの external data ファイルへ
+  重ならない短い区間を多数指定した入力では検証が O(n²) になり、入力だけ
+  で処理を停止させられる（A04 資源枯渇）。`max_external_files` は同一
+  ファイルを 1 件としか数えず、`max_total_bytes` は短い区間の合計しか
+  制限しないため、既存の上限では抑えられない。
+- **採用した方式**: パス 1 のテンソルごとの処理では区間
+  `(offset, end, entry_idx)`（`entry_idx` は external テンソルの入力順）を
+  `FileKey` で畳み込んだファイル単位に収集するだけとし、全テンソルの
+  計画後にファイルごとに `(offset, entry_idx)` の昇順へソートして 1 回
+  走査する（`external_data.rs::find_overlap`）。走査中はそれまでの最大
+  `end` とその持ち主を保持し、次の区間の `offset` が最大 `end` 未満なら
+  持ち主の区間と重なっているとして `OverlappingRegion` を返す（直前の
+  区間ではなく最大 `end` と比べるため包含関係も漏らさない。境界が
+  接するだけ〈`end == 次の offset`〉は重なりではない）。計算量は
+  ファイルあたり O(n log n)。長さ 0 の区間は従来どおり対象外。
+- **エラーの意味論**: variant（`OverlappingRegion { tensor_name,
+  other_tensor_name }`）と中身の意味（重なり合う 2 テンソルの名前）は
+  不変。報告するペアの選び方のみ変わる: 旧実装は「後から計画された
+  テンソル」と「それと重なる既存テンソルのうち最初のもの」、新方式は
+  「ソート順で後側の区間」と「その時点で最大 `end` を持つ区間（同値なら
+  先に現れた区間）」。ソートキーに入力順を含め、ファイルは初出順
+  （`file_ids` が振る番号順）に検査するため、報告は入力に対して決定的。
+- **判定順序**: 上限判定（合計サイズ・distinct ファイル数）は従来どおり
+  各テンソルの計画時に行い、重複検査はその後（全テンソル分の上限判定を
+  終えてから）・パス 2 の読み込みより前に行う。いずれも読み込み前の
+  fail-closed 判定であることは変わらない。重複と別種の検証エラー
+  （例: 後続テンソルの `LengthMismatch`）が同じモデルに併存する場合は、
+  旧実装と異なり別種のエラーが先に報告されうる。
+- **同類型の洗い出し**（未信頼入力で回数が決まるループの二次計算）:
+  `external_data.rs` の `plan`／`load`／`resolve_external_data`、呼び出し
+  側の `graph::build_graph`、facade `OnnxModel::from_path` を確認し、
+  該当は上記の区間重複検査のみだった（initializer 名の重複・location
+  キャッシュ・distinct ファイル集合・`build_graph` の名前解決はいずれも
+  `HashSet`／`HashMap`、`load` の location 別振り分けは添字による
+  `Vec` で線形。テンソルごとの `external_data` キー走査は重複・未知キー
+  で即座に拒否するため高々数件）。
+- **回帰テスト**: `external_data.rs::overlap_tests`（隣接〈接するだけ／
+  1 バイト重なる〉・包含・長さ 0 の除外・同一 offset の決定的な報告・
+  入力順と位置順の不一致・20 万区間）と、統合テスト
+  `many_non_overlapping_unit_regions_in_one_file_resolve`（1 ファイルに
+  長さ 1 の区間 5 万件を公開入口経由で解決。実時間の閾値判定はせず、
+  通ること自体と値の正しさで確認）・
+  `one_overlap_among_many_unit_regions_is_rejected_with_names`。参考実測
+  （x86_64 Linux・debug ビルド）: 同じ 5 万区間の統合テストは旧実装で
+  2.50 秒、新方式ではテストファイル全体（50 テスト）で 0.22 秒。
 
 読み込んだバイト列は `raw_data` へ書き戻し、`data_location = DEFAULT`・
 `external_data` は空にする（パス 2 完了後にのみ書き戻す。検証・読み込み
@@ -345,7 +396,7 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 ## 8. テスト・実測
 
 - 合成入力の網羅テスト: `crates/onnx-interop/tests/onnx_external_data.rs`
-  （unix で 48 テスト＋非 unix 契約テスト 2 件。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
+  （unix で 50 テスト＋非 unix 契約テスト 2 件。正常系〈FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・
   隣接区間・Constant 属性テンソル〉・異常系〈A2〜A5 のパス検証・数値検証・
   重複検証・キー検証・A6 回帰〉。base_dir 外へのシンボリックリンク脱出
   〈`symlink_escaping_base_dir_via_absolute_target_is_rejected`〉を含む）。
@@ -372,7 +423,11 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   unlink → 同長の別ファイル作成、`plan` 後の同一 inode・同長の in-place
   上書き（dev/ino・長さが不変で ctime／mtime だけが検出する経路。照合を
   dev/ino・長さのみに戻すと本テストが失敗することを変異確認済み）をそれ
-  ぞれ `load` が拒否すること。
+  ぞれ `load` が拒否すること。区間重複検査（4.2 節。codex P0 是正）の
+  回帰テストは統合テスト 2 件（`many_non_overlapping_unit_regions_in_
+  one_file_resolve`・`one_overlap_among_many_unit_regions_is_rejected_
+  with_names`。上記 50 テストに含む）と、全プラットフォームで実行する
+  単体テスト `external_data.rs::overlap_tests`（7 テスト）。
 - PyTorch 実生成 fixture: `crates/onnx-interop/tests/fixtures/
   pytorch-onnx-external-data/`・`tests/onnx_interp_pytorch_cnn_fixture.rs`
   の `external_data_fixture_*` 3 テスト＋

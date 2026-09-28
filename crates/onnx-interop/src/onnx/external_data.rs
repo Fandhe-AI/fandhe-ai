@@ -1016,8 +1016,8 @@ fn element_size(tensor_name: &str, data_type: i32) -> Result<u64, GraphError> {
     }
 }
 
-/// `files`／`regions`（`plan` 内）のファイル識別キー。overlap 検出・
-/// ファイルハンドル再利用が「同一ファイル実体」を正しく畳み込めるよう、
+/// `file_ids`（`plan` 内。区間の重複検査もこのキーで畳み込んだファイル単位で行う）のファイル識別キー。overlap 検出・
+/// distinct ファイル数の計数が「同一ファイル実体」を正しく畳み込めるよう、
 /// パス文字列ではなくファイルの実体識別子を使う（Cursor Bugbot 指摘・
 /// PR #2348 review thread `PRRT_kwDOTuUCJc6mkYTr`: `base_dir.join(location)` という `location` の
 /// 生文字列連結をキーにすると、`Path` の `Eq`/`Hash` はコンポーネント
@@ -1192,12 +1192,16 @@ fn plan(
     let mut location_cache: HashMap<PathBuf, usize> = HashMap::new();
     let mut locations: Vec<PlannedLocation> = Vec::new();
 
-    // distinct なファイル実体（`FileKey`）の集合。`max_external_files` の
-    // 判定にのみ使い、ハンドルは保持しない（旧構成の `files: HashMap<
-    // FileKey, OpenFile>` を置き換えた。PR #2348 codex P1 是正）。
-    let mut known_keys: std::collections::HashSet<FileKey> = std::collections::HashSet::new();
-    let mut regions: HashMap<FileKey, Vec<(u64, u64, String)>> = HashMap::new();
-    let mut entries = Vec::new();
+    // distinct なファイル実体（`FileKey`）→ 初出順のファイル番号。
+    // `file_ids.len()` が `max_external_files` の判定に使う distinct 数で、
+    // ハンドルは保持しない（旧構成の `files: HashMap<FileKey, OpenFile>` を
+    // 置き換えた。PR #2348 codex P1 是正）。ファイル番号は
+    // `regions_by_file` の添字であり、ループ後の重複区間検査をファイルの
+    // 初出順に行うことで報告するペアを決定的にする（`HashMap` の反復順に
+    // 依存させない）。
+    let mut file_ids: HashMap<FileKey, usize> = HashMap::new();
+    let mut regions_by_file: Vec<Vec<Region>> = Vec::new();
+    let mut entries: Vec<LoadPlanEntry> = Vec::new();
     let mut total_requested: u64 = 0;
 
     for (slot, tensor_name, t) in enumerate_tensors(model) {
@@ -1404,39 +1408,49 @@ fn plan(
         // 分散させると合計サイズは 0 のままファイルハンドルだけが増え、
         // プロセスの fd 上限に達しうる（#2347 P0 是正・PR #2348 コード
         // レビュー対応・PRRT_kwDOTuUCJc6mlxhy）。`file_key` が既知の実体で
-        // なければ、`known_keys` へ登録する前にここで拒否する（ハンドルは
+        // なければ、`file_ids` へ登録する前にここで拒否する（ハンドルは
         // 上で既に close 済みのため、この判定自体は fd を消費しない）。
-        if !known_keys.contains(&file_key) && known_keys.len() >= options.max_external_files {
-            return Err(GraphError::ExternalData(
-                ExternalDataError::TooManyExternalFiles {
-                    limit: options.max_external_files,
-                },
-            ));
-        }
-
-        // 同一ファイル内の読み込み区間の重複検出。`length == 0` のテンソル
-        // （1 バイトも読まない）は区間としての幅を持たないため対象外とする
-        // （`offset` がファイル長以内であることは上の `end > file_len`
-        // 検査で既に検証済み。レビュー対応: 0 バイト読み込みが既存区間の
-        // 内側の offset を指すだけで誤って `OverlappingRegion` になって
-        // いた不具合の是正。#2347）。
-        if length > 0 {
-            let region_key = file_key.clone();
-            let interval_list = regions.entry(region_key).or_default();
-            for (s, e, other_name) in interval_list.iter() {
-                if offset < *e && *s < end {
+        let file_id = match file_ids.get(&file_key) {
+            Some(&id) => id,
+            None => {
+                if file_ids.len() >= options.max_external_files {
                     return Err(GraphError::ExternalData(
-                        ExternalDataError::OverlappingRegion {
-                            tensor_name: cap_name(&tensor_name),
-                            other_tensor_name: cap_name(other_name),
+                        ExternalDataError::TooManyExternalFiles {
+                            limit: options.max_external_files,
                         },
                     ));
                 }
+                let id = regions_by_file.len();
+                regions_by_file.push(Vec::new());
+                file_ids.insert(file_key, id);
+                id
             }
-            interval_list.push((offset, end, tensor_name.clone()));
-        }
+        };
 
-        known_keys.insert(file_key);
+        // 同一ファイル内の読み込み区間はここでは収集だけ行い、重複判定は
+        // 全テンソルの計画後に [`find_overlap`] でまとめて行う（codex P0
+        // 是正。旧実装はテンソルごとに同一ファイルの既存区間を全走査して
+        // おり、1 ファイルへ重ならない短い区間を多数並べた入力で O(n²) に
+        // なった。`max_external_files` は同一ファイルを 1 件としか数えず、
+        // `max_total_bytes` も短い区間の合計しか制限しないため、上限では
+        // 抑えられない）。`length == 0` のテンソル（1 バイトも読まない）は
+        // 区間としての幅を持たないため対象外とする（`offset` がファイル長
+        // 以内であることは上の `end > file_len` 検査で既に検証済み。
+        // レビュー対応: 0 バイト読み込みが既存区間の内側の offset を指す
+        // だけで誤って `OverlappingRegion` になっていた不具合の是正。
+        // #2347）。
+        if length > 0 {
+            regions_by_file
+                .get_mut(file_id)
+                .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                    reason: "plan: file_id が regions_by_file の範囲外",
+                }))?
+                .push(Region {
+                    offset,
+                    end,
+                    entry_idx: entries.len(),
+                });
+        }
 
         entries.push(LoadPlanEntry {
             slot,
@@ -1447,7 +1461,68 @@ fn plan(
         });
     }
 
+    // 同一ファイル内の読み込み区間の重複検査（同一区間の二重参照を含む）。
+    // 上限判定（総量・ファイル数）を全テンソルについて終えた後、読み込み
+    // （パス 2）より前に行う fail-closed 判定。ファイルは初出順に検査し、
+    // 最初に見つかった重複を報告する。
+    for regions in regions_by_file.iter_mut() {
+        if let Some((later_idx, earlier_idx)) = find_overlap(regions) {
+            let name_of = |idx: usize| {
+                entries
+                    .get(idx)
+                    .map(|e| cap_name(&e.tensor_name))
+                    .ok_or(GraphError::ExternalData(ExternalDataError::Internal {
+                        reason: "plan: Region::entry_idx が entries の範囲外",
+                    }))
+            };
+            return Err(GraphError::ExternalData(
+                ExternalDataError::OverlappingRegion {
+                    tensor_name: name_of(later_idx)?,
+                    other_tensor_name: name_of(earlier_idx)?,
+                },
+            ));
+        }
+    }
+
     Ok((entries, locations, base_dir_file))
+}
+
+/// 同一ファイル内の読み込み区間 1 件分（`plan` が収集し [`find_overlap`]
+/// が検査する）。`[offset, end)` の半開区間で、`entry_idx` は `plan` の
+/// `entries`（external テンソルの入力順）への添字。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Region {
+    offset: u64,
+    end: u64,
+    entry_idx: usize,
+}
+
+/// 同一ファイルの区間集合から重なり合う 2 区間を 1 組探す（O(n log n)。
+/// codex P0 是正）。見つかれば `(後側の entry_idx, 既存側の entry_idx)` を
+/// 返す。
+///
+/// `(offset, entry_idx)` の昇順にソートしてから走査し、それまでに現れた
+/// 区間の最大 `end` とその持ち主を保持する。次の区間の `offset` がその
+/// 最大 `end` 未満なら、持ち主の区間と重なっている（持ち主の `offset` は
+/// ソート順で次の区間の `offset` 以下、かつ持ち主の `end` は次の区間の
+/// `offset` を超えるため）。直前の区間ではなく最大 `end` と比べることで、
+/// 長い区間が後続の複数区間を包含する場合も漏らさない。境界が接するだけ
+/// （`end == 次の offset`）は重なりではない。同じ `offset` の区間は入力順
+/// （`entry_idx`）で並べ、最大 `end` の持ち主は同値なら先に現れた区間の
+/// まま更新しないため、報告するペアは入力に対して決定的である。長さ 0 の
+/// 区間（`offset == end`）は幅を持たないため検査対象外とする（`plan` は
+/// そもそも登録しないが、関数単体でもこの契約を守る）。
+fn find_overlap(regions: &mut [Region]) -> Option<(usize, usize)> {
+    regions.sort_unstable_by_key(|r| (r.offset, r.entry_idx));
+    let mut max_end: Option<(u64, usize)> = None;
+    for r in regions.iter().filter(|r| r.end > r.offset) {
+        match max_end {
+            Some((end, owner)) if r.offset < end => return Some((r.entry_idx, owner)),
+            Some((end, _)) if r.end <= end => {}
+            _ => max_end = Some((r.end, r.entry_idx)),
+        }
+    }
+    None
 }
 
 /// パス 2: パス 1 が確定した計画に従い、該当区間だけを読み込む。
@@ -1688,6 +1763,89 @@ pub fn build_graph_with_external_data(
 /// では統合テスト（`tests/onnx_external_data.rs`）だけではフォールバック
 /// 関数（`open_chain_component_walk`）自体が実行されない。ここで両関数を
 /// 直接呼び、フォールバック経路も独立して検証する。
+/// [`find_overlap`]（同一ファイル内の区間重複検査。codex P0 是正で
+/// O(n log n) のソート＋走査へ置き換えた）の単体テスト。ファイル I/O を
+/// 伴わないため全プラットフォームで実行する。
+#[cfg(test)]
+mod overlap_tests {
+    use super::{Region, find_overlap};
+
+    fn r(offset: u64, end: u64, entry_idx: usize) -> Region {
+        Region {
+            offset,
+            end,
+            entry_idx,
+        }
+    }
+
+    /// 境界が接するだけ（`end == 次の offset`）の区間は重ならない。
+    #[test]
+    fn adjacent_touching_regions_do_not_overlap() {
+        let mut v = vec![r(4, 8, 1), r(0, 4, 0), r(8, 12, 2)];
+        assert_eq!(find_overlap(&mut v), None);
+    }
+
+    /// 隣接区間が 1 バイトでも重なれば検出し、`(後側, 既存側)` を返す。
+    #[test]
+    fn adjacent_regions_sharing_one_byte_overlap() {
+        let mut v = vec![r(0, 4, 0), r(3, 8, 1)];
+        assert_eq!(find_overlap(&mut v), Some((1, 0)));
+    }
+
+    /// 長い区間が後続の区間を包含する場合も検出する（内側の区間を後側、
+    /// 包含する区間を既存側として報告する）。
+    #[test]
+    fn containing_region_is_detected() {
+        let mut v = vec![r(10, 20, 1), r(0, 100, 0), r(30, 40, 2)];
+        assert_eq!(find_overlap(&mut v), Some((1, 0)));
+    }
+
+    /// 入力順がファイル内の位置順と一致しなくても（逆順・飛び飛び）、
+    /// ソート後の位置関係だけで判定する。
+    #[test]
+    fn unsorted_input_is_judged_by_position() {
+        let mut v = vec![r(50, 60, 0), r(0, 5, 1), r(5, 50, 2)];
+        assert_eq!(find_overlap(&mut v), None);
+        let mut w = vec![r(50, 60, 0), r(0, 5, 1), r(5, 51, 2)];
+        assert_eq!(find_overlap(&mut w), Some((0, 2)));
+    }
+
+    /// 長さ 0 の区間は幅を持たないため、既存区間の内側・同じ offset を
+    /// 指していても重なりとしない。
+    #[test]
+    fn zero_length_regions_are_excluded() {
+        let mut v = vec![r(0, 8, 0), r(4, 4, 1), r(0, 0, 2), r(8, 8, 3)];
+        assert_eq!(find_overlap(&mut v), None);
+    }
+
+    /// 同じ offset の区間は入力順（`entry_idx`）で並べ、後に現れた方を
+    /// 後側として報告する（入力の並びに依らず決定的）。同一区間の二重
+    /// 参照もここに含まれる。
+    #[test]
+    fn same_offset_regions_are_reported_deterministically() {
+        let mut v = vec![r(0, 4, 1), r(0, 4, 0)];
+        assert_eq!(find_overlap(&mut v), Some((1, 0)));
+        let mut w = vec![r(0, 4, 0), r(0, 4, 1)];
+        assert_eq!(find_overlap(&mut w), Some((1, 0)));
+        let mut x = vec![r(0, 2, 1), r(0, 8, 0)];
+        assert_eq!(find_overlap(&mut x), Some((1, 0)));
+    }
+
+    /// 1 ファイルに重ならない長さ 1 の区間を多数（逆順で）並べても重なり
+    /// なしと判定する（旧実装の O(n²) 全走査では 20 万件で約 2×10^10 回の
+    /// 比較になる規模。ソート＋1 回の走査で完了することを、件数を大きく
+    /// 取って通ること自体で確認する。実時間の閾値判定はしない）。
+    #[test]
+    fn many_non_overlapping_unit_regions_are_accepted() {
+        const N: usize = 200_000;
+        let mut v: Vec<Region> = (0..N).rev().map(|i| r(i as u64, i as u64 + 1, i)).collect();
+        assert_eq!(find_overlap(&mut v), None);
+        // 末尾に 1 件だけ重なる区間を足すと検出する（空振りでないこと）。
+        v.push(r(12_345, 12_347, N));
+        assert_eq!(find_overlap(&mut v), Some((N, 12_345)));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::ffi::OsStr;

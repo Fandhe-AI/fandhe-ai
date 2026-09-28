@@ -1238,6 +1238,95 @@ fn duplicate_identical_region_is_rejected() {
     assert!(matches!(err, ExternalDataError::OverlappingRegion { .. }));
 }
 
+/// 1 ファイルに重ならない長さ 1 の区間を指定するテンソルの本数（codex P0
+/// 回帰テスト用）。旧実装（テンソルごとに同一ファイルの既存区間を全走査）
+/// では約 N²/2 ≒ 12.5 億回の区間比較になる規模。
+#[cfg(unix)]
+const MANY_REGIONS_COUNT: usize = 50_000;
+
+/// `MANY_REGIONS_COUNT` 本の BOOL テンソル（dims=[1]・1 バイト）が 1 つの
+/// `.data` ファイルの `[i, i+1)` を 1 件ずつ参照するモデルを作る（テンソル
+/// は位置の逆順に並べ、入力順と位置順を一致させない）。
+#[cfg(unix)]
+fn many_unit_regions_model(extra: Option<TensorProto>) -> ModelProto {
+    let mut tensors: Vec<TensorProto> = (0..MANY_REGIONS_COUNT)
+        .rev()
+        .map(|i| {
+            external_tensor(
+                &format!("b{i}"),
+                vec![1],
+                data_type::BOOL,
+                "many.data",
+                Some(&i.to_string()),
+                Some("1"),
+            )
+        })
+        .collect();
+    tensors.extend(extra);
+    model_with_initializers(tensors)
+}
+
+/// 1 ファイルに重ならない短い区間を多数並べた入力を、区間重複検査が二次
+/// 時間にならず現実的な時間で解決できることを検査する（codex P0 是正。
+/// `max_external_files` は同一ファイルを 1 件としか数えず、
+/// `max_total_bytes` も短い区間の合計しか制限しないため、上限では抑え
+/// られない入力）。実時間の閾値では判定せず、件数を大きく取って既定の
+/// テストタイムアウト内に通ること自体と、全値の正しさで確認する。
+#[cfg(unix)]
+#[test]
+fn many_non_overlapping_unit_regions_in_one_file_resolve() {
+    let dir = TempDir::new("many-unit-regions");
+    let bytes: Vec<u8> = (0..MANY_REGIONS_COUNT).map(|i| (i % 2) as u8).collect();
+    dir.write_file("many.data", &bytes);
+    let model = many_unit_regions_model(None);
+    let graph = build_graph_with_external_data(&model, dir.path(), &ExternalDataOptions::default())
+        .expect("重ならない区間だけなら解決できるはず");
+    assert_eq!(graph.initializers.len(), MANY_REGIONS_COUNT);
+    for i in [0, 1, 2, MANY_REGIONS_COUNT / 2, MANY_REGIONS_COUNT - 1] {
+        match graph.initializers.get(&format!("b{i}")) {
+            Some(RawTensor::Bool { data, .. }) => assert_eq!(data, &vec![i % 2 == 1]),
+            other => panic!("b{i}: RawTensor::Bool を期待: {other:?}"),
+        }
+    }
+}
+
+/// 上と同じ多数区間の入力に、中ほどの区間と 1 バイトだけ重なるテンソルを
+/// 1 件足すと `OverlappingRegion` で拒否し、重なる 2 テンソルの名前を
+/// 報告する（ソート＋走査への置き換えで検出漏れが無いことの確認）。
+#[cfg(unix)]
+#[test]
+fn one_overlap_among_many_unit_regions_is_rejected_with_names() {
+    let dir = TempDir::new("many-unit-regions-overlap");
+    dir.write_file("many.data", &vec![0u8; MANY_REGIONS_COUNT]);
+    let mid = MANY_REGIONS_COUNT / 2;
+    let extra = external_tensor(
+        "intruder",
+        vec![2],
+        data_type::BOOL,
+        "many.data",
+        Some(&mid.to_string()),
+        Some("2"),
+    );
+    let model = many_unit_regions_model(Some(extra));
+    let err = assert_external_err(build_graph_with_external_data(
+        &model,
+        dir.path(),
+        &ExternalDataOptions::default(),
+    ));
+    match err {
+        ExternalDataError::OverlappingRegion {
+            tensor_name,
+            other_tensor_name,
+        } => {
+            // 同じ offset の区間は入力順で並ぶため、先に現れた `b{mid}` が
+            // 既存側、後から現れた `intruder` が後側になる（決定的）。
+            assert_eq!(tensor_name, "intruder");
+            assert_eq!(other_tensor_name, format!("b{mid}"));
+        }
+        other => panic!("OverlappingRegion を期待: {other:?}"),
+    }
+}
+
 #[test]
 fn duplicate_initializer_name_is_rejected_before_io() {
     let dir = TempDir::new("dup-init-name");
