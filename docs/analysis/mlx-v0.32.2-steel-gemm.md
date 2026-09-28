@@ -29,7 +29,9 @@ Phase 3（#2098「負けセル分析・原因帰属」）の入力として使�
   git -C mlx diff --stat 9ab977b5649154590d598ea5d545aa1b3c97f883..v0.32.2 \
     -- mlx/backend/metal/kernels/steel/gemm mlx/backend/metal/matmul.cpp \
        mlx/backend/metal/matmul.h mlx/backend/metal/device.cpp
-  git -C mlx diff --stat v0.32.2..origin/main -- （同上パス）
+  git -C mlx diff --stat v0.32.2..origin/main \
+    -- mlx/backend/metal/kernels/steel/gemm mlx/backend/metal/matmul.cpp \
+       mlx/backend/metal/matmul.h mlx/backend/metal/device.cpp
   ```
   clone は scratchpad 配下で読み取り専用に行い、cmake・pip・ビルドスクリプト
   は一切実行していない（`git diff`／`git show`／`grep` のみ）。解析後に
