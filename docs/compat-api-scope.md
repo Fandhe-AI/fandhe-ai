@@ -1055,6 +1055,16 @@ Module>>, .. }` の実装で既に実証済み（同 doc §3）。sealed 化は�
 1 件を除く）。承認事項（§10）が未承認のため否定ガード＋保留記録 doc のみを
 追加した。詳細は `docs/facade-nn-module-exposure-decision.md` §12。
 
+**#2338（#2133 が承認待ちのままクローズされた件の追跡し直し）も経路 2 未適用
+のまま承認待ちを継続している。** コード変更なし。#2131・#2132・#2133・#2338・
+PR #2230 のコメント・レビューを再確認したが、所有者による §10 承認事項 1〜6
+への明示的な承認は依然として見つからない（PR #2230 のレビューは
+`github-actions`〈codex-review〉の自動レビューのみ）。#2133 のクローズは
+前例 #2063／#2064 と同じ意図的な運用だったが、その結果として承認待ちを
+追う open issue が残らなかった点が #2338 の実質的な発生理由であり、本 PR
+は #2338 を close せずに追跡先として維持する。詳細は
+`docs/facade-nn-module-exposure-decision.md` §13。
+
 **#2169（`compat::Sequential::compile()` の `Loss` enum への BCE／
 BCEWithLogits／NLL／KLDiv／Huber／SmoothL1／L1 追加）は経路 2 未適用の
 まま承認待ちで保留した。** コード変更なし（`#[cfg(doctest)]` 限定の
