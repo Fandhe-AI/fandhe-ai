@@ -1229,6 +1229,75 @@ issue では公開面へ到達しかねないコード自体を `crates/facade/s
 （`src/models/` への移設・`pub mod models`／`pub use`・本物の doctest
 への切り替え）は `docs/reference-models-decision.md` §5 を参照。
 
+**#2202（参照モデル実装。`ResNetBlock`／`ResNet`／`Transformer`）は
+経路 2 未適用のまま承認待ちで保留した。** イシュー本文の承認事項節は
+3 型の facade `pub use` を前提としているが、#2202・親 #2190 のいずれ
+にも所有者の明示承認コメントが確認できなかったため、`crates/facade/
+src/` は一切変更していない。対象 item は `ResNetBlock`／`ResNet`／
+`Transformer` の 3 型に加え、examples 限定の trait `ReferenceModule`／
+`Trainable`（`crates/facade/examples/models/reference_module.rs`。
+いずれも保留中の facade `nn::Module`〈#2133〉の代わりに利用者コード側
+で用意した代替）。#2201（`Mlp`／`LeNet`）と同じ理由により、本 issue
+でも facade 公開面へ到達しかねないコード自体を `crates/facade/src/`
+へ書いていない（`crates/facade/examples/models/` 配下の**利用者
+コード**として実装し `#[path]` で個別に取り込む）ため、`HoldDoctest
+Guard` 方式の否定ガードは追加していない——ガードで守るべき「facade 側
+の保留対象コード」自体が存在しないため（#2212 のレビューで受け入れ
+られなかった前例と同じ判断軸）。doctest の代わりは統合テスト 2 本
+（`crates/facade/tests/example_resnet_cifar10.rs`・
+`example_transformer_cifar10.rs`）と runnable example（`cargo run -p
+fandhe-ai --example main`）。承認取得後の移行手順（`src/models/` への
+移設・`pub mod models`／`pub use`・本物の doctest への切り替え・
+`api_surface.rs` の期待値更新）は #2201 と同じ（`docs/reference-
+models-decision.md` §3.1）で、詳細は同 doc §10.1・§10.2 を参照。
+
+**保留記録（イシュー #2141・親 #2131）**: bool を返す比較 6 種
+（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）・
+logical 3 種（`logical_and`／`logical_or`／`logical_not`）・
+`masked_select` の facade 公開（`Var` への委譲メソッド追加）は未承認の
+まま保留した。実装自体は `fandhe_ai_autodiff::bool_ops`（内部クレート
+限定の自由関数モジュール）として完了済み。`crates/facade/src/
+lib.rs::VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
+`crates/facade/tests/api_surface.rs` のソース走査・workspace
+インベントリ（4 テスト）で多層固定している。詳細は
+`docs/autodiff-bool-ops-exposure-decision.md` §0・§6 を参照。
+
+**保留記録（イシュー #2174・親 #2131）**: `fandhe_ai::optim::
+OptimizerStateDict` の再エクスポートまたは `AdamW`／`Adam`／
+`RmsProp`／`Adagrad`／`Lamb` への inherent `state_dict`／
+`load_state_dict` 追加・`compat::Sequential` の optimizer state
+取得／復元 API・model と optimizer の complete checkpoint（未起票）は
+未承認のまま保留した。`crates/facade/src/lib.rs::
+OptimizerStateDictHoldDoctestGuard`（正のプローブ doctest）と
+`crates/facade/tests/api_surface.rs` の 4 テストで多層固定している。
+詳細は `docs/autodiff-optimizer-state-dict-decision.md` §0・§5 を参照。
+
+**保留記録（イシュー #2189・親 #2131）**: `Tensor<f32>` の NumPy 互換
+`.npy`／`.npz` 読み書き（`load_npy`／`save_npy`／`load_npz`／
+`save_npz`）・`NpyError` の再エクスポートは未承認のまま保留した。
+`crates/facade/src/lib.rs::NpyIoHoldDoctestGuard`（正のプローブ
+doctest）と `crates/facade/tests/api_surface.rs` の 4 テストで多層
+固定している。詳細は `docs/tensor-core-npy-npz-io-decision.md` §7
+を参照。
+
+**保留記録（イシュー #2191・親 #2084）**: 自己回帰生成ループ（3 戦略・
+KV キャッシュ結線・seed 決定性）の facade 公開（`pub fn generate` 等
+の署名・エラー型・`GenerateConfig` 型）は未承認のまま保留した。実装
+自体は `fandhe_ai_autodiff::generate`（内部クレート）として完了済み。
+`crates/facade/src/lib.rs::GenerateHoldDoctestGuard`（正のプローブ
+doctest）とトークン方式の否定ガード（`facade_does_not_reexport_or_
+declare_generate_items` 等）で多層固定している。詳細は
+`docs/facade-generate-decision.md` §0・§1 を参照。
+
+**保留記録（イシュー #2192・親 #2131）**: `Sequential::
+predict_batches`・`PhaseMetrics`・`get_phase_metrics`／
+`current_phase_metrics`／`reset_phase_metrics`・非公開 `mod inference`
+の `pub mod` 昇格は未承認のまま保留した。`crates/facade/src/lib.rs::
+PredictBatchesHoldDoctestGuard`（正のプローブ doctest）と
+`crates/facade/tests/api_surface.rs` の 4 テストで多層固定している。
+詳細は `docs/facade-predict-batches-phase-metrics-decision.md` §0・
+§5 を参照。
+
 | 出典 | 内容 |
 |------|------|
 | `docs/spec/04-requirements.md:222-236` | REQ-9 概要・受け入れ基準（2026-09-12 改定後）・関連 PoC |
