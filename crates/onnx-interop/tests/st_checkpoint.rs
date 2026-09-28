@@ -28,7 +28,7 @@
 //! ファイルでは扱わない。
 //!
 //! **決定的シード**: 重み初期化（`Linear::new` の `seed` 引数）・データ生成
-//! （`bench_harness::rng::Xorshift64Star`）を固定シードで駆動する
+//! （`support::Xorshift64Star`。`tests/support/mod.rs`）を固定シードで駆動する
 //! （`coding-rust.md`「学習系回帰テストには決定的シード設定ユーティリティを
 //! 使う」）。`crates/autodiff/tests/nn_train_convergence.rs` と同じ
 //! 「重み初期化用シードとデータ生成用シードを分離する」方針を踏襲する。
@@ -41,6 +41,14 @@
 //! 全テストは CPU のみで完結するため実機（CUDA/Metal）非依存であり
 //! `#[ignore]` 分離は行わない。
 
+// 決定的シード PRNG は `bench_harness::rng::Xorshift64Star` ではなく
+// `support::Xorshift64Star`（同一アルゴリズムの複製）を使う。理由は
+// `tests/support/mod.rs` 冒頭ドキュメント参照（`bench-harness` の
+// `backend-cuda` 依存が非 unix ターゲットで `compile_error!` になるため、
+// 本クレートの CPU のみで完結するテストを Windows でも動かせるよう依存を
+// 切り離した。codex-review 指摘 `PRRT_kwDOTuUCJc6mzcKf`・PR #2351）。
+mod support;
+
 use std::collections::HashMap;
 
 use fandhe_ai_autodiff::Tape;
@@ -51,7 +59,7 @@ use fandhe_ai_onnx_interop::st_load::load_safetensors_f32;
 use fandhe_ai_onnx_interop::st_save::save_safetensors_f32;
 use fandhe_ai_tensor_core::Tensor;
 
-use bench_harness::rng::Xorshift64Star;
+use support::Xorshift64Star;
 
 const BATCH: usize = 4;
 const D_IN: usize = 8;

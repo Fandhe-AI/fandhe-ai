@@ -140,10 +140,14 @@ pass することを確認済み（prost は既定値のスカラーと空の re
      **再解決しない**（エラー分類用の診断も、既に開いた親ディレクトリ fd
      を起点にした単一コンポーネントの `fstatat(AT_SYMLINK_NOFOLLOW)` の
      みを使う）ため、検証と実際のオープン対象が fd レベルで一致すること
-     が構造的に保証される。**非 unix**（Windows 等）は `openat`／
-     `openat2` 相当の安全な経路解決手段を持たないため、`resolve_and_open`
-     は常に `UnsupportedPlatformForSecureResolve` で拒否する
-     （fail-closed。5 節参照）。
+     が構造的に保証される。**Windows**（イシュー #2349）は `openat` 相当
+     （ディレクトリハンドル起点の相対オープン）を std が持たないため、
+     祖先ディレクトリのハンドル連鎖保持＋開いたハンドル自身の reparse
+     point 属性検査による封じ込めオープン（`win_contained_open`）で TOCTOU
+     を閉じる（4.6 節）。**それ以外**（wasm32 等）は上記いずれの安全な
+     経路解決手段も持たないため、`resolve_and_open` は常に
+     `UnsupportedPlatformForSecureResolve` で拒否する（fail-closed。
+     5 節参照）。
    - ファイルを開いてサイズを取り、`offset + length` がファイル長を
      超えないこと・`length` が dims/data_type から導出した期待バイト長
      （`element_count` × 要素サイズ。FLOAT=4／INT64=8／BOOL=1／
@@ -524,6 +528,80 @@ pass することを確認済み（prost は既定値のスカラーと空の re
     が inline モデルと bit 一致・3 回の `run` で不変・export バイト列が
     inline モデルの export と同一）。
 
+### 4.6 Windows 向け経路解決（`win_contained_open`。イシュー #2349）
+
+Windows の std にはディレクトリハンドル起点の相対オープン（`openat` 相当。
+`NtCreateFile` の `RootDirectory`）が無く、`File::open` は常にフルパスの
+`CreateFileW` になる（`FILE_FLAG_OPEN_REPARSE_POINT` が効くのは最終成分
+だけで、途中の junction は辿ってしまう）。そのため unix 版（4 節・
+`no_follow_open`）とは異なる構成で TOCTOU を閉じる
+（`crates/onnx-interop/src/onnx/external_data.rs::win_contained_open`）:
+
+- **祖先チェーンのハンドル保持**: `base_dir`（ボリュームルート
+  `\\?\C:\` から）までの各ディレクトリ成分を開いたまま保持する
+  （`BaseDirHandle { base, chain }`。`plan`・`load` を通して 1 つだけ
+  保持する。unix のディレクトリ fd 単体保持とは異なり祖先全体を保持する
+  構成になる）。対象を rename・削除するには DELETE アクセスで開く必要が
+  あり、共有モード（`dwShareMode`）から `FILE_SHARE_DELETE` を意図的に
+  外すことで保持中の成分は他プロセスから rename・削除できない。また
+  NTFS では reparse point 化（`FSCTL_SET_REPARSE_POINT`）に対象
+  ディレクトリが空であることを要求するため、保持中の次成分を含む
+  ディレクトリは reparse point 化できない。
+- **開いた直後の属性検査**: 各ハンドルを開いた直後に、そのハンドル自身
+  （パスではない）に対する属性照会（`File::metadata` →
+  `GetFileInformationByHandle` 相当）で reparse point 属性
+  （`FILE_ATTRIBUTE_REPARSE_POINT`）を検査する。判定は
+  `file_type().is_symlink()`（シンボリックリンク・マウントポイントの
+  タグしか認識せず AppExecLink・cloud files 等を素通りさせる）ではなく
+  属性ビットで行う。最終ファイルを開いた後は、保持中の全祖先ハンドル
+  （`base_dir.chain` ＋ 本 location 専用に新規で開いた途中ディレクトリ）
+  の属性を再取得する事後チェックも行う。
+- **`base_dir` の受理範囲**: `canonicalize` の結果（`\\?\C:\...`）の
+  先頭成分が `Prefix::VerbatimDisk` の場合のみ受け付ける。UNC
+  （`\\server\share\...`）は SMB 越しの junction がサーバ側で評価され
+  共有モードの意味論も異なるため、Volume GUID パス
+  （`\\?\Volume{GUID}\...`）はフォルダにマウントされたボリュームを
+  経由しうるため、いずれも `InvalidBaseDir` で拒否する。
+- **定数**: Win32 SDK ヘッダ（`winnt.h`／`winbase.h`）の値を手書きする。
+  Linux の `O_*` フラグ（CPU アーキテクチャごとに値が異なり、旧実装の
+  手書き値誤りの原因になった。4 節参照）と異なり、Win32 API の定数は
+  x86_64／aarch64 で ABI が固定され値が変わらないため、`libc` 相当の
+  crate を追加せず std の `OpenOptionsExt` へ渡すだけで済み、この部分は
+  `unsafe` を要しない（下記「FileKey・FileSnapshot」節・「最終ハンドルの
+  実所在検証」〈5 節「Windows 版の残存リスク」項目 5〉は std が未安定化の
+  API に依存するため kernel32.dll への手書き `extern "system"` 宣言を使い、
+  `unsafe` を FFI 境界〈2 関数の呼び出し箇所のみ〉に限定する）。
+- **FileKey・FileSnapshot（2026-09-28 codex-review 是正・PR #2351 で更新）**:
+  dev/ino 相当（`file_index`）・volume serial number
+  （`volume_serial_number`）・ctime 相当（`change_time`）は
+  `std::os::windows::fs::MetadataExt` が 1.98.1 時点で安定化していない
+  （`windows_by_handle`／`windows_change_time` の nightly-only feature。
+  `file_attributes`／`creation_time`／`last_access_time`／
+  `last_write_time`／`file_size` は安定）。当初はこれを理由に `FileKey`
+  をパスベースにしていたが、ハードリンク・NTFS 8.3 短縮名等の別名パスで
+  同一ファイルを参照する `location` が異なるキーへ分散し
+  `OverlappingRegion` 検証をすり抜ける欠陥だったため（codex-review 指摘
+  `PRRT_kwDOTuUCJc6my2Ie`）、kernel32.dll の `GetFileInformationByHandle`
+  （winbase.h）への手書き `extern "system"` 宣言（`unsafe` を FFI 境界に
+  限定。第三のクレート追加は不要——kernel32.dll は Windows の全プロセスが
+  常にリンクする基盤 DLL）で直接呼び、`(dwVolumeSerialNumber,
+  nFileIndex)` を実体識別子として使うよう是正した
+  （`win_contained_open::file_identity`）。`FileSnapshot` は引き続き
+  `file_attributes`／`creation_time`／`last_write_time` を使う
+  （`change_time` 未安定化のため。unix の ctime ほど強い変更検知では
+  ない）。
+- **location の字句検査（`windows_component_reject_reason`。
+  `cfg(any(windows, test))`。Linux でも `cfg(test)` ビルドに含まれ単体
+  テスト可能）**: 代替データストリーム（`name:stream`）・予約デバイス名
+  （`CON`／`PRN`／`AUX`／`NUL`／`COM0`〜`COM9`〈上付き数字含む〉／
+  `LPT0`〜`LPT9`〈同上〉／`CONIN$`／`CONOUT$`。大文字小文字を区別せず
+  拡張子・末尾の空白/ドットを除いた基底名で判定）・禁止文字
+  （`<>"|?*` ・制御文字）・末尾のドット/空白を拒否する。配線は
+  `validate_location_string` 内の `cfg(windows)` 限定で、unix の受理
+  範囲（`a:b` 等）は変えない。
+- **残存リスク**: TOCTOU の根拠・受容する残存リスクは 5 節「Windows 版の
+  残存リスク」に記録する。
+
 ## 5. 残るリスク（受容済み）
 
 - **確保成功後のページ実コミット時の OOM（2026-09-28・PR #2348 codex P0
@@ -571,10 +649,11 @@ pass することを確認済み（prost は既定値のスカラーと空の re
     した単一コンポーネントの `fstatat(AT_SYMLINK_NOFOLLOW)`
     （`is_symlink_component`）のみを使い、パス文字列の再解決を一切
     行わない。
-  - **非 unix**（Windows 等）: 上記の安全な経路解決手段を持たないため、
-    `resolve_and_open` は常に `UnsupportedPlatformForSecureResolve` で
-    拒否する（fail-closed のまま変更なし）。Windows 対応はイシュー
-    #2349 で追跡中。
+  - **Windows**: 4.6 節の封じ込めオープン（`win_contained_open`）で
+    対応済み（イシュー #2349）。**それ以外**（wasm32 等）は上記いずれの
+    安全な経路解決手段も持たないため、`resolve_and_open` は常に
+    `UnsupportedPlatformForSecureResolve` で拒否する（fail-closed の
+    まま変更なし）。
 - **O_NONBLOCK 未指定によるハングの是正（2026-09-28・Cursor Bugbot
   High 指摘 PRRT_kwDOTuUCJc6mk6-d）**: `no_follow_open::openat_no_follow`
   は `O_NOFOLLOW` のみを指定しており、`base_dir` 配下に FIFO（named
@@ -627,6 +706,83 @@ pass することを確認済み（prost は既定値のスカラーと空の re
 - `checksum` の検証（SHA-1）は本 issue のスコープ外（依存を追加でき
   ないため）。拒否することで no-silent-skip 契約を守る。
 
+### Windows 版の残存リスク（2026-09-28・イシュー #2349）
+
+`win_contained_open`（4.6 節）の TOCTOU 根拠:
+
+1. **名前と実体の対応の固定**: 対象オブジェクトの名前を変えたり削除
+   したりするには、そのオブジェクト自体を DELETE アクセスで開く必要が
+   ある。ボリュームルートから最終ファイルまで全成分を DELETE 共有なしで
+   保持しているので、どの成分も rename・削除・差し替えができない。
+2. **その場での junction 化の防止**: NTFS ではディレクトリに reparse
+   point を設定するにはそのディレクトリが空でなければならない（MS
+   Learn "Reparse Points"）。保持中の途中ディレクトリは次の成分
+   （同じく保持中で消せない）を必ず含むので空にできず、junction 化
+   できない。
+3. **最終成分**: `FILE_FLAG_OPEN_REPARSE_POINT` で開き、開いたハンドルの
+   属性で reparse point でないことと通常ファイルであることを確かめる。
+   `FILE_FLAG_BACKUP_SEMANTICS` も最終成分に付与する（実装時判明の必須
+   追加。4.6 節の定数コメント参照）: `location` がディレクトリ・
+   junction を指す場合、この flag が無いと `CreateFileW` は
+   `ERROR_ACCESS_DENIED` で open 自体に失敗し、「開いてから属性で分類
+   する」という契約そのものが機能しない（Rust std の `File::open` が
+   ディレクトリに対し os error 5 を返す既知の挙動と同根）。通常ファイル
+   の open には副作用が無いため無条件で付与する。
+4. **読み込みの窓**: 読み込みハンドルは書き込み共有を拒否している。
+   したがって、既存の writer ハンドルがあれば open 自体が失敗し、保持
+   している間は新しい writer も開けない（unix より強い保証）。
+5. **最終ハンドルの実所在検証（2026-09-28 codex-review 是正・PR #2351 で
+   追加・同 PR のレビューで 2 度是正）**: 1.〜4. だけでは「held に積んで
+   いるディレクトリであっても、共有モードが許す書き込みアクセスで別
+   ハンドルから同一オブジェクトへ reparse タグを立てる（削除・rename を
+   伴わないため 1. の防御が及ばない）→ 以後のフルパス文字列解決（`held`
+   のハンドル経由ではなく毎回ファイルシステム名前空間を再解決する）が
+   その reparse point を中間成分として追跡してしまう → 事後チェック
+   （2.）が走る前に reparse タグを外して元へ戻す」という flip-and-revert
+   （旧 (a) の残存リスク）を検出できなかった（codex-review 指摘
+   `PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`）。最終ファイルを
+   開いた直後に、`GetFinalPathNameByHandleW`（winbase.h。std 未対応の
+   ため kernel32.dll への手書き `extern "system"` 宣言で直接呼ぶ）で
+   「そのハンドルが実際に指しているオブジェクトの所在」を取得する
+   （`win_contained_open::final_real_path`）。初版はこれを `base_dir`
+   配下・想定した**深さ（成分数）だけ**で判定していたが、`base_dir`
+   配下の「同じ深さの別ディレクトリ」へ着地した場合（例: 成分 `A` を
+   同じ深さの別ディレクトリ `B` への junction へ一時的に差し替えて最終
+   ファイルを開かせ、事後チェックが走る前に `A` を元へ戻す）を見逃す
+   欠陥が残っていた（P0 是正・codex-review 指摘
+   `PRRT_kwDOTuUCJc6m0J-L`・PR #2351）。是正版
+   （`win_contained_open::verify_final_path_within_base_dir`）は、深さだけ
+   でなく `held`（本 location 専用に保持中の各祖先ディレクトリハンドル）
+   自身の実所在（同じく `final_real_path` によるハンドル起点の逆引き）を
+   最終ファイルの実所在と成分単位で対応づけ、加えてボリューム識別子
+   （`file_identity` の `volume_serial_number`）を `base_dir` の
+   ボリュームルートハンドルと突き合わせる。いずれもハンドルが指す
+   オブジェクトそのものに基づく逆引きであり、経路文字列の再解決では
+   ないため、reparse point を事後に元へ戻しても偽装できない。
+
+**残るリスク**:
+
+- (a) 「最深ディレクトリの flip-and-revert 競合」は上記 5. の初版
+  （深さのみの判定）で一旦閉じたが、`base_dir` 配下の同じ深さの別
+  ディレクトリへの着地を見逃す欠陥が残っており、held ハンドルとの対応
+  づけ・ボリューム識別子の突き合わせで最終的に閉じた
+  （2026-09-28・PR #2351。codex-review 指摘 `PRRT_kwDOTuUCJc6m0J-L`）。
+- (b) **snapshot の弱さ**: `FileSnapshot`（4.6 節）の時刻フィールドは
+  `SetFileTime` で利用者が書き換え可能なため、pass 1・pass 2 間の
+  差し替え検出は unix の ctime より弱い。ただし封じ込め（`base_dir`
+  配下・reparse なし・区間は有界）は snapshot に依存しない（pass 2 は
+  同じ封じ込め手順で開き直し、書き込み共有を拒否した状態で読むため）。
+- (c) 「実体同一性の欠如（`FileKey` パスベース）」は上記「FileKey・
+  FileSnapshot」節の是正（`(dwVolumeSerialNumber, nFileIndex)` への
+  切替）で閉じた（2026-09-28・PR #2351）。
+- (d) NTFS 以外（ReFS・exFAT 等）で「reparse point 化には空ディレクトリ
+  が必要」という規則が成り立つかは未確認（Windows 実機での確認事項）。
+- **可用性への副作用**: 読み込み中は祖先ディレクトリを rename・削除
+  しようとした他プロセスが共有違反で失敗する。他プロセスが書き込み
+  ハンドルで開いているモデルデータは読めない。OneDrive のプレースホルダ
+  や dedup ファイル（reparse point）も拒否される。いずれも fail-closed
+  側の制約として記録する。
+
 ## 6. facade 公開・合計上限の既定値
 
 - **facade へのパス入力 import 入口の公開（2026-09-28 ユーザー承認・
@@ -664,6 +820,22 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   無くす（`Arc` 共有）には `tensor-core` の `Tensor` 構築 API か
   `RawTensor` の表現の変更が要るため、必要になった時点で別途扱う
   （現状は失敗可能確保で abort しない）。
+- **（新規・2026-09-28・イシュー #2349）facade `OnnxModel::from_path` の
+  Windows 対応**: `onnx-interop::onnx::external_data` 自体は Windows へ
+  対応済み（4.6 節）だが、facade（`fandhe-ai`）は `backend-cuda` への
+  無条件依存のため Windows ではビルドできない（`crates/backend-cuda/
+  src/nvrtc.rs` の `compile_error!`。#509／PR #677）。facade の Windows
+  対応には backend-cuda 側の再設計（NVRTC キャッシュの TOCTOU 対策を
+  非 unix でも成立させる、または Windows では機能を落として妥協する等）
+  が必要で本 PR の範囲外。起票候補として記録し、ユーザー承認後に別
+  Issue へ切り出す。
+- **（新規・2026-09-28・イシュー #2349）Windows の残存 TOCTOU 経路の
+  閉鎖**: 5 節「Windows 版の残存リスク」(a) の flip-and-revert 競合は、
+  `GetFinalPathNameByHandleW` または `NtCreateFile(RootDirectory)` の
+  FFI（`unsafe` の追加、場合によっては `windows-sys` 依存の追加）で
+  閉じられる。両方とも deps-policy.md・coding-rust.md の承認対象
+  （依存追加・`unsafe` 追加）のため、この残存リスクを受容するか FFI を
+  承認して閉じるかはユーザー判断事項として PR 本文冒頭に記載する。
 
 自動運転中はユーザー承認を取れないため Issue は起票せず、本節と PR 本文に
 起票候補として記録する。
@@ -736,6 +908,36 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   doc コメント参照）。
 - facade A6 回帰: `crates/facade/tests/interop_onnx_internal_parity.rs::
   facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution`。
+- **Windows 対応のテスト（イシュー #2349・2026-09-28）**: 正常系
+  （FLOAT/INT64/BOOL/FLOAT16・offset 省略・length 省略・隣接区間・
+  数値検証・範囲・上限・重複区間・`owned_build_matches_resolve_then_
+  build_graph` 等）は `cfg(unix)` から `cfg(any(unix, windows))` へ広げ、
+  unix・Windows 共通で実行する。symlink・FIFO・fd 数計測・
+  hard link（`FileKey` がパスベースのため Windows では別名扱いになり
+  重複検出が成立しないため対象から外す。5 節「Windows 版の残存
+  リスク」(c) 参照）は `cfg(unix)` のまま残す。Windows 固有の新規テスト
+  （`onnx_external_data.rs`）: junction が途中成分・最終成分（ディレクトリ
+  への junction）にある場合の `ReparsePoint` 拒否、字句検査（ADS・予約
+  デバイス名・禁止文字・末尾ドット/空白。`windows_lexical_rejections_
+  via_full_pipeline`）、他プロセスの書き込みハンドルによる共有違反拒否
+  （`write_handle_causes_sharing_violation_rejection`）。シンボリックリンク
+  拒否（最終・途中成分）・UNC `base_dir` の拒否は特権・管理共有の設定に
+  依存するため `#[ignore = "..."]` で分離し通常 CI では走らない。
+  「読み込み中の祖先ディレクトリの rename が共有違反で失敗すること」は
+  ライブラリ内部のハンドル保持へ同一プロセスから割り込む手段が無いため
+  本 PR では自動テスト化していない（Windows 実機での手動確認項目として
+  下記の申し送りに含める）。字句検査の純関数
+  `windows_component_reject_reason` の単体テスト（`external_data.rs::
+  windows_lexical_tests`。5 テスト）は Linux の `cfg(test)` ビルドでも
+  実行される（`cfg(any(windows, test))`）。`onnx_interp_pytorch_cnn_
+  fixture.rs` の external data fixture テスト（R1）も `cfg(any(unix,
+  windows))` へ広げた。**Windows 実機でのテスト実行はこの PR の Linux 上
+  の自動運転では行えない**ため、実行コマンド・確認項目（`FILE_TRAVERSE`
+  の ACL 可否、祖先の rename が共有違反で失敗すること、junction のテスト、
+  `FSCTL_SET_REPARSE_POINT` が非空ディレクトリで失敗すること）を PR 本文
+  に申し送りとして記録し、Issue #2349 は `Refs #2349` で紐付けて open の
+  まま残す（facade 到達性〈R1'〉・実機結果〈R4〉が未充足のため close
+  しない）。
 
 ## 9. OWASP Top 10 観点
 
@@ -747,3 +949,22 @@ no-silent-skip 契約）。`unsafe` は `no_follow_open`（`cfg(unix)` 限定）
 呼び出しに限定して使用する（2026-09-28・#2347 是正で `libc =0.2.189`
 〈`.claude/rules/deps-policy.md`「OS FFI」区分〉を導入。呼び出し箇所には
 `coding-rust.md` 準拠の `// SAFETY:` コメントを付与済み。5 節参照）。
+**Windows 版（`win_contained_open`。イシュー #2349）は `unsafe` を
+kernel32.dll への手書き `extern "system"` 宣言（`GetFileInformationByHandle`・
+`GetFinalPathNameByHandleW`）の呼び出し箇所 2 か所に限定する**（依存の
+追加〈`windows-sys` 等〉はしない。4.6 節「FileKey・FileSnapshot」・
+「最終ハンドルの実所在検証」参照）。ディレクトリ祖先チェーンの走査・
+reparse point 属性検査そのものは std の
+`OpenOptionsExt::{access_mode, share_mode, custom_flags}` と
+`MetadataExt` のみで完結する安全な API で構成するが、`file_index`／
+`volume_serial_number`（`FileKey` の実体識別）・実所在の逆引き
+（TOCTOU 是正の flip-and-revert 対策。PR #2351 codex-review 指摘
+`PRRT_kwDOTuUCJc6my2IX`・`PRRT_kwDOTuUCJc6mzcKZ`・`PRRT_kwDOTuUCJc6m0J-L`）
+は std が 1.98.1 時点で未安定化のため、この 2 関数のみ `unsafe` な FFI
+呼び出しで直接叩く（`.claude/rules/coding-rust.md`「`unsafe` は FFI
+境界等の必要最小限に留め、理由をコメントで明記」に準拠。呼び出し箇所には
+`// SAFETY:` コメントを付与済み）。A01（パストラバーサル）は 4.6 節の
+祖先ハンドル保持・reparse point 属性検査・`base_dir` の `VerbatimDisk`
+限定・最終ハンドルの実所在検証（`held` 各エントリとの対応づけ）で対処し、
+字句検査（ADS・予約デバイス名・禁止文字）は A03 の一部として Windows
+固有の非信頼入力検証に位置づける。

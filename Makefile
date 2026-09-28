@@ -267,6 +267,21 @@ else
 	@echo "skip: Cargo.toml 未追加のため check-cross-cpu-tests をスキップ"
 endif
 
+# onnx-interop の external data Windows 対応（イシュー #2349）を Linux 上で
+# 継続的に型検査・lint するためのクロスターゲット clippy。facade（fandhe-ai）は
+# backend-cuda への無条件依存が非 unix ターゲットで `compile_error!` を発する
+# （#509／PR #677）ため Windows でビルドできず、対象は onnx-interop 単体に
+# 限る（上記 check-cross-metal-tests・check-cross-cpu-tests と同じ手法。
+# `cargo clippy` はリンクを行わないため Windows SDK 非搭載でも成立する）。
+.PHONY: check-cross-windows-interop
+check-cross-windows-interop: ## onnx-interop（external data の Windows 対応）を x86_64-pc-windows-msvc で clippy 検査する
+ifdef HAS_CARGO
+	rustup target list --installed | grep -qx 'x86_64-pc-windows-msvc' || rustup target add x86_64-pc-windows-msvc
+	cargo clippy -p fandhe-ai-onnx-interop --lib --tests --locked --target x86_64-pc-windows-msvc -- -D warnings
+else
+	@echo "skip: Cargo.toml 未追加のため check-cross-windows-interop をスキップ"
+endif
+
 # rustdoc 警告ゲート（イシュー #883）。ci.yml の build ジョブに追加した 2 step
 # （Linux ホスト分・aarch64-apple-darwin クロス分）とローカルで同一コマンドを共用し、
 # 再現手順を一本化する。cfg（aarch64 NEON vs x86 AVX・macOS 限定モジュール）により
@@ -447,7 +462,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests doc-warnings test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests check-cross-windows-interop doc-warnings test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）

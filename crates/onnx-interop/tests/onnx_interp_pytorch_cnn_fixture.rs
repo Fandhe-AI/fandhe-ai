@@ -1354,7 +1354,7 @@ fn reduction_baselines_are_well_formed() {
 // `external_data_fixture_bytes_entry_point_still_rejects`・
 // `external_data_baselines_are_well_formed`——は decode／manifest 参照・
 // 静的テーブル検査のみで実解決を行わないため OS 非依存のまま維持する）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fandhe_ai_onnx_interop::onnx::external_data::{
     ExternalDataOptions, build_graph_with_external_data,
 };
@@ -1416,7 +1416,7 @@ fn load_external_manifest() -> HashMap<String, ExternalManifestEntry> {
 ///
 /// `build_graph_with_external_data` の実解決は unix でのみ成功するため
 /// `cfg(unix)` 限定（上の import コメント参照）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn compute_external_case_stats(case_name: &str, entry: &ExternalManifestEntry) -> DiffStats {
     let model_path = external_fixture_root().join(format!("{case_name}_dynamo.onnx"));
     let bytes = read_file_bounded(&model_path);
@@ -1513,7 +1513,7 @@ static EXTERNAL_DATA_BASELINES: &[ExternalDataBaseline] = &[
 /// fail-closed に panic する（`find_reduction_baseline` と同型。黙って
 /// skip しない）。`compute_external_case_stats` 経由でのみ使うため
 /// `cfg(unix)` 限定（上の import コメント参照）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[track_caller]
 fn find_external_data_baseline(case_name: &str) -> &'static ExternalDataBaseline {
     EXTERNAL_DATA_BASELINES
@@ -1531,7 +1531,7 @@ fn find_external_data_baseline(case_name: &str) -> &'static ExternalDataBaseline
 /// （`assert_no_reduction_baseline_regression` と同型）。
 /// `external_data_fixture_matches_self_contained_reference` 専用のため
 /// `cfg(unix)` 限定（上の import コメント参照）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[track_caller]
 fn assert_no_external_data_baseline_regression(
     case_name: &str,
@@ -1648,7 +1648,7 @@ fn external_data_baselines_are_well_formed() {
 /// （`ExternalDataError::UnsupportedPlatformForSecureResolve`）ため
 /// `cfg(unix)` 限定（Cursor Bugbot 指摘対応・PRRT_kwDOTuUCJc6mrW…。
 /// 上の import コメント参照）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn external_data_fixture_matches_self_contained_reference() {
     let manifest = load_external_manifest();
@@ -1709,17 +1709,18 @@ fn external_data_fixture_matches_self_contained_reference() {
     }
 }
 
-/// [`external_data_fixture_matches_self_contained_reference`] の非 unix
-/// 契約テスト（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW… 対応）。非 unix
-/// では `openat`／`openat2` 相当の安全な経路解決手段を持たないため、
-/// `build_graph_with_external_data` はファイルの実在有無に関わらず常に
-/// `ExternalDataError::UnsupportedPlatformForSecureResolve` で fail-closed
-/// に拒否する（`external_data.rs` モジュール doc「非 unix（Windows 等）」
-/// 節参照。Windows 対応はイシュー #2349 で追跡中）。fixture 自体（`.onnx`
-/// 本体）は実在するコミット済みファイルを使うが、companion `.onnx.data`
-/// には一切アクセスしない（非 unix の `resolve_and_open` は `location`
+/// [`external_data_fixture_matches_self_contained_reference`] の
+/// unix・Windows 以外向け契約テスト（Cursor Bugbot 指摘・
+/// PRRT_kwDOTuUCJc6mrW… 対応。イシュー #2349 で Windows 対応後に対象を
+/// 一般化）。unix・Windows 以外では封じ込めオープン相当の安全な経路解決
+/// 手段を持たないため、`build_graph_with_external_data` はファイルの実在
+/// 有無に関わらず常に `ExternalDataError::UnsupportedPlatformForSecureResolve`
+/// で fail-closed に拒否する（`external_data.rs` モジュール doc「それ以外
+/// （wasm32 等）」節参照）。fixture 自体（`.onnx` 本体）は実在する
+/// コミット済みファイルを使うが、companion `.onnx.data` には一切
+/// アクセスしない（unix・Windows 以外の `resolve_and_open` は `location`
 /// の文字列検証のみ行い、実ファイルの open を試みないため）。
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn external_data_fixture_rejected_as_unsupported_platform_when_not_unix() {
     use fandhe_ai_onnx_interop::onnx::external_data::{ExternalDataError, ExternalDataOptions};
@@ -1734,7 +1735,7 @@ fn external_data_fixture_rejected_as_unsupported_platform_when_not_unix() {
             &external_fixture_root(),
             &ExternalDataOptions::default(),
         )
-        .expect_err("非 unix では external data 解決が成功してはならない");
+        .expect_err("unix・Windows 以外では external data 解決が成功してはならない");
         assert!(
             matches!(
                 err,

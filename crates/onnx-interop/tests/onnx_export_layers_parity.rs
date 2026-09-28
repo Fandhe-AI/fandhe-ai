@@ -12,9 +12,16 @@
 //! 独立参照計算と `fandhe_ai_backend_cpu::parity::assert_parity` で
 //! 突き合わせる。
 
+// 決定的シード PRNG は `bench_harness::rng::Xorshift64Star` ではなく
+// `support::Xorshift64Star`（同一アルゴリズムの複製）を使う。理由は
+// `tests/support/mod.rs` 冒頭ドキュメント参照（`bench-harness` の
+// `backend-cuda` 依存が非 unix ターゲットで `compile_error!` になるため、
+// 本クレートの CPU のみで完結するテストを Windows でも動かせるよう依存を
+// 切り離した。codex-review 指摘 `PRRT_kwDOTuUCJc6mzcKf`・PR #2351）。
+mod support;
+
 use std::collections::HashMap;
 
-use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_autodiff::nn::activation::{Gelu, GeluTanh, LogSoftmax, Relu, Sigmoid, Softmax};
 use fandhe_ai_autodiff::nn::{Conv2d, LayerNorm, Linear, Module};
 use fandhe_ai_backend_cpu::CpuBackendOps;
@@ -26,6 +33,7 @@ use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
 use fandhe_ai_onnx_interop::onnx::proto::ModelProto;
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
+use support::Xorshift64Star;
 
 // ---- テストユーティリティ（`onnx_export_nn.rs` と同型。別テスト
 // バイナリのため独立に定義する） ----

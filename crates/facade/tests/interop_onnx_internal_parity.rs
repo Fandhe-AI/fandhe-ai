@@ -824,18 +824,26 @@ fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution()
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
-/// 上記テストの非 unix（Windows 等）契約版（Cursor Bugbot 指摘・
-/// PRRT_kwDOTuUCJc6mrW… 対応）。非 unix では `onnx::external_data::
-/// resolve_and_open` が `openat`／`openat2` 相当の安全な経路解決手段を
-/// 持たないため companion ファイルの実在有無に関わらず常に
-/// `ExternalDataError::UnsupportedPlatformForSecureResolve` で拒否され、
-/// これは facade の `map_graph_error` の catch-all 分岐（`ExternalDataError::
-/// Io` 以外はすべて `InvalidModel` へ写像。`map_graph_error` 本体参照）
-/// により `OnnxError::InvalidModel` として観測される（`OnnxError::Io`
-/// **ではない**点が unix 版との違い）。`from_bytes` はプラットフォーム
-/// を問わず external data 経由をそもそも通らないため挙動不変のまま
-/// 共通で確認する。Windows 対応はイシュー #2349 で追跡中。
-#[cfg(not(unix))]
+/// 上記テストの unix・Windows 以外向け契約版（Cursor Bugbot 指摘・
+/// PRRT_kwDOTuUCJc6mrW… 対応。2026-09-28 イシュー #2349 で訂正）。
+/// `onnx::external_data::resolve_and_open` 自体は unix・Windows の両方で
+/// 封じ込めオープンに対応済みだが、**facade（本クレート）は Windows では
+/// ビルドできない**（`backend-cuda` への無条件依存が非 unix ターゲットで
+/// `compile_error!` を発するため。#509／PR #677。`crates/facade/tests/
+/// interop_onnx_external_data.rs` ファイル冒頭コメント参照）。cfg を
+/// `not(any(unix, windows))` に限定するのは、facade が将来 Windows で
+/// ビルドできるようになった場合に、この「非対応」契約テストが
+/// `from_path` の実際の成功と矛盾する側で固定されるのを防ぐため。本
+/// テストが実際に走るのは facade がビルドできる非 unix 環境（現状
+/// 存在しない）に限られ、その環境では companion ファイルの実在有無に
+/// 関わらず常に `ExternalDataError::UnsupportedPlatformForSecureResolve`
+/// で拒否され、これは facade の `map_graph_error` の catch-all 分岐
+/// （`ExternalDataError::Io` 以外はすべて `InvalidModel` へ写像。
+/// `map_graph_error` 本体参照）により `OnnxError::InvalidModel` として
+/// 観測される（`OnnxError::Io` **ではない**点が unix 版との違い）。
+/// `from_bytes` はプラットフォームを問わず external data 経由をそもそも
+/// 通らないため挙動不変のまま共通で確認する。
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn facade_from_bytes_rejects_external_data_model_from_path_rejects_unsupported_platform_on_non_unix()
  {

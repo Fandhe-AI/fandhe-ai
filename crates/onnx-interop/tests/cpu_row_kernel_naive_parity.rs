@@ -21,12 +21,20 @@
 //! 同一 `eps` として両実装が一致することをテストする（一般入力での一致は
 //! 数学的に成立しないため要求しない）。
 
-use bench_harness::rng::Xorshift64Star;
+// 決定的シード PRNG は `bench_harness::rng::Xorshift64Star` ではなく
+// `support::Xorshift64Star`（同一アルゴリズムの複製）を使う。理由は
+// `tests/support/mod.rs` 冒頭ドキュメント参照（`bench-harness` の
+// `backend-cuda` 依存が非 unix ターゲットで `compile_error!` になるため、
+// 本クレートの CPU のみで完結するテストを Windows でも動かせるよう依存を
+// 切り離した。codex-review 指摘 `PRRT_kwDOTuUCJc6mzcKf`・PR #2351）。
+mod support;
+
 use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32;
 use fandhe_ai_backend_cpu::softmax::run_softmax_f32;
 use fandhe_ai_onnx_interop::ops::{LayerNormAttrs, layer_normalization, softmax};
 use fandhe_ai_tensor_core::Tensor;
+use support::Xorshift64Star;
 
 #[test]
 fn cpu_softmax_matches_onnx_naive_softmax_2d() {

@@ -60,7 +60,8 @@
 #     最初の CI run では target キャッシュが構成上フルミスし、
 #     `cargo clippy --workspace --all-targets --all-features` が全クレートを再検査する
 #     ことを保証する。build（Linux debug + aarch64-apple-darwin クロス lib +
-#     backend-metal check）・build-no-cuda-toolkit（Linux debug + test 成果物）・
+#     backend-metal check + onnx-interop の x86_64-pc-windows-msvc クロス
+#     clippy〈イシュー #2349〉）・build-no-cuda-toolkit（Linux debug + test 成果物）・
 #     guardrail-regression（guardrail クレートの debug テスト成果物）・
 #     verification-gates（debug build + release test + clippy 成果物）で target 内容が
 #     ジョブごとに異なるため分離する（混在させると復元・保存サイズが無駄に膨らむ。
@@ -348,6 +349,16 @@ jobs:
           set -euo pipefail
           rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
 
+      # ONNX external data の Windows 対応（イシュー #2349）を Linux CI で継続的に
+      # 型検査・lint するための target。facade（fandhe-ai）は backend-cuda への
+      # 無条件依存が非 unix ターゲットで `compile_error!` を発する（#509／PR #677）
+      # ため Windows でビルドできず、対象は onnx-interop 単体に限る（下記ステップ）。
+      - name: Ensure x86_64-pc-windows-msvc target
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustup target list --installed | grep -qx 'x86_64-pc-windows-msvc' || rustup target add x86_64-pc-windows-msvc
+
       # cargo registry（3 ジョブ共通・本ファイル冒頭コメントのキャッシュ設計参照）。
       # SHA は v4 系最新タグ v4.3.0 を `gh api repos/actions/cache/git/refs/tags/v4.3.0`
       # で解決（追跡 ref: v4.3.0）。
@@ -437,6 +448,17 @@ jobs:
       - name: cargo check（backend-cpu の cfg(test) 限定コード・macOS ターゲット）
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo check -p fandhe-ai-backend-cpu --tests --target aarch64-apple-darwin
+
+      # イシュー #2349: onnx-interop の ONNX external data（Windows 向け封じ込め
+      # オープン `win_contained_open`・字句検査）を x86_64-pc-windows-msvc で
+      # 継続的に clippy 検査する（Makefile の check-cross-windows-interop と
+      # 同一コマンド）。facade は Windows でビルドできない（上の Ensure
+      # x86_64-pc-windows-msvc target ステップのコメント参照）ため対象は
+      # onnx-interop 単体。`cargo clippy` はリンクを行わないため Windows SDK
+      # 非搭載でも成立する。
+      - name: cargo clippy（onnx-interop の external data・Windows ターゲット）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo clippy -p fandhe-ai-onnx-interop --lib --tests --locked --target x86_64-pc-windows-msvc -- -D warnings
 
       # rustdoc 警告ゲート（イシュー #883）。crates.io 公開クレートの docs.rs
       # ビルド成立性（受け入れ条件 b）を CI で常時検査する。cfg（aarch64 NEON vs
