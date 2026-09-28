@@ -512,7 +512,7 @@ set_cuda_onnx_gpu_execution_enabled`／`set_metal_onnx_gpu_execution_enabled`
 読み込みする新入口）を実装した。`ExternalDataOptions::max_total_bytes`
 （2026-09-28 ユーザー承認により既定 **64 GiB** へ改定。当初の 4 GiB
 暫定値から更新）が確保前検査の上限として、`ExternalDataOptions::
-max_external_files`（既定 4096。本改定の対象外で暫定値のまま）が
+max_external_files`（既定 4096。2026-09-28 ユーザー承認で正式な既定値として確定）が
 distinct ファイル数（fd 枯渇対策。A04）の上限として機能する（詳細は
 `docs/onnx-external-data-decision.md`）。
 

@@ -33,7 +33,7 @@ import 入口を `onnx-interop` 内部に新設し、外部参照を fail-closed
     （2026-09-28 ユーザー承認。当初の 4 GiB 暫定値から改定済み。変更は
     定数 1 行の書き換えで済む。6 節参照）。
   - `max_external_files` の既定値は `DEFAULT_MAX_EXTERNAL_FILES = 4096`
-    （本改定の対象外で**暫定値のまま**。同一の扱い）。distinct な external
+    （2026-09-28 ユーザー承認。当初の暫定値 4096 を正式な既定値として確定）。distinct な external
     data ファイル実体（[`FileKey`] で畳み込んだ後の数）の上限で、
     `max_total_bytes` がバイト数のみを制限する隙間（サイズ 0 のテンソルを
     大量の異なるファイルへ分散させるとファイルハンドルだけが増え fd 上限
@@ -235,9 +235,9 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   ユーザー承認により 4 GiB から **64 GiB** へ改定した
   （`DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES`。`options` で変更可能な
   ままであることは不変）。
-- `ExternalDataOptions::max_external_files` の既定値（4096）は本改定の
-  対象外で暫定値のまま据え置く（`DEFAULT_MAX_EXTERNAL_FILES` の 1 行
-  変更で調整可能）。
+- `ExternalDataOptions::max_external_files` の既定値（4096）は 2026-09-28
+  ユーザー承認により当初の暫定値をそのまま正式な既定値として確定した
+  （`DEFAULT_MAX_EXTERNAL_FILES`。`options` で変更可能なままであることは不変）。
 
 ## 7. スコープ外の事項（`.claude/rules/out-of-scope-tracking.md`）
 

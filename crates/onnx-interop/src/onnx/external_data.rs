@@ -124,8 +124,8 @@ pub const DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 /// 複数テンソルが参照する通常の分割形式（同一 `.onnx.data` を initializer
 /// 群が共有する構成）は 1 件としてしか数えない。
 ///
-/// **暫定値・ユーザー承認待ち**（`max_total_bytes` と同じ扱い。イシュー
-/// #2347 計画 §2「承認待ちの事項」）。変更は本定数 1 行の書き換えで済む。
+/// 2026-09-28 ユーザー承認（イシュー #2347。当初の暫定値 4096 をそのまま
+/// 正式な既定値として確定）。変更は本定数 1 行の書き換えで済む。
 /// `ExternalDataOptions::default()` が参照する。
 pub const DEFAULT_MAX_EXTERNAL_FILES: usize = 4096;
 
