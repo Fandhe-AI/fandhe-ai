@@ -10,12 +10,15 @@ PyTorch `torch.optim.Optimizer.param_groups` 相当の機能（パラメータ
 集合をグループに分け、グループごとに独立した学習率・weight decay を
 適用する）を、**`fandhe_ai_autodiff::nn::optim::{ParamGroup,
 ParamGroupStep}`**（`crates/autodiff/src/nn/optim/param_group.rs`）
-として内部クレート限定で実装した。既存 6 optimizer（`AdamW`・`Adam`・
-`RmsProp`・`Adagrad`・`Lamb`・`crate::optim::Sgd`）へ `ParamGroupStep`
-を実装し、各 optimizer の既存 `step()` は新設した `pub(crate)
-step_with_slot_hparams`（スロット単位の `lr`／`weight_decay` を受け取る
-実装本体）への薄い委譲へ変更した。演算式の形・演算順は変えていない
-ため、`groups = &[]` は既存 `step()` と **bit 完全一致**する。
+として内部クレート限定で実装した。対象は計 10 optimizer——`AdamW`・
+`Adam`・`RmsProp`・`Adagrad`・`Lamb`・`crate::optim::Sgd`（イシュー
+#2173）に加え、`Adadelta`・`Adamax`・`NAdam`・`RAdam`（イシュー #2298。
+#2171 で追加された 4 種への横展開。§7「#2298 追補」参照）——で、
+`ParamGroupStep` を実装した。各 optimizer の既存 `step()` は新設した
+`pub(crate) step_with_slot_hparams`（スロット単位の `lr`／
+`weight_decay` を受け取る実装本体）への薄い委譲へ変更した。演算式の
+形・演算順は変えていないため、`groups = &[]` は既存 `step()` と
+**bit 完全一致**する。
 
 facade（`fandhe_ai::optim`）への再エクスポート・`compat::Sequential`
 への `compile_with_param_groups` 等の新設は、親 #2131 の「facade 公開
@@ -106,6 +109,36 @@ Lamb は `step_size`・`weight_decay` に加え、trust ratio の式
 Adagrad は `clr = lr / (1 + (step-1)*lr_decay)` の `lr` のみスロット
 単位（`hp.lr`）にし、`lr_decay` は共有値のまま。
 
+**イシュー #2298 で追加した 4 種**（`docs/autodiff-optimizer-adadelta-
+adamax-nadam-radam-decision.md` 参照）の lr 置換箇所:
+
+- **Adadelta**: `param -= lr * delta` の `lr` を `hp.lr` に。
+  `weight_decay` は coupled（`grad += wd*param`）のまま `hp.weight_decay`
+  を使う
+- **Adamax**: `clr = lr / (1 - beta1^step)` の `lr` を `hp.lr` に。
+  `clr` 自体は f64 計算のままスロットループ内（要素ループの外）で
+  求める
+- **NAdam**: lr 依存の `coef_grad = -lr*(1-mu)/(1-mu_product)`・
+  `coef_exp_avg = -lr*mu_next/(1-mu_product_next)` の `lr` を `hp.lr`
+  に。共有状態 `mu_product` はスロットに依存しないためループ外で
+  1 回だけ更新する（複数スロットへ誤って繰り返し乗算しないことが
+  bit 一致契約の前提）
+- **RAdam**: 更新式 `bias_corrected_exp_avg * lr * adaptive_lr * rect`
+  （左結合）・`bias_corrected_exp_avg * lr` の `lr` を `hp.lr` に。
+  `bc1`／`bc2`／`rho_inf`／`rho_t`／`rect` は lr に依存しない共有計算の
+  ままループ外で 1 回だけ求める
+
+### 2.5 `decoupled_weight_decay`（NAdam・RAdam）の扱い（R3）
+
+`NAdam`／`RAdam` は `decoupled_weight_decay`（decoupled `param *= 1 -
+lr*wd` か coupled `grad += wd*param` かを切り替えるフラグ）を config に
+持つ。この値は**optimizer の config が定める意味のまま**
+`ParamGroup` の `weight_decay` に適用され、**グループ側では切り替え
+ない**（`ParamGroup` は `lr`／`weight_decay` のみを保持する純データ型
+のため）。PyTorch の `param_groups` は `decoupled_weight_decay` も
+グループごとに持てるが、本実装ではグループ上書き対象外とする意図的な
+差分である（§3 に追記）。
+
 ## §3 PyTorch との差分
 
 - 未所属スロットは既定グループ扱い（PyTorch は全パラメータのグループ
@@ -115,6 +148,10 @@ Adagrad は `clr = lr / (1 + (step-1)*lr_decay)` の `lr` のみスロット
   `momentum` 等は不可）
 - `set_lr` は既定グループのみに効く（PyTorch のスケジューラは全
   グループに適用）
+- `NAdam`／`RAdam` の `decoupled_weight_decay` はグループ上書き不可
+  （optimizer の config が定める意味のまま適用する。PyTorch の
+  `param_groups` はこのフラグもグループごとに持てる。イシュー
+  #2298・§2.5 参照）
 
 ## §4 数値一致
 
@@ -161,9 +198,10 @@ doctest）・`crates/facade/tests/api_surface.rs` の 4 テスト
 - `crate::optim::device_store::DeviceParamStore` 常駐経路の group 対応
 - `Optimizer` enum 拡張（#2170 の担当）
 - optimizer state_dict へのグループ保存（#2174 の担当）
-- 本イシューと並行して追加された `Adadelta`／`Adamax`／`NAdam`／`RAdam`
-  （#2171）への `ParamGroupStep` 実装（`param_group.rs` の実装対象は
-  上記 6 optimizer のみ）
+- `Lbfgs`（closure 型で PyTorch LBFGS も param groups 非対応のため
+  対象外）
+- `NAdam`／`RAdam` の `decoupled_weight_decay` のグループ上書き
+  （§2.5・§3 参照。イシュー #2298 でも対象外のまま）
 - 追跡 Issue の起票は承認なしに行わない規約（`out-of-scope-tracking.md`）
   に従い、必要なら PR 上でユーザーへ提案する
 
@@ -188,3 +226,42 @@ doctest）・`crates/facade/tests/api_surface.rs` の 4 テスト
 - `git diff --stat` で `crates/facade/src/compat/training.rs`・
   `crates/facade/src/optim.rs`・`Cargo.toml`／`Cargo.lock`・
   `docs/spec` に差分がないことを確認済み
+
+## §8 #2298 追補（`Adadelta`／`Adamax`／`NAdam`／`RAdam` への横展開）
+
+イシュー #2298（親 #2131）で `param_group.rs` の対象を上記 6 種から
+`Adadelta`・`Adamax`・`NAdam`・`RAdam`（#2171 で追加）を加えた計 10 種
+へ拡張した。実装形は §2.4「式の形（bit 一致契約）」・§2.5
+「`decoupled_weight_decay` の扱い」に追記済み。facade 非公開の判断
+（§5）・スコープ外（§6）は不変のまま維持する。
+
+検証コマンドと結果:
+
+- `cargo fmt --all --check` → pass
+- `cargo clippy -p fandhe-ai-autodiff --lib -- -D warnings` → pass
+  （`cargo clippy --workspace ...` は `backend-cuda` の無関係な
+  pre-existing dead-code lint が `main` ブランチでも同様に fail する
+  環境依存の既知事象のため、本イシューの変更対象クレートへ範囲を
+  絞って確認した）
+- `cargo test -p fandhe-ai-autodiff --lib nn::optim` → 196 passed
+  （新規 4 件の `slot_hparams_len_mismatch_is_rejected` を含む）
+- `cargo test -p fandhe-ai-autodiff --test nn_optim_param_groups` →
+  33 passed（新規 16 件。R1・R2・R4）
+- `cargo test -p fandhe-ai-autodiff --test nn_optim_adadelta --test
+  nn_optim_adamax --test nn_optim_nadam --test nn_optim_radam` →
+  各 3 passed（R5。無修正で green）
+- `cargo test -p fandhe-ai-autodiff` → 全 green（1435 passed 他）
+- `cargo test -p fandhe-ai --test api_surface` → 273 passed
+  （`workspace_declares_param_group_fn_names_only_in_allowed_locations`
+  の期待集合を 10 impl・4 `step_with_slot_hparams` 追加へ更新）
+- `cargo test -p fandhe-ai --doc` → 46 passed（`ParamGroupsHoldDoctestGuard`・
+  `OptimizerExtHoldDoctestGuard` を含む）
+- `cargo test -p fandhe-ai --test compat_sequential_param_groups` →
+  4 passed（無修正で green）
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`
+  → pass（`pub(crate)` の `step_with_slot_hparams`／`SlotHparams` へは
+  pub な `step()` doc から intra-doc link せず `//` コメント・
+  バッククォート表記に留めたため private-intra-doc-link 違反なし）
+- `git diff --stat` で `crates/facade/src/**`・`Cargo.toml`／
+  `Cargo.lock`・`docs/spec`・既存 fixture テスト 4 本に差分がないこと
+  を確認済み

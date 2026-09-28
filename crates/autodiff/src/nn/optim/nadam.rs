@@ -53,6 +53,14 @@ pub struct NAdamConfig {
     pub momentum_decay: f32,
     /// `true` のとき decoupled weight decay（`param *= 1 - lr*wd`）を
     /// 使う。`false`（既定）は coupled（`grad += wd*param`）。
+    ///
+    /// **param groups（イシュー #2298）との関係**: [`super::ParamGroup`]
+    /// はスロットごとの `lr`／`weight_decay` の上書きのみを持ち、この
+    /// フラグ自体はグループで上書きしない共有ハイパーパラメータの
+    /// まま（`NAdam::step_with_slot_hparams`〈`pub(crate)`〉doc
+    /// 「`decoupled_weight_decay` の扱い」節参照）。グループの
+    /// `weight_decay` は、この config 値が定める意味（decoupled／
+    /// coupled）で適用される。
     pub decoupled_weight_decay: bool,
 }
 
@@ -164,12 +172,67 @@ impl NAdam {
     }
 
     /// `params_and_grads` と同順で更新後の `Tensor<f32>` を返す。
-    /// `rmsprop.rs::RmsProp::step` と同じ 2 段構成（検証専用フェーズ→
-    /// 状態変更フェーズ）を採る。
     pub fn step(
         &mut self,
         params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 既定 config の `lr`／`weight_decay` を全スロットへ一様に適用
+        // する `SlotHparams` 列を組んで委譲する（イシュー #2298。
+        // `step_with_slot_hparams` doc「`step()` との bit 一致契約」
+        // 参照）。
+        let hparams = vec![
+            super::SlotHparams {
+                lr: self.config.lr,
+                weight_decay: self.config.weight_decay,
+            };
+            params_and_grads.len()
+        ];
+        self.step_with_slot_hparams(params_and_grads, &hparams)
+    }
+
+    /// [`NAdam::step`] の実装本体（イシュー #2298。param groups 対応の
+    /// ため `lr`／`weight_decay` をスロット単位の [`super::SlotHparams`]
+    /// として受け取る形へ抽出した）。`hparams[i]` はスロット `i`
+    /// （`params_and_grads[i]`）へ適用する `lr`／`weight_decay`。
+    ///
+    /// **`step()` との bit 一致契約**: `hparams` の全要素が
+    /// `self.config.lr`／`self.config.weight_decay` と等しいとき（＝
+    /// [`NAdam::step`] からの呼び出し、または
+    /// [`super::ParamGroupStep::step_with_groups`] を空グループ列で
+    /// 呼んだとき）、本メソッドの出力は [`NAdam::step`] 単体の出力と
+    /// bit 完全一致する（式の形・演算順を変えていないため）。
+    /// `mu_product`（optimizer 全体で共有する状態。モジュール冒頭 doc
+    /// 「`mu_product` の扱い」節）はスロットや `lr` に依存しないため、
+    /// 従来どおりループ外で 1 回だけ更新する（複数スロットに対して
+    /// 誤って繰り返し乗算しないこと自体が bit 一致契約の前提）。
+    ///
+    /// **`decoupled_weight_decay` の扱い（R3。イシュー #2298）**:
+    /// グループの `weight_decay` は、`self.config.decoupled_weight_decay`
+    /// が定める意味（`true` なら decoupled `param *= 1 - lr*wd`、
+    /// `false`〈既定〉なら coupled `grad += wd*param`。`lr` もスロット
+    /// 値を使う）で適用する。`decoupled_weight_decay` 自体はグループで
+    /// 上書きしない（[`ParamGroup`] は `lr`／`weight_decay` のみを持つ）
+    /// 共有ハイパーパラメータであり、`beta1`／`beta2`／`eps`／
+    /// `momentum_decay` と同様に `param_group` モジュール冒頭 doc
+    /// 「追加しないもの」節の対象になる。PyTorch の `param_groups` は
+    /// `decoupled_weight_decay` もグループごとに持てるが、本実装では
+    /// グループ上書き対象外とする意図的な差分である。
+    ///
+    /// `rmsprop.rs::RmsProp::step` と同じ 2 段構成（検証専用フェーズ→
+    /// 状態変更フェーズ）を採る。
+    pub(crate) fn step_with_slot_hparams(
+        &mut self,
+        params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
+        hparams: &[super::SlotHparams],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        if hparams.len() != params_and_grads.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "NAdam::step_with_slot_hparams: hparams.len() ({}) != params_and_grads.len() ({})",
+                hparams.len(),
+                params_and_grads.len()
+            )));
+        }
+
         if self.states.is_empty() {
             for (param, grad) in params_and_grads {
                 if grad.shape() != param.shape() {
@@ -244,8 +307,6 @@ impl NAdam {
         let one_minus_beta1 = 1.0 - beta1;
         let eps = self.config.eps;
         let momentum_decay = self.config.momentum_decay as f64;
-        let lr = self.config.lr;
-        let weight_decay = self.config.weight_decay;
         let decoupled = self.config.decoupled_weight_decay;
 
         // `mu = beta1*(1 - 0.5*0.96^(step*momentum_decay))`・
@@ -268,25 +329,33 @@ impl NAdam {
         let mu_product = self.mu_product;
         let mu_product_next = mu_product * mu_next as f32;
 
-        let coef_grad = -lr * (1.0 - mu as f32) / (1.0 - mu_product);
-        let coef_exp_avg = -lr * mu_next as f32 / (1.0 - mu_product_next);
-
         let mut out = Vec::with_capacity(params_and_grads.len());
-        for (slot, (param, grad)) in self.states.iter_mut().zip(params_and_grads.iter()) {
+        for ((slot, (param, grad)), hp) in self
+            .states
+            .iter_mut()
+            .zip(params_and_grads.iter())
+            .zip(hparams.iter())
+        {
             let param_data = dense_vec_ref(param);
             let grad_data = dense_vec_ref(grad);
             let mut new_param = Vec::with_capacity(param_data.len());
 
+            // lr 依存の係数はスロットごとに異なりうるため hparams
+            // ループ内（要素ループの外）で計算する（イシュー #2298）。
+            // 式の形・キャスト位置は既存と同一に保つ。
+            let coef_grad = -hp.lr * (1.0 - mu as f32) / (1.0 - mu_product);
+            let coef_exp_avg = -hp.lr * mu_next as f32 / (1.0 - mu_product_next);
+
             for i in 0..param_data.len() {
                 let mut g = grad_data[i];
                 let mut p = param_data[i];
-                if weight_decay != 0.0 {
+                if hp.weight_decay != 0.0 {
                     if decoupled {
                         // `param.mul_(1 - lr*wd)`（勾配は変更しない）。
-                        p *= 1.0 - lr * weight_decay;
+                        p *= 1.0 - hp.lr * hp.weight_decay;
                     } else {
                         // `grad = grad.add(param, alpha=weight_decay)`。
-                        g = f32::mul_add(weight_decay, param_data[i], g);
+                        g = f32::mul_add(hp.weight_decay, param_data[i], g);
                     }
                 }
 
@@ -620,6 +689,30 @@ mod tests {
 
         opt.set_lr(0.001).unwrap();
         assert_eq!(opt.step_count(), 1);
+    }
+
+    // =========================================================================
+    // step_with_slot_hparams（イシュー #2298・param groups）
+    // =========================================================================
+
+    /// `hparams.len() != params_and_grads.len()` は状態変更前に
+    /// `InvalidArgument` で拒否する（`adadelta.rs` と同型の回帰テスト）。
+    #[test]
+    fn slot_hparams_len_mismatch_is_rejected() {
+        let mut opt = NAdam::new(NAdamConfig::default()).unwrap();
+        let param = t(vec![1.0], &[1]);
+        let grad = t(vec![0.1], &[1]);
+        let hparams = vec![
+            super::super::SlotHparams {
+                lr: 0.1,
+                weight_decay: 0.0,
+            };
+            2
+        ];
+        let err = opt
+            .step_with_slot_hparams(&[(&param, &grad)], &hparams)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 
     /// P0/P1 レビュー指摘（イシュー #2174 PR #2304）の回帰検査:

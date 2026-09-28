@@ -151,16 +151,57 @@ impl Adadelta {
     }
 
     /// `params_and_grads` と同順で更新後の `Tensor<f32>` を返す。
+    pub fn step(
+        &mut self,
+        params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 既定 config の `lr`／`weight_decay` を全スロットへ一様に適用
+        // する `SlotHparams` 列を組んで委譲する（イシュー #2298。
+        // `step_with_slot_hparams` doc「`step()` との bit 一致契約」
+        // 参照）。
+        let hparams = vec![
+            super::SlotHparams {
+                lr: self.config.lr,
+                weight_decay: self.config.weight_decay,
+            };
+            params_and_grads.len()
+        ];
+        self.step_with_slot_hparams(params_and_grads, &hparams)
+    }
+
+    /// [`Adadelta::step`] の実装本体（イシュー #2298。param groups 対応
+    /// のため `lr`／`weight_decay` をスロット単位の [`super::SlotHparams`]
+    /// として受け取る形へ抽出した）。`hparams[i]` はスロット `i`
+    /// （`params_and_grads[i]`）へ適用する `lr`／`weight_decay`。
+    ///
+    /// **`step()` との bit 一致契約**: `hparams` の全要素が
+    /// `self.config.lr`／`self.config.weight_decay` と等しいとき（＝
+    /// [`Adadelta::step`] からの呼び出し、または
+    /// [`super::ParamGroupStep::step_with_groups`] を空グループ列で
+    /// 呼んだとき）、本メソッドの出力は [`Adadelta::step`] 単体の出力と
+    /// bit 完全一致する（式の形・演算順を変えていないため）。
+    ///
+    /// `rho`／`eps` はグループで上書きしない共有ハイパーパラメータの
+    /// まま（`param_group` モジュール冒頭 doc「追加しないもの」節）。
     ///
     /// `rmsprop.rs::RmsProp::step` と同じ 2 段構成を採る: 副作用
     /// （状態バッファの更新）を一切加えない検証専用フェーズで全スロット
     /// の shape を確認しきってから、状態変更フェーズへ進む（形状エラー
     /// 発生時に状態バッファが部分更新されたまま残ると、後続の成功する
     /// step が破損した状態から学習してしまうため）。
-    pub fn step(
+    pub(crate) fn step_with_slot_hparams(
         &mut self,
         params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
+        hparams: &[super::SlotHparams],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        if hparams.len() != params_and_grads.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Adadelta::step_with_slot_hparams: hparams.len() ({}) != params_and_grads.len() ({})",
+                hparams.len(),
+                params_and_grads.len()
+            )));
+        }
+
         if self.states.is_empty() {
             for (param, grad) in params_and_grads {
                 if grad.shape() != param.shape() {
@@ -229,11 +270,15 @@ impl Adadelta {
 
         let rho = self.config.rho;
         let one_minus_rho = 1.0 - rho;
-        let lr = self.config.lr;
         let eps = self.config.eps;
 
         let mut out = Vec::with_capacity(params_and_grads.len());
-        for (slot, (param, grad)) in self.states.iter_mut().zip(params_and_grads.iter()) {
+        for ((slot, (param, grad)), hp) in self
+            .states
+            .iter_mut()
+            .zip(params_and_grads.iter())
+            .zip(hparams.iter())
+        {
             let param_data = dense_vec_ref(param);
             let grad_data = dense_vec_ref(grad);
             let mut new_param = Vec::with_capacity(param_data.len());
@@ -243,8 +288,8 @@ impl Adadelta {
                 // `grad = grad.add(param, alpha=weight_decay)`
                 // （weight_decay == 0 のときは演算自体を skip する。
                 // RMSprop と同じ coupled L2 方式）。
-                if self.config.weight_decay != 0.0 {
-                    g = f32::mul_add(self.config.weight_decay, param_data[i], g);
+                if hp.weight_decay != 0.0 {
+                    g = f32::mul_add(hp.weight_decay, param_data[i], g);
                 }
 
                 // `square_avg.mul_(rho).addcmul_(grad, grad, value=1-rho)`。
@@ -262,7 +307,7 @@ impl Adadelta {
                     f32::mul_add(rho, slot.acc_delta[i], one_minus_rho * delta * delta);
 
                 // `param.add_(delta, alpha=-lr)`。
-                new_param.push(param_data[i] - lr * delta);
+                new_param.push(param_data[i] - hp.lr * delta);
             }
 
             out.push(Tensor::new(new_param, &slot.shape)?);
@@ -585,5 +630,31 @@ mod tests {
 
         opt.set_lr(0.1).unwrap();
         assert_eq!(opt.step_count(), 1);
+    }
+
+    // =========================================================================
+    // step_with_slot_hparams（イシュー #2298・param groups）
+    // =========================================================================
+
+    /// `hparams.len() != params_and_grads.len()` は状態変更前に
+    /// `InvalidArgument` で拒否する（`param_group.rs` からの誤用を含む
+    /// 内部呼び出し契約の回帰テスト。`pub(crate)` のためこのファイル内
+    /// からのみ直接呼べる）。
+    #[test]
+    fn slot_hparams_len_mismatch_is_rejected() {
+        let mut opt = Adadelta::new(AdadeltaConfig::default()).unwrap();
+        let param = t(vec![1.0], &[1]);
+        let grad = t(vec![0.1], &[1]);
+        let hparams = vec![
+            super::super::SlotHparams {
+                lr: 0.1,
+                weight_decay: 0.0,
+            };
+            2
+        ];
+        let err = opt
+            .step_with_slot_hparams(&[(&param, &grad)], &hparams)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 }

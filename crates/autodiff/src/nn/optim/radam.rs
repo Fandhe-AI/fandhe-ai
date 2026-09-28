@@ -43,6 +43,14 @@ pub struct RAdamConfig {
     pub weight_decay: f32,
     /// `true` のとき decoupled weight decay（`param *= 1 - lr*wd`）を
     /// 使う。`false`（既定）は coupled（`grad += wd*param`）。
+    ///
+    /// **param groups（イシュー #2298）との関係**: [`super::ParamGroup`]
+    /// はスロットごとの `lr`／`weight_decay` の上書きのみを持ち、この
+    /// フラグ自体はグループで上書きしない共有ハイパーパラメータの
+    /// まま（`RAdam::step_with_slot_hparams`〈`pub(crate)`〉doc
+    /// 「`decoupled_weight_decay` の扱い」節参照）。グループの
+    /// `weight_decay` は、この config 値が定める意味（decoupled／
+    /// coupled）で適用される。
     pub decoupled_weight_decay: bool,
 }
 
@@ -143,12 +151,63 @@ impl RAdam {
     }
 
     /// `params_and_grads` と同順で更新後の `Tensor<f32>` を返す。
-    /// `rmsprop.rs::RmsProp::step` と同じ 2 段構成（検証専用フェーズ→
-    /// 状態変更フェーズ）を採る。
     pub fn step(
         &mut self,
         params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 既定 config の `lr`／`weight_decay` を全スロットへ一様に適用
+        // する `SlotHparams` 列を組んで委譲する（イシュー #2298。
+        // `step_with_slot_hparams` doc「`step()` との bit 一致契約」
+        // 参照）。
+        let hparams = vec![
+            super::SlotHparams {
+                lr: self.config.lr,
+                weight_decay: self.config.weight_decay,
+            };
+            params_and_grads.len()
+        ];
+        self.step_with_slot_hparams(params_and_grads, &hparams)
+    }
+
+    /// [`RAdam::step`] の実装本体（イシュー #2298。param groups 対応の
+    /// ため `lr`／`weight_decay` をスロット単位の [`super::SlotHparams`]
+    /// として受け取る形へ抽出した）。`hparams[i]` はスロット `i`
+    /// （`params_and_grads[i]`）へ適用する `lr`／`weight_decay`。
+    ///
+    /// **`step()` との bit 一致契約**: `hparams` の全要素が
+    /// `self.config.lr`／`self.config.weight_decay` と等しいとき（＝
+    /// [`RAdam::step`] からの呼び出し、または
+    /// [`super::ParamGroupStep::step_with_groups`] を空グループ列で
+    /// 呼んだとき）、本メソッドの出力は [`RAdam::step`] 単体の出力と
+    /// bit 完全一致する（式の形・演算順を変えていないため）。
+    /// `bc1`／`bc2`／`bc2_sqrt`／`rho_inf`／`rho_t`／`rect` は lr に
+    /// 依存しない共有計算のまま従来どおりループ外で 1 回だけ求める。
+    ///
+    /// **`decoupled_weight_decay` の扱い（R3。イシュー #2298）**:
+    /// `nadam.rs::NAdam::step_with_slot_hparams` と同じ契約——グループの
+    /// `weight_decay` は `self.config.decoupled_weight_decay` が定める
+    /// 意味（decoupled／coupled。`lr` もスロット値を使う）で適用し、
+    /// フラグ自体はグループで上書きしない共有ハイパーパラメータのまま
+    /// （`param_group` モジュール冒頭 doc「追加しないもの」節）。
+    /// PyTorch の `param_groups` は `decoupled_weight_decay` もグループ
+    /// ごとに持てるが、本実装ではグループ上書き対象外とする意図的な
+    /// 差分である。
+    ///
+    /// `rmsprop.rs::RmsProp::step` と同じ 2 段構成（検証専用フェーズ→
+    /// 状態変更フェーズ）を採る。
+    pub(crate) fn step_with_slot_hparams(
+        &mut self,
+        params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
+        hparams: &[super::SlotHparams],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        if hparams.len() != params_and_grads.len() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "RAdam::step_with_slot_hparams: hparams.len() ({}) != params_and_grads.len() ({})",
+                hparams.len(),
+                params_and_grads.len()
+            )));
+        }
+
         if self.states.is_empty() {
             for (param, grad) in params_and_grads {
                 if grad.shape() != param.shape() {
@@ -224,8 +283,6 @@ impl RAdam {
         let beta2 = self.config.beta2;
         let one_minus_beta1 = 1.0 - beta1;
         let eps = self.config.eps;
-        let lr = self.config.lr;
-        let weight_decay = self.config.weight_decay;
         let decoupled = self.config.decoupled_weight_decay;
 
         // `rho_inf = 2/(1-beta2) - 1`・
@@ -252,7 +309,12 @@ impl RAdam {
         let bc2_sqrt = (bc2.sqrt()) as f32;
 
         let mut out = Vec::with_capacity(params_and_grads.len());
-        for (slot, (param, grad)) in self.states.iter_mut().zip(params_and_grads.iter()) {
+        for ((slot, (param, grad)), hp) in self
+            .states
+            .iter_mut()
+            .zip(params_and_grads.iter())
+            .zip(hparams.iter())
+        {
             let param_data = dense_vec_ref(param);
             let grad_data = dense_vec_ref(grad);
             let mut new_param = Vec::with_capacity(param_data.len());
@@ -260,11 +322,11 @@ impl RAdam {
             for i in 0..param_data.len() {
                 let mut g = grad_data[i];
                 let mut p = param_data[i];
-                if weight_decay != 0.0 {
+                if hp.weight_decay != 0.0 {
                     if decoupled {
-                        p *= 1.0 - lr * weight_decay;
+                        p *= 1.0 - hp.lr * hp.weight_decay;
                     } else {
-                        g = f32::mul_add(weight_decay, param_data[i], g);
+                        g = f32::mul_add(hp.weight_decay, param_data[i], g);
                     }
                 }
 
@@ -288,10 +350,10 @@ impl RAdam {
                     // `adaptive_lr = sqrt(bc2) / (sqrt(exp_avg_sq)+eps)`。
                     let adaptive_lr = bc2_sqrt / (slot.exp_avg_sq[i].sqrt() + eps);
                     // `bias_corrected_exp_avg * lr * adaptive_lr * rect`
-                    // （左結合の評価順）。
-                    bias_corrected_exp_avg * lr * adaptive_lr * rect
+                    // （左結合の評価順。`lr` はスロット値）。
+                    bias_corrected_exp_avg * hp.lr * adaptive_lr * rect
                 } else {
-                    bias_corrected_exp_avg * lr
+                    bias_corrected_exp_avg * hp.lr
                 };
 
                 new_param.push(p);
@@ -618,5 +680,29 @@ mod tests {
 
         opt.set_lr(0.0001).unwrap();
         assert_eq!(opt.step_count(), 1);
+    }
+
+    // =========================================================================
+    // step_with_slot_hparams（イシュー #2298・param groups）
+    // =========================================================================
+
+    /// `hparams.len() != params_and_grads.len()` は状態変更前に
+    /// `InvalidArgument` で拒否する（`adadelta.rs` と同型の回帰テスト）。
+    #[test]
+    fn slot_hparams_len_mismatch_is_rejected() {
+        let mut opt = RAdam::new(RAdamConfig::default()).unwrap();
+        let param = t(vec![1.0], &[1]);
+        let grad = t(vec![0.1], &[1]);
+        let hparams = vec![
+            super::super::SlotHparams {
+                lr: 0.1,
+                weight_decay: 0.0,
+            };
+            2
+        ];
+        let err = opt
+            .step_with_slot_hparams(&[(&param, &grad)], &hparams)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 }
