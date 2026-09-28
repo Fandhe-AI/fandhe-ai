@@ -125,11 +125,20 @@ index 0〜10）のうち classic 6 構成に対応が付かない残り 5 構成
 | `(64,64,32,2,2)` | 9 | `tile.rs:961-968` | classic 6 構成に同一形状なし（E7・#1329。`select` 系には未組み込み・明示指定限定） |
 | `(128,64,16,2,2)` | 10 | `tile.rs:996-1003` | classic 6 構成に同一形状なし（E8・#1331。同上・未組み込み） |
 
-**classic 経路の上限（不変）**: 6 構成を通じて `wm*wn` の最大は 4
-（128 スレッド）、`bk` の最大は 32（`(64,32,32,2,2)`）。本実装
-`CANDIDATES` の index 9（`bk=32`）・index 10（`bm=128`）はこの上限内に
-収まる（`TileConfig::validate` で機械検証済み）が、classic 6 構成の
-形状そのものには存在しない本実装独自候補である。
+**classic 経路の構成範囲（不変）**: 6 構成を通じて `bm`・`bn` の最大は
+64、`wm*wn` の最大は 4（128 スレッド）、`bk` の最大は 32
+（`(64,32,32,2,2)`）。本実装 `CANDIDATES` の index 9
+（`(64,64,32,2,2)`。`bk=32`）は `wm*wn`・`bk` の軸では classic の範囲内
+だが `bm=64,bn=64` は classic 6 構成のどの形状とも一致しない。index 10
+（`(128,64,16,2,2)`。`bm=128`）は `bm` が classic の最大値 64 を超えて
+おり、classic の構成範囲には収まらない。**`TileConfig::validate`
+（`tile.rs:666` 以下）は `bm % (wm*8) == 0`／`bn % (wn*8) == 0`／
+`bk % 8 == 0` の整除制約と、アキュムレータ行列サイズ・スレッド数・
+共有メモリ量等のデバイス上限を検証するものであり、classic 6 構成の
+範囲（`bm`/`bn` の最大値等）を検証するものではない**——index 9・
+index 10 とも `validate` を通過するのは単にデバイス上限を満たすためで
+あって、classic の構成範囲内であることを意味しない。両者とも classic
+6 構成の形状そのものには存在しない本実装独自候補である。
 
 ## 5. NAX 経路の解析（タグ時点。v0.32.2）
 
@@ -214,7 +223,7 @@ ultra チップ向けにさらにタイルを変える」実装であり、NAX �
 | 既存記録 | 内容 | 本 doc との関係 |
 |---|---|---|
 | `docs/perf/metal-gemm-n4096-kernel-gap.md` §13（イシュー #1143） | classic 未収録構成 `(32,64,16,1,2)`（`CANDIDATES[8]`）を M4 Max 実機で追加測定した結果、劣後のため不採用・`select` 変更なし | **§4 の「完全一致」は構造上の一致であり、性能面では既に REJECT 済み**。Phase 3 で再実験する価値は低い（未試行候補には含めない） |
-| `docs/perf/metal-gemm-n4096-kernel-gap.md` §7〜§19（E1〜E9） | unroll・特殊化・フラグメントロード・協調ロード・タイルクラス分割・`CANDIDATES[9]`（bk=32）・`CANDIDATES[10]`（128×64）の実機実測。いずれも本番選択構成に対し REJECT または未組み込み | classic／NAX 双方に同型の構成（bk=32 大形状・128 幅タイル）は存在しない。MLX 側との直接対応はないが、「本実装独自候補は測定済みかつ大半 REJECT」という前提は変わらない |
+| `docs/perf/metal-gemm-n4096-kernel-gap.md` §7〜§19（E1〜E9） | unroll・特殊化・フラグメントロード・協調ロード・タイルクラス分割・`CANDIDATES[9]`（`(64,64,32,2,2)`。bk=32）・`CANDIDATES[10]`（`(128,64,16,2,2)`。128 幅タイル）の実機実測。いずれも本番選択構成に対し REJECT または未組み込み | classic 6 構成には `bk=32` の形状自体は存在する（`(64,32,32,2,2)`。§4）が、`CANDIDATES[9]` とは `bn`（32 対 64）が異なり完全一致しない。`bm=128` の構成（`CANDIDATES[10]`）は classic 6 構成に同型のものが存在しない（§4 の上限記述のとおり classic の `bm` 最大は 64）。NAX 側にも両候補と同型の構成はない。MLX 側との直接対応はないが、「本実装独自候補は測定済みかつ大半 REJECT」という前提は変わらない |
 | `docs/backend-metal-mpp-tensor-decision.md`（#1326） | Metal 4 `tensor<>`＋MPP `matmul2d`（NAX が使うのと同じ API 系統）の可用性・純カーネル時間 A/B を M4 Max 実機で検証（採否は未確定のまま整理） | NAX 経路自体（`mpp::tensor_ops::matmul2d`）と同じ MPP API 系統を対象にした既存調査であり、本 doc の§5 NAX 経路解析と技術的に重なる。#1326 は「採否の結論は出さない」整理のみで、§3 再訪条件（M5 実機必須）は本 doc でも不変 |
 | `docs/backend-metal-splitk-decision.md`・`docs/perf/metal-gemm-splitk-*.md` | 自作 split-K（f32・2 パス）の A/B・本番結線（実行時トグル opt-in・既定 `true`） | MLX 側の `steel_gemm_splitk_nax.metal`（§6・main HEAD 限定・2 行差分のみで詳細未解析）とは別実装。直接比較は未実施（未試行候補として§10 に列挙） |
 | `docs/backend-metal-async-copy-decision.md`（#546）・`docs/backend-metal-aligned-load-decision.md`・`docs/backend-metal-morton-mapping-decision.md` | 非公開 AIR intrinsic 不採用・アラインメント特化ロード不採用・Morton マッピング不採用 | NAX 経路（MPP API）は「API 公開性」の観点では #546 と性質が異なる（§9 の #549 記述を継承）。本 doc はこの整理を覆さない |
