@@ -39,6 +39,33 @@ use crate::error::CudaError;
 use crate::kernels_pooling::{self, POOLING_BLOCK_DIM};
 use crate::memory::readback;
 use crate::nvrtc::compile_ptx;
+use fandhe_ai_tensor_core::ShapeError;
+
+/// 索引の表現可能範囲検査（`H·W <= i32::MAX`。`BackendOps::
+/// max_pool2d` の索引は `Tensor<i32>` のため。イシュー #2297）。
+/// [`validate_index_domain`] は同じ条件を `CudaError::
+/// PoolingSizeLimitExceeded` へ写像し `ops.rs::map_pooling_error` 経由
+/// で `BackendError::Unsupported`（ホストフォールバック向け）へ落とす
+/// のに対し、本関数は `backend-cpu::pooling::check_max_index_range`・
+/// tape 経路（`Var::max_pool2d`）と同じ `ShapeError`（`ElementCountOverflow`／
+/// `IndexRangeOverflow`）をそのまま返す。`ops.rs::max_pool2d` が
+/// `pool2d_out_shape` の直後・出力が空（`out_shape.contains(&0)`）
+/// かどうかの早期 return より前で呼ぶことで、空バッチ（`N=0`）でも
+/// `H·W` が `i32::MAX` を超える契約違反を見逃さない（`out_shape` の
+/// 積は `N=0` のとき `0` になり `pool2d_out_shape` の
+/// `checked_numel_for` では検出できないため。`crate::pooling`
+/// モジュール doc・`docs/pooling-ops-design.md` §17 参照）。
+/// `validate_index_domain`（カーネル API 層）はそのまま残し多層防御
+/// とする。本クレートは `backend-cpu` へ依存しないため単一情報源に
+/// できず、同一ロジックを意図的に複製する
+/// （`.claude/rules/delegation-impl.md` のクレート境界に従う）。
+pub(crate) fn check_max_index_range(h: usize, w: usize) -> Result<(), ShapeError> {
+    let hw = h.checked_mul(w).ok_or(ShapeError::ElementCountOverflow)?;
+    if hw > i32::MAX as usize {
+        return Err(ShapeError::IndexRangeOverflow { index: hw });
+    }
+    Ok(())
+}
 
 /// `value` が `i32::MAX` に収まることを検証する（カーネル引数 `int` は
 /// C の 32bit 符号付き整数のため。`im2col.rs::validate_i32_bound` と
@@ -580,6 +607,26 @@ mod tests {
     #[test]
     fn checked_numel_computes_product() {
         assert_eq!(checked_numel(&[1, 2, 3, 4]).unwrap(), 24);
+    }
+
+    #[test]
+    fn check_max_index_range_accepts_i32_max() {
+        // `H*W == i32::MAX` ちょうどは境界内。
+        assert!(check_max_index_range(1, i32::MAX as usize).is_ok());
+    }
+
+    #[test]
+    fn check_max_index_range_rejects_i32_max_plus_one() {
+        let err = check_max_index_range(1, i32::MAX as usize + 1).unwrap_err();
+        assert!(matches!(err, ShapeError::IndexRangeOverflow { .. }));
+    }
+
+    #[test]
+    fn check_max_index_range_rejects_element_count_overflow() {
+        // `h*w` 自体が `usize` の乗算で overflow するケース
+        // （`i32::MAX` 超過とは別のエラー variant で拒否する）。
+        let err = check_max_index_range(usize::MAX, 2).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
     /// 設計 doc §13 の境界例: `kernel=2, dilation=1, padding=1`

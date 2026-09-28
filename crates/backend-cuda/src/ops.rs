@@ -5099,10 +5099,20 @@ impl BackendOps for CudaBackendOps {
 
     /// `BackendOps::max_pool2d` の CUDA 実装（イシュー #1729・
     /// 追従イシュー。#1607 ツリー）。[`pool2d_out_shape`] で
-    /// `input.shape()`／`params` を再検査してから
-    /// `pooling::CudaPooling::run_max_pool2d_f32` へ委譲する（`im2col`
-    /// と同じ二重検査方針）。`索引` テンソルの dtype は `i32` 固定
+    /// `input.shape()`／`params` を再検査し、さらに `pooling::
+    /// check_max_index_range`（非公開）で `H·W <= i32::MAX`（索引は
+    /// `i32` のため）を検査してから `pooling::CudaPooling::
+    /// run_max_pool2d_f32` へ委譲する（`im2col` と同じ二重検査方針）。
+    /// `索引` テンソルの dtype は `i32` 固定
     /// （`crate::pooling::CudaPooling::run_max_pool2d_f32` doc 参照）。
+    ///
+    /// 索引範囲検査は出力が空（`out_shape.contains(&0)`）かどうかの
+    /// 早期 return より前に `input` の `H`／`W` を直接見て行う（`N=0`
+    /// でも `H·W` が `i32::MAX` 超なら拒否する契約を CPU・tape 経路と
+    /// 揃える。イシュー #2297）。`pooling::CudaPooling::
+    /// run_max_pool2d_f32` が内部で呼ぶカーネル API 層の
+    /// `validate_index_domain` はそのまま残り多層防御となる
+    /// （`pooling::check_max_index_range` doc 参照）。
     ///
     /// `.contiguous()`（内部で無検査の `Vec::with_capacity(numel)` を
     /// 呼ぶ）呼び出し前に `checked_bytes_for::<f32>` で確保前検査する
@@ -5120,6 +5130,12 @@ impl BackendOps for CudaBackendOps {
     ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
         let out_shape =
             pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        let in_shape_for_index_check = input.shape();
+        crate::pooling::check_max_index_range(
+            in_shape_for_index_check.get(2).copied().unwrap_or(0),
+            in_shape_for_index_check.get(3).copied().unwrap_or(0),
+        )
+        .map_err(BackendError::ShapeMismatch)?;
         if out_shape.contains(&0) {
             return Ok((
                 Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
@@ -6140,6 +6156,27 @@ mod tests {
         assert_eq!(values.numel(), 0);
     }
 
+    /// 空バッチ（`N=0`）でも `H·W`（本テストでは `W` 単独）が
+    /// `i32::MAX` を超えていれば、出力が空だからといって索引範囲
+    /// 検査（`pooling::check_max_index_range`）をすり抜けてはならない
+    /// （CPU・tape 経路と同型の契約是正・イシュー #2297）。`out_shape`
+    /// の積は `N=0` のため `0` になり `pool2d_out_shape` の
+    /// `checked_numel_for` では検出できない契約違反を、`input` の
+    /// `H`／`W` を直接見る検査が拾うことを確認する。データは空
+    /// バッチのため確保しない（device 非接触）。
+    #[test]
+    fn max_pool2d_rejects_index_range_overflow_on_empty_batch_without_touching_device() {
+        let w = i32::MAX as usize + 1;
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 1, w]).unwrap();
+        let params = Pool2dParams::new([1, 1], None, [0, 0], [1, 1]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.max_pool2d(&x, &params).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { .. })
+        ));
+    }
+
     /// codex-review 指摘（PR #1888・スレッド `crates/backend-cuda/src/
     /// ops.rs:4758`）の再現固定: `input=[1,1,4,4]`（値 0〜15）・
     /// `kernel=[2,2]`・`stride=[3,3]`・`padding=[0,0]`・
@@ -6222,13 +6259,26 @@ mod tests {
     // `output_size` が入力 H に依存しないためそのまま `[2, 2]` で
     // 足りる）ことで出力 shape を小さく保つ。`with_driver_call`
     // 呼び出し前に完了するため GPU 非依存の通常テストとして Linux
-    // CI でも実行できる。 ---
+    // CI でも実行できる。**`max_pool2d` のみ他 2 関数と異なる fixture**
+    // を使う（イシュー #2297。`pooling::check_max_index_range` が
+    // `pool2d_out_shape` の直後・確保前検査より前に効くようになった
+    // ため、`H_in=2^61` のままだと `H*W=2^61*4=2^63 <= usize::MAX` で
+    // `checked_mul` 自体は overflow せず `IndexRangeOverflow` に
+    // なってしまい、本来検出したい `checked_bytes_for` の確保前検査
+    // （`ElementCountOverflow`）へ到達しない。そこで N・C 軸を
+    // `1<<16` ずつに広げつつ H 軸は `1<<30`（`H*W=2^30 <= i32::MAX`
+    // で索引域検査は通過）に抑え、入力側の総バイト数
+    // （`numel=2^62`・`bytes=2^64` で `usize` overflow）だけを
+    // 溢れさせる。出力 shape は `[2^16, 2^16, 1, 1]`（`numel=2^32`）
+    // で `pool2d_out_shape` 自体は overflow しない。 ---
 
     #[test]
     fn max_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
-        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
-        let huge = base.broadcast_to(&[1, 1, 1usize << 61, 4]).unwrap();
-        let params = Pool2dParams::new([1usize << 61, 1], None, [0, 0], [1, 1]).unwrap();
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize, 1, 1, 1]).unwrap();
+        let huge = base
+            .broadcast_to(&[1usize << 16, 1usize << 16, 1usize << 30, 1])
+            .unwrap();
+        let params = Pool2dParams::new([1usize << 30, 1], None, [0, 0], [1, 1]).unwrap();
         let ops = CudaBackendOps::new(0);
         let err = ops
             .max_pool2d(&huge, &params)

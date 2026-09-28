@@ -1,7 +1,9 @@
-//! param groups（層別学習率・weight decay。イシュー #2173・親 #2131）の
-//! 統合テスト。`fandhe_ai_autodiff::nn::optim::{ParamGroup, ParamGroupStep}`
-//! を 6 optimizer（`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・
-//! `fandhe_ai_autodiff::optim::Sgd`）へ適用したときの契約を固定する。
+//! param groups（層別学習率・weight decay。イシュー #2173・親 #2131。
+//! #2298 で `Adadelta`／`Adamax`／`NAdam`／`RAdam` を追加）の統合
+//! テスト。`fandhe_ai_autodiff::nn::optim::{ParamGroup, ParamGroupStep}`
+//! を 10 optimizer（`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・
+//! `fandhe_ai_autodiff::optim::Sgd`・`Adadelta`・`Adamax`・`NAdam`・
+//! `RAdam`）へ適用したときの契約を固定する。
 //!
 //! **`step()` との bit 一致契約**（R1・R2）: `step_with_groups(params,
 //! grads, &[])` を繰り返した結果は、同じ入力の既存 `step()` と
@@ -13,8 +15,9 @@
 
 use fandhe_ai_autodiff::AutodiffError;
 use fandhe_ai_autodiff::nn::optim::{
-    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Lamb, LambConfig, ParamGroup,
-    ParamGroupStep, RmsProp, RmsPropConfig,
+    Adadelta, AdadeltaConfig, Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Adamax,
+    AdamaxConfig, Lamb, LambConfig, NAdam, NAdamConfig, ParamGroup, ParamGroupStep, RAdam,
+    RAdamConfig, RmsProp, RmsPropConfig,
 };
 use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
 use fandhe_ai_tensor_core::Tensor;
@@ -90,6 +93,82 @@ tuple_optimizer_empty_groups_bit_matches_step!(
     lamb_empty_groups_bit_matches_step,
     Lamb,
     LambConfig::default()
+);
+
+// イシュー #2298: Adadelta／Adamax／NAdam／RAdam を追加。既定 config に
+// 加え、weight_decay 分岐（Adadelta・Adamax）・decoupled_weight_decay
+// の両分岐（NAdam・RAdam）も個別に固定する（実装計画 Step 5 (a)）。
+tuple_optimizer_empty_groups_bit_matches_step!(
+    adadelta_empty_groups_bit_matches_step,
+    Adadelta,
+    AdadeltaConfig::default()
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    adadelta_wd_empty_groups_bit_matches_step,
+    Adadelta,
+    AdadeltaConfig {
+        weight_decay: 0.05,
+        ..AdadeltaConfig::default()
+    }
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    adamax_empty_groups_bit_matches_step,
+    Adamax,
+    AdamaxConfig::default()
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    adamax_wd_empty_groups_bit_matches_step,
+    Adamax,
+    AdamaxConfig {
+        weight_decay: 0.05,
+        ..AdamaxConfig::default()
+    }
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    nadam_empty_groups_bit_matches_step,
+    NAdam,
+    NAdamConfig::default()
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    nadam_wd_coupled_empty_groups_bit_matches_step,
+    NAdam,
+    NAdamConfig {
+        weight_decay: 0.05,
+        decoupled_weight_decay: false,
+        ..NAdamConfig::default()
+    }
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    nadam_wd_decoupled_empty_groups_bit_matches_step,
+    NAdam,
+    NAdamConfig {
+        weight_decay: 0.05,
+        decoupled_weight_decay: true,
+        ..NAdamConfig::default()
+    }
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    radam_empty_groups_bit_matches_step,
+    RAdam,
+    RAdamConfig::default()
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    radam_wd_coupled_empty_groups_bit_matches_step,
+    RAdam,
+    RAdamConfig {
+        weight_decay: 0.05,
+        decoupled_weight_decay: false,
+        ..RAdamConfig::default()
+    }
+);
+tuple_optimizer_empty_groups_bit_matches_step!(
+    radam_wd_decoupled_empty_groups_bit_matches_step,
+    RAdam,
+    RAdamConfig {
+        weight_decay: 0.05,
+        decoupled_weight_decay: true,
+        ..RAdamConfig::default()
+    }
 );
 
 #[test]
@@ -326,6 +405,154 @@ fn adamw_state_not_mutated_after_failed_group_validation() {
     let out_ref = opt_ref.step(&[(&p1, &g1)]).unwrap();
     assert_eq!(to_bits(&out_after_failed[0]), to_bits(&out_ref[0]));
 }
+
+// =====================================================================
+// イシュー #2298: Adadelta／Adamax／NAdam／RAdam の 2 グループ独立
+// lr／weight_decay 検査（`adamw_two_groups_apply_independent_lr` と
+// 同型。複数 step 反復して bit 一致を固定する）。
+//
+// 独立インスタンス参照が bit で成立する根拠: `mu_product`（NAdam）・
+// `beta1_pow_t`（Adamax・RAdam）・`beta2_pow_t`（RAdam）は `step_count`
+// と共有ハイパーパラメータ（`beta1`／`beta2`／`momentum_decay`）だけに
+// 依存し、スロットや `lr` には依存しないため、slot 0／slot 1 それぞれを
+// 独立インスタンスで再現しても対応するスロットの出力と bit 一致する。
+// =====================================================================
+
+#[test]
+fn adadelta_two_groups_apply_independent_lr_wd() {
+    let cfg = AdadeltaConfig::default();
+    let mut opt = Adadelta::new(cfg).unwrap();
+
+    let p0 = t(vec![1.0, 2.0], &[2]);
+    let p1 = t(vec![3.0, 4.0], &[2]);
+    let g0 = t(vec![0.1, 0.1], &[2]);
+    let g1 = t(vec![0.1, 0.1], &[2]);
+
+    let group_lr = cfg.lr * 0.1;
+    let group_wd = 0.05;
+    let groups = vec![ParamGroup::new(vec![0], group_lr, group_wd)];
+
+    let cfg0 = AdadeltaConfig {
+        lr: group_lr,
+        weight_decay: group_wd,
+        ..cfg
+    };
+    let mut ref0 = Adadelta::new(cfg0).unwrap();
+    let mut ref1 = Adadelta::new(cfg).unwrap();
+
+    for _ in 0..3 {
+        let out =
+            ParamGroupStep::step_with_groups(&mut opt, &[&p0, &p1], &[&g0, &g1], &groups).unwrap();
+        let ref_out0 = ref0.step(&[(&p0, &g0)]).unwrap();
+        let ref_out1 = ref1.step(&[(&p1, &g1)]).unwrap();
+
+        assert_eq!(to_bits(&out[0]), to_bits(&ref_out0[0]));
+        assert_eq!(to_bits(&out[1]), to_bits(&ref_out1[0]));
+        assert_ne!(vals(&out[0]), vals(&out[1]));
+    }
+}
+
+#[test]
+fn adamax_two_groups_apply_independent_lr_wd() {
+    let cfg = AdamaxConfig::default();
+    let mut opt = Adamax::new(cfg).unwrap();
+
+    let p0 = t(vec![1.0, 2.0], &[2]);
+    let p1 = t(vec![3.0, 4.0], &[2]);
+    let g0 = t(vec![0.1, 0.1], &[2]);
+    let g1 = t(vec![0.1, 0.1], &[2]);
+
+    let group_lr = cfg.lr * 0.1;
+    let group_wd = 0.05;
+    let groups = vec![ParamGroup::new(vec![0], group_lr, group_wd)];
+
+    let cfg0 = AdamaxConfig {
+        lr: group_lr,
+        weight_decay: group_wd,
+        ..cfg
+    };
+    let mut ref0 = Adamax::new(cfg0).unwrap();
+    let mut ref1 = Adamax::new(cfg).unwrap();
+
+    for _ in 0..3 {
+        let out =
+            ParamGroupStep::step_with_groups(&mut opt, &[&p0, &p1], &[&g0, &g1], &groups).unwrap();
+        let ref_out0 = ref0.step(&[(&p0, &g0)]).unwrap();
+        let ref_out1 = ref1.step(&[(&p1, &g1)]).unwrap();
+
+        assert_eq!(to_bits(&out[0]), to_bits(&ref_out0[0]));
+        assert_eq!(to_bits(&out[1]), to_bits(&ref_out1[0]));
+        assert_ne!(vals(&out[0]), vals(&out[1]));
+    }
+}
+
+macro_rules! nadam_radam_two_groups_apply_independent_lr_wd {
+    ($test_name:ident, $opt_ty:ty, $cfg_ty:ident, $decoupled:expr) => {
+        #[test]
+        fn $test_name() {
+            let cfg = <$cfg_ty>::default();
+            let cfg = $cfg_ty {
+                decoupled_weight_decay: $decoupled,
+                ..cfg
+            };
+            let mut opt = <$opt_ty>::new(cfg).unwrap();
+
+            let p0 = t(vec![1.0, 2.0], &[2]);
+            let p1 = t(vec![3.0, 4.0], &[2]);
+            let g0 = t(vec![0.1, 0.1], &[2]);
+            let g1 = t(vec![0.1, 0.1], &[2]);
+
+            let group_lr = cfg.lr * 0.1;
+            let group_wd = 0.05;
+            let groups = vec![ParamGroup::new(vec![0], group_lr, group_wd)];
+
+            let cfg0 = $cfg_ty {
+                lr: group_lr,
+                weight_decay: group_wd,
+                ..cfg
+            };
+            let mut ref0 = <$opt_ty>::new(cfg0).unwrap();
+            let mut ref1 = <$opt_ty>::new(cfg).unwrap();
+
+            for _ in 0..3 {
+                let out =
+                    ParamGroupStep::step_with_groups(&mut opt, &[&p0, &p1], &[&g0, &g1], &groups)
+                        .unwrap();
+                let ref_out0 = ref0.step(&[(&p0, &g0)]).unwrap();
+                let ref_out1 = ref1.step(&[(&p1, &g1)]).unwrap();
+
+                assert_eq!(to_bits(&out[0]), to_bits(&ref_out0[0]));
+                assert_eq!(to_bits(&out[1]), to_bits(&ref_out1[0]));
+                assert_ne!(vals(&out[0]), vals(&out[1]));
+            }
+        }
+    };
+}
+
+nadam_radam_two_groups_apply_independent_lr_wd!(
+    nadam_two_groups_apply_independent_lr_wd_coupled,
+    NAdam,
+    NAdamConfig,
+    false
+);
+nadam_radam_two_groups_apply_independent_lr_wd!(
+    nadam_two_groups_apply_independent_lr_wd_decoupled,
+    NAdam,
+    NAdamConfig,
+    true
+);
+nadam_radam_two_groups_apply_independent_lr_wd!(
+    radam_two_groups_apply_independent_lr_wd_coupled,
+    RAdam,
+    RAdamConfig,
+    false
+);
+nadam_radam_two_groups_apply_independent_lr_wd!(
+    radam_two_groups_apply_independent_lr_wd_decoupled,
+    RAdam,
+    RAdamConfig,
+    true
+);
 
 // =====================================================================
 // 既存の単体テスト・fixture テストは無修正で green のはず（本ファイル

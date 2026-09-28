@@ -249,10 +249,12 @@ pub use state_dict::OptimizerStateDict;
 // `docs/autodiff-param-groups-decision.md` 参照）。新規 `Op`／
 // `BackendOps` メソッド／VJP／カーネル／`unsafe`／依存は追加していない
 // （ホストの `Tensor<f32>` 経路のみ）。`crate::optim::device_store::
-// DeviceParamStore` の group 対応は対象外のまま。本イシューと並行して
-// 追加された `Adadelta`／`Adamax`／`NAdam`／`RAdam`（#2171。下記）へは
-// `ParamGroupStep` を実装していない（実装対象は上記 6 種のみ。
-// `docs/autodiff-param-groups-decision.md` §6 参照）。
+// DeviceParamStore` の group 対応は対象外のまま。本イシュー時点では
+// 並行して追加された `Adadelta`／`Adamax`／`NAdam`／`RAdam`（#2171。
+// 下記）へは `ParamGroupStep` を実装していなかったが、イシュー #2298
+// （親 #2131）でこの 4 種へも横展開し、対象は計 10 optimizer になった
+// （`param_group` モジュール冒頭 doc・`docs/autodiff-param-groups-
+// decision.md` §0・§6 参照）。
 //
 // イシュー #2171（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 // 行内深掘り）」）: Adadelta（[`Adadelta`]・[`AdadeltaConfig`]。Zeiler,
@@ -269,7 +271,8 @@ pub use state_dict::OptimizerStateDict;
 // `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、
 // 本イシューでは対応する `BackendOps` メソッドを追加していないため
 // 4 種とも **`DeviceParamStore` 非対応**（ホスト `Tensor<f32>` を
-// 介した `step()` のみ）。
+// 介した `step()` のみ）。param groups（層別学習率・weight decay）は
+// イシュー #2298（親 #2131）で対応済み（上記 #2173 ブロック参照）。
 //
 // **facade（`fandhe_ai::optim`）への公開は保留**（`AdamW`／`Adam`／
 // `RmsProp`／`Adagrad`／`LAMB` とは異なり、本イシューでは
