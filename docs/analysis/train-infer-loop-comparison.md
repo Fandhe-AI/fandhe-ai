@@ -315,13 +315,17 @@ fresh との差分のみ記す（`tape_build`/`leaf_register`/`loss_readout`/
 |---|---|---|
 | `forward_resident` | §3 の forward（パラメータがデバイス常駐のまま演算する点は 3 者の通常経路と一致） | ライブラリ固有寄り（fresh の `forward` より 3 者の実態に近い——3 者はそもそも常にパラメータ常駐） |
 | `backward` | 7.1 と同じ | ライブラリ固有 |
-| `device_update` | §3 の更新式全体（3 者ともデバイス上でパラメータ更新を完結する点が fandhe reuse と一致） | ライブラリ固有寄り（reuse は fresh より 3 者のループ構造に近い。§8 の差分候補で詳述） |
+| `device_update` | §3 の更新式全体（3 者ともデバイス上でパラメータ更新を完結する点が fandhe reuse と一致するのはパラメータ更新の**演算自体**に限る。fandhe reuse の `device_update`〈`tape.step_device_param_store`〉自体は「grad H2D + デバイス上 SGD 発行」と定義され（`scripts/bench/framework-compare/README.md`「`train --phases`」節 `device_update` 行）、更新演算とは別に勾配の H2D 転送が同区間に残る。CPU のみ #1212 以降 `Op::LinearResident` の weight 勾配がデバイス常駐 staging へ backward 内で直接書き込み済みのため本フェーズの H2D は bias 等の勾配分のみに縮小し、CUDA／Metal は同ハーネス（framework-compare が固定する `fandhe-ai` 版）では resident 化未対応のため全パラメータ分の勾配 H2D が毎 step 残る。3 者はそもそもパラメータ・勾配ともデバイス常駐で更新完結するためこの H2D 相当区間を持たない）。 | ライブラリ固有寄り（reuse は fresh より 3 者のループ構造に近いが、勾配 H2D の残存はハーネス側の `fandhe-ai` 版固有事情の混在。§8 の差分候補で詳述） |
 
 **構造的非対称の要約**: fandhe **fresh** は `leaf_register`（入力の毎 step
 登録）・`param_readout`/`apply_params`（パラメータのホスト往復）という 3 者に
 存在しない区間を持つのに対し、fandhe **reuse**（`forward_resident`・
 `device_update`）は 3 者の「パラメータ常駐・デバイス上更新」という既定の
-ループ構造に近づく。**`loss_readout` が backward の前に同期を強制する**
+ループ構造に近づく。ただし reuse の `device_update` は演算（デバイス上 SGD
+発行）自体は 3 者と一致する一方、**勾配の H2D 転送は更新演算とは別に同区間へ
+残存する**（CUDA／Metal は全パラメータ分、CPU も bias 等の分。上表参照）ため、
+「パラメータ常駐・デバイス上更新」への一致は演算のみに限られ完全な同型では
+ない。**`loss_readout` が backward の前に同期を強制する**
 （README「同期待ちを独立区間にできない理由」節）点は fresh・reuse 共通の
 fandhe 固有構造で、3 者は同期点が step 末尾の 1 か所（loss/出力の host
 readout）のみという構造（§6）と対照的である。
