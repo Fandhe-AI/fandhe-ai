@@ -3,7 +3,7 @@
 ## 基盤方針（REQ-1 v2、変更禁止）
 
 - **完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）とする。Burn 等の既存 ML フレームワークへの統合は行わない
-- 依存は許容依存 8 区分のみ（詳細は [deps-policy.md](./deps-policy.md)）。禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査する（TASK-1.2）
+- 依存は許容依存 10 区分のみ（本体 workspace の直接依存は第 1〜8・第 10 区分の 9 区分、第 9 区分はベンチ比較対象の独立ハーネス限定。詳細は [deps-policy.md](./deps-policy.md)）。禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査する（TASK-1.2）
 - 互換 API 層（`compat::array`／`compat::Sequential` 相当）は自作コアの上の薄いラッパーに徹する（REQ-9）
 
 ## バックエンド構成（REQ-2）

@@ -7,7 +7,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を�
 - 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root。compat 公開面〈`compat::array`・`compat::Sequential`〉を持つ）に加え、GitHub Pages 公開ツリー向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`）。**`facade` が唯一のサポートされる公開 API 面**であり `tensor-core`・`autodiff`・`backend-*` は内部クレート（範囲の正は `docs/compat-api-scope.md` §0）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない
 - crates.io 公開済みは 6 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`）で、`[package] name` は `fandhe-ai` prefix 付きの公開名（`docs/crates-io-naming-decision.md`）。`onnx-interop` は公開承認済みの 7 クレート目で、公開準備は完了済み・実 publish は次回リリースサイクル。`guardrail`・`self-repair`・`bench-harness`・`docs-site` は非公開。facade からの ONNX import／export・safetensors save／load の公開範囲は `docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-safetensors-exposure-decision.md` を正とする
 - crates.io への公開は一括リリース `.github/workflows/release-all.yml`（workflow_dispatch 1 回・environment `crates-io-release` 承認 1 回で公開クレートを依存順に publish）を基本とし、単一クレートの再実行・障害復旧には `.github/workflows/release.yml` を使う（いずれも `CARGO_REGISTRY_TOKEN`〈org secret〉・fail-closed ガード群）。手順・版数運用・公開履歴（v0.3.0〜v0.9.0）の正は `docs/crates-io-publishing-order.md` §9〜11・`.claude/rules/ci.md`
-- 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
+- 依存は許容 10 区分のみ（本体 workspace の直接依存は第 1〜8・第 10 区分の 9 区分、第 9 区分はベンチ比較対象の独立ハーネス限定）・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
 - 現状 M0 完了（workspace Cargo.toml・クレート雛形・依存禁止検査・deny.toml・license-matrix.md）。crates.io 公開済み（最新 v0.9.0）・GitHub Pages 公開済み（`crates/docs-site` + `site/` + `.github/workflows/docs-site.yml`）。CI・Makefile の cargo 系チェック（fmt / clippy / test / deny / deps-forbidden）は全て有効化済み
 
@@ -24,7 +24,7 @@ fandhe-ai/
 ├── .editorconfig            # インデント・改行規約
 ├── Dockerfile / compose.yaml # 環境非依存の開発コンテナ（CPU バックエンドのみ）
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）
-├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉・許容依存 8 区分を =x.y.z 固定）
+├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉・本体 workspace の許容直接依存〈第 1〜8・第 10 区分〉を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
 ├── rust-toolchain.toml       # toolchain 単一真実源（stable + rustfmt/clippy。rust-base-ci 前提）
 ├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans）
@@ -109,7 +109,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | `.claude/rules/delegation.md` | 調査・設計フェーズの委譲原則・パスベース切り替え |
 | `.claude/rules/delegation-impl.md` | 作成・編集フェーズの委譲マッピング・実装フロー標準 |
 | `.claude/rules/coding-rust.md` | 完全自作コア方針・cfg ベースバックエンド・FMA 契約統一・品質基準 |
-| `.claude/rules/deps-policy.md` | 許容依存 8 区分・`=x.y.z` 完全固定・禁止リスト・ライセンス要件 |
+| `.claude/rules/deps-policy.md` | 許容依存 10 区分（本体直接依存は第 1〜8・第 10 区分）・`=x.y.z` 完全固定・禁止リスト・ライセンス要件 |
 | `.claude/rules/ci.md` | **CI は GitHub ホステッド（`ubuntu-latest`）既定**（例外は ai-review の codex 実行ジョブのみ）・fork PR 対策・timeout 必須・SHA 固定・fail-closed 集約 |
 | `.claude/rules/security.md` | OWASP Top 10・秘密情報混入防止・自己修復ループのガードレール |
 | `.claude/rules/japanese-style.md` | 日本語出力スタイル |
