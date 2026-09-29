@@ -1504,17 +1504,44 @@ impl Sequential {
                     .to_string(),
             ));
         }
-        // 2 パス目: `self.inner.layers_mut()` を同じ順序で再度走査し、
-        // 対応する `Rebuilt`（`Linear`／`Conv2d`／`Conv1d`）を代入する
-        // か、`GenericUpdate`（イシュー #1760 の 6 層種別）を
-        // `Module::set_parameter` で in-place 適用する。ここに到達した
-        // 時点で件数・shape 検証は全件（両経路とも）完了しているため、
-        // 代入・`set_parameter` 自体は失敗し得ない（`set_parameter`
-        // の戻り値はそれでも `?` で伝播し黙殺しない。fail-closed）。
+        // 2 パス目（2a）: `GenericUpdate`（イシュー #1760 の 6 層種別と `add_module`
+        // #2398 の独自層）を `Module::set_parameter` で in-place 適用する。独自層の
+        // `set_parameter` は任意実装で 1 パス目の検証後にも `Err` を返し得るため、
+        // 適用前に各層の現在値を snapshot し、途中で失敗したら適用済みの層を
+        // 逆順に元の値へ書き戻してからエラーを返す（エラー時はモデル不変の保証。
+        // 書き戻し自体の失敗は元エラーを優先して握りつぶす best effort）。
+        // `Rebuilt`（`Linear`／`Conv2d`／`Conv1d`）の代入は失敗し得ないため、
+        // 失敗し得る 2a を先に完了させてから 2b で行う（2a 失敗時は未着手のまま残す）。
+        type LayerSnapshot = (usize, Vec<(String, Tensor<f32>)>);
+        let mut applied: Vec<LayerSnapshot> = Vec::new();
+        let mut failure: Option<AutodiffError> = None;
+        'apply: for update in generic_updates {
+            let layer = &mut self.inner.layers_mut()[update.layer_index];
+            let snapshot: Vec<(String, Tensor<f32>)> = layer
+                .named_parameters()
+                .into_iter()
+                .map(|(n, t)| (n, t.clone()))
+                .collect();
+            applied.push((update.layer_index, snapshot));
+            for (name, value) in update.values {
+                if let Err(e) = layer.set_parameter(&name, value) {
+                    failure = Some(e);
+                    break 'apply;
+                }
+            }
+        }
+        if let Some(e) = failure {
+            for (layer_index, snapshot) in applied.into_iter().rev() {
+                let layer = &mut self.inner.layers_mut()[layer_index];
+                for (name, value) in snapshot {
+                    let _ = layer.set_parameter(&name, value);
+                }
+            }
+            return Err(e);
+        }
+        // 2b: 検証済みの `Rebuilt` を同じ層順で代入する（失敗し得ない）。
         let mut rebuilt = rebuilt.into_iter();
-        let mut generic_updates = generic_updates.into_iter();
-        let mut next_generic = generic_updates.next();
-        for (layer_index, layer) in self.inner.layers_mut().iter_mut().enumerate() {
+        for layer in self.inner.layers_mut().iter_mut() {
             if let Some(linear) = layer.as_linear_mut() {
                 if let Some(Rebuilt::Linear(new_linear)) = rebuilt.next() {
                     *linear = new_linear;
@@ -1527,11 +1554,6 @@ impl Sequential {
                 && let Some(Rebuilt::Conv1d(new_conv)) = rebuilt.next()
             {
                 *conv = new_conv;
-            } else if let Some(update) = next_generic.take_if(|u| u.layer_index == layer_index) {
-                for (name, value) in update.values {
-                    layer.set_parameter(&name, value)?;
-                }
-                next_generic = generic_updates.next();
             }
         }
         Ok(())
@@ -2482,6 +2504,66 @@ mod tests {
         ) -> Result<Var<'t>, AutodiffError> {
             Ok(*input)
         }
+    }
+
+    /// `set_parameter` を持つ独自層。`fail` が真なら常に `Err`（#2398 の部分更新防止テスト用）。
+    struct Settable {
+        w: Tensor<f32>,
+        fail: bool,
+    }
+    impl crate::nn::Module for Settable {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("w".into(), &self.w)]
+        }
+        fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+            if self.fail || name != "w" {
+                return Err(AutodiffError::InvalidArgument(
+                    "set_parameter failed".into(),
+                ));
+            }
+            self.w = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn apply_parameters_rolls_back_when_custom_layer_set_parameter_fails() {
+        let one = || Tensor::from_slice(&[1.0_f32], &[1]).unwrap();
+        let mut model = Sequential::new()
+            .add_linear(2, 2, SEED1)
+            .unwrap()
+            .add_module(Settable {
+                w: one(),
+                fail: false,
+            })
+            .add_module(Settable {
+                w: one(),
+                fail: true,
+            });
+        let before: Vec<Vec<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| dense_vec(t))
+            .collect();
+        let updated: Vec<Tensor<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| Tensor::new(vec![9.0_f32; t.numel()], t.shape()).unwrap())
+            .collect();
+        assert!(model.apply_parameters(updated).is_err());
+        let after: Vec<Vec<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| dense_vec(t))
+            .collect();
+        assert_eq!(before, after);
     }
 
     #[test]
