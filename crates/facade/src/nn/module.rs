@@ -15,7 +15,8 @@
 //! `named_parameters`／`set_parameter`／`state_dict`／`load_state_dict`／
 //! `set_training`／`training` の意味論・命名契約・fail-closed 検証は
 //! `crates/autodiff/src/nn/module.rs` の同名メソッドと同一である。
-//! `load_state_dict` は autodiff 側の単一実装を crate 内ブリッジ経由で再利用し、
+//! `load_state_dict` は autodiff 側の単一実装を crate 内アダプタ（`FacadeModuleAdapter`。
+//! autodiff コンテナへ積む橋渡しを兼ねる。#2397）経由で再利用し、
 //! two-pass 検証・キー昇順適用・逆順ロールバックの一致を構造的に保証する
 //! （コピーによるドリフトを避ける）。
 
@@ -75,7 +76,7 @@ pub trait Module {
         &mut self,
         state: HashMap<String, Tensor<f32>>,
     ) -> Result<(), AutodiffError> {
-        AutodiffModule::load_state_dict(&mut ParamBridge(self), state)
+        AutodiffModule::load_state_dict(&mut FacadeModuleAdapter(self), state)
     }
 
     /// 学習／評価モードの切替。既定は no-op（無状態層向け）。モード依存層は
@@ -88,27 +89,80 @@ pub trait Module {
     }
 }
 
-/// facade の [`Module`] を autodiff 側 `Module` として借用し、`load_state_dict` の
-/// 既定実装（two-pass・ロールバック）を再利用するための crate 内専用ブリッジ。
+/// facade の [`Module`] を autodiff 側 `Module` として扱う crate 内専用アダプタ
+/// （イシュー #2397・親 #2338 承認事項 4「借用ハンドル型による橋渡し」。
+/// `docs/facade-nn-module-exposure-decision.md` §6・§10・§14）。
 ///
-/// 非公開（公開面に出ない）。`forward` は実際に委譲する（スタブにしない）。
-struct ParamBridge<'a, M: ?Sized>(&'a mut M);
+/// 役割は 2 つ。`P = &mut M`（`M: Module + ?Sized`）では facade `Module::load_state_dict`
+/// 既定実装が autodiff 側の単一実装を再利用するための内部ブリッジ、`P = Box<dyn Module>`
+/// では autodiff コンテナ（`Box<dyn fandhe_ai_autodiff::nn::Module>`。`'static` 必須）へ
+/// facade 層を積むアダプタ（公開入口は #2398 で `compat::Sequential` に足す。それまで
+/// `nn/mod.rs` からは再エクスポートせず、compat からは到達しない）。
+///
+/// `pub(crate)` で公開面（REQ-12）には出ない。`unsafe` は使わず、autodiff の
+/// `&Tape` は `TapeRef::from_autodiff` の安全な借用変換で facade 層へ渡す。
+///
+/// 委譲: `forward`・`named_parameters`・`set_parameter`・`set_training`・`training`。
+/// `state_dict`／`load_state_dict` は autodiff 既定のまま（委譲済みの
+/// `named_parameters`／`set_parameter` の上で動く。facade 層が独自に
+/// `load_state_dict` を override していても本アダプタ経由では迂回される。
+/// `ModuleList` が子を扱うのと同じ意味論）。`as_*`／`is_pooling` は既定（`None`／`false`）。
+/// `set_requires_grad`／`requires_grad`／`children`／`type_name` は範囲外（#2400・#2401）で、
+/// 既定の fail-closed のまま（パラメータ持ちを含む `Sequential::freeze()` は現時点で `Err`）。
+///
+/// ホスト推論経路は非対応: `supports_forward_host` を `false` へ override し
+/// （autodiff 既定は `true`。既定のままだと `compat::Sequential::predict` の事前判定を
+/// 通過し、途中層の `Err` で手前層の副作用〈Dropout の RNG 消費・BatchNorm の running
+/// stats 更新〉が tape 経路再実行と二重化する）、`forward_host` は
+/// `InvalidArgument` を返す（`BackendError::Unsupported` は「フォールバックの合図」で
+/// `predict_recorded` が捕捉して再実行するため使わない。前例は `ModuleList::forward_host`。
+/// `Embedding` は `Unsupported` と `supports_forward_host() == false` の組だが、本アダプタは
+/// 直接呼び出しやネスト経由でも黙ってフォールバックさせない方針を優先する。security.md A04）。
+pub(crate) struct FacadeModuleAdapter<P>(pub(crate) P);
 
-impl<M: Module + ?Sized> AutodiffModule for ParamBridge<'_, M> {
+impl<P> AutodiffModule for FacadeModuleAdapter<P>
+where
+    P: std::ops::DerefMut,
+    P::Target: Module,
+{
     fn forward<'t>(
         &self,
         tape: &'t fandhe_ai_autodiff::Tape,
         input: &Var<'t>,
     ) -> Result<Var<'t>, AutodiffError> {
-        self.0.forward(TapeRef::from_autodiff(tape), input)
+        Module::forward(&*self.0, TapeRef::from_autodiff(tape), input)
     }
 
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        self.0.named_parameters()
+        Module::named_parameters(&*self.0)
     }
 
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
-        self.0.set_parameter(name, value)
+        Module::set_parameter(&mut *self.0, name, value)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        Module::set_training(&mut *self.0, training);
+    }
+
+    fn training(&self) -> bool {
+        Module::training(&*self.0)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn forward_host(
+        &self,
+        _ops: &dyn fandhe_ai_tensor_core::BackendOps,
+        _input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Err(AutodiffError::InvalidArgument(
+            "FacadeModuleAdapter::forward_host: facade nn::Module does not support the host \
+             (tape-free) inference path; supports_forward_host() is false and must be honored"
+                .to_string(),
+        ))
     }
 }
 
@@ -184,7 +238,7 @@ mod tests {
 
         let tb = crate::tape();
         let xb = tb.var(&t(3.0));
-        let bridge = ParamBridge(&mut layer);
+        let bridge = FacadeModuleAdapter(&mut layer);
         let via = AutodiffModule::forward(&bridge, &tb.0, &xb).expect("bridge");
         assert_eq!(bits(&direct.value()), bits(&via.value()));
     }
@@ -219,5 +273,172 @@ mod tests {
         missing.remove("b");
         let e = layer.load_state_dict(missing).expect_err("missing");
         assert!(e.to_string().contains("missing keys"), "{e}");
+    }
+
+    // ---- #2397: autodiff コンテナへ積むアダプタ（P = Box<dyn Module>）の検証 ----
+
+    use fandhe_ai_autodiff::nn::{Linear, Sequential};
+
+    /// パラメータ `a`（`[3]`）と train/eval フラグを実保持する facade 層。
+    struct Scale {
+        a: Tensor<f32>,
+        training: bool,
+    }
+
+    impl Scale {
+        fn new() -> Self {
+            Self {
+                a: Tensor::from_slice(&[0.5, -1.5, 2.0], &[3]).expect("tensor"),
+                training: true,
+            }
+        }
+    }
+
+    impl Module for Scale {
+        fn forward<'t>(
+            &self,
+            tape: TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            let a = tape.var(&self.a);
+            input.mul(&a)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("a".into(), &self.a)]
+        }
+        fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+            if name != "a" {
+                return Err(AutodiffError::InvalidArgument(format!("unknown {name}")));
+            }
+            self.a = value;
+            Ok(())
+        }
+        fn set_training(&mut self, training: bool) {
+            self.training = training;
+        }
+        fn training(&self) -> bool {
+            self.training
+        }
+    }
+
+    fn input() -> Tensor<f32> {
+        Tensor::from_slice(&[0.1, 0.2, -0.3, 0.4, -0.5, 0.6], &[2, 3]).expect("tensor")
+    }
+
+    fn adapter() -> FacadeModuleAdapter<Box<dyn Module>> {
+        FacadeModuleAdapter(Box::new(Scale::new()) as Box<dyn Module>)
+    }
+
+    /// forward 値・入力勾配・葉勾配・ノード数のスナップショット（bit 比較用）。
+    type Snapshot = (Vec<u32>, Option<Vec<u32>>, Vec<Option<Vec<u32>>>, usize);
+
+    fn snapshot<'t>(tape: &'t crate::Tape, x: &Var<'t>, out: &Var<'t>) -> Snapshot {
+        let loss = out.sum(None).expect("sum");
+        let grads = tape.backward(&loss).expect("backward");
+        let leaves = (0..tape.leaf_count())
+            .map(|i| {
+                let v = tape.leaf(i).expect("leaf");
+                grads.get(&v).expect("get").map(bits)
+            })
+            .collect();
+        (
+            bits(&out.value()),
+            grads.get(x).expect("get").map(bits),
+            leaves,
+            tape.0.len(),
+        )
+    }
+
+    #[test]
+    fn adapter_in_autodiff_sequential_matches_manual_chain() {
+        for linear_first in [true, false] {
+            let linear = Linear::new(3, 3, true, 7).expect("linear");
+            let reference = Scale::new();
+
+            let tape = crate::tape();
+            let x = tape.var(&input());
+            let mut h = x;
+            if linear_first {
+                h = linear.bind(&tape.0).forward(&h).expect("linear");
+                h = Module::forward(&reference, TapeRef::from(&tape), &h).expect("scale");
+            } else {
+                h = Module::forward(&reference, TapeRef::from(&tape), &h).expect("scale");
+                h = linear.bind(&tape.0).forward(&h).expect("linear");
+            }
+            let expected = snapshot(&tape, &x, &h);
+
+            let mut seq = Sequential::new();
+            let linear2 = Linear::new(3, 3, true, 7).expect("linear");
+            if linear_first {
+                seq.push(Box::new(linear2));
+                seq.push(Box::new(adapter()));
+            } else {
+                seq.push(Box::new(adapter()));
+                seq.push(Box::new(linear2));
+            }
+            let tape2 = crate::tape();
+            let x2 = tape2.var(&input());
+            let out = AutodiffModule::forward(&seq, &tape2.0, &x2).expect("seq forward");
+            let actual = snapshot(&tape2, &x2, &out);
+            assert_eq!(expected, actual, "linear_first={linear_first}");
+        }
+    }
+
+    #[test]
+    fn adapter_state_dict_semantics_match_facade_layer() {
+        let mut ad = adapter();
+        let direct = Scale::new();
+        let via = AutodiffModule::state_dict(&ad);
+        let want = Module::state_dict(&direct);
+        assert_eq!(via.len(), want.len());
+        assert_eq!(bits(&via["a"]), bits(&want["a"]));
+
+        let mut seq = Sequential::new();
+        seq.push(Box::new(Linear::new(3, 3, false, 1).expect("linear")));
+        seq.push(Box::new(adapter()));
+        let mut sd = AutodiffModule::state_dict(&seq);
+        let new_a = Tensor::from_slice(&[9.0, 8.0, 7.0], &[3]).expect("tensor");
+        sd.insert("1.a".into(), new_a.clone());
+        AutodiffModule::load_state_dict(&mut seq, sd).expect("load");
+        assert_eq!(bits(&AutodiffModule::state_dict(&seq)["1.a"]), bits(&new_a));
+
+        // 欠落キーの Err 文言は facade 層直接と同一。
+        let mut direct_mut = Scale::new();
+        let e_direct = Module::load_state_dict(&mut direct_mut, HashMap::new())
+            .expect_err("missing")
+            .to_string();
+        let e_adapter = AutodiffModule::load_state_dict(&mut ad, HashMap::new())
+            .expect_err("missing")
+            .to_string();
+        assert_eq!(e_direct, e_adapter);
+    }
+
+    #[test]
+    fn adapter_propagates_training_flag() {
+        let mut seq = Sequential::new();
+        seq.push(Box::new(adapter()));
+        assert!(AutodiffModule::training(&seq));
+        AutodiffModule::set_training(&mut seq, false);
+        assert!(!AutodiffModule::training(&seq));
+        assert!(!seq.layers()[0].training());
+        AutodiffModule::set_training(&mut seq, true);
+        assert!(seq.layers()[0].training());
+    }
+
+    #[test]
+    fn adapter_host_inference_is_fail_closed() {
+        let ad = adapter();
+        assert!(!AutodiffModule::supports_forward_host(&ad));
+        let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
+        let e = AutodiffModule::forward_host(&ad, &ops, &input()).expect_err("must be Err");
+        assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
+
+        let mut seq = Sequential::new();
+        seq.push(Box::new(adapter()));
+        let e = AutodiffModule::forward_host(&seq, &ops, &input()).expect_err("must be Err");
+        assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
+
+        assert!(AutodiffModule::as_linear(&ad).is_none());
+        assert!(!AutodiffModule::is_pooling(&ad));
     }
 }
