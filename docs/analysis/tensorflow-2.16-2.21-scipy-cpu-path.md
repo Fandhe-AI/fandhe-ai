@@ -4,12 +4,13 @@
 
 ## §1 判断サマリ
 
-- 対象は framework-compare スコアボードの CPU セルで比較対象になっている TensorFlow（M4 Max: 2.16.2 CPU 実行・GB10: 2.21.0）と SciPy 1.18.1（`scipy.linalg.blas.sgemm`）。計測ハーネスは `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py`。
+- 対象は framework-compare スコアボードの CPU セルで比較対象になっている TensorFlow（M4 Max: 2.16.2 CPU 実行・GB10: 2.21.0）と SciPy 1.18.1（`scipy.linalg.blas.sgemm`）。計測ハーネスは `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py`（GB10 は同ディレクトリの実測 JSONL で確認できる。M4 Max の TF／SciPy は元 JSONL が未収録の転記値で、同一ハーネスという根拠はスコアボードの記載〈`docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/body_1988.html:9`〉に留まる。§10）。
 - **本解析で判明した最重要事実**（§6・確定）: TensorFlow の oneDNN（`_MklMatMul` への eager op-rewrite）有効・無効は `TF_ENABLE_ONEDNN_OPTS` 環境変数と `DefaultOneDnnPolicy()` の既定値で決まるが、後者の aarch64 分岐は **`ARM_NEOVERSE_V1`（MIDR `implementer=0x41`・`part_num=0xd40`）専用のハードコード判定**であり、他の Arm コア（Apple Silicon・GB10 の Cortex-X925／Cortex-A725 等）は一致しない。判定に使う MIDR は `/sys/devices/system/cpu/cpu<N>/regs/identification/midr_el1`（`N` は `/sys/devices/system/cpu/present` の先頭）から読まれる（§5）。GB10 の `midr_el1` は既存実測ログ `docs/perf/logs/cpu-gemm-rayon-sweep-1305/env_info_raw-dgx.txt:36-44` に記録済みで（cpu0: part `0xd87`〈Cortex-A725〉・cpu5: part `0xd85`〈Cortex-X925〉）、いずれも `0xd40` と一致しない。よって **GB10 の oneDNN op-rewrite は `TF_ENABLE_ONEDNN_OPTS` 未設定時は既定 OFF（確定。判定ロジックは上流コード、MIDR 値は既存実測ログ）**。
 - macOS arm64（M4 Max）向け公式 wheel は `.bazelrc` の `release_macos_arm64` config に `mkl_aarch64` 系 `--define` が一切現れず、`INTEL_MKL` マクロが未定義になるため `IsMklEnabled()` は常に `false`（確定。§4）。M4 Max の TF CPU GEMM は oneDNN op-rewrite を経由しない。
 - Linux aarch64（GB10）向け公式 wheel は `release_arm64_linux` config が `mkl_aarch64_threadpool` を経由し `build_with_mkl_aarch64=true` → `INTEL_MKL` 定義（確定。§5）。ただし上記の Neoverse V1 専用判定と GB10 の実測 MIDR により、`TF_ENABLE_ONEDNN_OPTS` を設定しない本計測（bench_py.py。§5）では oneDNN op-rewrite は既定 OFF（確定。§5）。
-- **GB10 実測では CPU GEMM（N=256〜4096）・train・infer の全マッチセルで fandhe-ai 0.8.0 が TensorFlow 2.21.0・SciPy 1.18.1 を上回っている**（§10 表 1。比較値はすべて `fresh` モード同士）。N=4096 の fandhe-ai 値は本計測 JSONL ではなく同キャンペーンの追加計測 `docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/results-dgx-0.8.0-extra.jsonl:6`（`fresh`・1128.2 GFLOPS）で、TF 944.4 GFLOPS・SciPy 457.4 GFLOPS（`results-dgx-py-0.8.0.jsonl:12`・`:19`。いずれも `fresh`）を上回る。
-- **M4 Max では N=256 の CPU GEMM で fandhe-ai がわずかに負ける**（107.4 GFLOPS 対 TF 129 GFLOPS・SciPy 121 GFLOPS）。train・infer では SciPy に負ける（TF には両方とも勝つ）。負けセルは N=256 GEMM・train・infer の 3 種（§10 表 2）。**表 2 の train・infer は fandhe-ai 側を `fresh` モード値で統一している**（GEMM 行・表 1〈GB10〉と計測条件をそろえるため。fandhe-ai の `reuse` モード値を使う旧版の判定〈train は TF に対しても僅差で負け〉は §10 表 2 直後の注記を参照）。
+- **比較可能な範囲**（§10「比較可能範囲」で両ハーネスの計測コードを突き合わせた結果）: GEMM は同一入力・同一 checksum 定義で、GB10 は両側 `parity_fail_count: 0` かつ checksum も相互に一致するため比較可能。infer は演算列・GEMM 回数・checksum 定義が一致し、違いは初期パラメータの値だけなので**条件付きで比較可能**（checksum はフレームワーク間の数値一致の確認に使えない）。train は fandhe-ai 0.8.0 の backward だけが第 1 層の入力勾配 dX を計算し、backward の GEMM が 4 回対 3 回で処理が同等といえないため、**勝ち負けの判定から外し参考値（同等性は未確認）とする**。
+- **GB10 実測では判定対象セル（CPU GEMM N=256〜4096・infer）すべてで fandhe-ai 0.8.0 が TensorFlow 2.21.0・SciPy 1.18.1 を上回っている**（§10 表 1。infer は条件付き。比較値はすべて `fresh` モード同士）。train は参考値で判定しない。N=4096 の fandhe-ai 値は本計測 JSONL ではなく同キャンペーンの追加計測 `docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/results-dgx-0.8.0-extra.jsonl:6`（`fresh`・1128.2 GFLOPS）で、TF 944.4 GFLOPS・SciPy 457.4 GFLOPS（`results-dgx-py-0.8.0.jsonl:12`・`:19`。いずれも `fresh`）を上回る。
+- **M4 Max では N=256 の CPU GEMM で fandhe-ai がわずかに負ける**（107.4 GFLOPS 対 TF 129 GFLOPS・SciPy 121 GFLOPS）。infer は SciPy に負ける（条件付き。TF には勝つ）。負けセルは N=256 GEMM と infer（対 SciPy）の 2 セルで、train は参考値のため負けセルに数えない（§10 表 2）。M4 Max の TF／SciPy は元 JSONL がリポジトリに無い転記値で、GEMM の parity と train・infer の checksum を本リポジトリ内で再確認できない（§10）。**表 2 の fandhe-ai 側は `fresh` モード値で統一している**（GEMM 行・表 1〈GB10〉と計測条件をそろえるため。`reuse` モード値の扱いは §10 表 2 直後の注記を参照）。
 - SciPy の BLAS リンク先は wheels.yml のビルドマトリクスから macOS arm64 で openblas 変種と accelerate 変種の**両方**がビルドされることまでは確定できたが、PyPI へ実際に公開される変種の断定はワークフロー読み取りだけでは不可能（§8・§11）。
 - コードの持ち込みはなし。結論と `path:line`・タグ固定 URL のみを記録する。
 
@@ -131,6 +132,45 @@ TF（Eigen `ThreadPoolDevice` またはビルド構成次第で oneDNN `dnnl_sge
 
 ## §10 負けセルとの紐付け
 
+### 比較可能範囲（ハーネス間の突き合わせ。表 1・表 2 の判定の前提）
+
+表 1・表 2 の各セルが同じ処理を比べているかを、計測コード（fandhe-ai 側 `scripts/bench/framework-compare/bench-fandhe/src/main.rs`〈以下 `main.rs`〉・TF／SciPy 側 `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py`〈以下 `bench_py.py`〉）と、計測に使われた fandhe-ai 0.8.0 のソース（タグ `v0.8.0`。`crates/autodiff`・`crates/facade`）で突き合わせた。`main.rs` の該当定義（`build_model`・`mlp_data`・`run_train`・`run_infer`・`gemm_inputs`）と `fandhe-ai =0.8.0` ピンは、計測直後の main（`b7a266a0`・2026-09-13）でも同じであることを確認したうえで、HEAD の行番号を引く。
+
+| 項目 | fandhe-ai 0.8.0（`main.rs`） | TensorFlow／SciPy（`bench_py.py`） | 一致 |
+|---|---|---|---|
+| GEMM の入力 | `gemm_inputs`: `Xorshift64Star::new(SEED_A／SEED_B).fill_vec(n*n)`（`main.rs:413-423`。生成式は `bench-common/src/lib.rs:182-184`・シードは `:188-193`） | `fill_vec(SEED_A／SEED_B, n*n)`（`bench_py.py:24-42`・`:204`） | 一致 |
+| GEMM の checksum・parity | 全要素の f64 逐次和（`main.rs:471`）。parity は FMA 参照 GEMM と複合判定（`bench-common::parity`） | f64 累積和（`bench_py.py:51-54`）。parity は同じ契約の移植（`bench_py.py:57-87`） | 一致 |
+| MLP の構成 | 784→256→10・ReLU・bias あり（`main.rs:141-144`・`:990-995`） | 同じ（`bench_py.py:18`・`:153`・`:184-186`） | 一致 |
+| 入力 `x`・目標 `y` | `SEED_X`／`SEED_Y` の `fill_vec`（`main.rs:981-988`） | 同じ（`bench_py.py:225`） | 一致 |
+| バッチサイズ | 64（`main.rs:141`） | 64（`bench_py.py:18`） | 一致 |
+| 初期パラメータ | `Sequential::add_linear(.., SEED_L1／SEED_L2)`（`main.rs:990-995`）→ `Linear::new`。W・b とも `U(-1/√in, 1/√in)` で、シードは `derive_seed(seed, salt)` で導出し、bias は非ゼロ（v0.8.0 `crates/autodiff/src/nn/linear.rs:66-73`・`nn/init.rs:55-59`・`:73-76`・`:90-94`・`crates/facade/src/compat/sequential.rs:116-124`） | W = `fill_vec(SEED_L1／SEED_L2)`（`[-0.5, 0.5)`）・b = 0（`bench_py.py:223-224`）。candle・burn のハーネスも同じ初期化（`bench-candle/src/main.rs:435-450`・`bench-burn/src/main.rs:189-196`） | **不一致** |
+| 損失と正規化 | `mse_loss` = `Reduction::Mean`（全 64×10 要素の平均。v0.8.0 `crates/autodiff/src/var.rs:425-427`。`main.rs:1012`） | TF `tf.reduce_mean(tf.square(pred - y))`（`bench_py.py:154`）・SciPy `np.mean(d * d)` と勾配 `(2.0 / n) * d`（`n = d.size`。`bench_py.py:188-190`） | 一致 |
+| optimizer | ホスト側 SGD `p - LR * g`（LR 0.01。`main.rs:147`・`:1021-1036`） | TF `assign_sub(g * LR)`（`bench_py.py:156-157`）・SciPy の in-place 減算（`bench_py.py:194`） | 更新式は一致（実装は異なる） |
+| forward の GEMM 回数 | 2 回。CPU infer は `Sequential::predict` の tape 不要経路で Linear→ReLU を `gemm_bias_act` へ融合する（v0.8.0 `sequential.rs:221-228`・`:239-246`。`main.rs:1521`） | 2 回（TF は `@` 2 回・`bench_py.py:163`、SciPy は `sgemm` 2 回・`bench_py.py:198`） | 一致（融合の有無は実装差） |
+| backward の GEMM 回数（train） | **4 回**（dX・dW1・dH・dW2）。v0.8.0 の `Op::MatMul`／`Op::LinearAct` の VJP（`grad.rs:84-88`・`:365-397`）は `matmul_vjp`（`:505-520`。`da`・`db` を無条件に計算）を通して入力側の勾配を常に返し、`Tape::backward`（`backward.rs:175-202`）は入力側で枝刈りしない。第 1 層の入力 `x` は勾配不要の葉だが dX = g[64,256] × W1ᵀ[256,784] が計算される | **3 回**（dW1・dH・dW2）。TF は eager tape が watch 外かつ `sources` 外の入力を unneeded とし（[`tape.h#L743-L750`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/c/eager/tape.h#L743-L750)・[2.21.0 `#L744-L751`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/tensorflow/c/eager/tape.h#L744-L751)）、`_MatMulGrad` は `skip_input_indices` に 0 があれば `_MatMulGradAgainstSecondOnly` へ分岐する（[`math_grad.py#L1697-L1709`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/python/ops/math_grad.py#L1697-L1709)・[2.21.0 `#L1696-L1708`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/tensorflow/python/ops/math_grad.py#L1696-L1708)。`skip_input_indices` を勾配関数へ渡す口は [`backprop.py#L92-L136`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/python/eager/backprop.py#L92-L136)。確定〈Python 側の skip 分岐と C++ tape の unneeded 判定。両者の間の pywrap での受け渡しは未追跡〉）。`x` は `tf.identity(tf.constant(..))`（`bench_py.py:139-141`）で watch されない。SciPy は `gw2`・`gh`・`gw1` だけを計算する（`bench_py.py:191-193`） | **不一致** |
+| 1 計測の単位（train） | 1 step。100 step のうち先頭 20 を warmup とし、残り 80 step の中央値（`main.rs:145-146`・`:1003`・`:1045`） | 同じ（`bench_py.py:19`・`:233-238`） | 一致 |
+| 1 計測の単位（infer） | forward 1 回 + ホスト実体化 + checksum（warmup 20・計測 20。`main.rs:1520-1523`・`:1537-1542`） | 同じ（`bench_py.py:248-254`） | 一致 |
+| checksum（train） | 100 step 目の更新前の loss（`main.rs:1014-1017`・`:1056`） | 同じ（`bench_py.py:235`・`:241`） | 定義は一致 |
+| checksum（infer） | 出力 64×10 の全要素の f64 逐次和（`checksum_tensor`。`main.rs:395-411`・`:1522`） | 同じ（`bench_py.py:51-54`・`:251`） | 定義は一致 |
+| `mode: fresh` の中身 | train は step ごとに新しい tape を作り、パラメータと勾配をホストへ読み出して `Tensor::from_slice` で作り直す（`main.rs:1004-1038`）。CPU infer は `predict`（tape 不要） | プロトコルは 1 種類だけで、`mode` は `"fresh"` を固定で書き出す（`bench_py.py:277`）。TF は step ごとに `GradientTape`、SciPy は NumPy の手書き backprop | 名前だけが共通（中身は各ハーネスの定義） |
+
+**checksum が違う理由**: 定義（train は 100 step 目の loss、infer は全出力の f64 逐次和）は両ハーネスで同じで、違うのは初期パラメータの値だけである。これは実測 JSONL でも裏付けられる。共有初期化（`fill_vec` の W・bias 0）を使う実装は、フレームワークとデバイスを問わず同じ値になる。
+
+- GB10: TF train 0.1175494（`docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/results-dgx-py-0.8.0.jsonl:13`）・infer 1381.70878（`:14`）、SciPy 0.1175495（`:20`）・1381.70877（`:21`）、PyTorch CPU 0.1175496（`:6`）・1381.70880（`:7`）、candle CPU 0.117550・1381.708783（`docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/results-dgx-0.8.0.jsonl:25`・`:26`）、burn CPU 0.117549・1381.708825（同 `:38`・`:39`）
+- M4 Max: candle CPU 0.117550・1381.708783、burn CPU 0.117549・1381.708825（`scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl:23`・`:24`・`:32`・`:33`）。TF／SciPy は転記値で checksum が残っていない
+- fandhe-ai 0.8.0 は GB10 CPU・CUDA、M4 Max CPU・Metal、`fresh`・`reuse` のすべての行で train 0.080541・infer 13.976574 と自分自身では一致する（`results-dgx-0.8.0.jsonl:10-13`・`:46`・`:84`、`results-m4max-0.8.0.jsonl:10-13`・`:41`・`:79`）
+
+framework-compare の README も「重みの値は異なるが実行時間には影響しない」（`scripts/bench/framework-compare/README.md:43-44`）とし、train の最終 loss と train／infer の要素単位検証をフレームワーク間では突合しないと明記している（同 `:131-134`・`:650-651`）。dX の追加計算は loss の値に影響しないため、checksum の差の原因ではない。
+
+**セルごとの判定**:
+
+| セル | 判定 | 根拠と条件 |
+|---|---|---|
+| GEMM・GB10（N=256〜4096） | 比較可能（処理が同等） | 入力・checksum 定義・parity 契約が一致し、両側とも `parity_fail_count: 0`。checksum も全形状で本体の複合判定（相対誤差 1e-3 未満）の範囲で一致する（例: N=256 は fandhe-ai 237.54666〈`results-dgx-0.8.0.jsonl:6`〉・TF 237.546618〈`results-dgx-py-0.8.0.jsonl:8`〉・SciPy 237.546660〈`:15`〉、N=4096 は fandhe-ai −25768.747284〈`results-dgx-0.8.0-extra.jsonl:6`〉・TF −25768.737869〈`results-dgx-py-0.8.0.jsonl:12`〉・SciPy −25768.729558〈`:19`〉） |
+| GEMM・M4 Max（N=256〜2048） | 比較可能（TF／SciPy 側は転記値） | 処理は同じ（C = A×B・同一形状）。fandhe-ai 側は実測 JSONL で `parity_fail_count: 0`（`results-m4max-0.8.0.jsonl:1-4`）。TF／SciPy 側は元 JSONL が未収録で（`docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py:82-86`）、転記スクリプトが転記行へ `parity_fail_count: 0` を一律に書き込む（`gen_1988.py:101-102`）ため実測値ではない。同じハーネス・同じシードで計測したという根拠はスコアボードの記載（`docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/body_1988.html:9`）に留まる。よって M4 Max の TF／SciPy GEMM を「ゼロ fail を確認済み」とは扱わない |
+| infer（両ホスト） | **条件付きで比較可能** | forward の演算列・GEMM 回数・形状・checksum 定義が一致し、違いは初期パラメータの値だけで演算量は同じ。条件: (1) 値の違いが実行時間に影響しないことは README の設計前提（`README.md:43-44`）で、本リポジトリに A/B 実測はない。(2) 入力が違うため checksum が一致せず、GEMM の parity に当たるフレームワーク間の数値一致確認がない。(3) M4 Max の TF／SciPy は転記値で checksum が無く、同じハーネスで計測したことは `body_1988.html:9` の記載と、candle・burn の M4 Max checksum が共有初期化の値と一致することによる間接確認に留まる |
+| train（両ホスト） | **参考値（同等性は未確認）。勝ち負けの判定から外す** | backward の GEMM 回数が 4 回対 3 回で演算量が違う（fandhe-ai だけが dX を計算する。上表）。初期パラメータの値も違う。`reuse` モードの `Op::LinearResident` の VJP も d_input を計算する（v0.8.0 `grad.rs:280-288`）ため、モードを替えてもこの差は残る。GB10 で fandhe-ai が追加の GEMM を抱えたまま上回っている点は向きとしては保守的だが、判定には使わない。M4 Max の対 SciPy の負けは、この差とライブラリ実装差を切り分けられない |
+
 ### 表 1: GB10（DGX Spark。TF 2.21.0・SciPy 1.18.1・fandhe-ai 0.8.0）
 
 出典（比較値はすべて `mode: fresh` 同士）:
@@ -146,14 +186,16 @@ TF（Eigen `ThreadPoolDevice` またはビルド構成次第で oneDNN `dnnl_sge
 | gemm | 1024 | 525.7 GF | 235.2 GF | 187.0 GF | fandhe-ai 勝ち |
 | gemm | 2048 | 1020.9 GF | 603.8 GF | 338.8 GF | fandhe-ai 勝ち |
 | gemm | 4096 | 1128.2 GF（追加計測 `results-dgx-0.8.0-extra.jsonl:6`） | 944.4 GF | 457.4 GF | fandhe-ai 勝ち |
-| train | 64 | 0.892 ms | 2.720 ms | 1.198 ms | fandhe-ai 勝ち |
-| infer | 64 | 0.178 ms | 0.913 ms | 0.600 ms | fandhe-ai 勝ち |
+| train | 64 | 0.892 ms | 2.720 ms | 1.198 ms | 参考値（同等性は未確認。backward の GEMM 回数が 4 対 3。§10「比較可能範囲」） |
+| infer | 64 | 0.178 ms | 0.913 ms | 0.600 ms | fandhe-ai 勝ち（条件付き。初期パラメータの値だけが違う。§10「比較可能範囲」） |
 
-GB10 では本解析範囲のマッチセルすべて（N=4096 を含む）で fandhe-ai が両 FW を上回る（**負けセルなし**）。`gemm` 行は全行 `parity_fail_count: 0`（判定可能。fandhe-ai の N=4096 行〈`results-dgx-0.8.0-extra.jsonl:6`〉を含む。出典 JSONL の `gemm` 行のみが同フィールドを持つ）。ただし TF／SciPy の N=2048・4096 行は `parity_scaled_abs_rescued` がそれぞれ TF 4・547、SciPy 2・611（`results-dgx-py-0.8.0.jsonl:11`・`:12`・`:18`・`:19`）で、framework-compare ハーネス限定のスケール付き絶対誤差項（`bench_py.py#L80-L82`）で救済された要素を含む。fandhe-ai 側の `gemm` 行は全行 0。`train`／`infer` 行の出典 JSONL（`results-dgx-py-0.8.0.jsonl`）には `parity_fail_count` フィールド自体が存在せず（fandhe-ai 側 `train`／`infer` 出力にも同様に存在しない設計）、判定不能（parity 検査の対象外）である——ゼロ fail の記述は `gemm` 行に限る。
+train・infer の値の出典は TF `results-dgx-py-0.8.0.jsonl:13`・`:14`、SciPy `:20`・`:21`、fandhe-ai `results-dgx-0.8.0.jsonl:12`・`:13`。
+
+GB10 では判定対象セル（GEMM 5 形状〈N=4096 を含む〉と infer）すべてで fandhe-ai が両 FW を上回る（**負けセルなし**。infer は条件付き）。train は参考値で、勝ち負けには数えない。`gemm` 行は全行 `parity_fail_count: 0`（判定可能。fandhe-ai の N=4096 行〈`results-dgx-0.8.0-extra.jsonl:6`〉を含む。出典 JSONL の `gemm` 行のみが同フィールドを持つ）。ただし TF／SciPy の N=2048・4096 行は `parity_scaled_abs_rescued` がそれぞれ TF 4・547、SciPy 2・611（`results-dgx-py-0.8.0.jsonl:11`・`:12`・`:18`・`:19`）で、framework-compare ハーネス限定のスケール付き絶対誤差項（`bench_py.py#L80-L82`）で救済された要素を含む。fandhe-ai 側の `gemm` 行は全行 0。`train`／`infer` 行の出典 JSONL（`results-dgx-py-0.8.0.jsonl`）には `parity_fail_count` フィールド自体が存在せず（fandhe-ai 側 `train`／`infer` 出力にも同様に存在しない設計）、判定不能（parity 検査の対象外）である——ゼロ fail の記述は `gemm` 行に限る。train／infer の同等性の根拠は parity ではなく、上の「比較可能範囲」のハーネス突き合わせである。
 
 ### 表 2: M4 Max（TF 2.16.2・SciPy 1.18.1 は `gen_1988.py::M4_PY` 転記値・fandhe-ai は `results-m4max-0.8.0.jsonl`）
 
-出典: `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py::M4_PY`（TF／SciPy。2026-09-12 ページからの転記と明記されている。`mode: fresh` で記録。[`gen_1988.py#L101-L107`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）・`scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl`（fandhe-ai。`fresh` モード〈gemm: L1〜L4、train: L10、infer: L11〉。表 1〈GB10〉・本表の GEMM 行と計測条件をそろえるため train・infer も `fresh` で統一する）。CPU gemm N=4096 は `M4_PY` に TF／SciPy の値がなく（`gen_1988.py#L92`・`#L95`）、fandhe-ai 側の同 JSONL にも CPU N=4096 行がないため、本表には含めない。
+出典: `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py::M4_PY`（TF／SciPy。2026-09-12 ページからの転記と明記されている。`mode: fresh` で記録。[`gen_1988.py#L101-L107`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）・`scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl`（fandhe-ai。`fresh` モード〈gemm: L1〜L4、train: L10、infer: L11〉。表 1〈GB10〉・本表の GEMM 行と計測条件をそろえるため train・infer も `fresh` で統一する）。CPU gemm N=4096 は `M4_PY` に TF／SciPy の値がなく（`gen_1988.py#L92`・`#L95`）、fandhe-ai 側の同 JSONL にも CPU N=4096 行がないため、本表には含めない。TF／SciPy は元 JSONL がリポジトリに無い転記値で（`gen_1988.py#L82-L86`）、`gemm` 行の `parity_fail_count: 0` は転記スクリプトが一律に書き込んだ値（`gen_1988.py#L101-L102`）であり実測ではない。train・infer は checksum も残っていない。このため本表の TF／SciPy 側については、表 1 と違い parity・checksum による同等性の確認ができない（§10「比較可能範囲」）。fandhe-ai 側の `gemm` 行は実測 JSONL で全行 `parity_fail_count: 0`（`results-m4max-0.8.0.jsonl:1-4`）。
 
 | タスク | N | fandhe-ai (GFLOPS / ms) | TensorFlow 2.16.2 | SciPy 1.18.1 | 判定 |
 |---|---|---|---|---|---|
@@ -161,14 +203,14 @@ GB10 では本解析範囲のマッチセルすべて（N=4096 を含む）で f
 | gemm | 512 | 420.8 GF | 282 GF | 227 GF | fandhe-ai 勝ち |
 | gemm | 1024 | 739.2 GF | 471 GF | 372 GF | fandhe-ai 勝ち |
 | gemm | 2048 | 999.4 GF | 699 GF | 470 GF | fandhe-ai 勝ち |
-| train | 64 | 0.835 ms（fresh） | 0.96 ms | 0.31 ms | **fandhe-ai 負け（対 SciPy のみ。対 TF は勝ち）** |
-| infer | 64 | 0.178 ms（fresh） | 0.266 ms | 0.164 ms | **fandhe-ai 負け（対 SciPy のみ。対 TF は勝ち）** |
+| train | 64 | 0.835 ms（fresh） | 0.96 ms | 0.31 ms | 参考値（同等性は未確認。backward の GEMM 回数が 4 対 3。§10「比較可能範囲」） |
+| infer | 64 | 0.178 ms（fresh） | 0.266 ms | 0.164 ms | **fandhe-ai 負け（条件付き。対 SciPy のみ。対 TF は勝ち）** |
 
-M4 Max は N=256 GEMM・train・infer の 3 セルで負け。内訳は GEMM が対 TF・対 SciPy 双方に負け、train・infer は対 SciPy のみに負け（対 TF はいずれも勝ち）である。
+M4 Max の負けは N=256 GEMM（対 TF・対 SciPy 双方）と infer（対 SciPy のみ。条件付き）の 2 セル。train は参考値で、勝ち負けには数えない（値の上では TF より速く SciPy より遅いが、演算量が違うため判定しない）。
 
 **比較に使う fandhe-ai の版について（表 1・表 2 共通）**: fandhe-ai 0.9.0 の実測 JSONL も本リポジトリに収録されている（M4 Max: `docs/perf/logs/framework-compare-0.9.0-remeasure/m4max-series-a/results-m4max-0.9.0-median5.jsonl`・`m4max-series-b/results-m4max-0.9.0-median5.jsonl`、GB10: `docs/perf/logs/framework-compare-0.9.0-remeasure/gb10/results-dgx-0.9.0.jsonl`・`results-dgx-0.9.0-extra.jsonl`）。しかし TensorFlow／SciPy は 0.9.0 の再計測では計測されておらず、2026-09-12 の値がそのまま流用されている（`docs/perf/logs/framework-compare-0.9.0-remeasure/README.md:21`・`scoreboard/gen_090.py:7`・`:77`）。本 doc は比較対象 FW と同じ時期（2026-09-12。GB10 は同一キャンペーン `lowlayer-diagnosis-2026-09-12`）に計測された fandhe-ai 0.8.0 を比較値として使う。0.9.0 との対比は `gen_090.py` のスコアボードが扱っており、本 doc では行わない。
 
-**train・infer セルのモード選択について（注記）**: 本表の train・infer は fandhe-ai 側を `fresh` モード値（train 0.835ms・infer 0.178ms）で統一している。理由は GEMM 行（本表・表 1 とも `fresh`）・表 1（GB10。train・infer を含め fandhe-ai・TF・SciPy とも `fresh` 同士）と計測条件をそろえるため。参考として、同じ JSONL には fandhe-ai の `reuse` モード値（train 1.000ms・infer 0.195ms）も存在し、`docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py` のスコアボード本体は `reuse` を主表示列に採用している（`me = data.get((..., 'reuse'))`。[`gen_1988.py#L146-L147`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）が、TF／SciPy 側の値（`M4_PY`）は `fresh` としてのみ記録されており `reuse` 相当の値がそもそも存在しない（transcribed 転記データのため実測が 1 モードのみ）。`reuse` 値を採用すると train は TF 2.16.2（0.96ms）に対しても僅差で負けに転じる（1.000ms > 0.96ms）が、本 doc は fandhe-ai・TF・SciPy 間で計測条件（`fresh` 同士）をそろえることを優先し、上表を主判定として採用する。
+**train・infer セルのモード選択について（注記）**: 本表の train・infer は fandhe-ai 側を `fresh` モード値（train 0.835ms・infer 0.178ms。`results-m4max-0.8.0.jsonl:10`・`:11`）で統一している。理由は GEMM 行（本表・表 1 とも `fresh`）・表 1（GB10。train・infer を含め fandhe-ai・TF・SciPy とも `fresh` 同士）と計測条件をそろえるため。ただし `fresh` は名前が共通なだけで、中身は各ハーネスの定義である（§10「比較可能範囲」の `mode: fresh` の行）。参考として、同じ JSONL には fandhe-ai の `reuse` モード値（train 1.000ms・infer 0.195ms。`results-m4max-0.8.0.jsonl:41`・`:79`）も存在し、`docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py` のスコアボード本体は `reuse` を主表示列に採用している（`me = data.get((..., 'reuse'))`。[`gen_1988.py#L146-L147`](../perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py)）が、TF／SciPy 側の値（`M4_PY`）は `fresh` としてのみ記録されており `reuse` 相当の値がそもそも存在しない（transcribed 転記データのため実測が 1 モードのみ）。infer は `reuse` 値（0.195ms）でも対 TF 勝ち・対 SciPy 負けで結論は変わらない。train は `fresh`・`reuse` のどちらでも参考値である（`reuse` でも dX を計算するため。§10「比較可能範囲」）。`reuse` の train 値（1.000ms）は TF 2.16.2（0.96ms）より遅いが、これも判定には使わない。
 
 ## §11 限界・申し送り
 
@@ -181,6 +223,10 @@ M4 Max は N=256 GEMM・train・infer の 3 セルで負け。内訳は GEMM が
   - §7.2 の eager 実行時スレッドプール配線（`EagerContext` 側）の追跡
   - §8.2 の f2py `sgemm` 呼び出しにおけるコピー（上流注記上は C 連続入力で発生）の実挙動とコスト（`np.ascontiguousarray` 入力に対する f2py 層の挙動）の実測確認
   - §8.1 の直接 import した `sgemm` が LP64（`_fblas`）・ILP64（`_fblas_64`）のどちらだったかの確認（§8.3 の `scipy.show_config()` と同じ手順で確定できる）
+- train・infer の比較可能性を上げるための申し送り（本 doc はハーネスを変更しない）:
+  - infer を「条件付き」から「比較可能」にするには、fandhe-ai 側を共有初期化（`fill_vec` の W・bias 0）で計測し、checksum がほかの実装（1381.70878 前後）と一致することを確かめる必要がある
+  - train を判定対象に戻すには、backward の GEMM 回数をそろえる必要がある。fandhe-ai 0.8.0 の autodiff が勾配不要の葉（入力 `x`）についても入力側勾配を計算する挙動（`grad.rs:84-88`・`:365-397`・`:505-520`、`backward.rs:175-202`）はライブラリ側の性質であり、本 doc のスコープ外
+  - M4 Max の TF／SciPy の元 JSONL（checksum・parity 付き）が見つかれば、表 2 を表 1 と同じ根拠で再判定できる
 - Phase 3（負けセルの原因確定・A/B・性能実測）は本 doc の対象外。§10 の表 1・表 2 は既存 JSONL・転記データの突合結果であり、新規計測は一切行っていない。
 
 ## §12 ライセンス記録
@@ -196,6 +242,7 @@ M4 Max は N=256 GEMM・train・infer の 3 セルで負け。内訳は GEMM が
 
 - TensorFlow 2.16.2: [`tensorflow/core/util/port.cc`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/core/util/port.cc)・[`tensorflow/core/util/util.cc`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/core/util/util.cc)・[`tensorflow/core/common_runtime/process_util.cc`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/core/common_runtime/process_util.cc)・[`tensorflow/core/kernels/matmul_op_impl.h`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/core/kernels/matmul_op_impl.h)・[`tensorflow/core/kernels/BUILD`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/core/kernels/BUILD)・[`third_party/xla/third_party/tsl/tsl/framework/contraction/eigen_contraction_kernel.h`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/third_party/xla/third_party/tsl/tsl/framework/contraction/eigen_contraction_kernel.h)・[`third_party/xla/third_party/tsl/tsl/platform/cpu_info.h`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/third_party/xla/third_party/tsl/tsl/platform/cpu_info.h)・[`third_party/xla/third_party/tsl/tsl/platform/cpu_info.cc`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/third_party/xla/third_party/tsl/tsl/platform/cpu_info.cc)・[`third_party/xla/third_party/tsl/tsl/mkl/build_defs.bzl`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/third_party/xla/third_party/tsl/tsl/mkl/build_defs.bzl)・[`third_party/mkl/build_defs.bzl`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/third_party/mkl/build_defs.bzl)・[`tensorflow/tensorflow.bzl`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/tensorflow.bzl)・[`.bazelrc`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/.bazelrc)
 - TensorFlow 2.21.0: [`tensorflow/core/util/port.cc`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/tensorflow/core/util/port.cc)・[`third_party/xla/third_party/tsl/tsl/platform/cpu_info.cc`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/third_party/xla/third_party/tsl/tsl/platform/cpu_info.cc)・[`.bazelrc`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/.bazelrc)
+- TensorFlow eager backward（§10「比較可能範囲」の backward GEMM 回数の根拠。両タグ）: [`tensorflow/c/eager/tape.h`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/c/eager/tape.h)・[`tensorflow/python/ops/math_grad.py`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/python/ops/math_grad.py)・[`tensorflow/python/eager/backprop.py`](https://github.com/tensorflow/tensorflow/blob/v2.16.2/tensorflow/python/eager/backprop.py)（2.21.0 は同名パスの [`tape.h`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/tensorflow/c/eager/tape.h)・[`math_grad.py`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/tensorflow/python/ops/math_grad.py)・[`backprop.py`](https://github.com/tensorflow/tensorflow/blob/v2.21.0/tensorflow/python/eager/backprop.py)）
 - SciPy 1.18.1: [`scipy/linalg/blas.py`](https://github.com/scipy/scipy/blob/v1.18.1/scipy/linalg/blas.py)・[`scipy/linalg/fblas_l3.pyf.src`](https://github.com/scipy/scipy/blob/v1.18.1/scipy/linalg/fblas_l3.pyf.src)・[`pyproject.toml`](https://github.com/scipy/scipy/blob/v1.18.1/pyproject.toml)・[`.github/workflows/wheels.yml`](https://github.com/scipy/scipy/blob/v1.18.1/.github/workflows/wheels.yml)
 
 ### 本リポジトリ側の参照 doc・データ
@@ -207,6 +254,7 @@ M4 Max は N=256 GEMM・train・infer の 3 セルで負け。内訳は GEMM が
 - `scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl`（M4 Max fandhe-ai 実測 JSONL）
 - `docs/perf/logs/framework-compare-0.9.0-remeasure/`（fandhe-ai 0.9.0 の実測 JSONL。TF／SciPy は未再計測のため本 doc の比較には使わない。§10 の版に関する注記参照）
 - `crates/backend-cpu/src/gemm_blis/`・`sme_detect.rs`・`thread_limit.rs`・`small_shape_thread_cap.rs`・`gb10_affinity.rs`（fandhe 側対照）
+- §10「比較可能範囲」のハーネス突き合わせ: `scripts/bench/framework-compare/bench-fandhe/src/main.rs`・`bench-common/src/lib.rs`・`bench-candle/src/main.rs`・`bench-burn/src/main.rs`・`scripts/bench/framework-compare/README.md`（`:43-44`・`:131-134`・`:650-651`）、タグ `v0.8.0` の `crates/autodiff/src/nn/linear.rs`・`nn/init.rs`・`var.rs`・`grad.rs`・`backward.rs`・`crates/facade/src/compat/sequential.rs`、`docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/body_1988.html`（M4 Max の TF／SciPy が同一ハーネス・同一シードで計測されたという記載）
 - `docs/backend-cpu-gb10-affinity-design.md`・`docs/cpu-matmul-fixed-cost-design.md`・`docs/perf/cpu-gemm-small-shape-thread-cap.md`（既存判定記録との突合対象。今回の差分候補〈§8.2 の f2py コピーの実挙動・コスト〉は上記いずれの記録にも未収録の新規項目であり、既存 REJECT／undetermined 記録との重複はない。§5 の Neoverse V1 判定は既存実測ログ `docs/perf/logs/cpu-gemm-rayon-sweep-1305/env_info_raw-dgx.txt:36-44` の MIDR で確定済みのため差分候補から外した）
 
 ### 既存記録との突合結果（Step 6）
