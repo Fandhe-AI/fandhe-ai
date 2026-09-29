@@ -1396,63 +1396,8 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 #[allow(dead_code)]
 struct VarCustomHoldDoctestGuard;
 
-/// #2133（親 #2132・#2131）の facade 公開保留を固定する doctest 足場。
-/// `VarCustomHoldDoctestGuard`（直前の宣言。#2064 の custom autograd
-/// Function 保留）と同型の「正のプローブ 1 ブロック方式」を採る:
-/// facade の全 `pub mod` を glob import したスコープに、本ブロック内で
-/// のみ定義したローカル `__fandhe_nn_hold_probe::ModuleList`
-/// を導入し（`Module` は #2395 で公開済みのため probe から外した。`ModuleList`／
-/// `Sequential` は #2396 まで保留）、実際に使う関数を書く。facade がどの経路（別名再エクスポート・
-/// trait 定義・`pub type` 別名・`nn::Sequential` の新設等）で
-/// `Module`／`ModuleList`／（`compat::Sequential` 以外の）`Sequential` と
-/// いう名前を公開しても、ローカル定義との glob 衝突により名前解決が
-/// 曖昧になり（E0659 等）、エラーコードに依存せずコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// facade_does_not_reexport_nn_module_or_containers`・`facade_declares_
-/// no_nn_module_items`・`compat_sequential_does_not_expose_module_add_
-/// methods`）との多層防御の位置づけ・承認未取得の経緯は
-/// `docs/facade-nn-module-exposure-decision.md` §12「facade 公開の保留
-/// 記録（イシュー #2133）」を参照。本 doctest が glob import する
-/// `pub mod` 集合と `src/lib.rs` の実宣言集合のドリフトは
-/// `nn_module_hold_doctest_globs_all_pub_modules` が、本文（glob 以外）の
-/// 固定文言からのドリフトは `nn_module_hold_doctest_probe_body_matches_
-/// fixed_contract` が固定する（`extract_hold_doctest_guard_doc`・
-/// [`NN_MODULE_HOLD_PROBE_BODY`] 参照）。
-///
-/// (b)（案 B 採用時の facade 側 `nn::Module`／`ModuleList`／`Sequential`
-/// 新設）がユーザー承認され facade 公開を実施する日が来たら、本モジュール・
-/// 本 doctest 自体を削除する（ソース走査側の対応する否定ガードと同時に
-/// 外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_nn_hold_probe {
-///     pub struct ModuleList;
-/// }
-/// use __fandhe_nn_hold_probe::*;
-///
-/// fn __probe(_: ModuleList, _: &Sequential) {}
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct NnModuleHoldDoctestGuard;
-
 /// イシュー #2141（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（直前の宣言）
+/// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）
 /// と同型の「正のプローブ 1 ブロック方式」を採る:
 /// facade の全 `pub mod` を glob import したスコープに、本ブロック内で
 /// のみ定義したローカルの自由関数群（`__fandhe_bool_hold_probe::
@@ -1874,11 +1819,11 @@ struct VarRearrangeOpsHoldDoctestGuard;
 struct VarScalarUnaryOpsHoldDoctestGuard;
 
 /// イシュー #2139（親 #2138・#2131）の facade 公開保留を固定する doctest
-/// 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
+/// 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）／
 /// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
 /// ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを併用する:
 ///
-/// (a) 型・モジュール名の衝突プローブ（`NnModuleHoldDoctestGuard` 方式）。
+/// (a) 型・モジュール名の衝突プローブ（`NnModuleHoldDoctestGuard`〈#2396 で削除済み〉方式）。
 /// facade の全 `pub mod` を glob import したスコープに、本ブロック内でのみ
 /// 定義したローカル型（`__fandhe_hooks_hold_probe::{HookHandle,
 /// ForwardHooked, ForwardHookCtx}`）とモジュール（`hooks`）を導入し、
@@ -2021,7 +1966,7 @@ struct VarHooksHoldDoctestGuard;
 /// イシュー #2084（親 #2059。設計正本 `docs/kv-cache-design.md` §6
 /// 承認事項 2・§10）の facade 公開（K-2: `KvCache`／`StatefulAttention`・
 /// `compat::Sequential::add_stateful_attention` 相当）保留を固定する
-/// doctest 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
+/// doctest 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）／
 /// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
 /// ブロック方式」を採る: facade の全 `pub mod` を glob import したスコープ
 /// に、本ブロック内でのみ定義したローカル `__fandhe_kv_hold_probe::
