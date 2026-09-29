@@ -12,6 +12,8 @@
 //! 実機 PyTorch での確認手順は `crates/onnx-interop/src/st_save.rs` 冒頭
 //! ドキュメンテーションコメント「PyTorch 側での手動検証手順」を参照。
 
+mod support;
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -215,10 +217,8 @@ fn zero_element_tensor_round_trips_without_error() {
 #[test]
 fn save_to_file_produces_loadable_file() {
     let original = load_fixture_weights();
-    let tmp_dir =
-        std::env::temp_dir().join(format!("onnx-interop-st-save-test-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir).unwrap();
-    let out_path = tmp_dir.join("roundtrip.safetensors");
+    let tmp_dir = support::temp_dir::TempDirGuard::new("st-save-roundtrip");
+    let out_path = tmp_dir.path().join("roundtrip.safetensors");
 
     save_safetensors_f32(&out_path, &original).expect("ファイル書き出しに失敗した");
     assert!(out_path.exists(), "書き出し先ファイルが存在しない");
@@ -229,7 +229,7 @@ fn save_to_file_produces_loadable_file() {
     }
 
     // 一時ファイルが残っていないこと（rename 後に削除されている）。
-    let leftover: Vec<_> = std::fs::read_dir(&tmp_dir)
+    let leftover: Vec<_> = std::fs::read_dir(tmp_dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
@@ -238,6 +238,4 @@ fn save_to_file_produces_loadable_file() {
         leftover.is_empty(),
         "一時ファイルが残存している: {leftover:?}"
     );
-
-    std::fs::remove_dir_all(&tmp_dir).ok();
 }

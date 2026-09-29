@@ -1,3 +1,5 @@
+//! （#2383 追記）本モジュールは PRNG に加え、一時ディレクトリガード `temp_dir::TempDirGuard` も提供する。
+//!
 //! 統合テスト共通の決定的シード PRNG（xorshift64*。codex-review 指摘
 //! `PRRT_kwDOTuUCJc6mzcKf`・PR #2351・イシュー #2349 是正）。
 //!
@@ -33,6 +35,8 @@
 //! tests/common/mod.rs` と同型）。
 
 #![allow(dead_code)]
+
+pub mod temp_dir;
 
 /// xorshift64* 状態。呼び出し元はシード値のみを指定し、生成される数列は
 /// 完全に決定的になる。暗号学的に安全な PRNG ではないため、テスト入力
