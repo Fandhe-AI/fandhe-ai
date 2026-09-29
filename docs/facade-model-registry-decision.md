@@ -115,7 +115,7 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 
 1. 葉ファイルを `symlink_metadata`（no-follow）で検査し、`is_file() == true` を明示要求する（`!is_dir()` ではなく。FIFO・Unix ソケット・デバイスファイル等の非通常ファイルも拒否）。
 2. 葉パスを canonicalize しキャッシュルート配下であることを多層防御として再確認する（§12 のスナップショット検査。単独では TOCTOU を閉じない）。
-3. 葉を `open_leaf_no_follow`（private 関数）で開く。`O_NOFOLLOW`（シンボリックリンクへの差し替えをカーネルレベルで拒否。ELOOP で検出）・`O_NONBLOCK`（FIFO への差し替えによる `open` の無期限ブロックを防ぐ）を付与する。
+3. 葉を `open_leaf_no_follow`（`crate::fs_guard` の crate 内共有関数。#2364 で `model.rs` から抽出）で開く。`O_NOFOLLOW`（シンボリックリンクへの差し替えをカーネルレベルで拒否。ELOOP で検出）・`O_NONBLOCK`（FIFO への差し替えによる `open` の無期限ブロックを防ぐ）を付与する。
 4. 開いたハンドルの `fstat`（`File::metadata`）で `is_file()` を再確認したうえで、手順 1 の `symlink_metadata`（lstat）と `(dev, ino)` が一致することを検証する（「検査と open のハンドル一体化」）。手順 1〜3 の間に `name`／`version`／葉のいずれかが差し替えられても、開かれた実体の識別子は検査時点のものと一致しないため確実に検出できる（パスの再解決ではなく実体の同一性判定のため、中間ディレクトリの差し替えも同じ仕組みで捕捉する）。
 5. 以降は同じ `File` ハンドルから読み取ったバイト列を `load_safetensors_f32_from_bytes` へ渡す（パスで再度 open すると手順 3〜4 で閉じた TOCTOU 窓が復活するため、ハンドルの使い回しは必須）。
 
@@ -143,7 +143,7 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 
 `load` は `resolve_model_file` が開いた `File` ハンドルから `read_to_end` で全バイトを無条件に `Vec` へ確保していた。`model.safetensors` は非信頼な外部フォーマット入力（利用者が手動配置するが、共有キャッシュディレクトリ経由で他プロセス・他ユーザーが書き込める場合もある）であり、サイズ検証なしの無制限確保は巨大ファイルによるメモリ枯渇（OWASP A03。AGENTS.md「外部フォーマットのパース検証（P0）」長さ事前検証要件）を招く（codex-review 指摘・PR #2226・P0）。
 
-**対策**: `crates/facade/src/model.rs` に固定サイズ上限 `MAX_MODEL_FILE_BYTES`（当初 8 GiB。後述の再指摘を受け 1 GiB へ改定）を導入し、二段構えで検証する。
+**対策**: `crates/facade/src/fs_guard.rs`（#2364 で `model.rs` から抽出）に固定サイズ上限 `MAX_MODEL_FILE_BYTES`（当初 8 GiB。後述の再指摘を受け 1 GiB へ改定）を導入し、二段構えで検証する。
 
 1. `resolve_model_file` の手順 4（fstat によるハンドル識別子照合）の直後に `open_meta.len()` を `MAX_MODEL_FILE_BYTES` と比較し、上回れば読み取りへ進む前に `ModelError::TooLarge` で拒否する。
 2. `load` 側は fstat 完了後にファイルが差し替え・追記されて増大する TOCTOU にも備え、`std::io::Read::take(MAX_MODEL_FILE_BYTES + 1)` で読み取り自体を上限バイト数超で打ち切り、実際に読めたバイト数が上限を超えていれば同じく `ModelError::TooLarge` で拒否する（ちょうど上限バイト数で打ち切ると超過を検出できないため `+ 1` バイト分だけ多く読む）。事前確保サイズは実測ファイルサイズ（上限未満なら実測値）を用い、`Vec::try_reserve` で割り当て失敗を panic ではなく型付きエラーへ変換する。確保失敗は `ModelError::Io` の `ErrorKind::OutOfMemory`（ヒープ確保なしで構築できる `io::Error::from(ErrorKind)` 表現）で返す（#2250・PR #2239 と同類型）。

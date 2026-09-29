@@ -1023,13 +1023,13 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 
 | 脅威 | 対象（段階） | 本設計の対策（承認後の実装要件） | 既存実装の参照先 |
 |---|---|---|---|
-| シンボリックリンク（葉ファイル。`manifest.json`／`model.<gen>.safetensors`） | 読み込み | §13.2 の no-follow 手順（`symlink_metadata` 事前拒否 → `O_NOFOLLOW` オープン → `fstat` dev/ino 照合） | `crates/facade/src/model.rs::open_leaf_no_follow`・`resolve_model_file`／`crates/facade/tests/model_registry.rs::load_rejects_symlinked_leaf_file_escaping_root` |
+| シンボリックリンク（葉ファイル。`manifest.json`／`model.<gen>.safetensors`） | 読み込み | §13.2 の no-follow 手順（`symlink_metadata` 事前拒否 → `O_NOFOLLOW` オープン → `fstat` dev/ino 照合） | `crates/facade/src/fs_guard.rs::open_leaf_no_follow`・`crates/facade/src/model.rs::resolve_model_file`／`crates/facade/tests/model_registry.rs::load_rejects_symlinked_leaf_file_escaping_root` |
 | シンボリックリンク（対象ディレクトリ自身 `dir`） | 読み込み・書き込み共通 | 許容する（`dir` 自体が symlink であることは脅威モデル外。§13.1） | `model_registry.rs::load_succeeds_when_root_itself_is_a_symlink` |
 | シンボリックリンク（途中のパス要素） | — | 該当なし（`dir` 直下 1 段のみを扱うレイアウトのため中間ディレクトリが存在しない。§13.1） | — |
 | シンボリックリンク（一時ファイル名・最終ファイル名の位置に事前配置） | 書き込み | `create_new`（`O_EXCL` 相当。存在すれば symlink か否かを問わず `Err`）で作成し追従書き込みを構造的に防ぐ。衝突時は既存エントリに触れず新しい候補名で再試行する（上限 [`MAX_TMP_NAME_ATTEMPTS`]〈8 回〉。上限到達後もなお衝突する場合のみ `Err` を返し、既存エントリは不変） | 新設（§2 item 5・§12.3 手順 1〜2。PR #2317 review 指摘〈P2〉の是正） |
 | シンボリックリンク（固定名 `manifest.json` への `rename` 置換先。Linux／macOS の POSIX `rename(2)` 限定） | 書き込み | `rename` は宛先ディレクトリエントリ自体を置換するのみで宛先シンボリックリンクの参照先を辿らないため、リンクエントリを新しい通常ファイルへ安全に置換できる（参照先ファイルには書き込まない）。読み取り側 no-follow 手順とは対象が異なる別種の安全性のため拒否は不要。Windows（非 unix）は置換先 reparse point の挙動を確定できないため `save_model` 自体を fail-closed とする（§12.4。イシュー #2368） | 新設（§12.3 手順 2・§12.4。PR #2317 review 指摘〈P2〉の是正） |
 | ハードリンク | 読み込み・書き込み共通 | 対象外として受容（攻撃者が作成できるのは同一ファイルシステム上の既存ファイルへのリンクのみで、所有者・権限チェックを伴わない本モジュールの脅威モデル外） | `model.rs` モジュール doc「対象外として残る経路」節の理由をそのまま踏襲 |
-| 特殊ファイル（FIFO・Unix ソケット・デバイス） | 読み込み | `symlink_metadata`／`fstat` の両方で `is_file() == true` を要求し拒否。`O_NONBLOCK` で FIFO への差し替えによる無期限ブロックも防ぐ | `model.rs::open_leaf_no_follow`／`model_registry.rs::load_rejects_non_regular_leaf_unix_socket` |
+| 特殊ファイル（FIFO・Unix ソケット・デバイス） | 読み込み | `symlink_metadata`／`fstat` の両方で `is_file() == true` を要求し拒否。`O_NONBLOCK` で FIFO への差し替えによる無期限ブロックも防ぐ | `fs_guard.rs::open_leaf_no_follow`／`model_registry.rs::load_rejects_non_regular_leaf_unix_socket` |
 | 特殊ファイル（削除候補） | 削除 | **該当なし**（PR #2317 review 再確認・2026-09-27 第 2 回是正で自動削除機能自体を撤回。§13.0・§13.6） | — |
 | Windows reparse point／junction | 読み込み | no-follow の安全な実装を持たないため `load_model` を fail-closed 拒否（`ErrorKind::Unsupported`） | `model.rs`「Windows 対応状況」節・§12.3 手順 8 |
 | Windows reparse point／junction | 書き込み | `save_model` を fail-closed 拒否（`ErrorKind::Unsupported`。`dir` へ副作用を起こす前に判定）。`create_new` の契約と `rename` 置換先の挙動を Windows 実機で確認するまで許可しない | §12.4・§12.3 手順 8（実装は #2369） |
@@ -1055,6 +1055,10 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 持たない（同じ脆弱性クラスの対策を 2 箇所に分散させない）。
 `MAX_MODEL_FILE_BYTES`（1 GiB。現状 `model.rs` の private const）も
 同じ抽出の対象とし `pub(crate)` へ格上げして共有する（§2 item 4）。
+
+**抽出済み（イシュー #2364）**: `open_flags`・`open_leaf_no_follow`・
+`MAX_MODEL_FILE_BYTES` は `crates/facade/src/fs_guard.rs`（`crate::fs_guard`。
+`lib.rs` で素の `mod` 宣言のため公開面は不変）へ移動済み。
 
 ### 13.5 非信頼値の全数再点検（D。PR #2317 review 再確認・2026-09-27
 第 2 回・指摘 1・2 の是正に伴う全手順再点検）
