@@ -513,6 +513,7 @@ impl FixGenerator for CandidateFixGenerator {
 mod tests {
     use super::*;
     use crate::kind::RepairKind;
+    use crate::test_support::{TempDirGuard, create_new_file, unique_temp_dir};
     use std::fs;
 
     fn write_file(dir: &Path, relative: &str, content: &str) {
@@ -521,16 +522,6 @@ mod tests {
             fs::create_dir_all(parent).expect("create_dir_all should succeed in test setup");
         }
         fs::write(path, content).expect("write should succeed in test setup");
-    }
-
-    fn temp_workspace(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "self-repair-candidate-test-{name}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create_dir_all should succeed in test setup");
-        dir
     }
 
     #[test]
@@ -596,8 +587,10 @@ mod tests {
         // `apply_candidate` レベルでも symlink 経由の候補パスを拒否し、
         // symlink の指す先（workspace 外）を書き換えないことを確認する
         // （PR #361 codex-review P0 指摘の回帰防止）。
-        let dir = temp_workspace("apply-symlink-file");
-        let outside_dir = temp_workspace("apply-symlink-file-outside");
+        let dir_guard = unique_temp_dir("apply-symlink-file");
+        let dir = dir_guard.path().to_path_buf();
+        let outside_dir_guard = unique_temp_dir("apply-symlink-file-outside");
+        let outside_dir = outside_dir_guard.path().to_path_buf();
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, "do-not-overwrite").expect("write should succeed in test setup");
 
@@ -616,17 +609,15 @@ mod tests {
             fs::read_to_string(&outside_file).expect("read should succeed"),
             "do-not-overwrite"
         );
-
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     #[cfg(unix)]
     #[test]
     fn apply_candidate_rejects_candidate_via_symlink_directory_without_touching_target() {
-        let dir = temp_workspace("apply-symlink-dir");
-        let outside_dir = temp_workspace("apply-symlink-dir-outside");
-        fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+        let dir_guard = unique_temp_dir("apply-symlink-dir");
+        let dir = dir_guard.path().to_path_buf();
+        let outside_dir_guard = unique_temp_dir("apply-symlink-dir-outside");
+        let outside_dir = outside_dir_guard.path().to_path_buf();
 
         std::os::unix::fs::symlink(&outside_dir, dir.join("sub"))
             .expect("symlink creation should succeed in test setup");
@@ -640,14 +631,12 @@ mod tests {
         let result = apply_candidate(&dir, &baseline, &candidates, 1);
         assert!(result.is_err());
         assert!(!outside_dir.join("target.txt").exists());
-
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     #[test]
     fn apply_candidate_applies_in_attempt_order() {
-        let dir = temp_workspace("order");
+        let dir_guard = unique_temp_dir("order");
+        let dir = dir_guard.path().to_path_buf();
         write_file(&dir, "target.txt", "original");
 
         let mut baseline = HashMap::new();
@@ -680,15 +669,14 @@ mod tests {
             fs::read_to_string(dir.join("target.txt")).expect("read should succeed"),
             "fix-2"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn apply_candidate_exhaustion_does_not_touch_filesystem() {
         // 候補枯渇時（attempt が候補数を超える）は baseline 復元すら
         // 発生しないことを確認する（v1 PR #172 指摘の回帰防止）。
-        let dir = temp_workspace("exhaustion");
+        let dir_guard = unique_temp_dir("exhaustion");
+        let dir = dir_guard.path().to_path_buf();
         write_file(&dir, "target.txt", "untouched");
 
         let mut baseline = HashMap::new();
@@ -710,8 +698,6 @@ mod tests {
             fs::read_to_string(dir.join("target.txt")).expect("read should succeed"),
             "untouched"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -722,7 +708,8 @@ mod tests {
         // を probe が許容していたため、この事前検証を通過したうえで先頭
         // ファイルが書き換わってから後続の書き込みで失敗し、「一部だけ
         // 書き換わった状態で `Err` を返さない」契約に違反していた。
-        let dir = temp_workspace("missing-intermediate-dir");
+        let dir_guard = unique_temp_dir("missing-intermediate-dir");
+        let dir = dir_guard.path().to_path_buf();
         write_file(&dir, "target.txt", "original");
 
         let mut baseline = HashMap::new();
@@ -753,23 +740,22 @@ mod tests {
             "後続候補の中間ディレクトリ不在により、先頭候補も書き換わってはいけません"
         );
         assert!(!dir.join("missing").exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn apply_candidate_rejects_attempt_zero() {
-        let dir = temp_workspace("attempt-zero");
+        let dir_guard = unique_temp_dir("attempt-zero");
+        let dir = dir_guard.path().to_path_buf();
         let baseline = HashMap::new();
         let candidates: Vec<CandidateFix> = Vec::new();
         let result = apply_candidate(&dir, &baseline, &candidates, 0);
         assert!(result.is_err());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn candidate_fix_generator_retains_loop_attempt_number() {
-        let dir = temp_workspace("generator");
+        let dir_guard = unique_temp_dir("generator");
+        let dir = dir_guard.path().to_path_buf();
         write_file(&dir, "target.txt", "original");
 
         let candidates = vec![CandidateFix {
@@ -784,8 +770,6 @@ mod tests {
             .generate(&finding, 1)
             .expect("generate should succeed");
         assert_eq!(proposal.attempt, 1);
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -794,7 +778,9 @@ mod tests {
         // の構築時検証を経由せず直接呼べる）であるため、この関数自身が
         // `validate_relative_path` を経由することを確認する（A03 対応。
         // Cursor Bugbot review id 4885516474 指摘の回帰防止）。
-        let dir = temp_workspace("apply-unsafe-candidate-path");
+        let dir_guard = unique_temp_dir("apply-unsafe-candidate-path");
+        let dir = dir_guard.path().join("workspace");
+        fs::create_dir(&dir).expect("create_dir should succeed in test setup");
         let baseline = HashMap::new();
         let candidates = vec![CandidateFix {
             description: "malicious".to_string(),
@@ -804,8 +790,6 @@ mod tests {
         let result = apply_candidate(&dir, &baseline, &candidates, 1);
         assert!(result.is_err());
         assert!(!dir.parent().unwrap().join("outside.txt").exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// PR #361 codex-review P1 指摘の回帰防止（要求 (2)）: 候補が
@@ -815,7 +799,8 @@ mod tests {
     /// 「ポリシー除外設定の信頼境界」参照）。
     #[test]
     fn apply_candidate_rejects_policy_exclusion_toml_rewrite_candidate() {
-        let dir = temp_workspace("apply-rejects-policy-exclusion-rewrite");
+        let dir_guard = unique_temp_dir("apply-rejects-policy-exclusion-rewrite");
+        let dir = dir_guard.path().to_path_buf();
         write_file(&dir, "policy-exclusion.toml", "[[exclusion]]\n");
         let baseline = HashMap::new();
         let candidates = vec![CandidateFix {
@@ -834,15 +819,14 @@ mod tests {
             content, "[[exclusion]]\n",
             "拒否された候補が policy-exclusion.toml を書き換えてはならない"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 上記と同じ契約を `guardrail.toml`（`Category`・大文字小文字混在パス）
     /// でも確認する。
     #[test]
     fn apply_candidate_rejects_guardrail_toml_rewrite_candidate_case_insensitive() {
-        let dir = temp_workspace("apply-rejects-guardrail-toml-rewrite");
+        let dir_guard = unique_temp_dir("apply-rejects-guardrail-toml-rewrite");
+        let dir = dir_guard.path().to_path_buf();
         write_file(&dir, "GuardRail.TOML", "[thresholds]\n");
         let baseline = HashMap::new();
         let candidates = vec![CandidateFix {
@@ -855,8 +839,6 @@ mod tests {
 
         let result = apply_candidate(&dir, &baseline, &candidates, 1);
         assert!(result.is_err());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -865,7 +847,9 @@ mod tests {
         // （baseline は `CandidateFixGenerator::new` が構築するため通常は
         // 安全だが、`apply_candidate` を直接呼ぶ経路では任意の
         // `HashMap` を渡せるため、baseline 側の脱出も塞ぐ）。
-        let dir = temp_workspace("apply-unsafe-baseline-path");
+        let dir_guard = unique_temp_dir("apply-unsafe-baseline-path");
+        let dir = dir_guard.path().join("workspace");
+        fs::create_dir(&dir).expect("create_dir should succeed in test setup");
         let mut baseline = HashMap::new();
         baseline.insert(
             PathBuf::from("../outside.txt"),
@@ -879,36 +863,33 @@ mod tests {
         let result = apply_candidate(&dir, &baseline, &candidates, 1);
         assert!(result.is_err());
         assert!(!dir.parent().unwrap().join("outside.txt").exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn candidate_fix_generator_construction_rejects_unsafe_path() {
-        let dir = temp_workspace("unsafe-path");
+        let dir_guard = unique_temp_dir("unsafe-path");
+        let dir = dir_guard.path().to_path_buf();
         let candidates = vec![CandidateFix {
             description: "malicious".to_string(),
             files: vec![(PathBuf::from("../outside.txt"), "pwned".to_string())],
         }];
         let result = CandidateFixGenerator::new(dir.clone(), candidates);
         assert!(result.is_err());
-        let _ = fs::remove_dir_all(&dir);
     }
 
-    /// `--candidates` JSON 読み込み専用の一時ファイルパス（`temp_workspace`
-    /// と同じ `temp_dir() + process::id()` 方式だがディレクトリではなく単一
-    /// ファイルを扱う）。
-    fn temp_json_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "self-repair-candidate-json-{name}-{}.json",
-            std::process::id()
-        ))
+    /// `--candidates` JSON 読み込み専用の一時ファイルパス。一意名で排他作成した
+    /// ディレクトリ配下のパスを返す（ファイル自体は作らない。作る場合は
+    /// `create_new_file`）。ガードは `let (_json_dir, path) = ..` のように名前付きで保持すること。
+    fn temp_json_path(name: &str) -> (TempDirGuard, PathBuf) {
+        let guard = unique_temp_dir(&format!("candidate-json-{name}"));
+        let path = guard.path().join(format!("{name}.json"));
+        (guard, path)
     }
 
     #[test]
     fn load_candidates_from_json_parses_valid_input() {
-        let path = temp_json_path("valid");
-        fs::write(
+        let (_json_dir, path) = temp_json_path("valid");
+        create_new_file(
             &path,
             r#"[
                 {"description": "試行1", "files": [{"path": "src/lib.rs", "content": "fn a() {}"}]},
@@ -924,38 +905,33 @@ mod tests {
             candidates[1].files,
             vec![(PathBuf::from("src/lib.rs"), "fn b() {}".to_string())]
         );
-
-        let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn load_candidates_from_json_rejects_missing_file() {
-        let path = temp_json_path("missing");
-        let _ = fs::remove_file(&path);
+        let (_json_dir, path) = temp_json_path("missing");
         let result = load_candidates_from_json(&path);
         assert!(result.is_err());
     }
 
     #[test]
     fn load_candidates_from_json_rejects_empty_array() {
-        let path = temp_json_path("empty");
-        fs::write(&path, "[]").expect("一時 JSON の書き込みに失敗");
+        let (_json_dir, path) = temp_json_path("empty");
+        create_new_file(&path, "[]").expect("一時 JSON の書き込みに失敗");
         let result = load_candidates_from_json(&path);
         assert!(result.is_err());
-        let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn load_candidates_from_json_rejects_unknown_field() {
-        let path = temp_json_path("unknown-field");
-        fs::write(
+        let (_json_dir, path) = temp_json_path("unknown-field");
+        create_new_file(
             &path,
             r#"[{"description": "x", "files": [], "bogus": true}]"#,
         )
         .expect("一時 JSON の書き込みに失敗");
         let result = load_candidates_from_json(&path);
         assert!(result.is_err());
-        let _ = fs::remove_file(&path);
     }
 
     /// PR #361 codex-review 第 3 波 P1 指摘の回帰防止（ファイルサイズ上限）。
@@ -963,46 +939,43 @@ mod tests {
     /// どうかに関わらず）拒否されることを確認する。
     #[test]
     fn load_candidates_from_json_rejects_file_size_over_limit() {
-        let path = temp_json_path("oversize-file");
+        let (_json_dir, path) = temp_json_path("oversize-file");
         // JSON としての妥当性は問わない（サイズ検査がパース前に効くことを
         // 確認するテストのため、パディングの中身は任意）。
         let padding = "x".repeat((MAX_CANDIDATES_JSON_BYTES + 1) as usize);
-        fs::write(&path, padding).expect("一時 JSON の書き込みに失敗");
+        create_new_file(&path, padding).expect("一時 JSON の書き込みに失敗");
         let result = load_candidates_from_json(&path);
         assert!(result.is_err());
-        let _ = fs::remove_file(&path);
     }
 
     /// 候補数上限（`MAX_CANDIDATES`）超過を拒否することを確認する。
     #[test]
     fn load_candidates_from_json_rejects_candidate_count_over_limit() {
-        let path = temp_json_path("too-many-candidates");
+        let (_json_dir, path) = temp_json_path("too-many-candidates");
         let candidates: Vec<String> = (0..(MAX_CANDIDATES + 1))
             .map(|i| format!(r#"{{"description": "c{i}", "files": []}}"#))
             .collect();
-        fs::write(&path, format!("[{}]", candidates.join(",")))
+        create_new_file(&path, format!("[{}]", candidates.join(",")))
             .expect("一時 JSON の書き込みに失敗");
         let result = load_candidates_from_json(&path);
         assert!(result.is_err());
-        let _ = fs::remove_file(&path);
     }
 
     /// 候補数が上限ちょうど（`MAX_CANDIDATES`）の場合は受理されることを
     /// 確認する（上限超過テストと対になる境界確認）。
     #[test]
     fn load_candidates_from_json_accepts_candidate_count_at_limit() {
-        let path = temp_json_path("candidates-at-limit");
+        let (_json_dir, path) = temp_json_path("candidates-at-limit");
         let candidates: Vec<String> = (0..MAX_CANDIDATES)
             .map(|i| format!(r#"{{"description": "c{i}", "files": []}}"#))
             .collect();
-        fs::write(&path, format!("[{}]", candidates.join(",")))
+        create_new_file(&path, format!("[{}]", candidates.join(",")))
             .expect("一時 JSON の書き込みに失敗");
         let result = load_candidates_from_json(&path);
         assert_eq!(
             result.expect("上限ちょうどの候補数は受理されるはず").len(),
             MAX_CANDIDATES
         );
-        let _ = fs::remove_file(&path);
     }
 
     /// content 長上限（`MAX_CONTENT_BYTES`）超過を拒否することを確認する
@@ -1010,7 +983,7 @@ mod tests {
     /// ファイルサイズ検査とは独立の検査であることを確認するため）。
     #[test]
     fn load_candidates_from_json_rejects_content_over_limit() {
-        let path = temp_json_path("oversize-content");
+        let (_json_dir, path) = temp_json_path("oversize-content");
         let oversized_content = "x".repeat(MAX_CONTENT_BYTES + 1);
         let json = format!(
             r#"[{{"description": "c", "files": [{{"path": "a.txt", "content": "{oversized_content}"}}]}}]"#
@@ -1019,9 +992,8 @@ mod tests {
             (json.len() as u64) < MAX_CANDIDATES_JSON_BYTES,
             "このテストはファイルサイズ上限とは独立の content 長検査を確認するためのもの"
         );
-        fs::write(&path, json).expect("一時 JSON の書き込みに失敗");
+        create_new_file(&path, json).expect("一時 JSON の書き込みに失敗");
         let result = load_candidates_from_json(&path);
         assert!(result.is_err());
-        let _ = fs::remove_file(&path);
     }
 }

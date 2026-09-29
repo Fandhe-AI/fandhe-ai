@@ -4,18 +4,16 @@
 //! 起動せず検出・修正生成ロジックのみを検証するために使う
 //! [`ScriptedCommand`]（[`crate::exec::CommandRunner`] 実装）を 1 箇所に集約する
 //! （v1 `tools/self-repair/src/test_support.rs` と同じ集約方針。逐語複製を防ぐ）。
-//! 一時ディレクトリは `tempfile`（許容依存 8 区分外・依存追加はユーザー承認
-//! 事項）を使わず、v2 既存慣行（`crates/guardrail/tests/eval_harness.rs` 等）に
-//! 倣い `std::env::temp_dir()` + `std::process::id()` による一意ディレクトリで
-//! 代替する（実装計画セクション 2）。
+//! 一時ディレクトリは `tempfile`（許容依存外・依存追加はユーザー承認事項）を使わず、
+//! [`crate::test_temp`] の RAII ガード（一意名・排他作成・Drop で自身のみ削除）を
+//! 再輸出して使う（イシュー #2381・親 #2363）。
 //!
 //! 公開 API には含めない（`lib.rs` で `#[cfg(test)] pub(crate) mod test_support;`
 //! として登録し、テストビルド時のみ他モジュールの `#[cfg(test)]` から参照可能）。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
 use crate::exec::{CommandOutput, CommandRunner, ExecError};
 
@@ -124,22 +122,15 @@ pub(crate) fn write_workspace_file(dir: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).expect("フィクスチャファイル書き込みに失敗");
 }
 
-/// テストごとに衝突しない一時ディレクトリを作成し、その絶対パスを返す。
-///
-/// `tempfile` クレート（許容依存 8 区分外）を導入せず、`std::env::temp_dir()`
-/// とプロセス ID・単調増加カウンタの組み合わせでテスト間の一意性を確保する
-/// （同一プロセス内で複数テストが並行実行されても衝突しない。
-/// `crates/guardrail/tests/eval_harness.rs` と同じ一意化パターン）。呼び出し元は
-/// テスト終了時に明示的な削除を行わない（OS の一時領域クリーンアップに委ねる。
-/// CI runner は使い捨てのため許容する）。
-pub(crate) fn unique_temp_dir(test_name: &str) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "self-repair-test-{}-{}-{seq}",
-        std::process::id(),
-        test_name
-    ));
-    std::fs::create_dir_all(&dir).expect("一時ディレクトリ作成に失敗");
-    dir
+/// `path` にファイルを**排他作成**（`create_new`）して `contents` を書く。既存パス・symlink があれば `Err`。
+/// 呼び出し側は `.expect(..)` で扱う（テスト専用ユーティリティ）。
+pub(crate) fn create_new_file(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    f.write_all(contents.as_ref())
 }
+
+pub(crate) use crate::test_temp::{TempDirGuard, unique_temp_dir};
