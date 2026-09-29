@@ -49,7 +49,8 @@
 //! - **既存ファイルは読まず、削除もしない**。再保存すると旧世代の
 //!   `model.*.safetensors` が孤立ファイルとして残る。manifest が指していない
 //!   `model.*.safetensors` は手動で削除してよい。
-//! - 並行する save／load は非サポート。電源断耐性（fsync）は保証しない。
+//! - 並行する save／load は非サポート。電源断耐性（fsync）は保証しない
+//!   （手動掃除の手順を含め、利用者向けの契約は [`save_model`] の doc に書く）。
 //! - Windows（非 unix）では `save_model`・`load_model` とも `ErrorKind::Unsupported` で
 //!   fail-closed にする（`save_model` は `dir` への副作用より前に判定する）。
 //!   理由と緩和条件は決定記録 §12.4。
@@ -161,7 +162,8 @@ pub enum ModelIoError {
     },
     /// safetensors のエンコード・デコード失敗。
     Safetensors(String),
-    /// 本バージョンで保存・復元できないモデル（未対応の層・`compile` 済み等）。
+    /// 本バージョンで保存・復元できないモデル（`add_module` の利用者定義層・層モードの
+    /// 不一致・状態を記録できない `compile` 構成〈AMP を伴う Lbfgs 等〉・内部の整合性違反）。
     UnsupportedModel {
         /// 拒否した理由。
         reason: String,
@@ -214,12 +216,50 @@ impl std::error::Error for ModelIoError {
 
 /// `Sequential` を `dir` へ保存する（`dir/manifest.json`＋`dir/model.<gen>.safetensors`）。
 ///
-/// 対応範囲・世代コミット方式・既存ファイルを削除しない契約と手動掃除の手順・
-/// Windows 非対応（fail-closed。理由と緩和条件は決定記録 §12.4）はモジュール doc を参照。
+/// 対応範囲・世代コミット方式はモジュール doc を参照。
 /// BatchNorm の running stats（buffer）も別キーで保存する。`num_batches_tracked` は保存
 /// しない（forward の数値には影響しない。load 後は 0 から再開する）。
-/// 検証（未対応の層・`compile` 済み等）は `dir` を作る前にすべて終えるため、
-/// `UnsupportedModel` で失敗したときに `dir` には何も残らない。
+/// 検証（未対応の層・層モードの不一致・上限超過等）は `dir` を作る前にすべて終えるため、
+/// `UnsupportedModel`／`TooLarge` で失敗したときに `dir` には何も残らない。
+///
+/// # 旧世代ファイルと手動掃除
+///
+/// 本関数は `dir` の既存ファイルを**読まず、削除もしない**（`dir` の中身は非信頼で、
+/// 自分が書いたものだと証明できないため。決定記録 §13.0・§13.6）。同じ `dir` へ再保存すると、
+/// 旧世代の `model.<32 桁 16 進>.safetensors` が孤立ファイルとして残る。掃除は利用者が
+/// 手動で行う。
+///
+/// 1. その `dir` に対する `save_model`／`load_model` が、同一プロセス・他プロセスとも
+///    実行中でないことを確認する。
+/// 2. `dir/manifest.json` の `safetensors_file` の値（現行世代のファイル名）を確認する。
+/// 3. `dir` 直下の `model.<32 桁 16 進>.safetensors` のうち、手順 2 のファイル**以外**は
+///    削除してよい。現行世代のファイルは消さない。
+/// 4. 異常終了で残った `.manifest.json.tmp-*`（manifest の一時ファイル）も削除してよい。
+/// 5. 他のツールと共有する `dir` では、名前が一致するだけで他者のファイルを消さない
+///    （シンボリックリンクを消す場合もリンク先ではなくリンク自体だけを対象にする）。
+///
+/// # 並行アクセス
+///
+/// 同じ `dir` への並行する `save_model`／`load_model` は**非サポート**。manifest は最後に
+/// `rename` した側の内容になり、負けた側の世代は孤立ファイルになる。直列化（ファイルロック
+/// 等）は呼び出し元が行う（決定記録 §12.3 手順 6・7）。
+///
+/// # 耐久性（fsync）
+///
+/// `sync_all`・ディレクトリの同期は行わない。`Ok` を返した後でも、電源断・OS クラッシュで
+/// 保存内容が失われたり壊れたりしうる。保証するのは、ファイルシステムが応答している間の
+/// コミット順序（safetensors → manifest の `rename`）だけで、プロセスの異常終了で既存の
+/// manifest が壊れることはない（決定記録 §12.3 手順 9）。
+///
+/// 保存後に呼び出し元がファイルやディレクトリを同期しても、電源断時のコミット順序
+/// （safetensors の永続化 → manifest の `rename`）は保証できない（書き込みと `rename` の
+/// 間で同期せず、同期用のハンドルも返さないため）。耐久性が必要な用途には、この順序で同期を
+/// 行う保存経路が別途必要であり、本関数は対象外である。
+///
+/// # プラットフォーム
+///
+/// Windows（非 unix）では `ErrorKind::Unsupported` で fail-closed にし、`dir` へ副作用を
+/// 起こさない（理由と緩和条件は決定記録 §12.4）。
 pub fn save_model(model: &Sequential, dir: impl AsRef<Path>) -> Result<(), ModelIoError> {
     // 非 unix では `dir` への副作用（`create_dir_all` 等）より前にここで拒否する（§12.4 item 5）。
     save_platform_check()?;
@@ -233,6 +273,10 @@ pub fn save_model(model: &Sequential, dir: impl AsRef<Path>) -> Result<(), Model
 /// フラグも復元する。`num_batches_tracked` は復元しない（0 から再開する。forward の数値には
 /// 影響しない）。
 /// 途中で失敗しても部分的に構築したモデルは返さない。非信頼入力の扱いはモジュール doc を参照。
+///
+/// 同じ `dir` への並行する [`save_model`] 中の読み込みは非サポート（決定記録 §12.3 手順 7）。
+/// 非 unix では `ErrorKind::Unsupported` で拒否し、対応範囲は Linux x86_64／aarch64・macOS
+/// （旧世代ファイルの手動掃除・耐久性は [`save_model`] の doc を参照）。
 pub fn load_model(dir: impl AsRef<Path>) -> Result<Sequential, ModelIoError> {
     load_from_dir_with_limits(dir.as_ref(), MAX_MANIFEST_BYTES, MAX_MODEL_FILE_BYTES)
 }

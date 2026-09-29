@@ -1,9 +1,12 @@
 # `compat::Sequential` 層構成シリアライズ（`save_model`・`load_model`）の設計判断記録
 
 イシュー #2188・親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
-行内深掘り）」。facade 公開面拡張は承認待ちのため本 PR は保留固定のみ
+行内深掘り）」。**現状（2026-09-29 更新）: 主案（自由関数 `save_model`／`load_model`＋
+`ModelIoError`）は 2026-09-29 に承認され、親 #2362 配下の #2369〜#2376 で実装・テスト完了。
+未承認のまま保留しているのは代替案の inherent メソッド `Sequential::save`／`load` のみ**
 （`crates/facade/src/lib.rs::ModelIoHoldDoctestGuard`＋
-`crates/facade/tests/api_surface.rs` のテストで機械的に固定する）。
+`crates/facade/tests/api_surface.rs` のテストで機械的に固定。§7）。#2188 時点の経緯
+（承認待ちで保留固定のみとした判断）は §0.1 以下に残す。
 
 > **更新記録（イシュー #2369・親 #2362。2026-09-29）**: 親 #2362 でユーザー承認を受け、
 > 本 doc §2 item 1 の**主案**（自由関数 `compat::save_model`／`compat::load_model` と
@@ -13,7 +16,7 @@
 > #2372・#2373、網羅テストは #2374〜#2376）。**代替案の inherent メソッド
 > `Sequential::save`／`load` は承認範囲外のため保留ガードを維持**している（§7）。
 > 以下 §0 は #2188 時点の「保留」判断の記録であり、経緯として残す。
-> **#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**（公開範囲が途中状態のため）。
+> **#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**（公開範囲が途中状態のため。#2373 のマージで解除済み）。
 >
 > **更新記録（イシュー #2370・親 #2362。2026-09-29）**: 対応範囲を `compat::Sequential` の
 > `add_*` 全 30 種へ広げた（`add_module` の利用者定義層のみ構成を記録できないため
@@ -31,7 +34,7 @@
 > **`num_batches_tracked` は復元しない**（load 後は 0 から再開。forward のどこからも参照されず
 > 数値に影響しないため。`save_model`／`load_model` の API doc にも明記。§11）。
 > 上限定数の値は変えていない。**#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**
-> 契約は継続。
+> 契約は継続（#2373 のマージで解除済み）。
 
 > **更新記録（イシュー #2373・親 #2362。2026-09-29）**: `Optimizer::Lbfgs` の compile 状態を
 > `save_model`／`load_model` で保存・復元するようにした（#2372 の暫定 `UnsupportedModel` を撤去。
@@ -44,7 +47,42 @@
 > **これで #2369〜#2373 がすべて実装され、本 PR のマージをもって crates.io リリース停止の契約は
 > 解除される。**
 
-## 0. 結論（方式の確定）
+> **更新記録（イシュー #2377・親 #2362。2026-09-29）**: 実装完了に伴い本 doc・関連 doc の
+> 「承認待ち」「保留」「承認後に〜する」の記述を、実装済みの事実へ揃えた（本番コード・上限定数・
+> tolerance は不変）。イシュー→PR の対応は §0 の表を参照（#2372〈PR #2438〉の更新記録は
+> 個別に置いていなかったため、この表で補う）。利用者向けの契約（旧世代ファイルを自動削除しない
+> こと・手動掃除の手順・並行 save／load の非サポート・fsync 非保証）は `save_model` の API doc
+> （`///`）へ明記した（§12.3 手順 5〜7・9）。**代替案 `Sequential::save`／`load` は引き続き
+> 未承認・保留（§7）。**
+
+## 0. 結論（実装完了。2026-09-29）
+
+2026-09-29 に親 #2362 で承認を受け、主案を次のとおり実装済み。
+
+| イシュー | 内容 | マージ PR |
+|---|---|---|
+| #2364 | `fs_guard` 抽出（no-follow・`MAX_MODEL_FILE_BYTES`） | #2410 |
+| #2365 | `grad_scaler_from_state` | #2404 |
+| #2366 | Lbfgs 状態保存・復元 API | #2411 |
+| #2367 | `impl OptimizerStateDict for Sgd` | #2422 |
+| #2368 | Windows の `save_model` を fail-closed にする決定（§12.4） | #2405 |
+| #2369 | `compat::save_model`／`load_model`／`ModelIoError` 公開・保留ガードの正ガード化 | #2428 |
+| #2370 | `add_*` 全 30 層 | #2436 |
+| #2371 | BatchNorm running stats | #2437 |
+| #2372 | compile 状態（loss・6 optimizer・AMP） | #2438 |
+| #2373 | Lbfgs の compile 状態・`MAX_LBFGS_HISTORY` | #2440 |
+| #2374 | bit 一致 roundtrip 行列（§6.1） | #2442 |
+| #2375 | 改竄 manifest の fail-closed 網羅（§6.2） | #2441 |
+| #2376 | symlink・TOCTOU・衝突・削除しない契約（§6.2） | #2435 |
+| #2377 | 本 doc と関連 doc の実装完了状態への更新・API doc への契約明記 | 本 PR |
+
+- 公開面: 自由関数 2 件＋`#[non_exhaustive] enum ModelIoError`（§2 item 1 の主案）。
+- 対応範囲: `add_*` 全 30 層（`add_module` の利用者定義層を除く）・BatchNorm の buffer・
+  compile 状態（6 optimizer×AMP の有無と、AMP を伴わない Lbfgs）。
+- **代替案の inherent メソッド `Sequential::save`／`load` は未承認のため保留し、保留ガードを維持する**
+  （§7。解禁には再度ユーザー承認が要る）。
+
+### 0.1 #2188 時点の結論（経緯として保存。以降の本文は当時の記述）
 
 **facade 公開面の拡張は承認待ちのまま保留し、「設計判断記録＋保留ガード
 ＋公開 API のみで組める手動 roundtrip テスト」で閉じる**（#2306〈#2177〉・
@@ -95,7 +133,7 @@ Keras の `model.save()`／`load_model()`、PyTorch の「アーキテクチャ�
 スコープ外（イシュー規定）: ONNX／TorchScript への export・
 version migration。
 
-## 2. 承認事項（一覧。item 4 の上限値は 2026-09-29 承認済み）
+## 2. 承認事項（一覧。2026-09-29 に item 1 の主案〜item 6 を承認・実装済み。item 1 の代替案のみ未承認）
 
 1. **公開 API の署名とエラー型**。
    - `fandhe_ai::compat::save_model(model: &Sequential, dir: impl AsRef<Path>) -> Result<(), ModelIoError>`
@@ -103,6 +141,7 @@ version migration。
    - `#[non_exhaustive] pub enum ModelIoError { Io(std::io::Error), Manifest { message: String }, Safetensors(String), UnsupportedModel { reason: String }, Mismatch { message: String }, Autodiff(AutodiffError), TooLarge { what: &'static str, limit: u64 } }`
    - 代替案として `Sequential::save(&self, dir)`／`Sequential::load(dir)`
      （inherent メソッド）も併記する。
+   - **実装状況**: 主案は #2369（PR #2428）で公開済み。代替案は**未承認・保留**（§7 の保留ガード）。
 2. **内部クレートへの追加**（facade 公開面は広がらない）。
    - **【内部 API 実装済み（イシュー #2367）。`decode_slot_only_state_dict` で `step_count` 不要。`docs/autodiff-optimizer-state-dict-decision.md` §8】** `impl OptimizerStateDict for Sgd`（`crates/autodiff/src/optim/sgd.rs`）。
      `Sgd` は `velocity: Option<Vec<Tensor>>` を持つが `OptimizerStateDict`
@@ -119,6 +158,7 @@ version migration。
      「per-param スロットバッファ」形状（`AdamW` の `m`／`v` 等）とは構造が
      異なる（`Lbfgs` はフラット化した全パラメータ 1 本のベクトルに対する
      大域状態＋曲率ペアの履歴〈`history_size` 上限〉を保持する）。承認後は
+     （実装済み: #2366〈PR #2411〉。履歴上限は #2373〈PR #2440〉）
      `Lbfgs` 専用のキー配置を持つ `OptimizerStateDict` 実装（または同型の
      専用トレイト）を追加する。復元時の検証: `old_dirs.len() ==
      old_stps.len() == ro.len()`（manifest の `history_len` と
@@ -142,7 +182,7 @@ version migration。
    任意の `(scale, growth_tracker)` の組を事後に再現できない
    （`growth_tracker` は growth／backoff のたびに `0` へリセットされる
    ため、`update(false)` を再生しても再生前に backoff／growth で変化
-   済みの `scale` 自体は動かない）。承認後は次の内部 API（`fandhe_ai_
+   済みの `scale` 自体は動かない）。承認後は（実装済み: #2365〈PR #2404〉）次の内部 API（`fandhe_ai_
    autodiff` 限定。facade へは再エクスポートしない）を追加する:
    `grad_scaler_from_state(config: GradScalerConfig, scale: f32,
    growth_tracker: u64) -> Result<GradScaler, AutodiffError>`
@@ -262,9 +302,9 @@ version migration。
 | `Sequential` は層を `Box<dyn Module>` で持つ。`Module` のダウンキャストは不完全 | `crates/facade/src/compat/sequential.rs`・`crates/autodiff/src/nn/module.rs` | 各 `add_*`（30 メソッド）の引数を内部 `LayerSpec` enum として記録する方式にする |
 | BatchNorm の running stats は `state_dict()` に含まれない。setter がなく、`BatchNorm1d/2d::from_parameters` でのみ復元できる | `crates/autodiff/src/nn/batch_norm.rs` | buffer は safetensors に別キーで保存し、BN 層は `from_parameters` で再構築する。`num_batches_tracked` は非復元（forward 計算に一切使われないカウンタのみで、非復元でも数値へ影響しない。§11 参照） |
 | `Compiled { optimizer, loss, amp }`。7 optimizer（`Sgd`／`AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Lbfgs`。`Lbfgs` は PR #2319〈main 統合済み〉で追加）はいずれも `config()` を持ち、`set_lr` による書き換えも `config()` へ反映済みの値を返す | `crates/facade/src/compat/training.rs` | 設定値（LR scheduler が書き換えた現在値を含む）は全フィールドを直列化できる |
-| `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Sgd` は `OptimizerStateDict` 実装済み（`Sgd` は #2367）。`Lbfgs` は専用 inherent API 実装済み | `crates/autodiff/src/nn/optim/state_dict.rs`・`crates/autodiff/src/nn/optim/lbfgs.rs` | 承認後は `impl OptimizerStateDict for Sgd`、および `Lbfgs` 専用のキー配置を持つ状態保存・復元 API が必要（§2 item 2）。`Lbfgs` 側の内部 API は #2366 で実装済み（接頭辞なし。`docs/autodiff-lbfgs-decision.md` §10） |
-| `api_surface.rs::workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` が `state_dict`／`load_state_dict` の宣言元を完全一致で固定している | `crates/facade/tests/api_surface.rs` | 承認後の facade 側ヘルパーにこの名前は使えない |
-| `GradScaler` は `config()` の getter を**持たない**（当初この行は「`config()` はある」と誤記していた。#2372 の実測で訂正）。`(scale, growth_tracker)` を任意の値に復元するコンストラクタもない（`update` の backoff／growth 経由でしか変化しない）。#2372 では autodiff へ getter を足さず（`GradScaler` は facade が再エクスポート済みで公開面が広がるため）、facade 内部の `AmpState` に構築時の `GradScalerConfig` を記録する | `crates/autodiff/src/nn/optim/amp.rs` | `compile_with_amp` の時点で `GradScalerConfig` を記録し、save 時点の `scale()`／`growth_tracker()` を manifest に保存、復元は承認後の `grad_scaler_from_state`（§2 item 3）を使う（`update` の再生では現在の `scale` を再現できないため。§11） |
+| `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Sgd` は `OptimizerStateDict` 実装済み（`Sgd` は #2367）。`Lbfgs` は専用 inherent API 実装済み | `crates/autodiff/src/nn/optim/state_dict.rs`・`crates/autodiff/src/nn/optim/lbfgs.rs` | 承認後は（実装済み: #2367〈PR #2422〉・#2366〈PR #2411〉）`impl OptimizerStateDict for Sgd`、および `Lbfgs` 専用のキー配置を持つ状態保存・復元 API が必要（§2 item 2）。`Lbfgs` 側の内部 API は #2366 で実装済み（接頭辞なし。`docs/autodiff-lbfgs-decision.md` §10） |
+| `api_surface.rs::workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` が `state_dict`／`load_state_dict` の宣言元を完全一致で固定している | `crates/facade/tests/api_surface.rs` | facade 側ヘルパー（#2369 以降。承認後に実装済み）にこの名前は使えない |
+| `GradScaler` は `config()` の getter を**持たない**（当初この行は「`config()` はある」と誤記していた。#2372 の実測で訂正）。`(scale, growth_tracker)` を任意の値に復元するコンストラクタもない（`update` の backoff／growth 経由でしか変化しない）。#2372 では autodiff へ getter を足さず（`GradScaler` は facade が再エクスポート済みで公開面が広がるため）、facade 内部の `AmpState` に構築時の `GradScalerConfig` を記録する | `crates/autodiff/src/nn/optim/amp.rs` | `compile_with_amp` の時点で `GradScalerConfig` を記録し、save 時点の `scale()`／`growth_tracker()` を manifest に保存、復元は承認後に実装した `grad_scaler_from_state`（§2 item 3。#2365）を使う（`update` の再生では現在の `scale` を再現できないため。§11） |
 | `Optimizer::Lbfgs` は `compile_with_amp` から fail-closed に拒否される（AMP 非対応） | `crates/facade/src/compat/training.rs:899` | 検証計画（§6）の「optimizer × AMP」の直積対象から `Lbfgs` を除外する |
 | `compat::Sequential` では任意の skip connection を表現できない | `sequential.rs` | 受入基準の「skip connection」は深い異種スタック＋`add_transformer_encoder` で代替 |
 | `save_model`／`load_model` を宣言している `crates/*/src/` はない | `grep` 結果（2026-09-26） | 定義元インベントリの期待集合は空 |
@@ -362,7 +402,7 @@ version migration。
   `amp` は `null` または `{"dtype", "grad_scaler_config", "scale",
   "growth_tracker"}`。`scale`（f32）・`growth_tracker`（u64。JSON 整数）
   は save 時点の `GradScaler::scale()`／`growth_tracker()` の**現在値**
-  であり（`GradScalerConfig` の初期値ではない）、復元は承認後の
+  であり（`GradScalerConfig` の初期値ではない）、復元は承認後に実装した（#2365〈PR #2404〉）
   `grad_scaler_from_state(config, scale, growth_tracker)`（§2 item 3）を
   使う（PR #2317 review 指摘 1 の是正。§11 参照）。
 - 数値表現: f32 は Rust の最短往復表記（`{:?}`）で書き `str::parse::<f32>`
@@ -498,7 +538,7 @@ version migration。
   変数で epoch／ウィンドウ境界を跨いで持ち越されない）。網羅的な棚卸しは
   §11 を参照。
 
-## 6. 承認後の検証計画
+## 6. 検証計画（実装済み。所在は §6.1・§6.2）
 
 `crates/facade/tests/compat_sequential_model_io.rs` で、30 種すべての
 層を含むモデル・深い異種スタック・transformer encoder・train モード
@@ -582,7 +622,18 @@ optimizer 内部状態・BN buffer のように公開 API から直接観測で�
 統合すると `save_model` の不具合と既存公開 API の不具合を切り分けられなくなるため。
 CUDA／Metal 実機 parity は対象外（ホスト側 I/O と CPU 上の層再構築のみでカーネルを持たない）。
 
-## 7. 保留ガードの多層構成
+### 6.2 異常系・ファイル I/O 脅威の検証の所在（#2375・#2376）
+
+- 改竄 manifest の fail-closed 網羅: `crates/facade/tests/compat_sequential_model_io_tamper.rs`
+  （#2375・PR #2441）。
+- symlink・TOCTOU・名前衝突・既存ファイルを削除しない契約:
+  `crates/facade/tests/compat_sequential_model_io_fs_threats.rs`（#2376・PR #2435）。
+- 名前衝突の注入: `crates/facade/src/compat/model_io/fs_threat_tests.rs`。
+- 検査〜open 間の差し替え: `crates/facade/src/fs_guard.rs` の単体テスト。
+
+## 7. 保留ガードの多層構成（主案は #2369 で正ガードへ置き換え済み。代替案のみ保留）
+
+以下の 3 項目は #2188 時点の構成。#2369 での置き換えは後段の箇条を参照。
 
 - **正のプローブ doctest**（`crates/facade/src/lib.rs::
   ModelIoHoldDoctestGuard`）: facade の全 `pub mod` を glob import した
@@ -608,7 +659,7 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O と CPU 上の層再�
   インベントリという第 3 層の役割は別途この専用テストが担う。詳細は
   `crates/facade/tests/api_surface.rs::scan_sequential_alt_save_load_impls`
   のドキュメンテーションコメントを正とする）。
-- 承認後は、doctest・ソース走査を撤去して正ガード（実際の公開面の
+- 承認後は（#2369〈PR #2428〉で実施済み）、doctest・ソース走査を撤去して正ガード（実際の公開面の
   固定テスト）へ置き換え、インベントリの期待集合を
   `facade/src/compat/model_io.rs` へ差し替える。
 - **#2369 で実施した置き換え**（親 #2362）:
@@ -630,7 +681,13 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O と CPU 上の層再�
   - `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `save_model`・`load_model` を追加した
     （小文字始まりの `pub use` 葉は関数再エクスポートの契約）。
 
-## 8. OWASP Top 10 観点（承認後の要件として記録）
+- **現在も有効な保留**: 代替案の inherent メソッド（`Sequential::save`／`load`／`save_model`／
+  `load_model` の 4 名）は未承認のまま、`ModelIoHoldDoctestGuard` と
+  `workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations` が
+  公開・宣言を機械的に拒否する。解禁するには再度ユーザー承認が必要（本 doc の他の記述を
+  根拠に解禁してはならない）。
+
+## 8. OWASP Top 10 観点（実装要件。#2369〜#2376 で実装・テスト済み）
 
 - **A01 アクセス制御の不備／パストラバーサル**: `dir` 配下のファイル名は
   固定文字列（`manifest.json`）または固定パターン（
@@ -675,21 +732,23 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O と CPU 上の層再�
   さらに撤回した——非信頼 manifest が指す任意の通常ファイル名を
   「削除してよい対象」だと信じてしまう構造は、対象を 1 件に絞っても
   解消しない）。
-- **A04 安全でない設計**: 公開面の拡張を承認前に実施しない（保留
-  ガードで機械的に固定）。依存の追加（`serde_json`・`zip` 等）はせず
+- **A04 安全でない設計**: 公開面の拡張は承認前に実施しない（主案は 2026-09-29 の承認後に
+  公開。代替案は保留ガードで機械的に固定したまま）。依存の追加（`serde_json`・`zip` 等）はせず
   `Cargo.toml` も不変。
-- **本 PR 自体**: 本番コードの挙動は変わらない。秘密情報は扱わない。
+- **本 PR 自体（#2188 時点の記述）**: 本番コードの挙動は変わらない。秘密情報は扱わない。
 
 ## 9. 非信頼データに関する記録
 
 イシュー本文に、指示の上書きや秘密情報の出力といった命令文は見当たら
 なかった。本文は要件としてのみ扱い、逐語での引用はしていない。
+イシュー #2377 の本文にも同様の命令文はなく、要件としてのみ扱った（逐語引用なし）。
 
-## 10. 再開条件
+## 10. 再開条件（充足済み。2026-09-29 承認・#2362 で実装完了）
 
-**#2362 で再開済み（#2369）**: 2026-09-29 のユーザー承認を受け、親 #2362 配下で
-「§4〜§6 の実装 → 保留ガードの撤去」を段階的に進める。#2369 は最小構成の公開と
-保留ガードの正ガード化（§7）。以下は #2188 時点の再開条件の記録。
+**#2362 で再開し完了した**: 2026-09-29 のユーザー承認を受け、親 #2362 配下で
+「§4〜§6 の実装 → 保留ガードの撤去」を #2369〜#2376 で進め、#2377 で doc を実装完了の状態へ
+揃えた（§0 の表）。**代替案 `Sequential::save`／`load` の再開条件は別途ユーザー承認**
+（未承認のまま保留ガードを維持。§7）。以下は #2188／PR #2317 時点の再開条件と是正経緯の記録。
 
 イシュー #2188（または親 #2131）に、所有者による §2 の承認コメントが
 付くこと。承認後は、別イシューか同イシューの再開で「§4〜§6 の実装 →
@@ -851,8 +910,8 @@ main への PR #2319〈L-BFGS〉統合後の状態）。
 | BatchNorm `num_batches_tracked` | 可（`num_batches_tracked()`。crate 内限定） | 不可（`from_parameters` に対応引数がなく setter もない） | **意図的に非復元のまま**。forward 計算のどこからも参照されず（`batch_norm.rs:395-396` で加算されるだけで、読み出し箇所は同ファイルの getter とテストのみ）、数値へ影響しないため復元 API は追加しない |
 | `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Adadelta`／`Adamax`／`NAdam`／`RAdam` の内部状態 | 可（`OptimizerStateDict::state_dict()`） | 可（`load_state_dict()`。検証付き） | 変更なし |
 | `Sgd` の `velocity` | 可（#2367 の `OptimizerStateDict`） | 可（manifest 結線済み〈#2372〉） | 変更なし |
-| `Lbfgs` の `n_iter`／`func_evals`／`d`／`t`／`old_dirs`／`old_stps`／`ro`／`h_diag`／`prev_flat_grad`／`last_loss`／`slot_shapes` | 一部可（`n_iter()`／`func_evals()`／`last_loss()`／`config()` のみ公開） | 不可（他フィールドに setter がなく、`OptimizerStateDict` も未実装。実装するとしても既存トレイトが前提とする per-param スロットバッファ形状〈`AdamW` の `m`／`v` 等〉とは構造が異なる〈フラット化ベクトル 1 本＋曲率ペア履歴〉） | §2 item 2 拡張（承認後、`Lbfgs` 専用キー配置の状態保存・復元 API を新設。§4「Lbfgs 状態」節） |
-| `GradScaler` の `scale`／`growth_tracker` | 可（`scale()`／`growth_tracker()`） | **不可**（`new` は `init_scale` からしか開始できず、`update` は backoff／growth の状態機械経由でしか変化しない。`growth_tracker` は成長／backoff のたびに `0` へリセットされるため、`update(false)` を事後に何回再生しても、再生前の backoff／growth で変化済みの `scale` 自体は再現できない——指摘 1 の対象） | §2 item 3（承認後 `grad_scaler_from_state(config, scale, growth_tracker)` を新設。検証は `new` 相当＋`scale` の非正規化数チェック＋`growth_tracker < growth_interval`） |
+| `Lbfgs` の `n_iter`／`func_evals`／`d`／`t`／`old_dirs`／`old_stps`／`ro`／`h_diag`／`prev_flat_grad`／`last_loss`／`slot_shapes` | 一部可（`n_iter()`／`func_evals()`／`last_loss()`／`config()` のみ公開） | 不可（他フィールドに setter がなく、`OptimizerStateDict` も未実装。実装するとしても既存トレイトが前提とする per-param スロットバッファ形状〈`AdamW` の `m`／`v` 等〉とは構造が異なる〈フラット化ベクトル 1 本＋曲率ペア履歴〉） | §2 item 2 拡張（承認後に実装済み〈#2366〉。`Lbfgs` 専用キー配置の状態保存・復元 API を新設。§4「Lbfgs 状態」節） |
+| `GradScaler` の `scale`／`growth_tracker` | 可（`scale()`／`growth_tracker()`） | **不可**（`new` は `init_scale` からしか開始できず、`update` は backoff／growth の状態機械経由でしか変化しない。`growth_tracker` は成長／backoff のたびに `0` へリセットされるため、`update(false)` を事後に何回再生しても、再生前の backoff／growth で変化済みの `scale` 自体は再現できない——指摘 1 の対象） | §2 item 3（承認後に `grad_scaler_from_state(config, scale, growth_tracker)` を新設済み〈#2365〉。検証は `new` 相当＋`scale` の非正規化数チェック＋`growth_tracker < growth_interval`） |
 | LR scheduler・callbacks | 該当なし（`Compiled`／`Sequential` に保持されない `fit` 呼び出し引数） | — | 非対象（スコープ外のまま） |
 | LR scheduler が書き換えた**現在の** LR | 可（各 optimizer の `config()` が `set_lr` 後の値を返す。`AdamW`／`Adam`／`Sgd`／`Adadelta`／`Adamax`／`NAdam`／`RAdam`／`Lbfgs` で確認） | 可（`config` を保存・復元するだけでよい。`RmsProp`／`Adagrad`／`Lamb` は `set_lr` 自体がないため常に既定値のまま） | 変更なし |
 | param groups | 該当なし（facade は単一グループのみ。イシュー #2173 が facade 公開面拡張として別途保留中） | — | 非対象 |
@@ -865,7 +924,7 @@ main への PR #2319〈L-BFGS〉統合後の状態）。
 上表のとおり、「公開 API の再生だけでは復元できない」状態は
 `GradScaler`（指摘 1 の対象）に加え `Sgd`・`Lbfgs` の 3 者であり、
 いずれも同じ方針（現在値を保存し、範囲・有限性を検証する復元 API を
-承認後に内部追加する）で§2 に反映した。それ以外の状態は、既存の
+承認後に内部追加した。実装済み: #2365・#2366・#2367）で§2 に反映した。それ以外の状態は、既存の
 `state_dict`／`load_state_dict`／`from_parameters`／`config`／
 `set_training` 等の公開・内部 API の組み合わせだけで bit 一致復元が
 可能、または（BN の `num_batches_tracked`・グローバル RNG・LR
@@ -938,7 +997,7 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    write_file_creating_parent` の `MAX_TMP_NAME_ATTEMPTS` にそのまま揃える。
    上限に達してもなお衝突する場合は `ModelIoError::Io` で fail-closed とし
    `dir` の既存エントリは不変のまま返す——PR #2317 review 指摘（P2）の
-   是正。§6「承認後の検証計画」・§13.3 の対応行も本節と同じ挙動に揃える）。
+   是正。§6「検証計画」・§13.3 の対応行も本節と同じ挙動に揃える）。
    部分書き込みで失敗した場合、このファイルは以後どの manifest からも
    参照されない孤立ファイルとして残る（§13.6「削除所有権」。自動削除は
    しない）。
@@ -1034,7 +1093,7 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    明示的に受容する残余コストであり、利用者向けの掃除手順として
    「`manifest.json` の `safetensors_file` が指す世代以外の
    `model.*.safetensors` は安全に手動削除できる」旨を API ドキュメント
-   （承認後に追加する `model_io` モジュール doc）に明記する。
+   （`model_io` モジュール doc と `save_model` の doc に明記済み。手動掃除の手順は #2377）に明記する。
 6. **同時保存（2 プロセス）の扱い**: 本設計は「同一ディレクトリへの
    並行 `save_model` はサポート対象外」と明示する（`st_save.rs:185`
    の既存の未サポート表明と同型）。世代 ID が一意である限り、2 つの
@@ -1044,7 +1103,7 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    **残るのは「最後に勝った manifest 以外が参照していた世代が孤立して
    残ること」のみ**であり、これは手順 5 の残余コストと同じ性質の
    「非サポート」として受容する（呼び出し元が同一ディレクトリへ並行
-   書き込みしない前提での動作を保証する）。
+   書き込みしない前提での動作を保証する）。**`save_model` の API doc に明記済み（#2377）**。
 7. **読込中の書込み（reader/writer race）**: load は「manifest を
    読む → 参照されたファイルを §13 の no-follow 手順で開く」の順で
    処理する。手順 5 で自動削除をなくしたため、**load が読んだ世代が
@@ -1059,7 +1118,8 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    世代 ID が一意なため参照先ファイル自体は存在し続ける（消えるのは
    「latest」の意味だけで、読んだ世代の内容自体は不変のまま安全に
    読める）。単一プロセスが読み書きする通常運用では発生せず、並行
-   アクセスは呼び出し元でファイルロック等の直列化を行う前提とする。
+   アクセスは呼び出し元でファイルロック等の直列化を行う前提とする
+   （`load_model` の API doc にも明記済み。#2377）。
 8. **プラットフォーム**: rename の原子性については、本設計は既存
    `save_safetensors_f32`／`st_save.rs` が既に前提とする「同一
    ファイルシステム内の `rename` は POSIX 上 atomic」という前提を
@@ -1089,7 +1149,7 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    終了・異常終了（クラッシュ・kill）を含む、ファイルシステムが応答
    している間の 2 ファイル間コミット順序の不整合」（指摘 2 が対象と
    した問題）であり、ストレージ層の電源断耐性という別軸の非保証は
-   既存方針から変更しない。
+   既存方針から変更しない。**`save_model` の API doc に明記済み（#2377）**。
 
 ### 12.4 Windows の rename 置換先 reparse point の扱い（イシュー #2368）
 
@@ -1270,7 +1330,7 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 
 ### 13.3 脅威棚卸し表
 
-| 脅威 | 対象（段階） | 本設計の対策（承認後の実装要件） | 既存実装の参照先 |
+| 脅威 | 対象（段階） | 本設計の対策（実装済み） | 既存実装の参照先 |
 |---|---|---|---|
 | シンボリックリンク（葉ファイル。`manifest.json`／`model.<gen>.safetensors`） | 読み込み | §13.2 の no-follow 手順（`symlink_metadata` 事前拒否 → `O_NOFOLLOW` オープン → `fstat` dev/ino 照合） | `crates/facade/src/fs_guard.rs::open_leaf_no_follow`・`crates/facade/src/model.rs::resolve_model_file`／`crates/facade/tests/model_registry.rs::load_rejects_symlinked_leaf_file_escaping_root` |
 | シンボリックリンク（対象ディレクトリ自身 `dir`） | 読み込み・書き込み共通 | 許容する（`dir` 自体が symlink であることは脅威モデル外。§13.1） | `model_registry.rs::load_succeeds_when_root_itself_is_a_symlink` |
@@ -1300,7 +1360,7 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 `open_leaf_no_follow` を `model.rs` 専用の非公開実装から facade 内部の
 共有モジュールへ抽出する（§2 item 5）。抽出は `model.rs` 側の既存
 呼び出し・挙動を変えない純粋なリファクタリングであり、`model_io.rs`
-（承認後の実装）は同じヘルパーを呼ぶだけで独自の `O_NOFOLLOW` 実装を
+（#2369 で実装済み）は同じヘルパーを呼ぶだけで独自の `O_NOFOLLOW` 実装を
 持たない（同じ脆弱性クラスの対策を 2 箇所に分散させない）。
 `MAX_MODEL_FILE_BYTES`（1 GiB。現状 `model.rs` の private const）も
 同じ抽出の対象とし `pub(crate)` へ格上げして共有する（§2 item 4）。
