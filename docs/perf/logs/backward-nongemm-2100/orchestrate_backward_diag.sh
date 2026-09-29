@@ -117,7 +117,24 @@ HOST_NAME="$(hostname 2>/dev/null || echo unknown)"
 # sed 正規表現の特殊文字（. * [ ] ^ $ \ / と区切りの #）をエスケープする
 sed_escape() { printf '%s' "$1" | sed -e 's/[][\\.*^$/#]/\\&/g'; }
 mask() { # stdin -> stdout
-  local args=(-e "s#$(sed_escape "$HOME")#<home>#g")
+  # worktree・出力先・作業ディレクトリは $HOME 外（/tmp 等）にも置かれうるため、
+  # より長い（具体的な）パスから先に置換し、最後に $HOME を置換する。
+  # WORK は mktemp 後にのみ設定される（未設定・空はスキップ）。
+  local args=()
+  local pair path label
+  for pair in \
+    "${WORK:-}|<work>" \
+    "${OUT:-}|<out>" \
+    "${INSTR_FACADE%/crates/facade}|<instr-tree>" \
+    "${PLAIN_FACADE%/crates/facade}|<plain-tree>"; do
+    path="${pair%%|*}"
+    label="${pair##*|}"
+    # 空または "/" 単体は全置換になるためスキップ
+    if [[ -n "$path" && "$path" != "/" ]]; then
+      args+=(-e "s#$(sed_escape "$path")#$label#g")
+    fi
+  done
+  args+=(-e "s#$(sed_escape "$HOME")#<home>#g")
   # 3 文字以下のホスト名は一般語の過剰置換を招くためマスクしない
   if [[ "${#HOST_NAME}" -ge 4 ]]; then
     args+=(-e "s#$(sed_escape "$HOST_NAME")#<host>#g")
@@ -147,7 +164,7 @@ fi
   echo "load_gate: m4max = load1 < 8.0／gb10 = load1 < 1.0 かつ GPU util 0%／smoke-x86 = なし"
   echo "  30 秒間隔・最大 30 分待つ。1 run でも不通過ならその系列は参考扱い（gate.tsv 参照）"
   echo "not_reexecuted: 既存 REJECT と重複する実験（#1578 MSE 逐次しきい値の A/B 等）は再実行しない"
-  echo "masking: ホスト名・絶対パスは <host>／<home> へマスクして収録する"
+  echo "masking: ホスト名・絶対パスは <host>／<home>／<out>／<work>／<instr-tree>／<plain-tree> へマスクして収録する"
 } >"$RULE"
 echo "wrote $RULE"
 

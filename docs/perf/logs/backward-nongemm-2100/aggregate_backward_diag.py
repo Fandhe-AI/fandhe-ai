@@ -193,21 +193,40 @@ def collect(machine: str, in_dir: Path, runs: int, devices: list[str]):
     return csv_rows, cells, overhead
 
 
-def load_gate(in_dir: Path) -> dict[tuple[str, str], str]:
-    """gate.tsv からセル別のゲート通過状況（全 run 通過なら 'pass'）を返す。"""
-    gate: dict[tuple[str, str], list[str]] = {}
+def load_gate(
+    in_dir: Path, runs: int, devices: list[str]
+) -> dict[tuple[str, str], str]:
+    """gate.tsv からセル別のゲート通過状況（全 run 通過なら 'pass'）を返す。
+
+    RULE.txt「1 run でも不通過ならその系列は参考扱い」に合わせ、各 device × mode に
+    予定した run 1..runs がちょうど 1 行ずつ（欠落・重複・範囲外・不正値なし）揃い、
+    かつ全行が pass=1 のときだけ 'pass' とする。それ以外は通過扱いにしない。
+    """
     p = in_dir / "gate.tsv"
     if not p.is_file():
         return {}
+    seen: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for i, line in enumerate(p.read_text(encoding="utf-8").splitlines()):
         if i == 0 or not line.strip():
             continue
         parts = line.split("\t")
         if len(parts) != 6:
             continue
-        gate.setdefault((parts[1], parts[2]), []).append(parts[5])
-    return {k: ("pass" if all(x == "1" for x in v) else "参考扱い（ゲート不通過あり）")
-            for k, v in gate.items()}
+        seen.setdefault((parts[1], parts[2]), []).append((parts[0], parts[5]))
+    expected = [str(r) for r in range(1, runs + 1)]
+    result: dict[tuple[str, str], str] = {}
+    for dev in devices:
+        for mode in MODES:
+            recs = seen.get((dev, mode), [])
+            run_ids = sorted(r for r, _ in recs)
+            complete = run_ids == sorted(expected)
+            if complete and all(v == "1" for _, v in recs):
+                result[(dev, mode)] = "pass"
+            elif not complete:
+                result[(dev, mode)] = "参考扱い（gate.tsv の run 記録が欠落・重複・不正）"
+            else:
+                result[(dev, mode)] = "参考扱い（ゲート不通過あり）"
+    return result
 
 
 def render_md(machine, cells, overhead, gate, runs) -> str:
@@ -263,7 +282,7 @@ def run(args: argparse.Namespace) -> int:
         wtr = csv.writer(f)
         wtr.writerow(CSV_COLUMNS)
         wtr.writerows(csv_rows)
-    md = render_md(args.machine, cells, overhead, load_gate(in_dir), args.runs)
+    md = render_md(args.machine, cells, overhead, load_gate(in_dir, args.runs, devices), args.runs)
     Path(args.out_md).write_text(md, encoding="utf-8")
     print(f"wrote {args.out_csv} ({len(csv_rows)} rows), {args.out_md}")
     return 0
@@ -341,6 +360,33 @@ class SelfTest(unittest.TestCase):
             self.assertIn("非 GEMM", md)
             # warmup 列
             self.assertEqual(sum(r[5] for r in rows), 2 * 2 * TRAIN_WARMUP)
+
+    def _gate(self, d: Path, rows: list[tuple[int, str, str, int]]) -> None:
+        lines = ["run\tdevice\tmode\tload1\tgpu_util\tpass"]
+        lines += [f"{r}\t{dv}\t{m}\t0.1\t0\t{p}" for r, dv, m, p in rows]
+        (d / "gate.tsv").write_text("\n".join(lines) + "\n")
+
+    def test_load_gate_requires_all_runs_unique(self):
+        full = [(r, "cpu", m, 1) for m in MODES for r in (1, 2)]
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            self._gate(d, full)
+            g = load_gate(d, 2, ["cpu"])
+            self.assertEqual(g[("cpu", "fresh")], "pass")
+            # 欠落（run2 の行なし）は pass にしない
+            self._gate(d, [x for x in full if x[:3] != (2, "cpu", "fresh")])
+            self.assertNotEqual(load_gate(d, 2, ["cpu"])[("cpu", "fresh")], "pass")
+            # 重複（run1 が 2 行）で run2 欠落も pass にしない
+            self._gate(d, full + [(1, "cpu", "reuse", 1)])
+            self.assertNotEqual(load_gate(d, 2, ["cpu"])[("cpu", "reuse")], "pass")
+            # 範囲外の run 番号
+            self._gate(d, [(1, "cpu", "fresh", 1), (3, "cpu", "fresh", 1)])
+            self.assertNotEqual(load_gate(d, 2, ["cpu"])[("cpu", "fresh")], "pass")
+            # セル自体が無い
+            self.assertNotEqual(load_gate(d, 2, ["cpu"])[("cpu", "reuse")], "pass")
+            # 不通過あり
+            self._gate(d, [(r, "cpu", m, int(r == 1)) for m in MODES for r in (1, 2)])
+            self.assertNotEqual(load_gate(d, 2, ["cpu"])[("cpu", "fresh")], "pass")
 
     def test_missing_input_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
