@@ -28,9 +28,10 @@
 //! （BatchNorm は `RefCell` 内部可変性で running stats を保持し、
 //! train モードの forward は `&self` のままそれを更新するため。
 //! `crates/autodiff/src/nn/batch_norm.rs` 参照）。承認後の
-//! `save_model` は train 後の running stats も別キーで保存する設計
-//! （同 decision doc §4・§5）だが、本ファイルはその前段の「初期値の
-//! ままの roundtrip」のみを検証する。
+//! `save_model` は train 後の running stats も別キーで保存する（#2371 で
+//! 実装済み。同 decision doc §4・§5。検証は
+//! `compat_sequential_model_io_batch_norm.rs`）が、本ファイルはその前段の
+//! 「初期値のままの roundtrip」のみを検証する。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::Sequential;

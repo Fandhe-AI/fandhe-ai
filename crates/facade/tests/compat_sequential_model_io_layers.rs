@@ -5,10 +5,9 @@
 //!   `predict` 出力が bit 一致する（30 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
-//! - fail-closed: BatchNorm の running stats が初期値でない・層のモードがモデル全体と
-//!   異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
+//! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
 //!
-//! 衝突注入・TOCTOU・網羅的な改竄行列は #2375・#2376。BN の running stats の保存は #2371。
+//! 衝突注入・TOCTOU・網羅的な改竄行列は #2375・#2376。BN の running stats の保存・復元は #2371（`compat_sequential_model_io_batch_norm.rs`）。
 //! 実機（CUDA／Metal）は不要（ホスト側の I/O と層の再構築のみ）。
 
 #![cfg(unix)]
@@ -457,29 +456,6 @@ fn assert_save_rejected(label: &str, model: &Sequential, expect_too_large: bool)
         );
     }
     assert!(!dir.exists(), "{label}: dir が作られてはいけない");
-}
-
-#[test]
-fn batch_norm_with_updated_running_stats_is_rejected() {
-    // train モードの predict は running stats を更新する（`add_batch_norm1d` doc）。
-    // stats を保存しない本バージョンで通すと、復元後の eval が黙ってずれるため拒否する（#2371 まで）。
-    let model = Sequential::new()
-        .add_linear(4, 4, 1)
-        .and_then(|m| m.add_batch_norm1d(4, 1e-5, 0.1))
-        .expect("構築できるはず");
-    model
-        .predict(&tensor(&[6, 4], 0.3))
-        .expect("predict できるはず");
-    assert_save_rejected("bn1d-dirty", &model, false);
-
-    let model2d = Sequential::new()
-        .add_conv2d(1, 2, [1, 1], [1, 1], [0, 0], [1, 1], 1, 1)
-        .and_then(|m| m.add_batch_norm2d(2, 1e-5, 0.1))
-        .expect("構築できるはず");
-    model2d
-        .predict(&tensor(&[3, 1, 2, 2], 0.3))
-        .expect("predict できるはず");
-    assert_save_rejected("bn2d-dirty", &model2d, false);
 }
 
 #[test]

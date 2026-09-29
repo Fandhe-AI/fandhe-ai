@@ -17,11 +17,20 @@
 //! `dir` には何も作らない（fail-closed。REQ-7 の無言 skip 禁止）:
 //!
 //! - `add_module` の利用者定義層・`compile` 済みモデル（compile 状態は #2372・#2373）
-//! - running stats（buffer）が初期値でない BatchNorm（buffer の保存は #2371 まで暫定拒否）
 //! - dropout・BatchNorm の層のモードがモデル全体と食い違うモデル（load が全層を
 //!   `manifest.training` へ揃えるため復元後に forward がずれる）
 //! - f32 引数が非有限の層・manifest が固定上限（配列長・サイズ等）を超えるモデル
 //!   （save 側で load と同じ厳格パーサによる読み戻しを事前に行う）
+//!
+//! BatchNorm1d／2d の running stats（buffer）は `{i}.running_mean`／`{i}.running_var` として
+//! 同じ safetensors へ保存し、manifest の `buffer_keys` に記録する（#2371）。load は
+//! `buffer_keys`・safetensors のキー集合・shape を完全一致で照合し、BN を
+//! `BatchNorm*::from_parameters` で組み直す。`training` フラグも復元する。
+//! 旧形式（`format_version` 1。BN を含むのに `buffer_keys: []`）の保存データに限り初期
+//! running stats で読み込む。現行版（2）で期待 buffer が欠落した manifest は `Mismatch` で拒否する。
+//! **`num_batches_tracked` は保存も復元もしない**（load 後は 0 から再開する）。forward の
+//! どこからも参照されないカウンタで、eval／train の数値には影響しない
+//! （決定記録 §5・§11。復元には autodiff への setter 追加が要るためスコープ外）。
 //!
 //! manifest v1 のキー集合は先に確定済みで、拡張しても形式バージョンは上げない。
 //!
@@ -69,8 +78,15 @@ use crate::interop::safetensors::{load_safetensors_f32_from_bytes, save_safetens
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 /// manifest の `format` 値（形式の識別子）。
 const FORMAT_NAME: &str = "fandhe-ai.compat.sequential";
-/// manifest の `format_version` 値。
-const FORMAT_VERSION: u64 = 1;
+/// manifest の `format_version` 値（新規保存が書く版）。
+///
+/// 版 2 は BatchNorm の running stats を `buffer_keys` と safetensors へ保存する形式（#2371）。
+/// 版 2 では `buffer_keys` を層構成から導いた期待値と完全一致で要求する（欠落を旧形式と
+/// 取り違えて学習済み統計を無言で失わないため。REQ-7）。
+const FORMAT_VERSION: u64 = 2;
+/// 旧形式の `format_version` 値（#2371 以前。BN があっても `buffer_keys: []` で保存された）。
+/// この版に限り `buffer_keys` の欠落を初期 running stats で補って読み込む。
+const LEGACY_FORMAT_VERSION: u64 = 1;
 
 /// manifest（JSON）のサイズ上限（バイト）。1 MiB。
 ///
@@ -176,6 +192,8 @@ impl std::error::Error for ModelIoError {
 ///
 /// 対応範囲・世代コミット方式・既存ファイルを削除しない契約と手動掃除の手順・
 /// Windows 非対応（fail-closed。理由と緩和条件は決定記録 §12.4）はモジュール doc を参照。
+/// BatchNorm の running stats（buffer）も別キーで保存する。`num_batches_tracked` は保存
+/// しない（forward の数値には影響しない。load 後は 0 から再開する）。
 /// 検証（未対応の層・`compile` 済み等）は `dir` を作る前にすべて終えるため、
 /// `UnsupportedModel` で失敗したときに `dir` には何も残らない。
 pub fn save_model(model: &Sequential, dir: impl AsRef<Path>) -> Result<(), ModelIoError> {
@@ -187,7 +205,9 @@ pub fn save_model(model: &Sequential, dir: impl AsRef<Path>) -> Result<(), Model
 
 /// `save_model` が書いたディレクトリから `Sequential` を復元する。
 ///
-/// 重みは safetensors の値を bit のまま設定し、`training` フラグも復元する。
+/// 重みと BatchNorm の running stats は safetensors の値を bit のまま設定し、`training`
+/// フラグも復元する。`num_batches_tracked` は復元しない（0 から再開する。forward の数値には
+/// 影響しない）。
 /// 途中で失敗しても部分的に構築したモデルは返さない。非信頼入力の扱いはモジュール doc を参照。
 pub fn load_model(dir: impl AsRef<Path>) -> Result<Sequential, ModelIoError> {
     load_from_dir_with_limits(dir.as_ref(), MAX_MANIFEST_BYTES, MAX_MODEL_FILE_BYTES)
@@ -433,6 +453,22 @@ fn expected_parameter_keys(specs: &[LayerSpec]) -> Vec<(String, Vec<usize>)> {
     keys
 }
 
+/// 層構成から導く期待 buffer キー列（BatchNorm の `{index}.running_mean`／
+/// `{index}.running_var`。shape は `[num_features]`。層順・各層内は mean → var）。
+/// manifest の記載値は一致確認にだけ使い、確保量の根拠にしない（決定記録 §13.5）。
+fn expected_buffer_keys(specs: &[LayerSpec]) -> Vec<(String, Vec<usize>)> {
+    let mut keys = Vec::new();
+    for (i, spec) in specs.iter().enumerate() {
+        if let LayerSpec::BatchNorm1d { num_features, .. }
+        | LayerSpec::BatchNorm2d { num_features, .. } = spec
+        {
+            keys.push((format!("{i}.running_mean"), vec![*num_features]));
+            keys.push((format!("{i}.running_var"), vec![*num_features]));
+        }
+    }
+    keys
+}
+
 /// `render_params` の組み立て用フィールド列（キー, 描画済み JSON 値）。
 type ParamFields = Vec<(String, String)>;
 
@@ -666,6 +702,8 @@ struct PreparedSave {
     training: bool,
     specs: Vec<LayerSpec>,
     parameter_keys: Vec<(String, Vec<usize>)>,
+    /// BatchNorm の running stats のキー・shape（層順・各層内は mean → var）。
+    buffer_keys: Vec<(String, Vec<usize>)>,
     safetensors: Vec<u8>,
 }
 
@@ -704,7 +742,8 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
     }
 
     let expected = expected_parameter_keys(specs);
-    let state = model.state_dict();
+    let expected_buffers = expected_buffer_keys(specs);
+    let mut state = model.state_dict();
     let consistent = state.len() == expected.len()
         && expected
             .iter()
@@ -712,6 +751,41 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
     if !consistent {
         return Err(ModelIoError::UnsupportedModel {
             reason: "state_dict のキー・shape が層構成から導いた期待と一致しません".into(),
+        });
+    }
+    // buffer（BN の running stats）を別キーで同じ safetensors へ合成する。
+    // 合成前の state は parameter だけであることを上で確認済みなので、衝突は内部不整合。
+    for (i, spec) in specs.iter().enumerate() {
+        let (mean, var) = match spec {
+            LayerSpec::BatchNorm1d { .. } => {
+                let bn = model.layers()[i]
+                    .as_batch_norm1d()
+                    .ok_or_else(|| bn_downcast_error(i))?;
+                (bn.running_mean(), bn.running_var())
+            }
+            LayerSpec::BatchNorm2d { .. } => {
+                let bn = model.layers()[i]
+                    .as_batch_norm2d()
+                    .ok_or_else(|| bn_downcast_error(i))?;
+                (bn.running_mean(), bn.running_var())
+            }
+            _ => continue,
+        };
+        for (name, t) in [("running_mean", mean), ("running_var", var)] {
+            let key = format!("{i}.{name}");
+            if state.insert(key.clone(), t).is_some() {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: format!("buffer キー {key} が parameter キーと衝突します"),
+                });
+            }
+        }
+    }
+    let buffers_consistent = expected_buffers
+        .iter()
+        .all(|(k, shape)| state.get(k).is_some_and(|t| t.shape() == shape.as_slice()));
+    if !buffers_consistent || state.len() != expected.len() + expected_buffers.len() {
+        return Err(ModelIoError::UnsupportedModel {
+            reason: "BatchNorm の running stats の shape が層構成と一致しません".into(),
         });
     }
     let safetensors = save_safetensors_f32_to_bytes(&state, None)
@@ -727,6 +801,7 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
         training: model.training(),
         specs: specs.to_vec(),
         parameter_keys: expected,
+        buffer_keys: expected_buffers,
         safetensors,
     };
     verify_round_trip(&prepared)?;
@@ -739,9 +814,7 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
 ///   全層を `manifest.training` へ揃えるため、層のモードがコンテナと食い違う（`eval()` の後に
 ///   `add_*` した等）モデルは、復元後に forward がずれる。食い違いを拒否する。
 ///   他の層へは適用しない（`Module::training` の既定が `true` のため誤って eval モデルを拒否する）。
-/// - BatchNorm の running stats（buffer）は本バージョンで保存しない（後続イシュー #2371）。
-///   初期値（mean=0・var=1・追跡回数 0）以外を保存すると load 後に stats が黙って戻るため、
-///   初期値のときだけ保存を許す。#2371 で buffer を保存できるようになった時点で撤廃する。
+///   BatchNorm の running stats（buffer）は #2371 で別キーとして保存するため、ここでは検査しない。
 fn check_layer_state(model: &Sequential, i: usize, spec: &LayerSpec) -> Result<(), ModelIoError> {
     let layer = &model.layers()[i];
     let mode_dependent = matches!(
@@ -755,60 +828,14 @@ fn check_layer_state(model: &Sequential, i: usize, spec: &LayerSpec) -> Result<(
             ),
         });
     }
-    match spec {
-        LayerSpec::BatchNorm1d { .. } => {
-            let bn = layer
-                .as_batch_norm1d()
-                .ok_or_else(|| bn_downcast_error(i))?;
-            ensure_initial_bn_stats(
-                i,
-                &bn.running_mean(),
-                &bn.running_var(),
-                bn.num_batches_tracked(),
-            )
-        }
-        LayerSpec::BatchNorm2d { .. } => {
-            let bn = layer
-                .as_batch_norm2d()
-                .ok_or_else(|| bn_downcast_error(i))?;
-            ensure_initial_bn_stats(
-                i,
-                &bn.running_mean(),
-                &bn.running_var(),
-                bn.num_batches_tracked(),
-            )
-        }
-        _ => Ok(()),
-    }
+    Ok(())
 }
 
 fn bn_downcast_error(i: usize) -> ModelIoError {
     ModelIoError::UnsupportedModel {
         reason: format!(
-            "層 {i} を BatchNorm として取り出せないため running stats を確認できません"
+            "層 {i} を BatchNorm として取り出せないため running stats を保存できません"
         ),
-    }
-}
-
-/// running stats が初期値（全要素 bit で mean=`0.0`・var=`1.0`・追跡回数 0）か。
-fn ensure_initial_bn_stats(
-    i: usize,
-    mean: &Tensor<f32>,
-    var: &Tensor<f32>,
-    num_batches_tracked: u64,
-) -> Result<(), ModelIoError> {
-    let all_bits = |t: &Tensor<f32>, expect: f32| {
-        t.as_slice()
-            .is_some_and(|s| s.iter().all(|v| v.to_bits() == expect.to_bits()))
-    };
-    if num_batches_tracked == 0 && all_bits(mean, 0.0) && all_bits(var, 1.0) {
-        Ok(())
-    } else {
-        Err(ModelIoError::UnsupportedModel {
-            reason: format!(
-                "層 {i} の BatchNorm は running stats が初期値ではありません（running stats の保存は後続イシュー #2371 の対応まで未対応）"
-            ),
-        })
     }
 }
 
@@ -843,6 +870,7 @@ fn verify_round_trip(prepared: &PreparedSave) -> Result<(), ModelIoError> {
             .all(|(a, b)| spec_kind(a) == spec_kind(b) && render_params(a) == render_params(b));
     if parsed.training != prepared.training
         || parsed.parameter_keys != prepared.parameter_keys
+        || parsed.buffer_keys != prepared.buffer_keys
         || !same_specs
     {
         return Err(ModelIoError::UnsupportedModel {
@@ -853,8 +881,8 @@ fn verify_round_trip(prepared: &PreparedSave) -> Result<(), ModelIoError> {
 }
 
 /// manifest v1 を決定的な文字列にする（キー順固定・文字列はエスケープ不要な
-/// プログラム生成の ASCII のみ）。`compiled` は `null`・`buffer_keys` は `[]`
-/// （本バージョンの対応範囲。キー集合自体は将来拡張のため確定済み）。
+/// プログラム生成の ASCII のみ）。`compiled` は `null`。`parameter_keys`／`buffer_keys` は
+/// 同形式（`[{"key","shape"}]`）で [`render_key_shapes`] が描画する。
 fn render_manifest(p: &PreparedSave, safetensors_file: &str, safetensors_bytes: u64) -> String {
     let mut s = String::new();
     s.push_str(&format!(
@@ -872,21 +900,26 @@ fn render_manifest(p: &PreparedSave, safetensors_file: &str, safetensors_bytes: 
             "{{\"index\":{i},\"kind\":\"{kind}\",\"params\":{params}}}"
         ));
     }
-    s.push_str("],\"parameter_keys\":[");
-    for (i, (key, shape)) in p.parameter_keys.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        let dims: Vec<String> = shape.iter().map(usize::to_string).collect();
-        s.push_str(&format!(
-            "{{\"key\":\"{key}\",\"shape\":[{}]}}",
-            dims.join(",")
-        ));
-    }
+    s.push_str("],\"parameter_keys\":");
+    s.push_str(&render_key_shapes(&p.parameter_keys));
+    s.push_str(",\"buffer_keys\":");
+    s.push_str(&render_key_shapes(&p.buffer_keys));
     s.push_str(&format!(
-        "],\"buffer_keys\":[],\"safetensors_file\":\"{safetensors_file}\",\"safetensors_bytes\":{safetensors_bytes},\"compiled\":null}}"
+        ",\"safetensors_file\":\"{safetensors_file}\",\"safetensors_bytes\":{safetensors_bytes},\"compiled\":null}}"
     ));
     s
+}
+
+/// `[{"key":"...","shape":[..]}]` を描画する（キーはプログラム生成の ASCII のみ）。
+fn render_key_shapes(keys: &[(String, Vec<usize>)]) -> String {
+    let items: Vec<String> = keys
+        .iter()
+        .map(|(key, shape)| {
+            let dims: Vec<String> = shape.iter().map(usize::to_string).collect();
+            format!("{{\"key\":\"{key}\",\"shape\":[{}]}}", dims.join(","))
+        })
+        .collect();
+    format!("[{}]", items.join(","))
 }
 
 /// 非 unix の書き込み経路。`save_platform_check` が先に拒否するため通常は到達しないが、
@@ -1077,12 +1110,16 @@ fn load_from_dir_with_limits(
     drop(bytes);
 
     // キー集合と shape の完全一致（無言 skip をしない。REQ-7）。
-    let consistent = tensors.len() == manifest.parameter_keys.len()
-        && manifest.parameter_keys.iter().all(|(key, shape)| {
-            tensors
-                .get(key)
-                .is_some_and(|t| t.shape() == shape.as_slice())
-        });
+    let consistent = tensors.len() == manifest.parameter_keys.len() + manifest.buffer_keys.len()
+        && manifest
+            .parameter_keys
+            .iter()
+            .chain(&manifest.buffer_keys)
+            .all(|(key, shape)| {
+                tensors
+                    .get(key)
+                    .is_some_and(|t| t.shape() == shape.as_slice())
+            });
     if !consistent {
         return Err(ModelIoError::Mismatch {
             message: "safetensors のキー集合または shape が manifest と一致しません".into(),
@@ -1091,7 +1128,31 @@ fn load_from_dir_with_limits(
 
     // ここまでで Linear の in／out は実テンソルの shape と一致済み（非信頼な整数だけで
     // 確保量を決めない）。層を積み、値を bit のまま設定する。
-    let mut model = build_model(&manifest.specs)?;
+    // buffer は `load_state_dict`（strict）が未知キーとして拒否するため先に取り除く。
+    let mut buffers = std::collections::HashMap::new();
+    let mut tensors = tensors;
+    for (key, _) in &manifest.buffer_keys {
+        if let Some(t) = tensors.remove(key) {
+            buffers.insert(key.clone(), t);
+        }
+    }
+    if manifest.buffer_keys.is_empty() {
+        // 旧形式の BN は running stats が保存されていない。従来どおり初期値
+        // （mean = 0・var = 1）で復元する。
+        for (key, shape) in expected_buffer_keys(&manifest.specs) {
+            let n: usize = shape.iter().product();
+            let v = if key.ends_with(".running_var") {
+                1.0
+            } else {
+                0.0
+            };
+            let t = Tensor::new(vec![v; n], &shape).map_err(|e| ModelIoError::Mismatch {
+                message: format!("旧形式 BatchNorm の初期 running stats を構築できません（{e}）"),
+            })?;
+            buffers.insert(key, t);
+        }
+    }
+    let mut model = build_model(&manifest.specs, &mut buffers, &tensors)?;
     model
         .load_state_dict(tensors)
         .map_err(ModelIoError::Autodiff)?;
@@ -1104,9 +1165,16 @@ fn load_from_dir_with_limits(
 /// 重みは直後に `load_state_dict` で上書きするため `seed` は意味を持たない（0 固定。
 /// 決定記録 §5）。コンストラクタの引数検査（`p` の範囲・kernel=0 等）の失敗は
 /// `Autodiff` として返す（部分的に構築したモデルは返さない）。
-fn build_model(specs: &[LayerSpec]) -> Result<Sequential, ModelIoError> {
+///
+/// BatchNorm だけは `buffers`（`{i}.running_mean`／`{i}.running_var`）と `tensors` の
+/// `{i}.weight`／`{i}.bias` を使い `from_parameters` 経由で組み直す（#2371）。
+fn build_model(
+    specs: &[LayerSpec],
+    buffers: &mut std::collections::HashMap<String, Tensor<f32>>,
+    tensors: &std::collections::HashMap<String, Tensor<f32>>,
+) -> Result<Sequential, ModelIoError> {
     let mut model = Sequential::new();
-    for spec in specs {
+    for (i, spec) in specs.iter().enumerate() {
         model = match spec {
             LayerSpec::Linear {
                 in_features,
@@ -1186,16 +1254,26 @@ fn build_model(specs: &[LayerSpec]) -> Result<Sequential, ModelIoError> {
                 num_features,
                 eps,
                 momentum,
-            } => model
-                .add_batch_norm1d(*num_features, *eps, *momentum)
-                .map_err(ModelIoError::Autodiff)?,
+            } => {
+                let (w, b, m, v) = take_bn_tensors(i, buffers, tensors)?;
+                let next = model
+                    .add_batch_norm1d_restored(w, b, m, v, *eps, *momentum)
+                    .map_err(ModelIoError::Autodiff)?;
+                check_restored_features(&next, i, *num_features)?;
+                next
+            }
             LayerSpec::BatchNorm2d {
                 num_features,
                 eps,
                 momentum,
-            } => model
-                .add_batch_norm2d(*num_features, *eps, *momentum)
-                .map_err(ModelIoError::Autodiff)?,
+            } => {
+                let (w, b, m, v) = take_bn_tensors(i, buffers, tensors)?;
+                let next = model
+                    .add_batch_norm2d_restored(w, b, m, v, *eps, *momentum)
+                    .map_err(ModelIoError::Autodiff)?;
+                check_restored_features(&next, i, *num_features)?;
+                next
+            }
             LayerSpec::Embedding {
                 num_embeddings,
                 embedding_dim,
@@ -1264,6 +1342,58 @@ fn build_model(specs: &[LayerSpec]) -> Result<Sequential, ModelIoError> {
     Ok(model)
 }
 
+type BnTensors = (Tensor<f32>, Tensor<f32>, Tensor<f32>, Tensor<f32>);
+
+/// 層 `i` の BatchNorm 復元に要る (weight, bias, running_mean, running_var) を取り出す。
+/// キー・shape は照合済みなので通常は欠落しないが、`unwrap` せず `Mismatch` にする。
+fn take_bn_tensors(
+    i: usize,
+    buffers: &mut std::collections::HashMap<String, Tensor<f32>>,
+    tensors: &std::collections::HashMap<String, Tensor<f32>>,
+) -> Result<BnTensors, ModelIoError> {
+    let missing = |key: String| ModelIoError::Mismatch {
+        message: format!("BatchNorm の復元に必要なキー {key} が見つかりません"),
+    };
+    let mean = buffers
+        .remove(&format!("{i}.running_mean"))
+        .ok_or_else(|| missing(format!("{i}.running_mean")))?;
+    let var = buffers
+        .remove(&format!("{i}.running_var"))
+        .ok_or_else(|| missing(format!("{i}.running_var")))?;
+    // weight／bias は clone して渡す（map にも残し、直後の strict な `load_state_dict` で
+    // 同じ値を再設定する）。
+    let weight = tensors
+        .get(&format!("{i}.weight"))
+        .cloned()
+        .ok_or_else(|| missing(format!("{i}.weight")))?;
+    let bias = tensors
+        .get(&format!("{i}.bias"))
+        .cloned()
+        .ok_or_else(|| missing(format!("{i}.bias")))?;
+    Ok((weight, bias, mean, var))
+}
+
+/// 組み直した BatchNorm の `num_features`（`running_mean` の長さ由来）が spec と一致するか。
+fn check_restored_features(
+    model: &Sequential,
+    i: usize,
+    expected: usize,
+) -> Result<(), ModelIoError> {
+    match model.specs().get(i) {
+        Some(LayerSpec::BatchNorm1d { num_features, .. })
+        | Some(LayerSpec::BatchNorm2d { num_features, .. })
+            if *num_features == expected =>
+        {
+            Ok(())
+        }
+        _ => Err(ModelIoError::Mismatch {
+            message: format!(
+                "層 {i} の BatchNorm の復元後の num_features が manifest と一致しません"
+            ),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------
 // manifest の厳格パース（手書き。serde 非依存）
 // ---------------------------------------------------------------------
@@ -1273,6 +1403,7 @@ struct ParsedManifest {
     training: bool,
     specs: Vec<LayerSpec>,
     parameter_keys: Vec<(String, Vec<usize>)>,
+    buffer_keys: Vec<(String, Vec<usize>)>,
     safetensors_file: String,
     safetensors_bytes: u64,
 }
@@ -1964,6 +2095,21 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
     }
 }
 
+/// `[{"key","shape"}]` 配列を厳格に読む（`parameter_keys`／`buffer_keys` 共通）。
+fn parse_key_shapes(arr: &[Json], ctx: &str) -> Result<Vec<(String, Vec<usize>)>, ModelIoError> {
+    let mut keys = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let kf = exact_fields(entry, &format!("{ctx}[]"), &["key", "shape"])?;
+        let key = as_str(kf[0], &format!("{ctx}[].key"))?.to_string();
+        let shape = as_arr(kf[1], &format!("{ctx}[].shape"))?
+            .iter()
+            .map(|d| as_usize(d, &format!("{ctx}[].shape[]")))
+            .collect::<Result<Vec<_>, _>>()?;
+        keys.push((key, shape));
+    }
+    Ok(keys)
+}
+
 /// manifest のバイト列を厳格に検証して [`ParsedManifest`] にする
 /// （決定記録 §4・§13.5）。
 fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
@@ -1994,7 +2140,8 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
     if as_str(f[0], "format")? != FORMAT_NAME {
         return Err(manifest_error("format が想定と異なります"));
     }
-    if as_u64(f[1], "format_version")? != FORMAT_VERSION {
+    let format_version = as_u64(f[1], "format_version")?;
+    if format_version != FORMAT_VERSION && format_version != LEGACY_FORMAT_VERSION {
         return Err(manifest_error("format_version が未対応です"));
     }
     let Json::Bool(training) = f[2] else {
@@ -2019,11 +2166,6 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
             "num_layers が layers の要素数と一致しません",
         ));
     }
-    if !buffer_keys.is_empty() {
-        return Err(ModelIoError::UnsupportedModel {
-            reason: "buffer_keys を持つモデルは未対応です".into(),
-        });
-    }
     if !matches!(f[9], Json::Null) {
         return Err(ModelIoError::UnsupportedModel {
             reason: "compile 済みモデル（compiled が null でない）は未対応です".into(),
@@ -2044,19 +2186,22 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
         specs.push(spec_from_kind(as_str(lf[1], "layers[].kind")?, lf[2])?);
     }
 
-    let mut keys = Vec::with_capacity(parameter_keys.len());
-    for entry in parameter_keys {
-        let kf = exact_fields(entry, "parameter_keys[]", &["key", "shape"])?;
-        let key = as_str(kf[0], "parameter_keys[].key")?.to_string();
-        let shape = as_arr(kf[1], "parameter_keys[].shape")?
-            .iter()
-            .map(|d| as_usize(d, "parameter_keys[].shape[]"))
-            .collect::<Result<Vec<_>, _>>()?;
-        keys.push((key, shape));
-    }
+    let keys = parse_key_shapes(parameter_keys, "parameter_keys")?;
+    let buffer_keys = parse_key_shapes(buffer_keys, "buffer_keys")?;
     if keys != expected_parameter_keys(&specs) {
         return Err(ModelIoError::Mismatch {
             message: "parameter_keys が層構成から導いた期待キー・shape と一致しません".into(),
+        });
+    }
+
+    // 旧形式（`format_version` 1。BN があっても `buffer_keys: []` で保存された既存データ）に
+    // 限り空配列を受理し、load 側で初期 running stats を補う（公開済み保存データの後方互換）。
+    // 現行版（2）は期待 buffer の欠落を旧形式と区別できないため完全一致のみ受理する。
+    let expected_buffers = expected_buffer_keys(&specs);
+    let legacy_empty = format_version == LEGACY_FORMAT_VERSION && buffer_keys.is_empty();
+    if !legacy_empty && buffer_keys != expected_buffers {
+        return Err(ModelIoError::Mismatch {
+            message: "buffer_keys が層構成から導いた期待キー・shape と一致しません".into(),
         });
     }
 
@@ -2064,6 +2209,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
         training: *training,
         specs,
         parameter_keys: keys,
+        buffer_keys,
         safetensors_file: safetensors_file.to_string(),
         safetensors_bytes,
     })
@@ -2253,6 +2399,25 @@ mod tests {
         let err = save_platform_supported(false).expect_err("非 unix は拒否されるはず");
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
         assert!(save_platform_supported(true).is_ok());
+    }
+
+    /// 単体テスト用: BN の weight／bias／running stats を初期値で補って `build_model` を呼ぶ。
+    fn build_model_fresh(specs: &[LayerSpec]) -> Result<Sequential, ModelIoError> {
+        let mut buffers = std::collections::HashMap::new();
+        let mut tensors = std::collections::HashMap::new();
+        for (i, spec) in specs.iter().enumerate() {
+            if let LayerSpec::BatchNorm1d { num_features, .. }
+            | LayerSpec::BatchNorm2d { num_features, .. } = spec
+            {
+                let n = *num_features;
+                let t = |v: f32| Tensor::new(vec![v; n], &[n]).expect("構築できるはず");
+                tensors.insert(format!("{i}.weight"), t(1.0));
+                tensors.insert(format!("{i}.bias"), t(0.0));
+                buffers.insert(format!("{i}.running_mean"), t(0.0));
+                buffers.insert(format!("{i}.running_var"), t(1.0));
+            }
+        }
+        build_model(specs, &mut buffers, &tensors)
     }
 
     fn sample_model() -> Sequential {
@@ -2463,7 +2628,7 @@ mod tests {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
         // 30 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model(&specs).expect("30 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("30 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -2556,7 +2721,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    build_model(std::slice::from_ref(&spec)),
+                    build_model_fresh(std::slice::from_ref(&spec)),
                     Err(ModelIoError::Autodiff(_))
                 ),
                 "{spec:?} は構築時に拒否されるはず"
@@ -2584,7 +2749,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_save_rejects_mode_mismatch_and_dirty_batch_norm_stats() {
+    fn prepare_save_rejects_mode_mismatch() {
         // dropout だけがコンテナと異なるモード（eval の後に積んだ）→ 拒否。
         let mut model = Sequential::new()
             .add_linear(2, 2, 1)
@@ -2602,6 +2767,113 @@ mod tests {
         ok.eval();
         let ok = ok.add_relu();
         assert!(prepare_save(&ok).is_ok());
+    }
+
+    fn bn_model() -> Sequential {
+        let mut model = Sequential::new()
+            .add_linear(3, 4, 1)
+            .and_then(|m| m.add_batch_norm1d(4, 1e-5, 0.1))
+            .and_then(|m| m.add_relu().add_batch_norm2d(4, 1e-5, 0.1))
+            .expect("構築できるはず");
+        model.train();
+        model
+    }
+
+    #[test]
+    fn expected_buffer_keys_match_real_bn_buffers() {
+        let specs = all_kind_specs();
+        let model = build_model_fresh(&specs).expect("30 種を構築できるはず");
+        let expected = expected_buffer_keys(&specs);
+        assert_eq!(expected.len(), 4);
+        for (i, spec) in specs.iter().enumerate() {
+            let (mean, var) = match spec {
+                LayerSpec::BatchNorm1d { .. } => {
+                    let bn = model.layers()[i].as_batch_norm1d().expect("BN1d");
+                    (bn.running_mean(), bn.running_var())
+                }
+                LayerSpec::BatchNorm2d { .. } => {
+                    let bn = model.layers()[i].as_batch_norm2d().expect("BN2d");
+                    (bn.running_mean(), bn.running_var())
+                }
+                _ => continue,
+            };
+            for (name, t) in [("running_mean", mean), ("running_var", var)] {
+                let key = format!("{i}.{name}");
+                let (_, shape) = expected
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .unwrap_or_else(|| panic!("期待キー {key} がない"));
+                assert_eq!(t.shape(), shape.as_slice(), "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_with_buffers_round_trips_through_strict_parser() {
+        let model = bn_model();
+        let prepared = prepare_save(&model).expect("検証を通るはず");
+        assert_eq!(prepared.buffer_keys.len(), 4);
+        let name = format!("model.{}.safetensors", "c".repeat(32));
+        let text = render_manifest(&prepared, &name, prepared.safetensors.len() as u64);
+        let parsed = parse_manifest(text.as_bytes()).expect("読み戻せるはず");
+        assert_eq!(parsed.buffer_keys, prepared.buffer_keys);
+        assert_eq!(parsed.parameter_keys, prepared.parameter_keys);
+    }
+
+    #[test]
+    fn parse_manifest_rejects_buffer_key_tampering() {
+        let model = bn_model();
+        let prepared = prepare_save(&model).expect("検証を通るはず");
+        let name = format!("model.{}.safetensors", "d".repeat(32));
+        let good = render_manifest(&prepared, &name, 1);
+        let m1 = "{\"key\":\"1.running_mean\",\"shape\":[4]}";
+        let v1 = "{\"key\":\"1.running_var\",\"shape\":[4]}";
+        assert!(good.contains(&format!("{m1},{v1}")));
+        let mismatch = |text: String| {
+            assert!(
+                matches!(
+                    parse_manifest(text.as_bytes()),
+                    Err(ModelIoError::Mismatch { .. })
+                ),
+                "Mismatch のはず: {text}"
+            );
+        };
+        // 過不足・順序・キー名・shape の改竄は Mismatch。
+        mismatch(good.replace(&format!("{m1},{v1}"), v1));
+        mismatch(good.replace(&format!("{m1},{v1}"), &format!("{m1},{v1},{m1}")));
+        mismatch(good.replace(&format!("{m1},{v1}"), &format!("{v1},{m1}")));
+        mismatch(good.replace("1.running_mean", "1.running_meen"));
+        mismatch(good.replace(m1, "{\"key\":\"1.running_mean\",\"shape\":[5]}"));
+        // 型違いは Manifest。
+        let bad_type = good.replace(m1, "{\"key\":\"1.running_mean\",\"shape\":\"4\"}");
+        assert!(is_manifest_err(parse_manifest(bad_type.as_bytes())));
+    }
+
+    #[test]
+    fn parse_manifest_accepts_legacy_empty_buffer_keys_for_batch_norm() {
+        let model = bn_model();
+        let prepared = prepare_save(&model).expect("検証を通るはず");
+        let name = format!("model.{}.safetensors", "e".repeat(32));
+        let good = render_manifest(&prepared, &name, 1);
+        let start = good
+            .find("\"buffer_keys\":[")
+            .expect("buffer_keys があるはず");
+        let end = good
+            .find(",\"safetensors_file\"")
+            .expect("safetensors_file があるはず");
+        let stripped = format!("{}\"buffer_keys\":[]{}", &good[..start], &good[end..]);
+        assert!(stripped.contains("\"buffer_keys\":[]"), "{stripped}");
+        // 版 1（旧形式）なら受理される。
+        let legacy = stripped.replacen("\"format_version\":2", "\"format_version\":1", 1);
+        assert!(legacy.contains("\"format_version\":1"), "{legacy}");
+        let parsed = parse_manifest(legacy.as_bytes()).expect("旧形式は受理されるはず");
+        assert!(parsed.buffer_keys.is_empty());
+        // 現行版（2）で BN の buffer_keys が欠落したものは旧形式と区別できず Mismatch。
+        assert!(stripped.contains("\"format_version\":2"), "{stripped}");
+        assert!(matches!(
+            parse_manifest(stripped.as_bytes()),
+            Err(ModelIoError::Mismatch { .. })
+        ));
     }
 
     #[test]
@@ -2631,10 +2903,17 @@ mod tests {
             parse_manifest(compiled.as_bytes()),
             Err(ModelIoError::UnsupportedModel { .. })
         ));
+        // 要素の型違い（`exact_fields` 違反）は Manifest。
         let buffers = good.replace("\"buffer_keys\":[]", "\"buffer_keys\":[{}]");
+        assert!(is_manifest_err(parse_manifest(buffers.as_bytes())));
+        // BN を含まないモデルに buffer エントリを足すと期待と食い違い Mismatch。
+        let extra = good.replace(
+            "\"buffer_keys\":[]",
+            "\"buffer_keys\":[{\"key\":\"0.running_mean\",\"shape\":[4]}]",
+        );
         assert!(matches!(
-            parse_manifest(buffers.as_bytes()),
-            Err(ModelIoError::UnsupportedModel { .. })
+            parse_manifest(extra.as_bytes()),
+            Err(ModelIoError::Mismatch { .. })
         ));
         let kind = good.replace("\"relu\"", "\"no_such_kind\"");
         assert!(matches!(
@@ -2774,6 +3053,7 @@ mod tests {
         let prepared = PreparedSave {
             training: true,
             parameter_keys: expected_parameter_keys(&specs),
+            buffer_keys: expected_buffer_keys(&specs),
             specs,
             safetensors: Vec::new(),
         };
