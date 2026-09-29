@@ -15,6 +15,9 @@
 
 use std::process::Command;
 
+mod common;
+use common::temp_dir::TempDirGuard;
+
 fn guardrail_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_guardrail"))
 }
@@ -73,12 +76,8 @@ fn check_with_signals_and_env_guard_yields_auto_apply_and_writes_report() {
     // プリセットの閾値内であり除外リスト評価も行わない（injected 経路）ため
     // `decide()` は `auto_apply` を返す（TASK-4.1c・イシュー #106 で結線）。
     let signals_path = fixtures_dir().join("signals-ok.json");
-    let out_dir = std::env::temp_dir().join(format!(
-        "guardrail-cli-skeleton-test-{}-report-ok",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&out_dir).unwrap();
-    let out_path = out_dir.join("report.json");
+    let out_tmp = TempDirGuard::new("cli-skeleton-report-ok");
+    let out_path = out_tmp.path().join("report.json");
 
     let output = guardrail_bin()
         .args([
@@ -100,8 +99,6 @@ fn check_with_signals_and_env_guard_yields_auto_apply_and_writes_report() {
     assert_eq!(value["signal_source"], "injected");
     assert_eq!(value["verdict"], "auto_apply");
     assert_eq!(value["schema_version"], "1");
-
-    std::fs::remove_dir_all(&out_dir).ok();
 }
 
 #[test]

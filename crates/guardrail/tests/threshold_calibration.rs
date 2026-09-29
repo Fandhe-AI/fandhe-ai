@@ -20,6 +20,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+use common::temp_dir::TempDirGuard;
+
 use guardrail::config::{self, PresetName, Thresholds};
 
 fn guardrail_bin() -> Command {
@@ -33,13 +36,8 @@ fn real_dataset_dir() -> PathBuf {
 /// `guardrail.toml` を含まないことが保証された空リポジトリルート
 /// （`--repo` に渡し `config::resolve` の探索順序 2 段目〈`--repo` 直下〉を
 /// 常に「ファイルなし → 組み込み既定値」へ倒すため）。
-fn empty_repo_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "guardrail-threshold-calibration-{}-{tag}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("空 --repo 用一時ディレクトリの作成に失敗");
-    dir
+fn empty_repo_dir(tag: &str) -> TempDirGuard {
+    TempDirGuard::new(&format!("threshold-calibration-{tag}"))
 }
 
 struct PresetExpectation {
@@ -86,7 +84,7 @@ fn eval_sweep_across_three_presets_all_pass_with_zero_rates() {
                 "--dataset",
                 real_dataset_dir().to_str().expect("非 UTF-8 パス"),
                 "--repo",
-                repo_dir.to_str().expect("非 UTF-8 パス"),
+                repo_dir.path().to_str().expect("非 UTF-8 パス"),
                 "--preset",
                 exp.preset,
                 "--format",
@@ -127,8 +125,6 @@ fn eval_sweep_across_three_presets_all_pass_with_zero_rates() {
             "preset={}",
             exp.preset
         );
-
-        let _ = std::fs::remove_dir_all(&repo_dir);
     }
 }
 
@@ -172,19 +168,15 @@ fn loose_preset_misses_g4_via_item_level_verdict_while_default_and_strict_catch_
             .to_string()
     };
 
-    assert_eq!(g4_verdict("strict", &strict_repo), "escalate");
-    assert_eq!(g4_verdict("default", &default_repo), "escalate");
+    assert_eq!(g4_verdict("strict", strict_repo.path()), "escalate");
+    assert_eq!(g4_verdict("default", default_repo.path()), "escalate");
     assert_eq!(
-        g4_verdict("loose", &loose_repo),
+        g4_verdict("loose", loose_repo.path()),
         "auto_apply",
         "loose（lines_max=400）は G4（>200 行超過のみを検知条件とする境界例）を \
          見逃す設計上の弱点を持つ。gray カテゴリのため率には出ないが、\
          件別 verdict では観測できる（記録文書『候補閾値』節の選定根拠）"
     );
-
-    let _ = std::fs::remove_dir_all(&strict_repo);
-    let _ = std::fs::remove_dir_all(&default_repo);
-    let _ = std::fs::remove_dir_all(&loose_repo);
 }
 
 /// リポジトリルート直下の `guardrail.toml`（イシュー #117・TASK-4.3c で新設）が

@@ -332,6 +332,7 @@ impl ExclusionEvaluation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDirGuard;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -527,17 +528,11 @@ mod tests {
         );
     }
 
-    fn init_repo(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "guardrail-policy-exclusion-mod-{name}-{}",
-            std::process::id()
-        ));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("{dir:?} の削除に失敗: {e}"));
-        }
-        fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{dir:?} の作成に失敗: {e}"));
-        run(&dir, &["init", "-q"]);
-        dir
+    fn init_repo(name: &str) -> TempDirGuard {
+        let guard = TempDirGuard::new(&format!("policy-exclusion-mod-{name}"));
+        let dir = guard.path();
+        run(dir, &["init", "-q"]);
+        guard
     }
 
     /// 配線確認の目印テスト（#122 レビュー指摘・#123 引き継ぎの解消）:
@@ -547,7 +542,8 @@ mod tests {
     /// 参照）。
     #[test]
     fn test_assertion_relaxation_rule_is_evaluated_and_matched() {
-        let dir = init_repo("wired");
+        let tmp = init_repo("wired");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -556,7 +552,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -572,15 +568,13 @@ mod tests {
             .into_iter()
             .find(|r| r.id == "test-tolerance-loosening")
             .unwrap();
-        let ctx = EvaluationContext::from_repo(&dir, "HEAD").unwrap();
+        let ctx = EvaluationContext::from_repo(dir, "HEAD").unwrap();
         let evaluation = ExclusionEvaluation::evaluate(&[rule], &ctx).unwrap();
         assert_eq!(
             evaluation.matched_rule_ids,
             vec!["test-tolerance-loosening"]
         );
         assert!(evaluation.unevaluated_rule_ids.is_empty());
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -588,17 +582,16 @@ mod tests {
         // 3 ルール全て（`test-tolerance-loosening` を含む）を実リポジトリで
         // 評価し、無関係な変更では一切 match しないことを確認する
         // （`EvaluationContext::from_repo` 経由の end-to-end 疎通確認）。
-        let dir = init_repo("all-rules-clean");
+        let tmp = init_repo("all-rules-clean");
+        let dir = tmp.path();
         fs::write(dir.join("README.md"), "baseline\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
         fs::write(dir.join("README.md"), "updated\n").unwrap();
 
         let config = builtin_defaults().unwrap();
-        let ctx = EvaluationContext::from_repo(&dir, "HEAD").unwrap();
+        let ctx = EvaluationContext::from_repo(dir, "HEAD").unwrap();
         let evaluation = ExclusionEvaluation::evaluate(&config.rules, &ctx).unwrap();
         assert!(evaluation.matched_rule_ids.is_empty());
         assert!(evaluation.unevaluated_rule_ids.is_empty());
-
-        fs::remove_dir_all(&dir).ok();
     }
 }
