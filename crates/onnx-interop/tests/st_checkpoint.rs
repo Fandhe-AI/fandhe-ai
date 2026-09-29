@@ -88,19 +88,6 @@ fn gen_data(seed: u64) -> (Tensor<f32>, Tensor<f32>) {
     (tensor(x, &[BATCH, D_IN]), tensor(y, &[BATCH, D_OUT]))
 }
 
-/// テスト内で使い回す一時ディレクトリ（プロセス ID・スレッド ID・
-/// 呼び出し元指定タグで分離。`tests/st_save.rs::save_to_file_produces_loadable_file`
-/// の先例を踏襲し、CWD 変更は行わない）。呼び出し側で後始末する。
-fn make_tmp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "onnx-interop-st-checkpoint-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).expect("test fixture: 一時ディレクトリの作成に失敗した");
-    dir
-}
-
 /// 2 層 MLP（`Linear(D_IN→D_HIDDEN)` → `ReLU` → `Linear(D_HIDDEN→D_OUT)`）を
 /// `steps` 回フルバッチ SGD で学習し、各 step の loss（`(値,
 /// to_bits())`）を記録しつつ、最終的な `l1`/`l2` を返す。
@@ -219,16 +206,14 @@ fn mid_training_checkpoint_round_trips_bit_exact() {
     let (l1, l2, _log) = train_steps(l1, l2, &x_data, &y_data, &mut sgd, 10);
     let params = params_to_map(&l1, &l2);
 
-    let tmp_dir = make_tmp_dir("mid-training");
-    let out_path = tmp_dir.join("checkpoint.safetensors");
+    let tmp_dir = support::temp_dir::TempDirGuard::new("st-checkpoint-mid-training");
+    let out_path = tmp_dir.path().join("checkpoint.safetensors");
     save_safetensors_f32(&out_path, &params).expect("チェックポイント書き出しに失敗した");
     let reloaded = load_safetensors_f32(&out_path).expect("チェックポイント再ロードに失敗した");
 
     for key in ["fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"] {
         assert_bits_eq(key, &params[key], &reloaded[key]);
     }
-
-    std::fs::remove_dir_all(&tmp_dir).ok();
 }
 
 // --- ケース 2: チェックポイントからの再開が中断なし学習と等価（stateless SGD） ---
@@ -264,8 +249,8 @@ fn resume_from_checkpoint_matches_uninterrupted_training() {
     assert_eq!(log_b_phase1.len(), 10);
 
     let params_b = params_to_map(&l1_b, &l2_b);
-    let tmp_dir = make_tmp_dir("resume");
-    let out_path = tmp_dir.join("checkpoint.safetensors");
+    let tmp_dir = support::temp_dir::TempDirGuard::new("st-checkpoint-resume");
+    let out_path = tmp_dir.path().join("checkpoint.safetensors");
     save_safetensors_f32(&out_path, &params_b).expect("チェックポイント書き出しに失敗した");
     let reloaded = load_safetensors_f32(&out_path).expect("チェックポイント再ロードに失敗した");
 
@@ -305,8 +290,6 @@ fn resume_from_checkpoint_matches_uninterrupted_training() {
     for key in ["fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"] {
         assert_bits_eq(key, &params_a[key], &params_resumed[key]);
     }
-
-    std::fs::remove_dir_all(&tmp_dir).ok();
 }
 
 // --- ケース 3: momentum あり学習でも重みの save→load 自体は bit 一致 ---
@@ -328,14 +311,12 @@ fn weights_round_trip_bit_exact_even_under_momentum_training() {
     let (l1, l2, _log) = train_steps(l1, l2, &x_data, &y_data, &mut sgd, 10);
     let params = params_to_map(&l1, &l2);
 
-    let tmp_dir = make_tmp_dir("momentum-weights");
-    let out_path = tmp_dir.join("checkpoint.safetensors");
+    let tmp_dir = support::temp_dir::TempDirGuard::new("st-checkpoint-momentum-weights");
+    let out_path = tmp_dir.path().join("checkpoint.safetensors");
     save_safetensors_f32(&out_path, &params).expect("チェックポイント書き出しに失敗した");
     let reloaded = load_safetensors_f32(&out_path).expect("チェックポイント再ロードに失敗した");
 
     for key in ["fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"] {
         assert_bits_eq(key, &params[key], &reloaded[key]);
     }
-
-    std::fs::remove_dir_all(&tmp_dir).ok();
 }

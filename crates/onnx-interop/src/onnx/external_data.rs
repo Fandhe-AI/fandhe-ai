@@ -3004,34 +3004,7 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::no_follow_open;
-
-    /// テスト専用の一時ディレクトリ（`tests/onnx_external_data.rs::
-    /// TempDir` と同型。本ファイルはユニットテストのため独立実装する）。
-    struct UnitTestDir(std::path::PathBuf);
-
-    impl UnitTestDir {
-        fn new(name: &str) -> Self {
-            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "onnx-interop-external-data-unit-{}-{name}-{n}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("一時ディレクトリの作成に失敗した");
-            UnitTestDir(dir)
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl Drop for UnitTestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_temp_dir::UnitTestDir;
 
     /// 両方式（`open_chain_component_walk`・Linux では `open_chain_openat2`
     /// も）が、通常ファイルへの正常な多段解決を成功させることを確認する。
