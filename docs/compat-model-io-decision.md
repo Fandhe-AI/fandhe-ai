@@ -272,7 +272,7 @@ version migration。
   ```json
   {
     "format": "fandhe-ai.compat.sequential",
-    "format_version": 1,
+    "format_version": 2,
     "training": false,
     "num_layers": 3,
     "layers": [{"index": 0, "kind": "linear", "params": {}}],
@@ -290,6 +290,10 @@ version migration。
   キー名・shape の不一致は `Mismatch`、要素の型違い・未知フィールドは `Manifest`。
   buffer の値の有限性は検査しない（重みと同じく bit のまま往復し、発散したモデルも
   無言変換しない。REQ-7）。BN を含まないモデルでは `[]`。
+  **版管理**: 新規保存は `format_version: 2`。BN の buffer が無かった旧形式は `format_version: 1`
+  （BN を含むのに `buffer_keys: []`）で、この版に限り空配列を受理し初期 running stats
+  （mean = 0・var = 1）で読み込む。版 2 では期待 buffer の欠落を旧形式と区別できないため
+  `Mismatch` で拒否する（学習済み統計の無言喪失を防ぐ。REQ-7）。
   `safetensors_file`／`safetensors_bytes` は §12 の世代コミット方式が
   load 側の世代不一致検出に使う（`safetensors_file` は
   `model.<32桁16進>.safetensors` の完全一致パターンのみ許可し、パス

@@ -26,7 +26,8 @@
 //! 同じ safetensors へ保存し、manifest の `buffer_keys` に記録する（#2371）。load は
 //! `buffer_keys`・safetensors のキー集合・shape を完全一致で照合し、BN を
 //! `BatchNorm*::from_parameters` で組み直す。`training` フラグも復元する。
-//! 旧形式（BN を含むのに `buffer_keys: []`）の保存データは初期 running stats で読み込む。
+//! 旧形式（`format_version` 1。BN を含むのに `buffer_keys: []`）の保存データに限り初期
+//! running stats で読み込む。現行版（2）で期待 buffer が欠落した manifest は `Mismatch` で拒否する。
 //! **`num_batches_tracked` は保存も復元もしない**（load 後は 0 から再開する）。forward の
 //! どこからも参照されないカウンタで、eval／train の数値には影響しない
 //! （決定記録 §5・§11。復元には autodiff への setter 追加が要るためスコープ外）。
@@ -77,8 +78,15 @@ use crate::interop::safetensors::{load_safetensors_f32_from_bytes, save_safetens
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 /// manifest の `format` 値（形式の識別子）。
 const FORMAT_NAME: &str = "fandhe-ai.compat.sequential";
-/// manifest の `format_version` 値。
-const FORMAT_VERSION: u64 = 1;
+/// manifest の `format_version` 値（新規保存が書く版）。
+///
+/// 版 2 は BatchNorm の running stats を `buffer_keys` と safetensors へ保存する形式（#2371）。
+/// 版 2 では `buffer_keys` を層構成から導いた期待値と完全一致で要求する（欠落を旧形式と
+/// 取り違えて学習済み統計を無言で失わないため。REQ-7）。
+const FORMAT_VERSION: u64 = 2;
+/// 旧形式の `format_version` 値（#2371 以前。BN があっても `buffer_keys: []` で保存された）。
+/// この版に限り `buffer_keys` の欠落を初期 running stats で補って読み込む。
+const LEGACY_FORMAT_VERSION: u64 = 1;
 
 /// manifest（JSON）のサイズ上限（バイト）。1 MiB。
 ///
@@ -2132,7 +2140,8 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
     if as_str(f[0], "format")? != FORMAT_NAME {
         return Err(manifest_error("format が想定と異なります"));
     }
-    if as_u64(f[1], "format_version")? != FORMAT_VERSION {
+    let format_version = as_u64(f[1], "format_version")?;
+    if format_version != FORMAT_VERSION && format_version != LEGACY_FORMAT_VERSION {
         return Err(manifest_error("format_version が未対応です"));
     }
     let Json::Bool(training) = f[2] else {
@@ -2185,10 +2194,12 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
         });
     }
 
-    // 旧形式（#2371 以前。BN があっても `buffer_keys: []` で保存された既存データ）は
-    // 空配列に限り受理し、load 側で初期 running stats を補う（公開済み保存データの後方互換）。
+    // 旧形式（`format_version` 1。BN があっても `buffer_keys: []` で保存された既存データ）に
+    // 限り空配列を受理し、load 側で初期 running stats を補う（公開済み保存データの後方互換）。
+    // 現行版（2）は期待 buffer の欠落を旧形式と区別できないため完全一致のみ受理する。
     let expected_buffers = expected_buffer_keys(&specs);
-    if !buffer_keys.is_empty() && buffer_keys != expected_buffers {
+    let legacy_empty = format_version == LEGACY_FORMAT_VERSION && buffer_keys.is_empty();
+    if !legacy_empty && buffer_keys != expected_buffers {
         return Err(ModelIoError::Mismatch {
             message: "buffer_keys が層構成から導いた期待キー・shape と一致しません".into(),
         });
@@ -2850,10 +2861,19 @@ mod tests {
         let end = good
             .find(",\"safetensors_file\"")
             .expect("safetensors_file があるはず");
-        let legacy = format!("{}\"buffer_keys\":[]{}", &good[..start], &good[end..]);
-        assert!(legacy.contains("\"buffer_keys\":[]"), "{legacy}");
+        let stripped = format!("{}\"buffer_keys\":[]{}", &good[..start], &good[end..]);
+        assert!(stripped.contains("\"buffer_keys\":[]"), "{stripped}");
+        // 版 1（旧形式）なら受理される。
+        let legacy = stripped.replacen("\"format_version\":2", "\"format_version\":1", 1);
+        assert!(legacy.contains("\"format_version\":1"), "{legacy}");
         let parsed = parse_manifest(legacy.as_bytes()).expect("旧形式は受理されるはず");
         assert!(parsed.buffer_keys.is_empty());
+        // 現行版（2）で BN の buffer_keys が欠落したものは旧形式と区別できず Mismatch。
+        assert!(stripped.contains("\"format_version\":2"), "{stripped}");
+        assert!(matches!(
+            parse_manifest(stripped.as_bytes()),
+            Err(ModelIoError::Mismatch { .. })
+        ));
     }
 
     #[test]
