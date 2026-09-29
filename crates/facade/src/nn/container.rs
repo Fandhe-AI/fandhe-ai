@@ -611,7 +611,7 @@ impl Module for ModuleDict {
     }
 
     /// 挿入順に全子へ伝播する。ロールバック・集約は [`ModuleList`] と同一
-    /// （[`set_requires_grad_with_rollback`]。#2402 の申し送りを #2400 で実施）。
+    /// （`set_requires_grad_with_rollback`。#2402 の申し送りを #2400 で実施）。
     fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
         let children: Vec<&mut dyn Module> = self
             .modules
