@@ -494,3 +494,12 @@ facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタ�
 - **テスト**: `tests/nn_module_dict_summary.rs`（facade のみ依存。`summary` の文字列形式を完全一致で固定〈葉ルート・ネスト・空辞書・ジェネリクス・複数 ZST・循環・共有子〉）、`container.rs` の in-crate parity（autodiff との `summary`・エラー文言・命名のバイト一致）。
 - **ガード**: `facade_does_not_reexport_module_dict_or_summary` を正ガード化（承認済みの `src/nn/mod.rs` の 1 形のみ許容・葉 2 件のインベントリ・自己テスト）。`LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `summary` を追加。`facade_declares_no_nn_module_items` は `struct ModuleDict` を `container.rs` のみ許容。`compat_sequential_has_no_introspection_methods` は不変。
 - **範囲外**: shape 推定・`extra_repr`、`compat::Sequential::summary()` への委譲、`docs/compat-api-scope.md` 台帳（#2403）。
+
+## 20. 実装記録（イシュー #2399）
+
+#2338 受け入れ条件 4（公開面の正ガードとユーザー定義層の統合テスト）をテストのみで実装した。`crates/facade/src/` は変更していない。
+
+- **追加した正ガード（`crates/facade/tests/api_surface.rs`）**: `nn_module_types_are_reachable_via_facade_only`（facade だけの import での到達性）・`nn_{mod,module_rs,container_rs}_public_items_match_expected_set`（`src/nn/*.rs` の全種別の公開 item 集合の完全一致。§18〜§19 で承認済みの `ModuleDict`・`summary` を期待集合に含み、制限付き可視性は `FacadeModuleAdapter`〈`pub(crate)`〉・`NodeKey`〈`pub(super) type`〉のみ）・`nn_containers_inherent_and_trait_impls_match_expected_set`（`ModuleList`／`Sequential`／`ModuleDict` の固有 pub メソッド集合と手書き trait impl 集合）・自己テスト `nn_public_item_set_scanners_detect_each_category`
+- **`"nn::Module"` の区別**: ONNX 走査（`src/interop/onnx.rs` 限定）の禁止部分文字列 `nn::Module` は内部型の漏洩検出用だが、部分文字列一致のため facade 公開名 `fandhe_ai::nn::Module` にも一致する。facade `nn::Module` を受ける ONNX API は承認範囲外のため意図した fail-closed であり衝突ではない（現状 `onnx.rs` に参照 0 件）。両リストにコメントを追加し、`onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module` が固定する。将来 export を承認する場合はエントリを同時に見直す
+- **統合テスト（`crates/facade/tests/nn_module_user_defined.rs`）**: `fandhe_ai` と `bench_harness::rng` だけに依存する residual block を `nn::Sequential`（入れ子含む）に積み、学習（loss が初期の 0.5 倍未満）・`state_dict` 往復（bit 一致・fail-closed）・`set_training` 伝播を確認する。パラメータ勾配は葉プレフィックス方式（パラメータ持ち層を index 0 に置き最初の op より前に登録し、`Tape::leaf(i)` で取得）で取り出し、毎 step の葉数・葉値のインベントリ assert と手組み参照との bit 一致で対応のずれを検出する。更新は `Module::load_state_dict` で適用し、crate 内アダプタ経由の公開経路を毎 step 通す
+- **申し送り（#2403）**: facade `nn::Module` には、forward 内で登録したパラメータ `Var`／勾配を公開経由で収集する経路がない（本テストは葉プレフィックスの順序に依存する回避策）。`reference_module.rs` の書き換え評価も #2403
