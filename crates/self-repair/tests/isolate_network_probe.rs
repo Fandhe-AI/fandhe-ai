@@ -26,25 +26,15 @@
 //! と同じ最小形の 1 件を用意する）を用意する。
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+mod common;
+
+use common::temp_dir::TempDirGuard;
 
 fn self_repair_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_self-repair"))
-}
-
-fn unique_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "self-repair-isolate-network-probe-test-{name}-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    dir
 }
 
 /// `dir` で `git` を起動するコマンドを構築する。継承されうる `GIT_*`
@@ -104,16 +94,17 @@ fn host_supports_unshare_net() -> bool {
 
 /// 最小の git リポジトリ（コミット 1 つ）を構築し、`--repo` として使えるパス
 /// を返す。
-fn prepare_minimal_repo() -> PathBuf {
-    let repo = unique_dir("repo");
-    fs::create_dir_all(&repo).expect("repo ディレクトリ作成に失敗");
+fn prepare_minimal_repo() -> TempDirGuard {
+    // `tests/common/` の `TempDirGuard`（一意名＋排他作成・Drop で削除。イシュー #2382）。
+    let guard = TempDirGuard::new("isolate-network-probe-repo");
+    let repo = guard.path().to_path_buf();
     git(&repo, &["init", "--quiet", "--initial-branch=main"]);
     git(&repo, &["config", "user.email", "test@example.com"]);
     git(&repo, &["config", "user.name", "Test"]);
     fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
     git(&repo, &["add", "--all"]);
     git(&repo, &["commit", "--quiet", "-m", "baseline"]);
-    repo
+    guard
 }
 
 /// `load_candidates_from_json` が受理する最小の非空候補列を書き込む
@@ -142,7 +133,8 @@ fn run_with_isolate_network_fails_closed_when_unshare_net_unavailable() {
         return;
     }
 
-    let repo = prepare_minimal_repo();
+    let repo_guard = prepare_minimal_repo();
+    let repo = repo_guard.path();
     let candidates = repo.join("candidates.json");
     write_minimal_candidates(&candidates);
     let log = repo.join("trial.jsonl");
@@ -168,8 +160,6 @@ fn run_with_isolate_network_fails_closed_when_unshare_net_unavailable() {
         .output()
         .expect("failed to run self-repair binary");
 
-    let _ = fs::remove_dir_all(&repo);
-
     assert_eq!(
         output.status.code(),
         Some(1),
@@ -191,7 +181,8 @@ fn run_with_isolate_network_fails_closed_when_unshare_net_unavailable() {
 /// 由来のメッセージを含まないことのみを確認する）。
 #[test]
 fn run_without_isolate_network_does_not_invoke_probe() {
-    let repo = prepare_minimal_repo();
+    let repo_guard = prepare_minimal_repo();
+    let repo = repo_guard.path();
     let candidates = repo.join("candidates.json");
     write_minimal_candidates(&candidates);
     let log = repo.join("trial.jsonl");
@@ -215,8 +206,6 @@ fn run_without_isolate_network_does_not_invoke_probe() {
         ])
         .output()
         .expect("failed to run self-repair binary");
-
-    let _ = fs::remove_dir_all(&repo);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

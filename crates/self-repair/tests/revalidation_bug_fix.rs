@@ -56,33 +56,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-/// 準備リポジトリ（sandbox ディレクトリ）を、`Drop` により確実に削除する
-/// RAII ガード（レビュー指摘への対応。旧版〈PR #341〉が持っていた
-/// `SandboxGuard` を CLI 経由への全面書き換え時に落としていたのを復元する）。
-/// 本テストは複数の `assert!` を通過した後にのみ手動クリーンアップを行う
-/// 構成だったため、途中の `assert!` 失敗（panic）で sandbox（`crates/autodiff`
-/// のフルコピー＋ビルド成果物）が `/tmp` に残置される退行があった。PID
-/// ベースの一時パス（`unique_sandbox_dir`）のため次回実行時には自己回収
-/// されるが、失敗のたびに一時的なディスク消費が発生するため、通常経路・
-/// panic 経路のいずれでも確実に削除する。
-struct SandboxGuard(PathBuf);
+mod common;
+#[path = "common/temp_file.rs"]
+mod temp_file;
 
-impl Drop for SandboxGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::temp_dir::TempDirGuard;
+use temp_file::TempFileGuard;
 
-/// `--candidates` JSON 出力先（一時ファイル）を、`Drop` により確実に削除する
-/// RAII ガード。`SandboxGuard` と同じ理由（panic 時の残置防止）で、
-/// 候補 JSON 側にも同型のガードを用意する。
-struct CandidatesFileGuard(PathBuf);
-
-impl Drop for CandidatesFileGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+// sandbox（準備リポジトリ）・`--candidates` JSON は `tests/common/` の `TempDirGuard`・
+// `TempFileGuard`（一意名＋排他作成・Drop で自身のパスだけ削除。イシュー #2382）で確保する。
+// 途中の `assert!` が panic しても `/tmp` に `crates/autodiff` のフルコピー等が残置されない
+// ようにする RAII の役割は、旧 `SandboxGuard`／`CandidatesFileGuard`（PR #341 由来）と同じ。
 
 /// バグ注入・修正対象ファイル（`crates/autodiff/src/var.rs`。準備リポジトリ
 /// 相対パスは `src/var.rs`）。
@@ -100,30 +84,6 @@ fn repo_root() -> PathBuf {
         .parent()
         .expect("crates/ の親はリポジトリルート")
         .to_path_buf()
-}
-
-/// テストごとに衝突しない一時ディレクトリ（`self_repair::test_support` と同じ
-/// `temp_dir() + process::id()` 方式。本ファイルは `tests/` 配下の独立クレート
-/// のため `pub(crate)` ヘルパーを再利用できず、`feature_addition_loop_completion_
-/// task_3_3c.rs` と同型のヘルパーを再実装する）。
-fn unique_sandbox_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "self-repair-revalidation-bug-fix-task-3-3b-{name}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("sandbox ディレクトリ作成に失敗");
-    dir
-}
-
-/// 単一ファイル用の一時パス（`--candidates` JSON 出力先）。
-fn unique_temp_file(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "self-repair-revalidation-bug-fix-task-3-3b-{name}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&path);
-    path
 }
 
 /// `src` 配下を再帰的に `dst` へコピーする（`target/`・`.git/` は対象外）。
@@ -457,8 +417,8 @@ fn generate_lockfile(sandbox: &Path) {
 
 /// `crates/autodiff` を一意な一時ディレクトリへコピーし、workspace 継承の
 /// 実体化・ベンチワークロード追加・バグ注入・git 初期化までを行った「準備
-/// リポジトリ」を構築する。`sandbox` は呼び出し元が [`unique_sandbox_dir`]
-/// で確保済みのディレクトリを渡す（`SandboxGuard` を本関数呼び出し前に
+/// リポジトリ」を構築する。`sandbox` は呼び出し元が [`TempDirGuard`]
+/// で確保済みのディレクトリを渡す（ガードを本関数呼び出し前に
 /// 取得できるようにするため。関数内で新規作成すると、内部の `assert!`／
 /// `assert_ne!`〈`detach_autodiff_cargo_toml`・`generate_lockfile`・
 /// `git_init_baseline`〉が panic した場合に sandbox がガード対象外のまま
@@ -512,9 +472,9 @@ fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
     // sandbox は `prepare_standalone_autodiff_repo` 呼び出し前に確保し、
     // 直後にガードを取得する。関数内部の `assert!`／`assert_ne!` が panic
     // しても sandbox が確実に削除されるようにするため（レビュー指摘対応。
-    // `SandboxGuard`／`prepare_standalone_autodiff_repo` doc 参照）。
-    let sandbox = unique_sandbox_dir("prep");
-    let _sandbox_guard = SandboxGuard(sandbox.clone());
+    // `prepare_standalone_autodiff_repo` doc 参照）。
+    let sandbox_guard = TempDirGuard::new("revalidation-prep");
+    let sandbox = sandbox_guard.path().to_path_buf();
     let (injected_content, original_content) = prepare_standalone_autodiff_repo(&sandbox);
 
     // --- 候補列（#140 承認済み題材）を `--candidates` JSON へ書き出す ---
@@ -529,15 +489,15 @@ fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
             "files": [{"path": TARGET_FILE, "content": original_content}],
         },
     ]);
-    let candidates_path = unique_temp_file("candidates.json");
-    std::fs::write(
-        &candidates_path,
-        serde_json::to_string_pretty(&candidates_json).expect("候補 JSON のシリアライズに失敗"),
-    )
-    .expect("候補 JSON の書き込みに失敗");
-    // 以降の assert! が panic しても候補 JSON が確実に削除されるよう、
-    // 書き込み直後にガードを取得する（CandidatesFileGuard doc 参照）。
-    let _candidates_guard = CandidatesFileGuard(candidates_path.clone());
+    // 作成と書き込みを排他作成の 1 回で行い、以降の assert! が panic しても候補 JSON が
+    // ガードの Drop で確実に削除される。
+    let candidates_guard = TempFileGuard::new(
+        "candidates.json",
+        serde_json::to_string_pretty(&candidates_json)
+            .expect("候補 JSON のシリアライズに失敗")
+            .as_bytes(),
+    );
+    let candidates_path = candidates_guard.path().to_path_buf();
 
     // --- `self-repair run` を 1 回だけ起動する（完走判定基準 1） ---
     let target_out_dir = repo_root().join("target/self-repair-revalidation/bug-fix");
@@ -734,7 +694,7 @@ fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
             .expect("loop-log.jsonl の docs へのコピーに失敗");
     }
 
-    // sandbox・候補 JSON は `_sandbox_guard`／`_candidates_guard` の Drop で
+    // sandbox・候補 JSON は `sandbox_guard`／`candidates_guard` の Drop で
     // 削除される（正常終了・assert! panic のいずれの経路でも確実に削除する
     // ため、明示的な remove_dir_all／remove_file 呼び出しはここに置かない）。
 }

@@ -23,6 +23,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
+use common::temp_dir::TempDirGuard;
+
 use self_repair::stages::{Proposal, VerificationGate, VerificationOutcome};
 use self_repair::{RepairCompositeGate, RepairCompositeGateSpec, SystemCommandRunner};
 
@@ -42,25 +46,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn unique_sandbox_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "self-repair-verify-direct-composite-{name}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("sandbox ディレクトリ作成に失敗");
-    dir
-}
-
-/// sandbox を確実に削除する RAII ガード（`revalidation_bug_fix.rs::SandboxGuard`
-/// と同じ理由・同じ設計。パニック時の unwind 経由でも削除される）。
-struct SandboxGuard(PathBuf);
-
-impl Drop for SandboxGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+// sandbox は `tests/common/` の `TempDirGuard`（一意名＋排他作成・Drop で削除。イシュー #2382）。
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).expect("コピー先ディレクトリ作成に失敗");
@@ -160,9 +146,9 @@ fn git_init_baseline(sandbox: &Path) -> String {
 }
 
 /// sandbox 化した fixture のコピーを構築し、`baseline` commit sha を返す。
-fn build_sandbox(name: &str) -> (SandboxGuard, PathBuf, String) {
-    let sandbox = unique_sandbox_dir(name);
-    let guard = SandboxGuard(sandbox.clone());
+fn build_sandbox(name: &str) -> (TempDirGuard, PathBuf, String) {
+    let guard = TempDirGuard::new(&format!("verify-direct-composite-{name}"));
+    let sandbox = guard.path().to_path_buf();
     let fixture_src = repo_root().join("crates/self-repair").join(FIXTURE_REL);
     copy_dir_recursive(&fixture_src, &sandbox);
     rewrite_path_deps_to_absolute(&sandbox);
