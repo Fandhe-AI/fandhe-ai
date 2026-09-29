@@ -22,9 +22,15 @@
 //! compat::Sequential`（#411 で `facade` へ移設済みの非推奨シム）とも
 //! 別物であり、本イシューの対象外（触れない）。
 //!
-//! # facade への非公開
+//! # facade との関係（実施済み: イシュー #2338・2026-09-29 承認）
 //!
-//! `ModuleList`／`Sequential`（本モジュール）は facade から
+//! 本モジュールの `ModuleList`／`Sequential`／`ModuleDict`／`summary` は facade から
+//! 再エクスポートしない。facade は案 B（`docs/facade-nn-module-exposure-decision.md`
+//! §15・§19）に従い、独自の `nn::{ModuleList, Sequential, ModuleDict, summary}` を
+//! 新設して facade 側で子を直接保持しており、autodiff の型は公開面に現れない。
+//! 以下は #2134 時点（承認前）の判断記録で、当時の理由として残す。
+//!
+//! 当時の判断: `ModuleList`／`Sequential`（本モジュール）は facade から
 //! 再エクスポートしない（`Module` trait 自体が非公開のため使途がなく、
 //! `crates/facade/tests/api_surface.rs` の走査対象を増やさない）。
 //!
@@ -45,6 +51,8 @@
 //! #2133 完了後の `crates/facade/src/nn/mod.rs` 再エクスポート、または
 //! `fandhe_ai_facade::compat::Sequential::parameter_count()`／
 //! `summary()` の薄い委譲のいずれかを想定する（後続 issue で判断）。
+//! 実施結果: facade 側の鏡写しで公開済み（#2338）。`compat::Sequential` への
+//! 委譲は未実施。
 //!
 //! # ネストの限界（既知の制限。解消は行わない）
 //!
@@ -55,9 +63,11 @@
 //! 見る。本モジュールの `Sequential`／`ModuleList` をネストして構築
 //! した `Box<dyn Module>` を compat 層へ積んだ場合、ネスト内部の
 //! `Linear`／`Conv2d`／`Conv1d` は上記フックが `None` を返すため学習
-//! 可能パラメータとして認識されない。ただし facade は `ModuleList`／
-//! `Sequential`（本モジュール）を構築する経路を公開していないため、
-//! この制限は facade 経由では到達不能である。
+//! 可能パラメータとして認識されない。facade は本モジュールの型を構築する経路を
+//! 公開していないが、`compat::Sequential::add_module`（#2398）で包んだ facade
+//! コンテナを積めるようになったため、型付きアクセサに当たらないパラメータ持ち層は
+//! `first_untracked_parametric_layer` が学習経路で fail-closed に拒否する
+//! （`docs/facade-nn-module-exposure-decision.md` §17）。
 
 use std::collections::HashSet;
 

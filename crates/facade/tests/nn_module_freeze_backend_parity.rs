@@ -13,8 +13,8 @@
 //! ものである）。
 //!
 //! **facade 公開面（意図的な非変更）**: `fandhe_ai::nn::Module` 自体は
-//! まだ facade へ公開されていない（イシュー #2133 OPEN・
-//! `docs/facade-nn-module-exposure-decision.md` §10 承認待ち）。本
+//! #2338 で facade へ公開済み（`docs/facade-nn-module-exposure-decision.md`
+//! §22）。autodiff 経路の parity を担う本
 //! テストは内部クレート `fandhe_ai_autodiff::nn`・具体バックエンド
 //! クレート（`fandhe_ai_backend_cpu`／`fandhe_ai_backend_cuda`／
 //! `fandhe_ai_backend_metal`）を facade の依存経由で直接使う
