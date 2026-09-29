@@ -5,6 +5,8 @@
 //! 自前 `write_npy_bytes` の出力が `np.save` の C 順 `<f4` 出力と
 //! バイト完全一致することを検証する。
 
+mod common;
+
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::io::NpyError;
 use fandhe_ai_tensor_core::io::npy::{load_npy, read_npy_bytes, save_npy, write_npy_bytes};
@@ -17,15 +19,6 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
     std::fs::read(fixture_path(name)).unwrap_or_else(|e| panic!("fixture {name} を読めない: {e}"))
-}
-
-fn temp_dir_for(test_name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fandhe-ai-tensor-core-npy-roundtrip-{}-{test_name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 fn bits(t: &Tensor<f32>) -> Vec<u32> {
@@ -187,21 +180,19 @@ fn non_contiguous_view_is_saved_in_c_order() {
 
 #[test]
 fn path_based_round_trip() {
-    let dir = temp_dir_for("path-round-trip");
-    let path = dir.join("t.npy");
+    let dir = common::TempDirGuard::new("path-round-trip");
+    let path = dir.path().join("t.npy");
     let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
     save_npy(&t, &path).unwrap();
     let back = load_npy(&path).unwrap();
     assert_eq!(back.shape(), t.shape());
     assert_eq!(back.host_slice().to_vec(), t.host_slice().to_vec());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn load_npy_on_missing_path_returns_io_error() {
-    let dir = temp_dir_for("missing-path");
-    let path = dir.join("does-not-exist.npy");
+    let dir = common::TempDirGuard::new("missing-path");
+    let path = dir.path().join("does-not-exist.npy");
     let err = load_npy(&path);
     assert!(matches!(err, Err(NpyError::Io(_))));
-    let _ = std::fs::remove_dir_all(&dir);
 }

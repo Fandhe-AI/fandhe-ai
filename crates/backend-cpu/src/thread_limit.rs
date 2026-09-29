@@ -488,41 +488,31 @@ mod tests {
     // --- big_cores_from_sysfs (fixture ベース) --------------------------
 
     /// テストごとに一意な一時ディレクトリを作り、`cpu<N>/cpu_capacity`
-    /// fixture を書き込む（依存追加なしで `std::env::temp_dir()` 配下に
-    /// 作成・テスト終了時に `Drop` で削除する。#1363 実装計画 §5 手順 2）。
+    /// fixture を書き込む（一意名・排他作成・`Drop` 削除は
+    /// `crate::test_temp_dir::UnitTestDir` が担う。#1363 実装計画 §5 手順 2・#2385）。
     struct SysfsFixture {
-        root: std::path::PathBuf,
+        dir: crate::test_temp_dir::UnitTestDir,
     }
 
     impl SysfsFixture {
         fn new(name: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "fandhe-ai-thread-limit-test-{name}-{}-{}",
-                std::process::id(),
-                // テスト並列実行時の衝突を避けるための簡易 nonce。
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
-            ));
-            std::fs::create_dir_all(&root).expect("create fixture root");
-            Self { root }
+            Self {
+                dir: crate::test_temp_dir::UnitTestDir::new(name),
+            }
+        }
+
+        fn root(&self) -> &std::path::Path {
+            self.dir.path()
         }
 
         fn write_cpu_capacity(&self, cpu: usize, capacity: &str) {
-            let dir = self.root.join(format!("cpu{cpu}"));
+            let dir = self.root().join(format!("cpu{cpu}"));
             std::fs::create_dir_all(&dir).expect("create cpu dir");
             std::fs::write(dir.join("cpu_capacity"), capacity).expect("write cpu_capacity");
         }
 
         fn write_decoy_dir(&self, name: &str) {
-            std::fs::create_dir_all(self.root.join(name)).expect("create decoy dir");
-        }
-    }
-
-    impl Drop for SysfsFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
+            std::fs::create_dir_all(self.root().join(name)).expect("create decoy dir");
         }
     }
 
@@ -535,7 +525,7 @@ mod tests {
         for i in 12..16 {
             fx.write_cpu_capacity(i, "512\n");
         }
-        assert_eq!(big_cores_from_sysfs(&fx.root), Some(12));
+        assert_eq!(big_cores_from_sysfs(fx.root()), Some(12));
     }
 
     #[test]
@@ -544,7 +534,7 @@ mod tests {
         for i in 0..16 {
             fx.write_cpu_capacity(i, "1024\n");
         }
-        assert_eq!(big_cores_from_sysfs(&fx.root), None);
+        assert_eq!(big_cores_from_sysfs(fx.root()), None);
     }
 
     #[test]
@@ -552,8 +542,8 @@ mod tests {
         let fx = SysfsFixture::new("missing-file");
         fx.write_cpu_capacity(0, "1024\n");
         // cpu1 は cpu_capacity を持たない（欠損）。
-        std::fs::create_dir_all(fx.root.join("cpu1")).expect("create cpu1 dir");
-        assert_eq!(big_cores_from_sysfs(&fx.root), None);
+        std::fs::create_dir_all(fx.root().join("cpu1")).expect("create cpu1 dir");
+        assert_eq!(big_cores_from_sysfs(fx.root()), None);
     }
 
     #[test]
@@ -561,7 +551,7 @@ mod tests {
         let fx = SysfsFixture::new("invalid-value");
         fx.write_cpu_capacity(0, "1024\n");
         fx.write_cpu_capacity(1, "not-a-number\n");
-        assert_eq!(big_cores_from_sysfs(&fx.root), None);
+        assert_eq!(big_cores_from_sysfs(fx.root()), None);
     }
 
     #[test]
@@ -578,18 +568,20 @@ mod tests {
         fx.write_decoy_dir("cpufreq");
         fx.write_decoy_dir("cpuidle");
         fx.write_decoy_dir("cpu-map");
-        assert_eq!(big_cores_from_sysfs(&fx.root), Some(12));
+        assert_eq!(big_cores_from_sysfs(fx.root()), Some(12));
     }
 
     #[test]
     fn big_cores_from_sysfs_empty_dir_returns_none() {
         let fx = SysfsFixture::new("empty");
-        assert_eq!(big_cores_from_sysfs(&fx.root), None);
+        assert_eq!(big_cores_from_sysfs(fx.root()), None);
     }
 
     #[test]
     fn big_cores_from_sysfs_nonexistent_root_returns_none() {
-        let root = std::env::temp_dir().join("fandhe-ai-thread-limit-test-nonexistent-root-xyz");
+        // 排他作成した空ディレクトリ配下の未作成パスなので、存在しないことが保証される。
+        let dir = crate::test_temp_dir::UnitTestDir::new("nonexistent-root");
+        let root = dir.path().join("does-not-exist");
         assert_eq!(big_cores_from_sysfs(&root), None);
     }
 

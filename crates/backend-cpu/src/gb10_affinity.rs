@@ -698,39 +698,31 @@ mod tests {
     /// テストごとに一意な一時ディレクトリを作り、GB10 実機の sysfs
     /// レイアウト（`cpu<N>/cpufreq/cpuinfo_max_freq`・
     /// `cpu<N>/regs/identification/midr_el1`）を fixture として書き込む
-    /// （`crate::thread_limit::tests::SysfsFixture` と同型。依存追加なし）。
+    /// （`crate::thread_limit::tests::SysfsFixture` と同型。一時ディレクトリは
+    /// `crate::test_temp_dir::UnitTestDir`〈#2385〉）。
     struct SysfsFixture {
-        root: std::path::PathBuf,
+        dir: crate::test_temp_dir::UnitTestDir,
     }
 
     impl SysfsFixture {
         fn new(name: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "fandhe-ai-gb10-affinity-test-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
-            ));
-            std::fs::create_dir_all(&root).expect("create fixture root");
-            Self { root }
+            Self {
+                dir: crate::test_temp_dir::UnitTestDir::new(name),
+            }
+        }
+
+        fn root(&self) -> &std::path::Path {
+            self.dir.path()
         }
 
         fn write_cpu(&self, cpu: usize, freq: &str, midr: &str) {
-            let dir = self.root.join(format!("cpu{cpu}"));
+            let dir = self.root().join(format!("cpu{cpu}"));
             std::fs::create_dir_all(dir.join("cpufreq")).expect("create cpufreq dir");
             std::fs::write(dir.join("cpufreq/cpuinfo_max_freq"), freq)
                 .expect("write cpuinfo_max_freq");
             std::fs::create_dir_all(dir.join("regs/identification"))
                 .expect("create regs/identification dir");
             std::fs::write(dir.join("regs/identification/midr_el1"), midr).expect("write midr_el1");
-        }
-    }
-
-    impl Drop for SysfsFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 
@@ -749,7 +741,7 @@ mod tests {
     fn big_core_ids_from_sysfs_gb10_like_cross_validates() {
         let fx = SysfsFixture::new("gb10-like");
         write_gb10_like(&fx);
-        let big = big_core_ids_from_sysfs(&fx.root).expect("cross-validated big core group");
+        let big = big_core_ids_from_sysfs(fx.root()).expect("cross-validated big core group");
         assert_eq!(big, (0..10).collect::<Vec<_>>());
     }
 
@@ -759,17 +751,17 @@ mod tests {
         for i in 0..20 {
             fx.write_cpu(i, "3900000\n", "0x412fd851\n");
         }
-        assert_eq!(big_core_ids_from_sysfs(&fx.root), None);
+        assert_eq!(big_core_ids_from_sysfs(fx.root()), None);
     }
 
     #[test]
     fn big_core_ids_from_sysfs_missing_midr_returns_none() {
         let fx = SysfsFixture::new("missing-midr");
         // cpu0 は cpufreq のみで regs/identification を持たない（欠損）。
-        let dir = fx.root.join("cpu0/cpufreq");
+        let dir = fx.root().join("cpu0/cpufreq");
         std::fs::create_dir_all(&dir).expect("create cpufreq dir");
         std::fs::write(dir.join("cpuinfo_max_freq"), "3900000\n").expect("write freq");
-        assert_eq!(big_core_ids_from_sysfs(&fx.root), None);
+        assert_eq!(big_core_ids_from_sysfs(fx.root()), None);
     }
 
     #[test]
@@ -785,18 +777,20 @@ mod tests {
         for i in 10..20 {
             fx.write_cpu(i, "2808000\n", "0x412fd870\n");
         }
-        assert_eq!(big_core_ids_from_sysfs(&fx.root), None);
+        assert_eq!(big_core_ids_from_sysfs(fx.root()), None);
     }
 
     #[test]
     fn big_core_ids_from_sysfs_empty_dir_returns_none() {
         let fx = SysfsFixture::new("empty");
-        assert_eq!(big_core_ids_from_sysfs(&fx.root), None);
+        assert_eq!(big_core_ids_from_sysfs(fx.root()), None);
     }
 
     #[test]
     fn big_core_ids_from_sysfs_nonexistent_root_returns_none() {
-        let root = std::env::temp_dir().join("fandhe-ai-gb10-affinity-test-nonexistent-xyz");
+        // 排他作成した空ディレクトリ配下の未作成パスなので、存在しないことが保証される。
+        let dir = crate::test_temp_dir::UnitTestDir::new("nonexistent-root");
+        let root = dir.path().join("does-not-exist");
         assert_eq!(big_core_ids_from_sysfs(&root), None);
     }
 
@@ -842,7 +836,7 @@ mod tests {
     #[test]
     fn within_allowed_subset_true() {
         let fx = SysfsFixture::new("allowed-subset");
-        let status_path = fx.root.join("status");
+        let status_path = fx.root().join("status");
         std::fs::write(&status_path, "Cpus_allowed_list:\t0-19\n").expect("write status");
         assert!(big_core_ids_within_allowed(
             &(0..10).collect::<Vec<_>>(),
@@ -853,7 +847,7 @@ mod tests {
     #[test]
     fn within_allowed_not_subset_false() {
         let fx = SysfsFixture::new("allowed-not-subset");
-        let status_path = fx.root.join("status");
+        let status_path = fx.root().join("status");
         // 大コア群 (0..10) の一部 (cpu9) が許可集合から外れているケース。
         std::fs::write(&status_path, "Cpus_allowed_list:\t0-8,10-19\n").expect("write status");
         assert!(!big_core_ids_within_allowed(
@@ -864,14 +858,15 @@ mod tests {
 
     #[test]
     fn within_allowed_missing_file_false() {
-        let missing = std::env::temp_dir().join("fandhe-ai-gb10-affinity-test-no-status-xyz");
+        let dir = crate::test_temp_dir::UnitTestDir::new("no-status");
+        let missing = dir.path().join("does-not-exist");
         assert!(!big_core_ids_within_allowed(&[0, 1], &missing));
     }
 
     #[test]
     fn within_allowed_unparseable_false() {
         let fx = SysfsFixture::new("allowed-unparseable");
-        let status_path = fx.root.join("status");
+        let status_path = fx.root().join("status");
         std::fs::write(&status_path, "no such line here\n").expect("write status");
         assert!(!big_core_ids_within_allowed(&[0, 1], &status_path));
     }

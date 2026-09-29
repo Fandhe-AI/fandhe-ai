@@ -213,6 +213,10 @@ mod typed_f16;
 mod sme_detect;
 pub mod softmax;
 mod thread_limit;
+// イシュー #2385: `gb10_affinity`・`thread_limit` の単体テストが使う一時ディレクトリ
+// RAII ガード（一意名＋排他作成）。テスト専用。
+#[cfg(test)]
+mod test_temp_dir;
 // イシュー #1697（親 #1649）: `TypedOps<f64>` の CPU 実装。f32 の
 // `elementwise`／`reduction`／`gemm` 本体とは自己完結（モジュール冒頭
 // コメント参照）で、`ops::CpuBackendOps::typed_ops_f64()` accessor から
