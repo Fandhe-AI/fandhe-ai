@@ -1172,6 +1172,12 @@ impl Sequential {
                 "Sequential::{method}: epochs == 0"
             )));
         }
+        // イシュー #2398: `add_module` で積んだパラメータ持ちの独自層は `bind` が追跡せず
+        // 学習されないため、モード変更・DataLoader 構築より前に型付き拒否する。
+        if let Err(e) = self.reject_untracked_parametric_layer(&format!("Sequential::{method}")) {
+            self.compiled = Some(compiled);
+            return Err(e);
+        }
         // (1.5) 勾配累積（イシュー #2180）の引数検査。`accumulate_steps
         // == 0` はウィンドウ幅として意味を持たない（fail-closed）。
         if config.accumulate_steps == 0 {

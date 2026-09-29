@@ -158,7 +158,7 @@ impl fandhe_ai::nn::Module for MyBlock {
 
 - `nn::Module`（内部クレート `autodiff::nn::module`）実装本体の変更
 - required method の新規追加
-- `compat::Sequential` への `add_module` 追加
+- `compat::Sequential` への `add_module` 追加（**#2398 で上書き**: 2026-09-29 ユーザー承認により公開入口 1 件として追加。§17）
 - 組み込み層型（`Linear` 等）の facade 公開（別途承認が必要な独立の事項）
 - GPU 専用カーネルの追加・変更
 
@@ -463,9 +463,39 @@ facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタ�
 - **`supports_forward_host` は `false` へ override**: イシュー本文は「既定の `false` のまま」と記すが、autodiff trait の実際の既定は `true`。既定のままだと `compat::Sequential::predict` の事前判定を通過し、途中層の `Err` で手前層の副作用（Dropout の RNG 消費・BatchNorm の running stats 更新）が tape 経路再実行と二重化するため、`Embedding`／`MultiheadAttention` の前例に倣い明示的に `false` を返す
 - **`forward_host` は `AutodiffError::InvalidArgument`（fail-closed）**: `BackendError::Unsupported` は「フォールバックの合図」で `predict_recorded` が捕捉して再実行するため使わない（前例 `ModuleList::forward_host`）
 - **検証の読み替え**: #2396（facade `nn::Sequential`）は未マージのため、「facade `nn::Sequential` と bit 一致」は同じ層を手動連鎖させた参照経路（別 tape）との bit 一致（値・入力勾配・葉勾配・ノード数。`[Linear, Adapter]`／`[Adapter, Linear]` の 2 並び）で代替した
-- **申し送り**: #2398 で `nn/mod.rs` に `pub(crate) use module::FacadeModuleAdapter;` を追加し `compat::Sequential` の公開入口を作る。`set_requires_grad`／`requires_grad`／`children`／`type_name` の委譲は #2400／#2401（それまで既定の fail-closed のため、パラメータ持ちアダプタを含む `Sequential::freeze()` は `Err`）
+- **申し送り**: #2398 で `nn/mod.rs` に `pub(crate) use module::FacadeModuleAdapter;` を追加し `compat::Sequential` の公開入口を作る。`set_requires_grad`／`requires_grad` の委譲は #2400、`children`／`type_name` は #2401 で対応（§18）（それまで既定の fail-closed のため、パラメータ持ちアダプタを含む `Sequential::freeze()` は `Err`）
 
-## 17. 実装記録（イシュー #2399）
+
+## 17. 実装記録（イシュー #2398）
+
+`compat::Sequential::add_module<M: crate::nn::Module + 'static>(self, m: M) -> Self` を追加した（#2338 承認事項 4・2026-09-29 ユーザー承認。§9 の「`add_module` はスコープ外」を上書き）。内部は `Box<dyn Module>` を `FacadeModuleAdapter`（#2397。`nn/mod.rs` で `pub(crate)` 再エクスポート）で包み `inner.push` する。
+
+- **学習契約は (b) fail-closed を採用**: facade `Module::forward(TapeRef, &Var)` は forward 内で `tape.var(&param)` と毎回新しい葉を登録するため、`bind` が事前登録した `Var` を差し込めず `Gradients::get` で勾配を取り出せない。(a)（実際に学習）は trait の変更（破壊的変更）なしには成立しない。
+- **検出述語**: `first_untracked_parametric_layer`（`bind` が収集する 10 種の型付きアクセサのどれにも当たらず `named_parameters()` が非空の最初の層）。`type_name()` 文字列一致は #2401 でアダプタの `type_name` が委譲される予定のため使わない。
+- **拒否する経路**: `fit`／`fit_with_callbacks`／`fit_with_metrics`（`fit_with_callbacks_named` の引数検査。モード変更・`compiled.take` の前後関係を保ち書き戻す）・`SequentialVars::forward`・`SequentialVars::trainable_grads` は `InvalidArgument`。`init_device_param_store`・`forward_resident`・`predict_resident` は既存の常駐拒否とは別検査で `Unsupported`。学習側で `Unsupported`（`predict_recorded` のフォールバックの合図）は使わない。
+- **例外**: `bind`・`SequentialVars::trainable_vars` は signature 上 `Err` を返せず（非破壊要件）、独自層を含まない短い列を返しうる。後続の `forward`／`trainable_grads`／optimizer と `apply_parameters` の件数検査で塞がる。
+- **通過するもの**: 推論・`state_dict`／`load_state_dict`（キー `"{index}.{name}"`）・`apply_parameters`（独自層も実際に更新）・`evaluate`・無状態の独自層の学習／常駐経路。
+- **ガード**: `compat_sequential_does_not_expose_module_add_methods` は `sequential.rs` の `add_module` ちょうど 1 件のみ許容（`add_boxed`／`push_module` は禁止のまま）。正ガード `compat_sequential_add_module_is_sole_approved_entry` が承認済みシグネチャを固定する。
+- **申し送り**: (a)（パラメータ持ち独自層の学習対応）は `Module` trait の拡張が必要で別承認の対象。`freeze` 等の委譲は #2400／#2401、`docs/compat-api-scope.md` 台帳は #2403。
+
+## 18. 実装記録（イシュー #2401）
+
+- **追加**: facade `nn::Module` へ #2134 の defaulted メソッド 4 件（`children`・`named_modules`・`parameter_count`・`type_name`）を autodiff 側と同一意味論で鏡写し（§10 承認事項 6・2026-09-29 確定方針）。defaulted 6 件 → 10 件。required は増やさず公開面は追加のみ。`named_modules` は `(データポインタ, type_name)` キーの祖先スタック＋非 ZST の訪問済み集合 dedup（循環でも panic しない）、`parameter_count` は `saturating_add`。`NodeKey`・`collect_named_modules` は非公開。
+- **コンテナ**: `ModuleList::children` は `"{index}"`、`Sequential::children` は内側 `ModuleList` へ委譲。
+- **アダプタ（#2397）**: `type_name` は委譲する（autodiff 側表示に利用者層の型名を出すため）。`children` は委譲しない。facade の `&dyn Module` を借用のまま autodiff の `&dyn Module` へ変換するには所有アダプタ実体が要り、`unsafe`／リーク／保持構造なしには成立しないため。残存する非対称: autodiff の `named_modules` はアダプタで包んだ facade コンテナの内側へ降りない。
+- **テスト**: `crates/facade/tests/nn_module_introspection.rs`（ネスト順・ZST・offset 0・自己／間接循環・共有子・dyn 経由）、`nn/module.rs` の unit test（アダプタ）。`api_surface.rs` の defaulted 集合正ガードと自己テスト fixture を更新。否定ガード `compat_sequential_has_no_introspection_methods` は不変。
+- **範囲外**: `ModuleDict`・`summary`（#2402。§19 で実装済み）、`compat::Sequential` への委譲。
+
+## 19. 実装記録（イシュー #2402）
+
+- **追加**: `fandhe_ai::nn::{ModuleDict, summary}`（autodiff #2134 の鏡写し。§10 承認事項 6）。`src/nn/container.rs` に `ModuleDict`（挿入順 `Vec<(String, Box<dyn Module>)>`・キー検証〈空・`'.'` 拒否。文言は autodiff とバイト一致〉・`from_pairs`／`insert`／`remove`／`get`／`get_mut`／`contains_key`／`keys`／`iter`／`iter_mut`／`len`／`is_empty`）と `summary(&dyn Module) -> String` を置き、`nn/mod.rs` で既存行とは別の `pub use container::{ModuleDict, summary};` として公開する。公開面は追加のみ（semver minor 相当）。
+- **意味論**: `forward` は常に `InvalidArgument`、`children` はキー・挿入順、`named_parameters` は `"{key}.{name}"`、`set_parameter` は `split_once('.')` で振り分け（区切りなし・未知キーは `Err`）、`set_training` は全子へ伝播。`state_dict`／`load_state_dict` は既定実装に任せる。`summary` は循環を祖先スタックで打ち切り、非 ZST の共有子を `(ptr, type_name)` で dedup する（`NodeKey` を `pub(super)` にして `named_modules` と共有）。
+- **未実装（先行依存）**: `set_requires_grad`／`requires_grad` の伝播・ロールバックは #2400（PR #2426）が未マージで facade `Module` にメソッド自体が無いため実装していない。#2400 マージ後に `ModuleList` と同形（スナップショット・失敗子を含む逆順ロールバック・失敗集約）で追加する必要がある。
+- **テスト**: `tests/nn_module_dict_summary.rs`（facade のみ依存。`summary` の文字列形式を完全一致で固定〈葉ルート・ネスト・空辞書・ジェネリクス・複数 ZST・循環・共有子〉）、`container.rs` の in-crate parity（autodiff との `summary`・エラー文言・命名のバイト一致）。
+- **ガード**: `facade_does_not_reexport_module_dict_or_summary` を正ガード化（承認済みの `src/nn/mod.rs` の 1 形のみ許容・葉 2 件のインベントリ・自己テスト）。`LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `summary` を追加。`facade_declares_no_nn_module_items` は `struct ModuleDict` を `container.rs` のみ許容。`compat_sequential_has_no_introspection_methods` は不変。
+- **範囲外**: shape 推定・`extra_repr`、`compat::Sequential::summary()` への委譲、`docs/compat-api-scope.md` 台帳（#2403）。
+
+## 20. 実装記録（イシュー #2399）
 
 #2338 受け入れ条件 4（公開面の正ガードとユーザー定義層の統合テスト）をテストのみで実装した。`crates/facade/src/` は変更していない。
 
