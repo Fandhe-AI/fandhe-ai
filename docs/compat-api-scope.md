@@ -651,6 +651,13 @@ predict` と bit 完全一致）と内部クレート直接呼び出しとのバ
 検証済み。詳細な実装記録は `docs/facade-onnx-export-exposure-decision.md`
 §17 を参照。
 
+**適用記録（イシュー #2360・2026-09-29）**: `OnnxModel::from_path_with_limits`
+と `OnnxExternalDataLimits`（external data 読み込み予算。合計バイト上限・
+ファイル数上限）を facade へ追加した（新規公開面 2 件・追加のみ・
+`OnnxError` 不変・既定値不変）。`api_surface.rs` の承認範囲を 10 → 12 件、
+内部型名禁止リストを 10 → 12 件へ更新。詳細は
+`docs/facade-onnx-import-exposure-decision.md` §16。
+
 **適用記録（経路 2。イシュー #2065・親 #2059）**: `compat::Sequential`
 への `add_softmax`／`add_log_softmax`／`add_gelu`／`add_gelu_tanh`／
 `add_softplus`／`add_flatten` の 6 メソッド追加は、イシュー #2065 本文

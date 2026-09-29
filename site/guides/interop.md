@@ -46,6 +46,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+`from_path` は PyTorch の dynamo exporter が出力する external data
+（companion `.onnx.data`）も読み込めます。読み込み予算の既定は合計
+64 GiB・ファイル 4096 個で、低メモリ環境では `from_path_with_limits` で
+下げられます（超過モデルは確保前に `OnnxError::InvalidModel` で拒否）。
+
+```rust
+use fandhe_ai::interop::onnx::{OnnxExternalDataLimits, OnnxModel};
+
+let mut limits = OnnxExternalDataLimits::default();
+limits.max_total_bytes = 8 << 30; // 8 GiB
+let model = OnnxModel::from_path_with_limits("model.onnx", &limits)?;
+```
+
 **推論専用・ホスト CPU 実行のみ**（`OnnxModel::run` は `BackendOps`／
 `Device` を経由しないため GPU 実行にはなりません）で**autograd 未接続**
 （入出力は [`Tensor`](/api/)であり `Var` ではないため勾配は取れません）。

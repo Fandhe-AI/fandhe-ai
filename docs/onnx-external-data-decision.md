@@ -469,9 +469,10 @@ pass することを確認済み（prost は既定値のスカラーと空の re
   4 GiB の単一テンソルを宣言したモデルが下げた予算で確保前に拒否される
   ことを `sparse_file_huge_tensor_is_rejected_by_lowered_budget_before_
   allocation` で固定）。一方 facade `OnnxModel::from_path` は
-  `ExternalDataOptions::default()` 固定で、facade 利用者が予算を下げる
-  公開手段は無い（公開 API 面を変えないため本 P0 では追加しない。7 節の
-  起票候補）。この場合も確保失敗は abort ではなく
+  `ExternalDataOptions::default()` 固定のため、facade 利用者は
+  `OnnxModel::from_path_with_limits`＋`OnnxExternalDataLimits` で予算を
+  下げる（本 P0 では追加せず、イシュー #2360 へ切り出し済み・実装済み。
+  `docs/facade-onnx-import-exposure-decision.md` §16）。この場合も確保失敗は abort ではなく
   `OnnxError::Io(OutOfMemory)` になる。
 - **回帰テスト**: 数十 GiB の実確保は CI で危険なため行わない。
   `external_data.rs::alloc_tests`（`try_alloc_vec`／`alloc_region_buf` の
@@ -808,7 +809,9 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   確保へ是正済み）。
 - `checksum`（SHA-1）の検証。
 - `max_external_files` の既定値（4096）の承認（6 節）。
-- （2026-09-28・PR #2348 codex P0 是正に伴う起票候補。4.3 節）facade
+- （イシュー #2360 へ切り出し済み・実装済み・2026-09-29。
+  `OnnxModel::from_path_with_limits`／`OnnxExternalDataLimits`）
+  （2026-09-28・PR #2348 codex P0 是正に伴う起票候補。4.3 節）facade
   `OnnxModel::from_path` から `max_total_bytes` を下げる公開手段（現状は
   `ExternalDataOptions::default()` 固定。公開 API 面の追加にはユーザー
   承認が要る）。
