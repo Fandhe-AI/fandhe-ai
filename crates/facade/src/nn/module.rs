@@ -4,7 +4,7 @@
 //! 定義するための土台である（`fandhe_ai_autodiff::nn::Module::forward` は生の
 //! `fandhe_ai_autodiff::Tape` を引数に取るため facade 利用者は名指しできない。
 //! `docs/facade-nn-module-exposure-decision.md` §1.3）。#2338 承認事項 1（案 B）・
-//! 2（required `forward` ＋ defaulted 6 件。#2400 で凍結 API 3 件・#2401 で introspection 4 件を追加し 13 件＋封印内部フック 2 件）・4（`forward` 第 1 引数は
+//! 2（required `forward` ＋ defaulted 6 件。#2400 で凍結 API 3 件・#2401 で introspection 4 件・#2400 の葉単位ロールバック用に `children_mut` を追加し 14 件）・4（`forward` 第 1 引数は
 //! [`crate::TapeRef`]）に従う。
 //!
 //! REQ-12: 生の `Tape`・`BackendOps`・内部層型（`as_*`・`forward_host`・
@@ -31,14 +31,15 @@ use crate::{AutodiffError, TapeRef, Tensor, Var};
 
 /// facade 利用者が独自層を定義するための共通 forward シグネチャ。
 ///
-/// required は [`Self::forward`] の 1 件、defaulted は 15 件（うち 2 件は封印トークン付き `#[doc(hidden)]` 内部フック）
-/// （[`Self::named_parameters`]・[`Self::set_parameter`]・[`Self::state_dict`]・
+/// required は [`Self::forward`] の 1 件、defaulted は 14 件
 /// （[`Self::named_parameters`]・[`Self::set_parameter`]・[`Self::state_dict`]・
 /// [`Self::load_state_dict`]・[`Self::set_training`]・[`Self::training`]・
 /// [`Self::set_requires_grad`]・[`Self::freeze`]・[`Self::requires_grad`]・
-/// [`Self::children`]・[`Self::named_modules`]・[`Self::parameter_count`]・
-/// [`Self::type_name`]。`children` 以降 4 件は autodiff `Module`（#2134）の同名メソッドの
-/// 鏡写し、イシュー #2401）。
+/// [`Self::children`]・[`Self::children_mut`]・[`Self::named_modules`]・
+/// [`Self::parameter_count`]・[`Self::type_name`]。`children`・`named_modules`・
+/// `parameter_count`・`type_name` の 4 件は autodiff `Module`（#2134）の同名メソッドの
+/// 鏡写し〈イシュー #2401〉、`children_mut` は `set_requires_grad` の葉単位ロールバック用に
+/// `children` と対で実装する facade 独自のメソッド〈#2400〉）。
 /// 出典は `crates/autodiff/src/nn/module.rs` で、`tests/api_surface.rs` が
 /// この集合を機械的に固定する。
 pub trait Module {
