@@ -206,7 +206,8 @@ pub trait Module {
     /// 変更する前に `InvalidArgument` で拒否する（fail-closed）。`children` と同じ子への参照を
     /// 同じ順で返すこと（名前が同じでも別の子オブジェクトを返してはならない）。参照先の同一性
     /// （データアドレス・サイズ）が食い違う場合も `set_requires_grad` は状態変更前に
-    /// `InvalidArgument` を返す。復元は複合層自身へ
+    /// `InvalidArgument` を返す。復元時も参照先の同一性を照合し、処理中に差し替わった子は復元せず
+    /// 部分適用エラーにする（PR #2426 第 6 回レビュー P1 是正）。復元は複合層自身へ
     /// `set_requires_grad` を呼んだ後に本メソッドの子を葉単位で戻す順（[`Self::set_requires_grad`]
     /// 参照）。既定は空（葉モジュール向け）。
     fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {

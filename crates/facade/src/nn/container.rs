@@ -43,7 +43,10 @@ pub(crate) enum RequiresGradSnapshot {
     Leaf(bool),
     Nested {
         own: bool,
-        children: Vec<(String, RequiresGradSnapshot)>,
+        /// 取得時点の子の同一性キー（名前・データアドレス・サイズ）と葉単位スナップショット。
+        /// 復元時にも同位置の子と照合し、処理中に差し替わった子へは復元しない
+        /// （PR #2426 第 6 回レビュー P1）。
+        children: Vec<(ChildIdentity, RequiresGradSnapshot)>,
     },
 }
 
@@ -76,7 +79,8 @@ pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(
         check_children_consistent(type_name, &identities, &children)?;
         children
             .into_iter()
-            .map(|(name, child)| Ok((name, snapshot_requires_grad(child)?)))
+            .zip(identities)
+            .map(|((_, child), identity)| Ok((identity, snapshot_requires_grad(child)?)))
             .collect::<Result<Vec<_>, AutodiffError>>()?
     };
     if nested.is_empty() {
@@ -127,7 +131,9 @@ fn check_children_consistent(
 /// そのまま返す。入れ子は先に自身へ `set_requires_grad(own)` を呼び、その後に子を復元する
 /// （自身の呼び出しが子へ伝播した値は子の復元で上書きされる）。自身・子のどれかが失敗しても
 /// 残りの復元を続行し、失敗を集約する。
-/// 子の件数・名前が食い違う場合は fail-closed の `InvalidArgument`。
+/// 各子は名前・データアドレス・`size_of_val` を取得時の同一性キーと照合し、差し替わった子へは
+/// 復元せず（別の子を書き換えない）部分適用を明示した `InvalidArgument` に集約する。
+/// 子の件数が食い違う場合も fail-closed の `InvalidArgument`（self は復元済みの部分適用）。
 pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
     module: &mut M,
     snapshot: &RequiresGradSnapshot,
@@ -145,16 +151,36 @@ pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
             }
             let children = module.children_mut();
             if children.len() != expected.len() {
+                let self_note = if failures.is_empty() {
+                    "self was already restored"
+                } else {
+                    "self restore was attempted"
+                };
                 return Err(AutodiffError::InvalidArgument(format!(
-                    "restore_requires_grad: child count mismatch (snapshot {}, actual {})",
+                    "restore_requires_grad: child count changed during rollback (snapshot {}, \
+                     actual {}); {self_note} but no child could be restored, so the module may \
+                     be left in a partially applied state{}",
                     expected.len(),
-                    children.len()
+                    children.len(),
+                    if failures.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", failures.join(", "))
+                    }
                 )));
             }
-            for ((name, child), (expected_name, snap)) in children.into_iter().zip(expected) {
-                if &name != expected_name {
+            for ((name, child), ((exp_name, exp_addr, exp_size), snap)) in
+                children.into_iter().zip(expected)
+            {
+                // 名前だけでなく参照先（アドレス・サイズ）も照合する。差し替わった子へは
+                // スナップショットを適用せず（別の子を書き換えない）失敗として集約する。
+                let same = &name == exp_name
+                    && *exp_addr == (&*child as *const dyn Module as *const ())
+                    && *exp_size == std::mem::size_of_val(&*child);
+                if !same {
                     failures.push(format!(
-                        "child `{name}` (snapshot expected `{expected_name}`; structure changed)"
+                        "child `{exp_name}` (its reference changed during freezing, so it \
+                         was not restored: the module was left partially applied)"
                     ));
                     continue;
                 }
@@ -165,7 +191,11 @@ pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
             if failures.is_empty() {
                 Ok(())
             } else {
-                Err(AutodiffError::InvalidArgument(failures.join(", ")))
+                Err(AutodiffError::InvalidArgument(format!(
+                    "restore_requires_grad: rollback incomplete, the module may be left in a \
+                     partially applied state: {}",
+                    failures.join(", ")
+                )))
             }
         }
     }
@@ -1359,6 +1389,97 @@ mod tests {
         );
     }
 
+    /// 凍結処理中に `children_mut` の参照先が別の子へ切り替わる複合層をアダプタ経由で autodiff
+    /// `ModuleList` に積んだ経路（PR #2426 第 6 回レビュー P1）。部分適用を示す `Err` が返り、
+    /// 元エラーも含まれ、別の子 `b` へスナップショットの値は適用されない。
+    #[test]
+    fn adapter_in_autodiff_module_list_detects_child_swapped_during_freeze() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        struct Sl {
+            p: Tensor<f32>,
+            rg: Rc<Cell<bool>>,
+        }
+        impl Module for Sl {
+            fn forward<'t>(
+                &self,
+                _tape: TapeRef<'t>,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                Ok(*input)
+            }
+            fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+                vec![("p".into(), &self.p)]
+            }
+            fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+                self.rg.set(v);
+                Ok(())
+            }
+            fn requires_grad(&self) -> bool {
+                self.rg.get()
+            }
+        }
+        struct Sw {
+            a: Sl,
+            b: Sl,
+            switched: bool,
+        }
+        impl Module for Sw {
+            fn forward<'t>(
+                &self,
+                _tape: TapeRef<'t>,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                Ok(*input)
+            }
+            fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+                self.a.named_parameters()
+            }
+            fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+                self.switched = true;
+                if !v {
+                    self.b.set_requires_grad(false)?;
+                    self.a.set_requires_grad(false)?;
+                }
+                Ok(())
+            }
+            fn requires_grad(&self) -> bool {
+                self.a.requires_grad() || self.b.requires_grad()
+            }
+            fn children(&self) -> Vec<(String, &dyn Module)> {
+                let c = if self.switched { &self.b } else { &self.a };
+                vec![("x".into(), c)]
+            }
+            fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+                let c = if self.switched {
+                    &mut self.b
+                } else {
+                    &mut self.a
+                };
+                vec![("x".into(), c)]
+            }
+        }
+        let mk = |v: bool| Sl {
+            p: Tensor::from_slice(&[1.0f32, 2.0], &[2]).expect("p"),
+            rg: Rc::new(Cell::new(v)),
+        };
+        let b = mk(false);
+        let b_rg = Rc::clone(&b.rg);
+        let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
+        outer.push(Box::new(adapted(Sw {
+            a: mk(true),
+            b,
+            switched: false,
+        })));
+        outer.push(Box::new(adapted(failing_fz())));
+        let e = fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false)
+            .expect_err("後続子が失敗しロールバックも不完全");
+        let msg = e.to_string();
+        assert!(msg.contains("partially applied"), "{msg}");
+        assert!(msg.contains("child failed"), "元エラーも含む: {msg}");
+        assert!(!b_rg.get(), "別の子 b へスナップショットの値を適用しない");
+    }
+
     /// 同名で別の子を `children_mut` から返す複合層をアダプタ経由で積むと、状態変更前に
     /// `InvalidArgument` で拒否され全葉が不変（PR #2426 第 5 回レビュー P1。autodiff `ModuleList`）。
     #[test]
@@ -1422,15 +1543,21 @@ mod tests {
         let snap = RequiresGradSnapshot::Nested {
             own: true,
             children: vec![
-                ("0".to_string(), RequiresGradSnapshot::Leaf(true)),
-                ("1".to_string(), RequiresGradSnapshot::Leaf(true)),
+                (
+                    ("0".to_string(), std::ptr::null(), 0),
+                    RequiresGradSnapshot::Leaf(true),
+                ),
+                (
+                    ("1".to_string(), std::ptr::null(), 0),
+                    RequiresGradSnapshot::Leaf(true),
+                ),
             ],
         };
         let e = restore_requires_grad(&mut l, &snap).expect_err("不一致");
-        assert!(e.to_string().contains("count mismatch"), "{e}");
+        assert!(e.to_string().contains("child count changed"), "{e}");
         let mut leaf = fz(true);
         let e = restore_requires_grad(&mut leaf, &snap).expect_err("葉");
-        assert!(e.to_string().contains("count mismatch"), "{e}");
+        assert!(e.to_string().contains("child count changed"), "{e}");
     }
 
     fn relu_box() -> Box<dyn Module> {

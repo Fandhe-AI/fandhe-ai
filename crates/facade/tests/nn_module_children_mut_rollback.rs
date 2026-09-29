@@ -6,7 +6,7 @@
 //! 検証する。facade の公開面だけに依存する（外部利用者視点。`fandhe_ai_autodiff` は import しない）。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fandhe_ai::nn::{Module, ModuleDict, ModuleList, Sequential};
 use fandhe_ai::{AutodiffError, TapeRef, Tensor, Var};
@@ -495,4 +495,106 @@ fn sequential_and_dict_restore_composite_own_flag_after_failure() {
     assert!(c.requires_grad(), "自身のフラグが戻る");
     assert!(forward_leaf_is_tracked(*c));
     assert_eq!(leaf_states(&dict), before);
+}
+
+/// 状態を外部から観測できる葉（`rg` を共有する）。
+struct SharedLeaf {
+    p: Tensor<f32>,
+    rg: Arc<AtomicBool>,
+}
+
+impl SharedLeaf {
+    fn new(rg: &Arc<AtomicBool>) -> Self {
+        Self {
+            p: Tensor::from_slice(&[1.0f32, 2.0], &[2]).expect("p"),
+            rg: Arc::clone(rg),
+        }
+    }
+}
+
+impl Module for SharedLeaf {
+    fn forward<'t>(&self, _tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(*input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        vec![("p".into(), &self.p)]
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.rg.store(v, Ordering::SeqCst);
+        Ok(())
+    }
+    fn requires_grad(&self) -> bool {
+        self.rg.load(Ordering::SeqCst)
+    }
+}
+
+/// `children`／`children_mut` は通常子 `a` を返すが、自身の `set_requires_grad` が呼ばれると
+/// 以後は同名の別フィールド `b` を返すよう切り替わる利用者定義の複合層（PR #2426 第 6 回
+/// レビュー P1）。`false` の伝播は `b`→`a` の順で両方へ、`true` は自身では子へ伝播しない
+/// （復元時の自身への呼び出しが子の状態を書き換えず、別の子へ適用されたかを判別できるようにする）。
+struct SwitchingComposite {
+    a: Box<dyn Module>,
+    b: Box<dyn Module>,
+    switched: bool,
+}
+
+impl Module for SwitchingComposite {
+    fn forward<'t>(&self, _tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(*input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.a.named_parameters()
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.switched = true;
+        if !v {
+            self.b.set_requires_grad(false)?;
+            self.a.set_requires_grad(false)?;
+        }
+        Ok(())
+    }
+    fn requires_grad(&self) -> bool {
+        self.a.requires_grad() || self.b.requires_grad()
+    }
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        let c = if self.switched { &self.b } else { &self.a };
+        vec![("x".into(), c.as_ref())]
+    }
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        let c = if self.switched {
+            &mut self.b
+        } else {
+            &mut self.a
+        };
+        vec![("x".into(), c.as_mut())]
+    }
+}
+
+/// 凍結処理中に `children_mut` の参照先が別の子へ切り替わっても、ロールバックは偽の `Ok` や
+/// 元エラーだけを返さず、部分適用を示す `Err` を返し、別の子 `b` へスナップショットの値
+/// （`a` の取得時の値 `true`）を適用しない。
+#[test]
+fn rollback_detects_child_swapped_during_freeze() {
+    let a_rg = Arc::new(AtomicBool::new(true));
+    let b_rg = Arc::new(AtomicBool::new(false));
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(SwitchingComposite {
+        a: Box::new(SharedLeaf::new(&a_rg)),
+        b: Box::new(SharedLeaf::new(&b_rg)),
+        switched: false,
+    }));
+    list.push(Box::new(Leaf::failing(&calls)));
+
+    let e = list
+        .freeze()
+        .expect_err("後続子が失敗しロールバックも不完全");
+    let msg = e.to_string();
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{msg}");
+    assert!(msg.contains("partially applied"), "部分適用の明示: {msg}");
+    assert!(msg.contains("leaf failed"), "元エラーも含む: {msg}");
+    assert!(
+        !b_rg.load(Ordering::SeqCst),
+        "別の子 b へスナップショットの値を適用しない"
+    );
 }
