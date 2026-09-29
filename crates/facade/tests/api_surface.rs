@@ -18821,3 +18821,230 @@ fn onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module() {
         assert_ne!(facade_crate_root().join("src/nn").join(file), onnx_path);
     }
 }
+// =====================================================================
+// イシュー #2372（親 #2362）: `fandhe_ai_autodiff::nn::optim::amp::
+// grad_scaler_from_state` が facade の公開面に現れないことの固定（AC4）。
+//
+// `save_model`／`load_model`（`compat::model_io`）は GradScaler の状態を復元するため内部クレートの
+// 自由関数 `grad_scaler_from_state` を呼ぶが、これを facade へ再エクスポートすると公開面が広がる
+// （inherent メソッドにしなかった理由は同関数の doc 参照）。3 層で固定する:
+//   1. facade src の `pub use`・宣言のソース走査（否定ガード。自己テスト付き）
+//   2. workspace 全体の `fn grad_scaler_from_state` 宣言インベントリ
+//   3. コンパイル時の正のプローブ（inherent 追加・glob 漏出をコンパイルエラーで検出）
+// stable rustdoc は `compile_fail` のエラーコードを照合しないため doctest には頼らない。
+// =====================================================================
+
+/// facade src が `grad_scaler_from_state`／`amp` モジュールを `pub use`（別名・group 経由含む）、
+/// または `nn::optim`／`amp` への glob `pub use` で再エクスポートするか、
+/// `fn grad_scaler_from_state` を宣言していれば違反を返す。
+fn scan_grad_scaler_from_state_leaks(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for token in path_tokens {
+                if token == "grad_scaler_from_state" || token == "amp" {
+                    offending.push(format!("pub use path segment={token}"));
+                }
+            }
+            // glob（`optim::*`・`amp::*`）は `amp` の項目を漏らしうる。
+            for (idx, token) in path_tokens.iter().enumerate() {
+                if token == "*"
+                    && idx >= 3
+                    && path_tokens[idx - 1] == ":"
+                    && path_tokens[idx - 2] == ":"
+                    && matches!(path_tokens[idx - 3].as_str(), "optim" | "amp")
+                {
+                    offending.push(format!("{} への glob pub use", path_tokens[idx - 3]));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        i += 1;
+    }
+    if count_fn_declarations_by_name(&tokens, "grad_scaler_from_state") > 0 {
+        offending.push("fn grad_scaler_from_state 宣言".to_string());
+    }
+    offending
+}
+
+#[test]
+fn facade_does_not_reexport_or_declare_grad_scaler_from_state() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_grad_scaler_from_state_leaks(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が grad_scaler_from_state（イシュー #2372・内部クレート限定）を再エクスポート、\
+         または宣言している: {offending:?}"
+    );
+}
+
+#[test]
+fn facade_does_not_reexport_or_declare_grad_scaler_from_state_detects_each_category() {
+    let leaks = scan_grad_scaler_from_state_leaks;
+    // 正例: 単行・group・別名・モジュール・glob・宣言。
+    for src in [
+        "pub use fandhe_ai_autodiff::nn::optim::amp::grad_scaler_from_state;",
+        "pub use fandhe_ai_autodiff::nn::optim::amp::{scale_loss, grad_scaler_from_state};",
+        "pub use fandhe_ai_autodiff::nn::optim::amp::grad_scaler_from_state as f;",
+        "pub use fandhe_ai_autodiff::nn::optim::amp;",
+        "pub use fandhe_ai_autodiff::nn::optim::amp::*;",
+        "pub use fandhe_ai_autodiff::nn::optim::*;",
+        "pub fn grad_scaler_from_state() {}",
+    ] {
+        assert!(!leaks(src).is_empty(), "検出されなかった: {src}");
+    }
+    // 負例: コメント・文字列リテラル・非公開 use・無関係な pub use・承認済みの GradScaler 系。
+    for src in [
+        "// pub use x::grad_scaler_from_state;",
+        "let s = \"grad_scaler_from_state\";",
+        "use fandhe_ai_autodiff::nn::optim::amp::grad_scaler_from_state;",
+        "pub use fandhe_ai_autodiff::nn::optim::AdamW;",
+        "pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};",
+        "fn call() { grad_scaler_from_state(c, 1.0, 0); }",
+    ] {
+        assert!(leaks(src).is_empty(), "誤検出: {src}");
+    }
+}
+
+/// workspace 全体で `fn grad_scaler_from_state` の宣言が内部クレートの 1 か所だけであることを固定する
+/// （facade からの呼び出しは宣言ではないため対象外）。
+#[test]
+fn workspace_declares_grad_scaler_from_state_only_in_autodiff_amp() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .unwrap_or_else(|e| panic!("crates ディレクトリが読めない: {e}"))
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象を見失っている");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let count = count_fn_declarations_by_name(&tokens, "grad_scaler_from_state");
+            if count > 0 {
+                let rel = path
+                    .strip_prefix(&crates_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                *found.entry(rel).or_insert(0) += count;
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> =
+        [("autodiff/src/nn/optim/amp.rs".to_string(), 1usize)]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        found, expected,
+        "grad_scaler_from_state の宣言集合が期待と一致しない"
+    );
+}
+
+/// 正のプローブ 1（型パス）: `GradScaler` に同名のローカル trait 関数を生やし、型パス呼び出しの
+/// 戻り値を `Marker` に束縛する。将来 inherent の `from_state`／`grad_scaler_from_state` が facade
+/// 経由の `GradScaler` に加わると、inherent が trait より優先されて戻り値型が変わり、
+/// このモジュールがコンパイルできなくなる（fail-closed）。
+mod grad_scaler_from_state_type_path_probe {
+    pub struct Marker;
+    pub trait FromStateProbe {
+        fn from_state() -> Marker;
+        fn grad_scaler_from_state() -> Marker;
+    }
+    impl FromStateProbe for fandhe_ai::optim::GradScaler {
+        fn from_state() -> Marker {
+            Marker
+        }
+        fn grad_scaler_from_state() -> Marker {
+            Marker
+        }
+    }
+    pub fn probe() -> (Marker, Marker) {
+        (
+            <fandhe_ai::optim::GradScaler as FromStateProbe>::from_state(),
+            fandhe_ai::optim::GradScaler::grad_scaler_from_state(),
+        )
+    }
+}
+
+/// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
+const GRAD_SCALER_PROBE_MODULES: [&str; 9] = [
+    "compat",
+    "data",
+    "interop",
+    "interop::onnx",
+    "interop::safetensors",
+    "model",
+    "nn",
+    "nn::rnn",
+    "optim",
+];
+
+/// 正のプローブ 2（glob 漏出）: ローカルの同名自由関数と facade の各公開モジュールを `pub use` の
+/// glob で並べ、呼び出しの曖昧性（E0659）で漏出を検出する。漏出すると `api_surface` のテスト
+/// バイナリ全体がビルドに失敗するが、fail-closed として受け入れる。
+/// 漏出がない正常時はどの glob も名前を供給しないため、`unused_imports` はこの probe の存在意義そのもの
+/// （未使用であることが期待状態）であり、このモジュール限定で許可する。
+#[allow(unused_imports)]
+mod grad_scaler_from_state_glob_probe {
+    pub struct Marker;
+    mod local {
+        pub fn grad_scaler_from_state() -> super::Marker {
+            super::Marker
+        }
+    }
+    pub use self::local::*;
+    pub use fandhe_ai::compat::*;
+    pub use fandhe_ai::data::*;
+    pub use fandhe_ai::interop::onnx::*;
+    pub use fandhe_ai::interop::safetensors::*;
+    pub use fandhe_ai::interop::*;
+    pub use fandhe_ai::model::*;
+    pub use fandhe_ai::nn::rnn::*;
+    pub use fandhe_ai::nn::*;
+    pub use fandhe_ai::optim::*;
+    pub use fandhe_ai::*;
+
+    pub fn probe() -> Marker {
+        grad_scaler_from_state()
+    }
+}
+
+#[test]
+fn grad_scaler_from_state_positive_probes_compile_and_glob_list_matches_lib_rs() {
+    let _ = grad_scaler_from_state_type_path_probe::probe();
+    let _ = grad_scaler_from_state_glob_probe::probe();
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let probed: std::collections::BTreeSet<String> = GRAD_SCALER_PROBE_MODULES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        declared, probed,
+        "facade の pub mod 集合と glob probe の一覧がドリフトしている。\
+         新しい pub mod を足したら GRAD_SCALER_PROBE_MODULES と \
+         grad_scaler_from_state_glob_probe の `pub use` を更新すること"
+    );
+}

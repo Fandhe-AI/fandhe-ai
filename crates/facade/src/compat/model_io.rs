@@ -9,14 +9,20 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 未 `compile` の `Sequential` で、層が `add_*` 30 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 30 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
+//! `compile`／`compile_with_amp` 済みのモデルは、loss 種別・optimizer 種別と現在の config・
+//! optimizer 内部状態（safetensors の `optimizer.` 接頭辞）・AMP の GradScaler 状態を
+//! manifest の `compiled` 節（`compiled` サブモジュール）へ記録し、bit 一致で復元する
+//! （対象は `Sgd`・`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`。イシュー #2372）。
+//! `optimizer_state_keys` は配列長上限（`MAX_ARRAY_LEN`）に数えられるため、パラメータ数の
+//! 多いモデルは `save_model` が書き込み前に `TooLarge` で拒否する。
 //! 次は `save_model` が [`ModelIoError::UnsupportedModel`]／[`ModelIoError::TooLarge`] で拒否し、
 //! `dir` には何も作らない（fail-closed。REQ-7 の無言 skip 禁止）:
 //!
-//! - `add_module` の利用者定義層・`compile` 済みモデル（compile 状態は #2372・#2373）
+//! - `add_module` の利用者定義層・`Lbfgs` で `compile` 済みのモデル（#2373）
 //! - running stats（buffer）が初期値でない BatchNorm（buffer の保存は #2371 まで暫定拒否）
 //! - dropout・BatchNorm の層のモードがモデル全体と食い違うモデル（load が全層を
 //!   `manifest.training` へ揃えるため復元後に forward がずれる）
@@ -60,6 +66,12 @@ use std::path::Path;
 
 use fandhe_ai_autodiff::AutodiffError;
 
+mod compiled;
+
+use self::compiled::{
+    CompiledMeta, OPTIMIZER_PREFIX, check_slot_shapes, parse_compiled, render_compiled,
+    split_optimizer_tensors,
+};
 use super::sequential::{LayerSpec, Sequential};
 use crate::Tensor;
 use crate::fs_guard::{LeafError, MAX_MODEL_FILE_BYTES, OpenedLeaf, open_leaf_checked};
@@ -666,17 +678,19 @@ struct PreparedSave {
     training: bool,
     specs: Vec<LayerSpec>,
     parameter_keys: Vec<(String, Vec<usize>)>,
+    /// compile 済みモデルの manifest `compiled` 節（未 compile は `None`。イシュー #2372）。
+    compiled: Option<CompiledMeta>,
     safetensors: Vec<u8>,
 }
 
 /// 保存前の検証をすべて行い、書き込むバイト列と manifest の材料を返す。
 /// ここで失敗すれば `dir` には一切触れていない（受入基準「`dir` に何も残らない」）。
 fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
-    if model.compiled.is_some() {
-        return Err(ModelIoError::UnsupportedModel {
-            reason: "compile 済みのモデルは保存できません（compile 状態の保存は未対応）".into(),
-        });
-    }
+    let snapshot = model.snapshot_compiled().map_err(ModelIoError::Autodiff)?;
+    let compiled = snapshot
+        .as_ref()
+        .map(CompiledMeta::from_snapshot)
+        .transpose()?;
     let specs = model.specs();
     if specs.len() != model.layers().len() {
         return Err(ModelIoError::UnsupportedModel {
@@ -714,6 +728,21 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
             reason: "state_dict のキー・shape が層構成から導いた期待と一致しません".into(),
         });
     }
+    // optimizer 内部状態は `optimizer.` 接頭辞を付けて同じ safetensors へ合流させる
+    // （パラメータのキーは `{層番号}.{名前}` で衝突しない）。
+    let mut state = state;
+    if let Some(snap) = snapshot {
+        for (key, tensor) in snap.optimizer_state {
+            if state
+                .insert(format!("{OPTIMIZER_PREFIX}{key}"), tensor)
+                .is_some()
+            {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: "optimizer 状態のキーがパラメータのキーと衝突しました".into(),
+                });
+            }
+        }
+    }
     let safetensors = save_safetensors_f32_to_bytes(&state, None)
         .map_err(|e| ModelIoError::Safetensors(e.to_string()))?;
     if safetensors.len() as u64 > MAX_MODEL_FILE_BYTES {
@@ -727,6 +756,7 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
         training: model.training(),
         specs: specs.to_vec(),
         parameter_keys: expected,
+        compiled,
         safetensors,
     };
     verify_round_trip(&prepared)?;
@@ -841,9 +871,13 @@ fn verify_round_trip(prepared: &PreparedSave) -> Result<(), ModelIoError> {
             .iter()
             .zip(&prepared.specs)
             .all(|(a, b)| spec_kind(a) == spec_kind(b) && render_params(a) == render_params(b));
+    // compiled 節は描画文字列の完全一致で比較する（f32 は `{:?}` の最短往復表現＝bit 一致）。
+    let same_compiled = parsed.compiled.as_ref().map(render_compiled)
+        == prepared.compiled.as_ref().map(render_compiled);
     if parsed.training != prepared.training
         || parsed.parameter_keys != prepared.parameter_keys
         || !same_specs
+        || !same_compiled
     {
         return Err(ModelIoError::UnsupportedModel {
             reason: "保存する構成と読み戻した構成が一致しません".into(),
@@ -853,7 +887,8 @@ fn verify_round_trip(prepared: &PreparedSave) -> Result<(), ModelIoError> {
 }
 
 /// manifest v1 を決定的な文字列にする（キー順固定・文字列はエスケープ不要な
-/// プログラム生成の ASCII のみ）。`compiled` は `null`・`buffer_keys` は `[]`
+/// プログラム生成の ASCII のみ）。`compiled` は未 compile なら `null`、compile 済みなら
+/// [`compiled::render_compiled`] の object。`buffer_keys` は `[]`
 /// （本バージョンの対応範囲。キー集合自体は将来拡張のため確定済み）。
 fn render_manifest(p: &PreparedSave, safetensors_file: &str, safetensors_bytes: u64) -> String {
     let mut s = String::new();
@@ -883,8 +918,12 @@ fn render_manifest(p: &PreparedSave, safetensors_file: &str, safetensors_bytes: 
             dims.join(",")
         ));
     }
+    let compiled = p
+        .compiled
+        .as_ref()
+        .map_or_else(|| "null".to_string(), render_compiled);
     s.push_str(&format!(
-        "],\"buffer_keys\":[],\"safetensors_file\":\"{safetensors_file}\",\"safetensors_bytes\":{safetensors_bytes},\"compiled\":null}}"
+        "],\"buffer_keys\":[],\"safetensors_file\":\"{safetensors_file}\",\"safetensors_bytes\":{safetensors_bytes},\"compiled\":{compiled}}}"
     ));
     s
 }
@@ -1072,9 +1111,24 @@ fn load_from_dir_with_limits(
     let bytes = opened
         .read_exact_len()
         .map_err(map_leaf_error("model safetensors"))?;
-    let tensors = load_safetensors_f32_from_bytes(&bytes)
+    let mut tensors = load_safetensors_f32_from_bytes(&bytes)
         .map_err(|e| ModelIoError::Safetensors(e.to_string()))?;
     drop(bytes);
+
+    // optimizer 状態（`optimizer.` 接頭辞）を取り分け、manifest の `optimizer_state_keys` と
+    // 完全一致することを確認する。`compiled == null` なのに存在する場合も拒否する
+    // （無言 skip をしない。REQ-7）。
+    let (optimizer_full_keys, optimizer_state) = split_optimizer_tensors(&mut tensors);
+    let expected_optimizer_keys: &[String] = manifest
+        .compiled
+        .as_ref()
+        .map_or(&[], |c| c.state_keys.as_slice());
+    if optimizer_full_keys != expected_optimizer_keys {
+        return Err(ModelIoError::Mismatch {
+            message: "safetensors の optimizer 状態のキー集合が manifest の optimizer_state_keys と一致しません"
+                .into(),
+        });
+    }
 
     // キー集合と shape の完全一致（無言 skip をしない。REQ-7）。
     let consistent = tensors.len() == manifest.parameter_keys.len()
@@ -1096,6 +1150,14 @@ fn load_from_dir_with_limits(
         .load_state_dict(tensors)
         .map_err(ModelIoError::Autodiff)?;
     model.set_training(manifest.training);
+    if let Some(meta) = manifest.compiled {
+        // optimizer の load はスロット内の整合しか見ないため、パラメータとの数・shape の
+        // 照合は先にここで行う。復元は construct-before-assign（失敗時は部分状態を返さない）。
+        check_slot_shapes(&optimizer_state, &model.trainable_parameters())?;
+        model
+            .restore_compiled(meta.into_snapshot(optimizer_state))
+            .map_err(ModelIoError::Autodiff)?;
+    }
     Ok(model)
 }
 
@@ -1275,6 +1337,7 @@ struct ParsedManifest {
     parameter_keys: Vec<(String, Vec<usize>)>,
     safetensors_file: String,
     safetensors_bytes: u64,
+    compiled: Option<CompiledMeta>,
 }
 
 /// 本形式が受理する JSON 値（非負整数・小数の生字句・エスケープなし文字列・bool・null・配列・object）。
@@ -1630,12 +1693,17 @@ struct Params<'a> {
 
 impl<'a> Params<'a> {
     fn new(params: &'a Json, keys: &[&str]) -> Result<Self, ModelIoError> {
-        exact_fields(params, "layers[].params", keys)?;
+        Self::named("layers[].params", params, keys)
+    }
+
+    /// [`Params::new`] のエラー文言の対象名を指定できる版（compiled 節の config 等。イシュー #2372）。
+    fn named(ctx: &str, params: &'a Json, keys: &[&str]) -> Result<Self, ModelIoError> {
+        exact_fields(params, ctx, keys)?;
         match params {
             Json::Obj(entries) => Ok(Params { entries }),
-            _ => Err(manifest_error(
-                "layers[].params は object である必要があります",
-            )),
+            _ => Err(manifest_error(format!(
+                "{ctx} は object である必要があります"
+            ))),
         }
     }
 
@@ -2024,11 +2092,6 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
             reason: "buffer_keys を持つモデルは未対応です".into(),
         });
     }
-    if !matches!(f[9], Json::Null) {
-        return Err(ModelIoError::UnsupportedModel {
-            reason: "compile 済みモデル（compiled が null でない）は未対応です".into(),
-        });
-    }
     if !is_valid_safetensors_file_name(safetensors_file) {
         return Err(manifest_error(
             "safetensors_file が model.<32 桁 16 進>.safetensors の形式ではありません",
@@ -2060,12 +2123,15 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
         });
     }
 
+    let compiled = parse_compiled(f[9])?;
+
     Ok(ParsedManifest {
         training: *training,
         specs,
         parameter_keys: keys,
         safetensors_file: safetensors_file.to_string(),
         safetensors_bytes,
+        compiled,
     })
 }
 
@@ -2627,10 +2693,7 @@ mod tests {
         let with_unknown = good.replacen("\"training\"", "\"extra\":1,\"training\"", 1);
         assert!(is_manifest_err(parse_manifest(with_unknown.as_bytes())));
         let compiled = good.replace("\"compiled\":null", "\"compiled\":{}");
-        assert!(matches!(
-            parse_manifest(compiled.as_bytes()),
-            Err(ModelIoError::UnsupportedModel { .. })
-        ));
+        assert!(is_manifest_err(parse_manifest(compiled.as_bytes())));
         let buffers = good.replace("\"buffer_keys\":[]", "\"buffer_keys\":[{}]");
         assert!(matches!(
             parse_manifest(buffers.as_bytes()),
@@ -2775,6 +2838,7 @@ mod tests {
             training: true,
             parameter_keys: expected_parameter_keys(&specs),
             specs,
+            compiled: None,
             safetensors: Vec::new(),
         };
         let text = render_manifest(
