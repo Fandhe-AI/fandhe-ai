@@ -3992,10 +3992,11 @@ pub fn compile_ptx(src: &str, arch: &str) -> Result<Ptx, CudaError> {
     compile_ptx_with_opts(src, base).map_err(CudaError::from)
 }
 
-// ディスクキャッシュ I/O（`cfg(unix)` 限定）を前提とするため `cfg(all(test, unix))`。
-// 非 unix ではキャッシュ本体が無効でテストが参照する項目が存在しない
-// （`docs/facade-windows-build-decision.md`）。
-#[cfg(all(test, unix))]
+// 実機非依存テスト（descriptor 入力検証・キャッシュキー生成・パス正規化・
+// pipeline stages 境界値検証）は非 unix でも実行するため `cfg(test)` とする。
+// ディスクキャッシュ I/O（`cfg(unix)` 限定）を参照するテストと専用ヘルパーだけ
+// 個別に `#[cfg(unix)]` を付ける（`docs/facade-windows-build-decision.md`）。
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::collections::hash_map::DefaultHasher;
@@ -5321,6 +5322,7 @@ mod tests {
     /// `jit_cache_bench_tests::fresh_temp_dir` と同じ方式（Review #698 対応）。
     /// 戻り値は `PathBuf` のままで、呼び出し元がテスト末尾で
     /// `remove_dir_all` して片付ける（Drop ガード化は対象外）。
+    #[cfg(unix)]
     fn fresh_temp_dir(label: &str) -> PathBuf {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         const CREATE_DIR_RETRIES: u32 = 8;
@@ -5356,6 +5358,7 @@ mod tests {
 
     // 受け入れ基準（実装計画 §5）: store → load ラウンドトリップ。両
     // ファイルが存在し内容が一致すること。
+    #[cfg(unix)]
     #[test]
     fn store_then_load_roundtrips_entry_contents() {
         let root = fresh_temp_dir("roundtrip");
@@ -5670,6 +5673,7 @@ mod tests {
     }
 
     // 未書き込みキーの load はミス（`Ok(None)`）を返すこと。
+    #[cfg(unix)]
     #[test]
     fn load_returns_none_when_entry_absent() {
         let root = fresh_temp_dir("miss");
@@ -5684,6 +5688,7 @@ mod tests {
     // 受け入れ基準 1: 並行競合（先着吸収）。同一キーで 2 回 store しても
     // 両方 `Ok`、エントリは 1 つ・内容は 1 回目のもののまま破壊されない
     // （2 回目の rename は失敗し「他プロセス先着」として吸収される）。
+    #[cfg(unix)]
     #[test]
     fn store_twice_absorbs_second_writer_as_success() {
         let root = fresh_temp_dir("double-store");
@@ -5889,6 +5894,7 @@ mod tests {
     // 受け入れ基準 1: 並行競合（複数スレッド）。同一注入ルート・同一キー
     // へ複数スレッドが同時 store しても全スレッド `Ok` を返し、最終
     // エントリが不変条件（`validate_cache_entry`）を満たすこと。
+    #[cfg(unix)]
     #[test]
     fn concurrent_store_from_multiple_threads_all_succeed() {
         use std::sync::Arc;
@@ -5937,6 +5943,7 @@ mod tests {
 
     // 受け入れ基準 2: 破損検出。`kernel.ptx` を削除した破損エントリで
     // load がミス（`Ok(None)`）を返すこと。
+    #[cfg(unix)]
     #[test]
     fn load_treats_missing_ptx_file_as_miss() {
         let root = fresh_temp_dir("corrupt-load");
@@ -5953,6 +5960,7 @@ mod tests {
     }
 
     // 受け入れ基準 2: 破損エントリ存在下で store が置換に成功すること。
+    #[cfg(unix)]
     #[test]
     fn store_replaces_corrupt_existing_entry() {
         let root = fresh_temp_dir("corrupt-replace");
@@ -5982,6 +5990,7 @@ mod tests {
     // 受け入れ基準（実装計画 §3.1・§8）: 非空検査。`kernel.cu` をクラッシュ
     // 残骸想定の 0 バイトファイルへ差し替えると、`is_file()` は真だが
     // `read_verified_cache_entry_file` の非空チェックでミス扱いになること。
+    #[cfg(unix)]
     #[test]
     fn load_treats_empty_source_file_as_miss() {
         let root = fresh_temp_dir("empty-cu");
@@ -6010,6 +6019,7 @@ mod tests {
     // 書き込みが破棄されて空回りキャッシュミスが恒久化する（`is_plain_file`
     // の非空検査追加前は本テストが失敗していたはず）。0 バイト残骸を
     // `store_cache_entry_in` が「破損」として検出・置換することを検証する。
+    #[cfg(unix)]
     #[test]
     fn store_replaces_zero_byte_remnant_entry() {
         let root = fresh_temp_dir("zero-byte-remnant");
@@ -6125,6 +6135,7 @@ mod tests {
     // ソース不一致）と同じく、非 UTF-8 の `kernel.cu` はハードエラー
     // （`CudaError::CacheIo`）ではなくミス（`Ok(None)`）として扱われる
     // こと。
+    #[cfg(unix)]
     #[test]
     fn load_treats_invalid_utf8_source_as_miss() {
         let root = fresh_temp_dir("invalid-utf8");
@@ -6202,6 +6213,7 @@ mod tests {
     // バイト不一致であれば、64bit FNV-1a ハッシュの衝突によって別ソースの
     // エントリを誤ってヒット扱いしない（誤った PTX を GPU へ渡さない
     // fail-closed）。
+    #[cfg(unix)]
     #[test]
     fn load_treats_source_mismatch_as_miss() {
         let root = fresh_temp_dir("source-mismatch");
@@ -6230,6 +6242,7 @@ mod tests {
     // `ensure_cache_root_in`: 通常ケース（symlink なし）で `candidate_root`
     // が実体化され、containment 検証（`workspace_root` 配下でない）を
     // 通過した canonical パスが返ること。
+    #[cfg(unix)]
     #[test]
     fn ensure_cache_root_in_creates_and_returns_canonical_root() {
         let workspace_root = fresh_temp_dir("ensure-root-workspace");
@@ -6386,6 +6399,7 @@ mod tests {
     // CUDA toolkit 非搭載環境（通常 CI）では `NvrtcUnavailable` を返す想定
     // であり panic しないため `#[ignore]` で分離する（`make
     // test-ignored-cuda` 導線。`.claude/rules/coding-rust.md` 実機分離規約）。
+    #[cfg(unix)]
     #[test]
     #[ignore]
     fn nvrtc_version_returns_ok_on_real_device() {
