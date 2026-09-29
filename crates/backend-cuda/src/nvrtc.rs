@@ -4944,12 +4944,19 @@ mod tests {
     // おき、containment 検証が既存のフォールバック挙動を壊さないことを
     // 既存テスト自体で回帰確認する（下記の専用テストは逆に workspace_root
     // 配下を指すケースを検証する）。
+    //
+    // 以降の `resolve_cache_root` テストは `/...` 形式を絶対パスとして渡す
+    // ため `cfg(unix)` 限定とする（Windows では `/...` が相対パス扱いとなり
+    // `is_relative()` の fail-closed で成功ケースが panic／拒否ケースが別理由で
+    // 偽陽性通過するため。Windows の絶対パス経路は別途の専用テストで担保する）。
+    #[cfg(unix)]
     fn unrelated_workspace_root() -> PathBuf {
         PathBuf::from("/workspace/repository")
     }
 
     // キャッシュルート解決: env 上書き（override）が XDG_CACHE_HOME・
     // HOME より優先されること。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_prefers_override() {
         let root = resolve_cache_root(
@@ -4964,6 +4971,7 @@ mod tests {
 
     // キャッシュルート解決: override 欠落時は XDG_CACHE_HOME にフォール
     // バックし、`rust-ai-library/cuda` サブパスを付加すること。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_falls_back_to_xdg_cache_home() {
         let root = resolve_cache_root(
@@ -4981,6 +4989,7 @@ mod tests {
 
     // キャッシュルート解決: override・XDG_CACHE_HOME 欠落時は HOME に
     // フォールバックし `.cache/rust-ai-library/cuda` を付加すること。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_falls_back_to_home() {
         let root = resolve_cache_root(
@@ -4997,6 +5006,7 @@ mod tests {
     }
 
     // キャッシュルート解決: 全欠落時は `CacheDirUnavailable`（panic なし）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_errs_when_all_missing() {
         let result = resolve_cache_root(&unrelated_workspace_root(), None, None, None);
@@ -5004,6 +5014,7 @@ mod tests {
     }
 
     // 安全側の検証: 空文字列の override は拒否する。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_override() {
         let result = resolve_cache_root(
@@ -5017,6 +5028,7 @@ mod tests {
 
     // 安全側の検証: 相対パスの override は拒否する（リポジトリツリー内へ
     // キャッシュが落ちるのを防ぐ。イシュー #506 §4.4）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_override() {
         let result = resolve_cache_root(
@@ -5033,6 +5045,7 @@ mod tests {
     // コンテキストによってはリポジトリツリー内）を指す相対パスを未検証で
     // `Path::join` すると、override 検証を回避してキャッシュがリポジトリ
     // ツリー内へ落ちてしまうため、override と同じ fail-closed 検証を課す）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_xdg_cache_home() {
         let result = resolve_cache_root(
@@ -5047,6 +5060,7 @@ mod tests {
     // 安全側の検証: 相対パスの HOME は拒否する（PR #659 レビュー指摘。
     // `HOME=.` 等の相対パスフォールバックを未検証で許すと override・
     // XDG_CACHE_HOME と同じくリポジトリツリー内へキャッシュが落ちうる）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_home() {
         let result = resolve_cache_root(
@@ -5066,6 +5080,7 @@ mod tests {
     // fail-closed 契約違反があった。`docs/cuda-jit-cache-design.md:19-22`
     // の「三者とも空文字列を CacheDirUnavailable として拒否する」方針との
     // 整合を検証する）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_xdg_cache_home_even_with_valid_home() {
         let result = resolve_cache_root(
@@ -5081,6 +5096,7 @@ mod tests {
     // （override・XDG_CACHE_HOME 双方が未設定かつ HOME のみ空文字列で
     // 設定されているケース。上記 XDG のケースと対称に fail-closed である
     // ことを確認する。PR #659 codex-review P0 指摘）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_home() {
         let result = resolve_cache_root(
@@ -5096,6 +5112,7 @@ mod tests {
     // `RUST_AI_CUDA_CACHE_DIR` が `workspace_root` 配下を指す絶対パスの
     // 場合は拒否する。codex-review が指摘した具体例
     // `/workspace/repository/cache` をそのまま使う。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_override_within_workspace_root() {
         let result = resolve_cache_root(
@@ -5114,6 +5131,7 @@ mod tests {
     // 一致せず素通りしてしまうが、`..` 折り畳み後は `workspace_root` 配下
     // になるため [`path_lexically_within`] の正規化込み比較で拒否される
     // ことを確認する（codex-review 指摘の具体例そのもの）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_override_within_workspace_root_via_parent_dir_traversal() {
         let result = resolve_cache_root(
@@ -5128,6 +5146,7 @@ mod tests {
     // 安全側の検証: `XDG_CACHE_HOME` から導出したキャッシュルートが
     // `workspace_root` 配下になる場合も override と同様に拒否する
     // （PR #659 codex-review P0 再指摘: 3 分岐すべてを検証対象にする）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_xdg_cache_home_within_workspace_root() {
         let result = resolve_cache_root(
@@ -5141,6 +5160,7 @@ mod tests {
 
     // 安全側の検証: `HOME` から導出したキャッシュルートが `workspace_root`
     // 配下になる場合も同様に拒否する（3 分岐目。上記 2 テストと対称）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_home_within_workspace_root() {
         let result = resolve_cache_root(
@@ -5159,6 +5179,7 @@ mod tests {
     // （`resolve_cache_root_falls_back_to_home` 等の既存テストと合わせ、
     // workspace_root がたまたまホームディレクトリ等と重ならない限り誤検知
     // しないことの明示的な回帰確認）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_succeeds_when_workspace_root_is_elsewhere() {
         let root = resolve_cache_root(
@@ -5180,6 +5201,7 @@ mod tests {
     // ブロックすべきリポジトリ内キャッシュルートを受理してしまう）。
     // `resolve_cache_root` は 3 分岐へ入る前に `workspace_root` の絶対
     // パス性を検証して fail-closed で拒否しなければならない。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_workspace_root_even_when_override_is_within_it() {
         let result = resolve_cache_root(
@@ -5193,6 +5215,7 @@ mod tests {
 
     // 空文字列の `workspace_root`（`Path::new("")` は相対パス扱い）も
     // 同じ fail-closed 経路で拒否されることを確認する。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_workspace_root() {
         let result = resolve_cache_root(
@@ -5207,6 +5230,7 @@ mod tests {
     // 相対 `workspace_root` の拒否が特定の分岐（override）だけでなく
     // 入口の共通ガードで行われていることを、XDG_CACHE_HOME 分岐でも
     // 確認する（分岐ごとに個別実装していないことの回帰確認）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_workspace_root_via_xdg_branch() {
         let result = resolve_cache_root(
