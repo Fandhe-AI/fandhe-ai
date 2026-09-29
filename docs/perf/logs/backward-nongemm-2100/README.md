@@ -114,7 +114,8 @@ GB10 へは `docs/real-hardware-verification-env.md` §3 の手順（rsync）で
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` が通る。`FANDHE_DIAG_BACKWARD` 未設定では DIAG 行は出ない
 - `smoke-x86/`: 上記オーケストレーターを `smoke-x86`・3 run・cpu × {fresh, reuse} で実行した出力
   （1 プロセス 100 行・checksum 一致・CSV 生成を確認）。**非公式・判定外・実機（M4 Max／GB10）ではない**。
-  共有負荷下（load average 8〜19 の開発機）の値であり、絶対値を実機の結論として扱わない
+  共有負荷下（load average 15〜23 の開発機。開始時 19.59／終了時 22.37）の値であり、負荷ゲートは適用していない
+  （`gate.tsv` の load1 は全行同一値の参考記録で判定に使わない）。絶対値を実機の結論として扱わない
 
 ## 受入基準の状況（Phase B へ申し送り）
 

@@ -114,8 +114,15 @@ mkdir -p "$OUT"
 
 # ---- マスク（内部ホスト名・ホームディレクトリを収録ログへ残さない） ----
 HOST_NAME="$(hostname 2>/dev/null || echo unknown)"
+# sed 正規表現の特殊文字（. * [ ] ^ $ \ / と区切りの #）をエスケープする
+sed_escape() { printf '%s' "$1" | sed -e 's/[][\\.*^$/#]/\\&/g'; }
 mask() { # stdin -> stdout
-  sed -e "s#${HOME}#<home>#g" -e "s#${HOST_NAME}#<host>#g"
+  local args=(-e "s#$(sed_escape "$HOME")#<home>#g")
+  # 3 文字以下のホスト名は一般語の過剰置換を招くためマスクしない
+  if [[ "${#HOST_NAME}" -ge 4 ]]; then
+    args+=(-e "s#$(sed_escape "$HOST_NAME")#<host>#g")
+  fi
+  sed "${args[@]}"
 }
 
 # ---- 1. RULE.txt（実測開始前に固定。事後に緩めない） ----

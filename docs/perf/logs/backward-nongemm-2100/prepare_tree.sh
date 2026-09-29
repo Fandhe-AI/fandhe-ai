@@ -5,8 +5,9 @@
 # 役割: `diag-instrumentation-head.patch`（crates/ 配下のみ。Cargo.lock の
 # hunk は含まない）を本体ツリーへ残さず、使い捨ての worktree にだけ適用する
 # （計装は本番コードへ残さない。イシュー #2100 スコープ外）。
-# 呼び出し元: orchestrate_m4max.sh・orchestrate_gb10.sh（計装あり／なしの
-# 2 本のツリーを作る）。単体でも実行できる。実行はリポジトリ内の任意の
+# 呼び出し元: なし（手動実行。計装あり／なしの 2 本のツリーを作る）。実測側の
+# orchestrate_backward_diag.sh（M4 Max・GB10 共用）は本スクリプトが作った
+# ツリーを引数で受け取る。実行はリポジトリ内の任意の
 # ディレクトリから可能（git worktree はそのリポジトリへ作られる）。
 #
 # 使い方:
