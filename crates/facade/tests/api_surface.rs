@@ -18357,7 +18357,8 @@ fn nn_src(file: &str) -> String {
 }
 
 /// 正ガード: `src/nn/mod.rs` の全種別の公開 item が
-/// `pub mod rnn` と `pub use` の 3 件（`Module`・`ModuleList`・`Sequential`）に完全一致する。
+/// `pub mod rnn` と `pub use` の 5 件（`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
+/// `ModuleDict`／`summary` は #2402 で承認済み）に完全一致する。
 /// `pub fn`／`pub struct` 等の追加や `pub mod container;` 等の新設は fail する。
 #[test]
 fn nn_mod_public_items_match_expected_set() {
@@ -18367,34 +18368,47 @@ fn nn_mod_public_items_match_expected_set() {
         pair_set(&[
             ("mod", "rnn"),
             ("use", "Module"),
+            ("use", "ModuleDict"),
             ("use", "ModuleList"),
             ("use", "Sequential"),
+            ("use", "summary"),
         ]),
         "src/nn/mod.rs の公開 item 集合が期待と一致しない（nn 公開面の無断拡大を検知）"
     );
-    assert!(restricted.is_empty(), "制限付き pub item: {restricted:?}");
+    assert_eq!(
+        restricted,
+        pair_set(&[("use", "FacadeModuleAdapter")]),
+        "制限付き pub item は crate 内アダプタの再エクスポート 1 件のみ（#2401）"
+    );
 }
 
 /// 正ガード: `src/nn/module.rs` の公開 item は `trait Module` のみ。
-/// crate 内アダプタ `FacadeModuleAdapter` は制限付き可視性（REQ-12）のまま 1 件。
+/// 制限付き可視性のまま残すのは crate 内アダプタ `FacadeModuleAdapter`（REQ-12）と
+/// 走査用の内部型別名 `NodeKey`（`pub(super) type`。#2401）の 2 件。
 #[test]
 fn nn_module_rs_public_items_match_expected_set() {
     let (public, restricted) = scan_top_level_pub_items(&nn_src("module.rs"));
     assert_eq!(public, pair_set(&[("trait", "Module")]));
     assert_eq!(
         restricted,
-        pair_set(&[("struct", "FacadeModuleAdapter")]),
-        "FacadeModuleAdapter は pub(crate) のままであること（公開面へ出さない）"
+        pair_set(&[("struct", "FacadeModuleAdapter"), ("type", "NodeKey")]),
+        "FacadeModuleAdapter・NodeKey は制限付き可視性のままであること（公開面へ出さない）"
     );
 }
 
-/// 正ガード: `src/nn/container.rs` の公開 item は `ModuleList`・`Sequential` の 2 構造体のみ。
+/// 正ガード: `src/nn/container.rs` の公開 item は `ModuleDict`・`ModuleList`・`Sequential` の
+/// 3 構造体と `fn summary`（#2402 で承認済み）のみ。
 #[test]
 fn nn_container_rs_public_items_match_expected_set() {
     let (public, restricted) = scan_top_level_pub_items(&nn_src("container.rs"));
     assert_eq!(
         public,
-        pair_set(&[("struct", "ModuleList"), ("struct", "Sequential")])
+        pair_set(&[
+            ("fn", "summary"),
+            ("struct", "ModuleDict"),
+            ("struct", "ModuleList"),
+            ("struct", "Sequential"),
+        ])
     );
     assert!(restricted.is_empty(), "制限付き pub item: {restricted:?}");
 }
@@ -18436,6 +18450,30 @@ fn nn_containers_inherent_and_trait_impls_match_expected_set() {
     );
     assert!(seq_np.is_empty(), "Sequential の非 pub 固有 fn: {seq_np:?}");
     assert_eq!(seq_traits, to_set(&["Default", "From", "Module"]));
+
+    let (dict_pub, dict_np, dict_traits) = scan_type_impl_surface(&content, "ModuleDict");
+    assert_eq!(
+        dict_pub,
+        to_set(&[
+            "new",
+            "from_pairs",
+            "insert",
+            "remove",
+            "get",
+            "get_mut",
+            "contains_key",
+            "keys",
+            "iter",
+            "iter_mut",
+            "len",
+            "is_empty"
+        ])
+    );
+    assert!(
+        dict_np.is_empty(),
+        "ModuleDict の非 pub 固有 fn: {dict_np:?}"
+    );
+    assert_eq!(dict_traits, to_set(&["Default", "Module"]));
 }
 
 /// [`scan_top_level_pub_items`]・[`scan_type_impl_surface`] の自己テスト
@@ -18443,12 +18481,15 @@ fn nn_containers_inherent_and_trait_impls_match_expected_set() {
 #[test]
 fn nn_public_item_set_scanners_detect_each_category() {
     let base = "mod container; mod module; pub mod rnn;\n\
-                pub use container::{ModuleList, Sequential};\npub use module::Module;\n";
+                pub use container::{ModuleDict, ModuleList, Sequential, summary};\n\
+                pub use module::Module;\n";
     let expected_mod = pair_set(&[
         ("mod", "rnn"),
         ("use", "Module"),
+        ("use", "ModuleDict"),
         ("use", "ModuleList"),
         ("use", "Sequential"),
+        ("use", "summary"),
     ]);
     // 正例。
     assert_eq!(scan_top_level_pub_items(base).0, expected_mod);
