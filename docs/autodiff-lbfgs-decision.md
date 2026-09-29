@@ -445,5 +445,5 @@ L-BFGS は 1 epoch（= 1 outer step。フルバッチ）あたり `max_iter=20`
 
 ### スコープ外
 
-履歴件数の固定上限・manifest の `history_len` との突き合わせ・safetensors
+（#2373 で facade に実装済み）履歴件数の固定上限・manifest の `history_len` との突き合わせ・safetensors
 結線・`optimizer.` 接頭辞の付与は別イシュー #2373。

@@ -428,7 +428,15 @@ fn tampered_kind_is_rejected() {
     write_manifest(&dir, &t);
     assert!(matches!(load_err(&dir), ModelIoError::Autodiff(_)));
 
-    for bad in ["lbfgs", "nadam", "SGD", ""] {
+    // adam の config のまま lbfgs にすると config のキー集合と history_len が合わず Manifest
+    // （Lbfgs 自体の往復・改竄は compat_sequential_model_io_lbfgs.rs）。
+    let t = read_manifest(&dir).replace("\"kind\":\"adam\"", "\"kind\":\"lbfgs\"");
+    write_manifest(&dir, &t);
+    assert!(matches!(load_err(&dir), ModelIoError::Manifest { .. }));
+    let t = read_manifest(&dir).replace("\"kind\":\"lbfgs\"", "\"kind\":\"adam\"");
+    write_manifest(&dir, &t);
+
+    for bad in ["nadam", "SGD", ""] {
         let t = read_manifest(&dir).replace("\"kind\":\"adam\"", &format!("\"kind\":\"{bad}\""));
         write_manifest(&dir, &t);
         assert!(
