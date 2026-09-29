@@ -1352,6 +1352,14 @@ impl Sequential {
     /// review 指摘 #294）。two-pass にすることで、エラー時は呼び出し前の
     /// 状態を完全に維持する。#426 の shape 検証も同じ 1 パス目（代入前）に
     /// 置くため、この不変条件は変わらない。
+    ///
+    /// **独自層（`add_module`。#2398）の例外**: 独自層の `Module::set_parameter` は
+    /// 任意実装で、1 パス目の検証後にも失敗し得る。その場合は適用済みの層を snapshot
+    /// から書き戻して元エラーを返す（通常はモデル不変）。ただし書き戻し
+    /// （`set_parameter`）自体が失敗した場合は不変を保証できないため、
+    /// `AutodiffError::InvalidArgument`（元エラーと復元失敗の層・名前を含み
+    /// 「部分更新が残り得る」旨を明示）を返す。この場合、呼び出し側はモデルを
+    /// 破棄または再構築すること。
     pub fn apply_parameters(&mut self, updated: Vec<Tensor<f32>>) -> Result<(), AutodiffError> {
         /// 検証（#426。置換前 shape との完全一致）と `updated` からの
         /// weight／bias 取り出しを層種別（`Linear`／`Conv2d`／`Conv1d`）
@@ -1508,8 +1516,8 @@ impl Sequential {
         // #2398 の独自層）を `Module::set_parameter` で in-place 適用する。独自層の
         // `set_parameter` は任意実装で 1 パス目の検証後にも `Err` を返し得るため、
         // 適用前に各層の現在値を snapshot し、途中で失敗したら適用済みの層を
-        // 逆順に元の値へ書き戻してからエラーを返す（エラー時はモデル不変の保証。
-        // 書き戻し自体の失敗は元エラーを優先して握りつぶす best effort）。
+        // 逆順に元の値へ書き戻してからエラーを返す（エラー時はモデル不変。
+        // 書き戻し自体も失敗した場合は不変を保証できないため型付きエラーで明示する）。
         // `Rebuilt`（`Linear`／`Conv2d`／`Conv1d`）の代入は失敗し得ないため、
         // 失敗し得る 2a を先に完了させてから 2b で行う（2a 失敗時は未着手のまま残す）。
         type LayerSnapshot = (usize, Vec<(String, Tensor<f32>)>);
@@ -1531,13 +1539,28 @@ impl Sequential {
             }
         }
         if let Some(e) = failure {
+            // 書き戻し失敗を握りつぶさない（fail-closed。security.md A03）。独自層の
+            // `set_parameter` は任意実装で復元時にも `Err` を返し得るため、失敗した層と
+            // パラメータ名を集め、1 件でもあれば「部分更新が残り得る」ことを型付きエラー
+            // （`InvalidArgument`）で明示する。
+            let mut restore_failures: Vec<String> = Vec::new();
             for (layer_index, snapshot) in applied.into_iter().rev() {
                 let layer = &mut self.inner.layers_mut()[layer_index];
                 for (name, value) in snapshot {
-                    let _ = layer.set_parameter(&name, value);
+                    if let Err(re) = layer.set_parameter(&name, value) {
+                        restore_failures.push(format!("layer {layer_index} {name}: {re}"));
+                    }
                 }
             }
-            return Err(e);
+            if restore_failures.is_empty() {
+                return Err(e);
+            }
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::apply_parameters: custom layer set_parameter failed ({e}) and \
+                 rollback also failed; the model may be partially updated \
+                 (restore failures: {})",
+                restore_failures.join("; ")
+            )));
         }
         // 2b: 検証済みの `Rebuilt` を同じ層順で代入する（失敗し得ない）。
         let mut rebuilt = rebuilt.into_iter();
@@ -2564,6 +2587,53 @@ mod tests {
             .map(|t| dense_vec(t))
             .collect();
         assert_eq!(before, after);
+    }
+
+    /// 更新は 1 回目のみ成功し以後は常に失敗する独自層（復元失敗の検出テスト用）。
+    struct FailsAfterFirst {
+        w: Tensor<f32>,
+        calls: usize,
+    }
+    impl crate::nn::Module for FailsAfterFirst {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("w".into(), &self.w)]
+        }
+        fn set_parameter(&mut self, _name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+            self.calls += 1;
+            if self.calls > 1 {
+                return Err(AutodiffError::InvalidArgument("boom".into()));
+            }
+            self.w = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn apply_parameters_reports_partial_update_when_rollback_fails() {
+        let one = || Tensor::from_slice(&[1.0_f32], &[1]).unwrap();
+        let mut model = Sequential::new()
+            .add_module(FailsAfterFirst { w: one(), calls: 0 })
+            .add_module(Settable {
+                w: one(),
+                fail: true,
+            });
+        let updated: Vec<Tensor<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| Tensor::new(vec![9.0_f32; t.numel()], t.shape()).unwrap())
+            .collect();
+        let err = model.apply_parameters(updated).unwrap_err();
+        match err {
+            AutodiffError::InvalidArgument(m) => assert!(m.contains("partially updated"), "{m}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
