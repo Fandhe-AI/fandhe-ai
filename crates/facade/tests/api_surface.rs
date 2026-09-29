@@ -5879,44 +5879,131 @@ fn facade_declares_no_nn_module_items_detects_each_category() {
     assert!(scan_nn_module_item_declarations("// pub trait Module {}", other).is_empty());
 }
 
-/// `src/compat` 配下に `add_module`／`add_boxed`／`push_module` の
-/// `pub fn` 宣言が存在しないことを固定する（#2133 Step 2-3。
-/// `compat_sequential_does_not_expose_rnn_add_methods` と同型。
-/// `docs/facade-nn-module-exposure-decision.md` §9 で `add_module` は
-/// スコープ外と明記済み）。
-///
-/// #2133 のクローズ後も承認は得られておらず、#2338 で保留を再追跡中
-/// （`docs/facade-nn-module-exposure-decision.md` §13）。
+/// `src/compat` 配下の `add_module`／`add_boxed`／`push_module` の `fn` 宣言の扱いを判定する
+/// （#2133 Step 2-3・#2398）。`rel_path` は `src/compat` からの相対パス。
+/// `add_boxed`／`push_module` は常に違反。`add_module` は `sequential.rs` 内にちょうど 1 件の場合のみ
+/// 許容する（#2398 でユーザー承認済みの唯一の公開入口）。違反の説明文を返す。
+fn module_add_method_offenses(rel_path: &str, content: &str) -> Vec<String> {
+    let tokens = tokenize_including_punctuation(
+        &strip_comments_and_literals(content)
+            .iter()
+            .collect::<String>(),
+    );
+    let mut out = Vec::new();
+    for name in ["add_boxed", "push_module"] {
+        if count_fn_declarations_by_name(&tokens, name) > 0 {
+            out.push(format!("{rel_path}: fn {name}"));
+        }
+    }
+    let n = count_fn_declarations_by_name(&tokens, "add_module");
+    let allowed = rel_path == "sequential.rs" && n == 1;
+    if n > 0 && !allowed {
+        out.push(format!("{rel_path}: fn add_module x{n}"));
+    }
+    out
+}
+
+/// `src/compat` 配下で `add_module` は `sequential.rs` の 1 件だけを許容し（#2398。
+/// `docs/facade-nn-module-exposure-decision.md` §9 の旧「スコープ外」をユーザー承認 2026-09-29 で上書き）、
+/// `add_boxed`／`push_module` は引き続き禁止する。許容件数のインベントリ assert で走査の空振りを検出する。
 #[test]
 fn compat_sequential_does_not_expose_module_add_methods() {
     let compat_dir = facade_crate_root().join("src/compat");
-    let forbidden = ["add_module", "add_boxed", "push_module"];
     let mut offenses = Vec::new();
+    let mut approved = 0usize;
     visit_rs_files(&compat_dir, &mut |path, content| {
-        for name in forbidden {
-            if contains_pub_fn_declaration(content, name) {
-                offenses.push(format!("{}: pub fn {name}", path.display()));
-            }
-        }
+        let rel = path
+            .strip_prefix(&compat_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        offenses.extend(module_add_method_offenses(&rel, content));
+        let tokens = tokenize_including_punctuation(
+            &strip_comments_and_literals(content)
+                .iter()
+                .collect::<String>(),
+        );
+        approved += count_fn_declarations_by_name(&tokens, "add_module");
     });
     assert!(
         offenses.is_empty(),
-        "src/compat 配下に add_module／add_boxed／push_module が見つかった\
-         （承認スコープ〈#2133〉は Sequential への追加を認めていない）: {offenses:?}"
+        "src/compat 配下に承認外の add_module／add_boxed／push_module が見つかった\
+         （承認は sequential.rs の add_module 1 件のみ〈#2398〉）: {offenses:?}"
+    );
+    assert_eq!(
+        approved, 1,
+        "承認済み add_module がちょうど 1 件であること（走査の空振り検出）"
     );
 }
 
 /// [`compat_sequential_does_not_expose_module_add_methods`] の自己テスト。
 #[test]
 fn compat_sequential_does_not_expose_module_add_methods_detects_offense() {
-    assert!(contains_pub_fn_declaration(
-        "pub fn add_module(&mut self, m: impl Module + 'static) {}",
-        "add_module"
-    ));
-    assert!(!contains_pub_fn_declaration(
-        "pub fn add_linear(&mut self, l: Linear) {}",
-        "add_module"
-    ));
+    let one = "pub fn add_module<M: Module + 'static>(mut self, m: M) -> Self { self }";
+    // 正例: sequential.rs 内の 1 件は許容。コメント中の宣言風テキストは無視される。
+    assert!(module_add_method_offenses("sequential.rs", one).is_empty());
+    assert!(
+        module_add_method_offenses("training.rs", "// pub fn add_module(self) {}\nfn x() {}")
+            .is_empty()
+    );
+    // 負例: sequential.rs 以外の add_module、add_boxed／push_module、2 宣言。
+    assert!(!module_add_method_offenses("training.rs", one).is_empty());
+    assert!(!module_add_method_offenses("sequential.rs", "pub fn add_boxed(self) {}").is_empty());
+    assert!(
+        !module_add_method_offenses("sequential.rs", "pub fn push_module(&mut self) {}").is_empty()
+    );
+    let two = format!("{one}\n{one}");
+    assert!(!module_add_method_offenses("sequential.rs", &two).is_empty());
+}
+
+/// `Sequential::add_module` が承認済みの唯一の入口として、承認済みシグネチャ
+/// （`crate::nn::Module` bound・`'static`・`-> Self`。内部型を含まない）で存在することを固定する
+/// 正ガード（#2398。REQ-12 公開面の最小化）。
+#[test]
+fn compat_sequential_add_module_is_sole_approved_entry() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(count_fn_declarations_by_name(&tokens, "add_module"), 1);
+    assert!(sequential_add_module_signature_ok(&cleaned));
+}
+
+/// `pub fn add_module` から本体開始 `{` までの宣言部が承認済みシグネチャか判定する。
+fn sequential_add_module_signature_ok(cleaned: &str) -> bool {
+    let Some(start) = cleaned.find("pub fn add_module") else {
+        return false;
+    };
+    let Some(len) = cleaned[start..].find('{') else {
+        return false;
+    };
+    let sig: String = cleaned[start..start + len]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    ["crate::nn::Module", "'static", "->Self"]
+        .iter()
+        .all(|w| sig.contains(w))
+        && ["fandhe_ai_autodiff", "Box<dyn", "BackendOps", "Tape"]
+            .iter()
+            .all(|w| !sig.contains(w))
+}
+
+/// [`compat_sequential_add_module_is_sole_approved_entry`] の自己テスト。
+#[test]
+fn compat_sequential_add_module_is_sole_approved_entry_detects_offense() {
+    let ok = "pub fn add_module<M: crate::nn::Module + 'static>(mut self, m: M) -> Self {";
+    assert!(sequential_add_module_signature_ok(ok));
+    for bad in [
+        "pub fn add_module<M: crate::nn::Module + 'static>(mut self, m: M) -> Result<Self, E> {",
+        "pub fn add_module<M: Module>(mut self, m: M) -> Self {",
+        "pub fn add_module(mut self, m: Box<dyn crate::nn::Module + 'static>) -> Self {",
+        "pub fn add_module<M: crate::nn::Module + 'static>(mut self, t: &Tape, m: M) -> Self {",
+        "pub fn add_module<M: fandhe_ai_autodiff::nn::Module + crate::nn::Module + 'static>(self, m: M) -> Self {",
+        "pub fn add_linear(self) -> Self {",
+    ] {
+        assert!(!sequential_add_module_signature_ok(bad), "{bad}");
+    }
 }
 
 /// facade（crates.io 公開クレート `fandhe-ai`）の `Cargo.toml` が
