@@ -4,7 +4,7 @@
 //! 定義するための土台である（`fandhe_ai_autodiff::nn::Module::forward` は生の
 //! `fandhe_ai_autodiff::Tape` を引数に取るため facade 利用者は名指しできない。
 //! `docs/facade-nn-module-exposure-decision.md` §1.3）。#2338 承認事項 1（案 B）・
-//! 2（required `forward` ＋ defaulted 6 件。#2401 で introspection 4 件を追加し 10 件）・4（`forward` 第 1 引数は
+//! 2（required `forward` ＋ defaulted 6 件。#2400 で凍結 API 3 件・#2401 で introspection 4 件・#2400 の葉単位ロールバック用に `children_mut` を追加し 14 件）・4（`forward` 第 1 引数は
 //! [`crate::TapeRef`]）に従う。
 //!
 //! REQ-12: 生の `Tape`・`BackendOps`・内部層型（`as_*`・`forward_host`・
@@ -14,7 +14,8 @@
 //!
 //! `named_parameters`／`set_parameter`／`state_dict`／`load_state_dict`／
 //! `set_training`／`training`／`children`／`named_modules`／`parameter_count`／`type_name`
-//! （後ろ 4 件は #2134 の鏡写し。イシュー #2401）の意味論・命名契約・fail-closed 検証は
+//! （後ろ 4 件は #2134 の鏡写し。イシュー #2401）と、凍結 API の `set_requires_grad`／`freeze`／
+//! `requires_grad`（#2137 の鏡写し。#2400）の意味論・命名契約・fail-closed 検証は
 //! `crates/autodiff/src/nn/module.rs` の同名メソッドと同一である。
 //! `load_state_dict` は autodiff 側の単一実装を crate 内アダプタ（`FacadeModuleAdapter`。
 //! autodiff コンテナへ積む橋渡しを兼ねる。#2397）経由で再利用し、
@@ -24,17 +25,21 @@
 use std::collections::{HashMap, HashSet};
 
 use fandhe_ai_autodiff::nn::Module as AutodiffModule;
+use fandhe_ai_autodiff::nn::RequiresGradSnapshot;
 
 use crate::{AutodiffError, TapeRef, Tensor, Var};
 
 /// facade 利用者が独自層を定義するための共通 forward シグネチャ。
 ///
-/// required は [`Self::forward`] の 1 件、defaulted は 10 件
+/// required は [`Self::forward`] の 1 件、defaulted は 14 件
 /// （[`Self::named_parameters`]・[`Self::set_parameter`]・[`Self::state_dict`]・
 /// [`Self::load_state_dict`]・[`Self::set_training`]・[`Self::training`]・
-/// [`Self::children`]・[`Self::named_modules`]・[`Self::parameter_count`]・
-/// [`Self::type_name`]。後ろ 4 件は autodiff `Module`（#2134）の同名メソッドの鏡写しで、
-/// イシュー #2401）。
+/// [`Self::set_requires_grad`]・[`Self::freeze`]・[`Self::requires_grad`]・
+/// [`Self::children`]・[`Self::children_mut`]・[`Self::named_modules`]・
+/// [`Self::parameter_count`]・[`Self::type_name`]。`children`・`named_modules`・
+/// `parameter_count`・`type_name` の 4 件は autodiff `Module`（#2134）の同名メソッドの
+/// 鏡写し〈イシュー #2401〉、`children_mut` は `set_requires_grad` の葉単位ロールバック用に
+/// `children` と対で実装する facade 独自のメソッド〈#2400〉）。
 /// 出典は `crates/autodiff/src/nn/module.rs` で、`tests/api_surface.rs` が
 /// この集合を機械的に固定する。
 pub trait Module {
@@ -92,6 +97,59 @@ pub trait Module {
         true
     }
 
+    /// 層単位の `requires_grad` 凍結（PyTorch `module.requires_grad_(bool)` 相当。
+    /// #2137 の鏡写し・#2400）。
+    ///
+    /// 実装者契約: パラメータを持つ層は `requires_grad: bool` を自層に保持し、`forward`
+    /// 内でパラメータ葉を `if self.requires_grad { tape.var(&p) } else { tape.var_no_grad(&p) }`
+    /// のように切り替えて登録する。本メソッドと [`Self::requires_grad`] は必ず対で
+    /// override すること。
+    ///
+    /// 複合層（[`Self::children`] が非空）が自身にも `requires_grad` フラグを持つ場合、
+    /// [`Self::requires_grad`] はそのフラグを返すこと。凍結が失敗したときのロールバックは
+    /// 複合層ごとに「自身へ `set_requires_grad(呼び出し前の自身の `requires_grad()`)` →
+    /// 子を葉単位で再帰復元」の順に呼んで戻す（自身の呼び出しが子へ伝播した値は直後の子の
+    /// 復元で上書きされる）。ただし復元の前に子を照合キー（名前・型・アドレス・サイズ）で照合し、不一致なら自身の
+    /// 呼び出しを省いて部分適用エラーにする（[`Self::children_mut`] 参照。検出範囲は同 doc の
+    /// (b)〜(d) のとおりで、取り消しは不可）。不一致が無ければ自身のフラグと各子の状態が共に
+    /// 呼び出し前へ戻る。
+    ///
+    /// - 反映は次の `forward`（葉登録）から。登録済みの `Var` は変わらない。
+    /// - [`Self::set_training`]／[`Self::training`] とは独立の軸（BatchNorm 系の統計は
+    ///   凍結後も training のまま更新される）。
+    /// - [`Self::state_dict`]／[`Self::load_state_dict`]／[`Self::set_parameter`] の対象外で、
+    ///   パラメータを差し替えてもフラグは保持される。
+    /// - 粒度は層単位（パラメータ名指定の個別凍結は範囲外）。
+    ///
+    /// 既定は fail-closed: パラメータ 0 件なら `Ok(())`（無状態層）、1 件以上なら
+    /// `InvalidArgument`。override 忘れで「凍結したつもりが学習が続く」黙った事故を
+    /// 防ぐ（security.md A08。no-op 既定は採らない）。文言は autodiff 側と同一。
+    fn set_requires_grad(&mut self, _requires_grad: bool) -> Result<(), AutodiffError> {
+        let param_count = self.named_parameters().len();
+        if param_count == 0 {
+            Ok(())
+        } else {
+            Err(AutodiffError::InvalidArgument(format!(
+                "Module::set_requires_grad: this Module has {param_count} named parameter(s) \
+                 but does not override set_requires_grad (fail-closed default; freezing would \
+                 silently be a no-op)"
+            )))
+        }
+    }
+
+    /// [`Self::set_requires_grad`]`(false)` の別名（転移学習で backbone を固定する典型呼び出し）。
+    fn freeze(&mut self) -> Result<(), AutodiffError> {
+        self.set_requires_grad(false)
+    }
+
+    /// この層が現在追跡対象か。既定は `true`（パラメータを持たない層は状態を持たない）。
+    /// パラメータを持つ層は [`Self::set_requires_grad`] と対で override する。自身のフラグを
+    /// 持つ複合層はそのフラグを返すこと（ロールバックが自身→子の順に復元するため。
+    /// [`Self::set_requires_grad`] 参照）。
+    fn requires_grad(&self) -> bool {
+        true
+    }
+
     /// この層が直接内包する子 `Module` の「名前, 参照」列を登録順で返す
     /// （autodiff `Module::children`・PyTorch `Module.children()` 相当。#2134・#2401）。
     ///
@@ -136,8 +194,42 @@ pub trait Module {
 
     /// 実装型名（`std::any::type_name::<Self>()`）。出力形式は標準ライブラリが安定を
     /// 保証しないため表示用途に限る（autodiff `Module::type_name` の鏡写し。#2134・#2401）。
+    /// 例外として、凍結ロールバックが子の型の照合キーに使う（[`Self::children_mut`] の (b)。
+    /// 異なる型は区別できるが同じ型の別インスタンスは区別できない。偽る override は範囲外）。
     fn type_name(&self) -> &'static str {
         std::any::type_name::<Self>()
+    }
+
+    /// [`Self::children`] の可変版（同じ「名前, 参照」列を同じ順序・同じ名前で返す。
+    /// #2400・PR #2426 レビュー是正。2026-09-29 ユーザー承認済みの公開面追加）。
+    ///
+    /// 用途: 凍結（[`Self::set_requires_grad`]）が失敗したとき、コンテナが子孫を**葉単位**
+    /// （葉 = [`Self::children`] が空の層）で呼び出し前の状態へ戻すための可変アクセス。
+    /// 子を持つ利用者定義の複合層は `children` と対で必ず実装すること（`children` と同じ子への
+    /// 参照を同じ順・同じ名前で返し、名前が同じでも別の子オブジェクトを返してはならない）。
+    ///
+    /// 契約と検出範囲（PR #2426 第 6〜8 回レビュー P1 是正。ライブラリは `Module` 参照から真の
+    /// 同一性を得られないため、検出できる範囲を次のとおり定義する）:
+    /// - (a) 実装側の契約: [`Self::children`]／本メソッドは [`Self::set_requires_grad`] の間、
+    ///   同じ子を返し続けること。
+    /// - (b) ライブラリは、件数・名前・型（[`Self::type_name`]）・データアドレス・サイズで検出
+    ///   できる契約違反を、`ModuleList`／`Sequential`／`ModuleDict` の `set_requires_grad` が
+    ///   状態を変更する前の `InvalidArgument`（事前検査。`children_mut` 未実装で `children` だけ
+    ///   実装した層を含む）、または復元時の部分適用エラー（`InvalidArgument`）として報告する。
+    ///   復元は複合層ごとに、まず本メソッドの子を取得時のキーと照合し、**不一致なら自身の
+    ///   [`Self::set_requires_grad`] は呼ばない**。一致した位置の子だけを葉単位で戻す。
+    /// - (c) 同じ型・同じ格納位置での値の置き換え（同じアドレスでの再確保を含む）は検出できず、
+    ///   ロールバックは位置（格納スロット）単位で、そのスロットを凍結前の値へ戻す。
+    /// - (d) 自身の setter の**実行中**の伝播先は利用者の実装の責任で、ライブラリは防げない
+    ///   （事後の再照合で検出できる範囲だけ部分適用エラーとして報告し、取り消しはしない）。
+    ///   `type_name` を偽って override する実装は信頼境界の外。
+    /// - 全一致のときは自身へ `set_requires_grad` を呼んでから本メソッドを取り直して再照合する。
+    ///   取得時は葉（`children` が空）だった層が復元時に子を持っていれば、setter を呼ばず部分適用
+    ///   エラーにする。
+    ///
+    /// 既定は空（葉モジュール向け）。
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        Vec::new()
     }
 }
 
@@ -188,7 +280,12 @@ fn collect_named_modules<'a>(
 /// `pub(crate)` で公開面（REQ-12）には出ない。`unsafe` は使わず、autodiff の
 /// `&Tape` は `TapeRef::from_autodiff` の安全な借用変換で facade 層へ渡す。
 ///
-/// 委譲: `forward`・`named_parameters`・`set_parameter`・`set_training`・`training`。
+/// 委譲: `forward`・`named_parameters`・`set_parameter`・`set_training`・`training`・
+/// `set_requires_grad`・`requires_grad`（#2400）・葉単位の凍結スナップショット
+/// `requires_grad_snapshot`／`restore_requires_grad_snapshot`（autodiff コンテナの
+/// ロールバックで内側の複合層の混在状態を `children`／`children_mut` 経由で葉単位に保つ。PR #2426 P1）。`freeze` は autodiff 既定が
+/// `set_requires_grad(false)` を経由するため委譲せず（facade 層が独自に `freeze` を
+/// override していても本アダプタ経由では迂回される）、
 /// `state_dict`／`load_state_dict` は autodiff 既定のまま（委譲済みの
 /// `named_parameters`／`set_parameter` の上で動く。facade 層が独自に
 /// `load_state_dict` を override していても本アダプタ経由では迂回される。
@@ -196,8 +293,6 @@ fn collect_named_modules<'a>(
 /// `type_name` も委譲する（autodiff 側の表示に利用者の層の型名を出すため。#2401）。
 /// `children` は委譲しない（facade の `&dyn Module` を借用のまま autodiff の
 /// `&dyn Module` へ変換できず、autodiff の `named_modules` はアダプタ内へ降りない）。
-/// `set_requires_grad`／`requires_grad` は範囲外（#2400）で、
-/// 既定の fail-closed のまま（パラメータ持ちを含む `Sequential::freeze()` は現時点で `Err`）。
 ///
 /// ホスト推論経路は非対応: `supports_forward_host` を `false` へ override し
 /// （autodiff 既定は `true`。既定のままだと `compat::Sequential::predict` の事前判定を
@@ -236,6 +331,47 @@ where
 
     fn training(&self) -> bool {
         Module::training(&*self.0)
+    }
+
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Module::set_requires_grad(&mut *self.0, requires_grad)
+    }
+
+    fn requires_grad(&self) -> bool {
+        Module::requires_grad(&*self.0)
+    }
+
+    /// facade 側の葉単位スナップショット（`nn::container::snapshot_requires_grad`。
+    /// `children`／`children_mut` 経由）を `Opaque` に包んで返す。autodiff のコンテナが
+    /// アダプタを単一の葉として集約値で保存すると、内側の複合層の混在状態が復元時に
+    /// 均一化されるため（PR #2426 P1）。件数・名前・型・アドレス・サイズで検出できる
+    /// `children`／`children_mut` の不整合は状態変更前に `InvalidArgument` で報告する
+    /// （検出範囲は [`Module::children_mut`] の (b)〜(d)）。
+    fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
+        crate::nn::container::snapshot_requires_grad(&mut *self.0)
+            .map(|snap| RequiresGradSnapshot::Opaque(Box::new(snap)))
+    }
+
+    /// `Opaque` を facade 側のスナップショット型へ戻して葉単位に復元する。`Opaque` 以外・
+    /// 型違いは fail-closed の `InvalidArgument`。
+    fn restore_requires_grad_snapshot(
+        &mut self,
+        snapshot: &RequiresGradSnapshot,
+    ) -> Result<(), AutodiffError> {
+        let inner = match snapshot {
+            RequiresGradSnapshot::Opaque(any) => {
+                any.downcast_ref::<crate::nn::container::RequiresGradSnapshot>()
+            }
+            _ => None,
+        };
+        match inner {
+            Some(snap) => crate::nn::container::restore_requires_grad(&mut *self.0, snap),
+            None => Err(AutodiffError::InvalidArgument(
+                "FacadeModuleAdapter::restore_requires_grad_snapshot: snapshot was not \
+                 produced by a FacadeModuleAdapter (structure changed during rollback)"
+                    .to_string(),
+            )),
+        }
     }
 
     fn type_name(&self) -> &'static str {
@@ -518,6 +654,108 @@ mod tests {
         assert!(seq.layers()[0].training());
     }
 
+    #[test]
+    fn default_set_requires_grad_message_matches_autodiff() {
+        // autodiff 側は named_parameters だけを override した同数パラメータの型で比較する。
+        struct AdParams(Tensor<f32>);
+        impl AutodiffModule for AdParams {
+            fn forward<'t>(
+                &self,
+                _tape: &'t fandhe_ai_autodiff::Tape,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                Ok(*input)
+            }
+            fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+                vec![("p".into(), &self.0)]
+            }
+        }
+        struct FacParams(Tensor<f32>);
+        impl Module for FacParams {
+            fn forward<'t>(
+                &self,
+                _tape: TapeRef<'t>,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                Ok(*input)
+            }
+            fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+                vec![("p".into(), &self.0)]
+            }
+        }
+        let mine = FacParams(t(1.0))
+            .set_requires_grad(false)
+            .expect_err("fail-closed")
+            .to_string();
+        let theirs = AutodiffModule::set_requires_grad(&mut AdParams(t(1.0)), false)
+            .expect_err("fail-closed")
+            .to_string();
+        assert_eq!(mine, theirs);
+    }
+
+    #[test]
+    fn default_requires_grad_for_stateless_layer() {
+        let mut s = Stateless;
+        assert!(s.set_requires_grad(false).is_ok());
+        assert!(s.freeze().is_ok());
+        assert!(s.requires_grad());
+        let mut p = TwoParam {
+            a: t(1.0),
+            b: t(2.0),
+            fail_b: false,
+        };
+        assert!(matches!(p.freeze(), Err(AutodiffError::InvalidArgument(_))));
+    }
+
+    /// `requires_grad` を実保持する facade 層（アダプタ委譲の検証用）。
+    struct Freezable {
+        a: Tensor<f32>,
+        rg: bool,
+    }
+    impl Module for Freezable {
+        fn forward<'t>(
+            &self,
+            tape: TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            let a = if self.rg {
+                tape.var(&self.a)
+            } else {
+                tape.var_no_grad(&self.a)
+            };
+            input.mul(&a)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("a".into(), &self.a)]
+        }
+        fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+            self.rg = v;
+            Ok(())
+        }
+        fn requires_grad(&self) -> bool {
+            self.rg
+        }
+    }
+
+    #[test]
+    fn adapter_delegates_set_requires_grad_and_requires_grad() {
+        let mut seq = Sequential::new();
+        seq.push(Box::new(FacadeModuleAdapter(Box::new(Freezable {
+            a: Tensor::from_slice(&[1.0, 2.0, 3.0], &[3]).expect("tensor"),
+            rg: true,
+        }) as Box<dyn Module>)));
+        assert!(AutodiffModule::requires_grad(&seq));
+        AutodiffModule::freeze(&mut seq).expect("freeze");
+        assert!(!AutodiffModule::requires_grad(&seq));
+        assert!(!seq.layers()[0].requires_grad());
+        AutodiffModule::set_requires_grad(&mut seq, true).expect("unfreeze");
+        assert!(AutodiffModule::requires_grad(&seq));
+
+        // 未 override のパラメータ持ち facade 層は fail-closed で Err。
+        let mut bad = Sequential::new();
+        bad.push(Box::new(adapter()));
+        assert!(AutodiffModule::freeze(&mut bad).is_err());
+    }
     #[test]
     fn adapter_delegates_type_name_but_not_children() {
         let ad = adapter();

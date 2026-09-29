@@ -5705,9 +5705,10 @@ fn scan_module_trait_methods(content: &str) -> Option<Vec<(String, bool, Vec<Str
 }
 
 /// #2395 の正ガード: facade `nn::Module` の面が承認済み集合
-/// （required = `forward` のみ・defaulted = 10 件。#2401 で introspection 4 件を追加）と完全一致すること
+/// （required = `forward` のみ・defaulted = 14 件。#2400 で凍結 API 3 件と `children_mut`・#2401 で introspection 4 件を追加）と完全一致すること
 /// （#2338 承認事項 2）。`forward_host`・`as_*` 等の内部フックの混入を拒否する。
-/// #2400／#2401 で鏡写しのメソッドを足すときは本集合を更新する。
+/// #2400 で凍結 API 3 件（`set_requires_grad`・`freeze`・`requires_grad`）を追加し 9 件。
+/// #2401 で鏡写しのメソッドを足すときは本集合を更新する。
 #[test]
 fn facade_nn_module_trait_methods_match_approved_set() {
     let src = read_to_string_or_panic(&facade_crate_root().join("src/nn/module.rs"));
@@ -5735,10 +5736,16 @@ fn assert_module_surface(methods: &[(String, bool, Vec<String>)]) -> Result<(), 
         "load_state_dict",
         "set_training",
         "training",
+        "set_requires_grad",
+        "freeze",
+        "requires_grad",
         "children",
         "named_modules",
         "parameter_count",
         "type_name",
+        // #2400 レビュー是正（PR #2426。2026-09-29 ユーザー承認）: `children` と対の公開
+        // defaulted メソッド。凍結ロールバックが利用者定義の複合層も葉単位で復元するために使う。
+        "children_mut",
     ]
     .into();
     if required != want_req || defaulted != want_def {
@@ -5783,8 +5790,11 @@ fn facade_nn_module_trait_guards_detect_each_category() {
         fn named_parameters(&self) -> V { V } fn set_parameter(&mut self, n: &str) -> R { R } \
         fn state_dict(&self) -> H { H } fn load_state_dict(&mut self, s: H) -> R { R } \
         fn set_training(&mut self, t: bool) {} fn training(&self) -> bool { true } \
+        fn set_requires_grad(&mut self, r: bool) -> R { R } fn freeze(&mut self) -> R { R } \
+        fn requires_grad(&self) -> bool { true } \
         fn children(&self) -> V { V } fn named_modules(&self) -> V { V } \
-        fn parameter_count(&self) -> usize { 0 } fn type_name(&self) -> &'static str { S } }";
+        fn parameter_count(&self) -> usize { 0 } fn type_name(&self) -> &'static str { S } \
+        fn children_mut(&mut self) -> V { V } }";
     let m = scan_module_trait_methods(ok).expect("ok");
     assert!(assert_module_surface(&m).is_ok());
     assert!(check_module_signatures(&m).is_ok());
@@ -18625,7 +18635,9 @@ fn nn_module_rs_public_items_match_expected_set() {
 }
 
 /// 正ガード: `src/nn/container.rs` の公開 item は `ModuleDict`・`ModuleList`・`Sequential` の
-/// 3 構造体と `fn summary`（#2402 で承認済み）のみ。
+/// 3 構造体と `fn summary`（#2402 で承認済み）のみ。制限付き可視性は #2400（PR #2426）の
+/// `set_requires_grad` ロールバック用 crate 内ヘルパー（葉単位スナップショット型と
+/// snapshot／restore 関数。`FacadeModuleAdapter` からも使う）の 3 件のみ。
 #[test]
 fn nn_container_rs_public_items_match_expected_set() {
     let (public, restricted) = scan_top_level_pub_items(&nn_src("container.rs"));
@@ -18638,7 +18650,15 @@ fn nn_container_rs_public_items_match_expected_set() {
             ("struct", "Sequential"),
         ])
     );
-    assert!(restricted.is_empty(), "制限付き pub item: {restricted:?}");
+    assert_eq!(
+        restricted,
+        pair_set(&[
+            ("enum", "RequiresGradSnapshot"),
+            ("fn", "restore_requires_grad"),
+            ("fn", "snapshot_requires_grad"),
+        ]),
+        "制限付き pub item は凍結ロールバック用の crate 内ヘルパー 3 件のみ"
+    );
 }
 
 /// 正ガード: `ModuleList`／`Sequential` の固有 pub メソッド集合と手書き trait impl 集合。
