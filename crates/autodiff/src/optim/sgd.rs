@@ -22,6 +22,8 @@
 //! （`nn/linear.rs::Linear::from_parameters` 参照）のため、[`Sgd::step`]
 //! も同じ形（更新後の新規 `Tensor<f32>` 列を返す関数型 API）に合わせる。
 
+use std::collections::HashMap;
+
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -411,6 +413,80 @@ impl Sgd {
     }
 }
 
+/// [`crate::nn::optim::OptimizerStateDict`]（イシュー #2367。
+/// `nn::optim::state_dict` モジュール冒頭 doc「キー配置」節）。
+///
+/// `kind = "sgd"`。`step_count`／`beta*_pow_t` は持たず、momentum の
+/// `velocity` のみを `state.<i>.momentum_buffer` として保存・復元する
+/// （検証本体は `decode_slot_only_state_dict` へ委譲）。`velocity ==
+/// None` は `num_slots = 0` で表す。momentum 有効・params 0 件の step が
+/// 生む `Some(vec![])` も `num_slots = 0` に潰れ load で `None` に戻る
+/// （次の step が初回扱いになる正規化。受容済み）。
+///
+/// `momentum == 0.0` の `Sgd` へ `num_slots > 0` の state を読み込むと
+/// `InvalidArgument`（`step()` は「velocity が `Some` ⇔ momentum ≠ 0」
+/// を前提とし、そうしないと値が更新されないまま残るため）。velocity と
+/// params の件数・shape 整合は load 時点では params が無く検査できない
+/// ため、次の `step()` 冒頭の検査（`InvalidArgument`）で担保する。
+/// config は保存しない（同じ config で `new` してから load する契約）。
+impl crate::nn::optim::OptimizerStateDict for Sgd {
+    fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        use crate::nn::optim::state_dict as sd;
+        let slots = self.velocity.as_deref().unwrap_or(&[]);
+        let mut out = HashMap::with_capacity(2 + slots.len());
+        out.insert(
+            sd::marker_key("sgd"),
+            Tensor::new(vec![sd::FORMAT_VERSION], &[1])?,
+        );
+        out.insert(
+            sd::NUM_SLOTS_KEY.to_string(),
+            sd::encode_u16x4_tensor(slots.len() as u64)?,
+        );
+        for (i, v) in slots.iter().enumerate() {
+            out.insert(
+                sd::slot_key(i, "momentum_buffer"),
+                Tensor::new(crate::eval::dense_vec(v), v.shape())?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        let slots = crate::nn::optim::state_dict::decode_slot_only_state_dict(
+            "sgd",
+            &state,
+            &["momentum_buffer"],
+        )?;
+        if self.config.momentum == 0.0 && !slots.is_empty() {
+            return Err(AutodiffError::InvalidArgument(
+                "OptimizerStateDict::load_state_dict（kind=`sgd`）: momentum buffers cannot \
+                 be loaded into an Sgd with momentum == 0.0"
+                    .to_string(),
+            ));
+        }
+        let mut velocity = Vec::with_capacity(slots.len());
+        for (shape, mut buffers) in slots {
+            let Some(buf) = buffers.remove("momentum_buffer") else {
+                return Err(AutodiffError::InvalidArgument(
+                    "OptimizerStateDict::load_state_dict（kind=`sgd`）: internal error: \
+                     `momentum_buffer` missing after validation"
+                        .to_string(),
+                ));
+            };
+            velocity.push(Tensor::new(buf, &shape)?);
+        }
+        self.velocity = if velocity.is_empty() {
+            None
+        } else {
+            Some(velocity)
+        };
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +755,36 @@ mod tests {
         // この期待値が検証する: もし velocity が破棄されていれば
         // b2 = g2 = 4.0 となり p2 = 0.8 - 0.05*4.0 = 0.6 になるはず）
         assert!((out2[0].get(&[0]).unwrap() - 0.55).abs() < 1e-6);
+    }
+
+    // ---- OptimizerStateDict（イシュー #2367）----
+
+    #[test]
+    fn state_dict_velocity_none_maps_to_zero_slots() {
+        use crate::nn::optim::OptimizerStateDict as _;
+        let cfg = SgdConfig::new(0.1).with_momentum(0.9);
+        let sgd = Sgd::new(cfg).unwrap();
+        assert_eq!(sgd.state_dict().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn failed_load_keeps_velocity() {
+        use crate::nn::optim::OptimizerStateDict as _;
+        let cfg = SgdConfig::new(0.1).with_momentum(0.9);
+        let mut sgd = Sgd::new(cfg).unwrap();
+        let p = tensor(vec![1.0, 2.0], &[2]);
+        let g = tensor(vec![0.1, 0.2], &[2]);
+        sgd.step(&[&p], &[&g]).unwrap();
+        let snap = |s: &Sgd| -> Vec<Vec<f32>> {
+            s.velocity
+                .as_ref()
+                .map(|v| v.iter().map(crate::eval::dense_vec).collect())
+                .unwrap_or_default()
+        };
+        let before = snap(&sgd);
+        let mut bad = sgd.state_dict().unwrap();
+        bad.remove("state.0.momentum_buffer");
+        assert!(sgd.load_state_dict(bad).is_err());
+        assert_eq!(snap(&sgd), before);
     }
 }

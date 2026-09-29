@@ -200,8 +200,8 @@ facade（`fandhe_ai::optim`）公開面の拡張は次のいずれも未承認:
 
 ## §6 スコープ外
 
-- `crate::optim::Sgd`（momentum バッファ）・`Lbfgs`（受入基準の 9 種に
-  含まれない）
+- `Lbfgs`（受入基準の 9 種に含まれない。専用 inherent API は #2366、
+  `Sgd` は #2367 で実装済み。§8 参照）
 - `crate::optim::device_store::DeviceParamStore` 常駐更新経路の
   state_dict 対応
 - param groups（#2173）の group 別ハイパーパラメータの保存
@@ -235,3 +235,34 @@ facade（`fandhe_ai::optim`）公開面の拡張は次のいずれも未承認:
 - `cargo test -p fandhe-ai` → 全 test バイナリで 0 failed
 - `git diff --stat` で `Cargo.toml`／`Cargo.lock`・`docs/spec` に差分が
   ないことを確認済み（新規依存・仕様変更なし）
+
+## §8 `Sgd` への実装（イシュー #2367・親 #2131）
+
+`crate::optim::Sgd`（`crates/autodiff/src/optim/sgd.rs`）へ
+`OptimizerStateDict` を実装した。`compat::save_model`／`load_model` で
+momentum 付き `Sgd` を bit 一致で再開するための内部 API（manifest への
+結線は #2372）。facade への再エクスポートは行わない。
+
+- **キー**: `__optimizer__.sgd`（マーカー）・`num_slots.u64_u16x4`・
+  `state.<i>.momentum_buffer`（バッファ名は PyTorch と同じ）。
+  `step_count`／`beta*_pow_t`／`mu_product` は持たず、`step_count` キーの
+  混入は余剰キーとして拒否する。形式バージョンは 1 のまま
+- **`velocity == None`**: `num_slots = 0` でスロットキーなし
+- **デコーダ**: 既存 `decode_state_dict` のシグネチャ・挙動は不変。本体を
+  private な共通関数へ移し、`pub(crate) decode_slot_only_state_dict` が
+  `step_count` を要求しない形で同じ検証順（DoS 上限・キー集合完全一致・
+  マーカー・shape）を再利用する。`state_dict` モジュールは `pub(crate)`
+  化した（クレート外・facade の公開面は不変）
+- **`load_state_dict`**: 全件検証後に一括代入（失敗時 `self` 不変）。
+  `momentum == 0.0` の `Sgd` への `num_slots > 0` は `InvalidArgument`
+  （`step()` の「velocity が `Some` ⇔ momentum ≠ 0」前提の保護）。
+  velocity と params の件数・shape 整合は次の `step()` が検査する
+- **縮退ケース（受容）**: momentum 有効で params 0 件の step が作る
+  `Some(vec![])` は `num_slots = 0` に潰れ、load で `None` に戻る。差は
+  次の n>0 件 step が件数変化エラーでなく初回 step になる点のみ
+- **facade 保留ガード**: `OptimizerStateDictHoldDoctestGuard` のプローブ
+  対象（5 型）は本イシューでは変更しない（固定文言と同時変更が必要なため）。
+  `Sgd` をプローブへ追加する多層防御の強化はフォローアップ。
+  `api_surface.rs` の定義元インベントリに `sgd.rs` の 2 エントリを追加
+- 新規 `Op`／`BackendOps`／カーネル／`unsafe`／依存の追加なし。
+  `step()` の演算列は不変（bit ドリフトなし）

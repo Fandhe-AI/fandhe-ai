@@ -65,7 +65,7 @@ version migration。
    - 代替案として `Sequential::save(&self, dir)`／`Sequential::load(dir)`
      （inherent メソッド）も併記する。
 2. **内部クレートへの追加**（facade 公開面は広がらない）。
-   - `impl OptimizerStateDict for Sgd`（`crates/autodiff/src/optim/sgd.rs`）。
+   - **【内部 API 実装済み（イシュー #2367）。`decode_slot_only_state_dict` で `step_count` 不要。`docs/autodiff-optimizer-state-dict-decision.md` §8】** `impl OptimizerStateDict for Sgd`（`crates/autodiff/src/optim/sgd.rs`）。
      `Sgd` は `velocity: Option<Vec<Tensor>>` を持つが `OptimizerStateDict`
      未実装（`docs/autodiff-optimizer-state-dict-decision.md`）。
      `decode_state_dict` は現状 `step_count` を必須とするため、`Sgd`
@@ -193,7 +193,7 @@ version migration。
 | `Sequential` は層を `Box<dyn Module>` で持つ。`Module` のダウンキャストは不完全 | `crates/facade/src/compat/sequential.rs`・`crates/autodiff/src/nn/module.rs` | 各 `add_*`（30 メソッド）の引数を内部 `LayerSpec` enum として記録する方式にする |
 | BatchNorm の running stats は `state_dict()` に含まれない。setter がなく、`BatchNorm1d/2d::from_parameters` でのみ復元できる | `crates/autodiff/src/nn/batch_norm.rs` | buffer は safetensors に別キーで保存し、BN 層は `from_parameters` で再構築する。`num_batches_tracked` は非復元（forward 計算に一切使われないカウンタのみで、非復元でも数値へ影響しない。§11 参照） |
 | `Compiled { optimizer, loss, amp }`。7 optimizer（`Sgd`／`AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Lbfgs`。`Lbfgs` は PR #2319〈main 統合済み〉で追加）はいずれも `config()` を持ち、`set_lr` による書き換えも `config()` へ反映済みの値を返す | `crates/facade/src/compat/training.rs` | 設定値（LR scheduler が書き換えた現在値を含む）は全フィールドを直列化できる |
-| `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb` は `OptimizerStateDict` 実装済み。`Sgd`／`Lbfgs` は未実装 | `crates/autodiff/src/nn/optim/state_dict.rs`・`crates/autodiff/src/nn/optim/lbfgs.rs` | 承認後は `impl OptimizerStateDict for Sgd`、および `Lbfgs` 専用のキー配置を持つ状態保存・復元 API が必要（§2 item 2）。`Lbfgs` 側の内部 API は #2366 で実装済み（接頭辞なし。`docs/autodiff-lbfgs-decision.md` §10） |
+| `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Sgd` は `OptimizerStateDict` 実装済み（`Sgd` は #2367）。`Lbfgs` は専用 inherent API 実装済み | `crates/autodiff/src/nn/optim/state_dict.rs`・`crates/autodiff/src/nn/optim/lbfgs.rs` | 承認後は `impl OptimizerStateDict for Sgd`、および `Lbfgs` 専用のキー配置を持つ状態保存・復元 API が必要（§2 item 2）。`Lbfgs` 側の内部 API は #2366 で実装済み（接頭辞なし。`docs/autodiff-lbfgs-decision.md` §10） |
 | `api_surface.rs::workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` が `state_dict`／`load_state_dict` の宣言元を完全一致で固定している | `crates/facade/tests/api_surface.rs` | 承認後の facade 側ヘルパーにこの名前は使えない |
 | `GradScaler` に `config()` はあるが、`(scale, growth_tracker)` を任意の値に復元するコンストラクタがない（`update` の backoff／growth 経由でしか変化しない） | `crates/autodiff/src/nn/optim/amp.rs` | `compile_with_amp` の時点で `GradScalerConfig` を記録し、save 時点の `scale()`／`growth_tracker()` を manifest に保存、復元は承認後の `grad_scaler_from_state`（§2 item 3）を使う（`update` の再生では現在の `scale` を再現できないため。§11） |
 | `Optimizer::Lbfgs` は `compile_with_amp` から fail-closed に拒否される（AMP 非対応） | `crates/facade/src/compat/training.rs:899` | 検証計画（§6）の「optimizer × AMP」の直積対象から `Lbfgs` を除外する |
@@ -614,7 +614,7 @@ main への PR #2319〈L-BFGS〉統合後の状態）。
 | BatchNorm `running_mean`／`running_var` | 可（buffer） | 可（`BatchNorm1d/2d::from_parameters`） | 変更なし |
 | BatchNorm `num_batches_tracked` | 可（`num_batches_tracked()`。crate 内限定） | 不可（`from_parameters` に対応引数がなく setter もない） | **意図的に非復元のまま**。forward 計算のどこからも参照されず（`batch_norm.rs:395-396` で加算されるだけで、読み出し箇所は同ファイルの getter とテストのみ）、数値へ影響しないため復元 API は追加しない |
 | `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Adadelta`／`Adamax`／`NAdam`／`RAdam` の内部状態 | 可（`OptimizerStateDict::state_dict()`） | 可（`load_state_dict()`。検証付き） | 変更なし |
-| `Sgd` の `velocity` | 不可（`OptimizerStateDict` 未実装） | 不可 | §2 item 2（承認後 `impl OptimizerStateDict for Sgd`） |
+| `Sgd` の `velocity` | 内部 API 実装済み（#2367。manifest 結線は #2372） | 不可 | §2 item 2 |
 | `Lbfgs` の `n_iter`／`func_evals`／`d`／`t`／`old_dirs`／`old_stps`／`ro`／`h_diag`／`prev_flat_grad`／`last_loss`／`slot_shapes` | 一部可（`n_iter()`／`func_evals()`／`last_loss()`／`config()` のみ公開） | 不可（他フィールドに setter がなく、`OptimizerStateDict` も未実装。実装するとしても既存トレイトが前提とする per-param スロットバッファ形状〈`AdamW` の `m`／`v` 等〉とは構造が異なる〈フラット化ベクトル 1 本＋曲率ペア履歴〉） | §2 item 2 拡張（承認後、`Lbfgs` 専用キー配置の状態保存・復元 API を新設。§4「Lbfgs 状態」節） |
 | `GradScaler` の `scale`／`growth_tracker` | 可（`scale()`／`growth_tracker()`） | **不可**（`new` は `init_scale` からしか開始できず、`update` は backoff／growth の状態機械経由でしか変化しない。`growth_tracker` は成長／backoff のたびに `0` へリセットされるため、`update(false)` を事後に何回再生しても、再生前の backoff／growth で変化済みの `scale` 自体は再現できない——指摘 1 の対象） | §2 item 3（承認後 `grad_scaler_from_state(config, scale, growth_tracker)` を新設。検証は `new` 相当＋`scale` の非正規化数チェック＋`growth_tracker < growth_interval`） |
 | LR scheduler・callbacks | 該当なし（`Compiled`／`Sequential` に保持されない `fit` 呼び出し引数） | — | 非対象（スコープ外のまま） |
