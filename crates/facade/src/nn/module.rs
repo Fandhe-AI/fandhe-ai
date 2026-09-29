@@ -142,7 +142,7 @@ pub trait Module {
 }
 
 /// `named_modules` 用のノード同一性キー（データポインタ, 型名）。非公開。
-type NodeKey = (*const (), &'static str);
+pub(super) type NodeKey = (*const (), &'static str);
 
 /// `Module::named_modules` の再帰本体（autodiff 側 `collect_named_modules` と同一意味論）。
 /// 祖先スタックで循環を常に打ち切り、非 ZST のみ訪問済み集合で共有子を dedup する。

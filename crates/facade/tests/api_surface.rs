@@ -5748,7 +5748,7 @@ fn facade_declares_no_nn_module_items() {
     assert!(
         offending.is_empty(),
         "facade src に承認済み（`src/nn/module.rs` の `trait Module`・#2395、\
-         `src/nn/container.rs` の `struct ModuleList`／`struct Sequential`・#2396）以外の \
+         `src/nn/container.rs` の `struct ModuleList`／`struct Sequential`・#2396／`struct ModuleDict`・#2402）以外の \
          nn::Module／ModuleList 相当の独自宣言が見つかった: {offending:?}"
     );
     // インベントリ: 承認済みの `trait Module` 宣言がちょうど 1 件。
@@ -5760,7 +5760,7 @@ fn facade_declares_no_nn_module_items() {
     );
     // インベントリ（#2396）: 承認済みの `struct ModuleList`／`struct Sequential` が各 1 件。
     let container_rs = read_to_string_or_panic(&src_dir.join("nn/container.rs"));
-    for name in ["ModuleList", "Sequential"] {
+    for name in ["ModuleList", "Sequential", "ModuleDict"] {
         assert_eq!(
             scan_decl_count(&container_rs, "struct", name),
             1,
@@ -5814,6 +5814,9 @@ fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
             "Module" if token == "trait" && is_nn_module_rs => false,
             // #2396: `src/nn/container.rs` の `struct ModuleList`／`struct Sequential` のみ承認済み。
             "ModuleList" | "Sequential" if token == "struct" && is_nn_container_rs => false,
+            // #2402: `src/nn/container.rs` の `struct ModuleDict` のみ承認済み。
+            "ModuleDict" if token == "struct" && is_nn_container_rs => false,
+            "ModuleDict" => true,
             "Module" | "ModuleList" => true,
             "Sequential" => !is_compat_sequential,
             _ => false,
@@ -5865,6 +5868,16 @@ fn facade_declares_no_nn_module_items_detects_each_category() {
             "Sequential"
         ),
         2
+    );
+
+    // 承認済み（#2402）: `src/nn/container.rs` の `struct ModuleDict` のみ許容。
+    assert!(scan_nn_module_item_declarations("pub struct ModuleDict;", container_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct ModuleDict;", other).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct ModuleDict;", module_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub trait ModuleDict {}", container_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub enum ModuleDict {}", container_rs).is_empty());
+    assert!(
+        !scan_nn_module_item_declarations("pub type ModuleDict = u8;", container_rs).is_empty()
     );
 
     // 負例: 非公開 import・型参照。
@@ -6569,6 +6582,8 @@ fn collect_pub_use_leaves_expands_nested_groups_and_source_side_renames() {
 const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     // `compat/mod.rs`（`compat::array`。イシュー #411）。
     "array",
+    // `nn/mod.rs`（`nn::summary`。イシュー #2402。`ModuleDict` と同じ承認済み 1 行）。
+    "summary",
     // `interop/safetensors.rs`（イシュー #2019）。
     "load_safetensors_f32",
     "load_safetensors_f32_from_bytes",
@@ -6683,7 +6698,9 @@ fn facade_pub_use_leaves_are_not_modules_detects_unapproved_lowercase_leaf() {
     );
 
     // 負例: allowlist 内の既知の関数再エクスポート。
-    let approved = unexpected_lowercase_leaves("pub use array::{ArrayData, array};");
+    let approved = unexpected_lowercase_leaves(
+        "pub use array::{ArrayData, array}; pub use container::{ModuleDict, summary};",
+    );
     assert!(
         approved.is_empty(),
         "allowlist 内の葉が誤って違反として検出された: {approved:?}"
@@ -6715,48 +6732,133 @@ fn line_contains_identifier(line: &str, ident: &str) -> bool {
     false
 }
 
-/// `crates/facade/src/**` の `pub use` 行に `ModuleDict`／`summary`
-/// （`fandhe_ai_autodiff::nn::container` に イシュー #2134 で追加した
-/// 内部クレート限定の新規公開面）が識別子単位で現れないことを固定
-/// する（`facade_does_not_reexport_create_graph_result` と同型の否定
-/// ガード）。
+/// facade の `pub use` が `ModuleDict`／`summary` を承認済みの 1 形だけで公開することを固定する
+/// （イシュー #2402 で承認済み配置を正ガード化。旧 #2134 では facade に `Module` trait が無く
+/// 「未公開」を否定ガードで固定していた）。
 ///
-/// # 背景（実装計画 §2.1）
-///
-/// イシュー #2134・親 #2131 とも承認コメントが確認できないうえ、
-/// facade は `Module` trait 自体を公開していないため
-/// `Box<dyn Module>` を受ける `ModuleDict`・`&dyn Module` を受ける
-/// `summary` は #2133（`Module` trait の facade 公開）完了まで facade
-/// からは意味を成さない。本 PR では `crates/facade/src/**` を変更
-/// しないため、本テストは「未公開」という現状を fail-closed に固定
-/// するもの。承認取得後の実施形（#2133 完了後の再エクスポート等）を
-/// 追加する際は本テストを更新すること。
+/// 承認済みの形は `src/nn/mod.rs` の `pub use container::{ModuleDict, summary};`（トークン列
+/// 完全一致・葉 2 件）だけである。パスのトークン列のどこかに `ModuleDict`／`summary` が現れる
+/// `pub use`（別ファイル・`fandhe_ai_autodiff::nn::*` 経由・`as` 別名・分割形・順序違い・
+/// 複数行）はすべて違反とする。承認済み配置の追加・変更時は本ガードを更新すること。
 #[test]
 fn facade_does_not_reexport_module_dict_or_summary() {
     let src_dir = facade_crate_root().join("src");
     let mut offending = Vec::new();
+    let mut allowed_total = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with("pub use") {
-                continue;
-            }
-            for ident in ["ModuleDict", "summary"] {
-                if line_contains_identifier(trimmed, ident) {
-                    offending.push(format!(
-                        "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
-                        path.display()
-                    ));
-                }
-            }
-        }
+        let (offenses, allowed) = scan_module_dict_summary_reexports(content, path);
+        offending.extend(offenses);
+        allowed_total += allowed;
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が ModuleDict／summary（イシュー #2134 の内部クレート限定\
-         新規公開面）を再エクスポートしている（承認未取得のまま対象外という\
-         設計判断に違反）: {offending:?}"
+        "facade の `pub use` が承認済みの 1 形（`src/nn/mod.rs` の \
+         `pub use container::{{ModuleDict, summary}};`）以外で ModuleDict／summary を公開している: \
+         {offending:?}"
     );
+    // インベントリ: 承認済みの葉がちょうど 2 件（走査の空振り検出）。
+    assert_eq!(
+        allowed_total, 2,
+        "src/nn/mod.rs の承認済み `pub use`（ModuleDict・summary の葉）がちょうど 2 件であること"
+    );
+}
+
+/// `content`（`path` 由来）の `pub use` を走査し、`ModuleDict`／`summary` を含むものについて
+/// 違反文字列の列と承認済みの葉の件数を返す（[`facade_does_not_reexport_module_dict_or_summary`]
+/// ・自己テスト共用）。
+fn scan_module_dict_summary_reexports(content: &str, path: &Path) -> (Vec<String>, usize) {
+    let is_nn_mod = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .ends_with("src/nn/mod.rs");
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending = Vec::new();
+    let mut allowed = 0usize;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let hits = path_tokens
+                .iter()
+                .filter(|t| matches!(t.as_str(), "ModuleDict" | "summary"))
+                .count();
+            if hits > 0 {
+                let path_strs = path_tokens.iter().map(String::as_str).collect::<Vec<_>>();
+                let approved = is_nn_mod
+                    && path_strs
+                        == [
+                            "container",
+                            ":",
+                            ":",
+                            "{",
+                            "ModuleDict",
+                            ",",
+                            "summary",
+                            "}",
+                        ];
+                if approved {
+                    allowed += hits;
+                } else {
+                    offending.push(format!(
+                        "{}: `pub use {}`",
+                        path.display(),
+                        path_strs.join(" ")
+                    ));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        i += 1;
+    }
+    (offending, allowed)
+}
+
+/// [`scan_module_dict_summary_reexports`] の自己テスト（正例・負例の合成入力）。
+#[test]
+fn facade_does_not_reexport_module_dict_or_summary_detects_each_category() {
+    let nn_mod = Path::new("crates/facade/src/nn/mod.rs");
+    let lib = Path::new("crates/facade/src/lib.rs");
+    let off = |c: &str, p: &Path| scan_module_dict_summary_reexports(c, p).0;
+
+    // 承認済みの 1 形（違反 0・葉 2 件）。
+    assert_eq!(
+        scan_module_dict_summary_reexports("pub use container::{ModuleDict, summary};", nn_mod),
+        (Vec::new(), 2)
+    );
+    // 複数行でも同じ形として扱う。
+    assert_eq!(
+        scan_module_dict_summary_reexports(
+            "pub use container::{\n    ModuleDict,\n    summary,\n};",
+            nn_mod
+        )
+        .1,
+        0,
+        "末尾カンマ付きはトークン列が異なるため承認形ではない（違反）"
+    );
+
+    // 違反。
+    assert!(!off("pub use container::{ModuleDict, summary};", lib).is_empty());
+    assert!(!off("pub use container::{summary, ModuleDict};", nn_mod).is_empty());
+    assert!(!off("pub use container::ModuleDict;", nn_mod).is_empty());
+    assert!(!off("pub use container::summary;", nn_mod).is_empty());
+    assert!(!off("pub use container::ModuleDict as D;", nn_mod).is_empty());
+    assert!(!off("pub use container::{ModuleDict, summary as s};", nn_mod).is_empty());
+    assert!(!off("pub use fandhe_ai_autodiff::nn::ModuleDict;", nn_mod).is_empty());
+    assert!(!off("pub use fandhe_ai_autodiff::nn::summary;", lib).is_empty());
+    assert!(!off("pub use foo::Bar as ModuleDict;", nn_mod).is_empty());
+    assert!(!off("pub use foo::bar as summary;", nn_mod).is_empty());
+
+    // 負例: 非 pub・`pub(crate)`・無関係な識別子・コメント中。
+    assert!(off("use container::{ModuleDict, summary};", nn_mod).is_empty());
+    assert!(off("pub(crate) use container::{ModuleDict, summary};", nn_mod).is_empty());
+    assert!(off("pub use container::{ModuleList, Sequential};", nn_mod).is_empty());
+    assert!(off("// pub use container::ModuleDict;", nn_mod).is_empty());
 }
 
 /// `crates/facade/src/compat/sequential.rs` に

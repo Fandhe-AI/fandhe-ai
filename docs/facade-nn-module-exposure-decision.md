@@ -484,4 +484,13 @@ facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタ�
 - **コンテナ**: `ModuleList::children` は `"{index}"`、`Sequential::children` は内側 `ModuleList` へ委譲。
 - **アダプタ（#2397）**: `type_name` は委譲する（autodiff 側表示に利用者層の型名を出すため）。`children` は委譲しない。facade の `&dyn Module` を借用のまま autodiff の `&dyn Module` へ変換するには所有アダプタ実体が要り、`unsafe`／リーク／保持構造なしには成立しないため。残存する非対称: autodiff の `named_modules` はアダプタで包んだ facade コンテナの内側へ降りない。
 - **テスト**: `crates/facade/tests/nn_module_introspection.rs`（ネスト順・ZST・offset 0・自己／間接循環・共有子・dyn 経由）、`nn/module.rs` の unit test（アダプタ）。`api_surface.rs` の defaulted 集合正ガードと自己テスト fixture を更新。否定ガード `compat_sequential_has_no_introspection_methods` は不変。
-- **範囲外**: `ModuleDict`・`summary`（#2402）、`compat::Sequential` への委譲。
+- **範囲外**: `ModuleDict`・`summary`（#2402。§19 で実装済み）、`compat::Sequential` への委譲。
+
+## 19. 実装記録（イシュー #2402）
+
+- **追加**: `fandhe_ai::nn::{ModuleDict, summary}`（autodiff #2134 の鏡写し。§10 承認事項 6）。`src/nn/container.rs` に `ModuleDict`（挿入順 `Vec<(String, Box<dyn Module>)>`・キー検証〈空・`'.'` 拒否。文言は autodiff とバイト一致〉・`from_pairs`／`insert`／`remove`／`get`／`get_mut`／`contains_key`／`keys`／`iter`／`iter_mut`／`len`／`is_empty`）と `summary(&dyn Module) -> String` を置き、`nn/mod.rs` で既存行とは別の `pub use container::{ModuleDict, summary};` として公開する。公開面は追加のみ（semver minor 相当）。
+- **意味論**: `forward` は常に `InvalidArgument`、`children` はキー・挿入順、`named_parameters` は `"{key}.{name}"`、`set_parameter` は `split_once('.')` で振り分け（区切りなし・未知キーは `Err`）、`set_training` は全子へ伝播。`state_dict`／`load_state_dict` は既定実装に任せる。`summary` は循環を祖先スタックで打ち切り、非 ZST の共有子を `(ptr, type_name)` で dedup する（`NodeKey` を `pub(super)` にして `named_modules` と共有）。
+- **未実装（先行依存）**: `set_requires_grad`／`requires_grad` の伝播・ロールバックは #2400（PR #2426）が未マージで facade `Module` にメソッド自体が無いため実装していない。#2400 マージ後に `ModuleList` と同形（スナップショット・失敗子を含む逆順ロールバック・失敗集約）で追加する必要がある。
+- **テスト**: `tests/nn_module_dict_summary.rs`（facade のみ依存。`summary` の文字列形式を完全一致で固定〈葉ルート・ネスト・空辞書・ジェネリクス・複数 ZST・循環・共有子〉）、`container.rs` の in-crate parity（autodiff との `summary`・エラー文言・命名のバイト一致）。
+- **ガード**: `facade_does_not_reexport_module_dict_or_summary` を正ガード化（承認済みの `src/nn/mod.rs` の 1 形のみ許容・葉 2 件のインベントリ・自己テスト）。`LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `summary` を追加。`facade_declares_no_nn_module_items` は `struct ModuleDict` を `container.rs` のみ許容。`compat_sequential_has_no_introspection_methods` は不変。
+- **範囲外**: shape 推定・`extra_repr`、`compat::Sequential::summary()` への委譲、`docs/compat-api-scope.md` 台帳（#2403）。
