@@ -60,7 +60,7 @@
 //! 受ける `fit` 入口は対象外のまま。層構成ごとのディレクトリ保存・復元
 //! （[`crate::compat::save_model`]・[`crate::compat::load_model`]・[`crate::compat::ModelIoError`]。イシュー #2369・親 #2362）は
 //! 未 `compile` の `add_*` 全 30 層（`add_module` の利用者定義層を除く。イシュー #2370）に限って対応する
-//! （BatchNorm の running stats は #2371 まで初期値のときだけ保存可。対応範囲・世代コミット方式・
+//! （BatchNorm の running stats も保存・復元する〈`num_batches_tracked` は非復元。#2371〉。対応範囲・世代コミット方式・
 //! 既存ファイルを削除しない契約は `model_io` の各関数 doc を参照）。
 
 mod array;

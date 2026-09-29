@@ -22,6 +22,17 @@
 > 上限定数（`MAX_MANIFEST_BYTES`・`MAX_LAYERS`・`MAX_ARRAY_LEN`・`MAX_OBJECT_KEYS`・
 > `MAX_JSON_DEPTH`）の値は変えていない（§2 item 4 の補足）。
 
+> **更新記録（イシュー #2371・親 #2362。2026-09-29）**: BatchNorm1d／2d の running stats を
+> `{i}.running_mean`／`{i}.running_var` として同じ safetensors へ保存・復元するようにした
+> （#2370 の暫定 fail-closed〈stats が初期値のときだけ保存可〉を撤廃）。manifest の `buffer_keys` を
+> 使い（§4）、load は `buffer_keys`・safetensors のキー集合・shape を層構成から導いた期待と
+> 完全一致で照合してから `BatchNorm1d/2d::from_parameters` で BN 層を組み直す（§5）。
+> `training` フラグは従来どおり manifest で往復し、load が全層を `set_training` で揃える。
+> **`num_batches_tracked` は復元しない**（load 後は 0 から再開。forward のどこからも参照されず
+> 数値に影響しないため。`save_model`／`load_model` の API doc にも明記。§11）。
+> 上限定数の値は変えていない。**#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**
+> 契約は継続。
+
 ## 0. 結論（方式の確定）
 
 **facade 公開面の拡張は承認待ちのまま保留し、「設計判断記録＋保留ガード
@@ -266,12 +277,19 @@ version migration。
     "num_layers": 3,
     "layers": [{"index": 0, "kind": "linear", "params": {}}],
     "parameter_keys": [{"key": "0.weight", "shape": [8, 4]}],
-    "buffer_keys": [],
+    "buffer_keys": [{"key": "1.running_mean", "shape": [6]}, {"key": "1.running_var", "shape": [6]}],
     "safetensors_file": "model.0123...cdef.safetensors",
     "safetensors_bytes": 4096,
     "compiled": null
   }
   ```
+  **`buffer_keys`（#2371）**: 要素は `parameter_keys` と同じ `{"key","shape"}`。BatchNorm1d／2d の
+  層 `i` ごとに `{i}.running_mean`・`{i}.running_var`（shape は `[num_features]`）を層順・
+  mean → var の順で並べる。期待値は層構成（`num_features`）から導出し、manifest の記載値は
+  完全一致の判定にだけ使う（ファイル I/O・確保量の根拠にしない。§13.5）。過不足・順序・
+  キー名・shape の不一致は `Mismatch`、要素の型違い・未知フィールドは `Manifest`。
+  buffer の値の有限性は検査しない（重みと同じく bit のまま往復し、発散したモデルも
+  無言変換しない。REQ-7）。BN を含まないモデルでは `[]`。
   `safetensors_file`／`safetensors_bytes` は §12 の世代コミット方式が
   load 側の世代不一致検出に使う（`safetensors_file` は
   `model.<32桁16進>.safetensors` の完全一致パターンのみ許可し、パス
@@ -368,12 +386,13 @@ version migration。
     manifest に載せても復元結果は変わらない。load は seed=0 固定で構築する。
   - **`add_module`（利用者定義層）は対象外**。構成を記録できないため `LayerSpec::Unsupported` の
     まま `save_model` が `UnsupportedModel` で拒否する。
-  - **BatchNorm の running stats は #2371 まで暫定 fail-closed**。本バージョンは stats を保存しない
-    ため、train モードで forward を通した BN をそのまま保存すると load 後の stats が初期値へ戻り
-    eval の forward が無言でずれる（REQ-7 違反）。`save_model` は batch_norm1d／2d の
-    `running_mean` が全要素 bit で `0.0`・`running_var` が全要素 bit で `1.0`・追跡回数 0 のとき
-    だけ保存を許し、それ以外は `UnsupportedModel` にする（層を BatchNorm として取り出せない場合も
-    fail-closed）。#2371 で buffer を保存できるようになった時点でこの制限を撤廃する。
+  - **BatchNorm の running stats は #2371 で保存・復元する**。`running_mean`／`running_var` を
+    `{i}.running_mean`／`{i}.running_var` として safetensors に保存し、manifest の `buffer_keys`
+    にも記録する。load は `buffer_keys` と safetensors のキー集合・shape を完全一致で照合し、
+    BN を `from_parameters(weight, bias, running_mean, running_var, eps, momentum)` で組み直す
+    （weight／bias は safetensors の値を clone して渡し、直後の strict な `load_state_dict` でも
+    同じ値を再設定する。buffer キーは `load_state_dict` が未知キーとして拒否するため先に取り除く）。
+    層を BatchNorm として取り出せない場合の fail-closed は維持する。
   - **層ごとのモード一致**。`add_*` は push 後に層のモードを同期しない一方、load は
     `set_training(manifest.training)` で全層を揃える。モードで forward が変わる kind（dropout・
     batch_norm1d／2d）だけ、層の `training()` がモデル全体と一致することを要求し、不一致
@@ -406,12 +425,12 @@ version migration。
   `safetensors_bytes` と照合（不一致は `Mismatch`。§12.3 手順 4）→
   同じハンドルから safetensors を上限付きで読む → 3 種のキー集合と
   ファイル内容の完全一致・shape 一致を確認 → spec 順に層を構築（BN のみ
-  `from_parameters`）→ `load_state_dict` → `set_training` → `compiled`
+  `from_parameters`。#2371 で結線済み）→ `load_state_dict` → `set_training` → `compiled`
   があれば optimizer 復元（`Sgd`／`Lbfgs` は承認後の専用復元 API）・
   AMP があれば `grad_scaler_from_state` で scaler を復元。途中失敗時は
   部分的に構築した `Sequential` を返さない。
 - **非復元のもの**: BN の `num_batches_tracked`（forward 計算に使われない
-  カウンタのみで数値へ影響しない。§11）、Dropout の RNG 状態（グローバル
+  カウンタのみで数値へ影響しない。load 後は 0 から再開する。§11）、Dropout の RNG 状態（グローバル
   RNG。インスタンスに保持されない）、LR scheduler・callbacks・param
   groups（`Compiled`／`Sequential` に保持されない `fit` 呼び出し引数。
   ただし LR scheduler が書き換えた**現在の** LR 自体は各 optimizer の
@@ -423,7 +442,7 @@ version migration。
 
 `crates/facade/tests/compat_sequential_model_io.rs` で、30 種すべての
 層を含むモデル・深い異種スタック・transformer encoder・train モード
-後の BN running stats・6 optimizer（`Sgd`／`AdamW`／`Adam`／`RmsProp`／
+後の BN running stats（#2371。`crates/facade/tests/compat_sequential_model_io_batch_norm.rs`）・6 optimizer（`Sgd`／`AdamW`／`Adam`／`RmsProp`／
 `Adagrad`／`Lamb`）× AMP の有無の組み合わせ、および `Lbfgs`（AMP は
 `compile_with_amp` 側で fail-closed 拒否されるため AMP なしの組み合わせ
 のみ。§3 参照）が save／load 後に bit 完全一致することを検証する。
@@ -742,7 +761,7 @@ main への PR #2319〈L-BFGS〉統合後の状態）。
 | 状態 | 保存可否（getter） | 現行 API のみで bit 一致復元可能か | 対応方針 |
 |---|---|---|---|
 | 重み（各層 weight／bias 等） | 可（`Module::state_dict()`） | 可（`load_state_dict()`） | 変更なし |
-| BatchNorm `running_mean`／`running_var` | 可（buffer） | 可（`BatchNorm1d/2d::from_parameters`） | 変更なし |
+| BatchNorm `running_mean`／`running_var` | 可（buffer） | 可（`BatchNorm1d/2d::from_parameters`） | #2371 で結線済み（`{i}.running_mean`／`{i}.running_var`＋manifest `buffer_keys`） |
 | BatchNorm `num_batches_tracked` | 可（`num_batches_tracked()`。crate 内限定） | 不可（`from_parameters` に対応引数がなく setter もない） | **意図的に非復元のまま**。forward 計算のどこからも参照されず（`batch_norm.rs:395-396` で加算されるだけで、読み出し箇所は同ファイルの getter とテストのみ）、数値へ影響しないため復元 API は追加しない |
 | `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Adadelta`／`Adamax`／`NAdam`／`RAdam` の内部状態 | 可（`OptimizerStateDict::state_dict()`） | 可（`load_state_dict()`。検証付き） | 変更なし |
 | `Sgd` の `velocity` | 内部 API 実装済み（#2367。manifest 結線は #2372） | 不可 | §2 item 2 |
