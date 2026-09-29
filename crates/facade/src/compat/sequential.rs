@@ -146,6 +146,13 @@ use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 /// 「ネストの限界」参照。ただし compat 層は `NnSequential`／
 /// `ModuleList` を構築する経路自体を公開していないため、ネストは
 /// facade 経由では到達不能）。
+///
+/// **独自層（`add_module`。イシュー #2398）と学習契約**: [`Sequential::add_module`] で積んだ
+/// facade `nn::Module` 実装が学習可能パラメータを持つ場合、`bind` はその層を追跡しない。
+/// 学習されないまま成功する状態を作らないため、`fit` 系・`SequentialVars::forward`／
+/// `trainable_grads`・デバイス常駐経路は型付き `Err` で拒否する（`bind` と
+/// `SequentialVars::trainable_vars` は signature 上 `Err` を返せず、独自層を含まない短い列に
+/// なりうる。直後の `forward`／`trainable_grads` が拒否する）。無状態の独自層は通過する。
 pub struct Sequential {
     inner: NnSequential,
     /// Keras 風 `compile()`（イシュー #1761・`compat/training.rs`）で
@@ -609,6 +616,30 @@ impl Sequential {
         Ok(self)
     }
 
+    /// facade 独自の [`crate::nn::Module`] 実装（利用者が facade だけに依存して書いた独自層）を
+    /// 末尾へ積む（イシュー #2398。#2338 承認事項 4・2026-09-29 ユーザー承認の唯一の公開入口。
+    /// `docs/facade-nn-module-exposure-decision.md` §9 の「`add_module` はスコープ外」を上書きする）。
+    /// 内部では crate 内専用アダプタ `FacadeModuleAdapter`（#2397）で autodiff 側 `Module` へ包む。
+    ///
+    /// - 推論: アダプタは `supports_forward_host() == false` のため [`Sequential::predict`] は
+    ///   tape 経路で動く。`forward`／`state_dict`／`load_state_dict` も動き、`state_dict` の
+    ///   キーは `"{index}.{name}"`（`index` は層の追加順）。
+    /// - 学習契約（fail-closed）: 独自層が学習可能パラメータを持つ場合、[`Sequential::bind`] は
+    ///   その層を追跡しない（facade `Module::forward` は forward 内で葉を登録するため、事前登録した
+    ///   `Var` を差し込めず勾配を取り出せない）。学習されないまま成功する状態を作らないよう、
+    ///   `fit` 系・`SequentialVars::forward`・`SequentialVars::trainable_grads` は
+    ///   `AutodiffError::InvalidArgument`、デバイス常駐経路（`init_device_param_store`／
+    ///   `forward_resident`／`predict_resident`）は `Unsupported` で型付き拒否する。
+    ///   パラメータを持たない独自層は活性化層と同じ扱いで学習・常駐経路を通過する。
+    ///   [`Sequential::apply_parameters`] は独自層の値も実際に更新する。
+    /// - `push` 後にモードを同期しない（`add_dropout`・`NnSequential::push` と同じ契約）。
+    pub fn add_module<M: crate::nn::Module + 'static>(mut self, m: M) -> Self {
+        let boxed: Box<dyn crate::nn::Module> = Box::new(m);
+        self.inner
+            .push(Box::new(crate::nn::FacadeModuleAdapter(boxed)));
+        self
+    }
+
     /// 積み上げた層を先頭から順に `Module::forward` へ委譲する。
     /// 呼び出し元が用意した `tape` 上で 1 回分の forward を計算する
     /// （`Linear::bind` がステップごとに葉ノードを登録し直す契約に従う。
@@ -945,6 +976,10 @@ impl Sequential {
     /// 呼び出し元は `bind` 以降の一連の処理をブロックスコープで囲み、
     /// スコープを抜けてから `apply_parameters` を呼ぶ運用とする。
     /// `crates/facade/tests/compat_sequential_train.rs` に実例がある）。
+    ///
+    /// `add_module`（#2398）で積んだパラメータ持ちの独自層は追跡されない（`bind` は
+    /// `Result` を返さないため成功する）。返る [`SequentialVars`] の `forward`／
+    /// `trainable_grads` が `InvalidArgument` で拒否する。
     pub fn bind<'m, 't>(&'m self, tape: &'t Tape) -> SequentialVars<'m, 't> {
         // `Linear::bind`／`Conv2d::bind`／`Conv1d::bind` はいずれも
         // `&fandhe_ai_autodiff::Tape` を要求する（`forward` と同じ理由。
@@ -1082,6 +1117,53 @@ impl Sequential {
             }
         }
         out
+    }
+
+    /// `bind` が追跡する 10 種の型付き層のどれでもなく、かつ学習可能パラメータ
+    /// （`named_parameters()` が非空）を持つ最初の層の index を返す（イシュー #2398）。
+    /// `add_module` で積んだパラメータ持ちの独自層がこれに当たる。
+    /// `fit`／`SequentialVars::forward`／`trainable_grads`／常駐経路の入口検査から呼ばれる。
+    /// `type_name()` の文字列一致ではなく型付きアクセサの有無で判定する（アダプタの
+    /// `type_name` が将来内側の層へ委譲されても壊れないため）。
+    pub(super) fn first_untracked_parametric_layer(&self) -> Option<usize> {
+        self.inner.layers().iter().position(|layer| {
+            layer.as_linear().is_none()
+                && layer.as_conv2d().is_none()
+                && layer.as_conv1d().is_none()
+                && layer.as_layer_norm().is_none()
+                && layer.as_rms_norm().is_none()
+                && layer.as_batch_norm1d().is_none()
+                && layer.as_batch_norm2d().is_none()
+                && layer.as_embedding().is_none()
+                && layer.as_multihead_attention().is_none()
+                && layer.as_transformer_encoder_layer().is_none()
+                && !layer.named_parameters().is_empty()
+        })
+    }
+
+    /// [`Sequential::first_untracked_parametric_layer`] を `InvalidArgument` へ写す学習側の
+    /// 入口検査（`ctx` は呼び出し元メソッド名）。学習側では `BackendError::Unsupported`
+    /// （`predict_recorded` が「フォールバックの合図」として捕捉する）を使わない。
+    pub(super) fn reject_untracked_parametric_layer(&self, ctx: &str) -> Result<(), AutodiffError> {
+        match self.first_untracked_parametric_layer() {
+            None => Ok(()),
+            Some(i) => Err(AutodiffError::InvalidArgument(format!(
+                "{ctx}: 層 {i} は bind が追跡しない独自層（add_module）のパラメータを持ち、\
+                 学習経路は非対応（イシュー #2398）"
+            ))),
+        }
+    }
+
+    /// 常駐経路版の入口検査（`BackendError::Unsupported`。既存の
+    /// `contains_resident_unsupported_layer` 拒否と同じ型・別メッセージ）。
+    fn reject_untracked_parametric_layer_resident(&self, ctx: &str) -> Result<(), BackendError> {
+        match self.first_untracked_parametric_layer() {
+            None => Ok(()),
+            Some(i) => Err(BackendError::Unsupported(format!(
+                "{ctx}: 層 {i} は追跡対象外の独自層（add_module）のパラメータを持ち、\
+                 デバイス常駐経路は非対応（イシュー #2398）"
+            ))),
+        }
     }
 
     /// `self.inner.layers()` にデバイス常駐経路（[`Sequential::
@@ -1487,6 +1569,7 @@ impl Sequential {
                     .to_string(),
             ));
         }
+        self.reject_untracked_parametric_layer_resident("Sequential::init_device_param_store")?;
         let params = self.trainable_parameters();
         DeviceParamStore::new(&tape.0, &params)
     }
@@ -1540,6 +1623,8 @@ impl Sequential {
                     .to_string(),
             )));
         }
+        self.reject_untracked_parametric_layer_resident("Sequential::forward_resident")
+            .map_err(AutodiffError::Backend)?;
         let leaves = store.register_resident_params(&tape.0)?;
         match self.forward_from_flat_leaves(&tape.0, input, &leaves, store) {
             Ok(output) => Ok(output),
@@ -1595,6 +1680,8 @@ impl Sequential {
                     .to_string(),
             )));
         }
+        self.reject_untracked_parametric_layer_resident("Sequential::predict_resident")
+            .map_err(AutodiffError::Backend)?;
         let tape = crate::tape_for(store.device())?;
         let leaves = store.snapshot_resident_params(&tape.0)?;
 
@@ -1858,6 +1945,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
         input: &Var<'t>,
         low_precision: Option<ScalarDType>,
     ) -> Result<Var<'t>, AutodiffError> {
+        self.model
+            .reject_untracked_parametric_layer("SequentialVars::forward")?;
         let mut current = *input;
         // `self.linears` は `model.layers` から `Linear` 層のみを同じ順序で
         // 抽出したもの（`Sequential::bind` 参照）のため、`Linear` 層に
@@ -2050,7 +2139,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
 
     /// [`Sequential::trainable_parameters`] と同一の順序契約（層順に
     /// weight → bias〈`Some` の場合のみ〉。イシュー #1770 で `Conv2d`／
-    /// `Conv1d` を含む）で `Var` 参照列を返す。
+    /// `Conv1d` を含む）で `Var` 参照列を返す。`add_module`（#2398）の独自層のパラメータは含まれない
+    /// （signature 上 `Vec` のまま。`forward`／`trainable_grads` が拒否するため損失を作れず、
+    /// optimizer の件数検査も塞ぐ）。
     pub fn trainable_vars(&self) -> Vec<&Var<'t>> {
         let mut out = Vec::new();
         let mut linears = self.linears.iter();
@@ -2196,6 +2287,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
         &self,
         grads: &'g Gradients,
     ) -> Result<Vec<&'g Tensor<f32>>, AutodiffError> {
+        self.model
+            .reject_untracked_parametric_layer("SequentialVars::trainable_grads")?;
         fn push_weight_bias<'g>(
             out: &mut Vec<&'g Tensor<f32>>,
             grads: &'g Gradients,
@@ -2363,6 +2456,44 @@ mod tests {
             .as_slice()
             .expect("contiguous() 直後は必ず as_slice() が Some を返す")
             .to_vec()
+    }
+
+    /// パラメータ持ちの独自層（#2398）。
+    struct P(Tensor<f32>);
+    impl crate::nn::Module for P {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("w".into(), &self.0)]
+        }
+    }
+    /// 無状態の独自層（#2398）。
+    struct S;
+    impl crate::nn::Module for S {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+    }
+
+    #[test]
+    fn first_untracked_parametric_layer_detects_only_custom_parametric_layers() {
+        let tracked = Sequential::new()
+            .add_linear(2, 2, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_module(S);
+        assert_eq!(tracked.first_untracked_parametric_layer(), None);
+        let with_param = tracked.add_module(P(Tensor::from_slice(&[1.0], &[1]).unwrap()));
+        assert_eq!(with_param.first_untracked_parametric_layer(), Some(3));
     }
 
     #[test]

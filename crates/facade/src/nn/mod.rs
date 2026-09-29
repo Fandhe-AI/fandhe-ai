@@ -16,3 +16,6 @@ pub mod rnn;
 
 pub use container::{ModuleList, Sequential};
 pub use module::Module;
+// `compat::Sequential::add_module`（#2398）が独自層を autodiff 側 `Module` へ包む crate 内専用の
+// アダプタ。`pub(crate)` のため公開面には現れない。
+pub(crate) use module::FacadeModuleAdapter;
