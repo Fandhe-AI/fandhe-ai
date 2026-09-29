@@ -85,6 +85,25 @@ pub(crate) fn strip_child_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a 
     rest.strip_prefix('.')
 }
 
+/// [`Module::requires_grad_snapshot`] が返す凍結状態の不透明スナップショット
+/// （PR #2426 レビュー是正。内部クレート専用で公開 API の範囲外）。
+///
+/// 末端層は集約 bool 1 つ（`Leaf`）、`ModuleList`／`Sequential` は子ごとの再帰
+/// （`Nested`）、`ModuleDict` は挿入順の子ごとの再帰（`NestedDict`）で表す。別クレートの
+/// アダプタ（`fandhe-ai` の `FacadeModuleAdapter`）は自前の葉単位スナップショットを
+/// `Opaque` に包み、復元側で同じ型へ `downcast_ref` して取り出す（型が違えば fail-closed）。
+#[doc(hidden)]
+pub enum RequiresGradSnapshot {
+    /// 末端層の集約 `requires_grad()` 値。
+    Leaf(bool),
+    /// `ModuleList`／`Sequential` の子 1 体ごとのスナップショット（層順）。
+    Nested(Vec<RequiresGradSnapshot>),
+    /// `ModuleDict` の子 1 体ごとのスナップショット（挿入順）。
+    NestedDict(Vec<RequiresGradSnapshot>),
+    /// 別クレートのコンテナが保持する不透明スナップショット。
+    Opaque(Box<dyn std::any::Any>),
+}
+
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
 pub trait Module {
     /// このステップの `tape` 上で 1 回分の forward を計算する。
@@ -618,6 +637,43 @@ pub trait Module {
     /// ため実際には常に揃った値を返す）。
     fn requires_grad(&self) -> bool {
         true
+    }
+
+    /// 凍結状態（`requires_grad`）の葉単位スナップショットを取る内部フック
+    /// （PR #2426 レビュー是正・2026-09-29 ユーザー承認。イシュー #2400／#2338）。
+    ///
+    /// [`ModuleList`]／[`Sequential`]／[`ModuleDict`] の `set_requires_grad` が失敗時
+    /// ロールバックのため子ごとに呼ぶ。既定は集約 `requires_grad()` 1 値の
+    /// [`RequiresGradSnapshot::Leaf`]。内部に混在状態（一部凍結・一部追跡）を持ちうる
+    /// 複合層は override して自身の葉ごとのスナップショットを返す（組込みコンテナは
+    /// `Nested`／`NestedDict`、`fandhe-ai` facade の crate 内アダプタは `Opaque`）。
+    /// 集約値 1 つで保存・復元すると混在状態が均一化されるため、コンテナは子の
+    /// スナップショットを必ずこのメソッド経由で取る。公開 API の範囲外（内部クレート専用）。
+    #[doc(hidden)]
+    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
+        RequiresGradSnapshot::Leaf(self.requires_grad())
+    }
+
+    /// [`Module::requires_grad_snapshot`] で取ったスナップショットへ状態を戻す内部フック。
+    ///
+    /// 既定は `Leaf` のみ受理し、`requires_grad()` の一致による早期 `Ok` を行わず必ず
+    /// [`Module::set_requires_grad`] を呼ぶ（getter が既定 `true` のままの外部実装で
+    /// 部分適用が残るのを避けるため。`Err` はそのまま返す）。`Leaf` 以外を受け取った場合は
+    /// 構造変化として fail-closed の `InvalidArgument`。override する層は自身が作った
+    /// variant を復元し、子数不一致・variant 不一致を fail-closed で拒否する。
+    #[doc(hidden)]
+    fn restore_requires_grad_snapshot(
+        &mut self,
+        snapshot: &RequiresGradSnapshot,
+    ) -> Result<(), AutodiffError> {
+        match snapshot {
+            RequiresGradSnapshot::Leaf(value) => self.set_requires_grad(*value),
+            _ => Err(AutodiffError::InvalidArgument(
+                "restore_requires_grad_snapshot: snapshot is a container snapshot but the \
+                 module is a leaf layer (structure changed during rollback)"
+                    .to_string(),
+            )),
+        }
     }
 
     /// この層（および子を持つ場合は子を含む）が公開する学習可能

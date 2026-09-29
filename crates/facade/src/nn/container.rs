@@ -34,14 +34,15 @@ use crate::{AutodiffError, TapeRef, Tensor, Var};
 ///
 /// 入れ子コンテナ（内部フック [`Module::__nested_modules`] が `Some`）は子ごとに再帰し、
 /// 葉層は `requires_grad()` の値 1 つを保持する。集約値 1 つで潰すと、凍結済みと追跡中を
-/// 併せ持つ入れ子コンテナが失敗時に均一化されてしまうため。autodiff 側
+/// 併せ持つ入れ子コンテナが失敗時に均一化されてしまうため。`FacadeModuleAdapter` が autodiff の
+/// `Module::requires_grad_snapshot` へ `Opaque` として包んで渡す際にも使う（`pub(crate)`）。autodiff 側
 /// `RequiresGradSnapshot` と同型（`ModuleList`／`ModuleDict` の区別は facade では不要）。
-enum RequiresGradSnapshot {
+pub(crate) enum RequiresGradSnapshot {
     Leaf(bool),
     Nested(Vec<RequiresGradSnapshot>),
 }
 
-fn snapshot_requires_grad(module: &dyn Module) -> RequiresGradSnapshot {
+pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(module: &M) -> RequiresGradSnapshot {
     match module.__nested_modules(SEAL) {
         Some(children) => {
             RequiresGradSnapshot::Nested(children.into_iter().map(snapshot_requires_grad).collect())
@@ -54,8 +55,8 @@ fn snapshot_requires_grad(module: &dyn Module) -> RequiresGradSnapshot {
 /// 必ず `set_requires_grad` を呼び（getter が既定 `true` のままの外部実装対策）、`Err` は
 /// そのまま返す。入れ子は 1 つ失敗しても残りの子の復元を続行し、失敗を集約する。
 /// 子数不一致・入れ子でなくなっている場合は fail-closed の `InvalidArgument`。
-fn restore_requires_grad(
-    module: &mut dyn Module,
+pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
+    module: &mut M,
     snapshot: &RequiresGradSnapshot,
 ) -> Result<(), AutodiffError> {
     match snapshot {
@@ -1052,6 +1053,94 @@ mod tests {
         d.set_requires_grad(true).expect("unfreeze");
         assert!(d.requires_grad());
         assert!(ModuleDict::new().requires_grad());
+    }
+
+    /// アダプタが返す `Opaque` スナップショットから facade 側の葉状態を平坦化して読む。
+    fn adapter_leaf_states(m: &dyn fandhe_ai_autodiff::nn::Module) -> Vec<bool> {
+        fn flat(s: &super::RequiresGradSnapshot, out: &mut Vec<bool>) {
+            match s {
+                super::RequiresGradSnapshot::Leaf(v) => out.push(*v),
+                super::RequiresGradSnapshot::Nested(c) => c.iter().for_each(|x| flat(x, out)),
+            }
+        }
+        let snap = m.requires_grad_snapshot();
+        let fandhe_ai_autodiff::nn::RequiresGradSnapshot::Opaque(any) = snap else {
+            panic!("アダプタは Opaque を返すはず");
+        };
+        let inner = any
+            .downcast_ref::<super::RequiresGradSnapshot>()
+            .expect("facade スナップショット");
+        let mut out = Vec::new();
+        flat(inner, &mut out);
+        out
+    }
+
+    fn adapted(
+        m: impl Module + 'static,
+    ) -> crate::nn::module::FacadeModuleAdapter<Box<dyn Module>> {
+        crate::nn::module::FacadeModuleAdapter(Box::new(m) as Box<dyn Module>)
+    }
+
+    fn mixed_facade_container() -> ModuleList {
+        let inner = list_of(vec![Box::new(fz(false)), Box::new(fz(true))]);
+        list_of(vec![Box::new(fz(false)), Box::new(inner)])
+    }
+
+    /// PR #2426 P1（アダプタ境界）: 混在状態の facade コンテナをアダプタで包んで autodiff の
+    /// `ModuleList` に積み、後続の子が失敗しても全葉が呼び出し前と完全一致する。
+    #[test]
+    fn adapter_in_autodiff_module_list_restores_mixed_facade_container_per_leaf() {
+        let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
+        outer.push(Box::new(adapted(mixed_facade_container())));
+        outer.push(Box::new(adapted(failing_fz())));
+        let before = adapter_leaf_states(outer.get(0).expect("0"));
+        assert_eq!(before, vec![false, false, true]);
+        fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false).expect_err("失敗");
+        assert_eq!(adapter_leaf_states(outer.get(0).expect("0")), before);
+    }
+
+    /// 同上（autodiff `Sequential`・入れ子 autodiff `ModuleList` 経由）。
+    #[test]
+    fn adapter_in_autodiff_sequential_restores_mixed_facade_container_per_leaf() {
+        let mut inner = fandhe_ai_autodiff::nn::ModuleList::new();
+        inner.push(Box::new(adapted(mixed_facade_container())));
+        let mut outer = fandhe_ai_autodiff::nn::Sequential::new();
+        outer.push(Box::new(inner));
+        outer.push(Box::new(adapted(failing_fz())));
+        let list = outer.layers()[0].as_module_list().expect("ModuleList");
+        let before = adapter_leaf_states(list.get(0).expect("0"));
+        fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false).expect_err("失敗");
+        let list = outer.layers()[0].as_module_list().expect("ModuleList");
+        assert_eq!(adapter_leaf_states(list.get(0).expect("0")), before);
+    }
+
+    /// 同上（autodiff `ModuleDict`）。
+    #[test]
+    fn adapter_in_autodiff_module_dict_restores_mixed_facade_container_per_leaf() {
+        let mut outer = fandhe_ai_autodiff::nn::ModuleDict::new();
+        outer
+            .insert("m", Box::new(adapted(mixed_facade_container())))
+            .expect("k");
+        outer
+            .insert("bad", Box::new(adapted(failing_fz())))
+            .expect("k");
+        let before = adapter_leaf_states(outer.get("m").expect("m"));
+        fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false).expect_err("失敗");
+        assert_eq!(adapter_leaf_states(outer.get("m").expect("m")), before);
+    }
+
+    /// アダプタの復元は `Opaque` 以外・型違いを fail-closed で拒否する。
+    #[test]
+    fn adapter_restore_rejects_foreign_snapshot() {
+        use fandhe_ai_autodiff::nn::{Module as Ad, RequiresGradSnapshot as Snap};
+        let mut a = adapted(fz(true));
+        assert!(a.restore_requires_grad_snapshot(&Snap::Leaf(true)).is_err());
+        let foreign = Snap::Opaque(Box::new(7u8));
+        let e = a
+            .restore_requires_grad_snapshot(&foreign)
+            .expect_err("型違い");
+        assert!(e.to_string().contains("not produced by"), "{e}");
+        let _ = Ad::requires_grad(&a);
     }
 
     /// 復元中の入れ子が構造変化（子数不一致）した場合は fail-closed の `Err`。

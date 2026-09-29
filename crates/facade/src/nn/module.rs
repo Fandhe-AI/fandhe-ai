@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use fandhe_ai_autodiff::nn::Module as AutodiffModule;
+use fandhe_ai_autodiff::nn::RequiresGradSnapshot;
 
 use crate::{AutodiffError, TapeRef, Tensor, Var};
 
@@ -206,7 +207,7 @@ pub trait Module {
 }
 
 /// 内部フック用の封印トークン（crate 外から名指し・構築できない）。
-pub mod sealed {
+pub(crate) mod sealed {
     /// フック呼び出しの資格を示す ZST。フィールドが crate 内限定のため外部では作れない。
     #[derive(Debug, Clone, Copy)]
     pub struct Token(pub(crate) ());
@@ -260,7 +261,9 @@ fn collect_named_modules<'a>(
 /// `&Tape` は `TapeRef::from_autodiff` の安全な借用変換で facade 層へ渡す。
 ///
 /// 委譲: `forward`・`named_parameters`・`set_parameter`・`set_training`・`training`・
-/// `set_requires_grad`・`requires_grad`（#2400）。`freeze` は autodiff 既定が
+/// `set_requires_grad`・`requires_grad`（#2400）・葉単位の凍結スナップショット
+/// `requires_grad_snapshot`／`restore_requires_grad_snapshot`（autodiff コンテナの
+/// ロールバックで内側 facade コンテナの混在状態を保つ。PR #2426 P1）。`freeze` は autodiff 既定が
 /// `set_requires_grad(false)` を経由するため委譲せず（facade 層が独自に `freeze` を
 /// override していても本アダプタ経由では迂回される）、
 /// `state_dict`／`load_state_dict` は autodiff 既定のまま（委譲済みの
@@ -316,6 +319,38 @@ where
 
     fn requires_grad(&self) -> bool {
         Module::requires_grad(&*self.0)
+    }
+
+    /// facade 側の葉単位スナップショット（`nn::container::snapshot_requires_grad`）を
+    /// `Opaque` に包んで返す。autodiff のコンテナがアダプタを単一の葉として集約値で
+    /// 保存すると、内側の facade コンテナの混在状態が復元時に均一化されるため
+    /// （PR #2426 P1）。
+    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
+        RequiresGradSnapshot::Opaque(Box::new(crate::nn::container::snapshot_requires_grad(
+            &*self.0,
+        )))
+    }
+
+    /// `Opaque` を facade 側のスナップショット型へ戻して葉単位に復元する。`Opaque` 以外・
+    /// 型違いは fail-closed の `InvalidArgument`。
+    fn restore_requires_grad_snapshot(
+        &mut self,
+        snapshot: &RequiresGradSnapshot,
+    ) -> Result<(), AutodiffError> {
+        let inner = match snapshot {
+            RequiresGradSnapshot::Opaque(any) => {
+                any.downcast_ref::<crate::nn::container::RequiresGradSnapshot>()
+            }
+            _ => None,
+        };
+        match inner {
+            Some(snap) => crate::nn::container::restore_requires_grad(&mut *self.0, snap),
+            None => Err(AutodiffError::InvalidArgument(
+                "FacadeModuleAdapter::restore_requires_grad_snapshot: snapshot was not \
+                 produced by a FacadeModuleAdapter (structure changed during rollback)"
+                    .to_string(),
+            )),
+        }
     }
 
     fn type_name(&self) -> &'static str {

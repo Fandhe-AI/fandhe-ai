@@ -62,7 +62,7 @@
 use std::collections::HashSet;
 
 use crate::error::AutodiffError;
-use crate::nn::module::{Module, NodeKey};
+use crate::nn::module::{Module, NodeKey, RequiresGradSnapshot};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
@@ -270,7 +270,7 @@ impl Module for ModuleList {
         let previous: Vec<RequiresGradSnapshot> = self
             .modules
             .iter()
-            .map(|m| snapshot_requires_grad(m.as_ref()))
+            .map(|m| m.requires_grad_snapshot())
             .collect();
 
         for (index, module) in self.modules.iter_mut().enumerate() {
@@ -298,7 +298,7 @@ impl Module for ModuleList {
                         continue;
                     };
                     if let Err(rollback_err) =
-                        restore_requires_grad(rollback_module.as_mut(), &previous[rollback_index])
+                        rollback_module.restore_requires_grad_snapshot(&previous[rollback_index])
                     {
                         rollback_failures.push(format!("module {rollback_index} ({rollback_err})"));
                     }
@@ -370,6 +370,35 @@ impl Module for ModuleList {
         !saw_param_bearing_child
     }
 
+    /// 子ごとの葉単位スナップショット（[`Module::requires_grad_snapshot`]）。
+    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
+        RequiresGradSnapshot::Nested(
+            self.modules
+                .iter()
+                .map(|m| m.requires_grad_snapshot())
+                .collect(),
+        )
+    }
+
+    fn restore_requires_grad_snapshot(
+        &mut self,
+        snapshot: &RequiresGradSnapshot,
+    ) -> Result<(), AutodiffError> {
+        match snapshot {
+            RequiresGradSnapshot::Nested(children) => restore_children(
+                "ModuleList",
+                children.len(),
+                self.modules.len(),
+                self.modules.iter_mut().zip(children.iter()),
+            ),
+            _ => Err(AutodiffError::InvalidArgument(
+                "restore_requires_grad: snapshot is not Nested but the module is a \
+                 ModuleList/Sequential container (structure changed during rollback)"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn as_module_list(&self) -> Option<&ModuleList> {
         Some(self)
     }
@@ -390,173 +419,36 @@ impl Module for ModuleList {
     }
 }
 
-/// [`ModuleList::set_requires_grad`] のロールバック用、子 1 体分の
-/// 再帰的 `requires_grad` スナップショット（P1 是正・#2234 レビュー
-/// 指摘）。末端層（[`Module::as_module_list`] が `None` を返す層）は
-/// 集約 bool 1 つ（`Leaf`）で表現できるが、入れ子コンテナ
-/// （`ModuleList`／`Sequential`）は孫の混在状態を保持するため、孫ごとに
-/// 再帰した `Nested` で表現する。
-enum RequiresGradSnapshot {
-    /// 末端層（非コンテナ）の集約 `requires_grad()` 値。
-    Leaf(bool),
-    /// 入れ子 `ModuleList`／`Sequential`（[`Module::as_module_list`] が
-    /// `Some` を返す）の子 1 体ごとのスナップショット（層順）。
-    Nested(Vec<RequiresGradSnapshot>),
-    /// 入れ子 `ModuleDict`（[`Module::as_module_dict`] が `Some` を返す。
-    /// P1 是正・#2234 レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gg`／cursor\[bot\]
-    /// `PRRT_kwDOTuUCJc6lE80z`）の子 1 体ごとのスナップショット（挿入
-    /// 順。`ModuleDict::keys`／`iter` と同じ順序）。`ModuleList` の
-    /// `Nested` と別 variant にする理由は `restore_requires_grad` 側で
-    /// `as_module_list_mut`／`as_module_dict_mut` のどちらへ委譲するかを
-    /// スナップショット自体から判別するため（`ModuleList` と
-    /// `ModuleDict` は別の内部表現を持つ別コンテナ型であり、取り違えると
-    /// 復元が `as_module_list_mut`（`None` を返す）に落ちて fail-closed
-    /// エラーになる）。
-    NestedDict(Vec<RequiresGradSnapshot>),
-}
-
-/// `module` の現在の `requires_grad` 状態を再帰的にスナップショットする
-/// （[`RequiresGradSnapshot`] 参照）。`ModuleList`／`Sequential`
-/// （[`Module::as_module_list`]）と `ModuleDict`（[`Module::
-/// as_module_dict`]）の両方を入れ子コンテナとして認識する（どちらか
-/// 一方しか見ないと、他方がネストした場合に末端層として単一 bool へ
-/// 潰され、混在状態（一部凍結・一部解凍）がロールバックで破壊される。
-/// P1 是正・#2234 レビュー指摘）。
-fn snapshot_requires_grad(module: &dyn Module) -> RequiresGradSnapshot {
-    if let Some(list) = module.as_module_list() {
-        return RequiresGradSnapshot::Nested(
-            list.modules
-                .iter()
-                .map(|m| snapshot_requires_grad(m.as_ref()))
-                .collect(),
-        );
-    }
-    if let Some(dict) = module.as_module_dict() {
-        return RequiresGradSnapshot::NestedDict(
-            dict.modules
-                .iter()
-                .map(|(_, m)| snapshot_requires_grad(m.as_ref()))
-                .collect(),
-        );
-    }
-    RequiresGradSnapshot::Leaf(module.requires_grad())
-}
-
-/// `snapshot_requires_grad` で取得したスナップショットへ `module` の
-/// 状態を復元する。`Nested`／`NestedDict` の子数が実行時の子数と
-/// 一致しない場合は fail-closed で `InvalidArgument` を返す（通常の
-/// ロールバック経路では構造が変わらないため起こらないはずだが、想定外の
-/// 構成変化を静かに無視しないため検査する）。
+/// 子の列を [`RequiresGradSnapshot`] の子スナップショット列へ復元する共有ロジック
+/// （`ModuleList`／`ModuleDict` の [`Module::restore_requires_grad_snapshot`] 本体。
+/// P1 是正・codex-review 指摘 `PRRT_kwDOTuUCJc6lFh9N`）。
 ///
-/// `Nested`／`NestedDict` は `?` による早期 return を使わず、子の 1 つが
-/// 復元に失敗しても**必ず残り全ての子を処理してから**集約エラーを返す
-/// （P1 是正・codex-review 指摘 `PRRT_kwDOTuUCJc6lFh9N`。詳細は
-/// [`collect_restore_errors`] doc 参照）。
-fn restore_requires_grad(
-    module: &mut dyn Module,
-    snapshot: &RequiresGradSnapshot,
-) -> Result<(), AutodiffError> {
-    match snapshot {
-        RequiresGradSnapshot::Leaf(value) => {
-            // `0..=index`（失敗した子自身を含むロールバック範囲。P1
-            // 是正・#2234 レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gn`）により、
-            // ここで復元しようとしている子は「もともと失敗した
-            // `set_requires_grad` 呼び出しの当事者」でありうる。
-            //
-            // 呼び出し**前**に「すでに一致しているか」を見て早期 `Ok`
-            // にする最適化は行わない（`Module` は外部実装可能で
-            // `requires_grad()` が既定 `true` のまま・`set_requires_grad`
-            // だけを正しくオーバーライドする実装もありうるため。この
-            // 場合スナップショット `Leaf(true)` と実際の呼び出し前の値
-            // `true` が一致していても、実際に `set_requires_grad(*value)`
-            // を呼ばなければ復元されない）。したがって常に
-            // `set_requires_grad` を実際に呼ぶ。
-            //
-            // `Err` を返した場合は、その `Err` をそのまま伝播する
-            // （P1 是正・codex-review 指摘 `PRRT_kwDOTuUCJc6lFaVh`）。
-            // 旧実装は「呼び出し後の `requires_grad()`（集約 bool）が
-            // `value` と一致するか」で復元成功を判定していたが、`Leaf`
-            // はこの関数の再帰から見た粒度であり、`Module` は外部実装
-            // 可能で内部に複数の独立した子状態を持つ「複合 Module」
-            // でありうる（`as_module_list`／`as_module_dict` を実装せず
-            // `Leaf` 扱いされる不透明な実装）。そのような実装の
-            // `requires_grad()` が例えば「子のいずれかが `true` なら
-            // `true`」という集約契約を持つ場合、一部の子だけ `value` へ
-            // 書き換えに成功し残りは失敗した部分適用状態でも、集約結果が
-            // たまたま `value` と一致してしまい「復元成功」と誤判定
-            // （false positive）しうる。`Leaf` のスナップショットには
-            // 集約 bool 1 つしか無く、これ以上の粒度で内部状態を検証
-            // する手段が無い（`Module::children` は `&dyn` のみで
-            // `_mut` を持たず、複合実装が `as_module_list_mut`／
-            // `as_module_dict_mut` を実装しない限り再帰スナップショット
-            // 化できない）ため、検証不能な場合は fail-closed に「`Err`
-            // をそのまま呼び出し元へ返す」を採用し、集約値の一致を
-            // 復元成功の根拠にしない。
-            module.set_requires_grad(*value)
-        }
-        RequiresGradSnapshot::Nested(children) => match module.as_module_list_mut() {
-            Some(list) => {
-                if list.modules.len() != children.len() {
-                    return Err(AutodiffError::InvalidArgument(format!(
-                        "restore_requires_grad: snapshot has {} child module(s) but the \
-                         container now has {} (structure changed during rollback)",
-                        children.len(),
-                        list.modules.len()
-                    )));
-                }
-                // `?` による即時伝播は使わない（P1 是正・codex-review 指摘
-                // `PRRT_kwDOTuUCJc6lFh9N`）。最初の子の復元が `Err` を返した
-                // 時点で打ち切ると、残りの兄弟（1 度も `restore_requires_grad`
-                // が呼ばれない）が部分適用状態のまま放置され、fail-closed
-                // 契約（失敗した子自身も含め全子を元へ戻す）を破る。全子を
-                // 必ず 1 回ずつ処理してから、集約したエラーの有無で結果を返す。
-                collect_restore_errors(list.modules.iter_mut().zip(children.iter()))
-            }
-            None => Err(AutodiffError::InvalidArgument(
-                "restore_requires_grad: snapshot is Nested but the module is no longer a \
-                 ModuleList/Sequential container (structure changed during rollback)"
-                    .to_string(),
-            )),
-        },
-        RequiresGradSnapshot::NestedDict(children) => match module.as_module_dict_mut() {
-            Some(dict) => {
-                if dict.modules.len() != children.len() {
-                    return Err(AutodiffError::InvalidArgument(format!(
-                        "restore_requires_grad: snapshot has {} child module(s) but the \
-                         ModuleDict now has {} (structure changed during rollback)",
-                        children.len(),
-                        dict.modules.len()
-                    )));
-                }
-                // 同上（`Nested` 分岐のコメント参照）。`ModuleDict` 側も同じ
-                // fail-closed 契約を守るため全子を処理してからエラーを集約する。
-                collect_restore_errors(dict.modules.iter_mut().map(|(_, m)| m).zip(children.iter()))
-            }
-            None => Err(AutodiffError::InvalidArgument(
-                "restore_requires_grad: snapshot is NestedDict but the module is no longer a \
-                 ModuleDict container (structure changed during rollback)"
-                    .to_string(),
-            )),
-        },
-    }
-}
-
-/// `restore_requires_grad` の `Nested`／`NestedDict` 分岐が共有する集約
-/// ロジック（P1 是正・codex-review 指摘 `PRRT_kwDOTuUCJc6lFh9N`）: 子を
-/// 1 体ずつ `restore_requires_grad` へ委譲し、`Err` が出ても即座に伝播
-/// せず**必ず残り全ての子も処理してから**、失敗した子すべてを集約した
-/// 単一の `InvalidArgument` を返す（fail-closed。個々の子の復元失敗が
-/// 兄弟の復元機会を奪わないことを保証する。集約メッセージの形式は
-/// `ModuleList::set_requires_grad`／`ModuleDict::set_requires_grad` の
-/// ロールバック失敗集約〈`"module {index} ({err})"` を `", "` で連結〉と
-/// 揃える）。
-fn collect_restore_errors<'a, I>(children: I) -> Result<(), AutodiffError>
+/// 子数が一致しなければ fail-closed で `InvalidArgument`（ロールバック中に構造が変わる
+/// ことは通常ないが、想定外の構成変化を静かに無視しないため検査する）。子の 1 つが
+/// 復元に失敗しても**必ず残り全ての子を処理してから**、失敗した子すべてを集約した単一の
+/// `InvalidArgument` を返す（個々の子の復元失敗が兄弟の復元機会を奪わない。集約形式は
+/// `ModuleList::set_requires_grad` のロールバック失敗集約〈`"module {index} ({err})"`〉と
+/// 揃える）。子の復元は各子の [`Module::restore_requires_grad_snapshot`] 経由で行うため、
+/// 別クレートのコンテナ（`fandhe-ai` の facade アダプタ）が内側の混在状態を葉単位で
+/// 復元できる（PR #2426 P1 是正・2026-09-29 ユーザー承認）。
+fn restore_children<'a, I>(
+    owner: &str,
+    expected_len: usize,
+    actual_len: usize,
+    children: I,
+) -> Result<(), AutodiffError>
 where
     I: Iterator<Item = (&'a mut Box<dyn Module>, &'a RequiresGradSnapshot)>,
 {
+    if expected_len != actual_len {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "restore_requires_grad: snapshot has {expected_len} child module(s) but the \
+             {owner} now has {actual_len} (structure changed during rollback)"
+        )));
+    }
     let mut failures: Vec<String> = Vec::new();
     for (index, (m, s)) in children.enumerate() {
-        if let Err(err) = restore_requires_grad(m.as_mut(), s) {
+        if let Err(err) = m.restore_requires_grad_snapshot(s) {
             failures.push(format!("child {index} ({err})"));
         }
     }
@@ -732,6 +624,17 @@ impl Module for Sequential {
 
     fn requires_grad(&self) -> bool {
         Module::requires_grad(&self.inner)
+    }
+
+    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
+        self.inner.requires_grad_snapshot()
+    }
+
+    fn restore_requires_grad_snapshot(
+        &mut self,
+        snapshot: &RequiresGradSnapshot,
+    ) -> Result<(), AutodiffError> {
+        self.inner.restore_requires_grad_snapshot(snapshot)
     }
 
     /// `self.inner`（`ModuleList`）を返す（P1 是正・#2234 レビュー指摘。
@@ -993,7 +896,7 @@ impl Module for ModuleDict {
         let previous: Vec<RequiresGradSnapshot> = self
             .modules
             .iter()
-            .map(|(_, m)| snapshot_requires_grad(m.as_ref()))
+            .map(|(_, m)| m.requires_grad_snapshot())
             .collect();
 
         for (index, (_, module)) in self.modules.iter_mut().enumerate() {
@@ -1011,7 +914,7 @@ impl Module for ModuleDict {
                         continue;
                     };
                     if let Err(rollback_err) =
-                        restore_requires_grad(rollback_module.as_mut(), &previous[rollback_index])
+                        rollback_module.restore_requires_grad_snapshot(&previous[rollback_index])
                     {
                         rollback_failures.push(format!("module {rollback_index} ({rollback_err})"));
                     }
@@ -1048,6 +951,35 @@ impl Module for ModuleDict {
             }
         }
         !saw_param_bearing_child
+    }
+
+    /// 挿入順の子ごとの葉単位スナップショット（[`Module::requires_grad_snapshot`]）。
+    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
+        RequiresGradSnapshot::NestedDict(
+            self.modules
+                .iter()
+                .map(|(_, m)| m.requires_grad_snapshot())
+                .collect(),
+        )
+    }
+
+    fn restore_requires_grad_snapshot(
+        &mut self,
+        snapshot: &RequiresGradSnapshot,
+    ) -> Result<(), AutodiffError> {
+        match snapshot {
+            RequiresGradSnapshot::NestedDict(children) => restore_children(
+                "ModuleDict",
+                children.len(),
+                self.modules.len(),
+                self.modules.iter_mut().map(|(_, m)| m).zip(children.iter()),
+            ),
+            _ => Err(AutodiffError::InvalidArgument(
+                "restore_requires_grad: snapshot is not NestedDict but the module is a \
+                 ModuleDict container (structure changed during rollback)"
+                    .to_string(),
+            )),
+        }
     }
 
     fn as_module_dict(&self) -> Option<&ModuleDict> {
@@ -2113,5 +2045,153 @@ mod tests {
             .expect("`nested` は ModuleList のはず");
         assert!(restored_nested.get(0).unwrap().requires_grad());
         assert!(!restored_nested.get(1).unwrap().requires_grad());
+    }
+
+    /// `requires_grad_snapshot`／`restore_requires_grad_snapshot` を override した
+    /// 不透明な複合層（別クレートのコンテナをアダプタ越しに積む場合の模型。PR #2426 P1）。
+    /// 内部に独立な 2 状態 `(a, b)` を持ち、`set_requires_grad(v)` は両方を `v` へ揃える。
+    /// 集約 `requires_grad()`（`a || b`）だけで保存・復元すると混在状態 `(false, true)` が
+    /// 均一化される。スナップショットは `(a, b)` を `Opaque` に包む。
+    struct OpaqueMixed {
+        a: bool,
+        b: bool,
+        param: Tensor<f32>,
+        fail_apply: bool,
+    }
+
+    impl OpaqueMixed {
+        fn new(a: bool, b: bool) -> Self {
+            OpaqueMixed {
+                a,
+                b,
+                param: Tensor::new(vec![1.0f32], &[1]).unwrap(),
+                fail_apply: false,
+            }
+        }
+    }
+
+    impl Module for OpaqueMixed {
+        fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            unreachable!("本テストでは forward は呼ばれない")
+        }
+
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("param".to_string(), &self.param)]
+        }
+
+        fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+            if self.fail_apply && !requires_grad {
+                return Err(AutodiffError::InvalidArgument("opaque failed".to_string()));
+            }
+            self.a = requires_grad;
+            self.b = requires_grad;
+            Ok(())
+        }
+
+        fn requires_grad(&self) -> bool {
+            self.a || self.b
+        }
+
+        fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
+            RequiresGradSnapshot::Opaque(Box::new((self.a, self.b)))
+        }
+
+        fn restore_requires_grad_snapshot(
+            &mut self,
+            snapshot: &RequiresGradSnapshot,
+        ) -> Result<(), AutodiffError> {
+            match snapshot {
+                RequiresGradSnapshot::Opaque(any) => match any.downcast_ref::<(bool, bool)>() {
+                    Some((a, b)) => {
+                        self.a = *a;
+                        self.b = *b;
+                        Ok(())
+                    }
+                    None => Err(AutodiffError::InvalidArgument("bad opaque".to_string())),
+                },
+                _ => Err(AutodiffError::InvalidArgument("not opaque".to_string())),
+            }
+        }
+    }
+
+    /// `OpaqueMixed` の内部 2 状態を取り出す（`Box<dyn Module>` から `Opaque` スナップショット
+    /// 経由で読む）。
+    fn opaque_state(m: &dyn Module) -> (bool, bool) {
+        match m.requires_grad_snapshot() {
+            RequiresGradSnapshot::Opaque(any) => *any.downcast_ref::<(bool, bool)>().unwrap(),
+            _ => panic!("Opaque のはず"),
+        }
+    }
+
+    fn failing_opaque() -> OpaqueMixed {
+        let mut m = OpaqueMixed::new(true, true);
+        m.fail_apply = true;
+        m
+    }
+
+    /// PR #2426 P1: 内側に混在状態 `(false, true)` を持つ複合層が `ModuleList` の子のとき、
+    /// 後続の子の失敗後に内側の 2 状態が呼び出し前と完全一致する（集約値
+    /// `requires_grad() == true` で保存・復元すると `(true, true)` に均一化される）。
+    #[test]
+    fn module_list_rollback_uses_child_snapshot_hook_for_opaque_mixed_state() {
+        let mut outer = ModuleList::new();
+        outer.push(Box::new(OpaqueMixed::new(false, true)));
+        outer.push(Box::new(failing_opaque()));
+        outer.set_requires_grad(false).expect_err("後続が失敗");
+        assert_eq!(opaque_state(outer.get(0).unwrap()), (false, true));
+        assert_eq!(opaque_state(outer.get(1).unwrap()), (true, true));
+    }
+
+    /// 同上（`Sequential`・入れ子 `ModuleList` 経由の 2 段）。
+    #[test]
+    fn sequential_rollback_uses_child_snapshot_hook_through_nested_containers() {
+        let mut inner = ModuleList::new();
+        inner.push(Box::new(OpaqueMixed::new(false, true)));
+        inner.push(Box::new(OpaqueMixed::new(true, false)));
+        let mut outer = Sequential::new();
+        outer.push(Box::new(inner));
+        outer.push(Box::new(failing_opaque()));
+        outer.set_requires_grad(false).expect_err("後続が失敗");
+        let list = outer.layers()[0].as_module_list().expect("ModuleList");
+        assert_eq!(opaque_state(list.get(0).unwrap()), (false, true));
+        assert_eq!(opaque_state(list.get(1).unwrap()), (true, false));
+    }
+
+    /// 同上（`ModuleDict`）。
+    #[test]
+    fn module_dict_rollback_uses_child_snapshot_hook_for_opaque_mixed_state() {
+        let mut outer = ModuleDict::new();
+        outer
+            .insert("mixed", Box::new(OpaqueMixed::new(true, false)))
+            .unwrap();
+        outer.insert("bad", Box::new(failing_opaque())).unwrap();
+        outer.set_requires_grad(false).expect_err("後続が失敗");
+        assert_eq!(opaque_state(outer.get("mixed").unwrap()), (true, false));
+    }
+
+    /// コンテナの復元は variant 不一致・子数不一致を fail-closed で拒否する。
+    #[test]
+    fn container_restore_snapshot_rejects_shape_mismatch() {
+        let mut list = ModuleList::new();
+        list.push(Box::new(OpaqueMixed::new(true, true)));
+        let bad = RequiresGradSnapshot::Nested(vec![]);
+        let e = list
+            .restore_requires_grad_snapshot(&bad)
+            .expect_err("子数不一致");
+        assert!(e.to_string().contains("structure changed"), "{e}");
+        let e = list
+            .restore_requires_grad_snapshot(&RequiresGradSnapshot::Leaf(true))
+            .expect_err("variant 不一致");
+        assert!(e.to_string().contains("structure changed"), "{e}");
+        let mut dict = ModuleDict::new();
+        let e = dict
+            .restore_requires_grad_snapshot(&RequiresGradSnapshot::Nested(vec![]))
+            .expect_err("variant 不一致");
+        assert!(e.to_string().contains("structure changed"), "{e}");
+        let mut leaf = Linear::new(2, 2, true, 1).unwrap();
+        let e = leaf
+            .restore_requires_grad_snapshot(&RequiresGradSnapshot::Nested(vec![]))
+            .expect_err("葉");
+        assert!(e.to_string().contains("structure changed"), "{e}");
     }
 }

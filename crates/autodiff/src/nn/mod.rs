@@ -265,7 +265,7 @@ pub use embedding_bag::{EmbeddingBag, EmbeddingBagMode, EmbeddingBagVars};
 pub use flatten::Flatten;
 pub use identity::Identity;
 pub use linear::{Linear, LinearVars, linear_forward_low_precision};
-pub use module::Module;
+pub use module::{Module, RequiresGradSnapshot};
 pub use norm::{
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, RMS_NORM_DEFAULT_EPS, RmsNorm, RmsNormVars,
 };
