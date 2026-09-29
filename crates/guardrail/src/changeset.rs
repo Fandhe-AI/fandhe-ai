@@ -90,12 +90,10 @@ mod tests {
 
     #[test]
     fn resolve_nonexistent_ref_propagates_error_not_panicking() {
-        let dir =
-            std::env::temp_dir().join(format!("guardrail-changeset-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = crate::test_support::TempDirGuard::new("changeset-nonexistent-ref");
+        let dir = tmp.path();
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("init").arg("-q").current_dir(&dir);
+        cmd.arg("init").arg("-q").current_dir(dir);
         // 祖先プロセス（lefthook の pre-push フック等）から継承された
         // `GIT_DIR`／`GIT_WORK_TREE` 等を除去する（`exclusion_match::git_command`
         // と同一方針。除去しないとフィクスチャ用一時リポジトリの隔離が壊れる）。
@@ -107,9 +105,7 @@ mod tests {
         let status = cmd.status().unwrap();
         assert!(status.success());
 
-        let err = resolve_baseline_commit(&dir, "this-ref-does-not-exist").unwrap_err();
+        let err = resolve_baseline_commit(dir, "this-ref-does-not-exist").unwrap_err();
         assert!(matches!(err, GuardrailError::DiffFailed { .. }));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

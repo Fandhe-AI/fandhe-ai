@@ -162,6 +162,10 @@ pub mod model;
 /// `docs/facade-predict-batches-phase-metrics-decision.md` を参照。
 mod inference;
 
+/// 非公開。`model` と将来の `compat::model_io` が共有する no-follow 葉オープンと
+/// サイズ上限（`fs_guard` モジュール doc 参照）。
+mod fs_guard;
+
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
 // （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。

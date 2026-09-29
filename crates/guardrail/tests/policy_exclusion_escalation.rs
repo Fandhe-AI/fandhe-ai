@@ -11,8 +11,11 @@
 //! （粒度を分けて重複を避ける。計画 3.4 節）。
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+mod common;
+use common::temp_dir::TempDirGuard;
 
 use guardrail::config::{self, PresetName};
 use guardrail::decision::{BenchSignal, DecisionInput, GateSignal, GateSignals, Verdict, decide};
@@ -53,17 +56,11 @@ fn commit_all(cwd: &Path, message: &str) {
     );
 }
 
-fn init_repo(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "guardrail-policy-exclusion-escalation-{name}-{}",
-        std::process::id()
-    ));
-    if dir.exists() {
-        fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("{dir:?} の削除に失敗: {e}"));
-    }
-    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{dir:?} の作成に失敗: {e}"));
-    run(&dir, &["init", "-q"]);
-    dir
+fn init_repo(name: &str) -> TempDirGuard {
+    let guard = TempDirGuard::new(&format!("policy-exclusion-escalation-{name}"));
+    let dir = guard.path();
+    run(dir, &["init", "-q"]);
+    guard
 }
 
 fn all_passed_gates() -> GateSignals {
@@ -99,14 +96,15 @@ fn evaluate_and_decide(repo_root: &Path, baseline: &str) -> Verdict {
 /// green → `arch-hyperparameter-change` match → `Escalate`。
 #[test]
 fn architecture_change_alone_escalates() {
-    let dir = init_repo("g2");
+    let tmp = init_repo("g2");
+    let dir = tmp.path();
     fs::create_dir_all(dir.join("crates/tensor-core/src")).unwrap();
     fs::write(
         dir.join("crates/tensor-core/src/model.rs"),
         "pub const HIDDEN_DIM: usize = 8;\n",
     )
     .unwrap();
-    commit_all(&dir, "baseline");
+    commit_all(dir, "baseline");
 
     fs::write(
         dir.join("crates/tensor-core/src/model.rs"),
@@ -114,16 +112,15 @@ fn architecture_change_alone_escalates() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_and_decide(&dir, "HEAD"), Verdict::Escalate);
-
-    fs::remove_dir_all(&dir).ok();
+    assert_eq!(evaluate_and_decide(dir, "HEAD"), Verdict::Escalate);
 }
 
 /// ケース 2（G5 系）: テスト許容誤差の単独緩和（`1e-6 → 1e-2`）→
 /// `test-tolerance-loosening` match → `Escalate`。
 #[test]
 fn test_tolerance_loosening_alone_escalates() {
-    let dir = init_repo("g5");
+    let tmp = init_repo("g5");
+    let dir = tmp.path();
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(
         dir.join("src/lib.rs"),
@@ -132,7 +129,7 @@ fn test_tolerance_loosening_alone_escalates() {
          assert!((leaky_relu(-1.0) - (-0.01)).abs() < 1e-6);\n    }\n}\n",
     )
     .unwrap();
-    commit_all(&dir, "baseline");
+    commit_all(dir, "baseline");
 
     fs::write(
         dir.join("src/lib.rs"),
@@ -142,18 +139,17 @@ fn test_tolerance_loosening_alone_escalates() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_and_decide(&dir, "HEAD"), Verdict::Escalate);
-
-    fs::remove_dir_all(&dir).ok();
+    assert_eq!(evaluate_and_decide(dir, "HEAD"), Verdict::Escalate);
 }
 
 /// ケース 3（依存変更系）: `Cargo.toml` の変更 → `dependency-change` match
 /// → `Escalate`。
 #[test]
 fn dependency_change_alone_escalates() {
-    let dir = init_repo("dep");
+    let tmp = init_repo("dep");
+    let dir = tmp.path();
     fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-    commit_all(&dir, "baseline");
+    commit_all(dir, "baseline");
 
     fs::write(
         dir.join("Cargo.toml"),
@@ -161,9 +157,7 @@ fn dependency_change_alone_escalates() {
     )
     .unwrap();
 
-    assert_eq!(evaluate_and_decide(&dir, "HEAD"), Verdict::Escalate);
-
-    fs::remove_dir_all(&dir).ok();
+    assert_eq!(evaluate_and_decide(dir, "HEAD"), Verdict::Escalate);
 }
 
 /// ケース 4（fail-closed）: `unevaluated_rule_ids` が非空の合成
@@ -196,14 +190,13 @@ fn unevaluated_rule_ids_alone_escalate_via_effective_rule_ids() {
 /// （除外リストは安全側にしか作用しない。REQ-5 不変条件の配線経路確認）。
 #[test]
 fn no_match_and_clean_signals_yield_auto_apply() {
-    let dir = init_repo("clean");
+    let tmp = init_repo("clean");
+    let dir = tmp.path();
     fs::write(dir.join("README.md"), "baseline\n").unwrap();
-    commit_all(&dir, "baseline");
+    commit_all(dir, "baseline");
     fs::write(dir.join("README.md"), "updated\n").unwrap();
 
-    assert_eq!(evaluate_and_decide(&dir, "HEAD"), Verdict::AutoApply);
-
-    fs::remove_dir_all(&dir).ok();
+    assert_eq!(evaluate_and_decide(dir, "HEAD"), Verdict::AutoApply);
 }
 
 /// ケース 6（却下優先）: ゲート失敗 × match 同時成立 → `Reject` だが

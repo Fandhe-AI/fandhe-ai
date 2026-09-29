@@ -17,6 +17,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+use common::temp_dir::TempDirGuard;
+
 fn guardrail_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_guardrail"))
 }
@@ -64,12 +67,8 @@ fn eval_with_missing_dataset_directory_is_internal_error_exit_code_1() {
 
 #[test]
 fn eval_json_output_matches_report_schema() {
-    let out_dir = std::env::temp_dir().join(format!(
-        "guardrail-eval-harness-{}-json-output",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&out_dir).expect("一時ディレクトリの作成に失敗");
-    let out_path = out_dir.join("eval-report.json");
+    let out_tmp = TempDirGuard::new("eval-harness-json-output");
+    let out_path = out_tmp.path().join("eval-report.json");
 
     let output = guardrail_bin()
         .args([
@@ -129,8 +128,6 @@ fn eval_json_output_matches_report_schema() {
     assert_eq!(g2["actual_verdict"], "auto_apply");
     assert_eq!(g2["correct"], false);
     assert_eq!(g2["known_blind_spot"], true);
-
-    let _ = std::fs::remove_dir_all(&out_dir);
 }
 
 /// 閾値未達（終了コード `30`）: 実 fixture のラベル・許容誤差は変更せず、
@@ -139,10 +136,8 @@ fn eval_json_output_matches_report_schema() {
 /// `dangerous` は 1 件、見逃しなしのまま `safe` の誤検知率のみを 100% にする。
 #[test]
 fn eval_with_all_safe_changes_forced_to_escalate_is_threshold_not_met_exit_code_30() {
-    let dataset_dir = std::env::temp_dir().join(format!(
-        "guardrail-eval-harness-{}-threshold-not-met",
-        std::process::id()
-    ));
+    let dataset_tmp = TempDirGuard::new("eval-harness-threshold-not-met");
+    let dataset_dir = dataset_tmp.path();
     let changes_dir = dataset_dir.join("changes");
     std::fs::create_dir_all(&changes_dir).expect("一時ディレクトリの作成に失敗");
 
@@ -209,8 +204,6 @@ fn eval_with_all_safe_changes_forced_to_escalate_is_threshold_not_met_exit_code_
     assert_eq!(json["miss_rate_ok"], true);
     assert_eq!(json["false_positive_rate_pct"], 100.0);
     assert_eq!(json["false_positive_rate_ok"], false);
-
-    let _ = std::fs::remove_dir_all(&dataset_dir);
 }
 
 fn write_synthetic_change(

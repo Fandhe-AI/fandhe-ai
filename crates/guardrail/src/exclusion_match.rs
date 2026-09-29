@@ -472,8 +472,8 @@ pub fn test_assertion_relaxation_without_prod_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDirGuard;
     use std::fs;
-    use std::path::PathBuf;
 
     /// `run_git` と同じ `GIT_*` 除去方針を踏襲したテスト専用 git 実行
     /// ヘルパー（`tests/labeled_changes_fixtures.rs::run` と同一方針）。
@@ -513,19 +513,13 @@ mod tests {
     }
 
     /// 隔離作業ディレクトリを作り `git init` 済みリポジトリを用意する
-    /// （`std::env::temp_dir()` 配下。`tempfile` クレートは使わない。
-    /// `labeled_changes_fixtures.rs` の std-only 手法を踏襲）。
-    fn init_repo(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "guardrail-exclusion-match-{name}-{}",
-            std::process::id()
-        ));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("{dir:?} の削除に失敗: {e}"));
-        }
-        fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{dir:?} の作成に失敗: {e}"));
-        run(&dir, &["init", "-q"]);
-        dir
+    /// （`crate::test_support::TempDirGuard` による一意名の排他作成。`tempfile` クレートは使わない。
+    /// 戻り値のガードを名前付き変数で保持する間だけディレクトリが存在し、Drop で削除される）。
+    fn init_repo(name: &str) -> TempDirGuard {
+        let guard = TempDirGuard::new(&format!("exclusion-match-{name}"));
+        let dir = guard.path();
+        run(dir, &["init", "-q"]);
+        guard
     }
 
     fn default_patterns() -> Vec<String> {
@@ -540,7 +534,8 @@ mod tests {
     /// 受け入れ条件の最小再現。
     #[test]
     fn test_only_tolerance_loosening_matches() {
-        let dir = init_repo("case1");
+        let tmp = init_repo("case1");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -549,7 +544,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -560,7 +555,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(matched, "テスト単独の許容誤差緩和で match しない");
     }
@@ -569,7 +564,8 @@ mod tests {
     /// （`without_prod_change` 条件）。
     #[test]
     fn tolerance_loosening_with_prod_change_does_not_match() {
-        let dir = init_repo("case2");
+        let tmp = init_repo("case2");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -578,7 +574,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -589,7 +585,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(!matched, "本番コード変更を伴う場合は match してはいけない");
     }
@@ -597,7 +593,8 @@ mod tests {
     /// ケース 3: 本番コードのみの変更 → `false`。
     #[test]
     fn prod_only_change_does_not_match() {
-        let dir = init_repo("case3");
+        let tmp = init_repo("case3");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -606,7 +603,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -617,7 +614,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(
             !matched,
@@ -629,7 +626,8 @@ mod tests {
     /// （PoC-3 発見事項 3: S2 誤検知解消の維持）。
     #[test]
     fn new_test_addition_only_does_not_match() {
-        let dir = init_repo("case4");
+        let tmp = init_repo("case4");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -638,7 +636,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -650,7 +648,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(!matched, "削除行のない新規テスト追加のみでは match しない");
     }
@@ -695,7 +693,8 @@ mod tests {
     /// アサーション緩和 → `true`。
     #[test]
     fn tests_directory_only_change_matches() {
-        let dir = init_repo("case6");
+        let tmp = init_repo("case6");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::create_dir_all(dir.join("tests")).unwrap();
         fs::write(
@@ -708,7 +707,7 @@ mod tests {
             "#[test]\nfn works() {\n    assert!((1.0f32 - 1.0).abs() < 1e-6);\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("tests/integration.rs"),
@@ -717,7 +716,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(matched, "tests/ 配下のみの緩和は match するはず");
     }
@@ -734,7 +733,8 @@ mod tests {
     /// のまま）になることを検証する。
     #[test]
     fn prod_deletion_immediately_before_mod_tests_does_not_match() {
-        let dir = init_repo("case8");
+        let tmp = init_repo("case8");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -743,7 +743,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         // `mod tests` 直前の本番関数 b・c を削除しつつ、許容誤差も緩和する
         // （REQ-4 ゲーミング検知の入力領域＝本番・テスト同時変更に該当する
@@ -757,7 +757,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(
             !matched,
@@ -790,7 +790,8 @@ mod tests {
     /// 本ルールによるエスカレーションをすり抜けていた。
     #[test]
     fn unknown_test_boundary_escalates_instead_of_suppressing_match() {
-        let dir = init_repo("case10");
+        let tmp = init_repo("case10");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -799,7 +800,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -809,7 +810,7 @@ mod tests {
         )
         .unwrap();
 
-        let prod_touch = touches_prod_logic(&dir, "HEAD").unwrap();
+        let prod_touch = touches_prod_logic(dir, "HEAD").unwrap();
         assert_eq!(
             prod_touch,
             ProdTouch::UnknownBoundary,
@@ -817,7 +818,7 @@ mod tests {
         );
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(
             matched,
@@ -831,7 +832,8 @@ mod tests {
     /// されないことの回帰確認（Bugbot 指摘 Low・#123）。
     #[test]
     fn hostile_git_config_does_not_defeat_pattern_matching() {
-        let dir = init_repo("case11");
+        let tmp = init_repo("case11");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -840,14 +842,14 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         // diff 出力を変形しうるローカル設定を意図的に有効化する
         // （`-c` はこれらの設定より優先されるはずだが、優先されない場合は
         // 削除行が `^-` で始まらなくなりパターンマッチが無言で全滅する）。
-        run(&dir, &["config", "--local", "color.ui", "always"]);
-        run(&dir, &["config", "--local", "color.diff", "always"]);
-        run(&dir, &["config", "--local", "diff.external", "cat"]);
+        run(dir, &["config", "--local", "color.ui", "always"]);
+        run(dir, &["config", "--local", "color.diff", "always"]);
+        run(dir, &["config", "--local", "diff.external", "cat"]);
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -858,7 +860,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+            test_assertion_relaxation_without_prod_change(dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(
             matched,
@@ -871,13 +873,14 @@ mod tests {
     /// （`false` に丸めないことを検証。fail-closed）。
     #[test]
     fn invalid_baseline_ref_propagates_error_instead_of_false() {
-        let dir = init_repo("case7");
+        let tmp = init_repo("case7");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(dir.join("src/lib.rs"), "pub fn noop() {}\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         let result = test_assertion_relaxation_without_prod_change(
-            &dir,
+            dir,
             "this-ref-does-not-exist",
             &default_patterns(),
         );
@@ -896,19 +899,20 @@ mod tests {
     /// 文字列比較が無言で不一致になる（fail-open。#124）。
     #[test]
     fn non_ascii_path_is_not_octal_escaped() {
-        let dir = init_repo("quote-path");
+        let tmp = init_repo("quote-path");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(dir.join("src/lib.rs"), "pub fn noop() {}\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         let non_ascii_file = "src/日本語model.rs";
         fs::write(dir.join(non_ascii_file), "pub fn noop2() {}\n").unwrap();
         // `git diff <baseline>` は index に存在しないパス（純粋な未追跡ファイル）
         // を差分に含めない。`add` で index に載せた時点で「baseline のツリーに
         // 存在しない新規パス」として diff に現れるようになる（commit は不要）。
-        run(&dir, &["add", "-A"]);
+        run(dir, &["add", "-A"]);
 
-        let changed = changed_files_for_policy_exclusion(&dir, "HEAD").unwrap();
+        let changed = changed_files_for_policy_exclusion(dir, "HEAD").unwrap();
         assert_eq!(
             changed,
             vec![non_ascii_file.to_string()],
