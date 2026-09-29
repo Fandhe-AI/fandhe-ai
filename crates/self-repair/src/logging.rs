@@ -557,22 +557,17 @@ pub fn verify_chain(path: impl AsRef<Path>) -> Result<VerifyChainSummary, LogErr
 mod tests {
     use super::*;
     use crate::error::SelfRepairError;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::test_support::{TempDirGuard, create_new_file, unique_temp_dir};
     use std::time::Duration;
 
-    /// テストごとに衝突しない一時ファイルパスを作る。`tempfile` クレート
-    /// （許容依存 8 区分外）を使わず、`crate::test_support::unique_temp_dir`
-    /// と同じ `std::env::temp_dir()` + プロセス ID + 単調増加カウンタ方式で
-    /// 代替する（実装計画セクション 2。同モジュールを再利用しない理由は
-    /// `test_support` がディレクトリ単位のヘルパーであり、本テストが必要な
-    /// のは単一ファイルパスのみのため）。
-    fn unique_log_path(test_name: &str) -> std::path::PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "self-repair-logging-test-{}-{test_name}-{seq}.jsonl",
-            std::process::id()
-        ))
+    /// テストごとに一意なログファイルパスを返す。一意名で排他作成したディレクトリ
+    /// （[`TempDirGuard`]）配下の `trial.jsonl` で、ファイル自体は作らない
+    /// （`LogWriter::open` が新規作成する）。ガードは `let (_dir, path) = ..` の
+    /// ように名前付きで保持すること（`_` 単独は即 drop でディレクトリが消える）。
+    fn unique_log_path(test_name: &str) -> (TempDirGuard, std::path::PathBuf) {
+        let guard = unique_temp_dir(&format!("logging-{test_name}"));
+        let path = guard.path().join("trial.jsonl");
+        (guard, path)
     }
 
     fn sample_report(outcome: LoopOutcome, attempts: Vec<AttemptRecord>) -> LoopReport {
@@ -606,7 +601,7 @@ mod tests {
     /// （loop_start → detection → attempt → loop_outcome）が出力される。
     #[test]
     fn append_report_adopted_writes_expected_stage_sequence() {
-        let log_path = unique_log_path("adopted_stage_sequence");
+        let (_log_dir, log_path) = unique_log_path("adopted_stage_sequence");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![attempt(1, AttemptOutcome::Adopted)],
@@ -631,7 +626,6 @@ mod tests {
             vec!["loop_start", "detection", "attempt", "loop_outcome"]
         );
         verify_chain(&log_path).expect("直後の verify_chain が成功すること");
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// [`VerifyChainSummary`] がレコード件数・最終 `seq`・最終 `hash` を
@@ -639,7 +633,7 @@ mod tests {
     /// これらの値を突合材料として提示できるようにするための実測根拠）。
     #[test]
     fn verify_chain_summary_reports_record_count_and_last_seq_hash() {
-        let log_path = unique_log_path("summary_record_count_and_last_seq_hash");
+        let (_log_dir, log_path) = unique_log_path("summary_record_count_and_last_seq_hash");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![attempt(1, AttemptOutcome::Adopted)],
@@ -663,7 +657,6 @@ mod tests {
         assert_eq!(summary.record_count, 4);
         assert_eq!(summary.last_seq, Some(last_record.seq));
         assert_eq!(summary.last_hash, last_record.hash);
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// 空（0 バイト）ログに対する `verify_chain` は `Err` にはならないが
@@ -676,21 +669,20 @@ mod tests {
     /// 見る監査自動化がログ全削除による改竄を見逃す経路だったため変更した）。
     #[test]
     fn verify_chain_on_empty_file_returns_zero_record_summary() {
-        let log_path = unique_log_path("empty_file_zero_record_summary");
-        std::fs::write(&log_path, b"").expect("空ファイルを作成できること");
+        let (_log_dir, log_path) = unique_log_path("empty_file_zero_record_summary");
+        create_new_file(&log_path, b"").expect("空ファイルを作成できること");
 
         let summary = verify_chain(&log_path).expect("空ログはチェーン違反ではなく Ok を返すこと");
         assert_eq!(summary.record_count, 0);
         assert_eq!(summary.last_seq, None);
         assert_eq!(summary.last_hash, genesis_hash());
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// 却下・エスカレーション・NoActionNeeded の各ケースでも段階列が導出され、
     /// チェーン検証が通ることを確認する。
     #[test]
     fn append_report_covers_rejected_escalated_no_action_needed() {
-        let rejected_path = unique_log_path("rejected");
+        let (_rejected_dir, rejected_path) = unique_log_path("rejected");
         let rejected = sample_report(
             LoopOutcome::Rejected {
                 stage: "verification",
@@ -708,9 +700,8 @@ mod tests {
             .append_report(&rejected)
             .expect("却下ケースの追記に失敗しないこと");
         verify_chain(&rejected_path).expect("却下ケースの検証が成功すること");
-        let _ = std::fs::remove_file(&rejected_path);
 
-        let escalated_path = unique_log_path("escalated");
+        let (_escalated_dir, escalated_path) = unique_log_path("escalated");
         let escalated = sample_report(
             LoopOutcome::Escalated {
                 reason: "人間レビューへ回す".to_string(),
@@ -727,23 +718,21 @@ mod tests {
             .append_report(&escalated)
             .expect("エスカレーションケースの追記に失敗しないこと");
         verify_chain(&escalated_path).expect("エスカレーションケースの検証が成功すること");
-        let _ = std::fs::remove_file(&escalated_path);
 
-        let no_action_path = unique_log_path("no_action");
+        let (_no_action_dir, no_action_path) = unique_log_path("no_action");
         let no_action = sample_report(LoopOutcome::NoActionNeeded, vec![]);
         LogWriter::open(&no_action_path)
             .expect("開けること")
             .append_report(&no_action)
             .expect("NoActionNeeded ケースの追記に失敗しないこと");
         verify_chain(&no_action_path).expect("NoActionNeeded ケースの検証が成功すること");
-        let _ = std::fs::remove_file(&no_action_path);
     }
 
     /// `LoopFailure` 由来のログでも attempt → loop_failure の段階列が出力され、
     /// チェーン検証が通る。
     #[test]
     fn append_failure_writes_attempts_then_loop_failure_stage() {
-        let log_path = unique_log_path("failure_stage_sequence");
+        let (_log_dir, log_path) = unique_log_path("failure_stage_sequence");
         let failure = LoopFailure {
             error: SelfRepairError::Verification {
                 attempt: 2,
@@ -773,7 +762,6 @@ mod tests {
             .collect();
         assert_eq!(stages, vec!["attempt", "loop_failure"]);
         verify_chain(&log_path).expect("失敗ケースの検証が成功すること");
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// `stage` フィールドの改変（`payload` はそのまま）を検知する
@@ -783,7 +771,7 @@ mod tests {
     /// ことで塞いでいることを確認する）。
     #[test]
     fn verify_chain_detects_stage_field_tampering() {
-        let log_path = unique_log_path("stage_tampering");
+        let (_log_dir, log_path) = unique_log_path("stage_tampering");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![attempt(1, AttemptOutcome::Adopted)],
@@ -803,14 +791,13 @@ mod tests {
             matches!(result, Err(LogError::ChainViolation { .. })),
             "stage のみの改変（payload 不変）が ChainViolation として検知されること"
         );
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// `recorded_at_unix_ms` フィールドの改変を検知する（書き込み時刻の
     /// 偽装で「いつ判断されたか」の監査証跡を崩す経路を塞ぐ）。
     #[test]
     fn verify_chain_detects_recorded_at_field_tampering() {
-        let log_path = unique_log_path("recorded_at_tampering");
+        let (_log_dir, log_path) = unique_log_path("recorded_at_tampering");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![attempt(1, AttemptOutcome::Adopted)],
@@ -841,13 +828,12 @@ mod tests {
             matches!(result, Err(LogError::ChainViolation { .. })),
             "recorded_at_unix_ms のみの改変が ChainViolation として検知されること"
         );
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// フィールド改変（`payload` 内部）を検知する。
     #[test]
     fn verify_chain_detects_field_tampering() {
-        let log_path = unique_log_path("payload_field_tampering");
+        let (_log_dir, log_path) = unique_log_path("payload_field_tampering");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![attempt(1, AttemptOutcome::Adopted)],
@@ -867,7 +853,6 @@ mod tests {
             matches!(result, Err(LogError::ChainViolation { .. })),
             "フィールド改変が ChainViolation として検知されること"
         );
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// `LogRecord` にトップレベルの未知フィールドを注入した JSON 行は、
@@ -878,7 +863,7 @@ mod tests {
     /// comment 3700045168 の指摘に対する回帰テストを移植）。
     #[test]
     fn verify_chain_rejects_unknown_top_level_field_injection() {
-        let log_path = unique_log_path("unknown_field_injection");
+        let (_log_dir, log_path) = unique_log_path("unknown_field_injection");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![attempt(1, AttemptOutcome::Adopted)],
@@ -920,13 +905,12 @@ mod tests {
             matches!(result, Err(LogError::Serialization(_))),
             "未知フィールド注入がデシリアライズ段階で拒否されること（fail-closed）"
         );
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// レコード削除を検知する。
     #[test]
     fn verify_chain_detects_record_deletion() {
-        let log_path = unique_log_path("record_deletion");
+        let (_log_dir, log_path) = unique_log_path("record_deletion");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![
@@ -960,13 +944,12 @@ mod tests {
             matches!(result, Err(LogError::ChainViolation { .. })),
             "レコード削除が ChainViolation として検知されること"
         );
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// レコード順序入れ替えを検知する。
     #[test]
     fn verify_chain_detects_record_reordering() {
-        let log_path = unique_log_path("record_reordering");
+        let (_log_dir, log_path) = unique_log_path("record_reordering");
         let report = sample_report(
             LoopOutcome::Adopted,
             vec![
@@ -996,14 +979,13 @@ mod tests {
             matches!(result, Err(LogError::ChainViolation { .. })),
             "順序入れ替えが ChainViolation として検知されること"
         );
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// `AttemptOutcome` 全 5 variant の判断根拠（reason 含む）がログから
     /// 復元できる。
     #[test]
     fn attempt_outcomes_round_trip_through_log() {
-        let log_path = unique_log_path("attempt_outcomes_round_trip");
+        let (_log_dir, log_path) = unique_log_path("attempt_outcomes_round_trip");
         let attempts = vec![
             attempt(
                 1,
@@ -1058,14 +1040,13 @@ mod tests {
         assert_eq!(attempt_payloads[2]["outcome"]["kind"], "rejected_final");
         assert_eq!(attempt_payloads[3]["outcome"]["kind"], "escalated");
         assert_eq!(attempt_payloads[4]["outcome"]["kind"], "adopted");
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// A03 回帰: reason に JSON 特殊文字（`"` / 改行等）を含んでも整形式
     /// JSONL として出力・再パースでき、値が失われないこと。
     #[test]
     fn special_characters_in_reason_round_trip_safely() {
-        let log_path = unique_log_path("special_characters");
+        let (_log_dir, log_path) = unique_log_path("special_characters");
         let tricky_reason = "改行\nとダブルクォート\"と\\バックスラッシュを含む理由";
         let report = sample_report(
             LoopOutcome::Rejected {
@@ -1101,13 +1082,12 @@ mod tests {
             outcome_record.payload["outcome"]["reason"], tricky_reason,
             "reason の内容が JSON エスケープを経ても保持されること"
         );
-        let _ = std::fs::remove_file(&log_path);
     }
 
     /// 追記オープンにより既存ログへ追記してもチェーンが連続すること。
     #[test]
     fn reopening_writer_continues_the_chain() {
-        let log_path = unique_log_path("reopen_continues_chain");
+        let (_log_dir, log_path) = unique_log_path("reopen_continues_chain");
         let first = sample_report(
             LoopOutcome::Adopted,
             vec![attempt(1, AttemptOutcome::Adopted)],
@@ -1136,6 +1116,5 @@ mod tests {
             .collect();
         let expected: Vec<u64> = (0..seqs.len() as u64).collect();
         assert_eq!(seqs, expected, "seq が両方の書き込みを跨いで連番であること");
-        let _ = std::fs::remove_file(&log_path);
     }
 }
