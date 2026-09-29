@@ -47,9 +47,16 @@ use fandhe_ai_autodiff::Reduction;
 // 再エクスポート・独自宣言のみを検査するため、この内部専用 `use` は
 // 検査対象外——`Lbfgs` は本ファイルの外へ一切公開しない）。
 use fandhe_ai_autodiff::nn::optim::Lbfgs;
+// イシュー #2372: `save_model`／`load_model` が optimizer 内部状態と GradScaler の
+// 状態を往復させるための内部専用 import（`pub use` にしない。facade 公開面へ
+// 出ないことは `tests/api_surface.rs` の `grad_scaler_from_state`／
+// `OptimizerStateDict` ガードが機械的に固定する）。
+use fandhe_ai_autodiff::nn::optim::OptimizerStateDict;
+use fandhe_ai_autodiff::nn::optim::amp::grad_scaler_from_state;
 use fandhe_ai_tensor_core::Element;
 use fandhe_ai_tensor_core::ScalarDType;
 use fandhe_ai_tensor_core::data::{DataLoader, DataLoaderConfig, TensorDataset};
+use std::collections::HashMap;
 
 use super::callbacks::Callback;
 use super::metrics::{ConfusionAccumulator, Metrics, MetricsResult};
@@ -126,6 +133,14 @@ impl AmpConfig {
 /// [`OptimizerState`] と同様に手書き `Debug` を用意する。
 struct AmpState {
     dtype: ScalarDType,
+    /// `dtype` の元になった facade 公開型。`save_model` が manifest の
+    /// `amp.dtype`（`f16`／`bf16` の allowlist）へ書くために保持する
+    /// （`ScalarDType` は `#[non_exhaustive]` で逆写像が全域でないため）。
+    amp_dtype: AmpDType,
+    /// `GradScaler` は config の getter を持たない（公開面を広げないため
+    /// autodiff へ足さない）ので、構築時の [`GradScalerConfig`] をここへ記録する
+    /// （`save_model` の manifest `amp.grad_scaler_config`。イシュー #2372）。
+    grad_scaler_config: GradScalerConfig,
     scaler: GradScaler,
 }
 
@@ -645,6 +660,102 @@ pub(super) struct Compiled {
     amp: Option<AmpState>,
 }
 
+/// `save_model` が取り出す compile 状態の写し（イシュー #2372）。
+///
+/// `optimizer` は `set_lr` 反映後の**現在の config**、`optimizer_state` は
+/// `OptimizerStateDict::state_dict()` のキー（`optimizer.` 接頭辞なし）そのまま。
+/// `Lbfgs` は本イシューの対象外（#2373）で `optimizer_state` は空になる。
+/// 呼び出し元 `model_io::prepare_save` が `Lbfgs` を `UnsupportedModel` で拒否する。
+pub(super) struct CompiledSnapshot {
+    pub(super) loss: Loss,
+    pub(super) optimizer: Optimizer,
+    pub(super) optimizer_state: HashMap<String, Tensor<f32>>,
+    pub(super) amp: Option<AmpSnapshot>,
+}
+
+/// [`CompiledSnapshot`] の AMP 部分（`GradScaler` の save 時点の状態）。
+pub(super) struct AmpSnapshot {
+    pub(super) dtype: AmpDType,
+    pub(super) grad_scaler_config: GradScalerConfig,
+    pub(super) scale: f32,
+    pub(super) growth_tracker: u64,
+}
+
+impl Sequential {
+    /// compile 状態を取り出す（未 compile は `None`）。`save_model` から呼ばれる。
+    pub(super) fn snapshot_compiled(&self) -> Result<Option<CompiledSnapshot>, AutodiffError> {
+        let Some(compiled) = self.compiled.as_ref() else {
+            return Ok(None);
+        };
+        // `config()` は `set_lr` 反映後の現在値を返す（LR scheduler の書き換えを含む）。
+        let (optimizer, optimizer_state) = match &compiled.optimizer {
+            OptimizerState::Sgd(o) => (Optimizer::Sgd(*o.config()), o.state_dict()?),
+            OptimizerState::AdamW(o) => (Optimizer::AdamW(*o.config()), o.state_dict()?),
+            OptimizerState::Adam(o) => (Optimizer::Adam(*o.config()), o.state_dict()?),
+            OptimizerState::RmsProp(o) => (Optimizer::RmsProp(*o.config()), o.state_dict()?),
+            OptimizerState::Adagrad(o) => (Optimizer::Adagrad(*o.config()), o.state_dict()?),
+            OptimizerState::Lamb(o) => (Optimizer::Lamb(*o.config()), o.state_dict()?),
+            OptimizerState::Lbfgs(o) => (Optimizer::Lbfgs(*o.config()), HashMap::new()),
+        };
+        let amp = compiled.amp.as_ref().map(|a| AmpSnapshot {
+            dtype: a.amp_dtype,
+            grad_scaler_config: a.grad_scaler_config,
+            scale: a.scaler.scale(),
+            growth_tracker: a.scaler.growth_tracker(),
+        });
+        Ok(Some(CompiledSnapshot {
+            loss: compiled.loss,
+            optimizer,
+            optimizer_state,
+            amp,
+        }))
+    }
+
+    /// [`Self::snapshot_compiled`] の写しから compile 状態を復元する（`load_model` から呼ばれる）。
+    ///
+    /// construct-before-assign: optimizer の構築・状態の load・GradScaler の復元が
+    /// すべて成功してから `self.compiled` へ代入する（失敗時は変更しない）。値の範囲検証は
+    /// 各コンストラクタ（`*::new`・`grad_scaler_from_state`）へ委ねる。`Lbfgs` は #2373 まで拒否する。
+    pub(super) fn restore_compiled(&mut self, snap: CompiledSnapshot) -> Result<(), AutodiffError> {
+        let CompiledSnapshot {
+            loss,
+            optimizer,
+            optimizer_state,
+            amp,
+        } = snap;
+        let mut state = OptimizerState::new(optimizer)?;
+        match &mut state {
+            OptimizerState::Sgd(o) => o.load_state_dict(optimizer_state)?,
+            OptimizerState::AdamW(o) => o.load_state_dict(optimizer_state)?,
+            OptimizerState::Adam(o) => o.load_state_dict(optimizer_state)?,
+            OptimizerState::RmsProp(o) => o.load_state_dict(optimizer_state)?,
+            OptimizerState::Adagrad(o) => o.load_state_dict(optimizer_state)?,
+            OptimizerState::Lamb(o) => o.load_state_dict(optimizer_state)?,
+            OptimizerState::Lbfgs(_) => {
+                return Err(AutodiffError::InvalidArgument(
+                    "Sequential の compile 状態の復元: Lbfgs は未対応です（イシュー #2373）"
+                        .to_string(),
+                ));
+            }
+        }
+        let amp = match amp {
+            None => None,
+            Some(a) => Some(AmpState {
+                dtype: a.dtype.to_scalar_dtype(),
+                amp_dtype: a.dtype,
+                grad_scaler_config: a.grad_scaler_config,
+                scaler: grad_scaler_from_state(a.grad_scaler_config, a.scale, a.growth_tracker)?,
+            }),
+        };
+        self.compiled = Some(Compiled {
+            optimizer: state,
+            loss,
+            amp,
+        });
+        Ok(())
+    }
+}
+
 /// 未 compile のモデルへ `fit`／`evaluate` を呼んだ場合の共通エラー。
 fn not_compiled(method: &str) -> AutodiffError {
     AutodiffError::InvalidArgument(format!(
@@ -911,6 +1022,8 @@ impl Sequential {
             loss,
             amp: Some(AmpState {
                 dtype: amp.compute_dtype.to_scalar_dtype(),
+                amp_dtype: amp.compute_dtype,
+                grad_scaler_config: amp.grad_scaler,
                 scaler,
             }),
         });

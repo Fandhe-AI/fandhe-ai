@@ -194,18 +194,19 @@ fn unsupported_layer_is_rejected_without_touching_dir() {
 
 #[cfg(unix)]
 #[test]
-fn compiled_model_is_rejected_without_touching_dir() {
+fn compiled_lbfgs_model_is_rejected_without_touching_dir() {
     use fandhe_ai::compat::{Loss, Optimizer};
-    use fandhe_ai::optim::SgdConfig;
+    use fandhe_ai::optim::LbfgsConfig;
 
     let guard = TempDirGuard::new("compiled");
     let mut model = build_mixed_model();
     model
-        .compile(Optimizer::Sgd(SgdConfig::new(0.01)), Loss::Mse)
+        .compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
         .expect("compile できるはず");
 
     let fresh = guard.path().join("fresh");
-    let err = save_model(&model, &fresh).expect_err("compile 済みは拒否されるはず");
+    let err =
+        save_model(&model, &fresh).expect_err("compile 済み Lbfgs は拒否されるはず（#2373 まで）");
     assert!(
         matches!(err, ModelIoError::UnsupportedModel { .. }),
         "{err}"
@@ -216,7 +217,8 @@ fn compiled_model_is_rejected_without_touching_dir() {
     std::fs::create_dir(&existing).expect("作れるはず");
     std::fs::write(existing.join("keep.txt"), b"x").expect("書けるはず");
     let before = entries(&existing);
-    let err = save_model(&model, &existing).expect_err("compile 済みは拒否されるはず");
+    let err = save_model(&model, &existing)
+        .expect_err("compile 済み Lbfgs は拒否されるはず（#2373 まで）");
     assert!(
         matches!(err, ModelIoError::UnsupportedModel { .. }),
         "{err}"
@@ -403,9 +405,10 @@ fn load_rejects_unknown_key_and_unsupported_manifest_features() {
         original.replace("\"compiled\":null", "\"compiled\":{}"),
     )
     .expect("書けるはず");
+    // compiled 節は固定キー集合の object（`{}` はキー欠落）。
     assert!(matches!(
-        try_load(&dir).expect_err("compiled 付きは未対応のはず"),
-        ModelIoError::UnsupportedModel { .. }
+        try_load(&dir).expect_err("キーの欠けた compiled は拒否されるはず"),
+        ModelIoError::Manifest { .. }
     ));
 }
 
