@@ -146,6 +146,13 @@ use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 /// 「ネストの限界」参照。ただし compat 層は `NnSequential`／
 /// `ModuleList` を構築する経路自体を公開していないため、ネストは
 /// facade 経由では到達不能）。
+///
+/// **独自層（`add_module`。イシュー #2398）と学習契約**: [`Sequential::add_module`] で積んだ
+/// facade `nn::Module` 実装が学習可能パラメータを持つ場合、`bind` はその層を追跡しない。
+/// 学習されないまま成功する状態を作らないため、`fit` 系・`SequentialVars::forward`／
+/// `trainable_grads`・デバイス常駐経路は型付き `Err` で拒否する（`bind` と
+/// `SequentialVars::trainable_vars` は signature 上 `Err` を返せず、独自層を含まない短い列に
+/// なりうる。直後の `forward`／`trainable_grads` が拒否する）。無状態の独自層は通過する。
 pub struct Sequential {
     inner: NnSequential,
     /// Keras 風 `compile()`（イシュー #1761・`compat/training.rs`）で
@@ -609,6 +616,30 @@ impl Sequential {
         Ok(self)
     }
 
+    /// facade 独自の [`crate::nn::Module`] 実装（利用者が facade だけに依存して書いた独自層）を
+    /// 末尾へ積む（イシュー #2398。#2338 承認事項 4・2026-09-29 ユーザー承認の唯一の公開入口。
+    /// `docs/facade-nn-module-exposure-decision.md` §9 の「`add_module` はスコープ外」を上書きする）。
+    /// 内部では crate 内専用アダプタ `FacadeModuleAdapter`（#2397）で autodiff 側 `Module` へ包む。
+    ///
+    /// - 推論: アダプタは `supports_forward_host() == false` のため [`Sequential::predict`] は
+    ///   tape 経路で動く。`forward`／`state_dict`／`load_state_dict` も動き、`state_dict` の
+    ///   キーは `"{index}.{name}"`（`index` は層の追加順）。
+    /// - 学習契約（fail-closed）: 独自層が学習可能パラメータを持つ場合、[`Sequential::bind`] は
+    ///   その層を追跡しない（facade `Module::forward` は forward 内で葉を登録するため、事前登録した
+    ///   `Var` を差し込めず勾配を取り出せない）。学習されないまま成功する状態を作らないよう、
+    ///   `fit` 系・`SequentialVars::forward`・`SequentialVars::trainable_grads` は
+    ///   `AutodiffError::InvalidArgument`、デバイス常駐経路（`init_device_param_store`／
+    ///   `forward_resident`／`predict_resident`）は `Unsupported` で型付き拒否する。
+    ///   パラメータを持たない独自層は活性化層と同じ扱いで学習・常駐経路を通過する。
+    ///   [`Sequential::apply_parameters`] は独自層の値も実際に更新する。
+    /// - `push` 後にモードを同期しない（`add_dropout`・`NnSequential::push` と同じ契約）。
+    pub fn add_module<M: crate::nn::Module + 'static>(mut self, m: M) -> Self {
+        let boxed: Box<dyn crate::nn::Module> = Box::new(m);
+        self.inner
+            .push(Box::new(crate::nn::FacadeModuleAdapter(boxed)));
+        self
+    }
+
     /// 積み上げた層を先頭から順に `Module::forward` へ委譲する。
     /// 呼び出し元が用意した `tape` 上で 1 回分の forward を計算する
     /// （`Linear::bind` がステップごとに葉ノードを登録し直す契約に従う。
@@ -945,6 +976,10 @@ impl Sequential {
     /// 呼び出し元は `bind` 以降の一連の処理をブロックスコープで囲み、
     /// スコープを抜けてから `apply_parameters` を呼ぶ運用とする。
     /// `crates/facade/tests/compat_sequential_train.rs` に実例がある）。
+    ///
+    /// `add_module`（#2398）で積んだパラメータ持ちの独自層は追跡されない（`bind` は
+    /// `Result` を返さないため成功する）。返る [`SequentialVars`] の `forward`／
+    /// `trainable_grads` が `InvalidArgument` で拒否する。
     pub fn bind<'m, 't>(&'m self, tape: &'t Tape) -> SequentialVars<'m, 't> {
         // `Linear::bind`／`Conv2d::bind`／`Conv1d::bind` はいずれも
         // `&fandhe_ai_autodiff::Tape` を要求する（`forward` と同じ理由。
@@ -1082,6 +1117,53 @@ impl Sequential {
             }
         }
         out
+    }
+
+    /// `bind` が追跡する 10 種の型付き層のどれでもなく、かつ学習可能パラメータ
+    /// （`named_parameters()` が非空）を持つ最初の層の index を返す（イシュー #2398）。
+    /// `add_module` で積んだパラメータ持ちの独自層がこれに当たる。
+    /// `fit`／`SequentialVars::forward`／`trainable_grads`／常駐経路の入口検査から呼ばれる。
+    /// `type_name()` の文字列一致ではなく型付きアクセサの有無で判定する（アダプタの
+    /// `type_name` が将来内側の層へ委譲されても壊れないため）。
+    pub(super) fn first_untracked_parametric_layer(&self) -> Option<usize> {
+        self.inner.layers().iter().position(|layer| {
+            layer.as_linear().is_none()
+                && layer.as_conv2d().is_none()
+                && layer.as_conv1d().is_none()
+                && layer.as_layer_norm().is_none()
+                && layer.as_rms_norm().is_none()
+                && layer.as_batch_norm1d().is_none()
+                && layer.as_batch_norm2d().is_none()
+                && layer.as_embedding().is_none()
+                && layer.as_multihead_attention().is_none()
+                && layer.as_transformer_encoder_layer().is_none()
+                && !layer.named_parameters().is_empty()
+        })
+    }
+
+    /// [`Sequential::first_untracked_parametric_layer`] を `InvalidArgument` へ写す学習側の
+    /// 入口検査（`ctx` は呼び出し元メソッド名）。学習側では `BackendError::Unsupported`
+    /// （`predict_recorded` が「フォールバックの合図」として捕捉する）を使わない。
+    pub(super) fn reject_untracked_parametric_layer(&self, ctx: &str) -> Result<(), AutodiffError> {
+        match self.first_untracked_parametric_layer() {
+            None => Ok(()),
+            Some(i) => Err(AutodiffError::InvalidArgument(format!(
+                "{ctx}: 層 {i} は bind が追跡しない独自層（add_module）のパラメータを持ち、\
+                 学習経路は非対応（イシュー #2398）"
+            ))),
+        }
+    }
+
+    /// 常駐経路版の入口検査（`BackendError::Unsupported`。既存の
+    /// `contains_resident_unsupported_layer` 拒否と同じ型・別メッセージ）。
+    fn reject_untracked_parametric_layer_resident(&self, ctx: &str) -> Result<(), BackendError> {
+        match self.first_untracked_parametric_layer() {
+            None => Ok(()),
+            Some(i) => Err(BackendError::Unsupported(format!(
+                "{ctx}: 層 {i} は追跡対象外の独自層（add_module）のパラメータを持ち、\
+                 デバイス常駐経路は非対応（イシュー #2398）"
+            ))),
+        }
     }
 
     /// `self.inner.layers()` にデバイス常駐経路（[`Sequential::
@@ -1270,6 +1352,14 @@ impl Sequential {
     /// review 指摘 #294）。two-pass にすることで、エラー時は呼び出し前の
     /// 状態を完全に維持する。#426 の shape 検証も同じ 1 パス目（代入前）に
     /// 置くため、この不変条件は変わらない。
+    ///
+    /// **独自層（`add_module`。#2398）の例外**: 独自層の `Module::set_parameter` は
+    /// 任意実装で、1 パス目の検証後にも失敗し得る。その場合は適用済みの層を snapshot
+    /// から書き戻して元エラーを返す（通常はモデル不変）。ただし書き戻し
+    /// （`set_parameter`）自体が失敗した場合は不変を保証できないため、
+    /// `AutodiffError::InvalidArgument`（元エラーと復元失敗の層・名前を含み
+    /// 「部分更新が残り得る」旨を明示）を返す。この場合、呼び出し側はモデルを
+    /// 破棄または再構築すること。
     pub fn apply_parameters(&mut self, updated: Vec<Tensor<f32>>) -> Result<(), AutodiffError> {
         /// 検証（#426。置換前 shape との完全一致）と `updated` からの
         /// weight／bias 取り出しを層種別（`Linear`／`Conv2d`／`Conv1d`）
@@ -1422,17 +1512,59 @@ impl Sequential {
                     .to_string(),
             ));
         }
-        // 2 パス目: `self.inner.layers_mut()` を同じ順序で再度走査し、
-        // 対応する `Rebuilt`（`Linear`／`Conv2d`／`Conv1d`）を代入する
-        // か、`GenericUpdate`（イシュー #1760 の 6 層種別）を
-        // `Module::set_parameter` で in-place 適用する。ここに到達した
-        // 時点で件数・shape 検証は全件（両経路とも）完了しているため、
-        // 代入・`set_parameter` 自体は失敗し得ない（`set_parameter`
-        // の戻り値はそれでも `?` で伝播し黙殺しない。fail-closed）。
+        // 2 パス目（2a）: `GenericUpdate`（イシュー #1760 の 6 層種別と `add_module`
+        // #2398 の独自層）を `Module::set_parameter` で in-place 適用する。独自層の
+        // `set_parameter` は任意実装で 1 パス目の検証後にも `Err` を返し得るため、
+        // 適用前に各層の現在値を snapshot し、途中で失敗したら適用済みの層を
+        // 逆順に元の値へ書き戻してからエラーを返す（エラー時はモデル不変。
+        // 書き戻し自体も失敗した場合は不変を保証できないため型付きエラーで明示する）。
+        // `Rebuilt`（`Linear`／`Conv2d`／`Conv1d`）の代入は失敗し得ないため、
+        // 失敗し得る 2a を先に完了させてから 2b で行う（2a 失敗時は未着手のまま残す）。
+        type LayerSnapshot = (usize, Vec<(String, Tensor<f32>)>);
+        let mut applied: Vec<LayerSnapshot> = Vec::new();
+        let mut failure: Option<AutodiffError> = None;
+        'apply: for update in generic_updates {
+            let layer = &mut self.inner.layers_mut()[update.layer_index];
+            let snapshot: Vec<(String, Tensor<f32>)> = layer
+                .named_parameters()
+                .into_iter()
+                .map(|(n, t)| (n, t.clone()))
+                .collect();
+            applied.push((update.layer_index, snapshot));
+            for (name, value) in update.values {
+                if let Err(e) = layer.set_parameter(&name, value) {
+                    failure = Some(e);
+                    break 'apply;
+                }
+            }
+        }
+        if let Some(e) = failure {
+            // 書き戻し失敗を握りつぶさない（fail-closed。security.md A03）。独自層の
+            // `set_parameter` は任意実装で復元時にも `Err` を返し得るため、失敗した層と
+            // パラメータ名を集め、1 件でもあれば「部分更新が残り得る」ことを型付きエラー
+            // （`InvalidArgument`）で明示する。
+            let mut restore_failures: Vec<String> = Vec::new();
+            for (layer_index, snapshot) in applied.into_iter().rev() {
+                let layer = &mut self.inner.layers_mut()[layer_index];
+                for (name, value) in snapshot {
+                    if let Err(re) = layer.set_parameter(&name, value) {
+                        restore_failures.push(format!("layer {layer_index} {name}: {re}"));
+                    }
+                }
+            }
+            if restore_failures.is_empty() {
+                return Err(e);
+            }
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::apply_parameters: custom layer set_parameter failed ({e}) and \
+                 rollback also failed; the model may be partially updated \
+                 (restore failures: {})",
+                restore_failures.join("; ")
+            )));
+        }
+        // 2b: 検証済みの `Rebuilt` を同じ層順で代入する（失敗し得ない）。
         let mut rebuilt = rebuilt.into_iter();
-        let mut generic_updates = generic_updates.into_iter();
-        let mut next_generic = generic_updates.next();
-        for (layer_index, layer) in self.inner.layers_mut().iter_mut().enumerate() {
+        for layer in self.inner.layers_mut().iter_mut() {
             if let Some(linear) = layer.as_linear_mut() {
                 if let Some(Rebuilt::Linear(new_linear)) = rebuilt.next() {
                     *linear = new_linear;
@@ -1445,11 +1577,6 @@ impl Sequential {
                 && let Some(Rebuilt::Conv1d(new_conv)) = rebuilt.next()
             {
                 *conv = new_conv;
-            } else if let Some(update) = next_generic.take_if(|u| u.layer_index == layer_index) {
-                for (name, value) in update.values {
-                    layer.set_parameter(&name, value)?;
-                }
-                next_generic = generic_updates.next();
             }
         }
         Ok(())
@@ -1487,6 +1614,7 @@ impl Sequential {
                     .to_string(),
             ));
         }
+        self.reject_untracked_parametric_layer_resident("Sequential::init_device_param_store")?;
         let params = self.trainable_parameters();
         DeviceParamStore::new(&tape.0, &params)
     }
@@ -1540,6 +1668,8 @@ impl Sequential {
                     .to_string(),
             )));
         }
+        self.reject_untracked_parametric_layer_resident("Sequential::forward_resident")
+            .map_err(AutodiffError::Backend)?;
         let leaves = store.register_resident_params(&tape.0)?;
         match self.forward_from_flat_leaves(&tape.0, input, &leaves, store) {
             Ok(output) => Ok(output),
@@ -1595,6 +1725,8 @@ impl Sequential {
                     .to_string(),
             )));
         }
+        self.reject_untracked_parametric_layer_resident("Sequential::predict_resident")
+            .map_err(AutodiffError::Backend)?;
         let tape = crate::tape_for(store.device())?;
         let leaves = store.snapshot_resident_params(&tape.0)?;
 
@@ -1858,6 +1990,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
         input: &Var<'t>,
         low_precision: Option<ScalarDType>,
     ) -> Result<Var<'t>, AutodiffError> {
+        self.model
+            .reject_untracked_parametric_layer("SequentialVars::forward")?;
         let mut current = *input;
         // `self.linears` は `model.layers` から `Linear` 層のみを同じ順序で
         // 抽出したもの（`Sequential::bind` 参照）のため、`Linear` 層に
@@ -2050,7 +2184,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
 
     /// [`Sequential::trainable_parameters`] と同一の順序契約（層順に
     /// weight → bias〈`Some` の場合のみ〉。イシュー #1770 で `Conv2d`／
-    /// `Conv1d` を含む）で `Var` 参照列を返す。
+    /// `Conv1d` を含む）で `Var` 参照列を返す。`add_module`（#2398）の独自層のパラメータは含まれない
+    /// （signature 上 `Vec` のまま。`forward`／`trainable_grads` が拒否するため損失を作れず、
+    /// optimizer の件数検査も塞ぐ）。
     pub fn trainable_vars(&self) -> Vec<&Var<'t>> {
         let mut out = Vec::new();
         let mut linears = self.linears.iter();
@@ -2196,6 +2332,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
         &self,
         grads: &'g Gradients,
     ) -> Result<Vec<&'g Tensor<f32>>, AutodiffError> {
+        self.model
+            .reject_untracked_parametric_layer("SequentialVars::trainable_grads")?;
         fn push_weight_bias<'g>(
             out: &mut Vec<&'g Tensor<f32>>,
             grads: &'g Gradients,
@@ -2363,6 +2501,151 @@ mod tests {
             .as_slice()
             .expect("contiguous() 直後は必ず as_slice() が Some を返す")
             .to_vec()
+    }
+
+    /// パラメータ持ちの独自層（#2398）。
+    struct P(Tensor<f32>);
+    impl crate::nn::Module for P {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("w".into(), &self.0)]
+        }
+    }
+    /// 無状態の独自層（#2398）。
+    struct S;
+    impl crate::nn::Module for S {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+    }
+
+    /// `set_parameter` を持つ独自層。`fail` が真なら常に `Err`（#2398 の部分更新防止テスト用）。
+    struct Settable {
+        w: Tensor<f32>,
+        fail: bool,
+    }
+    impl crate::nn::Module for Settable {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("w".into(), &self.w)]
+        }
+        fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+            if self.fail || name != "w" {
+                return Err(AutodiffError::InvalidArgument(
+                    "set_parameter failed".into(),
+                ));
+            }
+            self.w = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn apply_parameters_rolls_back_when_custom_layer_set_parameter_fails() {
+        let one = || Tensor::from_slice(&[1.0_f32], &[1]).unwrap();
+        let mut model = Sequential::new()
+            .add_linear(2, 2, SEED1)
+            .unwrap()
+            .add_module(Settable {
+                w: one(),
+                fail: false,
+            })
+            .add_module(Settable {
+                w: one(),
+                fail: true,
+            });
+        let before: Vec<Vec<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| dense_vec(t))
+            .collect();
+        let updated: Vec<Tensor<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| Tensor::new(vec![9.0_f32; t.numel()], t.shape()).unwrap())
+            .collect();
+        assert!(model.apply_parameters(updated).is_err());
+        let after: Vec<Vec<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| dense_vec(t))
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    /// 更新は 1 回目のみ成功し以後は常に失敗する独自層（復元失敗の検出テスト用）。
+    struct FailsAfterFirst {
+        w: Tensor<f32>,
+        calls: usize,
+    }
+    impl crate::nn::Module for FailsAfterFirst {
+        fn forward<'t>(
+            &self,
+            _tape: crate::TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("w".into(), &self.w)]
+        }
+        fn set_parameter(&mut self, _name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+            self.calls += 1;
+            if self.calls > 1 {
+                return Err(AutodiffError::InvalidArgument("boom".into()));
+            }
+            self.w = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn apply_parameters_reports_partial_update_when_rollback_fails() {
+        let one = || Tensor::from_slice(&[1.0_f32], &[1]).unwrap();
+        let mut model = Sequential::new()
+            .add_module(FailsAfterFirst { w: one(), calls: 0 })
+            .add_module(Settable {
+                w: one(),
+                fail: true,
+            });
+        let updated: Vec<Tensor<f32>> = model
+            .trainable_parameters()
+            .iter()
+            .map(|t| Tensor::new(vec![9.0_f32; t.numel()], t.shape()).unwrap())
+            .collect();
+        let err = model.apply_parameters(updated).unwrap_err();
+        match err {
+            AutodiffError::InvalidArgument(m) => assert!(m.contains("partially updated"), "{m}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_untracked_parametric_layer_detects_only_custom_parametric_layers() {
+        let tracked = Sequential::new()
+            .add_linear(2, 2, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_module(S);
+        assert_eq!(tracked.first_untracked_parametric_layer(), None);
+        let with_param = tracked.add_module(P(Tensor::from_slice(&[1.0], &[1]).unwrap()));
+        assert_eq!(with_param.first_untracked_parametric_layer(), Some(3));
     }
 
     #[test]
