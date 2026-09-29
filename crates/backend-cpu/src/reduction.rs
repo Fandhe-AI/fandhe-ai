@@ -51,29 +51,21 @@
 //! `max`（`max_slice`／`axis_reduce` 経由）は丸めを伴わない厳密選択の
 //! ため `f32` のまま（対象外）。
 //!
-//! ## 小サイズ直列フォールバック（未導入・イシュー #811・#1027・codex-review
-//! 指摘への対応）
+//! ## 小サイズ直列フォールバック（機構導入済み・既定 OFF・イシュー #2101）
 //!
-//! `elementwise` モジュールの `crate::elementwise::PARALLEL_THRESHOLD`
-//! （elementwise モジュール doc「並列化」参照）はローカル QEMU x86_64 での
-//! スイープ実測により現状維持と判断された値であり、REQ-8 の正式対象実機
-//! Apple M4 Max での再スイープはまだ実施していない（`docs/perf/
-//! cpu-parallel-threshold-sweep.md`「計測環境」節に残課題として記録）。
-//! この値は要素ごと独立・アキュムレータなしの
-//! 契約に対するものであり、reduction（累積を伴う別契約。上記「決定性
-//! 契約」参照）へそのまま転用してよい根拠がない（reduction 専用の直列/
-//! 並列比較を M4 Max で実施していない）。そのため本モジュールは常に
-//! rayon 経由（全縮約: `par_chunks` によるチャンク並列、軸指定:
-//! 出力要素側の並列）で計算し、閾値ベースの直列フォールバックは導入
-//! しない。`gemm_blis/mod.rs` の `dispatch_shared_b`（イシュー #750）・
-//! `should_serialize`（イシュー #811・#1027。同ファイル参照）と同じ
-//! 「実機ゲート未通過のうちは攻めた値を本番結線しない」方針（PR #758
-//! 前例）に倣う。reduction 専用の M4 Max 実機直列/並列比較を実施し
-//! 閾値を確定・ユーザー承認を得られれば、`sum_slice`/`max_slice`/
-//! `axis_reduce` へ同様の分岐（`ThreadPoolBuilder::num_threads(1)` 下でも
-//! `par_chunks`/`Range` の順序保持契約により逐次実行と bit 完全一致する
-//! ことは自明なため、導入時も上記「決定性契約」を壊さない）を追加する
-//! 余地がある。
+//! 全 rayon サイトは 2 つのヘルパー（`chunk_partials`・`map_outputs`）経由で、
+//! ゲート `REDUCTION_SEQUENTIAL_FALLBACK_ENABLED`（既定 `false`）が `true`
+//! かつ入力要素数（`numel`）が `REDUCTION_PARALLEL_MIN_ELEMS` 未満のとき
+//! だけ逐次腕へ落ちる。ゲート `false` の間は変更前と完全に同一（常に rayon）。
+//! 逐次腕もチャンク内 fold → チャンク番号順 fold の 2 段構造・出力要素ごとの
+//! 昇順累積を保つため、どちらの腕も bit 同一（上記「決定性契約」を壊さない）。
+//!
+//! - しきい値の値は未実測の暫定候補。M4 Max・GB10 での実機スイープ（#2102）
+//!   で決める。`crate::elementwise::PARALLEL_THRESHOLD` は累積を伴わない
+//!   契約向けの値であり流用しない（`docs/perf/cpu-parallel-threshold-sweep.md`）。
+//! - `mse_loss_backward` への適用は #1578 で REJECT 確定（対象外）。
+//! - 設計・事前登録規則は `docs/perf/cpu-reduction-sequential-threshold.md`。
+//! - `logsumexp`／`vector_norm_p` の全縮約側はもともと逐次のため対象外。
 //!
 //! ## 空縮約の意味論
 //!
@@ -97,6 +89,95 @@ use rayon::prelude::*;
 /// 固定する（呼び出し側からの変更点を持たない。ガードレール閾値ではないが、
 /// 数値一致回帰テストの前提となるため安易に変更しない）。
 pub(crate) const CHUNK: usize = 4096;
+
+/// 全縮約サイトの rayon fork-join を要素数で逐次へ落とす機構の**ゲート**
+/// （イシュー #2101。低レイヤー診断 `docs/perf/lowlayer-diagnosis-2026-09-12.md`
+/// §4 の小形状 fork-join 固定費対策）。`false`（既定）の間は全サイトが従来
+/// どおり常に rayon 経由で、挙動は変更前と完全に同一。`true` への切替は
+/// #2102 の事前登録判定（`docs/perf/logs/elemental-reduction-threshold-2101/
+/// RULE.txt`）を経た場合のみ。`mse_loss_backward` は #1578 で REJECT
+/// 確定のため対象外。
+pub(crate) const REDUCTION_SEQUENTIAL_FALLBACK_ENABLED: bool = false;
+
+/// 逐次へ落とす入力要素数（`numel`）の**未実測の暫定候補**。ゲートが
+/// `false` の間は効かない。値は #2102 の実測で決める（#1578 Phase 0 で両機体
+/// とも `1 << 18` まで逐次が優位だったことのみを参考根拠とする）。
+/// `elementwise::PARALLEL_THRESHOLD` は流用しない（モジュール doc 参照）。
+pub(crate) const REDUCTION_PARALLEL_MIN_ELEMS: usize = 1 << 18;
+
+/// 逐次・並列の選択規則。判定尺度は入力要素数（`numel`）で、`dim=None`・
+/// `dim=Some(axis)`（`outer*axis_len*inner`）とも同じ量を使う。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SeqPolicy {
+    pub(crate) enabled: bool,
+    pub(crate) min_elems: usize,
+}
+
+impl SeqPolicy {
+    /// 本番既定（上記 2 定数から構成）。
+    pub(crate) const DEFAULT: SeqPolicy = SeqPolicy {
+        enabled: REDUCTION_SEQUENTIAL_FALLBACK_ENABLED,
+        min_elems: REDUCTION_PARALLEL_MIN_ELEMS,
+    };
+
+    /// `numel` で逐次腕を選ぶ述語（fork-join 入口の唯一の判定点）。
+    pub(crate) fn run_sequential(self, numel: usize) -> bool {
+        self.enabled && numel < self.min_elems
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// テスト専用の強制ポリシー。ヘルパーは呼び出しスレッド上で判定する
+    /// （rayon ワーカー側では参照しない）ため thread_local で足りる。
+    /// 公開面を増やさないための `#[cfg(test)]` 限定機構。
+    static POLICY_OVERRIDE: std::cell::Cell<Option<SeqPolicy>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// 現在有効なポリシー。本番ビルドでは常に [`SeqPolicy::DEFAULT`]。
+#[cfg(not(test))]
+fn current_policy() -> SeqPolicy {
+    SeqPolicy::DEFAULT
+}
+
+#[cfg(test)]
+fn current_policy() -> SeqPolicy {
+    POLICY_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or(SeqPolicy::DEFAULT)
+}
+
+/// `data` を [`CHUNK`] 単位に分割し各チャンクへ `f` を適用した部分結果を
+/// チャンク番号順に返す。逐次腕・並列腕とも**チャンク内 fold → チャンク
+/// 番号順 fold の 2 段構造は同一**で、結合順序は変わらず bit 同一
+/// （全体を 1 本で fold する形にはしない）。`sum_slice_f64` 等から呼ばれる。
+fn chunk_partials<T, F>(data: &[f32], f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(&[f32]) -> T + Sync + Send,
+{
+    if current_policy().run_sequential(data.len()) {
+        data.chunks(CHUNK).map(f).collect()
+    } else {
+        data.par_chunks(CHUNK).map(f).collect()
+    }
+}
+
+/// 出力要素 `0..total_out` へ `compute` を適用して順序どおり集める。各出力
+/// は縮約軸を昇順に逐次累積するため逐次腕・並列腕は bit 同一。`numel` は
+/// 入力要素数（しきい値判定用）。軸指定縮約から呼ばれる。
+fn map_outputs<T, F>(numel: usize, total_out: usize, compute: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync + Send,
+{
+    if current_policy().run_sequential(numel) {
+        (0..total_out).map(compute).collect()
+    } else {
+        (0..total_out).into_par_iter().map(compute).collect()
+    }
+}
 
 /// reduction カーネル固有のエラー。`BackendError`（TASK-1.9 で導入予定）への
 /// ラップは `BackendOps` 実装時に行う想定であり、本モジュールでは行わない。
@@ -199,11 +280,10 @@ fn gather_elements(a: &Tensor<f32>) -> Vec<f32> {
 }
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
-/// 従って `sum` を計算する。`elementwise` 用に検証された閾値を転用する
-/// 直列フォールバックは reduction 専用の M4 Max 実機検証未了のため
-/// 本番結線しない（モジュール doc「小サイズ直列フォールバック」参照）。
-/// 常に rayon 経由（`ThreadPoolBuilder::num_threads(1)` 下でも `par_chunks`
-/// の順序保持契約により逐次実行と bit 完全一致する）で計算する。
+/// 従って `sum` を計算する。逐次フォールバック機構（イシュー #2101）は
+/// 導入済みだが既定 OFF のため、現状は常に rayon 経由（`ThreadPoolBuilder::
+/// num_threads(1)` 下でも `par_chunks` の順序保持契約により逐次実行と
+/// bit 完全一致する）で計算する。
 ///
 /// アキュムレータは `f64`（チャンク内・チャンク間結合とも）で、**最後に
 /// 1 回だけ** `f32` へ downcast する（`.claude/rules/coding-rust.md`
@@ -224,18 +304,18 @@ fn sum_slice(data: &[f32]) -> f32 {
 /// ため、チャンク分割・結合ロジックそのものを共有する目的で切り出した
 /// （イシュー #1723。`sum_slice` の挙動・決定性契約は不変）。
 fn sum_slice_f64(data: &[f32]) -> f64 {
-    data.par_chunks(CHUNK)
-        .map(|chunk| chunk.iter().fold(0.0f64, |acc, &v| acc + v as f64))
-        .collect::<Vec<f64>>()
-        .into_iter()
-        .fold(0.0f64, |acc, v| acc + v)
+    chunk_partials(data, |chunk| {
+        chunk.iter().fold(0.0f64, |acc, &v| acc + v as f64)
+    })
+    .into_iter()
+    .fold(0.0f64, |acc, v| acc + v)
 }
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
 /// 従って `max` を計算する。`data` が空の場合は `None` を返す（呼び出し元が
-/// [`ReduceError::EmptyReduction`] に変換する）。直列フォールバックを
-/// 本番結線しない理由は [`sum_slice`] と同じ（モジュール doc「小サイズ
-/// 直列フォールバック」参照）。
+/// [`ReduceError::EmptyReduction`] に変換する）。直列フォールバック
+/// （既定 OFF。イシュー #2101）の扱いは [`sum_slice`] と同じ（モジュール
+/// doc「小サイズ直列フォールバック」参照）。
 ///
 /// 単位元として `f32::NEG_INFINITY` を用いる（`max(x, -inf) == x` が任意の
 /// 有限値 `x` で成立するため、`unwrap`/`expect` なしで畳み込みの初期値に
@@ -246,12 +326,11 @@ fn max_slice(data: &[f32]) -> Option<f32> {
     if data.is_empty() {
         return None;
     }
-    let result = data
-        .par_chunks(CHUNK)
-        .map(|chunk| chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max))
-        .collect::<Vec<f32>>()
-        .into_iter()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let result = chunk_partials(data, |chunk| {
+        chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+    })
+    .into_iter()
+    .fold(f32::NEG_INFINITY, f32::max);
     Some(result)
 }
 
@@ -264,12 +343,11 @@ fn min_slice(data: &[f32]) -> Option<f32> {
     if data.is_empty() {
         return None;
     }
-    let result = data
-        .par_chunks(CHUNK)
-        .map(|chunk| chunk.iter().copied().fold(f32::INFINITY, f32::min))
-        .collect::<Vec<f32>>()
-        .into_iter()
-        .fold(f32::INFINITY, f32::min);
+    let result = chunk_partials(data, |chunk| {
+        chunk.iter().copied().fold(f32::INFINITY, f32::min)
+    })
+    .into_iter()
+    .fold(f32::INFINITY, f32::min);
     Some(result)
 }
 
@@ -321,8 +399,8 @@ pub(crate) fn checked_alloc_numel_f32(shape: &[usize]) -> Result<usize, ReduceEr
 /// 縮約軸を `0..axis_len` の昇順で `op` により逐次累積する（決定性契約は
 /// モジュール doc 参照）。`Range<usize>` は `IndexedParallelIterator` であり
 /// `.collect()` が出力順を保持するため、`flat` 昇順の出力ベクタが得られる。
-/// 小サイズ直列フォールバックは reduction 専用の M4 Max 実機検証未了の
-/// ため導入しない（モジュール doc「小サイズ直列フォールバック」参照）。
+/// 小サイズ直列フォールバックは `map_outputs` 経由の既定 OFF 機構
+/// （モジュール doc「小サイズ直列フォールバック」参照）。
 fn axis_reduce<F>(a: &Tensor<f32>, axis: usize, identity: f32, op: F) -> Vec<f32>
 where
     F: Fn(f32, f32) -> f32 + Sync,
@@ -362,7 +440,7 @@ where
         acc
     };
 
-    (0..total_out).into_par_iter().map(compute).collect()
+    map_outputs(total_out.saturating_mul(axis_len), total_out, compute)
 }
 
 /// [`axis_reduce`] の `sum` 専用版。走査構造は完全に同一（並列化軸・
@@ -404,7 +482,7 @@ fn axis_reduce_sum(a: &Tensor<f32>, axis: usize) -> Vec<f32> {
         acc as f32
     };
 
-    (0..total_out).into_par_iter().map(compute).collect()
+    map_outputs(total_out.saturating_mul(axis_len), total_out, compute)
 }
 
 /// `data`（`dim=None` の全縮約対象。空でないこと・`n > correction` は
@@ -417,17 +495,14 @@ fn axis_reduce_sum(a: &Tensor<f32>, axis: usize) -> Vec<f32> {
 fn var_slice(data: &[f32], correction: usize) -> f32 {
     let n = data.len() as f64;
     let mean = sum_slice_f64(data) / n;
-    let sq_sum: f64 = data
-        .par_chunks(CHUNK)
-        .map(|chunk| {
-            chunk.iter().fold(0.0f64, |acc, &v| {
-                let d = v as f64 - mean;
-                acc + d * d
-            })
+    let sq_sum: f64 = chunk_partials(data, |chunk| {
+        chunk.iter().fold(0.0f64, |acc, &v| {
+            let d = v as f64 - mean;
+            acc + d * d
         })
-        .collect::<Vec<f64>>()
-        .into_iter()
-        .fold(0.0f64, |acc, v| acc + v);
+    })
+    .into_iter()
+    .fold(0.0f64, |acc, v| acc + v);
     (sq_sum / (n - correction as f64)) as f32
 }
 
@@ -478,7 +553,7 @@ fn axis_reduce_var(a: &Tensor<f32>, axis: usize, correction: usize) -> Vec<f32> 
         (sq_acc / denom) as f32
     };
 
-    (0..total_out).into_par_iter().map(compute).collect()
+    map_outputs(total_out.saturating_mul(axis_len), total_out, compute)
 }
 
 /// [`VectorNormOrd`] を検査済みの内部表現へ変換したもの。`VectorNormOrd`
@@ -510,20 +585,17 @@ impl NormKind {
 /// と同じチャンク並列・決定性契約で `f64` 累積し、L2 のみ最後に `sqrt`
 /// してから 1 回だけ `f32` へ downcast する（イシュー #1723）。
 fn vector_norm_slice(data: &[f32], kind: NormKind) -> f32 {
-    let acc: f64 = data
-        .par_chunks(CHUNK)
-        .map(|chunk| {
-            chunk.iter().fold(0.0f64, |acc, &v| {
-                let v = v as f64;
-                match kind {
-                    NormKind::L1 => acc + v.abs(),
-                    NormKind::L2 => acc + v * v,
-                }
-            })
+    let acc: f64 = chunk_partials(data, |chunk| {
+        chunk.iter().fold(0.0f64, |acc, &v| {
+            let v = v as f64;
+            match kind {
+                NormKind::L1 => acc + v.abs(),
+                NormKind::L2 => acc + v * v,
+            }
         })
-        .collect::<Vec<f64>>()
-        .into_iter()
-        .fold(0.0f64, |acc, v| acc + v);
+    })
+    .into_iter()
+    .fold(0.0f64, |acc, v| acc + v);
     match kind {
         NormKind::L1 => acc as f32,
         NormKind::L2 => acc.sqrt() as f32,
@@ -571,7 +643,7 @@ fn axis_reduce_vector_norm(a: &Tensor<f32>, axis: usize, kind: NormKind) -> Vec<
         }
     };
 
-    (0..total_out).into_par_iter().map(compute).collect()
+    map_outputs(total_out.saturating_mul(axis_len), total_out, compute)
 }
 
 /// 軸指定・全縮約いずれにも対応する `var`（`torch.var(dim, correction)`
@@ -802,7 +874,7 @@ fn axis_reduce_logsumexp(a: &Tensor<f32>, axis: usize) -> Vec<f32> {
         (acc.ln() + shift) as f32
     };
 
-    (0..total_out).into_par_iter().map(compute).collect()
+    map_outputs(total_out.saturating_mul(axis_len), total_out, compute)
 }
 
 /// 軸指定・全縮約いずれにも対応する `logsumexp`（`torch.logsumexp(dim)`
@@ -934,7 +1006,7 @@ fn axis_reduce_vector_norm_p(a: &Tensor<f32>, axis: usize, p: f64) -> Vec<f32> {
         (mx * acc.powf(1.0 / p)) as f32
     };
 
-    (0..total_out).into_par_iter().map(compute).collect()
+    map_outputs(total_out.saturating_mul(axis_len), total_out, compute)
 }
 
 /// 軸指定・全縮約いずれにも対応する `vector_norm_p`（`torch.linalg.
@@ -1143,7 +1215,7 @@ fn axis_arg_reduce(
         best_idx
     };
 
-    (0..total_out).into_par_iter().map(compute).collect()
+    map_outputs(total_out.saturating_mul(axis_len), total_out, compute)
 }
 
 /// `data`（全縮約対象。`gather_elements` 済みまたは `as_slice()` の
@@ -1841,8 +1913,8 @@ mod tests {
                 "max が PARALLEL_THRESHOLD 境界 n={n} でスレッド数間に不一致"
             );
 
-            // sum_slice は常に par_chunks 経由（閾値による逐次/並列分岐は
-            // 未導入。モジュール doc「小サイズ直列フォールバック」参照）で
+            // sum_slice は既定（ゲート OFF）で常に par_chunks 経由（モジュール
+            // doc「小サイズ直列フォールバック」参照）で
             // CHUNK 単位の逐次 fold をチャンク番号順に結合する構造のため、
             // `chunk_boundary_deterministic_sum` と同じ naive 実装
             // （本実装と同一の累積順序。`f64` アキュムレータ契約）との bit
@@ -2025,6 +2097,245 @@ mod tests {
                 b.get(&[i]).unwrap().to_bits(),
                 "var axis がスレッド数間に不一致（i={i}）"
             );
+        }
+    }
+
+    // ---- 逐次フォールバック機構（イシュー #2101）の回帰テスト ----
+
+    const FORCE_SEQ: SeqPolicy = SeqPolicy {
+        enabled: true,
+        min_elems: usize::MAX,
+    };
+    const FORCE_PAR: SeqPolicy = SeqPolicy {
+        enabled: false,
+        min_elems: 0,
+    };
+
+    /// `policy` を呼び出しスレッドへ強制して `f` を実行する。
+    fn with_policy<R>(policy: SeqPolicy, f: impl FnOnce() -> R) -> R {
+        POLICY_OVERRIDE.with(|c| c.set(Some(policy)));
+        let r = f();
+        POLICY_OVERRIDE.with(|c| c.set(None));
+        r
+    }
+
+    fn bits(t: &Tensor<f32>) -> Vec<u32> {
+        let n: usize = t.shape().iter().product();
+        let mut out = Vec::with_capacity(n);
+        for flat in 0..n {
+            let idx = unravel(flat, t.shape());
+            out.push(t.get(&idx).unwrap().to_bits());
+        }
+        out
+    }
+
+    fn seeded(n: usize, salt: u64) -> Vec<f32> {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ salt;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                ((x >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 8.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sequential_fallback_gate_is_off_by_default() {
+        assert!(!std::hint::black_box(REDUCTION_SEQUENTIAL_FALLBACK_ENABLED));
+        for n in [
+            0usize,
+            1,
+            640,
+            4096,
+            REDUCTION_PARALLEL_MIN_ELEMS - 1,
+            usize::MAX,
+        ] {
+            assert!(!SeqPolicy::DEFAULT.run_sequential(n));
+        }
+        assert!(FORCE_SEQ.run_sequential(usize::MAX - 1));
+        assert!(!FORCE_PAR.run_sequential(0));
+    }
+
+    fn check_all_arms<F>(t: &Tensor<f32>, dim: Option<usize>, ctx: &str, f: F)
+    where
+        F: Fn(&Tensor<f32>, Option<usize>) -> Result<Tensor<f32>, ReduceError>,
+    {
+        let seq = with_policy(FORCE_SEQ, || f(t, dim));
+        let par = with_policy(FORCE_PAR, || f(t, dim));
+        let def = f(t, dim);
+        match (seq, par, def) {
+            (Ok(s), Ok(p), Ok(d)) => {
+                assert_eq!(bits(&s), bits(&p), "seq/par 不一致 {ctx}");
+                assert_eq!(bits(&s), bits(&d), "seq/default 不一致 {ctx}");
+            }
+            (Err(_), Err(_), Err(_)) => {}
+            _ => panic!("結果種別が腕間で異なる {ctx}"),
+        }
+    }
+
+    #[test]
+    fn forced_seq_and_par_are_bit_identical_full_reduction() {
+        let sizes = [
+            0usize, 1, 2, 639, 640, 641, 4095, 4096, 4097, 8193, 32767, 32768, 32769, 65537,
+            262143, 262144, 262145,
+        ];
+        for &n in &sizes {
+            let mut inputs = vec![seeded(n, n as u64)];
+            if n >= 3 {
+                let mut special = seeded(n, 7);
+                special[0] = 1e8;
+                special[1] = 1.0;
+                special[2] = -1e8;
+                inputs.push(special.clone());
+                let mut sp = special;
+                sp[n / 2] = f32::NAN;
+                sp[n - 1] = -0.0;
+                inputs.push(sp);
+                let mut inf = seeded(n, 9);
+                inf[0] = f32::INFINITY;
+                inf[n - 1] = f32::MIN_POSITIVE / 4.0;
+                inputs.push(inf);
+            }
+            for data in inputs {
+                let t = Tensor::<f32>::new(data, &[n]).unwrap();
+                let ctx = format!("n={n}");
+                check_all_arms(&t, None, &ctx, sum);
+                check_all_arms(&t, None, &ctx, max);
+                check_all_arms(&t, None, &ctx, min);
+                check_all_arms(&t, None, &ctx, mean);
+                check_all_arms(&t, None, &ctx, |a, d| var(a, d, 1));
+                check_all_arms(&t, None, &ctx, |a, d| vector_norm(a, VectorNormOrd::L2, d));
+                check_all_arms(&t, None, &ctx, |a, d| vector_norm(a, VectorNormOrd::L1, d));
+            }
+        }
+    }
+
+    #[test]
+    fn forced_seq_and_par_are_bit_identical_axis_reduction() {
+        for shape in [
+            vec![7usize, 4681],
+            vec![64, 10],
+            vec![3, 5, 8],
+            vec![512, 513],
+            vec![2, 3, 4, 5],
+        ] {
+            let n: usize = shape.iter().product();
+            let t = Tensor::<f32>::new(seeded(n, 3), &shape).unwrap();
+            for axis in 0..shape.len() {
+                let ctx = format!("shape={shape:?} axis={axis}");
+                let d = Some(axis);
+                check_all_arms(&t, d, &ctx, sum);
+                check_all_arms(&t, d, &ctx, max);
+                check_all_arms(&t, d, &ctx, min);
+                check_all_arms(&t, d, &ctx, mean);
+                check_all_arms(&t, d, &ctx, |a, d| var(a, d, 1));
+                check_all_arms(&t, d, &ctx, |a, d| vector_norm(a, VectorNormOrd::L2, d));
+                check_all_arms(&t, d, &ctx, logsumexp);
+                let s = with_policy(FORCE_SEQ, || argmax(&t, d).unwrap());
+                let p = with_policy(FORCE_PAR, || argmax(&t, d).unwrap());
+                let m = with_policy(FORCE_SEQ, || argmin(&t, d).unwrap());
+                let q = with_policy(FORCE_PAR, || argmin(&t, d).unwrap());
+                assert_eq!(s.shape(), p.shape());
+                let cnt: usize = s.shape().iter().product();
+                for flat in 0..cnt {
+                    let idx = unravel(flat, s.shape());
+                    assert_eq!(s.get(&idx), p.get(&idx), "argmax {ctx}");
+                    assert_eq!(m.get(&idx), q.get(&idx), "argmin {ctx}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forced_seq_and_par_are_bit_identical_non_contiguous_views() {
+        let t = Tensor::<f32>::new(seeded(6 * 5000, 11), &[6, 5000]).unwrap();
+        let tr = t.transpose(0, 1).unwrap();
+        check_all_arms(&tr, None, "transpose full", sum);
+        check_all_arms(&tr, Some(0), "transpose axis0", sum);
+        check_all_arms(&tr, Some(1), "transpose axis1", mean);
+        let small = Tensor::<f32>::new(seeded(5000, 13), &[1, 5000]).unwrap();
+        let bc = small.broadcast_to(&[6, 5000]).unwrap();
+        check_all_arms(&bc, None, "broadcast full", sum);
+        check_all_arms(&bc, Some(0), "broadcast axis0", max);
+        check_all_arms(&bc, Some(1), "broadcast axis1", sum);
+    }
+
+    #[test]
+    fn forced_policies_are_thread_count_independent() {
+        let t = Tensor::<f32>::new(seeded(20000, 5), &[20000]).unwrap();
+        let base = bits(&sum(&t, None).unwrap());
+        for threads in [1usize, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for policy in [FORCE_SEQ, FORCE_PAR] {
+                let got = pool.install(|| with_policy(policy, || bits(&sum(&t, None).unwrap())));
+                assert_eq!(base, got, "threads={threads} policy={policy:?}");
+            }
+        }
+    }
+
+    /// 実機（M4 Max・GB10。CI 非対象）でのしきい値候補スイープ。手順・判定
+    /// 規則は `docs/perf/logs/elemental-reduction-threshold-2101/RULE.txt`
+    /// （事前登録。判定は #2102）。
+    #[test]
+    #[ignore]
+    fn reduction_threshold_sweep() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SIZES: &[usize] = &[640, 2560, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
+        const WARMUP: usize = 50;
+        const ITERS: usize = 1000;
+        const ROWS: usize = 64;
+
+        eprintln!("threads={}", rayon::current_num_threads());
+        for &n in SIZES {
+            let flat = Tensor::<f32>::new(seeded(n, 1), &[n]).unwrap();
+            let mat = Tensor::<f32>::new(seeded(ROWS * (n / ROWS), 2), &[ROWS, n / ROWS]).unwrap();
+            let cases: [(&str, &Tensor<f32>, Option<usize>, u8); 5] = [
+                ("sum_all", &flat, None, 0),
+                ("sum_axis0", &mat, Some(0), 0),
+                ("sum_axis1", &mat, Some(1), 0),
+                ("max_all", &flat, None, 1),
+                ("mean_all", &flat, None, 2),
+            ];
+            for (name, t, dim, op) in cases {
+                for (arm, policy) in [("seq", FORCE_SEQ), ("par", FORCE_PAR)] {
+                    let run = || {
+                        match op {
+                            0 => sum(t, dim),
+                            1 => max(t, dim),
+                            _ => mean(t, dim),
+                        }
+                        .unwrap()
+                    };
+                    with_policy(policy, || {
+                        for _ in 0..WARMUP {
+                            black_box(run());
+                        }
+                        let mut samples = Vec::with_capacity(ITERS);
+                        let mut out = run();
+                        for _ in 0..ITERS {
+                            let start = Instant::now();
+                            out = black_box(run());
+                            samples.push(start.elapsed().as_nanos());
+                        }
+                        samples.sort_unstable();
+                        let checksum: u64 = bits(&out)
+                            .iter()
+                            .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(*b as u64));
+                        eprintln!(
+                            "op={name} n={n} arm={arm} median_ns={} threads={} checksum={checksum:#x}",
+                            samples[samples.len() / 2],
+                            rayon::current_num_threads()
+                        );
+                    });
+                }
+            }
         }
     }
 }
