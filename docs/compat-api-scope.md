@@ -1003,7 +1003,16 @@ TrainStepHoldDoctestGuard`（正のプローブ doctest）＋
 baseline・`docs/spec/` は不変。承認後の完全な公開 API 案・数値契約は
 `docs/compat-train-step-hook-decision.md` §5 を参照。
 
-**保留記録（イシュー #2188・親 #2131）**: `compat::Sequential` の層構成
+**実装記録（イシュー #2362〈#2369〜#2377〉。#2188 の保留記録を更新）**: 2026-09-29 に親 #2362 で
+承認を受け、`compat::Sequential` の層構成シリアライズの主案（`fandhe_ai::compat::{save_model, load_model}`・
+`ModelIoError`。本節経路 2 の承認済み・実装済み扱い）を公開済み。対応範囲は `add_*` 全 30 層
+（`add_module` の利用者定義層を除く）・BatchNorm の running stats・compile 状態（6 optimizer×AMP の有無と
+Lbfgs。#2370〜#2373）で、テストは #2374〜#2376（bit 一致行列・改竄 manifest・ファイル I/O 脅威）。
+旧世代ファイルの手動掃除・並行 save／load の非サポート・fsync 非保証は `save_model` の API doc に明記した（#2377）。
+**代替案の inherent メソッド `Sequential::save`／`load` は未承認のまま保留し、保留ガードを維持する。**
+設計・承認の記録は `docs/compat-model-io-decision.md`。以下は #2188 時点の保留記録（経緯として残す）。
+
+**保留記録（イシュー #2188・親 #2131。#2188 時点の記述）**: `compat::Sequential` の層構成
 シリアライズ（Keras `model.save()`／`load_model()` 相当。層構成＋
 パラメータ＋`compile()` 状態の一括保存）は、本イシューに本番の
 呼び出し元が存在しないため、`accumulate_steps`（#2180）・
@@ -1028,9 +1037,9 @@ doc 更新を除く）は不変。公開 API のみで組める手動 roundtrip 
 完全一致を先行検証した。承認後の完全な公開 API 案・ファイル形式・
 意味論・検証計画は `docs/compat-model-io-decision.md` §2・§4〜§6 を
 参照。
-**（#2188 時点の記述。#2369・#2370 で更新）** 公開は #2369 で最小構成〈Linear＋活性化 7 種〉として
+**（#2188 時点の記述。#2369・#2370・#2372〜#2376 で更新）** 公開は #2369 で最小構成〈Linear＋活性化 7 種〉として
 実施済みで、#2370 で対象を `add_*` 全 30 層（`add_module` の利用者定義層を除く）へ広げた
-（BatchNorm の running stats も保存・復元する〈`num_batches_tracked` は非復元。#2371〉。`docs/compat-model-io-decision.md` §4・§5）。
+（BatchNorm の running stats も保存・復元する〈`num_batches_tracked` は非復元。#2371〉。compile 状態は #2372・#2373〈Lbfgs〉、検証は #2374〜#2376。`docs/compat-model-io-decision.md` §4・§5）。
 
 **#2083 の設計記録は `docs/kv-cache-design.md` として完了した。**
 コード変更なし。KV キャッシュ（K-1）は既存 `Var` 演算（`cat`／

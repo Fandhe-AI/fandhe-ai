@@ -346,7 +346,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | PyTorch | TF/Keras | fandhe-ai | 実装に必要なもの | 難度 |
 |---|---|---|---|---|
 | `state_dict()`/`load_state_dict()` | `model.save_weights` | 実装済み（#1752。`nn::Module::state_dict`/`load_state_dict`〈defaulted・`HashMap<String, Tensor<f32>>`・strict・two-pass アトミック〉・`compat::Sequential::state_dict`/`load_state_dict`〈1 行委譲。facade 新規 `pub fn` 2 件〉。safetensors への直列化自体は #1754 が対象） | — | — |
-| safetensors 読み書き | - | **実装済み（#2019。`fandhe_ai::interop::safetensors::{LoadError, SaveError, load_safetensors_f32, load_safetensors_f32_from_bytes, require_keys, save_safetensors_f32, save_safetensors_f32_to_bytes}`。`onnx-interop::st_load`/`st_save` からの純再エクスポート）** | `Sequential`／`ModelCheckpoint` の save/load ラッパーは引き続き対象外 | — |
+| safetensors 読み書き | - | **実装済み（#2019。`fandhe_ai::interop::safetensors::{LoadError, SaveError, load_safetensors_f32, load_safetensors_f32_from_bytes, require_keys, save_safetensors_f32, save_safetensors_f32_to_bytes}`。`onnx-interop::st_load`/`st_save` からの純再エクスポート）** | `Sequential` の層構成込み save/load は `compat::save_model`／`load_model`（#2369〜#2373）で実装済み、`ModelCheckpoint` は `to_file`（#2073）で実装済み | — |
 | ONNX export | `tf2onnx` 等 | なし（`onnx-interop` は import 方向のみ・かつ非公開） | export 側の実装＋facade 公開判断 | XL |
 | ONNX import | `torch.onnx`（逆方向） | リポ内非公開（`onnx-interop::onnx::interp`。autograd 未接続の推論専用グラフ解釈器） | facade への公開判断＋（学習させるなら）`Tape` への変換層 | L（公開のみなら）〜XL（学習可能化） |
 
