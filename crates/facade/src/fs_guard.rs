@@ -226,6 +226,17 @@ impl OpenedLeaf {
 /// 3. `fstat` で通常ファイルを再確認し、unix では手順 1 と `(dev, ino)` を照合
 /// 4. `fstat` 実長を `max` と比較し、超過なら読まずに [`LeafError::TooLarge`]
 pub(crate) fn open_leaf_checked(leaf: &Path, max: u64) -> Result<OpenedLeaf, LeafError> {
+    open_leaf_checked_with(leaf, max, || {})
+}
+
+/// [`open_leaf_checked`] の本体。`after_check` は手順 1（`symlink_metadata` 検査）の直後・
+/// 手順 2（open）の直前に呼ばれ、単体テストが検査〜open 間の差し替え（TOCTOU。
+/// 決定記録 §13.3・イシュー #2376）を再現するための注入点。本番は no-op を渡す。
+fn open_leaf_checked_with(
+    leaf: &Path,
+    max: u64,
+    after_check: impl FnOnce(),
+) -> Result<OpenedLeaf, LeafError> {
     let invalid = |msg: &'static str| {
         LeafError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))
     };
@@ -235,6 +246,7 @@ pub(crate) fn open_leaf_checked(leaf: &Path, max: u64) -> Result<OpenedLeaf, Lea
             "シンボリックリンクまたは通常ファイルでないため読み取りを拒否しました",
         ));
     }
+    after_check();
     let file = open_leaf_no_follow(leaf).map_err(LeafError::Io)?;
     let open_meta = file.metadata().map_err(LeafError::Io)?;
     if !open_meta.is_file() {
@@ -334,6 +346,104 @@ mod tests {
         assert!(matches!(
             opened.read_exact_len(),
             Err(LeafError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 検査〜open 間の差し替え（TOCTOU）の注入テスト。`symlink_metadata` の事前拒否を
+    /// 通過させた後に差し替えるため、`O_NOFOLLOW`（ELOOP）と `(dev, ino)` 照合の分岐へ届く。
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    fn swapped_leaf_setup(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = temp_dir(label);
+        let path = dir.join("leaf.bin");
+        std::fs::write(&path, b"original").expect("書き込めるはず");
+        (dir, path)
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn open_leaf_checked_rejects_symlink_swapped_in_after_check() {
+        let (dir, path) = swapped_leaf_setup("swap-sym");
+        let outside = dir.join("outside.bin");
+        std::fs::write(&outside, b"original").expect("書き込めるはず");
+        let result = open_leaf_checked_with(&path, 16, || {
+            std::fs::remove_file(&path).expect("消せるはず");
+            std::os::unix::fs::symlink(&outside, &path).expect("symlink を作れるはず");
+        });
+        assert!(matches!(
+            result,
+            Err(LeafError::Io(e)) if e.raw_os_error() == Some(open_flags::ELOOP)
+        ));
+        assert_eq!(std::fs::read(&outside).expect("読めるはず"), b"original");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn open_leaf_checked_rejects_regular_file_swapped_in_after_check() {
+        let (dir, path) = swapped_leaf_setup("swap-reg");
+        // 検査時点の inode を保持したまま別 inode の通常ファイルへ差し替える
+        // （解放済み inode の再利用による偶然の一致を避ける）。
+        let keep = dir.join("keep.bin");
+        let result = open_leaf_checked_with(&path, 16, || {
+            std::fs::rename(&path, &keep).expect("退避できるはず");
+            std::fs::write(&path, b"replaced").expect("書き込めるはず");
+        });
+        assert!(matches!(
+            result,
+            Err(LeafError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn open_leaf_checked_rejects_fifo_swapped_in_after_check_without_hanging() {
+        let (dir, path) = swapped_leaf_setup("swap-fifo");
+        let worker_path = path.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // O_NONBLOCK が効かない退行でも、テストがハングせず失敗するよう別スレッドで有界化する。
+        std::thread::spawn(move || {
+            let result = open_leaf_checked_with(&worker_path, 16, || {
+                std::fs::remove_file(&worker_path).expect("消せるはず");
+                let status = std::process::Command::new("mkfifo")
+                    .arg(&worker_path)
+                    .status()
+                    .expect("mkfifo を起動できるはず");
+                assert!(status.success(), "mkfifo が成功するはず");
+            });
+            let _ = tx.send(result.map(|_| ()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("FIFO でもハングせず結果を返すはず");
+        assert!(matches!(
+            result,
+            Err(LeafError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidInput
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }

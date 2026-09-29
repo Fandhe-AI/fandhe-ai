@@ -385,6 +385,20 @@ fn write_prepared(dir: &Path, prepared: &PreparedSave) -> Result<(), ModelIoErro
 /// 自己所有の一時ファイルの削除（§13.6）が `(dev, ino)` 照合（`MetadataExt`）に依るため。
 #[cfg(unix)]
 fn write_prepared(dir: &Path, p: &PreparedSave) -> Result<(), ModelIoError> {
+    write_prepared_with(dir, p, generation_id, tmp_manifest_name)
+}
+
+/// [`write_prepared`] の本体。世代 ID・一時 manifest 名の生成器を引数にして、
+/// 単体テスト（`model_io_fs_threat_tests.rs`）が事前配置の衝突を `save_model` 相当の
+/// 経路全体へ注入できるようにする（決定記録 §6・§12.3 手順 1〜2。イシュー #2376）。
+/// 生成器は本番では [`generation_id`]・[`tmp_manifest_name`] を渡す。
+#[cfg(unix)]
+fn write_prepared_with(
+    dir: &Path,
+    p: &PreparedSave,
+    mut next_gen: impl FnMut() -> String,
+    mut next_tmp: impl FnMut() -> String,
+) -> Result<(), ModelIoError> {
     use std::io::Write;
 
     std::fs::create_dir_all(dir).map_err(ModelIoError::Io)?;
@@ -393,7 +407,7 @@ fn write_prepared(dir: &Path, p: &PreparedSave) -> Result<(), ModelIoError> {
     // 触れずに名前を作り直す。書き込みに失敗しても孤立ファイルとして残す（自動削除しない）。
     let (mut st_file, st_name) = create_new_with_retry(
         dir,
-        || format!("model.{}.safetensors", generation_id()),
+        || format!("model.{}.safetensors", next_gen()),
         MAX_TMP_NAME_ATTEMPTS,
     )?;
     st_file
@@ -403,7 +417,7 @@ fn write_prepared(dir: &Path, p: &PreparedSave) -> Result<(), ModelIoError> {
     // 手順 2〜3: manifest は一時ファイルへ書いて rename する（唯一のコミット点）。
     let manifest = render_manifest(p, &st_name, p.safetensors.len() as u64);
     let (mut tmp_file, tmp_name) =
-        create_new_with_retry(dir, tmp_manifest_name, MAX_TMP_NAME_ATTEMPTS)?;
+        create_new_with_retry(dir, &mut next_tmp, MAX_TMP_NAME_ATTEMPTS)?;
     let tmp_path = dir.join(&tmp_name);
     let committed = tmp_file
         .write_all(manifest.as_bytes())
@@ -1131,6 +1145,12 @@ mod tests {
             .expect("構築できるはず")
     }
 
+    /// 子モジュール `fs_threat_tests`（#2376）が使う共有ヘルパー。
+    #[cfg(unix)]
+    pub(super) fn sample_model_for_threats() -> Sequential {
+        sample_model()
+    }
+
     #[test]
     fn prepare_save_rejects_unsupported_and_compiled_models() {
         let dropout = Sequential::new().add_dropout(0.5).expect("構築できるはず");
@@ -1327,3 +1347,7 @@ mod tests {
         );
     }
 }
+
+/// 衝突注入・中断ウィンドウの単体テスト（決定記録 §6 後半・§13.3。イシュー #2376）。
+#[cfg(all(test, unix))]
+mod fs_threat_tests;
