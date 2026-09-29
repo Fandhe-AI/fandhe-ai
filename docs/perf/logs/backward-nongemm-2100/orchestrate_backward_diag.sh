@@ -26,7 +26,7 @@
 #   DIAG_PLAIN_FACADE_PATH=<plain ツリー>/crates/facade \
 #   DIAG_OUT_DIR=<出力先の絶対パス> \
 #   [DIAG_DEVICES="cpu"]   # 参考セル: m4max は "cpu metal"、gb10 は "cpu cuda"
-#   [DIAG_RUNS=5]
+#   [DIAG_RUNS=5]         # m4max／gb10 は 5 固定。smoke-x86 のみ 1〜99 可
 #     bash orchestrate_backward_diag.sh <m4max|gb10|smoke-x86>
 #
 # セキュリティ: 引数・環境変数は allowlist／絶対パス検査で検証し、eval は使わ
@@ -99,6 +99,12 @@ fi
 RUNS=${DIAG_RUNS:-5}
 if [[ ! "$RUNS" =~ ^[1-9][0-9]?$ ]]; then
   echo "error: DIAG_RUNS must be a small positive integer (got: '$RUNS')" >&2
+  exit 1
+fi
+# 実機（m4max／gb10）は RULE.txt の 5 run 契約（5 回計測中央値）に従い 5 固定。
+# 少ない run は smoke-x86（記録のみ）に限る。
+if [[ "$MACHINE" != "smoke-x86" && "$RUNS" != "5" ]]; then
+  echo "error: DIAG_RUNS must be 5 for $MACHINE (got: '$RUNS'; other values are smoke-x86 only)" >&2
   exit 1
 fi
 DEVICES=${DIAG_DEVICES:-cpu}

@@ -229,11 +229,14 @@ def load_gate(
     if not p.is_file():
         return {}
     seen: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    # 列数が 6 でない行は帰属先セルを確定できないため、1 行でもあれば全セルを参考扱いへ倒す。
+    malformed = 0
     for i, line in enumerate(p.read_text(encoding="utf-8").splitlines()):
         if i == 0 or not line.strip():
             continue
         parts = line.split("\t")
         if len(parts) != 6:
+            malformed += 1
             continue
         seen.setdefault((parts[1], parts[2]), []).append((parts[0], parts[5]))
     expected = [str(r) for r in range(1, runs + 1)]
@@ -243,7 +246,11 @@ def load_gate(
             recs = seen.get((dev, mode), [])
             run_ids = sorted(r for r, _ in recs)
             complete = run_ids == sorted(expected)
-            if complete and all(v == "1" for _, v in recs):
+            if malformed:
+                result[(dev, mode)] = (
+                    f"参考扱い（gate.tsv に不正行 {malformed} 件: 列数が 6 でない）"
+                )
+            elif complete and all(v == "1" for _, v in recs):
                 result[(dev, mode)] = "pass"
             elif not complete:
                 result[(dev, mode)] = "参考扱い（gate.tsv の run 記録が欠落・重複・不正）"
@@ -411,6 +418,17 @@ class SelfTest(unittest.TestCase):
         lines = ["run\tdevice\tmode\tload1\tgpu_util\tpass"]
         lines += [f"{r}\t{dv}\t{m}\t0.1\t0\t{p}" for r, dv, m, p in rows]
         (d / "gate.tsv").write_text("\n".join(lines) + "\n")
+
+    def test_load_gate_malformed_row_is_reference_only(self):
+        full = [(r, "cpu", m, 1) for m in MODES for r in (1, 2)]
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            self._gate(d, full)
+            with (d / "gate.tsv").open("a", encoding="utf-8") as f:
+                f.write("3\tcpu\tfresh\t0.1\n")  # 列数 4（不正行）
+            g = load_gate(d, 2, ["cpu"])
+            for mode in MODES:
+                self.assertNotEqual(g[("cpu", mode)], "pass")
 
     def test_load_gate_requires_all_runs_unique(self):
         full = [(r, "cpu", m, 1) for m in MODES for r in (1, 2)]
