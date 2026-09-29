@@ -10,6 +10,8 @@
 
 本イシューは docs のみ・**段階 0**（facade 公開面は不変）。
 
+> **2026-09-29 追記**: 本節は #2132 当時の記述である。#2338 で承認済み、#2394〜#2402 で実施済み（段階 0 は解除）。承認と実施のまとめは §22 を参照。
+
 `nn::Module` trait は `dyn Module` として object safe である（§3。`ModuleList` が既に `Vec<Box<dyn Module>>` を保持してコンパイル・テスト済みのため実証済み）。しかし **#2133 が想定する「素の再エクスポート」（`pub use fandhe_ai_autodiff::nn::{Module, ModuleList}`）は、REQ-12 以前に「ユーザー定義層を facade だけで書けるようにする」という目的自体を満たさない**（§1.3）。理由は `Module::forward` が生の `fandhe_ai_autodiff::Tape` を引数に取り、facade 利用者は `fandhe-ai` のみの依存では `impl Module for MyLayer` を書けないためである。
 
 推奨案は **案 B**（facade 独自の薄い `Module` trait と `ModuleList`／`Sequential` コンテナを新設し、内部型・`BackendOps`・生 `Tape` を一切露出しない構成。§5・§6）。ただし採否・実装形は承認事項（§10）であり、本 doc では決定しない。**#2133 の実装形は本 doc の承認結果に従って再確定する必要がある**（本イシューでは #2133 を編集しない。申し送りは PR 本文と summary に記す）。
@@ -150,7 +152,7 @@ impl fandhe_ai::nn::Module for MyBlock {
 ## 8. 兄弟 issue との整合
 
 - **#2133（実装）**: 想定形（素の `pub use`）は§1.3 の構造制約により再確定が必要。本 doc の承認結果（案 B の採否・橋渡し方式）を前提として実装形を決め直す
-- **#2134／#2137**: 「`named_modules`／`parameter_count`／`ModuleDict`／`summary`」「`freeze`／`set_requires_grad`」を autodiff trait へ defaulted 追加し facade `nn/mod.rs` で再エクスポートする計画は、案 B 採用時には「autodiff trait への defaulted 追加」＋「facade trait 側 defaulted メソッドへの鏡写し追加」の 2 段構成へ読み替えが必要。**#2137 は前段（autodiff trait への defaulted 追加。`Module::freeze`／`set_requires_grad`／`requires_grad`）のみ実装済み**（`crates/autodiff/src/nn/module.rs`。`docs/autodiff-nograd-leaf-dinput-skip-decision.md`「実装記録（#2137）」参照）。facade 側鏡写しは本 doc §10 の承認（項目 1・2・6）待ちのまま未実施（#2137 分の鏡写しは #2400 で実施済み。§17 参照）
+- **#2134／#2137**: 「`named_modules`／`parameter_count`／`ModuleDict`／`summary`」「`freeze`／`set_requires_grad`」を autodiff trait へ defaulted 追加し facade `nn/mod.rs` で再エクスポートする計画は、案 B 採用時には「autodiff trait への defaulted 追加」＋「facade trait 側 defaulted メソッドへの鏡写し追加」の 2 段構成へ読み替えが必要。**#2137 は前段（autodiff trait への defaulted 追加。`Module::freeze`／`set_requires_grad`／`requires_grad`）のみ実装済み**（`crates/autodiff/src/nn/module.rs`。`docs/autodiff-nograd-leaf-dinput-skip-decision.md`「実装記録（#2137）」参照）。facade 側鏡写しは本 doc §10 の承認（項目 1・2・6）待ちのまま未実施（#2137 分の鏡写しは #2400 で実施済み。§21 参照）
 - **#2140**（`nn::init` 純再エクスポート）: `Module` trait に依存しない独立の再エクスポートのため非衝突
 - **#2138／#2139**（hooks）: `Var`／`Tape` レベルで独立のため非衝突
 
@@ -392,6 +394,8 @@ trait とコンテナの新設。§5・§6）になる見込みである。本�
 → #2133）の運用から意図的に外れる。PR 本文にもこの判断理由を明記
 する。
 
+**2026-09-29 追記**: 承認は同日に取得され、#2394〜#2402 で実施済み（§22）。#2338 は #2403 の PR マージ後に明示的に close する。
+
 ## 14. 実装記録（イシュー #2395）
 
 `fandhe_ai::nn::Module`（required `forward` 1 件 + defaulted 6 件）を
@@ -518,3 +522,58 @@ facade `nn::Module` へ #2137 の凍結 API を鏡写しした（#2338 承認事
 - **アダプタ境界のロールバック（PR #2426 第 2 の P1 是正・2026-09-29 ユーザー承認済み。非対称は解消）**: 旧記述の非対称（facade コンテナを `FacadeModuleAdapter` 経由で autodiff コンテナへ積むと、autodiff 側スナップショットがアダプタを単一の葉として集約値で保存し内側の混在状態を均一化する）は、autodiff（内部クレート）の `nn::Module` へ `#[doc(hidden)]` の defaulted 内部メソッド `requires_grad_snapshot`／`restore_requires_grad_snapshot` と不透明スナップショット型 `RequiresGradSnapshot`（`Leaf`／`Nested`／`NestedDict`／`Opaque(Box<dyn Any>)`）を追加して解消した。autodiff の `ModuleList`／`Sequential`／`ModuleDict` は子のスナップショットを必ずこのメソッド経由で取り復元する（従来の `as_module_list`／`as_module_dict` による再帰スナップショットを置換。同じ手法へ統一）。`FacadeModuleAdapter` は両メソッドを override して facade 側の葉単位スナップショットを `Opaque` に包んで保存・復元する（型違い・`Opaque` 以外は fail-closed の `InvalidArgument`）。autodiff の `Module` は facade から再エクスポートされていないため facade の公開面は増えない（`tests/api_surface.rs` は不変）。autodiff 側は内部クレートの追加のみ（既定実装あり・既存実装は非破壊）。facade コンテナ内の facade コンテナ・autodiff コンテナ内の autodiff コンテナ・autodiff コンテナ内アダプタ越しの facade コンテナのいずれも葉単位復元となる。**第 3 回是正（同上承認）**: 事前検査を可能にするため autodiff の内部フックを `requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError>` へ変更し（内部クレート・`#[doc(hidden)]`）、`FacadeModuleAdapter` は facade 側の `children`／`children_mut` 経由の葉単位スナップショットを `Opaque` に包む（不整合は状態変更前に `InvalidArgument`）。autodiff は `children_mut` を持たないため autodiff 側の trait は不変
 - **ガード**: `tests/api_surface.rs` の `facade_nn_module_trait_methods_match_approved_set`（defaulted は合計 14 件。承認済み集合はフック 2 件を除き `children_mut` を追加）と自己テストを更新
 - **テスト**: `module.rs`／`container.rs` の in-crate テスト（文言一致・伝播・集約・ロールバック・アダプタ委譲・autodiff `ModuleList`／`Sequential`／`ModuleDict` にアダプタ越しで積んだ混在状態 facade コンテナの葉単位復元〈`adapter_in_autodiff_*`〉）と autodiff 側 `nn/container.rs` の `*_rollback_uses_child_snapshot_hook_*`（不透明混在状態の復元）と `tests/nn_module_requires_grad.rs`（facade だけに依存。凍結前後の forward・`dx` の bit 一致、パラメータ葉の `GradientTrackingDisabled`、反映タイミング、`training`／`state_dict` との独立、既定の fail-closed）。CUDA／Metal 実機 parity は対象外（凍結は tape メタデータのみで、autodiff 経路は `nn_module_freeze_backend_parity.rs` が担う）。`crates/facade/tests/nn_module_children_mut_rollback.rs`（外部利用者視点: 利用者定義の複合層〈`children`／`children_mut` 実装あり・混在状態・2 段ネスト〉を `ModuleList`／`Sequential`／`ModuleDict` に積み後続失敗後に全葉が完全一致・`children_mut` 未実装／名前不整合の複合層は状態変更前に `InvalidArgument`）と、`container.rs` の `adapter_in_autodiff_module_list_*user_composite*`／`*children_only_composite*`（アダプタ経由）
+
+## 22. 承認取得と実施記録（イシュー #2338・#2403）
+
+#2338（facade `nn::Module` 公開の承認待ちの追跡）を締めくくる記録。コード変更なし（doc コメントの追従のみ）。
+
+### 22.1 節番号についての注記
+
+#2403 の本文は本節を「§14 を新設」と指定しているが、§14〜§21 は子 issue #2395〜#2400 の実装記録として使用済みで、他 doc・`api_surface.rs` の doc コメントから参照されている。番号の振り直しを避けるため、承認取得と実施のまとめは §22 とした。あわせて §8 の「§17 参照」（#2398 の記録）を、#2137 鏡写しの記録である §21 に訂正した。
+
+### 22.2 承認の記録
+
+所有者の承認は #2338 のコメントに残っている（いずれも 2026-09-29）。
+
+| 承認内容 | 出典 |
+|---|---|
+| §10 承認事項 1〜6 を推奨案（案 B）で承認 | https://github.com/Fandhe-AI/fandhe-ai/issues/2338#issuecomment-5881439884 |
+| 子 issue #2394〜#2402 への分解と確定事項（`forward` の第 1 引数は `TapeRef<'t>`・`add_module` の追加・鏡写しに `children`／`type_name` を含める） | https://github.com/Fandhe-AI/fandhe-ai/issues/2338#issuecomment-5882029568 |
+| 追加承認 1: 封印フックと autodiff の内部スナップショットメソッド（`#[doc(hidden)]`） | https://github.com/Fandhe-AI/fandhe-ai/issues/2338#issuecomment-5888987363 |
+| 追加承認 2: 封印フックを廃止し、公開 defaulted の `children_mut` に置き換え | https://github.com/Fandhe-AI/fandhe-ai/issues/2338#issuecomment-5890443852 |
+
+### 22.3 実施の対応表
+
+| 子 issue | PR | 内容 | 記録 |
+|---|---|---|---|
+| #2394 | #2407 | 借用ハンドル `TapeRef<'t>`（`unsafe` なし） | §14 の前提 |
+| #2395 | #2412 | facade `nn::Module` trait | §14 |
+| #2396 | #2417 | `nn::ModuleList`／`nn::Sequential` | §15 |
+| #2397 | #2419 | autodiff 側へのアダプタ（`FacadeModuleAdapter`。`pub(crate)`） | §16 |
+| #2398 | #2425 | `compat::Sequential::add_module` | §17 |
+| #2399 | #2432 | 正ガードとユーザー定義層の統合テスト | §20 |
+| #2400 | #2426 | 凍結 API（#2137）の鏡写し・`children_mut` | §21 |
+| #2401 | #2427 | イントロスペクション（#2134）の鏡写し | §18 |
+| #2402 | #2429 | `nn::ModuleDict`・`nn::summary` | §19 |
+
+### 22.4 §6 からのずれ
+
+- `forward` の第 1 引数は `&'t fandhe_ai::Tape` ではなく `TapeRef<'t>`（値渡しの借用ハンドル。#2394・#2395）
+- §9 の「`add_module` はスコープ外」を #2398 で上書きした（公開入口は 1 件のみ）
+- defaulted メソッドは 6 件から 14 件へ増えた（凍結 3 件・イントロスペクション 4 件・`children_mut`）
+- コンテナは autodiff の型を包まず、facade 側で直接保持する方式にした（§15）
+- autodiff（内部クレート）の `nn::Module` へ `#[doc(hidden)]` の内部スナップショットメソッドを追加した（§21）。facade の公開面は増えない
+
+### 22.5 最終の公開面と 0.9.0 互換性
+
+公開面は追加のみ（semver minor 相当）で、`fandhe-ai =0.9.0` の既存公開面は変えていない。一覧は `docs/compat-api-scope.md` §5 の「適用記録（経路 2。イシュー #2338）」を正とする。
+
+### 22.6 残った課題と起票候補
+
+- **`ReferenceModule` の facade `nn::Module` への移行**: 現行の公開面では委譲による移行はできない（`docs/reference-models-decision.md` §10.8 (d)）。成り立たせるには新しい公開面が要り、別承認が必要。起票候補「examples `ReferenceModule`／`Trainable` を facade `nn::Module` へ移行する（前提: `compat::Sequential` への `nn::Module` 実装または `TapeRef` を受ける forward の公開承認、もしくは部品の手組み書き換え方針の決定）」。自動運転のため未起票
+- **パラメータを持つ独自層の学習対応**: `compat::Sequential` に積んだ場合の `fit`／`bind` 系は fail-closed のまま（§17）。forward 内で登録したパラメータ `Var`／勾配を公開経由で集める経路もない（§20）。trait の拡張で別承認が必要
+- `compat::Sequential::parameter_count()`／`summary()` への委譲は未実施（§19）
+
+### 22.7 #2338 の close の扱い
+
+#2338 は過去に意図せず reopen された経緯があるため（§13.2）、本記録を入れる #2403 の PR ではクローズキーワードを使わない。PR のマージを確認したうえで明示的に close する。

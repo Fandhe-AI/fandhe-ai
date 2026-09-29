@@ -357,7 +357,7 @@ examples から内部の `fandhe_ai_autodiff::nn::Module` を impl する
 
 | `ReferenceModule`／`Trainable` のメソッド | 案 B の対応 | 一致度 |
 |---|---|---|
-| `forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>` | required method `forward`（§6 利用例） | シグネチャが同一（注: 2026-09-29 に案 B の `forward` の第 1 引数は `TapeRef<'t>` で確定したため〈#2394〉、「同一」の評価は #2403 で再確定する。#2395 で facade `nn::Module` が実装済みで、差分は第 1 引数が `TapeRef<'t>` である点のみ。`ReferenceModule` は `&'t Tape` のまま） |
+| `forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>` | required method `forward`（§6 利用例） | 第 1 引数のみ差分（確定: facade は `TapeRef<'t>`・`ReferenceModule` は `&'t Tape`。変換は `TapeRef::from(&tape)` だが、実装側が部品の `&Tape` を得られず委譲できない。(d) 参照） |
 | `named_parameters(&self) -> Vec<(String, &Tensor<f32>)>` | defaulted メソッド `named_parameters`（§10 承認事項 2） | 名前・意味論とも同じ |
 | `set_training(&mut self, training: bool)` | defaulted メソッド `set_training`（同上） | 名前・意味論とも同じ |
 | `is_training(&self) -> bool` | defaulted メソッド `training`（同上） | 意味論は同じだが**名前が異なる**（`is_training` vs `training`） |
@@ -373,3 +373,40 @@ examples から内部の `fandhe_ai_autodiff::nn::Module` を impl する
 `nn::Module` への実際の移行・置き換えは、案 B の採否が承認されたのち
 に別イシューで行う（§9 のスコープ外一覧・`docs/facade-nn-module-
 exposure-decision.md` §13.5 の「承認取得後に実施する変更範囲」参照）。
+
+**(d) 確定評価（イシュー #2403・2026-09-29）**: facade `nn::Module` は #2338 で公開済み
+（`docs/facade-nn-module-exposure-decision.md` §22）。公開面を再確認した結果、
+(c) の「ほぼ機械的に寄せられる」という事前評価を改め、**現行の公開面では
+`ResNetBlock`／`ResNet`／`Transformer` に facade `nn::Module` を委譲で実装
+することはできない**と確定する。
+
+- **理由**: facade `Module::forward` は `TapeRef<'t>` を受け取るが、`TapeRef` の
+  公開メソッドは `var`／`var_from`／`var_no_grad` だけで `&Tape` へ戻る公開経路が
+  ない（`tape_ref_pub_fns_do_not_return_raw_tape`・
+  `tape_ref_public_surface_is_exactly_var_family`）。一方、各モデルの部品である
+  `compat::Sequential::forward` は `&'t Tape` を取り
+  （`crates/facade/src/compat/sequential.rs`）、`compat::Sequential` は facade
+  `nn::Module` を実装していない（実装は `nn::{ModuleList, Sequential, ModuleDict}`
+  のみ）。`resnet.rs`・`transformer.rs` の `forward` は部品の
+  `forward(tape, x)` を呼んでいるため、`TapeRef` からは呼べない
+- **メソッドごとの確定形**: `forward` は第 1 引数が `&'t Tape` から `TapeRef<'t>`
+  に変わる（呼び出し側は `TapeRef::from(&tape)`）。`named_parameters`・
+  `set_training` はシグネチャ・意味論とも一致。`is_training` は `training` への
+  改名が要る。`set_parameter`／`state_dict`／`load_state_dict` は `ReferenceModule`
+  側に対応がなく、移行するなら `set_parameter` の実装が必要（既定は fail-closed の
+  `Err`）。`Trainable::train_step` は対応がなく examples 側に残り、facade `Module` には
+  パラメータ `Var` を集める公開経路もない（決定記録 §20）
+- **逆方向も解決にならない**: 部品が compat 型で facade `Module` ではなく、
+  `compat::Sequential::add_module` で積んだパラメータ持ち facade 層の学習は
+  fail-closed になる（決定記録 §17）
+- **移行を成り立たせる方法**（いずれも別承認が必要）: (i) `compat::Sequential` に
+  facade `nn::Module` を実装する、(ii) `compat::Sequential` に `TapeRef` を受け取る
+  forward を追加する（(i)・(ii) は新しい公開面）、(iii) 部品を `Var` 演算の手組みへ
+  書き直す（公開面は増えないが大規模で、学習経路は §20 の制約を受ける）
+- **起票候補（未起票）**: 「examples `ReferenceModule`／`Trainable` を facade
+  `nn::Module` へ移行する（前提: (i)／(ii) の公開ブリッジの承認、または (iii) の
+  書き換え方針の決定）」。承認が要るため本 issue では起票せず、PR 本文に記録する
+  （`.claude/rules/out-of-scope-tracking.md`）
+
+以上により #2338 受け入れ条件 5 の評価は「現行公開面では不可（条件付き）」で確定する。
+(c) の本文は事前評価として残し、結論は (d) で改めた。

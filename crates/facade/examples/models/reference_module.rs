@@ -2,9 +2,11 @@
 //! #2202・親 #2190。AC3「各層が `nn::Module` trait を実装すること」の
 //! 代替実装）。
 //!
-//! `facade` の `nn::Module` は #2133 で公開保留中のため到達できない
-//! （`crates/facade/src/lib.rs` の `NnModuleHoldDoctestGuard`・
-//! `docs/facade-nn-module-exposure-decision.md` §12）。examples から
+//! `facade` の `nn::Module` は #2338 で公開済み（`docs/facade-nn-module-
+//! exposure-decision.md` §22）。ただし `forward` が `TapeRef<'t>` を取り、
+//! 部品の `compat::Sequential::forward(&Tape, ..)` を呼べないため、現行の公開面では
+//! 本 trait を facade `nn::Module` へ委譲で移行できない
+//! （`docs/reference-models-decision.md` §10.8 (d)）。examples から
 //! 内部の `fandhe_ai_autodiff::nn::Module` を impl することもしない
 //! （公開パス限定の方針）。本ファイルはその代わりに、PyTorch
 //! `nn.Module` に似せた examples 限定の利用者コードとして

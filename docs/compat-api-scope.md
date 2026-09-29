@@ -1072,6 +1072,65 @@ PR #2230 のコメント・レビューを再確認したが、所有者によ�
 は #2338 を close せずに追跡先として維持する。詳細は
 `docs/facade-nn-module-exposure-decision.md` §13。
 
+**2026-09-29 追記: 承認済み・実施済み**（#2132／#2133／#2338 の上記 3 段落は当時の記録として残す。下記の適用記録を参照）。
+
+**適用記録（経路 2。イシュー #2338・2026-09-29 ユーザー承認）**: 所有者が
+`docs/facade-nn-module-exposure-decision.md` §10 承認事項 1〜6 を推奨案
+（案 B）で承認した
+（https://github.com/Fandhe-AI/fandhe-ai/issues/2338#issuecomment-5881439884。
+子 issue の分解と確定事項は #issuecomment-5882029568、追加承認 2 件は
+#issuecomment-5888987363・#issuecomment-5890443852）。子 issue #2394〜#2402
+（PR #2407・#2412・#2417・#2419・#2425・#2432・#2426・#2427・#2429）で
+実施済み。公開面は追加のみ（semver minor 相当）で、`fandhe-ai =0.9.0` の
+既存公開面は変えていない。
+
+- **新しい公開面**:
+  - `fandhe_ai::nn::Module`（open trait）。required は `forward<'t>(&self,
+    tape: TapeRef<'t>, input: &Var<'t>)` の 1 件、defaulted は合計 14 件
+    （基本 6 件: `named_parameters`・`set_parameter`・`state_dict`・
+    `load_state_dict`・`set_training`・`training`／凍結 3 件:
+    `set_requires_grad`・`freeze`・`requires_grad`／イントロスペクション
+    4 件: `children`・`named_modules`・`parameter_count`・`type_name`／
+    `children_mut`）
+  - `fandhe_ai::nn::{ModuleList, Sequential, ModuleDict}`（facade 側で子を
+    直接保持するコンテナ）と `fandhe_ai::nn::summary`
+  - `fandhe_ai::TapeRef<'t>`（`var`／`var_from`／`var_no_grad` と
+    `From<&Tape>`。`lib.rs` で直接定義し、生 `Tape` へ戻る経路はない）
+  - `compat::Sequential::add_module<M: nn::Module + 'static>(self, m: M) -> Self`
+    （唯一の入口。§9 の除外を上書き）
+- **公開していないもの**: autodiff の `nn::Module`・`ModuleList`・`Sequential`・
+  `ModuleDict` の再エクスポート、生 `Tape`・`BackendOps`、
+  `FacadeModuleAdapter`（`pub(crate)`）、組み込み層型（`Linear` 等）
+- **ガードの切り替え**（`crates/facade/tests/api_surface.rs`）: 否定ガード
+  `facade_does_not_reexport_nn_module_or_containers`・
+  `facade_declares_no_nn_module_items`・
+  `facade_does_not_reexport_module_dict_or_summary`・
+  `compat_sequential_does_not_expose_module_add_methods`（`add_module` 1 件のみ
+  許容）を承認済みの形だけを許す正ガードへ切り替えた。`NnModuleHoldDoctestGuard`
+  と関連テスト・定数は削除した（#2396）。`nn_mod_declares_only_rnn_submodule` は
+  非公開 `mod` と `pub use` の方式のため変更なし。新設した正ガードは
+  `tape_ref_public_surface_is_exactly_var_family`・
+  `tape_ref_declared_once_with_crate_private_field`・
+  `tape_ref_pub_fns_do_not_return_raw_tape`・
+  `facade_nn_module_trait_methods_match_approved_set`・
+  `facade_nn_module_trait_signatures_hide_internal_types`・
+  `compat_sequential_add_module_is_sole_approved_entry`・
+  `nn_module_types_are_reachable_via_facade_only`・
+  `nn_{mod,module_rs,container_rs}_public_items_match_expected_set`・
+  `nn_containers_inherent_and_trait_impls_match_expected_set`・
+  `onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module`
+  （それぞれ自己テストを含む）
+- **autodiff（内部クレート）**: 追加承認 1・2 に基づき `#[doc(hidden)]` の
+  `requires_grad_snapshot`／`restore_requires_grad_snapshot`・
+  `RequiresGradSnapshot` を追加した。facade の公開面には現れない
+- **既知の制限**: `compat::Sequential` に積んだパラメータを持つ facade 層では
+  `fit`／`bind` 系が fail-closed になる（決定記録 §17）。forward 内で登録した
+  パラメータ・勾配を公開経由で集める経路はない（同 §20）。autodiff の
+  `named_modules` はアダプタで包んだ facade コンテナの内側へ降りない（同 §18）
+- **詳細**: `docs/facade-nn-module-exposure-decision.md` §14〜§22。
+  examples の `ReferenceModule` の移行評価は
+  `docs/reference-models-decision.md` §10.8 (d)
+
 **#2169（`compat::Sequential::compile()` の `Loss` enum への BCE／
 BCEWithLogits／NLL／KLDiv／Huber／SmoothL1／L1 追加）は経路 2 未適用の
 まま承認待ちで保留した。** コード変更なし（`#[cfg(doctest)]` 限定の
@@ -1134,6 +1193,7 @@ fail-closed に固定した。詳細は
 設計した（同 doc §5.3）が、facade の `nn` は #2133 と同じ理由で未公開
 （`docs/facade-nn-module-exposure-decision.md`）のため、facade へ公開
 するには `nn::Module` 公開（#2133）と本節経路 2 の双方の承認が要る。
+（2026-09-29 追記: facade `nn::Module` は #2338 で公開済み。上記適用記録を参照。#2139 自体の承認状況は変わらない。）
 本節経路 2 の承認（同 doc §11 承認事項 5）は #2139 着手可否を左右
 する条件の一つに過ぎない。同 doc §11 は設計案（§4・§5）の承認・
 hook と `CustomFunction` の役割分担・callback lifetime・エラー伝播
@@ -1244,7 +1304,7 @@ src/` は一切変更していない。対象 item は `ResNetBlock`／`ResNet`�
 `Transformer` の 3 型に加え、examples 限定の trait `ReferenceModule`／
 `Trainable`（`crates/facade/examples/models/reference_module.rs`。
 いずれも保留中の facade `nn::Module`〈#2133〉の代わりに利用者コード側
-で用意した代替）。#2201（`Mlp`／`LeNet`）と同じ理由により、本 issue
+で用意した代替）。（2026-09-29 追記: facade `nn::Module` は #2338 で公開済み。上記適用記録を参照。#2202 自体の承認状況は変わらない。）#2201（`Mlp`／`LeNet`）と同じ理由により、本 issue
 でも facade 公開面へ到達しかねないコード自体を `crates/facade/src/`
 へ書いていない（`crates/facade/examples/models/` 配下の**利用者
 コード**として実装し `#[path]` で個別に取り込む）ため、`HoldDoctest
