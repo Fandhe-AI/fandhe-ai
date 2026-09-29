@@ -760,13 +760,14 @@ fn from_sequential_to_bytes_initializers_match_state_dict_bit_exact() {
 /// from_path_resolves_external_data_and_matches_manifest_reference` を
 /// 参照。
 ///
-/// **`cfg(unix)` 限定**（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
-/// 対応）: `from_path` の external data 解決は unix でのみ実際にファイル
-/// を開こうと試みるため、companion 欠落が `OnnxError::Io(NotFound)` に
-/// なるのは unix の契約である。非unix の契約は
+/// **`cfg(any(unix, windows))` 限定**: `from_path` の external data 解決は
+/// unix・Windows とも onnx-interop が封じ込めオープンを試みるため、
+/// companion 欠落は `OnnxError::Io(NotFound)` になる。Windows での実行
+/// 確認は #2393（Linux CI では Windows クロス clippy による型検査のみ）。
+/// unix・Windows 以外の契約は
 /// [`facade_from_bytes_rejects_external_data_model_from_path_rejects_
 /// unsupported_platform_on_non_unix`] が固定する。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution() {
     let t = TensorProto {
@@ -825,10 +826,9 @@ fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution()
 /// 上記テストの unix・Windows 以外向け契約版（Cursor Bugbot 指摘・
 /// PRRT_kwDOTuUCJc6mrW… 対応。2026-09-28 イシュー #2349 で訂正）。
 /// `onnx::external_data::resolve_and_open` 自体は unix・Windows の両方で
-/// 封じ込めオープンに対応済みだが、**facade（本クレート）は Windows では
-/// ビルドできない**（`backend-cuda` への無条件依存が非 unix ターゲットで
-/// `compile_error!` を発するため。#509／PR #677。`crates/facade/tests/
-/// interop_onnx_external_data.rs` ファイル冒頭コメント参照）。cfg を
+/// 封じ込めオープンに対応済みだが、facade（本クレート）も #2390
+/// 以降は Windows でビルドできるため、本テストは unix・Windows 以外の
+/// 環境向けの契約として残す。cfg を
 /// `not(any(unix, windows))` に限定するのは、facade が将来 Windows で
 /// ビルドできるようになった場合に、この「非対応」契約テストが
 /// `from_path` の実際の成功と矛盾する側で固定されるのを防ぐため。本

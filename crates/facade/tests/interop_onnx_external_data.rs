@@ -18,27 +18,18 @@
 //! 基準 `abs_err / (|ref| + 1e-6) <= 1e-3`（REQ-2 バックエンド間数値一致
 //! OR 複合判定とは別指標）。
 //!
-//! **プラットフォーム前提（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW…
-//! 対応。2026-09-28 イシュー #2349 で訂正）**: `onnx-interop` の
-//! external data 実解決（封じ込めオープン）は unix・Windows の両方で
-//! 成功する（`fandhe_ai_onnx_interop::onnx::external_data` モジュール
-//! doc 参照）。しかし **facade（本クレート `fandhe-ai`）自体は Windows
-//! ではビルドできない**: facade は `backend-cuda` へ無条件依存し、
-//! `crates/backend-cuda/src/nvrtc.rs` は非 unix ターゲットで
-//! `compile_error!` を発する（#509／PR #677。NVRTC キャッシュの fd pin
-//! による TOCTOU 対策が `openat`・`/proc/self/fd` 等 unix 系 API に
-//! 依存するため非 unix 向けフォールバックを提供しない設計）。したがって
-//! `OnnxModel::from_path` の Windows 対応は本 crate（`onnx-interop`）側の
-//! 対応だけでは完結せず、facade 経由の到達性は本ファイルでは検証できない
-//! （backend-cuda の Windows 対応は別イシューでの起票候補。イシュー
-//! #2349 PR 参照）。解決成功を前提とする
+//! **プラットフォーム前提（イシュー #2349 で訂正・#2390／#2391 で更新）**:
+//! `onnx-interop` の external data 実解決（封じ込めオープン）は unix・
+//! Windows の両方で成功する（`fandhe_ai_onnx_interop::onnx::external_data`
+//! モジュール doc 参照）。facade（本クレート `fandhe-ai`）も #2390
+//! （backend-cuda の非 unix NVRTC ディスクキャッシュ無効化）以降は
+//! Windows でビルドでき、CI の Windows クロス clippy（`--lib --tests`）で
+//! 型検査している（#2391）。解決成功を前提とする
 //! [`from_path_resolves_external_data_and_matches_manifest_reference`]
-//! は `cfg(unix)` 限定のままとし、`cfg(not(any(unix, windows)))` 版
-//! （`InvalidModel` で拒否されることの契約）は facade がビルドできる
-//! unix・Windows 以外の環境（将来 backend-cuda が対応した場合）向けに
-//! 残す（`not(unix)` のままだと、facade が将来 Windows でビルドできる
-//! ようになった時点で「Windows では拒否される」という誤った契約を
-//! 固定してしまう。onnx-interop 自体は既に Windows へ対応済みのため）。
+//! は `cfg(any(unix, windows))` で有効にし、`cfg(not(any(unix, windows)))`
+//! 版（`InvalidModel` で拒否されることの契約）は unix・Windows 以外の
+//! 環境向けに残す。Windows 上での実行確認は Windows 実機検証（#2393）
+//! の範囲であり、Linux CI では型検査のみ。
 //! `from_bytes` は external data 経由をそもそも通らないため
 //! [`from_bytes_still_rejects_external_data_fixture`] は OS 非依存のまま
 //! 全プラットフォームで実行する。
@@ -46,14 +37,14 @@
 use std::path::PathBuf;
 
 use fandhe_ai::interop::onnx::OnnxModel;
-// external data の実解決を伴うテスト（cfg(unix) 限定。ファイル冒頭
-// コメント参照）専用の import。非 unix ビルドでは未使用になるため
+// external data の実解決を伴うテスト（cfg(any(unix, windows))。ファイル冒頭
+// コメント参照）専用の import。それ以外のビルドでは未使用になるため
 // 揃えて cfg する。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fandhe_ai::Tensor;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use fandhe_ai::interop::onnx::OnnxValue;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::collections::HashMap;
 
 const EXTERNAL_DATA_CASE_NAMES: &[&str] =
@@ -71,8 +62,8 @@ fn external_data_fixture_root() -> PathBuf {
 /// tensor_from_record` と同型。要素数一致を先に検証してから
 /// `f32::from_bits` で復元する。A03）。
 /// `from_path_resolves_external_data_and_matches_manifest_reference`
-/// 専用のため `cfg(unix)` 限定（ファイル冒頭コメント参照）。
-#[cfg(unix)]
+/// 専用のため `cfg(any(unix, windows))` 限定（ファイル冒頭コメント参照）。
+#[cfg(any(unix, windows))]
 fn tensor_from_manifest(record: &serde_json::Value) -> Tensor<f32> {
     let shape: Vec<usize> = record["shape"]
         .as_array()
@@ -110,8 +101,8 @@ fn tensor_from_manifest(record: &serde_json::Value) -> Tensor<f32> {
 /// した重みに対する PyTorch 参照値。`README.md`「実測結果」節参照）と
 /// REQ-7 事前固定基準で一致することを確認する。
 ///
-/// **`cfg(unix)` 限定**（ファイル冒頭コメント参照）。
-#[cfg(unix)]
+/// **`cfg(any(unix, windows))` 限定**（ファイル冒頭コメント参照）。Windows での実行は #2393。
+#[cfg(any(unix, windows))]
 #[test]
 fn from_path_resolves_external_data_and_matches_manifest_reference() {
     let root = external_data_fixture_root();
@@ -185,10 +176,9 @@ fn from_bytes_still_rejects_external_data_fixture() {
 
 /// [`from_path_resolves_external_data_and_matches_manifest_reference`]
 /// の非 unix 契約版（Cursor Bugbot 指摘・PRRT_kwDOTuUCJc6mrW… 対応。
-/// 2026-09-28 イシュー #2349 で訂正）。facade は Windows ではビルド
-/// できないため（ファイル冒頭コメント参照）、本テストが実際に走るのは
-/// facade がビルドできる非 unix 環境（現状存在しない。将来 backend-cuda
-/// が対応した場合の回帰防止として残す）に限られる。その環境で
+/// 2026-09-28 イシュー #2349 で訂正）。facade は #2390 以降 Windows で
+/// ビルドできるため（ファイル冒頭コメント参照）、本テストが実際に走るのは
+/// unix・Windows 以外でビルドできる環境（現状存在しない）に限られる。その環境で
 /// external data の実解決手段を持たない場合、companion `.onnx.data` が
 /// 実在する fixture であっても `from_path` は常に
 /// `OnnxError::InvalidModel`（`ExternalDataError::
