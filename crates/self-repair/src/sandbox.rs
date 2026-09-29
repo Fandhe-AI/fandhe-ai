@@ -326,9 +326,10 @@ mod tests {
     use super::*;
     use crate::test_support::unique_temp_dir;
 
-    /// テスト専用の隔離 git リポジトリを構築する（`dir` は呼び出し元が `unique_temp_dir` で作成済みの空ディレクトリ）（`main.rs::resolve_baseline_commit`
+    /// テスト専用の隔離 git リポジトリを構築する（`main.rs::resolve_baseline_commit`
     /// と同じ `GIT_*` 除去方式）。`init` の初期ブランチ名を明示指定し、
     /// 環境の `init.defaultBranch` 設定に依存しないようにする。
+    /// `dir` は呼び出し元が `unique_temp_dir` で作成済みの空ディレクトリとする。
     fn init_repo(dir: &Path) {
         for args in [
             vec!["init", "--quiet", "--initial-branch=main"],
