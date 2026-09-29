@@ -844,8 +844,9 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   Windows ではビルドできなかった（`crates/backend-cuda/src/nvrtc.rs` の
   `compile_error!`。#509／PR #677）。方針決定は #2389、実装は #2390（非
   unix で NVRTC ディスクキャッシュを無効化。いずれも close 済み）へ切り
-  出し済み。facade の Windows クロス clippy の CI 化は #2391（open）で
-  追跡する。
+  出し済み。facade の Windows クロス clippy の CI 化は #2391 へ切り出し済み・解消
+  （2026-09-29。`build` ジョブと Makefile `check-cross-windows-interop` に
+  facade 行〈`--lib --tests`〉を追加。実機実行は #2393）。
 - **（解消済み・2026-09-28・PR #2351。事後監査は 2026-09-29・イシュー
   #2392 の 10 節）Windows の残存 TOCTOU 経路の閉鎖**: 5 節「Windows 版
   の残存リスク」(a) の flip-and-revert 競合は、`GetFinalPathNameByHandleW`

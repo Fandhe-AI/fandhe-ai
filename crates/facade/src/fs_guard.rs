@@ -16,7 +16,7 @@
 //!
 //! 出典: `docs/compat-model-io-decision.md` §13.2・§13.4、
 //! `docs/facade-model-registry-decision.md`、イシュー #2364。
-//! 対象外: Windows 実装（#2389〜#2392）。書き込み側（`create_new`・一時ファイルの
+//! 対象外: Windows 向け no-follow 実装（別件。facade のビルド可否は #2390・#2391 で解消済み）。書き込み側（`create_new`・一時ファイルの
 //! 所有権確認削除）は `compat::model_io` が std のみで持つ（このモジュールには置かない）。
 
 use std::fs::File;
