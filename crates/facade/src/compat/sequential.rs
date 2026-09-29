@@ -640,6 +640,66 @@ impl Sequential {
         Ok(self)
     }
 
+    /// `compat::model_io::load_model` 専用: running stats を持つ BatchNorm1d を積む
+    /// （イシュー #2371）。`from_parameters` 経由で weight／bias／running stats を
+    /// そのまま持つ層を作り、`LayerSpec` の `num_features` は `running_mean` の長さから決める。
+    /// `num_batches_tracked` は復元されず 0 から始まる（forward の数値には影響しない）。
+    /// 初期モードは train で、呼び出し側が直後に `set_training` で全層を揃える。
+    pub(super) fn add_batch_norm1d_restored(
+        mut self,
+        weight: Tensor<f32>,
+        bias: Tensor<f32>,
+        running_mean: Tensor<f32>,
+        running_var: Tensor<f32>,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        let num_features = running_mean.shape().first().copied().unwrap_or(0);
+        let layer = BatchNorm1d::from_parameters(
+            Some(weight),
+            Some(bias),
+            running_mean,
+            running_var,
+            eps,
+            momentum,
+        )?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::BatchNorm1d {
+            num_features,
+            eps,
+            momentum,
+        });
+        Ok(self)
+    }
+
+    /// [`Sequential::add_batch_norm1d_restored`] の BatchNorm2d 版（イシュー #2371）。
+    pub(super) fn add_batch_norm2d_restored(
+        mut self,
+        weight: Tensor<f32>,
+        bias: Tensor<f32>,
+        running_mean: Tensor<f32>,
+        running_var: Tensor<f32>,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        let num_features = running_mean.shape().first().copied().unwrap_or(0);
+        let layer = BatchNorm2d::from_parameters(
+            Some(weight),
+            Some(bias),
+            running_mean,
+            running_var,
+            eps,
+            momentum,
+        )?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::BatchNorm2d {
+            num_features,
+            eps,
+            momentum,
+        });
+        Ok(self)
+    }
+
     /// Embedding 層を追加する（`nn::Embedding`。イシュー #1760）。
     /// 決定的シードで `N(0, 1)` 初期化する（`Embedding::new` 参照）。
     ///
