@@ -8,6 +8,9 @@
 //!
 //! 実機（CUDA/Metal）非依存・外部ネットワーク非依存のため `#[ignore]` は不要。
 
+mod common;
+
+use common::TempOutDir;
 use std::path::{Path, PathBuf};
 
 use docs_site::build::build_site;
@@ -21,34 +24,6 @@ fn repo_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("repository root should be resolvable from CARGO_MANIFEST_DIR")
-}
-
-/// テスト専用の一時出力ディレクトリ。`Drop` でベストエフォート削除する。
-/// `tests/site_nav.rs`・`tests/cli_fail_closed.rs` と同じパターン
-/// （`std::env::temp_dir()` を先に `canonicalize` してから一意サフィックスを
-/// 付ける。macOS の `/var` symlink による `open_out_root_dir` の偽陽性拒否を
-/// 回避する。同コメント参照）。外部クレート（`tempfile` 等）は追加しない。
-struct TempOutDir(PathBuf);
-
-impl TempOutDir {
-    fn new(tag: &str) -> Self {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let base = std::fs::canonicalize(std::env::temp_dir())
-            .expect("canonicalize std::env::temp_dir() for real_site_search_index test");
-        Self(base.join(format!(
-            "rust-ai-library-docs-site-real-site-search-index-test-{tag}-{}-{unique}",
-            std::process::id()
-        )))
-    }
-}
-
-impl Drop for TempOutDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 #[test]
@@ -86,14 +61,14 @@ fn real_site_nav_toml_builds_and_search_index_covers_every_declared_page() {
     );
 
     let out = TempOutDir::new("real-site");
-    let report = build_site(&root, &out.0).expect("repository root site/ should build");
+    let report = build_site(&root, out.out()).expect("repository root site/ should build");
     assert_eq!(
         report.pages,
         expected_pages.len(),
         "build_site page count should match nav.toml declared page count"
     );
 
-    let index_json = std::fs::read_to_string(out.0.join("assets/search-index.json"))
+    let index_json = std::fs::read_to_string(out.out().join("assets/search-index.json"))
         .expect("assets/search-index.json should be written");
 
     // 受け入れ基準 1 の核心: `nav::parse_nav` が返す全ページ数と索引内の
