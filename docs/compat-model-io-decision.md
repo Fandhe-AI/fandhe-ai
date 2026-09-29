@@ -104,8 +104,17 @@ version migration。
    ため、`update(false)` を再生しても再生前に backoff／growth で変化
    済みの `scale` 自体は動かない）。承認後は次の内部 API（`fandhe_ai_
    autodiff` 限定。facade へは再エクスポートしない）を追加する:
-   `GradScaler::from_state(config: GradScalerConfig, scale: f32,
-   growth_tracker: u64) -> Result<GradScaler, AutodiffError>`。検証は
+   `grad_scaler_from_state(config: GradScalerConfig, scale: f32,
+   growth_tracker: u64) -> Result<GradScaler, AutodiffError>`
+   （`fandhe_ai_autodiff::nn::optim::amp` の自由関数）。
+   **設計変更の記録（イシュー #2365・PR #2404 review 是正）**: 当初は
+   `GradScaler::from_state` という inherent メソッドを承認していたが、
+   facade は `GradScaler` 型を `pub use` で再エクスポートしており
+   （`crates/facade/src/optim.rs`）、inherent メソッドは facade の
+   公開面へ自動的に露出して「facade へは再エクスポートしない」契約に反する。
+   このため名前・所在のみ自由関数 `grad_scaler_from_state` へ変更した
+   （検証内容・引数・戻り値は承認済みの契約のまま不変。`nn::optim` の
+   `pub use` にも載せない）。検証は
    `new`（`config` の各フィールド）に加え、`scale` が有限・正・非正規化
    数でないこと（`update` の backoff 検証と同一基準）、`growth_tracker
    < config.growth_interval`（`growth_tracker` は `growth_interval` に
@@ -185,7 +194,7 @@ version migration。
 | `Compiled { optimizer, loss, amp }`。7 optimizer（`Sgd`／`AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Lbfgs`。`Lbfgs` は PR #2319〈main 統合済み〉で追加）はいずれも `config()` を持ち、`set_lr` による書き換えも `config()` へ反映済みの値を返す | `crates/facade/src/compat/training.rs` | 設定値（LR scheduler が書き換えた現在値を含む）は全フィールドを直列化できる |
 | `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb` は `OptimizerStateDict` 実装済み。`Sgd`／`Lbfgs` は未実装 | `crates/autodiff/src/nn/optim/state_dict.rs`・`crates/autodiff/src/nn/optim/lbfgs.rs` | 承認後は `impl OptimizerStateDict for Sgd`、および `Lbfgs` 専用のキー配置を持つ状態保存・復元 API が必要（§2 item 2） |
 | `api_surface.rs::workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` が `state_dict`／`load_state_dict` の宣言元を完全一致で固定している | `crates/facade/tests/api_surface.rs` | 承認後の facade 側ヘルパーにこの名前は使えない |
-| `GradScaler` に `config()` はあるが、`(scale, growth_tracker)` を任意の値に復元するコンストラクタがない（`update` の backoff／growth 経由でしか変化しない） | `crates/autodiff/src/nn/optim/amp.rs` | `compile_with_amp` の時点で `GradScalerConfig` を記録し、save 時点の `scale()`／`growth_tracker()` を manifest に保存、復元は承認後の `GradScaler::from_state`（§2 item 3）を使う（`update` の再生では現在の `scale` を再現できないため。§11） |
+| `GradScaler` に `config()` はあるが、`(scale, growth_tracker)` を任意の値に復元するコンストラクタがない（`update` の backoff／growth 経由でしか変化しない） | `crates/autodiff/src/nn/optim/amp.rs` | `compile_with_amp` の時点で `GradScalerConfig` を記録し、save 時点の `scale()`／`growth_tracker()` を manifest に保存、復元は承認後の `grad_scaler_from_state`（§2 item 3）を使う（`update` の再生では現在の `scale` を再現できないため。§11） |
 | `Optimizer::Lbfgs` は `compile_with_amp` から fail-closed に拒否される（AMP 非対応） | `crates/facade/src/compat/training.rs:899` | 検証計画（§6）の「optimizer × AMP」の直積対象から `Lbfgs` を除外する |
 | `compat::Sequential` では任意の skip connection を表現できない | `sequential.rs` | 受入基準の「skip connection」は深い異種スタック＋`add_transformer_encoder` で代替 |
 | `save_model`／`load_model` を宣言している `crates/*/src/` はない | `grep` 結果（2026-09-26） | 定義元インベントリの期待集合は空 |
@@ -252,7 +261,7 @@ version migration。
   "growth_tracker"}`。`scale`（f32）・`growth_tracker`（u64。JSON 整数）
   は save 時点の `GradScaler::scale()`／`growth_tracker()` の**現在値**
   であり（`GradScalerConfig` の初期値ではない）、復元は承認後の
-  `GradScaler::from_state(config, scale, growth_tracker)`（§2 item 3）を
+  `grad_scaler_from_state(config, scale, growth_tracker)`（§2 item 3）を
   使う（PR #2317 review 指摘 1 の是正。§11 参照）。
 - 数値表現: f32 は Rust の最短往復表記（`{:?}`）で書き `str::parse::<f32>`
   で読む（非有限値は save 時に `UnsupportedModel` で拒否）。u64／usize は
@@ -289,7 +298,7 @@ version migration。
   ファイル内容の完全一致・shape 一致を確認 → spec 順に層を構築（BN のみ
   `from_parameters`）→ `load_state_dict` → `set_training` → `compiled`
   があれば optimizer 復元（`Sgd`／`Lbfgs` は承認後の専用復元 API）・
-  AMP があれば `GradScaler::from_state` で scaler を復元。途中失敗時は
+  AMP があれば `grad_scaler_from_state` で scaler を復元。途中失敗時は
   部分的に構築した `Sequential` を返さない。
 - **非復元のもの**: BN の `num_batches_tracked`（forward 計算に使われない
   カウンタのみで数値へ影響しない。§11）、Dropout の RNG 状態（グローバル
@@ -468,7 +477,7 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 growth で変化済みの `scale` を再現できないことが判明した——§1「compile
 状態復元契約」に反する。是正として、save 時点の `scale`／
 `growth_tracker` の**現在値**を manifest に保存し、承認後に検証付きの
-`GradScaler::from_state` コンストラクタ（§2 item 3）を新設して復元する
+`grad_scaler_from_state` コンストラクタ（§2 item 3）を新設して復元する
 方式へ変更した。(2) 既存ディレクトリへの再保存で、safetensors の
 rename 完了後〜manifest の rename 完了前の窓に旧 manifest と新
 safetensors が共存し得ることが判明した——manifest を最後に書くだけ
@@ -606,7 +615,7 @@ main への PR #2319〈L-BFGS〉統合後の状態）。
 | `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`／`Adadelta`／`Adamax`／`NAdam`／`RAdam` の内部状態 | 可（`OptimizerStateDict::state_dict()`） | 可（`load_state_dict()`。検証付き） | 変更なし |
 | `Sgd` の `velocity` | 不可（`OptimizerStateDict` 未実装） | 不可 | §2 item 2（承認後 `impl OptimizerStateDict for Sgd`） |
 | `Lbfgs` の `n_iter`／`func_evals`／`d`／`t`／`old_dirs`／`old_stps`／`ro`／`h_diag`／`prev_flat_grad`／`last_loss`／`slot_shapes` | 一部可（`n_iter()`／`func_evals()`／`last_loss()`／`config()` のみ公開） | 不可（他フィールドに setter がなく、`OptimizerStateDict` も未実装。実装するとしても既存トレイトが前提とする per-param スロットバッファ形状〈`AdamW` の `m`／`v` 等〉とは構造が異なる〈フラット化ベクトル 1 本＋曲率ペア履歴〉） | §2 item 2 拡張（承認後、`Lbfgs` 専用キー配置の状態保存・復元 API を新設。§4「Lbfgs 状態」節） |
-| `GradScaler` の `scale`／`growth_tracker` | 可（`scale()`／`growth_tracker()`） | **不可**（`new` は `init_scale` からしか開始できず、`update` は backoff／growth の状態機械経由でしか変化しない。`growth_tracker` は成長／backoff のたびに `0` へリセットされるため、`update(false)` を事後に何回再生しても、再生前の backoff／growth で変化済みの `scale` 自体は再現できない——指摘 1 の対象） | §2 item 3（承認後 `GradScaler::from_state(config, scale, growth_tracker)` を新設。検証は `new` 相当＋`scale` の非正規化数チェック＋`growth_tracker < growth_interval`） |
+| `GradScaler` の `scale`／`growth_tracker` | 可（`scale()`／`growth_tracker()`） | **不可**（`new` は `init_scale` からしか開始できず、`update` は backoff／growth の状態機械経由でしか変化しない。`growth_tracker` は成長／backoff のたびに `0` へリセットされるため、`update(false)` を事後に何回再生しても、再生前の backoff／growth で変化済みの `scale` 自体は再現できない——指摘 1 の対象） | §2 item 3（承認後 `grad_scaler_from_state(config, scale, growth_tracker)` を新設。検証は `new` 相当＋`scale` の非正規化数チェック＋`growth_tracker < growth_interval`） |
 | LR scheduler・callbacks | 該当なし（`Compiled`／`Sequential` に保持されない `fit` 呼び出し引数） | — | 非対象（スコープ外のまま） |
 | LR scheduler が書き換えた**現在の** LR | 可（各 optimizer の `config()` が `set_lr` 後の値を返す。`AdamW`／`Adam`／`Sgd`／`Adadelta`／`Adamax`／`NAdam`／`RAdam`／`Lbfgs` で確認） | 可（`config` を保存・復元するだけでよい。`RmsProp`／`Adagrad`／`Lamb` は `set_lr` 自体がないため常に既定値のまま） | 変更なし |
 | param groups | 該当なし（facade は単一グループのみ。イシュー #2173 が facade 公開面拡張として別途保留中） | — | 非対象 |
@@ -992,8 +1001,8 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 | `compiled.optimizer.kind` | 非信頼 | 分岐（optimizer 種別の決定） | 7 種の文字列 allowlist との完全一致のみ許可。未知の値は `UnsupportedModel`（確保操作を伴わない） |
 | `compiled.optimizer.config`（各 optimizer 設定値） | 非信頼 | optimizer 構築のパラメータ | 既存 optimizer コンストラクタが行う範囲検証（`lr > 0` 等）をそのまま経由。新規の確保・破壊操作はない |
 | `optimizer.history_len`（Lbfgs） | 非信頼 | 履歴件数の**期待値**（実際の確保量の根拠にはしない） | safetensors 内に実在する `optimizer.history.{i}.*` キー数（safetensors 自体が固定上限で有界）と**一致**するかどうかの確認にのみ使う。`history_len` を信じて事前確保しない（§2 item 2 是正）。加えて `<= history_size` はどちらも非信頼または呼び出し元設定値のため単なる整合性確認であり上限の代用にはしない |
-| `amp.scale`（GradScaler 復元値） | 非信頼 | `GradScaler::from_state` の引数 | 有限・正・非正規化数でないことを検証（§2 item 3）。確保・削除を伴わないスカラー値 |
-| `amp.growth_tracker`（GradScaler 復元値） | 非信頼 | `GradScaler::from_state` の引数（カウンタ） | `< config.growth_interval` を検証（§2 item 3）。カウンタ 1 個の代入のみで確保・削除を伴わないため、非信頼値どうしの範囲チェックで十分（`growth_interval` 自体は `GradScalerConfig` 側で `>= 1` 検証済みの呼び出し元設定値） |
+| `amp.scale`（GradScaler 復元値） | 非信頼 | `grad_scaler_from_state` の引数 | 有限・正・非正規化数でないことを検証（§2 item 3）。確保・削除を伴わないスカラー値 |
+| `amp.growth_tracker`（GradScaler 復元値） | 非信頼 | `grad_scaler_from_state` の引数（カウンタ） | `< config.growth_interval` を検証（§2 item 3）。カウンタ 1 個の代入のみで確保・削除を伴わないため、非信頼値どうしの範囲チェックで十分（`growth_interval` 自体は `GradScalerConfig` 側で `>= 1` 検証済みの呼び出し元設定値） |
 | `d`／`t`／`h_diag`／`prev_flat_grad`／`old_dirs`／`old_stps`／`ro`（Lbfgs 状態テンソル） | 非信頼（safetensors 内容） | Lbfgs 内部状態への代入 | 各要素の有限性検証＋長さが `slot_shapes`（構築済みモデルから導出。§2 item 2）と一致することの確認のみ。confirmedな長さ以上には決して確保しない（safetensors 自体が固定上限で有界なため要素数の絶対上限も自動的に決まる） |
 | `model.<gen>.safetensors` の rename／作成先パス | 信頼（コード側が生成する世代 ID。`<gen>` 自体は非信頼な外部入力から作られない） | `create_new` の対象パス | 該当なし（本モジュールが生成する値であり非信頼ではない） |
 
