@@ -159,24 +159,30 @@ fn resave_into_existing_dir_keeps_old_generation() {
     assert_models_identical(&second, &loaded, &tensor(2, 4, 1.5));
 }
 
+/// 構成を記録できない利用者定義層（`add_module`）。保存対象外の例として使う。
+struct CustomIdentity;
+impl fandhe_ai::nn::Module for CustomIdentity {
+    fn forward<'t>(
+        &self,
+        _tape: fandhe_ai::TapeRef<'t>,
+        input: &fandhe_ai::Var<'t>,
+    ) -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError> {
+        Ok(input.tanh())
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn unsupported_layer_is_rejected_without_touching_dir() {
     let guard = TempDirGuard::new("unsupported");
     let dir = guard.path().join("never-created");
-    let dropout = Sequential::new()
+    // `add_module`（利用者定義層）は構成を記録できないため、30 層対応後も保存対象外。
+    let with_linear = Sequential::new()
         .add_linear(2, 2, 1)
-        .and_then(|m| m.add_dropout(0.1))
-        .expect("構築できるはず");
-    let conv = Sequential::new()
-        .add_conv2d(1, 1, [3, 3], [1, 1], [0, 0], [1, 1], 1, 1)
-        .expect("構築できるはず");
-    let custom = Sequential::new().add_relu().add_leaky_relu(0.2);
-    for (label, model) in [
-        ("dropout", dropout),
-        ("conv2d", conv),
-        ("leaky_relu", custom),
-    ] {
+        .expect("構築できるはず")
+        .add_module(CustomIdentity);
+    let with_relu = Sequential::new().add_relu().add_module(CustomIdentity);
+    for (label, model) in [("linear+module", with_linear), ("relu+module", with_relu)] {
         let err = save_model(&model, &dir).expect_err("未対応の層は拒否されるはず");
         assert!(
             matches!(err, ModelIoError::UnsupportedModel { .. }),
