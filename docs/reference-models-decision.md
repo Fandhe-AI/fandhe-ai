@@ -357,7 +357,7 @@ examples から内部の `fandhe_ai_autodiff::nn::Module` を impl する
 
 | `ReferenceModule`／`Trainable` のメソッド | 案 B の対応 | 一致度 |
 |---|---|---|
-| `forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>` | required method `forward`（§6 利用例） | シグネチャが同一 |
+| `forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>` | required method `forward`（§6 利用例） | シグネチャが同一（注: 2026-09-29 に案 B の `forward` の第 1 引数は `TapeRef<'t>` で確定したため〈#2394〉、「同一」の評価は #2403 で再確定する） |
 | `named_parameters(&self) -> Vec<(String, &Tensor<f32>)>` | defaulted メソッド `named_parameters`（§10 承認事項 2） | 名前・意味論とも同じ |
 | `set_training(&mut self, training: bool)` | defaulted メソッド `set_training`（同上） | 名前・意味論とも同じ |
 | `is_training(&self) -> bool` | defaulted メソッド `training`（同上） | 意味論は同じだが**名前が異なる**（`is_training` vs `training`） |
