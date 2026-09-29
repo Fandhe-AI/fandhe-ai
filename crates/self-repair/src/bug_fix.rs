@@ -221,9 +221,10 @@ mod tests {
 
     #[test]
     fn generate_applies_candidates_in_attempt_order_and_restores_baseline_between_attempts() {
-        let dir = unique_temp_dir(
+        let dir_guard = unique_temp_dir(
             "bug_fix_generate_applies_candidates_in_attempt_order_and_restores_baseline_between_attempts",
         );
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "src/lib.rs", "baseline content");
 
         let candidates = vec![
@@ -258,7 +259,8 @@ mod tests {
 
     #[test]
     fn generate_fails_closed_when_candidates_exhausted() {
-        let dir = unique_temp_dir("bug_fix_generate_fails_closed_when_candidates_exhausted");
+        let dir_guard = unique_temp_dir("bug_fix_generate_fails_closed_when_candidates_exhausted");
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "src/lib.rs", "baseline content");
 
         let candidates = vec![CandidateFix {
@@ -294,7 +296,8 @@ mod tests {
 
     #[test]
     fn new_rejects_candidate_paths_outside_workspace() {
-        let dir = unique_temp_dir("bug_fix_new_rejects_candidate_paths_outside_workspace");
+        let dir_guard = unique_temp_dir("bug_fix_new_rejects_candidate_paths_outside_workspace");
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "src/lib.rs", "baseline content");
 
         let candidates = vec![CandidateFix {
@@ -322,13 +325,14 @@ mod tests {
         // （`apply_candidate`）だけでなく `new` 自体が symlink 経由の候補パス
         // を拒否することを確認する（`crate::fd_walk` モジュール冒頭 doc 参照。
         // PR #361 codex-review 第 4 波 P0 指摘の read 側回帰防止）。
-        let dir = unique_temp_dir(
+        let dir_guard = unique_temp_dir(
             "bug_fix_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content",
         );
-        let outside_dir = unique_temp_dir(
+        let dir = dir_guard.path().to_path_buf();
+        let outside_dir_guard = unique_temp_dir(
             "bug_fix_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content-outside",
         );
-        std::fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+        let outside_dir = outside_dir_guard.path().to_path_buf();
         let outside_file = outside_dir.join("secret.rs");
         std::fs::write(&outside_file, "workspace 外の秘匿内容")
             .expect("write should succeed in test setup");

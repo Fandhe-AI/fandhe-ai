@@ -54,6 +54,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+mod common;
+#[path = "common/temp_file.rs"]
+mod temp_file;
+
+use common::temp_dir::TempDirGuard;
+use temp_file::TempFileGuard;
+
 /// baseline フィクスチャの相対パス（`crates/self-repair/tests/fixtures/…`。
 /// `CARGO_MANIFEST_DIR` は本クレート〈`crates/self-repair`〉のルート）。
 const FIXTURE_REL: &str = "tests/fixtures/feature-addition-leaky-relu/baseline";
@@ -179,29 +186,8 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// テストごとに衝突しない一時ディレクトリ（`self_repair::test_support` と同じ
-/// `temp_dir() + process::id()` 方式。本ファイルは `tests/` 配下の独立クレート
-/// のため `pub(crate)` ヘルパーを再利用できず、同型のヘルパーを再実装する）。
-fn unique_sandbox_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "self-repair-feature-addition-task-3-3c-{name}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("sandbox ディレクトリ作成に失敗");
-    dir
-}
-
-/// 単一ファイル用の一時パス（`--candidates` JSON 出力先。`unique_sandbox_dir`
-/// と同じ `temp_dir() + process::id()` 方式だがディレクトリではなくファイル）。
-fn unique_temp_file(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "self-repair-feature-addition-task-3-3c-{name}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&path);
-    path
-}
+// 一時 sandbox・`--candidates` JSON は `tests/common/` の `TempDirGuard`・`TempFileGuard`
+// （一意名＋排他作成・Drop で自身のパスだけ削除。イシュー #2382）を使う。
 
 /// `src` 配下を再帰的に `dst` へコピーする（`target/`・`.git/` は対象外。
 /// baseline フィクスチャは `.gitignore` に `/target` のみを持つため通常
@@ -451,7 +437,8 @@ fn feature_addition_loop_reaches_adopted_with_measured_evidence() {
 
     // --- sandbox 準備 ---
     let fixture_src = repo_root().join("crates/self-repair").join(FIXTURE_REL);
-    let sandbox = unique_sandbox_dir("sandbox");
+    let sandbox_guard = TempDirGuard::new("feature-addition-sandbox");
+    let sandbox = sandbox_guard.path().to_path_buf();
     copy_dir_recursive(&fixture_src, &sandbox);
     rewrite_path_deps_to_absolute(&sandbox);
     git_init_baseline(&sandbox);
@@ -467,12 +454,13 @@ fn feature_addition_loop_reaches_adopted_with_measured_evidence() {
             "files": [{"path": TARGET_FILE, "content": candidate2_correct_content()}],
         },
     ]);
-    let candidates_path = unique_temp_file("candidates.json");
-    std::fs::write(
-        &candidates_path,
-        serde_json::to_string_pretty(&candidates_json).expect("候補 JSON のシリアライズに失敗"),
-    )
-    .expect("候補 JSON の書き込みに失敗");
+    let candidates_guard = TempFileGuard::new(
+        "candidates.json",
+        serde_json::to_string_pretty(&candidates_json)
+            .expect("候補 JSON のシリアライズに失敗")
+            .as_bytes(),
+    );
+    let candidates_path = candidates_guard.path().to_path_buf();
 
     // --- `self-repair run` を 1 回だけ起動する（完走判定基準 1） ---
     let target_out_dir = repo_root().join("target/self-repair-revalidation/feature-addition");
@@ -681,6 +669,6 @@ fn feature_addition_loop_reaches_adopted_with_measured_evidence() {
             .expect("loop-log.jsonl の docs へのコピーに失敗");
     }
 
-    let _ = std::fs::remove_dir_all(&sandbox);
-    let _ = std::fs::remove_file(&candidates_path);
+    // sandbox・candidates.json は `sandbox_guard`・`candidates_guard` の Drop で削除される
+    // （途中で panic しても残らない）。
 }

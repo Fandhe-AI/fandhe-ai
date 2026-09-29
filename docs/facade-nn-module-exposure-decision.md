@@ -126,13 +126,16 @@ defaulted メソッド（`named_parameters`／`set_parameter`／`state_dict`／`
 struct MyBlock { linear: /* 何らかの facade 層 */ }
 
 impl fandhe_ai::nn::Module for MyBlock {
-    fn forward<'t>(&self, tape: &'t fandhe_ai::Tape, x: &fandhe_ai::Var<'t>)
+    fn forward<'t>(&self, tape: fandhe_ai::TapeRef<'t>, x: &fandhe_ai::Var<'t>)
         -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError> {
         // tape・x のみで既存 Var 演算を合成する
         todo!()
     }
 }
 ```
+
+> 確定形（#2394・#2395）: 上記コード例の第 1 引数は確定形の `tape: fandhe_ai::TapeRef<'t>`
+> （値渡しの借用ハンドル。§5・§6 の擬似コードの `&'t fandhe_ai::Tape` ではない）である。
 
 ## 7. 0.9.0 互換性表
 
@@ -388,3 +391,33 @@ trait とコンテナの新設。§5・§6）になる見込みである。本�
 の原因そのものを再発させないための判断であり、前例（#2063・#2064
 → #2133）の運用から意図的に外れる。PR 本文にもこの判断理由を明記
 する。
+
+## 14. 実装記録（イシュー #2395）
+
+`fandhe_ai::nn::Module`（required `forward` 1 件 + defaulted 6 件）を
+`crates/facade/src/nn/module.rs` に新設した（#2338 承認事項 1・2・4）。
+
+- **公開形**: `nn/mod.rs` に非公開 `mod module;` と `pub use module::Module;`
+  を置く。`pub mod module;` にしないのは、`collect_public_module_paths` の集合
+  （約 43 件の hold doctest の glob 一覧）と `nn_mod_declares_only_rnn_submodule`
+  の期待値 `["pub mod rnn;"]` を不変に保つためである。`pub use` 経路の漏れは
+  縮小した `facade_does_not_reexport_nn_module_or_containers` が固定する。
+  #2396 のコンテナも同型（`mod container;` + `pub use`）で揃える。
+- **`load_state_dict`**: crate 内非公開の借用ブリッジ `ParamBridge` が autodiff 側
+  `Module` を実装し、autodiff の既定実装（two-pass・キー昇順適用・逆順ロールバック・
+  ロールバック失敗時の部分適用エラー）をそのまま再利用する。意味論の一致が構造的に
+  保証されコピーによるドリフトがない。`set_parameter` 既定のメッセージは
+  autodiff 側と同一文字列で、in-crate テストが一致を固定する。
+- **ガードの縮小**: `facade_does_not_reexport_nn_module_or_containers` は
+  `src/nn/mod.rs` の `pub use module::Module;` 1 件だけを許容し（件数 1 のインベントリ
+  つき）、`ModuleList`／nn 系 `Sequential` は従来どおり違反とする。
+  `facade_declares_no_nn_module_items` は `src/nn/module.rs` の `trait Module` のみ許容する。
+  `NnModuleHoldDoctestGuard` の probe から `Module` を外した（glob 衝突回避。`ModuleList`
+  と `Sequential` は #2396 まで保留）。`compat_sequential_does_not_expose_module_add_methods`
+  は不変（`add_module` は #2398）。
+- **正ガード**: `facade_nn_module_trait_methods_match_approved_set`（required =
+  `forward`・defaulted 6 件の完全一致）と `facade_nn_module_trait_signatures_hide_internal_types`
+  （シグネチャに `fandhe_ai_autodiff`／`BackendOps`／裸の `Tape` が現れず `forward` の第 1 引数が
+  `TapeRef`）と自己テスト。#2400／#2401 で鏡写しメソッドを足すときは集合を更新する。
+- **申し送り**: #2397 のアダプタは `ParamBridge` を一般化・置換してよい。#2403 で台帳
+  （`docs/compat-api-scope.md`）を最終まとめする。

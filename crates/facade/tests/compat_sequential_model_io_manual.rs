@@ -37,8 +37,7 @@ use fandhe_ai::interop::safetensors::{load_safetensors_f32, save_safetensors_f32
 use fandhe_ai::{AutodiffError, Tensor};
 
 /// テストごとに衝突しない一時ディレクトリを新規作成し、`Drop` で必ず
-/// 削除する（`interop_safetensors_roundtrip.rs` の `temp_dir_for` と
-/// 同じ目的だが、命名方式・作成 API は異なる。こちらは呼び出し側の
+/// 削除する（共有版 `tests/common/temp_dir.rs` と同じ方式。こちらは呼び出し側の
 /// `unwrap` パニックが途中で発生しても確実に片付くよう `Drop` ガード
 /// にした）。
 ///

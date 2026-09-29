@@ -11,27 +11,22 @@
 //! （`.claude/rules/coding-rust.md`）。
 
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use self_repair::outcome::LoopOutcome;
 use self_repair::report::{AttemptOutcome, AttemptRecord, LoopReport};
 use self_repair::{LogWriter, RepairKind};
 
+mod common;
+
+use common::temp_dir::TempDirGuard;
+
 fn self_repair_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_self-repair"))
 }
 
-/// テストごとに衝突しない一時ファイルパスを作る
-/// （`tests/logging_chain.rs::unique_log_path` と同一方式）。
-fn unique_log_path(test_name: &str) -> std::path::PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "self-repair-cli-verify-log-it-{}-{test_name}-{seq}.jsonl",
-        std::process::id()
-    ))
-}
+// 各テストは `tests/common/` の `TempDirGuard`（一意名＋排他作成・Drop で削除。イシュー #2382）
+// の中に `loop-log.jsonl` を作る。ガードは名前付き変数で保持する（一時値化は即 drop される）。
 
 /// 正当な 1 レコードのログを新規作成する。
 fn write_valid_log(path: &std::path::Path) {
@@ -60,7 +55,8 @@ fn write_valid_log(path: &std::path::Path) {
 /// `records=4`・`last_seq=3` になる（`logging.rs::append_stages` 参照）。
 #[test]
 fn verify_log_on_valid_chain_exits_zero() {
-    let path = unique_log_path("valid_chain");
+    let dir = TempDirGuard::new("cli-verify-log-valid-chain");
+    let path = dir.path().join("loop-log.jsonl");
     write_valid_log(&path);
 
     let output = self_repair_bin()
@@ -83,7 +79,6 @@ fn verify_log_on_valid_chain_exits_zero() {
         last_hash_field.len() >= 32,
         "stdout の last_hash が空でなくハッシュ長を持つこと: {stdout}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// PR #356 codex-review P1 指摘対応: 空（0 バイト）ログは `--allow-empty-log`
@@ -92,8 +87,13 @@ fn verify_log_on_valid_chain_exits_zero() {
 /// （従来の無条件 exit 0 の回帰防止としてこのテストを固定する）。
 #[test]
 fn verify_log_on_empty_file_exits_one_without_allow_empty_log_flag() {
-    let path = unique_log_path("empty_file_default");
-    std::fs::write(&path, b"").expect("空ファイルを作成できること");
+    let dir = TempDirGuard::new("cli-verify-log-empty-file-default");
+    let path = dir.path().join("loop-log.jsonl");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("空ファイルを作成できること");
 
     let output = self_repair_bin()
         .args(["verify-log", "--log", path.to_str().unwrap()])
@@ -106,7 +106,6 @@ fn verify_log_on_empty_file_exits_one_without_allow_empty_log_flag() {
         stderr.contains("records=0") && stderr.contains("--allow-empty-log"),
         "stderr に空ログ検知と --allow-empty-log の案内が出ること: {stderr}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Review #145 指摘対応（PR #356 で `--allow-empty-log` 明示指定時の挙動へ
@@ -115,8 +114,13 @@ fn verify_log_on_empty_file_exits_one_without_allow_empty_log_flag() {
 /// と誤読されない文言になっていること。
 #[test]
 fn verify_log_on_empty_file_with_allow_empty_log_flag_exits_zero_with_warn_message() {
-    let path = unique_log_path("empty_file_allowed");
-    std::fs::write(&path, b"").expect("空ファイルを作成できること");
+    let dir = TempDirGuard::new("cli-verify-log-empty-file-allowed");
+    let path = dir.path().join("loop-log.jsonl");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("空ファイルを作成できること");
 
     let output = self_repair_bin()
         .args([
@@ -138,14 +142,14 @@ fn verify_log_on_empty_file_with_allow_empty_log_flag_exits_zero_with_warn_messa
         !stdout.contains("OK:"),
         "空ログでは無条件の OK 文言を出さないこと: {stdout}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// 受け入れ条件: 改竄チェーン（`hash` フィールドの書き換え）→ exit 1・
 /// stderr に改竄検知メッセージ。
 #[test]
 fn verify_log_on_tampered_hash_field_exits_one_with_message() {
-    let path = unique_log_path("tampered_hash");
+    let dir = TempDirGuard::new("cli-verify-log-tampered-hash");
+    let path = dir.path().join("loop-log.jsonl");
     write_valid_log(&path);
 
     let content = std::fs::read_to_string(&path).expect("読めること");
@@ -168,7 +172,6 @@ fn verify_log_on_tampered_hash_field_exits_one_with_message() {
         stderr.contains("改竄") || stderr.contains("欠落"),
         "stderr に改竄検知メッセージが含まれること: {stderr}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// 受け入れ条件: レコード削除（中間行の削除。末尾からの切り詰めではない）
@@ -179,7 +182,8 @@ fn verify_log_on_tampered_hash_field_exits_one_with_message() {
 /// 6 節「レコード削除・順序入れ替え（いずれも `verify_chain` が検知）」）。
 #[test]
 fn verify_log_on_deleted_middle_record_exits_one() {
-    let path = unique_log_path("deleted_middle_record");
+    let dir = TempDirGuard::new("cli-verify-log-deleted-middle-record");
+    let path = dir.path().join("loop-log.jsonl");
     write_valid_log(&path);
 
     let content = std::fs::read_to_string(&path).expect("読めること");
@@ -206,7 +210,6 @@ fn verify_log_on_deleted_middle_record_exits_one() {
         stderr.contains("改竄") || stderr.contains("欠落"),
         "stderr に改竄検知メッセージが含まれること: {stderr}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// 既知の限界: 末尾切り詰め（末尾レコードの削除）は `seq` 連続性・
@@ -217,7 +220,8 @@ fn verify_log_on_deleted_middle_record_exits_one() {
 /// 誤って挙動が変わった場合にこのテストが失敗して気付けるようにする）。
 #[test]
 fn verify_log_on_tail_truncation_exits_zero_known_limitation() {
-    let path = unique_log_path("tail_truncation");
+    let dir = TempDirGuard::new("cli-verify-log-tail-truncation");
+    let path = dir.path().join("loop-log.jsonl");
     let report_a = LoopReport {
         kind: RepairKind::FeatureAddition,
         outcome: LoopOutcome::Adopted,
@@ -249,7 +253,6 @@ fn verify_log_on_tail_truncation_exits_zero_known_limitation() {
         .expect("failed to run self-repair binary");
 
     assert_eq!(output.status.code(), Some(0));
-    let _ = std::fs::remove_file(&path);
 }
 
 /// 受け入れ条件: `--log` 未指定 → exit 2（usage エラー）。
@@ -272,7 +275,8 @@ fn verify_log_without_log_arg_exits_two() {
 /// で非 0）。
 #[test]
 fn verify_log_on_missing_file_exits_one() {
-    let path = unique_log_path("missing_file");
+    let dir = TempDirGuard::new("cli-verify-log-missing-file");
+    let path = dir.path().join("loop-log.jsonl");
     // ファイルを作らずそのままパスを渡す。
 
     let output = self_repair_bin()
@@ -292,11 +296,10 @@ fn verify_log_on_missing_file_exits_one() {
 fn verify_log_on_non_utf8_log_path_exits_one_without_panicking() {
     use std::os::unix::ffi::OsStrExt;
 
-    let mut log_path = std::env::temp_dir().into_os_string();
-    log_path.push(format!(
-        "/self-repair-cli-verify-log-it-non-utf8-{}-",
-        std::process::id()
-    ));
+    let dir = TempDirGuard::new("cli-verify-log-non-utf8");
+    // ファイルは作らず、排他作成したディレクトリ配下の存在しない非 UTF-8 名を渡す。
+    let mut log_path = dir.path().as_os_str().to_os_string();
+    log_path.push("/");
     log_path.push(std::ffi::OsStr::from_bytes(b"\xff\xfe.jsonl"));
 
     let output = self_repair_bin()

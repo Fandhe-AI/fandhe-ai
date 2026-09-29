@@ -11,20 +11,20 @@
 use self_repair::stages::{Proposal, VerificationGate, VerificationOutcome};
 use self_repair::{CargoVerificationGate, SystemCommandRunner};
 use std::fs;
-use std::path::{Path, PathBuf};
 
-/// 一時ディレクトリに fixture workspace を作る（`bench_gate_completion.rs` 等
-/// 既存の統合テストと同様、`temp_dir()` + `process::id()` で並列テスト実行時の
-/// 衝突を避ける）。本リポの workspace（親 `Cargo.toml` の `[workspace]`）配下に
-/// 置くと fixture の Cargo.toml がワークスペースメンバーとして誤認識されうる
-/// ため、リポジトリ外の一時ディレクトリに作る。
-fn fixture_workspace(name: &str, main_rs: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "self-repair-verify-gates-fixture-{name}-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(dir.join("src")).expect("create_dir_all should succeed in test setup");
+mod common;
+
+use common::temp_dir::TempDirGuard;
+
+/// 一時ディレクトリに fixture workspace を作る。`tests/common/` の `TempDirGuard`
+/// （一意名＋排他作成・Drop で削除。イシュー #2382）で確保し、返すガードを保持する間だけ存在する。
+/// 本リポの workspace（親 `Cargo.toml` の `[workspace]`）配下に置くと fixture の Cargo.toml が
+/// ワークスペースメンバーとして誤認識されうるため、リポジトリ外の一時ディレクトリに作る。
+fn fixture_workspace(name: &str, main_rs: &str) -> TempDirGuard {
+    let guard = TempDirGuard::new(&format!("verify-gates-fixture-{name}"));
+    let dir = guard.path().to_path_buf();
+    // 自身が排他作成したディレクトリの中なので、`create_dir` で十分。
+    fs::create_dir(dir.join("src")).expect("create_dir should succeed in test setup");
 
     fs::write(
         dir.join("Cargo.toml"),
@@ -34,11 +34,7 @@ fn fixture_workspace(name: &str, main_rs: &str) -> PathBuf {
     fs::write(dir.join("src/main.rs"), main_rs)
         .expect("write src/main.rs should succeed in test setup");
 
-    dir
-}
-
-fn cleanup(dir: &Path) {
-    let _ = fs::remove_dir_all(dir);
+    guard
 }
 
 #[test]
@@ -50,7 +46,7 @@ fn all_gates_pass_for_valid_fixture_workspace() {
     );
 
     let gate = CargoVerificationGate::new(
-        workspace.clone(),
+        workspace.path().to_path_buf(),
         SystemCommandRunner::new(),
         0,
         false,
@@ -75,8 +71,6 @@ fn all_gates_pass_for_valid_fixture_workspace() {
             panic!("expected all gates to pass, got Failed: {reason}")
         }
     }
-
-    cleanup(&workspace);
 }
 
 #[test]
@@ -88,7 +82,7 @@ fn build_gate_fails_for_fixture_with_compile_error() {
     );
 
     let gate = CargoVerificationGate::new(
-        workspace.clone(),
+        workspace.path().to_path_buf(),
         SystemCommandRunner::new(),
         0,
         false,
@@ -112,6 +106,4 @@ fn build_gate_fails_for_fixture_with_compile_error() {
             panic!("expected build gate to fail for a fixture with a compile error")
         }
     }
-
-    cleanup(&workspace);
 }

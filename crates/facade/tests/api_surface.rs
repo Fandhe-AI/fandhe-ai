@@ -4235,10 +4235,11 @@ fn nn_rnn_module_is_pure_reexport() {
 /// `src/nn/mod.rs` の公開宣言が `pub mod rnn;` の 1 件のみであること
 /// を固定する（将来の無断拡大を fail-closed に検出する）。**#2133 の
 /// 保留（`docs/facade-nn-module-exposure-decision.md` §12）も本テストが
-/// 担う**: 案 B 採用時に想定する `nn::module`／`nn::container` 新設
-/// （`pub mod module;`／`pub mod container;`）はこの完全一致検査に
-/// より現時点では fail する。承認後に案 B を実装する際は期待集合
-/// （`["rnn", "module", "container"]` 等）へ更新する。**#2140 の保留
+/// 担う**: `nn::container` 等の `pub mod` 新設はこの完全一致検査に
+/// より fail する。#2395 の `nn::Module` は非公開 `mod module;` と
+/// `pub use module::Module;` で公開したため期待集合は不変
+/// （`pub use` 経路は `facade_does_not_reexport_nn_module_or_containers`
+/// が固定する）。**#2140 の保留
 /// （`docs/facade-nn-init-exposure-decision.md` §3・§4）も本テストが
 /// 担う**: `nn::init` の facade 公開（条件付き手順 §4）で想定する
 /// `pub mod init;` 追加はこの完全一致検査により現時点では fail する。
@@ -5446,12 +5447,11 @@ fn nn_module_hold_doctest_probe_body_matches_fixed_contract() {
 const NN_MODULE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_nn_hold_probe {\n\
-\x20\x20\x20\x20pub trait Module {}\n\
 \x20\x20\x20\x20pub struct ModuleList;\n\
 }\n\
 use __fandhe_nn_hold_probe::*;\n\
 \n\
-fn __probe(_: &dyn Module, _: ModuleList, _: &Sequential) {}";
+fn __probe(_: ModuleList, _: &Sequential) {}";
 
 /// facade src の全 `pub use` 文（`pub(..) use` は対象外）から
 /// [`collect_pub_use_leaves`] で葉（ソース側・rename 前）を集め、葉が
@@ -5469,93 +5469,274 @@ fn __probe(_: &dyn Module, _: ModuleList, _: &Sequential) {}";
 fn facade_does_not_reexport_nn_module_or_containers() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
+    let mut allowed_total = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
-        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-        let tokens = tokenize_including_punctuation(&cleaned);
-        let mut i = 0usize;
-        while i < tokens.len() {
-            if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-                let mut end = i + 2;
-                while end < tokens.len() && tokens[end] != ";" {
-                    end += 1;
-                }
-                let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-                let leaves = collect_pub_use_leaves(path_tokens);
-                let path_contains_nn_autodiff = path_tokens
-                    .iter()
-                    .any(|t| t == "fandhe_ai_autodiff" || t == "nn");
-                for leaf in leaves {
-                    let offense = match leaf.as_str() {
-                        "Module" | "ModuleList" => true,
-                        "Sequential" => path_contains_nn_autodiff,
-                        _ => false,
-                    };
-                    if offense {
-                        offending.push(format!("{}: leaf={leaf}", path.display()));
-                    }
-                }
-                i = (end + 1).min(tokens.len());
-                continue;
-            }
-            i += 1;
-        }
+        let (offenses, allowed) = scan_nn_module_reexports(content, path);
+        offending.extend(offenses);
+        allowed_total += allowed;
     });
     assert!(
         offending.is_empty(),
-        "facade の pub use が nn::Module／ModuleList／nn 系 Sequential を\
-         再エクスポートしている（#2133 未承認のまま対象外という設計判断に\
-         違反）: {offending:?}"
+        "facade の pub use が承認済みの 1 経路（`src/nn/mod.rs` の `pub use \
+         module::Module;`・#2395）以外で nn::Module／ModuleList／nn 系 \
+         Sequential を再エクスポートしている（ModuleList／Sequential は \
+         #2396 まで保留）: {offending:?}"
     );
+    // インベントリ: 承認済み経路がちょうど 1 件あること（走査の空振り検出）。
+    assert_eq!(
+        allowed_total, 1,
+        "src/nn/mod.rs の `pub use module::Module;` がちょうど 1 件であること"
+    );
+}
+
+/// `content`（`path` 由来）の `pub use` を走査し、違反文字列の列と
+/// 「承認済み経路」の出現数を返す（[`facade_does_not_reexport_nn_module_or_containers`]
+/// ・自己テスト共用）。承認済み経路は、ファイルパス末尾が `src/nn/mod.rs` で、
+/// パストークンがちょうど `module :: Module` の `pub use`（葉 `Module`）だけである
+/// （#2395。非公開 `mod module;` からの再エクスポート）。
+fn scan_nn_module_reexports(content: &str, path: &Path) -> (Vec<String>, usize) {
+    let is_nn_mod = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .ends_with("src/nn/mod.rs");
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending = Vec::new();
+    let mut allowed = 0usize;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            let path_contains_nn_autodiff = path_tokens
+                .iter()
+                .any(|t| t == "fandhe_ai_autodiff" || t == "nn");
+            let is_approved_form = is_nn_mod
+                && path_tokens.iter().map(String::as_str).collect::<Vec<_>>()
+                    == ["module", ":", ":", "Module"];
+            for leaf in leaves {
+                let offense = match leaf.as_str() {
+                    "Module" if is_approved_form => {
+                        allowed += 1;
+                        false
+                    }
+                    "Module" | "ModuleList" => true,
+                    "Sequential" => path_contains_nn_autodiff,
+                    _ => false,
+                };
+                if offense {
+                    offending.push(format!("{}: leaf={leaf}", path.display()));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        i += 1;
+    }
+    (offending, allowed)
 }
 
 /// [`facade_does_not_reexport_nn_module_or_containers`] の自己テスト
 /// （正例・負例の合成入力）。
 #[test]
 fn facade_does_not_reexport_nn_module_or_containers_detects_each_category() {
-    fn offenses(content: &str) -> Vec<String> {
-        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-        let tokens = tokenize_including_punctuation(&cleaned);
-        let mut offending = Vec::new();
-        let mut i = 0usize;
-        while i < tokens.len() {
-            if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-                let mut end = i + 2;
-                while end < tokens.len() && tokens[end] != ";" {
-                    end += 1;
-                }
-                let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-                let leaves = collect_pub_use_leaves(path_tokens);
-                let path_contains_nn_autodiff = path_tokens
-                    .iter()
-                    .any(|t| t == "fandhe_ai_autodiff" || t == "nn");
-                for leaf in leaves {
-                    let offense = match leaf.as_str() {
-                        "Module" | "ModuleList" => true,
-                        "Sequential" => path_contains_nn_autodiff,
-                        _ => false,
-                    };
-                    if offense {
-                        offending.push(format!("leaf={leaf}"));
-                    }
-                }
-                i = (end + 1).min(tokens.len());
-                continue;
-            }
-            i += 1;
-        }
-        offending
-    }
+    let nn_mod = Path::new("crates/facade/src/nn/mod.rs");
+    let lib = Path::new("crates/facade/src/lib.rs");
+    let off = |c: &str, p: &Path| scan_nn_module_reexports(c, p).0;
 
-    // 正例。
-    assert!(!offenses("pub use fandhe_ai_autodiff::nn::Module;").is_empty());
-    assert!(!offenses("pub use fandhe_ai_autodiff::nn::{Module as Layer};").is_empty());
-    assert!(!offenses("pub use fandhe_ai_autodiff::nn::{self as n, ModuleList};").is_empty());
-    assert!(!offenses("pub use fandhe_ai_autodiff::nn::Sequential;").is_empty());
+    // 正例（違反として検出される）。
+    assert!(!off("pub use module::Module;", lib).is_empty());
+    assert!(!off("pub use fandhe_ai_autodiff::nn::Module;", nn_mod).is_empty());
+    assert!(!off("pub use module::{Module, ModuleList};", nn_mod).is_empty());
+    assert_eq!(
+        off("pub use module::{Module, ModuleList};", nn_mod).len(),
+        2
+    );
+    assert!(!off("pub use fandhe_ai_autodiff::nn::{Module as Layer};", nn_mod).is_empty());
+    assert!(
+        !off(
+            "pub use fandhe_ai_autodiff::nn::{self as n, ModuleList};",
+            lib
+        )
+        .is_empty()
+    );
+    assert!(!off("pub use fandhe_ai_autodiff::nn::Sequential;", nn_mod).is_empty());
+    assert!(!off("pub use module::ModuleList;", nn_mod).is_empty());
 
+    // 負例: 承認済みの 1 経路（違反 0・承認 1 件）。
+    assert_eq!(
+        scan_nn_module_reexports("pub use module::Module;", nn_mod),
+        (Vec::new(), 1)
+    );
     // 負例: `compat::Sequential`（パスに fandhe_ai_autodiff／nn を含まない）。
-    assert!(offenses("pub use sequential::{Sequential, SequentialVars};").is_empty());
+    assert!(off("pub use sequential::{Sequential, SequentialVars};", lib).is_empty());
     // 負例: 非 pub。
-    assert!(offenses("use fandhe_ai_autodiff::nn::Module;").is_empty());
+    assert!(off("use fandhe_ai_autodiff::nn::Module;", nn_mod).is_empty());
+}
+
+/// `pub trait Module` の本体（brace 深さ 1）から `fn` を「required（`;` 終わり）」
+/// 「defaulted（本体あり）」に分類し、シグネチャのトークン列とともに返す。
+/// `Module` trait が 0 件・複数件の場合は `None`（走査の空振り検出用）。
+fn scan_module_trait_methods(content: &str) -> Option<Vec<(String, bool, Vec<String>)>> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let starts: Vec<usize> = (0..tokens.len().saturating_sub(2))
+        .filter(|&i| tokens[i] == "pub" && tokens[i + 1] == "trait" && tokens[i + 2] == "Module")
+        .collect();
+    if starts.len() != 1 {
+        return None;
+    }
+    let mut i = starts[0] + 3;
+    while i < tokens.len() && tokens[i] != "{" {
+        i += 1;
+    }
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    while i < tokens.len() {
+        match tokens[i].as_str() {
+            "{" => depth += 1,
+            "}" => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            "fn" if depth == 1 => {
+                let name = tokens.get(i + 1).cloned().unwrap_or_default();
+                let mut j = i;
+                let mut paren = 0i32;
+                while j < tokens.len() {
+                    match tokens[j].as_str() {
+                        "(" => paren += 1,
+                        ")" => paren -= 1,
+                        "{" | ";" if paren == 0 => break,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                let required = tokens.get(j).map(String::as_str) == Some(";");
+                out.push((name, required, tokens[i..j.min(tokens.len())].to_vec()));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
+/// #2395 の正ガード: facade `nn::Module` の面が承認済み集合
+/// （required = `forward` のみ・defaulted = 6 件）と完全一致すること
+/// （#2338 承認事項 2）。`forward_host`・`as_*` 等の内部フックの混入を拒否する。
+/// #2400／#2401 で鏡写しのメソッドを足すときは本集合を更新する。
+#[test]
+fn facade_nn_module_trait_methods_match_approved_set() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/nn/module.rs"));
+    let methods = scan_module_trait_methods(&src).expect("`pub trait Module` がちょうど 1 件");
+    assert_module_surface(&methods).expect("承認済み集合と一致");
+}
+
+fn assert_module_surface(methods: &[(String, bool, Vec<String>)]) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    let required: BTreeSet<&str> = methods
+        .iter()
+        .filter(|m| m.1)
+        .map(|m| m.0.as_str())
+        .collect();
+    let defaulted: BTreeSet<&str> = methods
+        .iter()
+        .filter(|m| !m.1)
+        .map(|m| m.0.as_str())
+        .collect();
+    let want_req: BTreeSet<&str> = ["forward"].into();
+    let want_def: BTreeSet<&str> = [
+        "named_parameters",
+        "set_parameter",
+        "state_dict",
+        "load_state_dict",
+        "set_training",
+        "training",
+    ]
+    .into();
+    if required != want_req || defaulted != want_def {
+        return Err(format!("required={required:?} defaulted={defaulted:?}"));
+    }
+    Ok(())
+}
+
+/// シグネチャに内部型（`fandhe_ai_autodiff`・`BackendOps`・裸の `Tape`）が現れず、
+/// `forward` の第 1 引数型が `TapeRef` であること（REQ-12）。
+fn check_module_signatures(methods: &[(String, bool, Vec<String>)]) -> Result<(), String> {
+    for (name, _, toks) in methods {
+        if let Some(bad) = toks
+            .iter()
+            .find(|t| matches!(t.as_str(), "fandhe_ai_autodiff" | "BackendOps" | "Tape"))
+        {
+            return Err(format!("{name}: 内部型 `{bad}` が公開シグネチャに現れる"));
+        }
+        if name == "forward" {
+            // `self` `,` `tape` `:` <型> の <型> 先頭が TapeRef。
+            let pos = toks.iter().position(|t| t == "tape");
+            let ty = pos.and_then(|p| toks.get(p + 2));
+            if ty.map(String::as_str) != Some("TapeRef") {
+                return Err("forward の第 1 引数型が TapeRef でない".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn facade_nn_module_trait_signatures_hide_internal_types() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/nn/module.rs"));
+    let methods = scan_module_trait_methods(&src).expect("`pub trait Module` がちょうど 1 件");
+    check_module_signatures(&methods).expect("シグネチャ検査");
+}
+
+/// 正ガード 2 種の自己テスト（合成入力で各逸脱が検出されること）。
+#[test]
+fn facade_nn_module_trait_guards_detect_each_category() {
+    let ok = "pub trait Module { fn forward<'t>(&self, tape: TapeRef<'t>, input: &Var<'t>) -> R; \
+        fn named_parameters(&self) -> V { V } fn set_parameter(&mut self, n: &str) -> R { R } \
+        fn state_dict(&self) -> H { H } fn load_state_dict(&mut self, s: H) -> R { R } \
+        fn set_training(&mut self, t: bool) {} fn training(&self) -> bool { true } }";
+    let m = scan_module_trait_methods(ok).expect("ok");
+    assert!(assert_module_surface(&m).is_ok());
+    assert!(check_module_signatures(&m).is_ok());
+
+    let extra_def = ok.replace("fn training", "fn forward_host(&self) {} fn training");
+    let m = scan_module_trait_methods(&extra_def).expect("extra");
+    assert!(assert_module_surface(&m).is_err());
+    let missing = ok.replace("fn training(&self) -> bool { true }", "");
+    let m = scan_module_trait_methods(&missing).expect("missing");
+    assert!(assert_module_surface(&m).is_err());
+    let extra_req = ok.replace("fn training", "fn extra(&self); fn training");
+    let m = scan_module_trait_methods(&extra_req).expect("req");
+    assert!(assert_module_surface(&m).is_err());
+    let as_hook = ok.replace(
+        "fn training",
+        "fn as_linear(&self) -> Option<u8> { None } fn training",
+    );
+    let m = scan_module_trait_methods(&as_hook).expect("as");
+    assert!(assert_module_surface(&m).is_err());
+
+    let host = ok.replace(
+        "fn training",
+        "fn h(&self, ops: &dyn BackendOps) {} fn training",
+    );
+    let m = scan_module_trait_methods(&host).expect("host");
+    assert!(check_module_signatures(&m).is_err());
+    let raw = ok.replace("tape: TapeRef<'t>", "tape: &'t Tape");
+    let m = scan_module_trait_methods(&raw).expect("raw");
+    assert!(check_module_signatures(&m).is_err());
+    let autodiff = ok.replace("input: &Var<'t>", "input: &fandhe_ai_autodiff::Var<'t>");
+    let m = scan_module_trait_methods(&autodiff).expect("ad");
+    assert!(check_module_signatures(&m).is_err());
+
+    assert!(scan_module_trait_methods("pub struct X;").is_none());
 }
 
 /// facade src に facade 独自の `trait Module`／`struct ModuleList`／
@@ -5580,9 +5761,26 @@ fn facade_declares_no_nn_module_items() {
     });
     assert!(
         offending.is_empty(),
-        "facade src に nn::Module／ModuleList 相当の独自宣言が見つかった\
-         （#2133 未承認のまま対象外という設計判断に違反）: {offending:?}"
+        "facade src に承認済み（`src/nn/module.rs` の `trait Module`・#2395）以外の \
+         nn::Module／ModuleList 相当の独自宣言が見つかった: {offending:?}"
     );
+    // インベントリ: 承認済みの `trait Module` 宣言がちょうど 1 件。
+    let module_rs = src_dir.join("nn/module.rs");
+    let approved = scan_trait_module_decl_count(&read_to_string_or_panic(&module_rs));
+    assert_eq!(
+        approved, 1,
+        "src/nn/module.rs の `trait Module` はちょうど 1 件"
+    );
+}
+
+/// `trait Module` トークン列の出現数（コメント・リテラル除外）。
+fn scan_trait_module_decl_count(content: &str) -> usize {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    tokens
+        .windows(2)
+        .filter(|w| w[0] == "trait" && w[1] == "Module")
+        .count()
 }
 
 /// `content`（`path` 由来）を走査し、`trait`／`struct`／`enum`／`type`
@@ -5593,10 +5791,9 @@ fn facade_declares_no_nn_module_items() {
 fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
-    let is_compat_sequential = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .ends_with("compat/sequential.rs");
+    let norm_path = path.to_string_lossy().replace('\\', "/");
+    let is_compat_sequential = norm_path.ends_with("compat/sequential.rs");
+    let is_nn_module_rs = norm_path.ends_with("src/nn/module.rs");
     let mut offending = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
         if !matches!(token.as_str(), "trait" | "struct" | "enum" | "type") {
@@ -5606,6 +5803,8 @@ fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
             continue;
         };
         let offense = match name {
+            // #2395: `src/nn/module.rs` の `trait Module` のみ承認済み。
+            "Module" if token == "trait" && is_nn_module_rs => false,
             "Module" | "ModuleList" => true,
             "Sequential" => !is_compat_sequential,
             _ => false,
@@ -5621,7 +5820,8 @@ fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
 /// declarations`]）の自己テスト（正例・負例の合成入力）。
 #[test]
 fn facade_declares_no_nn_module_items_detects_each_category() {
-    let other = Path::new("src/nn/module.rs");
+    let other = Path::new("src/nn/rnn.rs");
+    let module_rs = Path::new("src/nn/module.rs");
     let compat_seq = Path::new("src/compat/sequential.rs");
 
     // 正例。
@@ -5632,6 +5832,12 @@ fn facade_declares_no_nn_module_items_detects_each_category() {
             .is_empty()
     );
     assert!(!scan_nn_module_item_declarations("pub struct Sequential;", other).is_empty());
+
+    // 承認済み: `src/nn/module.rs` の `trait Module` のみ許容。他の宣言は違反のまま。
+    assert!(scan_nn_module_item_declarations("pub trait Module {}", module_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct Module;", module_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct ModuleList;", module_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct Sequential;", module_rs).is_empty());
 
     // 負例: 非公開 import・型参照。
     assert!(
@@ -13304,6 +13510,9 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
         ("autodiff/src/nn/module.rs::load_state_dict", 1usize),
         ("facade/src/compat/sequential.rs::state_dict", 1usize),
         ("facade/src/compat/sequential.rs::load_state_dict", 1usize),
+        // #2395: facade 独自 `nn::Module` の defaulted メソッド（承認済み）。
+        ("facade/src/nn/module.rs::state_dict", 1usize),
+        ("facade/src/nn/module.rs::load_state_dict", 1usize),
         ("autodiff/src/nn/optim/state_dict.rs::state_dict", 1usize),
         (
             "autodiff/src/nn/optim/state_dict.rs::load_state_dict",

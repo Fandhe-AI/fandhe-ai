@@ -324,12 +324,13 @@ fn apply_patch(repo: &Path, patch: &[u8], check_only: bool) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::unique_temp_dir;
 
     /// テスト専用の隔離 git リポジトリを構築する（`main.rs::resolve_baseline_commit`
     /// と同じ `GIT_*` 除去方式）。`init` の初期ブランチ名を明示指定し、
     /// 環境の `init.defaultBranch` 設定に依存しないようにする。
+    /// `dir` は呼び出し元が `unique_temp_dir` で作成済みの空ディレクトリとする。
     fn init_repo(dir: &Path) {
-        fs::create_dir_all(dir).expect("repo ディレクトリ作成に失敗");
         for args in [
             vec!["init", "--quiet", "--initial-branch=main"],
             vec!["config", "user.email", "test@example.com"],
@@ -360,19 +361,6 @@ mod tests {
             .to_string()
     }
 
-    fn unique_test_dir(name: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!(
-            "self-repair-sandbox-test-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        dir
-    }
-
     /// P2 回帰防止（PR #361 codex-review 第 3 波指摘）: `git clone` 成功後に
     /// `git checkout --detach` が失敗した場合でも、clone 済みの sandbox
     /// ディレクトリが残置されないことを確認する。
@@ -384,12 +372,15 @@ mod tests {
     /// （`create_at` doc コメント参照）。
     #[test]
     fn create_removes_sandbox_directory_when_initialization_fails_after_clone() {
-        let repo = unique_test_dir("create-checkout-fails-source");
+        let repo_guard = unique_temp_dir("create-checkout-fails-source");
+        let repo = repo_guard.path().to_path_buf();
         init_repo(&repo);
         fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
         git_commit_all(&repo, "baseline commit");
 
-        let root = unique_test_dir("create-checkout-fails-sandbox");
+        // `git clone` は存在しない宛先を要求するため、ガード配下の未作成の子パスを使う。
+        let root_parent = unique_temp_dir("sandbox-create-checkout-fails");
+        let root = root_parent.path().join("sandbox");
         // 存在しない commit sha を渡し、clone 成功後の `git checkout --detach`
         // を確実に失敗させる（40 桁の 16 進数だが実在しないオブジェクト）。
         let bogus_baseline_commit = "0".repeat(40);
@@ -404,16 +395,14 @@ mod tests {
             "checkout 失敗時は clone 済みの sandbox ディレクトリが残置されてはならない: {}",
             root.display()
         );
-
-        let _ = fs::remove_dir_all(&repo);
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// P0 不変条件 (a): `RunSandbox::create` は `--repo` の作業ツリー・index に
     /// 一切触れない（未コミット変更のある `--repo` で構築しても状態が不変）。
     #[test]
     fn create_does_not_touch_source_repo_working_tree_or_index() {
-        let repo = unique_test_dir("create-source");
+        let repo_guard = unique_temp_dir("create-source");
+        let repo = repo_guard.path().to_path_buf();
         init_repo(&repo);
         fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
         git_commit_all(&repo, "baseline commit");
@@ -454,7 +443,6 @@ mod tests {
 
         sandbox.keep();
         let _ = fs::remove_dir_all(sandbox.root());
-        let _ = fs::remove_dir_all(&repo);
     }
 
     /// P0 不変条件 (b): `reflect_adopted_diff` は clean な `--repo` へ差分のみを
@@ -462,7 +450,8 @@ mod tests {
     /// 汚さないことの確認。sandbox 内の `git add -A` は sandbox 専用）。
     #[test]
     fn reflect_adopted_diff_applies_only_working_tree_changes_without_staging() {
-        let repo = unique_test_dir("reflect-clean");
+        let repo_guard = unique_temp_dir("reflect-clean");
+        let repo = repo_guard.path().to_path_buf();
         init_repo(&repo);
         fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
         git_commit_all(&repo, "baseline commit");
@@ -491,7 +480,6 @@ mod tests {
 
         sandbox.keep();
         let _ = fs::remove_dir_all(sandbox.root());
-        let _ = fs::remove_dir_all(&repo);
     }
 
     /// P0 不変条件 (c): 反映先（`--repo`）が競合する形でダーティな場合、
@@ -499,7 +487,8 @@ mod tests {
     /// 不変のまま（`git apply --check` の fail-closed 検査）。
     #[test]
     fn reflect_adopted_diff_rejects_conflicting_dirty_repo_without_touching_it() {
-        let repo = unique_test_dir("reflect-conflict");
+        let repo_guard = unique_temp_dir("reflect-conflict");
+        let repo = repo_guard.path().to_path_buf();
         init_repo(&repo);
         fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
         git_commit_all(&repo, "baseline commit");
@@ -532,7 +521,6 @@ mod tests {
 
         sandbox.keep();
         let _ = fs::remove_dir_all(sandbox.root());
-        let _ = fs::remove_dir_all(&repo);
     }
 
     /// P1 回帰防止（PR #361 codex-review 第 4 波指摘）: sandbox の作業木が
@@ -543,7 +531,8 @@ mod tests {
     /// この `Err` を内部エラー区分 exit 1 へ写像する）。
     #[test]
     fn reflect_adopted_diff_rejects_empty_diff_instead_of_reporting_success() {
-        let repo = unique_test_dir("reflect-empty-diff-source");
+        let repo_guard = unique_temp_dir("reflect-empty-diff-source");
+        let repo = repo_guard.path().to_path_buf();
         init_repo(&repo);
         fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
         git_commit_all(&repo, "baseline commit");
@@ -569,6 +558,5 @@ mod tests {
 
         sandbox.keep();
         let _ = fs::remove_dir_all(sandbox.root());
-        let _ = fs::remove_dir_all(&repo);
     }
 }

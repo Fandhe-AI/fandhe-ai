@@ -854,9 +854,17 @@ fn write_json_with_trailing_newline(doc: &serde_json::Value, path: &Path) -> Res
         .map_err(|error| format!("{} への書き込みに失敗しました: {error}", path.display()))
 }
 
+/// テスト専用の一時ディレクトリガード。bin のテストビルドは非テスト版 lib をリンクし
+/// `self_repair::test_support` に到達できないため、std のみ依存の同ファイルを取り込む
+/// （lib 側と同一実装。イシュー #2381）。
+#[cfg(test)]
+#[path = "test_temp.rs"]
+mod test_temp;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_temp::unique_temp_dir;
 
     /// [`outcome_for_reflection`] が `persisted == true` の場合は `outcome`
     /// をそのまま透過することを確認する（`--log`／`--output` 書き込み成功時、
@@ -917,10 +925,8 @@ mod tests {
         // （ファイル生成）を確実に失敗させる（`logging.rs::LogWriter::
         // append_stages` が `OpenOptions::create(true)` で開こうとし、親
         // ディレクトリ不在により `NotFound` で失敗する）。
-        let log_path = std::env::temp_dir().join(format!(
-            "self-repair-main-test-nonexistent-dir-{}/trial.jsonl",
-            std::process::id()
-        ));
+        let tmp = unique_temp_dir("main-log-write-fails");
+        let log_path = tmp.path().join("nonexistent").join("trial.jsonl");
 
         let (_, persisted) = finish_with_report(&report, &log_path, None, None, None);
         assert!(!persisted);
@@ -942,16 +948,9 @@ mod tests {
             attempts: Vec::new(),
             total_duration: std::time::Duration::from_millis(0),
         };
-        let log_dir = std::env::temp_dir().join(format!(
-            "self-repair-main-test-output-fails-log-dir-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&log_dir).expect("log_dir の作成に失敗");
-        let log_path = log_dir.join("trial.jsonl");
-        let output_path = std::env::temp_dir().join(format!(
-            "self-repair-main-test-nonexistent-dir-{}/report.json",
-            std::process::id()
-        ));
+        let log_dir = unique_temp_dir("main-output-fails");
+        let log_path = log_dir.path().join("trial.jsonl");
+        let output_path = log_dir.path().join("nonexistent").join("report.json");
 
         let (exit_code, persisted) =
             finish_with_report(&report, &log_path, Some(&output_path), None, None);
@@ -962,7 +961,5 @@ mod tests {
         // `ExitCode` は `PartialEq` を実装しないため `Debug` 表示で比較する
         // （`persisted == true` でも終了コードは非 0 のまま保つ契約の確認）。
         assert_eq!(format!("{exit_code:?}"), format!("{:?}", ExitCode::from(1)));
-
-        let _ = std::fs::remove_dir_all(&log_dir);
     }
 }
