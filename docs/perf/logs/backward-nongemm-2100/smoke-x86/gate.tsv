@@ -1,0 +1,7 @@
+run	device	mode	load1	gpu_util	pass
+1	cpu	fresh	22.37	0	1
+2	cpu	fresh	22.37	0	1
+3	cpu	fresh	22.37	0	1
+1	cpu	reuse	22.37	0	1
+2	cpu	reuse	22.37	0	1
+3	cpu	reuse	22.37	0	1

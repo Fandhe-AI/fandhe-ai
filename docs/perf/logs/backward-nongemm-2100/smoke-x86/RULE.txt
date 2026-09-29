@@ -1,0 +1,16 @@
+# RULE.txt — イシュー #2100 backward 非 GEMM 内訳の診断（事前登録。実測前に固定）
+fixed_at_utc: 2026-09-29T22:15:18Z
+machine: smoke-x86
+devices: cpu  (cpu = 必須セル。metal／cuda = 参考セル。いずれも record_only)
+modes: fresh reuse
+task: train --size 64 --phases（1 プロセス 100 step。うち先頭 20 step は warmup）
+runs: 3（それぞれ独立プロセス。差し替え・追加起動はしない）
+decision: record_only（診断のみ。ADOPT／REJECT は判定しない）
+fail_closed_check: 計装あり／計装なしの JSONL checksum が全セル・全 run で完全一致
+  （不一致なら系列を無効とする。計装が数値を変えないことの証明）
+recorded_not_judged: 計装オーバーヘッド比（計装あり step_total ÷ 計装なし step_total）
+aggregation: 各 run で step 20..99 の中央値 → その 3 run の中央値
+load_gate: m4max = load1 < 8.0／gb10 = load1 < 1.0 かつ GPU util 0%／smoke-x86 = なし
+  30 秒間隔・最大 30 分待つ。1 run でも不通過ならその系列は参考扱い（gate.tsv 参照）
+not_reexecuted: 既存 REJECT と重複する実験（#1578 MSE 逐次しきい値の A/B 等）は再実行しない
+masking: ホスト名・絶対パスは <host>／<home> へマスクして収録する
