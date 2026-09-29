@@ -85,5 +85,8 @@ pub mod ops;
 pub mod st_load;
 pub mod st_save;
 
+#[cfg(test)]
+mod test_temp_dir;
+
 mod require_keys;
 pub use require_keys::{LoadError, require_keys};

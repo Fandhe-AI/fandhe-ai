@@ -7,8 +7,10 @@
 //! `tests/onnx_interp_pytorch_cnn_fixture.rs` を参照（本ファイルは torch に
 //! 依存しない）。
 //!
-//! 一時ディレクトリは `std::env::temp_dir()` 配下にプロセス ID + テスト名で
-//! 一意にして作り、終了時に削除する（`tests/st_save.rs` と同型）。
+//! 一時ディレクトリは `support::temp_dir::TempDirGuard`（一意名 + `create_dir`
+//! による排他作成。作成前の削除なし）で作り、終了時に削除する（#2383）。
+
+mod support;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,44 +30,33 @@ use fandhe_ai_onnx_interop::onnx::proto::{
 
 /// テスト専用の一時ディレクトリを作る（テストごとに固有のサブディレクトリ名
 /// を要求し、並行実行時の衝突を避ける）。
-struct TempDir(PathBuf);
+struct TempDir(support::temp_dir::TempDirGuard);
 
 impl TempDir {
     /// `name` はディレクトリ名の可読性のためだけに使う。一意性は
-    /// プロセス ID + プロセス内グローバルカウンタで担保する（同名 `name`
-    /// を渡すヘルパ関数〈`expect_location_reject`／`expect_number_reject`〉
-    /// が並行実行される複数テストから呼ばれても、`Drop` による削除が
-    /// 他テストのディレクトリを巻き込まないようにするため）。
+    /// `TempDirGuard`（pid・ナノ秒・カウンタ + `create_dir` 排他作成）が担保する。
     fn new(name: &str) -> Self {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "onnx-interop-external-data-test-{}-{name}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("一時ディレクトリの作成に失敗した");
-        TempDir(dir)
+        TempDir(support::temp_dir::TempDirGuard::new(&format!(
+            "external-data-{name}"
+        )))
     }
 
     fn path(&self) -> &Path {
-        &self.0
+        self.0.path()
     }
 
     fn write_file(&self, rel: &str, bytes: &[u8]) -> PathBuf {
-        let p = self.0.join(rel);
+        let p = self.path().join(rel);
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let mut f = std::fs::File::create(&p).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+            .unwrap();
         f.write_all(bytes).unwrap();
         p
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

@@ -266,13 +266,9 @@ mod tests {
         // このケースでも正しくカレントディレクトリを指すことを確認する。
         let _guard = CWD_MUTATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let original_cwd = std::env::current_dir().unwrap();
-        let work_dir = std::env::temp_dir().join(format!(
-            "onnx-interop-st-save-bare-relpath-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&work_dir).unwrap();
-        std::env::set_current_dir(&work_dir).unwrap();
+        // `_guard` より後に宣言し、drop 順を「ディレクトリ削除 → Mutex 解放」にする。
+        let work_dir = crate::test_temp_dir::UnitTestDir::new("st-save-bare-relpath");
+        std::env::set_current_dir(work_dir.path()).unwrap();
 
         let mut tensors: HashMap<String, Tensor<f32>> = HashMap::new();
         tensors.insert("w".to_string(), Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
@@ -284,15 +280,13 @@ mod tests {
         std::env::set_current_dir(&original_cwd).unwrap();
 
         result.expect("バレファイル名（ディレクトリ成分なし）での書き出しに失敗した");
-        let written_path = work_dir.join("bare_relative_output.safetensors");
+        let written_path = work_dir.path().join("bare_relative_output.safetensors");
         assert!(
             written_path.exists(),
             "カレントディレクトリに書き出されていない: {written_path:?}"
         );
         let loaded = crate::st_load::load_safetensors_f32(&written_path).unwrap();
         assert_eq!(loaded["w"].shape(), &[2]);
-
-        let _ = std::fs::remove_dir_all(&work_dir);
     }
 
     #[test]

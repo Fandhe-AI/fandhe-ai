@@ -5128,10 +5128,11 @@ fn scan_top_level_pub_mods_rejects_unmodelable_mod_forms() {
 /// ドキュメンテーションコメント（`///` の連続。空行・非 `///` 行で途切れた
 /// 時点で走査を止める）を、直前の `#[allow(dead_code)]`・
 /// `#[cfg(doctest)]` の並びを検証したうえで抽出する（[`custom_function_
-/// hold_doctest_probe_body_matches_fixed_contract`]・[`nn_module_hold_
-/// doctest_probe_body_matches_fixed_contract`] 共用。元は
+/// hold_doctest_probe_body_matches_fixed_contract`]・
+/// `nn_module_hold_doctest_probe_body_matches_fixed_contract`
+/// （#2396 で削除済み）共用。元は
 /// `VarCustomHoldDoctestGuard` 専用の固定名関数だったが、#2133 で
-/// `NnModuleHoldDoctestGuard` にも同じ抽出が必要になったため `struct_name`
+/// `NnModuleHoldDoctestGuard`（#2396 で削除済み）にも同じ抽出が必要になったため `struct_name`
 /// 引数版へ最小限リファクタした。挙動は `struct_name` に `"VarCustomHold
 /// DoctestGuard"` を渡した場合と不変）。`#[path]` 付き `pub mod` の非公開
 /// 扱い除外（`scan_top_level_pub_mods`）と同種の「モデル化できない構造は
@@ -5384,87 +5385,22 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheHoldMarker = x.add_custom();\n\
 }";
 
-// =====================================================================
-// #2133（親 #2132・#2131）の facade 公開保留固定（`NnModuleHoldDoctestGuard`）。
-// `VarCustomHoldDoctestGuard` 系（上記 2 テスト・HOLD_PROBE_BODY）と同型の
-// 正のプローブ 1 ブロック方式のドリフト検査。承認未取得の経緯・多層防御の
-// 位置づけは `docs/facade-nn-module-exposure-decision.md` §12 参照。
-// =====================================================================
-
-/// [`custom_function_hold_doctest_globs_all_pub_modules`] の
-/// `NnModuleHoldDoctestGuard` 版。`crates/facade/src/lib.rs` の
-/// `NnModuleHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob
-/// import するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod`
-/// 宣言集合が一致することを固定する。
-#[test]
-fn nn_module_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "NnModuleHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "NnModuleHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// [`custom_function_hold_doctest_probe_body_matches_fixed_contract`] の
-/// `NnModuleHoldDoctestGuard` 版。doctest ブロックの glob 以外の本文
-/// （ローカル `__fandhe_nn_hold_probe` モジュール定義・`use` ・`__probe`
-/// 関数）が固定文言 [`NN_MODULE_HOLD_PROBE_BODY`] と 1 行たりとも違わず
-/// 一致することを固定する（`# ` 隠し行・プローブの削除・別名への
-/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否する）。
-#[test]
-fn nn_module_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "NnModuleHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, NN_MODULE_HOLD_PROBE_BODY,
-        "NnModuleHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 NN_MODULE_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_nn_hold_probe モジュール・__probe 関数）の\
-         削除・弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`nn_module_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の `NnModuleHoldDoctestGuard`
-/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
-/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
-/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
-const NN_MODULE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_nn_hold_probe {\n\
-\x20\x20\x20\x20pub struct ModuleList;\n\
-}\n\
-use __fandhe_nn_hold_probe::*;\n\
-\n\
-fn __probe(_: ModuleList, _: &Sequential) {}";
-
 /// facade src の全 `pub use` 文（`pub(..) use` は対象外）から
-/// [`collect_pub_use_leaves`] で葉（ソース側・rename 前）を集め、葉が
-/// `Module`／`ModuleList` である行、または葉が `Sequential` かつパスに
-/// `fandhe_ai_autodiff`／`nn` を含む行を違反とする（#2133 Step 2-1）。
-/// `compat/mod.rs` の `pub use sequential::{Sequential, SequentialVars};`
-/// （パスに `fandhe_ai_autodiff`／`nn` を含まない）は正当な既存形のため
-/// 許容する。別名（`as Layer` 等）の前のソース側の葉で判定するため、
-/// `pub use fandhe_ai_autodiff::nn::Module as Layer;` のような別名
-/// 再エクスポートも検出する。
+/// [`collect_pub_use_leaves`] で葉（ソース側・rename 前）を集め、承認済みの配置
+/// 以外での `Module`／`ModuleList`／`Sequential` の再エクスポートを違反とする
+/// （#2133 Step 2-1 の否定ガードを #2396 で正ガードへ切り替え）。
 ///
-/// #2133 のクローズ後も承認は得られておらず、#2338 で保留を再追跡中
-/// （`docs/facade-nn-module-exposure-decision.md` §13）。
+/// 承認済みの形は `src/nn/mod.rs` の次の 2 つだけ（#2395・#2396。非公開 `mod` からの
+/// 再エクスポート）:
+/// - `pub use module::Module;`
+/// - `pub use container::{ModuleList, Sequential};`
+///
+/// `src/nn/mod.rs` 内では、葉が 3 名のいずれかで上記完全一致形でない `pub use`
+/// （別名・分割形を含む）をすべて違反とする。`src/nn/mod.rs` の外では
+/// `Module`／`ModuleList` の葉は常に違反、`Sequential` の葉はパスに
+/// `fandhe_ai_autodiff`／`nn`／`container` を含むとき違反とする。
+/// `compat/mod.rs` の `pub use sequential::{Sequential, SequentialVars};` は許容する。
+/// 別名（`as Layer` 等）の前のソース側の葉で判定するため別名再エクスポートも検出する。
 #[test]
 fn facade_does_not_reexport_nn_module_or_containers() {
     let src_dir = facade_crate_root().join("src");
@@ -5477,23 +5413,23 @@ fn facade_does_not_reexport_nn_module_or_containers() {
     });
     assert!(
         offending.is_empty(),
-        "facade の pub use が承認済みの 1 経路（`src/nn/mod.rs` の `pub use \
-         module::Module;`・#2395）以外で nn::Module／ModuleList／nn 系 \
-         Sequential を再エクスポートしている（ModuleList／Sequential は \
-         #2396 まで保留）: {offending:?}"
+        "facade の pub use が承認済みの 2 経路（`src/nn/mod.rs` の `pub use \
+         module::Module;`・`pub use container::{{ModuleList, Sequential}};`）以外で \
+         nn::Module／ModuleList／nn 系 Sequential を再エクスポートしている: {offending:?}"
     );
-    // インベントリ: 承認済み経路がちょうど 1 件あること（走査の空振り検出）。
+    // インベントリ: 承認済みの葉がちょうど 3 件あること（走査の空振り検出）。
     assert_eq!(
-        allowed_total, 1,
-        "src/nn/mod.rs の `pub use module::Module;` がちょうど 1 件であること"
+        allowed_total, 3,
+        "src/nn/mod.rs の承認済み `pub use`（Module・ModuleList・Sequential の葉）が\
+         ちょうど 3 件であること"
     );
 }
 
 /// `content`（`path` 由来）の `pub use` を走査し、違反文字列の列と
-/// 「承認済み経路」の出現数を返す（[`facade_does_not_reexport_nn_module_or_containers`]
+/// 「承認済み経路」の葉の出現数を返す（[`facade_does_not_reexport_nn_module_or_containers`]
 /// ・自己テスト共用）。承認済み経路は、ファイルパス末尾が `src/nn/mod.rs` で、
-/// パストークンがちょうど `module :: Module` の `pub use`（葉 `Module`）だけである
-/// （#2395。非公開 `mod module;` からの再エクスポート）。
+/// パストークンがちょうど `module :: Module`（葉 1 件）または
+/// `container :: { ModuleList , Sequential }`（葉 2 件）の `pub use` だけである。
 fn scan_nn_module_reexports(content: &str, path: &Path) -> (Vec<String>, usize) {
     let is_nn_mod = path
         .to_string_lossy()
@@ -5512,21 +5448,37 @@ fn scan_nn_module_reexports(content: &str, path: &Path) -> (Vec<String>, usize) 
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
             let leaves = collect_pub_use_leaves(path_tokens);
+            let path_strs = path_tokens.iter().map(String::as_str).collect::<Vec<_>>();
             let path_contains_nn_autodiff = path_tokens
                 .iter()
-                .any(|t| t == "fandhe_ai_autodiff" || t == "nn");
+                .any(|t| t == "fandhe_ai_autodiff" || t == "nn" || t == "container");
             let is_approved_form = is_nn_mod
-                && path_tokens.iter().map(String::as_str).collect::<Vec<_>>()
-                    == ["module", ":", ":", "Module"];
+                && (path_strs == ["module", ":", ":", "Module"]
+                    || path_strs
+                        == [
+                            "container",
+                            ":",
+                            ":",
+                            "{",
+                            "ModuleList",
+                            ",",
+                            "Sequential",
+                            "}",
+                        ]);
             for leaf in leaves {
-                let offense = match leaf.as_str() {
-                    "Module" if is_approved_form => {
-                        allowed += 1;
-                        false
+                let is_target = matches!(leaf.as_str(), "Module" | "ModuleList" | "Sequential");
+                let offense = if !is_target {
+                    false
+                } else if is_approved_form {
+                    allowed += 1;
+                    false
+                } else if is_nn_mod {
+                    true
+                } else {
+                    match leaf.as_str() {
+                        "Sequential" => path_contains_nn_autodiff,
+                        _ => true,
                     }
-                    "Module" | "ModuleList" => true,
-                    "Sequential" => path_contains_nn_autodiff,
-                    _ => false,
                 };
                 if offense {
                     offending.push(format!("{}: leaf={leaf}", path.display()));
@@ -5565,15 +5517,40 @@ fn facade_does_not_reexport_nn_module_or_containers_detects_each_category() {
         .is_empty()
     );
     assert!(!off("pub use fandhe_ai_autodiff::nn::Sequential;", nn_mod).is_empty());
+    assert!(
+        !off(
+            "pub use fandhe_ai_autodiff::nn::{ModuleList, Sequential};",
+            nn_mod
+        )
+        .is_empty()
+    );
+    // #2396: 承認済み配置（`src/nn/mod.rs` の container 形）の別名・分割形・ファイル違い。
+    assert!(!off("pub use container::Sequential as Seq;", nn_mod).is_empty());
+    assert!(!off("pub use container::{ModuleList as L, Sequential};", nn_mod).is_empty());
+    assert!(!off("pub use container::ModuleList;", nn_mod).is_empty());
+    assert!(!off("pub use container::Sequential;", nn_mod).is_empty());
+    assert!(!off("pub use nn::Sequential;", lib).is_empty());
+    assert!(!off("pub use container::{ModuleList, Sequential};", lib).is_empty());
     assert!(!off("pub use module::ModuleList;", nn_mod).is_empty());
 
-    // 負例: 承認済みの 1 経路（違反 0・承認 1 件）。
+    // 負例: 承認済みの 2 形（違反 0・葉 1 件／2 件）。
     assert_eq!(
         scan_nn_module_reexports("pub use module::Module;", nn_mod),
         (Vec::new(), 1)
     );
-    // 負例: `compat::Sequential`（パスに fandhe_ai_autodiff／nn を含まない）。
+    assert_eq!(
+        scan_nn_module_reexports("pub use container::{ModuleList, Sequential};", nn_mod),
+        (Vec::new(), 2)
+    );
+    // 負例: `compat::Sequential`（パスに fandhe_ai_autodiff／nn／container を含まない）。
     assert!(off("pub use sequential::{Sequential, SequentialVars};", lib).is_empty());
+    assert!(
+        off(
+            "pub use sequential::{Sequential, SequentialVars};",
+            Path::new("crates/facade/src/compat/mod.rs")
+        )
+        .is_empty()
+    );
     // 負例: 非 pub。
     assert!(off("use fandhe_ai_autodiff::nn::Module;", nn_mod).is_empty());
 }
@@ -5748,8 +5725,8 @@ fn facade_nn_module_trait_guards_detect_each_category() {
 /// `compat/sequential.rs` 自身の `pub struct Sequential` は正当な既存形
 /// のため許容する。
 ///
-/// #2133 のクローズ後も承認は得られておらず、#2338 で保留を再追跡中
-/// （`docs/facade-nn-module-exposure-decision.md` §13）。
+/// #2396 で承認済み配置を正ガード化した: `struct ModuleList`／`struct Sequential` は
+/// `src/nn/container.rs` のときだけ許容する（`trait`／`enum`／`type` 版は違反のまま）。
 #[test]
 fn facade_declares_no_nn_module_items() {
     let src_dir = facade_crate_root().join("src");
@@ -5761,7 +5738,8 @@ fn facade_declares_no_nn_module_items() {
     });
     assert!(
         offending.is_empty(),
-        "facade src に承認済み（`src/nn/module.rs` の `trait Module`・#2395）以外の \
+        "facade src に承認済み（`src/nn/module.rs` の `trait Module`・#2395、\
+         `src/nn/container.rs` の `struct ModuleList`／`struct Sequential`・#2396）以外の \
          nn::Module／ModuleList 相当の独自宣言が見つかった: {offending:?}"
     );
     // インベントリ: 承認済みの `trait Module` 宣言がちょうど 1 件。
@@ -5771,6 +5749,25 @@ fn facade_declares_no_nn_module_items() {
         approved, 1,
         "src/nn/module.rs の `trait Module` はちょうど 1 件"
     );
+    // インベントリ（#2396）: 承認済みの `struct ModuleList`／`struct Sequential` が各 1 件。
+    let container_rs = read_to_string_or_panic(&src_dir.join("nn/container.rs"));
+    for name in ["ModuleList", "Sequential"] {
+        assert_eq!(
+            scan_decl_count(&container_rs, "struct", name),
+            1,
+            "src/nn/container.rs の `struct {name}` はちょうど 1 件"
+        );
+    }
+}
+
+/// `<kind> <name>` トークン列の出現数（コメント・リテラル除外）。
+fn scan_decl_count(content: &str, kind: &str, name: &str) -> usize {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    tokens
+        .windows(2)
+        .filter(|w| w[0] == kind && w[1] == name)
+        .count()
 }
 
 /// `trait Module` トークン列の出現数（コメント・リテラル除外）。
@@ -5794,6 +5791,7 @@ fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
     let norm_path = path.to_string_lossy().replace('\\', "/");
     let is_compat_sequential = norm_path.ends_with("compat/sequential.rs");
     let is_nn_module_rs = norm_path.ends_with("src/nn/module.rs");
+    let is_nn_container_rs = norm_path.ends_with("src/nn/container.rs");
     let mut offending = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
         if !matches!(token.as_str(), "trait" | "struct" | "enum" | "type") {
@@ -5805,6 +5803,8 @@ fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
         let offense = match name {
             // #2395: `src/nn/module.rs` の `trait Module` のみ承認済み。
             "Module" if token == "trait" && is_nn_module_rs => false,
+            // #2396: `src/nn/container.rs` の `struct ModuleList`／`struct Sequential` のみ承認済み。
+            "ModuleList" | "Sequential" if token == "struct" && is_nn_container_rs => false,
             "Module" | "ModuleList" => true,
             "Sequential" => !is_compat_sequential,
             _ => false,
@@ -5823,6 +5823,7 @@ fn facade_declares_no_nn_module_items_detects_each_category() {
     let other = Path::new("src/nn/rnn.rs");
     let module_rs = Path::new("src/nn/module.rs");
     let compat_seq = Path::new("src/compat/sequential.rs");
+    let container_rs = Path::new("src/nn/container.rs");
 
     // 正例。
     assert!(!scan_nn_module_item_declarations("pub trait Module {}", other).is_empty());
@@ -5838,6 +5839,24 @@ fn facade_declares_no_nn_module_items_detects_each_category() {
     assert!(!scan_nn_module_item_declarations("pub struct Module;", module_rs).is_empty());
     assert!(!scan_nn_module_item_declarations("pub struct ModuleList;", module_rs).is_empty());
     assert!(!scan_nn_module_item_declarations("pub struct Sequential;", module_rs).is_empty());
+
+    // 承認済み（#2396）: `src/nn/container.rs` の `struct ModuleList`／`struct Sequential` のみ許容。
+    assert!(scan_nn_module_item_declarations("pub struct ModuleList;", container_rs).is_empty());
+    assert!(scan_nn_module_item_declarations("pub struct Sequential;", container_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub trait ModuleList {}", container_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct Module;", container_rs).is_empty());
+    assert!(
+        !scan_nn_module_item_declarations("pub type Sequential = u8;", container_rs).is_empty()
+    );
+    assert!(!scan_nn_module_item_declarations("pub enum Sequential {}", container_rs).is_empty());
+    assert_eq!(
+        scan_decl_count(
+            "pub struct Sequential; struct Sequential;",
+            "struct",
+            "Sequential"
+        ),
+        2
+    );
 
     // 負例: 非公開 import・型参照。
     assert!(
@@ -6718,7 +6737,7 @@ fn facade_does_not_expose_kv_cache_stateful_attention() {
 
 /// `KvCacheHoldDoctestGuard` の唯一の doctest ブロックが glob import する
 /// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が
-/// 一致することを固定する（`nn_module_hold_doctest_globs_all_pub_modules`・
+/// 一致することを固定する（`nn_module_hold_doctest_globs_all_pub_modules`〈#2396 で削除済み〉・
 /// `bool_ops_hold_doctest_globs_all_pub_modules` と同型。新しい `pub mod`
 /// を facade へ追加した際、doctest 側の `use` 一覧の更新を機械的に強制
 /// する）。
@@ -6954,7 +6973,7 @@ fn facade_does_not_reexport_or_declare_kv_cache_items_detects_each_category() {
 /// `crates/facade/src/**` を変更せず、本テストで現状（未実装）を
 /// fail-closed に固定する。
 ///
-/// # ガード方式（#2133 の `NnModuleHoldDoctestGuard` とは別方式）
+/// # ガード方式（#2133 の `NnModuleHoldDoctestGuard`〈#2396 で削除済み〉とは別方式）
 ///
 /// #2133 のガードはソースの `pub use` 行に現れる「名前」の衝突を
 /// 検出する方式だが、トレイト実装は再エクスポートのような新しい
@@ -7144,7 +7163,7 @@ fn var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold() {
 
 // =====================================================================
 // #2141（親 #2131）の facade 公開保留固定（`VarBoolOpsHoldDoctestGuard`）。
-// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard` 系と同型の
+// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）系と同型の
 // 正のプローブ 1 ブロック方式のドリフト検査。承認事項・多層防御の
 // 位置づけは `docs/autodiff-bool-ops-exposure-decision.md` §6 参照。
 // =====================================================================
@@ -8004,7 +8023,7 @@ fn workspace_declares_scalar_unary_ops_fn_names_only_in_autodiff_scalar_unary_op
 
 // =====================================================================
 // #2139（親 #2138・#2131）の facade 公開保留固定（`VarHooksHoldDoctestGuard`）。
-// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
+// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）／
 // `VarBoolOpsHoldDoctestGuard` 系と同型の正のプローブ 1 ブロック方式の
 // ドリフト検査に加え、workspace 全体のソース走査による定義元インベント
 // リを持つ。承認事項・多層防御の位置づけは
@@ -13456,7 +13475,8 @@ fn facade_does_not_reexport_or_declare_optimizer_state_dict() {
 /// 本イシュー（#2174）が追加した [`OptimizerStateDict`] trait 宣言
 /// （`autodiff/src/nn/optim/state_dict.rs`）と、9 optimizer ファイル
 /// （`adamw`・`adam`・`rmsprop`・`adagrad`・`lamb`・`adadelta`・
-/// `adamax`・`nadam`・`radam`）各 1 件ずつの impl。
+/// `adamax`・`nadam`・`radam`）各 1 件ずつの impl。加えて #2366 が追加した
+/// `Lbfgs` 専用 inherent API（`autodiff/src/nn/optim/lbfgs.rs`）各 1 件。
 #[test]
 fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -13535,6 +13555,10 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
         ("autodiff/src/nn/optim/nadam.rs::load_state_dict", 1usize),
         ("autodiff/src/nn/optim/radam.rs::state_dict", 1usize),
         ("autodiff/src/nn/optim/radam.rs::load_state_dict", 1usize),
+        // イシュー #2366: `Lbfgs` 専用 inherent API（トレイト非実装。
+        // `Lbfgs` は facade 非公開のため公開面は広がらない）。
+        ("autodiff/src/nn/optim/lbfgs.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/lbfgs.rs::load_state_dict", 1usize),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

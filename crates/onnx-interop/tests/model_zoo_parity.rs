@@ -30,6 +30,8 @@
 //! ONNX インタープリタはホスト CPU 実行のみ（GPU 経路・実測 baseline が無い）
 //! のため REQ-2 の対象外（構造的 N/A。`docs/onnx-model-zoo-parity.md` §4）。
 
+mod support;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -544,26 +546,29 @@ fn resnet50_v1_12_matches_expectation() {
 
 /// `read_file_bounded_with_limit` が上限超過を fail-closed で拒否し、上限
 /// ちょうどは許容することを検証する（`tempfile` は許容依存外のため
-/// `std::env::temp_dir()` 配下に自前で一時ファイルを作る。プロセス ID を
-/// ファイル名へ含めて並行実行時の衝突を避ける）。
+/// `support::temp_dir::TempDirGuard`（一意名 + `create_dir` 排他作成）の
+/// 配下へ `create_new` で一時ファイルを作る。作成前の削除・予測可能名は使わない）。
 ///
 /// `take(max_bytes + 1)` による読み込み時検査（2 段目のガード）はファイルの
 /// `len()` と実読込量が食い違うレース条件下でしか単独では踏めないため、本
 /// テストでは `metadata().len()` 事前検査（1 段目）のみを対象にする。
 #[test]
 fn read_file_bounded_rejects_oversized_file() {
-    let path = std::env::temp_dir().join(format!(
-        "model_zoo_parity_bounded_{}_{}",
-        std::process::id(),
-        "rejects_oversized"
-    ));
+    let dir = support::temp_dir::TempDirGuard::new("model-zoo-bounded-rejects-oversized");
+    let path = dir.path().join("input.bin");
     let content = b"0123456789";
-    std::fs::write(&path, content).expect("一時ファイル書き込み失敗");
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("一時ファイル作成失敗");
+        f.write_all(content).expect("一時ファイル書き込み失敗");
+    }
 
     let too_small = read_file_bounded_with_limit(&path, (content.len() - 1) as u64);
     let exact = read_file_bounded_with_limit(&path, content.len() as u64);
-
-    let _ = std::fs::remove_file(&path);
 
     assert!(
         too_small.is_err(),

@@ -422,7 +422,39 @@ trait とコンテナの新設。§5・§6）になる見込みである。本�
 - **申し送り**: #2397 のアダプタは `ParamBridge` を一般化・置換してよい。#2403 で台帳
   （`docs/compat-api-scope.md`）を最終まとめする。
 
-## 15. 実装記録（イシュー #2397）
+## 15. 実装記録（イシュー #2396）
+
+#2338 承認事項 3 に基づき、facade 側コンテナ `fandhe_ai::nn::ModuleList`／`nn::Sequential` を
+新設した（実装は `crates/facade/src/nn/container.rs`）。
+
+- **公開形**: §14 と同型。非公開 `mod container;` と `pub use container::{ModuleList, Sequential};`
+  （`src/nn/mod.rs`）。`pub mod` にしないため `nn_mod_declares_only_rnn_submodule` の期待値と
+  hold doctest の glob 集合は変わらない。
+- **実装方式**: `Vec<Box<dyn nn::Module>>` と `training` を facade 側で直接保持する（autodiff
+  コンテナを包むアダプタ方式は採らない）。理由は (a) #2397 のアダプタが未マージ、(b) 子が不透明な
+  facade `Module` のため autodiff `Sequential` の Linear→ReLU 融合は適用できない、(c) 内部型が
+  公開シグネチャに出ない（REQ-12）。`Sequential` は内部の `ModuleList` へ委譲する。
+- **意味論**（`crates/autodiff/src/nn/container.rs` と一致）: `ModuleList::forward` は常に
+  `InvalidArgument`（同一文言）／`Sequential::forward` は層順適用・空は恒等（融合なし）／
+  `set_training` は自身のフラグを更新し全子へ伝播（`push` した子は同期しない）／
+  `named_parameters` は `"{index}.{name}"`／`set_parameter` は `split_once('.')` → `usize` parse →
+  範囲検査で振り分け、失敗は同一文言の `InvalidArgument`（panic なし）。`state_dict`／
+  `load_state_dict` は override せず `Module` の既定実装（`ParamBridge` 経由の two-pass・ロールバック）を再利用する。
+- **ガードの切り替え**: `NnModuleHoldDoctestGuard`・テスト `nn_module_hold_doctest_globs_all_pub_modules`／
+  `nn_module_hold_doctest_probe_body_matches_fixed_contract`・定数 `NN_MODULE_HOLD_PROBE_BODY` を削除。
+  `facade_does_not_reexport_nn_module_or_containers` は承認済みの 2 形（`module::Module`・
+  `container::{ModuleList, Sequential}`。`src/nn/mod.rs` のみ）を許し、承認済み配置内の別名・分割形も
+  違反とする正ガードへ切り替え（承認済み葉の合計 3 件のインベントリ）。
+  `facade_declares_no_nn_module_items` は `src/nn/container.rs` の `struct ModuleList`／
+  `struct Sequential` のみ許容（各 1 件のインベントリ）。
+- **テスト**: `crates/facade/tests/nn_containers.rs`（facade だけに依存。手動合成とのビット一致・命名・
+  fail-closed・モード伝播・空コンテナ・dyn 入れ子）と、`container.rs` の in-crate テスト
+  （テスト専用の包み型で autodiff `ModuleList` と名前列・エラー文言の一致を確認）。
+- **申し送り（#2403）**: `docs/compat-api-scope.md` の台帳、autodiff `container.rs` の
+  「facade への非公開」doc、`crates/facade/examples/models/reference_module.rs` の古い参照。
+  `compat::Sequential` との相互運用は #2397／#2398、`ModuleDict` は #2402。
+
+## 16. 実装記録（イシュー #2397）
 
 facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタを実装した（#2338 承認事項 4・§6・§10・§14 の申し送りに沿う）。
 
