@@ -59,6 +59,9 @@
 
 use std::path::Path;
 
+mod common;
+use common::temp_dir::TempDirGuard;
+
 fn facade_crate_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
@@ -1644,7 +1647,8 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// `pub static`／`pub mod`）が存在しないかを走査する。承認範囲は
 /// `interop::onnx::{OnnxModel, OnnxValue, OnnxError, OnnxExportOptions}`
 /// と `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path,
-/// from_sequential}` の 10 件のみ（イシュー #2017・#2018・#2037）。
+/// from_sequential, from_path_with_limits}` と `OnnxExternalDataLimits` の
+/// 12 件のみ（イシュー #2017・#2018・#2037・#2360）。
 ///
 /// `interop_module_exposes_only_approved_onnx_surface` の従来実装は
 /// 期待する 6 文字列が「存在すること」の contains 検査のみで、
@@ -1672,7 +1676,7 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// （`ModelProto` 等）の露出を見逃していた（codex-review 指摘 P2・
 /// #2024。本関数へ統合し単一の走査でシグネチャ全体を検査する）。
 fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
-    const ALLOWED_PUB_ITEMS: [(&str, &str); 10] = [
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 12] = [
         ("struct", "OnnxModel"),
         ("enum", "OnnxValue"),
         ("enum", "OnnxError"),
@@ -1683,12 +1687,14 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         ("fn", "to_bytes"),
         ("fn", "to_path"),
         ("fn", "from_sequential"),
+        ("struct", "OnnxExternalDataLimits"),
+        ("fn", "from_path_with_limits"),
     ];
     const SCANNED_KINDS: [&str; 9] = [
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
     const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
-    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 10] = [
+    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 12] = [
         "ModelProto",
         "NodeProto",
         "prost::",
@@ -1699,6 +1705,8 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         "ExportNode",
         "NnExportParts",
         "nn::Module",
+        "ExternalDataOptions",
+        "external_data::",
     ];
 
     let cleaned = strip_comments_and_literals(original);
@@ -1999,10 +2007,10 @@ impl OnnxModel {
     );
 }
 
-/// `scan_unapproved_onnx_pub_items` が承認範囲 10 件（`OnnxModel`／
-/// `OnnxValue`／`OnnxError`／`OnnxExportOptions` の型定義 4 件と
-/// `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path,
-/// from_sequential}` のメソッド 6 件）をすべて含む合成ソースに対して
+/// `scan_unapproved_onnx_pub_items` が承認範囲 12 件（`OnnxModel`／
+/// `OnnxValue`／`OnnxError`／`OnnxExportOptions`／`OnnxExternalDataLimits` の
+/// 型定義 5 件と `OnnxModel::{from_bytes, from_path, from_path_with_limits,
+/// run, to_bytes, to_path, from_sequential}` のメソッド 7 件）をすべて含む合成ソースに対して
 /// オフェンス 0 件を返すことを確認する（空虚 pass 防止。承認範囲の
 /// 拡張〈#2018・#2037〉自体が正しく反映されていることの正例テスト）。
 #[test]
@@ -2050,11 +2058,25 @@ pub struct OnnxExportOptions {
     pub ir_version: i64,
     pub opset_version: i64,
 }
+
+pub struct OnnxExternalDataLimits {
+    pub max_total_bytes: u64,
+    pub max_external_files: usize,
+}
+
+impl OnnxModel {
+    pub fn from_path_with_limits(
+        path: &str,
+        limits: &OnnxExternalDataLimits,
+    ) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
+}
 "#;
     let offenses = scan_unapproved_onnx_pub_items(synthetic);
     assert!(
         offenses.is_empty(),
-        "承認範囲 10 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
+        "承認範囲 12 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
          テストの前提が崩れている）: {offenses:?}"
     );
 }
@@ -2176,6 +2198,8 @@ fn interop_module_exposes_only_approved_onnx_surface() {
             "ExportNode",
             "NnExportParts",
             "nn::Module",
+            "ExternalDataOptions",
+            "external_data::",
         ] {
             if line.contains(forbidden) {
                 leaked_internal_types.push(format!("`{trimmed}` が {forbidden} を含む"));
@@ -2200,6 +2224,8 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         "pub fn to_bytes",
         "pub fn to_path",
         "pub fn from_sequential",
+        "pub struct OnnxExternalDataLimits",
+        "pub fn from_path_with_limits",
     ] {
         assert!(
             onnx_rs_content.contains(expected),
@@ -2218,6 +2244,56 @@ fn interop_module_exposes_only_approved_onnx_surface() {
          違反の疑い。docs/facade-onnx-import-exposure-decision.md §12 参照）: \
          {unapproved_pub_items:?}"
     );
+}
+
+/// external data 予算まわり（イシュー #2360）の承認外追加を検出する負例。
+#[test]
+fn unapproved_onnx_external_data_items_are_flagged() {
+    let synthetic = r#"
+impl OnnxModel {
+    pub fn from_path_with_limits(path: &str, options: &fandhe_ai_onnx_interop::onnx::external_data::ExternalDataOptions) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
+}
+
+pub type OnnxExternalDataLimits = ExternalDataOptions;
+pub use fandhe_ai_onnx_interop::onnx::external_data::ExternalDataOptions;
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses
+            .iter()
+            .any(|o| o.contains("from_path_with_limits") && o.contains("ExternalDataOptions")),
+        "シグネチャ内の内部型が検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses.iter().any(|o| o.contains("type")),
+        "承認外の `pub type` が検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses.iter().any(|o| o.contains("use")),
+        "`pub use` 再エクスポートが検出されなかった: {offenses:?}"
+    );
+}
+
+/// `OnnxExternalDataLimits`／`from_path_with_limits` が facade から到達可能で
+/// 既定値・フィールド変更・シグネチャが固定されていること（#2360）。
+#[test]
+fn onnx_external_data_limits_are_reachable_via_facade() {
+    use fandhe_ai::interop::onnx::{OnnxError, OnnxExternalDataLimits, OnnxModel};
+    use std::path::Path;
+
+    let mut l = OnnxExternalDataLimits::default();
+    assert_eq!(l.max_total_bytes, 64 * 1024 * 1024 * 1024);
+    assert_eq!(l.max_external_files, 4096);
+    l.max_total_bytes = 1 << 20;
+    l.max_external_files = 1;
+    assert_eq!(l.max_total_bytes, 1 << 20);
+    assert_eq!(l.max_external_files, 1);
+
+    fn _sig(p: &Path, l: &OnnxExternalDataLimits) -> Result<OnnxModel, OnnxError> {
+        OnnxModel::from_path_with_limits(p, l)
+    }
 }
 
 /// `fandhe_ai::interop::onnx::{OnnxModel, OnnxValue, OnnxError}` が
@@ -4953,11 +5029,8 @@ fn collect_public_module_paths_recursive_ignores_private_mod_subtree() {
 /// 解決していた）。一時ディレクトリに実ファイルを置いて検証する。
 #[test]
 fn collect_public_module_paths_recursive_resolves_file_child_of_inline_mod() {
-    let root = std::env::temp_dir().join(format!(
-        "fandhe-ai-api-surface-inline-mod-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
+    let guard = TempDirGuard::new("api-surface-inline-mod");
+    let root = guard.path().to_path_buf();
     std::fs::create_dir_all(root.join("outer")).expect("一時ディレクトリを作成できない");
     std::fs::write(
         root.join("outer").join("child.rs"),
@@ -4971,7 +5044,6 @@ fn collect_public_module_paths_recursive_resolves_file_child_of_inline_mod() {
     let tokens = tokenize_including_punctuation("pub mod outer { pub mod child; }");
     let mut out = std::collections::BTreeSet::new();
     collect_public_module_paths_recursive(&tokens, &root, "", &mut out);
-    let _ = std::fs::remove_dir_all(&root);
 
     let expected: std::collections::BTreeSet<String> =
         ["outer", "outer::child", "outer::child::grandchild"]
@@ -17178,4 +17250,446 @@ fn workspace_declares_predict_batches_fn_names_nowhere() {
          実装はこれらの名前を一切使わない設計のため、見つかった場合は\
          承認済みの実装か迂回経路の混入かを確認すること）: {found:?}"
     );
+}
+
+// ==== #2394 TapeRef（借用ハンドル型。var 系メソッドのみ）のガード ====
+//
+// `TapeRef` は `src/lib.rs` に `pub struct` として直接定義する（`pub use` を
+// 通さないため `facade_does_not_reexport_tape_or_backend_ops` は不変）。
+// 公開面は `var`／`var_from`／`var_no_grad` の 3 メソッドと `From<&Tape>` のみで、
+// 生の `fandhe_ai_autodiff::Tape` へ抜ける経路（`Deref`／`AsRef`／`Tape` を返す
+// メソッド等）を持たないことを、トークン走査で fail-closed に固定する
+// （REQ-12。#2338 承認事項 4）。
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FnVis {
+    /// 制限なしの `pub`。
+    Public,
+    /// `pub(crate)` 等の制限付き可視性。
+    Restricted,
+    /// 可視性指定なし（trait impl 内の fn を含む）。
+    Private,
+}
+
+#[derive(Debug)]
+struct FnInfo {
+    vis: FnVis,
+    name: String,
+    /// `->` 以降（`{`／`where`／`;` の手前まで）のトークン列。戻り値なしは空。
+    ret: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ImplInfo {
+    /// trait impl の trait パス（`for` の手前）のトークン列。固有 impl は `None`。
+    trait_tokens: Option<Vec<String>>,
+    fns: Vec<FnInfo>,
+}
+
+fn tokens_of(content: &str) -> Vec<String> {
+    let stripped: String = strip_comments_and_literals(content).into_iter().collect();
+    tokenize_including_punctuation(&stripped)
+}
+
+/// `tokens[i]` が開き括弧（`open`）のとき、対応する閉じ括弧の index を返す。
+fn matching_close(tokens: &[String], i: usize, open: &str, close: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (j, t) in tokens.iter().enumerate().skip(i) {
+        if t == open {
+            depth += 1;
+        } else if t == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(j);
+            }
+        }
+    }
+    None
+}
+
+/// `tokens[fn_idx]`（`fn`）の可視性・名前・戻り値型を読む。
+fn parse_fn_at(tokens: &[String], fn_idx: usize) -> Option<FnInfo> {
+    let name = tokens.get(fn_idx + 1)?.clone();
+    // 可視性: 修飾子を遡って読み飛ばし、直前が `pub` か `pub ( ... )` かを見る。
+    let mut k = fn_idx;
+    while k > 0
+        && matches!(
+            tokens[k - 1].as_str(),
+            "unsafe" | "const" | "async" | "extern"
+        )
+    {
+        k -= 1;
+    }
+    let vis = if k > 0 && tokens[k - 1] == "pub" {
+        FnVis::Public
+    } else if k > 0 && tokens[k - 1] == ")" {
+        // `pub ( crate )` 形: 対応する `(` の直前が `pub` なら制限付き。
+        let mut depth = 0usize;
+        let mut open = None;
+        for j in (0..k).rev() {
+            if tokens[j] == ")" {
+                depth += 1;
+            } else if tokens[j] == "(" {
+                depth -= 1;
+                if depth == 0 {
+                    open = Some(j);
+                    break;
+                }
+            }
+        }
+        match open {
+            Some(o) if o > 0 && tokens[o - 1] == "pub" => FnVis::Restricted,
+            _ => FnVis::Private,
+        }
+    } else {
+        FnVis::Private
+    };
+    // ジェネリクス・引数リストを読み飛ばす。
+    let mut j = fn_idx + 2;
+    if tokens.get(j).map(String::as_str) == Some("<") {
+        j = matching_close(tokens, j, "<", ">")? + 1;
+    }
+    if tokens.get(j).map(String::as_str) != Some("(") {
+        return None;
+    }
+    j = matching_close(tokens, j, "(", ")")? + 1;
+    let mut ret = Vec::new();
+    if tokens.get(j).map(String::as_str) == Some("-")
+        && tokens.get(j + 1).map(String::as_str) == Some(">")
+    {
+        j += 2;
+        while let Some(t) = tokens.get(j) {
+            if matches!(t.as_str(), "{" | ";" | "where") {
+                break;
+            }
+            ret.push(t.clone());
+            j += 1;
+        }
+    }
+    Some(FnInfo { vis, name, ret })
+}
+
+/// `content` 内の `impl ... <type_name> ... { ... }`（固有 impl・trait impl の両方。
+/// 対象型はパスの最終セグメントの完全一致）を集める。コメント・文字列リテラルは無視する。
+fn collect_type_impls(content: &str, type_name: &str) -> Vec<ImplInfo> {
+    let tokens = tokens_of(content);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i] != "impl" {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        if tokens.get(j).map(String::as_str) == Some("<") {
+            match matching_close(&tokens, j, "<", ">") {
+                Some(c) => j = c + 1,
+                None => break,
+            }
+        }
+        let header_start = j;
+        while j < tokens.len() && !matches!(tokens[j].as_str(), "{" | ";" | "where") {
+            j += 1;
+        }
+        let header = &tokens[header_start..j];
+        // `where` 節を読み飛ばして本体の `{` へ。
+        while j < tokens.len() && tokens[j] != "{" && tokens[j] != ";" {
+            j += 1;
+        }
+        if tokens.get(j).map(String::as_str) != Some("{") {
+            i += 1;
+            continue;
+        }
+        let for_pos = header.iter().position(|t| t == "for");
+        let (trait_tokens, target) = match for_pos {
+            Some(p) => (Some(header[..p].to_vec()), &header[p + 1..]),
+            None => (None, header),
+        };
+        let target_path: Vec<&String> = target
+            .iter()
+            .take_while(|t| t.as_str() != "<")
+            .filter(|t| t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
+            .collect();
+        let matches_type = target_path.last().is_some_and(|t| t.as_str() == type_name);
+        let Some(close) = matching_close(&tokens, j, "{", "}") else {
+            break;
+        };
+        if matches_type {
+            let mut fns = Vec::new();
+            let mut depth = 0usize;
+            for k in j..=close {
+                match tokens[k].as_str() {
+                    "{" => depth += 1,
+                    "}" => depth -= 1,
+                    "fn" if depth == 1 => {
+                        if let Some(f) = parse_fn_at(&tokens, k) {
+                            fns.push(f);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push(ImplInfo { trait_tokens, fns });
+        }
+        i = close + 1;
+    }
+    out
+}
+
+/// trait パスのトークン列から trait 名（最初の `<` の手前の最終識別子）を得る。
+fn trait_name(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .take_while(|t| t.as_str() != "<")
+        .filter(|t| t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
+        .last()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 戻り値型トークン列が生の `Tape`／`BackendOps` へ到達しうるか（`TapeRef` の impl 用。
+/// facade `Tape` も含め識別子 `Tape` の完全一致を禁止する。`TapeRef` は別トークン）。
+fn ret_reaches_raw_tape(ret: &[String]) -> bool {
+    ret.iter()
+        .any(|t| matches!(t.as_str(), "fandhe_ai_autodiff" | "Tape" | "BackendOps"))
+}
+
+/// `TapeRef` の impl 群を `src/` 全体から集め、宣言元ファイルとともに返す。
+fn collect_tape_ref_impls_in_src() -> Vec<ImplInfo> {
+    let src_dir = facade_crate_root().join("src");
+    let mut all = Vec::new();
+    visit_rs_files(&src_dir, &mut |_path, content| {
+        all.extend(collect_type_impls(content, "TapeRef"));
+    });
+    all
+}
+
+/// 正ガード: `TapeRef` の公開メソッドは `var`／`var_from`／`var_no_grad` のみ、
+/// 制限付き可視性は `from_autodiff` のみ、手書き trait impl は `Debug`／`From` のみ
+/// （`Deref`／`AsRef` 等で生の `Tape` へ抜ける経路の追加を検出）。
+#[test]
+fn tape_ref_public_surface_is_exactly_var_family() {
+    let impls = collect_tape_ref_impls_in_src();
+    let mut public = std::collections::BTreeSet::new();
+    let mut restricted = std::collections::BTreeSet::new();
+    let mut traits = std::collections::BTreeSet::new();
+    let mut from_headers = 0usize;
+    for imp in &impls {
+        match &imp.trait_tokens {
+            None => {
+                for f in &imp.fns {
+                    match f.vis {
+                        FnVis::Public => {
+                            public.insert(f.name.clone());
+                        }
+                        FnVis::Restricted => {
+                            restricted.insert(f.name.clone());
+                        }
+                        FnVis::Private => {
+                            panic!("TapeRef の固有 impl に可視性なしの fn `{}` がある", f.name)
+                        }
+                    }
+                }
+            }
+            Some(tr) => {
+                let name = trait_name(tr);
+                if name == "From" {
+                    from_headers += 1;
+                    assert!(
+                        tr.iter().any(|t| t == "Tape")
+                            && !tr.iter().any(|t| t == "fandhe_ai_autodiff"),
+                        "From の入力は facade の `&Tape` でなければならない: {tr:?}"
+                    );
+                }
+                traits.insert(name);
+            }
+        }
+    }
+    let to_set = |xs: &[&str]| -> std::collections::BTreeSet<String> {
+        xs.iter().map(|s| (*s).to_string()).collect()
+    };
+    assert_eq!(
+        public,
+        to_set(&["var", "var_from", "var_no_grad"]),
+        "TapeRef の公開メソッド集合"
+    );
+    assert_eq!(
+        restricted,
+        to_set(&["from_autodiff"]),
+        "TapeRef の制限付き可視性 fn 集合"
+    );
+    assert_eq!(
+        traits,
+        to_set(&["Debug", "From"]),
+        "TapeRef の手書き trait impl 集合"
+    );
+    assert_eq!(from_headers, 1, "From<&Tape> の impl はちょうど 1 件");
+}
+
+/// インベントリ: `struct TapeRef` の宣言が `src/lib.rs` にちょうど 1 件で、
+/// タプルフィールドが `pub(crate)`、derive が `Clone`・`Copy` のみ。0 件（走査空振り）も fail。
+#[test]
+fn tape_ref_declared_once_with_crate_private_field() {
+    let src_dir = facade_crate_root().join("src");
+    let mut decls: Vec<(String, Vec<String>)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "struct" && tokens.get(i + 1).map(String::as_str) == Some("TapeRef") {
+                let mut j = i + 2;
+                if tokens.get(j).map(String::as_str) == Some("<") {
+                    j = matching_close(&tokens, j, "<", ">").expect("ジェネリクスが閉じている") + 1;
+                }
+                assert_eq!(
+                    tokens.get(j).map(String::as_str),
+                    Some("("),
+                    "タプル構造体であること"
+                );
+                let field_vis: Vec<String> = tokens[j + 1..j + 5].to_vec();
+                // derive 属性を遡って集める。
+                let mut derives = Vec::new();
+                let mut k = i;
+                if k > 0 && tokens[k - 1] == "pub" {
+                    k -= 1;
+                }
+                while k > 0 && tokens[k - 1] == "]" {
+                    let mut depth = 0usize;
+                    let mut open = k - 1;
+                    for m in (0..k).rev() {
+                        if tokens[m] == "]" {
+                            depth += 1;
+                        } else if tokens[m] == "[" {
+                            depth -= 1;
+                            if depth == 0 {
+                                open = m;
+                                break;
+                            }
+                        }
+                    }
+                    if tokens.get(open + 1).map(String::as_str) == Some("derive") {
+                        derives.extend(
+                            tokens[open + 2..k - 1]
+                                .iter()
+                                .filter(|t| {
+                                    t.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                                })
+                                .cloned(),
+                        );
+                    }
+                    k = open.saturating_sub(1); // `#` を飛ばす
+                }
+                derives.sort();
+                let mut rec = field_vis;
+                rec.push("|".to_string());
+                rec.extend(derives);
+                decls.push((path.display().to_string(), rec));
+            }
+        }
+    });
+    assert_eq!(
+        decls.len(),
+        1,
+        "struct TapeRef の宣言はちょうど 1 件: {decls:?}"
+    );
+    let (path, rec) = &decls[0];
+    assert!(path.ends_with("src/lib.rs"), "宣言は src/lib.rs: {path}");
+    assert_eq!(
+        rec.as_slice(),
+        ["pub", "(", "crate", ")", "|", "Clone", "Copy"],
+        "フィールド可視性は pub(crate)・derive は Clone/Copy のみ"
+    );
+}
+
+/// 否定ガード: `TapeRef` の全 fn（固有・trait impl 両方）の戻り値型が生の `Tape`／
+/// `BackendOps` を含まない。加えて crate 全体の `pub fn` の戻り値型に
+/// `fandhe_ai_autodiff::Tape` が現れないことも固定する。
+#[test]
+fn tape_ref_pub_fns_do_not_return_raw_tape() {
+    for imp in collect_tape_ref_impls_in_src() {
+        for f in &imp.fns {
+            assert!(
+                !ret_reaches_raw_tape(&f.ret),
+                "TapeRef::{} の戻り値型が生の Tape へ到達: {:?}",
+                f.name,
+                f.ret
+            );
+        }
+    }
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    let mut scanned_pub_fns = 0usize;
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t != "fn" {
+                continue;
+            }
+            let Some(f) = parse_fn_at(&tokens, i) else {
+                continue;
+            };
+            if f.vis != FnVis::Public {
+                continue;
+            }
+            scanned_pub_fns += 1;
+            let raw = f.ret.windows(4).any(|w| {
+                w[0] == "fandhe_ai_autodiff" && w[1] == ":" && w[2] == ":" && w[3] == "Tape"
+            });
+            if raw {
+                offending.push(format!("{}: pub fn {}", path.display(), f.name));
+            }
+        }
+    });
+    assert!(
+        scanned_pub_fns > 0,
+        "pub fn を 1 件も走査できていない（走査空振り）"
+    );
+    assert!(
+        offending.is_empty(),
+        "pub fn の戻り値に fandhe_ai_autodiff::Tape が現れる: {offending:?}"
+    );
+}
+
+/// 自己テスト: 合成入力で各違反類型が検出され、無関係な入力は誤検知しない。
+#[test]
+fn collect_type_impls_detects_each_category() {
+    let src = "impl<'t> TapeRef<'t> {\n pub fn backward(&self) {}\n pub(crate) fn from_autodiff(t: &'t X) -> Self { Self(t) }\n pub\n unsafe fn raw(&self)\n -> &'t fandhe_ai_autodiff::Tape { todo!() }\n pub const fn c() {}\n}\n\
+        impl Deref for TapeRef<'_> { type Target = X; fn deref(&self) -> &X { todo!() } }\n\
+        impl<'t> From<&'t Tape> for crate::TapeRef<'t> { fn from(t: &'t Tape) -> Self { todo!() } }\n\
+        impl Other { pub fn ignored(&self) {} }\n\
+        // impl TapeRef { pub fn in_comment() {} }\n\
+        const S: &str = \"impl TapeRef { pub fn in_string() {} }\";";
+    let impls = collect_type_impls(src, "TapeRef");
+    assert_eq!(impls.len(), 3, "固有 1 + Deref + From: {impls:?}");
+    let inherent = &impls[0];
+    assert!(inherent.trait_tokens.is_none());
+    let vis = |n: &str| inherent.fns.iter().find(|f| f.name == n).map(|f| f.vis);
+    assert_eq!(vis("backward"), Some(FnVis::Public));
+    assert_eq!(vis("from_autodiff"), Some(FnVis::Restricted));
+    assert_eq!(
+        vis("raw"),
+        Some(FnVis::Public),
+        "改行・unsafe 修飾子付きも検出"
+    );
+    assert_eq!(vis("c"), Some(FnVis::Public));
+    assert_eq!(vis("in_comment"), None);
+    assert_eq!(vis("in_string"), None);
+    let raw = inherent.fns.iter().find(|f| f.name == "raw").expect("raw");
+    assert!(ret_reaches_raw_tape(&raw.ret), "生の Tape を返す fn を検出");
+    assert_eq!(
+        trait_name(impls[1].trait_tokens.as_deref().expect("trait")),
+        "Deref"
+    );
+    assert_eq!(
+        trait_name(impls[2].trait_tokens.as_deref().expect("trait")),
+        "From"
+    );
+    let ret_ok = vec!["Var".to_string(), "<".into(), "'t".into(), ">".into()];
+    assert!(!ret_reaches_raw_tape(&ret_ok));
+    let ret_ref = vec!["TapeRef".to_string()];
+    assert!(
+        !ret_reaches_raw_tape(&ret_ref),
+        "TapeRef は別トークンで誤検知しない"
+    );
+    let ret_facade_tape = vec!["&".to_string(), "Tape".into()];
+    assert!(ret_reaches_raw_tape(&ret_facade_tape));
 }

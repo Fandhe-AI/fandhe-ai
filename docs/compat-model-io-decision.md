@@ -744,13 +744,10 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    §12.3 手順 6）。**この宛先非追従の性質は Linux／macOS の POSIX
    `rename(2)` について確認したものであり、Windows の `MoveFileExW`
    （reparse point〈シンボリックリンク／junction〉が置換先にある場合の
-   挙動）は本設計では個別に検証しない**。§12.3 手順 8 は `save_model`
-   自体を全 OS で動作対象とする非対称性を認めているが、これは
-   `create_new`（Rust std が Windows でも「既存パスがあれば `Err`」を
-   保証する）の契約にのみ基づくものであり、本項が主張する「`rename` は
-   宛先シンボリックリンクの参照先を辿らない」という保証は Linux／macOS
-   限定の記述として扱う（Windows 上での `manifest.json` の rename 先が
-   reparse point だった場合の厳密な挙動は承認事項として残す）。
+   挙動）は一次資料で確定できない**。このため Windows（非 unix）では
+   手順 8 のとおり `save_model` 自体を fail-closed にし、本手順の
+   rename 経路へ到達させない（イシュー #2368 で決定。根拠・棄却案・
+   緩和条件・#2369 実装要件は §12.4）。
 3. **manifest の rename が唯一のコミット点である根拠**: 手順 1 の
    `create_new` による `model.<gen>.safetensors` への直接書き込みが
    完了した時点で（PR #2317 review 再々確認・指摘 1 の是正により、
@@ -839,16 +836,15 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    `load_model` を fail-closed に拒否する**（`ModelIoError::Io` /
    `ErrorKind::Unsupported`）。これは既存 `save_safetensors_f32`／
    `st_save.rs` 自体が OS で分岐していないという旧版の前提を、load
-   側についてのみ撤回する変更である。**`save_model` 側は非対称に
-   Windows でも動作させる**——一時ファイル作成の対策（`create_new`。
-   手順 1〜2・§13「一時ファイル作成」）は Rust std のみで完結し
-   `OpenOptions::create_new` が Windows でも同じ「既存パス〈シンボリック
-   リンクを含む〉があれば `Err`」という契約を提供するため、no-follow
-   オープンのような OS 固有の生 flag 値を必要とせず、Windows を
-   fail-closed にする理由がない。この非対称性（save は全 OS 対応・load
-   は Linux／macOS 限定）は矛盾ではなく、両者が対処する脅威が異なる
-   （書き込み側は「一時ファイル名への追従書き込み」、読み込み側は
-   「配置済みファイルの追従オープン」）ことに起因する。
+   側についてのみ撤回する変更である。**`save_model` 側も同じく非 unix では
+   fail-closed に拒否する**（`ModelIoError::Io` / `ErrorKind::
+   Unsupported`。`dir` へのあらゆる副作用より前に判定する）。旧版は
+   `create_new` が Windows でも既存パスで `Err` になることを根拠に
+   「save は全 OS 対応・load は Linux／macOS 限定」という非対称性を
+   認めていたが、イシュー #2368 で撤回した。`rename` の置換先が
+   reparse point の場合の Windows 挙動を確定できないこと、Windows では
+   `load_model` が拒否されるため roundtrip が成立しないこと、§13.6 を
+   std だけで実装できないことが理由である（詳細は §12.4）。
 9. **電源断耐性（fsync）は対象外のまま**: `st_save.rs` は一時ファイル
    への `fsync`（`File::sync_all`）を行わないため、rename 成功後の
    電源断・OS クラッシュに対する耐性を保証しない（既存注記のとおり。
@@ -857,6 +853,97 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
    している間の 2 ファイル間コミット順序の不整合」（指摘 2 が対象と
    した問題）であり、ストレージ層の電源断耐性という別軸の非保証は
    既存方針から変更しない。
+
+### 12.4 Windows の rename 置換先 reparse point の扱い（イシュー #2368）
+
+**決定: (a) Windows（`cfg(not(unix))`）では `save_model` も fail-closed に
+する**（`ModelIoError::Io(io::Error::from(ErrorKind::Unsupported))`）。
+§12.3 手順 8 の「save は全 OS・load は Linux／macOS」という非対称性は
+撤回した。
+
+**1. 調査結果（出典付き）**
+
+| 項目 | 内容 | 出典 | 確度 |
+|------|------|------|------|
+| Rust std 1.98.1 の `fs::rename`（Windows） | まず `MoveFileExW(old, new, MOVEFILE_REPLACE_EXISTING)` を呼ぶ。`ERROR_ACCESS_DENIED` で失敗したときに限り、`old` を `DELETE` アクセス＋`FILE_FLAG_OPEN_REPARSE_POINT \| FILE_FLAG_BACKUP_SEMANTICS` で開き直し、`SetFileInformationByHandle(FileRenameInfoEx)`（`FILE_RENAME_FLAG_REPLACE_IF_EXISTS \| FILE_RENAME_FLAG_POSIX_SEMANTICS`）で再試行する 2 段構成 | rust-lang/rust タグ `1.98.1`・`library/std/src/sys/fs/windows.rs` `pub fn rename`（L1321〜L1387 付近。計画時点の確認。`rust-toolchain.toml` は stable 追従のため将来の版で変わりうる） | 明文（ソース） |
+| `OpenOptions::create_new` | `CREATE_NEW` を選び `FILE_FLAG_OPEN_REPARSE_POINT` を自動付与するため、既存の symlink〈dangling を含む〉があれば `AlreadyExists` になる想定 | 同 `get_flags_and_attributes`（L317・L329〜L333 付近） | ソース上の推定。実機は未確認（W-save-4） |
+| 置換先が**ファイル symlink** の場合 | リンク自体の置換か参照先への書き込みかを、MS Learn の明文では確定できない | MS Learn「MoveFileExW」・「Symbolic Link Effects on File Systems Functions」（主に移動元が symlink の場合を記述） | 未確認（W-save-2） |
+| 置換先が**ディレクトリ symlink** の場合 | 上に加え、ディレクトリ属性を持つ置換先が `ERROR_ACCESS_DENIED` を経て POSIX semantics 経路へ落ちる場合の挙動も不明 | 同上 | 未確認（W-save-2・W-save-3） |
+| 置換先が**junction** の場合 | 同上 | 同上 | 未確認（W-save-2・W-save-3） |
+
+明文出典のない挙動は推定を事実として書かず「未確認」とし、Windows 実機での
+確認を #2393 へ申し送る（本節 6）。
+
+**2. 3 案の比較**
+
+| 観点 | (a) fail-closed（採用） | (b) 宛先を `FILE_FLAG_OPEN_REPARSE_POINT` で検査して拒否 | (c) std の意味論のまま許可 |
+|------|------|------|------|
+| 参照先への書き込みリスク | なし（経路ごと遮断） | 検査〜`rename` 間の TOCTOU が構造的に残る（宛先は名前解決されるため、検査ハンドルと置換対象を一体化できない。`FILE_SHARE_DELETE` なしで保持すると rename 自体が共有違反になる） | 意味論が未確認のため評価不能 |
+| `unsafe` | 不要 | 検査自体は std＋`MetadataExt::file_attributes()` で可能だが、§13.6 の Windows 実装で FFI が要る | §13.6 の Windows 実装で FFI が要る |
+| 新規依存 | なし | なし | なし |
+| §13.6 との整合 | 経路自体が不要 | `(dev, ino)` 相当（`file_index`）は 1.98.1 で nightly 限定のため kernel32 FFI が必要 | 同左 |
+| roundtrip | 成立しない（ただし `load_model` も Windows で拒否済みで現状と同じ） | 成立しない | 成立しない（load が拒否） |
+
+(b) は「意味論が安全なら検査は不要、危険なら検査では閉じられない」ため (c)
+に支配される。(c) は前提の「std の意味論で安全」を明文出典・実機で確認できて
+いないため採らない。
+
+**3. 決定の帰結**
+
+- `unsafe` FFI・新規依存は不要（FFI を要する案は選んでいない）。したがって
+  security-auditor の追加監査要件は発生しない。#2369 の実装 PR は
+  `security.md` のレビュー体制どおり通常の監査を行う
+- Windows で実際に効くのは facade が Windows でビルド可能になる #2389〜#2391
+  以降である
+
+**4. 緩和条件（(c) へ移る条件。変更はユーザー承認必須）**
+
+次の 3 点がすべて満たされること。
+
+1. ファイル symlink／ディレクトリ symlink／junction／その他の reparse タグ
+   （AppExecLink・cloud placeholder 等）のすべてで、`rename` が参照先へ書き込ま
+   ないこと（リンク自体の置換またはエラー）を実機と明文出典で確認する
+2. §13.6 の Windows 実装手段（`unsafe` を伴う場合は監査要件を別途定める）
+3. `load_model` の Windows 対応
+
+**5. #2369 実装要件（正本）**
+
+- `save_model` の冒頭で、`dir` へのあらゆる副作用（`create_dir_all`・
+  `create_new`・`rename`）より前に、`cfg(not(unix))` のとき
+  `Err(ModelIoError::Io(io::Error::from(ErrorKind::Unsupported)))` を返す
+  （`dir` を一切変更しない）
+- 判定は cfg 分岐する小さな関数（例: `save_model_platform_supported() ->
+  io::Result<()>`）にまとめ、`load_model` の Unsupported 経路と同じ語彙の
+  エラーにする
+- 回帰テスト: (i) `#[cfg(not(unix))]` のテストで `save_model` が
+  `ErrorKind::Unsupported` を返し `dir` のエントリが増えないことを検証する
+  （Linux CI では実行されず、Windows 向けクロス clippy `--tests` による型検査
+  のみ。facade のクロス clippy は #2391 以降に有効になる）。(ii) Linux でも
+  拒否ロジックを検査したい場合は、`onnx-interop` の
+  `windows_component_reject_reason`（`cfg(any(windows, test))`）の先例に倣い
+  非 unix 判定の純関数を `cfg(any(not(unix), test))` で Linux のテストビルドに
+  も含める
+- 公開 doc（`model_io` モジュール doc・`save_model` doc）に「Windows では未対応
+  （fail-closed）。理由と緩和条件は決定記録 §12.4」と記載する
+  （`crates/facade/src/model.rs`「Windows 対応状況」節と同型）。intra-doc link は
+  公開項目にだけ張る
+
+**6. Windows 実機確認項目（#2393 への申し送り）**
+
+- W-save-1: `save_model` が `ErrorKind::Unsupported` を返し `dir` に何も作らない
+  こと（#2369・#2391 の後）
+- W-save-2: 緩和検討用。`manifest.json` を ファイル symlink（有効／dangling）・
+  ディレクトリ symlink・junction・その他の reparse タグ（可能なら AppExecLink・
+  OneDrive placeholder）にして `std::fs::rename(tmp, manifest.json)` を実行し、
+  参照先の内容・タイムスタンプが不変か、置換されたか、エラー（`ErrorKind`／OS
+  エラー）かを記録する
+- W-save-3: 上記で `MoveFileExW` が `ERROR_ACCESS_DENIED` を返し
+  `FileRenameInfoEx` の POSIX semantics fallback 経路に入るケースの特定と、その
+  経路での同じ観測
+- W-save-4: `OpenOptions::create_new` が dangling symlink・junction の位置で
+  `AlreadyExists` になること
+- 記録事項: NTFS 必須（可能なら ReFS も）・Windows と Rust toolchain の版。結果の
+  反映先は本節
 
 ## 13. ファイル I/O 脅威の全数棚卸し（C。PR #2317 review 再々確認・
 2026-09-27・指摘 1・2 の是正に伴う網羅確認）
@@ -949,12 +1036,12 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 | シンボリックリンク（対象ディレクトリ自身 `dir`） | 読み込み・書き込み共通 | 許容する（`dir` 自体が symlink であることは脅威モデル外。§13.1） | `model_registry.rs::load_succeeds_when_root_itself_is_a_symlink` |
 | シンボリックリンク（途中のパス要素） | — | 該当なし（`dir` 直下 1 段のみを扱うレイアウトのため中間ディレクトリが存在しない。§13.1） | — |
 | シンボリックリンク（一時ファイル名・最終ファイル名の位置に事前配置） | 書き込み | `create_new`（`O_EXCL` 相当。存在すれば symlink か否かを問わず `Err`）で作成し追従書き込みを構造的に防ぐ。衝突時は既存エントリに触れず新しい候補名で再試行する（上限 [`MAX_TMP_NAME_ATTEMPTS`]〈8 回〉。上限到達後もなお衝突する場合のみ `Err` を返し、既存エントリは不変） | 新設（§2 item 5・§12.3 手順 1〜2。PR #2317 review 指摘〈P2〉の是正） |
-| シンボリックリンク（固定名 `manifest.json` への `rename` 置換先。Linux／macOS の POSIX `rename(2)` 限定） | 書き込み | `rename` は宛先ディレクトリエントリ自体を置換するのみで宛先シンボリックリンクの参照先を辿らないため、リンクエントリを新しい通常ファイルへ安全に置換できる（参照先ファイルには書き込まない）。読み取り側 no-follow 手順とは対象が異なる別種の安全性のため拒否は不要。Windows の `MoveFileExW`（reparse point が置換先の場合）は個別に検証しておらず承認事項として残す | 新設（§12.3 手順 2。PR #2317 review 指摘〈P2〉の是正） |
+| シンボリックリンク（固定名 `manifest.json` への `rename` 置換先。Linux／macOS の POSIX `rename(2)` 限定） | 書き込み | `rename` は宛先ディレクトリエントリ自体を置換するのみで宛先シンボリックリンクの参照先を辿らないため、リンクエントリを新しい通常ファイルへ安全に置換できる（参照先ファイルには書き込まない）。読み取り側 no-follow 手順とは対象が異なる別種の安全性のため拒否は不要。Windows（非 unix）は置換先 reparse point の挙動を確定できないため `save_model` 自体を fail-closed とする（§12.4。イシュー #2368） | 新設（§12.3 手順 2・§12.4。PR #2317 review 指摘〈P2〉の是正） |
 | ハードリンク | 読み込み・書き込み共通 | 対象外として受容（攻撃者が作成できるのは同一ファイルシステム上の既存ファイルへのリンクのみで、所有者・権限チェックを伴わない本モジュールの脅威モデル外） | `model.rs` モジュール doc「対象外として残る経路」節の理由をそのまま踏襲 |
 | 特殊ファイル（FIFO・Unix ソケット・デバイス） | 読み込み | `symlink_metadata`／`fstat` の両方で `is_file() == true` を要求し拒否。`O_NONBLOCK` で FIFO への差し替えによる無期限ブロックも防ぐ | `model.rs::open_leaf_no_follow`／`model_registry.rs::load_rejects_non_regular_leaf_unix_socket` |
 | 特殊ファイル（削除候補） | 削除 | **該当なし**（PR #2317 review 再確認・2026-09-27 第 2 回是正で自動削除機能自体を撤回。§13.0・§13.6） | — |
 | Windows reparse point／junction | 読み込み | no-follow の安全な実装を持たないため `load_model` を fail-closed 拒否（`ErrorKind::Unsupported`） | `model.rs`「Windows 対応状況」節・§12.3 手順 8 |
-| Windows reparse point／junction | 書き込み | `create_new` は Rust std が Windows でも同じ「既存パスがあれば `Err`」契約を提供するため対応可能（§12.3 手順 8 の非対称性の根拠） | 新設 |
+| Windows reparse point／junction | 書き込み | `save_model` を fail-closed 拒否（`ErrorKind::Unsupported`。`dir` へ副作用を起こす前に判定）。`create_new` の契約と `rename` 置換先の挙動を Windows 実機で確認するまで許可しない | §12.4・§12.3 手順 8（実装は #2369） |
 | TOCTOU（検査〜open の間の差し替え） | 読み込み | 開いたハンドルの `fstat` を `symlink_metadata` の実体識別子（`dev`／`ino`）と照合し、差し替えを検出する（パス再解決ではなく実体同一性で判定） | `model.rs`「検査と open のハンドル一体化」節 |
 | TOCTOU（fstat 後の読み取り中の増大） | 読み込み | 同一ハンドルから `take(fstat 実長 + 1)` で読み、実読バイト数が `fstat` 実長と一致しなければ拒否する（§13.2 手順 5） | `model.rs` 手順 6 |
 | TOCTOU（一時ファイル作成） | 書き込み | `create_new` は「存在確認」と「作成」を単一のシステムコールで行うためレースが原理的に生じない（std ドキュメントが明記する atomic 操作） | 新設 |

@@ -74,6 +74,9 @@
 //! `fandhe_ai_autodiff::Tape` を直に引数へ取っており、内部クレートの型が facade の
 //! 公開シグネチャへ直接露出していた。codex-review 指摘）。
 //!
+//! [`TapeRef`]（#2394）は `var`／`var_from`／`var_no_grad` のみを持つ借用ハンドルで、
+//! [`Tape`] の公開メソッドは変えない。crate 外の入口は `From<&Tape>` のみ。
+//!
 //! **`Var`／`Gradients`／`AutodiffError`／`LinearVars`（`autodiff` 由来）・
 //! `Tensor`（`tensor_core` 由来）の扱い**: これらは `BackendOps` 注入の
 //! 迂回経路を持たない値型・エラー型であるため、`facade` の正式な公開契約
@@ -135,8 +138,9 @@ pub mod nn;
 
 /// 相互運用（interop）公開面の入口（イシュー #2017・#2018・#2019）。
 /// [`interop::onnx`]（ONNX import／export。`OnnxModel`／`OnnxValue`／
-/// `OnnxError`・`OnnxModel::{from_bytes, from_path, run, to_bytes,
-/// to_path}`・`OnnxExportOptions`。export は #2018 で公開済み・roundtrip
+/// `OnnxError`・`OnnxModel::{from_bytes, from_path, from_path_with_limits, run,
+/// to_bytes, to_path}`・`OnnxExportOptions`・`OnnxExternalDataLimits`
+/// 〈external data 読み込み予算。#2360〉。export は #2018 で公開済み・roundtrip
 /// export ラッパー限定）に加え、[`interop::safetensors`]（safetensors
 /// save／load 純再エクスポート。イシュー #2019）を提供する
 /// （`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-
@@ -648,6 +652,59 @@ impl Tape {
     /// #1939）。
     pub fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
         self.0.typed_ops_bf16()
+    }
+}
+
+/// autodiff コンテナ内で facade 独自層へ渡す、`var` 系メソッドのみの借用ハンドル。
+///
+/// 役割: `fandhe_ai::nn::Module::forward`（#2395）の第 1 引数、および autodiff
+/// 側コンテナ（`compat::Sequential` 内部）から facade 独自層を呼ぶアダプタ（#2397）
+/// が `&fandhe_ai_autodiff::Tape` から構築する橋渡しである。生の
+/// `fandhe_ai_autodiff::Tape` から facade の [`Tape`]（newtype）を作る安全な手段は
+/// なく、`#[repr(transparent)]` と `unsafe` の参照キャストは不採用（#2338
+/// 2026-09-29 承認事項 4「案 1: 借用ハンドル型・`unsafe` なし」）。
+///
+/// REQ-12: 生の `Tape`／`BackendOps` を露出しないため、公開メソッドは
+/// [`Self::var`]・[`Self::var_from`]・[`Self::var_no_grad`] の 3 件のみで、
+/// `backward` 等は委譲しない。フィールドは `pub(crate)`。crate 内の構築は
+/// `from_autodiff`、crate 外の入口は `From<&Tape>` のみ。
+/// `tests/api_surface.rs` がこの面を機械的に固定する。
+#[derive(Clone, Copy)]
+pub struct TapeRef<'t>(pub(crate) &'t fandhe_ai_autodiff::Tape);
+
+impl<'t> TapeRef<'t> {
+    /// `&fandhe_ai_autodiff::Tape` から借用ハンドルを作る crate 内専用の構築経路
+    /// （#2397 のアダプタが使う。`From<&Tape>` もここへ集約する）。
+    pub(crate) fn from_autodiff(tape: &'t fandhe_ai_autodiff::Tape) -> Self {
+        Self(tape)
+    }
+
+    /// [`Tape::var`] と同じ（葉ノード登録）。戻り値の寿命は借用元テープ `'t` に結び付く。
+    pub fn var(&self, tensor: &Tensor<f32>) -> Var<'t> {
+        self.0.var(tensor)
+    }
+
+    /// [`Tape::var_from`] と同じ（dtype 変換つきの葉ノード登録）。
+    pub fn var_from<T: CastElement>(&self, tensor: &Tensor<T>) -> Result<Var<'t>, AutodiffError> {
+        self.0.var_from(tensor)
+    }
+
+    /// [`Tape::var_no_grad`] と同じ（`requires_grad == false` の葉ノード登録）。
+    pub fn var_no_grad(&self, tensor: &Tensor<f32>) -> Var<'t> {
+        self.0.var_no_grad(tensor)
+    }
+}
+
+impl std::fmt::Debug for TapeRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // facade `Tape` の `Debug` と同じ方針（内部 `Tape` の表現に依存しない）。
+        f.debug_struct("TapeRef").finish_non_exhaustive()
+    }
+}
+
+impl<'t> From<&'t Tape> for TapeRef<'t> {
+    fn from(tape: &'t Tape) -> Self {
+        Self::from_autodiff(&tape.0)
     }
 }
 
@@ -5848,3 +5905,21 @@ struct GenerateHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct PredictBatchesHoldDoctestGuard;
+
+#[cfg(test)]
+mod tape_ref_tests {
+    use super::*;
+
+    /// `pub(crate)` の `from_autodiff` 経路（統合テストから呼べない）で作った葉が
+    /// facade `Tape::backward` で勾配を得られること。
+    #[test]
+    fn from_autodiff_leaf_receives_gradient() {
+        let t = tape();
+        let r = TapeRef::from_autodiff(&t.0);
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0], &[3]).expect("テスト入力の構築");
+        let v = r.var(&x);
+        let loss = v.mul(&v).expect("mul").sum(None).expect("sum");
+        let g = t.backward(&loss).expect("backward");
+        assert!(g.get(&v).expect("get").is_some());
+    }
+}

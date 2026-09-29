@@ -118,6 +118,8 @@ defaulted メソッド（`named_parameters`／`set_parameter`／`state_dict`／`
 1. `var` 系メソッドのみを持つ借用ハンドル型（例: `TapeRef<'t>(pub(crate) &'t fandhe_ai_autodiff::Tape)`）を新設（安全だが第 2 のハンドル型が増える）
 2. 第 1 段では橋渡し自体を対象外とし、facade 側 `nn::Module` 実装層は facade 側 `nn::{ModuleList, Sequential}` の中でのみ完結させる（`compat::Sequential` との相互運用は行わない）
 
+**実装形の確定（#2394・2026-09-29 承認事項 4）**: 案 1（借用ハンドル型・`unsafe` なし）を採用した。`fandhe_ai::TapeRef<'t>` を `crates/facade/src/lib.rs` に `pub struct` として直接定義し（`pub use` を通さないため `facade_does_not_reexport_tape_or_backend_ops` は不変）、公開メソッドは `var`／`var_from`／`var_no_grad` のみ、crate 外の入口は `From<&Tape>` のみ、crate 内の構築は `pub(crate) fn from_autodiff`（#2397 のアダプタ用）とした。#2395 の `forward` の第 1 引数は `&'t fandhe_ai::Tape` ではなく `TapeRef<'t>` になるため、§5・§6 の擬似コードとはこの点でずれる。固定するガードは `tests/api_surface.rs` の `tape_ref_public_surface_is_exactly_var_family`・`tape_ref_declared_once_with_crate_private_field`・`tape_ref_pub_fns_do_not_return_raw_tape`（自己テスト `collect_type_impls_detects_each_category`）。最終まとめは #2403。
+
 利用例（擬似コード。実装は行わない）:
 
 ```rust
