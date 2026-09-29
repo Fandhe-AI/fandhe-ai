@@ -130,11 +130,11 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// `jit_cache_regression_tests::fresh_temp_dir` と同趣旨（テスト・ベンチ用に
-/// 一意な一時ディレクトリを払い出す）だが、以下の PID 再利用対策
-/// （Review #698 指摘）により実装は同型ではない。モジュール境界をまたいだ
-/// 結合を避けるため独立して定義する（`jit_cache_regression_tests.rs`
-/// 冒頭コメント参照）。戻り値は [`TempDirGuard`] であり、呼び出し元
+/// `jit_cache_regression_tests::fresh_temp_dir`・`nvrtc::tests::fresh_temp_dir`
+/// と作成方式（PID＋seq＋ナノ秒・`create_dir` の排他作成・最大 8 回再試行）は
+/// 同じ（#2384 で両者を本関数へ揃えた）。違いは名前の接頭辞と戻り値のみ。
+/// モジュール境界をまたいだ結合を避けるため独立して定義する
+/// （`jit_cache_regression_tests.rs` 冒頭コメント参照）。戻り値は [`TempDirGuard`] であり、呼び出し元
 /// スコープを抜けるときに panic 経路も含めて自動的に片付けられる。
 ///
 /// # PID 再利用時の衝突対策（Review #698 指摘）
@@ -145,8 +145,7 @@ impl Drop for TempDirGuard {
 /// 直後は `SEQ == 0` から再開する）によって同名ディレクトリへ書き込む
 /// 可能性が理論上残る（実機ランナー上で繰り返し実行される用途のため無視
 /// できない）。そこで `tempfile` 相当の「実際に新規であること」を
-/// 以下の 2 点で保証する（`jit_cache_regression_tests::fresh_temp_dir` の
-/// 「PID＋カウンタのみ・`create_dir_all`」方式からの差分）:
+/// 以下の 2 点で保証する:
 /// - 名前に `SystemTime::now()` のナノ秒成分を追加し、PID 再利用が起きても
 ///   同名になる確率を実用上無視できる水準まで下げる
 /// - `create_dir_all`（既存ディレクトリを黙って受け入れる）ではなく
