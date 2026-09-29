@@ -1986,18 +1986,23 @@ fn atomic_rmw_occurrences_match_expected_test_only_count() {
     // 実コード上の atomic read-modify-write 出現は
     // `gemm_blis/mod.rs::gemm_blis_ic_dynamic_region`（`#[cfg(test)]`
     // ゲート済み・本番未結線の診断コード）内の 1 箇所のみ。本番経路に
-    // atomic 蓄積は存在しない。
+    // atomic 蓄積は存在しない。加えて `test_temp_dir.rs`（`#[cfg(test)]`
+    // 限定の一時ディレクトリ一意名採番カウンタ `fetch_add`。数値蓄積とは
+    // 無関係で本番未結線）も許容される test 専用の出現として固定する。
     assert_eq!(
-        total, 1,
-        "atomic read-modify-write の出現数が期待（1 件・gemm_blis/mod.rs\
-         の #[cfg(test)] 限定診断コードのみ）と一致しない（新規の atomic\
+        total, 2,
+        "atomic read-modify-write の出現数が期待（2 件・gemm_blis/mod.rs\
+         と test_temp_dir.rs の #[cfg(test)] 限定コードのみ）と一致しない（新規の atomic\
          蓄積が本番経路へ混入した可能性がある）: per_file={per_file:?}"
     );
     assert_eq!(
         per_file,
-        vec![("gemm_blis/mod.rs".to_string(), 1usize)],
+        vec![
+            ("gemm_blis/mod.rs".to_string(), 1usize),
+            ("test_temp_dir.rs".to_string(), 1usize),
+        ],
         "atomic read-modify-write の出現元ファイルが期待\
-         （gemm_blis/mod.rs のみ）と一致しない: {per_file:?}"
+         （gemm_blis/mod.rs・test_temp_dir.rs のみ）と一致しない: {per_file:?}"
     );
 }
 
