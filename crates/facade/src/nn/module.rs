@@ -4,7 +4,7 @@
 //! 定義するための土台である（`fandhe_ai_autodiff::nn::Module::forward` は生の
 //! `fandhe_ai_autodiff::Tape` を引数に取るため facade 利用者は名指しできない。
 //! `docs/facade-nn-module-exposure-decision.md` §1.3）。#2338 承認事項 1（案 B）・
-//! 2（required `forward` ＋ defaulted 6 件）・4（`forward` 第 1 引数は
+//! 2（required `forward` ＋ defaulted 6 件。#2401 で introspection 4 件を追加し 10 件）・4（`forward` 第 1 引数は
 //! [`crate::TapeRef`]）に従う。
 //!
 //! REQ-12: 生の `Tape`・`BackendOps`・内部層型（`as_*`・`forward_host`・
@@ -13,14 +13,15 @@
 //! required メソッドの追加は破壊的変更である。
 //!
 //! `named_parameters`／`set_parameter`／`state_dict`／`load_state_dict`／
-//! `set_training`／`training` の意味論・命名契約・fail-closed 検証は
+//! `set_training`／`training`／`children`／`named_modules`／`parameter_count`／`type_name`
+//! （後ろ 4 件は #2134 の鏡写し。イシュー #2401）の意味論・命名契約・fail-closed 検証は
 //! `crates/autodiff/src/nn/module.rs` の同名メソッドと同一である。
 //! `load_state_dict` は autodiff 側の単一実装を crate 内アダプタ（`FacadeModuleAdapter`。
 //! autodiff コンテナへ積む橋渡しを兼ねる。#2397）経由で再利用し、
 //! two-pass 検証・キー昇順適用・逆順ロールバックの一致を構造的に保証する
 //! （コピーによるドリフトを避ける）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fandhe_ai_autodiff::nn::Module as AutodiffModule;
 
@@ -28,9 +29,12 @@ use crate::{AutodiffError, TapeRef, Tensor, Var};
 
 /// facade 利用者が独自層を定義するための共通 forward シグネチャ。
 ///
-/// required は [`Self::forward`] の 1 件、defaulted は 6 件
+/// required は [`Self::forward`] の 1 件、defaulted は 10 件
 /// （[`Self::named_parameters`]・[`Self::set_parameter`]・[`Self::state_dict`]・
-/// [`Self::load_state_dict`]・[`Self::set_training`]・[`Self::training`]）。
+/// [`Self::load_state_dict`]・[`Self::set_training`]・[`Self::training`]・
+/// [`Self::children`]・[`Self::named_modules`]・[`Self::parameter_count`]・
+/// [`Self::type_name`]。後ろ 4 件は autodiff `Module`（#2134）の同名メソッドの鏡写しで、
+/// イシュー #2401）。
 /// 出典は `crates/autodiff/src/nn/module.rs` で、`tests/api_surface.rs` が
 /// この集合を機械的に固定する。
 pub trait Module {
@@ -87,6 +91,88 @@ pub trait Module {
     fn training(&self) -> bool {
         true
     }
+
+    /// この層が直接内包する子 `Module` の「名前, 参照」列を登録順で返す
+    /// （autodiff `Module::children`・PyTorch `Module.children()` 相当。#2134・#2401）。
+    ///
+    /// 名前は [`Self::named_parameters`] の接頭辞と完全一致させる（`ModuleList`／
+    /// `Sequential` は `"{index}"`）。既定は空（葉モジュール向け）。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        Vec::new()
+    }
+
+    /// 子孫を深さ優先（子自身 → その子孫）・登録順で再帰列挙する
+    /// （autodiff `Module::named_modules` の鏡写し。#2134・#2401）。
+    ///
+    /// ルート自身は含めない（`Self: Sized` 境界が object safety を壊すため。PyTorch の
+    /// `""` エントリとは異なる）。パスは `"{parent}.{child}"`。
+    ///
+    /// 循環・重複: 同一性は `(データポインタ, type_name)` の組で判定する。(1) 祖先スタックに
+    /// 既出なら常に打ち切る（循環でも panic しない）、(2) ゼロサイズ型を除き訪問済み集合でも
+    /// dedup する（共有子は最初の経路のみ。PyTorch の memo 相当）。ZST は複数インスタンスが
+    /// dangling address を共有しうるため (2) から除外する。型名をキーに含めるのは、先頭
+    /// フィールドの子がルートと同一アドレスになる（offset 0）場合の誤判定を避けるため。
+    fn named_modules(&self) -> Vec<(String, &dyn Module)> {
+        let mut out = Vec::new();
+        let root_key: NodeKey = (self as *const Self as *const (), self.type_name());
+        let mut ancestors: Vec<NodeKey> = vec![root_key];
+        let mut visited: HashSet<NodeKey> = HashSet::new();
+        for (name, child) in self.children() {
+            collect_named_modules(name, child, &mut ancestors, &mut visited, &mut out);
+        }
+        out
+    }
+
+    /// [`Self::named_parameters`] が公開する学習可能パラメータの総要素数
+    /// （autodiff `Module::parameter_count` の鏡写し。#2134・#2401）。
+    /// `saturating_add` で合計するためオーバーフローでも panic せず `usize::MAX` に飽和する。
+    fn parameter_count(&self) -> usize {
+        self.named_parameters()
+            .into_iter()
+            .fold(0usize, |acc, (_, tensor)| {
+                acc.saturating_add(tensor.numel())
+            })
+    }
+
+    /// 実装型名（`std::any::type_name::<Self>()`）。出力形式は標準ライブラリが安定を
+    /// 保証しないため表示用途に限る（autodiff `Module::type_name` の鏡写し。#2134・#2401）。
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+}
+
+/// `named_modules` 用のノード同一性キー（データポインタ, 型名）。非公開。
+pub(super) type NodeKey = (*const (), &'static str);
+
+/// `Module::named_modules` の再帰本体（autodiff 側 `collect_named_modules` と同一意味論）。
+/// 祖先スタックで循環を常に打ち切り、非 ZST のみ訪問済み集合で共有子を dedup する。
+fn collect_named_modules<'a>(
+    name: String,
+    child: &'a dyn Module,
+    ancestors: &mut Vec<NodeKey>,
+    visited: &mut HashSet<NodeKey>,
+    out: &mut Vec<(String, &'a dyn Module)>,
+) {
+    let key: NodeKey = (child as *const dyn Module as *const (), child.type_name());
+    if ancestors.contains(&key) {
+        return;
+    }
+    let is_zst = std::mem::size_of_val(child) == 0;
+    if !is_zst && !visited.insert(key) {
+        return;
+    }
+    out.push((name.clone(), child));
+    ancestors.push(key);
+    for (descendant_name, descendant) in child.children() {
+        collect_named_modules(
+            format!("{name}.{descendant_name}"),
+            descendant,
+            ancestors,
+            visited,
+            out,
+        );
+    }
+    ancestors.pop();
 }
 
 /// facade の [`Module`] を autodiff 側 `Module` として扱う crate 内専用アダプタ
@@ -107,7 +193,10 @@ pub trait Module {
 /// `named_parameters`／`set_parameter` の上で動く。facade 層が独自に
 /// `load_state_dict` を override していても本アダプタ経由では迂回される。
 /// `ModuleList` が子を扱うのと同じ意味論）。`as_*`／`is_pooling` は既定（`None`／`false`）。
-/// `set_requires_grad`／`requires_grad`／`children`／`type_name` は範囲外（#2400・#2401）で、
+/// `type_name` も委譲する（autodiff 側の表示に利用者の層の型名を出すため。#2401）。
+/// `children` は委譲しない（facade の `&dyn Module` を借用のまま autodiff の
+/// `&dyn Module` へ変換できず、autodiff の `named_modules` はアダプタ内へ降りない）。
+/// `set_requires_grad`／`requires_grad` は範囲外（#2400）で、
 /// 既定の fail-closed のまま（パラメータ持ちを含む `Sequential::freeze()` は現時点で `Err`）。
 ///
 /// ホスト推論経路は非対応: `supports_forward_host` を `false` へ override し
@@ -147,6 +236,10 @@ where
 
     fn training(&self) -> bool {
         Module::training(&*self.0)
+    }
+
+    fn type_name(&self) -> &'static str {
+        Module::type_name(&*self.0)
     }
 
     fn supports_forward_host(&self) -> bool {
@@ -423,6 +516,29 @@ mod tests {
         assert!(!seq.layers()[0].training());
         AutodiffModule::set_training(&mut seq, true);
         assert!(seq.layers()[0].training());
+    }
+
+    #[test]
+    fn adapter_delegates_type_name_but_not_children() {
+        let ad = adapter();
+        assert_eq!(
+            AutodiffModule::type_name(&ad),
+            Module::type_name(&Scale::new())
+        );
+        assert!(AutodiffModule::children(&ad).is_empty());
+        assert_eq!(
+            AutodiffModule::parameter_count(&ad),
+            Module::parameter_count(&Scale::new())
+        );
+
+        let mut seq = Sequential::new();
+        seq.push(Box::new(adapter()));
+        seq.push(Box::new(adapter()));
+        let names: Vec<String> = AutodiffModule::named_modules(&seq)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, vec!["0".to_string(), "1".to_string()]);
     }
 
     #[test]

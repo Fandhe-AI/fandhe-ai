@@ -1694,6 +1694,11 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
     const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
+    // `nn::Module` の本来の目的は内部型 `fandhe_ai_autodiff::nn::Module` の漏洩検出だが、
+    // 部分文字列一致のため facade 公開名 `fandhe_ai::nn::Module`（#2395）にも一致する。
+    // 走査対象は `src/interop/onnx.rs` 限定で、facade `nn::Module` を受ける ONNX API は
+    // 承認範囲外のため、この一致は意図した fail-closed（衝突ではない）。将来承認する場合は
+    // 本エントリを同時に見直す（`onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module`）。
     const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 12] = [
         "ModelProto",
         "NodeProto",
@@ -2187,6 +2192,9 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         if !trimmed.starts_with("pub ") && !trimmed.contains(" pub ") {
             continue;
         }
+        // `nn::Module` は内部型の漏洩検出用だが facade 公開名にも部分一致する。
+        // 意図した fail-closed（onnx.rs は facade `nn::Module` を受けない）。
+        // 詳細は `scan_unapproved_onnx_pub_items` の同名リスト直上のコメントを参照。
         for forbidden in [
             "ModelProto",
             "NodeProto",
@@ -4148,8 +4156,10 @@ fn nn_mod_rs_path() -> std::path::PathBuf {
 /// surface` と同型の検査）。**#2133 の保留（`docs/facade-nn-module-
 /// exposure-decision.md` §12）も本テストが担う**: 期待集合に `Module`
 /// を含めていないため、`src/nn/rnn.rs` の `pub use` 行へ `Module` を
-/// 追加すると本テストが fail する。承認後に案 B（facade 独自 trait）を
-/// 実装する際は期待集合を正ガードへ更新する。
+/// 追加すると本テストが fail する。案 B（facade 独自 trait）は #2395・#2396 で
+/// `src/nn/mod.rs` の `pub use` として実装済みで、本テストの期待集合は不変
+/// （`Module` は rnn 経由では再エクスポートしない）。nn 全体の公開 item 集合は
+/// `nn_mod_public_items_match_expected_set` が固定する（#2399）。
 #[test]
 fn nn_rnn_module_reexports_exactly_expected_surface() {
     let path = nn_rnn_rs_path();
@@ -5695,7 +5705,7 @@ fn scan_module_trait_methods(content: &str) -> Option<Vec<(String, bool, Vec<Str
 }
 
 /// #2395 の正ガード: facade `nn::Module` の面が承認済み集合
-/// （required = `forward` のみ・defaulted = 6 件）と完全一致すること
+/// （required = `forward` のみ・defaulted = 10 件。#2401 で introspection 4 件を追加）と完全一致すること
 /// （#2338 承認事項 2）。`forward_host`・`as_*` 等の内部フックの混入を拒否する。
 /// #2400／#2401 で鏡写しのメソッドを足すときは本集合を更新する。
 #[test]
@@ -5725,6 +5735,10 @@ fn assert_module_surface(methods: &[(String, bool, Vec<String>)]) -> Result<(), 
         "load_state_dict",
         "set_training",
         "training",
+        "children",
+        "named_modules",
+        "parameter_count",
+        "type_name",
     ]
     .into();
     if required != want_req || defaulted != want_def {
@@ -5768,7 +5782,9 @@ fn facade_nn_module_trait_guards_detect_each_category() {
     let ok = "pub trait Module { fn forward<'t>(&self, tape: TapeRef<'t>, input: &Var<'t>) -> R; \
         fn named_parameters(&self) -> V { V } fn set_parameter(&mut self, n: &str) -> R { R } \
         fn state_dict(&self) -> H { H } fn load_state_dict(&mut self, s: H) -> R { R } \
-        fn set_training(&mut self, t: bool) {} fn training(&self) -> bool { true } }";
+        fn set_training(&mut self, t: bool) {} fn training(&self) -> bool { true } \
+        fn children(&self) -> V { V } fn named_modules(&self) -> V { V } \
+        fn parameter_count(&self) -> usize { 0 } fn type_name(&self) -> &'static str { S } }";
     let m = scan_module_trait_methods(ok).expect("ok");
     assert!(assert_module_surface(&m).is_ok());
     assert!(check_module_signatures(&m).is_ok());
@@ -5778,6 +5794,9 @@ fn facade_nn_module_trait_guards_detect_each_category() {
     assert!(assert_module_surface(&m).is_err());
     let missing = ok.replace("fn training(&self) -> bool { true }", "");
     let m = scan_module_trait_methods(&missing).expect("missing");
+    assert!(assert_module_surface(&m).is_err());
+    let missing_intro = ok.replace("fn type_name(&self) -> &'static str { S }", "");
+    let m = scan_module_trait_methods(&missing_intro).expect("missing_intro");
     assert!(assert_module_surface(&m).is_err());
     let extra_req = ok.replace("fn training", "fn extra(&self); fn training");
     let m = scan_module_trait_methods(&extra_req).expect("req");
@@ -5828,7 +5847,7 @@ fn facade_declares_no_nn_module_items() {
     assert!(
         offending.is_empty(),
         "facade src に承認済み（`src/nn/module.rs` の `trait Module`・#2395、\
-         `src/nn/container.rs` の `struct ModuleList`／`struct Sequential`・#2396）以外の \
+         `src/nn/container.rs` の `struct ModuleList`／`struct Sequential`・#2396／`struct ModuleDict`・#2402）以外の \
          nn::Module／ModuleList 相当の独自宣言が見つかった: {offending:?}"
     );
     // インベントリ: 承認済みの `trait Module` 宣言がちょうど 1 件。
@@ -5840,7 +5859,7 @@ fn facade_declares_no_nn_module_items() {
     );
     // インベントリ（#2396）: 承認済みの `struct ModuleList`／`struct Sequential` が各 1 件。
     let container_rs = read_to_string_or_panic(&src_dir.join("nn/container.rs"));
-    for name in ["ModuleList", "Sequential"] {
+    for name in ["ModuleList", "Sequential", "ModuleDict"] {
         assert_eq!(
             scan_decl_count(&container_rs, "struct", name),
             1,
@@ -5894,6 +5913,9 @@ fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
             "Module" if token == "trait" && is_nn_module_rs => false,
             // #2396: `src/nn/container.rs` の `struct ModuleList`／`struct Sequential` のみ承認済み。
             "ModuleList" | "Sequential" if token == "struct" && is_nn_container_rs => false,
+            // #2402: `src/nn/container.rs` の `struct ModuleDict` のみ承認済み。
+            "ModuleDict" if token == "struct" && is_nn_container_rs => false,
+            "ModuleDict" => true,
             "Module" | "ModuleList" => true,
             "Sequential" => !is_compat_sequential,
             _ => false,
@@ -5945,6 +5967,16 @@ fn facade_declares_no_nn_module_items_detects_each_category() {
             "Sequential"
         ),
         2
+    );
+
+    // 承認済み（#2402）: `src/nn/container.rs` の `struct ModuleDict` のみ許容。
+    assert!(scan_nn_module_item_declarations("pub struct ModuleDict;", container_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct ModuleDict;", other).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct ModuleDict;", module_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub trait ModuleDict {}", container_rs).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub enum ModuleDict {}", container_rs).is_empty());
+    assert!(
+        !scan_nn_module_item_declarations("pub type ModuleDict = u8;", container_rs).is_empty()
     );
 
     // 負例: 非公開 import・型参照。
@@ -6652,6 +6684,8 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     // `compat/mod.rs`（`compat::save_model`／`compat::load_model`。イシュー #2369・親 #2362）。
     "save_model",
     "load_model",
+    // `nn/mod.rs`（`nn::summary`。イシュー #2402。`ModuleDict` と同じ承認済み 1 行）。
+    "summary",
     // `interop/safetensors.rs`（イシュー #2019）。
     "load_safetensors_f32",
     "load_safetensors_f32_from_bytes",
@@ -6766,7 +6800,9 @@ fn facade_pub_use_leaves_are_not_modules_detects_unapproved_lowercase_leaf() {
     );
 
     // 負例: allowlist 内の既知の関数再エクスポート。
-    let approved = unexpected_lowercase_leaves("pub use array::{ArrayData, array};");
+    let approved = unexpected_lowercase_leaves(
+        "pub use array::{ArrayData, array}; pub use container::{ModuleDict, summary};",
+    );
     assert!(
         approved.is_empty(),
         "allowlist 内の葉が誤って違反として検出された: {approved:?}"
@@ -6798,48 +6834,133 @@ fn line_contains_identifier(line: &str, ident: &str) -> bool {
     false
 }
 
-/// `crates/facade/src/**` の `pub use` 行に `ModuleDict`／`summary`
-/// （`fandhe_ai_autodiff::nn::container` に イシュー #2134 で追加した
-/// 内部クレート限定の新規公開面）が識別子単位で現れないことを固定
-/// する（`facade_does_not_reexport_create_graph_result` と同型の否定
-/// ガード）。
+/// facade の `pub use` が `ModuleDict`／`summary` を承認済みの 1 形だけで公開することを固定する
+/// （イシュー #2402 で承認済み配置を正ガード化。旧 #2134 では facade に `Module` trait が無く
+/// 「未公開」を否定ガードで固定していた）。
 ///
-/// # 背景（実装計画 §2.1）
-///
-/// イシュー #2134・親 #2131 とも承認コメントが確認できないうえ、
-/// facade は `Module` trait 自体を公開していないため
-/// `Box<dyn Module>` を受ける `ModuleDict`・`&dyn Module` を受ける
-/// `summary` は #2133（`Module` trait の facade 公開）完了まで facade
-/// からは意味を成さない。本 PR では `crates/facade/src/**` を変更
-/// しないため、本テストは「未公開」という現状を fail-closed に固定
-/// するもの。承認取得後の実施形（#2133 完了後の再エクスポート等）を
-/// 追加する際は本テストを更新すること。
+/// 承認済みの形は `src/nn/mod.rs` の `pub use container::{ModuleDict, summary};`（トークン列
+/// 完全一致・葉 2 件）だけである。パスのトークン列のどこかに `ModuleDict`／`summary` が現れる
+/// `pub use`（別ファイル・`fandhe_ai_autodiff::nn::*` 経由・`as` 別名・分割形・順序違い・
+/// 複数行）はすべて違反とする。承認済み配置の追加・変更時は本ガードを更新すること。
 #[test]
 fn facade_does_not_reexport_module_dict_or_summary() {
     let src_dir = facade_crate_root().join("src");
     let mut offending = Vec::new();
+    let mut allowed_total = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with("pub use") {
-                continue;
-            }
-            for ident in ["ModuleDict", "summary"] {
-                if line_contains_identifier(trimmed, ident) {
-                    offending.push(format!(
-                        "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
-                        path.display()
-                    ));
-                }
-            }
-        }
+        let (offenses, allowed) = scan_module_dict_summary_reexports(content, path);
+        offending.extend(offenses);
+        allowed_total += allowed;
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が ModuleDict／summary（イシュー #2134 の内部クレート限定\
-         新規公開面）を再エクスポートしている（承認未取得のまま対象外という\
-         設計判断に違反）: {offending:?}"
+        "facade の `pub use` が承認済みの 1 形（`src/nn/mod.rs` の \
+         `pub use container::{{ModuleDict, summary}};`）以外で ModuleDict／summary を公開している: \
+         {offending:?}"
     );
+    // インベントリ: 承認済みの葉がちょうど 2 件（走査の空振り検出）。
+    assert_eq!(
+        allowed_total, 2,
+        "src/nn/mod.rs の承認済み `pub use`（ModuleDict・summary の葉）がちょうど 2 件であること"
+    );
+}
+
+/// `content`（`path` 由来）の `pub use` を走査し、`ModuleDict`／`summary` を含むものについて
+/// 違反文字列の列と承認済みの葉の件数を返す（[`facade_does_not_reexport_module_dict_or_summary`]
+/// ・自己テスト共用）。
+fn scan_module_dict_summary_reexports(content: &str, path: &Path) -> (Vec<String>, usize) {
+    let is_nn_mod = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .ends_with("src/nn/mod.rs");
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending = Vec::new();
+    let mut allowed = 0usize;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let hits = path_tokens
+                .iter()
+                .filter(|t| matches!(t.as_str(), "ModuleDict" | "summary"))
+                .count();
+            if hits > 0 {
+                let path_strs = path_tokens.iter().map(String::as_str).collect::<Vec<_>>();
+                let approved = is_nn_mod
+                    && path_strs
+                        == [
+                            "container",
+                            ":",
+                            ":",
+                            "{",
+                            "ModuleDict",
+                            ",",
+                            "summary",
+                            "}",
+                        ];
+                if approved {
+                    allowed += hits;
+                } else {
+                    offending.push(format!(
+                        "{}: `pub use {}`",
+                        path.display(),
+                        path_strs.join(" ")
+                    ));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        i += 1;
+    }
+    (offending, allowed)
+}
+
+/// [`scan_module_dict_summary_reexports`] の自己テスト（正例・負例の合成入力）。
+#[test]
+fn facade_does_not_reexport_module_dict_or_summary_detects_each_category() {
+    let nn_mod = Path::new("crates/facade/src/nn/mod.rs");
+    let lib = Path::new("crates/facade/src/lib.rs");
+    let off = |c: &str, p: &Path| scan_module_dict_summary_reexports(c, p).0;
+
+    // 承認済みの 1 形（違反 0・葉 2 件）。
+    assert_eq!(
+        scan_module_dict_summary_reexports("pub use container::{ModuleDict, summary};", nn_mod),
+        (Vec::new(), 2)
+    );
+    // 複数行でも同じ形として扱う。
+    assert_eq!(
+        scan_module_dict_summary_reexports(
+            "pub use container::{\n    ModuleDict,\n    summary,\n};",
+            nn_mod
+        )
+        .1,
+        0,
+        "末尾カンマ付きはトークン列が異なるため承認形ではない（違反）"
+    );
+
+    // 違反。
+    assert!(!off("pub use container::{ModuleDict, summary};", lib).is_empty());
+    assert!(!off("pub use container::{summary, ModuleDict};", nn_mod).is_empty());
+    assert!(!off("pub use container::ModuleDict;", nn_mod).is_empty());
+    assert!(!off("pub use container::summary;", nn_mod).is_empty());
+    assert!(!off("pub use container::ModuleDict as D;", nn_mod).is_empty());
+    assert!(!off("pub use container::{ModuleDict, summary as s};", nn_mod).is_empty());
+    assert!(!off("pub use fandhe_ai_autodiff::nn::ModuleDict;", nn_mod).is_empty());
+    assert!(!off("pub use fandhe_ai_autodiff::nn::summary;", lib).is_empty());
+    assert!(!off("pub use foo::Bar as ModuleDict;", nn_mod).is_empty());
+    assert!(!off("pub use foo::bar as summary;", nn_mod).is_empty());
+
+    // 負例: 非 pub・`pub(crate)`・無関係な識別子・コメント中。
+    assert!(off("use container::{ModuleDict, summary};", nn_mod).is_empty());
+    assert!(off("pub(crate) use container::{ModuleDict, summary};", nn_mod).is_empty());
+    assert!(off("pub use container::{ModuleList, Sequential};", nn_mod).is_empty());
+    assert!(off("// pub use container::ModuleDict;", nn_mod).is_empty());
 }
 
 /// `crates/facade/src/compat/sequential.rs` に
@@ -18244,4 +18365,439 @@ fn collect_type_impls_detects_each_category() {
     );
     let ret_facade_tape = vec!["&".to_string(), "Tape".into()];
     assert!(ret_reaches_raw_tape(&ret_facade_tape));
+}
+// ---------------------------------------------------------------------------
+// facade `nn::{Module, ModuleList, Sequential}`・`TapeRef` の公開面の正ガード
+// （イシュー #2399・親 #2338 受け入れ条件 4）
+//
+// 個別に固定済みの観点（`pub mod` の集合・`pub use` の承認形・trait メソッド集合・
+// 宣言位置）に加え、ここでは (1) facade だけの import での到達性、(2) `src/nn/*.rs` の
+// 「全種別の公開 item 集合」の完全一致、(3) ONNX 走査の禁止部分文字列 `nn::Module` との
+// 区別を固定する。期待集合は #2400〜#2402 等で公開メソッドが増える場合は承認のうえ
+// 更新する（`facade_nn_module_trait_methods_match_approved_set` と同じ運用）。
+// ---------------------------------------------------------------------------
+
+/// `nn::{Module, ModuleList, Sequential}` と `TapeRef` が facade だけの import で到達でき、
+/// シグネチャ・基本動作が固定されていることのコンパイル時＋実行時固定
+/// （`nn_rnn_types_are_reachable_via_facade_only` と同型。`fandhe_ai_autodiff` は
+/// import しない。#2394・#2395・#2396 の公開面）。
+#[test]
+fn nn_module_types_are_reachable_via_facade_only() {
+    use fandhe_ai::TapeRef;
+    use fandhe_ai::nn::{Module, ModuleList, Sequential};
+
+    /// パラメータ 1 個のローカル層。
+    struct Scale {
+        w: fandhe_ai::Tensor<f32>,
+        training: bool,
+    }
+    impl Module for Scale {
+        fn forward<'t>(
+            &self,
+            tape: TapeRef<'t>,
+            input: &fandhe_ai::Var<'t>,
+        ) -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError> {
+            let w = tape.var(&self.w);
+            input.mul(&w)
+        }
+        fn named_parameters(&self) -> Vec<(String, &fandhe_ai::Tensor<f32>)> {
+            vec![("w".to_string(), &self.w)]
+        }
+        fn set_parameter(
+            &mut self,
+            name: &str,
+            value: fandhe_ai::Tensor<f32>,
+        ) -> Result<(), fandhe_ai::AutodiffError> {
+            if name != "w" || value.shape() != self.w.shape() {
+                return Err(fandhe_ai::AutodiffError::InvalidArgument(
+                    "unknown or shape mismatch".to_string(),
+                ));
+            }
+            self.w = value;
+            Ok(())
+        }
+        fn set_training(&mut self, training: bool) {
+            self.training = training;
+        }
+        fn training(&self) -> bool {
+            self.training
+        }
+    }
+
+    // コンパイル時プローブ: シグネチャの固定（`dyn Module` が成り立つこと・`TapeRef` の取得）。
+    fn _fwd<'t>(
+        m: &dyn Module,
+        t: TapeRef<'t>,
+        x: &fandhe_ai::Var<'t>,
+    ) -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError> {
+        m.forward(t, x)
+    }
+    fn _tr(t: &fandhe_ai::Tape) -> TapeRef<'_> {
+        TapeRef::from(t)
+    }
+
+    let scale = || Scale {
+        w: fandhe_ai::Tensor::<f32>::from_slice(&[2.0, 3.0], &[2])
+            .expect("test fixture: w の構築に失敗"),
+        training: true,
+    };
+    let x_data = fandhe_ai::Tensor::<f32>::from_slice(&[1.0, 1.0], &[2])
+        .expect("test fixture: x の構築に失敗");
+
+    // ModuleList: 保持器。forward は Err。
+    let mut list = ModuleList::new();
+    assert!(list.is_empty());
+    list.push(Box::new(scale()));
+    assert_eq!(list.len(), 1);
+    assert!(list.get(0).is_some() && list.get(1).is_none());
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&x_data);
+    assert!(list.forward(TapeRef::from(&tape), &x).is_err());
+
+    // Sequential: add／push／layers／From<ModuleList>。
+    let mut seq = Sequential::new().add(scale());
+    seq.push(Box::new(scale()));
+    assert_eq!((seq.len(), seq.layers().len()), (2, 2));
+    let from_list = Sequential::from(list);
+    assert_eq!(from_list.len(), 1);
+
+    // forward → backward → 入力勾配。
+    let out = seq
+        .forward(TapeRef::from(&tape), &x)
+        .expect("test fixture: forward");
+    let loss = out.sum(None).expect("test fixture: sum");
+    let grads = tape.backward(&loss).expect("test fixture: backward");
+    assert!(grads.get(&x).expect("test fixture: get").is_some());
+
+    // state_dict／load_state_dict の往復と set_training／training。
+    let sd = seq.state_dict();
+    assert_eq!(sd.len(), 2);
+    seq.load_state_dict(sd)
+        .expect("test fixture: load_state_dict");
+    assert!(seq.training());
+    seq.set_training(false);
+    assert!(!seq.training());
+}
+
+/// `(種別, 名前)` の集合。
+type PubItemSet = std::collections::BTreeSet<(String, String)>;
+/// 名前の集合。
+type NameSet = std::collections::BTreeSet<String>;
+
+/// 単一ファイルの「brace／paren／bracket 深さ 0」にある `pub` item を
+/// `(種別, 名前)` の集合として返す（制限なし `pub` と `pub(...)` 制限付きを別集合に分ける）。
+/// `pub use` は use tree を展開した葉ごとに `("use", 葉)` とする。
+/// 関数本体・impl・trait 本体・`#[cfg(test)] mod tests { .. }` の中身は深さ 1 以上のため
+/// 走査対象外（impl 側は [`scan_type_impl_surface`] が別途固定する）。
+/// コメント・文字列リテラルは無視する。
+fn scan_top_level_pub_items(content: &str) -> (PubItemSet, PubItemSet) {
+    const KINDS: [&str; 10] = [
+        "mod", "use", "fn", "struct", "enum", "trait", "type", "const", "static", "union",
+    ];
+    let tokens = tokens_of(content);
+    let mut public = std::collections::BTreeSet::new();
+    let mut restricted = std::collections::BTreeSet::new();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        match tokens[i].as_str() {
+            "{" | "(" | "[" => depth += 1,
+            "}" | ")" | "]" => depth -= 1,
+            "pub" if depth == 0 => {
+                let mut j = i + 1;
+                let mut is_restricted = false;
+                if tokens.get(j).map(String::as_str) == Some("(") {
+                    is_restricted = true;
+                    j = matching_close(&tokens, j, "(", ")").map_or(tokens.len(), |c| c + 1);
+                }
+                // `const fn` の `const` は修飾子。`pub const X` の `const` は種別。
+                while let Some(t) = tokens.get(j) {
+                    let is_qualifier = matches!(t.as_str(), "async" | "unsafe" | "extern")
+                        || (t == "const" && tokens.get(j + 1).map(String::as_str) == Some("fn"));
+                    if !is_qualifier {
+                        break;
+                    }
+                    j += 1;
+                }
+                let kind = tokens.get(j).cloned().unwrap_or_default();
+                let entry_names: Vec<String> = if kind == "use" {
+                    let mut end = j + 1;
+                    while end < tokens.len() && tokens[end] != ";" {
+                        end += 1;
+                    }
+                    collect_pub_use_leaves(&tokens[j + 1..end.min(tokens.len())])
+                } else if KINDS.contains(&kind.as_str()) {
+                    tokens.get(j + 1).cloned().into_iter().collect()
+                } else {
+                    // 未知の種別（`macro` 等）も見逃さず、種別名そのものを記録する。
+                    vec![String::new()]
+                };
+                for name in entry_names {
+                    let set = if is_restricted {
+                        &mut restricted
+                    } else {
+                        &mut public
+                    };
+                    set.insert((kind.clone(), name));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (public, restricted)
+}
+
+fn pair_set(items: &[(&str, &str)]) -> std::collections::BTreeSet<(String, String)> {
+    items
+        .iter()
+        .map(|(k, n)| (k.to_string(), n.to_string()))
+        .collect()
+}
+
+/// `type_name` の impl 群から (固有 impl の制限なし pub fn 名, 固有 impl の非 pub fn 名,
+/// 手書き trait impl の trait 名) を返す。
+fn scan_type_impl_surface(content: &str, type_name: &str) -> (NameSet, Vec<String>, NameSet) {
+    let mut public = std::collections::BTreeSet::new();
+    let mut nonpublic = Vec::new();
+    let mut traits = std::collections::BTreeSet::new();
+    for imp in collect_type_impls(content, type_name) {
+        match &imp.trait_tokens {
+            None => {
+                for f in imp.fns {
+                    if f.vis == FnVis::Public {
+                        public.insert(f.name);
+                    } else {
+                        nonpublic.push(f.name);
+                    }
+                }
+            }
+            Some(t) => {
+                traits.insert(trait_name(t));
+            }
+        }
+    }
+    (public, nonpublic, traits)
+}
+
+fn nn_src(file: &str) -> String {
+    read_to_string_or_panic(&facade_crate_root().join("src/nn").join(file))
+}
+
+/// 正ガード: `src/nn/mod.rs` の全種別の公開 item が
+/// `pub mod rnn` と `pub use` の 5 件（`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
+/// `ModuleDict`／`summary` は #2402 で承認済み）に完全一致する。
+/// `pub fn`／`pub struct` 等の追加や `pub mod container;` 等の新設は fail する。
+#[test]
+fn nn_mod_public_items_match_expected_set() {
+    let (public, restricted) = scan_top_level_pub_items(&nn_src("mod.rs"));
+    assert_eq!(
+        public,
+        pair_set(&[
+            ("mod", "rnn"),
+            ("use", "Module"),
+            ("use", "ModuleDict"),
+            ("use", "ModuleList"),
+            ("use", "Sequential"),
+            ("use", "summary"),
+        ]),
+        "src/nn/mod.rs の公開 item 集合が期待と一致しない（nn 公開面の無断拡大を検知）"
+    );
+    assert_eq!(
+        restricted,
+        pair_set(&[("use", "FacadeModuleAdapter")]),
+        "制限付き pub item は crate 内アダプタの再エクスポート 1 件のみ（#2401）"
+    );
+}
+
+/// 正ガード: `src/nn/module.rs` の公開 item は `trait Module` のみ。
+/// 制限付き可視性のまま残すのは crate 内アダプタ `FacadeModuleAdapter`（REQ-12）と
+/// 走査用の内部型別名 `NodeKey`（`pub(super) type`。#2401）の 2 件。
+#[test]
+fn nn_module_rs_public_items_match_expected_set() {
+    let (public, restricted) = scan_top_level_pub_items(&nn_src("module.rs"));
+    assert_eq!(public, pair_set(&[("trait", "Module")]));
+    assert_eq!(
+        restricted,
+        pair_set(&[("struct", "FacadeModuleAdapter"), ("type", "NodeKey")]),
+        "FacadeModuleAdapter・NodeKey は制限付き可視性のままであること（公開面へ出さない）"
+    );
+}
+
+/// 正ガード: `src/nn/container.rs` の公開 item は `ModuleDict`・`ModuleList`・`Sequential` の
+/// 3 構造体と `fn summary`（#2402 で承認済み）のみ。
+#[test]
+fn nn_container_rs_public_items_match_expected_set() {
+    let (public, restricted) = scan_top_level_pub_items(&nn_src("container.rs"));
+    assert_eq!(
+        public,
+        pair_set(&[
+            ("fn", "summary"),
+            ("struct", "ModuleDict"),
+            ("struct", "ModuleList"),
+            ("struct", "Sequential"),
+        ])
+    );
+    assert!(restricted.is_empty(), "制限付き pub item: {restricted:?}");
+}
+
+/// 正ガード: `ModuleList`／`Sequential` の固有 pub メソッド集合と手書き trait impl 集合。
+/// 固有 impl に可視性なし・制限付きの fn を置かない（`Deref` 等で内部へ抜ける経路の追加も
+/// trait impl 集合で検出する）。
+#[test]
+fn nn_containers_inherent_and_trait_impls_match_expected_set() {
+    let content = nn_src("container.rs");
+    let to_set = |xs: &[&str]| -> std::collections::BTreeSet<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    };
+    let (list_pub, list_np, list_traits) = scan_type_impl_surface(&content, "ModuleList");
+    assert_eq!(
+        list_pub,
+        to_set(&[
+            "new", "push", "len", "is_empty", "get", "get_mut", "iter", "iter_mut"
+        ])
+    );
+    assert!(
+        list_np.is_empty(),
+        "ModuleList の非 pub 固有 fn: {list_np:?}"
+    );
+    assert_eq!(list_traits, to_set(&["Default", "FromIterator", "Module"]));
+
+    let (seq_pub, seq_np, seq_traits) = scan_type_impl_surface(&content, "Sequential");
+    assert_eq!(
+        seq_pub,
+        to_set(&[
+            "new",
+            "push",
+            "add",
+            "len",
+            "is_empty",
+            "layers",
+            "layers_mut"
+        ])
+    );
+    assert!(seq_np.is_empty(), "Sequential の非 pub 固有 fn: {seq_np:?}");
+    assert_eq!(seq_traits, to_set(&["Default", "From", "Module"]));
+
+    let (dict_pub, dict_np, dict_traits) = scan_type_impl_surface(&content, "ModuleDict");
+    assert_eq!(
+        dict_pub,
+        to_set(&[
+            "new",
+            "from_pairs",
+            "insert",
+            "remove",
+            "get",
+            "get_mut",
+            "contains_key",
+            "keys",
+            "iter",
+            "iter_mut",
+            "len",
+            "is_empty"
+        ])
+    );
+    assert!(
+        dict_np.is_empty(),
+        "ModuleDict の非 pub 固有 fn: {dict_np:?}"
+    );
+    assert_eq!(dict_traits, to_set(&["Default", "Module"]));
+}
+
+/// [`scan_top_level_pub_items`]・[`scan_type_impl_surface`] の自己テスト
+/// （合成入力で各カテゴリの逸脱が検出され、現行の形が正例として通ることを確認する）。
+#[test]
+fn nn_public_item_set_scanners_detect_each_category() {
+    let base = "mod container; mod module; pub mod rnn;\n\
+                pub use container::{ModuleDict, ModuleList, Sequential, summary};\n\
+                pub use module::Module;\n";
+    let expected_mod = pair_set(&[
+        ("mod", "rnn"),
+        ("use", "Module"),
+        ("use", "ModuleDict"),
+        ("use", "ModuleList"),
+        ("use", "Sequential"),
+        ("use", "summary"),
+    ]);
+    // 正例。
+    assert_eq!(scan_top_level_pub_items(base).0, expected_mod);
+    // 負例: 追加された公開 item はすべて期待集合から外れる。
+    for extra in [
+        "pub fn x() {}",
+        "pub mod container;",
+        "pub use module::FacadeModuleAdapter;",
+        "pub struct S;",
+        "pub const fn c() {}",
+        "pub unsafe fn u() {}",
+        "pub macro m() {}",
+    ] {
+        let src = format!("{base}{extra}\n");
+        assert_ne!(
+            scan_top_level_pub_items(&src).0,
+            expected_mod,
+            "追加が検出されなかった: {extra}"
+        );
+    }
+    // 関数本体・テストモジュール内の `pub` は走査対象外（深さ 1 以上）。
+    let nested = format!("{base}#[cfg(test)] mod tests {{ pub fn t() {{}} }}\n");
+    assert_eq!(scan_top_level_pub_items(&nested).0, expected_mod);
+    // 制限付き可視性は別集合。フィールドの `pub(crate)` は拾わない。
+    let (p, r) = scan_top_level_pub_items("pub(crate) struct A<P>(pub(crate) P); pub trait T {}");
+    assert_eq!(p, pair_set(&[("trait", "T")]));
+    assert_eq!(r, pair_set(&[("struct", "A")]));
+
+    // impl 側: 固有 pub fn の追加・非 pub 固有 fn・追加 trait impl の検出。
+    let imp = "impl Sequential { pub fn new() -> Self { todo!() } }\n\
+               impl Default for Sequential { fn default() -> Self { todo!() } }";
+    let (pubs, np, traits) = scan_type_impl_surface(imp, "Sequential");
+    assert_eq!((pubs.len(), np.len(), traits.len()), (1, 0, 1));
+    let bad = format!(
+        "{imp}\nimpl Sequential {{ pub fn extra(&self) {{}} fn hidden(&self) {{}} \
+         pub(crate) fn r(&self) {{}} }}\nimpl Deref for Sequential {{ }}"
+    );
+    let (pubs, np, traits) = scan_type_impl_surface(&bad, "Sequential");
+    assert!(pubs.contains("extra"));
+    assert!(np.contains(&"hidden".to_string()) && np.contains(&"r".to_string()));
+    assert!(traits.contains("Deref"));
+}
+
+/// ONNX 走査の禁止部分文字列 `nn::Module`（`src/interop/onnx.rs` 限定）は、本来は内部型
+/// `fandhe_ai_autodiff::nn::Module` の漏洩検出用だが、部分文字列一致のため facade の公開名
+/// `fandhe_ai::nn::Module`（#2395）にも一致する。走査対象は `src/interop/onnx.rs` に限られ、
+/// facade `nn::Module` を受け取る ONNX API は承認範囲外
+/// （`docs/facade-onnx-export-exposure-decision.md`）のため、この一致は意図した fail-closed で
+/// 誤検知（衝突）ではない。現状 `onnx.rs` は `nn::Module` を一切参照せず衝突していないことと、
+/// 走査が両方の名前を検出することを固定する。将来 facade `nn::Module` から ONNX へ export する
+/// API を承認する場合は、このエントリと許容リストを同時に見直す。
+#[test]
+fn onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module() {
+    let onnx_path = facade_crate_root().join("src/interop/onnx.rs");
+    let content = read_to_string_or_panic(&onnx_path);
+    let compact: String = strip_comments_and_literals(&content)
+        .into_iter()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        !compact.contains("nn::Module"),
+        "src/interop/onnx.rs が nn::Module を参照している（facade／内部のいずれも承認範囲外）"
+    );
+
+    for ty in ["crate::nn::Module", "fandhe_ai::nn::Module"] {
+        let src =
+            format!("pub fn from_module(m: &dyn {ty}) -> Result<Self, OnnxError> {{ todo!() }}");
+        let offenses = scan_unapproved_onnx_pub_items(&src);
+        assert!(
+            offenses.iter().any(|o| o.contains("from_module")),
+            "承認範囲外の fn 名が検出されなかった ({ty}): {offenses:?}"
+        );
+        assert!(
+            offenses.iter().any(|o| o.contains("nn::Module")),
+            "シグネチャ中の nn::Module が検出されなかった ({ty}): {offenses:?}"
+        );
+    }
+
+    // nn の各ファイルは ONNX 走査の対象パス（src/interop/onnx.rs）と別である。
+    for file in ["mod.rs", "module.rs", "container.rs"] {
+        assert_ne!(facade_crate_root().join("src/nn").join(file), onnx_path);
+    }
 }

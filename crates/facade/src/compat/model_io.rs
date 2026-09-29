@@ -66,14 +66,15 @@ const FORMAT_VERSION: u64 = 1;
 /// manifest（JSON）のサイズ上限（バイト）。1 MiB。
 ///
 /// 値の根拠: v1 の manifest は 1 層あたり 100〜150 B 程度で、`MAX_LAYERS`（4096 層）でも
-/// 約 0.6 MiB に収まる。**候補値であり、上限値のユーザー承認（親 #2362 の承認項目 5）は
-/// 実装時点で記録が確認できていない**（決定記録 §2 item 4）。
+/// 約 0.6 MiB に収まる。**2026-09-29 ユーザー承認済み**（親 #2362 のコメント
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/2362#issuecomment-5888987015>。
+/// 決定記録 §2 item 4）。値の変更は再承認が必要。
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 /// 層数の上限。4096。
 ///
 /// 値の根拠: 既存テストに 1714 層の `Sequential` があり
 /// （`sequential.rs` の `..._with_1714_layers`）、それを包含する 2 のべき乗。
-/// 承認状況は `MAX_MANIFEST_BYTES` と同じ（候補値）。
+/// 承認状況は `MAX_MANIFEST_BYTES` と同じ（2026-09-29 ユーザー承認済み。#2362 コメント）。
 const MAX_LAYERS: usize = 4096;
 /// JSON のコンテナ（object／array）のネスト上限。ポリシー閾値ではなく v1 スキーマの
 /// 最大ネスト（root → 配列 → 要素 object → params／shape）から導いた構造上の値。
