@@ -162,7 +162,7 @@ pub mod model;
 /// `docs/facade-predict-batches-phase-metrics-decision.md` を参照。
 mod inference;
 
-/// 非公開。`model` と将来の `compat::model_io` が共有する no-follow 葉オープンと
+/// 非公開。`model` と `compat::model_io`（#2369）が共有する no-follow 葉オープンと
 /// サイズ上限（`fs_guard` モジュール doc 参照）。
 mod fs_guard;
 
@@ -5522,22 +5522,16 @@ struct TrainStepHoldDoctestGuard;
 struct NpyIoHoldDoctestGuard;
 
 /// イシュー #2188（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
-/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
+/// 行内深掘り）」）で導入し、イシュー #2369（親 #2362）で**代替案専用へ縮小**
+/// した facade 公開保留の doctest 足場。
 /// `TrainStepHoldDoctestGuard`（#2184）と同型の「正のプローブ 1 ブロック
 /// 方式」を採る: facade の全 `pub mod` を glob import したスコープに、
-/// 本ブロック内でのみ定義したローカル型・関数
-/// （`__fandhe_model_io_hold_probe::{model_io::{save_model, load_model},
-/// save_model, load_model, ModelIoError}`）と、`fandhe_ai::compat::
-/// Sequential` への inherent メソッドを装うトレイト
-/// （`__FandheModelIoHoldProbe`）を導入し、実際に使う名前・呼び出しを
-/// 書く。facade がどの経路（モジュール `model_io` の公開・crate ルート
-/// 直下または `compat` 直下への自由関数 `save_model`／`load_model` の
-/// 公開・エラー型 `ModelIoError` の公開・`Sequential` への inherent
-/// メソッド追加）でこれらの名前を公開しても、ローカル定義との glob 衝突
-/// （モジュール名・関数名・型名の場合。E0659 等）または呼び出しシグネ
-/// チャの不一致（inherent メソッドがトレイトメソッドより優先解決される
-/// ため、本プローブの trait 経由呼び出しが型・引数不一致でコンパイル
-/// 失敗する）でエラーコードに依存せずコンパイルが失敗する。
+/// 本ブロック内でのみ定義した、`fandhe_ai::compat::Sequential` への inherent
+/// メソッドを装うトレイト（`__FandheModelIoHoldProbe`）を導入し、実際に使う
+/// 呼び出しを書く。facade が `Sequential` へ inherent メソッド
+/// （`save`／`load`／`save_model`／`load_model`）を追加すると、inherent メソッドが
+/// トレイトメソッドより優先解決されるため、本プローブの trait 経由呼び出しが
+/// 型・引数不一致でエラーコードに依存せずコンパイル失敗する。
 ///
 /// `docs/compat-model-io-decision.md` §2 は代替公開 API 案として
 /// `Sequential::save(&self, dir)`／`Sequential::load(dir)`（`_model`
@@ -5548,26 +5542,23 @@ struct NpyIoHoldDoctestGuard;
 /// `Sequential::save`／`Sequential::load` を facade が追加しても本
 /// プローブ・`api_surface.rs` のソース走査のいずれも検出できなかった）。
 ///
-/// **本イシューは内部ロジックすら実装しない**（`TrainStepHoldDoctestGuard`
-/// 〈#2184〉・`GradAccumulationHoldDoctestGuard`〈#2180〉が内部ロジックを
-/// 実装済みのまま facade 公開のみを保留したのとは異なり、`save_model`／
-/// `load_model` には本番の呼び出し元が存在しないため、内部実装だけを
-/// 先行させると `clippy -D warnings` の `dead_code` に抵触する。
-/// `docs/compat-model-io-decision.md` §0 参照）。保留対象は facade 公開面
-/// のみで、承認事項・承認後のファイル形式・意味論・検証計画は同 doc
-/// §2・§4〜§6 に記録済み。
+/// **#2369 で自由関数 `compat::save_model`／`compat::load_model` と
+/// `compat::ModelIoError` は公開済み**（親 #2362 でユーザー承認済みの主案。
+/// 承認事項 1）。そのため、旧版が持っていたローカル定義（`model_io` モジュール・
+/// 自由関数・エラー型のプローブ）は glob 衝突で本 doctest 自体を壊すため撤去し、
+/// 正の確認は `api_surface.rs` の正ガード
+/// （`model_io_items_are_reachable_via_facade` 等）へ移した。**残る保留**は
+/// 代替案の inherent メソッド `Sequential::save`／`Sequential::load`（および
+/// 同じく承認外の `Sequential::save_model`／`Sequential::load_model`）で、
+/// 本 doctest と `api_surface.rs` の `Sequential` 内 `fn save`／`fn load`
+/// 走査・workspace インベントリ（0 件固定）が固定する
+/// （`docs/compat-model-io-decision.md` §7・§10）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// model_io_hold_doctest_globs_all_pub_modules`・
 /// `model_io_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_model_io`・
-/// `workspace_declares_model_io_fn_names_only_in_allowed_locations`）
-/// との多層防御の位置づけ・承認未取得の経緯は
-/// `docs/compat-model-io-decision.md` §10「再開条件」節を参照。
-///
-/// 承認（`save_model`／`load_model`・`ModelIoError` の新設）を得た日が
-/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
+/// `workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations`）
+/// との多層防御の位置づけは同 doc §7 を参照。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5583,17 +5574,6 @@ struct NpyIoHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
-///
-/// mod __fandhe_model_io_hold_probe {
-///     pub mod model_io {
-///         pub fn save_model() {}
-///         pub fn load_model() {}
-///     }
-///     pub fn save_model() {}
-///     pub fn load_model() {}
-///     pub struct ModelIoError;
-/// }
-/// use __fandhe_model_io_hold_probe::*;
 ///
 /// struct __FandheModelIoHoldMarker;
 ///
@@ -5617,20 +5597,6 @@ struct NpyIoHoldDoctestGuard;
 ///     fn load(&self) -> __FandheModelIoHoldMarker {
 ///         __FandheModelIoHoldMarker
 ///     }
-/// }
-///
-/// fn __probe_module_path() {
-///     model_io::save_model();
-///     model_io::load_model();
-/// }
-///
-/// fn __probe_free_fn() {
-///     save_model();
-///     load_model();
-/// }
-///
-/// fn __probe_error_type() {
-///     let _ = ModelIoError;
 /// }
 ///
 /// fn __probe_inherent_method(seq: &fandhe_ai::compat::Sequential) {
