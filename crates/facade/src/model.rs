@@ -983,19 +983,48 @@ mod tests {
         );
     }
 
-    /// テストごとに衝突しない一時ディレクトリを作る（`crates/facade/
-    /// tests/model_registry.rs::temp_dir_for` と同型。実際の 1 GiB
-    /// ファイルを用意する非現実的な手段は取らず、`resolve_model_file_
-    /// with_limit`／`load_with_limit` の `max` 引数を小さく指定する
-    /// ことで小さな実ファイルのみで上限超過を再現する）。
-    fn temp_dir_for(test_name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "fandhe-ai-model-registry-unit-{}-{test_name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// テスト用一時ディレクトリの RAII ガード（イシュー #2378・親 #2363）。
+    /// `tests/common/temp_dir.rs::TempDirGuard` と同方式（一意名の `create_dir`
+    /// 排他作成・事前削除なし・drop 時に作成分のみ削除）。`tests/common` は
+    /// src から見えないため複製している。実際の 1 GiB ファイルを用意する
+    /// 非現実的な手段は取らず、`resolve_model_file_with_limit`／
+    /// `load_with_limit` の `max` 引数を小さく指定して上限超過を再現する。
+    struct TempDirGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let pid = std::process::id();
+            for _ in 0..64 {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+                let candidate = std::env::temp_dir().join(format!(
+                    "fandhe-ai-model-registry-unit-{pid}-{nanos}-{seq}-{label}"
+                ));
+                match std::fs::create_dir(&candidate) {
+                    Ok(()) => return Self { path: candidate },
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => panic!("一時ディレクトリを作成できない: {e}"),
+                }
+            }
+            panic!("一意な一時ディレクトリ名を 64 回試行しても確保できない");
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 
     fn write_leaf(dir: &Path, contents: &[u8]) {
@@ -1014,10 +1043,10 @@ mod tests {
     /// 9 バイトのファイル・上限 8 バイトで同じ経路を再現できる。
     #[test]
     fn resolve_model_file_with_limit_rejects_over_bound() {
-        let dir = temp_dir_for("resolve-over-bound");
-        write_leaf(&dir, b"123456789");
+        let dir = TempDirGuard::new("resolve-over-bound");
+        write_leaf(dir.path(), b"123456789");
 
-        let registry = ModelRegistry::with_cache_dir(dir.clone());
+        let registry = ModelRegistry::with_cache_dir(dir.path());
         let err = registry
             .resolve_model_file_with_limit("mlp", "v1", 8)
             .unwrap_err();
@@ -1035,8 +1064,6 @@ mod tests {
             }
             other => panic!("ModelError::TooLarge を期待したが {other:?} だった"),
         }
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `resolve_model_file_with_limit` は `len == max`（境界値）を
@@ -1046,17 +1073,15 @@ mod tests {
     /// `load_safetensors_f32_from_bytes` 側のエラーとは切り分ける）。
     #[test]
     fn resolve_model_file_with_limit_accepts_at_bound() {
-        let dir = temp_dir_for("resolve-at-bound");
-        write_leaf(&dir, b"12345678");
+        let dir = TempDirGuard::new("resolve-at-bound");
+        write_leaf(dir.path(), b"12345678");
 
-        let registry = ModelRegistry::with_cache_dir(dir.clone());
+        let registry = ModelRegistry::with_cache_dir(dir.path());
         assert!(
             registry
                 .resolve_model_file_with_limit("mlp", "v1", 8)
                 .is_ok()
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `load_with_limit`（[`ModelRegistry::load`] 本体）が `max` を
@@ -1066,16 +1091,14 @@ mod tests {
     /// 「非信頼入力の扱い」節手順 5〜6）。
     #[test]
     fn load_with_limit_rejects_over_bound() {
-        let dir = temp_dir_for("load-over-bound");
-        write_leaf(&dir, b"123456789");
+        let dir = TempDirGuard::new("load-over-bound");
+        write_leaf(dir.path(), b"123456789");
 
-        let registry = ModelRegistry::with_cache_dir(dir.clone());
+        let registry = ModelRegistry::with_cache_dir(dir.path());
         let err = registry.load_with_limit("mlp", "v1", 8).unwrap_err();
         assert!(
             matches!(err, ModelError::TooLarge { len: 9, max: 8, .. }),
             "ModelError::TooLarge {{ len: 9, max: 8, .. }} を期待したが {err:?} だった"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

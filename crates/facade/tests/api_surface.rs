@@ -59,6 +59,9 @@
 
 use std::path::Path;
 
+mod common;
+use common::temp_dir::TempDirGuard;
+
 fn facade_crate_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
@@ -4953,11 +4956,8 @@ fn collect_public_module_paths_recursive_ignores_private_mod_subtree() {
 /// 解決していた）。一時ディレクトリに実ファイルを置いて検証する。
 #[test]
 fn collect_public_module_paths_recursive_resolves_file_child_of_inline_mod() {
-    let root = std::env::temp_dir().join(format!(
-        "fandhe-ai-api-surface-inline-mod-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
+    let guard = TempDirGuard::new("api-surface-inline-mod");
+    let root = guard.path().to_path_buf();
     std::fs::create_dir_all(root.join("outer")).expect("一時ディレクトリを作成できない");
     std::fs::write(
         root.join("outer").join("child.rs"),
@@ -4971,7 +4971,6 @@ fn collect_public_module_paths_recursive_resolves_file_child_of_inline_mod() {
     let tokens = tokenize_including_punctuation("pub mod outer { pub mod child; }");
     let mut out = std::collections::BTreeSet::new();
     collect_public_module_paths_recursive(&tokens, &root, "", &mut out);
-    let _ = std::fs::remove_dir_all(&root);
 
     let expected: std::collections::BTreeSet<String> =
         ["outer", "outer::child", "outer::child::grandchild"]
