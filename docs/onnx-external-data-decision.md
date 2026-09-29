@@ -571,7 +571,8 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   `unsafe` を要しない（下記「FileKey・FileSnapshot」節・「最終ハンドルの
   実所在検証」〈5 節「Windows 版の残存リスク」項目 5〉は std が未安定化の
   API に依存するため kernel32.dll への手書き `extern "system"` 宣言を使い、
-  `unsafe` を FFI 境界〈2 関数の呼び出し箇所のみ〉に限定する）。
+  `unsafe` を FFI 境界〈2 関数の FFI 呼び出しと `file_identity` の
+  `assume_init` の計 3 つの `unsafe` 式のみ〉に限定する。事後監査は 10 節）。
 - **FileKey・FileSnapshot（2026-09-28 codex-review 是正・PR #2351 で更新）**:
   dev/ino 相当（`file_index`）・volume serial number
   （`volume_serial_number`）・ctime 相当（`change_time`）は
@@ -760,6 +761,8 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
    ボリュームルートハンドルと突き合わせる。いずれもハンドルが指す
    オブジェクトそのものに基づく逆引きであり、経路文字列の再解決では
    ないため、reparse point を事後に元へ戻しても偽装できない。
+   本 5. の事後監査と閉鎖状況の結論（pass 1・pass 2 の両方で検証が走る
+   こと、検出型である点の限界）は 10 節（イシュー #2392）を正とする。
 
 **残るリスク**:
 
@@ -768,16 +771,27 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   ディレクトリへの着地を見逃す欠陥が残っており、held ハンドルとの対応
   づけ・ボリューム識別子の突き合わせで最終的に閉じた
   （2026-09-28・PR #2351。codex-review 指摘 `PRRT_kwDOTuUCJc6m0J-L`）。
+  閉鎖は検出型（事後検証）であり、`base_dir` 外のオブジェクトを 1 バイト
+  も読まないことは保証するが、拒否されるまでの間の open そのもの
+  （メタデータ取得・短時間の共有ロック保持）と、`is_file`／reparse の
+  分類が実所在検証より先に走ることによるエラー種別の差（`base_dir`
+  外の存在・種別の限定的なオラクル）は残る受容リスクである（10.3 節）。
 - (b) **snapshot の弱さ**: `FileSnapshot`（4.6 節）の時刻フィールドは
   `SetFileTime` で利用者が書き換え可能なため、pass 1・pass 2 間の
   差し替え検出は unix の ctime より弱い。ただし封じ込め（`base_dir`
   配下・reparse なし・区間は有界）は snapshot に依存しない（pass 2 は
   同じ封じ込め手順で開き直し、書き込み共有を拒否した状態で読むため）。
+  `ChangeTime` への切替も利用者設定が可能なため根本改善にならない。
+  改善候補（USN による変更検知）は 10.4 節に起票候補として記録した。
 - (c) 「実体同一性の欠如（`FileKey` パスベース）」は上記「FileKey・
   FileSnapshot」節の是正（`(dwVolumeSerialNumber, nFileIndex)` への
   切替）で閉じた（2026-09-28・PR #2351）。
 - (d) NTFS 以外（ReFS・exFAT 等）で「reparse point 化には空ディレクトリ
   が必要」という規則が成り立つかは未確認（Windows 実機での確認事項）。
+  2026-09-29 再分類（10.4 節）: 実所在検証（5. 項）はこの規則に依存
+  しないため、flip-and-revert の検出に関する影響度は下がる。残る論点
+  （ReFS の 64 bit `nFileIndex` の一意性・共有モードの意味論）は 10.4
+  節の表に従い、FFI 改善候補と #2393 の実機確認項目に分ける。
 - **可用性への副作用**: 読み込み中は祖先ディレクトリを rename・削除
   しようとした他プロセスが共有違反で失敗する。他プロセスが書き込み
   ハンドルで開いているモデルデータは読めない。OneDrive のプレースホルダ
@@ -823,25 +837,32 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   無くす（`Arc` 共有）には `tensor-core` の `Tensor` 構築 API か
   `RawTensor` の表現の変更が要るため、必要になった時点で別途扱う
   （現状は失敗可能確保で abort しない）。
-- **（新規・2026-09-28・イシュー #2349）facade `OnnxModel::from_path` の
-  Windows 対応**: `onnx-interop::onnx::external_data` 自体は Windows へ
-  対応済み（4.6 節）だが、facade（`fandhe-ai`）は `backend-cuda` への
-  無条件依存のため Windows ではビルドできない（`crates/backend-cuda/
-  src/nvrtc.rs` の `compile_error!`。#509／PR #677）。facade の Windows
-  対応には backend-cuda 側の再設計（NVRTC キャッシュの TOCTOU 対策を
-  非 unix でも成立させる、または Windows では機能を落として妥協する等）
-  が必要で本 PR の範囲外。起票候補として記録し、ユーザー承認後に別
-  Issue へ切り出す。
-- **（新規・2026-09-28・イシュー #2349）Windows の残存 TOCTOU 経路の
-  閉鎖**: 5 節「Windows 版の残存リスク」(a) の flip-and-revert 競合は、
-  `GetFinalPathNameByHandleW` または `NtCreateFile(RootDirectory)` の
-  FFI（`unsafe` の追加、場合によっては `windows-sys` 依存の追加）で
-  閉じられる。両方とも deps-policy.md・coding-rust.md の承認対象
-  （依存追加・`unsafe` 追加）のため、この残存リスクを受容するか FFI を
-  承認して閉じるかはユーザー判断事項として PR 本文冒頭に記載する。
+- **（解消済み・2026-09-29）facade `OnnxModel::from_path` の Windows
+  対応**（2026-09-28・イシュー #2349 で起票候補として記録）:
+  `onnx-interop::onnx::external_data` 自体は Windows へ対応済み（4.6
+  節）だが、facade（`fandhe-ai`）は `backend-cuda` への無条件依存で
+  Windows ではビルドできなかった（`crates/backend-cuda/src/nvrtc.rs` の
+  `compile_error!`。#509／PR #677）。方針決定は #2389、実装は #2390（非
+  unix で NVRTC ディスクキャッシュを無効化。いずれも close 済み）へ切り
+  出し済み。facade の Windows クロス clippy の CI 化は #2391（open）で
+  追跡する。
+- **（解消済み・2026-09-28・PR #2351。事後監査は 2026-09-29・イシュー
+  #2392 の 10 節）Windows の残存 TOCTOU 経路の閉鎖**: 5 節「Windows 版
+  の残存リスク」(a) の flip-and-revert 競合は、`GetFinalPathNameByHandleW`
+  による実所在検証（`win_contained_open::final_real_path`・
+  `verify_final_path_within_base_dir`）を PR #2351 で導入して閉じた。
+  kernel32.dll への手書き `extern "system"` 宣言で実現し、依存の追加
+  （`windows-sys` 等）はしていない。当初ここに記した「`windows-sys`
+  依存の追加の可能性」は不要になった。`NtCreateFile(RootDirectory)`
+  による予防型対策（W2）は 10.3 節の結論により不要とする。
+- **本節に残る起票候補（2026-09-29・イシュー #2392。ユーザー承認待ち・
+  起票していない）**: 10.4 節の表を正とする。(1) `extern` ブロックへの
+  `#[link(name = "kernel32")]` の明示（コード修正・P2。実機リンクは
+  #2393 で確認）、(2) USN（`FSCTL_READ_FILE_USN_DATA`）による変更検知、
+  (3) `GetFileInformationByHandleEx(FileIdInfo)`（128 bit ID）への切替。
 
-自動運転中はユーザー承認を取れないため Issue は起票せず、本節と PR 本文に
-起票候補として記録する。
+自動運転中はユーザー承認を取れないため Issue は起票せず、本節（「本節に
+残る起票候補」）と PR 本文に起票候補として記録する。
 
 ## 8. テスト・実測
 
@@ -916,9 +937,12 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   数値検証・範囲・上限・重複区間・`owned_build_matches_resolve_then_
   build_graph` 等）は `cfg(unix)` から `cfg(any(unix, windows))` へ広げ、
   unix・Windows 共通で実行する。symlink・FIFO・fd 数計測・
-  hard link（`FileKey` がパスベースのため Windows では別名扱いになり
-  重複検出が成立しないため対象から外す。5 節「Windows 版の残存
-  リスク」(c) 参照）は `cfg(unix)` のまま残す。Windows 固有の新規テスト
+  hard link は `cfg(unix)` のまま残す（当初の除外理由「`FileKey` が
+  パスベースのため Windows では別名扱いになる」は、`FileKey` を
+  `(dwVolumeSerialNumber, nFileIndex)` へ切り替えた PR #2351〈5 節
+  (c)〉で失効している。`overlapping_regions_via_hard_link_are_rejected`
+  の Windows 実行は未充足のテスト網羅として #2393〈実機検証〉へ申し
+  送る。イシュー #2392 ではテストを変更しない）。Windows 固有の新規テスト
   （`onnx_external_data.rs`）: junction が途中成分・最終成分（ディレクトリ
   への junction）にある場合の `ReparsePoint` 拒否、字句検査（ADS・予約
   デバイス名・禁止文字・末尾ドット/空白。`windows_lexical_rejections_
@@ -939,8 +963,9 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   の ACL 可否、祖先の rename が共有違反で失敗すること、junction のテスト、
   `FSCTL_SET_REPARSE_POINT` が非空ディレクトリで失敗すること）を PR 本文
   に申し送りとして記録し、Issue #2349 は `Refs #2349` で紐付けて open の
-  まま残す（facade 到達性〈R1'〉・実機結果〈R4〉が未充足のため close
-  しない）。
+  まま残した（当時）。2026-09-29 時点では #2349 は close 済みで、R1'
+  （facade からの到達性）は #2389〜#2391、R4（Windows 実機結果）は
+  #2393 へ付け替えた。
 
 ## 9. OWASP Top 10 観点
 
@@ -954,7 +979,9 @@ no-silent-skip 契約）。`unsafe` は `no_follow_open`（`cfg(unix)` 限定）
 `coding-rust.md` 準拠の `// SAFETY:` コメントを付与済み。5 節参照）。
 **Windows 版（`win_contained_open`。イシュー #2349）は `unsafe` を
 kernel32.dll への手書き `extern "system"` 宣言（`GetFileInformationByHandle`・
-`GetFinalPathNameByHandleW`）の呼び出し箇所 2 か所に限定する**（依存の
+`GetFinalPathNameByHandleW`）の FFI 呼び出し 2 か所と `file_identity` の
+`MaybeUninit::assume_init` 1 か所（計 3 つの `unsafe` 式）に限定する。
+security-auditor 相当の事後監査は 10 節（イシュー #2392）で記録済み**（依存の
 追加〈`windows-sys` 等〉はしない。4.6 節「FileKey・FileSnapshot」・
 「最終ハンドルの実所在検証」参照）。ディレクトリ祖先チェーンの走査・
 reparse point 属性検査そのものは std の
@@ -971,3 +998,93 @@ reparse point 属性検査そのものは std の
 限定・最終ハンドルの実所在検証（`held` 各エントリとの対応づけ）で対処し、
 字句検査（ADS・予約デバイス名・禁止文字）は A03 の一部として Windows
 固有の非信頼入力検証に位置づける。
+
+## 10. 既存 Windows FFI の事後監査と flip-and-revert 閉鎖状況の再評価（2026-09-29・イシュー #2392）
+
+PR #2351 のレビュー是正で main に入った `win_contained_open`
+（`crates/onnx-interop/src/onnx/external_data.rs`）の `unsafe` FFI は、
+`.claude/rules/security.md`「unsafe」節が求める監査記録を欠いていた。本節は
+その事後監査と、flip-and-revert の閉鎖状況の結論を記録する。参照は行番号
+ではなくシンボル名で書く。
+
+### 10.1 監査の範囲・方法
+
+- **対象シンボル**: `win_contained_open` 内の `unsafe extern "system"` ブロック
+  （`GetFileInformationByHandle`・`GetFinalPathNameByHandleW`）、
+  `ByHandleFileInformation`・`RawFiletime`、`file_identity`、
+  `final_real_path`、`verify_final_path_within_base_dir`、
+  `open_base_dir_handle`、`resolve_and_open`、および上位の `cfg(windows)` 版
+  `resolve_and_open`・`file_key_for`。
+- **方法**: 上記のソース精読と MS Learn の戻り値契約との突き合わせ。
+  `make check-cross-windows-interop`（`x86_64-pc-windows-msvc` への
+  onnx-interop クロス clippy）は 2026-09-29 に警告なしで成功し、宣言が
+  型検査を通ることを確認した。
+- **実施体制の注記**: 本監査は自動運転の実装エージェントが security-auditor
+  の観点（`.claude/agents`）に沿って行った。独立した security-auditor
+  サブエージェントでの再監査は、ユーザーが望む場合に別途実施する。
+- **限界**: クロス clippy はリンクを行わないため、シンボル解決と実行時挙動は
+  Linux からは未検証である（#2393 の実機確認項目）。
+
+### 10.2 指摘の表
+
+| 重要度 | シンボル | 内容 | 処置 |
+|--------|---------|------|------|
+| 指摘なし（P0／P1 なし） | `ByHandleFileInformation`・`RawFiletime` | `#[repr(C)]`・フィールド順と型幅（`u32`／FILETIME の 32 bit ペア）が winbase.h の `BY_HANDLE_FILE_INFORMATION` と一致 | なし |
+| 指摘なし | `extern "system"` 宣言 | `HANDLE=*mut c_void`・`BOOL=i32`・`DWORD=u32`・`LPWSTR=*mut u16`・呼び出し規約が winbase.h と一致 | なし |
+| P2 | `unsafe extern "system"` ブロック | `#[link(name = "kernel32")]` が無く、std が kernel32 をリンクすることに暗黙に依存する。クロス clippy はリンクしないため未検証 | #2393 で実機ビルド・リンクを確認。コード修正（`#[link]` 明示）は起票候補（7 節） |
+| 指摘なし | `final_real_path` | 成功時は終端 NUL を除く文字数、不足時は NUL 込みの必要文字数を返す契約に対し、成功判定 `n < buf.len()`・不足時 `resize(n)`・上限 8 回後の `Unsupported`（fail-closed）が整合。`buf.len() as u32` は 32K 文字規模のため切り詰めは起きない | なし |
+| 指摘なし | `file_identity` | 全フィールドが整数で零値が有効なビットパターンのため、`zeroed` → 成功時のみ `assume_init` は健全。失敗時は構造体を使わない | なし |
+| P3（文言） | 4.6・9 節・モジュール doc | `unsafe` 式は FFI 呼び出し 2 か所と `assume_init` 1 か所の計 3 つ。「2 か所」は不正確 | 4.6・9 節は本 PR で是正済み。ソースのコメントは範囲外（コード変更なし） |
+| 指摘なし | `verify_final_path_within_base_dir` のパス比較 | `base_dir.base`（`canonicalize`。std 内部が同じ API を同じ既定フラグで呼ぶ）と `real_path`（`FILE_NAME_NORMALIZED \| VOLUME_NAME_DOS`）は同じ表記系（`\\?\` 接頭辞・on-disk の大小文字・長い名前）で、`strip_prefix` の成分比較が健全。食い違いは拒否側（可用性の低下であり安全性の低下ではない）に倒れる。`VerbatimDisk` 以外は `open_base_dir_handle` が拒否 | なし |
+| 指摘なし | ボリューム識別子の照合 | `volume_serial_number` は 32 bit で利用者が変更し得るため単独では根拠にならず、パス接頭辞検査の補助として位置づけられている。途中のマウントポイントは reparse 属性の検査で先に拒否される | なし |
+
+### 10.3 flip-and-revert の閉鎖状況
+
+**検証が走る経路**: パス 1 の `plan` とパス 2 の `load` は、どちらも上位の
+`resolve_and_open`（`cfg(windows)` 版）から `win_contained_open::resolve_and_open`
+へ入る。後者は最終ファイルを開くたびに無条件で `final_real_path` と
+`verify_final_path_within_base_dir` を実行するため、両パスで検証が走る。
+
+**ケース別の確認**:
+
+- (i) `parts.len() == 1`（`base_dir` 直下）: `held` は空で、防御は
+  `strip_prefix(&base_dir.base)` と深さ 1 の検査になる。これは
+  `base_dir.chain` の各ハンドルを DELETE 共有なしで保持し（rename・削除・
+  同名の別オブジェクトによる占有ができない）、かつ各祖先が次の成分を含み
+  空でないため reparse 化もできないことに依存し、成立する。
+- (ii) 途中成分の一時的 junction 化: `held[i]` 自身の実所在と最終ファイルの
+  実所在の接頭辞・深さの突き合わせで検出される。
+- (iii) 最深の `held` の一時的 junction 化: 同じ突き合わせで検出される。
+
+いずれも検出はハンドルからの逆引き（`GetFinalPathNameByHandleW`）に基づき、
+経路文字列の再解決ではないため、reparse タグを事後に元へ戻しても偽装できない。
+なお NTFS の「reparse 化には空ディレクトリが必要」という規則と、保持中の
+成分の削除不能性により、flip 自体も二重に起こりにくい（検出はこれに依存しない）。
+
+**「閉じている」の定義**: 対策は検出型（事後検証）である。したがって
+「`base_dir` 外のデータを 1 バイトも読まない（読み込みは検証通過後のハンドル
+に限る）」という意味で閉じている。拒否されるまでの間の open そのもの
+（メタデータ取得・短時間の共有ロック保持）と、`is_file`／reparse の分類が
+実所在検証より先に走ることによるエラー種別の差（`base_dir` 外の存在・種別の
+限定的なオラクル）は、残存する副作用として受容する（5 節 (a)）。
+
+**結論**: 検証通過後に `base_dir` 外のバイトを読める経路は見つからなかった。
+よって flip-and-revert は閉じていると判断し、予防型対策（W2。
+`NtCreateFile(RootDirectory)`）は不要とする（起票しない）。
+
+### 10.4 残存リスク (b)・(d) の再棚卸し
+
+| 項目 | 現状 | FFI で改善できるか | 起票候補または確認項目 |
+|------|------|-------------------|----------------------|
+| (b) snapshot の弱さ | `FileSnapshot` の時刻は `SetFileTime` で書き換え可能。`ChangeTime` も `SetFileInformationByHandle` で設定できるため切替は根本改善にならない。封じ込めは snapshot に依存しない | USN（`FSCTL_READ_FILE_USN_DATA`。利用者が任意値にできない）による変更検知で改善できる（`unsafe` は増えるが依存追加は不要） | 起票候補（ユーザー承認待ち） |
+| (d) NTFS 以外: flip の検出 | 実所在検証は NTFS の空ディレクトリ規則に依存しないため、影響度は下がる | 不要 | なし |
+| (d) ReFS の `nFileIndex` | 64 bit の `nFileIndex` は ReFS で一意とは限らず、`FileKey` の実体同一性に関わる | `GetFileInformationByHandleEx(FileIdInfo)`（128 bit ID）へ切替可能 | 起票候補（ユーザー承認待ち） |
+| (d) ReFS・exFAT の意味論 | reparse・共有モードの意味論は未確認 | 不可（実機依存） | #2393 の実機確認項目 |
+| リンク解決 | `#[link(name = "kernel32")]` の明示（10.2 の P2） | コード修正 | #2393 で確認、修正は起票候補 |
+| テスト網羅 | `overlapping_regions_via_hard_link_are_rejected` は `cfg(unix)` のまま | テスト変更 | #2393 へ申し送り |
+
+### 10.5 PR #2351 の記録との関係
+
+PR #2351 の本文と squash コミットのメッセージにある「対象外」の記載は、同 PR
+内のレビュー是正より前の記述である。履歴は書き換えず、本決定記録を正とする。
+起票候補（7 節）は自動運転中のため起票していない。
