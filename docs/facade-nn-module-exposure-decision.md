@@ -463,4 +463,12 @@ facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタ�
 - **`supports_forward_host` は `false` へ override**: イシュー本文は「既定の `false` のまま」と記すが、autodiff trait の実際の既定は `true`。既定のままだと `compat::Sequential::predict` の事前判定を通過し、途中層の `Err` で手前層の副作用（Dropout の RNG 消費・BatchNorm の running stats 更新）が tape 経路再実行と二重化するため、`Embedding`／`MultiheadAttention` の前例に倣い明示的に `false` を返す
 - **`forward_host` は `AutodiffError::InvalidArgument`（fail-closed）**: `BackendError::Unsupported` は「フォールバックの合図」で `predict_recorded` が捕捉して再実行するため使わない（前例 `ModuleList::forward_host`）
 - **検証の読み替え**: #2396（facade `nn::Sequential`）は未マージのため、「facade `nn::Sequential` と bit 一致」は同じ層を手動連鎖させた参照経路（別 tape）との bit 一致（値・入力勾配・葉勾配・ノード数。`[Linear, Adapter]`／`[Adapter, Linear]` の 2 並び）で代替した
-- **申し送り**: #2398 で `nn/mod.rs` に `pub(crate) use module::FacadeModuleAdapter;` を追加し `compat::Sequential` の公開入口を作る。`set_requires_grad`／`requires_grad`／`children`／`type_name` の委譲は #2400／#2401（それまで既定の fail-closed のため、パラメータ持ちアダプタを含む `Sequential::freeze()` は `Err`）
+- **申し送り**: #2398 で `nn/mod.rs` に `pub(crate) use module::FacadeModuleAdapter;` を追加し `compat::Sequential` の公開入口を作る。`set_requires_grad`／`requires_grad` の委譲は #2400、`children`／`type_name` は #2401 で対応（§17）（それまで既定の fail-closed のため、パラメータ持ちアダプタを含む `Sequential::freeze()` は `Err`）
+
+## 17. 実装記録（イシュー #2401）
+
+- **追加**: facade `nn::Module` へ #2134 の defaulted メソッド 4 件（`children`・`named_modules`・`parameter_count`・`type_name`）を autodiff 側と同一意味論で鏡写し（§10 承認事項 6・2026-09-29 確定方針）。defaulted 6 件 → 10 件。required は増やさず公開面は追加のみ。`named_modules` は `(データポインタ, type_name)` キーの祖先スタック＋非 ZST の訪問済み集合 dedup（循環でも panic しない）、`parameter_count` は `saturating_add`。`NodeKey`・`collect_named_modules` は非公開。
+- **コンテナ**: `ModuleList::children` は `"{index}"`、`Sequential::children` は内側 `ModuleList` へ委譲。
+- **アダプタ（#2397）**: `type_name` は委譲する（autodiff 側表示に利用者層の型名を出すため）。`children` は委譲しない。facade の `&dyn Module` を借用のまま autodiff の `&dyn Module` へ変換するには所有アダプタ実体が要り、`unsafe`／リーク／保持構造なしには成立しないため。残存する非対称: autodiff の `named_modules` はアダプタで包んだ facade コンテナの内側へ降りない。
+- **テスト**: `crates/facade/tests/nn_module_introspection.rs`（ネスト順・ZST・offset 0・自己／間接循環・共有子・dyn 経由）、`nn/module.rs` の unit test（アダプタ）。`api_surface.rs` の defaulted 集合正ガードと自己テスト fixture を更新。否定ガード `compat_sequential_has_no_introspection_methods` は不変。
+- **範囲外**: `ModuleDict`・`summary`（#2402）、`compat::Sequential` への委譲。

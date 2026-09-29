@@ -8,7 +8,7 @@
 //!
 //! 意味論は `crates/autodiff/src/nn/container.rs` の同名コンテナと一致させる
 //! （`forward` の fail-closed、`"{index}.{name}"` 命名、`set_parameter` の接頭辞振り分けと
-//! 未知キーの `Err`、`set_training`／`training` の伝播）。`state_dict`／`load_state_dict` は
+//! 未知キーの `Err`、`set_training`／`training` の伝播、`children` の `"{index}"` 命名。#2401）。`state_dict`／`load_state_dict` は
 //! autodiff 側と同じく override せず、[`crate::nn::Module`] の既定実装（two-pass 検証・
 //! キー昇順適用・逆順ロールバック）に任せる。
 //!
@@ -97,6 +97,15 @@ impl Module for ModuleList {
             "ModuleList has no forward (nn.ModuleList is a holder, not a callable module)"
                 .to_string(),
         ))
+    }
+
+    /// 子は `"{index}"`（`named_parameters` の接頭辞と一致。#2401）。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        self.modules
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i.to_string(), m.as_ref()))
+            .collect()
     }
 
     fn set_training(&mut self, training: bool) {
@@ -212,6 +221,11 @@ impl Module for Sequential {
             current = layer.forward(tape, &current)?;
         }
         Ok(current)
+    }
+
+    /// 内側 `ModuleList` へ委譲（`inner` 自体はノードとして出さない。#2401）。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        self.inner.children()
     }
 
     fn set_training(&mut self, training: bool) {
