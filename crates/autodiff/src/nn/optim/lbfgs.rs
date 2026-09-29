@@ -557,7 +557,7 @@ impl Lbfgs {
         // ので x = flatten(params) を再構築する必要はない）。
         let mut func_evals = self.func_evals;
         let (loss0, grads0) = closure(params)?;
-        func_evals += 1;
+        func_evals = counter_add("func_evals", func_evals, 1)?;
         validate_closure_output(&slot_shapes, loss0, &grads0)?;
         let mut flat_grad = flatten_tensors(&grads0);
         let orig_loss = loss0;
@@ -605,7 +605,7 @@ impl Lbfgs {
                 break;
             }
             n_iter_local += 1;
-            n_iter_global += 1;
+            n_iter_global = counter_add("n_iter", n_iter_global, 1)?;
 
             if n_iter_global == 1 {
                 d = flat_grad.iter().map(|&g| -g).collect();
@@ -791,7 +791,7 @@ impl Lbfgs {
             }
 
             current_evals += ls_func_evals;
-            func_evals += ls_func_evals as u64;
+            func_evals = counter_add("func_evals", func_evals, ls_func_evals as u64)?;
 
             let dt_max = d.iter().fold(0f32, |m, &di| m.max((di * t).abs()));
             let loss_diff = (loss - prev_loss).abs();
@@ -1264,6 +1264,21 @@ fn vector_tensor(v: &[f32]) -> Result<Tensor<f32>, AutodiffError> {
     Tensor::new(v.to_vec(), &[v.len()]).map_err(AutodiffError::Shape)
 }
 
+/// 累積カウンタ（`n_iter`／`func_evals`）の checked 加算。復元状態が
+/// `u64::MAX` 近傍でも `step` 側で panic／巻き戻りせず型付きエラーにする
+/// （呼び出しはローカル作業コピー上のため `self` の状態は不変のまま返る）。
+fn counter_add(name: &str, cur: u64, inc: u64) -> Result<u64, AutodiffError> {
+    cur.checked_add(inc).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "Lbfgs::try_step_closure: {name} counter overflow ({cur} + {inc})"
+        ))
+    })
+}
+
+/// 復元を受け入れるカウンタ上限。これを超える値は到達不能とみなし、
+/// 復元後の増分でオーバーフローしうる状態を `load_state_dict` 時点で拒否する。
+const LBFGS_COUNTER_LIMIT: u64 = u64::MAX / 2;
+
 fn load_err(msg: String) -> AutodiffError {
     AutodiffError::InvalidArgument(format!("Lbfgs::load_state_dict: {msg}"))
 }
@@ -1358,6 +1373,14 @@ fn decode_lbfgs_state(
     let n_iter = decode_u16x4_tensor(LBFGS_N_ITER_KEY, get_key(state, LBFGS_N_ITER_KEY)?)?;
     let func_evals =
         decode_u16x4_tensor(LBFGS_FUNC_EVALS_KEY, get_key(state, LBFGS_FUNC_EVALS_KEY)?)?;
+
+    for (name, v) in [("n_iter", n_iter), ("func_evals", func_evals)] {
+        if v > LBFGS_COUNTER_LIMIT {
+            return Err(load_err(format!(
+                "{name} {v} exceeds the restorable counter limit {LBFGS_COUNTER_LIMIT}"
+            )));
+        }
+    }
 
     // 履歴件数は実在するキーだけから導く（宣言値・呼び出し元の値を根拠に
     // 確保・ループしない）。件数は実キー数で上限が決まる。

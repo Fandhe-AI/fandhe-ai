@@ -409,3 +409,14 @@ fn rejects_bad_u16x4_encoding() {
         );
     });
 }
+
+/// `n_iter`／`func_evals` に `u64::MAX` を入れた state は、復元後の step で
+/// panic／巻き戻りを起こさないよう `load_state_dict` で拒否する。
+#[test]
+fn rejects_counter_near_u64_max() {
+    for key in ["n_iter.u64_u16x4", "func_evals.u64_u16x4"] {
+        reject_with(|sd, _| {
+            sd.insert(key.to_string(), encode_u16x4(u64::MAX));
+        });
+    }
+}
