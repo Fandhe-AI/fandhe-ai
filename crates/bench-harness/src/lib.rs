@@ -151,9 +151,9 @@ pub mod rng;
 mod rounding;
 pub mod startup;
 mod stats;
+pub mod sync;
 // イシュー #2385: `peak_memory`・`startup` の単体テストが使う一時ディレクトリ
 // RAII ガード（一意名＋排他作成）。テスト専用。
-pub mod sync;
 #[cfg(test)]
 mod test_temp_dir;
 mod threshold;
