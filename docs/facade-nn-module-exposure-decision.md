@@ -453,3 +453,14 @@ trait とコンテナの新設。§5・§6）になる見込みである。本�
 - **申し送り（#2403）**: `docs/compat-api-scope.md` の台帳、autodiff `container.rs` の
   「facade への非公開」doc、`crates/facade/examples/models/reference_module.rs` の古い参照。
   `compat::Sequential` との相互運用は #2397／#2398、`ModuleDict` は #2402。
+
+## 16. 実装記録（イシュー #2397）
+
+facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタを実装した（#2338 承認事項 4・§6・§10・§14 の申し送りに沿う）。
+
+- **一般化**: 非公開の `ParamBridge<'a, M>` を `pub(crate) struct FacadeModuleAdapter<P>(pub(crate) P)`（`P: DerefMut, P::Target: Module`）へ置き換えた。`P = &mut M` は facade `load_state_dict` 既定の内部ブリッジ、`P = Box<dyn Module>` は autodiff コンテナ（`'static` 必須）へ積む実体になる。`unsafe` は使わず `TapeRef::from_autodiff` の安全な借用変換で橋渡しする
+- **委譲**: `forward`・`named_parameters`・`set_parameter`・`set_training`・`training`。`state_dict`／`load_state_dict` は autodiff 既定のまま（委譲済みの `named_parameters`／`set_parameter` の上で動く）。facade 層が独自に `load_state_dict` を override していても本アダプタ経由では迂回される（`ModuleList` が子を扱うのと同じ意味論）
+- **`supports_forward_host` は `false` へ override**: イシュー本文は「既定の `false` のまま」と記すが、autodiff trait の実際の既定は `true`。既定のままだと `compat::Sequential::predict` の事前判定を通過し、途中層の `Err` で手前層の副作用（Dropout の RNG 消費・BatchNorm の running stats 更新）が tape 経路再実行と二重化するため、`Embedding`／`MultiheadAttention` の前例に倣い明示的に `false` を返す
+- **`forward_host` は `AutodiffError::InvalidArgument`（fail-closed）**: `BackendError::Unsupported` は「フォールバックの合図」で `predict_recorded` が捕捉して再実行するため使わない（前例 `ModuleList::forward_host`）
+- **検証の読み替え**: #2396（facade `nn::Sequential`）は未マージのため、「facade `nn::Sequential` と bit 一致」は同じ層を手動連鎖させた参照経路（別 tape）との bit 一致（値・入力勾配・葉勾配・ノード数。`[Linear, Adapter]`／`[Adapter, Linear]` の 2 並び）で代替した
+- **申し送り**: #2398 で `nn/mod.rs` に `pub(crate) use module::FacadeModuleAdapter;` を追加し `compat::Sequential` の公開入口を作る。`set_requires_grad`／`requires_grad`／`children`／`type_name` の委譲は #2400／#2401（それまで既定の fail-closed のため、パラメータ持ちアダプタを含む `Sequential::freeze()` は `Err`）
