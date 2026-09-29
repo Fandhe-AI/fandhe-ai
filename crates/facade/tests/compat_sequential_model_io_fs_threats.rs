@@ -7,6 +7,20 @@
 //! `compat_sequential_model_io.rs` にあり、本ファイルはその補完で重複させない。
 //! symlink の参照先は常に各テストの一時ディレクトリ配下に置く。
 
+// 各テストの cfg は `crate::fs_guard::open_leaf_no_follow`（`src/fs_guard.rs`）の実対応範囲
+// （Linux x86_64/aarch64・macOS）に合わせる。他の Unix では常に `Unsupported` となり拒否処理を
+// 通らず、再保存後の復元検証も失敗するため（Codex P2 指摘）。非対応環境ではヘルパが未使用になる。
+#![cfg_attr(
+    not(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    )),
+    allow(dead_code, unused_imports)
+)]
+
 use std::path::Path;
 
 use fandhe_ai::compat::{ModelIoError, Sequential, load_model, save_model};
@@ -98,7 +112,13 @@ fn bounded<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         .expect("ハングせず結果を返すはず")
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn load_rejects_dangling_symlink_manifest_and_safetensors() {
     for target_is_manifest in [true, false] {
@@ -114,7 +134,13 @@ fn load_rejects_dangling_symlink_manifest_and_safetensors() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn load_rejects_leaf_replaced_with_symlink_after_initial_write() {
     for target_is_manifest in [true, false] {
@@ -134,7 +160,13 @@ fn load_rejects_leaf_replaced_with_symlink_after_initial_write() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn load_rejects_fifo_manifest_and_safetensors_without_hanging() {
     for target_is_manifest in [true, false] {
@@ -154,7 +186,13 @@ fn load_rejects_fifo_manifest_and_safetensors_without_hanging() {
 
 /// 既存の `manifest.json` が symlink でも、`rename` はリンクエントリ自体を置換し
 /// 参照先へ書き込まない（§13.3 「`manifest.json` の rename 置換先」）。
-#[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn save_replaces_symlinked_manifest_entry_without_writing_through() {
     for dangling in [false, true] {
@@ -186,7 +224,13 @@ fn save_replaces_symlinked_manifest_entry_without_writing_through() {
 }
 
 /// 再保存は旧世代・よそ者の命名規則一致ファイル・古い一時ファイルを一切削除しない。
-#[cfg(unix)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn resave_never_deletes_old_generation_strangers_or_stale_tmp() {
     let (_g, dir, old_st) = saved("no-delete");
@@ -212,7 +256,13 @@ fn resave_never_deletes_old_generation_strangers_or_stale_tmp() {
 
 /// 中断した保存の残骸（孤立 safetensors・一時 manifest）があっても旧コミットを読め、
 /// 再保存も成功して残骸に触れない。
-#[cfg(unix)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn interrupted_save_leaves_previous_commit_loadable() {
     let g = TempDirGuard::new("interrupted");
@@ -237,7 +287,13 @@ fn interrupted_save_leaves_previous_commit_loadable() {
 
 /// `rename` が失敗（`manifest.json` が中身のあるディレクトリ）したら自己所有の一時 manifest を
 /// 削除し、既存ディレクトリには触れない（§13.6）。孤立 safetensors は残る（§12.3 手順 1）。
-#[cfg(unix)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn save_removes_own_tmp_when_rename_fails() {
     let g = TempDirGuard::new("rename-fail");
@@ -265,7 +321,13 @@ fn save_removes_own_tmp_when_rename_fails() {
 }
 
 /// `dir` 自身が symlink でも保存・復元できる（§13.3 第 2 行。許容）。
-#[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn save_and_load_through_symlinked_dir() {
     let g = TempDirGuard::new("dir-symlink");
