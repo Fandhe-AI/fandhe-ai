@@ -74,7 +74,7 @@
 //! `fandhe_ai_autodiff::Tape` を直に引数へ取っており、内部クレートの型が facade の
 //! 公開シグネチャへ直接露出していた。codex-review 指摘）。
 //!
-//! [`TapeRef`]（#2394）は `var`／`var_from`／`var_no_grad` のみを持つ借用ハンドルで、
+//! [`TapeRef`]（#2394。[`nn::Module::forward`] の第 1 引数）は `var`／`var_from`／`var_no_grad` のみを持つ借用ハンドルで、
 //! [`Tape`] の公開メソッドは変えない。crate 外の入口は `From<&Tape>` のみ。
 //!
 //! **`Var`／`Gradients`／`AutodiffError`／`LinearVars`（`autodiff` 由来）・
@@ -129,9 +129,9 @@ pub mod optim;
 /// design.md` 参照）。
 pub mod data;
 
-/// `nn` 公開面（イシュー #1955）。現時点は [`nn::rnn`]
-/// （`Rnn`／`Lstm`／`Gru` の Sequence レベル API の純再エクスポート）
-/// のみを提供する。`forward_seq` の呼び出しには [`Tape::rnn_forward_seq`]
+/// `nn` 公開面（イシュー #1955）。[`nn::rnn`]
+/// （`Rnn`／`Lstm`／`Gru` の Sequence レベル API の純再エクスポート）と、
+/// facade 独自の [`nn::Module`]（#2395）を提供する。`forward_seq` の呼び出しには [`Tape::rnn_forward_seq`]
 /// 等（本モジュール自体ではなく `impl Tape` の薄い委譲メソッド）を
 /// 使う（詳細は [`nn::rnn`] モジュール doc 参照）。
 pub mod nn;
@@ -1396,8 +1396,9 @@ struct VarCustomHoldDoctestGuard;
 /// `VarCustomHoldDoctestGuard`（直前の宣言。#2064 の custom autograd
 /// Function 保留）と同型の「正のプローブ 1 ブロック方式」を採る:
 /// facade の全 `pub mod` を glob import したスコープに、本ブロック内で
-/// のみ定義したローカル `__fandhe_nn_hold_probe::{Module, ModuleList}`
-/// を導入し、実際に使う関数を書く。facade がどの経路（別名再エクスポート・
+/// のみ定義したローカル `__fandhe_nn_hold_probe::ModuleList`
+/// を導入し（`Module` は #2395 で公開済みのため probe から外した。`ModuleList`／
+/// `Sequential` は #2396 まで保留）、実際に使う関数を書く。facade がどの経路（別名再エクスポート・
 /// trait 定義・`pub type` 別名・`nn::Sequential` の新設等）で
 /// `Module`／`ModuleList`／（`compat::Sequential` 以外の）`Sequential` と
 /// いう名前を公開しても、ローカル定義との glob 衝突により名前解決が
@@ -1436,12 +1437,11 @@ struct VarCustomHoldDoctestGuard;
 /// use fandhe_ai::model::*;
 ///
 /// mod __fandhe_nn_hold_probe {
-///     pub trait Module {}
 ///     pub struct ModuleList;
 /// }
 /// use __fandhe_nn_hold_probe::*;
 ///
-/// fn __probe(_: &dyn Module, _: ModuleList, _: &Sequential) {}
+/// fn __probe(_: ModuleList, _: &Sequential) {}
 /// ```
 #[cfg(doctest)]
 #[allow(dead_code)]
