@@ -72,6 +72,34 @@ fi
 # A/B 両 checkout が「同一コミット・after は定数 1 行のみ差分」であることをビルド前に
 # 検証する（fail-closed。PR #2448 codex 指摘）。別コミット・他変更を含む checkout での
 # 計測を防ぐ。
+verify_no_untracked_build_inputs() { # verify_no_untracked_build_inputs <arm> <root>
+  local arm=$1 root=$2 untracked ignored_hits
+  # 未追跡（gitignore 対象外）はビルド影響の有無を問わず 1 件でもあれば停止する。
+  # `ls-files --others` は個別ファイル単位で列挙する。
+  untracked="$(git -C "$root" ls-files --others --exclude-standard)" || {
+    echo "error: $arm checkout の未追跡ファイル一覧を取得できません" >&2
+    exit 1
+  }
+  if [[ -n "$untracked" ]]; then
+    echo "error: $arm checkout に未追跡ファイルがあります（ビルド影響の恐れ）:" >&2
+    printf '%s\n' "$untracked" | head -20 >&2
+    exit 1
+  fi
+  # gitignore 済みでもビルド結果を変えうるファイル（cargo 設定・toolchain 指定・
+  # ソース・マニフェスト）は停止対象。`target*` 等の成果物ディレクトリは対象外。
+  ignored_hits="$(git -C "$root" ls-files --others --ignored --exclude-standard)" || {
+    echo "error: $arm checkout の無視済みファイル一覧を取得できません" >&2
+    exit 1
+  }
+  ignored_hits="$(printf '%s\n' "$ignored_hits" | grep -vE '^(target[^/]*|scripts/bench/[^ ]*/target[^/]*)/' |
+    grep -E '(^|/)\.cargo/|(^|/)rust-toolchain(\.toml)?$|(^|/)Cargo\.(toml|lock)$|(^|/)build\.rs$|\.rs$' || true)"
+  if [[ -n "$ignored_hits" ]]; then
+    echo "error: $arm checkout に gitignore 済みのビルド影響ファイルがあります:" >&2
+    printf '%s\n' "$ignored_hits" | head -20 >&2
+    exit 1
+  fi
+}
+
 verify_same_commit_and_diff() {
   local before_root after_root bh ah names changed
   before_root="$(git -C "$BEFORE_FACADE" rev-parse --show-toplevel 2>/dev/null)" || {
@@ -92,6 +120,12 @@ verify_same_commit_and_diff() {
     echo "error: before checkout に未コミット変更があります" >&2
     exit 1
   fi
+  # 未追跡・gitignore 済みのビルド影響ファイル（`.cargo/config.toml`・
+  # `rust-toolchain*`・追加 `.rs`／`Cargo.*`／`build.rs` 等）は tracked diff で検出できず、
+  # 「同一コミットで定数 1 行のみ差」の事前宣言を破るため、両 checkout で検出して停止する
+  # （fail-closed。PR #2448 codex P1 指摘）。
+  verify_no_untracked_build_inputs "before" "$before_root"
+  verify_no_untracked_build_inputs "after" "$after_root"
   names="$(git -C "$after_root" diff --name-only HEAD)"
   if [[ "$names" != "crates/tensor-core/src/alloc.rs" ]]; then
     echo "error: after checkout の差分が alloc.rs のみではありません: ${names:-(空)}" >&2
