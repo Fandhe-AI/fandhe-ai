@@ -57,17 +57,22 @@
 //! （accuracy・precision・recall・F1・confusion matrix）は
 //! [`crate::compat::Sequential::fit_with_metrics`]（イシュー #2072・
 //! 親 #2059・`metrics` モジュール）で実装済み。`DataLoader` を直接
-//! 受ける `fit` 入口は対象外のまま。
+//! 受ける `fit` 入口は対象外のまま。層構成ごとのディレクトリ保存・復元
+//! （[`crate::compat::save_model`]・[`crate::compat::load_model`]・[`crate::compat::ModelIoError`]。イシュー #2369・親 #2362）は
+//! 未 `compile` の Linear と活性化 7 種に限って対応する（対応範囲・世代コミット方式・
+//! 既存ファイルを削除しない契約は `model_io` の各関数 doc を参照）。
 
 mod array;
 mod callbacks;
 mod metrics;
+mod model_io;
 mod sequential;
 mod training;
 
 pub use array::{ArrayData, array};
 pub use callbacks::{Callback, EarlyStopping, LrSchedule, ModelCheckpoint, Monitor, MonitorMode};
 pub use metrics::{Metrics, MetricsResult};
+pub use model_io::{ModelIoError, load_model, save_model};
 pub use sequential::{Sequential, SequentialVars};
 pub use training::{AmpConfig, AmpDType, FitConfig, FitTarget, History, Loss, Optimizer};
 

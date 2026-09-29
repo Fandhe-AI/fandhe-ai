@@ -5,6 +5,16 @@
 （`crates/facade/src/lib.rs::ModelIoHoldDoctestGuard`＋
 `crates/facade/tests/api_surface.rs` のテストで機械的に固定する）。
 
+> **更新記録（イシュー #2369・親 #2362。2026-09-29）**: 親 #2362 でユーザー承認を受け、
+> 本 doc §2 item 1 の**主案**（自由関数 `compat::save_model`／`compat::load_model` と
+> `#[non_exhaustive] enum ModelIoError`）を `crates/facade/src/compat/model_io.rs` で
+> 公開した（対応範囲は未 `compile` の `Linear` と活性化 7 種の最小構成。それ以外は
+> `UnsupportedModel` で fail-closed。全 30 層は #2370、BN buffer は #2371、compile 状態は
+> #2372・#2373、網羅テストは #2374〜#2376）。**代替案の inherent メソッド
+> `Sequential::save`／`load` は承認範囲外のため保留ガードを維持**している（§7）。
+> 以下 §0 は #2188 時点の「保留」判断の記録であり、経緯として残す。
+> **#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**（公開範囲が途中状態のため）。
+
 ## 0. 結論（方式の確定）
 
 **facade 公開面の拡張は承認待ちのまま保留し、「設計判断記録＋保留ガード
@@ -56,7 +66,7 @@ Keras の `model.save()`／`load_model()`、PyTorch の「アーキテクチャ�
 スコープ外（イシュー規定）: ONNX／TorchScript への export・
 version migration。
 
-## 2. 承認事項（未承認・一覧）
+## 2. 承認事項（一覧。item 4 の上限値は 2026-09-29 承認済み）
 
 1. **公開 API の署名とエラー型**。
    - `fandhe_ai::compat::save_model(model: &Sequential, dir: impl AsRef<Path>) -> Result<(), ModelIoError>`
@@ -129,6 +139,19 @@ version migration。
    `model_io.rs`（または共有 `fs_guard`）に持つ。manifest 側の記載値は
    この固定定数と一致するかどうかの確認にのみ使い、確定前の資源確保・
    ループ回数の根拠にしない）。
+   **#2369 の実装値（2026-09-29 ユーザー承認済み）**: `MAX_MANIFEST_BYTES = 1 MiB`・
+   `MAX_LAYERS = 4096`（いずれも `model_io.rs` の private const）。**承認記録**: 親 #2362 の
+   コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/2362#issuecomment-5888987015>
+   （2026-09-29）で、manifest サイズ上限 1 MiB・層数上限 4096・Lbfgs 履歴ペア数上限 65536
+   を候補値どおり確定する承認を受けた。根拠: v1 manifest は 1 層 100〜150 B 程度で 4096 層でも
+   約 0.6 MiB に収まる（`model_io.rs` の単体テスト `manifest_of_max_layers_fits_the_manifest_bound`
+   が 5 桁次元の 4096 Linear で固定）。4096 は既存テストの 1714 層 `Sequential`
+   （`sequential.rs`）を包含する 2 のべき乗。併せて構造上の値として JSON ネスト上限 4
+   （v1 スキーマの最大ネスト。#2372・#2373 の `compiled` も 4 以内）・配列要素数上限
+   `2 * MAX_LAYERS`・object キー数上限 16（重複キー検査の線形走査を有界にする）を持つが、
+   これらはポリシー閾値ではなくスキーマから導いた値。値の変更は再承認が必要で、定数と
+   本記述を同時に更新する。`MAX_TMP_NAME_ATTEMPTS = 8` は §12.3 で確定済みの値
+   （`docs-site` と同値）。
    - **safetensors ファイルサイズ上限**: `crates/facade/src/model.rs`
      の `MAX_MODEL_FILE_BYTES`（1 GiB。private const）を再利用する
      ——承認事項ではなく確定方針とする。理由: 用途が同一（非信頼な
@@ -137,22 +160,24 @@ version migration。
      脅威モデル（§13.1）を共有するため、新しい値を発明せず既存定数を
      `fs_guard` 共有モジュールへ `pub(crate)` として抽出し双方から使う
      （§2 item 5・§13.4）。
-   - **manifest（JSON）サイズ上限**: **承認事項のまま**（値は未定。
-     旧版が挙げていた候補 1 MiB は本 PR の是正前の記述であり確定
-     ではない）。ワークスペース内を横断調査した結果、facade が依存
+   - **manifest（JSON）サイズ上限**: **1 MiB で確定**（2026-09-29 ユーザー承認。
+     #2362 コメント）。ワークスペース内を横断調査した結果、facade が依存
      できる範囲に同一用途の既存定数はない（`crates/self-repair/src/
      candidate.rs::MAX_CONTENT_BYTES`〈1 MiB〉・`crates/docs-site/src/
      nav.rs::MAX_INPUT_BYTES`〈1 MiB〉はいずれも同じ値だが facade とは
      無関係のクレート・用途〈self-repair の候補パッチ・docs-site の
-     Markdown ソース〉のため転用しない）。承認時に具体的な上限値
-     （候補 1 MiB）を人間が決定する。
-   - **層数上限**: 承認事項のまま（候補 4096。値は承認時に確定）。
-   - **Lbfgs 履歴ペア数の上限**: 承認事項のまま（`LbfgsConfig::
-     history_size` は `>= 1` のみ検証済みで上限がないため、manifest の
-     `history_len` を信じて確保しないことに加え、`history_size` 自体
-     または history エントリ総数に対する DoS 対策の固定上限——候補
-     `65536`——を新設するかどうかを承認時に決定する。上限の根拠・
-     使い方は §2 item 2 の是正済み記述を参照）。
+     Markdown ソース〉のため転用しない）。
+   - **層数上限**: **4096 で確定**（2026-09-29 ユーザー承認。#2362 コメント）。
+   - **Lbfgs 履歴ペア数の上限**: **65536 で確定**（2026-09-29 ユーザー承認。
+     #2362 コメント。`history_size` 自体・history エントリ総数のいずれも
+     超過は型付きエラーで拒否）。`LbfgsConfig::history_size` は `>= 1` のみ
+     検証済みで上限がないため、manifest の `history_len` を信じて確保しない
+     ことに加えて設ける DoS 対策の固定上限である。**本 PR（#2369）は `Lbfgs` の
+     読み書きを扱わない（最小構成は未 `compile` の `Linear` と活性化のみ）ため
+     定数は未実装。実装は後続 issue（`compile` 状態の保存・復元を扱う
+     #2372・#2373 の A 系）で、`Lbfgs` の状態を manifest／safetensors へ
+     書き読みする際に適用し境界テストを加える**。上限の根拠・使い方は §2 item 2
+     の是正済み記述を参照）。
 5. **ファイル I/O のハードニング用内部 API**（facade 公開面は広がらない。
    PR #2317 review 再々確認・2026-09-27 第 2 回是正に伴う新設。全数棚卸しは
    §13）。
@@ -397,6 +422,24 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 - 承認後は、doctest・ソース走査を撤去して正ガード（実際の公開面の
   固定テスト）へ置き換え、インベントリの期待集合を
   `facade/src/compat/model_io.rs` へ差し替える。
+- **#2369 で実施した置き換え**（親 #2362）:
+  - `ModelIoHoldDoctestGuard`: `model_io` モジュール・自由関数・エラー型のローカル定義
+    （glob 衝突で doctest 自体が壊れるため）を撤去し、**代替案の inherent メソッド
+    （`Sequential::save`／`load`／`save_model`／`load_model`）専用のプローブへ縮小**した
+    （`api_surface.rs` の `MODEL_IO_HOLD_PROBE_BODY` も同期）。
+  - ソース走査は**正ガード**へ反転: `facade_model_io_public_surface_matches_approved_contract`
+    （`mod model_io;` は `compat/mod.rs` に private でちょうど 1 件・`pub use
+    model_io::{ModelIoError, load_model, save_model};` がちょうど 1 文・`enum ModelIoError` と
+    `fn save_model`／`fn load_model` は `compat/model_io.rs` に各 1 件・代替案は 0 件）と、その
+    自己テスト `facade_model_io_public_surface_detects_each_category`。追加で
+    `model_io_module_exposes_only_approved_surface`（`model_io.rs` の `pub` 項目は 3 件のみ）・
+    `model_io_items_are_reachable_via_facade`（署名・`#[non_exhaustive]` の 7 variant）。
+  - 定義元インベントリ `workspace_declares_model_io_fn_names_only_in_allowed_locations` の
+    期待集合は `facade/src/compat/model_io.rs` の `save_model`・`load_model` 各 1 件へ差し替えた。
+    代替案の `workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations` は
+    承認範囲外のため 0 件固定を維持する。
+  - `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `save_model`・`load_model` を追加した
+    （小文字始まりの `pub use` 葉は関数再エクスポートの契約）。
 
 ## 8. OWASP Top 10 観点（承認後の要件として記録）
 
@@ -454,6 +497,10 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 なかった。本文は要件としてのみ扱い、逐語での引用はしていない。
 
 ## 10. 再開条件
+
+**#2362 で再開済み（#2369）**: 2026-09-29 のユーザー承認を受け、親 #2362 配下で
+「§4〜§6 の実装 → 保留ガードの撤去」を段階的に進める。#2369 は最小構成の公開と
+保留ガードの正ガード化（§7）。以下は #2188 時点の再開条件の記録。
 
 イシュー #2188（または親 #2131）に、所有者による §2 の承認コメントが
 付くこと。承認後は、別イシューか同イシューの再開で「§4〜§6 の実装 →
@@ -907,7 +954,10 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
 2. §13.6 の Windows 実装手段（`unsafe` を伴う場合は監査要件を別途定める）
 3. `load_model` の Windows 対応
 
-**5. #2369 実装要件（正本）**
+**5. #2369 実装要件（正本。実装済み: `model_io.rs` の `save_platform_supported(is_unix)`〈純関数。
+`save_model` の冒頭で `dir` への副作用より前に呼ぶ〉・単体テスト
+`non_unix_platform_is_rejected_as_unsupported`・`tests/compat_sequential_model_io.rs` の
+`#[cfg(not(unix))]` テスト・公開 doc への記載）**
 
 - `save_model` の冒頭で、`dir` へのあらゆる副作用（`create_dir_all`・
   `create_new`・`rename`）より前に、`cfg(not(unix))` のとき
@@ -1012,7 +1062,7 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
    `(dev, ino)` が一致することを検証する（検査と open の間の
    差し替え——TOCTOU——を実体識別子の一致で検出する）。
 4. 開いたハンドルの `fstat` で得たファイルサイズを、**信頼できる固定
-   上限**（manifest は承認事項の固定定数〈候補 1 MiB。§2 item 4〉、
+   上限**（manifest は承認済みの固定定数〈1 MiB。§2 item 4〉、
    safetensors は `MAX_MODEL_FILE_BYTES`〈`model.rs` から `fs_guard` へ
    共有抽出する既存の 1 GiB 定数。§2 item 4・§13.4〉）とまず比較し、
    上回る場合は読み取りに入る前に拒否する（この判定は非信頼値を一切
@@ -1048,7 +1098,7 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 | TOCTOU（一時ファイル作成） | 書き込み | `create_new` は「存在確認」と「作成」を単一のシステムコールで行うためレースが原理的に生じない（std ドキュメントが明記する atomic 操作） | 新設 |
 | パストラバーサル（manifest 内の `safetensors_file`） | 読み込み | `model.<32桁16進>.safetensors` の完全一致パターンのみ許可。パス区切り文字・`..`・絶対パスを含む値は即 `Err`（ただし §13.2 の no-follow 手順と併用しない限りシンボリックリンク経由の脱出は防げない点に注意。§13.3 上段） | §4「ファイル形式」・§8 A01 |
 | パストラバーサル（manifest 内の層構成・キー名等） | 読み込み | ファイルシステムへ渡さない値（層種別・パラメータキー名は state_dict のキー照合にのみ使う）のため対象外 | §4「ファイル形式」 |
-| 読み込みサイズ上限（manifest） | 読み込み | **信頼できる固定上限**（コード定数。§2 item 4・承認事項）に `fstat` 実長を比較してから読み取りに入る。`take(fstat 実長 + 1)` で確保・パース前に検証（§13.2 手順 4〜5） | §8 A03 |
+| 読み込みサイズ上限（manifest） | 読み込み | **信頼できる固定上限**（コード定数。§2 item 4・承認済み）に `fstat` 実長を比較してから読み取りに入る。`take(fstat 実長 + 1)` で確保・パース前に検証（§13.2 手順 4〜5） | §8 A03 |
 | 読み込みサイズ上限（safetensors ヘッダ長・データ長） | 読み込み | まず `fstat` 実長を**信頼できる固定上限**（`MAX_MODEL_FILE_BYTES`。§2 item 4）と比較して拒否判定し、通過後に非信頼値である manifest の `safetensors_bytes` との**一致**を確認する（§12.3 手順 4）。`safetensors_bytes` 自体を確保量の根拠にはしない。safetensors 自体のヘッダ検証は既存 `load_safetensors_f32_from_bytes` に一元化（複製・迂回しない） | `crate::interop::safetensors`（`onnx-interop::st_load`） |
 | 削除の所有権 | 削除 | **`save_model`／`load_model` は `dir` 内の既存ファイルを自動削除しない**（§13.0・§13.6）。旧世代・無関係ファイルはいずれも残存し、これは明示的に受容する残余コストとして API doc に記載する。所有が証明できる自己一時ファイル（作成時に得た fd を保持したまま同一呼び出し内で失敗した場合）のみ例外的に削除する | 新設（PR #2317 review 再確認・2026-09-27 第 2 回是正で自動削除機能を撤回） |
 | 一時ファイル（作成方式） | 書き込み | `manifest.json` は `create_new` 一時ファイル（衝突時は既存エントリに触れず新しい候補名で再試行。上限 [`MAX_TMP_NAME_ATTEMPTS`]〈8 回〉。§12.3 手順 2）＋`rename`。`model.<gen>.safetensors` は世代 ID の一意性を利用し**最終ファイル名へ直接 `create_new`**（tmp／rename を経由しない。衝突時の再試行は同じ上限。§12.3 手順 1） | 新設。`st_save.rs` の `std::fs::write` ベース一時ファイル作成は踏襲しない（§12.3 手順 1 是正理由）。再試行上限は `crates/docs-site/src/build.rs::write_file_creating_parent` の `MAX_TMP_NAME_ATTEMPTS` に揃える（PR #2317 review 指摘〈P2〉の是正） |
@@ -1065,6 +1115,14 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 持たない（同じ脆弱性クラスの対策を 2 箇所に分散させない）。
 `MAX_MODEL_FILE_BYTES`（1 GiB。現状 `model.rs` の private const）も
 同じ抽出の対象とし `pub(crate)` へ格上げして共有する（§2 item 4）。
+
+**書き込み側（#2369）**: `create_new`・一時ファイル名の再試行・自己所有一時ファイルの
+`(dev, ino)` 照合削除は std のみで `compat/model_io.rs`（`cfg(unix)` 限定）に持ち、
+`fs_guard` には置かない。読み取り側は `fs_guard::open_leaf_checked`（§13.2 手順 1〜4）と
+`OpenedLeaf::read_exact_len`（手順 5）を新設して共有する（`model.rs` の手順を同ヘルパーへ
+寄せる整理は挙動を変えない別作業として将来課題）。`load_model` の対応範囲
+（Linux x86_64／aarch64・macOS）は unix 全体より狭いため、それ以外の unix では
+`save_model` が成功しても `load_model` は拒否される（既知の非対称性）。
 
 **抽出済み（イシュー #2364）**: `open_flags`・`open_leaf_no_follow`・
 `MAX_MODEL_FILE_BYTES` は `crates/facade/src/fs_guard.rs`（`crate::fs_guard`。
@@ -1084,9 +1142,9 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 | `dir`（呼び出し元引数） | 信頼（呼び出し元がプロセス内で直接渡す。ネットワーク越しの入力ではない） | `create_dir_all`／全ファイル操作の起点 | 信頼済みのため境界不要。ただし配下の中身は非信頼（§13.1） |
 | `dir` 配下のファイル名・種別（既存ファイル一覧） | **非信頼**（第三者が事前配置し得る） | 読み込み時の open 対象決定 | 固定パターン 2 種のみ（`manifest.json`／`model.<32桁16進>.safetensors`）に一致する名前しか扱わず、実際に開く際は §13.2 no-follow 手順（symlink・特殊ファイル拒否＋TOCTOU 検出）を経由する |
 | `dir` 配下の既存ファイル（削除対象としての利用） | **非信頼** | （行わない） | **§13.0 の原則により削除の根拠に一切使わない**——`save_model` は既存ファイルを読みも削除もしない（§12.3 手順 5・§13.6） |
-| manifest.json のバイト列そのもの | 非信頼 | パース前の読み取り量 | `fstat` 実長を**信頼できる固定上限**（承認事項。§2 item 4）と比較してから `take(実長 + 1)` で読む。実長自体は非信頼な manifest の内容ではなく OS が返す事実（fstat）であり、固定上限で挟まれているため境界内 |
+| manifest.json のバイト列そのもの | 非信頼 | パース前の読み取り量 | `fstat` 実長を**信頼できる固定上限**（承認済み。§2 item 4）と比較してから `take(実長 + 1)` で読む。実長自体は非信頼な manifest の内容ではなく OS が返す事実（fstat）であり、固定上限で挟まれているため境界内 |
 | `format`／`format_version` | 非信頼 | 分岐（受理／拒否） | 固定文字列・固定整数との完全一致のみ許可。不一致は即拒否（確保・破壊操作を伴わない単純な等価判定） |
-| `num_layers`／`layers`（層構成） | 非信頼 | 層オブジェクトの構築（メモリ確保を伴う） | manifest 全体が固定上限（承認事項）で有界なため要素数も有界。**加えて層数自体にも固定上限（候補 4096。§2 item 4）を課し、上限超過時は 1 層ずつ push する前に打ち切る**（事前に `num_layers` を信じて `Vec::with_capacity` しない） |
+| `num_layers`／`layers`（層構成） | 非信頼 | 層オブジェクトの構築（メモリ確保を伴う） | manifest 全体が固定上限（承認済み）で有界なため要素数も有界。**加えて層数自体にも固定上限（4096・承認済み。§2 item 4）を課し、上限超過時は 1 層ずつ push する前に打ち切る**（事前に `num_layers` を信じて `Vec::with_capacity` しない） |
 | `parameter_keys`／`buffer_keys`（キー集合・shape） | 非信頼 | state_dict とのキー突き合わせ（ファイルシステムへは渡さない） | 完全一致判定にのみ使用。ファイル I/O・確保量の根拠にしない（§13.3「パストラバーサル（層構成・キー名等）」） |
 | `safetensors_file` | 非信頼 | open 対象パスの構築 | `model.<32桁16進>.safetensors` の完全一致パターン検証 → §13.2 no-follow 手順で open（パターン検証だけでは脱出を防げないため必ず両方を経由。§13.3） |
 | `safetensors_bytes` | 非信頼 | safetensors 読み取り量の**確認**（確保量の決定には使わない） | `fstat` 実長を先に固定上限（`MAX_MODEL_FILE_BYTES`）と比較 → 通過後に非信頼値との**一致**のみ確認 → 一致後は `fstat` 実長（既に有界）を根拠に `take` する（§12.3 手順 4・§13.2 手順 4〜5） |
