@@ -135,8 +135,9 @@ cargo test -p self-repair --test feature_addition_loop_completion_task_3_3c -- -
 （他ゲート系統合テストと同じ理由。理由は `#[ignore = "..."]` の属性文字列・
 テスト関数のドキュメンテーションコメント参照）。実行のたび sandbox は一意な
 一時ディレクトリ（`std::env::temp_dir()`／
-`self-repair-feature-addition-task-3-3c-sandbox-<pid>`）に作られ、テスト
-終了時に削除される。
+`fandhe-ai-self-repair-it-<pid>-<nanos>-<seq>-feature-addition-sandbox`。
+`create_dir` による排他作成・イシュー #2382）に作られ、テスト終了時に
+（panic 時も）ガードの Drop で削除される。
 
 結果の書き出し先は既定で `target/self-repair-revalidation/feature-addition/`
 （git 管理対象外）であり、通常の実行では本ディレクトリの commit 済み
