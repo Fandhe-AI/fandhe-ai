@@ -556,6 +556,30 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 残存することを検証する（`save_model` は失敗時の自己所有一時ファイルを
 除き `dir` の既存ファイルを一切削除しない）。
 
+### 6.1 正常系の検証の所在（イシュー #2374）
+
+§6 の正常系（save → load 後の bit 完全一致）は次のとおりテストで固定されている。
+単一軸の深掘りは兄弟ファイルが担い、軸をまたぐ組み合わせと全セル共通の
+**再保存不変条件**（load したモデルを別 dir へ再保存すると、safetensors が
+バイト一致し、manifest が `safetensors_file` の値を除いて一致する。`growth_tracker`・
+optimizer 内部状態・BN buffer のように公開 API から直接観測できない状態も
+この不変条件で bit 一致を担保する）を
+`crates/facade/tests/compat_sequential_model_io.rs` の `roundtrip_matrix` が固定する。
+
+| §6 の行 | 単一軸のテスト | 直積セル（`compat_sequential_model_io.rs::roundtrip_matrix`） |
+|---|---|---|
+| 30 種すべての層 | `_layers.rs::all_thirty_layer_kinds_round_trip_bit_identically` | `matrix_thirty_kinds_eval_round_trip_and_resave_identical` |
+| 深い異種スタック・TE | `_layers.rs::deep_heterogeneous_stack_with_transformer_encoders_round_trips` | `matrix_deep_stack_*`・`matrix_transformer_stack_*`（eval・optimizer・Lbfgs の各状態と組み合わせ） |
+| train 後の BN running stats | `_batch_norm.rs::bn1d_*`・`train_mode_continuation_matches_after_load` | `matrix_deep_stack_eval_and_trained_bn_round_trip`・`matrix_deep_stack_six_optimizers_with_and_without_amp`（BN を含む compile 済みモデル） |
+| 6 optimizer × AMP の有無 | `_compiled.rs::every_optimizer_with_and_without_amp_resumes_bit_identically` | `matrix_deep_stack_six_optimizers_with_and_without_amp`・`matrix_transformer_stack_six_optimizers_with_and_without_amp` |
+| GradScaler 非初期状態 | `_compiled.rs::grad_scaler_state_after_backoff_and_growth_round_trips` | 上記 AMP ありセル（`init_scale` 3.0e38・全 optimizer で非初期の scale を確認） |
+| Lbfgs 履歴 未満／到達済み | `_lbfgs.rs::resumes_bit_identically_with_history_below_and_at_capacity` | `matrix_deep_stack_lbfgs_history_below_and_at_capacity`・`matrix_transformer_stack_lbfgs_history_below_and_at_capacity` |
+
+`compat_sequential_model_io_manual.rs` は統合せず残す。`state_dict`／`load_state_dict` と
+`interop::safetensors` だけで組む**重みのみ**の経路（`save_model` とは独立）を固定しており、
+統合すると `save_model` の不具合と既存公開 API の不具合を切り分けられなくなるため。
+CUDA／Metal 実機 parity は対象外（ホスト側 I/O と CPU 上の層再構築のみでカーネルを持たない）。
+
 ## 7. 保留ガードの多層構成
 
 - **正のプローブ doctest**（`crates/facade/src/lib.rs::
