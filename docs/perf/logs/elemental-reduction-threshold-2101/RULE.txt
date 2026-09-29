@@ -1,0 +1,30 @@
+事前登録判定規則（イシュー #2101・Phase 0＝しきい値候補の決定。実測より前に固定する）
+=====================================================================
+
+対象: crates/backend-cpu/src/reduction.rs の rayon fork-join サイト
+      （逐次フォールバック機構。ゲート REDUCTION_SEQUENTIAL_FALLBACK_ENABLED=false が既定）
+除外: mse_loss_backward（#1578 で REJECT 確定。同型の再実行はしない）
+
+計測コマンド（機体ごとに 5 プロセスを独立に起動。RAYON_NUM_THREADS は未設定＝本番と同一）:
+  cargo test -p fandhe-ai-backend-cpu --release --lib \
+    reduction::tests::reduction_threshold_sweep -- --ignored --nocapture
+
+対象演算: sum(dim=None)・sum(dim=Some 0 / Some 1、shape [64, n/64])・max(dim=None)・mean(dim=None)
+サイズ: n in {640, 2560, 4096, 8192, 16384, 32768, 65536, 131072, 262144}（#1578 Phase 0 と同系列）
+腕: forced-seq と forced-par。(n, 腕, 演算) ごとに 1000 反復の中央値(ns)と checksum を出力する。
+
+代表値: プロセスごとの中央値の、5 プロセスにわたる中央値。 r(n) = seq / par。
+
+checksum: 全セルで seq と par が完全一致すること。1 件でも不一致なら機構の不具合として
+          FAIL とし、性能判定の前に止める。
+
+決定規則:
+  - 機体ごとに n* を「最初に r(n) > 1.00 となる n」とする（見つからなければ 1<<18）。
+  - T = min(n*_M4Max, n*_GB10)
+  - T <= 640 なら REJECT（小形状で効果なし）。
+  - それ以外は T を #2102 の A/B 候補値として渡す。
+
+負荷: record_only（load average の推移を env_info に記録）。専有ゲートは #2102 の A/B 側で適用する。
+事後緩和・セル除外・run の追加による再判定は行わない。
+本規則は Phase 0（しきい値候補の決定）に限る。framework-compare 全セルの非後退判定
+（ratio <= 1.00）は #2102 の範囲。
