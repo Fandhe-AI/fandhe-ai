@@ -269,9 +269,9 @@ impl Module for ModuleList {
         // 失敗しない。
         let previous: Vec<RequiresGradSnapshot> = self
             .modules
-            .iter()
+            .iter_mut()
             .map(|m| m.requires_grad_snapshot())
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         for (index, module) in self.modules.iter_mut().enumerate() {
             if let Err(err) = module.set_requires_grad(requires_grad) {
@@ -371,13 +371,13 @@ impl Module for ModuleList {
     }
 
     /// 子ごとの葉単位スナップショット（[`Module::requires_grad_snapshot`]）。
-    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
-        RequiresGradSnapshot::Nested(
+    fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
+        Ok(RequiresGradSnapshot::Nested(
             self.modules
-                .iter()
+                .iter_mut()
                 .map(|m| m.requires_grad_snapshot())
-                .collect(),
-        )
+                .collect::<Result<_, _>>()?,
+        ))
     }
 
     fn restore_requires_grad_snapshot(
@@ -626,7 +626,7 @@ impl Module for Sequential {
         Module::requires_grad(&self.inner)
     }
 
-    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
+    fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
         self.inner.requires_grad_snapshot()
     }
 
@@ -895,9 +895,9 @@ impl Module for ModuleDict {
         // 記録する（ロールバック用）。
         let previous: Vec<RequiresGradSnapshot> = self
             .modules
-            .iter()
+            .iter_mut()
             .map(|(_, m)| m.requires_grad_snapshot())
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         for (index, (_, module)) in self.modules.iter_mut().enumerate() {
             if let Err(err) = module.set_requires_grad(requires_grad) {
@@ -954,13 +954,13 @@ impl Module for ModuleDict {
     }
 
     /// 挿入順の子ごとの葉単位スナップショット（[`Module::requires_grad_snapshot`]）。
-    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
-        RequiresGradSnapshot::NestedDict(
+    fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
+        Ok(RequiresGradSnapshot::NestedDict(
             self.modules
-                .iter()
+                .iter_mut()
                 .map(|(_, m)| m.requires_grad_snapshot())
-                .collect(),
-        )
+                .collect::<Result<_, _>>()?,
+        ))
     }
 
     fn restore_requires_grad_snapshot(
@@ -2092,8 +2092,8 @@ mod tests {
             self.a || self.b
         }
 
-        fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
-            RequiresGradSnapshot::Opaque(Box::new((self.a, self.b)))
+        fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
+            Ok(RequiresGradSnapshot::Opaque(Box::new((self.a, self.b))))
         }
 
         fn restore_requires_grad_snapshot(
@@ -2116,8 +2116,8 @@ mod tests {
 
     /// `OpaqueMixed` の内部 2 状態を取り出す（`Box<dyn Module>` から `Opaque` スナップショット
     /// 経由で読む）。
-    fn opaque_state(m: &dyn Module) -> (bool, bool) {
-        match m.requires_grad_snapshot() {
+    fn opaque_state(m: &mut dyn Module) -> (bool, bool) {
+        match m.requires_grad_snapshot().unwrap() {
             RequiresGradSnapshot::Opaque(any) => *any.downcast_ref::<(bool, bool)>().unwrap(),
             _ => panic!("Opaque のはず"),
         }
@@ -2138,8 +2138,8 @@ mod tests {
         outer.push(Box::new(OpaqueMixed::new(false, true)));
         outer.push(Box::new(failing_opaque()));
         outer.set_requires_grad(false).expect_err("後続が失敗");
-        assert_eq!(opaque_state(outer.get(0).unwrap()), (false, true));
-        assert_eq!(opaque_state(outer.get(1).unwrap()), (true, true));
+        assert_eq!(opaque_state(outer.get_mut(0).unwrap()), (false, true));
+        assert_eq!(opaque_state(outer.get_mut(1).unwrap()), (true, true));
     }
 
     /// 同上（`Sequential`・入れ子 `ModuleList` 経由の 2 段）。
@@ -2152,9 +2152,11 @@ mod tests {
         outer.push(Box::new(inner));
         outer.push(Box::new(failing_opaque()));
         outer.set_requires_grad(false).expect_err("後続が失敗");
-        let list = outer.layers()[0].as_module_list().expect("ModuleList");
-        assert_eq!(opaque_state(list.get(0).unwrap()), (false, true));
-        assert_eq!(opaque_state(list.get(1).unwrap()), (true, false));
+        let list = outer.layers_mut()[0]
+            .as_module_list_mut()
+            .expect("ModuleList");
+        assert_eq!(opaque_state(list.get_mut(0).unwrap()), (false, true));
+        assert_eq!(opaque_state(list.get_mut(1).unwrap()), (true, false));
     }
 
     /// 同上（`ModuleDict`）。
@@ -2166,7 +2168,7 @@ mod tests {
             .unwrap();
         outer.insert("bad", Box::new(failing_opaque())).unwrap();
         outer.set_requires_grad(false).expect_err("後続が失敗");
-        assert_eq!(opaque_state(outer.get("mixed").unwrap()), (true, false));
+        assert_eq!(opaque_state(outer.get_mut("mixed").unwrap()), (true, false));
     }
 
     /// コンテナの復元は variant 不一致・子数不一致を fail-closed で拒否する。

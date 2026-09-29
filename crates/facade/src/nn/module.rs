@@ -186,31 +186,18 @@ pub trait Module {
         std::any::type_name::<Self>()
     }
 
-    /// 【内部フック・利用者向けではない】入れ子コンテナが直接保持する子を層順で返す
-    /// （`set_requires_grad` の失敗時ロールバックが、混在状態〈一部凍結・一部追跡中〉の
-    /// 入れ子コンテナを葉単位で復元するための crate 内部プロトコル。イシュー #2400・
-    /// PR #2426 レビュー指摘）。autodiff 側の `as_module_list`／`as_module_dict` に相当。
+    /// [`Self::children`] の可変版（同じ「名前, 参照」列を同じ順序・同じ名前で返す。
+    /// #2400・PR #2426 レビュー是正。2026-09-29 ユーザー承認済みの公開面追加）。
     ///
-    /// 引数の [`sealed::Token`] は crate 外から構築・名指しできないため、利用者は呼び出しも
-    /// override もできない（実効的に非公開。REQ-12）。既定は `None`（葉層）。
-    /// `ModuleList`・`Sequential`・`ModuleDict` だけが override する。
-    #[doc(hidden)]
-    fn __nested_modules(&self, _token: sealed::Token) -> Option<Vec<&dyn Module>> {
-        None
+    /// 用途: 凍結（[`Self::set_requires_grad`]）が失敗したとき、コンテナが子孫を**葉単位**
+    /// （葉 = [`Self::children`] が空の層）で呼び出し前の状態へ戻すための可変アクセス。
+    /// 子を持つ利用者定義の複合層は `children` と対で必ず実装すること。件数・名前・順序が
+    /// `children` と食い違う（既定の空のまま `children` だけ実装した場合を含む）層を
+    /// 含む構成は、`ModuleList`／`Sequential`／`ModuleDict` の `set_requires_grad` が状態を
+    /// 変更する前に `InvalidArgument` で拒否する（fail-closed）。既定は空（葉モジュール向け）。
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        Vec::new()
     }
-
-    /// [`Self::__nested_modules`] の可変版（復元側）。同じく内部フック。
-    #[doc(hidden)]
-    fn __nested_modules_mut(&mut self, _token: sealed::Token) -> Option<Vec<&mut dyn Module>> {
-        None
-    }
-}
-
-/// 内部フック用の封印トークン（crate 外から名指し・構築できない）。
-pub(crate) mod sealed {
-    /// フック呼び出しの資格を示す ZST。フィールドが crate 内限定のため外部では作れない。
-    #[derive(Debug, Clone, Copy)]
-    pub struct Token(pub(crate) ());
 }
 
 /// `named_modules` 用のノード同一性キー（データポインタ, 型名）。非公開。
@@ -263,7 +250,7 @@ fn collect_named_modules<'a>(
 /// 委譲: `forward`・`named_parameters`・`set_parameter`・`set_training`・`training`・
 /// `set_requires_grad`・`requires_grad`（#2400）・葉単位の凍結スナップショット
 /// `requires_grad_snapshot`／`restore_requires_grad_snapshot`（autodiff コンテナの
-/// ロールバックで内側 facade コンテナの混在状態を保つ。PR #2426 P1）。`freeze` は autodiff 既定が
+/// ロールバックで内側の複合層の混在状態を `children`／`children_mut` 経由で葉単位に保つ。PR #2426 P1）。`freeze` は autodiff 既定が
 /// `set_requires_grad(false)` を経由するため委譲せず（facade 層が独自に `freeze` を
 /// override していても本アダプタ経由では迂回される）、
 /// `state_dict`／`load_state_dict` は autodiff 既定のまま（委譲済みの
@@ -321,14 +308,14 @@ where
         Module::requires_grad(&*self.0)
     }
 
-    /// facade 側の葉単位スナップショット（`nn::container::snapshot_requires_grad`）を
-    /// `Opaque` に包んで返す。autodiff のコンテナがアダプタを単一の葉として集約値で
-    /// 保存すると、内側の facade コンテナの混在状態が復元時に均一化されるため
-    /// （PR #2426 P1）。
-    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
-        RequiresGradSnapshot::Opaque(Box::new(crate::nn::container::snapshot_requires_grad(
-            &*self.0,
-        )))
+    /// facade 側の葉単位スナップショット（`nn::container::snapshot_requires_grad`。
+    /// `children`／`children_mut` 経由）を `Opaque` に包んで返す。autodiff のコンテナが
+    /// アダプタを単一の葉として集約値で保存すると、内側の複合層の混在状態が復元時に
+    /// 均一化されるため（PR #2426 P1）。`children`／`children_mut` が不整合な構成は
+    /// 状態変更前に `InvalidArgument` で拒否する。
+    fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
+        crate::nn::container::snapshot_requires_grad(&mut *self.0)
+            .map(|snap| RequiresGradSnapshot::Opaque(Box::new(snap)))
     }
 
     /// `Opaque` を facade 側のスナップショット型へ戻して葉単位に復元する。`Opaque` 以外・

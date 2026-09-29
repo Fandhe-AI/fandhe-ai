@@ -14,8 +14,10 @@
 //! キー昇順適用・逆順ロールバック）に任せる。凍結 API（#2400）は `set_requires_grad` の
 //! 子への伝播と失敗時ロールバック（`0..=index` を逆順）、`requires_grad` の集約
 //! （パラメータを持つ子の `any`。該当なしは `true`）を autodiff 側と一致させる。
-//! ロールバックは入れ子コンテナも含め葉単位で復元する（封印トークン付き内部フック
-//! `Module::__nested_modules`／`__nested_modules_mut` 経由。PR #2426 レビュー指摘）。
+//! ロールバックは子孫を葉（`children` が空の層）単位で復元する（公開の
+//! `Module::children`／`children_mut` 経由のため、利用者定義の複合層も対象。PR #2426
+//! レビュー指摘・2026-09-29 ユーザー承認）。`children` と `children_mut` が不整合な構成は
+//! 状態変更前に `InvalidArgument` で拒否する（fail-closed）。
 //!
 //! autodiff 側との差: 子は facade `Module` の不透明な trait object のため、
 //! `Sequential::forward` は autodiff 側の Linear→ReLU 融合を行わず子を順に適用するだけである。
@@ -32,29 +34,65 @@ use crate::{AutodiffError, TapeRef, Tensor, Var};
 /// `set_requires_grad` ロールバック用の再帰スナップショット（葉単位。イシュー #2400・
 /// PR #2426 レビュー指摘）。
 ///
-/// 入れ子コンテナ（内部フック [`Module::__nested_modules`] が `Some`）は子ごとに再帰し、
-/// 葉層は `requires_grad()` の値 1 つを保持する。集約値 1 つで潰すと、凍結済みと追跡中を
-/// 併せ持つ入れ子コンテナが失敗時に均一化されてしまうため。`FacadeModuleAdapter` が autodiff の
-/// `Module::requires_grad_snapshot` へ `Opaque` として包んで渡す際にも使う（`pub(crate)`）。autodiff 側
-/// `RequiresGradSnapshot` と同型（`ModuleList`／`ModuleDict` の区別は facade では不要）。
+/// [`Module::children`] が非空の層は子ごと（名前付き）に再帰し、葉（`children` が空）は
+/// `requires_grad()` の値 1 つを保持する。集約値 1 つで潰すと、凍結済みと追跡中を併せ持つ
+/// 複合層が失敗時に均一化されてしまうため。複合層自身の `requires_grad` は復元対象外
+/// （子の葉が正）。`FacadeModuleAdapter` が autodiff の `Module::requires_grad_snapshot` へ
+/// `Opaque` として包んで渡す際にも使う（`pub(crate)`）。
 pub(crate) enum RequiresGradSnapshot {
     Leaf(bool),
-    Nested(Vec<RequiresGradSnapshot>),
+    Nested(Vec<(String, RequiresGradSnapshot)>),
 }
 
-pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(module: &M) -> RequiresGradSnapshot {
-    match module.__nested_modules(SEAL) {
-        Some(children) => {
-            RequiresGradSnapshot::Nested(children.into_iter().map(snapshot_requires_grad).collect())
-        }
-        None => RequiresGradSnapshot::Leaf(module.requires_grad()),
+/// `module` の凍結状態を葉単位で記録する。状態は変更しない。辿った各ノードで
+/// [`Module::children`] と [`Module::children_mut`] の件数・名前・順序が食い違う場合は
+/// `InvalidArgument`（`children_mut` 未実装の複合層など。呼び出し側が状態変更前に
+/// 呼ぶことで fail-closed の事前検査を兼ねる）。
+pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(
+    module: &mut M,
+) -> Result<RequiresGradSnapshot, AutodiffError> {
+    let names: Vec<String> = module.children().into_iter().map(|(n, _)| n).collect();
+    let type_name = module.type_name();
+    let nested = {
+        let children = module.children_mut();
+        check_children_consistent(type_name, &names, &children)?;
+        children
+            .into_iter()
+            .map(|(name, child)| Ok((name, snapshot_requires_grad(child)?)))
+            .collect::<Result<Vec<_>, AutodiffError>>()?
+    };
+    if nested.is_empty() {
+        Ok(RequiresGradSnapshot::Leaf(module.requires_grad()))
+    } else {
+        Ok(RequiresGradSnapshot::Nested(nested))
+    }
+}
+
+/// `children` の名前列と `children_mut` の結果が一致することを検査する（不一致は
+/// `InvalidArgument`）。
+fn check_children_consistent(
+    type_name: &str,
+    names: &[String],
+    children_mut: &[(String, &mut dyn Module)],
+) -> Result<(), AutodiffError> {
+    let consistent = names.len() == children_mut.len()
+        && names.iter().zip(children_mut).all(|(n, (m, _))| n == m);
+    if consistent {
+        Ok(())
+    } else {
+        Err(AutodiffError::InvalidArgument(format!(
+            "set_requires_grad: `{type_name}` exposes children {names:?} via `children` but {:?} \
+             via `children_mut`; implement `children_mut` consistently with `children` \
+             (same count, names and order) so that freezing can be rolled back per leaf",
+            children_mut.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        )))
     }
 }
 
 /// スナップショットへ葉単位で復元する。葉は `requires_grad()` の一致で早期 `Ok` にせず
 /// 必ず `set_requires_grad` を呼び（getter が既定 `true` のままの外部実装対策）、`Err` は
 /// そのまま返す。入れ子は 1 つ失敗しても残りの子の復元を続行し、失敗を集約する。
-/// 子数不一致・入れ子でなくなっている場合は fail-closed の `InvalidArgument`。
+/// 子の件数・名前が食い違う場合は fail-closed の `InvalidArgument`。
 pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
     module: &mut M,
     snapshot: &RequiresGradSnapshot,
@@ -62,24 +100,24 @@ pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
     match snapshot {
         RequiresGradSnapshot::Leaf(value) => module.set_requires_grad(*value),
         RequiresGradSnapshot::Nested(expected) => {
-            let Some(children) = module.__nested_modules_mut(SEAL) else {
-                return Err(AutodiffError::InvalidArgument(
-                    "restore_requires_grad: snapshot is nested but the module no longer \
-                     exposes nested children"
-                        .to_string(),
-                ));
-            };
+            let children = module.children_mut();
             if children.len() != expected.len() {
                 return Err(AutodiffError::InvalidArgument(format!(
-                    "restore_requires_grad: nested child count mismatch (snapshot {}, actual {})",
+                    "restore_requires_grad: child count mismatch (snapshot {}, actual {})",
                     expected.len(),
                     children.len()
                 )));
             }
             let mut failures: Vec<String> = Vec::new();
-            for (i, (child, snap)) in children.into_iter().zip(expected).enumerate() {
+            for ((name, child), (expected_name, snap)) in children.into_iter().zip(expected) {
+                if &name != expected_name {
+                    failures.push(format!(
+                        "child `{name}` (snapshot expected `{expected_name}`; structure changed)"
+                    ));
+                    continue;
+                }
                 if let Err(e) = restore_requires_grad(child, snap) {
-                    failures.push(format!("child {i} ({e})"));
+                    failures.push(format!("child `{name}` ({e})"));
                 }
             }
             if failures.is_empty() {
@@ -101,10 +139,12 @@ fn set_requires_grad_with_rollback(
     mut children: Vec<&mut dyn Module>,
     requires_grad: bool,
 ) -> Result<(), AutodiffError> {
+    // 状態変更前の事前検査を兼ねる: `children`／`children_mut` が不整合な子孫が 1 つでも
+    // あれば、ここで `InvalidArgument` を返し何も変更しない。
     let previous: Vec<RequiresGradSnapshot> = children
-        .iter()
-        .map(|m| snapshot_requires_grad(&**m))
-        .collect();
+        .iter_mut()
+        .map(|m| snapshot_requires_grad(&mut **m))
+        .collect::<Result<_, _>>()?;
     for index in 0..children.len() {
         if let Err(err) = children[index].set_requires_grad(requires_grad) {
             let mut failures: Vec<String> = Vec::new();
@@ -141,8 +181,6 @@ fn aggregate_requires_grad<'a>(children: impl Iterator<Item = &'a dyn Module>) -
     }
     !saw
 }
-
-const SEAL: crate::nn::module::sealed::Token = crate::nn::module::sealed::Token(());
 
 /// PyTorch `nn.ModuleList` 相当。forward を持たない子 `Module` の保持器。
 ///
@@ -244,9 +282,9 @@ impl Module for ModuleList {
 
     /// 全子へ伝播する。失敗したら適用済みの子と失敗した子自身（`0..=index`）を逆順に
     /// 適用前の値へ必ず戻し（`requires_grad()` が一致して見えても `set_requires_grad` を
-    /// 呼ぶ）、復元失敗は打ち切らず集約して `Err` に含める。ネストしたコンテナは内部フック
-    /// （[`Module::__nested_modules`]）経由で葉単位に復元するため、凍結済みと追跡中が混在する
-    /// 内側コンテナも呼び出し前と完全一致に戻る（autodiff 側と同じ契約。PR #2426 レビュー指摘）。
+    /// 呼ぶ）、復元失敗は打ち切らず集約して `Err` に含める。子孫は `children`／`children_mut`
+    /// 経由で葉単位に復元するため、凍結済みと追跡中が混在する内側の複合層も
+    /// 呼び出し前と完全一致に戻る（`children_mut` 不整合な構成は変更前に `InvalidArgument`）（autodiff 側と同じ契約。PR #2426 レビュー指摘）。
     fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
         let children: Vec<&mut dyn Module> = self
             .modules
@@ -261,25 +299,13 @@ impl Module for ModuleList {
         aggregate_requires_grad(self.modules.iter().map(|m| m.as_ref()))
     }
 
-    #[doc(hidden)]
-    fn __nested_modules(
-        &self,
-        _token: crate::nn::module::sealed::Token,
-    ) -> Option<Vec<&dyn Module>> {
-        Some(self.modules.iter().map(|m| m.as_ref()).collect())
-    }
-
-    #[doc(hidden)]
-    fn __nested_modules_mut(
-        &mut self,
-        _token: crate::nn::module::sealed::Token,
-    ) -> Option<Vec<&mut dyn Module>> {
-        Some(
-            self.modules
-                .iter_mut()
-                .map(|m| -> &mut dyn Module { m.as_mut() })
-                .collect(),
-        )
+    /// `children` の可変版（名前・順序は同一。#2400）。
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        self.modules
+            .iter_mut()
+            .enumerate()
+            .map(|(i, m)| -> (String, &mut dyn Module) { (i.to_string(), m.as_mut()) })
+            .collect()
     }
 
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
@@ -415,20 +441,8 @@ impl Module for Sequential {
         self.inner.requires_grad()
     }
 
-    #[doc(hidden)]
-    fn __nested_modules(
-        &self,
-        token: crate::nn::module::sealed::Token,
-    ) -> Option<Vec<&dyn Module>> {
-        self.inner.__nested_modules(token)
-    }
-
-    #[doc(hidden)]
-    fn __nested_modules_mut(
-        &mut self,
-        token: crate::nn::module::sealed::Token,
-    ) -> Option<Vec<&mut dyn Module>> {
-        self.inner.__nested_modules_mut(token)
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        self.inner.children_mut()
     }
 }
 
@@ -626,25 +640,12 @@ impl Module for ModuleDict {
         aggregate_requires_grad(self.modules.iter().map(|(_, m)| m.as_ref()))
     }
 
-    #[doc(hidden)]
-    fn __nested_modules(
-        &self,
-        _token: crate::nn::module::sealed::Token,
-    ) -> Option<Vec<&dyn Module>> {
-        Some(self.modules.iter().map(|(_, m)| m.as_ref()).collect())
-    }
-
-    #[doc(hidden)]
-    fn __nested_modules_mut(
-        &mut self,
-        _token: crate::nn::module::sealed::Token,
-    ) -> Option<Vec<&mut dyn Module>> {
-        Some(
-            self.modules
-                .iter_mut()
-                .map(|(_, m)| -> &mut dyn Module { m.as_mut() })
-                .collect(),
-        )
+    /// `children` の可変版（キー・挿入順は同一。#2400）。
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        self.modules
+            .iter_mut()
+            .map(|(key, module)| -> (String, &mut dyn Module) { (key.clone(), module.as_mut()) })
+            .collect()
     }
 }
 
@@ -975,11 +976,16 @@ mod tests {
         assert!(outer.layers()[0].requires_grad());
     }
 
-    /// 葉ごとの `requires_grad` を層順に平坦化して返す（入れ子は内部フックで辿る）。
+    /// 葉ごとの `requires_grad` を層順に平坦化して返す（入れ子は `children` で辿る）。
     fn leaf_states(m: &dyn Module) -> Vec<bool> {
-        match m.__nested_modules(SEAL) {
-            Some(children) => children.into_iter().flat_map(leaf_states).collect(),
-            None => vec![m.requires_grad()],
+        let children = m.children();
+        if children.is_empty() {
+            vec![m.requires_grad()]
+        } else {
+            children
+                .into_iter()
+                .flat_map(|(_, c)| leaf_states(c))
+                .collect()
         }
     }
 
@@ -1056,14 +1062,14 @@ mod tests {
     }
 
     /// アダプタが返す `Opaque` スナップショットから facade 側の葉状態を平坦化して読む。
-    fn adapter_leaf_states(m: &dyn fandhe_ai_autodiff::nn::Module) -> Vec<bool> {
+    fn adapter_leaf_states(m: &mut dyn fandhe_ai_autodiff::nn::Module) -> Vec<bool> {
         fn flat(s: &super::RequiresGradSnapshot, out: &mut Vec<bool>) {
             match s {
                 super::RequiresGradSnapshot::Leaf(v) => out.push(*v),
-                super::RequiresGradSnapshot::Nested(c) => c.iter().for_each(|x| flat(x, out)),
+                super::RequiresGradSnapshot::Nested(c) => c.iter().for_each(|(_, x)| flat(x, out)),
             }
         }
-        let snap = m.requires_grad_snapshot();
+        let snap = m.requires_grad_snapshot().expect("snapshot");
         let fandhe_ai_autodiff::nn::RequiresGradSnapshot::Opaque(any) = snap else {
             panic!("アダプタは Opaque を返すはず");
         };
@@ -1093,10 +1099,10 @@ mod tests {
         let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
         outer.push(Box::new(adapted(mixed_facade_container())));
         outer.push(Box::new(adapted(failing_fz())));
-        let before = adapter_leaf_states(outer.get(0).expect("0"));
+        let before = adapter_leaf_states(outer.get_mut(0).expect("0"));
         assert_eq!(before, vec![false, false, true]);
         fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false).expect_err("失敗");
-        assert_eq!(adapter_leaf_states(outer.get(0).expect("0")), before);
+        assert_eq!(adapter_leaf_states(outer.get_mut(0).expect("0")), before);
     }
 
     /// 同上（autodiff `Sequential`・入れ子 autodiff `ModuleList` 経由）。
@@ -1107,11 +1113,15 @@ mod tests {
         let mut outer = fandhe_ai_autodiff::nn::Sequential::new();
         outer.push(Box::new(inner));
         outer.push(Box::new(adapted(failing_fz())));
-        let list = outer.layers()[0].as_module_list().expect("ModuleList");
-        let before = adapter_leaf_states(list.get(0).expect("0"));
+        let list = outer.layers_mut()[0]
+            .as_module_list_mut()
+            .expect("ModuleList");
+        let before = adapter_leaf_states(list.get_mut(0).expect("0"));
         fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false).expect_err("失敗");
-        let list = outer.layers()[0].as_module_list().expect("ModuleList");
-        assert_eq!(adapter_leaf_states(list.get(0).expect("0")), before);
+        let list = outer.layers_mut()[0]
+            .as_module_list_mut()
+            .expect("ModuleList");
+        assert_eq!(adapter_leaf_states(list.get_mut(0).expect("0")), before);
     }
 
     /// 同上（autodiff `ModuleDict`）。
@@ -1124,9 +1134,101 @@ mod tests {
         outer
             .insert("bad", Box::new(adapted(failing_fz())))
             .expect("k");
-        let before = adapter_leaf_states(outer.get("m").expect("m"));
+        let before = adapter_leaf_states(outer.get_mut("m").expect("m"));
         fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false).expect_err("失敗");
-        assert_eq!(adapter_leaf_states(outer.get("m").expect("m")), before);
+        assert_eq!(adapter_leaf_states(outer.get_mut("m").expect("m")), before);
+    }
+
+    /// 利用者定義の複合層（`children`／`children_mut` 実装あり。PR #2426 第 3 の P1）。
+    struct Comp {
+        a: Fz,
+        b: Fz,
+    }
+    impl Module for Comp {
+        fn forward<'t>(
+            &self,
+            _tape: TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("a.p".into(), &self.a.p), ("b.p".into(), &self.b.p)]
+        }
+        fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+            self.a.set_requires_grad(v)?;
+            self.b.set_requires_grad(v)
+        }
+        fn requires_grad(&self) -> bool {
+            self.a.requires_grad() || self.b.requires_grad()
+        }
+        fn children(&self) -> Vec<(String, &dyn Module)> {
+            vec![("a".into(), &self.a), ("b".into(), &self.b)]
+        }
+        fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+            vec![("a".into(), &mut self.a), ("b".into(), &mut self.b)]
+        }
+    }
+
+    /// `children` だけ実装し `children_mut` を実装しない複合層（拒否対象）。
+    struct ChildrenOnly(Comp);
+    impl Module for ChildrenOnly {
+        fn forward<'t>(
+            &self,
+            tape: TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            self.0.forward(tape, input)
+        }
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            self.0.named_parameters()
+        }
+        fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+            self.0.set_requires_grad(v)
+        }
+        fn requires_grad(&self) -> bool {
+            self.0.requires_grad()
+        }
+        fn children(&self) -> Vec<(String, &dyn Module)> {
+            self.0.children()
+        }
+    }
+
+    fn mixed_comp() -> Comp {
+        Comp {
+            a: fz(false),
+            b: fz(true),
+        }
+    }
+
+    /// PR #2426 第 3 の P1: 混在状態の利用者定義複合層を autodiff `ModuleList` へアダプタ経由で
+    /// 積み、後続の失敗後も全葉が呼び出し前と完全一致する。
+    #[test]
+    fn adapter_in_autodiff_module_list_restores_user_composite_per_leaf() {
+        let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
+        outer.push(Box::new(adapted(mixed_comp())));
+        outer.push(Box::new(adapted(failing_fz())));
+        let before = adapter_leaf_states(outer.get_mut(0).expect("0"));
+        assert_eq!(before, vec![false, true]);
+        fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false).expect_err("失敗");
+        assert_eq!(adapter_leaf_states(outer.get_mut(0).expect("0")), before);
+    }
+
+    /// `children_mut` 未実装の複合層をアダプタ経由で積むと、状態を変更する前に
+    /// `InvalidArgument` で拒否され、全葉が不変（autodiff `ModuleList`）。
+    #[test]
+    fn adapter_in_autodiff_module_list_rejects_children_only_composite_before_mutation() {
+        let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
+        outer.push(Box::new(adapted(fz(true))));
+        outer.push(Box::new(adapted(ChildrenOnly(mixed_comp()))));
+        let e = fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false)
+            .expect_err("事前検査で拒否");
+        assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
+        assert!(e.to_string().contains("children_mut"), "{e}");
+        assert_eq!(
+            adapter_leaf_states(outer.get_mut(0).expect("0")),
+            vec![true]
+        );
     }
 
     /// アダプタの復元は `Opaque` 以外・型違いを fail-closed で拒否する。
@@ -1148,14 +1250,14 @@ mod tests {
     fn restore_shape_mismatch_is_fail_closed() {
         let mut l = list_of(vec![Box::new(fz(true))]);
         let snap = RequiresGradSnapshot::Nested(vec![
-            RequiresGradSnapshot::Leaf(true),
-            RequiresGradSnapshot::Leaf(true),
+            ("0".to_string(), RequiresGradSnapshot::Leaf(true)),
+            ("1".to_string(), RequiresGradSnapshot::Leaf(true)),
         ]);
         let e = restore_requires_grad(&mut l, &snap).expect_err("不一致");
         assert!(e.to_string().contains("count mismatch"), "{e}");
         let mut leaf = fz(true);
         let e = restore_requires_grad(&mut leaf, &snap).expect_err("葉");
-        assert!(e.to_string().contains("no longer"), "{e}");
+        assert!(e.to_string().contains("count mismatch"), "{e}");
     }
 
     fn relu_box() -> Box<dyn Module> {

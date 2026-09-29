@@ -649,9 +649,13 @@ pub trait Module {
     /// `Nested`／`NestedDict`、`fandhe-ai` facade の crate 内アダプタは `Opaque`）。
     /// 集約値 1 つで保存・復元すると混在状態が均一化されるため、コンテナは子の
     /// スナップショットを必ずこのメソッド経由で取る。公開 API の範囲外（内部クレート専用）。
+    ///
+    /// `&mut self` かつ `Result` なのは、別クレートのアダプタが `children`／`children_mut` の
+    /// 整合を状態変更前に検査して拒否できるようにするため（fail-closed。PR #2426 P1）。
+    /// 実装は状態を変更してはならない。
     #[doc(hidden)]
-    fn requires_grad_snapshot(&self) -> RequiresGradSnapshot {
-        RequiresGradSnapshot::Leaf(self.requires_grad())
+    fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
+        Ok(RequiresGradSnapshot::Leaf(self.requires_grad()))
     }
 
     /// [`Module::requires_grad_snapshot`] で取ったスナップショットへ状態を戻す内部フック。

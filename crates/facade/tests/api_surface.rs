@@ -5705,7 +5705,7 @@ fn scan_module_trait_methods(content: &str) -> Option<Vec<(String, bool, Vec<Str
 }
 
 /// #2395 の正ガード: facade `nn::Module` の面が承認済み集合
-/// （required = `forward` のみ・defaulted = 15 件。#2400 で凍結 API 3 件と封印内部フック 2 件・#2401 で introspection 4 件を追加）と完全一致すること
+/// （required = `forward` のみ・defaulted = 14 件。#2400 で凍結 API 3 件と `children_mut`・#2401 で introspection 4 件を追加）と完全一致すること
 /// （#2338 承認事項 2）。`forward_host`・`as_*` 等の内部フックの混入を拒否する。
 /// #2400 で凍結 API 3 件（`set_requires_grad`・`freeze`・`requires_grad`）を追加し 9 件。
 /// #2401 で鏡写しのメソッドを足すときは本集合を更新する。
@@ -5743,10 +5743,9 @@ fn assert_module_surface(methods: &[(String, bool, Vec<String>)]) -> Result<(), 
         "named_modules",
         "parameter_count",
         "type_name",
-        // #2400 レビュー是正: 封印トークン付き `#[doc(hidden)]` 内部フック 2 件
-        // （入れ子コンテナの凍結状態を葉単位で復元する crate 内プロトコル。要承認）。
-        "__nested_modules",
-        "__nested_modules_mut",
+        // #2400 レビュー是正（PR #2426。2026-09-29 ユーザー承認）: `children` と対の公開
+        // defaulted メソッド。凍結ロールバックが利用者定義の複合層も葉単位で復元するために使う。
+        "children_mut",
     ]
     .into();
     if required != want_req || defaulted != want_def {
@@ -5795,8 +5794,7 @@ fn facade_nn_module_trait_guards_detect_each_category() {
         fn requires_grad(&self) -> bool { true } \
         fn children(&self) -> V { V } fn named_modules(&self) -> V { V } \
         fn parameter_count(&self) -> usize { 0 } fn type_name(&self) -> &'static str { S } \
-        fn __nested_modules(&self, t: Token) -> V { V } \
-        fn __nested_modules_mut(&mut self, t: Token) -> V { V } }";
+        fn children_mut(&mut self) -> V { V } }";
     let m = scan_module_trait_methods(ok).expect("ok");
     assert!(assert_module_surface(&m).is_ok());
     assert!(check_module_signatures(&m).is_ok());
@@ -18624,20 +18622,15 @@ fn nn_mod_public_items_match_expected_set() {
 
 /// 正ガード: `src/nn/module.rs` の公開 item は `trait Module` のみ。
 /// 制限付き可視性のまま残すのは crate 内アダプタ `FacadeModuleAdapter`（REQ-12）と
-/// 走査用の内部型別名 `NodeKey`（`pub(super) type`。#2401）・封印トークンの置き場
-/// `pub(crate) mod sealed`（内部フック `__nested_modules*` 用。#2400・PR #2426）の 3 件。
+/// 走査用の内部型別名 `NodeKey`（`pub(super) type`。#2401）の 2 件。
 #[test]
 fn nn_module_rs_public_items_match_expected_set() {
     let (public, restricted) = scan_top_level_pub_items(&nn_src("module.rs"));
     assert_eq!(public, pair_set(&[("trait", "Module")]));
     assert_eq!(
         restricted,
-        pair_set(&[
-            ("mod", "sealed"),
-            ("struct", "FacadeModuleAdapter"),
-            ("type", "NodeKey")
-        ]),
-        "FacadeModuleAdapter・NodeKey・sealed は制限付き可視性のままであること（公開面へ出さない）"
+        pair_set(&[("struct", "FacadeModuleAdapter"), ("type", "NodeKey")]),
+        "FacadeModuleAdapter・NodeKey は制限付き可視性のままであること（公開面へ出さない）"
     );
 }
 
