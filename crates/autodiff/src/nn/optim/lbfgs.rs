@@ -1457,9 +1457,11 @@ fn decode_lbfgs_state(
         |key: &str| -> Result<f32, AutodiffError> { Ok(read_exact_shape(state, key, &[1])?[0]) };
     let t = scalar(LBFGS_T_KEY)?;
     let h_diag = scalar(LBFGS_H_DIAG_KEY)?;
-    // `h_diag` は初期値 1.0 か `ys / yy`（ys > 1e-10・yy > 0）のため常に正の有限値。
-    if !(h_diag.is_finite() && h_diag > 0.0) {
-        return Err(load_err(format!("h_diag {h_diag} must be finite and > 0")));
+    // `h_diag` は初期値 1.0 か `ys / yy`（ys > 1e-10・yy > 0）。有限な除算でも
+    // yy が極大だと f32 で 0 にアンダーフローしうる（生成側の到達可能状態）ため、
+    // 保存した状態を読み戻せるよう 0 を許容し、負値・非有限のみ拒否する。
+    if !(h_diag.is_finite() && h_diag >= 0.0) {
+        return Err(load_err(format!("h_diag {h_diag} must be finite and >= 0")));
     }
     let last_loss = if has_loss {
         Some(scalar(LBFGS_LAST_LOSS_KEY)?)

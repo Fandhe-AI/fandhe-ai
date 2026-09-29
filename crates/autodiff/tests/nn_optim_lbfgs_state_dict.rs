@@ -422,19 +422,34 @@ fn rejects_n_iter_exceeding_func_evals() {
     });
 }
 
-/// `h_diag`・`history.rho` は正の有限値のみ到達可能（ys > 1e-10 のペアのみ生成）。
+/// `history.rho` は正の有限値のみ到達可能（ys > 1e-10 のペアのみ生成）。
+/// `h_diag` は負値のみ拒否する（0 は下記の受理テストを参照）。
 #[test]
 fn rejects_non_positive_h_diag_and_rho() {
+    reject_with(|sd, _| {
+        sd.insert("h_diag".into(), t(vec![-1.0], &[1]));
+    });
     for v in [0.0f32, -1.0] {
-        reject_with(|sd, _| {
-            sd.insert("h_diag".into(), t(vec![v], &[1]));
-        });
         reject_with(|sd, n| {
             let mut rho = vec![1.0f32; n];
             rho[n - 1] = v;
             sd.insert("history.rho".into(), t(rho, &[n]));
         });
     }
+}
+
+/// `h_diag = ys / yy` は f32 で 0 にアンダーフローしうる到達可能状態のため、
+/// 保存した `h_diag = 0` は復元でき、再保存が bit 一致する。
+#[test]
+fn zero_h_diag_is_restorable_and_round_trips() {
+    let (mut sd, n) = valid();
+    sd.insert("h_diag".into(), t(vec![0.0], &[1]));
+    let (mut target, _params) = trained(config(HIST, LbfgsLineSearch::None), 1);
+    target
+        .load_state_dict(sd.clone(), &slot_shapes(), n)
+        .unwrap();
+    let saved = target.state_dict().unwrap();
+    assert_state_dicts_bit_equal(&saved, &sd);
 }
 
 /// カウンタに上限定数はなく、`u64::MAX` の復元自体は受理し、
