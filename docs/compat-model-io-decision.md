@@ -5,6 +5,16 @@
 （`crates/facade/src/lib.rs::ModelIoHoldDoctestGuard`＋
 `crates/facade/tests/api_surface.rs` のテストで機械的に固定する）。
 
+> **更新記録（イシュー #2369・親 #2362。2026-09-29）**: 親 #2362 でユーザー承認を受け、
+> 本 doc §2 item 1 の**主案**（自由関数 `compat::save_model`／`compat::load_model` と
+> `#[non_exhaustive] enum ModelIoError`）を `crates/facade/src/compat/model_io.rs` で
+> 公開した（対応範囲は未 `compile` の `Linear` と活性化 7 種の最小構成。それ以外は
+> `UnsupportedModel` で fail-closed。全 30 層は #2370、BN buffer は #2371、compile 状態は
+> #2372・#2373、網羅テストは #2374〜#2376）。**代替案の inherent メソッド
+> `Sequential::save`／`load` は承認範囲外のため保留ガードを維持**している（§7）。
+> 以下 §0 は #2188 時点の「保留」判断の記録であり、経緯として残す。
+> **#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**（公開範囲が途中状態のため）。
+
 ## 0. 結論（方式の確定）
 
 **facade 公開面の拡張は承認待ちのまま保留し、「設計判断記録＋保留ガード
@@ -129,6 +139,18 @@ version migration。
    `model_io.rs`（または共有 `fs_guard`）に持つ。manifest 側の記載値は
    この固定定数と一致するかどうかの確認にのみ使い、確定前の資源確保・
    ループ回数の根拠にしない）。
+   **#2369 の実装値（2026-09-29）**: `MAX_MANIFEST_BYTES = 1 MiB`・
+   `MAX_LAYERS = 4096`（いずれも `model_io.rs` の private const）。**候補値のまま実装しており、
+   親 #2362 上で所有者がこの 2 値を承認した記録は実装時点で確認できていない
+   （承認日は記録しない。承認待ち）**。根拠: v1 manifest は 1 層 100〜150 B 程度で 4096 層でも
+   約 0.6 MiB に収まる（`model_io.rs` の単体テスト `manifest_of_max_layers_fits_the_manifest_bound`
+   が 5 桁次元の 4096 Linear で固定）。4096 は既存テストの 1714 層 `Sequential`
+   （`sequential.rs`）を包含する 2 のべき乗。併せて構造上の値として JSON ネスト上限 4
+   （v1 スキーマの最大ネスト。#2372・#2373 の `compiled` も 4 以内）・配列要素数上限
+   `2 * MAX_LAYERS`・object キー数上限 16（重複キー検査の線形走査を有界にする）を持つが、
+   これらはポリシー閾値ではなくスキーマから導いた値。値が異なる承認が出た場合は定数と
+   本記述を更新する。`MAX_TMP_NAME_ATTEMPTS = 8` は §12.3 で確定済みの値
+   （`docs-site` と同値）。
    - **safetensors ファイルサイズ上限**: `crates/facade/src/model.rs`
      の `MAX_MODEL_FILE_BYTES`（1 GiB。private const）を再利用する
      ——承認事項ではなく確定方針とする。理由: 用途が同一（非信頼な
@@ -397,6 +419,24 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 - 承認後は、doctest・ソース走査を撤去して正ガード（実際の公開面の
   固定テスト）へ置き換え、インベントリの期待集合を
   `facade/src/compat/model_io.rs` へ差し替える。
+- **#2369 で実施した置き換え**（親 #2362）:
+  - `ModelIoHoldDoctestGuard`: `model_io` モジュール・自由関数・エラー型のローカル定義
+    （glob 衝突で doctest 自体が壊れるため）を撤去し、**代替案の inherent メソッド
+    （`Sequential::save`／`load`／`save_model`／`load_model`）専用のプローブへ縮小**した
+    （`api_surface.rs` の `MODEL_IO_HOLD_PROBE_BODY` も同期）。
+  - ソース走査は**正ガード**へ反転: `facade_model_io_public_surface_matches_approved_contract`
+    （`mod model_io;` は `compat/mod.rs` に private でちょうど 1 件・`pub use
+    model_io::{ModelIoError, load_model, save_model};` がちょうど 1 文・`enum ModelIoError` と
+    `fn save_model`／`fn load_model` は `compat/model_io.rs` に各 1 件・代替案は 0 件）と、その
+    自己テスト `facade_model_io_public_surface_detects_each_category`。追加で
+    `model_io_module_exposes_only_approved_surface`（`model_io.rs` の `pub` 項目は 3 件のみ）・
+    `model_io_items_are_reachable_via_facade`（署名・`#[non_exhaustive]` の 7 variant）。
+  - 定義元インベントリ `workspace_declares_model_io_fn_names_only_in_allowed_locations` の
+    期待集合は `facade/src/compat/model_io.rs` の `save_model`・`load_model` 各 1 件へ差し替えた。
+    代替案の `workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations` は
+    承認範囲外のため 0 件固定を維持する。
+  - `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `save_model`・`load_model` を追加した
+    （小文字始まりの `pub use` 葉は関数再エクスポートの契約）。
 
 ## 8. OWASP Top 10 観点（承認後の要件として記録）
 
@@ -454,6 +494,10 @@ CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネル
 なかった。本文は要件としてのみ扱い、逐語での引用はしていない。
 
 ## 10. 再開条件
+
+**#2362 で再開済み（#2369）**: 2026-09-29 のユーザー承認を受け、親 #2362 配下で
+「§4〜§6 の実装 → 保留ガードの撤去」を段階的に進める。#2369 は最小構成の公開と
+保留ガードの正ガード化（§7）。以下は #2188 時点の再開条件の記録。
 
 イシュー #2188（または親 #2131）に、所有者による §2 の承認コメントが
 付くこと。承認後は、別イシューか同イシューの再開で「§4〜§6 の実装 →
@@ -907,7 +951,10 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
 2. §13.6 の Windows 実装手段（`unsafe` を伴う場合は監査要件を別途定める）
 3. `load_model` の Windows 対応
 
-**5. #2369 実装要件（正本）**
+**5. #2369 実装要件（正本。実装済み: `model_io.rs` の `save_platform_supported(is_unix)`〈純関数。
+`save_model` の冒頭で `dir` への副作用より前に呼ぶ〉・単体テスト
+`non_unix_platform_is_rejected_as_unsupported`・`tests/compat_sequential_model_io.rs` の
+`#[cfg(not(unix))]` テスト・公開 doc への記載）**
 
 - `save_model` の冒頭で、`dir` へのあらゆる副作用（`create_dir_all`・
   `create_new`・`rename`）より前に、`cfg(not(unix))` のとき
@@ -1065,6 +1112,14 @@ load_succeeds_when_root_itself_is_a_symlink` と同じ考え方——利用者�
 持たない（同じ脆弱性クラスの対策を 2 箇所に分散させない）。
 `MAX_MODEL_FILE_BYTES`（1 GiB。現状 `model.rs` の private const）も
 同じ抽出の対象とし `pub(crate)` へ格上げして共有する（§2 item 4）。
+
+**書き込み側（#2369）**: `create_new`・一時ファイル名の再試行・自己所有一時ファイルの
+`(dev, ino)` 照合削除は std のみで `compat/model_io.rs`（`cfg(unix)` 限定）に持ち、
+`fs_guard` には置かない。読み取り側は `fs_guard::open_leaf_checked`（§13.2 手順 1〜4）と
+`OpenedLeaf::read_exact_len`（手順 5）を新設して共有する（`model.rs` の手順を同ヘルパーへ
+寄せる整理は挙動を変えない別作業として将来課題）。`load_model` の対応範囲
+（Linux x86_64／aarch64・macOS）は unix 全体より狭いため、それ以外の unix では
+`save_model` が成功しても `load_model` は拒否される（既知の非対称性）。
 
 **抽出済み（イシュー #2364）**: `open_flags`・`open_leaf_no_follow`・
 `MAX_MODEL_FILE_BYTES` は `crates/facade/src/fs_guard.rs`（`crate::fs_guard`。

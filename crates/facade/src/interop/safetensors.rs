@@ -80,11 +80,10 @@
 //! （[`crate::compat::ModelCheckpoint::to_file`]）は #2073 で実装済み。
 //! `compat::Sequential` の層構成シリアライズ（manifest.json ＋
 //! safetensors の組み合わせによる `save_model`／`load_model`）は、
-//! イシュー #2188（親 #2131）で承認後の設計を
-//! `docs/compat-model-io-decision.md` §5 に記録し、facade 公開面は
-//! ユーザー承認待ちで保留した（`src/lib.rs::ModelIoHoldDoctestGuard`＋
-//! `tests/api_surface.rs` の 4 テストで機械固定。本モジュール自体への
-//! 変更はなく、案 A の素の再エクスポートのみのまま）。F32 以外の
+//! イシュー #2369（親 #2362）で `compat::save_model`／`compat::load_model` として
+//! 公開済み（設計は `docs/compat-model-io-decision.md`。本モジュールの
+//! `save_safetensors_f32_to_bytes`／`load_safetensors_f32_from_bytes` を再利用する。
+//! 本モジュール自体への変更はなく、案 A の素の再エクスポートのみのまま）。F32 以外の
 //! dtype・入力サイズ上限の導入・`st_load`／`st_save` 本体ロジックの
 //! 変更も対象外。
 

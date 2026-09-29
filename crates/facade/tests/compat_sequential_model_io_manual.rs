@@ -1,7 +1,8 @@
 //! イシュー #2188（親 #2131）「`compat::Sequential` 層構成シリアライズ
-//! （`save_model`・`load_model`）」の facade 公開面は未承認のまま保留
-//! した（`docs/compat-model-io-decision.md` §0）。本ファイルは、承認後
-//! の `save_model`／`load_model` が被せる土台部分——`state_dict`／
+//! （`save_model`・`load_model`）」は承認待ちで保留していたが、親 #2362 の承認を
+//! 受け #2369 で最小構成（未 compile の Linear と活性化 7 種）を公開した
+//! （`docs/compat-model-io-decision.md` §0・§10）。本ファイルは、全 30 層へ
+//! 拡張する #2370 以降が被せる土台部分——`state_dict`／
 //! `load_state_dict`／`fandhe_ai::interop::safetensors` の**既存公開
 //! API のみ**を使った層構成パラメータの roundtrip——が、深い異種
 //! スタック・transformer encoder（内部 residual）・embedding+

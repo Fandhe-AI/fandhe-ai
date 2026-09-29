@@ -4710,6 +4710,95 @@ fn model_types_are_reachable_via_facade() {
     }
 }
 
+// ============================================================================
+// compat::model_io 公開面の機械検査（イシュー #2369・親 #2362）
+// ============================================================================
+
+/// `src/compat/model_io.rs` の公開アイテム（`pub` 直後が `(` でないもの。`pub(crate)`／
+/// `pub(super)` は対象外）が承認範囲の `fn save_model`・`fn load_model`・`enum ModelIoError`
+/// の 3 件だけであることを走査する（`scan_unapproved_model_pub_items` と同型の独自許可リスト）。
+fn scan_unapproved_model_io_pub_items(original: &str) -> Vec<String> {
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 3] = [
+        ("fn", "save_model"),
+        ("fn", "load_model"),
+        ("enum", "ModelIoError"),
+    ];
+    let cleaned: String = strip_comments_and_literals(original).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offenses = Vec::new();
+    for i in 0..tokens.len() {
+        if tokens[i] != "pub" || tokens.get(i + 1).map(String::as_str) == Some("(") {
+            continue;
+        }
+        let kind = tokens.get(i + 1).map(String::as_str).unwrap_or_default();
+        let name = tokens.get(i + 2).map(String::as_str).unwrap_or_default();
+        if !ALLOWED_PUB_ITEMS.contains(&(kind, name)) {
+            offenses.push(format!("pub {kind} {name}"));
+        }
+    }
+    offenses
+}
+
+#[test]
+fn model_io_module_exposes_only_approved_surface() {
+    let content = read_to_string_or_panic(&facade_crate_root().join("src/compat/model_io.rs"));
+    let offenses = scan_unapproved_model_io_pub_items(&content);
+    assert!(
+        offenses.is_empty(),
+        "src/compat/model_io.rs に承認範囲外の公開アイテムが見つかった: {offenses:?}"
+    );
+    // 承認済みの 3 件が実在すること（走査の空振りで通過しない）。
+    assert!(content.contains("pub fn save_model("));
+    assert!(content.contains("pub fn load_model("));
+    assert!(content.contains("pub enum ModelIoError"));
+}
+
+/// [`scan_unapproved_model_io_pub_items`] の自己テスト（承認済みは違反 0、
+/// 承認外の `pub` 項目は検出し、`pub(crate)`／`pub(super)` は対象外）。
+#[test]
+fn scan_unapproved_model_io_pub_items_detects_offense() {
+    let approved = "pub enum ModelIoError {}\npub fn save_model() {}\npub fn load_model() {}\n\
+                    pub(crate) fn helper() {}\npub(super) struct Hidden;\n";
+    assert!(scan_unapproved_model_io_pub_items(approved).is_empty());
+    let offenses = scan_unapproved_model_io_pub_items("pub fn rogue() {}\npub struct Extra;\n");
+    assert_eq!(offenses.len(), 2, "offenses={offenses:?}");
+    assert!(offenses[0].contains("rogue"));
+    assert!(!scan_unapproved_model_io_pub_items("pub fn save_model_v2() {}").is_empty());
+}
+
+/// `fandhe_ai::compat::{save_model, load_model, ModelIoError}` が facade から到達可能で、
+/// 承認済みのシグネチャ（`Result<_, ModelIoError>`・`impl AsRef<Path>`）であることを
+/// コンパイル時に固定する。`ModelIoError` は `#[non_exhaustive]` のためワイルドカード腕を持つ
+/// `match` で 7 variant を網羅できることも併せて確認する。
+#[test]
+fn model_io_items_are_reachable_via_facade() {
+    use fandhe_ai::compat::{ModelIoError, Sequential};
+
+    fn _assert_error_matchable(e: &ModelIoError) -> &'static str {
+        match e {
+            ModelIoError::Io(_) => "io",
+            ModelIoError::Manifest { .. } => "manifest",
+            ModelIoError::Safetensors(_) => "safetensors",
+            ModelIoError::UnsupportedModel { .. } => "unsupported_model",
+            ModelIoError::Mismatch { .. } => "mismatch",
+            ModelIoError::Autodiff(_) => "autodiff",
+            ModelIoError::TooLarge { .. } => "too_large",
+            _ => "unknown",
+        }
+    }
+    fn _assert_signatures(model: &Sequential, dir: &Path) {
+        let _: Result<(), ModelIoError> = fandhe_ai::compat::save_model(model, dir);
+        let _: Result<(), ModelIoError> =
+            fandhe_ai::compat::save_model(model, std::path::PathBuf::new());
+        let _: Result<Sequential, ModelIoError> = fandhe_ai::compat::load_model(dir);
+        let _: Result<Sequential, ModelIoError> =
+            fandhe_ai::compat::load_model(std::path::PathBuf::new());
+    }
+    // `std::error::Error` を実装していること（`?` で `Box<dyn Error>` へ流せる）。
+    fn _assert_error_trait<E: std::error::Error + Send + Sync + 'static>() {}
+    _assert_error_trait::<ModelIoError>();
+}
+
 fn lib_rs_path() -> std::path::PathBuf {
     facade_crate_root().join("src/lib.rs")
 }
@@ -6560,6 +6649,9 @@ fn collect_pub_use_leaves_expands_nested_groups_and_source_side_renames() {
 const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     // `compat/mod.rs`（`compat::array`。イシュー #411）。
     "array",
+    // `compat/mod.rs`（`compat::save_model`／`compat::load_model`。イシュー #2369・親 #2362）。
+    "save_model",
+    "load_model",
     // `interop/safetensors.rs`（イシュー #2019）。
     "load_safetensors_f32",
     "load_safetensors_f32_from_bytes",
@@ -15752,14 +15844,14 @@ fn facade_does_not_reexport_or_declare_train_step_items_detects_each_category() 
 }
 
 // =====================================================================
-// #2188（親 #2131）の facade 公開保留固定（`ModelIoHoldDoctestGuard`）。
-// 層構成シリアライズ（`save_model`／`load_model`）は本番の呼び出し元が
-// 存在しないため内部ロジックも実装していない（`TrainStepHoldDoctestGuard`
-// 〈#2184〉・`GradAccumulationHoldDoctestGuard`〈#2180〉とは異なり本体
-// コードの変更なし）。`TrainStepHoldDoctestGuard`（#2184）と同型の 4
-// テスト構成に加え、`workspace_declares_optimizer_state_dict_fn_names_
-// only_in_allowed_locations` と同型の workspace 全体インベントリ
-// （期待集合は空）を第 4 テストとして持つ。
+// #2188（親 #2131）で導入し、#2369（親 #2362）で正ガードへ反転した
+// `compat::save_model`／`load_model`／`ModelIoError` の facade 公開面の固定。
+// 自由関数とエラー型は承認・公開済みのため、ソース走査は「承認済みの形で
+// ちょうど 1 件だけ存在すること」を固定する正ガード
+// （`facade_model_io_public_surface_matches_approved_contract` ほか）になった。
+// 代替案の inherent メソッド（`Sequential::save`／`load`）は承認範囲外のため、
+// `ModelIoHoldDoctestGuard`（代替案専用へ縮小）と `impl Sequential` 内
+// `fn save`／`fn load` の 0 件固定（workspace インベントリ）を維持している。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `ModelIoHoldDoctestGuard` doc 内の
@@ -15804,7 +15896,7 @@ fn model_io_hold_doctest_probe_body_matches_fixed_contract() {
         actual, MODEL_IO_HOLD_PROBE_BODY,
         "ModelIoHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
          固定文言 MODEL_IO_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_model_io_hold_probe モジュール・\
+         プローブ（#2369 で縮小済み。\
          __FandheModelIoHoldProbe トレイト・__probe_* 関数群）の削除・\
          弱体化・隠し行の混入がないか確認すること。\n--- actual ---\n{actual}"
     );
@@ -15816,17 +15908,6 @@ fn model_io_hold_doctest_probe_body_matches_fixed_contract() {
 /// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
 /// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
 const MODEL_IO_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_model_io_hold_probe {\n\
-\x20\x20\x20\x20pub mod model_io {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn save_model() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn load_model() {}\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20pub fn save_model() {}\n\
-\x20\x20\x20\x20pub fn load_model() {}\n\
-\x20\x20\x20\x20pub struct ModelIoError;\n\
-}\n\
-use __fandhe_model_io_hold_probe::*;\n\
 \n\
 struct __FandheModelIoHoldMarker;\n\
 \n\
@@ -15852,20 +15933,6 @@ impl __FandheModelIoHoldProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_module_path() {\n\
-\x20\x20\x20\x20model_io::save_model();\n\
-\x20\x20\x20\x20model_io::load_model();\n\
-}\n\
-\n\
-fn __probe_free_fn() {\n\
-\x20\x20\x20\x20save_model();\n\
-\x20\x20\x20\x20load_model();\n\
-}\n\
-\n\
-fn __probe_error_type() {\n\
-\x20\x20\x20\x20let _ = ModelIoError;\n\
-}\n\
-\n\
 fn __probe_inherent_method(seq: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheModelIoHoldMarker =\n\
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::save_model(seq);\n\
@@ -15877,29 +15944,48 @@ fn __probe_inherent_method(seq: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::load(seq);\n\
 }";
 
-/// [`facade_does_not_reexport_or_declare_model_io`]・その自己テストが
-/// 共用する検出本体。facade src 全体（`crates/facade/src/**`）の
-/// `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
-/// `model_io`／`save_model`／`load_model`／`ModelIoError` を検出し
-/// （単一行・複数行・ネストした group・別名も検出）、`trait`／
-/// `struct`／`enum`／`type` 直後の `ModelIoError` 独自宣言、`mod
-/// model_io` 宣言、`save_model`／`load_model` の `fn` 宣言、および
-/// `impl Sequential { .. }`／`impl <Trait> for Sequential { .. }`
-/// ブロック内の `fn save`／`fn load` 宣言（[`scan_sequential_alt_
-/// save_load_impls`]。`docs/compat-model-io-decision.md` §2 の代替案
-/// `Sequential::save(&self, dir)`／`Sequential::load(dir)` を検出する。
-/// PR #2317 review 指摘: `_model` 接尾辞ありの 2 名だけを走査しており
-/// 代替名を見逃していた）を違反として返す
-/// （`scan_train_step_reexports_and_declarations` と同型。`fn` 宣言の
-/// 定義元インベントリは
-/// [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
-/// が workspace 全体で別途固定する）。
-fn scan_model_io_reexports_and_declarations(content: &str) -> Vec<String> {
+/// `model_io` 正ガード（[`facade_model_io_public_surface_matches_approved_contract`]・
+/// その自己テストが共用）の 1 ファイル分の検出結果。
+///
+/// #2369（親 #2362）で `compat::save_model`／`compat::load_model`／
+/// `compat::ModelIoError` が公開されたため、#2188 の否定ガード（「存在しないこと」）を
+/// 正ガード（「承認済みの形で、承認済みの場所に、ちょうど 1 件だけ存在すること」）へ反転した。
+#[derive(Default)]
+struct ModelIoFileScan {
+    /// 修飾子なし（private）の `mod model_io` 宣言数。
+    private_mod_decls: usize,
+    /// `pub mod model_io`・`pub(crate) mod model_io` 等、修飾子付きの `mod model_io` 宣言数。
+    qualified_mod_decls: usize,
+    /// 葉に `model_io`／`save_model`／`load_model`／`ModelIoError` を持つ
+    /// `pub use` 文の正規化文字列（トークンを空白なしで連結したもの）。
+    pub_use_statements: Vec<String>,
+    /// `enum ModelIoError` 宣言数。
+    enum_decls: usize,
+    /// `trait`／`struct`／`type` による `ModelIoError` 宣言数。
+    other_type_decls: usize,
+    /// `fn save_model` 宣言数。
+    save_model_fns: usize,
+    /// `fn load_model` 宣言数。
+    load_model_fns: usize,
+    /// `impl Sequential { .. }` 内の `fn save`／`fn load` 宣言数（代替案。承認外）。
+    alt_impl_offenses: usize,
+}
+
+/// `crates/facade/src/` 内で承認済みの `pub use`（compat 公開面。`compat/mod.rs` の 1 文 1 行）。
+const MODEL_IO_APPROVED_PUB_USE: &str = "model_io::{ModelIoError,load_model,save_model}";
+/// `mod model_io;` と承認済み `pub use` を置く唯一のファイル（`src/` からの相対パス）。
+const MODEL_IO_MOD_FILE: &str = "compat/mod.rs";
+/// `save_model`／`load_model`／`ModelIoError` の唯一の定義ファイル（同上）。
+const MODEL_IO_IMPL_FILE: &str = "compat/model_io.rs";
+
+/// 1 ファイルから [`ModelIoFileScan`] を作る（コメント・リテラルを除いたトークン列を走査。
+/// `scan_train_step_reexports_and_declarations` と同型で、単一行・複数行・ネストした
+/// group・別名の `pub use` も葉の単位で検出する）。
+fn scan_model_io_file(content: &str) -> ModelIoFileScan {
     const REEXPORT_LEAF_NAMES: [&str; 4] = ["model_io", "save_model", "load_model", "ModelIoError"];
-    const FN_NAMES: [&str; 2] = ["save_model", "load_model"];
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
+    let mut scan = ModelIoFileScan::default();
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -15910,35 +15996,130 @@ fn scan_model_io_reexports_and_declarations(content: &str) -> Vec<String> {
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
             let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if REEXPORT_LEAF_NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
-                }
+            if leaves
+                .iter()
+                .any(|leaf| REEXPORT_LEAF_NAMES.contains(&leaf.as_str()))
+            {
+                // 複数行 group の末尾カンマ（rustfmt の整形差）は同一文として扱う。
+                scan.pub_use_statements
+                    .push(path_tokens.concat().replace(",}", "}"));
             }
             i = (end + 1).min(tokens.len());
             continue;
         }
-        if tokens[i] == "ModelIoError"
-            && i > 0
-            && matches!(tokens[i - 1].as_str(), "trait" | "struct" | "enum" | "type")
-        {
-            offending.push(format!("{} ModelIoError 宣言", tokens[i - 1]));
+        if tokens[i] == "ModelIoError" && i > 0 {
+            match tokens[i - 1].as_str() {
+                "enum" => scan.enum_decls += 1,
+                "trait" | "struct" | "type" => scan.other_type_decls += 1,
+                _ => {}
+            }
         }
         if tokens[i] == "mod" && tokens.get(i + 1).map(String::as_str) == Some("model_io") {
-            offending.push("mod model_io 宣言".to_string());
+            // 直前が `pub` または `)`（`pub(crate)` 等の修飾子）なら修飾子付き。
+            let qualified = i > 0 && matches!(tokens[i - 1].as_str(), "pub" | ")");
+            if qualified {
+                scan.qualified_mod_decls += 1;
+            } else {
+                scan.private_mod_decls += 1;
+            }
         }
         i += 1;
     }
 
-    for name in FN_NAMES {
-        offending.extend(
-            (0..count_fn_declarations_by_name(&tokens, name)).map(|_| format!("fn {name} 宣言")),
-        );
+    scan.save_model_fns = count_fn_declarations_by_name(&tokens, "save_model");
+    scan.load_model_fns = count_fn_declarations_by_name(&tokens, "load_model");
+    scan.alt_impl_offenses = scan_sequential_alt_save_load_impls(content).len();
+    scan
+}
+
+/// `(src からの相対パス, 内容)` の集合に対し、`model_io` 公開面の正契約を検査して違反を返す
+/// （空なら適合）。契約:
+///
+/// - `mod model_io;` は `compat/mod.rs` にちょうど 1 件で、`pub` 等の修飾子なし
+/// - `model_io`／`save_model`／`load_model`／`ModelIoError` を葉に持つ `pub use` は
+///   `compat/mod.rs` の固定形 `pub use model_io::{ModelIoError, load_model, save_model};`
+///   ちょうど 1 文だけ（別名・分割・他ファイルからの再エクスポートは違反）
+/// - `ModelIoError` の型宣言は `compat/model_io.rs` の `enum` 1 件だけ
+/// - `fn save_model`／`fn load_model` は `compat/model_io.rs` に各 1 件だけ
+/// - 代替案 `Sequential::save`／`Sequential::load`（`impl Sequential` 内の `fn save`／`fn load`）は 0 件
+///   （承認外。#2362 契約）
+fn model_io_contract_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let mut private_mods = 0usize;
+    let mut approved_uses = 0usize;
+    let mut impl_enums = 0usize;
+    let mut impl_save_fns = 0usize;
+    let mut impl_load_fns = 0usize;
+
+    for (rel, content) in files {
+        let scan = scan_model_io_file(content);
+        let is_mod_file = rel == MODEL_IO_MOD_FILE;
+        let is_impl_file = rel == MODEL_IO_IMPL_FILE;
+
+        for _ in 0..scan.qualified_mod_decls {
+            violations.push(format!("{rel}: 修飾子付きの mod model_io 宣言"));
+        }
+        for _ in 0..scan.private_mod_decls {
+            if is_mod_file {
+                private_mods += 1;
+            } else {
+                violations.push(format!(
+                    "{rel}: {MODEL_IO_MOD_FILE} 以外の mod model_io 宣言"
+                ));
+            }
+        }
+        for stmt in &scan.pub_use_statements {
+            if is_mod_file && stmt == MODEL_IO_APPROVED_PUB_USE {
+                approved_uses += 1;
+            } else {
+                violations.push(format!("{rel}: 承認外の pub use（{stmt}）"));
+            }
+        }
+        for _ in 0..scan.enum_decls {
+            if is_impl_file {
+                impl_enums += 1;
+            } else {
+                violations.push(format!(
+                    "{rel}: {MODEL_IO_IMPL_FILE} 以外の enum ModelIoError 宣言"
+                ));
+            }
+        }
+        for _ in 0..scan.other_type_decls {
+            violations.push(format!(
+                "{rel}: trait／struct／type による ModelIoError 宣言"
+            ));
+        }
+        for (name, count, slot) in [
+            ("save_model", scan.save_model_fns, &mut impl_save_fns),
+            ("load_model", scan.load_model_fns, &mut impl_load_fns),
+        ] {
+            if is_impl_file {
+                *slot += count;
+            } else {
+                for _ in 0..count {
+                    violations.push(format!("{rel}: {MODEL_IO_IMPL_FILE} 以外の fn {name} 宣言"));
+                }
+            }
+        }
+        for _ in 0..scan.alt_impl_offenses {
+            violations.push(format!(
+                "{rel}: impl Sequential 内の fn save／fn load 宣言（代替案は承認外）"
+            ));
+        }
     }
 
-    offending.extend(scan_sequential_alt_save_load_impls(content));
-
-    offending
+    for (what, actual) in [
+        ("mod model_io（private）", private_mods),
+        ("承認済みの pub use", approved_uses),
+        ("enum ModelIoError", impl_enums),
+        ("fn save_model", impl_save_fns),
+        ("fn load_model", impl_load_fns),
+    ] {
+        if actual != 1 {
+            violations.push(format!("{what} がちょうど 1 件ではない（{actual} 件）"));
+        }
+    }
+    violations
 }
 
 /// `impl Sequential { .. }`／`impl <Trait> for Sequential { .. }`
@@ -15956,7 +16137,7 @@ fn scan_model_io_reexports_and_declarations(content: &str) -> Vec<String> {
 ///
 /// 本関数自体は呼び出し元が渡した走査対象（文字列 `content`）にのみ
 /// 依存し `Sequential` 型の一意性を前提にしない。呼び出し元
-/// （[`facade_does_not_reexport_or_declare_model_io`]）が
+/// （[`facade_model_io_public_surface_matches_approved_contract`]）が
 /// `crates/facade/src/**` に限定して呼ぶのは型の一意性ゆえではなく
 /// **依存方向**が理由: 本イシューが対象とする公開型
 /// `fandhe_ai::compat::Sequential`（facade クレート `fandhe-ai` で定義）
@@ -16025,118 +16206,159 @@ fn scan_sequential_alt_save_load_impls(content: &str) -> Vec<String> {
     offending
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、`model_io`（モジュール
-/// 名）・`save_model`／`load_model`（自由関数名）・`ModelIoError`（型名）
-/// を識別子単位で含む `pub use`（複数行・ネストした group・別名含む）
-/// も、`mod model_io` 宣言も、facade 独自の `ModelIoError`
-/// `trait`／`struct`／`enum`／`type` 宣言も、`save_model`／
-/// `load_model` の `fn` 宣言も存在しないことを固定する
-/// （`ModelIoHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
-/// ソース走査ガード。`facade_does_not_reexport_or_declare_train_step_
-/// items` と同型）。`save_model`／`load_model` の定義元インベントリは
-/// [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
+/// facade src 全体（`crates/facade/src/**`）の `model_io` 公開面が、承認済みの形で
+/// ちょうど 1 件だけ存在することを固定する正ガード（イシュー #2369・親 #2362。
+/// #2188 の否定ガード `facade_does_not_reexport_or_declare_model_io` を反転したもの）。
+/// 契約の詳細は [`model_io_contract_violations`] を参照。`save_model`／`load_model` の
+/// 定義元インベントリは [`workspace_declares_model_io_fn_names_only_in_allowed_locations`]
 /// が workspace 全体で別途固定する。
 #[test]
-fn facade_does_not_reexport_or_declare_model_io() {
+fn facade_model_io_public_surface_matches_approved_contract() {
     let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_model_io_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
     });
+    files.sort();
     assert!(
-        offending.is_empty(),
-        "facade の公開面が層構成シリアライズ（#2188。model_io／\
-         save_model／load_model／ModelIoError）を再エクスポート、または\
-         独自宣言している（`docs/compat-model-io-decision.md` §2 承認\
-         事項が未取得のまま対象外としている設計判断に違反）: \
-         {offending:?}"
+        files.len() > 1,
+        "facade src から .rs ファイルを十分に抽出できなかった（テスト自体が検査対象を見失っている可能性がある）"
+    );
+    let violations = model_io_contract_violations(&files);
+    assert!(
+        violations.is_empty(),
+        "facade の model_io 公開面（compat::save_model／load_model／ModelIoError。#2369）が\
+         承認済みの形（`docs/compat-model-io-decision.md` §2 item 1）から外れている: {violations:?}"
     );
 }
 
-/// [`scan_model_io_reexports_and_declarations`]
-/// （[`facade_does_not_reexport_or_declare_model_io`]）の自己テスト
-/// （正例・負例の合成入力）。
+/// [`model_io_contract_violations`]（[`facade_model_io_public_surface_matches_approved_contract`]）の
+/// 自己テスト。承認済みの形は違反 0、各違反カテゴリの合成入力は違反を検出することを固定する
+/// （正のプローブ。否定ガードだけでは検出器の空振りに気づけないため）。
 #[test]
-fn facade_does_not_reexport_or_declare_model_io_detects_each_category() {
-    // 正例: 単一行 pub use（モジュール再エクスポート）。
+fn facade_model_io_public_surface_detects_each_category() {
+    fn baseline() -> Vec<(String, String)> {
+        vec![
+            (
+                "compat/mod.rs".to_string(),
+                "mod model_io;\npub use model_io::{ModelIoError, load_model, save_model};\n"
+                    .to_string(),
+            ),
+            (
+                "compat/model_io.rs".to_string(),
+                "pub enum ModelIoError {}\npub fn save_model() {}\npub fn load_model() {}\n"
+                    .to_string(),
+            ),
+        ]
+    }
+    fn with(mutate: impl FnOnce(&mut Vec<(String, String)>)) -> Vec<String> {
+        let mut files = baseline();
+        mutate(&mut files);
+        model_io_contract_violations(&files)
+    }
+
+    // 正例: 承認済みの形は違反 0（複数行の group でも同一文とみなす）。
+    assert!(model_io_contract_violations(&baseline()).is_empty());
     assert!(
-        !scan_model_io_reexports_and_declarations("pub use fandhe_ai_facade::compat::model_io;")
+        with(|f| {
+            f[0].1 = "mod model_io;\npub use model_io::{\n    ModelIoError,\n    load_model,\n    save_model,\n};\n"
+                .to_string();
+        })
+        .is_empty()
+    );
+    // 負例: コメント中の出現・無関係な宣言は違反にならない。
+    assert!(
+        with(|f| f.push((
+            "lib.rs".to_string(),
+            "// pub use crate::compat::save_model;\npub struct FitConfig;\nimpl FitConfig { pub fn new() {} }\n"
+                .to_string()
+        )))
+        .is_empty()
+    );
+    // 負例: `Sequential` を含まない impl の `fn load` は代替案ではない。
+    assert!(
+        with(|f| f.push((
+            "model.rs".to_string(),
+            "impl ModelRegistry { pub fn load(&self) {} }\n".to_string()
+        )))
+        .is_empty()
+    );
+
+    // 違反: 何も存在しない（承認済みの公開面が消えた）。
+    assert!(!model_io_contract_violations(&[]).is_empty());
+    // 違反: `mod model_io` の公開・修飾子付き・他ファイルでの宣言・重複。
+    assert!(!with(|f| f[0].1 = f[0].1.replace("mod model_io;", "pub mod model_io;")).is_empty());
+    assert!(
+        !with(|f| f[0].1 = f[0].1.replace("mod model_io;", "pub(crate) mod model_io;")).is_empty()
+    );
+    assert!(!with(|f| f.push(("lib.rs".to_string(), "mod model_io;".to_string()))).is_empty());
+    // 違反: 別名・分割・他ファイルからの再エクスポート。
+    assert!(
+        !with(|f| {
+            f[0].1 = "mod model_io;\npub use model_io::ModelIoError as Foo;\npub use model_io::{load_model, save_model};\n"
+                .to_string();
+        })
+        .is_empty()
+    );
+    assert!(
+        !with(|f| {
+            f[0].1 = "mod model_io;\npub use model_io::{ModelIoError, load_model};\npub use model_io::save_model;\n"
+                .to_string();
+        })
+        .is_empty()
+    );
+    assert!(
+        !with(|f| f.push((
+            "lib.rs".to_string(),
+            "pub use crate::compat::save_model;".to_string()
+        )))
+        .is_empty()
+    );
+    assert!(
+        !with(|f| f.push((
+            "lib.rs".to_string(),
+            "pub use crate::compat::{ModelIoError as E};".to_string()
+        )))
+        .is_empty()
+    );
+    // 違反: 他ファイルでの型・関数の宣言・model_io.rs 内での重複。
+    assert!(
+        !with(|f| f.push(("lib.rs".to_string(), "pub struct ModelIoError;".to_string())))
             .is_empty()
     );
-    // 正例: 複数行 pub use（group）。
     assert!(
-        !scan_model_io_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::{\n    FitConfig,\n    save_model,\n};"
-        )
-        .is_empty()
-    );
-    // 正例: 別名 pub use。
-    assert!(
-        !scan_model_io_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::ModelIoError as Foo;"
-        )
-        .is_empty()
-    );
-    // 正例: 独自 struct 宣言。
-    assert!(!scan_model_io_reexports_and_declarations("pub struct ModelIoError;").is_empty());
-    // 正例: mod model_io 宣言。
-    assert!(!scan_model_io_reexports_and_declarations("pub mod model_io {}").is_empty());
-    // 正例: save_model の fn 宣言。
-    assert!(
-        !scan_model_io_reexports_and_declarations(
-            "impl Sequential { pub fn save_model(&self) {} }"
-        )
-        .is_empty()
-    );
-    // 正例: load_model の fn 宣言。
-    assert!(
-        !scan_model_io_reexports_and_declarations("pub fn load_model() -> Sequential { todo!() }")
+        !with(|f| f.push(("lib.rs".to_string(), "pub enum ModelIoError {}".to_string())))
             .is_empty()
     );
-    // 正例: `impl Sequential { fn save }`（§2 代替案の inherent メソッド）。
     assert!(
-        !scan_model_io_reexports_and_declarations(
-            "impl Sequential { pub fn save(&self, dir: &Path) -> Result<(), ModelIoError> { todo!() } }"
-        )
+        !with(|f| f.push(("lib.rs".to_string(), "pub fn load_model() {}".to_string()))).is_empty()
+    );
+    assert!(!with(|f| f[1].1.push_str("pub fn save_model() {}\n")).is_empty());
+    // 違反: 代替案の inherent メソッド（承認外）。
+    assert!(
+        !with(|f| f[1]
+            .1
+            .push_str("impl Sequential { pub fn save(&self, dir: &Path) {} }\n"))
         .is_empty()
     );
-    // 正例: `impl Sequential { fn load }`（§2 代替案の inherent メソッド）。
     assert!(
-        !scan_model_io_reexports_and_declarations(
-            "impl Sequential { pub fn load(dir: &Path) -> Result<Sequential, ModelIoError> { todo!() } }"
-        )
+        !with(|f| f.push((
+            "compat/sequential.rs".to_string(),
+            "impl Sequential { pub fn load(dir: &Path) {} }".to_string()
+        )))
         .is_empty()
     );
-    // 正例: `impl <Trait> for Sequential { fn save }`。
     assert!(
-        !scan_model_io_reexports_and_declarations(
-            "impl ModelIo for Sequential { fn save(&self, dir: &Path) { todo!() } }"
-        )
+        !with(|f| f.push((
+            "compat/sequential.rs".to_string(),
+            "impl ModelIo for Sequential { fn save(&self) {} }".to_string()
+        )))
         .is_empty()
-    );
-    // 負例: コメント中の出現。
-    assert!(scan_model_io_reexports_and_declarations("// pub use ...::save_model;").is_empty());
-    // 負例: 無関係な型・関数名。
-    assert!(
-        scan_model_io_reexports_and_declarations(
-            "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
-        )
-        .is_empty()
-    );
-    // 負例: 無関係な型への `fn load`（`Sequential` を含まない impl。
-    // `ModelRegistry::load` 相当の既存宣言を誤検出しないことを固定する）。
-    assert!(
-        scan_model_io_reexports_and_declarations(
-            "impl ModelRegistry { pub fn load(&self, name: &str) -> Result<(), Error> { todo!() } }"
-        )
-        .is_empty()
-    );
-    // 負例: `Sequential` を含む impl でも `save`／`load` 以外の関数名。
-    assert!(
-        scan_model_io_reexports_and_declarations("impl Sequential { pub fn forward(&self) {} }")
-            .is_empty()
     );
 }
 
@@ -16145,11 +16367,11 @@ fn facade_does_not_reexport_or_declare_model_io_detects_each_category() {
 /// （`workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_
 /// locations` と同型のインベントリ）。
 ///
-/// **期待集合**（着手前確認の再 grep で判明）: `save_model`／
-/// `load_model` という名前の `fn` 宣言は workspace 全体
-/// （`crates/*/src/`）に 1 件も存在しない（承認前のため未実装。
-/// `docs/compat-model-io-decision.md` §0）。承認後の実装では
-/// `facade/src/compat/model_io.rs` へ期待集合を差し替える。
+/// **期待集合**（#2369・親 #2362 で差し替え済み）: `save_model`／
+/// `load_model` という名前の `fn` 宣言は workspace 全体（`crates/*/src/`）で
+/// `facade/src/compat/model_io.rs` の各 1 件だけ
+/// （`docs/compat-model-io-decision.md` §2 item 1）。過不足いずれも
+/// fail-closed に検出する。
 #[test]
 fn workspace_declares_model_io_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -16197,14 +16419,19 @@ fn workspace_declares_model_io_fn_names_only_in_allowed_locations() {
         });
     }
 
-    let expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("facade/src/compat/model_io.rs::save_model".to_string(), 1),
+        ("facade/src/compat/model_io.rs::load_model".to_string(), 1),
+    ]
+    .into_iter()
+    .collect();
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の save_model／load_model 系\
-         `fn` 宣言集合が期待（空集合）と一致しない（承認前に本番実装が\
-         紛れ込んだ可能性がある。過不足いずれも fail-closed に検出\
-         する）: {found:?}"
+         `fn` 宣言集合が期待（facade/src/compat/model_io.rs の各 1 件）と\
+         一致しない（承認外の場所への実装が紛れ込んだ、または定義が\
+         消えた可能性がある。過不足いずれも fail-closed に検出する）: {found:?}"
     );
 }
 
@@ -16212,7 +16439,7 @@ fn workspace_declares_model_io_fn_names_only_in_allowed_locations() {
 /// （`save_model`／`load_model` の定義元インベントリ）を、
 /// `docs/compat-model-io-decision.md` §2 の代替公開 API 案
 /// `Sequential::save(&self, dir)`／`Sequential::load(dir)` にも横展開した
-/// 第 3 層。[`facade_does_not_reexport_or_declare_model_io`]（第 2 層）は
+/// 第 3 層。[`facade_model_io_public_surface_matches_approved_contract`]（第 2 層）は
 /// `crates/facade/src/**` に走査対象を限定しているため（`Sequential` は
 /// facade でのみ公開され、facade を依存する workspace クレートが存在しない
 /// ため facade 外から `impl ... for Sequential` を書けない。PR #2317
@@ -16239,8 +16466,9 @@ fn workspace_declares_model_io_fn_names_only_in_allowed_locations() {
 /// `compat::Sequential`）に加え、autodiff 内部専用の 2 型
 /// （`crates/autodiff/src/compat/sequential.rs::Sequential`・
 /// `crates/autodiff/src/nn/container.rs::Sequential`）にも存在するが、
-/// いずれにも `fn save`／`fn load` 宣言はなく空集合。承認後は facade 側の
-/// 期待集合を `facade/src/compat/model_io.rs` へ差し替える。
+/// いずれにも `fn save`／`fn load` 宣言はなく空集合。#2369（親 #2362）では
+/// 承認されたのが自由関数 `save_model`／`load_model` だけで、代替案の inherent メソッドは
+/// 承認範囲外のため、空集合の固定を維持する（差し替えない）。
 #[test]
 fn workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -17453,7 +17681,7 @@ fn facade_does_not_reexport_or_declare_predict_batches_items() {
 
 /// [`facade_does_not_reexport_or_declare_predict_batches_items`] の自己
 /// テスト（各違反カテゴリの合成ソースを検出できることを固定する。
-/// `facade_does_not_reexport_or_declare_model_io_detects_each_category`
+/// `facade_model_io_public_surface_detects_each_category`
 /// と同型）。
 #[test]
 fn facade_does_not_reexport_or_declare_predict_batches_items_detects_each_category() {

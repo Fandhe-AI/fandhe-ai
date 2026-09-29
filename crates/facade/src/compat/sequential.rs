@@ -163,6 +163,37 @@ pub struct Sequential {
     /// 追加）を保持）は本クレート内でのみ構築・参照する非公開型で、
     /// `Sequential` の他フィールドと同じく公開面には出さない。
     pub(super) compiled: Option<super::training::Compiled>,
+    /// 各層の構成記録（`inner` の層と 1 対 1）。`compat::model_io::save_model`
+    /// が manifest の層構成を導く唯一の根拠で、`add_*` が積むたびに push する
+    /// （イシュー #2369・`docs/compat-model-io-decision.md` §5）。private
+    /// フィールドのため公開 API は非破壊。
+    specs: Vec<LayerSpec>,
+}
+
+/// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
+///
+/// 本イシュー（#2369）で保存・復元できる層だけが値を持つ variant で、それ以外の
+/// `add_*` は [`LayerSpec::Unsupported`] を記録し `save_model` が
+/// `UnsupportedModel` で fail-closed にする（全 30 層への拡張は #2370）。
+/// `seed` は保持しない（重みは safetensors から復元するため不要。§5 の
+/// 「seed を保持」は #2370 で再判断する）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LayerSpec {
+    Linear {
+        in_features: usize,
+        out_features: usize,
+    },
+    Relu,
+    Sigmoid,
+    Tanh,
+    Silu,
+    Hardswish,
+    Gelu,
+    GeluTanh,
+    /// 本イシューでは保存対象外の層（`kind` は `add_*` の名前。エラー文言で読む）。
+    Unsupported {
+        kind: &'static str,
+    },
 }
 
 impl Default for Sequential {
@@ -176,6 +207,7 @@ impl Sequential {
         Sequential {
             inner: NnSequential::new(),
             compiled: None,
+            specs: Vec::new(),
         }
     }
 
@@ -192,6 +224,10 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let linear = Linear::new(in_features, out_features, true, seed)?;
         self.inner.push(Box::new(linear));
+        self.specs.push(LayerSpec::Linear {
+            in_features,
+            out_features,
+        });
         Ok(self)
     }
 
@@ -199,18 +235,21 @@ impl Sequential {
     /// 構造的に失敗しえず `Result` を返さない）。
     pub fn add_relu(mut self) -> Self {
         self.inner.push(Box::new(Relu));
+        self.specs.push(LayerSpec::Relu);
         self
     }
 
     /// シグモイド層を追加する（`nn::activation::Sigmoid`）。
     pub fn add_sigmoid(mut self) -> Self {
         self.inner.push(Box::new(Sigmoid));
+        self.specs.push(LayerSpec::Sigmoid);
         self
     }
 
     /// 双曲線正接層を追加する（`nn::activation::Tanh`）。
     pub fn add_tanh(mut self) -> Self {
         self.inner.push(Box::new(Tanh));
+        self.specs.push(LayerSpec::Tanh);
         self
     }
 
@@ -220,6 +259,7 @@ impl Sequential {
     /// の演算のため構造的に失敗しえず `Result` を返さない。
     pub fn add_silu(mut self) -> Self {
         self.inner.push(Box::new(Silu));
+        self.specs.push(LayerSpec::Silu);
         self
     }
 
@@ -227,6 +267,7 @@ impl Sequential {
     /// #1714）。[`Sequential::add_silu`] と同様融合対象外。
     pub fn add_hardswish(mut self) -> Self {
         self.inner.push(Box::new(Hardswish));
+        self.specs.push(LayerSpec::Hardswish);
         self
     }
 
@@ -235,6 +276,8 @@ impl Sequential {
     /// まま伝播する。[`Sequential::add_silu`] と同様融合対象外。
     pub fn add_leaky_relu(mut self, negative_slope: f32) -> Self {
         self.inner.push(Box::new(LeakyRelu::new(negative_slope)));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "leaky_relu" });
         self
     }
 
@@ -243,6 +286,7 @@ impl Sequential {
     /// と同様融合対象外。
     pub fn add_elu(mut self, alpha: f32) -> Self {
         self.inner.push(Box::new(Elu::new(alpha)));
+        self.specs.push(LayerSpec::Unsupported { kind: "elu" });
         self
     }
 
@@ -253,6 +297,7 @@ impl Sequential {
     /// と同型の遅延検査契約として `Result` を返さず `Self` を返す。
     pub fn add_softmax(mut self, dim: usize) -> Self {
         self.inner.push(Box::new(Softmax::new(dim)));
+        self.specs.push(LayerSpec::Unsupported { kind: "softmax" });
         self
     }
 
@@ -260,6 +305,9 @@ impl Sequential {
     /// #2065）。[`Sequential::add_softmax`] と同じ遅延検査契約。
     pub fn add_log_softmax(mut self, dim: usize) -> Self {
         self.inner.push(Box::new(LogSoftmax::new(dim)));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "log_softmax",
+        });
         self
     }
 
@@ -267,6 +315,7 @@ impl Sequential {
     /// イシュー #2065）。ユニット構造体のため構築時検査は無い。
     pub fn add_gelu(mut self) -> Self {
         self.inner.push(Box::new(Gelu));
+        self.specs.push(LayerSpec::Gelu);
         self
     }
 
@@ -274,6 +323,7 @@ impl Sequential {
     /// イシュー #2065）。[`Sequential::add_gelu`] と同型。
     pub fn add_gelu_tanh(mut self) -> Self {
         self.inner.push(Box::new(GeluTanh));
+        self.specs.push(LayerSpec::GeluTanh);
         self
     }
 
@@ -287,6 +337,7 @@ impl Sequential {
     pub fn add_softplus(mut self, beta: f32, threshold: f32) -> Result<Self, AutodiffError> {
         let layer = Softplus::new(beta, threshold)?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported { kind: "softplus" });
         Ok(self)
     }
 
@@ -301,6 +352,7 @@ impl Sequential {
     /// 契約として `Result` を返さず `Self` を返す。
     pub fn add_flatten(mut self, start_dim: usize, end_dim: usize) -> Self {
         self.inner.push(Box::new(Flatten::new(start_dim, end_dim)));
+        self.specs.push(LayerSpec::Unsupported { kind: "flatten" });
         self
     }
 
@@ -316,6 +368,7 @@ impl Sequential {
     pub fn add_dropout(mut self, p: f32) -> Result<Self, AutodiffError> {
         let dropout = Dropout::new(p)?;
         self.inner.push(Box::new(dropout));
+        self.specs.push(LayerSpec::Unsupported { kind: "dropout" });
         Ok(self)
     }
 
@@ -350,6 +403,7 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(conv));
+        self.specs.push(LayerSpec::Unsupported { kind: "conv2d" });
         Ok(self)
     }
 
@@ -379,6 +433,7 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(conv));
+        self.specs.push(LayerSpec::Unsupported { kind: "conv1d" });
         Ok(self)
     }
 
@@ -397,6 +452,8 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = LayerNorm::new(normalized_size, eps)?;
         self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "layer_norm" });
         Ok(self)
     }
 
@@ -406,6 +463,7 @@ impl Sequential {
     pub fn add_rms_norm(mut self, normalized_size: usize, eps: f32) -> Result<Self, AutodiffError> {
         let layer = RmsNorm::new(normalized_size, eps)?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported { kind: "rms_norm" });
         Ok(self)
     }
 
@@ -430,6 +488,9 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = BatchNorm1d::new(num_features, eps, momentum)?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "batch_norm1d",
+        });
         Ok(self)
     }
 
@@ -445,6 +506,9 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = BatchNorm2d::new(num_features, eps, momentum)?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "batch_norm2d",
+        });
         Ok(self)
     }
 
@@ -469,6 +533,8 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = Embedding::new(num_embeddings, embedding_dim, padding_idx, seed)?;
         self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "embedding" });
         Ok(self)
     }
 
@@ -494,6 +560,9 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = MultiheadAttention::new(embed_dim, num_heads, true, seed)?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "multihead_attention",
+        });
         Ok(self)
     }
 
@@ -525,6 +594,9 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "transformer_encoder",
+        });
         Ok(self)
     }
 
@@ -544,6 +616,8 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = MaxPool2d::new(kernel_size, stride, padding, dilation)?;
         self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "max_pool2d" });
         Ok(self)
     }
 
@@ -559,6 +633,8 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = MaxPool1d::new(kernel_size, stride, padding, dilation)?;
         self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "max_pool1d" });
         Ok(self)
     }
 
@@ -576,6 +652,8 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = AvgPool2d::new(kernel_size, stride, padding, count_include_pad)?;
         self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "avg_pool2d" });
         Ok(self)
     }
 
@@ -591,6 +669,8 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = AvgPool1d::new(kernel_size, stride, padding, count_include_pad)?;
         self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "avg_pool1d" });
         Ok(self)
     }
 
@@ -604,6 +684,9 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = AdaptiveAvgPool2d::new(output_size)?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "adaptive_avg_pool2d",
+        });
         Ok(self)
     }
 
@@ -613,6 +696,9 @@ impl Sequential {
     pub fn add_adaptive_avg_pool1d(mut self, output_size: usize) -> Result<Self, AutodiffError> {
         let layer = AdaptiveAvgPool1d::new(output_size)?;
         self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "adaptive_avg_pool1d",
+        });
         Ok(self)
     }
 
@@ -637,6 +723,7 @@ impl Sequential {
         let boxed: Box<dyn crate::nn::Module> = Box::new(m);
         self.inner
             .push(Box::new(crate::nn::FacadeModuleAdapter(boxed)));
+        self.specs.push(LayerSpec::Unsupported { kind: "module" });
         self
     }
 
@@ -1300,6 +1387,13 @@ impl Sequential {
         self.inner.layers()
     }
 
+    /// 層構成の記録への読み取り専用アクセサ（`compat::model_io` の
+    /// `save_model` 専用。`layers()` と同じ長さを保つ不変条件は呼び出し側が
+    /// fail-closed で検査する）。
+    pub(super) fn specs(&self) -> &[LayerSpec] {
+        &self.specs
+    }
+
     /// optimizer（[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
     /// [`crate::optim::Adam::step`]）
     /// が返した更新後テンソル列を
@@ -1905,12 +1999,15 @@ impl Sequential {
     #[cfg(test)]
     fn from_boxed_layers(layers: Vec<Box<dyn Module>>) -> Self {
         let mut inner = NnSequential::new();
+        let mut specs = Vec::with_capacity(layers.len());
         for layer in layers {
             inner.push(layer);
+            specs.push(LayerSpec::Unsupported { kind: "test" });
         }
         Sequential {
             inner,
             compiled: None,
+            specs,
         }
     }
 }
