@@ -24,38 +24,26 @@
 //! `kernels_wmma_opt.rs` の `render_*` 関数のドキュメンテーションコメント
 //! 参照）。
 //!
-//! # サポート対象 OS（非 unix のビルドを拒否する。イシュー #509 PR #677
-//! codex-review P0 再指摘対応）
+//! # サポート対象 OS（unix はディスクキャッシュあり・非 unix は無効化。
+//! イシュー #2390・決定記録 `docs/facade-windows-build-decision.md`〈#2389〉）
 //!
-//! 本モジュールの NVRTC キャッシュ I/O（[`ensure_cache_root`]・
-//! [`store_cache_entry`]・[`load_cache_entry`] とその内部実装）は
-//! symlink 脱出・TOCTOU 対策として `O_NOFOLLOW`・fd 相対解決
-//! （`/proc/self/fd/<fd>` 経由・`openat`/`mkdirat`/`renameat`/`unlinkat`
-//! 相当の自前 FFI）を用いており、いずれも unix 系 API（`<fcntl.h>`・
-//! `std::os::unix::fs::OpenOptionsExt`）にのみ依存する。以前は
-//! `#[cfg(not(unix))]` に「検証してから読み書きする」という構造的に
-//! TOCTOU を閉じられないパスベースのフォールバック実装を維持していたが、
-//! `.claude/rules/deps-policy.md`（`libc`／`rustix` はユーザー承認なしに
-//! 追加できない）の制約下ではこのフォールバックを同水準まで強化できず、
-//! 本クレートのサポート対象（Linux／macOS。`backend-switching-design.md`）
-//! では到達しないコードでもあったため、`.claude/rules/security.md` の
-//! fail-closed 方針に従いフォールバックごと削除した。非 unix
-//! ターゲットでのビルドはコンパイルエラーで明示的に拒否する。
-
-#[cfg(not(unix))]
-compile_error!(
-    "backend-cuda の NVRTC キャッシュ（crates/backend-cuda/src/nvrtc.rs）は \
-     unix（Linux/macOS）のみサポートする。fd pin による TOCTOU 対策が \
-     O_NOFOLLOW・/proc/self/fd・openat 等の unix 系 API に依存するため、 \
-     非 unix 向けの同水準フォールバックは提供しない \
-     （イシュー #509 PR #677 codex-review P0 再指摘対応）。"
-);
+//! 本モジュールの NVRTC ディスクキャッシュ I/O（`ensure_cache_root`・
+//! `store_cache_entry`・`load_cache_entry` とその内部実装）は symlink 脱出・
+//! TOCTOU 対策として `O_NOFOLLOW`・fd 相対解決（`openat`/`mkdirat`/`renameat`/
+//! `unlinkat` 相当の自前 FFI）を用いるため `cfg(unix)` に閉じる。非 unix
+//! （Windows を含む）ではディスクキャッシュを設計上無効にし、プロセス内 LRU と
+//! NVRTC 直コンパイルのみで動く（`runtime_workspace_root` が `Err` を返し、
+//! 呼び出し元の縮退経路へ入る）。ヒット時も PTX は実行入力に使わず常に
+//! コンパイルするため性能上の損失はない。イシュー #509（PR #677）で削除した
+//! 非 unix 向けパスベースのフォールバックは復活させない。
 
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::fs;
 use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
@@ -1164,6 +1152,7 @@ pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
 /// 「このディレクトリが境界か」を粗く判定する目的で、誤検知の帰結は
 /// 「ディスクキャッシュが効かない」で fail-safe に収まるため厳密な TOML
 /// パースは過剰）。
+#[cfg(unix)]
 fn has_workspace_root_marker(dir: &Path) -> bool {
     // `dir` 自体の所有者・書き込み権限を先に検査する（イシュー #511
     // PR #703 codex-review Bugbot 指摘〈Forgeable workspace root
@@ -1231,6 +1220,7 @@ fn has_workspace_root_marker(dir: &Path) -> bool {
 ///
 /// マーカーが 1 つも見つからないまま `Path::parent()` が `None` になる
 /// （ファイルシステムルートに到達）まで祖先を辿った場合は `None` を返す。
+#[cfg(unix)]
 fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
     let mut current = Some(start);
     while let Some(dir) = current {
@@ -1279,6 +1269,7 @@ fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
 /// された等）・マーカーが見つからなかった場合のいずれも
 /// `CudaError::CacheDirUnavailable` を返し、呼び出し元は同じ fail-safe
 /// 方針でディスクキャッシュなし運転へ縮退する。
+#[cfg(unix)]
 pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
     let cwd = std::env::current_dir().map_err(|e| CudaError::CacheDirUnavailable {
         detail: format!("failed to resolve current_dir() for cache workspace_root: {e}"),
@@ -1299,6 +1290,27 @@ pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
              boundary"
         ),
     })
+}
+
+/// 非 unix 版: ワークスペース root 解決を行わず常に `Err` を返す。縮退の唯一の分岐点であり、
+/// 呼び出し元 `module_cache` の `.ok()` が `None` となって store／load は呼ばれず、
+/// プロセス内 LRU と NVRTC 直コンパイルのみで動く（`docs/facade-windows-build-decision.md`
+/// §4・§5。イシュー #2390）。
+#[cfg(not(unix))]
+pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
+    Err(disk_cache_disabled_on_non_unix())
+}
+/// 非 unix ターゲットで NVRTC ディスクキャッシュを設計上無効化していることを
+/// 表す型付きエラー（3 つの非 unix スタブが共有する。`docs/facade-windows-build-decision.md`
+/// §4・§5。イシュー #2390）。
+#[cfg(not(unix))]
+fn disk_cache_disabled_on_non_unix() -> CudaError {
+    CudaError::CacheDirUnavailable {
+        detail: "on-disk NVRTC cache is disabled by design on non-unix targets \
+                 (docs/facade-windows-build-decision.md section 4); the in-process \
+                 LRU and direct NVRTC compilation are unaffected"
+            .to_string(),
+    }
 }
 
 /// `root` と [`CudaKernelCacheKey::cache_entry_dir_name`] を合成し、
@@ -1378,10 +1390,12 @@ pub(crate) fn cache_entry_path(
 /// キャッシュエントリ内のソースファイル名（NVRTC へ渡した `.cu` ソース
 /// 全文）。[`validate_cache_entry`]・[`store_cache_entry_in`]・
 /// [`load_cache_entry_in`] が共用する。
+#[cfg(unix)]
 const CACHE_ENTRY_SOURCE_FILE: &str = "kernel.cu";
 
 /// キャッシュエントリ内の成果物ファイル名（NVRTC コンパイル結果の PTX
 /// アセンブリ全文）。定数化の理由は [`CACHE_ENTRY_SOURCE_FILE`] と同じ。
+#[cfg(unix)]
 const CACHE_ENTRY_PTX_FILE: &str = "kernel.ptx";
 
 /// コンパイルキャッシュから読み出したカーネルの実体（イシュー #509・
@@ -1430,9 +1444,10 @@ pub(crate) struct CachedKernel {
 /// （symlink 差し替え等の外部観測用アサーション）専用として
 /// `#[cfg(test)]` で残す（イシュー #509 PR #677 codex-review P0 再指摘
 /// 対応。旧非 Unix フォールバックは検証と読み取りが別ステップで
-/// TOCTOU を構造的に閉じられなかったため削除済み。crate ルート／
-/// `nvrtc` モジュール冒頭の `compile_error!` 参照）。
-#[cfg(test)]
+/// TOCTOU を構造的に閉じられなかったため削除済み。非 unix ではディスク
+/// キャッシュ自体を無効化しており本 I/O 経路はコンパイルされない。
+/// `docs/facade-windows-build-decision.md`）。
+#[cfg(all(test, unix))]
 fn validate_cache_entry(entry_dir: &Path) -> bool {
     is_plain_dir(entry_dir)
         && is_plain_file(&entry_dir.join(CACHE_ENTRY_SOURCE_FILE))
@@ -1456,7 +1471,7 @@ fn validate_cache_entry(entry_dir: &Path) -> bool {
 /// 自分の新規書き込みを破棄してしまい、そのキーは以降ずっと「ミスと
 /// 判定されて再コンパイルされる」空回りに陥る（正常書き込みが永久に
 /// キャッシュへ反映されない）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn is_plain_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_file() && meta.len() > 0)
@@ -1467,7 +1482,7 @@ fn is_plain_file(path: &Path) -> bool {
 /// 追跡しない [`fs::symlink_metadata`] で判定する（[`is_plain_file`] と
 /// 同じ理由。エントリディレクトリ自体が symlink に置換されているケース
 /// を拒否する）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn is_plain_dir(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_dir())
@@ -1483,9 +1498,9 @@ fn is_plain_dir(path: &Path) -> bool {
 /// deps-policy.md`）外でユーザー承認なしに追加できないため、
 /// `std::os::unix::fs::OpenOptionsExt::custom_flags`（std 標準機能）へ
 /// 渡すフラグ値を自前で定義する。値はターゲット OS ごとに異なるため
-/// `target_os` で分岐する（本クレートのビルド対象は Linux/macOS のみ。
-/// `backend-switching-design.md`。非 unix は crate ルート／`nvrtc`
-/// モジュール冒頭の `compile_error!` でビルド自体を拒否する）。
+/// `target_os` で分岐する（ディスクキャッシュを使う unix は Linux/macOS。
+/// 非 unix ではキャッシュ I/O 自体がコンパイルされない。
+/// `docs/facade-windows-build-decision.md`）。
 ///
 /// **Linux はさらに CPU アーキテクチャで値が異なる**（イシュー #1107）。
 /// `O_NOFOLLOW`／`O_DIRECTORY` は POSIX 標準に値の規定がなく、Linux
@@ -2196,6 +2211,7 @@ fn read_verified_cache_entry_file(mut file: fs::File) -> std::io::Result<Option<
 
 /// 一時ディレクトリ名のシーケンス番号（プロセス内一意性の担保。
 /// [`temp_entry_dir_name`] が使う）。
+#[cfg(unix)]
 static TEMP_ENTRY_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// [`store_cache_entry_in`] が使う一時ディレクトリ名を生成する。
@@ -2209,6 +2225,7 @@ static TEMP_ENTRY_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 /// compiler の一時ディレクトリ方式に倣う。実装計画 §3.2）。
 /// `final_entry_name` はキー検証済み（[`CudaKernelCacheKey::cache_entry_dir_name`]
 /// の A03 トラバーサル防御を経由済み）の文字列のみを渡すこと。
+#[cfg(unix)]
 fn temp_entry_dir_name(final_entry_name: &str) -> String {
     let seq = TEMP_ENTRY_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
     format!(".tmp.{final_entry_name}.{}.{seq}", std::process::id())
@@ -2624,6 +2641,7 @@ fn write_child_file_pinned(dir_fd: &fs::File, name: &str, content: &str) -> Resu
 /// 別ルートへ書き込む、または細工された PTX を読み込みうる TOCTOU が
 /// あった（`O_NOFOLLOW` は最終コンポーネントの symlink のみを防ぎ、
 /// 祖先の差し替えは防がない）。
+#[cfg(unix)]
 fn ensure_cache_root_in(
     candidate_root: &Path,
     workspace_root: &Path,
@@ -2740,6 +2758,7 @@ fn ensure_cache_root_in(
 /// `None` を返さない。相対パスかつどの祖先も存在しない極端なケースの
 /// みフォールバックとして `None` を返す（呼び出し元は `CacheIo` で
 /// fail-closed に扱う）。
+#[cfg(unix)]
 fn longest_existing_ancestor(path: &Path) -> Option<PathBuf> {
     let mut current = path;
     loop {
@@ -3150,6 +3169,7 @@ fn create_dir_all_verified(
 /// ドキュメンテーションコメント参照）。戻り値の fd は呼び出し元が
 /// store／load 完了まで引き回す想定であり、`root` パスとして再オープン
 /// してはならない（イシュー #509 PR #677 codex-review P0 再指摘対応）。
+#[cfg(unix)]
 pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<(PathBuf, fs::File), CudaError> {
     ensure_cache_root_in(&cache_root(workspace_root)?, workspace_root)
 }
@@ -3196,10 +3216,9 @@ pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<(PathBuf, fs::F
 /// #509 PR #677 codex-review P0 指摘対応: `root` を pin した後で
 /// キャッシュルート自体が symlink へ差し替えられても、以降の全操作が
 /// pin 済みの元の実体だけを見るため追従しない）。本クレートのビルド
-/// 対象は Linux/macOS（unix）のみであり、`O_NOFOLLOW` 相当の std API を
-/// 持たない非 unix 向けの検出型フォールバックは維持しない（fd pin による
-/// TOCTOU 対策が unix 系 API に依存するため。crate ルート／`nvrtc`
-/// モジュール冒頭の `compile_error!` 参照）。
+/// 対象は unix のみであり、非 unix ではディスクキャッシュを設計上無効に
+/// するため本関数はコンパイルされない（検出型フォールバックは維持しない。
+/// `docs/facade-windows-build-decision.md`）。
 ///
 /// 本番経路の公開ラッパー [`store_cache_entry`] は本関数へ委譲しない
 /// （[`ensure_cache_root`] が検証直後に pin した fd をそのまま
@@ -3414,6 +3433,7 @@ fn store_cache_entry_at(
 /// `PathBuf` を [`store_cache_entry_in`] が改めて `open_dir_nofollow` で
 /// 開き直しており、その間に祖先を差し替えられると検証していない別
 /// ルートへ書き込みうる TOCTOU があった）。
+#[cfg(unix)]
 pub(crate) fn store_cache_entry(
     workspace_root: &Path,
     key: &CudaKernelCacheKey,
@@ -3424,6 +3444,20 @@ pub(crate) fn store_cache_entry(
     let final_dir = cache_entry_path_in(&root, key)?;
     let entry_name = key.cache_entry_dir_name()?;
     store_cache_entry_at(&root_fd, &final_dir, &entry_name, kernel_cu, kernel_ptx)
+}
+
+/// 非 unix 版 `store_cache_entry`: ディスクキャッシュ無効のため常に `Err`。
+/// `runtime_workspace_root` が先に `Err` を返すため実運用では到達しない。
+/// `ensure_cache_root` には非 unix スタブを置かない（呼び出し元がスタブ同士で
+/// 使われず dead_code になるため。`docs/facade-windows-build-decision.md` §5）。
+#[cfg(not(unix))]
+pub(crate) fn store_cache_entry(
+    _workspace_root: &Path,
+    _key: &CudaKernelCacheKey,
+    _kernel_cu: &str,
+    _kernel_ptx: &str,
+) -> Result<PathBuf, CudaError> {
+    Err(disk_cache_disabled_on_non_unix())
 }
 
 /// キャッシュエントリを読み出す（イシュー #509・Phase C-3。実装計画
@@ -3678,6 +3712,7 @@ fn load_cache_entry_at(
 /// `load_cache_entry_at` 側に閉じ込めるのは、呼び出し元が省略できる
 /// `Option` 引数にしないという C-2 以来の「注入で決定化・迂回不能」
 /// 方針を fs I/O 層まで一貫させるため。
+#[cfg(unix)]
 pub(crate) fn load_cache_entry(
     workspace_root: &Path,
     key: &CudaKernelCacheKey,
@@ -3685,6 +3720,16 @@ pub(crate) fn load_cache_entry(
 ) -> Result<Option<CachedKernel>, CudaError> {
     let (_root, root_fd) = ensure_cache_root(workspace_root)?;
     load_cache_entry_at(&root_fd, key, expected_src)
+}
+
+/// 非 unix 版 `load_cache_entry`: ディスクキャッシュ無効のため常に `Err`（到達しない）。
+#[cfg(not(unix))]
+pub(crate) fn load_cache_entry(
+    _workspace_root: &Path,
+    _key: &CudaKernelCacheKey,
+    _expected_src: &str,
+) -> Result<Option<CachedKernel>, CudaError> {
+    Err(disk_cache_disabled_on_non_unix())
 }
 
 /// リンクされている NVRTC のバージョンを `(major, minor)` で返す。
@@ -3947,6 +3992,10 @@ pub fn compile_ptx(src: &str, arch: &str) -> Result<Ptx, CudaError> {
     compile_ptx_with_opts(src, base).map_err(CudaError::from)
 }
 
+// 実機非依存テスト（descriptor 入力検証・キャッシュキー生成・パス正規化・
+// pipeline stages 境界値検証）は非 unix でも実行するため `cfg(test)` とする。
+// ディスクキャッシュ I/O（`cfg(unix)` 限定）を参照するテストと専用ヘルパーだけ
+// 個別に `#[cfg(unix)]` を付ける（`docs/facade-windows-build-decision.md`）。
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -4895,12 +4944,19 @@ mod tests {
     // おき、containment 検証が既存のフォールバック挙動を壊さないことを
     // 既存テスト自体で回帰確認する（下記の専用テストは逆に workspace_root
     // 配下を指すケースを検証する）。
+    //
+    // 以降の `resolve_cache_root` テストは `/...` 形式を絶対パスとして渡す
+    // ため `cfg(unix)` 限定とする（Windows では `/...` が相対パス扱いとなり
+    // `is_relative()` の fail-closed で成功ケースが panic／拒否ケースが別理由で
+    // 偽陽性通過するため。Windows の絶対パス経路は別途の専用テストで担保する）。
+    #[cfg(unix)]
     fn unrelated_workspace_root() -> PathBuf {
         PathBuf::from("/workspace/repository")
     }
 
     // キャッシュルート解決: env 上書き（override）が XDG_CACHE_HOME・
     // HOME より優先されること。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_prefers_override() {
         let root = resolve_cache_root(
@@ -4915,6 +4971,7 @@ mod tests {
 
     // キャッシュルート解決: override 欠落時は XDG_CACHE_HOME にフォール
     // バックし、`rust-ai-library/cuda` サブパスを付加すること。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_falls_back_to_xdg_cache_home() {
         let root = resolve_cache_root(
@@ -4932,6 +4989,7 @@ mod tests {
 
     // キャッシュルート解決: override・XDG_CACHE_HOME 欠落時は HOME に
     // フォールバックし `.cache/rust-ai-library/cuda` を付加すること。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_falls_back_to_home() {
         let root = resolve_cache_root(
@@ -4948,6 +5006,7 @@ mod tests {
     }
 
     // キャッシュルート解決: 全欠落時は `CacheDirUnavailable`（panic なし）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_errs_when_all_missing() {
         let result = resolve_cache_root(&unrelated_workspace_root(), None, None, None);
@@ -4955,6 +5014,7 @@ mod tests {
     }
 
     // 安全側の検証: 空文字列の override は拒否する。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_override() {
         let result = resolve_cache_root(
@@ -4968,6 +5028,7 @@ mod tests {
 
     // 安全側の検証: 相対パスの override は拒否する（リポジトリツリー内へ
     // キャッシュが落ちるのを防ぐ。イシュー #506 §4.4）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_override() {
         let result = resolve_cache_root(
@@ -4984,6 +5045,7 @@ mod tests {
     // コンテキストによってはリポジトリツリー内）を指す相対パスを未検証で
     // `Path::join` すると、override 検証を回避してキャッシュがリポジトリ
     // ツリー内へ落ちてしまうため、override と同じ fail-closed 検証を課す）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_xdg_cache_home() {
         let result = resolve_cache_root(
@@ -4998,6 +5060,7 @@ mod tests {
     // 安全側の検証: 相対パスの HOME は拒否する（PR #659 レビュー指摘。
     // `HOME=.` 等の相対パスフォールバックを未検証で許すと override・
     // XDG_CACHE_HOME と同じくリポジトリツリー内へキャッシュが落ちうる）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_home() {
         let result = resolve_cache_root(
@@ -5017,6 +5080,7 @@ mod tests {
     // fail-closed 契約違反があった。`docs/cuda-jit-cache-design.md:19-22`
     // の「三者とも空文字列を CacheDirUnavailable として拒否する」方針との
     // 整合を検証する）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_xdg_cache_home_even_with_valid_home() {
         let result = resolve_cache_root(
@@ -5032,6 +5096,7 @@ mod tests {
     // （override・XDG_CACHE_HOME 双方が未設定かつ HOME のみ空文字列で
     // 設定されているケース。上記 XDG のケースと対称に fail-closed である
     // ことを確認する。PR #659 codex-review P0 指摘）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_home() {
         let result = resolve_cache_root(
@@ -5047,6 +5112,7 @@ mod tests {
     // `RUST_AI_CUDA_CACHE_DIR` が `workspace_root` 配下を指す絶対パスの
     // 場合は拒否する。codex-review が指摘した具体例
     // `/workspace/repository/cache` をそのまま使う。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_override_within_workspace_root() {
         let result = resolve_cache_root(
@@ -5065,6 +5131,7 @@ mod tests {
     // 一致せず素通りしてしまうが、`..` 折り畳み後は `workspace_root` 配下
     // になるため [`path_lexically_within`] の正規化込み比較で拒否される
     // ことを確認する（codex-review 指摘の具体例そのもの）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_override_within_workspace_root_via_parent_dir_traversal() {
         let result = resolve_cache_root(
@@ -5079,6 +5146,7 @@ mod tests {
     // 安全側の検証: `XDG_CACHE_HOME` から導出したキャッシュルートが
     // `workspace_root` 配下になる場合も override と同様に拒否する
     // （PR #659 codex-review P0 再指摘: 3 分岐すべてを検証対象にする）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_xdg_cache_home_within_workspace_root() {
         let result = resolve_cache_root(
@@ -5092,6 +5160,7 @@ mod tests {
 
     // 安全側の検証: `HOME` から導出したキャッシュルートが `workspace_root`
     // 配下になる場合も同様に拒否する（3 分岐目。上記 2 テストと対称）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_home_within_workspace_root() {
         let result = resolve_cache_root(
@@ -5110,6 +5179,7 @@ mod tests {
     // （`resolve_cache_root_falls_back_to_home` 等の既存テストと合わせ、
     // workspace_root がたまたまホームディレクトリ等と重ならない限り誤検知
     // しないことの明示的な回帰確認）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_succeeds_when_workspace_root_is_elsewhere() {
         let root = resolve_cache_root(
@@ -5131,6 +5201,7 @@ mod tests {
     // ブロックすべきリポジトリ内キャッシュルートを受理してしまう）。
     // `resolve_cache_root` は 3 分岐へ入る前に `workspace_root` の絶対
     // パス性を検証して fail-closed で拒否しなければならない。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_workspace_root_even_when_override_is_within_it() {
         let result = resolve_cache_root(
@@ -5144,6 +5215,7 @@ mod tests {
 
     // 空文字列の `workspace_root`（`Path::new("")` は相対パス扱い）も
     // 同じ fail-closed 経路で拒否されることを確認する。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_empty_workspace_root() {
         let result = resolve_cache_root(
@@ -5158,6 +5230,7 @@ mod tests {
     // 相対 `workspace_root` の拒否が特定の分岐（override）だけでなく
     // 入口の共通ガードで行われていることを、XDG_CACHE_HOME 分岐でも
     // 確認する（分岐ごとに個別実装していないことの回帰確認）。
+    #[cfg(unix)]
     #[test]
     fn resolve_cache_root_rejects_relative_workspace_root_via_xdg_branch() {
         let result = resolve_cache_root(
@@ -5273,6 +5346,7 @@ mod tests {
     /// `jit_cache_bench_tests::fresh_temp_dir` と同じ方式（Review #698 対応）。
     /// 戻り値は `PathBuf` のままで、呼び出し元がテスト末尾で
     /// `remove_dir_all` して片付ける（Drop ガード化は対象外）。
+    #[cfg(unix)]
     fn fresh_temp_dir(label: &str) -> PathBuf {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         const CREATE_DIR_RETRIES: u32 = 8;
@@ -5308,6 +5382,7 @@ mod tests {
 
     // 受け入れ基準（実装計画 §5）: store → load ラウンドトリップ。両
     // ファイルが存在し内容が一致すること。
+    #[cfg(unix)]
     #[test]
     fn store_then_load_roundtrips_entry_contents() {
         let root = fresh_temp_dir("roundtrip");
@@ -5622,6 +5697,7 @@ mod tests {
     }
 
     // 未書き込みキーの load はミス（`Ok(None)`）を返すこと。
+    #[cfg(unix)]
     #[test]
     fn load_returns_none_when_entry_absent() {
         let root = fresh_temp_dir("miss");
@@ -5636,6 +5712,7 @@ mod tests {
     // 受け入れ基準 1: 並行競合（先着吸収）。同一キーで 2 回 store しても
     // 両方 `Ok`、エントリは 1 つ・内容は 1 回目のもののまま破壊されない
     // （2 回目の rename は失敗し「他プロセス先着」として吸収される）。
+    #[cfg(unix)]
     #[test]
     fn store_twice_absorbs_second_writer_as_success() {
         let root = fresh_temp_dir("double-store");
@@ -5841,6 +5918,7 @@ mod tests {
     // 受け入れ基準 1: 並行競合（複数スレッド）。同一注入ルート・同一キー
     // へ複数スレッドが同時 store しても全スレッド `Ok` を返し、最終
     // エントリが不変条件（`validate_cache_entry`）を満たすこと。
+    #[cfg(unix)]
     #[test]
     fn concurrent_store_from_multiple_threads_all_succeed() {
         use std::sync::Arc;
@@ -5889,6 +5967,7 @@ mod tests {
 
     // 受け入れ基準 2: 破損検出。`kernel.ptx` を削除した破損エントリで
     // load がミス（`Ok(None)`）を返すこと。
+    #[cfg(unix)]
     #[test]
     fn load_treats_missing_ptx_file_as_miss() {
         let root = fresh_temp_dir("corrupt-load");
@@ -5905,6 +5984,7 @@ mod tests {
     }
 
     // 受け入れ基準 2: 破損エントリ存在下で store が置換に成功すること。
+    #[cfg(unix)]
     #[test]
     fn store_replaces_corrupt_existing_entry() {
         let root = fresh_temp_dir("corrupt-replace");
@@ -5934,6 +6014,7 @@ mod tests {
     // 受け入れ基準（実装計画 §3.1・§8）: 非空検査。`kernel.cu` をクラッシュ
     // 残骸想定の 0 バイトファイルへ差し替えると、`is_file()` は真だが
     // `read_verified_cache_entry_file` の非空チェックでミス扱いになること。
+    #[cfg(unix)]
     #[test]
     fn load_treats_empty_source_file_as_miss() {
         let root = fresh_temp_dir("empty-cu");
@@ -5962,6 +6043,7 @@ mod tests {
     // 書き込みが破棄されて空回りキャッシュミスが恒久化する（`is_plain_file`
     // の非空検査追加前は本テストが失敗していたはず）。0 バイト残骸を
     // `store_cache_entry_in` が「破損」として検出・置換することを検証する。
+    #[cfg(unix)]
     #[test]
     fn store_replaces_zero_byte_remnant_entry() {
         let root = fresh_temp_dir("zero-byte-remnant");
@@ -6077,6 +6159,7 @@ mod tests {
     // ソース不一致）と同じく、非 UTF-8 の `kernel.cu` はハードエラー
     // （`CudaError::CacheIo`）ではなくミス（`Ok(None)`）として扱われる
     // こと。
+    #[cfg(unix)]
     #[test]
     fn load_treats_invalid_utf8_source_as_miss() {
         let root = fresh_temp_dir("invalid-utf8");
@@ -6154,6 +6237,7 @@ mod tests {
     // バイト不一致であれば、64bit FNV-1a ハッシュの衝突によって別ソースの
     // エントリを誤ってヒット扱いしない（誤った PTX を GPU へ渡さない
     // fail-closed）。
+    #[cfg(unix)]
     #[test]
     fn load_treats_source_mismatch_as_miss() {
         let root = fresh_temp_dir("source-mismatch");
@@ -6182,6 +6266,7 @@ mod tests {
     // `ensure_cache_root_in`: 通常ケース（symlink なし）で `candidate_root`
     // が実体化され、containment 検証（`workspace_root` 配下でない）を
     // 通過した canonical パスが返ること。
+    #[cfg(unix)]
     #[test]
     fn ensure_cache_root_in_creates_and_returns_canonical_root() {
         let workspace_root = fresh_temp_dir("ensure-root-workspace");
@@ -6338,6 +6423,7 @@ mod tests {
     // CUDA toolkit 非搭載環境（通常 CI）では `NvrtcUnavailable` を返す想定
     // であり panic しないため `#[ignore]` で分離する（`make
     // test-ignored-cuda` 導線。`.claude/rules/coding-rust.md` 実機分離規約）。
+    #[cfg(unix)]
     #[test]
     #[ignore]
     fn nvrtc_version_returns_ok_on_real_device() {
@@ -6435,7 +6521,7 @@ mod tests {
 // ヘルパー（`sample_key` 等）とは独立に自前のヘルパーを持つ（可視性
 // ルールと配置理由の詳細は `jit_cache_regression_tests.rs` 冒頭の
 // ドキュメンテーションコメントを正とする）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "jit_cache_regression_tests.rs"]
 mod jit_cache_regression_tests;
 
@@ -6446,6 +6532,6 @@ mod jit_cache_regression_tests;
 // `#[ignore]`（実機必須）のため通常 CI では実行されず、コンパイル検査の
 // みが行われる（詳細は `jit_cache_bench_tests.rs` 冒頭ドキュメンテーション
 // コメントを正とする）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "jit_cache_bench_tests.rs"]
 mod jit_cache_bench_tests;

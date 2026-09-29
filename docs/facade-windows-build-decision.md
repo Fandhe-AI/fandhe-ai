@@ -59,6 +59,11 @@
 6. アーキテクチャゲート（:1516）は変更しない。
 7. 受入範囲は `--lib`。unix 専用テスト（`jit_cache_regression_tests.rs` 等）は `cfg(unix)` のまま。unix の既存経路（TOCTOU 回帰テスト含む）は無改変。`unsafe` は追加しない。
 
+### 実装時の差分（#2390）
+
+- `ensure_cache_root` には非 unix スタブを置かず `cfg(unix)` のみとした（呼び出し元は同ファイルの store／load のみで、両スタブが呼ばないため `-D warnings` で dead_code になる。`#[allow]` での抑止は `coding-rust.md` が禁じる）。
+- 非 unix スタブは `runtime_workspace_root`・`store_cache_entry`・`load_cache_entry` の 3 個で、いずれも `CudaError::CacheDirUnavailable` を返す。
+
 ## 6. サポート対象 OS の階層（本書を正とする）
 
 - **Linux／macOS**: 全機能（ディスクキャッシュは fd pin の TOCTOU 対策付き）。
