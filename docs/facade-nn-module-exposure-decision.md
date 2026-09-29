@@ -150,7 +150,7 @@ impl fandhe_ai::nn::Module for MyBlock {
 ## 8. 兄弟 issue との整合
 
 - **#2133（実装）**: 想定形（素の `pub use`）は§1.3 の構造制約により再確定が必要。本 doc の承認結果（案 B の採否・橋渡し方式）を前提として実装形を決め直す
-- **#2134／#2137**: 「`named_modules`／`parameter_count`／`ModuleDict`／`summary`」「`freeze`／`set_requires_grad`」を autodiff trait へ defaulted 追加し facade `nn/mod.rs` で再エクスポートする計画は、案 B 採用時には「autodiff trait への defaulted 追加」＋「facade trait 側 defaulted メソッドへの鏡写し追加」の 2 段構成へ読み替えが必要。**#2137 は前段（autodiff trait への defaulted 追加。`Module::freeze`／`set_requires_grad`／`requires_grad`）のみ実装済み**（`crates/autodiff/src/nn/module.rs`。`docs/autodiff-nograd-leaf-dinput-skip-decision.md`「実装記録（#2137）」参照）。facade 側鏡写しは本 doc §10 の承認（項目 1・2・6）待ちのまま未実施
+- **#2134／#2137**: 「`named_modules`／`parameter_count`／`ModuleDict`／`summary`」「`freeze`／`set_requires_grad`」を autodiff trait へ defaulted 追加し facade `nn/mod.rs` で再エクスポートする計画は、案 B 採用時には「autodiff trait への defaulted 追加」＋「facade trait 側 defaulted メソッドへの鏡写し追加」の 2 段構成へ読み替えが必要。**#2137 は前段（autodiff trait への defaulted 追加。`Module::freeze`／`set_requires_grad`／`requires_grad`）のみ実装済み**（`crates/autodiff/src/nn/module.rs`。`docs/autodiff-nograd-leaf-dinput-skip-decision.md`「実装記録（#2137）」参照）。facade 側鏡写しは本 doc §10 の承認（項目 1・2・6）待ちのまま未実施（#2137 分の鏡写しは #2400 で実施済み。§17 参照）
 - **#2140**（`nn::init` 純再エクスポート）: `Module` trait に依存しない独立の再エクスポートのため非衝突
 - **#2138／#2139**（hooks）: `Var`／`Tape` レベルで独立のため非衝突
 
@@ -464,3 +464,15 @@ facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタ�
 - **`forward_host` は `AutodiffError::InvalidArgument`（fail-closed）**: `BackendError::Unsupported` は「フォールバックの合図」で `predict_recorded` が捕捉して再実行するため使わない（前例 `ModuleList::forward_host`）
 - **検証の読み替え**: #2396（facade `nn::Sequential`）は未マージのため、「facade `nn::Sequential` と bit 一致」は同じ層を手動連鎖させた参照経路（別 tape）との bit 一致（値・入力勾配・葉勾配・ノード数。`[Linear, Adapter]`／`[Adapter, Linear]` の 2 並び）で代替した
 - **申し送り**: #2398 で `nn/mod.rs` に `pub(crate) use module::FacadeModuleAdapter;` を追加し `compat::Sequential` の公開入口を作る。`set_requires_grad`／`requires_grad`／`children`／`type_name` の委譲は #2400／#2401（それまで既定の fail-closed のため、パラメータ持ちアダプタを含む `Sequential::freeze()` は `Err`）
+
+## 17. 実装記録（イシュー #2400）
+
+facade `nn::Module` へ #2137 の凍結 API を鏡写しした（#2338 承認事項 6）。公開面は追加のみ（semver minor 相当）。
+
+- **追加 3 件（defaulted、合計 9 件）**: `set_requires_grad(&mut self, bool) -> Result<(), AutodiffError>`・`freeze`（`set_requires_grad(false)` の別名）・`requires_grad(&self) -> bool`（既定 `true`）。`set_requires_grad` の既定は fail-closed（パラメータ 0 件なら `Ok(())`、1 件以上なら `InvalidArgument`。文言は autodiff 側とバイト一致で in-crate テストが固定。security.md A08）
+- **実装者契約**: パラメータを持つ層は `requires_grad` フィールドを持ち、`forward` 内で `tape.var`／`tape.var_no_grad` を切り替える。反映は次の forward から。`training` とは独立で、`state_dict`／`load_state_dict`／`set_parameter` の対象外
+- **コンテナ**: `ModuleList`／`Sequential` は子へ伝播し、失敗時は `0..=index` を逆順に適用前の値へ必ず戻す（`requires_grad()` が一致して見えても呼ぶ）。復元失敗は打ち切らず集約して部分適用を明示した `Err` を返す。`requires_grad` は「パラメータ要素数が 0 でない子の `any`、該当なしは `true`」。facade trait に `parameter_count` がないため `container.rs` にモジュール private の `param_numel` を置いた（#2401 で `parameter_count` が入った後の置換は #2401 側で判断）
+- **アダプタ**: `FacadeModuleAdapter` が `set_requires_grad`／`requires_grad` を委譲する。`freeze` は autodiff 既定が `set_requires_grad(false)` を経由するため委譲しない。これで autodiff コンテナに積んだパラメータ持ち facade 層の `freeze()` が `Err` にならなくなる
+- **残る差分（追跡対象）**: autodiff コンテナは `as_module_list`／`as_module_dict` でネストしたコンテナの混在状態を再帰的に復元するが、facade trait は REQ-12 により内部フックを持たないため、facade コンテナは子単位（集約値 1 つ）で復元する。外側の `set_requires_grad` が後続の子で失敗したとき、混在状態のネストした facade コンテナはエラー経路でのみ均一化されうる（戻り値は `Err`）。#2402 の `ModuleDict` にも同じ差分が生じる。解消案は (a) `#[doc(hidden)]` の sealed フックメソッド、(b) `trait Module: Any` の supertrait と downcast、(c) thread-local による内部プロトコルだが、いずれも公開面またはグローバル状態の変更で、ユーザー承認が必要のため未実施
+- **ガード**: `tests/api_surface.rs` の `facade_nn_module_trait_methods_match_approved_set`（defaulted 6 件から 9 件）と自己テストを更新
+- **テスト**: `module.rs`／`container.rs` の in-crate テスト（文言一致・伝播・集約・ロールバック・アダプタ委譲）と `tests/nn_module_requires_grad.rs`（facade だけに依存。凍結前後の forward・`dx` の bit 一致、パラメータ葉の `GradientTrackingDisabled`、反映タイミング、`training`／`state_dict` との独立、既定の fail-closed）。CUDA／Metal 実機 parity は対象外（凍結は tape メタデータのみで、autodiff 経路は `nn_module_freeze_backend_parity.rs` が担う）

@@ -5606,9 +5606,10 @@ fn scan_module_trait_methods(content: &str) -> Option<Vec<(String, bool, Vec<Str
 }
 
 /// #2395 の正ガード: facade `nn::Module` の面が承認済み集合
-/// （required = `forward` のみ・defaulted = 6 件）と完全一致すること
+/// （required = `forward` のみ・defaulted = 9 件）と完全一致すること
 /// （#2338 承認事項 2）。`forward_host`・`as_*` 等の内部フックの混入を拒否する。
-/// #2400／#2401 で鏡写しのメソッドを足すときは本集合を更新する。
+/// #2400 で凍結 API 3 件（`set_requires_grad`・`freeze`・`requires_grad`）を追加し 9 件。
+/// #2401 で鏡写しのメソッドを足すときは本集合を更新する。
 #[test]
 fn facade_nn_module_trait_methods_match_approved_set() {
     let src = read_to_string_or_panic(&facade_crate_root().join("src/nn/module.rs"));
@@ -5636,6 +5637,9 @@ fn assert_module_surface(methods: &[(String, bool, Vec<String>)]) -> Result<(), 
         "load_state_dict",
         "set_training",
         "training",
+        "set_requires_grad",
+        "freeze",
+        "requires_grad",
     ]
     .into();
     if required != want_req || defaulted != want_def {
@@ -5679,7 +5683,9 @@ fn facade_nn_module_trait_guards_detect_each_category() {
     let ok = "pub trait Module { fn forward<'t>(&self, tape: TapeRef<'t>, input: &Var<'t>) -> R; \
         fn named_parameters(&self) -> V { V } fn set_parameter(&mut self, n: &str) -> R { R } \
         fn state_dict(&self) -> H { H } fn load_state_dict(&mut self, s: H) -> R { R } \
-        fn set_training(&mut self, t: bool) {} fn training(&self) -> bool { true } }";
+        fn set_training(&mut self, t: bool) {} fn training(&self) -> bool { true } \
+        fn set_requires_grad(&mut self, r: bool) -> R { R } fn freeze(&mut self) -> R { R } \
+        fn requires_grad(&self) -> bool { true } }";
     let m = scan_module_trait_methods(ok).expect("ok");
     assert!(assert_module_surface(&m).is_ok());
     assert!(check_module_signatures(&m).is_ok());
