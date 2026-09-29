@@ -13,6 +13,9 @@
 //! CPU 経路のみを本ファイルで検証し、CUDA／Metal 実機での往復は
 //! `#[ignore]` 分離（§6.3 相当。下部）とする。
 
+mod common;
+
+use common::temp_dir::TempDirGuard;
 use std::collections::HashMap;
 
 use bench_harness::rng::Xorshift64Star;
@@ -53,18 +56,6 @@ fn build_model() -> Sequential {
         .add_relu()
         .add_linear(D_HIDDEN, D_OUT, SEED_L2)
         .unwrap_or_else(|e| panic!("test fixture: 層 2 の構築に失敗: {e}"))
-}
-
-/// `interop_safetensors_roundtrip.rs::temp_dir_for` と同型（プロセス
-/// ID + テスト名で衝突しない一時ディレクトリを作る。`tempfile`
-/// クレートは不使用）。
-fn temp_dir_for(test_name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fandhe-ai-checkpoint-file-{}-{test_name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 fn state_dict_bit_exact(
@@ -110,8 +101,8 @@ fn state_dict_bit_exact(
 #[test]
 fn to_file_saves_best_snapshot_and_roundtrips_bit_exact() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("best-only");
-    let path = dir.join("best.safetensors");
+    let dir = TempDirGuard::new("checkpoint-file-best-only");
+    let path = dir.path().join("best.safetensors");
 
     let mut model = build_model();
     model
@@ -143,7 +134,7 @@ fn to_file_saves_best_snapshot_and_roundtrips_bit_exact() {
 
     // 一時ファイル（`.tmp.` を含む名前）が残っていないこと（atomic
     // rename の契約。`save_safetensors_f32` doc 参照）。
-    let leftover: Vec<_> = std::fs::read_dir(&dir)
+    let leftover: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
@@ -162,8 +153,8 @@ fn to_file_saves_best_snapshot_and_roundtrips_bit_exact() {
 #[test]
 fn to_file_with_save_best_only_false_persists_last_epoch() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("every-epoch");
-    let path = dir.join("last.safetensors");
+    let dir = TempDirGuard::new("checkpoint-file-every-epoch");
+    let path = dir.path().join("last.safetensors");
 
     let mut model = build_model();
     model
@@ -199,8 +190,8 @@ fn to_file_with_save_best_only_false_persists_last_epoch() {
 #[test]
 fn to_file_then_load_state_dict_predict_matches_source_model_bit_exact() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("restore-predict");
-    let path = dir.join("ckpt.safetensors");
+    let dir = TempDirGuard::new("checkpoint-file-restore-predict");
+    let path = dir.path().join("ckpt.safetensors");
 
     let mut model = build_model();
     model
@@ -256,8 +247,8 @@ fn to_file_then_load_state_dict_predict_matches_source_model_bit_exact() {
 #[test]
 fn to_file_combined_with_early_stopping_restore_best_weights_bit_exact() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("restore-best-weights");
-    let path = dir.join("ckpt.safetensors");
+    let dir = TempDirGuard::new("checkpoint-file-restore-best-weights");
+    let path = dir.path().join("ckpt.safetensors");
 
     let mut model = build_model();
     model
@@ -300,11 +291,11 @@ fn to_file_combined_with_early_stopping_restore_best_weights_bit_exact() {
 #[test]
 fn to_file_save_failure_propagates_as_invalid_argument_and_restores_mode() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("save-failure");
+    let dir = TempDirGuard::new("checkpoint-file-save-failure");
     // 親ディレクトリ位置に通常ファイルを置き、`create_dir_all` を
     // 失敗させる（`persist` の親ディレクトリ作成契約。
     // `callbacks.rs::persist` doc 参照）。
-    let blocking_file = dir.join("not-a-dir");
+    let blocking_file = dir.path().join("not-a-dir");
     std::fs::write(&blocking_file, b"not a directory").unwrap();
     let path = blocking_file.join("ckpt.safetensors");
 
@@ -338,10 +329,10 @@ fn to_file_save_failure_propagates_as_invalid_argument_and_restores_mode() {
 #[test]
 fn to_file_save_failure_rolls_back_best_and_retries_on_next_fit_call() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("save-failure-retry");
+    let dir = TempDirGuard::new("checkpoint-file-save-failure-retry");
     // 親ディレクトリ位置に通常ファイルを置き `create_dir_all` を失敗
     // させる（1 回目の呼び出し用の障害物）。
-    let blocking_file = dir.join("not-a-dir");
+    let blocking_file = dir.path().join("not-a-dir");
     std::fs::write(&blocking_file, b"not a directory").unwrap();
     let path = blocking_file.join("ckpt.safetensors");
 
@@ -409,8 +400,8 @@ fn to_file_save_failure_rolls_back_best_and_retries_on_next_fit_call() {
 #[test]
 fn to_file_does_not_change_in_memory_training_behavior() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("no-side-effect");
-    let path = dir.join("ckpt.safetensors");
+    let dir = TempDirGuard::new("checkpoint-file-no-side-effect");
+    let path = dir.path().join("ckpt.safetensors");
 
     let mut model_a = build_model();
     model_a
@@ -476,8 +467,8 @@ fn to_file_does_not_change_in_memory_training_behavior() {
 #[test]
 fn to_file_across_multiple_fit_calls_keeps_best_continuation_contract() {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("cross-fit");
-    let path = dir.join("ckpt.safetensors");
+    let dir = TempDirGuard::new("checkpoint-file-cross-fit");
+    let path = dir.path().join("ckpt.safetensors");
 
     let mut model = build_model();
     model
@@ -545,8 +536,8 @@ fn to_file_across_multiple_fit_calls_keeps_best_continuation_contract() {
 #[allow(dead_code)]
 fn run_checkpoint_roundtrip_on_device(device: fandhe_ai::Device) {
     let (x, y) = gen_regression_data(SEED_DATA);
-    let dir = temp_dir_for("device-roundtrip");
-    let path = dir.join("ckpt.safetensors");
+    let dir = TempDirGuard::new("checkpoint-file-device-roundtrip");
+    let path = dir.path().join("ckpt.safetensors");
 
     let mut model = build_model();
     model

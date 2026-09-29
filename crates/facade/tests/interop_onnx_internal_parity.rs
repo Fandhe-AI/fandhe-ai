@@ -9,6 +9,9 @@
 //! `tests/interop_onnx_import.rs`／`tests/interop_onnx_export.rs`
 //! 〈facade のみ import〉とは目的が異なる）。
 
+mod common;
+
+use common::temp_dir::TempDirGuard;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -801,12 +804,8 @@ fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution()
         "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
     );
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "facade-onnx-external-data-a6-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&tmp_dir).unwrap();
-    let onnx_path = tmp_dir.join("model.onnx");
+    let tmp_dir = TempDirGuard::new("onnx-external-data-a6");
+    let onnx_path = tmp_dir.path().join("model.onnx");
     std::fs::write(&onnx_path, &bytes).unwrap();
     // companion `w.onnx.data` を用意していないため、`from_path` は
     // external data 解決を試みたうえで見つからず拒否される
@@ -821,7 +820,6 @@ fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution()
         matches!(&err, OnnxError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
         "companion ファイル不在は OnnxError::Io(NotFound) を期待したが: {err:?}"
     );
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 /// 上記テストの unix・Windows 以外向け契約版（Cursor Bugbot 指摘・
@@ -882,12 +880,8 @@ fn facade_from_bytes_rejects_external_data_model_from_path_rejects_unsupported_p
         "InvalidModel(raw_data バイト長不整合) を期待したが: {err:?}"
     );
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "facade-onnx-external-data-a6-non-unix-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&tmp_dir).unwrap();
-    let onnx_path = tmp_dir.join("model.onnx");
+    let tmp_dir = TempDirGuard::new("onnx-external-data-a6-non-unix");
+    let onnx_path = tmp_dir.path().join("model.onnx");
     std::fs::write(&onnx_path, &bytes).unwrap();
     // companion ファイルを用意しない: 非 unix では実在有無に関わらず
     // UnsupportedPlatformForSecureResolve（→ InvalidModel）で拒否される
@@ -898,7 +892,6 @@ fn facade_from_bytes_rejects_external_data_model_from_path_rejects_unsupported_p
         "非 unix では OnnxError::InvalidModel（UnsupportedPlatformForSecureResolve 由来）を \
          期待したが: {err:?}"
     );
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 /// facade の `OnnxExternalDataLimits::default()` が内部
