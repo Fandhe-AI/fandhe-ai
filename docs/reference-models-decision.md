@@ -357,7 +357,7 @@ examples から内部の `fandhe_ai_autodiff::nn::Module` を impl する
 
 | `ReferenceModule`／`Trainable` のメソッド | 案 B の対応 | 一致度 |
 |---|---|---|
-| `forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>` | required method `forward`（§6 利用例） | 第 1 引数のみ差分（確定: facade は `TapeRef<'t>`・`ReferenceModule` は `&'t Tape`。変換は `TapeRef::from(&tape)` だが、実装側が部品の `&Tape` を得られず委譲できない。(d) 参照） |
+| `forward<'t>(&self, tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError>` | required method `forward`（§6 利用例） | 第 1 引数のみ差分（確定: facade は `TapeRef<'t>`・`ReferenceModule` は `&'t Tape`。変換は `TapeRef::from(tape)`（`tape` が借用済みの `&'t Tape` の場合。`Tape` を所有する側は `TapeRef::from(&tape)`）だが、実装側が部品の `&Tape` を得られず委譲できない。(d) 参照） |
 | `named_parameters(&self) -> Vec<(String, &Tensor<f32>)>` | defaulted メソッド `named_parameters`（§10 承認事項 2） | 名前・意味論とも同じ |
 | `set_training(&mut self, training: bool)` | defaulted メソッド `set_training`（同上） | 名前・意味論とも同じ |
 | `is_training(&self) -> bool` | defaulted メソッド `training`（同上） | 意味論は同じだが**名前が異なる**（`is_training` vs `training`） |
@@ -390,7 +390,7 @@ exposure-decision.md` §13.5 の「承認取得後に実施する変更範囲」
   のみ）。`resnet.rs`・`transformer.rs` の `forward` は部品の
   `forward(tape, x)` を呼んでいるため、`TapeRef` からは呼べない
 - **メソッドごとの確定形**: `forward` は第 1 引数が `&'t Tape` から `TapeRef<'t>`
-  に変わる（呼び出し側は `TapeRef::from(&tape)`）。`named_parameters`・
+  に変わる（呼び出し側は `Tape` を所有していれば `TapeRef::from(&tape)`、借用済みの `tape: &'t Tape` なら `TapeRef::from(tape)`。`&&Tape` にしない）。`named_parameters`・
   `set_training` はシグネチャ・意味論とも一致。`is_training` は `training` への
   改名が要る。`set_parameter`／`state_dict`／`load_state_dict` は `ReferenceModule`
   側に対応がなく、移行するなら `set_parameter` の実装が必要（既定は fail-closed の
