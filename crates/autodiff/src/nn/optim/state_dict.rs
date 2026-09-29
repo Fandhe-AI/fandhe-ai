@@ -10,6 +10,9 @@
 //! `NAdam`・`RAdam`（9 optimizer）が [`OptimizerStateDict`] を実装する
 //! （各ファイル末尾の `impl OptimizerStateDict for X` 参照）。
 //!
+//! `Lbfgs` はフラット化した大域状態のため本 trait ではなく同型の専用
+//! inherent API を持つ（`lbfgs.rs` 参照。イシュー #2366）。
+//!
 //! # facade 公開の保留（イシュー #2173 と同型の判断）
 //!
 //! `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb` は

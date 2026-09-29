@@ -400,3 +400,50 @@ L-BFGS は 1 epoch（= 1 outer step。フルバッチ）あたり `max_iter=20`
 1 回呼び `max_iter` を大きく取る）。所要時間が SGD よりかなり長いのも
 同じ理由（内部反復あたり 1 回の forward／backward）で想定どおり。
 
+
+## §10 状態保存・復元 API（イシュー #2366）
+
+`Lbfgs` の大域状態を保存・復元する専用 inherent API を内部クレート
+（`fandhe_ai_autodiff::nn::optim::Lbfgs`。facade 非公開のため公開面は
+広がらない）に追加した（`crates/autodiff/src/nn/optim/lbfgs.rs`）。
+`docs/compat-model-io-decision.md` §2 item 2・§4・§13.5 の内部 API 部分の実装。
+
+### API
+
+| メソッド | 役割 |
+|---|---|
+| `state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError>` | 状態の書き出し |
+| `load_state_dict(&mut self, state, slot_shapes: &[Vec<usize>], expected_history_len: usize)` | fail-closed な復元（`Err` 時 `self` 不変） |
+| `history_len(&self) -> usize` | 現在の履歴件数（manifest の `history_len` 用） |
+
+`OptimizerStateDict` のトレイト実装にしなかった理由: `slot_shapes`
+（キー配置に含まれず構築済みモデルから導出）と `expected_history_len`
+（manifest 由来）を受け取る余地がトレイトのシグネチャにないため。
+
+### キー配置（接頭辞なし。`optimizer.` は facade 側 safetensors の名前空間で #2373 が付与）
+
+| キー | 形 | 出現条件 |
+|---|---|---|
+| `n_iter.u64_u16x4`・`func_evals.u64_u16x4` | `[4]` | 常に |
+| `t`・`h_diag` | `[1]` 生 f32 | 常に |
+| `last_loss` | `[1]` | `func_evals >= 1` |
+| `d`・`prev_flat_grad` | `[N]` | `n_iter >= 1` |
+| `history.{i}.s`（`old_stps`）・`history.{i}.y`（`old_dirs`） | `[N]` | `i in 0..n` |
+| `history.rho` | `[n]`（index 0 が最古） | `n >= 1` |
+
+空ベクトルはキーごと省く（長さ 0 テンソルを作らず、#2373 の safetensors
+往復で 0 要素テンソルを扱わないため）。
+
+### 復元時の不変条件（到達可能状態から導出。すべて状態変更前に検査）
+
+- `n <= config.history_size`（追い出し判定が `==` のため、超過状態を許すと履歴が無限に増える）
+- `n >= 1` ならば `n <= n_iter - 1`（曲率ペアは 2 回目以降の反復でのみ push される）
+- `n_iter >= 1` ならば `func_evals >= 1`（`last_loss` 必須）・`d`／`prev_flat_grad` あり
+- 履歴件数は実在キーから導出（正規表記の添字のみ）し `expected_history_len` と照合。宣言値で確保しない
+- shape は厳密一致、全 f32 値は有限、`N` は checked 演算
+- 未実行（`func_evals == 0`）の復元は `slot_shapes` を空に戻し、次の step で params の shape を採用させる
+
+### スコープ外
+
+履歴件数の固定上限・manifest の `history_len` との突き合わせ・safetensors
+結線・`optimizer.` 接頭辞の付与は別イシュー #2373。
