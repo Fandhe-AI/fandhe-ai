@@ -464,3 +464,12 @@ facade `nn::Module` を autodiff `Module` として扱う crate 内アダプタ�
 - **`forward_host` は `AutodiffError::InvalidArgument`（fail-closed）**: `BackendError::Unsupported` は「フォールバックの合図」で `predict_recorded` が捕捉して再実行するため使わない（前例 `ModuleList::forward_host`）
 - **検証の読み替え**: #2396（facade `nn::Sequential`）は未マージのため、「facade `nn::Sequential` と bit 一致」は同じ層を手動連鎖させた参照経路（別 tape）との bit 一致（値・入力勾配・葉勾配・ノード数。`[Linear, Adapter]`／`[Adapter, Linear]` の 2 並び）で代替した
 - **申し送り**: #2398 で `nn/mod.rs` に `pub(crate) use module::FacadeModuleAdapter;` を追加し `compat::Sequential` の公開入口を作る。`set_requires_grad`／`requires_grad`／`children`／`type_name` の委譲は #2400／#2401（それまで既定の fail-closed のため、パラメータ持ちアダプタを含む `Sequential::freeze()` は `Err`）
+
+## 17. 実装記録（イシュー #2399）
+
+#2338 受け入れ条件 4（公開面の正ガードとユーザー定義層の統合テスト）をテストのみで実装した。`crates/facade/src/` は変更していない。
+
+- **追加した正ガード（`crates/facade/tests/api_surface.rs`）**: `nn_module_types_are_reachable_via_facade_only`（facade だけの import での到達性）・`nn_{mod,module_rs,container_rs}_public_items_match_expected_set`（`src/nn/*.rs` の全種別の公開 item 集合の完全一致。`FacadeModuleAdapter` が `pub(crate)` のままであることを含む）・`nn_containers_inherent_and_trait_impls_match_expected_set`（固有 pub メソッド集合と手書き trait impl 集合）・自己テスト `nn_public_item_set_scanners_detect_each_category`
+- **`"nn::Module"` の区別**: ONNX 走査（`src/interop/onnx.rs` 限定）の禁止部分文字列 `nn::Module` は内部型の漏洩検出用だが、部分文字列一致のため facade 公開名 `fandhe_ai::nn::Module` にも一致する。facade `nn::Module` を受ける ONNX API は承認範囲外のため意図した fail-closed であり衝突ではない（現状 `onnx.rs` に参照 0 件）。両リストにコメントを追加し、`onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module` が固定する。将来 export を承認する場合はエントリを同時に見直す
+- **統合テスト（`crates/facade/tests/nn_module_user_defined.rs`）**: `fandhe_ai` と `bench_harness::rng` だけに依存する residual block を `nn::Sequential`（入れ子含む）に積み、学習（loss が初期の 0.5 倍未満）・`state_dict` 往復（bit 一致・fail-closed）・`set_training` 伝播を確認する。パラメータ勾配は葉プレフィックス方式（パラメータ持ち層を index 0 に置き最初の op より前に登録し、`Tape::leaf(i)` で取得）で取り出し、毎 step の葉数・葉値のインベントリ assert と手組み参照との bit 一致で対応のずれを検出する。更新は `Module::load_state_dict` で適用し、crate 内アダプタ経由の公開経路を毎 step 通す
+- **申し送り（#2403）**: facade `nn::Module` には、forward 内で登録したパラメータ `Var`／勾配を公開経由で収集する経路がない（本テストは葉プレフィックスの順序に依存する回避策）。`reference_module.rs` の書き換え評価も #2403
