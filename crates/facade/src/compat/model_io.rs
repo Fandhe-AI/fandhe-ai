@@ -16,13 +16,14 @@
 //! `compile`／`compile_with_amp` 済みのモデルは、loss 種別・optimizer 種別と現在の config・
 //! optimizer 内部状態（safetensors の `optimizer.` 接頭辞）・AMP の GradScaler 状態を
 //! manifest の `compiled` 節（`compiled` サブモジュール）へ記録し、bit 一致で復元する
-//! （対象は `Sgd`・`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`。イシュー #2372）。
+//! （対象は `Sgd`・`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`〈イシュー #2372〉と、AMP を伴わない
+//! `Lbfgs`〈イシュー #2373。履歴ペア数は固定上限 `MAX_LBFGS_HISTORY` で保存・復元の両側を挟む〉）。
 //! `optimizer_state_keys` は配列長上限（`MAX_ARRAY_LEN`）に数えられるため、パラメータ数の
 //! 多いモデルは `save_model` が書き込み前に `TooLarge` で拒否する。
 //! 次は `save_model` が [`ModelIoError::UnsupportedModel`]／[`ModelIoError::TooLarge`] で拒否し、
 //! `dir` には何も作らない（fail-closed。REQ-7 の無言 skip 禁止）:
 //!
-//! - `add_module` の利用者定義層・`Lbfgs` で `compile` 済みのモデル（#2373）
+//! - `add_module` の利用者定義層
 //! - dropout・BatchNorm の層のモードがモデル全体と食い違うモデル（load が全層を
 //!   `manifest.training` へ揃えるため復元後に forward がずれる）
 //! - f32 引数が非有限の層・manifest が固定上限（配列長・サイズ等）を超えるモデル
@@ -78,8 +79,8 @@ use fandhe_ai_autodiff::AutodiffError;
 mod compiled;
 
 use self::compiled::{
-    CompiledMeta, OPTIMIZER_PREFIX, check_slot_shapes, parse_compiled, render_compiled,
-    split_optimizer_tensors,
+    CompiledMeta, OPTIMIZER_PREFIX, check_lbfgs_history, check_slot_shapes, parse_compiled,
+    render_compiled, split_optimizer_tensors,
 };
 use super::sequential::{LayerSpec, Sequential};
 use crate::Tensor;
@@ -113,6 +114,17 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 /// （`sequential.rs` の `..._with_1714_layers`）、それを包含する 2 のべき乗。
 /// 承認状況は `MAX_MANIFEST_BYTES` と同じ（2026-09-29 ユーザー承認済み。#2362 コメント）。
 const MAX_LAYERS: usize = 4096;
+/// `Lbfgs` の履歴ペア件数の上限。65536（イシュー #2373）。
+///
+/// `config.history_size`（`LbfgsConfig` で任意に大きく設定できる）と manifest の `history_len`・
+/// safetensors の実履歴キー数のいずれかが超えたら `TooLarge` で拒否する（保存・復元の両側。
+/// 65536 ちょうどは受理）。非信頼な履歴件数で資源確保・検査ループを決めないための固定上限。
+/// **2026-09-29 ユーザー承認済み**（親 #2362 のコメント
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/2362#issuecomment-5888987015>。
+/// 決定記録 §2 item 4）。値の変更は再承認が必要。なお `MAX_ARRAY_LEN` が `optimizer_state_keys`
+/// にも掛かるため、実際に保存できる履歴件数は約 4092 件までである（超過は保存前の
+/// `verify_round_trip` が `TooLarge`。`MAX_ARRAY_LEN` は引き上げない）。
+const MAX_LBFGS_HISTORY: usize = 65536;
 /// JSON のコンテナ（object／array）のネスト上限。ポリシー閾値ではなく v1 スキーマの
 /// 最大ネスト（root → 配列 → 要素 object → params／shape）から導いた構造上の値。
 const MAX_JSON_DEPTH: usize = 4;
@@ -809,6 +821,16 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
         // 維持するため、パラメータ数が増えた状態を書き出すと load が Mismatch で拒否する
         // ディレクトリができてしまう（「書き出したものは必ず load できる」契約の保持）。
         check_slot_shapes(&snap.optimizer_state, &model.trainable_parameters())?;
+        // `Lbfgs` は `state.` 接頭辞のキーを持たず上の検査が効かないため、新しい `Lbfgs` へ
+        // 試験復元して同じ契約（構成のずれ・非有限値の拒否）を保存前に確認する（#2373）。
+        model
+            .check_lbfgs_restorable(&snap)
+            .map_err(|e| ModelIoError::Mismatch {
+                message: format!(
+                    "Lbfgs の状態を復元できない構成です（{})",
+                    clip(&e.to_string())
+                ),
+            })?;
         for (key, tensor) in snap.optimizer_state {
             if state
                 .insert(format!("{OPTIMIZER_PREFIX}{key}"), tensor)
@@ -1164,6 +1186,11 @@ fn load_from_dir_with_limits(
             message: "safetensors の optimizer 状態のキー集合が manifest の optimizer_state_keys と一致しません"
                 .into(),
         });
+    }
+
+    // `Lbfgs` の履歴件数は実キー数と照合する（`history_len` を確保量の根拠にしない。#2373）。
+    if let Some(meta) = manifest.compiled.as_ref() {
+        check_lbfgs_history(meta, &optimizer_state)?;
     }
 
     // キー集合と shape の完全一致（無言 skip をしない。REQ-7）。

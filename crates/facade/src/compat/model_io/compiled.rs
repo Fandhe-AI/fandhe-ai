@@ -16,20 +16,28 @@
 //! 呼び出し元: `model_io.rs` の `prepare_save`・`render_manifest`・`verify_round_trip`・
 //! `parse_manifest`・`load_from_dir_with_limits`。
 //!
-//! `Lbfgs`（#2373）は manifest の `kind` として認識するが、それまでは
-//! `ModelIoError::UnsupportedModel` で拒否する（分岐点は `parse_optimizer` と
-//! `CompiledMeta::from_snapshot` の 2 か所のみ）。
+//! `Lbfgs`（#2373）は `kind: "lbfgs"` として保存・復元する（AMP 併用は対象外）。manifest の
+//! optimizer object には `history_len`（履歴ペア件数）を追加し、`config` は `LbfgsConfig` の
+//! 全 8 フィールド（`max_eval` は `null` か整数・`line_search` は `"none"`／`"strong_wolfe"`）を持つ。
+//! 履歴件数は非信頼値のため、固定上限 `MAX_LBFGS_HISTORY`（親モジュール。65536。2026-09-29
+//! ユーザー承認）で `config.history_size` と `history_len` を挟み、load では safetensors の
+//! 実キー数と照合する（`check_lbfgs_history`。`history_len` を確保量の根拠にしない）。
 
 use std::collections::HashMap;
 
 use super::super::training::{AmpDType, AmpSnapshot, CompiledSnapshot, Loss, Optimizer};
 use super::{
-    Json, ModelIoError, Params, as_arr, as_f32, as_str, as_u64, clip, exact_fields, manifest_error,
+    Json, MAX_LBFGS_HISTORY, ModelIoError, Params, as_arr, as_f32, as_str, as_u64, as_usize, clip,
+    exact_fields, manifest_error,
 };
 use crate::Tensor;
 use crate::optim::{
-    AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, RmsPropConfig, SgdConfig,
+    AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, LbfgsConfig,
+    RmsPropConfig, SgdConfig,
 };
+// facade は `LbfgsLineSearch` を再エクスポートしない（承認範囲外）。ここは private use で、
+// manifest 文字列との相互変換にだけ使う（`api_surface` の公開面検査の対象外）。
+use fandhe_ai_autodiff::nn::optim::LbfgsLineSearch;
 
 /// safetensors 内の optimizer 状態キーの接頭辞（`Sequential::state_dict` のキーは
 /// `{層番号}.{名前}` で、この接頭辞から始まることはない）。
@@ -42,15 +50,47 @@ pub(super) struct CompiledMeta {
     /// safetensors 内の完全キー（`optimizer.` 接頭辞付き）。昇順・重複なし。
     pub(super) state_keys: Vec<String>,
     pub(super) amp: Option<AmpSnapshot>,
+    /// `Lbfgs` の履歴ペア件数（`Lbfgs` のときだけ `Some`。manifest の `history_len`）。
+    pub(super) lbfgs_history_len: Option<usize>,
+}
+
+/// `Lbfgs` の履歴に関する固定上限の検査（`what` は `TooLarge` の対象名）。
+fn check_lbfgs_limit(n: usize, what: &'static str) -> Result<(), ModelIoError> {
+    check_lbfgs_limit_with(n, MAX_LBFGS_HISTORY, what)
+}
+
+fn check_lbfgs_limit_with(n: usize, limit: usize, what: &'static str) -> Result<(), ModelIoError> {
+    if n > limit {
+        return Err(ModelIoError::TooLarge {
+            what,
+            limit: limit as u64,
+        });
+    }
+    Ok(())
 }
 
 impl CompiledMeta {
-    /// snapshot から manifest 用の写しを作る。`Lbfgs` は #2373 まで拒否する。
+    /// snapshot から manifest 用の写しを作る。`Lbfgs` は履歴の固定上限・`line_search` の
+    /// 既知 variant・AMP 非併用を確認する（保存できないものはここで拒否する）。
     pub(super) fn from_snapshot(snap: &CompiledSnapshot) -> Result<Self, ModelIoError> {
-        if matches!(snap.optimizer, Optimizer::Lbfgs(_)) {
-            return Err(ModelIoError::UnsupportedModel {
-                reason: "compile 済み Lbfgs の保存は未対応です（イシュー #2373）".into(),
-            });
+        if let Optimizer::Lbfgs(c) = &snap.optimizer {
+            check_lbfgs_limit(c.history_size, "Lbfgs history_size")?;
+            let Some(n) = snap.lbfgs_history_len else {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: "Lbfgs の履歴件数が取得できません".into(),
+                });
+            };
+            check_lbfgs_limit(n, "Lbfgs 履歴件数")?;
+            if snap.amp.is_some() {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: "Lbfgs と AMP の併用は保存できません".into(),
+                });
+            }
+            if line_search_name(c.line_search).is_none() {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: "未対応の Lbfgs line_search です".into(),
+                });
+            }
         }
         let mut state_keys: Vec<String> = snap
             .optimizer_state
@@ -68,6 +108,7 @@ impl CompiledMeta {
                 scale: a.scale,
                 growth_tracker: a.growth_tracker,
             }),
+            lbfgs_history_len: snap.lbfgs_history_len,
         })
     }
 
@@ -80,6 +121,7 @@ impl CompiledMeta {
             loss: self.loss,
             optimizer: self.optimizer,
             optimizer_state,
+            lbfgs_history_len: self.lbfgs_history_len,
             amp: self.amp,
         }
     }
@@ -109,6 +151,16 @@ fn optimizer_kind(o: &Optimizer) -> &'static str {
         Optimizer::Adagrad(_) => "adagrad",
         Optimizer::Lamb(_) => "lamb",
         Optimizer::Lbfgs(_) => "lbfgs",
+    }
+}
+
+/// `line_search` の manifest 上の文字列（allowlist の正）。`#[non_exhaustive]` の
+/// 未知 variant は `None`（保存側 `from_snapshot` が拒否する）。
+fn line_search_name(ls: LbfgsLineSearch) -> Option<&'static str> {
+    match ls {
+        LbfgsLineSearch::None => Some("none"),
+        LbfgsLineSearch::StrongWolfe => Some("strong_wolfe"),
+        _ => None,
     }
 }
 
@@ -162,8 +214,26 @@ fn config_fields(o: &Optimizer) -> Vec<(String, String)> {
             real("initial_accumulator_value", c.initial_accumulator_value),
             real("eps", c.eps),
         ],
-        // 保存側は `CompiledMeta::from_snapshot` が先に拒否する。到達しても空の config にする。
-        Optimizer::Lbfgs(_) => Vec::new(),
+        Optimizer::Lbfgs(c) => vec![
+            real("lr", c.lr),
+            ("max_iter".into(), c.max_iter.to_string()),
+            (
+                "max_eval".into(),
+                c.max_eval.map_or("null".to_string(), |n| n.to_string()),
+            ),
+            real("tolerance_grad", c.tolerance_grad),
+            real("tolerance_change", c.tolerance_change),
+            ("history_size".into(), c.history_size.to_string()),
+            (
+                "line_search".into(),
+                // 未知 variant は `from_snapshot` が先に拒否する。到達しても読み戻しで拒否される値にする。
+                format!(
+                    "\"{}\"",
+                    line_search_name(c.line_search).unwrap_or("unknown")
+                ),
+            ),
+            ("line_search_steps".into(), c.line_search_steps.to_string()),
+        ],
     }
 }
 
@@ -194,8 +264,12 @@ pub(super) fn render_compiled(m: &CompiledMeta) -> String {
             )
         }
     };
+    let history_len = match (&m.optimizer, m.lbfgs_history_len) {
+        (Optimizer::Lbfgs(_), Some(n)) => format!(",\"history_len\":{n}"),
+        _ => String::new(),
+    };
     format!(
-        "{{\"loss\":\"{}\",\"optimizer\":{{\"kind\":\"{}\",\"config\":{}}},\"optimizer_state_keys\":[{}],\"amp\":{amp}}}",
+        "{{\"loss\":\"{}\",\"optimizer\":{{\"kind\":\"{}\",\"config\":{}{history_len}}},\"optimizer_state_keys\":[{}],\"amp\":{amp}}}",
         loss_name(m.loss),
         optimizer_kind(&m.optimizer),
         render_object(&config_fields(&m.optimizer)),
@@ -207,14 +281,85 @@ const CONFIG_CTX: &str = "compiled.optimizer.config";
 const ADAM_LIKE_KEYS: [&str; 5] = ["lr", "beta1", "beta2", "eps", "weight_decay"];
 
 /// `optimizer` object（`kind` の allowlist と kind ごとの固定キー集合）を読む。
-fn parse_optimizer(value: &Json) -> Result<Optimizer, ModelIoError> {
-    let f = exact_fields(value, "compiled.optimizer", &["kind", "config"])?;
-    let kind = as_str(f[0], "compiled.optimizer.kind")?;
+/// `kind` を先に読み、`lbfgs` だけ `history_len` を加えたキー集合で厳格に照合する。
+/// 戻り値の `Option<usize>` は `Lbfgs` の `history_len`（それ以外は `None`）。
+fn parse_optimizer(value: &Json) -> Result<(Optimizer, Option<usize>), ModelIoError> {
+    let Json::Obj(entries) = value else {
+        return Err(manifest_error(
+            "compiled.optimizer は object である必要があります",
+        ));
+    };
+    let kind_value = entries
+        .iter()
+        .find(|(k, _)| k == "kind")
+        .map(|(_, v)| v)
+        .ok_or_else(|| manifest_error("compiled.optimizer にキー kind がありません"))?;
+    let kind = as_str(kind_value, "compiled.optimizer.kind")?;
+    let keys: &[&str] = if kind == "lbfgs" {
+        &["kind", "config", "history_len"]
+    } else {
+        &["kind", "config"]
+    };
+    let f = exact_fields(value, "compiled.optimizer", keys)?;
+    if let Some(history_value) = f.get(2) {
+        // 上限判定は config・キー照合より前（非信頼値で資源を決めない）。
+        let history_len = as_usize(history_value, "compiled.optimizer.history_len")?;
+        check_lbfgs_limit(history_len, "Lbfgs 履歴件数")?;
+        return parse_lbfgs(f[1], history_len);
+    }
+    parse_non_lbfgs(kind, f[1]).map(|o| (o, None))
+}
+
+/// `kind: "lbfgs"` の config（8 キー）を読む。
+fn parse_lbfgs(
+    config: &Json,
+    history_len: usize,
+) -> Result<(Optimizer, Option<usize>), ModelIoError> {
+    let p = Params::named(
+        CONFIG_CTX,
+        config,
+        &[
+            "lr",
+            "max_iter",
+            "max_eval",
+            "tolerance_grad",
+            "tolerance_change",
+            "history_size",
+            "line_search",
+            "line_search_steps",
+        ],
+    )?;
+    let history_size = p.usize("history_size")?;
+    check_lbfgs_limit(history_size, "Lbfgs history_size")?;
+    let line_search = match as_str(p.get("line_search")?, "line_search")? {
+        "none" => LbfgsLineSearch::None,
+        "strong_wolfe" => LbfgsLineSearch::StrongWolfe,
+        other => {
+            return Err(ModelIoError::UnsupportedModel {
+                reason: format!("未対応の Lbfgs line_search {}", clip(other)),
+            });
+        }
+    };
+    let cfg = LbfgsConfig {
+        lr: p.f32("lr")?,
+        max_iter: p.usize("max_iter")?,
+        max_eval: p.opt_usize("max_eval")?,
+        tolerance_grad: p.f32("tolerance_grad")?,
+        tolerance_change: p.f32("tolerance_change")?,
+        history_size,
+        line_search,
+        line_search_steps: p.usize("line_search_steps")?,
+    };
+    Ok((Optimizer::Lbfgs(cfg), Some(history_len)))
+}
+
+/// `lbfgs` 以外の kind と config を読む（`kind` の allowlist）。
+fn parse_non_lbfgs(kind: &str, config: &Json) -> Result<Optimizer, ModelIoError> {
     match kind {
         "sgd" => {
             let p = Params::named(
                 CONFIG_CTX,
-                f[1],
+                config,
                 &["lr", "momentum", "dampening", "weight_decay", "nesterov"],
             )?;
             Ok(Optimizer::Sgd(SgdConfig {
@@ -226,7 +371,7 @@ fn parse_optimizer(value: &Json) -> Result<Optimizer, ModelIoError> {
             }))
         }
         "adamw" => {
-            let p = Params::named(CONFIG_CTX, f[1], &ADAM_LIKE_KEYS)?;
+            let p = Params::named(CONFIG_CTX, config, &ADAM_LIKE_KEYS)?;
             Ok(Optimizer::AdamW(AdamWConfig {
                 lr: p.f32("lr")?,
                 beta1: p.f32("beta1")?,
@@ -236,7 +381,7 @@ fn parse_optimizer(value: &Json) -> Result<Optimizer, ModelIoError> {
             }))
         }
         "adam" => {
-            let p = Params::named(CONFIG_CTX, f[1], &ADAM_LIKE_KEYS)?;
+            let p = Params::named(CONFIG_CTX, config, &ADAM_LIKE_KEYS)?;
             Ok(Optimizer::Adam(AdamConfig {
                 lr: p.f32("lr")?,
                 beta1: p.f32("beta1")?,
@@ -246,7 +391,7 @@ fn parse_optimizer(value: &Json) -> Result<Optimizer, ModelIoError> {
             }))
         }
         "lamb" => {
-            let p = Params::named(CONFIG_CTX, f[1], &ADAM_LIKE_KEYS)?;
+            let p = Params::named(CONFIG_CTX, config, &ADAM_LIKE_KEYS)?;
             Ok(Optimizer::Lamb(LambConfig {
                 lr: p.f32("lr")?,
                 beta1: p.f32("beta1")?,
@@ -258,7 +403,7 @@ fn parse_optimizer(value: &Json) -> Result<Optimizer, ModelIoError> {
         "rmsprop" => {
             let p = Params::named(
                 CONFIG_CTX,
-                f[1],
+                config,
                 &["lr", "alpha", "eps", "weight_decay", "momentum", "centered"],
             )?;
             Ok(Optimizer::RmsProp(RmsPropConfig {
@@ -273,7 +418,7 @@ fn parse_optimizer(value: &Json) -> Result<Optimizer, ModelIoError> {
         "adagrad" => {
             let p = Params::named(
                 CONFIG_CTX,
-                f[1],
+                config,
                 &[
                     "lr",
                     "lr_decay",
@@ -290,10 +435,6 @@ fn parse_optimizer(value: &Json) -> Result<Optimizer, ModelIoError> {
                 eps: p.f32("eps")?,
             }))
         }
-        // #2373 で Lbfgs の保存・復元を実装するまで、認識はするが拒否する（分岐点）。
-        "lbfgs" => Err(ModelIoError::UnsupportedModel {
-            reason: "optimizer kind lbfgs は未対応です（イシュー #2373）".into(),
-        }),
         other => Err(ModelIoError::UnsupportedModel {
             reason: format!("未対応の optimizer kind {}", clip(other)),
         }),
@@ -361,7 +502,7 @@ pub(super) fn parse_compiled(value: &Json) -> Result<Option<CompiledMeta>, Model
             });
         }
     };
-    let optimizer = parse_optimizer(f[1])?;
+    let (optimizer, lbfgs_history_len) = parse_optimizer(f[1])?;
     let mut state_keys: Vec<String> = Vec::new();
     for k in as_arr(f[2], "compiled.optimizer_state_keys")? {
         let key = as_str(k, "compiled.optimizer_state_keys[]")?;
@@ -378,11 +519,19 @@ pub(super) fn parse_compiled(value: &Json) -> Result<Option<CompiledMeta>, Model
         }
         state_keys.push(key.to_string());
     }
+    let amp = parse_amp(f[3])?;
+    if lbfgs_history_len.is_some() && amp.is_some() {
+        // `compile_with_amp` が禁じる組合せを manifest から作らせない。
+        return Err(ModelIoError::UnsupportedModel {
+            reason: "Lbfgs と AMP の併用は復元できません".into(),
+        });
+    }
     Ok(Some(CompiledMeta {
         loss,
         optimizer,
         state_keys,
-        amp: parse_amp(f[3])?,
+        amp,
+        lbfgs_history_len,
     }))
 }
 
@@ -404,6 +553,65 @@ pub(super) fn split_optimizer_tensors(
         }
     }
     (full_keys, state)
+}
+
+/// `history.<i>.s|y` の正規表記（`01`・`+1` は不可）を `(添字, s か)` に読む。autodiff の
+/// `parse_history_key` は private のため同じ規則を写す（非正規キーは autodiff が余剰キーとして拒否）。
+fn parse_history_key(key: &str) -> Option<(usize, bool)> {
+    let rest = key.strip_prefix("history.")?;
+    let (seg, part) = rest.rsplit_once('.')?;
+    let is_s = match part {
+        "s" => true,
+        "y" => false,
+        _ => return None,
+    };
+    let idx: usize = seg.parse().ok()?;
+    (idx.to_string() == seg).then_some((idx, is_s))
+}
+
+/// `Lbfgs` の履歴件数を、実際の safetensors キー（`history.{i}.s|y` の添字数）と照合する。
+/// `history_len` は照合にだけ使い、確保量の根拠にしない。上限超過は `TooLarge`、
+/// 件数の不一致（s と y の不揃いを含む）は `Mismatch`。`Lbfgs` 以外は何もしない。
+pub(super) fn check_lbfgs_history(
+    meta: &CompiledMeta,
+    state: &HashMap<String, Tensor<f32>>,
+) -> Result<(), ModelIoError> {
+    check_lbfgs_history_with_limit(meta, state, MAX_LBFGS_HISTORY)
+}
+
+fn check_lbfgs_history_with_limit(
+    meta: &CompiledMeta,
+    state: &HashMap<String, Tensor<f32>>,
+    limit: usize,
+) -> Result<(), ModelIoError> {
+    let Some(declared) = meta.lbfgs_history_len else {
+        return Ok(());
+    };
+    let mut s_idx = std::collections::HashSet::new();
+    let mut y_idx = std::collections::HashSet::new();
+    for key in state.keys() {
+        match parse_history_key(key) {
+            Some((i, true)) => {
+                s_idx.insert(i);
+            }
+            Some((i, false)) => {
+                y_idx.insert(i);
+            }
+            None => {}
+        }
+    }
+    let actual = s_idx.len().max(y_idx.len());
+    check_lbfgs_limit_with(actual, limit, "Lbfgs 履歴件数")?;
+    if s_idx.len() != y_idx.len() || actual != declared {
+        return Err(ModelIoError::Mismatch {
+            message: format!(
+                "Lbfgs の history_len {declared} が safetensors の履歴キー数（s: {}・y: {}）と一致しません",
+                s_idx.len(),
+                y_idx.len()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// `state.<i>.<buf>` の各バッファがモデルのパラメータ `i` と同 shape で、添字集合が空か
@@ -456,6 +664,7 @@ mod tests {
     use super::super::{Parser, prepare_save};
     use super::*;
     use crate::compat::{AmpConfig, FitConfig, Sequential};
+    use crate::optim::LbfgsConfig;
 
     fn parse(text: &str) -> Result<Option<CompiledMeta>, ModelIoError> {
         let root = Parser {
@@ -505,11 +714,33 @@ mod tests {
                 eps: 1e-6,
                 weight_decay: 0.01,
             }),
+            Optimizer::Lbfgs(LbfgsConfig {
+                lr: 0.1,
+                max_iter: 4,
+                max_eval: None,
+                tolerance_grad: 1e-7,
+                tolerance_change: 1e-9,
+                history_size: 3,
+                line_search: LbfgsLineSearch::None,
+                line_search_steps: 25,
+            }),
+            Optimizer::Lbfgs(LbfgsConfig {
+                lr: 0.5,
+                max_iter: 2,
+                max_eval: Some(7),
+                tolerance_grad: 1e-6,
+                tolerance_change: 1e-8,
+                history_size: MAX_LBFGS_HISTORY,
+                line_search: LbfgsLineSearch::StrongWolfe,
+                line_search_steps: 9,
+            }),
         ]
     }
 
     fn meta(optimizer: Optimizer, amp: Option<AmpSnapshot>) -> CompiledMeta {
+        let lbfgs_history_len = matches!(optimizer, Optimizer::Lbfgs(_)).then_some(3);
         CompiledMeta {
+            lbfgs_history_len,
             loss: Loss::CrossEntropy,
             optimizer,
             state_keys: vec![
@@ -538,6 +769,9 @@ mod tests {
     fn render_then_parse_round_trips_every_optimizer_and_amp() {
         for opt in all_optimizers() {
             for with_amp in [false, true] {
+                if with_amp && matches!(opt, Optimizer::Lbfgs(_)) {
+                    continue; // Lbfgs と AMP は併用不可（別テストで拒否を確認）
+                }
                 let m = meta(opt, with_amp.then(sample_amp));
                 let text = render_compiled(&m);
                 let parsed = parse(&text).expect("読めるはず").expect("object のはず");
@@ -576,7 +810,8 @@ mod tests {
             "\"optimizer_state_keys\":[1,"
         )));
         assert!(is_unsupported(&good.replace("cross_entropy", "x")));
-        assert!(is_unsupported(&good.replace("\"adamw\"", "\"lbfgs\"")));
+        // adamw の config のまま lbfgs にすると config のキー集合・history_len が合わず Manifest。
+        assert!(is_manifest(&good.replace("\"adamw\"", "\"lbfgs\"")));
         assert!(is_unsupported(&good.replace("\"adamw\"", "\"nadam\"")));
         // 重複キー
         let dup = good.replace(
@@ -648,14 +883,28 @@ mod tests {
     }
 
     #[test]
-    fn prepare_save_rejects_lbfgs_and_reports_too_large_for_huge_optimizer_state() {
+    fn prepare_save_accepts_lbfgs_and_reports_too_large_for_huge_optimizer_state() {
         use crate::optim::LbfgsConfig;
         let mut m = Sequential::new().add_linear(1, 1, 0).expect("構築");
         m.compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
             .expect("compile");
+        assert!(prepare_save(&m).is_ok());
+        // history_size が固定上限を 1 超えると保存できない（compile 自体は成功する）。
+        let mut over = Sequential::new().add_linear(1, 1, 0).expect("構築");
+        over.compile(
+            Optimizer::Lbfgs(LbfgsConfig {
+                history_size: MAX_LBFGS_HISTORY + 1,
+                ..LbfgsConfig::default()
+            }),
+            Loss::Mse,
+        )
+        .expect("compile");
         assert!(matches!(
-            prepare_save(&m),
-            Err(ModelIoError::UnsupportedModel { .. })
+            prepare_save(&over),
+            Err(ModelIoError::TooLarge {
+                what: "Lbfgs history_size",
+                limit: 65536
+            })
         ));
 
         // 3000 層 × (weight, bias) × AdamW の (m, v) = 12000 個の状態キーは配列長上限を超える
@@ -691,6 +940,184 @@ mod tests {
             prepare_save(&m),
             Err(ModelIoError::Mismatch { .. })
         ));
+    }
+
+    fn lbfgs_model(cfg: LbfgsConfig) -> Sequential {
+        let mut m = Sequential::new()
+            .add_linear(2, 2, 1)
+            .and_then(|m| m.add_relu().add_linear(2, 1, 1))
+            .expect("構築");
+        m.compile(Optimizer::Lbfgs(cfg), Loss::Mse)
+            .expect("compile");
+        m
+    }
+
+    fn fit_full_batch(m: &mut Sequential, epochs: usize) -> Vec<u32> {
+        let x = Tensor::new(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], &[3, 2]).expect("x");
+        let y = Tensor::new(vec![1.0, 0.0, 1.0], &[3, 1]).expect("y");
+        let h = m.fit(&x, &y, FitConfig::new(epochs, 3)).expect("fit");
+        h.loss.iter().map(|v| v.to_bits()).collect()
+    }
+
+    /// `StrongWolfe`（facade 未公開の variant）を含む Lbfgs が、snapshot → 描画 → パース →
+    /// 復元を通って、続く fit と bit 一致する。
+    #[test]
+    fn strong_wolfe_lbfgs_round_trips_through_snapshot_and_restore() {
+        let cfg = LbfgsConfig {
+            lr: 0.5,
+            max_iter: 3,
+            max_eval: Some(8),
+            history_size: 4,
+            line_search: LbfgsLineSearch::StrongWolfe,
+            ..LbfgsConfig::default()
+        };
+        let mut a = lbfgs_model(cfg);
+        fit_full_batch(&mut a, 2);
+        let snap = a.snapshot_compiled().expect("snapshot").expect("compiled");
+        assert!(snap.lbfgs_history_len.is_some());
+        let meta = CompiledMeta::from_snapshot(&snap).expect("meta");
+        let text = render_compiled(&meta);
+        assert!(text.contains("\"line_search\":\"strong_wolfe\""), "{text}");
+        let parsed = parse(&text).expect("parse").expect("some");
+        assert_eq!(parsed.optimizer, Optimizer::Lbfgs(cfg));
+        check_lbfgs_history(&parsed, &snap.optimizer_state).expect("履歴件数");
+
+        let mut b = Sequential::new()
+            .add_linear(2, 2, 9)
+            .and_then(|m| m.add_relu().add_linear(2, 1, 9))
+            .expect("構築");
+        b.load_state_dict(a.state_dict()).expect("params");
+        b.restore_compiled(parsed.into_snapshot(snap.optimizer_state))
+            .expect("restore");
+        assert_eq!(fit_full_batch(&mut a, 2), fit_full_batch(&mut b, 2));
+    }
+
+    /// `restore_compiled` の多層防御: 履歴件数の有無・AMP 併用の不整合は変更なしで拒否する。
+    #[test]
+    fn restore_compiled_rejects_inconsistent_lbfgs_snapshots() {
+        let mut a = lbfgs_model(LbfgsConfig::default());
+        fit_full_batch(&mut a, 1);
+        let mk = || a.snapshot_compiled().expect("snapshot").expect("compiled");
+        let mut target = lbfgs_model(LbfgsConfig::default());
+
+        let mut no_len = mk();
+        no_len.lbfgs_history_len = None;
+        assert!(target.restore_compiled(no_len).is_err());
+
+        let mut stray_len = mk();
+        stray_len.optimizer = Optimizer::Sgd(SgdConfig {
+            lr: 0.1,
+            momentum: 0.0,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+        });
+        assert!(target.restore_compiled(stray_len).is_err());
+
+        let mut with_amp = mk();
+        with_amp.amp = Some(sample_amp());
+        assert!(target.restore_compiled(with_amp).is_err());
+
+        // 失敗しても既存の compile 状態は変わらない（Lbfgs のまま）。
+        let after = target.snapshot_compiled().expect("snapshot").expect("some");
+        assert!(matches!(after.optimizer, Optimizer::Lbfgs(_)));
+    }
+
+    fn lbfgs_meta(history_len: usize) -> CompiledMeta {
+        let mut m = meta(all_optimizers()[6], None);
+        m.lbfgs_history_len = Some(history_len);
+        m
+    }
+
+    #[test]
+    fn parse_enforces_lbfgs_limits_and_shape() {
+        let good = render_compiled(&lbfgs_meta(3));
+        assert!(parse(&good).is_ok());
+        let tl = |t: String| matches!(parse(&t), Err(ModelIoError::TooLarge { limit: 65536, .. }));
+        let is_manifest = |t: &str| matches!(parse(t), Err(ModelIoError::Manifest { .. }));
+        // 境界: 65536 は受理・65537 は TooLarge（history_len・history_size とも）。
+        assert!(parse(&good.replace("\"history_len\":3", "\"history_len\":65536")).is_ok());
+        assert!(tl(
+            good.replace("\"history_len\":3", "\"history_len\":65537")
+        ));
+        assert!(tl(
+            good.replace("\"history_size\":3", "\"history_size\":65537")
+        ));
+        assert!(is_manifest(&good.replace(",\"history_len\":3", "")));
+        assert!(is_manifest(
+            &good.replace("\"history_len\":3", "\"history_len\":-1")
+        ));
+        assert!(is_manifest(
+            &good.replace("\"line_search\":\"none\"", "\"line_search\":1")
+        ));
+        assert!(matches!(
+            parse(&good.replace("\"none\"", "\"bogus\"")),
+            Err(ModelIoError::UnsupportedModel { .. })
+        ));
+        assert!(is_manifest(
+            &good.replace("\"max_eval\":null", "\"max_eval\":1.5")
+        ));
+        assert!(is_manifest(
+            &good.replace("\"max_eval\":null", "\"max_eval\":\"x\"")
+        ));
+        // 非 lbfgs に history_len を足すと未知キー。
+        let adamw = render_compiled(&meta(all_optimizers()[1], None));
+        assert!(is_manifest(
+            &adamw.replace("\"config\":", "\"history_len\":0,\"config\":")
+        ));
+        // Lbfgs と AMP の併用（manifest 経由の迂回）は拒否する。
+        let with_amp = good.replace(
+            "\"amp\":null",
+            "\"amp\":{\"dtype\":\"f16\",\"grad_scaler_config\":{\"init_scale\":1.0,\"growth_factor\":2.0,\"backoff_factor\":0.5,\"growth_interval\":3},\"scale\":1.0,\"growth_tracker\":0}",
+        );
+        assert!(matches!(
+            parse(&with_amp),
+            Err(ModelIoError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[test]
+    fn check_lbfgs_history_counts_canonical_keys_only() {
+        let t = || Tensor::new(vec![0.0], &[1]).expect("t");
+        let mut state = HashMap::new();
+        for i in 0..3 {
+            state.insert(format!("history.{i}.s"), t());
+            state.insert(format!("history.{i}.y"), t());
+        }
+        // 非正規表記・無関係なキーは数えない。
+        state.insert("history.01.s".into(), t());
+        state.insert("history.+1.y".into(), t());
+        state.insert("history.rho".into(), t());
+        assert!(check_lbfgs_history(&lbfgs_meta(3), &state).is_ok());
+        assert!(matches!(
+            check_lbfgs_history(&lbfgs_meta(2), &state),
+            Err(ModelIoError::Mismatch { .. })
+        ));
+        assert!(matches!(
+            check_lbfgs_history(&lbfgs_meta(4), &state),
+            Err(ModelIoError::Mismatch { .. })
+        ));
+        // s と y が不揃い。
+        state.remove("history.2.y");
+        assert!(matches!(
+            check_lbfgs_history(&lbfgs_meta(3), &state),
+            Err(ModelIoError::Mismatch { .. })
+        ));
+        // 上限: 境界ちょうどは受理・超過は TooLarge（限界値を差し替えて検証）。
+        let mut m = lbfgs_meta(3);
+        m.lbfgs_history_len = Some(2);
+        let mut two = HashMap::new();
+        for i in 0..2 {
+            two.insert(format!("history.{i}.s"), t());
+            two.insert(format!("history.{i}.y"), t());
+        }
+        assert!(check_lbfgs_history_with_limit(&m, &two, 2).is_ok());
+        assert!(matches!(
+            check_lbfgs_history_with_limit(&m, &two, 1),
+            Err(ModelIoError::TooLarge { .. })
+        ));
+        // Lbfgs 以外は何も見ない。
+        assert!(check_lbfgs_history(&meta(all_optimizers()[0], None), &two).is_ok());
     }
 
     #[test]

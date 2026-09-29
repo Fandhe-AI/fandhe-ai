@@ -203,40 +203,6 @@ fn unsupported_layer_is_rejected_without_touching_dir() {
 }
 
 #[cfg(unix)]
-#[test]
-fn compiled_lbfgs_model_is_rejected_without_touching_dir() {
-    use fandhe_ai::compat::{Loss, Optimizer};
-    use fandhe_ai::optim::LbfgsConfig;
-
-    let guard = TempDirGuard::new("compiled");
-    let mut model = build_mixed_model();
-    model
-        .compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
-        .expect("compile できるはず");
-
-    let fresh = guard.path().join("fresh");
-    let err =
-        save_model(&model, &fresh).expect_err("compile 済み Lbfgs は拒否されるはず（#2373 まで）");
-    assert!(
-        matches!(err, ModelIoError::UnsupportedModel { .. }),
-        "{err}"
-    );
-    assert!(!fresh.exists(), "存在しなかった dir は作られない");
-
-    let existing = guard.path().join("existing");
-    std::fs::create_dir(&existing).expect("作れるはず");
-    std::fs::write(existing.join("keep.txt"), b"x").expect("書けるはず");
-    let before = entries(&existing);
-    let err = save_model(&model, &existing)
-        .expect_err("compile 済み Lbfgs は拒否されるはず（#2373 まで）");
-    assert!(
-        matches!(err, ModelIoError::UnsupportedModel { .. }),
-        "{err}"
-    );
-    assert_eq!(entries(&existing), before, "既存 dir のエントリ集合は不変");
-}
-
-#[cfg(unix)]
 fn saved_dir(label: &str) -> (TempDirGuard, std::path::PathBuf) {
     let guard = TempDirGuard::new(label);
     let dir = guard.path().join("m");

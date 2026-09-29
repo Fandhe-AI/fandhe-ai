@@ -33,6 +33,17 @@
 > 上限定数の値は変えていない。**#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**
 > 契約は継続。
 
+> **更新記録（イシュー #2373・親 #2362。2026-09-29）**: `Optimizer::Lbfgs` の compile 状態を
+> `save_model`／`load_model` で保存・復元するようにした（#2372 の暫定 `UnsupportedModel` を撤去。
+> AMP との併用は `compile_with_amp` が拒否済みのため対象外で、manifest 経由の「Lbfgs＋AMP」も
+> 拒否する）。Lbfgs 履歴ペア数の固定上限を **`MAX_LBFGS_HISTORY = 65536`**
+> （`crates/facade/src/compat/model_io.rs`）として実装した。**値は 2026-09-29 にユーザー承認済み**
+> （親 #2362 のコメント
+> <https://github.com/Fandhe-AI/fandhe-ai/issues/2362#issuecomment-5888987015>。§2 item 4）で、
+> 今回新たな承認は不要。値の変更は再承認が必要。適用箇所は §2 item 4 の実装記録を参照。
+> **これで #2369〜#2373 がすべて実装され、本 PR のマージをもって crates.io リリース停止の契約は
+> 解除される。**
+
 ## 0. 結論（方式の確定）
 
 **facade 公開面の拡張は承認待ちのまま保留し、「設計判断記録＋保留ガード
@@ -196,12 +207,21 @@ version migration。
      #2362 コメント。`history_size` 自体・history エントリ総数のいずれも
      超過は型付きエラーで拒否）。`LbfgsConfig::history_size` は `>= 1` のみ
      検証済みで上限がないため、manifest の `history_len` を信じて確保しない
-     ことに加えて設ける DoS 対策の固定上限である。**本 PR（#2369）は `Lbfgs` の
-     読み書きを扱わない（最小構成は未 `compile` の `Linear` と活性化のみ）ため
-     定数は未実装。実装は後続 issue（`compile` 状態の保存・復元を扱う
-     #2372・#2373 の A 系）で、`Lbfgs` の状態を manifest／safetensors へ
-     書き読みする際に適用し境界テストを加える**。上限の根拠・使い方は §2 item 2
+     ことに加えて設ける DoS 対策の固定上限である。**#2369 の時点では `Lbfgs` の
+     読み書きを扱わないため定数は未実装だった。#2373 で実装済み**。上限の根拠・使い方は §2 item 2
      の是正済み記述を参照）。
+     **実装記録（#2373）**: 定数 `MAX_LBFGS_HISTORY: usize = 65536`。次のいずれかが上限を
+     超えたら `ModelIoError::TooLarge`（`what` は `"Lbfgs history_size"`／`"Lbfgs 履歴件数"`・
+     `limit: 65536`）で拒否し、**65536 ちょうどは受理**する。(1) `config.history_size`
+     （save・load の両方）、(2) manifest の `history_len`（load。配列・キーの照合より前に判定）、
+     (3) safetensors の実 `history.{i}.s|y` 添字数（load。`check_lbfgs_history`）。上限検査は
+     `model_io` の中だけで行い、`compile()`・`fit()` の挙動は変えない（`history_size > 65536` でも
+     compile・fit はでき、保存時に `TooLarge` になる）。**`MAX_ARRAY_LEN`（8192）との関係**:
+     `optimizer_state_keys` は Lbfgs では 2n + 8 個以下（n は履歴件数）で `MAX_ARRAY_LEN` に
+     数えられるため、n が約 4092 を超えるモデルは保存前の `verify_round_trip` が `TooLarge` で
+     拒否する（読めないファイルは作らない）。`MAX_ARRAY_LEN` は引き上げない（再承認が必要）。
+     65536 は `config.history_size`（保存可能な件数と無関係に任意に大きく設定できる）と、改竄された
+     `history_len` に対して実際に効く。
 5. **ファイル I/O のハードニング用内部 API**（facade 公開面は広がらない。
    PR #2317 review 再々確認・2026-09-27 第 2 回是正に伴う新設。全数棚卸しは
    §13）。
@@ -317,15 +337,24 @@ version migration。
   bool・`growth_interval`／`growth_tracker` は JSON 整数）。`optimizer_state_keys` は
   `[{key, shape}]` ではなく**キー文字列の昇順・重複なしの平坦な配列**にする（shape 配列を持たせると
   `MAX_JSON_DEPTH = 4` を超えるため。shape は信頼できる構造〈パラメータ shape〉から導出し、facade が
-  load 時に照合する）。`lbfgs` は認識するが #2373 までは保存・復元とも `UnsupportedModel`
-  （`compiled.rs` の `parse_optimizer`・`CompiledMeta::from_snapshot` の 2 か所が分岐点）。
+  load 時に照合する）。`lbfgs` は #2373 で保存・復元に対応した（AMP 併用は不可）。
+  **#2373 で確定した lbfgs の形**: `optimizer` object は `{"kind":"lbfgs","config":{…},
+  "history_len":N}`（`history_len` は lbfgs のときだけ持つ非負整数。他の 6 種に書かれていたら
+  `Manifest` で拒否、lbfgs で欠けていても `Manifest`）。`format_version` は 2 のまま
+  （Lbfgs はこれまで保存できず既存ファイルに存在しないため互換性は壊れない）。
+  `config` は `LbfgsConfig` の宣言順の 8 キー（`lr`・`max_iter`・`max_eval`・`tolerance_grad`・
+  `tolerance_change`・`history_size`・`line_search`・`line_search_steps`）。
+  `optimizer_state_keys` には `optimizer.` 接頭辞を付けた Lbfgs の状態キー
+  （`d`・`t`・`h_diag`・`n_iter`・`func_evals`・`history.{i}.s|y`・`history.rho` 等。
+  キー配置の正は `docs/autodiff-lbfgs-decision.md` §10）を並べる。
+  `parse_optimizer` は `kind` を先に読み、kind ごとのキー集合（lbfgs だけ `history_len` を加える）で
+  `exact_fields` を呼ぶ。
   `optimizer_state_keys` は配列長上限 `MAX_ARRAY_LEN` に数えられ、パラメータ数の多いモデルは
   `save_model` が書き込み前に `TooLarge` で拒否する（上限は変更しない）。
   `"lbfgs"` の `config` は `LbfgsConfig` の全フィールドを書く。うち
   `max_eval`（`Option<usize>`）は `null` またはその他は非負整数
-  （手書きパーサは JSON の `null` リテラルを明示的に扱う——本形式の他の
-  スカラーフィールドは今のところ `Option` を持たないため、`null`
-  受理はこのフィールド専用の分岐になる）、`line_search` は
+  （実装では #2370 で入った汎用の `Params::opt_usize`／`as_opt_usize` を再利用する。
+  このフィールド専用の分岐は作らない）、`line_search` は
   `"none"`／`"strong_wolfe"` の文字列 allowlist（facade は現状
   `LbfgsLineSearch` を再エクスポートしないため既定の `"none"` のみが
   生成されるが、パーサ自体は両方の値を受理できるようにする——将来の
@@ -451,6 +480,15 @@ version migration。
   （construct-before-assign。optimizer 構築・`load_state_dict`〈種別マーカー照合〉・
   `grad_scaler_from_state` がすべて成功してから代入）。途中失敗時は
   部分的に構築した `Sequential` を返さない。
+  **#2373 の Lbfgs 追加手順**: manifest のパース時に `history_size`・`history_len` を
+  `MAX_LBFGS_HISTORY` で挟む → キー集合の完全一致確認の後に、実際の `history.{i}.s|y` の
+  添字数（正規表記のみ）を数えて上限・`history_len` と照合（`check_lbfgs_history`。
+  超過は `TooLarge`・不一致は `Mismatch`）→ `restore_compiled` が `Lbfgs::load_state_dict`
+  （`slot_shapes` は `trainable_parameters()` から導出）で有限性・shape・到達可能性を検証。
+  **保存側の試験復元**: `check_slot_shapes` は `state.` 接頭辞のキーしか見ず Lbfgs では効かないため、
+  `prepare_save` が Lbfgs の snapshot を新しい `Lbfgs` へ試験復元し（`check_lbfgs_restorable`）、
+  fit 後の `add_*` によるパラメータ構成のずれや非有限の状態を保存前に `Mismatch` で拒否する
+  （書き出したものは必ず load できる契約の保持）。
 - **非復元のもの**: BN の `num_batches_tracked`（forward 計算に使われない
   カウンタのみで数値へ影響しない。load 後は 0 から再開する。§11）、Dropout の RNG 状態（グローバル
   RNG。インスタンスに保持されない）、LR scheduler・callbacks・param
@@ -1275,7 +1313,9 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 | `safetensors_bytes` | 非信頼 | safetensors 読み取り量の**確認**（確保量の決定には使わない） | `fstat` 実長を先に固定上限（`MAX_MODEL_FILE_BYTES`）と比較 → 通過後に非信頼値との**一致**のみ確認 → 一致後は `fstat` 実長（既に有界）を根拠に `take` する（§12.3 手順 4・§13.2 手順 4〜5） |
 | `compiled.optimizer.kind` | 非信頼 | 分岐（optimizer 種別の決定） | 7 種の文字列 allowlist との完全一致のみ許可。未知の値は `UnsupportedModel`（確保操作を伴わない） |
 | `compiled.optimizer.config`（各 optimizer 設定値） | 非信頼 | optimizer 構築のパラメータ | 既存 optimizer コンストラクタが行う範囲検証（`lr > 0` 等）をそのまま経由。新規の確保・破壊操作はない |
-| `optimizer.history_len`（Lbfgs） | 非信頼 | 履歴件数の**期待値**（実際の確保量の根拠にはしない） | safetensors 内に実在する `optimizer.history.{i}.*` キー数（safetensors 自体が固定上限で有界）と**一致**するかどうかの確認にのみ使う。`history_len` を信じて事前確保しない（§2 item 2 是正）。加えて `<= history_size` はどちらも非信頼または呼び出し元設定値のため単なる整合性確認であり上限の代用にはしない |
+| `optimizer.history_len`（Lbfgs） | 非信頼 | 履歴件数の**期待値**（実際の確保量の根拠にはしない） | safetensors 内に実在する `optimizer.history.{i}.*` キー数（safetensors 自体が固定上限で有界）と**一致**するかどうかの確認にのみ使う。`history_len` を信じて事前確保しない（§2 item 2 是正）。加えて `<= history_size` はどちらも非信頼または呼び出し元設定値のため単なる整合性確認であり上限の代用にはしない。**#2373 実装**: `history_len` と `config.history_size` は固定上限 `MAX_LBFGS_HISTORY`（65536）を配列・キー照合より前に判定し、実キー数との照合は `check_lbfgs_history` が行う |
+| `compiled.optimizer.config.history_size`（Lbfgs。#2373） | 非信頼 | 履歴の保持上限（`Lbfgs::new` の設定値） | `MAX_LBFGS_HISTORY`（65536）超過は `TooLarge`。65536 ちょうどは受理。`load_state_dict` が実履歴件数 `<= history_size` を検証する |
+| `compiled.optimizer.config.line_search`／`max_eval`（Lbfgs。#2373） | 非信頼 | 分岐・構築パラメータ | `line_search` は `"none"`／`"strong_wolfe"` の文字列 allowlist（未知は `UnsupportedModel`・文字列以外は `Manifest`）。`max_eval` は `null` か非負整数（既存 `as_opt_usize`）。`0` 等の範囲は `Lbfgs::new` が拒否 |
 | `amp.scale`（GradScaler 復元値） | 非信頼 | `grad_scaler_from_state` の引数 | 有限・正・非正規化数でないことを検証（§2 item 3）。確保・削除を伴わないスカラー値 |
 | `amp.growth_tracker`（GradScaler 復元値） | 非信頼 | `grad_scaler_from_state` の引数（カウンタ） | `< config.growth_interval` を検証（§2 item 3）。カウンタ 1 個の代入のみで確保・削除を伴わないため、非信頼値どうしの範囲チェックで十分（`growth_interval` 自体は `GradScalerConfig` 側で `>= 1` 検証済みの呼び出し元設定値） |
 | `d`／`t`／`h_diag`／`prev_flat_grad`／`old_dirs`／`old_stps`／`ro`（Lbfgs 状態テンソル） | 非信頼（safetensors 内容） | Lbfgs 内部状態への代入 | 各要素の有限性検証＋長さが `slot_shapes`（構築済みモデルから導出。§2 item 2）と一致することの確認のみ。confirmedな長さ以上には決して確保しない（safetensors 自体が固定上限で有界なため要素数の絶対上限も自動的に決まる） |
