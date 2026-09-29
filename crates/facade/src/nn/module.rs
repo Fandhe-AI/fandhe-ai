@@ -109,9 +109,10 @@ pub trait Module {
     /// [`Self::requires_grad`] はそのフラグを返すこと。凍結が失敗したときのロールバックは
     /// 複合層ごとに「自身へ `set_requires_grad(呼び出し前の自身の `requires_grad()`)` →
     /// 子を葉単位で再帰復元」の順に呼んで戻す（自身の呼び出しが子へ伝播した値は直後の子の
-    /// 復元で上書きされる）。ただし復元の前に子の参照先を照合し、不一致なら自身の呼び出しを
-    /// 省いて部分適用エラーにする（[`Self::children_mut`] 参照。差し替えの取り消しは不可）。
-    /// 差し替えが無ければ自身のフラグと各子の状態が共に呼び出し前へ戻る。
+    /// 復元で上書きされる）。ただし復元の前に子を照合キー（名前・型・アドレス・サイズ）で照合し、不一致なら自身の
+    /// 呼び出しを省いて部分適用エラーにする（[`Self::children_mut`] 参照。検出範囲は同 doc の
+    /// (b)〜(d) のとおりで、取り消しは不可）。不一致が無ければ自身のフラグと各子の状態が共に
+    /// 呼び出し前へ戻る。
     ///
     /// - 反映は次の `forward`（葉登録）から。登録済みの `Var` は変わらない。
     /// - [`Self::set_training`]／[`Self::training`] とは独立の軸（BatchNorm 系の統計は
@@ -193,6 +194,8 @@ pub trait Module {
 
     /// 実装型名（`std::any::type_name::<Self>()`）。出力形式は標準ライブラリが安定を
     /// 保証しないため表示用途に限る（autodiff `Module::type_name` の鏡写し。#2134・#2401）。
+    /// 例外として、凍結ロールバックが子の型の照合キーに使う（[`Self::children_mut`] の (b)。
+    /// 異なる型は区別できるが同じ型の別インスタンスは区別できない。偽る override は範囲外）。
     fn type_name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
@@ -202,27 +205,27 @@ pub trait Module {
     ///
     /// 用途: 凍結（[`Self::set_requires_grad`]）が失敗したとき、コンテナが子孫を**葉単位**
     /// （葉 = [`Self::children`] が空の層）で呼び出し前の状態へ戻すための可変アクセス。
-    /// 子を持つ利用者定義の複合層は `children` と対で必ず実装すること。件数・名前・順序が
-    /// `children` と食い違う（既定の空のまま `children` だけ実装した場合を含む）層を
-    /// 含む構成は、`ModuleList`／`Sequential`／`ModuleDict` の `set_requires_grad` が状態を
-    /// 変更する前に `InvalidArgument` で拒否する（fail-closed）。`children` と同じ子への参照を
-    /// 同じ順で返すこと（名前が同じでも別の子オブジェクトを返してはならない）。参照先の同一性
-    /// （データアドレス・サイズ）が食い違う場合も `set_requires_grad` は状態変更前に
-    /// `InvalidArgument` を返す。
+    /// 子を持つ利用者定義の複合層は `children` と対で必ず実装すること（`children` と同じ子への
+    /// 参照を同じ順・同じ名前で返し、名前が同じでも別の子オブジェクトを返してはならない）。
     ///
-    /// 復元時の契約（PR #2426 第 6・7 回レビュー P1 是正）:
-    /// - 復元は複合層ごとに、まず本メソッドの子の参照先（名前・データアドレス・サイズ・件数）を
-    ///   取得時の値と照合し、**不一致なら自身の [`Self::set_requires_grad`] は呼ばない**
-    ///   （自身の setter が差し替わった別の子へ伝播するのを避ける）。一致した位置の子だけを葉単位で
-    ///   戻し、差し替わった子・自身の未復元は部分適用エラー（`InvalidArgument`）に集約する。
-    /// - 全一致のときは自身へ `set_requires_grad` を呼んでから本メソッドを取り直して再照合する。
-    ///   **setter の実行中に差し替えが起きた場合、その伝播先は利用者実装の中で決まるためライブラリは
-    ///   防げない**。事後照合で検出して部分適用エラーとして報告するだけで、取り消しはできない
-    ///   （「差し替わった子には必ず復元値を適用しない」という無条件の保証ではない）。
-    /// - 取得時は葉（`children` が空）だった層が復元時に子を持っていれば、setter を呼ばず部分適用
-    ///   エラーにする。
-    /// - 利用者実装の契約: [`Self::children`]／本メソッドは [`Self::set_requires_grad`] の間、
+    /// 契約と検出範囲（PR #2426 第 6〜8 回レビュー P1 是正。ライブラリは `Module` 参照から真の
+    /// 同一性を得られないため、検出できる範囲を次のとおり定義する）:
+    /// - (a) 実装側の契約: [`Self::children`]／本メソッドは [`Self::set_requires_grad`] の間、
     ///   同じ子を返し続けること。
+    /// - (b) ライブラリは、件数・名前・型（[`Self::type_name`]）・データアドレス・サイズで検出
+    ///   できる契約違反を、`ModuleList`／`Sequential`／`ModuleDict` の `set_requires_grad` が
+    ///   状態を変更する前の `InvalidArgument`（事前検査。`children_mut` 未実装で `children` だけ
+    ///   実装した層を含む）、または復元時の部分適用エラー（`InvalidArgument`）として報告する。
+    ///   復元は複合層ごとに、まず本メソッドの子を取得時のキーと照合し、**不一致なら自身の
+    ///   [`Self::set_requires_grad`] は呼ばない**。一致した位置の子だけを葉単位で戻す。
+    /// - (c) 同じ型・同じ格納位置での値の置き換え（同じアドレスでの再確保を含む）は検出できず、
+    ///   ロールバックは位置（格納スロット）単位で、そのスロットを凍結前の値へ戻す。
+    /// - (d) 自身の setter の**実行中**の伝播先は利用者の実装の責任で、ライブラリは防げない
+    ///   （事後の再照合で検出できる範囲だけ部分適用エラーとして報告し、取り消しはしない）。
+    ///   `type_name` を偽って override する実装は信頼境界の外。
+    /// - 全一致のときは自身へ `set_requires_grad` を呼んでから本メソッドを取り直して再照合する。
+    ///   取得時は葉（`children` が空）だった層が復元時に子を持っていれば、setter を呼ばず部分適用
+    ///   エラーにする。
     ///
     /// 既定は空（葉モジュール向け）。
     fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
@@ -341,8 +344,9 @@ where
     /// facade 側の葉単位スナップショット（`nn::container::snapshot_requires_grad`。
     /// `children`／`children_mut` 経由）を `Opaque` に包んで返す。autodiff のコンテナが
     /// アダプタを単一の葉として集約値で保存すると、内側の複合層の混在状態が復元時に
-    /// 均一化されるため（PR #2426 P1）。`children`／`children_mut` が不整合な構成は
-    /// 状態変更前に `InvalidArgument` で拒否する。
+    /// 均一化されるため（PR #2426 P1）。件数・名前・型・アドレス・サイズで検出できる
+    /// `children`／`children_mut` の不整合は状態変更前に `InvalidArgument` で報告する
+    /// （検出範囲は [`Module::children_mut`] の (b)〜(d)）。
     fn requires_grad_snapshot(&mut self) -> Result<RequiresGradSnapshot, AutodiffError> {
         crate::nn::container::snapshot_requires_grad(&mut *self.0)
             .map(|snap| RequiresGradSnapshot::Opaque(Box::new(snap)))

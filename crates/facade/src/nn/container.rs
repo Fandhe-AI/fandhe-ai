@@ -16,10 +16,20 @@
 //! （パラメータを持つ子の `any`。該当なしは `true`）を autodiff 側と一致させる。
 //! ロールバックは子孫を葉（`children` が空の層）単位で復元する（公開の
 //! `Module::children`／`children_mut` 経由のため、利用者定義の複合層も対象。PR #2426
-//! レビュー指摘・2026-09-29 ユーザー承認）。`children` と `children_mut` が不整合（件数・名前・順序・参照先の不一致）な構成は
-//! 状態変更前に `InvalidArgument` で拒否する（fail-closed）。復元は自身の setter より前に
-//! 子の参照先を照合し、不一致なら setter を呼ばず部分適用エラーにする（setter 実行中の差し替えは
-//! 事後検出のみ。PR #2426 第 7 回レビュー P1）。
+//! レビュー指摘・2026-09-29 ユーザー承認）。
+//!
+//! 子の照合と検出範囲（PR #2426 第 7・8 回レビュー P1。`Module` 参照から真の同一性は利用者の
+//! 協力なしに得られないため、検出できる範囲を次のとおり定義する）:
+//! - (a) `children`／`children_mut` は `set_requires_grad` の間、同じ子を返し続けることが
+//!   実装側の契約である。
+//! - (b) ライブラリは、件数・名前・型（`Module::type_name`）・データアドレス・`size_of_val` で
+//!   検出できる契約違反を、状態変更前の `InvalidArgument`（事前検査）または復元時の部分適用
+//!   エラーとして報告する。復元は自身の setter より前に子を照合し、不一致なら setter を
+//!   呼ばず部分適用エラーにする。
+//! - (c) 同じ型・同じ格納位置での値の置き換え（同じアドレスでの再確保を含む）は検出できず、
+//!   ロールバックは位置（格納スロット）単位で、そのスロットを凍結前の値へ戻す。
+//! - (d) setter の実行中の伝播先は利用者の実装の責任で、ライブラリは防げない（事後照合で
+//!   検出できる範囲のみ報告する）。`type_name` を偽って override する実装は信頼境界の外。
 //!
 //! autodiff 側との差: 子は facade `Module` の不透明な trait object のため、
 //! `Sequential::forward` は autodiff 側の Linear→ReLU 融合を行わず子を順に適用するだけである。
@@ -45,31 +55,34 @@ pub(crate) enum RequiresGradSnapshot {
     Leaf(bool),
     Nested {
         own: bool,
-        /// 取得時点の子の同一性キー（名前・データアドレス・サイズ）と葉単位スナップショット。
-        /// 復元時は自身の setter より前に照合し、差し替わった子へは復元せず（不一致なら自身の
-        /// setter も呼ばない）部分適用エラーにする（PR #2426 第 6・7 回レビュー P1）。
+        /// 取得時点の子の照合キー（名前・型・データアドレス・サイズ）と葉単位スナップショット。
+        /// 復元時は自身の setter より前に照合し、キーで検出できる不一致の位置へは復元せず
+        /// （不一致なら自身の setter も呼ばない）部分適用エラーにする。同じ型・同じ位置の
+        /// 置き換えは検出できず位置単位で復元する（PR #2426 第 6〜8 回レビュー P1）。
         children: Vec<(ChildIdentity, RequiresGradSnapshot)>,
     },
 }
 
-/// `children` が返す 1 つの子の同一性キー（名前・データアドレス・サイズ）。
-/// `children_mut` 側の同位置の子と比べ、同じ子を指すことを確かめるのに使う。
-type ChildIdentity = (String, *const (), usize);
+/// `children` が返す 1 つの子の照合キー（名前・`Module::type_name`・データアドレス・サイズ）。
+/// `children_mut` 側の同位置の子と比べ、検出可能な範囲の食い違いを見つけるのに使う。真の
+/// 同一性ではない（同じ型・同じ位置の置き換えは区別できない）。
+type ChildIdentity = (String, &'static str, *const (), usize);
 
 /// `module` の凍結状態を葉単位で記録する。状態は変更しない。辿った各ノードで
-/// [`Module::children`] と [`Module::children_mut`] の件数・名前・順序・参照先（同一の子）が
-/// 食い違う場合は `InvalidArgument`（`children_mut` 未実装の複合層・別の子を返す実装など。
-/// 呼び出し側が状態変更前に呼ぶことで fail-closed の事前検査を兼ねる）。
+/// [`Module::children`] と [`Module::children_mut`] の件数・名前・順序・照合キー（型・
+/// アドレス・サイズ）が食い違う場合は `InvalidArgument`（`children_mut` 未実装の複合層・別の子を返す実装など。
+/// 呼び出し側が状態変更前に呼ぶことで、キーで検出できる契約違反の事前検査を兼ねる）。
 pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(
     module: &mut M,
 ) -> Result<RequiresGradSnapshot, AutodiffError> {
-    // 共有借用の参照は `children_mut` を呼ぶ前にここで drop し、同一性キーだけ持ち越す。
+    // 共有借用の参照は `children_mut` を呼ぶ前にここで drop し、照合キーだけ持ち越す。
     let identities: Vec<ChildIdentity> = module
         .children()
         .into_iter()
         .map(|(n, c)| {
             (
                 n,
+                c.type_name(),
                 c as *const dyn Module as *const (),
                 std::mem::size_of_val(c),
             )
@@ -95,9 +108,9 @@ pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(
     }
 }
 
-/// `children` の同一性キー列と `children_mut` の結果が位置ごとに一致することを検査する
-/// （名前に加え、データアドレスと `size_of_val` が同じ = 同一の子を指すこと。不一致は
-/// `InvalidArgument`）。vtable 比較は codegen unit をまたぐと値がずれ偽陰性になりうるため
+/// `children` の照合キー列と `children_mut` の結果が位置ごとに一致することを検査する
+/// （名前・`type_name`・データアドレス・`size_of_val` が同じ。不一致は `InvalidArgument`）。
+/// 一致は「同じ子」の証明ではない（同じ型・同じ位置の置き換えは検出できない）。vtable 比較は codegen unit をまたぐと値がずれ偽陰性になりうるため
 /// 行わない。サイズも比べるのは、ZST が後続フィールドとアドレスを共有しうるため
 /// （サイズまで同じ ZST 同士は状態を持たず区別不要）。
 fn check_children_consistent(
@@ -109,8 +122,9 @@ fn check_children_consistent(
         && expected
             .iter()
             .zip(children_mut)
-            .all(|((n, addr, size), (m, c))| {
+            .all(|((n, ty, addr, size), (m, c))| {
                 n == m
+                    && *ty == c.type_name()
                     && *addr == (&**c as *const dyn Module as *const ())
                     && *size == std::mem::size_of_val(&**c)
             });
@@ -118,21 +132,28 @@ fn check_children_consistent(
         Ok(())
     } else {
         Err(AutodiffError::InvalidArgument(format!(
-            "set_requires_grad: `{type_name}` exposes children {:?} via `children` but {:?} \
-             via `children_mut` (or refers to different child objects); implement \
-             `children_mut` consistently with `children` (same count, names, order and the \
-             identical child references) so that freezing can be rolled back per leaf",
-            expected.iter().map(|(n, _, _)| n).collect::<Vec<_>>(),
-            children_mut.iter().map(|(n, _)| n).collect::<Vec<_>>()
+            "set_requires_grad: `{type_name}` exposes children {:?} (types {:?}) via `children` \
+             but {:?} (types {:?}) via `children_mut` (a count, name, type, address or size \
+             mismatch); implement `children_mut` consistently with `children` (same count, \
+             names, order, types and child references) so that freezing can be rolled back \
+             per leaf",
+            expected.iter().map(|(n, _, _, _)| n).collect::<Vec<_>>(),
+            expected.iter().map(|(_, t, _, _)| t).collect::<Vec<_>>(),
+            children_mut.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            children_mut
+                .iter()
+                .map(|(_, c)| c.type_name())
+                .collect::<Vec<_>>()
         )))
     }
 }
 
-/// 位置 `i` の子が取得時の同一性キー `expected` と一致するか（名前・データアドレス・
-/// `size_of_val`）。
+/// 位置 `i` の子が取得時の照合キー `expected` と一致するか（名前・`type_name`・
+/// データアドレス・`size_of_val`）。同じ型・同じ位置の置き換えは一致とみなす（位置単位の復元）。
 fn child_matches(expected: &ChildIdentity, name: &str, child: &dyn Module) -> bool {
-    let (exp_name, exp_addr, exp_size) = expected;
+    let (exp_name, exp_type, exp_addr, exp_size) = expected;
     exp_name == name
+        && *exp_type == child.type_name()
         && *exp_addr == (child as *const dyn Module as *const ())
         && *exp_size == std::mem::size_of_val(child)
 }
@@ -145,20 +166,24 @@ fn child_matches(expected: &ChildIdentity, name: &str, child: &dyn Module) -> bo
 /// 明示した `InvalidArgument` を返す（PR #2426 第 7 回レビュー P1）。
 ///
 /// 入れ子は次の順で復元する（同第 7 回 P1 是正）。
-/// 1. **setter より前に照合する**: `children_mut` の結果を取得時の同一性キー（名前・
+/// 1. **setter より前に照合する**: `children_mut` の結果を取得時の照合キー（名前・型・
 ///    アドレス・`size_of_val`）と件数を含めて照合し、照合用の参照は照合後に drop する。
 ///    1 つでも不一致なら自身への `set_requires_grad(own)` は**呼ばない**（自身の setter が
-///    差し替わった別の子へ伝播して書き換えるのを避ける）。
+///    キーの食い違う別の子へ伝播して書き換えるのを避ける）。
 /// 2. 全一致のときだけ自身へ `set_requires_grad(own)` を呼び、その後 `children_mut` を
-///    取り直して再照合しつつ、一致した位置の子を個別に再帰復元する。不一致の位置の子には
-///    復元値を適用しない。
-/// 3. 自身の未復元・差し替わった子の未復元・各失敗は集約し、部分適用を明示した
+///    取り直して再照合しつつ、一致した位置の子を個別に再帰復元する。キーが食い違う位置の子
+///    には復元値を適用しない。
+/// 3. 自身の未復元・キーが食い違う子の未復元・各失敗は集約し、部分適用を明示した
 ///    `InvalidArgument` を返す。`Ok` は偽装しない。
 ///
-/// 限界: 自身の setter の**実行中**に差し替えが起き、その伝播先が別の子だった場合、伝播は
-/// 利用者コードの中で決まるためライブラリは防げない。事後照合（手順 2）で検出して部分適用
-/// エラーとして報告するだけで、取り消しはできない。`children`／`children_mut` は
-/// `set_requires_grad` の間、同じ子を返し続けることが利用者実装の契約である。
+/// 検出範囲と限界（第 8 回 P1 で意味論として定義）:
+/// - キーで検出できるのは件数・名前・型・アドレス・サイズの食い違いだけ。**同じ型・同じ
+///   格納位置での値の置き換え（同じアドレスでの再確保を含む）は検出できず、位置単位で復元
+///   する**（そのスロットを凍結前の値へ戻す。正当な意味論）。
+/// - 自身の setter の**実行中**の伝播先は利用者の実装の責任で、ライブラリは防げない。事後
+///   照合（手順 2）で検出できる範囲だけ部分適用エラーとして報告する。
+/// - `children`／`children_mut` は `set_requires_grad` の間、同じ子を返し続けることが実装側の
+///   契約で、`type_name` を偽って override する実装は信頼境界の外。
 pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
     module: &mut M,
     snapshot: &RequiresGradSnapshot,
@@ -196,9 +221,9 @@ pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
                 }
             } else {
                 failures.push(
-                    "self (not restored: child references changed before restore, and \
-                     `set_requires_grad` was skipped so it cannot propagate to a different \
-                     child)"
+                    "self (not restored: the children no longer match the snapshot in count, \
+                     name, type, address or size, so `set_requires_grad` was skipped to avoid \
+                     propagating to a different child)"
                         .to_string(),
                 );
             }
@@ -218,9 +243,12 @@ pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
                 };
                 if !child_matches(exp, &name, &*child) {
                     failures.push(format!(
-                        "child `{}` (its reference changed during freezing, so it was not \
+                        "child `{}` (its name, type, address or size no longer matches the \
+                         snapshot [expected type `{}`, found `{}` at `{name}`], so it was not \
                          restored)",
-                        exp.0
+                        exp.0,
+                        exp.1,
+                        child.type_name()
                     ));
                     continue;
                 }
@@ -1677,11 +1705,11 @@ mod tests {
             own: true,
             children: vec![
                 (
-                    ("0".to_string(), std::ptr::null(), 0),
+                    ("0".to_string(), "", std::ptr::null(), 0),
                     RequiresGradSnapshot::Leaf(true),
                 ),
                 (
-                    ("1".to_string(), std::ptr::null(), 0),
+                    ("1".to_string(), "", std::ptr::null(), 0),
                     RequiresGradSnapshot::Leaf(true),
                 ),
             ],

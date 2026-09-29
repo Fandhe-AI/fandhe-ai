@@ -811,3 +811,236 @@ fn restore_does_not_call_setter_on_leaf_that_grew_children() {
         "未知の子 extra は復元値で書き換えられない"
     );
 }
+
+/// 同じサイズ・同じレイアウトで型だけが異なる利用者定義の葉（`N` で型を分ける。PR #2426 第 8 回
+/// レビュー P1）。`rg` を外部と共有し、どちらの実体へ復元値が書かれたかを観測する。
+struct Tagged<const N: u8> {
+    p: Tensor<f32>,
+    rg: Arc<AtomicBool>,
+}
+
+impl<const N: u8> Tagged<N> {
+    fn new(rg: &Arc<AtomicBool>) -> Self {
+        Self {
+            p: Tensor::from_slice(&[1.0f32, 2.0], &[2]).expect("p"),
+            rg: Arc::clone(rg),
+        }
+    }
+}
+
+impl<const N: u8> Module for Tagged<N> {
+    fn forward<'t>(&self, _tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(*input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        vec![("p".into(), &self.p)]
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.rg.store(v, Ordering::SeqCst);
+        Ok(())
+    }
+    fn requires_grad(&self) -> bool {
+        self.rg.load(Ordering::SeqCst)
+    }
+}
+
+type KindA = Tagged<0>;
+type KindB = Tagged<1>;
+
+/// 同じサイズの 2 型を同じ格納位置（enum のペイロード）に取りうる格納スロット。
+enum Slot {
+    A(KindA),
+    B(KindB),
+}
+
+impl Slot {
+    fn as_module(&self) -> &dyn Module {
+        match self {
+            Slot::A(x) => x,
+            Slot::B(x) => x,
+        }
+    }
+    fn as_module_mut(&mut self) -> &mut dyn Module {
+        match self {
+            Slot::A(x) => x,
+            Slot::B(x) => x,
+        }
+    }
+}
+
+/// スロット `slot` を子 `"slot"` として公開する複合層。`mode` で置き換え時機を選ぶ。
+/// - `SwapOnMut`: `children_mut` を呼ぶと `slot` を `replacement` へ入れ替える（事前検査の経路。
+///   `children` は入れ替え前の型を返す）。
+/// - `SwapOnFreeze`: `set_requires_grad(false)` が `slot` を `replacement` へ入れ替えて
+///   伝播する（復元時の経路。`true` は現スロットへ伝播する）。
+#[derive(Clone, Copy, PartialEq)]
+enum SwapMode {
+    SwapOnMut,
+    SwapOnFreeze,
+}
+
+struct SlotComposite {
+    slot: Slot,
+    replacement: Option<Slot>,
+    mode: SwapMode,
+    setter_calls: Arc<AtomicUsize>,
+}
+
+impl Module for SlotComposite {
+    fn forward<'t>(&self, _tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(*input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.slot.as_module().named_parameters()
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.setter_calls.fetch_add(1, Ordering::SeqCst);
+        if self.mode == SwapMode::SwapOnFreeze
+            && !v
+            && let Some(r) = self.replacement.take()
+        {
+            self.slot = r;
+        }
+        self.slot.as_module_mut().set_requires_grad(v)
+    }
+    fn requires_grad(&self) -> bool {
+        self.slot.as_module().requires_grad()
+    }
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![("slot".into(), self.slot.as_module())]
+    }
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        if self.mode == SwapMode::SwapOnMut
+            && let Some(r) = self.replacement.take()
+        {
+            self.slot = r;
+        }
+        vec![("slot".into(), self.slot.as_module_mut())]
+    }
+}
+
+fn slot_composite(
+    slot: Slot,
+    replacement: Slot,
+    mode: SwapMode,
+    setter_calls: &Arc<AtomicUsize>,
+) -> SlotComposite {
+    SlotComposite {
+        slot,
+        replacement: Some(replacement),
+        mode,
+        setter_calls: Arc::clone(setter_calls),
+    }
+}
+
+/// テストの前提: 2 型は同じサイズで、`Slot` の中の同じ位置（同じアドレス）に置かれる。
+/// これが崩れると以下のテストは型照合の検証にならないため、先に固定する。
+#[test]
+fn slot_variants_share_size_and_address() {
+    let rg = Arc::new(AtomicBool::new(true));
+    assert_eq!(std::mem::size_of::<KindA>(), std::mem::size_of::<KindB>());
+    let mut slot = Slot::A(KindA::new(&rg));
+    let addr_a = slot.as_module() as *const dyn Module as *const ();
+    let size_a = std::mem::size_of_val(slot.as_module());
+    let name_a = slot.as_module().type_name();
+    slot = Slot::B(KindB::new(&rg));
+    let addr_b = slot.as_module() as *const dyn Module as *const ();
+    assert_eq!(addr_a, addr_b, "同じ格納位置");
+    assert_eq!(size_a, std::mem::size_of_val(slot.as_module()));
+    assert_ne!(name_a, slot.as_module().type_name(), "型名は異なる");
+}
+
+/// 事前検査の経路: `children` と `children_mut` の間で同じサイズ・同じ位置の別型へ入れ替わる
+/// 構成は、型の不一致として状態変更前に `InvalidArgument` で拒否される（setter は呼ばれない）。
+#[test]
+fn same_size_different_type_swap_is_rejected_by_precheck() {
+    let a_rg = Arc::new(AtomicBool::new(true));
+    let b_rg = Arc::new(AtomicBool::new(true));
+    let setter_calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(slot_composite(
+        Slot::A(KindA::new(&a_rg)),
+        Slot::B(KindB::new(&b_rg)),
+        SwapMode::SwapOnMut,
+        &setter_calls,
+    )));
+
+    let e = list.freeze().expect_err("型の不一致は事前検査で拒否");
+    let msg = e.to_string();
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{msg}");
+    assert!(msg.contains("type"), "型の不一致が分かる文言: {msg}");
+    assert!(
+        msg.contains("Tagged<0>") && msg.contains("Tagged<1>"),
+        "{msg}"
+    );
+    assert_eq!(setter_calls.load(Ordering::SeqCst), 0, "状態変更前に拒否");
+    assert!(a_rg.load(Ordering::SeqCst) && b_rg.load(Ordering::SeqCst));
+}
+
+/// 復元時の経路: 凍結の本処理で同じサイズ・同じ位置の別型（`KindA` → `KindB`）へ入れ替わると、
+/// 復元は型の不一致として検出し、自身の setter を呼ばず、新しい子 `KindB` へ凍結前の値
+/// （`true`）を適用しない。
+#[test]
+fn same_size_different_type_swap_is_detected_on_restore() {
+    let a_rg = Arc::new(AtomicBool::new(true));
+    let b_rg = Arc::new(AtomicBool::new(false));
+    let setter_calls = counter();
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(slot_composite(
+        Slot::A(KindA::new(&a_rg)),
+        Slot::B(KindB::new(&b_rg)),
+        SwapMode::SwapOnFreeze,
+        &setter_calls,
+    )));
+    list.push(Box::new(Leaf::failing(&calls)));
+
+    let e = list.freeze().expect_err("後続子が失敗し復元も不完全");
+    let msg = e.to_string();
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{msg}");
+    assert!(msg.contains("partially applied"), "部分適用の明示: {msg}");
+    assert!(msg.contains("leaf failed"), "元エラーも含む: {msg}");
+    assert!(
+        msg.contains("type") && msg.contains("Tagged<0>") && msg.contains("Tagged<1>"),
+        "型の不一致が分かる文言: {msg}"
+    );
+    assert_eq!(
+        setter_calls.load(Ordering::SeqCst),
+        1,
+        "自身の setter は凍結の本処理の 1 回だけ（復元では呼ばれない）"
+    );
+    assert!(
+        !b_rg.load(Ordering::SeqCst),
+        "別型の新しい子へ凍結前の値 true を適用しない"
+    );
+}
+
+/// 意味論の固定: 同じ型・同じ格納位置での置き換え（`KindA` → 別インスタンスの `KindA`）は
+/// 検出できず、ロールバックは位置単位で、そのスロットの新しい値を凍結前のフラグ（`true`）へ戻す。
+#[test]
+fn same_type_same_slot_replacement_is_restored_by_position() {
+    let old_rg = Arc::new(AtomicBool::new(true));
+    let new_rg = Arc::new(AtomicBool::new(true));
+    let setter_calls = counter();
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(slot_composite(
+        Slot::A(KindA::new(&old_rg)),
+        Slot::A(KindA::new(&new_rg)),
+        SwapMode::SwapOnFreeze,
+        &setter_calls,
+    )));
+    list.push(Box::new(Leaf::failing(&calls)));
+
+    let e = list.freeze().expect_err("後続子の失敗");
+    let msg = e.to_string();
+    assert!(msg.contains("leaf failed"), "{msg}");
+    assert!(
+        !msg.contains("partially applied"),
+        "同型・同位置は検出されず位置単位で復元が成功する: {msg}"
+    );
+    assert!(
+        new_rg.load(Ordering::SeqCst),
+        "位置（スロット）単位: 新しい値が凍結前のフラグ true へ戻る"
+    );
+}
