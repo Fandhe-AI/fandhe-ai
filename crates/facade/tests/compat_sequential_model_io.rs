@@ -2,7 +2,8 @@
 //! 統合テスト。facade の公開 API と `std` のみで、受入基準（bit 一致の往復・世代コミット・
 //! 未対応モデルの fail-closed・非信頼入力の拒否）を検証する。
 //!
-//! 網羅的な衝突注入・TOCTOU・改竄行列は #2375・#2376 で扱う（本ファイルは基本ケースと、
+//! 改竄行列は `compat_sequential_model_io_tamper.rs`（#2375）、衝突注入・TOCTOU は
+//! `compat_sequential_model_io_fs_threats.rs`（#2376）が担う（本ファイルは基本ケースと、
 //! #2374 の正常系 bit 一致行列）。
 //!
 //! `mod roundtrip_matrix`（#2374）は `docs/compat-model-io-decision.md` §6 の正常系を
