@@ -1107,27 +1107,25 @@ mod tests {
     #[test]
     fn run_probe_once_returns_probe_timeout_when_process_hangs_without_output() {
         with_fork_serialized(|| {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let script_path = std::env::temp_dir().join(format!(
-                "rust-ai-library-startup-timeout-test-{}-{nanos}.sh",
-                std::process::id()
-            ));
+            let dir = crate::test_temp_dir::UnitTestDir::new("startup-timeout");
+            let script_path = dir.path().join("probe.sh");
             // 引数（バックエンド名）を一切参照せず、無出力のまま長時間生存し続ける probe を
             // 模擬する（`run_probe_once` は probe に対し `config.backend.as_str()` を
             // 単一引数として渡すが、本スクリプトはそれを無視する）。
-            std::fs::write(&script_path, "#!/bin/sh\nsleep 300\n")
-                .expect("テスト用スクリプトの書き込みに失敗");
+            // 排他作成した専用ディレクトリ配下へ `create_new` で作り、第三者が事前に置いた
+            // 同名ファイルを実行しない。実行権限は作成時の mode で付与する。書き込み用 fd は
+            // ブロックを抜けて閉じてから spawn する（ETXTBSY 回避。`with_fork_serialized` 参照）。
             {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&script_path)
-                    .expect("テスト用スクリプトの metadata 取得に失敗")
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&script_path, perms)
-                    .expect("テスト用スクリプトへの実行権限付与に失敗");
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o755)
+                    .open(&script_path)
+                    .expect("テスト用スクリプトの排他作成に失敗");
+                f.write_all("#!/bin/sh\nsleep 300\n".as_bytes())
+                    .expect("テスト用スクリプトの書き込みに失敗");
             }
 
             let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
@@ -1135,8 +1133,6 @@ mod tests {
             let result =
                 run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
             let elapsed = started.elapsed();
-
-            let _ = std::fs::remove_file(&script_path);
 
             assert!(
                 matches!(result, Err(StartupError::ProbeTimeout(_))),
@@ -1160,31 +1156,28 @@ mod tests {
     #[test]
     fn run_probe_once_returns_probe_timeout_when_process_hangs_after_closing_streams() {
         with_fork_serialized(|| {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let script_path = std::env::temp_dir().join(format!(
-                "rust-ai-library-startup-timeout-close-streams-test-{}-{nanos}.sh",
-                std::process::id()
-            ));
+            let dir = crate::test_temp_dir::UnitTestDir::new("startup-timeout-close-streams");
+            let script_path = dir.path().join("probe.sh");
             // stdout/stderr へ何か出力した後、明示的に両 fd をクローズしてから長時間
             // 生存し続ける（`sleep`）。読み取りスレッドは EOF を受け取りループを
             // 正常に抜けるが、プロセス自体は `PROBE_TIMEOUT` 相当の期限を過ぎても
             // 終了しない状態を再現する。
-            std::fs::write(
-                &script_path,
-                "#!/bin/sh\necho ok\necho err 1>&2\nexec 1>&- 2>&-\nsleep 300\n",
-            )
-            .expect("テスト用スクリプトの書き込みに失敗");
+            // 排他作成した専用ディレクトリ配下へ `create_new` で作り、第三者が事前に置いた
+            // 同名ファイルを実行しない。実行権限は作成時の mode で付与する。書き込み用 fd は
+            // ブロックを抜けて閉じてから spawn する（ETXTBSY 回避。`with_fork_serialized` 参照）。
             {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&script_path)
-                    .expect("テスト用スクリプトの metadata 取得に失敗")
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&script_path, perms)
-                    .expect("テスト用スクリプトへの実行権限付与に失敗");
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o755)
+                    .open(&script_path)
+                    .expect("テスト用スクリプトの排他作成に失敗");
+                f.write_all(
+                    "#!/bin/sh\necho ok\necho err 1>&2\nexec 1>&- 2>&-\nsleep 300\n".as_bytes(),
+                )
+                .expect("テスト用スクリプトの書き込みに失敗");
             }
 
             let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
@@ -1192,8 +1185,6 @@ mod tests {
             let result =
                 run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
             let elapsed = started.elapsed();
-
-            let _ = std::fs::remove_file(&script_path);
 
             assert!(
                 matches!(result, Err(StartupError::ProbeTimeout(_))),
