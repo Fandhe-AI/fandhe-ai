@@ -314,3 +314,133 @@ fn builtin_containers_children_mut_matches_children() {
     let dm: Vec<String> = dict.children_mut().into_iter().map(|(n, _)| n).collect();
     assert_eq!(dn, dm);
 }
+
+/// 自身の `requires_grad` フラグを持ち、`forward` でそのフラグにより自身のパラメータ葉の
+/// 登録（`tape.var`／`tape.var_no_grad`）を切り替える利用者定義複合層（PR #2426 第 4 の P1）。
+/// 子 `a`・`b` は `children`／`children_mut` で公開する。`set_requires_grad` は自身のフラグを
+/// 更新してから子へ伝播するため、後続子の失敗時に自身だけ更新済みの状態が残りうる。
+struct SelfFlagComposite {
+    p: Tensor<f32>,
+    own: bool,
+    a: Box<dyn Module>,
+    b: Box<dyn Module>,
+}
+
+impl SelfFlagComposite {
+    fn new(own: bool, a: Box<dyn Module>, b: Box<dyn Module>) -> Self {
+        Self {
+            p: Tensor::from_slice(&[1.0f32, 2.0], &[2]).expect("p"),
+            own,
+            a,
+            b,
+        }
+    }
+}
+
+impl Module for SelfFlagComposite {
+    fn forward<'t>(&self, tape: TapeRef<'t>, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(if self.own {
+            tape.var(&self.p)
+        } else {
+            tape.var_no_grad(&self.p)
+        })
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("p".to_string(), &self.p)];
+        for (prefix, child) in [("a", &self.a), ("b", &self.b)] {
+            for (n, t) in child.named_parameters() {
+                out.push((format!("{prefix}.{n}"), t));
+            }
+        }
+        out
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.own = v;
+        self.a.set_requires_grad(v)?;
+        self.b.set_requires_grad(v)
+    }
+    fn requires_grad(&self) -> bool {
+        self.own
+    }
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![("a".into(), self.a.as_ref()), ("b".into(), self.b.as_ref())]
+    }
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        vec![("a".into(), self.a.as_mut()), ("b".into(), self.b.as_mut())]
+    }
+}
+
+/// `m.forward` が登録する葉が勾配追跡されているか（`Gradients::get` が `Ok(Some(_))` か）。
+fn forward_leaf_is_tracked(m: &dyn Module) -> bool {
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&Tensor::from_slice(&[0.0f32, 0.0], &[2]).expect("x"));
+    let out = m.forward(TapeRef::from(&tape), &x).expect("forward");
+    let loss = out.sum(None).expect("sum");
+    let grads = tape.backward(&loss).expect("backward");
+    matches!(grads.get(&out), Ok(Some(_)))
+}
+
+/// 自身のフラグ `own`・混在子（凍結済み `a`・追跡中 `b`）の複合層を作る。
+fn self_flag(calls: &Arc<AtomicUsize>) -> SelfFlagComposite {
+    SelfFlagComposite::new(
+        true,
+        Box::new(Leaf::new(false, calls)),
+        Box::new(Leaf::new(true, calls)),
+    )
+}
+
+/// `ModuleList` に自身のフラグを持つ複合層と失敗する後続子を積み、`freeze` 失敗後に (1) 自身の
+/// `requires_grad()`、(2) 全葉の状態、(3) forward で登録される葉の追跡有無が呼び出し前と一致する。
+#[test]
+fn module_list_restores_composite_own_flag_leaves_and_forward_tracking() {
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(self_flag(&calls)));
+    list.push(Box::new(Leaf::failing(&calls)));
+    let own_before = list.get(0).expect("0").requires_grad();
+    let leaves_before = leaf_states(&list);
+    let tracked_before = forward_leaf_is_tracked(list.get(0).expect("0"));
+    assert!(own_before && tracked_before);
+    assert_eq!(leaves_before, vec![false, true, true]);
+
+    list.freeze().expect_err("後続子が失敗");
+
+    assert_eq!(list.get(0).expect("0").requires_grad(), own_before);
+    assert_eq!(leaf_states(&list), leaves_before);
+    assert_eq!(
+        forward_leaf_is_tracked(list.get(0).expect("0")),
+        tracked_before,
+        "forward が登録する葉の追跡が止まらない"
+    );
+}
+
+/// 自身のフラグを持つ複合層を `Sequential`・`ModuleDict` に積んでも同様に戻る。また複合層内部の
+/// 子が失敗した場合（自身は更新済み・後続子は未適用）も戻る。
+#[test]
+fn sequential_and_dict_restore_composite_own_flag_after_failure() {
+    let calls = counter();
+    let mut seq = Sequential::new()
+        .add(self_flag(&calls))
+        .add(Leaf::failing(&calls));
+    seq.freeze().expect_err("後続子が失敗");
+    let first = &seq.children()[0].1;
+    assert!(first.requires_grad());
+    assert!(forward_leaf_is_tracked(*first));
+
+    let mut dict = ModuleDict::new();
+    dict.insert(
+        "c",
+        Box::new(SelfFlagComposite::new(
+            true,
+            Box::new(Leaf::new(false, &calls)),
+            Box::new(Leaf::failing(&calls)),
+        )),
+    )
+    .expect("key");
+    let before = leaf_states(&dict);
+    dict.freeze().expect_err("複合層内部の失敗");
+    let c = &dict.children()[0].1;
+    assert!(c.requires_grad(), "自身のフラグが戻る");
+    assert!(forward_leaf_is_tracked(*c));
+    assert_eq!(leaf_states(&dict), before);
+}

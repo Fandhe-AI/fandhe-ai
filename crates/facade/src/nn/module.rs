@@ -104,6 +104,12 @@ pub trait Module {
     /// のように切り替えて登録する。本メソッドと [`Self::requires_grad`] は必ず対で
     /// override すること。
     ///
+    /// 複合層（[`Self::children`] が非空）が自身にも `requires_grad` フラグを持つ場合、
+    /// [`Self::requires_grad`] はそのフラグを返すこと。凍結が失敗したときのロールバックは
+    /// 複合層ごとに「自身へ `set_requires_grad(呼び出し前の自身の `requires_grad()`)` →
+    /// 子を葉単位で再帰復元」の順に呼んで戻す（自身の呼び出しが子へ伝播した値は直後の子の
+    /// 復元で上書きされる）。したがって自身のフラグと各子の状態が共に呼び出し前へ戻る。
+    ///
     /// - 反映は次の `forward`（葉登録）から。登録済みの `Var` は変わらない。
     /// - [`Self::set_training`]／[`Self::training`] とは独立の軸（BatchNorm 系の統計は
     ///   凍結後も training のまま更新される）。
@@ -133,7 +139,9 @@ pub trait Module {
     }
 
     /// この層が現在追跡対象か。既定は `true`（パラメータを持たない層は状態を持たない）。
-    /// パラメータを持つ層は [`Self::set_requires_grad`] と対で override する。
+    /// パラメータを持つ層は [`Self::set_requires_grad`] と対で override する。自身のフラグを
+    /// 持つ複合層はそのフラグを返すこと（ロールバックが自身→子の順に復元するため。
+    /// [`Self::set_requires_grad`] 参照）。
     fn requires_grad(&self) -> bool {
         true
     }
@@ -194,7 +202,9 @@ pub trait Module {
     /// 子を持つ利用者定義の複合層は `children` と対で必ず実装すること。件数・名前・順序が
     /// `children` と食い違う（既定の空のまま `children` だけ実装した場合を含む）層を
     /// 含む構成は、`ModuleList`／`Sequential`／`ModuleDict` の `set_requires_grad` が状態を
-    /// 変更する前に `InvalidArgument` で拒否する（fail-closed）。既定は空（葉モジュール向け）。
+    /// 変更する前に `InvalidArgument` で拒否する（fail-closed）。復元は複合層自身へ
+    /// `set_requires_grad` を呼んだ後に本メソッドの子を葉単位で戻す順（[`Self::set_requires_grad`]
+    /// 参照）。既定は空（葉モジュール向け）。
     fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
         Vec::new()
     }
