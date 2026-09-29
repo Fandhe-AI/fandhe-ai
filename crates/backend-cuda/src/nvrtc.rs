@@ -5265,18 +5265,45 @@ mod tests {
     // （実装計画 §1 スコープ境界節）。
     // ------------------------------------------------------------------
 
-    /// テスト用に一意な一時ディレクトリを払い出す（プロセス内
-    /// `AtomicU64` カウンタ＋PID で並行テスト実行時の衝突を避ける）。
-    /// 呼び出し元がテスト末尾で `remove_dir_all` して片付ける。
+    /// テスト用に一意な一時ディレクトリを排他的に払い出す。
+    /// 名前は PID＋プロセス内カウンタ＋ナノ秒で、`create_dir_all` ではなく
+    /// `create_dir` で作る（PID 再利用による残骸や、world-writable な
+    /// `/tmp` に先置きされたディレクトリ・symlink を黙って受け入れず、
+    /// `AlreadyExists` なら最大 8 回まで別名で再試行する）。
+    /// `jit_cache_bench_tests::fresh_temp_dir` と同じ方式（Review #698 対応）。
+    /// 戻り値は `PathBuf` のままで、呼び出し元がテスト末尾で
+    /// `remove_dir_all` して片付ける（Drop ガード化は対象外）。
     fn fresh_temp_dir(label: &str) -> PathBuf {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "rust-ai-library-cache-test.{label}.{}.{seq}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).expect("failed to create test temp dir");
-        dir
+        const CREATE_DIR_RETRIES: u32 = 8;
+
+        // `std::env::temp_dir()` 自体が未作成の環境でも排他的 `create_dir` が
+        // 失敗しないよう、親の存在だけは `create_dir_all` で保証する
+        // （衝突検出には関与しない）。
+        fs::create_dir_all(std::env::temp_dir()).expect("failed to ensure system temp dir exists");
+
+        let pid = std::process::id();
+        for attempt in 0..CREATE_DIR_RETRIES {
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock must be after UNIX_EPOCH")
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "rust-ai-library-cache-test.{label}.{pid}.{seq}.{nanos}"
+            ));
+            match fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                // PID 再利用や /tmp への先置き（ディレクトリ・symlink）による名前衝突。
+                // 新しい seq・nanos で作り直す。
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("failed to create test temp dir on attempt {attempt}: {e}"),
+            }
+        }
+        panic!(
+            "failed to create a fresh test temp dir after {CREATE_DIR_RETRIES} retries \
+             (persistent AlreadyExists collisions)"
+        );
     }
 
     // 受け入れ基準（実装計画 §5）: store → load ラウンドトリップ。両
