@@ -208,8 +208,10 @@
 //! 公開済み（`docs/facade-onnx-import-exposure-decision.md` §6.3・
 //! `docs/compat-api-scope.md` §5 の承認待ち事項を解消。イシュー #2347）。
 //! [`resolve_external_data`]・[`ExternalDataOptions`] 自体は本モジュール
-//! （`onnx-interop` 内部限定）のままであり、facade 側は既定オプション
-//! （[`ExternalDataOptions::default`]）を渡すラッパーに徹する。
+//! （`onnx-interop` 内部限定）のままであり、facade 側は薄いラッパーに徹する
+//! （`from_path` は既定オプション〈[`ExternalDataOptions::default`]〉、
+//! `from_path_with_limits` は facade 独自型 `OnnxExternalDataLimits` から
+//! 変換して渡す。イシュー #2360。内部型は非公開のまま）。
 
 use std::collections::HashMap;
 use std::fmt;

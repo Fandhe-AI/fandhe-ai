@@ -900,3 +900,15 @@ fn facade_from_bytes_rejects_external_data_model_from_path_rejects_unsupported_p
     );
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+/// facade の `OnnxExternalDataLimits::default()` が内部
+/// `ExternalDataOptions::default()` と一致する（既定値ドリフトガード。#2360）。
+#[test]
+fn external_data_limits_default_matches_internal_default() {
+    use fandhe_ai::interop::onnx::OnnxExternalDataLimits;
+    use fandhe_ai_onnx_interop::onnx::external_data::ExternalDataOptions;
+    let f = OnnxExternalDataLimits::default();
+    let i = ExternalDataOptions::default();
+    assert_eq!(f.max_total_bytes, i.max_total_bytes);
+    assert_eq!(f.max_external_files, i.max_external_files);
+}

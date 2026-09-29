@@ -1644,7 +1644,8 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// `pub static`／`pub mod`）が存在しないかを走査する。承認範囲は
 /// `interop::onnx::{OnnxModel, OnnxValue, OnnxError, OnnxExportOptions}`
 /// と `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path,
-/// from_sequential}` の 10 件のみ（イシュー #2017・#2018・#2037）。
+/// from_sequential, from_path_with_limits}` と `OnnxExternalDataLimits` の
+/// 12 件のみ（イシュー #2017・#2018・#2037・#2360）。
 ///
 /// `interop_module_exposes_only_approved_onnx_surface` の従来実装は
 /// 期待する 6 文字列が「存在すること」の contains 検査のみで、
@@ -1672,7 +1673,7 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// （`ModelProto` 等）の露出を見逃していた（codex-review 指摘 P2・
 /// #2024。本関数へ統合し単一の走査でシグネチャ全体を検査する）。
 fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
-    const ALLOWED_PUB_ITEMS: [(&str, &str); 10] = [
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 12] = [
         ("struct", "OnnxModel"),
         ("enum", "OnnxValue"),
         ("enum", "OnnxError"),
@@ -1683,12 +1684,14 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         ("fn", "to_bytes"),
         ("fn", "to_path"),
         ("fn", "from_sequential"),
+        ("struct", "OnnxExternalDataLimits"),
+        ("fn", "from_path_with_limits"),
     ];
     const SCANNED_KINDS: [&str; 9] = [
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
     const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
-    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 10] = [
+    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 12] = [
         "ModelProto",
         "NodeProto",
         "prost::",
@@ -1699,6 +1702,8 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         "ExportNode",
         "NnExportParts",
         "nn::Module",
+        "ExternalDataOptions",
+        "external_data::",
     ];
 
     let cleaned = strip_comments_and_literals(original);
@@ -1999,7 +2004,7 @@ impl OnnxModel {
     );
 }
 
-/// `scan_unapproved_onnx_pub_items` が承認範囲 10 件（`OnnxModel`／
+/// `scan_unapproved_onnx_pub_items` が承認範囲 12 件（`OnnxModel`／
 /// `OnnxValue`／`OnnxError`／`OnnxExportOptions` の型定義 4 件と
 /// `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path,
 /// from_sequential}` のメソッド 6 件）をすべて含む合成ソースに対して
@@ -2050,11 +2055,25 @@ pub struct OnnxExportOptions {
     pub ir_version: i64,
     pub opset_version: i64,
 }
+
+pub struct OnnxExternalDataLimits {
+    pub max_total_bytes: u64,
+    pub max_external_files: usize,
+}
+
+impl OnnxModel {
+    pub fn from_path_with_limits(
+        path: &str,
+        limits: &OnnxExternalDataLimits,
+    ) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
+}
 "#;
     let offenses = scan_unapproved_onnx_pub_items(synthetic);
     assert!(
         offenses.is_empty(),
-        "承認範囲 10 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
+        "承認範囲 12 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
          テストの前提が崩れている）: {offenses:?}"
     );
 }
@@ -2176,6 +2195,8 @@ fn interop_module_exposes_only_approved_onnx_surface() {
             "ExportNode",
             "NnExportParts",
             "nn::Module",
+            "ExternalDataOptions",
+            "external_data::",
         ] {
             if line.contains(forbidden) {
                 leaked_internal_types.push(format!("`{trimmed}` が {forbidden} を含む"));
@@ -2200,6 +2221,8 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         "pub fn to_bytes",
         "pub fn to_path",
         "pub fn from_sequential",
+        "pub struct OnnxExternalDataLimits",
+        "pub fn from_path_with_limits",
     ] {
         assert!(
             onnx_rs_content.contains(expected),
@@ -2218,6 +2241,56 @@ fn interop_module_exposes_only_approved_onnx_surface() {
          違反の疑い。docs/facade-onnx-import-exposure-decision.md §12 参照）: \
          {unapproved_pub_items:?}"
     );
+}
+
+/// external data 予算まわり（イシュー #2360）の承認外追加を検出する負例。
+#[test]
+fn unapproved_onnx_external_data_items_are_flagged() {
+    let synthetic = r#"
+impl OnnxModel {
+    pub fn from_path_with_limits(path: &str, options: &fandhe_ai_onnx_interop::onnx::external_data::ExternalDataOptions) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
+}
+
+pub type OnnxExternalDataLimits = ExternalDataOptions;
+pub use fandhe_ai_onnx_interop::onnx::external_data::ExternalDataOptions;
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses
+            .iter()
+            .any(|o| o.contains("from_path_with_limits") && o.contains("ExternalDataOptions")),
+        "シグネチャ内の内部型が検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses.iter().any(|o| o.contains("type")),
+        "承認外の `pub type` が検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses.iter().any(|o| o.contains("use")),
+        "`pub use` 再エクスポートが検出されなかった: {offenses:?}"
+    );
+}
+
+/// `OnnxExternalDataLimits`／`from_path_with_limits` が facade から到達可能で
+/// 既定値・フィールド変更・シグネチャが固定されていること（#2360）。
+#[test]
+fn onnx_external_data_limits_are_reachable_via_facade() {
+    use fandhe_ai::interop::onnx::{OnnxError, OnnxExternalDataLimits, OnnxModel};
+    use std::path::Path;
+
+    let mut l = OnnxExternalDataLimits::default();
+    assert_eq!(l.max_total_bytes, 64 * 1024 * 1024 * 1024);
+    assert_eq!(l.max_external_files, 4096);
+    l.max_total_bytes = 1 << 20;
+    l.max_external_files = 1;
+    assert_eq!(l.max_total_bytes, 1 << 20);
+    assert_eq!(l.max_external_files, 1);
+
+    fn _sig(p: &Path, l: &OnnxExternalDataLimits) -> Result<OnnxModel, OnnxError> {
+        OnnxModel::from_path_with_limits(p, l)
+    }
 }
 
 /// `fandhe_ai::interop::onnx::{OnnxModel, OnnxValue, OnnxError}` が

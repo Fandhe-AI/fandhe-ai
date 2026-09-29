@@ -135,8 +135,9 @@ pub mod nn;
 
 /// 相互運用（interop）公開面の入口（イシュー #2017・#2018・#2019）。
 /// [`interop::onnx`]（ONNX import／export。`OnnxModel`／`OnnxValue`／
-/// `OnnxError`・`OnnxModel::{from_bytes, from_path, run, to_bytes,
-/// to_path}`・`OnnxExportOptions`。export は #2018 で公開済み・roundtrip
+/// `OnnxError`・`OnnxModel::{from_bytes, from_path, from_path_with_limits, run,
+/// to_bytes, to_path}`・`OnnxExportOptions`・`OnnxExternalDataLimits`
+/// 〈external data 読み込み予算。#2360〉。export は #2018 で公開済み・roundtrip
 /// export ラッパー限定）に加え、[`interop::safetensors`]（safetensors
 /// save／load 純再エクスポート。イシュー #2019）を提供する
 /// （`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-

@@ -151,7 +151,8 @@ use fandhe_ai_onnx_interop::onnx::export::{
 };
 use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
 use fandhe_ai_onnx_interop::onnx::external_data::{
-    ExternalDataError, ExternalDataOptions, build_graph_with_external_data,
+    DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES, DEFAULT_MAX_EXTERNAL_FILES, ExternalDataError,
+    ExternalDataOptions, build_graph_with_external_data,
 };
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{
@@ -251,8 +252,10 @@ impl OnnxModel {
     /// `.onnx.data` ファイル参照）を解決して読み込める。解決の基点
     /// ディレクトリ（`base_dir`）は `path` の親ディレクトリ（`path` が
     /// カレントディレクトリ相対の単純なファイル名で親コンポーネントを
-    /// 持たない場合は `.`）とし、`ExternalDataOptions::default()`
-    /// （合計サイズ上限 64 GiB・distinct ファイル数上限 4096）を使う。
+    /// 持たない場合は `.`）とし、既定の読み込み予算（合計サイズ上限
+    /// 64 GiB・distinct ファイル数上限 4096。[`OnnxExternalDataLimits::default`]）
+    /// を使う。予算を変更する場合は [`OnnxModel::from_path_with_limits`]
+    /// （イシュー #2360）を使う。
     /// external data を持たないモデルは従来どおり読み込める（`.onnx`
     /// 本体のみのモデルは [`OnnxModel::from_bytes`] と同じグラフ構築
     /// 経路〈`onnx::graph::build_graph`〉へ委譲される。`build_graph_
@@ -266,8 +269,9 @@ impl OnnxModel {
     /// を返す。合計サイズ上限（64 GiB）は読み込む raw バイト列の予算で、
     /// 読み込み中のピークは最大でおよそ「上限 ＋ 最大テンソル 1 個分」
     /// （`docs/onnx-external-data-decision.md` 4.3 節）。本関数は既定
-    /// オプション固定で上限を変更できない（利用可能メモリがそれより小さい
-    /// 環境で予算を下げる公開手段は未提供。同節）。Linux の
+    /// 予算固定であり、利用可能メモリがそれより小さい環境で予算を下げる
+    /// 場合は [`OnnxModel::from_path_with_limits`] を使う（イシュー
+    /// #2360）。Linux の
     /// overcommit 設定等により、確保自体は成功した後のページ実コミット時に
     /// OS がプロセスを終了させる可能性は残る。
     ///
@@ -276,6 +280,25 @@ impl OnnxModel {
     /// 挙動不変。`onnx::external_data` モジュール冒頭コメント「不変条件」
     /// 節・回帰テスト参照）。
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, OnnxError> {
+        Self::from_path_with_limits(path, &OnnxExternalDataLimits::default())
+    }
+
+    /// [`OnnxModel::from_path`] と同じ読み込みを、external data の読み込み
+    /// 予算（合計バイト上限・distinct ファイル数上限）を指定して行う
+    /// （イシュー #2360）。低メモリ環境で既定の 64 GiB を下げるための
+    /// facade 単独の入口。
+    ///
+    /// 予算の検査は確保より前（計画段階）に行われ、超過したモデルは
+    /// 確保・読み込みに進まず [`OnnxError::InvalidModel`] で拒否される
+    /// （合計バイト超過・ファイル数超過とも。写像は `from_path` と同じ）。
+    /// 確保に失敗した場合は従来どおり [`OnnxError::Io`]
+    /// （`ErrorKind::OutOfMemory`）。external data を持たないモデルでは
+    /// `limits` は結果に影響しない。`limits` の値は検証せずそのまま内部へ
+    /// 渡す（上げる指定も素通し。上げるとピークメモリが増える）。
+    pub fn from_path_with_limits(
+        path: impl AsRef<Path>,
+        limits: &OnnxExternalDataLimits,
+    ) -> Result<Self, OnnxError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(OnnxError::Io)?;
         let model = decode_model(&bytes).map_err(map_decode_error)?;
@@ -286,9 +309,8 @@ impl OnnxModel {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
-        let graph =
-            build_graph_with_external_data(&model, base_dir, &ExternalDataOptions::default())
-                .map_err(map_graph_error)?;
+        let graph = build_graph_with_external_data(&model, base_dir, &limits.to_internal())
+            .map_err(map_graph_error)?;
         Ok(Self { graph })
     }
 
@@ -432,6 +454,55 @@ impl OnnxExportOptions {
             ir_version: self.ir_version,
             opset_version: self.opset_version,
             ..ExportOptions::default()
+        }
+    }
+}
+
+/// [`OnnxModel::from_path_with_limits`] の external data 読み込み予算
+/// （イシュー #2360）。内部クレートの `ExternalDataOptions` を facade へ
+/// 出さないための自己完結型（薄いラッパー原則・REQ-12。型名に内部型名を
+/// 含めないのは `api_surface.rs` の内部型名検査との整合のため）。
+///
+/// - `max_total_bytes`: 読み込む raw バイト列の合計上限（既定 64 GiB）。
+///   `0` は非ゼロ長の external テンソルを 1 件でも含めば拒否する
+/// - `max_external_files`: 参照する distinct ファイル数の上限（既定 4096）。
+///   `0` は external 参照を 1 件でも含めば拒否する
+///
+/// 値は検証せずそのまま渡す。上げるとピークメモリ（最悪でおよそ 2 倍。
+/// `docs/onnx-external-data-decision.md` 4.3 節）が増え、確保後のページ
+/// コミット時 OOM という残存リスクも消えない。`#[non_exhaustive]` のため
+/// 下流では構造体リテラルで構築できず、`default()` へ代入して使う:
+///
+/// ```no_run
+/// use fandhe_ai::interop::onnx::{OnnxExternalDataLimits, OnnxModel};
+///
+/// let mut limits = OnnxExternalDataLimits::default();
+/// limits.max_total_bytes = 8 << 30;
+/// let model = OnnxModel::from_path_with_limits("model.onnx", &limits);
+/// ```
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OnnxExternalDataLimits {
+    pub max_total_bytes: u64,
+    pub max_external_files: usize,
+}
+
+impl Default for OnnxExternalDataLimits {
+    /// 内部クレートの既定定数を直接参照する（二重管理しない）。
+    fn default() -> Self {
+        OnnxExternalDataLimits {
+            max_total_bytes: DEFAULT_MAX_EXTERNAL_DATA_TOTAL_BYTES,
+            max_external_files: DEFAULT_MAX_EXTERNAL_FILES,
+        }
+    }
+}
+
+impl OnnxExternalDataLimits {
+    /// 内部クレートの `ExternalDataOptions` へ変換する（private ヘルパ）。
+    fn to_internal(self) -> ExternalDataOptions {
+        ExternalDataOptions {
+            max_total_bytes: self.max_total_bytes,
+            max_external_files: self.max_external_files,
         }
     }
 }
@@ -745,6 +816,19 @@ mod map_graph_error_tests {
             tensor_name: "w".to_string(),
             bytes: 1 << 40,
         }));
+    }
+
+    /// distinct ファイル数上限超過（イシュー #2360）は既存の catch-all で
+    /// `InvalidModel` へ写像される（新 variant なし）。
+    #[test]
+    fn too_many_external_files_maps_to_invalid_model() {
+        let e = map_graph_error(GraphError::ExternalData(
+            ExternalDataError::TooManyExternalFiles { limit: 1 },
+        ));
+        match e {
+            OnnxError::InvalidModel { message } => assert!(message.contains("limit=1")),
+            other => panic!("OnnxError::InvalidModel を期待したが {other:?}"),
+        }
     }
 
     /// 確保失敗（PR #2348 codex P0 是正）は `InvalidModel` ではなく

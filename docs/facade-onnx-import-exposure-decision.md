@@ -539,9 +539,10 @@ from_path_resolves_external_data_and_matches_manifest_reference`
 `OnnxError::Io`（`ErrorKind::OutOfMemory`）へ写像する（公開 variant の
 追加なし。同じ `from_path` 内の `std::fs::read` による `.onnx` 本体の
 確保失敗と同じ判別方法になる）。`from_path` は `ExternalDataOptions::
-default()` 固定のため、facade 利用者が `max_total_bytes` を下げる公開
-手段は無い（起票候補。詳細・ピークメモリ見積もりは
-`docs/onnx-external-data-decision.md` 4.3 節・7 節）。
+default()` 固定のため、facade 利用者が `max_total_bytes` を下げる手段は
+`from_path` には無い（#2360 へ切り出し済み・実装済み。§16 参照。
+詳細・ピークメモリ見積もりは `docs/onnx-external-data-decision.md`
+4.3 節・7 節）。
 
 **実行時・export 時の確保失敗の写像（2026-09-28・PR #2348 codex P0
 是正 2 回目）**: `OnnxModel::run` が実行ごとに initializer を実行時値へ
@@ -558,3 +559,38 @@ interp_error`）・`ExportError::AllocationFailed`（`map_export_error`）は、
 追記した（doc のみの変更で公開 API 面は不変）。演算カーネルの出力確保は
 一般の推論メモリとして対象外（`docs/onnx-external-data-decision.md`
 4.3 節の洗い出し表）。
+
+## 16. 追補（イシュー #2360・2026-09-29）: external data 読み込み予算の公開
+
+`from_path` は既定予算（合計 64 GiB・distinct ファイル 4096）固定で、低
+メモリ環境の facade 利用者が予算を下げられなかった（§15）。#2360 で次を
+追加した（追加のみ・semver minor 相当）。
+
+- **新規公開面 2 件**: `OnnxExternalDataLimits { max_total_bytes: u64,
+  max_external_files: usize }`（`#[non_exhaustive]`・`Clone`／`Copy`／
+  `Debug`／`PartialEq`／`Eq`・`Default`）と
+  `OnnxModel::from_path_with_limits(path, &OnnxExternalDataLimits)`。
+  `from_path` は既定値の `from_path_with_limits` へ委譲する（経路 1 本・
+  挙動不変・既定値不変）
+- **内部型は非露出**: 内部 `ExternalDataOptions` は再エクスポートせず
+  private `to_internal()` で変換する（`OnnxExportOptions` と同型）。
+  `api_surface.rs` の内部型名検査に `ExternalDataOptions`／
+  `external_data::` を追加したため、公開型名にこれらの部分文字列を含め
+  られない（`OnnxExternalDataLimits` はこの制約による命名）
+- **値は無検証で素通し**: 上げる指定も含めクランプしない（未承認の挙動
+  変更を避ける）。上げるとピーク（最悪でおよそ 2 倍。
+  `docs/onnx-external-data-decision.md` 4.3 節）が増え、確保後の OOM
+  という残存リスクは消えない。`0` は fail-closed 側（非ゼロ長 external
+  テンソル／external 参照が 1 件でもあれば拒否）
+- **エラー写像**: `OnnxError` の variant 追加なし。予算超過
+  （`TotalSizeLimitExceeded`／`TooManyExternalFiles`）は既存 catch-all の
+  `InvalidModel { message }`、確保失敗は従来どおり `Io(OutOfMemory)`
+- **ガード**: `api_surface.rs` の承認範囲を 10 → 12 件、内部型名禁止
+  リストを 10 → 12 件へ更新し、負例（内部型のシグネチャ露出・`pub type`
+  別名・`pub use` 再エクスポート）と到達性テストを追加
+- **テスト**: `tests/interop_onnx_external_data_limits.rs`（疎ファイルの
+  巨大テンソルが下げた予算で確保前に拒否・ファイル数超過・境界値・
+  `from_path` と既定予算版の一致）、`interop_onnx_internal_parity.rs`
+  （既定値ドリフトガード）、`map_graph_error_tests`
+- **スコープ外（据え置き）**: 既定値の変更・`run` ごとの initializer
+  複製の廃止・facade の Windows 対応
