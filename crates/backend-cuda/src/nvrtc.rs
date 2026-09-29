@@ -24,38 +24,26 @@
 //! `kernels_wmma_opt.rs` の `render_*` 関数のドキュメンテーションコメント
 //! 参照）。
 //!
-//! # サポート対象 OS（非 unix のビルドを拒否する。イシュー #509 PR #677
-//! codex-review P0 再指摘対応）
+//! # サポート対象 OS（unix はディスクキャッシュあり・非 unix は無効化。
+//! イシュー #2390・決定記録 `docs/facade-windows-build-decision.md`〈#2389〉）
 //!
-//! 本モジュールの NVRTC キャッシュ I/O（[`ensure_cache_root`]・
-//! [`store_cache_entry`]・[`load_cache_entry`] とその内部実装）は
-//! symlink 脱出・TOCTOU 対策として `O_NOFOLLOW`・fd 相対解決
-//! （`/proc/self/fd/<fd>` 経由・`openat`/`mkdirat`/`renameat`/`unlinkat`
-//! 相当の自前 FFI）を用いており、いずれも unix 系 API（`<fcntl.h>`・
-//! `std::os::unix::fs::OpenOptionsExt`）にのみ依存する。以前は
-//! `#[cfg(not(unix))]` に「検証してから読み書きする」という構造的に
-//! TOCTOU を閉じられないパスベースのフォールバック実装を維持していたが、
-//! `.claude/rules/deps-policy.md`（`libc`／`rustix` はユーザー承認なしに
-//! 追加できない）の制約下ではこのフォールバックを同水準まで強化できず、
-//! 本クレートのサポート対象（Linux／macOS。`backend-switching-design.md`）
-//! では到達しないコードでもあったため、`.claude/rules/security.md` の
-//! fail-closed 方針に従いフォールバックごと削除した。非 unix
-//! ターゲットでのビルドはコンパイルエラーで明示的に拒否する。
-
-#[cfg(not(unix))]
-compile_error!(
-    "backend-cuda の NVRTC キャッシュ（crates/backend-cuda/src/nvrtc.rs）は \
-     unix（Linux/macOS）のみサポートする。fd pin による TOCTOU 対策が \
-     O_NOFOLLOW・/proc/self/fd・openat 等の unix 系 API に依存するため、 \
-     非 unix 向けの同水準フォールバックは提供しない \
-     （イシュー #509 PR #677 codex-review P0 再指摘対応）。"
-);
+//! 本モジュールの NVRTC ディスクキャッシュ I/O（`ensure_cache_root`・
+//! `store_cache_entry`・`load_cache_entry` とその内部実装）は symlink 脱出・
+//! TOCTOU 対策として `O_NOFOLLOW`・fd 相対解決（`openat`/`mkdirat`/`renameat`/
+//! `unlinkat` 相当の自前 FFI）を用いるため `cfg(unix)` に閉じる。非 unix
+//! （Windows を含む）ではディスクキャッシュを設計上無効にし、プロセス内 LRU と
+//! NVRTC 直コンパイルのみで動く（`runtime_workspace_root` が `Err` を返し、
+//! 呼び出し元の縮退経路へ入る）。ヒット時も PTX は実行入力に使わず常に
+//! コンパイルするため性能上の損失はない。イシュー #509（PR #677）で削除した
+//! 非 unix 向けパスベースのフォールバックは復活させない。
 
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::fs;
 use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
@@ -1164,6 +1152,7 @@ pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
 /// 「このディレクトリが境界か」を粗く判定する目的で、誤検知の帰結は
 /// 「ディスクキャッシュが効かない」で fail-safe に収まるため厳密な TOML
 /// パースは過剰）。
+#[cfg(unix)]
 fn has_workspace_root_marker(dir: &Path) -> bool {
     // `dir` 自体の所有者・書き込み権限を先に検査する（イシュー #511
     // PR #703 codex-review Bugbot 指摘〈Forgeable workspace root
@@ -1231,6 +1220,7 @@ fn has_workspace_root_marker(dir: &Path) -> bool {
 ///
 /// マーカーが 1 つも見つからないまま `Path::parent()` が `None` になる
 /// （ファイルシステムルートに到達）まで祖先を辿った場合は `None` を返す。
+#[cfg(unix)]
 fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
     let mut current = Some(start);
     while let Some(dir) = current {
@@ -1279,6 +1269,7 @@ fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
 /// された等）・マーカーが見つからなかった場合のいずれも
 /// `CudaError::CacheDirUnavailable` を返し、呼び出し元は同じ fail-safe
 /// 方針でディスクキャッシュなし運転へ縮退する。
+#[cfg(unix)]
 pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
     let cwd = std::env::current_dir().map_err(|e| CudaError::CacheDirUnavailable {
         detail: format!("failed to resolve current_dir() for cache workspace_root: {e}"),
@@ -1299,6 +1290,27 @@ pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
              boundary"
         ),
     })
+}
+
+/// 非 unix 版: ワークスペース root 解決を行わず常に `Err` を返す。縮退の唯一の分岐点であり、
+/// 呼び出し元 `module_cache` の `.ok()` が `None` となって store／load は呼ばれず、
+/// プロセス内 LRU と NVRTC 直コンパイルのみで動く（`docs/facade-windows-build-decision.md`
+/// §4・§5。イシュー #2390）。
+#[cfg(not(unix))]
+pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
+    Err(disk_cache_disabled_on_non_unix())
+}
+/// 非 unix ターゲットで NVRTC ディスクキャッシュを設計上無効化していることを
+/// 表す型付きエラー（3 つの非 unix スタブが共有する。`docs/facade-windows-build-decision.md`
+/// §4・§5。イシュー #2390）。
+#[cfg(not(unix))]
+fn disk_cache_disabled_on_non_unix() -> CudaError {
+    CudaError::CacheDirUnavailable {
+        detail: "on-disk NVRTC cache is disabled by design on non-unix targets \
+                 (docs/facade-windows-build-decision.md section 4); the in-process \
+                 LRU and direct NVRTC compilation are unaffected"
+            .to_string(),
+    }
 }
 
 /// `root` と [`CudaKernelCacheKey::cache_entry_dir_name`] を合成し、
@@ -1378,10 +1390,12 @@ pub(crate) fn cache_entry_path(
 /// キャッシュエントリ内のソースファイル名（NVRTC へ渡した `.cu` ソース
 /// 全文）。[`validate_cache_entry`]・[`store_cache_entry_in`]・
 /// [`load_cache_entry_in`] が共用する。
+#[cfg(unix)]
 const CACHE_ENTRY_SOURCE_FILE: &str = "kernel.cu";
 
 /// キャッシュエントリ内の成果物ファイル名（NVRTC コンパイル結果の PTX
 /// アセンブリ全文）。定数化の理由は [`CACHE_ENTRY_SOURCE_FILE`] と同じ。
+#[cfg(unix)]
 const CACHE_ENTRY_PTX_FILE: &str = "kernel.ptx";
 
 /// コンパイルキャッシュから読み出したカーネルの実体（イシュー #509・
@@ -1430,8 +1444,9 @@ pub(crate) struct CachedKernel {
 /// （symlink 差し替え等の外部観測用アサーション）専用として
 /// `#[cfg(test)]` で残す（イシュー #509 PR #677 codex-review P0 再指摘
 /// 対応。旧非 Unix フォールバックは検証と読み取りが別ステップで
-/// TOCTOU を構造的に閉じられなかったため削除済み。crate ルート／
-/// `nvrtc` モジュール冒頭の `compile_error!` 参照）。
+/// TOCTOU を構造的に閉じられなかったため削除済み。非 unix ではディスク
+/// キャッシュ自体を無効化しており本 I/O 経路はコンパイルされない。
+/// `docs/facade-windows-build-decision.md`）。
 #[cfg(test)]
 fn validate_cache_entry(entry_dir: &Path) -> bool {
     is_plain_dir(entry_dir)
@@ -1483,9 +1498,9 @@ fn is_plain_dir(path: &Path) -> bool {
 /// deps-policy.md`）外でユーザー承認なしに追加できないため、
 /// `std::os::unix::fs::OpenOptionsExt::custom_flags`（std 標準機能）へ
 /// 渡すフラグ値を自前で定義する。値はターゲット OS ごとに異なるため
-/// `target_os` で分岐する（本クレートのビルド対象は Linux/macOS のみ。
-/// `backend-switching-design.md`。非 unix は crate ルート／`nvrtc`
-/// モジュール冒頭の `compile_error!` でビルド自体を拒否する）。
+/// `target_os` で分岐する（ディスクキャッシュを使う unix は Linux/macOS。
+/// 非 unix ではキャッシュ I/O 自体がコンパイルされない。
+/// `docs/facade-windows-build-decision.md`）。
 ///
 /// **Linux はさらに CPU アーキテクチャで値が異なる**（イシュー #1107）。
 /// `O_NOFOLLOW`／`O_DIRECTORY` は POSIX 標準に値の規定がなく、Linux
@@ -2196,6 +2211,7 @@ fn read_verified_cache_entry_file(mut file: fs::File) -> std::io::Result<Option<
 
 /// 一時ディレクトリ名のシーケンス番号（プロセス内一意性の担保。
 /// [`temp_entry_dir_name`] が使う）。
+#[cfg(unix)]
 static TEMP_ENTRY_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// [`store_cache_entry_in`] が使う一時ディレクトリ名を生成する。
@@ -2209,6 +2225,7 @@ static TEMP_ENTRY_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 /// compiler の一時ディレクトリ方式に倣う。実装計画 §3.2）。
 /// `final_entry_name` はキー検証済み（[`CudaKernelCacheKey::cache_entry_dir_name`]
 /// の A03 トラバーサル防御を経由済み）の文字列のみを渡すこと。
+#[cfg(unix)]
 fn temp_entry_dir_name(final_entry_name: &str) -> String {
     let seq = TEMP_ENTRY_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
     format!(".tmp.{final_entry_name}.{}.{seq}", std::process::id())
@@ -2624,6 +2641,7 @@ fn write_child_file_pinned(dir_fd: &fs::File, name: &str, content: &str) -> Resu
 /// 別ルートへ書き込む、または細工された PTX を読み込みうる TOCTOU が
 /// あった（`O_NOFOLLOW` は最終コンポーネントの symlink のみを防ぎ、
 /// 祖先の差し替えは防がない）。
+#[cfg(unix)]
 fn ensure_cache_root_in(
     candidate_root: &Path,
     workspace_root: &Path,
@@ -2740,6 +2758,7 @@ fn ensure_cache_root_in(
 /// `None` を返さない。相対パスかつどの祖先も存在しない極端なケースの
 /// みフォールバックとして `None` を返す（呼び出し元は `CacheIo` で
 /// fail-closed に扱う）。
+#[cfg(unix)]
 fn longest_existing_ancestor(path: &Path) -> Option<PathBuf> {
     let mut current = path;
     loop {
@@ -3150,6 +3169,7 @@ fn create_dir_all_verified(
 /// ドキュメンテーションコメント参照）。戻り値の fd は呼び出し元が
 /// store／load 完了まで引き回す想定であり、`root` パスとして再オープン
 /// してはならない（イシュー #509 PR #677 codex-review P0 再指摘対応）。
+#[cfg(unix)]
 pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<(PathBuf, fs::File), CudaError> {
     ensure_cache_root_in(&cache_root(workspace_root)?, workspace_root)
 }
@@ -3196,10 +3216,9 @@ pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<(PathBuf, fs::F
 /// #509 PR #677 codex-review P0 指摘対応: `root` を pin した後で
 /// キャッシュルート自体が symlink へ差し替えられても、以降の全操作が
 /// pin 済みの元の実体だけを見るため追従しない）。本クレートのビルド
-/// 対象は Linux/macOS（unix）のみであり、`O_NOFOLLOW` 相当の std API を
-/// 持たない非 unix 向けの検出型フォールバックは維持しない（fd pin による
-/// TOCTOU 対策が unix 系 API に依存するため。crate ルート／`nvrtc`
-/// モジュール冒頭の `compile_error!` 参照）。
+/// 対象は unix のみであり、非 unix ではディスクキャッシュを設計上無効に
+/// するため本関数はコンパイルされない（検出型フォールバックは維持しない。
+/// `docs/facade-windows-build-decision.md`）。
 ///
 /// 本番経路の公開ラッパー [`store_cache_entry`] は本関数へ委譲しない
 /// （[`ensure_cache_root`] が検証直後に pin した fd をそのまま
@@ -3414,6 +3433,7 @@ fn store_cache_entry_at(
 /// `PathBuf` を [`store_cache_entry_in`] が改めて `open_dir_nofollow` で
 /// 開き直しており、その間に祖先を差し替えられると検証していない別
 /// ルートへ書き込みうる TOCTOU があった）。
+#[cfg(unix)]
 pub(crate) fn store_cache_entry(
     workspace_root: &Path,
     key: &CudaKernelCacheKey,
@@ -3424,6 +3444,20 @@ pub(crate) fn store_cache_entry(
     let final_dir = cache_entry_path_in(&root, key)?;
     let entry_name = key.cache_entry_dir_name()?;
     store_cache_entry_at(&root_fd, &final_dir, &entry_name, kernel_cu, kernel_ptx)
+}
+
+/// 非 unix 版 `store_cache_entry`: ディスクキャッシュ無効のため常に `Err`。
+/// `runtime_workspace_root` が先に `Err` を返すため実運用では到達しない。
+/// `ensure_cache_root` には非 unix スタブを置かない（呼び出し元がスタブ同士で
+/// 使われず dead_code になるため。`docs/facade-windows-build-decision.md` §5）。
+#[cfg(not(unix))]
+pub(crate) fn store_cache_entry(
+    _workspace_root: &Path,
+    _key: &CudaKernelCacheKey,
+    _kernel_cu: &str,
+    _kernel_ptx: &str,
+) -> Result<PathBuf, CudaError> {
+    Err(disk_cache_disabled_on_non_unix())
 }
 
 /// キャッシュエントリを読み出す（イシュー #509・Phase C-3。実装計画
@@ -3678,6 +3712,7 @@ fn load_cache_entry_at(
 /// `load_cache_entry_at` 側に閉じ込めるのは、呼び出し元が省略できる
 /// `Option` 引数にしないという C-2 以来の「注入で決定化・迂回不能」
 /// 方針を fs I/O 層まで一貫させるため。
+#[cfg(unix)]
 pub(crate) fn load_cache_entry(
     workspace_root: &Path,
     key: &CudaKernelCacheKey,
@@ -3685,6 +3720,16 @@ pub(crate) fn load_cache_entry(
 ) -> Result<Option<CachedKernel>, CudaError> {
     let (_root, root_fd) = ensure_cache_root(workspace_root)?;
     load_cache_entry_at(&root_fd, key, expected_src)
+}
+
+/// 非 unix 版 `load_cache_entry`: ディスクキャッシュ無効のため常に `Err`（到達しない）。
+#[cfg(not(unix))]
+pub(crate) fn load_cache_entry(
+    _workspace_root: &Path,
+    _key: &CudaKernelCacheKey,
+    _expected_src: &str,
+) -> Result<Option<CachedKernel>, CudaError> {
+    Err(disk_cache_disabled_on_non_unix())
 }
 
 /// リンクされている NVRTC のバージョンを `(major, minor)` で返す。
