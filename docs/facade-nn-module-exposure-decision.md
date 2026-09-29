@@ -126,7 +126,7 @@ defaulted メソッド（`named_parameters`／`set_parameter`／`state_dict`／`
 struct MyBlock { linear: /* 何らかの facade 層 */ }
 
 impl fandhe_ai::nn::Module for MyBlock {
-    fn forward<'t>(&self, tape: &'t fandhe_ai::Tape, x: &fandhe_ai::Var<'t>)
+    fn forward<'t>(&self, tape: fandhe_ai::TapeRef<'t>, x: &fandhe_ai::Var<'t>)
         -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError> {
         // tape・x のみで既存 Var 演算を合成する
         todo!()
@@ -134,8 +134,8 @@ impl fandhe_ai::nn::Module for MyBlock {
 }
 ```
 
-> 確定形（#2394・#2395）: 第 1 引数は `&'t fandhe_ai::Tape` ではなく
-> `tape: fandhe_ai::TapeRef<'t>`（値渡しの借用ハンドル）である。
+> 確定形（#2394・#2395）: 上記コード例の第 1 引数は確定形の `tape: fandhe_ai::TapeRef<'t>`
+> （値渡しの借用ハンドル。§5・§6 の擬似コードの `&'t fandhe_ai::Tape` ではない）である。
 
 ## 7. 0.9.0 互換性表
 
