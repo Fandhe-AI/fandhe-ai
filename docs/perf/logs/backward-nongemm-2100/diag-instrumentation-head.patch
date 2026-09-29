@@ -234,8 +234,8 @@ index 00000000..baa18664
 +}
 +
 +/// resident grad staging への書き込み（`fill_resident_weight_grad`）の
-+/// 計測終了。`gemm_ns` へ計上（旧パッチの §4 と比較可能に保つ）しつつ、
-+/// bias 縮約を含む内訳として `fill_ns` にも加算する。
++/// 計測終了。`gemm_ns` へ計上（旧パッチの §4 と比較可能）しつつ `fill_ns` にも加算。
++/// GEMM 計算と bias 縮約は分離計時しない。集計器は total−gemm（下界）と total−gemm+fill（上界）を併記する。
 +pub(crate) fn record_fill(start: Option<Instant>) {
 +    let Some(start) = start else {
 +        return;

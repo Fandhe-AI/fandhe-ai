@@ -58,7 +58,7 @@ DIAG_BACKWARD seq=.. total_ns=.. vjp_ns=.. gemm_ns=.. fill_ns=.. mask_ns=.. ewis
 
 CSV 列（`iterations.csv`）: `machine,device,mode,run,step,is_warmup,seq,total_ns,vjp_ns,gemm_ns,fill_ns,mask_ns,
 ewise_ns,transpose_ns,materialize_ns,accumulate_ns,loss_ns,vjp_calls,gemm_calls,mask_calls,nongemm_ns`
-（`nongemm_ns = total_ns − gemm_ns`）。`train --phases` は 1 プロセス 100 step（うち先頭 20 が warmup。
+（`nongemm_ns = total_ns − gemm_ns`。`gemm_ns` は bias 縮約を含む `fill` を含むため非 GEMM の**下界**で、fill 全体を非 GEMM 側へ戻した上界 `nongemm_upper_ns = total_ns − gemm_ns + fill_ns` を末尾列に併記する。GEMM 計算と bias 縮約は分離計時していない）。`train --phases` は 1 プロセス 100 step（うち先頭 20 が warmup。
 `bench-fandhe/src/main.rs` の `TRAIN_STEPS`／`TRAIN_WARMUP`）なので DIAG 行はちょうど 100 行になり、
 集計器は件数・`seq` の単調増加を fail-closed で検査する。`aggregate.md` は各 run で step 20..99 の中央値 →
 5 run の中央値（µs・非 GEMM %・カテゴリ和との残差）。
@@ -112,7 +112,7 @@ GB10 へは `docs/real-hardware-verification-env.md` §3 の手順（rsync）で
   --all-targets --locked -- -D warnings`・`cargo test -p fandhe-ai-autodiff --lib --release`（1449 passed・3 ignored）・
   `cargo test -p fandhe-ai-backend-cpu --release`（診断テストは ignored）・
   `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` が通る。`FANDHE_DIAG_BACKWARD` 未設定では DIAG 行は出ない
-- `smoke-x86/`: 上記オーケストレーターを `smoke-x86`・3 run・cpu × {fresh, reuse} で実行した出力
+- `smoke-x86/`（元ログ〈`run*-instr.err`・計装あり／なし JSONL〉は収録しない。集計結果のみで、掲載値と checksum 一致は本ディレクトリ単独では再検証できない。詳細は `smoke-x86/aggregate.md` 末尾）: 上記オーケストレーターを `smoke-x86`・3 run・cpu × {fresh, reuse} で実行した出力
   （1 プロセス 100 行・checksum 一致・CSV 生成を確認）。**非公式・判定外・実機（M4 Max／GB10）ではない**。
   共有負荷下（load average 15〜23 の開発機。開始時 19.59／終了時 22.37）の値であり、負荷ゲートは適用していない
   （`gate.tsv` の load1 は全行同一値の参考記録で判定に使わない）。絶対値を実機の結論として扱わない

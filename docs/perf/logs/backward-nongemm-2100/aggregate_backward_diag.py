@@ -75,7 +75,7 @@ MODES = ["fresh", "reuse"]
 CSV_COLUMNS = (
     ["machine", "device", "mode", "run", "step", "is_warmup"]
     + KEYS
-    + ["nongemm_ns"]
+    + ["nongemm_ns", "nongemm_upper_ns"]
 )
 
 
@@ -198,7 +198,7 @@ def collect(machine: str, in_dir: Path, runs: int, devices: list[str]):
                     csv_rows.append(
                         [machine, dev, mode, run, step, is_warm]
                         + [r[k] for k in KEYS]
-                        + [nongemm]
+                        + [nongemm, nongemm + r["fill_ns"]]
                     )
                 # 3. run 内中央値（step 20..99）
                 measured = rows[TRAIN_WARMUP:]
@@ -206,6 +206,11 @@ def collect(machine: str, in_dir: Path, runs: int, devices: list[str]):
                     per_metric.setdefault(k, []).append(median([r[k] for r in measured]))
                 per_metric.setdefault("nongemm_ns", []).append(
                     median([r["total_ns"] - r["gemm_ns"] for r in measured])
+                )
+                # fill（bias 縮約を含む）を非 GEMM 側へ戻した上界。fill 内の GEMM 計算と
+                # bias 縮約は分離計時していないため、非 GEMM の下界（nongemm_ns）と併記する。
+                per_metric.setdefault("nongemm_upper_ns", []).append(
+                    median([r["total_ns"] - r["gemm_ns"] + r["fill_ns"] for r in measured])
                 )
                 # 4. 計装オーバーヘッド比（記録のみ・判定しない）
                 mi = read_step_total_median(texts["ij"])
@@ -271,6 +276,9 @@ def render_md(machine, cells, overhead, gate, runs) -> str:
     w(
         "注記: `gemm` は resident grad staging 書き込み（`fill`。bias 縮約を含みうる）を"
         "含む（旧診断 §4 と比較可能）。`fill` は `gemm` の内訳で二重計上しない。"
+        "`非 GEMM` は fill 内の bias 縮約を GEMM 側へ含めるため**下界**で、bias 縮約は非 GEMM "
+        "だが GEMM 計算と分離計時していないため、fill 全体を非 GEMM 側へ戻した**上界**"
+        "（total − gemm + fill）を別行に併記する。真値は下界〜上界の間にある。"
         "`非 GEMM` は step ごとに total − gemm を求めてから中央値を取る（表の total 行と "
         "gemm 行の中央値同士の差とは一致しない）。"
         "`残差` = total − Σ(gemm+mask+ewise+transpose+materialize+accumulate+loss)"
@@ -292,7 +300,8 @@ def render_md(machine, cells, overhead, gate, runs) -> str:
         rows += [(c.removesuffix("_ns"), med[c]) for c in CATEGORIES]
         rows += [("(fill ⊂ gemm)", med["fill_ns"]), ("vjp（参考）", med["vjp_ns"])]
         rows += [
-            ("**非 GEMM（step ごとの total − gemm の中央値）**", med["nongemm_ns"]),
+            ("**非 GEMM 下界（step ごとの total − gemm の中央値。fill を GEMM 側に含む）**", med["nongemm_ns"]),
+            ("**非 GEMM 上界（step ごとの total − gemm + fill の中央値。fill 全体を非 GEMM 側へ）**", med["nongemm_upper_ns"]),
             ("残差（中央値同士の差）", total - cat_sum),
         ]
         for name, v in rows:
@@ -407,6 +416,7 @@ class SelfTest(unittest.TestCase):
             self.assertEqual(len(rows), 2 * 2 * TRAIN_STEPS)  # 2 mode × 2 run
             med = {k: median(v) for k, v in cells[("cpu", "fresh")].items()}
             self.assertEqual(med["nongemm_ns"], 400)
+            self.assertEqual(med["nongemm_upper_ns"], 500)
             self.assertAlmostEqual(median(ov[("cpu", "fresh")]), 1.2)
             md = render_md("t", cells, ov, {}, 2)
             self.assertIn("record_only", md)
