@@ -54,6 +54,21 @@ validate_facade_path AB_AFTER_FACADE_PATH "${AB_AFTER_FACADE_PATH:-}"
 BEFORE_FACADE="$AB_BEFORE_FACADE_PATH"
 AFTER_FACADE="$AB_AFTER_FACADE_PATH"
 
+# A/B 両 checkout の `HOST_ARENA_DEFAULT_ENABLED` を計測前に検証する（fail-closed。
+# PR #2448 codex 指摘）。before=false・after=true 以外（同一 checkout・反転漏れ・
+# 定数の取得不能）は比較として無効なため、ビルド前に停止する。
+read_arena_default() { # read_arena_default <facade_path> -> true|false|(空)
+  local alloc="$1/../tensor-core/src/alloc.rs"
+  [[ -f "$alloc" ]] || return 0
+  sed -nE 's/^[[:space:]]*pub(\(crate\))?[[:space:]]+const[[:space:]]+HOST_ARENA_DEFAULT_ENABLED[[:space:]]*:[[:space:]]*bool[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*;.*/\2/p' "$alloc" | head -n1
+}
+BEFORE_ARENA_DEFAULT="$(read_arena_default "$BEFORE_FACADE")"
+AFTER_ARENA_DEFAULT="$(read_arena_default "$AFTER_FACADE")"
+if [[ "$BEFORE_ARENA_DEFAULT" != "false" || "$AFTER_ARENA_DEFAULT" != "true" ]]; then
+  echo "error: HOST_ARENA_DEFAULT_ENABLED mismatch (before=${BEFORE_ARENA_DEFAULT:-unreadable}, after=${AFTER_ARENA_DEFAULT:-unreadable}); expected before=false / after=true" >&2
+  exit 1
+fi
+
 # 判定対象デバイスは cpu 限定（arena は CPU の host バッファ再利用のため。CUDA・Metal は
 # 対象外）。cpu 以外は fail-closed で拒否する。
 DEVICE=${AB_DEVICE:-cpu}

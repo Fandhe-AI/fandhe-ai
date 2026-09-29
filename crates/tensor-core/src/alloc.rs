@@ -16,6 +16,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use crate::tensor::Tensor;
 
@@ -58,6 +59,9 @@ thread_local! {
 #[must_use = "ガードを drop すると上書きが元に戻る"]
 pub struct HostArenaOverrideGuard {
     prev: Option<bool>,
+    /// `!Send` 化。OVERRIDE は thread_local のため、別スレッドで drop されると作成元
+    /// スレッドの上書きが復元されない（PR #2448 codex 指摘）。
+    _not_send: PhantomData<*const ()>,
 }
 
 impl Drop for HostArenaOverrideGuard {
@@ -69,7 +73,10 @@ impl Drop for HostArenaOverrideGuard {
 /// 現スレッドの有効／無効をスコープ限定で上書きする（テスト・診断用。ネスト可）。
 pub fn override_enabled_for_scope(enabled: bool) -> HostArenaOverrideGuard {
     let prev = OVERRIDE.with(|c| c.replace(Some(enabled)));
-    HostArenaOverrideGuard { prev }
+    HostArenaOverrideGuard {
+        prev,
+        _not_send: PhantomData,
+    }
 }
 
 /// 現スレッドで arena が有効か。

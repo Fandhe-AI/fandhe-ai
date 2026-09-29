@@ -219,13 +219,20 @@ pub(crate) fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
         shape.iter().product::<usize>(),
         "build_tensor: shape 検査済みのはずのデータ長が一致しない（契約違反）"
     );
-    Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0)).unwrap_or_else(|_| {
-        debug_assert!(
-            false,
-            "build_tensor: shape の要素数積がオーバーフローした（契約違反）"
-        );
-        Tensor::scalar(0.0)
-    })
+    let tensor = Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0))
+        .unwrap_or_else(|_| {
+            debug_assert!(
+                false,
+                "build_tensor: shape の要素数積がオーバーフローした（契約違反）"
+            );
+            Tensor::scalar(0.0)
+        });
+    // `from_shape_fill` は値をコピーして別 Vec を作るため、入力 `data`（ReLU VJP 等が
+    // `take_cleared_f32` で arena から取った pooled Vec を含む）はここで用済みになる。
+    // arena 有効時は回収して後続の take の hit 機会を保つ（無効時は素通しで drop。
+    // イシュー #2104・PR #2448 Bugbot 指摘）。
+    fandhe_ai_tensor_core::alloc::recycle_f32(data);
+    tensor
 }
 
 /// クラス添字テンソル（`Tensor<i32>`）の稠密化。`dense_vec`（上記）の
