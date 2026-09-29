@@ -287,9 +287,10 @@ mod tests {
 
     #[test]
     fn generate_applies_candidates_in_attempt_order_and_restores_baseline_between_attempts() {
-        let dir = unique_temp_dir(
+        let dir_guard = unique_temp_dir(
             "feature_addition_generate_applies_candidates_in_attempt_order_and_restores_baseline_between_attempts",
         );
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "src/lib.rs", "baseline content");
 
         let candidates = vec![
@@ -325,8 +326,9 @@ mod tests {
 
     #[test]
     fn generate_fails_closed_when_candidates_exhausted() {
-        let dir =
+        let dir_guard =
             unique_temp_dir("feature_addition_generate_fails_closed_when_candidates_exhausted");
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "src/lib.rs", "baseline content");
 
         let candidates = vec![CandidateFix {
@@ -362,7 +364,9 @@ mod tests {
 
     #[test]
     fn new_rejects_candidate_paths_outside_workspace() {
-        let dir = unique_temp_dir("feature_addition_new_rejects_candidate_paths_outside_workspace");
+        let dir_guard =
+            unique_temp_dir("feature_addition_new_rejects_candidate_paths_outside_workspace");
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "src/lib.rs", "baseline content");
 
         let candidates = vec![CandidateFix {
@@ -391,13 +395,14 @@ mod tests {
         // workspace 外の実在ファイルを指す候補パスの内容が読み込まれてしまわ
         // ないことを確認する（`crate::fd_walk` モジュール冒頭 doc 参照。
         // PR #361 codex-review 第 4 波 P0 指摘の read 側回帰防止）。
-        let dir = unique_temp_dir(
+        let dir_guard = unique_temp_dir(
             "feature_addition_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content",
         );
-        let outside_dir = unique_temp_dir(
+        let dir = dir_guard.path().to_path_buf();
+        let outside_dir_guard = unique_temp_dir(
             "feature_addition_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content-outside",
         );
-        std::fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+        let outside_dir = outside_dir_guard.path().to_path_buf();
         let outside_file = outside_dir.join("secret.rs");
         std::fs::write(&outside_file, "workspace 外の秘匿内容")
             .expect("write should succeed in test setup");
@@ -423,9 +428,10 @@ mod tests {
     fn new_rejects_new_file_addition_not_present_in_baseline() {
         // 受け入れ条件: 新規ファイル追加候補は「既存モジュール内の合成実装」
         // の範囲を超えるため拒否する。
-        let dir = unique_temp_dir(
+        let dir_guard = unique_temp_dir(
             "feature_addition_new_rejects_new_file_addition_not_present_in_baseline",
         );
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "src/lib.rs", "baseline content");
 
         let candidates = vec![CandidateFix {
@@ -452,7 +458,9 @@ mod tests {
     fn new_rejects_cargo_toml_rewrite_candidate() {
         // 受け入れ条件: 依存クレート追加（Cargo.toml 書き換え）は人間承認必須
         // （deps-policy.md）であり本クレートは単独で許可しない。
-        let dir = unique_temp_dir("feature_addition_new_rejects_cargo_toml_rewrite_candidate");
+        let dir_guard =
+            unique_temp_dir("feature_addition_new_rejects_cargo_toml_rewrite_candidate");
+        let dir = dir_guard.path().to_path_buf();
         write_workspace_file(&dir, "Cargo.toml", "[package]\nname = \"x\"");
 
         let candidates = vec![CandidateFix {

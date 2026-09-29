@@ -169,6 +169,8 @@ pub mod verify_gates;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+pub(crate) mod test_temp;
 
 pub use bug_fix::{BugFixDetector, BugFixFixGenerator};
 pub use candidate::{CandidateFix, CandidateFixGenerator};

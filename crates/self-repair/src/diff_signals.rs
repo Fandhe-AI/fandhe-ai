@@ -713,6 +713,7 @@ pub fn measure_diff_signals<R: CommandRunner>(
 mod tests {
     use super::*;
     use crate::exec::{CommandOutput, ExecError};
+    use crate::test_support::unique_temp_dir;
     use std::cell::RefCell;
 
     /// テスト用に [`ChangedFile`] を組み立てる補助関数。
@@ -912,14 +913,8 @@ mod tests {
         // 「baseline のシグネチャが全て消えた」ことになり破壊として誤検出
         // されてしまうため、`sandbox_root` を実ディレクトリにし、現作業木の
         // 内容（追加後）を実ファイルとして書き込んで検証する。
-        let sandbox = std::env::temp_dir().join(format!(
-            "self-repair-diff-signals-pure-addition-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH 以降のはず")
-                .as_nanos()
-        ));
+        let sandbox_guard = unique_temp_dir("diff-signals-pure-addition");
+        let sandbox = sandbox_guard.path().to_path_buf();
         std::fs::create_dir_all(sandbox.join("src")).expect("src ディレクトリ作成に失敗");
         std::fs::write(
             sandbox.join("src/lib.rs"),
@@ -939,8 +934,6 @@ mod tests {
             "既存 pub fn を維持したまま新規 pub fn を追加しただけでは破壊とみなさないはず \
              （guardrail::checks::api_stability::adding_new_pub_fn_is_not_broken と同一意味論）"
         );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     #[test]
@@ -1012,14 +1005,8 @@ mod tests {
     /// rename は破壊として誤検出されない。
     #[test]
     fn api_signature_touched_does_not_flag_pure_rename_without_content_change_as_broken() {
-        let sandbox = std::env::temp_dir().join(format!(
-            "self-repair-diff-signals-pure-rename-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH 以降のはず")
-                .as_nanos()
-        ));
+        let sandbox_guard = unique_temp_dir("diff-signals-pure-rename");
+        let sandbox = sandbox_guard.path().to_path_buf();
         std::fs::create_dir_all(sandbox.join("src")).expect("src ディレクトリ作成に失敗");
         std::fs::write(
             sandbox.join("src/new.rs"),
@@ -1042,8 +1029,6 @@ mod tests {
             !touched,
             "内容が同一の純粋な rename は破壊として誤検出されないはず"
         );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     /// PR #361 codex-review Medium 指摘（`Rename API check skips non-rs
@@ -1059,14 +1044,8 @@ mod tests {
     #[test]
     fn api_signature_touched_flags_rename_from_rs_to_non_rs_as_broken_even_with_identical_content()
     {
-        let sandbox = std::env::temp_dir().join(format!(
-            "self-repair-diff-signals-rename-rs-to-non-rs-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH 以降のはず")
-                .as_nanos()
-        ));
+        let sandbox_guard = unique_temp_dir("diff-signals-rename-rs-to-non-rs");
+        let sandbox = sandbox_guard.path().to_path_buf();
         std::fs::create_dir_all(sandbox.join("src")).expect("src ディレクトリ作成に失敗");
         std::fs::write(
             sandbox.join("src/lib.txt"),
@@ -1092,8 +1071,6 @@ mod tests {
              検出されるはず（新パスの内容を読んで比較する旧実装では見逃されて \
              いた）"
         );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     /// 上記と対になる確認: 非 `.rs` → `.rs` の rename は baseline 側
@@ -1283,16 +1260,8 @@ mod tests {
     fn stage_untracked_files_makes_new_file_visible_to_diff_numstat_and_api_signature_touched() {
         use crate::exec::SystemCommandRunner;
 
-        let sandbox = std::env::temp_dir().join(format!(
-            "self-repair-diff-signals-untracked-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH 以降のはず")
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&sandbox);
-        std::fs::create_dir_all(&sandbox).expect("sandbox ディレクトリ作成に失敗");
+        let sandbox_guard = unique_temp_dir("diff-signals-untracked");
+        let sandbox = sandbox_guard.path().to_path_buf();
 
         let runner = SystemCommandRunner::new();
         let run_ok = |args: &[&str]| {
@@ -1378,8 +1347,6 @@ mod tests {
              差し戻し分: 本アサーションは旧実装の誤った意味論〈新規ファイルの pub fn も \
              一律検出〉を固定していたため反転した）"
         );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     /// PR #361 Codex レビュー P1 の回帰テスト（要求 (a)）: rename と同時に
@@ -1395,15 +1362,8 @@ mod tests {
     fn measure_diff_signals_detects_pub_fn_removal_hidden_behind_rename() {
         use crate::exec::SystemCommandRunner;
 
-        let sandbox = std::env::temp_dir().join(format!(
-            "self-repair-diff-signals-proof-rename-removal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH 以降のはず")
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&sandbox);
+        let sandbox_guard = unique_temp_dir("diff-signals-proof-rename-removal");
+        let sandbox = sandbox_guard.path().to_path_buf();
         std::fs::create_dir_all(sandbox.join("src")).expect("sandbox ディレクトリ作成に失敗");
 
         let runner = SystemCommandRunner::new();
@@ -1467,8 +1427,6 @@ mod tests {
              になるはず（PR #361 Codex レビュー P1: rename 表記が git show に渡され \
              非 0 終了が一律『新規ファイル』に丸められると、この破壊が見逃される）"
         );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     /// PR #361 codex-review P1 の回帰テスト（本体）: `policy_exclusion` を
@@ -1494,15 +1452,8 @@ mod tests {
      {
         use crate::exec::SystemCommandRunner;
 
-        let sandbox = std::env::temp_dir().join(format!(
-            "self-repair-diff-signals-policy-exclusion-fixation-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("システム時刻は UNIX_EPOCH 以降のはず")
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&sandbox);
+        let sandbox_guard = unique_temp_dir("diff-signals-policy-exclusion-fixation");
+        let sandbox = sandbox_guard.path().to_path_buf();
         std::fs::create_dir_all(sandbox.join("src")).expect("sandbox ディレクトリ作成に失敗");
 
         let runner = SystemCommandRunner::new();
@@ -1635,7 +1586,5 @@ type = "any_diff_in_paths"
              のたび再読込する実装だと、この時点で exclusion_rule_ids が \
              空になり、候補が自身の変更をエスカレーションから逃れさせられる）"
         );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 }
