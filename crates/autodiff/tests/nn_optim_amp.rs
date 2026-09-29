@@ -15,7 +15,9 @@
 
 mod common;
 
+use fandhe_ai_autodiff::AutodiffError;
 use fandhe_ai_autodiff::Tape;
+use fandhe_ai_autodiff::nn::optim::amp::grad_scaler_from_state;
 use fandhe_ai_autodiff::nn::optim::{
     GradScaler, GradScalerConfig, clip_grad_norm, has_non_finite, scale_grads, scale_loss,
     unscale_grads,
@@ -534,4 +536,170 @@ fn grad_scaler_skips_update_on_non_finite_step_and_updates_on_clean_step() {
         4.0,
         "非有限検出後は backoff_factor 倍される"
     );
+}
+
+// =====================================================================
+// 状態復元（イシュー #2365）
+// =====================================================================
+
+fn small_config() -> GradScalerConfig {
+    GradScalerConfig {
+        init_scale: 8.0,
+        growth_factor: 2.0,
+        backoff_factor: 0.5,
+        growth_interval: 3,
+    }
+}
+
+/// backoff・growth・overflow による growth 据え置きの全分岐を通る update 列。
+fn update_sequence() -> Vec<bool> {
+    let mut rng = Xorshift64Star::new(0x2365);
+    (0..60).map(|_| rng.next_u64().is_multiple_of(5)).collect()
+}
+
+#[test]
+fn grad_scaler_from_state_roundtrip_matches_original_update_sequence_bit_exact() {
+    for config in [
+        small_config(),
+        // 3 回 clean で growth が f32::MAX 超になり据え置き分岐を通る
+        GradScalerConfig {
+            init_scale: f32::MAX / 2.0,
+            ..small_config()
+        },
+    ] {
+        let seq = update_sequence();
+        for snapshot_at in [0usize, 1, 2, 5, 10, 25, 40] {
+            let mut original = GradScaler::new(config).expect("test fixture: config");
+            for &f in &seq[..snapshot_at] {
+                let _ = original.update(f);
+            }
+            let mut restored =
+                grad_scaler_from_state(config, original.scale(), original.growth_tracker())
+                    .expect("test fixture: valid state");
+            assert_eq!(restored.scale().to_bits(), original.scale().to_bits());
+            assert_eq!(restored.growth_tracker(), original.growth_tracker());
+            for &f in &seq[snapshot_at..] {
+                let a = original.update(f);
+                let b = restored.update(f);
+                assert_eq!(a.is_ok(), b.is_ok());
+                assert_eq!(restored.scale().to_bits(), original.scale().to_bits());
+                assert_eq!(restored.growth_tracker(), original.growth_tracker());
+            }
+        }
+    }
+    // scale != init_scale となる時点を含むことの確認
+    let config = small_config();
+    let mut s = GradScaler::new(config).expect("test fixture: config");
+    s.update(true).expect("test fixture: backoff");
+    assert_ne!(s.scale(), config.init_scale);
+}
+
+#[test]
+fn grad_scaler_from_state_with_initial_state_matches_new() {
+    let config = small_config();
+    let mut a = GradScaler::new(config).expect("test fixture: config");
+    let mut b =
+        grad_scaler_from_state(config, config.init_scale, 0).expect("test fixture: valid state");
+    for f in update_sequence() {
+        assert_eq!(a.update(f).is_ok(), b.update(f).is_ok());
+        assert_eq!(a.scale().to_bits(), b.scale().to_bits());
+        assert_eq!(a.growth_tracker(), b.growth_tracker());
+    }
+}
+
+#[test]
+fn grad_scaler_from_state_rejects_invalid_scale() {
+    for scale in [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.0,
+        -0.0,
+        -1.0,
+        f32::MIN_POSITIVE / 2.0,
+        f32::from_bits(1),
+    ] {
+        let err = grad_scaler_from_state(small_config(), scale, 0)
+            .err()
+            .unwrap_or_else(|| panic!("scale={scale} must be rejected"));
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(format!("{err}").contains("grad_scaler_from_state"));
+    }
+}
+
+#[test]
+fn grad_scaler_from_state_rejects_growth_tracker_out_of_range() {
+    let config = small_config();
+    for tracker in [config.growth_interval, config.growth_interval + 1, u64::MAX] {
+        let err = grad_scaler_from_state(config, 8.0, tracker)
+            .err()
+            .unwrap_or_else(|| panic!("tracker={tracker} must be rejected"));
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+}
+
+#[test]
+fn grad_scaler_from_state_rejects_invalid_config() {
+    let base = GradScalerConfig::default();
+    let mut cases = Vec::new();
+    for edit in 0..5 {
+        let mut c = base;
+        match edit {
+            0 => c.init_scale = 0.0,
+            1 => c.growth_factor = 1.0,
+            2 => c.backoff_factor = 0.0,
+            3 => c.backoff_factor = 1.0,
+            _ => c.growth_interval = 0,
+        }
+        cases.push(c);
+    }
+    for c in cases {
+        assert!(matches!(
+            grad_scaler_from_state(c, 1024.0, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+    }
+}
+
+#[test]
+fn grad_scaler_from_state_accepts_boundary_values() {
+    let config = small_config();
+    for (scale, tracker) in [
+        (8.0, config.growth_interval - 1),
+        (f32::MIN_POSITIVE, 0),
+        (f32::MAX, 0),
+    ] {
+        let s = grad_scaler_from_state(config, scale, tracker).expect("test fixture: boundary");
+        assert_eq!(s.scale().to_bits(), scale.to_bits());
+        assert_eq!(s.growth_tracker(), tracker);
+    }
+}
+
+/// 保存可能な状態と復元可能な状態の一致（PR #2404 指摘）: `GradScaler::new` が
+/// 受理する init_scale は全て `grad_scaler_from_state` でも復元でき、
+/// 非正規化数の init_scale は構築時点で拒否される。
+#[test]
+fn grad_scaler_new_and_from_state_share_scale_acceptance() {
+    let base = small_config();
+    for scale in [
+        f32::NAN,
+        f32::INFINITY,
+        0.0,
+        -1.0,
+        f32::MIN_POSITIVE / 2.0,
+        f32::from_bits(1),
+        f32::MIN_POSITIVE,
+        1.0,
+        f32::MAX,
+    ] {
+        let mut c = base;
+        c.init_scale = scale;
+        if let Ok(s) = GradScaler::new(c) {
+            let restored = grad_scaler_from_state(c, s.scale(), s.growth_tracker())
+                .unwrap_or_else(|e| panic!("scale={scale} built but not restorable: {e}"));
+            assert_eq!(restored.scale().to_bits(), s.scale().to_bits());
+        } else {
+            assert!(grad_scaler_from_state(c, scale, 0).is_err());
+        }
+    }
 }
