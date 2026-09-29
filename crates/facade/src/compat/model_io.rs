@@ -389,7 +389,7 @@ fn write_prepared(dir: &Path, p: &PreparedSave) -> Result<(), ModelIoError> {
 }
 
 /// [`write_prepared`] の本体。世代 ID・一時 manifest 名の生成器を引数にして、
-/// 単体テスト（`model_io_fs_threat_tests.rs`）が事前配置の衝突を `save_model` 相当の
+/// 単体テスト（`model_io/fs_threat_tests.rs`）が事前配置の衝突を `save_model` 相当の
 /// 経路全体へ注入できるようにする（決定記録 §6・§12.3 手順 1〜2。イシュー #2376）。
 /// 生成器は本番では [`generation_id`]・[`tmp_manifest_name`] を渡す。
 #[cfg(unix)]

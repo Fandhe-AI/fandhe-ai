@@ -2,7 +2,7 @@
 //! ファイル・差し替え・削除しない契約・中断）の統合テスト（イシュー #2376・親 #2362）。
 //!
 //! 出典: `docs/compat-model-io-decision.md` §6 後半・§12.3・§13.3（脅威棚卸し表）・§13.6。
-//! 公開 API と `std` のみで検証する（名前生成の衝突注入は `src/compat/model_io_fs_threat_tests.rs`、
+//! 公開 API と `std` のみで検証する（名前生成の衝突注入は `src/compat/model_io/fs_threat_tests.rs`、
 //! 検査〜open 間の差し替えは `src/fs_guard.rs` の単体テストが担う）。基本ケースは
 //! `compat_sequential_model_io.rs` にあり、本ファイルはその補完で重複させない。
 //! symlink の参照先は常に各テストの一時ディレクトリ配下に置く。
