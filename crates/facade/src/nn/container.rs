@@ -16,7 +16,7 @@
 //! （パラメータを持つ子の `any`。該当なしは `true`）を autodiff 側と一致させる。
 //! ロールバックは子孫を葉（`children` が空の層）単位で復元する（公開の
 //! `Module::children`／`children_mut` 経由のため、利用者定義の複合層も対象。PR #2426
-//! レビュー指摘・2026-09-29 ユーザー承認）。`children` と `children_mut` が不整合な構成は
+//! レビュー指摘・2026-09-29 ユーザー承認）。`children` と `children_mut` が不整合（件数・名前・順序・参照先の不一致）な構成は
 //! 状態変更前に `InvalidArgument` で拒否する（fail-closed）。
 //!
 //! autodiff 側との差: 子は facade `Module` の不透明な trait object のため、
@@ -47,18 +47,33 @@ pub(crate) enum RequiresGradSnapshot {
     },
 }
 
+/// `children` が返す 1 つの子の同一性キー（名前・データアドレス・サイズ）。
+/// `children_mut` 側の同位置の子と比べ、同じ子を指すことを確かめるのに使う。
+type ChildIdentity = (String, *const (), usize);
+
 /// `module` の凍結状態を葉単位で記録する。状態は変更しない。辿った各ノードで
-/// [`Module::children`] と [`Module::children_mut`] の件数・名前・順序が食い違う場合は
-/// `InvalidArgument`（`children_mut` 未実装の複合層など。呼び出し側が状態変更前に
-/// 呼ぶことで fail-closed の事前検査を兼ねる）。
+/// [`Module::children`] と [`Module::children_mut`] の件数・名前・順序・参照先（同一の子）が
+/// 食い違う場合は `InvalidArgument`（`children_mut` 未実装の複合層・別の子を返す実装など。
+/// 呼び出し側が状態変更前に呼ぶことで fail-closed の事前検査を兼ねる）。
 pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(
     module: &mut M,
 ) -> Result<RequiresGradSnapshot, AutodiffError> {
-    let names: Vec<String> = module.children().into_iter().map(|(n, _)| n).collect();
+    // 共有借用の参照は `children_mut` を呼ぶ前にここで drop し、同一性キーだけ持ち越す。
+    let identities: Vec<ChildIdentity> = module
+        .children()
+        .into_iter()
+        .map(|(n, c)| {
+            (
+                n,
+                c as *const dyn Module as *const (),
+                std::mem::size_of_val(c),
+            )
+        })
+        .collect();
     let type_name = module.type_name();
     let nested = {
         let children = module.children_mut();
-        check_children_consistent(type_name, &names, &children)?;
+        check_children_consistent(type_name, &identities, &children)?;
         children
             .into_iter()
             .map(|(name, child)| Ok((name, snapshot_requires_grad(child)?)))
@@ -74,22 +89,34 @@ pub(crate) fn snapshot_requires_grad<M: Module + ?Sized>(
     }
 }
 
-/// `children` の名前列と `children_mut` の結果が一致することを検査する（不一致は
-/// `InvalidArgument`）。
+/// `children` の同一性キー列と `children_mut` の結果が位置ごとに一致することを検査する
+/// （名前に加え、データアドレスと `size_of_val` が同じ = 同一の子を指すこと。不一致は
+/// `InvalidArgument`）。vtable 比較は codegen unit をまたぐと値がずれ偽陰性になりうるため
+/// 行わない。サイズも比べるのは、ZST が後続フィールドとアドレスを共有しうるため
+/// （サイズまで同じ ZST 同士は状態を持たず区別不要）。
 fn check_children_consistent(
     type_name: &str,
-    names: &[String],
+    expected: &[ChildIdentity],
     children_mut: &[(String, &mut dyn Module)],
 ) -> Result<(), AutodiffError> {
-    let consistent = names.len() == children_mut.len()
-        && names.iter().zip(children_mut).all(|(n, (m, _))| n == m);
+    let consistent = expected.len() == children_mut.len()
+        && expected
+            .iter()
+            .zip(children_mut)
+            .all(|((n, addr, size), (m, c))| {
+                n == m
+                    && *addr == (&**c as *const dyn Module as *const ())
+                    && *size == std::mem::size_of_val(&**c)
+            });
     if consistent {
         Ok(())
     } else {
         Err(AutodiffError::InvalidArgument(format!(
-            "set_requires_grad: `{type_name}` exposes children {names:?} via `children` but {:?} \
-             via `children_mut`; implement `children_mut` consistently with `children` \
-             (same count, names and order) so that freezing can be rolled back per leaf",
+            "set_requires_grad: `{type_name}` exposes children {:?} via `children` but {:?} \
+             via `children_mut` (or refers to different child objects); implement \
+             `children_mut` consistently with `children` (same count, names, order and the \
+             identical child references) so that freezing can be rolled back per leaf",
+            expected.iter().map(|(n, _, _)| n).collect::<Vec<_>>(),
             children_mut.iter().map(|(n, _)| n).collect::<Vec<_>>()
         )))
     }
@@ -1322,6 +1349,48 @@ mod tests {
         let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
         outer.push(Box::new(adapted(fz(true))));
         outer.push(Box::new(adapted(ChildrenOnly(mixed_comp()))));
+        let e = fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false)
+            .expect_err("事前検査で拒否");
+        assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
+        assert!(e.to_string().contains("children_mut"), "{e}");
+        assert_eq!(
+            adapter_leaf_states(outer.get_mut(0).expect("0")),
+            vec![true]
+        );
+    }
+
+    /// 同名で別の子を `children_mut` から返す複合層をアダプタ経由で積むと、状態変更前に
+    /// `InvalidArgument` で拒否され全葉が不変（PR #2426 第 5 回レビュー P1。autodiff `ModuleList`）。
+    #[test]
+    fn adapter_in_autodiff_module_list_rejects_swapped_children_mut_before_mutation() {
+        struct Swapped(Comp);
+        impl Module for Swapped {
+            fn forward<'t>(
+                &self,
+                tape: TapeRef<'t>,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                self.0.forward(tape, input)
+            }
+            fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+                self.0.named_parameters()
+            }
+            fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+                self.0.set_requires_grad(v)
+            }
+            fn requires_grad(&self) -> bool {
+                self.0.requires_grad()
+            }
+            fn children(&self) -> Vec<(String, &dyn Module)> {
+                vec![("x".into(), &self.0.a)]
+            }
+            fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+                vec![("x".into(), &mut self.0.b)]
+            }
+        }
+        let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
+        outer.push(Box::new(adapted(fz(true))));
+        outer.push(Box::new(adapted(Swapped(mixed_comp()))));
         let e = fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false)
             .expect_err("事前検査で拒否");
         assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");

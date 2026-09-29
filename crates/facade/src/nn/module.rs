@@ -203,7 +203,10 @@ pub trait Module {
     /// 子を持つ利用者定義の複合層は `children` と対で必ず実装すること。件数・名前・順序が
     /// `children` と食い違う（既定の空のまま `children` だけ実装した場合を含む）層を
     /// 含む構成は、`ModuleList`／`Sequential`／`ModuleDict` の `set_requires_grad` が状態を
-    /// 変更する前に `InvalidArgument` で拒否する（fail-closed）。復元は複合層自身へ
+    /// 変更する前に `InvalidArgument` で拒否する（fail-closed）。`children` と同じ子への参照を
+    /// 同じ順で返すこと（名前が同じでも別の子オブジェクトを返してはならない）。参照先の同一性
+    /// （データアドレス・サイズ）が食い違う場合も `set_requires_grad` は状態変更前に
+    /// `InvalidArgument` を返す。復元は複合層自身へ
     /// `set_requires_grad` を呼んだ後に本メソッドの子を葉単位で戻す順（[`Self::set_requires_grad`]
     /// 参照）。既定は空（葉モジュール向け）。
     fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {

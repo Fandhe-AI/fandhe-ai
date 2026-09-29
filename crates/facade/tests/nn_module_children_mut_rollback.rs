@@ -141,6 +141,31 @@ impl Module for RenamedMut {
     }
 }
 
+/// `children` は子 `a`、`children_mut` は同名で別フィールドの子 `b` を返す複合層（拒否対象。
+/// PR #2426 第 5 回レビュー P1）。`set_requires_grad` は両方へ伝播する。
+struct SwappedMut(Composite);
+
+impl Module for SwappedMut {
+    fn forward<'t>(&self, tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.0.forward(tape, input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.0.named_parameters()
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.0.set_requires_grad(v)
+    }
+    fn requires_grad(&self) -> bool {
+        self.0.requires_grad()
+    }
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![("x".into(), self.0.a.as_ref())]
+    }
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        vec![("x".into(), self.0.b.as_mut())]
+    }
+}
+
 fn counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
 }
@@ -292,6 +317,33 @@ fn inconsistent_children_mut_names_are_rejected_before_any_mutation() {
     let e = list.freeze().expect_err("名前不一致");
     assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
     assert_eq!(leaf_states(&list), before);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// 同名で別の子を `children_mut` から返す複合層は、状態変更前に `InvalidArgument` で拒否され、
+/// a・b ともに状態が変わらない（`ModuleList`／`Sequential`／`ModuleDict` の全経路）。
+#[test]
+fn different_child_object_with_same_name_is_rejected_before_any_mutation() {
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(Leaf::new(true, &calls)));
+    list.push(Box::new(SwappedMut(mixed(&calls))));
+    let e = list.freeze().expect_err("参照先不一致");
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let mut seq = Sequential::new();
+    seq.push(Box::new(SwappedMut(mixed(&calls))));
+    let e = seq.set_requires_grad(false).expect_err("参照先不一致");
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
+
+    let mut dict = ModuleDict::new();
+    dict.insert("m", Box::new(SwappedMut(mixed(&calls))))
+        .expect("insert");
+    let e = dict.set_requires_grad(false).expect_err("参照先不一致");
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{e}");
+
+    // 全経路で `set_requires_grad` が 1 度も葉へ届いていない（a・b とも状態不変）。
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
