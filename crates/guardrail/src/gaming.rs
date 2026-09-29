@@ -58,8 +58,8 @@ pub(crate) fn gaming_suspected(repo_root: &Path, baseline: &str) -> Result<bool,
 mod tests {
     use super::*;
     use crate::policy_exclusion::{self, MatchRule};
+    use crate::test_support::TempDirGuard;
     use std::fs;
-    use std::path::PathBuf;
     use std::process::Command;
 
     /// `ASSERTION_RELAXATION_PATTERNS`（本モジュールが複製する値）が
@@ -128,19 +128,18 @@ mod tests {
         );
     }
 
-    fn init_repo(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("guardrail-gaming-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        run(&dir, &["init", "-q"]);
-        dir
+    fn init_repo(name: &str) -> TempDirGuard {
+        let guard = TempDirGuard::new(&format!("gaming-{name}"));
+        let dir = guard.path();
+        run(dir, &["init", "-q"]);
+        guard
     }
 
     /// 本番コード変更＋許容誤差緩和の同時発生 → ゲーミング疑いあり。
     #[test]
     fn simultaneous_prod_and_tolerance_change_is_suspected() {
-        let dir = init_repo("simultaneous");
+        let tmp = init_repo("simultaneous");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -149,7 +148,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -159,8 +158,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(gaming_suspected(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(gaming_suspected(dir, "HEAD").unwrap());
     }
 
     /// テスト単独の許容誤差緩和（本番コード変更なし）→ ゲーミング疑いなし
@@ -168,7 +166,8 @@ mod tests {
     /// ションとして別途拾う対偶ケース）。
     #[test]
     fn test_only_relaxation_without_prod_change_is_not_suspected() {
-        let dir = init_repo("test-only");
+        let tmp = init_repo("test-only");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
@@ -177,7 +176,7 @@ mod tests {
              assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("src/lib.rs"),
@@ -187,21 +186,20 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!gaming_suspected(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(!gaming_suspected(dir, "HEAD").unwrap());
     }
 
     /// 本番コードのみの変更（アサーション緩和なし）→ ゲーミング疑いなし。
     #[test]
     fn prod_only_change_is_not_suspected() {
-        let dir = init_repo("prod-only");
+        let tmp = init_repo("prod-only");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(dir.join("src/lib.rs"), "pub fn noop() {}\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(dir.join("src/lib.rs"), "pub fn noop() { let _ = 1; }\n").unwrap();
 
-        assert!(!gaming_suspected(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(!gaming_suspected(dir, "HEAD").unwrap());
     }
 }

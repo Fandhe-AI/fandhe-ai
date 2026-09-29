@@ -113,8 +113,8 @@ pub(crate) fn api_broken(repo_root: &Path, baseline: &str) -> Result<bool, Guard
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDirGuard;
     use std::fs;
-    use std::path::PathBuf;
     use std::process::Command;
 
     fn run(cwd: &Path, args: &[&str]) {
@@ -155,26 +155,23 @@ mod tests {
         );
     }
 
-    fn init_repo(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "guardrail-api-stability-{name}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        run(&dir, &["init", "-q"]);
-        dir
+    fn init_repo(name: &str) -> TempDirGuard {
+        let guard = TempDirGuard::new(&format!("api-stability-{name}"));
+        let dir = guard.path();
+        run(dir, &["init", "-q"]);
+        guard
     }
 
     #[test]
     fn removing_pub_fn_is_detected_as_broken() {
-        let dir = init_repo("remove-fn");
+        let tmp = init_repo("remove-fn");
+        let dir = tmp.path();
         fs::write(
             dir.join("lib.rs"),
             "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn sub(a: i32, b: i32) -> i32 { a - b }\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("lib.rs"),
@@ -182,19 +179,19 @@ mod tests {
         )
         .unwrap();
 
-        assert!(api_broken(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(api_broken(dir, "HEAD").unwrap());
     }
 
     #[test]
     fn changing_signature_is_detected_as_broken() {
-        let dir = init_repo("change-sig");
+        let tmp = init_repo("change-sig");
+        let dir = tmp.path();
         fs::write(
             dir.join("lib.rs"),
             "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("lib.rs"),
@@ -202,19 +199,19 @@ mod tests {
         )
         .unwrap();
 
-        assert!(api_broken(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(api_broken(dir, "HEAD").unwrap());
     }
 
     #[test]
     fn adding_new_pub_fn_is_not_broken() {
-        let dir = init_repo("add-fn");
+        let tmp = init_repo("add-fn");
+        let dir = tmp.path();
         fs::write(
             dir.join("lib.rs"),
             "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("lib.rs"),
@@ -222,8 +219,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!api_broken(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(!api_broken(dir, "HEAD").unwrap());
     }
 
     #[test]
@@ -232,13 +228,14 @@ mod tests {
         // 関数のみを変更する（本チェックは行単位の文字列比較のため、
         // シグネチャと本体が同一行にあると本体の変更もシグネチャ変更として
         // 誤検知する。PoC-3 パリティの既知の限界＝モジュール冒頭コメント）。
-        let dir = init_repo("private-change");
+        let tmp = init_repo("private-change");
+        let dir = tmp.path();
         fs::write(
             dir.join("lib.rs"),
             "pub fn add(a: i32, b: i32) -> i32 {\n    helper(a, b)\n}\n\nfn helper(a: i32, b: i32) -> i32 { a + b }\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::write(
             dir.join("lib.rs"),
@@ -246,19 +243,18 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!api_broken(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(!api_broken(dir, "HEAD").unwrap());
     }
 
     #[test]
     fn deleted_file_with_pub_items_is_broken() {
-        let dir = init_repo("delete-file");
+        let tmp = init_repo("delete-file");
+        let dir = tmp.path();
         fs::write(dir.join("lib.rs"), "pub struct Foo;\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         fs::remove_file(dir.join("lib.rs")).unwrap();
 
-        assert!(api_broken(&dir, "HEAD").unwrap());
-        fs::remove_dir_all(&dir).ok();
+        assert!(api_broken(dir, "HEAD").unwrap());
     }
 }
