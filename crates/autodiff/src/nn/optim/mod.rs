@@ -234,6 +234,11 @@ pub use state_dict::OptimizerStateDict;
 // 承認範囲外のまま非公開を維持する（`docs/autodiff-lbfgs-decision.md`
 // §9）。`DeviceParamStore` 非対応（デバイス常駐化は親 #2172 のスコープ外）。
 
+// イシュー #2366: `Lbfgs` の状態保存・復元（専用 inherent API
+// `Lbfgs::state_dict`／`load_state_dict`／`history_len`。`lbfgs` モジュール
+// doc「状態の保存・復元」節・`docs/autodiff-lbfgs-decision.md` §10）。
+// `OptimizerStateDict` は実装せず facade 公開面も広げない。
+
 // イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）
 // を追加した（`param_group` モジュール冒頭 doc 参照）。`ParamGroup`／
 // `ParamGroupStep` を `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb`
