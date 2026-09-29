@@ -122,7 +122,7 @@
 //!
 //! `N` は `slot_shapes` の総要素数、`n` は履歴件数。空ベクトルは
 //! キーごと省く。`load_state_dict` は fail-closed で、検証順は
-//! (1) `N` の checked 計算 → (2) `n_iter`／`func_evals` 復号 →
+//! (1) `N` の checked 計算 → (2) `n_iter`／`func_evals` 復号（`n_iter <= func_evals`）→
 //! (3) 実在キーから履歴件数を導出（正規表記の添字のみ）し
 //! `expected_history_len` と照合 → (4) `n <= history_size`・
 //! `n <= n_iter - 1` 等の到達可能状態の不変条件 → (5) 期待キー集合との
@@ -1275,10 +1275,6 @@ fn counter_add(name: &str, cur: u64, inc: u64) -> Result<u64, AutodiffError> {
     })
 }
 
-/// 復元を受け入れるカウンタ上限。これを超える値は到達不能とみなし、
-/// 復元後の増分でオーバーフローしうる状態を `load_state_dict` 時点で拒否する。
-const LBFGS_COUNTER_LIMIT: u64 = u64::MAX / 2;
-
 fn load_err(msg: String) -> AutodiffError {
     AutodiffError::InvalidArgument(format!("Lbfgs::load_state_dict: {msg}"))
 }
@@ -1374,12 +1370,14 @@ fn decode_lbfgs_state(
     let func_evals =
         decode_u16x4_tensor(LBFGS_FUNC_EVALS_KEY, get_key(state, LBFGS_FUNC_EVALS_KEY)?)?;
 
-    for (name, v) in [("n_iter", n_iter), ("func_evals", func_evals)] {
-        if v > LBFGS_COUNTER_LIMIT {
-            return Err(load_err(format!(
-                "{name} {v} exceeds the restorable counter limit {LBFGS_COUNTER_LIMIT}"
-            )));
-        }
+    // 1 回の `step` は closure 評価を 1 回（初期評価）＋反復ごとに 1 回以上
+    // 行うため、到達可能な状態では常に `n_iter <= func_evals`。上限定数は
+    // 置かない（`step` が到達しうる値を拒否しないため。溢れは次の `step` の
+    // `counter_add` が型付きエラーにする）。
+    if n_iter > func_evals {
+        return Err(load_err(format!(
+            "n_iter {n_iter} exceeds func_evals {func_evals} (unreachable state)"
+        )));
     }
 
     // 履歴件数は実在するキーだけから導く（宣言値・呼び出し元の値を根拠に
@@ -1415,11 +1413,6 @@ fn decode_lbfgs_state(
 
     let has_loss = func_evals >= 1;
     let has_vectors = n_iter >= 1;
-    if has_vectors && !has_loss {
-        return Err(load_err(format!(
-            "n_iter {n_iter} requires func_evals >= 1 (got {func_evals})"
-        )));
-    }
     // 期待キー集合との完全一致（欠落 → 余剰の順に昇順で全件列挙）。
     let mut expected: BTreeSet<String> = BTreeSet::new();
     for k in [
@@ -1464,6 +1457,10 @@ fn decode_lbfgs_state(
         |key: &str| -> Result<f32, AutodiffError> { Ok(read_exact_shape(state, key, &[1])?[0]) };
     let t = scalar(LBFGS_T_KEY)?;
     let h_diag = scalar(LBFGS_H_DIAG_KEY)?;
+    // `h_diag` は初期値 1.0 か `ys / yy`（ys > 1e-10・yy > 0）のため常に正の有限値。
+    if !(h_diag.is_finite() && h_diag > 0.0) {
+        return Err(load_err(format!("h_diag {h_diag} must be finite and > 0")));
+    }
     let last_loss = if has_loss {
         Some(scalar(LBFGS_LAST_LOSS_KEY)?)
     } else {
@@ -1496,7 +1493,14 @@ fn decode_lbfgs_state(
         )?);
     }
     let ro: VecDeque<f32> = if n >= 1 {
-        read_exact_shape(state, LBFGS_RHO_KEY, &[n])?.into()
+        let rho = read_exact_shape(state, LBFGS_RHO_KEY, &[n])?;
+        // `rho = 1 / ys`（曲率ペアは ys > 1e-10 のときのみ生成）のため正の有限値。
+        if let Some(bad) = rho.iter().find(|r| !(r.is_finite() && **r > 0.0)) {
+            return Err(load_err(format!(
+                "history.rho value {bad} must be finite and > 0"
+            )));
+        }
+        rho.into()
     } else {
         VecDeque::new()
     };

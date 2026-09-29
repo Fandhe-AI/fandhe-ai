@@ -410,13 +410,46 @@ fn rejects_bad_u16x4_encoding() {
     });
 }
 
-/// `n_iter`／`func_evals` に `u64::MAX` を入れた state は、復元後の step で
-/// panic／巻き戻りを起こさないよう `load_state_dict` で拒否する。
+/// `n_iter > func_evals` は `step` から到達不能なため拒否する。
 #[test]
-fn rejects_counter_near_u64_max() {
-    for key in ["n_iter.u64_u16x4", "func_evals.u64_u16x4"] {
+fn rejects_n_iter_exceeding_func_evals() {
+    reject_with(|sd, _| {
+        sd.insert("n_iter.u64_u16x4".into(), encode_u16x4(u64::MAX));
+    });
+    reject_with(|sd, n| {
+        sd.insert("n_iter.u64_u16x4".into(), encode_u16x4(n as u64 + 2));
+        sd.insert("func_evals.u64_u16x4".into(), encode_u16x4(n as u64 + 1));
+    });
+}
+
+/// `h_diag`・`history.rho` は正の有限値のみ到達可能（ys > 1e-10 のペアのみ生成）。
+#[test]
+fn rejects_non_positive_h_diag_and_rho() {
+    for v in [0.0f32, -1.0] {
         reject_with(|sd, _| {
-            sd.insert(key.to_string(), encode_u16x4(u64::MAX));
+            sd.insert("h_diag".into(), t(vec![v], &[1]));
+        });
+        reject_with(|sd, n| {
+            let mut rho = vec![1.0f32; n];
+            rho[n - 1] = v;
+            sd.insert("history.rho".into(), t(rho, &[n]));
         });
     }
+}
+
+/// カウンタに上限定数はなく、`u64::MAX` の復元自体は受理し、
+/// 次の `step` が型付きエラーで失敗する（panic／巻き戻りなし）。
+#[test]
+fn counter_at_u64_max_is_restorable_and_next_step_errors() {
+    let (mut sd, n) = valid();
+    sd.insert("n_iter.u64_u16x4".into(), encode_u16x4(u64::MAX));
+    sd.insert("func_evals.u64_u16x4".into(), encode_u16x4(u64::MAX));
+    let (mut target, params) = trained(config(HIST, LbfgsLineSearch::None), 1);
+    target.load_state_dict(sd, &slot_shapes(), n).unwrap();
+    let err = target
+        .step_closure(&params, objective)
+        .expect_err("オーバーフローは型付きエラー");
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert_eq!(target.n_iter(), u64::MAX);
+    assert_eq!(target.func_evals(), u64::MAX);
 }
