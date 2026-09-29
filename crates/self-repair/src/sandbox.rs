@@ -29,6 +29,10 @@
 //! （sandbox 作成の時点で既に）満たせない。`git clone --local` は完全に独立した
 //! `.git` を作るため、より強い隔離を保証できる。
 //!
+//! sandbox 先パスは事前削除せず排他作成し（既存パスなら `Err`・内容には触れない）、
+//! 作成済みの空ディレクトリへ clone する（イシュー #2388）。後始末は自分が作った
+//! ディレクトリだけを対象にする。
+//!
 //! [`reflect_adopted_diff`] は [`crate::outcome::LoopOutcome::Adopted`] の場合
 //! のみ呼ばれ、sandbox の作業木と `baseline_commit` の差分を `--repo` の作業
 //! ツリーへ `git apply --check` の競合検査を経て反映する（index へは触れない。
@@ -37,9 +41,12 @@
 
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `git` を `cwd` で起動するコマンドを構築する。継承されうる `GIT_*` 環境変数
@@ -89,18 +96,25 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
-/// `env::temp_dir()` 配下に、プロセス ID とナノ秒タイムスタンプで一意化した
-/// sandbox パスを生成する（同一プロセス内で `self-repair run` 相当の処理を
-/// 連続実行しても衝突しないよう、PID のみに依存した `tests/` 側の簡易方式
-/// より強い一意性を持たせる。本モジュールは本番経路〈`src/`〉であり、
-/// テスト専用ヘルパーより衝突耐性を優先する）。
+/// プロセス内で単調増加する sandbox 名の連番（同一プロセス・同一ナノ秒でも
+/// 名前が衝突しないようにする）。
+static SANDBOX_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 通常経路（`RunSandbox::create`）で `AlreadyExists` 時に新しい名前で再試行する上限回数。
+const MAX_SANDBOX_CREATE_ATTEMPTS: usize = 8;
+
+/// `env::temp_dir()` 配下に、プロセス ID・ナノ秒タイムスタンプ・プロセス内連番
+/// で一意化した sandbox パス候補を生成する。名前は予測可能でありうるため、
+/// 一意性だけに頼らず、呼び出し側が排他作成（`create_sandbox_dir`）と
+/// `AlreadyExists` 時の再試行を組み合わせる前提である。
 fn unique_sandbox_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
+    let seq = SANDBOX_SEQ.fetch_add(1, Ordering::Relaxed);
     env::temp_dir().join(format!(
-        "self-repair-run-sandbox-{}-{nanos}",
+        "self-repair-run-sandbox-{}-{nanos}-{seq}",
         std::process::id()
     ))
 }
@@ -118,44 +132,57 @@ pub struct RunSandbox {
     keep: bool,
 }
 
-/// [`RunSandbox::create`] の本体。`root`（sandbox 先パス）を呼び出し元から
-/// 注入できる形にしたのは、テストで `unique_sandbox_path()`（PID・ナノ秒
-/// タイムスタンプ由来で決定不能）ではなく既知のパスを使い、初期化失敗時に
-/// 「そのパスが削除されているか」を決定的に検証するため
-/// （`tests` モジュール `create_removes_sandbox_directory_when_initialization_fails_after_clone`
-/// 参照）。
-///
-/// # clone 成功後の初期化失敗で一時ディレクトリが残置される問題（P2）
-/// 旧実装は `git clone` → `git checkout --detach` の両方が成功したあとで
-/// はじめて `RunSandbox { root, keep: false }` を構築していた。そのため
-/// `checkout` が失敗すると `RunSandbox`（`Drop` で `root` を削除する唯一の
-/// 主体）が一度も存在せず、clone 済みの sandbox ディレクトリが `Err` 経路で
-/// 残置されていた（PR #361 codex-review 第 3 波 P2 指摘）。
-///
-/// 本実装は `clone` 成功直後に `RunSandbox { root, keep: false }` を構築し、
-/// 以降の初期化ステップ（`checkout`）は構築済みの `sandbox`（cleanup guard
-/// を兼ねる）に対して行う。`checkout` が失敗して `?` で早期 return する際は
-/// ローカル変数 `sandbox` が関数末尾でドロップされ、`Drop for RunSandbox` が
-/// `root` を削除する。`RunSandbox` 自体が cleanup guard であるため、専用の
-/// 別型は導入しない。
-fn create_at(root: PathBuf, repo: &Path, baseline_commit: &str) -> Result<RunSandbox, String> {
+/// `root` を排他的に作成する（既存のディレクトリ・ファイル・シンボリックリンク
+/// 〈dangling を含む〉はすべて `AlreadyExists`）。Unix では他ユーザーから
+/// sandbox（`--repo` のソース一式と候補差分を含む）を読ませないため `0o700`
+/// で作る（umask で更に絞られうる）。親ディレクトリは作らない（非再帰）。
+fn create_exclusive_dir(root: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::DirBuilder::new().mode(0o700).create(root)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(root)
+    }
+}
+
+/// `root` を排他作成し、成功した直後に cleanup guard を兼ねる `RunSandbox` を
+/// 構築する。作成に失敗した場合は何も構築せず何も削除しない（他者のパスを
+/// 消さない）。
+fn create_sandbox_dir(root: PathBuf) -> io::Result<RunSandbox> {
+    create_exclusive_dir(&root)?;
+    Ok(RunSandbox { root, keep: false })
+}
+
+/// `--repo` を正規化し UTF-8 文字列として返す。ディレクトリ作成より前に
+/// 行うため、ここでの失敗は後始末を要さない。
+fn resolve_repo(repo: &Path) -> Result<String, String> {
     let repo_abs = fs::canonicalize(repo).map_err(|error| {
         format!(
             "--repo の解決に失敗しました（repo={}）: {error}",
             repo.display()
         )
     })?;
-    let repo_str = repo_abs
+    repo_abs
         .to_str()
-        .ok_or_else(|| "--repo のパスが UTF-8 ではありません".to_string())?;
+        .map(str::to_string)
+        .ok_or_else(|| "--repo のパスが UTF-8 ではありません".to_string())
+}
 
-    // 同一パスが前回実行の残骸として残っていないことを保証してから clone
-    // する（`git clone` は既存の空でない宛先ディレクトリを拒否するため）。
-    let _ = fs::remove_dir_all(&root);
-    let root_str = root
+/// 作成済みの空 sandbox ディレクトリへ `git clone` し、`baseline_commit` へ
+/// detached checkout する。`?` で早期 return しても `sandbox` の `Drop` が
+/// 自分の作った `root` のみを削除する。
+fn initialize(
+    sandbox: RunSandbox,
+    repo_str: &str,
+    baseline_commit: &str,
+) -> Result<RunSandbox, String> {
+    let root_str = sandbox
+        .root
         .to_str()
-        .ok_or_else(|| "sandbox パスが UTF-8 ではありません".to_string())?;
-
+        .ok_or_else(|| "sandbox パスが UTF-8 ではありません".to_string())?
+        .to_string();
     run_git(
         Path::new("."),
         &[
@@ -164,19 +191,76 @@ fn create_at(root: PathBuf, repo: &Path, baseline_commit: &str) -> Result<RunSan
             "--no-hardlinks",
             "--quiet",
             repo_str,
-            root_str,
+            &root_str,
         ],
     )?;
-
-    // clone 成功直後に `RunSandbox` を構築する（上記ドキュメント参照）。
-    // 以降 `?` で早期 return しても `sandbox` の `Drop` が `root` を削除する。
-    let sandbox = RunSandbox { root, keep: false };
     run_git(
         sandbox.root(),
         &["checkout", "--quiet", "--detach", baseline_commit],
     )?;
-
     Ok(sandbox)
+}
+
+/// パス注入版の単発作成（再試行なし。通常経路は `create_with_candidates`）。テスト専用。`root`（sandbox 先パス）を
+/// 呼び出し元から注入できる形にしたのは、テストで既知のパスを使い、初期化
+/// 失敗時に「そのパスが削除されているか」を決定的に検証するため
+/// （`tests` モジュール `create_removes_sandbox_directory_when_initialization_fails_after_clone`
+/// 参照）。
+///
+/// # 契約（イシュー #2388）
+/// - 事前削除はしない。`root` を排他作成し、既存パス（ディレクトリ・ファイル・
+///   シンボリックリンク）なら再試行せず、既存の内容に触れずに `Err` を返す。
+///   `git clone` は空の既存宛先を受け付けるため、事前削除は不要である。
+/// - `create_dir` 成功直後に cleanup guard（`RunSandbox`）を構築する。
+///   以降 clone・checkout のどちらが失敗しても、`Drop` が自分の作った
+///   ディレクトリだけを削除する（PR #361 codex-review 第 3 波 P2 指摘の
+///   「clone 済み sandbox の残置」防止を、構築位置を前倒しして維持）。
+///   作成自体に失敗した経路では何も消さない。
+#[cfg(test)]
+fn create_at(root: PathBuf, repo: &Path, baseline_commit: &str) -> Result<RunSandbox, String> {
+    let repo_str = resolve_repo(repo)?;
+    if root.to_str().is_none() {
+        return Err("sandbox パスが UTF-8 ではありません".to_string());
+    }
+    let sandbox = create_sandbox_dir(root.clone()).map_err(|error| {
+        format!(
+            "sandbox ディレクトリの排他作成に失敗しました（既存のパスには触れていません。path={}）: {error}",
+            root.display()
+        )
+    })?;
+    initialize(sandbox, &repo_str, baseline_commit)
+}
+
+/// 候補パスを順に排他作成し、最初に成功したものを sandbox として初期化する。
+/// `AlreadyExists` のときだけ次の候補へ進み（既存パスには触れない）、それ以外の
+/// I/O エラーは再試行せず即座に `Err` とする。候補を使い切った場合も `Err`。
+/// `RunSandbox::create`（候補は `unique_sandbox_path()` の有限個）から呼ばれる。
+fn create_with_candidates(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    repo: &Path,
+    baseline_commit: &str,
+) -> Result<RunSandbox, String> {
+    let repo_str = resolve_repo(repo)?;
+    let mut attempts = 0usize;
+    for root in candidates {
+        attempts += 1;
+        if root.to_str().is_none() {
+            return Err("sandbox パスが UTF-8 ではありません".to_string());
+        }
+        match create_sandbox_dir(root.clone()) {
+            Ok(sandbox) => return initialize(sandbox, &repo_str, baseline_commit),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "sandbox ディレクトリの作成に失敗しました（path={}）: {error}",
+                    root.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "一意な sandbox パスを確保できませんでした（{attempts} 回衝突）"
+    ))
 }
 
 impl RunSandbox {
@@ -191,8 +275,16 @@ impl RunSandbox {
     /// 場合でも sandbox が必ず `baseline_commit` の内容と一致することを保証
     /// するため（`git clone` の既定挙動〈`repo` の HEAD が指す先〉に依存
     /// しない）。
+    ///
+    /// sandbox 先は事前削除せず排他作成する（Unix では `0o700`）。名前が既存
+    /// パスと衝突した場合は新しい名前で最大 8 回まで再試行し、既存パスには
+    /// 触れない。
     pub fn create(repo: &Path, baseline_commit: &str) -> Result<Self, String> {
-        create_at(unique_sandbox_path(), repo, baseline_commit)
+        create_with_candidates(
+            (0..MAX_SANDBOX_CREATE_ATTEMPTS).map(|_| unique_sandbox_path()),
+            repo,
+            baseline_commit,
+        )
     }
 
     /// sandbox のルートパス（`RepairCompositeGateSpec::workspace`／
@@ -361,6 +453,170 @@ mod tests {
             .to_string()
     }
 
+    fn init_baseline_repo(name: &str) -> (crate::test_support::TempDirGuard, String) {
+        let guard = unique_temp_dir(name);
+        let repo = guard.path().to_path_buf();
+        init_repo(&repo);
+        fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
+        git_commit_all(&repo, "baseline commit");
+        let baseline = head_commit(&repo);
+        (guard, baseline)
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("read_dir に失敗")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn create_at_rejects_existing_directory_without_touching_contents() {
+        let (repo, baseline) = init_baseline_repo("excl-dir-src");
+        let parent = unique_temp_dir("excl-dir");
+        let existing = parent.path().join("existing");
+        fs::create_dir(&existing).expect("mkdir");
+        fs::write(existing.join("marker.txt"), "keep\n").expect("marker");
+        let before = dir_entries(&existing);
+
+        let result = create_at(existing.clone(), repo.path(), &baseline);
+        assert!(result.is_err(), "既存ディレクトリは拒否されるはず");
+        assert_eq!(
+            fs::read_to_string(existing.join("marker.txt")).expect("marker 読み取り"),
+            "keep\n"
+        );
+        assert_eq!(dir_entries(&existing), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_at_rejects_existing_symlink_without_touching_target() {
+        let (repo, baseline) = init_baseline_repo("excl-link-src");
+        let parent = unique_temp_dir("excl-link");
+        let target = parent.path().join("target");
+        fs::create_dir(&target).expect("mkdir");
+        fs::write(target.join("marker.txt"), "keep\n").expect("marker");
+        let link = parent.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let result = create_at(link.clone(), repo.path(), &baseline);
+        assert!(result.is_err(), "既存 symlink は拒否されるはず");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("marker.txt")).expect("marker 読み取り"),
+            "keep\n"
+        );
+        assert!(!target.join(".git").exists());
+        assert_eq!(dir_entries(&target), vec!["marker.txt".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_at_rejects_dangling_symlink() {
+        let (repo, baseline) = init_baseline_repo("excl-dangling-src");
+        let parent = unique_temp_dir("excl-dangling");
+        let missing = parent.path().join("missing-target");
+        let link = parent.path().join("link");
+        std::os::unix::fs::symlink(&missing, &link).expect("symlink");
+
+        let result = create_at(link.clone(), repo.path(), &baseline);
+        assert!(result.is_err(), "dangling symlink は拒否されるはず");
+        assert!(!missing.exists(), "リンク先パスが作られてはならない");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn create_at_rejects_existing_file() {
+        let (repo, baseline) = init_baseline_repo("excl-file-src");
+        let parent = unique_temp_dir("excl-file");
+        let file = parent.path().join("f");
+        fs::write(&file, "keep\n").expect("write");
+        let result = create_at(file.clone(), repo.path(), &baseline);
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&file).expect("read"), "keep\n");
+    }
+
+    #[test]
+    fn create_at_clones_into_freshly_created_empty_directory() {
+        let (repo, baseline) = init_baseline_repo("excl-fresh-src");
+        let parent = unique_temp_dir("excl-fresh");
+        let root = parent.path().join("sandbox");
+
+        let sandbox = create_at(root.clone(), repo.path(), &baseline)
+            .expect("未作成パスへの create_at は成功するはず");
+        assert_eq!(
+            fs::read_to_string(root.join("a.txt")).expect("a.txt"),
+            "baseline\n"
+        );
+        assert!(root.join(".git").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&root).expect("metadata").permissions().mode();
+            assert_eq!(mode & 0o077, 0, "group/other に権限があってはならない");
+        }
+        drop(sandbox);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn create_with_candidates_skips_existing_candidate_untouched() {
+        let (repo, baseline) = init_baseline_repo("cand-skip-src");
+        let parent = unique_temp_dir("cand-skip");
+        let first = parent.path().join("first");
+        fs::create_dir(&first).expect("mkdir");
+        fs::write(first.join("marker.txt"), "keep\n").expect("marker");
+        let second = parent.path().join("second");
+
+        let sandbox =
+            create_with_candidates(vec![first.clone(), second.clone()], repo.path(), &baseline)
+                .expect("2 番目の候補で成功するはず");
+        assert_eq!(sandbox.root(), second.as_path());
+        assert_eq!(dir_entries(&first), vec!["marker.txt".to_string()]);
+        assert_eq!(
+            fs::read_to_string(first.join("marker.txt")).expect("marker"),
+            "keep\n"
+        );
+    }
+
+    #[test]
+    fn create_with_candidates_errors_when_all_candidates_exist() {
+        let (repo, baseline) = init_baseline_repo("cand-all-src");
+        let parent = unique_temp_dir("cand-all");
+        let mut candidates = Vec::new();
+        for i in 0..3 {
+            let dir = parent.path().join(format!("c{i}"));
+            fs::create_dir(&dir).expect("mkdir");
+            fs::write(dir.join("marker.txt"), "keep\n").expect("marker");
+            candidates.push(dir);
+        }
+        let result = create_with_candidates(candidates.clone(), repo.path(), &baseline);
+        assert!(result.is_err());
+        for dir in candidates {
+            assert_eq!(dir_entries(&dir), vec!["marker.txt".to_string()]);
+        }
+    }
+
+    #[test]
+    fn create_generates_distinct_roots_for_consecutive_calls() {
+        let (repo, baseline) = init_baseline_repo("distinct-src");
+        let first = RunSandbox::create(repo.path(), &baseline).expect("create 1");
+        let second = RunSandbox::create(repo.path(), &baseline).expect("create 2");
+        assert_ne!(first.root(), second.root());
+    }
+
     /// P2 回帰防止（PR #361 codex-review 第 3 波指摘）: `git clone` 成功後に
     /// `git checkout --detach` が失敗した場合でも、clone 済みの sandbox
     /// ディレクトリが残置されないことを確認する。
@@ -378,7 +634,7 @@ mod tests {
         fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
         git_commit_all(&repo, "baseline commit");
 
-        // `git clone` は存在しない宛先を要求するため、ガード配下の未作成の子パスを使う。
+        // `create_at` は既存パスを拒否する（排他作成）ため、ガード配下の未作成の子パスを使う。
         let root_parent = unique_temp_dir("sandbox-create-checkout-fails");
         let root = root_parent.path().join("sandbox");
         // 存在しない commit sha を渡し、clone 成功後の `git checkout --detach`
