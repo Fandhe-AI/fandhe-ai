@@ -2005,9 +2005,9 @@ impl OnnxModel {
 }
 
 /// `scan_unapproved_onnx_pub_items` が承認範囲 12 件（`OnnxModel`／
-/// `OnnxValue`／`OnnxError`／`OnnxExportOptions` の型定義 4 件と
-/// `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path,
-/// from_sequential}` のメソッド 6 件）をすべて含む合成ソースに対して
+/// `OnnxValue`／`OnnxError`／`OnnxExportOptions`／`OnnxExternalDataLimits` の
+/// 型定義 5 件と `OnnxModel::{from_bytes, from_path, from_path_with_limits,
+/// run, to_bytes, to_path, from_sequential}` のメソッド 7 件）をすべて含む合成ソースに対して
 /// オフェンス 0 件を返すことを確認する（空虚 pass 防止。承認範囲の
 /// 拡張〈#2018・#2037〉自体が正しく反映されていることの正例テスト）。
 #[test]
