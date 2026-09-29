@@ -203,15 +203,34 @@ impl Fx {
     }
 }
 
-fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+/// dir 内の各ファイルの (名前, 長さ, 内容の代表バイト列) を返す。
+///
+/// 疎ファイル（1 GiB + 1 の safetensors 等）を全量 `read` するとテストが約 GiB 単位のメモリを
+/// 実体化して CI がメモリ不足になりうるため、`SNAPSHOT_FULL_LIMIT` 超のファイルは長さと先頭・末尾
+/// `SNAPSHOT_EDGE` バイトのみを比較する（load が書き換えないことの検知には長さ＋端の内容で足りる）。
+fn snapshot(dir: &Path) -> Vec<(String, u64, Vec<u8>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    const SNAPSHOT_FULL_LIMIT: u64 = 1 << 20;
+    const SNAPSHOT_EDGE: u64 = 4096;
+    let mut v: Vec<(String, u64, Vec<u8>)> = std::fs::read_dir(dir)
         .expect("readdir")
         .flatten()
         .map(|e| {
-            (
-                e.file_name().to_string_lossy().into_owned(),
-                std::fs::read(e.path()).expect("read"),
-            )
+            let mut f = std::fs::File::open(e.path()).expect("open");
+            let len = f.metadata().expect("metadata").len();
+            let mut buf = Vec::new();
+            if len <= SNAPSHOT_FULL_LIMIT {
+                f.read_to_end(&mut buf).expect("read");
+            } else {
+                let mut head = vec![0u8; SNAPSHOT_EDGE as usize];
+                f.read_exact(&mut head).expect("read head");
+                f.seek(SeekFrom::Start(len - SNAPSHOT_EDGE)).expect("seek");
+                let mut tail = vec![0u8; SNAPSHOT_EDGE as usize];
+                f.read_exact(&mut tail).expect("read tail");
+                buf.extend_from_slice(&head);
+                buf.extend_from_slice(&tail);
+            }
+            (e.file_name().to_string_lossy().into_owned(), len, buf)
         })
         .collect();
     v.sort();
