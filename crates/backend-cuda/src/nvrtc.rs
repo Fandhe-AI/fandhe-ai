@@ -1447,7 +1447,7 @@ pub(crate) struct CachedKernel {
 /// TOCTOU を構造的に閉じられなかったため削除済み。非 unix ではディスク
 /// キャッシュ自体を無効化しており本 I/O 経路はコンパイルされない。
 /// `docs/facade-windows-build-decision.md`）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn validate_cache_entry(entry_dir: &Path) -> bool {
     is_plain_dir(entry_dir)
         && is_plain_file(&entry_dir.join(CACHE_ENTRY_SOURCE_FILE))
@@ -1471,7 +1471,7 @@ fn validate_cache_entry(entry_dir: &Path) -> bool {
 /// 自分の新規書き込みを破棄してしまい、そのキーは以降ずっと「ミスと
 /// 判定されて再コンパイルされる」空回りに陥る（正常書き込みが永久に
 /// キャッシュへ反映されない）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn is_plain_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_file() && meta.len() > 0)
@@ -1482,7 +1482,7 @@ fn is_plain_file(path: &Path) -> bool {
 /// 追跡しない [`fs::symlink_metadata`] で判定する（[`is_plain_file`] と
 /// 同じ理由。エントリディレクトリ自体が symlink に置換されているケース
 /// を拒否する）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn is_plain_dir(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_dir())
@@ -3992,7 +3992,10 @@ pub fn compile_ptx(src: &str, arch: &str) -> Result<Ptx, CudaError> {
     compile_ptx_with_opts(src, base).map_err(CudaError::from)
 }
 
-#[cfg(test)]
+// ディスクキャッシュ I/O（`cfg(unix)` 限定）を前提とするため `cfg(all(test, unix))`。
+// 非 unix ではキャッシュ本体が無効でテストが参照する項目が存在しない
+// （`docs/facade-windows-build-decision.md`）。
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::HashMap;
     use std::collections::hash_map::DefaultHasher;
@@ -6480,7 +6483,7 @@ mod tests {
 // ヘルパー（`sample_key` 等）とは独立に自前のヘルパーを持つ（可視性
 // ルールと配置理由の詳細は `jit_cache_regression_tests.rs` 冒頭の
 // ドキュメンテーションコメントを正とする）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "jit_cache_regression_tests.rs"]
 mod jit_cache_regression_tests;
 
@@ -6491,6 +6494,6 @@ mod jit_cache_regression_tests;
 // `#[ignore]`（実機必須）のため通常 CI では実行されず、コンパイル検査の
 // みが行われる（詳細は `jit_cache_bench_tests.rs` 冒頭ドキュメンテーション
 // コメントを正とする）。
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "jit_cache_bench_tests.rs"]
 mod jit_cache_bench_tests;
