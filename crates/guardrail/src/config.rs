@@ -268,14 +268,9 @@ mod tests {
 
     #[test]
     fn resolve_falls_back_to_builtin_when_no_file_present() {
-        let dir = std::env::temp_dir().join(format!(
-            "guardrail-config-test-{}-{}",
-            std::process::id(),
-            "resolve-fallback"
-        ));
-        let _ = fs::create_dir_all(&dir);
-        let cfg = resolve(None, &dir, PresetName::Default).unwrap();
+        let tmp = crate::test_support::TempDirGuard::new("config-resolve-fallback");
+        let dir = tmp.path();
+        let cfg = resolve(None, dir, PresetName::Default).unwrap();
         assert_eq!(cfg.thresholds, Thresholds::builtin(PresetName::Default));
-        let _ = fs::remove_dir_all(&dir);
     }
 }

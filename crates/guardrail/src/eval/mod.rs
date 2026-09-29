@@ -273,17 +273,13 @@ mod tests {
 
     #[test]
     fn empty_dataset_is_rejected_fail_closed() {
-        let dir = std::env::temp_dir().join(format!(
-            "guardrail-eval-empty-dataset-{}",
-            std::process::id()
-        ));
+        let tmp = crate::test_support::TempDirGuard::new("eval-empty-dataset");
+        let dir = tmp.path();
         let changes_dir = dir.join("changes");
         std::fs::create_dir_all(&changes_dir).expect("一時ディレクトリの作成に失敗");
 
         let thresholds = default_thresholds();
-        let err = run(&dir, &thresholds).unwrap_err();
+        let err = run(dir, &thresholds).unwrap_err();
         assert!(matches!(err, GuardrailError::InvalidInput(_)));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

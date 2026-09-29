@@ -23,6 +23,9 @@
 
 use std::process::Command;
 
+mod common;
+use common::temp_dir::TempDirGuard;
+
 fn guardrail_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_guardrail"))
 }
@@ -151,11 +154,8 @@ fn measured_nonexistent_baseline_is_internal_error_not_a_verdict_code() {
 #[test]
 #[ignore = "cargo build/test --release/clippy を実起動するため高コスト（実機依存ではないが CI 既定では skip）"]
 fn measured_clean_tiny_crate_yields_auto_apply_exit_0() {
-    let dir = std::env::temp_dir().join(format!(
-        "guardrail-cli-three-branch-measured-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = TempDirGuard::new("cli-three-branch-measured");
+    let dir = tmp.path();
     std::fs::create_dir_all(dir.join("src")).unwrap();
 
     std::fs::write(
@@ -171,7 +171,7 @@ fn measured_clean_tiny_crate_yields_auto_apply_exit_0() {
 
     let git = |args: &[&str]| {
         let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(&dir);
+        cmd.args(args).current_dir(dir);
         // 祖先プロセス（lefthook の pre-push フック等）から継承された
         // `GIT_DIR`／`GIT_WORK_TREE` 等を除去する（`exclusion_match::git_command`
         // と同一方針。除去しないとフィクスチャ用一時リポジトリの隔離が壊れる）。
@@ -228,6 +228,4 @@ fn measured_clean_tiny_crate_yields_auto_apply_exit_0() {
     );
     assert_eq!(value["verdict"], "auto_apply");
     assert_eq!(value["signal_source"], "measured");
-
-    std::fs::remove_dir_all(&dir).ok();
 }

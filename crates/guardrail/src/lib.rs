@@ -94,6 +94,10 @@ mod exec;
 mod gaming;
 mod gates;
 
+// テスト専用の共有ヘルパ（一時ディレクトリの排他作成ガード。イシュー #2380）。公開 API ではない。
+#[cfg(test)]
+mod test_support;
+
 pub use config::{PresetName, Thresholds};
 pub use decision::{
     AUTO_APPLY_FALLBACK_REASON, BenchSignal, Decision, DecisionInput, GateSignal, GateSignals,

@@ -36,8 +36,8 @@ pub(crate) fn lines_changed(repo_root: &Path, baseline: &str) -> Result<u64, Gua
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDirGuard;
     use std::fs;
-    use std::path::PathBuf;
     use std::process::Command;
 
     fn run(cwd: &Path, args: &[&str]) {
@@ -78,43 +78,37 @@ mod tests {
         );
     }
 
-    fn init_repo(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "guardrail-diff-lines-{name}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        run(&dir, &["init", "-q"]);
-        dir
+    fn init_repo(name: &str) -> TempDirGuard {
+        let guard = TempDirGuard::new(&format!("diff-lines-{name}"));
+        let dir = guard.path();
+        run(dir, &["init", "-q"]);
+        guard
     }
 
     #[test]
     fn sums_added_and_removed_lines_excluding_cargo_lock() {
-        let dir = init_repo("basic");
+        let tmp = init_repo("basic");
+        let dir = tmp.path();
         fs::write(dir.join("a.txt"), "line1\nline2\nline3\n").unwrap();
         fs::write(dir.join("Cargo.lock"), "orig\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
         // a.txt: 1 行削除・2 行追加（3 変更行）。Cargo.lock は除外対象。
         fs::write(dir.join("a.txt"), "line1\nline2-changed\nline3\nline4\n").unwrap();
         fs::write(dir.join("Cargo.lock"), "orig\nnew-dep\n").unwrap();
 
-        let changed = lines_changed(&dir, "HEAD").unwrap();
+        let changed = lines_changed(dir, "HEAD").unwrap();
         assert_eq!(changed, 3, "Cargo.lock の変更は集計対象外のはず");
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn no_changes_yields_zero() {
-        let dir = init_repo("empty");
+        let tmp = init_repo("empty");
+        let dir = tmp.path();
         fs::write(dir.join("a.txt"), "unchanged\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
 
-        let changed = lines_changed(&dir, "HEAD").unwrap();
+        let changed = lines_changed(dir, "HEAD").unwrap();
         assert_eq!(changed, 0);
-
-        fs::remove_dir_all(&dir).ok();
     }
 }

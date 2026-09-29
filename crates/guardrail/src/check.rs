@@ -240,8 +240,8 @@ pub(crate) fn run_measured_with(
 mod tests {
     use super::*;
     use crate::exec::tests_support::ScriptedRunner;
+    use crate::test_support::TempDirGuard;
     use std::fs;
-    use std::path::PathBuf;
     use std::process::Command;
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -285,13 +285,11 @@ mod tests {
         );
     }
 
-    fn init_repo(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("guardrail-check-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        run_git(&dir, &["init", "-q"]);
-        dir
+    fn init_repo(name: &str) -> TempDirGuard {
+        let guard = TempDirGuard::new(&format!("check-{name}"));
+        let dir = guard.path();
+        run_git(dir, &["init", "-q"]);
+        guard
     }
 
     fn default_config() -> Config {
@@ -305,14 +303,15 @@ mod tests {
     /// が確定することを、`cargo` を実起動せず固定する。
     #[test]
     fn run_measured_with_failing_build_yields_reject() {
-        let dir = init_repo("reject");
+        let tmp = init_repo("reject");
+        let dir = tmp.path();
         fs::write(dir.join("README.md"), "baseline\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
         fs::write(dir.join("README.md"), "updated\n").unwrap();
 
         let runner = ScriptedRunner::new(vec![false]);
         let config = default_config();
-        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+        let report = run_measured_with(&runner, dir, "HEAD", &config, None).expect("判定に失敗");
 
         assert_eq!(report.verdict, crate::decision::Verdict::Reject);
         assert_eq!(report.signal_source, SignalSource::Measured);
@@ -322,8 +321,6 @@ mod tests {
                 .iter()
                 .any(|c| c == "gate_build_failed")
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// measured 経路の escalate 分岐: 全ゲート pass だが変更行数が閾値
@@ -331,9 +328,10 @@ mod tests {
     /// することを固定する。
     #[test]
     fn run_measured_with_large_diff_yields_escalate() {
-        let dir = init_repo("escalate");
+        let tmp = init_repo("escalate");
+        let dir = tmp.path();
         fs::write(dir.join("a.txt"), "baseline\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
         // 変更行数を確実に閾値（200 行）超にするため、300 行の新規内容へ
         // 置き換える（追加 300 行の diff）。
         let big_content: String = (0..300).map(|i| format!("line-{i}\n")).collect();
@@ -341,7 +339,7 @@ mod tests {
 
         let runner = ScriptedRunner::new(vec![true, true, true]);
         let config = default_config();
-        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+        let report = run_measured_with(&runner, dir, "HEAD", &config, None).expect("判定に失敗");
 
         assert_eq!(report.verdict, crate::decision::Verdict::Escalate);
         assert!(
@@ -350,8 +348,6 @@ mod tests {
                 .iter()
                 .any(|c| c == "lines_max_exceeded")
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// measured 経路の escalate 分岐（除外リスト match 経由）: `Cargo.toml`
@@ -363,9 +359,10 @@ mod tests {
     /// `DecisionInput` へ実際に到達していることの証跡でもある。
     #[test]
     fn run_measured_with_dependency_change_yields_escalate_via_exclusion_match() {
-        let dir = init_repo("exclusion");
+        let tmp = init_repo("exclusion");
+        let dir = tmp.path();
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
         fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"x\"\nversion = \"0.2.0\"\n",
@@ -374,7 +371,7 @@ mod tests {
 
         let runner = ScriptedRunner::new(vec![true, true, true]);
         let config = default_config();
-        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+        let report = run_measured_with(&runner, dir, "HEAD", &config, None).expect("判定に失敗");
 
         assert_eq!(report.verdict, crate::decision::Verdict::Escalate);
         assert_eq!(report.reason_conditions, vec!["policy_exclusion_match"]);
@@ -382,8 +379,6 @@ mod tests {
             report.applied_exclusion_rule_ids,
             vec!["dependency-change".to_string()]
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// measured 経路の auto_apply 分岐: 全ゲート pass・閾値内・除外リスト
@@ -391,14 +386,15 @@ mod tests {
     /// ことを固定する。
     #[test]
     fn run_measured_with_clean_small_change_yields_auto_apply() {
-        let dir = init_repo("auto-apply");
+        let tmp = init_repo("auto-apply");
+        let dir = tmp.path();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(
             dir.join("src/lib.rs"),
             "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
         )
         .unwrap();
-        commit_all(&dir, "baseline");
+        commit_all(dir, "baseline");
         fs::write(
             dir.join("src/lib.rs"),
             "// コメント追加\npub fn add(a: i32, b: i32) -> i32 { a + b }\n",
@@ -407,12 +403,10 @@ mod tests {
 
         let runner = ScriptedRunner::new(vec![true, true, true]);
         let config = default_config();
-        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+        let report = run_measured_with(&runner, dir, "HEAD", &config, None).expect("判定に失敗");
 
         assert_eq!(report.verdict, crate::decision::Verdict::AutoApply);
         assert!(report.reason_conditions.is_empty());
         assert!(report.applied_exclusion_rule_ids.is_empty());
-
-        fs::remove_dir_all(&dir).ok();
     }
 }
