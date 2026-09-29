@@ -78,7 +78,7 @@ mod nadam;
 pub(crate) mod param_group;
 mod radam;
 mod rmsprop;
-mod state_dict;
+pub(crate) mod state_dict;
 
 pub mod amp;
 pub mod clip;
@@ -238,6 +238,13 @@ pub use state_dict::OptimizerStateDict;
 // `Lbfgs::state_dict`／`load_state_dict`／`history_len`。`lbfgs` モジュール
 // doc「状態の保存・復元」節・`docs/autodiff-lbfgs-decision.md` §10）。
 // `OptimizerStateDict` は実装せず facade 公開面も広げない。
+
+// イシュー #2367: `crate::optim::Sgd` が `OptimizerStateDict` を実装した
+// （momentum の velocity を `state.<i>.momentum_buffer` として保存・復元。
+// `step_count` は持たない。`state_dict` モジュール doc・
+// `docs/autodiff-optimizer-state-dict-decision.md` §7）。`state_dict`
+// モジュールは `crate::optim::sgd` から共通ヘルパーへ到達するため
+// `pub(crate)` にしたが、trait の facade 再エクスポートは行わない。
 
 // イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）
 // を追加した（`param_group` モジュール冒頭 doc 参照）。`ParamGroup`／

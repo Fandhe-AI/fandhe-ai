@@ -7,8 +7,10 @@
 //! safetensors`。f32 の LE バイトをそのまま読み書きする。`onnx-interop`
 //! クレートの `st_load`／`st_save`）でロスレスに往復できる形で提供する。
 //! `AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・`Adadelta`・`Adamax`・
-//! `NAdam`・`RAdam`（9 optimizer）が [`OptimizerStateDict`] を実装する
-//! （各ファイル末尾の `impl OptimizerStateDict for X` 参照）。
+//! `NAdam`・`RAdam`（9 optimizer）に加え、`crate::optim::Sgd`（イシュー
+//! #2367。momentum の velocity のみを保存・復元する）が
+//! [`OptimizerStateDict`] を実装する（各ファイル末尾の
+//! `impl OptimizerStateDict for X` 参照）。
 //!
 //! `Lbfgs` はフラット化した大域状態のため本 trait ではなく同型の専用
 //! inherent API を持つ（`lbfgs.rs` 参照。イシュー #2366）。
@@ -33,20 +35,21 @@
 //!
 //! - **種別マーカー** `__optimizer__.<kind>`（shape `[1]`・値 `1.0`）。
 //!   `<kind>` は `adamw`／`adam`／`rmsprop`／`adagrad`／`lamb`／
-//!   `adadelta`／`adamax`／`nadam`／`radam`。キー集合の完全一致検査
+//!   `adadelta`／`adamax`／`nadam`／`radam`／`sgd`。キー集合の完全一致検査
 //!   （下記「検証」節）と組み合わせて、別種 optimizer の state（例:
 //!   `Adam` の state を `AdamW` に読み込む）を fail-closed で拒否する
 //!   （`Adam`／`AdamW` はバッファ名が同じ `m`／`v` のため、マーカーが
 //!   ないと黙って受理されてしまう。PyTorch は種別の異なる state の
 //!   読み込みを許すが、本実装は安全側に逸脱する）。
 //! - **スカラー状態**（ロスレス符号化。下記「符号化」節）:
-//!   - `step_count.u64_u16x4`（全 9 種）
+//!   - `step_count.u64_u16x4`（`Sgd` を除く 9 種。`Sgd` は持たず、
+//!     混入は余剰キーとして拒否する）
 //!   - `beta1_pow_t.f64_u16x4`（`AdamW`・`Adam`・`Lamb`・`RAdam`・
 //!     `Adamax`）
 //!   - `beta2_pow_t.f64_u16x4`（`AdamW`・`Adam`・`Lamb`・`RAdam`・
 //!     `NAdam`）
 //!   - `mu_product`（shape `[1]` の生 f32。`NAdam` のみ）
-//!   - `num_slots.u64_u16x4`（全 9 種・必須）: スロット数を実在する
+//!   - `num_slots.u64_u16x4`（`Sgd` を含む全 10 種・必須）: スロット数を実在する
 //!     バッファキーの最大添字から推測するのではなく、独立したメタ
 //!     データとして保存・照合する（P0 レビュー指摘・イシュー #2174
 //!     PR #2304: 単一バッファ optimizer で末尾スロットの全バッファが
@@ -58,8 +61,12 @@
 //!   `RmsProp` は `square_avg`・`grad_avg`・`momentum_buffer`、
 //!   `Adagrad` は `state_sum`、`Adadelta` は `square_avg`・
 //!   `acc_delta`、`Adamax` は `exp_avg`・`exp_inf`、`NAdam`・`RAdam`
-//!   は `exp_avg`・`exp_avg_sq`）。`states` が空（初回 `step()` 前）の
-//!   ときはスロットキーを一切出さない。
+//!   は `exp_avg`・`exp_avg_sq`、`Sgd` は `momentum_buffer`）。`states`
+//!   が空（初回 `step()` 前）のときはスロットキーを一切出さない。
+//!   `Sgd` は `velocity == None`（momentum 無効・未 step）⇔
+//!   `num_slots = 0` とする。momentum 有効で params 0 件の step が生む
+//!   `Some(vec![])` も `num_slots = 0` に潰れ、load で `None` に戻る
+//!   （次の step が初回扱いになる点だけが差。受容する正規化）。
 //!
 //! ハイパーパラメータ（config）は保存しない。呼び出し側が同じ config
 //! で `new` してから load する契約とする（PyTorch の `param_groups` の
@@ -361,6 +368,44 @@ pub(crate) fn decode_state_dict(
     has_beta2: bool,
     has_mu_product: bool,
 ) -> Result<DecodedState, AutodiffError> {
+    decode_state_dict_impl(
+        kind,
+        state,
+        buffer_names,
+        true,
+        has_beta1,
+        has_beta2,
+        has_mu_product,
+    )
+}
+
+/// スカラー状態（`step_count`／`beta*_pow_t`／`mu_product`）を一切
+/// 持たない optimizer（`Sgd`。イシュー #2367）用のデコーダ。
+/// [`decode_state_dict`] と検証順・DoS 上限・キー集合の完全一致・
+/// マーカー検証・スロット shape 検証は同一で、`step_count` キーの要求
+/// だけを外す（`step_count` キーが混入した state は余剰キーとして
+/// 拒否する）。検証済みスロット列のみを返す。
+pub(crate) fn decode_slot_only_state_dict(
+    kind: &str,
+    state: &HashMap<String, Tensor<f32>>,
+    buffer_names: &[&str],
+) -> Result<Vec<DecodedSlot>, AutodiffError> {
+    Ok(decode_state_dict_impl(kind, state, buffer_names, false, false, false, false)?.slots)
+}
+
+/// [`decode_state_dict`]／[`decode_slot_only_state_dict`] の共通本体。
+/// `has_step_count == false` のとき `step_count` キーを期待集合に入れず
+/// 復号もしない（[`DecodedState::step_count`] は `0` のダミー値になり
+/// 呼び出し元は参照しない）。
+fn decode_state_dict_impl(
+    kind: &str,
+    state: &HashMap<String, Tensor<f32>>,
+    buffer_names: &[&str],
+    has_step_count: bool,
+    has_beta1: bool,
+    has_beta2: bool,
+    has_mu_product: bool,
+) -> Result<DecodedState, AutodiffError> {
     // 1. `num_slots` を独立したメタデータとして先に復号する（実在する
     //    バッファキーの最大添字からは推測しない）。欠落は他のキーの
     //    整合性に関わらず即 `Err`（P0 レビュー指摘・イシュー #2174
@@ -413,7 +458,9 @@ pub(crate) fn decode_state_dict(
     //    ここで「欠落キー」または「余剰キー」として検出される。
     let mut expected: BTreeSet<String> = BTreeSet::new();
     expected.insert(marker_key(kind));
-    expected.insert(STEP_COUNT_KEY.to_string());
+    if has_step_count {
+        expected.insert(STEP_COUNT_KEY.to_string());
+    }
     expected.insert(NUM_SLOTS_KEY.to_string());
     if has_beta1 {
         expected.insert(BETA1_POW_T_KEY.to_string());
@@ -456,17 +503,21 @@ pub(crate) fn decode_state_dict(
     validate_marker(kind, marker)?;
 
     // 4. スカラーの復号・検証。
-    let Some(step_count_tensor) = state.get(STEP_COUNT_KEY) else {
-        return Err(AutodiffError::InvalidArgument(format!(
-            "OptimizerStateDict::load_state_dict（kind=`{kind}`）: internal error: \
-             `{STEP_COUNT_KEY}` missing after key-set validation"
-        )));
+    let step_count = if has_step_count {
+        let Some(step_count_tensor) = state.get(STEP_COUNT_KEY) else {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "OptimizerStateDict::load_state_dict（kind=`{kind}`）: internal error: \
+                 `{STEP_COUNT_KEY}` missing after key-set validation"
+            )));
+        };
+        // `step_count` は値域を検査しない（`load_state_dict` は `step()` の
+        // 到達可能な全域を受理する。モジュール冒頭 doc「符号化」節・
+        // イシュー #2174 PR #2304 P1 是正）。overflow 判定は `step()` 側の
+        // `checked_add` に一元化されている。
+        decode_u16x4_tensor(STEP_COUNT_KEY, step_count_tensor)?
+    } else {
+        0
     };
-    // `step_count` は値域を検査しない（`load_state_dict` は `step()` の
-    // 到達可能な全域を受理する。モジュール冒頭 doc「符号化」節・
-    // イシュー #2174 PR #2304 P1 是正）。overflow 判定は `step()` 側の
-    // `checked_add` に一元化されている。
-    let step_count = decode_u16x4_tensor(STEP_COUNT_KEY, step_count_tensor)?;
 
     let beta1_pow_t = if has_beta1 {
         let Some(t) = state.get(BETA1_POW_T_KEY) else {
@@ -854,5 +905,65 @@ mod tests {
         );
         let err = decode_state_dict("adamw", &state, &["m", "v"], false, false, false).unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    // ---- decode_slot_only_state_dict（イシュー #2367）----
+
+    fn slot_only_state(n: usize) -> HashMap<String, Tensor<f32>> {
+        let mut m = HashMap::new();
+        m.insert(
+            marker_key("sgd"),
+            Tensor::new(vec![FORMAT_VERSION], &[1]).unwrap(),
+        );
+        m.insert(
+            NUM_SLOTS_KEY.to_string(),
+            encode_u16x4_tensor(n as u64).unwrap(),
+        );
+        for i in 0..n {
+            m.insert(
+                slot_key(i, "momentum_buffer"),
+                Tensor::new(vec![1.0, 2.0], &[2]).unwrap(),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn slot_only_roundtrip_and_empty() {
+        for n in [0usize, 2] {
+            let slots =
+                decode_slot_only_state_dict("sgd", &slot_only_state(n), &["momentum_buffer"])
+                    .unwrap();
+            assert_eq!(slots.len(), n);
+        }
+    }
+
+    #[test]
+    fn slot_only_rejects_invalid_inputs() {
+        let names = ["momentum_buffer"];
+        let mut s = slot_only_state(1);
+        s.remove(NUM_SLOTS_KEY);
+        assert!(decode_slot_only_state_dict("sgd", &s, &names).is_err());
+
+        for n in [1_000_000u64, u64::MAX] {
+            let mut s = slot_only_state(1);
+            s.insert(NUM_SLOTS_KEY.to_string(), encode_u16x4_tensor(n).unwrap());
+            assert!(decode_slot_only_state_dict("sgd", &s, &names).is_err());
+        }
+
+        let mut s = slot_only_state(1);
+        s.insert(STEP_COUNT_KEY.to_string(), encode_u16x4_tensor(1).unwrap());
+        assert!(decode_slot_only_state_dict("sgd", &s, &names).is_err());
+
+        let mut s = slot_only_state(1);
+        let v = s.remove(&slot_key(0, "momentum_buffer")).unwrap();
+        s.insert("state.01.momentum_buffer".to_string(), v);
+        assert!(decode_slot_only_state_dict("sgd", &s, &names).is_err());
+
+        assert!(decode_slot_only_state_dict("adam", &slot_only_state(1), &names).is_err());
+
+        let mut s = slot_only_state(1);
+        s.remove(&slot_key(0, "momentum_buffer"));
+        assert!(decode_slot_only_state_dict("sgd", &s, &names).is_err());
     }
 }
