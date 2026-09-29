@@ -1221,22 +1221,34 @@ path = "/p1/"
     // ---- validate_sources（FS 依存） ----
 
     /// テスト専用の一時ディレクトリ。`Drop` でベストエフォート削除する。
-    /// 外部クレート（`tempfile` 等）を追加せず `std::env::temp_dir()` +
-    /// プロセス固有サフィックスで代用する（REQ-1 v2: 外部依存ゼロを維持する）。
+    /// 外部クレート（`tempfile` 等）を追加せず std のみで実装する
+    /// （REQ-1 v2: 外部依存ゼロを維持する）。名前は pid・ナノ秒・プロセス内
+    /// カウンタ・タグで一意化し、`create_dir` で排他作成する（`AlreadyExists`
+    /// のときだけ有限回再試行。作成前の削除はしない。イシュー #2386・親 #2363）。
+    /// `Drop` が消すのは自分が作成したパスだけ。
     struct TempDir(std::path::PathBuf);
 
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let path = std::env::temp_dir().join(format!(
-                "rust-ai-library-docs-site-nav-test-{tag}-{}-{unique}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&path).expect("create temp dir for nav.rs test");
-            Self(path)
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let base = std::env::temp_dir();
+            let pid = std::process::id();
+            for _ in 0..64u32 {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let path = base.join(format!(
+                    "rust-ai-library-docs-site-nav-test-{tag}-{pid}-{nanos}-{seq}"
+                ));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => panic!("create temp dir {}: {e}", path.display()),
+                }
+            }
+            panic!("failed to create a unique temp dir within 64 attempts");
         }
     }
 
