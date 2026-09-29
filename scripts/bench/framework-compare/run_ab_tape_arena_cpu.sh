@@ -20,7 +20,14 @@ cd "$(dirname "$0")" || exit 1
 source ./bench_fandhe_lock_restore.sh
 
 LABEL=${1:-}
-ROUNDS=${AB_ROUNDS:-5}
+# RULE.txt は「5 round 中央値・5/5 round 一貫性」を事前登録しており、
+# compare_gemm_ab.py も各セルちょうど 5 件を要求する。round 数は 5 固定とし、
+# AB_ROUNDS で 5 以外が指定された場合は fail-closed で拒否する（PR #2448 codex P1 指摘）。
+ROUNDS=5
+if [[ -n "${AB_ROUNDS:-}" && "${AB_ROUNDS}" != "5" ]]; then
+  echo "error: AB_ROUNDS must be 5 (RULE.txt の事前登録は 5 round 固定。got: ${AB_ROUNDS})" >&2
+  exit 1
+fi
 
 # A03 インジェクション対策: ラベルはファイル名・パスに直接埋め込むため、
 # 英数字・`._-` のみを許可する allowlist で検証する。
@@ -224,15 +231,34 @@ cat "$OUT"/tree-2104-*-"${LABEL}".txt
 BIN_BEFORE="$OUT/bench-fandhe-2104-before-${LABEL}"
 BIN_AFTER="$OUT/bench-fandhe-2104-after-${LABEL}"
 
+# セル（arm × task × mode）の JSONL 行数を数える。読み取り不能は空文字（呼び出し側が
+# 不足扱いにする）。round 対応（各 round で各セル +1 行）の検証と、比較前の
+# 5 件検証で共用する（PR #2448 codex P1 指摘）。
+count_cell_rows() { # count_cell_rows <arm> <task> <mode> -> 行数 | (空)
+  local f="$OUT/results-${1}-${LABEL}-${DEVICE}-${2}.jsonl"
+  [[ -f "$f" ]] || return 0
+  jq -rs --arg m "$3" '[.[] | select((.mode // "fresh") == $m)] | length' "$f" 2>/dev/null || true
+}
+
 run_cell() { # run_cell <arm> <task> <mode> [size]
-  local arm=$1 task=$2 mode=$3 size=${4:-64} bin
+  local arm=$1 task=$2 mode=$3 size=${4:-64} bin before_n after_n
   if [[ "$arm" == "before" ]]; then bin="$BIN_BEFORE"; else bin="$BIN_AFTER"; fi
   echo "== $task $DEVICE size=$size mode=$mode arm=$arm =="
+  before_n="$(count_cell_rows "$arm" "$task" "$mode")"
   if ! "$bin" --task "$task" --size "$size" --device "$DEVICE" --mode "$mode" \
     --out "$OUT/results-${arm}-${LABEL}-${DEVICE}-${task}.jsonl" 2>"$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp"; then
     echo "arm=$arm task=$task size=$size mode=$mode : $(cat "$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp")" >>"$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
     ANY_FAILED=$((ANY_FAILED + 1))
+  else
+    # 成功終了でも当該 round のセルが JSONL へ ちょうど 1 行追加されたことを確認する
+    # （追記漏れ・二重追記は round 対応が崩れるため fail-closed）。
+    after_n="$(count_cell_rows "$arm" "$task" "$mode")"
+    if [[ ! "$before_n" =~ ^[0-9]+$ || ! "$after_n" =~ ^[0-9]+$ || "$after_n" -ne $((before_n + 1)) ]]; then
+      echo "arm=$arm task=$task size=$size mode=$mode : round の記録行数が不正（before=${before_n:-NA} after=${after_n:-NA}。+1 行を期待）" >>"$SKIP"
+      echo "  -> ROW COUNT MISMATCH (recorded in $SKIP)"
+      ANY_FAILED=$((ANY_FAILED + 1))
+    fi
   fi
   rm -f "$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp"
 }
@@ -306,7 +332,25 @@ done
 # 比較レポート・エラーログの名前にも LABEL を含め、別 LABEL の再実行が前系列の
 # レポートを上書きしないようにする（JSONL・終了コードログと同じ系列別保持。
 # PR #2016 codex-review 指摘）
+# 比較前に全セル（arm × task × mode）がちょうど ROUNDS 件であることを検証する。
+# 不足・過剰があれば当該 task は判定不能として比較へ進まず非ゼロ終了する
+# （少標本の中央値で非後退判定が出るのを防ぐ。PR #2448 codex P1 指摘）。
 for task in train infer; do
+  CELLS_OK=1
+  for arm in before after; do
+    for mode in fresh reuse; do
+      n="$(count_cell_rows "$arm" "$task" "$mode")"
+      if [[ ! "$n" =~ ^[0-9]+$ || "$n" -ne "$ROUNDS" ]]; then
+        echo "compare task=$task: 判定不能（arm=$arm mode=$mode の記録は ${n:-NA} 件。${ROUNDS} 件を要求）" >>"$SKIP"
+        CELLS_OK=0
+      fi
+    done
+  done
+  if [[ "$CELLS_OK" != "1" ]]; then
+    echo "compare task=$task exit=NA (判定不能: 標本数不足)" | tee -a "$OUT/compare-exit-2104-${DEVICE}-${LABEL}.log"
+    ANY_FAILED=$((ANY_FAILED + 1))
+    continue
+  fi
   python3 compare_gemm_ab.py --device "$DEVICE" --task "$task" --threshold 1.00 --per-run \
     --require-checksum-exact \
     "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" \
