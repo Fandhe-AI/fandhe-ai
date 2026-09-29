@@ -172,12 +172,15 @@ pub struct Sequential {
 
 /// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
 ///
-/// 本イシュー（#2369）で保存・復元できる層だけが値を持つ variant で、それ以外の
-/// `add_*` は [`LayerSpec::Unsupported`] を記録し `save_model` が
-/// `UnsupportedModel` で fail-closed にする（全 30 層への拡張は #2370）。
-/// `seed` は保持しない（重みは safetensors から復元するため不要。§5 の
-/// 「seed を保持」は #2370 で再判断する）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `add_*` 30 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
+/// `add_*` を呼んで再構築する（イシュー #2369・#2370。`docs/compat-model-io-decision.md`
+/// §5）。`add_*` の内部で固定している値（conv／linear の `bias=true`・pool の
+/// `ceil_mode=false`・TE の活性化と eps 等）は記録しない（同じ `add_*` が再現するため）。
+/// `seed` は保持しない: 初期化にしか使われず、重みは直後の `load_state_dict` で上書きされる
+/// （#2369 が残した「#2370 で再判断」の結論）。[`LayerSpec::Unsupported`] は
+/// [`Sequential::add_module`]（構成を記録できない利用者定義層）専用で、`save_model` が
+/// `UnsupportedModel` で fail-closed にする。f32 を含むため `Eq` は実装しない。
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum LayerSpec {
     Linear {
         in_features: usize,
@@ -190,7 +193,110 @@ pub(super) enum LayerSpec {
     Hardswish,
     Gelu,
     GeluTanh,
-    /// 本イシューでは保存対象外の層（`kind` は `add_*` の名前。エラー文言で読む）。
+    LeakyRelu {
+        negative_slope: f32,
+    },
+    Elu {
+        alpha: f32,
+    },
+    Softmax {
+        dim: usize,
+    },
+    LogSoftmax {
+        dim: usize,
+    },
+    Softplus {
+        beta: f32,
+        threshold: f32,
+    },
+    Flatten {
+        start_dim: usize,
+        end_dim: usize,
+    },
+    Dropout {
+        p: f32,
+    },
+    Conv2d {
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+    },
+    Conv1d {
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
+    },
+    LayerNorm {
+        normalized_size: usize,
+        eps: f32,
+    },
+    RmsNorm {
+        normalized_size: usize,
+        eps: f32,
+    },
+    BatchNorm1d {
+        num_features: usize,
+        eps: f32,
+        momentum: f32,
+    },
+    BatchNorm2d {
+        num_features: usize,
+        eps: f32,
+        momentum: f32,
+    },
+    Embedding {
+        num_embeddings: usize,
+        embedding_dim: usize,
+        padding_idx: Option<usize>,
+    },
+    MultiheadAttention {
+        embed_dim: usize,
+        num_heads: usize,
+    },
+    TransformerEncoder {
+        d_model: usize,
+        num_heads: usize,
+        dim_feedforward: usize,
+    },
+    MaxPool2d {
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    },
+    MaxPool1d {
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        dilation: usize,
+    },
+    AvgPool2d {
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        count_include_pad: bool,
+    },
+    AvgPool1d {
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        count_include_pad: bool,
+    },
+    AdaptiveAvgPool2d {
+        output_size: [usize; 2],
+    },
+    AdaptiveAvgPool1d {
+        output_size: usize,
+    },
+    /// 保存対象外の層（`add_module` の利用者定義層。`kind` はエラー文言で読む）。
     Unsupported {
         kind: &'static str,
     },
@@ -276,8 +382,7 @@ impl Sequential {
     /// まま伝播する。[`Sequential::add_silu`] と同様融合対象外。
     pub fn add_leaky_relu(mut self, negative_slope: f32) -> Self {
         self.inner.push(Box::new(LeakyRelu::new(negative_slope)));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "leaky_relu" });
+        self.specs.push(LayerSpec::LeakyRelu { negative_slope });
         self
     }
 
@@ -286,7 +391,7 @@ impl Sequential {
     /// と同様融合対象外。
     pub fn add_elu(mut self, alpha: f32) -> Self {
         self.inner.push(Box::new(Elu::new(alpha)));
-        self.specs.push(LayerSpec::Unsupported { kind: "elu" });
+        self.specs.push(LayerSpec::Elu { alpha });
         self
     }
 
@@ -297,7 +402,7 @@ impl Sequential {
     /// と同型の遅延検査契約として `Result` を返さず `Self` を返す。
     pub fn add_softmax(mut self, dim: usize) -> Self {
         self.inner.push(Box::new(Softmax::new(dim)));
-        self.specs.push(LayerSpec::Unsupported { kind: "softmax" });
+        self.specs.push(LayerSpec::Softmax { dim });
         self
     }
 
@@ -305,9 +410,7 @@ impl Sequential {
     /// #2065）。[`Sequential::add_softmax`] と同じ遅延検査契約。
     pub fn add_log_softmax(mut self, dim: usize) -> Self {
         self.inner.push(Box::new(LogSoftmax::new(dim)));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "log_softmax",
-        });
+        self.specs.push(LayerSpec::LogSoftmax { dim });
         self
     }
 
@@ -337,7 +440,7 @@ impl Sequential {
     pub fn add_softplus(mut self, beta: f32, threshold: f32) -> Result<Self, AutodiffError> {
         let layer = Softplus::new(beta, threshold)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported { kind: "softplus" });
+        self.specs.push(LayerSpec::Softplus { beta, threshold });
         Ok(self)
     }
 
@@ -352,7 +455,7 @@ impl Sequential {
     /// 契約として `Result` を返さず `Self` を返す。
     pub fn add_flatten(mut self, start_dim: usize, end_dim: usize) -> Self {
         self.inner.push(Box::new(Flatten::new(start_dim, end_dim)));
-        self.specs.push(LayerSpec::Unsupported { kind: "flatten" });
+        self.specs.push(LayerSpec::Flatten { start_dim, end_dim });
         self
     }
 
@@ -368,7 +471,7 @@ impl Sequential {
     pub fn add_dropout(mut self, p: f32) -> Result<Self, AutodiffError> {
         let dropout = Dropout::new(p)?;
         self.inner.push(Box::new(dropout));
-        self.specs.push(LayerSpec::Unsupported { kind: "dropout" });
+        self.specs.push(LayerSpec::Dropout { p });
         Ok(self)
     }
 
@@ -403,7 +506,15 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(conv));
-        self.specs.push(LayerSpec::Unsupported { kind: "conv2d" });
+        self.specs.push(LayerSpec::Conv2d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+        });
         Ok(self)
     }
 
@@ -433,7 +544,15 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(conv));
-        self.specs.push(LayerSpec::Unsupported { kind: "conv1d" });
+        self.specs.push(LayerSpec::Conv1d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+        });
         Ok(self)
     }
 
@@ -452,8 +571,10 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = LayerNorm::new(normalized_size, eps)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "layer_norm" });
+        self.specs.push(LayerSpec::LayerNorm {
+            normalized_size,
+            eps,
+        });
         Ok(self)
     }
 
@@ -463,7 +584,10 @@ impl Sequential {
     pub fn add_rms_norm(mut self, normalized_size: usize, eps: f32) -> Result<Self, AutodiffError> {
         let layer = RmsNorm::new(normalized_size, eps)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported { kind: "rms_norm" });
+        self.specs.push(LayerSpec::RmsNorm {
+            normalized_size,
+            eps,
+        });
         Ok(self)
     }
 
@@ -488,8 +612,10 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = BatchNorm1d::new(num_features, eps, momentum)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "batch_norm1d",
+        self.specs.push(LayerSpec::BatchNorm1d {
+            num_features,
+            eps,
+            momentum,
         });
         Ok(self)
     }
@@ -506,8 +632,10 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = BatchNorm2d::new(num_features, eps, momentum)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "batch_norm2d",
+        self.specs.push(LayerSpec::BatchNorm2d {
+            num_features,
+            eps,
+            momentum,
         });
         Ok(self)
     }
@@ -533,8 +661,11 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = Embedding::new(num_embeddings, embedding_dim, padding_idx, seed)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "embedding" });
+        self.specs.push(LayerSpec::Embedding {
+            num_embeddings,
+            embedding_dim,
+            padding_idx,
+        });
         Ok(self)
     }
 
@@ -560,8 +691,9 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = MultiheadAttention::new(embed_dim, num_heads, true, seed)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "multihead_attention",
+        self.specs.push(LayerSpec::MultiheadAttention {
+            embed_dim,
+            num_heads,
         });
         Ok(self)
     }
@@ -594,8 +726,10 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "transformer_encoder",
+        self.specs.push(LayerSpec::TransformerEncoder {
+            d_model,
+            num_heads,
+            dim_feedforward,
         });
         Ok(self)
     }
@@ -616,8 +750,12 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = MaxPool2d::new(kernel_size, stride, padding, dilation)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "max_pool2d" });
+        self.specs.push(LayerSpec::MaxPool2d {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        });
         Ok(self)
     }
 
@@ -633,8 +771,12 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = MaxPool1d::new(kernel_size, stride, padding, dilation)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "max_pool1d" });
+        self.specs.push(LayerSpec::MaxPool1d {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        });
         Ok(self)
     }
 
@@ -652,8 +794,12 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = AvgPool2d::new(kernel_size, stride, padding, count_include_pad)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "avg_pool2d" });
+        self.specs.push(LayerSpec::AvgPool2d {
+            kernel_size,
+            stride,
+            padding,
+            count_include_pad,
+        });
         Ok(self)
     }
 
@@ -669,8 +815,12 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = AvgPool1d::new(kernel_size, stride, padding, count_include_pad)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "avg_pool1d" });
+        self.specs.push(LayerSpec::AvgPool1d {
+            kernel_size,
+            stride,
+            padding,
+            count_include_pad,
+        });
         Ok(self)
     }
 
@@ -684,9 +834,8 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = AdaptiveAvgPool2d::new(output_size)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "adaptive_avg_pool2d",
-        });
+        self.specs
+            .push(LayerSpec::AdaptiveAvgPool2d { output_size });
         Ok(self)
     }
 
@@ -696,9 +845,8 @@ impl Sequential {
     pub fn add_adaptive_avg_pool1d(mut self, output_size: usize) -> Result<Self, AutodiffError> {
         let layer = AdaptiveAvgPool1d::new(output_size)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "adaptive_avg_pool1d",
-        });
+        self.specs
+            .push(LayerSpec::AdaptiveAvgPool1d { output_size });
         Ok(self)
     }
 

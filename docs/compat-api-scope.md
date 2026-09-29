@@ -1028,6 +1028,9 @@ doc 更新を除く）は不変。公開 API のみで組める手動 roundtrip 
 完全一致を先行検証した。承認後の完全な公開 API 案・ファイル形式・
 意味論・検証計画は `docs/compat-model-io-decision.md` §2・§4〜§6 を
 参照。
+**（#2188 時点の記述。#2369・#2370 で更新）** 公開は #2369 で最小構成〈Linear＋活性化 7 種〉として
+実施済みで、#2370 で対象を `add_*` 全 30 層（`add_module` の利用者定義層を除く）へ広げた
+（BatchNorm の running stats は #2371 まで初期値のときだけ保存可。`docs/compat-model-io-decision.md` §4・§5）。
 
 **#2083 の設計記録は `docs/kv-cache-design.md` として完了した。**
 コード変更なし。KV キャッシュ（K-1）は既存 `Var` 演算（`cat`／

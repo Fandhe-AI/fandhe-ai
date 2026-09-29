@@ -14,6 +14,13 @@
 > `Sequential::save`／`load` は承認範囲外のため保留ガードを維持**している（§7）。
 > 以下 §0 は #2188 時点の「保留」判断の記録であり、経緯として残す。
 > **#2369〜#2373 がすべてマージされるまで crates.io リリースを止める**（公開範囲が途中状態のため）。
+>
+> **更新記録（イシュー #2370・親 #2362。2026-09-29）**: 対応範囲を `compat::Sequential` の
+> `add_*` 全 30 種へ広げた（`add_module` の利用者定義層のみ構成を記録できないため
+> `UnsupportedModel` のまま）。kind 別 `params` スキーマ・f32 の JSON 表現・平坦化規則は §4、
+> seed を保持しないこと・BN の暫定 fail-closed・層ごとのモード一致・save 側の自己検証は §5 を参照。
+> 上限定数（`MAX_MANIFEST_BYTES`・`MAX_LAYERS`・`MAX_ARRAY_LEN`・`MAX_OBJECT_KEYS`・
+> `MAX_JSON_DEPTH`）の値は変えていない（§2 item 4 の補足）。
 
 ## 0. 結論（方式の確定）
 
@@ -152,6 +159,12 @@ version migration。
    これらはポリシー閾値ではなくスキーマから導いた値。値の変更は再承認が必要で、定数と
    本記述を同時に更新する。`MAX_TMP_NAME_ATTEMPTS = 8` は §12.3 で確定済みの値
    （`docs-site` と同値）。
+   **#2370 の補足（値は不変）**: 全 30 層対応で `parameter_keys` は 1 層あたり最大 16 要素
+   （`add_transformer_encoder`）になり、`MAX_ARRAY_LEN`（8192）は 4096 層より手前
+   （TE のみなら 512 層）で先に超えうる。上限値は引き上げず（再承認が要るため）、
+   `save_model` が書き込み前に manifest を描画して load と同じ厳格パーサで読み戻し
+   （`verify_round_trip`）、超過するモデルを `TooLarge` で拒否する。「保存できたのに
+   読めない」ファイルは生まれない。引き上げが必要になった場合は別途ユーザー承認を得る。
    - **safetensors ファイルサイズ上限**: `crates/facade/src/model.rs`
      の `MAX_MODEL_FILE_BYTES`（1 GiB。private const）を再利用する
      ——承認事項ではなく確定方針とする。理由: 用途が同一（非信頼な
@@ -292,6 +305,55 @@ version migration。
 - 数値表現: f32 は Rust の最短往復表記（`{:?}`）で書き `str::parse::<f32>`
   で読む（非有限値は save 時に `UnsupportedModel` で拒否）。u64／usize は
   JSON の整数として書き独自パーサで読む。
+  **#2370 で確定した f32 の JSON 表現**: f32 は JSON 数値（小数点または指数を含む字句）で持つ。
+  厳格パーサの字句解析は JSON 数値の完全な文法（`-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`）を
+  受理し、符号・小数点・指数のいずれも無い非負整数だけを `Json::Num(u64)`（先頭ゼロ・u64 桁あふれを
+  拒否）、それ以外は生の字句を `Json::Real` として保持する（字句長は 64 バイト以内）。整数欄
+  （`as_u64`／`as_usize`）は `Real` を拒否するため整数フィールドの厳格性は変わらない。f32 欄
+  （`as_f32`）は `Real` だけを受理し、有限で、かつ**正準形**（読んだ値を `{:?}` で書き戻した
+  文字列と一致。`0.50`・`1`・`1E0` は拒否）のものに限る。これにより改竄を検出でき、往復は bit 一致
+  （`-0.0`・非正規化数を含む）になる。#2372 の optimizer config（`lr` 等）もこの表現を引き継ぐ。
+- **kind 別 `params` スキーマ（#2370。kind は 30 種の文字列 allowlist。`params` は kind ごとに
+  固定のキー集合で、未知キー・欠落キー・重複キー・型違いは `Manifest`、未知 kind は
+  `UnsupportedModel`）**。`params` は `add_*` の引数から `seed` を除いたものだけで、`add_*` が
+  内部で固定する値（linear／conv／MHA／TE の `bias=true`・pool の `ceil_mode=false`・TE の
+  ReLU 活性化と LayerNorm eps 等）は書かない（load が同じ `add_*` を呼ぶため自動で再現される）。
+  引数は渡された生の値のまま記録する（pool の `stride=None` を kernel で埋めない）。
+  `[usize; 2]` は `*_h`／`*_w` の平坦な 2 キーへ展開する（`params` 内に配列を置くと
+  `MAX_JSON_DEPTH = 4` を超えるため。全 kind で 16 キー以下）。`Option` は `null` または値で、
+  pool2d の `stride` は `stride_h`／`stride_w` が「両方 `null`」か「両方整数」でなければ `Manifest`。
+
+  | kind | params のキー | パラメータ（層内名: shape） |
+  |---|---|---|
+  | `linear` | `in_features`・`out_features` | `weight: [in, out]`・`bias: [out]` |
+  | `relu`・`sigmoid`・`tanh`・`silu`・`hardswish`・`gelu`・`gelu_tanh` | なし | なし |
+  | `leaky_relu` | `negative_slope`（f32） | なし |
+  | `elu` | `alpha`（f32） | なし |
+  | `softmax`・`log_softmax` | `dim` | なし |
+  | `softplus` | `beta`・`threshold`（f32） | なし |
+  | `flatten` | `start_dim`・`end_dim` | なし |
+  | `dropout` | `p`（f32） | なし |
+  | `conv2d` | `in_channels`・`out_channels`・`kernel_size_{h,w}`・`stride_{h,w}`・`padding_{h,w}`・`dilation_{h,w}`・`groups` | `weight: [out, in/groups, kh, kw]`・`bias: [out]` |
+  | `conv1d` | `in_channels`・`out_channels`・`kernel_size`・`stride`・`padding`・`dilation`・`groups` | `weight: [out, in/groups, k]`・`bias: [out]` |
+  | `layer_norm` | `normalized_size`・`eps`（f32） | `weight: [n]`・`bias: [n]` |
+  | `rms_norm` | `normalized_size`・`eps`（f32） | `weight: [n]` |
+  | `batch_norm1d`・`batch_norm2d` | `num_features`・`eps`・`momentum`（f32） | `weight: [c]`・`bias: [c]` |
+  | `embedding` | `num_embeddings`・`embedding_dim`・`padding_idx`（`null` 可） | `weight: [num, dim]` |
+  | `multihead_attention` | `embed_dim`・`num_heads` | `{q,k,v,out}_proj.{weight: [e, e], bias: [e]}` |
+  | `transformer_encoder` | `d_model`・`num_heads`・`dim_feedforward` | `self_attn.*`（8）・`linear1.{weight: [d, dff], bias: [dff]}`・`linear2.{weight: [dff, d], bias: [d]}`・`norm1.*`・`norm2.*`（計 16） |
+  | `max_pool2d` | `kernel_size_{h,w}`・`stride_{h,w}`（`null` 対可）・`padding_{h,w}`・`dilation_{h,w}` | なし |
+  | `max_pool1d` | `kernel_size`・`stride`（`null` 可）・`padding`・`dilation` | なし |
+  | `avg_pool2d` | `kernel_size_{h,w}`・`stride_{h,w}`（`null` 対可）・`padding_{h,w}`・`count_include_pad`（bool） | なし |
+  | `avg_pool1d` | `kernel_size`・`stride`（`null` 可）・`padding`・`count_include_pad`（bool） | なし |
+  | `adaptive_avg_pool2d` | `output_size_{h,w}` | なし |
+  | `adaptive_avg_pool1d` | `output_size` | なし |
+
+  期待キー・shape は非信頼な整数から純粋な算術だけで導く（`Vec` の事前確保に使わない。
+  conv の `in/groups` は `groups >= 1` かつ割り切れることを `Manifest` として先に検査し、
+  除算パニックを起こさない）。意味上の範囲（`p` が [0, 1] の外・`beta <= 0`・`kernel = 0`・
+  `padding_idx >= num_embeddings`・`momentum` の範囲等）は load 時の `add_*` の既存検査が
+  `ModelIoError::Autodiff` として拒否し、重複して実装しない。層を構築する（テンソルを確保する）のは、
+  上限付きで読んだ safetensors の実 shape と期待キーが完全一致した後だけである。
 
 ## 5. 意味論
 
@@ -300,6 +362,28 @@ version migration。
   フィールド `specs: Vec<LayerSpec>` を追加し、各 `add_*` で push する
   （フィールドは private なので公開 API は非破壊）。
   `specs.len() != layers().len()` なら `UnsupportedModel`。
+- **#2370 で確定した LayerSpec の扱い**:
+  - **seed は保持しない**（上の「引数・seed を保持」を改める。#2369 が残した「#2370 で再判断」の
+    結論）。seed は初期化にしか使われず、重みは直後の `load_state_dict` で上書きされるため、
+    manifest に載せても復元結果は変わらない。load は seed=0 固定で構築する。
+  - **`add_module`（利用者定義層）は対象外**。構成を記録できないため `LayerSpec::Unsupported` の
+    まま `save_model` が `UnsupportedModel` で拒否する。
+  - **BatchNorm の running stats は #2371 まで暫定 fail-closed**。本バージョンは stats を保存しない
+    ため、train モードで forward を通した BN をそのまま保存すると load 後の stats が初期値へ戻り
+    eval の forward が無言でずれる（REQ-7 違反）。`save_model` は batch_norm1d／2d の
+    `running_mean` が全要素 bit で `0.0`・`running_var` が全要素 bit で `1.0`・追跡回数 0 のとき
+    だけ保存を許し、それ以外は `UnsupportedModel` にする（層を BatchNorm として取り出せない場合も
+    fail-closed）。#2371 で buffer を保存できるようになった時点でこの制限を撤廃する。
+  - **層ごとのモード一致**。`add_*` は push 後に層のモードを同期しない一方、load は
+    `set_training(manifest.training)` で全層を揃える。モードで forward が変わる kind（dropout・
+    batch_norm1d／2d）だけ、層の `training()` がモデル全体と一致することを要求し、不一致
+    （`eval()` の後に積んだ等）は `UnsupportedModel`。他の kind へは適用しない
+    （`Module::training` の既定が `true` のため eval モデルを誤って拒否する）。
+  - **save 側の自己検証**（`verify_round_trip`）。`dir` に触れる前に manifest を描画し、load と
+    同じ厳格パーサで読み戻して構成（kind・params〈f32 は bit 一致〉・parameter_keys・training）が
+    一致することを確認する。配列長・キー数・深さ・サイズ・f32 正準形の違反をまとめて検出し、
+    上限起因は `TooLarge`、それ以外の不一致（内部不整合）は `UnsupportedModel`。f32 引数が
+    非有限のモデルは JSON へ書けないため保存前に `UnsupportedModel` で拒否する。
 - **save の手順**（世代コミット方式。詳細は §12。symlink・所有権対策は
   §13）: 検証をすべて終えてから書き込みに入る。`create_dir_all` →
   世代 ID を採番し `save_safetensors_f32_to_bytes`（既存・副作用なし）
