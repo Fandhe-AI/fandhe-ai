@@ -1067,7 +1067,7 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
   security-auditor の追加監査要件は発生しない。#2369 の実装 PR は
   `security.md` のレビュー体制どおり通常の監査を行う
 - Windows で実際に効くのは facade が Windows でビルド可能になる #2389〜#2391
-  以降である
+  以降である（#2391 で CI のクロス clippy を有効化済み。実機確認は #2393）
 
 **4. 緩和条件（(c) へ移る条件。変更はユーザー承認必須）**
 
@@ -1094,7 +1094,7 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
 - 回帰テスト: (i) `#[cfg(not(unix))]` のテストで `save_model` が
   `ErrorKind::Unsupported` を返し `dir` のエントリが増えないことを検証する
   （Linux CI では実行されず、Windows 向けクロス clippy `--tests` による型検査
-  のみ。facade のクロス clippy は #2391 以降に有効になる）。(ii) Linux でも
+  のみ。facade のクロス clippy は #2391 で有効化済み）。(ii) Linux でも
   拒否ロジックを検査したい場合は、`onnx-interop` の
   `windows_component_reject_reason`（`cfg(any(windows, test))`）の先例に倣い
   非 unix 判定の純関数を `cfg(any(not(unix), test))` で Linux のテストビルドに
@@ -1107,7 +1107,7 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
 **6. Windows 実機確認項目（#2393 への申し送り）**
 
 - W-save-1: `save_model` が `ErrorKind::Unsupported` を返し `dir` に何も作らない
-  こと（#2369・#2391 の後）
+  こと（#2369・#2391 の後。#2391 でクロス clippy 有効化済み、実機確認は #2393）
 - W-save-2: 緩和検討用。`manifest.json` を ファイル symlink（有効／dangling）・
   ディレクトリ symlink・junction・その他の reparse タグ（可能なら AppExecLink・
   OneDrive placeholder）にして `std::fs::rename(tmp, manifest.json)` を実行し、

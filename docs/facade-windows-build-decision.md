@@ -67,7 +67,7 @@
 ## 6. サポート対象 OS の階層（本書を正とする）
 
 - **Linux／macOS**: 全機能（ディスクキャッシュは fd pin の TOCTOU 対策付き）。
-- **Windows（x86_64-pc-windows-msvc）**: #2390・#2391 後にビルド可能。ディスクキャッシュは設計上無効。CUDA 実行時動作は #2393 まで未検証。
+- **Windows（x86_64-pc-windows-msvc）**: #2390・#2391 によりビルド可能（CI の Windows クロス clippy で継続検査）。ディスクキャッシュは設計上無効。CUDA 実行時動作は #2393 まで未検証。
 - **その他の非 unix**: ビルド可能だが未検証。
 
 `docs/backend-switching-design.md` にはサポート対象 OS の明文がなく、`nvrtc.rs` 冒頭コメントが同 doc を出典として引いているのは引用のずれである。同 doc へは本書への 1 行参照のみ追加した。
@@ -82,6 +82,12 @@ cudarc 0.19.8 `src/lib.rs:204-243` の `get_lib_name_candidates` は、Windows �
 - `build` ジョブ内に既存 onnx-interop 行（`--lib --tests`）とは別のコマンド行を 1 行追加する。#2390 後: `cargo clippy -p fandhe-ai-backend-cuda --lib --locked --target x86_64-pc-windows-msvc -- -D warnings`。#2391 後は facade 行（`-p fandhe-ai`）にまとめてよい。同一行に足さないのは、unix 専用テストを持つクレートに `--tests` を強制しないため（`--tests` の要否は #2391 で判断）。
 - Makefile `check-cross-windows-interop` にも同一コマンド行を追加する（ci.yml と共用の既存方針）。
 
+### 実装時の確定（#2391・2026-09-29）
+
+- facade 行 1 本（`cargo clippy -p fandhe-ai --lib --tests --locked --target x86_64-pc-windows-msvc -- -D warnings`）にまとめた。`-p fandhe-ai` は workspace の path 依存（backend-cuda 等の lib）にも clippy lint を適用することを、`cfg(windows)` 限定の lint 違反を仕込むプローブで実測した。backend-cuda 専用行は不要。
+- `--tests` を採用した（`docs/compat-model-io-decision.md` §12.4 項目 5 の前提）。3 つの test target で `cfg(unix)` 専用の補助が dead_code になっていたため cfg を揃え、非 unix 向け `load_model_is_unsupported_on_non_unix` を追加した。
+- ジョブ ID・name は不変で、ruleset の required contexts も変更していない。
+
 ## 9. #2393 への申し送り（Windows 実機で検証する項目）
 
 1. CUDA 13.0 Windows toolkit／driver で `nvcuda.dll`・`nvrtc64_130_0.dll` が解決されること、配置ディレクトリと `PATH` 要件。
@@ -94,8 +100,8 @@ cudarc 0.19.8 `src/lib.rs:204-243` の `get_lib_name_candidates` は、Windows �
 ## 10. 他 doc・コードに残るずれ（別イシューで是正）
 
 - `nvrtc.rs` 冒頭コメントの引用ずれ → #2390。
-- `ci.yml`（build ジョブの Windows ステップ・clippy コメント等）と `Makefile:270-275` の「facade は Windows でビルドできない」記述 → #2391。
-- `docs/onnx-external-data-decision.md` §7 → #2391。
+- `ci.yml`（build ジョブの Windows ステップ・clippy コメント等）と `Makefile:270-275` の「facade は Windows でビルドできない」記述 → #2391 で是正済み。
+- `docs/onnx-external-data-decision.md` §7 → #2391 で是正済み。
 
 ## 11. OWASP Top 10 観点
 

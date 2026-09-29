@@ -6,14 +6,17 @@
 //! ファイル名は `compat_sequential_model_io_manual.rs`（既存公開 API のみの往復土台）と
 //! 区別するため接尾辞なし。
 
+#[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::{ModelIoError, Sequential, load_model, save_model};
 
 mod common;
 use common::temp_dir::TempDirGuard;
 
+#[cfg(unix)]
 fn tensor(rows: usize, cols: usize, base: f32) -> Tensor<f32> {
     let data: Vec<f32> = (0..rows * cols)
         .map(|i| ((i as f32) * 0.37 + base).sin())
@@ -31,6 +34,7 @@ fn build_mixed_model() -> Sequential {
         .expect("構築できるはず")
 }
 
+#[cfg(unix)]
 /// 対応する活性化 7 種をすべて含む構成。
 fn build_all_activations_model() -> Sequential {
     Sequential::new()
@@ -48,6 +52,7 @@ fn build_all_activations_model() -> Sequential {
         .expect("構築できるはず")
 }
 
+#[cfg(unix)]
 fn assert_bit_identical(a: &Tensor<f32>, b: &Tensor<f32>, what: &str) {
     assert_eq!(a.shape(), b.shape(), "{what}: shape");
     let (ca, cb) = (a.contiguous(), b.contiguous());
@@ -63,6 +68,7 @@ fn assert_bit_identical(a: &Tensor<f32>, b: &Tensor<f32>, what: &str) {
     );
 }
 
+#[cfg(unix)]
 fn assert_models_identical(original: &Sequential, loaded: &Sequential, input: &Tensor<f32>) {
     let (sa, sb) = (original.state_dict(), loaded.state_dict());
     assert_eq!(sa.len(), sb.len());
@@ -81,6 +87,7 @@ fn try_load(dir: impl AsRef<Path>) -> Result<(), ModelIoError> {
     load_model(dir).map(|_| ())
 }
 
+#[cfg(unix)]
 fn entries(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .expect("読めるはず")
@@ -91,6 +98,7 @@ fn entries(dir: &Path) -> Vec<String> {
     names
 }
 
+#[cfg(unix)]
 fn safetensors_entries(dir: &Path) -> Vec<String> {
     entries(dir)
         .into_iter()
@@ -160,7 +168,9 @@ fn resave_into_existing_dir_keeps_old_generation() {
 }
 
 /// 構成を記録できない利用者定義層（`add_module`）。保存対象外の例として使う。
+#[cfg(unix)]
 struct CustomIdentity;
+#[cfg(unix)]
 impl fandhe_ai::nn::Module for CustomIdentity {
     fn forward<'t>(
         &self,
@@ -434,4 +444,24 @@ fn save_model_is_unsupported_on_non_unix() {
         "{err}"
     );
     assert!(!dir.exists(), "dir に何も作られない");
+}
+
+/// 非 unix では `load_model` も `Unsupported` で fail-closed する（`save_model` 側と対）。
+/// `fs_guard::open_leaf_checked` は `symlink_metadata` を先に呼ぶため、manifest が無いと
+/// `NotFound` になる。通常ファイルの `manifest.json` を先に置き、no-follow オープンの
+/// 拒否まで到達させる。Linux CI では型検査のみで、実行は Windows 実機検証（#2393）。
+#[cfg(not(unix))]
+#[test]
+fn load_model_is_unsupported_on_non_unix() {
+    let guard = TempDirGuard::new("non-unix-load");
+    let dir = guard.path().join("m");
+    std::fs::create_dir_all(&dir).expect("作れるはず");
+    std::fs::write(dir.join("manifest.json"), b"{}").expect("書けるはず");
+    let err = load_model(&dir)
+        .map(|_| ())
+        .expect_err("非 unix は未対応のはず");
+    assert!(
+        matches!(&err, ModelIoError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported),
+        "{err}"
+    );
 }

@@ -267,17 +267,18 @@ else
 	@echo "skip: Cargo.toml 未追加のため check-cross-cpu-tests をスキップ"
 endif
 
-# onnx-interop の external data Windows 対応（イシュー #2349）を Linux 上で
-# 継続的に型検査・lint するためのクロスターゲット clippy。facade（fandhe-ai）は
-# backend-cuda への無条件依存が非 unix ターゲットで `compile_error!` を発する
-# （#509／PR #677）ため Windows でビルドできず、対象は onnx-interop 単体に
-# 限る（上記 check-cross-metal-tests・check-cross-cpu-tests と同じ手法。
+# onnx-interop の external data Windows 対応（イシュー #2349）と facade の
+# Windows ビルド可能性（#2390・#2391）を Linux 上で継続的に型検査・lint する
+# ためのクロスターゲット clippy（onnx-interop 行と facade 行）。`-p fandhe-ai` は
+# backend-cuda 等の path 依存 lib も lint する（上記 check-cross-metal-tests・
+# check-cross-cpu-tests と同じ手法。
 # `cargo clippy` はリンクを行わないため Windows SDK 非搭載でも成立する）。
 .PHONY: check-cross-windows-interop
-check-cross-windows-interop: ## onnx-interop（external data の Windows 対応）を x86_64-pc-windows-msvc で clippy 検査する
+check-cross-windows-interop: ## onnx-interop・facade（Windows ビルド可能性）を x86_64-pc-windows-msvc で clippy 検査する
 ifdef HAS_CARGO
 	rustup target list --installed | grep -qx 'x86_64-pc-windows-msvc' || rustup target add x86_64-pc-windows-msvc
 	cargo clippy -p fandhe-ai-onnx-interop --lib --tests --locked --target x86_64-pc-windows-msvc -- -D warnings
+	cargo clippy -p fandhe-ai --lib --tests --locked --target x86_64-pc-windows-msvc -- -D warnings
 else
 	@echo "skip: Cargo.toml 未追加のため check-cross-windows-interop をスキップ"
 endif

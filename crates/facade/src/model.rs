@@ -143,6 +143,11 @@
 //! スコープ外として別イシューで追跡する（詳細は
 //! `docs/facade-model-registry-decision.md`）。
 //!
+//! facade 自体は x86_64-pc-windows-msvc でビルドでき、CI の Windows クロス
+//! clippy で継続検査している（#2390・#2391）。ただし `ModelRegistry::load`／
+//! `available_models` は上記のとおり `Unsupported` の fail-closed のままで、
+//! Windows 実機での動作は未検証（#2393）。
+//!
 //! # 対象外
 //!
 //! リモート取得・HF hub 連携（#2088）、`docs/model-distribution-

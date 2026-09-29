@@ -2287,6 +2287,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "fandhe-ai-model-io-{}-{}-{label}",
