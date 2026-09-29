@@ -516,6 +516,8 @@ save／load 一致を検証する。manifest の改竄（未知キー・版違�
 不一致）はすべて fail-closed に拒否されることを確認する。§12 の crash
 consistency（中断・既存ディレクトリへの再保存・旧世代の残存）も
 ファイルシステム操作を模した統合テストで検証する。
+改竄の統合テストは `crates/facade/tests/compat_sequential_model_io_tamper.rs`（#2375）に
+集約し、本節と §13.5 の各行との対応表を同ファイルの module doc に置く。
 CUDA／Metal 実機 parity は対象外（ホスト側 I/O のみでカーネルを
 持たないため）。
 
