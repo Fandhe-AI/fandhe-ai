@@ -79,6 +79,14 @@ if [[ "$INSTR_FACADE" == "$PLAIN_FACADE" ]]; then
   echo "error: instr / plain facade paths must differ" >&2
   exit 1
 fi
+# 同一 ref 検査: 計装あり／なしのツリーが同一コミットから作られていなければ、
+# checksum 一致・オーバーヘッド比の前提（計装差分のみの A/B）が崩れるため測定前に失敗させる。
+INSTR_REV="$(git -C "$INSTR_FACADE" rev-parse HEAD 2>/dev/null || true)"
+PLAIN_REV="$(git -C "$PLAIN_FACADE" rev-parse HEAD 2>/dev/null || true)"
+if [[ -z "$INSTR_REV" || -z "$PLAIN_REV" || "$INSTR_REV" != "$PLAIN_REV" ]]; then
+  echo "error: instr / plain trees must be at the same git HEAD (instr=${INSTR_REV:-unknown} plain=${PLAIN_REV:-unknown})" >&2
+  exit 1
+fi
 if ! grep -q "mod diag;" "$INSTR_FACADE/../autodiff/src/lib.rs" 2>/dev/null; then
   echo "error: instr tree does not contain the diag patch (crates/autodiff/src/lib.rs)" >&2
   exit 1
@@ -94,6 +102,15 @@ if [[ ! "$RUNS" =~ ^[1-9][0-9]?$ ]]; then
   exit 1
 fi
 DEVICES=${DIAG_DEVICES:-cpu}
+# cpu は必須セル。空・cpu 欠落は測定前に失敗させる（参考セルだけの収録を防ぐ）。
+HAS_CPU=0
+for d in $DEVICES; do
+  [[ "$d" == "cpu" ]] && HAS_CPU=1
+done
+if [[ "$HAS_CPU" -ne 1 ]]; then
+  echo "error: DIAG_DEVICES must be non-empty and include cpu (got: '$DEVICES')" >&2
+  exit 1
+fi
 for d in $DEVICES; do
   case "$d" in
     cpu | metal | cuda) ;;

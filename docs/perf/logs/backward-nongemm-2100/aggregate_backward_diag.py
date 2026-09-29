@@ -103,10 +103,15 @@ def parse_diag_lines(text: str, label: str) -> list[dict[str, int]]:
     return rows
 
 
-def read_checksums(text: str, label: str) -> set[float]:
-    """JSONL 全行の checksum を集める（欠落は fail-closed）。"""
-    sums: set[float] = set()
-    n = 0
+REQUIRED_PHASES = ("backward", "step_total")
+
+
+def read_checksums(text: str, label: str) -> list[tuple[str, float]]:
+    """JSONL 全行の (phase, checksum) を出現順に返す。集合へ縮約しない。
+
+    欠落・空・phase 重複・必須 phase（backward／step_total）の欠落は fail-closed。
+    """
+    rows: list[tuple[str, float]] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -115,13 +120,35 @@ def read_checksums(text: str, label: str) -> set[float]:
             obj = json.loads(line)
         except json.JSONDecodeError as exc:
             raise AggregateError(f"{label}: JSONL 解析失敗: {exc}") from exc
-        if "checksum" not in obj:
-            raise AggregateError(f"{label}: checksum 欠落")
-        sums.add(float(obj["checksum"]))
-        n += 1
-    if n == 0:
+        if "checksum" not in obj or not isinstance(obj.get("phase"), str):
+            raise AggregateError(f"{label}: phase／checksum 欠落")
+        rows.append((obj["phase"], float(obj["checksum"])))
+    if not rows:
         raise AggregateError(f"{label}: JSONL が空")
-    return sums
+    phases = [p for p, _ in rows]
+    if len(set(phases)) != len(phases):
+        raise AggregateError(f"{label}: phase 重複 {phases}")
+    for req in REQUIRED_PHASES:
+        if req not in phases:
+            raise AggregateError(f"{label}: 必須 phase {req} なし")
+    return rows
+
+
+def compare_checksums(
+    instr: list[tuple[str, float]], plain: list[tuple[str, float]], label: str
+) -> None:
+    """計装あり／なしで phase 列・行数・各行 checksum が完全一致することを検査する。"""
+    if [p for p, _ in instr] != [p for p, _ in plain]:
+        raise AggregateError(
+            f"{label}: phase 列が不一致 instr={[p for p, _ in instr]} "
+            f"plain={[p for p, _ in plain]}"
+        )
+    for (phase, ci), (_, cp) in zip(instr, plain):
+        if not ci == cp:  # NaN は不一致扱い（fail-closed）
+            raise AggregateError(
+                f"{label}: checksum 不一致 phase={phase} instr={ci!r} plain={cp!r}"
+                "（計装が数値を変えた。系列は無効）"
+            )
 
 
 def read_step_total_median(text: str) -> float | None:
@@ -162,11 +189,7 @@ def collect(machine: str, in_dir: Path, runs: int, devices: list[str]):
                 # 1. checksum 完全一致（fail-closed）
                 si = read_checksums(texts["ij"], label + " instr")
                 sp = read_checksums(texts["pj"], label + " plain")
-                if len(si) != 1 or len(sp) != 1 or si != sp:
-                    raise AggregateError(
-                        f"{label}: checksum 不一致 instr={sorted(si)} plain={sorted(sp)}"
-                        "（計装が数値を変えた。系列は無効）"
-                    )
+                compare_checksums(si, sp, label)
                 # 2. DIAG 行の件数・seq
                 rows = parse_diag_lines(texts["err"], label)
                 for step, r in enumerate(rows):
@@ -241,6 +264,8 @@ def render_md(machine, cells, overhead, gate, runs) -> str:
     w(
         "注記: `gemm` は resident grad staging 書き込み（`fill`。bias 縮約を含みうる）を"
         "含む（旧診断 §4 と比較可能）。`fill` は `gemm` の内訳で二重計上しない。"
+        "`非 GEMM` は step ごとに total − gemm を求めてから中央値を取る（表の total 行と "
+        "gemm 行の中央値同士の差とは一致しない）。"
         "`残差` = total − Σ(gemm+mask+ewise+transpose+materialize+accumulate+loss)"
         "（走査ループ・grads clone・checkpoint 再解放・未計装 arm 等）。"
         "GPU デバイスは非同期処理が同期点のカテゴリへ計上される。\n\n"
@@ -259,7 +284,10 @@ def render_md(machine, cells, overhead, gate, runs) -> str:
         rows = [("total", total)]
         rows += [(c.removesuffix("_ns"), med[c]) for c in CATEGORIES]
         rows += [("(fill ⊂ gemm)", med["fill_ns"]), ("vjp（参考）", med["vjp_ns"])]
-        rows += [("**非 GEMM = total − gemm**", med["nongemm_ns"]), ("残差", total - cat_sum)]
+        rows += [
+            ("**非 GEMM（step ごとの total − gemm の中央値）**", med["nongemm_ns"]),
+            ("残差（中央値同士の差）", total - cat_sum),
+        ]
         for name, v in rows:
             pct = (v / total * 100.0) if total else float("nan")
             w(f"| {name} | {v / 1000.0:.2f} | {pct:.1f}% |\n")
@@ -345,6 +373,24 @@ class SelfTest(unittest.TestCase):
             self._make(d, sum_instr=0.6)
             with self.assertRaises(AggregateError):
                 collect("t", d, 2, ["cpu"])
+
+    def test_checksum_per_row_and_phase_validation(self):
+        ok = [("backward", 0.5), ("step_total", 0.5)]
+        compare_checksums(ok, list(ok), "t")
+        # 行ごとの不一致（集合に縮約すると見逃す形）
+        with self.assertRaises(AggregateError):
+            compare_checksums(ok, [("backward", 0.5), ("step_total", 0.6)], "t")
+        # phase 列・行数の不一致
+        with self.assertRaises(AggregateError):
+            compare_checksums(ok, [("backward", 0.5)], "t")
+        with self.assertRaises(AggregateError):
+            compare_checksums(ok, [("step_total", 0.5), ("backward", 0.5)], "t")
+        # 必須 phase 欠落・phase 重複
+        with self.assertRaises(AggregateError):
+            read_checksums(json.dumps({"phase": "backward", "checksum": 1.0}), "t")
+        dup = "\n".join(json.dumps({"phase": "backward", "checksum": 1.0}) for _ in range(2))
+        with self.assertRaises(AggregateError):
+            read_checksums(dup, "t")
 
     def test_end_to_end(self):
         with tempfile.TemporaryDirectory() as td:
