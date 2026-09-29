@@ -17,7 +17,9 @@
 //! ロールバックは子孫を葉（`children` が空の層）単位で復元する（公開の
 //! `Module::children`／`children_mut` 経由のため、利用者定義の複合層も対象。PR #2426
 //! レビュー指摘・2026-09-29 ユーザー承認）。`children` と `children_mut` が不整合（件数・名前・順序・参照先の不一致）な構成は
-//! 状態変更前に `InvalidArgument` で拒否する（fail-closed）。
+//! 状態変更前に `InvalidArgument` で拒否する（fail-closed）。復元は自身の setter より前に
+//! 子の参照先を照合し、不一致なら setter を呼ばず部分適用エラーにする（setter 実行中の差し替えは
+//! 事後検出のみ。PR #2426 第 7 回レビュー P1）。
 //!
 //! autodiff 側との差: 子は facade `Module` の不透明な trait object のため、
 //! `Sequential::forward` は autodiff 側の Linear→ReLU 融合を行わず子を順に適用するだけである。
@@ -44,8 +46,8 @@ pub(crate) enum RequiresGradSnapshot {
     Nested {
         own: bool,
         /// 取得時点の子の同一性キー（名前・データアドレス・サイズ）と葉単位スナップショット。
-        /// 復元時にも同位置の子と照合し、処理中に差し替わった子へは復元しない
-        /// （PR #2426 第 6 回レビュー P1）。
+        /// 復元時は自身の setter より前に照合し、差し替わった子へは復元せず（不一致なら自身の
+        /// setter も呼ばない）部分適用エラーにする（PR #2426 第 6・7 回レビュー P1）。
         children: Vec<(ChildIdentity, RequiresGradSnapshot)>,
     },
 }
@@ -126,61 +128,99 @@ fn check_children_consistent(
     }
 }
 
-/// スナップショットへ葉単位で復元する。葉は `requires_grad()` の一致で早期 `Ok` にせず
-/// 必ず `set_requires_grad` を呼び（getter が既定 `true` のままの外部実装対策）、`Err` は
-/// そのまま返す。入れ子は先に自身へ `set_requires_grad(own)` を呼び、その後に子を復元する
-/// （自身の呼び出しが子へ伝播した値は子の復元で上書きされる）。自身・子のどれかが失敗しても
-/// 残りの復元を続行し、失敗を集約する。
-/// 各子は名前・データアドレス・`size_of_val` を取得時の同一性キーと照合し、差し替わった子へは
-/// 復元せず（別の子を書き換えない）部分適用を明示した `InvalidArgument` に集約する。
-/// 子の件数が食い違う場合も fail-closed の `InvalidArgument`（self は復元済みの部分適用）。
+/// 位置 `i` の子が取得時の同一性キー `expected` と一致するか（名前・データアドレス・
+/// `size_of_val`）。
+fn child_matches(expected: &ChildIdentity, name: &str, child: &dyn Module) -> bool {
+    let (exp_name, exp_addr, exp_size) = expected;
+    exp_name == name
+        && *exp_addr == (child as *const dyn Module as *const ())
+        && *exp_size == std::mem::size_of_val(child)
+}
+
+/// スナップショットへ葉単位で復元する。
+///
+/// 葉は `requires_grad()` の一致で早期 `Ok` にせず必ず `set_requires_grad` を呼ぶ（getter が
+/// 既定 `true` のままの外部実装対策）が、呼ぶ**前に** `children()` が空のままであることを
+/// 確かめる。子を持つようになっていれば setter を呼ばず（未知の子へ伝播させない）、部分適用を
+/// 明示した `InvalidArgument` を返す（PR #2426 第 7 回レビュー P1）。
+///
+/// 入れ子は次の順で復元する（同第 7 回 P1 是正）。
+/// 1. **setter より前に照合する**: `children_mut` の結果を取得時の同一性キー（名前・
+///    アドレス・`size_of_val`）と件数を含めて照合し、照合用の参照は照合後に drop する。
+///    1 つでも不一致なら自身への `set_requires_grad(own)` は**呼ばない**（自身の setter が
+///    差し替わった別の子へ伝播して書き換えるのを避ける）。
+/// 2. 全一致のときだけ自身へ `set_requires_grad(own)` を呼び、その後 `children_mut` を
+///    取り直して再照合しつつ、一致した位置の子を個別に再帰復元する。不一致の位置の子には
+///    復元値を適用しない。
+/// 3. 自身の未復元・差し替わった子の未復元・各失敗は集約し、部分適用を明示した
+///    `InvalidArgument` を返す。`Ok` は偽装しない。
+///
+/// 限界: 自身の setter の**実行中**に差し替えが起き、その伝播先が別の子だった場合、伝播は
+/// 利用者コードの中で決まるためライブラリは防げない。事後照合（手順 2）で検出して部分適用
+/// エラーとして報告するだけで、取り消しはできない。`children`／`children_mut` は
+/// `set_requires_grad` の間、同じ子を返し続けることが利用者実装の契約である。
 pub(crate) fn restore_requires_grad<M: Module + ?Sized>(
     module: &mut M,
     snapshot: &RequiresGradSnapshot,
 ) -> Result<(), AutodiffError> {
     match snapshot {
-        RequiresGradSnapshot::Leaf(value) => module.set_requires_grad(*value),
+        RequiresGradSnapshot::Leaf(value) => {
+            // 取得時は葉だった層が子を持つようになっていれば、setter が未知の子へ伝播しうる。
+            let now = module.children().len();
+            if now != 0 {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "restore_requires_grad: a leaf at snapshot time now exposes {now} \
+                     child(ren); `set_requires_grad` was not called to avoid propagating to \
+                     unknown children, so the module may be left in a partially applied state"
+                )));
+            }
+            module.set_requires_grad(*value)
+        }
         RequiresGradSnapshot::Nested {
             own,
             children: expected,
         } => {
             let mut failures: Vec<String> = Vec::new();
-            // 自身 → 子の順。自身の呼び出しは子へ伝播しうるが、直後の子の復元で上書きされる。
-            if let Err(e) = module.set_requires_grad(*own) {
-                failures.push(format!("self ({e})"));
+            // 手順 1: setter の前に参照先を照合する（参照は照合後にここで drop）。
+            let references_intact = {
+                let children = module.children_mut();
+                children.len() == expected.len()
+                    && children
+                        .iter()
+                        .zip(expected)
+                        .all(|((name, child), (exp, _))| child_matches(exp, name, &**child))
+            };
+            if references_intact {
+                if let Err(e) = module.set_requires_grad(*own) {
+                    failures.push(format!("self ({e})"));
+                }
+            } else {
+                failures.push(
+                    "self (not restored: child references changed before restore, and \
+                     `set_requires_grad` was skipped so it cannot propagate to a different \
+                     child)"
+                        .to_string(),
+                );
             }
+            // 手順 2: 取り直して再照合し、一致した位置の子だけを個別に復元する。
             let children = module.children_mut();
             if children.len() != expected.len() {
-                let self_note = if failures.is_empty() {
-                    "self was already restored"
-                } else {
-                    "self restore was attempted"
-                };
-                return Err(AutodiffError::InvalidArgument(format!(
-                    "restore_requires_grad: child count changed during rollback (snapshot {}, \
-                     actual {}); {self_note} but no child could be restored, so the module may \
-                     be left in a partially applied state{}",
+                failures.push(format!(
+                    "child count changed (snapshot {}, actual {}); only matching positions \
+                     were restored",
                     expected.len(),
-                    children.len(),
-                    if failures.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", failures.join(", "))
-                    }
-                )));
+                    children.len()
+                ));
             }
-            for ((name, child), ((exp_name, exp_addr, exp_size), snap)) in
-                children.into_iter().zip(expected)
-            {
-                // 名前だけでなく参照先（アドレス・サイズ）も照合する。差し替わった子へは
-                // スナップショットを適用せず（別の子を書き換えない）失敗として集約する。
-                let same = &name == exp_name
-                    && *exp_addr == (&*child as *const dyn Module as *const ())
-                    && *exp_size == std::mem::size_of_val(&*child);
-                if !same {
+            for (pos, (name, child)) in children.into_iter().enumerate() {
+                let Some((exp, snap)) = expected.get(pos) else {
+                    break;
+                };
+                if !child_matches(exp, &name, &*child) {
                     failures.push(format!(
-                        "child `{exp_name}` (its reference changed during freezing, so it \
-                         was not restored: the module was left partially applied)"
+                        "child `{}` (its reference changed during freezing, so it was not \
+                         restored)",
+                        exp.0
                     ));
                     continue;
                 }
@@ -1478,6 +1518,99 @@ mod tests {
         assert!(msg.contains("partially applied"), "{msg}");
         assert!(msg.contains("child failed"), "元エラーも含む: {msg}");
         assert!(!b_rg.get(), "別の子 b へスナップショットの値を適用しない");
+    }
+
+    /// 凍結の本処理で参照先が切り替わり、自身の setter が両方の子へ伝播する複合層をアダプタ経由で
+    /// autodiff `ModuleList` に積んだ経路（PR #2426 第 7 回レビュー P1）。復元は自身の setter を
+    /// 呼ばず（呼び出し回数 1 のまま）部分適用の `Err` を返し、新しい子 `b` を復元値で書き換えない。
+    #[test]
+    fn adapter_in_autodiff_module_list_skips_own_setter_when_child_swapped() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        struct Sl {
+            p: Tensor<f32>,
+            rg: Rc<Cell<bool>>,
+        }
+        impl Module for Sl {
+            fn forward<'t>(
+                &self,
+                _tape: TapeRef<'t>,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                Ok(*input)
+            }
+            fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+                vec![("p".into(), &self.p)]
+            }
+            fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+                self.rg.set(v);
+                Ok(())
+            }
+            fn requires_grad(&self) -> bool {
+                self.rg.get()
+            }
+        }
+        struct Sw {
+            a: Sl,
+            b: Sl,
+            switched: bool,
+            setter_calls: Rc<Cell<usize>>,
+        }
+        impl Module for Sw {
+            fn forward<'t>(
+                &self,
+                _tape: TapeRef<'t>,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                Ok(*input)
+            }
+            fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+                self.a.named_parameters()
+            }
+            fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+                self.setter_calls.set(self.setter_calls.get() + 1);
+                self.switched = true;
+                self.a.set_requires_grad(v)?;
+                self.b.set_requires_grad(v)
+            }
+            fn requires_grad(&self) -> bool {
+                self.a.requires_grad() || self.b.requires_grad()
+            }
+            fn children(&self) -> Vec<(String, &dyn Module)> {
+                let c = if self.switched { &self.b } else { &self.a };
+                vec![("x".into(), c)]
+            }
+            fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+                let c = if self.switched {
+                    &mut self.b
+                } else {
+                    &mut self.a
+                };
+                vec![("x".into(), c)]
+            }
+        }
+        let mk = |v: bool| Sl {
+            p: Tensor::from_slice(&[1.0f32, 2.0], &[2]).expect("p"),
+            rg: Rc::new(Cell::new(v)),
+        };
+        let b = mk(true);
+        let b_rg = Rc::clone(&b.rg);
+        let setter_calls = Rc::new(Cell::new(0usize));
+        let mut outer = fandhe_ai_autodiff::nn::ModuleList::new();
+        outer.push(Box::new(adapted(Sw {
+            a: mk(true),
+            b,
+            switched: false,
+            setter_calls: Rc::clone(&setter_calls),
+        })));
+        outer.push(Box::new(adapted(failing_fz())));
+        let e = fandhe_ai_autodiff::nn::Module::set_requires_grad(&mut outer, false)
+            .expect_err("後続子が失敗しロールバックも不完全");
+        let msg = e.to_string();
+        assert!(msg.contains("partially applied"), "{msg}");
+        assert!(msg.contains("child failed"), "元エラーも含む: {msg}");
+        assert_eq!(setter_calls.get(), 1, "復元では自身の setter を呼ばない");
+        assert!(!b_rg.get(), "b は復元値 true で書き換えられない");
     }
 
     /// 同名で別の子を `children_mut` から返す複合層をアダプタ経由で積むと、状態変更前に

@@ -530,7 +530,9 @@ impl Module for SharedLeaf {
 
 /// `children`／`children_mut` は通常子 `a` を返すが、自身の `set_requires_grad` が呼ばれると
 /// 以後は同名の別フィールド `b` を返すよう切り替わる利用者定義の複合層（PR #2426 第 6 回
-/// レビュー P1）。`false` の伝播は `b`→`a` の順で両方へ、`true` は自身では子へ伝播しない
+/// レビュー P1）。凍結の本処理で切り替わるため、第 7 回 P1 是正後は復元の**事前照合**で検出され
+/// （自身の setter は復元で呼ばれない）、setter が実行中に切り替わる事後照合側は
+/// `SwitchOnRestore` が担う。`false` の伝播は `b`→`a` の順で両方へ、`true` は自身では子へ伝播しない
 /// （復元時の自身への呼び出しが子の状態を書き換えず、別の子へ適用されたかを判別できるようにする）。
 struct SwitchingComposite {
     a: Box<dyn Module>,
@@ -596,5 +598,216 @@ fn rollback_detects_child_swapped_during_freeze() {
     assert!(
         !b_rg.load(Ordering::SeqCst),
         "別の子 b へスナップショットの値を適用しない"
+    );
+}
+
+/// 凍結の本処理中（自身の `set_requires_grad` 内）に `children`／`children_mut` の参照先が
+/// `a` から `b` へ切り替わり、かつ自身の setter は `a`・`b` の両方へ伝播する複合層（PR #2426
+/// 第 7 回レビュー P1）。`setter_calls` で自身の setter の呼び出し回数を数える。
+struct PreSwitching {
+    a: Box<dyn Module>,
+    b: Box<dyn Module>,
+    switched: bool,
+    setter_calls: Arc<AtomicUsize>,
+}
+
+impl Module for PreSwitching {
+    fn forward<'t>(&self, _tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(*input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.a.named_parameters()
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.setter_calls.fetch_add(1, Ordering::SeqCst);
+        self.switched = true;
+        self.a.set_requires_grad(v)?;
+        self.b.set_requires_grad(v)
+    }
+    fn requires_grad(&self) -> bool {
+        self.a.requires_grad() || self.b.requires_grad()
+    }
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        let c = if self.switched { &self.b } else { &self.a };
+        vec![("x".into(), c.as_ref())]
+    }
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        let c = if self.switched {
+            &mut self.b
+        } else {
+            &mut self.a
+        };
+        vec![("x".into(), c.as_mut())]
+    }
+}
+
+/// 凍結の本処理で参照先が切り替わった複合層に対し、復元は自身の setter を呼ばずに部分適用の
+/// `Err` を返し、伝播で新しい子 `b` を復元値（`true`）へ書き換えない（第 7 回 P1）。
+#[test]
+fn restore_does_not_call_own_setter_when_child_swapped_during_freeze() {
+    let a_rg = Arc::new(AtomicBool::new(true));
+    let b_rg = Arc::new(AtomicBool::new(true));
+    let setter_calls = counter();
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(PreSwitching {
+        a: Box::new(SharedLeaf::new(&a_rg)),
+        b: Box::new(SharedLeaf::new(&b_rg)),
+        switched: false,
+        setter_calls: Arc::clone(&setter_calls),
+    }));
+    list.push(Box::new(Leaf::failing(&calls)));
+
+    let e = list
+        .freeze()
+        .expect_err("後続子が失敗しロールバックも不完全");
+    let msg = e.to_string();
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{msg}");
+    assert!(msg.contains("partially applied"), "部分適用の明示: {msg}");
+    assert!(msg.contains("leaf failed"), "元エラーも含む: {msg}");
+    assert_eq!(
+        setter_calls.load(Ordering::SeqCst),
+        1,
+        "自身の setter は凍結の本処理の 1 回だけ（復元では呼ばれない）"
+    );
+    assert!(
+        !b_rg.load(Ordering::SeqCst),
+        "b は凍結の本処理で受けた値のまま（復元値 true で書き換えられない）"
+    );
+}
+
+/// 凍結では切り替わらず、復元で呼ばれる自身の setter（`true`）の実行中に参照先が `b` へ
+/// 切り替わり、その伝播先が `b` になる複合層。ライブラリは setter 内の伝播を防げないため、
+/// 事後照合で検出して部分適用の `Err` を返す（偽の `Ok` にしない。第 7 回 P1）。
+struct SwitchOnRestore {
+    a: Box<dyn Module>,
+    b: Box<dyn Module>,
+    switched: bool,
+    setter_calls: Arc<AtomicUsize>,
+}
+
+impl Module for SwitchOnRestore {
+    fn forward<'t>(&self, _tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(*input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.a.named_parameters()
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.setter_calls.fetch_add(1, Ordering::SeqCst);
+        if v {
+            self.switched = true;
+            self.b.set_requires_grad(true)
+        } else {
+            self.a.set_requires_grad(false)
+        }
+    }
+    fn requires_grad(&self) -> bool {
+        self.a.requires_grad() || self.b.requires_grad()
+    }
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        let c = if self.switched { &self.b } else { &self.a };
+        vec![("x".into(), c.as_ref())]
+    }
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        let c = if self.switched {
+            &mut self.b
+        } else {
+            &mut self.a
+        };
+        vec![("x".into(), c.as_mut())]
+    }
+}
+
+#[test]
+fn restore_detects_child_swapped_during_own_setter_post_check() {
+    let a_rg = Arc::new(AtomicBool::new(true));
+    let b_rg = Arc::new(AtomicBool::new(false));
+    let setter_calls = counter();
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(SwitchOnRestore {
+        a: Box::new(SharedLeaf::new(&a_rg)),
+        b: Box::new(SharedLeaf::new(&b_rg)),
+        switched: false,
+        setter_calls: Arc::clone(&setter_calls),
+    }));
+    list.push(Box::new(Leaf::failing(&calls)));
+
+    let e = list.freeze().expect_err("事後照合で部分適用を検出");
+    let msg = e.to_string();
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{msg}");
+    assert!(msg.contains("partially applied"), "{msg}");
+    assert_eq!(
+        setter_calls.load(Ordering::SeqCst),
+        2,
+        "事前照合は一致するため復元でも自身の setter が呼ばれる"
+    );
+}
+
+/// 取得時は葉（`children` が空）だが、凍結の本処理で子を持つようになる層（第 7 回 P1 の Leaf
+/// 分岐）。復元は setter を呼ばず（未知の子へ伝播させない）部分適用の `Err` を返す。
+struct GrowingLeaf {
+    p: Tensor<f32>,
+    grown: bool,
+    extra: Box<dyn Module>,
+    setter_calls: Arc<AtomicUsize>,
+}
+
+impl Module for GrowingLeaf {
+    fn forward<'t>(&self, _tape: TapeRef<'t>, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Ok(*input)
+    }
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        vec![("p".into(), &self.p)]
+    }
+    fn set_requires_grad(&mut self, v: bool) -> Result<(), AutodiffError> {
+        self.setter_calls.fetch_add(1, Ordering::SeqCst);
+        self.grown = true;
+        self.extra.set_requires_grad(v)
+    }
+    fn requires_grad(&self) -> bool {
+        true
+    }
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        if self.grown {
+            vec![("extra".into(), self.extra.as_ref())]
+        } else {
+            Vec::new()
+        }
+    }
+    fn children_mut(&mut self) -> Vec<(String, &mut dyn Module)> {
+        if self.grown {
+            vec![("extra".into(), self.extra.as_mut())]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[test]
+fn restore_does_not_call_setter_on_leaf_that_grew_children() {
+    let extra_rg = Arc::new(AtomicBool::new(true));
+    let setter_calls = counter();
+    let calls = counter();
+    let mut list = ModuleList::new();
+    list.push(Box::new(GrowingLeaf {
+        p: Tensor::from_slice(&[1.0f32, 2.0], &[2]).expect("p"),
+        grown: false,
+        extra: Box::new(SharedLeaf::new(&extra_rg)),
+        setter_calls: Arc::clone(&setter_calls),
+    }));
+    list.push(Box::new(Leaf::failing(&calls)));
+
+    let e = list
+        .freeze()
+        .expect_err("後続子が失敗しロールバックも不完全");
+    let msg = e.to_string();
+    assert!(matches!(e, AutodiffError::InvalidArgument(_)), "{msg}");
+    assert!(msg.contains("partially applied"), "{msg}");
+    assert_eq!(setter_calls.load(Ordering::SeqCst), 1, "復元では呼ばれない");
+    assert!(
+        !extra_rg.load(Ordering::SeqCst),
+        "未知の子 extra は復元値で書き換えられない"
     );
 }
