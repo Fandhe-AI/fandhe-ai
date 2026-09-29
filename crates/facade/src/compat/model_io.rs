@@ -732,6 +732,10 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
     // （パラメータのキーは `{層番号}.{名前}` で衝突しない）。
     let mut state = state;
     if let Some(snap) = snapshot {
+        // load 側と同じスロット整合ガードを保存側でも通す。compile 後の `add_*` は compiled を
+        // 維持するため、パラメータ数が増えた状態を書き出すと load が Mismatch で拒否する
+        // ディレクトリができてしまう（「書き出したものは必ず load できる」契約の保持）。
+        check_slot_shapes(&snap.optimizer_state, &model.trainable_parameters())?;
         for (key, tensor) in snap.optimizer_state {
             if state
                 .insert(format!("{OPTIMIZER_PREFIX}{key}"), tensor)

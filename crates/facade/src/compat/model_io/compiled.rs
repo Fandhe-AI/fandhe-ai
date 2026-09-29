@@ -675,6 +675,24 @@ mod tests {
         ));
     }
 
+    /// compile・fit 後に層を足すとパラメータ数が optimizer のスロット数を超える。
+    /// load が Mismatch で拒否するため、保存側も書き込み前に同じ Mismatch で拒否する。
+    #[test]
+    fn prepare_save_rejects_optimizer_slots_inconsistent_with_parameters() {
+        let mut m = Sequential::new().add_linear(2, 2, 1).expect("構築");
+        m.compile(Optimizer::AdamW(AdamWConfig::default()), Loss::Mse)
+            .expect("compile");
+        let x = Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).expect("x");
+        let y = Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).expect("y");
+        m.fit(&x, &y, FitConfig::new(1, 2)).expect("fit");
+        assert!(prepare_save(&m).is_ok());
+        let m = m.add_linear(2, 2, 2).expect("add_linear");
+        assert!(matches!(
+            prepare_save(&m),
+            Err(ModelIoError::Mismatch { .. })
+        ));
+    }
+
     #[test]
     fn check_slot_shapes_rejects_count_and_shape_mismatch() {
         let p0 = Tensor::new(vec![0.0; 4], &[2, 2]).expect("p0");
