@@ -36,6 +36,11 @@
 //! への公開・識別子の再エクスポートはイシュー #1722 で完了済み（純
 //! 再エクスポート。`crates/facade/src/optim.rs` 参照）。本モジュールは
 //! クレート内実装（`crate::nn::optim` 経由）に留まる。
+//!
+//! [`grad_scaler_from_state`]（イシュー #2365）は保存済み状態から
+//! [`GradScaler`] を検証付きで復元する内部 API。inherent メソッドにすると
+//! facade の `fandhe_ai::optim::GradScaler` 経由で公開面が広がるため自由関数とし、
+//! `nn::optim` の `pub use` にも載せない（facade へ再エクスポートしない）。
 
 use fandhe_ai_tensor_core::Tensor;
 
@@ -52,6 +57,45 @@ fn validate_scale(scale: f32, caller: &str) -> Result<(), AutodiffError> {
         )));
     }
     Ok(())
+}
+
+/// [`GradScalerConfig`] の共通検証。[`GradScaler::new`] と
+/// [`grad_scaler_from_state`] が同一基準で fail-closed に弾くため 1 箇所へ集約する。
+fn validate_config(config: &GradScalerConfig, caller: &str) -> Result<(), AutodiffError> {
+    if !config.init_scale.is_finite() || config.init_scale <= 0.0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{caller}: init_scale must be finite and > 0.0, got {}",
+            config.init_scale
+        )));
+    }
+    if !config.growth_factor.is_finite() || config.growth_factor <= 1.0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{caller}: growth_factor must be finite and > 1.0, got {}",
+            config.growth_factor
+        )));
+    }
+    if !(config.backoff_factor.is_finite()
+        && config.backoff_factor > 0.0
+        && config.backoff_factor < 1.0)
+    {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{caller}: backoff_factor must be finite and in (0.0, 1.0), got {}",
+            config.backoff_factor
+        )));
+    }
+    if config.growth_interval == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{caller}: growth_interval must be >= 1, got 0"
+        )));
+    }
+    Ok(())
+}
+
+/// 稼働中の scale として有効か（有限・正・非正規化数でない）。
+/// [`GradScaler::update`] の backoff 検証と [`grad_scaler_from_state`] の
+/// scale 検証が同一基準であることを構造で保証するため共有する。
+fn is_valid_live_scale(scale: f32) -> bool {
+    scale.is_finite() && scale > 0.0 && !scale.is_subnormal()
 }
 
 /// 損失を `scale` 倍する（AMP の順伝播側ステップ）。
@@ -240,32 +284,7 @@ impl GradScaler {
     /// - `growth_interval` が `0`（`0` 回連続 clean で成長する定義は
     ///   意味を持たない）
     pub fn new(config: GradScalerConfig) -> Result<GradScaler, AutodiffError> {
-        if !config.init_scale.is_finite() || config.init_scale <= 0.0 {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "GradScaler::new: init_scale must be finite and > 0.0, got {}",
-                config.init_scale
-            )));
-        }
-        if !config.growth_factor.is_finite() || config.growth_factor <= 1.0 {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "GradScaler::new: growth_factor must be finite and > 1.0, got {}",
-                config.growth_factor
-            )));
-        }
-        if !(config.backoff_factor.is_finite()
-            && config.backoff_factor > 0.0
-            && config.backoff_factor < 1.0)
-        {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "GradScaler::new: backoff_factor must be finite and in (0.0, 1.0), got {}",
-                config.backoff_factor
-            )));
-        }
-        if config.growth_interval == 0 {
-            return Err(AutodiffError::InvalidArgument(
-                "GradScaler::new: growth_interval must be >= 1, got 0".to_string(),
-            ));
-        }
+        validate_config(&config, "GradScaler::new")?;
         let scale = config.init_scale;
         Ok(GradScaler {
             config,
@@ -317,7 +336,7 @@ impl GradScaler {
     pub fn update(&mut self, found_non_finite: bool) -> Result<(), AutodiffError> {
         if found_non_finite {
             let next = self.scale * self.config.backoff_factor;
-            if !next.is_finite() || next <= 0.0 || next.is_subnormal() {
+            if !is_valid_live_scale(next) {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "GradScaler::update: backoff により scale が不正な値になった: {next}"
                 )));
@@ -339,4 +358,48 @@ impl GradScaler {
         }
         Ok(())
     }
+}
+
+/// 保存済みの現在値 `(scale, growth_tracker)` から [`GradScaler`] を検証付きで
+/// 復元する内部 API（イシュー #2365）。
+///
+/// `growth_tracker` は backoff・growth のたびに 0 へ戻るため、[`GradScaler::update`]
+/// の再生では任意の保存状態を再現できない。`fandhe_ai::compat` の model_io
+/// （`save_model`／`load_model`・イシュー #2372）が manifest の `amp.scale`・
+/// `amp.growth_tracker`（非信頼値。決定記録 §13.5）を渡して bit 一致で復元する。
+/// 出典は `docs/compat-model-io-decision.md` §2 item 3・§11。
+///
+/// inherent メソッドにしないのは、facade の `fandhe_ai::optim::GradScaler`
+/// 再エクスポート経由で公開面が自動的に広がるのを防ぐため。
+///
+/// # Errors
+///
+/// いずれも `AutodiffError::InvalidArgument`（fail-closed。最初の違反で返す）。
+///
+/// - `config` が [`GradScaler::new`] と同じ基準に違反
+/// - `scale` が非有限・0 以下・非正規化数（[`GradScaler::update`] の backoff 検証と同基準）
+/// - `growth_tracker >= config.growth_interval`（正常な状態機械は
+///   `0..growth_interval` にしか到達しないため改竄・破損とみなす）
+pub fn grad_scaler_from_state(
+    config: GradScalerConfig,
+    scale: f32,
+    growth_tracker: u64,
+) -> Result<GradScaler, AutodiffError> {
+    validate_config(&config, "grad_scaler_from_state")?;
+    if !is_valid_live_scale(scale) {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "grad_scaler_from_state: scale must be finite, > 0.0 and not subnormal, got {scale}"
+        )));
+    }
+    if growth_tracker >= config.growth_interval {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "grad_scaler_from_state: growth_tracker must be < growth_interval ({}), got {growth_tracker}",
+            config.growth_interval
+        )));
+    }
+    Ok(GradScaler {
+        config,
+        scale,
+        growth_tracker,
+    })
 }
