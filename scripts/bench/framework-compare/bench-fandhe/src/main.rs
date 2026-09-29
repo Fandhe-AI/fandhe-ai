@@ -2381,14 +2381,65 @@ mod tests {
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// テスト間で衝突しない一時 JSONL パスを作る（pid + カウンタで一意化。
-    /// 並行テスト実行時の読み取り／削除の混入を防ぐ）。
-    fn temp_out_path(tag: &str) -> std::path::PathBuf {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "bench-fandhe-test-{tag}-{}-{n}.jsonl",
-            std::process::id()
-        ))
+    /// テストが使う一時 JSONL 出力ファイルの RAII ガード（`temp_out_path` が返す）。
+    ///
+    /// 役割: `run_*`／`measure_*` の出力先（`Cli::out`）となる一時ファイルを、
+    /// 一意名 + `create_new`（排他作成）で確保し、`Drop` で後始末する。
+    /// 名前は `bench-fandhe-test-{tag}-{pid}-{nanos}-{seq}.jsonl` で、予測可能な
+    /// 共有 `temp_dir` 上のパスへ `create(true).append(true)` で書き込むと、
+    /// 既存ファイルやシンボリックリンクへ追記してしまう問題（イシュー #2387・
+    /// 親 #2363。参照実装は `TempDirGuard::new`・コミット 6130760f）を避ける。
+    /// 先に空ファイルを作っても、出力側の `bench-common::emit_line`
+    /// （`create + append`）は空ファイルへ追記するだけで両立する。
+    /// `Drop` は作成に成功した自身のパスだけを削除する（事前削除はしない）。
+    ///
+    /// `Deref`／`AsRef<Path>` は意図的に実装しない。`&temp_out_path(..)` の
+    /// ように一時値を直接渡すと、ガードが文末で drop されて実行前にファイルが
+    /// 消え、排他作成の保証が崩れるため、`.path()` の明示（`let` 束縛必須）を
+    /// 型エラーで強制する。
+    struct TempOutFile {
+        path: std::path::PathBuf,
+    }
+
+    impl TempOutFile {
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempOutFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// テスト間で衝突しない一時 JSONL ファイルを排他作成して返す
+    /// （pid + ナノ秒 + カウンタで一意化し、`create_new` で既存パスを拒否する）。
+    /// `AlreadyExists` のときは名前を取り直して有限回再試行し、それ以外の
+    /// エラーや上限到達はテストコードとして panic する。
+    fn temp_out_path(tag: &str) -> TempOutFile {
+        const MAX_ATTEMPTS: usize = 16;
+        for _ in 0..MAX_ATTEMPTS {
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "bench-fandhe-test-{tag}-{}-{nanos}-{n}.jsonl",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return TempOutFile { path },
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("test: 一時ファイル {} の作成に失敗: {e}", path.display()),
+            }
+        }
+        panic!("test: 一時ファイル名の衝突が {MAX_ATTEMPTS} 回続いた（tag={tag}）");
     }
 
     fn make_cli(task: &str, mode: &str, out: &std::path::Path) -> Cli {
@@ -2435,15 +2486,13 @@ mod tests {
         let fresh_path = temp_out_path("fresh");
         let reuse_path = temp_out_path("reuse");
 
-        run_train(&make_cli("train", "fresh", &fresh_path)).expect("run_train (fresh) failed");
-        run_train_reuse(&make_cli("train", "reuse", &reuse_path))
+        run_train(&make_cli("train", "fresh", fresh_path.path()))
+            .expect("run_train (fresh) failed");
+        run_train_reuse(&make_cli("train", "reuse", reuse_path.path()))
             .expect("run_train_reuse (reuse) failed");
 
-        let fresh_checksum = last_line_checksum(&fresh_path);
-        let reuse_checksum = last_line_checksum(&reuse_path);
-
-        let _ = std::fs::remove_file(&fresh_path);
-        let _ = std::fs::remove_file(&reuse_path);
+        let fresh_checksum = last_line_checksum(fresh_path.path());
+        let reuse_checksum = last_line_checksum(reuse_path.path());
 
         assert!(
             fresh_checksum.is_finite() && reuse_checksum.is_finite(),
@@ -2461,9 +2510,8 @@ mod tests {
     #[test]
     fn train_reuse_produces_expected_record_fields() {
         let out = temp_out_path("reuse-fields");
-        run_train_reuse(&make_cli("train", "reuse", &out)).expect("run_train_reuse failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        run_train_reuse(&make_cli("train", "reuse", out.path())).expect("run_train_reuse failed");
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let last = content.lines().next_back().expect("test: JSONL に行がない");
         assert!(last.contains("\"task\":\"train\""), "line={last}");
         assert!(last.contains("\"mode\":\"reuse\""), "line={last}");
@@ -2496,9 +2544,8 @@ mod tests {
     #[test]
     fn train_phases_fresh_emits_one_row_per_phase_in_order() {
         let out = temp_out_path("phases-fresh-order");
-        run_train_phases(&make_phases_cli("fresh", &out)).expect("run_train_phases failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        run_train_phases(&make_phases_cli("fresh", out.path())).expect("run_train_phases failed");
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let lines: Vec<&str> = content.lines().collect();
         // fresh の区間数（モジュール doc の PHASE_* 定数のうち fresh 経路で
         // 使うもの）: tape_build/leaf_register/forward/loss_readout/
@@ -2518,7 +2565,8 @@ mod tests {
 
     #[test]
     fn train_phases_each_step_phase_sum_does_not_exceed_total() {
-        let cli = make_phases_cli("fresh", &temp_out_path("phases-fresh-sum"));
+        let out = temp_out_path("phases-fresh-sum");
+        let cli = make_phases_cli("fresh", out.path());
         let (phases, _last_loss) = measure_train_phases(&cli).expect("measure_train_phases failed");
         let totals = phases.durations(PHASE_STEP_TOTAL);
         assert_eq!(totals.len(), TRAIN_STEPS);
@@ -2550,11 +2598,11 @@ mod tests {
     #[test]
     fn train_phases_fresh_final_loss_matches_run_train() {
         let fresh_path = temp_out_path("fresh-vs-phases");
-        run_train(&make_cli("train", "fresh", &fresh_path)).expect("run_train failed");
-        let fresh_checksum = last_line_checksum(&fresh_path);
-        let _ = std::fs::remove_file(&fresh_path);
+        run_train(&make_cli("train", "fresh", fresh_path.path())).expect("run_train failed");
+        let fresh_checksum = last_line_checksum(fresh_path.path());
 
-        let phases_cli = make_phases_cli("fresh", &temp_out_path("phases-loss-fresh"));
+        let phases_out = temp_out_path("phases-loss-fresh");
+        let phases_cli = make_phases_cli("fresh", phases_out.path());
         let (_phases, last_loss) =
             measure_train_phases(&phases_cli).expect("measure_train_phases failed");
         let phases_checksum = last_loss as f64;
@@ -2571,11 +2619,12 @@ mod tests {
     #[test]
     fn train_reuse_phases_final_loss_matches_run_train_reuse() {
         let reuse_path = temp_out_path("reuse-vs-phases");
-        run_train_reuse(&make_cli("train", "reuse", &reuse_path)).expect("run_train_reuse failed");
-        let reuse_checksum = last_line_checksum(&reuse_path);
-        let _ = std::fs::remove_file(&reuse_path);
+        run_train_reuse(&make_cli("train", "reuse", reuse_path.path()))
+            .expect("run_train_reuse failed");
+        let reuse_checksum = last_line_checksum(reuse_path.path());
 
-        let phases_cli = make_phases_cli("reuse", &temp_out_path("phases-loss-reuse"));
+        let phases_out = temp_out_path("phases-loss-reuse");
+        let phases_cli = make_phases_cli("reuse", phases_out.path());
         let (_phases, last_loss, _init_s) =
             measure_train_reuse_phases(&phases_cli).expect("measure_train_reuse_phases failed");
         let phases_checksum = last_loss as f64;
@@ -2592,10 +2641,9 @@ mod tests {
     #[test]
     fn train_reuse_phases_includes_init_s() {
         let out = temp_out_path("phases-reuse-init");
-        run_train_reuse_phases(&make_phases_cli("reuse", &out))
+        run_train_reuse_phases(&make_phases_cli("reuse", out.path()))
             .expect("run_train_reuse_phases failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         for line in content.lines() {
             assert!(line.contains("\"task\":\"train_phases\""), "line={line}");
             assert!(line.contains("\"mode\":\"reuse\""), "line={line}");
@@ -2617,7 +2665,7 @@ mod tests {
             task: task.to_string(),
             device: "cpu".to_string(),
             size: 64,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: mode.to_string(),
             phases: true,
             tf32: false,
@@ -2666,9 +2714,9 @@ mod tests {
     #[test]
     fn gemm_reuse_phases_emits_one_row_per_phase_in_order() {
         let out = temp_out_path("gemm-phases-order");
-        run_gemm_reuse_phases(&make_gemm_phases_cli(&out)).expect("run_gemm_reuse_phases failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        run_gemm_reuse_phases(&make_gemm_phases_cli(out.path()))
+            .expect("run_gemm_reuse_phases failed");
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 5, "lines={lines:?}");
         for (i, line) in lines.iter().enumerate() {
@@ -2694,15 +2742,15 @@ mod tests {
     #[test]
     fn gemm_reuse_phases_checksum_matches_run_gemm_reuse() {
         let reuse_path = temp_out_path("gemm-reuse-vs-phases");
-        run_gemm_reuse(&make_cli("gemm", "reuse", &reuse_path)).expect("run_gemm_reuse failed");
-        let reuse_checksum_line = last_line_checksum(&reuse_path);
-        let _ = std::fs::remove_file(&reuse_path);
+        run_gemm_reuse(&make_cli("gemm", "reuse", reuse_path.path()))
+            .expect("run_gemm_reuse failed");
+        let reuse_checksum_line = last_line_checksum(reuse_path.path());
 
         let phases_path = temp_out_path("gemm-phases-checksum");
-        run_gemm_reuse_phases(&make_gemm_phases_cli(&phases_path))
+        run_gemm_reuse_phases(&make_gemm_phases_cli(phases_path.path()))
             .expect("run_gemm_reuse_phases failed");
-        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&phases_path);
+        let content =
+            std::fs::read_to_string(phases_path.path()).expect("test: JSONL 読み取り失敗");
 
         // `last_line_checksum` は文字列としてではなく f64 へパースして
         // 返すため、`{:.6}` 整形後の値同士を比較する形になる（同一入力・
@@ -2726,7 +2774,8 @@ mod tests {
     /// （`train_phases_each_step_phase_sum_does_not_exceed_total` と同型）。
     #[test]
     fn gemm_reuse_phases_each_iter_phase_sum_does_not_exceed_total() {
-        let cli = make_gemm_phases_cli(&temp_out_path("gemm-phases-sum"));
+        let out = temp_out_path("gemm-phases-sum");
+        let cli = make_gemm_phases_cli(out.path());
         let (phases, _checksum, _init_s, _parity) =
             measure_gemm_reuse_phases(&cli).expect("measure_gemm_reuse_phases failed");
         let totals = phases.durations(PHASE_GEMM_ITER_TOTAL);
@@ -2771,10 +2820,9 @@ mod tests {
     #[test]
     fn gemm_reuse_phases_cpu_smoke_n512() {
         let out = temp_out_path("gemm-phases-cpu-smoke-n512");
-        let cli = make_gemm_phases_cli_sized(&out, 512);
+        let cli = make_gemm_phases_cli_sized(out.path(), 512);
         run_gemm_reuse_phases(&cli).expect("run_gemm_reuse_phases (N=512) failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 5, "lines={lines:?}");
         for (i, line) in lines.iter().enumerate() {
@@ -2804,17 +2852,16 @@ mod tests {
         let reuse_path = temp_out_path("gemm-reuse-vs-phases-n512");
         let reuse_cli = Cli {
             size: 512,
-            ..make_cli("gemm", "reuse", &reuse_path)
+            ..make_cli("gemm", "reuse", reuse_path.path())
         };
         run_gemm_reuse(&reuse_cli).expect("run_gemm_reuse (N=512) failed");
-        let reuse_checksum_line = last_line_checksum(&reuse_path);
-        let _ = std::fs::remove_file(&reuse_path);
+        let reuse_checksum_line = last_line_checksum(reuse_path.path());
 
         let phases_path = temp_out_path("gemm-phases-checksum-n512");
-        let phases_cli = make_gemm_phases_cli_sized(&phases_path, 512);
+        let phases_cli = make_gemm_phases_cli_sized(phases_path.path(), 512);
         run_gemm_reuse_phases(&phases_cli).expect("run_gemm_reuse_phases (N=512) failed");
-        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&phases_path);
+        let content =
+            std::fs::read_to_string(phases_path.path()).expect("test: JSONL 読み取り失敗");
 
         for line in content.lines() {
             let key = "\"checksum\":";
@@ -2903,16 +2950,15 @@ mod tests {
     /// metal-gemm-readout-interleave-1477/` 参照）。
     #[test]
     fn run_gemm_jsonl_records_readout_override_value() {
+        let out_path = temp_out_path("gemm-readout-legacy");
         let cli = Cli {
             readout: Some("legacy".to_string()),
             metal_split_k: None,
             pinned_h2d: false,
-            ..make_cli("gemm", "fresh", &temp_out_path("gemm-readout-legacy"))
+            ..make_cli("gemm", "fresh", out_path.path())
         };
-        let out_path = std::path::PathBuf::from(cli.out.clone());
         run_gemm(&cli).expect("run_gemm failed");
-        let content = std::fs::read_to_string(&out_path).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out_path);
+        let content = std::fs::read_to_string(out_path.path()).expect("test: JSONL 読み取り失敗");
         let last = content.lines().next_back().expect("test: JSONL に行がない");
         assert!(
             last.contains("\"readout\":\"legacy\""),
@@ -2922,20 +2968,15 @@ mod tests {
 
     #[test]
     fn run_gemm_reuse_jsonl_records_readout_override_value() {
+        let out_path = temp_out_path("gemm-reuse-readout-borrowed");
         let cli = Cli {
             readout: Some("borrowed".to_string()),
             metal_split_k: None,
             pinned_h2d: false,
-            ..make_cli(
-                "gemm",
-                "reuse",
-                &temp_out_path("gemm-reuse-readout-borrowed"),
-            )
+            ..make_cli("gemm", "reuse", out_path.path())
         };
-        let out_path = std::path::PathBuf::from(cli.out.clone());
         run_gemm_reuse(&cli).expect("run_gemm_reuse failed");
-        let content = std::fs::read_to_string(&out_path).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out_path);
+        let content = std::fs::read_to_string(out_path.path()).expect("test: JSONL 読み取り失敗");
         let last = content.lines().next_back().expect("test: JSONL に行がない");
         assert!(
             last.contains("\"readout\":\"borrowed\""),
@@ -2945,12 +2986,11 @@ mod tests {
 
     #[test]
     fn run_gemm_jsonl_omits_readout_key_when_override_is_none() {
-        let cli = make_cli("gemm", "fresh", &temp_out_path("gemm-readout-none"));
+        let out_path = temp_out_path("gemm-readout-none");
+        let cli = make_cli("gemm", "fresh", out_path.path());
         assert!(cli.readout.is_none());
-        let out_path = std::path::PathBuf::from(cli.out.clone());
         run_gemm(&cli).expect("run_gemm failed");
-        let content = std::fs::read_to_string(&out_path).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out_path);
+        let content = std::fs::read_to_string(out_path.path()).expect("test: JSONL 読み取り失敗");
         let last = content.lines().next_back().expect("test: JSONL に行がない");
         assert!(
             !last.contains("\"readout\""),
@@ -3053,7 +3093,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "cuda".to_string(),
             size: 1024,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "reuse".to_string(),
             phases: true,
             tf32: false,
@@ -3065,8 +3105,7 @@ mod tests {
             pinned_h2d: false,
         };
         dispatch(&cli).expect("cuda gemm --mode reuse --phases smoke failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         assert_eq!(content.lines().count(), 5, "content={content}");
         assert!(
             content.contains("\"phase\":\"iter_total\""),
@@ -3104,7 +3143,7 @@ mod tests {
                 task: "gemm".to_string(),
                 device: "cuda".to_string(),
                 size: 512,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: false,
                 tf32: true,
@@ -3117,8 +3156,7 @@ mod tests {
             };
             dispatch(&cli)
                 .unwrap_or_else(|e| panic!("cuda gemm --tf32 ({mode}) smoke failed: {e}"));
-            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-            let _ = std::fs::remove_file(&out);
+            let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
             assert!(
                 content.contains("\"tf32\":true"),
                 "mode={mode} content={content}"
@@ -3148,8 +3186,7 @@ mod tests {
             pinned_h2d: false,
         };
         dispatch(&cli).expect("metal gemm --mode reuse --phases smoke failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         assert_eq!(content.lines().count(), 5, "content={content}");
         assert!(
             content.contains("\"phase\":\"iter_total\""),
@@ -3191,15 +3228,13 @@ mod tests {
         let fresh_path = temp_out_path("infer-fresh");
         let reuse_path = temp_out_path("infer-reuse");
 
-        run_infer(&make_cli("infer", "fresh", &fresh_path)).expect("run_infer (fresh) failed");
-        run_infer_reuse(&make_cli("infer", "reuse", &reuse_path))
+        run_infer(&make_cli("infer", "fresh", fresh_path.path()))
+            .expect("run_infer (fresh) failed");
+        run_infer_reuse(&make_cli("infer", "reuse", reuse_path.path()))
             .expect("run_infer_reuse (reuse) failed");
 
-        let fresh_checksum = last_line_checksum(&fresh_path);
-        let reuse_checksum = last_line_checksum(&reuse_path);
-
-        let _ = std::fs::remove_file(&fresh_path);
-        let _ = std::fs::remove_file(&reuse_path);
+        let fresh_checksum = last_line_checksum(fresh_path.path());
+        let reuse_checksum = last_line_checksum(reuse_path.path());
 
         assert!(
             fresh_checksum.is_finite() && reuse_checksum.is_finite(),
@@ -3217,9 +3252,8 @@ mod tests {
     #[test]
     fn infer_reuse_produces_expected_record_fields() {
         let out = temp_out_path("infer-reuse-fields");
-        run_infer_reuse(&make_cli("infer", "reuse", &out)).expect("run_infer_reuse failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        run_infer_reuse(&make_cli("infer", "reuse", out.path())).expect("run_infer_reuse failed");
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let last = content.lines().next_back().expect("test: JSONL に行がない");
         assert!(last.contains("\"task\":\"infer\""), "line={last}");
         assert!(last.contains("\"mode\":\"reuse\""), "line={last}");
@@ -3235,9 +3269,9 @@ mod tests {
     #[test]
     fn infer_phases_fresh_cpu_emits_one_row_per_phase_in_order() {
         let out = temp_out_path("infer-phases-fresh-cpu-order");
-        run_infer_phases(&make_infer_phases_cli("fresh", &out)).expect("run_infer_phases failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        run_infer_phases(&make_infer_phases_cli("fresh", out.path()))
+            .expect("run_infer_phases failed");
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 4, "lines={lines:?}");
         for (i, line) in lines.iter().enumerate() {
@@ -3267,9 +3301,9 @@ mod tests {
     #[test]
     fn infer_phases_reuse_emits_one_row_per_phase_in_order_with_init_s() {
         let out = temp_out_path("infer-phases-reuse-order");
-        run_infer_phases(&make_infer_phases_cli("reuse", &out)).expect("run_infer_phases failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        run_infer_phases(&make_infer_phases_cli("reuse", out.path()))
+            .expect("run_infer_phases failed");
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 4, "lines={lines:?}");
         for (i, line) in lines.iter().enumerate() {
@@ -3295,15 +3329,14 @@ mod tests {
     #[test]
     fn infer_phases_fresh_checksum_matches_run_infer() {
         let fresh_path = temp_out_path("infer-fresh-vs-phases");
-        run_infer(&make_cli("infer", "fresh", &fresh_path)).expect("run_infer failed");
-        let fresh_checksum = last_line_checksum(&fresh_path);
-        let _ = std::fs::remove_file(&fresh_path);
+        run_infer(&make_cli("infer", "fresh", fresh_path.path())).expect("run_infer failed");
+        let fresh_checksum = last_line_checksum(fresh_path.path());
 
         let phases_path = temp_out_path("infer-phases-fresh-checksum");
-        run_infer_phases(&make_infer_phases_cli("fresh", &phases_path))
+        run_infer_phases(&make_infer_phases_cli("fresh", phases_path.path()))
             .expect("run_infer_phases failed");
-        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&phases_path);
+        let content =
+            std::fs::read_to_string(phases_path.path()).expect("test: JSONL 読み取り失敗");
 
         for line in content.lines() {
             let key = "\"checksum\":";
@@ -3323,15 +3356,15 @@ mod tests {
     #[test]
     fn infer_phases_reuse_checksum_matches_run_infer_reuse() {
         let reuse_path = temp_out_path("infer-reuse-vs-phases");
-        run_infer_reuse(&make_cli("infer", "reuse", &reuse_path)).expect("run_infer_reuse failed");
-        let reuse_checksum = last_line_checksum(&reuse_path);
-        let _ = std::fs::remove_file(&reuse_path);
+        run_infer_reuse(&make_cli("infer", "reuse", reuse_path.path()))
+            .expect("run_infer_reuse failed");
+        let reuse_checksum = last_line_checksum(reuse_path.path());
 
         let phases_path = temp_out_path("infer-phases-reuse-checksum");
-        run_infer_phases(&make_infer_phases_cli("reuse", &phases_path))
+        run_infer_phases(&make_infer_phases_cli("reuse", phases_path.path()))
             .expect("run_infer_phases failed");
-        let content = std::fs::read_to_string(&phases_path).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&phases_path);
+        let content =
+            std::fs::read_to_string(phases_path.path()).expect("test: JSONL 読み取り失敗");
 
         for line in content.lines() {
             let key = "\"checksum\":";
@@ -3353,8 +3386,8 @@ mod tests {
     #[test]
     fn infer_phases_each_iter_phase_sum_does_not_exceed_total() {
         for mode in ["fresh", "reuse"] {
-            let cli =
-                make_infer_phases_cli(mode, &temp_out_path(&format!("infer-phases-sum-{mode}")));
+            let out = temp_out_path(&format!("infer-phases-sum-{mode}"));
+            let cli = make_infer_phases_cli(mode, out.path());
             let (phases, _checksum, _init_s) =
                 measure_infer_phases(&cli, mode).expect("measure_infer_phases failed");
             let totals = phases.durations(PHASE_GEMM_ITER_TOTAL);
@@ -3397,7 +3430,7 @@ mod tests {
             task: "infer".to_string(),
             device: "cuda".to_string(),
             size: 64,
-            out: reuse_out.to_string_lossy().into_owned(),
+            out: reuse_out.path().to_string_lossy().into_owned(),
             mode: "reuse".to_string(),
             phases: false,
             tf32: false,
@@ -3409,8 +3442,8 @@ mod tests {
             pinned_h2d: false,
         })
         .expect("cuda infer --mode reuse smoke failed");
-        let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&reuse_out);
+        let reuse_content =
+            std::fs::read_to_string(reuse_out.path()).expect("test: JSONL 読み取り失敗");
         assert!(
             reuse_content.contains("\"task\":\"infer\"")
                 && reuse_content.contains("\"mode\":\"reuse\""),
@@ -3423,7 +3456,7 @@ mod tests {
                 task: "infer".to_string(),
                 device: "cuda".to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
@@ -3435,8 +3468,7 @@ mod tests {
                 pinned_h2d: false,
             })
             .expect("cuda infer --phases smoke failed");
-            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-            let _ = std::fs::remove_file(&out);
+            let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
             assert_eq!(
                 content.lines().count(),
                 expected_rows,
@@ -3471,8 +3503,8 @@ mod tests {
             pinned_h2d: false,
         })
         .expect("metal infer --mode reuse smoke failed");
-        let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&reuse_out);
+        let reuse_content =
+            std::fs::read_to_string(reuse_out.path()).expect("test: JSONL 読み取り失敗");
         assert!(
             reuse_content.contains("\"task\":\"infer\"")
                 && reuse_content.contains("\"mode\":\"reuse\""),
@@ -3497,8 +3529,7 @@ mod tests {
                 pinned_h2d: false,
             })
             .expect("metal infer --phases smoke failed");
-            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-            let _ = std::fs::remove_file(&out);
+            let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
             assert_eq!(
                 content.lines().count(),
                 expected_rows,
@@ -3649,7 +3680,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "cpu".to_string(),
             size: 64,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "fresh".to_string(),
             phases: false,
             tf32: false,
@@ -3661,7 +3692,7 @@ mod tests {
             pinned_h2d: false,
         };
         dispatch(&cli).expect("cpu gemm dispatch must succeed");
-        let content = std::fs::read_to_string(&out).expect("read jsonl output");
+        let content = std::fs::read_to_string(out.path()).expect("read jsonl output");
         assert!(
             !content.contains("\"tf32\""),
             "default row must omit the tf32 key: content={content}"
@@ -3680,7 +3711,7 @@ mod tests {
                 task: "gemm".to_string(),
                 device: device.to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: "fresh".to_string(),
                 phases: false,
                 tf32: false,
@@ -3715,7 +3746,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "cuda".to_string(),
             size: 64,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "fresh".to_string(),
             phases: false,
             tf32: false,
@@ -3745,7 +3776,7 @@ mod tests {
                 task: "gemm".to_string(),
                 device: device.to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: "fresh".to_string(),
                 phases: false,
                 tf32: false,
@@ -3782,7 +3813,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "metal".to_string(),
             size: 64,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "fresh".to_string(),
             phases: false,
             tf32: false,
@@ -3812,7 +3843,7 @@ mod tests {
                 task: "gemm".to_string(),
                 device: device.to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: "fresh".to_string(),
                 phases: false,
                 tf32: false,
@@ -3848,7 +3879,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "cuda".to_string(),
             size: 64,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "fresh".to_string(),
             phases: false,
             tf32: false,
@@ -3885,7 +3916,7 @@ mod tests {
                 task: task.to_string(),
                 device: device.to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: "fresh".to_string(),
                 phases: false,
                 tf32: false,
@@ -3923,7 +3954,7 @@ mod tests {
                 task: "train".to_string(),
                 device: "cuda".to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: "reuse".to_string(),
                 phases: false,
                 tf32: false,
@@ -3954,7 +3985,7 @@ mod tests {
                 task: task.to_string(),
                 device: "cpu".to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: "fresh".to_string(),
                 phases: false,
                 tf32: false,
@@ -3983,7 +4014,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "cpu".to_string(),
             size: 64,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "reuse".to_string(),
             phases: true,
             tf32: false,
@@ -4017,7 +4048,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "cpu".to_string(),
             size: 64,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "fresh".to_string(),
             phases: false,
             tf32: false,
@@ -4048,16 +4079,16 @@ mod tests {
     fn device_checksum_matches_legacy_checksum_fresh_and_reuse() {
         for mode in ["fresh", "reuse"] {
             let out_off = temp_out_path(&format!("device-checksum-off-{mode}"));
-            let mut cli_off = make_cli("gemm", mode, &out_off);
+            let mut cli_off = make_cli("gemm", mode, out_off.path());
             cli_off.device_checksum = false;
             dispatch(&cli_off).expect("--device-checksum off は成功するはず");
-            let checksum_off = last_line_checksum(&out_off);
+            let checksum_off = last_line_checksum(out_off.path());
 
             let out_on = temp_out_path(&format!("device-checksum-on-{mode}"));
-            let mut cli_on = make_cli("gemm", mode, &out_on);
+            let mut cli_on = make_cli("gemm", mode, out_on.path());
             cli_on.device_checksum = true;
             dispatch(&cli_on).expect("--device-checksum on は cpu バックエンドで成功するはず");
-            let checksum_on = last_line_checksum(&out_on);
+            let checksum_on = last_line_checksum(out_on.path());
 
             assert_eq!(
                 checksum_off, checksum_on,
@@ -4082,7 +4113,7 @@ mod tests {
                 task: "train".to_string(),
                 device: "cuda".to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
@@ -4094,8 +4125,7 @@ mod tests {
                 pinned_h2d: false,
             };
             dispatch(&cli).expect("cuda train --phases smoke failed");
-            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-            let _ = std::fs::remove_file(&out);
+            let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
             assert!(content.lines().count() > 1, "content={content}");
             assert!(
                 content.contains("\"phase\":\"step_total\""),
@@ -4128,8 +4158,7 @@ mod tests {
                 pinned_h2d: false,
             };
             dispatch(&cli).expect("metal train --phases smoke failed");
-            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-            let _ = std::fs::remove_file(&out);
+            let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
             assert!(content.lines().count() > 1, "content={content}");
             assert!(
                 content.contains("\"phase\":\"step_total\""),
@@ -4194,10 +4223,9 @@ mod tests {
     #[test]
     fn run_gemm_jsonl_contains_scaled_abs_keys_with_zero_rescue() {
         let out = temp_out_path("gemm-scaled-abs-keys");
-        let cli = make_cli("gemm", "fresh", &out);
+        let cli = make_cli("gemm", "fresh", out.path());
         run_gemm(&cli).expect("run_gemm (cpu fresh, size=64) failed");
-        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
-        let _ = std::fs::remove_file(&out);
+        let content = std::fs::read_to_string(out.path()).expect("test: JSONL 読み取り失敗");
         let last = content.lines().next_back().expect("JSONL に行がない");
 
         assert!(last.contains("\"parity_fail_count\":0"), "line={last}");
