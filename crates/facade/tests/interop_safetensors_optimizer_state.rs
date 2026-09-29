@@ -38,6 +38,9 @@
 //!
 //! 実機（CUDA/Metal）非依存のため `#[ignore]` 分離は行わない。
 
+mod common;
+
+use common::temp_dir::TempDirGuard;
 use std::collections::HashMap;
 
 use bench_harness::rng::Xorshift64Star;
@@ -85,15 +88,6 @@ fn assert_state_dicts_bit_equal(
             "state_dict のキー `{k}` の値が safetensors 往復で bit 一致しない"
         );
     }
-}
-
-fn temp_dir_for(test_name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fandhe-ai-optimizer-state-safetensors-{}-{test_name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 // =========================================================================
@@ -192,19 +186,18 @@ fn adamw_empty_state_dict_safetensors_bytes_roundtrip() {
 }
 
 /// ファイル往復（`save_safetensors_f32`／`load_safetensors_f32`。
-/// 一時ファイル経由）の 1 ケース（`interop_safetensors_roundtrip.rs::
-/// temp_dir_for` と同型）。
+/// 一時ファイル経由）の 1 ケース（一時ディレクトリは `tests/common/temp_dir.rs` の
+/// `TempDirGuard` で排他作成し、drop で削除する）。
 #[test]
 fn adamw_state_dict_safetensors_file_roundtrip() {
     let mut opt = AdamW::new(AdamWConfig::default()).unwrap();
     let sd = two_slot_state_dict(&mut opt, |o, x| o.step(x));
 
-    let dir = temp_dir_for("adamw_state_dict_file_roundtrip");
-    let path = dir.join("adamw_state.safetensors");
+    let dir = TempDirGuard::new("optimizer-state-adamw_state_dict_file_roundtrip");
+    let path = dir.path().join("adamw_state.safetensors");
     save_safetensors_f32(&path, &sd).unwrap();
     let loaded = load_safetensors_f32(&path).unwrap();
     assert_state_dicts_bit_equal(&sd, &loaded);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // =========================================================================
@@ -312,9 +305,9 @@ fn checkpoint_resume_via_safetensors_files_matches_uninterrupted_training() {
         losses_b.push(train_step(&mut model_b, &mut opt_b, &x_data, &y_data));
     }
 
-    let dir = temp_dir_for("checkpoint_resume_via_safetensors_files");
-    let model_path = dir.join("model.safetensors");
-    let optim_path = dir.join("optimizer.safetensors");
+    let dir = TempDirGuard::new("optimizer-state-checkpoint_resume_via_safetensors_files");
+    let model_path = dir.path().join("model.safetensors");
+    let optim_path = dir.path().join("optimizer.safetensors");
     save_safetensors_f32(&model_path, &model_b.state_dict()).unwrap();
     save_safetensors_f32(&optim_path, &opt_b.state_dict().unwrap()).unwrap();
 
@@ -332,7 +325,6 @@ fn checkpoint_resume_via_safetensors_files_matches_uninterrupted_training() {
     .unwrap();
     let loaded_optim_state = load_safetensors_f32(&optim_path).unwrap();
     opt_resumed.load_state_dict(loaded_optim_state).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 
     for _ in CHECKPOINT_AT..TOTAL_STEPS {
         losses_b.push(train_step(
@@ -387,9 +379,9 @@ fn checkpoint_resume_at_step_zero_matches_uninterrupted_training() {
     })
     .unwrap();
 
-    let dir = temp_dir_for("checkpoint_resume_at_step_zero");
-    let model_path = dir.join("model.safetensors");
-    let optim_path = dir.join("optimizer.safetensors");
+    let dir = TempDirGuard::new("optimizer-state-checkpoint_resume_at_step_zero");
+    let model_path = dir.path().join("model.safetensors");
+    let optim_path = dir.path().join("optimizer.safetensors");
     save_safetensors_f32(&model_path, &model_b.state_dict()).unwrap();
     save_safetensors_f32(&optim_path, &opt_b.state_dict().unwrap()).unwrap();
 
@@ -405,7 +397,6 @@ fn checkpoint_resume_at_step_zero_matches_uninterrupted_training() {
     opt_resumed
         .load_state_dict(load_safetensors_f32(&optim_path).unwrap())
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 
     let mut losses_b = Vec::with_capacity(TOTAL_STEPS);
     for _ in 0..TOTAL_STEPS {

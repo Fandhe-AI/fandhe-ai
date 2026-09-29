@@ -1,6 +1,8 @@
 //! テスト用一時ディレクトリ RAII ガード（イシュー #2378・親 #2363）。
 //!
-//! `tests/model_registry.rs`・`tests/api_surface.rs` から使われる（後続 #2379 も共有予定）。
+//! `tests/model_registry.rs`・`api_surface.rs`・`interop_safetensors_roundtrip.rs`・
+//! `interop_safetensors_optimizer_state.rs`・`compat_sequential_checkpoint_file.rs`・
+//! `interop_onnx_export.rs`・`interop_onnx_internal_parity.rs` から使われる（#2379）。
 //! pid・ナノ秒時刻・プロセス内カウンタ・ラベルによる一意名を `create_dir` で排他作成し、
 //! 既存パス（第三者が置いたディレクトリ・symlink）を再利用せず、作成前の削除もしない。
 //! `Drop` は作成に成功したパスだけを `remove_dir_all` する（std の `remove_dir_all` は

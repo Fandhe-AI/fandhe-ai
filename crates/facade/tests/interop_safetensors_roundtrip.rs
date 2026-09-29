@@ -11,6 +11,9 @@
 //!    複製しない）
 //! 3. 同一マップから 2 回生成したバイト列は完全一致（決定的出力）
 
+mod common;
+
+use common::temp_dir::TempDirGuard;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::interop::safetensors::{
@@ -30,18 +33,6 @@ fn build_model() -> Sequential {
 
 fn sample_input() -> Tensor<f32> {
     Tensor::new(vec![0.1_f32, -0.2, 0.3, -0.4], &[1, 4]).unwrap()
-}
-
-/// テストごとに衝突しない一時ディレクトリ（プロセス ID + テスト名）を
-/// 作る。docs・ログへ絶対パスを書かない（呼び出し元がパスを表示しない
-/// 限り安全）。
-fn temp_dir_for(test_name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fandhe-ai-safetensors-roundtrip-{}-{test_name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 fn assert_tensor_bit_exact(a: &Tensor<f32>, b: &Tensor<f32>, label: &str) {
@@ -159,8 +150,8 @@ fn sequential_state_dict_roundtrip_via_safetensors_bytes_matches_predict_output(
 /// 残らない（一時ファイル + rename 契約の維持確認）。
 #[test]
 fn file_roundtrip_is_bit_exact_and_leaves_no_tmp_file() {
-    let dir = temp_dir_for("file-roundtrip");
-    let path = dir.join("weights.safetensors");
+    let dir = TempDirGuard::new("safetensors-roundtrip-file-roundtrip");
+    let path = dir.path().join("weights.safetensors");
 
     let model = build_model();
     let sd = model.state_dict();
@@ -172,7 +163,7 @@ fn file_roundtrip_is_bit_exact_and_leaves_no_tmp_file() {
         assert_tensor_bit_exact(tensor, loaded.get(key.as_str()).unwrap(), key);
     }
 
-    let leftover_tmp: Vec<_> = std::fs::read_dir(&dir)
+    let leftover_tmp: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -182,8 +173,6 @@ fn file_roundtrip_is_bit_exact_and_leaves_no_tmp_file() {
         leftover_tmp.is_empty(),
         "一時ファイルが残存している: {leftover_tmp:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 同一マップから 2 回生成したバイト列は完全一致する（キー昇順ソート
@@ -365,11 +354,10 @@ fn corrupted_bytes_are_rejected_with_safetensors_format_error() {
 /// 存在しないパスは `LoadError::Io`。
 #[test]
 fn nonexistent_path_is_rejected_with_io_error() {
-    let dir = temp_dir_for("nonexistent-path");
-    let path = dir.join("does-not-exist.safetensors");
+    let dir = TempDirGuard::new("safetensors-roundtrip-nonexistent-path");
+    let path = dir.path().join("does-not-exist.safetensors");
     let err = load_safetensors_f32(&path).unwrap_err();
     assert!(matches!(err, LoadError::Io(_)));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `SaveError` 型自体が facade 経由で到達可能であることの空虚 pass

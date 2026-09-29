@@ -10,6 +10,9 @@
 //! 比較はすべて bit 同一（f32 は `to_bits()`）。REQ-2／REQ-7 の tolerance
 //! は使わない・導入もしない。
 
+mod common;
+
+use common::temp_dir::TempDirGuard;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -153,7 +156,7 @@ fn to_bytes_is_deterministic_and_a_fixed_point() {
     );
 }
 
-/// 4. `to_path` → `from_path` roundtrip: 一意なファイル名で書き出し、
+/// 4. `to_path` → `from_path` roundtrip: 排他作成した一時ディレクトリ内へ書き出し、
 ///    ファイル内容が `to_bytes` と一致・再 import の `run` が bit 同一。
 ///    絶対パスは assert メッセージへ出さない（`.claude/rules/security.md`）。
 #[test]
@@ -162,19 +165,9 @@ fn to_path_writes_bytes_matching_to_bytes_and_roundtrips() {
     let options = OnnxExportOptions::default();
     let expected_bytes = model.to_bytes(&options).expect("to_bytes 成功");
 
-    let path = std::env::temp_dir().join(format!(
-        "fandhe-ai-onnx-export-test-{}-{}.onnx",
-        std::process::id(),
-        "to_path_writes_bytes_matching_to_bytes_and_roundtrips"
-    ));
-    // panic 経路でも一時ファイルが残らないよう RAII で確実に削除する。
-    struct CleanupGuard(PathBuf);
-    impl Drop for CleanupGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _guard = CleanupGuard(path.clone());
+    // 排他作成したディレクトリ内に書く（panic 経路でも Drop で削除される）。
+    let dir = TempDirGuard::new("onnx-export-to-path-roundtrip");
+    let path = dir.path().join("model.onnx");
 
     model.to_path(&path, &options).expect("to_path 成功");
     let written = std::fs::read(&path).expect("一時ファイル読み込み成功");
@@ -326,10 +319,8 @@ fn synthetic_model_with_disallowed_op_type_is_rejected_at_export_fail_closed() {
         "OnnxError::UnsupportedOp を期待したが {err:?}"
     );
 
-    let path = std::env::temp_dir().join(format!(
-        "fandhe-ai-onnx-export-test-disallowed-op-{}.onnx",
-        std::process::id()
-    ));
+    let dir = TempDirGuard::new("onnx-export-disallowed-op");
+    let path = dir.path().join("model.onnx");
     let err = model
         .to_path(&path, &OnnxExportOptions::default())
         .unwrap_err();
