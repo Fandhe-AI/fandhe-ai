@@ -13250,7 +13250,8 @@ fn facade_does_not_reexport_or_declare_optimizer_state_dict() {
 /// 本イシュー（#2174）が追加した [`OptimizerStateDict`] trait 宣言
 /// （`autodiff/src/nn/optim/state_dict.rs`）と、9 optimizer ファイル
 /// （`adamw`・`adam`・`rmsprop`・`adagrad`・`lamb`・`adadelta`・
-/// `adamax`・`nadam`・`radam`）各 1 件ずつの impl。
+/// `adamax`・`nadam`・`radam`）各 1 件ずつの impl。加えて #2366 が追加した
+/// `Lbfgs` 専用 inherent API（`autodiff/src/nn/optim/lbfgs.rs`）各 1 件。
 #[test]
 fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -13326,6 +13327,10 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
         ("autodiff/src/nn/optim/nadam.rs::load_state_dict", 1usize),
         ("autodiff/src/nn/optim/radam.rs::state_dict", 1usize),
         ("autodiff/src/nn/optim/radam.rs::load_state_dict", 1usize),
+        // イシュー #2366: `Lbfgs` 専用 inherent API（トレイト非実装。
+        // `Lbfgs` は facade 非公開のため公開面は広がらない）。
+        ("autodiff/src/nn/optim/lbfgs.rs::state_dict", 1usize),
+        ("autodiff/src/nn/optim/lbfgs.rs::load_state_dict", 1usize),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

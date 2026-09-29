@@ -101,6 +101,35 @@
 //!   facade 再エクスポートは承認範囲外のまま非公開を維持する
 //!   （`docs/autodiff-lbfgs-decision.md` §9）。
 //!
+//! # 状態の保存・復元（イシュー #2366）
+//!
+//! 大域状態（フラット化した全パラメータ 1 本に対する `n_iter`・`d`・
+//! 曲率ペア履歴等）は per-param スロット前提の `OptimizerStateDict` に
+//! 載らないため、同型の専用 inherent API [`Lbfgs::state_dict`]／
+//! [`Lbfgs::load_state_dict`]／[`Lbfgs::history_len`] を持つ（`Lbfgs`
+//! は facade 非公開のため公開面は広がらない。`docs/autodiff-lbfgs-
+//! decision.md` §10）。キーは **接頭辞なし**（`optimizer.` は facade 側
+//! safetensors の名前空間でイシュー #2373 が付与する）:
+//!
+//! | キー | 形 | 出現条件 |
+//! |---|---|---|
+//! | `n_iter.u64_u16x4`・`func_evals.u64_u16x4` | `[4]` | 常に |
+//! | `t`・`h_diag` | `[1]` | 常に |
+//! | `last_loss` | `[1]` | `func_evals >= 1` |
+//! | `d`・`prev_flat_grad` | `[N]` | `n_iter >= 1` |
+//! | `history.{i}.s`・`history.{i}.y` | `[N]` | `i in 0..n` |
+//! | `history.rho` | `[n]` | `n >= 1`（index 0 が最古） |
+//!
+//! `N` は `slot_shapes` の総要素数、`n` は履歴件数。空ベクトルは
+//! キーごと省く。`load_state_dict` は fail-closed で、検証順は
+//! (1) `N` の checked 計算 → (2) `n_iter`／`func_evals` 復号 →
+//! (3) 実在キーから履歴件数を導出（正規表記の添字のみ）し
+//! `expected_history_len` と照合 → (4) `n <= history_size`・
+//! `n <= n_iter - 1` 等の到達可能状態の不変条件 → (5) 期待キー集合との
+//! 完全一致 → (6) shape 厳密一致・全値の有限性 → (7) 一括代入。
+//! `n` が `history_size` を超えると追い出し判定（`==`）が効かず履歴が
+//! 無限に増えるため拒否する。件数の固定上限・manifest 結線は #2373。
+//!
 //! # 数値型の方針
 //!
 //! フラットベクトル上の縮約（`g·d`/`y·s`/`y·y`/`s·q`/`y·r`/`‖g‖₁`）は
@@ -112,12 +141,13 @@
 //! float（f64）で計算するため `loss`/`prev_loss` を `f64` で保持する。
 //! ベクトル更新（`q -= al·y` 等）は `f32::mul_add`（FMA 契約）を使う。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
+use super::state_dict::{decode_u16x4_tensor, encode_u16x4_tensor};
 use crate::error::AutodiffError;
-use crate::eval::dense_vec_ref;
+use crate::eval::{dense_vec, dense_vec_ref};
 
 /// line search の方式。`#[non_exhaustive]` は将来の backtracking 追加
 /// 等を非破壊にするため（`AutodiffError` と同じ設計判断）。
@@ -349,6 +379,98 @@ impl Lbfgs {
     /// 累積 closure 評価回数（PyTorch `state["func_evals"]`）。
     pub fn func_evals(&self) -> u64 {
         self.func_evals
+    }
+
+    /// 曲率ペア履歴の現在件数（`old_dirs`／`old_stps`／`ro` の長さ。
+    /// 常に `<= config.history_size`）。[`Lbfgs::state_dict`] の出力
+    /// 形を呼び出し元が把握する用途（manifest の `history_len` 書き出し・
+    /// [`Lbfgs::load_state_dict`] の `expected_history_len` 引数）に使う。
+    pub fn history_len(&self) -> usize {
+        self.old_dirs.len()
+    }
+
+    /// 大域状態を専用キー配置の `HashMap<String, Tensor<f32>>` として
+    /// 書き出す（モジュール冒頭 doc「状態の保存・復元」節）。
+    ///
+    /// キーは接頭辞なし（`optimizer.` は facade 側 safetensors の名前
+    /// 空間でイシュー #2373 が付与する）。`d`／`prev_flat_grad` は
+    /// `n_iter >= 1`、`last_loss` は `Some`、`history.rho` は履歴が空で
+    /// ないときだけ出力する（長さ 0 のテンソルを作らないため）。
+    ///
+    /// # Errors
+    ///
+    /// テンソル構築失敗（`AutodiffError::Shape`）のみ。
+    pub fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        let mut out: HashMap<String, Tensor<f32>> = HashMap::new();
+        out.insert(
+            LBFGS_N_ITER_KEY.to_string(),
+            encode_u16x4_tensor(self.n_iter)?,
+        );
+        out.insert(
+            LBFGS_FUNC_EVALS_KEY.to_string(),
+            encode_u16x4_tensor(self.func_evals)?,
+        );
+        out.insert(LBFGS_T_KEY.to_string(), scalar_tensor(self.t)?);
+        out.insert(LBFGS_H_DIAG_KEY.to_string(), scalar_tensor(self.h_diag)?);
+        if let Some(loss) = self.last_loss {
+            out.insert(LBFGS_LAST_LOSS_KEY.to_string(), scalar_tensor(loss)?);
+        }
+        if self.n_iter >= 1 {
+            out.insert(LBFGS_D_KEY.to_string(), vector_tensor(&self.d)?);
+            if let Some(prev) = &self.prev_flat_grad {
+                out.insert(LBFGS_PREV_FLAT_GRAD_KEY.to_string(), vector_tensor(prev)?);
+            }
+        }
+        for (i, (s, y)) in self.old_stps.iter().zip(self.old_dirs.iter()).enumerate() {
+            out.insert(format!("history.{i}.s"), vector_tensor(s)?);
+            out.insert(format!("history.{i}.y"), vector_tensor(y)?);
+        }
+        if !self.ro.is_empty() {
+            let rho: Vec<f32> = self.ro.iter().copied().collect();
+            out.insert(LBFGS_RHO_KEY.to_string(), vector_tensor(&rho)?);
+        }
+        Ok(out)
+    }
+
+    /// [`Lbfgs::state_dict`] の出力から大域状態を復元する（fail-closed。
+    /// 全件を検証してから一括代入するため、`Err` の場合 `self` は変化
+    /// しない）。`config`／`resolved_max_eval` は復元せず、呼び出し元が
+    /// 同じ config で `new` した `self` へ読み込む契約。
+    ///
+    /// * `slot_shapes`: 構築済みモデルから導出したパラメータ shape 列
+    ///   （キー配置に含まれない）。
+    /// * `expected_history_len`: manifest 等が宣言する履歴件数。実在する
+    ///   キーから導いた件数と一致しなければ拒否する（この値を根拠に
+    ///   事前確保はしない）。
+    ///
+    /// # Errors
+    ///
+    /// キーの欠落・余剰、件数・長さ・shape の不一致、非有限値、到達不能
+    /// 状態は `InvalidArgument`／`Shape`。
+    pub fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+        slot_shapes: &[Vec<usize>],
+        expected_history_len: usize,
+    ) -> Result<(), AutodiffError> {
+        let decoded = decode_lbfgs_state(
+            &state,
+            slot_shapes,
+            expected_history_len,
+            self.config.history_size,
+        )?;
+        self.slot_shapes = decoded.slot_shapes;
+        self.n_iter = decoded.n_iter;
+        self.func_evals = decoded.func_evals;
+        self.d = decoded.d;
+        self.t = decoded.t;
+        self.old_dirs = decoded.old_dirs;
+        self.old_stps = decoded.old_stps;
+        self.ro = decoded.ro;
+        self.h_diag = decoded.h_diag;
+        self.prev_flat_grad = decoded.prev_flat_grad;
+        self.last_loss = decoded.last_loss;
+        Ok(())
     }
 
     /// `params` と同順で更新後の `Tensor<f32>` 列を返す（不失敗
@@ -1123,9 +1245,279 @@ where
     ))
 }
 
+// ---- 状態の保存・復元（イシュー #2366）のキー定数・復号ヘルパー ----
+
+const LBFGS_N_ITER_KEY: &str = "n_iter.u64_u16x4";
+const LBFGS_FUNC_EVALS_KEY: &str = "func_evals.u64_u16x4";
+const LBFGS_T_KEY: &str = "t";
+const LBFGS_H_DIAG_KEY: &str = "h_diag";
+const LBFGS_LAST_LOSS_KEY: &str = "last_loss";
+const LBFGS_D_KEY: &str = "d";
+const LBFGS_PREV_FLAT_GRAD_KEY: &str = "prev_flat_grad";
+const LBFGS_RHO_KEY: &str = "history.rho";
+
+fn scalar_tensor(v: f32) -> Result<Tensor<f32>, AutodiffError> {
+    Tensor::new(vec![v], &[1]).map_err(AutodiffError::Shape)
+}
+
+fn vector_tensor(v: &[f32]) -> Result<Tensor<f32>, AutodiffError> {
+    Tensor::new(v.to_vec(), &[v.len()]).map_err(AutodiffError::Shape)
+}
+
+fn load_err(msg: String) -> AutodiffError {
+    AutodiffError::InvalidArgument(format!("Lbfgs::load_state_dict: {msg}"))
+}
+
+/// 復号・検証済みの状態（`load_state_dict` が成功時にのみ一括代入する）。
+struct DecodedLbfgsState {
+    slot_shapes: Vec<Vec<usize>>,
+    n_iter: u64,
+    func_evals: u64,
+    d: Vec<f32>,
+    t: f32,
+    old_dirs: VecDeque<Vec<f32>>,
+    old_stps: VecDeque<Vec<f32>>,
+    ro: VecDeque<f32>,
+    h_diag: f32,
+    prev_flat_grad: Option<Vec<f32>>,
+    last_loss: Option<f32>,
+}
+
+/// `slot_shapes` の総要素数（checked。overflow は `InvalidArgument`）。
+fn total_numel(slot_shapes: &[Vec<usize>]) -> Result<usize, AutodiffError> {
+    let mut total: usize = 0;
+    for shape in slot_shapes {
+        let mut numel: usize = 1;
+        for &dim in shape {
+            numel = numel
+                .checked_mul(dim)
+                .ok_or_else(|| load_err(format!("slot_shapes numel overflows usize: {shape:?}")))?;
+        }
+        total = total
+            .checked_add(numel)
+            .ok_or_else(|| load_err("slot_shapes total numel overflows usize".to_string()))?;
+    }
+    Ok(total)
+}
+
+/// 履歴キー `history.<i>.<s|y>` の解析。添字は正規表記（`to_string`
+/// で元に戻るもの）のみ受理し、`01`／`+1` は `None`（余剰キー扱い）。
+/// 戻り値の `bool` は `true` が `s`、`false` が `y`。
+fn parse_history_key(key: &str) -> Option<(usize, bool)> {
+    let rest = key.strip_prefix("history.")?;
+    let (seg, part) = rest.rsplit_once('.')?;
+    let is_s = match part {
+        "s" => true,
+        "y" => false,
+        _ => return None,
+    };
+    let idx: usize = seg.parse().ok()?;
+    if idx.to_string() != seg {
+        return None;
+    }
+    Some((idx, is_s))
+}
+
+fn get_key<'a>(
+    state: &'a HashMap<String, Tensor<f32>>,
+    key: &str,
+) -> Result<&'a Tensor<f32>, AutodiffError> {
+    state
+        .get(key)
+        .ok_or_else(|| load_err(format!("missing key: `{key}`")))
+}
+
+/// shape が `expected` と厳密一致することを検査し、論理 row-major 順の
+/// 有限な値を返す。
+fn read_exact_shape(
+    state: &HashMap<String, Tensor<f32>>,
+    key: &str,
+    expected: &[usize],
+) -> Result<Vec<f32>, AutodiffError> {
+    let tensor = get_key(state, key)?;
+    if tensor.shape() != expected {
+        return Err(load_err(format!(
+            "`{key}` must have shape {expected:?}, got {:?}",
+            tensor.shape()
+        )));
+    }
+    let values = dense_vec(tensor);
+    ensure_finite_slice(&format!("load_state_dict `{key}`"), &values)?;
+    Ok(values)
+}
+
+/// 状態を変えずに全件検証する復号本体（検証順はモジュール冒頭 doc
+/// 「状態の保存・復元」節）。
+fn decode_lbfgs_state(
+    state: &HashMap<String, Tensor<f32>>,
+    slot_shapes: &[Vec<usize>],
+    expected_history_len: usize,
+    history_size: usize,
+) -> Result<DecodedLbfgsState, AutodiffError> {
+    let n_total = total_numel(slot_shapes)?;
+    let n_iter = decode_u16x4_tensor(LBFGS_N_ITER_KEY, get_key(state, LBFGS_N_ITER_KEY)?)?;
+    let func_evals =
+        decode_u16x4_tensor(LBFGS_FUNC_EVALS_KEY, get_key(state, LBFGS_FUNC_EVALS_KEY)?)?;
+
+    // 履歴件数は実在するキーだけから導く（宣言値・呼び出し元の値を根拠に
+    // 確保・ループしない）。件数は実キー数で上限が決まる。
+    let mut s_idx: BTreeSet<usize> = BTreeSet::new();
+    let mut y_idx: BTreeSet<usize> = BTreeSet::new();
+    for key in state.keys() {
+        if let Some((i, is_s)) = parse_history_key(key) {
+            if is_s {
+                s_idx.insert(i);
+            } else {
+                y_idx.insert(i);
+            }
+        }
+    }
+    let n = s_idx.len().max(y_idx.len());
+    if n != expected_history_len {
+        return Err(load_err(format!(
+            "history length mismatch: keys imply {n}, expected {expected_history_len}"
+        )));
+    }
+    if n > history_size {
+        return Err(load_err(format!(
+            "history length {n} exceeds config.history_size {history_size}"
+        )));
+    }
+    // 曲率ペアの push は 2 回目以降の反復でしか起きない（n <= n_iter - 1）。
+    if n >= 1 && (n as u64) >= n_iter {
+        return Err(load_err(format!(
+            "history length {n} is unreachable with n_iter {n_iter} (requires n <= n_iter - 1)"
+        )));
+    }
+
+    let has_loss = func_evals >= 1;
+    let has_vectors = n_iter >= 1;
+    if has_vectors && !has_loss {
+        return Err(load_err(format!(
+            "n_iter {n_iter} requires func_evals >= 1 (got {func_evals})"
+        )));
+    }
+    // 期待キー集合との完全一致（欠落 → 余剰の順に昇順で全件列挙）。
+    let mut expected: BTreeSet<String> = BTreeSet::new();
+    for k in [
+        LBFGS_N_ITER_KEY,
+        LBFGS_FUNC_EVALS_KEY,
+        LBFGS_T_KEY,
+        LBFGS_H_DIAG_KEY,
+    ] {
+        expected.insert(k.to_string());
+    }
+    if has_loss {
+        expected.insert(LBFGS_LAST_LOSS_KEY.to_string());
+    }
+    if has_vectors {
+        expected.insert(LBFGS_D_KEY.to_string());
+        expected.insert(LBFGS_PREV_FLAT_GRAD_KEY.to_string());
+    }
+    for i in 0..n {
+        expected.insert(format!("history.{i}.s"));
+        expected.insert(format!("history.{i}.y"));
+    }
+    if n >= 1 {
+        expected.insert(LBFGS_RHO_KEY.to_string());
+    }
+    let actual: BTreeSet<String> = state.keys().cloned().collect();
+    let missing: Vec<&String> = expected.difference(&actual).collect();
+    if !missing.is_empty() {
+        return Err(load_err(format!("missing key(s): {missing:?}")));
+    }
+    let extra: Vec<&String> = actual.difference(&expected).collect();
+    if !extra.is_empty() {
+        return Err(load_err(format!("unexpected key(s): {extra:?}")));
+    }
+
+    if has_loss && slot_shapes.is_empty() {
+        return Err(load_err(
+            "slot_shapes must be non-empty for a state with func_evals >= 1".to_string(),
+        ));
+    }
+
+    let scalar =
+        |key: &str| -> Result<f32, AutodiffError> { Ok(read_exact_shape(state, key, &[1])?[0]) };
+    let t = scalar(LBFGS_T_KEY)?;
+    let h_diag = scalar(LBFGS_H_DIAG_KEY)?;
+    let last_loss = if has_loss {
+        Some(scalar(LBFGS_LAST_LOSS_KEY)?)
+    } else {
+        None
+    };
+    let (d, prev_flat_grad) = if has_vectors {
+        (
+            read_exact_shape(state, LBFGS_D_KEY, &[n_total])?,
+            Some(read_exact_shape(
+                state,
+                LBFGS_PREV_FLAT_GRAD_KEY,
+                &[n_total],
+            )?),
+        )
+    } else {
+        (Vec::new(), None)
+    };
+    let mut old_dirs = VecDeque::new();
+    let mut old_stps = VecDeque::new();
+    for i in 0..n {
+        old_stps.push_back(read_exact_shape(
+            state,
+            &format!("history.{i}.s"),
+            &[n_total],
+        )?);
+        old_dirs.push_back(read_exact_shape(
+            state,
+            &format!("history.{i}.y"),
+            &[n_total],
+        )?);
+    }
+    let ro: VecDeque<f32> = if n >= 1 {
+        read_exact_shape(state, LBFGS_RHO_KEY, &[n])?.into()
+    } else {
+        VecDeque::new()
+    };
+
+    Ok(DecodedLbfgsState {
+        slot_shapes: if has_loss {
+            slot_shapes.to_vec()
+        } else {
+            Vec::new()
+        },
+        n_iter,
+        func_evals,
+        d,
+        t,
+        old_dirs,
+        old_stps,
+        ro,
+        h_diag,
+        prev_flat_grad,
+        last_loss,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_history_key_accepts_canonical_only() {
+        assert_eq!(parse_history_key("history.0.s"), Some((0, true)));
+        assert_eq!(parse_history_key("history.12.y"), Some((12, false)));
+        assert_eq!(parse_history_key("history.01.s"), None);
+        assert_eq!(parse_history_key("history.+1.s"), None);
+        assert_eq!(parse_history_key("history.rho"), None);
+        assert_eq!(parse_history_key("history.1.z"), None);
+        assert_eq!(parse_history_key("history..s"), None);
+    }
+
+    #[test]
+    fn total_numel_detects_overflow() {
+        assert_eq!(total_numel(&[vec![2, 2], vec![3]]).unwrap(), 7);
+        assert!(total_numel(&[vec![usize::MAX, 2]]).is_err());
+        assert!(total_numel(&[vec![usize::MAX], vec![1]]).is_err());
+    }
 
     fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
         Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
