@@ -81,8 +81,12 @@ pub fn override_enabled_for_scope(enabled: bool) -> HostArenaOverrideGuard {
 
 /// 現スレッドで arena が有効か。
 pub fn is_enabled() -> bool {
+    // `Tape`／`Gradients` の Drop から呼ばれるため、TLS 破棄後でも panic しないよう
+    // `try_with` を使う（arena 側の try_with と揃える。破棄後は既定値へ倒す）。
     OVERRIDE
-        .with(Cell::get)
+        .try_with(Cell::get)
+        .ok()
+        .flatten()
         .unwrap_or(HOST_ARENA_DEFAULT_ENABLED)
 }
 
@@ -124,7 +128,7 @@ fn pop(len: usize) -> Option<Vec<f32>> {
             match got {
                 Some(v) => {
                     a.stats.hit += 1;
-                    a.stats.pooled_bytes -= v.len() * 4;
+                    a.stats.pooled_bytes -= v.capacity() * 4;
                     Some(v)
                 }
                 None => {
@@ -145,7 +149,9 @@ pub fn recycle_f32(v: Vec<f32>) {
     // TLS 破棄後の呼び出しでは try_with が Err になり、v はそのまま drop される。
     let _ = ARENA.try_with(|a| {
         let mut a = a.borrow_mut();
-        let bytes = v.len() * 4;
+        // 保持量は実確保量（capacity）で計上・判定する。len だけだと capacity > len の
+        // Vec で上限を超えて保持しうる（PR #2448 codex 指摘）。
+        let bytes = v.capacity() * 4;
         if bytes > HOST_ARENA_MAX_BYTES || a.stats.pooled_bytes + bytes > HOST_ARENA_MAX_BYTES {
             a.stats.rejected += 1;
             return;
@@ -253,6 +259,12 @@ mod tests {
         recycle_f32(vec![0.0; n - 1]);
         assert!(stats().pooled_bytes <= HOST_ARENA_MAX_BYTES);
         assert_eq!(stats().rejected, 2);
+        // capacity > len の Vec は capacity で判定され、上限超過なら拒否される
+        let mut big = Vec::with_capacity(HOST_ARENA_MAX_BYTES / 4 + 1);
+        big.extend([0.0f32; 4]);
+        recycle_f32(big);
+        assert_eq!(stats().rejected, 3);
+        assert!(stats().pooled_bytes <= HOST_ARENA_MAX_BYTES);
         clear_thread_arena();
         assert_eq!(stats().pooled_bytes, 0);
     }

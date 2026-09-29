@@ -69,6 +69,44 @@ if [[ "$BEFORE_ARENA_DEFAULT" != "false" || "$AFTER_ARENA_DEFAULT" != "true" ]];
   exit 1
 fi
 
+# A/B 両 checkout が「同一コミット・after は定数 1 行のみ差分」であることをビルド前に
+# 検証する（fail-closed。PR #2448 codex 指摘）。別コミット・他変更を含む checkout での
+# 計測を防ぐ。
+verify_same_commit_and_diff() {
+  local before_root after_root bh ah names changed
+  before_root="$(git -C "$BEFORE_FACADE" rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "error: before checkout is not a git worktree ($BEFORE_FACADE)" >&2
+    exit 1
+  }
+  after_root="$(git -C "$AFTER_FACADE" rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "error: after checkout is not a git worktree ($AFTER_FACADE)" >&2
+    exit 1
+  }
+  bh="$(git -C "$before_root" rev-parse HEAD)" || exit 1
+  ah="$(git -C "$after_root" rev-parse HEAD)" || exit 1
+  if [[ -z "$bh" || "$bh" != "$ah" ]]; then
+    echo "error: before/after checkout の HEAD コミットが一致しません (before=$bh after=$ah)" >&2
+    exit 1
+  fi
+  if [[ -n "$(git -C "$before_root" status --porcelain --untracked-files=no)" ]]; then
+    echo "error: before checkout に未コミット変更があります" >&2
+    exit 1
+  fi
+  names="$(git -C "$after_root" diff --name-only HEAD)"
+  if [[ "$names" != "crates/tensor-core/src/alloc.rs" ]]; then
+    echo "error: after checkout の差分が alloc.rs のみではありません: ${names:-(空)}" >&2
+    exit 1
+  fi
+  changed="$(git -C "$after_root" diff -U0 HEAD -- crates/tensor-core/src/alloc.rs | grep -E '^[-+][^-+]' || true)"
+  if [[ "$(printf '%s\n' "$changed" | wc -l | tr -d ' ')" != "2" ]] ||
+    ! printf '%s\n' "$changed" | grep -qE '^-.*HOST_ARENA_DEFAULT_ENABLED.*= false;' ||
+    ! printf '%s\n' "$changed" | grep -qE '^\+.*HOST_ARENA_DEFAULT_ENABLED.*= true;'; then
+    echo "error: after checkout の差分が HOST_ARENA_DEFAULT_ENABLED の false→true 1 行のみではありません" >&2
+    exit 1
+  fi
+}
+verify_same_commit_and_diff
+
 # 判定対象デバイスは cpu 限定（arena は CPU の host バッファ再利用のため。CUDA・Metal は
 # 対象外）。cpu 以外は fail-closed で拒否する。
 DEVICE=${AB_DEVICE:-cpu}
