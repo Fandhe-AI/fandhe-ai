@@ -674,3 +674,32 @@ fn grad_scaler_from_state_accepts_boundary_values() {
         assert_eq!(s.growth_tracker(), tracker);
     }
 }
+
+/// 保存可能な状態と復元可能な状態の一致（PR #2404 指摘）: `GradScaler::new` が
+/// 受理する init_scale は全て `grad_scaler_from_state` でも復元でき、
+/// 非正規化数の init_scale は構築時点で拒否される。
+#[test]
+fn grad_scaler_new_and_from_state_share_scale_acceptance() {
+    let base = small_config();
+    for scale in [
+        f32::NAN,
+        f32::INFINITY,
+        0.0,
+        -1.0,
+        f32::MIN_POSITIVE / 2.0,
+        f32::from_bits(1),
+        f32::MIN_POSITIVE,
+        1.0,
+        f32::MAX,
+    ] {
+        let mut c = base;
+        c.init_scale = scale;
+        if let Ok(s) = GradScaler::new(c) {
+            let restored = grad_scaler_from_state(c, s.scale(), s.growth_tracker())
+                .unwrap_or_else(|e| panic!("scale={scale} built but not restorable: {e}"));
+            assert_eq!(restored.scale().to_bits(), s.scale().to_bits());
+        } else {
+            assert!(grad_scaler_from_state(c, scale, 0).is_err());
+        }
+    }
+}

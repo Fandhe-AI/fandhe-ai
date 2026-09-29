@@ -62,9 +62,12 @@ fn validate_scale(scale: f32, caller: &str) -> Result<(), AutodiffError> {
 /// [`GradScalerConfig`] の共通検証。[`GradScaler::new`] と
 /// [`grad_scaler_from_state`] が同一基準で fail-closed に弾くため 1 箇所へ集約する。
 fn validate_config(config: &GradScalerConfig, caller: &str) -> Result<(), AutodiffError> {
-    if !config.init_scale.is_finite() || config.init_scale <= 0.0 {
+    // 構築時の init_scale も稼働中 scale と同一基準（非正規化数を除く）で弾く。
+    // 非正規化数では unscale の逆数が非有限になり、かつ保存後に
+    // `grad_scaler_from_state` で復元できない状態を作ってしまうため。
+    if !is_valid_live_scale(config.init_scale) {
         return Err(AutodiffError::InvalidArgument(format!(
-            "{caller}: init_scale must be finite and > 0.0, got {}",
+            "{caller}: init_scale must be finite, > 0.0 and not subnormal, got {}",
             config.init_scale
         )));
     }
@@ -275,7 +278,8 @@ impl GradScaler {
     ///
     /// # Errors
     ///
-    /// - `init_scale` が有限かつ正でない
+    /// - `init_scale` が有限かつ正でない、または非正規化数
+    ///   （稼働中 scale・`grad_scaler_from_state` と同一基準）
     /// - `growth_factor` が有限かつ `1.0` より大きくない
     ///   （`1.0` 以下では成長条件が意味を持たない）
     /// - `backoff_factor` が `(0.0, 1.0)` の範囲外
