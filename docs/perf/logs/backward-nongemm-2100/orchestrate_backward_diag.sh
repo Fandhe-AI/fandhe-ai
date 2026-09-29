@@ -128,8 +128,9 @@ for d in $DEVICES; do
 done
 GATE_INTERVAL_S=${DIAG_GATE_INTERVAL_S:-30}
 GATE_MAX_S=${DIAG_GATE_MAX_S:-1800}
-if [[ ! "$GATE_INTERVAL_S" =~ ^[0-9]+$ || ! "$GATE_MAX_S" =~ ^[0-9]+$ ]]; then
-  echo "error: DIAG_GATE_INTERVAL_S / DIAG_GATE_MAX_S must be integers" >&2
+if [[ ! "$GATE_INTERVAL_S" =~ ^[1-9][0-9]*$ || ! "$GATE_MAX_S" =~ ^[0-9]+$ ]]; then
+  # 待機間隔 0 は waited が増えず不通過時に無期限待機になるため、正の整数に限る
+  echo "error: DIAG_GATE_INTERVAL_S は正の整数、DIAG_GATE_MAX_S は 0 以上の整数で指定する" >&2
   exit 1
 fi
 
@@ -280,6 +281,11 @@ gpu_util() {
     echo "na"
   fi
 }
+# load_below <load1> <閾値>: load1 が数値でなければ（空・解析失敗）不通過（fail-closed）。
+# 空文字列は awk の比較で閾値未満と誤判定されるため、先に数値検証する
+load_below() {
+  awk -v l="$1" -v t="$2" 'BEGIN{ if (l !~ /^[0-9]+([.][0-9]+)?$/) exit 1; exit !((l + 0) < (t + 0)) }'
+}
 GATE_TSV="$OUT/gate.tsv"
 printf 'run\tdevice\tmode\tload1\tgpu_util\tpass\n' >"$GATE_TSV"
 
@@ -289,8 +295,8 @@ wait_gate() { # wait_gate <run> <device> <mode>; 結果を gate.tsv へ記録
     l="$(load1)"
     g="$(gpu_util)"
     case "$MACHINE" in
-      m4max) awk -v l="$l" 'BEGIN{exit !(l < 8.0)}' && pass=1 ;;
-      gb10) awk -v l="$l" 'BEGIN{exit !(l < 1.0)}' && [[ "$g" == "0" ]] && pass=1 ;;
+      m4max) load_below "$l" 8.0 && pass=1 ;;
+      gb10) load_below "$l" 1.0 && [[ "$g" == "0" ]] && pass=1 ;;
       smoke-x86) pass=1 ;;
     esac
     if [[ "$pass" == "1" || "$waited" -ge "$GATE_MAX_S" ]]; then
