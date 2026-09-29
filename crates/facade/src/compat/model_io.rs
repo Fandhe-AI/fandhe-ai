@@ -26,6 +26,7 @@
 //! 同じ safetensors へ保存し、manifest の `buffer_keys` に記録する（#2371）。load は
 //! `buffer_keys`・safetensors のキー集合・shape を完全一致で照合し、BN を
 //! `BatchNorm*::from_parameters` で組み直す。`training` フラグも復元する。
+//! 旧形式（BN を含むのに `buffer_keys: []`）の保存データは初期 running stats で読み込む。
 //! **`num_batches_tracked` は保存も復元もしない**（load 後は 0 から再開する）。forward の
 //! どこからも参照されないカウンタで、eval／train の数値には影響しない
 //! （決定記録 §5・§11。復元には autodiff への setter 追加が要るためスコープ外）。
@@ -1127,6 +1128,22 @@ fn load_from_dir_with_limits(
             buffers.insert(key.clone(), t);
         }
     }
+    if manifest.buffer_keys.is_empty() {
+        // 旧形式の BN は running stats が保存されていない。従来どおり初期値
+        // （mean = 0・var = 1）で復元する。
+        for (key, shape) in expected_buffer_keys(&manifest.specs) {
+            let n: usize = shape.iter().product();
+            let v = if key.ends_with(".running_var") {
+                1.0
+            } else {
+                0.0
+            };
+            let t = Tensor::new(vec![v; n], &shape).map_err(|e| ModelIoError::Mismatch {
+                message: format!("旧形式 BatchNorm の初期 running stats を構築できません（{e}）"),
+            })?;
+            buffers.insert(key, t);
+        }
+    }
     let mut model = build_model(&manifest.specs, &mut buffers, &tensors)?;
     model
         .load_state_dict(tensors)
@@ -2168,7 +2185,10 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
         });
     }
 
-    if buffer_keys != expected_buffer_keys(&specs) {
+    // 旧形式（#2371 以前。BN があっても `buffer_keys: []` で保存された既存データ）は
+    // 空配列に限り受理し、load 側で初期 running stats を補う（公開済み保存データの後方互換）。
+    let expected_buffers = expected_buffer_keys(&specs);
+    if !buffer_keys.is_empty() && buffer_keys != expected_buffers {
         return Err(ModelIoError::Mismatch {
             message: "buffer_keys が層構成から導いた期待キー・shape と一致しません".into(),
         });
@@ -2816,6 +2836,24 @@ mod tests {
         // 型違いは Manifest。
         let bad_type = good.replace(m1, "{\"key\":\"1.running_mean\",\"shape\":\"4\"}");
         assert!(is_manifest_err(parse_manifest(bad_type.as_bytes())));
+    }
+
+    #[test]
+    fn parse_manifest_accepts_legacy_empty_buffer_keys_for_batch_norm() {
+        let model = bn_model();
+        let prepared = prepare_save(&model).expect("検証を通るはず");
+        let name = format!("model.{}.safetensors", "e".repeat(32));
+        let good = render_manifest(&prepared, &name, 1);
+        let start = good
+            .find("\"buffer_keys\":[")
+            .expect("buffer_keys があるはず");
+        let end = good
+            .find(",\"safetensors_file\"")
+            .expect("safetensors_file があるはず");
+        let legacy = format!("{}\"buffer_keys\":[]{}", &good[..start], &good[end..]);
+        assert!(legacy.contains("\"buffer_keys\":[]"), "{legacy}");
+        let parsed = parse_manifest(legacy.as_bytes()).expect("旧形式は受理されるはず");
+        assert!(parsed.buffer_keys.is_empty());
     }
 
     #[test]
