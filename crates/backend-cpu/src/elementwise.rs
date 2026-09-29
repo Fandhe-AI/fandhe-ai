@@ -525,7 +525,7 @@ fn binary_elementwise(
     if let (Some(sa), Some(sb)) = (ba.as_slice(), bb.as_slice()) {
         // fast path: 両 view が contiguous（ブロードキャスト拡張軸を
         // 含まない・非 contiguous view でない）。
-        let mut out = vec![0.0f32; sa.len()];
+        let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(sa.len());
         slice_kernel(sa, sb, &mut out);
         return Tensor::new(out, &out_shape);
     }
@@ -583,7 +583,7 @@ fn unary_elementwise(
     scalar_kernel: fn(f32) -> f32,
 ) -> Result<Tensor<f32>, ShapeError> {
     if let Some(sa) = a.as_slice() {
-        let mut out = vec![0.0f32; sa.len()];
+        let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(sa.len());
         slice_kernel(sa, &mut out);
         return Tensor::new(out, a.shape());
     }
@@ -660,7 +660,7 @@ pub fn where_cond(
     }
 
     if let (Some(cs), Some(as_), Some(bs)) = (cond.as_slice(), a.as_slice(), b.as_slice()) {
-        let mut out = vec![0.0f32; cs.len()];
+        let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(cs.len());
         where_slice(cs, as_, bs, &mut out);
         return Tensor::new(out, &out_shape);
     }
@@ -676,7 +676,7 @@ pub fn where_cond(
         out_shape.iter().product::<usize>(),
         "where_cond: contiguous() 直後は必ず as_slice を返すはず（契約違反）"
     );
-    let mut out = vec![0.0f32; cs.len()];
+    let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(cs.len());
     where_slice(cs, as_, bs, &mut out);
     Tensor::new(out, &out_shape)
 }
@@ -698,7 +698,7 @@ pub fn masked_fill(
     }
 
     if let (Some(xs), Some(ms)) = (x.as_slice(), mask.as_slice()) {
-        let mut out = vec![0.0f32; xs.len()];
+        let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(xs.len());
         masked_fill_slice(xs, ms, value, &mut out);
         return Tensor::new(out, &out_shape);
     }
@@ -712,7 +712,7 @@ pub fn masked_fill(
         out_shape.iter().product::<usize>(),
         "masked_fill: contiguous() 直後は必ず as_slice を返すはず（契約違反）"
     );
-    let mut out = vec![0.0f32; xs.len()];
+    let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(xs.len());
     masked_fill_slice(xs, ms, value, &mut out);
     Tensor::new(out, &out_shape)
 }

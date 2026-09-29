@@ -162,7 +162,7 @@ pub fn run_fused_elementwise(
     let output_index = ops.len().saturating_sub(1);
 
     let numel: usize = output_shape.iter().product();
-    let mut out = vec![0.0f32; numel];
+    let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(numel);
 
     // レジスタ配列（`ops.len()` 長）はチャンク／逐次ループの外側で 1 回だけ
     // 確保し、以降は `eval_one` 呼び出し間で使い回す（要素ごとの `Vec`

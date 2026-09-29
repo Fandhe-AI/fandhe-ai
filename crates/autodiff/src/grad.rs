@@ -5934,7 +5934,7 @@ fn try_elementwise_mul_mask_strided(
         ) = (&g_op, &mask_op)
         {
             let (ms0, ms1) = (m_strides[0], m_strides[1]);
-            let mut out = Vec::with_capacity(numel);
+            let mut out = fandhe_ai_tensor_core::alloc::take_cleared_f32(numel);
             for i in 0..rows {
                 let row_start = i * cols;
                 let g_row = g_s.get(row_start..row_start + cols)?;
@@ -5955,7 +5955,7 @@ fn try_elementwise_mul_mask_strided(
         ) = (&g_op, &mask_op)
         {
             let (gs0, gs1) = (g_strides[0], g_strides[1]);
-            let mut out = Vec::with_capacity(numel);
+            let mut out = fandhe_ai_tensor_core::alloc::take_cleared_f32(numel);
             for i in 0..rows {
                 let row_start = i * cols;
                 let m_row = m_s.get(row_start..row_start + cols)?;
@@ -5969,7 +5969,7 @@ fn try_elementwise_mul_mask_strided(
         }
     }
 
-    let mut out = Vec::with_capacity(numel);
+    let mut out = fandhe_ai_tensor_core::alloc::take_cleared_f32(numel);
 
     if shape.len() == 2 {
         // 上記 2 分岐（片方 `Contig`・片方 `View`）に該当しない rank-2

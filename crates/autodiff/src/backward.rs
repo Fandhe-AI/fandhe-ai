@@ -62,6 +62,22 @@ pub struct Gradients {
     resident_fingerprint: Option<(u64, u64, Option<u64>)>,
 }
 
+/// host arena（#2104・opt-in 既定 OFF）へ勾配バッファを返す回収点。学習ループでは
+/// `Tape` より先に `Gradients` が drop されるため、ここで回収しないと勾配バッファを
+/// 取りこぼす。無効時は何もしない。
+impl Drop for Gradients {
+    fn drop(&mut self) {
+        if !fandhe_ai_tensor_core::alloc::is_enabled() {
+            return;
+        }
+        for g in self.grads.iter_mut() {
+            if let Some(t) = g.take() {
+                fandhe_ai_tensor_core::alloc::recycle_tensor_f32(t);
+            }
+        }
+    }
+}
+
 impl Gradients {
     /// `var` に対応する勾配を取得する。`var` が別 `Tape` に属する場合、
     /// または `var` が属する `Tape` が本 `Gradients` 計算後に `reset()`
