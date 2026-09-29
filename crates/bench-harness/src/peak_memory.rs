@@ -1124,16 +1124,13 @@ mod tests {
         let mut report = run_peak_memory(&config).unwrap();
         report.samples[0].gemm_alloc_peak_bytes = None;
 
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "peak_memory_write_to_file_test_{}.json",
-            std::process::id()
-        ));
+        // 排他作成した専用ディレクトリ配下の未作成パス（検証失敗時に書き出されないことも確認する
+        // ため、対象ファイル自体は事前作成しない）。後始末はガードの `Drop` が担う。
+        let dir = crate::test_temp_dir::UnitTestDir::new("peak-memory-write-to-file");
+        let path = dir.path().join("report.json");
         let result = report.write_to_file(&path);
-        // 失敗経路の確認が主目的のため、書き出しに成功してしまった場合に備えて
-        // 後始末する（本番経路ではないテストコード限定の best-effort クリーンアップ）。
-        let _ = std::fs::remove_file(&path);
         assert!(matches!(result, Err(PeakMemoryError::ProtocolViolation(_))));
+        assert!(!path.exists(), "検証失敗時にファイルを書き出してはならない");
     }
 
     // --- 以下、`peak_memory_bench` CLI（`src/bin/peak_memory_bench.rs`）の
@@ -1215,11 +1212,9 @@ mod tests {
         let mut report = run_peak_memory(&config).unwrap();
         report.samples[0].gemm_alloc_peak_bytes = None;
 
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "emit_peak_memory_report_rejects_missing_gemm_alloc_tracking_via_out_file_{}.json",
-            std::process::id()
-        ));
+        // 排他作成した専用ディレクトリ配下の未作成パス（事前作成しない理由は上のテストと同じ）。
+        let dir = crate::test_temp_dir::UnitTestDir::new("peak-memory-emit-out-file");
+        let path = dir.path().join("report.json");
         let result = emit_peak_memory_report(&report, Some(&path));
 
         assert!(matches!(result, Err(PeakMemoryError::ProtocolViolation(_))));
