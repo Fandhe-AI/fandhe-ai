@@ -479,22 +479,14 @@ pub(crate) use unsupported::{probe, read_via_fd_walk, write_via_fd_walk};
 ))]
 mod tests {
     use super::*;
+    use crate::test_support::unique_temp_dir;
     use std::fs;
     use std::path::Path;
 
-    fn temp_workspace(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "self-repair-fd-walk-test-{name}-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create_dir_all should succeed in test setup");
-        dir
-    }
-
     #[test]
     fn write_then_read_plain_path_round_trips() {
-        let dir = temp_workspace("plain-round-trip");
+        let dir_guard = unique_temp_dir("plain-round-trip");
+        let dir = dir_guard.path().to_path_buf();
         fs::create_dir_all(dir.join("src")).expect("create_dir_all should succeed in test setup");
         let relative = Path::new("src/lib.rs");
 
@@ -509,13 +501,12 @@ mod tests {
         let content = read_via_fd_walk(&dir, relative)
             .expect("read_via_fd_walk should see overwritten content");
         assert_eq!(content, "updated");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn write_creates_new_file_via_existing_parent_dir() {
-        let dir = temp_workspace("new-file-via-parent");
+        let dir_guard = unique_temp_dir("new-file-via-parent");
+        let dir = dir_guard.path().to_path_buf();
         fs::create_dir_all(dir.join("src")).expect("create_dir_all should succeed in test setup");
         let relative = Path::new("src/new_module.rs");
         assert!(!dir.join(relative).exists());
@@ -545,15 +536,15 @@ mod tests {
                 "作成されたファイルの権限が想定外です: {mode:o}"
             );
         }
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
     fn rejects_leaf_symlink_without_touching_outside_target() {
-        let dir = temp_workspace("leaf-symlink-reject");
-        let outside_dir = temp_workspace("leaf-symlink-reject-outside");
+        let dir_guard = unique_temp_dir("leaf-symlink-reject");
+        let dir = dir_guard.path().to_path_buf();
+        let outside_dir_guard = unique_temp_dir("leaf-symlink-reject-outside");
+        let outside_dir = outside_dir_guard.path().to_path_buf();
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, "do-not-overwrite").expect("write should succeed in test setup");
 
@@ -570,17 +561,15 @@ mod tests {
 
         let read_result = read_via_fd_walk(&dir, relative);
         assert!(read_result.is_err());
-
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     #[cfg(unix)]
     #[test]
     fn rejects_intermediate_directory_symlink_without_touching_outside_target() {
-        let dir = temp_workspace("dir-symlink-reject");
-        let outside_dir = temp_workspace("dir-symlink-reject-outside");
-        fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+        let dir_guard = unique_temp_dir("dir-symlink-reject");
+        let dir = dir_guard.path().to_path_buf();
+        let outside_dir_guard = unique_temp_dir("dir-symlink-reject-outside");
+        let outside_dir = outside_dir_guard.path().to_path_buf();
 
         std::os::unix::fs::symlink(&outside_dir, dir.join("sub"))
             .expect("symlink creation should succeed in test setup");
@@ -592,20 +581,16 @@ mod tests {
 
         let read_result = read_via_fd_walk(&dir, relative);
         assert!(read_result.is_err());
-
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     #[test]
     fn probe_allows_not_yet_existing_path() {
-        let dir = temp_workspace("probe-not-found");
+        let dir_guard = unique_temp_dir("probe-not-found");
+        let dir = dir_guard.path().to_path_buf();
         fs::create_dir_all(dir.join("src")).expect("create_dir_all should succeed in test setup");
 
         let result = probe(&dir, Path::new("src/not_created_yet.rs"));
         assert!(result.is_ok());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -613,7 +598,8 @@ mod tests {
         // PR #361 codex-review 追加指摘 P1: 中間ディレクトリの `NotFound` は
         // `write_via_fd_walk` が新規作成できないため、末端ファイルの
         // `NotFound`（許容）と区別して拒否しなければならない。
-        let dir = temp_workspace("probe-missing-intermediate-dir");
+        let dir_guard = unique_temp_dir("probe-missing-intermediate-dir");
+        let dir = dir_guard.path().to_path_buf();
 
         let result = probe(&dir, Path::new("missing/target.rs"));
         assert!(
@@ -621,15 +607,15 @@ mod tests {
             "中間ディレクトリ不在のパスは事前検証で拒否されるべきです"
         );
         assert!(!dir.join("missing").exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
     fn probe_rejects_existing_symlink() {
-        let dir = temp_workspace("probe-symlink-reject");
-        let outside_dir = temp_workspace("probe-symlink-reject-outside");
+        let dir_guard = unique_temp_dir("probe-symlink-reject");
+        let dir = dir_guard.path().to_path_buf();
+        let outside_dir_guard = unique_temp_dir("probe-symlink-reject-outside");
+        let outside_dir = outside_dir_guard.path().to_path_buf();
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, "secret").expect("write should succeed in test setup");
 
@@ -639,8 +625,5 @@ mod tests {
 
         let result = probe(&dir, relative);
         assert!(result.is_err());
-
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&outside_dir);
     }
 }
