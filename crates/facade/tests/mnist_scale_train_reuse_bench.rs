@@ -297,6 +297,85 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
     bench_fresh_vs_reuse(Device::Metal, "metal");
 }
 
+/// train forward の encode-only 合流フラグ（イシュー #2113）を一時的に
+/// 設定し、drop で元へ戻す RAII ガード。フラグはプロセスワイドのため
+/// [`serialize_diagnostic_counter_tests`] の保持下でのみ使う。
+struct EncodeOnlyFlagGuard {
+    original: bool,
+}
+
+impl EncodeOnlyFlagGuard {
+    fn set(enabled: bool) -> Self {
+        let original = fandhe_ai_backend_metal::__train_forward_encode_only_enabled();
+        fandhe_ai_backend_metal::__set_train_forward_encode_only_enabled(enabled);
+        Self { original }
+    }
+}
+
+impl Drop for EncodeOnlyFlagGuard {
+    fn drop(&mut self) {
+        fandhe_ai_backend_metal::__set_train_forward_encode_only_enabled(self.original);
+    }
+}
+
+/// steady-state 1 step（forward + MSE + backward + SGD）の
+/// `(encode, command_buffer, wait)` カウンタ差分を、train forward の
+/// encode-only 合流フラグを `encode_only` に固定して計測する
+/// （[`mnist_scale_train_reuse_metal_batch_counters`]・
+/// [`mnist_scale_train_reuse_metal_batch_counters_forward_encode_only`] の
+/// 共通本体。呼び出し元が直列化ロックを保持していること）。
+fn measure_train_reuse_step_counters(encode_only: bool) -> (usize, usize, usize) {
+    let _flag = EncodeOnlyFlagGuard::set(encode_only);
+    let device = Device::Metal;
+    let model = build_model();
+    let (x_data, y_data) = mlp_data();
+
+    let init_tape = fandhe_ai::tape_for(device).unwrap();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    let _ = init_tape.sync_device_param_store_to_host(&store).unwrap();
+    drop(init_tape);
+
+    let config = FacadeSgdConfig::new(LR);
+
+    let run_step = |store: &mut fandhe_ai::DeviceParamStore| {
+        let tape = fandhe_ai::tape_for(device).unwrap();
+        let x = tape.var(&x_data);
+        let y = tape.var(&y_data);
+        let pred = model.forward_resident(&tape, &x, store).unwrap();
+        let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+        let last_loss = loss
+            .to_tensor()
+            .get(&[])
+            .expect("loss は shape [] スカラー");
+        assert!(
+            last_loss.is_finite(),
+            "MEASURE_ERROR: step loss not finite: {last_loss}"
+        );
+        let grads = tape.backward_device_param_store(&loss, store).unwrap();
+        tape.step_device_param_store(store, &grads, &config)
+            .unwrap();
+    };
+
+    // steady-state 到達（`TRAIN_WARMUP`＝20 と同じ考え方。#1017／#1099
+    // いずれもプールのフリーリスト充足状態が前提のため、初回数 step は
+    // フレッシュ確保が混じりカウンタが安定しない）。
+    const WARMUP: usize = TRAIN_WARMUP;
+    for _ in 0..WARMUP {
+        run_step(&mut store);
+    }
+
+    let before = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext は実機で必ず取得できるはず");
+    run_step(&mut store);
+    let after = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+        .expect("singleton MetalContext は実機で必ず取得できるはず");
+
+    let encode_delta = after.encode_calls - before.encode_calls;
+    let command_buffer_delta = after.command_buffers - before.command_buffers;
+    let wait_delta = after.wait_until_completed - before.wait_until_completed;
+    (encode_delta, command_buffer_delta, wait_delta)
+}
+
 /// イシュー #1099 の受入条件 2: プール再利用時ゼロ埋めの無条件
 /// `synchronize()` 除去（`crates/backend-metal/src/pool.rs::
 /// MetalAllocator::alloc_inner`）により、steady-state の MLP reuse 学習
@@ -451,53 +530,8 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn mnist_scale_train_reuse_metal_batch_counters() {
     let _guard = serialize_diagnostic_counter_tests();
-    let device = Device::Metal;
-    let model = build_model();
-    let (x_data, y_data) = mlp_data();
-
-    let init_tape = fandhe_ai::tape_for(device).unwrap();
-    let mut store = model.init_device_param_store(&init_tape).unwrap();
-    let _ = init_tape.sync_device_param_store_to_host(&store).unwrap();
-    drop(init_tape);
-
-    let config = FacadeSgdConfig::new(LR);
-
-    let run_step = |store: &mut fandhe_ai::DeviceParamStore| {
-        let tape = fandhe_ai::tape_for(device).unwrap();
-        let x = tape.var(&x_data);
-        let y = tape.var(&y_data);
-        let pred = model.forward_resident(&tape, &x, store).unwrap();
-        let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-        let last_loss = loss
-            .to_tensor()
-            .get(&[])
-            .expect("loss は shape [] スカラー");
-        assert!(
-            last_loss.is_finite(),
-            "MEASURE_ERROR: step loss not finite: {last_loss}"
-        );
-        let grads = tape.backward_device_param_store(&loss, store).unwrap();
-        tape.step_device_param_store(store, &grads, &config)
-            .unwrap();
-    };
-
-    // steady-state 到達（`TRAIN_WARMUP`＝20 と同じ考え方。#1017／#1099
-    // いずれもプールのフリーリスト充足状態が前提のため、初回数 step は
-    // フレッシュ確保が混じりカウンタが安定しない）。
-    const WARMUP: usize = TRAIN_WARMUP;
-    for _ in 0..WARMUP {
-        run_step(&mut store);
-    }
-
-    let before = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
-        .expect("singleton MetalContext は実機で必ず取得できるはず");
-    run_step(&mut store);
-    let after = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
-        .expect("singleton MetalContext は実機で必ず取得できるはず");
-
-    let encode_delta = after.encode_calls - before.encode_calls;
-    let command_buffer_delta = after.command_buffers - before.command_buffers;
-    let wait_delta = after.wait_until_completed - before.wait_until_completed;
+    // 既定（フラグ OFF。#2113）の値を固定する。ON は別テストで検証する。
+    let (encode_delta, command_buffer_delta, wait_delta) = measure_train_reuse_step_counters(false);
 
     println!(
         "[mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: \
@@ -558,6 +592,37 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
         "waitUntilCompleted() 呼び出し数は #1563 適用後は 9→8、#1690 適用後は \
          8→7 のはず（command_buffer_delta と同じ理由。本ファイル冒頭 doc \
          comment「#1690 追記」参照。机上導出。Mac 実機未確認）"
+    );
+}
+
+/// train forward の encode-only 合流（イシュー #2113・opt-in。既定 OFF）を
+/// ON にした steady-state 1 step のカウンタを固定する。
+///
+/// 机上導出（**Mac 実機未確認**。#1690 の前例と同じ扱い）: 現行 11/7/7 の
+/// うち forward の L1 gemm と relu は、OFF では各 1 回ずつ同期する
+/// （`gemm_resident_rhs` の `download` と `relu` の `dispatch_sync`）。ON では
+/// 両者を同一バッチへ積み同期 1 回へ合流するため、encode 総数は不変・
+/// command_buffer／wait が各 -1 の **11 / 6 / 6** になる。実測で不一致なら
+/// 期待値を実測へ合わせず原因を切り分けること（事後緩和禁止。
+/// `docs/perf/logs/metal-train-forward-encodeonly-2113/RULE.txt`）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn mnist_scale_train_reuse_metal_batch_counters_forward_encode_only() {
+    let _guard = serialize_diagnostic_counter_tests();
+    let (encode_delta, command_buffer_delta, wait_delta) = measure_train_reuse_step_counters(true);
+    println!(
+        "[mnist_scale_train_reuse_metal_batch_counters_forward_encode_only] steady-state 1 step: \
+         encode_delta={encode_delta} command_buffer_delta={command_buffer_delta} \
+         wait_delta={wait_delta}（机上導出 11/6/6・OFF は 11/7/7）"
+    );
+    assert_eq!(encode_delta, 11, "encode 総数は合流でも不変のはず");
+    assert_eq!(
+        command_buffer_delta, 6,
+        "L1 gemm と relu の合流で cb は 7→6 のはず（机上導出。Mac 実機未確認）"
+    );
+    assert_eq!(
+        wait_delta, 6,
+        "L1 gemm と relu の合流で wait は 7→6 のはず（机上導出。Mac 実機未確認）"
     );
 }
 

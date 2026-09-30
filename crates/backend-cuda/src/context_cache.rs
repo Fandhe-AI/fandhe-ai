@@ -1149,22 +1149,36 @@ thread_local! {
 
 /// このスレッドが `ordinal` 上で既に 1 つ以上 [`CallToken`] を保持して
 /// いるか（[`DRIVER_CALL_DEPTH`] 参照）。
+///
+/// イシュー #2115: `try_with` を使う。thread_local に `DeviceBuffer` を
+/// 保持するキャッシュ（`graph.rs::INFER_GRAPHS`）が TLS 破棄時に
+/// `CudaBufferHandle::Drop` → `begin_buffer_release` 経由で本関数を呼ぶ際、
+/// `DRIVER_CALL_DEPTH` が先に破棄済みだと `.with` は panic し、破棄中の
+/// panic は abort になりうる。破棄後は「保持なし（false）」の安全側に倒す。
 fn has_in_flight_call_on_this_thread(ordinal: usize) -> bool {
-    DRIVER_CALL_DEPTH.with(|depth| depth.borrow().get(&ordinal).copied().unwrap_or(0) > 0)
+    DRIVER_CALL_DEPTH
+        .try_with(|depth| depth.borrow().get(&ordinal).copied().unwrap_or(0) > 0)
+        .unwrap_or(false)
 }
 
 /// [`DRIVER_CALL_DEPTH`] のこのスレッド・`ordinal` の値を 1 増やす
 /// （[`begin_driver_call`] が [`CallToken`] を発行する直前に呼ぶ）。
+///
+/// TLS 破棄後は no-op（[`has_in_flight_call_on_this_thread`] 参照。
+/// イシュー #2115）。
 fn increment_driver_call_depth(ordinal: usize) {
-    DRIVER_CALL_DEPTH.with(|depth| {
+    let _ = DRIVER_CALL_DEPTH.try_with(|depth| {
         *depth.borrow_mut().entry(ordinal).or_insert(0) += 1;
     });
 }
 
 /// [`DRIVER_CALL_DEPTH`] のこのスレッド・`ordinal` の値を 1 減らす
 /// （[`CallToken::drop`] から呼ぶ。`saturating_sub` で下振れを防ぐ）。
+///
+/// TLS 破棄後は no-op（[`has_in_flight_call_on_this_thread`] 参照。
+/// イシュー #2115）。
 fn decrement_driver_call_depth(ordinal: usize) {
-    DRIVER_CALL_DEPTH.with(|depth| {
+    let _ = DRIVER_CALL_DEPTH.try_with(|depth| {
         if let Some(count) = depth.borrow_mut().get_mut(&ordinal) {
             *count = count.saturating_sub(1);
         }

@@ -2485,3 +2485,10 @@ M4 Max（GPU 40 コア）・macOS 26.6.2・rustc 1.96.0。計測中の
 before-0.7.0-head-f396784.jsonl`・`results-m4max-gemm-ab-after-head-f396784.jsonl`・
 `manifest-m4max-gemm-ab-head-f396784.json`・
 `skipped-m4max-gemm-ab-head-f396784.log`（空）。
+
+## §20 candle／MLX steel 解析差分からの未試行候補（イシュー #2110）
+
+§7〜§19 の候補に対し、candle-metal-01 §6 の差分のうち kernel_gpu 5 run A/B が未実施の組合せ
+（candle 相当タイル + acc unroll・協調ロード unroll 新軸 `UNROLL_LOAD_ENABLED`〈index 18〉・fine barrier 近似）を
+opt-in で実装した。機構・除外候補・判定規則は `docs/perf/metal-gemm-steel-candidates.md`、実測は #2111
+（`docs/perf/logs/metal-gemm-candidate-ab-2111/`）。本番既定は不変で、本節時点では実機未実測。

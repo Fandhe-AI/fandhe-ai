@@ -1,0 +1,82 @@
+RULE fixed-at-utc: 2026-09-30T04:00:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #2116 CUDA train reuse forward_resident 内訳診断と fresh param_readout の CPU 側オーバーヘッド診断
+doc: docs/perf/cuda-train-forward-resident-diagnosis.md
+
+[実行方法]
+- 1 run = 1 プロセスペア。次の 2 つのテストバイナリを orchestrate.sh が順に独立起動する。
+  (上位) crates/facade/tests/cuda_train_forward_resident_diag.rs の
+         `cuda_train_forward_resident_phases`  -> run{N}.facade.jsonl
+  (下位) crates/backend-cuda/src/train_forward_resident_diag_tests.rs の
+         `cuda_train_forward_resident_backend_phases` -> run{N}.backend.jsonl
+  いずれも `--ignored --exact --nocapture --test-threads=1`。
+- run1〜run5 の 5 run。差し替え・追加起動・既存 run ファイルの上書きはしない。
+- 1 プロセスあたり warmup 20 反復 + 計測 80 反復（20 反復 x 4 ラウンド。ラウンドごとに arm 順を反転）。
+- batch は 16 / 64 / 256 / 1024（64 が bench 既定）。fresh の readout 診断は batch 64 のみ。
+- 対象ホスト: DGX Spark GB10（gb10。判定対象）。RTX 3060 等（rtx3060）は record_only。
+
+[代表値]
+- 各セルは run ごとの median_s を採り、5 run 間の中央値と min-max を報告する。
+- 比は 5 run 中央値同士で計算する（F = public/forward_resident の 5 run 中央値）。
+  反復単位の集計は paired/residual（public - sum(decomposed parts)。反復ごとに差を取ってから
+  run 内 median）だけである。
+
+[checksum 規則（hard・fail-closed）。1 つでも不一致・欠落なら系列は無効（集計は exit != 0）]
+- 上位: batch ごとに public と decomposed の checksum が一致し、5 run で一致する。
+- 上位: readout の r0_mirror / r1_split / r2_pretouched の checksum が互いに一致し、5 run で一致する。
+  r3_cpu_control は CPU 対照のため別 checksum とし、5 run 間の一致のみを要求する。
+- 下位: prod/total（l1・l2・relu・mse。各 batch）の checksum_bits が 5 run で一致する。
+- 下位の分解出力が本番 gemm_resident_rhs 出力と bit 一致することはテスト内の hard assert で担保する
+  （不一致ならテストが失敗し run ファイルは生成されない）。
+
+[支配項の判定（batch ごと。閾値は事後に変えない）]
+F = public/forward_resident。次の 6 項は、それぞれ独立した参考指標として F との比を見る（合算して F の排他的な内訳を成すものではない）。
+  H1・H4 は syncsplit（本番にない同期を挿入した別スケジュール）、H3 は nosync、H2・H6 は本番 prod の単独呼び出し、
+  H5 は上位 API の値であり、計測スケジュールが異なるため、6 項の和は F と一致せず 1.0 を超えうる。
+  各項は F に対する独立した寄与の目安として個別に閾値判定し、和が F を再現する前提は置かない。
+- H1 層境界の upload/download 呼び出し全体（転送のみの分離計測ではなく、呼び出し内のホスト側確保・登録等を含む）= syncsplit の (h2d_upload + d2h_download) を l1 と l2 で合算
+  （nosync の d2h_download はカーネル完了待ちを含み H4 と二重計上になるため使わない。syncsplit は
+  kernel_wait を別区間へ分離済みで H4 と重ならない。実機計測前の規則修正。レビュー指摘 #2116）
+- H2 未融合 relu の往復 = prod/relu total
+- H3 呼び出しごとのデバイス確保 = nosync の (mem_new + alloc_c) を l1 と l2 で合算
+- H4 カーネル実行 = syncsplit の kernel_wait を l1 と l2 で合算
+- H5 上位 API の固定費 = decomposed/register + paired/residual
+- H6 mse の往復（target の H2D を含む）= prod/mse total
+- 各項の F に対する比が 0.40 以上なら「支持（支配項）」、0.20 以上 0.40 未満なら「寄与あり」、
+  0.20 未満なら「非支持」。どの項も 0.40 に届かなければ「分散」と記録する。
+- 層の種類別: l1・l2 それぞれで nosync の各区間 / nosync total が 0.40 以上の区間を、その層の支配項とする。
+- fidelity（記録のみ）: nosync total / prod total（l1・l2）を報告する。0.8〜1.2 を外れる場合は
+  区間和が本番を再現していないと記録し、その batch の H1・H3 を参考扱いにする。
+  syncsplit は本番にない同期を挿入するので fidelity 評価に使わない（H4 の値のみに使う）。
+- 補助（判定に使わない）: facade decomposed の l1_linear_relu / l2_linear / mse_loss の F 比、
+  what-if（融合 relu）total / (prod l1 total + prod relu total)、what-if の bits_equal。
+
+[param_readout の判定（batch 64。R0 = readout_r0_mirror/param_readout）]
+- P1 host alloc / page fault: (R0 - R2) / R0 >= 0.50 なら支持（R2 = readout_r2_pretouched）。
+- P2 非 contiguous の gather: noncontig_grad_count の 5 run 中央値 > 0 かつ
+  grad_contiguous / R0 >= 0.50 なら支持。
+- P3 CUDA 由来の差: R0 / R3 > 1.50 なら「CUDA 由来の差あり」と記録（R3 = readout_r3_cpu_control）。
+- P4 sync 待ち: 構造上 0（Tensor はホスト storage のみで D2H・デバイス同期がない。
+  grad は backward 内で実体化済み）。測定しない。
+- R1 の内訳（param/grad の contiguous・to_vec）は表示のみ。
+- 参考値（train-step-phase-breakdown.md §17.6.2）: cuda fresh param_readout 87.0 us・
+  cpu fresh 40.2 us（別バイナリ・別ハーネスの値で判定に使わない）。
+
+[比の定義・非後退]
+- 本イシューは本番コードを変更しないため採否ゲートは無い（record_only）。
+- ratio = HEAD の public/forward_resident（batch 64）の 5 run 中央値 / 155.9 us（§17.6.2・
+  registry fandhe-ai =0.9.0）。ratio <= 1.00 ならそのまま記録し、> 1.00 なら「HEAD で後退」と
+  記録してスコープ外 Issue 候補に挙げる。バイナリ（HEAD ソース対 registry 版）とハーネス
+  （テスト計時対 bench-fandhe）が異なる点を併記する。
+
+[ゲート]
+- gb10: 各 run の開始前に load1 < 1.0 かつ GPU utilization 0% を 30 秒間隔・最大 30 分待つ。
+  1 run でも通過しなければ系列を参考扱いにする（load_gate.log に記録）。
+  nvidia-smi を実行できない場合は通過扱いにしない。
+- rtx3060 ほか: record_only（並列作業と GPU を共有しうる。env_info に compute-apps 数を記録）。
+
+[対象外（再実行しない既存実験。決定記録あり）]
+- #1182 の正方 GEMM 分解 / #1336・#1437 の readout 方式 / #1149 の per-call alloc 閾値 /
+  #1585 の pinned H2D / #1353 の managed。
+
+[マスク規則]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。

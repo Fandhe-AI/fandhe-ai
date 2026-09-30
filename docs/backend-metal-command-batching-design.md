@@ -1293,6 +1293,29 @@ env_info（内部ホスト名は含めない）: 未実測
 実測は `docs/perf/logs/metal-mse-backward-1691/orchestrate.sh` へ記録
 （README・事前登録判定規則を参照）。本 PR 時点では未実測。
 
+### 7.6 #2113: train forward の encode-only 合流（opt-in・既定 OFF）
+
+#### 7.6.1 対象と変更点
+
+- 対象は train reuse forward の `BackendOps::gemm_resident_rhs_act`（`DeviceParamStore::linear_forward_with_activation` から呼ばれる）。Metal はこれをオーバーライドしておらず、`tensor-core` の既定合成（`gemm_resident_rhs` → `self.relu`）が `act == Relu` で 2 回同期していた（gemm は `dispatch_strided_bias_act_prepared` + `download`、relu は `run_unary` の `dispatch_sync`）。
+- 変更は `gemm.rs` ではなく `ops.rs`（Metal オーバーライドの追加）と `elementwise.rs`（`encode_unary_resident_tracked`）。gemm 側の encode-only 入口は `linear_forward_device` 用に既存。
+- ON かつ `act == Relu` のときだけ、gemm（`act_relu=false`）→ resident relu を同一バッチへ encode-only で積み、`synchronize` を 1 回にする。カーネル・入力は不変で bit 同一。`DispatchFailureCell` を全 encode に渡し `synchronize` 後に検査する（fail-closed。#1690 と同じ契約）。encode の間に確保を挟まない。
+- opt-in は `train_forward_encode_runtime.rs`（既定 `false`。facade の公開面・環境変数は追加しない）。OFF と `act == None` は変更前の呼び出し列のまま。
+
+#### 7.6.2 カウンタ見積り（机上導出・Mac 実機未確認）
+
+- HEAD の steady-state 1 step は 11/7/7（#1690 適用後。`mnist_scale_train_reuse_metal_batch_counters`）。ON で L1 gemm と relu が 1 同期へ合流し **11/6/6**（encode 不変・cb −1・wait −1）。backward 区間のみの窓（5/3/3）は不変。
+- `device_update` フェーズ（3.4 µs）は本変更の対象外で record_only。効果は `forward_resident` フェーズに現れる見込み。
+- 融合 epilogue（`act_relu=true` の結線）は encode-only 化ではなくカーネル融合（#1044 の Metal 未実施分）で効果の帰属が混ざるため採らない（10/6/6 見込み。別途検討）。
+
+#### 7.6.3 他イシューとの関係
+
+- #1690（MSE forward の encode-only 化・REJECT）・#1563（backward の d_input 層内合流）とは同期境界が独立で、効果を重複主張しない。infer は `predict_device_chain` を優先し本オーバーライドへ到達しないため判定対象外。
+
+#### 7.6.4 実測記入欄
+
+未実測。判定規則は `docs/perf/logs/metal-train-forward-encodeonly-2113/RULE.txt`、手順は同 README を参照（M4 Max・GB10 とも実機セッションへ申し送り）。
+
 ## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
 
 §4.2・§4.5 が特定した「9 個のバッチがいずれも dispatch 数 1（マージ
