@@ -75,6 +75,21 @@ if [[ "$EXPECTED_FACADE_PATH" == "unknown" || "$ACTUAL_FACADE_PATH" != "$EXPECTE
   exit 1
 fi
 
+# codex-review 指摘（PR #2463 P1）: HEAD sha とパスの照合だけでは作業ツリー・index の未コミット変更
+# （crates/facade 等）を検出できず、別コードの計測結果が HEAD の結果として manifest に記録される。
+# 計測前に tracked ファイルの作業ツリー・index が HEAD と一致し、計測対象コード（crates/・Cargo.*）に
+# 未追跡ファイルも無いことを確認し、差異があれば fail-closed で停止する（submodule は対象外）。
+REPO_ROOT="$SCRIPT_DIR/../../.."
+if ! git -C "$REPO_ROOT" diff --quiet --ignore-submodules=all HEAD -- \
+  || ! git -C "$REPO_ROOT" diff --cached --quiet --ignore-submodules=all HEAD --; then
+  echo "error: 作業ツリーまたは index に HEAD との差異（未コミット変更）がある。HEAD の計測結果として記録できないため停止する" >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$REPO_ROOT" ls-files --others --exclude-standard -- crates Cargo.toml Cargo.lock 2>/dev/null)" ]]; then
+  echo "error: crates/ または Cargo.* に未追跡ファイルがある。HEAD の計測結果として記録できないため停止する" >&2
+  exit 1
+fi
+
 # Metal 版（#2112）由来の codex-review 指摘（PR #2456）: RULE.txt は 5 round 固定で、
 # 後段 compare_gemm_ab.py も各セル 5 件を要求する。5 以外は判定不能な出力を
 # 生むため、計測開始前に fail-closed で拒否する（環境変数での上書きも 5 のみ許可）。
@@ -98,6 +113,9 @@ OUT_AFTER="results/raw/results-dgx-readback-reuse-ab-${LABEL}-after.jsonl"
 SKIP="results/raw/skipped-dgx-readback-reuse-ab-${LABEL}.log"
 MANIFEST="results/raw/manifest-dgx-readback-reuse-ab-${LABEL}.json"
 UNDETERMINED="results/raw/readback-reuse-ab-${LABEL}.undetermined.txt"
+# codex-review 指摘（PR #2463 P1）: 判定レポートの衝突は計測・公開後ではなく計測前に検出する
+# （公開後に停止すると判定レポートを作れない結果だけが残る）。下の一括検査に含める。
+REPORT="results/raw/compare-readback-reuse-ab-${LABEL}.md"
 if [[ -L results || -L results/raw ]]; then
   echo "error: results／results/raw がシンボリックリンク（出力先のすり替え防止のため拒否）" >&2
   exit 1
@@ -131,7 +149,7 @@ write_excl() { # write_excl <path>: stdin を排他作成したファイルへ�
 }
 
 # 計測開始前に全出力先を一括検査する（途中失敗で部分出力を残さない）。
-for existing in "$OUT_BEFORE" "$OUT_AFTER" "$SKIP" "$MANIFEST" "$UNDETERMINED" \
+for existing in "$OUT_BEFORE" "$OUT_AFTER" "$SKIP" "$MANIFEST" "$UNDETERMINED" "$REPORT" \
   "$OUT_BEFORE_TMP" "$OUT_AFTER_TMP" "$SKIP_TMP" "$MANIFEST_TMP" \
   "$GATE_LOG" "$UPTIME_SAMPLER_LOG"; do
   reject_existing "$existing" || exit 1
@@ -590,11 +608,7 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   echo "done. results in $OUT_BEFORE / $OUT_AFTER ; manifest in $MANIFEST"
   # 判定（RULE.txt）: 5 run 中央値の ratio と checksum 完全一致（fail-closed）。ADOPT 判断は
   # RULE.txt の前提ゲート（#2107 の帰属判定）と合わせて人間が行う。
-  REPORT="results/raw/compare-readback-reuse-ab-${LABEL}.md"
-  if [[ -e "$REPORT" || -L "$REPORT" ]]; then
-    echo "error: 判定レポートの出力先が既に存在する（上書き禁止）: $REPORT" >&2
-    exit 1
-  fi
+  # REPORT の既存確認は計測前に実施済み（write_excl も排他作成で二重に守る）。
   python3 compare_gemm_ab.py "$OUT_BEFORE" "$OUT_AFTER" --device cuda --sizes large --modes reuse --threshold 1.00 \
     --require-checksum-exact | write_excl "$REPORT"
   # 比較器と書き込み先の両方の終了状態を検査する（片方だけ見ると、write_excl 失敗で
