@@ -40,6 +40,9 @@ RE_BIT = re.compile(
     r"^N=(\d+) arm=(\S+) checksum=(-?[0-9.eE+-]+) bit_identical=(true|false) same_kernel=(true|false)(?: same_tile=(true|false))?$"
 )
 RE_RATIO = re.compile(r"^N=(\d+) arm=(\S+) head_over_base_kernel_gpu=([0-9.eE+-]+)$")
+RE_MEDIAN = re.compile(
+    r"^N=(\d+) arm=(\S+) resolved_tile=.* kernel_gpu_median_ms=([0-9.eE+-]+) q1=[0-9.eE+-]+ q3=[0-9.eE+-]+$"
+)
 
 
 def parse_run(text):
@@ -60,7 +63,31 @@ def parse_run(text):
         m = RE_RATIO.match(line)
         if m:
             out.setdefault((m.group(2), int(m.group(1))), {})["ratio"] = float(m.group(3))
+            continue
+        m = RE_MEDIAN.match(line)
+        if m:
+            out.setdefault((m.group(2), int(m.group(1))), {})["median_ms"] = float(m.group(3))
     return out
+
+
+def check_base_cells(runs):
+    """全 run・全 N の base 行（bit 行・中央値行・比行）が揃い妥当か検証する（fail-closed）。
+
+    base は全 arm の比の分母であり、欠落したまま候補 arm の比だけで採用判定すると
+    比較基準の無い ADOPT_CANDIDATE を出しうる。戻り値: 問題の文字列リスト（空なら妥当）。
+    """
+    bad = []
+    for i, r in enumerate(runs, start=1):
+        for n in EXPECTED_SIZES:
+            c = r.get((BASE, n))
+            if c is None:
+                bad.append(f"run{i} N={n} の base 行が無い")
+                continue
+            if "bit_identical" not in c or "ratio" not in c or "median_ms" not in c:
+                bad.append(f"run{i} N={n} の base 行が不完全（bit／比／中央値のいずれかが無い）")
+            elif c["median_ms"] <= 0.0 or c["ratio"] != 1.0 or not c["bit_identical"]:
+                bad.append(f"run{i} N={n} の base 値が不正（median_ms>0・ratio=1.0・bit_identical=true が必要）")
+    return bad
 
 
 def judge(runs, reference_only=False, problems=()):
@@ -70,6 +97,9 @@ def judge(runs, reference_only=False, problems=()):
     1 件でもあれば全 arm を INCOMPLETE にする（採用判定を出さない。fail-closed）。
     """
     verdicts = {}
+    problems = list(problems)
+    if len(runs) == N_RUNS:
+        problems += check_base_cells(runs)
     arms = sorted(set(EXPECTED_ARMS) | {arm for r in runs for (arm, _n) in r if arm != BASE})
     for arm in arms:
         if problems:
@@ -136,9 +166,11 @@ def check_gate_log(text):
     for t in GATE_TESTS:
         if not re.search(r"^test " + re.escape(t) + r" \.\.\. ok$", text, re.M):
             return False, f"ゲートテスト未成功または未実行: {t}"
-    m = re.search(r"^test result: ok\. (\d+) passed; 0 failed", text, re.M)
-    if not m or int(m.group(1)) != len(GATE_TESTS):
-        return False, "test result: ok. 4 passed; 0 failed が確認できない"
+    # orchestrate.sh はゲート 4 本を 1 本ずつ別プロセスで実行するため、
+    # `test result: ok. 1 passed; 0 failed` が 4 件並ぶ（libtest のテスト名フィルタ複数指定に依存しない）。
+    n_ok = len(re.findall(r"^test result: ok\. 1 passed; 0 failed", text, re.M))
+    if n_ok != len(GATE_TESTS):
+        return False, f"test result: ok. 1 passed; 0 failed が {len(GATE_TESTS)} 件必要（実際 {n_ok} 件）"
     return True, "ok"
 
 
@@ -151,8 +183,13 @@ def check_run_log(text):
     """
     if "FAILED" in text or "panicked" in text:
         return False, "FAILED／panicked を含む"
-    if not re.search(r"^test " + re.escape(AB_TEST) + r" \.\.\. ok$", text, re.M):
-        return False, "対象テストの成功行（... ok）が無い"
+    # `--nocapture` 実行では libtest が `test <name> ...` を出した後にテスト本体の標準出力が続き、
+    # 判定語 `ok` は後続の独立行になる。同一行（`... ok`）・別行（`...` 行 + 独立 `ok` 行）の双方を許容する。
+    if not re.search(r"^test " + re.escape(AB_TEST) + r" \.\.\.(?: ok)?$", text, re.M) or not (
+        re.search(r"^test " + re.escape(AB_TEST) + r" \.\.\. ok$", text, re.M)
+        or re.search(r"^ok$", text, re.M)
+    ):
+        return False, "対象テストの成功行（... ok、または ... の後の独立 ok 行）が無い"
     if not re.search(r"^test result: ok\. 1 passed; 0 failed", text, re.M):
         return False, "test result: ok. 1 passed; 0 failed が無い"
     return True, "ok"
@@ -216,10 +253,22 @@ def load_dir(d):
     return runs, reference_only, problems
 
 
-def _fixture_run(ratios, bit=True, same=None, checksum="1.000000"):
-    """自己テスト用の 1 run 分ログを生成する。ratios: {(arm, n): ratio}。"""
+def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", with_base=True):
+    """自己テスト用の 1 run 分ログを生成する。ratios: {(arm, n): ratio}。
+
+    with_base=True なら出現する各 N の base 行（bit・中央値・比）を補う。
+    """
     lines = []
     same = same or set()
+    if with_base:
+        for n in sorted({n for (_a, n) in ratios}):
+            lines.append(
+                f"N={n} arm=base checksum={checksum} bit_identical=true same_kernel=true same_tile=true"
+            )
+            lines.append(
+                f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0000 q1=0.9000 q3=1.1000"
+            )
+            lines.append(f"N={n} arm=base head_over_base_kernel_gpu=1.000000")
     for (arm, n), r in ratios.items():
         lines.append(
             f"N={n} arm={arm} checksum={checksum} bit_identical={'true' if bit else 'false'} "
@@ -284,6 +333,9 @@ def self_test():
     # 別タイル arm の bit 不一致は NOT_ADOPTABLE にしない／同一タイルの不一致は NOT_ADOPTABLE
     diff_tile = [
         parse_run("\n".join(
+            f"N={n} arm=base checksum=1.0 bit_identical=true same_kernel=true same_tile=true\n"
+            f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0 q1=0.9 q3=1.1\n"
+            f"N={n} arm=base head_over_base_kernel_gpu=1.0\n"
             f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=false\n"
             f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
         for _ in range(N_RUNS)
@@ -291,21 +343,40 @@ def self_test():
     assert judge(diff_tile)["X"][0] == "ADOPT_CANDIDATE"
     same_tile = [
         parse_run("\n".join(
+            f"N={n} arm=base checksum=1.0 bit_identical=true same_kernel=true same_tile=true\n"
+            f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0 q1=0.9 q3=1.1\n"
+            f"N={n} arm=base head_over_base_kernel_gpu=1.0\n"
             f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=true\n"
             f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
         for _ in range(N_RUNS)
     ]
     assert judge(same_tile)["X"][0] == "NOT_ADOPTABLE"
     # ゲートログ検証
-    good = "\n".join(f"test {t} ... ok" for t in GATE_TESTS) + \
-        "\ntest result: ok. 4 passed; 0 failed; 0 ignored"
+    good = "\n".join(
+        f"test {t} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored" for t in GATE_TESTS
+    )
     assert check_gate_log(good)[0]
     assert not check_gate_log(good.replace("... ok", "... FAILED", 1))[0]
     assert not check_gate_log("")[0]
     assert not check_gate_log(good.replace(GATE_TESTS[0], "x"))[0]
+    # test result 行が 4 件に満たない場合は不成立
+    assert not check_gate_log(good.replace("test result: ok. 1 passed", "test result: ok. 0 passed", 1))[0]
     # 入力不完全（run 失敗・ゲート記録欠落等）は全 arm INCOMPLETE
     v = judge(build(ok), problems=["x"])
     assert v["X"][0] == "INCOMPLETE" and v["LU"][0] == "INCOMPLETE"
+    # base 行欠落（全欠落・一部 run／N のみ欠落・中央値行のみ欠落・不正値）は INCOMPLETE
+    no_base = [parse_run(_fixture_run({("X", n): 0.9 for n in EXPECTED_SIZES}, with_base=False))
+               for _ in range(N_RUNS)]
+    assert judge(no_base)["X"][0] == "INCOMPLETE"
+    part = build(ok)
+    del part[2][(BASE, 1024)]
+    assert judge(part)["X"][0] == "INCOMPLETE"
+    nomed = build(ok)
+    del nomed[0][(BASE, 512)]["median_ms"]
+    assert judge(nomed)["X"][0] == "INCOMPLETE"
+    badbase = build(ok)
+    badbase[1][(BASE, 2048)]["ratio"] = 1.2
+    assert judge(badbase)["X"][0] == "INCOMPLETE"
     # ratio<=0 は INCOMPLETE
     assert judge(build({512: 0.0, 1024: 0.9, 2048: 0.9, 4096: 0.9}))["X"][0] == "INCOMPLETE"
     # run ログ検証
@@ -315,6 +386,10 @@ def self_test():
     assert not check_run_log(good_run + "\ntest x ... FAILED")[0]
     assert not check_run_log(good_run.replace("0 failed", "1 failed"))[0]
     assert not check_run_log(good_run.replace("... ok", "... ignored"))[0]
+    # --nocapture 形式: `test <name> ...` の後にテスト stdout、独立 `ok` 行が続く
+    nocap = f"test {AB_TEST} ...\nN=512 arm=base x\nok\ntest result: ok. 1 passed; 0 failed; 0 ignored"
+    assert check_run_log(nocap)[0]
+    assert not check_run_log(nocap.replace("\nok\n", "\n"))[0]
     # 負荷ゲート記録検証
     assert check_load_gate("run1 OK load1=1 waited=0s\n", 1)[0] == "OK"
     assert check_load_gate("run1 TIMEOUT load1=9 waited=1800s\n", 1)[0] == "TIMEOUT"

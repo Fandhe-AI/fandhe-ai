@@ -7,7 +7,7 @@
 # 負荷運用のみ「専有ゲート」（RULE.txt 7.）へ変更している。
 #
 #   ./orchestrate.sh gate [--dry-run]
-#       RULE.txt 1.（前提ゲート）: bit 一致 3 本 + parity 1 本を `--exact` で
+#       RULE.txt 1.（前提ゲート）: bit 一致 3 本 + parity 1 本を 1 本ずつ `--exact` で
 #       実行する。1 件でも FAIL なら打ち切る（A/B は実施しない）。
 #       ログは本ディレクトリ直下の `gate_run.log`。run 番号の実行は起動前にこのログを検証し、
 #       ゲート未成立なら拒否する（verify_gate_log）。
@@ -128,8 +128,9 @@ verify_gate_log() {
             return 1
         fi
     done
-    if ! grep -Eq '^test result: ok\. 4 passed; 0 failed' "$GATE_LOG"; then
-        echo "前提ゲート不成立: 'test result: ok. 4 passed; 0 failed' が無い（RULE.txt 1.）" >&2
+    n_ok=$(grep -Ec '^test result: ok\. 1 passed; 0 failed' "$GATE_LOG" || true)
+    if [ "$n_ok" -ne 4 ]; then
+        echo "前提ゲート不成立: 'test result: ok. 1 passed; 0 failed' が 4 件必要（実際 ${n_ok} 件。RULE.txt 1.）" >&2
         return 1
     fi
     return 0
@@ -150,15 +151,20 @@ run_gate() {
         exit 1
     fi
     cd "$REPO_ROOT"
-    # shellcheck disable=SC2086 # GATE_TESTS は固定リテラル集合（外部入力なし）
-    cargo test -p fandhe-ai-backend-metal --release --lib \
-        -- --ignored --exact --test-threads=1 --nocapture \
-        $GATE_TESTS \
-        > "$GATE_LOG" 2>&1 || {
-        STATUS=$?
-        echo "gate: FAIL（status=${STATUS}）。${GATE_LOG} を確認する。A/B は実施しない（RULE.txt 1.）" >&2
-        exit "$STATUS"
-    }
+    # libtest のテスト名フィルタは複数指定の扱いが実装依存になりうるため、1 本ずつ別プロセスで
+    # `--exact` 実行し、全件を同一ログへ追記する（1 本でも失敗したら即打ち切る）。
+    # --nocapture は付けない（`... ok` を同一行に保ち、verify_gate_log／aggregate.py の
+    # 判定を単純にするため。ゲートテストは標準出力を判定に使わない）。
+    : > "$GATE_LOG"
+    for t in $GATE_TESTS; do
+        cargo test -p fandhe-ai-backend-metal --release --lib \
+            -- --ignored --exact --test-threads=1 "$t" \
+            >> "$GATE_LOG" 2>&1 || {
+            STATUS=$?
+            echo "gate: FAIL（${t}・status=${STATUS}）。${GATE_LOG} を確認する。A/B は実施しない（RULE.txt 1.）" >&2
+            exit "$STATUS"
+        }
+    done
     echo "gate: 全 4 テスト成功した。A/B（run1〜run5）へ進める"
 }
 
