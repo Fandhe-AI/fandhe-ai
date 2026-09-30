@@ -7,7 +7,7 @@
 
 use fandhe_ai_backend_metal::MetalDeviceProvider;
 use fandhe_ai_tensor_core::device::DeviceProvider;
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily};
+use objc2_metal::{MTLCopyAllDevices, MTLDevice, MTLGPUFamily};
 
 #[test]
 fn backend_name_is_metal() {
@@ -49,7 +49,12 @@ fn select_metal_device_on_real_hardware() {
     // `probe_all` は Apple ファミリ（`supportsFamily(Apple1)`）と確認できた
     // GPU にのみ `Some(32)` を報告し、Intel／AMD GPU 搭載 Mac では `None` を
     // 返す契約のため、Apple GPU 確認時のみ `Some(32)` を要求する（#2125）。
-    let is_apple_gpu = MTLCreateSystemDefaultDevice()
+    // `select(Device::Metal)` は `MTLCopyAllDevices()` の先頭を返すため、判定も
+    // 同じ列挙の先頭デバイスで行う（マルチ GPU Mac では
+    // `MTLCreateSystemDefaultDevice()` と別デバイスになりうる）。
+    let is_apple_gpu = MTLCopyAllDevices()
+        .to_vec()
+        .first()
         .is_some_and(|device| device.supportsFamily(MTLGPUFamily::Apple1));
     if is_apple_gpu {
         assert_eq!(info.warp_width, Some(32));
