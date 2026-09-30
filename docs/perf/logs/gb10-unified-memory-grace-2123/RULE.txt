@@ -1,0 +1,35 @@
+RULE fixed-at-utc: 2026-09-30 (GB10 実機計測より前にコミットして固定。事後に緩和・変更しない)
+issue: #2123 GB10 unified memory・Grace CPU の最適化考察（親 #2121）
+doc: docs/gb10-unified-memory-grace-cpu-consideration.md
+
+[R-SVE2-detect]
+- 入力: `EXPECT_GRACE_SVE2=1 cargo test -p fandhe-ai-backend-cpu --release --test grace_sve2_probe_report -- --ignored --nocapture` の
+  grace_sve2_probe 行（cpuinfo_sve2 / auxv_hwcap2_sve2 / std_detect_sve2）
+- 3 経路がすべて true なら「SVE2 は cpuinfo・getauxval 系（AT_HWCAP2 bit1）・std_detect の 3 経路で検出可能と確定」
+- いずれかが false／na で食い違う場合は「判定不能」とし、検出可能とは記録しない（格上げしない）
+
+[R-SVE2-kernel]
+- 入力: 同出力の sve_default_vl_bytes
+- 16（128 bit。NEON と同じ幅）: SVE2 GEMM マイクロカーネルは Non-Goal（幅の利得なし・DRAM 帯域律速・比較対象に優位済み）
+- 32 以上: 別イシュー候補（`asm!` の unsafe 個別承認が前提。本 PR では実装しない）
+- na: 判定不能
+
+[R-UM-train]
+- 入力: `scripts/bench/framework-compare/run_ab_managed_cuda.sh` の train reuse セル（HEAD の facade を AB_PATCH_FACADE_PATH で参照）
+- 5 回中央値の on/off <= 1.00 かつ checksum 完全一致 かつ gemm・train fresh に後退なし、の 3 条件すべてを満たせば
+  「既定化の再評価候補」（既定化そのものは別イシュー・ユーザー承認）
+- それ以外は「REJECT 維持」。既定値（managed OFF）は本イシューでは変更しない
+
+[R-UM-bw]
+- `managed_placement_bandwidth_real_device` の readback／upload／download を 5 回中央値で記録するのみ。既定化判定には使わない
+
+[R-UM-prefetch]
+- 入力: unified_memory_probe の属性値
+- CONCURRENT_MANAGED_ACCESS=0: prefetch は事前拒否（CUDA_ERROR_NOT_PERMITTED が sticky poison 扱いになるため）
+- CONCURRENT_MANAGED_ACCESS=1: prefetch 契約案（doc §3）を別イシューで評価可能。mem_advise は unsafe のため本イシューでは採用しない
+- PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES=1: pageable 直接アクセスは別候補（tensor-core ストレージ抽象変更と新規 unsafe を伴うため承認事項）
+- 本イシューでは prefetch／advise を実装しない
+
+[共通]
+- 未計測の値は推定で埋めず「未計測」と記録する。開発機（非 GB10）の出力は GB10 の代替にしない
+- tolerance・baseline・ガードレール閾値は変更しない

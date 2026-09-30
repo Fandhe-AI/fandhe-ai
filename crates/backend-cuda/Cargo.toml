@@ -49,6 +49,13 @@ test = true
 required-features = ["internal-diagnostics"]
 
 [[example]]
+# イシュー #2123: unified memory 属性プローブ。`device.context().attribute(..)`
+# を使うため `device_attributes_dump`（上記）と同じ理由で
+# `internal-diagnostics` feature を要求する（依存の追加・変更ではない）。
+name = "unified_memory_probe"
+required-features = ["internal-diagnostics"]
+
+[[example]]
 # PR #692 Bugbot 指摘（Medium, test-coverage）対応: `cuda_floor_bench` は
 # `#[cfg(test)] mod tests` に `reference_only_sizes_are_disjoint_from_judged_sizes`
 # （REFERENCE_ONLY_SIZES と JUDGED_SIZES の非重複を検査する不変条件テスト。

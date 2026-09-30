@@ -221,7 +221,7 @@ train reuse の後退のみを根拠にしており影響を受けない）。�
 
 ## フォローアップ・出典
 
-- 性能比較（5 回中央値）・既定化可否判断は #1353。
+- 性能比較（5 回中央値）・既定化可否判断は #1353。unified memory の再考察（D2H 省略・prefetch 契約・REJECT 実因）は `docs/gb10-unified-memory-grace-cpu-consideration.md`（#2123）。
 - fresh モード managed 化・NT 転置分岐 managed 化・managed 対応プール・
   pinned host memory は必要になった時点で別イシューとして起票する
   （`.claude/rules/out-of-scope-tracking.md`）。
