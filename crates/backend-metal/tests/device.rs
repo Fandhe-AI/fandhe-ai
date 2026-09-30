@@ -48,10 +48,18 @@ fn select_metal_device_on_real_hardware() {
     assert_eq!(info.warp_width, Some(32));
 }
 
-/// Apple GPU の simdgroup 幅は 32（#2125）。
+/// Apple GPU の simdgroup 幅は 32（#2125）。`probe_all` は Apple ファミリ
+/// （`supportsFamily(Apple1)`）と確認できない GPU（Intel/AMD 搭載 Mac 等）では
+/// `None`（不明）を報告する契約のため、全列挙デバイスに `Some(32)` は要求せず
+/// `Some(32)` または `None` のみを許容する。Apple Silicon 実機での `Some(32)`
+/// は `select_metal_device_on_real_hardware`（`#[ignore]`）で検証する。
 #[test]
-fn enumerated_devices_report_warp_width_32() {
+fn enumerated_devices_report_warp_width_32_or_unknown() {
     for info in MetalDeviceProvider::new().enumerate().expect("enumerate") {
-        assert_eq!(info.warp_width, Some(32));
+        assert!(
+            matches!(info.warp_width, Some(32) | None),
+            "warp_width must be Some(32) or None, got {:?}",
+            info.warp_width
+        );
     }
 }
