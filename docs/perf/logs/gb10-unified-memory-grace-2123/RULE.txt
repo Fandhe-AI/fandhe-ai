@@ -1,0 +1,57 @@
+RULE fixed-at-utc: 2026-09-30 (GB10 実機計測より前にコミットして固定。事後に緩和・変更しない)
+issue: #2123 GB10 unified memory・Grace CPU の最適化考察（親 #2121）
+doc: docs/gb10-unified-memory-grace-cpu-consideration.md
+
+[R-SVE2-detect]
+- 入力: `EXPECT_GRACE_SVE2=1 cargo test -p fandhe-ai-backend-cpu --release --test grace_sve2_probe_report -- --ignored --nocapture` の
+  grace_sve2_probe 行（cpuinfo_sve2 / auxv_hwcap2_sve2 / std_detect_sve2）
+- 3 経路がすべて true なら「SVE2 は cpuinfo・getauxval 系（AT_HWCAP2 bit1）・std_detect の 3 経路で検出可能と確定」
+- いずれかが false／na で食い違う場合は「判定不能」とし、検出可能とは記録しない（格上げしない）
+- 検出の成否は上記 3 経路のみで決める。sve_default_vl_bytes（既定 VL）は判定に使わない参考値であり、欠測（na）でも検出成否は変えず、
+  別項目「既定 VL 欠測」として記録する
+
+[R-SVE2-kernel]
+- 入力: 同出力の sve_default_vl_bytes（参考値）と sve_running_vl_bytes（判定に使う値）
+- sve_default_vector_length は「新規プロセスの既定値」であり、実行中スレッドの実 VL（prctl PR_SVE_SET_VL／cgroup・コンテナ
+  設定等で変わりうる）と一致する保証がない。よって判定には使わない（記録のみ）
+- 判定に使うのは、カーネル候補コードが実際に走る同一プロセス・同一スレッドで取得した実行時 VL（sve_running_vl_bytes。
+  PR_SVE_GET_VL または rdvl 相当）のみ。取得手段は新規 unsafe／libc 利用を伴うため別イシュー・ユーザー承認事項であり、
+  本 PR の probe は実行時 VL を取得しない
+- sve_running_vl_bytes が 16（128 bit。NEON と同じ幅）: SVE2 GEMM マイクロカーネルは Non-Goal（幅の利得なし・DRAM 帯域律速・比較対象に優位済み）
+- sve_running_vl_bytes が 32 以上: 別イシュー候補（`asm!` の unsafe 個別承認が前提。本 PR では実装しない）
+- na（未取得。本 PR の probe が出力する状態を含む）: 判定不能。sve_default_vl_bytes のみで Non-Goal・別イシュー候補のいずれも確定しない
+- sve_default_vl_bytes と sve_running_vl_bytes が食い違う場合は running を採用し、食い違いを記録する
+
+[R-UM-train]
+- 入力: `scripts/bench/framework-compare/run_ab_managed_cuda.sh` の train reuse セル（HEAD の facade を AB_PATCH_FACADE_PATH で参照）
+- 条件 1: train cuda 64 reuse の on/off（managed ON / OFF）比が 5 回中央値で <= 1.00
+- 条件 2: 判定に用いる各セル（train reuse と条件 3 の 4 セル）の checksum が on/off で完全一致。いずれかのセルで
+  checksum が欠測（記録なし・取得失敗）の場合は「判定不能」とし REJECT 維持側へ倒す
+- 条件 3（後退なし）: 対象セルは「gemm cuda N in {1024, 2048, 4096} x mode=fresh」の 3 セルと「train cuda 64 x mode=fresh」の
+  1 セル（計 4 セル。gemm reuse・infer は対象外）。各セルで run_ab_managed_cuda.sh の 5 run（off -> on 連続起動）の
+  on/off 比を run ごとに求めず、off・on それぞれの 5 回中央値を取って比（on 中央値 / off 中央値）とする。
+  後退境界は「4 セルすべてで比 <= 1.00」（許容幅なし。1 セルでも 1.00 を超えれば後退あり）。境界を緩める変更・セルの追加削除は
+  事後に行わない。5 run 未満のセル（FAILED 記録あり）は後退なしと見なさず「判定不能」として REJECT 維持側へ倒す
+- 条件 4（readback 帯域。#1353 §8 の ADOPT 候補条件「帯域テストで readback が明確に低下していない」を継承）:
+  R-UM-bw で記録する readback の managed／device-only 5 回中央値比が、是正後実装（HEAD）の計測で、R-UM-bw が出力する
+  全サイズ（4・16・32・33・64 MiB）のすべてで 1.00 以上（サイズ別に判定し、集約は全サイズ AND。平均・最良サイズでの代替はしない）
+  （低下なし）であること。「明確に」の数値境界は事前に固定できないため、既存記録より緩めず fail-closed に 1.00 未満を
+  すべて低下ありとして扱う。いずれかのサイズで readback が欠測・5 回未満の場合は「判定不能」とし REJECT 維持側へ倒す
+- 4 条件すべてを満たせば「既定化の再評価候補」（既定化そのものは別イシュー・ユーザー承認）
+- それ以外は「REJECT 維持」。既定値（managed OFF）は本イシューでは変更しない
+
+[R-UM-bw]
+- `managed_placement_bandwidth_real_device` の readback／upload／download を 5 回中央値で記録する
+- readback は R-UM-train の条件 4 として既定化の再評価候補の判定に使う（既存 #1353 §8 の判定契約を緩めない）。
+  upload／download は記録のみ（判定に使わない。#1353 §8 に判定条件として含まれないため）
+
+[R-UM-prefetch]
+- 入力: unified_memory_probe の属性値
+- CONCURRENT_MANAGED_ACCESS=0: prefetch は事前拒否（CUDA_ERROR_NOT_PERMITTED が sticky poison 扱いになるため）
+- CONCURRENT_MANAGED_ACCESS=1: prefetch 契約案（doc §3）を別イシューで評価可能。mem_advise は unsafe のため本イシューでは採用しない
+- PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES=1: pageable 直接アクセスは別候補（tensor-core ストレージ抽象変更と新規 unsafe を伴うため承認事項）
+- 本イシューでは prefetch／advise を実装しない
+
+[共通]
+- 未計測の値は推定で埋めず「未計測」と記録する。開発機（非 GB10）の出力は GB10 の代替にしない
+- tolerance・baseline・ガードレール閾値は変更しない
