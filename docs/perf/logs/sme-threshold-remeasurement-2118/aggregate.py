@@ -92,10 +92,16 @@ def classify_cell(is_reached, ratios):
     }
 
 
-def candidate_verdict(r4_ok, cells):
-    """RULE.txt §6。cells は {"reached", "adopt", "reject", "status", "exact", "reason"} の dict 列。
+REFERENCE_ADOPT = "ADOPT 候補相当（参考・record_only）"
+
+
+def candidate_verdict(r4_ok, cells, official=True):
+    """RULE.txt §6・§11。cells は {"reached", "adopt", "reject", "status", "exact", "reason"} の dict 列。
 
     FAIL（R2: checksum 不一致。停止扱いで ADOPT にも REJECT にも数えない）> REJECT > ADOPT 候補 > undetermined。
+    official は M4 Max の負荷ゲート（R4 格子 5/5 通過 かつ R1 系列 5/5 通過）の結果。§11 により
+    通過しない系列は record_only であり、ADOPT 条件を満たしても "ADOPT 候補" は返さず参考判定
+    （REFERENCE_ADOPT）に落とす（推奨候補の選定対象外にする）。
     """
     for c in cells:
         if c["status"] == "ok" and not c["exact"]:
@@ -111,7 +117,7 @@ def candidate_verdict(r4_ok, cells):
         and all(c["adopt"] for c in cells if c["reached"])
         and not any(c["reject"] for c in cells if not c["reached"])
     ):
-        return "ADOPT 候補"
+        return "ADOPT 候補" if official else REFERENCE_ADOPT
     return "undetermined"
 
 
@@ -202,6 +208,22 @@ def load_gate_series(path):
     return official and len(gates) == 5 and all(g == "pass" for g in gates)
 
 
+def _gate_log_official(path, prefix):
+    """load-gate ログ（`<prefix>N gate=pass|...` 行）が 5/5 通過か。ログ不在は None。"""
+    if not os.path.exists(path):
+        return None
+    gs = re.findall(rf"^{prefix}\d+ gate=(\S+)", Path(path).read_text(encoding="utf-8"), re.M)
+    return len(gs) == 5 and all(g == "pass" for g in gs)
+
+
+def outer_gate_official(path):
+    """GB10 外側専有ゲート（RULE.txt §8）。`start attempt=N ... pass` 行があれば正式。fail(reference)・ログ不在は参考。"""
+    if not os.path.exists(path):
+        return None
+    text = Path(path).read_text(encoding="utf-8")
+    return bool(re.search(r"^start attempt=\d+ .* pass$", text, re.M))
+
+
 def _fmt_ratios(c):
     if not c.get("ratios"):
         return "-"
@@ -229,6 +251,7 @@ def render_m4max(base):
     out = ["# SME_MIN_K 候補の M4 Max 再実測（イシュー #2118）\n"]
     m4 = Path(base) / "m4max"
     ok = None
+    r4_gate = None
     runs = []
     for i in range(1, 6):
         f = m4 / f"sme_r4_grid_run{i}.log"
@@ -249,13 +272,9 @@ def render_m4max(base):
         cand = _R4.candidates(ok)
         out.append("\n参考（パレート極小の採用候補）: " + (
             "、".join(f"`min(m,n) >= {a}` かつ `k >= {b}`" for a, b in cand) if cand else "なし"))
-        lg = m4 / "load_gate_r4.log"
-        if lg.exists():
-            gs = re.findall(r"^run\d+ gate=(\S+)", lg.read_text(encoding="utf-8"), re.M)
-            out.append("R4 負荷ゲート: " + ("5/5 通過（正式）" if len(gs) == 5 and all(g == "pass" for g in gs)
-                                          else "不通過を含む（record_only）"))
-        else:
-            out.append("R4 負荷ゲート: ログなし（record_only 扱い）")
+        r4_gate = _gate_log_official(str(m4 / "load_gate_r4.log"), "run")
+        out.append("R4 負荷ゲート: " + {True: "5/5 通過（正式）", False: "不通過を含む（record_only）",
+                                       None: "ログなし（record_only 扱い）"}[r4_gate])
     else:
         out.append("## R4 格子\n\n未実測（`sme_r4_grid_run{1..5}.log` が揃っていない）。")
     out.append("\n## 候補別判定\n")
@@ -270,10 +289,14 @@ def render_m4max(base):
             continue
         cells = apply_k(evaluate_series(str(d), label), k)
         r4c, pts = (False, []) if ok is None else r4_holds(ok, k)
-        v = candidate_verdict(r4c, cells)
-        verdicts[k] = v
         gate = load_gate_series(str(d / f"load-gate-1978-cpu-{label}.log"))
-        series = {True: "正式（load ゲート 5/5 通過）", False: "record_only（参考）", None: "ゲートログなし（record_only 扱い）"}[gate]
+        # RULE.txt §11: R4・R1 の両負荷ゲートを通過した系列だけを正式とする
+        official = bool(r4_gate) and gate is True
+        v = candidate_verdict(r4c, cells, official)
+        verdicts[k] = v
+        series = {True: "正式（R1 load ゲート 5/5 通過）", False: "record_only（参考）", None: "ゲートログなし（record_only 扱い）"}[gate]
+        if gate is True and not r4_gate:
+            series = "record_only（R4 負荷ゲート不通過・未確認）"
         summary.append(f"| {k} | {'成立' if r4c else '不成立/未計測'} | {'成立' if ac1_ok(cells) else '不成立'} | {v} | {series} |")
         detail.append(f"### K={k}\n\n格子点: {pts}\n\n{render_cells(cells)}\n")
     out += summary + [""] + detail
@@ -293,13 +316,13 @@ def _parse_rt(path):
 
 def render_gb10(base):
     out = ["\n# GB10 非後退再確認（候補ごと。語彙は RULE-gb10.txt を継承）\n"]
-    rows = ["| K | R0 | RT | 5/5<=1.00 セル数（参考） | 総合判定 |", "|---:|---|---|---:|---|"]
+    rows = ["| K | R0 | RT | 5/5<=1.00 セル数（参考） | 総合判定 | 系列 |", "|---:|---|---|---:|---|---|"]
     detail = []
     for k in KS_CANDIDATE:
         label = f"2118-gb10-k{k}"
         d = Path(base) / "gb10" / f"k{k}"
         if not (d / "r1r2").exists():
-            rows.append(f"| {k} | - | - | - | 未確定（実測未実施） |")
+            rows.append(f"| {k} | - | - | - | 未確定（実測未実施） | - |")
             continue
         rep = (d / "sme_report.txt").read_text(encoding="utf-8") if (d / "sme_report.txt").exists() else ""
         r0 = rep.count("kernel_enabled: false") >= 2
@@ -309,8 +332,14 @@ def render_gb10(base):
         for c in cells:
             c["reached"] = False
         v = gb10_verdict(r0, rt, cells)
+        # RULE.txt §8: 外側専有ゲート不通過（またはログなし）の系列は「参考」と明記する
+        gate = outer_gate_official(str(d / "load_gate_outer.log"))
+        if gate is not True:
+            v += "（参考）"
+        series = {True: "正式（外側専有ゲート通過）", False: "参考（外側専有ゲート不通過）",
+                  None: "参考（外側ゲートログなし）"}[gate]
         n = sum(1 for c in cells if c.get("all_le_1"))
-        rows.append(f"| {k} | {'成立' if r0 else '不成立'} | {rt} | {n} | {v} |")
+        rows.append(f"| {k} | {'成立' if r0 else '不成立'} | {rt} | {n} | {v} | {series} |")
         detail.append(f"### K={k}\n\n{render_cells(cells)}\n")
     return "\n".join(out + rows + [""] + detail)
 
@@ -379,6 +408,9 @@ def self_test():
         _write_series(os.path.join(td, "a"), "L", rb)
         cells = apply_k(evaluate_series(os.path.join(td, "a"), "L"), 128)
         assert candidate_verdict(True, cells) == "ADOPT 候補", candidate_verdict(True, cells)
+        # §11: 負荷ゲート不通過（record_only）系列は ADOPT 条件を満たしても "ADOPT 候補" にしない
+        assert candidate_verdict(True, cells, official=False) == REFERENCE_ADOPT
+        assert candidate_verdict(True, cells, official=False) != "ADOPT 候補"
         assert ac1_ok(cells)
         # 同じデータを K=64 で見ると train reuse（到達）が ADOPT 候補条件不成立 → undetermined（(b)）
         cells64 = apply_k(evaluate_series(os.path.join(td, "a"), "L"), 64)
@@ -432,6 +464,14 @@ def self_test():
         Path(p).write_text("threshold=8.0 rule_threshold=8.0 series=official\nround1 gate=timeout\n")
         assert load_gate_series(p) is False
         assert load_gate_series(os.path.join(td, "none.log")) is None
+        # 外側専有ゲート（GB10）の解釈
+        Path(p).write_text("start attempt=1 load1=0.1 gpu_util=0 wait\nstart attempt=2 load1=0.1 gpu_util=0 pass\n")
+        assert outer_gate_official(p) is True
+        Path(p).write_text("start attempt=20 load1=3 gpu_util=NA fail(reference)\n")
+        assert outer_gate_official(p) is False
+        assert outer_gate_official(os.path.join(td, "none.log")) is None
+        Path(p).write_text("run1 gate=pass\n" * 4 + "run5 gate=timeout\n")
+        assert _gate_log_official(p, "run") is False
         # 未実測ディレクトリの描画が例外なく「未実測」を出す
         txt = render_m4max(td) + render_gb10(td)
         assert "未実測" in txt and "未確定（実測未実施）" in txt

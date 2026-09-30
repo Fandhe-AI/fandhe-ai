@@ -35,7 +35,7 @@ if [ "${DRY}" = "1" ]; then
   echo "[dry-run] 1. 外側専有ゲート（load1<1.0 かつ gpu_util==0・最大 20 回・30 秒間隔）を記録"
   echo "[dry-run] 2. git archive HEAD -> <work>/{before,after}・パッチ適用・指紋差分 1 件と定数行を assert"
   echo "[dry-run] 3. R0: 両腕で sme_report() が kernel_enabled: false（1587/gb10/sme-probe-* を再利用）"
-  echo "[dry-run] 4. RT: after 腕で cargo test -p fandhe-ai-backend-cpu --release。FAIL は ${KNOWN_FAIL} の 1 件のみ許容"
+  echo "[dry-run] 4. RT: after 腕で cargo test -p fandhe-ai-backend-cpu --release。FAIL は ${KNOWN_FAIL} の 1 件のみ許容（終了コード・結果行を検証し fail-closed）"
   echo "[dry-run] 5. R1/R2: run_ab_sme_cpu.sh ${LABEL}（AB_DEVICE=cpu）"
   echo "[dry-run] 6. マスクして ${OUT}/ へ収録・env_info.txt"
   exit 0
@@ -89,14 +89,32 @@ if ! grep -q 'kernel_enabled: false' "${LOGD}/sme_probe_after.log" \
 fi
 
 # RT: after 腕の既存テスト（非 #[ignore]）。既知 FAIL 1 件のみ許容（RULE.txt §9）
-(cd "${WORK}/after" && CARGO_TARGET_DIR="${WORK}/target-after" cargo test -p fandhe-ai-backend-cpu --release) >"${WORK}/cargo_test_after.log" 2>&1
-echo "RT rc=$?" >"${LOGD}/rt_result.txt"
+# --no-fail-fast: 既知 FAIL のあるテストバイナリで打ち切られず全バイナリの結果行を得る。
+(cd "${WORK}/after" && CARGO_TARGET_DIR="${WORK}/target-after" cargo test -p fandhe-ai-backend-cpu --release --no-fail-fast) >"${WORK}/cargo_test_after.log" 2>&1
+TEST_RC=$?
+echo "RT rc=${TEST_RC}" >"${LOGD}/rt_result.txt"
 grep -E '^test result|FAILED|panicked' "${WORK}/cargo_test_after.log" | sme2118_mask "${WORK}" >"${LOGD}/cargo_test_after.summary.log"
 FAILS=$(grep -E '^test .* \.\.\. FAILED$' "${WORK}/cargo_test_after.log" | sed -e 's/^test //' -e 's/ \.\.\. FAILED$//' | sort -u)
-if [ -z "${FAILS}" ] || [ "${FAILS}" = "${KNOWN_FAIL}" ]; then
+RESULT_LINES=$(grep -cE '^test result: ' "${WORK}/cargo_test_after.log")
+ABNORMAL=$(grep -cE "could not compile|process didn't exit successfully|error: test failed|error: could not" "${WORK}/cargo_test_after.log")
+# fail-closed（RULE.txt §8〜§9）: 終了コードと結果行の存在を検証する。FAIL 行の有無だけで pass にしない。
+#  - rc=0: FAIL 行なし・結果行 1 件以上のときのみ pass
+#  - rc!=0: rc=101（テスト失敗）かつ FAIL が既知 1 件のみ・結果行 1 件以上・異常終了行なしのときのみ pass（既知 FAIL 許容）
+#  それ以外（起動・コンパイル失敗、途中終了、結果行なし、想定外 FAIL）は regression-suspect
+RT_REASON=""
+if [ "${RESULT_LINES}" -lt 1 ]; then
+  RT_REASON="test result 行なし（起動失敗・途中終了の疑い）"
+elif [ "${TEST_RC}" -eq 0 ]; then
+  [ -z "${FAILS}" ] || RT_REASON="rc=0 だが FAIL 行あり"
+elif [ "${TEST_RC}" -ne 101 ] || [ "${ABNORMAL}" -gt 0 ]; then
+  RT_REASON="rc=${TEST_RC}・異常終了行=${ABNORMAL}（テスト失敗以外の終了）"
+elif [ "${FAILS}" != "${KNOWN_FAIL}" ]; then
+  RT_REASON="既知 FAIL 以外あり、または FAIL 名を抽出できない"
+fi
+if [ -z "${RT_REASON}" ]; then
   echo "rt_verdict=pass known_fail_only=$([ -n "${FAILS}" ] && echo yes || echo none)" >>"${LOGD}/rt_result.txt"
 else
-  echo "rt_verdict=regression-suspect（既知 FAIL 以外あり）" >>"${LOGD}/rt_result.txt"
+  echo "rt_verdict=regression-suspect（${RT_REASON}）" >>"${LOGD}/rt_result.txt"
   printf '%s\n' "${FAILS}" >>"${LOGD}/rt_result.txt"
 fi
 cat "${LOGD}/rt_result.txt"
