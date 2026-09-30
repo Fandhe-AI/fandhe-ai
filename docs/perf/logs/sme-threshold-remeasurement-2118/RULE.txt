@@ -1,0 +1,83 @@
+# 事前登録判定規則（イシュー #2118: SME_MIN_K 候補 64／128／256 の M4 Max 再実測 + GB10 非後退再確認）
+# 登録日時: 2026-09-30T11:30Z 頃（UTC。正確な時刻は git の事前登録コミット時刻を正とする）。
+# 事前登録コミット sha: 本ファイル単独の 1 コミット目。sha は後続コミットでこのヘッダ末尾へ追記する（本文は変更しない）。
+# 登録時点の main HEAD（before 腕の基準）: 0b25525fa4026b951021a5d0da3a9d613b507502
+# 実測開始前に本ファイルをコミットし、結果が出た後に緩和しない。訂正は末尾への追記方式に限る。
+
+## 0. 親規則との関係
+- 親規則（docs/perf/logs/cpu-gemm-sme-fmopa-1587/RULE.txt・同 gb10/RULE-gb10.txt）は変更しない。本ファイルはそれを緩めず、SME_MIN_K 候補ごとの適用範囲と語彙だけを新規に事前登録する。
+- 本イシューは SME_PRODUCTION_ENABLED・SME_MIN_M/N/K を main で変更しない。候補値は計測専用ツリーへ当てるパッチでのみ使う。採否と定数切替・本番化は #2119 のユーザー承認事項であり、本イシューでは実施しない。
+- tolerance・baseline・ガードレール閾値・docs/spec は変更しない。
+
+## 1. 腕
+- before = 登録時点の main HEAD（sha を記録）。
+- after(K) = 同一コミットに on-arm-k{K}.patch を当てた計測専用ツリー（main へはコミットしない）。K ∈ {64, 128, 256}。
+  - on-arm-k64.patch: SME_PRODUCTION_ENABLED を false→true にするだけ（1587/on-arm.patch と同じ意味を現 HEAD で作り直したもの）。
+  - on-arm-k128.patch／on-arm-k256.patch: 上記に加え SME_MIN_K を 64→128／256 に変える。
+- 両ツリーの指紋差分が crates/backend-cpu/src/gemm_blis/mod.rs の 1 ファイルのみであり、定数 2 行がパッチどおりであることを assert する。失敗したらその場で停止する。
+
+## 2. 候補別の到達セル表（数値を見る前に固定。PR #2016 の教訓: K によって分類が変わる）
+形状の根拠: bench-fandhe/src/main.rs の BATCH=64（141 行）・D_IN=784（142）・D_HIDDEN=256（143）・D_OUT=10（144）、build_model は Linear(784→256)→ReLU→Linear(256→10)（1031–1036 行）。infer は --infer-batch 未指定で既定 BATCH=64（infer_batch_from_args）。
+SME 到達条件は dispatch_two_d_dynamic の sme_shape_eligible(m_total, n, k)（m_total>=256 かつ n>=256 かつ k>=K）。層別 GEMM の分解:
+- L1 forward 64x256x784: m=64 <256 のため全候補で非到達。
+- L1 d_weight（TN）784x256x64: m=784・n=256・k=64。K=64 のみ到達。K=128／256 では k=64<K で非到達。
+- L2 の各 GEMM（256→10 側）: n=10 または m=64 のため全候補で非到達。
+- infer size=64: L1 forward 相当のみで全候補非到達。
+
+| セル | K=64 | K=128 | K=256 |
+|---|---|---|---|
+| gemm 512／1024／2048 x fresh／reuse（m=n=k>=512） | 到達 | 到達 | 到達 |
+| train size=64 fresh／reuse（L1 d_weight 784x256x64 が経路を分ける） | 到達 | 非到達 | 非到達 |
+| infer size=64 fresh／reuse | 非到達 | 非到達 | 非到達 |
+
+K=128／256 で train が非到達へ変わるのは規則上の帰結であり、事後の再分類ではない。その場合の train 64 の変動は「非到達セルのノイズ」として扱う。
+
+## 3. R4（1 系列。候補にかかわらず共通）
+- sme_vs_neon_ab_r4_grid（#[ignore]・aarch64。SME_MIN_* を参照しない診断経路）を 5 プロセス独立起動する。
+- 格子点ごとに ratio = SME/NEON の median_gflops 比が 5/5 run で >=1.0 のとき「SME>=NEON」とする。
+- 候補 K の R4 判定は、格子 {min(m,n) ∈ {256, 512}} x {k ∈ {32, 64, 128, 256}, k >= K} の全点が SME>=NEON のとき成立とする。
+- パレート極小の採用候補（既存 aggregate.py の candidates）も参考として併記する。
+
+## 4. R1（候補ごと）
+- scripts/bench/framework-compare/run_ab_sme_cpu.sh を LABEL 2118-m4max-k{K} で実行する（5 round・round 単位の起動順反転・--require-checksum-exact・内側 load ゲート 8.0）。
+- 到達セル: 5 round 中央値 ratio<=1.00 かつ 5/5 round が <=1.00 で ADOPT 候補。
+- 非到達セル: 5/5 round 一貫の後退（全 round >1.00）のみ REJECT 材料。中央値 >1.00 でも 5/5 一貫でなければ「後退の証拠なし（ノイズ帯）」として値を併記する。
+
+## 5. R2（checksum）
+- 全 10 セルで before／after の checksum が完全一致すること。1 件でも不一致なら FAIL（停止。ADOPT にも REJECT にも数えない）。
+- checksum は gemm／infer の全要素和・train の最終 loss を小数点以下 6 桁へ丸めた値であり、bit 同一の証拠ではない（1587/gb10/RULE-gb10.txt の追記を継承）。
+
+## 6. 候補別の総合判定
+- ADOPT 候補 = R4 成立 かつ 到達セルがすべて ADOPT 候補 かつ 非到達セルに REJECT 材料なし かつ R2 全一致。
+- REJECT = 到達セルに 5/5 一貫の後退が 1 つでもある。
+- それ以外は undetermined。
+- AC1 の直接判定欄「到達セル 5 round 中央値<=1.00 かつ 5/5 round<=1.00、かつ checksum 完全一致」は総合判定とは独立の欄として別途記録する。
+- 推奨候補は「ADOPT 候補になった最小の K」。ただし採否と定数切替は #2119 のユーザー承認事項であり、本イシューでは実施しない。いずれの結果でも SME_PRODUCTION_ENABLED は切り替えない。
+
+## 7. K=64 の扱い（重複実験の禁止との整理）
+K=64 は現行定数のベースラインであり、イシュー本文の候補リストと #1979 の再開条件 1 が名指しで求める再実測である。過去の undetermined（#1978・train 64/reuse の round 1・5 が 1.00 超）と同一 HEAD・同一手順の重複ではなく、候補間比較の対照として必須のため、禁止対象の「既存 REJECT／undetermined と重複する実験」には当たらない。
+
+## 8. GB10（候補ごと。LABEL 2118-gb10-k{K}。順序 k64 → k128 → k256）
+- 手順は 1587/gb10/RULE-gb10.txt の R0・RT・R1-GB10・R2-GB10 と同じ。R0: 両腕で sme_report() が kernel_enabled: false（true なら計測中止・記録のみ）。10 セルはすべて SME 非到達セル。
+- 判定語彙は RULE-gb10.txt をそのまま使う:
+  - pass = R0 成立・RT 全 pass（§9 の既知 FAIL を除く）・5/5 一貫の後退セルなし・checksum 全一致。
+  - 後退あり = 5/5 一貫の後退セルがある、または checksum 不一致。
+  - undetermined = 上記いずれにも当てはまらない（R0 不成立・計測失敗・round 欠損等）。
+- 「全セル 5/5 <=1.00」という読み方は採らない（1587 §5.5 の 512/fresh round 3 = 2.007 のように before 側の外れ値で成立不能になるため）。5/5 <=1.00 のセル数は参考として記録するだけとする。この解釈の選択をここに固定する。
+- 専有ゲート（外側・記録）: load1 < 1.0 かつ nvidia-smi utilization.gpu 0% を最大 20 回・30 秒間隔で待つ。不通過なら実行はするが「参考」と明記する。内側ゲートは run_ab_sme_cpu.sh 固定の 8.0。
+
+## 9. RT の既知 FAIL（1587 §5.5 で規則の不備として指摘された点の是正。事前登録）
+- after 腕では gemm_blis::tests::sme_production_enabled_is_false_pending_measurement が構造上 FAIL する（定数ドリフトガードのため）。これを想定内の 1 件として登録し、FAIL 名がこれと一致することを照合する。
+- それ以外の FAIL が 1 件でもあれば「後退あり相当（要調査）」とする。是正はしない。
+- sme_shape_eligible_boundary_values は定数を記号参照しているため全候補で pass する想定（SME 関連テストに K の値のハードコードがないことは grep で確認済み）。
+
+## 10. 実行順序と差し替え禁止
+- M4 Max: R4 → R1 k64 → k128 → k256。GB10: k64 → k128 → k256。
+- run の差し替え・追加起動はしない。再実行は別 LABEL で行い、旧系列も残す。既存 LABEL・既存ログがあれば停止する。
+
+## 11. 負荷ゲート
+- M4 Max: 各 run／round の前に load1 < 8.0 を最大 30 分待つ（1587/RULE.txt を継承）。5/5 通過した系列だけを正式とし、不通過を含む系列は record_only（参考扱い）とする。専有ゲートを通らない系列は record_only。
+- GB10: §8 の外側ゲートを記録する。
+
+## 12. マスク
+ホスト名は masked、$HOME は <home> に置き換え、ユーザー名と絶対パスは除去する。bench バイナリ・dump 本体はコミットしない。
