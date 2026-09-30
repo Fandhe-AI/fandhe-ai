@@ -774,12 +774,14 @@ where
         ReadbackDest::Fresh => {
             let host = stream.clone_dtoh(dev)?;
             stream.synchronize()?;
+            crate::gemm::diag_count_stream_sync();
             Ok(host)
         }
         ReadbackDest::PretouchedFresh => {
             let mut host = pretouched_host_vec::<T>(dev.len());
             stream.memcpy_dtoh(dev, &mut host)?;
             stream.synchronize()?;
+            crate::gemm::diag_count_stream_sync();
             Ok(host)
         }
     }

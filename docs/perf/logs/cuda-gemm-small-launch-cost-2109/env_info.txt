@@ -1,0 +1,10 @@
+# イシュー #2109 計測環境の記入欄（GB10 実測時に記入。ホスト名は masked、$HOME は <home>）
+host: masked
+gpu / driver / CUDA:
+kernel / OS:
+rustc:
+fandhe-ai pin（framework-compare）: =0.9.0
+HEAD sha（Layer B）:
+candle: =0.11.0
+専有ゲート結果: load_gate.log を参照
+計測開始時刻（UTC）:

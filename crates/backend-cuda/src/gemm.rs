@@ -228,6 +228,175 @@ thread_local! {
     pub(crate) static TF32X3_OPTIN_GEMM_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
+// ---------------------------------------------------------------------
+// イシュー #2109: N=256 GEMM 起動固定費の診断カウンタ
+// ---------------------------------------------------------------------
+//
+// 役割: `run_f32_kernel`（`run_tiled_f32`・`ops.rs::gemm_fp32_strict` の
+// NN 経路が到達する本番 1 反復）が 1 回の GEMM で踏む driver 境界の
+// 回数（capture 排他スコープ・H2D・プール確保・カーネル起動・D2H・
+// stream 同期）を数える。`gemm_small_launch_cost_diag_tests`（`lib.rs` の
+// `#[cfg(test)]` 兄弟モジュール）と `diagnostics::gemm_launch_counters_*`
+// （`internal-diagnostics` feature 限定）から読まれる。
+//
+// cfg 規約（#2299 の 2 層方針）: 実体は `any(test, internal-diagnostics)`
+// 限定。それ以外のビルドでは増分ヘルパーが空の `#[inline(always)]` 関数
+// となり、既定ビルドの生成コードに何も残らない（呼び出し側に cfg を
+// 散らさないための設計）。
+//
+// 観測できない範囲: cudarc 内部の `cuEventCreate`／`cuEventDestroy`・
+// `cuMemAllocAsync`／`cuMemFreeAsync`・`cuCtxGetCurrent` は本カウンタの
+// 対象外（`docs/perf/cuda-gemm-small-launch-cost.md` の理論数表と
+// nsys の任意計測で補う）。readback の宛先確保方式の帰属検証は #2107 の
+// 担当であり、本カウンタは D2H を 1 区間として数えるだけである。
+
+/// 診断カウンタのスナップショット（[`gemm_launch_diag_snapshot`]）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GemmLaunchDiagCounters {
+    /// `CudaGemm::with_driver_call` に入った回数。
+    pub driver_call_scopes: u64,
+    /// `upload_h2d_new` の成功回数。
+    pub h2d_calls: u64,
+    /// H2D の総バイト数。
+    pub h2d_bytes: u64,
+    /// プールからの出力バッファ確保回数。
+    pub pool_allocs: u64,
+    /// カーネル起動（`launch`）の成功回数。
+    pub kernel_launches: u64,
+    /// `memory::readback`（D2H）の成功回数。
+    pub d2h_calls: u64,
+    /// D2H の総バイト数。
+    pub d2h_bytes: u64,
+    /// `readback_with` 内で実行された `synchronize` の成功回数（同期箇所で計上）。
+    pub stream_syncs: u64,
+}
+
+// 差分計算は診断テスト専用（`internal-diagnostics` 単独ビルドでは
+// crate 外の入口が生値を返すだけで使わない）ため `cfg(test)` に限る。
+#[cfg(test)]
+impl GemmLaunchDiagCounters {
+    /// `self - earlier`（各フィールド `saturating_sub`）。
+    pub(crate) fn since(self, earlier: Self) -> Self {
+        Self {
+            driver_call_scopes: self
+                .driver_call_scopes
+                .saturating_sub(earlier.driver_call_scopes),
+            h2d_calls: self.h2d_calls.saturating_sub(earlier.h2d_calls),
+            h2d_bytes: self.h2d_bytes.saturating_sub(earlier.h2d_bytes),
+            pool_allocs: self.pool_allocs.saturating_sub(earlier.pool_allocs),
+            kernel_launches: self.kernel_launches.saturating_sub(earlier.kernel_launches),
+            d2h_calls: self.d2h_calls.saturating_sub(earlier.d2h_calls),
+            d2h_bytes: self.d2h_bytes.saturating_sub(earlier.d2h_bytes),
+            stream_syncs: self.stream_syncs.saturating_sub(earlier.stream_syncs),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+thread_local! {
+    /// 呼び出しスレッド上の診断カウンタ。スレッドローカルにする理由は
+    /// 既存の `*_LAUNCH_COUNT` と同じ（`cargo test` の並列実行で他テストの
+    /// 起動が混入しないようにするため）。
+    static GEMM_LAUNCH_DIAG: Cell<GemmLaunchDiagCounters> =
+        const { Cell::new(GemmLaunchDiagCounters {
+            driver_call_scopes: 0,
+            h2d_calls: 0,
+            h2d_bytes: 0,
+            pool_allocs: 0,
+            kernel_launches: 0,
+            d2h_calls: 0,
+            d2h_bytes: 0,
+            stream_syncs: 0,
+        }) };
+}
+
+/// 現スレッドの診断カウンタを読む。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub(crate) fn gemm_launch_diag_snapshot() -> GemmLaunchDiagCounters {
+    GEMM_LAUNCH_DIAG.with(|c| c.get())
+}
+
+/// 現スレッドの診断カウンタを 0 へ戻す。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub(crate) fn gemm_launch_diag_reset() {
+    GEMM_LAUNCH_DIAG.with(|c| c.set(GemmLaunchDiagCounters::default()));
+}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+fn gemm_launch_diag_update(f: impl FnOnce(&mut GemmLaunchDiagCounters)) {
+    GEMM_LAUNCH_DIAG.with(|c| {
+        let mut v = c.get();
+        f(&mut v);
+        c.set(v);
+    });
+}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+fn diag_count_driver_scope() {
+    gemm_launch_diag_update(|c| c.driver_call_scopes += 1);
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+fn diag_count_driver_scope() {}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+fn diag_count_h2d(bytes: usize) {
+    gemm_launch_diag_update(|c| {
+        c.h2d_calls += 1;
+        c.h2d_bytes += bytes as u64;
+    });
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+fn diag_count_h2d(_bytes: usize) {}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+fn diag_count_pool_alloc() {
+    gemm_launch_diag_update(|c| c.pool_allocs += 1);
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+fn diag_count_pool_alloc() {}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+fn diag_count_kernel_launch() {
+    gemm_launch_diag_update(|c| c.kernel_launches += 1);
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+fn diag_count_kernel_launch() {}
+
+/// D2H（`memory::readback` の成功）だけを数える。同期回数は
+/// [`diag_count_stream_sync`] が同期の実行箇所（`memory.rs::readback_with`）で
+/// 別途数えるため、ここでは `stream_syncs` を触らない（固定 +1 の推定を排除）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+fn diag_count_readback(bytes: usize) {
+    gemm_launch_diag_update(|c| {
+        c.d2h_calls += 1;
+        c.d2h_bytes += bytes as u64;
+    });
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+fn diag_count_readback(_bytes: usize) {}
+
+/// `CudaStream::synchronize` の成功を実行箇所で数える（`memory.rs::readback_with`
+/// の各同期直後から呼ぶ）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+pub(crate) fn diag_count_stream_sync() {
+    gemm_launch_diag_update(|c| c.stream_syncs += 1);
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+pub(crate) fn diag_count_stream_sync() {}
+
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
 ///
 /// `stream` は [`CudaDevice`] から `Arc` クローンで受け取る（`device.rs` の
@@ -4839,6 +5008,8 @@ impl CudaGemm {
         &self,
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, CudaError> {
+        // #2109: capture 排他スコープへ入った回数（既定ビルドでは空関数）。
+        diag_count_driver_scope();
         context_cache::with_driver_call(self.ordinal, f)
     }
 
@@ -4906,7 +5077,9 @@ impl CudaGemm {
         // 排他区間の内側に収まる）。
         self.with_driver_call(|| {
             let a_dev = self.upload_h2d_new(a)?;
+            diag_count_h2d(std::mem::size_of_val(a));
             let b_dev = self.upload_h2d_new(b)?;
+            diag_count_h2d(std::mem::size_of_val(b));
             // イシュー #1020: 出力バッファはサイズクラス別プール
             // （`crate::pool::CudaAllocator`）経由で確保する（都度
             // `alloc_zeros`／解放していた固定費の削減。#1008 実測が主因の
@@ -4919,6 +5092,7 @@ impl CudaGemm {
             let mut c_dev = self
                 .allocator
                 .alloc_uninit_f32((m as usize) * (n as usize))?;
+            diag_count_pool_alloc();
 
             let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
@@ -4944,10 +5118,12 @@ impl CudaGemm {
                     .arg(&k_i)
                     .launch(cfg)?;
             }
+            diag_count_kernel_launch();
             // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
             // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
             // ため、論理長ビュー（`as_view()`）を渡す。
             let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
+            diag_count_readback(std::mem::size_of_val(c_host.as_slice()));
             Ok(c_host)
         })
     }

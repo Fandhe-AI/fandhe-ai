@@ -1,0 +1,174 @@
+イシュー #2109 事前登録判定規則（実測前に固定。結果を見てから緩和・変更しない）
+================================================================================
+
+固定日: 2026-09-30（本ファイルを含むコミット時点。GB10 実測はこの後に行う）
+対象: CUDA gemm N=256（スコアボード 2026-09-19 版のセル G-CUDA-G256。
+      fandhe-ai 2 位・対 candle 0.83×）の起動固定費（launch 回数・同期・
+      確保・解放・host dispatch）の内訳診断。修正実装は対象外（別 issue）。
+
+0. 数値の不一致の扱い
+  - Issue 本文の「0.72×」は G-CPU-G256 の値で転記違いの可能性がある
+    （docs/perf/loss-attribution-matrix.md §8）。本診断は G-CUDA-G256 =
+    0.83× を対象とする。Issue 本文は編集しない。
+
+1. 実行
+  - 1 run = 1 プロセス。run1〜run5 の 5 run とし、差し替え・追加起動・
+    上書きをしない。Layer B は 50 warmup + 200 計測。追加起動禁止の例外は、
+    1a に事前登録した補助診断プロセス（nsys）と 1b の別テスト（counts-exact）のみ。
+    どちらも「5 run」の一部ではなく、5 run の統計・判定の入力にしない。
+  - ログ完全性の契約（fail-closed）: aggregate.py は読み取る全レコード種別
+    （Layer A/HEAD/candle の JSONL の run 区切り・phase レコード、Layer B の
+    DIAG2109 区間・checksum_bits・counts〈行内の各項目を含む〉・verify〈出力一致〉・kernel 行、
+    load_gate.log のゲート行、`cargo test` の成功行）を共通の登録口
+    （register_once）で扱い、同じキーのレコードが 2 度現れたら値が同一でも
+    LogIntegrityError とする（上書き・最初の値の採用・黙殺をしない）。キー集合は
+    期待（run 1..5・サイズ 128/256/512・診断テストが emit する区間の完全集合・
+    counts の全項目・ゲートラベル 30 個）と過不足なく一致すること
+    （欠落・余剰・未知を拒否）。JSONL の各レコードは task/device/size/mode の
+    期待値と数値の median_s・checksum を持つこと。検出範囲はここに列挙した入力・
+    キーに限り、上記以外のフィールド（JSONL の追加キー等）の値や、ログ全体が
+    実際に当該実行から生成されたことの証明までは保証しない。
+  - 単位は µs。区間ごとに run 内の中央値を取り、5 run 間の中央値と
+    min・max を報告する。
+
+1a. 補助診断プロセス（nsys。事前登録。PR #2454 指摘 PRRT_kwDOTuUCJc6ne6gg）
+  - 目的: cudarc 内部の event・async alloc の件数の確認（6 の補助・定量化）。
+    nsys のオーバーヘッドが時間統計を汚染するため、5 run のいずれにも組み込まない。
+  - 条件: 環境変数 RUN_NSYS=1 かつ nsys が導入済みのときのみ起動する
+    （未指定・未導入・実行失敗のときは起動しない／再試行しない。欠測記録を残す）。
+  - 起動回数: ちょうど 1（nsys 経由の Layer B 診断テスト 1 プロセス）。
+  - 順序: Layer B の 5 run と counts-exact の後（計測系列の後段。専有ゲートは通さない）。
+  - 出力: nsys-cuda-api.log のみ。Layer B の統計（区間・checksum・件数）・判定
+    （gap・H1〜H6・ratio・支配項）・load_gate.log には一切使わない。
+  - aggregate.py の担保（fail-closed）: nsys-cuda-api.log は 5 run とは別入力として
+    register_once／require_exact_keys の登録口で形式のみ検査し（既知の欠測記録 1 行、
+    または nsys の統計出力を含み診断テストの成功行がちょうど 1 回のログ以外は拒否）、
+    値は読まない。5 run の Layer B ログ（layerB-run{1..5}.log）に nsys の出力痕跡が
+    あれば拒否し、Layer B ログが 5 本でなければ拒否する。保証範囲は形式と入力の分離に限り、
+    nsys が実際に 1 回だけ起動されたことの証明まではしない（起動回数は orchestrate.sh の
+    コード構造〈nsys profile の呼び出しが 1 箇所〉と本規則による）。
+
+1b. orchestrate.sh が起動する全計測プロセスの登録（実測前に固定）
+  | プロセス | 起動回数・順序 | 条件 | 出力 | 専有ゲート | 判定に使う |
+  |---|---|---|---|---|---|
+  | Layer A phases（registry =0.9.0） | 5・1 番目 | 常時 | layerA-phases-N256.log | あり | 参考（H5 の版差参考値・ratio 分母） |
+  | AC-2（registry・非 phases） | 5・2 番目 | 常時 | layerA-ac2-N256.log | あり | 参考（ratio 分母・checksum 突合） |
+  | HEAD path-patch phases | 5・3 番目 | 常時 | head-phases-N256.log | あり | 使う（H5） |
+  | HEAD path-patch AC-2 | 5・4 番目 | 常時 | head-ac2-N256.log | あり | 使う（gap・ratio 分子・checksum） |
+  | candle fresh | 5・5 番目 | 常時 | candle-fresh-N256.log | あり | 使う（gap の減数） |
+  | Layer B（診断テスト） | 5・6 番目（1 run = 1 プロセス） | 常時 | layerB-run{1..5}.log | あり | 使う（H1〜H4・6〜8） |
+  | counts-exact（別テスト） | 1・Layer B の後 | 常時 | counts-exact.log | なし（計測ではない件数断言） | hard 条件（3。成否のみ） |
+  | nsys 補助診断（1a） | 0 または 1・最後 | RUN_NSYS=1 | nsys-cuda-api.log | なし | 使わない（表示のみ） |
+  ゲート行は 6 系列 × 5 run = 30 個（9）。cargo build は計測プロセスではない。
+
+2. checksum（hard・fail-closed）
+  - Layer A の phases と非 phases（AC-2）の checksum が一致し、
+    237.546660（#1988 の値）と一致すること。
+  - Layer B の checksum_bits が 5 run で同一であること（サイズごと。各サイズに
+    ちょうど 1 行。重複は不一致でなくても fail-closed）。
+  - 1 つでも外れたら系列を無効とし、aggregate.py は exit != 0 で終わる。
+  - 出力一致（Layer B。PR #2454 指摘）: 所要時間を比較する全腕（L0・L1・L2・L2S・
+    D dev_trial・D b2b・E tiny・E h2d_prealloc・E h2d_clone・件数走行）の出力は、
+    計測窓の外で `run_tiled_f32` の参照出力（計測前に 1 回取得）または既知の期待値
+    （tiny は 1.0、h2d は入力そのもの）と bit 一致（`f32::to_bits`）を確認し、不一致・
+    非有限値・要素数違いは診断テストが panic する。統一複合判定の許容誤差は新設・
+    変更しない（比較する腕は同一カーネル選択・単一の連続 K ループのため bit 一致が
+    成立する構造。成立しなければ診断を無効とする）。aggregate.py は各サイズ・各腕の
+    `verify` 行（checks >= 1・mode=bit_exact）の存在を要求する。保証範囲は
+    「実行した反復の出力が参照と bit 一致した」ことに限り、参照自体が数学的に
+    正しいこと（CPU 参照との一致）や、sync_idle・event_create_drop の区間
+    （出力を持たない）は対象外。
+
+3. 件数（hard）
+  - `gemm_small_launch_counts_exact` が pass すること
+    （run_tiled_f32・gemm_fp32_strict とも driver_call_scopes=1,
+    h2d_calls=2, pool_allocs=1, kernel_launches=1, d2h_calls=1,
+    stream_syncs=1, h2d_bytes=2*N^2*4, d2h_bytes=N^2*4）。
+  - Layer B 出力の counts 行も同値であること（aggregate.py が検査。サイズごとに
+    ちょうど 1 行で、全項目が過不足なく期待と一致すること）。
+  - テスト自体の成功は counts-exact.log（`test ...gemm_small_launch_counts_exact
+    ... ok` と `test result: ok. 1 passed; 0 failed`）を aggregate.py が入力に
+    含めて検証する。ログ欠落・失敗・0 件実行は fail-closed（exit != 0）。
+
+4. 非後退 ratio（record_only）
+  - 本変更は既定ビルド（feature 無効・非 test）の生成コードを変えない
+    （計装は cfg(any(test, internal-diagnostics)) 限定・非該当ビルドでは
+    空の #[inline(always)] 関数）。コードの A/B 対は存在しないため
+    record_only とし、根拠は静的保証とする:
+    `cargo clippy -p fandhe-ai-backend-cuda --all-targets -- -D warnings`
+    （feature 無効）が警告 0 件であること。
+  - HEAD path-patch の Layer A（`[patch.crates-io.fandhe-ai]` を CLI `--config` で
+    与えた bench-fandhe。phases と非 phases の 5 run ずつ）を必須の計測系列に
+    昇格させる（レビュー指摘 PR #2454・P1。registry =0.9.0 と HEAD の版差を H5
+    に混ぜないため）。H5（facade・autodiff・tape）は HEAD path-patch の matmul −
+    L0 を正式な突合相手とし、registry =0.9.0 の matmul − L0 は版差を含む参考値
+    として記録するのみで帰属に使わない。
+  - ratio = HEAD path-patch reuse N=256 中央値 / registry 0.9.0 reuse N=256
+    中央値（同一セッション）を記録する。ratio <= 1.00 なら「非後退」、> 1.00 なら
+    「要調査（別 issue）」。採否ゲートではない。
+  - v0.9.0..HEAD の N=256 NN 経路の実行文の差分分類は docs/perf/
+    cuda-gemm-small-launch-cost.md §4。
+
+5. 差分（gap）の定義
+  - gap = HEAD path-patch の fandhe reuse（非 phases。AC-2 の N=256）の中央値
+    − candle fresh の中央値。同一セッションの N=256。H1〜H4（HEAD の Layer B）・
+    H5（HEAD path-patch）と同じ版で定義し、帰属（50% 判定）の分母にする。
+    registry =0.9.0 の reuse − candle は版差を含む参考値として併記するのみで、
+    帰属に使わない（レビュー指摘 PR #2454・P2）。
+
+6. 仮説と帰属（ある区間が gap の 50% 以上を説明すれば「支持」、どの区間も
+   届かなければ「未確定」。閾値は事後に変えない）
+  - H1 毎反復 H2D（入力が resident でない境界の非対称）: L2 h2d_a + h2d_b
+  - H2 launch と同期の往復: L2 launch_issue + (L2S kernel_wait − dev_kernel_b2b)。
+       floor（E tiny_roundtrip・sync_idle）と照合
+  - H3 D2H readback: L2S d2h（宛先方式の帰属は #2107 に委ね、本件ではしない）
+  - H4 host 側 dispatch: (L0 − L1) と (L1 − l2_sum)
+  - H5 facade・autodiff・tape: HEAD path-patch Layer A の matmul − L0。reuse が fresh より
+       遅い逆転の手がかりとして記録
+  - 注: L2（l2_sum を含む）は本番 run_f32_kernel と同じ同期 1 回（readback 内）
+    の経路で測る。kernel_wait と d2h の分離は追加同期を挟む非本番の補助系列
+    L2S でのみ行い、l2_sum・H4b には含めない。カーネル時間は D の device event
+    （dev_kernel_b2b）で別系列として測る（レビュー指摘 PR #2454・P1）。
+  - H6 checksum: 両者が払うハーネスのコスト。記録のみ（支持・未確定の判定対象外）
+  - 補助: teardown（L2）・cudarc 内部（event・async alloc）は
+    teardown と (E h2d_clone_drop − E h2d_prealloc)、nsys 補助診断（任意・1a。判定に不使用）で定量化
+
+7. launch overhead の定量化（受入基準 3）
+  - host→kernel 往復 = E tiny_roundtrip の中央値
+  - device 側 idle の推定 = D dev_kernel_seg − D dev_kernel_b2b
+    （dev_kernel_seg は event 間隔で host の投入待ちを含む。b2b は
+    連続キューイング差分からの純カーネル時間の推定であり厳密値ではない）
+  - host のみの時間 = L2 l2_sum − D dev_span（ 0 未満は 0 と記す）
+  - いずれも L0 に対する比率で報告する
+
+8. 支配項
+  - L2 の各区間（teardown を含む）と H4・H5 のうち、L0（または Layer A の
+    iter_total）に占める比率が最大のもの
+
+9. ゲート（専有）
+  - GB10 は各 run 開始前に load1 < 1.0 かつ nvidia-smi の GPU 利用率 0%
+    を確認する（30 秒間隔・最大 30 分待機。結果を load_gate.log に残す）。
+    1 run でも通らなければ系列を参考扱いにする。
+  - 開発機（RTX 3060 等）のスモークは記録対象外（コミットしない）。
+
+10. マスク規則
+  - 生ログ・env_info はホスト名を masked、$HOME を <home> に置換してから
+    収録する（orchestrate.sh が収録時に置換。aggregate.py が未マスクの
+    絶対パスを検出したら exit != 0）。
+  - この検査は集計が読む全入力に同じく適用する（必須ログに加え、任意・補助入力の
+    nsys-cuda-api.log・env_info.txt も存在すれば内容を検査する。「nsys 欠測」記録のみの
+    内容でも検査対象）。ただし検査するのは `/home/<name>` 形の絶対パスのみで、
+    ホスト名の残存までは検出しない。
+  - orchestrate.sh は LOG_DIR・FRAMEWORK_COMPARE_DIR を最初の cd より前に絶対パスへ
+    正規化する（相対指定でもログを 1 ディレクトリに集約するため）。
+
+11. 再実行しない既存実験（本件では A/B を再実行しない）
+  - H2D pinned staging（#1585・REJECT）／per-call alloc release threshold
+    ・同期割当（#1149・差し戻し確定）／都度同期の除去（#1011・#1013・
+    実装済み）／CUDA Graph step capture（#1350・中立・既定 OFF）／
+    Stream-K・persistent・TMA Stage 1（REJECT・調査済み）／N=1024〜4096 の
+    reuse フェーズ分解（#1182・#1973。N=256 のみ本件で新規計測）。
+
+12. 変更しないもの
+  - tolerance・baseline・Cargo.toml・Cargo.lock・ガードレール閾値・
+    docs/spec。
