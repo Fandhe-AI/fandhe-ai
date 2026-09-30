@@ -4,7 +4,7 @@
 # ../RULE.txt §8〜§9（事前登録。語彙は 1587/gb10/RULE-gb10.txt を継承）。
 # #1978 残の `cpu-gemm-sme-fmopa-1587/gb10/orchestrate_gb10.sh` と同じ
 # R0（sme_report プローブ）→ RT（after 腕の既存テスト）→ R1/R2
-# （run_ab_sme_cpu.sh）の手順を、K・パッチ・LABEL を引数化し、`git archive HEAD`
+# （run_ab_sme_cpu.sh）の手順を、K・パッチ・LABEL を引数化し、事前登録コミット（SME2118_REGISTERED_BASE）の `git archive`
 # 由来の一時ツリー（before／after(K)）で行う。main の SME 定数は変更しない。
 #
 # 使い方: orchestrate_gb10.sh [--dry-run] <64|128|256>
@@ -33,7 +33,7 @@ KNOWN_FAIL="gemm_blis::tests::sme_production_enabled_is_false_pending_measuremen
 if [ "${DRY}" = "1" ]; then
   echo "[dry-run] K=${K} LABEL=${LABEL} patch=${PATCH} out=${OUT}"
   echo "[dry-run] 1. 外側専有ゲート（load1<1.0 かつ gpu_util==0・最大 20 回・30 秒間隔）を記録"
-  echo "[dry-run] 2. git archive HEAD -> <work>/{before,after}・パッチ適用・指紋差分 1 件と定数行を assert"
+  echo "[dry-run] 2. git archive ${SME2118_REGISTERED_BASE} -> <work>/{before,after}・パッチ適用・指紋差分 1 件と定数行を assert"
   echo "[dry-run] 3. R0: 両腕で sme_report() が kernel_enabled: false（1587/gb10/sme-probe-* を再利用）"
   echo "[dry-run] 4. RT: after 腕で cargo test -p fandhe-ai-backend-cpu --release。FAIL は ${KNOWN_FAIL} の 1 件のみ許容（終了コード・結果行を検証し fail-closed）"
   echo "[dry-run] 5. R1/R2: run_ab_sme_cpu.sh ${LABEL}（AB_DEVICE=cpu）"
@@ -96,7 +96,9 @@ echo "RT rc=${TEST_RC}" >"${LOGD}/rt_result.txt"
 grep -E '^test result|FAILED|panicked' "${WORK}/cargo_test_after.log" | sme2118_mask "${WORK}" >"${LOGD}/cargo_test_after.summary.log"
 FAILS=$(grep -E '^test .* \.\.\. FAILED$' "${WORK}/cargo_test_after.log" | sed -e 's/^test //' -e 's/ \.\.\. FAILED$//' | sort -u)
 RESULT_LINES=$(grep -cE '^test result: ' "${WORK}/cargo_test_after.log")
-ABNORMAL=$(grep -cE "could not compile|process didn't exit successfully|error: test failed|error: could not" "${WORK}/cargo_test_after.log")
+# 異常終了行 = コンパイル失敗、または終了状態が 101 以外の `process didn't exit successfully`。
+# cargo の通常のテスト失敗フッタ（error: test failed・exit status: 101）は異常に数えない（lib_trees.sh）。
+ABNORMAL=$(sme2118_rt_abnormal_count "${WORK}/cargo_test_after.log")
 # fail-closed（RULE.txt §8〜§9）: 終了コードと結果行の存在を検証する。FAIL 行の有無だけで pass にしない。
 #  - rc=0: FAIL 行なし・結果行 1 件以上のときのみ pass
 #  - rc!=0: rc=101（テスト失敗）かつ FAIL が既知 1 件のみ・結果行 1 件以上・異常終了行なしのときのみ pass（既知 FAIL 許容）

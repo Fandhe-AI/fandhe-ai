@@ -82,3 +82,8 @@ K=64 は現行定数のベースラインであり、イシュー本文の候補
 
 ## 12. マスク
 ホスト名は masked、$HOME は <home> に置き換え、ユーザー名と絶対パスは除去する。bench バイナリ・dump 本体はコミットしない。
+
+## 13. 追記（実行側の fail-closed 化。判定規則・閾値は不変。PR #2465 レビュー指摘への対応）
+- before 腕の基準は実行時 HEAD ではなく、ヘッダ記載の登録 sha（lib_trees.sh の SME2118_REGISTERED_BASE）を git archive して固定する。当該 sha が無ければ停止する（HEAD へのフォールバックなし）。実行時の HEAD は current_head として記録のみ行う。
+- run_ab_sme_cpu.sh の終了コード（M4 Max: env_info.txt の run_ab_exit・GB10: rt_result.txt の run_ab rc）が 0 でない、または記録がない系列は、部分データから ADOPT／REJECT／pass を出さず undetermined（判定不能）とする。
+- GB10 の RT 異常終了行は、コンパイル失敗と終了状態が 101 以外の `process didn't exit successfully` に限る。cargo の通常のテスト失敗フッタ（error: test failed・exit status: 101）は異常終了に数えず、§9 の既知 FAIL 1 件のみなら pass とする。

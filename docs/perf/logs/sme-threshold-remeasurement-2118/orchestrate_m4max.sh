@@ -12,7 +12,7 @@
 #   orchestrate_m4max.sh [--dry-run] r1 <64|128|256>
 #   orchestrate_m4max.sh [--dry-run] all           # r4 → r1 64 → 128 → 256
 # 収録先: <このディレクトリ>/m4max/（生ログは差し替え禁止。既存があれば停止）。
-# 事前に `git archive HEAD` 由来の一時ツリーで release ビルドするため、計測中に
+# 事前に事前登録コミット（lib_trees.sh の SME2118_REGISTERED_BASE）を git archive した一時ツリーで release ビルドするため、計測中に
 # ビルドを並走させない。main の SME 定数は変更しない（本番切替は #2119）。
 # bash 3.2（macOS 標準）でも動く書き方に限る。
 set -u
@@ -59,7 +59,7 @@ wait_load_gate() {
 
 do_r4() {
   if [ "${DRY}" = "1" ]; then
-    echo "[dry-run] git archive HEAD -> <work>/before; (cd <work>/before && ${CMD}) x5 -> ${OUTD}/sme_r4_grid_run{1..5}.log (+ .raw.log)"
+    echo "[dry-run] git archive ${SME2118_REGISTERED_BASE} -> <work>/before; (cd <work>/before && ${CMD}) x5 -> ${OUTD}/sme_r4_grid_run{1..5}.log (+ .raw.log)"
     return 0
   fi
   local i f work rc grc status
@@ -69,10 +69,14 @@ do_r4() {
       if [ -e "${OUTD}/${f}" ]; then echo "${f} が既に存在する（差し替え禁止）" >&2; return 1; fi
     done
   done
+  sme2118_resolve_base "${REPO}" || return 1
   work=$(mktemp -d) || return 1
   mkdir -p "${work}/before" || return 1
-  git -C "${REPO}" archive HEAD | tar -x -C "${work}/before" || return 1
-  echo "head=$(git -C "${REPO}" rev-parse HEAD)" >"${OUTD}/r4_head.txt"
+  git -C "${REPO}" archive "${SME2118_REGISTERED_BASE}" | tar -x -C "${work}/before" || return 1
+  {
+    echo "head=${SME2118_REGISTERED_BASE}"
+    echo "current_head=$(git -C "${REPO}" rev-parse HEAD)"
+  } >"${OUTD}/r4_head.txt"
   (cd "${work}/before" && CARGO_TARGET_DIR="${work}/target" cargo test -p fandhe-ai-backend-cpu --release --lib --no-run) \
     || { echo "R4 ビルド失敗" >&2; return 1; }
   for i in 1 2 3 4 5; do
@@ -95,7 +99,7 @@ do_r4() {
 do_r1() {
   local k=$1 label="2118-m4max-k$1" patch="${HERE}/on-arm-k$1.patch" work bench
   if [ "${DRY}" = "1" ]; then
-    echo "[dry-run] K=${k}: git archive HEAD -> <work>/{before,after}; patch ${patch} を after のみへ適用し指紋差分 1 件・定数行を assert"
+    echo "[dry-run] K=${k}: git archive ${SME2118_REGISTERED_BASE} -> <work>/{before,after}; patch ${patch} を after のみへ適用し指紋差分 1 件・定数行を assert"
     echo "[dry-run]   AB_BEFORE_FACADE_PATH=<work>/before/crates/facade AB_AFTER_FACADE_PATH=<work>/after/crates/facade AB_DEVICE=cpu bash run_ab_sme_cpu.sh ${label}"
     echo "[dry-run]   -> mask して ${OUTD}/r1r2/k${k}/ へ収録・env_info.txt"
     return 0

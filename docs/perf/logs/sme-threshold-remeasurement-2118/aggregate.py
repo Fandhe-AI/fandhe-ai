@@ -95,14 +95,18 @@ def classify_cell(is_reached, ratios):
 REFERENCE_ADOPT = "ADOPT 候補相当（参考・record_only）"
 
 
-def candidate_verdict(r4_ok, cells, official=True):
+def candidate_verdict(r4_ok, cells, official=True, run_ok=True):
     """RULE.txt §6・§11。cells は {"reached", "adopt", "reject", "status", "exact", "reason"} の dict 列。
 
     FAIL（R2: checksum 不一致。停止扱いで ADOPT にも REJECT にも数えない）> REJECT > ADOPT 候補 > undetermined。
     official は M4 Max の負荷ゲート（R4 格子 5/5 通過 かつ R1 系列 5/5 通過）の結果。§11 により
     通過しない系列は record_only であり、ADOPT 条件を満たしても "ADOPT 候補" は返さず参考判定
     （REFERENCE_ADOPT）に落とす（推奨候補の選定対象外にする）。
+    run_ok は run_ab_sme_cpu.sh の終了コード 0 の確認結果。非ゼロ・記録なしは計測失敗であり、
+    部分的な JSONL から ADOPT／REJECT を出さず undetermined（判定不能）に倒す（fail-closed）。
     """
+    if not run_ok:
+        return "undetermined"
     for c in cells:
         if c["status"] == "ok" and not c["exact"]:
             return "FAIL"
@@ -134,12 +138,15 @@ def rt_verdict(fail_names):
     return "pass" if not others else "regression-suspect"
 
 
-def gb10_verdict(r0_ok, rt, cells):
+def gb10_verdict(r0_ok, rt, cells, run_ok=True):
     """RULE.txt §8〜§9（語彙は 1587/gb10/RULE-gb10.txt を継承）。
 
     5/5 一貫の後退セルまたは checksum 不一致 = 後退あり。RT の既知 FAIL 以外 = 後退あり相当（要調査）。
-    R0 不成立・計測失敗・round 欠損 = undetermined。それ以外 = pass。「全セル 5/5<=1.00」は採らない。
+    R0 不成立・計測失敗（run_ab_sme_cpu.sh の終了コード非ゼロ／記録なしを含む）・round 欠損 = undetermined。
+    それ以外 = pass。「全セル 5/5<=1.00」は採らない。
     """
+    if not run_ok:
+        return "undetermined"
     if any(c["status"] == "ok" and (c["reject"] or not c["exact"]) for c in cells):
         return "後退あり"
     if any(c["status"] != "ok" and "checksum" in (c.get("reason") or "") for c in cells):
@@ -292,11 +299,14 @@ def render_m4max(base):
         gate = load_gate_series(str(d / f"load-gate-1978-cpu-{label}.log"))
         # RULE.txt §11: R4・R1 の両負荷ゲートを通過した系列だけを正式とする
         official = bool(r4_gate) and gate is True
-        v = candidate_verdict(r4c, cells, official)
+        run_ok = run_ab_ok_m4max(str(d / "env_info.txt")) is True
+        v = candidate_verdict(r4c, cells, official, run_ok)
         verdicts[k] = v
         series = {True: "正式（R1 load ゲート 5/5 通過）", False: "record_only（参考）", None: "ゲートログなし（record_only 扱い）"}[gate]
         if gate is True and not r4_gate:
             series = "record_only（R4 負荷ゲート不通過・未確認）"
+        if not run_ok:
+            series += "／run_ab_sme_cpu.sh 非ゼロ終了または終了コード記録なし（判定不能）"
         summary.append(f"| {k} | {'成立' if r4c else '不成立/未計測'} | {'成立' if ac1_ok(cells) else '不成立'} | {v} | {series} |")
         detail.append(f"### K={k}\n\n格子点: {pts}\n\n{render_cells(cells)}\n")
     out += summary + [""] + detail
@@ -304,6 +314,22 @@ def render_m4max(base):
     out.append("推奨候補（ADOPT 候補になった最小の K）: " + (str(adopts[0]) if adopts else "なし（または未実測）"))
     out.append("採否と定数切替は #2119 のユーザー承認事項。本集計は SME_PRODUCTION_ENABLED を切り替えない。")
     return "\n".join(out)
+
+
+def run_ab_ok_m4max(env_info_path):
+    """M4 Max: env_info.txt の `run_ab_exit=N` が 0 か。ファイル・記録なしは None（判定不能扱い）。"""
+    if not os.path.exists(env_info_path):
+        return None
+    m = re.search(r"run_ab_exit=(\d+)", Path(env_info_path).read_text(encoding="utf-8"))
+    return None if m is None else int(m.group(1)) == 0
+
+
+def run_ab_ok_gb10(rt_result_path):
+    """GB10: rt_result.txt の `run_ab rc=N` が 0 か。ファイル・記録なしは None（判定不能扱い）。"""
+    if not os.path.exists(rt_result_path):
+        return None
+    m = re.search(r"^run_ab rc=(\d+)", Path(rt_result_path).read_text(encoding="utf-8"), re.M)
+    return None if m is None else int(m.group(1)) == 0
 
 
 def _parse_rt(path):
@@ -331,7 +357,8 @@ def render_gb10(base):
         cells = apply_k(evaluate_series(str(d / "r1r2"), label), 0)  # SME 非到達のため全セル非到達扱い
         for c in cells:
             c["reached"] = False
-        v = gb10_verdict(r0, rt, cells)
+        run_ok = run_ab_ok_gb10(str(d / "rt_result.txt")) is True
+        v = gb10_verdict(r0, rt, cells, run_ok)
         # RULE.txt §8: 外側専有ゲート不通過（またはログなし）の系列は「参考」と明記する
         gate = outer_gate_official(str(d / "load_gate_outer.log"))
         if gate is not True:
@@ -339,6 +366,8 @@ def render_gb10(base):
         series = {True: "正式（外側専有ゲート通過）", False: "参考（外側専有ゲート不通過）",
                   None: "参考（外側ゲートログなし）"}[gate]
         n = sum(1 for c in cells if c.get("all_le_1"))
+        if not run_ok:
+            series += "／run_ab_sme_cpu.sh 非ゼロ終了または終了コード記録なし"
         rows.append(f"| {k} | {'成立' if r0 else '不成立'} | {rt} | {n} | {v} | {series} |")
         detail.append(f"### K={k}\n\n{render_cells(cells)}\n")
     return "\n".join(out + rows + [""] + detail)
@@ -418,6 +447,22 @@ def self_test():
         assert not ac1_ok(cells64)
         # R4 不成立なら ADOPT にならない
         assert candidate_verdict(False, cells) == "undetermined"
+        # run_ab_sme_cpu.sh の実行失敗は ADOPT／参考 ADOPT にも FAIL／REJECT にもせず判定不能
+        assert candidate_verdict(True, cells, run_ok=False) == "undetermined"
+        assert candidate_verdict(True, cells, official=False, run_ok=False) == "undetermined"
+        assert gb10_verdict(True, "pass", cells, run_ok=False) == "undetermined"
+        _p = os.path.join(td, "env_ok.txt")
+        Path(_p).write_text("label=x run_ab_exit=0\n")
+        assert run_ab_ok_m4max(_p) is True
+        Path(_p).write_text("label=x run_ab_exit=1\n")
+        assert run_ab_ok_m4max(_p) is False
+        Path(_p).write_text("label=x\n")
+        assert run_ab_ok_m4max(_p) is None
+        assert run_ab_ok_m4max(os.path.join(td, "nonexistent")) is None
+        Path(_p).write_text("RT rc=101\nrun_ab rc=0\n")
+        assert run_ab_ok_gb10(_p) is True
+        Path(_p).write_text("RT rc=101\nrun_ab rc=2\n")
+        assert run_ab_ok_gb10(_p) is False
         # (c) 非到達セル（infer）が 5/5 >1.00 → 総合は ADOPT にならない
         rc = _uniform()
         rc[("infer", 64, "fresh")] = [1.01] * 5

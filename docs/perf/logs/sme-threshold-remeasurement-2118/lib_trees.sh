@@ -5,7 +5,7 @@
 # 動くよう連想配列・mapfile は使わない）。判定規則は同ディレクトリの
 # RULE.txt（事前登録）が正で、本ファイルは規則の実行側のみを担う。
 #
-# 役割: `git archive HEAD` を一時ディレクトリへ展開して before ツリーと
+# 役割: 事前登録コミット（SME2118_REGISTERED_BASE）を `git archive` で一時ディレクトリへ展開して before ツリーと
 # after(K) ツリーを作り、on-arm-k{K}.patch を after にだけ適用したうえで
 # 「差分が gemm_blis/mod.rs の 1 ファイルのみ」「定数 2 行がパッチどおり」
 # を fail-closed で assert する（RULE.txt §1。run_ab_sme_cpu.sh は after の
@@ -13,6 +13,29 @@
 # 呼び出し元は本ファイルを source する 2 本の orchestrate_*.sh のみ。
 
 SME2118_MOD_REL="crates/backend-cpu/src/gemm_blis/mod.rs"
+
+# 事前登録 before コミット（RULE.txt ヘッダ「登録時点の main HEAD」。before 腕の基準）。
+# 実行時の HEAD ではなく本 sha を固定で使い、main の前進や作業ブランチの差異で
+# before/after の基準が事後にドリフトしないようにする（RULE.txt §1・§10）。
+SME2118_REGISTERED_BASE="0b25525fa4026b951021a5d0da3a9d613b507502"
+
+# sme2118_resolve_base <repo_root>: 登録 sha がリポジトリに存在するか検証する（fail-closed）。
+# 存在しなければ（浅い clone 等）計測せず停止する。HEAD へのフォールバックはしない。
+sme2118_resolve_base() {
+  local repo=$1
+  git -C "$repo" cat-file -e "${SME2118_REGISTERED_BASE}^{commit}" 2>/dev/null \
+    || { echo "error: 事前登録 before コミット ${SME2118_REGISTERED_BASE} がリポジトリに無い（git fetch で取得。HEAD へのフォールバックはしない）" >&2; return 1; }
+}
+
+# sme2118_rt_abnormal_count <cargo_test_log>: cargo test のログから「テスト失敗以外の異常終了」行数を返す。
+# cargo はテスト失敗時にも `error: test failed` と `process didn't exit successfully ... (exit status: 101)`
+# を出すため、これらは異常扱いにしない（既知 FAIL のみでも rt_verdict が regression-suspect になるのを防ぐ）。
+# 異常とするのは、コンパイル失敗（could not compile）と、終了状態が 101 以外（シグナル・abort 等）の
+# `process didn't exit successfully` 行。
+sme2118_rt_abnormal_count() {
+  grep -E "could not compile|error: could not|process didn't exit successfully" "$1" \
+    | grep -cvE '\((exit status|exit code): 101\)'
+}
 
 # K の allowlist（A03 インジェクション対策。パッチ名・LABEL へ埋め込むため）
 sme2118_validate_k() {
@@ -52,12 +75,13 @@ sme2118_prepare_trees() {
   sme2118_validate_k "$k" || return 1
   [ -f "$patch" ] || { echo "error: パッチが無い: $patch" >&2; return 1; }
   mkdir -p "$work/before" "$work/after" "$out" || return 1
-  local head
-  head=$(git -C "$repo" rev-parse HEAD) || return 1
-  git -C "$repo" archive HEAD | tar -x -C "$work/before" || return 1
-  git -C "$repo" archive HEAD | tar -x -C "$work/after" || return 1
+  sme2118_resolve_base "$repo" || return 1
+  local head=$SME2118_REGISTERED_BASE
+  git -C "$repo" archive "$head" | tar -x -C "$work/before" || return 1
+  git -C "$repo" archive "$head" | tar -x -C "$work/after" || return 1
   {
     echo "head=${head}"
+    echo "current_head=$(git -C "$repo" rev-parse HEAD)"
     sme2118_sha256 "$patch" | awk '{print "patch_sha256=" $1}'
   } >"$out/patch_sha256.txt"
   (cd "$work/after" && patch -p1 --forward <"$patch") >"$out/patch_apply.log" 2>&1 \
