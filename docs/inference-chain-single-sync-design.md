@@ -127,7 +127,7 @@ plan 構築不能（`Sigmoid`／`Tanh` 混在・leaves 件数不一致）、ま�
 ## 5. スコープ外
 
 - `forward_resident`（学習 forward）のデバイス常駐化・backward への拡張
-- `Sigmoid`／`Tanh` のデバイス常駐対応（`Activation` 拡張）・多層融合カーネル・CUDA Graph によるチェーン全体 capture
+- `Sigmoid`／`Tanh` のデバイス常駐対応（`Activation` 拡張）・多層融合カーネル・CUDA Graph によるチェーン全体 capture（**#2115 で opt-in・既定 OFF として実装**。§11 参照）
 - `Sequential::predict`（CPU 固定経路）の変更
 - MSE backward の encode-only 化（#1582）
 - crates.io 公開・framework-compare 承認ピン更新
@@ -171,3 +171,17 @@ plan 構築不能（`Sigmoid`／`Tanh` 混在・leaves 件数不一致）、ま�
 - **`docs/perf/metal-infer-chain-single-sync.md`**: 実装記録表（#1688 への帰属）・事前登録規則の転記・M4 Max 実機記入欄
 
 M4 Max 実機での実測自体は本エージェント実行環境に Apple Silicon 実機への到達手段がないため未実施のまま記入欄を残し、Mac セッションへ引き継ぐ。
+
+## 11. 実装記録（#2115・CUDA Graph によるチェーン全体 capture）
+
+推論 forward チェーンの層カーネル列を CUDA Graph へ stream capture し、2 回目以降を graph launch
+1 回で再生する opt-in 経路（環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`・既定 OFF）を追加した。
+学習 step の update 区間 capture（#1349）とは別機構。詳細・判定規則・実測記入欄は
+`docs/perf/infer-chain-graphcapture-cuda-ab.md`（verdict は GB10 未実測のため `undetermined`）。
+
+- **決定 3（同期点は入力 1・出力 1）は維持**: capture 経路は `upload_into` 1 回＋graph launch 1 回＋`download` 1 回。
+  中間バッファは thread-local のキャッシュエントリが所有して再利用し、層ごとの `alloc_zeroed`／`Drop` がなくなる
+- **決定 5（CUDA は `failure_token` を使わない）は維持**: `BackendOps::linear_chain_forward_captured` は token を受け取らない
+- **決定 7（`Unsupported` は tape 経路への全体フォールバック）との整合**: capture の不適用は `Ok(None)` で表し、
+  既存の非 capture チェーンへ進む（`Unsupported` にすると非 capture チェーンを飛び越えて遅い経路へ落ちるため）
+- 関連: `crates/backend-cuda/src/graph.rs`・`ops.rs::linear_chain_forward_captured`・`crates/autodiff/src/optim/device_store.rs::predict_device_chain`

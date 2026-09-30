@@ -117,6 +117,10 @@ _LARGE_SIZES_BY_DEVICE = {
 # しても train の形状定義は `bench-fandhe` 側の定数に従うため、device
 # 別の分岐は設けない）。
 _VALID_SIZES_TRAIN = frozenset({64})
+# イシュー #2115: `--task infer --sizes infer-batches`。`bench-fandhe --task
+# infer --infer-batch {64,1024,4096}`（allowlist）が emit する 3 形状の
+# セル集合。既定の infer（64 のみ）は変えない（#1689 の呼び出し不変）。
+_VALID_SIZES_INFER_BATCHES = frozenset({64, 1024, 4096})
 DEFAULT_TASK = "gemm"
 _VALID_TASKS = frozenset({"gemm", "train", "infer"})
 
@@ -132,6 +136,10 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
     の `BATCH` 定数＝64 は train/infer で共通）を返す（train/infer
     タスクに "gate" の概念は存在しない）。
     """
+    if sizes_arg == "infer-batches":
+        if task != "infer":
+            raise ValueError("--sizes infer-batches は --task infer 専用（イシュー #2115）")
+        return _VALID_SIZES_INFER_BATCHES
     if task in ("train", "infer"):
         return _VALID_SIZES_TRAIN
     if sizes_arg == "gate":
@@ -740,13 +748,15 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate", "large"),
+        choices=("full", "gate", "large", "infer-batches"),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "
             "_VALID_SIZES_BY_DEVICE）または 'gate'（run_gemm_gate.sh 由来入力用。"
             "metal は 512 を除いた 1024/2048/4096 のみに絞り込む。イシュー #1337）"
             "または 'large'（全 device で 1024/2048/4096。イシュー #2102）"
+            "または 'infer-batches'（--task infer 専用。batch 64/1024/4096 の "
+            "3 形状。イシュー #2115）"
         ),
     )
     parser.add_argument(
@@ -829,7 +839,11 @@ def main(argv):
             file=sys.stderr,
         )
         return 2
-    size_set = _size_set_for(args.device, args.sizes, task=args.task)
+    try:
+        size_set = _size_set_for(args.device, args.sizes, task=args.task)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
 
     before_rows, before_warnings = load_rows(
         args.before, args.device, size_set=size_set, modes=modes, task=args.task
