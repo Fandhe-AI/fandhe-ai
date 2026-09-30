@@ -13,3 +13,7 @@
 
 Metal の parity 確認（`cargo test -p fandhe-ai-backend-metal -- --ignored` の reduce 系）も同セッションで実施する。
 内部ホスト名・絶対パス・ユーザー名は `<home>` 等にマスクしてから置く。
+
+## 集計・A/B（#2102）
+
+Phase 0 の生ログの集計は `../../elemental-reduction-ab-2102/aggregate_sweep.py` で行う（判定規則は `../../elemental-reduction-ab-2102/RULE.txt`）。

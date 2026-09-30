@@ -1,0 +1,57 @@
+事前登録判定規則（イシュー #2102・縮約しきい値化の両機体 A/B と結線判断。実測より前に固定する）
+=====================================================================================
+
+前提: 本規則の固定時点で両機体（M4 Max・GB10）の実測はない。以下は実測結果を見る前に確定する。
+      elemental-reduction-threshold-2101/RULE.txt（Phase 0 規則）は変更も緩和もしない。
+対象: crates/backend-cpu/src/reduction.rs の 2 定数
+        REDUCTION_SEQUENTIAL_FALLBACK_ENABLED（既定 false）
+        REDUCTION_PARALLEL_MIN_ELEMS（既定 1 << 18）
+除外: mse_loss_backward（#1578 で REJECT 確定）・elementwise::PARALLEL_THRESHOLD・mse.rs／bce.rs
+      autodiff の grad.rs は rayon 非依存のため 0 行変更（docs/perf/cpu-reduction-sequential-threshold.md）
+
+Stage 0（しきい値候補 T の決定と利得判定）
+  - 計測・集計は 2101 の RULE.txt をそのまま適用する（機体ごとに 5 プロセス独立・R_MAX=1.05・
+    T = 全 (機体, 演算) の違反点 v の最小値）。集計は aggregate_sweep.py で機械計算する。
+  - checksum は全セルで seq と par が完全一致すること。1 件でも不一致なら FAIL（性能判定の前に停止）。
+  - T <= 640 なら REJECT。Stage 1 へ進まない。
+  - 利得判定（2101 の RULE が #2102 へ委ねた部分）: 両機体それぞれで、T 未満のいずれかの (演算, n) セルに
+    ついて、5 プロセス中央値の r(n) = seq/par < 1.00 かつ 5/5 プロセスすべてで r(n) < 1.00 であること。
+    どちらかの機体で成立しなければ undetermined（結線しない）。
+
+Stage 1（framework-compare の A/B。CPU）
+  - before = main の crates/facade。
+  - after  = 同一コミットで reduction.rs の 2 定数だけを変えた計測専用 worktree
+             （ゲート = true、MIN_ELEMS = T）。after worktree は main へコミットしない。
+  - セル: gemm N in {1024, 2048, 4096} x {fresh, reuse}、train x {fresh, reuse}、infer x {fresh, reuse}（すべて cpu）。
+  - 5 round・各起動は独立プロセス・round ごとに before/after の起動順を反転する。
+  - 判定: 各セルの 5 round 中央値 ratio (after/before) <= 1.00 かつ checksum 完全一致
+          （compare_gemm_ab.py --require-checksum-exact）。
+  - 実行: scripts/bench/framework-compare/run_ab_reduction_threshold_cpu.sh <label>
+
+専有ゲート
+  - 各 round の開始前に load1 < 8.0 を最大 30 分待つ。load_gate.log の各 round 行に
+    gate=pass|timeout|unavailable と gate_ok=0|1 を併記する。
+  - 5/5 round が gate_ok=1 の系列だけを正式系列とし、それ以外は record_only（参考扱い・判定に使わない）。
+  - Stage 0 の 5 プロセスは load average の推移を env_info に記録する（record_only。2101 と同じ）。
+
+総合判定（3 値）
+  - ADOPT: 両機体で Stage 0 の利得が成立し、Stage 1 の全セルが非後退（ratio <= 1.00）かつ checksum 完全一致で、
+           両機体とも正式系列であること。
+  - REJECT: (a) Stage 0 で T <= 640、または (b) いずれかの機体で、あるセルが 5/5 round 一貫して後退
+           （全 round で ratio > 1.00）した場合。
+  - undetermined: 上記以外（専有ゲート不成立・ノイズで一部 round のみ ratio > 1.00 等）。
+           ノイズによる単発の後退を永続的な REJECT にしない。
+           checksum の不一致は機構の不具合として FAIL（ADOPT にも REJECT にも数えず停止）。
+
+禁止事項
+  - run の差し替え・追加起動・セル除外・事後の緩和・T の再選定による再判定は行わない。
+  - 同じ label の既存 JSONL があればスクリプトが停止する。再実行は別 label で行い、旧系列も残す。
+
+ADOPT 時の結線（後続 PR・実機セッション）
+  - reduction.rs の 2 定数を切り替える（ゲート = true、MIN_ELEMS = T）。前後比較（Stage 1 の compare 表）を収録する。
+  - 既存テスト sequential_fallback_gate_is_off_by_default は「ON で T 未満は逐次」を検査する形へ改める。
+  - tolerance・baseline・依存・ガードレール閾値・docs/spec は変更しない。
+
+REJECT 時: 施策リスト化は別 issue で扱う（本規則の対象外）。
+
+マスク: ホスト名・絶対パス・ユーザー名は <home> 等へ置き換えてから収録する。
