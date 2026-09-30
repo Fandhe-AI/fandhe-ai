@@ -10,8 +10,12 @@
   `bench-fandhe --task gemm --device cuda --mode reuse --phases` の JSONL を
   5 run 分連結したもの（`matmul` 区間の `median_s`・`checksum` を使う）。
 - `<dir>/env_info.txt`（任意）: `layerA_same_code: yes|no|unknown` 行（計測経路の同一性検査
-  `check_layer_a_path_identity.py` の結果）。
-- `<dir>/load_gate_status.txt`（任意）: `run<k> gate=pass|unpassed|record_only`。
+  `check_layer_a_path_identity.py` の結果）と `host_kind: gb10|x86` 行。
+- `<dir>/load_gate_status.txt`: `run<k> gate=pass|unpassed|record_only`。
+  GB10 の通過済み系列（host_kind=gb10 かつ run1..5 の全記録が `gate=pass`）以外
+  （ファイル欠落・run 記録の不足/重複・不明値・未通過・x86 smoke の record_only）は
+  通常の帰属判定を出さず「参考扱い」と明示する（fail-closed。RULE.txt の専有ゲート契約・
+  x86 smoke は GB10 実測の代替にしない）。
 
 完全性・checksum 検査は fail-closed（不一致・欠落は `IntegrityError` を
 送出し、集計値を一切出力せず exit 1）。`--self-test` は GPU なしで
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 import tempfile
@@ -118,6 +123,40 @@ def parse_layer_a(path: Path, n: int) -> dict:
     return {"median": med(matmul), "min": min(matmul), "max": max(matmul)}
 
 
+def series_reliability(base: Path, host_kind: str) -> str:
+    """GB10 通過済み系列でない理由を返す（空文字なら通過済み系列）。
+
+    欠落・不明値・run 記録不足・未通過・GB10 以外は全て非空（fail-closed）。
+    """
+    if host_kind != "gb10":
+        return (
+            f"host_kind={host_kind or '不明'}: GB10 実測ではない"
+            "（x86 smoke 等は GB10 実測の代替にしない）"
+        )
+    gate = base / "load_gate_status.txt"
+    if not gate.is_file():
+        return "load_gate_status.txt が欠落（専有ゲート状態を確認できない）"
+    seen: dict[int, list[str]] = {}
+    for raw in gate.read_text().splitlines():
+        parts = raw.split()
+        if not parts:
+            continue
+        m = re.fullmatch(r"run(\d+)", parts[0])
+        g = parts[1].removeprefix("gate=") if len(parts) == 2 and parts[1].startswith("gate=") else ""
+        if not m:
+            return f"load_gate_status.txt に不明な行: {raw!r}"
+        seen.setdefault(int(m.group(1)), []).append(g)
+    expected = set(range(1, RUNS + 1))
+    if set(seen) != expected or any(len(v) != 1 for v in seen.values()):
+        return f"load_gate_status.txt の run 記録が run1..run{RUNS} を 1 件ずつ満たさない"
+    bad = {k: v[0] for k, v in sorted(seen.items()) if v[0] != "pass"}
+    if bad:
+        return "専有ゲートが pass でない run あり: " + ", ".join(
+            f"run{k}={v or '不明'}" for k, v in bad.items()
+        )
+    return ""
+
+
 def verdict(residual: float, share: float | None) -> str:
     if residual <= 0:
         return "未説明分非再現（帰属は行わない）"
@@ -131,15 +170,17 @@ def verdict(residual: float, share: float | None) -> str:
 
 def analyze(base: Path) -> tuple[str, dict]:
     same_code = "unknown"
+    host_kind = ""
     env = base / "env_info.txt"
     if env.is_file():
         for ln in env.read_text().splitlines():
             if ln.startswith("layerA_same_code:"):
                 same_code = ln.split(":", 1)[1].strip()
-    gate_note = ""
-    gate = base / "load_gate_status.txt"
-    if gate.is_file() and "unpassed" in gate.read_text():
-        gate_note = "専有ゲート未通過の run あり（系列は参考扱い）"
+            elif ln.startswith("host_kind:"):
+                host_kind = ln.split(":", 1)[1].strip()
+    gate_note = series_reliability(base, host_kind)
+    if gate_note:
+        gate_note = f"GB10 の専有ゲート通過済み系列ではない（{gate_note}）。系列は参考扱い"
 
     out: list[str] = ["# #2107 集計結果（RULE.txt の規則。単位 μs・5 run 中央値）", ""]
     if same_code != "yes":
@@ -252,6 +293,8 @@ def _write_fixture(
     checksum_bits: str = "c09cf4e2a0000000",
     bad_bits_arm: str | None = None,
     drop_run: bool = False,
+    host_kind: str = "gb10",
+    gate: str = "pass",
 ) -> None:
     front_names = ["h2d_a", "h2d_b", "alloc_c", "launch_issue", "kernel_wait"]
     parts = {
@@ -307,7 +350,10 @@ def _write_fixture(
                 )
             )
         (base / f"layerA-phases-N{n}.log").write_text("\n".join(lines) + "\n")
-    (base / "env_info.txt").write_text("layerA_same_code: yes\n")
+    (base / "env_info.txt").write_text(f"layerA_same_code: yes\nhost_kind: {host_kind}\n")
+    (base / "load_gate_status.txt").write_text(
+        "".join(f"run{k} gate={gate}\n" for k in range(1, RUNS + 1))
+    )
 
 
 def self_test() -> int:
@@ -388,6 +434,53 @@ def self_test() -> int:
             "ゲート未通過なら全 N の判定が参考扱い",
         )
         expect("支持" in res[2048]["verdict"], "素の判定は括弧内に保持")
+
+        # 通過済み GB10 系列: 通常の判定（参考扱いにならない）。
+        base = Path(t) / "gbok"
+        _write_fixture(base, layer_a_us=1150.0)
+        _, res = analyze(base)
+        expect(not res[2048]["verdict"].startswith("参考扱い"), "GB10 全 pass は通常判定")
+
+        # load_gate_status.txt 欠落・run 不足・不明値・record_only・x86: 全て参考扱い。
+        def reference_case(name: str, mutate) -> None:
+            b = Path(t) / name
+            _write_fixture(b, layer_a_us=1150.0)
+            mutate(b)
+            text, r = analyze(b)
+            expect(
+                all(r[n]["verdict"].startswith("参考扱い") for n in SIZES),
+                f"{name}: 参考扱い",
+            )
+            expect("参考扱い" in text.split("## N=")[0], f"{name}: 冒頭に注意書き")
+
+        reference_case("gate_missing", lambda b: (b / "load_gate_status.txt").unlink())
+        reference_case(
+            "gate_short",
+            lambda b: (b / "load_gate_status.txt").write_text("run1 gate=pass\n"),
+        )
+        reference_case(
+            "gate_unknown",
+            lambda b: (b / "load_gate_status.txt").write_text(
+                "".join(f"run{k} gate={'weird' if k == 3 else 'pass'}\n" for k in range(1, 6))
+            ),
+        )
+        reference_case(
+            "gate_dup",
+            lambda b: (b / "load_gate_status.txt").write_text(
+                "".join(f"run{k} gate=pass\n" for k in (1, 1, 2, 3, 4))
+            ),
+        )
+        b = Path(t) / "x86"
+        _write_fixture(b, layer_a_us=1150.0, host_kind="x86", gate="record_only")
+        text, r = analyze(b)
+        expect(
+            all(r[n]["verdict"].startswith("参考扱い") for n in SIZES),
+            "x86 smoke は参考扱い",
+        )
+        reference_case(
+            "host_missing",
+            lambda b: (b / "env_info.txt").write_text("layerA_same_code: yes\n"),
+        )
 
         # 同一コード未確認: 判定は無効（参考扱い）。
         base = Path(t) / "unk"

@@ -39,6 +39,38 @@ ITEMS = [
     ("memory.rs", "fn", "pretouched_host_vec"),
     ("memory.rs", "fn", "readback"),
     ("memory.rs", "fn", "readback_with"),
+    # 既定の宛先確保方式を決める定数（値の差し替えで経路が変わる）。
+    ("memory.rs", "const", "READBACK_DEST"),
+]
+# tiled パイプラインのカーネルソース生成経路（64x64 と 128x64 の両方。gemm.rs の選択が
+# どちらも起動しうる）。`*_source` 系は `render_source` を呼ぶだけの薄いラッパーのため、
+# テンプレ断片・`#define` 群・ステージ数/タイル寸法定数・`render_source` 本体・
+# LazyLock 静的変数まで比較しないとカーネル編集を検出できない（PR #2452 Bugbot 指摘）。
+for _f, _p, _consts in (
+    (
+        "kernels_tiled_pipeline.rs",
+        "TP",
+        ["BM", "BN", "BK", "THREAD_M", "THREAD_N", "THREADS_X", "THREADS_Y", "BLOCK_THREADS",
+         "DEFAULT_STAGES", "MIN_STAGES", "MAX_STAGES", "A_PAD", "B_PAD", "A_CHUNKS", "B_CHUNKS",
+         "SMEM_BYTES_PER_STAGE"],
+    ),
+    (
+        "kernels_tiled_pipeline_128x64.rs",
+        "TP128",
+        ["BM", "BN", "BK", "THREAD_M", "THREAD_N", "THREADS_X", "THREADS_Y", "BLOCK_THREADS",
+         "DEFAULT_STAGES", "MIN_STAGES", "MAX_STAGES", "A_CHUNKS", "B_CHUNKS",
+         "A_CHUNKS_PER_ROW", "SMEM_BYTES_PER_STAGE"],
+    ),
+):
+    ITEMS += [(_f, "const", f"{_p}_{c}") for c in _consts]
+    ITEMS += [(_f, "const", "MAX_WAIT_GROUP_IMMEDIATE")]
+    ITEMS += [(_f, "const", f"{_p}_{c}") for c in
+              ("CP_ASYNC_HELPER", "NON_PERSISTENT_PREFIX", "TILE_CORE", "KERNEL_SUFFIX")]
+    ITEMS += [(_f, "fn", "render_defines"), (_f, "fn", "render_source")]
+ITEMS += [
+    ("kernels_tiled_pipeline.rs", "static", "TILED_PIPELINE_F32_SOURCE"),
+    ("kernels_tiled_pipeline_128x64.rs", "static", "TILED_PIPELINE_128X64_F32_SOURCE"),
+    ("kernels_tiled_pipeline_128x64.rs", "fn", "tiled_pipeline_128x64_f32_source"),
 ]
 GATE = '#[cfg(feature = "internal-diagnostics")]'
 
@@ -55,9 +87,17 @@ def extract(text: str, kind: str, name: str) -> str | None:
     if not m:
         return None
     start = m.start()
-    if kind == "const":
-        end = text.find('"#;', start)
-        return None if end < 0 else text[start : end + 3]
+    if kind in ("const", "static"):
+        # 生文字列 `r#"..."#;` は本文中の `;` を含むため終端を `"#;` で探す。
+        # それ以外（数値定数・`LazyLock` 静的変数）は最初の `;` まで。
+        eq = text.find("=", m.end())
+        if eq < 0:
+            return None
+        if text[eq + 1 :].lstrip().startswith('r#"'):
+            end = text.find('"#;', eq)
+            return None if end < 0 else text[start : end + 3]
+        end = text.find(";", eq)
+        return None if end < 0 else text[start : end + 1]
     depth, seen, i = 0, False, m.end()
     while i < len(text):
         c = text[i]
@@ -73,7 +113,7 @@ def extract(text: str, kind: str, name: str) -> str | None:
 
 
 def normalize(body: str, kind: str) -> str:
-    if kind == "const":
+    if kind == "const" and 'r#"' in body:
         return body  # カーネルソース本体はコメントも含め完全一致を要求する
     out: list[str] = []
     skipping, depth, seen = False, 0, False
