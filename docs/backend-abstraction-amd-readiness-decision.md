@@ -154,6 +154,7 @@ HIP では `hipCtx*`／`hipModule*` は legacy 扱いで、新規コードは `h
 1. `DeviceInfo::warp_width: Option<u32>` の追加と CUDA（`CU_DEVICE_ATTRIBUTE_WARP_SIZE`）・Metal（`threadExecutionWidth()` の再利用）実装
 2. rmsnorm／softmax／mse カーネルの `#define WARP_SIZE` レンダリング時注入化と、既存ビット一致テストの回帰確認
 3. cooperative 起動入口（`LaunchKind::Cooperative`）の `unsafe` 採用承認と、Stream-K fixup（#1357）との連携可否の評価
+   - 制約・HIPRTC/NVRTC 互換性表・SAFETY 根拠案は `docs/rocm-cooperative-hiprtc-unsafe-readiness-decision.md`（#2127）に整理済み
 
 ## 6b. 実装記録（#2125・起票案 1 の第 1 段）
 
