@@ -76,6 +76,15 @@ def _finite(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+def _check_range(path, i, key, rec):
+    """min_s・max_s の有限性と min <= q1 <= median <= q3 <= max の順序を検証する（fail-closed）。"""
+    vals = [rec.get(k) for k in ("min_s", "q1_s", "median_s", "q3_s", "max_s")]
+    if not all(_finite(v) for v in vals):
+        raise AggError(f"{path}:{i}: min_s/q1_s/median_s/q3_s/max_s のいずれかが有限でない {key}")
+    if any(a > b for a, b in zip(vals, vals[1:])):
+        raise AggError(f"{path}:{i}: min<=q1<=median<=q3<=max の順序違反 {key} ({vals})")
+
+
 def load_facade(path):
     cells, checksums = {}, {}
     try:
@@ -112,6 +121,7 @@ def load_facade(path):
                 for k in ("q1_s", "q3_s"):
                     if not _finite(rec.get(k)):
                         raise AggError(f"{path}:{i}: {k} が有限でない {key}")
+                _check_range(path, i, key, rec)
                 cells[key] = rec
     except OSError as e:
         raise AggError(f"{path}: 読み込み不可 ({e})")
@@ -157,6 +167,7 @@ def load_backend(path):
                 for k in ("q1_s", "q3_s"):
                     if not _finite(rec.get(k)):
                         raise AggError(f"{path}:{i}: {k} が有限でない {key}")
+                _check_range(path, i, key, rec)
                 cells[key] = rec
     except OSError as e:
         raise AggError(f"{path}: 読み込み不可 ({e})")
@@ -269,7 +280,9 @@ def aggregate(f_runs, b_runs, unpassed=(), record_only=()):
         fid = {k: g("nosync", k, "total") / g("prod", k, "total") for k in ("l1", "l2")}
         fid_bad = [k for k, v in fid.items() if not (FIDELITY_LO <= v <= FIDELITY_HI)]
         terms = {
-            "H1 層境界のホスト往復": sum(g("nosync", k, "h2d_upload") + g("nosync", k, "d2h_download")
+            # nosync の d2h_download は同期待ちを含み H4 と二重計上になるため、kernel_wait を
+            # 分離済みの syncsplit から純粋な転送時間を取る（RULE.txt H1）。
+            "H1 層境界のホスト往復": sum(g("syncsplit", k, "h2d_upload") + g("syncsplit", k, "d2h_download")
                                         for k in ("l1", "l2")),
             "H2 未融合 relu の往復": g("prod", "relu", "total"),
             "H3 呼び出しごとのデバイス確保": sum(g("nosync", k, "mem_new") + g("nosync", k, "alloc_c")
@@ -355,8 +368,9 @@ def synth_facade(bump=None):
     lines = []
 
     def cell(arm, ph, b, m):
-        lines.append({"record": "cell", "arm": arm, "phase": ph, "batch": b, "median_s": m, "q1_s": m * 0.9,
-                      "q3_s": m * 1.1, "min_s": m * 0.8, "max_s": m * 1.3, "n": EXPECTED_N})
+        d = abs(m) * 0.1  # 負の median（residual）でも min<=q1<=median<=q3<=max を保つ
+        lines.append({"record": "cell", "arm": arm, "phase": ph, "batch": b, "median_s": m, "q1_s": m - d,
+                      "q3_s": m + d, "min_s": m - 2 * d, "max_s": m + 3 * d, "n": EXPECTED_N})
     for b in BATCHES:
         cell("public", "forward_resident", b, 2.0e-4)
         cell("decomposed", "register", b, 1e-6)
@@ -419,6 +433,13 @@ def expect_fail(d, label):
     raise SystemExit(f"self-test 失敗: {label} を検出できない")
 
 
+def _fid_bump(i, r):
+    """nosync/total の値を fidelity 外へ動かす（順序不変条件を保つため統計量を一括で置換）。"""
+    if r["arm"] == "nosync" and r["phase"] == "total":
+        m = 1e-4
+        r.update(median_s=m, q1_s=m * 0.9, q3_s=m * 1.1, min_s=m * 0.8, max_s=m * 1.3)
+
+
 def self_test():
     import tempfile
     fl, bl = synth_facade(), synth_backend()
@@ -452,7 +473,10 @@ def self_test():
                     fn(rec)
             return mut
         cellp = lambda r: r.get("record") == "cell" and r["arm"] == "public"
-        for label, fn in (("n=1", lambda r: r.__setitem__("n", 1)),
+        for label, fn in (("min_s NaN", lambda r: r.__setitem__("min_s", float("nan"))),
+                          ("max_s Infinity", lambda r: r.__setitem__("max_s", float("inf"))),
+                          ("min > median", lambda r: r.__setitem__("min_s", r["median_s"] + 1.0)),
+                          ("n=1", lambda r: r.__setitem__("n", 1)),
                           ("median NaN", lambda r: r.__setitem__("median_s", float("nan"))),
                           ("median 0", lambda r: r.__setitem__("median_s", 0.0)),
                           ("想定外セル", lambda r: r.__setitem__("phase", "bogus"))):
@@ -480,14 +504,21 @@ def self_test():
         expect_fail(d, "backend checksum 欠落")
         dump(pb, bl, first(lambda r: r["arm"] == "nosync", lambda r: r.__setitem__("median_s", -1.0)))
         expect_fail(d, "backend 負の median")
+        nosync1 = lambda r: r["arm"] == "nosync"
+        dump(pb, bl, first(nosync1, lambda r: r.__setitem__("min_s", float("nan"))))
+        expect_fail(d, "backend min_s NaN")
+        dump(pb, bl, first(nosync1, lambda r: r.__setitem__("max_s", float("inf"))))
+        expect_fail(d, "backend max_s Infinity")
+        dump(pb, bl, first(nosync1, lambda r: r.__setitem__("max_s", 0.0)))
+        expect_fail(d, "backend max < median")
         dump(pb, bl[:-1])
         expect_fail(d, "backend bits_equal 欠落")
         dump(pb, bl)
         # fidelity 外の注記が出る
-        dump(pb, bl, lambda i, r: r.__setitem__("median_s", 1e-4) if (r["arm"] == "nosync" and r["phase"] == "total") else None)
+        dump(pb, bl, _fid_bump)
         for n in range(2, RUNS + 1):
             dump(os.path.join(d, f"run{n}.backend.jsonl"), bl,
-                 lambda i, r: r.__setitem__("median_s", 1e-4) if (r["arm"] == "nosync" and r["phase"] == "total") else None)
+                 _fid_bump)
         assert "fidelity 外のため参考扱い" in run_dir(d)
     print("self-test OK")
 
