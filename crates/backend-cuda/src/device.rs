@@ -374,7 +374,12 @@ impl CudaDevice {
         #[cfg(not(feature = "internal-diagnostics"))]
         let (ctx, stream, stream_kind) = resolve_stream_kind_for(
             ordinal,
-            crate::graph::step_graph_mode().requires_created_stream(),
+            // イシュー #2115: 推論チェーン capture の opt-in も created stream を
+            // 要求する（OR。override は混ぜない〈`graph::
+            // infer_graph_stream_requested` doc 参照〉）。ordinal ごとに
+            // sticky のため、いずれも最初のデバイス初期化前に設定が必要。
+            crate::graph::step_graph_mode().requires_created_stream()
+                || crate::graph::infer_graph_stream_requested(),
         )?;
         let name = ctx.name()?;
         let compute_capability = ctx.compute_capability()?;

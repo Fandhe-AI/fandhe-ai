@@ -987,6 +987,47 @@ fn mlp_data() -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::error::Error>> 
     ))
 }
 
+/// `--infer-batch` の許容値（イシュー #2115。`--task infer` 限定。
+/// 既定 [`BATCH`] = 64 は allowlist の要素で、指定なしの挙動・既存レコード
+/// は不変）。1024／4096 は「N=1024/4096」条件（CUDA 推論チェーン capture の
+/// A/B）の判定セル。allowlist 外は MEASURE_ERROR で fail-closed 拒否する
+/// （security.md A03。値を自由なサイズとして流さない）。
+const INFER_BATCH_ALLOWLIST: [usize; 3] = [64, 1024, 4096];
+
+/// `args`（`std::env::args()` 相当）から `--infer-batch <N>` を解釈する
+/// 純粋関数。未指定は [`BATCH`]。値欠落・非数値・allowlist 外はエラー
+/// （値そのものはエラー文へエコーしない）。
+fn infer_batch_from_args(args: &[String]) -> Result<usize, String> {
+    let Some(pos) = args.iter().position(|a| a == "--infer-batch") else {
+        return Ok(BATCH);
+    };
+    let value = args
+        .get(pos + 1)
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| INFER_BATCH_ALLOWLIST.contains(v));
+    value.ok_or_else(|| {
+        format!(
+            "MEASURE_ERROR: --infer-batch requires one of {INFER_BATCH_ALLOWLIST:?} (issue #2115)"
+        )
+    })
+}
+
+/// 実プロセスの引数から `--infer-batch` を解釈する（`run_infer`／
+/// `run_infer_reuse` が使う。`bench-common::Cli` は共有クレートのため
+/// 本フラグを持たせず、本バイナリ内で完結させる）。
+fn infer_batch() -> Result<usize, Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    Ok(infer_batch_from_args(&args)?)
+}
+
+/// `--task infer` 用の入力データ（`batch` 行。`mlp_data` と同一系列の
+/// 先頭 `batch * D_IN` 要素で、`batch == BATCH` のとき `mlp_data` の `x`
+/// と bit 同一）。
+fn infer_input(batch: usize) -> Result<Tensor<f32>, Box<dyn std::error::Error>> {
+    let x = Xorshift64Star::new(SEED_X).fill_vec(batch * D_IN);
+    Ok(Tensor::new(x, &[batch, D_IN])?)
+}
+
 fn build_model() -> Result<Sequential, Box<dyn std::error::Error>> {
     Ok(Sequential::new()
         .add_linear(D_IN, D_HIDDEN, SEED_L1)?
@@ -1510,7 +1551,8 @@ fn run_train_reuse_phases(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let model = build_model()?;
-    let (x_data, _) = mlp_data()?;
+    let batch = infer_batch()?;
+    let x_data = infer_input(batch)?;
     let mut checksum = 0.0;
 
     let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
@@ -1547,7 +1589,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         framework_version: VERSION,
         task: "infer",
         device: &cli.device,
-        size: BATCH,
+        size: batch,
         stats: st,
         gflops: None,
         throughput_per_s: Some(1.0 / st.median_s),
@@ -1592,7 +1634,8 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// そのまま使う。
 fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let model = build_model()?;
-    let (x_data, _) = mlp_data()?;
+    let batch = infer_batch()?;
+    let x_data = infer_input(batch)?;
 
     let init_start = Instant::now();
     let init_tape = make_tape(&cli.device)?;
@@ -1653,7 +1696,7 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         framework_version: VERSION,
         task: "infer",
         device: &cli.device,
-        size: BATCH,
+        size: batch,
         stats: st,
         gflops: None,
         throughput_per_s: Some(1.0 / st.median_s),
@@ -1925,6 +1968,20 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
+    // イシュー #2115: `--infer-batch` は `--task infer`（`--phases` なし）
+    // 限定。他タスクで黙って無視されると、別セルの行を計測したつもりに
+    // なるため fail-closed 拒否する。値の allowlist 検査は `infer_batch()`。
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--infer-batch") {
+        if cli.task != "infer" || cli.phases {
+            return Err(
+                "MEASURE_ERROR: --infer-batch is only meaningful for --task infer without \
+                 --phases (issue #2115)"
+                    .into(),
+            );
+        }
+        infer_batch_from_args(&args)?;
+    }
     dispatch(&cli)
 }
 
@@ -4234,5 +4291,51 @@ mod tests {
             "line={last}"
         );
         assert!(last.contains("\"parity_scaled_abs_bound\":"), "line={last}");
+    }
+
+    /// イシュー #2115: `--infer-batch` の allowlist 解釈。未指定は既定 64
+    /// （既存レコード不変）・64／1024／4096 のみ受理・それ以外／値欠落／
+    /// 非数値は拒否（値をエラー文へエコーしない）。
+    #[test]
+    fn infer_batch_from_args_allowlist() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(infer_batch_from_args(&a(&["bin"])).unwrap(), BATCH);
+        assert_eq!(
+            infer_batch_from_args(&a(&["bin", "--infer-batch", "64"])).unwrap(),
+            64
+        );
+        assert_eq!(
+            infer_batch_from_args(&a(&["--infer-batch", "1024"])).unwrap(),
+            1024
+        );
+        assert_eq!(
+            infer_batch_from_args(&a(&["--infer-batch", "4096"])).unwrap(),
+            4096
+        );
+        for bad in ["0", "65", "8192", "abc", "-1", "1e3", ""] {
+            let err = infer_batch_from_args(&a(&["--infer-batch", bad])).unwrap_err();
+            assert!(err.starts_with("MEASURE_ERROR"), "{err}");
+        }
+        assert!(
+            !infer_batch_from_args(&a(&["--infer-batch", "abc"]))
+                .unwrap_err()
+                .contains("abc")
+        );
+        assert!(infer_batch_from_args(&a(&["--infer-batch"])).is_err());
+    }
+
+    /// `infer_input(BATCH)` は `mlp_data` の `x` と bit 同一（既定 64 で
+    /// 既存の計測入力が不変であることの固定）。
+    #[test]
+    fn infer_input_default_batch_matches_mlp_data() {
+        let (x, _) = mlp_data().unwrap();
+        let y = infer_input(BATCH).unwrap();
+        assert_eq!(x.shape(), y.shape());
+        let xs = x.contiguous();
+        let ys = y.contiguous();
+        let xb: Vec<u32> = xs.as_slice().unwrap().iter().map(|v| v.to_bits()).collect();
+        let yb: Vec<u32> = ys.as_slice().unwrap().iter().map(|v| v.to_bits()).collect();
+        assert_eq!(xb, yb);
+        assert_eq!(infer_input(1024).unwrap().shape(), &[1024, D_IN]);
     }
 }

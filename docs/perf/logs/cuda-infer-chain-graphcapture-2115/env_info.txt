@@ -1,0 +1,17 @@
+# イシュー #2115 実装セッションの環境情報（参考。GB10 判定の実測環境ではない）
+# 内部ホスト名・絶対パスはマスク（<home> 等）
+date: 2026-09-30
+base: origin/main 2e7a79d2
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+kernel: Linux 7.0.0-34-generic
+gpu: NVIDIA GeForce RTX 3060 (driver 595.91.07, CUDA 13.2 driver)
+nvrtc: 13.0.88（pip wheel を <scratchpad> へ展開して LD_LIBRARY_PATH で指定）
+
+# 実行結果
+# - GPU 不要の単体テスト（tensor-core / backend-cuda graph:: / autodiff predict_device_chain /
+#   bench-fandhe / compare_gemm_ab_test.py）: 全 green
+# - 実機 #[ignore] テスト（infer_graph_capture_real_device.rs）:
+#     inapplicable_inputs_return_none のみ PASS（device 初期化・created stream・入力検査まで）
+#     残りは NVRTC が cuda_fp16.h（<cuda>/include）を見つけられず GEMM カーネルの
+#     コンパイルで失敗するため未実行（本機に CUDA toolkit のヘッダがない。
+#     capture 経路の実機検証は GB10 で実施する。R1）

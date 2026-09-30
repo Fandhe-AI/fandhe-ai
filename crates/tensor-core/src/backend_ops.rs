@@ -3541,6 +3541,44 @@ pub trait BackendOps {
         self.linear_forward_device(a, w, bias, act)
     }
 
+    /// 推論 forward チェーン（`Linear`〈＋`ReLU`〉の連なり）全体を、
+    /// バックエンド固有の「一括再生機構」（CUDA では CUDA Graph の
+    /// stream capture → graph launch。イシュー #2115）で 1 回の起動へ
+    /// まとめて計算し、ホスト `Tensor` として返す opt-in 拡張。
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore::
+    /// predict_device_chain` が、層ごとの [`Self::linear_forward_device_tracked`]
+    /// ループの**前**に 1 回だけ呼ぶ。
+    ///
+    /// # 戻り値の契約（`captured_segment_key` とは意図的に異なる）
+    ///
+    /// - `Ok(Some(t))`: 一括再生機構で計算済み。`t` は最終出力
+    ///   （`layers` の最終層の `[m, n_last]`）。呼び出し元は層ループも
+    ///   `upload`／`download` も行わない。
+    /// - `Ok(None)`: このバックエンド・この設定・この入力では本機構を
+    ///   使わない（既定 OFF・未対応の形状・非対応ストリーム等）。
+    ///   呼び出し元は既存の非 capture チェーンを実行する。
+    /// - `Err(e)`: 実際の driver・起動失敗のみ。呼び出し元はそのまま伝播する。
+    ///
+    /// **「不適用」を `Err(Unsupported)` で表現しない**。チェーン側の
+    /// `Unsupported` は呼び出し元（`Sequential::predict_resident`）が
+    /// tape 経路へ全体フォールバックする契約（設計文書決定 7）であり、
+    /// 不適用を `Unsupported` にすると非 capture チェーンを飛び越えて
+    /// 遅い経路へ落ちてしまうため、`Option` で区別する。
+    ///
+    /// # デフォルト実装
+    /// 常に `Ok(None)`（非破壊拡張。CPU・Metal は既定のまま）。
+    fn linear_chain_forward_captured(
+        &self,
+        _input: &Tensor<f32>,
+        _layers: &[(
+            DeviceBufferView<'_>,
+            Option<DeviceBufferView<'_>>,
+            Activation,
+        )],
+    ) -> Result<Option<Tensor<f32>>, BackendError> {
+        Ok(None)
+    }
+
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
     /// いずれも [`DeviceBuffer`] 常駐のまま計算する（イシュー #1584）。
     /// `linear_forward_device` と同じ動機（`docs/inference-forward-
@@ -5220,6 +5258,22 @@ mod tests {
         }
         // デフォルト委譲は token に一切触れない。
         assert!(!token.is_set());
+    }
+
+    /// [`BackendOps::linear_chain_forward_captured`] の既定実装が
+    /// `Ok(None)`（不適用。`Err(Unsupported)` ではない）を返すことを
+    /// 確認する（イシュー #2115。`Unsupported` は tape 経路への全体
+    /// フォールバックを意味するため、不適用と区別する契約のガード）。
+    #[test]
+    fn linear_chain_forward_captured_default_returns_none() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![1.0_f32, 2.0], &[1, 2]).unwrap();
+        let w_buf = empty_device_buffer(Device::Cpu);
+        let w_view = DeviceBufferView::new(&w_buf, 0, &[1]).unwrap();
+
+        let result = ops.linear_chain_forward_captured(&input, &[(w_view, None, Activation::None)]);
+
+        assert!(matches!(result, Ok(None)));
     }
 
     /// [`BackendOps::scalar_unary`] の既定実装が fail-safe
