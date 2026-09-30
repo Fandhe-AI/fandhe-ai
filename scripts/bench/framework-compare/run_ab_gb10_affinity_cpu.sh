@@ -364,6 +364,13 @@ GATE_SERIES=official
 if [[ "$(awk -v a="$LOAD_GATE" -v r="$RULE_LOAD_GATE" 'BEGIN{print (a==r)?1:0}')" != "1" ]]; then
   GATE_SERIES=reference
 fi
+# report-only（機構発火を assert しない疎通確認）は閾値が 1.0 でも正式系列にしない。
+# RULE.txt: 機構発火の確認を経ない系列は正式判定の対象外。series は smoke に固定する
+# （PR #2464 codex P1 指摘）。
+if [[ "$PRECHECK" == report-only ]]; then
+  GATE_SERIES=smoke
+fi
+GATE_NOT_OK=0
 GATE_LOG="$OUT/load_gate-2117-${DEVICE}-${LABEL}.log"
 : >"$GATE_LOG"
 echo "threshold=${LOAD_GATE} rule_threshold=${RULE_LOAD_GATE} series=${GATE_SERIES} precheck=${PRECHECK}$([[ "$PRECHECK" == report-only ]] && echo " series_note=smoke（正式系列として扱わない）")" >>"$GATE_LOG"
@@ -388,11 +395,14 @@ wait_load_gate() { # wait_load_gate <round>
     waited=$((waited + 30))
   done
   # 緩和閾値で通過した round は pass ではなく pass-reference（参考扱い）として記録する
-  if [[ "$status" == pass && "$GATE_SERIES" == reference ]]; then status=pass-reference; fi
+  if [[ "$status" == pass && "$GATE_SERIES" != official ]]; then status="pass-${GATE_SERIES}"; fi
   # gate_ok=1 は厳密に「規則閾値 1.0 で pass」の round のみ（RULE.txt: 5/5 round が
   # gate_ok=1 の系列だけが正式系列）。timeout・unavailable・pass-reference は 0。
   local gate_ok=0
   [[ "$status" == pass ]] && gate_ok=1
+  # 専有ゲート不成立 round を集約する（smoke は正式判定の対象外のため数えない）。
+  # 1 件でも不成立なら比較結果が非後退でも判定不能として非ゼロ終了する（末尾参照）。
+  if [[ "$gate_ok" != 1 && "$GATE_SERIES" != smoke ]]; then GATE_NOT_OK=$((GATE_NOT_OK + 1)); fi
   echo "round${1} gate=${status} gate_ok=${gate_ok} threshold=${LOAD_GATE} load1=${l1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GATE_LOG"
 }
 
@@ -497,6 +507,11 @@ for task in gemm train infer; do
       ;;
   esac
 done
+
+if [[ "$GATE_NOT_OK" -gt 0 ]]; then
+  echo "gate: 判定不能（専有ゲート gate_ok=1 でない round が ${GATE_NOT_OK} 件。RULE.txt は 5/5 round が gate_ok=1 の系列のみ正式判定対象。ADOPT／REJECT に数えない。詳細は $GATE_LOG）" >>"$SKIP"
+  ANY_FAILED=$((ANY_FAILED + 1))
+fi
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
 if [[ "$ANY_FAILED" -gt 0 ]]; then
