@@ -23,14 +23,25 @@ FANDHE_AI_CUDA_GRAPH_INFER=1 cargo test -p fandhe-ai --release \
   --test predict_device_chain_cuda_bit_identity -- --ignored --nocapture
 
 # R2: OFF/ON の bit ダンプ diff（batch ごとに --exact で単独実行。各 2 プロセス）
+# fail-closed: テスト終了状態と各ダンプの行数（batch*10）を確認してから diff する。
+# ON 側は infer_graph_stats で capture 1・replay 2 もテスト内で検証される。
 for b in 64 1024 4096; do
+  ok=1
   for mode in off on; do
     if [ "$mode" = on ]; then export FANDHE_AI_CUDA_GRAPH_INFER=1; else unset FANDHE_AI_CUDA_GRAPH_INFER; fi
-    cargo test -p fandhe-ai --release --test predict_device_chain_cuda_graph_bit_identity \
-      -- --ignored --exact --nocapture "predict_resident_bit_dump_cuda_graph_batch_$b" \
-      | grep '^out\[' > "dump-$mode-$b.txt"
+    if ! cargo test -p fandhe-ai --release --test predict_device_chain_cuda_graph_bit_identity \
+        -- --ignored --exact --nocapture "predict_resident_bit_dump_cuda_graph_batch_$b" \
+        > "raw-$mode-$b.txt"; then
+      echo "R2-FAIL batch=$b: test failed mode=$mode"; ok=0; break
+    fi
+    grep '^out\[' "raw-$mode-$b.txt" > "dump-$mode-$b.txt"
+    if [ "$(wc -l < "dump-$mode-$b.txt")" -ne $((b * 10)) ]; then
+      echo "R2-FAIL batch=$b: dump 行数不正 mode=$mode"; ok=0; break
+    fi
   done
-  diff "dump-off-$b.txt" "dump-on-$b.txt" && echo "R2-PASS batch=$b"
+  if [ "$ok" = 1 ]; then
+    diff "dump-off-$b.txt" "dump-on-$b.txt" && echo "R2-PASS batch=$b" || echo "R2-FAIL batch=$b: diff"
+  fi
 done
 unset FANDHE_AI_CUDA_GRAPH_INFER
 

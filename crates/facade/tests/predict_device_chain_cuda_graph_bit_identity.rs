@@ -14,18 +14,30 @@
 //! 各テストは 3 回 `predict_resident` を呼び、3 回の出力が bit 一致する
 //! ことも同時に検証してからダンプする。
 //!
+//! ON では predict_resident が capture 1 回・replay 2 回を実際に辿ることを
+//! `infer_graph_stats` の差分で検証する（結線が外れて OFF 経路へ落ちた場合に
+//! bit 一致だけで合格する取りこぼしを防ぐ）。OFF では capture／replay が 0
+//! 回であることを検証する。
+//!
+//! 判定は fail-closed とする（テストの終了状態と各ダンプの行数 `batch * 10`
+//! を確認する。`grep` 単独ではテスト失敗で空ダンプ同士が一致し偽合格になる）:
+//!
 //! ```sh
+//! b=1024
 //! for mode in off on; do
 //!   if [ "$mode" = on ]; then export FANDHE_AI_CUDA_GRAPH_INFER=1; else unset FANDHE_AI_CUDA_GRAPH_INFER; fi
 //!   cargo test -p fandhe-ai --release --test predict_device_chain_cuda_graph_bit_identity \
-//!     -- --ignored --exact --nocapture predict_resident_bit_dump_cuda_graph_batch_1024 \
-//!     | grep '^out\[' > "dump-$mode-1024.txt"
+//!     -- --ignored --exact --nocapture "predict_resident_bit_dump_cuda_graph_batch_$b" \
+//!     > "raw-$mode-$b.txt" || { echo "R2-FAIL: test failed mode=$mode"; break; }
+//!   grep '^out\[' "raw-$mode-$b.txt" > "dump-$mode-$b.txt"
+//!   [ "$(wc -l < "dump-$mode-$b.txt")" -eq $((b * 10)) ] || { echo "R2-FAIL: dump 行数不正 mode=$mode"; break; }
 //! done
-//! diff dump-off-1024.txt dump-on-1024.txt && echo R2-PASS
+//! diff "dump-off-$b.txt" "dump-on-$b.txt" && echo R2-PASS
 //! ```
 
 use fandhe_ai::Device;
 use fandhe_ai::compat::Sequential;
+use fandhe_ai_backend_cuda::graph::{infer_graph_enabled, infer_graph_stats};
 use fandhe_ai_tensor_core::Tensor;
 
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -130,11 +142,13 @@ fn bench_shape_model_and_input(batch: usize) -> (Sequential, Tensor<f32>) {
 /// bit 一致することを確認したうえで `out[<i>].bits=<hex>` を 1 要素 1 行
 /// 印字する。
 fn dump(batch: usize) {
+    let on = infer_graph_enabled();
     let (model, input) = bench_shape_model_and_input(batch);
     let init_tape = fandhe_ai::tape_for(Device::Cuda(0))
         .expect("CUDA device 0 must be available on ignored test runner");
     let store = model.init_device_param_store(&init_tape).unwrap();
     drop(init_tape);
+    let stats_before = infer_graph_stats();
     let first = model.predict_resident(&store, &input).unwrap();
     for i in 1..3 {
         let again = model.predict_resident(&store, &input).unwrap();
@@ -143,6 +157,17 @@ fn dump(batch: usize) {
             bits_vec(&again),
             "predict_resident の {i} 回目が 1 回目と bit 不一致（replay の不安定）"
         );
+    }
+    // predict_resident → capture 経路の結線検証（bit 一致だけでは結線が
+    // 外れて OFF 経路へ落ちても合格してしまう）。
+    let stats_after = infer_graph_stats();
+    let captured = stats_after.captured - stats_before.captured;
+    let replayed = stats_after.replayed - stats_before.replayed;
+    if on {
+        assert_eq!(captured, 1, "ON: 1 回目の capture が 1 回であること");
+        assert_eq!(replayed, 2, "ON: 2・3 回目が replay 2 回であること");
+    } else {
+        assert_eq!((captured, replayed), (0, 0), "OFF: capture／replay は 0 回");
     }
     for (i, bits) in bits_vec(&first).into_iter().enumerate() {
         println!("out[{i}].bits={bits:#010x}");
