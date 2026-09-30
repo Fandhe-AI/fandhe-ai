@@ -104,6 +104,11 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
             .synchronize_with_gpu_timestamps()
             .expect("commit + wait");
         let commit_wait = t.elapsed().as_secs_f64();
+        // 反復開始から最終同期直後までの waitUntilCompleted 回数。
+        // download 側の同期は gpu_busy の対象外のため、download の前に読む。
+        let wait1 = crate::__diagnostic_batch_counters_snapshot()
+            .expect("counters")
+            .wait_until_completed;
 
         let t = Instant::now();
         let out = mem.download(&y).expect("download");
@@ -116,9 +121,6 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
             .iter()
             .filter(|b| b.kernel_gpu_secs().is_some())
             .count();
-        let wait1 = crate::__diagnostic_batch_counters_snapshot()
-            .expect("counters")
-            .wait_until_completed;
         if i >= WARMUP {
             samples.push(Sample {
                 upload,
@@ -153,9 +155,15 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
     // 全バッチ・全反復で GPU タイムスタンプが取れた場合のみ gpu_busy を有効とする。
     // 欠落時は filter_map の sum が 0 になり (wall-gpu_busy)/wall が約 100% と
     // 表示されて H4（ホスト固定費主体）を誤支持するため、判定不能として扱う。
-    let ts_complete = samples
-        .iter()
-        .all(|s| s.batches_total > 0 && s.batches_with_timestamps == s.batches_total);
+    // 加えて、反復内の wait 回数が最終同期の返却バッチ数と一致しない反復
+    // （linear_forward_device 途中の暗黙同期で一部バッチの GPU 時間が
+    // 返却分から欠落）が 1 つでもあれば、ホスト固定費を過大計上しうるため
+    // 判定不能とする。
+    let ts_complete = samples.iter().all(|s| {
+        s.batches_total > 0
+            && s.batches_with_timestamps == s.batches_total
+            && s.wait_calls == s.batches_total
+    });
     if ts_complete && wall > 0.0 {
         let share = (wall - gpu) / wall * 100.0;
         println!(
@@ -164,7 +172,7 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
         );
     } else {
         println!(
-            "  host_fixed: GPU タイムスタンプ取得数が期待数未満のため H4 は判定不能（割合は算出しない）"
+            "  host_fixed: GPU タイムスタンプ取得数が期待数未満、または途中同期が疑われる（wait 回数≠返却バッチ数）ため H4 は判定不能（割合は算出しない）"
         );
     }
     let ts_min = samples
