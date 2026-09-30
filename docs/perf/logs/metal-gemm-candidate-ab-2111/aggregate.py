@@ -163,7 +163,9 @@ def judge(runs, reference_only=False, problems=()):
             else:
                 v = ("UNDETERMINED", "上記いずれにも該当せず")
             if reference_only:
-                v = (v[0] + "(REFERENCE_ONLY)", v[1] + " / 負荷ゲート timeout のため参考扱い")
+                # 参考扱い系列（専有ゲート timeout／load_policy が exclusive_gate 以外）は
+                # ADOPT_CANDIDATE 等の採用系判定語を一切出さず REFERENCE_ONLY のみとする（RULE.txt 7.。fail-closed）。
+                v = ("REFERENCE_ONLY", f"参考扱い（専有ゲート不成立）のため判定 {v[0]} は採用根拠にしない: " + v[1])
             verdicts[arm] = (v[0], v[1] + " | " + "; ".join(detail))
     return verdicts
 
@@ -222,6 +224,12 @@ def check_load_gate(text, i):
     return states[0], "ok"
 
 
+def parse_load_policy(env_text):
+    """env_info.txt の `load_policy:` 値を返す。行が無ければ None（RULE.txt 7.。`#` 以降は注釈）。"""
+    m = re.search(r"^load_policy:[ \t]*([^\s#]*)", env_text, re.M)
+    return m.group(1) if m else None
+
+
 def load_dir(d):
     """ログディレクトリを読む。戻り値: (runs, reference_only, problems)。
 
@@ -243,6 +251,12 @@ def load_dir(d):
         with open(env, encoding="utf-8", errors="replace") as f:
             env_text = f.read()
     reference_only = False
+    # 専有ゲート（RULE.txt 7.）を宣言どおり満たす系列のみ採用根拠にできる。record_only・未記入・
+    # 未知値・行欠落はすべて参考扱い（fail-closed）。load_gate.log が全 OK でも覆らない。
+    policy = parse_load_policy(env_text)
+    if policy != "exclusive_gate":
+        reference_only = True
+        print(f"note: env_info.txt の load_policy={policy!r}（exclusive_gate 以外）のため参考扱い", file=sys.stderr)
     for i in range(1, N_RUNS + 1):
         p = os.path.join(d, f"kernel_gpu_run{i}.log")
         if not os.path.isfile(p):
@@ -345,7 +359,12 @@ def self_test():
            for _ in range(N_RUNS)]
     assert judge(old)["X"][0] == "INCOMPLETE"
     # 参考扱いの付記
-    assert judge(build(ok), reference_only=True)["X"][0] == "ADOPT_CANDIDATE(REFERENCE_ONLY)"
+    assert judge(build(ok), reference_only=True)["X"][0] == "REFERENCE_ONLY"
+    # load_policy: exclusive_gate のみ採用根拠になる。record_only／未記入／欠落／未知値は参考扱い
+    assert parse_load_policy("load_policy: exclusive_gate  # x\n") == "exclusive_gate"
+    assert parse_load_policy("load_policy: record_only\n") == "record_only"
+    assert parse_load_policy("load_policy:  # 未記入\n") == ""
+    assert parse_load_policy("chip: x\n") is None
     # データ欠落 N
     partial = [parse_run(_fixture_run({("X", 512): 0.9})) for _ in range(N_RUNS)]
     assert judge(partial)["X"][0] == "INCOMPLETE"

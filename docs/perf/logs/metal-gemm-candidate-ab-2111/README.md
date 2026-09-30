@@ -35,7 +35,7 @@ Linux 等では `./orchestrate.sh gate --dry-run`／`./orchestrate.sh 1 --dry-ru
 
 ## 判定後の手順（#2111）
 
-- `record_only` の宣言（専有できない場合）は **run 1 の前に** `env_info.txt` へ理由付きで書く（`env_info.txt` の運用。RULE.txt 7. は専有ゲートと timeout 時の REFERENCE_ONLY のみを定めており、事前宣言は事前登録規則に無い運用上の取り決めである）。事後宣言は認めない。
+- `record_only` の宣言（専有できない場合）は **run 1 の前に** `env_info.txt` へ理由付きで書く（`env_info.txt` の運用。RULE.txt 7. は専有ゲートと timeout 時の REFERENCE_ONLY のみを定めており、事前宣言は事前登録規則に無い運用上の取り決めである）。事後宣言は認めない。**`load_policy: record_only`（および `exclusive_gate` 以外・未記入・行欠落）の系列は参考扱い（REFERENCE_ONLY）であり、採用判定・結線判断の根拠にしない**。`aggregate.py` は `env_info.txt` の `load_policy` を読み、`exclusive_gate` 以外では ADOPT_CANDIDATE 等を出さず `REFERENCE_ONLY` のみを出力する（fail-closed。RULE.txt 7.）。採用判断には専有ゲートを満たした再計測が必要。
 - ADOPT_CANDIDATE が出ても**結線前にユーザー承認を取る**（RULE.txt 10.）。結線手順は `docs/perf/metal-gemm-steel-candidates.md` §8。
 - 全 arm が ADOPT_CANDIDATE でない場合は結線せず、判定・中央値の記入と本ディレクトリの収録のみで完了とする。
 - 保存するログは、コミット前にホスト名・ユーザー名・絶対パスをマスクする（上記マスク規則）。
