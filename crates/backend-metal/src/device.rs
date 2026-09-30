@@ -25,7 +25,7 @@
 //! で `IOKit`／`CoreFoundation` framework を直接リンクする。
 
 use fandhe_ai_tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
-use objc2_metal::{MTLCopyAllDevices, MTLDevice};
+use objc2_metal::{MTLCopyAllDevices, MTLDevice, MTLGPUFamily};
 
 /// IOKit／CoreFoundation の手書き FFI 宣言（[`probe_gpu_core_count`] 専用）。
 ///
@@ -196,13 +196,21 @@ impl MetalDeviceProvider {
             .to_vec()
             .into_iter()
             .map(|device| {
+                // simdgroup 幅 32 は Apple GPU 固有の値。Intel／AMD GPU 搭載
+                // Mac の `MTLDevice` へ同値を報告すると `DeviceInfo` の契約
+                // （不明は `None`）を破るため、Apple ファミリ（`Apple1`
+                // 以上。Apple GPU は最小ファミリから全世代で支持）と確認
+                // できた場合に限り報告し、それ以外は `None` とする（#2125）。
+                let warp_width = device
+                    .supportsFamily(MTLGPUFamily::Apple1)
+                    .then_some(APPLE_SIMDGROUP_WIDTH);
                 DeviceInfo::new(
                     Device::Metal,
                     device.name().to_string(),
                     Some(device.recommendedMaxWorkingSetSize()),
                     gpu_core_count,
                 )
-                .with_warp_width(Some(APPLE_SIMDGROUP_WIDTH))
+                .with_warp_width(warp_width)
             })
             .collect()
     }
