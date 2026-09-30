@@ -93,6 +93,7 @@ def classify_cell(is_reached, ratios):
 
 
 REFERENCE_ADOPT = "ADOPT 候補相当（参考・record_only）"
+REFERENCE_REJECT = "REJECT（参考・record_only）"
 
 
 def candidate_verdict(r4_ok, cells, official=True, run_ok=True):
@@ -101,7 +102,8 @@ def candidate_verdict(r4_ok, cells, official=True, run_ok=True):
     FAIL（R2: checksum 不一致。停止扱いで ADOPT にも REJECT にも数えない）> REJECT > ADOPT 候補 > undetermined。
     official は M4 Max の負荷ゲート（R4 格子 5/5 通過 かつ R1 系列 5/5 通過）の結果。§11 により
     通過しない系列は record_only であり、ADOPT 条件を満たしても "ADOPT 候補" は返さず参考判定
-    （REFERENCE_ADOPT）に落とす（推奨候補の選定対象外にする）。
+    （REFERENCE_ADOPT）に落とす（推奨候補の選定対象外にする）。REJECT も同様で、不通過系列の
+    5/5 後退は正式な REJECT ではなく参考（REFERENCE_REJECT）として返し、系列の正式性を判定欄に反映する。
     run_ok は run_ab_sme_cpu.sh の終了コード 0 の確認結果。非ゼロ・記録なしは計測失敗であり、
     部分的な JSONL から ADOPT／REJECT を出さず undetermined（判定不能）に倒す（fail-closed）。
     """
@@ -113,7 +115,7 @@ def candidate_verdict(r4_ok, cells, official=True, run_ok=True):
         if c["status"] != "ok" and "checksum" in (c.get("reason") or ""):
             return "FAIL"
     if any(c["reached"] and c["reject"] for c in cells if c["status"] == "ok"):
-        return "REJECT"
+        return "REJECT" if official else REFERENCE_REJECT
     if (
         r4_ok
         and len(cells) == len(CELLS)
@@ -215,6 +217,21 @@ def load_gate_series(path):
     return official and len(gates) == 5 and all(g == "pass" for g in gates)
 
 
+def r4_runs_ok(path):
+    """R4 系列の実行成否（RULE.txt §13）。load_gate_r4.log に run1..5 が全て `exit=0 grep_exit=0` で、
+    かつ `series done` 行がある場合のみ True。ログ不在は None、異常終了・欠損・途中終了は False。
+    32 点をログから解析できても、非ゼロ終了した系列は R4 成立として扱わない（fail-closed）。"""
+    if not os.path.exists(path):
+        return None
+    text = Path(path).read_text(encoding="utf-8")
+    for i in range(1, 6):
+        if not re.search(rf"^run{i} exit=0 grep_exit=0(\s|$)", text, re.M):
+            return False
+    if len(re.findall(r"^run\d+ exit=", text, re.M)) != 5:
+        return False
+    return bool(re.search(r"^series done\s*$", text, re.M))
+
+
 def _gate_log_official(path, prefix):
     """load-gate ログ（`<prefix>N gate=pass|...` 行）が 5/5 通過か。ログ不在は None。"""
     if not os.path.exists(path):
@@ -259,6 +276,7 @@ def render_m4max(base):
     m4 = Path(base) / "m4max"
     ok = None
     r4_gate = None
+    r4_run = None
     runs = []
     for i in range(1, 6):
         f = m4 / f"sme_r4_grid_run{i}.log"
@@ -280,6 +298,10 @@ def render_m4max(base):
         out.append("\n参考（パレート極小の採用候補）: " + (
             "、".join(f"`min(m,n) >= {a}` かつ `k >= {b}`" for a, b in cand) if cand else "なし"))
         r4_gate = _gate_log_official(str(m4 / "load_gate_r4.log"), "run")
+        r4_run = r4_runs_ok(str(m4 / "load_gate_r4.log"))
+        if r4_run is not True:
+            out.append("\n**R4 計測の実行成否: 5 run 全ての exit=0 と `series done` を確認できない"
+                       "（異常終了・記録なし）。RULE.txt §13 により R4 は判定不能（下表の格子は参考表示のみ）。**\n")
         out.append("R4 負荷ゲート: " + {True: "5/5 通過（正式）", False: "不通過を含む（record_only）",
                                        None: "ログなし（record_only 扱い）"}[r4_gate])
     else:
@@ -296,15 +318,20 @@ def render_m4max(base):
             continue
         cells = apply_k(evaluate_series(str(d), label), k)
         r4c, pts = (False, []) if ok is None else r4_holds(ok, k)
+        r4_exec_ok = r4_run is True
+        if not r4_exec_ok:
+            r4c = False  # RULE.txt §13: R4 実行成否が確認できない系列は R4 成立にしない
         gate = load_gate_series(str(d / f"load-gate-1978-cpu-{label}.log"))
         # RULE.txt §11: R4・R1 の両負荷ゲートを通過した系列だけを正式とする
         official = bool(r4_gate) and gate is True
         run_ok = run_ab_ok_m4max(str(d / "env_info.txt")) is True
-        v = candidate_verdict(r4c, cells, official, run_ok)
+        v = candidate_verdict(r4c, cells, official, run_ok and r4_exec_ok)
         verdicts[k] = v
         series = {True: "正式（R1 load ゲート 5/5 通過）", False: "record_only（参考）", None: "ゲートログなし（record_only 扱い）"}[gate]
         if gate is True and not r4_gate:
             series = "record_only（R4 負荷ゲート不通過・未確認）"
+        if not r4_exec_ok:
+            series += "／R4 が異常終了または終了記録なし（判定不能）"
         if not run_ok:
             series += "／run_ab_sme_cpu.sh 非ゼロ終了または終了コード記録なし（判定不能）"
         summary.append(f"| {k} | {'成立' if r4c else '不成立/未計測'} | {'成立' if ac1_ok(cells) else '不成立'} | {v} | {series} |")
@@ -447,6 +474,24 @@ def self_test():
         assert not ac1_ok(cells64)
         # R4 不成立なら ADOPT にならない
         assert candidate_verdict(False, cells) == "undetermined"
+        # §11: 不通過系列の 5/5 後退は正式 REJECT ではなく参考扱い
+        rc = [dict(c) for c in cells]
+        for c in rc:
+            if c["reached"] and c["status"] == "ok":
+                c["reject"] = True
+        assert candidate_verdict(True, rc, official=True) == "REJECT"
+        assert candidate_verdict(True, rc, official=False) == REFERENCE_REJECT
+        assert candidate_verdict(True, rc, official=False, run_ok=False) == "undetermined"
+        # §13: R4 の異常終了・欠損は判定不能
+        _r4 = os.path.join(td, "r4gate.log")
+        _good = "".join(f"run{i} gate=pass\nrun{i} exit=0 grep_exit=0 end_load1=1\n" for i in range(1, 6))
+        Path(_r4).write_text(_good + "series done\n")
+        assert r4_runs_ok(_r4) is True
+        Path(_r4).write_text(_good)
+        assert r4_runs_ok(_r4) is False
+        Path(_r4).write_text(_good.replace("run5 exit=0", "run5 exit=1") + "series done\n")
+        assert r4_runs_ok(_r4) is False
+        assert r4_runs_ok(os.path.join(td, "none.log")) is None
         # run_ab_sme_cpu.sh の実行失敗は ADOPT／参考 ADOPT にも FAIL／REJECT にもせず判定不能
         assert candidate_verdict(True, cells, run_ok=False) == "undetermined"
         assert candidate_verdict(True, cells, official=False, run_ok=False) == "undetermined"

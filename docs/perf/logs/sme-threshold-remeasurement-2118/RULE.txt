@@ -87,3 +87,5 @@ K=64 は現行定数のベースラインであり、イシュー本文の候補
 - before 腕の基準は実行時 HEAD ではなく、ヘッダ記載の登録 sha（lib_trees.sh の SME2118_REGISTERED_BASE）を git archive して固定する。当該 sha が無ければ停止する（HEAD へのフォールバックなし）。実行時の HEAD は current_head として記録のみ行う。
 - run_ab_sme_cpu.sh の終了コード（M4 Max: env_info.txt の run_ab_exit・GB10: rt_result.txt の run_ab rc）が 0 でない、または記録がない系列は、部分データから ADOPT／REJECT／pass を出さず undetermined（判定不能）とする。
 - GB10 の RT 異常終了行は、コンパイル失敗と終了状態が 101 以外の `process didn't exit successfully` に限る。cargo の通常のテスト失敗フッタ（error: test failed・exit status: 101）は異常終了に数えず、§9 の既知 FAIL 1 件のみなら pass とする。
+- M4 Max の R4 系列は、load_gate_r4.log に run1..5 の `exit=0 grep_exit=0` と `series done` の全てが記録されている場合のみ R4 成立の判定に使う。32 点を解析できても、非ゼロ終了・欠損・途中終了の系列は判定不能（undetermined）とする。
+- §11 の record_only（負荷ゲート不通過）系列は ADOPT 相当だけでなく REJECT も正式判定として出さず、「REJECT（参考・record_only）」と表示する。
