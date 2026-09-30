@@ -7,7 +7,7 @@
 <p class="eyebrow">fandhe-ai · framework-compare · candle · burn · PyTorch · TensorFlow · SciPy · f32 · warmup 20 + 計測 20（GEMM）／100 step（学習）· 5 run 中央値 · 計測日・rev は実測時に記入（RULE.txt・env_info.txt）</p>
 <h1>他フレームワークとの勝敗スコアボード</h1>
 <p class="lede">イシュー #2120（Phase 3 採否反映）の再計測版。fandhe-ai を 3 腕（A: crates.io 公開版 <code>fandhe-ai =0.9.0</code>／B: Phase 3 直前ツリー 65035979／C: 計測時点の main HEAD）で、同一ハーネス・同一 xorshift64* シード入力のまま <code>candle-core =0.11.0</code>・<code>burn =0.21.0</code> と両機体（M4 Max・GB10）で 5 run（プロセス独立）計測した。<b>本ページの fandhe-ai 行は腕 C（Phase 3 後）の各セル 5 run 中央値 run</b>、「前比」は腕 B（Phase 3 前）の同一セルとの比（判定規則は <code>docs/perf/logs/framework-compare-phase3-remeasure-2120/RULE.txt</code> で実測前に固定）。Python 3 フレームワーク（PyTorch／TensorFlow／SciPy）は再計測せず既存値を流用している（M4 Max は 0.9.0 スコアボードの転記値・GB10 は <code>results-dgx-py-precision-class.jsonl</code>。Phase 3 前後比は fandhe-ai の腕間比であり相手値に依存しない）。Hugging Face transformers と LangChain は計算層ではないため性能比較の対象外とし、下の役割対応表で扱う。<b>M4 Max の専有ゲートは record_only</b>（{m4_load}）、<b>GB10 は専有ゲート（load1 &lt; 1.0 かつ GPU 使用率 0%）</b>（{gb_load}）。「勝敗」は fandhe-ai の中央値を有効な他フレームワーク最速と比べた順位。値は中央値 ms（GEMM は GFLOP/s 併記）、推論はバッチ/秒。「前比」は同一セル・同一モードの fandhe-ai 中央値の比（&lt;1 が高速化。推論は &gt;1 が改善）。<b>Phase 3 の施策はいずれも opt-in・既定 OFF のままマージされているため、計測ツリーで既定 ON のスイッチが 0 件なら前比は 1.00 近傍が期待値</b>（採否スナップショットは <code>switches-B.txt</code>／<code>switches-C.txt</code>）。</p>
-<div class="tally"><div class="w"><b>{n_win}</b><span>1 位（勝ち）</span></div><div class="n"><b>{n_near}</b><span>僅差（最速の 90% 以内）</span></div><div class="l"><b>{n_loss}</b><span>負け</span></div><div><b>{n_invalid}</b><span>判定不能セル（要素検証超過・順位に含めない）／判定対象 {n_total} 行</span></div></div>
+<div class="tally"><div class="w"><b>{n_win}</b><span>1 位（勝ち）</span></div><div class="n"><b>{n_near}</b><span>僅差（最速の 90% 以内）</span></div><div class="l"><b>{n_loss}</b><span>負け</span></div><div><b>{n_invalid}</b><span>判定不能セル（要素検証超過・順位に含めない）</span></div><div><b>{n_undet}</b><span>判定不能行（fandhe-ai parity 不合格・有効な比較対象なし）／全 {n_total} 行 = 勝ち＋僅差＋負け＋判定不能行</span></div></div>
 
 <h2>Apple M4 Max（Metal／CPU）— fandhe-ai 腕 C（Phase 3 後）／candle／burn 5 run 中央値＋PyTorch／TensorFlow／SciPy は 0.9.0 スコアボード転記値（未再計測）</h2>
 <div class="wrap"><table>{m4_head}<tbody>
@@ -151,7 +151,7 @@
 <div><h3>candle 比ゲート（正式系列 0.8.0・5 回中央値）</h3><span class="v">達成 4 セル／12 セル</span><p>CUDA N=4096（1.478×）・Metal N=2048（1.002×）・CPU GB10 N=2048（1.400×）・CPU M4 Max N=512（1.015×）が正式系列として達成。他 8 セルは未達（<code>docs/perf/cuda,metal,cpu-gemm-candle-gate-remeasurement.md</code> §16／§16／§24）。本ページの両機体の行は同席 1 run の値で、ゲート判定の正式値ではない。</p></div>
 </div>
 
-<h2>まとめ（判定対象 {n_total} 行 = 勝ち {n_win}＋僅差 {n_near}＋負け {n_loss}・相手は candle／burn／PyTorch／TensorFlow／SciPy の有効セル最速）</h2>
+<h2>まとめ（全 {n_total} 行 = 勝ち {n_win}＋僅差 {n_near}＋負け {n_loss}＋判定不能 {n_undet}・相手は candle／burn／PyTorch／TensorFlow／SciPy の有効セル最速）</h2>
 <div class="kv">
 <div><h3>勝っている領域（{n_win}）</h3><p>{win_list}</p></div><div><h3>僅差（{n_near}）</h3><p>{near_list}</p></div><div><h3>負けている領域（{n_loss}）</h3><p>{loss_list}</p></div>
 <div><h3>読み方</h3><p>内訳は上記「勝っている領域」「僅差」「負けている領域」のとおり（詳細は各表の行を参照）。0.9.0 に含まれる同期境界最適化・機能網羅の各種変更（#1902／#1903／#1905／#1908／#1909／#1911 等の性能記録）は fandhe-ai 単体の HEAD 側 A/B であり、本表の registry 公開版同士の比較には未反映のものを含む。</p></div>

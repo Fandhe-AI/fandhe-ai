@@ -189,6 +189,17 @@ def build_row(data, data_prev, machine, task, device, size, skip):
         if best is None or better(v, best[1], task):
             best = (fw, v)
         cells.append((fw, txt + mark, v))
+    # 有効な比較対象が 1 つも無い（行欠損・全 FW が parity 不合格）セルは判定不能として表示し、他セルの生成を継続する
+    if best is None:
+        me_txt = cell_value(me, task, size)[0]
+        cells_html = ''.join(c if v is None else f'<td class="num">{c}</td>' for fw, c, v in cells)
+        tr = (f'<tr class="v-undet"><th scope="row"><span class="ph">{label}</span><span class="ds">{desc}</span></th>'
+              f'<td><span class="pill undet">判定不能</span><span class="vs">有効な比較対象なし</span></td>'
+              f'<td class="ratio"><span class="rt">—</span></td>'
+              f'<td class="num me">{me_txt} <small>reuse</small></td><td class="num me2"><span class="na">—</span></td>'
+              f'{cells_html}</tr>')
+        return dict(tr=tr, cls='undet', verdict='判定不能', ratio=None, label=label, machine=machine, best=None, vprev=None,
+                    vprevs='判定不能（有効な比較対象なし）', me=me, me_fresh=None, old=None, fresh_note='')
     # 順位
     n_better = sum(1 for fw, v in comp if better(v, mine, task))
     rank = 1 + n_better
@@ -250,6 +261,8 @@ allrows = m4_rows + gb_rows
 wins = [r for r in allrows if r['cls'] == 'win']
 nears = [r for r in allrows if r['cls'] == 'near']
 losses = [r for r in allrows if r['cls'] == 'loss']
+undets = [r for r in allrows if r['cls'] == 'undet']
+assert len(wins) + len(nears) + len(losses) + len(undets) == len(allrows), 'tally が行数と分割にならない'
 # 無効セル（判定不能）数
 def count_invalid(data, rows):
     n = 0
@@ -310,7 +323,7 @@ BODY = open(ARGS.body).read()
 
 out = BODY.format(
     css=CSS,
-    n_win=len(wins), n_near=len(nears), n_loss=len(losses), n_invalid=invalid_n, n_total=len(allrows),
+    n_win=len(wins), n_near=len(nears), n_loss=len(losses), n_invalid=invalid_n, n_undet=len(undets), n_total=len(allrows),
     m4_head=head(['candle-core 0.11.0', 'burn 0.21.0', 'PyTorch 2.14.0（MPS）', 'TensorFlow 2.16.2（Metal プラグイン）', 'SciPy 1.18.1']),
     m4_rows=''.join(r['tr'] for r in m4_rows),
     gb_head=head(['candle-core 0.11.0', 'burn 0.21.0', 'PyTorch 2.14.0+cu130', 'TensorFlow 2.21.0（CPU のみ）', 'SciPy 1.18.1']),
@@ -330,4 +343,4 @@ for r in allrows:
     print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best'] or '-':10} {rt}  {r['vprevs']}")
 if ARGS.tsv:
     Path(ARGS.tsv).write_text(''.join(f"{r['machine']}\t{r['label']}\t{r['verdict']}\t{r['best'] or ''}\t{'' if r['ratio'] is None else format(r['ratio'], '.4f')}\t{r['vprevs']}\n" for r in allrows))
-print('tally', len(wins), len(nears), len(losses), 'invalid', invalid_n, 'total', len(allrows))
+print('tally', len(wins), len(nears), len(losses), 'undet', len(undets), 'invalid', invalid_n, 'total', len(allrows))

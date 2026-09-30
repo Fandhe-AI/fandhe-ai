@@ -48,7 +48,20 @@ export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 
 sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 # 置換順: 具体的なパス（LOGD・HEAD_TREE・PRE_TREE）を先に、最後に HOME（HOME 配下に置く実機ノードで <head-tree> 等が潰れないように）
-mask() { sed -e "s|${LOGD}|<logd>|g" -e "s|${HEAD_TREE}|<head-tree>|g" -e "s|${PRE_TREE}|<pre-tree>|g" -e "s|${HOME}|<home>|g"; }
+# sed の置換式へパスを埋め込むと `|`・改行・`&` で式を脱出でき（GNU sed の e コマンドでシェル実行に至る）、
+# 正規表現メタ文字も誤解釈されるため、python3 の固定文字列置換へ渡す（値は環境変数経由でコード・式に連結しない）。
+mask() {
+  MASK_LOGD="${LOGD}" MASK_HEAD="${HEAD_TREE}" MASK_PRE="${PRE_TREE}" MASK_HOME="${HOME}" python3 -c '
+import os, sys
+pairs = [(os.environ["MASK_LOGD"], "<logd>"), (os.environ["MASK_HEAD"], "<head-tree>"),
+         (os.environ["MASK_PRE"], "<pre-tree>"), (os.environ["MASK_HOME"], "<home>")]
+for line in sys.stdin:
+    for src, dst in pairs:
+        if src:
+            line = line.replace(src, dst)
+    sys.stdout.write(line)
+'
+}
 
 if [[ "${SMOKE}" == "1" ]]; then RUNS=1; else RUNS=5; fi
 BUILD_LOG="${LOGD}/build.log"; GATE_LOG="${LOGD}/gate.log"; : > "${BUILD_LOG}"; : > "${GATE_LOG}"
