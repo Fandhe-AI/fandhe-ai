@@ -730,6 +730,10 @@ pub(crate) mod spec_source;
 // 環境・CI）でも `AtomicBool` の単体テストが回るようにしてある。
 pub mod split_k_runtime;
 pub mod tile;
+// Metal train forward の encode-only 合流 opt-in（イシュー #2113）。
+// `split_k_runtime` と同じ設計判断で cfg を付けず Linux でも既定値の
+// ドリフト検出テストを回す。
+pub(crate) mod train_forward_encode_runtime;
 // `TypedOps<half::f16>` 実装（イシュー #1705・親 #1651・
 // `docs/backend-dtype-dispatch-design.md` §14）。`ops::MetalBackendOps`
 // （`cfg(target_os = "macos")` 限定）へ `impl` するため同じ cfg を付ける。
@@ -848,4 +852,18 @@ pub fn __diagnostic_batch_counters_snapshot() -> Result<context::BatchCountersSn
 {
     let ctx = context_cache::cached_context()?;
     Ok(ctx.diagnostic_batch_counters())
+}
+
+/// テスト・A/B 診断専用: train forward の encode-only 合流（イシュー #2113。
+/// 既定 OFF）を切り替える。`#[doc(hidden)]` で `facade` の公開面には含めない
+/// （`docs/compat-api-scope.md` §0）。プロセスワイドのため並列テストは直列化する。
+#[doc(hidden)]
+pub fn __set_train_forward_encode_only_enabled(enabled: bool) {
+    train_forward_encode_runtime::set_train_forward_encode_only_enabled(enabled);
+}
+
+/// [`__set_train_forward_encode_only_enabled`] の現在値 getter（テスト・診断専用）。
+#[doc(hidden)]
+pub fn __train_forward_encode_only_enabled() -> bool {
+    train_forward_encode_runtime::train_forward_encode_only_enabled()
 }
