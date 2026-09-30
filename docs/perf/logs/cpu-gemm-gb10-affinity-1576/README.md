@@ -8,3 +8,5 @@
 - `on-arm.patch`（`GB10_AFFINITY_ENABLED = false → true` の 1 行差分。#1301/#1481 と同型）
 - `env_info.txt`（内部ホスト名は含めない）
 - `compare.md`（`docs/perf/cpu-gemm-gb10-affinity-ab.md` の判定規則に基づく判定結果）
+
+> イシュー #2117: 実測ログの正式な置き場と実行基盤（事前登録 `RULE.txt`・`run_ab_gb10_affinity_cpu.sh`）は `docs/perf/logs/cpu-gb10-affinity-ab-2117/` へ移った。以後の実測収録はそちらへ行う。
