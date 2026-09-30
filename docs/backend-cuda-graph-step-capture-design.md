@@ -41,6 +41,8 @@
 
 ### 3.2 スコープ外（PR 本文へ記録・起票はユーザー承認後）
 
+- **推論チェーンの capture は別機構（#2115）**: 推論 forward チェーン（`predict_device_chain`）の capture は本書の update 区間 capture とは別の opt-in（`FANDHE_AI_CUDA_GRAPH_INFER`）として `crates/backend-cuda/src/graph.rs` に追加した（`docs/perf/infer-chain-graphcapture-cuda-ab.md`）。created stream の選択（§4.1）は両 opt-in の OR で決まる
+
 - **exec update**（`cuGraphExecUpdate_v2`）: `unsafe` 導入が必要（F3）
 - **forward／backward の capture**: 前提となる「forward の facade 常駐チェーン結線（#1216 Phase 2 未完了）」「backward の d_input／d_weight デバイス直接計算（CUDA の `gemm_fp32_strict_into` 未実装）」「loss のデバイス常駐化」が未整備（F2）
 - **tape レベルの構造検出**（tape 長・形状・dtype ハッシュ）: step 全体 capture と同時に導入する対象であり、本イシューのキー（`SegmentKey`）は「パラメータ layout + SGD 設定 + 世代 + バッファ同一性」に限定

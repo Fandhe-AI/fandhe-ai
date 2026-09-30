@@ -1,0 +1,52 @@
+# イシュー #2115 事前登録規則（実測前に固定。2026-09-30。事後に緩めない）
+#
+# 対象: CUDA 推論 forward チェーンの CUDA Graph capture opt-in
+#       （環境変数 FANDHE_AI_CUDA_GRAPH_INFER=1・既定 OFF）
+# 判定機: DGX Spark GB10（本規則の実測は GB10 専有でのみ有効）
+# 計測: scripts/bench/framework-compare/run_ab_infer_graph_cuda.sh
+#       同一バイナリ・before=環境変数未設定 / after=FANDHE_AI_CUDA_GRAPH_INFER=1
+#       5 run（プロセス独立起動・round ごとに起動順を反転）
+# 判定セル: infer x {fresh, reuse} x batch {64, 1024, 4096}（計 6 セル）
+#           batch 64 は G-CUDA-INF スコアボードと同じセル
+#
+# ratio = after 中央値 / before 中央値（5 run の median_s の中央値）
+#
+# 専有ゲート（計測前 3 サンプル連続・30 秒間隔・最大 20 サンプル）
+#   load1 < 1.0 かつ nvidia-smi utilization.gpu == 0%
+#   不成立なら計測せず undetermined を 1 回記録して終了（再試行ループなし）
+#
+# 前提ゲート（機能正当性。いずれも GB10 で実行）
+#   R0: crates/backend-cuda/tests/linear_forward_device_real_device.rs と
+#       graph_capture_real_device.rs（#1349）が非後退（green）
+#   R1: FANDHE_AI_CUDA_GRAPH_INFER=1 で
+#       crates/backend-cuda/tests/infer_graph_capture_real_device.rs の全テストが
+#       "INFER_CAPTURE_R1: PASS" を出力（SKIP は不合格扱い）。
+#       あわせて facade の predict_device_chain_cuda_bit_identity.rs
+#       （chain 経路 vs 旧経路 bit 完全一致）が ON でも green
+#   R2: OFF/ON の 2 プロセスで predict_device_chain_cuda_graph_bit_identity.rs の
+#       batch 64/1024/4096 のダンプ（out[i].bits= 行）を diff し全行一致
+#
+# ADOPT（すべて満たすこと）
+#   1. 専有ゲートが成立していること
+#   2. 全 6 セルで 5 run 中央値の ratio <= 1.00
+#   3. 全セルで checksum が完全一致（compare_gemm_ab.py --require-checksum-exact）
+#   4. reuse の少なくとも 1 セルで 5/5 run 一貫して ratio < 1.00
+#   5. R0・R1・R2 がすべて合格
+# REJECT（いずれか）
+#   - いずれかのセルで中央値 ratio > 1.00
+#   - checksum の不一致
+#   - R1 / R2 の bit 不一致
+# undetermined（いずれか。判定を保留し結果を採否に使わない）
+#   - 専有ゲート不成立
+#   - 件数不足（セルあたり 5 run 未満・欠測セルあり）
+#   - R0〜R2 の未実行
+#   - GB10 以外での計測
+#
+# 帰属の事前記述
+#   - fresh セルは推論チェーンへ到達しない（model.forward の tape 経路）。
+#     fresh に効き得るのは created stream 化（event tracking 無効化）のみ。
+#     #1350 では stream-only 単独が改善方向だった（参考。本判定は再測定する）
+#   - reuse セルは created stream 化と graph capture の合算効果
+#   - --phases の内訳は診断用で判定には使わない
+#
+# 判定に使わないもの: RTX 3060 等 GB10 以外の参考ログ（ignored/ 配下）

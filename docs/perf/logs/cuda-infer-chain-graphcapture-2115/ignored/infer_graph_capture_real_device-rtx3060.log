@@ -1,0 +1,38 @@
+# RTX 3060 参考ログ（GB10 判定には使わない）。cuda_fp16.h 不在で GEMM カーネルをコンパイルできず 4 件失敗 = 未実行扱い。
+# cmd: FANDHE_AI_CUDA_GRAPH_INFER=1 cargo test -p fandhe-ai-backend-cuda --release --test infer_graph_capture_real_device -- --ignored --nocapture --test-threads=1
+
+running 5 tests
+test chain_capture_then_replay_is_bit_identical_to_uncaptured_chain ... 
+thread 'chain_capture_then_replay_is_bit_identical_to_uncaptured_chain' (3998578) panicked at crates/backend-cuda/tests/infer_graph_capture_real_device.rs:123:18:
+called `Result::unwrap()` on an `Err` value: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_86\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test different_batch_recaptures_under_a_different_key ... 
+thread 'different_batch_recaptures_under_a_different_key' (3998586) panicked at crates/backend-cuda/tests/infer_graph_capture_real_device.rs:131:14:
+called `Result::unwrap()` on an `Err` value: KernelLaunchFailed("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_86\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+FAILED
+test inapplicable_inputs_return_none ... INFER_CAPTURE_R1: PASS inapplicable_inputs
+ok
+test replay_reflects_in_place_weight_update ... 
+thread 'replay_reflects_in_place_weight_update' (3998588) panicked at crates/backend-cuda/tests/infer_graph_capture_real_device.rs:131:14:
+called `Result::unwrap()` on an `Err` value: KernelLaunchFailed("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_86\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+FAILED
+test worker_thread_exit_with_populated_cache_does_not_abort ... 
+thread '<unnamed>' (3998590) panicked at crates/backend-cuda/tests/infer_graph_capture_real_device.rs:131:14:
+called `Result::unwrap()` on an `Err` value: KernelLaunchFailed("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_86\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+
+thread 'worker_thread_exit_with_populated_cache_does_not_abort' (3998589) panicked at crates/backend-cuda/tests/infer_graph_capture_real_device.rs:281:6:
+ワーカースレッドの終了（TLS 破棄）で panic/abort しない: Any { .. }
+FAILED
+
+failures:
+
+failures:
+    chain_capture_then_replay_is_bit_identical_to_uncaptured_chain
+    different_batch_recaptures_under_a_different_key
+    replay_reflects_in_place_weight_update
+    worker_thread_exit_with_populated_cache_does_not_abort
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test infer_graph_capture_real_device`

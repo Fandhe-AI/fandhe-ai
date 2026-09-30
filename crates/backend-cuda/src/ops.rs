@@ -1390,6 +1390,62 @@ pub(crate) fn gemm_bias_act_route(bias_shape: Option<&[usize]>, n: usize) -> Gem
     }
 }
 
+/// [`CudaBackendOps::linear_chain_forward_captured`] の host-only 検査
+/// （イシュー #2115）。層の連鎖が既存の `linear_forward_device` の受理条件
+/// と同じで、capture 対象にできる場合のみ `(m, 層記述)` を返し、それ以外は
+/// `None`（不適用。エラーの型付けは既存の非 capture 経路へ委ねる）。
+fn chain_layers_for_capture<'a>(
+    ordinal: usize,
+    input_shape: &[usize],
+    layers: &[(
+        DeviceBufferView<'a>,
+        Option<DeviceBufferView<'a>>,
+        Activation,
+    )],
+) -> Option<(usize, Vec<crate::graph::ChainLayer<'a>>)> {
+    if layers.is_empty() || input_shape.len() != 2 {
+        return None;
+    }
+    let (m, mut k) = (input_shape[0], input_shape[1]);
+    if m == 0 || k == 0 {
+        return None;
+    }
+    let mut chain = Vec::with_capacity(layers.len());
+    for (w, bias, act) in layers {
+        if w.device() != Device::Cuda(ordinal) {
+            return None;
+        }
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k || w_shape[1] == 0 {
+            return None;
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias
+            && (b.device() != Device::Cuda(ordinal) || b.shape() != [n])
+        {
+            return None;
+        }
+        let relu = match act {
+            Activation::None => false,
+            Activation::Relu => true,
+            _ => return None,
+        };
+        let k_u32 = u32::try_from(k).ok()?;
+        crate::gemm::validate_tiled_k_bound(k_u32).ok()?;
+        u32::try_from(n).ok()?;
+        u32::try_from(m).ok()?;
+        chain.push(crate::graph::ChainLayer {
+            w: *w,
+            bias: *bias,
+            relu,
+            k,
+            n,
+        });
+        k = n;
+    }
+    Some((m, chain))
+}
+
 /// `ordinal` に対応する `&'static CudaMemory` をプロセス内キャッシュから
 /// 取得する（イシュー #935）。
 ///
@@ -1407,7 +1463,7 @@ pub(crate) fn gemm_bias_act_route(bias_shape: Option<&[usize]>, n: usize) -> Gem
 /// `context_cache` と同じ「エントリはプロセスの生存期間中 evict されない」
 /// 設計（`context_cache.rs` モジュール冒頭コメント「所有モデル・生存
 /// 期間」）に倣った意図的なリークであり、通常のメモリリークとは区別する。
-fn static_cuda_memory(
+pub(crate) fn static_cuda_memory(
     ordinal: usize,
     device: &CudaDevice,
 ) -> Result<&'static CudaMemory, BackendError> {
@@ -2371,6 +2427,93 @@ impl BackendOps for CudaBackendOps {
             config,
             token,
         )
+    }
+
+    /// 推論 forward チェーンを CUDA Graph へ capture し、2 回目以降は
+    /// graph launch 1 回で再生する opt-in 経路（イシュー #2115。学習 step
+    /// の update 区間 capture〈#1349〉とは別機構。実体は
+    /// `crate::graph::run_captured_linear_chain`）。
+    ///
+    /// **`Ok(None)`（不適用）にする条件**: opt-in OFF（既定・
+    /// `crate::graph::infer_graph_enabled`）、`layers` 空、`input` が
+    /// rank≠2／`m == 0`、層の shape 連鎖・device・bias shape・活性化
+    /// （`None`／`Relu` 以外）・`k` 上限（`validate_tiled_k_bound`）の
+    /// いずれかが既存経路の受理条件を満たさない場合、対象デバイスが
+    /// capture 不能な legacy stream（opt-in の設定順序誤り・
+    /// `internal-diagnostics` ビルド）の場合。不適用の判定は既存の
+    /// 非 capture チェーンへ委ね、そちらが同じ入力に型付きエラーを返す。
+    /// `captured_segment_key` と違い不適用を `Err(Unsupported)` にしない
+    /// のは、チェーン側の `Unsupported` が tape 経路への全体
+    /// フォールバックを意味するため（設計文書決定 7）。
+    ///
+    /// **driver 呼び出し境界**: `captured_segment_key` と同じ順序
+    /// （世代収集〈host-only〉→ `begin_driver_call` → 観測付き
+    /// `device_handle_raw` → アドレス導出）で `SegmentKey` を作り、その
+    /// トークンを drop してから graph 機構へ委譲する
+    /// （`begin_capture_session` の in_flight ドレイン契約）。key は毎回
+    /// この呼び出しの live 借用から計算するため、ヒットした graph が焼き
+    /// 込んだ weight/bias アドレスは現在生存しているバッファと一致する。
+    fn linear_chain_forward_captured(
+        &self,
+        input: &Tensor<f32>,
+        layers: &[(
+            DeviceBufferView<'_>,
+            Option<DeviceBufferView<'_>>,
+            Activation,
+        )],
+    ) -> Result<Option<Tensor<f32>>, BackendError> {
+        if !crate::graph::infer_graph_enabled() {
+            return Ok(None);
+        }
+        let Some((m, chain)) = chain_layers_for_capture(self.ordinal, input.shape(), layers) else {
+            return Ok(None);
+        };
+        let k0 = chain[0].k;
+
+        // host-only（driver 非接触）: 世代収集。
+        let mut generations = Vec::with_capacity(layers.len() * 2);
+        let mut bases: Vec<&DeviceBuffer<f32>> = Vec::with_capacity(layers.len() * 2);
+        for (w, b, _) in layers {
+            generations.push(w.buffer().generation());
+            bases.push(w.buffer());
+            if let Some(b) = b {
+                generations.push(b.buffer().generation());
+                bases.push(b.buffer());
+            }
+        }
+        let token = context_cache::begin_driver_call(self.ordinal, &generations)?;
+        let device =
+            context_cache::observe_cuda_result(self.ordinal, &token, self.device_handle_raw())
+                .map_err(|e| BackendError::CudaUnavailable(e.to_string()))?;
+        if !device.is_capturable_stream() {
+            return Ok(None);
+        }
+        let segment_resources = Self::segment_resources_for(&bases, device.stream())?;
+
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (m, k0).hash(&mut hasher);
+        for ((w, b, _), l) in layers.iter().zip(chain.iter()) {
+            (
+                l.k,
+                l.n,
+                w.offset(),
+                w.numel(),
+                b.map(|b| (b.offset(), b.numel())),
+                l.relu,
+            )
+                .hash(&mut hasher);
+        }
+        let key = SegmentKey {
+            generation: token.generation(),
+            config_key: hasher.finish(),
+            resources: segment_resources,
+        };
+        drop(token);
+
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        crate::graph::run_captured_linear_chain(self.ordinal, &device, mem, key, input, m, &chain)
+            .map(Some)
     }
 
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
