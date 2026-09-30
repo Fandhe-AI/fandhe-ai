@@ -1533,7 +1533,8 @@ param_readout（16.8%・87.0 µs）。フェーズ和／合計: 102.8%（差分�
   の内訳切り分け（新規。§17.4 第 3 項〈cpu reuse の fresh 比後退〉
   と近縁だが GB10 では step_total は reuse が速く、更新区間単独の
   絶対値が論点）。`docs/perf/train-resident-grad-device-update.md`
-  （#1212）が近縁の既存記録
+  （#1212）が近縁の既存記録。**診断基盤は #2106 で追加済み**
+  （`docs/perf/cpu-reuse-device-update.md`。実機 5 run 実測は未実施）
 - cuda fresh の `param_readout`＋`host_sgd`＋`apply_params`
   （141.7 µs・27.4%）削減余地の確認（新規。reuse 経路では `device_update` 8.0 µs に
   置き換わっている区間で、fresh 経路にのみ残る D2H 読み出しとホスト
