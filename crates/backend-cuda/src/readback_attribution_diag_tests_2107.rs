@@ -114,10 +114,16 @@ impl Arm {
     }
 }
 
-fn gen_square_ab(seed: u64, n: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut rng = Xorshift64Star::new(seed);
-    let a = rng.fill_vec(n * n);
-    let b = rng.fill_vec(n * n);
+/// Layer A（`bench-fandhe` の `gemm --mode reuse`）と同一の入力シード。
+/// `scripts/bench/framework-compare/bench-common/src/lib.rs` の `SEED_A`／`SEED_B`
+/// と一致させる（Layer A−ΣLayer B の残差へデータ差を混入させないため。#2107）。
+const SEED_A: u64 = 0xA11CE;
+const SEED_B: u64 = 0xB0B;
+
+/// Layer A と同一入力（A は `SEED_A`、B は `SEED_B` の別ストリーム、各 `n*n` 要素）を生成する。
+fn gen_square_ab(n: usize) -> (Vec<f32>, Vec<f32>) {
+    let a = Xorshift64Star::new(SEED_A).fill_vec(n * n);
+    let b = Xorshift64Star::new(SEED_B).fill_vec(n * n);
     (a, b)
 }
 
@@ -350,7 +356,7 @@ fn run_size_arm(n: usize, arm: Arm) {
     let allocator = cached_allocator(&device).expect("CudaAllocator construction must succeed");
     let stream = device.stream().clone();
 
-    let (a, b) = gen_square_ab(0x2107_a000 ^ (n as u64), n);
+    let (a, b) = gen_square_ab(n);
     let numel = n * n;
 
     // 参照 checksum。計測ループの外で 1 回だけ求め、`Vec` は関数末尾まで

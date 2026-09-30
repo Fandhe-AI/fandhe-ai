@@ -28,6 +28,12 @@ ITEMS = [
     ("gemm.rs", "fn", "validate_output_len"),
     ("gemm.rs", "fn", "validate_tiled_k_bound"),
     ("gemm.rs", "fn", "tiled_f32_kernel_kind"),
+    # tile 選択（64x64／128x64）を決める本番既定の有効化フラグ・しきい値・選択関数
+    # （値の差し替えで Layer A が通るタイルが変わる。PR #2452 Bugbot 指摘）。
+    ("gemm.rs", "const", "TILED_PIPELINE_128X64_PRODUCTION_ENABLED"),
+    ("gemm.rs", "const", "TILED_PIPELINE_128X64_MIN_N"),
+    ("gemm.rs", "const", "TILED_PIPELINE_128X64_MIN_K"),
+    ("gemm.rs", "fn", "tiled_pipeline_tile_kind"),
     ("gemm.rs", "fn", "tiled_pipeline_launch_config"),
     ("gemm.rs", "fn", "tiled_f32_launch_config"),
     ("gemm.rs", "fn", "select_tiled_f32_kernel"),

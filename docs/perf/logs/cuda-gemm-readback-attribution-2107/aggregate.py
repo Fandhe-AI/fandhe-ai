@@ -204,6 +204,16 @@ def analyze(base: Path) -> tuple[str, dict]:
             bits_all |= bits
         if len(bits_all) != 1:
             raise IntegrityError(f"N={n}: 腕間で checksum_bits が不一致 {sorted(bits_all)}")
+        # Layer B の checksum を Layer A 既知値（§12.3）と照合する（RULE.txt hard 条件。
+        # 入力は Layer A と同一の SEED_A/SEED_B なので一致するはず。不一致は系列無効）。
+        known = KNOWN_LAYER_A_CHECKSUM[n]
+        for a, rows in arms_rows.items():
+            for r in rows:
+                c = float(r["checksum"])
+                if not (abs(c - known) <= 1e-6):
+                    raise IntegrityError(
+                        f"N={n} 腕 {a}: Layer B checksum {c} が Layer A 既知値 {known} と不一致"
+                    )
         layer_a = parse_layer_a(base / f"layerA-phases-N{n}.log", n)
 
         out += [f"## N={n}", "", "| 腕 | 区間 | median | min | max |", "|---|---|---|---|---|"]
@@ -292,6 +302,7 @@ def _write_fixture(
     layer_a_us: float,
     checksum_bits: str = "c09cf4e2a0000000",
     bad_bits_arm: str | None = None,
+    bad_value_arm: str | None = None,
     drop_run: bool = False,
     host_kind: str = "gb10",
     gate: str = "pass",
@@ -327,7 +338,11 @@ def _write_fixture(
                     "warmup": 20,
                     "measured": 20,
                     "phases": ph,
-                    "checksum": 1.0,
+                    "checksum": (
+                        KNOWN_LAYER_A_CHECKSUM[n] + 1.0
+                        if arm == bad_value_arm and k == 3
+                        else KNOWN_LAYER_A_CHECKSUM[n]
+                    ),
                     "checksum_bits": (
                         "deadbeefdeadbeef" if arm == bad_bits_arm and k == 2 else checksum_bits
                     ),
@@ -401,6 +416,15 @@ def self_test() -> int:
         try:
             analyze(base)
             expect(False, "checksum 不一致で IntegrityError")
+        except IntegrityError:
+            pass
+
+        # Layer B checksum が Layer A 既知値と不一致（bits は全腕一致）: fail-closed。
+        base = Path(t) / "badvalue"
+        _write_fixture(base, layer_a_us=1300.0, bad_value_arm=KEEP_ALIVE)
+        try:
+            analyze(base)
+            expect(False, "Layer B checksum 既知値不一致で IntegrityError")
         except IntegrityError:
             pass
 
