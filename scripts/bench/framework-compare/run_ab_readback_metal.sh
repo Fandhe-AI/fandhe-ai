@@ -14,7 +14,7 @@
 #     bash run_ab_readback_metal.sh head-<short sha>-2112
 #
 # 出力は「失敗を捏造しない」方針（security.md A08）: 全 run 成功時のみ一時ファイルを
-# 正規パスへ原子的に反映し、失敗時は `.failed-<UTC>` へ退避する。同一 label の既存
+# 正規パスへ排他的に（既存を置換せず）公開し、失敗時は `.failed-<UTC>` へ排他退避する。同一 label の既存
 # 出力があれば fail-closed で停止する（上書き・run の差し替えをしない）。
 set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -109,10 +109,6 @@ for existing in "$OUT_FRESH" "$OUT_PARALLEL" "$SKIP" "$MANIFEST" "$UNDETERMINED"
   "$GATE_LOG" "$UPTIME_SAMPLER_LOG"; do
   reject_existing "$existing" || exit 1
 done
-create_excl "$OUT_FRESH_TMP" || exit 1
-create_excl "$OUT_PARALLEL_TMP" || exit 1
-create_excl "$SKIP_TMP" || exit 1
-
 ANY_FAILED=0
 
 sha256_of() {
@@ -334,6 +330,13 @@ restore_lock_trap() {
 }
 trap restore_lock_trap EXIT
 
+# 計測前（ビルド・解決元検証）の失敗では、この実行が排他作成した専有ゲートログ
+# だけを掃除する（計測が走っていないのに同一 LABEL の再試行が塞がれない。
+# 専有ゲート不成立の undetermined マーカーとそのログは判定根拠のため残す）。
+discard_pre_measure_gate_log() {
+  rm -f "$GATE_LOG"
+}
+
 # stderr の退避先は mktemp（排他作成・推測不能名）。固定名のリダイレクトは
 # 既存リンクをたどるため使わない（PR #2456 P0 と同型）。
 BUILD_ERR="$(mktemp)"
@@ -343,6 +346,7 @@ if ! cargo build --release -p bench-fandhe --config "$PATCH_CONFIG" 2>"$BUILD_ER
   tail -40 "$BUILD_ERR"
   echo "bench-fandhe BUILD FAILED: $(tail -3 "$BUILD_ERR" | tr '\n' ' ')" >&2
   rm -f "$BUILD_ERR"
+  discard_pre_measure_gate_log
   exit 1
 fi
 rm -f "$BUILD_ERR"
@@ -350,8 +354,17 @@ rm -f "$BUILD_ERR"
 SOURCE_DESC="$(fandhe_ai_source_desc --config "$PATCH_CONFIG" || true)"
 if [[ "$SOURCE_DESC" != "path:${AB_PATCH_FACADE_PATH}" ]]; then
   echo "error: fandhe-ai が期待した path 解決ではない (expected=path:${AB_PATCH_FACADE_PATH} actual=${SOURCE_DESC:-<取得失敗>})" >&2
+  discard_pre_measure_gate_log
   exit 1
 fi
+
+# イシュー #2112・codex-review／Bugbot 指摘（PR #2456）: 結果一時ファイルは
+# 入力検証・専有ゲート・ビルド・解決元検証がすべて通った後（計測開始直前）に
+# 排他作成する。検証・ビルド失敗で残骸を残し同一 LABEL の再試行が
+# reject_existing で塞がれるのを防ぐ。
+create_excl "$OUT_FRESH_TMP" || exit 1
+create_excl "$OUT_PARALLEL_TMP" || exit 1
+create_excl "$SKIP_TMP" || exit 1
 
 BIN_SHA="$(sha256_of target/release/bench-fandhe)"
 echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
@@ -449,30 +462,43 @@ echo "== metal status (after loop) =="
 pmset -g therm 2>&1 || true
 uptime 2>&1 || true
 
+# 一時ファイルを最終パスへ排他的に公開する。`ln`（ハードリンク）は宛先が
+# 既存（dangling シンボリックリンク含む）なら EEXIST で失敗するため、計測中に
+# 作られた同一 label の結果や既存の退避先を上書きしない（`mv -f` は無条件に
+# 置換するため使わない。PR #2456 P0）。成功時のみ一時ファイルを削除する。
 MV_FAILED=0
-mv_checked() { # mv_checked <src> <dst>
-  if ! mv -f "$1" "$2"; then
-    echo "error: mv -f '$1' '$2' に失敗した" >&2
+publish_excl() { # publish_excl <src> <dst>
+  if [[ -e "$2" || -L "$2" ]] || ! ln "$1" "$2"; then
+    echo "error: '$2' へ排他的に公開できない（既存あり。上書きしない）。結果は '$1' に残す" >&2
     MV_FAILED=$((MV_FAILED + 1))
+    return 1
   fi
+  rm -f "$1"
 }
 
 if [[ "$ANY_FAILED" -eq 0 ]]; then
-  mv_checked "$OUT_FRESH_TMP" "$OUT_FRESH"
-  mv_checked "$OUT_PARALLEL_TMP" "$OUT_PARALLEL"
-  mv_checked "$SKIP_TMP" "$SKIP"
-  mv_checked "$MANIFEST_TMP" "$MANIFEST"
+  # 公開前に全宛先の不在を一括確認する（一部だけ公開された状態を避ける）。
+  for dst in "$OUT_FRESH" "$OUT_PARALLEL" "$SKIP" "$MANIFEST"; do
+    if [[ -e "$dst" || -L "$dst" ]]; then
+      echo "error: 計測中に同一 label の出力が作られた（上書き禁止）: $dst。結果は *.tmp に残す" >&2
+      exit 1
+    fi
+  done
+  publish_excl "$OUT_FRESH_TMP" "$OUT_FRESH"
+  publish_excl "$OUT_PARALLEL_TMP" "$OUT_PARALLEL"
+  publish_excl "$SKIP_TMP" "$SKIP"
+  publish_excl "$MANIFEST_TMP" "$MANIFEST"
   if [[ "$MV_FAILED" -ne 0 ]]; then
-    echo "error: $MV_FAILED 件の mv が失敗した（正規パスの反映が不完全な可能性がある）" >&2
+    echo "error: $MV_FAILED 件の公開が失敗した（正規パスの反映が不完全な可能性がある）" >&2
     exit 1
   fi
   echo "done. results in $OUT_FRESH / $OUT_PARALLEL ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  mv_checked "$OUT_FRESH_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-fresh.failed-${FAIL_TS}.jsonl"
-  mv_checked "$OUT_PARALLEL_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-parallel.failed-${FAIL_TS}.jsonl"
-  mv_checked "$SKIP_TMP" "results/raw/skipped-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.log"
-  mv_checked "$MANIFEST_TMP" "results/raw/manifest-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.json"
+  publish_excl "$OUT_FRESH_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-fresh.failed-${FAIL_TS}.jsonl"
+  publish_excl "$OUT_PARALLEL_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-parallel.failed-${FAIL_TS}.jsonl"
+  publish_excl "$SKIP_TMP" "results/raw/skipped-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.log"
+  publish_excl "$MANIFEST_TMP" "results/raw/manifest-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.json"
   echo "FAILED: $ANY_FAILED run(s) failed; partial data kept (${FAIL_TS}). 正規パスは未変更（fail-closed。security.md A08）。" >&2
   exit 1
 fi
