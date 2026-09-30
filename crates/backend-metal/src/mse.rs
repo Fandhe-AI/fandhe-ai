@@ -44,6 +44,10 @@ const MSE_MSL_SRC: &str = include_str!("shaders/mse.metal");
 /// 対応させる（256/32=8）。
 const MSE_THREADGROUP_WIDTH: usize = 256;
 
+/// `shaders/mse.metal::MSE_SIMDGROUPS_PER_TG`（8）と `MSE_THREADGROUP_WIDTH /
+/// APPLE_SIMDGROUP_WIDTH` の一致をコンパイル時に固定する（イシュー #2126）。
+const _: () = assert!(MSE_THREADGROUP_WIDTH / (crate::device::APPLE_SIMDGROUP_WIDTH as usize) == 8);
+
 /// forward 2 段目（`mse_finalize_f32`）が単一 threadgroup で処理しきれる
 /// `partial` の最大長（＝ forward 1 段目の起動 threadgroup 数の上限）。
 /// CUDA 側 `kernels_mse::MSE_MAX_BLOCKS` と同じ値。

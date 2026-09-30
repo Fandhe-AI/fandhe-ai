@@ -20,6 +20,7 @@ use crate::kernels_mse::{self, MSE_BLOCK_DIM, MSE_MAX_BLOCKS};
 use crate::memory::readback;
 use crate::nvrtc::compile_ptx;
 use crate::pool::CudaAllocator;
+use crate::warp_geometry::WarpGeometry;
 
 /// `numel`（`pred`／`target`／`dpred` の要素数）が `i32::MAX` に収まる
 /// ことを検証する（`elementwise.rs::validate_elementwise_len` と同じ
@@ -77,9 +78,12 @@ impl CudaMse {
     /// を構築する（`elementwise.rs::CudaElementwise::new` と同一手順）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let arch = device.arch();
+        // warp 幅依存定数はデバイス属性から導出して数値 `#define` で注入する
+        // （イシュー #2126。`kernels_mse.rs` 冒頭・`warp_geometry.rs` 参照）。
+        let geom = WarpGeometry::for_cuda(device)?;
 
-        let partial_ptx = compile_ptx(kernels_mse::MSE_PARTIAL_F32, arch)?;
-        let finalize_ptx = compile_ptx(kernels_mse::MSE_FINALIZE_F32, arch)?;
+        let partial_ptx = compile_ptx(&kernels_mse::render_mse_partial_f32(geom)?, arch)?;
+        let finalize_ptx = compile_ptx(&kernels_mse::render_mse_finalize_f32(geom)?, arch)?;
         let backward_ptx = compile_ptx(kernels_mse::MSE_BACKWARD_F32, arch)?;
 
         let partial_f32 = device

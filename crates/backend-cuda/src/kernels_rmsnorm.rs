@@ -166,14 +166,19 @@ pub const RMSNORM_BWD_BLOCK_DIM: u32 = 256;
 mod bwd_block_dim_tests {
     use super::RMSNORM_BWD_BLOCK_DIM;
 
-    /// `RMSNORM_BWD_DX_F32` 内の `__shared__ float smem_dot[8]`
+    /// `RMSNORM_BWD_DX_F32` 内の `__shared__ float smem_dot[WARPS_PER_BLOCK]`
     /// （warp あたり 1 要素の静的配列）が `RMSNORM_BWD_BLOCK_DIM / 32`
     /// と一致することを回帰検出する（不一致は未初期化 warp スロットの
     /// 読み出しに繋がる）。
     #[test]
     fn smem_dot_array_size_matches_warps_per_block() {
         assert_eq!(RMSNORM_BWD_BLOCK_DIM / 32, 8);
-        assert!(super::RMSNORM_BWD_DX_F32.contains("__shared__ float smem_dot[8]"));
+        assert!(super::RMSNORM_BWD_DX_F32.contains("__shared__ float smem_dot[WARPS_PER_BLOCK]"));
+        let geom = crate::warp_geometry::WarpGeometry::new(32).expect("32");
+        let rendered = super::render_rmsnorm_bwd_dx_f32(geom).expect("render");
+        assert!(rendered.contains("#define WARPS_PER_BLOCK 8\n"));
+        assert_eq!(geom.warps_per_block(RMSNORM_BWD_BLOCK_DIM), Some(8));
+        assert_eq!(geom.width(), super::RMSNORM_BLOCK_DIM);
     }
 }
 
@@ -232,7 +237,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
         // `long long`（本ファイル冒頭コメント「ループ添字のオーバーフロー
         // 安全性」参照。`hidden` が `i32::MAX` 近傍でも `int` 添字の
         // signed overflow による境界チェック迂回を防ぐ）。
-        for (long long base = lane * 4; base < vec_hidden; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_hidden; base += WARP_SIZE * 4) {
             if (base + 3 < hidden) {
                 float4 v = *reinterpret_cast<const float4*>(x_row + base);
                 smem[base + 0] = v.x;
@@ -248,7 +253,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
         // スカラー経路: hidden % 4 != 0 なら全要素、それ以外は端要素なし
         // （vec_hidden == hidden のため本ループは実行されない）。`i` は
         // `long long`（同上）。
-        for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
+        for (long long i = (long long)vec_hidden + lane; i < hidden; i += WARP_SIZE) {
             float v = x_row[i];
             smem[i] = v;
             acc = fma((double)v, (double)v, acc);
@@ -257,7 +262,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
         // 上記ロードループが書いた smem を他レーンが読めるようにする
         // warp 内バリア（`__syncthreads()` は使わない。ブロック全体
         // 同期を要求しない設計。本ファイル冒頭コメント「設計」参照）。
-        __syncwarp(0xffffffffu);
+        WARP_SYNC();
 
         // warp 内 butterfly reduction（5 段、全レーンが総和を保持する）。
         // `__shfl_xor_sync` は `double`（8 byte）に対応する組み込み
@@ -265,8 +270,8 @@ extern "C" __global__ void rmsnorm_f32_onepass(
         // functions 節。内部で 2 回の 32-bit shuffle に分解される）ため
         // 型変更のみで動作する。
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            acc += __shfl_xor_sync(0xffffffffu, acc, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            acc += WARP_SHFL_XOR(acc, offset);
         }
 
         // 最終の除算・平方根も double で行い、float32 へは 1 回だけ
@@ -282,7 +287,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
             rstd_out[row] = rstd;
         }
 
-        for (long long i = lane; i < hidden; i += 32) {
+        for (long long i = lane; i < hidden; i += WARP_SIZE) {
             float normed = smem[i] * rstd;
             if (has_weight) {
                 normed = normed * w[i];
@@ -292,7 +297,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
 
         // 次の行（grid-stride ループの次反復）が smem を上書きする前に、
         // 全レーンの上記読み出しが完了していることを保証する。
-        __syncwarp(0xffffffffu);
+        WARP_SYNC();
     }
 }
 "#;
@@ -342,7 +347,7 @@ extern "C" __global__ void rmsnorm_f32_twopass(
         // 正規化前データ格納・最終出力・`rstd` の型契約自体は float の
         // まま変更しない（二乗和の蓄積過程のみを double 化する）。
         double acc = 0.0;
-        for (long long base = lane * 4; base < vec_hidden; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_hidden; base += WARP_SIZE * 4) {
             if (base + 3 < hidden) {
                 float4 v = *reinterpret_cast<const float4*>(x_row + base);
                 acc = fma((double)v.x, (double)v.x, acc);
@@ -351,7 +356,7 @@ extern "C" __global__ void rmsnorm_f32_twopass(
                 acc = fma((double)v.w, (double)v.w, acc);
             }
         }
-        for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
+        for (long long i = (long long)vec_hidden + lane; i < hidden; i += WARP_SIZE) {
             float v = x_row[i];
             acc = fma((double)v, (double)v, acc);
         }
@@ -361,8 +366,8 @@ extern "C" __global__ void rmsnorm_f32_twopass(
         // Programming Guide の warp shuffle functions 節。内部で 2 回の
         // 32-bit shuffle に分解される）ため型変更のみで動作する。
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            acc += __shfl_xor_sync(0xffffffffu, acc, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            acc += WARP_SHFL_XOR(acc, offset);
         }
 
         // 最終の除算・平方根も double で行い、float32 へは 1 回だけ
@@ -378,7 +383,7 @@ extern "C" __global__ void rmsnorm_f32_twopass(
         // Pass 2: x を再度 global から読み正規化して書き出す（同一カーネル・
         // 同一行ループ内で完結。中間テンソルは書き出さない）。`base`／`i`
         // は `long long`（同上）。
-        for (long long base = lane * 4; base < vec_hidden; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_hidden; base += WARP_SIZE * 4) {
             if (base + 3 < hidden) {
                 float4 v = *reinterpret_cast<const float4*>(x_row + base);
                 float4 o;
@@ -395,7 +400,7 @@ extern "C" __global__ void rmsnorm_f32_twopass(
                 *reinterpret_cast<float4*>(out_row + base) = o;
             }
         }
-        for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
+        for (long long i = (long long)vec_hidden + lane; i < hidden; i += WARP_SIZE) {
             float v = x_row[i] * rstd;
             if (has_weight) {
                 v = v * w[i];
@@ -434,12 +439,12 @@ extern "C" __global__ void rmsnorm_bwd_dx_f32(
     float inv_n,
     int has_weight)
 {
-    __shared__ float smem_dot[8];
+    __shared__ float smem_dot[WARPS_PER_BLOCK];
     __shared__ float dot_broadcast;
 
     int tid = threadIdx.x;
-    int lane = tid % 32;
-    int warp_id = tid / 32;
+    int lane = tid % WARP_SIZE;
+    int warp_id = tid / WARP_SIZE;
     int vec_hidden = (hidden % 4 == 0) ? hidden : 0;
 
     for (long long row = blockIdx.x; row < rows; row += gridDim.x) {
@@ -480,8 +485,8 @@ extern "C" __global__ void rmsnorm_bwd_dx_f32(
 
         // warp 内 butterfly reduction（5 段、全レーンが warp 内総和を保持）。
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            acc += __shfl_xor_sync(0xffffffffu, acc, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            acc += WARP_SHFL_XOR(acc, offset);
         }
         if (lane == 0) {
             smem_dot[warp_id] = acc;
@@ -490,10 +495,10 @@ extern "C" __global__ void rmsnorm_bwd_dx_f32(
 
         float dot = 0.0f;
         if (warp_id == 0) {
-            float v = (lane < 8) ? smem_dot[lane] : 0.0f;
+            float v = (lane < WARPS_PER_BLOCK) ? smem_dot[lane] : 0.0f;
             #pragma unroll
-            for (int offset = 16; offset > 0; offset >>= 1) {
-                v += __shfl_xor_sync(0xffffffffu, v, offset);
+            for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+                v += WARP_SHFL_XOR(v, offset);
             }
             if (lane == 0) {
                 dot_broadcast = v;
@@ -859,8 +864,73 @@ extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
 }
 "#;
 
+use crate::error::CudaError;
+use crate::warp_geometry::WarpGeometry;
+
+/// レンダ済み RMSNORM_F32_ONEPASS（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_rmsnorm_f32_onepass(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(None)?,
+        RMSNORM_F32_ONEPASS
+    ))
+}
+
+/// レンダ済み RMSNORM_F32_TWOPASS（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_rmsnorm_f32_twopass(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(None)?,
+        RMSNORM_F32_TWOPASS
+    ))
+}
+
+/// レンダ済み RMSNORM_BWD_DX_F32（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_rmsnorm_bwd_dx_f32(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(Some(RMSNORM_BWD_BLOCK_DIM))?,
+        RMSNORM_BWD_DX_F32
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    /// width 32 のレンダ結果: 注入 define があり、カーネル本体に warp 幅
+    /// リテラル（`% 32`・`offset = 16`・フルマスク等）が残っていない
+    /// （イシュー #2126 の置換漏れ否定検査）。width 64 は fail-closed。
+    #[test]
+    fn rendered_sources_inject_warp_defines_without_literals() {
+        let geom = crate::warp_geometry::WarpGeometry::new(32).expect("32");
+        for src in [
+            super::render_rmsnorm_f32_onepass(geom).expect("render"),
+            super::render_rmsnorm_f32_twopass(geom).expect("render"),
+            super::render_rmsnorm_bwd_dx_f32(geom).expect("render"),
+        ] {
+            assert!(src.starts_with("#define WARP_SIZE 32\n#define WARP_HALF 16\n"));
+            let body = &src[src.find("extern \"C\"").expect("kernel")..];
+            for lit in [
+                "tid % 32",
+                "tid / 32",
+                "offset = 16",
+                "0xffffffff",
+                "[8]",
+                "lane < 8",
+            ] {
+                assert!(!body.contains(lit), "残存リテラル: {lit}");
+            }
+            assert!(body.contains("WARP_SHFL_XOR(") || body.contains("WARP_SIZE"));
+        }
+        let g64 = crate::warp_geometry::WarpGeometry::new(64).expect("64");
+        assert!(super::render_rmsnorm_f32_onepass(g64).is_err());
+    }
+
     use super::*;
 
     /// grid-stride ループの添字（`row`／`base`／`i`）が `long long` で
@@ -883,12 +953,14 @@ mod tests {
                 "row ループ添字が long long で宣言されていない"
             );
             assert!(
-                src.contains("for (long long base = lane * 4; base < vec_hidden; base += 32 * 4)"),
+                src.contains(
+                    "for (long long base = lane * 4; base < vec_hidden; base += WARP_SIZE * 4)"
+                ),
                 "base ループ添字が long long で宣言されていない"
             );
             assert!(
                 src.contains(
-                    "for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32)"
+                    "for (long long i = (long long)vec_hidden + lane; i < hidden; i += WARP_SIZE)"
                 ),
                 "i ループ添字が long long で宣言されていない"
             );

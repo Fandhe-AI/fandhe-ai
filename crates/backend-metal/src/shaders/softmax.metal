@@ -55,6 +55,13 @@
 using namespace metal;
 
 constant uint SOFTMAX_ONEPASS_MAX_HIDDEN = 4096u;
+// 【warp 幅 32 固定の安全性（イシュー #2126・ROCm readiness）】Apple GPU の
+// simdgroup 幅は世代によらず 32 固定で、MSL には CUDA 側のような `WARP_SIZE`
+// の数値注入機構がないため、本ファイルの 32 前提（`SOFTMAX_SIMD_WIDTH`・`simd_shuffle_xor` の offset 16→1）は据え置く。
+// 実行時には Rust 側のパイプライン構築時検証（`threadExecutionWidth` ≠ 32 →
+// `MetalError::UnexpectedThreadExecutionWidth`）が fail-closed で担保し、
+// `DeviceInfo::warp_width` も `device.rs::APPLE_SIMDGROUP_WIDTH`（32）を報告する。
+// CUDA 側は `crates/backend-cuda/src/warp_geometry.rs` が実行時属性から注入する。
 constant uint SOFTMAX_SIMD_WIDTH = 32u;
 constant float SOFTMAX_LOG2E = 1.4426950408889634f;
 // `row_kernel::SOFTMAX_NEG_FLT_MAX`（Rust 側。`f32::MIN` の単一の真実源）

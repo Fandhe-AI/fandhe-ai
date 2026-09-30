@@ -97,9 +97,9 @@ extern "C" __global__ void mse_partial_f32(
     float* __restrict__ partial,
     int numel)
 {
-    __shared__ float warp_sums[8];
-    int lane = threadIdx.x % 32;
-    int warp_id = threadIdx.x / 32;
+    __shared__ float warp_sums[WARPS_PER_BLOCK];
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
 
     float acc = 0.0f;
     long long stride = (long long)gridDim.x * blockDim.x;
@@ -109,8 +109,8 @@ extern "C" __global__ void mse_partial_f32(
     }
 
     #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        acc += __shfl_xor_sync(0xffffffff, acc, offset);
+    for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+        acc += WARP_SHFL_XOR(acc, offset);
     }
     if (lane == 0) {
         warp_sums[warp_id] = acc;
@@ -118,10 +118,10 @@ extern "C" __global__ void mse_partial_f32(
     __syncthreads();
 
     if (warp_id == 0) {
-        float block_sum = (lane < 8) ? warp_sums[lane] : 0.0f;
+        float block_sum = (lane < WARPS_PER_BLOCK) ? warp_sums[lane] : 0.0f;
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            block_sum += __shfl_xor_sync(0xffffffff, block_sum, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            block_sum += WARP_SHFL_XOR(block_sum, offset);
         }
         if (lane == 0) {
             partial[blockIdx.x] = block_sum;
@@ -140,9 +140,9 @@ extern "C" __global__ void mse_finalize_f32(
     int num_partials,
     float factor)
 {
-    __shared__ float warp_sums[8];
-    int lane = threadIdx.x % 32;
-    int warp_id = threadIdx.x / 32;
+    __shared__ float warp_sums[WARPS_PER_BLOCK];
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
 
     float acc = 0.0f;
     for (int idx = threadIdx.x; idx < num_partials; idx += blockDim.x) {
@@ -150,8 +150,8 @@ extern "C" __global__ void mse_finalize_f32(
     }
 
     #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        acc += __shfl_xor_sync(0xffffffff, acc, offset);
+    for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+        acc += WARP_SHFL_XOR(acc, offset);
     }
     if (lane == 0) {
         warp_sums[warp_id] = acc;
@@ -159,10 +159,10 @@ extern "C" __global__ void mse_finalize_f32(
     __syncthreads();
 
     if (warp_id == 0) {
-        float block_sum = (lane < 8) ? warp_sums[lane] : 0.0f;
+        float block_sum = (lane < WARPS_PER_BLOCK) ? warp_sums[lane] : 0.0f;
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            block_sum += __shfl_xor_sync(0xffffffff, block_sum, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            block_sum += WARP_SHFL_XOR(block_sum, offset);
         }
         if (lane == 0) {
             out[0] = block_sum * factor;
@@ -192,9 +192,72 @@ extern "C" __global__ void mse_backward_f32(
 }
 "#;
 
+use crate::error::CudaError;
+use crate::warp_geometry::WarpGeometry;
+
+/// MSE forward 1 段目のレンダ済みソース（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_mse_partial_f32(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(Some(MSE_BLOCK_DIM))?,
+        MSE_PARTIAL_F32
+    ))
+}
+
+/// MSE forward 2 段目のレンダ済みソース（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_mse_finalize_f32(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(Some(MSE_BLOCK_DIM))?,
+        MSE_FINALIZE_F32
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// width 32 のレンダ結果の注入 define・リテラル残存否定・境界検査維持
+    /// （イシュー #2126）。`WARPS_PER_BLOCK` は `MSE_BLOCK_DIM / 32 = 8`。
+    #[test]
+    fn rendered_sources_inject_warp_defines_without_literals() {
+        let geom = WarpGeometry::new(32).expect("32");
+        assert_eq!(geom.warps_per_block(MSE_BLOCK_DIM), Some(8));
+        for src in [
+            render_mse_partial_f32(geom).expect("render"),
+            render_mse_finalize_f32(geom).expect("render"),
+        ] {
+            assert!(src.starts_with("#define WARP_SIZE 32\n#define WARP_HALF 16\n"));
+            assert!(src.contains("#define WARP_FULL_MASK 0xffffffffu\n"));
+            assert!(src.contains("#define WARPS_PER_BLOCK 8\n"));
+            let body = &src[src.find("extern \"C\"").expect("kernel")..];
+            for lit in [
+                "0xffffffff",
+                "offset = 16",
+                "[8]",
+                "lane < 8",
+                "% 32",
+                "/ 32",
+            ] {
+                assert!(!body.contains(lit), "残存リテラル: {lit}");
+            }
+        }
+        assert!(
+            render_mse_partial_f32(geom)
+                .expect("r")
+                .contains("idx < numel")
+        );
+        assert!(
+            render_mse_finalize_f32(geom)
+                .expect("r")
+                .contains("idx < num_partials")
+        );
+        assert!(render_mse_partial_f32(WarpGeometry::new(64).expect("64")).is_err());
+    }
 
     /// REQ-8 境界検査・非 atomic 決定性の証跡（`backend-metal` の
     /// `mse_source_evidence.rs` と対になる CUDA 側の文字列検査。ソース

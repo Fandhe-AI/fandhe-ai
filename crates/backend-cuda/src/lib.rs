@@ -433,13 +433,12 @@ mod kernels_softmax;
 mod kernels_tiled_pipeline;
 mod kernels_tiled_pipeline_128x64;
 mod kernels_transpose;
-// イシュー #2125: warp 幅依存化の模型（純粋関数＋固定テストのみ。カーネル
-// 未結線のため `cfg(test)` 限定。#2126 の結線時に `cfg(test)` を外す）。
 mod kernels_wmma;
 mod kernels_wmma_opt;
 #[cfg(test)]
 mod readout_regression_diag_tests_1436;
-#[cfg(test)]
+// イシュー #2125・#2126: warp 幅依存カーネル定数の導出元（NVRTC ソースへの
+// `WARP_SIZE` 等の数値 `#define` 注入。`kernels_{rmsnorm,softmax,mse}.rs` が使う）。
 mod warp_geometry;
 // イシュー #2107: readback 区間（D2H 宛先確保・事前タッチ・D2H 発行・同期）を
 // サブフェーズ分解し、`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §12.5 の
