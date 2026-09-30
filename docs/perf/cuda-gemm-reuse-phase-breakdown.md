@@ -385,6 +385,7 @@ N=4096 `matmul` は 5 run とも 30.05〜30.29 ms（q1/q3 29.9〜30.4）で二�
 の純カーネル時間実測 N=2048 1.12 倍・N=4096 1.35 倍と本ラウンドの 1.127／
 1.375 倍が整合するが、本ラウンドは切替前後の同一セッション比較ではない
 ため帰属は未検証）。
+（帰属検証の計装は §13〔イシュー #2107〕。）
 
 ### §12.5 突合（Layer A `matmul` 対 Σ Layer B）
 
@@ -475,3 +476,71 @@ candle/fandhe = 0.485／0.522／1.49 倍であり、issue #1973 本文の「約 
 宛先の反復間再利用（#1336 `HostStagingCache` と同型の設計。§11 のとおり
 現状は本経路に到達しない）の A/B を、事前登録規則付きで行うことを入力
 として引き継ぐ。tolerance／baseline／本番コードは本イシューで変更しない。
+
+（§12.5・本節の「未検証」の帰属検証計装は §13〔イシュー #2107〕を参照。）
+
+## §13 readback 宛先確保の帰属検証（イシュー #2107・**計装実装済み・GB10 実測は未実施**）
+
+### §13.1 位置づけ
+
+§12.5 は Layer A `matmul` と Σ Layer B の未説明分（N=1024 1.235 ms・
+N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
+（既定 `ReadbackDest::PretouchedFresh`・#1437）の「D2H 宛先 `Vec` の新規確保
+と非ゼロ sentinel による事前タッチ」へ帰属する候補としたが、Layer B の
+`d2h` が `clone_dtoh` を使い本番と宛先確保方式が異なるため**未検証**だった。
+本節は、その帰属を定量化する Layer B 計装と事前登録規則を記録する。
+修正施策（宛先の反復間再利用・`READBACK_DEST` 既定変更等）は次イシューの
+対象であり、本イシューでは本番コード・tolerance・baseline を変更しない。
+
+### §13.2 計装
+
+`crates/backend-cuda/src/readback_attribution_diag_tests_2107.rs`
+（`#[cfg(test)]`・実機テストは全て `#[ignore]`・新規 `unsafe` なし）。
+
+- 4 腕は `readout_regression_diag_tests_1436.rs` の `ReadoutArm` と 1:1 対応
+  （`clone_dtoh_legacy_to_vec`＝`LegacyToVec`、`clone_dtoh_borrowed_keep_alive`＝
+  `BorrowedKeepAlive`、`clone_dtoh_borrowed_dummy_alloc_free`＝
+  `BorrowedWithDummyAllocFree`、`pretouched_fresh_split`＝`PretouchedFreshDest`）。
+  補助対照 `pretouched_fresh_production`（本番 `readback` を分解せず 1 区間）を
+  4 腕に数えず追加する。
+- 各試行は Layer B と同じ前半 5 区間（`h2d_a`／`h2d_b`／`alloc_c`／
+  `launch_issue`／`kernel_wait`）に腕別 readback を続け、Σ(matmul 相当) を
+  Layer A `matmul` と直接突合できるようにする。
+- readback のサブフェーズ: `pretouched_fresh_split` は `dest_alloc`
+  （`Vec::with_capacity`）・`pretouch_fill`（`resize(n, SENTINEL)`）・
+  `d2h_issue`（`memcpy_dtoh`）・`d2h_sync`。`clone_dtoh` 系は内部確保と発行を
+  分離できない（未初期化 `Vec` に `unsafe` が要る）ため `clone_dtoh`・`d2h_sync`。
+  `with_capacity`＋`resize` は本番 `vec![SENTINEL; n]` と同じく `alloc_zeroed`
+  を経由せず全要素を書き込むため費用として等価で、補助腕との一致で実測でも
+  裏付ける（RULE.txt の計装健全性〈record_only〉）。
+- 腕単位のテスト（`readback_attribution_2107_n{1024,2048,4096}_{arm}` の 15
+  本）を新規プロセスで起動し、JSONL（`DIAG_JSON`。μs・median/q1/q3/min/max・
+  checksum の bit 表現）を出力する。腕間の大小関係へは `assert!` しない。
+- 実測基盤: `docs/perf/logs/cuda-gemm-readback-attribution-2107/`
+  （`RULE.txt`・`orchestrate.sh`・`aggregate.py`・`README.md`）。
+
+### §13.3 事前登録規則（要約。正は `RULE.txt`、実測前に固定・事後緩和なし）
+
+- 5 run（プロセス独立・腕順は run ごとに巡回）・単位 μs・run ごとの中央値の
+  5 run 間中央値と min-max。同一セッションで Layer A（`fandhe-ai =0.9.0`）も 5 run。
+- checksum は (N, 腕) 内・N 内の全腕・Layer A 既知値で一致（fail-closed）。
+- `residual = LayerA.matmul − Σ_matmul_equiv(clone_dtoh_borrowed_keep_alive)`、
+  `alloc_fill_share = (dest_alloc + pretouch_fill) / residual`。`≥ 0.80` 支持・
+  `< 0.50` 棄却・その間は未確定・`residual ≤ 0` は非再現。
+- Layer A（0.9.0）と Layer B（HEAD）の `memory.rs`／`gemm.rs`／`kernels*.rs` に
+  差分があれば判定は「無効（参考扱い）」。GB10 の専有ゲート（load1 < 1.0・GPU 0%）
+  未通過の run があれば参考扱い。
+
+### §13.4 状態
+
+| 項目 | 状態 |
+| --- | --- |
+| 計装・事前登録規則・オーケストレータ・集計器（`--self-test` 済み） | 実装済み |
+| x86 実機（RTX 3060）smoke | **不可**: 開発ホストに NVRTC（CUDA toolkit）が無く `CudaGemm` 構築が `NvrtcUnavailable` になるため未実施（コンパイル・純粋単体テストのみ確認） |
+| GB10 での 5 run 実測・帰属判定 | **未実施（実機セッションへ申し送り）**。`orchestrate.sh gb10` → `aggregate.py` の判定をここへ転記する |
+
+### §13.5 スコープ外
+
+- 結果に基づく修正施策（事前タッチ済み宛先の再利用・`READBACK_DEST` 既定変更）
+- managed memory（ゼロコピー）経路の比較・`PretouchedReusedDest` の再評価
+- N=4096 Layer B `d2h` 二峰性の原因究明・M4 Max（Metal）側の対応計測
