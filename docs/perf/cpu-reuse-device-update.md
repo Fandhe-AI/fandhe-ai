@@ -46,7 +46,7 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
 ## 3. 仮説
 
 - **H1 ループ形**: 境界検査付きの添字スカラーループが自動ベクトル化されず、1 要素の
-  コストが大きい（`sgd_kernel` と境界検査なし zip 形 `sgd_kernel_zip` の差で見る）
+  コストが大きい（`sgd_kernel` からループ外固定費 `sgd_kernel_fixed`〈同じ `sgd_step_device` を 1 要素で呼ぶ〉を引いた値と、境界検査なし zip 形 `sgd_kernel_zip` の差で見る）
 - **H2 cache 状態**: backward で rayon ワーカーが staging を書き、forward で params を
   読んだ直後に main スレッドが両者を読み書きするため、コア間（GB10 は 2 クラスタ構成）
   で cache line が移動する（`insitu_direct` と `insitu_pretouch` の差で見る）
@@ -70,8 +70,9 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
     staging と params を読んでから step を計時）。2 腕は別 store（同一初期値・同一データ）
     を交互に 1 step ずつ進める
   - standalone: `alloc`／`stage`／`sgd_kernel`／`sgd_compute_split`／`apply_params_split`／
-    `sgd_kernel_zip`／`sgd_kernel_xthread`（勾配を複数スレッドで書いた直後の融合カーネル。
-    H2 の補助で判定には使わない）
+    `sgd_kernel_zip`／`sgd_kernel_fixed`（ループ外固定費）／`sgd_kernel_xthread`（書き込み元の勾配 Tensor を別スレッドで生成してから main が書き込んだ直後の融合カーネル。
+    `DeviceBuffer` が `Send` でなく対象バッファへの書き込み自体は main のため、クロスコアの
+    cache 移動は再現しない。H2 は in-situ 2 腕の差で見る。判定には使わない）
   - checksum は最終 params の bit ハッシュ（腕間・run 間一致を集計で fail-closed 検査）
 - 判定規則は `logs/cpu-reuse-device-update-2106/RULE.txt`（実測前に固定）、集計は
   `aggregate.py`（`--self-test` あり）、実行は `orchestrate.sh`（独立 5 プロセス）
@@ -89,7 +90,7 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
 | M4 Max（5 run・record_only） | 未実施（実機セッションへ申し送り） |
 
 参考（判定外）: x86_64 Linux（Core i7-13700K・10 コア）の 5 run スモーク
-`logs/cpu-reuse-device-update-2106/smoke-x86/`。`sgd_kernel` が約 192 µs に対し境界検査
+`logs/cpu-reuse-device-update-2106/smoke-x86/`。`sgd_kernel` が約 171 µs（ループ外固定費 sgd_kernel_fixed は約 0.2 µs）に対し境界検査
 なしの zip 形は約 29 µs で、この環境では H1（ループ形）が大きく見える。ただし対象機種・
 コア構成・アロケータが GB10／M4 Max と異なり、RULE.txt のゲートも通していないため、
 仮説判定にも §7 の対処採否にも使わない。

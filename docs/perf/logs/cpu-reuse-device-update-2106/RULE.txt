@@ -1,4 +1,5 @@
 RULE fixed-at-utc: 2026-09-30T02:00:00Z (実機計測より前にコミットして固定。事後に緩めない)
+改訂: H1 の計時範囲差（レビュー指摘）を実機計測より前に是正。sgd_kernel_fixed を追加し H1 から固定費を除く。xthread 腕は DeviceBuffer が Send でなく対象バッファへの書き込みは main のため、名称の解釈を「書き込み元 Tensor を別スレッドで生成」へ是正（クロスコア cache 移動は再現しない）。
 issue: #2106 CPU reuse 学習 device_update フェーズ（GB10 277 µs）の内訳切り分け
 doc: docs/perf/cpu-reuse-device-update.md
 
@@ -30,14 +31,17 @@ doc: docs/perf/cpu-reuse-device-update.md
 [帰属規則]
 - T  = insitu_direct/device_update の 5 run 中央値
 - H2 = insitu_direct - insitu_pretouch（cache 状態。符号付きで報告）
-- H1 = standalone/sgd_kernel - standalone/sgd_kernel_zip（ループ形の差）
+- H1 = (standalone/sgd_kernel - standalone/sgd_kernel_fixed) - standalone/sgd_kernel_zip
+  （ループ形の差。sgd_kernel_fixed は同じ sgd_step_device を 1 要素で呼んだ固定費で、
+  device・shape・handle 検査や設定分岐などループ外の処理を除いて計時範囲を揃える）
 - H3 = standalone/alloc + standalone/stage（ホスト側確保・bias の stage）
 - kernel = standalone/sgd_kernel（融合 compute+apply 全体）
 - H4（prologue＋残差） = insitu_pretouch - (kernel + alloc + stage)
 - どれか 1 項が T の 50% 以上なら対応仮説を「支持」、どの項も届かなければ「未確定」。
   kernel 全体の割合と H1 差分の割合は別行で報告する。閾値は事後に変えない。
 - 補助: apply_params_split / (sgd_compute_split + apply_params_split) を書き戻し
-  トラフィック比として記録する。sgd_kernel_xthread は H2 の補助で判定に使わない。
+  トラフィック比として記録する。sgd_kernel_xthread（別スレッドで生成した勾配 Tensor を main が書いた直後の融合カーネル。
+  クロスコア cache 移動は再現しない）は H2 の補助で判定に使わない。
 - イシュー呼称との対応: alloc→alloc(+stage)、sgd_compute→sgd_kernel /
   sgd_compute_split、apply_params→この経路では融合のため独立区間なし
   （apply_params_split を参考値とする）。

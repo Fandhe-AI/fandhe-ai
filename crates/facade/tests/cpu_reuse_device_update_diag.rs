@@ -57,7 +57,7 @@ const ROUNDS: usize = 4;
 const ITERS_PER_ROUND: usize = 20;
 /// 標準出力の 1 行 1 区間 JSON の接頭辞（`orchestrate.sh` が抽出）。
 const PREFIX: &str = "DIAG_JSON ";
-/// `xthread` 補助腕で勾配バッファを書くスレッド数（H2 の補助。判定には使わない）。
+/// `xthread` 補助腕で書き込み元 Tensor を生成するスレッド数（H2 の補助。判定には使わない）。
 const XTHREADS: usize = 4;
 
 fn make_model() -> Sequential {
@@ -325,6 +325,9 @@ struct Standalone {
     p_zip: DeviceBuffer<f32>,
     p_split: DeviceBuffer<f32>,
     p_xthread: DeviceBuffer<f32>,
+    /// `sgd_kernel_fixed` 腕（1 要素。`sgd_step_device` のループ外固定費の計測用）。
+    p_fixed: DeviceBuffer<f32>,
+    g_fixed: DeviceBuffer<f32>,
     /// 非融合腕のホスト鏡像（compute の入力）。
     host_p: Vec<f32>,
     g_buf: DeviceBuffer<f32>,
@@ -352,6 +355,8 @@ impl Standalone {
             p_zip: upload_flat(mem, p0),
             p_split: upload_flat(mem, p0),
             p_xthread: upload_flat(mem, p0),
+            p_fixed: upload_flat(mem, &[1.0]),
+            g_fixed: upload_flat(mem, &[1.0]),
             host_p: p0.to_vec(),
             g_buf: upload_flat(mem, g),
             g_buf_x: upload_flat(mem, g),
@@ -397,6 +402,13 @@ impl Standalone {
         rec.timed("standalone", "sgd_kernel", || {
             ops.sgd_step_device(pf, gb, None, &sgd_cfg()).expect("sgd");
         });
+        // 固定費（H1 の分離用）: 同じ `sgd_step_device` を 1 要素で呼び、device・shape・
+        // handle 検査と設定分岐などループ外のコストだけを計時する。
+        let (pfx, gfx) = (&mut self.p_fixed, &self.g_fixed);
+        rec.timed("standalone", "sgd_kernel_fixed", || {
+            ops.sgd_step_device(pfx, gfx, None, &sgd_cfg())
+                .expect("sgd");
+        });
         // 非融合: compute → apply。
         let scratch = rec.timed("standalone", "sgd_compute_split", || {
             split_compute(&self.host_p, &self.g)
@@ -424,10 +436,15 @@ impl Standalone {
         mem.upload_into(&t, &mut self.p_zip, 0).expect("zip 反映");
     }
 
-    /// 勾配バッファを複数スレッドで書いた直後の融合カーネル（H2 の補助）。
+    /// 勾配の元データを別スレッドで生成（Tensor 化）してから main が `upload_into` した直後の
+    /// 融合カーネル（H2 の補助・判定に使わない）。
+    /// 注意: `DeviceBuffer` は `Send` でないため対象バッファへの書き込み自体は main
+    /// スレッドで行う。ワーカーが書くのは書き込み元のホスト Tensor だけであり、
+    /// 「別スレッドが勾配バッファを書いた直後の cache 状態」は再現していない
+    /// （その再現は insitu_direct/insitu_pretouch の差で見る）。
     fn run_xthread(&mut self, rec: &mut Rec) {
         let mem = self.ops.memory_ops().expect("MemoryOps");
-        // 書き込みは各スレッドが別チャンクを Tensor 経由で行う（区間外）。
+        // 書き込み元 Tensor は各スレッドが別チャンクで生成する（区間外）。
         let chunk = self.total.div_ceil(XTHREADS);
         let g = &self.g;
         let parts: Vec<Tensor<f32>> = std::thread::scope(|s| {

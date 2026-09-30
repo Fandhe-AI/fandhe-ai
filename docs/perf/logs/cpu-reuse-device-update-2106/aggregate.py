@@ -18,7 +18,7 @@ EXPECTED = {
     "insitu_pretouch": ["device_update"],
     "standalone": [
         "alloc", "stage", "sgd_kernel", "sgd_compute_split", "apply_params_split",
-        "sgd_kernel_zip", "sgd_kernel_xthread",
+        "sgd_kernel_zip", "sgd_kernel_xthread", "sgd_kernel_fixed",
     ],
 }
 # checksum_bits を持つべきセル（RULE.txt checksum 規則）
@@ -137,7 +137,7 @@ def aggregate(runs, unpassed=()):
     kernel = s("sgd_kernel")
     terms = {
         "H2 cache 状態(direct-pretouch)": t - pre,
-        "H1 ループ形(kernel-zip)": kernel - s("sgd_kernel_zip"),
+        "H1 ループ形((kernel-fixed)-zip)": (kernel - s("sgd_kernel_fixed")) - s("sgd_kernel_zip"),
         "H3 ホスト確保(alloc+stage)": s("alloc") + s("stage"),
         "kernel 全体(sgd_kernel)": kernel,
         "H4 prologue+残差(pretouch-(kernel+alloc+stage))": pre - (kernel + s("alloc") + s("stage")),
@@ -157,7 +157,7 @@ def aggregate(runs, unpassed=()):
     out.append("帰属: " + (", ".join(supported) if supported else "未確定（どの項も 50% 未満）"))
     split = s("sgd_compute_split") + s("apply_params_split")
     out.append(f"補助: apply_params_split / (compute+apply)_split = {s('apply_params_split') / split:.2f}")
-    out.append(f"補助: sgd_kernel_xthread = {us(s('sgd_kernel_xthread'))} us（H2 の補助。判定に使わない）")
+    out.append(f"補助: sgd_kernel_xthread = {us(s('sgd_kernel_xthread'))} us（H2 の補助・別スレッド生成 Tensor 経由でありクロスコア書き込みは再現しない。判定に使わない）")
     return "\n".join(out)
 
 
@@ -170,7 +170,7 @@ def synth_cells():
     lines = []
     for arm, phases in EXPECTED.items():
         for ph in phases:
-            t = {"device_update": 2.5e-4, "sgd_kernel": 1.5e-4, "sgd_kernel_zip": 0.5e-4}.get(ph, 1e-5)
+            t = {"device_update": 2.5e-4, "sgd_kernel": 1.5e-4, "sgd_kernel_zip": 0.5e-4, "sgd_kernel_fixed": 0.2e-4}.get(ph, 1e-5)
             if arm == "insitu_pretouch":
                 t = 2.0e-4
             if ph == "sgd_kernel_zip":
