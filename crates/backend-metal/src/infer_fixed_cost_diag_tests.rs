@@ -49,6 +49,8 @@ struct Sample {
     wall: f64,
     gpu_busy: f64,
     batches_with_timestamps: usize,
+    /// 反復内でコミットされたバッチ総数（タイムスタンプ取得数との突合用）。
+    batches_total: usize,
     wait_calls: usize,
 }
 
@@ -126,6 +128,7 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
                 wall,
                 gpu_busy,
                 batches_with_timestamps: with_ts,
+                batches_total: batches.len(),
                 wait_calls: wait1.saturating_sub(wait0),
             });
         }
@@ -147,15 +150,23 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
     println!("  download    median={:.1} us", med(|s| s.download) * 1e6);
     println!("  wall        median={:.1} us", wall * 1e6);
     println!("  gpu_busy    median={:.1} us", gpu * 1e6);
-    let share = if wall > 0.0 {
-        (wall - gpu) / wall * 100.0
+    // 全バッチ・全反復で GPU タイムスタンプが取れた場合のみ gpu_busy を有効とする。
+    // 欠落時は filter_map の sum が 0 になり (wall-gpu_busy)/wall が約 100% と
+    // 表示されて H4（ホスト固定費主体）を誤支持するため、判定不能として扱う。
+    let ts_complete = samples
+        .iter()
+        .all(|s| s.batches_total > 0 && s.batches_with_timestamps == s.batches_total);
+    if ts_complete && wall > 0.0 {
+        let share = (wall - gpu) / wall * 100.0;
+        println!(
+            "  host_fixed (wall - gpu_busy) median={:.1} us ({share:.0}% of wall)",
+            (wall - gpu) * 1e6
+        );
     } else {
-        0.0
-    };
-    println!(
-        "  host_fixed (wall - gpu_busy) median={:.1} us ({share:.0}% of wall)",
-        (wall - gpu) * 1e6
-    );
+        println!(
+            "  host_fixed: GPU タイムスタンプ取得数が期待数未満のため H4 は判定不能（割合は算出しない）"
+        );
+    }
     let ts_min = samples
         .iter()
         .map(|s| s.batches_with_timestamps)
