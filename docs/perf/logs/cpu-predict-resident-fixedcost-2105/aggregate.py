@@ -7,6 +7,7 @@
 RULE.txt（実測前に固定）が正で、本スクリプトは変更しない。
 """
 import json
+import math
 import os
 import statistics
 import sys
@@ -23,6 +24,8 @@ EXPECTED = {
     "fresh_layers": ["l1_linear_relu_fused", "l2_linear_gemm_add"],
     "ablation": ["l1_host_unfused_gemm_add_relu", "input_to_vec_copy"],
 }
+EXPECTED_N = 80  # 計測 20 反復 x 4 ラウンド（RULE.txt 実行方法。テスト側 ROUNDS x ITERS_PER_ROUND）
+GATE_FILE = "load_gate_status.txt"  # orchestrate.sh が run ごとに 1 行 `run<N> gate=<pass|unpassed|record_only>` を書く
 ATTRIB_THRESHOLD = 0.5  # RULE.txt 帰属規則（事後に変えない）
 
 
@@ -42,8 +45,15 @@ def load_run(path):
                     rec = json.loads(line)
                     key = (rec["arm"], rec["phase"])
                     rec["median_s"] = float(rec["median_s"])
+                    n = rec["n"]
                 except (ValueError, KeyError, TypeError) as e:
                     raise AggError(f"{path}:{i}: 不正な行 ({e})")
+                if key[1] not in EXPECTED.get(key[0], []):
+                    raise AggError(f"{path}:{i}: 想定外のセル {key}")
+                if not math.isfinite(rec["median_s"]) or rec["median_s"] <= 0.0:
+                    raise AggError(f"{path}:{i}: median_s が有限の正値でない {key} ({rec['median_s']})")
+                if isinstance(n, bool) or n != EXPECTED_N:
+                    raise AggError(f"{path}:{i}: 計測回数 n={n!r} が {EXPECTED_N} でない {key}")
                 if key in cells:
                     raise AggError(f"{path}:{i}: セル重複 {key}")
                 cells[key] = rec
@@ -54,6 +64,28 @@ def load_run(path):
             if (arm, ph) not in cells:
                 raise AggError(f"{path}: セル欠落 {arm}/{ph}")
     return cells
+
+
+def load_gate(d):
+    """load_gate_status.txt を読み、負荷ゲート未通過の run 名一覧を返す（欠落・不正は fail-closed）。"""
+    path = os.path.join(d, GATE_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except OSError as e:
+        raise AggError(f"{path}: 読み込み不可 ({e})")
+    seen = {}
+    for ln in lines:
+        parts = ln.split()
+        if len(parts) != 2 or not parts[1].startswith("gate="):
+            raise AggError(f"{path}: 不正な行 {ln!r}")
+        status = parts[1][5:]
+        if status not in ("pass", "unpassed", "record_only") or parts[0] in seen:
+            raise AggError(f"{path}: 不正または重複した行 {ln!r}")
+        seen[parts[0]] = status
+    if set(seen) != {f"run{n}" for n in range(1, RUNS + 1)}:
+        raise AggError(f"{path}: run1..run{RUNS} の全行が必要 ({sorted(seen)})")
+    return sorted(r for r, st in seen.items() if st == "unpassed")
 
 
 def med(runs, arm, ph):
@@ -78,9 +110,12 @@ def us(x):
     return f"{x * 1e6:.1f}"
 
 
-def aggregate(runs):
+def aggregate(runs, unpassed=()):
     fresh_eq_reuse = check_checksums(runs)
     out = []
+    if unpassed:
+        out.append(f"【参考扱い】GB10 負荷ゲート未通過の run: {', '.join(unpassed)}（RULE.txt ゲート節。通常判定として扱わない）")
+        out.append("")
     out.append("| arm | phase | median(us) | min-max(us) | minflt/iter(median) |")
     out.append("|---|---|---|---|---|")
     for arm, phases in EXPECTED.items():
@@ -127,7 +162,7 @@ def aggregate(runs):
 
 
 def synth_line(arm, ph, med_s, chk=None):
-    return {"arm": arm, "phase": ph, "median_s": med_s, "checksum_bits": chk,
+    return {"arm": arm, "phase": ph, "median_s": med_s, "n": EXPECTED_N, "checksum_bits": chk,
             "minflt_delta_per_iter": None}
 
 
@@ -143,6 +178,20 @@ def synth_cells(scale=1.0):
     return lines
 
 
+def write_gate(d, statuses):
+    with open(os.path.join(d, GATE_FILE), "w", encoding="utf-8") as f:
+        for n, st in enumerate(statuses, 1):
+            f.write(f"run{n} gate={st}\n")
+
+
+def expect_fail(d, label):
+    try:
+        run_dir(d)
+    except AggError:
+        return
+    raise SystemExit(f"self-test 失敗: {label} を検出できない")
+
+
 def self_test():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -150,8 +199,34 @@ def self_test():
             with open(os.path.join(d, f"run{n}.jsonl"), "w", encoding="utf-8") as f:
                 for rec in synth_cells():
                     f.write(json.dumps(rec) + "\n")
+        write_gate(d, ["pass"] * RUNS)
         text = run_dir(d)
-        assert "ratio" in text and "帰属" in text, text
+        assert "ratio" in text and "帰属" in text and "参考扱い" not in text, text
+        # 負荷ゲート未通過は参考扱いとして出力へ反映される
+        write_gate(d, ["pass", "unpassed", "pass", "pass", "pass"])
+        text = run_dir(d)
+        assert "【参考扱い】" in text and "run2" in text, text
+        os.remove(os.path.join(d, GATE_FILE))
+        expect_fail(d, "ゲート状態ファイル欠落")
+        write_gate(d, ["pass"] * RUNS)
+        # n 不足・NaN・Inf・負値・ゼロ
+        p = os.path.join(d, "run1.jsonl")
+        orig = open(p, encoding="utf-8").read()
+        for label, mut in (
+            ("n=1", lambda r: r.__setitem__("n", 1)),
+            ("median NaN", lambda r: r.__setitem__("median_s", float("nan"))),
+            ("median Inf", lambda r: r.__setitem__("median_s", float("inf"))),
+            ("median 負", lambda r: r.__setitem__("median_s", -1e-4)),
+            ("median 0", lambda r: r.__setitem__("median_s", 0.0)),
+        ):
+            with open(p, "w", encoding="utf-8") as f:
+                for i, ln in enumerate(orig.splitlines()):
+                    rec = json.loads(ln)
+                    if i == 0:
+                        mut(rec)
+                    f.write(json.dumps(rec) + "\n")
+            expect_fail(d, label)
+        open(p, "w", encoding="utf-8").write(orig)
         # 欠落セル
         p = os.path.join(d, "run3.jsonl")
         lines = open(p, encoding="utf-8").read().splitlines()
@@ -184,7 +259,7 @@ def self_test():
 
 def run_dir(d):
     runs = [load_run(os.path.join(d, f"run{n}.jsonl")) for n in range(1, RUNS + 1)]
-    return aggregate(runs)
+    return aggregate(runs, load_gate(d))
 
 
 def main(argv):

@@ -80,8 +80,11 @@ load1() {
   uptime | sed -e 's/.*load averages*: *//' -e 's/,/ /g' | awk '{print $1}'
 }
 
+# 集計器へ渡す負荷ゲート状態（aggregate.py が読み、未通過 run があれば参考扱いを出力へ反映する）
+: >"$out_dir/load_gate_status.txt"
 for n in 1 2 3 4 5; do
   if [ "$host_kind" = "gb10" ]; then
+    gate_status=pass
     waited=0
     while :; do
       l="$(load1)"
@@ -89,14 +92,17 @@ for n in 1 2 3 4 5; do
       if awk -v l="$l" 'BEGIN{exit !(l < 1.0)}'; then break; fi
       if [ "$waited" -ge 1800 ]; then
         echo "run$n: 負荷ゲート未通過（参考扱い）" >>"$out_dir/load_gate.log"
+        gate_status=unpassed
         break
       fi
       sleep 30
       waited=$((waited + 30))
     done
   else
+    gate_status=record_only
     echo "run$n load1=$(load1) (record_only)" >>"$out_dir/load_gate.log"
   fi
+  echo "run$n gate=$gate_status" >>"$out_dir/load_gate_status.txt"
   "$bin" --ignored --exact cpu_predict_resident_fixedcost_phases --nocapture --test-threads=1 \
     >"$out_dir/run$n.raw" 2>"$out_dir/run$n.err.raw"
   grep -o 'DIAG_JSON .*' "$out_dir/run$n.raw" | sed -e 's/^DIAG_JSON //' >"$out_dir/run$n.jsonl"
