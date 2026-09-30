@@ -44,6 +44,20 @@ fn checksum_f64(values: &[f32]) -> f64 {
     values.iter().fold(0.0f64, |acc, &v| acc + v as f64)
 }
 
+/// f32 出力の全要素ビット列（`to_bits` のリトルエンディアン 4 バイト）に対する FNV-1a 64bit。
+/// run 間出力一致の判定用（依存追加なしの自前実装）。checksum（f64 和の 6 桁丸め）は
+/// 誤差相殺・丸めで異なる出力を同一視しうるため参考値に留め、判定は本ハッシュで行う。
+fn bits_hash_fnv1a64(values: &[f32]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    values.iter().fold(OFFSET, |h, v| {
+        v.to_bits()
+            .to_le_bytes()
+            .iter()
+            .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(PRIME))
+    })
+}
+
 fn bits_of(values: &[f32]) -> Vec<u32> {
     values.iter().map(|v| v.to_bits()).collect()
 }
@@ -283,7 +297,9 @@ fn steel_candidate_arms_match_cpu_reference() {
 /// `aggregate.py` が行う。`kernel_gpu` の大小は assert しない（記録のみ）。
 ///
 /// 出力行（`aggregate.py` の正規表現と一致させる。変更時は両方を更新する）:
-/// - `N=<n> arm=<label> checksum=<f> bit_identical=<bool> same_kernel=<bool> same_tile=<bool>`
+/// - `hash` は出力全要素の f32 ビット列の FNV-1a 64bit で、`aggregate.py` の run 間出力一致判定に使う
+///   （`checksum` は参考値）。
+/// - `N=<n> arm=<label> checksum=<f> hash=<16 桁 hex> bit_identical=<bool> same_kernel=<bool> same_tile=<bool>`
 ///   （`bit_identical` は base 出力とのビット一致。タイル形状が異なる arm は K 方向の
 ///   演算順序が変わりうるため bit 一致は契約外〈`metal-gemm-steel-candidates.md` §5〉。
 ///   `aggregate.py` は `same_tile=true` の cell のみ bit 一致を採用可否へ反映する）
@@ -334,9 +350,10 @@ fn steel_candidate_kernel_gpu_ab_production_sizes() {
             let same_kernel = STEEL_ARMS[idx].same_kernel_as_base(n, verified);
             let same_tile = cfgs[idx] == cfgs[0];
             println!(
-                "N={n} arm={} checksum={:.6} bit_identical={} same_kernel={same_kernel} same_tile={same_tile}",
+                "N={n} arm={} checksum={:.6} hash={:016x} bit_identical={} same_kernel={same_kernel} same_tile={same_tile}",
                 STEEL_ARMS[idx].label,
                 checksum_f64(&out),
+                bits_hash_fnv1a64(&out),
                 bits_of(&out) == base_bits,
             );
         }

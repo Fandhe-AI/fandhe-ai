@@ -37,7 +37,7 @@ GATE_TESTS = (
 AB_TEST = "gemm_steel_candidate_diag_tests::steel_candidate_kernel_gpu_ab_production_sizes"
 
 RE_BIT = re.compile(
-    r"^N=(\d+) arm=(\S+) checksum=(-?[0-9.eE+-]+) bit_identical=(true|false) same_kernel=(true|false)(?: same_tile=(true|false))?$"
+    r"^N=(\d+) arm=(\S+) checksum=(-?[0-9.eE+-]+) hash=([0-9a-f]{16}) bit_identical=(true|false) same_kernel=(true|false) same_tile=(true|false)$"
 )
 RE_RATIO = re.compile(r"^N=(\d+) arm=(\S+) head_over_base_kernel_gpu=([0-9.eE+-]+)$")
 RE_MEDIAN = re.compile(
@@ -54,11 +54,13 @@ def parse_run(text):
         if m:
             n, arm = int(m.group(1)), m.group(2)
             d = out.setdefault((arm, n), {})
+            # checksum（f64 和の 6 桁丸め）は参考値。run 間出力一致は全要素 f32 ビット列の
+            # FNV-1a 64bit ハッシュ（hash）で判定する（丸め・誤差相殺で見逃さないため）。
             d["checksum"] = m.group(3)
-            d["bit_identical"] = m.group(4) == "true"
-            d["same_kernel"] = m.group(5) == "true"
-            # same_tile 欠落（旧形式）は fail-closed に「同一タイル」扱い＝bit 一致を要求する。
-            d["same_tile"] = m.group(6) != "false"
+            d["hash"] = m.group(4)
+            d["bit_identical"] = m.group(5) == "true"
+            d["same_kernel"] = m.group(6) == "true"
+            d["same_tile"] = m.group(7) == "true"
             continue
         m = RE_RATIO.match(line)
         if m:
@@ -87,6 +89,11 @@ def check_base_cells(runs):
                 bad.append(f"run{i} N={n} の base 行が不完全（bit／比／中央値のいずれかが無い）")
             elif c["median_ms"] <= 0.0 or c["ratio"] != 1.0 or not c["bit_identical"]:
                 bad.append(f"run{i} N={n} の base 値が不正（median_ms>0・ratio=1.0・bit_identical=true が必要）")
+    # base 出力の全要素ハッシュが run 間で一致すること（入力・カーネルの決定性確認）。
+    for n in EXPECTED_SIZES:
+        hs = {r[(BASE, n)]["hash"] for r in runs if (BASE, n) in r and "hash" in r[(BASE, n)]}
+        if len(hs) > 1:
+            bad.append(f"N={n} の base 出力ハッシュが run 間で不一致（{sorted(hs)}）")
     return bad
 
 
@@ -127,10 +134,10 @@ def judge(runs, reference_only=False, problems=()):
                 verdicts[arm] = ("INCOMPLETE", f"N={n} の ratio が正でない（計測不正）")
                 break
             # bit 一致は同一タイル cell のみ要求する（タイル形状が異なる arm 間の bit 一致は
-            # metal-gemm-steel-candidates.md §5 で契約外。run 間 checksum 一致は常に要求する）。
+            # metal-gemm-steel-candidates.md §5 で契約外。run 間の全要素ビット列ハッシュ一致は常に要求する）。
             if any(c["same_tile"] and not c["bit_identical"] for c in cells):
                 bit_bad.append(n)
-            if len({c["checksum"] for c in cells}) != 1:
+            if len({c["hash"] for c in cells}) != 1:
                 checksum_bad.append(n)
             if all(c["same_kernel"] for c in cells):
                 detail.append(f"N={n}: same_kernel（除外）")
@@ -144,7 +151,7 @@ def judge(runs, reference_only=False, problems=()):
             if bit_bad:
                 v = ("NOT_ADOPTABLE", f"bit_identical=false: N={bit_bad}")
             elif checksum_bad:
-                v = ("NOT_ADOPTABLE", f"run 間 checksum 不一致: N={checksum_bad}")
+                v = ("NOT_ADOPTABLE", f"run 間出力ハッシュ不一致: N={checksum_bad}")
             elif not considered:
                 v = ("UNDETERMINED", "判定対象 N なし（全 N same_kernel）")
             elif any(med > 1.0 and pos == N_RUNS for _n, med, pos in considered):
@@ -259,7 +266,7 @@ def load_dir(d):
     return runs, reference_only, problems
 
 
-def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", with_base=True,
+def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", hash_="0000000000000001", with_base=True,
                  with_median=True):
     """自己テスト用の 1 run 分ログを生成する。ratios: {(arm, n): ratio}。
 
@@ -270,7 +277,7 @@ def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", with_base=Tru
     if with_base:
         for n in sorted({n for (_a, n) in ratios}):
             lines.append(
-                f"N={n} arm=base checksum={checksum} bit_identical=true same_kernel=true same_tile=true"
+                f"N={n} arm=base checksum={checksum} hash=0000000000000001 bit_identical=true same_kernel=true same_tile=true"
             )
             lines.append(
                 f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0000 q1=0.9000 q3=1.1000"
@@ -278,8 +285,8 @@ def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", with_base=Tru
             lines.append(f"N={n} arm=base head_over_base_kernel_gpu=1.000000")
     for (arm, n), r in ratios.items():
         lines.append(
-            f"N={n} arm={arm} checksum={checksum} bit_identical={'true' if bit else 'false'} "
-            f"same_kernel={'true' if (arm, n) in same else 'false'}"
+            f"N={n} arm={arm} checksum={checksum} hash={hash_} bit_identical={'true' if bit else 'false'} "
+            f"same_kernel={'true' if (arm, n) in same else 'false'} same_tile=true"
         )
         if with_median:
             lines.append(
@@ -325,10 +332,18 @@ def self_test():
     assert judge(all_same)["X"][0] == "UNDETERMINED"
     # run 数不足
     assert judge(build(ok)[:3])["X"][0] == "INCOMPLETE"
-    # checksum が run 間で不一致
-    cs = [parse_run(_fixture_run({("X", n): 0.9 for n in EXPECTED_SIZES}, checksum=f"{i}.0"))
+    # ハッシュが run 間で不一致（checksum は全 run 同一＝和が同じでビット列が異なるケース）
+    cs = [parse_run(_fixture_run({("X", n): 0.9 for n in EXPECTED_SIZES}, hash_=f"{i:016x}"))
           for i in range(N_RUNS)]
     assert judge(cs)["X"][0] == "NOT_ADOPTABLE"
+    # base ハッシュが run 間で不一致 → INCOMPLETE（check_base_cells）
+    bh = build(ok)
+    bh[2][(BASE, 1024)]["hash"] = "00000000000000ff"
+    assert judge(bh)["X"][0] == "INCOMPLETE"
+    # 旧形式（hash 欄なし）の行は解析されず INCOMPLETE
+    old = [parse_run(_fixture_run({("X", n): 0.9 for n in EXPECTED_SIZES}).replace(" hash=0000000000000001", ""))
+           for _ in range(N_RUNS)]
+    assert judge(old)["X"][0] == "INCOMPLETE"
     # 参考扱いの付記
     assert judge(build(ok), reference_only=True)["X"][0] == "ADOPT_CANDIDATE(REFERENCE_ONLY)"
     # データ欠落 N
@@ -344,10 +359,10 @@ def self_test():
     # 別タイル arm の bit 不一致は NOT_ADOPTABLE にしない／同一タイルの不一致は NOT_ADOPTABLE
     diff_tile = [
         parse_run("\n".join(
-            f"N={n} arm=base checksum=1.0 bit_identical=true same_kernel=true same_tile=true\n"
+            f"N={n} arm=base checksum=1.0 hash=0000000000000001 bit_identical=true same_kernel=true same_tile=true\n"
             f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0 q1=0.9 q3=1.1\n"
             f"N={n} arm=base head_over_base_kernel_gpu=1.0\n"
-            f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=false\n"
+            f"N={n} arm=X checksum=1.0 hash=0000000000000001 bit_identical=false same_kernel=false same_tile=false\n"
             f"N={n} arm=X resolved_tile=Cfg kernel_gpu_median_ms=0.9 q1=0.8 q3=1.0\n"
             f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
         for _ in range(N_RUNS)
@@ -355,10 +370,10 @@ def self_test():
     assert judge(diff_tile)["X"][0] == "ADOPT_CANDIDATE"
     same_tile = [
         parse_run("\n".join(
-            f"N={n} arm=base checksum=1.0 bit_identical=true same_kernel=true same_tile=true\n"
+            f"N={n} arm=base checksum=1.0 hash=0000000000000001 bit_identical=true same_kernel=true same_tile=true\n"
             f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0 q1=0.9 q3=1.1\n"
             f"N={n} arm=base head_over_base_kernel_gpu=1.0\n"
-            f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=true\n"
+            f"N={n} arm=X checksum=1.0 hash=0000000000000001 bit_identical=false same_kernel=false same_tile=true\n"
             f"N={n} arm=X resolved_tile=Cfg kernel_gpu_median_ms=0.9 q1=0.8 q3=1.0\n"
             f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
         for _ in range(N_RUNS)
