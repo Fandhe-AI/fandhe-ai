@@ -60,8 +60,9 @@
 //! 逐次腕もチャンク内 fold → チャンク番号順 fold の 2 段構造・出力要素ごとの
 //! 昇順累積を保つため、どちらの腕も bit 同一（上記「決定性契約」を壊さない）。
 //!
-//! - しきい値の値は未実測の暫定候補。M4 Max・GB10 での実機スイープ（#2102）
-//!   で決める。`crate::elementwise::PARALLEL_THRESHOLD` は累積を伴わない
+//! - しきい値の値は未実測の暫定候補。M4 Max・GB10 での実機スイープと A/B の
+//!   判定は #2102（規則は `docs/perf/logs/elemental-reduction-ab-2102/RULE.txt`。
+//!   基盤は整備済み・実測は未実施でゲートは既定 OFF のまま）で決める。`crate::elementwise::PARALLEL_THRESHOLD` は累積を伴わない
 //!   契約向けの値であり流用しない（`docs/perf/cpu-parallel-threshold-sweep.md`）。
 //! - `mse_loss_backward` への適用は #1578 で REJECT 確定（対象外）。
 //! - 設計・事前登録規則は `docs/perf/cpu-reduction-sequential-threshold.md`。
@@ -94,13 +95,17 @@ pub(crate) const CHUNK: usize = 4096;
 /// （イシュー #2101。低レイヤー診断 `docs/perf/lowlayer-diagnosis-2026-09-12.md`
 /// §4 の小形状 fork-join 固定費対策）。`false`（既定）の間は全サイトが従来
 /// どおり常に rayon 経由で、挙動は変更前と完全に同一。`true` への切替は
-/// #2102 の事前登録判定（`docs/perf/logs/elemental-reduction-threshold-2101/
-/// RULE.txt`）を経た場合のみ。`mse_loss_backward` は #1578 で REJECT
+/// #2102 の事前登録判定（`docs/perf/logs/elemental-reduction-ab-2102/RULE.txt`。
+/// Phase 0 の規則は `docs/perf/logs/elemental-reduction-threshold-2101/
+/// RULE.txt`）で ADOPT となった場合のみ。A/B スクリプト
+/// `scripts/bench/framework-compare/run_ab_reduction_threshold_cpu.sh` は本 2 定数の
+/// 宣言を 1 行形式のまま sed で読むため、宣言の書式を変えない（ドリフト検査は
+/// `tests::ab_script_constant_declarations_are_parseable`）。`mse_loss_backward` は #1578 で REJECT
 /// 確定のため対象外。
 pub(crate) const REDUCTION_SEQUENTIAL_FALLBACK_ENABLED: bool = false;
 
 /// 逐次へ落とす入力要素数（`numel`）の**未実測の暫定候補**。ゲートが
-/// `false` の間は効かない。値は #2102 の実測で決める（#1578 Phase 0 で両機体
+/// `false` の間は効かない。値は #2102 の実測（Phase 0 で決めた T）で決める（#1578 Phase 0 で両機体
 /// とも `1 << 18` まで逐次が優位だったことのみを参考根拠とする）。
 /// `elementwise::PARALLEL_THRESHOLD` は流用しない（モジュール doc 参照）。
 pub(crate) const REDUCTION_PARALLEL_MIN_ELEMS: usize = 1 << 18;
@@ -2278,9 +2283,55 @@ mod tests {
         }
     }
 
+    /// A/B スクリプト（`run_ab_reduction_threshold_cpu.sh`）が sed で 2 定数を読む前提
+    /// （宣言が 1 行形式で 1 回ずつ現れる）を CI で守る（書式ドリフトの早期検出。値の
+    /// 既定は `sequential_fallback_gate_is_off_by_default` が別に守る。イシュー #2102）。
+    #[test]
+    fn ab_script_constant_declarations_are_parseable() {
+        let src = include_str!("reduction.rs");
+        let decl = |name: &str, ty: &str| -> Vec<String> {
+            let head = format!("pub(crate) const {name}: {ty} = ");
+            src.lines()
+                .map(str::trim_start)
+                .filter(|l| l.starts_with(&head))
+                .map(str::to_owned)
+                .collect()
+        };
+        let gate = decl("REDUCTION_SEQUENTIAL_FALLBACK_ENABLED", "bool");
+        assert_eq!(
+            gate.len(),
+            1,
+            "ゲート宣言は 1 行形式でちょうど 1 回: {gate:?}"
+        );
+        assert!(
+            gate[0].ends_with("= true;") || gate[0].ends_with("= false;"),
+            "{gate:?}"
+        );
+        let min = decl("REDUCTION_PARALLEL_MIN_ELEMS", "usize");
+        assert_eq!(
+            min.len(),
+            1,
+            "MIN_ELEMS 宣言は 1 行形式でちょうど 1 回: {min:?}"
+        );
+        let value = min[0]
+            .rsplit("= ")
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(';');
+        let plain = value.replace('_', "").parse::<usize>().is_ok();
+        let shifted = value
+            .split_once("<<")
+            .is_some_and(|(a, b)| a.trim() == "1" && b.trim().parse::<u32>().is_ok());
+        assert!(
+            plain || shifted,
+            "10 進整数または `1 << k` 形式のみ: {value:?}"
+        );
+    }
+
     /// 実機（M4 Max・GB10。CI 非対象）でのしきい値候補スイープ。手順・判定
     /// 規則は `docs/perf/logs/elemental-reduction-threshold-2101/RULE.txt`
-    /// （事前登録。判定は #2102）。
+    /// （事前登録）。A/B と結線の判定規則は `.../elemental-reduction-ab-2102/RULE.txt`、
+    /// 集計は同ディレクトリの `aggregate_sweep.py`（イシュー #2102）。
     #[test]
     #[ignore]
     fn reduction_threshold_sweep() {
