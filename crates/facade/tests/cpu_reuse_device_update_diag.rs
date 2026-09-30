@@ -379,13 +379,16 @@ impl Standalone {
         let total = self.total;
         // alloc（H3）: `flat_grad` 相当の未使用 capacity 確保と小 Vec 群に加え、
         // `DeviceParamStore::step` が bias 勾配を host 経由で stage する際の
-        // `grad.clone()`（2 本）も含める（含めないと H4 残差へ混入し H3/H4 の帰属を誤らせる）。
+        // `host_grads_for_staging` の構築・push と `grad.clone()`（2 本）も含める（含めないと H4 残差へ混入し H3/H4 の帰属を誤らせる）。
         let (cb1, cb2) = (&self.b1, &self.b2);
         rec.timed("standalone", "alloc", || {
             // `&Tensor` への `.clone()` が参照コピーに解決されないよう `Tensor::clone` を明示する。
-            let c1 = Tensor::clone(cb1);
-            let c2 = Tensor::clone(cb2);
-            std::hint::black_box((&c1, &c2));
+            // 本番と同じ `Vec<(usize, Tensor<f32>)>` の構築と push（初回 push の Vec 確保）も含める。
+            let mut staged: Vec<(usize, Tensor<f32>)> = Vec::new();
+            for (i, b) in [(1usize, cb1), (3usize, cb2)] {
+                staged.push((i, Tensor::clone(b)));
+            }
+            std::hint::black_box(&staged);
             let flat: Vec<f32> = Vec::with_capacity(total);
             let vars: Vec<u64> = Vec::with_capacity(4);
             let filled: Vec<bool> = vec![false; 4];
