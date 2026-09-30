@@ -628,6 +628,12 @@ pub(crate) enum ReadbackDest {
     /// 上書きされるため、返す `Vec` の内容自体は `Fresh` と bit 同一
     /// （D2H が全要素を上書きするため事前値は残らない）。
     PretouchedFresh,
+    /// pinned（page-locked）staging を ordinal・要素数ごとに再利用し、D2H 後に `to_vec()` で
+    /// 所有 `Vec` へ copy-out する opt-in 方式（イシュー #2108）。既定 OFF。env
+    /// `FANDHE_AI_CUDA_READBACK_DEST=pinned-reuse` でのみ選ばれる
+    /// （`crate::readback_policy`）。f32 以外の型は `PretouchedFresh` と同一処理。
+    /// 返す `Vec` は D2H が全要素を上書きするため `PretouchedFresh` と bit 同一。
+    PinnedStagingReuse,
 }
 
 /// `crates/backend-cuda` の CUDA 実機実測（#1437・GB10）で Layer B
@@ -667,10 +673,63 @@ pub(crate) trait ReadbackSentinel: DeviceRepr + Copy {
     /// （`readout_regression_diag_tests_1436.rs` の `PretouchedReusedDest`
     /// 腕が既に踏んだ同種の罠。#1436 コメント参照）。
     const SENTINEL: Self;
+
+    /// [`ReadbackDest::PinnedStagingReuse`] の実装点（イシュー #2108）。既定実装は
+    /// `PretouchedFresh` と同一処理（staging が f32 専用のため f32 以外はここへ落ちる）。
+    fn readback_pinned_reuse<Src: DevicePtr<Self>>(
+        stream: &Arc<CudaStream>,
+        dev: &Src,
+    ) -> Result<Vec<Self>, CudaError> {
+        let mut host = pretouched_host_vec::<Self>(dev.len());
+        stream.memcpy_dtoh(dev, &mut host)?;
+        stream.synchronize()?;
+        crate::gemm::diag_count_stream_sync();
+        Ok(host)
+    }
 }
 
 impl ReadbackSentinel for f32 {
     const SENTINEL: f32 = 1.0;
+
+    /// pinned staging をプールから借り（miss 時は新規確保）、`memcpy_dtoh` → `synchronize` の後
+    /// `to_vec()` で所有 `Vec` へ copy-out する。D2H が全要素を上書きするため
+    /// `PretouchedFresh` と bit 同一。エラー時は staging を返却せず破棄する（fail-closed）。
+    /// pinned 確保は既存の `HostStaging::alloc`（既存 `unsafe` 1 箇所）を再利用する。
+    fn readback_pinned_reuse<Src: DevicePtr<f32>>(
+        stream: &Arc<CudaStream>,
+        dev: &Src,
+    ) -> Result<Vec<f32>, CudaError> {
+        let numel = dev.len();
+        if numel == 0 {
+            return pretouched_readback_default::<f32, Src>(stream, dev);
+        }
+        let ctx = stream.context();
+        let ordinal = ctx.ordinal();
+        let generation = context_cache::current_generation(ordinal);
+        let pool = crate::readback_policy::readback_staging_pool();
+        let mut staging = match pool.take(ordinal, generation, numel) {
+            Some(s) => s,
+            None => HostStaging::alloc(host_staging::HOST_STAGING_KIND, ctx, numel)?,
+        };
+        stream.memcpy_dtoh(dev, staging.as_host_slice_mut())?;
+        stream.synchronize()?;
+        crate::gemm::diag_count_stream_sync();
+        let out = staging.as_slice()?.to_vec();
+        pool.put(ordinal, generation, numel, staging);
+        Ok(out)
+    }
+}
+
+/// `PretouchedFresh` と同一の readback（`numel == 0` の staging 回避用）。
+fn pretouched_readback_default<T: ReadbackSentinel, Src: DevicePtr<T>>(
+    stream: &Arc<CudaStream>,
+    dev: &Src,
+) -> Result<Vec<T>, CudaError> {
+    let mut host = pretouched_host_vec::<T>(dev.len());
+    stream.memcpy_dtoh(dev, &mut host)?;
+    stream.synchronize()?;
+    crate::gemm::diag_count_stream_sync();
+    Ok(host)
 }
 
 impl ReadbackSentinel for half::f16 {
@@ -755,7 +814,9 @@ where
     T: ReadbackSentinel,
     Src: DevicePtr<T>,
 {
-    readback_with(stream, dev, READBACK_DEST)
+    // 宛先方式は `readback_policy::current_dest()`（テスト override > env
+    // `FANDHE_AI_CUDA_READBACK_DEST` > `READBACK_DEST`。既定 `PretouchedFresh` 不変。#2108）。
+    readback_with(stream, dev, crate::readback_policy::current_dest())
 }
 
 /// [`readback`] の宛先確保方式を明示指定できる内部版（実機 A/B 計測・
@@ -784,6 +845,7 @@ where
             crate::gemm::diag_count_stream_sync();
             Ok(host)
         }
+        ReadbackDest::PinnedStagingReuse => T::readback_pinned_reuse(stream, dev),
     }
 }
 
@@ -807,6 +869,50 @@ pub fn readback_f32_diag(
         ReadbackDest::Fresh
     };
     readback_with(stream, dev, dest)
+}
+
+/// [`readback_f32_diag`] の宛先方式を `pinned_reuse` で選ぶ版（イシュー #2108。
+/// `false` は `PretouchedFresh`・`true` は `PinnedStagingReuse`）。実機 `#[ignore]` テスト用。
+#[cfg(feature = "internal-diagnostics")]
+pub fn readback_f32_policy_diag(
+    stream: &Arc<CudaStream>,
+    dev: &CudaSlice<f32>,
+    pinned_reuse: bool,
+) -> Result<Vec<f32>, CudaError> {
+    let dest = if pinned_reuse {
+        ReadbackDest::PinnedStagingReuse
+    } else {
+        ReadbackDest::PretouchedFresh
+    };
+    readback_with(stream, dev, dest)
+}
+
+/// [`readback_f32_policy_diag`] の f16 版（非 f32 が `PretouchedFresh` と同一処理へ落ちる確認用）。
+#[cfg(feature = "internal-diagnostics")]
+pub fn readback_f16_policy_diag(
+    stream: &Arc<CudaStream>,
+    dev: &CudaSlice<half::f16>,
+    pinned_reuse: bool,
+) -> Result<Vec<half::f16>, CudaError> {
+    let dest = if pinned_reuse {
+        ReadbackDest::PinnedStagingReuse
+    } else {
+        ReadbackDest::PretouchedFresh
+    };
+    readback_with(stream, dev, dest)
+}
+
+/// readback staging プールの統計 `(hits, misses, evicted, cached_bytes)`（イシュー #2108）。
+#[cfg(feature = "internal-diagnostics")]
+pub fn readback_staging_stats_diag() -> (u64, u64, u64, u64) {
+    let s = crate::readback_policy::readback_staging_pool().stats();
+    (s.hits, s.misses, s.evicted, s.cached_bytes)
+}
+
+/// readback staging プールを明示解放し、解放バイト数を返す（イシュー #2108）。
+#[cfg(feature = "internal-diagnostics")]
+pub fn release_readback_staging_diag() -> u64 {
+    crate::readback_policy::readback_staging_pool().release_all()
 }
 
 /// [`readback_f32_diag`] の f16 版（`gemm_mma.rs::download_f16` が経由

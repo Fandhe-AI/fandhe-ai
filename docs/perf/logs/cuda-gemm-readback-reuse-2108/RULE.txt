@@ -1,0 +1,54 @@
+RULE fixed-at-utc: 2026-09-30 (実機計測より前にコミットして固定。事後に緩和・変更しない)
+issue: #2108 CUDA readback 宛先の再利用・ゼロコピー化の opt-in 実装＋A/B
+doc: docs/perf/cuda-gemm-readback-reuse-2108.md
+
+[対象]
+- 同一バイナリ（HEAD の facade を AB_PATCH_FACADE_PATH で参照。本スクリプトのリポジトリ HEAD と一致必須）。
+  before = FANDHE_AI_CUDA_READBACK_DEST 未設定（既定 PretouchedFresh）
+  after  = FANDHE_AI_CUDA_READBACK_DEST=pinned-reuse（PinnedStagingReuse）
+- env 許容値は pretouched／pinned-reuse のみ（完全一致。未知値は既定へ倒す）
+- 凍結する定数: HOST_STAGING_CAP_BYTES = 256 MiB（ordinal あたり）、staging は f32 のみ・要素数ごとに 1 バッファ
+- 腕の性格: pinned（page-locked）staging への D2H + CPU copy-out 1 回。#1436 の PretouchedReusedDest
+  （pageable 再利用宛先）とは別の実験であり、REJECT／undetermined 済み実験の再実行には当たらない。
+  managed 配置（#1352/#1353）は REJECT 済みのため扱わない
+- 判定セル（3 セルすべて）: gemm cuda reuse N=1024、N=2048、N=4096。fresh 行は計測しない
+
+[前提ゲート（#2107 の帰属判定）]
+- #2107 の aggregate.py 判定が N ごとに「支持（alloc_fill_share >= 0.80）」の N だけが、その N で ADOPT の対象になる
+- 全 N が「棄却」なら #2108 の A/B は実施せず not applicable と記録する
+- 「未確定」「非再現」の N は判定を undetermined 止まりとする
+- 順序制約: #2107 の orchestrate.sh gb10 は本 PR（#2108）より前のコミット（例: 8bba6b57）の checkout で先に実行する。
+  本 PR は memory.rs の readback／readback_with を変更するため、#2107 の check_layer_a_path_identity.py
+  （readback 系項目の正規化テキスト比較）が HEAD 上では「no」になる。#2107 側のスクリプト・RULE.txt・
+  REVIEWED_EQUIVALENT は編集しない（事後緩和の禁止）。本 A/B は #2107 の後に HEAD で実行する
+
+[計測]
+- 5 round 固定（AB_ROUNDS=5 以外は拒否）、プロセス独立起動、round ごとに起動順を反転（run_ab_readback_reuse_cuda.sh）
+- run の差し替え・追加起動はしない。同一 label の既存出力があれば停止する
+- 各セルの ratio = median(after) / median(before)（5 run の中央値どうし。単位は bench-fandhe の median_s）
+
+[判定]
+- ADOPT: 専有ゲート（AB_LOAD_GATE_MODE=exclusive。load1 < 1.0 かつ GPU 使用率 0% を 3 サンプル連続）を通過し、
+  前提ゲートで対象となった全判定セルで ratio <= 1.00（--threshold 1.00）、かつ全 run で checksum 完全一致
+  （--require-checksum-exact）。checksum 不一致は fail-closed
+- REJECT: 専有ゲートが成立した系列で、いずれかの判定セルが ratio > 1.00、または checksum 不一致
+- undetermined: 専有ゲート不成立・record_only・取得不能・前提ゲートが支持でない N を含む場合（ADOPT にしない）
+- しきい値を事後調整して再計測しない
+
+[事前表明する期待値]
+- 仮説 H-reuse（pageable 宛先の D2H・事前フィルを pinned 直接 DMA + copy-out 1 回へ置換すると露出コストが減る）は
+  未検証。copy-out の memcpy（N=4096 で 64 MiB）が追加されるため、大形状では改善しないか後退しうる。
+  ADOPT の見込みは高くない。REJECT／undetermined でも機構（既定 OFF）と記録を残す
+
+[ADOPT 時]
+- 既定値（memory::READBACK_DEST）の PinnedStagingReuse への切替は別 PR とし、ユーザー承認を前提にする
+  （pinned 確保の到達範囲が全 f32 readback に広がる。既存 unsafe 経路の既定化に当たる）。本 PR では既定値を変えない
+
+[対象外]
+- 真の宛先再利用（copy-out なし）・ゼロコピー（借用ビュー）: Tensor の Arc<Storage{Vec<T>}> に drop フックがなく
+  返却できない。tensor-core のストレージ抽象変更と新規 unsafe が要りユーザー承認事項
+- 並列フィル腕、Metal、fresh 行
+
+[記録]
+- 生成物に内部ホスト名・絶対パスを含めない（<home> 等でマスクする）
+- tolerance・baseline・Cargo.toml・ガードレール閾値・docs/spec・#2107 の計測成果物は変更しない

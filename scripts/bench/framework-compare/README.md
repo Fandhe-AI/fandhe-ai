@@ -1964,6 +1964,22 @@ jq -s '[.[] | select(.mode=="fresh" or .mode=="reuse")] | group_by(.mode)[] | {m
   上の同期点として残る（`docs/backend-cuda-async-execution-design.md`）。
   定常状態では計測窓のずれ（1 step）を無視でき 1 step 総和と等価とみなす。
 
+### CUDA readback 宛先ポリシー A/B（`run_ab_readback_reuse_cuda.sh`。イシュー #2108）
+
+`FANDHE_AI_CUDA_READBACK_DEST`（`crates/backend-cuda/src/readback_policy.rs`。既定 OFF）の before（env 未設定＝
+`PretouchedFresh`）／after（`pinned-reuse`＝pinned staging 再利用 + copy-out）を、同一バイナリ・HEAD の facade
+path patch で run 単位に interleave 計測する。判定セルは gemm cuda reuse N=1024/2048/4096。5 round 固定・
+round ごとに起動順反転・プロセス独立起動・専有ゲート（load1 < 1.0 かつ GPU 使用率 0% を 3 回連続。
+`AB_LOAD_GATE_MODE=record_only` は非正式系列）。末尾で `compare_gemm_ab.py --device cuda --sizes large
+--modes reuse --threshold 1.00 --require-checksum-exact` を自動実行する。
+
+```sh
+AB_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" bash run_ab_readback_reuse_cuda.sh head-<short sha>-2108
+```
+
+判定規則・順序制約（#2107 の実測を先に旧コミットで実施）は `docs/perf/logs/cuda-gemm-readback-reuse-2108/RULE.txt`、
+設計は `docs/perf/cuda-gemm-readback-reuse-2108.md`。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）

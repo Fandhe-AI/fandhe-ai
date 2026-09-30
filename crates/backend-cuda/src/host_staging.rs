@@ -351,7 +351,7 @@ impl HostStagingCache {
     /// release_host_staging` 経由）の返却値も過大になる
     /// （codex-review 指摘 P2・Cursor Bugbot Medium 指摘。両者は
     /// 同一箇所・同一問題）。
-    fn put(&mut self, numel: usize, generation: u64, buf: HostStaging) {
+    pub(crate) fn put(&mut self, numel: usize, generation: u64, buf: HostStaging) {
         let bytes = buf.byte_len();
         let existing_bytes = self
             .entries
