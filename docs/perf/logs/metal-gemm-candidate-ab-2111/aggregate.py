@@ -114,8 +114,14 @@ def judge(runs, reference_only=False, problems=()):
         checksum_bad = []
         for n in EXPECTED_SIZES:
             cells = [r.get((arm, n)) for r in runs]
-            if any(c is None or "ratio" not in c or "bit_identical" not in c for c in cells):
-                verdicts[arm] = ("INCOMPLETE", f"N={n} のデータ欠落")
+            if any(
+                c is None or "ratio" not in c or "bit_identical" not in c or "median_ms" not in c
+                for c in cells
+            ):
+                verdicts[arm] = ("INCOMPLETE", f"N={n} のデータ欠落（bit／比／中央値行のいずれかが無い）")
+                break
+            if any(c["median_ms"] <= 0.0 for c in cells):
+                verdicts[arm] = ("INCOMPLETE", f"N={n} の median_ms が正でない（計測不正）")
                 break
             if any(c["ratio"] <= 0.0 for c in cells):
                 verdicts[arm] = ("INCOMPLETE", f"N={n} の ratio が正でない（計測不正）")
@@ -253,7 +259,8 @@ def load_dir(d):
     return runs, reference_only, problems
 
 
-def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", with_base=True):
+def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", with_base=True,
+                 with_median=True):
     """自己テスト用の 1 run 分ログを生成する。ratios: {(arm, n): ratio}。
 
     with_base=True なら出現する各 N の base 行（bit・中央値・比）を補う。
@@ -274,6 +281,10 @@ def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", with_base=Tru
             f"N={n} arm={arm} checksum={checksum} bit_identical={'true' if bit else 'false'} "
             f"same_kernel={'true' if (arm, n) in same else 'false'}"
         )
+        if with_median:
+            lines.append(
+                f"N={n} arm={arm} resolved_tile=Cfg kernel_gpu_median_ms=0.9000 q1=0.8000 q3=1.0000"
+            )
         lines.append(f"N={n} arm={arm} head_over_base_kernel_gpu={r:.6f}")
     return "\n".join(lines)
 
@@ -337,6 +348,7 @@ def self_test():
             f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0 q1=0.9 q3=1.1\n"
             f"N={n} arm=base head_over_base_kernel_gpu=1.0\n"
             f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=false\n"
+            f"N={n} arm=X resolved_tile=Cfg kernel_gpu_median_ms=0.9 q1=0.8 q3=1.0\n"
             f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
         for _ in range(N_RUNS)
     ]
@@ -347,6 +359,7 @@ def self_test():
             f"N={n} arm=base resolved_tile=Cfg kernel_gpu_median_ms=1.0 q1=0.9 q3=1.1\n"
             f"N={n} arm=base head_over_base_kernel_gpu=1.0\n"
             f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=true\n"
+            f"N={n} arm=X resolved_tile=Cfg kernel_gpu_median_ms=0.9 q1=0.8 q3=1.0\n"
             f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
         for _ in range(N_RUNS)
     ]
@@ -377,6 +390,13 @@ def self_test():
     badbase = build(ok)
     badbase[1][(BASE, 2048)]["ratio"] = 1.2
     assert judge(badbase)["X"][0] == "INCOMPLETE"
+    # 候補 arm の中央値行欠落（全欠落・1 run／1 N のみ欠落）は ADOPT_CANDIDATE に到達させず INCOMPLETE
+    no_med = [parse_run(_fixture_run({("X", n): 0.9 for n in EXPECTED_SIZES}, with_median=False))
+              for _ in range(N_RUNS)]
+    assert judge(no_med)["X"][0] == "INCOMPLETE"
+    part_med = build(ok)
+    del part_med[3][("X", 2048)]["median_ms"]
+    assert judge(part_med)["X"][0] == "INCOMPLETE"
     # ratio<=0 は INCOMPLETE
     assert judge(build({512: 0.0, 1024: 0.9, 2048: 0.9, 4096: 0.9}))["X"][0] == "INCOMPLETE"
     # run ログ検証
