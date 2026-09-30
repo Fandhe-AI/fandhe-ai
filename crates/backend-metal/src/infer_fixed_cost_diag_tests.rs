@@ -165,10 +165,20 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
             && s.wait_calls == s.batches_total
     });
     if ts_complete && wall > 0.0 {
-        let share = (wall - gpu) / wall * 100.0;
+        // wall - gpu_busy は upload/download（転送とその待機）を含む GPU 非稼働時間。
+        // H4（ホスト固定費）の判定には転送区間を除いた値を使う。
+        let non_gpu = wall - gpu;
+        let non_gpu_share = non_gpu / wall * 100.0;
         println!(
-            "  host_fixed (wall - gpu_busy) median={:.1} us ({share:.0}% of wall)",
-            (wall - gpu) * 1e6
+            "  gpu_idle (wall - gpu_busy) median={:.1} us ({non_gpu_share:.0}% of wall。転送を含むため H4 判定には使わない)",
+            non_gpu * 1e6
+        );
+        let transfer = med(|s| s.upload) + med(|s| s.download);
+        let host_fixed = non_gpu - transfer;
+        let share = host_fixed / wall * 100.0;
+        println!(
+            "  host_fixed (wall - gpu_busy - upload - download) median={:.1} us ({share:.0}% of wall)",
+            host_fixed * 1e6
         );
     } else {
         println!(

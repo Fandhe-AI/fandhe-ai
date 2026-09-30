@@ -77,7 +77,7 @@ Metal infer reuse（365.2 µs。CPU reuse 175.3 µs の約 2.1 倍）の固定�
 | H1a（補助） | IOKit 単独の割合 | `probe_gpu_core_count / provider_select` を記録 |
 | H2 | `Tape::new_with_ops` は 1 µs 未満 | `micro.tape_new` の中央値 < 1 µs |
 | H3 | reuse の 1 反復は encode 2・command_buffers 1・wait 1 | 5 run すべてで成立（#1580 実測との照合） |
-| H4 | infer の wall − GPU busy がホスト固定費の主体 | (c) の差が wall の 50% 以上 |
+| H4 | infer の wall − GPU busy がホスト固定費の主体 | (c) の wall − GPU busy − upload − download が wall の 50% 以上 |
 
 再実行しない既存実験: #1580／#1911 の chain 単一同期 A/B・#1477 の readout 腕。
 
@@ -86,7 +86,7 @@ Metal infer reuse（365.2 µs。CPU reuse 175.3 µs の約 2.1 倍）の固定�
 判定規則の正は `docs/perf/logs/metal-tape-build-infer-phase-2114/RULE.txt`（実測前に固定）。要点:
 
 - 1 run = 1 プロセスで独立 5 run。各セルは run ごとの median の中央値と min–max
-- checksum は arm 内で run 間・off と on・`reuse_decomposed` と `reuse` で完全一致（fail-closed）
+- checksum（出力全要素の f32::to_bits 順序込み FNV-1a ダイジェスト）は arm 内で run 間・off と on・`reuse_decomposed` と `reuse` で完全一致（fail-closed）
 - 比 `on / off`（tape_build と iter_total）の `<= 1.00` は記録のみ（ADOPT 判定はしない）
 - m4max は `record_only`（共有環境）
 

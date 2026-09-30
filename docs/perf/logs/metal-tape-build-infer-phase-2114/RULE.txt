@@ -25,6 +25,8 @@ doc: docs/perf/metal-tape-build-infer-fixedcost.md
 - 6 arm（fresh_*・reuse_*・reuse_decomposed_*）の iter_total.checksum_bits が
   5 run すべてで一致すること。
 - 同種の off と on の checksum_bits が一致すること（キャッシュ ON で出力が変わらない）。
+  checksum_bits は出力全要素の f32::to_bits を順序込みで畳み込んだ FNV-1a 64bit
+  ダイジェスト（f64 総和ではない）。
 - reuse_decomposed_X と reuse_X（X = off/on）の checksum_bits が一致すること。
 - fresh と reuse の一致は記録のみで要件にしない。
 - 1 つでも不一致なら系列は無効（集計は exit != 0）。
@@ -46,8 +48,11 @@ doc: docs/perf/metal-tape-build-infer-fixedcost.md
 - H2: micro.tape_new の中央値が 1 us 未満なら「支持」。
 - H3: reuse_off の 1 反復あたり encode = 2・command_buffers = 1・wait = 1 が
   5 run すべてで成立すれば「支持」（#1580 の実測との照合）。
-- H4: (c) の wall - GPU busy がホスト固定費として wall の 50% 以上なら「支持」
-  （手動転記した出力で判定。5 run 集計の対象外）。
+- H4: (c) の host_fixed = wall - GPU busy - upload - download（転送とその待機を除いた
+  ホスト側の encode・commit・同期固定費）が wall の 50% 以上なら「支持」
+  （手動転記した出力で判定。5 run 集計の対象外）。wall - GPU busy は転送時間を含む
+  GPU 非稼働時間であり、H4 の判定には使わない。
+  （改訂: codex レビュー指摘で転送区間を分離。実機計測前の修正であり閾値 50% は不変。）
 
 [ゲート]
 - m4max: record_only（共有環境。load average の推移を env_info と load_gate.log に記録）。

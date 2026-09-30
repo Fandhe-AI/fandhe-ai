@@ -82,8 +82,22 @@ fn bits(t: &Tensor<f32>) -> Vec<u32> {
     host_copy(t).into_iter().map(f32::to_bits).collect()
 }
 
-fn checksum(v: &[f32]) -> f64 {
-    v.iter().map(|x| f64::from(*x)).sum()
+/// 出力の順序込み bit ダイジェスト（FNV-1a 64bit。各要素の `f32::to_bits` と要素数を畳み込む）。
+/// f64 総和では異なる出力が同じ和になりうるため、RULE.txt の「出力が変わらない」判定に
+/// 足りない。要素順序・NaN payload・±0 の違いも検出する。
+fn checksum(v: &[f32]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = OFFSET;
+    for byte in (v.len() as u64).to_le_bytes() {
+        h = (h ^ u64::from(byte)).wrapping_mul(PRIME);
+    }
+    for x in v {
+        for byte in x.to_bits().to_le_bytes() {
+            h = (h ^ u64::from(byte)).wrapping_mul(PRIME);
+        }
+    }
+    h
 }
 
 /// `resolve_ops(Device::Metal)` の存在確認部分と同じ呼び出し（キャッシュ越し）。
@@ -217,11 +231,10 @@ impl Rec {
     }
 
     /// 同一 arm の全反復で checksum の bit 一致を要求する（不一致なら panic）。
-    fn record_checksum(&mut self, arm: &'static str, s: f64) {
+    fn record_checksum(&mut self, arm: &'static str, bits: u64) {
         if !self.on {
             return;
         }
-        let bits = s.to_bits();
         let c = self.cell(arm, "iter_total");
         match c.checksum {
             None => c.checksum = Some(bits),
