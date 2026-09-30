@@ -149,6 +149,12 @@ def gb10_verdict(r0_ok, rt, cells, run_ok=True):
     """
     if not run_ok:
         return "undetermined"
+    # RULE.txt §8: round 欠損（セル数不足・checksum 起因以外の非 ok セル）は後退判定より先に undetermined とする。
+    # 一部セルの reject／checksum 不一致があっても、別セルが欠損していれば全体の後退判定は確定させない。
+    if len(cells) != len(CELLS) or any(
+        c["status"] != "ok" and "checksum" not in (c.get("reason") or "") for c in cells
+    ):
+        return "undetermined"
     if any(c["status"] == "ok" and (c["reject"] or not c["exact"]) for c in cells):
         return "後退あり"
     if any(c["status"] != "ok" and "checksum" in (c.get("reason") or "") for c in cells):
@@ -325,7 +331,8 @@ def render_m4max(base):
         # RULE.txt §11: R4・R1 の両負荷ゲートを通過した系列だけを正式とする
         official = bool(r4_gate) and gate is True
         run_ok = run_ab_ok_m4max(str(d / "env_info.txt")) is True
-        v = candidate_verdict(r4c, cells, official, run_ok and r4_exec_ok)
+        # RULE.txt §6・§13: R4 の実行成否は R4 成立（r4c）だけを保留し、R1 由来の REJECT／FAIL は R4 と独立に判定する
+        v = candidate_verdict(r4c, cells, official, run_ok)
         verdicts[k] = v
         series = {True: "正式（R1 load ゲート 5/5 通過）", False: "record_only（参考）", None: "ゲートログなし（record_only 扱い）"}[gate]
         if gate is True and not r4_gate:
@@ -546,6 +553,12 @@ def self_test():
         _write_series(os.path.join(td, "g2"), "L", g2)
         cg2 = apply_k(evaluate_series(os.path.join(td, "g2"), "L"), 0)
         assert gb10_verdict(True, "pass", cg2) == "後退あり"
+        # (i) GB10: 一部セルの後退があっても別セルの round 欠損なら undetermined（RULE.txt §8）
+        cg3 = [dict(x) for x in cg2]
+        cg3[0].update(status="missing", reason="round 欠損")
+        assert gb10_verdict(True, "pass", cg3) == "undetermined"
+        # (j) R4 実行不成立でも R1 の REJECT は保留されない（RULE.txt §6・§13）。R4 不成立のみで REJECT なしなら undetermined
+        assert candidate_verdict(False, apply_k(evaluate_series(os.path.join(td, "d"), "L"), 256)) == "REJECT"
         # load ゲートログの解釈
         p = os.path.join(td, "gate.log")
         Path(p).write_text("threshold=8.0 rule_threshold=8.0 series=official\n" +

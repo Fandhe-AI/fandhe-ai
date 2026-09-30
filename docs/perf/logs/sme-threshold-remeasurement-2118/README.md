@@ -21,7 +21,7 @@
 |---|---|
 | `RULE.txt` | 事前登録判定規則（候補別の到達セル表・R4・R1・R2・総合判定・GB10 語彙・RT 既知 FAIL） |
 | `on-arm-k{64,128,256}.patch` | 計測専用パッチ（下表）。`patch -p1` で適用 |
-| `lib_trees.sh` | `git archive HEAD` から before／after ツリーを作り、指紋差分 1 件・定数行を assert する共有ヘルパー |
+| `lib_trees.sh` | 事前登録 sha（`SME2118_REGISTERED_BASE`）を `git archive` して before／after ツリーを作り、指紋差分 1 件・定数行を assert する共有ヘルパー |
 | `orchestrate_m4max.sh` | M4 Max 用（`r4`・`r1 <K>`・`all`・`--dry-run`） |
 | `gb10/orchestrate_gb10.sh` | GB10 用（`<K>`・`--dry-run`）。R0 → RT → R1／R2 |
 | `aggregate.py` | 集計（python3 標準ライブラリのみ・`--self-test` 付き）。`aggregate.md` を生成 |
@@ -85,7 +85,7 @@ verdict は実測後に限り更新する。定数の切替・本番化の判断
 - 収録前に `$HOME` は `<home>`・作業ディレクトリは `<work>` へ置換される（`lib_trees.sh` の
   `sme2118_mask`）。ホスト名は収録テキストへ出さず env_info に `hostname=masked` と書く
   （短い名前の内容置換が LABEL 等を壊すため）。bench バイナリはコミットしない。
-- before 腕は実行時点の `git archive HEAD`（`patch_sha256.txt` に HEAD を記録）。
+- before 腕は実行時 HEAD ではなく、RULE.txt ヘッダの登録 sha（`lib_trees.sh` の `SME2118_REGISTERED_BASE`）を `git archive` して固定する（当該 sha が無ければ停止・HEAD へのフォールバックなし。実行時 HEAD は `current_head` として記録のみ）。
   RULE.txt 記載の基準 HEAD から `mod.rs` 以外が変わっていても、指紋差分の対象は
   before／after の 2 ツリー間なので判定は成立する（基準 HEAD からの変化は env_info で確認）。
 - checksum は丸めた集約値で、bit 同一の証拠ではない（RULE.txt §5）。
