@@ -51,7 +51,7 @@ candle 0.11.0 `select_tile_config` の f32・NN・batch=1 部分を純関数化�
 
 | 候補 | 除外理由 |
 |---|---|
-| acc ループの無条件 unroll（acc 積 8 以下にも適用） | §7.6a で本番 N=512〜2048 が 15〜35% 後退し撤回済み（`T0U` は acc 積 16 以上のみ実効） |
+| acc ループの無条件 unroll（acc 積 8 以下にも適用） | `metal-gemm-n4096-kernel-gap.md` §7.6a で本番 N=512〜2048 が 15〜35% 後退し撤回済み（`T0U` は acc 積 16 以上のみ実効） |
 | align_M/N/K 分岐ロード | `docs/backend-metal-aligned-load-decision.md`（#808）で不採用確定・REQ-8。`UNROLL_LOAD` は整列可否で分岐しない |
 | async copy（非公開 AIR intrinsic） | #546 で不採用 |
 | tgid swizzle | candle も `swizzle_log=0` で無効（candle-metal-01 §4.1）、#1279 で判定不可 |
@@ -107,7 +107,7 @@ M4 Max の `MTLDevice.architecture.name` 確認・MLX Ultra 分岐／NAX split-K
 
 ### 8.3 `T0U`／`T0U-LU`／`T0U-LU-FB` が ADOPT_CANDIDATE の場合（別設計 PR が必要）
 
-- `select_candle_equivalent` と `STEEL_ARMS` は `#[cfg(test)]` 限定で、`UNROLL_ACC_ENABLED` はグローバル定数（acc 積 16 以上の候補すべてに効く）。無条件 unroll は §7.6a で N=512〜2048 が 15〜35% 後退し撤回済みのため、定数の切替では結線できない。
+- `select_candle_equivalent` と `STEEL_ARMS` は `#[cfg(test)]` 限定で、`UNROLL_ACC_ENABLED` はグローバル定数（acc 積 16 以上の候補すべてに効く）。無条件 unroll は `metal-gemm-n4096-kernel-gap.md` §7.6a で N=512〜2048 が 15〜35% 後退し撤回済みのため、定数の切替では結線できない。
 - 形状スコープ付きの選択機構（計測済み正方 N のみ対象・CANDIDATES[0] 選択時だけ unroll_acc を実効化）が必要で、設計判断となる。ユーザー承認と別イシュー／別 PR で扱う（`select_for_device` の本番化・`unroll_acc_loops_for` との整合・既存タイル選択テストの改修を含む）。
 - **N=512 は結線対象から外す（保留）**。RULE.txt 9. の candle デバイス区分仮定に依存するため、`env_info.txt` の `mtl_architecture_name` で M4 Max の区分が確認されるまで結線しない。N>=1024 は区分に依らない。
 - `T0U-LU-FB` の FINE_BARRIER は candle の近似で、FB 単体は #1278 で undetermined。ADOPT でも FB 軸だけの寄与は分離していないことを記録する。
@@ -127,7 +127,7 @@ Linux で実施済みの検証: `aggregate.py --self-test`（OK）、`orchestrat
 
 Mac セッションで実施する手順:
 
-1. `main` を最新にし `env_info.txt` を記入する（chip・gpu_cores・macOS・rustc・git_commit・date_utc・`mtl_architecture_name`）。専有できない場合は **run 1 の前に** `load_policy: record_only` と理由を宣言する（RULE.txt 7.）。
+1. `main` を最新にし `env_info.txt` を記入する（chip・gpu_cores・macOS・rustc・git_commit・date_utc・`mtl_architecture_name`）。専有できない場合は **run 1 の前に** `load_policy: record_only` と理由を宣言する（`env_info.txt` の運用。RULE.txt 7. は専有ゲートと REFERENCE_ONLY のみを定め、事前宣言は事前登録規則に無い運用上の取り決め）。
 2. `./orchestrate.sh gate` — 1 件でも FAIL なら REJECT を確定し A/B は実施しない。
 3. `./orchestrate.sh 1` 〜 `5`（差し替え・追加・選別はしない）。
 4. `python3 aggregate.py` の出力を `aggregate.md` に保存する。
