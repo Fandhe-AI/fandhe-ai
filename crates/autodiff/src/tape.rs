@@ -2408,6 +2408,24 @@ struct CheckpointRegion {
     output: usize,
 }
 
+/// host arena（`tensor_core::alloc`・#2104・opt-in 既定 OFF）へ tape 生存期間内の
+/// ホストバッファを返す。step ごとに新しい `Tape` を作る CPU の train／infer で、
+/// 次の `Tape` のカーネル出力確保が再利用できるようにするための回収点。
+/// 無効時は何もしない（従来どおり各ノードの drop が解放する）。`Tape` は `Send` で、
+/// 別スレッドで drop された場合はそのスレッドの arena へ入る（上限付きで安全）。
+impl Drop for Tape {
+    fn drop(&mut self) {
+        if !fandhe_ai_tensor_core::alloc::is_enabled() {
+            return;
+        }
+        for node in self.nodes.get_mut().iter_mut() {
+            if let Some(v) = node.value.take() {
+                fandhe_ai_tensor_core::alloc::recycle_tensor_f32(v);
+            }
+        }
+    }
+}
+
 impl std::fmt::Debug for Tape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `ops`（`Box<dyn BackendOps + Send>`）の中身は `Debug` を実装
@@ -2734,6 +2752,18 @@ impl Tape {
             .retained_leaf_len
             .get()
             .unwrap_or_else(|| self.nodes.get_mut().len());
+        // host arena（#2104・opt-in）有効時は、除去するノードの値バッファを回収して
+        // 次 step の CPU カーネル出力確保で再利用する（葉プレフィックスは保持）。
+        if fandhe_ai_tensor_core::alloc::is_enabled() {
+            let nodes = self.nodes.get_mut();
+            if keep < nodes.len() {
+                for node in &mut nodes[keep..] {
+                    if let Some(v) = node.value.take() {
+                        fandhe_ai_tensor_core::alloc::recycle_tensor_f32(v);
+                    }
+                }
+            }
+        }
         self.nodes.get_mut().truncate(keep);
         self.epoch.set(self.epoch.get() + 1);
         // checkpoint 区間（イシュー #1624）は葉プレフィックスより後ろの

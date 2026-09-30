@@ -160,6 +160,9 @@
 //! #1754 追加修正でグローバル予算・rank ガードを導入した。設計判断は
 //! issue #1754 実装計画・PR 本文、詳細契約は `tensor_fmt` モジュール
 //! doc 参照）。
+// ホスト `Vec<f32>` の thread-local arena（#2104）。crate 間結線のための内部面で公開契約外。
+#[doc(hidden)]
+pub mod alloc;
 mod backend_ops;
 mod broadcast;
 pub mod buffer;

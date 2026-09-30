@@ -1,0 +1,8 @@
+# 事前宣言（実測前に固定。2026-09-29。イシュー #2104。結果が出た後に緩めない）
+- 対象: ホスト arena（HOST_ARENA_DEFAULT_ENABLED のみ true にした計測専用 worktree）の before/after A/B。before = main の crates/facade、after = 同一コミットで crates/tensor-core/src/alloc.rs の定数だけを反転（main へはコミットしない）。
+- 手順: scripts/bench/framework-compare/run_ab_tape_arena_cpu.sh <label>。train／infer × fresh／reuse（cpu・size=64）を 5 round・プロセス独立起動・round 単位で起動順反転。
+- 判定（機体ごと）: セルごとに 5 round 中央値 ratio<=1.00 かつ checksum 完全一致（compare_gemm_ab.py --require-checksum-exact）。全セル（train fresh／reuse・infer fresh／reuse）が非後退であること。
+- 総合: M4 Max・GB10 の両機体で全セル非後退かつ少なくとも 1 セルが 5/5 round 一貫で改善（全 round ratio<1.00）のとき ADOPT。いずれかの機体で 5/5 round 一貫して後退（全 round ratio>1.00）したセルが 1 つでもあれば REJECT。それ以外は undetermined。
+- 負荷: 各 round 開始前に load1 < 8.0 を最大 30 分待つ。5/5 round 通過のみ正式系列。不通過・取得不能を含む場合は record_only（参考扱い）と明記する。
+- run の差し替え・追加起動はしない（同一 label の既存 JSONL があればスクリプトが fail-closed で停止する）。
+- ADOPT の場合のみ、後続 PR で HOST_ARENA_DEFAULT_ENABLED を true に切り替える。本 PR では既定値を変えない。

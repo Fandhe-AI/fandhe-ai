@@ -601,6 +601,37 @@ impl<T: Element> Tensor<T> {
         })
     }
 
+    /// 一意所有・offset 0・contiguous・`data.len() == numel` のときだけ内部 `Vec` を
+    /// 取り出す（`alloc::recycle_tensor_f32` 専用。`Arc::try_unwrap` により参照中の
+    /// storage は絶対に取り出さない）。条件を満たさなければ自身を返す。
+    pub(crate) fn try_into_unique_vec(self) -> Result<Vec<T>, Tensor<T>> {
+        if self.offset != 0 || !self.is_contiguous() {
+            return Err(self);
+        }
+        let numel = self.numel();
+        let Tensor {
+            storage,
+            offset,
+            shape,
+            strides,
+        } = self;
+        match Arc::try_unwrap(storage) {
+            Ok(unique) if unique.data.len() == numel => Ok(unique.data),
+            Ok(unique) => Err(Tensor {
+                storage: Arc::new(unique),
+                offset,
+                shape,
+                strides,
+            }),
+            Err(shared) => Err(Tensor {
+                storage: shared,
+                offset,
+                shape,
+                strides,
+            }),
+        }
+    }
+
     /// 非 contiguous な場合に、行優先連続バッファへ実体化した新しい
     /// `Tensor` を返す（常にコピーを伴う明示 API）。contiguous な場合は
     /// 自身の複製（`Arc` 共有のまま、コピーなし）を返す。

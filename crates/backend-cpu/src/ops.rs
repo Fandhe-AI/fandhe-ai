@@ -207,7 +207,7 @@ pub(crate) const GEMM_OUTPUT_PARALLEL_ZERO_MIN_CHUNK_ELEMS: usize = 1 << 16;
 /// `docs/cpu-matmul-fixed-cost-design.md` §3.C・ユーザー承認事項）。
 pub(crate) fn zeroed_output_with_threshold(len: usize, min_elems: usize) -> Vec<f32> {
     if len < min_elems {
-        return vec![0.0f32; len];
+        return fandhe_ai_tensor_core::alloc::take_zeroed_f32(len);
     }
     use rayon::iter::{IndexedParallelIterator, repeat_n};
     let mut out = Vec::with_capacity(len);
@@ -1367,7 +1367,7 @@ impl BackendOps for CpuBackendOps {
             None => None,
         };
 
-        let mut out = vec![0.0f32; m * n];
+        let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(m * n);
         gemm_blis_bias_act_parallel(a_slice, b_slice, &mut out, m, n, k, bias_slice, act)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
@@ -1459,7 +1459,7 @@ impl BackendOps for CpuBackendOps {
             .ok_or(BackendError::DeviceMismatch)?;
         let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
 
-        let mut out = vec![0.0f32; p * r];
+        let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(p * r);
         if let Some(bt) = dense_transposed_view(b) {
             gemm_blis_parallel_nt(w_slice, bt, &mut out, p, r, q)
                 .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -2225,7 +2225,7 @@ impl BackendOps for CpuBackendOps {
         let target_c = target.contiguous();
         let pred_slice = pred_c.as_slice().unwrap_or(&[]);
         let target_slice = target_c.as_slice().unwrap_or(&[]);
-        let mut dpred = vec![0.0f32; pred_slice.len()];
+        let mut dpred = fandhe_ai_tensor_core::alloc::take_zeroed_f32(pred_slice.len());
         mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
     }
@@ -2288,7 +2288,7 @@ impl BackendOps for CpuBackendOps {
         let target_c = target.contiguous();
         let pred_slice = pred_c.as_slice().unwrap_or(&[]);
         let target_slice = target_c.as_slice().unwrap_or(&[]);
-        let mut dpred = vec![0.0f32; pred_slice.len()];
+        let mut dpred = fandhe_ai_tensor_core::alloc::take_zeroed_f32(pred_slice.len());
         huber::huber_loss_backward_f32(pred_slice, target_slice, kind, delta, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
     }
