@@ -724,10 +724,10 @@ pub(crate) mod spec_source;
 // 触れないため、`cfg(target_os = "macos")` を付けず Linux（本実装
 // 環境・CI）でも `AtomicBool` の単体テストが回るようにしてある。
 pub mod split_k_runtime;
+pub mod tile;
 // Metal train forward の encode-only 合流 opt-in（イシュー #2113）。
 // `split_k_runtime` と同じ設計判断で cfg を付けず Linux でも既定値の
 // ドリフト検出テストを回す。
-pub mod tile;
 pub(crate) mod train_forward_encode_runtime;
 // `TypedOps<half::f16>` 実装（イシュー #1705・親 #1651・
 // `docs/backend-dtype-dispatch-design.md` §14）。`ops::MetalBackendOps`
