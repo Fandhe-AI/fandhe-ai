@@ -142,7 +142,9 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
   - B（既存回帰）: `tests/parity_nonregression.rs` 等の既存テストで 0 fail
   - B-1（Stream-K 候補 C3・C4 で必須）: 候補自身の残タイルを CPU 参照実装と複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で比較し、全行 `fail_count == 0`。`fail_count > 0` の行が 1 件でもあれば B-1 は FAIL とし、baseline 方式（`ParityBaseline`）への変更・tolerance の変更はユーザー承認を条件とする（承認なしに採用しない）
 - **C**: GPU-only の純カーネル時間の 5 回中央値。N≥1024 のいずれかで ≥1.05 かつ全計測形状で後退なし
-- **D**: 結線後の本番ディスパッチ非後退（framework-compare の gemm cuda を同一 HEAD の base／after で比較し、checksum 完全一致と性能非後退の両方を満たすこと。`backend-cuda-tma-gemm-load-design.md` §6 のゲート D と同じ）
+- **D**: 結線後の本番ディスパッチ非後退（framework-compare の gemm cuda を同一 HEAD の base／after で比較する。`backend-cuda-tma-gemm-load-design.md` §6 のゲート D と同型だが、判定条件は候補の結合順序で分ける）
+  - K 連鎖を分割しない候補（C1・C2 等。ゲート A で bit 一致を要求できるもの）: base／after の checksum 完全一致と性能非後退の両方を満たすこと
+  - K 連鎖を分割する候補（Stream-K の C3・C4）: 残タイルの結合順序が非 Stream-K 版と異なり bit 一致しない（ゲート A・B-1 で許容済み）ため、checksum 完全一致は要求しない。代わりに (1) base／after の出力を複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で比較して全行 `fail_count == 0`（ゲート B-1 と同じ承認済み方式。tolerance・baseline は変更しない）、(2) after 側の同一入力での再実行 checksum が一致（決定性維持）、(3) 性能非後退、のすべてを満たすこと
 
 **no-go**: A の不一致 1 件（C3・C4 は決定性検査の失敗または full タイルの bit 不一致 1 件）、B-1 の `fail_count > 0`（承認なき baseline 化は不可）、または C の後退 1 形状で REJECT（opt-in 維持）。判定基準は実測前に固定し、事後に変更しない。tolerance・baseline の変更が必要になった時点で停止し、ユーザー承認へ回す。
 
