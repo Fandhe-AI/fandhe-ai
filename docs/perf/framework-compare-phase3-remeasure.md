@@ -51,7 +51,8 @@ main 上で既定 ON に結線された ADOPT 施策は 0 件であり、「ADOP
 
 - 主比較は B→C（同一 run 内比 `C.median_s / B.median_s` の 5 run 中央値。**非後退 ⇔ 1.00 以下**）。A→C は 0.9.0 以降の非 Phase 3 変更を含む参考比。
 - 5 run・プロセス独立・腕順は run ごとに反転（奇数 A→B→C・偶数 C→B→A）。candle・burn は各 run で 1 回。Python FW 行は既存値を流用。
-- 専有ゲート: GB10 は load1 < 1.0 かつ GPU 使用率 0%（不通過 run も除外せず併記）。M4 Max は record_only（load1 < 8.0 を最大 30 分待機。不通過でも計測し記録）。
+- 専有ゲート: GB10 は load1 < 1.0 かつ GPU 使用率 0% を**正式計測の前提条件**とする（20 回とも不通過なら `orchestrate.sh` はその run を計測せず停止し、5 run を最初からやり直す）。M4 Max は record_only（load1 < 8.0 を最大 30 分待機。不通過でも計測し、集計・スコアボードに「不通過」を併記）。
+- 前提（RULE.txt P1〜P5）: 計測条件（`env_info.txt`・`switches-{B,C}.txt`）・専有ゲート（`gate.log` の書式と pass の閾値再検証）・終了コード（`skipped.log`）・入力の厳格性（NaN／重複キー／重複行／型／セル範囲外）・完備性を `aggregate.py` の `check_prerequisites` が一括評価し、1 つでも不成立なら判定不能として何も出力しない。
 - checksum は各腕・各セルで 5 run 文字列完全一致、かつ腕間でも一致。不一致は是正せず記録。
 - tolerance・baseline・`Cargo.toml`・`Cargo.lock`・ガードレール閾値・`docs/spec` は不変。`FANDHE_AI_*` は未設定（設定されていれば起動を拒否）。
 
@@ -59,8 +60,10 @@ main 上で既定 ON に結線された ADOPT 施策は 0 件であり、「ADOP
 
 倍率は `gen_1988.out` と同じ定義（最速他 FW ÷ fandhe-ai。gemm／train は所要時間比・infer は逆向き。1.00 未満が負け側）。
 「基準」列は `docs/perf/loss-attribution-matrix.md` §3 の転記（2026-09-16／18 セッション）。「腕 B」「腕 C」列は
-`scoreboard/gen_2120.py --tsv` の出力（腕 B を主入力にした実行と腕 C を主入力にした実行）から転記する。「B→C 比」は
-`aggregate.md` の fandhe-ai セル別 `C.median_s / B.median_s` の 5 run 中央値（**時間比。infer も同じ向き**。<1 が高速化）。
+`scoreboard/gen_2120.py --tsv` の出力（`--arm B` で腕 B を主入力にした実行と `--arm C` の実行）から転記する。「B→C 比」「非後退」
+「checksum」は同 TSV の集計 JSON 由来列（判定列 reuse セルの `bc_med`・非後退・checksum 一致。`aggregate.md` と同値）から転記する。
+B→C 比は同一 run 内比 `C.median_s / B.median_s` の 5 run 中央値（**時間比。infer も同じ向き**。<1 が高速化）であり、採用行同士の比ではない
+（RULE.txt 判定 3 追記）。
 
 | セル ID | 対象 | 基準（`gen_1988.out`） | 腕 B | 腕 C | B→C 比 | 非後退 | checksum | 備考 |
 |---|---|---:|---:|---:|---:|---|---|---|
@@ -100,17 +103,20 @@ git rev-parse --short HEAD > <head-tree>/.rev-stamp   # main HEAD のツリー�
 SMOKE=1 HEAD_TREE=<head-tree> PRE_TREE=<pre-tree> LOGD=<scratch> bash docs/perf/logs/framework-compare-phase3-remeasure-2120/orchestrate_gb10.sh
 # 2. 本計測（GB10 は orchestrate_gb10.sh・M4 Max は orchestrate_m4max.sh。LOGD は機体別の m4max／gb10 ディレクトリ）
 HEAD_TREE=<head-tree> PRE_TREE=<pre-tree> LOGD=<logd> bash docs/perf/logs/framework-compare-phase3-remeasure-2120/orchestrate_<machine>.sh
-# 3. 集計（派生 JSONL は <prefix>-{A,B,C}-full.jsonl）
+# 3. 集計（前提 P1〜P5 不成立なら非 0 終了し何も出力しない。成立時は <prefix>-{A,B,C}-full.jsonl と <prefix>-aggregate.json）
 python3 aggregate.py --self-test
 python3 aggregate.py --machine <gb10|m4max> --logs <logd> --md <logd>/aggregate.md --out-prefix <logd>/results
-# 4. スコアボード（腕 C を主入力・腕 B を前比入力。M4 Max と GB10 の派生 JSONL を両方渡す）
-python3 scoreboard/gen_2120.py --prev-label "Phase 3 前" --main-label "Phase 3 後（HEAD）" --m4 m4max/results-C-full.jsonl --m4-prev m4max/results-B-full.jsonl \
-  --gb gb10/results-C-full.jsonl --gb-extra <空ファイル> --gb-py <py JSONL> --gb-prev gb10/results-B-full.jsonl \
+# 4. スコアボード（正式モード。腕 C を主入力。前比・B→C 比は集計 JSON の bc_med を転記し、gen は再計算しない）
+python3 scoreboard/gen_2120.py --self-test
+python3 scoreboard/gen_2120.py --arm C --main-label "Phase 3 後（HEAD）" \
+  --m4 m4max/results-C-full.jsonl --m4-agg m4max/results-aggregate.json \
+  --gb gb10/results-C-full.jsonl --gb-agg gb10/results-aggregate.json --gb-py <py JSONL> \
   --out fandhe-ai-phase3-scoreboard.html --tsv ratios-C.tsv
-# 腕 B の倍率（基準との比較用）は --m4 ...-B-full.jsonl --gb ...-B-full.jsonl へ差し替えて同様に実行し --tsv ratios-B.tsv を得る
+# 腕 B の倍率（基準との比較用）は --arm B と ...-B-full.jsonl へ差し替えて同様に実行し --tsv ratios-B.tsv を得る
 ```
 
-- `--m4-prev` は M4 Max の Python FW 転記値を `gen_2120.py` が内蔵しているため、機体別の派生 JSONL だけを渡す。
+- `--m4` 側は M4 Max の Python FW 転記値を `gen_2120.py` が内蔵しているため、機体別の派生 JSONL だけを渡す。`--gb-py`（と任意の `--gb-extra`）は Python FW 行のみ受理する。
+- `gen_2120.py` は集計 JSON が formal でない・`--m4`／`--gb` が集計 JSON に記録された腕の派生 JSONL（sha256）と一致しない・`--m4-prev`／`--gb-prev`／`--prev-label` が指定された場合は停止する。gen_1988 互換の出力は `--legacy-1988`（非後退確認用）。
 - スコアボード HTML は新規 Artifact として公開してよい（0.9.0 版・#1988 版は不変のまま履歴として残す）。
 - ホスト名・ユーザー名・絶対パスは `orchestrate.sh` が `env_info.txt`／`build.log` で `<home>`／`<head-tree>`／`<pre-tree>` へマスクする。生ログ（JSONL・`err.log`）にもホスト情報が無いことを収録前に確認する。
 - 所要時間の目安: 3 腕化のため 1 run は既存の run_all 系スイープの約 2 倍強（candle・burn は 1 回のみ）＋ゲート待機。
@@ -128,8 +134,8 @@ python3 scoreboard/gen_2120.py --prev-label "Phase 3 前" --main-label "Phase 3 
 
 ## 7. 検証（作業ホストで実施したもの）
 
-- `python3 aggregate.py --self-test`（正常系・5 run 欠け拒否・`parity_fail_count` 不正 4 種拒否・run 欠損時の空欄保持・checksum 不一致検出・比 1.00 境界〈非後退〉／1.0001〈後退〉）。
-- `gen_2120.py --body body_1988.html --prev-label 0.8.0` を #1988 の元入力で実行した HTML・検証出力が `gen_1988.py` の出力と byte 同一。
+- `python3 aggregate.py --self-test`（RULE.txt の条項ごとの表駆動。判定 1〜4・専有ゲート〈GB10 前提条件／M4 Max record_only〉・終了コード・計測条件・入力の厳格性の各条項について、その条項だけを破った入力が想定した理由で拒否されること、正常系の集計 JSON・派生 JSONL・sha256 の整合）。
+- `python3 scoreboard/gen_2120.py --self-test`（前比・TSV の B→C 比が集計 JSON の `bc_med` と一致し採用行同士の比にならないこと、sha256 不一致・腕／機体の取り違え・非 formal・Python FW 以外の行・`--m4-prev` 指定で停止すること、M4 Max の不通過 run の併記、`--legacy-1988` の HTML・標準出力が `gen_1988.py` と byte 同一）。
 - `switches.sh` を HEAD で実行し 8 定数・3 環境変数がすべて解決（`--allow-missing` は腕 B 用）。
 - x86_64＋RTX 3060 で `SMOKE=1 orchestrate_gb10.sh`（3 腕ビルド〈腕 A は registry `fandhe-ai v0.9.0`・B／C は path 解決を `cargo tree` で確認〉・`Cargo.lock` sha256 前後一致・CPU gemm N=256 の 3 腕 checksum `237.546660` 一致）。この作業ホストは CUDA toolkit（NVRTC）非搭載のため CUDA セルは `skipped.log` に記録され失敗扱いで正しく分離された（結果は判定に使わず未収録）。CUDA・Metal の実行経路そのものは実機セッションでの初回実測時に確認する。
 

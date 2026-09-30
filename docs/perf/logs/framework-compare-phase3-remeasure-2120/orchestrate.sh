@@ -8,7 +8,11 @@
 #   ノード上で実行する（Mac から HEAD_TREE／PRE_TREE を転送後）。
 # 使い方: HEAD_TREE=<main HEAD ツリー> PRE_TREE=<65035979 ツリー> LOGD=<出力先> orchestrate.sh <gb10|m4max>
 #   HEAD_TREE／PRE_TREE は各々ルートに .rev-stamp（空不可）が必要。PRE_TREE の stamp は 65035979 で始まること。
-#   SMOKE=1: 1 run・N=256 の gemm のみ・ゲート省略・candle／burn なしの疎通確認（LOGD 必須。結果は判定に使わない）。
+#   SMOKE=1: 1 run・N=256 の gemm のみ・ゲート省略・candle／burn なしの疎通確認（LOGD 必須。結果は判定に使わない。
+#   env_info.txt の smoke=1・gate.log の smoke-skip により aggregate.py の前提ゲートが正式集計を拒否する）。
+# 専有ゲート（RULE.txt「計測」）: GB10 は正式計測の前提条件で、20 回とも不通過ならその run を計測せず非 0 で停止する
+#   （不通過のまま計測した run を作らない）。M4 Max は record_only で、不通過でも計測し gate.log に記録する。
+# 完了記録: env_info.txt は全 run 完了・Cargo.lock 突合・build.log マスク後に最後に書く（aggregate.py は無ければ未完走として拒否）。
 # 参照元の方針: 承認ピン（fandhe-ai =0.9.0）と Cargo.lock は変更しない。腕 B／C は invocation 限定の --config patch
 #   （run_all.sh／run_all_cuda.sh の GEMM_GATE_PATCH_FACADE_PATH と同一機構）でビルドし、
 #   bench_fandhe_lock_restore.sh の退避・復元 trap と sha256 突合で Cargo.lock 不変を保証する。
@@ -44,6 +48,8 @@ SHA_C="$(cat "${HEAD_TREE}/.rev-stamp")"; SHA_B="$(cat "${PRE_TREE}/.rev-stamp")
 FC="${HEAD_TREE}/scripts/bench/framework-compare"
 [[ -d "${FC}" ]] || { echo "ERROR: ${FC} が無い" >&2; exit 1; }
 mkdir -p "${LOGD}/bin" || exit 1
+# 完了記録は最後に書き直す（途中停止したとき前回の完走記録が新しい gate.log 等と並んで残らないよう、最初に消す）
+rm -f "${LOGD}/env_info.txt" || exit 1
 export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 
 sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
@@ -64,7 +70,7 @@ for line in sys.stdin:
 }
 
 if [[ "${SMOKE}" == "1" ]]; then RUNS=1; else RUNS=5; fi
-BUILD_LOG="${LOGD}/build.log"; GATE_LOG="${LOGD}/gate.log"; : > "${BUILD_LOG}"; : > "${GATE_LOG}"
+BUILD_LOG="${LOGD}/build.log"; GATE_LOG="${LOGD}/gate.log"; : > "${BUILD_LOG}" || exit 1; : > "${GATE_LOG}" || exit 1
 
 cd "${FC}" || exit 1
 # Cargo.lock の退避・復元 trap（EXIT で必ず元へ戻す）＋各腕ビルド前の手動リセット用コピー。
@@ -122,6 +128,8 @@ assert_lock "after builds" || exit 1
 echo "Cargo.lock sha256(after)=$(sha256_of Cargo.lock)" >> "${BUILD_LOG}"
 
 # --- 専有ゲート ---
+# 取得値が数値でない（コマンド失敗・[N/A] 等）ときは通過扱いにしない（awk の文字列比較で "" < 8.0 が真になるのを防ぐ）。
+is_num() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 gate() { # gate <run>
   local r=$1 i l1 gu=-
   if [[ "${SMOKE}" == "1" ]]; then echo "run=${r} attempt=0 load1=- gpu_util=- smoke-skip" >> "${GATE_LOG}"; return 0; fi
@@ -129,7 +137,8 @@ gate() { # gate <run>
     for i in $(seq 1 20); do
       l1="$(cut -d' ' -f1 /proc/loadavg)"
       gu="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | head -1 | tr -d ' ')"
-      if awk -v l="${l1}" -v g="${gu}" 'BEGIN{exit !(l<1.0 && g==0)}'; then
+      is_num "${l1}" || l1="NA"; [[ "${gu}" =~ ^[0-9]+$ ]] || gu="NA"
+      if [[ "${l1}" != "NA" && "${gu}" != "NA" ]] && awk -v l="${l1}" -v g="${gu}" 'BEGIN{exit !(l<1.0 && g==0)}'; then
         echo "run=${r} attempt=${i} load1=${l1} gpu_util=${gu} pass" >> "${GATE_LOG}"; return 0
       fi
       echo "run=${r} attempt=${i} load1=${l1} gpu_util=${gu} wait" >> "${GATE_LOG}"; sleep 30
@@ -139,7 +148,8 @@ gate() { # gate <run>
   # M4 Max（record_only）: load1 < 8.0 を最大 30 分（60 秒間隔）待つ。不通過でも計測は実行し記録する。
   for i in $(seq 1 30); do
     l1="$(sysctl -n vm.loadavg | awk '{print $2}')"
-    if awk -v l="${l1}" 'BEGIN{exit !(l<8.0)}'; then
+    is_num "${l1}" || l1="NA"
+    if [[ "${l1}" != "NA" ]] && awk -v l="${l1}" 'BEGIN{exit !(l<8.0)}'; then
       echo "run=${r} attempt=${i} load1=${l1} gpu_util=- pass" >> "${GATE_LOG}"; return 0
     fi
     echo "run=${r} attempt=${i} load1=${l1} gpu_util=- wait" >> "${GATE_LOG}"; sleep 60
@@ -183,19 +193,27 @@ run_cells() { # run_cells <bin> <out> <err> <skiplog> < cells
   done
 }
 
-uptime > "${LOGD}/uptime_before.txt"
+uptime > "${LOGD}/uptime_before.txt" || exit 1
 echo "start $(date -u +%FT%TZ) machine=${MACHINE} B=${SHA_B} C=${SHA_C} smoke=${SMOKE}"
 for r in $(seq 1 "${RUNS}"); do
-  RD="${LOGD}/run${r}"; mkdir -p "${RD}"; ERR="${RD}/err.log"; SKIPLOG="${RD}/skipped.log"; : > "${ERR}"; : > "${SKIPLOG}"
-  gate "${r}" || echo "run${r}: 専有ゲート不通過（除外せず記録して続行。RULE.txt）"
+  RD="${LOGD}/run${r}"; mkdir -p "${RD}" || exit 1
+  ERR="${RD}/err.log"; SKIPLOG="${RD}/skipped.log"; : > "${ERR}" || exit 1; : > "${SKIPLOG}" || exit 1
+  if ! gate "${r}"; then
+    if [[ "${MACHINE}" == "gb10" ]]; then
+      # GB10 の専有ゲートは前提条件（RULE.txt）。不通過のまま計測した run を作らず、ここで正式計測を停止する。
+      echo "ERROR: run${r}: 専有ゲート不通過（GB10 は前提条件）。計測を停止する。負荷を解消して最初から再実行すること" >&2
+      exit 1
+    fi
+    echo "run${r}: 専有ゲート不通過（M4 Max は record_only。除外せず gate.log に記録して続行。RULE.txt）"
+  fi
   if (( r % 2 == 1 )); then ORDER="A B C"; else ORDER="C B A"; fi
   for arm in ${ORDER}; do
-    : > "${RD}/${arm}.jsonl"
+    : > "${RD}/${arm}.jsonl" || exit 1
     echo "-- run${r} arm=${arm} ($(date -u +%FT%TZ))"
     fandhe_cells | run_cells "${LOGD}/bin/bench-fandhe-${arm}" "${RD}/${arm}.jsonl" "${ERR}" "${SKIPLOG}"
   done
   if [[ "${SMOKE}" != "1" ]]; then
-    : > "${RD}/others.jsonl"
+    : > "${RD}/others.jsonl" || exit 1
     for bin in bench-candle bench-burn; do
       others_cells | run_cells "${LOGD}/bin/${bin}" "${RD}/others.jsonl" "${ERR}" "${SKIPLOG}"
     done
@@ -203,33 +221,43 @@ for r in $(seq 1 "${RUNS}"); do
   echo "run${r} rows: A=$(wc -l < "${RD}/A.jsonl") B=$(wc -l < "${RD}/B.jsonl") C=$(wc -l < "${RD}/C.jsonl") skipped=$(wc -l < "${SKIPLOG}")"
 done
 assert_lock "after runs" || exit 1
+if ! { mask < "${BUILD_LOG}" > "${BUILD_LOG}.masked" && mv "${BUILD_LOG}.masked" "${BUILD_LOG}"; }; then
+  echo "ERROR: build.log のマスクに失敗" >&2; exit 1
+fi
+uptime > "${LOGD}/uptime_after.txt" || exit 1
 
-{
-  echo "date_utc=$(date -u +%FT%TZ)"
-  echo "machine=${MACHINE}"
-  echo "rev_A=registry fandhe-ai =0.9.0"
-  echo "rev_B=${SHA_B}"
-  echo "rev_C=${SHA_C}"
-  echo "uname=$(uname -srm)"
-  echo "rustc=$(rustc -V)"; echo "cargo=$(cargo -V)"
-  if [[ "${MACHINE}" == "gb10" ]]; then
-    echo "nvcc=$(nvcc --version 2>/dev/null | tail -1)"
-    nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv 2>/dev/null
-    echo "nproc=$(nproc)"
-    echo "load_gate=load1<1.0 && gpu_util==0 (see gate.log)"
-  else
-    echo "sw_vers=$(sw_vers -productVersion 2>/dev/null)"
-    echo "cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
-    echo "ncpu=$(sysctl -n hw.ncpu 2>/dev/null)"
-    echo "therm=$( (pmset -g therm 2>/dev/null | tr '\n' ' ') || true)"
-    [[ -n "$(pmset -g therm 2>/dev/null)" ]] || echo "therm=取得不能"
-    echo "load_gate=record_only: load1<8.0 を最大 30 分待機（see gate.log）"
-  fi
-  echo "FANDHE_AI_*=未設定（起動時に検査）"
-  echo "Cargo.lock_sha256=${LOCK_SHA0}（前後一致を確認）"
-  echo "head_tree=<head-tree>  pre_tree=<pre-tree>"
-} 2>&1 | mask > "${LOGD}/env_info.txt"
-mask < "${BUILD_LOG}" > "${BUILD_LOG}.masked" && mv "${BUILD_LOG}.masked" "${BUILD_LOG}"
-uptime > "${LOGD}/uptime_after.txt"
+# 完了記録（最後に書く）。runs・smoke は aggregate.py の前提ゲートが正式計測か否かの判定に使う。
+write_env_info() {
+  {
+    echo "date_utc=$(date -u +%FT%TZ)"
+    echo "machine=${MACHINE}"
+    echo "rev_A=registry fandhe-ai =0.9.0"
+    echo "rev_B=${SHA_B}"
+    echo "rev_C=${SHA_C}"
+    echo "runs=${RUNS}"
+    echo "smoke=${SMOKE}"
+    echo "uname=$(uname -srm)"
+    echo "rustc=$(rustc -V)"; echo "cargo=$(cargo -V)"
+    if [[ "${MACHINE}" == "gb10" ]]; then
+      echo "nvcc=$(nvcc --version 2>/dev/null | tail -1)"
+      nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv 2>/dev/null
+      echo "nproc=$(nproc)"
+      echo "load_gate=load1<1.0 && gpu_util==0 (see gate.log)"
+    else
+      echo "sw_vers=$(sw_vers -productVersion 2>/dev/null)"
+      echo "cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+      echo "ncpu=$(sysctl -n hw.ncpu 2>/dev/null)"
+      echo "therm=$( (pmset -g therm 2>/dev/null | tr '\n' ' ') || true)"
+      [[ -n "$(pmset -g therm 2>/dev/null)" ]] || echo "therm=取得不能"
+      echo "load_gate=record_only: load1<8.0 を最大 30 分待機（see gate.log）"
+    fi
+    echo "FANDHE_AI_*=未設定（起動時に検査）"
+    echo "Cargo.lock_sha256=${LOCK_SHA0}（前後一致を確認）"
+    echo "head_tree=<head-tree>  pre_tree=<pre-tree>"
+  } 2>&1 | mask > "${LOGD}/env_info.txt.tmp"
+}
+if ! { write_env_info && mv "${LOGD}/env_info.txt.tmp" "${LOGD}/env_info.txt"; }; then
+  echo "ERROR: env_info.txt の書き出しに失敗（完了記録なし＝aggregate.py は集計しない）" >&2; exit 1
+fi
 rm -f "${LOCK_COPY}"
 echo "done. $(date -u +%FT%TZ)"

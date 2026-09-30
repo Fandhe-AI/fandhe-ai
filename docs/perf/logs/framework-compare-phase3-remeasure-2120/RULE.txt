@@ -36,6 +36,27 @@
     GB10: 各 run 前に load1 < 1.0 かつ nvidia-smi utilization.gpu 0%（#1988 と同一。最大 20 回×30 秒）。
     M4 Max（record_only）: 各 run 前に load1 < 8.0 を最大 30 分待機（0.9.0 系列 B と同一）。タイムアウトでも計測は実行する。
   不通過の run は除外せず「不通過」を併記する（判定は変えない。規則の事後緩和ではなく記録）。
+  （追記 2026-09-30・実測前。PR #2466 レビュー。上記の閾値・試行回数・間隔は変えない）
+    GB10 の専有ゲートは正式計測の前提条件である（record_only は M4 Max のみ。docs/perf/framework-compare-phase3-remeasure.md §6
+    「GB10 5 run 実測（専有ゲート成立下）」）。20 回とも不通過なら orchestrate.sh はその run を計測せずに非 0 で停止し、
+    不通過のまま計測した GB10 の run は作らない（負荷を解消して 5 run を最初からやり直す）。このため上の「除外せず併記」が
+    実際に働くのは M4 Max（record_only）の不通過 run であり、それは採用したうえで aggregate.md・集計 JSON・スコアボードの
+    計測条件注記に「不通過」を併記する。#1988 の orchestrate_gb10.sh は不通過でも続行したが、本イシューでは実測前に
+    GB10 側を厳格化する（緩和ではない）。取得値が数値でない（コマンド失敗・[N/A] 等）試行は NA と記録し通過扱いにしない。
+
+前提（追記 2026-09-30・実測前。aggregate.py の check_prerequisites が判定の前に一括評価する単一ゲート）:
+  次の 1 つでも満たさなければ前提不成立＝判定不能とし、aggregate.md・派生 JSONL・集計 JSON を作らない（既存の派生出力も消す）。
+  判定 1〜6 の閾値・定義は変えない。
+  P1 計測条件: env_info.txt（orchestrate.sh が全 run 完了後に最後に書く完了記録）に machine=<対象機体>・runs=5・smoke=0・
+     FANDHE_AI_*=未設定・rev_B が 65035979 始まり・rev_C がある。switches-B.txt・switches-C.txt があり、C に <absent> がない。
+  P2 専有ゲート: gate.log の全行が orchestrate.sh の書式どおりで、各 run（1..5）に終端（pass／fail）が 1 つだけある。
+     pass は記録値で閾値を再検証する。GB10 は 5 run すべて pass。M4 Max は fail も可（不通過として併記）。SMOKE の記録は不可。
+  P3 終了コード: 各 run の skipped.log があり、判定対象・比較対象セルの FAIL がない（行が出力済みでも採用しない）。
+     --phases 行と判定 1 の明示例外（M4 Max burn Metal N>=512）の FAIL は判定を止めず aggregate.md に併記する。
+  P4 入力の厳格性: JSONL に NaN／Infinity・非有限値・1 行内の重複キーがない。必須キー（framework・task・device・size・mode・
+     median_s）がそろい、size は整数、median_s は正の有限値、parity_fail_count は非負整数（gemm は必須）。
+     同一セルの重複行・セル範囲外の行・想定外 FW の行がない。
+  P5 判定 1 の完備性と判定 4 の checksum 欠損なし（下記）。
 
 判定（結果が出る前に固定・中間なし）:
   1. 完備性: 判定対象セルは 5 run × 3 腕がそろうこと。欠けがあれば派生出力を作らず停止する（捏造・補間しない）。
@@ -43,6 +64,9 @@
   3. セル単位の Phase 3 前後比 = 各 run の同一 run 内比 C.median_s / B.median_s の 5 run 中央値（infer も時間比で統一）。
      非後退 ⇔ 比 <= 1.00（厳密。> 1.00 は「後退」と記録する。q1／q3 を併記するが判定は変えない）。
      A→C も同様に算出して併記する（参考）。
+     （追記 2026-09-30・実測前）スコアボードの「前比」表示・カードの比・22 セル転記の B→C 比は、aggregate.py が算出した本比
+     （集計 JSON <prefix>-aggregate.json の bc_med・bc_q1・bc_q3・nonreg）をそのまま用い、gen_2120.py は再計算しない。
+     判定 2 の採用行同士の比は本比と一致するとは限らないため、表示・転記に使わない（採用行の値そのものは参考表示してよい）。
   4. checksum: 各腕・各セルで 5 run の JSON checksum 値が文字列として完全一致すること、および腕 A/B/C 間でも
      完全一致すること。不一致は不一致として記録し、是正・再試行しない（ADOPT で数値経路が変わった腕がある場合も同じ）。
      他 FW との整合は既存どおり parity_fail_count（> 0 は判定不能）で扱う。
@@ -50,6 +74,9 @@
   6. 負けセル 22 件（docs/perf/loss-attribution-matrix.md §3。負け 20 + 僅差 2）の Phase 3 前後倍率
      （gen_1988 の「最速他 FW ÷ fandhe-ai」倍率〈基準〉→ 腕 B → 腕 C）を docs/perf/framework-compare-phase3-remeasure.md へ記録する。
      残存負けセルの原因再分析は Phase 4 のスコープであり、本イシューでは行わない。
+     （追記 2026-09-30・実測前）腕 B・腕 C の倍率は gen_2120.py --tsv（--arm B／--arm C の各実行）から、B→C 比・非後退・
+     checksum は同 TSV の集計 JSON 由来列（aggregate.md と同値）から転記する。gen_2120.py は集計 JSON が formal でない・
+     入力 JSONL が集計 JSON の記録（sha256）と一致しない場合は生成を停止する。
 
 期待値（事前記載）: 計測時点の .rev-stamp で既定 ON のスイッチが 0 件なら、B→C は全セルで 1.00 近傍（run 間ノイズ帯内）・
   checksum は文字列一致。これを失敗と扱わない。1.00 を有意に下回る（改善）セルが出た場合は、switches-C.txt の ON スイッチと
@@ -61,5 +88,6 @@
 
 保存物（本ディレクトリ）: RULE.txt・README.md・orchestrate.sh（orchestrate_gb10.sh／orchestrate_m4max.sh は薄いラッパー）・
   switches.sh・aggregate.py（python3 標準ライブラリのみ・--self-test）・aggregate.md・switches-{B,C}.txt・
+  <prefix>-{A,B,C}-full.jsonl・<prefix>-aggregate.json（追記 2026-09-30）・
   build.log・gate.log・run{1..5}/・env_info.txt（ホスト名・ユーザー名・絶対パスは <home> 等へマスク）・
   scoreboard/（gen_2120.py・body_2120.html）。機体別は m4max/・gb10/ 配下へ収納する。
