@@ -1,0 +1,65 @@
+事前登録判定規則（イシュー #2120・framework-compare 両機体再計測とスコアボード再生成〈Phase 3 採否反映〉）
+登録日時: 2026-09-30（UTC）。実測開始前に本ファイルをコミットし、結果が出た後に緩和しない。
+本ファイルの判定条項は、実測結果を見た後に変更しない。
+
+対象機体: Apple M4 Max（Metal／CPU）・DGX Spark GB10（CUDA／ARM CPU。driver・compute_cap は env_info.txt に記録）。
+  本規則・計測キットの作成ホストは x86_64 + RTX 3060 であり、いずれの本番機体でもない。
+  したがって本コミットは「再計測基盤＋事前登録規則」であり、両機体の本番実測は Mac／GB10 セッションで
+  本規則に従って実施する（#2117〈GB10 affinity〉・#2118〈SME しきい値〉と同じ構成）。
+
+前提のずれ（事前記載）:
+  Phase 3（親 #2099）の #2100〜#2119 は全件クローズ済みだが、マージ済み施策はいずれも opt-in・既定 OFF のまま
+  実機判定を申し送っており、main 上で既定 ON 化（本番結線）された施策は 0 件である（作成時点の実測）。
+  よって Phase 3 前後（腕 B→腕 C）の差は、計測時点の .rev-stamp で既定 ON になっているスイッチがなければ
+  ノイズ帯の 1.00 近傍・checksum 文字列完全一致が期待値であり、それは正当な記録結果として扱う（失敗扱いにしない）。
+  各スイッチの既定値は switches-{B,C}.txt へ計測時点のツリーから機械抽出して記録する（switches.sh）。
+
+計測腕（fandhe-ai のソースだけが異なる。比較相手 candle・burn は腕に依らず各 run で 1 回）:
+  腕 A: registry fandhe-ai =0.9.0（承認ピン。patch なし）。loss-attribution-matrix の基準と同じ実装（参考腕）。
+  腕 B: Phase 3 直前ツリー 65035979（#2445 docs マージ。Phase 3 最初のコード変更 7b40ed4f の直前）。
+        GEMM_GATE_PATCH_FACADE_PATH=<pre-tree>/crates/facade の invocation 限定 --config patch でビルド。
+  腕 C: 計測時点の main HEAD（.rev-stamp に記録）。同じく patch でビルド。スコアボードの主表示。
+  主比較 = B→C（Phase 3 前後比）。A→C は 0.9.0 以降の非 Phase 3 変更を含む参考比として併記する。
+  facade の version はいずれも 0.9.0 のため JSONL の version では腕を区別できない → 腕ごとに別 JSONL へ書く。
+  腕の実行順は run ごとに反転（奇数 run: A→B→C、偶数 run: C→B→A。order-bias 相殺）。
+  opt-in 環境変数（FANDHE_AI_*）は一切設定しない。1 つでも設定されていれば計測を開始しない。
+  Python FW（PyTorch／TensorFlow／SciPy）行は再計測せず既存値（M4: 0.9.0 スコアボード転記値・GB10:
+  results-dgx-py-precision-class.jsonl）を流用する。Phase 3 前後比は fandhe-ai 腕間の比であり相手値に依存しない。
+
+セル範囲（0.9.0 スコアボードの行に写像し、新セルを作らない。各腕とも fandhe-ai は fresh・reuse 両モード）:
+  M4 Max: gemm cpu N=256〜2048・gemm metal N=256〜4096・train／infer × {cpu, metal}（batch 64。--phases 行は収録するが判定対象外）。
+  GB10  : gemm cuda N=256〜4096・gemm cpu N=256〜4096・train／infer × {cuda, cpu}（batch 64。--phases 行は判定対象外）。
+  candle・burn は gemm／train／infer の fresh 行（既存 run_all*.sh と同じ）。
+
+計測: 5 run・プロセス独立（run{1..5}/{A,B,C,others}.jsonl）。
+  専有ゲート:
+    GB10: 各 run 前に load1 < 1.0 かつ nvidia-smi utilization.gpu 0%（#1988 と同一。最大 20 回×30 秒）。
+    M4 Max（record_only）: 各 run 前に load1 < 8.0 を最大 30 分待機（0.9.0 系列 B と同一）。タイムアウトでも計測は実行する。
+  不通過の run は除外せず「不通過」を併記する（判定は変えない。規則の事後緩和ではなく記録）。
+
+判定（結果が出る前に固定・中間なし）:
+  1. 完備性: 判定対象セルは 5 run × 3 腕がそろうこと。欠けがあれば派生出力を作らず停止する（捏造・補間しない）。
+  2. スコアボード採用行: 各セル・各腕で 5 run のうち median_s が中央値の run の行（median_rounds.py と同規則。偶数なら小さい側）。
+  3. セル単位の Phase 3 前後比 = 各 run の同一 run 内比 C.median_s / B.median_s の 5 run 中央値（infer も時間比で統一）。
+     非後退 ⇔ 比 <= 1.00（厳密。> 1.00 は「後退」と記録する。q1／q3 を併記するが判定は変えない）。
+     A→C も同様に算出して併記する（参考）。
+  4. checksum: 各腕・各セルで 5 run の JSON checksum 値が文字列として完全一致すること、および腕 A/B/C 間でも
+     完全一致すること。不一致は不一致として記録し、是正・再試行しない（ADOPT で数値経路が変わった腕がある場合も同じ）。
+     他 FW との整合は既存どおり parity_fail_count（> 0 は判定不能）で扱う。
+  5. 勝敗・順位・僅差・判定不能: scoreboard/gen_2120.py（gen_1988.py 派生）の既存規則で機械的に決める。
+  6. 負けセル 22 件（docs/perf/loss-attribution-matrix.md §3。負け 20 + 僅差 2）の Phase 3 前後倍率
+     （gen_1988 の「最速他 FW ÷ fandhe-ai」倍率〈基準〉→ 腕 B → 腕 C）を docs/perf/framework-compare-phase3-remeasure.md へ記録する。
+     残存負けセルの原因再分析は Phase 4 のスコープであり、本イシューでは行わない。
+
+期待値（事前記載）: 計測時点の .rev-stamp で既定 ON のスイッチが 0 件なら、B→C は全セルで 1.00 近傍（run 間ノイズ帯内）・
+  checksum は文字列一致。これを失敗と扱わない。1.00 を有意に下回る（改善）セルが出た場合は、switches-C.txt の ON スイッチと
+  突き合わせて記録する。
+
+不変（本イシューで変更しない）: tolerance 4 定数・判定式・ParityBaseline・BASELINES・Cargo.toml・Cargo.lock・
+  ガードレール閾値・docs/spec・SME_PRODUCTION_ENABLED／GB10_AFFINITY_ENABLED 等の既定値。
+  既存 REJECT／undetermined 実験の再実行はしない。
+
+保存物（本ディレクトリ）: RULE.txt・README.md・orchestrate.sh（orchestrate_gb10.sh／orchestrate_m4max.sh は薄いラッパー）・
+  switches.sh・aggregate.py（python3 標準ライブラリのみ・--self-test）・aggregate.md・switches-{B,C}.txt・
+  build.log・gate.log・run{1..5}/・env_info.txt（ホスト名・ユーザー名・絶対パスは <home> 等へマスク）・
+  scoreboard/（gen_2120.py・body_2120.html）。機体別は m4max/・gb10/ 配下へ収納する。
