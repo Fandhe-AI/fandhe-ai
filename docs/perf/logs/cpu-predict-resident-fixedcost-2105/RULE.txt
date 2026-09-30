@@ -1,0 +1,55 @@
+RULE fixed-at-utc: 2026-09-30T00:33:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #2105 CPU predict_resident 固定費（GB10 reuse > fresh 逆転）の切り分け
+doc: docs/perf/cpu-predict-resident-fixedcost.md
+
+[実行方法]
+- 1 run = 1 プロセス。テストバイナリ
+  crates/facade/tests/cpu_predict_resident_fixedcost_diag.rs を
+  `--ignored --exact cpu_predict_resident_fixedcost_phases --nocapture --test-threads=1`
+  で起動し、出力は 1 つの run{N}.jsonl。
+- run1〜run5 の 5 run。差し替え・追加起動・既存 run ファイルの上書きはしない。
+- 1 プロセスあたり warmup 20 反復 + 計測 80 反復（20 反復 x 4 ラウンド。
+  ラウンドごとに arm 順を反転）。
+- 対象ホスト: Apple M4 Max（m4max）と DGX Spark GB10（gb10）。
+
+[代表値]
+- 各セルは run ごとの median_s を採り、5 run 間の中央値と min-max を報告する。
+
+[checksum 規則（hard・fail-closed）]
+- 各 arm の iter_total.checksum_bits が 5 run すべてで一致すること。
+- reuse_decomposed と reuse の checksum_bits が一致すること。
+- fresh と reuse の一致は記録のみで要件にしない。
+- 1 つでも不一致なら系列は無効（集計は exit != 0）。
+
+[比の定義]
+- ratio = reuse.iter_total / fresh.iter_total（5 run 中央値同士）。
+- 本イシューは修正を出荷しないため ratio <= 1.00 を非後退基準として記録する。
+- ratio > 1.00 なら「HEAD で逆転が再現」と判定する（採否ゲートではない）。
+
+[帰属規則]
+- diff = reuse.iter_total - fresh.iter_total（diff <= 0 なら帰属は行わず
+  「逆転非再現」とする）。
+- 区間差分（reuse_decomposed 側 - fresh 側）:
+  H1 カーネル差 = reuse_decomposed.l1_linear_forward_device - fresh_layers.l1_linear_relu_fused
+  L2 差        = reuse_decomposed.l2_linear_forward_device - fresh_layers.l2_linear_gemm_add
+  H2 コピー/確保 = reuse_decomposed.upload + reuse_decomposed.readout
+  H4 tape 固定費 = reuse_decomposed.tape_build + (reuse.iter_total - reuse_decomposed.iter_total)
+- 1 区間の差分が diff の 50% 以上なら対応仮説を「支持」、どの区間も
+  50% に届かなければ「未確定」。閾値は事後に変えない。
+- H3（アロケータ/ページフォルト）は補助情報のみ（判定には使わない）。minflt 採取は
+  /proc 読み出しがタイミングを歪めるため 5 run の系列では OFF（minflt_delta_per_iter=null）。
+  FIXEDCOST_MINFLT=1 を付けた別ディレクトリ（--out）の 1 run でのみ記録し、
+  reuse_decomposed.upload/readout/forward_resident と fresh の値を比較する。
+  H5（順序効果・二峰性）は q1/q3/min/max を記録するのみ。
+
+[ゲート]
+- gb10: 各 run の開始前に load1 < 1.0 を 30 秒間隔・最大 30 分待つ。
+  1 run でも通過しなければ系列を参考扱いにする（load_gate.log に記録）。
+- m4max: record_only（共有環境。load average の推移を env_info に記録）。
+
+[対象外（再実行しない既存実験。決定記録あり）]
+- #1575 small_shape_thread_cap / #1576 GB10 affinity / B packing 共有 /
+  SME ゲート / 2D dynamic / RAYON_NUM_THREADS スイープ。
+
+[マスク規則]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。
