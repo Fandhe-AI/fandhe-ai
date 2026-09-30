@@ -273,3 +273,5 @@ GB10 実測で K 分割なし版は REJECT と確定）が完了したのを受�
   行追加の要否はユーザー承認事項として本イシューでは判断していない）・128×64 タイルへの Stream-K
   拡張は今後の検討候補として `docs/perf/cuda-gemm-tiled-pipeline-streamk.md` §6.8 に記録した
   （本節では重複記載しない）。
+
+（sm_121 での REJECT 理由の再分類・fixup 固定費削減候補・CTA→SM 分布プローブの設計は `docs/cuda-sm121-gemm-candidates-design.md` §3.1・§4 を参照。#2130）

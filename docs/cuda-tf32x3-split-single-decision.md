@@ -180,3 +180,4 @@ mma_tf32x3_source_issues_mma_sync_from_single_macro_site_called_three_times`）
   （3×TF32 opt-in モードは f32 SIMT 参照実装と bit 一致しない）の記述は
   opt-in 経路自体が残るため変更しない。REQ-2 の複合判定・tolerance 定数も
   不変
+- **sm_121 での再分類（#2130）**: 本節の判断は変更しない。P1 不成立の原因切り分け（累積意味論 vs 設計要素）の判別実験設計は `docs/cuda-sm121-gemm-candidates-design.md` §3.4 を参照。
