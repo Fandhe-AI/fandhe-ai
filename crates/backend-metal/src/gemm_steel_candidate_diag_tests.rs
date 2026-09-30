@@ -341,9 +341,12 @@ fn steel_candidate_kernel_gpu_ab_production_sizes() {
             );
         }
 
-        let mut keep_alives: Vec<Vec<Vec<f32>>> = (0..num)
-            .map(|_| Vec::with_capacity(WARMUP_TRIALS + MEASURED_TRIALS))
-            .collect();
+        // `measure_one_phase_trial` は各試行の `n*n` f32 出力を `keep_alive` へ積む。
+        // 5 arm × (warmup + 計測) 分を全保持すると N=4096 で約 12.5 GiB に達し、
+        // メモリ圧迫が計測へ影響しうるため、試行ごとに `clear()` して保持を
+        // 1 試行分（arm あたり 1 出力）へ制限する。`kernel_gpu` は GPU タイムスタンプで
+        // あり、解放（計測区間外）は計測値へ混入しない。
+        let mut keep_alives: Vec<Vec<Vec<f32>>> = (0..num).map(|_| Vec::with_capacity(1)).collect();
         for _ in 0..WARMUP_TRIALS {
             for idx in 0..num {
                 let _ = measure_one_phase_trial(
@@ -355,6 +358,7 @@ fn steel_candidate_kernel_gpu_ab_production_sizes() {
                     cfgs[idx],
                     &mut keep_alives[idx],
                 );
+                keep_alives[idx].clear();
             }
         }
         let mut kernel_gpu: Vec<Vec<f64>> = (0..num)
@@ -373,6 +377,7 @@ fn steel_candidate_kernel_gpu_ab_production_sizes() {
                     cfgs[idx],
                     &mut keep_alives[idx],
                 );
+                keep_alives[idx].clear();
                 assert_eq!(
                     sample.resolved_cfg, cfgs[idx],
                     "N={n} trial={trial} arm={}: pipeline_for_tile フォールバックが発生した\
