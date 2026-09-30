@@ -71,6 +71,8 @@ unsafe extern "C" {
 
 本エージェント実行環境に GB10（DGX Spark GB10）実機への到達手段が無いため、既定 `GB10_AFFINITY_ENABLED = false` のまま実装・単体テストを完了し、性能 A/B は未実施のまま `docs/perf/cpu-gemm-gb10-affinity-ab.md` に事前登録判定規則のみを記録する。ADOPT 判断は実機実測を伴う後続セッションへ引き継ぐ（#1364 と同型のロールバック運用: 1 行差し戻すだけで無効化できる）。
 
+イシュー #2117 で実行基盤（事前登録 `docs/perf/logs/cpu-gb10-affinity-ab-2117/RULE.txt`・`scripts/bench/framework-compare/run_ab_gb10_affinity_cpu.sh`・機構発火確認 `crates/backend-cpu/tests/gb10_affinity_report.rs`）を用意済み。実測・判定・結線は GB10 セッション待ち。
+
 ## 8. スコープ外事項（`.claude/rules/out-of-scope-tracking.md` に従い別 issue で追跡）
 
 - tolerance／baseline の変更（issue 本文の契約により対象外）

@@ -1,0 +1,20 @@
+uname_m=x86_64
+rustc=rustc 1.98.1 (48a229cea 2026-09-01)
+head=45f10b8205d29bf47da2440cc861a3a624c3991c
+cpu_model=13th Gen Intel(R) Core(TM) i7-13700K
+nproc=10
+cpus_allowed_list=0-9
+rayon_num_threads=unset
+precheck=report-only
+--- lscpu -e (CPU,MAXMHZ) ---
+CPU MAXMHZ
+  0      -
+  1      -
+  2      -
+  3      -
+  4      -
+  5      -
+  6      -
+  7      -
+  8      -
+  9      -
