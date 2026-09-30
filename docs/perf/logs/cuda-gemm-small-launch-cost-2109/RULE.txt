@@ -14,13 +14,26 @@
 1. 実行
   - 1 run = 1 プロセス。run1〜run5 の 5 run とし、差し替え・追加起動・
     上書きをしない。Layer B は 50 warmup + 200 計測。
+  - ログ完全性の契約（fail-closed）: aggregate.py は読み取る全レコード種別
+    （Layer A/HEAD/candle の JSONL の run 区切り・phase レコード、Layer B の
+    DIAG2109 区間・checksum_bits・counts〈行内の各項目を含む〉・kernel 行、
+    load_gate.log のゲート行、`cargo test` の成功行）を共通の登録口
+    （register_once）で扱い、同じキーのレコードが 2 度現れたら値が同一でも
+    LogIntegrityError とする（上書き・最初の値の採用・黙殺をしない）。キー集合は
+    期待（run 1..5・サイズ 128/256/512・診断テストが emit する区間の完全集合・
+    counts の全項目・ゲートラベル 30 個）と過不足なく一致すること
+    （欠落・余剰・未知を拒否）。JSONL の各レコードは task/device/size/mode の
+    期待値と数値の median_s・checksum を持つこと。検出範囲はここに列挙した入力・
+    キーに限り、上記以外のフィールド（JSONL の追加キー等）の値や、ログ全体が
+    実際に当該実行から生成されたことの証明までは保証しない。
   - 単位は µs。区間ごとに run 内の中央値を取り、5 run 間の中央値と
     min・max を報告する。
 
 2. checksum（hard・fail-closed）
   - Layer A の phases と非 phases（AC-2）の checksum が一致し、
     237.546660（#1988 の値）と一致すること。
-  - Layer B の checksum_bits が 5 run で同一であること。
+  - Layer B の checksum_bits が 5 run で同一であること（サイズごと。各サイズに
+    ちょうど 1 行。重複は不一致でなくても fail-closed）。
   - 1 つでも外れたら系列を無効とし、aggregate.py は exit != 0 で終わる。
 
 3. 件数（hard）
@@ -28,7 +41,8 @@
     （run_tiled_f32・gemm_fp32_strict とも driver_call_scopes=1,
     h2d_calls=2, pool_allocs=1, kernel_launches=1, d2h_calls=1,
     stream_syncs=1, h2d_bytes=2*N^2*4, d2h_bytes=N^2*4）。
-  - Layer B 出力の counts 行も同値であること（aggregate.py が検査）。
+  - Layer B 出力の counts 行も同値であること（aggregate.py が検査。サイズごとに
+    ちょうど 1 行で、全項目が過不足なく期待と一致すること）。
   - テスト自体の成功は counts-exact.log（`test ...gemm_small_launch_counts_exact
     ... ok` と `test result: ok. 1 passed; 0 failed`）を aggregate.py が入力に
     含めて検証する。ログ欠落・失敗・0 件実行は fail-closed（exit != 0）。

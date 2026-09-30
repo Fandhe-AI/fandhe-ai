@@ -10,7 +10,9 @@
   - counts-exact.log（`gemm_small_launch_counts_exact` の出力。RULE.txt 3 の hard 条件。
     `test result: ok. 1 passed; 0 failed` を含まなければ fail-closed）
 
-fail-closed: run 数不足・phase 欠落/重複・壊れた JSON・checksum 不一致・
+fail-closed: 全レコード種別（run 区切り・phase・DIAG2109 区間/checksum/counts/kernel・
+ゲート行・test 成功行）の重複（値が同一でも拒否。register_once に一本化）とキー集合の
+過不足（require_exact_keys）・run 数不足・phase 欠落/重複・壊れた JSON・checksum 不一致・
 件数不一致・未マスクの絶対パス（/home/<user>）・load_gate.log の欠落や
 書式不正を検出したら `LogIntegrityError` を送出し、正式な集計（Markdown）を
 一切出力せず非ゼロ終了する。全ログ未生成（実測前）のときだけ正常な中間状態
@@ -46,6 +48,26 @@ class LogIntegrityError(Exception):
     """完全性検査に失敗したことを表す（黙って除外せず非ゼロ終了する）。"""
 
 
+def register_once(store: dict, key, value, where: str) -> None:
+    """キー付きレコードの唯一の登録口。既出キーは上書き・無視せず LogIntegrityError にする。
+
+    本ファイルのパーサはキー付きレコード（区間・checksum・件数・件数の各項目・ゲート行・
+    run 内の phase・run 区切り）を必ずこの関数で登録する（RULE.txt 1・3。重複は連結・再実行の
+    痕跡であり、最初の値・最後の値のどちらも採用しない）。
+    """
+    if key in store:
+        raise LogIntegrityError(f"{where}: レコードが重複: {key!r}")
+    store[key] = value
+
+
+def require_exact_keys(got, want, where: str) -> None:
+    """観測したキー集合が期待集合と過不足なく一致することを要求する（欠落・余剰・未知を拒否）。"""
+    got_s, want_s = set(got), set(want)
+    if got_s != want_s:
+        raise LogIntegrityError(
+            f"{where}: キー集合が期待と不一致（欠落 {sorted(want_s - got_s)}・余剰 {sorted(got_s - want_s)}）")
+
+
 def check_masked(text: str, name: str) -> None:
     m = UNMASKED_RE.search(text)
     if m:
@@ -66,6 +88,7 @@ def parse_jsonl_runs(text: str, name: str, need: tuple[str, ...] | None,
     check_masked(text, name)
     runs: list[list[dict]] = []
     cur: list[dict] | None = None
+    cur_keys: dict = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -82,6 +105,7 @@ def parse_jsonl_runs(text: str, name: str, need: tuple[str, ...] | None,
                 raise LogIntegrityError(
                     f"{name}: run 番号が連番でない（期待 {len(runs) + 1}・実際 {m[1]}）: {line!r}")
             cur = []
+            cur_keys = {}
             continue
         if cur is None:
             raise LogIntegrityError(f"{name}: 区切り行より前にデータ行: {line!r}")
@@ -98,6 +122,16 @@ def parse_jsonl_runs(text: str, name: str, need: tuple[str, ...] | None,
                 raise LogIntegrityError(
                     f"{name}: run {len(runs) + 1} のレコード {key} が期待と不一致"
                     f"（期待 {want!r}・実際 {rec.get(key)!r}）")
+        # median_s・checksum は集計が読む必須フィールド（欠落・非数値は KeyError にせず fail-closed）。
+        for fld in ("median_s", "checksum"):
+            v = rec.get(fld)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+                raise LogIntegrityError(f"{name}: run {len(runs) + 1} のレコードに数値の {fld} が無い: {line!r}")
+        # run 内のレコード識別子は phase（phases なしは単一レコード）。重複は register_once で拒否。
+        if need is None and "phase" in rec:
+            raise LogIntegrityError(f"{name}: phase を持たない系列に phase 付きレコード: {line!r}")
+        register_once(cur_keys, rec.get("phase") if need else "<record>", True,
+                      f"{name} run {len(runs) + 1}")
         cur.append(rec)
     if cur is not None:
         runs.append(cur)
@@ -109,9 +143,7 @@ def parse_jsonl_runs(text: str, name: str, need: tuple[str, ...] | None,
         if len(r) != want:
             raise LogIntegrityError(f"{name}: run {i} のレコード数が不正（期待 {want}・実際 {len(r)}）")
         if need:
-            got = [rec.get("phase") for rec in r]
-            if sorted(got) != sorted(need):
-                raise LogIntegrityError(f"{name}: run {i} の phase 集合が不正: {got}")
+            require_exact_keys([rec.get("phase") for rec in r], need, f"{name} run {i} の phase")
     return runs
 
 
@@ -132,39 +164,68 @@ def check_layer_b_success(text: str, name: str) -> None:
     N=256 の行を出した後に N=512 でテストが失敗しても DIAG2109 行だけは揃うため、
     対象テストの実行行と成功した `test result` を必須にする（未完走の実測を採用しない）。
     """
-    if (not LAYER_B_NAME_RE.search(text) or not TEST_RESULT_OK_RE.search(text)
+    if (len(LAYER_B_NAME_RE.findall(text)) != 1 or len(TEST_RESULT_OK_RE.findall(text)) != 1
             or LAYER_B_FAIL_RE.search(text)):
         raise LogIntegrityError(
             f"{name}: {LAYER_B_TEST} の成功（test result: ok. 1 passed）を確認できない")
 
 
+SIZES = (128, 256, 512)  # 診断テストの `SIZES`（gemm_small_launch_cost_diag_tests.rs）と一致させる
+# 診断テストが 1 サイズあたり emit する (layer, phase) の完全集合（同ファイル run_size の emit 呼び出し）。
+LAYER_B_PHASES = frozenset(
+    [("L0", "ops_total"), ("L1", "gemm_total")]
+    + [("L2", p) for p in ("h2d_a", "h2d_b", "alloc_c", "launch_issue", "readback", "teardown",
+                           "driver_scope", "l2_sum")]
+    + [("L2S", "kernel_wait"), ("L2S", "d2h")]
+    + [("D", p) for p in ("dev_h2d_a", "dev_h2d_b", "dev_kernel_seg", "dev_d2h", "dev_span",
+                          "dev_kernel_b2b")]
+    + [("E", p) for p in ("sync_idle", "tiny_roundtrip", "event_create_drop", "h2d_prealloc",
+                          "h2d_clone_drop")])
+KERNEL_RE = re.compile(r"^DIAG2109 n=(\d+) kernel=(.+)$")
+
+
 def parse_layer_b(text: str, name: str) -> dict:
-    """1 プロセス分の Layer B ログ → {(n, layer, phase): median_us, ...}。"""
+    """1 プロセス分の Layer B ログ → phases/checksum/counts/kernel の辞書。
+
+    DIAG2109 の全レコード種別（区間・checksum・counts・kernel）を register_once で登録し、
+    同一キーの重複を拒否する。サイズは SIZES、区間は LAYER_B_PHASES と過不足なく一致すること
+    （kernel 行のみ feature 依存で任意だが、あれば SIZES の各 n につき 1 回まで）。
+    """
     check_masked(text, name)
     check_layer_b_success(text, name)
-    out: dict = {"phases": {}, "checksum": {}, "counts": {}}
+    phases: dict = {}
+    checksum: dict = {}
+    counts: dict = {}
+    kernel: dict = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line.startswith("DIAG2109 "):
             continue
         if m := DIAG_RE.match(line):
-            key = (int(m[1]), m[2], m[3])
-            if key in out["phases"]:
-                raise LogIntegrityError(f"{name}: 区間が重複: {key}")
-            out["phases"][key] = float(m[4])
+            register_once(phases, (int(m[1]), m[2], m[3]), float(m[4]), f"{name} 区間")
         elif m := CKSUM_RE.match(line):
-            out["checksum"][int(m[1])] = m[2]
+            register_once(checksum, int(m[1]), m[2], f"{name} checksum_bits")
         elif m := COUNTS_RE.match(line):
-            out["counts"][int(m[1])] = dict(kv.split("=") for kv in m[2].split())
-        elif " kernel=" in line:
-            pass
+            items: dict = {}
+            for kv in m[2].split():
+                k, sep, v = kv.partition("=")
+                if not sep or not k:
+                    raise LogIntegrityError(f"{name}: counts 行の項目が k=v 形式でない: {line!r}")
+                register_once(items, k, v, f"{name} counts n={m[1]}")
+            register_once(counts, int(m[1]), items, f"{name} counts")
+        elif m := KERNEL_RE.match(line):
+            register_once(kernel, int(m[1]), m[2], f"{name} kernel")
         else:
             raise LogIntegrityError(f"{name}: 認識できない DIAG2109 行: {line!r}")
-    if N not in out["checksum"]:
-        raise LogIntegrityError(f"{name}: N={N} の checksum_bits が無い")
-    if not any(k[0] == N for k in out["phases"]):
-        raise LogIntegrityError(f"{name}: N={N} の区間が無い")
-    return out
+    require_exact_keys(checksum, SIZES, f"{name} checksum_bits の n")
+    require_exact_keys(counts, SIZES, f"{name} counts の n")
+    if not set(kernel) <= set(SIZES):
+        raise LogIntegrityError(f"{name}: 未知の n の kernel 行: {sorted(set(kernel) - set(SIZES))}")
+    require_exact_keys({(n, l, p) for (n, l, p) in phases},
+                       {(n, l, p) for n in SIZES for (l, p) in LAYER_B_PHASES}, f"{name} 区間")
+    for n, items in counts.items():
+        require_exact_keys(items, expected_counts(n), f"{name} counts n={n} の項目")
+    return {"phases": phases, "checksum": checksum, "counts": counts, "kernel": kernel}
 
 
 COUNTS_TEST = "gemm_small_launch_cost_diag_tests::gemm_small_launch_counts_exact"
@@ -179,7 +240,8 @@ def check_counts_exact(text: str) -> None:
     0 ignored;` の両方が必要（テスト未実施・失敗・0 件実行・別テストの成功では通さない）。
     """
     check_masked(text, "counts-exact")
-    if not TEST_LINE_OK_RE.search(text) or not TEST_RESULT_OK_RE.search(text):
+    # 成功行は各 1 回ちょうど（連結ログ・再実行の重複を通さない）。
+    if len(TEST_LINE_OK_RE.findall(text)) != 1 or len(TEST_RESULT_OK_RE.findall(text)) != 1:
         raise LogIntegrityError(
             "counts-exact.log: gemm_small_launch_counts_exact の成功（ok / 1 passed）を確認できない"
             "（RULE.txt 3）")
@@ -201,7 +263,7 @@ def parse_gate(text: str) -> bool:
     """
     check_masked(text, "load_gate")
     ok = True
-    seen: list[str] = []
+    seen: dict = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -220,15 +282,10 @@ def parse_gate(text: str) -> bool:
             raise LogIntegrityError(f"load_gate: PASS だが実測値が専有条件を満たさない: {line!r}")
         if verdict != "PASS" and meets:
             raise LogIntegrityError(f"load_gate: FAIL だが実測値が専有条件を満たす（矛盾）: {line!r}")
-        seen.append(label)
+        register_once(seen, label, verdict, "load_gate")
         if verdict != "PASS":
             ok = False
-    if len(seen) != len(set(seen)):
-        raise LogIntegrityError("load_gate: ラベルが重複")
-    if set(seen) != GATE_EXPECTED:
-        missing = sorted(GATE_EXPECTED - set(seen))
-        extra = sorted(set(seen) - GATE_EXPECTED)
-        raise LogIntegrityError(f"load_gate: ラベル集合が期待と不一致（欠落 {missing}・余剰 {extra}）")
+    require_exact_keys(seen, GATE_EXPECTED, "load_gate ラベル")
     return ok
 
 
@@ -253,11 +310,13 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
     if len(layer_b_texts) != RUNS:
         raise LogIntegrityError(f"Layer B の run 数が不一致（期待 {RUNS}・実際 {len(layer_b_texts)}）")
     bs = [parse_layer_b(t, f"layerB-run{i}") for i, t in enumerate(layer_b_texts, 1)]
-    if len({b["checksum"][N] for b in bs}) != 1:
-        raise LogIntegrityError("Layer B の checksum_bits が run 間で不一致（RULE.txt 2）")
+    for n in SIZES:
+        if len({b["checksum"][n] for b in bs}) != 1:
+            raise LogIntegrityError(f"Layer B の checksum_bits が run 間で不一致（n={n}。RULE.txt 2）")
     for i, b in enumerate(bs, 1):
-        if b["counts"].get(N) != expected_counts(N):
-            raise LogIntegrityError(f"layerB-run{i}: 件数が期待と不一致: {b['counts'].get(N)}")
+        for n in SIZES:
+            if b["counts"][n] != expected_counts(n):
+                raise LogIntegrityError(f"layerB-run{i}: n={n} の件数が期待と不一致: {b['counts'][n]}")
 
     base = {"device": "cuda", "size": N}
     pa = parse_jsonl_runs(phases_text, "layerA-phases", PHASES_A,
@@ -399,12 +458,15 @@ def _layer_b_fixture(cksum: str = "0x4062c00000000000") -> str:
           ("L2", "teardown"): 8,
           ("L2", "driver_scope"): 1, ("L2", "l2_sum"): 72, ("D", "dev_kernel_b2b"): 8, ("D", "dev_kernel_seg"): 14,
           ("D", "dev_span"): 50, ("E", "tiny_roundtrip"): 12, ("E", "sync_idle"): 3,
-          ("E", "h2d_prealloc"): 4, ("E", "h2d_clone_drop"): 9}
-    rows = [f"DIAG2109 n={N} layer={l} phase={p} median_us={v:.3f} q1_us={v:.3f} q3_us={v:.3f}"
-            for (l, p), v in ph.items()]
-    e = expected_counts(N)
-    rows.append(f"DIAG2109 n={N} checksum_bits={cksum}")
-    rows.append(f"DIAG2109 n={N} counts " + " ".join(f"{k}={v}" for k, v in e.items()))
+          ("E", "h2d_prealloc"): 4, ("E", "h2d_clone_drop"): 9, ("E", "event_create_drop"): 5,
+          ("D", "dev_h2d_a"): 3, ("D", "dev_h2d_b"): 3, ("D", "dev_d2h"): 4}
+    rows = []
+    for n in SIZES:
+        rows += [f"DIAG2109 n={n} layer={l} phase={p} median_us={v:.3f} q1_us={v:.3f} q3_us={v:.3f}"
+                 for (l, p), v in ph.items()]
+        rows.append(f"DIAG2109 n={n} kernel=\"tiled\"")
+        rows.append(f"DIAG2109 n={n} checksum_bits={cksum}")
+        rows.append(f"DIAG2109 n={n} counts " + " ".join(f"{k}={v}" for k, v in expected_counts(n).items()))
     rows.append("test " + LAYER_B_TEST + " ... ok")
     rows.append("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
     return "\n".join(rows) + "\n"
@@ -512,6 +574,54 @@ def self_test() -> None:
               "nsys 欠測記録に未マスク")
     must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, None, "path /home/someone/x\n"),
               "env_info 未マスク")
+
+    # ---- 全レコード種別の重複・欠落・余剰（RULE.txt 1・3。値が同一でも重複は拒否）----
+    def lb0(f):
+        return lambda: agg([f(lb[0])] + lb[1:], pa, ac2, cd, gate)
+
+    def dup_line(prefix: str):
+        def f(t: str) -> str:
+            ln = [x for x in t.splitlines() if x.startswith(prefix)][0]
+            return t.replace(ln + "\n", ln + "\n" + ln + "\n", 1)
+        return f
+
+    def drop_line(prefix: str):
+        return lambda t: "\n".join(x for x in t.splitlines() if not x.startswith(prefix)) + "\n"
+
+    n_ = N
+    must_fail(lb0(dup_line(f"DIAG2109 n={n_} layer=L2 phase=h2d_a ")), "Layer B 区間の重複")
+    must_fail(lb0(dup_line(f"DIAG2109 n={n_} checksum_bits=")), "Layer B checksum_bits の重複（同値）")
+    must_fail(lb0(dup_line(f"DIAG2109 n={n_} counts ")), "Layer B counts の重複（同値）")
+    must_fail(lb0(dup_line(f"DIAG2109 n={n_} kernel=")), "Layer B kernel 行の重複")
+    must_fail(lb0(dup_line("test result:")), "Layer B test result の重複")
+    must_fail(lb0(dup_line("test " + LAYER_B_TEST)), "Layer B テスト名行の重複")
+    must_fail(lb0(drop_line(f"DIAG2109 n={n_} layer=L2 phase=h2d_a ")), "Layer B 区間の欠落")
+    must_fail(lb0(drop_line("DIAG2109 n=128 layer=L0 ")), "Layer B 別サイズの区間欠落")
+    must_fail(lb0(drop_line(f"DIAG2109 n={n_} checksum_bits=")), "Layer B checksum_bits の欠落")
+    must_fail(lb0(drop_line("DIAG2109 n=512 checksum_bits=")), "Layer B 別サイズの checksum 欠落")
+    must_fail(lb0(drop_line(f"DIAG2109 n={n_} counts ")), "Layer B counts の欠落")
+    must_fail(lb0(lambda t: t + f"DIAG2109 n={n_} layer=L9 phase=x median_us=1.000 q1_us=1.000 q3_us=1.000\n"),
+              "Layer B 未知の区間")
+    must_fail(lb0(lambda t: t + "DIAG2109 n=1024 checksum_bits=0x4062c00000000000\n"), "Layer B 未知のサイズ")
+    must_fail(lb0(lambda t: t.replace("h2d_calls=2 ", "h2d_calls=2 h2d_calls=2 ", 1)), "counts 行内の項目重複")
+    must_fail(lb0(lambda t: t.replace(" h2d_calls=2", "", 1)), "counts の項目欠落")
+    must_fail(lb0(lambda t: t.replace("stream_syncs=1", "stream_syncs=1 extra=0", 1)), "counts の未知項目")
+    must_fail(lb0(lambda t: t.replace("pool_allocs=1", "pool_allocs", 1)), "counts の項目が k=v でない")
+    # JSONL: phase レコードの重複・欠落・必須フィールド欠落
+    p_first = [ln for ln in pa.splitlines() if ln.startswith("{")][0]
+    must_fail(lambda: agg(lb, pa.replace("-- run 2/", p_first + "\n-- run 2/", 1), ac2, cd, gate),
+              "phases の重複レコード（同値）")
+    must_fail(lambda: agg(lb, pa.replace(p_first + "\n", "", 1), ac2, cd, gate), "phases のレコード欠落")
+    must_fail(lambda: agg(lb, pa.replace('"median_s"', '"median_x"', 1), ac2, cd, gate), "median_s 欠落")
+    must_fail(lambda: agg(lb, pa.replace('"checksum"', '"checksum_x"', 1), ac2, cd, gate), "checksum 欠落")
+    must_fail(lambda: agg(lb, pa, ac2.replace('"reuse"', '"reuse", "phase": "matmul"', 1), cd, gate),
+              "phase を持たない系列に phase 付きレコード")
+    must_fail(lambda: agg(lb, pa, ac2.replace("-- run 2/", "-- run 1/", 1), cd, gate), "run 区切りの重複")
+    must_fail(lambda: agg(lb, pa, ac2.replace("-- run 5/N=256 --\n", "", 1), cd, gate), "run 区切りの欠落")
+    # load_gate: 同一行（同値）の重複
+    must_fail(lambda: agg(lb, pa, ac2, cd, gate + glines[0] + "\n"), "ゲート行の重複（同値）")
+    # counts-exact: 成功行の重複
+    must_fail(lambda: agg(lb, pa, ac2, cd, gate, ce_=ce_ok + ce_ok), "counts-exact 成功行の重複")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, hac2_=_jsonl([90], None, "1.000000")), "HEAD checksum 不一致")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, hpa_=hpa.replace('"matmul"', '"matmul_x"', 1)), "HEAD phase 不正")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate.replace("head-ac2 run1", "head-ac2 run9")), "HEAD ゲートラベル不一致")
