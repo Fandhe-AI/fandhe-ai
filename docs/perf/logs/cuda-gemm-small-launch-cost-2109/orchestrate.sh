@@ -4,6 +4,9 @@
 # 構成は #1973（`../cuda-gemm-reuse-phase-1973/orchestrate.sh`）と同型:
 #   - Layer A: `bench-fandhe --task gemm --device cuda --mode reuse --phases
 #     --size 256`（registry ピン `fandhe-ai =0.9.0`）を 5 run
+#   - HEAD path-patch Layer A（必須。RULE.txt 4）: 同一 bench を
+#     `--config 'patch.crates-io.fandhe-ai.path=<HEAD crates/facade>'` でビルドし
+#     phases／非 phases を 5 run ずつ（H5 の正式な突合相手・ratio の分子）
 #   - AC-2: `--phases` なしの reuse N=256 を 5 run（checksum 突合）
 #   - candle 参照（診断用。判定に使わない）: `bench-candle --mode fresh` 5 run
 #   - Layer B: `gemm_small_launch_cost_diag`（crates/backend-cuda 非公開 API・
@@ -46,6 +49,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   ls -la "$REPO_ROOT/crates/backend-cuda/src/gemm_small_launch_cost_diag_tests.rs"
   grep -n '^fandhe-ai' "$WORK_DIR/bench-fandhe/Cargo.toml" || true
   echo "dry-run: cargo build --release -p bench-fandhe"
+  echo "dry-run: cargo build --release -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path=\"$REPO_ROOT/crates/facade\"'"
   echo "dry-run: cargo build --release -p bench-candle --no-default-features --features cuda"
   echo "dry-run: cargo test --release -p fandhe-ai-backend-cuda --lib $LAYER_B_FILTER -- --ignored --exact --test-threads=1 --nocapture"
   echo "dry-run: OK"
@@ -80,8 +84,21 @@ gate() {
 : >"$SELF_DIR/load_gate.log"
 
 cd "$WORK_DIR"
+# path patch のビルドは framework-compare/Cargo.lock を書き換えるため必ず復元する
+# （承認ピン固定。deps-policy.md 第 9 区分）。
+source ./bench_fandhe_lock_restore.sh
+bench_fandhe_setup_lock_restore_trap
+BIN_DIR="$(mktemp -d)"
 echo "== ビルド（release） =="
 cargo build --release -p bench-fandhe
+cp ./target/release/bench-fandhe "$BIN_DIR/bench-fandhe-registry"
+echo "== ビルド（release・HEAD path-patch） =="
+cargo build --release -p bench-fandhe \
+  --config "patch.crates-io.fandhe-ai.path=\"$REPO_ROOT/crates/facade\""
+cp ./target/release/bench-fandhe "$BIN_DIR/bench-fandhe-head"
+# Cargo.lock はビルド直後に復元し trap を解除する（後段で cd するため EXIT trap の相対パスが外れる）。
+bench_fandhe_restore_lock
+trap - EXIT
 cargo build --release -p bench-candle --no-default-features --features cuda
 
 echo "== Layer A: reuse --phases N=$N =="
@@ -90,7 +107,7 @@ OUT="$SELF_DIR/layerA-phases-N${N}.log"
 for i in $(seq 1 "$RUNS"); do
   gate "layerA-phases run$i"
   echo "-- run $i/N=$N --" >>"$OUT"
-  ./target/release/bench-fandhe --task gemm --device cuda --size "$N" \
+  "$BIN_DIR/bench-fandhe-registry" --task gemm --device cuda --size "$N" \
     --mode reuse --phases 2>&1 | mask >>"$OUT"
 done
 
@@ -100,7 +117,27 @@ OUT="$SELF_DIR/layerA-ac2-N${N}.log"
 for i in $(seq 1 "$RUNS"); do
   gate "ac2 run$i"
   echo "-- run $i/N=$N --" >>"$OUT"
-  ./target/release/bench-fandhe --task gemm --device cuda --size "$N" \
+  "$BIN_DIR/bench-fandhe-registry" --task gemm --device cuda --size "$N" \
+    --mode reuse 2>&1 | mask >>"$OUT"
+done
+
+echo "== HEAD path-patch Layer A: reuse --phases N=$N =="
+OUT="$SELF_DIR/head-phases-N${N}.log"
+: >"$OUT"
+for i in $(seq 1 "$RUNS"); do
+  gate "head-phases run$i"
+  echo "-- run $i/N=$N --" >>"$OUT"
+  "$BIN_DIR/bench-fandhe-head" --task gemm --device cuda --size "$N" \
+    --mode reuse --phases 2>&1 | mask >>"$OUT"
+done
+
+echo "== HEAD path-patch AC-2: reuse（非 phases） N=$N =="
+OUT="$SELF_DIR/head-ac2-N${N}.log"
+: >"$OUT"
+for i in $(seq 1 "$RUNS"); do
+  gate "head-ac2 run$i"
+  echo "-- run $i/N=$N --" >>"$OUT"
+  "$BIN_DIR/bench-fandhe-head" --task gemm --device cuda --size "$N" \
     --mode reuse 2>&1 | mask >>"$OUT"
 done
 
@@ -113,6 +150,8 @@ for i in $(seq 1 "$RUNS"); do
   ./target/release/bench-candle --task gemm --device cuda --size "$N" \
     --mode fresh 2>&1 | mask >>"$OUT"
 done
+
+rm -rf "$BIN_DIR"
 
 echo "== Layer B: 診断テスト（${RUNS} プロセス） =="
 cd "$REPO_ROOT"

@@ -37,13 +37,17 @@
     record_only とし、根拠は静的保証とする:
     `cargo clippy -p fandhe-ai-backend-cuda --all-targets -- -D warnings`
     （feature 無効）が警告 0 件であること。
-  - 任意 (a)（HEAD path-patch の Layer A）を実行した場合に限り
-    ratio = HEAD path-patch reuse N=256 中央値 / registry 0.9.0 reuse
-    N=256 中央値（同一セッション・交互実行）を記録する。ratio <= 1.00 なら
-    「非後退」、> 1.00 なら「要調査（別 issue）」。採否ゲートではない。
-  - v0.9.0..HEAD の N=256 NN 経路の実行文に差分があれば、任意 (a) を
-    正式な突合相手に昇格させる（差分分類は docs/perf/
-    cuda-gemm-small-launch-cost.md §4）。
+  - HEAD path-patch の Layer A（`[patch.crates-io.fandhe-ai]` を CLI `--config` で
+    与えた bench-fandhe。phases と非 phases の 5 run ずつ）を必須の計測系列に
+    昇格させる（レビュー指摘 PR #2454・P1。registry =0.9.0 と HEAD の版差を H5
+    に混ぜないため）。H5（facade・autodiff・tape）は HEAD path-patch の matmul −
+    L0 を正式な突合相手とし、registry =0.9.0 の matmul − L0 は版差を含む参考値
+    として記録するのみで帰属に使わない。
+  - ratio = HEAD path-patch reuse N=256 中央値 / registry 0.9.0 reuse N=256
+    中央値（同一セッション）を記録する。ratio <= 1.00 なら「非後退」、> 1.00 なら
+    「要調査（別 issue）」。採否ゲートではない。
+  - v0.9.0..HEAD の N=256 NN 経路の実行文の差分分類は docs/perf/
+    cuda-gemm-small-launch-cost.md §4。
 
 5. 差分（gap）の定義
   - gap = fandhe reuse（非 phases。AC-2 の N=256）の中央値 − candle fresh
@@ -56,9 +60,9 @@
        floor（E tiny_roundtrip・sync_idle）と照合
   - H3 D2H readback: L2 d2h（宛先方式の帰属は #2107 に委ね、本件ではしない）
   - H4 host 側 dispatch: (L0 − L1) と (L1 − l2_sum)
-  - H5 facade・autodiff・tape: Layer A の matmul − L0。reuse が fresh より
+  - H5 facade・autodiff・tape: HEAD path-patch Layer A の matmul − L0。reuse が fresh より
        遅い逆転の手がかりとして記録
-  - H6 checksum: 両者が払うハーネスのコスト。記録のみ
+  - H6 checksum: 両者が払うハーネスのコスト。記録のみ（支持・未確定の判定対象外）
   - 補助: teardown（L2）・cudarc 内部（event・async alloc）は
     teardown と (E h2d_clone_drop − E h2d_prealloc)、nsys（任意）で定量化
 

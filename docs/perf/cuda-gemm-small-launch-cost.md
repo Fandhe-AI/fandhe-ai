@@ -33,7 +33,7 @@
 
 - `memory.rs`／`host_staging.rs`／`pool.rs`: 差分は #2299 の cfg ゲート化とドキュメント整理のみ（実行文の変更なし。本 PR で `git diff v0.9.0..origin/main` を確認）
 - `gemm.rs`（+953 行）・`ops.rs`（+763 行）・`context_cache.rs`（+261 行）: 多くは cfg ゲートと新機能と見られるが、N=256 NN 経路の実行文への影響は未分類
-- 未分類が残るため RULE.txt 4 に従い、GB10 セッションでは **任意 (a)（HEAD path-patch の Layer A）を正式な突合相手として実施する**ことを推奨する。分類結果は本節へ追記する
+- 未分類が残るため RULE.txt 4 に従い、GB10 セッションでは **HEAD path-patch の Layer A を必須の正式な突合相手として実施する**（RULE.txt 4。H5 は HEAD の matmul − L0 で判定し、registry =0.9.0 は ratio の分母・参考値のみ）。分類結果は本節へ追記する
 
 ## 5. 仮説
 

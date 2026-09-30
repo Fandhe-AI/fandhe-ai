@@ -18,7 +18,7 @@ G-CUDA-G256（fandhe-ai 2 位・対 candle 0.83×）の起動固定費（launch 
 | ファイル | 役割 |
 |---|---|
 | `RULE.txt` | 事前登録判定規則（実測前に固定。事後に緩和しない） |
-| `orchestrate.sh` | Layer A／AC-2／candle 参照／Layer B（5 プロセス）／任意の nsys を一括実行。`--dry-run` 付き。収録時にホスト名・`$HOME` をマスク |
+| `orchestrate.sh` | Layer A（registry）／HEAD path-patch Layer A（H5 の突合相手）／AC-2／candle 参照／Layer B（5 プロセス）／任意の nsys を一括実行。`--dry-run` 付き。収録時にホスト名・`$HOME` をマスク |
 | `aggregate.py` | 集計（python3 標準ライブラリのみ）。`--self-test` あり。checksum・件数・run 数・未マスクパスを fail-closed で検査 |
 | `env_info.txt` | 環境情報の記入欄（実測時に記入） |
 | `layerA-*.log` `candle-fresh-N256.log` `layerB-run{1..5}.log` `counts-exact.log` `nsys-cuda-api.log` `load_gate.log` | 実測時に生成される生ログ（未生成） |
