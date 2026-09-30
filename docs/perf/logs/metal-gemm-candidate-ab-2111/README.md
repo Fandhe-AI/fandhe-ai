@@ -32,3 +32,10 @@ Linux 等では `./orchestrate.sh gate --dry-run`／`./orchestrate.sh 1 --dry-ru
 
 コミット前に、ログ中のホスト名・ユーザー名・絶対パスを `<home>` 等へマスクする
 （`.claude/rules/security.md`。並走プロセスは `run*_procs.txt` に件数のみ記録される）。
+
+## 判定後の手順（#2111）
+
+- `record_only` の宣言（専有できない場合）は **run 1 の前に** `env_info.txt` へ理由付きで書く（RULE.txt 7.）。事後宣言は認めない。
+- ADOPT_CANDIDATE が出ても**結線前にユーザー承認を取る**（RULE.txt 10.）。結線手順は `docs/perf/metal-gemm-steel-candidates.md` §8。
+- 全 arm が ADOPT_CANDIDATE でない場合は結線せず、判定・中央値の記入と本ディレクトリの収録のみで完了とする。
+- 保存するログは、コミット前にホスト名・ユーザー名・絶対パスをマスクする（上記マスク規則）。

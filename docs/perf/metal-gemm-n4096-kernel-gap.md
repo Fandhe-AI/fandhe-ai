@@ -2492,3 +2492,5 @@ before-0.7.0-head-f396784.jsonl`・`results-m4max-gemm-ab-after-head-f396784.jso
 （candle 相当タイル + acc unroll・協調ロード unroll 新軸 `UNROLL_LOAD_ENABLED`〈index 18〉・fine barrier 近似）を
 opt-in で実装した。機構・除外候補・判定規則は `docs/perf/metal-gemm-steel-candidates.md`、実測は #2111
 （`docs/perf/logs/metal-gemm-candidate-ab-2111/`）。本番既定は不変で、本節時点では実機未実測。
+
+#2111 の状況: kernel_gpu 5 run の実測・判定は Mac 実機で未実施。条件付きの結線手順書は `docs/perf/metal-gemm-steel-candidates.md` §8・§9 を参照。

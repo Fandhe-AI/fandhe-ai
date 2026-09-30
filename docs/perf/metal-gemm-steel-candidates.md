@@ -86,3 +86,52 @@ E7（`CANDIDATES[9]`）・E8（`[10]`）は acc 積 16 以上なのに unroll �
 4.5〜7.6 倍後退は交絡の可能性がある（candle／MLX 由来ではないため本 issue 外）。ほか kk ループ unroll・
 ロード先アドレスの K ループ外事前計算・f16／hfrag／te／split-K への `UNROLL_LOAD` 展開・NT/TN/TT の性能 A/B・
 M4 Max の `MTLDevice.architecture.name` 確認・MLX Ultra 分岐／NAX split-K。
+
+## 8. 結線手順書（イシュー #2111・判定結果別の条件付き手順）
+
+本節は `aggregate.py` の arm 判定を入口とする手順書であり、**本番コード・既定値は #2111 の Linux 側実装では変更していない**。
+判定規則の正は `docs/perf/logs/metal-gemm-candidate-ab-2111/RULE.txt`（実測前固定。事後に緩和しない）。
+
+### 8.1 全 arm が REJECT／UNDETERMINED／NOT_ADOPTABLE／INCOMPLETE の場合
+
+結線しない。§6 に判定と中央値を記入し、`aggregate.md` と生ログを収録する PR で完了とする（本番コードは不変）。
+`REFERENCE_ONLY` の系列は採用根拠にしない（RULE.txt 7.）。
+
+### 8.2 `LU` が ADOPT_CANDIDATE の場合（定数 1 個の切替）
+
+1. **結線前にユーザー承認を得る**（RULE.txt 10.）。
+2. `tile::UNROLL_LOAD_ENABLED`（`crates/backend-metal/src/tile.rs`）を `true` にする。`MetalGemm::new` 系はこの定数を渡すため `dispatch_auto` にも伝播する。f16／hfrag／te／split-K パス 1 はホスト側で常に `false` とする no-op 契約のため影響しない。
+3. 既定値ドリフトテスト（`tile.rs` の既定 `false` 固定テスト、`STEEL_ARMS[0].unroll_load == UNROLL_LOAD_ENABLED` の前提、`spec_source.rs` の既定 `false` 期待値）を「承認済み既定 `true`」へ整合させる。
+4. 注意: 本番 `dispatch_auto` は計測した正方 4 形状以外（非正方・小形状・境界形状）にも同じ定数で効く。bit 一致は `unroll_load_on_off_bit_match_all_candidates`／`_dispatch_auto`／`_transposed` が担保するが、**性能は正方 4 形状しか計測していない**。承認時に「非正方代表形状で非後退を確認する」か「正方に限定するスコープ付きゲートにする」かをユーザーへ提示する。
+5. 結線後は Mac で gate の 4 テストと Metal parity テスト（split-K baseline 含む）を `--ignored` で再実行し、framework-compare gemm metal の前後 A/B を収録する（`metal-gemm-n4096-kernel-gap.md` §19 と同型）。
+
+### 8.3 `T0U`／`T0U-LU`／`T0U-LU-FB` が ADOPT_CANDIDATE の場合（別設計 PR が必要）
+
+- `select_candle_equivalent` と `STEEL_ARMS` は `#[cfg(test)]` 限定で、`UNROLL_ACC_ENABLED` はグローバル定数（acc 積 16 以上の候補すべてに効く）。無条件 unroll は §7.6a で N=512〜2048 が 15〜35% 後退し撤回済みのため、定数の切替では結線できない。
+- 形状スコープ付きの選択機構（計測済み正方 N のみ対象・CANDIDATES[0] 選択時だけ unroll_acc を実効化）が必要で、設計判断となる。ユーザー承認と別イシュー／別 PR で扱う（`select_for_device` の本番化・`unroll_acc_loops_for` との整合・既存タイル選択テストの改修を含む）。
+- **N=512 は結線対象から外す（保留）**。RULE.txt 9. の candle デバイス区分仮定に依存するため、`env_info.txt` の `mtl_architecture_name` で M4 Max の区分が確認されるまで結線しない。N>=1024 は区分に依らない。
+- `T0U-LU-FB` の FINE_BARRIER は candle の近似で、FB 単体は #1278 で undetermined。ADOPT でも FB 軸だけの寄与は分離していないことを記録する。
+
+### 8.4 複数 arm が ADOPT の場合
+
+事前登録にない新規則で採用 arm を選ばない。候補と中央値をユーザーへ提示し、選択は承認事項とする。
+いずれの場合も tolerance・parity baseline・`Cargo.toml` は不変。
+
+## 9. 実測状況・申し送り（イシュー #2111）
+
+**状況: 未実測。** #2111 の実装担当ホストは Linux で Apple M4 Max へ到達できず、計測もユーザー承認も取れないため、
+§6 の記入欄・`env_info.txt` の値・`aggregate.md` には一切値を入れていない。
+
+Linux で実施済みの検証: `aggregate.py --self-test`（OK）、`orchestrate.sh` の `gate`／`1`／`5` の `--dry-run`（成功・ログ非生成）、
+不正引数（`6`・`gate --foo`）の拒否、`cargo test -p fandhe-ai-backend-metal --lib`（550 件 pass）・`--test shader_source_evidence`（59 件 pass）。
+
+Mac セッションで実施する手順:
+
+1. `main` を最新にし `env_info.txt` を記入する（chip・gpu_cores・macOS・rustc・git_commit・date_utc・`mtl_architecture_name`）。専有できない場合は **run 1 の前に** `load_policy: record_only` と理由を宣言する（RULE.txt 7.）。
+2. `./orchestrate.sh gate` — 1 件でも FAIL なら REJECT を確定し A/B は実施しない。
+3. `./orchestrate.sh 1` 〜 `5`（差し替え・追加・選別はしない）。
+4. `python3 aggregate.py` の出力を `aggregate.md` に保存する。
+5. ログ中のホスト名・ユーザー名・絶対パスを `<home>` 等へマスクする。
+6. §6 を記入し実測 PR を作る。
+7. ADOPT_CANDIDATE があれば §8 に従い、**ユーザー承認後**に結線 PR（別 PR）を作る。
+8. 両 PR のマージ後に #2111 をクローズする。
