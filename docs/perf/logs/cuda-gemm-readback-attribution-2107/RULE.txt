@@ -1,0 +1,130 @@
+RULE fixed-at-utc: 2026-09-30T02:29:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #2107 CUDA GEMM reuse readback 宛先確保の帰属検証（Layer B 計装）
+doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §13
+背景: 同 doc §12.5 の Layer A matmul と Σ Layer B の未説明分（N=1024 1.235 ms・
+      N=2048 4.254 ms・N=4096 約 18 ms）のうち、readback の宛先確保・事前タッチが
+      占める割合を定量化する。修正施策は本イシューの対象外。
+
+[実行方法]
+- 1 run = (N, 腕) ごとに独立プロセスで 1 回。テストバイナリ
+  crates/backend-cuda/src/readback_attribution_diag_tests_2107.rs を
+  `--ignored --exact <test> --nocapture --test-threads=1` で起動し、
+  出力は JSONL（プレフィックス DIAG_JSON）。
+- N = 1024 / 2048 / 4096。腕は次の 2 群（順序の違いが判定上の役割を分ける）。
+  * 直列腕（起動直後に kernel_wait で同期してから readback を計る。区間内訳を見る
+    補助診断。帰属・share の判定には使わない）: clone_dtoh_legacy_to_vec /
+    clone_dtoh_borrowed_keep_alive / clone_dtoh_borrowed_dummy_alloc_free /
+    pretouched_fresh_split の 4 腕 + 補助対照 pretouched_fresh_production。
+  * 本番順序腕（起動後に同期せず、本番 memory::readback と同じ順序で計る。
+    帰属判定に使う）: prod_order_fresh（本番 readback を 1 区間 readback_total。
+    宛先の新規確保・事前タッチ・D2H・同期を含む）と prod_order_reused（計測ループ外で
+    確保・事前タッチ済みの宛先へ D2H・同期。区間 d2h_issue・d2h_sync）。
+    prod_order_reused は exposed cost を出す計測対照であり、宛先再利用
+    （PretouchedReusedDest）の採否・修正施策の再評価ではない（下記「対象外」）。
+- run1〜run5 の 5 run。run ごとに腕の実行順を巡回させる。
+  差し替え・追加起動・既存 run ファイルの上書きはしない。
+- 1 プロセスあたり warmup 20 + 計測 20 試行。単位は μs。
+
+[同一セッション Layer A]
+- 同じセッションで bench-fandhe --task gemm --device cuda --mode reuse --phases
+  （fandhe-ai =0.9.0 ピン・既存コマンド）を N ごとに 5 run 実行する。
+- 計測時点で Layer A（fandhe-ai =0.9.0）と Layer B（HEAD）の計測経路が同一で
+  あることを check_layer_a_path_identity.py（orchestrate.sh が呼び出し）で確認し
+  env_info.txt の layerA_same_code と項目別 path_item 行に記録する。比較対象は
+  Layer A が通る経路の項目（gemm.rs の検証・tile 選択〈TILED_PIPELINE_128X64_*
+  定数・tiled_pipeline_tile_kind〉・起動選択・run_f32_kernel、kernels.rs の TILED_F32、
+  kernels_tiled_pipeline.rs／kernels_tiled_pipeline_128x64.rs の pipeline ソース生成一式
+  〈定数・テンプレ断片・render_defines・render_source・静的変数〉、memory.rs の
+  readback 系と READBACK_DEST）で、コメント行と診断 feature ゲート項目〈および本番
+  既定で到達しない ReadbackDest::Fresh 腕〉を除いた正規化テキストの完全一致を要求する。
+  計測経路項目の差分は no、抽出不能は unknown となる。生成・起動経路の項目
+  （CudaGemm::new・compile_tiled_pipeline*・launch_tiled_f32・Layer B が実際に呼ぶ
+  launch_tiled_f32_pooled・module_cache.rs::load_function_cached 等）の差分・抽出不能は
+  unknown となる（下記「追記」の人手レビュー済み既知差分を除く）。yes 以外は
+  帰属判定は「無効（参考扱い）」とする。ファイル全体の差分は判定に用いない。
+  [改訂 2026-09-30・実機計測前] 当初は memory.rs・gemm.rs・kernels*.rs の
+  ファイル単位 git diff の空を要求していたが、#2299 の feature gate・ドキュメント・
+  診断専用機能追加で恒常的に差分が出て判定が常に無効化されるため（PR #2452
+  レビュー指摘）、計測経路の項目へ絞った。閾値（0.80／0.50）・判定式は不変。
+  [追記 2026-09-30] 生成・起動経路（CudaGemm::new・compile_tiled_pipeline*）は #2299 の
+  feature gate 起因の文面差（診断専用フィールド追加・context_ptr 取得削除・タプル構造体の
+  名前付き化）が恒常的に残り、そのままでは常に unknown となるため、差分の中身を人手
+  レビューし本番経路で等価と確認した base／head の正規化テキストの sha256 対を
+  check_layer_a_path_identity.py の REVIEWED_EQUIVALENT に記録した。ハッシュ対が
+  一致する場合のみ reviewed-equivalent として yes 判定に反映し、どちらかの文面が変われば
+  従来どおり unknown（要再レビュー）へ戻る。閾値・判定式は不変。
+  [記述整合 2026-09-30・実機計測前] 上記の比較項目・専有ゲート集計の記述を検査実装
+  （check_layer_a_path_identity.py・aggregate.py）の実際の判定条件に合わせた。判定挙動・
+  閾値・判定式は不変。
+
+[代表値]
+- 各区間は run ごとの median（20 試行）を採り、5 run 間の中央値と min-max を報告する。
+
+[checksum 規則（hard・fail-closed）]
+- 各 (N, 腕) で全 run の checksum_bits が一致すること。
+- 同一 N の全腕（補助を含む）で checksum_bits が一致すること。
+- Layer A の checksum が既知値（N=1024 -1855.597736 / N=2048 -6016.774008 /
+  N=4096 -25768.747284。§12.3）と一致すること。
+- 1 件でも不一致なら系列は無効（集計は exit != 0）。
+
+[改訂 2026-09-30・実機計測前（PR #2452 Codex P1）]
+直列腕は起動直後に同期してから宛先を確保するため、本番の「起動 → 宛先確保・事前タッチ →
+D2H 発行 → 同期」で CPU 側の宛先準備と GPU 側カーネル実行が重なり得る点を再現しない。
+直列区間の和を Layer A matmul から引く旧定義（keep_alive 直列 Σ を引く residual と
+split の dest_alloc+pretouch_fill を分子にする share）は帰属を表さないため、判定を
+本番順序腕の壁時計差（exposed cost）へ置き換えた。閾値（0.80／0.50）・checksum 規則・
+専有ゲートは不変。実機計測前のため事後緩和には当たらない。判定式の被演算子を再定義した
+事実は本節に固定する。
+
+[帰属の定義（同一セッションの値のみ。本番順序腕のみを使う）]
+- Layer A の matmul 区間は a.matmul(&b)（H2D・カーネル・D2H・同期を内包。
+  bench-fandhe main.rs の gemm --mode reuse --phases 定義）。Sum_matmul_equiv は
+  これに対応する Layer B の区間和（h2d_a+h2d_b+alloc_c+launch_issue+readback。host_read を除く）。
+- 本番順序腕の区間は連続（同期は最後の 1 回のみ）なので、Sum_matmul_equiv は壁時計。
+- exposed_alloc_fill = prod_order_fresh.readback_total
+                       - (prod_order_reused.d2h_issue + prod_order_reused.d2h_sync)
+  （同一順序での新規宛先 readback と確保済み宛先 D2H の readback 区間壁時計差。
+   直列区間の和では定義しない。5 run 中央値同士）。
+- residual = LayerA.matmul - Sum_matmul_equiv(prod_order_reused)
+- alloc_fill_share = exposed_alloc_fill / residual
+  - >= 0.80 : 宛先確保・事前タッチへの帰属を支持
+  - <  0.50 : 棄却（主因は別）
+  - それ以外: 未確定
+  - residual <= 0: 未説明分非再現。帰属は行わない
+- 判定が示す範囲（契約）: 本番順序で表に出た宛先確保・事前タッチ費用（exposed cost）が
+  residual に占める割合のみ。CPU 側準備が GPU カーネル実行に隠れた費用は exposed に現れず、
+  Layer A 側の固定費（Layer B が再現しない分）も検出対象外。帰属を完全に切り分けたとは主張しない。
+- 補助指標（記録のみ。判定に使わない）:
+  校正 = LayerA.matmul - Sum_matmul_equiv(prod_order_fresh)（本番順序の Layer B が
+  Layer A を再現する度合い）、
+  重なり = Sum_matmul_equiv(pretouched_fresh_production 直列) - Sum_matmul_equiv(prod_order_fresh)
+  （同一 readback 関数の直列/本番順序の壁時計差）、
+  直列腕の dest_alloc+pretouch_fill（直列区間の値。exposed との差が重なりに隠れた分）、
+  旧 residual = LayerA.matmul - Sum_matmul_equiv(keep_alive 直列)（§12.5 との連続性）、
+  clone_dtoh 腕の readback - pretouched_fresh_split の (d2h_issue+d2h_sync)（直列腕同士）。
+
+[直列分解の整合（record_only。補助診断）]
+- |(dest_alloc+pretouch_fill+d2h_issue+d2h_sync) - pretouched_fresh_production.readback_total|
+  <= 5% x readback_total を記録する。直列腕同士（split と production は共に事前同期後）の
+  整合確認であり、本番順序の値とは突合しない。帰属判定へは付記しない（判定に使わない）。
+
+[非後退（record_only）]
+- ratio = pretouched_fresh_split.sum_readback / clone_dtoh_legacy_to_vec.sum_readback
+  （直列腕同士）を記録する。本イシューは本番修正を出荷しないため採否ゲートにしない。
+- N=4096 の clone_dtoh 二峰性（§12.4）は q1/q3/min/max の記録のみ。
+
+[専有ゲート]
+- gb10: 各 run 開始前に load1 < 1.0 かつ GPU 利用率 0% を 30 秒間隔・最大 30 分待つ。
+  通過しない run があれば系列を参考扱いとする（load_gate.log）。集計器は
+  load_gate_status.txt の run1..5 が全て gate=pass の GB10 系列のみ通常判定とし、
+  ファイル欠落・run 記録の不足・不明値・未通過は各 N の判定にも「参考扱い」を明示する。
+- x86 smoke: record_only。GB10 実測の代替ではない（集計器は参考扱いと明示）。
+
+[対象外（再実行しない）]
+- #1436 §7 の MALLOC_MMAP_THRESHOLD_ 固定確証実験
+- #1437 §13.3 の Layer A ゲート
+- PretouchedReusedDest（候補 A）の再評価（prod_order_reused は exposed cost 算出の
+  計測対照に限る。修正施策としての採否・性能評価は行わない）
+
+[マスク]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。

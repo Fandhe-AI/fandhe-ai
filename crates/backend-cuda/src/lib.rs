@@ -430,6 +430,13 @@ mod kernels_wmma;
 mod kernels_wmma_opt;
 #[cfg(test)]
 mod readout_regression_diag_tests_1436;
+// イシュー #2107: readback 区間（D2H 宛先確保・事前タッチ・D2H 発行・同期）を
+// サブフェーズ分解し、`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §12.5 の
+// 未説明分への帰属を検証する診断テスト（Layer B 計装）。`pub(crate)` 項目
+// （`context_cache`・`launch_tiled_f32_pooled`・`memory::readback`）へ到達する
+// ためクレートルートの兄弟モジュールとして配置する。本番経路は変更しない。
+#[cfg(test)]
+mod readback_attribution_diag_tests_2107;
 // イシュー #1336: `MemoryOps::with_host_view` の CUDA 実装
 // （`memory.rs`）が使う、形状ごとに再利用するホストステージング
 // バッファのキャッシュ（D2H 側）。イシュー #1585 で H2D 側（`memory.rs`
