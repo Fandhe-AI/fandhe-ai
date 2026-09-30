@@ -377,8 +377,14 @@ impl Standalone {
 
     fn run_all(&mut self, rec: &mut Rec) {
         let total = self.total;
-        // alloc（H3）: `flat_grad` 相当の未使用 capacity 確保と小 Vec 群。
+        // alloc（H3）: `flat_grad` 相当の未使用 capacity 確保と小 Vec 群に加え、
+        // `DeviceParamStore::step` が bias 勾配を host 経由で stage する際の
+        // `grad.clone()`（2 本）も含める（含めないと H4 残差へ混入し H3/H4 の帰属を誤らせる）。
+        let (cb1, cb2) = (&self.b1, &self.b2);
         rec.timed("standalone", "alloc", || {
+            let c1 = cb1.clone();
+            let c2 = cb2.clone();
+            std::hint::black_box((&c1, &c2));
             let flat: Vec<f32> = Vec::with_capacity(total);
             let vars: Vec<u64> = Vec::with_capacity(4);
             let filled: Vec<bool> = vec![false; 4];
