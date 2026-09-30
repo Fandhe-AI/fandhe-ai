@@ -371,9 +371,41 @@ echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
 
 SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
 FACADE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
-write_excl "$MANIFEST_TMP" <<JSON
+# manifest の書き込み失敗・内容不備は計測前に fail-closed で停止する（PR #2456 P1）。
+# この時点で排他作成済みの一時ファイルと専有ゲートログは、計測が走っていないため掃除する
+# （同一 LABEL の再試行を塞がない）。
+abort_before_measure() { # abort_before_measure <理由>
+  echo "error: $1" >&2
+  rm -f "$OUT_FRESH_TMP" "$OUT_PARALLEL_TMP" "$SKIP_TMP" "$MANIFEST_TMP"
+  discard_pre_measure_gate_log
+  exit 1
+}
+# manifest が 1 つの JSON オブジェクトで、公開前提の必須キーが非空であることを検証する。
+validate_manifest() { # validate_manifest <path>
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        m = json.load(f)
+except Exception as e:
+    sys.exit("manifest が JSON として不正: %s" % e)
+if not isinstance(m, dict):
+    sys.exit("manifest が JSON オブジェクトではない")
+for k in ("label", "device", "script_repo_head_sha", "facade_head_sha", "bin_sha256",
+          "bin_source", "readback_arms", "env", "gate_mode", "load_gate_max_load1", "recorded_at"):
+    if k not in m or m[k] in ("", None, []):
+        sys.exit("manifest の必須キーが欠落または空: %s" % k)
+PY
+}
+if ! write_excl "$MANIFEST_TMP" <<JSON
 {"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","readback_arms":["fresh","parallel"],"env":"FANDHE_AI_METAL_READBACK_DEST","gate_mode":"${AB_LOAD_GATE_MODE}","load_gate_max_load1":"${AB_LOAD_GATE_MAX_LOAD1}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
+then
+  abort_before_measure "manifest の書き込みに失敗した（不完全な manifest を公開しないため計測前に停止）: $MANIFEST_TMP"
+fi
+if ! validate_manifest "$MANIFEST_TMP"; then
+  abort_before_measure "manifest の内容検証に失敗した（計測前に停止）: $MANIFEST_TMP"
+fi
 echo "== manifest（一時ファイル）記録: $MANIFEST_TMP =="
 cat "$MANIFEST_TMP"
 
@@ -465,40 +497,56 @@ uptime 2>&1 || true
 # 一時ファイルを最終パスへ排他的に公開する。`ln`（ハードリンク）は宛先が
 # 既存（dangling シンボリックリンク含む）なら EEXIST で失敗するため、計測中に
 # 作られた同一 label の結果や既存の退避先を上書きしない（`mv -f` は無条件に
-# 置換するため使わない。PR #2456 P0）。成功時のみ一時ファイルを削除する。
-MV_FAILED=0
-publish_excl() { # publish_excl <src> <dst>
-  if [[ -e "$2" || -L "$2" ]] || ! ln "$1" "$2"; then
-    echo "error: '$2' へ排他的に公開できない（既存あり。上書きしない）。結果は '$1' に残す" >&2
-    MV_FAILED=$((MV_FAILED + 1))
-    return 1
-  fi
-  rm -f "$1"
+# 置換するため使わない。PR #2456 P0）。
+# PR #2456 P1: 4 ファイルは「全部公開できたときだけ」成立させる。途中の ln 失敗時は
+# この実行が作成した正規パスだけを巻き戻し（既存ファイルは触らない）、結果は *.tmp に残す。
+# 成功時のみ全 ln 完了後に一時ファイルを削除する。manifest は最後に公開し完了印とする。
+publish_set() { # publish_set <src1> <dst1> [<src2> <dst2> ...]
+  local created=() srcs=() src dst d
+  # 公開前に全宛先の不在を一括確認する。
+  local i
+  for ((i = 1; i < $#; i += 2)); do
+    dst="${@:i+1:1}"
+    if [[ -e "$dst" || -L "$dst" ]]; then
+      echo "error: 計測中に同一 label の出力が作られた（上書き禁止）: $dst。結果は *.tmp に残す" >&2
+      return 1
+    fi
+  done
+  while [[ $# -ge 2 ]]; do
+    src=$1 dst=$2
+    shift 2
+    if ln "$src" "$dst"; then
+      created+=("$dst")
+      srcs+=("$src")
+    else
+      echo "error: '$dst' へ排他的に公開できない。この実行が公開済みの正規パスを巻き戻す。結果は '$src' などの *.tmp に残す" >&2
+      for d in "${created[@]}"; do rm -f "$d"; done
+      return 1
+    fi
+  done
+  rm -f "${srcs[@]}"
 }
 
 if [[ "$ANY_FAILED" -eq 0 ]]; then
-  # 公開前に全宛先の不在を一括確認する（一部だけ公開された状態を避ける）。
-  for dst in "$OUT_FRESH" "$OUT_PARALLEL" "$SKIP" "$MANIFEST"; do
-    if [[ -e "$dst" || -L "$dst" ]]; then
-      echo "error: 計測中に同一 label の出力が作られた（上書き禁止）: $dst。結果は *.tmp に残す" >&2
-      exit 1
-    fi
-  done
-  publish_excl "$OUT_FRESH_TMP" "$OUT_FRESH"
-  publish_excl "$OUT_PARALLEL_TMP" "$OUT_PARALLEL"
-  publish_excl "$SKIP_TMP" "$SKIP"
-  publish_excl "$MANIFEST_TMP" "$MANIFEST"
-  if [[ "$MV_FAILED" -ne 0 ]]; then
-    echo "error: $MV_FAILED 件の公開が失敗した（正規パスの反映が不完全な可能性がある）" >&2
+  if ! validate_manifest "$MANIFEST_TMP"; then
+    echo "error: 公開前の manifest 検証に失敗した。結果は *.tmp に残す" >&2
+    exit 1
+  fi
+  if ! publish_set "$OUT_FRESH_TMP" "$OUT_FRESH" "$OUT_PARALLEL_TMP" "$OUT_PARALLEL" \
+    "$SKIP_TMP" "$SKIP" "$MANIFEST_TMP" "$MANIFEST"; then
+    echo "error: 公開に失敗した（正規パスは巻き戻し済み。部分公開なし）" >&2
     exit 1
   fi
   echo "done. results in $OUT_FRESH / $OUT_PARALLEL ; manifest in $MANIFEST"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  publish_excl "$OUT_FRESH_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-fresh.failed-${FAIL_TS}.jsonl"
-  publish_excl "$OUT_PARALLEL_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-parallel.failed-${FAIL_TS}.jsonl"
-  publish_excl "$SKIP_TMP" "results/raw/skipped-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.log"
-  publish_excl "$MANIFEST_TMP" "results/raw/manifest-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.json"
+  if ! publish_set \
+    "$OUT_FRESH_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-fresh.failed-${FAIL_TS}.jsonl" \
+    "$OUT_PARALLEL_TMP" "results/raw/results-m4max-readback-ab-${LABEL}-parallel.failed-${FAIL_TS}.jsonl" \
+    "$SKIP_TMP" "results/raw/skipped-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.log" \
+    "$MANIFEST_TMP" "results/raw/manifest-m4max-readback-ab-${LABEL}.failed-${FAIL_TS}.json"; then
+    echo "error: 失敗退避の公開にも失敗した。部分データは *.tmp に残る" >&2
+  fi
   echo "FAILED: $ANY_FAILED run(s) failed; partial data kept (${FAIL_TS}). 正規パスは未変更（fail-closed。security.md A08）。" >&2
   exit 1
 fi
