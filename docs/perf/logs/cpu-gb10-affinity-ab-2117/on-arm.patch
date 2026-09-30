@@ -1,0 +1,13 @@
+diff --git a/crates/backend-cpu/src/gb10_affinity.rs b/crates/backend-cpu/src/gb10_affinity.rs
+index 9406fe54..9d6f1795 100644
+--- a/crates/backend-cpu/src/gb10_affinity.rs
++++ b/crates/backend-cpu/src/gb10_affinity.rs
+@@ -123,7 +123,7 @@ use std::path::Path;
+ /// なく未実施のまま記入欄を残す。`docs/perf/cpu-gemm-gb10-affinity-ab.md`
+ /// 参照。ADOPT が確定した場合のみ `true` へ切替える単一行ロールバック
+ /// 機構は [`crate::thread_limit::BIG_CORE_LIMIT_ENABLED`] と同型）。
+-pub(crate) const GB10_AFFINITY_ENABLED: bool = false;
++pub(crate) const GB10_AFFINITY_ENABLED: bool = true;
+ 
+ /// 専用 affinity プールへルーティングする仕事量（`m * n * k`）の上限。
+ ///

@@ -118,6 +118,15 @@ _READBACK_SIZES_BY_DEVICE = {
     "cuda": frozenset({1024, 4096}),
 }
 
+# イシュー #2117: `--sizes affinity`（cpu 専用）。GB10 大コア affinity A/B
+# （`run_ab_gb10_affinity_cpu.sh`）の gemm 10 セル（N=256/512/1024/2048/4096 ×
+# fresh/reuse）を扱う。N=256 は `m*n*k` が `GB10_AFFINITY_MAX_WORK` 以下でルーティング
+# 対象（処置セル）、N>=512 は非ルーティングのガード。判定規則は同一
+# （`docs/perf/logs/cpu-gb10-affinity-ab-2117/RULE.txt`）。cpu 以外は拒否する。
+_AFFINITY_SIZES_BY_DEVICE = {
+    "cpu": frozenset({256, 512, 1024, 2048, 4096}),
+}
+
 # イシュー #1517: `--task train` 用のセル集合。`bench-fandhe --task train`
 # は `Record.size` に `BATCH`（`scripts/bench/framework-compare/
 # bench-fandhe/src/main.rs` の `const BATCH: usize = 64;`）を emit する
@@ -139,7 +148,9 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
 
     `sizes_arg` は `"full"`（既定・後方互換。`_VALID_SIZES_BY_DEVICE` を
     そのまま使う）・`"gate"`（`_GATE_SIZES_BY_DEVICE` へ絞り込む）・
-    `"large"`（全 device で 1024/2048/4096。イシュー #2102）。
+    `"large"`（全 device で 1024/2048/4096。イシュー #2102）・
+    `"affinity"`（cpu 専用で 256/512/1024/2048/4096。イシュー #2117。
+    cpu 以外は `ValueError`）。
     `task` が `"train"`／`"infer"`（イシュー #1689 で追加）の場合は
     `sizes_arg` を無視し `_VALID_SIZES_TRAIN`（単一形状。`bench-fandhe`
     の `BATCH` 定数＝64 は train/infer で共通）を返す（train/infer
@@ -151,6 +162,10 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
         return _VALID_SIZES_INFER_BATCHES
     if task in ("train", "infer"):
         return _VALID_SIZES_TRAIN
+    if sizes_arg == "affinity":
+        if device not in _AFFINITY_SIZES_BY_DEVICE:
+            raise ValueError("--sizes affinity は --device cpu 専用（イシュー #2117）")
+        return _AFFINITY_SIZES_BY_DEVICE[device]
     if sizes_arg == "gate":
         return _GATE_SIZES_BY_DEVICE[device]
     if sizes_arg == "large":
@@ -759,7 +774,7 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate", "large", "readback", "infer-batches"),
+        choices=("full", "gate", "large", "readback", "infer-batches", "affinity"),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "
@@ -769,6 +784,7 @@ def main(argv):
             "または 'readback'（全 device で 1024/4096。イシュー #2112）"
             "または 'infer-batches'（--task infer 専用。batch 64/1024/4096 の "
             "3 形状。イシュー #2115）"
+            "または 'affinity'（cpu 専用。N=256/512/1024/2048/4096。イシュー #2117）"
         ),
     )
     parser.add_argument(

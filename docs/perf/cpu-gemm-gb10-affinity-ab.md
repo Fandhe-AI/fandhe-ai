@@ -14,6 +14,12 @@
 - 二値構成（`GB10_AFFINITY_ENABLED = false/true` の 2 バイナリビルド。`on-arm.patch` として保存。#1301/#1481 と同型手順）
 - 内部ホスト名は含めない。専有ゲート or record_only を明記する
 
+## 実行基盤（イシュー #2117）
+
+判定規則の固定版（14 セル・専有ゲート load1<1.0・機構発火の前提）は `docs/perf/logs/cpu-gb10-affinity-ab-2117/RULE.txt`、実行は `scripts/bench/framework-compare/run_ab_gb10_affinity_cpu.sh`（`compare_gemm_ab.py --sizes affinity`）。上記の判定規則は緩めていない。実測は GB10 セッション待ちで、本書の記入欄・verdict は未実測のまま。
+
+注記: `GB10_AFFINITY_MAX_WORK`（32*1024*1024）に対し gemm N=256（`256^3 = 16.7M`）はルーティング対象（処置セル）で、非ルーティングの真のガードは N=512 以上。判定規則は 14 セルすべてに同一適用する。
+
 ## §1 対象形状の根拠
 
 `docs/perf/lowlayer-diagnosis-2026-09-12.md` §3（実機実測。出典 `docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/rayon-sweep.jsonl`／`rayon-sweep-pinned.jsonl`）。

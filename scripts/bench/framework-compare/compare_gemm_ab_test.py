@@ -606,6 +606,32 @@ class SizesLargeTest(unittest.TestCase):
         )
         self.assertEqual(code, 3)
 
+    def test_cpu_affinity_accepts_256_to_4096(self):
+        # イシュー #2117: N=256（ルーティング対象）〜4096 の 5 size × 2 mode = 10 セル。
+        sizes = (256, 512, 1024, 2048, 4096)
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=sizes, device="cpu")
+        code, out, _ = self._run(before, after, ["--device", "cpu", "--sizes", "affinity"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("非後退"), 10)
+
+    def test_cpu_affinity_missing_256_cell_exit_three(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(512, 1024, 2048, 4096), device="cpu")
+        code, out, _ = self._run(before, after, ["--device", "cpu", "--sizes", "affinity"])
+        self.assertEqual(code, 3)
+        self.assertIn("欠測セル", out)
+
+    def test_metal_affinity_is_invalid_input(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(256,), device="metal")
+        code, _, err = self._run(before, after, ["--device", "metal", "--sizes", "affinity"])
+        self.assertEqual(code, 2)
+        self.assertIn("affinity", err)
+
+    def test_cpu_large_set_unchanged_by_affinity(self):
+        # 回帰: `--sizes large` の cpu 集合に 256 が混入しない。
+        self.assertEqual(
+            compare_gemm_ab._size_set_for("cpu", "large"), frozenset({1024, 2048, 4096})
+        )
+
     def test_cpu_full_default_still_rejects_4096(self):
         before, after = _all_cells_rows(0.002, 0.0019, sizes=self._LARGE, device="cpu")
         code, _, _ = self._run(before, after, ["--device", "cpu"])
