@@ -23,7 +23,7 @@
 //! ## 実行
 //!
 //! ```sh
-//! cargo run -p fandhe-ai-backend-cuda --release --example unified_memory_probe
+//! cargo run -p fandhe-ai-backend-cuda --release --features internal-diagnostics --example unified_memory_probe
 //! ```
 
 use cudarc::driver::sys::CUdevice_attribute as A;
