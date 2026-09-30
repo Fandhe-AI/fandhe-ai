@@ -16,8 +16,10 @@
 //! ## 前提・限界
 //!
 //! - `CudaDevice::context().attribute()`（safe API）のみを使い、新規 `unsafe`・依存はない。
-//! - CUDA ドライバ不在（`DriverUnavailable`）のみ非 CUDA 環境としてスキップ（終了コード 0）する。
-//!   それ以外の `CudaDevice::new` 失敗は計測失敗として stderr に出力し終了コード 1 で終える。
+//! - CUDA ドライバ不在（`DriverUnavailable`）は既定で計測失敗として stderr に出力し終了コード 1 で終える
+//!   （GB10 計測でドライバが使えず属性が 0 件でも成功扱いにしないため）。非 CUDA 環境での
+//!   スモーク実行など明示的にスキップしたい場合に限り `--allow-no-driver` を付けると終了コード 0 で終える。
+//!   それ以外の `CudaDevice::new` 失敗も計測失敗として stderr に出力し終了コード 1 で終える。
 //! - 開発機（非 GB10）での出力は GB10 の値の代替にならない。
 //! - 属性取得に失敗した項目は `key=error` として出力を継続し（`unwrap`/`expect` なし）、1 件でも失敗があれば
 //!   stderr に失敗属性を列挙して終了コード 1 で終える（`error` を含む出力は判定不能であり計測成功として扱わない）。
@@ -26,6 +28,8 @@
 //!
 //! ```sh
 //! cargo run -p fandhe-ai-backend-cuda --release --features internal-diagnostics --example unified_memory_probe
+//! # 非 CUDA 環境でのスモーク実行（ドライバ不在を許容）
+//! cargo run -p fandhe-ai-backend-cuda --release --features internal-diagnostics --example unified_memory_probe -- --allow-no-driver
 //! ```
 
 use cudarc::driver::sys::CUdevice_attribute as A;
@@ -46,8 +50,17 @@ fn main() {
     let device = match CudaDevice::new(0) {
         Ok(dev) => dev,
         Err(CudaError::DriverUnavailable { detail }) => {
-            println!("unified_memory_probe: CUDA driver unavailable ({detail}); skipping.");
-            return;
+            if std::env::args().skip(1).any(|a| a == "--allow-no-driver") {
+                println!(
+                    "unified_memory_probe: CUDA driver unavailable ({detail}); skipping (--allow-no-driver)."
+                );
+                return;
+            }
+            // GB10 計測でドライバが使えないのは計測失敗であり、明示スキップ指定がない限り成功扱いにしない。
+            eprintln!(
+                "unified_memory_probe: CUDA driver unavailable ({detail}); measurement failed (use --allow-no-driver to skip)."
+            );
+            std::process::exit(1);
         }
         Err(other) => {
             // ドライバ不在以外の失敗（デバイス初期化不能等）は GB10 計測の失敗であり、
