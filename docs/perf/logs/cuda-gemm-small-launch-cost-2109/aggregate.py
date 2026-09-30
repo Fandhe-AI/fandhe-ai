@@ -119,9 +119,29 @@ def med(xs: list[float]) -> float:
     return statistics.median(xs)
 
 
+LAYER_B_TEST = "gemm_small_launch_cost_diag_tests::gemm_small_launch_cost_diag"
+# `--nocapture` ではテスト名行の後ろに標準出力が続くため、テスト名行は行頭一致のみで判定し、
+# 成功は `test result: ok. 1 passed; 0 failed;` で確認する（失敗・パニックの痕跡も拒否する）。
+LAYER_B_NAME_RE = re.compile(r"^test " + re.escape(LAYER_B_TEST) + r" \.\.\.", re.M)
+LAYER_B_FAIL_RE = re.compile(r"(^test result: FAILED|\.\.\. FAILED|panicked at)", re.M)
+
+
+def check_layer_b_success(text: str, name: str) -> None:
+    """Layer B ログが診断テストの成功終了を示すことを検証する（fail-closed）。
+
+    N=256 の行を出した後に N=512 でテストが失敗しても DIAG2109 行だけは揃うため、
+    対象テストの実行行と成功した `test result` を必須にする（未完走の実測を採用しない）。
+    """
+    if (not LAYER_B_NAME_RE.search(text) or not TEST_RESULT_OK_RE.search(text)
+            or LAYER_B_FAIL_RE.search(text)):
+        raise LogIntegrityError(
+            f"{name}: {LAYER_B_TEST} の成功（test result: ok. 1 passed）を確認できない")
+
+
 def parse_layer_b(text: str, name: str) -> dict:
     """1 プロセス分の Layer B ログ → {(n, layer, phase): median_us, ...}。"""
     check_masked(text, name)
+    check_layer_b_success(text, name)
     out: dict = {"phases": {}, "checksum": {}, "counts": {}}
     for raw in text.splitlines():
         line = raw.strip()
@@ -349,6 +369,8 @@ def _layer_b_fixture(cksum: str = "0x4062c00000000000") -> str:
     e = expected_counts(N)
     rows.append(f"DIAG2109 n={N} checksum_bits={cksum}")
     rows.append(f"DIAG2109 n={N} counts " + " ".join(f"{k}={v}" for k, v in e.items()))
+    rows.append("test " + LAYER_B_TEST + " ... ok")
+    rows.append("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
     return "\n".join(rows) + "\n"
 
 
@@ -405,6 +427,13 @@ def self_test() -> None:
     must_fail(lambda: agg(lb, pa.replace('"matmul"', '"matmul_x"', 1), ac2, cd, gate), "phase 不正")
     must_fail(lambda: agg(lb, pa + "{broken\n", ac2, cd, gate), "壊れた JSON")
     must_fail(lambda: agg([lb[0] + "# /home/someone/x\n"] + lb[1:], pa, ac2, cd, gate), "未マスク")
+    tail_ok = "test result: ok. 1 passed; 0 failed"
+    must_fail(lambda: agg([lb[0].replace(tail_ok, "test result: FAILED. 0 passed; 1 failed")] + lb[1:],
+                          pa, ac2, cd, gate), "Layer B テスト失敗")
+    must_fail(lambda: agg([lb[0].split("test result:")[0]] + lb[1:], pa, ac2, cd, gate),
+              "Layer B test result 欠落")
+    must_fail(lambda: agg([lb[0].replace("test " + LAYER_B_TEST, "test other")] + lb[1:],
+                          pa, ac2, cd, gate), "Layer B 別テスト")
     bad = lb[0].replace("kernel_launches=1", "kernel_launches=2")
     must_fail(lambda: agg([bad] + lb[1:], pa, ac2, cd, gate), "件数不一致")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate.splitlines()[0]), "ゲート行不足")

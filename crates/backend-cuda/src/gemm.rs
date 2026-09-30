@@ -268,7 +268,7 @@ pub(crate) struct GemmLaunchDiagCounters {
     pub d2h_calls: u64,
     /// D2H の総バイト数。
     pub d2h_bytes: u64,
-    /// `readback` 内の `synchronize` 回数（readback は同期を 1 回だけ行う契約）。
+    /// `readback_with` 内で実行された `synchronize` の成功回数（同期箇所で計上）。
     pub stream_syncs: u64,
 }
 
@@ -371,20 +371,31 @@ fn diag_count_kernel_launch() {
 #[inline(always)]
 fn diag_count_kernel_launch() {}
 
-/// `memory::readback` は `memcpy_dtoh` 1 回と `synchronize` 1 回だけを
-/// 行う契約（`memory.rs::readback_with`）のため、D2H と同期を同時に数える。
+/// D2H（`memory::readback` の成功）だけを数える。同期回数は
+/// [`diag_count_stream_sync`] が同期の実行箇所（`memory.rs::readback_with`）で
+/// 別途数えるため、ここでは `stream_syncs` を触らない（固定 +1 の推定を排除）。
 #[cfg(any(test, feature = "internal-diagnostics"))]
 #[inline]
 fn diag_count_readback(bytes: usize) {
     gemm_launch_diag_update(|c| {
         c.d2h_calls += 1;
         c.d2h_bytes += bytes as u64;
-        c.stream_syncs += 1;
     });
 }
 #[cfg(not(any(test, feature = "internal-diagnostics")))]
 #[inline(always)]
 fn diag_count_readback(_bytes: usize) {}
+
+/// `CudaStream::synchronize` の成功を実行箇所で数える（`memory.rs::readback_with`
+/// の各同期直後から呼ぶ）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+pub(crate) fn diag_count_stream_sync() {
+    gemm_launch_diag_update(|c| c.stream_syncs += 1);
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+pub(crate) fn diag_count_stream_sync() {}
 
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
 ///
