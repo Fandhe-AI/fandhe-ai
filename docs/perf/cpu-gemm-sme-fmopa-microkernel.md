@@ -663,6 +663,8 @@ train size=64〈reuse・L1 d_weight 784×256×64 が `sme_shape_eligible`
   バックへ切り替える。§3.2「フォールバック契約」参照）。
 - **REQ-8**: `check_panel_lengths`／`check_c_tile_bounds` を asm 呼び出し
   前に必ず通す（最適化を理由に境界検査を省略しない）。
+- **unsafe 監査記録**: `asm!` の監査結果と本番化の条件付き再承認申請（未承認）は
+  `docs/cpu-gemm-sme-unsafe-audit.md`（イシュー #2119）を参照。
 
 ## 7. スコープ外
 
