@@ -39,6 +39,11 @@ for n in 1 2 3 4 5; do
   fi
 done
 
+# 未マスクの生ログ（ホスト名・ホームパスを含み得る）はログ置き場へ置かず、mktemp -d の
+# 一時領域へ収録する。テスト失敗（set -e 終了）・中断でも trap で必ず削除する。
+raw_dir="$(mktemp -d)"
+trap 'rm -rf "$raw_dir"' EXIT
+
 mask() {
   sed -e "s|${HOME}|<home>|g" -e "s|$(hostname)|masked|g"
 }
@@ -107,9 +112,9 @@ for n in 1 2 3 4 5; do
   fi
   echo "run$n gate=$gate_status" >>"$out_dir/load_gate_status.txt"
   "$bin" --ignored --exact cpu_reuse_device_update_phases --nocapture --test-threads=1 \
-    >"$out_dir/run$n.raw" 2>"$out_dir/run$n.err.raw"
-  grep -o 'DIAG_JSON .*' "$out_dir/run$n.raw" | sed -e 's/^DIAG_JSON //' >"$out_dir/run$n.jsonl"
-  mask <"$out_dir/run$n.err.raw" >"$out_dir/run$n.err"
-  rm -f "$out_dir/run$n.raw" "$out_dir/run$n.err.raw"
+    >"$raw_dir/run$n.raw" 2>"$raw_dir/run$n.err.raw"
+  grep -o 'DIAG_JSON .*' "$raw_dir/run$n.raw" | sed -e 's/^DIAG_JSON //' >"$out_dir/run$n.jsonl"
+  mask <"$raw_dir/run$n.err.raw" >"$out_dir/run$n.err"
+  rm -f "$raw_dir/run$n.raw" "$raw_dir/run$n.err.raw"
 done
 echo "完了: $out_dir（次: python3 $script_dir/aggregate.py $out_dir）"

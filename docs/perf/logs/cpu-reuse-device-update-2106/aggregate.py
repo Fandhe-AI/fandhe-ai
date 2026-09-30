@@ -147,7 +147,6 @@ def aggregate(runs, unpassed=(), record_only=()):
         "H2 cache 状態(direct-pretouch)": t - pre,
         "H1 ループ形((kernel-fixed)-zip)": (kernel - s("sgd_kernel_fixed")) - s("sgd_kernel_zip"),
         "H3 ホスト確保(alloc+stage)": s("alloc") + s("stage"),
-        "kernel 全体(sgd_kernel)": kernel,
         "H4 prologue+残差(pretouch-(kernel+alloc+stage))": pre - (kernel + s("alloc") + s("stage")),
     }
     out.append(f"T = insitu_direct/device_update = {us(t)} us（bench §17.6.2 の 277.5 us〈GB10〉は参考値）")
@@ -161,8 +160,10 @@ def aggregate(runs, unpassed=(), record_only=()):
         if ok:
             supported.append(name)
         out.append(f"| {name} | {us(v)} | {share:.2f} | {'支持' if ok else '-'} |")
+    # kernel 全体は RULE.txt で H1 差分とは別の参考指標（支持判定の対象外）。表示のみ。
+    out.append(f"| 参考: kernel 全体(sgd_kernel) | {us(kernel)} | {kernel / t:.2f} | 参考（判定対象外） |")
     out.append("")
-    out.append("帰属: " + (", ".join(supported) if supported else "未確定（どの項も 50% 未満）"))
+    out.append("帰属: " + (", ".join(supported) if supported else "未確定（H1〜H4 のどの項も 50% 未満）"))
     split = s("sgd_compute_split") + s("apply_params_split")
     out.append(f"補助: apply_params_split / (compute+apply)_split = {s('apply_params_split') / split:.2f}")
     out.append(f"補助: sgd_kernel_xthread = {us(s('sgd_kernel_xthread'))} us（H2 の補助・別スレッド生成 Tensor 経由でありクロスコア書き込みは再現しない。判定に使わない）")
@@ -223,6 +224,8 @@ def self_test():
         text = run_dir(d)
         assert "帰属" in text and "参考扱い" not in text and "H1 ループ形" in text, text
         assert "record_only" not in text, text
+        # 合成値は kernel 全体が T の 60% だが H1〜H4 は全て 50% 未満。kernel 全体は帰属に入れない。
+        assert "帰属: 未確定" in text and "参考: kernel 全体" in text, text
         write_gate(d, ["pass", "unpassed", "pass", "pass", "pass"])
         text = run_dir(d)
         assert "【参考扱い】" in text and "run2" in text, text
