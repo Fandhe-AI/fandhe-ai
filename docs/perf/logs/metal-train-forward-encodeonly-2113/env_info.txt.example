@@ -1,0 +1,10 @@
+# 内部ホスト名・ユーザー名・絶対パスは含めない（<home> 等へマスク）
+machine: (M4 Max | GB10)
+os:
+rustc:
+git_sha_before:
+git_sha_after:
+after_diff_files: crates/backend-metal/src/train_forward_encode_runtime.rs (定数 1 行のみ)
+ab_device:
+uptime_load1_at_start:
+gate_series: (official | reference)

@@ -367,6 +367,8 @@ impl MetalMemory {
         Ok(DeviceBuffer::new(Device::Metal, shape.to_vec(), handle))
     }
 
+    // 読み出しは `MetalBuffer::read_to_vec` 経由のため、宛先 `Vec` の作り方は
+    // readback 宛先ポリシー（`crate::readback_policy`。イシュー #2112。既定 OFF）の対象になる。
     fn download_inner(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, MetalError> {
         let handle = buffer
             .downcast_handle::<MetalBufferHandle>()
