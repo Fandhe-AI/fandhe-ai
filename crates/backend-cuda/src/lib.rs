@@ -372,6 +372,13 @@ mod fresh_overhead_diag_tests;
 // クレートルートの兄弟モジュールとして配置する。
 #[cfg(test)]
 mod gemm_reuse_phase_diag_tests;
+// イシュー #2109: CUDA N=256 GEMM の起動固定費（launch 回数・同期・
+// device idle）を多層分解する診断テスト。`gemm_reuse_phase_diag_tests`
+// と同じ理由（`pub(crate)` の `context_cache`・`gemm` 診断項目へ到達）
+// でクレートルートの兄弟モジュールとして配置する。プロダクション
+// コードは診断カウンタ（`gemm.rs`。cfg 限定）以外変更しない。
+#[cfg(test)]
+mod gemm_small_launch_cost_diag_tests;
 #[cfg(test)]
 mod init_cost_diag_tests;
 // イシュー #1436: 借用ビュー readout（#1335／#1336／#1337。#1438 で
@@ -1091,5 +1098,31 @@ pub mod diagnostics {
         crate::module_cache::KernelModuleCache::global()
             .ok()
             .map(|cache| cache.miss_count())
+    }
+
+    /// 現スレッドの GEMM 起動診断カウンタ（イシュー #2109。`gemm.rs` の
+    /// `GemmLaunchDiagCounters`）を `[driver_call_scopes, h2d_calls,
+    /// h2d_bytes, pool_allocs, kernel_launches, d2h_calls, d2h_bytes,
+    /// stream_syncs]` の順で返す。crate 外の実機ハーネスが「1 回の
+    /// `run_tiled_f32` が踏む driver 境界の回数」を読むための入口で、
+    /// 内部型を公開面へ出さないため配列で返す。`internal-diagnostics`
+    /// 限定（既定ビルドの公開 API 面は変わらない）。
+    pub fn gemm_launch_counters_snapshot() -> [u64; 8] {
+        let c = crate::gemm::gemm_launch_diag_snapshot();
+        [
+            c.driver_call_scopes,
+            c.h2d_calls,
+            c.h2d_bytes,
+            c.pool_allocs,
+            c.kernel_launches,
+            c.d2h_calls,
+            c.d2h_bytes,
+            c.stream_syncs,
+        ]
+    }
+
+    /// [`gemm_launch_counters_snapshot`] の対象カウンタを 0 へ戻す。
+    pub fn reset_gemm_launch_counters() {
+        crate::gemm::gemm_launch_diag_reset();
     }
 }

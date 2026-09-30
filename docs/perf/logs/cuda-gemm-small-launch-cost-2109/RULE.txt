@@ -1,0 +1,97 @@
+イシュー #2109 事前登録判定規則（実測前に固定。結果を見てから緩和・変更しない）
+================================================================================
+
+固定日: 2026-09-30（本ファイルを含むコミット時点。GB10 実測はこの後に行う）
+対象: CUDA gemm N=256（スコアボード 2026-09-19 版のセル G-CUDA-G256。
+      fandhe-ai 2 位・対 candle 0.83×）の起動固定費（launch 回数・同期・
+      確保・解放・host dispatch）の内訳診断。修正実装は対象外（別 issue）。
+
+0. 数値の不一致の扱い
+  - Issue 本文の「0.72×」は G-CPU-G256 の値で転記違いの可能性がある
+    （docs/perf/loss-attribution-matrix.md §8）。本診断は G-CUDA-G256 =
+    0.83× を対象とする。Issue 本文は編集しない。
+
+1. 実行
+  - 1 run = 1 プロセス。run1〜run5 の 5 run とし、差し替え・追加起動・
+    上書きをしない。Layer B は 50 warmup + 200 計測。
+  - 単位は µs。区間ごとに run 内の中央値を取り、5 run 間の中央値と
+    min・max を報告する。
+
+2. checksum（hard・fail-closed）
+  - Layer A の phases と非 phases（AC-2）の checksum が一致し、
+    237.546660（#1988 の値）と一致すること。
+  - Layer B の checksum_bits が 5 run で同一であること。
+  - 1 つでも外れたら系列を無効とし、aggregate.py は exit != 0 で終わる。
+
+3. 件数（hard）
+  - `gemm_small_launch_counts_exact` が pass すること
+    （run_tiled_f32・gemm_fp32_strict とも driver_call_scopes=1,
+    h2d_calls=2, pool_allocs=1, kernel_launches=1, d2h_calls=1,
+    stream_syncs=1, h2d_bytes=2*N^2*4, d2h_bytes=N^2*4）。
+  - Layer B 出力の counts 行も同値であること（aggregate.py が検査）。
+
+4. 非後退 ratio（record_only）
+  - 本変更は既定ビルド（feature 無効・非 test）の生成コードを変えない
+    （計装は cfg(any(test, internal-diagnostics)) 限定・非該当ビルドでは
+    空の #[inline(always)] 関数）。コードの A/B 対は存在しないため
+    record_only とし、根拠は静的保証とする:
+    `cargo clippy -p fandhe-ai-backend-cuda --all-targets -- -D warnings`
+    （feature 無効）が警告 0 件であること。
+  - 任意 (a)（HEAD path-patch の Layer A）を実行した場合に限り
+    ratio = HEAD path-patch reuse N=256 中央値 / registry 0.9.0 reuse
+    N=256 中央値（同一セッション・交互実行）を記録する。ratio <= 1.00 なら
+    「非後退」、> 1.00 なら「要調査（別 issue）」。採否ゲートではない。
+  - v0.9.0..HEAD の N=256 NN 経路の実行文に差分があれば、任意 (a) を
+    正式な突合相手に昇格させる（差分分類は docs/perf/
+    cuda-gemm-small-launch-cost.md §4）。
+
+5. 差分（gap）の定義
+  - gap = fandhe reuse（非 phases。AC-2 の N=256）の中央値 − candle fresh
+    の中央値。同一セッションの N=256。
+
+6. 仮説と帰属（ある区間が gap の 50% 以上を説明すれば「支持」、どの区間も
+   届かなければ「未確定」。閾値は事後に変えない）
+  - H1 毎反復 H2D（入力が resident でない境界の非対称）: L2 h2d_a + h2d_b
+  - H2 launch と同期の往復: L2 launch_issue + (kernel_wait − dev_kernel_b2b)。
+       floor（E tiny_roundtrip・sync_idle）と照合
+  - H3 D2H readback: L2 d2h（宛先方式の帰属は #2107 に委ね、本件ではしない）
+  - H4 host 側 dispatch: (L0 − L1) と (L1 − l2_sum)
+  - H5 facade・autodiff・tape: Layer A の matmul − L0。reuse が fresh より
+       遅い逆転の手がかりとして記録
+  - H6 checksum: 両者が払うハーネスのコスト。記録のみ
+  - 補助: teardown（L2）・cudarc 内部（event・async alloc）は
+    teardown と (E h2d_clone_drop − E h2d_prealloc)、nsys（任意）で定量化
+
+7. launch overhead の定量化（受入基準 3）
+  - host→kernel 往復 = E tiny_roundtrip の中央値
+  - device 側 idle の推定 = D dev_kernel_seg − D dev_kernel_b2b
+    （dev_kernel_seg は event 間隔で host の投入待ちを含む。b2b は
+    連続キューイング差分からの純カーネル時間の推定であり厳密値ではない）
+  - host のみの時間 = L2 l2_sum − D dev_span（ 0 未満は 0 と記す）
+  - いずれも L0 に対する比率で報告する
+
+8. 支配項
+  - L2 の各区間（teardown を含む）と H4・H5 のうち、L0（または Layer A の
+    iter_total）に占める比率が最大のもの
+
+9. ゲート（専有）
+  - GB10 は各 run 開始前に load1 < 1.0 かつ nvidia-smi の GPU 利用率 0%
+    を確認する（30 秒間隔・最大 30 分待機。結果を load_gate.log に残す）。
+    1 run でも通らなければ系列を参考扱いにする。
+  - 開発機（RTX 3060 等）のスモークは記録対象外（コミットしない）。
+
+10. マスク規則
+  - 生ログ・env_info はホスト名を masked、$HOME を <home> に置換してから
+    収録する（orchestrate.sh が収録時に置換。aggregate.py が未マスクの
+    絶対パスを検出したら exit != 0）。
+
+11. 再実行しない既存実験（本件では A/B を再実行しない）
+  - H2D pinned staging（#1585・REJECT）／per-call alloc release threshold
+    ・同期割当（#1149・差し戻し確定）／都度同期の除去（#1011・#1013・
+    実装済み）／CUDA Graph step capture（#1350・中立・既定 OFF）／
+    Stream-K・persistent・TMA Stage 1（REJECT・調査済み）／N=1024〜4096 の
+    reuse フェーズ分解（#1182・#1973。N=256 のみ本件で新規計測）。
+
+12. 変更しないもの
+  - tolerance・baseline・Cargo.toml・Cargo.lock・ガードレール閾値・
+    docs/spec。
