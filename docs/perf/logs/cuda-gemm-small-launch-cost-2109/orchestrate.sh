@@ -11,8 +11,10 @@
 #   - candle 参照（診断用。判定に使わない）: `bench-candle --mode fresh` 5 run
 #   - Layer B: `gemm_small_launch_cost_diag`（crates/backend-cuda 非公開 API・
 #     HEAD ツリー）を 5 プロセス
-#   - 任意: `RUN_NSYS=1` で nsys の CUDA API 集計（cudarc 内部の event・
-#     async alloc の件数を得る唯一の手段）。未実行なら「欠測」と記録する
+#   - 補助診断（任意。RULE.txt 1a）: `RUN_NSYS=1` のときだけ、5 run・counts-exact の後に
+#     nsys 経由で Layer B をちょうど 1 回追加起動し nsys-cuda-api.log にのみ出力する
+#     （cudarc 内部の event・async alloc の件数を得る唯一の手段。5 run の統計・判定には
+#     使わない）。未実行・未導入・失敗時は「欠測」と記録する
 # 専有ゲート: 各 run 前に load1 < 1.0 かつ GPU 利用率 0% を確認する
 # （30 秒間隔・最大 30 分。結果は load_gate.log）。
 # 収録時にホスト名を masked、$HOME を <home> へ置換する（RULE.txt 10）。
@@ -85,6 +87,13 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "dry-run: cargo build --release -p bench-fandhe --config 'patch.crates-io.fandhe-ai.path=\"$REPO_ROOT/crates/facade\"'"
   echo "dry-run: cargo build --release -p bench-candle --no-default-features --features cuda"
   echo "dry-run: cargo test --release -p fandhe-ai-backend-cuda --lib $LAYER_B_FILTER -- --ignored --exact --test-threads=1 --nocapture"
+  # 起動列（RULE.txt 1a の登録と一致すること。実機不要で検証できるよう列挙する）。
+  echo "dry-run: 起動列: LayerA-phases x$RUNS -> AC-2 x$RUNS -> HEAD-phases x$RUNS -> HEAD-AC-2 x$RUNS -> candle x$RUNS -> LayerB x$RUNS -> counts-exact x1"
+  if [[ "$RUN_NSYS" == "1" ]]; then
+    echo "dry-run: 補助診断（RUN_NSYS=1）: nsys 経由 Layer B x1（counts-exact の後。出力は nsys-cuda-api.log のみ・判定に不使用）"
+  else
+    echo "dry-run: 補助診断なし（RUN_NSYS!=1）。nsys-cuda-api.log には欠測記録のみ"
+  fi
   echo "dry-run: OK"
   exit 0
 fi
@@ -197,12 +206,22 @@ echo "== 件数の厳密断言 =="
 cargo test --release -p fandhe-ai-backend-cuda --lib gemm_small_launch_cost_diag_tests::gemm_small_launch_counts_exact \
   -- --ignored --exact --test-threads=1 2>&1 | mask >"$LOG_DIR/counts-exact.log"
 
+# 補助診断プロセス（RULE.txt 1a）。RUN_NSYS=1 のときだけ、5 run と counts-exact の後に
+# ちょうど 1 回、nsys 経由で Layer B を起動する。出力は nsys-cuda-api.log のみで、
+# Layer B の統計・判定・専有ゲート（load_gate.log）には関与しない（aggregate.py が別入力として
+# 形式のみ検査し、値は使わない）。実行失敗時は再試行せず欠測記録を残す（追加起動をしない）。
 if [[ "$RUN_NSYS" == "1" ]]; then
-  echo "== 任意: nsys CUDA API 集計（Layer B 1 プロセス） =="
+  echo "== 補助診断: nsys CUDA API 集計（Layer B 1 プロセス。統計・判定に不使用） =="
   if command -v nsys >/dev/null 2>&1; then
-    nsys profile --trace=cuda --stats=true -o "$(mktemp -d)/gemm2109" \
-      cargo test --release -p fandhe-ai-backend-cuda --lib "$LAYER_B_FILTER" \
-      -- --ignored --exact --test-threads=1 --nocapture 2>&1 | mask >"$LOG_DIR/nsys-cuda-api.log"
+    NSYS_TMP="$(mktemp -d)"
+    if nsys profile --trace=cuda --stats=true -o "$NSYS_TMP/gemm2109" \
+        cargo test --release -p fandhe-ai-backend-cuda --lib "$LAYER_B_FILTER" \
+        -- --ignored --exact --test-threads=1 --nocapture >"$NSYS_TMP/out.log" 2>&1; then
+      mask <"$NSYS_TMP/out.log" >"$LOG_DIR/nsys-cuda-api.log"
+    else
+      echo "nsys 欠測（実行失敗）" >"$LOG_DIR/nsys-cuda-api.log"
+    fi
+    rm -rf "$NSYS_TMP"
   else
     echo "nsys 欠測（未導入）" >"$LOG_DIR/nsys-cuda-api.log"
   fi

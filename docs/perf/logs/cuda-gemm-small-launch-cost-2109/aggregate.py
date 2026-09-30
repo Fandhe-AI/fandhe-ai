@@ -9,6 +9,9 @@
   - layerB-run{1..5}.log（`DIAG2109 ...` 行。診断テストの出力）
   - counts-exact.log（`gemm_small_launch_counts_exact` の出力。RULE.txt 3 の hard 条件。
     `test result: ok. 1 passed; 0 failed` を含まなければ fail-closed）
+  - nsys-cuda-api.log（任意の補助診断プロセス〈RUN_NSYS=1〉。RULE.txt 1a。5 run とは別入力で、
+    形式のみ検査し〈欠測の既知 1 行、または nsys 統計出力＋診断テスト成功行 1 回〉、値は判定・統計に使わない。
+    5 run の Layer B ログへ nsys 出力が混入したら fail-closed）
 
 fail-closed: 全レコード種別（run 区切り・phase・DIAG2109 区間/checksum/counts/kernel・
 ゲート行・test 成功行）の重複（値が同一でも拒否。register_once に一本化）とキー集合の
@@ -190,6 +193,36 @@ VERIFY_ARMS = ("L0_ops", "L1_gemm", "L2", "L2S", "D_dev_trial", "D_b2b", "E_tiny
                "E_h2d_prealloc", "E_h2d_clone", "count_run")
 
 
+# nsys の統計出力・起動の痕跡（RULE.txt 1a）。5 run の Layer B ログ（生の診断テスト出力）には現れない。
+NSYS_MARKER_RE = re.compile(r"cuda_api_sum|CUDA API Statistics|Generating SQLite|nsys profile", re.I)
+# orchestrate.sh が nsys を実行しなかったときに書く唯一の欠測記録（全文一致。これ以外の欠測表記は拒否）。
+NSYS_MISSING_MARKERS = ("nsys 欠測（未導入）", "nsys 欠測（RUN_NSYS=1 未指定）", "nsys 欠測（実行失敗）")
+
+
+def parse_nsys_aux(text: str | None) -> str:
+    """nsys 補助診断ログ（RULE.txt 1a）の形式を検証し状態（absent／missing／acquired）を返す。
+
+    この関数の戻り値は表示専用で、判定（gap・H1〜H6・checksum 突合・ratio）には一切渡さない。
+    内容の数値は読まない（DIAG2109 行も含め採用しない）。検査するのは形式のみ:
+      - 欠測記録は orchestrate.sh が書く既知の 1 行のみ（余剰行・未知の表記は拒否）
+      - 取得済みは nsys の統計出力を含み、対象診断テストの成功行がちょうど 1 回（複数回起動の痕跡を拒否）
+    """
+    if text is None:
+        return "absent"
+    aux: dict = {}
+    body = text.strip()
+    if body in NSYS_MISSING_MARKERS:
+        register_once(aux, "status", "missing", "nsys-cuda-api.log")
+    else:
+        if not NSYS_MARKER_RE.search(text):
+            raise LogIntegrityError(
+                "nsys-cuda-api.log: 既知の欠測記録でも nsys の統計出力でもない（RULE.txt 1a）")
+        check_layer_b_success(text, "nsys-cuda-api.log")
+        register_once(aux, "status", "acquired", "nsys-cuda-api.log")
+    require_exact_keys(aux.keys(), {"status"}, "nsys-cuda-api.log")
+    return aux["status"]
+
+
 def parse_layer_b(text: str, name: str) -> dict:
     """1 プロセス分の Layer B ログ → phases/checksum/counts/kernel の辞書。
 
@@ -198,6 +231,9 @@ def parse_layer_b(text: str, name: str) -> dict:
     （kernel 行のみ feature 依存で任意だが、あれば SIZES の各 n につき 1 回まで）。
     """
     check_masked(text, name)
+    if NSYS_MARKER_RE.search(text):
+        raise LogIntegrityError(
+            f"{name}: nsys 経由の出力が混入している（nsys 補助プロセスは 5 run の統計入力にしない。RULE.txt 1a）")
     check_layer_b_success(text, name)
     phases: dict = {}
     checksum: dict = {}
@@ -319,6 +355,7 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
     # 任意・補助入力（nsys・env_info）も必須ログと同じマスク検査を通す（RULE.txt 10）。
     check_optional_log(nsys_text, "nsys-cuda-api")
     check_optional_log(env_text, "env_info")
+    nsys_status = parse_nsys_aux(nsys_text)  # 表示専用。以降の判定・統計には渡さない（RULE.txt 1a）
     gate_ok = parse_gate(gate_text)
     check_counts_exact(counts_exact_text)
     if len(layer_b_texts) != RUNS:
@@ -412,8 +449,8 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
         # RULE.txt 6 H5: reuse が fresh より遅い逆転の手がかり（HEAD reuse − candle fresh の符号）。
         f"- reuse が candle fresh より遅い逆転: {'あり' if head_reuse > candle else 'なし'}"
         f"（HEAD reuse − candle fresh = {head_reuse - candle:+.3f}）",
-        "- nsys（任意）: " + ("欠測（未取得）" if nsys_text is None or nsys_text.lstrip().startswith("nsys 欠測")
-                            else "取得済み（nsys-cuda-api.log を参照）"), "",
+        "- nsys 補助診断プロセス（RULE.txt 1a。判定・統計に不使用）: "
+        + ("取得済み（nsys-cuda-api.log を参照）" if nsys_status == "acquired" else "欠測（未取得）"), "",
         "- 注: 各値の中央値は run 単位の値の 5 run 中央値。仮説の µs は run 毎に導出した値の中央値",
         "  （差・和は同一 run 内の区間から作る。H2 は kernel_wait と dev_kernel_b2b が別測定系列の推定を",
         "  組み合わせた値で、厳密な区間ではない）。", "",
@@ -582,7 +619,28 @@ def self_test() -> None:
     # 任意・補助入力（nsys・env_info）も同じマスク検査を通る（存在すれば内容を検査。正常は通る）。
     ok_nsys = "nsys 欠測（RUN_NSYS=1 未指定）\n"
     assert "欠測" in aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, ok_nsys, "host masked\n")
-    assert "取得済み" in aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, "CUDA API Summary\n<home>/x\n")
+    # nsys 補助診断プロセス（RULE.txt 1a）: 取得済みの形式は「nsys の統計出力 + 診断テストの成功行 1 回」。
+    # 中身の診断値は判定に使わない（別値・別 checksum でも判定部が不変であることを固定する）。
+    nsys_ok = "Generating SQLite file x.sqlite\n" + lb[0] + "cuda_api_sum:\n cuMemAllocAsync 999\n"
+    nsys_other = nsys_ok.replace("median_us=", "median_us=9", 1)  # 別の数値（判定に影響してはならない）
+    md_none = aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, None)
+    md_nsys = aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, nsys_ok)
+    md_other = aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, nsys_other)
+
+    def judged(md_: str) -> str:
+        return "\n".join(x for x in md_.splitlines() if "nsys" not in x)
+
+    assert "取得済み" in md_nsys and "取得済み" in md_other and "欠測" in md_none
+    assert judged(md_none) == judged(md_nsys) == judged(md_other), "nsys の内容が判定・統計出力に影響した"
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, "CUDA API Summary\n<home>/x\n"),
+              "nsys 取得済みを名乗るが統計出力・成功行がない")
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, "nsys 欠測（理由不明）\n"),
+              "nsys 未知の欠測表記")
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, nsys_ok + lb[1]),
+              "nsys ログに診断テストの成功行が複数（複数回起動の痕跡）")
+    # nsys 経由の出力が 5 run の Layer B 入力へ混入したら拒否する。
+    must_fail(lambda: agg([nsys_ok] + lb[1:], pa, ac2, cd, gate), "Layer B run に nsys 出力が混入")
+    must_fail(lambda: agg(lb + [nsys_ok], pa, ac2, cd, gate), "Layer B が 6 プロセス（nsys を 6 本目に数える）")
     must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, "CUDA API\n/home/someone/x\n"),
               "nsys 未マスク")
     must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, ok_nsys + "/home/someone/x\n"),

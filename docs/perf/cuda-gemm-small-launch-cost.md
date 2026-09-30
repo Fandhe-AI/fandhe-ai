@@ -24,7 +24,7 @@
 | `crates/backend-cuda/src/gemm_small_launch_cost_diag_tests.rs` | N ∈ {128, 256, 512} の多層分解（L0 `ops_total`／L1 `gemm_total`／L2 h2d_a・h2d_b・alloc_c・launch_issue・readback〈本番と同じ同期 1 回〉・teardown・driver_scope〈本番 with_driver_call 入退場〉／L2S kernel_wait・d2h〈追加同期を挟む非本番の分離用補助系列。l2_sum に含めない〉／D device event／E floor）。`gemm_small_launch_counts_exact` は 1 回の GEMM の件数を厳密断言。実機テストは `#[ignore]` |
 
 - 新規 `unsafe`・依存・公開 API 面の変更なし
-- 観測できないもの: cudarc 内部の `cuEventCreate`／`cuEventDestroy`・`cuMemAllocAsync`／`cuMemFreeAsync`・`cuCtxGetCurrent`。cudarc 0.19.8 では `new_event` が `bind_to_thread` の後に `cuEventCreate`（`safe/core.rs:551`）、`record_event` が event 生成＋record（同 `:751`）、`memcpy_htod` が `bind_to_thread` の後に async memcpy（同 `:1602`）を行う。event tracking 有効時は alloc 系が slice ごとに event を作る。実数は nsys（任意）で確認する
+- 観測できないもの: cudarc 内部の `cuEventCreate`／`cuEventDestroy`・`cuMemAllocAsync`／`cuMemFreeAsync`・`cuCtxGetCurrent`。cudarc 0.19.8 では `new_event` が `bind_to_thread` の後に `cuEventCreate`（`safe/core.rs:551`）、`record_event` が event 生成＋record（同 `:751`）、`memcpy_htod` が `bind_to_thread` の後に async memcpy（同 `:1602`）を行う。event tracking 有効時は alloc 系が slice ごとに event を作る。実数は nsys 補助診断（任意。`RUN_NSYS=1` 時のみ 5 run の後にちょうど 1 回。判定・統計には使わない。RULE.txt 1a）で確認する
 - device event は `CU_EVENT_DEFAULT` を明示（`new_event(None)` は DISABLE_TIMING）。event は計測区間の外で事前生成する
 - `dev_kernel_b2b` は「1 回起動」と「9 回連続キューイング」の device 時間差 /8 で求める推定値（launch latency を差し引く近似。厳密値ではない）
 - 出力一致の検証（PR #2454 指摘）: 所要時間を比較する全腕（L0・L1・L2・L2S・D・b2b・tiny・H2D・件数走行）の出力を、計測窓の外で `run_tiled_f32` の参照出力（計測前に 1 回取得）または既知の期待値と bit 一致で確認し、不一致・非有限値は panic する（純関数 `verify_bit_identical`。CPU 単体テストあり）。全腕が同一カーネル選択・単一の連続 K ループのため bit 一致が成立する構造で、許容誤差は新設・変更していない。保証は「実行した反復の出力が参照と一致した」ことまでで、参照の数学的正しさ（CPU 参照との一致）は対象外。実施結果は `verify` 行として出力され `aggregate.py` が全腕の存在を検査する
@@ -46,7 +46,7 @@
 | H4 | host 側 dispatch | L0 − L1、L1 − l2_sum |
 | H5 | facade・autodiff・tape | HEAD path-patch Layer A matmul − L0 |
 | H6 | checksum | 記録のみ |
-| 補助 | teardown（drop 時の free・event 破棄）・cudarc 内部 | L2 teardown、E h2d_clone_drop − h2d_prealloc、nsys |
+| 補助 | teardown（drop 時の free・event 破棄）・cudarc 内部 | L2 teardown、E h2d_clone_drop − h2d_prealloc、nsys 補助診断（1a・判定に不使用）|
 
 判定閾値（gap の 50% 以上で「支持」）などの詳細は
 [`RULE.txt`](logs/cuda-gemm-small-launch-cost-2109/RULE.txt) を正とし、本節では複製しない。
