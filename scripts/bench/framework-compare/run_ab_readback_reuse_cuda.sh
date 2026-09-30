@@ -581,8 +581,28 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   fi
   python3 compare_gemm_ab.py "$OUT_BEFORE" "$OUT_AFTER" --device cuda --sizes large --modes reuse --threshold 1.00 \
     --require-checksum-exact | write_excl "$REPORT"
-  cmp_rc=${PIPESTATUS[0]}
-  echo "compare_gemm_ab.py exit=$cmp_rc; report: $REPORT"
+  # 比較器と書き込み先の両方の終了状態を検査する（片方だけ見ると、write_excl 失敗で
+  # レポートが無いのに exit 0 になる。fail-closed。security.md A08）。
+  pipe_rc=("${PIPESTATUS[@]}")
+  cmp_rc=${pipe_rc[0]}
+  write_rc=${pipe_rc[1]}
+  echo "compare_gemm_ab.py exit=$cmp_rc; report write exit=$write_rc; report: $REPORT"
+  if [[ "$write_rc" -ne 0 ]]; then
+    echo "error: 判定レポートの書き込みに失敗した（レポートなし。fail-closed）" >&2
+    exit 1
+  fi
+  # record_only は非正式系列（RULE.txt §判定: ADOPT 不可・undetermined）。比較値は上のレポートへ
+  # 記録したうえで、比較器の結果に関わらず最終状態を undetermined として明示し非 0 終了する。
+  if [[ "$AB_LOAD_GATE_MODE" == "record_only" ]]; then
+    {
+      echo "verdict=undetermined"
+      echo "reason=AB_LOAD_GATE_MODE=record_only は非正式系列（専有ゲート要件なし。RULE.txt: ADOPT 不可）。比較器 exit=${cmp_rc} は参考値"
+      echo "report=$REPORT"
+      date -u +%Y-%m-%dT%H:%M:%SZ
+    } | write_excl "$UNDETERMINED" || exit 1
+    echo "undetermined: ${UNDETERMINED}（record_only。比較値は ${REPORT} に記録済み）" >&2
+    exit 1
+  fi
   exit "$cmp_rc"
 else
   FAIL_TS=$(date -u +%Y%m%dT%H%M%SZ)
