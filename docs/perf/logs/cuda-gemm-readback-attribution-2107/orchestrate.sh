@@ -121,17 +121,19 @@ print(exe)
 bench_fandhe="$fc_dir/target/release/bench-fandhe"
 [ -x "$bench_fandhe" ] || { echo "bench-fandhe を特定できない" >&2; exit 1; }
 
-# Layer A（fandhe-ai =0.9.0 crates.io 版）と Layer B（HEAD）が同一コードか。
-# RULE.txt: 差分があれば帰属判定は「無効（参考扱い）」。
+# Layer A（fandhe-ai =0.9.0 crates.io 版）と Layer B（HEAD）の計測経路が同一か。
+# crates/backend-cuda のファイル単位 diff は #2299 の feature gate・ドキュメント・
+# 診断専用機能追加で常に差分が出て判定が恒常的に無効化されるため、Layer A の
+# 計測経路（GEMM 起動選択・tiled カーネルソース・D2H readback 宛先確保）の項目に
+# 限定し、コメントと診断 feature ゲート項目を除いた正規化テキストで比較する
+# （RULE.txt「同一コード確認」節。差分・抽出不能なら判定は「無効（参考扱い）」）。
 same_code=unknown
+path_identity_detail=""
 if git rev-parse -q --verify "refs/tags/v0.9.0" >/dev/null 2>&1; then
-  if git diff --quiet v0.9.0..HEAD -- \
-    crates/backend-cuda/src/memory.rs crates/backend-cuda/src/gemm.rs \
-    'crates/backend-cuda/src/kernels*.rs'; then
-  same_code=yes
-  else
-    same_code=no
-  fi
+  path_identity_out="$(python3 "$script_dir/check_layer_a_path_identity.py" v0.9.0 HEAD || true)"
+  same_code="$(printf '%s\n' "$path_identity_out" | sed -n 's/^layerA_same_code: //p' | head -1)"
+  case "$same_code" in yes | no | unknown) ;; *) same_code=unknown ;; esac
+  path_identity_detail="$(printf '%s\n' "$path_identity_out" | grep '^path_item:' || true)"
 fi
 
 {
@@ -142,6 +144,7 @@ fi
   echo "git_head: $(git rev-parse HEAD)"
   echo "host_kind: $host_kind"
   echo "layerA_same_code: $same_code"
+  [ -z "$path_identity_detail" ] || echo "$path_identity_detail"
   echo "os_release: $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
   nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null || echo "nvidia-smi: unavailable"
   nvcc --version 2>/dev/null | tail -1 || echo "nvcc: unavailable"

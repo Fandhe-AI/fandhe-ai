@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""イシュー #2107: Layer A（fandhe-ai =0.9.0）と Layer B（HEAD）の計測経路同一性検査。
+
+`orchestrate.sh` から呼ばれ、`git show <ref>:<path>` で v0.9.0 と HEAD の
+「計測経路上の項目」だけを取り出し、コメント行と
+`#[cfg(feature = "internal-diagnostics")]` ゲート項目（本番既定ビルドに
+含まれない）を除いた正規化テキストを比較する（python3 標準ライブラリのみ）。
+`crates/backend-cuda` のファイル単位の diff は #2299 の feature gate・ドキュメント
+変更・診断専用機能追加で常に差分が出るため、Layer A の計測経路
+（GEMM 起動選択・tiled カーネルソース・D2H readback 宛先確保）に限定して
+比較する（RULE.txt「同一コード確認」節。PR #2452 codex-review 指摘 P1）。
+出力は `layerA_same_code: yes|no|unknown` の 1 行 + 項目別の `path_item:` 行。
+項目が抽出できない場合は fail-closed で `unknown`（`yes` にしない）。
+使い方: check_layer_a_path_identity.py [<base_ref=v0.9.0>] [<head_ref=HEAD>]
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+
+SRC = "crates/backend-cuda/src/"
+# (ファイル, 種別, 名前)。Layer A 経路: bench-fandhe → 本番 matmul
+# （run_f32_kernel → 選択 → tiled カーネル）と本番 readback。
+ITEMS = [
+    ("gemm.rs", "fn", "validate_gemm_dims"),
+    ("gemm.rs", "fn", "validate_output_len"),
+    ("gemm.rs", "fn", "validate_tiled_k_bound"),
+    ("gemm.rs", "fn", "tiled_f32_kernel_kind"),
+    ("gemm.rs", "fn", "tiled_pipeline_launch_config"),
+    ("gemm.rs", "fn", "tiled_f32_launch_config"),
+    ("gemm.rs", "fn", "select_tiled_f32_kernel"),
+    ("gemm.rs", "fn", "select_tiled_pipeline_handle"),
+    ("gemm.rs", "fn", "run_f32_kernel"),
+    ("kernels.rs", "const", "TILED_F32"),
+    ("kernels_tiled_pipeline.rs", "fn", "tiled_pipeline_f32_source"),
+    ("kernels_tiled_pipeline.rs", "fn", "tiled_pipeline_f32_source_with_stages"),
+    ("memory.rs", "fn", "pretouched_host_vec"),
+    ("memory.rs", "fn", "readback"),
+    ("memory.rs", "fn", "readback_with"),
+]
+GATE = '#[cfg(feature = "internal-diagnostics")]'
+
+
+def show(ref: str, rel: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{ref}:{SRC}{rel}"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+
+
+def extract(text: str, kind: str, name: str) -> str | None:
+    m = re.search(rf"^[ \t]*(?:pub(?:\([a-z]+\))?\s+)?{kind}\s+{re.escape(name)}\b", text, re.M)
+    if not m:
+        return None
+    start = m.start()
+    if kind == "const":
+        end = text.find('"#;', start)
+        return None if end < 0 else text[start : end + 3]
+    depth, seen, i = 0, False, m.end()
+    while i < len(text):
+        c = text[i]
+        if c == "{":
+            depth += 1
+            seen = True
+        elif c == "}":
+            depth -= 1
+            if seen and depth == 0:
+                return text[start : i + 1]
+        i += 1
+    return None
+
+
+def normalize(body: str, kind: str) -> str:
+    if kind == "const":
+        return body  # カーネルソース本体はコメントも含め完全一致を要求する
+    out: list[str] = []
+    skipping, depth, seen = False, 0, False
+    for raw in body.splitlines():
+        s = raw.strip()
+        if not skipping and s == GATE:
+            skipping, depth, seen = True, 0, False
+            continue
+        # 本番既定 `READBACK_DEST` は常に `PretouchedFresh`。`Fresh` 腕は v0.9.0 では
+        # 無条件・HEAD では feature gate 付きだが、いずれも本番経路では到達しない。
+        if not skipping and s.startswith("ReadbackDest::Fresh =>"):
+            skipping, depth, seen = True, 0, False
+        if skipping:
+            depth += s.count("{") - s.count("}")
+            seen = seen or "{" in s
+            if depth <= 0 and (s.endswith(",") or s.endswith(";") or (seen and s.endswith("}"))):
+                skipping = False
+            continue
+        if not s or s.startswith("//"):
+            continue
+        out.append(re.sub(r"\s+", " ", s))
+    return "\n".join(out)
+
+
+def main() -> int:
+    base = sys.argv[1] if len(sys.argv) > 1 else "v0.9.0"
+    head = sys.argv[2] if len(sys.argv) > 2 else "HEAD"
+    lines, verdict = [], "yes"
+    try:
+        for rel, kind, name in ITEMS:
+            a = extract(show(base, rel), kind, name)
+            b = extract(show(head, rel), kind, name)
+            if a is None or b is None:
+                lines.append(f"path_item: {rel}::{name} 抽出不能")
+                if verdict == "yes":
+                    verdict = "unknown"
+            elif normalize(a, kind) == normalize(b, kind):
+                lines.append(f"path_item: {rel}::{name} identical")
+            else:
+                lines.append(f"path_item: {rel}::{name} DIFFERS")
+                verdict = "no"
+    except (subprocess.CalledProcessError, OSError):
+        print("layerA_same_code: unknown")
+        return 0
+    print(f"layerA_same_code: {verdict}")
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

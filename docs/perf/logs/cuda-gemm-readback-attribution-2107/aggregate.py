@@ -9,7 +9,8 @@
 - `<dir>/layerA-phases-N{N}.log`: 同一セッションの
   `bench-fandhe --task gemm --device cuda --mode reuse --phases` の JSONL を
   5 run 分連結したもの（`matmul` 区間の `median_s`・`checksum` を使う）。
-- `<dir>/env_info.txt`（任意）: `layerA_same_code: yes|no|unknown` 行。
+- `<dir>/env_info.txt`（任意）: `layerA_same_code: yes|no|unknown` 行（計測経路の同一性検査
+  `check_layer_a_path_identity.py` の結果）。
 - `<dir>/load_gate_status.txt`（任意）: `run<k> gate=pass|unpassed|record_only`。
 
 完全性・checksum 検査は fail-closed（不一致・欠落は `IntegrityError` を
@@ -213,6 +214,9 @@ def analyze(base: Path) -> tuple[str, dict]:
             v_out = f"{v}（分解歪みあり）"
         else:
             v_out = v
+        # 専有ゲート未通過の系列は参考扱い（RULE.txt「専有ゲート」）。各 N の判定にも明示する。
+        if gate_note and not v_out.startswith("無効"):
+            v_out = f"参考扱い（専有ゲート未通過。素の判定: {v_out}）"
         out += [
             f"- residual = LayerA.matmul − Σ_matmul_equiv(keep_alive) = {residual:.1f} us",
             f"- alloc_fill_share = {'n/a' if share is None else f'{share:.3f}'}"
@@ -373,6 +377,17 @@ def self_test() -> int:
             expect(False, "Layer A checksum 不一致で IntegrityError")
         except IntegrityError:
             pass
+
+        # 専有ゲート未通過: 各 N の判定にも参考扱いを明示する。
+        base = Path(t) / "gate"
+        _write_fixture(base, layer_a_us=1150.0)
+        (base / "load_gate_status.txt").write_text("run1 gate=unpassed\n")
+        _, res = analyze(base)
+        expect(
+            all(res[n]["verdict"].startswith("参考扱い") for n in SIZES),
+            "ゲート未通過なら全 N の判定が参考扱い",
+        )
+        expect("支持" in res[2048]["verdict"], "素の判定は括弧内に保持")
 
         # 同一コード未確認: 判定は無効（参考扱い）。
         base = Path(t) / "unk"

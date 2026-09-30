@@ -20,10 +20,18 @@ doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §13
 [同一セッション Layer A]
 - 同じセッションで bench-fandhe --task gemm --device cuda --mode reuse --phases
   （fandhe-ai =0.9.0 ピン・既存コマンド）を N ごとに 5 run 実行する。
-- 計測時点で git diff v0.9.0..HEAD -- crates/backend-cuda/src/memory.rs
-  crates/backend-cuda/src/gemm.rs 'crates/backend-cuda/src/kernels*.rs' が空で
-  あることを確認し env_info.txt に記録する。差分があれば Layer A と Layer B は
-  同一コードでないため帰属判定は「無効（参考扱い）」とする。
+- 計測時点で Layer A（fandhe-ai =0.9.0）と Layer B（HEAD）の計測経路が同一で
+  あることを check_layer_a_path_identity.py（orchestrate.sh が呼び出し）で確認し
+  env_info.txt の layerA_same_code と項目別 path_item 行に記録する。比較対象は
+  Layer A が通る経路の項目（gemm.rs の起動選択・検証・run_f32_kernel、
+  kernels.rs の TILED_F32、kernels_tiled_pipeline.rs の pipeline ソース生成、
+  memory.rs の readback 系）で、コメント行と診断 feature ゲート項目を除いた
+  正規化テキストの完全一致を要求する。1 項目でも差分・抽出不能なら
+  layerA_same_code は no／unknown となり、帰属判定は「無効（参考扱い）」とする。
+  [改訂 2026-09-30・実機計測前] 当初は memory.rs・gemm.rs・kernels*.rs の
+  ファイル単位 git diff の空を要求していたが、#2299 の feature gate・ドキュメント・
+  診断専用機能追加で恒常的に差分が出て判定が常に無効化されるため（PR #2452
+  レビュー指摘）、計測経路の項目へ絞った。閾値（0.80／0.50）・判定式は不変。
 
 [代表値]
 - 各区間は run ごとの median（20 試行）を採り、5 run 間の中央値と min-max を報告する。
