@@ -322,6 +322,7 @@ impl MetalMemory {
         })?;
         let buf = MetalBuffer::new_with_data(&self.context, data)?;
         let bytes = checked_byte_len(data.len())?;
+        crate::fixed_cost_diag::record_upload(bytes);
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
         let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle {
             buffer: Some(buf),
@@ -359,6 +360,7 @@ impl MetalMemory {
         }
         let buf = MetalBuffer::new_with_data(&self.context, slice)?;
         let bytes = checked_byte_len(slice.len())?;
+        crate::fixed_cost_diag::record_upload(bytes);
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
         let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle {
             buffer: Some(buf),
@@ -382,6 +384,7 @@ impl MetalMemory {
             None => Vec::new(),
             Some(buf) => buf.read_to_vec(),
         };
+        crate::fixed_cost_diag::record_download(std::mem::size_of_val(data.as_slice()) as u64);
         // shape 不整合（通常到達しない防御的経路）を `BufferAllocation
         // { bytes: 0 }` のような実態と異なる variant に化けさせず、
         // 元の `ShapeError` の詳細を `MetalError::ShapeMismatch` として
@@ -488,6 +491,7 @@ impl MemoryOps for MetalMemory {
             ));
         };
         buf.write_slice_at(dst_offset, src);
+        crate::fixed_cost_diag::record_upload(std::mem::size_of_val(src) as u64);
         Ok(())
     }
 

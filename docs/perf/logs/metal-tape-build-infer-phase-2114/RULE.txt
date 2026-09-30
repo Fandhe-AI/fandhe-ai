@@ -1,0 +1,63 @@
+RULE fixed-at-utc: 2026-09-30T05:52:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #2114 Metal tape_build 削減（opt-in）と infer GPU 起動固定費の診断
+doc: docs/perf/metal-tape-build-infer-fixedcost.md
+
+[実行方法]
+- 1 run = 1 プロセス。テストバイナリ
+  crates/facade/tests/metal_infer_tape_build_fixedcost_diag.rs を
+  `--ignored --exact metal_infer_tape_build_fixedcost_phases --nocapture --test-threads=1`
+  で起動し、出力は 1 つの run{N}.jsonl。
+- run1〜run5 の 5 run。差し替え・追加起動・既存 run ファイルの上書きはしない。
+- 1 プロセスあたり warmup 20 反復 + 計測 80 反復（20 反復 x 4 ラウンド。
+  ラウンドごとに arm 順を反転）。
+- arm: fresh_off / fresh_on / reuse_off / reuse_on / reuse_decomposed_off /
+  reuse_decomposed_on / tape_build_micro（off = デバイス存在確認キャッシュ OFF＝既定・
+  on = ON。tape_build_micro は常に OFF）。
+- 対象ホスト: Apple M4 Max（m4max）のみ。
+- (c) GPU busy 診断（crates/backend-metal/src/infer_fixed_cost_diag_tests.rs の
+  infer_fixed_cost_diag_wall_vs_gpu_busy）は別コマンドで実行し、出力は env_info と
+  同じディレクトリへ手動転記する（record-only。5 run 集計の対象外）。
+
+[代表値]
+- 各セルは run ごとの median_s を採り、5 run 間の中央値と min-max を報告する。
+
+[checksum 規則（hard・fail-closed）]
+- 6 arm（fresh_*・reuse_*・reuse_decomposed_*）の iter_total.checksum_bits が
+  5 run すべてで一致すること。
+- 同種の off と on の checksum_bits が一致すること（キャッシュ ON で出力が変わらない）。
+- reuse_decomposed_X と reuse_X（X = off/on）の checksum_bits が一致すること。
+- fresh と reuse の一致は記録のみで要件にしない。
+- 1 つでも不一致なら系列は無効（集計は exit != 0）。
+
+[比の定義]
+- ratio_tape_build_fresh = fresh_on.tape_build / fresh_off.tape_build
+- ratio_tape_build_decomposed = reuse_decomposed_on.tape_build / reuse_decomposed_off.tape_build
+- ratio_iter_fresh = fresh_on.iter_total / fresh_off.iter_total
+- ratio_iter_reuse = reuse_on.iter_total / reuse_off.iter_total
+  （いずれも 5 run 中央値同士）
+- 非後退基準 ratio <= 1.00 は記録のみ。本イシューは修正を出荷しないため ADOPT 判定は
+  行わない（既定 ON 化は別イシューで A/B 後に判断）。
+
+[仮説判定（閾値は事後に変えない）]
+- H1: micro.provider_select の中央値が fresh_off.tape_build の中央値の 50% 以上なら「支持」、
+  未満なら「未確定」。
+- H1a（補助）: micro.probe_gpu_core_count / micro.provider_select の比を記録。
+  1 - この比 が MTLCopyAllDevices と name 取得の推定割合。
+- H2: micro.tape_new の中央値が 1 us 未満なら「支持」。
+- H3: reuse_off の 1 反復あたり encode = 2・command_buffers = 1・wait = 1 が
+  5 run すべてで成立すれば「支持」（#1580 の実測との照合）。
+- H4: (c) の wall - GPU busy がホスト固定費として wall の 50% 以上なら「支持」
+  （手動転記した出力で判定。5 run 集計の対象外）。
+
+[ゲート]
+- m4max: record_only（共有環境。load average の推移を env_info と load_gate.log に記録）。
+
+[対象外（再実行しない既存実験。決定記録あり）]
+- #1580／#1911 の chain 単一同期 A/B・#1477 の readout 腕。
+
+[窓定義の注記]
+- fresh の tape_build は計測窓の内側。bench-fandhe（#1217 D4: make_tape は計測窓の外）とは
+  窓が異なるため infer-reuse-phase-breakdown.md §10.2 の数値と直接比較しない。
+
+[マスク規則]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。
