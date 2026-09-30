@@ -109,6 +109,15 @@ _LARGE_SIZES_BY_DEVICE = {
     "cuda": frozenset({1024, 2048, 4096}),
 }
 
+# イシュー #2112: `--sizes readback`。`run_ab_readback_metal.sh` の GEMM_SIZES
+# （1024・4096）と判定セルを一致させる（N=2048 は計測しないため `large` だと
+# 欠測セルで終了コード 3 になる）。RULE.txt の判定セル（gemm N=1024・N=4096）と同一。
+_READBACK_SIZES_BY_DEVICE = {
+    "metal": frozenset({1024, 4096}),
+    "cpu": frozenset({1024, 4096}),
+    "cuda": frozenset({1024, 4096}),
+}
+
 # イシュー #1517: `--task train` 用のセル集合。`bench-fandhe --task train`
 # は `Record.size` に `BATCH`（`scripts/bench/framework-compare/
 # bench-fandhe/src/main.rs` の `const BATCH: usize = 64;`）を emit する
@@ -146,6 +155,8 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
         return _GATE_SIZES_BY_DEVICE[device]
     if sizes_arg == "large":
         return _LARGE_SIZES_BY_DEVICE[device]
+    if sizes_arg == "readback":
+        return _READBACK_SIZES_BY_DEVICE[device]
     return _VALID_SIZES_BY_DEVICE[device]
 
 # 既定の非後退閾値（median 比 ratio = after/before が 1.05 以下なら非後退。
@@ -748,13 +759,14 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate", "large", "infer-batches"),
+        choices=("full", "gate", "large", "readback", "infer-batches"),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "
             "_VALID_SIZES_BY_DEVICE）または 'gate'（run_gemm_gate.sh 由来入力用。"
             "metal は 512 を除いた 1024/2048/4096 のみに絞り込む。イシュー #1337）"
             "または 'large'（全 device で 1024/2048/4096。イシュー #2102）"
+            "または 'readback'（全 device で 1024/4096。イシュー #2112）"
             "または 'infer-batches'（--task infer 専用。batch 64/1024/4096 の "
             "3 形状。イシュー #2115）"
         ),

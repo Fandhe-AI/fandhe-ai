@@ -497,6 +497,51 @@ impl MetalElementwise {
     }
 }
 
+impl MetalElementwise {
+    /// [`Self::dispatch_unary_resident`] の encode-only・token 付き版
+    /// （イシュー #2113。`ops.rs::gemm_resident_rhs_act` の Metal
+    /// オーバーライドが gemm の直後に relu を同一バッチへ積むために使う）。
+    ///
+    /// **待たない**: `ctx.encode` でバッチへ登録するのみで `synchronize` は
+    /// しない。呼び出し元が `ctx.synchronize()` と `token` 検査（fail-closed）を
+    /// 行う契約。検証（`numel` の u32 上限・バッファ長 1:1・`numel == 0` の
+    /// 早期 return）は [`Self::dispatch_unary_resident`] と同一（REQ-8・A03）で、
+    /// カーネル側の境界チェックは変更しない。`a`／`out` は `resources` として
+    /// バッチへ retain させる（GPU 完了前の解放防止）。
+    pub(crate) fn encode_unary_resident_tracked(
+        &self,
+        ctx: &MetalContext,
+        op: UnaryElementwiseOp,
+        a: &MetalBuffer,
+        out: &MetalBuffer,
+        numel: usize,
+        token: &fandhe_ai_tensor_core::DispatchFailureCell,
+    ) -> Result<(), MetalError> {
+        validate_elementwise_len(numel)?;
+        if a.len() != numel || out.len() != numel {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "elementwise buffer length must equal numel: a_len={}, out_len={}, numel={numel}",
+                    a.len(),
+                    out.len()
+                ),
+            });
+        }
+        if numel == 0 {
+            return Ok(());
+        }
+        let pipeline = self.pipeline_for_unary(op)?;
+        ctx.encode(
+            "elementwise_unary_resident",
+            &[a.raw(), out.raw()],
+            Some(token),
+            |encoder| {
+                encode_unary_dispatch(encoder, pipeline, a, out, numel as u32, &[]);
+            },
+        )
+    }
+}
+
 /// `numel` に対する grid/threadgroup サイズを構築する（`div_ceil` による
 /// 末尾ブロックの余剰スレッドはカーネル内境界チェックに委ねる契約。REQ-8。
 /// `crate::gemm` の `THREADGROUP_SIDE`／grid 計算と同じ考え方の 1 次元版）。

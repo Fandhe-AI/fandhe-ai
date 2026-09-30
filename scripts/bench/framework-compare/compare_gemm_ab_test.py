@@ -592,6 +592,20 @@ class SizesLargeTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("欠測セル", out)
 
+    def test_metal_readback_accepts_1024_4096_only(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(1024, 4096), device="metal")
+        code, out, _ = self._run(
+            before, after, ["--modes", "reuse", "--sizes", "readback"]
+        )
+        self.assertEqual(code, 0)
+
+    def test_metal_large_missing_2048_exit_three(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(1024, 4096), device="metal")
+        code, _, _ = self._run(
+            before, after, ["--modes", "reuse", "--sizes", "large"]
+        )
+        self.assertEqual(code, 3)
+
     def test_cpu_full_default_still_rejects_4096(self):
         before, after = _all_cells_rows(0.002, 0.0019, sizes=self._LARGE, device="cpu")
         code, _, _ = self._run(before, after, ["--device", "cpu"])
