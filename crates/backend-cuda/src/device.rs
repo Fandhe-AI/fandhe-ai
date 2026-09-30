@@ -568,6 +568,19 @@ impl CudaDevice {
             .and_then(|count| u32::try_from(count).ok())
     }
 
+    /// warp 幅（`CU_DEVICE_ATTRIBUTE_WARP_SIZE`。#2125）。ドライバ由来の
+    /// 外部入力のため `u32` 変換と 0 除外を経て採用し、失敗・負値・0 は
+    /// `None`（`compute_units` と同じ fail-soft 方針）。
+    /// `CudaDeviceProvider::probe` が `DeviceInfo::warp_width` へ報告する。
+    /// カーネルへの注入は #2126 で扱う。
+    pub fn warp_size(&self) -> Option<u32> {
+        self.ctx
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_WARP_SIZE)
+            .ok()
+            .and_then(|w| u32::try_from(w).ok())
+            .filter(|w| *w > 0)
+    }
+
     /// SM（マルチプロセッサ）数の公開アクセサ（イシュー #499）。
     ///
     /// `compute_units` と同一の取得ロジック・
@@ -685,7 +698,8 @@ impl CudaDeviceProvider {
             device.name().to_string(),
             total_memory_bytes,
             compute_units,
-        ))
+        )
+        .with_warp_width(device.warp_size()))
     }
 }
 

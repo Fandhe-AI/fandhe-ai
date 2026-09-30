@@ -45,4 +45,13 @@ fn select_metal_device_on_real_hardware() {
 
     assert_eq!(info.device, Device::Metal);
     assert!(!info.name.is_empty());
+    assert_eq!(info.warp_width, Some(32));
+}
+
+/// Apple GPU の simdgroup 幅は 32（#2125）。
+#[test]
+fn enumerated_devices_report_warp_width_32() {
+    for info in MetalDeviceProvider::new().enumerate().expect("enumerate") {
+        assert_eq!(info.warp_width, Some(32));
+    }
 }

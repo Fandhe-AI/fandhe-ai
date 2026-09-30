@@ -167,6 +167,14 @@ mod iokit_ffi {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MetalDeviceProvider;
 
+/// Apple GPU の simdgroup 幅（#2125）。世代に依らず 32 固定で、`MTLDevice`
+/// にデバイス単位の simdgroup 幅 API はない（`threadExecutionWidth` は
+/// `MTLComputePipelineState` のプロパティ）。実行時の突合はパイプライン
+/// 構築時の検証（`MetalError::UnexpectedThreadExecutionWidth`）が
+/// fail-closed で担う。既存の手動定数（`gemm.rs::SIMDGROUP_THREADGROUP_WIDTH`
+/// 等）と同値で、置換は #2126 以降。`DeviceInfo::warp_width` へ報告する。
+pub(crate) const APPLE_SIMDGROUP_WIDTH: u32 = 32;
+
 impl MetalDeviceProvider {
     /// 新規 provider を構築する。macOS 上の Metal デバイス検出自体は
     /// `is_available`／`enumerate`／`select` 呼び出し時に行う。
@@ -194,6 +202,7 @@ impl MetalDeviceProvider {
                     Some(device.recommendedMaxWorkingSetSize()),
                     gpu_core_count,
                 )
+                .with_warp_width(Some(APPLE_SIMDGROUP_WIDTH))
             })
             .collect()
     }

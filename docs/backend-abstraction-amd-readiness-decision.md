@@ -155,6 +155,17 @@ HIP では `hipCtx*`／`hipModule*` は legacy 扱いで、新規コードは `h
 2. rmsnorm／softmax／mse カーネルの `#define WARP_SIZE` レンダリング時注入化と、既存ビット一致テストの回帰確認
 3. cooperative 起動入口（`LaunchKind::Cooperative`）の `unsafe` 採用承認と、Stream-K fixup（#1357）との連携可否の評価
 
+## 6b. 実装記録（#2125・起票案 1 の第 1 段）
+
+本文書冒頭の「コード変更なし」は #1340 時点の記述であり、#2125 で次を実装した。
+
+- `tensor-core::DeviceInfo` に `warp_width: Option<u32>` を追加（イシュー文面は `u32` だが、本文書 §3・§6 と既存の `Option` 方針〈`total_memory_bytes`・`compute_units`〉に合わせ `Option` を採用。CPU は `None` で CPU 本番コードは無変更）
+- 公開クレートの semver 互換のため `DeviceInfo::new` のシグネチャは据え置き、ビルダー `with_warp_width` を追加
+- CUDA: `CU_DEVICE_ATTRIBUTE_WARP_SIZE` を `CudaDevice::warp_size`（失敗・0 は `None`）で取得し `probe` から報告
+- Metal: `threadExecutionWidth` は `MTLComputePipelineState` のプロパティでデバイス単位では取れないため、デバイス列挙時は Apple GPU の定数 32（`APPLE_SIMDGROUP_WIDTH`）を報告し、パイプライン構築時の `UnexpectedThreadExecutionWidth` 検証を実行時突合として維持する（§3 の「再利用」表現との差分）
+- カーネル・シェーダは未変更（bit 一致は構造上不変）。`WARP_SIZE`／マスクのレンダリング時注入は #2126。`backend-cuda/src/warp_geometry.rs` は導出値の模型（`cfg(test)` 限定・未結線）で、width 32 の値が現行リテラルと一致することを固定する
+- facade へは公開しない（`api_surface` テストが `DeviceInfo` 再エクスポート禁止を固定）
+
 ## 7. 出典
 
 - `.claude/skills/amd-rocm/references/hip/porting-cuda-to-hip.md`（warp 幅・legacy driver/module API）
