@@ -1,0 +1,155 @@
+# framework-compare 両機体再計測とスコアボード再生成（Phase 3 採否反映・イシュー #2120）
+
+| 項目 | 内容 |
+|---|---|
+| 親 | #2099（Phase 3。負けセル 22 件への施策群）。基準は `docs/perf/loss-attribution-matrix.md` §3（`gen_1988.out`・fandhe-ai は `reuse` 行） |
+| 状態 | **再計測基盤＋事前登録規則を追加済み。M4 Max・GB10 の本番実測と結果転記は未実施**（後述「申し送り」） |
+| 判定規則 | `docs/perf/logs/framework-compare-phase3-remeasure-2120/RULE.txt`（実測前に固定） |
+| 計測キット | `docs/perf/logs/framework-compare-phase3-remeasure-2120/`（`orchestrate.sh`・`switches.sh`・`aggregate.py`・`scoreboard/gen_2120.py`） |
+
+## 1. 目的
+
+Phase 3 の施策群のあと、framework-compare を両機体（Apple M4 Max・DGX Spark GB10）で再計測し、スコアボードを再生成して、
+負けセル 22 件（負け 20＋僅差 2）の倍率が Phase 3 の前後でどう変わったかを定量化する。残存する負けセルの原因再分析は
+Phase 4 のスコープであり本イシューでは行わない。
+
+## 2. 前提のずれ（本キット作成時点の実測）
+
+Phase 3 の #2100〜#2119 はクローズ済みだが、マージ済みの施策はいずれも **opt-in・既定 OFF のまま実機判定を申し送っている**。
+main 上で既定 ON に結線された ADOPT 施策は 0 件であり、「ADOPT 施策の結線後に計測する」という本イシューの前提は現時点では未充足である。
+
+このため計測キットは rev 非依存に作り、計測時点の `.rev-stamp` における各スイッチの既定値を `switches.sh` で機械抽出して
+`switches-{B,C}.txt` へ証跡化する（採否スナップショット）。既定 ON のスイッチが 0 件なら、B→C の比は 1.00 近傍・checksum は
+文字列一致が期待値であり、それは正当な記録結果として扱う（RULE.txt「期待値」）。各施策の実機判定・既定 ON 化の後に本キットを
+再実行すれば、スナップショットと B→C 比へそのまま反映される。
+
+### 2.1 採否スナップショット（作成時点の HEAD `0a25a9c0`。計測時に再取得して上書きする）
+
+| スイッチ | 既定値（作成時） | 出典（file:line） | 導入 issue | 計測時の値（記入欄） |
+|---|---|---|---|---|
+| `HOST_ARENA_DEFAULT_ENABLED` | false | `crates/tensor-core/src/alloc.rs:25` | #2104 | |
+| `REDUCTION_SEQUENTIAL_FALLBACK_ENABLED` | false | `crates/backend-cpu/src/reduction.rs:105` | #2101／#2102 | |
+| `INFER_GRAPH_DEFAULT_ENABLED` | false | `crates/backend-cuda/src/graph.rs:658` | #2115 | |
+| `TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED` | false | `crates/backend-metal/src/train_forward_encode_runtime.rs:33` | #2113 | |
+| `METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED` | false | `crates/backend-metal/src/fixed_cost_diag.rs:43` | #2114 | |
+| `UNROLL_LOAD_ENABLED` | false | `crates/backend-metal/src/tile.rs:1576` | #2110／#2111 | |
+| `SME_PRODUCTION_ENABLED` | false | `crates/backend-cpu/src/gemm_blis/mod.rs:3085` | #2118／#2119 | |
+| `GB10_AFFINITY_ENABLED` | false | `crates/backend-cpu/src/gb10_affinity.rs:126` | #2117 | |
+| `FANDHE_AI_CUDA_READBACK_DEST`（環境変数・未設定で OFF） | opt-in | `crates/backend-cuda/src/readback_policy.rs:33` | #2108 | |
+| `FANDHE_AI_METAL_READBACK_DEST`（環境変数・未設定で OFF） | opt-in | `crates/backend-metal/src/readback_policy.rs:30` | #2112 | |
+| `FANDHE_AI_CUDA_GRAPH_INFER`（環境変数・未設定で OFF） | opt-in | `crates/backend-cuda/src/graph.rs:684` | #2115 | |
+
+`SME_PRODUCTION_ENABLED` と `GB10_AFFINITY_ENABLED` の切替は人間承認事項であり、本イシューでは実施しない。
+
+## 3. 計測設計（RULE.txt の要約。正は RULE.txt）
+
+| 腕 | fandhe-ai のソース | 役割 |
+|---|---|---|
+| A | registry `fandhe-ai =0.9.0`（承認ピン・patch なし） | 基準（`gen_1988.out`）と同じ実装の参考腕 |
+| B | Phase 3 直前ツリー `65035979`（#2445 docs マージ。Phase 3 最初のコード変更 `7b40ed4f` の直前） | Phase 3 前 |
+| C | 計測時点の main HEAD | Phase 3 後（スコアボード主表示） |
+
+- 主比較は B→C（同一 run 内比 `C.median_s / B.median_s` の 5 run 中央値。**非後退 ⇔ 1.00 以下**）。A→C は 0.9.0 以降の非 Phase 3 変更を含む参考比。
+- 5 run・プロセス独立・腕順は run ごとに反転（奇数 A→B→C・偶数 C→B→A）。candle・burn は各 run で 1 回。Python FW 行は既存値を流用。
+- 専有ゲート: GB10 は load1 < 1.0 かつ GPU 使用率 0% を**正式計測の前提条件**とする（20 回とも不通過なら `orchestrate.sh` はその run を計測せず停止し、5 run を最初からやり直す）。M4 Max は record_only（load1 < 8.0 を最大 30 分待機。不通過でも計測し、集計・スコアボードに「不通過」を併記）。
+- 前提（RULE.txt P1〜P5）: 計測条件（`env_info.txt`・`switches-{B,C}.txt`）・専有ゲート（`gate.log` の書式と pass の閾値再検証）・終了コード（`skipped.log`）・入力の厳格性（NaN／重複キー／重複行／型／セル範囲外）・完備性を `aggregate.py` の `check_prerequisites` が一括評価し、1 つでも不成立なら判定不能として何も出力しない。
+- checksum は各腕・各セルで 5 run 文字列完全一致、かつ腕間でも一致。不一致は是正せず記録。
+- tolerance・baseline・`Cargo.toml`・`Cargo.lock`・ガードレール閾値・`docs/spec` は不変。`FANDHE_AI_*` は未設定（設定されていれば起動を拒否）。
+
+## 4. 負けセル 22 件の Phase 3 前後倍率（実測後に記入）
+
+倍率は `gen_1988.out` と同じ定義（最速他 FW ÷ fandhe-ai。gemm／train は所要時間比・infer は逆向き。1.00 未満が負け側）。
+「基準」列は `docs/perf/loss-attribution-matrix.md` §3 の転記（2026-09-16／18 セッション）。「腕 B」「腕 C」列は
+`scoreboard/gen_2120.py --tsv` の出力（`--arm B` で腕 B を主入力にした実行と `--arm C` の実行）から転記する。「B→C 比」「非後退」
+「checksum」は同 TSV の集計 JSON 由来列（判定列 reuse セルの `bc_med`・非後退・checksum 一致。`aggregate.md` と同値）から転記する。
+B→C 比は同一 run 内比 `C.median_s / B.median_s` の 5 run 中央値（**時間比。infer も同じ向き**。<1 が高速化）であり、採用行同士の比ではない
+（RULE.txt 判定 3 追記）。
+
+| セル ID | 対象 | 基準（`gen_1988.out`） | 腕 B | 腕 C | B→C 比 | 非後退 | checksum | 備考 |
+|---|---|---:|---:|---:|---:|---|---|---|
+| M-MTL-G256 | M4 Max gemm Metal N=256 | 0.93 | | | | | | |
+| M-MTL-G512 | M4 Max gemm Metal N=512 | 0.72 | | | | | | |
+| M-MTL-G1024 | M4 Max gemm Metal N=1024 | 0.68 | | | | | | |
+| M-MTL-G2048 | M4 Max gemm Metal N=2048 | 0.74 | | | | | | |
+| M-MTL-G4096 | M4 Max gemm Metal N=4096 | 0.59 | | | | | | |
+| M-CPU-G256 | M4 Max gemm CPU N=256 | 0.66 | | | | | | |
+| M-CPU-G1024 | M4 Max gemm CPU N=1024 | 0.91 | | | | | | |
+| M-CPU-G2048 | M4 Max gemm CPU N=2048 | 0.73 | | | | | | |
+| M-MTL-TRN | M4 Max train Metal | 0.38 | | | | | | |
+| M-MTL-INF | M4 Max infer Metal | 0.79 | | | | | | |
+| M-CPU-TRN | M4 Max train CPU | 0.21 | | | | | | |
+| M-CPU-INF | M4 Max infer CPU | 0.18 | | | | | | |
+| G-CUDA-G256 | GB10 gemm CUDA N=256 | 0.83 | | | | | | |
+| G-CUDA-G512 | GB10 gemm CUDA N=512 | 0.43 | | | | | | |
+| G-CUDA-G1024 | GB10 gemm CUDA N=1024 | 0.41 | | | | | | |
+| G-CUDA-G2048 | GB10 gemm CUDA N=2048 | 0.48 | | | | | | |
+| G-CPU-G256 | GB10 gemm CPU N=256 | 0.72 | | | | | | |
+| G-CPU-G512 | GB10 gemm CPU N=512 | 0.76 | | | | | | |
+| G-CUDA-TRN | GB10 train CUDA | 0.88 | | | | | | |
+| G-CUDA-INF | GB10 infer CUDA | 0.41 | | | | | | |
+| G-CPU-TRN | GB10 train CPU | 0.34 | | | | | | |
+| G-CPU-INF | GB10 infer CPU | 0.72 | | | | | | |
+
+監視セル: GB10 CUDA gemm N=4096（基準は burn 比 1.03×・1 位。同一 run 内比の最速相手 burn の中央値 1.0145 と 1 に近く、
+`loss-attribution-matrix.md` §3 が「回帰の兆候があれば #2108／#2120 で再確認」と定めたセル）。計測後にこのセルの腕 B／C の順位・倍率を追記する。
+
+## 5. 再現手順（Mac／GB10 セッション向け）
+
+```bash
+# 0. 腕 B のツリーを用意（例。転送でも可）。各ツリーのルートに .rev-stamp（空不可。B は 65035979 で始まること）を書く
+git worktree add --detach <pre-tree> 65035979 && git -C <pre-tree> rev-parse --short HEAD > <pre-tree>/.rev-stamp
+git rev-parse --short HEAD > <head-tree>/.rev-stamp   # main HEAD のツリー（.rev-stamp はコミットしない）
+# 1. 疎通確認（任意。1 run・N=256 の gemm のみ・ゲート省略・candle／burn なし。結果は判定に使わない）
+SMOKE=1 HEAD_TREE=<head-tree> PRE_TREE=<pre-tree> LOGD=<scratch> bash docs/perf/logs/framework-compare-phase3-remeasure-2120/orchestrate_gb10.sh
+# 2. 本計測（GB10 は orchestrate_gb10.sh・M4 Max は orchestrate_m4max.sh。LOGD は機体別の m4max／gb10 ディレクトリ）
+HEAD_TREE=<head-tree> PRE_TREE=<pre-tree> LOGD=<logd> bash docs/perf/logs/framework-compare-phase3-remeasure-2120/orchestrate_<machine>.sh
+# 3. 集計（前提 P1〜P5 不成立なら非 0 終了し何も出力しない。成立時は <prefix>-{A,B,C}-full.jsonl と <prefix>-aggregate.json）
+python3 aggregate.py --self-test
+python3 aggregate.py --machine <gb10|m4max> --logs <logd> --md <logd>/aggregate.md --out-prefix <logd>/results
+# 4. スコアボード（正式モード。腕 C を主入力。前比・B→C 比は集計 JSON の bc_med を転記し、gen は再計算しない）
+python3 scoreboard/gen_2120.py --self-test
+python3 scoreboard/gen_2120.py --arm C \
+  --m4 m4max/results-C-full.jsonl --m4-agg m4max/results-aggregate.json \
+  --gb gb10/results-C-full.jsonl --gb-agg gb10/results-aggregate.json --gb-py <py JSONL> \
+  --out fandhe-ai-phase3-scoreboard.html --tsv ratios-C.tsv
+# 腕 B の倍率（基準との比較用）は --arm B と ...-B-full.jsonl へ差し替え、--out と --tsv を別名にして実行する（腕 C の HTML を上書きしない）。
+# 判定列見出し・本文の腕表示は --arm から導出されるため --main-label は不要（指定する場合は --arm と一致必須）
+python3 scoreboard/gen_2120.py --arm B \
+  --m4 m4max/results-B-full.jsonl --m4-agg m4max/results-aggregate.json \
+  --gb gb10/results-B-full.jsonl --gb-agg gb10/results-aggregate.json --gb-py <py JSONL> \
+  --out fandhe-ai-phase3-scoreboard-armB.html --tsv ratios-B.tsv
+```
+
+- （追記・PR #2466 レビュー）`HEAD_TREE`・`PRE_TREE` は `.git` を含む git 作業ツリーのルートとして用意する（`git worktree add` のツリーを別ノードへ転送すると `.git` の参照が切れるため、転送する場合は clone 等で `.git` ごと用意する）。`orchestrate.sh` は `.rev-stamp` と `git rev-parse HEAD` の一致（腕 B は `650359799aa5…` と完全一致）と作業ツリーに変更がないこと（ルートの未追跡 `.rev-stamp` と docs/ 配下に置いた `LOGD` の未追跡ファイルを除く。submodule は除外）を計測前と全 run 後に照合し、外れれば停止する。キットは `HEAD_TREE` の本ディレクトリから起動する（詳細は RULE.txt「計測腕」追記）。
+- `--m4` 側は M4 Max の Python FW 転記値を `gen_2120.py` が内蔵しているため、機体別の派生 JSONL だけを渡す。`--gb-py`（と任意の `--gb-extra`）は Python FW 行のみ受理する。
+- `gen_2120.py` は集計 JSON が formal でない・`--m4`／`--gb` が集計 JSON に記録された腕の派生 JSONL（sha256）と一致しない・`--m4-prev`／`--gb-prev`／`--prev-label` が指定された場合は停止する。gen_1988 互換の出力は `--legacy-1988`（非後退確認用）。
+- スコアボード HTML は新規 Artifact として公開してよい（0.9.0 版・#1988 版は不変のまま履歴として残す）。
+- ホスト名・ユーザー名・絶対パスは `orchestrate.sh` が `env_info.txt`／`build.log` で `<home>`／`<head-tree>`／`<pre-tree>` へマスクする。生ログ（JSONL・`err.log`）にもホスト情報が無いことを収録前に確認する。
+- 所要時間の目安: 3 腕化のため 1 run は既存の run_all 系スイープの約 2 倍強（candle・burn は 1 回のみ）＋ゲート待機。
+
+## 6. 申し送り（本 PR で未実施）
+
+| 項目 | 状況 |
+|---|---|
+| M4 Max 5 run 実測（専有ゲート record_only） | 作業ホストが x86_64＋RTX 3060 のため未実施。Mac セッションへ |
+| GB10 5 run 実測（専有ゲート成立下） | 同上。GB10 セッションへ |
+| §2.1・§4 表の転記、`aggregate.md`／`switches-*.txt`／`env_info.txt`／生ログの収録 | 実測後 |
+| スコアボード HTML の再生成・Artifact 公開 | 実測後 |
+| イシュー #2120 の受入条件チェック更新 | 実測後（実機実測が済むまで #2120 を完了扱いにしない） |
+| Phase 3 各施策の実機判定・既定 ON 化 | 各施策の判定 issue 側。結線後に本キットを再実行する |
+
+## 7. 検証（作業ホストで実施したもの）
+
+- `python3 aggregate.py --self-test`（RULE.txt の条項ごとの表駆動。判定 1〜4・専有ゲート〈GB10 前提条件／M4 Max record_only〉・終了コード・計測条件・入力の厳格性の各条項について、その条項だけを破った入力が想定した理由で拒否されること、正常系の集計 JSON・派生 JSONL・sha256 の整合）。
+- `python3 scoreboard/gen_2120.py --self-test`（前比・TSV の B→C 比が集計 JSON の `bc_med` と一致し採用行同士の比にならないこと、sha256 不一致・腕／機体の取り違え・非 formal・Python FW 以外の行・`--m4-prev` 指定で停止すること、M4 Max の不通過 run の併記、`--legacy-1988` の HTML・標準出力が `gen_1988.py` と byte 同一）。
+- `switches.sh` を HEAD で実行し 8 定数・3 環境変数がすべて解決（`--allow-missing` は腕 B 用）。
+- x86_64＋RTX 3060 で `SMOKE=1 orchestrate_gb10.sh`（3 腕ビルド〈腕 A は registry `fandhe-ai v0.9.0`・B／C は path 解決を `cargo tree` で確認〉・`Cargo.lock` sha256 前後一致・CPU gemm N=256 の 3 腕 checksum `237.546660` 一致）。この作業ホストは CUDA toolkit（NVRTC）非搭載のため CUDA セルは `skipped.log` に記録され失敗扱いで正しく分離された（結果は判定に使わず未収録）。CUDA・Metal の実行経路そのものは実機セッションでの初回実測時に確認する。
+
+- （追記・PR #2466 レビュー）`bash orchestrate_selftest.sh`（一時 git リポジトリで、`.rev-stamp` と HEAD の不一致・古い stamp・腕 B の規定 commit 不一致・追跡ファイルの変更／削除・ステージ済み追加・未追跡ファイル・assume-unchanged／skip-worktree・git 作業ツリーでない／ルートでない・docs/ 外の `LOGD` で停止し、ルートの `.rev-stamp`・docs/ 配下の `LOGD` の未追跡ファイル・submodule の差分は許すこと。`orchestrate.sh` 本体が照合失敗時に cargo・`switches.sh` の前に停止すること）。`aggregate.py --self-test` に派生値の有限性（同一 run 内比の inf／0・1/median_s と gflops の inf・gflops の負値）と出力の原子性（生成途中・確定途中の例外で部分出力・前回出力が残らない）・env_info の出典照合キーのケースを、`gen_2120.py --self-test` に表示値の inf・TSV 確定途中の例外・出力先＝入力のケースを追加した。
+- （追記・PR #2466 レビュー）作業ホストで本リポジトリの clone 2 つ（腕 C 相当に本変更を載せた一時コミット・腕 B は 65035979）を用意し、cargo・rustc・計測バイナリをスタブにした `SMOKE=1 orchestrate_gb10.sh`（`LOGD` はツリーの docs/ 配下・相対パス指定）で、照合を通過して完了記録に `rev_B_head`・`rev_C_head`・`tree_*_clean`・`bin_sha256` が書かれること、計測中に追跡ファイルを変更すると全 run 後の再照合で停止し完了記録を書かないこと、HEAD を進めた古い stamp で計測前に停止することを確認した（実ビルド・実計測は行っていない）。
+
+## 8. 変更していないもの
+
+tolerance 4 定数・判定式・`ParityBaseline`／`BASELINES`・`Cargo.toml`／`Cargo.lock`・ガードレール閾値・`docs/spec`・
+承認ピン（`fandhe-ai =0.9.0`・`candle-core =0.11.0`・`burn =0.21.0`）・`SME_PRODUCTION_ENABLED`／`GB10_AFFINITY_ENABLED` の既定値・
+既存 REJECT／undetermined 実験（再実行なし）。新規依存・新規 `unsafe`・facade 公開面の拡張はない。
