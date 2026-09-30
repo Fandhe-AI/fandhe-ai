@@ -1884,12 +1884,10 @@ impl DeviceParamStore {
             )
         })?;
 
-        // 決定 3（設計文書）: 入力側の同期点は upload 1 回のみ
-        // （`upload_into` は使わない。Metal の `upload_into` は
-        // synchronize を挟むため「チェーン全体で同期 1 回」の契約に
-        // 反する）。
-        let mut current = mem.upload(input)?;
-
+        // 全層の weight／bias ビューと活性化を先に解決する（既存の
+        // per-layer 検査〈`checked_resident_buffer`・bias shape〉を
+        // capture 経路〈下記〉と共有するため。エラーの型は従来と同じ）。
+        let mut resolved = Vec::with_capacity(steps.len());
         for (weight, bias, act) in steps {
             let w_buf = self.checked_resident_buffer(weight.store_id, weight.slot)?;
             let b_buf = match bias {
@@ -1906,6 +1904,31 @@ impl DeviceParamStore {
                     },
                 ));
             }
+            resolved.push((w_buf, b_buf, *act));
+        }
+
+        // イシュー #2115: バックエンドが推論チェーンの一括再生機構（CUDA
+        // Graph capture。opt-in・既定 OFF）を提供する場合はここで層ループ
+        // ごと置き換える。`Ok(None)` は「不適用」で既存経路（下記）へ
+        // 進む（`Unsupported` ではない。tape 経路への全体フォールバックと
+        // 区別する契約は `BackendOps::linear_chain_forward_captured` doc）。
+        // 同期点は機構側が入力 1・出力 1 を守る（決定 3）。`Err` は実際の
+        // driver 失敗のみで、そのまま伝播する。
+        if let Some(result) = tape.ops().linear_chain_forward_captured(input, &resolved)? {
+            if self.failure_token.is_set() {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(BackendError::StorePoisoned);
+            }
+            return Ok(result);
+        }
+
+        // 決定 3（設計文書）: 入力側の同期点は upload 1 回のみ
+        // （`upload_into` は使わない。Metal の `upload_into` は
+        // synchronize を挟むため「チェーン全体で同期 1 回」の契約に
+        // 反する）。
+        let mut current = mem.upload(input)?;
+
+        for (w_buf, b_buf, act) in resolved {
             // 決定 7（設計文書）: `Unsupported` はここで即座に伝播し、
             // 呼び出し元（`Sequential::predict_resident`）が全体
             // フォールバックする。本メソッドは `self` の可変状態を
@@ -1915,7 +1938,7 @@ impl DeviceParamStore {
                 &current,
                 w_buf,
                 b_buf,
-                *act,
+                act,
                 &self.failure_token,
             )?;
         }
@@ -4079,6 +4102,20 @@ mod tests {
         /// `chain_capable` と併用し「チェーンの各ステップは成功する
         /// が最終 download が落ちる」を模す）。
         download_fails: bool,
+        /// [`BackendOps::linear_chain_forward_captured`] の挙動（イシュー
+        /// #2115）。`Off`（既定）はトレイト既定と同じ `Ok(None)`。
+        chain_captured: ChainCapturedMode,
+    }
+
+    /// [`MockDeviceOps`] の `linear_chain_forward_captured` の挙動選択。
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ChainCapturedMode {
+        /// `Ok(None)`（不適用。既存の層ループへ進む）。
+        Off,
+        /// ホストで計算して `Ok(Some(..))`（一括再生機構の成功を模す）。
+        Success,
+        /// `Err(KernelLaunchFailed)`（driver 失敗を模す）。
+        Failure,
     }
 
     impl MockDeviceOps {
@@ -4098,6 +4135,7 @@ mod tests {
                 chain_capable: false,
                 set_token_then_succeed: false,
                 download_fails: false,
+                chain_captured: ChainCapturedMode::Off,
             }
         }
 
@@ -4117,6 +4155,7 @@ mod tests {
                 chain_capable: false,
                 set_token_then_succeed: false,
                 download_fails: false,
+                chain_captured: ChainCapturedMode::Off,
             }
         }
 
@@ -4140,6 +4179,7 @@ mod tests {
                 chain_capable: false,
                 set_token_then_succeed: false,
                 download_fails: false,
+                chain_captured: ChainCapturedMode::Off,
             }
         }
 
@@ -4176,6 +4216,7 @@ mod tests {
                 chain_capable: false,
                 set_token_then_succeed: false,
                 download_fails: false,
+                chain_captured: ChainCapturedMode::Off,
             }
         }
 
@@ -4216,6 +4257,17 @@ mod tests {
             }
         }
 
+        /// `linear_chain_forward_captured` を `mode` の挙動にしたモック
+        /// （イシュー #2115）。`chain_capable` は `false` のままにして、
+        /// 層ループ（`linear_forward_device`）へ落ちれば `Unsupported`
+        /// で顕在化するようにする。
+        fn chain_captured(mode: ChainCapturedMode) -> Self {
+            Self {
+                chain_captured: mode,
+                ..Self::new()
+            }
+        }
+
         /// `download()` が常に `Err` を返すモック（決定 4 ケース 2 の
         /// 再現。`chain_capable` も `true` にして「チェーンの各ステップ
         /// 自体は成功するが最終 download が落ちる」を模す。
@@ -4225,6 +4277,7 @@ mod tests {
             Self {
                 chain_capable: true,
                 download_fails: true,
+                chain_captured: ChainCapturedMode::Off,
                 ..Self::new()
             }
         }
@@ -4563,6 +4616,39 @@ mod tests {
                 data: RefCell::new(contiguous.as_slice().unwrap_or(&[]).to_vec()),
             });
             Ok(DeviceBuffer::new(Device::Cpu, y.shape().to_vec(), handle))
+        }
+
+        /// イシュー #2115: `chain_captured` の挙動に従う。`Success` は
+        /// upload／download を一切経由せず（`upload_count`／`download_count`
+        /// を増やさない）ホストで層を畳み込んだ結果を返す。
+        fn linear_chain_forward_captured(
+            &self,
+            input: &Tensor<f32>,
+            layers: &[(
+                DeviceBufferView<'_>,
+                Option<DeviceBufferView<'_>>,
+                Activation,
+            )],
+        ) -> Result<Option<Tensor<f32>>, BackendError> {
+            match self.chain_captured {
+                ChainCapturedMode::Off => Ok(None),
+                ChainCapturedMode::Failure => Err(BackendError::KernelLaunchFailed(
+                    "MockDeviceOps: simulated chain capture failure".into(),
+                )),
+                ChainCapturedMode::Success => {
+                    let mut y = input.clone();
+                    for (w, b, act) in layers {
+                        y = crate::eval::matmul(&y, &Self::read_resident(*w)?);
+                        if let Some(b) = b {
+                            y = crate::eval::add(&y, &Self::read_resident(*b)?);
+                        }
+                        if *act == Activation::Relu {
+                            y = crate::eval::relu(&y);
+                        }
+                    }
+                    Ok(Some(y.contiguous()))
+                }
+            }
         }
 
         /// `set_token_then_succeed == true` の場合、計算自体は成功させた
@@ -6948,6 +7034,84 @@ mod tests {
 
         assert!(matches!(result, Err(BackendError::StorePoisoned)));
         assert!(store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// イシュー #2115: `linear_chain_forward_captured` が `Some` を返す場合、
+    /// 層ループ・`upload`・`download` を経由せずその結果をそのまま返す
+    /// （`chain_capable == false` のモックで層ループへ落ちれば
+    /// `Unsupported` になるため、成功自体が層ループ非経由の証拠）。
+    #[test]
+    fn predict_device_chain_uses_captured_result_without_layer_loop() {
+        let ops = MockDeviceOps::chain_captured(ChainCapturedMode::Success);
+        let upload = ops.upload_count.clone();
+        let download = ops.download_counter();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w1 = tensor(vec![1.0, -2.0, 0.5, 1.0], &[2, 2]);
+        let b1 = tensor(vec![0.1, -0.2], &[2]);
+        let w2 = tensor(vec![2.0, 0.0, 0.0, 2.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w1, &b1, &w2]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![1.0, -3.0], &[1, 2]);
+        let steps = vec![
+            (&leaves[0], Some(&leaves[1]), Activation::Relu),
+            (&leaves[2], None, Activation::None),
+        ];
+        // ストア構築・leaf 発行が行う upload／download は除外して差分で見る。
+        let upload_before = upload.load(Ordering::SeqCst);
+        let download_before = download.load(Ordering::SeqCst);
+
+        let result = store.predict_device_chain(&tape, &input, &steps).unwrap();
+
+        // w1 は行優先 [[1,-2],[0.5,1]]: [1*1+(-3)*0.5, 1*(-2)+(-3)*1] =
+        // [-0.5, -5] + b1 = [-0.4, -5.2] → relu → [0, 0] → @ w2 = [0, 0]。
+        assert_eq!(result.shape(), &[1, 2]);
+        assert_eq!(result.as_slice().unwrap(), &[0.0, 0.0]);
+        assert_eq!(upload.load(Ordering::SeqCst), upload_before);
+        assert_eq!(download.load(Ordering::SeqCst), download_before);
+        assert!(!store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// イシュー #2115: `linear_chain_forward_captured` の `Err`（実際の
+    /// driver 失敗）は poison せずそのまま伝播し、`upload` も行わない。
+    #[test]
+    fn predict_device_chain_captured_err_propagates_without_poisoning() {
+        let ops = MockDeviceOps::chain_captured(ChainCapturedMode::Failure);
+        let upload = ops.upload_count.clone();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        let upload_before = upload.load(Ordering::SeqCst);
+
+        let result = store.predict_device_chain(&tape, &input, &steps);
+
+        assert!(matches!(result, Err(BackendError::KernelLaunchFailed(_))));
+        assert!(!store.poisoned.load(Ordering::SeqCst));
+        assert_eq!(upload.load(Ordering::SeqCst), upload_before);
+    }
+
+    /// イシュー #2115: `Ok(None)`（不適用）では既存の upload → 層ループ →
+    /// download 経路へ進み、`Unsupported` にならない（tape 経路への全体
+    /// フォールバックと区別する契約）。
+    #[test]
+    fn predict_device_chain_captured_none_falls_through_to_existing_chain() {
+        let mut ops = MockDeviceOps::chain_capable();
+        ops.chain_captured = ChainCapturedMode::Off;
+        let upload = ops.upload_count.clone();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        let upload_before = upload.load(Ordering::SeqCst);
+
+        let result = store.predict_device_chain(&tape, &input, &steps).unwrap();
+
+        assert_eq!(result.as_slice().unwrap(), &[2.0, 3.0]);
+        assert_eq!(upload.load(Ordering::SeqCst), upload_before + 1);
     }
 
     /// 別の `Tape` で発行した [`ResidentLeaf`] を渡した場合に

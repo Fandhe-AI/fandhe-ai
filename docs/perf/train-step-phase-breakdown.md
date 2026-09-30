@@ -1533,14 +1533,17 @@ param_readout（16.8%・87.0 µs）。フェーズ和／合計: 102.8%（差分�
   の内訳切り分け（新規。§17.4 第 3 項〈cpu reuse の fresh 比後退〉
   と近縁だが GB10 では step_total は reuse が速く、更新区間単独の
   絶対値が論点）。`docs/perf/train-resident-grad-device-update.md`
-  （#1212）が近縁の既存記録
+  （#1212）が近縁の既存記録。**診断基盤は #2106 で追加済み**
+  （`docs/perf/cpu-reuse-device-update.md`。実機 5 run 実測は未実施）
 - cuda fresh の `param_readout`＋`host_sgd`＋`apply_params`
   （141.7 µs・27.4%）削減余地の確認（新規。reuse 経路では `device_update` 8.0 µs に
   置き換わっている区間で、fresh 経路にのみ残る D2H 読み出しとホスト
-  SGD の固定費）
+  SGD の固定費）。**診断基盤は #2116 で追加済み**（`docs/perf/cuda-train-forward-resident-diagnosis.md`。
+  実機 5 run 実測は未実施）
 - cuda reuse で forward_resident（155.9 µs）が backward と拮抗する
   点の内訳確認（新規。forward 側の encode／同期回数の診断カウンタ。
-  `docs/backend-cuda-async-execution-design.md` が同期契約の既存記録）
+  `docs/backend-cuda-async-execution-design.md` が同期契約の既存記録）。**診断基盤は #2116 で追加済み**（`docs/perf/cuda-train-forward-resident-diagnosis.md`。
+  実機 5 run 実測は未実施）
 - cpu fresh のフェーズ和／合計 74.2% の残差を iteration 単位で直接
   集計する計装（§17.3 末尾の「未実施」と同じ。Mac 分では列挙して
   いなかったため新規に列挙）

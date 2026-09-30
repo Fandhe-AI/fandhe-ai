@@ -1,0 +1,18 @@
+# 事前宣言（実測前に固定。2026-09-30。イシュー #2113。結果が出た後に緩めない）
+- 対象: Metal train forward の encode-only 合流（crates/backend-metal/src/train_forward_encode_runtime.rs の TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED のみ true にした計測専用 worktree）の before/after A/B。before = main の crates/facade、after = 同一コミットで上記定数だけを反転（main へはコミットしない）。
+- 手順: scripts/bench/framework-compare/run_ab_train_forward_encode_metal.sh <label>（AB_DEVICE=metal|cpu|cuda）。train fresh／reuse（size=64）を 5 round・プロセス独立起動・round 単位で起動順反転。infer は Sequential::predict_resident が predict_device_chain を優先し本オーバーライドへ到達しないため record_only（判定に使わない）。
+- 前提ゲート（M4 Max・after 腕。1 件でも不一致なら FAIL とし性能判定へ進まない）:
+  (a) backend-metal の train_forward_encode_only_parity と facade の metal_train_forward_encode_only_bit_identity がすべて pass（to_bits 完全一致。tolerance は使わない）。
+  (b) カウンタ（mnist_scale_train_reuse_metal_batch_counters*）が ON で 11/6/6、OFF で 11/7/7 を再現し、mnist_scale_train_reuse_metal_backward_dinput_phase は両方で 5/3/3。
+  (c) 既存 #[ignore] 群（command_batching・command_batching_bench・gemm_resident_parity・linear_forward_device_parity・mnist_scale_train_reuse_bench・device_param_store_backend_parity）が非後退。main で既に FAIL のものは before 腕でも FAIL することを示して区別する。
+- 判定セル: M4 Max = metal × train {fresh, reuse}（主対象は reuse）。GB10 = cpu・cuda × train {fresh, reuse}（Metal コードは Linux でコンパイルされないため効果なしの対照＝A/A 相当。判定条件は M4 Max と同一で緩和しない）。--phases の forward_resident・device_update は record_only。
+- 判定（機体ごと）: セルごとに 5 round 中央値 ratio（after/before）<=1.00 かつ checksum 完全一致（compare_gemm_ab.py --require-checksum-exact）。checksum 不一致は FAIL として停止。
+- 総合（3 値）:
+  ADOPT = 両機体とも正式系列で前提ゲートが成立し、全判定セルが ratio<=1.00 かつ checksum 完全一致で、M4 Max の少なくとも 1 セル（train reuse を想定）が 5/5 round 一貫で改善（全 round ratio<1.00）。
+  REJECT = いずれかの機体で、あるセルが 5/5 round 一貫して後退（全 round ratio>1.00）。
+  undetermined = 上記以外。
+- 負荷: 各 round 開始前に load1 < 8.0 を最大 30 分待つ。5/5 round 通過のみ正式系列。不通過・取得不能を含む場合は record_only（参考扱い）と明記する。
+- run の差し替え・追加起動・セル除外・事後の緩和はしない（同一 label の既存 JSONL があればスクリプトが fail-closed で停止する）。再実行は別 label で行い旧系列も残す。
+- ADOPT の場合のみ、後続 PR で TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED を true に切り替え、既存カウンタテストの期待値を 11/6/6 へ移し、前後比較を収録する。本 PR では既定値を変えない。
+- 収録物のホスト名・ユーザー名・絶対パスは <home> 等へマスクしてから収録する。
+- 重複確認: #1691（MSE encode-only・REJECT）・#1563（backward の d_input 合流）・#1044（epilogue 融合）とは対象の同期境界が異なり再実行にあたらない。tolerance・baseline・Cargo.toml・ガードレール閾値・docs/spec は変更しない。

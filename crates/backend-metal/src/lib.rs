@@ -253,6 +253,17 @@
 // 判断で `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）
 // でも単体テストが回るようにする。
 pub(crate) mod batch_state;
+// イシュー #2114: Metal デバイス存在確認キャッシュ（opt-in・既定 OFF）と infer GPU 起動固定費の
+// 診断カウンタ。objc2 に触れない純 Rust のため `cfg(target_os = "macos")` を付けず、Linux CI でも
+// 状態機械の単体テストが回る（`batch_state` と同じ判断。設計は `fixed_cost_diag.rs` 冒頭）。
+// `#[doc(hidden)] pub` は facade（`resolve_ops`）との crate 間結線用の内部面で、facade からは再公開しない。
+#[doc(hidden)]
+pub mod fixed_cost_diag;
+// `buffer.rs::MetalBuffer::read_to_vec` の readback 宛先ポリシー（イシュー
+// #2112。既定 OFF・env `FANDHE_AI_METAL_READBACK_DEST` で opt-in）。`objc2`
+// 系 FFI に触れない純ロジックのため `batch_state` と同じ判断で cfg を付けず、
+// Linux でも単体テストが回る。
+pub(crate) mod readback_policy;
 // `context.rs::MetalContext::synchronize`／`pool.rs::PooledMetalHandle::
 // Drop`（イシュー #1021）が「保留中のプール返却列」へ push・合流する
 // 判定ロジック（`objc2` 系 FFI に触れない）を切り出したモジュール。
@@ -314,6 +325,11 @@ pub mod gemm;
 // 参照）が `kernel_gpu`（GPUStartTime/GPUEndTime）変種の実体。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_reuse_phase_diag_tests;
+// イシュー #2114: infer（784→256→ReLU→10・batch 64）の wall 時間と GPU busy（GPUStart/EndTime）の
+// 差から GPU 起動・同期の固定費を record-only で診断する。`synchronize_with_gpu_timestamps` は
+// 既定ビルドで `pub(crate)` のため crate 内部の兄弟モジュールとして置く（`gemm_reuse_phase_diag_tests` と同型）。
+#[cfg(all(test, target_os = "macos"))]
+mod infer_fixed_cost_diag_tests;
 // E2 特殊化版（`spec_source`／`gemm::MetalGemm::new_with_source_
 // specialization`。イシュー #1288）の `MTLComputePipelineState` 反射値・
 // N=1024/2048/4096 純カーネル時間（GPU タイムスタンプ）を base（function
@@ -372,6 +388,16 @@ mod gemm_coop_load_diag_tests;
 // `shaders/gemm.metal`）は無変更。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_smem_swizzle_diag_tests;
+// candle／MLX steel 解析差分由来の GEMM 候補（`UNROLL_LOAD_ENABLED`・candle 相当
+// タイル選択との組合せ。イシュー #2110。`docs/perf/metal-gemm-steel-candidates.md`）
+// の bit 一致・CPU 参照 parity の自己検証と kernel_gpu 5 run A/B ハーネス。
+// `MetalGemm::new_with_steel_candidate`（`#[cfg(test)] pub(crate)`）・
+// `tile::STEEL_ARMS`（`#[cfg(test)]`）・`gemm_reuse_phase_diag_tests` の
+// `pub(crate)` 面へ到達するため、`gemm_smem_swizzle_diag_tests` と同じ理由で
+// クレートルートの兄弟モジュールとして配置し、同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。実機実測・結線判断は #2111。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_steel_candidate_diag_tests;
 // E6 タイルクラス分割（`tile::TileClassMode`。イシュー #1327・PR #1388で
 // opt-in 機構を追加・bit 一致を自己検証済み）の N=1024/2048/4096 純カー
 // ネル時間（GPU タイムスタンプ）を候補 0/4/5/8（`tile::CANDIDATES`）で
@@ -725,6 +751,10 @@ pub(crate) mod spec_source;
 // 環境・CI）でも `AtomicBool` の単体テストが回るようにしてある。
 pub mod split_k_runtime;
 pub mod tile;
+// Metal train forward の encode-only 合流 opt-in（イシュー #2113）。
+// `split_k_runtime` と同じ設計判断で cfg を付けず Linux でも既定値の
+// ドリフト検出テストを回す。
+pub(crate) mod train_forward_encode_runtime;
 // `TypedOps<half::f16>` 実装（イシュー #1705・親 #1651・
 // `docs/backend-dtype-dispatch-design.md` §14）。`ops::MetalBackendOps`
 // （`cfg(target_os = "macos")` 限定）へ `impl` するため同じ cfg を付ける。
@@ -843,4 +873,18 @@ pub fn __diagnostic_batch_counters_snapshot() -> Result<context::BatchCountersSn
 {
     let ctx = context_cache::cached_context()?;
     Ok(ctx.diagnostic_batch_counters())
+}
+
+/// テスト・A/B 診断専用: train forward の encode-only 合流（イシュー #2113。
+/// 既定 OFF）を切り替える。`#[doc(hidden)]` で `facade` の公開面には含めない
+/// （`docs/compat-api-scope.md` §0）。プロセスワイドのため並列テストは直列化する。
+#[doc(hidden)]
+pub fn __set_train_forward_encode_only_enabled(enabled: bool) {
+    train_forward_encode_runtime::set_train_forward_encode_only_enabled(enabled);
+}
+
+/// [`__set_train_forward_encode_only_enabled`] の現在値 getter（テスト・診断専用）。
+#[doc(hidden)]
+pub fn __train_forward_encode_only_enabled() -> bool {
+    train_forward_encode_runtime::train_forward_encode_only_enabled()
 }

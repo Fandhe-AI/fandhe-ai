@@ -113,6 +113,12 @@ pub(crate) struct GemmGateConstants {
     /// crate::tile::SmemSwizzle` から渡す。`gemm_simdgroup_tiled_f16`／
     /// `_hfrag`／`_te` は参照しない（他ゲートと同じ扱い）。
     pub(crate) coop_smem_swizzle: u32,
+    /// 協調ロード `vi` ループの固定反復数化 + full unroll 軸（イシュー
+    /// #2110。`UNROLL_LOAD_ENABLED`。index 18）。呼び出し元
+    /// [`crate::gemm::MetalGemm::pipeline_for_tile`] がインスタンスの
+    /// `unroll_load_enabled` から渡し、f16／hfrag／split-K パス 1 用の
+    /// 構築は常に `false`（no-op 契約）。
+    pub(crate) unroll_load_enabled: bool,
 }
 
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
@@ -256,6 +262,7 @@ pub(crate) fn make_pipeline_with_constants(
         tile_class,
         split_k_enabled,
         coop_smem_swizzle,
+        unroll_load_enabled,
     } = gates;
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -447,6 +454,16 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::UInt,
             17,
         );
+        // 協調ロード unroll 軸（イシュー #2110）。index は COOP_SMEM_SWIZZLE
+        // （index 17）の直後の 18（`shaders/gemm.metal` 冒頭
+        // UNROLL_LOAD_ENABLED 宣言と 1:1 対応。`tests/shader_source_evidence.rs`
+        // が固定）。f16／hfrag／te は参照しない no-op。
+        let unroll_load = unroll_load_enabled;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&unroll_load).cast(),
+            MTLDataType::Bool,
+            18,
+        );
     }
 
     let func = library
@@ -503,6 +520,7 @@ pub(crate) fn make_pipeline_source_specialized(
         tile_class,
         split_k_enabled,
         coop_smem_swizzle,
+        unroll_load_enabled,
     } = gates;
     let params = crate::spec_source::SpecializationParams {
         // イシュー #1298/#1327/#1474/#1970: 協調ロード軸（`tgp_pad_elems`/
@@ -517,6 +535,7 @@ pub(crate) fn make_pipeline_source_specialized(
         tile_class,
         split_k_enabled,
         coop_smem_swizzle,
+        unroll_load_enabled,
         ..crate::spec_source::SpecializationParams::new(
             cfg,
             swizzle_enabled,

@@ -592,6 +592,20 @@ class SizesLargeTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("欠測セル", out)
 
+    def test_metal_readback_accepts_1024_4096_only(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(1024, 4096), device="metal")
+        code, out, _ = self._run(
+            before, after, ["--modes", "reuse", "--sizes", "readback"]
+        )
+        self.assertEqual(code, 0)
+
+    def test_metal_large_missing_2048_exit_three(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(1024, 4096), device="metal")
+        code, _, _ = self._run(
+            before, after, ["--modes", "reuse", "--sizes", "large"]
+        )
+        self.assertEqual(code, 3)
+
     def test_cpu_full_default_still_rejects_4096(self):
         before, after = _all_cells_rows(0.002, 0.0019, sizes=self._LARGE, device="cpu")
         code, _, _ = self._run(before, after, ["--device", "cpu"])
@@ -941,7 +955,7 @@ class TaskTrainTest(unittest.TestCase):
             os.unlink(after_phases_path)
 
 
-def _rec_infer(median_s, checksum=-1.5, mode="reuse", version="0.8.0", warmup=5, iters=15):
+def _rec_infer(median_s, checksum=-1.5, mode="reuse", version="0.8.0", warmup=5, iters=15, size=64):
     """`bench-fandhe --task infer` 行の複製（イシュー #1689）。`_rec_train`
     と同様に `parity` フィールドを持たない（`Record.parity: Option<
     ParityStats>`。`run_infer`／`run_infer_reuse` は `parity: None` を
@@ -952,7 +966,7 @@ def _rec_infer(median_s, checksum=-1.5, mode="reuse", version="0.8.0", warmup=5,
         "version": version,
         "task": "infer",
         "device": "cuda",
-        "size": 64,
+        "size": size,
         "median_s": median_s,
         "q1_s": median_s,
         "q3_s": median_s,
@@ -1357,6 +1371,69 @@ class PerRunTest(unittest.TestCase):
         # 終了コードは 3（any_bad）になる。列数の検証が本テストの主眼で
         # あり終了コード自体は本題ではないため存在確認のみ行う。
         self.assertEqual(code, 3)
+
+
+class InferBatchesTest(unittest.TestCase):
+    """イシュー #2115: `--task infer --sizes infer-batches`（batch
+    64/1024/4096 × fresh/reuse の 6 セルを判定）。"""
+
+    _BATCHES = (64, 1024, 4096)
+
+    def _rows(self, before_median, after_median, batches=_BATCHES):
+        before, after = [], []
+        for size in batches:
+            for mode in _MODES:
+                for _ in range(5):
+                    before.append(_rec_infer(before_median, mode=mode, size=size))
+                    after.append(_rec_infer(after_median, mode=mode, size=size))
+        return before, after
+
+    def _run(self, before, after, extra):
+        bp = _write_jsonl(before)
+        ap = _write_jsonl(after)
+        try:
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", *extra, bp, ap])
+            return code, out.getvalue(), err.getvalue()
+        finally:
+            os.unlink(bp)
+            os.unlink(ap)
+
+    _ARGS = ["--task", "infer", "--device", "cuda", "--sizes", "infer-batches"]
+
+    def test_all_six_cells_non_regression(self):
+        before, after = self._rows(0.010, 0.0099)
+        code, out, _ = self._run(before, after, self._ARGS)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("非後退"), 6)
+        for size in self._BATCHES:
+            self.assertIn(f"{size}/reuse", out)
+
+    def test_missing_batch_cell_is_judged_bad(self):
+        before, after = self._rows(0.010, 0.0099, batches=(64, 1024))
+        code, out, _ = self._run(before, after, self._ARGS)
+        self.assertEqual(code, 3)
+        self.assertIn("欠測セル", out)
+
+    def test_regression_in_one_batch_fails(self):
+        b1, a1 = self._rows(0.010, 0.0099, batches=(64, 1024))
+        b2, a2 = self._rows(0.010, 0.020, batches=(4096,))
+        code, _, _ = self._run(b1 + b2, a1 + a2, self._ARGS)
+        self.assertEqual(code, 3)
+
+    def test_default_infer_still_rejects_large_batches(self):
+        before, after = self._rows(0.010, 0.0099, batches=(1024,))
+        code, _, _ = self._run(before, after, ["--task", "infer", "--device", "cuda"])
+        self.assertEqual(code, 2)
+
+    def test_infer_batches_is_rejected_for_non_infer_task(self):
+        before, after = self._rows(0.010, 0.0099, batches=(64,))
+        code, _, err = self._run(
+            before, after, ["--task", "train", "--device", "cuda", "--sizes", "infer-batches"]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("infer 専用", err)
 
 
 if __name__ == "__main__":

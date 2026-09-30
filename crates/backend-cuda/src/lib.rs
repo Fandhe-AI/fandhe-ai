@@ -381,6 +381,14 @@ mod gemm_reuse_phase_diag_tests;
 mod gemm_small_launch_cost_diag_tests;
 #[cfg(test)]
 mod init_cost_diag_tests;
+// イシュー #2116: CUDA train reuse の `forward_resident` 区間（層ごとの
+// `gemm_resident_rhs` 往復・未融合 relu・mse の H2D／確保／起動／同期 D2H）を
+// 層の種類別・batch 別に分解する診断テスト。`context_cache`・
+// `CudaBufferHandle`・`launch_tiled_bias_act_f32_resident`（いずれも非公開）へ
+// 到達する必要があるため `gemm_reuse_phase_diag_tests` と同じ理由で
+// クレートルートの兄弟モジュールとして配置する。本番コードは変更しない。
+#[cfg(test)]
+mod train_forward_resident_diag_tests;
 // イシュー #1436: 借用ビュー readout（#1335／#1336／#1337。#1438 で
 // bench-fandhe の既定経路化・旧計測専用 cargo feature は撤去済み）
 // 有効時の CUDA reuse N=1024/2048 後退（15.04 倍・1.20 倍）を、D2H
