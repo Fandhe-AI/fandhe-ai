@@ -17,6 +17,17 @@
 //!   本ファイルは (a) readback 内部のサブフェーズ分解、(b) 各試行に H2D・確保・
 //!   投入・カーネル待ちを含めた Σ(matmul 相当) の算出（Layer A `matmul` との
 //!   直接突合用）、(c) 腕単位のプロセス分離・μs・JSONL 出力を加える。
+//! - **順序契約（PR #2452 Codex P1）**: 直列腕（`kernel_wait` で事前同期してから
+//!   readback を計る 5 腕）は区間の内訳を見るための補助診断であり、本番
+//!   `memory::readback` の順序（カーネル起動後に同期せず、宛先確保・事前タッチ・
+//!   D2H 発行・同期の順）とは異なる。本番では CPU 側の宛先準備と GPU 側の
+//!   カーネル実行が重なり得るため、直列区間の和は Layer A `matmul` と帰属を
+//!   比べる基準にならない。帰属・share の判定には本番順序の 2 腕
+//!   （`prod_order_fresh`／`prod_order_reused`。事前同期なし）の壁時計差
+//!   （exposed cost）のみを使う。`prod_order_reused` は exposed cost を出す
+//!   計測対照であり、宛先再利用（`PretouchedReusedDest`）の修正施策の再評価では
+//!   ない（施策判断は #2107 のスコープ外）。重なりに隠れた費用は判定では検出
+//!   できず、直列腕との差として記録するに留まる。
 //! - 判定規則は `docs/perf/logs/cuda-gemm-readback-attribution-2107/RULE.txt`
 //!   （実測前に固定）が正。集計は同ディレクトリの `aggregate.py`、起動は
 //!   `orchestrate.sh` が担う。本ファイルは計測値の出力のみを担い、腕間の大小
@@ -68,11 +79,16 @@ use crate::memory::ReadbackSentinel;
 const WARMUP_TRIALS: usize = 20;
 const MEASURED_TRIALS: usize = 20;
 
-/// 全腕共通の前半 5 区間（`gemm_reuse_phase_diag_tests.rs` と同じ定義）。
+/// 直列腕の前半 5 区間（`gemm_reuse_phase_diag_tests.rs` と同じ定義）。
 const FRONT_PHASES: [&str; 5] = ["h2d_a", "h2d_b", "alloc_c", "launch_issue", "kernel_wait"];
 
+/// 本番順序腕の前半 4 区間。`kernel_wait`（事前同期）を持たない。カーネル完了待ちは
+/// 腕別 readback 区間の最後の同期に含まれる（本番 `memory::readback` と同じ順序）。
+const FRONT_PHASES_PROD_ORDER: [&str; 4] = ["h2d_a", "h2d_b", "alloc_c", "launch_issue"];
+
 /// readback 宛先確保方式の腕（1436 の `ReadoutArm` との対応はファイル冒頭参照）。
-/// `PretouchedFreshProduction` は 4 腕に数えない補助対照。
+/// `PretouchedFreshProduction`・`ProdOrderFresh`・`ProdOrderReused` は 4 腕に
+/// 数えない補助対照で、後ろ 2 つが本番順序（事前同期なし）の判定用腕。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
     CloneDtohLegacyToVec,
@@ -80,15 +96,21 @@ enum Arm {
     CloneDtohBorrowedDummyAllocFree,
     PretouchedFreshSplit,
     PretouchedFreshProduction,
+    /// 本番順序: 起動後に同期せず本番 `readback`（新規確保・事前タッチ・D2H・同期）。
+    ProdOrderFresh,
+    /// 本番順序: 起動後に同期せず、確保済み・タッチ済みの宛先へ D2H・同期。
+    ProdOrderReused,
 }
 
 impl Arm {
-    const ALL: [Arm; 5] = [
+    const ALL: [Arm; 7] = [
         Arm::CloneDtohLegacyToVec,
         Arm::CloneDtohBorrowedKeepAlive,
         Arm::CloneDtohBorrowedDummyAllocFree,
         Arm::PretouchedFreshSplit,
         Arm::PretouchedFreshProduction,
+        Arm::ProdOrderFresh,
+        Arm::ProdOrderReused,
     ];
 
     /// JSONL の `arm` 値（`orchestrate.sh`／`aggregate.py`／RULE.txt と共通）。
@@ -99,6 +121,22 @@ impl Arm {
             Arm::CloneDtohBorrowedDummyAllocFree => "clone_dtoh_borrowed_dummy_alloc_free",
             Arm::PretouchedFreshSplit => "pretouched_fresh_split",
             Arm::PretouchedFreshProduction => "pretouched_fresh_production",
+            Arm::ProdOrderFresh => "prod_order_fresh",
+            Arm::ProdOrderReused => "prod_order_reused",
+        }
+    }
+
+    /// 起動直後にカーネル完了を同期で待つ直列腕か（`false` は本番順序腕）。
+    fn serialized(self) -> bool {
+        !matches!(self, Arm::ProdOrderFresh | Arm::ProdOrderReused)
+    }
+
+    /// 腕別の前半区間名（計測順）。
+    fn front_phases(self) -> &'static [&'static str] {
+        if self.serialized() {
+            &FRONT_PHASES
+        } else {
+            &FRONT_PHASES_PROD_ORDER
         }
     }
 
@@ -109,7 +147,8 @@ impl Arm {
             | Arm::CloneDtohBorrowedKeepAlive
             | Arm::CloneDtohBorrowedDummyAllocFree => &["clone_dtoh", "d2h_sync"],
             Arm::PretouchedFreshSplit => &["dest_alloc", "pretouch_fill", "d2h_issue", "d2h_sync"],
-            Arm::PretouchedFreshProduction => &["readback_total"],
+            Arm::PretouchedFreshProduction | Arm::ProdOrderFresh => &["readback_total"],
+            Arm::ProdOrderReused => &["d2h_issue", "d2h_sync"],
         }
     }
 }
@@ -175,14 +214,18 @@ fn checksum_f64(v: &[f32]) -> f64 {
 
 /// 1 試行分の計測結果（秒）。
 struct TrialSample {
-    front: [f64; 5],
+    front: Vec<f64>,
     readback_parts: Vec<f64>,
     host_read: f64,
     checksum: f64,
 }
 
-/// 1 試行を計測する。前半 5 区間は `gemm_reuse_phase_diag_tests.rs::
+/// 1 試行を計測する。前半は `gemm_reuse_phase_diag_tests.rs::
 /// measure_one_phase_trial` と同じ構成（H2D は試行ごとに行う）で、後半は腕別。
+/// 直列腕はカーネル起動直後に同期してから readback を計る（`kernel_wait` 区間あり）。
+/// 本番順序腕は同期せず readback へ進み、最後の同期でカーネル完了を待つ
+/// （区間は連続しており、和が本番 `matmul` 相当の壁時計になる）。
+/// `reused_dest` は `ProdOrderReused` 腕のみ使う事前確保・事前タッチ済みの宛先。
 #[allow(clippy::too_many_arguments)]
 fn measure_one_trial(
     device: &crate::device::CudaDevice,
@@ -193,6 +236,7 @@ fn measure_one_trial(
     n: u32,
     arm: Arm,
     keep_alive: &mut Vec<Vec<f32>>,
+    reused_dest: &mut Vec<f32>,
 ) -> TrialSample {
     let stream = device.stream().clone();
     let len = (n as usize) * (n as usize);
@@ -224,11 +268,14 @@ fn measure_one_trial(
     .expect("launch_tiled_f32_pooled (issue only) must succeed");
     let launch_issue = t.elapsed().as_secs_f64();
 
-    let t = Instant::now();
-    stream
-        .synchronize()
-        .expect("stream synchronize (kernel completion wait) must succeed");
-    let kernel_wait = t.elapsed().as_secs_f64();
+    let mut front = vec![h2d_a, h2d_b, alloc_c, launch_issue];
+    if arm.serialized() {
+        let t = Instant::now();
+        stream
+            .synchronize()
+            .expect("stream synchronize (kernel completion wait) must succeed");
+        front.push(t.elapsed().as_secs_f64());
+    }
 
     let (readback_parts, host_read, checksum) = match arm {
         Arm::CloneDtohLegacyToVec
@@ -299,7 +346,7 @@ fn measure_one_trial(
                 checksum,
             )
         }
-        Arm::PretouchedFreshProduction => {
+        Arm::PretouchedFreshProduction | Arm::ProdOrderFresh => {
             let t = Instant::now();
             let dest = crate::memory::readback::<f32, _>(&stream, &c_dev.as_view())
                 .expect("production readback must succeed");
@@ -311,11 +358,29 @@ fn measure_one_trial(
             keep_alive.push(dest);
             (vec![readback_total], host_read, checksum)
         }
+        Arm::ProdOrderReused => {
+            let t = Instant::now();
+            stream
+                .memcpy_dtoh(&c_dev.as_view(), reused_dest)
+                .expect("D2H download into reused pretouched dest must succeed");
+            let d2h_issue = t.elapsed().as_secs_f64();
+
+            let t = Instant::now();
+            stream
+                .synchronize()
+                .expect("stream synchronize after D2H must succeed");
+            let d2h_sync = t.elapsed().as_secs_f64();
+
+            let t = Instant::now();
+            let checksum = checksum_f64(reused_dest);
+            let host_read = t.elapsed().as_secs_f64();
+            (vec![d2h_issue, d2h_sync], host_read, checksum)
+        }
     };
 
     drop(c_dev);
     TrialSample {
-        front: [h2d_a, h2d_b, alloc_c, launch_issue, kernel_wait],
+        front,
         readback_parts,
         host_read,
         checksum,
@@ -371,7 +436,7 @@ fn build_jsonl(
     checksum: f64,
 ) -> String {
     let mut phases: Vec<String> = Vec::new();
-    for (name, s) in FRONT_PHASES.iter().zip(front) {
+    for (name, s) in arm.front_phases().iter().zip(front) {
         phases.push(format!("\"{name}\":{}", stat_json(s)));
     }
     for (name, s) in arm.readback_parts().iter().zip(parts) {
@@ -383,12 +448,13 @@ fn build_jsonl(
     format!(
         "{{\"issue\":2107,\"n\":{n},\"arm\":\"{}\",\"warmup\":{WARMUP_TRIALS},\"measured\":{MEASURED_TRIALS},\
 \"phases\":{{{}}},\"checksum\":{checksum:.6},\"checksum_bits\":\"{:016x}\",\
-\"sum_matmul_equiv_us\":{:.3},\"sum_readback_us\":{:.3}}}",
+\"sum_matmul_equiv_us\":{:.3},\"sum_readback_us\":{:.3},\"serialized\":{}}}",
         arm.label(),
         phases.join(","),
         checksum.to_bits(),
         sum_front + sum_readback,
         sum_readback,
+        arm.serialized(),
     )
 }
 
@@ -438,6 +504,13 @@ fn run_size_arm(n: usize, arm: Arm) {
     );
 
     let mut keep_alive: Vec<Vec<f32>> = Vec::with_capacity(WARMUP_TRIALS + MEASURED_TRIALS);
+    // `ProdOrderReused` 腕のみ、確保・事前タッチ（非ゼロ sentinel の全要素書き込み）を
+    // 計測ループの外で 1 回だけ行い、以後の試行はこの宛先へ上書きする。
+    let mut reused_dest: Vec<f32> = if arm == Arm::ProdOrderReused {
+        vec![<f32 as ReadbackSentinel>::SENTINEL; numel]
+    } else {
+        Vec::new()
+    };
     for _ in 0..WARMUP_TRIALS {
         let _ = measure_one_trial(
             &device,
@@ -448,11 +521,13 @@ fn run_size_arm(n: usize, arm: Arm) {
             n as u32,
             arm,
             &mut keep_alive,
+            &mut reused_dest,
         );
     }
 
     let parts_len = arm.readback_parts().len();
-    let mut front: Vec<Vec<f64>> = vec![Vec::with_capacity(MEASURED_TRIALS); FRONT_PHASES.len()];
+    let mut front: Vec<Vec<f64>> =
+        vec![Vec::with_capacity(MEASURED_TRIALS); arm.front_phases().len()];
     let mut parts: Vec<Vec<f64>> = vec![Vec::with_capacity(MEASURED_TRIALS); parts_len];
     let mut host_read: Vec<f64> = Vec::with_capacity(MEASURED_TRIALS);
     let mut checksums: Vec<f64> = Vec::with_capacity(MEASURED_TRIALS);
@@ -466,6 +541,7 @@ fn run_size_arm(n: usize, arm: Arm) {
             n as u32,
             arm,
             &mut keep_alive,
+            &mut reused_dest,
         );
         for (col, v) in front.iter_mut().zip(s.front) {
             col.push(v);
@@ -506,6 +582,7 @@ fn run_size_arm(n: usize, arm: Arm) {
 
     drop(reference_out);
     drop(keep_alive);
+    drop(reused_dest);
     let _ = allocator.release_cached();
 }
 
@@ -522,12 +599,14 @@ macro_rules! single_arm_test {
 }
 
 macro_rules! arms_for_n {
-    ($n:expr, $a:ident, $b:ident, $c:ident, $d:ident, $e:ident) => {
+    ($n:expr, $a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident) => {
         single_arm_test!($a, $n, Arm::CloneDtohLegacyToVec);
         single_arm_test!($b, $n, Arm::CloneDtohBorrowedKeepAlive);
         single_arm_test!($c, $n, Arm::CloneDtohBorrowedDummyAllocFree);
         single_arm_test!($d, $n, Arm::PretouchedFreshSplit);
         single_arm_test!($e, $n, Arm::PretouchedFreshProduction);
+        single_arm_test!($f, $n, Arm::ProdOrderFresh);
+        single_arm_test!($g, $n, Arm::ProdOrderReused);
     };
 }
 
@@ -537,7 +616,9 @@ arms_for_n!(
     readback_attribution_2107_n1024_clone_dtoh_borrowed_keep_alive,
     readback_attribution_2107_n1024_clone_dtoh_borrowed_dummy_alloc_free,
     readback_attribution_2107_n1024_pretouched_fresh_split,
-    readback_attribution_2107_n1024_pretouched_fresh_production
+    readback_attribution_2107_n1024_pretouched_fresh_production,
+    readback_attribution_2107_n1024_prod_order_fresh,
+    readback_attribution_2107_n1024_prod_order_reused
 );
 arms_for_n!(
     2048,
@@ -545,7 +626,9 @@ arms_for_n!(
     readback_attribution_2107_n2048_clone_dtoh_borrowed_keep_alive,
     readback_attribution_2107_n2048_clone_dtoh_borrowed_dummy_alloc_free,
     readback_attribution_2107_n2048_pretouched_fresh_split,
-    readback_attribution_2107_n2048_pretouched_fresh_production
+    readback_attribution_2107_n2048_pretouched_fresh_production,
+    readback_attribution_2107_n2048_prod_order_fresh,
+    readback_attribution_2107_n2048_prod_order_reused
 );
 arms_for_n!(
     4096,
@@ -553,7 +636,9 @@ arms_for_n!(
     readback_attribution_2107_n4096_clone_dtoh_borrowed_keep_alive,
     readback_attribution_2107_n4096_clone_dtoh_borrowed_dummy_alloc_free,
     readback_attribution_2107_n4096_pretouched_fresh_split,
-    readback_attribution_2107_n4096_pretouched_fresh_production
+    readback_attribution_2107_n4096_pretouched_fresh_production,
+    readback_attribution_2107_n4096_prod_order_fresh,
+    readback_attribution_2107_n4096_prod_order_reused
 );
 
 #[cfg(test)]
@@ -592,6 +677,17 @@ mod pure_unit_tests {
     }
 
     #[test]
+    fn prod_order_arms_have_no_pre_sync_phase() {
+        for arm in Arm::ALL {
+            let has_wait = arm.front_phases().contains(&"kernel_wait");
+            assert_eq!(has_wait, arm.serialized(), "{arm:?}");
+        }
+        assert!(!Arm::ProdOrderFresh.serialized());
+        assert!(!Arm::ProdOrderReused.serialized());
+        assert_eq!(Arm::ProdOrderFresh.front_phases(), FRONT_PHASES_PROD_ORDER);
+    }
+
+    #[test]
     fn checksum_f64_matches_manual_sum_for_small_vector() {
         assert!((checksum_f64(&[1.0f32, 2.0, 3.5]) - 6.5).abs() < 1e-9);
     }
@@ -605,7 +701,7 @@ mod pure_unit_tests {
     #[test]
     fn jsonl_line_has_required_keys_and_balanced_braces() {
         for arm in Arm::ALL {
-            let front: Vec<Stat> = (0..5).map(|i| stat(i as f64)).collect();
+            let front: Vec<Stat> = arm.front_phases().iter().map(|_| stat(1.0)).collect();
             let parts: Vec<Stat> = arm.readback_parts().iter().map(|_| stat(2.0)).collect();
             let line = build_jsonl(1024, arm, &front, &parts, &stat(1.0), -1855.597736);
             for key in [
@@ -617,11 +713,12 @@ mod pure_unit_tests {
                 "\"sum_matmul_equiv_us\":",
                 "\"sum_readback_us\":",
                 "\"host_read\":",
+                "\"serialized\":",
                 "\"median_us\":",
             ] {
                 assert!(line.contains(key), "missing {key} in {line}");
             }
-            for name in FRONT_PHASES.iter().chain(arm.readback_parts()) {
+            for name in arm.front_phases().iter().chain(arm.readback_parts()) {
                 assert!(line.contains(&format!("\"{name}\":")), "missing {name}");
             }
             assert!(!line.contains('\n'));

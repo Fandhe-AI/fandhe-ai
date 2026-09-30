@@ -43,6 +43,8 @@ arms=(
   clone_dtoh_borrowed_dummy_alloc_free
   pretouched_fresh_split
   pretouched_fresh_production
+  prod_order_fresh
+  prod_order_reused
 )
 runs=5
 test_prefix="readback_attribution_diag_tests_2107::readback_attribution_2107"

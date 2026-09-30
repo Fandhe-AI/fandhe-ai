@@ -21,6 +21,10 @@
 送出し、集計値を一切出力せず exit 1）。`--self-test` は GPU なしで
 合成 fixture（正常系・checksum 不一致・residual<=0・run 欠落）を検証する。
 判定しきい値は RULE.txt と同一（0.80 / 0.50。事後に変更しない）。
+
+帰属判定（residual・alloc_fill_share）は本番順序の 2 腕（`prod_order_fresh`／
+`prod_order_reused`。起動後に同期しない）の readback 区間壁時計差のみを使う。
+直列腕（`kernel_wait` で事前同期する 5 腕）は区間内訳の補助診断で、判定に使わない。
 """
 
 from __future__ import annotations
@@ -41,8 +45,19 @@ ARMS = (
     "clone_dtoh_borrowed_dummy_alloc_free",
     "pretouched_fresh_split",
     "pretouched_fresh_production",
+    "prod_order_fresh",
+    "prod_order_reused",
 )
-FRONT_PHASES = ("h2d_a", "h2d_b", "alloc_c", "launch_issue", "kernel_wait")
+# 直列腕（起動直後に kernel_wait で同期してから readback を計る。区間内訳の補助診断用）と
+# 本番順序腕（同期なし。帰属判定用）で前半区間が異なる。
+FRONT_PHASES_SERIALIZED = ("h2d_a", "h2d_b", "alloc_c", "launch_issue", "kernel_wait")
+FRONT_PHASES_PROD_ORDER = ("h2d_a", "h2d_b", "alloc_c", "launch_issue")
+PROD_ORDER_ARMS = ("prod_order_fresh", "prod_order_reused")
+
+
+def front_phases(arm: str) -> tuple[str, ...]:
+    return FRONT_PHASES_PROD_ORDER if arm in PROD_ORDER_ARMS else FRONT_PHASES_SERIALIZED
+
 # 腕別 readback サブフェーズ名（readback_attribution_diag_tests_2107.rs の
 # `Arm::readback_parts` と一致させる）。
 ARM_PARTS = {
@@ -51,11 +66,15 @@ ARM_PARTS = {
     "clone_dtoh_borrowed_dummy_alloc_free": ("clone_dtoh", "d2h_sync"),
     "pretouched_fresh_split": ("dest_alloc", "pretouch_fill", "d2h_issue", "d2h_sync"),
     "pretouched_fresh_production": ("readback_total",),
+    "prod_order_fresh": ("readback_total",),
+    "prod_order_reused": ("d2h_issue", "d2h_sync"),
 }
 # JSONL の値は Rust 側で `{:.3}`（μs）に丸められた区間中央値の和のため、
 # 区間数（最大 9）×0.0005 を上回る余裕を持たせた絶対許容（μs）。
 SUM_RECHECK_TOL_US = 0.01
 KEEP_ALIVE = "clone_dtoh_borrowed_keep_alive"
+PROD_FRESH = "prod_order_fresh"
+PROD_REUSED = "prod_order_reused"
 SPLIT = "pretouched_fresh_split"
 PRODUCTION = "pretouched_fresh_production"
 LEGACY = "clone_dtoh_legacy_to_vec"
@@ -107,7 +126,7 @@ def recheck_sums(p: Path, arm: str, row: dict) -> None:
     try:
         ph = row["phases"]
         readback = sum(float(ph[nm]["median_us"]) for nm in ARM_PARTS[arm])
-        front = sum(float(ph[nm]["median_us"]) for nm in FRONT_PHASES)
+        front = sum(float(ph[nm]["median_us"]) for nm in front_phases(arm))
         got_rb = float(row["sum_readback_us"])
         got_mm = float(row["sum_matmul_equiv_us"])
     except (KeyError, TypeError, ValueError) as e:
@@ -279,49 +298,74 @@ def analyze(base: Path) -> tuple[str, dict]:
             "",
         ]
 
-        residual = layer_a["median"] - summ[KEEP_ALIVE]["_sum_matmul_equiv"]["median"]
-        alloc_fill = (
+        # --- 帰属判定（本番順序の 2 腕のみ。直列腕は判定に使わない。RULE.txt「帰属の定義」）
+        # exposed cost = 同じ本番順序（起動後に同期しない）での「新規宛先 readback」と
+        # 「確保済み・タッチ済み宛先への D2H」の readback 区間壁時計差。直列区間の和は使わない。
+        tail_fresh = summ[PROD_FRESH]["readback_total"]["median"]
+        tail_reused = summ[PROD_REUSED]["d2h_issue"]["median"] + summ[PROD_REUSED]["d2h_sync"]["median"]
+        exposed = tail_fresh - tail_reused
+        sigma_fresh = summ[PROD_FRESH]["_sum_matmul_equiv"]["median"]
+        sigma_reused = summ[PROD_REUSED]["_sum_matmul_equiv"]["median"]
+        residual = layer_a["median"] - sigma_reused
+        share = exposed / residual if residual > 0 else None
+        v = verdict(residual, share)
+        # --- 記録のみ（判定には使わない）
+        calib = layer_a["median"] - sigma_fresh  # 本番順序の Layer B が Layer A を再現する度合い
+        sigma_serial_prod = summ[PRODUCTION]["_sum_matmul_equiv"]["median"]
+        overlap = sigma_serial_prod - sigma_fresh  # 同一 readback 関数の直列/本番順序の壁時計差
+        serial_alloc_fill = (
             summ[SPLIT]["dest_alloc"]["median"] + summ[SPLIT]["pretouch_fill"]["median"]
         )
-        share = alloc_fill / residual if residual > 0 else None
-        v = verdict(residual, share)
-        gap_ratio = summ[SPLIT]["_sum_matmul_equiv"]["median"] / layer_a["median"]
+        old_residual = layer_a["median"] - summ[KEEP_ALIVE]["_sum_matmul_equiv"]["median"]
         split_d2h = summ[SPLIT]["d2h_issue"]["median"] + summ[SPLIT]["d2h_sync"]["median"]
         clone_minus_split = (
             summ[KEEP_ALIVE]["clone_dtoh"]["median"]
             + summ[KEEP_ALIVE]["d2h_sync"]["median"]
             - split_d2h
         )
-        split_readback = (
-            alloc_fill + split_d2h
-        )
+        split_readback = serial_alloc_fill + split_d2h
         prod_total = summ[PRODUCTION]["readback_total"]["median"]
         distortion = abs(split_readback - prod_total) / prod_total if prod_total > 0 else float("inf")
         healthy = distortion <= HEALTH_TOLERANCE
         ratio = summ[SPLIT]["_sum_readback"]["median"] / summ[LEGACY]["_sum_readback"]["median"]
         if same_code != "yes":
             v_out = f"無効（参考扱い。素の判定: {v}）"
-        elif not healthy:
-            v_out = f"{v}（分解歪みあり）"
         else:
             v_out = v
         # 専有ゲート未通過の系列は参考扱い（RULE.txt「専有ゲート」）。各 N の判定にも明示する。
         if gate_note and not v_out.startswith("無効"):
             v_out = f"参考扱い（専有ゲート未通過。素の判定: {v_out}）"
         out += [
-            f"- residual = LayerA.matmul − Σ_matmul_equiv(keep_alive) = {residual:.1f} us",
+            f"- exposed_alloc_fill = prod_order_fresh.readback_total − prod_order_reused.(d2h_issue+d2h_sync)"
+            f" = {tail_fresh:.1f} − {tail_reused:.1f} = {exposed:.1f} us",
+            f"- residual = LayerA.matmul − Σ_matmul_equiv(prod_order_reused) = {residual:.1f} us",
             f"- alloc_fill_share = {'n/a' if share is None else f'{share:.3f}'}"
-            f"（dest_alloc+pretouch_fill = {alloc_fill:.1f} us）",
+            "（exposed_alloc_fill / residual）",
             f"- **判定: {v_out}**",
-            f"- gap_ratio = Σ_matmul_equiv(split)/LayerA.matmul = {gap_ratio:.3f}（記録のみ）",
-            f"- clone_dtoh 系 readback − split の (d2h_issue+d2h_sync) = {clone_minus_split:.1f} us（記録のみ）",
-            f"- 計装健全性: |split 分解和 − production readback_total| / production = "
-            f"{distortion:.3f}（許容 {HEALTH_TOLERANCE}。{'OK' if healthy else '超過'}。記録のみ）",
-            f"- 非後退 ratio = split.Σreadback / legacy.Σreadback = {ratio:.3f}（記録のみ）",
+            "- 判定が示す範囲: 本番順序で表に出た宛先確保・事前タッチ費用（exposed cost）が"
+            "residual を占める割合のみ。重なりに隠れた費用・Layer B が再現しない Layer A 側の"
+            "固定費は検出対象外",
+            f"- 校正: LayerA.matmul − Σ_matmul_equiv(prod_order_fresh) = {calib:.1f} us"
+            f"（{calib / layer_a['median'] * 100:.1f}% of LayerA。本番順序の Layer B が"
+            "Layer A を再現する度合い。記録のみ）",
+            f"- 重なり: Σ_matmul_equiv(直列 production) − Σ_matmul_equiv(prod_order_fresh) = {overlap:.1f} us"
+            "（同一 readback 関数の直列/本番順序の壁時計差。記録のみ）",
+            f"- 直列腕の dest_alloc+pretouch_fill = {serial_alloc_fill:.1f} us"
+            f"（直列区間の値。exposed との差が重なりに隠れた分。判定には使わない・記録のみ）",
+            f"- 旧 residual（§12.5 基準）= LayerA.matmul − Σ_matmul_equiv(keep_alive 直列) = {old_residual:.1f} us"
+            "（連続性のための記録のみ）",
+            f"- clone_dtoh 系 readback − split の (d2h_issue+d2h_sync) = {clone_minus_split:.1f} us"
+            "（直列腕同士の比較。記録のみ）",
+            f"- 直列分解の整合（補助）: |split 分解和 − production readback_total| / production = "
+            f"{distortion:.3f}（許容 {HEALTH_TOLERANCE}。{'OK' if healthy else '超過'}。"
+            "直列腕同士のみの整合で判定には使わない・記録のみ）",
+            f"- 非後退 ratio = split.Σreadback / legacy.Σreadback = {ratio:.3f}（直列腕同士。記録のみ）",
             "",
         ]
         results[n] = {
             "residual": residual,
+            "exposed": exposed,
+            "overlap": overlap,
             "share": share,
             "verdict": v_out,
             "healthy": healthy,
@@ -347,7 +391,6 @@ def _write_fixture(
     host_kind: str = "gb10",
     gate: str = "pass",
 ) -> None:
-    front_names = ["h2d_a", "h2d_b", "alloc_c", "launch_issue", "kernel_wait"]
     parts = {
         "clone_dtoh_legacy_to_vec": {"clone_dtoh": 300, "d2h_sync": 50},
         "clone_dtoh_borrowed_keep_alive": {"clone_dtoh": 300, "d2h_sync": 50},
@@ -359,6 +402,9 @@ def _write_fixture(
             "d2h_sync": 10,
         },
         "pretouched_fresh_production": {"readback_total": 310},
+        # 本番順序: fresh の readback 壁時計 520・reused の D2H 壁時計 250 → exposed=270。
+        "prod_order_fresh": {"readback_total": 520},
+        "prod_order_reused": {"d2h_issue": 50, "d2h_sync": 200},
     }
     for n in SIZES:
         for k in range(1, RUNS + 1):
@@ -367,7 +413,7 @@ def _write_fixture(
             for arm in ARMS:
                 if drop_run and k == 3 and arm == SPLIT and n == 1024:
                     continue
-                ph = {nm: _phase(100.0) for nm in front_names}
+                ph = {nm: _phase(100.0) for nm in front_phases(arm)}
                 ph.update({nm: _phase(float(v)) for nm, v in parts[arm].items()})
                 ph["host_read"] = _phase(1.0)
                 s_back = float(sum(parts[arm].values()))
@@ -386,7 +432,7 @@ def _write_fixture(
                     "checksum_bits": (
                         "deadbeefdeadbeef" if arm == bad_bits_arm and k == 2 else checksum_bits
                     ),
-                    "sum_matmul_equiv_us": 500.0 + s_back,
+                    "sum_matmul_equiv_us": 100.0 * len(front_phases(arm)) + s_back,
                     "sum_readback_us": s_back,
                 }
                 (d / f"n{n}_{arm}.jsonl").write_text(json.dumps(row) + "\n")
@@ -421,31 +467,51 @@ def self_test() -> int:
             print(f"FAIL: {msg}", file=sys.stderr)
 
     with tempfile.TemporaryDirectory() as t:
-        # 正常系: Σ_matmul_equiv(keep_alive)=850 → layerA=1300 で residual=450、
-        # alloc_fill=250 → share≈0.556（未確定）。
+        # 正常系: Σ_matmul_equiv(prod_order_reused)=650・exposed=520−250=270。
+        # layerA=1100 で residual=450 → share=0.6（未確定）。重なり=直列 production
+        # (500+310=810) − prod_order_fresh(400+520=920) = −110。
         base = Path(t) / "ok"
-        _write_fixture(base, layer_a_us=1300.0)
+        _write_fixture(base, layer_a_us=1100.0)
         text, res = analyze(base)
         expect(abs(res[1024]["residual"] - 450.0) < 1e-6, "residual 450")
-        expect(abs(res[1024]["share"] - 250.0 / 450.0) < 1e-9, "share")
+        expect(abs(res[1024]["exposed"] - 270.0) < 1e-6, "exposed 270")
+        expect(abs(res[1024]["overlap"] - (-110.0)) < 1e-6, "overlap")
+        expect(abs(res[1024]["share"] - 270.0 / 450.0) < 1e-9, "share")
+        expect("exposed_alloc_fill" in text and "重なり" in text, "exposed・重なりの出力")
+        expect("検出対象外" in text, "判定範囲の明示")
         expect(res[1024]["verdict"] == "未確定", f"verdict {res[1024]['verdict']}")
         expect("## N=4096" in text, "N=4096 セクション")
 
-        # 支持: residual=300（layerA=1150）→ share=0.833。
+        # 直列腕（split の dest_alloc/pretouch_fill）を変えても判定・share は不変
+        # （帰属判定は本番順序 2 腕のみ。直列区間の和は判定に使わない）。
+        base = Path(t) / "serial_indep"
+        _write_fixture(base, layer_a_us=1100.0)
+        for k in range(1, RUNS + 1):
+            pth = base / f"run{k}" / f"n1024_{SPLIT}.jsonl"
+            row = json.loads(pth.read_text())
+            row["phases"]["pretouch_fill"]["median_us"] = 9999.0
+            row["sum_readback_us"] += 9999.0 - 240.0
+            row["sum_matmul_equiv_us"] += 9999.0 - 240.0
+            pth.write_text(json.dumps(row) + "\n")
+        _, res2 = analyze(base)
+        expect(abs(res2[1024]["share"] - 270.0 / 450.0) < 1e-9, "直列腕は share に無関係")
+        expect(res2[1024]["verdict"] == "未確定", "直列腕は判定に無関係")
+
+        # 支持: residual=300（layerA=950）→ share=0.9。
         base = Path(t) / "support"
-        _write_fixture(base, layer_a_us=1150.0)
+        _write_fixture(base, layer_a_us=950.0)
         _, res = analyze(base)
         expect("支持" in res[2048]["verdict"], f"support {res[2048]['verdict']}")
 
-        # 棄却: residual=800（layerA=1650）→ share=0.3125。
+        # 棄却: residual=800（layerA=1450）→ share=0.3375。
         base = Path(t) / "reject"
-        _write_fixture(base, layer_a_us=1650.0)
+        _write_fixture(base, layer_a_us=1450.0)
         _, res = analyze(base)
         expect("棄却" in res[2048]["verdict"], f"reject {res[2048]['verdict']}")
 
         # residual<=0: 帰属を行わない。
         base = Path(t) / "nores"
-        _write_fixture(base, layer_a_us=800.0)
+        _write_fixture(base, layer_a_us=600.0)
         _, res = analyze(base)
         expect(res[1024]["share"] is None, "residual<=0 で share None")
         expect("非再現" in res[1024]["verdict"], "非再現")
@@ -504,7 +570,7 @@ def self_test() -> int:
 
         # 専有ゲート未通過: 各 N の判定にも参考扱いを明示する。
         base = Path(t) / "gate"
-        _write_fixture(base, layer_a_us=1150.0)
+        _write_fixture(base, layer_a_us=950.0)
         (base / "load_gate_status.txt").write_text("run1 gate=unpassed\n")
         _, res = analyze(base)
         expect(
@@ -515,7 +581,7 @@ def self_test() -> int:
 
         # 通過済み GB10 系列: 通常の判定（参考扱いにならない）。
         base = Path(t) / "gbok"
-        _write_fixture(base, layer_a_us=1150.0)
+        _write_fixture(base, layer_a_us=950.0)
         _, res = analyze(base)
         expect(not res[2048]["verdict"].startswith("参考扱い"), "GB10 全 pass は通常判定")
 

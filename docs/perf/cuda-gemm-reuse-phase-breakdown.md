@@ -497,23 +497,32 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
 `crates/backend-cuda/src/readback_attribution_diag_tests_2107.rs`
 （`#[cfg(test)]`・実機テストは全て `#[ignore]`・新規 `unsafe` なし）。
 
-- 4 腕は `readout_regression_diag_tests_1436.rs` の `ReadoutArm` と 1:1 対応
+- 順序の 2 群（PR #2452 Codex P1）: 直列腕（起動直後に `kernel_wait` で同期してから
+  readback を計る 5 腕）は区間内訳の補助診断で、本番 `memory::readback` の順序
+  （起動後に同期せず、宛先確保・事前タッチ・D2H 発行・同期）とは異なり、CPU 側の宛先準備と
+  GPU カーネル実行の重なりを再現しない。帰属判定には本番順序の 2 腕
+  （`prod_order_fresh`＝本番 `readback`／`prod_order_reused`＝計測ループ外で確保・タッチ済みの
+  宛先へ D2H）の readback 区間壁時計差（exposed cost）のみを使う。`prod_order_reused` は
+  exposed cost を出す計測対照であり、宛先再利用の修正施策の再評価ではない（§13.5）。
+- 4 腕（直列群）は `readout_regression_diag_tests_1436.rs` の `ReadoutArm` と 1:1 対応
   （`clone_dtoh_legacy_to_vec`＝`LegacyToVec`、`clone_dtoh_borrowed_keep_alive`＝
   `BorrowedKeepAlive`、`clone_dtoh_borrowed_dummy_alloc_free`＝
   `BorrowedWithDummyAllocFree`、`pretouched_fresh_split`＝`PretouchedFreshDest`）。
   補助対照 `pretouched_fresh_production`（本番 `readback` を分解せず 1 区間）を
-  4 腕に数えず追加する。
-- 各試行は Layer B と同じ前半 5 区間（`h2d_a`／`h2d_b`／`alloc_c`／
-  `launch_issue`／`kernel_wait`）に腕別 readback を続け、Σ(matmul 相当) を
-  Layer A `matmul` と直接突合できるようにする。
+  4 腕に数えず追加する。本番順序の 2 腕（`prod_order_fresh`・`prod_order_reused`）も
+  4 腕に数えない判定用腕（計 7 腕）。
+- 直列腕は Layer B と同じ前半 5 区間（`h2d_a`／`h2d_b`／`alloc_c`／
+  `launch_issue`／`kernel_wait`）に腕別 readback を続ける。本番順序腕は
+  `kernel_wait` を持たない前半 4 区間に readback（最後の同期でカーネル完了を待つ）を
+  続け、区間が連続するため Σ(matmul 相当) が Layer A `matmul` と比べられる壁時計になる。
 - readback のサブフェーズ: `pretouched_fresh_split` は `dest_alloc`
   （`Vec::with_capacity`）・`pretouch_fill`（`resize(n, SENTINEL)`）・
   `d2h_issue`（`memcpy_dtoh`）・`d2h_sync`。`clone_dtoh` 系は内部確保と発行を
   分離できない（未初期化 `Vec` に `unsafe` が要る）ため `clone_dtoh`・`d2h_sync`。
   `with_capacity`＋`resize` は本番 `vec![SENTINEL; n]` と同じく `alloc_zeroed`
-  を経由せず全要素を書き込むため費用として等価で、補助腕との一致で実測でも
-  裏付ける（RULE.txt の計装健全性〈record_only〉）。
-- 腕単位のテスト（`readback_attribution_2107_n{1024,2048,4096}_{arm}` の 15
+  を経由せず全要素を書き込む。分解和と補助腕の `readback_total` の一致は直列腕同士の
+  整合として記録する（RULE.txt の直列分解の整合〈record_only・判定に使わない〉）。
+- 腕単位のテスト（`readback_attribution_2107_n{1024,2048,4096}_{arm}` の 21
   本）を新規プロセスで起動し、JSONL（`DIAG_JSON`。μs・median/q1/q3/min/max・
   checksum の bit 表現）を出力する。腕間の大小関係へは `assert!` しない。
 - 実測基盤: `docs/perf/logs/cuda-gemm-readback-attribution-2107/`
@@ -525,9 +534,19 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
 - 5 run（プロセス独立・腕順は run ごとに巡回）・単位 μs・run ごとの中央値の
   5 run 間中央値と min-max。同一セッションで Layer A（`fandhe-ai =0.9.0`）も 5 run。
 - checksum は (N, 腕) 内・N 内の全腕・Layer A 既知値で一致（fail-closed）。
-- `residual = LayerA.matmul − Σ_matmul_equiv(clone_dtoh_borrowed_keep_alive)`、
-  `alloc_fill_share = (dest_alloc + pretouch_fill) / residual`。`≥ 0.80` 支持・
-  `< 0.50` 棄却・その間は未確定・`residual ≤ 0` は非再現。
+- 帰属は本番順序の 2 腕のみで定義する（直列区間の和は使わない）。
+  `exposed_alloc_fill = prod_order_fresh.readback_total − (prod_order_reused.d2h_issue +
+  d2h_sync)`、`residual = LayerA.matmul − Σ_matmul_equiv(prod_order_reused)`、
+  `alloc_fill_share = exposed_alloc_fill / residual`。`≥ 0.80` 支持・`< 0.50` 棄却・
+  その間は未確定・`residual ≤ 0` は非再現。閾値・checksum 規則・専有ゲートは不変
+  （実機計測前に被演算子のみを再定義。RULE.txt「改訂 2026-09-30」）。Layer A の `matmul`
+  区間は `a.matmul(&b)`（H2D・カーネル・D2H・同期を内包。`bench-fandhe` の
+  `gemm --mode reuse --phases`）で、Σ_matmul_equiv はそれに対応する Layer B の区間和。
+- 判定が示す範囲: 本番順序で表に出た宛先確保・事前タッチ費用が residual に占める割合のみ。
+  重なりに隠れた費用・Layer B が再現しない Layer A 側の固定費は検出対象外。記録のみの
+  補助指標: 校正（`LayerA.matmul − Σ_matmul_equiv(prod_order_fresh)`）・重なり（直列
+  production の Σ − `prod_order_fresh` の Σ）・直列腕の `dest_alloc + pretouch_fill`・
+  旧 residual（§12.5 基準）。
 - 同一コード確認は**ファイル単位の diff ではなく項目単位**
   （`check_layer_a_path_identity.py`。`orchestrate.sh` が呼び出し `env_info.txt` の
   `layerA_same_code`・`path_item:` 行へ記録）。Layer A（0.9.0）と Layer B（HEAD）で、
@@ -563,4 +582,5 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
 
 - 結果に基づく修正施策（事前タッチ済み宛先の再利用・`READBACK_DEST` 既定変更）
 - managed memory（ゼロコピー）経路の比較・`PretouchedReusedDest` の再評価
+  （`prod_order_reused` 腕は exposed cost 算出の計測対照に限り、採否・性能評価は対象外）
 - N=4096 Layer B `d2h` 二峰性の原因究明・M4 Max（Metal）側の対応計測
