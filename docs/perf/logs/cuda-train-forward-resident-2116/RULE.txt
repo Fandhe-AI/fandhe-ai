@@ -30,7 +30,7 @@ doc: docs/perf/cuda-train-forward-resident-diagnosis.md
 
 [支配項の判定（batch ごと。閾値は事後に変えない）]
 F = public/forward_resident。次の 6 項は互いに重ならないよう定義する。
-- H1 層境界のホスト往復（純粋な転送時間）= syncsplit の (h2d_upload + d2h_download) を l1 と l2 で合算
+- H1 層境界の upload/download 呼び出し全体（転送のみの分離計測ではなく、呼び出し内のホスト側確保・登録等を含む）= syncsplit の (h2d_upload + d2h_download) を l1 と l2 で合算
   （nosync の d2h_download はカーネル完了待ちを含み H4 と二重計上になるため使わない。syncsplit は
   kernel_wait を別区間へ分離済みで H4 と重ならない。実機計測前の規則修正。レビュー指摘 #2116）
 - H2 未融合 relu の往復 = prod/relu total

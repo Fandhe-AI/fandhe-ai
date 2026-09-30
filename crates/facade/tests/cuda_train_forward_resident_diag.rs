@@ -408,12 +408,15 @@ fn fresh_step(
             let t0 = Instant::now();
             let mut hp = Vec::with_capacity(param_refs.len());
             let mut hg = Vec::with_capacity(param_refs.len());
+            // bench-fandhe と同じく shapes も計時区間内で with_capacity 確保する（計測境界を逐語一致させる）。
+            let mut sh = Vec::with_capacity(param_refs.len());
             for (param, grad) in param_refs.iter().zip(grad_refs.iter()) {
                 hp.push(param.contiguous().as_slice().expect("param").to_vec());
                 hg.push(grad.contiguous().as_slice().expect("grad").to_vec());
-                shapes.push(param.shape().to_vec());
+                sh.push(param.shape().to_vec());
             }
             rec.push(arm, "param_readout", batch, t0.elapsed().as_secs_f64());
+            shapes = sh;
             host_params = hp;
             host_grads = hg;
         }

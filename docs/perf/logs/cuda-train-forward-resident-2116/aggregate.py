@@ -285,8 +285,8 @@ def aggregate(f_runs, b_runs, unpassed=(), record_only=()):
         fid_bad = [k for k, v in fid.items() if not (FIDELITY_LO <= v <= FIDELITY_HI)]
         terms = {
             # nosync の d2h_download は同期待ちを含み H4 と二重計上になるため、kernel_wait を
-            # 分離済みの syncsplit から純粋な転送時間を取る（RULE.txt H1）。
-            "H1 層境界のホスト往復": sum(g("syncsplit", k, "h2d_upload") + g("syncsplit", k, "d2h_download")
+            # 分離済みの syncsplit からupload/download 呼び出し全体の経過時間（転送 + ホスト側の確保・同期を含み、転送のみの分離計測ではない）を取る（RULE.txt H1）。
+            "H1 層境界の upload/download 呼び出し全体": sum(g("syncsplit", k, "h2d_upload") + g("syncsplit", k, "d2h_download")
                                         for k in ("l1", "l2")),
             "H2 未融合 relu の往復": g("prod", "relu", "total"),
             "H3 呼び出しごとのデバイス確保": sum(g("nosync", k, "mem_new") + g("nosync", k, "alloc_c")

@@ -90,7 +90,7 @@ F = `public/forward_resident` に対する比が 0.40 以上で支配項、0.20 
 
 | 仮説 | 内容 | 定義 |
 |---|---|---|
-| H1 | 層境界のホスト往復（純粋な転送時間） | syncsplit の (h2d_upload + d2h_download) を l1・l2 で合算。nosync の d2h_download はカーネル完了待ちを含み H4 と重複するため使わない（syncsplit は kernel_wait を別区間に分離済みで重ならない） |
+| H1 | 層境界の upload/download 呼び出し全体（転送のみの分離計測ではなく、呼び出し内のホスト側確保等を含む） | syncsplit の (h2d_upload + d2h_download) を l1・l2 で合算。nosync の d2h_download はカーネル完了待ちを含み H4 と重複するため使わない（syncsplit は kernel_wait を別区間に分離済みで重ならない） |
 | H2 | 未融合 relu の往復 | prod/relu total |
 | H3 | 呼び出しごとのデバイス確保 | nosync の (mem_new + alloc_c) を l1・l2 で合算 |
 | H4 | カーネル実行 | syncsplit の kernel_wait を l1・l2 で合算 |
