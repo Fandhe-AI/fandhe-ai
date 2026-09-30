@@ -462,6 +462,7 @@ mod module_cache;
 mod mse;
 mod nll;
 mod norm_backward;
+mod readback_policy;
 mod rnn_cell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）起動 API・カーネル
 // ソース。`mse.rs`／`kernels_mse.rs` と同じ 2 ファイル構成
