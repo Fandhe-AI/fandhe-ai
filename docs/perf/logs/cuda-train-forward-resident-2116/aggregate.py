@@ -298,6 +298,10 @@ def aggregate(f_runs, b_runs, unpassed=(), record_only=()):
         }
         out.append(f"## batch={b}: F = public/forward_resident = {us(F)} us")
         out.append("")
+        out.append("注: 各項は計測スケジュールの異なる独立した参考指標（H1・H4=syncsplit、H3=nosync、"
+                   "H2・H6=prod 単独、H5=上位 API）であり、排他的な内訳ではない。F 比の和は 1.0 を"
+                   "超えうる・合算して F の内訳とは読まない。")
+        out.append("")
         out.append("| 項 | 値(us) | F 比 | 判定 |")
         out.append("|---|---|---|---|")
         dominant = []

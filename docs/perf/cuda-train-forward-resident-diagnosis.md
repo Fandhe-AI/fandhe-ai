@@ -88,6 +88,8 @@ alloc）・#1585（pinned H2D）・#1353（managed）の A/B も再実行しな�
 
 F = `public/forward_resident` に対する比が 0.40 以上で支配項、0.20 以上 0.40 未満で寄与あり。
 
+各項（H1〜H6）は計測スケジュールの異なる独立した参考指標（H1・H4 は syncsplit、H3 は nosync、H2・H6 は prod 単独、H5 は上位 API）であり、排他的な内訳ではない。F 比の和は 1.0 を超えうるため、合算して F の内訳とは読まない。
+
 | 仮説 | 内容 | 定義 |
 |---|---|---|
 | H1 | 層境界の upload/download 呼び出し全体（転送のみの分離計測ではなく、呼び出し内のホスト側確保等を含む） | syncsplit の (h2d_upload + d2h_download) を l1・l2 で合算。nosync の d2h_download はカーネル完了待ちを含み H4 と重複するため使わない（syncsplit は kernel_wait を別区間に分離済みで重ならない） |
