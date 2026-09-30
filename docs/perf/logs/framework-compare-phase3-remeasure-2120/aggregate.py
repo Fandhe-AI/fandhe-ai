@@ -49,6 +49,25 @@ def judged_cells(machine):
     return cells
 
 
+def others_expected(machine):
+    """candle／burn の期待セル（RULE.txt セル範囲・orchestrate.sh の others_cells と同一。fresh 行のみ）。
+    全 run 欠損でも検出できるよう、観測キーではなく期待キーから完備性を検査する。"""
+    exp = set()
+    for (t, d, n, m) in judged_cells(machine):
+        if m == 'fresh':
+            for fw in ('candle', 'burn'):
+                exp.add((fw, t, d, n, m))
+    return exp - others_exceptions(machine)
+
+
+def others_exceptions(machine):
+    """明示例外: M4 Max の burn Metal GEMM N>=512 は結果テンソル全ゼロ（upstream 既知バグ）で記録拒否される
+    （gen_2120.py の M4_SKIP と同一）。ここへ足す変更は RULE.txt 判定 1 の緩和にあたりレビュー必須。"""
+    if machine == 'm4max':
+        return {('burn', 'gemm', 'metal', n, 'fresh') for n in (512, 1024, 2048, 4096)}
+    return set()
+
+
 def key(r):
     return (r['framework'], r['task'], r['device'], int(r['size']), r.get('mode', 'fresh'))
 
@@ -142,10 +161,14 @@ def validate(runs, machine):
     for (t, d, n, m) in cells:
         k = ('fandhe-ai', t, d, n, m)
         for a in ARMS:
+            # RULE.txt 判定 4: 判定対象行の checksum 欠損は一致扱いにせず入力不正として拒否する。
+            nock = [r for r in range(1, NRUN + 1) if k in runs[r][a] and raw_checksum(runs[r][a][k][1]) is None]
+            if nock:
+                errs.append(f'腕 {a} の {t} {d} N={n} {m} の checksum が run {nock} で欠損')
             miss = [r for r in range(1, NRUN + 1) if k not in runs[r][a]]
             if miss:
                 errs.append(f'腕 {a} の {t} {d} N={n} {m} が run {miss} で欠損（5 run × 3 腕完備が必須）')
-    okeys = {k for r in runs for k in runs[r]['O']}
+    okeys = {k for r in runs for k in runs[r]['O']} | others_expected(machine)
     for k in okeys:
         have = [r for r in range(1, NRUN + 1) if k in runs[r]['O']]
         if len(have) != NRUN:
@@ -231,7 +254,7 @@ def write_full(runs, out_prefix, machine):
 
 def self_test():
     with tempfile.TemporaryDirectory() as td:
-        def mk(ratio_c=1.0, drop=None, bad_parity='__unset__', ck_diff=False):
+        def mk(ratio_c=1.0, drop=None, bad_parity='__unset__', ck_diff=False, no_ck=False, others_all=True):
             for r in range(1, NRUN + 1):
                 os.makedirs(os.path.join(td, f'run{r}'), exist_ok=True)
                 for a in ARMS:
@@ -246,13 +269,19 @@ def self_test():
                                 row['parity_fail_count'] = 0
                             ck = '1.500000' if not (ck_diff and a == 'C' and r == 2) else '1.500001'
                             line = json.dumps(row)[:-1] + f', "checksum":{ck}' + '}'
+                            if no_ck:
+                                line = json.dumps(row)
                             if bad_parity != '__unset__' and t == 'gemm':
                                 row2 = dict(row); row2['parity_fail_count'] = bad_parity
                                 line = json.dumps(row2)[:-1] + f', "checksum":{ck}' + '}'
                             w.write(line + '\n')
                 with open(os.path.join(td, f'run{r}', 'others.jsonl'), 'w') as w:
-                    w.write(json.dumps({'framework': 'candle', 'task': 'gemm', 'device': 'cuda', 'size': 256, 'mode': 'fresh',
-                                        'median_s': 0.01 * r, 'parity_fail_count': 0}) + '\n')
+                    keys = others_expected('gb10') if others_all else {('candle', 'gemm', 'cuda', 256, 'fresh')}
+                    for (fw, t, d, n, m) in sorted(keys):
+                        row = {'framework': fw, 'task': t, 'device': d, 'size': n, 'mode': m, 'median_s': 0.01 * r}
+                        if t == 'gemm':
+                            row['parity_fail_count'] = 0
+                        w.write(json.dumps(row) + '\n')
 
         def go():
             runs = load_all(td)
@@ -286,6 +315,24 @@ def self_test():
             pass
         else:
             raise AssertionError('欠損セルを受理した')
+        # checksum 欠損は停止
+        mk(1.0, no_ck=True)
+        try:
+            go()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('checksum 欠損を受理した')
+        # 比較対象セルの全 run 欠損は停止（明示例外の m4max burn metal は除く）
+        mk(1.0, others_all=False)
+        try:
+            go()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('others 全 run 欠損を受理した')
+        assert ('burn', 'gemm', 'metal', 512, 'fresh') not in others_expected('m4max')
+        assert ('burn', 'gemm', 'cuda', 512, 'fresh') in others_expected('gb10')
         # parity_fail_count 不正 4 種は停止
         for bad in (None, -1, 'x', True):
             mk(1.0, bad_parity=bad)
@@ -308,7 +355,7 @@ def self_test():
         md = render(runs, 'gb10', st)
         assert '非後退' in md and '後退セル数（B→C 中央値 > 1.00）: 0' in md
         ps = write_full(runs, os.path.join(td, 'out'), 'gb10')
-        assert len(ps) == 3 and all(len(open(p).read().splitlines()) == len(judged_cells('gb10')) + 1 for p in ps)
+        assert len(ps) == 3 and all(len(open(p).read().splitlines()) == len(judged_cells('gb10')) + len(others_expected('gb10')) for p in ps)
         # run 欠損の空欄保持（左詰めしない）
         st2 = cell_stats(runs, 'gb10')
         del st2[0]['bc'][2]

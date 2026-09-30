@@ -151,6 +151,17 @@ def build_row(data, data_prev, machine, task, device, size, skip):
     me = data.get(('fandhe-ai', task, device, size, 'reuse'))
     me_fresh = data.get(('fandhe-ai', task, device, size, 'fresh'))
     assert me is not None, (machine, task, device, size)
+    # fandhe-ai 自身の判定行（reuse）が parity 不合格なら他 FW と同じく判定不能。順位・倍率を出さない（RULE.txt 判定 5）。
+    me_fail = me.get('parity_fail_count') or 0
+    if me_fail > 0:
+        me_txt = cell_value(me, task, size)[0]
+        tr = (f'<tr class="v-undet"><th scope="row"><span class="ph">{label}</span><span class="ds">{desc}</span></th>'
+              f'<td><span class="pill undet">判定不能</span><span class="vs">fandhe-ai parity 不合格 {me_fail:,} 要素</span></td>'
+              f'<td class="ratio"><span class="rt">—</span></td>'
+              f'<td class="num me inv">{me_txt} <small>reuse</small></td><td class="num me2"><span class="na">—</span></td>'
+              + ''.join('<td class="num"><span class="na">—</span></td>' for _ in FW_ORDER) + '</tr>')
+        return dict(tr=tr, cls='undet', verdict='判定不能', ratio=None, label=label, machine=machine, best=None, vprev=None,
+                    vprevs='判定不能（fandhe-ai parity 不合格）', me=me, me_fresh=None, old=None, fresh_note='')
     mine = metric(me, task)
     comp = []  # (fw, r, valid)
     best = None
@@ -247,6 +258,9 @@ def count_invalid(data, rows):
             r = data.get((fw, task, dev, size, 'fresh'))
             if r is not None and (r.get('parity_fail_count') or 0) > 0:
                 n += 1
+        me = data.get(('fandhe-ai', task, dev, size, 'reuse'))
+        if me is not None and (me.get('parity_fail_count') or 0) > 0:
+            n += 1
     return n
 invalid_n = count_invalid(m4, M4_ROWS) + count_invalid(gb, GB_ROWS)
 
@@ -254,7 +268,7 @@ def head(cols):
     return f'<thead><tr><th>対象</th><th>勝敗</th><th>最速他 FW ÷ fandhe-ai</th><th>fandhe-ai {ARGS.main_label}（判定）</th><th>fandhe-ai 別モード（参考）</th>' + ''.join(f'<th>{c}</th>' for c in cols) + '</tr></thead>'
 
 def lst(rows):
-    return '、'.join(f'{r["machine"]} {r["label"]}（{r["ratio"]:.2f}×）' for r in rows)
+    return '、'.join(f'{r["machine"]} {r["label"]}（{r["ratio"]:.2f}×）' for r in rows if r['ratio'] is not None)
 
 def msprev(data, data_prev, task, dev, size):
     """{PREV_VER}→0.9.0 の同一モード（reuse 優先）中央値ペアを返す。"""
@@ -312,7 +326,8 @@ Path(ARGS.out).write_text(out)
 
 # 検証出力
 for r in allrows:
-    print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best']:10} {r['ratio']:.2f}x  {r['vprevs']}")
+    rt = 'n/a' if r['ratio'] is None else f"{r['ratio']:.2f}x"
+    print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best'] or '-':10} {rt}  {r['vprevs']}")
 if ARGS.tsv:
-    Path(ARGS.tsv).write_text(''.join(f"{r['machine']}\t{r['label']}\t{r['verdict']}\t{r['best']}\t{r['ratio']:.4f}\t{r['vprevs']}\n" for r in allrows))
+    Path(ARGS.tsv).write_text(''.join(f"{r['machine']}\t{r['label']}\t{r['verdict']}\t{r['best'] or ''}\t{'' if r['ratio'] is None else format(r['ratio'], '.4f')}\t{r['vprevs']}\n" for r in allrows))
 print('tally', len(wins), len(nears), len(losses), 'invalid', invalid_n, 'total', len(allrows))

@@ -83,7 +83,13 @@ build_arm() { # build_arm <A|B|C> <patch-facade-path or "">
   echo "== build bench-fandhe arm=${arm} patch=${patch:-none} ($(date -u +%FT%TZ))" >> "${BUILD_LOG}"
   cargo build --release -p bench-fandhe ${args[@]+"${args[@]}"} >> "${BUILD_LOG}" 2>&1 || { echo "ERROR: build arm ${arm} 失敗 -> 計測を停止" >&2; exit 1; }
   echo "-- cargo tree arm=${arm}" >> "${BUILD_LOG}"
-  cargo tree -p bench-fandhe --depth 1 ${args[@]+"${args[@]}"} 2>/dev/null | grep -E 'fandhe-ai v' >> "${BUILD_LOG}"
+  local tree_line
+  tree_line="$(cargo tree -p bench-fandhe --depth 1 ${args[@]+"${args[@]}"} 2>/dev/null | grep -E 'fandhe-ai v')"
+  echo "${tree_line}" >> "${BUILD_LOG}"
+  # 腕 B／C は指定ツリーの facade path に解決されたことを計測前に確認する（patch 不発で registry 版を計測しない）。
+  if [[ -n "${patch}" && "${tree_line}" != *"(${patch}/crates/facade)"* ]]; then
+    echo "ERROR: 腕 ${arm} が ${patch}/crates/facade に解決されていない: ${tree_line}" >&2; exit 1
+  fi
   cp target/release/bench-fandhe "${LOGD}/bin/bench-fandhe-${arm}" || exit 1
 }
 build_arm A ""
