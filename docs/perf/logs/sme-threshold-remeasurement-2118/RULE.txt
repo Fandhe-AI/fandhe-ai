@@ -98,3 +98,15 @@ K=64 は現行定数のベースラインであり、イシュー本文の候補
 - 実行側は成果物収録（lib_trees.sh の `sme2118_collect_r1r2`）の失敗を非ゼロで伝播する。必須成果物（results/raw の 6 JSONL・load-gate ログ・compare-exit ログ・bench 直下の compare-{gemm,train,infer} の md／err）の欠損・空ファイル、およびマスク付きコピーの失敗を検出する。呼び出し側（orchestrate_m4max.sh・gb10/orchestrate_gb10.sh）は戻り値を確認して終了コードを記録し、非ゼロなら停止する（R4 のマスク収録失敗も同様）。M4 Max 側は pipefail を有効にする。
 - R4 ログは 16 格子点 x {NEON, SME} の 32 点を重複・欠落・未知なくちょうど 1 回ずつ含む run のみ有効とする（重複行が後勝ちで 32 件に見える場合を含めて無効）。
 - 検出範囲: 上記は成果物の存在・非空・コピー成否・終了コード記録・セルの件数と集合の整合の検査であり、JSONL 内の値の妥当性（計測が正しく行われたか）を保証するものではない。値の検証は compare_gemm_ab.py の判定に委ねる。
+
+## 15. 追記（判定不能条件の列挙と単一の前提ゲート。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nj1Wj・PRRT_kwDOTuUCJc6nj-IA への対応）
+- §6・§8 の総合判定（FAIL／REJECT／ADOPT 候補／後退あり／後退あり相当／pass）は、次の前提がすべて成立した系列にだけ出す。1 つでも不成立（非ゼロ終了・記録なし・内容不一致）なら undetermined（判定不能）とし、不成立の前提をすべて理由として併記する。集計（aggregate.py）はこの前提を 1 か所（preconditions）で評価し、判定はその結果が空のときにだけ返す。
+  - P-TREE（§1・§13）: ツリーの記録（patch_sha256.txt の head が登録 sha・tree_verify.txt の成功記録・tree_diff.txt が mod.rs の 1 件のみ・gate_constant.txt の定数 2 行が候補 K どおり）が揃っていること。
+  - P-RUNAB（§13）: run_ab_sme_cpu.sh の終了コード 0 の記録。
+  - P-COLLECT（§14）: 成果物収録の終了コード 0 の記録。
+  - P-CELLS（§8・§14）: 全 10 セルが判定可能であること（JSONL 欠損・round 欠損・重複行・値不正・checksum の欠損／非数値はいずれも判定不能）。セル集合そのものの重複・欠落・未知は §14 のとおり例外で停止する。
+  - P-R4-BASE・P-R4-EXEC・P-R4-LOG（M4 Max。§3・§13・§14）: R4 は候補共通の 1 系列であり、その登録 sha 固定の記録（r4_head.txt）・5 run 全ての終了コード 0 と `series done`・5 run 全てが 32 点をちょうど 1 回ずつ含むことを、**全候補の総合判定**の前提とする。確認できなければ R1 由来の REJECT／FAIL も出さず全候補を undetermined とする（R4 の不成立を R4 成立欄だけに閉じ、R1 の REJECT／FAIL を R4 と独立に出していた従前の実装はこれで置き換える）。§6 の AC1 直接判定欄は R4 を使わないため R4 系の前提は課さず、それ以外の前提（P-TREE・P-RUNAB・P-COLLECT・P-CELLS）が不成立なら「判定不能」と表示する。
+  - P-R0（GB10。§8）: R0 成立。
+  - P-RT（GB10。§9）: RT の判定記録（rt_result.txt の rt_verdict 行）があること。記録がない場合は「後退あり相当」ではなく判定不能とする（§14 の「欠損は不一致ではなく判定不能」と同じ扱い）。
+- 前提ではなく判定の修飾として扱うもの: §11 の record_only（REJECT／ADOPT とも参考表示）・§8 の外側専有ゲート不通過（「参考」と明記）・§9 の既知 FAIL 以外の RT FAIL（後退あり相当）。§10 の既存 LABEL・既存ログでの停止は実行側のみの規定で、集計側の対応はない。
+- 実行側のロケール: 3 本のシェルスクリプト（lib_trees.sh・orchestrate_m4max.sh・gb10/orchestrate_gb10.sh）は LC_ALL=C を export する。§1 の指紋差分は diff の出力文言を解析せず、両ツリーのパス一覧の一致と cmp の終了コードで判定する。

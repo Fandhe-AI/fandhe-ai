@@ -11,6 +11,9 @@
 #   順序は k64 → k128 → k256（RULE.txt §10）。差し替え禁止（既存収録があれば停止）。
 # 収録先: <このディレクトリ>/k<K>/。マスク（RULE.txt §12）を経てから保存する。
 set -uo pipefail
+# ロケール固定（RULE.txt §15）: awk の数値比較・case の文字範囲・sort 順・lscpu 等の出力を C に固定する
+# （source する lib_trees.sh も同じ export を行う。source 前の処理を含めて固定するためここでも行う）。
+export LC_ALL=C
 HERE=$(cd "$(dirname "$0")" && pwd)
 PARENT=$(cd "${HERE}/.." && pwd)
 # shellcheck source=../lib_trees.sh

@@ -18,6 +18,9 @@
 # 失敗の伝播（RULE.txt §13）: pipefail でパイプ先頭（git archive 等）の失敗も検出し、収録・マスク・
 # コピーの戻り値は全て確認して非ゼロで返す（set -e は使わず個別に `|| return 1`）。
 set -uo pipefail
+# ロケール固定（RULE.txt §15）: awk の数値比較・case の文字範囲・sort 順・lscpu 等の出力を C に固定する
+# （source する lib_trees.sh も同じ export を行う。source 前の処理を含めて固定するためここでも行う）。
+export LC_ALL=C
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=./lib_trees.sh
 . "${HERE}/lib_trees.sh"

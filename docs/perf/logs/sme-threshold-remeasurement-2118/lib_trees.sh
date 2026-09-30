@@ -10,7 +10,14 @@
 # 「差分が gemm_blis/mod.rs の 1 ファイルのみ」「定数 2 行がパッチどおり」
 # を fail-closed で assert する（RULE.txt §1。run_ab_sme_cpu.sh は after の
 # 差分を検証しないため、その分をここで補う）。main の定数は変更しない。
-# 呼び出し元は本ファイルを source する 2 本の orchestrate_*.sh のみ。
+# 呼び出し元は本ファイルを source する 2 本の orchestrate_*.sh（と self-test の selftest_collect.sh）のみ。
+
+# ロケール固定（RULE.txt §15）: 本ファイルと呼び出し元は、コマンドの出力（cargo の結果行・git／patch の
+# 終了コード・awk の数値比較・case の文字範囲・sort 順）に依存する。日本語ロケール等のホストで文言・
+# 小数点・照合順が変わらないよう C へ固定する（source した呼び出し元と子プロセスにも及ぶ。cargo・rustc は
+# ローカライズされず、python3 は 3.7 以降 C ロケールで UTF-8 モードになるため JSONL・日本語ログの読み書きは不変）。
+# 呼び出し元の orchestrate_*.sh も冒頭で同じ export を行う（source 前の処理を含めて固定するため）。
+export LC_ALL=C
 
 SME2118_MOD_REL="crates/backend-cpu/src/gemm_blis/mod.rs"
 
@@ -67,9 +74,57 @@ sme2118_sha256() {
   fi
 }
 
+# sme2118_tree_fingerprint <work_dir>: <work_dir>/before と <work_dir>/after の差分エントリを 1 行 1 件で標準出力へ出す。
+# diff の出力文言（ロケールで翻訳される）は解析しない（RULE.txt §15。PR #2465 PRRT_kwDOTuUCJc6nj-IA）。
+#   - 片側にしか無いパス（.orig・.rej の混入、ファイル／ディレクトリの増減）: `only: <path>`
+#   - 両側にあり種別（ファイル／ディレクトリ／リンク）が異なる、または内容が異なる: `<path>`（内容は cmp -s の終了コードで判定）
+# パスは各ツリー起点の相対パス（先頭の ./ を除く）。改行を含むパス名は git archive の展開物に無い前提。
+# 作業用のパス一覧は <work_dir> 直下（before／after の外）に置く。
+# 戻り値: 列挙に成功すれば 0（差分の有無は問わない）。find・sort・comm のいずれかが失敗すれば 1
+# （列挙の欠けを「差分なし」と取り違えないよう、各段の終了コードを個別に確認する）。
+sme2118_tree_fingerprint() {
+  local work=$1 t p only_b only_a common
+  for t in before after; do
+    (cd "$work/$t" && find . -print) >"$work/fingerprint-$t.raw" || return 1
+    LC_ALL=C sort "$work/fingerprint-$t.raw" >"$work/fingerprint-$t.lst" || return 1
+  done
+  # comm は C ロケールでソート済みの入力を要求する
+  only_b=$(LC_ALL=C comm -23 "$work/fingerprint-before.lst" "$work/fingerprint-after.lst") || return 1
+  only_a=$(LC_ALL=C comm -13 "$work/fingerprint-before.lst" "$work/fingerprint-after.lst") || return 1
+  common=$(LC_ALL=C comm -12 "$work/fingerprint-before.lst" "$work/fingerprint-after.lst") || return 1
+  # 片側のみのパス
+  while IFS= read -r p; do
+    case "$p" in '') continue ;; esac
+    printf 'only: %s\n' "${p#./}"
+  done <<EOF
+$only_b
+$only_a
+EOF
+  # 両側にあるパス: 種別の一致と内容の一致（cmp -s の終了コードのみを見る）
+  while IFS= read -r p; do
+    case "$p" in '' | .) continue ;; esac
+    if [ -d "$work/before/$p" ] && [ -d "$work/after/$p" ]; then
+      continue
+    fi
+    if [ -L "$work/before/$p" ] || [ -L "$work/after/$p" ]; then
+      if [ "$(readlink "$work/before/$p")" != "$(readlink "$work/after/$p")" ]; then printf '%s\n' "${p#./}"; fi
+      continue
+    fi
+    if [ -f "$work/before/$p" ] && [ -f "$work/after/$p" ]; then
+      cmp -s "$work/before/$p" "$work/after/$p" || printf '%s\n' "${p#./}"
+      continue
+    fi
+    printf '%s\n' "${p#./}"
+  done <<EOF
+$common
+EOF
+  return 0
+}
+
 # sme2118_prepare_trees <repo_root> <work_dir> <k> <patch_file> <out_dir>
-#   <work_dir>/before と <work_dir>/after を作る。パッチ sha256 と検証
-#   ログを <out_dir>/patch_sha256.txt・tree_verify.txt へ記録する。
+#   <work_dir>/before と <work_dir>/after を作る。パッチ sha256・指紋差分・定数行・成功記録を
+#   <out_dir>/patch_sha256.txt・tree_diff.txt・gate_constant.txt・tree_verify.txt へ記録する
+#   （aggregate.py はこれらの記録を P-TREE の前提として照合する。RULE.txt §15）。
 sme2118_prepare_trees() {
   local repo=$1 work=$2 k=$3 patch=$4 out=$5
   sme2118_validate_k "$k" || return 1
@@ -86,13 +141,13 @@ sme2118_prepare_trees() {
   } >"$out/patch_sha256.txt"
   (cd "$work/after" && patch -p1 --forward <"$patch") >"$out/patch_apply.log" 2>&1 \
     || { echo "error: パッチ適用に失敗（$out/patch_apply.log）" >&2; return 1; }
-  # 指紋差分: 差分ファイルは mod.rs の 1 件のみ（.orig 等の混入も検出）
+  # 指紋差分: 差分エントリは mod.rs の 1 件のみ（.orig 等の混入・ファイル増減も検出）。
+  # 判定は文言の解析ではなく、差分エントリ一覧がちょうど mod.rs の 1 行であることの完全一致で行う。
   local diffs
-  diffs=$(cd "$work" && diff -rq before after)
+  diffs=$(sme2118_tree_fingerprint "$work") \
+    || { echo "error: ツリーの指紋差分の列挙に失敗" >&2; return 1; }
   printf '%s\n' "$diffs" >"$out/tree_diff.txt"
-  local n
-  n=$(printf '%s\n' "$diffs" | grep -c .)
-  if [ "$n" -ne 1 ] || ! printf '%s\n' "$diffs" | grep -q "before/${SME2118_MOD_REL} and after/${SME2118_MOD_REL} differ"; then
+  if [ "$diffs" != "${SME2118_MOD_REL}" ]; then
     echo "error: ツリー差分が mod.rs 1 件のみでない（$out/tree_diff.txt）" >&2
     return 1
   fi
@@ -111,6 +166,8 @@ sme2118_prepare_trees() {
     && [ "$a_en" = "const SME_PRODUCTION_ENABLED: bool = true;" ] \
     && [ "$a_k" = "const SME_MIN_K: usize = ${k};" ] \
     || { echo "error: 定数行がパッチの意図と一致しない（$out/gate_constant.txt）" >&2; return 1; }
+  # 成功記録（P-TREE。全 assert 通過後にだけ書く）
+  echo "trees_ok head=${head} K=${k}" >"$out/tree_verify.txt" || return 1
   echo "trees ok: head=${head} K=${k}"
 }
 
