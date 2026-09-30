@@ -1,0 +1,68 @@
+事前登録判定規則（イシュー #2117・GB10 大コア affinity〈#1576〉の A/B 実測と結線判断。実測より前に固定する）
+=====================================================================================
+fixed-at-utc: 2026-09-30（実機計測より前の本ファイルのコミット時点で固定。以後の緩和・事後調整は行わない）
+
+前提: 本規則の固定時点で GB10 実機の A/B 実測はない。以下は実測結果を見る前に確定する。
+      docs/perf/cpu-gemm-gb10-affinity-ab.md の事前登録判定規則（#1576）を緩めず継承する
+      （#2102 の「5/5 round 一貫して後退した場合のみ REJECT」という逃げ道は採らない）。
+対象: crates/backend-cpu/src/gb10_affinity.rs の GB10_AFFINITY_ENABLED
+        before = false（既定）／ after = true（on-arm.patch の 1 行差分のみ）
+除外（再実験しない）: #1364 BIG_CORE_LIMIT_ENABLED・#1575 small_shape_thread_cap・RAYON_NUM_THREADS スイープ・
+      #2102 縮約しきい値・#2104 host arena・#1587 SME。M4 Max での affinity 検証は対象外。
+
+腕
+  - before = main の crates/facade。
+  - after  = 同一コミットで on-arm.patch だけを当てた計測専用 worktree の crates/facade（main へコミットしない）。
+  - 実行: scripts/bench/framework-compare/run_ab_gb10_affinity_cpu.sh <label>
+    （HEAD 一致・before クリーン・after の差分が GB10_AFFINITY_ENABLED 宣言 1 行のみ、をスクリプトが検証する）
+
+セル（14 個・すべて --device cpu）
+  - 対象 4 セル: train／infer × fresh／reuse（size=64）
+  - gemm 10 セル: N = 256／512／1024／2048／4096 × fresh／reuse
+    解釈: GB10_AFFINITY_MAX_WORK = 32*1024*1024 に対し N=256 は m*n*k = 16.7M でルーティング対象（処置セル）、
+          N>=512（134M〜）は非ルーティングの真のガード。区別は解釈のためだけで、全 14 セルに同一の判定規則を適用する。
+
+反復
+  - 5 round、各起動は独立プロセス、round ごとに before／after の起動順を反転する。
+  - run の差し替え・追加起動・セル除外はしない。同一 label の既存 JSONL があればスクリプトが停止する。
+    再実行は別 label で行い、旧系列も残す。
+  - 各セルの代表値は 5 round 中央値 ratio = after / before。
+
+機構発火の前提条件（fail-closed。ベンチ前に確認）
+  - crates/backend-cpu/tests/gb10_affinity_report.rs を両腕で実行する。
+      before: pool_active=false
+      after : enabled=true・env_override=false・detected_big_core_ids が 10 個・pool_active=true
+  - 不成立なら系列は無効（ベンチを走らせず停止。判定は undetermined）。RAYON_NUM_THREADS が設定されていれば拒否する。
+  - AB_AFFINITY_PRECHECK=report-only は x86 等の疎通確認専用。出力を記録するだけで、正式系列として扱わない（series=smoke）。
+
+checksum（hard）
+  - 各セルで before・after 全 round の checksum が数値かつ完全一致であること（compare 前に jq で独立確認し、
+    compare_gemm_ab.py --require-checksum-exact も併用する）。1 件でも不一致なら FAIL
+    （ADOPT にも REJECT にも数えず停止。機構の不具合として扱う）。
+
+専有ゲート
+  - 各 round の開始前に load1 < 1.0 を 30 秒間隔・最大 30 分待つ。
+  - 根拠: 本機構は特定の大コア 10 個へ GEMM スレッドを固定するため、背景負荷がそれらのコアに乗ると after 腕のみが
+    不利になる交絡が生じる（全コアで分散できる before 腕と非対称）。GB10 の平常 load1 は #1312 の gate-dgx.log で
+    0.05〜0.14 と実測されており到達可能。
+  - load_gate.log の各 round 行に gate=pass|timeout|unavailable と gate_ok=0|1 を併記する。gate_ok=1 は規則閾値 1.0
+    での pass に限る（AB_LOAD_GATE で変更した系列は reference 扱い・gate_ok=0）。
+  - 5/5 round が gate_ok=1 の系列だけを正式系列とし、それ以外は record_only（参考扱い・判定に使わない）。
+
+総合判定（4 値）
+  - ADOPT: 正式系列で、機構発火の前提が成立し、14 セルすべての中央値 ratio <= 1.00 かつ checksum 完全一致。
+  - REJECT: 正式系列で、1 セルでも中央値 ratio > 1.00（ガードセルだけの除外・閾値の事後調整はしない）。
+  - undetermined: 専有ゲート不成立（record_only）・機構発火の前提不成立・標本数不足。
+  - FAIL: checksum 不一致（停止）。
+
+ADOPT 時の結線（後続 PR・GB10 セッション）
+  - gb10_affinity.rs の GB10_AFFINITY_ENABLED を true に切り替える。
+  - 単体テスト with_affinity_gate_disabled_calls_closure_directly の const { assert!(!GB10_AFFINITY_ENABLED) } を
+    「ON でも大形状・判定不能は直呼び」を検査する形へ改める。
+  - gb10_affinity.rs の「既定 OFF」記述・thread_limit.rs の相互参照・docs/backend-cpu-gb10-affinity-design.md §7・
+    docs/perf/cpu-gemm-gb10-affinity-ab.md の verdict・docs/README.md を更新する。前後比較（compare 表）を収録する。
+  - tolerance・baseline・Cargo.toml・guardrail 閾値・docs/spec は変更しない。
+REJECT 時: GB10_AFFINITY_ENABLED=false を維持し、決定記録を docs/perf/cpu-gemm-gb10-affinity-ab.md に残す。
+           GB10_AFFINITY_MAX_WORK の再チューニング等は別 issue で扱う（本規則の対象外）。
+
+マスク: ホスト名は masked、$HOME は <home>、ユーザー名・絶対パスは除去または置換してから収録する。
