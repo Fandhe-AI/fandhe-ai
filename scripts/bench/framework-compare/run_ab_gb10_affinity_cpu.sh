@@ -5,7 +5,7 @@
 # before = main の `crates/facade`、after = 同一コミットで上記 1 定数（false -> true）だけを
 # 変えた計測専用 worktree の `crates/facade` を、それぞれ `[patch.crates-io.fandhe-ai]` path
 # patch した 2 本の `bench-fandhe` としてビルドし、5 round・round 単位で起動順を反転しながら
-# 交互実行する（`run_ab_gb10_affinity_cpu.sh`〈#2117〉の派生。ビルド・lock 復元・
+# 交互実行する（`run_ab_reduction_threshold_cpu.sh`〈#2102〉の派生。ビルド・lock 復元・
 # path patch 解決検証・負荷ゲートの骨格は同一）。after worktree は計測専用で main へコミットしない。
 # 追加要素: 各 arm で `crates/backend-cpu/tests/gb10_affinity_report.rs` を実行し、専用
 # affinity プールが after だけで実際に有効であること（機構発火）をベンチ前に fail-closed で確認する
