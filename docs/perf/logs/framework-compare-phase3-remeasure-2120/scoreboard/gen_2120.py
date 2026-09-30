@@ -25,6 +25,14 @@ REPO = Path('<repo>')
 RAW = REPO / 'scripts/bench/framework-compare/results/raw'
 DGX08 = REPO / 'docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx'
 
+# docs/perf/logs ディレクトリ。本ファイルは docs/perf/logs/<2120 dir>/scoreboard/gen_2120.py にあるため
+# parents[0]=scoreboard, parents[1]=2120 dir, parents[2]=logs。parent の段数に依らず名前で検証して誤読・移設を検出する。
+LOGS_DIR = Path(__file__).resolve().parents[2]
+if LOGS_DIR.name != 'logs' or LOGS_DIR.parent.name != 'perf':
+    raise SystemExit(f'error: LOGS_DIR が docs/perf/logs ではありません（{LOGS_DIR}）。本スクリプトの配置を確認してください')
+DEFAULT_STYLE = LOGS_DIR / 'framework-compare-0.9.0-remeasure' / 'scoreboard' / 'style.css'
+DEFAULT_BODY = Path(__file__).resolve().with_name('body_2120.html')
+
 
 
 def parse_args():
@@ -42,16 +50,30 @@ def parse_args():
     p.add_argument('--out', default='fandhe-ai-0.9.0-scoreboard.html', help='出力 HTML パス')
     p.add_argument('--m4-load', default='', help='M4 Max の負荷条件注記文（計測条件節に埋め込む）')
     p.add_argument('--gb-load', default='', help='GB10 の負荷条件注記文（計測条件節に埋め込む）')
-    p.add_argument('--body', default=str(Path(__file__).with_name('body_2120.html')), help='本文テンプレート HTML')
-    # 既定 CSS: 本ファイル(scoreboard/)の 2 つ上 = 2120 ディレクトリ、3 つ上 = docs/perf/logs。0.9.0 版 CSS は logs 直下にある。
-    p.add_argument('--style', default=str(Path(__file__).resolve().parent.parent.parent / 'framework-compare-0.9.0-remeasure' / 'scoreboard' / 'style.css'), help='CSS（0.9.0 版と同一ファイル）')
+    p.add_argument('--body', default=str(DEFAULT_BODY), help='本文テンプレート HTML')
+    # 既定 CSS は LOGS_DIR（docs/perf/logs）直下の 0.9.0 版 CSS。
+    p.add_argument('--style', default=str(DEFAULT_STYLE), help='CSS（0.9.0 版と同一ファイル）')
     p.add_argument('--prev-label', default='0.8.0', help='「前比」列の比較元ラベル（既定 0.8.0）')
     p.add_argument('--main-label', default='0.9.0', help='判定列の見出しに使う fandhe-ai 側ラベル（既定 0.9.0。#2120 では "Phase 3 後（HEAD）"）')
     p.add_argument('--tsv', default='', help='検証出力を TSV でも書くパス（任意）')
+    p.add_argument('--self-test', action='store_true', help='既定の CSS・本文テンプレートの存在だけを確認して終了する（他の必須引数は不要）')
     return p.parse_args()
 
 
+def _require_file(path, flag):
+    if not Path(path).is_file():
+        raise SystemExit(f'error: {flag} が存在しません: {path}')
+
+
+if '--self-test' in __import__('sys').argv:
+    for _flag, _path in (('--style（既定）', DEFAULT_STYLE), ('--body（既定）', DEFAULT_BODY)):
+        _require_file(_path, _flag)
+        print(f'OK {_flag}: {_path}')
+    raise SystemExit(0)
+
 ARGS = parse_args()
+_require_file(ARGS.style, '--style')
+_require_file(ARGS.body, '--body')
 PREV_VER = ARGS.prev_label  # 比較元ラベル（この版との差分を「{PREV_VER} 比」として表示する）
 
 
