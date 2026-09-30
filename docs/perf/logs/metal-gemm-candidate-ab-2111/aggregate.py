@@ -233,12 +233,17 @@ def parse_load_policy(env_text):
     `exclusive_gate` にならない番兵値 `<duplicate>` を返す（呼び出し側は参考扱いに倒す。fail-closed）。
     キー表記の揺れ（先頭空白・コロン前の空白）も同じ行として数える。
     """
-    vals = re.findall(r"^[ \t]*load_policy[ \t]*:[ \t]*([^\s#]*)", env_text, re.M)
+    vals = re.findall(r"^[ \t]*load_policy[ \t]*:([^#\r\n]*)", env_text, re.M)
     if not vals:
         return None
     if len(vals) > 1:
         return "<duplicate>"
-    return vals[0]
+    v = vals[0].strip()
+    # コメント除去後の行全体が単一トークンでなければ（`exclusive_gate record_only` 等の余分な値）
+    # 先頭値だけを採らず番兵値 `<invalid>` へ倒す（exclusive_gate にならない。fail-closed）
+    if re.search(r"\s", v):
+        return "<invalid>"
+    return v
 
 
 def load_dir(d):
@@ -384,6 +389,10 @@ def self_test():
     assert parse_load_policy("load_policy: exclusive_gate\nload_policy: record_only\n") == "<duplicate>"
     assert parse_load_policy("load_policy: record_only\nload_policy: exclusive_gate\n") == "<duplicate>"
     assert parse_load_policy("load_policy: exclusive_gate\n load_policy : exclusive_gate\n") == "<duplicate>"
+    # 余分な値付き行は先頭値で通さず参考扱い側へ倒す
+    assert parse_load_policy("load_policy: exclusive_gate record_only\n") == "<invalid>"
+    assert parse_load_policy("load_policy: exclusive_gate\trecord_only # x\n") == "<invalid>"
+    assert parse_load_policy("load_policy: exclusive_gate\r\n") == "exclusive_gate"
     # データ欠落 N
     partial = [parse_run(_fixture_run({("X", 512): 0.9})) for _ in range(N_RUNS)]
     assert judge(partial)["X"][0] == "INCOMPLETE"
