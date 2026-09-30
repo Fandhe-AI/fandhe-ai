@@ -28,7 +28,13 @@
 //! - L0 `ops_total`: `BackendOps::gemm_fp32_strict` の wall（本番の入口）
 //! - L1 `gemm_total`: `CudaGemm::run_tiled_f32` の wall
 //! - L2: `run_f32_kernel` と同じ順の手動分解（`h2d_a`／`h2d_b`／`alloc_c`
-//!   ／`launch_issue`／`kernel_wait`／`d2h`／`teardown`／`l2_sum`）
+//!   ／`launch_issue`／`readback`〈カーネル完了待ち + D2H。本番同様
+//!   `memory::readback` 内の同期 1 回のみ〉／`teardown`／`driver_scope`／
+//!   `l2_sum`）。追加同期を含まない本番相当経路であり、`l2_sum` はこの経路
+//!   の合計（PR #2454 指摘: 追加の `stream.synchronize()` を除く）
+//! - L2S: kernel_wait と d2h の分離用の**非本番**補助系列（`kernel_wait`
+//!   ／`d2h`）。起動後に追加同期を 1 回挟むため本番の同期回数と異なり、
+//!   `l2_sum` には含めない。H2・H3 の内訳算出専用
 //! - D: device 側 event 計時（別パス。L2 の値を乱さない）。event 間隔は
 //!   device idle（host の投入待ち）を含む点に注意。`dev_kernel_b2b` は
 //!   同一カーネルを連続キューイングした時間差から求める推定値
@@ -105,7 +111,12 @@ struct L2Sample {
     h2d_b: f64,
     alloc_c: f64,
     launch_issue: f64,
+    /// 本番相当の `memory::readback`（カーネル完了待ち 1 回 + D2H）。
+    /// `split_sync = true` の補助試行では 0（`kernel_wait`／`d2h` へ分離）。
+    readback: f64,
+    /// 補助試行（`split_sync = true`）のみ: 追加同期によるカーネル完了待ち。
     kernel_wait: f64,
+    /// 補助試行のみ: 同期後の D2H（readback 内同期は完了済みで軽い）。
     d2h: f64,
     teardown: f64,
     /// 本番 `run_f32_kernel` が全区間を包む `with_driver_call`（capture 排他
@@ -121,14 +132,17 @@ impl L2Sample {
             + self.h2d_b
             + self.alloc_c
             + self.launch_issue
-            + self.kernel_wait
-            + self.d2h
+            + self.readback
             + self.teardown
             + self.driver_scope
     }
 }
 
+/// `split_sync = false` は本番 `run_f32_kernel` と同じ同期回数（readback 内
+/// の 1 回のみ）で測る。`true` は kernel_wait と d2h を分離するための補助
+/// 試行で追加同期を挟む（`sum()` の対象外・非本番）。
 fn l2_trial(
+    split_sync: bool,
     device: &crate::device::CudaDevice,
     gemm: &crate::gemm::CudaGemm,
     allocator: &crate::pool::CudaAllocator,
@@ -166,13 +180,20 @@ fn l2_trial(
     .expect("launch");
     s.launch_issue = t.elapsed().as_secs_f64();
 
-    let t = Instant::now();
-    stream.synchronize().expect("kernel wait");
-    s.kernel_wait = t.elapsed().as_secs_f64();
+    if split_sync {
+        let t = Instant::now();
+        stream.synchronize().expect("kernel wait");
+        s.kernel_wait = t.elapsed().as_secs_f64();
+    }
 
     let t = Instant::now();
     let out = crate::memory::readback(&stream, &c_dev.as_view()).expect("readback");
-    s.d2h = t.elapsed().as_secs_f64();
+    let rb = t.elapsed().as_secs_f64();
+    if split_sync {
+        s.d2h = rb;
+    } else {
+        s.readback = rb;
+    }
 
     let t = Instant::now();
     drop(c_dev);
@@ -328,9 +349,9 @@ fn run_size(n: usize) {
     assert_ne!(checksum, 0.0f64.to_bits(), "checksum must be non-zero");
 
     // --- L2 ---
-    let mut cols: [Vec<f64>; 9] = Default::default();
+    let mut cols: [Vec<f64>; 8] = Default::default();
     for i in 0..(WARMUP + MEASURED) {
-        let (s, out) = l2_trial(&device, &gemm, &allocator, &a, &b, nn);
+        let (s, out) = l2_trial(false, &device, &gemm, &allocator, &a, &b, nn);
         assert_eq!(out.len(), n * n);
         if i >= WARMUP {
             let v = [
@@ -338,8 +359,7 @@ fn run_size(n: usize) {
                 s.h2d_b,
                 s.alloc_c,
                 s.launch_issue,
-                s.kernel_wait,
-                s.d2h,
+                s.readback,
                 s.teardown,
                 s.driver_scope,
                 s.sum(),
@@ -354,8 +374,7 @@ fn run_size(n: usize) {
         "h2d_b",
         "alloc_c",
         "launch_issue",
-        "kernel_wait",
-        "d2h",
+        "readback",
         "teardown",
         "driver_scope",
         "l2_sum",
@@ -365,6 +384,19 @@ fn run_size(n: usize) {
     {
         emit(n, "L2", name, c);
     }
+
+    // --- L2S（kernel_wait／d2h 分離。追加同期を含む非本番の補助系列）---
+    let mut split: [Vec<f64>; 2] = Default::default();
+    for i in 0..(WARMUP + MEASURED) {
+        let (s, out) = l2_trial(true, &device, &gemm, &allocator, &a, &b, nn);
+        assert_eq!(out.len(), n * n);
+        if i >= WARMUP {
+            split[0].push(s.kernel_wait);
+            split[1].push(s.d2h);
+        }
+    }
+    emit(n, "L2S", "kernel_wait", &split[0]);
+    emit(n, "L2S", "d2h", &split[1]);
 
     // --- D（device 側 event）---
     let mut d: [Vec<f64>; 5] = Default::default();

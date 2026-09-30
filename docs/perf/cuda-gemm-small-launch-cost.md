@@ -21,7 +21,7 @@
 |---|---|
 | `crates/backend-cuda/src/gemm.rs`（`GemmLaunchDiagCounters`） | `run_f32_kernel`・`CudaGemm::with_driver_call` の driver 境界回数（scope・H2D・pool alloc・launch・D2H・sync）。thread-local。`cfg(any(test, internal-diagnostics))` 限定で、非該当ビルドは空の `#[inline(always)]` 関数（#2299 の 2 層規約）。増分位置は成功後のみ、早期 return 経路は数えない |
 | `lib.rs` `diagnostics::gemm_launch_counters_snapshot`／`reset_gemm_launch_counters` | crate 外向け入口（`internal-diagnostics` 限定。内部型を出さず `[u64; 8]`） |
-| `crates/backend-cuda/src/gemm_small_launch_cost_diag_tests.rs` | N ∈ {128, 256, 512} の多層分解（L0 `ops_total`／L1 `gemm_total`／L2 h2d_a・h2d_b・alloc_c・launch_issue・kernel_wait・d2h・teardown・driver_scope〈本番 with_driver_call 入退場〉／D device event／E floor）。`gemm_small_launch_counts_exact` は 1 回の GEMM の件数を厳密断言。実機テストは `#[ignore]` |
+| `crates/backend-cuda/src/gemm_small_launch_cost_diag_tests.rs` | N ∈ {128, 256, 512} の多層分解（L0 `ops_total`／L1 `gemm_total`／L2 h2d_a・h2d_b・alloc_c・launch_issue・readback〈本番と同じ同期 1 回〉・teardown・driver_scope〈本番 with_driver_call 入退場〉／L2S kernel_wait・d2h〈追加同期を挟む非本番の分離用補助系列。l2_sum に含めない〉／D device event／E floor）。`gemm_small_launch_counts_exact` は 1 回の GEMM の件数を厳密断言。実機テストは `#[ignore]` |
 
 - 新規 `unsafe`・依存・公開 API 面の変更なし
 - 観測できないもの: cudarc 内部の `cuEventCreate`／`cuEventDestroy`・`cuMemAllocAsync`／`cuMemFreeAsync`・`cuCtxGetCurrent`。cudarc 0.19.8 では `new_event` が `bind_to_thread` の後に `cuEventCreate`（`safe/core.rs:551`）、`record_event` が event 生成＋record（同 `:751`）、`memcpy_htod` が `bind_to_thread` の後に async memcpy（同 `:1602`）を行う。event tracking 有効時は alloc 系が slice ごとに event を作る。実数は nsys（任意）で確認する
@@ -40,8 +40,8 @@
 | ID | 仮説 | 帰属に使う区間 |
 |---|---|---|
 | H1 | 毎反復 H2D（入力が resident でない境界の非対称） | L2 h2d_a + h2d_b |
-| H2 | launch と同期の往復 | launch_issue + (kernel_wait − dev_kernel_b2b)。floor と照合 |
-| H3 | D2H readback | L2 d2h |
+| H2 | launch と同期の往復 | launch_issue + (L2S kernel_wait − dev_kernel_b2b)。floor と照合 |
+| H3 | D2H readback | L2S d2h |
 | H4 | host 側 dispatch | L0 − L1、L1 − l2_sum |
 | H5 | facade・autodiff・tape | HEAD path-patch Layer A matmul − L0 |
 | H6 | checksum | 記録のみ |

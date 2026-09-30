@@ -7,6 +7,8 @@
     （HEAD path-patch。H5 の正式な突合相手。RULE.txt 4）
     （bench の JSONL を `-- run i/N=256 --` 区切りで 5 run 分連結したもの）
   - layerB-run{1..5}.log（`DIAG2109 ...` 行。診断テストの出力）
+  - counts-exact.log（`gemm_small_launch_counts_exact` の出力。RULE.txt 3 の hard 条件。
+    `test result: ok. 1 passed; 0 failed` を含まなければ fail-closed）
 
 fail-closed: run 数不足・phase 欠落/重複・壊れた JSON・checksum 不一致・
 件数不一致・未マスクの絶対パス（/home/<user>）・load_gate.log の欠落や
@@ -145,6 +147,24 @@ def parse_layer_b(text: str, name: str) -> dict:
     return out
 
 
+COUNTS_TEST = "gemm_small_launch_cost_diag_tests::gemm_small_launch_counts_exact"
+TEST_RESULT_OK_RE = re.compile(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", re.M)
+TEST_LINE_OK_RE = re.compile(r"^test " + re.escape(COUNTS_TEST) + r" \.\.\. ok$", re.M)
+
+
+def check_counts_exact(text: str) -> None:
+    """counts-exact.log が件数厳密テストの成功を示すことを検証する（RULE.txt 3・fail-closed）。
+
+    `cargo test` の出力に当該テストの `... ok` 行と `test result: ok. 1 passed; 0 failed;
+    0 ignored;` の両方が必要（テスト未実施・失敗・0 件実行・別テストの成功では通さない）。
+    """
+    check_masked(text, "counts-exact")
+    if not TEST_LINE_OK_RE.search(text) or not TEST_RESULT_OK_RE.search(text):
+        raise LogIntegrityError(
+            "counts-exact.log: gemm_small_launch_counts_exact の成功（ok / 1 passed）を確認できない"
+            "（RULE.txt 3）")
+
+
 GATE_RE = re.compile(r"^(\S+ run\d+) (PASS|FAIL\(参考扱い\)) load1=(\S+) gpu_util=(\S+)$")
 GATE_LABELS = ("layerA-phases", "ac2", "head-phases", "head-ac2", "candle", "layerB")
 GATE_EXPECTED = {f"{lab} run{i}" for lab in GATE_LABELS for i in range(1, RUNS + 1)}
@@ -202,8 +222,10 @@ def expected_counts(n: int) -> dict:
 
 
 def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_text: str,
-              gate_text: str, head_phases_text: str, head_ac2_text: str) -> str:
+              gate_text: str, head_phases_text: str, head_ac2_text: str,
+              counts_exact_text: str) -> str:
     gate_ok = parse_gate(gate_text)
+    check_counts_exact(counts_exact_text)
     if len(layer_b_texts) != RUNS:
         raise LogIntegrityError(f"Layer B の run 数が不一致（期待 {RUNS}・実際 {len(layer_b_texts)}）")
     bs = [parse_layer_b(t, f"layerB-run{i}") for i, t in enumerate(layer_b_texts, 1)]
@@ -235,7 +257,10 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
     fandhe_reuse = med([r[0]["median_s"] for r in ac2]) * 1e6
     head_reuse = med([r[0]["median_s"] for r in hac2]) * 1e6
     candle = med([r[0]["median_s"] for r in cd]) * 1e6
-    gap = fandhe_reuse - candle
+    # 帰属の分母は HEAD path-patch の reuse（Layer B・H5 と同一ツリー。RULE.txt 5）。
+    # registry =0.9.0 との差は版差を含むため、参考値としてのみ併記する。
+    gap = head_reuse - candle
+    gap_registry = fandhe_reuse - candle
 
     def b_runs(layer: str, phase: str) -> list[float]:
         return [x["phases"][(N, layer, phase)] for x in bs]
@@ -254,9 +279,9 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
     l0r, l1r, l2r = b_runs("L0", "ops_total"), b_runs("L1", "gemm_total"), b_runs("L2", "l2_sum")
     rows = [
         ("H1 毎反復 H2D", rr((1, b_runs("L2", "h2d_a")), (1, b_runs("L2", "h2d_b")))),
-        ("H2 launch+同期の往復（推定）", rr((1, b_runs("L2", "launch_issue")), (1, b_runs("L2", "kernel_wait")),
+        ("H2 launch+同期の往復（推定）", rr((1, b_runs("L2", "launch_issue")), (1, b_runs("L2S", "kernel_wait")),
                                   (-1, b_runs("D", "dev_kernel_b2b")))),
-        ("H3 D2H readback", b_runs("L2", "d2h")),
+        ("H3 D2H readback", b_runs("L2S", "d2h")),
         ("H4a host dispatch (L0-L1)", rr((1, l0r), (-1, l1r))),
         ("H4b host dispatch (L1-l2_sum)", rr((1, l1r), (-1, l2r))),
         # H5 の突合相手は HEAD path-patch の Layer A（Layer B・L0 と同一ツリー。RULE.txt 4）。
@@ -272,8 +297,11 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
         f"## N={N} 集計（5 run 中央値, µs。括弧内は 5 run 間の min–max）", "",
         "" if gate_ok else "> 専有ゲート FAIL の run を含む系列のため **参考扱い**（RULE.txt 9）。"
         "仮説の「支持」判定は出さない。\n",
-        f"- fandhe reuse（AC-2・registry =0.9.0）: {fandhe_reuse:.3f}／candle fresh: {candle:.3f}／gap: {gap:.3f}",
-        f"- HEAD path-patch reuse（AC-2）: {head_reuse:.3f}／ratio（HEAD/registry, record_only・RULE.txt 4）: "
+        f"- HEAD path-patch reuse（AC-2）: {head_reuse:.3f}／candle fresh: {candle:.3f}"
+        f"／gap（HEAD − candle。帰属の分母・RULE.txt 5）: {gap:.3f}",
+        f"- 参考: registry =0.9.0 reuse（AC-2）: {fandhe_reuse:.3f}／gap（registry − candle。版差を含み"
+        f"帰属に使わない）: {gap_registry:.3f}",
+        f"- HEAD path-patch / registry（record_only・RULE.txt 4）: "
         f"{head_reuse / fandhe_reuse:.3f}"
         + ("（非後退）" if head_reuse <= fandhe_reuse else "（要調査・別 issue）"),
         f"- L0 ops_total: {l0:.3f}／L1 gemm_total: {l1:.3f}／L2 l2_sum: {l2:.3f}",
@@ -310,7 +338,8 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
 def _layer_b_fixture(cksum: str = "0x4062c00000000000") -> str:
     ph = {("L0", "ops_total"): 90, ("L1", "gemm_total"): 85, ("L2", "h2d_a"): 10,
           ("L2", "h2d_b"): 10, ("L2", "alloc_c"): 2, ("L2", "launch_issue"): 6,
-          ("L2", "kernel_wait"): 20, ("L2", "d2h"): 15, ("L2", "teardown"): 8,
+          ("L2", "readback"): 30, ("L2S", "kernel_wait"): 20, ("L2S", "d2h"): 15,
+          ("L2", "teardown"): 8,
           ("L2", "driver_scope"): 1, ("L2", "l2_sum"): 72, ("D", "dev_kernel_b2b"): 8, ("D", "dev_kernel_seg"): 14,
           ("D", "dev_span"): 50, ("E", "tiny_roundtrip"): 12, ("E", "sync_idle"): 3}
     rows = [f"DIAG2109 n={N} layer={l} phase={p} median_us={v:.3f} q1_us={v:.3f} q3_us={v:.3f}"
@@ -340,9 +369,12 @@ def self_test() -> None:
     hpa = _jsonl([70, 1, 1, 5, 92], PHASES_A, task="gemm_phases")
     hac2 = _jsonl([90], None)
 
-    def agg(lb_, pa_, ac2_, cd_, g_, hpa_=None, hac2_=None):
+    ce_ok = ("running 1 test\ntest " + COUNTS_TEST + " ... ok\n\n"
+             "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n")
+
+    def agg(lb_, pa_, ac2_, cd_, g_, hpa_=None, hac2_=None, ce_=None):
         return aggregate(lb_, pa_, ac2_, cd_, g_, hpa if hpa_ is None else hpa_,
-                         hac2 if hac2_ is None else hac2_)
+                         hac2 if hac2_ is None else hac2_, ce_ok if ce_ is None else ce_)
 
     pa = _jsonl([70, 1, 1, 5, 92], PHASES_A, task="gemm_phases")
     ac2 = _jsonl([92], None)
@@ -350,7 +382,7 @@ def self_test() -> None:
     gate = "".join(f"{lab} run{i} PASS load1=0.10 gpu_util=0\n"
                    for lab in GATE_LABELS for i in range(1, RUNS + 1))
     md = agg(lb, pa, ac2, cd, gate)
-    assert "gap: 16.000" in md and "支持" in md and "min–max" in md and "L0 比" in md, md
+    assert "gap（HEAD − candle。帰属の分母・RULE.txt 5）: 14.000" in md and "支持" in md and "min–max" in md and "L0 比" in md, md
     gate_fail = gate.replace("PASS load1=0.10 gpu_util=0", "FAIL(参考扱い) load1=2.50 gpu_util=0", 1)
     md_ref = agg(lb, pa, ac2, cd, gate_fail)
     assert "参考扱い" in md_ref and "支持" not in md_ref.split("| 仮説")[1], md_ref
@@ -397,12 +429,18 @@ def self_test() -> None:
     first_c = [ln for ln in cd.splitlines() if ln.startswith("{")][0]
     must_fail(lambda: agg(lb, pa, ac2, cd.replace("-- run 2/", first_c + "\n-- run 2/", 1), gate),
               "candle の重複レコード")
+    must_fail(lambda: agg(lb, pa, ac2, cd, gate, ce_=""), "counts-exact.log が空")
+    must_fail(lambda: agg(lb, pa, ac2, cd, gate, ce_=ce_ok.replace("... ok", "... FAILED")
+                          .replace("ok. 1 passed; 0 failed", "FAILED. 0 passed; 1 failed")),
+              "counts-exact テスト失敗")
+    must_fail(lambda: agg(lb, pa, ac2, cd, gate, ce_=ce_ok.replace("1 passed", "0 passed")), "counts-exact 0 件実行")
+    must_fail(lambda: agg(lb, pa, ac2, cd, gate, ce_=ce_ok + "# /home/someone/x\n"), "counts-exact 未マスク")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, hac2_=_jsonl([90], None, "1.000000")), "HEAD checksum 不一致")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, hpa_=hpa.replace('"matmul"', '"matmul_x"', 1)), "HEAD phase 不正")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate.replace("head-ac2 run1", "head-ac2 run9")), "HEAD ゲートラベル不一致")
     row = [ln for ln in md.splitlines() if ln.startswith("| H6")][0]
     assert row.endswith("| 記録のみ |"), row
-    assert "H5 facade/tape (HEAD matmul-L0)" in md and "ratio（HEAD/registry" in md
+    assert "H5 facade/tape (HEAD matmul-L0)" in md and "HEAD path-patch / registry" in md
     print("self-test OK")
 
 
@@ -417,7 +455,8 @@ def main(argv: list[str]) -> int:
     d = Path(args.log_dir)
     needed = [d / f"layerB-run{i}.log" for i in range(1, RUNS + 1)] + [
         d / f"layerA-phases-N{N}.log", d / f"layerA-ac2-N{N}.log", d / f"candle-fresh-N{N}.log",
-        d / "load_gate.log", d / f"head-phases-N{N}.log", d / f"head-ac2-N{N}.log"]
+        d / "load_gate.log", d / f"head-phases-N{N}.log", d / f"head-ac2-N{N}.log",
+        d / "counts-exact.log"]
     present = [p.exists() for p in needed]
     if not any(present):
         print("ログ未生成（実測前）。orchestrate.sh を GB10 で実行後に再実行すること。")
@@ -431,7 +470,7 @@ def main(argv: list[str]) -> int:
         print(aggregate([p.read_text() for p in needed[:RUNS]], needed[RUNS].read_text(),
                         needed[RUNS + 1].read_text(), needed[RUNS + 2].read_text(),
                         needed[RUNS + 3].read_text(), needed[RUNS + 4].read_text(),
-                        needed[RUNS + 5].read_text()))
+                        needed[RUNS + 5].read_text(), needed[RUNS + 6].read_text()))
     except LogIntegrityError as exc:
         print(f"LogIntegrityError: {exc}", file=sys.stderr)
         return 1
