@@ -382,7 +382,15 @@ def render_gb10(base):
         label = f"2118-gb10-k{k}"
         d = Path(base) / "gb10" / f"k{k}"
         if not (d / "r1r2").exists():
-            rows.append(f"| {k} | - | - | - | 未確定（実測未実施） | - |")
+            # sme_report.txt があれば R0 は実施済み。R0 不成立で r1r2 を作らず中止した系列を
+            # 「未実測」に潰さず RULE.txt §8 の undetermined として R0 の記録を表示する。
+            if (d / "sme_report.txt").exists():
+                rep0 = (d / "sme_report.txt").read_text(encoding="utf-8")
+                ok0 = rep0.count("kernel_enabled: false") >= 2
+                why = "R0 成立後に r1r2 なし（計測中止・記録なし）" if ok0 else "R0 不成立（kernel_enabled が false でない）で計測中止"
+                rows.append(f"| {k} | {'成立' if ok0 else '不成立'} | - | - | undetermined（{why}） | 参考（r1r2 なし） |")
+            else:
+                rows.append(f"| {k} | - | - | - | 未確定（実測未実施） | - |")
             continue
         rep = (d / "sme_report.txt").read_text(encoding="utf-8") if (d / "sme_report.txt").exists() else ""
         r0 = rep.count("kernel_enabled: false") >= 2
@@ -578,6 +586,12 @@ def self_test():
         # 未実測ディレクトリの描画が例外なく「未実測」を出す
         txt = render_m4max(td) + render_gb10(td)
         assert "未実測" in txt and "未確定（実測未実施）" in txt
+        # R0 不成立で中止（sme_report.txt のみ・r1r2 なし）は「未実測」ではなく undetermined＋R0 不成立を表示
+        g = Path(td) / "gb10" / "k128"
+        g.mkdir(parents=True)
+        (g / "sme_report.txt").write_text("before: sme_report=kernel_enabled: true\nafter: sme_report=kernel_enabled: true\n")
+        txt2 = render_gb10(td)
+        assert "| 128 | 不成立 | - | - | undetermined（R0 不成立" in txt2, txt2
     print("self-test ok")
 
 
