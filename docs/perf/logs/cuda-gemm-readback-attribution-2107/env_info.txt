@@ -1,0 +1,1 @@
+# 実測時に orchestrate.sh が <dir>/env_info.txt へ採取する（実測前テンプレート）
