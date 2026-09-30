@@ -1117,6 +1117,18 @@ A/B。`run_ab_resident_grad_cuda.sh`〈#1560〉と同じ「before／after 2 本�
   `docs/perf/infer-chain-single-sync-cuda-ab.md` を参照（本 PR 時点では
   実機到達手段がなく未実測のままスキャフォールドのみ）
 
+### `--infer-batch <64|1024|4096>` と CUDA 推論チェーン CUDA Graph capture A/B（イシュー #2115）
+
+- `bench-fandhe --task infer`（fresh／reuse。`--phases` 併用不可）の入力行数を選ぶ値付きフラグ。allowlist は
+  64／1024／4096（未指定＝既定 64 で既存レコード・既存挙動は不変。それ以外・`--task infer` 以外での指定は
+  MEASURE_ERROR で拒否）。`Record.size` は指定した batch になる
+- `run_ab_infer_graph_cuda.sh <label>`: opt-in `FANDHE_AI_CUDA_GRAPH_INFER`（未設定 vs `=1`）の同一バイナリ A/B。
+  `AB_PATCH_FACADE_PATH`（本機構を含む `crates/facade` への絶対パス）必須。infer × {fresh, reuse} × batch {64, 1024, 4096}
+  を 5 run（起動順を round ごとに反転）。専有ゲート（load1<1.0・GPU util 0% を 3 サンプル連続）不成立なら
+  undetermined で終了。判定は `compare_gemm_ab.py --task infer --sizes infer-batches --per-run --require-checksum-exact`
+  （`--sizes infer-batches` は infer 専用の 3 形状セル集合）
+- 判定規則・実行手順・記録: `docs/perf/infer-chain-graphcapture-cuda-ab.md`・`docs/perf/logs/cuda-infer-chain-graphcapture-2115/`
+
 ### CUDA GEMM VJP NT／TN 転置入口 train A/B（イシュー #1590）
 
 #1214（PR #1226・マージコミット `ab0b77d0`）の train fresh／reuse A/B。

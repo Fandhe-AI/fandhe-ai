@@ -12,6 +12,22 @@
 //! 導入がユーザー承認事項のため本モジュールでは実装しない（同 doc
 //! §3。構造変化時は再 capture + 再 instantiate で置き換える）。
 //!
+//! # 推論 forward チェーンの capture（イシュー #2115。別機構）
+//!
+//! 学習 step の update 区間（上記・`STEP_GRAPH_MODE`・#1349）とは**別の
+//! opt-in**として、推論 forward チェーン（`DeviceParamStore::
+//! predict_device_chain` の層カーネル列）を 1 本の graph へ capture し、
+//! 2 回目以降は graph launch 1 回で再生する経路を持つ
+//! （`run_captured_linear_chain`・opt-in は [`infer_graph_enabled`]・
+//! 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER`・既定 OFF）。層ごとの kernel
+//! launch と出力バッファの `alloc_zeroed`・入力の `upload` 新規確保を
+//! 除去することが目的で、graph・staging・中間バッファは thread-local の
+//! `INFER_GRAPHS` が所有する。**stream 種別（created stream）の決定は
+//! 学習側と共通**（`device.rs` が `step_graph_mode` と本 opt-in の OR で
+//! 決める。ordinal ごとに sticky）。設計・判定規則は
+//! `docs/perf/infer-chain-graphcapture-cuda-ab.md`・
+//! `docs/inference-chain-single-sync-design.md` §11。
+//!
 //! # opt-in フラグと共有ストリーム（`device.rs` との契約）
 //!
 //! `STEP_GRAPH_MODE` は 3 値（`GraphMode::Off`／`GraphMode::StreamOnly`／
@@ -38,22 +54,25 @@
 //! 最大 `MAX_CACHED_GRAPHS_PER_THREAD` 件まで保持する（超過時は挿入順
 //! 最古を evict）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use cudarc::driver::CudaGraph;
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 
-use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{
-    BackendOps, DispatchFailureCell, SegmentKey, SegmentRun, SgdStepConfig,
+    BackendOps, DispatchFailureCell, SegmentKey, SegmentRun, SgdStepConfig, Tensor,
 };
 
 use crate::context_cache;
+use crate::device::CudaDevice;
 use crate::error::CudaError;
+use crate::memory::{CudaBufferHandle, CudaMemory, CudaStorage};
 use crate::ops::CudaBackendOps;
 
 /// CUDA Graph step capture の opt-in 状態（モジュール冒頭コメント参照）。
@@ -628,6 +647,473 @@ pub(crate) fn run_captured_sgd_step_segment(
     Ok(SegmentRun::Captured)
 }
 
+// ============================================================
+// 推論 forward チェーンの capture（イシュー #2115。別機構・opt-in・既定 OFF）
+// ============================================================
+
+/// 推論チェーン capture の既定値（**既定 OFF**）。A/B の after 側・将来の
+/// 既定反転（別 PR）で反転する単一ゲート。反転すると `device.rs` の
+/// created stream 選択にも波及する（全 CUDA 利用者の既定ストリームが
+/// created に変わる）ため、反転は GB10 での ADOPT 判定後に限る。
+pub(crate) const INFER_GRAPH_DEFAULT_ENABLED: bool = false;
+
+/// 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` の値と既定値から opt-in を決める
+/// 純粋関数（`std::env` を読まないため並列テストで安全）。許容値は
+/// `1`／`true` の完全一致のみで、それ以外の設定値は fail-closed で OFF
+/// （OWASP A03。値をログ・エラー文へエコーしない）。未設定は `default`。
+fn resolve_infer_enabled(env: Option<&str>, default: bool) -> bool {
+    match env {
+        Some(raw) => matches!(raw, "1" | "true"),
+        None => default,
+    }
+}
+
+static INFER_ENV_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// override を含まない opt-in 判定（環境変数 > 既定 const。プロセス生存
+/// 期間中 1 回だけ読む）。`device.rs::CudaDevice::new` が created stream を
+/// 選ぶ判断に使う（stream 種別は ordinal ごとに sticky なため、スレッド
+/// ローカルの test override をここへ混ぜない）。
+///
+/// `internal-diagnostics` feature 下では `device.rs` 側の分岐が cfg で
+/// 除外され呼ばれなくなる（`GraphMode::requires_created_stream` と同じ）。
+#[cfg_attr(feature = "internal-diagnostics", allow(dead_code))]
+pub(crate) fn infer_graph_stream_requested() -> bool {
+    *INFER_ENV_ENABLED.get_or_init(|| {
+        resolve_infer_enabled(
+            std::env::var("FANDHE_AI_CUDA_GRAPH_INFER").ok().as_deref(),
+            INFER_GRAPH_DEFAULT_ENABLED,
+        )
+    })
+}
+
+thread_local! {
+    /// テスト専用の thread-local override（[`override_infer_graph_for_scope`]）。
+    static INFER_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// 推論チェーン capture が有効か（override > 環境変数 > 既定 const）。
+/// `CudaBackendOps::linear_chain_forward_captured` の最初の判定。
+pub fn infer_graph_enabled() -> bool {
+    INFER_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or_else(infer_graph_stream_requested)
+}
+
+/// [`override_infer_graph_for_scope`] の RAII ガード。drop で直前の値へ
+/// 戻す。thread-local を書き換えるため `!Send`
+/// （`tensor-core::alloc` の同型ガードと同じ設計）。
+#[must_use = "ガードを drop すると override が解除される"]
+pub struct InferGraphOverrideGuard {
+    prev: Option<bool>,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for InferGraphOverrideGuard {
+    fn drop(&mut self) {
+        let prev = self.prev;
+        let _ = INFER_OVERRIDE.try_with(|c| c.set(prev));
+    }
+}
+
+/// 同一プロセス内で capture あり／なしを比較する実機テスト専用に、
+/// 現スレッドの [`infer_graph_enabled`] を上書きする。**stream 種別は
+/// 変えない**（created stream 化は環境変数で起動時に決まる）ため、
+/// `true` を指定しても legacy stream 上では `Ok(None)`（不適用）になる。
+#[doc(hidden)]
+pub fn override_infer_graph_for_scope(enabled: bool) -> InferGraphOverrideGuard {
+    let prev = INFER_OVERRIDE.with(|c| c.replace(Some(enabled)));
+    InferGraphOverrideGuard {
+        prev,
+        _not_send: PhantomData,
+    }
+}
+
+static INFER_CAPTURED_COUNT: AtomicU64 = AtomicU64::new(0);
+static INFER_REPLAYED_COUNT: AtomicU64 = AtomicU64::new(0);
+static INFER_GRAPH_LAUNCH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 推論チェーン capture の診断カウンタ（POD）。学習側の
+/// [`StepGraphStats`] とは独立（0.9.0 ピンの bench が読む公開型を変えない
+/// ため別型）。値はプロセス起動からの累積で、前後の差分で使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InferGraphStats {
+    /// 新規 capture（キャッシュミス→capture→初回 launch 成功）の回数。
+    pub captured: u64,
+    /// 既存 graph の再生回数。
+    pub replayed: u64,
+    /// `CudaGraph::launch()` 成功回数（`captured + replayed` と一致する）。
+    pub graph_launches: u64,
+}
+
+/// [`InferGraphStats`] の現在値を返す。
+pub fn infer_graph_stats() -> InferGraphStats {
+    InferGraphStats {
+        captured: INFER_CAPTURED_COUNT.load(Ordering::Relaxed),
+        replayed: INFER_REPLAYED_COUNT.load(Ordering::Relaxed),
+        graph_launches: INFER_GRAPH_LAUNCH_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+/// thread-local に保持する 1 個の capture 済み推論チェーン。
+///
+/// **フィールド順が drop 順**: graph（exec）を先に破棄してから、graph が
+/// 参照するバッファ（staging・中間出力）を解放する。TLS 破棄時は
+/// `CudaBufferHandle::Drop` → `context_cache::begin_buffer_release` が
+/// 走るため、そちらは `try_with` 化済み（`context_cache.rs`）。
+struct CachedInferChain {
+    graph: CudaGraph,
+    input_staging: DeviceBuffer<f32>,
+    /// 各層の出力。最終要素が最終出力（`download` 対象）。
+    acts: Vec<DeviceBuffer<f32>>,
+    inserted_seq: u64,
+}
+
+thread_local! {
+    /// ordinal でパーティションした推論チェーンのキャッシュ（`STEP_GRAPHS`
+    /// と同型。別 ordinal の graph を replay・evict しない）。
+    static INFER_GRAPHS: RefCell<HashMap<usize, HashMap<SegmentKey, CachedInferChain>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn take_cached_chain(ordinal: usize, key: &SegmentKey) -> Option<CachedInferChain> {
+    INFER_GRAPHS
+        .try_with(|cache| {
+            cache
+                .borrow_mut()
+                .get_mut(&ordinal)
+                .and_then(|per_ordinal| per_ordinal.remove(key))
+        })
+        .ok()
+        .flatten()
+}
+
+/// 世代不一致の掃除・上限超過時の最古 evict をまとめて行い、`entry` を
+/// 戻す（[`put_cached_graph`] と同じ方針。同一 ordinal 内で閉じる）。
+fn put_cached_chain(ordinal: usize, key: SegmentKey, mut entry: CachedInferChain) {
+    let _ = INFER_GRAPHS.try_with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let cache = cache.entry(ordinal).or_default();
+        cache.retain(|k, _| k.generation == key.generation);
+        if cache.len() >= MAX_CACHED_GRAPHS_PER_THREAD
+            && !cache.contains_key(&key)
+            && let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.inserted_seq)
+                .map(|(k, _)| k.clone())
+        {
+            cache.remove(&oldest_key);
+        }
+        entry.inserted_seq = next_seq();
+        cache.insert(key, entry);
+    });
+}
+
+/// capture 対象 1 層分の記述（`CudaBackendOps::linear_chain_forward_captured`
+/// が検査済みの値を渡す）。
+pub(crate) struct ChainLayer<'a> {
+    pub(crate) w: DeviceBufferView<'a>,
+    pub(crate) bias: Option<DeviceBufferView<'a>>,
+    pub(crate) relu: bool,
+    pub(crate) k: usize,
+    pub(crate) n: usize,
+}
+
+/// `buf` の CUDA 実体（`CudaStorage`）を取り出す。
+fn storage_ref(buf: &DeviceBuffer<f32>) -> Result<&CudaStorage, BackendError> {
+    let handle = buf
+        .downcast_handle::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    handle.storage.as_ref().ok_or_else(|| {
+        BackendError::DeviceAllocationFailed(
+            "linear_chain capture: buffer has numel > 0 but no device allocation".to_string(),
+        )
+    })
+}
+
+/// 層カーネル列を `stream` へ積む（capture 区間の body。`launch_tiled_bias_act_
+/// f32_resident` は `linear_forward_device` と同じ融合カーネルで、alloc・
+/// upload・download・同期を含まないため capture 可能）。1 層目の入力は
+/// `input_staging`、以降は直前層の出力。launch 失敗は `token` で観測
+/// （sticky なら ordinal を poison）してから型付きエラーで返す。
+fn launch_chain_layers(
+    gemm: &crate::gemm::CudaGemm,
+    ordinal: usize,
+    token: &context_cache::CallToken,
+    input_staging: &DeviceBuffer<f32>,
+    acts: &mut [DeviceBuffer<f32>],
+    layers: &[ChainLayer<'_>],
+    m: usize,
+) -> Result<(), BackendError> {
+    for (i, layer) in layers.iter().enumerate() {
+        let (done, rest) = acts.split_at_mut(i);
+        let a_buf: &DeviceBuffer<f32> = if i == 0 { input_staging } else { &done[i - 1] };
+        let c_buf = rest.first_mut().ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "linear_chain capture: acts/layers length mismatch".into(),
+            )
+        })?;
+        let a_arg = storage_ref(a_buf)?.as_arg();
+        let w_full = storage_ref(layer.w.buffer())?;
+        let w_view = w_full.view(layer.w.offset()..layer.w.offset() + layer.w.numel());
+        let bias_view = match layer.bias {
+            Some(b) => {
+                let full = storage_ref(b.buffer())?;
+                Some(full.view(b.offset()..b.offset() + b.numel()))
+            }
+            None => None,
+        };
+        let c_handle = c_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let c_storage = c_handle.storage.as_mut().ok_or_else(|| {
+            BackendError::DeviceAllocationFailed(
+                "linear_chain capture: output buffer has numel > 0 but no device allocation"
+                    .to_string(),
+            )
+        })?;
+        let mut c_arg = c_storage.as_arg_mut();
+        if let Err(e) = gemm.launch_tiled_bias_act_f32_resident(
+            &a_arg,
+            &w_view,
+            bias_view.as_ref(),
+            layer.relu,
+            &mut c_arg,
+            m as u32,
+            layer.n as u32,
+            layer.k as u32,
+        ) {
+            context_cache::observe_cuda_error_ref(ordinal, token, &e);
+            return Err(crate::memory::map_cuda_error(e));
+        }
+    }
+    Ok(())
+}
+
+/// キャッシュミス時に staging・中間バッファを確保し、層カーネル列を
+/// capture して graph を作る（`run_captured_sgd_step_segment` の ②と同じ
+/// 手順: warmup → `begin_capture_session` → `begin_driver_call` →
+/// `begin_capture` → body〈`catch_unwind`〉→ 必ず `end_capture` →
+/// `upload`）。**capture 中は alloc／upload／download をしない**
+/// （`with_sync_point_call` が拒否するため。確保は全て capture の外）。
+/// 呼び出し時点でスレッドは当該 ordinal の `CallToken` を保持していない
+/// こと（`begin_capture_session` の in_flight ドレイン契約）。
+///
+/// 中間出力バッファを replay ごとに再利用できるのは、融合カーネル
+/// （`kernels.rs::gemm_tiled_bias_act_f32`）が境界検査付きで `c[..] = v` と
+/// **全要素を上書き**し、累積（`+=`）しないため（zeroed 前提に依存しない）。
+fn capture_chain(
+    ordinal: usize,
+    device: &Arc<CudaDevice>,
+    mem: &CudaMemory,
+    key: &SegmentKey,
+    m: usize,
+    layers: &[ChainLayer<'_>],
+) -> Result<CachedInferChain, BackendError> {
+    let stream = device.stream();
+    let k0 = layers.first().map(|l| l.k).ok_or_else(|| {
+        BackendError::InvalidArgument("linear_chain capture: empty layers".to_string())
+    })?;
+    let input_staging = mem.alloc_zeroed(&[m, k0])?;
+    let mut acts = Vec::with_capacity(layers.len());
+    for l in layers {
+        acts.push(mem.alloc_zeroed(&[m, l.n])?);
+    }
+
+    // NVRTC／モジュールロードを capture の排他区間の外で済ませる
+    // （`run_captured_sgd_step_segment` の warmup と同じ理由）。さらに
+    // 層カーネル列を capture の**外で 1 回実際に launch** して、CUDA の
+    // lazy module loading（`CUDA_MODULE_LOADING=LAZY`）で初回 launch
+    // 時に走る関数ロードを capture 区間へ持ち込まない（capture 中の
+    // 暗黙ロードによる capture 失敗を避ける。staging はゼロ初期化済みで
+    // 出力は捨てる。ストリーム順序により後続の graph launch より前に
+    // 完了する）。結果は観測して sticky エラーなら ordinal を poison する。
+    let gemm = {
+        let warmup_token = context_cache::begin_driver_call(ordinal, &[key.generation])?;
+        let gemm = match context_cache::observe_cuda_result(
+            ordinal,
+            &warmup_token,
+            context_cache::cached_gemm(device),
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                drop(warmup_token);
+                return Err(crate::memory::map_cuda_error(e));
+            }
+        };
+        let warm = launch_chain_layers(
+            &gemm,
+            ordinal,
+            &warmup_token,
+            &input_staging,
+            &mut acts,
+            layers,
+            m,
+        );
+        drop(warmup_token);
+        warm?;
+        gemm
+    };
+
+    let guard = context_cache::begin_capture_session(ordinal)?;
+    let token = match context_cache::begin_driver_call(ordinal, &[key.generation]) {
+        Ok(t) => t,
+        Err(e) => {
+            drop(guard);
+            return Err(e);
+        }
+    };
+    let begin_result =
+        stream.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
+    if let Err(e) = context_cache::observe_driver_result(ordinal, &token, begin_result) {
+        drop(guard);
+        return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
+    }
+
+    // panic しても必ず `end_capture` してから型付きエラーへ変換する
+    // （driver 側の capture を残さない。`run_captured_sgd_step_segment` と
+    // 同じ契約。本番経路で panic を再送出しない）。
+    let body_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        launch_chain_layers(&gemm, ordinal, &token, &input_staging, &mut acts, layers, m)
+    }));
+    let end_result = stream.end_capture(instantiate_flags());
+    drop(guard);
+
+    let body_result = match body_outcome {
+        Ok(r) => r,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "panic payload of unknown type".to_string());
+            Err(BackendError::KernelLaunchFailed(format!(
+                "capture_chain: layer launch panicked during CUDA Graph capture (end_capture \
+                 has already been called): {msg}"
+            )))
+        }
+    };
+    let body_err = body_result.err();
+
+    let graph = match end_result {
+        Ok(Some(graph)) => graph,
+        Ok(None) => {
+            // 空 graph は fail-closed（silent success 禁止）。
+            return Err(body_err.unwrap_or_else(|| {
+                // `Unsupported` にしない: チェーン側の `Unsupported` は tape 経路
+                // への黙示の全体フォールバック（決定 7）になり、毎回 capture を
+                // 試みて最遅経路へ落ちるサイレント劣化を招くため、実失敗として
+                // 顕在化させる。
+                BackendError::KernelLaunchFailed(
+                    "capture_chain: end_capture produced an empty graph (no kernel launches \
+                     were recorded during capture)"
+                        .to_string(),
+                )
+            }));
+        }
+        Err(e) => {
+            let _ = context_cache::observe_driver_result::<()>(ordinal, &token, Err(e));
+            let mapped = crate::memory::map_cuda_error(CudaError::Driver(e));
+            return Err(body_err.unwrap_or(mapped));
+        }
+    };
+    if let Some(e) = body_err {
+        return Err(e);
+    }
+    if let Err(e) = graph.upload() {
+        context_cache::observe_cuda_error_ref(ordinal, &token, &CudaError::Driver(e));
+        return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
+    }
+    drop(token);
+    Ok(CachedInferChain {
+        graph,
+        input_staging,
+        acts,
+        inserted_seq: 0,
+    })
+}
+
+/// 共通の実行手順（キャッシュヒット・ミス直後とも）: 入力を staging へ
+/// H2D（capture 外の同期点。既存チェーンの `upload` 相当）→ graph launch
+/// 1 回 → 最終出力を `download`（最終同期点 1 回）。決定 3（設計文書
+/// `docs/inference-chain-single-sync-design.md`）の「同期点は入力 1・
+/// 出力 1」を守る。
+fn execute_chain(
+    ordinal: usize,
+    mem: &CudaMemory,
+    entry: &mut CachedInferChain,
+    generation: u64,
+    input: &Tensor<f32>,
+    fresh: bool,
+) -> Result<Tensor<f32>, BackendError> {
+    mem.upload_into(input, &mut entry.input_staging, 0)?;
+    {
+        let token = context_cache::begin_driver_call(ordinal, &[generation])?;
+        let launch_result = entry.graph.launch();
+        context_cache::observe_driver_result(ordinal, &token, launch_result)
+            .map_err(|e| crate::memory::map_cuda_error(CudaError::Driver(e)))?;
+    }
+    // 3 カウンタは launch 成功時に揃えて加算する（`InferGraphStats` の
+    // `graph_launches == captured + replayed` の不変条件。以後の download
+    // 失敗では崩れない）。
+    INFER_GRAPH_LAUNCH_COUNT.fetch_add(1, Ordering::Relaxed);
+    if fresh {
+        INFER_CAPTURED_COUNT.fetch_add(1, Ordering::Relaxed);
+    } else {
+        INFER_REPLAYED_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    let last = entry.acts.last().ok_or_else(|| {
+        BackendError::InvalidArgument("linear_chain capture: cached chain has no output".into())
+    })?;
+    mem.download(last)
+}
+
+/// [`crate::ops::CudaBackendOps::linear_chain_forward_captured`] の実体
+/// （イシュー #2115）。`key` に対応する capture 済みチェーンがあれば
+/// replay、なければ capture してから実行する。`key` は呼び出し元が同じ
+/// 呼び出し内の live 借用から計算した値のため、ヒットした graph が焼き
+/// 込んだ weight/bias アドレスは現在生存しているバッファと一致する
+/// （#1349 §4.4 の再検証論法）。
+///
+/// 呼び出しスレッドは当該 ordinal の `CallToken` を保持していないこと。
+pub(crate) fn run_captured_linear_chain(
+    ordinal: usize,
+    device: &Arc<CudaDevice>,
+    mem: &CudaMemory,
+    key: SegmentKey,
+    input: &Tensor<f32>,
+    m: usize,
+    layers: &[ChainLayer<'_>],
+) -> Result<Tensor<f32>, BackendError> {
+    let k0 = layers.first().map(|l| l.k).ok_or_else(|| {
+        BackendError::InvalidArgument("linear_chain capture: empty layers".to_string())
+    })?;
+    if input.shape() != [m, k0] {
+        return Err(BackendError::InvalidArgument(
+            "linear_chain capture: input shape does not match the captured chain".to_string(),
+        ));
+    }
+    let generation = key.generation;
+    let (mut entry, fresh) = match take_cached_chain(ordinal, &key) {
+        Some(e) => (e, false),
+        None => (capture_chain(ordinal, device, mem, &key, m, layers)?, true),
+    };
+    match execute_chain(ordinal, mem, &mut entry, generation, input, fresh) {
+        Ok(t) => {
+            put_cached_chain(ordinal, key, entry);
+            Ok(t)
+        }
+        Err(e) => {
+            // 既存 graph は破損していないため、失敗しても戻す（一過性の
+            // `DeviceContextCaptureInProgress` 等で失わない。step 版と同型）。
+            // 新規 capture 直後の失敗は再利用しない。
+            if !fresh {
+                put_cached_chain(ordinal, key, entry);
+            }
+            Err(e)
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,5 +1219,92 @@ mod tests {
         assert_eq!(after.captured - before.captured, 1);
         assert_eq!(after.replayed - before.replayed, 1);
         assert_eq!(after.graph_launches - before.graph_launches, 2);
+    }
+
+    /// イシュー #2115: 推論チェーン opt-in の環境変数解釈は `1`／`true` の
+    /// 完全一致のみ ON（未設定は既定値・それ以外は fail-closed で OFF）。
+    #[test]
+    fn resolve_infer_enabled_accepts_only_allowlisted_values() {
+        assert!(resolve_infer_enabled(Some("1"), false));
+        assert!(resolve_infer_enabled(Some("true"), false));
+        for bad in [
+            "0",
+            "false",
+            "TRUE",
+            "True",
+            "",
+            " 1",
+            "; rm -rf /",
+            "stream-only",
+        ] {
+            assert!(
+                !resolve_infer_enabled(Some(bad), true),
+                "{bad:?} は OFF のはず"
+            );
+        }
+        assert!(!resolve_infer_enabled(None, false));
+        assert!(resolve_infer_enabled(None, true));
+    }
+
+    /// 既定は OFF（受け入れ基準 1。反転は ADOPT 判定後の別 PR）。
+    #[test]
+    fn infer_graph_default_is_off() {
+        const { assert!(!INFER_GRAPH_DEFAULT_ENABLED) };
+    }
+
+    /// override は現スレッド限定で、ガード drop で直前の値へ戻る。
+    #[test]
+    fn override_infer_graph_round_trips_and_nests() {
+        let base = infer_graph_enabled();
+        {
+            let _g1 = override_infer_graph_for_scope(true);
+            assert!(infer_graph_enabled());
+            {
+                let _g2 = override_infer_graph_for_scope(false);
+                assert!(!infer_graph_enabled());
+            }
+            assert!(infer_graph_enabled());
+            let other = std::thread::spawn(infer_graph_enabled).join().unwrap();
+            assert_eq!(other, infer_graph_stream_requested());
+        }
+        assert_eq!(infer_graph_enabled(), base);
+    }
+
+    /// `infer_graph_stats` がカウンタ現在値を反映する（差分検証）。
+    #[test]
+    fn infer_graph_stats_reflects_counters() {
+        let before = infer_graph_stats();
+        INFER_CAPTURED_COUNT.fetch_add(1, Ordering::Relaxed);
+        INFER_REPLAYED_COUNT.fetch_add(2, Ordering::Relaxed);
+        INFER_GRAPH_LAUNCH_COUNT.fetch_add(3, Ordering::Relaxed);
+        let after = infer_graph_stats();
+        assert_eq!(after.captured - before.captured, 1);
+        assert_eq!(after.replayed - before.replayed, 2);
+        assert_eq!(after.graph_launches - before.graph_launches, 3);
+    }
+
+    /// TLS 破棄後を模擬: 別スレッドの終了時に `INFER_GRAPHS` を触っても
+    /// （`try_with` 化により）abort しない。キャッシュ操作が破棄後に
+    /// no-op へ縮退することを確認する。
+    #[test]
+    fn infer_cache_access_after_tls_destruction_does_not_panic() {
+        struct TouchOnDrop;
+        impl Drop for TouchOnDrop {
+            fn drop(&mut self) {
+                let key = SegmentKey {
+                    generation: 0,
+                    config_key: 0,
+                    resources: Vec::new(),
+                };
+                assert!(take_cached_chain(usize::MAX, &key).is_none());
+            }
+        }
+        thread_local! { static T: TouchOnDrop = const { TouchOnDrop }; }
+        std::thread::spawn(|| {
+            let _ = INFER_GRAPHS.with(|c| c.borrow().len());
+            T.with(|_| {});
+        })
+        .join()
+        .unwrap();
     }
 }
