@@ -55,9 +55,12 @@ if ! grep -qE '^\s*name\s*=\s*"fandhe-ai"\s*$' "$AB_PATCH_FACADE_PATH/Cargo.toml
 fi
 PATCH_CONFIG="patch.crates-io.fandhe-ai.path=\"${AB_PATCH_FACADE_PATH}\""
 
+# イシュー #2112・codex-review 指摘（PR #2456）: RULE.txt は 5 round 固定で、
+# 後段 compare_gemm_ab.py も各セル 5 件を要求する。5 以外は判定不能な出力を
+# 生むため、計測開始前に fail-closed で拒否する（環境変数での上書きも 5 のみ許可）。
 AB_ROUNDS=${AB_ROUNDS:-5}
-if [[ ! "$AB_ROUNDS" =~ ^[0-9]+$ || "$AB_ROUNDS" -lt 1 ]]; then
-  echo "error: AB_ROUNDS must be a positive integer (got: $AB_ROUNDS)" >&2
+if [[ "$AB_ROUNDS" != "5" ]]; then
+  echo "error: AB_ROUNDS は 5 固定（RULE.txt の事前登録条件。got: $AB_ROUNDS）" >&2
   exit 1
 fi
 
@@ -68,20 +71,47 @@ OUT_PARALLEL="results/raw/results-m4max-readback-ab-${LABEL}-parallel.jsonl"
 SKIP="results/raw/skipped-m4max-readback-ab-${LABEL}.log"
 MANIFEST="results/raw/manifest-m4max-readback-ab-${LABEL}.json"
 UNDETERMINED="results/raw/readback-ab-${LABEL}.undetermined.txt"
+if [[ -L results || -L results/raw ]]; then
+  echo "error: results／results/raw がシンボリックリンク（出力先のすり替え防止のため拒否）" >&2
+  exit 1
+fi
 mkdir -p results/raw
 
-for existing in "$OUT_FRESH" "$OUT_PARALLEL"; do
-  if [[ -e "$existing" ]]; then
-    echo "error: 既存の出力がある（上書き禁止・run 差し替え禁止。RULE.txt）: $existing" >&2
-    exit 1
-  fi
-done
 OUT_FRESH_TMP="${OUT_FRESH}.tmp"
 OUT_PARALLEL_TMP="${OUT_PARALLEL}.tmp"
 SKIP_TMP="${SKIP}.tmp"
-: > "$OUT_FRESH_TMP"
-: > "$OUT_PARALLEL_TMP"
-: > "$SKIP_TMP"
+MANIFEST_TMP="${MANIFEST}.tmp"
+GATE_LOG="results/raw/gate-readback-ab-${LABEL}.log"
+UPTIME_SAMPLER_LOG="results/raw/uptime-readback-ab-${LABEL}.log"
+
+# イシュー #2112・codex-review 指摘（PR #2456 P0）: 全出力（正規パス・一時ファイル・
+# 各ログ・undetermined マーカー）は既存パス・シンボリックリンク（dangling 含む）を
+# 拒否し、排他作成（noclobber = O_EXCL）でのみ作る。`: >` は既存リンクをたどって
+# リンク先を切り詰めうるため使わない。上書き禁止・run 差し替え禁止（RULE.txt）。
+reject_existing() { # reject_existing <path>
+  if [[ -e "$1" || -L "$1" ]]; then
+    echo "error: 既存の出力またはシンボリックリンクがある（上書き禁止・run 差し替え禁止。RULE.txt）: $1" >&2
+    return 1
+  fi
+}
+create_excl() { # create_excl <path>: 空ファイルを排他作成
+  reject_existing "$1" || return 1
+  ( set -C; : > "$1" ) || { echo "error: 排他作成に失敗した: $1" >&2; return 1; }
+}
+write_excl() { # write_excl <path>: stdin を排他作成したファイルへ書く
+  reject_existing "$1" || return 1
+  ( set -C; cat > "$1" ) || { echo "error: 排他書き込みに失敗した: $1" >&2; return 1; }
+}
+
+# 計測開始前に全出力先を一括検査する（途中失敗で部分出力を残さない）。
+for existing in "$OUT_FRESH" "$OUT_PARALLEL" "$SKIP" "$MANIFEST" "$UNDETERMINED" \
+  "$OUT_FRESH_TMP" "$OUT_PARALLEL_TMP" "$SKIP_TMP" "$MANIFEST_TMP" \
+  "$GATE_LOG" "$UPTIME_SAMPLER_LOG"; do
+  reject_existing "$existing" || exit 1
+done
+create_excl "$OUT_FRESH_TMP" || exit 1
+create_excl "$OUT_PARALLEL_TMP" || exit 1
+create_excl "$SKIP_TMP" || exit 1
 
 ANY_FAILED=0
 
@@ -191,8 +221,8 @@ load1_is_valid() {
 
 wait_for_exclusive_gate() {
   local attempt=0 wait_s="$AB_LOAD_GATE_INITIAL_WAIT" consecutive_ok=0 l1
-  local gate_log="results/raw/gate-readback-ab-${LABEL}.log"
-  : > "$gate_log"
+  local gate_log="$GATE_LOG"
+  create_excl "$gate_log" || return 1
   while [[ "$attempt" -lt "$AB_LOAD_GATE_MAX_ATTEMPTS" ]]; do
     l1="$(load1_now)"
     if ! load1_is_valid "$l1"; then
@@ -227,7 +257,7 @@ wait_for_exclusive_gate() {
     echo "reason=専有ゲート（load average < ${AB_LOAD_GATE_MAX_LOAD1} を 2 回連続）が ${AB_LOAD_GATE_MAX_ATTEMPTS} 試行以内に成立しなかった"
     echo "gate_log=$gate_log"
     date -u +%Y-%m-%dT%H:%M:%SZ
-  } > "$UNDETERMINED"
+  } | write_excl "$UNDETERMINED"
   echo "undetermined: ${UNDETERMINED}（判定規則 §2 に従い再試行せず終了する）" >&2
   return 1
 }
@@ -245,10 +275,10 @@ fi
 # load average の推移は gate-readback-ab-<label>.log／uptime-readback-ab-<label>.log
 # へ記録する（#1520 と同じ記録先）。
 record_only_gate_note() {
-  local gate_log="results/raw/gate-readback-ab-${LABEL}.log"
+  local gate_log="$GATE_LOG"
   local l1
   l1="$(load1_now)"
-  : > "$gate_log"
+  create_excl "$gate_log" || return 1
   # `wait_for_exclusive_gate` と同じく `load1_is_valid` で数値妥当性を
   # 検証してから記録する（codex-review 指摘・PR #1493 P1 と同型の懸念:
   # `uptime` の出力形式が想定外の場合 `load1_now` が非数値をそのまま
@@ -304,14 +334,18 @@ restore_lock_trap() {
 }
 trap restore_lock_trap EXIT
 
+# stderr の退避先は mktemp（排他作成・推測不能名）。固定名のリダイレクトは
+# 既存リンクをたどるため使わない（PR #2456 P0 と同型）。
+BUILD_ERR="$(mktemp)"
+RUN_ERR="$(mktemp)"
 echo "== build bench-fandhe (HEAD path patch) =="
-if ! cargo build --release -p bench-fandhe --config "$PATCH_CONFIG" 2>build-err.tmp; then
-  tail -40 build-err.tmp
-  echo "bench-fandhe BUILD FAILED: $(tail -3 build-err.tmp | tr '\n' ' ')" >&2
-  rm -f build-err.tmp
+if ! cargo build --release -p bench-fandhe --config "$PATCH_CONFIG" 2>"$BUILD_ERR"; then
+  tail -40 "$BUILD_ERR"
+  echo "bench-fandhe BUILD FAILED: $(tail -3 "$BUILD_ERR" | tr '\n' ' ')" >&2
+  rm -f "$BUILD_ERR"
   exit 1
 fi
-rm -f build-err.tmp
+rm -f "$BUILD_ERR"
 
 SOURCE_DESC="$(fandhe_ai_source_desc --config "$PATCH_CONFIG" || true)"
 if [[ "$SOURCE_DESC" != "path:${AB_PATCH_FACADE_PATH}" ]]; then
@@ -324,8 +358,7 @@ echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
 
 SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
 FACADE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
-MANIFEST_TMP="${MANIFEST}.tmp"
-cat > "$MANIFEST_TMP" <<JSON
+write_excl "$MANIFEST_TMP" <<JSON
 {"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","readback_arms":["fresh","parallel"],"env":"FANDHE_AI_METAL_READBACK_DEST","gate_mode":"${AB_LOAD_GATE_MODE}","load_gate_max_load1":"${AB_LOAD_GATE_MAX_LOAD1}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
 echo "== manifest（一時ファイル）記録: $MANIFEST_TMP =="
@@ -347,16 +380,16 @@ run() { # run <arm: fresh|parallel> <task: gemm|infer> <size(gemm のみ)>
   echo "== bench-fandhe $task metal reuse size=${size:-n/a} readback=$arm =="
   local rc=0
   if [[ "$task" == "gemm" ]]; then
-    FANDHE_AI_METAL_READBACK_DEST="$arm" ./target/release/bench-fandhe --task gemm --device metal --size "$size" --mode reuse --out "$out_tmp" 2>err.tmp || rc=$?
+    FANDHE_AI_METAL_READBACK_DEST="$arm" ./target/release/bench-fandhe --task gemm --device metal --size "$size" --mode reuse --out "$out_tmp" 2>"$RUN_ERR" || rc=$?
   else
-    FANDHE_AI_METAL_READBACK_DEST="$arm" ./target/release/bench-fandhe --task infer --device metal --mode reuse --out "$out_tmp" 2>err.tmp || rc=$?
+    FANDHE_AI_METAL_READBACK_DEST="$arm" ./target/release/bench-fandhe --task infer --device metal --mode reuse --out "$out_tmp" 2>"$RUN_ERR" || rc=$?
   fi
   if [[ "$rc" -ne 0 ]]; then
-    echo "$task metal size=${size:-n/a} readback=$arm : $(cat err.tmp)" >> "$SKIP_TMP"
+    echo "$task metal size=${size:-n/a} readback=$arm : $(cat "$RUN_ERR")" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in $SKIP_TMP)"
     ANY_FAILED=$((ANY_FAILED + 1))
   fi
-  rm -f err.tmp
+  : > "$RUN_ERR"
 }
 
 run_cell() { # run_cell <round> <task> <size>
@@ -372,8 +405,7 @@ sysctl -n machdep.cpu.brand_string 2>&1 || true
 pmset -g therm 2>&1 || true
 uptime 2>&1 || true
 
-UPTIME_SAMPLER_LOG="results/raw/uptime-readback-ab-${LABEL}.log"
-: > "$UPTIME_SAMPLER_LOG"
+create_excl "$UPTIME_SAMPLER_LOG" || exit 1
 (
   while true; do
     { date -u +%Y-%m-%dT%H:%M:%SZ; uptime; } >> "$UPTIME_SAMPLER_LOG" 2>&1
