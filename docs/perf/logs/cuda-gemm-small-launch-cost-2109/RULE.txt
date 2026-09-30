@@ -98,6 +98,12 @@
   - 生ログ・env_info はホスト名を masked、$HOME を <home> に置換してから
     収録する（orchestrate.sh が収録時に置換。aggregate.py が未マスクの
     絶対パスを検出したら exit != 0）。
+  - この検査は集計が読む全入力に同じく適用する（必須ログに加え、任意・補助入力の
+    nsys-cuda-api.log・env_info.txt も存在すれば内容を検査する。「nsys 欠測」記録のみの
+    内容でも検査対象）。ただし検査するのは `/home/<name>` 形の絶対パスのみで、
+    ホスト名の残存までは検出しない。
+  - orchestrate.sh は LOG_DIR・FRAMEWORK_COMPARE_DIR を最初の cd より前に絶対パスへ
+    正規化する（相対指定でもログを 1 ディレクトリに集約するため）。
 
 11. 再実行しない既存実験（本件では A/B を再実行しない）
   - H2D pinned staging（#1585・REJECT）／per-call alloc release threshold

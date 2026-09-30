@@ -41,6 +41,11 @@ SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SELF_DIR/../../../.." && pwd)"
 WORK_DIR="${FRAMEWORK_COMPARE_DIR:-$REPO_ROOT/scripts/bench/framework-compare}"
 LOG_DIR="${LOG_DIR:-$SELF_DIR}"
+# パスは最初の `cd` より前に絶対パスへ正規化する（後段で `cd "$WORK_DIR"`／`cd "$REPO_ROOT"` するため、
+# 相対のままだと既存ログ検査・load_gate.log・Layer A・Layer B が別ディレクトリへ分散する）。
+# ディレクトリ未作成でも解決できるよう先頭が `/` でなければ起動時の cwd を前置する。
+case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
+case "$WORK_DIR" in /*) ;; *) WORK_DIR="$PWD/$WORK_DIR" ;; esac
 N=256
 RUNS=5
 RUN_NSYS="${RUN_NSYS:-0}"

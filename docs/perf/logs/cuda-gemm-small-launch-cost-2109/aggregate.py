@@ -243,7 +243,11 @@ def expected_counts(n: int) -> dict:
 
 def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_text: str,
               gate_text: str, head_phases_text: str, head_ac2_text: str,
-              counts_exact_text: str, nsys_text: str | None = None) -> str:
+              counts_exact_text: str, nsys_text: str | None = None,
+              env_text: str | None = None) -> str:
+    # 任意・補助入力（nsys・env_info）も必須ログと同じマスク検査を通す（RULE.txt 10）。
+    check_optional_log(nsys_text, "nsys-cuda-api")
+    check_optional_log(env_text, "env_info")
     gate_ok = parse_gate(gate_text)
     check_counts_exact(counts_exact_text)
     if len(layer_b_texts) != RUNS:
@@ -498,6 +502,16 @@ def self_test() -> None:
               "counts-exact テスト失敗")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, ce_=ce_ok.replace("1 passed", "0 passed")), "counts-exact 0 件実行")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, ce_=ce_ok + "# /home/someone/x\n"), "counts-exact 未マスク")
+    # 任意・補助入力（nsys・env_info）も同じマスク検査を通る（存在すれば内容を検査。正常は通る）。
+    ok_nsys = "nsys 欠測（RUN_NSYS=1 未指定）\n"
+    assert "欠測" in aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, ok_nsys, "host masked\n")
+    assert "取得済み" in aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, "CUDA API Summary\n<home>/x\n")
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, "CUDA API\n/home/someone/x\n"),
+              "nsys 未マスク")
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, ok_nsys + "/home/someone/x\n"),
+              "nsys 欠測記録に未マスク")
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate, hpa, hac2, ce_ok, None, "path /home/someone/x\n"),
+              "env_info 未マスク")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, hac2_=_jsonl([90], None, "1.000000")), "HEAD checksum 不一致")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate, hpa_=hpa.replace('"matmul"', '"matmul_x"', 1)), "HEAD phase 不正")
     must_fail(lambda: agg(lb, pa, ac2, cd, gate.replace("head-ac2 run1", "head-ac2 run9")), "HEAD ゲートラベル不一致")
@@ -510,6 +524,15 @@ def self_test() -> None:
     aux = [ln for ln in md.splitlines() if ln.startswith("| 補助 h2d_clone_drop")][0]
     assert aux.endswith("| 記録のみ |"), aux
     print("self-test OK")
+
+
+def check_optional_log(text: str | None, name: str) -> None:
+    """任意・補助ログ（nsys-cuda-api.log 等）も必須ログと同じマスク検査を通す（RULE.txt 10）。
+
+    「欠測」記録のみの内容でも検査する。存在しない（None）場合のみ検査を省く。
+    """
+    if text is not None:
+        check_masked(text, name)
 
 
 def main(argv: list[str]) -> int:
@@ -535,12 +558,14 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         return 1
     nsys = d / "nsys-cuda-api.log"
+    env = d / "env_info.txt"
     try:
         print(aggregate([p.read_text() for p in needed[:RUNS]], needed[RUNS].read_text(),
                         needed[RUNS + 1].read_text(), needed[RUNS + 2].read_text(),
                         needed[RUNS + 3].read_text(), needed[RUNS + 4].read_text(),
                         needed[RUNS + 5].read_text(), needed[RUNS + 6].read_text(),
-                        nsys.read_text() if nsys.exists() else None))
+                        nsys.read_text() if nsys.exists() else None,
+                        env.read_text() if env.exists() else None))
     except LogIntegrityError as exc:
         print(f"LogIntegrityError: {exc}", file=sys.stderr)
         return 1
