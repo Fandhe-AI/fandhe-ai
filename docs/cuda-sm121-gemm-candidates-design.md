@@ -22,7 +22,7 @@
 | 機能 | sm_121 での状態 | 出典 |
 |---|---|---|
 | `mma.sync`・`ldmatrix`・`cp.async` | 可（実装実績あり） | `cuda-tensor-core-design.md` §11.1 |
-| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機の意味論プローブ 3 件で成立。`shared::cta` と cluster variant の両方で bit 一致） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
+| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機で NVRTC compile・CTA 実行・cluster 実行の 3 プローブが成立。`shared::cta` と cluster variant の両方で bit 一致。要素座標・部分 OOB・smem 配置ダンプの意味論プローブ 3 件は未実装で、その範囲の検証は未了） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
 | wgmma・tcgen05・TMEM | 不可（静的読解。実機での再確認は #2122 待ち） | `cuda-tensor-core-design.md` §11.1 |
 | cluster（実用） | 1×1×1 のみ（静的読解。launch 可否の実機確認は #2122 待ち） | 同 §11.1 |
 | `setmaxnreg` | **未実測**（プローブ実装はあるが実機実行は未了） | 同 §13・`backend-cuda-tma-gemm-load-design.md` §2 F2 |
@@ -138,7 +138,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 - **A**: bit 一致（同タイルの cp.async 版 vs 候補。端あり・転置 4 パターン）
 - **B**: parity 非後退（`tests/parity_nonregression.rs` 等で 0 fail）
 - **C**: GPU-only の純カーネル時間の 5 回中央値。N≥1024 のいずれかで ≥1.05 かつ全計測形状で後退なし
-- **D**: 結線後の本番ディスパッチ非後退（framework-compare の gemm cuda を同一 HEAD の base／after で比較・checksum 一致）
+- **D**: 結線後の本番ディスパッチ非後退（framework-compare の gemm cuda を同一 HEAD の base／after で比較し、checksum 完全一致と性能非後退の両方を満たすこと。`backend-cuda-tma-gemm-load-design.md` §6 のゲート D と同じ）
 
 **no-go**: A の不一致 1 件、または C の後退 1 形状で REJECT（opt-in 維持）。判定基準は実測前に固定し、事後に変更しない。tolerance・baseline の変更が必要になった時点で停止し、ユーザー承認へ回す。
 
