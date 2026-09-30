@@ -43,6 +43,7 @@ def parse_args():
     p.add_argument('--m4-load', default='', help='M4 Max の負荷条件注記文（計測条件節に埋め込む）')
     p.add_argument('--gb-load', default='', help='GB10 の負荷条件注記文（計測条件節に埋め込む）')
     p.add_argument('--body', default=str(Path(__file__).with_name('body_2120.html')), help='本文テンプレート HTML')
+    # 既定 CSS: 本ファイル(scoreboard/)の 2 つ上 = 2120 ディレクトリ、3 つ上 = docs/perf/logs。0.9.0 版 CSS は logs 直下にある。
     p.add_argument('--style', default=str(Path(__file__).resolve().parent.parent.parent / 'framework-compare-0.9.0-remeasure' / 'scoreboard' / 'style.css'), help='CSS（0.9.0 版と同一ファイル）')
     p.add_argument('--prev-label', default='0.8.0', help='「前比」列の比較元ラベル（既定 0.8.0）')
     p.add_argument('--main-label', default='0.9.0', help='判定列の見出しに使う fandhe-ai 側ラベル（既定 0.9.0。#2120 では "Phase 3 後（HEAD）"）')

@@ -216,17 +216,20 @@ def render(runs, machine, stats):
     L.append('')
     L.append('## Phase 3 前後比 B→C（主）・A→C（参考）。比 = C.median_s / B.median_s（同一 run 内・<1 で C が高速。非後退 ⇔ 5 run 中央値 <= 1.00）')
     L.append('')
-    L.append('| セル | B 中央値[s] | C 中央値[s] | run1 | run2 | run3 | run4 | run5 | B→C 中央値 | 判定 | A→C 中央値 | checksum（run 間／腕間） |')
-    L.append('|---|---|---|---|---|---|---|---|---|---|---|---|')
+    L.append('| セル | B 中央値[s] | C 中央値[s] | run1 | run2 | run3 | run4 | run5 | B→C 中央値 | B→C q1 | B→C q3 | 判定 | A→C 中央値 | checksum（run 間／腕間） |')
+    L.append('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
     nreg = 0
     for s in stats:
         t, d, n, m = s['cell']
         runs5 = ' | '.join(fmt(s['bc'].get(r)) for r in range(1, NRUN + 1))
         v = '非後退' if s['nonreg'] else '**後退**'
         nreg += 0 if s['nonreg'] else 1
+        # RULE.txt 判定 3: 同一 run 内比 C/B の四分位（inclusive 法。判定は中央値のみで行い q1／q3 は併記専用）。
+        qv = list(s['bc'].values())
+        q1, q3 = (statistics.quantiles(qv, n=4, method='inclusive')[i] for i in (0, 2)) if len(qv) >= 2 else (None, None)
         ck = 'n/a' if s['ck_none'] else f'{"一致" if s["ck_within"] else "**不一致**"}／{"一致" if s["ck_across"] else "**不一致**"}'
         L.append(f'| {t} {d} N={n} {m} | {statistics.median(s["med"]["B"]):.6g} | {statistics.median(s["med"]["C"]):.6g} | {runs5} | '
-                 f'{s["bc_med"]:.4f} | {v} | {s["ac_med"]:.4f} | {ck} |')
+                 f'{s["bc_med"]:.4f} | {fmt(q1)} | {fmt(q3)} | {v} | {s["ac_med"]:.4f} | {ck} |')
     L.append('')
     L.append(f'後退セル数（B→C 中央値 > 1.00）: {nreg} / {len(stats)}')
     bad = [s for s in stats if not s['ck_none'] and not (s['ck_within'] and s['ck_across'])]
@@ -371,7 +374,7 @@ def self_test():
         for r in range(1, 6):
             GATE[r] = ('pass', '0.10', '0')
         md = render(runs, 'gb10', st)
-        assert '非後退' in md and '後退セル数（B→C 中央値 > 1.00）: 0' in md
+        assert 'B→C q1' in md and '非後退' in md and '後退セル数（B→C 中央値 > 1.00）: 0' in md
         ps = write_full(runs, os.path.join(td, 'out'), 'gb10')
         assert len(ps) == 3 and all(len(open(p).read().splitlines()) == len(judged_cells('gb10')) + len(others_expected('gb10')) for p in ps)
         # run 欠損の空欄保持（左詰めしない）
