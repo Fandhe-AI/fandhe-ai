@@ -1,0 +1,114 @@
+#!/bin/bash
+# イシュー #2118: SME_MIN_K 候補（64／128／256）の計測専用ツリー作成と
+# 検証の共有ヘルパー。`orchestrate_m4max.sh`（Apple M4 Max）と
+# `gb10/orchestrate_gb10.sh`（DGX Spark GB10）が source する（bash 3.2 でも
+# 動くよう連想配列・mapfile は使わない）。判定規則は同ディレクトリの
+# RULE.txt（事前登録）が正で、本ファイルは規則の実行側のみを担う。
+#
+# 役割: `git archive HEAD` を一時ディレクトリへ展開して before ツリーと
+# after(K) ツリーを作り、on-arm-k{K}.patch を after にだけ適用したうえで
+# 「差分が gemm_blis/mod.rs の 1 ファイルのみ」「定数 2 行がパッチどおり」
+# を fail-closed で assert する（RULE.txt §1。run_ab_sme_cpu.sh は after の
+# 差分を検証しないため、その分をここで補う）。main の定数は変更しない。
+# 呼び出し元は本ファイルを source する 2 本の orchestrate_*.sh のみ。
+
+SME2118_MOD_REL="crates/backend-cpu/src/gemm_blis/mod.rs"
+
+# K の allowlist（A03 インジェクション対策。パッチ名・LABEL へ埋め込むため）
+sme2118_validate_k() {
+  case "${1:-}" in
+    64 | 128 | 256) return 0 ;;
+    *)
+      echo "error: K は 64／128／256 のいずれか（got: ${1:-<empty>}）" >&2
+      return 1
+      ;;
+  esac
+}
+
+# LABEL は run_ab_sme_cpu.sh と同じ allowlist（英数字・._-）
+sme2118_validate_label() {
+  case "${1:-}" in
+    '' | *[!A-Za-z0-9._-]*)
+      echo "error: LABEL は [A-Za-z0-9._-]+ のみ（got: ${1:-<empty>}）" >&2
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+sme2118_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi
+}
+
+# sme2118_prepare_trees <repo_root> <work_dir> <k> <patch_file> <out_dir>
+#   <work_dir>/before と <work_dir>/after を作る。パッチ sha256 と検証
+#   ログを <out_dir>/patch_sha256.txt・tree_verify.txt へ記録する。
+sme2118_prepare_trees() {
+  local repo=$1 work=$2 k=$3 patch=$4 out=$5
+  sme2118_validate_k "$k" || return 1
+  [ -f "$patch" ] || { echo "error: パッチが無い: $patch" >&2; return 1; }
+  mkdir -p "$work/before" "$work/after" "$out" || return 1
+  local head
+  head=$(git -C "$repo" rev-parse HEAD) || return 1
+  git -C "$repo" archive HEAD | tar -x -C "$work/before" || return 1
+  git -C "$repo" archive HEAD | tar -x -C "$work/after" || return 1
+  {
+    echo "head=${head}"
+    sme2118_sha256 "$patch" | awk '{print "patch_sha256=" $1}'
+  } >"$out/patch_sha256.txt"
+  (cd "$work/after" && patch -p1 --forward <"$patch") >"$out/patch_apply.log" 2>&1 \
+    || { echo "error: パッチ適用に失敗（$out/patch_apply.log）" >&2; return 1; }
+  # 指紋差分: 差分ファイルは mod.rs の 1 件のみ（.orig 等の混入も検出）
+  local diffs
+  diffs=$(cd "$work" && diff -rq before after)
+  printf '%s\n' "$diffs" >"$out/tree_diff.txt"
+  local n
+  n=$(printf '%s\n' "$diffs" | grep -c .)
+  if [ "$n" -ne 1 ] || ! printf '%s\n' "$diffs" | grep -q "before/${SME2118_MOD_REL} and after/${SME2118_MOD_REL} differ"; then
+    echo "error: ツリー差分が mod.rs 1 件のみでない（$out/tree_diff.txt）" >&2
+    return 1
+  fi
+  # 定数 2 行の assert（before は現行値・after はパッチどおり）
+  local b_en b_k a_en a_k
+  b_en=$(grep -E '^const SME_PRODUCTION_ENABLED: bool = ' "$work/before/$SME2118_MOD_REL")
+  b_k=$(grep -E '^const SME_MIN_K: usize = ' "$work/before/$SME2118_MOD_REL")
+  a_en=$(grep -E '^const SME_PRODUCTION_ENABLED: bool = ' "$work/after/$SME2118_MOD_REL")
+  a_k=$(grep -E '^const SME_MIN_K: usize = ' "$work/after/$SME2118_MOD_REL")
+  {
+    echo "before: ${b_en} / ${b_k}"
+    echo "after:  ${a_en} / ${a_k}"
+  } >"$out/gate_constant.txt"
+  [ "$b_en" = "const SME_PRODUCTION_ENABLED: bool = false;" ] \
+    && [ "$b_k" = "const SME_MIN_K: usize = 64;" ] \
+    && [ "$a_en" = "const SME_PRODUCTION_ENABLED: bool = true;" ] \
+    && [ "$a_k" = "const SME_MIN_K: usize = ${k};" ] \
+    || { echo "error: 定数行がパッチの意図と一致しない（$out/gate_constant.txt）" >&2; return 1; }
+  echo "trees ok: head=${head} K=${k}"
+}
+
+# 収録前のマスク（RULE.txt §12。作業ディレクトリ→<work>・$HOME→<home>）。標準入力を標準出力へ。
+# ホスト名の内容置換はしない（gb10・mac 等の短い名前が LABEL や単語を壊すため。ホスト名は
+# env_info に `hostname=masked` と書くだけで、収録テキストへ出さない）。
+sme2118_mask() {
+  local work=${1:-/nonexistent-work-dir}
+  sed -e "s#${work}#<work>#g" -e "s#${HOME}#<home>#g"
+}
+
+# sme2118_collect_r1r2 <bench_dir> <label> <dest_dir> <work_dir>
+#   run_ab_sme_cpu.sh の成果物（バイナリ・target を除く）をマスクして dest へ収録する。
+sme2118_collect_r1r2() {
+  local bench=$1 label=$2 dest=$3 work=$4 f base
+  mkdir -p "$dest" || return 1
+  for f in "$bench"/results/raw/*"-${label}"* "$bench"/results/raw/*"-${label}-"* \
+    "$bench"/compare-*"-${label}".md "$bench"/compare-*"-${label}".err; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    case "$base" in bench-fandhe-*) continue ;; esac
+    if [ -e "$dest/$base" ]; then continue; fi
+    sme2118_mask "$work" <"$f" >"$dest/$base"
+  done
+}
