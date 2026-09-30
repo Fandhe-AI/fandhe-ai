@@ -192,3 +192,4 @@ MPP はシェーダ側 vendor primitive（Cargo 依存ではなく Metal SDK フ
 - `docs/perf/metal-gemm-n4096-kernel-gap.md`（E7/E8 の交互測定・符号一貫性判断の先例）
 - `crates/backend-metal/src/gemm_mpp_diag_tests.rs`（本調査の診断テスト実装）
 - `docs/perf/logs/metal-gemm-mpp-tensor-1326/`（実測ログ・env_info・aggregate.md）
+- `docs/backend-metal-m4max-optimization-considerations.md`（#2124。本調査を含む M4 Max 最適化考察の統合記録）
