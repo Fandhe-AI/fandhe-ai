@@ -7,9 +7,12 @@
   - layerB-run{1..5}.log（`DIAG2109 ...` 行。診断テストの出力）
 
 fail-closed: run 数不足・phase 欠落/重複・壊れた JSON・checksum 不一致・
-件数不一致・未マスクの絶対パス（/home/<user>）を検出したら
-`LogIntegrityError` を送出し、正式な集計（Markdown）を一切出力せず
-非ゼロ終了する。ログ未生成（実測前）は正常な中間状態として扱う。
+件数不一致・未マスクの絶対パス（/home/<user>）・load_gate.log の欠落や
+書式不正を検出したら `LogIntegrityError` を送出し、正式な集計（Markdown）を
+一切出力せず非ゼロ終了する。全ログ未生成（実測前）のときだけ正常な中間状態
+として exit 0 とし、一部だけ欠けている場合は欠測として exit 非 0（RULE.txt 1）。
+専有ゲート FAIL の run が 1 つでもある系列は「参考扱い」とし、仮説の
+「支持」判定を出さない（RULE.txt 9）。
 `--self-test` は固定 fixture による自己検証（実機不要）。
 """
 
@@ -111,6 +114,33 @@ def parse_layer_b(text: str, name: str) -> dict:
     return out
 
 
+GATE_RE = re.compile(r"^(\S+(?: \S+)?) (PASS|FAIL\(参考扱い\)) load1=\S+ gpu_util=\S+$")
+
+
+def parse_gate(text: str) -> bool:
+    """load_gate.log を検証し、全 run が専有ゲート PASS なら True（FAIL があれば False）。
+
+    ゲート行は Layer A phases・AC-2・candle・Layer B の各 5 run 分（計 20 行以上）を
+    要求する。行数不足・書式不正は fail-closed（RULE.txt 9）。
+    """
+    check_masked(text, "load_gate")
+    ok = True
+    rows = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = GATE_RE.match(line)
+        if not m:
+            raise LogIntegrityError(f"load_gate: 認識できない行: {line!r}")
+        rows += 1
+        if m[2] != "PASS":
+            ok = False
+    if rows < 4 * RUNS:
+        raise LogIntegrityError(f"load_gate: ゲート行が不足（期待 {4 * RUNS} 以上・実際 {rows}）")
+    return ok
+
+
 def expected_counts(n: int) -> dict:
     b = n * n * 4
     return {
@@ -120,7 +150,9 @@ def expected_counts(n: int) -> dict:
     }
 
 
-def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_text: str) -> str:
+def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_text: str,
+              gate_text: str) -> str:
+    gate_ok = parse_gate(gate_text)
     if len(layer_b_texts) != RUNS:
         raise LogIntegrityError(f"Layer B の run 数が不一致（期待 {RUNS}・実際 {len(layer_b_texts)}）")
     bs = [parse_layer_b(t, f"layerB-run{i}") for i, t in enumerate(layer_b_texts, 1)]
@@ -139,42 +171,73 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
     if sums != {EXPECTED_CHECKSUM}:
         raise LogIntegrityError(f"Layer A の checksum が {EXPECTED_CHECKSUM} と不一致: {sorted(sums)}")
 
+    def a_runs(phase: str) -> list[float]:
+        return [next(x["median_s"] for x in r if x["phase"] == phase) * 1e6 for r in pa]
+
     def a_med(phase: str) -> float:
-        return med([next(x["median_s"] for x in r if x["phase"] == phase) for r in pa]) * 1e6
+        return med(a_runs(phase))
 
     fandhe_reuse = med([r[0]["median_s"] for r in ac2]) * 1e6
     candle = med([r[0]["median_s"] for r in cd]) * 1e6
     gap = fandhe_reuse - candle
 
+    def b_runs(layer: str, phase: str) -> list[float]:
+        return [x["phases"][(N, layer, phase)] for x in bs]
+
     def b(layer: str, phase: str) -> float:
-        return med([x["phases"][(N, layer, phase)] for x in bs])
+        return med(b_runs(layer, phase))
+
+    def rng(xs: list[float]) -> str:
+        return f"{min(xs):.3f}–{max(xs):.3f}"
 
     l0, l1, l2 = b("L0", "ops_total"), b("L1", "gemm_total"), b("L2", "l2_sum")
+    def rr(*terms: tuple[int, list[float]]) -> list[float]:
+        """run 単位の系列を要素ごとに符号付き加算して run 毎の導出値にする。"""
+        return [sum(sg * xs[i] for sg, xs in terms) for i in range(RUNS)]
+
+    l0r, l1r, l2r = b_runs("L0", "ops_total"), b_runs("L1", "gemm_total"), b_runs("L2", "l2_sum")
     rows = [
-        ("H1 毎反復 H2D", b("L2", "h2d_a") + b("L2", "h2d_b")),
-        ("H2 launch+同期の往復", b("L2", "launch_issue") + b("L2", "kernel_wait") - b("D", "dev_kernel_b2b")),
-        ("H3 D2H readback", b("L2", "d2h")),
-        ("H4a host dispatch (L0-L1)", l0 - l1),
-        ("H4b host dispatch (L1-l2_sum)", l1 - l2),
-        ("H5 facade/tape (matmul-L0)", a_med("matmul") - l0),
-        ("H6 checksum", a_med("checksum")),
-        ("補助 teardown", b("L2", "teardown")),
-        ("補助 alloc_c", b("L2", "alloc_c")),
+        ("H1 毎反復 H2D", rr((1, b_runs("L2", "h2d_a")), (1, b_runs("L2", "h2d_b")))),
+        ("H2 launch+同期の往復（推定）", rr((1, b_runs("L2", "launch_issue")), (1, b_runs("L2", "kernel_wait")),
+                                  (-1, b_runs("D", "dev_kernel_b2b")))),
+        ("H3 D2H readback", b_runs("L2", "d2h")),
+        ("H4a host dispatch (L0-L1)", rr((1, l0r), (-1, l1r))),
+        ("H4b host dispatch (L1-l2_sum)", rr((1, l1r), (-1, l2r))),
+        ("H5 facade/tape (matmul-L0)", rr((1, a_runs("matmul")), (-1, l0r))),
+        ("H6 checksum", a_runs("checksum")),
+        ("補助 teardown", b_runs("L2", "teardown")),
+        ("補助 alloc_c", b_runs("L2", "alloc_c")),
     ]
     lines = [
-        f"## N={N} 集計（5 run 中央値, µs）", "",
+        f"## N={N} 集計（5 run 中央値, µs。括弧内は 5 run 間の min–max）", "",
+        "" if gate_ok else "> 専有ゲート FAIL の run を含む系列のため **参考扱い**（RULE.txt 9）。"
+        "仮説の「支持」判定は出さない。\n",
         f"- fandhe reuse（AC-2）: {fandhe_reuse:.3f}／candle fresh: {candle:.3f}／gap: {gap:.3f}",
         f"- L0 ops_total: {l0:.3f}／L1 gemm_total: {l1:.3f}／L2 l2_sum: {l2:.3f}",
         f"- Layer A iter_total: {a_med('iter_total'):.3f}／matmul: {a_med('matmul'):.3f}",
-        f"- floor tiny_roundtrip: {b('E', 'tiny_roundtrip'):.3f}／sync_idle: {b('E', 'sync_idle'):.3f}",
-        f"- device idle 推定: {b('D', 'dev_kernel_seg') - b('D', 'dev_kernel_b2b'):.3f}"
-        f"／host のみ: {max(0.0, l2 - b('D', 'dev_span')):.3f}", "",
-        "| 仮説 | µs | L0 比 | gap 比 | 判定 |", "| --- | --- | --- | --- | --- |",
+        f"- L0 ops_total の run 間 min–max: {rng(l0r)}", "",
+        "- 注: 各値の中央値は run 単位の値の 5 run 中央値。仮説の µs は run 毎に導出した値の中央値",
+        "  （差・和は同一 run 内の区間から作る。H2 は kernel_wait と dev_kernel_b2b が別測定系列の推定を",
+        "  組み合わせた値で、厳密な区間ではない）。", "",
+        "### 床・launch overhead（RULE.txt 7。L0 比を併記）", "",
+        "| 項目 | µs (min–max) | L0 比 |", "| --- | --- | --- |",
     ]
-    for name, v in rows:
+    tiny_r = b_runs("E", "tiny_roundtrip")
+    idle_r = rr((1, b_runs("D", "dev_kernel_seg")), (-1, b_runs("D", "dev_kernel_b2b")))
+    host_r = [max(0.0, l2r[i] - b_runs("D", "dev_span")[i]) for i in range(RUNS)]
+    for name, xs in (("host→kernel 往復 (E tiny_roundtrip)", tiny_r),
+                     ("device idle 推定 (dev_kernel_seg-b2b)", idle_r),
+                     ("host のみ時間 (l2_sum-dev_span, 0 未満は 0)", host_r)):
+        lines.append(f"| {name} | {med(xs):.3f} ({rng(xs)}) | {med(xs) / l0 * 100:.1f}% |")
+    lines += ["", "| 仮説 | µs (min–max) | L0 比 | gap 比 | 判定 |", "| --- | --- | --- | --- | --- |"]
+    for name, xs in rows:
+        v = med(xs)
         share = v / gap if gap > 0 else float("nan")
-        verdict = "支持" if gap > 0 and share >= 0.5 else "未確定"
-        lines.append(f"| {name} | {v:.3f} | {v / l0 * 100:.1f}% | {share * 100:.1f}% | {verdict} |")
+        if not gate_ok:
+            verdict = "参考（専有ゲート FAIL）"
+        else:
+            verdict = "支持" if gap > 0 and share >= 0.5 else "未確定"
+        lines.append(f"| {name} | {v:.3f} ({rng(xs)}) | {v / l0 * 100:.1f}% | {share * 100:.1f}% | {verdict} |")
     lines.append("")
     return "\n".join(lines)
 
@@ -210,8 +273,13 @@ def self_test() -> None:
     pa = _jsonl([70, 1, 1, 5, 92], PHASES_A)
     ac2 = _jsonl([92], None)
     cd = _jsonl([76], None)
-    md = aggregate(lb, pa, ac2, cd)
-    assert "gap: 16.000" in md, md
+    gate = "".join(f"{lab} run{i} PASS load1=0.10 gpu_util=0\n"
+                   for lab in ("layerA-phases", "ac2", "candle", "layerB") for i in range(1, RUNS + 1))
+    md = aggregate(lb, pa, ac2, cd, gate)
+    assert "gap: 16.000" in md and "支持" in md and "min–max" in md and "L0 比" in md, md
+    gate_fail = gate.replace("PASS", "FAIL(参考扱い)", 1)
+    md_ref = aggregate(lb, pa, ac2, cd, gate_fail)
+    assert "参考扱い" in md_ref and "支持" not in md_ref.split("| 仮説")[1], md_ref
 
     def must_fail(fn, label: str) -> None:
         try:
@@ -220,17 +288,19 @@ def self_test() -> None:
             return
         raise AssertionError(f"fail-closed でない: {label}")
 
-    must_fail(lambda: aggregate(lb[:4], pa, ac2, cd), "Layer B run 数不足")
+    must_fail(lambda: aggregate(lb[:4], pa, ac2, cd, gate), "Layer B run 数不足")
     must_fail(
-        lambda: aggregate([_layer_b_fixture("0x4062c00000000001")] + lb[1:], pa, ac2, cd),
+        lambda: aggregate([_layer_b_fixture("0x4062c00000000001")] + lb[1:], pa, ac2, cd, gate),
         "checksum_bits 不一致",
     )
-    must_fail(lambda: aggregate(lb, pa, _jsonl([92], None, "1.000000"), cd), "Layer A checksum 不一致")
-    must_fail(lambda: aggregate(lb, pa.replace('"matmul"', '"matmul_x"', 1), ac2, cd), "phase 不正")
-    must_fail(lambda: aggregate(lb, pa + "{broken\n", ac2, cd), "壊れた JSON")
-    must_fail(lambda: aggregate([lb[0] + "# /home/someone/x\n"] + lb[1:], pa, ac2, cd), "未マスク")
+    must_fail(lambda: aggregate(lb, pa, _jsonl([92], None, "1.000000"), cd, gate), "Layer A checksum 不一致")
+    must_fail(lambda: aggregate(lb, pa.replace('"matmul"', '"matmul_x"', 1), ac2, cd, gate), "phase 不正")
+    must_fail(lambda: aggregate(lb, pa + "{broken\n", ac2, cd, gate), "壊れた JSON")
+    must_fail(lambda: aggregate([lb[0] + "# /home/someone/x\n"] + lb[1:], pa, ac2, cd, gate), "未マスク")
     bad = lb[0].replace("kernel_launches=1", "kernel_launches=2")
-    must_fail(lambda: aggregate([bad] + lb[1:], pa, ac2, cd), "件数不一致")
+    must_fail(lambda: aggregate([bad] + lb[1:], pa, ac2, cd, gate), "件数不一致")
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate.splitlines()[0]), "ゲート行不足")
+    must_fail(lambda: aggregate(lb, pa, ac2, cd, gate + "garbage\n"), "ゲート書式不正")
     print("self-test OK")
 
 
@@ -244,13 +314,21 @@ def main(argv: list[str]) -> int:
         return 0
     d = Path(args.log_dir)
     needed = [d / f"layerB-run{i}.log" for i in range(1, RUNS + 1)] + [
-        d / f"layerA-phases-N{N}.log", d / f"layerA-ac2-N{N}.log", d / f"candle-fresh-N{N}.log"]
-    if not all(p.exists() for p in needed):
+        d / f"layerA-phases-N{N}.log", d / f"layerA-ac2-N{N}.log", d / f"candle-fresh-N{N}.log",
+        d / "load_gate.log"]
+    present = [p.exists() for p in needed]
+    if not any(present):
         print("ログ未生成（実測前）。orchestrate.sh を GB10 で実行後に再実行すること。")
         return 0
+    if not all(present):
+        missing = ", ".join(p.name for p, ok in zip(needed, present) if not ok)
+        print(f"LogIntegrityError: 一部のログが欠測: {missing}（RULE.txt 1・fail-closed）",
+              file=sys.stderr)
+        return 1
     try:
         print(aggregate([p.read_text() for p in needed[:RUNS]], needed[RUNS].read_text(),
-                        needed[RUNS + 1].read_text(), needed[RUNS + 2].read_text()))
+                        needed[RUNS + 1].read_text(), needed[RUNS + 2].read_text(),
+                        needed[RUNS + 3].read_text()))
     except LogIntegrityError as exc:
         print(f"LogIntegrityError: {exc}", file=sys.stderr)
         return 1

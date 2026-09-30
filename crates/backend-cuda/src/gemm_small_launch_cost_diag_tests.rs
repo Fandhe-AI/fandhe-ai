@@ -268,6 +268,9 @@ fn kernel_queue_ms(
             .expect("launch");
     }
     e.record(&stream).expect("rec");
+    // cuEventElapsedTime は両イベント完了が前提（未完了だと NOT_READY）。
+    // 計測値には含まれない同期のため、経過時間の取得前に stream を同期する。
+    stream.synchronize().expect("sync before elapsed");
     s.elapsed_ms(&e).expect("elapsed") as f64
 }
 
