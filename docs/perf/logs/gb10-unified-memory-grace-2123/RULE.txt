@@ -7,6 +7,8 @@ doc: docs/gb10-unified-memory-grace-cpu-consideration.md
   grace_sve2_probe 行（cpuinfo_sve2 / auxv_hwcap2_sve2 / std_detect_sve2）
 - 3 経路がすべて true なら「SVE2 は cpuinfo・getauxval 系（AT_HWCAP2 bit1）・std_detect の 3 経路で検出可能と確定」
 - いずれかが false／na で食い違う場合は「判定不能」とし、検出可能とは記録しない（格上げしない）
+- 検出の成否は上記 3 経路のみで決める。sve_default_vl_bytes（既定 VL）は判定に使わない参考値であり、欠測（na）でも検出成否は変えず、
+  別項目「既定 VL 欠測」として記録する
 
 [R-SVE2-kernel]
 - 入力: 同出力の sve_default_vl_bytes（参考値）と sve_running_vl_bytes（判定に使う値）
@@ -31,9 +33,10 @@ doc: docs/gb10-unified-memory-grace-cpu-consideration.md
   後退境界は「4 セルすべてで比 <= 1.00」（許容幅なし。1 セルでも 1.00 を超えれば後退あり）。境界を緩める変更・セルの追加削除は
   事後に行わない。5 run 未満のセル（FAILED 記録あり）は後退なしと見なさず「判定不能」として REJECT 維持側へ倒す
 - 条件 4（readback 帯域。#1353 §8 の ADOPT 候補条件「帯域テストで readback が明確に低下していない」を継承）:
-  R-UM-bw で記録する readback の managed／device-only 5 回中央値比が、是正後実装（HEAD）の計測で 1.00 以上
+  R-UM-bw で記録する readback の managed／device-only 5 回中央値比が、是正後実装（HEAD）の計測で、R-UM-bw が出力する
+  全サイズ（4・16・32・33・64 MiB）のすべてで 1.00 以上（サイズ別に判定し、集約は全サイズ AND。平均・最良サイズでの代替はしない）
   （低下なし）であること。「明確に」の数値境界は事前に固定できないため、既存記録より緩めず fail-closed に 1.00 未満を
-  すべて低下ありとして扱う。readback が欠測・5 回未満の場合は「判定不能」とし REJECT 維持側へ倒す
+  すべて低下ありとして扱う。いずれかのサイズで readback が欠測・5 回未満の場合は「判定不能」とし REJECT 維持側へ倒す
 - 4 条件すべてを満たせば「既定化の再評価候補」（既定化そのものは別イシュー・ユーザー承認）
 - それ以外は「REJECT 維持」。既定値（managed OFF）は本イシューでは変更しない
 

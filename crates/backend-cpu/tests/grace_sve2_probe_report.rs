@@ -11,8 +11,8 @@
 //! ## 構成
 //!
 //! - pure parser 群（fail-closed: 形式不正は `None`）と、その単体テスト（CI で実行）。
-//! - `#[ignore]` の実機レポート。env `EXPECT_GRACE_SVE2`: 未設定=出力のみ／`1`=3 経路一致と VL
-//!   取得を要求／`0`=SVE2 非検出を要求／他は panic で拒否（値はエコーしない）。
+//! - `#[ignore]` の実機レポート。env `EXPECT_GRACE_SVE2`: 未設定=出力のみ／`1`=3 経路一致を要求（既定 VL は参考値で
+//!   欠測しても失敗にせず別項目として出力）／`0`=SVE2 非検出を要求／他は panic で拒否（値はエコーしない）。
 
 /// auxv のキー（Linux `AT_HWCAP`／`AT_HWCAP2`）。
 const AT_HWCAP: u64 = 16;
@@ -185,7 +185,12 @@ fn grace_sve2_probe_dump() {
             assert_eq!(cpuinfo_sve2, Some(true), "cpuinfo 経路が sve2 を検出しない");
             assert_eq!(aux_sve2, Some(true), "auxv HWCAP2 経路が sve2 を検出しない");
             assert_eq!(std_sve2, Some(true), "std_detect 経路が sve2 を検出しない");
-            assert!(vl.is_some(), "SVE ベクトル長を取得できない");
+            // 既定 VL は検出判定に使わない参考値（RULE.txt R-SVE2-detect）。欠測は検出失敗にせず別項目として記録する。
+            if vl.is_none() {
+                eprintln!(
+                    "grace_sve2_probe sve_default_vl_bytes_missing=1（参考値の欠測。検出判定には影響しない）"
+                );
+            }
         }
         Some("0") => {
             assert_ne!(cpuinfo_sve2, Some(true));
