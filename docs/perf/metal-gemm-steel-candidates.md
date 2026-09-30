@@ -67,7 +67,7 @@ Linux で実行済み: `tile`／`spec_source` の単体テスト、`shader_sourc
 実機 `#[ignore]`（`gemm_steel_candidate_diag_tests`）: `unroll_load_on_off_bit_match_all_candidates`／`_dispatch_auto`／
 `_transposed`（assert）、`steel_candidate_arms_match_cpu_reference`（REQ-2 `assert_parity`。tolerance 不変）、
 `unroll_load_effective_gate_is_forwarded`、`steel_candidate_kernel_gpu_ab_production_sizes`（記録のみ）。
-タイル形状が異なる arm 同士の bit 一致は E7 §13.4 と同様に契約外で、assert せず `aggregate.py` が記録・判定する。
+タイル形状が異なる arm 同士の bit 一致は E7 §13.4 と同様に契約外で、assert せず記録のみとする。`aggregate.py` は `same_tile=true`（base と同一タイル）の cell のみ bit 一致を採用可否へ反映し、run 間 checksum 一致は全 cell で要求する。前提ゲート（`gate_run.log`）の全件成功は `orchestrate.sh` の run 起動前と `aggregate.py` の双方が機械検証し、不成立なら計測・判定を拒否する。
 
 ## 6. 実測記入欄（#2111 が埋める）
 

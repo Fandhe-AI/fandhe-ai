@@ -8,9 +8,11 @@
    parity 1 本（steel_candidate_arms_match_cpu_reference）が全 PASS であること。1 件でも FAIL なら機構契約の不成立として REJECT を確定し、A/B は実施しない。
 2. 計測は 5 run をプロセス独立に起動する（orchestrate.sh 1〜5）。run の差し替え・追加起動・選別はしない。
 3. 指標は run 内の head/base kernel_gpu 比（head_over_base_kernel_gpu）。arm × N ごとに 5 run の中央値をとる。
-4. 1 run・1 N でも bit_identical=false があれば、その arm は採用不可（NOT_ADOPTABLE）。run 間で checksum が一致しない場合も採用不可。
+4. 同一タイル cell（same_tile=true。base とタイル形状が同じ）で 1 run・1 N でも bit_identical=false があれば、その arm は採用不可（NOT_ADOPTABLE）。
+   タイル形状が異なる cell の bit 一致は契約外（docs/perf/metal-gemm-steel-candidates.md 5 節）のため要求しない。run 間で checksum が一致しない場合は全 cell で採用不可。
+   （実測前の PR レビュー是正〈#2455〉による明確化。実測結果に基づく変更ではない）
 5. same_kernel=true の N（arm の実効カーネルが base と同一。例: N=512 の T0U）は、「ratio<1.00 の形状数」と非後退判定の両方から除外する（事前登録。自己比較のノイズを勝敗に数えない）。
-6. arm の総合判定:
+6. arm の総合判定（固定 4 候補 T0U／LU／T0U-LU／T0U-LU-FB のいずれかの出力が欠落した場合は INCOMPLETE）:
    - ADOPT_CANDIDATE: 除外後の対象 N すべてで中央値 <=1.00、中央値 <1.00 が 2 形状以上、checksum が全 run で一致。
      （#2111 の採用条件は正方 4 形状のうち 2 形状以上で ratio<1.00 かつ checksum 一致。本規則はそれに非後退条件を加えた事前登録）
    - REJECT: 対象 N のいずれかで中央値 >1.00 かつ 5/5 run の符号が一貫。

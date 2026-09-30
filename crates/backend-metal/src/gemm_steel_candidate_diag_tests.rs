@@ -283,7 +283,10 @@ fn steel_candidate_arms_match_cpu_reference() {
 /// `aggregate.py` が行う。`kernel_gpu` の大小は assert しない（記録のみ）。
 ///
 /// 出力行（`aggregate.py` の正規表現と一致させる。変更時は両方を更新する）:
-/// - `N=<n> arm=<label> checksum=<f> bit_identical=<bool> same_kernel=<bool>`
+/// - `N=<n> arm=<label> checksum=<f> bit_identical=<bool> same_kernel=<bool> same_tile=<bool>`
+///   （`bit_identical` は base 出力とのビット一致。タイル形状が異なる arm は K 方向の
+///   演算順序が変わりうるため bit 一致は契約外〈`metal-gemm-steel-candidates.md` §5〉。
+///   `aggregate.py` は `same_tile=true` の cell のみ bit 一致を採用可否へ反映する）
 /// - `N=<n> arm=<label> resolved_tile=<cfg> kernel_gpu_median_ms=<v> q1=<v> q3=<v>`
 /// - `N=<n> arm=<label> head_over_base_kernel_gpu=<r>`
 #[test]
@@ -329,8 +332,9 @@ fn steel_candidate_kernel_gpu_ab_production_sizes() {
                 run_tiled(&ctx, &gemms[idx], &a, &b, (n, n, n), cfgs[idx])
             };
             let same_kernel = STEEL_ARMS[idx].same_kernel_as_base(n, verified);
+            let same_tile = cfgs[idx] == cfgs[0];
             println!(
-                "N={n} arm={} checksum={:.6} bit_identical={} same_kernel={same_kernel}",
+                "N={n} arm={} checksum={:.6} bit_identical={} same_kernel={same_kernel} same_tile={same_tile}",
                 STEEL_ARMS[idx].label,
                 checksum_f64(&out),
                 bits_of(&out) == base_bits,

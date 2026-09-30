@@ -23,9 +23,18 @@ import sys
 N_RUNS = 5
 EXPECTED_SIZES = (512, 1024, 2048, 4096)
 BASE = "base"
+# RULE.txt の固定 4 候補（欠落 arm は結果から消さず INCOMPLETE にする）。
+EXPECTED_ARMS = ("T0U", "LU", "T0U-LU", "T0U-LU-FB")
+# RULE.txt 1. の前提ゲート 4 テスト（orchestrate.sh の GATE_TESTS と一致させる）。
+GATE_TESTS = (
+    "gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_all_candidates",
+    "gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_dispatch_auto",
+    "gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_transposed",
+    "gemm_steel_candidate_diag_tests::steel_candidate_arms_match_cpu_reference",
+)
 
 RE_BIT = re.compile(
-    r"^N=(\d+) arm=(\S+) checksum=(-?[0-9.eE+-]+) bit_identical=(true|false) same_kernel=(true|false)$"
+    r"^N=(\d+) arm=(\S+) checksum=(-?[0-9.eE+-]+) bit_identical=(true|false) same_kernel=(true|false)(?: same_tile=(true|false))?$"
 )
 RE_RATIO = re.compile(r"^N=(\d+) arm=(\S+) head_over_base_kernel_gpu=([0-9.eE+-]+)$")
 
@@ -42,6 +51,8 @@ def parse_run(text):
             d["checksum"] = m.group(3)
             d["bit_identical"] = m.group(4) == "true"
             d["same_kernel"] = m.group(5) == "true"
+            # same_tile 欠落（旧形式）は fail-closed に「同一タイル」扱い＝bit 一致を要求する。
+            d["same_tile"] = m.group(6) != "false"
             continue
         m = RE_RATIO.match(line)
         if m:
@@ -52,7 +63,7 @@ def parse_run(text):
 def judge(runs, reference_only=False):
     """runs: parse_run 結果のリスト。arm 別の判定 dict を返す（RULE.txt 3.〜6.）。"""
     verdicts = {}
-    arms = sorted({arm for r in runs for (arm, _n) in r if arm != BASE})
+    arms = sorted(set(EXPECTED_ARMS) | {arm for r in runs for (arm, _n) in r if arm != BASE})
     for arm in arms:
         if len(runs) != N_RUNS:
             verdicts[arm] = ("INCOMPLETE", f"run 数が {len(runs)}（必要 {N_RUNS}）")
@@ -66,7 +77,9 @@ def judge(runs, reference_only=False):
             if any(c is None or "ratio" not in c or "bit_identical" not in c for c in cells):
                 verdicts[arm] = ("INCOMPLETE", f"N={n} のデータ欠落")
                 break
-            if any(not c["bit_identical"] for c in cells):
+            # bit 一致は同一タイル cell のみ要求する（タイル形状が異なる arm 間の bit 一致は
+            # metal-gemm-steel-candidates.md §5 で契約外。run 間 checksum 一致は常に要求する）。
+            if any(c["same_tile"] and not c["bit_identical"] for c in cells):
                 bit_bad.append(n)
             if len({c["checksum"] for c in cells}) != 1:
                 checksum_bad.append(n)
@@ -97,6 +110,23 @@ def judge(runs, reference_only=False):
                 v = (v[0] + "(REFERENCE_ONLY)", v[1] + " / 負荷ゲート timeout のため参考扱い")
             verdicts[arm] = (v[0], v[1] + " | " + "; ".join(detail))
     return verdicts
+
+
+def check_gate_log(text):
+    """gate_run.log が前提ゲート全件 PASS を示すか検証する（RULE.txt 1.。fail-closed）。
+
+    戻り値: (ok, 理由)。GATE_TESTS の各行が `... ok` で、`test result: ok.` かつ
+    `0 failed` を含み、`FAILED`／`panicked` を含まないことを要求する。
+    """
+    if "FAILED" in text or "panicked" in text:
+        return False, "gate_run.log に FAILED／panicked が含まれる"
+    for t in GATE_TESTS:
+        if not re.search(r"^test " + re.escape(t) + r" \.\.\. ok$", text, re.M):
+            return False, f"ゲートテスト未成功または未実行: {t}"
+    m = re.search(r"^test result: ok\. (\d+) passed; 0 failed", text, re.M)
+    if not m or int(m.group(1)) != len(GATE_TESTS):
+        return False, "test result: ok. 4 passed; 0 failed が確認できない"
+    return True, "ok"
 
 
 def load_dir(d):
@@ -174,6 +204,33 @@ def self_test():
     assert judge(partial)["X"][0] == "INCOMPLETE"
     # 無関係な行・base は無視
     assert parse_run("garbage\nN=1 arm=base head_over_base_kernel_gpu=1.0")[(BASE, 1)]["ratio"] == 1.0
+    # 欠落 arm（固定 4 候補のうち 1 つも出力が無い）は INCOMPLETE で列挙される
+    only_x = [parse_run(_fixture_run({("T0U", n): 0.9 for n in EXPECTED_SIZES}))
+              for _ in range(N_RUNS)]
+    v = judge(only_x)
+    assert v["LU"][0] == "INCOMPLETE" and v["T0U-LU-FB"][0] == "INCOMPLETE"
+    # 別タイル arm の bit 不一致は NOT_ADOPTABLE にしない／同一タイルの不一致は NOT_ADOPTABLE
+    diff_tile = [
+        parse_run("\n".join(
+            f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=false\n"
+            f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
+        for _ in range(N_RUNS)
+    ]
+    assert judge(diff_tile)["X"][0] == "ADOPT_CANDIDATE"
+    same_tile = [
+        parse_run("\n".join(
+            f"N={n} arm=X checksum=1.0 bit_identical=false same_kernel=false same_tile=true\n"
+            f"N={n} arm=X head_over_base_kernel_gpu=0.9" for n in EXPECTED_SIZES))
+        for _ in range(N_RUNS)
+    ]
+    assert judge(same_tile)["X"][0] == "NOT_ADOPTABLE"
+    # ゲートログ検証
+    good = "\n".join(f"test {t} ... ok" for t in GATE_TESTS) + \
+        "\ntest result: ok. 4 passed; 0 failed; 0 ignored"
+    assert check_gate_log(good)[0]
+    assert not check_gate_log(good.replace("... ok", "... FAILED", 1))[0]
+    assert not check_gate_log("")[0]
+    assert not check_gate_log(good.replace(GATE_TESTS[0], "x"))[0]
     print("self-test OK")
 
 
@@ -183,6 +240,17 @@ def main(argv):
         return 0
     d = argv[1] if len(argv) > 1 else os.path.dirname(os.path.abspath(__file__))
     runs, reference_only = load_dir(d)
+    gate_path = os.path.join(d, "gate_run.log")
+    gate_ok, gate_reason = False, "gate_run.log が存在しない"
+    if os.path.isfile(gate_path):
+        with open(gate_path, encoding="utf-8", errors="replace") as f:
+            gate_ok, gate_reason = check_gate_log(f.read())
+    if not gate_ok:
+        # 前提ゲート不成立: 採用判定を出さず REJECT を確定する（RULE.txt 1.）。
+        print(f"gate=FAIL :: {gate_reason}")
+        print("verdict=REJECT :: 前提ゲート不成立のため A/B 判定は行わない（RULE.txt 1.）")
+        return 1
+    print("gate=OK")
     verdicts = judge(runs, reference_only)
     print(f"runs={len(runs)} reference_only={reference_only}")
     for arm, (v, detail) in sorted(verdicts.items()):

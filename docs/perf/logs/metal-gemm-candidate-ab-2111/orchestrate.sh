@@ -9,7 +9,8 @@
 #   ./orchestrate.sh gate [--dry-run]
 #       RULE.txt 1.（前提ゲート）: bit 一致 3 本 + parity 1 本を `--exact` で
 #       実行する。1 件でも FAIL なら打ち切る（A/B は実施しない）。
-#       ログは本ディレクトリ直下の `gate_run.log`。
+#       ログは本ディレクトリ直下の `gate_run.log`。run 番号の実行は起動前にこのログを検証し、
+#       ゲート未成立なら拒否する（verify_gate_log）。
 #
 #   ./orchestrate.sh <run番号（1〜5 の整数）> [--dry-run]
 #       kernel_gpu A/B（`steel_candidate_kernel_gpu_ab_production_sizes`）を
@@ -108,6 +109,32 @@ gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_transposed
 gemm_steel_candidate_diag_tests::steel_candidate_arms_match_cpu_reference
 "
 
+# 前提ゲート成立の機械検証（RULE.txt 1.。fail-closed）。gate_run.log が存在し、
+# GATE_TESTS の全件が `... ok` で `0 failed`・FAILED/panicked なしであることを要求する。
+# 不成立なら 0 以外を返す。A/B（run_ab）の起動前に呼ぶ。aggregate.py の check_gate_log と同条件。
+verify_gate_log() {
+    GATE_LOG="$SCRIPT_DIR/gate_run.log"
+    if [ ! -f "$GATE_LOG" ]; then
+        echo "前提ゲート未実施: ${GATE_LOG} が無い。先に ./orchestrate.sh gate を実行する（RULE.txt 1.）" >&2
+        return 1
+    fi
+    if grep -Eq 'FAILED|panicked' "$GATE_LOG"; then
+        echo "前提ゲート不成立: ${GATE_LOG} に FAILED/panicked がある。A/B は実施しない（RULE.txt 1.）" >&2
+        return 1
+    fi
+    for t in $GATE_TESTS; do
+        if ! grep -Fxq "test ${t} ... ok" "$GATE_LOG"; then
+            echo "前提ゲート不成立: ${t} の成功行が無い。A/B は実施しない（RULE.txt 1.）" >&2
+            return 1
+        fi
+    done
+    if ! grep -Eq '^test result: ok\. 4 passed; 0 failed' "$GATE_LOG"; then
+        echo "前提ゲート不成立: 'test result: ok. 4 passed; 0 failed' が無い（RULE.txt 1.）" >&2
+        return 1
+    fi
+    return 0
+}
+
 run_gate() {
     GATE_LOG="$SCRIPT_DIR/gate_run.log"
     if [ "$DRY_RUN" = "1" ]; then
@@ -159,6 +186,8 @@ run_ab() {
         echo "[dry-run]   pmset_after   -> $PMSET_AFTER"
         return 0
     fi
+
+    verify_gate_log || exit 1
 
     for artifact in "$UPTIME_BEFORE" "$PMSET_BEFORE" "$PMSET_AFTER" "$RUN_LOG" "$MONITOR_LOG" "$PROCS_LOG"; do
         if [ -e "$artifact" ]; then
