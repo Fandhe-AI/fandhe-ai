@@ -33,7 +33,12 @@ doc: docs/perf/cpu-predict-resident-fixedcost.md
   H1 カーネル差 = reuse_decomposed.l1_linear_forward_device - fresh_layers.l1_linear_relu_fused
   L2 差        = reuse_decomposed.l2_linear_forward_device - fresh_layers.l2_linear_gemm_add
   H2 コピー/確保 = reuse_decomposed.upload + reuse_decomposed.readout
-  H4 tape 固定費 = reuse_decomposed.tape_build + (reuse.iter_total - reuse_decomposed.iter_total)
+  H4 tape 固定費 = reuse_decomposed.tape_build + (reuse.iter_total - reuse_decomposed.iter_total) - H6
+  H6 chain 検証・tracked 差 = reuse_decomposed.chain_public - reuse_decomposed.forward_resident - reuse_decomposed.readout
+    （PR #2450 レビュー対応。分解が直接呼ぶ linear_forward_device は公開経路 predict_device_chain の
+    resident buffer 取得・検証・linear_forward_device_tracked・poison 再検査を含まないため、
+    chain_public として別区間で実測し H4 の残差から分離する。H4+H6 は従来の H4 と等しく、
+    diff・他区間・閾値は不変。実測前の追補）
 - 1 区間の差分が diff の 50% 以上なら対応仮説を「支持」、どの区間も
   50% に届かなければ「未確定」。閾値は事後に変えない。
 - H3（アロケータ/ページフォルト）は補助情報のみ（判定には使わない）。minflt 採取は

@@ -319,6 +319,22 @@ fn run_decomposed(c: &Ctx, rec: &mut Rec) {
     if rec.on {
         rec.cell(arm, "iter_total").checksum = Some(s.to_bits());
     }
+
+    // 上の分解は `linear_forward_device` を直接呼ぶため、公開経路
+    // （`predict_device_chain`）が持つ `check_not_poisoned`／`check_device`・
+    // tape_id 検証・`checked_resident_buffer`・形状検証・
+    // `linear_forward_device_tracked`・事後 poison 再検査は区間に含まれない。
+    // 省略分を別区間 `chain_public` として同じ tape・steps で実測する
+    // （iter_total の外側。`aggregate.py` が
+    // `chain_public - forward_resident - readout` を検証・tracked 差として
+    // H4 の残差から分離して帰属する。RULE.txt 参照）。
+    rec.timed(arm, "chain_public", || {
+        std::hint::black_box(
+            c.store
+                .predict_device_chain(&tape, &c.input, &steps)
+                .expect("chain"),
+        )
+    });
 }
 
 /// 帰属用の比較のみ（fresh の層別内訳・H1: 非融合 L1・H2: 入力コピー単独）。

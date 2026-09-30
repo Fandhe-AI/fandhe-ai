@@ -20,6 +20,7 @@ EXPECTED = {
         "tape_new", "snapshot", "tape_build", "upload",
         "l1_linear_forward_device", "l2_linear_forward_device",
         "forward_resident", "readout", "host_copy", "checksum", "iter_total",
+        "chain_public",
     ],
     "fresh_layers": ["l1_linear_relu_fused", "l2_linear_gemm_add"],
     "ablation": ["l1_host_unfused_gemm_add_relu", "input_to_vec_copy"],
@@ -136,6 +137,13 @@ def aggregate(runs, unpassed=()):
     if diff <= 0:
         out.append("帰属: 逆転非再現のため帰属を行わない")
         return "\n".join(out)
+    # 分解が省略する公開経路の検証・tracked 呼び出し分（chain_public は
+    # iter_total の外側で実測した predict_device_chain 全体）。
+    chain_extra = (
+        med(runs, "reuse_decomposed", "chain_public")[0]
+        - med(runs, "reuse_decomposed", "forward_resident")[0]
+        - med(runs, "reuse_decomposed", "readout")[0]
+    )
     seg = {
         "H1 カーネル差(L1)": med(runs, "reuse_decomposed", "l1_linear_forward_device")[0]
         - med(runs, "fresh_layers", "l1_linear_relu_fused")[0],
@@ -143,8 +151,10 @@ def aggregate(runs, unpassed=()):
         - med(runs, "fresh_layers", "l2_linear_gemm_add")[0],
         "H2 コピー/確保(upload+readout)": med(runs, "reuse_decomposed", "upload")[0]
         + med(runs, "reuse_decomposed", "readout")[0],
-        "H4 tape 固定費(tape_build+残差)": med(runs, "reuse_decomposed", "tape_build")[0]
-        + (r_tot - d_tot),
+        "H4 tape 固定費(tape_build+残差-H6)": med(runs, "reuse_decomposed", "tape_build")[0]
+        + (r_tot - d_tot)
+        - chain_extra,
+        "H6 chain 検証・tracked 差": chain_extra,
     }
     out.append("")
     out.append("| 区間 | 差分(us) | diff 比 | 判定 |")

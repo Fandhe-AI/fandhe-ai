@@ -62,7 +62,8 @@ L1 は融合 `Linear::forward_host_with_activation`（`gemm_bias_act`→
 | H1 カーネル差 | reuse の L1 は非融合、fresh の L1 は融合 | `l1_linear_forward_device` 対 `l1_linear_relu_fused`（ablation に非融合ホスト版） |
 | H2 コピー・確保 | reuse だけに `upload`／`download`／`wrap_vec` がある | `upload`＋`readout`（ablation に入力コピー単独） |
 | H3 アロケータ／ページフォルト | 約 200 KB の呼び出しごと確保が Linux の mmap 閾値付近で minor fault を生む | minflt 差分（補助情報のみ） |
-| H4 tape 固定費 | `Tape::new_with_ops`・葉 push・steps 構築・ガード | `tape_build`＋`iter_total` 残差 |
+| H4 tape 固定費 | `Tape::new_with_ops`・葉 push・steps 構築・ガード | `tape_build`＋`iter_total` 残差（H6 を除く） |
+| H6 chain 検証・tracked 差 | 分解が省略する `predict_device_chain` の resident buffer 検証・`linear_forward_device_tracked` | `chain_public` − `forward_resident` − `readout` |
 | H5 順序効果・二峰性 | reuse の min が fresh の min 付近まで下がる（§10.6.2） | arm 順のラウンド反転・q1/q3/min/max |
 
 再実行しない既存実験: #1575 thread cap・#1576 GB10 affinity・B packing 共有・SME ゲート・
