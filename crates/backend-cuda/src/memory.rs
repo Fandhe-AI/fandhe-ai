@@ -707,7 +707,8 @@ impl ReadbackSentinel for f32 {
         let ordinal = ctx.ordinal();
         let generation = context_cache::current_generation(ordinal);
         let pool = crate::readback_policy::readback_staging_pool();
-        let mut staging = match pool.take(ordinal, generation, numel) {
+        let key = crate::readback_policy::StagingKey::from_context(ctx);
+        let mut staging = match pool.take(key, generation, numel) {
             Some(s) => s,
             None => HostStaging::alloc(host_staging::HOST_STAGING_KIND, ctx, numel)?,
         };
@@ -715,7 +716,7 @@ impl ReadbackSentinel for f32 {
         stream.synchronize()?;
         crate::gemm::diag_count_stream_sync();
         let out = staging.as_slice()?.to_vec();
-        pool.put(ordinal, generation, numel, staging);
+        pool.put(key, generation, numel, staging);
         Ok(out)
     }
 }

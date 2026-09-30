@@ -1,6 +1,6 @@
 //! readback 宛先ポリシー（イシュー #2108）。`memory::readback`（全 D2H readback が通る唯一の
 //! 同期点）が返すホスト `Vec` を「毎回 fresh + 事前タッチ（`PretouchedFresh`）」で作るか、
-//! 「pinned（page-locked）staging を ordinal・要素数ごとに再利用して copy-out（`PinnedStagingReuse`）」
+//! 「pinned（page-locked）staging を (ordinal・context)・要素数ごとに再利用して copy-out（`PinnedStagingReuse`）」
 //! で作るかを選ぶ純ロジックと、env 切替・staging プールをまとめる。
 //!
 //! # 位置づけ
@@ -92,12 +92,32 @@ pub(crate) fn current_dest() -> ReadbackDest {
     env_mode()
 }
 
-/// ordinal ごとの staging プール（要素数ごとに 1 バッファ。各 ordinal の総量は
+/// staging プールのキー。ordinal に加えて `Arc<CudaContext>` の同一性（`Arc::as_ptr`）を含める
+/// （`context_cache::ContextKey` と同じ理由: 同一 ordinal でも別 `CudaContext` で確保した
+/// pinned staging を別 context の D2H へ再利用すると context 不一致になりうる。codex-review 指摘 P1）。
+/// pinned staging（`PinnedHostSlice`）は確保元 `Arc<CudaContext>` を保持するため、キャッシュ保持中は
+/// アドレスが再利用されない。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct StagingKey {
+    pub(crate) ordinal: usize,
+    pub(crate) context_ptr: usize,
+}
+
+impl StagingKey {
+    pub(crate) fn from_context(ctx: &std::sync::Arc<cudarc::driver::CudaContext>) -> Self {
+        Self {
+            ordinal: ctx.ordinal(),
+            context_ptr: std::sync::Arc::as_ptr(ctx) as usize,
+        }
+    }
+}
+
+/// (ordinal, context) ごとの staging プール（要素数ごとに 1 バッファ。各キーの総量は
 /// `HOST_STAGING_CAP_BYTES` で頭打ち）。ロック保持は `take`／`put` の間のみで、
 /// pinned 確保・D2H・synchronize はロック外で行う。
 pub(crate) struct ReadbackStagingPool {
     kind: HostStagingKind,
-    per_ordinal: Mutex<HashMap<usize, HostStagingCache>>,
+    per_ordinal: Mutex<HashMap<StagingKey, HostStagingCache>>,
     #[cfg(test)]
     cap_bytes: Option<u64>,
 }
@@ -133,22 +153,22 @@ impl ReadbackStagingPool {
     /// D2H が全要素を上書きするため正しさには影響しない）。
     pub(crate) fn take(
         &self,
-        ordinal: usize,
+        key: StagingKey,
         generation: u64,
         numel: usize,
     ) -> Option<HostStaging> {
         let mut guard = self.per_ordinal.lock().ok()?;
-        guard.get_mut(&ordinal)?.take(numel, generation)
+        guard.get_mut(&key)?.take(numel, generation)
     }
 
     /// 使用済み staging を返却する（cap 超過は登録せず破棄）。poison 後も `into_inner` で回復する。
-    pub(crate) fn put(&self, ordinal: usize, generation: u64, numel: usize, buf: HostStaging) {
+    pub(crate) fn put(&self, key: StagingKey, generation: u64, numel: usize, buf: HostStaging) {
         let mut guard = match self.per_ordinal.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         guard
-            .entry(ordinal)
+            .entry(key)
             .or_insert_with(|| self.new_cache())
             .put(numel, generation, buf);
     }
@@ -237,6 +257,13 @@ mod tests {
         assert_eq!(current_dest(), base);
     }
 
+    fn k(ordinal: usize, ptr: usize) -> StagingKey {
+        StagingKey {
+            ordinal,
+            context_ptr: ptr,
+        }
+    }
+
     fn pageable(n: usize) -> HostStaging {
         HostStaging::Pageable(vec![0.0f32; n])
     }
@@ -244,19 +271,30 @@ mod tests {
     #[test]
     fn pool_separates_ordinals_and_reuses() {
         let pool = ReadbackStagingPool::new(HostStagingKind::Pageable);
-        assert!(pool.take(0, 0, 8).is_none());
-        pool.put(0, 0, 8, pageable(8));
-        assert!(pool.take(1, 0, 8).is_none(), "ordinal 別に分離");
-        assert!(pool.take(0, 0, 8).is_some());
+        assert!(pool.take(k(0, 1), 0, 8).is_none());
+        pool.put(k(0, 1), 0, 8, pageable(8));
+        assert!(pool.take(k(1, 1), 0, 8).is_none(), "ordinal 別に分離");
+        assert!(pool.take(k(0, 1), 0, 8).is_some());
         let s = pool.stats();
         assert_eq!(s.hits, 1);
     }
 
     #[test]
+    fn pool_separates_contexts_with_same_ordinal() {
+        let pool = ReadbackStagingPool::new(HostStagingKind::Pageable);
+        pool.put(k(0, 1), 0, 8, pageable(8));
+        assert!(
+            pool.take(k(0, 2), 0, 8).is_none(),
+            "同一 ordinal でも context が違えば再利用しない"
+        );
+        assert!(pool.take(k(0, 1), 0, 8).is_some());
+    }
+
+    #[test]
     fn pool_drops_stale_generation() {
         let pool = ReadbackStagingPool::new(HostStagingKind::Pageable);
-        pool.put(0, 0, 8, pageable(8));
-        assert!(pool.take(0, 1, 8).is_none(), "世代不一致は破棄");
+        pool.put(k(0, 1), 0, 8, pageable(8));
+        assert!(pool.take(k(0, 1), 1, 8).is_none(), "世代不一致は破棄");
         assert_eq!(pool.stats().evicted, 1);
         assert_eq!(pool.stats().cached_bytes, 0);
     }
@@ -264,8 +302,8 @@ mod tests {
     #[test]
     fn pool_release_all_reports_bytes() {
         let pool = ReadbackStagingPool::new(HostStagingKind::Pageable);
-        pool.put(0, 0, 8, pageable(8));
-        pool.put(1, 0, 4, pageable(4));
+        pool.put(k(0, 1), 0, 8, pageable(8));
+        pool.put(k(1, 1), 0, 4, pageable(4));
         assert_eq!(pool.release_all(), 48);
         assert_eq!(pool.stats().cached_bytes, 0);
     }
@@ -274,7 +312,7 @@ mod tests {
     fn pool_cap_overflow_is_not_registered() {
         let pool = ReadbackStagingPool::with_cap(HostStagingKind::Pageable, 16);
         let n = 16 / 4 + 1;
-        pool.put(0, 0, n, pageable(n));
+        pool.put(k(0, 1), 0, n, pageable(n));
         assert_eq!(pool.stats().cached_bytes, 0);
         assert_eq!(pool.stats().evicted, 1);
     }
