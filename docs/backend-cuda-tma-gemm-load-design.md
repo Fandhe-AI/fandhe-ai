@@ -237,3 +237,4 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 **再評価の仮説（ユーザー承認待ち・新規 issue 起票なし）**:
 - N≥512 限定の形状条件
 - 128×64 タイルへの TMA 適用（Stage 2）
+- N=256 後退の原因切り分け（encode 固定費仮説の棄却・残仮説の判別実験設計）と Stage 2 の候補設計は `docs/cuda-sm121-gemm-candidates-design.md` §3.3・§4（#2130）を参照。
