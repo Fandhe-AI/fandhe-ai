@@ -9,7 +9,8 @@ CPU backward の非 GEMM 残差の一因が小さい要素数での rayon fork-j
 - 機構: **導入済み・既定 OFF**（`REDUCTION_SEQUENTIAL_FALLBACK_ENABLED = false`）。ゲート OFF の間は変更前と完全に同一の経路。
 - しきい値 `REDUCTION_PARALLEL_MIN_ELEMS = 1 << 18` は**未実測の暫定候補**（ゲート OFF の間は効かない）。
 - 実機（M4 Max・GB10）の実測: **未実施**（`docs/perf/logs/elemental-reduction-threshold-2101/{m4max,gb10}/README.md` に手順）。
-- ゲートの ON 切替と framework-compare 全セルの A/B: #2102。
+- #2102: 両機体 A/B の基盤（`scripts/bench/framework-compare/run_ab_reduction_threshold_cpu.sh`・`compare_gemm_ab.py --sizes large`・集計 `aggregate_sweep.py`）と**事前登録規則**（`docs/perf/logs/elemental-reduction-ab-2102/RULE.txt`）を整備済み。A/B・結線判断は**実測未実施のため未結線で、既定 OFF を維持**（ADOPT の場合のみ後続 PR で `reduction.rs` の 2 定数を切り替える）。
+- `crates/autodiff/src/grad.rs`・`crates/backend-cpu/src/ops.rs` は #2102 でも 0 行変更（次節の理由による）。
 
 ## 対象サイトの食い違い（重要）
 
