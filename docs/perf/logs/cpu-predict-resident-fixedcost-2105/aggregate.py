@@ -107,6 +107,17 @@ def check_checksums(runs):
     return fresh == reuse
 
 
+def dist_cols(runs, arm, ph):
+    """H5（順序・ばらつき）確認用の分布指標（q1_s・q3_s・min_s・max_s）を run 間 median/極値で要約する。"""
+    def col(k):
+        return [r[(arm, ph)].get(k) for r in runs]
+    q1, q3, mn, mx = col("q1_s"), col("q3_s"), col("min_s"), col("max_s")
+    if any(v is None for v in q1 + q3 + mn + mx):
+        return "null | null"
+    return (f"{us(statistics.median(q1))}/{us(statistics.median(q3))} | "
+            f"{us(min(mn))}-{us(max(mx))}")
+
+
 def us(x):
     return f"{x * 1e6:.1f}"
 
@@ -117,14 +128,15 @@ def aggregate(runs, unpassed=()):
     if unpassed:
         out.append(f"【参考扱い】GB10 負荷ゲート未通過の run: {', '.join(unpassed)}（RULE.txt ゲート節。通常判定として扱わない）")
         out.append("")
-    out.append("| arm | phase | median(us) | min-max(us) | minflt/iter(median) |")
-    out.append("|---|---|---|---|---|")
+    out.append("| arm | phase | median(us) | min-max(us) | q1/q3 median(us) | run 内 min-max(us) | minflt/iter(median) |")
+    out.append("|---|---|---|---|---|---|---|")
     for arm, phases in EXPECTED.items():
         for ph in phases:
             m, lo, hi = med(runs, arm, ph)
             fl = [r[(arm, ph)].get("minflt_delta_per_iter") for r in runs]
             fl_s = "null" if any(v is None for v in fl) else f"{statistics.median(fl):.3f}"
-            out.append(f"| {arm} | {ph} | {us(m)} | {us(lo)}-{us(hi)} | {fl_s} |")
+            dist = dist_cols(runs, arm, ph)
+            out.append(f"| {arm} | {ph} | {us(m)} | {us(lo)}-{us(hi)} | {dist} | {fl_s} |")
     f_tot = med(runs, "fresh", "iter_total")[0]
     r_tot = med(runs, "reuse", "iter_total")[0]
     d_tot = med(runs, "reuse_decomposed", "iter_total")[0]
@@ -173,6 +185,7 @@ def aggregate(runs, unpassed=()):
 
 def synth_line(arm, ph, med_s, chk=None):
     return {"arm": arm, "phase": ph, "median_s": med_s, "n": EXPECTED_N, "checksum_bits": chk,
+            "q1_s": med_s * 0.9, "q3_s": med_s * 1.1, "min_s": med_s * 0.8, "max_s": med_s * 1.3,
             "minflt_delta_per_iter": None}
 
 
@@ -212,6 +225,7 @@ def self_test():
         write_gate(d, ["pass"] * RUNS)
         text = run_dir(d)
         assert "ratio" in text and "帰属" in text and "参考扱い" not in text, text
+        assert "q1/q3" in text and "80.0-130.0" in text, text
         # 負荷ゲート未通過は参考扱いとして出力へ反映される
         write_gate(d, ["pass", "unpassed", "pass", "pass", "pass"])
         text = run_dir(d)

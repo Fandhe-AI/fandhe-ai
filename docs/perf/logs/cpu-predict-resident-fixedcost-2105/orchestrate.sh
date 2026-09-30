@@ -27,7 +27,9 @@ while [ $# -gt 0 ]; do
     *) usage ;;
   esac
 done
+# cd 後も同じ場所を指すよう絶対パス化する（相対 --out はリポジトリルート基準にずれるため）。
 mkdir -p "$out_dir"
+out_dir="$(cd "$out_dir" && pwd)"
 
 # 差し替え禁止: 既存の run ファイルがあれば中止する。
 for n in 1 2 3 4 5; do
@@ -89,7 +91,8 @@ for n in 1 2 3 4 5; do
     while :; do
       l="$(load1)"
       echo "run$n load1=$l waited=${waited}s" >>"$out_dir/load_gate.log"
-      if awk -v l="$l" 'BEGIN{exit !(l < 1.0)}'; then break; fi
+      # 空・非数値は通過扱いにしない（awk では 0 とみなされ l<1.0 が成立してしまうため）。
+      if [[ "$l" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v l="$l" 'BEGIN{exit !(l < 1.0)}'; then break; fi
       if [ "$waited" -ge 1800 ]; then
         echo "run$n: 負荷ゲート未通過（参考扱い）" >>"$out_dir/load_gate.log"
         gate_status=unpassed

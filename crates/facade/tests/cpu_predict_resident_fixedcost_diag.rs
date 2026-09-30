@@ -220,6 +220,24 @@ impl Rec {
         &mut self.cells[i].1
     }
 
+    /// 計測反復の checksum を記録する。同一 arm の全反復で bit 一致を要求し、
+    /// 不一致なら panic する（最後の値だけが JSON に残って反復間の数値ずれを
+    /// 見逃すのを防ぐ。決定的な CPU 経路では常に一致する想定）。
+    fn record_checksum(&mut self, arm: &'static str, s: f64) {
+        if !self.on {
+            return;
+        }
+        let bits = s.to_bits();
+        let c = self.cell(arm, "iter_total");
+        match c.checksum {
+            None => c.checksum = Some(bits),
+            Some(prev) => assert_eq!(
+                prev, bits,
+                "arm {arm}: 反復間で checksum が不一致（{prev:016x} vs {bits:016x}）"
+            ),
+        }
+    }
+
     fn push(&mut self, arm: &'static str, phase: &'static str, dt: f64, f0: Option<u64>) {
         if !self.on {
             return;
@@ -274,9 +292,7 @@ fn run_public(c: &Ctx, rec: &mut Rec, arm: &'static str) {
     let v = rec.timed(arm, "host_copy", || host_copy(&out));
     let s = rec.timed(arm, "checksum", || checksum(&v));
     rec.push(arm, "iter_total", t.elapsed().as_secs_f64(), f0);
-    if rec.on {
-        rec.cell(arm, "iter_total").checksum = Some(s.to_bits());
-    }
+    rec.record_checksum(arm, s);
 }
 
 fn run_decomposed(c: &Ctx, rec: &mut Rec) {
@@ -316,9 +332,7 @@ fn run_decomposed(c: &Ctx, rec: &mut Rec) {
     let v = rec.timed(arm, "host_copy", || host_copy(&out));
     let s = rec.timed(arm, "checksum", || checksum(&v));
     rec.push(arm, "iter_total", t_all.elapsed().as_secs_f64(), f_all);
-    if rec.on {
-        rec.cell(arm, "iter_total").checksum = Some(s.to_bits());
-    }
+    rec.record_checksum(arm, s);
 
     // 上の分解は `linear_forward_device` を直接呼ぶため、公開経路
     // （`predict_device_chain`）が持つ `check_not_poisoned`／`check_device`・
