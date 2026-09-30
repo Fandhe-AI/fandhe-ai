@@ -182,6 +182,12 @@ LAYER_B_PHASES = frozenset(
     + [("E", p) for p in ("sync_idle", "tiny_roundtrip", "event_create_drop", "h2d_prealloc",
                           "h2d_clone_drop")])
 KERNEL_RE = re.compile(r"^DIAG2109 n=(\d+) kernel=(.+)$")
+# 診断テストの出力一致検証（PR #2454 指摘）。全腕の出力を計測窓の外で参照と bit 一致確認した
+# 実施回数の行。不一致はテスト側が panic するため成功ログに現れるのは実施済みの腕のみ。
+VERIFY_RE = re.compile(r"^DIAG2109 n=(\d+) verify arm=(\w+) checks=(\d+) mode=bit_exact$")
+# 診断テストの `VERIFY_ARMS`（gemm_small_launch_cost_diag_tests.rs）と一致させる。
+VERIFY_ARMS = ("L0_ops", "L1_gemm", "L2", "L2S", "D_dev_trial", "D_b2b", "E_tiny",
+               "E_h2d_prealloc", "E_h2d_clone", "count_run")
 
 
 def parse_layer_b(text: str, name: str) -> dict:
@@ -197,6 +203,7 @@ def parse_layer_b(text: str, name: str) -> dict:
     checksum: dict = {}
     counts: dict = {}
     kernel: dict = {}
+    verify: dict = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line.startswith("DIAG2109 "):
@@ -213,6 +220,10 @@ def parse_layer_b(text: str, name: str) -> dict:
                     raise LogIntegrityError(f"{name}: counts 行の項目が k=v 形式でない: {line!r}")
                 register_once(items, k, v, f"{name} counts n={m[1]}")
             register_once(counts, int(m[1]), items, f"{name} counts")
+        elif m := VERIFY_RE.match(line):
+            if int(m[3]) < 1:
+                raise LogIntegrityError(f"{name}: 出力検証の実施回数が 0: {line!r}")
+            register_once(verify, (int(m[1]), m[2]), int(m[3]), f"{name} 出力検証")
         elif m := KERNEL_RE.match(line):
             register_once(kernel, int(m[1]), m[2], f"{name} kernel")
         else:
@@ -225,7 +236,10 @@ def parse_layer_b(text: str, name: str) -> dict:
                        {(n, l, p) for n in SIZES for (l, p) in LAYER_B_PHASES}, f"{name} 区間")
     for n, items in counts.items():
         require_exact_keys(items, expected_counts(n), f"{name} counts n={n} の項目")
-    return {"phases": phases, "checksum": checksum, "counts": counts, "kernel": kernel}
+    # 出力一致検証: 全サイズ・全腕で実施済みであること（欠落・余剰・未知の腕を拒否）。
+    require_exact_keys(verify, {(n, a) for n in SIZES for a in VERIFY_ARMS}, f"{name} 出力検証")
+    return {"phases": phases, "checksum": checksum, "counts": counts, "kernel": kernel,
+            "verify": verify}
 
 
 COUNTS_TEST = "gemm_small_launch_cost_diag_tests::gemm_small_launch_counts_exact"
@@ -467,6 +481,7 @@ def _layer_b_fixture(cksum: str = "0x4062c00000000000") -> str:
         rows.append(f"DIAG2109 n={n} kernel=\"tiled\"")
         rows.append(f"DIAG2109 n={n} checksum_bits={cksum}")
         rows.append(f"DIAG2109 n={n} counts " + " ".join(f"{k}={v}" for k, v in expected_counts(n).items()))
+        rows += [f"DIAG2109 n={n} verify arm={a} checks=250 mode=bit_exact" for a in VERIFY_ARMS]
     rows.append("test " + LAYER_B_TEST + " ... ok")
     rows.append("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
     return "\n".join(rows) + "\n"
@@ -593,6 +608,14 @@ def self_test() -> None:
     must_fail(lb0(dup_line(f"DIAG2109 n={n_} checksum_bits=")), "Layer B checksum_bits の重複（同値）")
     must_fail(lb0(dup_line(f"DIAG2109 n={n_} counts ")), "Layer B counts の重複（同値）")
     must_fail(lb0(dup_line(f"DIAG2109 n={n_} kernel=")), "Layer B kernel 行の重複")
+    must_fail(lb0(dup_line(f"DIAG2109 n={n_} verify arm=L0_ops ")), "Layer B 出力検証行の重複（同値）")
+    must_fail(lb0(drop_line(f"DIAG2109 n={n_} verify arm=L0_ops ")), "Layer B 出力検証（L0）の欠落")
+    must_fail(lb0(drop_line("DIAG2109 n=512 verify arm=D_b2b ")), "Layer B 別サイズの出力検証欠落")
+    must_fail(lb0(lambda t: t + f"DIAG2109 n={n_} verify arm=X checks=1 mode=bit_exact\n"),
+              "Layer B 未知の腕の出力検証")
+    must_fail(lb0(lambda t: t.replace("verify arm=L2 checks=250", "verify arm=L2 checks=0", 1)),
+              "Layer B 出力検証の実施回数 0")
+    must_fail(lb0(lambda t: t.replace("mode=bit_exact", "mode=loose", 1)), "Layer B 出力検証の mode 不正")
     must_fail(lb0(dup_line("test result:")), "Layer B test result の重複")
     must_fail(lb0(dup_line("test " + LAYER_B_TEST)), "Layer B テスト名行の重複")
     must_fail(lb0(drop_line(f"DIAG2109 n={n_} layer=L2 phase=h2d_a ")), "Layer B 区間の欠落")

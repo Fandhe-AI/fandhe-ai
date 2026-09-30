@@ -27,6 +27,7 @@
 - 観測できないもの: cudarc 内部の `cuEventCreate`／`cuEventDestroy`・`cuMemAllocAsync`／`cuMemFreeAsync`・`cuCtxGetCurrent`。cudarc 0.19.8 では `new_event` が `bind_to_thread` の後に `cuEventCreate`（`safe/core.rs:551`）、`record_event` が event 生成＋record（同 `:751`）、`memcpy_htod` が `bind_to_thread` の後に async memcpy（同 `:1602`）を行う。event tracking 有効時は alloc 系が slice ごとに event を作る。実数は nsys（任意）で確認する
 - device event は `CU_EVENT_DEFAULT` を明示（`new_event(None)` は DISABLE_TIMING）。event は計測区間の外で事前生成する
 - `dev_kernel_b2b` は「1 回起動」と「9 回連続キューイング」の device 時間差 /8 で求める推定値（launch latency を差し引く近似。厳密値ではない）
+- 出力一致の検証（PR #2454 指摘）: 所要時間を比較する全腕（L0・L1・L2・L2S・D・b2b・tiny・H2D・件数走行）の出力を、計測窓の外で `run_tiled_f32` の参照出力（計測前に 1 回取得）または既知の期待値と bit 一致で確認し、不一致・非有限値は panic する（純関数 `verify_bit_identical`。CPU 単体テストあり）。全腕が同一カーネル選択・単一の連続 K ループのため bit 一致が成立する構造で、許容誤差は新設・変更していない。保証は「実行した反復の出力が参照と一致した」ことまでで、参照の数学的正しさ（CPU 参照との一致）は対象外。実施結果は `verify` 行として出力され `aggregate.py` が全腕の存在を検査する
 - D2H は本番 `memory::readback` を 1 区間として測るだけ。宛先方式の帰属は #2107 の担当
 
 ## 4. v0.9.0..HEAD の差分の扱い

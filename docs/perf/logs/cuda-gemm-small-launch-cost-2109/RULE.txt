@@ -16,7 +16,7 @@
     上書きをしない。Layer B は 50 warmup + 200 計測。
   - ログ完全性の契約（fail-closed）: aggregate.py は読み取る全レコード種別
     （Layer A/HEAD/candle の JSONL の run 区切り・phase レコード、Layer B の
-    DIAG2109 区間・checksum_bits・counts〈行内の各項目を含む〉・kernel 行、
+    DIAG2109 区間・checksum_bits・counts〈行内の各項目を含む〉・verify〈出力一致〉・kernel 行、
     load_gate.log のゲート行、`cargo test` の成功行）を共通の登録口
     （register_once）で扱い、同じキーのレコードが 2 度現れたら値が同一でも
     LogIntegrityError とする（上書き・最初の値の採用・黙殺をしない）。キー集合は
@@ -35,6 +35,17 @@
   - Layer B の checksum_bits が 5 run で同一であること（サイズごと。各サイズに
     ちょうど 1 行。重複は不一致でなくても fail-closed）。
   - 1 つでも外れたら系列を無効とし、aggregate.py は exit != 0 で終わる。
+  - 出力一致（Layer B。PR #2454 指摘）: 所要時間を比較する全腕（L0・L1・L2・L2S・
+    D dev_trial・D b2b・E tiny・E h2d_prealloc・E h2d_clone・件数走行）の出力は、
+    計測窓の外で `run_tiled_f32` の参照出力（計測前に 1 回取得）または既知の期待値
+    （tiny は 1.0、h2d は入力そのもの）と bit 一致（`f32::to_bits`）を確認し、不一致・
+    非有限値・要素数違いは診断テストが panic する。統一複合判定の許容誤差は新設・
+    変更しない（比較する腕は同一カーネル選択・単一の連続 K ループのため bit 一致が
+    成立する構造。成立しなければ診断を無効とする）。aggregate.py は各サイズ・各腕の
+    `verify` 行（checks >= 1・mode=bit_exact）の存在を要求する。保証範囲は
+    「実行した反復の出力が参照と bit 一致した」ことに限り、参照自体が数学的に
+    正しいこと（CPU 参照との一致）や、sync_idle・event_create_drop の区間
+    （出力を持たない）は対象外。
 
 3. 件数（hard）
   - `gemm_small_launch_counts_exact` が pass すること
