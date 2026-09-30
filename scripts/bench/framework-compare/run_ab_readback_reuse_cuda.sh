@@ -403,7 +403,9 @@ create_excl "$OUT_AFTER_TMP" || exit 1
 create_excl "$SKIP_TMP" || exit 1
 
 BIN_SHA="$(sha256_of target/release/bench-fandhe)"
-echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
+# manifest には絶対パスを載せない（RULE.txt の規則）。path 解決の記述は固定の相対表記へ正規化する。
+BIN_SOURCE_REL="path:crates/facade"
+echo "bench-fandhe sha256: $BIN_SHA (source: $BIN_SOURCE_REL)"
 
 # manifest の書き込み失敗・内容不備は計測前に fail-closed で停止する（PR #2456 P1）。
 # この時点で排他作成済みの一時ファイルと専有ゲートログは、計測が走っていないため掃除する
@@ -432,7 +434,7 @@ for k in ("label", "device", "script_repo_head_sha", "facade_head_sha", "bin_sha
 PY
 }
 if ! write_excl "$MANIFEST_TMP" <<JSON
-{"label":"${LABEL}","device":"cuda","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","readback_arms":["pretouched","pinned-reuse"],"env":"FANDHE_AI_CUDA_READBACK_DEST","gate_mode":"${AB_LOAD_GATE_MODE}","load_gate_max_load1":"${AB_LOAD_GATE_MAX_LOAD1}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"label":"${LABEL}","device":"cuda","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${BIN_SOURCE_REL}","readback_arms":["pretouched","pinned-reuse"],"env":"FANDHE_AI_CUDA_READBACK_DEST","gate_mode":"${AB_LOAD_GATE_MODE}","load_gate_max_load1":"${AB_LOAD_GATE_MAX_LOAD1}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
 then
   abort_before_measure "manifest の書き込みに失敗した（不完全な manifest を公開しないため計測前に停止）: $MANIFEST_TMP"

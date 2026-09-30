@@ -284,7 +284,7 @@ impl HostStagingCache {
     }
 
     #[cfg(test)]
-    fn with_cap(kind: HostStagingKind, cap_bytes: u64) -> Self {
+    pub(crate) fn with_cap(kind: HostStagingKind, cap_bytes: u64) -> Self {
         Self {
             cap_bytes,
             ..Self::new(kind)

@@ -98,6 +98,8 @@ pub(crate) fn current_dest() -> ReadbackDest {
 pub(crate) struct ReadbackStagingPool {
     kind: HostStagingKind,
     per_ordinal: Mutex<HashMap<usize, HostStagingCache>>,
+    #[cfg(test)]
+    cap_bytes: Option<u64>,
 }
 
 impl ReadbackStagingPool {
@@ -105,7 +107,26 @@ impl ReadbackStagingPool {
         Self {
             kind,
             per_ordinal: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            cap_bytes: None,
         }
+    }
+
+    /// テスト専用: ordinal ごとの cap を小さく差し替える（巨大確保を避けるため）。
+    #[cfg(test)]
+    fn with_cap(kind: HostStagingKind, cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes: Some(cap_bytes),
+            ..Self::new(kind)
+        }
+    }
+
+    fn new_cache(&self) -> HostStagingCache {
+        #[cfg(test)]
+        if let Some(cap) = self.cap_bytes {
+            return HostStagingCache::with_cap(self.kind, cap);
+        }
+        HostStagingCache::new(self.kind)
     }
 
     /// 世代・要素数が一致する staging を取り出す。poison 時は miss 扱い（新規確保へ倒す。
@@ -128,12 +149,12 @@ impl ReadbackStagingPool {
         };
         guard
             .entry(ordinal)
-            .or_insert_with(|| HostStagingCache::new(self.kind))
+            .or_insert_with(|| self.new_cache())
             .put(numel, generation, buf);
     }
 
-    /// 全 ordinal の staging を破棄し、解放したバイト数を返す。
-    #[cfg(any(test, feature = "internal-diagnostics"))]
+    /// 全 ordinal の staging を破棄し、解放したバイト数を返す（本番用の明示解放経路。
+    /// `CudaMemory::release_readback_staging` から呼ばれる。REQ-14 `release_cached` 系と同型）。
     pub(crate) fn release_all(&self) -> u64 {
         let mut guard = match self.per_ordinal.lock() {
             Ok(g) => g,
@@ -251,8 +272,8 @@ mod tests {
 
     #[test]
     fn pool_cap_overflow_is_not_registered() {
-        let pool = ReadbackStagingPool::new(HostStagingKind::Pageable);
-        let n = (crate::host_staging::HOST_STAGING_CAP_BYTES / 4) as usize + 1;
+        let pool = ReadbackStagingPool::with_cap(HostStagingKind::Pageable, 16);
+        let n = 16 / 4 + 1;
         pool.put(0, 0, n, pageable(n));
         assert_eq!(pool.stats().cached_bytes, 0);
         assert_eq!(pool.stats().evicted, 1);

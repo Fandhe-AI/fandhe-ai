@@ -902,6 +902,13 @@ pub fn readback_f16_policy_diag(
     readback_with(stream, dev, dest)
 }
 
+/// プロセス共通の readback staging プール（`PinnedStagingReuse` opt-in 時に ordinal ごと最大
+/// 256 MiB の page-locked ホストメモリを保持する。イシュー #2108）を明示解放し、解放バイト数を
+/// 返す。`CudaMemory::release_host_staging` と同型の本番用解放経路（REQ-14）。未 opt-in なら 0。
+pub fn release_readback_staging() -> u64 {
+    crate::readback_policy::readback_staging_pool().release_all()
+}
+
 /// readback staging プールの統計 `(hits, misses, evicted, cached_bytes)`（イシュー #2108）。
 #[cfg(feature = "internal-diagnostics")]
 pub fn readback_staging_stats_diag() -> (u64, u64, u64, u64) {
@@ -912,7 +919,7 @@ pub fn readback_staging_stats_diag() -> (u64, u64, u64, u64) {
 /// readback staging プールを明示解放し、解放バイト数を返す（イシュー #2108）。
 #[cfg(feature = "internal-diagnostics")]
 pub fn release_readback_staging_diag() -> u64 {
-    crate::readback_policy::readback_staging_pool().release_all()
+    release_readback_staging()
 }
 
 /// [`readback_f32_diag`] の f16 版（`gemm_mma.rs::download_f16` が経由
