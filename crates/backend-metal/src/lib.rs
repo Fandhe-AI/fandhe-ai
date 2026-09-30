@@ -259,6 +259,11 @@ pub(crate) mod batch_state;
 // `#[doc(hidden)] pub` は facade（`resolve_ops`）との crate 間結線用の内部面で、facade からは再公開しない。
 #[doc(hidden)]
 pub mod fixed_cost_diag;
+// `buffer.rs::MetalBuffer::read_to_vec` の readback 宛先ポリシー（イシュー
+// #2112。既定 OFF・env `FANDHE_AI_METAL_READBACK_DEST` で opt-in）。`objc2`
+// 系 FFI に触れない純ロジックのため `batch_state` と同じ判断で cfg を付けず、
+// Linux でも単体テストが回る。
+pub(crate) mod readback_policy;
 // `context.rs::MetalContext::synchronize`／`pool.rs::PooledMetalHandle::
 // Drop`（イシュー #1021）が「保留中のプール返却列」へ push・合流する
 // 判定ロジック（`objc2` 系 FFI に触れない）を切り出したモジュール。
