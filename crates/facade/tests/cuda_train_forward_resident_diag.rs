@@ -465,15 +465,20 @@ fn fresh_step(
                 shapes.push(param.shape().to_vec());
             }
             rec.push(arm, "param_readout", batch, t0.elapsed().as_secs_f64());
-            host_params = reuse.params.clone();
-            host_grads = reuse.grads.clone();
+            // 再利用バッファは複製せず、そのまま更新処理へ渡す（複製の確保費用が
+            // R0 との比較に混入しない計測区間外の差にならないよう、複製自体を行わない）。
         }
     }
     drop(param_refs);
     drop(grad_refs);
     drop(bound);
-    let mut next = Vec::with_capacity(host_params.len());
-    for ((p, g), shape) in host_params.iter().zip(host_grads.iter()).zip(shapes.iter()) {
+    let (upd_params, upd_grads): (&[Vec<f32>], &[Vec<f32>]) = if readout == Readout::Pretouched {
+        (&reuse.params, &reuse.grads)
+    } else {
+        (&host_params, &host_grads)
+    };
+    let mut next = Vec::with_capacity(upd_params.len());
+    for ((p, g), shape) in upd_params.iter().zip(upd_grads.iter()).zip(shapes.iter()) {
         let upd: Vec<f32> = p.iter().zip(g.iter()).map(|(p, g)| p - LR * g).collect();
         next.push(Tensor::from_slice(&upd, shape).expect("形状一致"));
     }
