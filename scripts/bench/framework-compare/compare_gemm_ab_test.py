@@ -546,6 +546,58 @@ class DeviceCpuTest(unittest.TestCase):
             os.unlink(after_path)
 
 
+
+class SizesLargeTest(unittest.TestCase):
+    """`--sizes large`（イシュー #2102。cpu で N=1024/2048/4096 を判定）。"""
+
+    _LARGE = (1024, 2048, 4096)
+
+    def _run(self, before, after, argv_extra):
+        bp = _write_jsonl(before)
+        ap = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", *argv_extra, bp, ap])
+            return code, out.getvalue(), err.getvalue()
+        finally:
+            os.unlink(bp)
+            os.unlink(ap)
+
+    def test_cpu_large_accepts_4096(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=self._LARGE, device="cpu")
+        code, out, _ = self._run(
+            before, after, ["--device", "cpu", "--sizes", "large"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("非後退"), 6)
+
+    def test_cpu_large_512_rows_are_out_of_cell_warning(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=self._LARGE, device="cpu")
+        extra_b, extra_a = _all_cells_rows(0.002, 0.0019, sizes=(512,), device="cpu")
+        code, out, err = self._run(
+            before + extra_b, after + extra_a,
+            ["--device", "cpu", "--sizes", "large"],
+        )
+        # セル外サイズ行は不正行として警告され exit 2（既存の意味論どおり）。
+        self.assertEqual(code, 2)
+        self.assertIn("512", err)
+
+    def test_cpu_large_missing_4096_cell_exit_three(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(1024, 2048), device="cpu")
+        code, out, _ = self._run(
+            before, after, ["--device", "cpu", "--sizes", "large"]
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("欠測セル", out)
+
+    def test_cpu_full_default_still_rejects_4096(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=self._LARGE, device="cpu")
+        code, _, _ = self._run(before, after, ["--device", "cpu"])
+        self.assertEqual(code, 2)
+
+
 class GateCudaAndModesTest(unittest.TestCase):
     """イシュー #1337: `--device cuda`・`--sizes gate`・`--modes` の挙動を
     検証する（`run_gemm_gate.sh` 由来の cuda/metal reuse 専用入力を想定）。
