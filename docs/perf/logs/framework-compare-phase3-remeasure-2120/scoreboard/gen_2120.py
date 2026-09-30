@@ -15,6 +15,9 @@
     同一セルの重複行は拒否する。例外は PY_DOCUMENTED_OVERRIDES（RULE.txt「Python FW 行の文書化済み上書き」追記）に
     列挙した 1 キーだけで、同一ファイル内に「上書き元 → 上書き先」の順で 2 行あり、両行が記録済みの sha256 と一致する
     ときに限り後着行を採用する（#1988 の後勝ち追記と同じ意味）。採用・破棄した行は標準出力と GB10 計測条件注記に残す。
+  - 出典表示（本文・表見出し・判定列見出し）の腕は `--arm` から生成する（ARM_TEXT。腕 B の実行で「腕 C」と固定表示しない）。
+    腕 B の rev は集計 JSON の rev_B（aggregate.py が 65035979 始まりを検証済み）を使う。`--main-label` は省略が既定で、
+    指定する場合は `--arm` から導く値と一致しなければ停止する。標準出力の先頭行と `--tsv` の末尾列（arm）にも腕を記す。
   - 計測条件注記へ集計 JSON の専有ゲート結果（M4 Max の不通過 run を含む）を自動で併記する。
   - `--m4-prev`／`--gb-prev`／`--prev-label` は使わない（指定すると停止）。
 - `--legacy-1988`: gen_1988.py と同じ入力・出力（`--prev-label`・`--m4-prev`／`--gb-prev` で前比を自前計算）。
@@ -81,7 +84,7 @@ def parse_args():
     # 既定 CSS は LOGS_DIR（docs/perf/logs）直下の 0.9.0 版 CSS。
     p.add_argument('--style', default=str(DEFAULT_STYLE), help='CSS（0.9.0 版と同一ファイル）')
     p.add_argument('--prev-label', default=None, help='[--legacy-1988 のみ] 「前比」列の比較元ラベル（既定 0.8.0）')
-    p.add_argument('--main-label', default='0.9.0', help='判定列の見出しに使う fandhe-ai 側ラベル（既定 0.9.0。#2120 では "Phase 3 後（HEAD）"）')
+    p.add_argument('--main-label', default=None, help='判定列の見出しに使う fandhe-ai 側ラベル（--legacy-1988 の既定 0.9.0。正式モードは --arm から導き、指定する場合は一致必須）')
     p.add_argument('--tsv', default='', help='検証出力を TSV でも書くパス（任意）')
     p.add_argument('--self-test', action='store_true', help='既定の CSS・本文の存在と、集計 JSON との一致・拒否条件・legacy の byte 同一を検査して終了する（他の必須引数は不要）')
     return p.parse_args()
@@ -131,6 +134,16 @@ def _die(msg):
     raise SystemExit(f'error: {msg}')
 
 
+# 正式モードの出典表示（腕）。本文テンプレートの {arm_label}／{arm_short}／{arm_detail} と判定列見出しの元。
+# 腕 C の文言は #2120 初版の固定表示と同一（従来どおりの表示）。腕 B の rev は集計 JSON の rev_B から埋める。
+ARM_TEXT = {
+    'C': dict(short='腕 C', label='腕 C（Phase 3 後）', main='Phase 3 後（HEAD）',
+              detail='腕 C（計測時点 main HEAD。rev は <code>env_info.txt</code>）'),
+    'B': dict(short='腕 B', label='腕 B（Phase 3 前）', main='Phase 3 前（直前ツリー）',
+              detail='腕 B（Phase 3 直前ツリー {rev_B}。rev は <code>env_info.txt</code>）'),
+}
+
+
 def _self_test():
     """RULE.txt の表示・転記条項の self-test（表駆動）。aggregate.py の fixture から集計 JSON を作り、本スクリプトを
     サブプロセスで起動して、前比が bc_med と一致すること・前提を満たさない入力で停止すること・legacy の byte 同一を検査する。"""
@@ -171,7 +184,7 @@ def _self_test():
             if swap_agg:
                 m4a, gba = gba, m4a
             return ['--m4', m4_file or f'{m4p}-{arm}-full.jsonl', '--m4-agg', m4a, '--gb', f'{gbp}-{arm}-full.jsonl',
-                    '--gb-agg', gba, '--gb-py', py, '--arm', arm, '--main-label', 'Phase 3 後（HEAD）',
+                    '--gb-agg', gba, '--gb-py', py, '--arm', arm,
                     '--out', os.path.join(base, f'out-{arm}.html'), '--tsv', os.path.join(base, f'out-{arm}.tsv')]
 
         def edit_json(path, fn):
@@ -228,6 +241,53 @@ def _self_test():
             assert ok(r), r.stderr
             check_tsv_matches(out, base, 'B')
         case('J6-腕 B 実行でも B→C 比は同じ bc_med', c_arm_b)
+
+        # 出典表示（腕）: 本文・表見出し・判定列見出し・標準出力・TSV の腕は --arm から生成し、腕 B の出力に腕 C の固定表示を残さない
+        ARM_C_PHRASES = ('fandhe-ai 腕 C（Phase 3 後）／candle', '本ページの fandhe-ai 行は腕 C（Phase 3 後）の各セル',
+                         'fandhe-ai は腕 C（計測時点 main HEAD。rev は <code>env_info.txt</code>）の各セル',
+                         'fandhe-ai は腕 C の 5 run 中央値 run', 'fandhe-ai Phase 3 後（HEAD）（判定）')
+
+        def c_arm_text():
+            out, py, base = prep('armtext')
+            rc_ = run(args_for(out, py, base, arm='C'))
+            rb_ = run(args_for(out, py, base, arm='B'))
+            assert ok(rc_) and ok(rb_), (rc_.stderr, rb_.stderr)
+            hc, hb = (open(os.path.join(base, f'out-{a}.html')).read() for a in 'CB')
+            # 腕 C: 従来どおりの固定表示と同一
+            for ph in ARM_C_PHRASES:
+                assert ph in hc, f'腕 C の出力に従来の表示がない: {ph}'
+            # 腕 B: 腕 C の出典表示が残らず、腕 B の表示になる
+            for ph in ARM_C_PHRASES + ('腕 C（Phase 3 後）', 'Phase 3 後（HEAD）'):
+                assert ph not in hb, f'腕 B の出力に腕 C の固定表示が残っている: {ph}'
+            for ph in ('fandhe-ai 腕 B（Phase 3 前）／candle', '本ページの fandhe-ai 行は腕 B（Phase 3 前）の各セル',
+                       'fandhe-ai は腕 B（Phase 3 直前ツリー 65035979。rev は <code>env_info.txt</code>）の各セル',
+                       'fandhe-ai は腕 B の 5 run 中央値 run', 'fandhe-ai Phase 3 前（直前ツリー）（判定）'):
+                assert ph in hb, f'腕 B の出力に腕 B の表示がない: {ph}'
+            # 残る「腕 C」は腕に依らない説明（腕の定義・B→C 比・見出し）だけ: テンプレートの静的出現数と一致する
+            static_c = open(DEFAULT_BODY).read().count('腕 C')
+            assert hb.count('腕 C') == static_c and hc.count('腕 C') - hb.count('腕 C') == 5, (hb.count('腕 C'), hc.count('腕 C'), static_c)
+            # 標準出力・TSV にも腕を記す
+            assert rb_.stdout.splitlines()[0].startswith('arm B ') and rc_.stdout.splitlines()[0].startswith('arm C '), (rb_.stdout[:40], rc_.stdout[:40])
+            for a in 'BC':
+                assert all(l.split('\t')[-1] == f'arm={a}' for l in open(os.path.join(base, f'out-{a}.tsv')).read().splitlines())
+        case('ARM-出典表示は --arm から生成（腕 B に腕 C の固定表示なし・腕 C は従来どおり・標準出力／TSV に腕）', c_arm_text)
+
+        def c_main_label():
+            out, py, base = prep('mainlabel')
+            ok_ = run(args_for(out, py, base, arm='C') + ['--main-label', 'Phase 3 後（HEAD）'])
+            assert ok(ok_), ok_.stderr
+            r = run(args_for(out, py, base, arm='B') + ['--main-label', 'Phase 3 後（HEAD）'])
+            assert not ok(r) and '--main-label' in r.stderr, r.stderr
+        case('ARM-腕と食い違う --main-label → 停止（一致する指定は受理）', c_main_label)
+
+        def c_arm_flag_mismatch():
+            out, py, base = prep('armflag')
+            # 腕 B の派生 JSONL を --arm C で渡す（--arm と入力の腕の食い違い）→ 腕の取り違えと明示して停止
+            a = args_for(out, py, base, arm='C')
+            a[a.index('--gb') + 1] = f'{out["gb10"][0]}-B-full.jsonl'
+            r = run(a)
+            assert not ok(r) and 'sha256' in r.stderr and 'B の派生 JSONL と一致' in r.stderr and '--arm と入力の腕が食い違う' in r.stderr, r.stderr
+        case('ARM-集計 JSON の腕と --arm が食い違う入力 → 停止（取り違え先の腕を明示）', c_arm_flag_mismatch)
 
         def c_sha():
             out, py, base = prep('sha')
@@ -457,6 +517,9 @@ else:
         if _v is not None:
             _die(f'正式モードでは {_flag} を使わない（前比は集計 JSON の bc_med。RULE.txt 判定 3 追記）')
     PREV_VER = None
+    if ARGS.main_label is not None and ARGS.main_label != ARM_TEXT[ARGS.arm]['main']:
+        _die(f'--main-label {ARGS.main_label!r} は --arm {ARGS.arm} の出典表示（{ARM_TEXT[ARGS.arm]["main"]!r}）と一致しない'
+             '（省略すると --arm から導く。腕と異なる見出しを付けない）')
 
 
 def load(p):
@@ -510,8 +573,13 @@ def load_agg(path, machine, main_path, arm):
     if exc != AGGMOD.others_exceptions(machine):
         _die(f'{path}: 明示例外（others_exceptions）が aggregate.py の定義と一致しない')
     dg = (d.get('derived') or {}).get(arm) or {}
-    if AGGMOD.sha256_file(main_path) != dg.get('sha256'):
-        _die(f'{main_path} が集計 JSON の腕 {arm} の派生 JSONL（sha256）と一致しない（集計後の改変・腕／機体の取り違え）')
+    sha = AGGMOD.sha256_file(main_path)
+    if sha != dg.get('sha256'):
+        other = [a for a, x in (d.get('derived') or {}).items() if a != arm and (x or {}).get('sha256') == sha]
+        hint = f'。この入力は腕 {"・".join(sorted(other))} の派生 JSONL と一致する（--arm と入力の腕が食い違う）' if other else ''
+        _die(f'{main_path} が集計 JSON の腕 {arm} の派生 JSONL（sha256）と一致しない（集計後の改変・腕／機体の取り違え）{hint}')
+    if arm == 'B' and not str(d.get('rev_B', '')).startswith(AGGMOD.PRE_TREE_PREFIX):
+        _die(f'{path}: 腕 B の rev_B が {AGGMOD.PRE_TREE_PREFIX} 始まりでない')
     return d, cells
 
 
@@ -811,7 +879,7 @@ def count_invalid(data, rows):
 invalid_n = count_invalid(m4, M4_ROWS) + count_invalid(gb, GB_ROWS)
 
 def head(cols):
-    return f'<thead><tr><th>対象</th><th>勝敗</th><th>最速他 FW ÷ fandhe-ai</th><th>fandhe-ai {ARGS.main_label}（判定）</th><th>fandhe-ai 別モード（参考）</th>' + ''.join(f'<th>{c}</th>' for c in cols) + '</tr></thead>'
+    return f'<thead><tr><th>対象</th><th>勝敗</th><th>最速他 FW ÷ fandhe-ai</th><th>fandhe-ai {MAIN_LABEL}（判定）</th><th>fandhe-ai 別モード（参考）</th>' + ''.join(f'<th>{c}</th>' for c in cols) + '</tr></thead>'
 
 def lst(rows):
     return '、'.join(f'{r["machine"]} {r["label"]}（{r["ratio"]:.2f}×）' for r in rows if r['ratio'] is not None)
@@ -894,6 +962,17 @@ else:
     GB_CARDS = (card_gemm(gb, gb_prev, 'cuda', (256, 512, 1024, 2048, 4096), 'GB10 GEMM CUDA') + card_gemm(gb, gb_prev, 'cpu', (256, 512, 1024, 2048, 4096), 'GB10 GEMM CPU')
                 + card_train(gb, gb_prev, ('cuda', 'cpu'), 'GB10 MLP 学習 1 step') + card_infer(gb, gb_prev, ('cuda', 'cpu'), 'GB10 推論スループット'))
 
+if LEGACY:
+    MAIN_LABEL, ARM_FMT = ARGS.main_label if ARGS.main_label is not None else '0.9.0', {}
+else:
+    _t = ARM_TEXT[ARGS.arm]
+    _revs = {str(x.get('rev_B', ''))[:8] for x in (AGG_M4, AGG_GB)}
+    if ARGS.arm == 'B' and len(_revs) != 1:
+        _die(f'M4 Max と GB10 の集計 JSON で rev_B が一致しない: {sorted(_revs)}')
+    MAIN_LABEL = _t['main']
+    ARM_FMT = dict(arm_label=_t['label'], arm_short=_t['short'],
+                   arm_detail=_t['detail'].format(rev_B=html.escape(sorted(_revs)[0])))
+
 CSS = open(ARGS.style).read()
 BODY = open(ARGS.body).read()
 
@@ -907,10 +986,14 @@ out = BODY.format(
     win_list=lst(wins), near_list=lst(nears), loss_list=lst(losses),
     m4_load=M4_LOAD, gb_load=GB_LOAD,
     m4_cards=M4_CARDS, gb_cards=GB_CARDS,
+    **ARM_FMT,
 )
 Path(ARGS.out).write_text(out)
 
 # 検証出力
+if not LEGACY:
+    # 正式モードのみ先頭行に腕を記す（legacy は gen_1988.py と byte 同一の標準出力を保つ）
+    print(f'arm {ARGS.arm} {ARM_TEXT[ARGS.arm]["label"]}')
 for r in allrows:
     rt = 'n/a' if r['ratio'] is None else f"{r['ratio']:.2f}x"
     print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best'] or '-':10} {rt}  {r['vprevs']}")
@@ -924,7 +1007,7 @@ if ARGS.tsv:
         c = AGG[r['machine']][(t, d, n, 'reuse')]
         ck = '一致' if c['ck_within'] and c['ck_across'] else '不一致'
         return (f"\t{t}\t{d}\t{n}\t{c['bc_med']:.4f}\t{c['bc_q1']:.4f}\t{c['bc_q3']:.4f}"
-                f"\t{'非後退' if c['nonreg'] else '後退'}\t{ck}")
+                f"\t{'非後退' if c['nonreg'] else '後退'}\t{ck}\tarm={ARGS.arm}")
     Path(ARGS.tsv).write_text(''.join(f"{r['machine']}\t{r['label']}\t{r['verdict']}\t{r['best'] or ''}\t{'' if r['ratio'] is None else format(r['ratio'], '.4f')}\t{r['vprevs']}{_tsv_tail(r, spec)}\n"
                                       for r, spec in zip(allrows, M4_ROWS + GB_ROWS)))
 if LEGACY:

@@ -19,6 +19,11 @@
 実測後は `m4max/`・`gb10/` 配下へ `run{1..5}/`・`gate.log`・`build.log`・`env_info.txt`・`switches-{B,C}.txt`・`aggregate.md`・
 `<prefix>-{A,B,C}-full.jsonl`・`<prefix>-aggregate.json` を収録する（RULE.txt 保存物）。
 
+（追記）`gen_2120.py` の HTML・標準出力・`--tsv` の出典表示（腕）は `--arm` から生成する。`--arm B` の HTML は「腕 B（Phase 3 前）」
+表示（rev は集計 JSON の rev_B）で、腕 C の固定表示を含まない。`--main-label` は省略が既定で、指定する場合は `--arm` と一致が必須。
+`--arm` と入力 JSONL の腕が食い違えば停止する（self-test の ARM-系ケースが検査。`--arm C` の表示と `--legacy-1988` の byte 同一は不変）。
+腕 B と腕 C の HTML は `--out` を分けて出力すること（同名で上書きしない）。
+
 ## 再現手順・所要時間
 
 `docs/perf/framework-compare-phase3-remeasure.md` §5 を参照。
