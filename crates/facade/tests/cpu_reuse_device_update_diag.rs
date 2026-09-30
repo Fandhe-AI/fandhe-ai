@@ -382,8 +382,9 @@ impl Standalone {
         // `grad.clone()`（2 本）も含める（含めないと H4 残差へ混入し H3/H4 の帰属を誤らせる）。
         let (cb1, cb2) = (&self.b1, &self.b2);
         rec.timed("standalone", "alloc", || {
-            let c1 = cb1.clone();
-            let c2 = cb2.clone();
+            // `&Tensor` への `.clone()` が参照コピーに解決されないよう `Tensor::clone` を明示する。
+            let c1 = Tensor::clone(cb1);
+            let c2 = Tensor::clone(cb2);
             std::hint::black_box((&c1, &c2));
             let flat: Vec<f32> = Vec::with_capacity(total);
             let vars: Vec<u64> = Vec::with_capacity(4);
