@@ -610,6 +610,12 @@ pub struct MetalGemm {
     /// セッションへ申し送り、性能実測・`tile::select` への組み込み判断は
     /// 行わない**（`docs/perf/metal-gemm-n4096-kernel-gap.md` §該当節）。
     smem_swizzle: tile::SmemSwizzle,
+    /// 協調ロード `vi` ループの固定反復数化 + full unroll 軸（イシュー #2110。
+    /// `shaders/gemm.metal` の `UNROLL_LOAD_ENABLED`〈index 18〉へ畳み込まれる）。
+    /// `MetalGemm::new` は本番既定 `tile::UNROLL_LOAD_ENABLED`（`false`）を渡す
+    /// ため既定挙動は不変。f16／hfrag／split-K パス 1 は常に `false`（no-op 契約）。
+    /// 実測・結線判断は #2111 のスコープ。
+    unroll_load_enabled: bool,
     /// タイルクラス分割（イシュー #1327・E6 試作）をこのインスタンスの
     /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]・
     /// [`Self::encode_tiled_by_class`]）で有効化するかどうか。
@@ -816,6 +822,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -858,6 +865,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -896,6 +904,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -944,6 +953,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             smem_swizzle,
+            tile::UNROLL_LOAD_ENABLED,
         )
     }
 
@@ -953,6 +963,56 @@ impl MetalGemm {
     #[cfg(test)]
     pub(crate) fn smem_swizzle(&self) -> tile::SmemSwizzle {
         self.smem_swizzle
+    }
+
+    /// テスト専用: [`Self::new`] と同じ構築を行うが、steel 差分候補
+    /// （イシュー #2110）の 3 軸を明示指定する: アキュムレータ系 unroll
+    /// （`unroll_acc`。実効は [`tile::unroll_acc_loops_for`] の acc 積閾値との
+    /// AND）・協調ロード unroll（`unroll_load`。`shaders/gemm.metal`
+    /// `UNROLL_LOAD_ENABLED`）・細粒度バリア（`fine_barrier`）。他ゲートは
+    /// 本番既定。呼び出し元は `gemm_steel_candidate_diag_tests`（bit 一致・
+    /// parity・kernel_gpu 5 run ハーネス）のみ。`#[cfg(test)] pub(crate)` に
+    /// 留める理由は、`fandhe-ai-backend-metal` が crates.io 公開クレートで
+    /// あり候補機構で公開面を増やさないため（性能実測・結線判断は #2111）。
+    #[cfg(test)]
+    pub(crate) fn new_with_steel_candidate(
+        ctx: &MetalContext,
+        unroll_acc: bool,
+        unroll_load: bool,
+        fine_barrier: bool,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            fine_barrier,
+            unroll_acc,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
+            tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,
+            tile::MMA_FRAG_LOAD,
+            tile::SMEM_SWIZZLE,
+            unroll_load,
+        )
+    }
+
+    /// テスト専用: このインスタンスの協調ロード unroll ゲート（#2110）。
+    #[cfg(test)]
+    pub(crate) fn unroll_load_enabled(&self) -> bool {
+        self.unroll_load_enabled
+    }
+
+    /// テスト専用: このインスタンスのアキュムレータ unroll instance フラグ（#2110）。
+    #[cfg(test)]
+    pub(crate) fn unroll_acc_enabled_flag(&self) -> bool {
+        self.unroll_acc_enabled
+    }
+
+    /// テスト専用: このインスタンスの細粒度バリアフラグ（#2110）。
+    #[cfg(test)]
+    pub(crate) fn fine_barrier_enabled_flag(&self) -> bool {
+        self.fine_barrier_enabled
     }
 
     /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の 1
@@ -990,6 +1050,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -1030,6 +1091,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -1060,6 +1122,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -1089,6 +1152,7 @@ impl MetalGemm {
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -1133,6 +1197,7 @@ impl MetalGemm {
             split_k_auto_enabled,
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -1189,6 +1254,7 @@ impl MetalGemm {
             },
             mma_frag_load,
             tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
+            tile::UNROLL_LOAD_ENABLED, // unroll_load 既定（イシュー #2110。候補ゲートは new_with_steel_candidate 経由でのみ指定）
         )
     }
 
@@ -1283,6 +1349,7 @@ impl MetalGemm {
         split_k_auto_enabled: bool,
         mma_frag_load: tile::MmaFragLoad,
         smem_swizzle: tile::SmemSwizzle,
+        unroll_load_enabled: bool,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -1330,6 +1397,7 @@ impl MetalGemm {
             frag_load,
             coop_load,
             smem_swizzle,
+            unroll_load_enabled,
             tile_class_mode,
             tiled_splitk_cache: Mutex::new(HashMap::new()),
             pipeline_splitk_reduce,
@@ -1473,6 +1541,7 @@ impl MetalGemm {
                 // そのまま渡す（`coop_load_layout` と同じ instance ゲート
                 // 方式）。
                 coop_smem_swizzle: self.smem_swizzle.as_u32(),
+                unroll_load_enabled: self.unroll_load_enabled,
             };
             // イシュー #1693: `mma_frag_load` に応じてカーネル関数名を
             // 切り替える（`GemmVariant::SimdgroupTiled` の本番関数名
@@ -1602,6 +1671,7 @@ impl MetalGemm {
                 // 同じ理由で XOR swizzle 軸を opt-in せず本番既定値（`0`＝
                 // `SmemSwizzle::Off`）で固定する。
                 coop_smem_swizzle: 0,
+                unroll_load_enabled: false,
             };
             let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
             let build_result = pipeline::make_pipeline_with_constants(
@@ -1933,6 +2003,7 @@ impl MetalGemm {
                 // 参照しないため常に `0`（`SmemSwizzle::Off`）を渡す
                 // no-op 契約（他ゲートと同じ扱い）。
                 coop_smem_swizzle: 0,
+                unroll_load_enabled: false,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -2035,6 +2106,7 @@ impl MetalGemm {
                 // 参照しないため常に `0`（`SmemSwizzle::Off`）を渡す
                 // no-op 契約（`pipeline_for_tile_f16` と同じ扱い）。
                 coop_smem_swizzle: 0,
+                unroll_load_enabled: false,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),

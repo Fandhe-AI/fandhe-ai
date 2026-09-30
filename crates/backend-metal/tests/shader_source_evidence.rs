@@ -637,8 +637,9 @@ fn gemm_simdgroup_tiled_source_uses_float4_staged_load() {
     let occurrences = kernel_body.matches(needle).count();
     // イシュー #1138: NN 用（A/B）2 箇所 + 転置ロード用（TRANS_A/TRANS_B
     // 分岐。A タイル・B タイルそれぞれ 1 箇所ずつ）2 箇所の計 4 箇所。
+    // イシュー #2110: `UNROLL_LOAD_ENABLED` の if/else 複製で 4→8（本体同一の 2 variant）。
     assert_eq!(
-        occurrences, 4,
+        occurrences, 8,
         "gemm_simdgroup_tiled の staged 経路（NN・転置ロード双方）の A/B タイルロードに float4 ベクトルロード `{needle}` が見つかりません（見つかった数: {occurrences}）"
     );
 }
@@ -659,8 +660,8 @@ fn gemm_simdgroup_tiled_source_retains_float4_load_boundary_fallback() {
     // A タイル・B タイルそれぞれ 1 箇所ずつ）2 箇所の計 4 箇所。
     assert_eq!(
         kernel_body.matches("bool group_in_bounds =").count(),
-        4,
-        "A タイル・B タイルの NN・転置ロード双方に group_in_bounds 判定が必要です"
+        8,
+        "A タイル・B タイルの NN・転置ロード双方（各 unroll_load variant）に group_in_bounds 判定が必要です"
     );
 }
 
@@ -729,9 +730,10 @@ fn gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding() {
         "B タイルのパディング込み書き込み先添字 dst_idx が見つかりません"
     );
     // イシュー #1138: 上記コメントと同じ理由で 4 箇所（NN 2 + 転置 2）。
+    // イシュー #2110: UNROLL_LOAD_ENABLED の if/else 複製で 8 箇所。
     assert_eq!(
         kernel_body.matches("bool group_in_bounds =").count(),
-        4,
+        8,
         "パディング導入後も A タイル・B タイル双方（NN・転置ロード）の group_in_bounds 判定が必要です"
     );
 }
@@ -963,9 +965,17 @@ fn gemm_simdgroup_tiled_source_gates_unroll_pragmas_behind_function_constant() {
     let pragma_count = kernel_body
         .matches("#pragma clang loop unroll(full)")
         .count();
+    // イシュー #2110: 協調ロード側の unroll pragma 4 個（`for (uint it = 0; it <
+    // *_ITERS; ...)` 直前。別軸 `UNROLL_LOAD_ENABLED`）を除いた acc 系が 10 個。
+    let load_pragma_count = kernel_body.matches("for (uint it = 0; it < ").count();
     assert_eq!(
-        pragma_count, 10,
-        "gemm_simdgroup_tiled の #pragma clang loop unroll(full) 出現数が 10 ではありません（見つかった数: {pragma_count}）"
+        load_pragma_count, 4,
+        "協調ロード unroll ループ数が 4 ではありません"
+    );
+    assert_eq!(
+        pragma_count - load_pragma_count,
+        10,
+        "gemm_simdgroup_tiled の acc 系 #pragma clang loop unroll(full) 出現数が 10 ではありません（全体: {pragma_count}）"
     );
 }
 
@@ -1089,6 +1099,7 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_eighteen_defines() {
         "constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;",
         "constant bool SPLIT_K_ENABLED = GEMM_SPEC_SPLIT_K_ENABLED;",
         "constant uint COOP_SMEM_SWIZZLE = GEMM_SPEC_COOP_SMEM_SWIZZLE;",
+        "constant bool UNROLL_LOAD_ENABLED = GEMM_SPEC_UNROLL_LOAD_ENABLED;",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
@@ -1098,7 +1109,7 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_eighteen_defines() {
 }
 
 /// イシュー #1288/#1293/#1298/#1327/#1474/#1970 の証跡: `#ifdef
-/// GEMM_SPEC_ENABLED` 導入後も `#else` 側の 17 個の function constant
+/// GEMM_SPEC_ENABLED` 導入後も `#else` 側の 19 個の function constant
 /// 宣言（本番既定経路。#188/#538/#540/#809/#1138/#1282/#1293/#1298/
 /// #1327/#1474/#1970 の各 index）がバイト同一で残っていることをロックする
 /// （`crate::spec_source` へ移設した `SOURCE_SPECIALIZATION_ENABLED` 既定
@@ -1124,6 +1135,7 @@ fn gemm_metal_source_else_branch_retains_all_eighteen_function_constants() {
         "constant uint TILE_CLASS [[function_constant(15)]];",
         "constant bool SPLIT_K_ENABLED [[function_constant(16)]];",
         "constant uint COOP_SMEM_SWIZZLE [[function_constant(17)]];",
+        "constant bool UNROLL_LOAD_ENABLED [[function_constant(18)]];",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
@@ -1218,26 +1230,26 @@ fn gemm_simdgroup_tiled_source_uses_smem_swizzle_col_helper() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     let total_calls = kernel_body.matches("smem_swizzle_col(").count();
     assert_eq!(
-        total_calls, 20,
-        "gemm_simdgroup_tiled 本体内の smem_swizzle_col 呼び出しがちょうど 20 箇所で \
+        total_calls, 24,
+        "gemm_simdgroup_tiled 本体内の smem_swizzle_col 呼び出しがちょうど 24 箇所で \
          あるはずです（見つかった数: {total_calls}）"
     );
     let a_gate_calls = kernel_body
         .matches("smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1,")
         .count();
     assert_eq!(
-        a_gate_calls, 10,
-        "A タイル箇所（協調ロード書き込み 2 + フラグメントロード 8）の \
-         COOP_SMEM_SWIZZLE >= 1 ゲート呼び出しが 10 箇所であるはずです \
+        a_gate_calls, 12,
+        "A タイル箇所（協調ロード書き込み 4〈#2110 の unroll_load 複製込み〉+ フラグメントロード 8）の \
+         COOP_SMEM_SWIZZLE >= 1 ゲート呼び出しが 12 箇所であるはずです \
          （見つかった数: {a_gate_calls}）"
     );
     let b_gate_calls = kernel_body
         .matches("smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2,")
         .count();
     assert_eq!(
-        b_gate_calls, 10,
-        "B タイル箇所（協調ロード書き込み 2 + フラグメントロード 8）の \
-         COOP_SMEM_SWIZZLE >= 2 ゲート呼び出しが 10 箇所であるはずです \
+        b_gate_calls, 12,
+        "B タイル箇所（協調ロード書き込み 4〈#2110 の unroll_load 複製込み〉+ フラグメントロード 8）の \
+         COOP_SMEM_SWIZZLE >= 2 ゲート呼び出しが 12 箇所であるはずです \
          （見つかった数: {b_gate_calls}）"
     );
 
@@ -1251,7 +1263,7 @@ fn gemm_simdgroup_tiled_source_uses_smem_swizzle_col_helper() {
     let staged_scope = &kernel_body[..direct_load_start];
     let staged_calls = staged_scope.matches("smem_swizzle_col(").count();
     assert_eq!(
-        staged_calls, 20,
+        staged_calls, 24,
         "smem_swizzle_col 呼び出しは全て staged 経路（direct-load 目印コメントより前）に \
          収まっているはずです（staged 側で見つかった数: {staged_calls}）"
     );
@@ -1587,11 +1599,11 @@ fn gemm_simdgroup_tiled_hfrag_source_does_not_reference_experimental_gates() {
 fn gemm_simdgroup_tiled_hfrag_introduces_no_new_function_constants() {
     let declared = GEMM_METAL_SOURCE.matches("[[function_constant(").count();
     // `gemm_metal_source_declares_spec_ifdef_block_with_all_eighteen_defines`
-    // が個々の宣言文字列（index 0〜17 の 18 個）を固定済みのため、本テストは
+    // が個々の宣言文字列（index 0〜18 の 19 個。#2110 で index 18 追加）を固定済みのため、本テストは
     // 総数のみを再確認する（`gemm_simdgroup_tiled_hfrag` が新規宣言を追加
     // していないことの裏付け）。
     assert_eq!(
-        declared, 18,
+        declared, 19,
         "function_constant 宣言の総数が想定外です（gemm_simdgroup_tiled_hfrag または他カーネルが新規 function constant を追加した疑い）"
     );
 }
@@ -1828,4 +1840,82 @@ fn gemm_splitk_reduce_source_still_uses_no_atomics_after_te_addition() {
         !code_only.contains("atomic"),
         "gemm_splitk_reduce が atomic 系 API を参照しています（イシュー #1693 追加後の非後退確認）"
     );
+}
+
+/// イシュー #2110 の証跡: 協調ロード unroll 軸 `UNROLL_LOAD_ENABLED` が
+/// function constant index 18 として `COOP_SMEM_SWIZZLE`（17）の直後にちょうど
+/// 1 回宣言され、`gemm_simdgroup_tiled` の協調ロード 4 ブロック（A-NN／A-T／
+/// B-NN／B-T）が `if (UNROLL_LOAD_ENABLED) {` で 4 回だけ複製されていること、
+/// 追加された full unroll pragma は協調ロード側の 4 個のみ（acc 系 10 個は
+/// 別テストが固定）であることをロックする。
+#[test]
+fn gemm_simdgroup_tiled_source_gates_coop_load_unroll_behind_function_constant() {
+    assert_eq!(
+        GEMM_METAL_SOURCE
+            .matches("constant bool UNROLL_LOAD_ENABLED [[function_constant(18)]];")
+            .count(),
+        1,
+        "UNROLL_LOAD_ENABLED の function constant 宣言（index 18）がちょうど 1 回ではありません"
+    );
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    assert_eq!(
+        kernel_body.matches("if (UNROLL_LOAD_ENABLED) {").count(),
+        4,
+        "gemm_simdgroup_tiled の UNROLL_LOAD_ENABLED 分岐ブロック数が 4 ではありません"
+    );
+    // 協調ロード側の固定反復数化: A／B 各 2 ブロックが `it < *_ITERS` ループを持つ。
+    assert_eq!(kernel_body.matches("it < A_ITERS").count(), 2);
+    assert_eq!(kernel_body.matches("it < B_ITERS").count(), 2);
+    // 部分反復ガード（省略すると cand6 の B 等で範囲外へ書く）。
+    assert_eq!(kernel_body.matches("if (vi < a_vecs) {").count(), 2);
+    assert_eq!(kernel_body.matches("if (vi < b_vecs) {").count(), 2);
+    // pragma 総数 = acc 系 10 + 協調ロード 4。
+    assert_eq!(
+        kernel_body
+            .matches("#pragma clang loop unroll(full)")
+            .count(),
+        14,
+        "acc 系 10 + 協調ロード 4 の計 14 ではありません"
+    );
+}
+
+/// イシュー #2110 / REQ-8 の証跡: 協調ロードの手動境界検査（`tiled_*_group_in_bounds`
+/// 判定とスカラー 0 埋めフォールバック）が unroll_load 版・非 unroll_load 版の
+/// 両方に残っていること（各 variant で 4 ブロック分 = 合計 8 と、0 埋め
+/// 三項式が 8 箇所）をロックする。整列可否による分岐ロードは #808 で不採用。
+#[test]
+fn gemm_simdgroup_tiled_source_retains_req8_boundary_guards_in_both_unroll_load_variants() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for (needle, expected) in [
+        ("tiled_at_group_in_bounds(", 2),
+        ("tiled_a_group_in_bounds(", 2),
+        ("tiled_bt_group_in_bounds(", 2),
+        ("tiled_b_group_in_bounds(", 2),
+        ("tiled_at_elem_in_bounds(", 2),
+        ("tiled_a_elem_in_bounds(", 2),
+        ("tiled_bt_elem_in_bounds(", 2),
+        ("tiled_b_elem_in_bounds(", 2),
+    ] {
+        let occurrences = kernel_body.matches(needle).count();
+        assert_eq!(
+            occurrences, expected,
+            "`{needle}` の出現数が期待値と異なります（見つかった数: {occurrences}、期待値: {expected}。\
+             unroll_load 版・非 unroll_load 版の両方で境界検査を維持する契約）"
+        );
+    }
+}
+
+/// イシュー #2110 の証跡: `gemm_simdgroup_tiled_f16`／`_hfrag`／`_te` は
+/// `UNROLL_LOAD_ENABLED` を参照しない no-op 契約（ホスト側は常に `false`）。
+#[test]
+fn other_gemm_kernels_do_not_reference_unroll_load() {
+    for (name, body) in [
+        ("f16", gemm_simdgroup_tiled_f16_kernel_body()),
+        ("hfrag", gemm_simdgroup_tiled_hfrag_kernel_body()),
+    ] {
+        assert!(
+            !body.contains("UNROLL_LOAD_ENABLED"),
+            "gemm_simdgroup_tiled_{name} が UNROLL_LOAD_ENABLED を参照しています（no-op 契約違反）"
+        );
+    }
 }

@@ -98,6 +98,10 @@ pub(crate) struct SpecializationParams {
     /// [`new`](Self::new) は本番既定 `0`（`crate::tile::SmemSwizzle::Off`）
     /// を渡す。
     pub(crate) coop_smem_swizzle: u32,
+    /// `GEMM_SPEC_UNROLL_LOAD_ENABLED`（イシュー #2110）。
+    /// `crate::pipeline::GemmGateConstants::unroll_load_enabled` と同じ意味。
+    /// [`new`](Self::new) は本番既定 `false`（現行ループ）を渡す。
+    pub(crate) unroll_load_enabled: bool,
 }
 
 impl SpecializationParams {
@@ -144,6 +148,8 @@ impl SpecializationParams {
             // イシュー #1970: 本コンストラクタは従来の 7 引数のまま据え置き、
             // XOR swizzle 軸も本番既定値（`0`＝`SmemSwizzle::Off`）で埋める。
             coop_smem_swizzle: 0,
+            // イシュー #2110: 協調ロード unroll 軸も本番既定値（`false`）で埋める。
+            unroll_load_enabled: false,
         }
     }
 }
@@ -236,6 +242,10 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
         "#define GEMM_SPEC_COOP_SMEM_SWIZZLE {}\n",
         params.coop_smem_swizzle
     ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_UNROLL_LOAD_ENABLED {}\n",
+        msl_bool(params.unroll_load_enabled)
+    ));
     header.push_str(&format!("#define GEMM_SPEC_ACC_ROWS {acc_rows}\n"));
     header.push_str(&format!("#define GEMM_SPEC_ACC_COLS {acc_cols}\n"));
     header.push_str(GEMM_MSL_SRC);
@@ -276,6 +286,7 @@ mod tests {
                 assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_KSTEPS 1\n"));
                 assert!(src.contains("#define GEMM_SPEC_COOP_LOAD_LAYOUT 0\n"));
                 assert!(src.contains("#define GEMM_SPEC_COOP_SMEM_SWIZZLE 0\n"));
+                assert!(src.contains("#define GEMM_SPEC_UNROLL_LOAD_ENABLED false\n"));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_ROWS {}\n", cfg.acc_rows())));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_COLS {}\n", cfg.acc_cols())));
             }
@@ -436,5 +447,28 @@ mod tests {
             src,
             "swizzle 差分が生成文字列へ反映されていない"
         );
+    }
+
+    /// イシュー #2110: 協調ロード unroll 軸（`unroll_load_enabled`）の
+    /// 上書きが生成 `#define` へ反映されること（既定 false・true で差分）。
+    #[test]
+    fn unroll_load_override_is_reflected_in_generated_defines() {
+        let base = SpecializationParams::new(
+            CANDIDATES[3],
+            false,
+            false,
+            false,
+            false,
+            1,
+            TransposePattern::Nn,
+        );
+        assert!(!base.unroll_load_enabled);
+        let overridden = SpecializationParams {
+            unroll_load_enabled: true,
+            ..base
+        };
+        let src = specialized_gemm_source(&overridden);
+        assert!(src.contains("#define GEMM_SPEC_UNROLL_LOAD_ENABLED true\n"));
+        assert_ne!(specialized_gemm_source(&base), src);
     }
 }

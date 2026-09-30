@@ -623,6 +623,7 @@ constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;
 constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;
 constant bool SPLIT_K_ENABLED = GEMM_SPEC_SPLIT_K_ENABLED;
 constant uint COOP_SMEM_SWIZZLE = GEMM_SPEC_COOP_SMEM_SWIZZLE;
+constant bool UNROLL_LOAD_ENABLED = GEMM_SPEC_UNROLL_LOAD_ENABLED;
 #else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
@@ -859,6 +860,22 @@ constant bool SPLIT_K_ENABLED [[function_constant(16)]];
 // 未使用の最小 index。`tests/shader_source_evidence.rs` が index まで
 // 含めて固定する）。
 constant uint COOP_SMEM_SWIZZLE [[function_constant(17)]];
+// イシュー #2110: 協調ロード（`gemm_simdgroup_tiled` staged 経路の A/B 4 ブロック）
+// の `vi` ループを「固定反復数 + `#pragma clang loop unroll(full)`」へ切り替える
+// opt-in 軸（既定 false = 現行ループと本体同一・字下げのみ差）。candle steel の BlockLoader
+// は読み出しループに `STEEL_PRAGMA_UNROLL` を付ける（`docs/analysis/candle-metal-01.md`
+// §5・§6 候補 1・2）。`UNROLL_ACC_ENABLED`（#1282 E1・アキュムレータ系 10 ループのみ）
+// とは別軸で、協調ロードの 4 ループは未着手だった。
+// **bit 一致の論拠**: 各スレッドが担当する float4 グループの集合（`vi` の像）と
+// 共有メモリへ書く値・位置はループ形状に依らず不変で、変わるのは反復構造のみ。
+// `threadgroup_barrier` 以降のフラグメントロード・MMA オペランド列も不変
+// （#536/#538/#1282/#1298 と同型）。**REQ-8**: 本体（`*_group_in_bounds` 判定と
+// スカラー 0 埋めフォールバック）は両 variant で一字一句同一に維持し、整列可否での
+// 分岐ロードは行わない（#808 で不採用確定）。部分反復は `vi < *_vecs` ガードで扱う。
+// `gemm_simdgroup_tiled_f16`／`_hfrag`／`_te`／split-K パス 1 は本定数を参照しない
+// no-op 契約。index は COOP_SMEM_SWIZZLE（17）の直後の 18
+// （`tests/shader_source_evidence.rs` が固定する）。
+constant bool UNROLL_LOAD_ENABLED [[function_constant(18)]];
 #endif
 
 // イシュー #1298: 協調ロードの「スレッド → float4 グループ」割当を
@@ -1250,51 +1267,118 @@ kernel void gemm_simdgroup_tiled(
                 // ヘルパは `tiled_b_*` と同型・M 方向を検査。本ファイル冒頭
                 // ヘルパ群のコメント参照）。threadgroup タイルは
                 // `BK×(BM+pad)`（行=K・列=M）で確保済み（上記 `a_tile_rows`）。
-                for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
-                    uint idx = coop_load_flat_index(vi, BK, BM);
-                    uint kk = idx / BM;
-                    uint r = idx % BM;
-                    uint dst_idx = kk * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, r, BM);
-                    uint global_row = row0 + r;
-                    uint global_k = p0 + kk;
-                    bool group_in_bounds = tiled_at_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
-                    if (group_in_bounds) {
-                        device const float4* src = reinterpret_cast<device const float4*>(
-                            a + (size_t)global_k * (size_t)st.lda + (size_t)global_row);
-                        threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
-                        *dst = *src;
-                    } else {
-                        for (uint e = 0; e < 4; e++) {
-                            uint global_row_e = global_row + e;
-                            tile_a[dst_idx + e] = tiled_at_elem_in_bounds(kk, bk_eff, global_row_e, global_k, dims)
-                                ? a[(size_t)global_k * (size_t)st.lda + (size_t)global_row_e]
-                                : 0.0f;
+                if (UNROLL_LOAD_ENABLED) {
+                    // イシュー #2110: 固定反復数 + full unroll 版（本体は else 側と同一）。
+                    // 部分反復は `vi < a_vecs` ガードで維持する（省略しない）。
+                    const uint A_ITERS = (a_vecs + threads_total - 1) / threads_total;
+                    #pragma clang loop unroll(full)
+                    for (uint it = 0; it < A_ITERS; it++) {
+                        uint vi = local_tid + it * threads_total;
+                        if (vi < a_vecs) {
+                            uint idx = coop_load_flat_index(vi, BK, BM);
+                            uint kk = idx / BM;
+                            uint r = idx % BM;
+                            uint dst_idx = kk * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, r, BM);
+                            uint global_row = row0 + r;
+                            uint global_k = p0 + kk;
+                            bool group_in_bounds = tiled_at_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
+                            if (group_in_bounds) {
+                                device const float4* src = reinterpret_cast<device const float4*>(
+                                    a + (size_t)global_k * (size_t)st.lda + (size_t)global_row);
+                                threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
+                                *dst = *src;
+                            } else {
+                                for (uint e = 0; e < 4; e++) {
+                                    uint global_row_e = global_row + e;
+                                    tile_a[dst_idx + e] = tiled_at_elem_in_bounds(kk, bk_eff, global_row_e, global_k, dims)
+                                        ? a[(size_t)global_k * (size_t)st.lda + (size_t)global_row_e]
+                                        : 0.0f;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
+                        uint idx = coop_load_flat_index(vi, BK, BM);
+                        uint kk = idx / BM;
+                        uint r = idx % BM;
+                        uint dst_idx = kk * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, r, BM);
+                        uint global_row = row0 + r;
+                        uint global_k = p0 + kk;
+                        bool group_in_bounds = tiled_at_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
+                        if (group_in_bounds) {
+                            device const float4* src = reinterpret_cast<device const float4*>(
+                                a + (size_t)global_k * (size_t)st.lda + (size_t)global_row);
+                            threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
+                            *dst = *src;
+                        } else {
+                            for (uint e = 0; e < 4; e++) {
+                                uint global_row_e = global_row + e;
+                                tile_a[dst_idx + e] = tiled_at_elem_in_bounds(kk, bk_eff, global_row_e, global_k, dims)
+                                    ? a[(size_t)global_k * (size_t)st.lda + (size_t)global_row_e]
+                                    : 0.0f;
+                            }
                         }
                     }
                 }
             } else {
-                for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
-                    uint idx = coop_load_flat_index(vi, BM, BK);
-                    uint r = idx / BK;
-                    uint kk = idx % BK;
-                    // パディング込みの書き込み先添字（イシュー #1970: 列項
-                    // kk を `COOP_SMEM_SWIZZLE >= 1` ゲートで swizzle）。
-                    uint dst_idx = r * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, r, kk, BK);
-                    uint global_row = row0 + r;
-                    uint global_k = p0 + kk;
-                    bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
-                    if (group_in_bounds) {
-                        device const float4* src = reinterpret_cast<device const float4*>(
-                            a + (size_t)global_row * (size_t)st.lda + (size_t)global_k);
-                        threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
-                        *dst = *src;
-                    } else {
-                        for (uint e = 0; e < 4; e++) {
-                            uint kk_e = kk + e;
-                            uint global_k_e = global_k + e;
-                            tile_a[dst_idx + e] = tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)
-                                ? a[(size_t)global_row * (size_t)st.lda + (size_t)global_k_e]
-                                : 0.0f;
+                if (UNROLL_LOAD_ENABLED) {
+                    // イシュー #2110: 固定反復数 + full unroll 版（本体は else 側と同一）。
+                    // 部分反復は `vi < a_vecs` ガードで維持する（省略しない）。
+                    const uint A_ITERS = (a_vecs + threads_total - 1) / threads_total;
+                    #pragma clang loop unroll(full)
+                    for (uint it = 0; it < A_ITERS; it++) {
+                        uint vi = local_tid + it * threads_total;
+                        if (vi < a_vecs) {
+                            uint idx = coop_load_flat_index(vi, BM, BK);
+                            uint r = idx / BK;
+                            uint kk = idx % BK;
+                            // パディング込みの書き込み先添字（イシュー #1970: 列項
+                            // kk を `COOP_SMEM_SWIZZLE >= 1` ゲートで swizzle）。
+                            uint dst_idx = r * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, r, kk, BK);
+                            uint global_row = row0 + r;
+                            uint global_k = p0 + kk;
+                            bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
+                            if (group_in_bounds) {
+                                device const float4* src = reinterpret_cast<device const float4*>(
+                                    a + (size_t)global_row * (size_t)st.lda + (size_t)global_k);
+                                threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
+                                *dst = *src;
+                            } else {
+                                for (uint e = 0; e < 4; e++) {
+                                    uint kk_e = kk + e;
+                                    uint global_k_e = global_k + e;
+                                    tile_a[dst_idx + e] = tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)
+                                        ? a[(size_t)global_row * (size_t)st.lda + (size_t)global_k_e]
+                                        : 0.0f;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
+                        uint idx = coop_load_flat_index(vi, BM, BK);
+                        uint r = idx / BK;
+                        uint kk = idx % BK;
+                        // パディング込みの書き込み先添字（イシュー #1970: 列項
+                        // kk を `COOP_SMEM_SWIZZLE >= 1` ゲートで swizzle）。
+                        uint dst_idx = r * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, r, kk, BK);
+                        uint global_row = row0 + r;
+                        uint global_k = p0 + kk;
+                        bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
+                        if (group_in_bounds) {
+                            device const float4* src = reinterpret_cast<device const float4*>(
+                                a + (size_t)global_row * (size_t)st.lda + (size_t)global_k);
+                            threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
+                            *dst = *src;
+                        } else {
+                            for (uint e = 0; e < 4; e++) {
+                                uint kk_e = kk + e;
+                                uint global_k_e = global_k + e;
+                                tile_a[dst_idx + e] = tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)
+                                    ? a[(size_t)global_row * (size_t)st.lda + (size_t)global_k_e]
+                                    : 0.0f;
+                            }
                         }
                     }
                 }
@@ -1306,52 +1390,120 @@ kernel void gemm_simdgroup_tiled(
                 // K）のため、ベクトル方向を N→K へ入れ替える（`tiled_bt_*`
                 // ヘルパは `tiled_a_*` と同型・K 方向をベクトル判定）。
                 // threadgroup タイルは `BN×(BK+pad)`（行=N・列=K）で確保済み。
-                for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
-                    uint idx = coop_load_flat_index(vi, BN, BK);
-                    uint c_ = idx / BK;
-                    uint kk = idx % BK;
-                    uint dst_idx = c_ * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, c_, kk, BK);
-                    uint global_k = p0 + kk;
-                    uint global_col = col0 + c_;
-                    bool group_in_bounds = tiled_bt_group_in_bounds(kk, bk_eff, global_col, global_k, 4, dims);
-                    if (group_in_bounds) {
-                        device const float4* src = reinterpret_cast<device const float4*>(
-                            b + (size_t)global_col * (size_t)st.ldb + (size_t)global_k);
-                        threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
-                        *dst = *src;
-                    } else {
-                        for (uint e = 0; e < 4; e++) {
-                            uint kk_e = kk + e;
-                            uint global_k_e = global_k + e;
-                            tile_b[dst_idx + e] = tiled_bt_elem_in_bounds(kk_e, bk_eff, global_col, global_k_e, dims)
-                                ? b[(size_t)global_col * (size_t)st.ldb + (size_t)global_k_e]
-                                : 0.0f;
+                if (UNROLL_LOAD_ENABLED) {
+                    // イシュー #2110: 固定反復数 + full unroll 版（本体は else 側と同一）。
+                    // 部分反復は `vi < b_vecs` ガードで維持する（省略しない）。
+                    const uint B_ITERS = (b_vecs + threads_total - 1) / threads_total;
+                    #pragma clang loop unroll(full)
+                    for (uint it = 0; it < B_ITERS; it++) {
+                        uint vi = local_tid + it * threads_total;
+                        if (vi < b_vecs) {
+                            uint idx = coop_load_flat_index(vi, BN, BK);
+                            uint c_ = idx / BK;
+                            uint kk = idx % BK;
+                            uint dst_idx = c_ * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, c_, kk, BK);
+                            uint global_k = p0 + kk;
+                            uint global_col = col0 + c_;
+                            bool group_in_bounds = tiled_bt_group_in_bounds(kk, bk_eff, global_col, global_k, 4, dims);
+                            if (group_in_bounds) {
+                                device const float4* src = reinterpret_cast<device const float4*>(
+                                    b + (size_t)global_col * (size_t)st.ldb + (size_t)global_k);
+                                threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
+                                *dst = *src;
+                            } else {
+                                for (uint e = 0; e < 4; e++) {
+                                    uint kk_e = kk + e;
+                                    uint global_k_e = global_k + e;
+                                    tile_b[dst_idx + e] = tiled_bt_elem_in_bounds(kk_e, bk_eff, global_col, global_k_e, dims)
+                                        ? b[(size_t)global_col * (size_t)st.ldb + (size_t)global_k_e]
+                                        : 0.0f;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
+                        uint idx = coop_load_flat_index(vi, BN, BK);
+                        uint c_ = idx / BK;
+                        uint kk = idx % BK;
+                        uint dst_idx = c_ * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, c_, kk, BK);
+                        uint global_k = p0 + kk;
+                        uint global_col = col0 + c_;
+                        bool group_in_bounds = tiled_bt_group_in_bounds(kk, bk_eff, global_col, global_k, 4, dims);
+                        if (group_in_bounds) {
+                            device const float4* src = reinterpret_cast<device const float4*>(
+                                b + (size_t)global_col * (size_t)st.ldb + (size_t)global_k);
+                            threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
+                            *dst = *src;
+                        } else {
+                            for (uint e = 0; e < 4; e++) {
+                                uint kk_e = kk + e;
+                                uint global_k_e = global_k + e;
+                                tile_b[dst_idx + e] = tiled_bt_elem_in_bounds(kk_e, bk_eff, global_col, global_k_e, dims)
+                                    ? b[(size_t)global_col * (size_t)st.ldb + (size_t)global_k_e]
+                                    : 0.0f;
+                            }
                         }
                     }
                 }
             } else {
-                for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
-                    uint idx = coop_load_flat_index(vi, BK, BN);
-                    uint kk = idx / BN;
-                    uint c_ = idx % BN;
-                    // パディング込みの書き込み先添字（イシュー #1970: 列項
-                    // c_ を `COOP_SMEM_SWIZZLE >= 2` ゲートで swizzle）。
-                    uint dst_idx = kk * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, c_, BN);
-                    uint global_k = p0 + kk;
-                    uint global_col = col0 + c_;
-                    bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 4, dims);
-                    if (group_in_bounds) {
-                        device const float4* src = reinterpret_cast<device const float4*>(
-                            b + (size_t)global_k * (size_t)st.ldb + (size_t)global_col);
-                        threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
-                        *dst = *src;
-                    } else {
-                        for (uint e = 0; e < 4; e++) {
-                            uint c_e = c_ + e;
-                            uint global_col_e = global_col + e;
-                            tile_b[dst_idx + e] = tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)
-                                ? b[(size_t)global_k * (size_t)st.ldb + (size_t)global_col_e]
-                                : 0.0f;
+                if (UNROLL_LOAD_ENABLED) {
+                    // イシュー #2110: 固定反復数 + full unroll 版（本体は else 側と同一）。
+                    // 部分反復は `vi < b_vecs` ガードで維持する（省略しない）。
+                    const uint B_ITERS = (b_vecs + threads_total - 1) / threads_total;
+                    #pragma clang loop unroll(full)
+                    for (uint it = 0; it < B_ITERS; it++) {
+                        uint vi = local_tid + it * threads_total;
+                        if (vi < b_vecs) {
+                            uint idx = coop_load_flat_index(vi, BK, BN);
+                            uint kk = idx / BN;
+                            uint c_ = idx % BN;
+                            // パディング込みの書き込み先添字（イシュー #1970: 列項
+                            // c_ を `COOP_SMEM_SWIZZLE >= 2` ゲートで swizzle）。
+                            uint dst_idx = kk * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, c_, BN);
+                            uint global_k = p0 + kk;
+                            uint global_col = col0 + c_;
+                            bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 4, dims);
+                            if (group_in_bounds) {
+                                device const float4* src = reinterpret_cast<device const float4*>(
+                                    b + (size_t)global_k * (size_t)st.ldb + (size_t)global_col);
+                                threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
+                                *dst = *src;
+                            } else {
+                                for (uint e = 0; e < 4; e++) {
+                                    uint c_e = c_ + e;
+                                    uint global_col_e = global_col + e;
+                                    tile_b[dst_idx + e] = tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)
+                                        ? b[(size_t)global_k * (size_t)st.ldb + (size_t)global_col_e]
+                                        : 0.0f;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
+                        uint idx = coop_load_flat_index(vi, BK, BN);
+                        uint kk = idx / BN;
+                        uint c_ = idx % BN;
+                        // パディング込みの書き込み先添字（イシュー #1970: 列項
+                        // c_ を `COOP_SMEM_SWIZZLE >= 2` ゲートで swizzle）。
+                        uint dst_idx = kk * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, c_, BN);
+                        uint global_k = p0 + kk;
+                        uint global_col = col0 + c_;
+                        bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 4, dims);
+                        if (group_in_bounds) {
+                            device const float4* src = reinterpret_cast<device const float4*>(
+                                b + (size_t)global_k * (size_t)st.ldb + (size_t)global_col);
+                            threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
+                            *dst = *src;
+                        } else {
+                            for (uint e = 0; e < 4; e++) {
+                                uint c_e = c_ + e;
+                                uint global_col_e = global_col + e;
+                                tile_b[dst_idx + e] = tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)
+                                    ? b[(size_t)global_k * (size_t)st.ldb + (size_t)global_col_e]
+                                    : 0.0f;
+                            }
                         }
                     }
                 }
