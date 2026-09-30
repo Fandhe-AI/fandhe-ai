@@ -76,6 +76,14 @@ enum Kind {
 }
 
 impl Kind {
+    /// 出力レコードへ記録する backend 識別子。aggregate.py が `cuda` 以外の混入を fail-closed で拒否する。
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Cpu => "cpu",
+            Kind::Cuda => "cuda",
+        }
+    }
+
     fn device(self) -> Device {
         match self {
             Kind::Cpu => Device::Cpu,
@@ -569,6 +577,7 @@ fn cuda_train_forward_resident_phases() {
         let line = serde_json::json!({
             "issue": 2116,
             "layer": "facade",
+            "backend": kind.label(),
             "record": "cell",
             "arm": arm,
             "phase": phase,
@@ -586,6 +595,7 @@ fn cuda_train_forward_resident_phases() {
         let line = serde_json::json!({
             "issue": 2116,
             "layer": "facade",
+            "backend": kind.label(),
             "record": "checksum",
             "arm": arm,
             "batch": batch,

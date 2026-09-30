@@ -15,6 +15,18 @@ host_kind="${1:-}"
 shift
 case "$host_kind" in gb10 | rtx3060) ;; *) usage ;; esac
 
+# CPU 診断モードの混入拒否: TRAIN_FWD_DIAG_KIND が cuda 以外だと上位診断だけ CPU で走り
+# 下位（CUDA）と混合した系列になる。未設定または cuda のみ許可する（出力の backend 識別子は
+# aggregate.py も照合する二重ガード）。
+case "${TRAIN_FWD_DIAG_KIND:-cuda}" in
+  cuda) ;;
+  *)
+    echo "TRAIN_FWD_DIAG_KIND=${TRAIN_FWD_DIAG_KIND} は不可（CUDA 実測のみ。unset して再実行）" >&2
+    exit 2
+    ;;
+esac
+export TRAIN_FWD_DIAG_KIND=cuda
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../../.." && pwd)"
 out_dir="$script_dir/$host_kind"

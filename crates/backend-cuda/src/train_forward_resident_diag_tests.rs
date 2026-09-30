@@ -377,7 +377,7 @@ fn cuda_train_forward_resident_backend_phases() {
             .unwrap_or_else(|| "null".to_string());
         // 文字列値は本ファイル内の固定リテラルのみ（エスケープ不要）。数値は有限。
         println!(
-            "{PREFIX}{{\"issue\":2116,\"layer\":\"backend\",\"arm\":\"{arm}\",\"kind\":\"{layer}\",\"batch\":{batch},\"phase\":\"{phase}\",\"median_s\":{:e},\"q1_s\":{:e},\"q3_s\":{:e},\"min_s\":{:e},\"max_s\":{:e},\"n\":{},\"checksum_bits\":{chk}}}",
+            "{PREFIX}{{\"issue\":2116,\"layer\":\"backend\",\"backend\":\"cuda\",\"arm\":\"{arm}\",\"kind\":\"{layer}\",\"batch\":{batch},\"phase\":\"{phase}\",\"median_s\":{:e},\"q1_s\":{:e},\"q3_s\":{:e},\"min_s\":{:e},\"max_s\":{:e},\"n\":{},\"checksum_bits\":{chk}}}",
             q.median,
             q.q1,
             q.q3,
@@ -389,7 +389,7 @@ fn cuda_train_forward_resident_backend_phases() {
     for ((arm, layer, batch), v) in &rec.checksums {
         if arm == "whatif_bits_equal" {
             println!(
-                "{PREFIX}{{\"issue\":2116,\"layer\":\"backend\",\"arm\":\"whatif\",\"kind\":\"{layer}\",\"batch\":{batch},\"phase\":\"bits_equal\",\"value\":{}}}",
+                "{PREFIX}{{\"issue\":2116,\"layer\":\"backend\",\"backend\":\"cuda\",\"arm\":\"whatif\",\"kind\":\"{layer}\",\"batch\":{batch},\"phase\":\"bits_equal\",\"value\":{}}}",
                 *v == 1
             );
         }

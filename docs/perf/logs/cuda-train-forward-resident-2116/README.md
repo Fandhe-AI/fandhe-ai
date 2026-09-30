@@ -26,4 +26,4 @@ bash docs/perf/logs/cuda-train-forward-resident-2116/orchestrate.sh rtx3060
 - 既存の `run{N}.*.jsonl` があると `orchestrate.sh` は中止する（差し替え禁止）
 - 収録前にホスト名は `masked`、`$HOME` は `<home>` へ置換される（`env_info.txt`・`run*.err`）
 - 結果は `docs/perf/cuda-train-forward-resident-diagnosis.md` §6 に RULE.txt の規則で記入する
-- 出力形式の動作確認のみ CPU でできる: `TRAIN_FWD_DIAG_KIND=cpu cargo test --release -p fandhe-ai --test cuda_train_forward_resident_diag cuda_train_forward_resident_phases -- --ignored --nocapture --test-threads=1`（判定外）
+- 出力形式の動作確認のみ CPU でできる: `TRAIN_FWD_DIAG_KIND=cpu cargo test --release -p fandhe-ai --test cuda_train_forward_resident_diag cuda_train_forward_resident_phases -- --ignored --nocapture --test-threads=1`（判定外）。orchestrate.sh は `TRAIN_FWD_DIAG_KIND` が cuda 以外だと中止し、各出力行の `backend` 識別子が `cuda` でない run を aggregate.py が fail-closed で拒否する（CPU 混入を GB10 CUDA 実測として集計させない）

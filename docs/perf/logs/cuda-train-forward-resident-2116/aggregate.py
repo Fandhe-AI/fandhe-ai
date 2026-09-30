@@ -99,6 +99,8 @@ def load_facade(path):
                     arm, batch = rec["arm"], rec["batch"]
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     raise AggError(f"{path}:{i}: 不正な行 ({e})")
+                if rec.get("backend") != "cuda":
+                    raise AggError(f"{path}:{i}: backend が cuda でない ({rec.get('backend')!r})。CPU 診断モード等の混入は GB10 CUDA 実測として集計しない")
                 if kind == "checksum":
                     bits = rec.get("bits")
                     if not isinstance(bits, str) or not bits or (arm, batch) in checksums:
@@ -148,6 +150,8 @@ def load_backend(path):
                     arm, kind, phase, batch = rec["arm"], rec["kind"], rec["phase"], rec["batch"]
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     raise AggError(f"{path}:{i}: 不正な行 ({e})")
+                if rec.get("backend") != "cuda":
+                    raise AggError(f"{path}:{i}: backend が cuda でない ({rec.get('backend')!r})。CPU 診断モード等の混入は GB10 CUDA 実測として集計しない")
                 if phase == "bits_equal":
                     v = rec.get("value")
                     if not isinstance(v, bool) or (kind, batch) in whatif:
@@ -369,7 +373,7 @@ def synth_facade(bump=None):
 
     def cell(arm, ph, b, m):
         d = abs(m) * 0.1  # 負の median（residual）でも min<=q1<=median<=q3<=max を保つ
-        lines.append({"record": "cell", "arm": arm, "phase": ph, "batch": b, "median_s": m, "q1_s": m - d,
+        lines.append({"backend": "cuda", "record": "cell", "arm": arm, "phase": ph, "batch": b, "median_s": m, "q1_s": m - d,
                       "q3_s": m + d, "min_s": m - 2 * d, "max_s": m + 3 * d, "n": EXPECTED_N})
     for b in BATCHES:
         cell("public", "forward_resident", b, 2.0e-4)
@@ -378,13 +382,13 @@ def synth_facade(bump=None):
         cell("decomposed", "l2_linear", b, 4e-5)
         cell("decomposed", "mse_loss", b, 3e-5)
         cell("paired", "residual", b, -2e-6)
-        lines.append({"record": "checksum", "arm": "public", "batch": b, "bits": f"{b:016x}"})
-        lines.append({"record": "checksum", "arm": "decomposed", "batch": b, "bits": f"{b:016x}"})
+        lines.append({"backend": "cuda", "record": "checksum", "arm": "public", "batch": b, "bits": f"{b:016x}"})
+        lines.append({"backend": "cuda", "record": "checksum", "arm": "decomposed", "batch": b, "bits": f"{b:016x}"})
     for arm in READOUT_ARMS:
         for ph in (R1_PHASES if arm == "readout_r1_split" else ["param_readout"]):
             m = 0.0 if ph == "noncontig_grad_count" else 8e-5
             cell(arm, ph, BENCH_BATCH, m)
-        lines.append({"record": "checksum", "arm": arm, "batch": BENCH_BATCH,
+        lines.append({"backend": "cuda", "record": "checksum", "arm": arm, "batch": BENCH_BATCH,
                       "bits": "cafe" if arm != "readout_r3_cpu_control" else "beef"})
     return lines
 
@@ -393,7 +397,7 @@ def synth_backend():
     lines = []
 
     def cell(arm, kind, ph, b, m, chk=None):
-        lines.append({"arm": arm, "kind": kind, "phase": ph, "batch": b, "median_s": m, "q1_s": m * 0.9,
+        lines.append({"backend": "cuda", "arm": arm, "kind": kind, "phase": ph, "batch": b, "median_s": m, "q1_s": m * 0.9,
                       "q3_s": m * 1.1, "min_s": m * 0.8, "max_s": m * 1.3, "n": EXPECTED_N,
                       "checksum_bits": chk})
     for b in BATCHES:
@@ -406,7 +410,7 @@ def synth_backend():
         cell("prod", "relu", "total", b, 3e-5, f"bb{b}")
         cell("prod", "mse", "total", b, 2e-5, f"cc{b}")
         cell("whatif", "l1", "total", b, 6e-5)
-        lines.append({"arm": "whatif", "kind": "l1", "batch": b, "phase": "bits_equal", "value": True})
+        lines.append({"backend": "cuda", "arm": "whatif", "kind": "l1", "batch": b, "phase": "bits_equal", "value": True})
     return lines
 
 
@@ -491,6 +495,10 @@ def self_test():
         dump(pf, fl, first(lambda r: r.get("record") == "checksum" and r["arm"] == "readout_r2_pretouched",
                            lambda r: r.__setitem__("bits", "dead")))
         expect_fail(d, "readout 腕間の checksum 不一致")
+        dump(pf, fl, first(cellp, lambda r: r.__setitem__("backend", "cpu")))
+        expect_fail(d, "facade backend=cpu 混入")
+        dump(pf, fl, first(cellp, lambda r: r.pop("backend")))
+        expect_fail(d, "facade backend 欠落")
         dump(pf, fl[:-1])
         expect_fail(d, "facade 行の欠落")
         with open(pf, "w", encoding="utf-8") as f:
@@ -511,6 +519,8 @@ def self_test():
         expect_fail(d, "backend max_s Infinity")
         dump(pb, bl, first(nosync1, lambda r: r.__setitem__("max_s", 0.0)))
         expect_fail(d, "backend max < median")
+        dump(pb, bl, first(nosync1, lambda r: r.__setitem__("backend", "cpu")))
+        expect_fail(d, "backend backend=cpu 混入")
         dump(pb, bl[:-1])
         expect_fail(d, "backend bits_equal 欠落")
         dump(pb, bl)
