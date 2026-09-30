@@ -110,7 +110,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 |---|---|---|---|---|---|
 | C1: TMA Stage 2（128×64 タイルへの TMA 適用）＋形状条件 N≥512。tensor map キャッシュを同時設計 | `backend-cuda-tma-gemm-load-design.md` §10.8「再評価の仮説」 | なし（TMA は確定済み） | 本番構成と同一タイルで比較可能。N≥512 で Stage 1 の改善（最大 20.7%）が本番比でも出るか | A〜D | 初期は P-diag、合格後に形状分岐 |
 | C2: producer/consumer 非対称レジスタ（warp specialization）＋TMA | 同 §2 F2・§7 | **`setmaxnreg` の受理・実行の確定が前提**（未確定なら着手不可） | 非同期オーバーラップの上振れ | A〜D | P-diag |
-| C3: Stream-K の fixup 固定費削減。(a) co-residency 保証付きのカーネル内 fixup（cooperative launch。raw FFI の `unsafe` を伴うため #2127 の整理と security-auditor 監査が前提）／(b) cluster>1 と DSMEM が確定した場合のクラスタ内固定順序還元（クラスタ内 CTA は同時スケジュールされ、デッドロック要因を排除できる） | `cuda-gemm-tiled-pipeline-streamk.md` §6.8 | (b) のみ cluster・DSMEM | N=1024／2048 で wave 損失 11〜33% の回復余地。固定順序で決定性を維持 | A〜D（B-1 の fail>0 の扱いは承認事項） | P-diag |
+| C3: Stream-K の fixup 固定費削減。(a) co-residency 保証付きのカーネル内 fixup（cooperative launch。raw FFI の `unsafe` を伴うため #2127 の整理と security-auditor 監査が前提）／(b) cluster>1 と DSMEM が確定した場合のクラスタ内固定順序還元（クラスタ内 CTA は同時スケジュールされ、デッドロック要因を排除できる） | `cuda-gemm-tiled-pipeline-streamk.md` §6.8 | (b) のみ cluster・DSMEM | N=1024／2048 で wave 損失 11〜33% の回復余地。固定順序で決定性を維持 | A〜D（A は決定性・full タイル bit 一致。B-1 必須・fail>0 の扱いは承認事項） | P-diag |
 | C4: 128×64 版 Stream-K | 同 §6.8 | なし | C3 の成否に従属。ゲート C が 64×64 で FAIL のため優先度低 | A〜D | P-diag |
 
 **対象外**:
@@ -135,12 +135,16 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 
 事前登録ゲートは既存と同形とする。
 
-- **A**: bit 一致（同タイルの cp.async 版 vs 候補。端あり・転置 4 パターン）
-- **B**: parity 非後退（`tests/parity_nonregression.rs` 等で 0 fail）
+- **A**: 候補の種別で判定を分ける
+  - 計算順序（K 連鎖）を維持する候補（C1・C2 等）: bit 一致（同タイルの cp.async 版 vs 候補。端あり・転置 4 パターン）
+  - K 連鎖を分割する候補（Stream-K の C3・C4）: 残タイルは非 Stream-K 版と bit 同一にならない（`cuda-gemm-tiled-pipeline-streamk.md` §5）ため bit 一致は要求しない。既存の決定性検査（`streamk_repeated_launch_is_deterministic` 等。再実行で bit 一致）と、分割されない full タイルの非 Stream-K 版との bit 一致を適用する。残タイルは下記ゲート B-1 の複合判定（承認済み方式）で判定する
+- **B**: parity 非後退。2 段で判定する
+  - B（既存回帰）: `tests/parity_nonregression.rs` 等の既存テストで 0 fail
+  - B-1（Stream-K 候補 C3・C4 で必須）: 候補自身の残タイルを CPU 参照実装と複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で比較し、全行 `fail_count == 0`。`fail_count > 0` の行が 1 件でもあれば B-1 は FAIL とし、baseline 方式（`ParityBaseline`）への変更・tolerance の変更はユーザー承認を条件とする（承認なしに採用しない）
 - **C**: GPU-only の純カーネル時間の 5 回中央値。N≥1024 のいずれかで ≥1.05 かつ全計測形状で後退なし
 - **D**: 結線後の本番ディスパッチ非後退（framework-compare の gemm cuda を同一 HEAD の base／after で比較し、checksum 完全一致と性能非後退の両方を満たすこと。`backend-cuda-tma-gemm-load-design.md` §6 のゲート D と同じ）
 
-**no-go**: A の不一致 1 件、または C の後退 1 形状で REJECT（opt-in 維持）。判定基準は実測前に固定し、事後に変更しない。tolerance・baseline の変更が必要になった時点で停止し、ユーザー承認へ回す。
+**no-go**: A の不一致 1 件（C3・C4 は決定性検査の失敗または full タイルの bit 不一致 1 件）、B-1 の `fail_count > 0`（承認なき baseline 化は不可）、または C の後退 1 形状で REJECT（opt-in 維持）。判定基準は実測前に固定し、事後に変更しない。tolerance・baseline の変更が必要になった時点で停止し、ユーザー承認へ回す。
 
 **フロー**: #2122 確定 → 候補の着手可否判定（依存項目）→ P-diag 実装 issue → GB10 実測 issue → ゲート A〜D → 本番結線 issue（P-prod／形状分岐）。
 
