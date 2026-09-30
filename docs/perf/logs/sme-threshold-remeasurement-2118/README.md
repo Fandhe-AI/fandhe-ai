@@ -101,6 +101,7 @@ verdict は実測後に限り更新する。定数の切替・本番化の判断
 - **入力処理が検出した異常（警告を含む）はすべて前提不成立として扱う**（RULE.txt §14・§15 追記。PRRT_kwDOTuUCJc6nk4YH）:
   - JSONL: `compare_gemm_ab.py` の `load_rows` が不正行を読み飛ばしたときの警告と、`aggregate.py` の `scan_jsonl_strict` が各行で検出するもの（壊れた行・重複キー・`NaN`／`Infinity`・非有限値・型不正・`Record::to_json_line` のキー集合との不一致〈未知キー、`mode`・gemm の `parity_*` 等の欠損〉・framework／task／device／mode の想定外の値）は P-CELLS 不成立。有効な 5 行が残るセルがあっても判定を出さない。checksum の `NaN` は FAIL ではなく判定不能。
   - 記録ファイル: 終了コードの値が数字列でない（P-RUNAB・P-COLLECT）・`head=` 行の重複（P-TREE・P-R4-BASE）・`rt_verdict` の重複や未知の値（P-RT。後退あり相当へ丸めない）・`sme_report.txt` の形の逸脱（P-R0）・R4 ログの解析できない `median_gflops=` 行／m と n の不一致／0 以下の値（P-R4-LOG）。
+  - 数値変換・比較で例外を起こす入力（`10**400` 等の float に変換できない巨大整数・桁数上限超過の整数・`bool` 値・数値文字列・深すぎる入れ子・不正な UTF-8・巨大桁数の終了コード／R4 サイズ・有限でない R4 値）は例外で止めず、それぞれ P-CELLS・P-RUNAB・P-TREE・P-R4-LOG の不成立にする（PRRT_kwDOTuUCJc6nl21M）。セル集合の構造破綻は従前どおり例外で停止する。
   - 共有モジュール（`compare_gemm_ab.py`・`cpu-gemm-sme-fmopa-1587/aggregate.py`）は変更せず、呼び出し側で警告と戻り値を受け取って写像する。
   - 再発防止: `--self-test` の `_check_input_handling` が本番関数の AST を棚卸しし、`continue`・`.get`・`except`・戻り値の一部の破棄（`rows, _ = ...`）・外部モジュールの使用が根拠付きの一覧（`SILENT_SITE_INVENTORY`・`EXTERNAL_USES`・`ANOMALY_RETURNING`）と一致しなければ失敗する。指摘の形（警告を `_` で捨てる・`except` で既定値に落とす）を差し込んだソースで失敗することも負のプローブで確かめる。
 - 実行側は成果物収録（必須成果物の欠損・空・コピー失敗）を非ゼロで返し、`env_info.txt` の `collect_exit=`（M4 Max）・`rt_result.txt` の `collect rc=`（GB10）に記録する。

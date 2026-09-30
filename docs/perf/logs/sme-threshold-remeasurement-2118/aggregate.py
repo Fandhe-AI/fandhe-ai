@@ -157,12 +157,24 @@ RULE_CLAUSE_IDS = (
     "§15/P-R0:sme_report の行の矛盾",
     "§15/P-RT:rt_verdict の値不正",
     "§15/P-RT:rt_verdict の重複",
+    # §14・§15 追記（PRRT_kwDOTuUCJc6nl21M）: 入力値の数値変換・比較で例外を出しうる形は例外で止めず前提不成立
+    "§14/P-CELLS:巨大整数の median_s",
+    "§14/P-CELLS:巨大整数の checksum",
+    "§14/P-CELLS:bool 値",
+    "§14/P-CELLS:数値文字列",
+    "§14/P-CELLS:桁数上限超過の整数",
+    "§14/P-CELLS:深すぎる入れ子",
+    "§14/P-CELLS:不正な UTF-8 の JSONL",
+    "§15/P-RUNAB:終了コードの巨大な数字列",
+    "§15/P-TREE:記録の不正な UTF-8",
+    "§15/P-R4-LOG:R4 の巨大な桁数のサイズ",
+    "§15/P-R4-LOG:R4 の有限でない値",
 )
 
 # RULE.txt の各節で判定不能系の語を含む行数（self-test が RULE.txt から数えて照合する）。
 # 条項の追加・変更でずれたら、RULE_CLAUSE_IDS・CLAUSE_CASES・PRECONDITIONS を見直してから更新する。
 RULE_KEYWORD_RE = re.compile(r"判定不能|undetermined|停止|中止|欠損|非ゼロ|前提|記録なし|記録がない")
-RULE_KEYWORD_LINES = {"1": 1, "5": 1, "6": 1, "7": 1, "8": 2, "10": 1, "13": 3, "14": 5, "15": 7}
+RULE_KEYWORD_LINES = {"1": 1, "5": 1, "6": 1, "7": 1, "8": 2, "10": 1, "13": 3, "14": 5, "15": 8}
 
 
 def reached(k, task):
@@ -371,8 +383,14 @@ def _value_ok(kind, v):
         return isinstance(v, int) and not isinstance(v, bool)
     if kind == "num|null" and v is None:
         return True
-    # "num"・"num|null": 1e400 のような巨大値は json.loads が例外なく inf にするため有限性まで見る
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    # "num"・"num|null": 1e400 のような巨大値は json.loads が例外なく inf にする。10**400 のような巨大整数は
+    # math.isfinite(v)・float(v)・浮動小数点との算術が OverflowError で集計全体を止めるため、変換せずに整数と
+    # float 最大値の厳密比較（Python の int と float の比較は変換しない）で範囲外を値不正にする
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if isinstance(v, int):
+        return abs(v) <= sys.float_info.max
+    return math.isfinite(v)
 
 
 def scan_jsonl_strict(path, task):
@@ -385,35 +403,42 @@ def scan_jsonl_strict(path, task):
     """
     name = os.path.basename(path)
     anomalies = []
-    with open(path, encoding="utf-8") as f:
-        for lineno, line in enumerate(f, start=1):
-            if not line.strip():
-                continue
-            where = f"{name}:{lineno}"
-            try:
-                obj = json.loads(line, object_pairs_hook=_reject_dup_keys, parse_constant=_reject_constant)
-            except ValueError as e:  # json.JSONDecodeError と _RowAnomaly（どちらも ValueError）
-                anomalies.append(f"{where}: JSON として読めない（{e}）")
-                continue
-            if not isinstance(obj, dict):
-                anomalies.append(f"{where}: JSON object ではない")
-                continue
-            schema = dict(ROW_KEYS_COMMON, **ROW_KEYS_BY_TASK[task])
-            if obj.get("mode") == "reuse":
-                schema.update(ROW_KEYS_REUSE)
-            missing = sorted(set(schema) - set(obj))
-            unknown = sorted(set(obj) - set(schema))
-            if missing or unknown:
-                anomalies.append(f"{where}: キー集合が不一致（欠損 {missing}・未知 {unknown}）")
-            bad = sorted(k for k, kind in schema.items() if k in obj and not _value_ok(kind, obj[k]))
-            if bad:
-                anomalies.append(f"{where}: 型不正または非有限の値 {bad}")
-            expect = {"framework": "fandhe-ai", "task": task, "device": "cpu"}
-            wrong = sorted(k for k, v in expect.items() if obj.get(k) != v)
-            if obj.get("mode") not in ROW_MODES:
-                wrong.append("mode")
-            if wrong:
-                anomalies.append(f"{where}: 値が想定外 {wrong}")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = list(f)  # 不正な UTF-8 はここで UnicodeDecodeError（ValueError）になる
+    except UnicodeDecodeError as e:
+        anomalies.append(f"{name}: UTF-8 として読めない（{type(e).__name__}）")
+        return anomalies
+    for lineno, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        where = f"{name}:{lineno}"
+        try:
+            obj = json.loads(line, object_pairs_hook=_reject_dup_keys, parse_constant=_reject_constant)
+        except (ValueError, RecursionError) as e:
+            # json.JSONDecodeError・_RowAnomaly・整数の桁数上限超過（いずれも ValueError）と、
+            # 深すぎる入れ子（RecursionError）。行の内容は載せず型名だけにする（巨大な行で報告を膨らませない）
+            anomalies.append(f"{where}: JSON として読めない（{type(e).__name__}: {str(e)[:80]}）")
+            continue
+        if not isinstance(obj, dict):
+            anomalies.append(f"{where}: JSON object ではない")
+            continue
+        schema = dict(ROW_KEYS_COMMON, **ROW_KEYS_BY_TASK[task])
+        if obj.get("mode") == "reuse":
+            schema.update(ROW_KEYS_REUSE)
+        missing = sorted(set(schema) - set(obj))
+        unknown = sorted(set(obj) - set(schema))
+        if missing or unknown:
+            anomalies.append(f"{where}: キー集合が不一致（欠損 {missing}・未知 {unknown}）")
+        bad = sorted(k for k, kind in schema.items() if k in obj and not _value_ok(kind, obj[k]))
+        if bad:
+            anomalies.append(f"{where}: 型不正または非有限の値 {bad}")
+        expect = {"framework": "fandhe-ai", "task": task, "device": "cpu"}
+        wrong = sorted(k for k, v in expect.items() if obj.get(k) != v)
+        if obj.get("mode") not in ROW_MODES:
+            wrong.append("mode")
+        if wrong:
+            anomalies.append(f"{where}: 値が想定外 {wrong}")
     return anomalies
 
 
@@ -433,6 +458,7 @@ def evaluate_series(dirpath, label):
     cells = []
     anomalies = []
     per_task = {}
+    load_failed = {}
     for task in ("gemm", "train", "infer"):
         paths = [os.path.join(dirpath, f"results-{arm}-{label}-cpu-{task}.jsonl") for arm in ("before", "after")]
         if not all(os.path.exists(p) for p in paths):
@@ -440,8 +466,18 @@ def evaluate_series(dirpath, label):
             per_task[task] = None
             continue
         size_set = _CMP._size_set_for("cpu", "full", task)
-        b, b_warnings = _CMP.load_rows(paths[0], device="cpu", task=task, size_set=size_set)
-        a, a_warnings = _CMP.load_rows(paths[1], device="cpu", task=task, size_set=size_set)
+        try:
+            b, b_warnings = _CMP.load_rows(paths[0], device="cpu", task=task, size_set=size_set)
+            a, a_warnings = _CMP.load_rows(paths[1], device="cpu", task=task, size_set=size_set)
+        except (ValueError, RecursionError) as e:
+            # 共有の load_rows は json.JSONDecodeError しか捕まえない。不正な UTF-8・整数の桁数上限超過・
+            # 深すぎる入れ子はここで例外になる。集計を止めず、そのタスクを判定不能（P-CELLS）にする
+            anomalies.append(f"load_rows: {task}: JSONL の読み込みで例外（{type(e).__name__}）")
+            for p in paths:
+                anomalies += scan_jsonl_strict(p, task)
+            per_task[task] = None
+            load_failed[task] = type(e).__name__
+            continue
         for p, warnings in ((paths[0], b_warnings), (paths[1], a_warnings)):
             anomalies += [f"load_rows: {_mask_path(w, p)}" for w in warnings] + scan_jsonl_strict(p, task)
         gb, ga = _CMP.group_by_cell(b), _CMP.group_by_cell(a)
@@ -457,15 +493,24 @@ def evaluate_series(dirpath, label):
                "reason": "JSONL 欠損", "exact": False, "adopt": False, "reject": False,
                "ratios": None, "median": None}
         pt = per_task[task]
+        if task in load_failed:
+            rec["reason"] = f"JSONL の読み込みで例外（{load_failed[task]}）"
         if pt is not None:
             bc, ac = pt
             # 行の無いセルは [] を渡す。evaluate_cell が「ちょうど 5 件」を満たさず判定不能を返す（P-CELLS）
             br, ar = bc.get((size, mode), []), ac.get((size, mode), [])
-            ev = _CMP.evaluate_cell(br, ar, 1.00)
-            rec["status"] = ev["status"]
-            rec["reason"] = ev["reason"]
-            if ev["status"] == "ok":
-                ratios = _CMP.per_run_ratios(br, ar)
+            try:
+                ev = _CMP.evaluate_cell(br, ar, 1.00)
+                ratios = _CMP.per_run_ratios(br, ar) if ev["status"] == "ok" else None
+            except (ArithmeticError, ValueError, TypeError) as e:
+                # 共有モジュールは巨大整数（10**400 等）を float へ変換・比較して OverflowError を投げうる。
+                # 入力由来の例外は集計を止めず、当該セルを判定不能にして異常として記録する
+                anomalies.append(f"{_cell_name(rec)}: 数値の変換・比較で例外（{type(e).__name__}）")
+                rec["status"], rec["reason"] = "undeterminable", f"入力値の数値変換・比較で例外（{type(e).__name__}）"
+            else:
+                rec["status"] = ev["status"]
+                rec["reason"] = ev["reason"]
+            if rec["status"] == "ok":
                 if ratios is None:
                     # evaluate_cell が ok なら起きない想定。起きたら判定可能セルに数えない（黙って ok のまま残さない）
                     rec["status"], rec["reason"] = "undeterminable", "run 単位の比を計算できない"
@@ -500,7 +545,8 @@ def _five_passes(text, prefix):
     """`<prefix>N gate=<status>` 行が N=1..5 をちょうど 1 回ずつ持ち、全て pass か（§8・§11 の正式／参考の修飾）。
     重複行（round1 が 2 行で round5 が無い等）で 5 行に見える記録を正式にしない（異常は参考側へ倒す）。"""
     gates = re.findall(rf"^{prefix}(\d+) gate=(\S+)", text, re.M)
-    return sorted(int(n) for n, _ in gates) == [1, 2, 3, 4, 5] and all(g == "pass" for _, g in gates)
+    # 番号は文字列のまま比べる（数字列が 4300 桁を超えると int() が ValueError で集計を止めるため。`01` 等も正式にしない）
+    return sorted(n for n, _ in gates) == ["1", "2", "3", "4", "5"] and all(g == "pass" for _, g in gates)
 
 
 def load_gate_series(path):
@@ -508,7 +554,7 @@ def load_gate_series(path):
     `series=` の記録は run_ab_sme_cpu.sh が先頭に 1 行だけ書く。0 行・複数行・official 以外は正式にしない。"""
     if not os.path.exists(path):
         return None
-    text = Path(path).read_text(encoding="utf-8")
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
     official = re.findall(r"(?:^|\s)series=(\S*)", text, re.M) == ["official"]
     return official and _five_passes(text, "round")
 
@@ -518,7 +564,7 @@ def r4_runs_ok(path):
     かつ `series done` 行がある場合のみ True。ログ不在は None、異常終了・欠損・途中終了は False。"""
     if not os.path.exists(path):
         return None
-    text = Path(path).read_text(encoding="utf-8")
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
     for i in range(1, 6):
         if not re.search(rf"^run{i} exit=0 grep_exit=0(\s|$)", text, re.M):
             return False
@@ -531,7 +577,7 @@ def _gate_log_official(path, prefix):
     """load-gate ログ（`<prefix>N gate=pass|...` 行）が 5/5 通過か。ログ不在は None。"""
     if not os.path.exists(path):
         return None
-    return _five_passes(Path(path).read_text(encoding="utf-8"), prefix)
+    return _five_passes(Path(path).read_text(encoding="utf-8", errors="replace"), prefix)
 
 
 def outer_gate_official(path):
@@ -540,7 +586,7 @@ def outer_gate_official(path):
     正式。fail(reference)・pass の重複・形式外の行・ログ不在は参考（異常は参考側へ倒す）。"""
     if not os.path.exists(path):
         return None
-    lines = [ln for ln in Path(path).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    lines = [ln for ln in Path(path).read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
     st = [re.fullmatch(r"start attempt=\d+ .* (wait|pass|fail\(reference\))", ln) for ln in lines]
     if not st or not all(st):
         return False
@@ -552,7 +598,7 @@ def head_record_ok(path):
     """`head=<sha>` 行が登録 sha（REGISTERED_BASE）か（RULE.txt §13）。ファイル・行なしは None。"""
     if not os.path.exists(path):
         return None
-    heads = re.findall(r"^head=(.*)$", Path(path).read_text(encoding="utf-8"), re.M)
+    heads = re.findall(r"^head=(.*)$", Path(path).read_text(encoding="utf-8", errors="replace"), re.M)
     if not heads:
         return None
     # 複数行はどれを正とするか決められないため不成立（先頭一致で成立にしない）
@@ -571,9 +617,9 @@ def tree_record_ok(dirpath, k):
     if not all(f.exists() for f in files):
         return None
     head = head_record_ok(str(files[0]))
-    verify = files[1].read_text(encoding="utf-8").splitlines() == [f"trees_ok head={REGISTERED_BASE} K={k}"]
-    diff = files[2].read_text(encoding="utf-8").splitlines() == [MOD_REL]
-    const = files[3].read_text(encoding="utf-8").splitlines() == [
+    verify = files[1].read_text(encoding="utf-8", errors="replace").splitlines() == [f"trees_ok head={REGISTERED_BASE} K={k}"]
+    diff = files[2].read_text(encoding="utf-8", errors="replace").splitlines() == [MOD_REL]
+    const = files[3].read_text(encoding="utf-8", errors="replace").splitlines() == [
         "before: const SME_PRODUCTION_ENABLED: bool = false; / const SME_MIN_K: usize = 64;",
         f"after:  const SME_PRODUCTION_ENABLED: bool = true; / const SME_MIN_K: usize = {k};",
     ]
@@ -587,14 +633,15 @@ def _exit_record(text, pattern):
     ms = re.findall(pattern, text, re.M)
     if len(ms) != 1:
         return None if not ms else False
-    return re.fullmatch(r"\d+", ms[0]) is not None and int(ms[0]) == 0
+    # int() に渡さず判定する（数字列が 4300 桁を超えると int() が ValueError で集計を止める）。ASCII の 0 だけの列が 0
+    return re.fullmatch(r"[0-9]+", ms[0]) is not None and not ms[0].strip("0")
 
 
 def exit_records_m4max(env_info_path):
     """M4 Max: env_info.txt の `run_ab_exit=N`・`collect_exit=N`（RULE.txt §13・§14）を (run_ab, collect) で返す。"""
     if not os.path.exists(env_info_path):
         return None, None
-    text = Path(env_info_path).read_text(encoding="utf-8")
+    text = Path(env_info_path).read_text(encoding="utf-8", errors="replace")
     return _exit_record(text, r"\brun_ab_exit=(\S*)"), _exit_record(text, r"\bcollect_exit=(\S*)")
 
 
@@ -602,7 +649,7 @@ def exit_records_gb10(rt_result_path):
     """GB10: rt_result.txt の `run_ab rc=N`・`collect rc=N` を (run_ab, collect) で返す。意味は M4 Max と同じ。"""
     if not os.path.exists(rt_result_path):
         return None, None
-    text = Path(rt_result_path).read_text(encoding="utf-8")
+    text = Path(rt_result_path).read_text(encoding="utf-8", errors="replace")
     return _exit_record(text, r"^run_ab rc=(\S*)"), _exit_record(text, r"^collect rc=(\S*)")
 
 
@@ -618,7 +665,10 @@ def parse_r4_strict(text):
         if "median_gflops=" not in line:
             continue
         m = _R4.LINE.search(line.strip())
-        if m is None or m.group(2) != m.group(3) or not re.fullmatch(r"\d+(\.\d+)?", m.group(5)) \
+        # 数字列は int()／float() へ渡す前に形を絞る（4300 桁超の整数で ValueError・1e400 相当の桁数で inf になるため）。
+        # サイズは 9 桁以内の ASCII 数字、値は ASCII の小数で有限かつ正
+        if m is None or m.group(2) != m.group(3) or not all(re.fullmatch(r"[0-9]{1,9}", m.group(i)) for i in (2, 3, 4)) \
+                or not re.fullmatch(r"[0-9]+(\.[0-9]+)?", m.group(5)) or not math.isfinite(float(m.group(5))) \
                 or not float(m.group(5)) > 0:
             return None
         hits.append(m)
@@ -636,7 +686,7 @@ def load_r4(base):
     for i in range(1, 6):
         f = m4 / f"sme_r4_grid_run{i}.log"
         if f.exists():
-            r = parse_r4_strict(f.read_text(encoding="utf-8"))
+            r = parse_r4_strict(f.read_text(encoding="utf-8", errors="replace"))
             if r is not None:
                 runs.append(r)
     grid, ratios = None, None
@@ -663,7 +713,7 @@ def rt_record(path):
     （preconditions が P-RT 不成立にする。未知の値を「後退あり相当」へ丸めない）。"""
     if not os.path.exists(path):
         return None
-    vals = re.findall(r"^rt_verdict=(.*)$", Path(path).read_text(encoding="utf-8"), re.M)
+    vals = re.findall(r"^rt_verdict=(.*)$", Path(path).read_text(encoding="utf-8", errors="replace"), re.M)
     if not vals:
         return None
     if len(vals) != 1:
@@ -678,7 +728,7 @@ def r0_record(path):
     を含まず、他の行が無いときだけ成立。ファイルなしは None、それ以外（行の欠け・重複・矛盾）は不成立。"""
     if not os.path.exists(path):
         return None
-    lines = [ln for ln in Path(path).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    lines = [ln for ln in Path(path).read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
     arms = [ln.split(":", 1)[0] for ln in lines]
     if sorted(arms) != ["after", "before"]:
         return False
@@ -1078,6 +1128,57 @@ def _m_gemm_parity_missing(b, m, k):
     _edit_obj(_jsonl(b, m, k, "before", "gemm"), 4, lambda r: r.pop("parity_fail_count"))
 
 
+# 入力値の数値変換・比較で例外を出しうる形（§14 追記。PRRT_kwDOTuUCJc6nl21M）。従前は OverflowError／ValueError で集計全体が止まった
+def _m_huge_int_median(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "before", "train"), 0, lambda r: r.update(median_s=10**400))
+
+
+def _m_huge_int_checksum(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "after", "infer"), 0, lambda r: r.update(checksum=10**400))
+
+
+def _m_bool_values(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "after", "infer"), 0, lambda r: r.update(checksum=True, median_s=True))
+
+
+def _m_numeric_strings(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "after", "infer"), 0, lambda r: r.update(checksum="1.5", median_s="0.5"))
+
+
+def _m_digit_limit(b, m, k):
+    _edit_row(_jsonl(b, m, k, "after", "infer"), 0, lambda s: re.sub(r'"checksum": [^,}]+', '"checksum": ' + "9" * 5000, s, count=1))
+
+
+def _m_deep_nesting(b, m, k):
+    f = _jsonl(b, m, k, "after", "infer")
+    f.write_text(f.read_text() + "[" * 200000 + "\n")
+
+
+def _m_bad_utf8(b, m, k):
+    f = _jsonl(b, m, k, "after", "infer")
+    f.write_bytes(f.read_bytes() + b"\xff\xfe\n")
+
+
+def _m_runab_huge_digits(b, m, k):
+    _sub(_exit_file(b, m, k), "run_ab_exit=0 " if m == "m4max" else "run_ab rc=0",
+         "run_ab_exit=" + "9" * 5000 + " " if m == "m4max" else "run_ab rc=" + "9" * 5000)
+
+
+def _m_tree_bad_utf8(b, m, k):
+    f = _series_dir(b, m, k) / "patch_sha256.txt"
+    f.write_bytes(b"head=" + b"\xff" * 40 + b"\n")
+
+
+def _m_r4_huge_digits(b, m, k):
+    _sub(Path(b) / "m4max" / "sme_r4_grid_run3.log", "variant=SME(X) size=(256,256,64)",
+         "variant=SME(X) size=(" + "1" * 5000 + "," + "1" * 5000 + ",64)")
+
+
+def _m_r4_overflow_value(b, m, k):
+    _sub(Path(b) / "m4max" / "sme_r4_grid_run3.log", "variant=SME(X) size=(256,256,64) median_gflops=2.0",
+         "variant=SME(X) size=(256,256,64) median_gflops=" + "9" * 400)
+
+
 # 記録ファイルの形式外の値・重複行（§15 追記）。従前は先頭一致・数字の前方一致・「pass 以外は要調査」で成立側へ丸めていた
 def _m_tree_head_dup(b, m, k):
     f = _series_dir(b, m, k) / "patch_sha256.txt"
@@ -1208,6 +1309,17 @@ CLAUSE_CASES = {
     "§15/P-R0:sme_report の行の矛盾": ("P-R0", ("gb10",), _m_r0_contradict),
     "§15/P-RT:rt_verdict の値不正": ("P-RT", ("gb10",), _m_rt_bad_value),
     "§15/P-RT:rt_verdict の重複": ("P-RT", ("gb10",), _m_rt_dup),
+    "§14/P-CELLS:巨大整数の median_s": ("P-CELLS", BOTH, _m_huge_int_median),
+    "§14/P-CELLS:巨大整数の checksum": ("P-CELLS", BOTH, _m_huge_int_checksum),
+    "§14/P-CELLS:bool 値": ("P-CELLS", BOTH, _m_bool_values),
+    "§14/P-CELLS:数値文字列": ("P-CELLS", BOTH, _m_numeric_strings),
+    "§14/P-CELLS:桁数上限超過の整数": ("P-CELLS", BOTH, _m_digit_limit),
+    "§14/P-CELLS:深すぎる入れ子": ("P-CELLS", BOTH, _m_deep_nesting),
+    "§14/P-CELLS:不正な UTF-8 の JSONL": ("P-CELLS", BOTH, _m_bad_utf8),
+    "§15/P-RUNAB:終了コードの巨大な数字列": ("P-RUNAB", BOTH, _m_runab_huge_digits),
+    "§15/P-TREE:記録の不正な UTF-8": ("P-TREE", BOTH, _m_tree_bad_utf8),
+    "§15/P-R4-LOG:R4 の巨大な桁数のサイズ": ("P-R4-LOG", ("m4max",), _m_r4_huge_digits),
+    "§15/P-R4-LOG:R4 の有限でない値": ("P-R4-LOG", ("m4max",), _m_r4_overflow_value),
 }
 
 
@@ -1256,11 +1368,12 @@ def _clean_series(d, label="L"):
 # (関数名, 種別) → (件数, 写像先または無害の根拠)。種別: "continue"・"get"（.get 呼び出し）・"except"。
 # 件数が変わると self-test が落ちる。経路を足すときは前提 ID へ写像するか、判定に影響しない根拠をここへ書く。
 SILENT_SITE_INVENTORY = {
-    ("evaluate_series", "continue"): (1, "片腕でも JSONL が無いタスクを飛ばす。当該セルは status=missing（JSONL 欠損）で P-CELLS"),
+    ("evaluate_series", "continue"): (2, "片腕でも JSONL が無いタスク・load_rows が例外を出したタスクを飛ばす。当該セルは判定不能（JSONL 欠損・読み込みで例外）で P-CELLS"),
     ("evaluate_series", "get"): (2, "行の無いセルに [] を渡す。evaluate_cell が 0 件で判定不能を返し P-CELLS"),
     ("scan_jsonl_strict", "continue"): (3, "空行（データなし。load_rows と同じ）と、異常を記録した後の次行への移動"),
     ("scan_jsonl_strict", "get"): (3, "mode・期待値との比較。キーの欠損は別途キー集合の照合で異常にする"),
-    ("scan_jsonl_strict", "except"): (1, "json.loads の失敗（壊れた行・重複キー・NaN リテラル）を異常として記録する"),
+    ("scan_jsonl_strict", "except"): (2, "UTF-8 として読めないファイルと json.loads の失敗（壊れた行・重複キー・NaN リテラル・桁数上限超過・深すぎる入れ子）を異常として記録する"),
+    ("evaluate_series", "except"): (2, "load_rows／evaluate_cell／per_run_ratios の入力由来の例外（巨大整数の OverflowError・桁数上限超過・不正な UTF-8）を異常として記録し当該タスク・セルを判定不能にする"),
     ("parse_r4_strict", "continue"): (1, "median_gflops= を含まない行（test 見出し・結果フッタ）は R4 の値を持たない"),
     ("render_cells", "continue"): (1, "判定不能セルの表示行を出した後の次セルへの移動（表示のみ）"),
     ("render_m4max", "continue"): (1, "系列ディレクトリが無い候補を「未実測」と表示した後の移動（判定を出さない）"),
@@ -1461,14 +1574,36 @@ def _run_clause_table(td):
             shutil.rmtree(case)
 
 
+def _check_numeric_conversions():
+    """入力値の数値変換・比較が例外で集計を止めないこと（PRRT_kwDOTuUCJc6nl21M）。値の判定を関数単位で確かめる
+    （記録ファイル全体を通した確認は CLAUSE_CASES の表駆動検査）。"""
+    big = 10**400
+    for kind in ("num", "num|null"):
+        assert _value_ok(kind, 10**300) and _value_ok(kind, -10**300) and _value_ok(kind, 1.5)
+        assert not any(_value_ok(kind, v) for v in (big, -big, True, False, "1.5", float("inf"), float("nan"), [1]))
+    assert _value_ok("num|null", None) and not _value_ok("num", None)
+    assert _value_ok("int", 5) and not any(_value_ok("int", v) for v in (True, 5.0, "5"))
+    assert _value_ok("str", "x") and not _value_ok("str", 5)
+    digits = "9" * 5000  # 整数の桁数上限（4300）超過。int() が ValueError を投げる長さ
+    assert _five_passes("".join(f"round{i} gate=pass\n" for i in range(1, 6)), "round") is True
+    assert _five_passes(f"round{digits} gate=pass\n", "round") is False
+    assert _exit_record(f"run_ab_exit={digits} ", r"\brun_ab_exit=(\S*)") is False
+    assert _exit_record("run_ab_exit=00 ", r"\brun_ab_exit=(\S*)") is True
+    assert _exit_record("run_ab_exit=٠ ", r"\brun_ab_exit=(\S*)") is False  # ASCII 以外の数字は成立にしない
+    r4 = "variant=SME(X) size=(256,256,64) median_gflops="
+    assert parse_r4_strict(r4 + "9" * 400 + "\n") is None and parse_r4_strict(r4 + "0.0\n") is None
+    assert parse_r4_strict(f"variant=SME(X) size=({digits},{digits},64) median_gflops=2.0\n") is None
+
+
 def self_test():
+    _check_numeric_conversions()
     _check_rule_drift()
     _check_single_gate()
     _check_input_handling()
     # 負のプローブ: 指摘の形（警告を `_` で捨てる）と、except で既定値に落とす形を検出できること
     own = Path(__file__).read_text(encoding="utf-8")
     for old, new in (("b, b_warnings = _CMP.load_rows", "b, _ = _CMP.load_rows"),
-                     ("anomalies.append(f\"{where}: JSON として読めない（{e}）\")", "obj = {}")):
+                     ("anomalies.append(f\"{where}: JSON として読めない（{type(e).__name__}: {str(e)[:80]}）\")", "obj = {}")):
         # 置換するのは本番コード側の最初の 1 箇所（本 self-test の文字列リテラルより前にある）
         assert own.find(old) != -1 and own.find(old) < own.find("# --- self-test 用の模擬記録 ---"), old
         try:
