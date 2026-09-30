@@ -165,7 +165,8 @@ def judge(runs, reference_only=False, problems=()):
             if reference_only:
                 # 参考扱い系列（専有ゲート timeout／load_policy が exclusive_gate 以外）は
                 # ADOPT_CANDIDATE 等の採用系判定語を一切出さず REFERENCE_ONLY のみとする（RULE.txt 7.。fail-closed）。
-                v = ("REFERENCE_ONLY", f"参考扱い（専有ゲート不成立）のため判定 {v[0]} は採用根拠にしない: " + v[1])
+                # 元の判定語・理由文は出力に含めない（ADOPT_CANDIDATE 等の語が参考系列に残らないようにする）。
+                v = ("REFERENCE_ONLY", "参考扱い（専有ゲート不成立）のため採用根拠にしない")
             verdicts[arm] = (v[0], v[1] + " | " + "; ".join(detail))
     return verdicts
 
@@ -370,6 +371,10 @@ def self_test():
     assert judge(old)["X"][0] == "INCOMPLETE"
     # 参考扱いの付記
     assert judge(build(ok), reference_only=True)["X"][0] == "REFERENCE_ONLY"
+    # 参考系列の出力全体に採用系判定語が残らない（元判定が ADOPT_CANDIDATE でも）
+    assert judge(build(ok))["X"][0] == "ADOPT_CANDIDATE"
+    _ref = judge(build(ok), reference_only=True)["X"]
+    assert not any(w in " ".join(_ref) for w in ("ADOPT_CANDIDATE", "REJECT", "UNDETERMINED"))
     # load_policy: exclusive_gate のみ採用根拠になる。record_only／未記入／欠落／未知値は参考扱い
     assert parse_load_policy("load_policy: exclusive_gate  # x\n") == "exclusive_gate"
     assert parse_load_policy("load_policy: record_only\n") == "record_only"

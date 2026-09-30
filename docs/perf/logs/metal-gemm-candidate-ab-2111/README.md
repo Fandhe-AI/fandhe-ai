@@ -14,7 +14,7 @@ candle／MLX steel 解析差分由来の Metal GEMM 候補（イシュー #2110�
 
 ## 実行手順（Apple Silicon 実機・#2111）
 
-1. `env_info.txt` を記入する（ホスト名・ユーザー名・絶対パスは書かない）。
+1. `env_info.txt` を記入する（ホスト名・ユーザー名・絶対パスは書かない）。専有ゲート（RULE.txt 7.）を満たして計測する通常運用では **run 1 の前に** `load_policy: exclusive_gate` を明記する（`aggregate.py` は `exclusive_gate` 以外・未記入・行欠落を常に REFERENCE_ONLY にするため、この行が無いと採用判定が出ない）。専有できない場合のみ `load_policy: record_only` と理由を宣言する（下記「判定後の手順」）。
 2. `./orchestrate.sh gate` — bit 一致 3 本と CPU 参照 parity 1 本。FAIL なら A/B は実施しない（RULE.txt 1.）。
 3. `./orchestrate.sh 1` … `./orchestrate.sh 5` — プロセス独立の 5 run。各 run の前に load1 < 8.0 を最大 30 分待つ。
 4. `python3 aggregate.py` — arm 別に ADOPT_CANDIDATE／REJECT／UNDETERMINED／NOT_ADOPTABLE／INCOMPLETE を出力する。
