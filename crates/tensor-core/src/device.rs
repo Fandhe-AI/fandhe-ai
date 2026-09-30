@@ -65,6 +65,7 @@ pub enum Device {
 /// （`.claude/rules/security.md`）であり、後続タスク（1.9b 以降）で
 /// プロパティ項目が増えても呼び出し側の網羅的フィールドアクセスを
 /// 破壊しないため（構築はこのモジュール内の関数のみが行う）。
+/// `warp_width`（#2125）の追加がその実例。
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -78,6 +79,13 @@ pub struct DeviceInfo {
     /// 演算ユニット数（CPU: 論理コア数 ／ CUDA: SM 数）。取得できない
     /// 場合は `None`。
     pub compute_units: Option<u32>,
+    /// warp／wave／simdgroup の実行単位幅（レーン数。#2125・AMD ROCm
+    /// readiness）。CUDA は `CU_DEVICE_ATTRIBUTE_WARP_SIZE` の実測値、
+    /// Metal は Apple GPU の simdgroup 幅の定数 32（パイプライン単位の
+    /// `threadExecutionWidth` 検証は backend-metal 側で維持）、CPU は
+    /// `None`。将来の ROCm は HIP の `warpSize`（32/64）を想定する。
+    /// 根拠は `docs/backend-abstraction-amd-readiness-decision.md` §3・§6。
+    pub warp_width: Option<u32>,
 }
 
 impl DeviceInfo {
@@ -96,7 +104,17 @@ impl DeviceInfo {
             name: name.into(),
             total_memory_bytes,
             compute_units,
+            warp_width: None,
         }
+    }
+
+    /// `warp_width` を設定した `DeviceInfo` を返す（#2125）。`new` の
+    /// シグネチャは公開クレートの semver 互換のため据え置き、warp 幅を
+    /// 報告できるバックエンド（CUDA・Metal）がこのビルダーで付与する。
+    #[must_use]
+    pub fn with_warp_width(mut self, warp_width: Option<u32>) -> Self {
+        self.warp_width = warp_width;
+        self
     }
 }
 
@@ -435,6 +453,32 @@ mod tests {
                     ))
                 })
         }
+    }
+
+    #[test]
+    fn warp_width_defaults_to_none_and_roundtrips_via_builder() {
+        let base = DeviceInfo::new(Device::Cpu, "cpu", Some(1), Some(2));
+        assert_eq!(base.warp_width, None);
+        for w in [Some(32), Some(64), None] {
+            let info = base.clone().with_warp_width(w);
+            assert_eq!(info.warp_width, w);
+            assert_eq!(info.name, "cpu");
+            assert_eq!(info.total_memory_bytes, Some(1));
+            assert_eq!(info.compute_units, Some(2));
+        }
+    }
+
+    #[test]
+    fn warp_width_propagates_through_select_from() {
+        let provider = MockProvider {
+            name: "cpu",
+            available: true,
+            devices: vec![
+                DeviceInfo::new(Device::Cpu, "cpu", None, None).with_warp_width(Some(32)),
+            ],
+        };
+        let info = select_from(&[&provider], Device::Cpu).expect("select");
+        assert_eq!(info.warp_width, Some(32));
     }
 
     fn cpu_provider() -> MockProvider {

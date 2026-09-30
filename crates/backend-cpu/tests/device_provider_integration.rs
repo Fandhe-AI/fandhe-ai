@@ -98,3 +98,16 @@ fn cuda_absence_does_not_break_other_backends_enumeration() {
     let all = enumerate_all(&refs);
     assert!(all.iter().any(|info| info.device == Device::Cpu));
 }
+
+#[test]
+fn cpu_device_reports_no_warp_width() {
+    // CPU に warp 概念はなく `warp_width` は `None`（#2125）。
+    let provider = CpuDeviceProvider::new();
+    for info in provider.enumerate().expect("enumerate") {
+        assert_eq!(info.warp_width, None);
+    }
+    assert_eq!(
+        provider.select(Device::Cpu).expect("select").warp_width,
+        None
+    );
+}

@@ -7,6 +7,7 @@
 
 use fandhe_ai_backend_metal::MetalDeviceProvider;
 use fandhe_ai_tensor_core::device::DeviceProvider;
+use objc2_metal::{MTLCopyAllDevices, MTLDevice, MTLGPUFamily};
 
 #[test]
 fn backend_name_is_metal() {
@@ -45,4 +46,35 @@ fn select_metal_device_on_real_hardware() {
 
     assert_eq!(info.device, Device::Metal);
     assert!(!info.name.is_empty());
+    // `probe_all` は Apple ファミリ（`supportsFamily(Apple1)`）と確認できた
+    // GPU にのみ `Some(32)` を報告し、Intel／AMD GPU 搭載 Mac では `None` を
+    // 返す契約のため、Apple GPU 確認時のみ `Some(32)` を要求する（#2125）。
+    // `select(Device::Metal)` は `MTLCopyAllDevices()` の先頭を返すため、判定も
+    // 同じ列挙の先頭デバイスで行う（マルチ GPU Mac では
+    // `MTLCreateSystemDefaultDevice()` と別デバイスになりうる）。
+    let is_apple_gpu = MTLCopyAllDevices()
+        .to_vec()
+        .first()
+        .is_some_and(|device| device.supportsFamily(MTLGPUFamily::Apple1));
+    if is_apple_gpu {
+        assert_eq!(info.warp_width, Some(32));
+    } else {
+        assert!(matches!(info.warp_width, Some(32) | None));
+    }
+}
+
+/// Apple GPU の simdgroup 幅は 32（#2125）。`probe_all` は Apple ファミリ
+/// （`supportsFamily(Apple1)`）と確認できない GPU（Intel/AMD 搭載 Mac 等）では
+/// `None`（不明）を報告する契約のため、全列挙デバイスに `Some(32)` は要求せず
+/// `Some(32)` または `None` のみを許容する。Apple Silicon 実機での `Some(32)`
+/// は `select_metal_device_on_real_hardware`（`#[ignore]`）で検証する。
+#[test]
+fn enumerated_devices_report_warp_width_32_or_unknown() {
+    for info in MetalDeviceProvider::new().enumerate().expect("enumerate") {
+        assert!(
+            matches!(info.warp_width, Some(32) | None),
+            "warp_width must be Some(32) or None, got {:?}",
+            info.warp_width
+        );
+    }
 }

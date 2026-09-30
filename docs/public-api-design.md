@@ -646,7 +646,7 @@ let output = model.predict_with_ops(&input, Box::new(fandhe_ai_backend_cpu::CpuB
 **TASK-1.9a（#44）実装時の突合結果**: `Device`（`Cpu`／`Cuda(usize)`／`Metal`）は本節のシグネチャをそのまま `crates/tensor-core/src/device.rs` に実装した。以下は本文書からの拡張・保留であり、実装コメントにも同旨を記載している。
 
 - `Device::available()` は `tensor-core` から 3 バックエンドクレートを直接参照できないため実装せず、複数 `DeviceProvider`（新規追加。下記）を横断する `enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo>` を同等機能として提供した。集約入口（`Device::available()` をどの層で結線するか）は TASK-1.9c（#46）では対象外とし、TASK-1.9d（#47）でも「3 バックエンド統合テストの整備」という受け入れ条件には不要と判断し対象外とした（実装は別途追跡）。**イシュー #1614 で解消**: 集約入口は `facade` の自由関数 `fandhe_ai::available_devices() -> Vec<Device>` として結線した（orphan rule により `Device` への inherent メソッド形は採れないため、既存の `release_cached_memory(device)` 等と同じ自由関数パターンに従う。`DeviceProvider`／`DeviceInfo`／`enumerate_all` 自体は再エクスポートせず `Device` 識別子のみを返す。詳細は `docs/facade-device-transfer-enumeration-design.md`）。
-- 3 バックエンドが「同一 trait でデバイス列挙・選択できる」（#44 受け入れ条件）ための入口として `DeviceProvider` trait（`backend_name`／`is_available`／`enumerate`／`select`）と `DeviceInfo`（`device`／`name`／`total_memory_bytes`／`compute_units`。`#[non_exhaustive]`）を新規追加した。本文書は §4.2 の `BackendOps`（カーネルディスパッチ）のみを定義しており、デバイス検出・選択専用の trait は記載していなかった。
+- 3 バックエンドが「同一 trait でデバイス列挙・選択できる」（#44 受け入れ条件）ための入口として `DeviceProvider` trait（`backend_name`／`is_available`／`enumerate`／`select`）と `DeviceInfo`（`device`／`name`／`total_memory_bytes`／`compute_units`／`warp_width`〈#2125 で追加。`Option<u32>`〉。`#[non_exhaustive]`）を新規追加した。本文書は §4.2 の `BackendOps`（カーネルディスパッチ）のみを定義しており、デバイス検出・選択専用の trait は記載していなかった。
 - 既定デバイス選択ロジック（本節の未決事項）は本イシューでも実装しない（列挙と明示選択のみを提供する。ユーザー承認が必要な事項のため自動運転では安全側に倒した）。
 
 ### 4.2 カーネル入口トレイト案

@@ -106,4 +106,15 @@ fn select_device_zero_on_real_hardware() {
 
     assert_eq!(info.device, Device::Cuda(0));
     assert!(!info.name.is_empty());
+    assert_eq!(info.warp_width, Some(32));
+}
+
+/// NVIDIA の全世代で warp 幅は 32（#2125）。ドライバ不在の CI では列挙 0 件で
+/// 空振りとなり green。
+#[test]
+fn enumerated_devices_report_warp_width_32() {
+    let devices = CudaDeviceProvider::new().enumerate().expect("enumerate");
+    for info in devices {
+        assert_eq!(info.warp_width, Some(32));
+    }
 }

@@ -25,7 +25,7 @@
 //! で `IOKit`／`CoreFoundation` framework を直接リンクする。
 
 use fandhe_ai_tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
-use objc2_metal::{MTLCopyAllDevices, MTLDevice};
+use objc2_metal::{MTLCopyAllDevices, MTLDevice, MTLGPUFamily};
 
 /// IOKit／CoreFoundation の手書き FFI 宣言（[`probe_gpu_core_count`] 専用）。
 ///
@@ -167,6 +167,14 @@ mod iokit_ffi {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MetalDeviceProvider;
 
+/// Apple GPU の simdgroup 幅（#2125）。世代に依らず 32 固定で、`MTLDevice`
+/// にデバイス単位の simdgroup 幅 API はない（`threadExecutionWidth` は
+/// `MTLComputePipelineState` のプロパティ）。実行時の突合はパイプライン
+/// 構築時の検証（`MetalError::UnexpectedThreadExecutionWidth`）が
+/// fail-closed で担う。既存の手動定数（`gemm.rs::SIMDGROUP_THREADGROUP_WIDTH`
+/// 等）と同値で、置換は #2126 以降。`DeviceInfo::warp_width` へ報告する。
+pub(crate) const APPLE_SIMDGROUP_WIDTH: u32 = 32;
+
 impl MetalDeviceProvider {
     /// 新規 provider を構築する。macOS 上の Metal デバイス検出自体は
     /// `is_available`／`enumerate`／`select` 呼び出し時に行う。
@@ -188,12 +196,21 @@ impl MetalDeviceProvider {
             .to_vec()
             .into_iter()
             .map(|device| {
+                // simdgroup 幅 32 は Apple GPU 固有の値。Intel／AMD GPU 搭載
+                // Mac の `MTLDevice` へ同値を報告すると `DeviceInfo` の契約
+                // （不明は `None`）を破るため、Apple ファミリ（`Apple1`
+                // 以上。Apple GPU は最小ファミリから全世代で支持）と確認
+                // できた場合に限り報告し、それ以外は `None` とする（#2125）。
+                let warp_width = device
+                    .supportsFamily(MTLGPUFamily::Apple1)
+                    .then_some(APPLE_SIMDGROUP_WIDTH);
                 DeviceInfo::new(
                     Device::Metal,
                     device.name().to_string(),
                     Some(device.recommendedMaxWorkingSetSize()),
                     gpu_core_count,
                 )
+                .with_warp_width(warp_width)
             })
             .collect()
     }
