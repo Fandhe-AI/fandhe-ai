@@ -75,11 +75,14 @@ gate || echo "外側専有ゲート不通過: この系列は参考扱い（RULE
 for t in before after; do
   P="${WORK}/probe-${t}"
   mkdir -p "${P}/src" || exit 1
-  sed "s#TREE_PLACEHOLDER#${WORK}/${t}#" "${REPO}/docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/sme-probe-Cargo.toml" >"${P}/Cargo.toml"
-  cp "${REPO}/docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/sme-probe-main.rs" "${P}/src/main.rs"
+  sed "s#TREE_PLACEHOLDER#${WORK}/${t}#" "${REPO}/docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/sme-probe-Cargo.toml" >"${P}/Cargo.toml" \
+    || { echo "probe ${t} の Cargo.toml 生成に失敗 -> 中止"; exit 1; }
+  cp "${REPO}/docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/sme-probe-main.rs" "${P}/src/main.rs" \
+    || { echo "probe ${t} の main.rs コピーに失敗 -> 中止"; exit 1; }
   (cd "${P}" && CARGO_TARGET_DIR="${WORK}/target-probe" cargo run --release -q) >"${WORK}/probe_${t}.log" 2>&1 \
     || { echo "probe ${t} 失敗 -> 中止"; tail -20 "${WORK}/probe_${t}.log"; exit 1; }
-  sme2118_mask "${WORK}" <"${WORK}/probe_${t}.log" >"${LOGD}/sme_probe_${t}.log"
+  sme2118_mask "${WORK}" <"${WORK}/probe_${t}.log" >"${LOGD}/sme_probe_${t}.log" \
+    || { echo "probe ${t} ログのマスク収録に失敗 -> 中止"; exit 1; }
   echo "${t}: $(grep sme_report= "${LOGD}/sme_probe_${t}.log")" | tee -a "${LOGD}/sme_report.txt"
 done
 if ! grep -q 'kernel_enabled: false' "${LOGD}/sme_probe_after.log" \
@@ -93,7 +96,10 @@ fi
 (cd "${WORK}/after" && CARGO_TARGET_DIR="${WORK}/target-after" cargo test -p fandhe-ai-backend-cpu --release --no-fail-fast) >"${WORK}/cargo_test_after.log" 2>&1
 TEST_RC=$?
 echo "RT rc=${TEST_RC}" >"${LOGD}/rt_result.txt"
-grep -E '^test result|FAILED|panicked' "${WORK}/cargo_test_after.log" | sme2118_mask "${WORK}" >"${LOGD}/cargo_test_after.summary.log"
+# grep は一致 0 件で rc=1 になるため rc は見ず、収録（マスク）の成否だけを確認する。
+grep -E '^test result|FAILED|panicked' "${WORK}/cargo_test_after.log" >"${WORK}/cargo_test_after.summary.raw"
+sme2118_mask "${WORK}" <"${WORK}/cargo_test_after.summary.raw" >"${LOGD}/cargo_test_after.summary.log" \
+  || { echo "RT サマリのマスク収録に失敗 -> 中止"; exit 1; }
 FAILS=$(grep -E '^test .* \.\.\. FAILED$' "${WORK}/cargo_test_after.log" | sed -e 's/^test //' -e 's/ \.\.\. FAILED$//' | sort -u)
 RESULT_LINES=$(grep -cE '^test result: ' "${WORK}/cargo_test_after.log")
 # 異常終了行 = コンパイル失敗、または終了状態が 101 以外の `process didn't exit successfully`。
@@ -128,8 +134,14 @@ BENCH="${WORK}/before/scripts/bench/framework-compare"
   bash run_ab_sme_cpu.sh "${LABEL}") >"${WORK}/run_ab.log" 2>&1
 RC=$?
 echo "run_ab rc=${RC}" | tee -a "${LOGD}/rt_result.txt"
-sme2118_mask "${WORK}" <"${WORK}/run_ab.log" >"${LOGD}/run_ab.log"
-sme2118_collect_r1r2 "${BENCH}" "${LABEL}" "${LOGD}/r1r2" "${WORK}"
+MASK_RC=0
+sme2118_mask "${WORK}" <"${WORK}/run_ab.log" >"${LOGD}/run_ab.log" || MASK_RC=1
+# 収録の失敗（必須成果物の欠損・コピー失敗）は rt_result.txt の `collect rc=` へ記録し、末尾で非ゼロ終了へ
+# 伝播する。aggregate.py は `collect rc=0` の記録がない系列を判定不能にする（RULE.txt §13）。
+COLLECT_RC=0
+sme2118_collect_r1r2 "${BENCH}" "${LABEL}" "${LOGD}/r1r2" "${WORK}" || COLLECT_RC=1
+[ "${MASK_RC}" -eq 0 ] || COLLECT_RC=1
+echo "collect rc=${COLLECT_RC}" | tee -a "${LOGD}/rt_result.txt"
 {
   echo "date_utc=$(date -u +%FT%TZ)"
   echo "label=${LABEL} K=${K}"
@@ -145,4 +157,5 @@ sme2118_collect_r1r2 "${BENCH}" "${LABEL}" "${LOGD}/r1r2" "${WORK}"
 uptime >"${LOGD}/uptime_after.txt"
 rm -rf "${WORK}"
 echo "done. $(date -u +%FT%TZ)"
-[ "${RC}" -eq 0 ] || exit 1
+[ "${RC}" -eq 0 ] || { echo "run_ab_sme_cpu.sh が非ゼロ終了（rc=${RC}）" >&2; exit 1; }
+[ "${COLLECT_RC}" -eq 0 ] || { echo "成果物の収録に失敗（collect rc=${COLLECT_RC}）" >&2; exit 1; }

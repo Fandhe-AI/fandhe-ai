@@ -89,3 +89,12 @@ K=64 は現行定数のベースラインであり、イシュー本文の候補
 - GB10 の RT 異常終了行は、コンパイル失敗と終了状態が 101 以外の `process didn't exit successfully` に限る。cargo の通常のテスト失敗フッタ（error: test failed・exit status: 101）は異常終了に数えず、§9 の既知 FAIL 1 件のみなら pass とする。
 - M4 Max の R4 系列は、load_gate_r4.log に run1..5 の `exit=0 grep_exit=0` と `series done` の全てが記録されている場合のみ R4 成立の判定に使う。32 点を解析できても、非ゼロ終了・欠損・途中終了の系列は判定不能（undetermined）とする。
 - §11 の record_only（負荷ゲート不通過）系列は ADOPT 相当だけでなく REJECT も正式判定として出さず、「REJECT（参考・record_only）」と表示する。
+
+## 14. 追記（判定の順序と収録失敗の伝播の明文化。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6njHDE への対応）
+- 候補別・GB10 の総合判定は、次の順で評価する。前段が満たされなければ後段の判定（FAIL／REJECT／ADOPT 候補／pass／後退あり）を一切出さず undetermined（判定不能）とする。§6 の「REJECT = 到達セルに 5/5 一貫の後退が 1 つでもある」は、下記 1〜2 が満たされた系列にだけ適用する（欠損セルが 1 つでもある系列の到達済みセルの後退から REJECT を出さない）。
+  1. 入力の完全性: セル集合が §2 の 10 セルと重複・欠落・未知なく一致すること（集計側の構造破綻は例外で停止する。値を推定しない）。JSONL 内の重複行・round 欠損・未知の値は当該セルを判定不能として扱う。
+  2. 判定可能性: run_ab_sme_cpu.sh の終了コード 0 と成果物収録の終了コード 0（M4 Max: env_info.txt の `run_ab_exit=0 collect_exit=0`・GB10: rt_result.txt の `run_ab rc=0`・`collect rc=0`）が記録され、GB10 では R0 が成立し、全 10 セルの記録が判定可能であること。checksum 不一致（複合判定外れ・完全一致でない）だけは FAIL の根拠として記録済みとみなす。checksum の欠損・非数値は不一致ではなく判定不能とする。
+  3. 判定: FAIL > REJECT > ADOPT 候補（GB10 は 後退あり > 後退あり相当 > pass）。§11 の record_only は REJECT／ADOPT とも参考表示にする（§13 末尾）。
+- 実行側は成果物収録（lib_trees.sh の `sme2118_collect_r1r2`）の失敗を非ゼロで伝播する。必須成果物（results/raw の 6 JSONL・load-gate ログ・compare-exit ログ・bench 直下の compare-{gemm,train,infer} の md／err）の欠損・空ファイル、およびマスク付きコピーの失敗を検出する。呼び出し側（orchestrate_m4max.sh・gb10/orchestrate_gb10.sh）は戻り値を確認して終了コードを記録し、非ゼロなら停止する（R4 のマスク収録失敗も同様）。M4 Max 側は pipefail を有効にする。
+- R4 ログは 16 格子点 x {NEON, SME} の 32 点を重複・欠落・未知なくちょうど 1 回ずつ含む run のみ有効とする（重複行が後勝ちで 32 件に見える場合を含めて無効）。
+- 検出範囲: 上記は成果物の存在・非空・コピー成否・終了コード記録・セルの件数と集合の整合の検査であり、JSONL 内の値の妥当性（計測が正しく行われたか）を保証するものではない。値の検証は compare_gemm_ab.py の判定に委ねる。

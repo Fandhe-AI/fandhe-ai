@@ -15,7 +15,9 @@
 # 事前に事前登録コミット（lib_trees.sh の SME2118_REGISTERED_BASE）を git archive した一時ツリーで release ビルドするため、計測中に
 # ビルドを並走させない。main の SME 定数は変更しない（本番切替は #2119）。
 # bash 3.2（macOS 標準）でも動く書き方に限る。
-set -u
+# 失敗の伝播（RULE.txt §13）: pipefail でパイプ先頭（git archive 等）の失敗も検出し、収録・マスク・
+# コピーの戻り値は全て確認して非ゼロで返す（set -e は使わず個別に `|| return 1`）。
+set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=./lib_trees.sh
 . "${HERE}/lib_trees.sh"
@@ -83,7 +85,8 @@ do_r4() {
     wait_load_gate "${OUTD}/load_gate_r4.log" "run${i}"
     (cd "${work}/before" && CARGO_TARGET_DIR="${work}/target" ${CMD}) >"${work}/raw${i}.log" 2>&1
     rc=$?
-    sme2118_mask "${work}" <"${work}/raw${i}.log" >"${OUTD}/sme_r4_grid_run${i}.raw.log"
+    sme2118_mask "${work}" <"${work}/raw${i}.log" >"${OUTD}/sme_r4_grid_run${i}.raw.log" \
+      || { echo "run${i}: raw ログのマスク収録に失敗" >&2; return 1; }
     grep -E "^(variant=|test |SME )" "${OUTD}/sme_r4_grid_run${i}.raw.log" >"${OUTD}/sme_r4_grid_run${i}.log"
     grc=$?
     echo "run${i} exit=${rc} grep_exit=${grc} end_load1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')" >>"${OUTD}/load_gate_r4.log"
@@ -117,10 +120,14 @@ do_r1() {
     AB_AFTER_FACADE_PATH="${work}/after/crates/facade" AB_DEVICE=cpu \
     bash run_ab_sme_cpu.sh "${label}") >"${work}/run_ab.log" 2>&1
   local rc=$?
-  sme2118_mask "${work}" <"${work}/run_ab.log" >"${OUTD}/r1r2/k${k}/run_ab.log"
-  sme2118_collect_r1r2 "${bench}" "${label}" "${OUTD}/r1r2/k${k}" "${work}"
+  local mask_rc=0 collect_rc=0
+  sme2118_mask "${work}" <"${work}/run_ab.log" >"${OUTD}/r1r2/k${k}/run_ab.log" || mask_rc=1
+  # 収録の失敗（必須成果物の欠損・コピー失敗）は collect_exit へ記録し、下で非ゼロ終了へ伝播する。
+  # aggregate.py は collect_exit=0 の記録がない系列を判定不能にする（RULE.txt §13）。
+  sme2118_collect_r1r2 "${bench}" "${label}" "${OUTD}/r1r2/k${k}" "${work}" || collect_rc=1
+  [ "${mask_rc}" -eq 0 ] || collect_rc=1
   {
-    echo "label=${label} K=${k} run_ab_exit=${rc}"
+    echo "label=${label} K=${k} run_ab_exit=${rc} collect_exit=${collect_rc}"
     echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "uname=$(uname -srm)"
     echo "chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
@@ -131,6 +138,10 @@ do_r1() {
   rm -rf "${work}"
   if [ "${rc}" -ne 0 ]; then
     echo "run_ab_sme_cpu.sh が非ゼロ終了（exit=${rc}）。run_ab.log と skipped ログを確認" >&2
+    return 1
+  fi
+  if [ "${collect_rc}" -ne 0 ]; then
+    echo "成果物の収録に失敗（必須成果物の欠損またはコピー失敗）。標準エラーの一覧と ${OUTD}/r1r2/k${k}/ を確認" >&2
     return 1
   fi
 }

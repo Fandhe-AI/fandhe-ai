@@ -124,15 +124,43 @@ sme2118_mask() {
 
 # sme2118_collect_r1r2 <bench_dir> <label> <dest_dir> <work_dir>
 #   run_ab_sme_cpu.sh の成果物（バイナリ・target を除く）をマスクして dest へ収録する。
+#   fail-closed（RULE.txt §13）: 集計（aggregate.py）が読む必須成果物のいずれかが欠損・空、または
+#   コピー（マスク）が 1 件でも失敗したら、欠損を列挙して非ゼロで返す。呼び出し側は戻り値を必ず
+#   確認し、env_info／rt_result へ終了コードを記録して非ゼロ終了へ伝播する（aggregate.py は
+#   収録の終了コード 0 の記録がない系列を判定不能にする）。
+#   必須: results/raw の 6 JSONL（before/after x gemm/train/infer）・load-gate ログ・
+#   compare-exit ログ・bench 直下の compare-{task}-1978-cpu-{label}.{md,err}（task 3 種）。
+#   任意（存在すれば収録）: uptime・skipped 等その他の成果物。
 sme2118_collect_r1r2() {
-  local bench=$1 label=$2 dest=$3 work=$4 f base
+  local bench=$1 label=$2 dest=$3 work=$4 f base task arm rc=0 seen=" "
   mkdir -p "$dest" || return 1
-  for f in "$bench"/results/raw/*"-${label}"* "$bench"/results/raw/*"-${label}-"* \
-    "$bench"/compare-*"-${label}".md "$bench"/compare-*"-${label}".err; do
+  local raw="$bench/results/raw"
+  # 必須成果物の存在確認（JSONL・md・ゲート／終了コードログは空も不可。err は正常時空なので存在のみ）
+  for task in gemm train infer; do
+    for arm in before after; do
+      [ -s "$raw/results-${arm}-${label}-cpu-${task}.jsonl" ] \
+        || { echo "error: 必須成果物が無い／空: results-${arm}-${label}-cpu-${task}.jsonl" >&2; rc=1; }
+    done
+    [ -s "$bench/compare-${task}-1978-cpu-${label}.md" ] \
+      || { echo "error: 必須成果物が無い／空: compare-${task}-1978-cpu-${label}.md" >&2; rc=1; }
+    [ -e "$bench/compare-${task}-1978-cpu-${label}.err" ] \
+      || { echo "error: 必須成果物が無い: compare-${task}-1978-cpu-${label}.err" >&2; rc=1; }
+  done
+  for base in "load-gate-1978-cpu-${label}.log" "compare-exit-1978-cpu-${label}.log"; do
+    [ -s "$raw/$base" ] || { echo "error: 必須成果物が無い／空: $base" >&2; rc=1; }
+  done
+  # 収録（存在するものは必須・任意を問わず全て。1 件でもマスク／書き込みに失敗すれば rc=1）
+  for f in "$raw"/*"-${label}"* "$bench"/compare-*"-${label}".md "$bench"/compare-*"-${label}".err; do
     [ -f "$f" ] || continue
     base=$(basename "$f")
     case "$base" in bench-fandhe-*) continue ;; esac
-    if [ -e "$dest/$base" ]; then continue; fi
-    sme2118_mask "$work" <"$f" >"$dest/$base"
+    case "$seen" in *" $base "*) continue ;; esac
+    seen="${seen}${base} "
+    if ! sme2118_mask "$work" <"$f" >"$dest/$base"; then
+      echo "error: 収録（マスク）に失敗: $base" >&2
+      rm -f "$dest/$base"
+      rc=1
+    fi
   done
+  return "$rc"
 }

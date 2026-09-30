@@ -24,6 +24,7 @@
 | `lib_trees.sh` | 事前登録 sha（`SME2118_REGISTERED_BASE`）を `git archive` して before／after ツリーを作り、指紋差分 1 件・定数行を assert する共有ヘルパー |
 | `orchestrate_m4max.sh` | M4 Max 用（`r4`・`r1 <K>`・`all`・`--dry-run`） |
 | `gb10/orchestrate_gb10.sh` | GB10 用（`<K>`・`--dry-run`）。R0 → RT → R1／R2 |
+| `selftest_collect.sh` | 収録関数 `sme2118_collect_r1r2` の fail-closed 契約の self-test（必須成果物の欠損・空・コピー失敗で非ゼロ。実機不要。`bash selftest_collect.sh`） |
 | `aggregate.py` | 集計（python3 標準ライブラリのみ・`--self-test` 付き）。`aggregate.md` を生成 |
 | （実測時に生成）`m4max/`・`gb10/k{K}/` | 生ログ・JSONL・compare 表・load_gate・env_info（マスク済み） |
 
@@ -79,6 +80,13 @@ python3 aggregate.py . > aggregate.md
 
 `aggregate.md` の値を `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.8 の記入欄へ転記する。
 verdict は実測後に限り更新する。定数の切替・本番化の判断は #2119。
+
+## 判定の順序と失敗の伝播（RULE.txt §13・§14）
+
+- 集計は「入力の完全性（10 セルの集合・件数）→ 判定可能性（run_ab と収録の終了コード 0 記録・全セル記録済み・GB10 は R0 成立）→ 判定」の順で行う。欠損セルが 1 つでもあれば、他セルの後退があっても REJECT／後退あり等は出さず undetermined になる。セル集合の重複・欠落・未知は例外で停止する。
+- 実行側は成果物収録（必須成果物の欠損・空・コピー失敗）を非ゼロで返し、`env_info.txt` の `collect_exit=`（M4 Max）・`rt_result.txt` の `collect rc=`（GB10）に記録する。記録がない系列は判定不能。
+- 検出範囲は存在・非空・コピー成否・終了コード・セル集合の整合まで。計測値そのものの妥当性は保証しない。
+- 検証: `python3 aggregate.py --self-test`・`bash selftest_collect.sh`。
 
 ## 注意
 

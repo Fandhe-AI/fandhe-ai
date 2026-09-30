@@ -96,30 +96,60 @@ REFERENCE_ADOPT = "ADOPT 候補相当（参考・record_only）"
 REFERENCE_REJECT = "REJECT（参考・record_only）"
 
 
-def candidate_verdict(r4_ok, cells, official=True, run_ok=True):
-    """RULE.txt §6・§11。cells は {"reached", "adopt", "reject", "status", "exact", "reason"} の dict 列。
+CHECKSUM_FAIL_REASON = "checksum が複合判定を外れる"
 
-    FAIL（R2: checksum 不一致。停止扱いで ADOPT にも REJECT にも数えない）> REJECT > ADOPT 候補 > undetermined。
-    official は M4 Max の負荷ゲート（R4 格子 5/5 通過 かつ R1 系列 5/5 通過）の結果。§11 により
-    通過しない系列は record_only であり、ADOPT 条件を満たしても "ADOPT 候補" は返さず参考判定
-    （REFERENCE_ADOPT）に落とす（推奨候補の選定対象外にする）。REJECT も同様で、不通過系列の
-    5/5 後退は正式な REJECT ではなく参考（REFERENCE_REJECT）として返し、系列の正式性を判定欄に反映する。
-    run_ok は run_ab_sme_cpu.sh の終了コード 0 の確認結果。非ゼロ・記録なしは計測失敗であり、
-    部分的な JSONL から ADOPT／REJECT を出さず undetermined（判定不能）に倒す（fail-closed）。
+
+def is_checksum_fail(c):
+    """R2 の checksum 不一致（RULE.txt §5）。丸め後の完全一致でない ok セル、または複合判定外れ。
+    checksum の欠損・非数値は「判定不能」であり FAIL に数えない（記録の欠損と不一致を混同しない）。"""
+    if c["status"] == "ok":
+        return not c["exact"]
+    return (c.get("reason") or "").startswith(CHECKSUM_FAIL_REASON)
+
+
+def validate_cells(cells):
+    """入力の完全性（構造）検査。判定関数はどの判定より先にこれを呼ぶ（RULE.txt §13）。
+
+    cells は CELLS と同一のキー集合（task, size, mode）を重複なく持つこと。重複・欠落・未知キーは
+    「記録が読めない」のではなく集計側の入力構造の破綻なので ValueError（fail-closed。値を推定しない）。
     """
-    if not run_ok:
+    keys = [(c["task"], c["size"], c["mode"]) for c in cells]
+    dup = sorted({k for k in keys if keys.count(k) > 1})
+    unknown = sorted(set(keys) - set(CELLS))
+    missing = sorted(set(CELLS) - set(keys))
+    if dup or unknown or missing or len(keys) != len(CELLS):
+        raise ValueError(f"セル集合が RULE.txt §2 の 10 セルと一致しない: dup={dup} unknown={unknown} missing={missing}")
+
+
+def series_determinable(cells):
+    """全 10 セルの記録があり判定可能か（RULE.txt §6・§8・§13）。validate_cells 済みを前提とする。
+
+    判定可能 = 各セルが status ok、または checksum 不一致として記録済み（FAIL の根拠）。
+    それ以外（JSONL 欠損・round 欠損・値不正・parity 不良等）が 1 セルでもあれば False。
+    """
+    return all(c["status"] == "ok" or is_checksum_fail(c) for c in cells)
+
+
+def candidate_verdict(r4_ok, cells, official=True, run_ok=True):
+    """RULE.txt §6・§11・§13。cells は {"reached", "adopt", "reject", "status", "exact", "reason"} の dict 列。
+
+    判定の順序（RULE.txt §13。この順を崩さない）:
+      1. 入力の完全性（validate_cells。違反は ValueError）
+      2. 判定可能性: run_ok（run_ab_sme_cpu.sh の終了コード 0）かつ全 10 セルが記録済み。満たさなければ
+         後段の FAIL／REJECT／ADOPT を一切出さず undetermined（部分データから判定しない）
+      3. FAIL（R2: checksum 不一致。停止扱いで ADOPT にも REJECT にも数えない）> REJECT > ADOPT 候補 > undetermined
+    official は M4 Max の負荷ゲート（R4 格子 5/5 通過 かつ R1 系列 5/5 通過）の結果。§11 により
+    通過しない系列は record_only であり、ADOPT／REJECT とも正式判定にせず参考（REFERENCE_*）へ落とす。
+    """
+    validate_cells(cells)
+    if not run_ok or not series_determinable(cells):
         return "undetermined"
-    for c in cells:
-        if c["status"] == "ok" and not c["exact"]:
-            return "FAIL"
-        if c["status"] != "ok" and "checksum" in (c.get("reason") or ""):
-            return "FAIL"
-    if any(c["reached"] and c["reject"] for c in cells if c["status"] == "ok"):
+    if any(is_checksum_fail(c) for c in cells):
+        return "FAIL"
+    if any(c["reached"] and c["reject"] for c in cells):
         return "REJECT" if official else REFERENCE_REJECT
     if (
         r4_ok
-        and len(cells) == len(CELLS)
-        and all(c["status"] == "ok" for c in cells)
         and all(c["adopt"] for c in cells if c["reached"])
         and not any(c["reject"] for c in cells if not c["reached"])
     ):
@@ -129,7 +159,8 @@ def candidate_verdict(r4_ok, cells, official=True, run_ok=True):
 
 def ac1_ok(cells):
     """AC1 の直接判定欄（RULE.txt §6）。到達セルが 5 round 中央値<=1.00 かつ 5/5<=1.00、かつ全セル checksum 完全一致。"""
-    if len(cells) != len(CELLS) or any(c["status"] != "ok" for c in cells):
+    validate_cells(cells)
+    if any(c["status"] != "ok" for c in cells):
         return False
     return all(c["adopt"] for c in cells if c["reached"]) and all(c["exact"] for c in cells)
 
@@ -141,28 +172,20 @@ def rt_verdict(fail_names):
 
 
 def gb10_verdict(r0_ok, rt, cells, run_ok=True):
-    """RULE.txt §8〜§9（語彙は 1587/gb10/RULE-gb10.txt を継承）。
+    """RULE.txt §8〜§9・§13（語彙は 1587/gb10/RULE-gb10.txt を継承）。
 
-    5/5 一貫の後退セルまたは checksum 不一致 = 後退あり。RT の既知 FAIL 以外 = 後退あり相当（要調査）。
-    R0 不成立・計測失敗（run_ab_sme_cpu.sh の終了コード非ゼロ／記録なしを含む）・round 欠損 = undetermined。
+    判定の順序（candidate_verdict と同じ）: 完全性（validate_cells）→ 判定可能性（run_ab の終了コード 0・
+    R0 成立・全 10 セル記録済み。満たさなければ undetermined）→ 判定。
+    判定: 5/5 一貫の後退セルまたは checksum 不一致 = 後退あり。RT の既知 FAIL 以外 = 後退あり相当（要調査）。
     それ以外 = pass。「全セル 5/5<=1.00」は採らない。
     """
-    if not run_ok:
+    validate_cells(cells)
+    if not run_ok or not r0_ok or not series_determinable(cells):
         return "undetermined"
-    # RULE.txt §8: round 欠損（セル数不足・checksum 起因以外の非 ok セル）は後退判定より先に undetermined とする。
-    # 一部セルの reject／checksum 不一致があっても、別セルが欠損していれば全体の後退判定は確定させない。
-    if len(cells) != len(CELLS) or any(
-        c["status"] != "ok" and "checksum" not in (c.get("reason") or "") for c in cells
-    ):
-        return "undetermined"
-    if any(c["status"] == "ok" and (c["reject"] or not c["exact"]) for c in cells):
-        return "後退あり"
-    if any(c["status"] != "ok" and "checksum" in (c.get("reason") or "") for c in cells):
+    if any(is_checksum_fail(c) or (c["status"] == "ok" and c["reject"]) for c in cells):
         return "後退あり"
     if rt == "regression-suspect":
         return "後退あり相当（要調査）"
-    if not r0_ok or len(cells) != len(CELLS) or any(c["status"] != "ok" for c in cells):
-        return "undetermined"
     return "pass"
 
 
@@ -178,7 +201,14 @@ def evaluate_series(dirpath, label):
         size_set = _CMP._size_set_for("cpu", "full", task)
         b, _ = _CMP.load_rows(paths[0], device="cpu", task=task, size_set=size_set)
         a, _ = _CMP.load_rows(paths[1], device="cpu", task=task, size_set=size_set)
-        per_task[task] = (_CMP.group_by_cell(b), _CMP.group_by_cell(a))
+        gb, ga = _CMP.group_by_cell(b), _CMP.group_by_cell(a)
+        # 未知セル（RULE.txt §2 の 10 セル外）が混入していれば fail-closed（読み飛ばして判定しない）
+        expected = {(s, m) for t, s, m in CELLS if t == task}
+        for g in (gb, ga):
+            extra = sorted(set(g) - expected, key=repr)
+            if extra:
+                raise ValueError(f"{task}: RULE.txt §2 に無い未知セルが JSONL にある: {extra}")
+        per_task[task] = (gb, ga)
     for task, size, mode in CELLS:
         rec = {"task": task, "size": size, "mode": mode, "reached": None, "status": "missing",
                "reason": "JSONL 欠損", "exact": False, "adopt": False, "reject": False,
@@ -277,6 +307,18 @@ def render_cells(cells):
     return "\n".join(lines)
 
 
+def parse_r4_strict(text):
+    """R4 ログ 1 run 分を厳密に解析する。16 格子点 x {NEON, SME} = 32 点を重複・欠落・未知なく
+    ちょうど 1 回ずつ含む場合のみ dict を返し、それ以外（重複行・欠落・未知の格子点）は None。
+    1587 の `parse` は重複行を後勝ちで潰し件数だけ 32 に見えることがあるため、行数まで照合する。"""
+    hits = [_R4.LINE.search(line.strip()) for line in text.splitlines()]
+    keys = [(m.group(1), int(m.group(2)), int(m.group(4))) for m in hits if m]
+    expected = {(v, mn, kk) for v in ("NEON", "SME") for mn in _R4.MN for kk in _R4.KS}
+    if len(keys) != len(expected) or set(keys) != expected:
+        return None
+    return _R4.parse(text)
+
+
 def render_m4max(base):
     out = ["# SME_MIN_K 候補の M4 Max 再実測（イシュー #2118）\n"]
     m4 = Path(base) / "m4max"
@@ -287,8 +329,8 @@ def render_m4max(base):
     for i in range(1, 6):
         f = m4 / f"sme_r4_grid_run{i}.log"
         if f.exists():
-            r = _R4.parse(f.read_text(encoding="utf-8"))
-            if len(r) == 32:
+            r = parse_r4_strict(f.read_text(encoding="utf-8"))
+            if r is not None:
                 runs.append(r)
     if len(runs) == 5:
         ok = {}
@@ -311,7 +353,7 @@ def render_m4max(base):
         out.append("R4 負荷ゲート: " + {True: "5/5 通過（正式）", False: "不通過を含む（record_only）",
                                        None: "ログなし（record_only 扱い）"}[r4_gate])
     else:
-        out.append("## R4 格子\n\n未実測（`sme_r4_grid_run{1..5}.log` が揃っていない）。")
+        out.append("## R4 格子\n\n未実測または不完全（`sme_r4_grid_run{1..5}.log` が揃っていない、または 32 点を重複・欠落なく含まない run がある）。R4 は判定不能。")
     out.append("\n## 候補別判定\n")
     summary = ["| K | R4 | R1 到達セル AC1 欄 | 総合判定 | 系列 |", "|---:|---|---|---|---|"]
     detail = []
@@ -340,7 +382,7 @@ def render_m4max(base):
         if not r4_exec_ok:
             series += "／R4 が異常終了または終了記録なし（判定不能）"
         if not run_ok:
-            series += "／run_ab_sme_cpu.sh 非ゼロ終了または終了コード記録なし（判定不能）"
+            series += "／run_ab_sme_cpu.sh／成果物収録が非ゼロ終了または終了コード記録なし（判定不能）"
         summary.append(f"| {k} | {'成立' if r4c else '不成立/未計測'} | {'成立' if ac1_ok(cells) else '不成立'} | {v} | {series} |")
         detail.append(f"### K={k}\n\n格子点: {pts}\n\n{render_cells(cells)}\n")
     out += summary + [""] + detail
@@ -351,19 +393,28 @@ def render_m4max(base):
 
 
 def run_ab_ok_m4max(env_info_path):
-    """M4 Max: env_info.txt の `run_ab_exit=N` が 0 か。ファイル・記録なしは None（判定不能扱い）。"""
+    """M4 Max: env_info.txt の `run_ab_exit=N` と `collect_exit=N`（成果物収録の終了コード。lib_trees.sh の
+    sme2118_collect_r1r2）が**両方とも記録され 0** か。片方でも非ゼロなら False、ファイル・どちらかの記録なしは
+    None（判定不能扱い。RULE.txt §13）。"""
     if not os.path.exists(env_info_path):
         return None
-    m = re.search(r"run_ab_exit=(\d+)", Path(env_info_path).read_text(encoding="utf-8"))
-    return None if m is None else int(m.group(1)) == 0
+    text = Path(env_info_path).read_text(encoding="utf-8")
+    return _all_zero([re.search(r"run_ab_exit=(\d+)", text), re.search(r"collect_exit=(\d+)", text)])
 
 
 def run_ab_ok_gb10(rt_result_path):
-    """GB10: rt_result.txt の `run_ab rc=N` が 0 か。ファイル・記録なしは None（判定不能扱い）。"""
+    """GB10: rt_result.txt の `run_ab rc=N` と `collect rc=N` が両方とも記録され 0 か。意味は run_ab_ok_m4max と同じ。"""
     if not os.path.exists(rt_result_path):
         return None
-    m = re.search(r"^run_ab rc=(\d+)", Path(rt_result_path).read_text(encoding="utf-8"), re.M)
-    return None if m is None else int(m.group(1)) == 0
+    text = Path(rt_result_path).read_text(encoding="utf-8")
+    return _all_zero([re.search(r"^run_ab rc=(\d+)", text, re.M), re.search(r"^collect rc=(\d+)", text, re.M)])
+
+
+def _all_zero(matches):
+    """終了コード記録の正規表現一致列を評価する。非ゼロがあれば False・記録欠けがあれば None・全て 0 なら True。"""
+    if any(m is not None and int(m.group(1)) != 0 for m in matches):
+        return False
+    return None if any(m is None for m in matches) else True
 
 
 def _parse_rt(path):
@@ -409,7 +460,7 @@ def render_gb10(base):
                   None: "参考（外側ゲートログなし）"}[gate]
         n = sum(1 for c in cells if c.get("all_le_1"))
         if not run_ok:
-            series += "／run_ab_sme_cpu.sh 非ゼロ終了または終了コード記録なし"
+            series += "／run_ab_sme_cpu.sh／成果物収録が非ゼロ終了または終了コード記録なし"
         rows.append(f"| {k} | {'成立' if r0 else '不成立'} | {rt} | {n} | {v} | {series} |")
         detail.append(f"### K={k}\n\n{render_cells(cells)}\n")
     return "\n".join(out + rows + [""] + detail)
@@ -512,17 +563,25 @@ def self_test():
         assert candidate_verdict(True, cells, official=False, run_ok=False) == "undetermined"
         assert gb10_verdict(True, "pass", cells, run_ok=False) == "undetermined"
         _p = os.path.join(td, "env_ok.txt")
-        Path(_p).write_text("label=x run_ab_exit=0\n")
+        Path(_p).write_text("label=x run_ab_exit=0 collect_exit=0\n")
         assert run_ab_ok_m4max(_p) is True
-        Path(_p).write_text("label=x run_ab_exit=1\n")
+        Path(_p).write_text("label=x run_ab_exit=1 collect_exit=0\n")
         assert run_ab_ok_m4max(_p) is False
+        Path(_p).write_text("label=x run_ab_exit=0 collect_exit=1\n")  # 収録失敗（コピー失敗・成果物欠損）
+        assert run_ab_ok_m4max(_p) is False
+        Path(_p).write_text("label=x run_ab_exit=0\n")  # 収録の終了コード記録なし → 判定不能
+        assert run_ab_ok_m4max(_p) is None
         Path(_p).write_text("label=x\n")
         assert run_ab_ok_m4max(_p) is None
         assert run_ab_ok_m4max(os.path.join(td, "nonexistent")) is None
-        Path(_p).write_text("RT rc=101\nrun_ab rc=0\n")
+        Path(_p).write_text("RT rc=101\nrun_ab rc=0\ncollect rc=0\n")
         assert run_ab_ok_gb10(_p) is True
-        Path(_p).write_text("RT rc=101\nrun_ab rc=2\n")
+        Path(_p).write_text("RT rc=101\nrun_ab rc=2\ncollect rc=0\n")
         assert run_ab_ok_gb10(_p) is False
+        Path(_p).write_text("RT rc=101\nrun_ab rc=0\ncollect rc=1\n")
+        assert run_ab_ok_gb10(_p) is False
+        Path(_p).write_text("RT rc=101\nrun_ab rc=0\n")
+        assert run_ab_ok_gb10(_p) is None
         # (c) 非到達セル（infer）が 5/5 >1.00 → 総合は ADOPT にならない
         rc = _uniform()
         rc[("infer", 64, "fresh")] = [1.01] * 5
@@ -567,6 +626,77 @@ def self_test():
         assert gb10_verdict(True, "pass", cg3) == "undetermined"
         # (j) R4 実行不成立でも R1 の REJECT は保留されない（RULE.txt §6・§13）。R4 不成立のみで REJECT なしなら undetermined
         assert candidate_verdict(False, apply_k(evaluate_series(os.path.join(td, "d"), "L"), 256)) == "REJECT"
+        # RULE.txt §13: 完全性・判定可能性は REJECT／FAIL／ADOPT より先（1 セル欠損 + 他セル後退 → REJECT にしない）
+        cd = apply_k(evaluate_series(os.path.join(td, "d"), "L"), 256)
+        assert candidate_verdict(True, cd) == "REJECT"
+        for i in range(len(cd)):
+            cm = [dict(x) for x in cd]
+            cm[i].update(status="missing", reason="JSONL 欠損", ratios=None)
+            if cm[i]["reached"] and cm[i]["reject"]:
+                cm[i]["reject"] = False  # 後退セル自身が欠損する場合も含め、別の後退セルは残す
+            assert candidate_verdict(True, cm) == "undetermined", i
+            assert candidate_verdict(True, cm, official=False) == "undetermined", i
+        cm = [dict(x) for x in cd]
+        cm[-1].update(status="undeterminable", reason="before=4 件・after=5 件（各ちょうど 5 件を要求）")
+        assert candidate_verdict(True, cm) == "undetermined"
+        # checksum 不一致セル + 別セル欠損 → FAIL にも REJECT にもせず undetermined
+        cf = apply_k(evaluate_series(os.path.join(td, "e"), "L"), 128)
+        assert candidate_verdict(True, cf) == "FAIL"
+        cfm = [dict(x) for x in cf]
+        cfm[0].update(status="missing", reason="JSONL 欠損", ratios=None)
+        assert candidate_verdict(True, cfm) == "undetermined"
+        # checksum の欠損・非数値は不一致（FAIL）ではなく判定不能
+        cck = [dict(x) for x in cd]
+        cck[0].update(status="undeterminable", reason="checksum 欠損または非数値の行あり")
+        assert candidate_verdict(True, cck) == "undetermined"
+        # GB10 も同順序: 一部セル後退 + 別セル欠損 → undetermined・R0 不成立も判定より先
+        assert gb10_verdict(True, "pass", cg2) == "後退あり"
+        assert gb10_verdict(True, "pass", cg3) == "undetermined"
+        assert gb10_verdict(False, "regression-suspect", cg2) == "undetermined"
+        cgf = [dict(x) for x in cf]
+        cgf[3].update(status="missing", reason="JSONL 欠損", ratios=None)
+        assert gb10_verdict(True, "pass", cgf) == "undetermined"
+        # ファイル起点: 後退セルがあり、別タスクの JSONL 1 round 分が欠けた系列は undetermined
+        rdm = _uniform()
+        rdm[("gemm", 512, "fresh")] = [1.03] * 5
+        _write_series(os.path.join(td, "dm"), "L", rdm)
+        fa = Path(td, "dm", "results-after-L-cpu-infer.jsonl")
+        fa.write_text("".join(fa.read_text().splitlines(True)[:-1]))
+        cdm = apply_k(evaluate_series(os.path.join(td, "dm"), "L"), 256)
+        assert any(x["status"] != "ok" for x in cdm) and any(x["reject"] for x in cdm if x["status"] == "ok")
+        assert candidate_verdict(True, cdm) == "undetermined"
+        # 重複行（1 セル 6 件）も判定不能
+        fb = Path(td, "dm", "results-before-L-cpu-train.jsonl")
+        lines = fb.read_text().splitlines(True)
+        fb.write_text("".join(lines) + lines[0])
+        cdd = apply_k(evaluate_series(os.path.join(td, "dm"), "L"), 256)
+        assert any(x["status"] != "ok" and x["task"] == "train" for x in cdd)
+        assert candidate_verdict(True, cdd) == "undetermined"
+        # 構造の破綻（重複・欠落・未知セル）は例外（fail-closed）。判定関数・AC1 欄のいずれでも
+        bad_sets = {
+            "dup": cd + [dict(cd[0])],
+            "missing": cd[:-1],
+            "unknown": [dict(cd[0], size=4096)] + cd[1:],
+            "dup_replace": [dict(cd[0])] + [dict(cd[0])] + cd[2:],
+        }
+        for name, bad in bad_sets.items():
+            for fn in (lambda c: candidate_verdict(True, c), lambda c: gb10_verdict(True, "pass", c), ac1_ok):
+                try:
+                    fn(bad)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(f"構造破綻 {name} が例外にならない")
+        # R4 ログの厳密解析: 32 点ちょうど 1 回ずつのみ受理。重複行・欠落・未知格子点は None
+        r4txt = "".join(
+            f"variant={v}(X) size=({mn},{mn},{kk}) median_gflops=1.0\n"
+            for v in ("NEON", "SME") for mn in _R4.MN for kk in _R4.KS
+        )
+        assert parse_r4_strict(r4txt) is not None and len(parse_r4_strict(r4txt)) == 32
+        first = r4txt.splitlines(True)[0]
+        assert parse_r4_strict(r4txt + first) is None  # 重複（後勝ちで 32 件に見える）
+        assert parse_r4_strict("".join(r4txt.splitlines(True)[1:])) is None  # 欠落
+        assert parse_r4_strict("".join(r4txt.splitlines(True)[1:]) + "variant=SME(X) size=(999,999,32) median_gflops=1.0\n") is None  # 未知
         # load ゲートログの解釈
         p = os.path.join(td, "gate.log")
         Path(p).write_text("threshold=8.0 rule_threshold=8.0 series=official\n" +
