@@ -1,0 +1,70 @@
+RULE fixed-at-utc: 2026-09-30T02:29:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #2107 CUDA GEMM reuse readback 宛先確保の帰属検証（Layer B 計装）
+doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §13
+背景: 同 doc §12.5 の Layer A matmul と Σ Layer B の未説明分（N=1024 1.235 ms・
+      N=2048 4.254 ms・N=4096 約 18 ms）のうち、readback の宛先確保・事前タッチが
+      占める割合を定量化する。修正施策は本イシューの対象外。
+
+[実行方法]
+- 1 run = (N, 腕) ごとに独立プロセスで 1 回。テストバイナリ
+  crates/backend-cuda/src/readback_attribution_diag_tests_2107.rs を
+  `--ignored --exact <test> --nocapture --test-threads=1` で起動し、
+  出力は JSONL（プレフィックス DIAG_JSON）。
+- N = 1024 / 2048 / 4096。腕 = clone_dtoh_legacy_to_vec /
+  clone_dtoh_borrowed_keep_alive / clone_dtoh_borrowed_dummy_alloc_free /
+  pretouched_fresh_split の 4 腕 + 補助対照 pretouched_fresh_production。
+- run1〜run5 の 5 run。run ごとに腕の実行順を巡回させる。
+  差し替え・追加起動・既存 run ファイルの上書きはしない。
+- 1 プロセスあたり warmup 20 + 計測 20 試行。単位は μs。
+
+[同一セッション Layer A]
+- 同じセッションで bench-fandhe --task gemm --device cuda --mode reuse --phases
+  （fandhe-ai =0.9.0 ピン・既存コマンド）を N ごとに 5 run 実行する。
+- 計測時点で git diff v0.9.0..HEAD -- crates/backend-cuda/src/memory.rs
+  crates/backend-cuda/src/gemm.rs 'crates/backend-cuda/src/kernels*.rs' が空で
+  あることを確認し env_info.txt に記録する。差分があれば Layer A と Layer B は
+  同一コードでないため帰属判定は「無効（参考扱い）」とする。
+
+[代表値]
+- 各区間は run ごとの median（20 試行）を採り、5 run 間の中央値と min-max を報告する。
+
+[checksum 規則（hard・fail-closed）]
+- 各 (N, 腕) で全 run の checksum_bits が一致すること。
+- 同一 N の全腕（補助を含む）で checksum_bits が一致すること。
+- Layer A の checksum が既知値（N=1024 -1855.597736 / N=2048 -6016.774008 /
+  N=4096 -25768.747284。§12.3）と一致すること。
+- 1 件でも不一致なら系列は無効（集計は exit != 0）。
+
+[帰属の定義（同一セッションの値のみ）]
+- residual = LayerA.matmul - Sum_matmul_equiv(clone_dtoh_borrowed_keep_alive)
+  （Sum_matmul_equiv = h2d_a+h2d_b+alloc_c+launch_issue+kernel_wait+readback。host_read を除く）。
+- alloc_fill_share = (pretouched_fresh_split.dest_alloc + pretouch_fill) / residual
+  - >= 0.80 : 宛先確保・事前タッチへの帰属を支持
+  - <  0.50 : 棄却（主因は別）
+  - それ以外: 未確定
+  - residual <= 0: 未説明分非再現。帰属は行わない
+- 補助指標（記録のみ）:
+  gap_ratio = Sum_matmul_equiv(pretouched_fresh_split) / LayerA.matmul、
+  clone_dtoh 腕の readback - pretouched_fresh_split の (d2h_issue+d2h_sync)。
+
+[計装健全性（record_only）]
+- |(dest_alloc+pretouch_fill+d2h_issue+d2h_sync) - pretouched_fresh_production.readback_total|
+  <= 5% x readback_total を記録する。超過時は帰属判定に「分解歪みあり」を付記する。
+
+[非後退（record_only）]
+- ratio = pretouched_fresh_split.sum_readback / clone_dtoh_legacy_to_vec.sum_readback
+  を記録する。本イシューは本番修正を出荷しないため採否ゲートにしない。
+- N=4096 の clone_dtoh 二峰性（§12.4）は q1/q3/min/max の記録のみ。
+
+[専有ゲート]
+- gb10: 各 run 開始前に load1 < 1.0 かつ GPU 利用率 0% を 30 秒間隔・最大 30 分待つ。
+  通過しない run があれば系列を参考扱いとする（load_gate.log）。
+- x86 smoke: record_only。GB10 実測の代替ではない。
+
+[対象外（再実行しない）]
+- #1436 §7 の MALLOC_MMAP_THRESHOLD_ 固定確証実験
+- #1437 §13.3 の Layer A ゲート
+- PretouchedReusedDest（候補 A）の再評価
+
+[マスク]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。
