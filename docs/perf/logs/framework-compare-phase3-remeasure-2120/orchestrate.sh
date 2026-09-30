@@ -8,6 +8,7 @@
 #   ノード上で実行する（Mac から HEAD_TREE／PRE_TREE を転送後）。
 # 使い方: HEAD_TREE=<main HEAD ツリー> PRE_TREE=<65035979 ツリー> LOGD=<出力先> orchestrate.sh <gb10|m4max>
 #   HEAD_TREE／PRE_TREE は各々ルートに .rev-stamp（空不可）が必要。PRE_TREE の stamp は 65035979 で始まること。
+#   3 変数とも相対パス可（起動時の cwd 基準で解決し、framework-compare へ cd する前に pwd -P で絶対化する）。
 #   SMOKE=1: 1 run・N=256 の gemm のみ・ゲート省略・candle／burn なしの疎通確認（LOGD 必須。結果は判定に使わない。
 #   env_info.txt の smoke=1・gate.log の smoke-skip により aggregate.py の前提ゲートが正式集計を拒否する）。
 # 専有ゲート（RULE.txt「計測」）: GB10 は正式計測の前提条件で、20 回とも不通過ならその run を計測せず非 0 で停止する
@@ -25,7 +26,23 @@ HEAD_TREE="${HEAD_TREE:?HEAD_TREE を指定（main HEAD ツリー）}"
 PRE_TREE="${PRE_TREE:?PRE_TREE を指定（65035979 ツリー）}"
 LOGD="${LOGD:?LOGD を指定（出力先ディレクトリ）}"
 
-# A03 インジェクション対策: パスは TOML 文字列（--config）へ埋め込むため '"' と '\' を含む値を拒否する。
+# パスの絶対化（PR #2466 レビュー）: 後段で framework-compare（${FC}）へ cd するため、cd の前後で意味が変わるパスを
+# ここで一度だけ物理絶対パス（pwd -P。存在確認を兼ねる）へ正規化する。対象は HEAD_TREE・PRE_TREE・LOGD（入力）と
+# 本スクリプトの配置ディレクトリ（$0 由来。switches.sh の解決に使う）。BUILD_LOG・GATE_LOG・FC・run{r}/ 等は
+# これらから導出するため正規化後は cwd に依存しない。相対のままだと switches.sh の引数・--config patch のパス・
+# ログ出力先が cd 後に別の場所を指し、build.log の mask（cargo は絶対パスを出す）も効かない。
+# CDPATH が設定されていると cd が解決先を標準出力へ出し値が二重になるため、CDPATH を空にして cd する。
+abs_dir() { (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P); }
+SCRIPT_DIR="$(abs_dir "$(dirname -- "$0")")" || { echo "ERROR: 本スクリプトの配置ディレクトリを解決できない: $0" >&2; exit 1; }
+for name in HEAD_TREE PRE_TREE; do
+  resolved="$(abs_dir "${!name}")" || { echo "ERROR: ${name} のディレクトリが無い: ${!name}" >&2; exit 1; }
+  printf -v "${name}" '%s' "${resolved}"
+done
+mkdir -p "${LOGD}" || exit 1
+LOGD="$(abs_dir "${LOGD}")" || { echo "ERROR: LOGD を解決できない" >&2; exit 1; }
+
+# A03 インジェクション対策: パスは TOML 文字列（--config）へ埋め込むため '"' と '\' を含む値を拒否する
+# （正規化後の値＝実際に埋め込む値を検査する）。
 for v in "${HEAD_TREE}" "${PRE_TREE}" "${LOGD}"; do
   if [[ "${v}" == *'"'* || "${v}" == *'\'* ]]; then
     echo "ERROR: パスに '\"' または '\\' を含めることはできない" >&2; exit 1
@@ -89,7 +106,8 @@ assert_lock() {
 echo "Cargo.lock sha256(before)=${LOCK_SHA0}" >> "${BUILD_LOG}"
 
 # --- スイッチ既定値スナップショット（腕 B は Phase 3 導入前のため欠落許容）---
-SW="$(dirname "$0")/switches.sh"
+# SCRIPT_DIR は cd 前に絶対化済み（$0 が相対でも cd 後に FC 基準で誤解決しない）
+SW="${SCRIPT_DIR}/switches.sh"
 [[ -x "${SW}" ]] || SW="${HEAD_TREE}/docs/perf/logs/framework-compare-phase3-remeasure-2120/switches.sh"
 bash "${SW}" "${PRE_TREE}" --allow-missing > "${LOGD}/switches-B.txt" || { echo "ERROR: switches.sh(B) 失敗" >&2; exit 1; }
 bash "${SW}" "${HEAD_TREE}" > "${LOGD}/switches-C.txt" || { echo "ERROR: switches.sh(C) 失敗。計測を開始しない" >&2; exit 1; }

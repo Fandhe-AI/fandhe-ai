@@ -12,6 +12,9 @@
     一致しなければ停止する（集計後の差し替え・腕の取り違えを拒否）。集計 JSON の status が formal でなければ停止する。
   - `--gb-extra`／`--gb-py` は Python FW（PyTorch／TensorFlow／SciPy）行のみ受理する（後勝ちマージで fandhe-ai・candle・
     burn の集計値を上書きさせない）。行は aggregate.py と同じ厳格読み取り（NaN・重複キー・型）で検査する。
+    同一セルの重複行は拒否する。例外は PY_DOCUMENTED_OVERRIDES（RULE.txt「Python FW 行の文書化済み上書き」追記）に
+    列挙した 1 キーだけで、同一ファイル内に「上書き元 → 上書き先」の順で 2 行あり、両行が記録済みの sha256 と一致する
+    ときに限り後着行を採用する（#1988 の後勝ち追記と同じ意味）。採用・破棄した行は標準出力と GB10 計測条件注記に残す。
   - 計測条件注記へ集計 JSON の専有ゲート結果（M4 Max の不通過 run を含む）を自動で併記する。
   - `--m4-prev`／`--gb-prev`／`--prev-label` は使わない（指定すると停止）。
 - `--legacy-1988`: gen_1988.py と同じ入力・出力（`--prev-label`・`--m4-prev`／`--gb-prev` で前比を自前計算）。
@@ -23,6 +26,7 @@
 呼び出し元: aggregate.py の派生 JSONL と集計 JSON（README・docs/perf/framework-compare-phase3-remeasure.md §5）。
 """
 import argparse
+import hashlib
 import json
 import html
 import os
@@ -35,10 +39,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import aggregate as AGGMOD  # noqa: E402
 
-REPO = Path('<repo>')
-RAW = REPO / 'scripts/bench/framework-compare/results/raw'
-DGX08 = REPO / 'docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx'
-
 # docs/perf/logs ディレクトリ。本ファイルは docs/perf/logs/<2120 dir>/scoreboard/gen_2120.py にあるため
 # parents[0]=scoreboard, parents[1]=2120 dir, parents[2]=logs。parent の段数に依らず名前で検証して誤読・移設を検出する。
 LOGS_DIR = Path(__file__).resolve().parents[2]
@@ -46,6 +46,12 @@ if LOGS_DIR.name != 'logs' or LOGS_DIR.parent.name != 'perf':
     raise SystemExit(f'error: LOGS_DIR が docs/perf/logs ではありません（{LOGS_DIR}）。本スクリプトの配置を確認してください')
 DEFAULT_STYLE = LOGS_DIR / 'framework-compare-0.9.0-remeasure' / 'scoreboard' / 'style.css'
 DEFAULT_BODY = Path(__file__).resolve().with_name('body_2120.html')
+# --legacy-1988 の既定入力（--m4-prev／--gb-prev 省略時）も CSS と同じく LOGS_DIR 基点で解決する（cwd に依存させない）。
+# gen_1988.py は REPO = Path('<repo>') のプレースホルダのままで、既定値は cwd 相対の実在しないパスになっていた。
+# LOGS_DIR.parents[2] = リポジトリルート（parents[0]=docs/perf・[1]=docs・[2]=ルート。self-test の c_legacy と同じ基点）。
+REPO = LOGS_DIR.parents[2]
+RAW = REPO / 'scripts/bench/framework-compare/results/raw'
+DGX08 = LOGS_DIR / 'lowlayer-diagnosis-2026-09-12' / 'dgx'
 
 
 
@@ -88,6 +94,37 @@ def _require_file(path, flag):
 
 PY_FWS = ('pytorch', 'tensorflow', 'scipy')  # --gb-extra／--gb-py で受理する FW（RULE.txt: Python FW 行は既存値を流用）
 HERE = Path(__file__).resolve()
+# RULE.txt が --gb-py に指定する規定の入力（#1988 の Python FW 流用ファイル。self-test で実物を読む）
+REAL_GB_PY = LOGS_DIR / 'framework-compare-precision-class-remeasure-1988' / 'results-dgx-py-precision-class.jsonl'
+
+
+def _line_sha256(line):
+    """JSONL 1 行（前後の空白を除いた本文の UTF-8 バイト列）の sha256。PY_DOCUMENTED_OVERRIDES の照合に使う。"""
+    return hashlib.sha256(line.encode('utf-8')).hexdigest()
+
+
+# --gb-py の文書化済み上書き（後勝ち）許可リスト。RULE.txt「Python FW 行の文書化済み上書き」追記と 1 対 1 で対応する
+# （self-test が RULE.txt の記載・出典ファイルの実物と照合する）。
+# 背景: RULE.txt が --gb-py に指定する #1988 の results-dgx-py-precision-class.jsonl は、#1988 README のとおり
+#   results-dgx-py-0.8.0.jsonl（2026-09-12 セッション）へ PyTorch cpu gemm N=4096 の #1988 採用 run 行（2026-09-18
+#   セッション・gb10/run5/py.jsonl）を末尾追記したもので、gen_1988.py の index（後勝ち）で追記行が置き換える前提の
+#   ファイルである（#1988 aggregate.py 冒頭 docstring・TARGET_PY）。同キーの行が 5 行目と 29 行目に 2 行ある。
+# 識別方式: 行に計測日・セッションのフィールドは無く、2 行は version・checksum・parity 系まで同値で median_s／q1_s／q3_s／
+#   gflops だけが異なる。日付で決められないため、出典の実物と byte 一致する行本文の sha256 を上書き元・上書き先の
+#   両方について固定し、「同一ファイル内に上書き元 → 上書き先の順でちょうど 2 行」の場合だけ後着行を採用する。
+#   それ以外（許可リスト外のキー・3 行以上・順序逆転・どちらかの sha256 不一致・同一内容・ファイルをまたぐ重複）は拒否する。
+PY_DOCUMENTED_OVERRIDES = {
+    ('pytorch', 'gemm', 'cpu', 4096, 'fresh'): dict(
+        superseded_sha256='c40eca05edc8b1c5ccbdf533ba7bffdf889cefd7f7ee0c512ec1c9369a73fa9e',
+        superseded_src='lowlayer-diagnosis-2026-09-12/dgx/results-dgx-py-0.8.0.jsonl 5 行目・2026-09-12 セッション',
+        superseding_sha256='e7061be8ba151ce7f0c61357d5018059383bd8d50d074110e2f6f396e00d4c6f',
+        superseding_src='framework-compare-precision-class-remeasure-1988/gb10/run5/py.jsonl・#1988 採用 run・2026-09-18 セッション',
+    ),
+}
+for _k, _v in PY_DOCUMENTED_OVERRIDES.items():
+    if _v['superseded_sha256'] == _v['superseding_sha256']:  # 同一内容の「上書き」は識別不能として許可しない
+        raise SystemExit(f'error: PY_DOCUMENTED_OVERRIDES {_k}: 上書き元と上書き先の sha256 が同一')
+PY_OVERRIDES_APPLIED = []  # load_py が採用・破棄した行の記録（標準出力・GB10 計測条件注記へ出す）
 
 
 def _die(msg):
@@ -257,6 +294,67 @@ def _self_test():
                 assert not ok(r) and hint in r.stderr, r.stderr
             case(f'PY-{tag}（--gb-py に不正行）→ 停止', c_py)
 
+        # --gb-py の文書化済み上書き（RULE.txt 追記）: 規定の実ファイルそのものを正式モードで読めること・許可外の重複と
+        # 識別できない後着行は拒否すること・許可リストの定数が出典の実物と RULE.txt の記載に一致すること
+        real_lines = [l.strip() for l in open(REAL_GB_PY) if l.strip()]
+        ov_key = ('pytorch', 'gemm', 'cpu', 4096, 'fresh')
+        ov = PY_DOCUMENTED_OVERRIDES[ov_key]
+
+        def c_real_py():
+            out, _, base = prep('realpy')
+            r = run(args_for(out, str(REAL_GB_PY), base))
+            assert ok(r), r.stderr
+            note = [l for l in r.stdout.splitlines() if l.startswith('py-override ')]
+            assert len(note) == 1 and 'results-dgx-py-precision-class.jsonl:29' in note[0] and \
+                'results-dgx-py-precision-class.jsonl:5' in note[0] and note[0].index(':29') < note[0].index(':5（'), note
+            h = open(os.path.join(base, 'out-C.html')).read()
+            # 採用は後着行（2026-09-18・628 GF）、破棄は 5 行目（2026-09-12・501 GF）。判定不能セル（parity 1 要素）として表示される
+            assert '218.83 <small>/ 628 GF</small>' in h and '274.60 <small>/ 501 GF</small>' not in h, 'PyTorch CPU N=4096 の採用行が後着行でない'
+            assert '文書化済み上書き' in h and 'results-dgx-py-precision-class.jsonl:29' in h and str(LOGS_DIR) not in h
+        case('PYOV-規定の --gb-py 実ファイル（#1988）を正式モードで読み、後着行の採用・破棄を記録', c_real_py)
+
+        def c_ov_consts():
+            src_new = LOGS_DIR / 'framework-compare-precision-class-remeasure-1988' / 'gb10' / 'run5' / 'py.jsonl'
+            src_old = LOGS_DIR / 'lowlayer-diagnosis-2026-09-12' / 'dgx' / 'results-dgx-py-0.8.0.jsonl'
+            assert _line_sha256(open(src_new).read().strip()) == ov['superseding_sha256'], '上書き先の sha256 が出典と不一致'
+            assert _line_sha256([l.strip() for l in open(src_old) if l.strip()][4]) == ov['superseded_sha256'], '上書き元の sha256 が出典と不一致'
+            assert (_line_sha256(real_lines[4]), _line_sha256(real_lines[28])) == (ov['superseded_sha256'], ov['superseding_sha256'])
+            rule = (HERE.parents[1] / 'RULE.txt').read_text()
+            assert rule.count('上書き許可キー:') == len(PY_DOCUMENTED_OVERRIDES), '許可リストと RULE.txt の件数が不一致'
+            for k, v in PY_DOCUMENTED_OVERRIDES.items():
+                assert f'上書き許可キー: {" ".join(map(str, k))}' in rule, f'RULE.txt に許可キー {k} の記載がない'
+                assert v['superseded_sha256'] in rule and v['superseding_sha256'] in rule, 'RULE.txt に sha256 の記載がない'
+        case('PYOV-許可リスト定数が出典の実物（#1988 run5・0.8.0 py）と RULE.txt の記載に一致', c_ov_consts)
+
+        def py_variant(tag, lines, extra_lines=None):
+            out, _, base = prep(tag)
+            py = os.path.join(base, 'real-variant.jsonl')
+            open(py, 'w').write('\n'.join(lines) + '\n')
+            a = args_for(out, py, base)
+            if extra_lines is not None:
+                ex = os.path.join(base, 'extra.jsonl')
+                open(ex, 'w').write('\n'.join(extra_lines) + '\n')
+                a += ['--gb-extra', ex]
+            return run(a)
+
+        bumped = real_lines[28].replace('"median_s": 0.2188275649677962', '"median_s": 0.2188275649677963')
+        assert bumped != real_lines[28]
+        for tag, lines, extra, hint in (
+            # 許可リスト外のキーの重複（実ファイルに別セルの重複行を足す）
+            ('ovnotlisted', real_lines + [real_lines[0]], None, '許可リスト外'),
+            # 許可キーでもファイルをまたぐ重複（--gb-py が採用した後着行を --gb-extra にも置く）
+            ('ovxfile', real_lines, [real_lines[28]], '別ファイル'),
+            # 許可キーだが後着行が識別できない: 同一内容・値の改変・順序逆転・3 行目
+            ('ovsame', real_lines[:28] + [real_lines[4]], None, '識別できない'),
+            ('ovbump', real_lines[:28] + [bumped], None, '識別できない'),
+            ('ovswap', real_lines[:4] + [real_lines[28]] + real_lines[5:28] + [real_lines[4]], None, '識別できない'),
+            ('ovtriple', real_lines + [real_lines[28]], None, '識別できない'),
+        ):
+            def c_ov(tag=tag, lines=lines, extra=extra, hint=hint):
+                r = py_variant(tag, lines, extra)
+                assert not ok(r) and '重複' in r.stderr and hint in r.stderr, r.stderr
+            case(f'PYOV-{tag}（許可外・識別不能な重複）→ 停止', c_ov)
+
         def c_need_agg():
             out, py, base = prep('needagg')
             a = args_for(out, py, base)
@@ -309,7 +407,23 @@ def _self_test():
             assert r88.returncode == 0 and r20.returncode == 0, (r88.stderr, r20.stderr)
             assert open(os.path.join(base, 'a.html'), 'rb').read() == open(os.path.join(base, 'b.html'), 'rb').read(), 'HTML が byte 同一でない'
             assert r88.stdout == r20.stdout, '標準出力が byte 同一でない'
-        case('LEGACY-gen_1988.py と HTML・標準出力が byte 同一', c_legacy)
+            # 既定の比較元（--m4-prev／--gb-prev 省略）は LOGS_DIR 基点で解決され cwd に依存しない: 別の cwd から
+            # 相対パス（--out）で実行しても明示指定時と byte 同一
+            drop = {'--m4-prev': 1, '--gb-prev': 3}
+            no_prev, i = [], 0
+            while i < len(common):
+                if common[i] in drop:
+                    i += 1 + drop[common[i]]
+                    continue
+                no_prev.append(common[i])
+                i += 1
+            r20d = subprocess.run([sys.executable, str(HERE)] + no_prev
+                                  + ['--legacy-1988', '--body', str(d88 / 'scoreboard' / 'body_1988.html'), '--prev-label', '0.8.0',
+                                     '--out', 'c.html'], capture_output=True, text=True, cwd=base)
+            assert r20d.returncode == 0, r20d.stderr
+            assert open(os.path.join(base, 'c.html'), 'rb').read() == open(os.path.join(base, 'a.html'), 'rb').read(), '既定の比較元で HTML が変わった'
+            assert r20d.stdout == r88.stdout
+        case('LEGACY-gen_1988.py と HTML・標準出力が byte 同一（既定の比較元・別 cwd でも同一）', c_legacy)
 
         for cid, fn in cases:
             fn()
@@ -402,33 +516,72 @@ def load_agg(path, machine, main_path, arm):
 
 
 def load_py(paths):
-    """--gb-py／--gb-extra: Python FW 行のみを aggregate.py と同じ厳格読み取りで受理する（後勝ちマージで集計値を上書きさせない）。"""
-    seen, out = set(), []
+    """--gb-py／--gb-extra: Python FW 行のみを aggregate.py と同じ厳格読み取りで受理する（後勝ちマージで集計値を上書きさせない）。
+    同一セルの重複は拒否する。PY_DOCUMENTED_OVERRIDES のキーに限り、同一ファイル内の上書き元 → 上書き先の 2 行が
+    記録済みの sha256 と一致するときだけ後着行を採用し、採用・破棄を PY_OVERRIDES_APPLIED へ記録する。"""
+    seen, out = {}, []
     for p in paths:
         try:
             rows = AGGMOD.load_rows(p)
         except ValueError as e:
             _die(f'Python FW JSONL を読めない: {e}')
-        for r, _ in rows:
+        # load_rows は空行以外の全行（--phases 行を含む）を順に返すので、空行以外の行番号と 1 対 1 に対応する
+        nos = [no for no, l in enumerate(open(p), 1) if l.strip()]
+        assert len(nos) == len(rows), p
+        groups = {}  # このファイル内のセル → [(row, line, 行番号)]（出現順）
+        for (r, line), no in zip(rows, nos):
             if r.get('framework') not in PY_FWS:
                 _die(f'{p}: Python FW 以外の行（{r.get("framework")!r}）。fandhe-ai・candle・burn は集計の派生 JSONL のみから取る')
             if r.get('task') in AGGMOD.PHASE_TASKS or 'phase' in r:
                 continue
             k = key(r)
             if k in seen:
-                _die(f'{p}: セル {k} が重複')
-            seen.add(k)
-            out.append(r)
+                _die(f'{p}:{no}: セル {k} が重複（{seen[k]} と別ファイル。ファイルをまたぐ上書きは許可しない）')
+            groups.setdefault(k, []).append((r, line, no))
+        for k, g in groups.items():
+            if len(g) == 1:
+                seen[k] = f'{p}:{g[0][2]}'
+                out.append(g[0][0])
+                continue
+            spec = PY_DOCUMENTED_OVERRIDES.get(k)
+            if spec is None:
+                _die(f'{p}: セル {k} が重複（{"・".join(str(x[2]) for x in g)} 行目）。文書化済みの上書き許可リスト外')
+            if (len(g) != 2 or _line_sha256(g[0][1]) != spec['superseded_sha256']
+                    or _line_sha256(g[1][1]) != spec['superseding_sha256']):
+                _die(f'{p}: セル {k} が重複（{"・".join(str(x[2]) for x in g)} 行目）。上書き許可キーだが、'
+                     f'上書き元 → 上書き先の 2 行が記録済みの sha256 と一致せず後着行を識別できない（RULE.txt 追記）')
+            (old, old_line, old_no), (new, new_line, new_no) = g
+            seen[k] = f'{p}:{new_no}'
+            out.append(new)
+            PY_OVERRIDES_APPLIED.append(dict(
+                key=k, file=os.path.basename(p), adopted_line=new_no, adopted_sha256=_line_sha256(new_line),
+                adopted_median_s=new['median_s'], adopted_src=spec['superseding_src'],
+                discarded_line=old_no, discarded_sha256=_line_sha256(old_line), discarded_median_s=old['median_s'],
+                discarded_src=spec['superseded_src']))
     return out
+
+
+def py_override_note(o):
+    """採用・破棄の記録 1 件を 1 行の文にする（パスは basename のみ。公開 HTML に絶対パスを出さない）。"""
+    fw, t, d, n, m = o['key']
+    return (f'Python FW 行の文書化済み上書き（RULE.txt 追記）: {fw} {t} {d} N={n} {m} は {o["file"]}:{o["adopted_line"]}'
+            f'（sha256 {o["adopted_sha256"][:12]}・median_s {o["adopted_median_s"]:.6g}・出典 {o["adopted_src"]}）を採用し、'
+            f'{o["file"]}:{o["discarded_line"]}（sha256 {o["discarded_sha256"][:12]}・median_s {o["discarded_median_s"]:.6g}・'
+            f'出典 {o["discarded_src"]}）を破棄')
 
 
 if LEGACY:
     AGG = None
+    # 既定の比較元（LOGS_DIR 基点の絶対パス）も明示指定も、読む前に存在を検査する（CSS・本文と同じ扱い）
+    _m4_prev = ARGS.m4_prev or str(RAW / 'results-m4max-0.8.0.jsonl')
+    _gb_prev = ARGS.gb_prev or LEGACY_GB_PREV
+    for _flag, _p in [('--m4-prev', _m4_prev)] + [('--gb-prev', x) for x in _gb_prev]:
+        _require_file(_p, _flag)
     m4 = index(load(ARGS.m4))
-    m4_prev = index(load(ARGS.m4_prev or str(RAW / 'results-m4max-0.8.0.jsonl')))
+    m4_prev = index(load(_m4_prev))
     gb = index(load(ARGS.gb) + load(ARGS.gb_extra) + load(ARGS.gb_py))
     gb_prev_rows = []
-    for f in (ARGS.gb_prev or LEGACY_GB_PREV):
+    for f in _gb_prev:
         gb_prev_rows += load(f)
     gb_prev = index(gb_prev_rows)
 else:
@@ -730,7 +883,8 @@ def gate_note(d):
 
 if AGG is not None:
     M4_LOAD = '；'.join(x for x in (ARGS.m4_load, gate_note(AGG_M4)) if x)
-    GB_LOAD = '；'.join(x for x in (ARGS.gb_load, gate_note(AGG_GB)) if x)
+    GB_LOAD = '；'.join(x for x in (ARGS.gb_load, gate_note(AGG_GB)) + tuple(html.escape(py_override_note(o))
+                                                                            for o in PY_OVERRIDES_APPLIED) if x)
     M4_CARDS = agg_cards('M4 Max', 'metal', (256, 512, 1024, 2048, 4096), (256, 512, 1024, 2048), ('metal', 'cpu'), 'M4 Max')
     GB_CARDS = agg_cards('GB10', 'cuda', (256, 512, 1024, 2048, 4096), (256, 512, 1024, 2048, 4096), ('cuda', 'cpu'), 'GB10')
 else:
@@ -778,3 +932,6 @@ if LEGACY:
     print('tally', len(wins), len(nears), len(losses), 'invalid', invalid_n, 'total', len(allrows))
 else:
     print('tally', len(wins), len(nears), len(losses), 'undet', len(undets), 'invalid', invalid_n, 'total', len(allrows))
+    # --gb-py の文書化済み上書き（採用行・破棄行）の記録。legacy は gen_1988 と byte 同一の標準出力を保つため出さない
+    for o in PY_OVERRIDES_APPLIED:
+        print('py-override', py_override_note(o))

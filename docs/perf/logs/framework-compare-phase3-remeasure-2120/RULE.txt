@@ -25,6 +25,23 @@
   opt-in 環境変数（FANDHE_AI_*）は一切設定しない。1 つでも設定されていれば計測を開始しない。
   Python FW（PyTorch／TensorFlow／SciPy）行は再計測せず既存値（M4: 0.9.0 スコアボード転記値・GB10:
   results-dgx-py-precision-class.jsonl）を流用する。Phase 3 前後比は fandhe-ai 腕間の比であり相手値に依存しない。
+  （追記 2026-09-30・実測前。PR #2466 レビュー。Python FW 行の文書化済み上書き。上の流用元・判定条項は変えない）
+    GB10 の流用元 results-dgx-py-precision-class.jsonl（#1988）は、#1988 README のとおり results-dgx-py-0.8.0.jsonl
+    （2026-09-12 セッション）へ PyTorch cpu gemm N=4096 の #1988 採用 run 行（2026-09-18 セッション・gb10/run5/py.jsonl）を
+    末尾追記したファイルで、同一セルが 5 行目と 29 行目の 2 行ある（gen_1988.py の後勝ちで 29 行目が 5 行目を置き換える前提）。
+    scoreboard/gen_2120.py は --gb-py／--gb-extra の同一セルの重複を拒否し、次の許可キーに限り #1988 と同じ意味（後着行を採用）で
+    受理する。行に計測日のフィールドは無いため、後着行の識別は出典の実物と byte 一致する行本文の sha256 で行う。
+    同一ファイル内に「上書き元 → 上書き先」の順でちょうど 2 行あり、両行が下の sha256 と一致する場合だけ後着行を採用し、
+    採用・破棄した行（ファイル名・行番号・sha256・median_s）をスコアボードの GB10 計測条件注記と標準出力に記録する。
+    許可リスト外のキー・3 行以上・順序逆転・sha256 不一致（同一内容・値の改変を含む）・ファイルをまたぐ重複は拒否する。
+    許可キーの追加・変更は規則の変更であり、gen_2120.py の PY_DOCUMENTED_OVERRIDES と本項を同時に改め、レビューを経る
+    （self-test が両者の一致と出典ファイルの実物を照合する）。前提 P4 の「同一セルの重複行がない」は計測腕の run JSONL
+    （aggregate.py の入力）についての条項であり、本項は流用する Python FW 行だけに適用する。
+    上書き許可キー: pytorch gemm cpu 4096 fresh
+      上書き元（破棄）: sha256 c40eca05edc8b1c5ccbdf533ba7bffdf889cefd7f7ee0c512ec1c9369a73fa9e
+        （lowlayer-diagnosis-2026-09-12/dgx/results-dgx-py-0.8.0.jsonl の 5 行目と同一。2026-09-12 セッション）
+      上書き先（採用）: sha256 e7061be8ba151ce7f0c61357d5018059383bd8d50d074110e2f6f396e00d4c6f
+        （framework-compare-precision-class-remeasure-1988/gb10/run5/py.jsonl と同一。#1988 採用 run・2026-09-18 セッション）
 
 セル範囲（0.9.0 スコアボードの行に写像し、新セルを作らない。各腕とも fandhe-ai は fresh・reuse 両モード）:
   M4 Max: gemm cpu N=256〜2048・gemm metal N=256〜4096・train／infer × {cpu, metal}（batch 64。--phases 行は収録するが判定対象外）。
