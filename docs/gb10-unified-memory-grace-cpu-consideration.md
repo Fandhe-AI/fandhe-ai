@@ -44,7 +44,7 @@ GB10 の属性値による推奨の分岐は `RULE.txt` の R-UM-prefetch に事
 ## §4 training loop への影響（受入 4）
 
 - 見立て: `UnifiedSlice::drop` の同期解放が残る限り REJECT は再現する見込み。既定化の再評価の前提条件は managed 対応 `SizeClassPool`（同期解放の除去）で、別イシュー候補。
-- 再実測は GB10 で `run_ab_managed_cuda.sh`（v0.9.0 ピン + `AB_PATCH_FACADE_PATH`）を HEAD で 5 回中央値実行し、`RULE.txt` の R-UM-train で判定する。帯域（`managed_placement_bandwidth_real_device`）は R-UM-bw で記録のみ（既定化判定に使わない。#1353 §8 と同位置づけ）。
+- 再実測は GB10 で `run_ab_managed_cuda.sh`（v0.9.0 ピン + `AB_PATCH_FACADE_PATH`）を HEAD で 5 回中央値実行し、`RULE.txt` の R-UM-train で判定する。帯域（`managed_placement_bandwidth_real_device`）は R-UM-bw で記録し、readback は #1353 §8 の ADOPT 候補条件（readback が明確に低下していない）を継承して R-UM-train 条件 4 で既定化の再評価候補の判定に使う（upload／download は記録のみ。各セルの checksum 完全一致・欠測時は判定不能も条件に含む）。
 - 結果: **未計測**。
 
 ## §5 Grace CPU（受入 2・3）
