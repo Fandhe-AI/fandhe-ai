@@ -99,6 +99,16 @@ _GATE_SIZES_BY_DEVICE = {
     "cuda": frozenset({1024, 2048, 4096}),
 }
 
+# イシュー #2102: `--sizes large`。縮約しきい値化の CPU A/B（
+# `run_ab_reduction_threshold_cpu.sh`）が要求する N=1024/2048/4096 を全 device
+# 共通で扱う。`full`／`gate` の cpu 集合（512/1024/2048）は変えない（変えると
+# `run_ab_sme_cpu.sh` の期待セルが変わり失敗するため）。
+_LARGE_SIZES_BY_DEVICE = {
+    "metal": frozenset({1024, 2048, 4096}),
+    "cpu": frozenset({1024, 2048, 4096}),
+    "cuda": frozenset({1024, 2048, 4096}),
+}
+
 # イシュー #1517: `--task train` 用のセル集合。`bench-fandhe --task train`
 # は `Record.size` に `BATCH`（`scripts/bench/framework-compare/
 # bench-fandhe/src/main.rs` の `const BATCH: usize = 64;`）を emit する
@@ -115,7 +125,8 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
     """`--device`/`--sizes`/`--task` から実際に使うセルサイズ集合を決める。
 
     `sizes_arg` は `"full"`（既定・後方互換。`_VALID_SIZES_BY_DEVICE` を
-    そのまま使う）または `"gate"`（`_GATE_SIZES_BY_DEVICE` へ絞り込む）。
+    そのまま使う）・`"gate"`（`_GATE_SIZES_BY_DEVICE` へ絞り込む）・
+    `"large"`（全 device で 1024/2048/4096。イシュー #2102）。
     `task` が `"train"`／`"infer"`（イシュー #1689 で追加）の場合は
     `sizes_arg` を無視し `_VALID_SIZES_TRAIN`（単一形状。`bench-fandhe`
     の `BATCH` 定数＝64 は train/infer で共通）を返す（train/infer
@@ -125,6 +136,8 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
         return _VALID_SIZES_TRAIN
     if sizes_arg == "gate":
         return _GATE_SIZES_BY_DEVICE[device]
+    if sizes_arg == "large":
+        return _LARGE_SIZES_BY_DEVICE[device]
     return _VALID_SIZES_BY_DEVICE[device]
 
 # 既定の非後退閾値（median 比 ratio = after/before が 1.05 以下なら非後退。
@@ -715,7 +728,8 @@ def main(argv):
         default=DEFAULT_DEVICE,
         help=(
             "device 別セル集合を選択する（既定 'metal'。後方互換。"
-            "'cpu' は N=512/1024/2048 のみ。イシュー #1364）"
+            "'cpu' は既定（full/gate）では N=512/1024/2048 のみ、"
+            "'--sizes large' では 1024/2048/4096。イシュー #1364・#2102）"
         ),
     )
     parser.add_argument(
@@ -726,12 +740,13 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate"),
+        choices=("full", "gate", "large"),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "
             "_VALID_SIZES_BY_DEVICE）または 'gate'（run_gemm_gate.sh 由来入力用。"
             "metal は 512 を除いた 1024/2048/4096 のみに絞り込む。イシュー #1337）"
+            "または 'large'（全 device で 1024/2048/4096。イシュー #2102）"
         ),
     )
     parser.add_argument(
