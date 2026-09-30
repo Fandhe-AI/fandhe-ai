@@ -112,8 +112,8 @@ impl StagingKey {
     }
 }
 
-/// (ordinal, context) ごとの staging プール（要素数ごとに 1 バッファ。各キーの総量は
-/// `HOST_STAGING_CAP_BYTES` で頭打ち）。ロック保持は `take`／`put` の間のみで、
+/// (ordinal, context) ごとの staging プール（要素数ごとに 1 バッファ。同一 ordinal 内の全
+/// context の合計保持量を `HOST_STAGING_CAP_BYTES` で頭打ちにする）。ロック保持は `take`／`put` の間のみで、
 /// pinned 確保・D2H・synchronize はロック外で行う。
 pub(crate) struct ReadbackStagingPool {
     kind: HostStagingKind,
@@ -139,6 +139,15 @@ impl ReadbackStagingPool {
             cap_bytes: Some(cap_bytes),
             ..Self::new(kind)
         }
+    }
+
+    /// ordinal あたりの pinned 保持上限（テストでは差し替え可能）。
+    fn ordinal_cap_bytes(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(cap) = self.cap_bytes {
+            return cap;
+        }
+        crate::host_staging::HOST_STAGING_CAP_BYTES
     }
 
     fn new_cache(&self) -> HostStagingCache {
@@ -167,10 +176,19 @@ impl ReadbackStagingPool {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+        // 上限は ordinal 全体の合計へ適用する（同一 ordinal の別 context の保持量を差し引いた
+        // 残りをこの key の有効上限とする。codex-review 指摘 P1: key ごとに独立上限だと
+        // page-locked 総量が ordinal あたり上限を超える）。
+        let ordinal_cap = self.ordinal_cap_bytes();
+        let others: u64 = guard
+            .iter()
+            .filter(|(k, _)| k.ordinal == key.ordinal && **k != key)
+            .map(|(_, c)| c.cached_bytes())
+            .sum();
         guard
             .entry(key)
             .or_insert_with(|| self.new_cache())
-            .put(numel, generation, buf);
+            .put_within(numel, generation, buf, ordinal_cap.saturating_sub(others));
     }
 
     /// 全 ordinal の staging を破棄し、解放したバイト数を返す（本番用の明示解放経路。
@@ -306,6 +324,23 @@ mod tests {
         pool.put(k(1, 1), 0, 4, pageable(4));
         assert_eq!(pool.release_all(), 48);
         assert_eq!(pool.stats().cached_bytes, 0);
+    }
+
+    #[test]
+    fn pool_cap_applies_across_contexts_of_same_ordinal() {
+        let pool = ReadbackStagingPool::with_cap(HostStagingKind::Pageable, 32);
+        pool.put(k(0, 1), 0, 4, pageable(4));
+        pool.put(k(0, 2), 0, 4, pageable(4));
+        assert_eq!(pool.stats().cached_bytes, 32);
+        pool.put(k(0, 3), 0, 2, pageable(2));
+        assert_eq!(
+            pool.stats().cached_bytes,
+            32,
+            "ordinal 合計上限超過は登録しない"
+        );
+        assert_eq!(pool.stats().evicted, 1);
+        pool.put(k(1, 1), 0, 8, pageable(8));
+        assert_eq!(pool.stats().cached_bytes, 64, "別 ordinal は独立");
     }
 
     #[test]
