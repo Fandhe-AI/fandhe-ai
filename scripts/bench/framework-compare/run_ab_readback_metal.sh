@@ -55,6 +55,24 @@ if ! grep -qE '^\s*name\s*=\s*"fandhe-ai"\s*$' "$AB_PATCH_FACADE_PATH/Cargo.toml
 fi
 PATCH_CONFIG="patch.crates-io.fandhe-ai.path=\"${AB_PATCH_FACADE_PATH}\""
 
+# イシュー #2112・codex-review 指摘（PR #2456 P1）: 計測対象 facade は「本スクリプトを含む
+# PR head の同一リポジトリの crates/facade」でなければならない（RULE.txt・AGENTS.md の
+# 同一バイナリ・同一 HEAD 契約）。別所に checkout した facade が通ると、HEAD 計測として
+# 公開される結果の出所が崩れる。パス（正規化後）と HEAD sha の双方を計測前に fail-closed で照合する。
+SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
+FACADE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
+EXPECTED_FACADE_PATH="$(cd "$SCRIPT_DIR/../../../crates/facade" 2>/dev/null && pwd -P || echo unknown)"
+ACTUAL_FACADE_PATH="$(cd "$AB_PATCH_FACADE_PATH" 2>/dev/null && pwd -P || echo unknown)"
+if [[ "$SCRIPT_REPO_HEAD_SHA" == "unknown" || "$FACADE_HEAD_SHA" == "unknown" \
+  || "$SCRIPT_REPO_HEAD_SHA" != "$FACADE_HEAD_SHA" ]]; then
+  echo "error: facade の HEAD sha が本スクリプトのリポジトリ HEAD と一致しない（script=${SCRIPT_REPO_HEAD_SHA} facade=${FACADE_HEAD_SHA}）。PR head の facade のみ計測できる" >&2
+  exit 1
+fi
+if [[ "$EXPECTED_FACADE_PATH" == "unknown" || "$ACTUAL_FACADE_PATH" != "$EXPECTED_FACADE_PATH" ]]; then
+  echo "error: AB_PATCH_FACADE_PATH が本リポジトリの crates/facade ではない（expected=${EXPECTED_FACADE_PATH} actual=${ACTUAL_FACADE_PATH}）" >&2
+  exit 1
+fi
+
 # イシュー #2112・codex-review 指摘（PR #2456）: RULE.txt は 5 round 固定で、
 # 後段 compare_gemm_ab.py も各セル 5 件を要求する。5 以外は判定不能な出力を
 # 生むため、計測開始前に fail-closed で拒否する（環境変数での上書きも 5 のみ許可）。
@@ -321,6 +339,7 @@ restore_lock() {
 }
 restore_lock_trap() {
   local code=$?
+  rm -f "${BUILD_ERR:-}" "${RUN_ERR:-}"
   if ! restore_lock; then
     if [[ "$code" -eq 0 ]]; then
       code=1
@@ -369,8 +388,6 @@ create_excl "$SKIP_TMP" || exit 1
 BIN_SHA="$(sha256_of target/release/bench-fandhe)"
 echo "bench-fandhe sha256: $BIN_SHA (source: $SOURCE_DESC)"
 
-SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null || echo unknown)"
-FACADE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
 # manifest の書き込み失敗・内容不備は計測前に fail-closed で停止する（PR #2456 P1）。
 # この時点で排他作成済みの一時ファイルと専有ゲートログは、計測が走っていないため掃除する
 # （同一 LABEL の再試行を塞がない）。
@@ -464,6 +481,7 @@ UPTIME_SAMPLER_PID=$!
 # 事故を防ぐ）。
 restore_lock_and_kill_sampler_trap() {
   local code=$?
+  rm -f "${BUILD_ERR:-}" "${RUN_ERR:-}"
   kill "$UPTIME_SAMPLER_PID" 2>/dev/null || true
   if ! restore_lock; then
     if [[ "$code" -eq 0 ]]; then
@@ -520,7 +538,7 @@ publish_set() { # publish_set <src1> <dst1> [<src2> <dst2> ...]
       srcs+=("$src")
     else
       echo "error: '$dst' へ排他的に公開できない。この実行が公開済みの正規パスを巻き戻す。結果は '$src' などの *.tmp に残す" >&2
-      for d in "${created[@]}"; do rm -f "$d"; done
+      for d in ${created[@]+"${created[@]}"}; do rm -f "$d"; done
       return 1
     fi
   done
