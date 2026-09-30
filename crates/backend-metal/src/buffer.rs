@@ -307,16 +307,20 @@ impl MetalBuffer {
     /// バッファの内容をホストへ読み出し新規 `Vec` としてコピーする。
     ///
     /// 借用のまま使えない場合（所有権が必要な場合）のみ使う。
+    ///
+    /// 宛先 `Vec` の作り方は [`crate::readback_policy`]（イシュー #2112。既定
+    /// `Fresh` = 従来の `to_vec()` と同一。env で分割並列コピーへ opt-in）に従う。
+    /// gemm.rs・memory.rs（`download_inner`）が共通に通る readback の 1 箇所。
     pub fn read_to_vec(&self) -> Vec<f32> {
         // SAFETY: `as_host_slice()` の Safety 契約 2 点を満たす:
-        // (1) 呼び出し元（このメソッド自身）は書き込み完了の同期を
-        // 呼び出し元契約として要求するのみで、本メソッド自体は
-        // 追加同期を行わない（従来どおりの契約。呼び出し元の
-        // `memory.rs::download_inner` 等が `synchronize()` を先に
-        // 呼ぶ）。(2) 返す借用は `.to_vec()` で即座にコピーし、この式の
-        // 評価が終わるまでの間のみ生存する一時値であり、その間に
-        // 新規 GPU dispatch を挟む経路は存在しない（単一式内で完結）。
-        unsafe { self.as_host_slice() }.to_vec()
+        // (1) 書き込み完了の同期は従来どおり呼び出し元契約（`download_inner` 等が
+        // 先に `synchronize()` する）。(2) 借用は `copy_to_vec` の呼び出しが返る
+        // までのみ生存する。`copy_to_vec` はホスト側コピーだけを行い（GPU dispatch・
+        // `&self` 経由書き込みを一切発行しない）、並列経路のスコープ付きスレッドも
+        // `&[f32]`（Sync）を読むだけで、scope を抜ける前に全員 join される。よって
+        // 借用が本呼び出しより長く生きることも、その間に新規 GPU 書き込みが
+        // 挟まることもない。unsafe ブロックの数は #2112 前後で不変。
+        crate::readback_policy::copy_to_vec(unsafe { self.as_host_slice() })
     }
 
     /// バッファの内容を既存の `dest` へコピーする（確保を伴わない

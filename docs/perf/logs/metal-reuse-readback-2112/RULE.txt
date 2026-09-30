@@ -1,0 +1,33 @@
+イシュー #2112 判定規則（実測前に事前登録。2026-09-30。事後に緩和・変更しない）
+
+対象
+- 同一バイナリ（HEAD の facade を AB_PATCH_FACADE_PATH で参照）。
+  before = FANDHE_AI_METAL_READBACK_DEST=fresh、after = FANDHE_AI_METAL_READBACK_DEST=parallel
+- 凍結する定数: PARALLEL_READBACK_MIN_BYTES = 8 MiB (8388608)、PARALLEL_READBACK_MAX_THREADS = 8
+  （crates/backend-metal/src/readback_policy.rs）。env 許容値は fresh／parallel のみ
+- 判定セル（3 セルすべて）: gemm reuse N=1024、gemm reuse N=4096（既定 readout = legacy）、infer reuse
+- borrowed readout は判定に使わない（#1520 REJECT の再実行に当たるため）
+
+計測
+- 5 round、プロセス独立起動、round ごとに起動順を反転（run_ab_readback_metal.sh）
+- run の差し替え・追加起動はしない。同一 label の既存出力があれば停止する
+- 各セルの ratio = median(after) / median(before)（5 run の中央値どうし）
+
+判定
+- ADOPT: 専有ゲート（AB_LOAD_GATE_MODE=exclusive、load1 < 4.0 を 2 回連続）を通過し、
+  全判定セルで ratio <= 1.00、かつ全 run で checksum 完全一致（--require-checksum-exact）
+- REJECT: 専有ゲートが成立した系列で、いずれかの判定セルが ratio > 1.00、または checksum 不一致
+- undetermined: 専有ゲート不成立・record_only・取得不能を含む場合（ADOPT にしない）
+- N=1024 はしきい値未満で経路が変わらないが判定セルに含める。ノイズで ratio > 1.00 になっても
+  REJECT として記録し、しきい値を事後調整して再計測しない
+
+事前表明する期待値
+- legacy 既定の判定セルで見込める改善は小さいかゼロ。しきい値以上の形状でスレッド生成の固定費により
+  後退する可能性もある（docs/perf/metal-reuse-readback-2112.md §3）
+
+ADOPT 時
+- 後続 PR で READBACK_DEST_DEFAULT を ParallelChunked へ切り替える。本 PR では既定値を変えない
+
+記録
+- 生成物に内部ホスト名・絶対パスを含めない（<home> 等でマスクする）
+- tolerance・baseline・Cargo.toml・ガードレール閾値・docs/spec は変更しない
