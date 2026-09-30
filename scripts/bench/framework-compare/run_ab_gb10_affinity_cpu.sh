@@ -474,12 +474,23 @@ for task in gemm train infer; do
     "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" \
     >"compare-${task}-2117-${DEVICE}-${LABEL}.md" 2>"compare-${task}-2117-${DEVICE}-${LABEL}.err"
   COMPARE_EXIT=$?
-  # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 後退セルあり（checksum は上で
-  # 独立確認済みのため、ここでの 3 は性能後退のみ。いずれも正常な判定結果で記録のみ）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
+  # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 「後退セルあり」または「判定不能セルあり」
+  # （evaluate_cell の status != ok・欠測セル・per-run 比の算出不能はいずれも 3 に畳まれる）。
+  # checksum は上で独立確認済み。3 を無条件に REJECT 相当の正常判定として扱うと RULE.txt が
+  # 区別する undetermined を REJECT と誤認するため、比較レポートのセル別状態を検査し、
+  # 「判定不能」行があれば性能判定とは独立に undetermined として記録し非ゼロ終了へ伝播する
+  # （PR #2464 codex P1 指摘）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
   # 比較処理自体の失敗であり、判定結果と区別して非ゼロ終了へ伝播する。
   echo "compare task=$task exit=$COMPARE_EXIT" | tee -a "$OUT/compare-exit-2117-${DEVICE}-${LABEL}.log"
   case "$COMPARE_EXIT" in
-    0 | 3) ;;
+    0) ;;
+    3)
+      if grep -q '判定不能' "compare-${task}-2117-${DEVICE}-${LABEL}.md"; then
+        echo "compare task=$task: undetermined（判定不能セルあり。REJECT ではない。詳細は compare-${task}-2117-${DEVICE}-${LABEL}.md の「判定不能」行）" >>"$SKIP"
+        echo "compare task=$task undetermined=1 (判定不能セルあり。性能判定 REJECT とは区別)" | tee -a "$OUT/compare-exit-2117-${DEVICE}-${LABEL}.log"
+        ANY_FAILED=$((ANY_FAILED + 1))
+      fi
+      ;;
     *)
       echo "compare task=$task: 比較不能（exit=$COMPARE_EXIT）。$(tail -3 "compare-${task}-2117-${DEVICE}-${LABEL}.err" | tr '\n' ' ')" >>"$SKIP"
       ANY_FAILED=$((ANY_FAILED + 1))
