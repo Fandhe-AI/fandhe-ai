@@ -120,6 +120,7 @@ python3 scoreboard/gen_2120.py --arm B \
   --out fandhe-ai-phase3-scoreboard-armB.html --tsv ratios-B.tsv
 ```
 
+- （追記・PR #2466 レビュー）`HEAD_TREE`・`PRE_TREE` は `.git` を含む git 作業ツリーのルートとして用意する（`git worktree add` のツリーを別ノードへ転送すると `.git` の参照が切れるため、転送する場合は clone 等で `.git` ごと用意する）。`orchestrate.sh` は `.rev-stamp` と `git rev-parse HEAD` の一致（腕 B は `650359799aa5…` と完全一致）と作業ツリーに変更がないこと（ルートの未追跡 `.rev-stamp` と docs/ 配下に置いた `LOGD` の未追跡ファイルを除く。submodule は除外）を計測前と全 run 後に照合し、外れれば停止する。キットは `HEAD_TREE` の本ディレクトリから起動する（詳細は RULE.txt「計測腕」追記）。
 - `--m4` 側は M4 Max の Python FW 転記値を `gen_2120.py` が内蔵しているため、機体別の派生 JSONL だけを渡す。`--gb-py`（と任意の `--gb-extra`）は Python FW 行のみ受理する。
 - `gen_2120.py` は集計 JSON が formal でない・`--m4`／`--gb` が集計 JSON に記録された腕の派生 JSONL（sha256）と一致しない・`--m4-prev`／`--gb-prev`／`--prev-label` が指定された場合は停止する。gen_1988 互換の出力は `--legacy-1988`（非後退確認用）。
 - スコアボード HTML は新規 Artifact として公開してよい（0.9.0 版・#1988 版は不変のまま履歴として残す）。
@@ -143,6 +144,9 @@ python3 scoreboard/gen_2120.py --arm B \
 - `python3 scoreboard/gen_2120.py --self-test`（前比・TSV の B→C 比が集計 JSON の `bc_med` と一致し採用行同士の比にならないこと、sha256 不一致・腕／機体の取り違え・非 formal・Python FW 以外の行・`--m4-prev` 指定で停止すること、M4 Max の不通過 run の併記、`--legacy-1988` の HTML・標準出力が `gen_1988.py` と byte 同一）。
 - `switches.sh` を HEAD で実行し 8 定数・3 環境変数がすべて解決（`--allow-missing` は腕 B 用）。
 - x86_64＋RTX 3060 で `SMOKE=1 orchestrate_gb10.sh`（3 腕ビルド〈腕 A は registry `fandhe-ai v0.9.0`・B／C は path 解決を `cargo tree` で確認〉・`Cargo.lock` sha256 前後一致・CPU gemm N=256 の 3 腕 checksum `237.546660` 一致）。この作業ホストは CUDA toolkit（NVRTC）非搭載のため CUDA セルは `skipped.log` に記録され失敗扱いで正しく分離された（結果は判定に使わず未収録）。CUDA・Metal の実行経路そのものは実機セッションでの初回実測時に確認する。
+
+- （追記・PR #2466 レビュー）`bash orchestrate_selftest.sh`（一時 git リポジトリで、`.rev-stamp` と HEAD の不一致・古い stamp・腕 B の規定 commit 不一致・追跡ファイルの変更／削除・ステージ済み追加・未追跡ファイル・assume-unchanged／skip-worktree・git 作業ツリーでない／ルートでない・docs/ 外の `LOGD` で停止し、ルートの `.rev-stamp`・docs/ 配下の `LOGD` の未追跡ファイル・submodule の差分は許すこと。`orchestrate.sh` 本体が照合失敗時に cargo・`switches.sh` の前に停止すること）。`aggregate.py --self-test` に派生値の有限性（同一 run 内比の inf／0・1/median_s と gflops の inf・gflops の負値）と出力の原子性（生成途中・確定途中の例外で部分出力・前回出力が残らない）・env_info の出典照合キーのケースを、`gen_2120.py --self-test` に表示値の inf・TSV 確定途中の例外・出力先＝入力のケースを追加した。
+- （追記・PR #2466 レビュー）作業ホストで本リポジトリの clone 2 つ（腕 C 相当に本変更を載せた一時コミット・腕 B は 65035979）を用意し、cargo・rustc・計測バイナリをスタブにした `SMOKE=1 orchestrate_gb10.sh`（`LOGD` はツリーの docs/ 配下・相対パス指定）で、照合を通過して完了記録に `rev_B_head`・`rev_C_head`・`tree_*_clean`・`bin_sha256` が書かれること、計測中に追跡ファイルを変更すると全 run 後の再照合で停止し完了記録を書かないこと、HEAD を進めた古い stamp で計測前に停止することを確認した（実ビルド・実計測は行っていない）。
 
 ## 8. 変更していないもの
 

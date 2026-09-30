@@ -8,6 +8,9 @@
 #   ノード上で実行する（Mac から HEAD_TREE／PRE_TREE を転送後）。
 # 使い方: HEAD_TREE=<main HEAD ツリー> PRE_TREE=<65035979 ツリー> LOGD=<出力先> orchestrate.sh <gb10|m4max>
 #   HEAD_TREE／PRE_TREE は各々ルートに .rev-stamp（空不可）が必要。PRE_TREE の stamp は 65035979 で始まること。
+#   （追記）両ツリーは .git を含む git 作業ツリーのルートで、stamp は git rev-parse HEAD と一致し（腕 B は HEAD が
+#   650359799aa5… と完全一致）、作業ツリーに変更がないこと（.rev-stamp と LOGD 配下の未追跡ファイルを除く。tree_provenance.sh）。
+#   本スクリプトは HEAD_TREE 収録のキット（docs/perf/logs/framework-compare-phase3-remeasure-2120/）から起動すること。
 #   3 変数とも相対パス可（起動時の cwd 基準で解決し、framework-compare へ cd する前に pwd -P で絶対化する）。
 #   SMOKE=1: 1 run・N=256 の gemm のみ・ゲート省略・candle／burn なしの疎通確認（LOGD 必須。結果は判定に使わない。
 #   env_info.txt の smoke=1・gate.log の smoke-skip により aggregate.py の前提ゲートが正式集計を拒否する）。
@@ -62,6 +65,25 @@ done
 SHA_C="$(cat "${HEAD_TREE}/.rev-stamp")"; SHA_B="$(cat "${PRE_TREE}/.rev-stamp")"
 [[ "${SHA_B}" == 65035979* ]] || { echo "ERROR: PRE_TREE の rev-stamp が 65035979 で始まらない: ${SHA_B}" >&2; exit 1; }
 
+# 出典の実体照合（PR #2466 レビュー・RULE.txt「計測腕」追記）: .rev-stamp は手で書く値のため、各ツリーの git rev-parse HEAD と
+# 照合し、作業ツリーの変更（.rev-stamp と LOGD 配下の未追跡ファイル以外）を拒否する。スイッチ抽出・ビルドより前に行い、
+# 全 run 後にも再照合する（計測中の checkout・編集の検出）。照合内容は tree_provenance.sh 冒頭を正とする。
+# 腕 B の完全な commit（aggregate.py の PRE_TREE_FULL と同値。前提 P1 が env_info.txt の rev_B_head で再確認する）
+PRE_TREE_FULL=650359799aa5e8e6d493bf3a38d6e59732062863
+[[ -f "${SCRIPT_DIR}/tree_provenance.sh" ]] || { echo "ERROR: ${SCRIPT_DIR}/tree_provenance.sh が無い" >&2; exit 1; }
+# shellcheck source=tree_provenance.sh
+source "${SCRIPT_DIR}/tree_provenance.sh"
+verify_tree_provenance C "${HEAD_TREE}" "${SHA_C}" - "${LOGD}" || exit 1
+HEAD_C_FULL="${PROV_HEAD}"
+verify_tree_provenance B "${PRE_TREE}" "${SHA_B}" "${PRE_TREE_FULL}" "${LOGD}" || exit 1
+HEAD_B_FULL="${PROV_HEAD}"
+# 計測キット（本スクリプト・switches.sh・tree_provenance.sh）は照合済みの腕 C のツリーに収録された版から起動する
+# （別の場所の改変版キットで計測し、腕 C の rev を出典として記録しない）。
+KIT_REL="docs/perf/logs/framework-compare-phase3-remeasure-2120"
+if [[ "${SCRIPT_DIR}" != "${HEAD_TREE}/${KIT_REL}" ]]; then
+  echo "ERROR: 計測キットは HEAD_TREE 収録の ${KIT_REL} から起動すること（起動元: ${SCRIPT_DIR}）" >&2; exit 1
+fi
+
 FC="${HEAD_TREE}/scripts/bench/framework-compare"
 [[ -d "${FC}" ]] || { echo "ERROR: ${FC} が無い" >&2; exit 1; }
 mkdir -p "${LOGD}/bin" || exit 1
@@ -108,7 +130,7 @@ echo "Cargo.lock sha256(before)=${LOCK_SHA0}" >> "${BUILD_LOG}"
 # --- スイッチ既定値スナップショット（腕 B は Phase 3 導入前のため欠落許容）---
 # SCRIPT_DIR は cd 前に絶対化済み（$0 が相対でも cd 後に FC 基準で誤解決しない）
 SW="${SCRIPT_DIR}/switches.sh"
-[[ -x "${SW}" ]] || SW="${HEAD_TREE}/docs/perf/logs/framework-compare-phase3-remeasure-2120/switches.sh"
+[[ -x "${SW}" ]] || SW="${HEAD_TREE}/${KIT_REL}/switches.sh"
 bash "${SW}" "${PRE_TREE}" --allow-missing > "${LOGD}/switches-B.txt" || { echo "ERROR: switches.sh(B) 失敗" >&2; exit 1; }
 bash "${SW}" "${HEAD_TREE}" > "${LOGD}/switches-C.txt" || { echo "ERROR: switches.sh(C) 失敗。計測を開始しない" >&2; exit 1; }
 
@@ -144,6 +166,14 @@ if [[ "${SMOKE}" != "1" ]]; then
 fi
 assert_lock "after builds" || exit 1
 echo "Cargo.lock sha256(after)=$(sha256_of Cargo.lock)" >> "${BUILD_LOG}"
+# 計測バイナリの sha256（env_info.txt に記録し、全 run 後に変化していないことを確認する。PR #2466 レビュー）
+bin_manifest() {
+  local f out=""
+  for f in "${LOGD}"/bin/*; do out+="${out:+ }$(basename "${f}"):$(sha256_of "${f}")"; done
+  printf '%s' "${out}"
+}
+BIN_SHA="$(bin_manifest)"
+echo "bin sha256: ${BIN_SHA}" >> "${BUILD_LOG}"
 
 # --- 専有ゲート ---
 # 取得値が数値でない（コマンド失敗・[N/A] 等）ときは通過扱いにしない（awk の文字列比較で "" < 8.0 が真になるのを防ぐ）。
@@ -239,6 +269,10 @@ for r in $(seq 1 "${RUNS}"); do
   echo "run${r} rows: A=$(wc -l < "${RD}/A.jsonl") B=$(wc -l < "${RD}/B.jsonl") C=$(wc -l < "${RD}/C.jsonl") skipped=$(wc -l < "${SKIPLOG}")"
 done
 assert_lock "after runs" || exit 1
+# 全 run 後の再照合（計測中にツリーの HEAD・内容・計測バイナリが変わっていないこと）。Cargo.lock は復元・突合済み。
+verify_tree_provenance C "${HEAD_TREE}" "${SHA_C}" "${HEAD_C_FULL}" "${LOGD}" || { echo "ERROR: 全 run 後の出典再照合に失敗（腕 C）" >&2; exit 1; }
+verify_tree_provenance B "${PRE_TREE}" "${SHA_B}" "${HEAD_B_FULL}" "${LOGD}" || { echo "ERROR: 全 run 後の出典再照合に失敗（腕 B）" >&2; exit 1; }
+[[ "$(bin_manifest)" == "${BIN_SHA}" ]] || { echo "ERROR: 計測バイナリの sha256 が計測中に変化した" >&2; exit 1; }
 if ! { mask < "${BUILD_LOG}" > "${BUILD_LOG}.masked" && mv "${BUILD_LOG}.masked" "${BUILD_LOG}"; }; then
   echo "ERROR: build.log のマスクに失敗" >&2; exit 1
 fi
@@ -252,6 +286,14 @@ write_env_info() {
     echo "rev_A=registry fandhe-ai =0.9.0"
     echo "rev_B=${SHA_B}"
     echo "rev_C=${SHA_C}"
+    # 出典の実体照合の結果（tree_provenance.sh。計測前と全 run 後の 2 回。aggregate.py の前提 P1 が再確認する）
+    echo "rev_B_head=${HEAD_B_FULL}"
+    echo "rev_C_head=${HEAD_C_FULL}"
+    echo "tree_B_clean=yes"
+    echo "tree_C_clean=yes"
+    echo "tree_check=git rev-parse HEAD が .rev-stamp で始まる・git status に .rev-stamp と LOGD 配下の未追跡以外の変更なし（submodule 除外）・assume-unchanged／skip-worktree なし（計測前と全 run 後）"
+    echo "kit=<head-tree>/${KIT_REL}"
+    echo "bin_sha256=${BIN_SHA}"
     echo "runs=${RUNS}"
     echo "smoke=${SMOKE}"
     echo "uname=$(uname -srm)"

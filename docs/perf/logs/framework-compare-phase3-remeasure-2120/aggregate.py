@@ -11,6 +11,10 @@
   を aggregate.md と集計 JSON（<out-prefix>-aggregate.json。機械可読の単一情報源）へ書き、
   scoreboard/gen_2120.py の入力となる派生 JSONL（腕ごと・機体別）を出力する。
   gen_2120.py は「前比」表示・22 セル転記の B→C 比を本 JSON の bc_med から取り、自前で再計算しない（判定 3 追記）。
+  派生値の有限性（PR #2466 レビュー）: 同一 run 内比・中央値・q1／q3・採用行とスコアボードの表示用導出値を
+  derived_value_errors で、どの出力を書くよりも前に一括検証する（不成立は前提不成立と同じく何も出力しない）。
+  出力はメモリ上で生成・検証した後に commit_outputs で一時ファイル → os.replace によりまとめて確定し、既存の派生出力は
+  冒頭で消す（途中の例外でも部分出力・前回の出力を残さない）。
 python3 標準ライブラリのみ。#1988 aggregate.py の fail-closed 教訓（parity_fail_count の厳格読み・
 5 run 完備の強制・run 欠損の空欄保持）を踏襲する。
 
@@ -37,6 +41,10 @@ SCHEMA = 'fandhe-ai-2120-aggregate/1'
 OTHER_FWS = ('candle', 'burn')
 # 腕 B の rev（RULE.txt「計測腕」。orchestrate.sh の PRE_TREE .rev-stamp 検査と同値）
 PRE_TREE_PREFIX = '65035979'
+# 腕 B の完全な commit（PR #2466 レビュー。orchestrate.sh が PRE_TREE の git rev-parse HEAD と完全一致を照合し
+# env_info.txt の rev_B_head に記録する値。前提 P1 で再確認する）
+PRE_TREE_FULL = '650359799aa5e8e6d493bf3a38d6e59732062863'
+HEX40_RE = re.compile(r'^[0-9a-f]{40}$')
 # 専有ゲート（RULE.txt「計測」。orchestrate.sh gate() と同値。値の変更は規則の変更でありレビュー必須）。
 #   precondition=True（GB10）: 5 run すべての pass が前提。fail は判定不能。
 #   precondition=False（M4 Max・record_only）: fail も計測・採用し「不通過」を併記する。
@@ -248,6 +256,12 @@ def check_env_info(logs, machine, reasons):
         'FANDHE_AI_*': lambda v: v.startswith('未設定'),
         'rev_B': lambda v: v.startswith(PRE_TREE_PREFIX),
         'rev_C': lambda v: bool(v.strip()),
+        # 出典の実体照合（PR #2466 レビュー・RULE.txt P1 追記）: orchestrate.sh が計測前と全 run 後に各ツリーの
+        # git rev-parse HEAD と .rev-stamp・作業ツリーのクリーンさを照合した結果。stamp（rev_B／rev_C）との整合もここで再確認する。
+        'rev_B_head': lambda v: v == PRE_TREE_FULL and v.startswith(kv.get('rev_B') or '\0'),
+        'rev_C_head': lambda v: bool(HEX40_RE.match(v)) and v.startswith(kv.get('rev_C') or '\0'),
+        'tree_B_clean': lambda v: v == 'yes',
+        'tree_C_clean': lambda v: v == 'yes',
     }
     for k, ok in need.items():
         if k in dup:
@@ -256,7 +270,8 @@ def check_env_info(logs, machine, reasons):
             reasons.append(f'env_info.txt に {k} が無い')
         elif not ok(kv[k]):
             reasons.append(f'env_info.txt の {k}={kv[k]!r} が計測条件を満たさない（machine={machine}・runs={NRUN}・smoke=0・'
-                           f'FANDHE_AI_* 未設定・rev_B は {PRE_TREE_PREFIX} 始まり）')
+                           f'FANDHE_AI_* 未設定・rev_B は {PRE_TREE_PREFIX} 始まり・rev_B_head は {PRE_TREE_FULL}・'
+                           'rev_C_head は rev_C で始まる 40 桁・tree_B_clean／tree_C_clean は yes）')
     return kv
 
 
@@ -434,28 +449,95 @@ def _quartiles(vals):
     return q[0], q[2]
 
 
+def _ratio_runs(runs, k, num, den):
+    """同一 run 内比 num.median_s / den.median_s の 5 run 値。有限値同士でも極端な値の除算は inf（例 1e300 / 1e-300）や
+    0.0（アンダーフロー）になりうるため、値はそのまま返し（例外は None）、正の有限値でない run を含むセルは cell_stats が
+    中央値・四分位を計算せず、どの出力を書くよりも前の一括検証（derived_value_errors）で判定不能にする（PR #2466 レビュー）。"""
+    out = []
+    for r in range(1, NRUN + 1):
+        try:
+            out.append(runs[r][num][k][0]['median_s'] / runs[r][den][k][0]['median_s'])
+        except (OverflowError, ZeroDivisionError):
+            out.append(None)
+    return out
+
+
 def cell_stats(runs, machine):
-    """セルごとの腕別 run 値・比・checksum 一致・採用行を返す。前提成立（check_prerequisites）が前提。"""
+    """セルごとの腕別 run 値・比・checksum 一致・採用行を返す。前提成立（check_prerequisites）が前提。
+    比の run 値に正の有限値でないものがあるセルは中央値・四分位を計算せず None とする（derived_value_errors が拒否する）。"""
     out = []
     for (t, d, n, m) in judged_cells(machine):
         k = ('fandhe-ai', t, d, n, m)
         med = {a: [runs[r][a][k][0]['median_s'] for r in range(1, NRUN + 1)] for a in ARMS}
-        bc = [runs[r]['C'][k][0]['median_s'] / runs[r]['B'][k][0]['median_s'] for r in range(1, NRUN + 1)]
-        ac = [runs[r]['C'][k][0]['median_s'] / runs[r]['A'][k][0]['median_s'] for r in range(1, NRUN + 1)]
+        bc = _ratio_runs(runs, k, 'C', 'B')
+        ac = _ratio_runs(runs, k, 'C', 'A')
         cks = {a: [checksum_of(*runs[r][a][k]) for r in range(1, NRUN + 1)] for a in ARMS}
         picked = {}
         for a in ARMS:
             pr, prow, _ = pick_median([(r, runs[r][a][k][0], runs[r][a][k][1]) for r in range(1, NRUN + 1)])
             picked[a] = dict(run=pr, median_s=prow['median_s'])
-        bc_med = statistics.median(bc)
-        q1, q3 = _quartiles(bc)
+        bc_ok, ac_ok = all(_pos_finite(v) for v in bc), all(_pos_finite(v) for v in ac)
+        bc_med = statistics.median(bc) if bc_ok else None
+        q1, q3 = _quartiles(bc) if bc_ok else (None, None)
         out.append(dict(task=t, device=d, size=n, mode=m, med=med, bc_runs=bc, ac_runs=ac,
-                        bc_med=bc_med, bc_q1=q1, bc_q3=q3, ac_med=statistics.median(ac),
-                        nonreg=bc_med <= 1.00, cks=cks,
+                        bc_med=bc_med, bc_q1=q1, bc_q3=q3, ac_med=statistics.median(ac) if ac_ok else None,
+                        nonreg=(bc_med is not None and bc_med <= 1.00), cks=cks,
                         ck_within=all(len(set(v)) == 1 for v in cks.values()),
                         ck_across=len({c for v in cks.values() for c in v}) == 1,
                         picked=picked))
     return out
+
+
+def _pos_finite(v):
+    return (not isinstance(v, bool)) and isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+
+
+def _shown_values(row):
+    """スコアボード（gen_2120.py の cell_value・metric）が採用行から導出して表示・比較する値 [(名前, 値)]。
+    time: median_s・ms 表示（median_s×1e3）、infer はスループット 1/median_s と µs 表示、gemm は gflops（記録値。無ければ
+    2N³/median_s/1e9。gen と同じ規則）。いずれも正の有限値でなければならない。"""
+    ms = row['median_s']
+    vals = [('median_s', ms)]
+    try:
+        vals.append(('median_s×1e3', ms * 1e3))
+        if row.get('task') == 'infer':
+            vals.append(('1/median_s', 1.0 / ms))
+            vals.append(('median_s×1e6', ms * 1e6))
+        if row.get('task') == 'gemm':
+            vals.append(('gflops', row['gflops'] if row.get('gflops') else 2.0 * row['size'] ** 3 / ms / 1e9))
+    except (OverflowError, ZeroDivisionError) as e:
+        vals.append((f'導出値（{e}）', None))
+    return vals
+
+
+def derived_value_errors(stats, derived_rows):
+    """計算で派生するすべての数値の一括検証（PR #2466 レビュー・RULE.txt 前提の追記「派生値の有限性」）。
+    どの出力（aggregate.md・派生 JSONL・集計 JSON）を書くよりも前に呼ぶ。対象:
+      - セルごと: 腕別 5 run の median_s（med）・同一 run 内比 B→C／A→C の各 run 値・B→C 中央値・q1・q3・A→C 中央値・
+        採用行の median_s（picked）・aggregate.md の B／C 中央値
+      - 派生 JSONL に書く採用行（fandhe-ai 3 腕・candle／burn）: スコアボードが導出する値（_shown_values）
+    いずれも正の有限値であること。不成立理由のリストを返す（空なら成立）。"""
+    errs = []
+    for s in stats:
+        cid = f'{s["task"]} {s["device"]} N={s["size"]} {s["mode"]}'
+        vals = []
+        for a in ARMS:
+            vals += [(f'腕 {a} run{i} median_s', v) for i, v in enumerate(s['med'][a], 1)]
+            vals.append((f'腕 {a} 採用行 median_s', s['picked'][a]['median_s']))
+        vals += [(f'B→C 比 run{i}', v) for i, v in enumerate(s['bc_runs'], 1)]
+        vals += [(f'A→C 比 run{i}', v) for i, v in enumerate(s['ac_runs'], 1)]
+        vals += [('B→C 中央値', s['bc_med']), ('B→C q1', s['bc_q1']), ('B→C q3', s['bc_q3']), ('A→C 中央値', s['ac_med'])]
+        vals += [('B 中央値（md）', statistics.median(s['med']['B'])), ('C 中央値（md）', statistics.median(s['med']['C']))]
+        bad = [f'{name}={v!r}' for name, v in vals if not _pos_finite(v)]
+        if bad:
+            errs.append(f'派生値が正の有限値ではない（{cid}）: {"・".join(bad)}（極端な値の比は inf／0 になりうる。判定不能）')
+    for a, rows in derived_rows.items():
+        for row in rows:
+            bad = [f'{name}={v!r}' for name, v in _shown_values(row) if not _pos_finite(v)]
+            if bad:
+                errs.append(f'派生 JSONL（腕 {a}）の {row["framework"]} {row["task"]} {row["device"]} N={row["size"]} {row["mode"]} の'
+                            f'表示用導出値が正の有限値ではない: {"・".join(bad)}')
+    return errs
 
 
 def fmt(x, p=4):
@@ -510,28 +592,31 @@ def sha256_file(p):
     return h.hexdigest()
 
 
-def write_full(runs, out_prefix, machine):
-    """腕ごとの派生 JSONL: fandhe-ai 採用行 + candle／burn 採用行（gen_2120.py の入力）。{arm: path} を返す。"""
-    written = {}
+def derived_jsonl(runs, machine):
+    """腕ごとの派生 JSONL（fandhe-ai 採用行 + candle／burn 採用行。gen_2120.py の入力）をメモリ上で作る。
+    {arm: (本文 bytes, [採用行 dict])} を返す。書き出しは run_aggregate が検証後にまとめて行う（出力の原子性）。"""
+    out = {}
     for a in ARMS:
-        lines = []
+        lines, rows_used = [], []
         for (t, d, n, m) in judged_cells(machine):
             k = ('fandhe-ai', t, d, n, m)
             rows = [(r, runs[r][a][k][0], runs[r][a][k][1]) for r in range(1, NRUN + 1)]
-            lines.append(pick_median(rows)[2])
+            _, prow, pline = pick_median(rows)
+            lines.append(pline)
+            rows_used.append(prow)
         okeys = sorted({k for r in runs for k in runs[r]['O']})
         for k in okeys:
             rows = [(r, runs[r]['O'][k][0], runs[r]['O'][k][1]) for r in range(1, NRUN + 1) if k in runs[r]['O']]
-            lines.append(pick_median(rows)[2])
-        p = f'{out_prefix}-{a}-full.jsonl'
-        with open(p, 'w') as w:
-            w.write('\n'.join(lines) + '\n')
-        written[a] = p
-    return written
+            _, prow, pline = pick_median(rows)
+            lines.append(pline)
+            rows_used.append(prow)
+        out[a] = (('\n'.join(lines) + '\n').encode('utf-8'), rows_used)
+    return out
 
 
 def build_result(machine, pre, stats, derived):
-    """集計 JSON（機械可読の単一情報源）。gen_2120.py はこの bc_med・採用行・ゲート・派生 JSONL の sha256 を読む。"""
+    """集計 JSON（機械可読の単一情報源）。gen_2120.py はこの bc_med・採用行・ゲート・派生 JSONL の sha256 を読む。
+    derived は {arm: (出力パス, 本文 bytes)}（sha256 は書き出す予定の bytes から計算する。書き出しは検証後）。"""
     spec = GATE_SPEC[machine]
     cells = []
     for s in stats:
@@ -543,12 +628,13 @@ def build_result(machine, pre, stats, derived):
         gate=dict(precondition=spec['precondition'], load1_lt=spec['load1_lt'], gpu_util_eq=spec['gpu_util_eq'],
                   runs=[pre['gate'][r] for r in range(1, NRUN + 1)]),
         rev_B=pre['env'].get('rev_B', ''), rev_C=pre['env'].get('rev_C', ''),
+        rev_B_head=pre['env'].get('rev_B_head', ''), rev_C_head=pre['env'].get('rev_C_head', ''),
         notes=pre['notes'],
         others_exceptions=sorted(list(k) for k in others_exceptions(machine)),
         cells=cells,
         summary=dict(n_cells=len(stats), n_regressed=sum(1 for s in stats if not s['nonreg']),
                      n_ck_mismatch=sum(1 for s in stats if not (s['ck_within'] and s['ck_across']))),
-        derived={a: dict(file=os.path.basename(p), sha256=sha256_file(p)) for a, p in derived.items()},
+        derived={a: dict(file=os.path.basename(p), sha256=hashlib.sha256(body).hexdigest()) for a, (p, body) in derived.items()},
     )
 
 
@@ -559,33 +645,65 @@ def output_paths(md, out_prefix):
     return ps
 
 
+def _remove_outputs(paths):
+    for p in paths:
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+
+
+def commit_outputs(files):
+    """[(path, bytes)] を原子的にまとめて確定する（PR #2466 レビュー）。各ファイルを同じディレクトリの一時ファイルへ
+    すべて書いてから os.replace で置き換える（順序は files の順。集計 JSON は最後）。途中で例外が出たら一時ファイルと
+    今回の出力先をすべて消してから例外を送出する（部分出力を残さない。前回の出力は run_aggregate が冒頭で消している）。"""
+    tmps = []
+    try:
+        for p, body in files:
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(p)), prefix=f'.{os.path.basename(p)}.tmp-')
+            tmps.append(tmp)
+            with os.fdopen(fd, 'wb') as w:
+                w.write(body)
+        for (p, _), tmp in zip(files, tmps):
+            os.replace(tmp, p)
+    except BaseException:
+        _remove_outputs(tmps + [p for p, _ in files])
+        raise
+
+
 def run_aggregate(logs, machine, md, out_prefix, quiet=False):
-    """集計本体。前提不成立なら既存の派生出力を消して 1 を返す（古い正式結果の取り違え防止）。成立なら (0, result)。"""
+    """集計本体。前提不成立・派生値の検証不成立なら 1 を返し何も出力しない。成立なら (0, result)。
+    既存の派生出力は冒頭で消す（古い正式結果の取り違え防止。前提不成立・派生値不正・途中の例外のいずれでも残さない）。
+    出力はすべてメモリ上で生成・検証してから commit_outputs で一括して確定する。"""
+    paths = output_paths(md, out_prefix)
+    _remove_outputs(paths)
     pre = check_prerequisites(logs, machine)
-    if pre['reasons']:
-        for p in output_paths(md, out_prefix):
-            if os.path.exists(p):
-                os.remove(p)
+    reasons = list(pre['reasons'])
+    if not reasons:
+        stats = cell_stats(pre['runs'], machine)
+        dj = derived_jsonl(pre['runs'], machine)
+        # どの出力を書くよりも前に、計算で派生するすべての数値を一括検証する（判定・派生出力の前提。RULE.txt 前提の追記）
+        reasons += derived_value_errors(stats, {a: rows for a, (_, rows) in dj.items()})
+    if reasons:
         print('前提不成立（RULE.txt「前提」）: 判定不能とし、aggregate.md・派生 JSONL・集計 JSON を作らない:\n  '
-              + '\n  '.join(pre['reasons']), file=sys.stderr)
+              + '\n  '.join(reasons), file=sys.stderr)
         return 1, None
-    stats = cell_stats(pre['runs'], machine)
-    derived = write_full(pre['runs'], out_prefix, machine) if out_prefix else {}
+    derived = {a: (f'{out_prefix}-{a}-full.jsonl', dj[a][0]) for a in ARMS} if out_prefix else {}
     result = build_result(machine, pre, stats, derived)
     md_text = render(result)
+    # allow_nan=False は明示検証の取りこぼしに対する最後の防波堤（ここで失敗してもまだ何も書いていない）
+    json_text = json.dumps(result, ensure_ascii=False, indent=1, allow_nan=False) + '\n'
+    files = [(p, body) for (p, body) in derived.values()]
     if md:
-        with open(md, 'w') as w:
-            w.write(md_text)
+        files.append((md, md_text.encode('utf-8')))
+    if out_prefix:
+        files.append((f'{out_prefix}-aggregate.json', json_text.encode('utf-8')))  # 完了記録（派生 JSONL の sha256）は最後
+    commit_outputs(files)
     if not quiet:
         print(md_text)
-    if out_prefix:
-        # 集計 JSON は最後に書く（派生 JSONL の sha256 を含む完了記録）。非有限値は書かない。
-        with open(f'{out_prefix}-aggregate.json', 'w') as w:
-            json.dump(result, w, ensure_ascii=False, indent=1, allow_nan=False)
-            w.write('\n')
-        if not quiet:
+        if out_prefix:
             for a in ARMS:
-                print('wrote', derived[a])
+                print('wrote', derived[a][0])
             print('wrote', f'{out_prefix}-aggregate.json')
     return 0, result
 
@@ -635,7 +753,9 @@ def make_fixture(td, machine, ratio_c=1.0, c_factors=None):
                 w.write(f'run={r} attempt=1 load1={spec["load1_lt"] - 0.5:.2f} gpu_util={gu} pass\n')
     with open(os.path.join(td, 'env_info.txt'), 'w') as w:
         w.write(f'date_utc=2026-09-30T00:00:00Z\nmachine={machine}\nrev_A=registry fandhe-ai =0.9.0\n'
-                f'rev_B={PRE_TREE_PREFIX}\nrev_C=0a25a9c0\nruns={NRUN}\nsmoke=0\nFANDHE_AI_*=未設定（起動時に検査）\n')
+                f'rev_B={PRE_TREE_PREFIX}\nrev_C=0a25a9c0\nruns={NRUN}\nsmoke=0\nFANDHE_AI_*=未設定（起動時に検査）\n'
+                f'rev_B_head={PRE_TREE_FULL}\nrev_C_head=0a25a9c021dcaa6dae86aef03850fc55f8f40d00\n'
+                'tree_B_clean=yes\ntree_C_clean=yes\n')
     for arm in ('B', 'C'):
         with open(os.path.join(td, f'switches-{arm}.txt'), 'w') as w:
             w.write('SME_PRODUCTION_ENABLED=false crates/x.rs:1\n' if arm == 'C' else 'SME_PRODUCTION_ENABLED=<absent> -\n')
@@ -662,6 +782,24 @@ def _append(path, line):
 
 def _gate_lines(td, fn):
     _edit(os.path.join(td, 'gate.log'), fn)
+
+
+def _map_rows(path, pred, upd):
+    """JSONL の各行のうち pred(row) が真の行へ upd(row) を適用して書き直す（値の極端化ケース用。checksum の表記は fixture と同じに保つ）。"""
+    def f(ls):
+        out = []
+        for l in ls:
+            r = json.loads(l)
+            if pred(r):
+                upd(r)
+                l = json.dumps(r).replace('"checksum": 1.5', '"checksum": 1.500000')
+            out.append(l)
+        return out
+    _edit(path, f)
+
+
+def _cell(t, d, n, m):
+    return lambda r: (r.get('task'), r.get('device'), r.get('size'), r.get('mode')) == (t, d, n, m)
 
 
 def self_test_cases():
@@ -706,6 +844,34 @@ def self_test_cases():
 
     def dup_key(td):
         _sub_first(A1(td), '"median_s": ', '"median_s": 0.5, "median_s": ')
+
+    # 派生値の有限性（PR #2466 レビュー）: 入力は各々正の有限値だが、派生値が inf／0 になる極端値
+    def ratio_inf(td):  # run2 の gemm cuda N=256 fresh: C/B = 1e300 / 1e-300 = inf
+        c = _cell('gemm', 'cuda', 256, 'fresh')
+        _map_rows(j(td, 'run2', 'B.jsonl'), c, lambda r: r.update(median_s=1e-300, gflops=1.0))
+        _map_rows(j(td, 'run2', 'C.jsonl'), c, lambda r: r.update(median_s=1e300, gflops=1.0))
+
+    def ratio_zero(td):  # run2 の train cpu 64 reuse: C/B = 1e-300 / 1e300 = 0.0（アンダーフロー）
+        c = _cell('train', 'cpu', 64, 'reuse')
+        _map_rows(j(td, 'run2', 'B.jsonl'), c, lambda r: r.update(median_s=1e300))
+        _map_rows(j(td, 'run2', 'C.jsonl'), c, lambda r: r.update(median_s=1e-300))
+
+    def tput_inf(td):  # infer cuda 64 fresh の全 run・全腕が 1e-320（非正規数）: 比は 1 だが 1/median_s = inf
+        c = _cell('infer', 'cuda', 64, 'fresh')
+        for r in range(1, NRUN + 1):
+            for a in ARMS:
+                _map_rows(j(td, f'run{r}', f'{a}.jsonl'), c, lambda x: x.update(median_s=1e-320))
+
+    def gflops_inf(td):  # gemm cpu 4096 reuse の全 run・全腕: gflops 記録なし・2N³/median_s が inf
+        c = _cell('gemm', 'cpu', 4096, 'reuse')
+        for r in range(1, NRUN + 1):
+            for a in ARMS:
+                _map_rows(j(td, f'run{r}', f'{a}.jsonl'), c, lambda x: (x.update(median_s=1e-300), x.pop('gflops')))
+
+    def gflops_bad(td):  # candle の gemm cuda 512 fresh の gflops 記録値が負
+        c = _cell('gemm', 'cuda', 512, 'fresh')
+        for r in range(1, NRUN + 1):
+            _map_rows(j(td, f'run{r}', 'others.jsonl'), lambda x: c(x) and x['framework'] == 'candle', lambda x: x.update(gflops=-1.0))
 
     return [
         # 判定 3（非後退 ⇔ B→C 5 run 中央値 <= 1.00。境界 1.00 は非後退）
@@ -794,6 +960,23 @@ def self_test_cases():
         ('SW-C 欠損', 'switches-C.txt が無い', 'gb10', 1.0, lambda td: os.remove(j(td, 'switches-C.txt')), 'reject'),
         ('SW-C absent', 'switches-C.txt に <absent>', 'gb10', 1.0,
          lambda td: _append(j(td, 'switches-C.txt'), 'X=<absent> -'), 'reject'),
+        # 出典の実体照合（PR #2466 レビュー・RULE.txt P1 追記。orchestrate.sh が照合した結果の再確認）
+        ('ENV-腕 B HEAD 欠損', 'rev_B_head が無い', 'gb10', 1.0,
+         lambda td: _edit(j(td, 'env_info.txt'), lambda ls: [l for l in ls if not l.startswith('rev_B_head=')]), 'reject'),
+        ('ENV-腕 B HEAD 不一致', 'rev_B_head が 65035979 始まりだが完全な commit と異なる', 'gb10', 1.0,
+         lambda td: _set_env(td, 'rev_B_head', PRE_TREE_PREFIX + '0' * 32), 'reject'),
+        ('ENV-腕 C HEAD と stamp 不一致', 'rev_C_head が rev_C（stamp）で始まらない', 'gb10', 1.0,
+         lambda td: _set_env(td, 'rev_C_head', 'f' * 40), 'reject'),
+        ('ENV-腕 C HEAD 短縮', 'rev_C_head が 40 桁でない', 'gb10', 1.0, lambda td: _set_env(td, 'rev_C_head', '0a25a9c0'), 'reject'),
+        ('ENV-腕 B dirty', 'tree_B_clean=no', 'gb10', 1.0, lambda td: _set_env(td, 'tree_B_clean', 'no'), 'reject'),
+        ('ENV-腕 C clean 欠損', 'tree_C_clean が無い', 'gb10', 1.0,
+         lambda td: _edit(j(td, 'env_info.txt'), lambda ls: [l for l in ls if not l.startswith('tree_C_clean=')]), 'reject'),
+        # 派生値の有限性（PR #2466 レビュー。極端値の比で inf／0 → 判定不能・出力なし・既存出力も除去）
+        ('DV-比 inf', '1e300 / 1e-300 の同一 run 内比が inf', 'gb10', 1.0, ratio_inf, 'reject'),
+        ('DV-比 0', '1e-300 / 1e300 の同一 run 内比が 0（アンダーフロー）', 'gb10', 1.0, ratio_zero, 'reject'),
+        ('DV-スループット inf', 'median_s 1e-320 の 1/median_s が inf', 'gb10', 1.0, tput_inf, 'reject'),
+        ('DV-gflops inf', 'gflops 記録なし・2N³/median_s が inf', 'gb10', 1.0, gflops_inf, 'reject'),
+        ('DV-gflops 負', '比較対象の gflops 記録値が負', 'gb10', 1.0, gflops_bad, 'reject'),
     ]
 
 
@@ -815,6 +998,11 @@ REJECT_HINTS = {
     'EXIT-書式不正': '書式不正', 'ENV-欠損': 'env_info.txt が無い', 'ENV-機体違い': "machine='m4max'", 'ENV-SMOKE': "smoke='1'",
     'ENV-run 数': "runs='1'", 'ENV-FANDHE_AI': 'FANDHE_AI_*=', 'ENV-腕 B rev': "rev_B='deadbeef'",
     'SW-C 欠損': 'switches-C.txt が無い', 'SW-C absent': '<absent>',
+    'ENV-腕 B HEAD 欠損': 'rev_B_head が無い', 'ENV-腕 B HEAD 不一致': "rev_B_head='65035979",
+    'ENV-腕 C HEAD と stamp 不一致': "rev_C_head='ffff", 'ENV-腕 C HEAD 短縮': "rev_C_head='0a25a9c0'",
+    'ENV-腕 B dirty': "tree_B_clean='no'", 'ENV-腕 C clean 欠損': 'tree_C_clean が無い',
+    'DV-比 inf': 'B→C 比 run2=inf', 'DV-比 0': 'B→C 比 run2=0.0', 'DV-スループット inf': '1/median_s=inf',
+    'DV-gflops inf': 'gflops=inf', 'DV-gflops 負': 'gflops=-1.0',
 }
 
 
@@ -868,6 +1056,47 @@ def self_test():
         res['cells'][0]['bc_runs'][1] = None
         row = [ln for ln in render(res).splitlines() if ln.startswith('| gemm cuda N=256 fresh |')][0]
         assert row.split('|')[5].strip() == '', row
+    # 出力の原子性（PR #2466 レビュー）: 生成途中・確定途中の例外で部分出力も前回の出力も残らない
+    def _no_residue(td, md, prefix, label):
+        assert not any(os.path.exists(p) for p in output_paths(md, prefix)), f'{label}: 出力が残った'
+        left = [f for f in os.listdir(td) if '.tmp-' in f]
+        assert not left, f'{label}: 一時ファイルが残った: {left}'
+
+    g = globals()  # run_aggregate が参照する render をこのモジュールの名前空間で差し替える
+    for label, phase in (('ATOM-生成途中の例外', 'render'), ('ATOM-確定途中の例外（3 件目の置換で失敗）', 'replace')):
+        with tempfile.TemporaryDirectory() as td:
+            logs = os.path.join(td, 'logs')
+            os.makedirs(logs)
+            make_fixture(logs, 'gb10')
+            md, prefix = os.path.join(td, 'aggregate.md'), os.path.join(td, 'out')
+            for p in output_paths(md, prefix):
+                open(p, 'w').write('stale')
+            orig_render, orig_replace, calls = g['render'], os.replace, []
+
+            def boom_render(result):
+                raise RuntimeError('injected')
+
+            def boom_replace(a, b):
+                calls.append(b)
+                if len(calls) == 3:
+                    raise OSError('injected')
+                return orig_replace(a, b)
+            try:
+                if phase == 'render':
+                    g['render'] = boom_render
+                else:
+                    os.replace = boom_replace
+                try:
+                    run_aggregate(logs, 'gb10', md, prefix, quiet=True)
+                    raise AssertionError(f'{label}: 例外が伝播しない')
+                except (RuntimeError, OSError) as e:
+                    assert 'injected' in str(e), e
+            finally:
+                g['render'], os.replace = orig_render, orig_replace
+            if phase == 'replace':
+                assert len(calls) == 3, calls  # 2 件は確定済みだった（それも消えることを確かめる）
+            _no_residue(td, md, prefix, label)
+            n += 1
     # 明示例外の範囲（判定 1 の例外は M4 Max burn Metal N>=512 のみ）
     assert ('burn', 'gemm', 'metal', 512, 'fresh') not in others_expected('m4max')
     assert ('burn', 'gemm', 'cuda', 512, 'fresh') in others_expected('gb10')

@@ -20,6 +20,9 @@
     指定する場合は `--arm` から導く値と一致しなければ停止する。標準出力の先頭行と `--tsv` の末尾列（arm）にも腕を記す。
   - 計測条件注記へ集計 JSON の専有ゲート結果（M4 Max の不通過 run を含む）を自動で併記する。
   - `--m4-prev`／`--gb-prev`／`--prev-label` は使わない（指定すると停止）。
+  - （PR #2466 レビュー）HTML・標準出力・`--tsv` に出す派生値（倍率・前比・ms・GF・スループット・カードの比・採用行）が
+    正の有限値でなければ停止する（_chk）。前回の `--out`／`--tsv` は起動時に消し、HTML と TSV はすべての検査の後に
+    一時ファイル経由でまとめて確定する（_commit_outputs。途中の例外でも片方だけの出力を残さない）。両モード共通。
 - `--legacy-1988`: gen_1988.py と同じ入力・出力（`--prev-label`・`--m4-prev`／`--gb-prev` で前比を自前計算）。
   `--body body_1988.html --prev-label 0.8.0` と #1988 の元入力で実行した HTML・標準出力は gen_1988.py の出力と
   byte 同一（非後退確認。`--self-test` が cmp で検査する）。#2120 の正式スコアボードには使わない。
@@ -32,6 +35,7 @@ import argparse
 import hashlib
 import json
 import html
+import math
 import os
 import subprocess
 import sys
@@ -132,6 +136,36 @@ PY_OVERRIDES_APPLIED = []  # load_py が採用・破棄した行の記録（標�
 
 def _die(msg):
     raise SystemExit(f'error: {msg}')
+
+
+def _chk(name, v):
+    """HTML・標準出力・--tsv に出す派生値（倍率・前比・ms／GF／スループット・カードの比）が正の有限値であることを検査する
+    （PR #2466 レビュー）。有限値同士でも極端な値の除算・逆数は inf／0 になりうる。出力はすべて検査の後にまとめて書くため、
+    ここで停止すれば何も出力しない（前回の --out／--tsv は起動時に消している）。"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        _die(f'派生値 {name}={v!r} が正の有限値ではない（極端な入力値。判定不能としてスコアボードを出力しない）')
+    return v
+
+
+def _commit_outputs(files):
+    """[(path, text)] を同じディレクトリの一時ファイルへすべて書いてから os.replace でまとめて確定する（PR #2466 レビュー）。
+    途中で例外が出たら一時ファイルと今回の出力先をすべて消して例外を送出する（HTML だけ・TSV だけの部分出力を残さない）。"""
+    tmps = []
+    try:
+        for p, text in files:
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(p)), prefix=f'.{os.path.basename(p)}.tmp-')
+            tmps.append(tmp)
+            with os.fdopen(fd, 'w', encoding='utf-8') as w:
+                w.write(text)
+        for (p, _), tmp in zip(files, tmps):
+            os.replace(tmp, p)
+    except BaseException:
+        for x in tmps + [p for p, _ in files]:
+            try:
+                os.remove(x)
+            except FileNotFoundError:
+                pass
+        raise
 
 
 # 正式モードの出典表示（腕）。本文テンプレートの {arm_label}／{arm_short}／{arm_detail} と判定列見出しの元。
@@ -334,6 +368,63 @@ def _self_test():
             assert not ok(r) and 'NaN' in r.stderr, r.stderr
         case('IN-集計 JSON の bc_med が NaN → 停止', c_bc_nan)
 
+        # 派生値の有限性と出力の原子性（PR #2466 レビュー）: 停止時は HTML・TSV とも出力せず、前回の出力も残さない
+        def stale(base, arm='C'):
+            for ext in ('html', 'tsv'):
+                open(os.path.join(base, f'out-{arm}.{ext}'), 'w').write('stale')
+
+        def no_outputs(base, arm='C'):
+            left = [f for f in os.listdir(base) if f.startswith(f'out-{arm}.') or '.tmp-' in f]
+            assert not left, f'出力・一時ファイルが残った: {left}'
+
+        def c_py_tiny():
+            out, py, base = prep('pytiny')
+            with open(py, 'w') as w:  # 入力としては正の有限値（非正規数）だが gflops・倍率が inf／0 になる
+                w.write(json.dumps({'framework': 'pytorch', 'version': 'x', 'task': 'gemm', 'device': 'cuda', 'size': 256,
+                                    'median_s': 1e-320, 'mode': 'fresh', 'parity_total': 65536, 'parity_fail_count': 0}) + '\n')
+            stale(base)
+            r = run(args_for(out, py, base))
+            assert not ok(r) and '正の有限値ではない' in r.stderr, r.stderr
+            no_outputs(base)
+        case('DV-Python FW 行の極端値で倍率・gflops が inf／0 → 停止・出力なし・前回出力も除去', c_py_tiny)
+
+        def c_picked_tiny():
+            out, py, base = prep('pickedtiny')
+            edit_json(f'{out["gb10"][0]}-aggregate.json', lambda d: d['cells'][0]['picked']['C'].update(median_s=1e-320))
+            stale(base)
+            r = run(args_for(out, py, base))
+            assert not ok(r) and '1/median_s' in r.stderr, r.stderr
+            no_outputs(base)
+        case('DV-集計 JSON の採用行 median_s の逆数が inf → 停止・出力なし', c_picked_tiny)
+
+        def c_commit_fail():
+            out, py, base = prep('commitfail')
+            stale(base)
+            # HTML の確定（1 件目の os.replace）後、TSV の確定（2 件目）で例外を注入する
+            inject = ('import os, runpy, sys\n'
+                      'orig = os.replace\n'
+                      'n = [0]\n'
+                      'def boom(a, b):\n'
+                      '    n[0] += 1\n'
+                      '    if n[0] == 2:\n'
+                      '        raise OSError("injected")\n'
+                      '    return orig(a, b)\n'
+                      'os.replace = boom\n'
+                      f'sys.argv = [{str(HERE)!r}] + sys.argv[1:]\n'
+                      f'runpy.run_path({str(HERE)!r}, run_name="__main__")\n')
+            r = subprocess.run([sys.executable, '-c', inject] + args_for(out, py, base), capture_output=True, text=True)
+            assert r.returncode != 0 and 'injected' in r.stderr, r.stderr
+            no_outputs(base)
+        case('ATOM-TSV の確定途中の例外 → HTML も残さない（部分出力なし）', c_commit_fail)
+
+        def c_out_is_input():
+            out, py, base = prep('outin')
+            a = args_for(out, py, base)
+            a[a.index('--out') + 1] = py
+            r = run(a)
+            assert not ok(r) and '入力ファイルと同じパス' in r.stderr and os.path.isfile(py), r.stderr
+        case('ATOM-出力先が入力と同じ → 停止（入力を消さない）', c_out_is_input)
+
         def c_exc():
             out, py, base = prep('exc')
             edit_json(f'{out["m4max"][0]}-aggregate.json', lambda d: d.update(others_exceptions=[]))
@@ -522,8 +613,33 @@ else:
              '（省略すると --arm から導く。腕と異なる見出しを付けない）')
 
 
+# 出力の原子性（PR #2466 レビュー）: 前回の --out／--tsv は起動時に消し、以後どこで停止しても部分出力・古い出力を残さない
+# （成功時だけ最後にまとめて書く）。出力先が入力と同じパスなら入力を消してしまうため停止する。
+_OUTS = [x for x in (ARGS.out, ARGS.tsv) if x]
+_INS = [x for x in (ARGS.m4, ARGS.gb, ARGS.gb_py, ARGS.gb_extra, ARGS.m4_agg, ARGS.gb_agg, ARGS.m4_prev, ARGS.body, ARGS.style)
+        if x] + list(ARGS.gb_prev or [])
+if len({os.path.realpath(x) for x in _OUTS}) != len(_OUTS):
+    _die('--out と --tsv が同じパス')
+for _o in _OUTS:
+    if any(os.path.realpath(_o) == os.path.realpath(_i) for _i in _INS):
+        _die(f'出力先 {_o} が入力ファイルと同じパス')
+for _o in _OUTS:
+    if os.path.lexists(_o):
+        if os.path.isdir(_o) and not os.path.islink(_o):
+            _die(f'出力先 {_o} がディレクトリ')
+        os.remove(_o)
+
+
 def load(p):
     return [json.loads(l) for l in open(p) if l.strip()]
+
+
+def load_strict(p):
+    """正式モードの --m4／--gb（aggregate.py の派生 JSONL）を aggregate.py と同じ厳格読み取り（NaN・重複キー・型）で読む。"""
+    try:
+        return [r for r, _ in AGGMOD.load_rows(p)]
+    except ValueError as e:
+        _die(f'派生 JSONL を読めない: {e}')
 
 
 def key(r):
@@ -566,6 +682,15 @@ def load_agg(path, machine, main_path, arm):
                 AGGMOD._positive_finite(c.get(f), f)
             except ValueError as e:
                 _die(f'{path}: セル {k}: {e}')
+        # カードに出す採用行の値（ms・スループット 1/median_s）と判定の真偽値も検査する（PR #2466 レビュー）
+        for a in ('B', 'C'):
+            ms = ((c.get('picked') or {}).get(a) or {}).get('median_s')
+            _chk(f'{path}: セル {k} 腕 {a} 採用行 median_s', ms)
+            _chk(f'{path}: セル {k} 腕 {a} 採用行 1/median_s', 1.0 / ms)
+            _chk(f'{path}: セル {k} 腕 {a} 採用行 median_s×1e3', ms * 1e3)
+        for f in ('nonreg', 'ck_within', 'ck_across'):
+            if not isinstance(c.get(f), bool):
+                _die(f'{path}: セル {k}: {f} が真偽値ではない: {c.get(f)!r}')
         cells[k] = c
     if set(cells) != set(AGGMOD.judged_cells(machine)):
         _die(f'{path}: セル集合が RULE.txt のセル範囲と一致しない')
@@ -656,8 +781,8 @@ else:
     AGG_M4, M4_CELLS = load_agg(ARGS.m4_agg, 'm4max', ARGS.m4, ARGS.arm)
     AGG_GB, GB_CELLS = load_agg(ARGS.gb_agg, 'gb10', ARGS.gb, ARGS.arm)
     AGG = {'M4 Max': M4_CELLS, 'GB10': GB_CELLS}
-    m4 = index(load(ARGS.m4))
-    gb = index(load(ARGS.gb) + load_py([ARGS.gb_py] + ([ARGS.gb_extra] if ARGS.gb_extra else [])))
+    m4 = index(load_strict(ARGS.m4))
+    gb = index(load_strict(ARGS.gb) + load_py([ARGS.gb_py] + ([ARGS.gb_extra] if ARGS.gb_extra else [])))
     m4_prev = gb_prev = None
 
 
@@ -708,23 +833,26 @@ def fmt_ms(ms):
 
 def cell_value(r, task, size):
     """(表示値, 有効か, 注記) を返す。"""
-    ms = r['median_s'] * 1e3
+    who = f'{r.get("framework")} {task} {r.get("device")} N={size} {r.get("mode")}'
+    ms = _chk(f'{who} ms', r['median_s'] * 1e3)
     fail = r.get('parity_fail_count') or 0
     resc = r.get('parity_scaled_abs_rescued') or 0
     valid = fail == 0
     if task == 'gemm':
-        gf = r.get('gflops') or (2.0 * size ** 3 / r['median_s'] / 1e9)
+        gf = _chk(f'{who} gflops', r.get('gflops') or (2.0 * size ** 3 / r['median_s'] / 1e9))
         txt = f'{fmt_ms(ms)} <small>/ {gf:,.0f} GF</small>'
     elif task == 'train':
         txt = f'{fmt_ms(ms)} <small>ms</small>'
     else:
-        tp = 1.0 / r['median_s']
+        tp = _chk(f'{who} 1/median_s', 1.0 / r['median_s'])
+        _chk(f'{who} µs', ms * 1e3)
         txt = f'{tp:,.0f} <small>/ {ms*1e3:,.0f} µs</small>'
     return txt, valid, fail, resc
 
 def metric(r, task):
     """比較用スカラ。時間は小さいほど良い・推論はスループット大きいほど良い。"""
-    return (1.0 / r['median_s']) if task == 'infer' else r['median_s']
+    return _chk(f'{r.get("framework")} {task} {r.get("device")} N={r.get("size")} 比較値',
+                (1.0 / r['median_s']) if task == 'infer' else r['median_s'])
 
 def better(a, b, task):
     return a > b if task == 'infer' else a < b
@@ -801,6 +929,7 @@ def build_row(data, data_prev, machine, task, device, size, skip):
         ratio = mine / best[1]
     else:
         ratio = best[1] / mine
+    _chk(f'{machine} {label} 倍率（最速他 FW ÷ fandhe-ai）', ratio)
     if rank == 1:
         verdict, cls = '1 位', 'win'
     elif ratio >= 0.90:
@@ -825,6 +954,7 @@ def build_row(data, data_prev, machine, task, device, size, skip):
             base = me
         if old is not None:
             vprev = (metric(base, task) / metric(old, task)) if task == 'infer' else (base['median_s'] / old['median_s'])
+            _chk(f'{machine} {label} {PREV_VER} 比', vprev)
             vprevs = f'{PREV_VER} 比 {vprev:.2f}×{fresh_note}'
         else:
             vprev, vprevs = None, f'{PREV_VER} 記録なし'
@@ -901,6 +1031,7 @@ def card_gemm(data, data_prev, dev, sizes, title):
         parts.append(f'N={n} {old["median_s"]*1e3:.2f}→{new["median_s"]*1e3:.2f} ms')
         ratios.append(new['median_s'] / old['median_s'])
     mode_lbl = mode
+    [_chk(f'{title} {PREV_VER} 比', x) for x in ratios]
     return f'<div><h3>{title}（{mode_lbl}）</h3><span class="v">{PREV_VER} 比 {min(ratios):.2f}〜{max(ratios):.2f}（&lt;1 が高速化）</span><p>{"・".join(parts)}</p></div>'
 
 def card_train(data, data_prev, devs, title):
@@ -909,6 +1040,7 @@ def card_train(data, data_prev, devs, title):
         old, new, mode = msprev(data, data_prev, 'train', dev, 64)
         parts.append(f'{DEVNAME[dev]} {old["median_s"]*1e3:.2f}→{new["median_s"]*1e3:.2f} ms（{mode}）')
         ratios.append(new['median_s'] / old['median_s'])
+    [_chk(f'{title} {PREV_VER} 比', x) for x in ratios]
     return f'<div><h3>{title}</h3><span class="v">{PREV_VER} 比 {min(ratios):.2f}〜{max(ratios):.2f}（&lt;1 が高速化）</span><p>{"・".join(parts)}</p></div>'
 
 def card_infer(data, data_prev, devs, title):
@@ -917,6 +1049,7 @@ def card_infer(data, data_prev, devs, title):
         old, new, mode = msprev(data, data_prev, 'infer', dev, 64)
         parts.append(f'{DEVNAME[dev]} {1/old["median_s"]:,.0f}→{1/new["median_s"]:,.0f} /s（{mode}）')
         ratios.append(old['median_s'] / new['median_s'])
+    [_chk(f'{title} {PREV_VER} 比', x) for x in ratios]
     return f'<div><h3>{title}</h3><span class="v">{PREV_VER} 比 {min(ratios):.2f}〜{max(ratios):.2f}（&gt;1 が改善）</span><p>{"・".join(parts)}</p></div>'
 
 def _agg_card(machine, task, keys, title, fmt_pair, mode_lbl):
@@ -988,15 +1121,9 @@ out = BODY.format(
     m4_cards=M4_CARDS, gb_cards=GB_CARDS,
     **ARM_FMT,
 )
-Path(ARGS.out).write_text(out)
-
-# 検証出力
-if not LEGACY:
-    # 正式モードのみ先頭行に腕を記す（legacy は gen_1988.py と byte 同一の標準出力を保つ）
-    print(f'arm {ARGS.arm} {ARM_TEXT[ARGS.arm]["label"]}')
-for r in allrows:
-    rt = 'n/a' if r['ratio'] is None else f"{r['ratio']:.2f}x"
-    print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best'] or '-':10} {rt}  {r['vprevs']}")
+# 検証出力（HTML・TSV はメモリ上で生成し、派生値の検査をすべて通った後に _commit_outputs でまとめて書く。
+# 標準出力は確定後に出す。出力の順序・内容は従来どおりで、legacy の gen_1988.py との byte 同一も保つ）
+OUT_FILES = [(ARGS.out, out)]
 if ARGS.tsv:
     def _tsv_tail(r, spec):
         # 正式モードは 22 セル転記用に、行のセル（task／device／size）と集計 JSON の B→C 比・q1／q3・非後退・checksum 一致を
@@ -1008,8 +1135,16 @@ if ARGS.tsv:
         ck = '一致' if c['ck_within'] and c['ck_across'] else '不一致'
         return (f"\t{t}\t{d}\t{n}\t{c['bc_med']:.4f}\t{c['bc_q1']:.4f}\t{c['bc_q3']:.4f}"
                 f"\t{'非後退' if c['nonreg'] else '後退'}\t{ck}\tarm={ARGS.arm}")
-    Path(ARGS.tsv).write_text(''.join(f"{r['machine']}\t{r['label']}\t{r['verdict']}\t{r['best'] or ''}\t{'' if r['ratio'] is None else format(r['ratio'], '.4f')}\t{r['vprevs']}{_tsv_tail(r, spec)}\n"
-                                      for r, spec in zip(allrows, M4_ROWS + GB_ROWS)))
+    OUT_FILES.append((ARGS.tsv, ''.join(f"{r['machine']}\t{r['label']}\t{r['verdict']}\t{r['best'] or ''}\t{'' if r['ratio'] is None else format(r['ratio'], '.4f')}\t{r['vprevs']}{_tsv_tail(r, spec)}\n"
+                                        for r, spec in zip(allrows, M4_ROWS + GB_ROWS))))
+_commit_outputs(OUT_FILES)
+
+if not LEGACY:
+    # 正式モードのみ先頭行に腕を記す（legacy は gen_1988.py と byte 同一の標準出力を保つ）
+    print(f'arm {ARGS.arm} {ARM_TEXT[ARGS.arm]["label"]}')
+for r in allrows:
+    rt = 'n/a' if r['ratio'] is None else f"{r['ratio']:.2f}x"
+    print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best'] or '-':10} {rt}  {r['vprevs']}")
 if LEGACY:
     # gen_1988.py と byte 同一の集計行（判定不能行は 0.9.0 系データでは生じない）
     print('tally', len(wins), len(nears), len(losses), 'invalid', invalid_n, 'total', len(allrows))

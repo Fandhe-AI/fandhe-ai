@@ -42,6 +42,24 @@
         （lowlayer-diagnosis-2026-09-12/dgx/results-dgx-py-0.8.0.jsonl の 5 行目と同一。2026-09-12 セッション）
       上書き先（採用）: sha256 e7061be8ba151ce7f0c61357d5018059383bd8d50d074110e2f6f396e00d4c6f
         （framework-compare-precision-class-remeasure-1988/gb10/run5/py.jsonl と同一。#1988 採用 run・2026-09-18 セッション）
+  （追記 2026-09-30・実測前。PR #2466 レビュー。出典の照合。上の腕の定義・.rev-stamp の記録は変えない）
+    HEAD_TREE・PRE_TREE は .git を含む git 作業ツリーのルートとして用意する（git worktree add で作ったツリーを別ノードへ
+    転送すると .git の参照が切れるため、転送する場合は clone 等で .git ごと用意する）。orchestrate.sh は各ツリーについて
+    次を tree_provenance.sh で照合し、1 つでも外れればスイッチ抽出・ビルドの前に停止する。全 run 後にも同じ照合を繰り返し
+    （腕 C・腕 B とも HEAD が計測前と同一であること）、外れれば完了記録（env_info.txt）を書かずに停止する:
+    - git rev-parse --show-toplevel がツリー自身であること（包含する別リポジトリの HEAD を借用しない）
+    - .rev-stamp が 7〜40 桁の小文字 16 進で、git rev-parse HEAD（40 桁）がその値で始まること。腕 B は HEAD が
+      650359799aa5e8e6d493bf3a38d6e59732062863 と完全一致すること
+    - git status（未追跡ファイルを含む）に変更がないこと。例外は計測手順が意図的に加える次の 2 つだけ:
+      ツリールートの未追跡 .rev-stamp（手順 §5 が書く）と、LOGD をツリー内に置く場合の LOGD 配下の未追跡ファイル
+      （計測出力。ツリー内の LOGD は docs/ 配下に限る。LOGD 配下でも追跡ファイルの変更は例外にしない）。
+      submodule（docs/spec）はビルドに使わないため照合から除外する。Cargo.lock の patch ビルドによる一時的な書き換えは
+      従来どおりビルドごとに復元し sha256 で突合する（照合はビルド前と復元後に行う）。
+    - assume-unchanged／skip-worktree のファイルがないこと（git status に変更が現れなくなるため）
+    - 計測キット（orchestrate.sh・switches.sh・tree_provenance.sh）は HEAD_TREE の本ディレクトリから起動すること
+    照合結果は env_info.txt の rev_B_head・rev_C_head（40 桁）・tree_B_clean・tree_C_clean（yes）に記録し、前提 P1 が
+    再確認する。ビルドした計測バイナリの sha256 も env_info.txt（bin_sha256）に記録し、全 run 後に変化していないことを確かめる。
+    ツリー外の環境（~/.cargo 等の cargo 設定・ツールチェーン・ドライバ）は照合の対象外で、env_info.txt に取得値を記録するだけである。
 
 セル範囲（0.9.0 スコアボードの行に写像し、新セルを作らない。各腕とも fandhe-ai は fresh・reuse 両モード）:
   M4 Max: gemm cpu N=256〜2048・gemm metal N=256〜4096・train／infer × {cpu, metal}（batch 64。--phases 行は収録するが判定対象外）。
@@ -74,6 +92,17 @@
      median_s）がそろい、size は整数、median_s は正の有限値、parity_fail_count は非負整数（gemm は必須）。
      同一セルの重複行・セル範囲外の行・想定外 FW の行がない。
   P5 判定 1 の完備性と判定 4 の checksum 欠損なし（下記）。
+  （追記 2026-09-30・実測前。PR #2466 レビュー。P1〜P5 と判定 1〜6 の閾値・定義は変えない）
+  P1 追加（出典の実体照合）: env_info.txt に rev_B_head（650359799aa5e8e6d493bf3a38d6e59732062863 と一致し rev_B で始まる）・
+     rev_C_head（40 桁の 16 進で rev_C で始まる）・tree_B_clean=yes・tree_C_clean=yes があること（「計測腕」追記の照合結果）。
+  派生値の有限性: aggregate.py は、計算で派生する数値（各腕 5 run の median_s・同一 run 内比 B→C／A→C の各 run 値・
+     B→C 中央値・q1・q3・A→C 中央値・採用行の median_s・aggregate.md の中央値、派生 JSONL に書く採用行からスコアボードが
+     導出する ms・1/median_s・gflops〈記録値、無ければ 2N³/median_s〉）が正の有限値であることを、どの出力を書くよりも前に
+     一括で検証する。入力が各々正の有限値でも極端な値の比・逆数は inf や 0 になりうるためである。1 つでも満たさなければ
+     前提不成立と同じく判定不能とし、aggregate.md・派生 JSONL・集計 JSON を作らない（既存の派生出力も消す）。
+     出力はメモリ上で生成・検証した後に一時ファイルへ書いて置き換え、途中で例外が起きた場合は今回の出力もすべて消す。
+     scoreboard/gen_2120.py も、HTML・--tsv に出す倍率・前比・ms・GF・スループット・カードの比が正の有限値でなければ停止し、
+     HTML と TSV は両方を検証した後にまとめて書く（前回の --out／--tsv は起動時に消す）。
 
 判定（結果が出る前に固定・中間なし）:
   1. 完備性: 判定対象セルは 5 run × 3 腕がそろうこと。欠けがあれば派生出力を作らず停止する（捏造・補間しない）。
@@ -113,3 +142,4 @@
   <prefix>-{A,B,C}-full.jsonl・<prefix>-aggregate.json（追記 2026-09-30）・
   build.log・gate.log・run{1..5}/・env_info.txt（ホスト名・ユーザー名・絶対パスは <home> 等へマスク）・
   scoreboard/（gen_2120.py・body_2120.html）。機体別は m4max/・gb10/ 配下へ収納する。
+  （追記 2026-09-30）tree_provenance.sh（出典照合。orchestrate.sh が source する）・orchestrate_selftest.sh（その self-test）。
