@@ -253,6 +253,12 @@
 // 判断で `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）
 // でも単体テストが回るようにする。
 pub(crate) mod batch_state;
+// イシュー #2114: Metal デバイス存在確認キャッシュ（opt-in・既定 OFF）と infer GPU 起動固定費の
+// 診断カウンタ。objc2 に触れない純 Rust のため `cfg(target_os = "macos")` を付けず、Linux CI でも
+// 状態機械の単体テストが回る（`batch_state` と同じ判断。設計は `fixed_cost_diag.rs` 冒頭）。
+// `#[doc(hidden)] pub` は facade（`resolve_ops`）との crate 間結線用の内部面で、facade からは再公開しない。
+#[doc(hidden)]
+pub mod fixed_cost_diag;
 // `buffer.rs::MetalBuffer::read_to_vec` の readback 宛先ポリシー（イシュー
 // #2112。既定 OFF・env `FANDHE_AI_METAL_READBACK_DEST` で opt-in）。`objc2`
 // 系 FFI に触れない純ロジックのため `batch_state` と同じ判断で cfg を付けず、
@@ -319,6 +325,11 @@ pub mod gemm;
 // 参照）が `kernel_gpu`（GPUStartTime/GPUEndTime）変種の実体。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_reuse_phase_diag_tests;
+// イシュー #2114: infer（784→256→ReLU→10・batch 64）の wall 時間と GPU busy（GPUStart/EndTime）の
+// 差から GPU 起動・同期の固定費を record-only で診断する。`synchronize_with_gpu_timestamps` は
+// 既定ビルドで `pub(crate)` のため crate 内部の兄弟モジュールとして置く（`gemm_reuse_phase_diag_tests` と同型）。
+#[cfg(all(test, target_os = "macos"))]
+mod infer_fixed_cost_diag_tests;
 // E2 特殊化版（`spec_source`／`gemm::MetalGemm::new_with_source_
 // specialization`。イシュー #1288）の `MTLComputePipelineState` 反射値・
 // N=1024/2048/4096 純カーネル時間（GPU タイムスタンプ）を base（function

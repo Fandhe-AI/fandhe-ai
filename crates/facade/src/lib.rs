@@ -901,9 +901,18 @@ fn resolve_ops(device: Device) -> Result<Box<dyn BackendOps + Send>, BackendErro
         Device::Metal => {
             // `MetalDeviceProvider::select` で存在検証してから構築する
             // （`crates/backend-metal/src/device.rs::MetalDeviceProvider`）。
-            let provider = fandhe_ai_backend_metal::MetalDeviceProvider::new();
-            let providers: [&dyn DeviceProvider; 1] = [&provider];
-            select_from(&providers, device)?;
+            //
+            // イシュー #2114: 存在確認（`probe_all` = IOKit + `MTLCopyAllDevices`）は
+            // `tape_for`／`predict_resident` の呼び出しごとに走り、tape_build の主因と推定される。
+            // `verify_device_cached` は既定 OFF で従来と同じく毎回 `select_from` を実行する。
+            // opt-in（backend-metal 側の `#[doc(hidden)]` ガード）の ON 時のみ、成功済みの
+            // 存在確認を再利用する（失敗はキャッシュしない。設計は
+            // `docs/perf/metal-tape-build-infer-fixedcost.md`）。
+            fandhe_ai_backend_metal::fixed_cost_diag::verify_device_cached(|| {
+                let provider = fandhe_ai_backend_metal::MetalDeviceProvider::new();
+                let providers: [&dyn DeviceProvider; 1] = [&provider];
+                select_from(&providers, device).map(|_| ())
+            })?;
             Ok(Box::new(fandhe_ai_backend_metal::MetalBackendOps::new()))
         }
     }
