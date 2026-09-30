@@ -92,7 +92,9 @@ def fail_count(r):
 
 
 def load_jsonl(path):
-    """{key: (row, line)}。--phases 行は判定対象外のため除外。後勝ち。"""
+    """{key: (row, line)}。--phases 行は判定対象外のため除外。
+    同一セルキーの重複行は採用値が曖昧になり 5 run × 3 腕の完備性も検証できないため、
+    後勝ちにせず ValueError で入力不正として拒否する（orchestrate.sh は run ごとに truncate するため正常系で重複は出ない）。"""
     idx = {}
     if not os.path.exists(path):
         return idx
@@ -104,7 +106,10 @@ def load_jsonl(path):
             r = json.loads(line)
             if r.get('task') in PHASE_TASKS or 'phase' in r:
                 continue
-            idx[key(r)] = (r, line)
+            k = key(r)
+            if k in idx:
+                raise ValueError(f'{path}: セルキーが重複: {k}（採用値が曖昧なため拒否。原因を調査して再計測すること）')
+            idx[k] = (r, line)
     return idx
 
 
@@ -346,6 +351,19 @@ def self_test():
         mk(1.0, ck_diff=True)
         _, st = go()
         assert all(not (s['ck_within'] and s['ck_across']) for s in st)
+        # 同一セルの重複行は後勝ちにせず停止（A 腕・others の両方）
+        for fn in ('A.jsonl', 'others.jsonl'):
+            mk(1.0)
+            p = os.path.join(td, 'run2', fn)
+            lines = open(p).read().splitlines()
+            with open(p, 'a') as w:
+                w.write(lines[0] + '\n')
+            try:
+                load_all(td)
+            except ValueError as e:
+                assert '重複' in str(e)
+            else:
+                raise AssertionError(f'{fn} の重複行を受理した')
         # 派生 JSONL と md
         mk(1.0)
         runs, st = go()
@@ -377,8 +395,8 @@ def main():
         return
     if not (a.machine and a.logs):
         ap.error('--machine と --logs が必要')
-    runs = load_all(a.logs)
     try:
+        runs = load_all(a.logs)
         validate(runs, a.machine)
     except ValueError as e:
         print(e, file=sys.stderr)
