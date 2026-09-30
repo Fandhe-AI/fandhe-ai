@@ -167,6 +167,15 @@ HIP では `hipCtx*`／`hipModule*` は legacy 扱いで、新規コードは `h
 - カーネル・シェーダは未変更（bit 一致は構造上不変）。`WARP_SIZE`／マスクのレンダリング時注入は #2126。`backend-cuda/src/warp_geometry.rs` は導出値の模型（`cfg(test)` 限定・未結線）で、width 32 の値が現行リテラルと一致することを固定する
 - facade へは公開しない（`api_surface` テストが `DeviceInfo` 再エクスポート禁止を固定）
 
+## 6c. 実装記録（#2126・起票案 2）
+
+- **注入方式**: `crates/backend-cuda/src/warp_geometry.rs`（`cfg(test)` を外して本番結線）の `WarpGeometry::for_cuda(&CudaDevice)` が `CudaDevice::warp_size()`（`DeviceInfo::warp_width` と同じ取得元）から幅を導出し、`render_defines` が数値のみの `#define` を NVRTC ソース先頭へ連結する（`kernels_tiled_pipeline.rs::render_defines` と同方針。文字列の外部入力なし）。注入する define は `WARP_SIZE`・`WARP_HALF`（butterfly 初期 offset）・`WARP_FULL_MASK`・`WARP_SHFL_XOR(v, off)`・`WARP_SYNC()`、および `MSE_PARTIAL_F32`／`MSE_FINALIZE_F32`／`RMSNORM_BWD_DX_F32` の `WARPS_PER_BLOCK`。
+- **対象**: `kernels_rmsnorm.rs`（ONEPASS／TWOPASS／BWD_DX）・`kernels_softmax.rs`（softmax／log_softmax の各 ONEPASS／TWOPASS）・`kernels_mse.rs`（PARTIAL／FINALIZE）。各 `pub const` はマクロ参照を含む「テンプレート」となり、`render_*(geom)` 経由でのみ NVRTC へ渡す。`MSE_BACKWARD_F32` と rmsnorm dw 系は warp 演算を持たないため不変。
+- **width ≠ 32 は fail-closed**: CUDA の `__shfl_xor_sync`／`__syncwarp` のマスクは 32 bit で、`full_lane_mask()` の 64 bit 値をそのまま注入すると誤動作するため、`render_*` は文字列組み立て前に `InvalidKernelConfig` で拒否する。`warp_size()` の取得失敗も 32 と推定せず拒否する。wave64／HIP のマクロ本体は #2127 以降。
+- **Metal は 32 固定で据え置き**: MSL に注入機構がないため、`rmsnorm.metal`／`softmax.metal`／`mse.metal` へ安全性コメントを追記（`simd_shuffle_xor` の offset 16→1 と `threadExecutionWidth` 検証による fail-closed）。Rust 側の `RMSNORM_THREADGROUP_WIDTH`／`SOFTMAX_THREADGROUP_WIDTH` は `APPLE_SIMDGROUP_WIDTH` から導出し、`MSE_THREADGROUP_WIDTH / APPLE_SIMDGROUP_WIDTH == 8` をコンパイル時に固定した。MSL テキストのロック（`*_source_evidence.rs`）は不変。
+- **検証**: Linux CI で実行可能な単体テスト（レンダ結果の define・リテラル残存否定・境界検査維持・width 64 拒否）を追加。width 32 ではマクロ展開後に旧ソースと同一の式となるため数値・性能は不変の想定。GB10／M4 Max 実機での `#[ignore]` bit 一致スイート（`rmsnorm_parity`・`rmsnorm_backward_parity`・`softmax_parity`・`log_softmax_parity`・`log_softmax_backward_parity`・`mse_parity`、Metal 側同名群）の再実行は**未実施・申し送り**。
+- **後続候補**: `kernels_bce/huber/nll/reduce/norm_backward.rs` の同型 8 warp 固定、§2 (A) の `kernels_mma*.rs`・`kernels_wmma_opt.rs`・`kernels.rs` のレーン導出リテラル。
+
 ## 7. 出典
 
 - `.claude/skills/amd-rocm/references/hip/porting-cuda-to-hip.md`（warp 幅・legacy driver/module API）

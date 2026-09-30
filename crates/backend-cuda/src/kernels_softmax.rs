@@ -164,7 +164,7 @@ extern "C" __global__ void softmax_f32_onepass(
         // codex-review 指摘・P1 修正: `raw * scale` を先に計算すると
         // `raw = f32::MAX` 等の有限な極値で `+Inf` へオーバーフローし
         // `exp2f(Inf - Inf) = NaN` になるため）。
-        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_cols; base += WARP_SIZE * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
                 smem[base + 0] = v4.x;
@@ -189,7 +189,7 @@ extern "C" __global__ void softmax_f32_onepass(
             }
         }
         // スカラー経路: cols % 4 != 0 なら全要素、それ以外は端要素なし。
-        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+        for (long long i = (long long)vec_cols + lane; i < cols; i += WARP_SIZE) {
             float raw = x_row[i];
             smem[i] = raw;
             float m_new = fmaxf(m, raw);
@@ -203,7 +203,7 @@ extern "C" __global__ void softmax_f32_onepass(
         // 上記ロードループが書いた smem を他レーンが読めるようにする
         // warp 内バリア（`__syncthreads()` は使わない。`kernels_rmsnorm.rs`
         // と同じ設計方針）。
-        __syncwarp(0xffffffffu);
+        WARP_SYNC();
 
         // warp 内 (m, l) ペアの butterfly 結合（5 段。offset 16→1。本
         // ファイル冒頭コメント「2 段シャッフルではなく 5 段 butterfly を
@@ -211,9 +211,9 @@ extern "C" __global__ void softmax_f32_onepass(
         // 補正係数スキップを適用する。`m`／`m_o` は生ドメインのため差分
         // 計算後に `scale` を乗算する（上記と同じ理由）。
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
-            float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            float m_o = WARP_SHFL_XOR(m, offset);
+            float l_o = WARP_SHFL_XOR(l, offset);
             float m_t = fmaxf(m, m_o);
             float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
             float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
@@ -223,13 +223,13 @@ extern "C" __global__ void softmax_f32_onepass(
 
         float inv_l = 1.0f / l;
 
-        for (long long i = lane; i < cols; i += 32) {
+        for (long long i = lane; i < cols; i += WARP_SIZE) {
             out_row[i] = exp2f((smem[i] - m) * scale) * inv_l;
         }
 
         // 次の行（grid-stride ループの次反復）が smem を上書きする前に、
         // 全レーンの上記読み出しが完了していることを保証する。
-        __syncwarp(0xffffffffu);
+        WARP_SYNC();
     }
 }
 "#;
@@ -265,7 +265,7 @@ extern "C" __global__ void softmax_f32_twopass(
         // 指摘・P1 修正。本ファイル冒頭コメント参照）。
         float m = SOFTMAX_MASK_E2;
         float l = 0.0f;
-        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_cols; base += WARP_SIZE * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
                 float vals[4] = { v4.x, v4.y, v4.z, v4.w };
@@ -281,7 +281,7 @@ extern "C" __global__ void softmax_f32_twopass(
                 }
             }
         }
-        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+        for (long long i = (long long)vec_cols + lane; i < cols; i += WARP_SIZE) {
             float raw = x_row[i];
             float m_new = fmaxf(m, raw);
             if (m_new > m) {
@@ -292,9 +292,9 @@ extern "C" __global__ void softmax_f32_twopass(
         }
 
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
-            float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            float m_o = WARP_SHFL_XOR(m, offset);
+            float l_o = WARP_SHFL_XOR(l, offset);
             float m_t = fmaxf(m, m_o);
             float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
             float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
@@ -308,7 +308,7 @@ extern "C" __global__ void softmax_f32_twopass(
         // `raw = x[i]` を再計算し `exp2f((raw - m) * scale)` を書き出す
         // （同一カーネル・同一行ループ内で完結。中間テンソルは書き出さ
         // ない）。
-        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_cols; base += WARP_SIZE * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
                 float4 o;
@@ -319,7 +319,7 @@ extern "C" __global__ void softmax_f32_twopass(
                 *reinterpret_cast<float4*>(out_row + base) = o;
             }
         }
-        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+        for (long long i = (long long)vec_cols + lane; i < cols; i += WARP_SIZE) {
             out_row[i] = exp2f((x_row[i] - m) * scale) * inv_l;
         }
     }
@@ -363,7 +363,7 @@ extern "C" __global__ void log_softmax_f32_onepass(
         float m = SOFTMAX_MASK_E2;
         float l = 0.0f;
 
-        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_cols; base += WARP_SIZE * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
                 smem[base + 0] = v4.x;
@@ -383,7 +383,7 @@ extern "C" __global__ void log_softmax_f32_onepass(
                 }
             }
         }
-        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+        for (long long i = (long long)vec_cols + lane; i < cols; i += WARP_SIZE) {
             float raw = x_row[i];
             smem[i] = raw;
             float m_new = fmaxf(m, raw);
@@ -394,12 +394,12 @@ extern "C" __global__ void log_softmax_f32_onepass(
             m = m_new;
         }
 
-        __syncwarp(0xffffffffu);
+        WARP_SYNC();
 
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
-            float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            float m_o = WARP_SHFL_XOR(m, offset);
+            float l_o = WARP_SHFL_XOR(l, offset);
             float m_t = fmaxf(m, m_o);
             float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
             float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
@@ -411,11 +411,11 @@ extern "C" __global__ void log_softmax_f32_onepass(
         // （Sterbenz 順序。本定数冒頭コメント参照。`softmax` の
         // `exp2f((smem[i] - m) * scale) * inv_l` とはここだけが異なる）。
         float log_l = logf(l);
-        for (long long i = lane; i < cols; i += 32) {
+        for (long long i = lane; i < cols; i += WARP_SIZE) {
             out_row[i] = (smem[i] - m) - log_l;
         }
 
-        __syncwarp(0xffffffffu);
+        WARP_SYNC();
     }
 }
 "#;
@@ -447,7 +447,7 @@ extern "C" __global__ void log_softmax_f32_twopass(
         // 指摘・P1 修正。本ファイル冒頭コメント参照）。
         float m = SOFTMAX_MASK_E2;
         float l = 0.0f;
-        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_cols; base += WARP_SIZE * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
                 float vals[4] = { v4.x, v4.y, v4.z, v4.w };
@@ -463,7 +463,7 @@ extern "C" __global__ void log_softmax_f32_twopass(
                 }
             }
         }
-        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+        for (long long i = (long long)vec_cols + lane; i < cols; i += WARP_SIZE) {
             float raw = x_row[i];
             float m_new = fmaxf(m, raw);
             if (m_new > m) {
@@ -474,9 +474,9 @@ extern "C" __global__ void log_softmax_f32_twopass(
         }
 
         #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
-            float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
+        for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+            float m_o = WARP_SHFL_XOR(m, offset);
+            float l_o = WARP_SHFL_XOR(l, offset);
             float m_t = fmaxf(m, m_o);
             float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
             float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
@@ -492,7 +492,7 @@ extern "C" __global__ void log_softmax_f32_twopass(
         // `raw = x[i]` を再計算し `(raw - m) - log_l` を書き出す
         // （同一カーネル・同一行ループ内で完結。中間テンソルは書き出さ
         // ない）。
-        for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_cols; base += WARP_SIZE * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
                 float4 o;
@@ -503,15 +503,88 @@ extern "C" __global__ void log_softmax_f32_twopass(
                 *reinterpret_cast<float4*>(out_row + base) = o;
             }
         }
-        for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
+        for (long long i = (long long)vec_cols + lane; i < cols; i += WARP_SIZE) {
             out_row[i] = (x_row[i] - m) - log_l;
         }
     }
 }
 "#;
 
+use crate::error::CudaError;
+use crate::warp_geometry::WarpGeometry;
+
+/// レンダ済み SOFTMAX_F32_ONEPASS（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_softmax_f32_onepass(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(None)?,
+        SOFTMAX_F32_ONEPASS
+    ))
+}
+
+/// レンダ済み SOFTMAX_F32_TWOPASS（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_softmax_f32_twopass(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(None)?,
+        SOFTMAX_F32_TWOPASS
+    ))
+}
+
+/// レンダ済み LOG_SOFTMAX_F32_ONEPASS（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_log_softmax_f32_onepass(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(None)?,
+        LOG_SOFTMAX_F32_ONEPASS
+    ))
+}
+
+/// レンダ済み LOG_SOFTMAX_F32_TWOPASS（イシュー #2126）。[`WarpGeometry`] の数値 `#define` を先頭へ連結した
+/// NVRTC ソースを返す。幅が CUDA 注入非対応（32 以外）なら文字列を組み立てる前に
+/// `InvalidKernelConfig` で拒否する。
+pub(crate) fn render_log_softmax_f32_twopass(geom: WarpGeometry) -> Result<String, CudaError> {
+    Ok(format!(
+        "{}{}",
+        geom.render_defines(None)?,
+        LOG_SOFTMAX_F32_TWOPASS
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    /// width 32 のレンダ結果の注入 define・リテラル残存否定・境界検査維持
+    /// （イシュー #2126）。width 64 は fail-closed。
+    #[test]
+    fn rendered_sources_inject_warp_defines_without_literals() {
+        let geom = crate::warp_geometry::WarpGeometry::new(32).expect("32");
+        for src in [
+            super::render_softmax_f32_onepass(geom).expect("render"),
+            super::render_softmax_f32_twopass(geom).expect("render"),
+            super::render_log_softmax_f32_onepass(geom).expect("render"),
+            super::render_log_softmax_f32_twopass(geom).expect("render"),
+        ] {
+            assert!(src.starts_with("#define WARP_SIZE 32\n#define WARP_HALF 16\n"));
+            assert!(!src.contains("WARPS_PER_BLOCK"));
+            let body = &src[src.find("extern \"C\"").expect("kernel")..];
+            for lit in ["0xffffffff", "offset = 16", "+= 32", "% 32", "/ 32"] {
+                assert!(!body.contains(lit), "残存リテラル: {lit}");
+            }
+            assert!(body.contains("WARP_SHFL_XOR("));
+            assert!(body.contains("for (int offset = WARP_HALF; offset > 0; offset >>= 1)"));
+            assert!(body.contains("long long"));
+        }
+        assert_eq!(geom.width(), super::SOFTMAX_BLOCK_DIM);
+        let g64 = crate::warp_geometry::WarpGeometry::new(64).expect("64");
+        assert!(super::render_softmax_f32_onepass(g64).is_err());
+    }
+
     use super::*;
 
     /// grid-stride ループの添字（`row`／`base`／`i`）が `long long` で
@@ -531,11 +604,15 @@ mod tests {
                 "row ループ添字が long long で宣言されていない"
             );
             assert!(
-                src.contains("for (long long base = lane * 4; base < vec_cols; base += 32 * 4)"),
+                src.contains(
+                    "for (long long base = lane * 4; base < vec_cols; base += WARP_SIZE * 4)"
+                ),
                 "base ループ添字が long long で宣言されていない"
             );
             assert!(
-                src.contains("for (long long i = (long long)vec_cols + lane; i < cols; i += 32)"),
+                src.contains(
+                    "for (long long i = (long long)vec_cols + lane; i < cols; i += WARP_SIZE)"
+                ),
                 "i ループ添字が long long で宣言されていない"
             );
             assert!(

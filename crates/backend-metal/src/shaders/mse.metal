@@ -55,6 +55,13 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// 【warp 幅 32 固定の安全性（イシュー #2126・ROCm readiness）】Apple GPU の
+// simdgroup 幅は世代によらず 32 固定で、MSL には CUDA 側のような `WARP_SIZE`
+// の数値注入機構がないため、本ファイルの 32 前提（`MSE_SIMDGROUPS_PER_TG` = 256 / 32・`simd_sum`）は据え置く。
+// 実行時には Rust 側のパイプライン構築時検証（`threadExecutionWidth` ≠ 32 →
+// `MetalError::UnexpectedThreadExecutionWidth`）が fail-closed で担保し、
+// `DeviceInfo::warp_width` も `device.rs::APPLE_SIMDGROUP_WIDTH`（32）を報告する。
+// CUDA 側は `crates/backend-cuda/src/warp_geometry.rs` が実行時属性から注入する。
 // simdgroup 数（`MSE_THREADGROUP_WIDTH / 32`。Rust 側 `mse.rs::
 // MSE_THREADGROUP_WIDTH` と同期させる固定値）。
 constant uint MSE_SIMDGROUPS_PER_TG = 8u;

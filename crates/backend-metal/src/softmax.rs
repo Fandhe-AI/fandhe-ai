@@ -33,7 +33,7 @@ const SOFTMAX_MSL_SRC: &str = include_str!("shaders/softmax.metal");
 
 /// カーネル起動時の threadgroup 幅（32 スレッド = 1 simdgroup 固定。
 /// `shaders/softmax.metal` 冒頭コメント参照。`crate::rmsnorm` と同じ値）。
-const SOFTMAX_THREADGROUP_WIDTH: usize = 32;
+const SOFTMAX_THREADGROUP_WIDTH: usize = crate::device::APPLE_SIMDGROUP_WIDTH as usize;
 
 /// [`crate::row_kernel::RowKernelValidationError`] → [`MetalError`] の変換
 /// （`crate::rmsnorm::map_validation_error` と同じ変換規則。独立実装する

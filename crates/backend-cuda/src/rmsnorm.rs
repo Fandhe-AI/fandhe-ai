@@ -32,6 +32,7 @@ use crate::kernels_rmsnorm::{
     RMSNORM_DW_REDUCE_BLOCK_DIM,
 };
 use crate::nvrtc::compile_ptx;
+use crate::warp_geometry::WarpGeometry;
 
 /// [`rmsnorm_route`] が返す経路選択。行長（`RowFusionMeta::row_len`／
 /// 直接 API の `hidden`）が 1 パス経路（動的 SMEM 常駐）の予算に収まるか
@@ -527,9 +528,12 @@ impl CudaRmsNorm {
     /// と同じ方針）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let arch = device.arch();
+        // warp 幅依存定数はデバイス属性から導出して数値 `#define` で注入する
+        // （イシュー #2126。`warp_geometry.rs` 参照）。
+        let geom = WarpGeometry::for_cuda(device)?;
 
-        let onepass_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_F32_ONEPASS, arch)?;
-        let twopass_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_F32_TWOPASS, arch)?;
+        let onepass_ptx = compile_ptx(&kernels_rmsnorm::render_rmsnorm_f32_onepass(geom)?, arch)?;
+        let twopass_ptx = compile_ptx(&kernels_rmsnorm::render_rmsnorm_f32_twopass(geom)?, arch)?;
 
         let onepass_f32 = device
             .context()
@@ -540,7 +544,7 @@ impl CudaRmsNorm {
             .load_module(twopass_ptx)?
             .load_function("rmsnorm_f32_twopass")?;
 
-        let bwd_dx_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_BWD_DX_F32, arch)?;
+        let bwd_dx_ptx = compile_ptx(&kernels_rmsnorm::render_rmsnorm_bwd_dx_f32(geom)?, arch)?;
         let bwd_dw_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_BWD_DW_F32, arch)?;
         let bwd_dx_f32 = device
             .context()

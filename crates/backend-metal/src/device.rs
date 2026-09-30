@@ -172,7 +172,7 @@ pub struct MetalDeviceProvider;
 /// `MTLComputePipelineState` のプロパティ）。実行時の突合はパイプライン
 /// 構築時の検証（`MetalError::UnexpectedThreadExecutionWidth`）が
 /// fail-closed で担う。既存の手動定数（`gemm.rs::SIMDGROUP_THREADGROUP_WIDTH`
-/// 等）と同値で、置換は #2126 以降。`DeviceInfo::warp_width` へ報告する。
+/// 等）と同値で、rmsnorm／softmax の threadgroup 幅定数は #2126 で本定数から導出した。`DeviceInfo::warp_width` へ報告する。
 pub(crate) const APPLE_SIMDGROUP_WIDTH: u32 = 32;
 
 impl MetalDeviceProvider {

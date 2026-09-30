@@ -45,6 +45,7 @@ use crate::pool::CudaAllocator;
 use crate::rmsnorm::{
     RmsNormRoute, derive_persistent_grid_one_pass, derive_persistent_grid_two_pass, rmsnorm_route,
 };
+use crate::warp_geometry::WarpGeometry;
 
 // `log_softmax` forward（イシュー #2155）の追加により、本モジュールは
 // softmax／log_softmax 双方の起動 API を保持する。共通の起動本体
@@ -253,16 +254,25 @@ impl CudaSoftmax {
     /// ハンドルを構築する（`rmsnorm.rs::CudaRmsNorm::new` と同型）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let arch = device.arch();
+        // warp 幅依存定数はデバイス属性から導出して数値 `#define` で注入する
+        // （イシュー #2126。`warp_geometry.rs` 参照）。
+        let geom = WarpGeometry::for_cuda(device)?;
 
-        let onepass_ptx = compile_ptx(kernels_softmax::SOFTMAX_F32_ONEPASS, arch)?;
-        let twopass_ptx = compile_ptx(kernels_softmax::SOFTMAX_F32_TWOPASS, arch)?;
+        let onepass_ptx = compile_ptx(&kernels_softmax::render_softmax_f32_onepass(geom)?, arch)?;
+        let twopass_ptx = compile_ptx(&kernels_softmax::render_softmax_f32_twopass(geom)?, arch)?;
         // `log_softmax` forward（イシュー #2155）の 2 PTX を追加で
         // コンパイルする。`CudaSoftmax::new` の初回構築コストは 2→4
         // PTX に増えるが、`context_cache::cached_softmax` により 1 回
         // 限りのコストであるため許容する（実装計画 §7「スコープ外・
         // リスク」）。
-        let log_onepass_ptx = compile_ptx(kernels_softmax::LOG_SOFTMAX_F32_ONEPASS, arch)?;
-        let log_twopass_ptx = compile_ptx(kernels_softmax::LOG_SOFTMAX_F32_TWOPASS, arch)?;
+        let log_onepass_ptx = compile_ptx(
+            &kernels_softmax::render_log_softmax_f32_onepass(geom)?,
+            arch,
+        )?;
+        let log_twopass_ptx = compile_ptx(
+            &kernels_softmax::render_log_softmax_f32_twopass(geom)?,
+            arch,
+        )?;
 
         let onepass_f32 = device
             .context()

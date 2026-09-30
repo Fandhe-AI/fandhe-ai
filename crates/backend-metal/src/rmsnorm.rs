@@ -30,7 +30,7 @@ const RMSNORM_MSL_SRC: &str = include_str!("shaders/rmsnorm.metal");
 /// カーネル起動時の threadgroup 幅（32 スレッド = 1 simdgroup 固定。
 /// `shaders/rmsnorm.metal` 冒頭コメント「1 threadgroup = 1 simdgroup 固定」
 /// と一致させる）。
-const RMSNORM_THREADGROUP_WIDTH: usize = 32;
+const RMSNORM_THREADGROUP_WIDTH: usize = crate::device::APPLE_SIMDGROUP_WIDTH as usize;
 
 /// [`RowKernelValidationError`] → [`MetalError`] の変換（`softmax.rs` と
 /// 共有できる形にせず独立に持つ理由: `MetalError` は `#[non_exhaustive]`
