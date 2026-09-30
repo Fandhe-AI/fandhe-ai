@@ -78,6 +78,22 @@ ITEMS += [
     ("kernels_tiled_pipeline_128x64.rs", "static", "TILED_PIPELINE_128X64_F32_SOURCE"),
     ("kernels_tiled_pipeline_128x64.rs", "fn", "tiled_pipeline_128x64_f32_source"),
 ]
+# カーネルの生成（NVRTC コンパイル・ロード）経路と本番起動経路。`CudaGemm::new`・
+# `compile_tiled_pipeline*` は #2299 の feature gate（`context_ptr` の `let`・タプル→
+# 構造体化）で v0.9.0 と文面が変わり、文面比較だけでは「同一」とも「実質差」とも
+# 断定できない。差分が出た場合は `no` ではなく `unknown`（人手確認要）とし、
+# `yes` にはしない（PR #2452 codex-review 指摘 P1。生成・起動経路が比較対象外のまま
+# `layerA_same_code: yes` を返していた）。
+CONSTRUCTION_ITEMS = [
+    ("gemm.rs", "fn", "new"),
+    ("gemm.rs", "fn", "kernel_specs"),
+    ("gemm.rs", "fn", "tiled_pipeline_descriptor"),
+    ("gemm.rs", "fn", "compile_tiled_pipeline"),
+    ("gemm.rs", "fn", "compile_tiled_pipeline_128x64"),
+    ("gemm.rs", "fn", "new_with_tiled_pipeline_128x64"),
+    ("gemm.rs", "fn", "launch_tiled_f32"),
+    ("module_cache.rs", "fn", "load_function_cached"),
+]
 GATE = '#[cfg(feature = "internal-diagnostics")]'
 
 
@@ -161,6 +177,19 @@ def main() -> int:
             else:
                 lines.append(f"path_item: {rel}::{name} DIFFERS")
                 verdict = "no"
+        for rel, kind, name in CONSTRUCTION_ITEMS:
+            a = extract(show(base, rel), kind, name)
+            b = extract(show(head, rel), kind, name)
+            if a is None or b is None:
+                lines.append(f"path_item: {rel}::{name} 抽出不能（生成・起動経路）")
+                if verdict == "yes":
+                    verdict = "unknown"
+            elif normalize(a, kind) == normalize(b, kind):
+                lines.append(f"path_item: {rel}::{name} identical（生成・起動経路）")
+            else:
+                lines.append(f"path_item: {rel}::{name} DIFFERS（生成・起動経路。要人手確認）")
+                if verdict == "yes":
+                    verdict = "unknown"
     except (subprocess.CalledProcessError, OSError):
         print("layerA_same_code: unknown")
         return 0

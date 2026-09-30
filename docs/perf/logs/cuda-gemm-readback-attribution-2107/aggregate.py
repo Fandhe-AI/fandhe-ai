@@ -42,6 +42,19 @@ ARMS = (
     "pretouched_fresh_split",
     "pretouched_fresh_production",
 )
+FRONT_PHASES = ("h2d_a", "h2d_b", "alloc_c", "launch_issue", "kernel_wait")
+# 腕別 readback サブフェーズ名（readback_attribution_diag_tests_2107.rs の
+# `Arm::readback_parts` と一致させる）。
+ARM_PARTS = {
+    "clone_dtoh_legacy_to_vec": ("clone_dtoh", "d2h_sync"),
+    "clone_dtoh_borrowed_keep_alive": ("clone_dtoh", "d2h_sync"),
+    "clone_dtoh_borrowed_dummy_alloc_free": ("clone_dtoh", "d2h_sync"),
+    "pretouched_fresh_split": ("dest_alloc", "pretouch_fill", "d2h_issue", "d2h_sync"),
+    "pretouched_fresh_production": ("readback_total",),
+}
+# JSONL の値は Rust 側で `{:.3}`（μs）に丸められた区間中央値の和のため、
+# 区間数（最大 9）×0.0005 を上回る余裕を持たせた絶対許容（μs）。
+SUM_RECHECK_TOL_US = 0.01
 KEEP_ALIVE = "clone_dtoh_borrowed_keep_alive"
 SPLIT = "pretouched_fresh_split"
 PRODUCTION = "pretouched_fresh_production"
@@ -80,8 +93,33 @@ def load_arm_runs(base: Path, n: int, arm: str) -> list[dict]:
             raise IntegrityError(f"{p}: 壊れた JSON: {e}") from e
         if row.get("n") != n or row.get("arm") != arm:
             raise IntegrityError(f"{p}: n/arm がファイル名と不一致")
+        recheck_sums(p, arm, row)
         rows.append(row)
     return rows
+
+
+def recheck_sums(p: Path, arm: str, row: dict) -> None:
+    """`sum_readback_us`／`sum_matmul_equiv_us` を phases の区間中央値から再計算して照合する。
+
+    JSONL の合計値をそのまま信用せず（改竄・出力側バグの検出）、区間値の和と
+    一致しなければ fail-closed（PR #2452 codex-review 指摘 P2）。
+    """
+    try:
+        ph = row["phases"]
+        readback = sum(float(ph[nm]["median_us"]) for nm in ARM_PARTS[arm])
+        front = sum(float(ph[nm]["median_us"]) for nm in FRONT_PHASES)
+        got_rb = float(row["sum_readback_us"])
+        got_mm = float(row["sum_matmul_equiv_us"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise IntegrityError(f"{p}: 合計値の再計算に必要な項目が欠落・不正: {e!r}") from e
+    if abs(got_rb - readback) > SUM_RECHECK_TOL_US:
+        raise IntegrityError(
+            f"{p}: sum_readback_us={got_rb} が区間値からの再計算 {readback:.3f} と不一致"
+        )
+    if abs(got_mm - (front + readback)) > SUM_RECHECK_TOL_US:
+        raise IntegrityError(
+            f"{p}: sum_matmul_equiv_us={got_mm} が区間値からの再計算 {front + readback:.3f} と不一致"
+        )
 
 
 def phase_summary(rows: list[dict], phase: str) -> dict:
@@ -221,6 +259,8 @@ def analyze(base: Path) -> tuple[str, dict]:
         for a, rows in arms_rows.items():
             phases = list(rows[0]["phases"].keys())
             summ[a] = {p: phase_summary(rows, p) for p in phases}
+            # 各 run の合計は load_arm_runs で区間値から再計算照合済み（不一致は
+            # IntegrityError）。ここでは照合済みの値の 5 run 中央値を使う。
             summ[a]["_sum_matmul_equiv"] = {
                 "median": med([r["sum_matmul_equiv_us"] for r in rows])
             }
@@ -427,6 +467,20 @@ def self_test() -> int:
             expect(False, "Layer B checksum 既知値不一致で IntegrityError")
         except IntegrityError:
             pass
+
+        # 合計値が区間値からの再計算と不一致（JSONL 改竄）: fail-closed。
+        for key in ("sum_readback_us", "sum_matmul_equiv_us"):
+            base = Path(t) / f"badsum_{key}"
+            _write_fixture(base, layer_a_us=1300.0)
+            p = base / "run2" / f"n1024_{KEEP_ALIVE}.jsonl"
+            row = json.loads(p.read_text())
+            row[key] += 5.0
+            p.write_text(json.dumps(row) + "\n")
+            try:
+                analyze(base)
+                expect(False, f"{key} 再計算不一致で IntegrityError")
+            except IntegrityError:
+                pass
 
         # run 欠落: fail-closed。
         base = Path(t) / "drop"

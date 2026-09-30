@@ -59,7 +59,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use bench_harness::{median_q1_q3, rng::Xorshift64Star};
+use bench_harness::median_q1_q3;
 
 use crate::context_cache::{cached_allocator, cached_device, cached_gemm};
 use crate::gemm::DiagTiledF32Kernel;
@@ -120,10 +120,52 @@ impl Arm {
 const SEED_A: u64 = 0xA11CE;
 const SEED_B: u64 = 0xB0B;
 
+/// Layer A（`bench-common::Xorshift64Star`）と bit 同一の xorshift64* PRNG。
+///
+/// `bench_harness::rng::Xorshift64Star` は移動量（13/7/17）・値域（`[-1, 1)`）とも
+/// bench-common（移動量 12/25/27・`fill_vec` は `next_f32() - 0.5` の `[-0.5, 0.5)`）
+/// と異なるため流用できない（流用すると checksum が Layer A 既知値と一致せず
+/// `aggregate.py` が系列全体を無効にする。PR #2452 Bugbot 指摘）。bench-common は
+/// 本体 workspace 外（framework-compare）で依存化できないため式を逐語で複製する。
+struct LayerAXorshift64Star {
+    state: u64,
+}
+
+impl LayerAXorshift64Star {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.state = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// `[0, 1)` の一様 f32（上位 24bit）。
+    fn next_f32(&mut self) -> f32 {
+        ((self.next_u64() >> 40) as f32) / (1u32 << 24) as f32
+    }
+
+    /// `[-0.5, 0.5)` の f32 を `n` 個（bench-common `fill_vec` と同式）。
+    fn fill_vec(&mut self, n: usize) -> Vec<f32> {
+        (0..n).map(|_| self.next_f32() - 0.5).collect()
+    }
+}
+
 /// Layer A と同一入力（A は `SEED_A`、B は `SEED_B` の別ストリーム、各 `n*n` 要素）を生成する。
 fn gen_square_ab(n: usize) -> (Vec<f32>, Vec<f32>) {
-    let a = Xorshift64Star::new(SEED_A).fill_vec(n * n);
-    let b = Xorshift64Star::new(SEED_B).fill_vec(n * n);
+    let a = LayerAXorshift64Star::new(SEED_A).fill_vec(n * n);
+    let b = LayerAXorshift64Star::new(SEED_B).fill_vec(n * n);
     (a, b)
 }
 
@@ -535,6 +577,18 @@ mod pure_unit_tests {
         labels.sort_unstable();
         labels.dedup();
         assert_eq!(n, labels.len(), "arm labels must be pairwise distinct");
+    }
+
+    #[test]
+    fn gen_input_matches_bench_common_series() {
+        // bench-common（`fill_vec`: 移動量 12/25/27・`[-0.5, 0.5)`）の SEED_A 先頭 3 要素
+        // （Python での独立再計算値。f32 で厳密に表現できる）。
+        let v = LayerAXorshift64Star::new(SEED_A).fill_vec(3);
+        let expected = [0.494_945_82_f32, 0.409_829_97_f32, 0.051_873_744_f32];
+        for (g, e) in v.iter().zip(expected) {
+            assert_eq!(g.to_bits(), e.to_bits(), "{g} != {e}");
+        }
+        assert!(v.iter().all(|x| (-0.5..0.5).contains(x)));
     }
 
     #[test]
