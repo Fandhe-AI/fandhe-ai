@@ -93,6 +93,10 @@ CONSTRUCTION_ITEMS = [
     ("gemm.rs", "fn", "compile_tiled_pipeline_128x64"),
     ("gemm.rs", "fn", "new_with_tiled_pipeline_128x64"),
     ("gemm.rs", "fn", "launch_tiled_f32"),
+    # Layer B 計装テスト（readback_attribution_diag_tests_2107.rs）が実際に呼ぶ起動経路。
+    # `launch_tiled_f32` だけ比較すると、この経路の差分を見逃して `yes` になる
+    # （PR #2452 codex-review 指摘 P1）。抽出不能・差分は `unknown`（fail-closed）。
+    ("gemm.rs", "fn", "launch_tiled_f32_pooled"),
     ("module_cache.rs", "fn", "load_function_cached"),
 ]
 # 人手レビュー済みの「本番経路で等価な既知差分」（項目名 -> (v0.9.0 側, HEAD 側) の
