@@ -108,11 +108,16 @@ python3 aggregate.py --self-test
 python3 aggregate.py --machine <gb10|m4max> --logs <logd> --md <logd>/aggregate.md --out-prefix <logd>/results
 # 4. スコアボード（正式モード。腕 C を主入力。前比・B→C 比は集計 JSON の bc_med を転記し、gen は再計算しない）
 python3 scoreboard/gen_2120.py --self-test
-python3 scoreboard/gen_2120.py --arm C --main-label "Phase 3 後（HEAD）" \
+python3 scoreboard/gen_2120.py --arm C \
   --m4 m4max/results-C-full.jsonl --m4-agg m4max/results-aggregate.json \
   --gb gb10/results-C-full.jsonl --gb-agg gb10/results-aggregate.json --gb-py <py JSONL> \
   --out fandhe-ai-phase3-scoreboard.html --tsv ratios-C.tsv
-# 腕 B の倍率（基準との比較用）は --arm B と ...-B-full.jsonl へ差し替えて同様に実行し --tsv ratios-B.tsv を得る
+# 腕 B の倍率（基準との比較用）は --arm B と ...-B-full.jsonl へ差し替え、--out と --tsv を別名にして実行する（腕 C の HTML を上書きしない）。
+# 判定列見出し・本文の腕表示は --arm から導出されるため --main-label は不要（指定する場合は --arm と一致必須）
+python3 scoreboard/gen_2120.py --arm B \
+  --m4 m4max/results-B-full.jsonl --m4-agg m4max/results-aggregate.json \
+  --gb gb10/results-B-full.jsonl --gb-agg gb10/results-aggregate.json --gb-py <py JSONL> \
+  --out fandhe-ai-phase3-scoreboard-armB.html --tsv ratios-B.tsv
 ```
 
 - `--m4` 側は M4 Max の Python FW 転記値を `gen_2120.py` が内蔵しているため、機体別の派生 JSONL だけを渡す。`--gb-py`（と任意の `--gb-extra`）は Python FW 行のみ受理する。
