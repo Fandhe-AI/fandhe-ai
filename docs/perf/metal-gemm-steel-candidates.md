@@ -127,7 +127,7 @@ Linux で実施済みの検証: `aggregate.py --self-test`（OK）、`orchestrat
 
 Mac セッションで実施する手順:
 
-1. `main` を最新にし `env_info.txt` を記入する（chip・gpu_cores・macOS・rustc・git_commit・date_utc・`mtl_architecture_name`）。専有ゲート（RULE.txt 7.）を満たして計測する通常運用では **run 1 の前に** `load_policy: exclusive_gate` を明記する（`aggregate.py` は `exclusive_gate` 以外・未記入・行欠落を常に REFERENCE_ONLY にするため、この行が無いと全 run 負荷 OK でも採用判定が出ない）。専有できない場合は **run 1 の前に** `load_policy: record_only` と理由を宣言する（`env_info.txt` の運用。RULE.txt 7. は専有ゲートと REFERENCE_ONLY のみを定め、事前宣言は事前登録規則に無い運用上の取り決め）。**`record_only` 系列は参考扱い（REFERENCE_ONLY）であり、判定・結線の根拠から除外する**（`aggregate.py` が `load_policy` を読み、`exclusive_gate` 以外では ADOPT_CANDIDATE を出さず `REFERENCE_ONLY` のみを出力する。採用判断には専有ゲートを満たした再計測が必要）。
+1. `main` を最新にし `env_info.txt` を記入する（chip・gpu_cores・macOS・rustc・git_commit・date_utc・`mtl_architecture_name`）。専有ゲート（RULE.txt 7.）を満たして計測する通常運用では **run 1 の前に** `load_policy: exclusive_gate` を明記する（`aggregate.py` は `exclusive_gate` 以外・未記入・行欠落を常に REFERENCE_ONLY にするため、この行が無いと全 run 負荷 OK でも採用判定が出ない）。専有できない場合は **run 1 の前に** `load_policy: record_only` と理由を宣言する（`env_info.txt` の運用。RULE.txt 7. は専有ゲートと REFERENCE_ONLY のみを定め、事前宣言は事前登録規則に無い運用上の取り決め）。**`record_only` 系列は参考扱い（REFERENCE_ONLY）であり、判定・結線の根拠から除外する**（`aggregate.py` が `load_policy` を読み、`exclusive_gate` 以外では最終判定（`verdict=` 行）に ADOPT_CANDIDATE を出さず `REFERENCE_ONLY` のみを出力する。上書き前の判定・理由〈bit 不一致・ハッシュ不一致を含む〉は `underlying_verdict`／`underlying_reason` 行の診断情報として別に残る。採用判断には専有ゲートを満たした再計測が必要）。
 2. `./orchestrate.sh gate` — 1 件でも FAIL なら REJECT を確定し A/B は実施しない。
 3. `./orchestrate.sh 1` 〜 `5`（差し替え・追加・選別はしない）。
 4. `python3 aggregate.py` の出力を `aggregate.md` に保存する。

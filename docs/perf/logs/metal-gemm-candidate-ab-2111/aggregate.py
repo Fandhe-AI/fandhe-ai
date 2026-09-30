@@ -15,6 +15,7 @@ python3 標準ライブラリのみ・固定の正規表現のみで解析し、
 （変更時は両方を更新する）。
 """
 
+import collections
 import os
 import re
 import statistics
@@ -97,77 +98,121 @@ def check_base_cells(runs):
     return bad
 
 
-def judge(runs, reference_only=False, problems=()):
-    """runs: parse_run 結果のリスト。arm 別の判定 dict を返す（RULE.txt 3.〜6.）。
+# arm 別の判定結果。先頭 2 要素（verdict, detail）は従来の tuple 互換（呼び出し側の `[0]`／`[1]`）。
+# verdict／detail は「最終判定（出力上の採否）」、underlying_* は上書き前のデータ由来の判定と全理由、
+# override_reasons は最終判定が underlying を上書きした（INCOMPLETE／REFERENCE_ONLY にした）全理由。
+# 下位の判定・理由を最終判定で潰さず、診断情報として常に別項目で残す（PR #2461 レビュー是正）。
+Verdict = collections.namedtuple(
+    "Verdict", ["verdict", "detail", "underlying_verdict", "underlying_reasons", "override_reasons"]
+)
+
+
+def _judge_arm(arm, runs):
+    """1 arm のデータのみに基づく判定（負荷ゲート・入力問題による上書き前）。
+
+    戻り値: (verdict, reasons, detail)。reasons は該当する全理由（先頭 1 件で打ち切らない）:
+    データ欠落の N 全件・bit 不一致の N 全件・run 間ハッシュ不一致の N 全件・性能規則の判定
+    （RULE.txt 4.〜6.）。verdict は優先度 INCOMPLETE > NOT_ADOPTABLE > UNDETERMINED／REJECT／
+    ADOPT_CANDIDATE（RULE.txt 4.・6.）で選ぶ。detail は N ごとの中央値（診断用）。
+    """
+    if len(runs) != N_RUNS:
+        return "INCOMPLETE", [f"run 数が {len(runs)}（必要 {N_RUNS}）"], []
+    detail = []
+    considered = []  # (n, median, signs)
+    incomplete = []
+    bit_bad = []
+    checksum_bad = []
+    for n in EXPECTED_SIZES:
+        cells = [r.get((arm, n)) for r in runs]
+        if any(
+            c is None or "ratio" not in c or "bit_identical" not in c or "median_ms" not in c
+            for c in cells
+        ):
+            incomplete.append(f"N={n} のデータ欠落（bit／比／中央値行のいずれかが無い）")
+            continue
+        if any(c["median_ms"] <= 0.0 for c in cells):
+            incomplete.append(f"N={n} の median_ms が正でない（計測不正）")
+            continue
+        if any(c["ratio"] <= 0.0 for c in cells):
+            incomplete.append(f"N={n} の ratio が正でない（計測不正）")
+            continue
+        # bit 一致は同一タイル cell のみ要求する（タイル形状が異なる arm 間の bit 一致は
+        # metal-gemm-steel-candidates.md §5 で契約外。run 間の全要素ビット列ハッシュ一致は常に要求する）。
+        if any(c["same_tile"] and not c["bit_identical"] for c in cells):
+            bit_bad.append(n)
+        if len({c["hash"] for c in cells}) != 1:
+            checksum_bad.append(n)
+        if all(c["same_kernel"] for c in cells):
+            detail.append(f"N={n}: same_kernel（除外）")
+            continue
+        ratios = [c["ratio"] for c in cells]
+        med = statistics.median(ratios)
+        signs_pos = sum(1 for x in ratios if x > 1.0)
+        considered.append((n, med, signs_pos))
+        detail.append(f"N={n}: median={med:.4f} ratios={[round(x, 4) for x in ratios]}")
+    reasons = list(incomplete)
+    if bit_bad:
+        reasons.append(f"bit_identical=false: N={bit_bad}")
+    if checksum_bad:
+        reasons.append(f"run 間出力ハッシュ不一致: N={checksum_bad}")
+    perf = None  # 性能規則側の判定（データ完全時のみ。数値上の不採用理由とは別に併記する）
+    if not incomplete:
+        if not considered:
+            perf = ("UNDETERMINED", "判定対象 N なし（全 N same_kernel）")
+        elif any(med > 1.0 and pos == N_RUNS for _n, med, pos in considered):
+            perf = ("REJECT", "中央値 >1.00 かつ 5/5 run 符号一貫の N あり")
+        elif all(med <= 1.0 for _n, med, _p in considered) and sum(
+            1 for _n, med, _p in considered if med < 1.0
+        ) >= 2:
+            perf = ("ADOPT_CANDIDATE", "全対象 N で中央値 <=1.00 かつ <1.00 が 2 形状以上")
+        else:
+            perf = ("UNDETERMINED", "上記いずれにも該当せず")
+        reasons.append(f"性能規則の判定 {perf[0]}: {perf[1]}")
+    if incomplete:
+        verdict = "INCOMPLETE"
+    elif bit_bad or checksum_bad:
+        verdict = "NOT_ADOPTABLE"
+    else:
+        verdict = perf[0]
+    return verdict, reasons, detail
+
+
+def judge(runs, reference_only=False, problems=(), reference_reasons=()):
+    """runs: parse_run 結果のリスト。arm 別の Verdict を返す（RULE.txt 3.〜6.）。
 
     problems: 入力の欠落・不完全（run ログ欠落・失敗 run・負荷ゲート記録欠落等）の理由リスト。
     1 件でもあれば全 arm を INCOMPLETE にする（採用判定を出さない。fail-closed）。
+    reference_only／reference_reasons: 参考扱い（専有ゲート不成立。RULE.txt 7.）。真なら（INCOMPLETE で
+    ない限り）最終判定を REFERENCE_ONLY にする（採用系判定語を最終判定に出さない。fail-closed）。
+
+    最終判定の優先度は INCOMPLETE > REFERENCE_ONLY > データ由来の判定で従来どおり。ただし
+    上書きされた下位の判定・理由は Verdict.underlying_verdict／underlying_reasons／override_reasons
+    へ常に残す（bit 不一致・ハッシュ不一致という数値上の問題と、負荷条件による参考扱いを出力上区別できるようにする）。
     """
     verdicts = {}
     problems = list(problems)
     if len(runs) == N_RUNS:
         problems += check_base_cells(runs)
+    reference_reasons = list(reference_reasons)
+    reference_only = bool(reference_only) or bool(reference_reasons)
+    if reference_only and not reference_reasons:
+        reference_reasons = ["参考扱い（専有ゲート不成立）"]
     arms = sorted(set(EXPECTED_ARMS) | {arm for r in runs for (arm, _n) in r if arm != BASE})
     for arm in arms:
+        uv, ureasons, detail = _judge_arm(arm, runs)
+        override = ["入力不完全: " + p for p in problems] + list(reference_reasons)
+        detail_s = "; ".join(detail)
         if problems:
-            verdicts[arm] = ("INCOMPLETE", "入力不完全: " + "; ".join(problems))
-            continue
-        if len(runs) != N_RUNS:
-            verdicts[arm] = ("INCOMPLETE", f"run 数が {len(runs)}（必要 {N_RUNS}）")
-            continue
-        detail = []
-        considered = []  # (n, median, signs)
-        bit_bad = []
-        checksum_bad = []
-        for n in EXPECTED_SIZES:
-            cells = [r.get((arm, n)) for r in runs]
-            if any(
-                c is None or "ratio" not in c or "bit_identical" not in c or "median_ms" not in c
-                for c in cells
-            ):
-                verdicts[arm] = ("INCOMPLETE", f"N={n} のデータ欠落（bit／比／中央値行のいずれかが無い）")
-                break
-            if any(c["median_ms"] <= 0.0 for c in cells):
-                verdicts[arm] = ("INCOMPLETE", f"N={n} の median_ms が正でない（計測不正）")
-                break
-            if any(c["ratio"] <= 0.0 for c in cells):
-                verdicts[arm] = ("INCOMPLETE", f"N={n} の ratio が正でない（計測不正）")
-                break
-            # bit 一致は同一タイル cell のみ要求する（タイル形状が異なる arm 間の bit 一致は
-            # metal-gemm-steel-candidates.md §5 で契約外。run 間の全要素ビット列ハッシュ一致は常に要求する）。
-            if any(c["same_tile"] and not c["bit_identical"] for c in cells):
-                bit_bad.append(n)
-            if len({c["hash"] for c in cells}) != 1:
-                checksum_bad.append(n)
-            if all(c["same_kernel"] for c in cells):
-                detail.append(f"N={n}: same_kernel（除外）")
-                continue
-            ratios = [c["ratio"] for c in cells]
-            med = statistics.median(ratios)
-            signs_pos = sum(1 for x in ratios if x > 1.0)
-            considered.append((n, med, signs_pos))
-            detail.append(f"N={n}: median={med:.4f} ratios={[round(x, 4) for x in ratios]}")
+            v, why = "INCOMPLETE", "入力不完全: " + "; ".join(problems)
+        elif uv == "INCOMPLETE":
+            v, why = "INCOMPLETE", "; ".join(ureasons)
+        elif reference_only:
+            # 参考扱い系列は採用系の最終判定語を出さず REFERENCE_ONLY のみとする（RULE.txt 7.）。
+            # 元の判定・理由は underlying_* として別項目に残す（最終判定行の文言には混ぜない）。
+            v, why = "REFERENCE_ONLY", "参考扱い（専有ゲート不成立）のため採用根拠にしない: " + "; ".join(reference_reasons)
         else:
-            if bit_bad:
-                v = ("NOT_ADOPTABLE", f"bit_identical=false: N={bit_bad}")
-            elif checksum_bad:
-                v = ("NOT_ADOPTABLE", f"run 間出力ハッシュ不一致: N={checksum_bad}")
-            elif not considered:
-                v = ("UNDETERMINED", "判定対象 N なし（全 N same_kernel）")
-            elif any(med > 1.0 and pos == N_RUNS for _n, med, pos in considered):
-                v = ("REJECT", "中央値 >1.00 かつ 5/5 run 符号一貫の N あり")
-            elif all(med <= 1.0 for _n, med, _p in considered) and sum(
-                1 for _n, med, _p in considered if med < 1.0
-            ) >= 2:
-                v = ("ADOPT_CANDIDATE", "全対象 N で中央値 <=1.00 かつ <1.00 が 2 形状以上")
-            else:
-                v = ("UNDETERMINED", "上記いずれにも該当せず")
-            if reference_only:
-                # 参考扱い系列（専有ゲート timeout／load_policy が exclusive_gate 以外）は
-                # ADOPT_CANDIDATE 等の採用系判定語を一切出さず REFERENCE_ONLY のみとする（RULE.txt 7.。fail-closed）。
-                # 元の判定語・理由文は出力に含めない（ADOPT_CANDIDATE 等の語が参考系列に残らないようにする）。
-                v = ("REFERENCE_ONLY", "参考扱い（専有ゲート不成立）のため採用根拠にしない")
-            verdicts[arm] = (v[0], v[1] + " | " + "; ".join(detail))
+            v, why = uv, "; ".join(ureasons)
+        verdicts[arm] = Verdict(v, why + (" | " + detail_s if detail_s else ""), uv, ureasons, override)
     return verdicts
 
 
@@ -247,7 +292,9 @@ def parse_load_policy(env_text):
 
 
 def load_dir(d):
-    """ログディレクトリを読む。戻り値: (runs, reference_only, problems)。
+    """ログディレクトリを読む。戻り値: (runs, reference_reasons, problems)。
+
+    reference_reasons は参考扱いにした理由の全件（空なら採用根拠にできる系列）。
 
     runs は成功が確認できた run の解析結果のみ。run ログ欠落・失敗・完了記録なし・
     負荷ゲート記録欠落は problems に積み、judge が全 arm を INCOMPLETE にする。
@@ -266,13 +313,12 @@ def load_dir(d):
     if os.path.isfile(env):
         with open(env, encoding="utf-8", errors="replace") as f:
             env_text = f.read()
-    reference_only = False
+    reference_reasons = []
     # 専有ゲート（RULE.txt 7.）を宣言どおり満たす系列のみ採用根拠にできる。record_only・未記入・
     # 未知値・行欠落はすべて参考扱い（fail-closed）。load_gate.log が全 OK でも覆らない。
     policy = parse_load_policy(env_text)
     if policy != "exclusive_gate":
-        reference_only = True
-        print(f"note: env_info.txt の load_policy={policy!r}（exclusive_gate 以外）のため参考扱い", file=sys.stderr)
+        reference_reasons.append(f"env_info.txt の load_policy={policy!r}（exclusive_gate 以外）")
     for i in range(1, N_RUNS + 1):
         p = os.path.join(d, f"kernel_gpu_run{i}.log")
         if not os.path.isfile(p):
@@ -292,8 +338,8 @@ def load_dir(d):
             if state is None:
                 problems.append(why)
             elif state == "TIMEOUT":
-                reference_only = True
-    return runs, reference_only, problems
+                reference_reasons.append(f"run{i} の専有ゲート timeout（load_gate.log）")
+    return runs, reference_reasons, problems
 
 
 def _fixture_run(ratios, bit=True, same=None, checksum="1.000000", hash_="0000000000000001", with_base=True,
@@ -374,12 +420,43 @@ def self_test():
     old = [parse_run(_fixture_run({("X", n): 0.9 for n in EXPECTED_SIZES}).replace(" hash=0000000000000001", ""))
            for _ in range(N_RUNS)]
     assert judge(old)["X"][0] == "INCOMPLETE"
-    # 参考扱いの付記
-    assert judge(build(ok), reference_only=True)["X"][0] == "REFERENCE_ONLY"
-    # 参考系列の出力全体に採用系判定語が残らない（元判定が ADOPT_CANDIDATE でも）
+    # 参考扱い（reference_only）: 最終判定は REFERENCE_ONLY のみ。採用系判定語は最終判定行に出さない
     assert judge(build(ok))["X"][0] == "ADOPT_CANDIDATE"
+    _adopt_words = ("ADOPT_CANDIDATE", "REJECT", "UNDETERMINED", "NOT_ADOPTABLE")
+    # reference_only かつ正常: 最終は REFERENCE_ONLY、下位判定 ADOPT_CANDIDATE は underlying へ残る
     _ref = judge(build(ok), reference_only=True)["X"]
-    assert not any(w in " ".join(_ref) for w in ("ADOPT_CANDIDATE", "REJECT", "UNDETERMINED"))
+    assert _ref.verdict == "REFERENCE_ONLY"
+    assert not any(w in _ref.verdict + " " + _ref.detail for w in _adopt_words)
+    assert _ref.underlying_verdict == "ADOPT_CANDIDATE" and _ref.underlying_reasons
+    assert _ref.override_reasons
+    # reference_only かつ bit 不一致: 最終は REFERENCE_ONLY、NOT_ADOPTABLE と bit 不一致の理由が残る
+    _ref = judge(build(ok, bit=False), reference_only=True, reference_reasons=["load_policy 不正"])["X"]
+    assert _ref.verdict == "REFERENCE_ONLY"
+    assert not any(w in _ref.verdict + " " + _ref.detail for w in _adopt_words)
+    assert _ref.underlying_verdict == "NOT_ADOPTABLE"
+    assert any("bit_identical=false" in r for r in _ref.underlying_reasons)
+    assert any("load_policy 不正" in r for r in _ref.override_reasons)
+    # reference_only かつハッシュ不一致
+    _ref = judge(cs, reference_only=True)["X"]
+    assert _ref.verdict == "REFERENCE_ONLY" and _ref.underlying_verdict == "NOT_ADOPTABLE"
+    assert any("ハッシュ不一致" in r for r in _ref.underlying_reasons)
+    # bit 不一致とハッシュ不一致が同時なら理由を両方列挙する（先頭 1 件で打ち切らない）
+    _both = [parse_run(_fixture_run({("X", n): 0.9 for n in EXPECTED_SIZES}, bit=False, hash_=f"{i:016x}"))
+             for i in range(N_RUNS)]
+    _v = judge(_both)["X"]
+    assert _v.verdict == "NOT_ADOPTABLE"
+    assert any("bit_identical=false" in r for r in _v.underlying_reasons)
+    assert any("ハッシュ不一致" in r for r in _v.underlying_reasons)
+    # 参考扱いでない系列は最終判定＝下位判定で override_reasons は空
+    _v = judge(build(ok))["X"]
+    assert _v.verdict == _v.underlying_verdict == "ADOPT_CANDIDATE" and not _v.override_reasons
+    # 入力不完全（problems）でもデータ由来の下位判定を残し、参考扱い理由と併せて override へ全列挙する
+    _v = judge(build(ok), reference_only=True, problems=["ゲート記録欠落"], reference_reasons=["timeout"])["X"]
+    assert _v.verdict == "INCOMPLETE" and _v.underlying_verdict == "ADOPT_CANDIDATE"
+    assert len(_v.override_reasons) == 2
+    # データ欠落 N は全件列挙する
+    _p = judge([parse_run(_fixture_run({("X", 512): 0.9})) for _ in range(N_RUNS)])["X"]
+    assert _p.verdict == "INCOMPLETE" and sum("データ欠落" in r for r in _p.underlying_reasons) == 3
     # load_policy: exclusive_gate のみ採用根拠になる。record_only／未記入／欠落／未知値は参考扱い
     assert parse_load_policy("load_policy: exclusive_gate  # x\n") == "exclusive_gate"
     assert parse_load_policy("load_policy: record_only\n") == "record_only"
@@ -486,7 +563,8 @@ def main(argv):
         self_test()
         return 0
     d = argv[1] if len(argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-    runs, reference_only, problems = load_dir(d)
+    runs, reference_reasons, problems = load_dir(d)
+    reference_only = bool(reference_reasons)
     gate_path = os.path.join(d, "gate_run.log")
     gate_ok, gate_reason = False, "gate_run.log が存在しない"
     if os.path.isfile(gate_path):
@@ -494,16 +572,29 @@ def main(argv):
             gate_ok, gate_reason = check_gate_log(f.read())
     if not gate_ok:
         # 前提ゲート不成立: 採用判定を出さず REJECT を確定する（RULE.txt 1.）。
+        # 上書きされる参考扱い・入力問題の理由は診断情報として残す（arm 別の A/B 判定は行わない）。
         print(f"gate=FAIL :: {gate_reason}")
         print("verdict=REJECT :: 前提ゲート不成立のため A/B 判定は行わない（RULE.txt 1.）")
+        for rr in reference_reasons:
+            print(f"reference_reason: {rr}")
+        for pr in problems:
+            print(f"problem: {pr}")
         return 1
     print("gate=OK")
-    verdicts = judge(runs, reference_only, problems)
+    verdicts = judge(runs, reference_only, problems, reference_reasons)
     print(f"runs={len(runs)} reference_only={reference_only}")
+    for rr in reference_reasons:
+        print(f"reference_reason: {rr}")
     for pr in problems:
         print(f"problem: {pr}")
-    for arm, (v, detail) in sorted(verdicts.items()):
-        print(f"arm={arm} verdict={v} :: {detail}")
+    # 採否の正は `^arm=<名> verdict=` の行のみ。underlying_* は上書き前のデータ由来の診断情報で採否ではない。
+    for arm, vd in sorted(verdicts.items()):
+        print(f"arm={arm} verdict={vd.verdict} :: {vd.detail}")
+        print(f"arm={arm} underlying_verdict={vd.underlying_verdict}")
+        for r in vd.underlying_reasons:
+            print(f"arm={arm} underlying_reason: {r}")
+        for r in vd.override_reasons:
+            print(f"arm={arm} override_reason: {r}")
     return 0
 
 
