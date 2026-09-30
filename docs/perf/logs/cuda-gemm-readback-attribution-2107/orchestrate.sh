@@ -124,8 +124,8 @@ bench_fandhe="$fc_dir/target/release/bench-fandhe"
 # Layer A（fandhe-ai =0.9.0 crates.io 版）と Layer B（HEAD）の計測経路が同一か。
 # crates/backend-cuda のファイル単位 diff は #2299 の feature gate・ドキュメント・
 # 診断専用機能追加で常に差分が出て判定が恒常的に無効化されるため、Layer A の
-# 計測経路（GEMM 起動選択・tiled カーネルソース・D2H readback 宛先確保）の項目に
-# 限定し、コメントと診断 feature ゲート項目を除いた正規化テキストで比較する
+# 計測経路（GEMM tile 選択・起動選択・tiled カーネルソース・D2H readback 宛先確保・
+# 生成／起動経路）の項目に限定し、コメントと診断 feature ゲート項目を除いた正規化テキストで比較する
 # （RULE.txt「同一コード確認」節。差分・抽出不能なら判定は「無効（参考扱い）」）。
 same_code=unknown
 path_identity_detail=""

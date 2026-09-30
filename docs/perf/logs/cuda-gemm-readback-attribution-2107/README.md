@@ -16,7 +16,7 @@ NVRTC（CUDA toolkit）が無く `CudaGemm` 構築に失敗するため smoke �
 | `RULE.txt` | 事前登録判定規則 |
 | `orchestrate.sh` | `<gb10|x86> [--dry-run] [--out <dir>]`。テストバイナリを 1 回ビルドし (N, 腕) ごとに独立プロセスで 5 run＋同一セッション Layer A。既存 run の上書きは拒否。出力は host 名・`$HOME` をマスク |
 | `aggregate.py` | `python3 aggregate.py <dir>` で `aggregate.md` を生成。`--self-test`（GPU 不要・合成 fixture） |
-| `check_layer_a_path_identity.py` | Layer A（fandhe-ai =0.9.0）と HEAD の計測経路項目の同一性検査（コメント・診断 feature ゲート項目を除いた正規化比較）。`orchestrate.sh` が呼び出し `layerA_same_code` を決める |
+| `check_layer_a_path_identity.py` | Layer A（fandhe-ai =0.9.0）と HEAD の計測経路項目（tile 選択・カーネルソース生成・readback・生成／起動経路。ファイル全体の diff ではない）の同一性検査（コメント・診断 feature ゲート項目を除いた正規化比較。生成／起動経路は人手レビュー済み sha256 一致のみ許容）。`orchestrate.sh` が呼び出し `layerA_same_code` を決める |
 | `env_info.txt` | 実測時に `orchestrate.sh` が `<dir>/` へ採取（driver・CUDA・OS・rustc・commit・load・GPU 利用率・`layerA_same_code`）。本ファイルは実測前の空テンプレート |
 
 出力ディレクトリ（`<dir>` = 既定 `gb10/`）: `run{1..5}/n{N}_{arm}.jsonl`・

@@ -517,7 +517,8 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
   本）を新規プロセスで起動し、JSONL（`DIAG_JSON`。μs・median/q1/q3/min/max・
   checksum の bit 表現）を出力する。腕間の大小関係へは `assert!` しない。
 - 実測基盤: `docs/perf/logs/cuda-gemm-readback-attribution-2107/`
-  （`RULE.txt`・`orchestrate.sh`・`aggregate.py`・`README.md`）。
+  （`RULE.txt`・`orchestrate.sh`・`aggregate.py`・`check_layer_a_path_identity.py`・
+  `README.md`）。
 
 ### §13.3 事前登録規則（要約。正は `RULE.txt`、実測前に固定・事後緩和なし）
 
@@ -527,9 +528,28 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
 - `residual = LayerA.matmul − Σ_matmul_equiv(clone_dtoh_borrowed_keep_alive)`、
   `alloc_fill_share = (dest_alloc + pretouch_fill) / residual`。`≥ 0.80` 支持・
   `< 0.50` 棄却・その間は未確定・`residual ≤ 0` は非再現。
-- Layer A（0.9.0）と Layer B（HEAD）の `memory.rs`／`gemm.rs`／`kernels*.rs` に
-  差分があれば判定は「無効（参考扱い）」。GB10 の専有ゲート（load1 < 1.0・GPU 0%）
-  未通過の run があれば参考扱い。
+- 同一コード確認は**ファイル単位の diff ではなく項目単位**
+  （`check_layer_a_path_identity.py`。`orchestrate.sh` が呼び出し `env_info.txt` の
+  `layerA_same_code`・`path_item:` 行へ記録）。Layer A（0.9.0）と Layer B（HEAD）で、
+  Layer A が通る計測経路の項目（`gemm.rs` の検証・tile 選択〈有効化フラグ・しきい値・
+  選択関数〉・起動選択・`run_f32_kernel`、`kernels.rs` の `TILED_F32`、
+  `kernels_tiled_pipeline*.rs` の 64x64／128x64 カーネルソース生成一式、`memory.rs` の
+  `readback` 系と `READBACK_DEST`）と、生成・起動経路（`CudaGemm::new`・
+  `compile_tiled_pipeline*`・`launch_tiled_f32`・Layer B が実際に呼ぶ
+  `launch_tiled_f32_pooled`・`module_cache.rs::load_function_cached`）を比較する。
+  比較はコメント行と診断 feature ゲート項目〈本番既定ビルド外〉を除いた正規化テキスト。
+  `memory.rs`／`gemm.rs`／`kernels*.rs` の**ファイル全体の差分は判定に用いない**
+  （#2299 の feature gate・ドキュメント・診断専用機能追加で恒常的に差分が出るため。
+  上記項目以外の差分は無効化要因にならない）。
+  - 計測経路項目の差分 → `no`。抽出不能 → `unknown`。
+  - 生成・起動経路項目の差分 → `unknown`（人手確認要）。ただし人手レビューで本番経路
+    等価と確認済みの差分（`new`・`compile_tiled_pipeline*`）は、base／head 双方の
+    正規化テキストの sha256 が `REVIEWED_EQUIVALENT` の記録と一致する場合に限り
+    reviewed-equivalent として `yes` 判定へ反映し、文面が変われば `unknown` へ戻る。
+  - `yes` 以外は帰属判定を「無効（参考扱い）」とする。
+- GB10 の専有ゲート（load1 < 1.0・GPU 0%）を全 5 run で通過した系列以外
+  （未通過・`load_gate_status.txt` の欠落や run 記録の不足・不明値・x86 smoke の
+  `record_only`）は、各 N の判定にも明示して参考扱いとする（fail-closed）。
 
 ### §13.4 状態
 

@@ -23,11 +23,17 @@ doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §13
 - 計測時点で Layer A（fandhe-ai =0.9.0）と Layer B（HEAD）の計測経路が同一で
   あることを check_layer_a_path_identity.py（orchestrate.sh が呼び出し）で確認し
   env_info.txt の layerA_same_code と項目別 path_item 行に記録する。比較対象は
-  Layer A が通る経路の項目（gemm.rs の起動選択・検証・run_f32_kernel、
-  kernels.rs の TILED_F32、kernels_tiled_pipeline.rs の pipeline ソース生成、
-  memory.rs の readback 系）で、コメント行と診断 feature ゲート項目を除いた
-  正規化テキストの完全一致を要求する。1 項目でも差分・抽出不能なら
-  layerA_same_code は no／unknown となり、帰属判定は「無効（参考扱い）」とする。
+  Layer A が通る経路の項目（gemm.rs の検証・tile 選択〈TILED_PIPELINE_128X64_*
+  定数・tiled_pipeline_tile_kind〉・起動選択・run_f32_kernel、kernels.rs の TILED_F32、
+  kernels_tiled_pipeline.rs／kernels_tiled_pipeline_128x64.rs の pipeline ソース生成一式
+  〈定数・テンプレ断片・render_defines・render_source・静的変数〉、memory.rs の
+  readback 系と READBACK_DEST）で、コメント行と診断 feature ゲート項目〈および本番
+  既定で到達しない ReadbackDest::Fresh 腕〉を除いた正規化テキストの完全一致を要求する。
+  計測経路項目の差分は no、抽出不能は unknown となる。生成・起動経路の項目
+  （CudaGemm::new・compile_tiled_pipeline*・launch_tiled_f32・Layer B が実際に呼ぶ
+  launch_tiled_f32_pooled・module_cache.rs::load_function_cached 等）の差分・抽出不能は
+  unknown となる（下記「追記」の人手レビュー済み既知差分を除く）。yes 以外は
+  帰属判定は「無効（参考扱い）」とする。ファイル全体の差分は判定に用いない。
   [改訂 2026-09-30・実機計測前] 当初は memory.rs・gemm.rs・kernels*.rs の
   ファイル単位 git diff の空を要求していたが、#2299 の feature gate・ドキュメント・
   診断専用機能追加で恒常的に差分が出て判定が常に無効化されるため（PR #2452
@@ -39,6 +45,9 @@ doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §13
   check_layer_a_path_identity.py の REVIEWED_EQUIVALENT に記録した。ハッシュ対が
   一致する場合のみ reviewed-equivalent として yes 判定に反映し、どちらかの文面が変われば
   従来どおり unknown（要再レビュー）へ戻る。閾値・判定式は不変。
+  [記述整合 2026-09-30・実機計測前] 上記の比較項目・専有ゲート集計の記述を検査実装
+  （check_layer_a_path_identity.py・aggregate.py）の実際の判定条件に合わせた。判定挙動・
+  閾値・判定式は不変。
 
 [代表値]
 - 各区間は run ごとの median（20 試行）を採り、5 run 間の中央値と min-max を報告する。
@@ -73,8 +82,10 @@ doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §13
 
 [専有ゲート]
 - gb10: 各 run 開始前に load1 < 1.0 かつ GPU 利用率 0% を 30 秒間隔・最大 30 分待つ。
-  通過しない run があれば系列を参考扱いとする（load_gate.log）。
-- x86 smoke: record_only。GB10 実測の代替ではない。
+  通過しない run があれば系列を参考扱いとする（load_gate.log）。集計器は
+  load_gate_status.txt の run1..5 が全て gate=pass の GB10 系列のみ通常判定とし、
+  ファイル欠落・run 記録の不足・不明値・未通過は各 N の判定にも「参考扱い」を明示する。
+- x86 smoke: record_only。GB10 実測の代替ではない（集計器は参考扱いと明示）。
 
 [対象外（再実行しない）]
 - #1436 §7 の MALLOC_MMAP_THRESHOLD_ 固定確証実験

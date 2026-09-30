@@ -7,8 +7,10 @@
 含まれない）を除いた正規化テキストを比較する（python3 標準ライブラリのみ）。
 `crates/backend-cuda` のファイル単位の diff は #2299 の feature gate・ドキュメント
 変更・診断専用機能追加で常に差分が出るため、Layer A の計測経路
-（GEMM 起動選択・tiled カーネルソース・D2H readback 宛先確保）に限定して
-比較する（RULE.txt「同一コード確認」節。PR #2452 codex-review 指摘 P1）。
+（GEMM の tile 選択・起動選択・tiled カーネルソース〈64x64／128x64〉・D2H readback
+宛先確保）と生成・起動経路（`CudaGemm::new`・`compile_tiled_pipeline*`・
+`launch_tiled_f32*`）に限定して比較する（生成・起動経路の差分は `unknown`、
+人手レビュー済み sha256 一致のみ許容）（RULE.txt「同一コード確認」節。PR #2452 codex-review 指摘 P1）。
 出力は `layerA_same_code: yes|no|unknown` の 1 行 + 項目別の `path_item:` 行。
 項目が抽出できない場合は fail-closed で `unknown`（`yes` にしない）。
 使い方: check_layer_a_path_identity.py [<base_ref=v0.9.0>] [<head_ref=HEAD>]
