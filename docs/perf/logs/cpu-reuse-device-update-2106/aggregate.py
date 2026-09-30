@@ -70,7 +70,10 @@ def load_run(path):
 
 
 def load_gate(d):
-    """load_gate_status.txt を読み、負荷ゲート未通過の run 名一覧を返す（欠落・不正は fail-closed）。"""
+    """load_gate_status.txt を読み、(未通過 run 名一覧, record_only run 名一覧) を返す（欠落・不正は fail-closed）。
+
+    record_only は共有環境（M4 Max）で負荷ゲートを通過できず記録のみとした run であり、
+    ゲート通過済み（pass）の通常判定と区別して出力に明示する。"""
     path = os.path.join(d, GATE_FILE)
     try:
         with open(path, encoding="utf-8") as f:
@@ -88,7 +91,8 @@ def load_gate(d):
         seen[parts[0]] = status
     if set(seen) != {f"run{n}" for n in range(1, RUNS + 1)}:
         raise AggError(f"{path}: run1..run{RUNS} の全行が必要 ({sorted(seen)})")
-    return sorted(r for r, st in seen.items() if st == "unpassed")
+    return (sorted(r for r, st in seen.items() if st == "unpassed"),
+            sorted(r for r, st in seen.items() if st == "record_only"))
 
 
 def med(runs, arm, ph):
@@ -114,9 +118,13 @@ def us(x):
     return f"{x * 1e6:.1f}"
 
 
-def aggregate(runs, unpassed=()):
+def aggregate(runs, unpassed=(), record_only=()):
     check_checksums(runs)
     out = []
+    if record_only:
+        out.append(f"【record_only（共有環境・負荷ゲート非適用）】run: {', '.join(record_only)}"
+                   "（RULE.txt「m4max: record_only」。負荷ゲート通過済み〈pass〉の通常判定とは区別し、以下の集計は記録扱い）")
+        out.append("")
     if unpassed:
         out.append(f"【参考扱い】GB10 負荷ゲート未通過の run: {', '.join(unpassed)}（RULE.txt ゲート節。通常判定として扱わない）")
         out.append("")
@@ -214,9 +222,13 @@ def self_test():
         write_gate(d, ["pass"] * RUNS)
         text = run_dir(d)
         assert "帰属" in text and "参考扱い" not in text and "H1 ループ形" in text, text
+        assert "record_only" not in text, text
         write_gate(d, ["pass", "unpassed", "pass", "pass", "pass"])
         text = run_dir(d)
         assert "【参考扱い】" in text and "run2" in text, text
+        write_gate(d, ["record_only"] * RUNS)
+        text = run_dir(d)
+        assert "【record_only" in text and "run1" in text and "run5" in text and "参考扱い" not in text, text
         os.remove(os.path.join(d, GATE_FILE))
         expect_fail(d, "ゲート状態ファイル欠落")
         write_gate(d, ["pass"] * RUNS)
@@ -261,7 +273,8 @@ def self_test():
 
 def run_dir(d):
     runs = [load_run(os.path.join(d, f"run{n}.jsonl")) for n in range(1, RUNS + 1)]
-    return aggregate(runs, load_gate(d))
+    unpassed, record_only = load_gate(d)
+    return aggregate(runs, unpassed, record_only)
 
 
 def main(argv):
