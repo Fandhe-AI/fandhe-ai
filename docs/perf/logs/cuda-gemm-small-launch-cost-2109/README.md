@@ -30,6 +30,10 @@ G-CUDA-G256（fandhe-ai 2 位・対 candle 0.83×）の起動固定費（launch 
 python3 docs/perf/logs/cuda-gemm-small-launch-cost-2109/aggregate.py > docs/perf/logs/cuda-gemm-small-launch-cost-2109/aggregate.md
 ```
 
+`orchestrate.sh` は出力先（既定は本ディレクトリ）に既存の計測ログがあると開始前に
+`exit 1` で停止する（RULE.txt 1: 上書き禁止）。再計測は空の別ディレクトリを
+`LOG_DIR=<dir>` で指定し、集計は `aggregate.py --log-dir <dir>` で行う。
+
 `aggregate.py` が非ゼロ終了した系列は無効とし、原因を記録して系列全体を
 やり直す（一部 run の差し替えはしない）。
 

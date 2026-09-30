@@ -243,7 +243,7 @@ def expected_counts(n: int) -> dict:
 
 def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_text: str,
               gate_text: str, head_phases_text: str, head_ac2_text: str,
-              counts_exact_text: str) -> str:
+              counts_exact_text: str, nsys_text: str | None = None) -> str:
     gate_ok = parse_gate(gate_text)
     check_counts_exact(counts_exact_text)
     if len(layer_b_texts) != RUNS:
@@ -313,6 +313,9 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
         ("補助 teardown", b_runs("L2", "teardown")),
         ("補助 driver_scope（本番 with_driver_call 入退場）", b_runs("L2", "driver_scope")),
         ("補助 alloc_c", b_runs("L2", "alloc_c")),
+        # RULE.txt 6: cudarc 内部（event・async alloc）費用の補助量。run 毎の差分から中央値と min–max を出す。
+        ("補助 h2d_clone_drop − h2d_prealloc（cudarc 内部の確保・解放）",
+         rr((1, b_runs("E", "h2d_clone_drop")), (-1, b_runs("E", "h2d_prealloc")))),
     ]
     lines = [
         f"## N={N} 集計（5 run 中央値, µs。括弧内は 5 run 間の min–max）", "",
@@ -328,7 +331,12 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
         f"- L0 ops_total: {l0:.3f}／L1 gemm_total: {l1:.3f}／L2 l2_sum: {l2:.3f}",
         f"- Layer A（HEAD path-patch）iter_total: {a_med('iter_total'):.3f}／matmul: {a_med('matmul'):.3f}"
         f"（参考 registry =0.9.0: iter_total {a_med('iter_total', pa):.3f}／matmul {a_med('matmul', pa):.3f}）",
-        f"- L0 ops_total の run 間 min–max: {rng(l0r)}", "",
+        f"- L0 ops_total の run 間 min–max: {rng(l0r)}",
+        # RULE.txt 6 H5: reuse が fresh より遅い逆転の手がかり（HEAD reuse − candle fresh の符号）。
+        f"- reuse が candle fresh より遅い逆転: {'あり' if head_reuse > candle else 'なし'}"
+        f"（HEAD reuse − candle fresh = {head_reuse - candle:+.3f}）",
+        "- nsys（任意）: " + ("欠測（未取得）" if nsys_text is None or nsys_text.lstrip().startswith("nsys 欠測")
+                            else "取得済み（nsys-cuda-api.log を参照）"), "",
         "- 注: 各値の中央値は run 単位の値の 5 run 中央値。仮説の µs は run 毎に導出した値の中央値",
         "  （差・和は同一 run 内の区間から作る。H2 は kernel_wait と dev_kernel_b2b が別測定系列の推定を",
         "  組み合わせた値で、厳密な区間ではない）。", "",
@@ -342,6 +350,15 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
                      ("device idle 推定 (dev_kernel_seg-b2b)", idle_r),
                      ("host のみ時間 (l2_sum-dev_span, 0 未満は 0)", host_r)):
         lines.append(f"| {name} | {med(xs):.3f} ({rng(xs)}) | {med(xs) / l0 * 100:.1f}% |")
+    # RULE.txt 6 H2: floor（E tiny_roundtrip・sync_idle）との照合。H2 は推定値で床との比は目安。
+    h2_r = rows[1][1]
+    sync_r = b_runs("E", "sync_idle")
+    lines += ["", "### H2 と床の照合（RULE.txt 6）", "",
+              "| 項目 | µs (min–max) | H2 中央値との比 |", "| --- | --- | --- |"]
+    for name, xs in (("H2 launch+同期の往復（推定）", h2_r), ("E tiny_roundtrip", tiny_r),
+                     ("E sync_idle", sync_r)):
+        ratio = f"{med(xs) / med(h2_r) * 100:.1f}%" if med(h2_r) > 0 else "n/a"
+        lines.append(f"| {name} | {med(xs):.3f} ({rng(xs)}) | {ratio} |")
     lines += ["", "| 仮説 | µs (min–max) | L0 比 | gap 比 | 判定 |", "| --- | --- | --- | --- | --- |"]
     for name, xs in rows:
         v = med(xs)
@@ -353,7 +370,21 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
         else:
             verdict = "支持" if gap > 0 and share >= 0.5 else "未確定"
         lines.append(f"| {name} | {v:.3f} ({rng(xs)}) | {v / l0 * 100:.1f}% | {share * 100:.1f}% | {verdict} |")
-    lines.append("")
+    # RULE.txt 8 支配項: L2 各区間（teardown 含む）と H4・H5 のうち L0 比が最大のもの。
+    # 主分母は L0。H5 は Layer A 側の値なので HEAD iter_total 比も併記する。
+    iter_total = a_med("iter_total")
+    cand = [(f"L2 {ph}", b_runs("L2", ph)) for ph in
+            ("h2d_a", "h2d_b", "alloc_c", "launch_issue", "readback", "teardown", "driver_scope")]
+    cand += [(n, xs) for n, xs in rows if n.startswith(("H4a", "H4b", "H5"))]
+    ranked = sorted(cand, key=lambda c: med(c[1]), reverse=True)
+    lines += ["", "### 支配項（RULE.txt 8。L0 比が最大の項目）", "",
+              "| 順位 | 項目 | µs | L0 比 | iter_total 比 |", "| --- | --- | --- | --- | --- |"]
+    for k, (name, xs) in enumerate(ranked, 1):
+        lines.append(f"| {k} | {name} | {med(xs):.3f} | {med(xs) / l0 * 100:.1f}% "
+                     f"| {med(xs) / iter_total * 100:.1f}% |")
+    top_name, top_xs = ranked[0]
+    lines += ["", f"- 支配項: **{top_name}**（{med(top_xs):.3f} µs／L0 比 {med(top_xs) / l0 * 100:.1f}%）"
+              + ("" if gate_ok else "（専有ゲート FAIL のため参考）"), ""]
     return "\n".join(lines)
 
 
@@ -363,7 +394,8 @@ def _layer_b_fixture(cksum: str = "0x4062c00000000000") -> str:
           ("L2", "readback"): 30, ("L2S", "kernel_wait"): 20, ("L2S", "d2h"): 15,
           ("L2", "teardown"): 8,
           ("L2", "driver_scope"): 1, ("L2", "l2_sum"): 72, ("D", "dev_kernel_b2b"): 8, ("D", "dev_kernel_seg"): 14,
-          ("D", "dev_span"): 50, ("E", "tiny_roundtrip"): 12, ("E", "sync_idle"): 3}
+          ("D", "dev_span"): 50, ("E", "tiny_roundtrip"): 12, ("E", "sync_idle"): 3,
+          ("E", "h2d_prealloc"): 4, ("E", "h2d_clone_drop"): 9}
     rows = [f"DIAG2109 n={N} layer={l} phase={p} median_us={v:.3f} q1_us={v:.3f} q3_us={v:.3f}"
             for (l, p), v in ph.items()]
     e = expected_counts(N)
@@ -472,6 +504,11 @@ def self_test() -> None:
     row = [ln for ln in md.splitlines() if ln.startswith("| H6")][0]
     assert row.endswith("| 記録のみ |"), row
     assert "H5 facade/tape (HEAD matmul-L0)" in md and "HEAD path-patch / registry" in md
+    assert "支配項: **" in md and "H2 と床の照合" in md and "h2d_clone_drop − h2d_prealloc" in md, md
+    # fixture: L0=90・L2 readback=30 が最大の L2 区間、H4a=5・H5=70-90=-20 → 支配項は L2 readback
+    assert "支配項: **L2 readback**（30.000 µs／L0 比 33.3%）" in md, md
+    aux = [ln for ln in md.splitlines() if ln.startswith("| 補助 h2d_clone_drop")][0]
+    assert aux.endswith("| 記録のみ |"), aux
     print("self-test OK")
 
 
@@ -497,11 +534,13 @@ def main(argv: list[str]) -> int:
         print(f"LogIntegrityError: 一部のログが欠測: {missing}（RULE.txt 1・fail-closed）",
               file=sys.stderr)
         return 1
+    nsys = d / "nsys-cuda-api.log"
     try:
         print(aggregate([p.read_text() for p in needed[:RUNS]], needed[RUNS].read_text(),
                         needed[RUNS + 1].read_text(), needed[RUNS + 2].read_text(),
                         needed[RUNS + 3].read_text(), needed[RUNS + 4].read_text(),
-                        needed[RUNS + 5].read_text(), needed[RUNS + 6].read_text()))
+                        needed[RUNS + 5].read_text(), needed[RUNS + 6].read_text(),
+                        nsys.read_text() if nsys.exists() else None))
     except LogIntegrityError as exc:
         print(f"LogIntegrityError: {exc}", file=sys.stderr)
         return 1

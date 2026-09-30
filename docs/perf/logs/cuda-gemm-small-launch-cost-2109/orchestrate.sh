@@ -17,10 +17,18 @@
 # （30 秒間隔・最大 30 分。結果は load_gate.log）。
 # 収録時にホスト名を masked、$HOME を <home> へ置換する（RULE.txt 10）。
 #
+# 上書き禁止（RULE.txt 1: run1〜run5 の差し替え・追加起動・上書きをしない）:
+#   出力先 LOG_DIR（既定は本ディレクトリ）に生成物ログが 1 つでもあれば、計測開始前に
+#   exit 1 で停止する。再計測は空の別ディレクトリを LOG_DIR に指定する（既存ログは
+#   触らない）。加えて `set -o noclobber` で `>` による既存ファイルの切り詰めも
+#   シェルが拒否する（事前検査をすり抜けた場合の二重防止）。
+#
 # 使い方（GB10 実機。別セッション）:
 #   ./orchestrate.sh
-#   ./orchestrate.sh --dry-run   # 経路解決のみ（実機不要）
+#   LOG_DIR=/path/to/new-empty-dir ./orchestrate.sh   # 別ディレクトリへ保存
+#   ./orchestrate.sh --dry-run   # 経路解決と上書き検査のみ（実機不要）
 set -euo pipefail
+set -o noclobber
 
 DRY_RUN=0
 case "${1:-}" in
@@ -32,6 +40,7 @@ esac
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SELF_DIR/../../../.." && pwd)"
 WORK_DIR="${FRAMEWORK_COMPARE_DIR:-$REPO_ROOT/scripts/bench/framework-compare}"
+LOG_DIR="${LOG_DIR:-$SELF_DIR}"
 N=256
 RUNS=5
 RUN_NSYS="${RUN_NSYS:-0}"
@@ -42,7 +51,26 @@ if [[ ! -f "$WORK_DIR/Cargo.toml" ]]; then
   exit 1
 fi
 
+# 事前登録済みの生成物ログ（aggregate.py の入力＋補助ログ）が 1 つでもあれば開始前に停止する。
+# 計測終了後に env_info へ追記される「計測終了時刻」行も計測済みの印として扱う。
+existing=()
+for f in load_gate.log layerA-phases-N${N}.log layerA-ac2-N${N}.log head-phases-N${N}.log \
+         head-ac2-N${N}.log candle-fresh-N${N}.log counts-exact.log nsys-cuda-api.log \
+         $(seq -f 'layerB-run%g.log' 1 "$RUNS"); do
+  [[ -e "$LOG_DIR/$f" ]] && existing+=("$f")
+done
+if [[ -f "$LOG_DIR/env_info.txt" ]] && grep -q '^計測終了時刻' "$LOG_DIR/env_info.txt"; then
+  existing+=("env_info.txt（計測終了時刻あり）")
+fi
+if (( ${#existing[@]} > 0 )); then
+  echo "ERROR: 出力先 $LOG_DIR に既存の計測ログがある。上書きは禁止（RULE.txt 1）: ${existing[*]}" >&2
+  echo "ERROR: 再計測は空の別ディレクトリを LOG_DIR に指定すること" >&2
+  exit 1
+fi
+mkdir -p "$LOG_DIR"
+
 if [[ "$DRY_RUN" == "1" ]]; then
+  echo "dry-run: LOG_DIR=$LOG_DIR"
   echo "dry-run: WORK_DIR=$WORK_DIR"
   echo "dry-run: REPO_ROOT=$REPO_ROOT"
   echo "dry-run: N=$N runs=$RUNS RUN_NSYS=$RUN_NSYS"
@@ -69,11 +97,11 @@ gate() {
     load="$(cut -d' ' -f1 /proc/loadavg)"
     util="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | head -n1 | tr -d ' ')"
     if awk -v l="$load" 'BEGIN{exit !(l < 1.0)}' && [[ "$util" == "0" ]]; then
-      echo "$label PASS load1=$load gpu_util=$util" >>"$SELF_DIR/load_gate.log"
+      echo "$label PASS load1=$load gpu_util=$util" >>"$LOG_DIR/load_gate.log"
       return 0
     fi
     if (( waited >= 1800 )); then
-      echo "$label FAIL(参考扱い) load1=$load gpu_util=$util" >>"$SELF_DIR/load_gate.log"
+      echo "$label FAIL(参考扱い) load1=$load gpu_util=$util" >>"$LOG_DIR/load_gate.log"
       return 0
     fi
     sleep 30
@@ -81,7 +109,7 @@ gate() {
   done
 }
 
-: >"$SELF_DIR/load_gate.log"
+: >"$LOG_DIR/load_gate.log"
 
 cd "$WORK_DIR"
 # path patch のビルドは framework-compare/Cargo.lock を書き換えるため必ず復元する
@@ -102,7 +130,7 @@ trap - EXIT
 cargo build --release -p bench-candle --no-default-features --features cuda
 
 echo "== Layer A: reuse --phases N=$N =="
-OUT="$SELF_DIR/layerA-phases-N${N}.log"
+OUT="$LOG_DIR/layerA-phases-N${N}.log"
 : >"$OUT"
 for i in $(seq 1 "$RUNS"); do
   gate "layerA-phases run$i"
@@ -112,7 +140,7 @@ for i in $(seq 1 "$RUNS"); do
 done
 
 echo "== AC-2: reuse（非 phases） N=$N =="
-OUT="$SELF_DIR/layerA-ac2-N${N}.log"
+OUT="$LOG_DIR/layerA-ac2-N${N}.log"
 : >"$OUT"
 for i in $(seq 1 "$RUNS"); do
   gate "ac2 run$i"
@@ -122,7 +150,7 @@ for i in $(seq 1 "$RUNS"); do
 done
 
 echo "== HEAD path-patch Layer A: reuse --phases N=$N =="
-OUT="$SELF_DIR/head-phases-N${N}.log"
+OUT="$LOG_DIR/head-phases-N${N}.log"
 : >"$OUT"
 for i in $(seq 1 "$RUNS"); do
   gate "head-phases run$i"
@@ -132,7 +160,7 @@ for i in $(seq 1 "$RUNS"); do
 done
 
 echo "== HEAD path-patch AC-2: reuse（非 phases） N=$N =="
-OUT="$SELF_DIR/head-ac2-N${N}.log"
+OUT="$LOG_DIR/head-ac2-N${N}.log"
 : >"$OUT"
 for i in $(seq 1 "$RUNS"); do
   gate "head-ac2 run$i"
@@ -142,7 +170,7 @@ for i in $(seq 1 "$RUNS"); do
 done
 
 echo "== candle 参照（診断用） fresh N=$N =="
-OUT="$SELF_DIR/candle-fresh-N${N}.log"
+OUT="$LOG_DIR/candle-fresh-N${N}.log"
 : >"$OUT"
 for i in $(seq 1 "$RUNS"); do
   gate "candle run$i"
@@ -158,29 +186,29 @@ cd "$REPO_ROOT"
 for i in $(seq 1 "$RUNS"); do
   gate "layerB run$i"
   cargo test --release -p fandhe-ai-backend-cuda --lib "$LAYER_B_FILTER" \
-    -- --ignored --exact --test-threads=1 --nocapture 2>&1 | mask >"$SELF_DIR/layerB-run${i}.log"
+    -- --ignored --exact --test-threads=1 --nocapture 2>&1 | mask >"$LOG_DIR/layerB-run${i}.log"
 done
 echo "== 件数の厳密断言 =="
 cargo test --release -p fandhe-ai-backend-cuda --lib gemm_small_launch_cost_diag_tests::gemm_small_launch_counts_exact \
-  -- --ignored --exact --test-threads=1 2>&1 | mask >"$SELF_DIR/counts-exact.log"
+  -- --ignored --exact --test-threads=1 2>&1 | mask >"$LOG_DIR/counts-exact.log"
 
 if [[ "$RUN_NSYS" == "1" ]]; then
   echo "== 任意: nsys CUDA API 集計（Layer B 1 プロセス） =="
   if command -v nsys >/dev/null 2>&1; then
     nsys profile --trace=cuda --stats=true -o "$(mktemp -d)/gemm2109" \
       cargo test --release -p fandhe-ai-backend-cuda --lib "$LAYER_B_FILTER" \
-      -- --ignored --exact --test-threads=1 --nocapture 2>&1 | mask >"$SELF_DIR/nsys-cuda-api.log"
+      -- --ignored --exact --test-threads=1 --nocapture 2>&1 | mask >"$LOG_DIR/nsys-cuda-api.log"
   else
-    echo "nsys 欠測（未導入）" >"$SELF_DIR/nsys-cuda-api.log"
+    echo "nsys 欠測（未導入）" >"$LOG_DIR/nsys-cuda-api.log"
   fi
 else
-  echo "nsys 欠測（RUN_NSYS=1 未指定）" >"$SELF_DIR/nsys-cuda-api.log"
+  echo "nsys 欠測（RUN_NSYS=1 未指定）" >"$LOG_DIR/nsys-cuda-api.log"
 fi
 
 {
   echo "計測終了時刻（UTC）: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   uptime
   nvidia-smi --query-gpu=name,driver_version,utilization.gpu --format=csv || true
-} 2>&1 | mask >>"$SELF_DIR/env_info.txt"
+} 2>&1 | mask >>"$LOG_DIR/env_info.txt"
 
-echo "done. 次: python3 $SELF_DIR/aggregate.py"
+echo "done. 次: python3 $SELF_DIR/aggregate.py --log-dir $LOG_DIR"
