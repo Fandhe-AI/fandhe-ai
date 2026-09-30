@@ -1559,6 +1559,140 @@ pub(crate) const FINE_BARRIER_ENABLED: bool = false;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const UNROLL_ACC_ENABLED: bool = false;
 
+/// 協調ロード `vi` ループの固定反復数化 + full unroll 軸（`UNROLL_LOAD_ENABLED`。
+/// `shaders/gemm.metal` index 18。イシュー #2110）の**本番既定値**。
+///
+/// candle 0.11.0 の steel BlockLoader は読み出しループに `STEEL_PRAGMA_UNROLL`
+/// を付ける（`docs/analysis/candle-metal-01.md` §5・§6 候補 1・2）。本軸は
+/// `UNROLL_ACC_ENABLED`（アキュムレータ系ループ。#1282）とは別軸の opt-in で、
+/// [`crate::gemm::MetalGemm::new`] 系は常に本定数（`false`）を渡すため既定挙動
+/// は不変。候補の構築入口は `#[cfg(test)]` の
+/// `MetalGemm::new_with_steel_candidate` のみ。性能実測（kernel_gpu 5 run）・
+/// 本番結線判断は #2111 のスコープで、いかなる結果でも既定値変更はユーザー承認
+/// 事項（`docs/perf/metal-gemm-steel-candidates.md`）。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`UNROLL_ACC_ENABLED`] と同じ。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const UNROLL_LOAD_ENABLED: bool = false;
+
+/// candle 0.11.0 `select_tile_config`（f32・NN・batch=1）のタイル選択を純関数で
+/// モデル化したもの（イシュー #2110。テスト・診断専用。コードは持ち込まず
+/// `docs/analysis/candle-metal-01.md` §3.2 の結論のみを使う）。
+///
+/// - `m < 16` は `CANDIDATES[3]`（`TILE_32_32_16_2_2`）
+/// - `m * n >= 2^20` は `CANDIDATES[0]`（`TILE_64_64_16_2_2`。N>=1024 の正方はデバイス
+///   区分に依らずこれ）
+/// - それ以外は `CANDIDATES[5]`（`TILE_64_32_32_2_2`。**M4 Max が candle の
+///   Max／Medium／Ultra 区分に解決される仮定**。未確認: 同 doc §3.2・§8）
+#[cfg(test)]
+pub(crate) fn select_candle_equivalent(m: usize, n: usize, _k: usize) -> TileConfig {
+    if m < 16 {
+        CANDIDATES[3]
+    } else if m.saturating_mul(n) >= (1usize << 20) {
+        CANDIDATES[0]
+    } else {
+        CANDIDATES[5]
+    }
+}
+
+/// [`SteelArm`] のタイル選択方式（イシュー #2110）。
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SteelTileSelect {
+    /// 本番選択 [`select_for_device`]。
+    Production,
+    /// candle 相当 [`select_candle_equivalent`]。
+    CandleEquivalent,
+}
+
+/// #2110 候補 arm（事前登録。`docs/perf/logs/metal-gemm-candidate-ab-2111/RULE.txt`
+/// と 1:1 対応）。呼び出し元は `gemm::tests`（bit 一致・parity）と
+/// `gemm_steel_candidate_diag_tests`（kernel_gpu 5 run ハーネス）。
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SteelArm {
+    pub(crate) label: &'static str,
+    pub(crate) select: SteelTileSelect,
+    pub(crate) unroll_acc: bool,
+    pub(crate) unroll_load: bool,
+    pub(crate) fine_barrier: bool,
+}
+
+/// 事前登録 5 arm（index 0 = base = 本番既定）。FB 単体は #1278 で
+/// undetermined のため単体 arm にしない。`T0U-LU-FB` は candle の fragment
+/// ロードと MMA の間の `simdgroup_barrier(mem_none)` の**近似**（粒度は
+/// 厳密一致しない可能性がある。candle-metal-01 §6）。
+#[cfg(test)]
+pub(crate) const STEEL_ARMS: [SteelArm; 5] = [
+    SteelArm {
+        label: "base",
+        select: SteelTileSelect::Production,
+        unroll_acc: false,
+        unroll_load: false,
+        fine_barrier: false,
+    },
+    SteelArm {
+        label: "T0U",
+        select: SteelTileSelect::CandleEquivalent,
+        unroll_acc: true,
+        unroll_load: false,
+        fine_barrier: false,
+    },
+    SteelArm {
+        label: "LU",
+        select: SteelTileSelect::Production,
+        unroll_acc: false,
+        unroll_load: true,
+        fine_barrier: false,
+    },
+    SteelArm {
+        label: "T0U-LU",
+        select: SteelTileSelect::CandleEquivalent,
+        unroll_acc: true,
+        unroll_load: true,
+        fine_barrier: false,
+    },
+    SteelArm {
+        label: "T0U-LU-FB",
+        select: SteelTileSelect::CandleEquivalent,
+        unroll_acc: true,
+        unroll_load: true,
+        fine_barrier: true,
+    },
+];
+
+#[cfg(test)]
+impl SteelArm {
+    /// arm のタイル構成（`base` は本番選択に `verified` を渡す）。
+    pub(crate) fn tile_for(
+        &self,
+        n: usize,
+        verified: Option<VerifiedM4MaxGpuCoreCount>,
+    ) -> TileConfig {
+        match self.select {
+            SteelTileSelect::Production => select_for_device(n, n, n, verified),
+            SteelTileSelect::CandleEquivalent => select_candle_equivalent(n, n, n),
+        }
+    }
+
+    /// base と実効的に同一カーネルか（タイル・実効 unroll_acc・unroll_load・
+    /// fine_barrier がすべて base と等しい）。同一なら RULE.txt により当該 N は
+    /// 判定から除外される（自己比較ノイズを勝敗に数えない）。
+    pub(crate) fn same_kernel_as_base(
+        &self,
+        n: usize,
+        verified: Option<VerifiedM4MaxGpuCoreCount>,
+    ) -> bool {
+        let base = &STEEL_ARMS[0];
+        let (bc, ac) = (base.tile_for(n, verified), self.tile_for(n, verified));
+        bc == ac
+            && unroll_acc_loops_for(bc, base.unroll_acc)
+                == unroll_acc_loops_for(ac, self.unroll_acc)
+            && base.unroll_load == self.unroll_load
+            && base.fine_barrier == self.fine_barrier
+    }
+}
+
 /// `gemm_simdgroup_tiled` のソーステキスト特殊化経路（イシュー #1288。
 /// E2 試作）を本番 dispatch で実際に有効化するかどうかのゲート。
 /// `SWIZZLE_ENABLED`/`FINE_BARRIER_ENABLED`/`UNROLL_ACC_ENABLED` と同じ
@@ -4691,6 +4825,79 @@ mod tests {
              本番既定は false（性能実測・切替判断は #1284 のスコープ）です \
              （tile.rs 冒頭 UNROLL_ACC_ENABLED doc comment・イシュー #1282 参照）。"
         );
+    }
+
+    /// `UNROLL_LOAD_ENABLED` の**コミット状態既定値**が `false` に固定されて
+    /// いることをロックする（イシュー #2110。`unroll_acc_enabled_is_false_by_default`
+    /// と同型。本番既定切替は #2111・ユーザー承認事項）。
+    #[test]
+    fn unroll_load_enabled_is_false_by_default() {
+        assert!(
+            !std::hint::black_box(UNROLL_LOAD_ENABLED),
+            "UNROLL_LOAD_ENABLED が true のままコミットされている疑いがあります。\
+             本番既定は false です（イシュー #2110・tile.rs UNROLL_LOAD_ENABLED doc）。"
+        );
+    }
+
+    /// candle 相当タイル選択の分岐境界（`docs/analysis/candle-metal-01.md` §3.2）。
+    #[test]
+    fn select_candle_equivalent_branches() {
+        assert_eq!(select_candle_equivalent(512, 512, 512), CANDIDATES[5]);
+        assert_eq!(select_candle_equivalent(1024, 1024, 1024), CANDIDATES[0]);
+        assert_eq!(select_candle_equivalent(2048, 2048, 2048), CANDIDATES[0]);
+        assert_eq!(select_candle_equivalent(4096, 4096, 4096), CANDIDATES[0]);
+        assert_eq!(select_candle_equivalent(8, 4096, 4096), CANDIDATES[3]);
+        assert_eq!(select_candle_equivalent(15, 1 << 20, 64), CANDIDATES[3]);
+        // m*n が 2^20 ちょうど（>= で大）とその直下（小）。
+        assert_eq!(select_candle_equivalent(1024, 1024, 8), CANDIDATES[0]);
+        assert_eq!(select_candle_equivalent(1023, 1024, 8), CANDIDATES[5]);
+        assert_eq!(select_candle_equivalent(16, 65536, 8), CANDIDATES[0]);
+        assert_eq!(select_candle_equivalent(16, 65535, 8), CANDIDATES[5]);
+    }
+
+    /// arm 表: base が全既定・ラベル一意・base 以外は base と異なる構成を持つ。
+    #[test]
+    fn steel_arms_table_is_well_formed() {
+        let base = STEEL_ARMS[0];
+        assert_eq!(base.label, "base");
+        assert_eq!(base.select, SteelTileSelect::Production);
+        assert_eq!(base.unroll_acc, UNROLL_ACC_ENABLED);
+        assert_eq!(base.unroll_load, UNROLL_LOAD_ENABLED);
+        assert_eq!(base.fine_barrier, FINE_BARRIER_ENABLED);
+        for (i, a) in STEEL_ARMS.iter().enumerate() {
+            for b in &STEEL_ARMS[i + 1..] {
+                assert_ne!(a.label, b.label, "arm ラベルは一意");
+            }
+            if i > 0 {
+                assert!(
+                    a.select != SteelTileSelect::Production
+                        || a.unroll_acc
+                        || a.unroll_load
+                        || a.fine_barrier,
+                    "{} は base と同一構成になっている",
+                    a.label
+                );
+            }
+        }
+    }
+
+    /// T0U は N>=1024 で acc 積 16 以上のタイル（CANDIDATES[0]）に unroll が実効化し、
+    /// N=512（CANDIDATES[5]。acc 積 8 以下）では実効化しない。base は全 N で
+    /// 自己と同一カーネル、LU は全 N で別カーネル。
+    #[test]
+    fn steel_t0u_effective_unroll_by_n() {
+        let t0u = STEEL_ARMS[1];
+        assert_eq!(t0u.label, "T0U");
+        for n in [1024usize, 2048, 4096] {
+            let cfg = t0u.tile_for(n, None);
+            assert!(unroll_acc_loops_for(cfg, t0u.unroll_acc), "N={n}");
+        }
+        let cfg512 = t0u.tile_for(512, None);
+        assert!(!unroll_acc_loops_for(cfg512, t0u.unroll_acc));
+        for n in [512usize, 1024, 2048, 4096] {
+            assert!(STEEL_ARMS[0].same_kernel_as_base(n, None));
+            assert!(!STEEL_ARMS[2].same_kernel_as_base(n, None));
+        }
     }
 
     /// `SOURCE_SPECIALIZATION_ENABLED` の**コミット状態既定値**が `false`

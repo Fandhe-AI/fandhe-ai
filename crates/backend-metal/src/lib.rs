@@ -372,6 +372,16 @@ mod gemm_coop_load_diag_tests;
 // `shaders/gemm.metal`）は無変更。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_smem_swizzle_diag_tests;
+// candle／MLX steel 解析差分由来の GEMM 候補（`UNROLL_LOAD_ENABLED`・candle 相当
+// タイル選択との組合せ。イシュー #2110。`docs/perf/metal-gemm-steel-candidates.md`）
+// の bit 一致・CPU 参照 parity の自己検証と kernel_gpu 5 run A/B ハーネス。
+// `MetalGemm::new_with_steel_candidate`（`#[cfg(test)] pub(crate)`）・
+// `tile::STEEL_ARMS`（`#[cfg(test)]`）・`gemm_reuse_phase_diag_tests` の
+// `pub(crate)` 面へ到達するため、`gemm_smem_swizzle_diag_tests` と同じ理由で
+// クレートルートの兄弟モジュールとして配置し、同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。実機実測・結線判断は #2111。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_steel_candidate_diag_tests;
 // E6 タイルクラス分割（`tile::TileClassMode`。イシュー #1327・PR #1388で
 // opt-in 機構を追加・bit 一致を自己検証済み）の N=1024/2048/4096 純カー
 // ネル時間（GPU タイムスタンプ）を候補 0/4/5/8（`tile::CANDIDATES`）で

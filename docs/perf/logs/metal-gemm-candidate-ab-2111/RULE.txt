@@ -1,0 +1,25 @@
+事前登録判定規則（イシュー #2110 が実測前に固定。2026-09-30。#2111 の実測結果を見た後の緩和・変更は禁止）
+
+対象 arm: base（本番）／T0U／LU／T0U-LU／T0U-LU-FB（定義: docs/perf/metal-gemm-steel-candidates.md 2 節、crates/backend-metal/src/tile.rs の STEEL_ARMS）
+対象 N: 正方 512／1024／2048／4096（f32・NN・kernel_gpu）
+判定の実行: python3 aggregate.py（本ディレクトリ）
+
+1. 前提ゲート: `orchestrate.sh gate` が実行する bit 一致 3 本（unroll_load_on_off_bit_match_all_candidates／_dispatch_auto／_transposed）と
+   parity 1 本（steel_candidate_arms_match_cpu_reference）が全 PASS であること。1 件でも FAIL なら機構契約の不成立として REJECT を確定し、A/B は実施しない。
+2. 計測は 5 run をプロセス独立に起動する（orchestrate.sh 1〜5）。run の差し替え・追加起動・選別はしない。
+3. 指標は run 内の head/base kernel_gpu 比（head_over_base_kernel_gpu）。arm × N ごとに 5 run の中央値をとる。
+4. 1 run・1 N でも bit_identical=false があれば、その arm は採用不可（NOT_ADOPTABLE）。run 間で checksum が一致しない場合も採用不可。
+5. same_kernel=true の N（arm の実効カーネルが base と同一。例: N=512 の T0U）は、「ratio<1.00 の形状数」と非後退判定の両方から除外する（事前登録。自己比較のノイズを勝敗に数えない）。
+6. arm の総合判定:
+   - ADOPT_CANDIDATE: 除外後の対象 N すべてで中央値 <=1.00、中央値 <1.00 が 2 形状以上、checksum が全 run で一致。
+     （#2111 の採用条件は正方 4 形状のうち 2 形状以上で ratio<1.00 かつ checksum 一致。本規則はそれに非後退条件を加えた事前登録）
+   - REJECT: 対象 N のいずれかで中央値 >1.00 かつ 5/5 run の符号が一貫。
+   - UNDETERMINED: 上記いずれにも該当しない（run 数不足は INCOMPLETE）。
+7. 負荷: 専有ゲート。orchestrate.sh は load1 < 8.0 になるまで 30 秒間隔・最大 30 分待つ（load_gate.log に記録）。
+   1 run でも timeout した系列は参考扱い（REFERENCE_ONLY）とし、採用判断の根拠にしない。
+8. base の定義: 本番選択 tile::select_for_device(n,n,n, verified_m4_max) と全ゲート既定値の classic 経路（dispatch_tiled_prepared）。
+   正方 N=512〜4096 では should_split_k が None のため、本番 dispatch_auto と同一の経路になる（docs/backend-metal-splitk-decision.md）。
+9. candle のデバイス区分の仮定: N=512 の T0U／T0U-LU／T0U-LU-FB は、M4 Max が candle の Max／Medium／Ultra 区分に解決される仮定の下で
+   TILE_64_32_32_2_2（CANDIDATES[5]）を使う（docs/analysis/candle-metal-01.md 3.2・8。未確認）。N>=1024 の結論は区分に依らない。
+10. いかなる判定結果でも、本番既定（MetalGemm::new・tile::select*・dispatch_auto・UNROLL_LOAD_ENABLED）の変更は #2111 とユーザー承認の事項とする。
+    tolerance・parity baseline は不変。

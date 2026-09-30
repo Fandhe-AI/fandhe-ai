@@ -1,0 +1,10 @@
+# 実測前テンプレート（#2111 が M4 Max 実機で記入する。ホスト名・ユーザー名・絶対パスは書かない）
+hardware:
+chip: (例: Apple M4 Max)
+gpu_cores:
+macos:
+rustc:
+git_commit:
+date_utc:
+load_policy: exclusive_gate  # RULE.txt 7.。record_only にする場合は事前にここへ宣言し理由を記す
+mtl_architecture_name:  # candle のデバイス区分仮定（RULE.txt 9.）の確認用。取得できれば記入
