@@ -9,15 +9,27 @@ doc: docs/gb10-unified-memory-grace-cpu-consideration.md
 - いずれかが false／na で食い違う場合は「判定不能」とし、検出可能とは記録しない（格上げしない）
 
 [R-SVE2-kernel]
-- 入力: 同出力の sve_default_vl_bytes
-- 16（128 bit。NEON と同じ幅）: SVE2 GEMM マイクロカーネルは Non-Goal（幅の利得なし・DRAM 帯域律速・比較対象に優位済み）
-- 32 以上: 別イシュー候補（`asm!` の unsafe 個別承認が前提。本 PR では実装しない）
-- na: 判定不能
+- 入力: 同出力の sve_default_vl_bytes（参考値）と sve_running_vl_bytes（判定に使う値）
+- sve_default_vector_length は「新規プロセスの既定値」であり、実行中スレッドの実 VL（prctl PR_SVE_SET_VL／cgroup・コンテナ
+  設定等で変わりうる）と一致する保証がない。よって判定には使わない（記録のみ）
+- 判定に使うのは、カーネル候補コードが実際に走る同一プロセス・同一スレッドで取得した実行時 VL（sve_running_vl_bytes。
+  PR_SVE_GET_VL または rdvl 相当）のみ。取得手段は新規 unsafe／libc 利用を伴うため別イシュー・ユーザー承認事項であり、
+  本 PR の probe は実行時 VL を取得しない
+- sve_running_vl_bytes が 16（128 bit。NEON と同じ幅）: SVE2 GEMM マイクロカーネルは Non-Goal（幅の利得なし・DRAM 帯域律速・比較対象に優位済み）
+- sve_running_vl_bytes が 32 以上: 別イシュー候補（`asm!` の unsafe 個別承認が前提。本 PR では実装しない）
+- na（未取得。本 PR の probe が出力する状態を含む）: 判定不能。sve_default_vl_bytes のみで Non-Goal・別イシュー候補のいずれも確定しない
+- sve_default_vl_bytes と sve_running_vl_bytes が食い違う場合は running を採用し、食い違いを記録する
 
 [R-UM-train]
 - 入力: `scripts/bench/framework-compare/run_ab_managed_cuda.sh` の train reuse セル（HEAD の facade を AB_PATCH_FACADE_PATH で参照）
-- 5 回中央値の on/off <= 1.00 かつ checksum 完全一致 かつ gemm・train fresh に後退なし、の 3 条件すべてを満たせば
-  「既定化の再評価候補」（既定化そのものは別イシュー・ユーザー承認）
+- 条件 1: train cuda 64 reuse の on/off（managed ON / OFF）比が 5 回中央値で <= 1.00
+- 条件 2: train reuse の checksum が on/off で完全一致
+- 条件 3（後退なし）: 対象セルは「gemm cuda N in {1024, 2048, 4096} x mode=fresh」の 3 セルと「train cuda 64 x mode=fresh」の
+  1 セル（計 4 セル。gemm reuse・infer は対象外）。各セルで run_ab_managed_cuda.sh の 5 run（off -> on 連続起動）の
+  on/off 比を run ごとに求めず、off・on それぞれの 5 回中央値を取って比（on 中央値 / off 中央値）とする。
+  後退境界は「4 セルすべてで比 <= 1.00」（許容幅なし。1 セルでも 1.00 を超えれば後退あり）。境界を緩める変更・セルの追加削除は
+  事後に行わない。5 run 未満のセル（FAILED 記録あり）は後退なしと見なさず「判定不能」として REJECT 維持側へ倒す
+- 3 条件すべてを満たせば「既定化の再評価候補」（既定化そのものは別イシュー・ユーザー承認）
 - それ以外は「REJECT 維持」。既定値（managed OFF）は本イシューでは変更しない
 
 [R-UM-bw]

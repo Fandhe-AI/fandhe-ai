@@ -17,7 +17,8 @@
 | 項目 | 値 |
 |---|---|
 | unified_memory_probe（GB10） | 未計測 |
-| grace_sve2_probe 3 経路・sve_default_vl_bytes | 未計測（cpuinfo 経路のみ既存ログで確認済み） |
+| grace_sve2_probe 3 経路・sve_default_vl_bytes（参考値） | 未計測（cpuinfo 経路のみ既存ログで確認済み） |
+| sve_running_vl_bytes（R-SVE2-kernel の判定値） | 未取得（現 probe は取得しない。取得手段は別イシュー・unsafe 承認事項）。当面 SVE2 カーネルは判定不能 |
 | train reuse on/off 中央値 | 未計測 |
 | 帯域 readback／upload／download | 未計測 |
 

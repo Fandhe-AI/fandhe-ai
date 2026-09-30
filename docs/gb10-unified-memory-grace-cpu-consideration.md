@@ -51,7 +51,7 @@ GB10 の属性値による推奨の分岐は `RULE.txt` の R-UM-prefetch に事
 
 - 大コア親和性は #1576／#2117 で設計・A/B 基盤済み。本書では参照のみとする。
 - **SVE2 検出（受入 2）**: `/proc/cpuinfo` 経路は既存 GB10 ログで確認済み（`docs/perf/logs/cpu-gemm-b-laneq-vec-ab-1318/lscpu-dgx.txt` のフラグ行に `sve sve2`、`docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/sme_report.txt` に `cpuinfo_tokens: sve sve2`）。`std::arch::is_aarch64_feature_detected!("sve2")` は stable でコンパイルでき（`--target aarch64-unknown-linux-gnu` で確認）、std の Linux 実装は getauxval（AT_HWCAP／AT_HWCAP2）を読むため、新規 `unsafe`・依存なしで getauxval 系経路を使える。`libc` は deps-policy 第 10 区分で onnx-interop 用途限定のため直接 FFI は行わない。補助に `/proc/self/auxv` の safe 読み取り（AT_HWCAP=16 bit22・AT_HWCAP2=26 bit1）と `/proc/sys/abi/sve_default_vector_length`。3 経路の実機一致は `grace_sve2_probe_report`（`crates/backend-cpu/tests/`）で GB10 にて確定する（R-SVE2-detect）。**現時点の結論: 検出手段は確定、実機一致は未計測**。
-- **SVE2 GEMM マイクロカーネル（受入 3）**: stable Rust に SVE intrinsics はなく `asm!` のみ（C コンパイラ・`cc` は許容依存外）。SME `fmopa` の先例（v0–v31／p0–p15／ffr の clobber 全列挙・`unsafe` 監査）があり、非 streaming SVE2 は ZA／SMSTART を伴わないため ABI 上の論点は SME より少ない。よって「ABI 互換性の範囲内で作成可能」と判定する。ただし価値は VL と帯域で決まる。GB10 の CPU GEMM は DRAM 帯域律速の根拠があり（`docs/cpu-gemm-prefetch-decision.md` 2026-09-08 追補）、比較対象すべてに優位（`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §1）。VL が 128 bit（16 byte）なら幅の利得がなく Non-Goal（R-SVE2-kernel）。VL は未計測。
+- **SVE2 GEMM マイクロカーネル（受入 3）**: stable Rust に SVE intrinsics はなく `asm!` のみ（C コンパイラ・`cc` は許容依存外）。SME `fmopa` の先例（v0–v31／p0–p15／ffr の clobber 全列挙・`unsafe` 監査）があり、非 streaming SVE2 は ZA／SMSTART を伴わないため ABI 上の論点は SME より少ない。よって「ABI 互換性の範囲内で作成可能」と判定する。ただし価値は VL と帯域で決まる。GB10 の CPU GEMM は DRAM 帯域律速の根拠があり（`docs/cpu-gemm-prefetch-decision.md` 2026-09-08 追補）、比較対象すべてに優位（`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §1）。実行時 VL が 128 bit（16 byte）なら幅の利得がなく Non-Goal（R-SVE2-kernel）。`sve_default_vector_length` は新規プロセスの既定値で実行スレッドの VL と一致する保証がないため判定には使わず、実行時 VL は未取得（取得は別イシュー・unsafe 承認事項）のため判定不能とする。
 
 ## §6 受入基準ごとの結論
 
@@ -59,7 +59,7 @@ GB10 の属性値による推奨の分岐は `RULE.txt` の R-UM-prefetch に事
 |---|---|---|
 | 1 D2H 省略の検証 | 常駐経路は実装済み・host 返却型は承認事項（§2） | 確定（コード読解）。GB10 裏取りは未 |
 | 2 SVE2 検出 | std のみの 3 経路で検出可能な設計（§5） | cpuinfo は確定・3 経路一致は GB10 待ち（規則固定済み） |
-| 3 SVE2 マイクロカーネル | `asm!` で ABI 上は可能。VL 16 byte なら Non-Goal | VL は GB10 待ち（規則固定済み） |
+| 3 SVE2 マイクロカーネル | `asm!` で ABI 上は可能。VL 16 byte なら Non-Goal | 実行時 VL 未取得のため判定不能（規則固定済み） |
 | 4 unified memory 既定化の影響 | REJECT 維持の見込み。前提は managed 対応 `SizeClassPool` | 再実測は GB10 待ち（規則固定済み） |
 | 5 本番結線かスコープ外化 | **本番結線しない（本イシューでは不採用）**。GB10 実測で規則を満たした項目のみ別イシューで再評価 | 確定 |
 
