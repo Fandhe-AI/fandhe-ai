@@ -60,6 +60,9 @@ bench_fandhe_setup_lock_restore_trap
 LOCK_SHA0="$(sha256_of Cargo.lock)"
 LOCK_COPY="$(mktemp)" || exit 1
 cp Cargo.lock "${LOCK_COPY}" || exit 1
+# EXIT trap は 1 スロットのため、Cargo.lock 復元 trap を包んで一時コピー削除も行う（build 失敗の exit 1 でも残さない）。
+cleanup_all() { local c=$?; rm -f "${LOCK_COPY}"; (exit "$c"); bench_fandhe_restore_lock_trap; }
+trap cleanup_all EXIT
 reset_lock() { cp "${LOCK_COPY}" Cargo.lock; }
 assert_lock() {
   [[ "$(sha256_of Cargo.lock)" == "${LOCK_SHA0}" ]] || { echo "ERROR: Cargo.lock の sha256 が変化した ($1)" | tee -a "${BUILD_LOG}" >&2; return 1; }
@@ -78,9 +81,9 @@ build_arm() { # build_arm <A|B|C> <patch-facade-path or "">
   reset_lock
   [[ -n "${patch}" ]] && args+=(--config "patch.crates-io.fandhe-ai.path=\"${patch}/crates/facade\"")
   echo "== build bench-fandhe arm=${arm} patch=${patch:-none} ($(date -u +%FT%TZ))" >> "${BUILD_LOG}"
-  cargo build --release -p bench-fandhe "${args[@]}" >> "${BUILD_LOG}" 2>&1 || { echo "ERROR: build arm ${arm} 失敗 -> 計測を停止" >&2; exit 1; }
+  cargo build --release -p bench-fandhe ${args[@]+"${args[@]}"} >> "${BUILD_LOG}" 2>&1 || { echo "ERROR: build arm ${arm} 失敗 -> 計測を停止" >&2; exit 1; }
   echo "-- cargo tree arm=${arm}" >> "${BUILD_LOG}"
-  cargo tree -p bench-fandhe --depth 1 "${args[@]}" 2>/dev/null | grep -E 'fandhe-ai v' >> "${BUILD_LOG}"
+  cargo tree -p bench-fandhe --depth 1 ${args[@]+"${args[@]}"} 2>/dev/null | grep -E 'fandhe-ai v' >> "${BUILD_LOG}"
   cp target/release/bench-fandhe "${LOGD}/bin/bench-fandhe-${arm}" || exit 1
 }
 build_arm A ""
@@ -92,7 +95,7 @@ if [[ "${SMOKE}" != "1" ]]; then
   if [[ "${MACHINE}" == "gb10" ]]; then OF=(--no-default-features --features cuda); else OF=(); fi
   for crate in bench-candle bench-burn; do
     echo "== build ${crate} ${OF[*]:-}" >> "${BUILD_LOG}"
-    cargo build --release -p "${crate}" "${OF[@]}" >> "${BUILD_LOG}" 2>&1 || { echo "ERROR: build ${crate} 失敗 -> 計測を停止" >&2; exit 1; }
+    cargo build --release -p "${crate}" ${OF[@]+"${OF[@]}"} >> "${BUILD_LOG}" 2>&1 || { echo "ERROR: build ${crate} 失敗 -> 計測を停止" >&2; exit 1; }
     cp "target/release/${crate}" "${LOGD}/bin/${crate}" || exit 1
   done
 fi
