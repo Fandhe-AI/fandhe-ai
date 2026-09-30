@@ -1,0 +1,55 @@
+RULE fixed-at-utc: 2026-09-30T02:00:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #2106 CPU reuse 学習 device_update フェーズ（GB10 277 µs）の内訳切り分け
+doc: docs/perf/cpu-reuse-device-update.md
+
+[実行方法]
+- 1 run = 1 プロセス。テストバイナリ
+  crates/facade/tests/cpu_reuse_device_update_diag.rs を
+  `--ignored --exact cpu_reuse_device_update_phases --nocapture --test-threads=1`
+  で起動し、出力は 1 つの run{N}.jsonl。
+- run1〜run5 の 5 run。差し替え・追加起動・既存 run ファイルの上書きはしない。
+- 1 プロセスあたり warmup 20 反復 + 計測 80 反復（20 反復 x 4 ラウンド。
+  ラウンドごとに in-situ 2 腕の順序を反転）。
+- 対象ホスト: Apple M4 Max（m4max）と DGX Spark GB10（gb10）。
+
+[代表値]
+- 各セルは run ごとの median_s を採り、5 run 間の中央値と min-max を報告する。
+
+[checksum 規則（hard・fail-closed）]
+- insitu_direct/device_update と insitu_pretouch/device_update の checksum_bits が
+  5 run すべてで一致し、かつ両腕で一致すること。
+- standalone の sgd_kernel / sgd_kernel_zip / apply_params_split /
+  sgd_kernel_xthread の checksum_bits が 5 run すべてで一致し、4 腕間でも一致すること。
+- 1 つでも不一致なら系列は無効（集計は exit != 0）。
+
+[比の定義・非後退]
+- 本イシューは修正を出荷しないため、非後退 ratio<=1.00 は採否ゲートにしない。
+- 参考値として insitu_direct と bench の device_update（train-step-phase-breakdown.md
+  §17.6.2 の 277.5 µs）の乖離を記録する。
+
+[帰属規則]
+- T  = insitu_direct/device_update の 5 run 中央値
+- H2 = insitu_direct - insitu_pretouch（cache 状態。符号付きで報告）
+- H1 = standalone/sgd_kernel - standalone/sgd_kernel_zip（ループ形の差）
+- H3 = standalone/alloc + standalone/stage（ホスト側確保・bias の stage）
+- kernel = standalone/sgd_kernel（融合 compute+apply 全体）
+- H4（prologue＋残差） = insitu_pretouch - (kernel + alloc + stage)
+- どれか 1 項が T の 50% 以上なら対応仮説を「支持」、どの項も届かなければ「未確定」。
+  kernel 全体の割合と H1 差分の割合は別行で報告する。閾値は事後に変えない。
+- 補助: apply_params_split / (sgd_compute_split + apply_params_split) を書き戻し
+  トラフィック比として記録する。sgd_kernel_xthread は H2 の補助で判定に使わない。
+- イシュー呼称との対応: alloc→alloc(+stage)、sgd_compute→sgd_kernel /
+  sgd_compute_split、apply_params→この経路では融合のため独立区間なし
+  （apply_params_split を参考値とする）。
+
+[ゲート]
+- gb10: 各 run の開始前に load1 < 1.0 を 30 秒間隔・最大 30 分待つ。
+  1 run でも通過しなければ系列を参考扱いにする（load_gate.log に記録）。
+- m4max: record_only（共有環境）。
+
+[対象外（再実行しない既存実験。決定記録あり）]
+- #1575 small_shape_thread_cap / #1576 GB10 affinity / RAYON_NUM_THREADS スイープ /
+  #2446 縮約の逐次しきい値 / #2104 host arena。
+
+[マスク規則]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。

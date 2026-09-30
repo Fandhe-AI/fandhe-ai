@@ -1,0 +1,13 @@
+date_utc: 2026-09-30T02:32:46Z
+uname: Linux 7.0.0-34-generic x86_64
+Architecture:                            x86_64
+CPU(s):                                  10
+Model name:                              13th Gen Intel(R) Core(TM) i7-13700K
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+git_head: e3b044751d6db2b7ee8105c3eade752cf4784c7f
+RAYON_NUM_THREADS: unset
+host_kind: m4max
