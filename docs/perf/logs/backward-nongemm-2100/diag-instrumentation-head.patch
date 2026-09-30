@@ -1,0 +1,1446 @@
+diff --git a/crates/autodiff/src/backward.rs b/crates/autodiff/src/backward.rs
+index ad708b77..16fd21e1 100644
+--- a/crates/autodiff/src/backward.rs
++++ b/crates/autodiff/src/backward.rs
+@@ -23,6 +23,7 @@
+ 
+ use fandhe_ai_tensor_core::{BackendOps, Tensor};
+ 
++use crate::diag::{self, Category};
+ use crate::error::AutodiffError;
+ use crate::grad;
+ use crate::tape::{NodeId, Op, ResidentResolver, Tape, TapeId};
+@@ -222,10 +223,31 @@ impl Tape {
+ 
+     /// `backward`／`backward_with_resident` の共通実装（イシュー #1022 で
+     /// `resolver` 引数を追加する形へ整理）。
++    ///
++    /// **診断計時（一時計装。`diag.rs` 参照。イシュー #2100）**:
++    /// `backward_impl_inner`（本体。挙動は変更しない）の壁時計時間全体を
++    /// `total_ns` として計測し、`FANDHE_DIAG_BACKWARD` 設定時に 1 step
++    /// 相当の呼び出し末尾で `diag::report_backward` が 1 行の機械可読な
++    /// 診断行を stderr へ出力してからカテゴリ別カウンタをリセットする。
+     fn backward_impl(
+         &self,
+         loss: &Var<'_>,
+         resolver: Option<&dyn ResidentResolver>,
++    ) -> Result<Gradients, AutodiffError> {
++        let diag_start = diag::maybe_start();
++        let result = self.backward_impl_inner(loss, resolver);
++        if let Some(start) = diag_start {
++            diag::report_backward(start.elapsed().as_nanos() as u64);
++        }
++        result
++    }
++
++    /// [`Tape::backward_impl`] の本体（診断計時の外側ラッパーから分離した
++    /// だけで、挙動は変更しない）。
++    fn backward_impl_inner(
++        &self,
++        loss: &Var<'_>,
++        resolver: Option<&dyn ResidentResolver>,
+     ) -> Result<Gradients, AutodiffError> {
+         if loss.tape_id() != self.id {
+             return Err(AutodiffError::TapeMismatch);
+@@ -328,7 +350,10 @@ impl Tape {
+                 let node_value = if matches!(node.op, Op::ResidentLeaf { .. }) {
+                     Tensor::scalar(0.0)
+                 } else {
+-                    crate::tape::materialize_fallible(&nodes, self.ops(), NodeId(id))?.clone()
++                    diag::time(Category::Materialize, || {
++                        crate::tape::materialize_fallible(&nodes, self.ops(), NodeId(id))
++                    })?
++                    .clone()
+                 };
+                 grad::vjp(
+                     &node.op,
+@@ -360,7 +385,9 @@ impl Tape {
+                     if !nodes[target.0].requires_grad {
+                         continue;
+                     }
+-                    accumulate(self.ops(), &mut grads, target, contribution)?;
++                    diag::time(Category::Accumulate, || {
++                        accumulate(self.ops(), &mut grads, target, contribution)
++                    })?;
+                 }
+             }
+             // activation checkpointing（イシュー #1624）の再解放:
+diff --git a/crates/autodiff/src/diag.rs b/crates/autodiff/src/diag.rs
+new file mode 100644
+index 00000000..baa18664
+--- /dev/null
++++ b/crates/autodiff/src/diag.rs
+@@ -0,0 +1,218 @@
++//! backward の内訳計時（診断専用・本番経路には影響しない）。
++//!
++//! 学習 1 step の `backward` 区間のうち GEMM 系 VJP（`matmul_vjp`・
++//! `Op::LinearResident`／`Op::LinearAct` の GEMM 呼び出し）以外
++//! （活性化マスク・elementwise VJP・転置・materialize・勾配 accumulate・
++//! loss 系）がそれぞれどれだけ占めるかを実測するための一時的な計装
++//! （イシュー #2100。`docs/perf/lowlayer-diagnosis-2026-09-12.md` §4 の
++//! HEAD 再適用版。旧パッチの HEAD 移植であり、本番コードへは残さない。
++//! パッチ本体と手順は `docs/perf/logs/backward-nongemm-2100/` を参照）。
++//!
++//! 環境変数 `FANDHE_DIAG_BACKWARD` が設定されている場合のみ
++//! `std::time::Instant` で計測する（未設定時は `Instant::now()` すら
++//! 呼ばない早期 return とし、通常経路のオーバーヘッドを避ける）。
++//! `thread_local!` のカウンタへ蓄積し、`backward.rs::backward_impl` の
++//! 呼び出し末尾（1 step 相当）で 1 行の機械可読な診断行
++//! （`DIAG_BACKWARD seq=.. total_ns=.. ...` の key=value 形式）を
++//! stderr へ出力してからリセットする（`report_backward` 参照）。集計は
++//! `aggregate_backward_diag.py` が担う。
++//!
++//! 本モジュールは診断専用のスクラッチであり、恒久実装ではない。
++
++use std::cell::Cell;
++use std::sync::OnceLock;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::time::Instant;
++
++/// 計装対象のカテゴリ。gemm／mask／ewise／transpose／materialize／
++/// accumulate／loss の 7 分類（旧パッチの 6 分類に、`total - vjp` に
++/// 埋もれていた勾配 accumulate 段を加えた）。`fill` は Gemm の内訳
++/// サブカウンタとして別建てで持つ（[`record_fill`]）。
++#[derive(Clone, Copy)]
++pub(crate) enum Category {
++    /// GEMM 系 VJP: `matmul_vjp` 全体・`Op::LinearResident` の
++    /// `gemm_resident_lhs`／`gemm_fp32_strict`・resident grad staging への
++    /// 書き込み（`fill_resident_weight_grad`。bias 縮約を含みうるため
++    /// 内訳を `fill_ns` に別掲する）・`Op::LinearAct` の `matmul_vjp`。
++    Gemm,
++    /// 活性化マスク: `elementwise_mul_mask`・`tanh_grad_factor`・
++    /// `sigmoid_grad_factor`。
++    Mask,
++    /// elementwise VJP: `vjp_elementwise_mul`・`reduce_to_shape`・
++    /// `reduce_bias_grad`（Add／Mul／bias の VJP）。
++    Ewise,
++    /// `transpose2d` 呼び出し（`matmul_vjp` 内部のものは Gemm 区間に
++    /// 内包されるため、`Op::LinearResident` の gemm 呼び出しの外側で行う
++    /// transpose のみが対象）。
++    Transpose,
++    /// `materialize_fallible` 呼び出し（`grad.rs` の各 `Op` 分岐・
++    /// `backward.rs` のノード自身の forward 値実体化の両方）。
++    Materialize,
++    /// `backward.rs::accumulate`（fan-out 勾配の合算）。
++    Accumulate,
++    /// loss 系 VJP: `ops.mse_loss_backward`／`mse_loss_vjp`・
++    /// `cross_entropy_loss_vjp`。
++    Loss,
++}
++
++/// カテゴリ別の累積時間（ns）と gemm／mask 呼び出し回数。
++#[derive(Default)]
++struct Counters {
++    gemm_ns: Cell<u64>,
++    fill_ns: Cell<u64>,
++    mask_ns: Cell<u64>,
++    ewise_ns: Cell<u64>,
++    transpose_ns: Cell<u64>,
++    materialize_ns: Cell<u64>,
++    accumulate_ns: Cell<u64>,
++    loss_ns: Cell<u64>,
++    vjp_ns: Cell<u64>,
++    gemm_calls: Cell<u64>,
++    mask_calls: Cell<u64>,
++    vjp_calls: Cell<u64>,
++}
++
++thread_local! {
++    static COUNTERS: Counters = Counters::default();
++}
++
++/// `DIAG_BACKWARD` 行の通し番号（プロセス全体で単調増加）。集計側が
++/// stderr の行順だけに頼らず step を復元できるようにする。
++static SEQ: AtomicU64 = AtomicU64::new(0);
++
++/// `FANDHE_DIAG_BACKWARD` の有無をプロセス内で 1 度だけ判定する
++/// （`OnceLock`。環境変数の値は解釈せず有無のみを見る）。
++pub(crate) fn is_enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var_os("FANDHE_DIAG_BACKWARD").is_some())
++}
++
++/// `FANDHE_DIAG_MASK_CONTIGUITY` の有無をプロセス内で 1 度だけ判定する
++/// （ホットな Relu arm から毎回環境変数を読まないため `OnceLock` 化）。
++pub(crate) fn mask_contiguity_enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var_os("FANDHE_DIAG_MASK_CONTIGUITY").is_some())
++}
++
++fn add_elapsed(c: &Counters, cat: Category, elapsed: u64) {
++    let cell = match cat {
++        Category::Gemm => &c.gemm_ns,
++        Category::Mask => &c.mask_ns,
++        Category::Ewise => &c.ewise_ns,
++        Category::Transpose => &c.transpose_ns,
++        Category::Materialize => &c.materialize_ns,
++        Category::Accumulate => &c.accumulate_ns,
++        Category::Loss => &c.loss_ns,
++    };
++    cell.set(cell.get() + elapsed);
++    match cat {
++        Category::Gemm => c.gemm_calls.set(c.gemm_calls.get() + 1),
++        Category::Mask => c.mask_calls.set(c.mask_calls.get() + 1),
++        _ => {}
++    }
++}
++
++/// `cat` に分類される処理 `f` の実行時間を計測して加算する。
++/// `is_enabled()` が `false` の場合は `Instant::now()` を呼ばず `f()` を
++/// そのまま実行する。
++pub(crate) fn time<T>(cat: Category, f: impl FnOnce() -> T) -> T {
++    if !is_enabled() {
++        return f();
++    }
++    let start = Instant::now();
++    let out = f();
++    let elapsed = start.elapsed().as_nanos() as u64;
++    COUNTERS.with(|c| add_elapsed(c, cat, elapsed));
++    out
++}
++
++/// `vjp()` 関数全体の実行時間を計測する（`vjp_ns`／`vjp_calls`）。
++pub(crate) fn time_vjp<T>(f: impl FnOnce() -> T) -> T {
++    if !is_enabled() {
++        return f();
++    }
++    let start = Instant::now();
++    let out = f();
++    let elapsed = start.elapsed().as_nanos() as u64;
++    COUNTERS.with(|c| {
++        c.vjp_ns.set(c.vjp_ns.get() + elapsed);
++        c.vjp_calls.set(c.vjp_calls.get() + 1);
++    });
++    out
++}
++
++/// 計測区間を開始する。途中に `return`（早期リターン）を含み
++/// [`time`]（クロージャベース）で素直に包めない場合に使う（例:
++/// `Op::MseLoss` の VJP 分岐）。エラーで早期 return した場合は対応する
++/// [`record`] へ到達せず当該区間の計測が欠落するが、診断専用のため許容
++/// する。`is_enabled()` が `false` の場合は `None` を返す。
++pub(crate) fn maybe_start() -> Option<Instant> {
++    is_enabled().then(Instant::now)
++}
++
++/// [`maybe_start`] で取得した開始時刻から経過時間を測り、`cat` の
++/// 累積へ加算する。`start` が `None` の場合は何もしない。
++pub(crate) fn record(cat: Category, start: Option<Instant>) {
++    let Some(start) = start else {
++        return;
++    };
++    let elapsed = start.elapsed().as_nanos() as u64;
++    COUNTERS.with(|c| add_elapsed(c, cat, elapsed));
++}
++
++/// resident grad staging への書き込み（`fill_resident_weight_grad`）の
++/// 計測終了。`gemm_ns` へ計上（旧パッチの §4 と比較可能）しつつ `fill_ns` にも加算。
++/// GEMM 計算と bias 縮約は分離計時しない。集計器は total−gemm（下界）と total−gemm+fill（上界）を併記する。
++pub(crate) fn record_fill(start: Option<Instant>) {
++    let Some(start) = start else {
++        return;
++    };
++    let elapsed = start.elapsed().as_nanos() as u64;
++    COUNTERS.with(|c| {
++        add_elapsed(c, Category::Gemm, elapsed);
++        c.fill_ns.set(c.fill_ns.get() + elapsed);
++    });
++}
++
++/// `backward_impl` 呼び出し 1 回（1 step 相当）の終わりに、累積した
++/// カテゴリ別カウンタと `total_ns`（`backward_impl` 全体の壁時計時間）を
++/// 1 行の機械可読な形式で stderr へ出力し、カウンタをリセットする。
++pub(crate) fn report_backward(total_ns: u64) {
++    if !is_enabled() {
++        return;
++    }
++    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
++    COUNTERS.with(|c| {
++        eprintln!(
++            "DIAG_BACKWARD seq={} total_ns={} vjp_ns={} gemm_ns={} fill_ns={} mask_ns={} \
++             ewise_ns={} transpose_ns={} materialize_ns={} accumulate_ns={} loss_ns={} \
++             vjp_calls={} gemm_calls={} mask_calls={}",
++            seq,
++            total_ns,
++            c.vjp_ns.get(),
++            c.gemm_ns.get(),
++            c.fill_ns.get(),
++            c.mask_ns.get(),
++            c.ewise_ns.get(),
++            c.transpose_ns.get(),
++            c.materialize_ns.get(),
++            c.accumulate_ns.get(),
++            c.loss_ns.get(),
++            c.vjp_calls.get(),
++            c.gemm_calls.get(),
++            c.mask_calls.get(),
++        );
++        c.vjp_ns.set(0);
++        c.gemm_ns.set(0);
++        c.fill_ns.set(0);
++        c.mask_ns.set(0);
++        c.ewise_ns.set(0);
++        c.transpose_ns.set(0);
++        c.materialize_ns.set(0);
++        c.accumulate_ns.set(0);
++        c.loss_ns.set(0);
++        c.vjp_calls.set(0);
++        c.gemm_calls.set(0);
++        c.mask_calls.set(0);
++    });
++}
+diff --git a/crates/autodiff/src/grad.rs b/crates/autodiff/src/grad.rs
+index 932266e5..0ff86551 100644
+--- a/crates/autodiff/src/grad.rs
++++ b/crates/autodiff/src/grad.rs
+@@ -35,6 +35,7 @@ use fandhe_ai_tensor_core::{
+     UniqueExtOutput, VectorNormOrd, adaptive_window, batch_norm_layout, row_norm_layout,
+ };
+ 
++use crate::diag::{self, Category};
+ use crate::error::AutodiffError;
+ use crate::eval::{self, build_tensor, dense_vec, dense_vec_i32};
+ use crate::tape::{
+@@ -42,6 +43,19 @@ use crate::tape::{
+ };
+ use crate::var::Reduction;
+ 
++/// `materialize_fallible` の診断計時付き薄いラッパー（`Category::
++/// Materialize`。イシュー #2100 の一時計装）。`diag::is_enabled()` が
++/// `false` の場合は `Instant::now()` を呼ばずそのまま委譲する。
++fn diag_materialize<'a>(
++    nodes: &'a [TapeNode],
++    ops: &dyn BackendOps,
++    id: NodeId,
++) -> Result<&'a Tensor<f32>, AutodiffError> {
++    diag::time(Category::Materialize, || {
++        materialize_fallible(nodes, ops, id)
++    })
++}
++
+ /// elementwise VJP（`Op::Mul`／`Op::Exp`／`Op::Tanh`／`Op::Sigmoid` の
+ /// 乗算、`backward.rs::accumulate` の fan-out 勾配合算）を
+ /// `BackendOps`（forward と同じ CPU 並列／CUDA／Metal カーネル）経由で
+@@ -186,6 +200,29 @@ fn vjp_elementwise_add_via(
+ /// と同じく入力を持たないため `resident` を参照しない。
+ #[allow(clippy::too_many_arguments)]
+ pub(crate) fn vjp(
++    op: &Op,
++    out_value: &Tensor<f32>,
++    upstream: &Tensor<f32>,
++    nodes: &[TapeNode],
++    ops: &dyn BackendOps,
++    resident: Option<&dyn ResidentResolver>,
++    tape_id: TapeId,
++    tape_epoch: u64,
++) -> Result<Vec<(NodeId, Tensor<f32>)>, AutodiffError> {
++    // 診断計時（イシュー #2100）: `vjp()` 全体（1 ノード分の VJP
++    // ディスパッチ）を `vjp_ns`／`vjp_calls` として計測する
++    // （`diag.rs::time_vjp`）。本体は `vjp_inner` へ委譲する。
++    diag::time_vjp(|| {
++        vjp_inner(
++            op, out_value, upstream, nodes, ops, resident, tape_id, tape_epoch,
++        )
++    })
++}
++
++/// [`vjp`] の本体（診断計時の外側ラッパーから分離しただけで、挙動は
++/// 変更しない）。
++#[allow(clippy::too_many_arguments)]
++fn vjp_inner(
+     op: &Op,
+     out_value: &Tensor<f32>,
+     upstream: &Tensor<f32>,
+@@ -208,9 +245,9 @@ pub(crate) fn vjp(
+     let contributions = match op.clone() {
+         Op::Leaf => Vec::new(),
+         Op::MatMul(a, b) => {
+-            let a_val = materialize_fallible(nodes, ops, a)?;
+-            let b_val = materialize_fallible(nodes, ops, b)?;
+-            let (da, db) = matmul_vjp(ops, a_val, b_val, upstream)?;
++            let a_val = diag_materialize(nodes, ops, a)?;
++            let b_val = diag_materialize(nodes, ops, b)?;
++            let (da, db) = diag::time(Category::Gemm, || matmul_vjp(ops, a_val, b_val, upstream))?;
+             vec![(a, da), (b, db)]
+         }
+         Op::Add(a, b) => {
+@@ -233,15 +270,25 @@ pub(crate) fn vjp(
+             // 内部で `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸
+             // 対応）へそのまま委譲するため挙動を変えない（`reduce_bias_
+             // grad` doc 参照）。
+-            let da = reduce_bias_grad(upstream, a_shape);
+-            let db = reduce_bias_grad(upstream, b_shape);
++            let da = diag::time(Category::Ewise, || reduce_bias_grad(upstream, a_shape));
++            let db = diag::time(Category::Ewise, || reduce_bias_grad(upstream, b_shape));
+             vec![(a, da), (b, db)]
+         }
+         Op::Mul(a, b) => {
+-            let a_val = materialize_fallible(nodes, ops, a)?;
+-            let b_val = materialize_fallible(nodes, ops, b)?;
+-            let da = reduce_to_shape(&vjp_elementwise_mul(ops, upstream, b_val)?, a_val.shape());
+-            let db = reduce_to_shape(&vjp_elementwise_mul(ops, upstream, a_val)?, b_val.shape());
++            let a_val = diag_materialize(nodes, ops, a)?;
++            let b_val = diag_materialize(nodes, ops, b)?;
++            let da = diag::time(Category::Ewise, || {
++                Ok::<_, AutodiffError>(reduce_to_shape(
++                    &vjp_elementwise_mul(ops, upstream, b_val)?,
++                    a_val.shape(),
++                ))
++            })?;
++            let db = diag::time(Category::Ewise, || {
++                Ok::<_, AutodiffError>(reduce_to_shape(
++                    &vjp_elementwise_mul(ops, upstream, a_val)?,
++                    b_val.shape(),
++                ))
++            })?;
+             vec![(a, da), (b, db)]
+         }
+         Op::Relu(a) => {
+@@ -250,28 +297,36 @@ pub(crate) fn vjp(
+             // `upstream`（reuse backward の下流層からは非連続転置 view
+             // でありうる）・`a_val` とも `elementwise_mul_mask` が
+             // stride 対応で読む（イシュー #1577）。
+-            let a_val = materialize_fallible(nodes, ops, a)?;
+-            let da = elementwise_mul_mask(upstream, a_val, |v| v > 0.0);
++            let a_val = diag_materialize(nodes, ops, a)?;
++            let da = diag::time(Category::Mask, || {
++                elementwise_mul_mask(upstream, a_val, |v| v > 0.0)
++            });
+             vec![(a, da)]
+         }
+         Op::Exp(a) => {
+             // d/dx exp(x) = exp(x)。forward 記録値 `out_value` を
+             // 再利用し `exp` を再計算しない。
+-            let da = vjp_elementwise_mul(ops, upstream, out_value)?;
++            let da = diag::time(Category::Ewise, || {
++                vjp_elementwise_mul(ops, upstream, out_value)
++            })?;
+             vec![(a, da)]
+         }
+         Op::Tanh(a) => {
+             // d/dx tanh(x) = 1 - tanh(x)^2。同じく `out_value` を再利用。
+-            let factor = tanh_grad_factor(out_value);
+-            let da = vjp_elementwise_mul(ops, upstream, &factor)?;
++            let factor = diag::time(Category::Mask, || tanh_grad_factor(out_value));
++            let da = diag::time(Category::Ewise, || {
++                vjp_elementwise_mul(ops, upstream, &factor)
++            })?;
+             vec![(a, da)]
+         }
+         Op::Sigmoid(a) => {
+             // d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x))。
+             // `Exp`/`Tanh` と同じく forward 記録値 `out_value`
+             // （= sigmoid(x)）を再利用し再計算しない（TASK-9.1b・#92）。
+-            let factor = sigmoid_grad_factor(out_value);
+-            let da = vjp_elementwise_mul(ops, upstream, &factor)?;
++            let factor = diag::time(Category::Mask, || sigmoid_grad_factor(out_value));
++            let da = diag::time(Category::Ewise, || {
++                vjp_elementwise_mul(ops, upstream, &factor)
++            })?;
+             vec![(a, da)]
+         }
+         Op::ScalarUnary { op: sop, input } => {
+@@ -280,7 +335,7 @@ pub(crate) fn vjp(
+             // 再利用しつつ入力値 `x_val` から係数テンソルを組み立て、
+             // 既存の `vjp_elementwise_mul`（イシュー #1583 のゲート
+             // 付き乗算。`Exp`/`Tanh`/`Sigmoid` と同じ経路）へ渡す。
+-            let x_val = materialize_fallible(nodes, ops, input)?;
++            let x_val = diag_materialize(nodes, ops, input)?;
+             if sop.is_piecewise_constant() {
+                 // イシュー #2145: `Floor`／`Ceil`／`Round`／`Sign` は
+                 // 区分定数で勾配が恒等的にゼロ。`Op::ScalarBinary` の
+@@ -303,8 +358,8 @@ pub(crate) fn vjp(
+             // の shape）で `(da 係数, db 係数)` を返し、`Op::Add` と
+             // 同じ `reduce_bias_grad`（f64 相当のアキュムレータ）で
+             // 元の `a`/`b` shape へ縮約する（§3.5 設計方針）。
+-            let a_val = materialize_fallible(nodes, ops, a)?;
+-            let b_val = materialize_fallible(nodes, ops, b)?;
++            let a_val = diag_materialize(nodes, ops, a)?;
++            let b_val = diag_materialize(nodes, ops, b)?;
+             if sop.is_comparison() {
+                 // 比較演算（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は区分
+                 // 定数で両入力の勾配が恒等的にゼロ（`binary_partials`
+@@ -382,7 +437,7 @@ pub(crate) fn vjp(
+             // イシュー #1731）。forward 記録値 `out_value` ではなく
+             // 入力 `x` 自体が必要なため `Op::Max` と同型に
+             // `materialize_fallible` で取得する。
+-            let x_val = materialize_fallible(nodes, ops, input)?;
++            let x_val = diag_materialize(nodes, ops, input)?;
+             let da = cumprod_vjp_along(x_val, upstream, dim);
+             vec![(input, da)]
+         }
+@@ -392,7 +447,7 @@ pub(crate) fn vjp(
+             vec![(input, da)]
+         }
+         Op::Max { input, dim } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = max_vjp(input_val, dim, out_value, upstream);
+             vec![(input, da)]
+         }
+@@ -402,12 +457,12 @@ pub(crate) fn vjp(
+             dim,
+             correction,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = var_vjp(input_val, dim, correction, upstream);
+             vec![(input, da)]
+         }
+         Op::VectorNorm { input, ord, dim } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = vector_norm_vjp(input_val, ord, dim, upstream);
+             vec![(input, da)]
+         }
+@@ -416,17 +471,17 @@ pub(crate) fn vjp(
+             dim,
+             correction,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = std_vjp(input_val, dim, correction, upstream);
+             vec![(input, da)]
+         }
+         Op::LogSumExp { input, dim } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = logsumexp_vjp(input_val, dim, upstream);
+             vec![(input, da)]
+         }
+         Op::PNorm { input, p, dim } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = pnorm_vjp(input_val, p, dim, upstream);
+             vec![(input, da)]
+         }
+@@ -435,7 +490,7 @@ pub(crate) fn vjp(
+             // 共有する実体）を直接呼ぶ: forward 記録値 `out_value` と
+             // `==` 一致する最初の位置へ上流勾配を置くだけで最大／最小
+             // どちらの縮約かに依存しないため（`Op::Min` doc 参照）。
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = extremum_first_match_vjp(input_val, dim, out_value, upstream);
+             vec![(input, da)]
+         }
+@@ -446,7 +501,7 @@ pub(crate) fn vjp(
+             // どちらの縮約かに依存しない実装のため `Op::Max`／`Op::Min`
+             // と同様に共有アームでよい（`extremum_first_match_vjp` と
+             // 同じ判断枠組み）。
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let da = extremum_even_split_vjp(input_val, dim, out_value, upstream);
+             vec![(input, da)]
+         }
+@@ -465,9 +520,13 @@ pub(crate) fn vjp(
+             target,
+             reduction,
+         } => {
+-            let pred_val = materialize_fallible(nodes, ops, pred)?;
+-            let target_val = materialize_fallible(nodes, ops, target)?;
++            let pred_val = diag_materialize(nodes, ops, pred)?;
++            let target_val = diag_materialize(nodes, ops, target)?;
+             let n = pred_val.numel();
++            // `Category::Loss`: 途中に型付きエラーでの早期 `return` を含む
++            // ため `diag::time` では包めず `maybe_start`／`record` を使う
++            // （早期 return 時は計測欠落を許容。`diag.rs::maybe_start` 参照）。
++            let diag_loss_start = diag::maybe_start();
+             let (dpred, dtarget) = if n == 0 {
+                 // `mse_loss_vjp` と同じゼロ除算回避（`scale` 計算前に
+                 // 早期 return。融合カーネル呼び出しを回避することで
+@@ -503,6 +562,7 @@ pub(crate) fn vjp(
+                     Err(other) => return Err(AutodiffError::Backend(other)),
+                 }
+             };
++            diag::record(Category::Loss, diag_loss_start);
+             vec![(pred, dpred), (target, dtarget)]
+         }
+         Op::HuberLoss {
+@@ -512,8 +572,8 @@ pub(crate) fn vjp(
+             delta,
+             reduction,
+         } => {
+-            let pred_val = materialize_fallible(nodes, ops, pred)?;
+-            let target_val = materialize_fallible(nodes, ops, target)?;
++            let pred_val = diag_materialize(nodes, ops, pred)?;
++            let target_val = diag_materialize(nodes, ops, target)?;
+             let n = pred_val.numel();
+             let (dpred, dtarget) = if n == 0 {
+                 // `huber_loss_vjp` と同じゼロ除算回避（`Op::MseLoss`
+@@ -555,8 +615,8 @@ pub(crate) fn vjp(
+             kind,
+             reduction,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
+-            let target_val = materialize_fallible(nodes, ops, target)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
++            let target_val = diag_materialize(nodes, ops, target)?;
+             let n = input_val.numel();
+             let (dinput, dtarget) = if n == 0 {
+                 // `mse_loss` の `Op::MseLoss` 分岐と同じゼロ除算回避
+@@ -605,9 +665,10 @@ pub(crate) fn vjp(
+             class_dim,
+             reduction,
+         } => {
+-            let logits_val = materialize_fallible(nodes, ops, logits)?;
+-            let dlogits =
+-                cross_entropy_loss_vjp(logits_val, &targets, class_dim, reduction, upstream);
++            let logits_val = diag_materialize(nodes, ops, logits)?;
++            let dlogits = diag::time(Category::Loss, || {
++                cross_entropy_loss_vjp(logits_val, &targets, class_dim, reduction, upstream)
++            });
+             // `targets` は非追跡（`Var`/`NodeId` を持たない）ため勾配
+             // 寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
+             // CrossEntropyLoss` doc 参照）。
+@@ -618,8 +679,8 @@ pub(crate) fn vjp(
+             target,
+             reduction,
+         } => {
+-            let pred_val = materialize_fallible(nodes, ops, pred)?;
+-            let target_val = materialize_fallible(nodes, ops, target)?;
++            let pred_val = diag_materialize(nodes, ops, pred)?;
++            let target_val = diag_materialize(nodes, ops, target)?;
+             let n = pred_val.numel();
+             let (dpred, dtarget) = if n == 0 {
+                 // `Op::MseLoss` 分岐と同じゼロ除算回避（`scale` 計算前に
+@@ -652,7 +713,7 @@ pub(crate) fn vjp(
+             reduction,
+             options,
+         } => {
+-            let logits_val = materialize_fallible(nodes, ops, logits)?;
++            let logits_val = diag_materialize(nodes, ops, logits)?;
+             let dlogits = cross_entropy_loss_with_options_vjp(
+                 logits_val, &targets, class_dim, reduction, &options, upstream,
+             );
+@@ -668,8 +729,8 @@ pub(crate) fn vjp(
+             margin,
+             reduction,
+         } => {
+-            let x1_val = materialize_fallible(nodes, ops, x1)?;
+-            let x2_val = materialize_fallible(nodes, ops, x2)?;
++            let x1_val = diag_materialize(nodes, ops, x1)?;
++            let x2_val = diag_materialize(nodes, ops, x2)?;
+             let n = if x1_val.shape().len() == 1 {
+                 1
+             } else {
+@@ -695,8 +756,8 @@ pub(crate) fn vjp(
+             margin,
+             reduction,
+         } => {
+-            let x1_val = materialize_fallible(nodes, ops, x1)?;
+-            let x2_val = materialize_fallible(nodes, ops, x2)?;
++            let x1_val = diag_materialize(nodes, ops, x1)?;
++            let x2_val = diag_materialize(nodes, ops, x2)?;
+             let n = x1_val.numel();
+             let (dx1, dx2) = if n == 0 {
+                 let zeros = build_tensor(vec![0f32; 0], x1_val.shape());
+@@ -718,9 +779,9 @@ pub(crate) fn vjp(
+             options,
+             reduction,
+         } => {
+-            let anchor_val = materialize_fallible(nodes, ops, anchor)?;
+-            let positive_val = materialize_fallible(nodes, ops, positive)?;
+-            let negative_val = materialize_fallible(nodes, ops, negative)?;
++            let anchor_val = diag_materialize(nodes, ops, anchor)?;
++            let positive_val = diag_materialize(nodes, ops, positive)?;
++            let negative_val = diag_materialize(nodes, ops, negative)?;
+             let shape = anchor_val.shape();
+             let n = if shape.len() == 1 { 1 } else { shape[0] };
+             let (danchor, dpositive, dnegative) = if n == 0 {
+@@ -746,8 +807,8 @@ pub(crate) fn vjp(
+             options,
+             reduction,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
+-            let target_val = materialize_fallible(nodes, ops, target)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
++            let target_val = diag_materialize(nodes, ops, target)?;
+             let n = input_val.numel();
+             let (dinput, dtarget) = if n == 0 {
+                 let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+@@ -770,7 +831,7 @@ pub(crate) fn vjp(
+             options,
+             reduction,
+         } => {
+-            let log_probs_val = materialize_fallible(nodes, ops, log_probs)?;
++            let log_probs_val = diag_materialize(nodes, ops, log_probs)?;
+             let shape = log_probs_val.shape();
+             let n = if shape.len() == 3 { shape[1] } else { 0 };
+             let dlog_probs = if n == 0 {
+@@ -795,7 +856,7 @@ pub(crate) fn vjp(
+             class_dim,
+             reduction,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
+             let n = targets.numel();
+             let dinput = if n == 0 {
+                 // `mse_loss` の `Op::MseLoss` 分岐と同じゼロ除算回避
+@@ -833,8 +894,8 @@ pub(crate) fn vjp(
+             kind,
+             reduction,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
+-            let target_val = materialize_fallible(nodes, ops, target)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
++            let target_val = diag_materialize(nodes, ops, target)?;
+             let n = input_val.numel();
+             let (dinput, dtarget) = if n == 0 {
+                 let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+@@ -925,7 +986,7 @@ pub(crate) fn vjp(
+                 }
+             };
+             let w_dev = resident.resident_buffer(store_id, slot)?;
+-            let x_val = materialize_fallible(nodes, ops, input)?;
++            let x_val = diag_materialize(nodes, ops, input)?;
+ 
+             // epilogue activation のマスク段（イシュー #1044）。`act ==
+             // Relu` の場合、フォワードで融合した ReLU の劣勾配
+@@ -942,7 +1003,21 @@ pub(crate) fn vjp(
+             let g: &Tensor<f32> = match act {
+                 Activation::None => upstream,
+                 Activation::Relu => {
+-                    masked_upstream = elementwise_mul_mask(upstream, out_value, |v| v > 0.0);
++                    if diag::mask_contiguity_enabled() {
++                        eprintln!(
++                            "[diag] Op::LinearResident Relu arm: upstream.is_contiguous()={} \
++                             upstream.strides()={:?} upstream.shape()={:?} \
++                             out_value.is_contiguous()={} out_value.strides()={:?}",
++                            upstream.is_contiguous(),
++                            upstream.strides(),
++                            upstream.shape(),
++                            out_value.is_contiguous(),
++                            out_value.strides()
++                        );
++                    }
++                    masked_upstream = diag::time(Category::Mask, || {
++                        elementwise_mul_mask(upstream, out_value, |v| v > 0.0)
++                    });
+                     &masked_upstream
+                 }
+                 // `Activation` は `#[non_exhaustive]`（`tensor-core::
+@@ -982,7 +1057,7 @@ pub(crate) fn vjp(
+             // ため、数値契約は bit 一致ではなく REQ-2 統一複合判定。
+             // `docs/matmul-vjp-zero-copy-decision.md` §4.4）。TT・分類
+             // 不能形状は Metal でも従来どおり `contiguous()` を経由する。
+-            let x_t = transpose2d(x_val);
++            let x_t = diag::time(Category::Transpose, || transpose2d(x_val));
+ 
+             // イシュー #1212: d_weight をホストへ戻さずデバイス常駐の
+             // まま `resolver`（`DeviceParamStore`）の grad staging へ
+@@ -1063,6 +1138,10 @@ pub(crate) fn vjp(
+                 _ => None,
+             };
+ 
++            // 診断計時（イシュー #2100）: resident grad staging への書き込みは
++            // §4（旧診断）と比較できるよう `gemm_ns` へ計上しつつ、bias 縮約
++            // を含む内訳を `fill_ns` に別掲する（`diag::record_fill`）。
++            let diag_fill_start = diag::maybe_start();
+             let outcome = resident.fill_resident_weight_grad(
+                 ops,
+                 store_id,
+@@ -1074,6 +1153,7 @@ pub(crate) fn vjp(
+                 g,
+                 bias_target,
+             )?;
++            diag::record_fill(diag_fill_start);
+ 
+             // d_input^T = W @ g^T（`W: [k,n]`・`g: [m,n]` → `g^T: [n,m]`
+             // → `tmp: [k,m]`）。`W` はデバイス常駐のまま
+@@ -1083,16 +1163,17 @@ pub(crate) fn vjp(
+             // d_weight のコマンドバッファも合流させて完了させる合流点
+             // になる（`crates/backend-metal/src/ops.rs::
+             // gemm_resident_lhs` doc 参照）。
+-            let g_t = transpose2d(g);
+-            let tmp = ops
+-                .gemm_resident_lhs(w_dev, &g_t)
++            // 診断計時: ここでの `transpose2d` は `matmul_vjp` の外側
++            // （zero-copy な stride view 作成のみ）のため `Transpose` として
++            // `gemm_resident_lhs`（`Gemm`）とは別計上する。
++            let g_t = diag::time(Category::Transpose, || transpose2d(g));
++            let tmp = diag::time(Category::Gemm, || ops.gemm_resident_lhs(w_dev, &g_t))
+                 .map_err(AutodiffError::Backend)?;
+-            let d_input = transpose2d(&tmp);
++            let d_input = diag::time(Category::Transpose, || transpose2d(&tmp));
+ 
+             let mut contributions = vec![(input, d_input)];
+             if !outcome.weight_filled {
+-                let d_weight = ops
+-                    .gemm_fp32_strict(&x_t, g)
++                let d_weight = diag::time(Category::Gemm, || ops.gemm_fp32_strict(&x_t, g))
+                     .map_err(AutodiffError::Backend)?;
+                 contributions.push((weight, d_weight));
+             }
+@@ -1109,7 +1190,7 @@ pub(crate) fn vjp(
+                 // 非対応バックエンドのフォールバックがここに来るため、
+                 // resident 経路（f64 逐次和）と数値方式を揃える
+                 // 必要がある（イシュー #1566・PR #1659 codex-review P1）。
+-                let d_bias = reduce_bias_grad(g, &bias_node.shape);
++                let d_bias = diag::time(Category::Ewise, || reduce_bias_grad(g, &bias_node.shape));
+                 contributions.push((bias_id, d_bias));
+             }
+             contributions
+@@ -1127,8 +1208,8 @@ pub(crate) fn vjp(
+             // 拒否時の診断メッセージへ含めるため（下記 `format!`）。
+             compute_dtype,
+         } => {
+-            let w_val = materialize_fallible(nodes, ops, weight)?;
+-            let x_val = materialize_fallible(nodes, ops, input)?;
++            let w_val = diag_materialize(nodes, ops, weight)?;
++            let x_val = diag_materialize(nodes, ops, input)?;
+ 
+             // epilogue activation のマスク段（`Op::LinearResident` と同じ
+             // `out_value > 0` 規約。イシュー #1044）。`upstream` が
+@@ -1138,7 +1219,9 @@ pub(crate) fn vjp(
+             let g: &Tensor<f32> = match act {
+                 Activation::None => upstream,
+                 Activation::Relu => {
+-                    masked_upstream = elementwise_mul_mask(upstream, out_value, |v| v > 0.0);
++                    masked_upstream = diag::time(Category::Mask, || {
++                        elementwise_mul_mask(upstream, out_value, |v| v > 0.0)
++                    });
+                     &masked_upstream
+                 }
+                 // `Activation` は `#[non_exhaustive]`（`tensor-core::
+@@ -1155,7 +1238,8 @@ pub(crate) fn vjp(
+                 }
+             };
+ 
+-            let (d_input, d_weight) = matmul_vjp(ops, x_val, w_val, g)?;
++            let (d_input, d_weight) =
++                diag::time(Category::Gemm, || matmul_vjp(ops, x_val, w_val, g))?;
+             let mut contributions = vec![(input, d_input), (weight, d_weight)];
+             if let Some(bias_id) = bias {
+                 let bias_shape = &nodes[bias_id.0].shape;
+@@ -1163,7 +1247,7 @@ pub(crate) fn vjp(
+                 // `reduce_bias_grad` doc 参照）と数値方式を揃える
+                 // （fresh〈本 Op〉/reuse 間の一致。イシュー #1566・PR
+                 // #1659 codex-review P1）。
+-                let d_bias = reduce_bias_grad(g, bias_shape);
++                let d_bias = diag::time(Category::Ewise, || reduce_bias_grad(g, bias_shape));
+                 contributions.push((bias_id, d_bias));
+             }
+             contributions
+@@ -1197,8 +1281,8 @@ pub(crate) fn vjp(
+                     "grad::vjp: Op::Conv2d has an unrecognized compute_dtype ({compute_dtype:?})"
+                 )));
+             }
+-            let input_val = materialize_fallible(nodes, ops, input)?;
+-            let weight_val = materialize_fallible(nodes, ops, weight)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
++            let weight_val = diag_materialize(nodes, ops, weight)?;
+             let input_shape = input_val.shape().to_vec();
+             let weight_shape = weight_val.shape().to_vec();
+ 
+@@ -1284,8 +1368,8 @@ pub(crate) fn vjp(
+             bias,
+             params,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
+-            let weight_val = materialize_fallible(nodes, ops, weight)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
++            let weight_val = diag_materialize(nodes, ops, weight)?;
+             let input_shape = input_val.shape().to_vec();
+             let weight_shape = weight_val.shape().to_vec();
+ 
+@@ -1376,8 +1460,8 @@ pub(crate) fn vjp(
+             bias,
+             params,
+         } => {
+-            let input_val = materialize_fallible(nodes, ops, input)?;
+-            let weight_val = materialize_fallible(nodes, ops, weight)?;
++            let input_val = diag_materialize(nodes, ops, input)?;
++            let weight_val = diag_materialize(nodes, ops, weight)?;
+             let input_shape = input_val.shape().to_vec();
+             let weight_shape = weight_val.shape().to_vec();
+ 
+@@ -1489,9 +1573,9 @@ pub(crate) fn vjp(
+             // `input`（と `weight` があれば `weight`）を実体化し直して
+             // 行内統計（`rstd`）を再計算する（`eval::row_rms_stats` と
+             // 同じ縮約精度契約。`.claude/rules/coding-rust.md`）。
+-            let x_val = materialize_fallible(nodes, ops, input)?.clone();
++            let x_val = diag_materialize(nodes, ops, input)?.clone();
+             let w_val = match weight {
+-                Some(w) => Some(materialize_fallible(nodes, ops, w)?.clone()),
++                Some(w) => Some(diag_materialize(nodes, ops, w)?.clone()),
+                 None => None,
+             };
+             let x_shape = x_val.shape().to_vec();
+@@ -1553,9 +1637,9 @@ pub(crate) fn vjp(
+         } => {
+             // `Op::RmsNorm` と同じ理由で `input`／`weight` を実体化し直し
+             // `mean`／`rstd` を再計算する（`eval::row_ln_stats`）。
+-            let x_val = materialize_fallible(nodes, ops, input)?.clone();
++            let x_val = diag_materialize(nodes, ops, input)?.clone();
+             let w_val = match weight {
+-                Some(w) => Some(materialize_fallible(nodes, ops, w)?.clone()),
++                Some(w) => Some(diag_materialize(nodes, ops, w)?.clone()),
+                 None => None,
+             };
+             let x_shape = x_val.shape().to_vec();
+@@ -1648,9 +1732,9 @@ pub(crate) fn vjp(
+             // `weight` を実体化し直して統計を再計算する（`Op::LayerNorm`
+             // と同じ理由）。eval モードは `fixed_stats` が定数の
+             // `mean`／`var` を直接保持しているため再計算不要。
+-            let x_val = materialize_fallible(nodes, ops, input)?.clone();
++            let x_val = diag_materialize(nodes, ops, input)?.clone();
+             let w_val = match weight {
+-                Some(w) => Some(materialize_fallible(nodes, ops, w)?.clone()),
++                Some(w) => Some(diag_materialize(nodes, ops, w)?.clone()),
+                 None => None,
+             };
+             let x_shape = x_val.shape().to_vec();
+@@ -1705,10 +1789,10 @@ pub(crate) fn vjp(
+             b_ih,
+             b_hh,
+         } => {
+-            let x_val = materialize_fallible(nodes, ops, x)?;
+-            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+-            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+-            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
++            let x_val = diag_materialize(nodes, ops, x)?;
++            let h_prev_val = diag_materialize(nodes, ops, h_prev)?;
++            let w_ih_val = diag_materialize(nodes, ops, w_ih)?;
++            let w_hh_val = diag_materialize(nodes, ops, w_hh)?;
+             let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+             let factor = tanh_grad_factor(out_value);
+             let d_pre = eval::mul(upstream, &factor);
+@@ -1738,11 +1822,11 @@ pub(crate) fn vjp(
+             b_hh,
+             gates_ifg,
+         } => {
+-            let x_val = materialize_fallible(nodes, ops, x)?;
+-            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+-            let c_prev_val = materialize_fallible(nodes, ops, c_prev)?;
+-            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+-            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
++            let x_val = diag_materialize(nodes, ops, x)?;
++            let h_prev_val = diag_materialize(nodes, ops, h_prev)?;
++            let c_prev_val = diag_materialize(nodes, ops, c_prev)?;
++            let w_ih_val = diag_materialize(nodes, ops, w_ih)?;
++            let w_hh_val = diag_materialize(nodes, ops, w_hh)?;
+             let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+             let (d_pre_ifg, dc_prev) =
+                 match ops.lstm_cell_backward(&gates_ifg, c_prev_val, upstream) {
+@@ -1777,7 +1861,7 @@ pub(crate) fn vjp(
+         // （決定 1b 追記。`cell` 以外を指すことは想定しないため `_` 分岐
+         // では型付きエラーで fail-closed に拒否し、パニックしない）。
+         Op::LstmHidden { cell, gate_o } => {
+-            let c_val = materialize_fallible(nodes, ops, cell)?;
++            let c_val = diag_materialize(nodes, ops, cell)?;
+             let (d_pre_o, dc) = match ops.lstm_hidden_backward(c_val, &gate_o, upstream) {
+                 Ok(v) => v,
+                 Err(BackendError::Unsupported(_)) => {
+@@ -1810,10 +1894,10 @@ pub(crate) fn vjp(
+                     ));
+                 }
+             };
+-            let x_val = materialize_fallible(nodes, ops, x)?;
+-            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+-            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+-            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
++            let x_val = diag_materialize(nodes, ops, x)?;
++            let h_prev_val = diag_materialize(nodes, ops, h_prev)?;
++            let w_ih_val = diag_materialize(nodes, ops, w_ih)?;
++            let w_hh_val = diag_materialize(nodes, ops, w_hh)?;
+             let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+             let hidden = d_pre_o.shape().get(1).copied().unwrap_or(0);
+             let col_start = total_cols.saturating_sub(hidden);
+@@ -1854,10 +1938,10 @@ pub(crate) fn vjp(
+             gates_rzn,
+             q,
+         } => {
+-            let x_val = materialize_fallible(nodes, ops, x)?;
+-            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+-            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+-            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
++            let x_val = diag_materialize(nodes, ops, x)?;
++            let h_prev_val = diag_materialize(nodes, ops, h_prev)?;
++            let w_ih_val = diag_materialize(nodes, ops, w_ih)?;
++            let w_hh_val = diag_materialize(nodes, ops, w_hh)?;
+             let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+             let (d_pre_i, d_pre_h, dh_prev_direct) =
+                 match ops.gru_backward(&gates_rzn, &q, h_prev_val, upstream) {
+@@ -1894,7 +1978,7 @@ pub(crate) fn vjp(
+             // `out_value`（forward が返す `f32` 記録値の `A^{-1}`）は
+             // 再利用せず、`input` から改めて `f64` で計算する
+             // （`eval::linalg::inv_vjp` doc 参照。codex-review 指摘）。
+-            let a_val = materialize_fallible(nodes, ops, input)?;
++            let a_val = diag_materialize(nodes, ops, input)?;
+             let da = eval::linalg::inv_vjp(a_val, upstream)?;
+             vec![(input, da)]
+         }
+@@ -1902,13 +1986,13 @@ pub(crate) fn vjp(
+             // `out_value`（forward の解 `X` の `f32` 記録値）は再利用
+             // せず、`a`／`b` から改めて `f64` で計算する
+             // （`eval::linalg::solve_vjp` doc 参照。codex-review 指摘）。
+-            let a_val = materialize_fallible(nodes, ops, a)?;
+-            let b_val = materialize_fallible(nodes, ops, b)?;
++            let a_val = diag_materialize(nodes, ops, a)?;
++            let b_val = diag_materialize(nodes, ops, b)?;
+             let (da, db) = eval::linalg::solve_vjp(a_val, b_val, upstream)?;
+             vec![(a, da), (b, db)]
+         }
+         Op::Det { input } => {
+-            let a_val = materialize_fallible(nodes, ops, input)?;
++            let a_val = diag_materialize(nodes, ops, input)?;
+             let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
+             let da = eval::linalg::det_vjp(a_val, g_scalar)?;
+             vec![(input, da)]
+@@ -1946,7 +2030,7 @@ pub(crate) fn vjp(
+             vec![(input, da)]
+         }
+         Op::MatrixNorm { input, ord } => {
+-            let a_val = materialize_fallible(nodes, ops, input)?;
++            let a_val = diag_materialize(nodes, ops, input)?;
+             let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
+             let da = eval::linalg::matrix_norm_vjp(a_val, ord, g_scalar)?;
+             vec![(input, da)]
+@@ -1973,19 +2057,19 @@ pub(crate) fn vjp(
+             vec![(input, d_input)]
+         }
+         Op::SlogdetLogAbsDet { input } => {
+-            let a_val = materialize_fallible(nodes, ops, input)?;
++            let a_val = diag_materialize(nodes, ops, input)?;
+             let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
+             let da = eval::linalg::slogdet_logabsdet_vjp(a_val, g_scalar)?;
+             vec![(input, da)]
+         }
+         Op::Pinv { input, rcond } => {
+-            let a_val = materialize_fallible(nodes, ops, input)?;
++            let a_val = diag_materialize(nodes, ops, input)?;
+             let da = eval::linalg::pinv_vjp(a_val, Some(rcond), upstream)?;
+             vec![(input, da)]
+         }
+         Op::Lstsq { a, b, rcond } => {
+-            let a_val = materialize_fallible(nodes, ops, a)?;
+-            let b_val = materialize_fallible(nodes, ops, b)?;
++            let a_val = diag_materialize(nodes, ops, a)?;
++            let b_val = diag_materialize(nodes, ops, b)?;
+             let (da, db) = eval::linalg::lstsq_vjp(a_val, b_val, Some(rcond), upstream)?;
+             vec![(a, da), (b, db)]
+         }
+@@ -2768,7 +2852,7 @@ pub(crate) fn vjp(
+         Op::Custom { inputs, func } => {
+             let input_vals: Vec<&Tensor<f32>> = inputs
+                 .iter()
+-                .map(|id| materialize_fallible(nodes, ops, *id))
++                .map(|id| diag_materialize(nodes, ops, *id))
+                 .collect::<Result<_, _>>()?;
+             let requires_grad: Vec<bool> =
+                 inputs.iter().map(|id| nodes[id.0].requires_grad).collect();
+@@ -5566,6 +5650,12 @@ fn transpose2d(tensor: &Tensor<f32>) -> Tensor<f32> {
+ /// `eval::matmul` への暗黙フォールバックは設けない（forward と backward
+ /// で数値経路が分岐する判定迂回を作らないため。`.claude/rules/
+ /// security.md` A08）。
++///
++/// **診断計時の注記（一時計装。`diag.rs`・イシュー #2100）**: 呼び出し元
++/// （`Op::MatMul`／`Op::LinearAct`）は本関数全体を `Category::Gemm` で
++/// 計測する。内部の `transpose2d`（zero-copy な stride view 作成のみ）は
++/// 個別に切り出さず Gemm 区間に内包する（`Op::LinearResident` 側の
++/// gemm 呼び出しの外側の `transpose2d` は個別に `Transpose` 計上する）。
+ fn matmul_vjp(
+     ops: &dyn BackendOps,
+     a: &Tensor<f32>,
+@@ -14236,3 +14326,110 @@ release ビルドでも検知できるよう `assert!` を使う）"
+         );
+     }
+ }
++
++/// 一時的な機構診断ベンチ（恒久実装ではない。ユーザー依頼「2 つの固定費の
++/// 機構を micro 計測で確定する」の一環。`elementwise_mul_mask` が
++/// fresh 経路（`Op::LinearAct`）で 9 µs・reuse 経路（`Op::LinearResident`）
++/// で 44 µs かかる差の由来を、`upstream` 引数の contiguity（連続 vs
++/// `transpose2d` 後の非連続 view）で切り分ける。`#[ignore]` 付き（参考用・判定外。`--ignored` で実行）・
++/// `--release --nocapture` で実行し中央値を stderr へ出力する。
++#[cfg(test)]
++mod diag_elementwise_mask_bench {
++    use super::*;
++    use std::time::Instant;
++
++    const ITERS: usize = 1000;
++    const ROWS: usize = 64;
++    const COLS: usize = 256;
++
++    fn median(mut v: Vec<u128>) -> u128 {
++        v.sort_unstable();
++        v[v.len() / 2]
++    }
++
++    fn contiguous_tensor() -> Tensor<f32> {
++        let data: Vec<f32> = (0..ROWS * COLS).map(|i| (i as f32) * 0.001 - 5.0).collect();
++        Tensor::new(data, &[ROWS, COLS]).unwrap()
++    }
++
++    /// reuse 経路が実際に upstream として渡す形を再現する: `[COLS,ROWS]`
++    /// の contiguous バッファを作り `transpose2d` で `[ROWS,COLS]` の
++    /// 非連続 view にする（`device_store.rs::linear_forward_with_activation`
++    /// の呼び出し元レイヤーが `d_input = transpose2d(&tmp)` で作るのと
++    /// 同じ構造。`tmp` は `[k,m]=[COLS,ROWS]`、転置後 `[m,k]=[ROWS,COLS]`）。
++    fn transposed_view_tensor() -> Tensor<f32> {
++        let data: Vec<f32> = (0..ROWS * COLS).map(|i| (i as f32) * 0.001 - 5.0).collect();
++        let base = Tensor::new(data, &[COLS, ROWS]).unwrap();
++        transpose2d(&base)
++    }
++
++    #[test]
++    #[ignore = "診断専用マイクロベンチ（イシュー #2100 では判定に使わない参考用。実行は --ignored --nocapture）"]
++    fn bench_elementwise_mul_mask_contiguous_vs_transposed_upstream() {
++        let out_value = contiguous_tensor(); // mask_src（`out_value`）は常に contiguous
++        let g_contig = contiguous_tensor();
++        let g_transposed = transposed_view_tensor();
++
++        assert!(g_contig.is_contiguous(), "対照条件が前提から外れている");
++        assert!(
++            !g_transposed.is_contiguous(),
++            "reuse 再現条件が前提から外れている（transpose2d が non-contiguous \
++             view を返さなくなった可能性）"
++        );
++
++        // ウォームアップ
++        for _ in 0..50 {
++            let _ = elementwise_mul_mask(&g_contig, &out_value, |v| v > 0.0);
++            let _ = elementwise_mul_mask(&g_transposed, &out_value, |v| v > 0.0);
++        }
++
++        let mut contig_ns = Vec::with_capacity(ITERS);
++        for _ in 0..ITERS {
++            let start = Instant::now();
++            let r = elementwise_mul_mask(&g_contig, &out_value, |v| v > 0.0);
++            contig_ns.push(start.elapsed().as_nanos());
++            std::hint::black_box(&r);
++        }
++
++        let mut transposed_ns = Vec::with_capacity(ITERS);
++        for _ in 0..ITERS {
++            let start = Instant::now();
++            let r = elementwise_mul_mask(&g_transposed, &out_value, |v| v > 0.0);
++            transposed_ns.push(start.elapsed().as_nanos());
++            std::hint::black_box(&r);
++        }
++
++        // `dense_vec` 単体（= `contiguous()` の内訳）も分離計測する。
++        let mut dense_vec_contig_ns = Vec::with_capacity(ITERS);
++        for _ in 0..ITERS {
++            let start = Instant::now();
++            let r = dense_vec(&g_contig);
++            dense_vec_contig_ns.push(start.elapsed().as_nanos());
++            std::hint::black_box(&r);
++        }
++        let mut dense_vec_transposed_ns = Vec::with_capacity(ITERS);
++        for _ in 0..ITERS {
++            let start = Instant::now();
++            let r = dense_vec(&g_transposed);
++            dense_vec_transposed_ns.push(start.elapsed().as_nanos());
++            std::hint::black_box(&r);
++        }
++
++        eprintln!(
++            "[diag] elementwise_mul_mask contiguous median = {} ns",
++            median(contig_ns)
++        );
++        eprintln!(
++            "[diag] elementwise_mul_mask transposed-view median = {} ns",
++            median(transposed_ns)
++        );
++        eprintln!(
++            "[diag] dense_vec(contiguous) median = {} ns",
++            median(dense_vec_contig_ns)
++        );
++        eprintln!(
++            "[diag] dense_vec(transposed view) median = {} ns",
++            median(dense_vec_transposed_ns)
++        );
++    }
++}
+diff --git a/crates/autodiff/src/lib.rs b/crates/autodiff/src/lib.rs
+index 8e3d68ca..1d136866 100644
+--- a/crates/autodiff/src/lib.rs
++++ b/crates/autodiff/src/lib.rs
+@@ -239,7 +239,11 @@ pub mod conv3d_ops;
+ mod create_graph;
+ mod custom;
+ mod default_ops;
++// 診断専用の backward 内訳計時（イシュー #2100 の一時計装。
++// `FANDHE_DIAG_BACKWARD` 環境変数が設定された場合のみ計測する。
++// `diag.rs` モジュール冒頭コメント参照）。
+ pub mod determinism;
++mod diag;
+ mod einsum;
+ pub mod einsum_batch;
+ mod error;
+diff --git a/crates/autodiff/src/optim/device_store.rs b/crates/autodiff/src/optim/device_store.rs
+index 1804007f..b10ee9d3 100644
+--- a/crates/autodiff/src/optim/device_store.rs
++++ b/crates/autodiff/src/optim/device_store.rs
+@@ -7558,4 +7558,69 @@ mod tests {
+         let after = store.sync_to_host(&tape).unwrap();
+         assert_ne!(after[0].host_slice(), w_init.host_slice());
+     }
++
++    /// 一時的な機構診断テスト（恒久実装ではない）。真の 2 層 reuse
++    /// ネットワーク（layer1: `linear_forward_with_activation(Relu)`・
++    /// layer2: `linear_forward`）で 1 step backward を実行し、layer1 の
++    /// `Op::LinearResident` Relu マスク段に渡る `upstream`（layer2 の
++    /// `d_input = transpose2d(&tmp)`）が実際に非連続 view であることを
++    /// `FANDHE_DIAG_MASK_CONTIGUITY=1` 環境変数経由で `grad.rs` に
++    /// `eprintln!` させて確認する（`cargo test … -- --nocapture` 必須。
++    /// 環境変数未設定時は何も出力しない通常テストとして無害）。
++    #[test]
++    #[ignore = "診断専用マイクロベンチ（イシュー #2100 では判定に使わない参考用。実行は --ignored --nocapture）"]
++    fn diag_two_layer_resident_relu_backward_upstream_contiguity() {
++        let batch = 4;
++        let in_dim = 5;
++        let hidden = 3;
++        let out_dim = 2;
++        let w1 = tensor(
++            (0..in_dim * hidden)
++                .map(|i| (i as f32) * 0.01 - 0.3)
++                .collect(),
++            &[in_dim, hidden],
++        );
++        let b1 = tensor(vec![0.1, -0.2, 0.05], &[hidden]);
++        let w2 = tensor(
++            (0..hidden * out_dim)
++                .map(|i| (i as f32) * 0.02 - 0.2)
++                .collect(),
++            &[hidden, out_dim],
++        );
++        let x_data = tensor(
++            (0..batch * in_dim)
++                .map(|i| (i as f32) * 0.03 - 0.5)
++                .collect(),
++            &[batch, in_dim],
++        );
++        let target_data = tensor(vec![0.0; batch * out_dim], &[batch, out_dim]);
++
++        let tape = simple_tape(None);
++        let mut store = DeviceParamStore::new(&tape, &[&w1, &b1, &w2]).unwrap();
++        let leaves = store.register_resident_params(&tape).unwrap();
++        let x = tape.var(&x_data);
++        let target = tape.var(&target_data);
++
++        let y1 = store
++            .linear_forward_with_activation(
++                &tape,
++                &x,
++                &leaves[0],
++                Some(&leaves[1]),
++                Activation::Relu,
++            )
++            .unwrap();
++        let y2 = store.linear_forward(&tape, &y1, &leaves[2], None).unwrap();
++        let loss = y2.mse_loss(&target).unwrap();
++
++        // 環境変数 `FANDHE_DIAG_MASK_CONTIGUITY=1` はテスト内で変更せず
++        // プロセス起動時にシェル側で設定する（例:
++        // `FANDHE_DIAG_MASK_CONTIGUITY=1 cargo test -p fandhe-ai-autodiff
++        //  --release diag_two_layer_resident_relu_backward_upstream_contiguity -- --nocapture`）。
++        // `std::env::set_var`／`remove_var` は Rust 2024 で unsafe であり、
++        // rayon 等のワーカースレッドが環境を参照しないことを保証できない
++        // ため、テスト内での変更は行わない（未設定時は診断行を出力せず
++        // 通常経路を通るだけで、テスト自体は pass する）。
++        let _grads = store.backward(&tape, &loss).unwrap();
++    }
+ }
+diff --git a/crates/backend-cpu/src/mse.rs b/crates/backend-cpu/src/mse.rs
+index ba07c08c..ce4a004c 100644
+--- a/crates/backend-cpu/src/mse.rs
++++ b/crates/backend-cpu/src/mse.rs
+@@ -408,3 +408,92 @@ mod tests {
+         }
+     }
+ }
++
++/// 一時的な機構診断ベンチ（恒久実装ではない）。`mse_loss_backward_f32`
++/// が 640 要素に対し約 70 µs かかる（`CHUNK=4096` より小さいため
++/// `par_chunks` 自体は関与しない設計上のはずだが、実装は `par_iter_mut`
++/// を使っており本当に 1 ジョブに収まるか・rayon 起動オーバーヘッドが
++/// 支配的かを切り分ける）。`#[ignore]` 付き（参考用・判定外。`--ignored` で実行）・`--release --ignored --nocapture` で
++/// 実行し中央値（ns）を stderr へ出力する。
++#[cfg(test)]
++mod diag_backward_bench {
++    use super::*;
++    use std::time::Instant;
++
++    const ITERS: usize = 1000;
++    const N: usize = 640;
++
++    fn median(mut v: Vec<u128>) -> u128 {
++        v.sort_unstable();
++        v[v.len() / 2]
++    }
++
++    /// (b) 比較用の単純逐次 `for` ループ版。bit 一致確認込み。
++    fn naive_backward(pred: &[f32], target: &[f32], scale: f32, dpred: &mut [f32]) {
++        for i in 0..pred.len() {
++            dpred[i] = scale * (pred[i] - target[i]);
++        }
++    }
++
++    #[test]
++    #[ignore = "診断専用マイクロベンチ（イシュー #2100 では判定に使わない参考用。実行は --ignored --nocapture）"]
++    fn bench_mse_loss_backward_f32_direct_vs_naive() {
++        let pred: Vec<f32> = (0..N).map(|i| (i as f32) * 0.01 - 3.0).collect();
++        let target: Vec<f32> = (0..N).map(|i| (i as f32) * 0.005 - 1.0).collect();
++        let scale = 1.0f32 / (N as f32);
++
++        // (d) 初回呼び出し（スレッドプール初期化・ワーカー起床を含みうる）
++        // と 2 回目以降を分離して計測する。bit 一致確認・
++        // `rayon::current_num_threads()`（プールを遅延初期化しうる）
++        // より必ず前に置く。
++        let mut dpred = vec![0.0f32; N];
++        let first_start = Instant::now();
++        mse_loss_backward_f32(&pred, &target, scale, &mut dpred).unwrap();
++        let first_ns = first_start.elapsed().as_nanos();
++        eprintln!("[diag] mse_loss_backward_f32 first call = {first_ns} ns");
++
++        eprintln!(
++            "[diag] rayon::current_num_threads() = {}",
++            rayon::current_num_threads()
++        );
++
++        // bit 一致確認（(a) と (b) が同じ結果を返すこと）。初回計測後。
++        let mut d_a = vec![0.0f32; N];
++        let mut d_b = vec![0.0f32; N];
++        mse_loss_backward_f32(&pred, &target, scale, &mut d_a).unwrap();
++        naive_backward(&pred, &target, scale, &mut d_b);
++        assert_eq!(d_a, d_b, "par_iter_mut 版と逐次版が bit 不一致");
++
++        // ウォームアップ（スレッドプールは初回呼び出しで確立済みのはず）。
++        for _ in 0..50 {
++            mse_loss_backward_f32(&pred, &target, scale, &mut dpred).unwrap();
++        }
++
++        // (a) 直接呼び出し（`dpred` 事前確保）。
++        let mut direct_ns = Vec::with_capacity(ITERS);
++        for _ in 0..ITERS {
++            let start = Instant::now();
++            mse_loss_backward_f32(&pred, &target, scale, &mut dpred).unwrap();
++            direct_ns.push(start.elapsed().as_nanos());
++            std::hint::black_box(&dpred);
++        }
++
++        // (b) 単純逐次ループ版。
++        let mut naive_ns = Vec::with_capacity(ITERS);
++        for _ in 0..ITERS {
++            let start = Instant::now();
++            naive_backward(&pred, &target, scale, &mut dpred);
++            naive_ns.push(start.elapsed().as_nanos());
++            std::hint::black_box(&dpred);
++        }
++
++        eprintln!(
++            "[diag] mse_loss_backward_f32 direct (par_iter_mut, dpred 事前確保) median = {} ns",
++            median(direct_ns)
++        );
++        eprintln!(
++            "[diag] naive sequential for-loop median = {} ns",
++            median(naive_ns)
++        );
++    }
++}
+diff --git a/crates/backend-cpu/tests/mse_backward_fixed_cost_diag.rs b/crates/backend-cpu/tests/mse_backward_fixed_cost_diag.rs
+new file mode 100644
+index 00000000..47e387bd
+--- /dev/null
++++ b/crates/backend-cpu/tests/mse_backward_fixed_cost_diag.rs
+@@ -0,0 +1,98 @@
++//! 一時的な機構診断ベンチ（恒久実装ではない。ユーザー依頼「学習 1 step
++//! backward の `CpuBackendOps::mse_loss_backward` が 640 要素に対し約
++//! 70 µs かかる固定費の機構を確定する」の一環）。
++//!
++//! `mse.rs::diag_backward_bench`（クレート内 `#[cfg(test)]`）が
++//! `mse_loss_backward_f32` 単体（(a)）と単純逐次ループ（(b)）を計測する
++//! のに対し、本ファイルは公開 API `CpuBackendOps::mse_loss_backward`
++//! （`vec![0.0f32; n]` 確保・`Tensor::new` 構築を含む全体。(c)）を
++//! 計測し、(a) との差分から確保・構築コストの寄与を切り分ける。
++//!
++//! `#[ignore]` 付き（参考用・判定外）。`cargo test -p fandhe-ai-backend-cpu
++//! --release --test mse_backward_fixed_cost_diag -- --ignored --nocapture`
++//! で実行し中央値（ns）を stderr へ出力する。
++
++use fandhe_ai_backend_cpu::CpuBackendOps;
++use fandhe_ai_tensor_core::{BackendOps, Tensor};
++use std::time::Instant;
++
++const ITERS: usize = 1000;
++const N: usize = 640;
++
++fn median(mut v: Vec<u128>) -> u128 {
++    v.sort_unstable();
++    v[v.len() / 2]
++}
++
++#[test]
++#[ignore = "診断専用マイクロベンチ（イシュー #2100 では判定に使わない参考用。実行は --ignored --nocapture）"]
++fn bench_cpu_backend_ops_mse_loss_backward_full_path() {
++    let pred_data: Vec<f32> = (0..N).map(|i| (i as f32) * 0.01 - 3.0).collect();
++    let target_data: Vec<f32> = (0..N).map(|i| (i as f32) * 0.005 - 1.0).collect();
++    let pred = Tensor::new(pred_data, &[N]).unwrap();
++    let target = Tensor::new(target_data, &[N]).unwrap();
++    let ops = CpuBackendOps::new();
++    let scale = 1.0f32 / (N as f32);
++
++    // ウォームアップ。
++    for _ in 0..50 {
++        let r = ops.mse_loss_backward(&pred, &target, scale).unwrap();
++        std::hint::black_box(&r);
++    }
++
++    let mut full_ns = Vec::with_capacity(ITERS);
++    for _ in 0..ITERS {
++        let start = Instant::now();
++        let r = ops.mse_loss_backward(&pred, &target, scale).unwrap();
++        full_ns.push(start.elapsed().as_nanos());
++        std::hint::black_box(&r);
++    }
++
++    // (c) の内訳切り分け用: `pred.contiguous()`／`target.contiguous()`
++    // 単体（両者とも入力は既に contiguous なので `Arc::clone` のみの
++    // はずだが実測で確認する）。
++    let mut contiguous_ns = Vec::with_capacity(ITERS);
++    for _ in 0..ITERS {
++        let start = Instant::now();
++        let pc = pred.contiguous();
++        let tc = target.contiguous();
++        contiguous_ns.push(start.elapsed().as_nanos());
++        std::hint::black_box((&pc, &tc));
++    }
++
++    // `vec![0.0f32; N]` 確保単体。
++    let mut alloc_ns = Vec::with_capacity(ITERS);
++    for _ in 0..ITERS {
++        let start = Instant::now();
++        let v = vec![0.0f32; N];
++        alloc_ns.push(start.elapsed().as_nanos());
++        std::hint::black_box(&v);
++    }
++
++    // `Tensor::new(vec, shape)` 構築単体（データは事前確保済みを渡す）。
++    let mut tensor_new_ns = Vec::with_capacity(ITERS);
++    for _ in 0..ITERS {
++        let data = vec![0.0f32; N];
++        let start = Instant::now();
++        let t = Tensor::new(data, &[N]).unwrap();
++        tensor_new_ns.push(start.elapsed().as_nanos());
++        std::hint::black_box(&t);
++    }
++
++    eprintln!(
++        "[diag] CpuBackendOps::mse_loss_backward full path median = {} ns",
++        median(full_ns)
++    );
++    eprintln!(
++        "[diag] pred.contiguous()+target.contiguous() median = {} ns",
++        median(contiguous_ns)
++    );
++    eprintln!(
++        "[diag] vec![0.0f32; {N}] alloc median = {} ns",
++        median(alloc_ns)
++    );
++    eprintln!(
++        "[diag] Tensor::new(vec, shape) construct median = {} ns",
++        median(tensor_new_ns)
++    );
++}

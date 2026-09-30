@@ -1,0 +1,13 @@
+machine: smoke-x86
+date_utc: 2026-09-29T22:15:18Z
+uname: Linux 7.0.0-34-generic x86_64
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+instr_tree_rev: a24e1c3269c30e9e646bd25c0149562b494ad5a1
+plain_tree_rev: a24e1c3269c30e9e646bd25c0149562b494ad5a1
+cpu: 13th Gen Intel(R) Core(TM) i7-13700K
+ncpu: 10
+mem_kb: 28662512
+gpu: NVIDIA GeForce RTX 3060, 595.91.07
+uptime_at_start:  22:15:18 up 3 days, 12:17,  3 users,  load average: 19.59, 16.68, 15.42
+uptime_at_end:  22:16:31 up 3 days, 12:18,  3 users,  load average: 22.37, 18.05, 15.98
