@@ -127,9 +127,9 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 既存の 2 パターンから選ぶ。
 
 - **P-diag（診断限定・本番非到達）**: `internal-diagnostics` feature 限定の `compile_*_variant`／`run_*`／`launch_*` を置き、計算本体の文字列を既存カーネルと共有して bit 同一を担保する（persistent #1346・Stream-K #1358・TMA #1975 と同型）。C1〜C4 の初期実装はすべてこれとする
-- **P-prod（本番到達 opt-in）**: `crates/backend-cuda/src/precision.rs` の `AtomicU8` 方式（既定 OFF・fail-closed・黙示フォールバック禁止）。ゲート A〜D 全合格後にのみ検討する
+- **P-prod（本番到達 opt-in）**: `crates/backend-cuda/src/precision.rs` の `AtomicU8` 方式（既定 OFF・fail-closed）。opt-in が OFF の間は候補経路へ入らず、ON かつ候補が失敗した場合は既存経路へ黙示的に落とさず型付きエラーで拒否する（P-prod の失敗時契約）。ゲート A〜D 全合格後にのみ検討する
 - **結線形態**: 合格後は `select_tiled_f32_kernel`／`select_tiled_pipeline_handle` の形状条件分岐（`TILED_PIPELINE_128X64_PRODUCTION_ENABLED` と同型の `const` スイッチ＋N／K 閾値）を第一候補とする。**facade への新規公開 API は本 issue でも後続の初期実装でも追加しない**（公開 API 非破壊のガードレール。追加が必要になればユーザー承認）
-- **disable 経路**: コンパイル失敗・整列不成立時は既存の cp.async pipeline／classic へフォールバックする（結線後は既存の `if let` fail-closed 方針）。診断 API は型付きエラーで拒否する
+- **失敗時契約（選択方式ごと）**: (1) 診断入口（P-diag）と P-prod の明示 opt-in 経路は、コンパイル失敗・整列不成立を型付きエラーで拒否し、既存経路へ黙示フォールバックしない。(2) 形状条件による本番の自動選択（`const` スイッチ＋N／K 閾値。明示 opt-in ではない）に限り、コンパイル失敗・整列不成立時は既存の cp.async pipeline／classic へフォールバックする（既存の `if let` fail-closed 方針と同型。条件外形状は従来経路のまま）。両者を混在させず、結線 issue で採用する方式を 1 つ明記する
 
 ## 6. 本番結線の判断フロー
 
@@ -144,7 +144,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 - **C**: GPU-only の純カーネル時間の 5 回中央値。N≥1024 のいずれかで ≥1.05 かつ全計測形状で後退なし
 - **D**: 結線後の本番ディスパッチ非後退（framework-compare の gemm cuda を同一 HEAD の base／after で比較する。`backend-cuda-tma-gemm-load-design.md` §6 のゲート D と同型だが、判定条件は候補の結合順序で分ける）
   - K 連鎖を分割しない候補（C1・C2 等。ゲート A で bit 一致を要求できるもの）: base／after の checksum 完全一致と性能非後退の両方を満たすこと
-  - K 連鎖を分割する候補（Stream-K の C3・C4）: 残タイルの結合順序が非 Stream-K 版と異なり bit 一致しない（ゲート A・B-1 で許容済み）ため、checksum 完全一致は要求しない。代わりに (1) base／after の出力を複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で比較して全行 `fail_count == 0`（ゲート B-1 と同じ承認済み方式。tolerance・baseline は変更しない）、(2) after 側の同一入力での再実行 checksum が一致（決定性維持）、(3) 性能非後退、のすべてを満たすこと
+  - K 連鎖を分割する候補（Stream-K の C3・C4）: 残タイルの結合順序が非 Stream-K 版と異なり bit 一致しない（ゲート A・B-1 で許容済み）ため、checksum 完全一致は要求しない。代わりに (1) base／after の出力を複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で比較して全行 `fail_count == 0`（ゲート B-1 と同じ承認済み方式。tolerance・baseline は変更しない。framework-compare の checksum は全要素和で要素単位の `fail_count` を得られず誤差相殺を見逃すため判定に使わない。base／after それぞれ同一の決定的シード入力で出力行列の全要素をファイル等へ保存し〈checksum 出力とは別に保存するハーネス側の追加が必要。ハーネス未対応なら本ゲートは未達扱い〉、同一形状・同一入力について要素単位で複合判定して不合格要素数を数える）、(2) after 側の同一入力での再実行 checksum が一致（決定性維持）、(3) 性能非後退、のすべてを満たすこと
 
 **no-go**: A の不一致 1 件（C3・C4 は決定性検査の失敗または full タイルの bit 不一致 1 件）、B-1 の `fail_count > 0`（承認なき baseline 化は不可）、または C の後退 1 形状で REJECT（opt-in 維持）。判定基準は実測前に固定し、事後に変更しない。tolerance・baseline の変更が必要になった時点で停止し、ユーザー承認へ回す。
 
