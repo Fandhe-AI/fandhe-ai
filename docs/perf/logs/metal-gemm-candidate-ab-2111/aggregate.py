@@ -225,9 +225,19 @@ def check_load_gate(text, i):
 
 
 def parse_load_policy(env_text):
-    """env_info.txt の `load_policy:` 値を返す。行が無ければ None（RULE.txt 7.。`#` 以降は注釈）。"""
-    m = re.search(r"^load_policy:[ \t]*([^\s#]*)", env_text, re.M)
-    return m.group(1) if m else None
+    """env_info.txt の `load_policy:` 値を返す。行が無ければ None（RULE.txt 7.。`#` 以降は注釈）。
+
+    全行を解析する（最初の 1 行だけ採用すると、後続の `load_policy: record_only` 追記で
+    参考扱い判定を迂回できるため）。行が 2 本以上ある場合は値が同一でも重複・矛盾の疑いとして
+    `exclusive_gate` にならない番兵値 `<duplicate>` を返す（呼び出し側は参考扱いに倒す。fail-closed）。
+    キー表記の揺れ（先頭空白・コロン前の空白）も同じ行として数える。
+    """
+    vals = re.findall(r"^[ \t]*load_policy[ \t]*:[ \t]*([^\s#]*)", env_text, re.M)
+    if not vals:
+        return None
+    if len(vals) > 1:
+        return "<duplicate>"
+    return vals[0]
 
 
 def load_dir(d):
@@ -365,6 +375,10 @@ def self_test():
     assert parse_load_policy("load_policy: record_only\n") == "record_only"
     assert parse_load_policy("load_policy:  # 未記入\n") == ""
     assert parse_load_policy("chip: x\n") is None
+    # 重複・矛盾行（後続の record_only 追記）は最初の行で隠さず参考扱い側へ倒す
+    assert parse_load_policy("load_policy: exclusive_gate\nload_policy: record_only\n") == "<duplicate>"
+    assert parse_load_policy("load_policy: record_only\nload_policy: exclusive_gate\n") == "<duplicate>"
+    assert parse_load_policy("load_policy: exclusive_gate\n load_policy : exclusive_gate\n") == "<duplicate>"
     # データ欠落 N
     partial = [parse_run(_fixture_run({("X", 512): 0.9})) for _ in range(N_RUNS)]
     assert judge(partial)["X"][0] == "INCOMPLETE"
