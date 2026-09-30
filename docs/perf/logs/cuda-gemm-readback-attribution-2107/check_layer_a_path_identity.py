@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import sys
@@ -94,6 +95,30 @@ CONSTRUCTION_ITEMS = [
     ("gemm.rs", "fn", "launch_tiled_f32"),
     ("module_cache.rs", "fn", "load_function_cached"),
 ]
+# 人手レビュー済みの「本番経路で等価な既知差分」（項目名 -> (v0.9.0 側, HEAD 側) の
+# 正規化テキストの sha256）。差分の中身は #2299 の feature gate 起因のみ:
+#  - `new`: `tiled_pipeline_128x64_error`（診断専用フィールド）の追加に伴い、
+#    `#[cfg(not(feature = "internal-diagnostics"))]` 側の 128x64 コンパイルが
+#    `compile_tiled_pipeline_128x64(device).ok()` になった（v0.9.0 は Ok/Err を分けて
+#    エラー文字列を保持するだけで、成功時に関数を得て失敗時 None となる挙動は同一）。
+#  - `compile_tiled_pipeline*`: 戻り値がタプル構造体から名前付き構造体になり、診断専用の
+#    `context_ptr` 取得が消えただけ（NVRTC コンパイル・ロード・tile 種別は同一）。
+# base／head の両ハッシュが一致した場合にのみ既知差分として扱う。どちらかの文面が
+# 変われば従来どおり `unknown`（fail-closed）に戻り、再レビューが必要になる。
+REVIEWED_EQUIVALENT = {
+    "new": (
+        "96cd939aaee2f38f74dacbfeb6917123ebdae9508b5a41591f7b8bb22014113c",
+        "ff331a7cad62f5129f184843c4a00e66be91893b0b0b78cff7e16c4095b6f238",
+    ),
+    "compile_tiled_pipeline": (
+        "fff46c6a7bb9c061a0ba13b7254e537b79686c63ff7e6c0317bec47ebf4804f6",
+        "fa72fbd443c56da7dae41b7556dd9ca0a448a855fe6ac15b97d1f89452e43348",
+    ),
+    "compile_tiled_pipeline_128x64": (
+        "0bc70d62b9abe2a248c9adfaa3d1a5ff695029041d611b56266c039738a14b00",
+        "b25c17b7f11e0a6e339b4ee575df060f026767725931998360a95c0e91d35343",
+    ),
+}
 GATE = '#[cfg(feature = "internal-diagnostics")]'
 
 
@@ -186,6 +211,18 @@ def main() -> int:
                     verdict = "unknown"
             elif normalize(a, kind) == normalize(b, kind):
                 lines.append(f"path_item: {rel}::{name} identical（生成・起動経路）")
+            elif (
+                rel == "gemm.rs"
+                and name in REVIEWED_EQUIVALENT
+                and REVIEWED_EQUIVALENT[name]
+                == tuple(
+                    hashlib.sha256(normalize(t, kind).encode()).hexdigest() for t in (a, b)
+                )
+            ):
+                lines.append(
+                    f"path_item: {rel}::{name} reviewed-equivalent（生成・起動経路。"
+                    "feature gate 由来の人手レビュー済み既知差分）"
+                )
             else:
                 lines.append(f"path_item: {rel}::{name} DIFFERS（生成・起動経路。要人手確認）")
                 if verdict == "yes":

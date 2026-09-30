@@ -32,6 +32,13 @@ doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §13
   ファイル単位 git diff の空を要求していたが、#2299 の feature gate・ドキュメント・
   診断専用機能追加で恒常的に差分が出て判定が常に無効化されるため（PR #2452
   レビュー指摘）、計測経路の項目へ絞った。閾値（0.80／0.50）・判定式は不変。
+  [追記 2026-09-30] 生成・起動経路（CudaGemm::new・compile_tiled_pipeline*）は #2299 の
+  feature gate 起因の文面差（診断専用フィールド追加・context_ptr 取得削除・タプル構造体の
+  名前付き化）が恒常的に残り、そのままでは常に unknown となるため、差分の中身を人手
+  レビューし本番経路で等価と確認した base／head の正規化テキストの sha256 対を
+  check_layer_a_path_identity.py の REVIEWED_EQUIVALENT に記録した。ハッシュ対が
+  一致する場合のみ reviewed-equivalent として yes 判定に反映し、どちらかの文面が変われば
+  従来どおり unknown（要再レビュー）へ戻る。閾値・判定式は不変。
 
 [代表値]
 - 各区間は run ごとの median（20 試行）を採り、5 run 間の中央値と min-max を報告する。
