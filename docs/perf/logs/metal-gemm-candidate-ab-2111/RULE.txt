@@ -19,6 +19,8 @@
    - UNDETERMINED: 上記いずれにも該当しない（run 数不足は INCOMPLETE）。
 7. 負荷: 専有ゲート。orchestrate.sh は load1 < 8.0 になるまで 30 秒間隔・最大 30 分待つ（load_gate.log に記録）。
    1 run でも timeout した系列は参考扱い（REFERENCE_ONLY）とし、採用判断の根拠にしない。
+   （PR レビュー是正による出力の明確化。閾値・判定条件の変更ではない: 最終判定は REFERENCE_ONLY のままだが、上書き前のデータ由来の判定と全理由〈bit 不一致・ハッシュ不一致等。4.・6.〉は
+   underlying_verdict／underlying_reason、上書きの全理由は override_reason として別行に診断情報で残す。採否は `verdict=` 行のみ。）
 8. base の定義: 本番選択 tile::select_for_device(n,n,n, verified_m4_max) と全ゲート既定値の classic 経路（dispatch_tiled_prepared）。
    正方 N=512〜4096 では should_split_k が None のため、本番 dispatch_auto と同一の経路になる（docs/backend-metal-splitk-decision.md）。
 9. candle のデバイス区分の仮定: N=512 の T0U／T0U-LU／T0U-LU-FB は、M4 Max が candle の Max／Medium／Ultra 区分に解決される仮定の下で
