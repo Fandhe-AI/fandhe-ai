@@ -16,7 +16,8 @@
 //! ## 前提・限界
 //!
 //! - `CudaDevice::context().attribute()`（safe API）のみを使い、新規 `unsafe`・依存はない。
-//! - CUDA 非搭載環境では `CudaDevice::new` 失敗を検出してスキップ終了する。
+//! - CUDA ドライバ不在（`DriverUnavailable`）のみ非 CUDA 環境としてスキップ（終了コード 0）する。
+//!   それ以外の `CudaDevice::new` 失敗は計測失敗として stderr に出力し終了コード 1 で終える。
 //! - 開発機（非 GB10）での出力は GB10 の値の代替にならない。
 //! - 属性取得に失敗した項目は `key=error` として出力を継続する（`unwrap`/`expect` なし）。
 //!
@@ -45,8 +46,12 @@ fn main() {
             return;
         }
         Err(other) => {
-            println!("unified_memory_probe: CudaDevice::new failed ({other}); skipping.");
-            return;
+            // ドライバ不在以外の失敗（デバイス初期化不能等）は GB10 計測の失敗であり、
+            // 非 CUDA 環境のスキップと区別するため stderr 出力＋非 0 終了とする。
+            eprintln!(
+                "unified_memory_probe: CudaDevice::new failed ({other}); measurement failed."
+            );
+            std::process::exit(1);
         }
     };
     println!("device_name={}", device.name());
