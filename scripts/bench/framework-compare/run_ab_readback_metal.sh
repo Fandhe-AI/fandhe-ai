@@ -151,6 +151,17 @@ if ! awk -v t="$AB_LOAD_GATE_MAX_LOAD1" 'BEGIN{exit !(t ~ /^[0-9]+(\.[0-9]+)?$/ 
   exit 1
 fi
 
+# イシュー #2112・codex-review 指摘（PR #2456）: RULE.txt の正式系列は
+# 「load1 < 4.0 を 2 回連続」で固定されている。exclusive（正式系列）で閾値を
+# 環境変数から変えると判定前提が崩れるため、4.0 以外は fail-closed で拒否する。
+# 別閾値で試す場合は record_only（非正式系列＝ADOPT 不可・undetermined）を使い、
+# 実効閾値は manifest の load_gate_max_load1 へ残して系列を区別する。
+if [[ "$AB_LOAD_GATE_MODE" == "exclusive" ]] \
+  && ! awk -v t="$AB_LOAD_GATE_MAX_LOAD1" 'BEGIN{exit !(t + 0 == 4.0)}'; then
+  echo "error: exclusive（正式系列）の専有ゲート閾値は 4.0 固定（RULE.txt）。AB_LOAD_GATE_MAX_LOAD1=${AB_LOAD_GATE_MAX_LOAD1} は不可。別閾値は AB_LOAD_GATE_MODE=record_only（非正式）で使う" >&2
+  exit 1
+fi
+
 load1_now() {
   # `uptime` の失敗（コマンド自体の異常終了）／出力形式の不一致は
   # 空文字を返す（呼び出し側 `wait_for_exclusive_gate` が非数値・空文字
@@ -315,7 +326,7 @@ SCRIPT_REPO_HEAD_SHA="$(git -C "$SCRIPT_DIR/../../.." rev-parse HEAD 2>/dev/null
 FACADE_HEAD_SHA="$(git -C "$AB_PATCH_FACADE_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
 MANIFEST_TMP="${MANIFEST}.tmp"
 cat > "$MANIFEST_TMP" <<JSON
-{"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","readback_arms":["fresh","parallel"],"env":"FANDHE_AI_METAL_READBACK_DEST","gate_mode":"${AB_LOAD_GATE_MODE}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"label":"${LABEL}","device":"metal","script_repo_head_sha":"${SCRIPT_REPO_HEAD_SHA}","facade_head_sha":"${FACADE_HEAD_SHA}","bin_sha256":"${BIN_SHA}","bin_source":"${SOURCE_DESC}","readback_arms":["fresh","parallel"],"env":"FANDHE_AI_METAL_READBACK_DEST","gate_mode":"${AB_LOAD_GATE_MODE}","load_gate_max_load1":"${AB_LOAD_GATE_MAX_LOAD1}","recorded_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 JSON
 echo "== manifest（一時ファイル）記録: $MANIFEST_TMP =="
 cat "$MANIFEST_TMP"

@@ -18,21 +18,21 @@ AB_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" \
 ```
 
 - 出力: `results/raw/results-m4max-readback-ab-<label>-{fresh,parallel}.jsonl`・manifest・gate／uptime ログ
-- `AB_LOAD_GATE_MODE=record_only` は非正式系列（ADOPT 不可）
+- `AB_LOAD_GATE_MODE=record_only` は非正式系列（ADOPT 不可）。`exclusive` の閾値は load1 < 4.0 固定で、`AB_LOAD_GATE_MAX_LOAD1` が 4.0 以外なら停止する。別閾値は record_only 限定で、実効値は manifest の `load_gate_max_load1` に残る（系列の区別用）
 
 ## 3. 比較（判定セルごと）
 
 ```sh
 # before = -fresh.jsonl、after = -parallel.jsonl（位置引数）。RULE.txt は ratio <= 1.00 なので
 # 既定 threshold 1.05 ではなく --threshold 1.00 を必ず指定する
-python3 compare_gemm_ab.py --device metal --task gemm --modes reuse --sizes large \
+python3 compare_gemm_ab.py --device metal --task gemm --modes reuse --sizes readback \
   --threshold 1.00 --require-checksum-exact <before> <after>
 python3 compare_gemm_ab.py --device metal --task infer --modes reuse \
   --threshold 1.00 --require-checksum-exact <before> <after>
 ```
 
-gemm は N=1024・4096 のみ計測する（N=2048 は判定セル外。表に欠損として出た場合も RULE.txt の
-対象 2 セルだけで判定する）。
+gemm は N=1024・4096 のみ計測し、`--sizes readback`（1024・4096）で判定セルを計測対象と一致させる
+（`--sizes large` は N=2048 が欠測となり終了コード 3 になるため使わない）。
 
 ## 4. 収録（このディレクトリ）
 

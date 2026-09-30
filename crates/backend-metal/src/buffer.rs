@@ -308,7 +308,7 @@ impl MetalBuffer {
     ///
     /// 借用のまま使えない場合（所有権が必要な場合）のみ使う。
     ///
-    /// 宛先 `Vec` の作り方は [`crate::readback_policy`]（イシュー #2112。既定
+    /// 宛先 `Vec` の作り方は `crate::readback_policy`（イシュー #2112。既定
     /// `Fresh` = 従来の `to_vec()` と同一。env で分割並列コピーへ opt-in）に従う。
     /// gemm.rs・memory.rs（`download_inner`）が共通に通る readback の 1 箇所。
     pub fn read_to_vec(&self) -> Vec<f32> {
