@@ -435,6 +435,9 @@ checksum（0.4%・0.6 µs）。フェーズ和／合計: 99.9%（差分は各フ
   〈`docs/perf/cpu-infer-predict-profile.md`（#1218）が fresh 側の
   近縁記録〉と `predict` の差分。run 間の min–max 幅〈167.6〜
   195.6 µs〉が大きいため負荷変動の寄与も未分離）
+  - 後続（イシュー #2105）: フェーズ分解の診断基盤と事前登録規則を
+    `docs/perf/cpu-predict-resident-fixedcost.md` に追加した（実機実測は
+    未実施）
 - cuda fresh の `to_tensor`（19.0 µs・12.0%）削減余地の確認（§10.4
   第 2 項の cuda 版。`docs/perf/cuda-host-view-staging-readout.md`
   〈#1336／#1478〉が D2H readback 経路の既存記録）
