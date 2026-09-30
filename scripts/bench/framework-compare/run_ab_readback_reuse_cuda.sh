@@ -215,6 +215,16 @@ if [[ "$AB_LOAD_GATE_MODE" == "exclusive" ]] \
   exit 1
 fi
 
+# codex-review 指摘（PR #2463）: RULE.txt の正式系列は試行条件（最大 10 試行・初回待機 60 秒
+# ×1.5 倍）も事前固定である。環境変数で試行回数・待機を変えると事前固定を超えて待てるため、
+# exclusive では固定値以外を fail-closed で拒否する。別値は record_only（非正式）で使う
+# （record_only は待機・リトライ自体を行わないため値は参考記録のみ）。
+if [[ "$AB_LOAD_GATE_MODE" == "exclusive" ]] \
+  && [[ "$AB_LOAD_GATE_MAX_ATTEMPTS" != "10" || "$AB_LOAD_GATE_INITIAL_WAIT" != "60" ]]; then
+  echo "error: exclusive（正式系列）の試行条件は AB_LOAD_GATE_MAX_ATTEMPTS=10・AB_LOAD_GATE_INITIAL_WAIT=60 固定（RULE.txt）。got: MAX_ATTEMPTS=${AB_LOAD_GATE_MAX_ATTEMPTS} INITIAL_WAIT=${AB_LOAD_GATE_INITIAL_WAIT}。別値は AB_LOAD_GATE_MODE=record_only（非正式）で使う" >&2
+  exit 1
+fi
+
 load1_now() {
   # `uptime` の失敗（コマンド自体の異常終了）／出力形式の不一致は
   # 空文字を返す（呼び出し側 `wait_for_exclusive_gate` が非数値・空文字
@@ -467,7 +477,11 @@ run() { # run <arm: before|after> <size>
     FANDHE_AI_CUDA_READBACK_DEST="pinned-reuse" ./target/release/bench-fandhe --task gemm --device cuda --size "$size" --mode reuse --out "$out_tmp" 2>"$RUN_ERR" || rc=$?
   fi
   if [[ "$rc" -ne 0 ]]; then
-    echo "gemm cuda size=${size} arm=$arm : $(cat "$RUN_ERR")" >> "$SKIP_TMP"
+    # 生 stderr は絶対パス・内部ホスト名を含みうるため公開する失敗記録へは書かない（RULE.txt
+    # 「生成物に含めない」。codex-review 指摘 PR #2463）。定型のエラー分類（終了コードのみ）を
+    # 記録し、詳細は端末（非永続）へだけ出す。
+    tail -20 "$RUN_ERR" >&2 || true
+    echo "gemm cuda size=${size} arm=$arm : bench-fandhe failed (exit_code=${rc})" >> "$SKIP_TMP"
     echo "  -> FAILED (recorded in $SKIP_TMP)"
     ANY_FAILED=$((ANY_FAILED + 1))
   fi
