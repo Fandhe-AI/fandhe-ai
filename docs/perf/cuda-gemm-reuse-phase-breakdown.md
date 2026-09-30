@@ -584,3 +584,5 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
 - managed memory（ゼロコピー）経路の比較・`PretouchedReusedDest` の再評価
   （`prod_order_reused` 腕は exposed cost 算出の計測対照に限り、採否・性能評価は対象外）
 - N=4096 Layer B `d2h` 二峰性の原因究明・M4 Max（Metal）側の対応計測
+
+後続 #2108（readback 宛先の pinned staging 再利用 opt-in と A/B 基盤）は `docs/perf/cuda-gemm-readback-reuse-2108.md` を参照。

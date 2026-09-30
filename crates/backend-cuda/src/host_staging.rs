@@ -284,7 +284,7 @@ impl HostStagingCache {
     }
 
     #[cfg(test)]
-    fn with_cap(kind: HostStagingKind, cap_bytes: u64) -> Self {
+    pub(crate) fn with_cap(kind: HostStagingKind, cap_bytes: u64) -> Self {
         Self {
             cap_bytes,
             ..Self::new(kind)
@@ -351,7 +351,26 @@ impl HostStagingCache {
     /// release_host_staging` 経由）の返却値も過大になる
     /// （codex-review 指摘 P2・Cursor Bugbot Medium 指摘。両者は
     /// 同一箇所・同一問題）。
-    fn put(&mut self, numel: usize, generation: u64, buf: HostStaging) {
+    pub(crate) fn put(&mut self, numel: usize, generation: u64, buf: HostStaging) {
+        self.put_within(numel, generation, buf, self.cap_bytes);
+    }
+
+    /// 現在の保持バイト数（複数キャッシュ横断の合計上限判定用。
+    /// `readback_policy::ReadbackStagingPool::put` が ordinal 全体の上限適用に使う）。
+    pub(crate) fn cached_bytes(&self) -> u64 {
+        self.cached_bytes
+    }
+
+    /// `put` と同じ契約で、上限を `cap_bytes` の代わりに `effective_cap` で判定する
+    /// （自身の `cap_bytes` を超える値は `cap_bytes` へ丸める）。
+    pub(crate) fn put_within(
+        &mut self,
+        numel: usize,
+        generation: u64,
+        buf: HostStaging,
+        effective_cap: u64,
+    ) {
+        let effective_cap = effective_cap.min(self.cap_bytes);
         let bytes = buf.byte_len();
         let existing_bytes = self
             .entries
@@ -362,7 +381,7 @@ impl HostStagingCache {
             .cached_bytes
             .saturating_sub(existing_bytes)
             .saturating_add(bytes);
-        if projected_cached_bytes > self.cap_bytes {
+        if projected_cached_bytes > effective_cap {
             self.stats.evicted += 1;
             return;
         }
