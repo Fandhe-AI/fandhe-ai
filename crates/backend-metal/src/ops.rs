@@ -1515,6 +1515,194 @@ impl MetalBackendOps {
         // 「同期契約」参照）。
         Ok(c_dev_buf)
     }
+
+    /// [`BackendOps::gemm_resident_rhs_act`] の ON（`act == Relu`）経路
+    /// （イシュー #2113）。[`Self::gemm_resident_rhs`] と同じ検証・同じ
+    /// カーネル（`gemm_tiled_bias_act`。epilogue の ReLU は融合せず
+    /// `act_relu=false`）で gemm を積み、その出力 `c` を入力に resident relu
+    /// （`run_relu_f32` と同一パイプライン）を同一バッチへ積んだうえで
+    /// `synchronize` を 1 回だけ呼ぶ。
+    ///
+    /// 検証・ハンドル解決は `gemm_resident_rhs` と対応する重複実装（OFF 経路の
+    /// 呼び出し列を変えないため抽出しない。両者の契約は同一に保つこと）。
+    ///
+    /// **encode の間に確保・ホスト書き込みをしない**: `c`／relu 出力はどちらも
+    /// 最初の encode より前に確保する（relu カーネルは全要素を書くため出力は
+    /// `alloc_uninit_pooled`。`mse.rs` の #1690 と同じ）。
+    ///
+    /// **fail-closed**: 呼び出しローカルの [`DispatchFailureCell`] を全 encode へ
+    /// 渡し、`synchronize` 後に `check_merged_dispatch_token` で検査する。
+    fn gemm_resident_rhs_relu_merged(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if w.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Metal {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        if k == 0 {
+            return Err(BackendError::InvalidArgument(
+                "gemm_resident_rhs_act: k == 0 is unreachable via Linear::new (in_features == 0 \
+                 is rejected at construction)"
+                    .to_string(),
+            ));
+        }
+        if m == 0 || n == 0 {
+            return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
+        }
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_buf) = w_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs_act: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let bias_handle = bias
+            .map(|b| {
+                b.buffer()
+                    .downcast_handle::<MetalBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset()))
+            })
+            .transpose()?;
+        let bias_arg = match &bias_handle {
+            Some((h, offset)) => {
+                let buf = h.buffer.as_ref().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "gemm_resident_rhs_act: bias buffer has numel > 0 but no device \
+                         allocation"
+                            .into(),
+                    )
+                })?;
+                Some((buf, *offset))
+            }
+            None => None,
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+        let (a_dev_buf, a_layout) = upload_operand_for_resident_gemm(&mem, a)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs_act: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let w_layout = MatrixLayout {
+            rows: k,
+            cols: n,
+            ld: n,
+            transposed: false,
+        };
+
+        // gemm 出力 `c`・relu 出力とも最初の encode より前に確保する
+        // （encode 間に確保を挟まない。本メソッド doc 参照）。
+        let c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs_act: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+        let out_buf = crate::buffer::MetalBuffer::alloc_uninit_pooled(&ctx, m * n)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let ew = context_cache::cached_elementwise(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let token = DispatchFailureCell::new();
+        gemm.encode_strided_bias_act_prepared_with_c_offset(
+            &ctx,
+            a_buf,
+            0,
+            a_layout,
+            w_buf,
+            w.offset(),
+            w_layout,
+            bias_arg,
+            false,
+            c_buf,
+            0,
+            m,
+            n,
+            k,
+            Some(&token),
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        ew.encode_unary_resident_tracked(
+            &ctx,
+            UnaryElementwiseOp::Relu,
+            c_buf,
+            &out_buf,
+            m * n,
+            &token,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        check_merged_dispatch_token(ctx.synchronize(), &token)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        Tensor::new(out_buf.read_to_vec(), &[m, n]).map_err(BackendError::ShapeMismatch)
+    }
+}
+
+/// `ctx.synchronize()` の結果を `token` と突き合わせる（`mse.rs` の同名
+/// private ヘルパと同型。`mse.rs` に触れないためローカルに置く。イシュー
+/// #2113）。`Err` はそのまま伝播し、`Ok` でも別スレッドが先に同じバッチを
+/// `synchronize()` して失敗を消費した場合（`token` 設定済み）は fail-closed で
+/// 拒否する。
+fn check_merged_dispatch_token(
+    sync_result: Result<(), MetalError>,
+    token: &DispatchFailureCell,
+) -> Result<(), MetalError> {
+    sync_result?;
+    if token.is_set() {
+        let message = token.take().map(|err| err.to_string()).unwrap_or_else(|| {
+            "dispatch failure token was set by a concurrent synchronize() on the shared \
+             MetalContext before this call's own synchronize() observed the batch"
+                .to_string()
+        });
+        return Err(MetalError::CommandBufferExecutionFailed { message });
+    }
+    Ok(())
 }
 
 impl BackendOps for MetalBackendOps {
@@ -2539,6 +2727,48 @@ impl BackendOps for MetalBackendOps {
         .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
 
         mem.download(&c_dev_buf)
+    }
+
+    /// `y = act(a @ w (+ bias))`（`w`／`bias` はデバイス常駐）。イシュー
+    /// #2113 の Metal オーバーライド。
+    ///
+    /// - **OFF（既定）または `act == None`**: `tensor-core` の既定合成と
+    ///   同一の呼び出し列（[`Self::gemm_resident_rhs`] → `act == Relu` なら
+    ///   `self.relu`）。カウンタ・出力ビットとも変更前と不変。
+    /// - **ON かつ `act == Relu`**: `Self::gemm_resident_rhs_relu_merged`
+    ///   で gemm と relu を同一コマンドバッファへ encode-only で積み、同期を
+    ///   1 回へ合流する（train reuse forward の `waitUntilCompleted` を 1 回
+    ///   削減する見積り。encode 総数は不変・カーネルも不変で bit 同一）。
+    ///
+    /// 同期契約: 戻り値の時点で GPU 完了・成否確定（`Tensor` を返すため）。
+    /// 呼び出し元は `DeviceParamStore::linear_forward_with_activation`
+    /// （autodiff）。未知の `Activation` は明示的に拒否する。
+    /// 融合 epilogue（`act_relu=true`）は encode-only 化ではなくカーネル融合の
+    /// 結線であり効果の帰属が混ざるため本イシューでは採らない
+    /// （`docs/backend-metal-command-batching-design.md` §7.6）。
+    fn gemm_resident_rhs_act(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        match act {
+            Activation::None => self.gemm_resident_rhs(a, w, bias),
+            Activation::Relu => {
+                if crate::train_forward_encode_runtime::train_forward_encode_only_enabled() {
+                    self.gemm_resident_rhs_relu_merged(a, w, bias)
+                } else {
+                    let out = self.gemm_resident_rhs(a, w, bias)?;
+                    self.relu(&out)
+                }
+            }
+            // `Activation` は `#[non_exhaustive]`（`linear_forward_device_impl`
+            // と同じ方針で未知 variant を黙って恒等扱いしない）。
+            _ => Err(BackendError::Unsupported(format!(
+                "gemm_resident_rhs_act: unsupported activation {act:?}"
+            ))),
+        }
     }
 
     /// `a`（デバイス常駐）・`w`（デバイス常駐）・`bias`（デバイス常駐・
