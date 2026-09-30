@@ -253,6 +253,11 @@
 // 判断で `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）
 // でも単体テストが回るようにする。
 pub(crate) mod batch_state;
+// `buffer.rs::MetalBuffer::read_to_vec` の readback 宛先ポリシー（イシュー
+// #2112。既定 OFF・env `FANDHE_AI_METAL_READBACK_DEST` で opt-in）。`objc2`
+// 系 FFI に触れない純ロジックのため `batch_state` と同じ判断で cfg を付けず、
+// Linux でも単体テストが回る。
+pub(crate) mod readback_policy;
 // `context.rs::MetalContext::synchronize`／`pool.rs::PooledMetalHandle::
 // Drop`（イシュー #1021）が「保留中のプール返却列」へ push・合流する
 // 判定ロジック（`objc2` 系 FFI に触れない）を切り出したモジュール。
