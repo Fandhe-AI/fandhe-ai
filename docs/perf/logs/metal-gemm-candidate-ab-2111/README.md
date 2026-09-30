@@ -23,6 +23,8 @@ candle／MLX steel 解析差分由来の Metal GEMM 候補（イシュー #2110�
 Linux 等では `./orchestrate.sh gate --dry-run`／`./orchestrate.sh 1 --dry-run` で分岐だけ検証できる。
 `python3 aggregate.py --self-test` は判定ロジックの固定 fixture 検証（実測不要）。
 
+`aggregate.py` は fail-closed: `load_gate.log` の run 1〜5 各記録・各 `kernel_gpu_run{i}.log` の対象テスト成功（`test result: ok`・`0 failed`）・`env_info.txt` の `run{i} completed` 記録のいずれかが欠ける／失敗の場合、全 arm を INCOMPLETE にし採用判定を出さない（RULE.txt 2.・7.）。
+
 ## 保存するファイル
 
 `gate_run.log`・`kernel_gpu_run{1..5}.log`・`load_gate.log`・`run{1..5}_monitor.log`・`run{1..5}_procs.txt`・

@@ -33,6 +33,9 @@ GATE_TESTS = (
     "gemm_steel_candidate_diag_tests::steel_candidate_arms_match_cpu_reference",
 )
 
+# kernel_gpu A/B 本体テスト（orchestrate.sh の run_ab が実行する 1 本。RULE.txt 2.）。
+AB_TEST = "gemm_steel_candidate_diag_tests::steel_candidate_kernel_gpu_ab_production_sizes"
+
 RE_BIT = re.compile(
     r"^N=(\d+) arm=(\S+) checksum=(-?[0-9.eE+-]+) bit_identical=(true|false) same_kernel=(true|false)(?: same_tile=(true|false))?$"
 )
@@ -60,11 +63,18 @@ def parse_run(text):
     return out
 
 
-def judge(runs, reference_only=False):
-    """runs: parse_run 結果のリスト。arm 別の判定 dict を返す（RULE.txt 3.〜6.）。"""
+def judge(runs, reference_only=False, problems=()):
+    """runs: parse_run 結果のリスト。arm 別の判定 dict を返す（RULE.txt 3.〜6.）。
+
+    problems: 入力の欠落・不完全（run ログ欠落・失敗 run・負荷ゲート記録欠落等）の理由リスト。
+    1 件でもあれば全 arm を INCOMPLETE にする（採用判定を出さない。fail-closed）。
+    """
     verdicts = {}
     arms = sorted(set(EXPECTED_ARMS) | {arm for r in runs for (arm, _n) in r if arm != BASE})
     for arm in arms:
+        if problems:
+            verdicts[arm] = ("INCOMPLETE", "入力不完全: " + "; ".join(problems))
+            continue
         if len(runs) != N_RUNS:
             verdicts[arm] = ("INCOMPLETE", f"run 数が {len(runs)}（必要 {N_RUNS}）")
             continue
@@ -76,6 +86,9 @@ def judge(runs, reference_only=False):
             cells = [r.get((arm, n)) for r in runs]
             if any(c is None or "ratio" not in c or "bit_identical" not in c for c in cells):
                 verdicts[arm] = ("INCOMPLETE", f"N={n} のデータ欠落")
+                break
+            if any(c["ratio"] <= 0.0 for c in cells):
+                verdicts[arm] = ("INCOMPLETE", f"N={n} の ratio が正でない（計測不正）")
                 break
             # bit 一致は同一タイル cell のみ要求する（タイル形状が異なる arm 間の bit 一致は
             # metal-gemm-steel-candidates.md §5 で契約外。run 間 checksum 一致は常に要求する）。
@@ -129,19 +142,78 @@ def check_gate_log(text):
     return True, "ok"
 
 
+def check_run_log(text):
+    """kernel_gpu_run{i}.log が A/B 本体テストの成功を示すか検証する（RULE.txt 2.。fail-closed）。
+
+    `orchestrate.sh` は cargo が非ゼロ終了してもログを残すため、テスト成功行・
+    `test result: ok.`・`0 failed` を確認し、FAILED／panicked を含むログは失敗扱いにする。
+    戻り値: (ok, 理由)。
+    """
+    if "FAILED" in text or "panicked" in text:
+        return False, "FAILED／panicked を含む"
+    if not re.search(r"^test " + re.escape(AB_TEST) + r" \.\.\. ok$", text, re.M):
+        return False, "対象テストの成功行（... ok）が無い"
+    if not re.search(r"^test result: ok\. 1 passed; 0 failed", text, re.M):
+        return False, "test result: ok. 1 passed; 0 failed が無い"
+    return True, "ok"
+
+
+def check_load_gate(text, i):
+    """load_gate.log から run i の負荷ゲート記録を検証する（RULE.txt 7.。fail-closed）。
+
+    戻り値: (state, 理由)。state は "OK"／"TIMEOUT"／None（記録欠落・不正）。
+    run i の記録が無い、または OK と TIMEOUT が混在・重複する場合は None。
+    """
+    states = re.findall(r"^run" + str(i) + r" (OK|TIMEOUT) ", text, re.M)
+    if not states:
+        return None, f"run{i} の負荷ゲート記録が load_gate.log に無い"
+    if len(states) != 1:
+        return None, f"run{i} の負荷ゲート記録が重複している（{states}）"
+    return states[0], "ok"
+
+
 def load_dir(d):
+    """ログディレクトリを読む。戻り値: (runs, reference_only, problems)。
+
+    runs は成功が確認できた run の解析結果のみ。run ログ欠落・失敗・完了記録なし・
+    負荷ゲート記録欠落は problems に積み、judge が全 arm を INCOMPLETE にする。
+    """
     runs = []
-    for i in range(1, N_RUNS + 1):
-        p = os.path.join(d, f"kernel_gpu_run{i}.log")
-        if os.path.isfile(p):
-            with open(p, encoding="utf-8", errors="replace") as f:
-                runs.append(parse_run(f.read()))
-    reference_only = False
+    problems = []
+    gate_text = None
     gate = os.path.join(d, "load_gate.log")
     if os.path.isfile(gate):
         with open(gate, encoding="utf-8", errors="replace") as f:
-            reference_only = "TIMEOUT" in f.read()
-    return runs, reference_only
+            gate_text = f.read()
+    else:
+        problems.append("load_gate.log が存在しない")
+    env_text = ""
+    env = os.path.join(d, "env_info.txt")
+    if os.path.isfile(env):
+        with open(env, encoding="utf-8", errors="replace") as f:
+            env_text = f.read()
+    reference_only = False
+    for i in range(1, N_RUNS + 1):
+        p = os.path.join(d, f"kernel_gpu_run{i}.log")
+        if not os.path.isfile(p):
+            problems.append(f"kernel_gpu_run{i}.log が存在しない")
+        else:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            ok, why = check_run_log(text)
+            if not ok:
+                problems.append(f"run{i} 失敗または未完了: {why}")
+            elif not re.search(r"^run" + str(i) + r" completed at ", env_text, re.M):
+                problems.append(f"run{i} の完了記録（env_info.txt）が無い")
+            else:
+                runs.append(parse_run(text))
+        if gate_text is not None:
+            state, why = check_load_gate(gate_text, i)
+            if state is None:
+                problems.append(why)
+            elif state == "TIMEOUT":
+                reference_only = True
+    return runs, reference_only, problems
 
 
 def _fixture_run(ratios, bit=True, same=None, checksum="1.000000"):
@@ -231,6 +303,24 @@ def self_test():
     assert not check_gate_log(good.replace("... ok", "... FAILED", 1))[0]
     assert not check_gate_log("")[0]
     assert not check_gate_log(good.replace(GATE_TESTS[0], "x"))[0]
+    # 入力不完全（run 失敗・ゲート記録欠落等）は全 arm INCOMPLETE
+    v = judge(build(ok), problems=["x"])
+    assert v["X"][0] == "INCOMPLETE" and v["LU"][0] == "INCOMPLETE"
+    # ratio<=0 は INCOMPLETE
+    assert judge(build({512: 0.0, 1024: 0.9, 2048: 0.9, 4096: 0.9}))["X"][0] == "INCOMPLETE"
+    # run ログ検証
+    good_run = f"test {AB_TEST} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored"
+    assert check_run_log(good_run)[0]
+    assert not check_run_log("")[0]
+    assert not check_run_log(good_run + "\ntest x ... FAILED")[0]
+    assert not check_run_log(good_run.replace("0 failed", "1 failed"))[0]
+    assert not check_run_log(good_run.replace("... ok", "... ignored"))[0]
+    # 負荷ゲート記録検証
+    assert check_load_gate("run1 OK load1=1 waited=0s\n", 1)[0] == "OK"
+    assert check_load_gate("run1 TIMEOUT load1=9 waited=1800s\n", 1)[0] == "TIMEOUT"
+    assert check_load_gate("run2 OK load1=1 waited=0s\n", 1)[0] is None
+    assert check_load_gate("run1 OK a\nrun1 TIMEOUT b\n", 1)[0] is None
+    assert check_load_gate("", 1)[0] is None
     print("self-test OK")
 
 
@@ -239,7 +329,7 @@ def main(argv):
         self_test()
         return 0
     d = argv[1] if len(argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-    runs, reference_only = load_dir(d)
+    runs, reference_only, problems = load_dir(d)
     gate_path = os.path.join(d, "gate_run.log")
     gate_ok, gate_reason = False, "gate_run.log が存在しない"
     if os.path.isfile(gate_path):
@@ -251,8 +341,10 @@ def main(argv):
         print("verdict=REJECT :: 前提ゲート不成立のため A/B 判定は行わない（RULE.txt 1.）")
         return 1
     print("gate=OK")
-    verdicts = judge(runs, reference_only)
+    verdicts = judge(runs, reference_only, problems)
     print(f"runs={len(runs)} reference_only={reference_only}")
+    for pr in problems:
+        print(f"problem: {pr}")
     for arm, (v, detail) in sorted(verdicts.items()):
         print(f"arm={arm} verdict={v} :: {detail}")
     return 0
