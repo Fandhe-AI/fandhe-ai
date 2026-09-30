@@ -296,8 +296,8 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
     for name, xs in rows:
         v = med(xs)
         share = v / gap if gap > 0 else float("nan")
-        if name.startswith(("H6", "参考")):
-            verdict = "記録のみ"  # RULE.txt 6: H6 は記録のみ・registry 版差の行は帰属に使わない
+        if name.startswith(("H6", "参考", "補助")):
+            verdict = "記録のみ"  # RULE.txt 6: H6・補助は記録のみ・registry 版差の行は帰属に使わない
         elif not gate_ok:
             verdict = "参考（専有ゲート FAIL）"
         else:

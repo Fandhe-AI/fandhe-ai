@@ -43,7 +43,7 @@
 | H2 | launch と同期の往復 | launch_issue + (kernel_wait − dev_kernel_b2b)。floor と照合 |
 | H3 | D2H readback | L2 d2h |
 | H4 | host 側 dispatch | L0 − L1、L1 − l2_sum |
-| H5 | facade・autodiff・tape | Layer A matmul − L0 |
+| H5 | facade・autodiff・tape | HEAD path-patch Layer A matmul − L0 |
 | H6 | checksum | 記録のみ |
 | 補助 | teardown（drop 時の free・event 破棄）・cudarc 内部 | L2 teardown、E h2d_clone_drop − h2d_prealloc、nsys |
 
