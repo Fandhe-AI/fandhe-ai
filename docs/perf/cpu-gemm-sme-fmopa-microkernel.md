@@ -213,6 +213,9 @@ aarch64-apple-darwin`（codegen を伴う）でアセンブラ検証済み・`ca
 **§5.4 で Apple M4 Max の正式実測（R1/R2/R4。イシュー #1978）を追記した。
 以下 §5.1〜§5.3 は初回 PR 時点の記述（参考計測のみ）をそのまま残す。**
 
+**§5.8 に `SME_MIN_K` 候補（64／128／256）の M4 Max 再実測と GB10 非後退再確認
+（イシュー #2118）の事前登録規則・実行基盤・記入欄を追加した（実測は未実施）。**
+
 ### 5.1 事前登録規則（issue #1587 コメント。実装着手前に固定）
 
 正式版は GitHub issue #1587 のコメント
@@ -646,6 +649,100 @@ train size=64〈reuse・L1 d_weight 784×256×64 が `sme_shape_eligible`
   2 行目（`let Some(kernel) = ` の先頭一致）は AVX-512 経路の 993 行目を
   拾っており SME 経路の記録ではない（スクリプトの grep 不備。SME 経路の
   差分は `fp-diff-*.txt` と `patch_apply_*.log` で担保）。
+
+### 5.8 SME しきい値候補の再実測（イシュー #2118。**未実測**・事前登録と実行基盤のみ）
+
+§5.4 では R4 の採用候補が `min(m,n)>=256 かつ k>=128`／`min(m,n)>=512 かつ k>=32` の
+2 組となり、現行の境界点 `(256, 64)` は 5/5 run 一貫にならなかった。train size=64 は
+L1 d_weight GEMM（TN・784×256×64）が現行 `SME_MIN_K=64` で SME に到達し、その到達セル
+train 64/reuse が ADOPT 候補条件を満たさず（round 1・5 が 1.00 超）総合判定は
+undetermined だった。GB10 側は §5.5 で gemm 1024/reuse が 5/5 一貫の後退（「後退あり」）と
+なったが、§5.7 の帰属切り分けでは再現しなかった（ノイズ帯）。#1979 の再開条件
+（`SME_MIN_K` 候補ごとに到達セルが 5/5 round <=1.00 かつ checksum 一致・GB10 で既存経路の
+非後退を再確認）を判定できる状態を、本節で実測前に固定する。
+
+**状態**: 実行ホストが x86_64 Linux で M4 Max・GB10 に届かないため、**実測値・推定値は
+記載しない**。イシューは open のまま（AC1・AC2 未達）。`SME_PRODUCTION_ENABLED=false`・
+`SME_MIN_M/N=256`・`SME_MIN_K=64` は不変。採否と定数切替は #2119 のユーザー承認事項。
+`.rs`・`Cargo.toml`・`Cargo.lock`・tolerance・baseline・`docs/spec/` は変更していない。
+成果物は `docs/perf/logs/sme-threshold-remeasurement-2118/`（`RULE.txt`〈事前登録・単独コミット〉・
+`on-arm-k{64,128,256}.patch`・`orchestrate_m4max.sh`・`gb10/orchestrate_gb10.sh`・
+`aggregate.py`・`README.md`）。
+
+#### 5.8.1 事前登録の要旨（正は `RULE.txt`）
+
+- **腕**: before = main HEAD `0b25525f`、after(K) = 同一コミット + 計測専用パッチ
+  （K=64 は定数反転のみ・K=128／256 は加えて `SME_MIN_K` を変更）。ツリー差分が
+  `gemm_blis/mod.rs` の 1 件のみ・定数行がパッチどおりであることを実測前に assert する。
+- **R4**（候補共通の 1 系列）: `sme_vs_neon_ab_r4_grid` 5 プロセス。候補 K の成立条件は
+  `min(m,n) ∈ {256, 512}` × `k ∈ {32,64,128,256}, k >= K` の全格子点が 5/5 run で SME>=NEON。
+- **R1**: 候補ごとに `run_ab_sme_cpu.sh`（LABEL `2118-m4max-k{K}`）。到達セルは 5 round
+  中央値 <=1.00 かつ 5/5 round <=1.00 で ADOPT 候補。非到達セルは 5/5 一貫の後退のみ
+  REJECT 材料。
+- **R2**: 全 10 セル checksum 完全一致（丸めた集約値で bit 同一の証拠ではない）。
+- **総合**: ADOPT 候補 = R4 成立 + 到達セルすべて ADOPT 候補 + 非到達セルに REJECT 材料なし
+  + R2 全一致。到達セルに 5/5 一貫の後退があれば REJECT。それ以外 undetermined。
+  AC1 の直接判定欄（到達セル 5/5 <=1.00 かつ checksum 一致）は独立に記録する。
+- **判定不能の前提**（RULE.txt §13〜§15。判定規則・閾値は不変）: ツリー記録・`run_ab_sme_cpu.sh` と
+  成果物収録の終了コード 0・全 10 セルの記録・R4 の登録 sha／実行／ログ（候補共通のため全候補に課す）・
+  GB10 の R0／RT 記録のいずれかが不成立なら、FAIL／REJECT／後退あり等を出さず undetermined とする。
+- **K=64 は再実測する**: 現行定数のベースラインで、#1979 再開条件 1 が名指しで求める
+  対象であり、既存 undetermined の重複実験には当たらない。
+- **GB10**: §5.5 と同じ R0・RT・R1-GB10・R2-GB10 を候補ごとに実施。語彙は
+  `RULE-gb10.txt` を継承（pass／後退あり／undetermined）。「全セル 5/5 <=1.00」は採らない
+  （§5.5 の 512/fresh round 3 = 2.007 の教訓）。RT は after 腕で定数ドリフトガード
+  `sme_production_enabled_is_false_pending_measurement` の 1 件のみ想定内 FAIL と事前登録し、
+  それ以外の FAIL は「後退あり相当（要調査）」とする（§5.5 で指摘された規則の不備の是正）。
+
+#### 5.8.2 候補別の到達セル表（数値を見る前に固定）
+
+形状根拠は `bench-fandhe/src/main.rs`（`BATCH=64`・`D_IN=784`・`D_HIDDEN=256`・`D_OUT=10`。
+Linear(784→256)→ReLU→Linear(256→10)）。`sme_shape_eligible(m_total, n, k)` は
+`m_total>=256 かつ n>=256 かつ k>=K`。L1 forward（64×256×784）・L2 各 GEMM は m または n が
+足りず全候補で非到達、L1 d_weight（784×256×64）だけが K=64 で到達する。
+
+| セル | K=64 | K=128 | K=256 |
+|---|---|---|---|
+| gemm 512／1024／2048 × fresh／reuse | 到達 | 到達 | 到達 |
+| train size=64 fresh／reuse | 到達 | 非到達 | 非到達 |
+| infer size=64 fresh／reuse | 非到達 | 非到達 | 非到達 |
+
+K=128／256 で train が非到達になるのは規則上の帰結で、事後の再分類ではない。
+
+#### 5.8.3 記入欄（すべて未実測。実機セッションが `aggregate.py` の出力を転記する）
+
+M4 Max R4（候補共通）: 未実測。
+
+| K | R4 成立 | R1 到達セル AC1 欄（5/5 <=1.00 かつ checksum 一致） | R2 | 総合判定 | 系列（load ゲート） |
+|---:|---|---|---|---|---|
+| 64 | 未実測 | 未実測 | 未実測 | 未確定（実測未実施） | 未実測 |
+| 128 | 未実測 | 未実測 | 未実測 | 未確定（実測未実施） | 未実測 |
+| 256 | 未実測 | 未実測 | 未実測 | 未確定（実測未実施） | 未実測 |
+
+推奨候補（ADOPT 候補になった最小の K）: 未確定。
+
+GB10（外側専有ゲートは記録のみ）:
+
+| K | R0 | RT | 5/5 <=1.00 セル数（参考） | 総合判定 |
+|---:|---|---|---:|---|
+| 64 | 未実測 | 未実測 | 未実測 | 未確定（実測未実施） |
+| 128 | 未実測 | 未実測 | 未実測 | 未確定（実測未実施） |
+| 256 | 未実測 | 未実測 | 未実測 | 未確定（実測未実施） |
+
+**verdict: 未確定（実測未実施）**。
+
+#### 5.8.4 実機セッションへの申し送りと #2119 との境界
+
+- 手順は `docs/perf/logs/sme-threshold-remeasurement-2118/README.md`（M4 Max: `orchestrate_m4max.sh all`、
+  GB10: `gb10/orchestrate_gb10.sh 64|128|256`、集計: `aggregate.py`）。実行順序は固定（R4 → k64 → k128 → k256）で、
+  run の差し替えはしない（再実行は別 LABEL）。
+- 結果が出たら本節の記入欄と verdict を更新する（規則本文は変更せず訂正は追記方式）。
+- 採否・`SME_MIN_K` の確定・`SME_PRODUCTION_ENABLED` の切替は #2119
+  （`docs/cpu-gemm-sme-unsafe-audit.md` の条件付き再承認申請）のユーザー承認事項であり、
+  本イシューでは行わない。
+- Linux 側で確認済み: パッチ 3 本の適用・差分 1 件・`cargo check --lib --tests` の
+  `aarch64-unknown-linux-gnu`／`aarch64-apple-darwin` 通過（コンパイル確認のみ）、
+  `aggregate.py --self-test`、スクリプトの `bash -n`／`shellcheck`／`--dry-run`。
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 

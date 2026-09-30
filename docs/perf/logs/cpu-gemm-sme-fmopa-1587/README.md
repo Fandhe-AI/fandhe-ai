@@ -44,6 +44,11 @@
   `SME_PRODUCTION_ENABLED=false` は不変。詳細は
   `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.7
 
+- **`SME_MIN_K` 候補（64／128／256）の M4 Max 再実測と GB10 非後退再確認（イシュー #2118）は
+  `../sme-threshold-remeasurement-2118/` で行う**（事前登録規則・実行基盤・記入欄まで作成済み・
+  実測は未実施。`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.8）。本ディレクトリの既存記録・
+  規則は変更しない。
+
 ## ディレクトリ構成
 
 - `RULE.txt` — 事前登録判定規則（固定日時 2026-09-17T16:32:14Z。一次

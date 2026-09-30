@@ -1,0 +1,118 @@
+# 事前登録判定規則（イシュー #2118: SME_MIN_K 候補 64／128／256 の M4 Max 再実測 + GB10 非後退再確認）
+# 登録日時: 2026-09-30T11:30Z 頃（UTC。正確な時刻は git の事前登録コミット時刻を正とする）。
+# 事前登録コミット sha: 本ファイル単独の 1 コミット目。sha は後続コミットでこのヘッダ末尾へ追記する（本文は変更しない）。
+# 登録時点の main HEAD（before 腕の基準）: 0b25525fa4026b951021a5d0da3a9d613b507502
+# 実測開始前に本ファイルをコミットし、結果が出た後に緩和しない。訂正は末尾への追記方式に限る。
+# 追記（2 つ目のコミット）: 事前登録コミット sha = b2d26f3a3425f595183803df500920dd2369a687（上記 3 行目の「1 コミット目」）。本文は不変。
+
+## 0. 親規則との関係
+- 親規則（docs/perf/logs/cpu-gemm-sme-fmopa-1587/RULE.txt・同 gb10/RULE-gb10.txt）は変更しない。本ファイルはそれを緩めず、SME_MIN_K 候補ごとの適用範囲と語彙だけを新規に事前登録する。
+- 本イシューは SME_PRODUCTION_ENABLED・SME_MIN_M/N/K を main で変更しない。候補値は計測専用ツリーへ当てるパッチでのみ使う。採否と定数切替・本番化は #2119 のユーザー承認事項であり、本イシューでは実施しない。
+- tolerance・baseline・ガードレール閾値・docs/spec は変更しない。
+
+## 1. 腕
+- before = 登録時点の main HEAD（sha を記録）。
+- after(K) = 同一コミットに on-arm-k{K}.patch を当てた計測専用ツリー（main へはコミットしない）。K ∈ {64, 128, 256}。
+  - on-arm-k64.patch: SME_PRODUCTION_ENABLED を false→true にするだけ（1587/on-arm.patch と同じ意味を現 HEAD で作り直したもの）。
+  - on-arm-k128.patch／on-arm-k256.patch: 上記に加え SME_MIN_K を 64→128／256 に変える。
+- 両ツリーの指紋差分が crates/backend-cpu/src/gemm_blis/mod.rs の 1 ファイルのみであり、定数 2 行がパッチどおりであることを assert する。失敗したらその場で停止する。
+
+## 2. 候補別の到達セル表（数値を見る前に固定。PR #2016 の教訓: K によって分類が変わる）
+形状の根拠: bench-fandhe/src/main.rs の BATCH=64（141 行）・D_IN=784（142）・D_HIDDEN=256（143）・D_OUT=10（144）、build_model は Linear(784→256)→ReLU→Linear(256→10)（1031–1036 行）。infer は --infer-batch 未指定で既定 BATCH=64（infer_batch_from_args）。
+SME 到達条件は dispatch_two_d_dynamic の sme_shape_eligible(m_total, n, k)（m_total>=256 かつ n>=256 かつ k>=K）。層別 GEMM の分解:
+- L1 forward 64x256x784: m=64 <256 のため全候補で非到達。
+- L1 d_weight（TN）784x256x64: m=784・n=256・k=64。K=64 のみ到達。K=128／256 では k=64<K で非到達。
+- L2 の各 GEMM（256→10 側）: n=10 または m=64 のため全候補で非到達。
+- infer size=64: L1 forward 相当のみで全候補非到達。
+
+| セル | K=64 | K=128 | K=256 |
+|---|---|---|---|
+| gemm 512／1024／2048 x fresh／reuse（m=n=k>=512） | 到達 | 到達 | 到達 |
+| train size=64 fresh／reuse（L1 d_weight 784x256x64 が経路を分ける） | 到達 | 非到達 | 非到達 |
+| infer size=64 fresh／reuse | 非到達 | 非到達 | 非到達 |
+
+K=128／256 で train が非到達へ変わるのは規則上の帰結であり、事後の再分類ではない。その場合の train 64 の変動は「非到達セルのノイズ」として扱う。
+
+## 3. R4（1 系列。候補にかかわらず共通）
+- sme_vs_neon_ab_r4_grid（#[ignore]・aarch64。SME_MIN_* を参照しない診断経路）を 5 プロセス独立起動する。
+- 格子点ごとに ratio = SME/NEON の median_gflops 比が 5/5 run で >=1.0 のとき「SME>=NEON」とする。
+- 候補 K の R4 判定は、格子 {min(m,n) ∈ {256, 512}} x {k ∈ {32, 64, 128, 256}, k >= K} の全点が SME>=NEON のとき成立とする。
+- パレート極小の採用候補（既存 aggregate.py の candidates）も参考として併記する。
+
+## 4. R1（候補ごと）
+- scripts/bench/framework-compare/run_ab_sme_cpu.sh を LABEL 2118-m4max-k{K} で実行する（5 round・round 単位の起動順反転・--require-checksum-exact・内側 load ゲート 8.0）。
+- 到達セル: 5 round 中央値 ratio<=1.00 かつ 5/5 round が <=1.00 で ADOPT 候補。
+- 非到達セル: 5/5 round 一貫の後退（全 round >1.00）のみ REJECT 材料。中央値 >1.00 でも 5/5 一貫でなければ「後退の証拠なし（ノイズ帯）」として値を併記する。
+
+## 5. R2（checksum）
+- 全 10 セルで before／after の checksum が完全一致すること。1 件でも不一致なら FAIL（停止。ADOPT にも REJECT にも数えない）。
+- checksum は gemm／infer の全要素和・train の最終 loss を小数点以下 6 桁へ丸めた値であり、bit 同一の証拠ではない（1587/gb10/RULE-gb10.txt の追記を継承）。
+
+## 6. 候補別の総合判定
+- ADOPT 候補 = R4 成立 かつ 到達セルがすべて ADOPT 候補 かつ 非到達セルに REJECT 材料なし かつ R2 全一致。
+- REJECT = 到達セルに 5/5 一貫の後退が 1 つでもある。
+- それ以外は undetermined。
+- AC1 の直接判定欄「到達セル 5 round 中央値<=1.00 かつ 5/5 round<=1.00、かつ checksum 完全一致」は総合判定とは独立の欄として別途記録する。
+- 推奨候補は「ADOPT 候補になった最小の K」。ただし採否と定数切替は #2119 のユーザー承認事項であり、本イシューでは実施しない。いずれの結果でも SME_PRODUCTION_ENABLED は切り替えない。
+
+## 7. K=64 の扱い（重複実験の禁止との整理）
+K=64 は現行定数のベースラインであり、イシュー本文の候補リストと #1979 の再開条件 1 が名指しで求める再実測である。過去の undetermined（#1978・train 64/reuse の round 1・5 が 1.00 超）と同一 HEAD・同一手順の重複ではなく、候補間比較の対照として必須のため、禁止対象の「既存 REJECT／undetermined と重複する実験」には当たらない。
+
+## 8. GB10（候補ごと。LABEL 2118-gb10-k{K}。順序 k64 → k128 → k256）
+- 手順は 1587/gb10/RULE-gb10.txt の R0・RT・R1-GB10・R2-GB10 と同じ。R0: 両腕で sme_report() が kernel_enabled: false（true なら計測中止・記録のみ）。10 セルはすべて SME 非到達セル。
+- 判定語彙は RULE-gb10.txt をそのまま使う:
+  - pass = R0 成立・RT 全 pass（§9 の既知 FAIL を除く）・5/5 一貫の後退セルなし・checksum 全一致。
+  - 後退あり = 5/5 一貫の後退セルがある、または checksum 不一致。
+  - undetermined = 上記いずれにも当てはまらない（R0 不成立・計測失敗・round 欠損等）。
+- 「全セル 5/5 <=1.00」という読み方は採らない（1587 §5.5 の 512/fresh round 3 = 2.007 のように before 側の外れ値で成立不能になるため）。5/5 <=1.00 のセル数は参考として記録するだけとする。この解釈の選択をここに固定する。
+- 専有ゲート（外側・記録）: load1 < 1.0 かつ nvidia-smi utilization.gpu 0% を最大 20 回・30 秒間隔で待つ。不通過なら実行はするが「参考」と明記する。内側ゲートは run_ab_sme_cpu.sh 固定の 8.0。
+
+## 9. RT の既知 FAIL（1587 §5.5 で規則の不備として指摘された点の是正。事前登録）
+- after 腕では gemm_blis::tests::sme_production_enabled_is_false_pending_measurement が構造上 FAIL する（定数ドリフトガードのため）。これを想定内の 1 件として登録し、FAIL 名がこれと一致することを照合する。
+- それ以外の FAIL が 1 件でもあれば「後退あり相当（要調査）」とする。是正はしない。
+- sme_shape_eligible_boundary_values は定数を記号参照しているため全候補で pass する想定（SME 関連テストに K の値のハードコードがないことは grep で確認済み）。
+
+## 10. 実行順序と差し替え禁止
+- M4 Max: R4 → R1 k64 → k128 → k256。GB10: k64 → k128 → k256。
+- run の差し替え・追加起動はしない。再実行は別 LABEL で行い、旧系列も残す。既存 LABEL・既存ログがあれば停止する。
+
+## 11. 負荷ゲート
+- M4 Max: 各 run／round の前に load1 < 8.0 を最大 30 分待つ（1587/RULE.txt を継承）。5/5 通過した系列だけを正式とし、不通過を含む系列は record_only（参考扱い）とする。専有ゲートを通らない系列は record_only。
+- GB10: §8 の外側ゲートを記録する。
+
+## 12. マスク
+ホスト名は masked、$HOME は <home> に置き換え、ユーザー名と絶対パスは除去する。bench バイナリ・dump 本体はコミットしない。
+
+## 13. 追記（実行側の fail-closed 化。判定規則・閾値は不変。PR #2465 レビュー指摘への対応）
+- before 腕の基準は実行時 HEAD ではなく、ヘッダ記載の登録 sha（lib_trees.sh の SME2118_REGISTERED_BASE）を git archive して固定する。当該 sha が無ければ停止する（HEAD へのフォールバックなし）。実行時の HEAD は current_head として記録のみ行う。
+- run_ab_sme_cpu.sh の終了コード（M4 Max: env_info.txt の run_ab_exit・GB10: rt_result.txt の run_ab rc）が 0 でない、または記録がない系列は、部分データから ADOPT／REJECT／pass を出さず undetermined（判定不能）とする。
+- GB10 の RT 異常終了行は、コンパイル失敗と終了状態が 101 以外の `process didn't exit successfully` に限る。cargo の通常のテスト失敗フッタ（error: test failed・exit status: 101）は異常終了に数えず、§9 の既知 FAIL 1 件のみなら pass とする。
+- M4 Max の R4 系列は、load_gate_r4.log に run1..5 の `exit=0 grep_exit=0` と `series done` の全てが記録されている場合のみ R4 成立の判定に使う。32 点を解析できても、非ゼロ終了・欠損・途中終了の系列は判定不能（undetermined）とする。
+- §11 の record_only（負荷ゲート不通過）系列は ADOPT 相当だけでなく REJECT も正式判定として出さず、「REJECT（参考・record_only）」と表示する。
+
+## 14. 追記（判定の順序と収録失敗の伝播の明文化。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6njHDE への対応）
+- 候補別・GB10 の総合判定は、次の順で評価する。前段が満たされなければ後段の判定（FAIL／REJECT／ADOPT 候補／pass／後退あり）を一切出さず undetermined（判定不能）とする。§6 の「REJECT = 到達セルに 5/5 一貫の後退が 1 つでもある」は、下記 1〜2 が満たされた系列にだけ適用する（欠損セルが 1 つでもある系列の到達済みセルの後退から REJECT を出さない）。
+  1. 入力の完全性: セル集合が §2 の 10 セルと重複・欠落・未知なく一致すること（集計側の構造破綻は例外で停止する。値を推定しない）。JSONL 内の重複行・round 欠損・未知の値は当該セルを判定不能として扱う。
+  2. 判定可能性: run_ab_sme_cpu.sh の終了コード 0 と成果物収録の終了コード 0（M4 Max: env_info.txt の `run_ab_exit=0 collect_exit=0`・GB10: rt_result.txt の `run_ab rc=0`・`collect rc=0`）が記録され、GB10 では R0 が成立し、全 10 セルの記録が判定可能であること。checksum 不一致（複合判定外れ・完全一致でない）だけは FAIL の根拠として記録済みとみなす。checksum の欠損・非数値は不一致ではなく判定不能とする。
+  3. 判定: FAIL > REJECT > ADOPT 候補（GB10 は 後退あり > 後退あり相当 > pass）。§11 の record_only は REJECT／ADOPT とも参考表示にする（§13 末尾）。
+- 実行側は成果物収録（lib_trees.sh の `sme2118_collect_r1r2`）の失敗を非ゼロで伝播する。必須成果物（results/raw の 6 JSONL・load-gate ログ・compare-exit ログ・bench 直下の compare-{gemm,train,infer} の md／err）の欠損・空ファイル、およびマスク付きコピーの失敗を検出する。呼び出し側（orchestrate_m4max.sh・gb10/orchestrate_gb10.sh）は戻り値を確認して終了コードを記録し、非ゼロなら停止する（R4 のマスク収録失敗も同様）。M4 Max 側は pipefail を有効にする。
+- R4 ログは 16 格子点 x {NEON, SME} の 32 点を重複・欠落・未知なくちょうど 1 回ずつ含む run のみ有効とする（重複行が後勝ちで 32 件に見える場合を含めて無効）。
+- 検出範囲: 上記は成果物の存在・非空・コピー成否・終了コード記録・セルの件数と集合の整合の検査であり、JSONL 内の値の妥当性（計測が正しく行われたか）を保証するものではない。値の検証は compare_gemm_ab.py の判定に委ねる。
+- 追記（入力処理の異常の扱い。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nk4YH への対応）: 集計（aggregate.py）の入力処理が検出した異常は、警告として出すだけのものも含めてすべて P-CELLS 不成立（判定不能）とする。対象は、compare_gemm_ab.py の load_rows が不正行を読み飛ばしたときの警告と、aggregate.py の scan_jsonl_strict が JSONL の各行で検出するもの（JSON として読めない行・重複キー・NaN／Infinity リテラル・非有限値・型不正・bench-common の Record::to_json_line が CPU の gemm／train／infer で出すキー集合との不一致〈未知のキー、mode・gemm の parity 等の欠損〉・framework／task／device／mode の想定外の値）。有効な 5 行が残るセルがあっても、異常を含む系列からは FAIL／REJECT／ADOPT 候補／後退あり／pass を出さない。checksum の NaN は不一致（FAIL）ではなく値不正として扱う。
+- 上記追記の検出範囲: 行の構文・キー集合・型・有限性・重複の検査までであり、計測値そのものが正しく測られたか（外れ値・環境要因）は保証しない。
+
+## 15. 追記（判定不能条件の列挙と単一の前提ゲート。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nj1Wj・PRRT_kwDOTuUCJc6nj-IA への対応）
+- §6・§8 の総合判定（FAIL／REJECT／ADOPT 候補／後退あり／後退あり相当／pass）は、次の前提がすべて成立した系列にだけ出す。1 つでも不成立（非ゼロ終了・記録なし・内容不一致）なら undetermined（判定不能）とし、不成立の前提をすべて理由として併記する。集計（aggregate.py）はこの前提を 1 か所（preconditions）で評価し、判定はその結果が空のときにだけ返す。
+  - P-TREE（§1・§13）: ツリーの記録（patch_sha256.txt の head が登録 sha・tree_verify.txt の成功記録・tree_diff.txt が mod.rs の 1 件のみ・gate_constant.txt の定数 2 行が候補 K どおり）が揃っていること。
+  - P-RUNAB（§13）: run_ab_sme_cpu.sh の終了コード 0 の記録。
+  - P-COLLECT（§14）: 成果物収録の終了コード 0 の記録。
+  - P-CELLS（§8・§14）: 全 10 セルが判定可能であること（JSONL 欠損・round 欠損・重複行・値不正・checksum の欠損／非数値はいずれも判定不能）。セル集合そのものの重複・欠落・未知は §14 のとおり例外で停止する。
+  - P-R4-BASE・P-R4-EXEC・P-R4-LOG（M4 Max。§3・§13・§14）: R4 は候補共通の 1 系列であり、その登録 sha 固定の記録（r4_head.txt）・5 run 全ての終了コード 0 と `series done`・5 run 全てが 32 点をちょうど 1 回ずつ含むことを、**全候補の総合判定**の前提とする。確認できなければ R1 由来の REJECT／FAIL も出さず全候補を undetermined とする（R4 の不成立を R4 成立欄だけに閉じ、R1 の REJECT／FAIL を R4 と独立に出していた従前の実装はこれで置き換える）。§6 の AC1 直接判定欄は R4 を使わないため R4 系の前提は課さず、それ以外の前提（P-TREE・P-RUNAB・P-COLLECT・P-CELLS）が不成立なら「判定不能」と表示する。
+  - P-R0（GB10。§8）: R0 成立。
+  - P-RT（GB10。§9）: RT の判定記録（rt_result.txt の rt_verdict 行）があること。記録がない場合は「後退あり相当」ではなく判定不能とする（§14 の「欠損は不一致ではなく判定不能」と同じ扱い）。
+- 前提ではなく判定の修飾として扱うもの: §11 の record_only（REJECT／ADOPT とも参考表示）・§8 の外側専有ゲート不通過（「参考」と明記）・§9 の既知 FAIL 以外の RT FAIL（後退あり相当）。§10 の既存 LABEL・既存ログでの停止は実行側のみの規定で、集計側の対応はない。
+- 実行側のロケール: 3 本のシェルスクリプト（lib_trees.sh・orchestrate_m4max.sh・gb10/orchestrate_gb10.sh）は LC_ALL=C を export する。§1 の指紋差分は diff の出力文言を解析せず、両ツリーのパス一覧の一致と cmp の終了コードで判定する。
+- 追記（記録ファイルの形式外の値。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nk4YH への対応）: 集計は記録の解析でも、形式外の値・重複行を成立側へ丸めず、いずれも判定不能とする。終了コードの値が 10 進の数字列でない（P-RUNAB・P-COLLECT 不成立）・head= 行が複数ある（P-TREE・P-R4-BASE 不成立）・rt_verdict 行が複数あるか値が pass／regression-suspect のどちらでもない（P-RT 不成立。後退あり相当へ丸めない）・sme_report.txt が「before／after 各 1 行で kernel_enabled: false のみ」の形でない（P-R0 不成立）・R4 ログに median_gflops= を含むのに解析できない行、m と n が異なる行、0 以下の値がある（その run を無効とし P-R4-LOG 不成立）。
+- 追記（同上）: §8・§11 の負荷ゲート・外側専有ゲートの記録の形式外（round／run 番号の重複・欠落、series= 行の重複、pass の重複や fail(reference) との混在、形式外の行）は前提ではなく修飾の側で扱い、正式ではなく参考（record_only）とする。
+- 追記（同上）: 集計側の再発防止として、aggregate.py の self-test は入力処理が異常を黙って捨てうる構文上の経路（continue・.get・except・戻り値の一部の破棄・外部モジュールの呼び出し）を AST で棚卸しし、根拠付きの一覧と件数が一致しなければ失敗する。検出範囲は aggregate.py の本番関数の構文までで、共有モジュール（compare_gemm_ab.py・cpu-gemm-sme-fmopa-1587/aggregate.py）の内部は、呼び出し側が警告と戻り値として受け取れる範囲に限る。
+- 追記（入力値の数値変換・比較。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nl21M への対応）: 入力由来の値が数値変換・比較で例外を起こす形（10**400 のような float に変換できない巨大整数・桁数上限を超える整数・bool 値・数値文字列・深すぎる入れ子・不正な UTF-8・巨大な桁数の終了コード／R4 のサイズ・有限でない R4 の値）は、集計を例外で止めず、JSONL は P-CELLS・終了コードは P-RUNAB／P-COLLECT・記録ファイルは P-TREE 等・R4 は P-R4-LOG の不成立（判定不能）とする。セル集合の重複・欠落・未知（§14 の構造破綻）は従前どおり例外で停止する。
