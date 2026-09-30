@@ -167,6 +167,16 @@ OUT="results/raw"
 mkdir -p "$OUT"
 SKIP="$OUT/skipped-2113-${DEVICE}-${LABEL}.log"
 ANY_FAILED=0
+# infer は RULE.txt で record_only（判定に使わない）。計測不備は記録するが train 判定の
+# 成否（ANY_FAILED）とは分離し、INFER_ISSUES へ計上する（PR #2457 codex P2 指摘）。
+INFER_ISSUES=0
+record_failure() { # record_failure <task>
+  if [[ "$1" == "infer" ]]; then
+    INFER_ISSUES=$((INFER_ISSUES + 1))
+  else
+    ANY_FAILED=$((ANY_FAILED + 1))
+  fi
+}
 
 # 同じ LABEL の既存系列は消去しない（RULE.txt: run の差し替え・追加起動はしない）。
 # 既存 JSONL を検出したら書き込み前に終了し、再実行は別ラベルで行わせる
@@ -253,7 +263,7 @@ run_cell() { # run_cell <arm> <task> <mode> [size]
     --out "$OUT/results-${arm}-${LABEL}-${DEVICE}-${task}.jsonl" 2>"$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp"; then
     echo "arm=$arm task=$task size=$size mode=$mode : $(cat "$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp")" >>"$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
-    ANY_FAILED=$((ANY_FAILED + 1))
+    record_failure "$task"
   else
     # 成功終了でも当該 round のセルが JSONL へ ちょうど 1 行追加されたことを確認する
     # （追記漏れ・二重追記は round 対応が崩れるため fail-closed）。
@@ -261,7 +271,7 @@ run_cell() { # run_cell <arm> <task> <mode> [size]
     if [[ ! "$before_n" =~ ^[0-9]+$ || ! "$after_n" =~ ^[0-9]+$ || "$after_n" -ne $((before_n + 1)) ]]; then
       echo "arm=$arm task=$task size=$size mode=$mode : round の記録行数が不正（before=${before_n:-NA} after=${after_n:-NA}。+1 行を期待）" >>"$SKIP"
       echo "  -> ROW COUNT MISMATCH (recorded in $SKIP)"
-      ANY_FAILED=$((ANY_FAILED + 1))
+      record_failure "$task"
     fi
   fi
   rm -f "$OUT/err-${arm}-${LABEL}-${DEVICE}.tmp"
@@ -352,7 +362,7 @@ for task in train infer; do
   done
   if [[ "$CELLS_OK" != "1" ]]; then
     echo "compare task=$task exit=NA (判定不能: 標本数不足)" | tee -a "$OUT/compare-exit-2113-${DEVICE}-${LABEL}.log"
-    ANY_FAILED=$((ANY_FAILED + 1))
+    record_failure "$task"
     continue
   fi
   python3 compare_gemm_ab.py --device "$DEVICE" --task "$task" --threshold 1.00 --per-run \
@@ -360,20 +370,34 @@ for task in train infer; do
     "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" \
     >"compare-${task}-2113-${DEVICE}-${LABEL}.md" 2>"compare-${task}-2113-${DEVICE}-${LABEL}.err"
   COMPARE_EXIT=$?
-  # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 後退セルあり（いずれも正常な
-  # 判定結果で記録のみ）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
-  # 比較処理自体の失敗であり、判定結果と区別して非ゼロ終了へ伝播する。
+  # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 後退セルあり（--require-checksum-exact
+  # 指定時は checksum 不一致・判定不能セルも 3 になる）・2 = 入力不正・空データ、それ以外
+  # （python 起動失敗等）は比較処理自体の失敗。RULE.txt「checksum 不一致は FAIL として停止」
+  # に従い、train の 3 は checksum 非完全一致・判定不能を検出したら非ゼロ終了へ伝播する
+  # （純粋な速度後退は判定結果として記録のみ）。infer は record_only のため常に記録のみ
+  # で train 判定へ影響させない（PR #2457 codex P1/P2 指摘）。
   echo "compare task=$task exit=$COMPARE_EXIT" | tee -a "$OUT/compare-exit-2113-${DEVICE}-${LABEL}.log"
   case "$COMPARE_EXIT" in
-    0 | 3) ;;
+    0) ;;
+    3)
+      if [[ "$task" != "infer" ]] &&
+        { grep -qE '不一致|複合判定 ok|判定不能' "compare-${task}-2113-${DEVICE}-${LABEL}.md" ||
+          grep -q 'checksum_exact_match=False' "compare-${task}-2113-${DEVICE}-${LABEL}.err"; }; then
+        echo "compare task=$task: checksum 不一致または判定不能（exit=3。RULE.txt により FAIL）" >>"$SKIP"
+        ANY_FAILED=$((ANY_FAILED + 1))
+      fi
+      ;;
     *)
       echo "compare task=$task: 比較不能（exit=$COMPARE_EXIT）。$(tail -3 "compare-${task}-2113-${DEVICE}-${LABEL}.err" | tr '\n' ' ')" >>"$SKIP"
-      ANY_FAILED=$((ANY_FAILED + 1))
+      record_failure "$task"
       ;;
   esac
 done
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
+if [[ "$INFER_ISSUES" -gt 0 ]]; then
+  echo "note: infer(record_only) に計測不備 ${INFER_ISSUES} 件（train 判定とは分離。詳細は $SKIP）" >&2
+fi
 if [[ "$ANY_FAILED" -gt 0 ]]; then
   echo "FAILED: $ANY_FAILED run(s) failed; see $SKIP" >&2
   exit 1
