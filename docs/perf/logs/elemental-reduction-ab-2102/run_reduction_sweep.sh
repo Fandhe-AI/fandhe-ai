@@ -3,7 +3,7 @@
 # 起動し、生ログ run1..5.log と env_info.txt を出力先へ保存する。
 # 規則の正は `elemental-reduction-threshold-2101/RULE.txt`（計測コマンド・5 プロセス・
 # RAYON_NUM_THREADS 未設定）と `RULE.txt`（本ディレクトリ。集計は aggregate_sweep.py）。
-# 上書き禁止（出力先に既存ファイルがあれば停止。run の差し替え・追加起動はしない）。
+# 上書き禁止（出力先に既存ファイルがあれば停止。判定は GNU/BSD 両 find で動く POSIX 形〈-quit 不使用〉。run の差し替え・追加起動はしない）。
 #
 # 使い方: bash run_reduction_sweep.sh <machine-label> <絶対パスの出力先>
 #   例: bash run_reduction_sweep.sh m4max <repo>/docs/perf/logs/elemental-reduction-threshold-2101/m4max
@@ -20,7 +20,7 @@ if [[ -z "$OUTDIR" || "$OUTDIR" != /* ]]; then
   echo "error: outdir must be an absolute path (got: ${OUTDIR:-empty})" >&2
   exit 1
 fi
-if [[ -d "$OUTDIR" ]] && [[ -n "$(find "$OUTDIR" -mindepth 1 -maxdepth 1 ! -name README.md -print -quit)" ]]; then
+if [[ -d "$OUTDIR" ]] && [[ -n "$(find "$OUTDIR" -mindepth 1 -maxdepth 1 ! -name README.md -print | head -n 1)" ]]; then
   echo "error: $OUTDIR に既存ファイルがあります。上書き禁止のため別の出力先を使ってください" >&2
   exit 1
 fi

@@ -405,6 +405,27 @@ for task in gemm train infer; do
     ANY_FAILED=$((ANY_FAILED + 1))
     continue
   fi
+  # checksum 完全一致の独立確認（RULE.txt: checksum 不一致は機構の不具合として FAIL。
+  # ADOPT／REJECT に数えず停止）。compare_gemm_ab.py --require-checksum-exact は性能後退と
+  # checksum 不一致を同じ終了コード 3 で返し区別できないため、比較の前に JSONL から
+  # セル（mode × size）ごとに before・after 全行の checksum が数値かつ完全一致であることを
+  # 確認し、不一致・欠損・検査不能なら比較へ進まず FAIL として停止する（fail-closed。PR #2451 codex P1 指摘）。
+  CK_BAD="$(jq -rs '
+      [.[] | select(.device == $dev)]
+      | group_by([(.mode // "fresh"), (.size // "NA" | tostring)])
+      | map(select(
+          ([.[].checksum] | (map(type == "number") | all) | not)
+          or ([.[].checksum] | unique | length) != 1))
+      | map("mode=\(.[0].mode // "fresh") size=\(.[0].size // "NA")")
+      | join(", ")' --arg dev "$DEVICE" \
+    "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" 2>/dev/null)"
+  CK_RC=$?
+  if [[ "$CK_RC" -ne 0 || -n "$CK_BAD" ]]; then
+    echo "compare task=$task: FAIL（checksum 完全一致の確認に失敗: ${CK_BAD:-検査不能 jq exit=$CK_RC}。機構の不具合として ADOPT／REJECT に数えず停止）" >>"$SKIP"
+    echo "compare task=$task exit=NA (FAIL: checksum 不一致。性能判定へ進まない)" | tee -a "$OUT/compare-exit-2102-${DEVICE}-${LABEL}.log"
+    ANY_FAILED=$((ANY_FAILED + 1))
+    continue
+  fi
   SIZES_ARGS=()
   [[ "$task" == gemm ]] && SIZES_ARGS=(--sizes large)
   python3 compare_gemm_ab.py --device "$DEVICE" --task "$task" --threshold 1.00 --per-run \
@@ -412,8 +433,8 @@ for task in gemm train infer; do
     "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" \
     >"compare-${task}-2102-${DEVICE}-${LABEL}.md" 2>"compare-${task}-2102-${DEVICE}-${LABEL}.err"
   COMPARE_EXIT=$?
-  # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 後退セルあり（いずれも正常な
-  # 判定結果で記録のみ）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
+  # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 後退セルあり（checksum は上で
+  # 独立確認済みのため、ここでの 3 は性能後退のみ。いずれも正常な判定結果で記録のみ）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
   # 比較処理自体の失敗であり、判定結果と区別して非ゼロ終了へ伝播する。
   echo "compare task=$task exit=$COMPARE_EXIT" | tee -a "$OUT/compare-exit-2102-${DEVICE}-${LABEL}.log"
   case "$COMPARE_EXIT" in
