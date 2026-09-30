@@ -25,7 +25,7 @@
 | `orchestrate_m4max.sh` | M4 Max 用（`r4`・`r1 <K>`・`all`・`--dry-run`） |
 | `gb10/orchestrate_gb10.sh` | GB10 用（`<K>`・`--dry-run`）。R0 → RT → R1／R2 |
 | `selftest_collect.sh` | `lib_trees.sh` の self-test（収録関数の欠損・空・コピー失敗での非ゼロ、指紋差分とツリー作成が非 C ロケール・翻訳された diff の下でも同じ結果になること。実機不要。`bash selftest_collect.sh`） |
-| `aggregate.py` | 集計（python3 標準ライブラリのみ・`--self-test` 付き）。`aggregate.md` を生成。判定不能条件は `preconditions` の 1 か所で評価する（RULE.txt §15） |
+| `aggregate.py` | 集計（python3 標準ライブラリのみ・`--self-test` 付き）。`aggregate.md` を生成。判定不能条件は `preconditions` の 1 か所で評価する（RULE.txt §15）。入力処理が検出した異常（警告を含む）は捨てずに前提不成立へ写像する（RULE.txt §14・§15 追記） |
 | （実測時に生成）`m4max/`・`gb10/k{K}/` | 生ログ・JSONL・compare 表・load_gate・env_info（マスク済み） |
 
 ### パッチ（基準 main HEAD `0b25525fa4026b951021a5d0da3a9d613b507502`）
@@ -92,15 +92,20 @@ verdict は実測後に限り更新する。定数の切替・本番化の判断
 | P-TREE | 両方 | `patch_sha256.txt` の head が登録 sha・`tree_verify.txt` の成功記録・`tree_diff.txt` が mod.rs の 1 件のみ・`gate_constant.txt` の定数 2 行が候補 K どおり | 課す |
 | P-RUNAB | 両方 | `run_ab_sme_cpu.sh` の終了コード 0 の記録（`env_info.txt` の `run_ab_exit=`・`rt_result.txt` の `run_ab rc=`） | 課す |
 | P-COLLECT | 両方 | 成果物収録の終了コード 0 の記録（`collect_exit=`・`collect rc=`） | 課す |
-| P-CELLS | 両方 | 全 10 セルが判定可能（JSONL 欠損・round 欠損・重複行・値不正・checksum の欠損／非数値なし） | 課す |
+| P-CELLS | 両方 | 全 10 セルが判定可能（JSONL 欠損・round 欠損・重複行・値不正・checksum の欠損／非数値なし）かつ入力処理の異常なし（`load_rows` の警告・`scan_jsonl_strict` の検出が 0 件） | 課す |
 | P-R4-BASE・P-R4-EXEC・P-R4-LOG | M4 Max | R4（候補共通の 1 系列）の `r4_head.txt` が登録 sha・5 run 全て `exit=0 grep_exit=0` と `series done`・5 run 全てが 32 点をちょうど 1 回ずつ含む。不成立なら全候補が undetermined | 課さない（AC1 欄は R4 を使わない） |
 | P-R0 | GB10 | R0 成立 | - |
 | P-RT | GB10 | `rt_result.txt` の `rt_verdict` 記録 | - |
 
-- 前提ではなく判定の修飾として扱うもの: 負荷ゲート不通過（record_only）・外側専有ゲート不通過（参考）・RT の既知 FAIL 以外（後退あり相当）。
+- 前提ではなく判定の修飾として扱うもの: 負荷ゲート不通過（record_only）・外側専有ゲート不通過（参考）・RT の既知 FAIL 以外（後退あり相当）。ゲート記録の形式外（番号の重複・欠落、`series=` 行の重複、`pass` の重複や `fail(reference)` との混在）は正式にせず参考側へ倒す。
+- **入力処理が検出した異常（警告を含む）はすべて前提不成立として扱う**（RULE.txt §14・§15 追記。PRRT_kwDOTuUCJc6nk4YH）:
+  - JSONL: `compare_gemm_ab.py` の `load_rows` が不正行を読み飛ばしたときの警告と、`aggregate.py` の `scan_jsonl_strict` が各行で検出するもの（壊れた行・重複キー・`NaN`／`Infinity`・非有限値・型不正・`Record::to_json_line` のキー集合との不一致〈未知キー、`mode`・gemm の `parity_*` 等の欠損〉・framework／task／device／mode の想定外の値）は P-CELLS 不成立。有効な 5 行が残るセルがあっても判定を出さない。checksum の `NaN` は FAIL ではなく判定不能。
+  - 記録ファイル: 終了コードの値が数字列でない（P-RUNAB・P-COLLECT）・`head=` 行の重複（P-TREE・P-R4-BASE）・`rt_verdict` の重複や未知の値（P-RT。後退あり相当へ丸めない）・`sme_report.txt` の形の逸脱（P-R0）・R4 ログの解析できない `median_gflops=` 行／m と n の不一致／0 以下の値（P-R4-LOG）。
+  - 共有モジュール（`compare_gemm_ab.py`・`cpu-gemm-sme-fmopa-1587/aggregate.py`）は変更せず、呼び出し側で警告と戻り値を受け取って写像する。
+  - 再発防止: `--self-test` の `_check_input_handling` が本番関数の AST を棚卸しし、`continue`・`.get`・`except`・戻り値の一部の破棄（`rows, _ = ...`）・外部モジュールの使用が根拠付きの一覧（`SILENT_SITE_INVENTORY`・`EXTERNAL_USES`・`ANOMALY_RETURNING`）と一致しなければ失敗する。指摘の形（警告を `_` で捨てる・`except` で既定値に落とす）を差し込んだソースで失敗することも負のプローブで確かめる。
 - 実行側は成果物収録（必須成果物の欠損・空・コピー失敗）を非ゼロで返し、`env_info.txt` の `collect_exit=`（M4 Max）・`rt_result.txt` の `collect rc=`（GB10）に記録する。
-- 検出範囲は記録の存在・非空・終了コード・記録内容の一致・セル集合の整合まで。計測値そのものの妥当性は保証しない。
-- 検証: `python3 aggregate.py --self-test`（条項ごとに 1 条項だけを破った記録で undetermined になることを、FAIL／REJECT／ADOPT 候補・後退あり／後退あり相当／pass の各基準系列で確認する）・`bash selftest_collect.sh`（非 C ロケールの既定は `C.UTF-8`。macOS では存在しないため `SME2118_SELFTEST_LOCALE=ja_JP.UTF-8` を渡す）。
+- 検出範囲は記録の存在・非空・終了コード・記録内容の一致・セル集合の整合と、JSONL 行の構文・キー集合・型・有限性・重複まで。計測値そのものの妥当性（外れ値・環境要因）は保証しない。AST の棚卸しは `aggregate.py` の本番関数の構文上の経路までで、共有モジュールの内部は呼び出し側が警告と戻り値として受け取れる範囲に限る。
+- 検証: `python3 aggregate.py --self-test`（条項ごとに 1 条項だけを破った記録で undetermined になることを、FAIL／REJECT／ADOPT 候補・後退あり／後退あり相当／pass の各基準系列で確認する。入力異常の条項〈壊れた JSON 行・型不正・checksum の NaN・非有限値・未知キー・重複キー・mode 欠損・gemm の parity 欠損・記録ファイルの形式外〉を含む。コミット済みの実データ〈#2053 の GB10 R1／R2・#1978 の R4〉を異常なしで読めることも正のプローブで確認する）・`bash selftest_collect.sh`（非 C ロケールの既定は `C.UTF-8`。macOS では存在しないため `SME2118_SELFTEST_LOCALE=ja_JP.UTF-8` を渡す）。
 
 ## 注意
 

@@ -98,6 +98,8 @@ K=64 は現行定数のベースラインであり、イシュー本文の候補
 - 実行側は成果物収録（lib_trees.sh の `sme2118_collect_r1r2`）の失敗を非ゼロで伝播する。必須成果物（results/raw の 6 JSONL・load-gate ログ・compare-exit ログ・bench 直下の compare-{gemm,train,infer} の md／err）の欠損・空ファイル、およびマスク付きコピーの失敗を検出する。呼び出し側（orchestrate_m4max.sh・gb10/orchestrate_gb10.sh）は戻り値を確認して終了コードを記録し、非ゼロなら停止する（R4 のマスク収録失敗も同様）。M4 Max 側は pipefail を有効にする。
 - R4 ログは 16 格子点 x {NEON, SME} の 32 点を重複・欠落・未知なくちょうど 1 回ずつ含む run のみ有効とする（重複行が後勝ちで 32 件に見える場合を含めて無効）。
 - 検出範囲: 上記は成果物の存在・非空・コピー成否・終了コード記録・セルの件数と集合の整合の検査であり、JSONL 内の値の妥当性（計測が正しく行われたか）を保証するものではない。値の検証は compare_gemm_ab.py の判定に委ねる。
+- 追記（入力処理の異常の扱い。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nk4YH への対応）: 集計（aggregate.py）の入力処理が検出した異常は、警告として出すだけのものも含めてすべて P-CELLS 不成立（判定不能）とする。対象は、compare_gemm_ab.py の load_rows が不正行を読み飛ばしたときの警告と、aggregate.py の scan_jsonl_strict が JSONL の各行で検出するもの（JSON として読めない行・重複キー・NaN／Infinity リテラル・非有限値・型不正・bench-common の Record::to_json_line が CPU の gemm／train／infer で出すキー集合との不一致〈未知のキー、mode・gemm の parity 等の欠損〉・framework／task／device／mode の想定外の値）。有効な 5 行が残るセルがあっても、異常を含む系列からは FAIL／REJECT／ADOPT 候補／後退あり／pass を出さない。checksum の NaN は不一致（FAIL）ではなく値不正として扱う。
+- 上記追記の検出範囲: 行の構文・キー集合・型・有限性・重複の検査までであり、計測値そのものが正しく測られたか（外れ値・環境要因）は保証しない。
 
 ## 15. 追記（判定不能条件の列挙と単一の前提ゲート。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nj1Wj・PRRT_kwDOTuUCJc6nj-IA への対応）
 - §6・§8 の総合判定（FAIL／REJECT／ADOPT 候補／後退あり／後退あり相当／pass）は、次の前提がすべて成立した系列にだけ出す。1 つでも不成立（非ゼロ終了・記録なし・内容不一致）なら undetermined（判定不能）とし、不成立の前提をすべて理由として併記する。集計（aggregate.py）はこの前提を 1 か所（preconditions）で評価し、判定はその結果が空のときにだけ返す。
@@ -110,3 +112,6 @@ K=64 は現行定数のベースラインであり、イシュー本文の候補
   - P-RT（GB10。§9）: RT の判定記録（rt_result.txt の rt_verdict 行）があること。記録がない場合は「後退あり相当」ではなく判定不能とする（§14 の「欠損は不一致ではなく判定不能」と同じ扱い）。
 - 前提ではなく判定の修飾として扱うもの: §11 の record_only（REJECT／ADOPT とも参考表示）・§8 の外側専有ゲート不通過（「参考」と明記）・§9 の既知 FAIL 以外の RT FAIL（後退あり相当）。§10 の既存 LABEL・既存ログでの停止は実行側のみの規定で、集計側の対応はない。
 - 実行側のロケール: 3 本のシェルスクリプト（lib_trees.sh・orchestrate_m4max.sh・gb10/orchestrate_gb10.sh）は LC_ALL=C を export する。§1 の指紋差分は diff の出力文言を解析せず、両ツリーのパス一覧の一致と cmp の終了コードで判定する。
+- 追記（記録ファイルの形式外の値。判定規則・閾値は不変。PR #2465 レビュー指摘 PRRT_kwDOTuUCJc6nk4YH への対応）: 集計は記録の解析でも、形式外の値・重複行を成立側へ丸めず、いずれも判定不能とする。終了コードの値が 10 進の数字列でない（P-RUNAB・P-COLLECT 不成立）・head= 行が複数ある（P-TREE・P-R4-BASE 不成立）・rt_verdict 行が複数あるか値が pass／regression-suspect のどちらでもない（P-RT 不成立。後退あり相当へ丸めない）・sme_report.txt が「before／after 各 1 行で kernel_enabled: false のみ」の形でない（P-R0 不成立）・R4 ログに median_gflops= を含むのに解析できない行、m と n が異なる行、0 以下の値がある（その run を無効とし P-R4-LOG 不成立）。
+- 追記（同上）: §8・§11 の負荷ゲート・外側専有ゲートの記録の形式外（round／run 番号の重複・欠落、series= 行の重複、pass の重複や fail(reference) との混在、形式外の行）は前提ではなく修飾の側で扱い、正式ではなく参考（record_only）とする。
+- 追記（同上）: 集計側の再発防止として、aggregate.py の self-test は入力処理が異常を黙って捨てうる構文上の経路（continue・.get・except・戻り値の一部の破棄・外部モジュールの呼び出し）を AST で棚卸しし、根拠付きの一覧と件数が一致しなければ失敗する。検出範囲は aggregate.py の本番関数の構文までで、共有モジュール（compare_gemm_ab.py・cpu-gemm-sme-fmopa-1587/aggregate.py）の内部は、呼び出し側が警告と戻り値として受け取れる範囲に限る。

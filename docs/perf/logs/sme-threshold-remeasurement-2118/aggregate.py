@@ -15,6 +15,11 @@
     返す関数はこの 2 つ（と RT 部分判定 `rt_verdict`）に限り、self-test が AST で照合する。
   - 前提 ID と RULE.txt 条項の対応は `PRECONDITIONS`、条項ごとの self-test ケースは
     `CLAUSE_CASES`（条項 ID は `RULE_CLAUSE_IDS`）に持つ。
+  - 入力処理が検出した異常（`_CMP.load_rows` の警告と、本ファイルの `scan_jsonl_strict` が見つけた
+    壊れた行・型不正・非有限値・重複キー・未知／欠損キー）は捨てずに series["input_anomalies"] へ集め、
+    preconditions が P-CELLS 不成立として扱う（RULE.txt §14・§15 追記）。記録ファイルの解析関数
+    （終了コード・rt_verdict・R0・head・R4 ログ）も、形式外の値・重複行を「成立」に丸めず不成立か
+    記録なしとして返す。入力処理の握り潰し経路は self-test の `_check_input_handling` が AST で棚卸しする。
 
 再利用（フォークしない）:
   - `../cpu-gemm-sme-fmopa-1587/aggregate.py` の `parse`／`candidates`（R4 の
@@ -34,8 +39,11 @@
 使い方: aggregate.py [--self-test] [<base_dir>] > aggregate.md
 """
 import ast
+import contextlib
 import importlib.util
+import io
 import json
+import math
 import os
 import re
 import shutil
@@ -96,8 +104,8 @@ PRECONDITIONS = (
      "登録 sha 固定・指紋差分 mod.rs 1 件・定数 2 行・成功記録（patch_sha256／tree_diff／gate_constant／tree_verify）"),
     ("P-RUNAB", ("m4max", "gb10"), True, "§13", "run_ab_sme_cpu.sh の終了コード 0 の記録"),
     ("P-COLLECT", ("m4max", "gb10"), True, "§14", "成果物収録の終了コード 0 の記録"),
-    ("P-CELLS", ("m4max", "gb10"), True, "§8・§14",
-     "全 10 セルが判定可能（JSONL・round 欠損・重複行・値不正・checksum 欠損／非数値なし）"),
+    ("P-CELLS", ("m4max", "gb10"), True, "§8・§14・§15",
+     "全 10 セルが判定可能（JSONL・round 欠損・重複行・値不正・checksum 欠損／非数値なし）かつ入力処理の異常なし"),
     ("P-R4-BASE", ("m4max",), False, "§13・§15", "R4 の登録 sha 固定の記録（r4_head.txt）"),
     ("P-R4-EXEC", ("m4max",), False, "§13", "R4 の 5 run 全て exit=0 grep_exit=0 と series done"),
     ("P-R4-LOG", ("m4max",), False, "§14", "R4 の 5 run 全てが 32 点をちょうど 1 回ずつ含む"),
@@ -130,12 +138,31 @@ RULE_CLAUSE_IDS = (
     "§8/P-R0:R0 不成立",
     "§8/P-R0:R0 記録なし",
     "§9/P-RT:rt_verdict 記録なし",
+    # §14・§15 追記（PRRT_kwDOTuUCJc6nk4YH）: 入力処理が検出した異常は前提不成立
+    "§14/P-CELLS:壊れた JSON 行",
+    "§14/P-CELLS:型不正の行",
+    "§14/P-CELLS:checksum が NaN",
+    "§14/P-CELLS:非有限値",
+    "§14/P-CELLS:未知のキー",
+    "§14/P-CELLS:重複キー",
+    "§14/P-CELLS:mode 欠損",
+    "§14/P-CELLS:gemm の parity 欠損",
+    "§15/P-TREE:head 行の重複",
+    "§15/P-RUNAB:終了コードの値不正",
+    "§15/P-COLLECT:終了コードの値不正",
+    "§15/P-R4-BASE:r4_head の head 行の重複",
+    "§15/P-R4-LOG:R4 の解析不能行",
+    "§15/P-R4-LOG:R4 の m と n の不一致",
+    "§15/P-R4-LOG:R4 の非正値",
+    "§15/P-R0:sme_report の行の矛盾",
+    "§15/P-RT:rt_verdict の値不正",
+    "§15/P-RT:rt_verdict の重複",
 )
 
 # RULE.txt の各節で判定不能系の語を含む行数（self-test が RULE.txt から数えて照合する）。
 # 条項の追加・変更でずれたら、RULE_CLAUSE_IDS・CLAUSE_CASES・PRECONDITIONS を見直してから更新する。
 RULE_KEYWORD_RE = re.compile(r"判定不能|undetermined|停止|中止|欠損|非ゼロ|前提|記録なし|記録がない")
-RULE_KEYWORD_LINES = {"1": 1, "5": 1, "6": 1, "7": 1, "8": 2, "10": 1, "13": 3, "14": 4, "15": 5}
+RULE_KEYWORD_LINES = {"1": 1, "5": 1, "6": 1, "7": 1, "8": 2, "10": 1, "13": 3, "14": 5, "15": 7}
 
 
 def reached(k, task):
@@ -179,7 +206,7 @@ def is_checksum_fail(c):
     checksum の欠損・非数値は「判定不能」であり FAIL に数えない（記録の欠損と不一致を混同しない）。"""
     if c["status"] == "ok":
         return not c["exact"]
-    return (c.get("reason") or "").startswith(CHECKSUM_FAIL_REASON)
+    return (c["reason"] or "").startswith(CHECKSUM_FAIL_REASON)
 
 
 def validate_cells(cells):
@@ -223,8 +250,13 @@ def preconditions(series, scope="overall"):
     need("P-RUNAB", series["run_ab"], "run_ab_sme_cpu.sh の終了コード 0")
     need("P-COLLECT", series["collect"], "成果物収録の終了コード 0")
     bad = [c for c in series["cells"] if not (c["status"] == "ok" or is_checksum_fail(c))]
-    need("P-CELLS", not bad, "全 10 セル判定可能。判定不能セル: "
-         + ("、".join(f"{_cell_name(c)}={c['reason']}" for c in bad) or "なし"))
+    # 入力処理（load_rows の警告・scan_jsonl_strict）が検出した異常。行を読み飛ばした結果として有効な
+    # 5 行が残っていても、値不正を含む系列から判定を出さない（RULE.txt §14・§15 追記。PRRT_kwDOTuUCJc6nk4YH）
+    anomalies = series["input_anomalies"]
+    need("P-CELLS", not bad and not anomalies, "全 10 セル判定可能かつ入力処理の異常なし。判定不能セル: "
+         + ("、".join(f"{_cell_name(c)}={c['reason']}" for c in bad) or "なし")
+         + f"。入力処理の異常 {len(anomalies)} 件"
+         + ("".join(f"／{a}" for a in anomalies[:3]) + ("／ほか" if len(anomalies) > 3 else "")))
     if machine == "m4max":
         r4 = series["r4"]
         need("P-R4-BASE", r4["base"], "R4 の r4_head.txt が登録 sha")
@@ -233,7 +265,8 @@ def preconditions(series, scope="overall"):
              f"R4 の 32 点ちょうど 1 回ずつの run が 5 本（有効 {r4['valid_runs']} 本）")
     else:
         need("P-R0", series["r0"], "R0（両腕 kernel_enabled: false）")
-        need("P-RT", True if series["rt"] in ("pass", "regression-suspect") else None, "RT の rt_verdict 記録")
+        # rt は "pass"／"regression-suspect"／None（記録なし）／RT_INVALID（値不正・重複行）
+        need("P-RT", None if series["rt"] is None else series["rt"] in RT_VERDICTS, "RT の rt_verdict 記録")
     return reasons
 
 
@@ -296,18 +329,121 @@ def rt_verdict(fail_names):
     return "pass" if not others else "regression-suspect"
 
 
+# --- 入力処理の異常（RULE.txt §14・§15 追記。P-CELLS）---
+# bench-common/src/lib.rs の Record::to_json_line が CPU の gemm／train／infer で emit するキー（正本は同関数。
+# run_ab_sme_cpu.sh は --tf32／--managed／--device-checksum／--graph／--readout／--metal-split-k／--pinned-h2d を
+# 渡さないため、それらのキーは出ない）。コミット済みの実データ（1587/gb10/attribution/r1r2-p1）で self-test が照合する。
+# 型: "str"・"int"（bool 以外の int）・"num"（bool 以外の有限の int/float）・"num|null"（parity の診断値は null あり）。
+ROW_KEYS_COMMON = {"framework": "str", "version": "str", "task": "str", "device": "str", "size": "int",
+                   "median_s": "num", "q1_s": "num", "q3_s": "num", "checksum": "num", "warmup": "int",
+                   "iters": "int", "mode": "str"}
+ROW_KEYS_BY_TASK = {
+    "gemm": {"gflops": "num", "parity_total": "int", "parity_fail_count": "int", "parity_max_abs_err": "num|null",
+             "parity_max_rel_err": "num|null", "parity_scaled_abs_bound": "num|null",
+             "parity_scaled_abs_rescued": "int"},
+    "train": {},
+    "infer": {"throughput_per_s": "num"},
+}
+ROW_KEYS_REUSE = {"init_s": "num"}  # reuse 行だけが持つ（fresh 行は emit しない）
+ROW_MODES = ("fresh", "reuse")
+
+
+class _RowAnomaly(ValueError):
+    """scan_jsonl_strict の json.loads フックが投げる（重複キー・NaN／Infinity リテラル）。"""
+
+
+def _reject_dup_keys(pairs):
+    keys = [k for k, _ in pairs]
+    dup = sorted({k for k in keys if keys.count(k) > 1})
+    if dup:
+        raise _RowAnomaly(f"重複キー {dup}")
+    return dict(pairs)
+
+
+def _reject_constant(name):
+    raise _RowAnomaly(f"非有限値リテラル {name}")
+
+
+def _value_ok(kind, v):
+    if kind == "str":
+        return isinstance(v, str)
+    if kind == "int":
+        return isinstance(v, int) and not isinstance(v, bool)
+    if kind == "num|null" and v is None:
+        return True
+    # "num"・"num|null": 1e400 のような巨大値は json.loads が例外なく inf にするため有限性まで見る
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def scan_jsonl_strict(path, task):
+    """JSONL 1 本を行ごとに厳密検査し、異常の説明（ファイル名:行番号 付き）のリストを返す。
+
+    `_CMP.load_rows` は不正行を警告付きでスキップし、未知キー・`mode` の欠損（fresh 扱い）・重複キー
+    （後勝ち）・NaN リテラル（Python の json は受理する。Rust の `{:.6}` は NaN を `NaN` と出す）を
+    黙って受け入れる。共有モジュールは変えずに、呼び出し側でここに集めて preconditions の P-CELLS へ渡す。
+    空行はデータを持たないため数えない（load_rows と同じ）。
+    """
+    name = os.path.basename(path)
+    anomalies = []
+    with open(path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            where = f"{name}:{lineno}"
+            try:
+                obj = json.loads(line, object_pairs_hook=_reject_dup_keys, parse_constant=_reject_constant)
+            except ValueError as e:  # json.JSONDecodeError と _RowAnomaly（どちらも ValueError）
+                anomalies.append(f"{where}: JSON として読めない（{e}）")
+                continue
+            if not isinstance(obj, dict):
+                anomalies.append(f"{where}: JSON object ではない")
+                continue
+            schema = dict(ROW_KEYS_COMMON, **ROW_KEYS_BY_TASK[task])
+            if obj.get("mode") == "reuse":
+                schema.update(ROW_KEYS_REUSE)
+            missing = sorted(set(schema) - set(obj))
+            unknown = sorted(set(obj) - set(schema))
+            if missing or unknown:
+                anomalies.append(f"{where}: キー集合が不一致（欠損 {missing}・未知 {unknown}）")
+            bad = sorted(k for k, kind in schema.items() if k in obj and not _value_ok(kind, obj[k]))
+            if bad:
+                anomalies.append(f"{where}: 型不正または非有限の値 {bad}")
+            expect = {"framework": "fandhe-ai", "task": task, "device": "cpu"}
+            wrong = sorted(k for k, v in expect.items() if obj.get(k) != v)
+            if obj.get("mode") not in ROW_MODES:
+                wrong.append("mode")
+            if wrong:
+                anomalies.append(f"{where}: 値が想定外 {wrong}")
+    return anomalies
+
+
+def _mask_path(msg, path):
+    """load_rows の警告に入る絶対パスをファイル名へ縮める（RULE.txt §12。aggregate.md はコミットされる）。"""
+    return msg.replace(path, os.path.basename(path))
+
+
 def evaluate_series(dirpath, label):
-    """dirpath の JSONL（before/after × gemm/train/infer）を CELLS の順に判定した dict 列を返す。"""
+    """dirpath の JSONL（before/after × gemm/train/infer）を CELLS の順に判定した dict 列と、
+    入力処理が検出した異常の説明リストの組 (cells, anomalies) を返す。
+
+    anomalies は `_CMP.load_rows` の警告（不正行のスキップ）と `scan_jsonl_strict` の検出の和で、
+    呼び出し側（load_m4_series／load_gb10_series）が series["input_anomalies"] へ入れ、preconditions が
+    P-CELLS 不成立にする。有効な 5 行が残るセルでも、異常のある系列から判定を出さないため（§14・§15 追記）。
+    """
     cells = []
+    anomalies = []
     per_task = {}
     for task in ("gemm", "train", "infer"):
         paths = [os.path.join(dirpath, f"results-{arm}-{label}-cpu-{task}.jsonl") for arm in ("before", "after")]
         if not all(os.path.exists(p) for p in paths):
+            # 片腕でも欠けたタスクのセルは下のループで status=missing（JSONL 欠損）になり P-CELLS 不成立
             per_task[task] = None
             continue
         size_set = _CMP._size_set_for("cpu", "full", task)
-        b, _ = _CMP.load_rows(paths[0], device="cpu", task=task, size_set=size_set)
-        a, _ = _CMP.load_rows(paths[1], device="cpu", task=task, size_set=size_set)
+        b, b_warnings = _CMP.load_rows(paths[0], device="cpu", task=task, size_set=size_set)
+        a, a_warnings = _CMP.load_rows(paths[1], device="cpu", task=task, size_set=size_set)
+        for p, warnings in ((paths[0], b_warnings), (paths[1], a_warnings)):
+            anomalies += [f"load_rows: {_mask_path(w, p)}" for w in warnings] + scan_jsonl_strict(p, task)
         gb, ga = _CMP.group_by_cell(b), _CMP.group_by_cell(a)
         # 未知セル（RULE.txt §2 の 10 セル外）が混入していれば fail-closed（読み飛ばして判定しない）
         expected = {(s, m) for t, s, m in CELLS if t == task}
@@ -320,21 +456,26 @@ def evaluate_series(dirpath, label):
         rec = {"task": task, "size": size, "mode": mode, "reached": None, "status": "missing",
                "reason": "JSONL 欠損", "exact": False, "adopt": False, "reject": False,
                "ratios": None, "median": None}
-        pt = per_task.get(task)
+        pt = per_task[task]
         if pt is not None:
             bc, ac = pt
+            # 行の無いセルは [] を渡す。evaluate_cell が「ちょうど 5 件」を満たさず判定不能を返す（P-CELLS）
             br, ar = bc.get((size, mode), []), ac.get((size, mode), [])
             ev = _CMP.evaluate_cell(br, ar, 1.00)
             rec["status"] = ev["status"]
-            rec["reason"] = ev.get("reason")
+            rec["reason"] = ev["reason"]
             if ev["status"] == "ok":
                 ratios = _CMP.per_run_ratios(br, ar)
-                rec["ratios"] = ratios
-                rec["exact"] = bool(ev["checksum_exact_match"])
-                rec["median"] = ev["ratio"]
+                if ratios is None:
+                    # evaluate_cell が ok なら起きない想定。起きたら判定可能セルに数えない（黙って ok のまま残さない）
+                    rec["status"], rec["reason"] = "undeterminable", "run 単位の比を計算できない"
+                else:
+                    rec["ratios"] = ratios
+                    rec["exact"] = bool(ev["checksum_exact_match"])
+                    rec["median"] = ev["ratio"]
                 # 到達判定は候補 K 依存のため呼び出し側で classify する（ここでは比の記録まで）
         cells.append(rec)
-    return cells
+    return cells, anomalies
 
 
 def apply_k(cells, k):
@@ -344,7 +485,9 @@ def apply_k(cells, k):
     for c in cells:
         d = dict(c)
         d["reached"] = False if k is None else reached(k, c["task"])
-        if c["status"] == "ok" and c["ratios"] is not None:
+        if c["status"] == "ok":
+            if c["ratios"] is None:
+                raise ValueError(f"{_cell_name(c)}: status=ok なのに run 単位の比が無い（evaluate_series の不変条件違反）")
             d.update(classify_cell(d["reached"], c["ratios"]))
             d["median"] = c["median"]
         out.append(d)
@@ -353,14 +496,21 @@ def apply_k(cells, k):
 
 # --- 記録の読み込み（True=成立・False=不成立・None=記録なし）---
 
+def _five_passes(text, prefix):
+    """`<prefix>N gate=<status>` 行が N=1..5 をちょうど 1 回ずつ持ち、全て pass か（§8・§11 の正式／参考の修飾）。
+    重複行（round1 が 2 行で round5 が無い等）で 5 行に見える記録を正式にしない（異常は参考側へ倒す）。"""
+    gates = re.findall(rf"^{prefix}(\d+) gate=(\S+)", text, re.M)
+    return sorted(int(n) for n, _ in gates) == [1, 2, 3, 4, 5] and all(g == "pass" for _, g in gates)
+
+
 def load_gate_series(path):
-    """load-gate ログから正式系列（official かつ全 round pass）かを返す。ログ不在は None。"""
+    """load-gate ログから正式系列（official かつ全 round pass）かを返す。ログ不在は None。
+    `series=` の記録は run_ab_sme_cpu.sh が先頭に 1 行だけ書く。0 行・複数行・official 以外は正式にしない。"""
     if not os.path.exists(path):
         return None
     text = Path(path).read_text(encoding="utf-8")
-    official = "series=official" in text
-    gates = re.findall(r"^round\d+ gate=(\S+)", text, re.M)
-    return official and len(gates) == 5 and all(g == "pass" for g in gates)
+    official = re.findall(r"(?:^|\s)series=(\S*)", text, re.M) == ["official"]
+    return official and _five_passes(text, "round")
 
 
 def r4_runs_ok(path):
@@ -381,24 +531,32 @@ def _gate_log_official(path, prefix):
     """load-gate ログ（`<prefix>N gate=pass|...` 行）が 5/5 通過か。ログ不在は None。"""
     if not os.path.exists(path):
         return None
-    gs = re.findall(rf"^{prefix}\d+ gate=(\S+)", Path(path).read_text(encoding="utf-8"), re.M)
-    return len(gs) == 5 and all(g == "pass" for g in gs)
+    return _five_passes(Path(path).read_text(encoding="utf-8"), prefix)
 
 
 def outer_gate_official(path):
-    """GB10 外側専有ゲート（RULE.txt §8）。`start attempt=N ... pass` 行があれば正式。fail(reference)・ログ不在は参考。"""
+    """GB10 外側専有ゲート（RULE.txt §8）。gb10/orchestrate_gb10.sh は `start attempt=N ... wait` を 0 行以上書いた後、
+    `... pass` か `... fail(reference)` を 1 行書く。その形（最後の 1 行だけが pass・それ以前は全て wait）のときだけ
+    正式。fail(reference)・pass の重複・形式外の行・ログ不在は参考（異常は参考側へ倒す）。"""
     if not os.path.exists(path):
         return None
-    text = Path(path).read_text(encoding="utf-8")
-    return bool(re.search(r"^start attempt=\d+ .* pass$", text, re.M))
+    lines = [ln for ln in Path(path).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    st = [re.fullmatch(r"start attempt=\d+ .* (wait|pass|fail\(reference\))", ln) for ln in lines]
+    if not st or not all(st):
+        return False
+    status = [m.group(1) for m in st]
+    return status[-1] == "pass" and all(s == "wait" for s in status[:-1])
 
 
 def head_record_ok(path):
     """`head=<sha>` 行が登録 sha（REGISTERED_BASE）か（RULE.txt §13）。ファイル・行なしは None。"""
     if not os.path.exists(path):
         return None
-    m = re.search(r"^head=(\S+)\s*$", Path(path).read_text(encoding="utf-8"), re.M)
-    return None if m is None else m.group(1) == REGISTERED_BASE
+    heads = re.findall(r"^head=(.*)$", Path(path).read_text(encoding="utf-8"), re.M)
+    if not heads:
+        return None
+    # 複数行はどれを正とするか決められないため不成立（先頭一致で成立にしない）
+    return len(heads) == 1 and heads[0].strip() == REGISTERED_BASE
 
 
 def tree_record_ok(dirpath, k):
@@ -424,11 +582,12 @@ def tree_record_ok(dirpath, k):
 
 def _exit_record(text, pattern):
     """終了コード記録 1 件の評価。0 なら True・非ゼロなら False・記録なしは None。
-    同じ記録が複数行ある場合は、どれを正とするか決められないため不成立（False）とする（fail-closed）。"""
+    同じ記録が複数行ある場合は、どれを正とするか決められないため不成立（False）とする（fail-closed）。
+    pattern は `=` 直後の空白までを捕まえる。値が 10 進の数字列でなければ（`0x`・空・`0abc` 等）不成立。"""
     ms = re.findall(pattern, text, re.M)
     if len(ms) != 1:
         return None if not ms else False
-    return int(ms[0]) == 0
+    return re.fullmatch(r"\d+", ms[0]) is not None and int(ms[0]) == 0
 
 
 def exit_records_m4max(env_info_path):
@@ -436,7 +595,7 @@ def exit_records_m4max(env_info_path):
     if not os.path.exists(env_info_path):
         return None, None
     text = Path(env_info_path).read_text(encoding="utf-8")
-    return _exit_record(text, r"\brun_ab_exit=(\d+)"), _exit_record(text, r"\bcollect_exit=(\d+)")
+    return _exit_record(text, r"\brun_ab_exit=(\S*)"), _exit_record(text, r"\bcollect_exit=(\S*)")
 
 
 def exit_records_gb10(rt_result_path):
@@ -444,15 +603,26 @@ def exit_records_gb10(rt_result_path):
     if not os.path.exists(rt_result_path):
         return None, None
     text = Path(rt_result_path).read_text(encoding="utf-8")
-    return _exit_record(text, r"^run_ab rc=(\d+)"), _exit_record(text, r"^collect rc=(\d+)")
+    return _exit_record(text, r"^run_ab rc=(\S*)"), _exit_record(text, r"^collect rc=(\S*)")
 
 
 def parse_r4_strict(text):
     """R4 ログ 1 run 分を厳密に解析する。16 格子点 x {NEON, SME} = 32 点を重複・欠落・未知なく
     ちょうど 1 回ずつ含む場合のみ dict を返し、それ以外（重複行・欠落・未知の格子点）は None。
-    1587 の `parse` は重複行を後勝ちで潰し件数だけ 32 に見えることがあるため、行数まで照合する。"""
-    hits = [_R4.LINE.search(line.strip()) for line in text.splitlines()]
-    keys = [(m.group(1), int(m.group(2)), int(m.group(4))) for m in hits if m]
+    1587 の `parse` は重複行を後勝ちで潰し件数だけ 32 に見えることがあるため、行数まで照合する。
+    `median_gflops=` を含むのに `_R4.LINE` に合わない行（NaN・inf・壊れた行）、m と n が異なる行（LINE は n を
+    キーに使わないため別形状が同じ格子点に潰れる）、値が 0 以下の行も、読み飛ばさずに run ごと無効とする。
+    `median_gflops=` を含まない行（`test ...` の見出し・`test result:` フッタ）は R4 の値を持たないので数えない。"""
+    hits = []
+    for line in text.splitlines():
+        if "median_gflops=" not in line:
+            continue
+        m = _R4.LINE.search(line.strip())
+        if m is None or m.group(2) != m.group(3) or not re.fullmatch(r"\d+(\.\d+)?", m.group(5)) \
+                or not float(m.group(5)) > 0:
+            return None
+        hits.append(m)
+    keys = [(m.group(1), int(m.group(2)), int(m.group(4))) for m in hits]
     expected = {(v, mn, kk) for v in ("NEON", "SME") for mn in _R4.MN for kk in _R4.KS}
     if len(keys) != len(expected) or set(keys) != expected:
         return None
@@ -482,6 +652,39 @@ def load_r4(base):
             "gate": _gate_log_official(log, "run"), "base": head_record_ok(str(m4 / "r4_head.txt"))}
 
 
+RT_VERDICTS = ("pass", "regression-suspect")
+RT_INVALID = "invalid"
+
+
+def rt_record(path):
+    """GB10 の rt_result.txt の `rt_verdict=` 行（RULE.txt §9・§15 の P-RT）を読む。
+    gb10/orchestrate_gb10.sh が書く形は `rt_verdict=pass known_fail_only=...` と `rt_verdict=regression-suspect（理由）`
+    の 2 つだけ。ファイル・行なしは None（記録なし）、行が複数・値が 2 語のどちらでもない場合は RT_INVALID
+    （preconditions が P-RT 不成立にする。未知の値を「後退あり相当」へ丸めない）。"""
+    if not os.path.exists(path):
+        return None
+    vals = re.findall(r"^rt_verdict=(.*)$", Path(path).read_text(encoding="utf-8"), re.M)
+    if not vals:
+        return None
+    if len(vals) != 1:
+        return RT_INVALID
+    m = re.match(r"(pass|regression-suspect)(?=$|\s|（)", vals[0])
+    return m.group(1) if m else RT_INVALID
+
+
+def r0_record(path):
+    """GB10 の R0（RULE.txt §8・§15 の P-R0）。sme_report.txt は `before: ...`・`after: ...` の 2 行
+    （gb10/orchestrate_gb10.sh）。各腕ちょうど 1 行・その行が `kernel_enabled: false` を含み `kernel_enabled: true`
+    を含まず、他の行が無いときだけ成立。ファイルなしは None、それ以外（行の欠け・重複・矛盾）は不成立。"""
+    if not os.path.exists(path):
+        return None
+    lines = [ln for ln in Path(path).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    arms = [ln.split(":", 1)[0] for ln in lines]
+    if sorted(arms) != ["after", "before"]:
+        return False
+    return all("kernel_enabled: false" in ln and "kernel_enabled: true" not in ln for ln in lines)
+
+
 def _series_dir_present(d):
     return d.exists() and any(d.iterdir())
 
@@ -494,8 +697,9 @@ def load_m4_series(base, k, r4):
         return None
     run_ab, collect = exit_records_m4max(str(d / "env_info.txt"))
     r1_gate = load_gate_series(str(d / f"load-gate-1978-cpu-{label}.log"))
+    cells, anomalies = evaluate_series(str(d), label)
     return {
-        "machine": "m4max", "k": k, "cells": apply_k(evaluate_series(str(d), label), k),
+        "machine": "m4max", "k": k, "cells": apply_k(cells, k), "input_anomalies": anomalies,
         "tree": tree_record_ok(d, k), "run_ab": run_ab, "collect": collect, "r4": r4,
         "r1_gate": r1_gate,
         # RULE.txt §11: R4・R1 の両負荷ゲートを通過した系列だけを正式とする（不通過は record_only）
@@ -510,18 +714,13 @@ def load_gb10_series(base, k):
     d = Path(base) / "gb10" / f"k{k}"
     if not _series_dir_present(d):
         return None
-    rep = d / "sme_report.txt"
-    r0 = None if not rep.exists() else rep.read_text(encoding="utf-8").count("kernel_enabled: false") >= 2
-    rt = None
     rtf = d / "rt_result.txt"
-    if rtf.exists():
-        m = re.search(r"^rt_verdict=(\S+)", rtf.read_text(encoding="utf-8"), re.M)
-        if m:
-            rt = "pass" if m.group(1) == "pass" else "regression-suspect"
     run_ab, collect = exit_records_gb10(str(rtf))
+    cells, anomalies = evaluate_series(str(d / "r1r2"), label)
     return {
-        "machine": "gb10", "k": k, "cells": apply_k(evaluate_series(str(d / "r1r2"), label), None),
-        "tree": tree_record_ok(d, k), "run_ab": run_ab, "collect": collect, "r0": r0, "rt": rt,
+        "machine": "gb10", "k": k, "cells": apply_k(cells, None), "input_anomalies": anomalies,
+        "tree": tree_record_ok(d, k), "run_ab": run_ab, "collect": collect,
+        "r0": r0_record(str(d / "sme_report.txt")), "rt": rt_record(str(rtf)),
         "outer_gate": outer_gate_official(str(d / "load_gate_outer.log")),
         # RULE.txt §8: 外側専有ゲート不通過（またはログなし）の系列は「参考」
         "official": outer_gate_official(str(d / "load_gate_outer.log")) is True,
@@ -531,7 +730,7 @@ def load_gb10_series(base, k):
 # --- 描画 ---
 
 def _fmt_ratios(c):
-    if not c.get("ratios"):
+    if not c["ratios"]:
         return "-"
     return ", ".join(f"{x:.4f}" for x in c["ratios"])
 
@@ -627,7 +826,8 @@ def render_gb10(base):
                   None: "参考（外側ゲートログなし）"}[s["outer_gate"]]
         n = sum(1 for c in s["cells"] if c.get("all_le_1"))
         r0 = {True: "成立", False: "不成立", None: "記録なし"}[s["r0"]]
-        rows.append(f"| {k} | {r0} | {s['rt'] or '記録なし'} | {n} | {v} | {series} |")
+        rt = "記録なし" if s["rt"] is None else ("値不正" if s["rt"] == RT_INVALID else s["rt"])
+        rows.append(f"| {k} | {r0} | {rt} | {n} | {v} | {series} |")
         why = "".join(f"\n- {r}" for r in reasons)
         detail.append(f"### K={k}\n\n判定理由:{why or ' なし'}\n\n{render_cells(s['cells'])}\n")
     return "\n".join(out + rows + [""] + detail)
@@ -636,12 +836,21 @@ def render_gb10(base):
 # --- self-test 用の模擬記録 ---
 
 def _rec(task, size, mode, median, checksum=1.5, device="cpu"):
-    return {"framework": "fandhe-ai", "version": "0.9.0", "task": task, "device": device, "size": size,
-            "median_s": median, "q1_s": median, "q3_s": median, "checksum": checksum,
-            "warmup": 5, "iters": 15, "mode": mode, "parity_fail_count": 0} if task == "gemm" else {
-        "framework": "fandhe-ai", "version": "0.9.0", "task": task, "device": device, "size": size,
-        "median_s": median, "q1_s": median, "q3_s": median, "checksum": checksum,
-        "warmup": 5, "iters": 15, "mode": mode}
+    """bench-common の Record::to_json_line と同じキー集合の模擬行（ROW_KEYS_* どおり。実データとの一致は
+    self-test の正のプローブが確認する）。"""
+    r = {"framework": "fandhe-ai", "version": "0.9.0", "task": task, "device": device, "size": size,
+         "median_s": median, "q1_s": median, "q3_s": median}
+    if task == "gemm":
+        r["gflops"] = 1.0
+    if task == "infer":
+        r["throughput_per_s"] = 1.0 / median
+    r.update({"checksum": checksum, "warmup": 5, "iters": 15, "mode": mode})
+    if mode == "reuse":
+        r["init_s"] = 0.1
+    if task == "gemm":
+        r.update({"parity_total": size * size, "parity_fail_count": 0, "parity_max_abs_err": 0.0,
+                  "parity_max_rel_err": None, "parity_scaled_abs_bound": 0.0, "parity_scaled_abs_rescued": 0})
+    return r
 
 
 def _write_series(dirpath, label, ratios_by_cell, checksum_after=None):
@@ -816,6 +1025,109 @@ def _m_checksum_missing(b, m, k):
     f.write_text(json.dumps(rec) + "\n" + "".join(lines[1:]))
 
 
+def _edit_row(f, idx, edit):
+    """JSONL の idx 行目（0 始まり）を edit(行テキスト) の結果に置き換える。"""
+    lines = Path(f).read_text(encoding="utf-8").splitlines(True)
+    lines[idx] = edit(lines[idx].rstrip("\n")) + "\n"
+    Path(f).write_text("".join(lines), encoding="utf-8")
+
+
+def _edit_obj(f, idx, edit):
+    """JSONL の idx 行目を dict として edit し、json.dumps で書き戻す（NaN は `NaN` リテラルになる）。"""
+    def g(line):
+        rec = json.loads(line)
+        edit(rec)
+        return json.dumps(rec)
+    _edit_row(f, idx, g)
+
+
+# 入力処理の異常（§14 追記）。各ファイルの 0 行目は round 1 の fresh セル、gemm の 4 行目は 2048/fresh（どの基準系列でも
+# 引き金にならないセル）。いずれも有効な 5 行は残る（従前は load_rows が黙って読み飛ばし、判定が出ていた）。
+def _m_broken_json(b, m, k):
+    f = _jsonl(b, m, k, "after", "infer")
+    f.write_text(f.read_text() + '{"framework": "fandhe-ai", "task": "infer"\n')
+
+
+def _m_type_bad_row(b, m, k):
+    f = _jsonl(b, m, k, "after", "train")
+    rec = json.loads(f.read_text().splitlines()[0])
+    f.write_text(f.read_text() + json.dumps(dict(rec, size="64")) + "\n")
+
+
+def _m_nan_checksum(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "after", "infer"), 0, lambda r: r.update(checksum=float("nan")))
+
+
+def _m_nonfinite(b, m, k):
+    _edit_row(_jsonl(b, m, k, "before", "train"), 0, lambda s: s.replace('"q1_s": 1.0', '"q1_s": 1e400', 1))
+
+
+def _m_unknown_key(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "after", "infer"), 0, lambda r: r.update(metal_split_k="off"))
+
+
+def _m_dup_key(b, m, k):
+    _edit_row(_jsonl(b, m, k, "after", "infer"), 0, lambda s: s[:-1] + ', "median_s": 0.5}')
+
+
+def _m_mode_missing(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "after", "infer"), 0, lambda r: r.pop("mode"))
+
+
+def _m_gemm_parity_missing(b, m, k):
+    _edit_obj(_jsonl(b, m, k, "before", "gemm"), 4, lambda r: r.pop("parity_fail_count"))
+
+
+# 記録ファイルの形式外の値・重複行（§15 追記）。従前は先頭一致・数字の前方一致・「pass 以外は要調査」で成立側へ丸めていた
+def _m_tree_head_dup(b, m, k):
+    f = _series_dir(b, m, k) / "patch_sha256.txt"
+    f.write_text(f.read_text() + "head=" + "1" * 40 + "\n")
+
+
+def _m_runab_bad_value(b, m, k):
+    _sub(_exit_file(b, m, k), "run_ab_exit=0 " if m == "m4max" else "run_ab rc=0",
+         "run_ab_exit=0x " if m == "m4max" else "run_ab rc=0x")
+
+
+def _m_collect_bad_value(b, m, k):
+    _sub(_exit_file(b, m, k), "collect_exit=0" if m == "m4max" else "collect rc=0",
+         "collect_exit=0abc" if m == "m4max" else "collect rc=0abc")
+
+
+def _m_r4_head_dup(b, m, k):
+    f = Path(b) / "m4max" / "r4_head.txt"
+    f.write_text(f.read_text() + "head=" + "2" * 40 + "\n")
+
+
+def _m_r4_unparsable(b, m, k):
+    f = Path(b) / "m4max" / "sme_r4_grid_run3.log"
+    f.write_text(f.read_text() + "variant=SME(X) size=(256,256,64) median_gflops=NaN\n")
+
+
+def _m_r4_mn(b, m, k):
+    _sub(Path(b) / "m4max" / "sme_r4_grid_run3.log", "variant=SME(X) size=(256,256,64)", "variant=SME(X) size=(256,512,64)")
+
+
+def _m_r4_nonpositive(b, m, k):
+    _sub(Path(b) / "m4max" / "sme_r4_grid_run3.log", "variant=SME(X) size=(256,256,64) median_gflops=2.0",
+         "variant=SME(X) size=(256,256,64) median_gflops=0.000")
+
+
+def _m_r0_contradict(b, m, k):
+    (_series_dir(b, m, k) / "sme_report.txt").write_text(
+        "before: sme_report=kernel_enabled: false kernel_enabled: false\nafter: sme_report=kernel_enabled: true\n")
+
+
+def _m_rt_bad_value(b, m, k):
+    f = _series_dir(b, m, k) / "rt_result.txt"
+    f.write_text(re.sub(r"^rt_verdict=.*$", "rt_verdict=unknown", f.read_text(), flags=re.M))
+
+
+def _m_rt_dup(b, m, k):
+    f = _series_dir(b, m, k) / "rt_result.txt"
+    f.write_text(f.read_text() + "rt_verdict=pass known_fail_only=none\n")
+
+
 def _m_r4_base(b, m, k):
     _sub(Path(b) / "m4max" / "r4_head.txt", f"head={REGISTERED_BASE}", "head=" + "2" * 40)
 
@@ -878,6 +1190,24 @@ CLAUSE_CASES = {
     "§8/P-R0:R0 不成立": ("P-R0", ("gb10",), _m_r0_fail),
     "§8/P-R0:R0 記録なし": ("P-R0", ("gb10",), _m_r0_none),
     "§9/P-RT:rt_verdict 記録なし": ("P-RT", ("gb10",), _m_rt_none),
+    "§14/P-CELLS:壊れた JSON 行": ("P-CELLS", BOTH, _m_broken_json),
+    "§14/P-CELLS:型不正の行": ("P-CELLS", BOTH, _m_type_bad_row),
+    "§14/P-CELLS:checksum が NaN": ("P-CELLS", BOTH, _m_nan_checksum),
+    "§14/P-CELLS:非有限値": ("P-CELLS", BOTH, _m_nonfinite),
+    "§14/P-CELLS:未知のキー": ("P-CELLS", BOTH, _m_unknown_key),
+    "§14/P-CELLS:重複キー": ("P-CELLS", BOTH, _m_dup_key),
+    "§14/P-CELLS:mode 欠損": ("P-CELLS", BOTH, _m_mode_missing),
+    "§14/P-CELLS:gemm の parity 欠損": ("P-CELLS", BOTH, _m_gemm_parity_missing),
+    "§15/P-TREE:head 行の重複": ("P-TREE", BOTH, _m_tree_head_dup),
+    "§15/P-RUNAB:終了コードの値不正": ("P-RUNAB", BOTH, _m_runab_bad_value),
+    "§15/P-COLLECT:終了コードの値不正": ("P-COLLECT", BOTH, _m_collect_bad_value),
+    "§15/P-R4-BASE:r4_head の head 行の重複": ("P-R4-BASE", ("m4max",), _m_r4_head_dup),
+    "§15/P-R4-LOG:R4 の解析不能行": ("P-R4-LOG", ("m4max",), _m_r4_unparsable),
+    "§15/P-R4-LOG:R4 の m と n の不一致": ("P-R4-LOG", ("m4max",), _m_r4_mn),
+    "§15/P-R4-LOG:R4 の非正値": ("P-R4-LOG", ("m4max",), _m_r4_nonpositive),
+    "§15/P-R0:sme_report の行の矛盾": ("P-R0", ("gb10",), _m_r0_contradict),
+    "§15/P-RT:rt_verdict の値不正": ("P-RT", ("gb10",), _m_rt_bad_value),
+    "§15/P-RT:rt_verdict の重複": ("P-RT", ("gb10",), _m_rt_dup),
 }
 
 
@@ -907,12 +1237,146 @@ def _load_fixture_series(base, machine, k):
 
 def _mem_series(cells, k=128, machine="m4max", **over):
     """前提が全て成立するメモリ上の系列（単体テスト用）。over で個別の記録を上書きする。"""
-    s = {"machine": machine, "k": k, "cells": cells, "tree": True, "run_ab": True, "collect": True,
+    s = {"machine": machine, "k": k, "cells": cells, "input_anomalies": [], "tree": True, "run_ab": True, "collect": True,
          "official": True, "r4": {"base": True, "exec": True, "valid_runs": 5,
                                   "grid": {(mn, kk): True for mn in _R4.MN for kk in _R4.KS}},
          "r0": True, "rt": "pass"}
     s.update(over)
     return s
+
+
+def _clean_series(d, label="L"):
+    """evaluate_series を呼び、入力処理の異常が 0 件であることを確かめてセル列だけを返す（模擬記録用）。"""
+    cells, anomalies = evaluate_series(d, label)
+    assert anomalies == [], anomalies
+    return cells
+
+
+# 入力処理の握り潰し経路の棚卸し（_check_input_handling が本番関数の AST と件数まで照合する）。
+# (関数名, 種別) → (件数, 写像先または無害の根拠)。種別: "continue"・"get"（.get 呼び出し）・"except"。
+# 件数が変わると self-test が落ちる。経路を足すときは前提 ID へ写像するか、判定に影響しない根拠をここへ書く。
+SILENT_SITE_INVENTORY = {
+    ("evaluate_series", "continue"): (1, "片腕でも JSONL が無いタスクを飛ばす。当該セルは status=missing（JSONL 欠損）で P-CELLS"),
+    ("evaluate_series", "get"): (2, "行の無いセルに [] を渡す。evaluate_cell が 0 件で判定不能を返し P-CELLS"),
+    ("scan_jsonl_strict", "continue"): (3, "空行（データなし。load_rows と同じ）と、異常を記録した後の次行への移動"),
+    ("scan_jsonl_strict", "get"): (3, "mode・期待値との比較。キーの欠損は別途キー集合の照合で異常にする"),
+    ("scan_jsonl_strict", "except"): (1, "json.loads の失敗（壊れた行・重複キー・NaN リテラル）を異常として記録する"),
+    ("parse_r4_strict", "continue"): (1, "median_gflops= を含まない行（test 見出し・結果フッタ）は R4 の値を持たない"),
+    ("render_cells", "continue"): (1, "判定不能セルの表示行を出した後の次セルへの移動（表示のみ）"),
+    ("render_m4max", "continue"): (1, "系列ディレクトリが無い候補を「未実測」と表示した後の移動（判定を出さない）"),
+    ("render_m4max", "get"): (1, "推奨候補の抽出で未実測の候補（判定なし）を ADOPT 候補に数えない"),
+    ("render_gb10", "continue"): (1, "系列ディレクトリが無い候補を「未実測」と表示した後の移動（判定を出さない）"),
+    ("render_gb10", "get"): (1, "5/5<=1.00 セル数は参考表示のみ（RULE.txt §8。判定に使わない）"),
+}
+# 本番関数が使う外部モジュールの属性（_CMP は scripts/bench/framework-compare/compare_gemm_ab.py・
+# _R4 は ../cpu-gemm-sme-fmopa-1587/aggregate.py。どちらも共有物のため変更せず、呼び出し側で異常を拾う）。
+EXTERNAL_USES = {
+    "_CMP": {
+        "_size_set_for": "設定値の取得（入力を読まない）",
+        "load_rows": "(rows, warnings) を返す。warnings は input_anomalies → P-CELLS（下の ANOMALY_RETURNING で照合）",
+        "group_by_cell": "検証済み行のグループ化（行を捨てない）",
+        "evaluate_cell": "判定不能は status／reason としてセルへ載り P-CELLS",
+        "per_run_ratios": "None は evaluate_series がセルを判定不能にする",
+    },
+    "_R4": {
+        "LINE": "parse_r4_strict が median_gflops= を含む全行に当て、合わない行は run ごと無効（P-R4-LOG）",
+        "parse": "parse_r4_strict の厳密検査を通った run にだけ使う",
+        "MN": "格子の定数", "KS": "格子の定数",
+        "candidates": "表示のみ（参考のパレート極小）",
+    },
+}
+# 異常を返す関数と、戻り値の中で異常の入っている位置。本番コードでの呼び出しは 2 要素のタプル代入で受け、
+# その位置の名前を `_` 始まりにせず関数内で使うこと（`rows, _ = load_rows(...)` の形を禁止する）。
+ANOMALY_RETURNING = {"load_rows": 1, "evaluate_series": 1}
+
+
+def _production_functions(src=None):
+    """self-test 用の模擬記録より前に定義された関数と main（本番経路）の AST。src 省略時は本ファイル。"""
+    src = Path(__file__).read_text(encoding="utf-8") if src is None else src
+    marker = src.splitlines().index("# --- self-test 用の模擬記録 ---") + 1
+    return [n for n in ast.parse(src).body
+            if isinstance(n, ast.FunctionDef) and (n.lineno < marker or n.name == "main")]
+
+
+def _check_input_handling(src=None):
+    """入力処理が異常を黙って捨てる経路が無いことを AST で照合する（PRRT_kwDOTuUCJc6nk4YH の再発防止）。
+
+    (1) continue／.get／except の件数が SILENT_SITE_INVENTORY と一致する（新しい読み飛ばしは根拠の記入を強制する）
+    (2) except は型を限定し、本体で raise するか anomalies へ append する（既定値を返して握り潰さない）
+    (3) ANOMALY_RETURNING の関数の戻り値は 2 要素タプルで受け、異常の位置の名前を関数内で使う。
+        本番コードのタプル代入に `_` 始まりの名前を置かない。外部モジュールの呼び出し結果を捨てない
+    (4) 外部モジュールの使用属性が EXTERNAL_USES と一致する（新しい外部関数の使用は根拠の記入を強制する）
+    (5) load_m4_series／load_gb10_series が input_anomalies を series に入れ、preconditions がそれを読む
+    """
+    counts, ext = {}, {}
+    prod = _production_functions(src)
+    for fn in prod:
+        for node in ast.walk(fn):
+            kind = ("continue" if isinstance(node, ast.Continue)
+                    else "get" if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    else "except" if isinstance(node, ast.ExceptHandler) else None)
+            if kind:
+                counts[(fn.name, kind)] = counts.get((fn.name, kind), 0) + 1
+            if isinstance(node, ast.ExceptHandler):
+                assert node.type is not None and getattr(node.type, "id", "") not in ("Exception", "BaseException"), fn.name
+                acts = [x for s in node.body for x in ast.walk(s)]
+                assert any(isinstance(x, ast.Raise) for x in acts) or any(
+                    isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and x.func.attr in ("append", "extend")
+                    and getattr(x.func.value, "id", "") == "anomalies" for x in acts), f"{fn.name}: except が異常を捨てる"
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in EXTERNAL_USES:
+                ext.setdefault(node.value.id, set()).add(node.attr)
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                f = node.value.func
+                assert not (isinstance(f, ast.Attribute) and getattr(f.value, "id", "") in EXTERNAL_USES), \
+                    f"{fn.name}: 外部関数 {f.attr} の戻り値を捨てている"
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    names = tgt.elts if isinstance(tgt, ast.Tuple) else []
+                    assert not any(isinstance(x, ast.Name) and x.id.startswith("_") for x in names), \
+                        f"{fn.name}: タプル代入で戻り値の一部を捨てている"
+        assigned = {}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                f = node.value.func
+                callee = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+                if callee in ANOMALY_RETURNING:
+                    tgt = node.targets[0]
+                    assert isinstance(tgt, ast.Tuple) and len(tgt.elts) == 2, f"{fn.name}: {callee} を 2 要素で受けていない"
+                    assigned[id(node.value)] = tgt.elts[ANOMALY_RETURNING[callee]].id
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                f = node.func
+                callee = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+                if callee in ANOMALY_RETURNING and fn.name != callee:
+                    assert id(node) in assigned, f"{fn.name}: {callee} の戻り値をタプル代入で受けていない"
+                    name = assigned[id(node)]
+                    loads = [x for x in ast.walk(fn) if isinstance(x, ast.Name) and x.id == name
+                             and isinstance(x.ctx, ast.Load)]
+                    assert loads, f"{fn.name}: {callee} の異常 {name} を使っていない"
+    expected = {k: v[0] for k, v in SILENT_SITE_INVENTORY.items()}
+    assert counts == expected, f"読み飛ばし経路の棚卸しがずれた（SILENT_SITE_INVENTORY を見直す）: {counts}"
+    assert ext == {m: set(v) for m, v in EXTERNAL_USES.items()}, f"外部モジュールの使用がずれた: {ext}"
+    fns = {fn.name: fn for fn in prod}
+    for loader in ("load_m4_series", "load_gb10_series"):
+        keys = [k.value for d in ast.walk(fns[loader]) if isinstance(d, ast.Dict)
+                for k in d.keys if isinstance(k, ast.Constant)]
+        assert "input_anomalies" in keys, loader
+    assert any(isinstance(x, ast.Subscript) and isinstance(x.slice, ast.Constant) and x.slice.value == "input_anomalies"
+               for x in ast.walk(fns["preconditions"])), "preconditions が input_anomalies を読まない"
+
+
+def _check_real_inputs():
+    """正のプローブ: コミット済みの実データ（#2053 の GB10 R1／R2・#1978 の M4 Max R4）を、厳密化した入力処理が
+    異常なしで読めること（スキーマ・R4 行の検査が実際の出力を誤って弾かないこと）を確かめる。"""
+    src = _HERE.parent / "cpu-gemm-sme-fmopa-1587"
+    d = src / "gb10" / "attribution" / "r1r2-p1"
+    cells, anomalies = evaluate_series(str(d), "2053-p1")
+    assert anomalies == [], anomalies
+    assert all(c["status"] != "missing" for c in cells), [c for c in cells if c["status"] == "missing"]
+    for i in range(1, 6):
+        r = parse_r4_strict((src / f"sme_r4_grid_run{i}.log").read_text(encoding="utf-8"))
+        assert r is not None and len(r) == 32, i
 
 
 def _check_single_gate():
@@ -986,6 +1450,8 @@ def _run_clause_table(td):
             v, reasons = series_verdict(sm)
             assert v == UNDETERMINED, f"[{cid}] {bname}: {v}"
             assert [r.split(":", 1)[0] for r in reasons] == [pid], f"[{cid}] {bname}: {reasons}"
+            # aggregate.md はコミットされるため、理由に実行環境の絶対パスを出さない（RULE.txt §12。load_rows の警告も対象）
+            assert str(case) not in "".join(reasons), f"[{cid}] 理由に絶対パス: {reasons}"
             if machine == "m4max":
                 a, a_reasons = ac1_verdict(sm)
                 if _PRECOND_BY_ID[pid][2]:
@@ -998,6 +1464,20 @@ def _run_clause_table(td):
 def self_test():
     _check_rule_drift()
     _check_single_gate()
+    _check_input_handling()
+    # 負のプローブ: 指摘の形（警告を `_` で捨てる）と、except で既定値に落とす形を検出できること
+    own = Path(__file__).read_text(encoding="utf-8")
+    for old, new in (("b, b_warnings = _CMP.load_rows", "b, _ = _CMP.load_rows"),
+                     ("anomalies.append(f\"{where}: JSON として読めない（{e}）\")", "obj = {}")):
+        # 置換するのは本番コード側の最初の 1 箇所（本 self-test の文字列リテラルより前にある）
+        assert own.find(old) != -1 and own.find(old) < own.find("# --- self-test 用の模擬記録 ---"), old
+        try:
+            _check_input_handling(own.replace(old, new, 1))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(f"_check_input_handling が {new!r} を検出しない")
+    _check_real_inputs()
     # (f) K による到達分類: train は K=64 のみ到達・infer は全候補で非到達・gemm は全候補で到達
     assert [reached(k, "train") for k in KS_CANDIDATE] == [True, False, False]
     assert not any(reached(k, "infer") for k in KS_CANDIDATE)
@@ -1025,13 +1505,14 @@ def self_test():
         rb = _uniform()
         rb[("train", 64, "reuse")] = [1.02, 1.01, 0.99, 1.02, 1.03]  # 非到達ではノイズ
         _write_series(os.path.join(td, "a"), "L", rb)
-        cells = apply_k(evaluate_series(os.path.join(td, "a"), "L"), 128)
+        raw_a = _clean_series(os.path.join(td, "a"))
+        cells = apply_k(raw_a, 128)
         assert series_verdict(_mem_series(cells)) == (V_ADOPT, [])
         # §11: 負荷ゲート不通過（record_only）系列は ADOPT 条件を満たしても "ADOPT 候補" にしない
         assert series_verdict(_mem_series(cells, official=False))[0] == REFERENCE_ADOPT
         assert ac1_verdict(_mem_series(cells))[0] == AC1_OK
         # 同じデータを K=64 で見ると train reuse（到達）が ADOPT 候補条件不成立 → undetermined（(b)）
-        cells64 = apply_k(evaluate_series(os.path.join(td, "a"), "L"), 64)
+        cells64 = apply_k(raw_a, 64)
         v, why = series_verdict(_mem_series(cells64, k=64))
         assert v == UNDETERMINED and why and why[0].startswith("§6"), (v, why)
         assert ac1_verdict(_mem_series(cells64, k=64))[0] == AC1_NG
@@ -1053,7 +1534,7 @@ def self_test():
         rcx = _uniform()
         rcx[("infer", 64, "fresh")] = [1.01] * 5
         _write_series(os.path.join(td, "c"), "L", rcx)
-        cellsc = apply_k(evaluate_series(os.path.join(td, "c"), "L"), 128)
+        cellsc = apply_k(_clean_series(os.path.join(td, "c")), 128)
         assert series_verdict(_mem_series(cellsc))[0] == UNDETERMINED
         assert any(x["reject"] and not x["reached"] for x in cellsc)
         # (h) GB10 語彙: RT の既知 FAIL は許容し pass・それ以外の FAIL は後退あり相当
@@ -1063,7 +1544,7 @@ def self_test():
         g = _uniform(gemm=1.0, train=1.0, infer=1.0)
         g[("gemm", 512, "fresh")] = [2.007, 0.99, 1.0, 0.98, 1.0]  # before 外れ値相当。5/5<=1 不成立でも後退ではない
         _write_series(os.path.join(td, "g"), "L", g)
-        cellsg = apply_k(evaluate_series(os.path.join(td, "g"), "L"), None)
+        cellsg = apply_k(_clean_series(os.path.join(td, "g")), None)
         assert series_verdict(_mem_series(cellsg, machine="gb10"))[0] == G_PASS
         assert series_verdict(_mem_series(cellsg, machine="gb10", rt="regression-suspect"))[0] == G_SUSPECT
         assert series_verdict(_mem_series(cellsg, machine="gb10", official=False))[0] == G_PASS + G_REFERENCE_SUFFIX
@@ -1099,6 +1580,37 @@ def self_test():
         assert exit_records_gb10(p) == (True, True)
         Path(p).write_text("RT rc=101\nrun_ab rc=2\n")
         assert exit_records_gb10(p) == (False, None)
+        # 値が 10 進の数字列でない終了コードは不成立（従前は `0abc` の先頭 0 を読んで成立にしていた）
+        for bad in ("run_ab_exit=0abc collect_exit=0", "run_ab_exit= collect_exit=0", "run_ab_exit=-0 collect_exit=0"):
+            Path(p).write_text(bad + "\n")
+            assert exit_records_m4max(p) == (False, True), bad
+        # rt_verdict: 実際に書かれる 2 形・値不正・重複・記録なし
+        Path(p).write_text("RT rc=101\nrt_verdict=pass known_fail_only=yes\n")
+        assert rt_record(p) == "pass"
+        Path(p).write_text("RT rc=101\nrt_verdict=regression-suspect（rc=0 だが FAIL 行あり）\n")
+        assert rt_record(p) == "regression-suspect"
+        for bad in ("rt_verdict=passed\n", "rt_verdict=\n", "rt_verdict=pass\nrt_verdict=pass\n"):
+            Path(p).write_text(bad)
+            assert rt_record(p) == RT_INVALID, bad
+        Path(p).write_text("RT rc=101\n")
+        assert rt_record(p) is None
+        # R0: 各腕 1 行・false のみで成立。腕の欠け・重複・true 混在・他の行は不成立
+        Path(p).write_text("before: sme_report=kernel_enabled: false\nafter: sme_report=kernel_enabled: false\n")
+        assert r0_record(p) is True
+        for bad in ("before: kernel_enabled: false\n",
+                    "before: kernel_enabled: false\nafter: kernel_enabled: false\nafter: kernel_enabled: false\n",
+                    "before: kernel_enabled: false kernel_enabled: true\nafter: kernel_enabled: false\n",
+                    "before: kernel_enabled: false\nafter: kernel_enabled: false\nnoise\n"):
+            Path(p).write_text(bad)
+            assert r0_record(p) is False, bad
+        assert r0_record(os.path.join(td, "none.txt")) is None
+        # head= 行: 1 行だけ・登録 sha のときのみ成立
+        Path(p).write_text(f"head={REGISTERED_BASE}\ncurrent_head=x\n")
+        assert head_record_ok(p) is True
+        Path(p).write_text(f"head={REGISTERED_BASE}\nhead={REGISTERED_BASE}\n")
+        assert head_record_ok(p) is False
+        Path(p).write_text("current_head=x\n")
+        assert head_record_ok(p) is None
         # R4 実行記録・ログの厳密解析
         _r4 = os.path.join(td, "r4gate.log")
         _good = "".join(f"run{i} gate=pass\nrun{i} exit=0 grep_exit=0 end_load1=1\n" for i in range(1, 6))
@@ -1127,6 +1639,32 @@ def self_test():
         assert outer_gate_official(p) is False
         Path(p).write_text("run1 gate=pass\n" * 4 + "run5 gate=timeout\n")
         assert _gate_log_official(p, "run") is False
+        # 負荷ゲート（§8・§11 の修飾）: 重複行で 5 行に見える記録・series= の重複は正式にしない（参考側へ倒す）
+        Path(p).write_text("".join(f"run{i} gate=pass\n" for i in (1, 1, 2, 3, 4)))
+        assert _gate_log_official(p, "run") is False
+        five = "".join(f"round{i} gate=pass threshold=8.0 load1=1 waited_s=0\n" for i in range(1, 6))
+        Path(p).write_text("threshold=8.0 rule_threshold=8.0 series=official\n" + five.replace("round5", "round1"))
+        assert load_gate_series(p) is False
+        Path(p).write_text("threshold=8.0 rule_threshold=8.0 series=official\n" * 2 + five)
+        assert load_gate_series(p) is False
+        Path(p).write_text("threshold=8.0 rule_threshold=8.0 series=officialx\n" + five)
+        assert load_gate_series(p) is False
+        for bad in ("start attempt=1 load1=0.1 gpu_util=0 pass\nstart attempt=2 load1=0.1 gpu_util=0 pass\n",
+                    "start attempt=1 load1=0.1 gpu_util=0 pass\nstart attempt=20 load1=3 gpu_util=NA fail(reference)\n",
+                    "start attempt=1 load1=0.1 gpu_util=0 pass\ngarbage\n", ""):
+            Path(p).write_text(bad)
+            assert outer_gate_official(p) is False, bad
+        # 正式／参考の修飾はディスク上の記録から系列の表示まで届く（ADOPT 候補 → 参考表示）
+        og = os.path.join(td, "og")
+        _write_m4_fixture(og, 128, _uniform())
+        assert series_verdict(_load_fixture_series(og, "m4max", 128)) == (V_ADOPT, [])
+        _sub(Path(og) / "m4max" / "load_gate_r4.log", "run5 gate=pass", "run1 gate=pass")
+        assert series_verdict(_load_fixture_series(og, "m4max", 128)) == (REFERENCE_ADOPT, [])
+        # CLI: 未知のオプション・余分な位置引数は停止（打ち間違いで集計が走らない）
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            assert main(["aggregate.py", "--selftest"]) == 2
+            assert main(["aggregate.py", td, td]) == 2
+        assert err.getvalue().count("usage:") == 2
 
         # 描画: 未実測ディレクトリは「未実測」
         e = os.path.join(td, "empty")
@@ -1155,7 +1693,14 @@ def main(argv):
     if "--self-test" in argv:
         self_test()
         return 0
-    args = [a for a in argv[1:] if not a.startswith("--")]
+    # 未知のオプション・余分な位置引数は読み飛ばさず使い方の誤りとして停止する（--selftest 等の打ち間違いで
+    # 実データの集計が走るのを防ぐ）
+    unknown = [a for a in argv[1:] if a.startswith("-")]
+    args = [a for a in argv[1:] if not a.startswith("-")]
+    if unknown or len(args) > 1:
+        print(f"usage: aggregate.py [--self-test] [<base_dir>]（未知のオプション {unknown}・位置引数 {args}）",
+              file=sys.stderr)
+        return 2
     base = args[0] if args else str(_HERE)
     print(render_m4max(base))
     print(render_gb10(base))
