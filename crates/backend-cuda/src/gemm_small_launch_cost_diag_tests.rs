@@ -108,6 +108,11 @@ struct L2Sample {
     kernel_wait: f64,
     d2h: f64,
     teardown: f64,
+    /// 本番 `run_f32_kernel` が全区間を包む `with_driver_call`（capture 排他
+    /// スコープ）の入退場費用。手動分解は各区間を個別に呼ぶためスコープを
+    /// 含まず、放置すると L1 − l2_sum（H4b）に混入する。空スコープを別区間
+    /// として測り l2_sum へ含める（PR #2454 指摘）。
+    driver_scope: f64,
 }
 
 impl L2Sample {
@@ -119,6 +124,7 @@ impl L2Sample {
             + self.kernel_wait
             + self.d2h
             + self.teardown
+            + self.driver_scope
     }
 }
 
@@ -173,6 +179,11 @@ fn l2_trial(
     drop(a_dev);
     drop(b_dev);
     s.teardown = t.elapsed().as_secs_f64();
+
+    // 本番と同じ `context_cache::with_driver_call` の入退場のみを空クロージャで測る。
+    let t = Instant::now();
+    crate::context_cache::with_driver_call(device.ordinal(), || Ok(())).expect("driver scope");
+    s.driver_scope = t.elapsed().as_secs_f64();
 
     (s, out)
 }
@@ -317,7 +328,7 @@ fn run_size(n: usize) {
     assert_ne!(checksum, 0.0f64.to_bits(), "checksum must be non-zero");
 
     // --- L2 ---
-    let mut cols: [Vec<f64>; 8] = Default::default();
+    let mut cols: [Vec<f64>; 9] = Default::default();
     for i in 0..(WARMUP + MEASURED) {
         let (s, out) = l2_trial(&device, &gemm, &allocator, &a, &b, nn);
         assert_eq!(out.len(), n * n);
@@ -330,6 +341,7 @@ fn run_size(n: usize) {
                 s.kernel_wait,
                 s.d2h,
                 s.teardown,
+                s.driver_scope,
                 s.sum(),
             ];
             for (c, x) in cols.iter_mut().zip(v) {
@@ -345,6 +357,7 @@ fn run_size(n: usize) {
         "kernel_wait",
         "d2h",
         "teardown",
+        "driver_scope",
         "l2_sum",
     ]
     .iter()
