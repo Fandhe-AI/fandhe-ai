@@ -120,9 +120,9 @@ struct L2Sample {
     d2h: f64,
     teardown: f64,
     /// 本番 `run_f32_kernel` が全区間を包む `with_driver_call`（capture 排他
-    /// スコープ）の入退場費用。手動分解は各区間を個別に呼ぶためスコープを
-    /// 含まず、放置すると L1 − l2_sum（H4b）に混入する。空スコープを別区間
-    /// として測り l2_sum へ含める（PR #2454 指摘）。
+    /// スコープ）の入退場費用。全操作を同一スコープ内で実行し、スコープ全体の
+    /// 所要から各区間合計を引いた残差として求め l2_sum へ含める
+    /// （L1 − l2_sum＝H4b の帰属を本番経路に合わせる。PR #2454 指摘）。
     driver_scope: f64,
 }
 
@@ -153,58 +153,70 @@ fn l2_trial(
     let stream = device.stream().clone();
     let mut s = L2Sample::default();
 
-    let t = Instant::now();
-    let a_dev = gemm.upload_h2d_new(a).expect("h2d a");
-    s.h2d_a = t.elapsed().as_secs_f64();
-
-    let t = Instant::now();
-    let b_dev = gemm.upload_h2d_new(b).expect("h2d b");
-    s.h2d_b = t.elapsed().as_secs_f64();
-
-    let t = Instant::now();
-    let mut c_dev = allocator
-        .alloc_uninit_f32((n as usize) * (n as usize))
-        .expect("alloc c");
-    s.alloc_c = t.elapsed().as_secs_f64();
-
-    let t = Instant::now();
-    gemm.launch_tiled_f32_pooled(
-        &a_dev,
-        &b_dev,
-        &mut c_dev,
-        n,
-        n,
-        n,
-        DiagTiledF32Kernel::Select,
-    )
-    .expect("launch");
-    s.launch_issue = t.elapsed().as_secs_f64();
-
-    if split_sync {
+    // 本番 `run_f32_kernel` と同じく H2D・確保・起動・readback・解放の全操作を
+    // `with_driver_call`（capture 排他スコープ）の内側で実行する。各区間は
+    // クロージャ内で個別計測し、スコープ全体の所要から区間合計を引いた残差を
+    // 入退場費用（`driver_scope`）とする（PR #2454 指摘）。
+    let scope_t = Instant::now();
+    let out = crate::context_cache::with_driver_call(device.ordinal(), || {
         let t = Instant::now();
-        stream.synchronize().expect("kernel wait");
-        s.kernel_wait = t.elapsed().as_secs_f64();
-    }
+        let a_dev = gemm.upload_h2d_new(a)?;
+        s.h2d_a = t.elapsed().as_secs_f64();
 
-    let t = Instant::now();
-    let out = crate::memory::readback(&stream, &c_dev.as_view()).expect("readback");
-    let rb = t.elapsed().as_secs_f64();
-    if split_sync {
-        s.d2h = rb;
-    } else {
-        s.readback = rb;
-    }
+        let t = Instant::now();
+        let b_dev = gemm.upload_h2d_new(b)?;
+        s.h2d_b = t.elapsed().as_secs_f64();
 
-    let t = Instant::now();
-    drop(c_dev);
-    drop(a_dev);
-    drop(b_dev);
-    s.teardown = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let mut c_dev = allocator.alloc_uninit_f32((n as usize) * (n as usize))?;
+        s.alloc_c = t.elapsed().as_secs_f64();
 
-    // 本番と同じ `context_cache::with_driver_call` の入退場のみを空クロージャで測る。
-    let t = Instant::now();
-    crate::context_cache::with_driver_call(device.ordinal(), || Ok(())).expect("driver scope");
-    s.driver_scope = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        gemm.launch_tiled_f32_pooled(
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+            n,
+            n,
+            n,
+            DiagTiledF32Kernel::Select,
+        )?;
+        s.launch_issue = t.elapsed().as_secs_f64();
+
+        if split_sync {
+            let t = Instant::now();
+            stream.synchronize().expect("kernel wait");
+            s.kernel_wait = t.elapsed().as_secs_f64();
+        }
+
+        let t = Instant::now();
+        let out = crate::memory::readback(&stream, &c_dev.as_view())?;
+        let rb = t.elapsed().as_secs_f64();
+        if split_sync {
+            s.d2h = rb;
+        } else {
+            s.readback = rb;
+        }
+
+        let t = Instant::now();
+        drop(c_dev);
+        drop(a_dev);
+        drop(b_dev);
+        s.teardown = t.elapsed().as_secs_f64();
+        Ok(out)
+    })
+    .expect("l2 scoped trial");
+    let scope_total = scope_t.elapsed().as_secs_f64();
+    s.driver_scope = (scope_total
+        - (s.h2d_a
+            + s.h2d_b
+            + s.alloc_c
+            + s.launch_issue
+            + s.kernel_wait
+            + s.readback
+            + s.d2h
+            + s.teardown))
+        .max(0.0);
 
     (s, out)
 }

@@ -251,8 +251,9 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
     def a_runs(phase: str, src=pa) -> list[float]:
         return [next(x["median_s"] for x in r if x["phase"] == phase) * 1e6 for r in src]
 
-    def a_med(phase: str) -> float:
-        return med(a_runs(phase))
+    def a_med(phase: str, src=hpa) -> float:
+        # 既定は HEAD path-patch 系列（gap・H5 と同一ツリー。registry 値は src=pa で参考併記のみ）。
+        return med(a_runs(phase, src))
 
     fandhe_reuse = med([r[0]["median_s"] for r in ac2]) * 1e6
     head_reuse = med([r[0]["median_s"] for r in hac2]) * 1e6
@@ -305,7 +306,8 @@ def aggregate(layer_b_texts: list[str], phases_text: str, ac2_text: str, candle_
         f"{head_reuse / fandhe_reuse:.3f}"
         + ("（非後退）" if head_reuse <= fandhe_reuse else "（要調査・別 issue）"),
         f"- L0 ops_total: {l0:.3f}／L1 gemm_total: {l1:.3f}／L2 l2_sum: {l2:.3f}",
-        f"- Layer A iter_total: {a_med('iter_total'):.3f}／matmul: {a_med('matmul'):.3f}",
+        f"- Layer A（HEAD path-patch）iter_total: {a_med('iter_total'):.3f}／matmul: {a_med('matmul'):.3f}"
+        f"（参考 registry =0.9.0: iter_total {a_med('iter_total', pa):.3f}／matmul {a_med('matmul', pa):.3f}）",
         f"- L0 ops_total の run 間 min–max: {rng(l0r)}", "",
         "- 注: 各値の中央値は run 単位の値の 5 run 中央値。仮説の µs は run 毎に導出した値の中央値",
         "  （差・和は同一 run 内の区間から作る。H2 は kernel_wait と dev_kernel_b2b が別測定系列の推定を",
