@@ -7,6 +7,7 @@
 
 use fandhe_ai_backend_metal::MetalDeviceProvider;
 use fandhe_ai_tensor_core::device::DeviceProvider;
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily};
 
 #[test]
 fn backend_name_is_metal() {
@@ -45,7 +46,16 @@ fn select_metal_device_on_real_hardware() {
 
     assert_eq!(info.device, Device::Metal);
     assert!(!info.name.is_empty());
-    assert_eq!(info.warp_width, Some(32));
+    // `probe_all` は Apple ファミリ（`supportsFamily(Apple1)`）と確認できた
+    // GPU にのみ `Some(32)` を報告し、Intel／AMD GPU 搭載 Mac では `None` を
+    // 返す契約のため、Apple GPU 確認時のみ `Some(32)` を要求する（#2125）。
+    let is_apple_gpu = MTLCreateSystemDefaultDevice()
+        .is_some_and(|device| device.supportsFamily(MTLGPUFamily::Apple1));
+    if is_apple_gpu {
+        assert_eq!(info.warp_width, Some(32));
+    } else {
+        assert!(matches!(info.warp_width, Some(32) | None));
+    }
 }
 
 /// Apple GPU の simdgroup 幅は 32（#2125）。`probe_all` は Apple ファミリ
