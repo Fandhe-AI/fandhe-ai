@@ -5,7 +5,8 @@
 - 対応イシュー #2130（親 #2122「sm_121 可用命令の実機プローブ」・ルート #2121 Phase 4）。**設計のみ**の記録であり、候補カーネルの実装・GB10 実機実測・新規依存の追加は行わない。tolerance 定数・`ParityBaseline`・既存の採否判断（3×TF32 のユーザー判断を含む）・facade 公開 API は変更しない
 - 目的: CUDA f32 GEMM の最適化候補のうち REJECT／非推奨となった 4 件（StreamK #1359・persistent #1347・TMA Stage 1 #1975/#1976・3×TF32 #1356）について、不採用の原因が (H) ハードウェア限界か (I) 実装の不完全さか (D) 設計・机上モデルの前提かを既存の確定記録だけで再分類し、再挑戦すべき候補とそうでない候補を分ける。あわせて新規候補の opt-in 設計と本番結線の判断フローを定める
 - **#2122 は本 doc 作成時点で未完了**（プローブ結果なし）。本 doc は既存の確定記録だけで成立する構成とし、#2122 で確定する項目は §2.3 の差し込み欄を「未確定」のまま置く。推定で埋めない。#2122 完了時は同 issue 側で §2.3 を更新する
-- **追記（#2122 PR-A）**: プローブ基盤は追加済み（`docs/cuda-sm121-isa-probe.md`。実装は `crates/backend-cuda/tests/sm121_isa_probe_*`、判定規則は `docs/perf/logs/sm121-isa-probe-2122/RULE.txt`）。**GB10 実測は未実施で、結果は未実測のまま**であり、§2.3 の値は変更していない（表の「プローブ ID・RULE 条項」列は反映先の対応を示すだけ）。TMA の意味論プローブ（`tma.*`）・既存 TMA プローブの再実行・raw 起動経路は PR-B で追加済み（結果は未実測）
+- **追記（#2122 PR-A）**: プローブ基盤は追加済み（`docs/cuda-sm121-isa-probe.md`。実装は `crates/backend-cuda/tests/sm121_isa_probe_*`、判定規則は `docs/perf/logs/sm121-isa-probe-2122/RULE.txt`）。PR-A の時点では **GB10 実測は未実施で、結果は未実測のまま**であり、§2.3 の値は変更していなかった（表の「プローブ ID・RULE 条項」列は反映先の対応を示すだけ）。TMA の意味論プローブ（`tma.*`）・既存 TMA プローブの再実行・raw 起動経路は PR-B で追加済み（結果は未実測）
+- **追記（#2122 PR-C・2026-10-01 GB10 実測）**: GB10 で正式実行 1 系列を実測し（転送元 `7b6019ae`・`aggregate.py` exit 0・判定不能 0 件）、§1-1・§2.1・§2.3・§4・§7 の該当箇所を実測判定で更新した。判定語は `docs/perf/logs/sm121-isa-probe-2122/aggregate.md` から逐語で転記し、結果表の正は `docs/cuda-sm121-isa-probe.md` §5。候補の着手可否・列挙対象の見直しは判定の転記にとどめ、本 doc では決めない（§4 の対象外の扱いを含め後続で判断する）
 - 出典の実測値は各 doc を正とし、本 doc は転記と分類のみを行う
 
 ## 1. 前提の訂正
@@ -13,6 +14,7 @@
 イシュー本文の想定と既存の確定記録が食い違う点を、黙って直さずここに記録する。
 
 1. **tcgen05／TMEM／wgmma・cluster**: イシューは sm_121 で可用と想定しているが、`docs/cuda-tensor-core-design.md` §11.1（CUTLASS v4.7.0 一次ソースの静的読解）は、tcgen05／TMEM／wgmma は SM120/sm_121 で**不可**、cluster は実用上 **1×1×1 のみ**と記録している。またイシューは sm_121 を「Blackwell datacenter」と呼ぶが、同 §11 は SM12x を DC Blackwell（SM100 系）と区別している。#2122 が §11 を実機で覆さない限り、tcgen05／TMEM 系の候補は列挙対象外とする（§4）
+   - **注記（#2122 GB10 実測・2026-10-01）**: tcgen05／TMEM（`tc5.alloc`・`tc5.ld`）と wgmma（`wgmma.m64n8k16`）は `compute_121`／`121a`／`121f` の 3 target とも「ptxas 拒否（オフライン）」、`tc5.cross`（compute_100a の PTX を GB10 でロード）は 3 target とも「ロード失敗」で、§11 の「不可」は実機で覆らなかった（tcgen05／TMEM 系は引き続き列挙対象外）。一方 cluster は `clu.dims2`／`dims4`／`dims8`・`clu.dsmem`・`clu.rt2`／`rt4`・`tma.multicast` が 3 target とも「成立」で、§11 の「実用上 1×1×1 のみ」とは食い違う（R-GUIDE の C09 は「不一致」）。`clu.dims16` は「実行時エラー」（`CUDA_ERROR_INVALID_CLUSTER_SIZE`）。出典: `docs/cuda-sm121-isa-probe.md` §5・§5.1
 2. **TMA Stage 1 の N=256 後退**は、ゲート C（GPU-only の純カーネル時間）での後退である。ゲート A（bit 一致）は全 PASS、ゲート B は 0 fail（`docs/backend-cuda-tma-gemm-load-design.md` §10.8）
 3. **3×TF32 の P1（厳密ゼロ fail）不成立**は、既に GB10（sm_121）実機で実測済みである（#1356。`docs/perf/cuda-tensor-core-tolerance-tf32x3-gb10.md` §10・§11）。2026-09-08 のユーザー判断で「opt-in 維持・非推奨」・baseline 不承認が確定している（`docs/cuda-tf32x3-split-single-decision.md` §9）。受入基準「sm_121 で検証」は既存実測の再掲と原因分類で満たし、本 issue では再計測しない
 
@@ -23,29 +25,29 @@
 | 機能 | sm_121 での状態 | 出典 |
 |---|---|---|
 | `mma.sync`・`ldmatrix`・`cp.async` | 可（実装実績あり） | `cuda-tensor-core-design.md` §11.1 |
-| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機で NVRTC compile・CTA 実行・cluster 実行の 3 プローブが成立。`shared::cta` と cluster variant の両方で bit 一致。要素座標・部分 OOB・smem 配置ダンプの意味論プローブ 3 件は GB10 では未実行で、その範囲の検証は未了（#2122 PR-B で `tma.*` として実装済み・実機未実測）） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
-| wgmma・tcgen05・TMEM | 不可（静的読解。実機での再確認は #2122 待ち） | `cuda-tensor-core-design.md` §11.1 |
-| cluster（実用） | 1×1×1 のみ（静的読解。launch 可否の実機確認は #2122 待ち） | 同 §11.1 |
-| `setmaxnreg` | **未実測**（プローブ実装はあるが実機実行は未了） | 同 §13・`backend-cuda-tma-gemm-load-design.md` §2 F2 |
+| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機で NVRTC compile・CTA 実行・cluster 実行の 3 プローブが成立。`shared::cta` と cluster variant の両方で bit 一致。#2122 の GB10 実測〈2026-10-01〉で `tma.base_cta`／`tma.base_cluster`／`tma.store`／`tma.prefetch`／`tma.multicast`／`tma.bulk_cta`／`tma.bulk_cluster` は 3 target とも「成立」、意味論の `tma.coord`／`tma.oob_*`／`tma.swz*` は「受理のみ（実行意味論は未検証）」で観測は要素座標＝内側次元が先・OOB はゼロ／NaN 埋め・swizzle は標準の XOR モデルと一致。既存 `tma_probe_real_device` の再実行も run_ok） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
+| wgmma・tcgen05・TMEM | 不可（静的読解。#2122 の GB10 実測で `wgmma.m64n8k16`・`tc5.alloc`・`tc5.ld` は 3 target とも「ptxas 拒否（オフライン）」、`tc5.cross` は「ロード失敗」） | `cuda-tensor-core-design.md` §11.1・`cuda-sm121-isa-probe.md` §5 |
+| cluster（実用） | 静的読解は 1×1×1 のみ。#2122 の GB10 実測では cluster 2／4／8（`clu.dims2`／`dims4`／`dims8`・runtime 指定の `clu.rt2`／`rt4`）と DSMEM（`clu.dsmem`）が 3 target とも「成立」、cluster 16（`clu.dims16`。non-portable 許可）は「実行時エラー」（`CUDA_ERROR_INVALID_CLUSTER_SIZE`） | 同 §11.1・`cuda-sm121-isa-probe.md` §5 |
+| `setmaxnreg` | `snr.dec`・`snr.incdec` は `compute_121` で「ptxas 拒否（オフライン）」、`compute_121a`・`compute_121f` で「成立」（#2122 GB10 実測。既存 `setmaxnreg_probe_*` も base は load_failed・accel は run_ok で整合） | 同 §13・`backend-cuda-tma-gemm-load-design.md` §2 F2・`cuda-sm121-isa-probe.md` §5 |
 | `has_async_alloc()` | true | `docs/perf/lowlayer-diagnosis-2026-09-12.md` |
 
 ### 2.2 デバイス属性
 
 SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 実効帯域 1237.62 GB/s（`docs/perf/sm121-device-attributes.md`）。常駐ブロック数は 64×64 タイルで 3 block/SM（grid_capacity 144）・128×64 タイルで 2 block/SM（同 96）で、机上見積りと実測が一致している（`docs/perf/cuda-gemm-tiled-pipeline.md`「#1347」節）。
 
-### 2.3 #2122 確定値の差し込み欄（未確定）
+### 2.3 #2122 確定値の差し込み欄（2026-10-01 GB10 実測で更新）
 
-| 項目 | 状態 | 依存する候補 | プローブ ID・RULE 条項（#2122 PR-A／PR-B。結果は未実測） |
+| 項目 | 状態（#2122 GB10 実測の判定。`compute_121`／`121a`／`121f`） | 依存する候補 | プローブ ID・RULE 条項（#2122 PR-A／PR-B） |
 |---|---|---|---|
-| cluster サイズ >1 の launch 可否 | 未確定（#2122 待ち） | C3(b) | `clu.dims1`／`dims2`／`dims4`／`dims8`／`dims16`・R-CLU |
-| DSMEM（`mapa`／`ld.shared::cluster`）の可否 | 未確定（#2122 待ち） | C3(b) | `clu.dsmem`・R-CLU |
-| `setmaxnreg` の受理・実行 | 未確定（#2122 待ち） | C2 | `snr.dec`／`snr.incdec`・R-SNR（既存 `setmaxnreg_probe_*` との整合は R-LEGACY） |
-| SM120 系の追加 mma 形状（f8f6f4・block-scaled。sm_121a 要否） | 未確定（#2122 待ち） | 本 issue では対象外（§4） | `mma.f8f6f4.m16n8k32`／`mma.block_scale.m16n8k64`（受理段のみ）・R-MMA。`sm_121`／`sm_121a`／`sm_121f` の差は S2 の target 別セル |
-| `CLOCK_RATE` 等の未実測属性 | 未確定（#2122 待ち） | bytes/cycle 換算を要する分析全般 | `attr.misc`／`attr.limits`／`attr.cluster`・R-GUIDE |
-| tcgen05／TMEM の到達可否 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `tc5.alloc`／`tc5.ld`／`tc5.cross`・R-TC5 |
-| wgmma の受理 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `wgmma.m64n8k16`（受理段のみ）・R-HOPPER |
-| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast） | 未確定（#2122 PR-B でプローブ追加済み。GB10 実測待ち） | C4（TMA Stage 2）ほか §3.3 | `tma.base_cta`／`tma.base_cluster`（R-TMA-BASE）・`tma.coord`／`tma.oob_none`／`tma.oob_nan`／`tma.oob_neg`／`tma.swz32`／`tma.swz64`／`tma.swz128`（R-TMA-SEM。観測の記録）・`tma.store`／`tma.bulk_cta`／`tma.bulk_cluster`／`tma.prefetch`／`tma.multicast`（R-TMA-XFER） |
-| arch 接尾辞（`a`／`f`）の要否 | 未確定（#2122 待ち） | 上記各候補 | 全プローブの target 別セル（`compute_121`／`compute_121a`／`compute_121f`）・`macro.arch` |
+| cluster サイズ >1 の launch 可否 | `clu.dims1`／`dims2`／`dims4`／`dims8`・`clu.rt2`／`rt4` は 3 target とも「成立」。`clu.dims16` は 3 target とも「実行時エラー」（`CUDA_ERROR_INVALID_CLUSTER_SIZE`。S3 参考値 `occupancy_max_potential_cluster_size=12`） | C3(b) | `clu.dims1`／`dims2`／`dims4`／`dims8`／`dims16`・R-CLU |
+| DSMEM（`mapa`／`ld.shared::cluster`）の可否 | `clu.dsmem` は 3 target とも「成立」 | C3(b) | `clu.dsmem`・R-CLU |
+| `setmaxnreg` の受理・実行 | `snr.dec`・`snr.incdec` とも `compute_121` は「ptxas 拒否（オフライン）」、`compute_121a`・`compute_121f` は「成立」。R-LEGACY（既存 `setmaxnreg_probe_*`: base は load_failed・accel は run_ok）と矛盾なし | C2 | `snr.dec`／`snr.incdec`・R-SNR（既存 `setmaxnreg_probe_*` との整合は R-LEGACY） |
+| SM120 系の追加 mma 形状（f8f6f4・block-scaled。sm_121a 要否） | `mma.f8f6f4.m16n8k32`・`mma.block_scale.m16n8k64` とも `compute_121` は「ptxas 拒否（オフライン）」、`compute_121a`・`compute_121f` は「受理のみ（実行意味論は未検証）」 | 本 issue では対象外（§4） | `mma.f8f6f4.m16n8k32`／`mma.block_scale.m16n8k64`（受理段のみ）・R-MMA。`sm_121`／`sm_121a`／`sm_121f` の差は S2 の target 別セル |
+| `CLOCK_RATE` 等の未実測属性 | `attr.limits`／`attr.cluster`／`attr.misc` は 3 target とも「成立」（記録値は `perf/sm121-device-attributes.md`。例: `clock_rate=2418000` kHz・`max_blocks_per_multiprocessor=24`・`cluster_launch=1`） | bytes/cycle 換算を要する分析全般 | `attr.misc`／`attr.limits`／`attr.cluster`・R-GUIDE |
+| tcgen05／TMEM の到達可否 | `tc5.alloc`・`tc5.ld` は 3 target とも「ptxas 拒否（オフライン）」、`tc5.cross` は 3 target とも「ロード失敗」（想定 `expect=reject121` どおり。想定外の受理なし） | 本 issue では対象外（§1-1） | `tc5.alloc`／`tc5.ld`／`tc5.cross`・R-TC5 |
+| wgmma の受理 | `wgmma.m64n8k16` は 3 target とも「ptxas 拒否（オフライン）」（Hopper〈sm_90a〉の S2 は ok） | 本 issue では対象外（§1-1） | `wgmma.m64n8k16`（受理段のみ）・R-HOPPER |
+| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast） | R-TMA-BASE・R-TMA-XFER の 7 件は 3 target とも「成立」。R-TMA-SEM の 7 件は「受理のみ（実行意味論は未検証）」で、観測は `tma.coord` が `ELEM_INNER_FIRST`・`tma.oob_none`／`oob_neg` が ZERO 埋め・`tma.oob_nan` が NaN 埋め（`0x7ff77ff7`）・`tma.swz32`／`swz128` が `XOR_ADDR_BITS`・`tma.swz64` が `XOR_ADDR_BITS+SRC_B64_MODEL`（両者は本 box では区別不能） | C4（TMA Stage 2）ほか §3.3 | `tma.base_cta`／`tma.base_cluster`（R-TMA-BASE）・`tma.coord`／`tma.oob_none`／`tma.oob_nan`／`tma.oob_neg`／`tma.swz32`／`tma.swz64`／`tma.swz128`（R-TMA-SEM。観測の記録）・`tma.store`／`tma.bulk_cta`／`tma.bulk_cluster`／`tma.prefetch`／`tma.multicast`（R-TMA-XFER） |
+| arch 接尾辞（`a`／`f`）の要否 | target 間で判定が分かれたのは `snr.dec`・`snr.incdec`・`mma.f8f6f4.m16n8k32`・`mma.block_scale.m16n8k64` の 4 件で、いずれも `compute_121` だけが「ptxas 拒否（オフライン）」で `121a`・`121f` は通る。他のプローブは 3 target で同じ判定。`macro.arch` の記録: `__CUDA_ARCH_SPECIFIC__` は 121a のみ 1・`__CUDA_ARCH_FAMILY_SPECIFIC__` は 121a・121f で 1 | 上記各候補 | 全プローブの target 別セル（`compute_121`／`compute_121a`／`compute_121f`）・`macro.arch` |
 
 
 ## 3. REJECT 理由の再分類
@@ -115,14 +117,14 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 | 候補 | 根拠 | #2122 依存 | 想定効果・対象形状 | 事前登録ゲート | opt-in 方式 |
 |---|---|---|---|---|---|
 | C1: TMA Stage 2（128×64 タイルへの TMA 適用）＋形状条件 N≥512。tensor map キャッシュを同時設計 | `backend-cuda-tma-gemm-load-design.md` §10.8「再評価の仮説」 | なし（TMA は確定済み） | 本番構成と同一タイルで比較可能。N≥512 で Stage 1 の改善（最大 20.7%）が本番比でも出るか | A〜D | 初期は P-diag、合格後に形状分岐 |
-| C2: producer/consumer 非対称レジスタ（warp specialization）＋TMA | 同 §2 F2・§7 | **`setmaxnreg` の受理・実行の確定が前提**（未確定なら着手不可） | 非同期オーバーラップの上振れ | A〜D | P-diag |
-| C3: Stream-K の fixup 固定費削減。(a) co-residency 保証付きのカーネル内 fixup（cooperative launch。raw FFI の `unsafe` を伴うため #2127 の整理と security-auditor 監査が前提）／(b) cluster>1 と DSMEM が確定した場合のクラスタ内固定順序還元（クラスタ内 CTA は同時スケジュールされ、デッドロック要因を排除できる） | `cuda-gemm-tiled-pipeline-streamk.md` §6.8 | (b) のみ cluster・DSMEM | N=1024／2048 で wave 損失 11〜33% の回復余地。固定順序で決定性を維持 | A〜D（A は決定性・full タイル bit 一致。B-1 必須・fail>0 の扱いは承認事項） | P-diag |
+| C2: producer/consumer 非対称レジスタ（warp specialization）＋TMA | 同 §2 F2・§7 | **`setmaxnreg` の受理・実行の確定が前提**（#2122 GB10 実測: `compute_121a`／`121f` で「成立」・`compute_121` で「ptxas 拒否（オフライン）」。着手可否の判断は後続） | 非同期オーバーラップの上振れ | A〜D | P-diag |
+| C3: Stream-K の fixup 固定費削減。(a) co-residency 保証付きのカーネル内 fixup（cooperative launch。raw FFI の `unsafe` を伴うため #2127 の整理と security-auditor 監査が前提）／(b) cluster>1 と DSMEM が確定した場合のクラスタ内固定順序還元（クラスタ内 CTA は同時スケジュールされ、デッドロック要因を排除できる） | `cuda-gemm-tiled-pipeline-streamk.md` §6.8 | (b) のみ cluster・DSMEM（#2122 GB10 実測: cluster 2／4／8 と DSMEM は 3 target とも「成立」。着手可否の判断は後続） | N=1024／2048 で wave 損失 11〜33% の回復余地。固定順序で決定性を維持 | A〜D（A は決定性・full タイル bit 一致。B-1 必須・fail>0 の扱いは承認事項） | P-diag |
 | C4: 128×64 版 Stream-K | 同 §6.8 | なし | C3 の成否に従属。ゲート C が 64×64 で FAIL のため優先度低 | A〜D | P-diag |
 
 **対象外**:
 
 - tcgen05／TMEM／wgmma 系（§1 の 1）
-- cluster multicast（1×1×1 のみ。#2122 で覆るまで）
+- cluster multicast（1×1×1 のみ。#2122 で覆るまで）。**注記（#2122 GB10 実測）**: `tma.multicast`（cluster 2）と cluster 2／4／8 の起動は 3 target とも「成立」で、前提の「1×1×1 のみ」は実機で覆った。列挙対象に戻すかは本 doc では決めない（後続で判断）
 - 3×TF32 の再興（ユーザー判断確定済み）
 - f8f6f4・block-scaled 等の narrow-precision mma（精度契約・REQ-2 の変更を伴うため本 issue の範囲外。必要なら spec 側への提案）
 
@@ -168,8 +170,8 @@ TMA・`setmaxnreg`・Stream-K・persistent・cluster で open issue を検索し
 | test(backend-cuda): Stage 2 の GB10 実測・採否 | C1 の実装 | C・D | 中 |
 | test(backend-cuda): 3×TF32 累積意味論の判別実験（§3.4） | なし | 診断のみ | 低 |
 | perf(backend-cuda): Stream-K の cooperative fixup（C3(a)） | #2127・security-auditor 監査 | A〜D | 中 |
-| perf(backend-cuda): クラスタ内還元（C3(b)） | #2122（cluster・DSMEM の確定） | A〜D | #2122 次第 |
-| perf(backend-cuda): warp specialization＋TMA（C2） | #2122（`setmaxnreg` の確定） | A〜D | #2122 次第 |
+| perf(backend-cuda): クラスタ内還元（C3(b)） | #2122（cluster・DSMEM の確定） | A〜D | #2122 次第（2026-10-01 GB10 実測で cluster 2／4／8・DSMEM は「成立」。優先度は未設定） |
+| perf(backend-cuda): warp specialization＋TMA（C2） | #2122（`setmaxnreg` の確定） | A〜D | #2122 次第（2026-10-01 GB10 実測で `setmaxnreg` は `compute_121a`／`121f` で「成立」・`compute_121` で「ptxas 拒否（オフライン）」。優先度は未設定） |
 
 C1〜C3 は raw FFI（`CUtensorMap` の `DeviceRepr` 実装・`cuLaunchKernelEx`・cooperative launch）を伴いうるため、後続の実装 PR では security-auditor の監査を必須とする。
 

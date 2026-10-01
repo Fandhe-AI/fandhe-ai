@@ -231,8 +231,17 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 **訂正追記（イシュー #2122・2026-10-01）**: 上のゲート A の「意味論プローブ 3 件（NVRTC compile probe・execution probe cta・execution probe cluster）✓」は、§10.4 の「意味論プローブ 3 件」（要素座標の非ゼロ確認・部分 OOB box の fill 意味論・`B64` swizzle の smem 物理配置ダンプ）とは別物である。✓ が付いているのは既存プローブ（`tests/tma_probe_real_device.rs`）の 3 テストの成功で、§10.4 定義の意味論プローブ 3 件は**未実装のまま**であり、下の「未実装（申し送り）」と `cuda-sm121-gemm-candidates-design.md` §2.1 の記述が正しい。なお、`compile_ptx(src, "compute_121")` は NVRTC が PTX を出すだけで ptxas は走らず（ptxas が検証するのは `cuModuleLoadData` の時点）、既存プローブの「arch ごとのコンパイル成功」は命令の受理をほぼ示さない。この区別を段として記録するプローブ基盤は `docs/cuda-sm121-isa-probe.md`（#2122）。TMA の意味論プローブ（`tma.coord`・`tma.oob_*`・`tma.swz32`／`swz64`／`swz128`・`tma.store`・`tma.bulk_*`・`tma.prefetch`・`tma.multicast`。判定規則は RULE.txt の R-TMA-BASE／R-TMA-SEM／R-TMA-XFER）は同基盤の PR-B（#2122）で実装した。§10.4 定義の「要素座標の非ゼロ確認・部分 OOB box の fill 意味論・`B64` swizzle の smem 物理配置ダンプ」は `tma.coord`・`tma.oob_*`・`tma.swz64` が対応する。**GB10 での実測は未実施で、結果は未実測**（下の「未実装（申し送り）」の意味論プローブ 3 件は、実装は完了したが実機実行が未了である）。
 
+**追記（イシュー #2122 GB10 実測・2026-10-01）**: 上の訂正追記の時点で未実測だった `tma.*` を GB10 で実測した（cc 12.1・ドライバ 580.173.02・NVRTC 13.0・転送元 `7b6019ae`。判定は `docs/perf/logs/sm121-isa-probe-2122/aggregate.md` の逐語転記、結果表の正は `docs/cuda-sm121-isa-probe.md` §5）。target は `compute_121`／`121a`／`121f` の 3 つで、すべての `tma.*` が 3 target で同じ判定になった。
+- R-TMA-BASE・R-TMA-XFER（成立の判定）: `tma.base_cta`・`tma.base_cluster`・`tma.store`・`tma.prefetch`・`tma.multicast`（cluster 2）・`tma.bulk_cta`・`tma.bulk_cluster` は「成立」。依存先の対照 `ctl.raw`・`ctl.rawmap` と `clu.rt2` も「成立」。
+- R-TMA-SEM（観測の記録。判定語は「受理のみ（実行意味論は未検証）」）: §10.4 の意味論プローブ 3 件に対応する観測は次のとおり。
+  - 要素座標（`tma.coord`）: `class=ELEM_INNER_FIRST`（内側次元が先の仮説と一致。転置・不一致なし）
+  - 部分 OOB box（`tma.oob_none`／`oob_nan`／`oob_neg`）: 範囲内は `inrange=MATCH`、OOB 要素 96 個は `oob_none`・`oob_neg`（負の座標）で ZERO 埋め、`oob_nan` で NaN 埋め（ビット列 `0x7ff77ff7`）。`expect_tx` を OOB を含む box 全体（512 B）にした構成で待ちが完了しており、事前登録どおり「OOB 要素も `complete_tx` に数える」と読む
+  - swizzle の smem 物理配置（`tma.swz32`／`swz64`／`swz128`）: `swz32`・`swz128` は標準の XOR モデル（`XOR_ADDR_BITS`）と一致、`swz64` は `XOR_ADDR_BITS+SRC_B64_MODEL`（標準の XOR モデルと src の B64 仮説 `tma_swizzled_chunk_a` の両方と一致。本 box〈タイル先頭 1024 B 整列・行 64 B〉では両者は全語で同一になり区別できないため、両者の優劣は判定しない）
+- 既存プローブの再実行（R-LEGACY）: `tma_probe_real_device` の `tma_execution_probe`（cluster 変種）と `tma_execution_probe_cta` は、先頭で受理された `compute_121` を選択して `result=success bitwise_match=true`（分類 run_ok）で、`tma.base_cluster`・`tma.base_cta` の「成立」と整合（LEGACY_CONTRADICTION なし）。`tma_nvrtc_compile_probe` の 6 行（cluster／cta × 3 arch）は記録のみ。
+- 下の「未実装（申し送り）」の意味論プローブ 3 件は、上記の観測で GB10 実測済みとなった（申し送りの項目自体は経緯として残す）。
+
 **未実装（申し送り）**:
-- 意味論プローブ 3 件（要素座標・部分 OOB・smem 配置ダンプ）
+- 意味論プローブ 3 件（要素座標・部分 OOB・smem 配置ダンプ）→ #2122 で実装・GB10 実測済み（上の追記）
 - tensor map キャッシュ
 - ベンチ example の拡張（§10.4 当初計画の遺項）
 
