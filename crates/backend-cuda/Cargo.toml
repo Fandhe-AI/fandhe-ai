@@ -334,6 +334,25 @@ required-features = ["internal-diagnostics"]
 name = "tma_probe_real_device"
 required-features = ["internal-diagnostics"]
 
+# イシュー #2122（sm_121 ISA プローブ基盤）: 3 テストは `tests/sm121_isa_probe_common/`
+# （`device.context()` を使う実行器を含む共有モジュール）を `#[path]` で取り込む。
+# `setmaxnreg_*` と同じ理由で `internal-diagnostics` feature を要求する。
+# `cargo test --workspace`（feature 未指定）では対象外となり、
+# `cargo test --all-features`（CI の test ジョブ）でレジストリ検査のみ走る
+# （compile／exec は `#[ignore]`）。
+
+[[test]]
+name = "sm121_isa_probe_registry"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "sm121_isa_probe_compile"
+required-features = ["internal-diagnostics"]
+
+[[test]]
+name = "sm121_isa_probe_exec_real_device"
+required-features = ["internal-diagnostics"]
+
 # `tests/setmaxnreg_common/mod.rs`（`device.context()`/`device.stream()` を
 # 使う共有ヘルパー）を `mod setmaxnreg_common;` で取り込む 4 ファイル。
 # 直接 grep では検出されない間接使用のため見落としやすい（PR #1390 再修正

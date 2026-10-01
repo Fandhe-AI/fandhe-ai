@@ -95,6 +95,8 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 | compute capability | 未実測 | (major, minor) |
 | 総メモリ容量 | 未実測 | bytes |
 
+> **追記（イシュー #2122）**: 下記「未実測」の行（`MAX_SHARED_MEMORY_PER_BLOCK`・`RESERVED_SHARED_MEMORY_PER_BLOCK`・`MAX_REGISTERS_PER_BLOCK`・`CLOCK_RATE` 等）は、#2122 のプローブ基盤（`docs/cuda-sm121-isa-probe.md`）の `attr.limits`／`attr.cluster`／`attr.misc` で GB10 実測時に回収する予定である。**回収は未実施で、本表の値は変更していない**（`CLUSTER_LAUNCH` など本表にない属性も同プローブが記録する）。
+
 上記「未実測」の行は #739 実測作業では転記元（イシュー #739・#736・#740〜#743 本文）に個別値の記載が
 無いため未実測のまま残す（推定値を書かない）。実機での `device_attributes_dump` 出力全文の回収により
 充足する。
