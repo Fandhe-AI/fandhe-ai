@@ -36,7 +36,7 @@
 ## 3. 検出範囲（保証しないこと）
 
 - 判定は、`aggregate.py` が読む入力（`compile.log`・`exec/*.log`・`legacy-*.log`・`env_info.txt`）に現れたレコードの完全性と、そこから導く規則に限る。ログが実際にその実行から生成されたことの証明（改竄検知）、ptxas・ドライバ内部の正しさ、sm_86 の結果の sm_121 への外挿の妥当性は保証しない。
-- 重複・未知の ID／stage／status・壊れた JSON・NaN・浮動小数点・64 bit を超える整数・キー集合の過不足・連鎖の矛盾・完了記録の欠落・未マスクの `/home/<name>` 形パスは fail-closed（exit 2）。ホスト名の残存は検出しない。
+- 重複・未知の ID／stage／status・壊れた JSON・NaN・浮動小数点・64 bit を超える整数・キー集合の過不足・連鎖の矛盾・完了記録の欠落・未マスクの `/home/<name>` 形パスは fail-closed（exit 2）。ホスト名の残存は検出しない。測定そのものの打ち切り（外部 timeout＝exit 124）・異常終了は、完全性違反ではなく判定不能（TIMEOUT／PROCESS_FAILED。compile・exec・legacy。dump は欠測として報告）として集計を続け、proc 記録の欠落や exit 0 なのに出力が欠けている場合を完全性違反にする（プロセス種別ごとの表は RULE.txt 13a）。
 - 前提ゲート G0（env_info の provenance〈`git_clean=1`〉・正式 target のみ・NVRTC の存在・全 exec の cc が 12.1）が不成立なら全セルを判定不能にする。ctl.copy の成否は G0 に含めず、target ごとの R-CTL が扱う。
 - レジストリ・RULE.txt・`aggregate.py` の 3 か所の突き合わせは、`sm121_isa_probe_registry`（CI で走る）が「レジストリ ↔ RULE.txt」を、`python3 aggregate.py --self-test`（CI では走らない）が「RULE.txt ↔ aggregate.py」「`orchestrate.sh --dry-run` の起動一覧 ↔ RULE.txt」を検査する。
 

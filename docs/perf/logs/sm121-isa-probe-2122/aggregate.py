@@ -421,6 +421,8 @@ class Run:
     execs: dict                  # (probe, target) -> ExecProc
     legacy: dict                 # name -> {"class": str, "exit": int}
     targets: tuple
+    compile_failure: str | None = None   # compile が打ち切られた: TIMEOUT／PROCESS_FAILED（完走なら None）
+    dump_status: str = "-"               # device_attributes_dump の記録状態: ok／TIMEOUT／PROCESS_FAILED
 
 
 def parse_env_info(text: str) -> dict:
@@ -562,23 +564,31 @@ def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str
 
 
 def load_compile(rule: Rule, text: str, targets: tuple) -> tuple:
+    """compile.log を読む。戻り値は (env, cells, nvrtc_missing, failure)。
+
+    exit 0 は完了記録と全セルが必須。exit 124／その他の非 0 は測定そのものの打ち切りで、
+    打ち切りまでに出たセルを検証して採用し、未出力のセルは欠測とする（failure に TIMEOUT／
+    PROCESS_FAILED を返し、欠測に依存する判定を verdict_for が判定不能にする）。
+    exit 0 なのに欠落、完了しているのに非 0、proc 記録の欠落は完全性違反（RULE.txt 13）。"""
     log = parse_log(text, "compile.log")
     envs = [r for r in log.envs if r["phase"] == "compile"]
-    if len(envs) != 1 or len(log.envs) != 1:
-        raise LogIntegrityError("compile.log: env レコードがちょうど 1 件でない")
-    env = envs[0]
-    if env["probe"] != "-" or env["target"] != "-":
-        raise LogIntegrityError("compile.log: env の probe／target が - でない")
+    if len(envs) != len(log.envs) or len(envs) > 1:
+        raise LogIntegrityError("compile.log: env レコードが 2 件以上、または phase が compile でない")
     procs = [r for r in log.procs if r["phase"] == "compile"]
     if len(procs) != 1 or len(log.procs) != 1:
         raise LogIntegrityError("compile.log: proc 記録がちょうど 1 件でない")
     exit_code = procs[0]["exit"]
     if procs[0]["probe"] != "-" or procs[0]["target"] != "-":
         raise LogIntegrityError("compile.log: proc の probe／target が - でない")
-    if env["nvrtc"] == "unavailable":
+    env = envs[0] if envs else None
+    if env is None and exit_code == 0:
+        raise LogIntegrityError("compile.log: exit 0 なのに env レコードが無い")
+    if env is not None and (env["probe"] != "-" or env["target"] != "-"):
+        raise LogIntegrityError("compile.log: env の probe／target が - でない")
+    if env is not None and env["nvrtc"] == "unavailable":
         if log.cells or log.dones:
             raise LogIntegrityError("compile.log: NVRTC 不在なのにセルまたは done がある")
-        return env, {}, True
+        return env, {}, True, None
     cells: dict = {}
     for rec in log.cells:
         if rec["phase"] != "compile":
@@ -616,14 +626,20 @@ def load_compile(rule: Rule, text: str, targets: tuple) -> tuple:
     for (pid, t, stage) in cells:
         if t in ("home", "hopper") and stage != "nvrtc_cubin":
             raise LogIntegrityError(f"compile.log: {t} は S2 のみ: {pid} {stage}")
-    require_exact_keys(cells.keys(), want, "compile.log のセル")
-    if len(log.dones) != 1 or log.dones[0]["phase"] != "compile" \
-            or log.dones[0]["probe"] != "-" or log.dones[0]["target"] != "-" \
-            or log.dones[0]["cells"] != len(cells) or log.dones[0]["mismatch"] != 0:
-        raise LogIntegrityError("compile.log: done がちょうど 1 件で件数一致していない")
-    if exit_code != 0:
-        raise LogIntegrityError(f"compile.log: 全セルがそろっているのに exit {exit_code}")
-    return env, cells, False
+    extra = set(cells) - want
+    if extra:
+        raise LogIntegrityError(f"compile.log のセル: 余剰・未知のキー {sorted(extra)}")
+    complete = set(cells) == want
+    done_ok = (len(log.dones) == 1 and log.dones[0]["phase"] == "compile"
+               and log.dones[0]["probe"] == "-" and log.dones[0]["target"] == "-"
+               and log.dones[0]["cells"] == len(cells) and log.dones[0]["mismatch"] == 0)
+    if exit_code == 0:
+        if not complete or not done_ok:
+            raise LogIntegrityError("compile.log: exit 0 なのに全セル・完了記録がそろっていない")
+        return env, cells, False, None
+    if complete or log.dones:
+        raise LogIntegrityError(f"compile.log: exit {exit_code} なのに全セルまたは完了記録がある（矛盾）")
+    return env, cells, False, "TIMEOUT" if exit_code == 124 else "PROCESS_FAILED"
 
 
 def classify_legacy(text: str, name: str, exit_code: int, want_arch: str) -> str:
@@ -653,19 +669,22 @@ def classify_legacy(text: str, name: str, exit_code: int, want_arch: str) -> str
             terminals.append("nvrtc_rejected")
         elif stage == "nvrtc_compile" and result == "inconclusive":
             terminals.append("inconclusive")
+    # 測定そのものの打ち切り・異常終了は比較不能（timeout／process_failed。新プローブ側は
+    # LEGACY_INCONCLUSIVE）。終端の結論が残っているのに異常終了、exit 0 なのに結論が無い等の
+    # 矛盾は完全性違反（RULE.txt 13）。
     if exit_code == 124:
         if terminals:
             raise LogIntegrityError(f"{name}: timeout なのに終端の結論がある: {terminals}")
         return "timeout"
-    if len(terminals) != 1:
-        raise LogIntegrityError(f"{name}: 終端の結論がちょうど 1 つでない: {terminals}")
-    if exit_code == 101 and terminals[0] != "mismatch":
-        raise LogIntegrityError(f"{name}: exit 101 は corrupted（mismatch）の場合のみ許容")
-    if exit_code not in (0, 101):
-        raise LogIntegrityError(f"{name}: legacy の終了コード {exit_code} は未知")
-    if exit_code == 0 and terminals[0] == "mismatch":
-        raise LogIntegrityError(f"{name}: corrupted なのに exit 0")
-    return terminals[0]
+    if exit_code == 0:
+        if len(terminals) != 1 or terminals[0] == "mismatch":
+            raise LogIntegrityError(f"{name}: exit 0 で終端の結論がちょうど 1 つ（corrupted 以外）でない: {terminals}")
+        return terminals[0]
+    if exit_code == 101 and terminals == ["mismatch"]:
+        return "mismatch"
+    if terminals:
+        raise LogIntegrityError(f"{name}: exit {exit_code} なのに終端の結論がある: {terminals}")
+    return "process_failed"
 
 
 def load_run(rule: Rule, log_dir: Path) -> Run:
@@ -716,7 +735,7 @@ def load_run(rule: Rule, log_dir: Path) -> Run:
         raise LogIntegrityError("env_info の mode=dev_smoke なのに正式 target のログがある")
     want = {(pid, t) for pid in rule.probes for t in targets}
     require_exact_keys(names.keys(), want, "exec ファイル集合")
-    compile_env, compile_cells, compile_missing = load_compile(
+    compile_env, compile_cells, compile_missing, compile_failure = load_compile(
         rule, compile_path.read_text(encoding="utf-8"), targets)
     execs: dict = {}
     for key, f in names.items():
@@ -752,9 +771,16 @@ def load_run(rule: Rule, log_dir: Path) -> Run:
     dprocs = [r for r in dump.procs if r["phase"] == "dump" and r["probe"] == "-" and r["target"] == "-"]
     if len(dprocs) != 1 or len(dump.procs) != 1:
         raise LogIntegrityError("device_attributes_dump.log: proc 記録がちょうど 1 件でない")
-    if dprocs[0]["exit"] != 0:
-        raise LogIntegrityError(f"device_attributes_dump.log: exit {dprocs[0]['exit']}（timeout は 124）")
-    return Run(True, mode, prov, compile_env, compile_cells, compile_missing, execs, legacy, targets)
+    # 記録用（判定に使わない）なので、打ち切り（124）・異常終了は欠測として報告し集計は続ける。
+    # exit 0 なのに本文が無い（proc 行だけ）は出力欠落として完全性違反。
+    if dprocs[0]["exit"] == 0:
+        if not [l for l in dump.other_lines if l.strip()]:
+            raise LogIntegrityError("device_attributes_dump.log: exit 0 なのに出力が無い")
+        dump_status = "ok"
+    else:
+        dump_status = "TIMEOUT" if dprocs[0]["exit"] == 124 else "PROCESS_FAILED"
+    return Run(True, mode, prov, compile_env, compile_cells, compile_missing, execs, legacy, targets,
+               compile_failure, dump_status)
 
 
 # ------------------------------------------------------------------ 判定
@@ -777,7 +803,7 @@ def evaluate_g0(run: Run) -> list:
         reasons.append("G0_DIRTY_TREE")
     if run.mode != "official":
         reasons.append("G0_DEV_TARGET")
-    if run.compile_missing or (run.compile_env or {}).get("nvrtc") == "unavailable":
+    if run.compile_missing or run.compile_env is None or run.compile_env.get("nvrtc") == "unavailable":
         reasons.append("G0_NVRTC_MISSING")
     envs = [p.env for p in run.execs.values()]
     if any(e is None or e["cc"] == "none" or e["device"] == "none" for e in envs):
@@ -829,6 +855,16 @@ def verdict_for(rule: Rule, run: Run, g0: list, pdef: ProbeDef, target: str) -> 
         if v.status == "unavailable":
             return indet("NO_DEVICE", v.detail)
         return indet("STAGE_ERROR", v.detail)
+    # compile が打ち切られて必要なセル（home・S1／S2・hopper）が欠測なら、R-HOME・R-HOPPER に
+    # 依存する判定は TIMEOUT／PROCESS_FAILED で判定不能（RULE.txt 6 (4)）。
+    if run.compile_failure is not None:
+        need = [(pdef.id, "home", "nvrtc_cubin"), (pdef.id, target, "nvrtc_ptx"),
+                (pdef.id, target, "nvrtc_cubin")]
+        if pdef.home == HOPPER_ARCH:
+            need.append((pdef.id, "hopper", "nvrtc_cubin"))
+        missing = [k for k in need if k not in run.compile_cells]
+        if missing:
+            return indet(run.compile_failure, f"compile が打ち切られ {missing[0][1]}／{missing[0][2]} が欠測")
     home = run.compile_cells.get((pdef.id, "home", "nvrtc_cubin"))
     if home is None or home.status != "ok":
         if home is not None and home.status == "rejected":
@@ -848,7 +884,7 @@ def verdict_for(rule: Rule, run: Run, g0: list, pdef: ProbeDef, target: str) -> 
             if pid == pdef.id and t == target and lname in run.legacy:
                 mine = new_class(c)
                 theirs = run.legacy[lname]["class"]
-                if theirs in ("inconclusive", "timeout"):
+                if theirs in ("inconclusive", "timeout", "process_failed"):
                     return indet("LEGACY_INCONCLUSIVE", f"legacy の結論が {theirs}（比較できない）")
                 if mine is not None and mine != theirs:
                     return indet("LEGACY_CONTRADICTION", f"legacy={theirs} 新プローブ={mine}")
@@ -997,6 +1033,11 @@ def render(rule: Rule, run: Run, g0: list, verdicts: dict, claims: list) -> str:
     else:
         out.append("- 成立")
     out += ["", f"mode={run.mode if run.measured else '-'}　git_head={run.provenance.get('git_head', '-')}", ""]
+    if run.measured:
+        out += [f"- compile プロセス: {run.compile_failure or '完走'}"
+                + ("（打ち切り。欠測セルに依存する判定は判定不能）" if run.compile_failure else ""),
+                f"- device_attributes_dump（記録のみ）: {run.dump_status}"
+                + ("（欠測。判定には使わない）" if run.dump_status != "ok" else ""), ""]
     targets = run.targets
     out += ["## プローブ別の判定", "",
             "| プローブ | AC | 条項 | home | " + " | ".join(targets) + " |",
@@ -1121,6 +1162,9 @@ class Model:
         self.compile_env = {"v": 1, "kind": "env", "phase": "compile", "probe": "-", "target": "-",
                             "device": "none", "cc": "none", "nvrtc": "13.0"}
         self.compile_cells: dict = {}
+        self.compile_exit = 0
+        self.compile_keep: int | None = None   # 先頭 N セルだけ書く（打ち切りの再現）
+        self.compile_env_present = True
         self.execs: dict = {}
         self.legacy: dict = {}
         for pid, p in rule.probes.items():
@@ -1170,14 +1214,18 @@ class Model:
                 "dump\n" + PREFIX_PROC + json.dumps({"v": 1, "kind": "proc", "phase": "dump", "probe": "-",
                                                     "target": "-", "exit": self.dump_exit}) + "\n",
                 encoding="utf-8")
-        lines = [PREFIX_JSON + json.dumps(self.compile_env)]
-        for (pid, t, stage), c in self.compile_cells.items():
+        lines = [PREFIX_JSON + json.dumps(self.compile_env)] if self.compile_env_present else []
+        items = list(self.compile_cells.items())
+        if self.compile_keep is not None:
+            items = items[:self.compile_keep]
+        for (pid, t, stage), c in items:
             lines.append(self._cell_line(pid, t, "compile", stage, c, self.compile_arch(pid, t, stage)))
-        lines.append(PREFIX_JSON + json.dumps({"v": 1, "kind": "done", "phase": "compile", "probe": "-",
-                                               "target": "-", "cells": len(self.compile_cells),
-                                               "mismatch": 0}))
+        if self.compile_keep is None:
+            lines.append(PREFIX_JSON + json.dumps({"v": 1, "kind": "done", "phase": "compile", "probe": "-",
+                                                   "target": "-", "cells": len(self.compile_cells),
+                                                   "mismatch": 0}))
         lines.append(PREFIX_PROC + json.dumps({"v": 1, "kind": "proc", "phase": "compile", "probe": "-",
-                                               "target": "-", "exit": 0}))
+                                               "target": "-", "exit": self.compile_exit}))
         (root / "compile.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
         for (pid, t), e in self.execs.items():
             ls = []
@@ -1341,6 +1389,27 @@ def fx_home_ind(rule):
     m = Model(rule)
     m.compile_cells[("wgmma.m64n8k16", "home", "nvrtc_cubin")] = Cell("error", "X", "home")
     _expect(_verdict(m, "wgmma.m64n8k16").code == "HOME_NOT_OK", "HOME_NOT_OK")
+    # compile プロセスの打ち切り: 出たセルは採用し、欠測に依存する判定だけを判定不能にする。
+    for exit_code, want in ((124, "TIMEOUT"), (139, "PROCESS_FAILED")):
+        m = Model(rule)
+        m.compile_exit, m.compile_keep = exit_code, 10   # ctl.copy（8 セル）は完全・macro.arch は途中
+        run, g0, v = _load(m)
+        _expect(run.compile_failure == want and g0 == [], f"compile 打ち切り exit={exit_code}: {run.compile_failure} {g0}")
+        _expect(v[("ctl.copy", "compute_121")].word == V_OK, "完全に出たセルの判定は継続する")
+        _expect(v[("wgmma.m64n8k16", "compute_121")].code == want, f"欠測に依存する判定は {want}")
+        _expect(v[("attr.limits", "compute_121")].word == V_OK, "compile に依存しない attr は継続する")
+    # env 行の前に打ち切られた compile は NVRTC の存在を確認できず G0 不成立。
+    m = Model(rule)
+    m.compile_exit, m.compile_keep, m.compile_env_present = 124, 0, False
+    run, g0, _ = _load(m)
+    _expect(g0 == ["G0_NVRTC_MISSING"], f"compile の env 欠落: {g0}")
+    # exit 0 なのに欠落、完了しているのに非 0 は完全性違反。
+    m = Model(rule)
+    m.compile_keep = 10
+    _expect_integrity_error(lambda: _load(m), "compile: exit 0 なのにセルが欠落")
+    m = Model(rule)
+    m.compile_exit = 124
+    _expect_integrity_error(lambda: _load(m), "compile: 完了しているのに exit 124")
 
 
 def fx_tc5(rule):
@@ -1473,6 +1542,21 @@ def fx_legacy_ind(rule):
     m.legacy["setmaxnreg_probe_incdec_accel_real_device"]["lines"].append(
         "SETMAXNREG_PROBE_RESULT stage=launch kernel=k arch=compute_121a result=failed")
     _expect_integrity_error(lambda: _load(m), "legacy の終端が 2 つ")
+    # 異常終了（124 以外の非 0）は比較不能。結論が残っている・exit 0 で結論が無いのは完全性違反。
+    for exit_code in (139, 101):
+        m = Model(rule)
+        m.legacy["setmaxnreg_probe_dec_base_real_device"].update(lines=[], exit=exit_code)
+        v = _verdict(m, "snr.dec")
+        _expect(v.code == "LEGACY_INCONCLUSIVE", f"legacy exit {exit_code}: {v}")
+    for exit_code, want in ((139, "process_failed"), (101, "process_failed"), (124, "timeout")):
+        got = classify_legacy("", "unit", exit_code, "compute_121")
+        _expect(got == want, f"classify_legacy 空出力 exit {exit_code}: {got}")
+    m = Model(rule)
+    m.legacy["setmaxnreg_probe_dec_base_real_device"]["exit"] = 1
+    _expect_integrity_error(lambda: _load(m), "legacy: 結論があるのに exit 1")
+    m = Model(rule)
+    m.legacy["setmaxnreg_probe_dec_base_real_device"]["lines"] = []
+    _expect_integrity_error(lambda: _load(m), "legacy: exit 0 なのに結論が無い")
     # legacy が inconclusive／timeout のときは矛盾ではなく比較不能（別コード）。
     m = Model(rule)
     m.legacy["setmaxnreg_probe_dec_base_real_device"]["lines"] = [
@@ -1590,8 +1674,14 @@ def fx_common_ind(rule):
     m.dump_exit = None
     _expect_integrity_error(lambda: _load(m), "dump ログの欠落")
     m = Model(rule)
-    m.dump_exit = 124
-    _expect_integrity_error(lambda: _load(m), "dump の timeout")
+    m.dump_exit = 124   # 打ち切りは欠測として報告し、集計は続ける（判定に使わない）
+    run, g0, _ = _load(m)
+    _expect(run.dump_status == "TIMEOUT" and g0 == [], f"dump timeout は非致命: {run.dump_status} {g0}")
+    m.dump_exit = 139
+    _expect(_load(m)[0].dump_status == "PROCESS_FAILED", "dump 異常終了は非致命")
+    _expect_integrity_error(lambda: _load(base, patch("device_attributes_dump.log",
+        lambda t: "\n".join(l for l in t.splitlines() if l.startswith(PREFIX_PROC)) + "\n")),
+        "dump: exit 0 なのに出力が無い")
     _expect_integrity_error(lambda: _load(base, patch("device_attributes_dump.log", lambda t: "\n".join(
         l for l in t.splitlines() if not l.startswith(PREFIX_PROC)) + "\n")), "dump の proc 欠落")
     # arch の期待値照合（exec・compile）。

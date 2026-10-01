@@ -86,7 +86,9 @@
 6. 連鎖と判定（共通・上から順に評価。最初に当たったものを採る）
   (1) G0 不成立 → 判定不能（G0_FAILED）
   (2) 当該プロセスの timeout／process_failed → 判定不能（TIMEOUT／PROCESS_FAILED）
-      （外部 timeout で打ち切られた＝ハング。記録できた段までを detail に残す）
+      （外部 timeout で打ち切られた＝ハング。記録できた段までを detail に残す）。compile プロセスの
+      打ち切りも同様で、打ち切りまでに出たセルは検証して採用し、欠測した home・S1／S2・hopper
+      セルに依存する判定（(4)(5)(5b)）だけを TIMEOUT／PROCESS_FAILED で判定不能にする。
   (3) ctl が ok でない（ctl.copy 以外）→ 判定不能（R-CTL の理由）
   (4) home の S2 が ok でない → 判定不能（R-HOME の理由）
   (5) compile.log の S1／S2 と exec の S1／S2 の状態が食い違う → 判定不能
@@ -165,11 +167,25 @@
   分類し、対応する snr.* の同 target の分類と食い違えば 6 (8) のとおり判定不能とする。
   legacy の分類: run_ok（execute success）／mismatch（execute corrupted。終了コード 101）／
   load_failed／runtime_error／nvrtc_rejected／inconclusive（nvrtc_compile inconclusive）／
-  timeout（終了コード 124・終端の結論なし）。inconclusive・timeout は新プローブ側を
-  判定不能（LEGACY_INCONCLUSIVE）にする。終端の結論はちょうど 1 つ（0 件・複数は完全性違反）。
+  timeout（終了コード 124・終端の結論なし）／process_failed（124 以外の非 0 で終端の結論なし。
+  device 初期化の panic〈101〉を含む）。inconclusive・timeout・process_failed は新プローブ側を
+  判定不能（LEGACY_INCONCLUSIVE）にする。exit 0 の終端の結論はちょうど 1 つ（0 件・複数は
+  完全性違反）。結論が残っているのに異常終了（101 の corrupted 以外）も完全性違反。
   対応: dec_base→(snr.dec, compute_121)・dec_accel→(snr.dec, compute_121a)・
   incdec_base→(snr.incdec, compute_121)・incdec_accel→(snr.incdec, compute_121a)。
   tma_probe_real_device の再実行は本規則の対象外。
+
+13a. プロセス異常の扱い（方針: 測定そのものの打ち切り・異常終了は判定不能として集計を続け、
+     記録の欠落・矛盾は改ざん・欠落の疑いとして完全性違反にする）
+  | プロセス | exit 124 | 124 以外の非 0 | exit 0 だが出力が欠落 |
+  |---|---|---|---|
+  | env_info（シェルのみ・プロセスなし） | - | - | 必須キー・値の欠落（end_utc なし＝未完了の実行を含む）は完全性違反 |
+  | device_attributes_dump | 欠測（TIMEOUT）として報告し集計は続ける（判定に使わない記録用） | 欠測（PROCESS_FAILED）として同様 | 本文なし（proc 行だけ）は完全性違反。proc 記録の欠落・ファイル欠落も完全性違反 |
+  | compile | 出たセルは採用。欠測セルに依存する判定は判定不能（TIMEOUT）。env 行も無ければ G0_NVRTC_MISSING | 同（PROCESS_FAILED） | 完全性違反（全セル・done が必須）。完走しているのに非 0 も完全性違反 |
+  | exec（(プローブ, target) ごと） | 欠落段の先頭に timeout を合成し判定不能（TIMEOUT）。ctl 段の打ち切りを含む | 同（PROCESS_FAILED）。101 は mismatch を伴う完了のみ許容 | 完全性違反（全セル・done・env が必須）。完走しているのに非 0（101＋mismatch を除く）も完全性違反 |
+  | legacy | 分類 timeout → 新プローブ側を判定不能（LEGACY_INCONCLUSIVE） | 結論なしなら分類 process_failed → 同（LEGACY_INCONCLUSIVE）。結論が残っているのは完全性違反 | 完全性違反（終端の結論がちょうど 1 つ） |
+  どのプロセス種別でも、proc 記録（SM121_PROBE_PROC 行）の欠落・重複・識別子の不一致は
+  完全性違反。official では legacy 4 件・dump・compile・exec 全件のファイルが必須。
 
 13. 入力の完全性（R-COMMON・fail-closed）
   aggregate.py は LogIntegrityError を送出し、正式な集計を一切出力せず非ゼロ終了する:
@@ -179,8 +195,8 @@
     - キー集合の過不足（期待する (プローブ, target, stage) の完全集合。欠落・余剰・未知）
     - 連鎖の矛盾（前段が失敗なのに後段が ok 等）・policy で固定された状態との不一致
     - 完了記録（done）の欠落・件数の不一致、プロセス記録（proc）の欠落・不整合
-      （compile・exec・legacy・device_attributes_dump のすべて。dump は終了コード 0 が必須で、
-      値は記録のみ）
+      （compile・exec・legacy・device_attributes_dump のすべて。打ち切り・異常終了の扱いは
+      13a の表。dump の値は記録のみ）
     - セルの arch が期待と異なる（exec: ctl は target・S2 は実アーキ・他は仮想アーキ、
       FIXEDARCH 行のプローブは固定アーキ。compile: home は PROBE 行の home=・hopper は sm_90a）
     - official で legacy ログが 4 件そろわない（dev では 0 件を要求）
