@@ -215,7 +215,14 @@ PR-B で追加予定・未実装。結果欄なし。
 
 ### 6.1 GB10 実機（共有ノード。空いているときに実行する）
 
-`docs/real-hardware-verification-env.md` §3 の手順で転送し、§4.8 の外部 timeout 運用契約に従う。
+`docs/real-hardware-verification-env.md` §3 の手順で転送し、§4.8 の外部 timeout 運用契約に従う。GB10 ノードの作業ツリーは `.git` を持たない（rsync で `.git/` を除外するため）ので、転送元で rsync の直前に provenance 用の `.rev-stamp` を **次の 2 行形式**で作る（§3 の `git rev-parse HEAD > .rev-stamp` の 1 行形式では `dirty=` 行がなく、G0 が `G0_DIRTY_TREE` で不成立になる。転送後に転送元の `.rev-stamp` は削除する）。
+
+```bash
+sha=$(git rev-parse HEAD); dirty=$(git status --porcelain --untracked-files=normal | wc -l)
+printf '%s\ndirty=%s\n' "$sha" "$dirty" > .rev-stamp
+```
+
+`orchestrate.sh` は git 作業ツリーなら git から、`.git` が無ければ `.rev-stamp` から `git_head`・`git_clean` を読み（`dirty=0` のときだけ `git_clean=1`）、どちらも無ければ開始前に停止する。dirty な状態から転送した実測は G0 が不成立になり、全セルが判定不能になる。
 
 ```bash
 env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
