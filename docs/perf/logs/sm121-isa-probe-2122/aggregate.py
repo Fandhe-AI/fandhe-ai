@@ -817,6 +817,11 @@ def classify_tma_legacy(text: str, name: str, exit_code: int, kind: str) -> tupl
     if len(selected) > 1 or len(successes) > 1:
         raise LogIntegrityError(f"{name}: 選択 arch／成功行が複数: {selected} {successes}")
     target = selected[0] if selected else None
+    # 選択・成功の arch は既存テストの PROBE_ARCHS（= 正式 target と同じ 3 値）の外にならない。外なら
+    # ログの改ざん・取り違えであり、比較を省いて素通りさせず完全性違反とする（fail-closed）。
+    for a in selected + successes:
+        if a not in TMA_LEGACY_ARCHS:
+            raise LogIntegrityError(f"{name}: 選択・成功行の arch が PROBE_ARCHS {TMA_LEGACY_ARCHS} の外: {a!r}")
     if successes:
         if exit_code != 0:
             raise LogIntegrityError(f"{name}: 成功行があるのに exit {exit_code}")
@@ -907,6 +912,8 @@ def load_run(rule: Rule, log_dir: Path) -> Run:
             cls, ltarget = classify_legacy(text, f.name, procs[0]["exit"], fixed_target), fixed_target
         else:
             cls, ltarget = classify_tma_legacy(text, f.name, procs[0]["exit"], kind)
+        if ltarget is not None and ltarget not in targets:
+            raise LogIntegrityError(f"{f.name}: legacy の対象 arch {ltarget!r} が正式 target {targets} の外")
         register_once(legacy, lname, {"class": cls, "exit": procs[0]["exit"], "target": ltarget}, "legacy")
     # R-LEGACY: official では legacy 7 件が必須（欠測を黙認すると legacy 照合が飛び「成立」になる）。
     # dev（開発機スモーク）では legacy を回さないので 0 件を要求する。
@@ -1332,8 +1339,7 @@ def render(rule: Rule, run: Run, g0: list, verdicts: dict, claims: list) -> str:
         for lname, d in sorted(run.legacy.items()):
             pid, fixed, _kind = LEGACY_NAMES[lname]
             lt = d["target"] or fixed or "-"
-            note = " （正式 target 外のため比較せず）" if lt != "-" and lt not in run.targets else ""
-            out.append(f"| {lname} | {pid or '-'}@{lt}{note} | {d['class']} | {d['exit']} |")
+            out.append(f"| {lname} | {pid or '-'}@{lt} | {d['class']} | {d['exit']} |")
     return "\n".join(out) + "\n"
 
 
@@ -2221,15 +2227,20 @@ def fx_tma_legacy(rule):
         "tma_compile_probe variant=cta arch=compute_121 result=success (selected for execution probe)",
         "TMA 転送結果が期待するタイル"]}
     _expect(_verdict(m, "tma.base_cta").word == V_LOAD, "legacy・新ともに失敗なら整合（新のロード失敗を採る）")
-    # legacy の選択 arch が正式 target 外なら比較しない（成立のまま）。
+    # legacy の選択 arch が正式 target（= PROBE_ARCHS）の外なら比較を省かず完全性違反（fail-closed）。
+    sel_bad = ["tma_compile_probe variant=cta arch=compute_86 result=success (selected for execution probe)",
+               "TMA 転送結果が期待するタイル"]
+    _expect_integrity_error(lambda: classify_tma_legacy("\n".join(sel_bad), "unit", 101, "tma_exec_cta"),
+                            "PROBE_ARCHS 外の選択 arch")
+    _expect_integrity_error(lambda: classify_tma_legacy(
+        "tma_compile_probe variant=cta arch=compute_86 result=success (selected for execution probe)\n"
+        "tma_execution_probe_cta variant=cta arch=compute_86 result=success", "unit", 0, "tma_exec_cta"),
+        "PROBE_ARCHS 外の成功行")
     m = Model(rule)
-    m.legacy["tma_probe_real_device@tma_execution_probe_cta"] = {"exit": 101, "lines": [
-        "tma_compile_probe variant=cta arch=compute_86 result=success (selected for execution probe)",
-        "TMA 転送結果が期待するタイル"]}
-    run, g0, v = _load(m)
-    _expect(v[("tma.base_cta", "compute_121")].word == V_OK, "正式 target 外の legacy は比較を省く")
-    md = render(rule, run, g0, v, load_claims(CLAIMS_PATH.read_text(encoding="utf-8")))
-    _expect("正式 target 外のため比較せず" in md, "比較を省いた legacy は R-LEGACY 表に注記する")
+    m.legacy["tma_probe_real_device@tma_execution_probe_cta"] = {"exit": 101, "lines": sel_bad}
+    _expect_integrity_error(lambda: _load(m), "load_run まで PROBE_ARCHS 外の選択 arch を拒否する")
+    # load_run 側は規則上の正式 target との照合（定数 TMA_LEGACY_ARCHS と RULE の TARGET の取り違え対策）。
+    _expect(tuple(TMA_LEGACY_ARCHS) == tuple(rule.targets), "TMA_LEGACY_ARCHS が RULE の正式 target と不一致")
 
 
 FIXTURES = {

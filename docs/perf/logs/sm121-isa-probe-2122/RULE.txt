@@ -248,7 +248,7 @@
   run_ok（`tma_execution_probe ... result=success`）／mismatch（exit 101 で転送結果の不一致メッセージ）／
   nvrtc_rejected（全 arch のコンパイル失敗の panic）／process_failed（その他の異常終了。選択 arch なしを含む）／
   timeout。比較の対象 target は legacy が選択した arch のみ（先頭で受理された arch だけ。他の arch の
-  結果は比較しない）。選択 arch が正式 target（TARGET 行）の外なら比較を省く（R-LEGACY 表に注記する）。
+  結果は比較しない）。選択・成功行の arch が正式 target（TARGET 行。既存テストの PROBE_ARCHS と同じ 3 値）の外なら、比較を省かず完全性違反（fail-closed。ログの改ざん・取り違えでしか起きない）。setmaxnreg の legacy は対象 arch が compute_121／121a の固定で、いずれも正式 target に含まれ、省略分岐は無い。
   選択 arch が無い（target 不明）の legacy は、対応する新プローブの全 target に適用する。
   比較は成否のみ（既存の TMA プローブはロード失敗・実行時エラー等を区別できない panic になるため）:
   legacy が mismatch／nvrtc_rejected（run_ok でない確定した失敗）なのに新プローブが run_ok（またはその逆）なら
