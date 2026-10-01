@@ -21,6 +21,7 @@ macro_rules! pre {
         concat!(
             "#define LD(i) (((unsigned)(i) < (unsigned)n_in) ? in[(i)] : 0u)\n",
             "#define ST(i, v) do { unsigned k_ = (unsigned)(i); if (k_ < (unsigned)n) { out[k_] = (v); } } while (0)\n",
+            "#define ST_F64(i, v) do { unsigned long long u_ = (unsigned long long)__double_as_longlong(v); ST((i), (unsigned)u_); ST((i) + 1u, (unsigned)(u_ >> 32)); } while (0)\n",
             "#define DBL(i) __longlong_as_double((long long)(((unsigned long long)LD(2u * (i) + 1u) << 32) | (unsigned long long)LD(2u * (i))))\n",
         )
     };
@@ -191,10 +192,8 @@ extern "C" __global__ void __launch_bounds__(32) mma_f64_m8n8k4(
     double d0, d1;
     asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 {%0,%1}, {%2}, {%3}, {%4,%5};"
         : "=d"(d0), "=d"(d1) : "d"(a0), "d"(b0), "d"(c0), "d"(c1));
-    unsigned long long u0 = (unsigned long long)__double_as_longlong(d0);
-    unsigned long long u1 = (unsigned long long)__double_as_longlong(d1);
-    ST(l * 4u, (unsigned)u0); ST(l * 4u + 1u, (unsigned)(u0 >> 32));
-    ST(l * 4u + 2u, (unsigned)u1); ST(l * 4u + 3u, (unsigned)(u1 >> 32));
+    ST_F64(l * 4u, d0);
+    ST_F64(l * 4u + 2u, d1);
 }
 "#
 );
@@ -240,8 +239,8 @@ extern "C" __global__ void __launch_bounds__(32) mma_f64_m16n8k4(
     asm volatile("mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};"
         : "=d"(d0), "=d"(d1), "=d"(d2), "=d"(d3)
         : "d"(a0), "d"(a1), "d"(b0), "d"(c0), "d"(c1), "d"(c2), "d"(c3));
-    ST(l * 8u, (unsigned)__double_as_longlong(d0)); ST(l * 8u + 1u, (unsigned)(__double_as_longlong(d1) >> 32));
-    ST(l * 8u + 2u, (unsigned)__double_as_longlong(d2)); ST(l * 8u + 3u, (unsigned)(__double_as_longlong(d3) >> 32));
+    ST_F64(l * 8u, d0); ST_F64(l * 8u + 2u, d1);
+    ST_F64(l * 8u + 4u, d2); ST_F64(l * 8u + 6u, d3);
 }
 "#
 );
@@ -260,8 +259,8 @@ extern "C" __global__ void __launch_bounds__(32) mma_f64_m16n8k8(
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f64.f64.f64.f64 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};"
         : "=d"(d0), "=d"(d1), "=d"(d2), "=d"(d3)
         : "d"(a0), "d"(a1), "d"(a2), "d"(a3), "d"(b0), "d"(b1), "d"(c0), "d"(c1), "d"(c2), "d"(c3));
-    ST(l * 8u, (unsigned)__double_as_longlong(d0)); ST(l * 8u + 1u, (unsigned)(__double_as_longlong(d1) >> 32));
-    ST(l * 8u + 2u, (unsigned)__double_as_longlong(d2)); ST(l * 8u + 3u, (unsigned)(__double_as_longlong(d3) >> 32));
+    ST_F64(l * 8u, d0); ST_F64(l * 8u + 2u, d1);
+    ST_F64(l * 8u + 4u, d2); ST_F64(l * 8u + 6u, d3);
 }
 "#
 );
@@ -282,8 +281,8 @@ extern "C" __global__ void __launch_bounds__(32) mma_f64_m16n8k16(
         : "=d"(d0), "=d"(d1), "=d"(d2), "=d"(d3)
         : "d"(a0), "d"(a1), "d"(a2), "d"(a3), "d"(a4), "d"(a5), "d"(a6), "d"(a7),
           "d"(b0), "d"(b1), "d"(b2), "d"(b3), "d"(c0), "d"(c1), "d"(c2), "d"(c3));
-    ST(l * 8u, (unsigned)__double_as_longlong(d0)); ST(l * 8u + 1u, (unsigned)(__double_as_longlong(d1) >> 32));
-    ST(l * 8u + 2u, (unsigned)__double_as_longlong(d2)); ST(l * 8u + 3u, (unsigned)(__double_as_longlong(d3) >> 32));
+    ST_F64(l * 8u, d0); ST_F64(l * 8u + 2u, d1);
+    ST_F64(l * 8u + 4u, d2); ST_F64(l * 8u + 6u, d3);
 }
 "#
 );

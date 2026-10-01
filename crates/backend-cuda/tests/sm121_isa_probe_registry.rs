@@ -226,6 +226,106 @@ fn raw_index_detector_catches_each_spelling() {
     }
 }
 
+/// ソース中の `ST(`／`ST_F64(` の第 1 引数が lane 添字の `l`・`l * A`・`l * A + B`（`u` 接尾辞可）
+/// の形だけでできているとき、`(stride A, 書く word 集合)` を返す。`ST_F64` は B と B+1 の 2 語。
+/// 他の形（ループ添字・定数添字など）が 1 つでもあれば `None`（検査対象外）。
+fn lane_strided_stores(src: &str) -> Option<(u32, BTreeSet<u32>)> {
+    let mut stride: Option<u32> = None;
+    let mut words = BTreeSet::new();
+    let mut seen = false;
+    for line in src.lines().filter(|l| !l.starts_with("#define")) {
+        let mut rest = line;
+        while let Some(pos) = rest.find("ST") {
+            let tail = &rest[pos..];
+            let (width, after) = if let Some(a) = tail.strip_prefix("ST_F64(") {
+                (2, a)
+            } else if let Some(a) = tail.strip_prefix("ST(") {
+                (1, a)
+            } else {
+                rest = &rest[pos + 2..];
+                continue;
+            };
+            let prev = rest[..pos].chars().next_back();
+            if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                rest = &rest[pos + 2..];
+                continue;
+            }
+            let arg: String = after
+                .split(',')
+                .next()?
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let num = |s: &str| s.trim_end_matches('u').parse::<u32>().ok();
+            let (a, b) = if arg == "l" {
+                (1, 0)
+            } else {
+                let r = arg.strip_prefix("l*")?;
+                match r.split_once('+') {
+                    Some((a, b)) => (num(a)?, num(b)?),
+                    None => (num(r)?, 0),
+                }
+            };
+            if stride.is_some_and(|s| s != a) {
+                return None;
+            }
+            stride = Some(a);
+            seen = true;
+            words.extend((0..width).map(|w| b + w));
+            rest = after;
+        }
+    }
+    seen.then(|| (stride.unwrap_or(1), words))
+}
+
+/// 宣言した出力 word 数と、カーネルが書く word 数の静的な突き合わせ。lane 添字の
+/// `l * stride + offset` 形のストアだけでできているカーネルについて、書く word の集合が
+/// `0..stride` ちょうどで、`out_words == 32 * stride` であることを要求する（上位語と下位語の
+/// 取り違えや、結果レジスタの書き漏らしを検出する。ループ添字など他の形のカーネルは対象外で、
+/// 値の正しさそのものは S6 のビット一致が担う）。
+#[test]
+fn declared_out_words_match_the_words_each_kernel_stores() {
+    let mut checked = 0;
+    for p in probes()
+        .iter()
+        .filter(|p| p.kind == Kind::Kernel && p.block == 32 && p.cluster == 0)
+    {
+        let Some((stride, words)) = lane_strided_stores(p.src) else {
+            continue;
+        };
+        let want: BTreeSet<u32> = (0..stride).collect();
+        assert_eq!(
+            words, want,
+            "{}: lane あたりの書き込み word が 0..{stride} と一致しない",
+            p.id
+        );
+        assert_eq!(
+            p.out_words,
+            32 * stride as usize,
+            "{}: out_words が 32 lane x {stride} と不一致",
+            p.id
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 30,
+        "静的検査の対象が少なすぎる（{checked} 件）。解析が空振りしている疑い"
+    );
+}
+
+#[test]
+fn store_layout_analysis_detects_the_f64_half_word_bug() {
+    // Bugbot 指摘の型: stride 8 なのに d0/d2 の下位と d1/d3 の上位だけを書く（4 語）。
+    let buggy = "ST(l * 8u, a); ST(l * 8u + 1u, b);\nST(l * 8u + 2u, c); ST(l * 8u + 3u, d);";
+    let (stride, words) = lane_strided_stores(buggy).expect("解析できる");
+    assert_eq!(stride, 8);
+    assert_ne!(words, (0..8).collect::<BTreeSet<u32>>());
+    let fixed = "ST_F64(l * 8u, a); ST_F64(l * 8u + 2u, b); ST_F64(l * 8u + 4u, c); ST_F64(l * 8u + 6u, d);";
+    let (stride, words) = lane_strided_stores(fixed).expect("解析できる");
+    assert_eq!((stride, words), (8, (0..8).collect::<BTreeSet<u32>>()));
+    assert!(lane_strided_stores("ST(i, sm[i]);").is_none());
+}
+
 #[test]
 fn symbol_table_covers_every_probe_and_rejects_unknown_ids() {
     assert!(registry::symbol_of("no.such.probe").is_none());
