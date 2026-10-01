@@ -147,6 +147,7 @@ HIP では `hipCtx*`／`hipModule*` は legacy 扱いで、新規コードは `h
 ### スコープ外（本イシューでは扱わない）
 
 - ROCm/HIP 対応を REQ-2 の受け入れ基準に含める要件化（正本 `docs/spec/` 側の変更が必要であり、本リポでは提案のみ可能）
+  - 格上げ条件の v2 再定義案は `docs/rocm-grade-up-conditions-v2-spec-proposal.md`（#2128。未起票）
 - `crates/tensor-core`・`crates/backend-cuda`・`crates/backend-metal` へのコード変更・実測
 
 ### 起票案（ユーザー承認後に起票する。本イシューでは起票しない）

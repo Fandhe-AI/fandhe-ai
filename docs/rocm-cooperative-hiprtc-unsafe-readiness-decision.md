@@ -133,7 +133,7 @@ HIP の FFI を担う Rust クレートは許容依存 10 区分に存在しな�
 1. HIP FFI の依存方式（§6.3）の承認
 2. HIP-Clang の FP contraction 既定値の実測と FMA 契約統一の判定
 3. cooperative 入口の実装と security-auditor 監査
-4. ROCm を対象範囲に入れる場合の spec 提案（fandhe-ai-spec 側）
+4. ROCm を対象範囲に入れる場合の spec 提案（fandhe-ai-spec 側）（→ #2128 で (b) 形式 draft 化: `docs/rocm-grade-up-conditions-v2-spec-proposal.md`。未起票）
 
 ## 9. 出典
 
