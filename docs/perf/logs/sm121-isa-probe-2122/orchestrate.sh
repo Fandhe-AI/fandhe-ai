@@ -158,16 +158,39 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # provenance（git HEAD と clean tree。出力先を作る前＝生成物が dirty を作る前の状態を記録する）。
-GIT_HEAD="$(git rev-parse HEAD)"
-if [[ -z "$(git status --porcelain --untracked-files=normal)" ]]; then
-  GIT_CLEAN=1
+# GB10 ノードの作業ツリーは rsync 転送で `.git` を持たない（docs/real-hardware-verification-env.md §3）。
+# その場合は転送元が書いた `.rev-stamp`（1 行目: HEAD の 40 桁 16 進・2 行目: `dirty=<件数>`。
+# 作り方は docs/cuda-sm121-isa-probe.md §6.1）から読む。どちらも得られなければ停止する
+# （黙って続行すると G0 が常に不成立になり、正式な集計を作れない）。
+GIT_SOURCE=none
+GIT_HEAD=unknown
+GIT_CLEAN=0
+if [[ "$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null || true)" == "$REPO_ROOT" ]]; then
+  GIT_SOURCE=git
+  GIT_HEAD="$(git rev-parse HEAD)"
+  if [[ -z "$(git status --porcelain --untracked-files=normal)" ]]; then
+    GIT_CLEAN=1
+  fi
+elif [[ -f "$REPO_ROOT/.rev-stamp" ]]; then
+  GIT_SOURCE=rev-stamp
+  GIT_HEAD="$(sed -n 1p "$REPO_ROOT/.rev-stamp")"
+  if [[ "$(sed -n 2p "$REPO_ROOT/.rev-stamp")" == "dirty=0" ]]; then
+    GIT_CLEAN=1
+  fi
 else
-  GIT_CLEAN=0
+  echo "ERROR: git 作業ツリーでも .rev-stamp でもない。転送元の HEAD を .rev-stamp に書いて転送すること" >&2
+  echo "ERROR: （docs/cuda-sm121-isa-probe.md §6.1）" >&2
+  exit 1
+fi
+if [[ ! "$GIT_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: HEAD が 40 桁 16 進でない（$GIT_SOURCE）: $GIT_HEAD" >&2
+  exit 1
 fi
 {
   echo "mode=$MODE"
   echo "git_head=$GIT_HEAD"
   echo "git_clean=$GIT_CLEAN"
+  echo "git_source=$GIT_SOURCE"
   echo "start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "uname=$(uname -srm)"
   nvidia-smi --query-gpu=name,driver_version,utilization.gpu --format=csv,noheader 2>/dev/null \

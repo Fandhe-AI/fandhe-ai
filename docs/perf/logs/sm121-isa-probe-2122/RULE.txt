@@ -187,6 +187,10 @@
   | compile | 1・3 番目 | 900 秒 | compile.log | S1／S2／home／hopper |
   | exec_matrix | PROBE 行 × 正式 TARGET 行 を 1 プロセスずつ | 120 秒 | exec/<probe>@<target>.log | 全セル |
   | legacy | 4（setmaxnreg_probe_* 各 1）・最後 | 180 秒 | legacy-<name>.log | R-LEGACY |
+  provenance（env_info.txt の git_head・git_clean）は、git 作業ツリーなら git から、GB10 ノードの
+  ように .git の無い転送先では転送元が書いた .rev-stamp（1 行目: HEAD の 40 桁 16 進・
+  2 行目: dirty=<件数>。dirty=0 のときだけ git_clean=1）から読む。どちらも得られなければ
+  orchestrate.sh は開始前に停止する（git_source に由来を記録する）。
   各プロセスに外部 timeout を付け、終了コードを proc 記録（SM121_PROBE_PROC 行）として
   ログへ追記する。終了コード 124＝timeout。exit 0 は完了記録（done）が必須、101（テストの
   panic）は mismatch または legacy の corrupted を伴う場合のみ許容、124・その他は未完了
