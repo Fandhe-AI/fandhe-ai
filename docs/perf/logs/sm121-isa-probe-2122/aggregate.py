@@ -495,7 +495,7 @@ def validate_chain(pdef: ProbeDef, cells: dict, where: str) -> None:
             upstream_ok = False
 
 
-SEM_COMMON_KEYS = ("status", "polls", "phase2", "polls2")
+SEM_COMMON_KEYS = ("polls", "phase2", "polls2")
 SEM_CLASS_KEYS = SEM_COMMON_KEYS + ("class",)
 SEM_OOB_KEYS = SEM_COMMON_KEYS + ("inrange", "oob_elems", "oob_fill", "oob_distinct")
 
@@ -516,9 +516,8 @@ def validate_sem_observation(pid: str, detail: str, where: str) -> dict:
     if kv.get("class") == "NONE":
         want.add("dump")
     require_exact_keys(kv.keys(), want, f"{where} TMA 観測のキー")
-    if kv["status"] not in ("complete", "timeout") or kv["phase2"] not in ("none", "complete", "timeout") \
-            or not kv["polls"].isdigit() or not kv["polls2"].isdigit():
-        raise LogIntegrityError(f"{where}: TMA 観測の status／phase2／polls の値が不正: {detail[:160]!r}")
+    if kv["phase2"] not in ("none", "complete") or not kv["polls"].isdigit() or not kv["polls2"].isdigit():
+        raise LogIntegrityError(f"{where}: TMA 観測の phase2／polls の値が不正: {detail[:160]!r}")
     if "inrange" in kv and kv["inrange"] not in ("MATCH", "MISMATCH"):
         raise LogIntegrityError(f"{where}: inrange の値が不正: {kv['inrange']!r}")
     if "oob_elems" in kv and not kv["oob_elems"].isdigit():
@@ -526,13 +525,40 @@ def validate_sem_observation(pid: str, detail: str, where: str) -> dict:
     return kv
 
 
+def xfer_required_keys(pid: str) -> tuple | None:
+    """R-TMA-BASE／R-TMA-XFER の成立（S6 ok）の detail のキー集合（出力ヘッダ長に従う。load 系は
+    polls・phase2・polls2、bulk は polls のみ）。該当しなければ None。"""
+    if pid in ("tma.base_cta", "tma.base_cluster"):
+        return SEM_COMMON_KEYS + ("box_words", "bit_exact")
+    if pid in ("tma.bulk_cta", "tma.bulk_cluster"):
+        return ("polls", "words", "bit_exact")
+    if pid == "tma.store":
+        return ("global_words", "bit_exact")
+    if pid == "tma.prefetch":
+        return ("completion_magic",)
+    if pid == "tma.multicast":
+        return tuple(f"cta{c}_{k}" for c in (0, 1) for k in SEM_COMMON_KEYS + ("mismatched_words",))
+    return None
+
+
+def validate_xfer_detail(pid: str, detail: str, where: str) -> dict:
+    kv = parse_kv(detail.split(), f"{where} 成立の detail", strict=True)
+    require_exact_keys(kv.keys(), xfer_required_keys(pid), f"{where} 成立の detail のキー")
+    for k, v in kv.items():
+        if k.endswith("phase2"):
+            ok = v in ("none", "complete")
+        elif k.endswith(("polls", "polls2", "words", "box_words", "mismatched_words", "global_words")):
+            ok = v.isdigit()
+        else:
+            ok = v == "true"
+        if not ok:
+            raise LogIntegrityError(f"{where}: 成立の detail の値が不正: {k}={v!r}")
+    return kv
+
+
 def sem_caution(kv: dict) -> str:
     """R-TMA 観測表の注意欄。判定語（受理のみ）に埋もれさせたくない異常を明示する。"""
     notes = []
-    if kv["status"] == "timeout":
-        notes.append("mbarrier が上限回数で完了せず（転送が残っている可能性）")
-    if kv["phase2"] == "timeout":
-        notes.append("第 2 待ちが上限回数で完了せず（転送が残っている可能性）")
     if kv.get("class") == "NONE":
         notes.append("どの候補モデルとも不一致（ダンプ全文を記録）")
     if kv.get("inrange") == "MISMATCH":
@@ -618,6 +644,8 @@ def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str
         parse_kv(cells["verify"].detail.split(), f"{name} attr detail", strict=True)
     if pdef.clause == "R-TMA-SEM" and cells["sync"].status == "ok":
         validate_sem_observation(pdef.id, cells["sync"].detail, name)
+    if xfer_required_keys(pdef.id) is not None and cells["verify"].status == "ok":
+        validate_xfer_detail(pdef.id, cells["verify"].detail, name)
     return ExecProc(pdef.id, target, envs.get("env"), cells, code, synthesized)
 
 
@@ -1315,7 +1343,7 @@ def _synth_cells(pdef: ProbeDef, reject: bool) -> dict:
         if stage != "ctl" and stage_is_na(pdef.policy, stage):
             cells[stage] = na
     if pdef.clause == "R-TMA-SEM":
-        base = "status=complete polls=3 phase2=none polls2=0"
+        base = "polls=3 phase2=none polls2=0"
         if pdef.id.startswith("tma.oob_"):
             det = f"{base} inrange=MATCH oob_elems=96 oob_fill=ZERO oob_distinct=0x00000000"
         else:
@@ -1327,6 +1355,11 @@ def _synth_cells(pdef: ProbeDef, reject: bool) -> dict:
                                           " max_shared_memory_per_block=49152"
                                           " max_shared_memory_per_block_optin=101376")
         return cells
+    xk = xfer_required_keys(pdef.id)
+    if xk is not None and not reject:
+        vals = {k: ("none" if k.endswith("phase2") else "true" if k in ("bit_exact", "completion_magic")
+                    else "0") for k in xk}
+        cells["verify"] = Cell("ok", "-", " ".join(f"{k}={v}" for k, v in vals.items()))
     if reject:
         cells["nvrtc_cubin"] = Cell("rejected", "NVRTC_COMPILE_ERROR", "ptxas: not supported")
         cells["module_load"] = Cell("error", "CUDA_ERROR_INVALID_PTX", "load_module failed")
@@ -2009,12 +2042,12 @@ def fx_tma_sem_ind(rule):
     m.legacy["tma_probe_real_device@tma_execution_probe_cta"] = {"exit": 139, "lines": []}
     v = _verdict(m, "tma.coord")
     _expect(v.code == "TMA_BASE_NOT_ESTABLISHED", f"base がロード失敗なら SEM は判定不能: {v}")
-    # 観測の書式不正（status／polls なし）は完全性違反。
+    # 観測の書式不正（polls／phase2 なし）は完全性違反。
     m = Model(rule)
     m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: class=ELEM_INNER_FIRST")
-    _expect_integrity_error(lambda: _load(m), "TMA 観測に status／polls が無い")
+    _expect_integrity_error(lambda: _load(m), "TMA 観測に polls／phase2 が無い")
     # プローブごとの必須キー: class が無い・oob のキーが無い・余剰キー・class=NONE なのに dump が無い。
-    base = "status=complete polls=3 phase2=none polls2=0"
+    base = "polls=3 phase2=none polls2=0"
     for pid, det, label in (
             ("tma.coord", base, "coord に class が無い"),
             ("tma.swz64", base + " class=LINEAR extra=1", "余剰キー"),
@@ -2022,33 +2055,45 @@ def fx_tma_sem_ind(rule):
             ("tma.oob_nan", base + " inrange=MATCH oob_elems=96 oob_fill=NAN", "oob_distinct が無い"),
             ("tma.swz32", base + " class=NONE", "class=NONE なのに dump が無い"),
             ("tma.coord", base + " class=LINEAR dump=0x00000000", "class≠NONE なのに dump がある"),
-            ("tma.coord", "status=complete polls=3 class=LINEAR", "phase2・polls2 が無い")):
+            ("tma.coord", "polls=3 class=LINEAR", "phase2・polls2 が無い"),
+            ("tma.coord", "status=complete " + base + " class=LINEAR", "廃止した status キーが残っている"),
+            ("tma.swz32", "polls=3 phase2=timeout polls2=9 class=LINEAR", "phase2 の値が不正（timeout は存在しない）")):
         m = Model(rule)
         m.execs[(pid, "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: " + det)
         _expect_integrity_error(lambda m=m: _load(m), f"SEM 観測: {label}")
     # 異常な観測は判定語（受理のみ）に埋もれず注意欄に出る。
     m = Model(rule)
     m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell(
-        "ok", "-", "record: status=timeout polls=1000000 phase2=none polls2=0 class=NONE dump=0xfeedface")
+        "ok", "-", "record: polls=3 phase2=none polls2=0 class=NONE dump=0xfeedface")
     m.execs[("tma.oob_nan", "compute_121")]["cells"]["sync"] = Cell(
-        "ok", "-", "record: status=complete polls=3 phase2=timeout polls2=1000000 inrange=MISMATCH oob_elems=96"
+        "ok", "-", "record: polls=3 phase2=complete polls2=7 inrange=MISMATCH oob_elems=96"
                    " oob_fill=SENTINEL+ZERO oob_distinct=0x00000000,0xfeedface")
     run, g0, v = _load(m)
     md = render(rule, run, g0, v, load_claims(CLAIMS_PATH.read_text(encoding="utf-8")))
-    for note in ("mbarrier が上限回数で完了せず", "どの候補モデルとも不一致", "第 2 待ちが上限回数で完了せず",
-                 "範囲内の要素が仮説と不一致", "OOB 要素が書かれていない"):
+    for note in ("どの候補モデルとも不一致", "範囲内の要素が仮説と不一致", "OOB 要素が書かれていない"):
         _expect(note in md, f"注意欄に {note!r} が出ない")
     m = Model(rule)
-    m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: status=complete polls=1 polls=2")
+    m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: polls=1 polls=2")
     _expect_integrity_error(lambda: _load(m), "TMA 観測の重複キー")
     m = Model(rule)
-    m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: status=weird polls=1")
-    _expect_integrity_error(lambda: _load(m), "TMA 観測の status が不正")
+    m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: polls=1 phase2=weird polls2=0")
+    _expect_integrity_error(lambda: _load(m), "TMA 観測の phase2 が不正")
 
 
 def fx_tma_xfer(rule):
     for pid in ("tma.store", "tma.prefetch", "tma.multicast", "tma.bulk_cta", "tma.bulk_cluster"):
         _expect(_verdict(Model(rule), pid).word == V_OK, f"{pid} 成立")
+    # 成立の detail はヘッダ長に従う固定キー集合（bulk は 1 語ヘッダ＝polls のみ。load 系 3 語ヘッダのキーは不可）。
+    for pid, det, label in (
+            ("tma.bulk_cta", "polls=5 phase2=none polls2=0 words=64 bit_exact=true", "bulk に load 系のキーがある"),
+            ("tma.bulk_cta", "words=64 bit_exact=true", "bulk に polls が無い"),
+            ("tma.base_cta", "polls=1 box_words=128 bit_exact=true", "base に phase2・polls2 が無い"),
+            ("tma.store", "global_words=6144 bit_exact=false", "bit_exact の値が不正"),
+            ("tma.multicast", "cta0_polls=1 cta0_phase2=none cta0_polls2=0 cta0_mismatched_words=0", "multicast に cta1 が無い"),
+            ("tma.prefetch", "completion_magic=true extra=1", "余剰キー")):
+        m = Model(rule)
+        m.execs[(pid, "compute_121")]["cells"]["verify"] = Cell("ok", "-", det)
+        _expect_integrity_error(lambda m=m: _load(m), f"XFER の detail: {label}")
 
 
 def fx_tma_xfer_ind(rule):
