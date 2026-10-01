@@ -30,7 +30,9 @@ python3 docs/perf/logs/sm121-isa-probe-2122/aggregate.py --out docs/perf/logs/sm
 
 - GB10 ノードには `.git` が無いため、転送元で rsync の直前に `.rev-stamp`（1 行目 HEAD・2 行目 `dirty=<件数>`）
   を作る（手順は [`docs/cuda-sm121-isa-probe.md`](../../../cuda-sm121-isa-probe.md) §6.1）。`orchestrate.sh` は
-  git 作業ツリーでなければ `.rev-stamp` から provenance を読み、どちらも無ければ開始前に停止する。
+  git 作業ツリーでなければ `.rev-stamp` から provenance を読み、どちらも無ければ開始前に停止する。正式実行で clean でない
+  （`dirty=0` の行が無い §3 の 1 行形式を含む。submodule ポインタの変更も dirty）場合はプロセスを 1 つも
+  起動せず `exit 1` で停止する。timeout 秒数は `RULE.txt` の `PROCESS:` 行（`timeout=`）が正。
 - 共有ノードのため、ノードが空いているときに実行する（意図的な不正命令を含む。プロセスは分離し
   外部 `timeout` 付き）。
 - `orchestrate.sh` は出力先（既定は本ディレクトリ）に既存ログがあると開始前に `exit 1` で停止する

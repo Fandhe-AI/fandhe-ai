@@ -102,7 +102,7 @@
 | `simt.redux_u32` | R-MMA | sm_80 | verify | none | none |
 | `simt.redux_f32` | R-MMA | sm_100a | accept_only | none | none |
 
-- 入力は f16／bf16／tf32 で正確に表せる小さな整数で、f32 累積でも結果が正確なためビット一致で判定する（tolerance は新設・変更しない）。`layout=verified` は開発機（sm_86）の実機で参照モデルを検証済み。`layout=unverified`（`stmatrix`・packed `f32x2`）は開発機で実行できず、不一致は「判定不能（LAYOUT_UNVERIFIED）」とする。
+- 入力は f16／bf16／tf32 で正確に表せる小さな整数で、f32 累積でも結果が正確なためビット一致で判定する（tolerance は新設・変更しない）。`layout=verified` は開発機（sm_86）の実機で参照モデルを検証済み（検証記録: PR-A〈#2122 の最初の PR〉本文の実行記録〈検証コマンドと出力要約〉。生ログはコミットしない。再現手順は §6.2）。`layout=unverified`（`stmatrix`・packed `f32x2`）は開発機で実行できず、不一致は「判定不能（LAYOUT_UNVERIFIED）」とする。
 - accept_only: `m8n8k4 .f16`（quad-pair のレイアウトを誤りなく記述する根拠が手元にない）・f64 `m16n8k4/k8/k16`・INT8/FP8（`s8`・`e4m3`・`e5m2`・`kind::f8f6f4`）・`block_scale`・`redux.sync` の f32 版。wmma の C++ API（`mma.h`）は含めない。
 
 ### AC5 Hopper との差分・setmaxnreg・cluster・DSMEM（R-HOPPER・R-SNR・R-CLU）
@@ -222,7 +222,7 @@ sha=$(git rev-parse HEAD); dirty=$(git status --porcelain --untracked-files=norm
 printf '%s\ndirty=%s\n' "$sha" "$dirty" > .rev-stamp
 ```
 
-`orchestrate.sh` は git 作業ツリーなら git から、`.git` が無ければ `.rev-stamp` から `git_head`・`git_clean` を読み（`dirty=0` のときだけ `git_clean=1`）、どちらも無ければ開始前に停止する。dirty な状態から転送した実測は G0 が不成立になり、全セルが判定不能になる。
+`orchestrate.sh` は git 作業ツリーなら git から、`.git` が無ければ `.rev-stamp` から `git_head`・`git_clean` を読み（`dirty=0` のときだけ `git_clean=1`）、どちらも無ければ開始前に停止する。正式実行（`--dev-smoke` でない実行）で `git_clean` が 1 でない場合は、**プロセスを 1 つも起動せず `exit 1` で停止する**（dirty な状態の実測は G0 が不成立で使えないため、実測前に止める）。「dirty」は `git status --porcelain --untracked-files=normal` が空でないことで、submodule ポインタの変更（`M docs/spec` など）や未追跡ファイルも含む。`docs/real-hardware-verification-env.md` §3 の既存の 1 行形式（`git rev-parse HEAD > .rev-stamp`）とは異なり、**2 行目の `dirty=0` が必須**で、1 行形式のままだと停止する。`--dev-smoke` では dirty を許容する（結果は G0 不成立）。
 
 ```bash
 env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
@@ -245,7 +245,7 @@ NVRTC 単体の S1／S2 全行列（GPU 不要）は `cargo test -p fandhe-ai-ba
 ### 6.3 開発機で確認できた事実（sm_121 の結論ではない）
 
 - NVRTC 13.0.88（x86_64 の開発機）で、`--gpu-architecture=sm_XX` に実アーキを渡すと NVRTC 内部で ptxas が走り、不正な命令は ptxas のログ付きでコンパイルエラーになる。成功時は PTX テキストも取得できる。したがって S2 に `nvrtcGetCUBIN` の生 FFI は不要で、本基盤の `unsafe` は `launch` のみである。GB10 側の NVRTC で同じ挙動かは、compile.log と exec の S1／S2 の突き合わせ（COMPILE_EXEC_DISAGREE）が検出する範囲でしか確認しない。
-- `layout=verified` の形状（TF32 `m16n8k8`／`m16n8k4`・f16 `m16n8k16`／`m16n8k8`・f16 累積・bf16・f64 `m8n8k4`・`ldmatrix` x1/x2/x4/x4.trans）と SIMT（`fma` の f32／f64／f16x2／bf16x2・`cvt.rna.tf32`・`redux.sync` の u32 版）・対照は、RTX 3060（sm_86）の `compute_86` 実行で S6 のビット一致を確認した。これはホスト参照モデル（fragment のレイアウト）の検証であり、sm_121 の実測ではない。
+- `layout=verified` の形状（TF32 `m16n8k8`／`m16n8k4`・f16 `m16n8k16`／`m16n8k8`・f16 累積・bf16・f64 `m8n8k4`・`ldmatrix` x1/x2/x4/x4.trans）と SIMT（`fma` の f32／f64／f16x2／bf16x2・`cvt.rna.tf32`・`redux.sync` の u32 版）・対照は、RTX 3060（sm_86）の `compute_86` 実行で S6 のビット一致を確認した。これはホスト参照モデル（fragment のレイアウト）の検証であり、sm_121 の実測ではない。（出典・再現: PR-A〈#2122 の最初の PR〉本文の実行記録〈検証コマンドと出力要約〉と、§6.2 の `--dev-smoke`。生ログはコミットしない。）
 
 ## 7. §2.3（`cuda-sm121-gemm-candidates-design.md`）への反映手順
 

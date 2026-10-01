@@ -177,7 +177,7 @@ cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --test-threads
 
 ### 4.8 sm_121 ISA プローブ（#2122）の外部 timeout 運用契約
 
-`docs/cuda-sm121-isa-probe.md`（#2122）のプローブは、意図的に不正命令（`ILLEGAL_INSTRUCTION` 等）や `barrier.cluster` のデッドロックを起こしうるため、**1 (プローブ, target) = 1 プロセス**で外部 `timeout` を付けて実行する（共有 GB10 ではノードが空いているときに実行する）。個別に手で回さず、`docs/perf/logs/sm121-isa-probe-2122/orchestrate.sh` を使う（起動列は同ディレクトリの `RULE.txt` の `PROCESS:`／`PROBE:`／`TARGET:` 行から導出し、各プロセスの終了コードを proc 記録としてログへ残す。exec は 120 秒・compile は 900 秒・legacy の `setmaxnreg_probe_*` は 180 秒・`device_attributes_dump` は 60 秒。終了コード 124 は timeout として集計される）。出力先に既存ログがあると開始前に停止する。ノード側には `.git` が無いため、転送元で rsync の直前に `.rev-stamp` を 2 行形式（1 行目 HEAD・2 行目 `dirty=<件数>`。§3 の 1 行形式ではなく `docs/cuda-sm121-isa-probe.md` §6.1 の形式）で作る。`orchestrate.sh` は `.rev-stamp` から provenance を読む（無ければ開始前に停止）。
+`docs/cuda-sm121-isa-probe.md`（#2122）のプローブは、意図的に不正命令（`ILLEGAL_INSTRUCTION` 等）や `barrier.cluster` のデッドロックを起こしうるため、**1 (プローブ, target) = 1 プロセス**で外部 `timeout` を付けて実行する（共有 GB10 ではノードが空いているときに実行する）。個別に手で回さず、`docs/perf/logs/sm121-isa-probe-2122/orchestrate.sh` を使う（起動列は同ディレクトリの `RULE.txt` の `PROCESS:`／`PROBE:`／`TARGET:` 行から導出し、各プロセスの終了コードを proc 記録としてログへ残す。timeout 秒数は同 `RULE.txt` の `PROCESS:` 行の `timeout=` が正で、`orchestrate.sh` はそこから読む。終了コード 124 は timeout として集計される）。出力先に既存ログがあると開始前に停止する。ノード側には `.git` が無いため、転送元で rsync の直前に `.rev-stamp` を 2 行形式（1 行目 HEAD・2 行目 `dirty=<件数>`。§3 の 1 行形式ではなく `docs/cuda-sm121-isa-probe.md` §6.1 の形式）で作る。`orchestrate.sh` は `.rev-stamp` から provenance を読む（無ければ開始前に停止）。
 
 ```bash
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
