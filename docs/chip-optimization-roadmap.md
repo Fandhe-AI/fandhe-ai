@@ -119,7 +119,7 @@ Issue 本文の想定と HEAD の記録が食い違う点を、黙って直さ�
 | split-K | 実装済み | 本番結線済み（既定 ON。#1516） | - | `split_k_runtime.rs:84`、`backend-metal-splitk-decision.md` §5 |
 | E1 loop unroll・E5 tgid swizzle／fine barrier | 設計済み | 判定不能のため非適用（`UNROLL_ACC_ENABLED=false`・`SWIZZLE_ENABLED=false` 維持） | (D) | m4max §3 |
 | E2〜E4（特殊化・フラグメントロード・協調ロード） | Non-Goal | `tile::select` への組み込み対象なし | (C)／(D) | m4max §3 |
-| E6 タイルクラス分割・E7／E8 タイル拡張・`CANDIDATES[8]` | Non-Goal | REJECT（実測） | (C) | m4max §3 |
+| E6 タイルクラス分割・E7／E8 タイル拡張（`CANDIDATES[9]`・`[10]`）・`CANDIDATES[8]`（32,64,16,1,2） | Non-Goal | REJECT（実測） | (C) | m4max §3 |
 | E9 hfrag | 設計済み | N=4096 のみ約 10〜12% 高速（SMEM 半減の間接効果という仮説）。無条件の前進は非推奨。条件付き | (C)／(H) | m4max §3 |
 | MPP／NAX Route C | ユーザー判断待ち | 実装・実測済み（診断テスト限定）。N=1024／2048／4096 で 1.0223／1.2632／1.9015 倍（純カーネル時間）。採否は `backend-metal-mpp-tensor-decision.md` §6 の (a)〜(c) | (F)／(G)／(C) | m4max §4 |
 | async copy（`simdgroup_async_copy`） | Non-Goal | 不採用 | (A)（物理的限界側） | `backend-metal-async-copy-decision.md` |
