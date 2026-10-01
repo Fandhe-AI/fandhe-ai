@@ -139,7 +139,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "dry-run: LOG_DIR=$LOG_DIR"
   echo "dry-run: REPO_ROOT=$REPO_ROOT"
   echo "dry-run: mode=$MODE targets=${EXEC_TARGETS[*]}"
-  echo "dry-run: cargo test ${TEST_PKG[*]} --no-run（sm121_isa_probe_compile・sm121_isa_probe_exec_real_device・setmaxnreg_probe_* ×4）"
+  echo "dry-run: cargo test ${TEST_PKG[*]} --no-run（sm121_isa_probe_compile・sm121_isa_probe_exec_real_device・setmaxnreg_probe_* ×4・tma_probe_real_device）"
   expand_processes | while IFS= read -r line; do
     echo "dry-run: process $line"
   done
@@ -260,7 +260,8 @@ echo "== ビルド（テストバイナリ） =="
 cargo test "${CARGO_FLAG_ARR[@]}" "${TEST_PKG[@]}" --no-run \
   --test sm121_isa_probe_compile --test sm121_isa_probe_exec_real_device \
   --test setmaxnreg_probe_dec_base_real_device --test setmaxnreg_probe_dec_accel_real_device \
-  --test setmaxnreg_probe_incdec_base_real_device --test setmaxnreg_probe_incdec_accel_real_device
+  --test setmaxnreg_probe_incdec_base_real_device --test setmaxnreg_probe_incdec_accel_real_device \
+  --test tma_probe_real_device
 cargo build "${CARGO_FLAG_ARR[@]}" "${TEST_PKG[@]}" --example device_attributes_dump
 
 while IFS= read -r proc; do
@@ -298,8 +299,15 @@ while IFS= read -r proc; do
     legacy\ *)
       read -r _ name <<<"$desc"
       echo "== legacy $name =="
+      # 名前は <テストバイナリ> または <テストバイナリ>@<テスト関数>（後者は 1 テストだけを
+      # 別プロセスで実行する。sticky なエラーを他のテストへ波及させない）。
+      bin="${name%%@*}"
+      test_filter=()
+      if [[ "$name" == *@* ]]; then
+        test_filter=(--exact "${name#*@}")
+      fi
       run_proc "$LOG_DIR/legacy-${name}.log" legacy "$name" - "$tmo" \
-        "${CARGO_TEST_PROBES[@]}" --test "$name" -- --ignored --nocapture
+        "${CARGO_TEST_PROBES[@]}" --test "$bin" -- --ignored --nocapture "${test_filter[@]+"${test_filter[@]}"}"
       ;;
     *)
       echo "ERROR: 未知の PROCESS 行: $proc" >&2

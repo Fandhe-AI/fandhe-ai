@@ -67,10 +67,15 @@ fn ids_are_unique_and_symbols_follow_the_id() {
     assert_unique(&ids, "プローブ ID");
     for p in &all {
         if p.kind == Kind::Kernel {
-            let want = if p.id == "tc5.cross" {
-                "tc5_alloc".to_string()
-            } else {
-                p.id.replace('.', "_")
+            // 共有ソース（同じカーネルを別 spec・別起動で使う）の例外は明示列挙する。
+            let want = match p.id {
+                "tc5.cross" => "tc5_alloc".to_string(),
+                "tma.base_cta" | "tma.coord" | "tma.oob_none" | "tma.oob_nan"
+                | "tma.oob_tx_partial" | "tma.oob_neg" | "tma.swz32" | "tma.swz64"
+                | "tma.swz128" => "tma_load_cta".to_string(),
+                "tma.base_cluster" => "tma_load_cluster".to_string(),
+                "tma.store" => "tma_store_cta".to_string(),
+                id => id.replace('.', "_"),
             };
             assert_eq!(p.symbol, want, "{}: シンボル名が ID と対応しない", p.id);
             assert!(
@@ -138,6 +143,19 @@ fn opcode_token(id: &str) -> &'static str {
         "snr.incdec" => "setmaxnreg.inc",
         "clu.dims1" | "clu.dims2" | "clu.dims4" | "clu.dims8" | "clu.dims16" => "__cluster_dims__",
         "clu.dsmem" => "mapa.shared::cluster",
+        "clu.rt2" | "clu.rt4" => "%cluster_ctarank",
+        "ctl.raw" => "ST(i, LD(i))",
+        "ctl.rawmap" => "tm.opaque",
+        "tma.base_cta" | "tma.coord" | "tma.oob_none" | "tma.oob_nan" | "tma.oob_tx_partial"
+        | "tma.oob_neg" | "tma.swz32" | "tma.swz64" | "tma.swz128" => {
+            "cp.async.bulk.tensor.2d.shared::cta.global"
+        }
+        "tma.base_cluster" => "cp.async.bulk.tensor.2d.shared::cluster.global",
+        "tma.store" => "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group",
+        "tma.prefetch" => "cp.async.bulk.prefetch.tensor.2d.L2",
+        "tma.multicast" => ".multicast::cluster",
+        "tma.bulk_cta" => "cp.async.bulk.shared::cta.global",
+        "tma.bulk_cluster" => "cp.async.bulk.shared::cluster.global",
         "attr.limits" | "attr.cluster" | "attr.misc" => "",
         other => panic!("{other}: opcode トークンが未登録（registry テストへ追加すること）"),
     }
@@ -737,7 +755,7 @@ fn rule_process_lines_carry_timeouts_and_fixed_arch_matches_the_registry() {
             .iter()
             .filter(|l| l.starts_with("PROCESS: legacy "))
             .count(),
-        4
+        7
     );
     for l in lines.iter().filter(|l| *l != "PROCESS: env_info") {
         let secs = l.rsplit_once(" timeout=").map(|(_, n)| n);
@@ -812,6 +830,357 @@ fn cargo_toml_requires_internal_diagnostics_for_the_three_tests() {
         assert!(
             manifest.contains(&needle),
             "{name}: required-features の指定が無い（#1390 の先例）"
+        );
+    }
+}
+
+// ---------------------------------------------------------------- TMA（PR-B）のホスト側モデル・encoder 引数
+
+use common::model_tma::{self as mt, Swz, TmaSpec};
+use common::registry::Outcome;
+use common::registry_tma::{
+    SPEC_BASE, SPEC_COORD, SPEC_OOB_NAN, SPEC_OOB_NEG, SPEC_OOB_NONE, SPEC_OOB_TX_PARTIAL,
+    SPEC_STORE, SPEC_SWZ32, SPEC_SWZ64, SPEC_SWZ128, all_tma_specs,
+};
+use common::types::Launch;
+
+fn dump_of(spec: &TmaSpec, elems: &[Option<u32>], oob: u32) -> Vec<u32> {
+    let mut out = vec![0u32, 7];
+    out.extend(elems.iter().map(|e| e.unwrap_or(oob)));
+    assert_eq!(out.len(), 2 + spec.dump_words as usize);
+    out
+}
+
+fn record(o: Outcome) -> String {
+    match o {
+        Outcome::Record(d) => d,
+        other => panic!("Record を期待: {other:?}"),
+    }
+}
+
+#[test]
+fn every_tma_spec_satisfies_the_encoder_constraints() {
+    for (name, spec) in all_tma_specs() {
+        spec.validate().unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    // 制約違反は検出できる（陰性）。
+    let mut bad = SPEC_SWZ64;
+    bad.box_cols = 32; // 128 B > 64 B の swizzle 幅
+    assert!(bad.validate().is_err());
+    let mut bad = SPEC_BASE;
+    bad.expect_tx = 513;
+    assert!(bad.validate().is_err());
+    let mut bad = SPEC_BASE;
+    bad.global_cols = 95; // 行ストライド 380 B は 16 の倍数でない
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn tma_probe_wiring_is_consistent() {
+    for p in probes().iter().filter(|p| {
+        p.id.starts_with("tma.") || p.id.starts_with("clu.rt") || p.id.starts_with("ctl.raw")
+    }) {
+        let Launch::Raw { cluster } = p.launch else {
+            panic!("{}: raw 起動であること", p.id)
+        };
+        if cluster > 0 {
+            assert_eq!(p.grid % cluster, 0, "{}: grid は cluster の倍数", p.id);
+        }
+        if let Some(spec) = p.tma {
+            // tensor map 系: 入力（global）は spec どおりの語数、出力語数はカーネルの書き込み規約どおり。
+            assert_eq!(
+                (p.make_input)().len(),
+                spec.global_words() as usize,
+                "{}",
+                p.id
+            );
+            let want_out = if spec.readback_global {
+                1 + spec.global_words() as usize
+            } else if p.id == "tma.prefetch" {
+                1
+            } else if p.id == "ctl.rawmap" {
+                5
+            } else {
+                (2 + spec.dump_words as usize) * p.grid as usize
+            };
+            assert_eq!(p.out_words, want_out, "{}", p.id);
+        }
+    }
+    // PR-B の AC3 の全プローブが存在する（欠落の検出）。
+    for id in [
+        "tma.base_cta",
+        "tma.coord",
+        "tma.oob_none",
+        "tma.oob_nan",
+        "tma.oob_tx_partial",
+        "tma.oob_neg",
+        "tma.swz32",
+        "tma.swz64",
+        "tma.swz128",
+        "tma.store",
+        "tma.bulk_cta",
+        "tma.bulk_cluster",
+        "tma.prefetch",
+        "tma.multicast",
+    ] {
+        assert!(registry::probe_by_id(id).is_some(), "{id}");
+    }
+}
+
+#[test]
+fn swizzle_candidate_models_are_bijections_and_the_src_b64_model_matches_the_xor_model() {
+    for (swz, words) in [(Swz::B32, 64u32), (Swz::B64, 128), (Swz::B128, 256)] {
+        let phys: BTreeSet<u32> = (0..words)
+            .map(|w| mt::swizzle_xor_phys_word(swz, w))
+            .collect();
+        assert_eq!(phys.len() as u32, words, "{swz:?}: 全単射でない");
+        assert!(phys.iter().all(|&p| p < words), "{swz:?}: 範囲外");
+    }
+    // src の B64 仮説（`tma_swizzled_chunk_a`）は標準の 64B XOR モデルと全語で一致する。
+    for w in 0..128u32 {
+        assert_eq!(
+            mt::swizzle_src_b64_phys_word(w),
+            mt::swizzle_xor_phys_word(Swz::B64, w),
+            "w={w}"
+        );
+    }
+    // 恒等ではない（行によっては並べ替えが起きる）ので、線形との区別が付く。
+    assert!((0..128u32).any(|w| mt::swizzle_xor_phys_word(Swz::B64, w) != w));
+    assert!((0..64u32).any(|w| mt::swizzle_xor_phys_word(Swz::B32, w) != w));
+    assert!((0..256u32).any(|w| mt::swizzle_xor_phys_word(Swz::B128, w) != w));
+}
+
+#[test]
+fn coord_classification_distinguishes_the_hypotheses() {
+    let data = mt::global_data(64, 96);
+    let normal = mt::box_elems(&SPEC_COORD, &data, false);
+    let transposed = mt::box_elems(&SPEC_COORD, &data, true);
+    assert_ne!(
+        normal, transposed,
+        "座標が仮説を区別できない位置になっていない"
+    );
+    assert!(normal.iter().all(Option::is_some) && transposed.iter().all(Option::is_some));
+    let c = record(mt::classify_coord(
+        &SPEC_COORD,
+        &data,
+        &dump_of(&SPEC_COORD, &normal, 0),
+    ));
+    assert!(
+        c.contains("class=ELEM_INNER_FIRST ") || c.ends_with("class=ELEM_INNER_FIRST"),
+        "{c}"
+    );
+    assert!(!c.contains("TRANSPOSED"), "{c}");
+    let c = record(mt::classify_coord(
+        &SPEC_COORD,
+        &data,
+        &dump_of(&SPEC_COORD, &transposed, 0),
+    ));
+    assert!(c.contains("class=TRANSPOSED"), "{c}");
+    let garbage = dump_of(&SPEC_COORD, &vec![Some(1); 128], 0);
+    let c = record(mt::classify_coord(&SPEC_COORD, &data, &garbage));
+    assert!(
+        c.contains("class=NONE") && c.contains("dump=0x"),
+        "NONE ではダンプ全文を記録する: {c}"
+    );
+}
+
+#[test]
+fn oob_classification_records_the_fill_kind_and_counts() {
+    let data = mt::global_data(64, 96);
+    for spec in [&SPEC_OOB_NONE, &SPEC_OOB_NAN, &SPEC_OOB_TX_PARTIAL] {
+        let elems = mt::box_elems(spec, &data, false);
+        let inside = elems.iter().filter(|e| e.is_some()).count();
+        assert_eq!(inside, 32, "範囲内 8 列 x 4 行");
+        // expect_tx: 部分 OOB 腕だけが範囲内のバイト数（32 要素 x 4 B）、他は box 全体（8 x 16 x 4 B）。
+        let partial = std::ptr::eq(spec, &SPEC_OOB_TX_PARTIAL);
+        assert_eq!(
+            spec.expect_tx,
+            if partial {
+                inside as u32 * 4
+            } else {
+                spec.box_words() * 4
+            }
+        );
+        for (oob, want) in [
+            (0u32, "oob_fill=ZERO"),
+            (0x7fc0_0000, "oob_fill=NAN"),
+            (mt::SENTINEL, "oob_fill=SENTINEL"),
+            (0x1234_5678, "oob_fill=OTHER"),
+        ] {
+            let d = record(mt::classify_oob(spec, &data, &dump_of(spec, &elems, oob)));
+            assert!(
+                d.contains("inrange=MATCH") && d.contains(want) && d.contains("oob_elems=96"),
+                "{d}"
+            );
+        }
+    }
+    let elems = mt::box_elems(&SPEC_OOB_NEG, &data, false);
+    assert_eq!(
+        elems.iter().filter(|e| e.is_some()).count(),
+        32,
+        "負座標: 行 0〜3 x 列 0〜7"
+    );
+    let mut bad = dump_of(
+        &SPEC_OOB_NONE,
+        &mt::box_elems(&SPEC_OOB_NONE, &data, false),
+        0,
+    );
+    bad[2] ^= 1;
+    assert!(record(mt::classify_oob(&SPEC_OOB_NONE, &data, &bad)).contains("inrange=MISMATCH"));
+    // OOB が無い box は NO_OOB_ELEMENTS。
+    let d = record(mt::classify_oob(
+        &SPEC_BASE,
+        &data,
+        &dump_of(&SPEC_BASE, &mt::box_elems(&SPEC_BASE, &data, false), 0),
+    ));
+    assert!(
+        d.contains("oob_fill=NO_OOB_ELEMENTS") && d.contains("oob_distinct=-"),
+        "{d}"
+    );
+}
+
+#[test]
+fn swizzle_classification_names_each_matching_candidate() {
+    for (spec, swz) in [
+        (&SPEC_SWZ32, Swz::B32),
+        (&SPEC_SWZ64, Swz::B64),
+        (&SPEC_SWZ128, Swz::B128),
+    ] {
+        let data = mt::global_data(64, 96);
+        let elems = mt::box_elems(spec, &data, false);
+        let linear = dump_of(spec, &elems, 0);
+        let c = record(mt::classify_swizzle(spec, &data, &linear));
+        assert!(c.contains("LINEAR"), "{swz:?}: {c}");
+        // XOR モデルの配置（線形の語 w が物理 phys(w) にある）。
+        let mut swz_dump = linear.clone();
+        for (w, e) in elems.iter().enumerate() {
+            swz_dump[2 + mt::swizzle_xor_phys_word(swz, w as u32) as usize] = e.expect("範囲内");
+        }
+        let c = record(mt::classify_swizzle(spec, &data, &swz_dump));
+        assert!(
+            c.contains("XOR_ADDR_BITS") && !c.contains("LINEAR"),
+            "{swz:?}: {c}"
+        );
+        assert_eq!(
+            c.contains("SRC_B64_MODEL"),
+            swz == Swz::B64,
+            "{swz:?}: src の B64 仮説は 64B のみ: {c}"
+        );
+        // どれとも一致しない配置は NONE＋ダンプ全文。
+        let mut bad = swz_dump.clone();
+        bad.swap(2, 3);
+        let c = record(mt::classify_swizzle(spec, &data, &bad));
+        assert!(
+            c.contains("class=NONE") && c.contains("dump=0x"),
+            "{swz:?}: {c}"
+        );
+    }
+}
+
+#[test]
+fn transfer_checks_distinguish_success_from_each_failure_kind() {
+    let data = mt::global_data(64, 96);
+    // base: 完走＋ビット一致 → Match。timeout 語・1 語不一致・長さ違いは Mismatch。
+    let ok = dump_of(&SPEC_BASE, &mt::box_elems(&SPEC_BASE, &data, false), 0);
+    assert!(matches!(
+        mt::check_base(&SPEC_BASE, &data, &ok),
+        Outcome::Match(_)
+    ));
+    let mut timed_out = ok.clone();
+    timed_out[0] = 1;
+    assert!(matches!(
+        mt::check_base(&SPEC_BASE, &data, &timed_out),
+        Outcome::Mismatch { .. }
+    ));
+    let mut one_off = ok.clone();
+    one_off[5] ^= 1;
+    assert!(matches!(
+        mt::check_base(&SPEC_BASE, &data, &one_off),
+        Outcome::Mismatch { count: 1, .. }
+    ));
+    assert!(matches!(
+        mt::check_base(&SPEC_BASE, &data, &ok[..10]),
+        Outcome::Mismatch { .. }
+    ));
+    // store: global の box 領域が既知パターン・他は番兵 → Match。
+    let spec = &SPEC_STORE;
+    let mut out = vec![mt::STORE_MAGIC];
+    out.extend(std::iter::repeat_n(
+        mt::SENTINEL,
+        spec.global_words() as usize,
+    ));
+    for r in 0..spec.box_rows {
+        for c in 0..spec.box_cols {
+            let idx = ((spec.cy as u32 + r) * spec.global_cols + spec.cx as u32 + c) as usize;
+            out[1 + idx] = 0xC0DE_0000 | (r * spec.box_cols + c);
+        }
+    }
+    assert!(matches!(
+        mt::check_store(spec, &[], &out),
+        Outcome::Match(_)
+    ));
+    let mut bad = out.clone();
+    bad[1] = 0; // box の外が書き換わった
+    assert!(matches!(
+        mt::check_store(spec, &[], &bad),
+        Outcome::Mismatch { .. }
+    ));
+    let mut no_magic = out.clone();
+    no_magic[0] = 0;
+    assert!(matches!(
+        mt::check_store(spec, &[], &no_magic),
+        Outcome::Mismatch { .. }
+    ));
+    // bulk・prefetch・multicast。
+    let input: Vec<u32> = (0..64).map(|i| 0xB000_0000 | (i * 7 + 1)).collect();
+    let mut bulk = vec![0u32, 3];
+    bulk.extend(&input);
+    assert!(matches!(mt::check_bulk(&input, &bulk), Outcome::Match(_)));
+    bulk[10] ^= 1;
+    assert!(matches!(
+        mt::check_bulk(&input, &bulk),
+        Outcome::Mismatch { .. }
+    ));
+    assert!(matches!(
+        mt::check_prefetch(&SPEC_BASE, &[], &[mt::PREFETCH_MAGIC]),
+        Outcome::Match(_)
+    ));
+    assert!(matches!(
+        mt::check_prefetch(&SPEC_BASE, &[], &[0]),
+        Outcome::Mismatch { .. }
+    ));
+    let slot = ok.clone();
+    let mut both: Vec<u32> = slot.iter().chain(slot.iter()).copied().collect();
+    assert!(matches!(
+        mt::check_multicast(&SPEC_BASE, &data, &both),
+        Outcome::Match(_)
+    ));
+    both[slot.len() + 7] ^= 1; // 2 つ目の CTA だけ不一致
+    assert!(matches!(
+        mt::check_multicast(&SPEC_BASE, &data, &both),
+        Outcome::Mismatch { count: 1, .. }
+    ));
+}
+
+#[test]
+fn recorded_tma_details_are_machine_parsable_key_value_tokens() {
+    let data = mt::global_data(64, 96);
+    let elems = mt::box_elems(&SPEC_OOB_NONE, &data, false);
+    for d in [
+        record(mt::classify_oob(
+            &SPEC_OOB_NONE,
+            &data,
+            &dump_of(&SPEC_OOB_NONE, &elems, 0),
+        )),
+        record(mt::classify_coord(
+            &SPEC_COORD,
+            &data,
+            &dump_of(&SPEC_COORD, &vec![Some(1); 128], 0),
+        )),
+    ] {
+        assert!(
+            d.split_whitespace().all(|t| t.contains('=')),
+            "k=v 以外のトークンがある: {d}"
         );
     }
 }

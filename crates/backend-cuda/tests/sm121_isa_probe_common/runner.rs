@@ -32,7 +32,7 @@ use fandhe_ai_backend_cuda::{CudaDevice, nvrtc_version};
 
 use super::jsonl::Record;
 use super::registry::{Check, Outcome, ProbeSpec, attr_table, evaluate, probe_by_id};
-use super::types::{Kind, Policy, Stage, Status, Target};
+use super::types::{Kind, Launch, Policy, Stage, Status, Target};
 
 /// out バッファの初期値（書かれなかった語の検出用。期待値に現れないことは
 /// registry テストが検査する）。
@@ -164,7 +164,7 @@ pub fn stage_archs(probe: &ProbeSpec, target: &Target) -> (&'static str, &'stati
 
 /// 設計上不実施の段なら `not_applicable_by_design`、そうでなければ上流失敗の
 /// `not_run` を返す。
-fn skipped(policy: Policy, stage: Stage, upstream: &str) -> Cell {
+pub(super) fn skipped(policy: Policy, stage: Stage, upstream: &str) -> Cell {
     if policy.stage_is_na(stage) {
         Cell::new(
             stage,
@@ -183,7 +183,7 @@ fn na_or(policy: Policy, stage: Stage) -> Option<Cell> {
         .then(|| skipped(policy, stage, ""))
 }
 
-fn driver_code(err: &cudarc::driver::DriverError) -> String {
+pub(super) fn driver_code(err: &cudarc::driver::DriverError) -> String {
     format!("{:?}", err.0)
 }
 
@@ -256,6 +256,10 @@ pub fn run_pipeline(
 
 fn device_stages(device: &CudaDevice, probe: &ProbeSpec, ptx: Ptx, sink: &mut dyn FnMut(Cell)) {
     let policy = probe.policy;
+    if let Launch::Raw { cluster } = probe.launch {
+        super::runner_raw::device_stages_raw(device, probe, ptx, cluster, sink);
+        return;
+    }
 
     // S3: ドライバ JIT。
     let module = match device.context().load_module(ptx) {
@@ -406,6 +410,21 @@ fn device_stages(device: &CudaDevice, probe: &ProbeSpec, ptx: Ptx, sink: &mut dy
         }
     }
 
+    let mut readback = || stream.clone_dtoh(&out_dev);
+    finish_after_launch(device, probe, &input, &mut readback, sink);
+}
+
+/// S4（起動）成功後の S5（同期・読み戻し）と S6（検証）。plain／raw の両起動経路が共有する。
+/// `readback` は同期後に出力語（TMA の store では global の読み戻しを連結したもの）を返す。
+pub(super) fn finish_after_launch(
+    device: &CudaDevice,
+    probe: &ProbeSpec,
+    input: &[u32],
+    readback: &mut dyn FnMut() -> Result<Vec<u32>, cudarc::driver::DriverError>,
+    sink: &mut dyn FnMut(Cell),
+) {
+    let policy = probe.policy;
+    let stream = device.stream();
     // S5: 同期（実行時エラー・不正命令はここで現れる）。
     if let Err(e) = stream.synchronize() {
         sink(Cell::new(
@@ -417,7 +436,7 @@ fn device_stages(device: &CudaDevice, probe: &ProbeSpec, ptx: Ptx, sink: &mut dy
         sink(skipped(policy, Stage::S6Verify, "S5 failed"));
         return;
     }
-    let out = match stream.clone_dtoh(&out_dev) {
+    let out = match readback() {
         Ok(v) => v,
         Err(e) => {
             sink(Cell::new(
@@ -433,7 +452,7 @@ fn device_stages(device: &CudaDevice, probe: &ProbeSpec, ptx: Ptx, sink: &mut dy
 
     if policy == Policy::RecordOnly {
         // 値は S5 の detail へ記録するのみ（S6 は設計上不実施）。
-        match evaluate(probe, &input, &out) {
+        match evaluate(probe, input, &out) {
             Outcome::Record(d) => sink(Cell::ok(Stage::S5Sync, format!("record: {d}"))),
             Outcome::Match(d) => sink(Cell::ok(Stage::S5Sync, format!("record: {d}"))),
             Outcome::Mismatch { detail, .. } => sink(Cell::new(
@@ -449,7 +468,7 @@ fn device_stages(device: &CudaDevice, probe: &ProbeSpec, ptx: Ptx, sink: &mut dy
     sink(Cell::ok(Stage::S5Sync, format!("out_words={}", out.len())));
 
     // S6: 検証（Verify のみ）。
-    let cell = match evaluate(probe, &input, &out) {
+    let cell = match evaluate(probe, input, &out) {
         Outcome::Match(d) => Cell::ok(Stage::S6Verify, d),
         Outcome::Mismatch { detail, .. } => {
             Cell::new(Stage::S6Verify, Status::Mismatch, "MISMATCH", detail)
