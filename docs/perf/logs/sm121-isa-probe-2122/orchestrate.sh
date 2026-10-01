@@ -46,14 +46,13 @@ RULE="$SELF_DIR/RULE.txt"
 LOG_DIR_GIVEN="${LOG_DIR:-}"
 LOG_DIR="${LOG_DIR:-$SELF_DIR}"
 case "$LOG_DIR" in /*) ;; *) LOG_DIR="$PWD/$LOG_DIR" ;; esac
+# `..` と symlink を解決して正規化する（リポジトリ外判定を迂回させない）。未作成でも解決できる -m。
+LOG_DIR="$(realpath -m -- "$LOG_DIR")"
 CARGO_FLAGS="${CARGO_FLAGS:-}"
 # shellcheck disable=SC2206  # 意図的な単語分割（空白区切りのフラグ列）
 CARGO_FLAG_ARR=($CARGO_FLAGS)
 
-EXEC_TIMEOUT=120
-COMPILE_TIMEOUT=900
-LEGACY_TIMEOUT=180
-DUMP_TIMEOUT=60
+# timeout の秒数は RULE.txt の PROCESS 行の `timeout=<秒>` が正（本ファイルに定数を持たない）。
 KILL_AFTER=10
 
 if [[ ! -f "$RULE" ]]; then
@@ -70,6 +69,12 @@ if (( ${#PROBES[@]} == 0 || ${#TARGETS[@]} == 0 || ${#DEVTARGETS[@]} == 0 || ${#
   echo "ERROR: RULE.txt から PROBE／TARGET／DEVTARGET／PROCESS 行を読めない" >&2
   exit 1
 fi
+for p in "${PROCESS_LINES[@]}"; do
+  if [[ "$p" != "env_info" && ! "$p" =~ \ timeout=[1-9][0-9]*$ ]]; then
+    echo "ERROR: RULE.txt の PROCESS 行に正の timeout=<秒> が無い: $p" >&2
+    exit 1
+  fi
+done
 if [[ "$DEV_SMOKE" == "1" ]]; then
   EXEC_TARGETS=("${DEVTARGETS[@]}")
   TARGET_SET=dev
@@ -84,10 +89,10 @@ fi
 expand_processes() {
   local p probe target
   for p in "${PROCESS_LINES[@]}"; do
-    if [[ "$p" == "exec_matrix" ]]; then
+    if [[ "$p" == exec_matrix\ * ]]; then
       for probe in "${PROBES[@]}"; do
         for target in "${EXEC_TARGETS[@]}"; do
-          echo "exec $probe $target"
+          echo "exec $probe $target ${p#exec_matrix }"
         done
       done
     elif [[ "$DEV_SMOKE" == "1" && "$p" == legacy\ * ]]; then
@@ -105,7 +110,7 @@ if [[ "$DEV_SMOKE" == "1" ]]; then
     exit 2
   fi
   case "$LOG_DIR/" in
-    "$REPO_ROOT"/*)
+    "$(realpath -m -- "$REPO_ROOT")"/*)
       echo "ERROR: --dev-smoke の出力先 $LOG_DIR はリポジトリ内（コミット防止のためリポジトリ外のみ許容）" >&2
       exit 2 ;;
   esac
@@ -134,7 +139,6 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "dry-run: LOG_DIR=$LOG_DIR"
   echo "dry-run: REPO_ROOT=$REPO_ROOT"
   echo "dry-run: mode=$MODE targets=${EXEC_TARGETS[*]}"
-  echo "dry-run: timeout 秒 exec=$EXEC_TIMEOUT compile=$COMPILE_TIMEOUT legacy=$LEGACY_TIMEOUT dump=$DUMP_TIMEOUT"
   echo "dry-run: cargo test ${TEST_PKG[*]} --no-run（sm121_isa_probe_compile・sm121_isa_probe_exec_real_device・setmaxnreg_probe_* ×4）"
   expand_processes | while IFS= read -r line; do
     echo "dry-run: process $line"
@@ -146,22 +150,12 @@ fi
 # ---------------------------------------------------------------- 実行
 
 cd "$REPO_ROOT"
-HOST_NAME="$(hostname)"
-# 収録時マスク（ホスト名 → masked、$HOME と /home/<name> → <home>）。aggregate.py は /home/<name> の
-# 残存を検出して拒否する。
-mask() {
-  sed -E -e "s|${HOME}|<home>|g" -e "s|/home/[A-Za-z0-9_.-]+|<home>|g" -e "s|${HOST_NAME}|masked|g"
-}
 
-mkdir -p "$LOG_DIR/exec"
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-
-# provenance（git HEAD と clean tree。出力先を作る前＝生成物が dirty を作る前の状態を記録する）。
+# provenance（git HEAD と clean tree）。出力先・作業ディレクトリを作る前に、プロセスを 1 つも
+# 起動しない段階で確定する。
 # GB10 ノードの作業ツリーは rsync 転送で `.git` を持たない（docs/real-hardware-verification-env.md §3）。
 # その場合は転送元が書いた `.rev-stamp`（1 行目: HEAD の 40 桁 16 進・2 行目: `dirty=<件数>`。
-# 作り方は docs/cuda-sm121-isa-probe.md §6.1）から読む。どちらも得られなければ停止する
-# （黙って続行すると G0 が常に不成立になり、正式な集計を作れない）。
+# 作り方は docs/cuda-sm121-isa-probe.md §6.1）から読む。どちらも得られなければ停止する。
 GIT_SOURCE=none
 GIT_HEAD=unknown
 GIT_CLEAN=0
@@ -186,6 +180,45 @@ if [[ ! "$GIT_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: HEAD が 40 桁 16 進でない（$GIT_SOURCE）: $GIT_HEAD" >&2
   exit 1
 fi
+# 正式実行は clean な provenance を必須とする（dirty なら G0 が不成立になり結果が使えないため、
+# 実測を始める前に止める）。submodule ポインタの変更（`M docs/spec` 等）も dirty に数える。
+if [[ "$MODE" == "gb10" && "$GIT_CLEAN" != "1" ]]; then
+  echo "ERROR: 作業ツリーが clean でない（git_source=$GIT_SOURCE）。正式実行は clean な状態からのみ許容" >&2
+  echo "ERROR: .rev-stamp の場合は 2 行目 dirty=0 が必要（docs/cuda-sm121-isa-probe.md §6.1）" >&2
+  exit 1
+fi
+
+HOST_NAME="$(hostname)"
+# ホスト名のマスクは JSON の構造を壊さないよう、SM121_PROBE_ 行（JSON）には素置換しない。
+# ホスト名が短い・JSON のキー／語彙と部分一致する場合は、素置換が JSON を壊すか漏れを見逃すので
+# fail-closed で停止する。JSON 行にホスト名が残っていたら run_proc が停止する。
+if (( ${#HOST_NAME} < 4 )); then
+  echo "ERROR: ホスト名が短すぎる（4 文字未満）ためマスクの安全性を確認できない" >&2
+  exit 1
+fi
+JSON_TOKENS=(
+  "v" "kind" "cell" "env" "done" "proc" "phase" "probe" "target" "arch" "stage" "status" "code" "detail" "device" "cc" "nvrtc" "exit" "cells" "mismatch" "compile" "exec" "legacy" "dump" "ok" "error" "rejected" "timeout" "unavailable" "true" "false" "compute" "sm" "mode" "git_head" "git_clean" "git_source" "start_utc" "end_utc" "uname" "gpu_at_start" "load1_at_start" "nvrtc_ptx" "nvrtc_cubin" "module_load" "launch" "sync" "verify" "ctl" "home" "hopper"
+)
+for t in "${JSON_TOKENS[@]}"; do
+  if [[ "$t" == *"$HOST_NAME"* || "$HOST_NAME" == *"$t"* && ${#t} -ge 4 ]]; then
+    echo "ERROR: ホスト名 $HOST_NAME が JSON のキー・語彙 $t と部分一致する。マスクが JSON を壊しうるため停止" >&2
+    exit 1
+  fi
+done
+sed_escape() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|\/]/\\&/g'; }
+HOST_RE="$(sed_escape "$HOST_NAME")"
+HOME_RE="$(sed_escape "$HOME")"
+# 収録時マスク（$HOME と /home/<name> → <home>。ホスト名 → masked は非 JSON 行のみ）。aggregate.py は
+# /home/<name> の残存を検出して拒否する（ホスト名の残存は検出しない。run_proc が JSON 行を検査する）。
+mask() {
+  sed -E -e "s|${HOME_RE}|<home>|g" -e "s|/home/[A-Za-z0-9_.-]+|<home>|g" \
+    -e "/^SM121_PROBE_/!s|${HOST_RE}|masked|g"
+}
+
+mkdir -p "$LOG_DIR/exec"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
 {
   echo "mode=$MODE"
   echo "git_head=$GIT_HEAD"
@@ -214,6 +247,10 @@ run_proc() {
     rc=124
   fi
   mask <"$raw" >"$out"
+  if grep '^SM121_PROBE_' "$out" | grep -F -q -- "$HOST_NAME"; then
+    echo "ERROR: JSON 行にホスト名が残っている（$out）。マスクできないため停止" >&2
+    exit 1
+  fi
   printf 'SM121_PROBE_PROC {"v":1,"kind":"proc","phase":"%s","probe":"%s","target":"%s","exit":%d}\n' \
     "$phase" "$probe" "$target" "$rc" >>"$out"
   rm -f "$raw"
@@ -227,34 +264,41 @@ cargo test "${CARGO_FLAG_ARR[@]}" "${TEST_PKG[@]}" --no-run \
 cargo build "${CARGO_FLAG_ARR[@]}" "${TEST_PKG[@]}" --example device_attributes_dump
 
 while IFS= read -r proc; do
-  case "$proc" in
+  # 末尾の `timeout=<秒>` を取り出す（env_info は timeout を持たない）。秒数は RULE.txt の PROCESS 行が正。
+  tmo=""
+  desc="$proc"
+  if [[ "$proc" =~ ^(.*)\ timeout=([1-9][0-9]*)$ ]]; then
+    desc="${BASH_REMATCH[1]}"
+    tmo="${BASH_REMATCH[2]}"
+  fi
+  case "$desc" in
     env_info)
       : # env_info.txt は上で記録済み（シェルのみ）
       ;;
     device_attributes_dump)
       echo "== device_attributes_dump =="
-      run_proc "$LOG_DIR/device_attributes_dump.log" dump - - "$DUMP_TIMEOUT" \
+      run_proc "$LOG_DIR/device_attributes_dump.log" dump - - "$tmo" \
         cargo run "${CARGO_FLAG_ARR[@]}" "${TEST_PKG[@]}" --example device_attributes_dump
       ;;
     compile)
       echo "== compile（S1／S2／home／hopper） =="
-      run_proc "$LOG_DIR/compile.log" compile - - "$COMPILE_TIMEOUT" \
+      run_proc "$LOG_DIR/compile.log" compile - - "$tmo" \
         env "SM121_PROBE_TARGET_SET=$TARGET_SET" \
         "${CARGO_TEST_PROBES[@]}" --test sm121_isa_probe_compile -- --ignored --nocapture --exact \
         sm121_isa_probe_compile_matrix
       ;;
     exec\ *)
-      read -r _ probe target <<<"$proc"
+      read -r _ probe target <<<"$desc"
       echo "== exec $probe $target =="
-      run_proc "$LOG_DIR/exec/${probe}@${target}.log" exec "$probe" "$target" "$EXEC_TIMEOUT" \
+      run_proc "$LOG_DIR/exec/${probe}@${target}.log" exec "$probe" "$target" "$tmo" \
         env "SM121_PROBE_ID=$probe" "SM121_PROBE_TARGET=$target" \
         "${CARGO_TEST_PROBES[@]}" --test sm121_isa_probe_exec_real_device -- --ignored --nocapture --exact \
         sm121_isa_probe_exec_selected
       ;;
     legacy\ *)
-      read -r _ name <<<"$proc"
+      read -r _ name <<<"$desc"
       echo "== legacy $name =="
-      run_proc "$LOG_DIR/legacy-${name}.log" legacy "$name" - "$LEGACY_TIMEOUT" \
+      run_proc "$LOG_DIR/legacy-${name}.log" legacy "$name" - "$tmo" \
         "${CARGO_TEST_PROBES[@]}" --test "$name" -- --ignored --nocapture
       ;;
     *)

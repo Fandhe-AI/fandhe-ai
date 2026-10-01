@@ -165,11 +165,72 @@ fn sources_are_ascii_without_include_and_contain_their_opcode() {
         // の添字アクセスはマクロ定義内（`#define`）以外に書かない。
         for line in p.src.lines().filter(|l| !l.starts_with("#define")) {
             assert!(
-                !line.contains("out[") && !line.contains(" in["),
+                !has_raw_index(line, "out") && !has_raw_index(line, "in"),
                 "{}: 境界チェックのない生アクセス: {line}",
                 p.id
             );
         }
+    }
+}
+
+/// `name[`（直前が識別子文字でない）の生の添字アクセスを検出する。空白を挟む `in [`、
+/// `(in[`・`*in[`・`=in[` のような書き方も捕まえる（`n_in[` のような別識別子は対象外）。
+fn has_raw_index(line: &str, name: &str) -> bool {
+    let mut norm = String::with_capacity(line.len());
+    for ch in line.chars() {
+        if ch == '[' {
+            while norm.ends_with(' ') || norm.ends_with('\t') {
+                norm.pop();
+            }
+        }
+        norm.push(ch);
+    }
+    let needle = format!("{name}[");
+    let mut start = 0;
+    while let Some(pos) = norm[start..].find(&needle) {
+        let at = start + pos;
+        let prev = norm[..at].chars().next_back();
+        if !prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return true;
+        }
+        start = at + needle.len();
+    }
+    false
+}
+
+#[test]
+fn raw_index_detector_catches_each_spelling() {
+    for bad in [
+        "x = in[i];",
+        "f(in[i])",
+        "*(in[0])",
+        "a=out[k]",
+        "out [k] = 1;",
+        "(out[0])",
+        "in\t[2]",
+    ] {
+        let name = if bad.contains("out") { "out" } else { "in" };
+        assert!(has_raw_index(bad, name), "検出できない: {bad}");
+    }
+    for ok in [
+        "n_in[0]",
+        "my_out[1]",
+        "ST(i, v)",
+        "LD(i)",
+        "int n_in, unsigned* out, int n",
+    ] {
+        assert!(
+            !has_raw_index(ok, "in") && !has_raw_index(ok, "out"),
+            "誤検出: {ok}"
+        );
+    }
+}
+
+#[test]
+fn symbol_table_covers_every_probe_and_rejects_unknown_ids() {
+    assert!(registry::symbol_of("no.such.probe").is_none());
+    for p in probes() {
+        assert!(registry::symbol_of(p.id).is_some(), "{}", p.id);
     }
 }
 
@@ -563,6 +624,50 @@ fn rule_clause_stage_status_and_target_lines_match() {
         .map(|t| format!("DEVTARGET: {} {}", t.name, t.real))
         .collect();
     assert_eq!(rule_lines("DEVTARGET: "), dev);
+}
+
+#[test]
+fn rule_process_lines_carry_timeouts_and_fixed_arch_matches_the_registry() {
+    // PROCESS 行は env_info 以外すべて正の `timeout=<秒>` を持つ（orchestrate.sh はそこから読む）。
+    let lines = rule_lines("PROCESS: ");
+    assert!(lines.iter().any(|l| l == "PROCESS: env_info"));
+    assert!(lines.iter().any(|l| l.starts_with("PROCESS: exec_matrix ")));
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("PROCESS: legacy "))
+            .count(),
+        4
+    );
+    for l in lines.iter().filter(|l| *l != "PROCESS: env_info") {
+        let secs = l.rsplit_once(" timeout=").map(|(_, n)| n);
+        assert!(
+            secs.is_some_and(|n| n.parse::<u64>().is_ok_and(|v| v > 0)),
+            "PROCESS 行に正の timeout= が無い: {l}"
+        );
+    }
+    // orchestrate.sh は秒数の定数を持たない（RULE.txt の単一ソース）。
+    let sh = read_repo("docs/perf/logs/sm121-isa-probe-2122/orchestrate.sh");
+    for needle in [
+        "EXEC_TIMEOUT=",
+        "COMPILE_TIMEOUT=",
+        "LEGACY_TIMEOUT=",
+        "DUMP_TIMEOUT=",
+    ] {
+        assert!(
+            !sh.contains(needle),
+            "orchestrate.sh に timeout 定数 {needle} が残っている"
+        );
+    }
+    // 固定アーキ（tc5.cross）は FIXEDARCH 行と一致する。
+    let want: Vec<String> = probes()
+        .iter()
+        .filter_map(|p| {
+            p.fixed_arch
+                .map(|(v, r)| format!("FIXEDARCH: {} {v} {r}", p.id))
+        })
+        .collect();
+    assert_eq!(rule_lines("FIXEDARCH: "), want);
 }
 
 #[test]

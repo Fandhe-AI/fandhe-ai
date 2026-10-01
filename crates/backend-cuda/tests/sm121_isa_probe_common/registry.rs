@@ -1100,7 +1100,12 @@ pub fn probes() -> Vec<ProbeSpec> {
     // symbol は id の '.' を '_' に置換した C シンボル名（tc5.cross は tc5.alloc のソースを使うため
     // 例外として `tc5_alloc`）。
     for p in &mut v {
-        p.symbol = symbol_of(p.id);
+        p.symbol = symbol_of(p.id).unwrap_or_else(|| {
+            panic!(
+                "{}: symbol_of の対応表に ID が無い（registry.rs へ追加すること）",
+                p.id
+            )
+        });
     }
     // tc5.cross は tc5.alloc と同じソース（固定アーキ compute_100a で S1／S2 を行う）。
     for p in &mut v {
@@ -1113,7 +1118,7 @@ pub fn probes() -> Vec<ProbeSpec> {
 
 /// `id` から C シンボル名を得る（`tc5.cross` のみ共有ソースのため `tc5_alloc`）。
 /// 返す `&'static str` は固定表由来（実行時文字列の `Box::leak` を避ける）。
-pub fn symbol_of(id: &str) -> &'static str {
+pub fn symbol_of(id: &str) -> Option<&'static str> {
     const SYMBOLS: &[(&str, &str)] = &[
         ("ctl.copy", "ctl_copy"),
         ("macro.arch", "macro_arch"),
@@ -1168,11 +1173,7 @@ pub fn symbol_of(id: &str) -> &'static str {
         ("attr.cluster", ""),
         ("attr.misc", ""),
     ];
-    SYMBOLS
-        .iter()
-        .find(|(k, _)| *k == id)
-        .map(|(_, v)| *v)
-        .unwrap_or("")
+    SYMBOLS.iter().find(|(k, _)| *k == id).map(|(_, v)| *v)
 }
 
 /// ホワイトリスト検索（未知の ID は `None`。呼び出し側が fail-loud にする）。

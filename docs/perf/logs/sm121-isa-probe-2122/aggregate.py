@@ -70,7 +70,7 @@ GUIDE_WORDS = (G_MATCH, G_DIFF, "判定不能")
 INDET_CODES = ("G0_FAILED", "TARGET_UNSUPPORTED", "CTL_FAILED", "HOME_REJECTED", "HOME_NOT_OK",
                "COMPILE_EXEC_DISAGREE", "OFFLINE_JIT_DISAGREE", "NVRTC_UNAVAILABLE", "NO_DEVICE",
                "UNSUPPORTED_PTX_VERSION", "STAGE_ERROR", "TIMEOUT", "PROCESS_FAILED",
-               "LAYOUT_UNVERIFIED", "UNEXPECTED_ACCEPT", "LEGACY_CONTRADICTION",
+               "LAYOUT_UNVERIFIED", "UNEXPECTED_ACCEPT", "LEGACY_CONTRADICTION", "LEGACY_INCONCLUSIVE",
                "HOPPER_HOME_DISAGREE", "GUIDE_NO_PROBE", "GUIDE_UNMEASURED")
 G0_REASONS = ("G0_PROVENANCE", "G0_DIRTY_TREE", "G0_DEV_MODE", "G0_DEV_TARGET", "G0_NVRTC_MISSING",
               "G0_CC", "G0_NO_DEVICE")
@@ -91,6 +91,7 @@ ARCH_RE = re.compile(r"^(-|(compute|sm)_[0-9]+[af]?)$")
 CC_RE = re.compile(r"^([0-9]+\.[0-9]+|none)$")
 NVRTC_RE = re.compile(r"^([0-9]+\.[0-9]+|unavailable)$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
 
 class LogIntegrityError(Exception):
@@ -118,6 +119,32 @@ def check_masked(text: str, name: str) -> None:
         raise LogIntegrityError(f"{name}: 未マスクの絶対パス {m.group(0)!r}（RULE.txt 13）")
 
 
+def parse_kv(tokens, where: str, strict: bool = False) -> dict:
+    """`k=v` 形式のトークン列を辞書にする。重複キーは値が同一でも拒否する（register_once）。
+    strict=True なら `k=v` でないトークンも拒否する。"""
+    kv: dict = {}
+    for tok in tokens:
+        k, sep, v = tok.partition("=")
+        if not sep or not k:
+            if strict:
+                raise LogIntegrityError(f"{where}: k=v 形式でないトークン: {tok!r}")
+            continue
+        register_once(kv, k, v, where)
+    return kv
+
+
+def expected_arch(rule: "Rule", pdef: "ProbeDef", target: str, stage: str) -> str:
+    """exec のセルが記録すべき arch（runner.rs / sm121_isa_probe_exec_real_device.rs の規則）。
+    ctl は target、S2 は実アーキ、それ以外は仮想アーキ。tc5.cross など固定アーキのプローブは
+    S1〜S6 が固定アーキ（FIXEDARCH 行）になる。"""
+    fixed = rule.fixed_arch.get(pdef.id)
+    if stage == "ctl":
+        return target
+    if stage == "nvrtc_cubin":
+        return fixed[1] if fixed else (rule.targets.get(target) or rule.dev_targets[target])
+    return fixed[0] if fixed else target
+
+
 # ------------------------------------------------------------------ RULE.txt
 
 @dataclass(frozen=True)
@@ -142,12 +169,13 @@ class Rule:
     targets: dict
     dev_targets: dict
     processes: list = field(default_factory=list)
+    fixed_arch: dict = field(default_factory=dict)
 
 
 def parse_rule(text: str) -> Rule:
     """RULE.txt の機械可読行を読む。未知の KEY や書式違反は LogIntegrityError。"""
     keys = ("CLAUSE", "STAGE", "STATUS", "VERDICT", "GUIDE", "INDETERMINATE", "G0REASON",
-            "TARGET", "DEVTARGET", "PROBE", "PROCESS")
+            "TARGET", "DEVTARGET", "PROBE", "PROCESS", "FIXEDARCH")
     lines: dict = {k: [] for k in keys}
     for raw in text.splitlines():
         m = re.match(r"^([A-Z0-9]+): (.*)$", raw)
@@ -177,7 +205,15 @@ def parse_rule(text: str) -> Rule:
         for v in lines[key]:
             name, real = v.split(" ")
             register_once(store, name, real, f"RULE.txt {key}")
-    return Rule(lines, probes, targets, dev, lines["PROCESS"])
+    fixed: dict = {}
+    for v in lines["FIXEDARCH"]:
+        pid, virt, real = v.split(" ")
+        if pid not in probes:
+            raise LogIntegrityError(f"RULE.txt: FIXEDARCH が未知のプローブ: {pid}")
+        register_once(fixed, pid, (virt, real), "RULE.txt FIXEDARCH")
+    for v in lines["PROCESS"]:
+        process_timeout(v)  # 書式検査（timeout= の欠落・不正は LogIntegrityError）
+    return Rule(lines, probes, targets, dev, lines["PROCESS"], fixed)
 
 
 def load_rule() -> Rule:
@@ -196,14 +232,26 @@ def check_rule_consistency(rule: Rule) -> None:
         raise LogIntegrityError("RULE.txt に PROBE／TARGET／DEVTARGET 行が無い")
 
 
+def process_timeout(line: str) -> int | None:
+    """PROCESS 行末尾の `timeout=<秒>`。env_info のみ timeout を持たない（None）。"""
+    if line == "env_info":
+        return None
+    m = re.search(r" timeout=([0-9]+)$", line)
+    if not m or int(m.group(1)) <= 0:
+        raise LogIntegrityError(f"RULE.txt: PROCESS 行に正の timeout= が無い: {line!r}")
+    return int(m.group(1))
+
+
 def expand_processes(rule: Rule) -> list:
-    """PROCESS 行を (PROBE × 正式 TARGET) まで展開した起動プロセス名の一覧にする。"""
+    """PROCESS 行を (PROBE × 正式 TARGET) まで展開した起動プロセス名の一覧にする
+    （`timeout=<秒>` を含む。orchestrate.sh --dry-run の出力と一致しなければならない）。"""
     out = []
     for p in rule.processes:
-        if p == "exec_matrix":
+        if p.startswith("exec_matrix "):
+            tmo = p[len("exec_matrix "):]
             for pid in rule.probes:
                 for t in rule.targets:
-                    out.append(f"exec {pid} {t}")
+                    out.append(f"exec {pid} {t} {tmo}")
         else:
             out.append(p)
     return out
@@ -302,7 +350,7 @@ def validate_record(rec: dict, where: str) -> str:
     elif kind == "done":
         if rec["cells"] < 0 or rec["mismatch"] < 0:
             raise LogIntegrityError(f"{where}: done の件数が負")
-    if rec["phase"] not in ("compile", "exec", "legacy"):
+    if rec["phase"] not in ("compile", "exec", "legacy", "dump"):
         raise LogIntegrityError(f"{where}: 未知の phase: {rec['phase']!r}")
     return kind
 
@@ -373,7 +421,6 @@ class Run:
     execs: dict                  # (probe, target) -> ExecProc
     legacy: dict                 # name -> {"class": str, "exit": int}
     targets: tuple
-    attr_dump_present: bool
 
 
 def parse_env_info(text: str) -> dict:
@@ -389,23 +436,33 @@ def parse_env_info(text: str) -> dict:
 
 def validate_chain(pdef: ProbeDef, cells: dict, where: str) -> None:
     """連鎖の矛盾・policy 固定状態との不一致を拒否する（R-STAGE）。"""
+    dead = any(cells[st].status in ("timeout", "process_failed") for st in STAGES)
     for stage in STAGES:
         c = cells[stage]
         if stage == "ctl":
             na_ok = pdef.id == "ctl.copy"
             if (c.status == "not_applicable_by_design") != na_ok:
                 raise LogIntegrityError(f"{where}: ctl の not_applicable_by_design は ctl.copy のみ")
-            if c.status not in ("ok", "error", "not_applicable_by_design"):
+            # timeout／process_failed は aggregate が合成する（対照段でのハング・異常終了）。
+            if c.status not in ("ok", "error", "timeout", "process_failed", "not_applicable_by_design"):
                 raise LogIntegrityError(f"{where}: ctl の状態が不正: {c.status}")
             continue
         na = stage_is_na(pdef.policy, stage)
+        if cells["ctl"].status in ("timeout", "process_failed") and not na:
+            continue  # 打ち切り時の検査は下の専用分岐が行う
         if na != (c.status == "not_applicable_by_design"):
             raise LogIntegrityError(
                 f"{where}: {stage} は policy={pdef.policy} で設計上不実施かどうかが状態と矛盾: {c.status}")
-        if stage in ("nvrtc_ptx", "nvrtc_cubin") and c.status in ("not_run", "mismatch"):
+        if stage in ("nvrtc_ptx", "nvrtc_cubin") and (c.status == "mismatch" or (c.status == "not_run" and not dead)):
             raise LogIntegrityError(f"{where}: {stage} に不正な状態 {c.status}")
         if stage == "verify" and c.status == "unavailable" and not pdef.is_attr:
             raise LogIntegrityError(f"{where}: verify の unavailable は attr のみ")
+    if cells["ctl"].status in ("timeout", "process_failed"):
+        # 対照段で打ち切られたプロセス: 以降の段（設計上不実施を除く）はすべて実行されていない。
+        for stage in STAGES[1:]:
+            if cells[stage].status not in ("not_run", "not_applicable_by_design"):
+                raise LogIntegrityError(f"{where}: ctl が打ち切られたのに {stage} が {cells[stage].status}")
+        return
     if pdef.is_attr:
         return
     chain = ("nvrtc_ptx", "nvrtc_cubin", "module_load", "launch", "sync", "verify")
@@ -434,6 +491,10 @@ def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str
     for rec in log.cells:
         if rec["phase"] != "exec" or rec["probe"] != pdef.id or rec["target"] != target:
             raise LogIntegrityError(f"{name}: セルの phase／probe／target がファイル名と不一致: {rec['probe']} {rec['target']}")
+        want_arch = expected_arch(rule, pdef, target, rec["stage"])
+        if rec["arch"] != want_arch:
+            raise LogIntegrityError(
+                f"{name}: {rec['stage']} の arch が期待 {want_arch} と不一致: {rec['arch']!r}")
         register_once(cells, rec["stage"], Cell(rec["status"], rec["code"], rec["detail"], rec["arch"]),
                       f"{name} cell")
         order.append(rec["stage"])
@@ -483,7 +544,10 @@ def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str
         for stage in STAGES:
             if stage in cells:
                 continue
-            if stage != "ctl" and stage_is_na(pdef.policy, stage):
+            if stage == "ctl" and pdef.id == "ctl.copy":
+                # ctl.copy 自身の ctl は設計上不実施（対照そのものがプローブ）。打ち切りは次の段に付く。
+                cells[stage] = Cell("not_applicable_by_design", "-", "this probe is the control")
+            elif stage != "ctl" and stage_is_na(pdef.policy, stage):
                 cells[stage] = Cell("not_applicable_by_design", "-", f"policy={pdef.policy}")
             elif first:
                 cells[stage] = Cell(status, f"EXIT_{code}", f"aggregate が合成（exit={code}。外部 timeout は 124）")
@@ -492,6 +556,8 @@ def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str
                 cells[stage] = Cell("not_run", "UPSTREAM_FAILED", "aggregate が合成（前段が未完了）")
         synthesized = True
     validate_chain(pdef, cells, name)
+    if pdef.is_attr and cells["verify"].status == "ok":
+        parse_kv(cells["verify"].detail.split(), f"{name} attr detail", strict=True)
     return ExecProc(pdef.id, target, envs.get("env"), cells, code, synthesized)
 
 
@@ -501,10 +567,14 @@ def load_compile(rule: Rule, text: str, targets: tuple) -> tuple:
     if len(envs) != 1 or len(log.envs) != 1:
         raise LogIntegrityError("compile.log: env レコードがちょうど 1 件でない")
     env = envs[0]
+    if env["probe"] != "-" or env["target"] != "-":
+        raise LogIntegrityError("compile.log: env の probe／target が - でない")
     procs = [r for r in log.procs if r["phase"] == "compile"]
     if len(procs) != 1 or len(log.procs) != 1:
         raise LogIntegrityError("compile.log: proc 記録がちょうど 1 件でない")
     exit_code = procs[0]["exit"]
+    if procs[0]["probe"] != "-" or procs[0]["target"] != "-":
+        raise LogIntegrityError("compile.log: proc の probe／target が - でない")
     if env["nvrtc"] == "unavailable":
         if log.cells or log.dones:
             raise LogIntegrityError("compile.log: NVRTC 不在なのにセルまたは done がある")
@@ -521,6 +591,17 @@ def load_compile(rule: Rule, text: str, targets: tuple) -> tuple:
             raise LogIntegrityError(f"compile.log: S1／S2 以外の stage: {rec['stage']}")
         if rec["status"] not in ("ok", "rejected", "error", "unavailable"):
             raise LogIntegrityError(f"compile.log: 不正な状態 {rec['status']}")
+        pdef = rule.probes[rec["probe"]]
+        if rec["target"] == "home":
+            want_arch = pdef.home
+        elif rec["target"] == "hopper":
+            want_arch = HOPPER_ARCH
+        else:
+            want_arch = expected_arch(rule, pdef, rec["target"], rec["stage"])
+        if rec["arch"] != want_arch:
+            raise LogIntegrityError(
+                f"compile.log: {rec['probe']} {rec['target']} {rec['stage']} の arch が期待 {want_arch}"
+                f" と不一致: {rec['arch']!r}")
         register_once(cells, (rec["probe"], rec["target"], rec["stage"]),
                       Cell(rec["status"], rec["code"], rec["detail"], rec["arch"]), "compile.log cell")
     want = set()
@@ -537,6 +618,7 @@ def load_compile(rule: Rule, text: str, targets: tuple) -> tuple:
             raise LogIntegrityError(f"compile.log: {t} は S2 のみ: {pid} {stage}")
     require_exact_keys(cells.keys(), want, "compile.log のセル")
     if len(log.dones) != 1 or log.dones[0]["phase"] != "compile" \
+            or log.dones[0]["probe"] != "-" or log.dones[0]["target"] != "-" \
             or log.dones[0]["cells"] != len(cells) or log.dones[0]["mismatch"] != 0:
         raise LogIntegrityError("compile.log: done がちょうど 1 件で件数一致していない")
     if exit_code != 0:
@@ -553,7 +635,7 @@ def classify_legacy(text: str, name: str, exit_code: int, want_arch: str) -> str
             continue
         body = raw[len(LEGACY_PREFIX):]
         main, _, _detail = body.partition(" detail=")
-        kv = dict(tok.split("=", 1) for tok in main.split() if "=" in tok)
+        kv = parse_kv(main.split(), f"{name} 行 {len(terminals)}")
         stage, result = kv.get("stage"), kv.get("result")
         arch = kv.get("arch")
         if arch is not None and arch != want_arch and stage in ("nvrtc_compile", "execute", "module_load",
@@ -597,7 +679,7 @@ def load_run(rule: Rule, log_dir: Path) -> Run:
     nothing = not (env_path.exists() or compile_path.exists() or exec_files or legacy_files
                    or dump_path.exists())
     if nothing:
-        return Run(False, "official", {}, None, {}, False, {}, {}, tuple(rule.targets), False)
+        return Run(False, "official", {}, None, {}, False, {}, {}, tuple(rule.targets))
     for need in (env_path, compile_path):
         if not need.exists():
             raise LogIntegrityError(f"{need.name} が無い（一部だけ欠けている）")
@@ -607,6 +689,11 @@ def load_run(rule: Rule, log_dir: Path) -> Run:
     for k in ("git_head", "git_clean", "start_utc", "end_utc"):
         if k not in prov:
             raise LogIntegrityError(f"env_info.txt: {k} が無い（未完了の実行の疑い）")
+    if prov["git_clean"] not in ("0", "1"):
+        raise LogIntegrityError(f"env_info.txt: git_clean が 0／1 でない: {prov['git_clean']!r}")
+    for k in ("start_utc", "end_utc"):
+        if not UTC_RE.match(prov[k]):
+            raise LogIntegrityError(f"env_info.txt: {k} の書式が不正: {prov[k]!r}")
     # exec ファイルのファイル名から target 集合（正式／開発機）を決める。
     names = {}
     for f in exec_files:
@@ -645,18 +732,29 @@ def load_run(rule: Rule, log_dir: Path) -> Run:
         log = parse_log(text, f.name)
         if log.cells or log.envs or log.dones:
             raise LogIntegrityError(f"{f.name}: legacy ログに新形式のセルがある")
-        procs = [r for r in log.procs if r["phase"] == "legacy" and r["probe"] == lname]
+        procs = [r for r in log.procs if r["phase"] == "legacy" and r["probe"] == lname
+                 and r["target"] == "-"]
         if len(procs) != 1 or len(log.procs) != 1:
             raise LogIntegrityError(f"{f.name}: proc 記録がちょうど 1 件でない")
         want_arch = LEGACY_NAMES[lname][1]
         cls = classify_legacy(text, f.name, procs[0]["exit"], want_arch)
         register_once(legacy, lname, {"class": cls, "exit": procs[0]["exit"]}, "legacy")
-    if legacy:
-        require_exact_keys(legacy.keys(), LEGACY_NAMES.keys(), "legacy ログの集合")
-    if dump_path.exists():
-        check_masked(dump_path.read_text(encoding="utf-8"), "device_attributes_dump.log")
-    return Run(True, mode, prov, compile_env, compile_cells, compile_missing, execs, legacy, targets,
-               dump_path.exists())
+    # R-LEGACY: official では legacy 4 件が必須（欠測を黙認すると legacy 照合が飛び「成立」になる）。
+    # dev（開発機スモーク）では legacy を回さないので 0 件を要求する。
+    require_exact_keys(legacy.keys(), LEGACY_NAMES.keys() if mode == "official" else (),
+                       f"legacy ログの集合（mode={mode}）")
+    # device_attributes_dump.log: 値は記録用だが、存在と proc 記録（exit 0）は必須（欠測の黙認をしない）。
+    if not dump_path.exists():
+        raise LogIntegrityError("device_attributes_dump.log が無い（記録用だが欠測は許容しない）")
+    dump = parse_log(dump_path.read_text(encoding="utf-8"), "device_attributes_dump.log")
+    if dump.cells or dump.envs or dump.dones:
+        raise LogIntegrityError("device_attributes_dump.log に新形式のセルがある")
+    dprocs = [r for r in dump.procs if r["phase"] == "dump" and r["probe"] == "-" and r["target"] == "-"]
+    if len(dprocs) != 1 or len(dump.procs) != 1:
+        raise LogIntegrityError("device_attributes_dump.log: proc 記録がちょうど 1 件でない")
+    if dprocs[0]["exit"] != 0:
+        raise LogIntegrityError(f"device_attributes_dump.log: exit {dprocs[0]['exit']}（timeout は 124）")
+    return Run(True, mode, prov, compile_env, compile_cells, compile_missing, execs, legacy, targets)
 
 
 # ------------------------------------------------------------------ 判定
@@ -750,7 +848,9 @@ def verdict_for(rule: Rule, run: Run, g0: list, pdef: ProbeDef, target: str) -> 
             if pid == pdef.id and t == target and lname in run.legacy:
                 mine = new_class(c)
                 theirs = run.legacy[lname]["class"]
-                if mine is not None and theirs != "inconclusive" and mine != theirs:
+                if theirs in ("inconclusive", "timeout"):
+                    return indet("LEGACY_INCONCLUSIVE", f"legacy の結論が {theirs}（比較できない）")
+                if mine is not None and mine != theirs:
                     return indet("LEGACY_CONTRADICTION", f"legacy={theirs} 新プローブ={mine}")
     s1, s2, s3 = c["nvrtc_ptx"], c["nvrtc_cubin"], c["module_load"]
     if s1.status == "rejected":
@@ -839,7 +939,7 @@ def attr_values(run: Run, probe: str, key: str) -> list | None:
         p = run.execs.get((probe, t))
         if p is None or p.cells["verify"].status != "ok":
             return None
-        kv = dict(tok.split("=", 1) for tok in p.cells["verify"].detail.split() if "=" in tok)
+        kv = parse_kv(p.cells["verify"].detail.split(), f"{probe}@{t} attr detail", strict=True)
         raw = kv.get(key)
         if raw is None or not re.fullmatch(r"-?[0-9]+", raw):
             return None
@@ -1040,9 +1140,21 @@ class Model:
                                                                  "mma.block_scale.m16n8k64")
                 self.compile_cells[(pid, "hopper", "nvrtc_cubin")] = (
                     Cell("rejected", "NVRTC_COMPILE_ERROR", "hopper") if hop_rejected else Cell("ok", "-", "hopper"))
-        for lname in LEGACY_NAMES:
+        self.dump_exit: int | None = 0
+        for lname in ([] if dev else LEGACY_NAMES):
             self.legacy[lname] = {"exit": 0, "lines": ["SETMAXNREG_PROBE_RESULT stage=execute kernel=k arch="
                                                        + LEGACY_NAMES[lname][1] + " result=success"]}
+
+    def exec_arch(self, pid, t, stage) -> str:
+        return expected_arch(self.rule, self.rule.probes[pid], t, stage)
+
+    def compile_arch(self, pid, t, stage) -> str:
+        p = self.rule.probes[pid]
+        if t == "home":
+            return p.home
+        if t == "hopper":
+            return HOPPER_ARCH
+        return expected_arch(self.rule, p, t, stage)
 
     def _cell_line(self, pid, t, phase, stage, c: Cell, arch="compute_121") -> str:
         rec = {"v": 1, "kind": "cell", "phase": phase, "probe": pid, "target": t, "arch": arch,
@@ -1053,10 +1165,14 @@ class Model:
         (root / "exec").mkdir(parents=True, exist_ok=True)
         (root / "env_info.txt").write_text(
             "".join(f"{k}={v}\n" for k, v in self.prov.items()), encoding="utf-8")
-        (root / "device_attributes_dump.log").write_text("dump\n", encoding="utf-8")
+        if self.dump_exit is not None:
+            (root / "device_attributes_dump.log").write_text(
+                "dump\n" + PREFIX_PROC + json.dumps({"v": 1, "kind": "proc", "phase": "dump", "probe": "-",
+                                                    "target": "-", "exit": self.dump_exit}) + "\n",
+                encoding="utf-8")
         lines = [PREFIX_JSON + json.dumps(self.compile_env)]
         for (pid, t, stage), c in self.compile_cells.items():
-            lines.append(self._cell_line(pid, t, "compile", stage, c))
+            lines.append(self._cell_line(pid, t, "compile", stage, c, self.compile_arch(pid, t, stage)))
         lines.append(PREFIX_JSON + json.dumps({"v": 1, "kind": "done", "phase": "compile", "probe": "-",
                                                "target": "-", "cells": len(self.compile_cells),
                                                "mismatch": 0}))
@@ -1069,7 +1185,8 @@ class Model:
                 ls.append(PREFIX_JSON + json.dumps(e["env"]))
             for stage in STAGES:
                 if stage in e["cells"]:
-                    ls.append(self._cell_line(pid, t, "exec", stage, e["cells"][stage]))
+                    ls.append(self._cell_line(pid, t, "exec", stage, e["cells"][stage],
+                                              self.exec_arch(pid, t, stage)))
             if e["done"]:
                 n_mis = sum(1 for c in e["cells"].values() if c.status == "mismatch")
                 ls.append(PREFIX_JSON + json.dumps({"v": 1, "kind": "done", "phase": "exec", "probe": pid,
@@ -1200,6 +1317,14 @@ def fx_ctl_ind(rule):
     _expect(v.word == V_INDET and v.code == "TARGET_UNSUPPORTED", f"TARGET_UNSUPPORTED: {v}")
     m.execs[("mma.tf32.m16n8k8", "compute_121f")]["cells"]["ctl"] = Cell("error", "CTL_FAILED", "x")
     _expect(_verdict(m, "mma.tf32.m16n8k8", "compute_121f").code == "CTL_FAILED", "CTL_FAILED")
+    # 対照段（env 行だけで打ち切られたプロセス）のハング・異常終了も判定不能（P1）。
+    for pid in ("mma.tf32.m16n8k8", "ctl.copy"):
+        for exit_code, want in ((124, "TIMEOUT"), (139, "PROCESS_FAILED")):
+            m = Model(rule)
+            e = m.execs[(pid, "compute_121")]
+            e["cells"], e["done"], e["exit"] = {}, False, exit_code
+            v = _verdict(m, pid)
+            _expect(v.word == V_INDET and v.code == want, f"{pid} ctl 欠落 exit={exit_code}: {v}")
 
 
 def fx_home(rule):
@@ -1348,6 +1473,28 @@ def fx_legacy_ind(rule):
     m.legacy["setmaxnreg_probe_incdec_accel_real_device"]["lines"].append(
         "SETMAXNREG_PROBE_RESULT stage=launch kernel=k arch=compute_121a result=failed")
     _expect_integrity_error(lambda: _load(m), "legacy の終端が 2 つ")
+    # legacy が inconclusive／timeout のときは矛盾ではなく比較不能（別コード）。
+    m = Model(rule)
+    m.legacy["setmaxnreg_probe_dec_base_real_device"]["lines"] = [
+        "SETMAXNREG_PROBE_RESULT stage=nvrtc_compile kernel=k arch=compute_121 result=inconclusive detail=X"]
+    v = _verdict(m, "snr.dec")
+    _expect(v.word == V_INDET and v.code == "LEGACY_INCONCLUSIVE", f"legacy inconclusive: {v}")
+    m = Model(rule)
+    m.legacy["setmaxnreg_probe_dec_base_real_device"].update(lines=[], exit=124)
+    v = _verdict(m, "snr.dec")
+    _expect(v.code == "LEGACY_INCONCLUSIVE", f"legacy timeout: {v}")
+    # official で legacy が 1 件でも欠ければ黙ってスキップせず完全性違反。
+    m = Model(rule)
+    del m.legacy["setmaxnreg_probe_dec_base_real_device"]
+    _expect_integrity_error(lambda: _load(m), "official の legacy 欠落")
+    m = Model(rule)
+    m.legacy.clear()
+    _expect_integrity_error(lambda: _load(m), "official の legacy 全欠落")
+    m = Model(rule, dev=True)
+    m.legacy["setmaxnreg_probe_dec_base_real_device"] = {"exit": 0, "lines": [
+        "SETMAXNREG_PROBE_RESULT stage=execute kernel=k arch=compute_121 result=success"]}
+    _expect_integrity_error(lambda: _load(m), "dev で legacy がある")
+    _load(Model(rule, dev=True))  # 陽性: dev は legacy 0 件で読める
 
 
 def fx_common(rule):
@@ -1438,6 +1585,51 @@ def fx_common_ind(rule):
     m = Model(rule)
     m.compile_cells.pop(("mma.tf32.m16n8k8", "home", "nvrtc_cubin"))
     _expect_integrity_error(lambda: _load(m), "compile のキー欠落")
+    # device_attributes_dump.log: 欠測・exit 非 0・proc 欠落は黙認しない（記録用でも必須）。
+    m = Model(rule)
+    m.dump_exit = None
+    _expect_integrity_error(lambda: _load(m), "dump ログの欠落")
+    m = Model(rule)
+    m.dump_exit = 124
+    _expect_integrity_error(lambda: _load(m), "dump の timeout")
+    _expect_integrity_error(lambda: _load(base, patch("device_attributes_dump.log", lambda t: "\n".join(
+        l for l in t.splitlines() if not l.startswith(PREFIX_PROC)) + "\n")), "dump の proc 欠落")
+    # arch の期待値照合（exec・compile）。
+    run_bad_arch = patch("exec/mma.tf32.m16n8k8@compute_121.log", lambda t: t.replace(
+        '"arch": "compute_121", "stage": "module_load"', '"arch": "compute_86", "stage": "module_load"'))
+    _expect_integrity_error(lambda: _load(base, run_bad_arch), "exec セルの arch 不一致")
+    _expect_integrity_error(lambda: _load(base, patch("exec/tc5.cross@compute_121.log", lambda t: t.replace(
+        '"arch": "compute_100a"', '"arch": "compute_121"'))), "固定アーキ（tc5.cross）の arch 不一致")
+    _expect_integrity_error(lambda: _load(base, patch("compile.log", lambda t: t.replace(
+        '"target": "home", "arch": "sm_80"', '"target": "home", "arch": "sm_90a"', 1))), "home の arch 不一致")
+    _expect_integrity_error(lambda: _load(base, patch("compile.log", lambda t: t.replace(
+        '"target": "hopper", "arch": "sm_90a"', '"target": "hopper", "arch": "sm_80"', 1))), "hopper の arch 不一致")
+    _expect_integrity_error(lambda: _load(base, patch("compile.log", lambda t: t.replace(
+        '"target": "compute_121", "arch": "sm_121"', '"target": "compute_121", "arch": "sm_121a"', 1))), "S2 の arch 不一致")
+    # 重複キー（attr の detail・legacy の行）。
+    m = Model(rule)
+    m.execs[("attr.limits", "compute_121")]["cells"]["verify"] = Cell("ok", "-", "warp_size=32 warp_size=32")
+    _expect_integrity_error(lambda: _load(m), "attr detail の重複キー")
+    m = Model(rule)
+    m.legacy["setmaxnreg_probe_dec_base_real_device"]["lines"] = [
+        "SETMAXNREG_PROBE_RESULT stage=execute stage=launch arch=compute_121 result=success"]
+    _expect_integrity_error(lambda: _load(m), "legacy 行の重複キー")
+    _expect_integrity_error(lambda: parse_kv(["a=1", "a=2"], "unit"), "parse_kv の重複")
+    # env_info の値検証・compile の識別子。
+    m = Model(rule)
+    m.prov["git_clean"] = "2"
+    _expect_integrity_error(lambda: _load(m), "git_clean の値")
+    m = Model(rule)
+    m.prov["end_utc"] = "yesterday"
+    _expect_integrity_error(lambda: _load(m), "end_utc の書式")
+    _expect_integrity_error(lambda: _load(base, patch("compile.log", lambda t: t.replace(
+        '"kind": "done", "phase": "compile", "probe": "-"', '"kind": "done", "phase": "compile", "probe": "x"'))), "compile done の probe")
+    _expect_integrity_error(lambda: _load(base, patch("legacy-setmaxnreg_probe_dec_base_real_device.log",
+        lambda t: t.replace('"target": "-"', '"target": "compute_121"'))), "legacy proc の target")
+    # PROCESS 行の timeout 書式。
+    _expect_integrity_error(lambda: process_timeout("compile"), "timeout 欠落")
+    _expect_integrity_error(lambda: process_timeout("exec_matrix timeout=0"), "timeout=0")
+    _expect(process_timeout("compile timeout=900") == 900 and process_timeout("env_info") is None, "timeout 解析")
     # 一部だけ欠けているログ（env_info があって compile.log が無い）。
     def drop_compile(root):
         (root / "compile.log").unlink()
