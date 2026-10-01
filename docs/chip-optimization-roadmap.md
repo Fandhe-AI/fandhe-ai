@@ -160,7 +160,8 @@ Issue 本文の想定と HEAD の記録が食い違う点を、黙って直さ�
 | Metal Morton | 物理的限界（API） | 標準 `simdgroup_matrix` がレーン対応を隠蔽 | `backend-metal-morton-mapping-decision.md` | なし |
 | Metal GPU counters 機構 | 物理的限界（計測手段） | 対象デバイスで未対応。代替の `MTLCounterSampleBuffer` は未プローブ | m4max §6 | counter set プローブの結果 |
 | Metal E2〜E4・E6〜E8 | 実装・実測後退 | 実測で REJECT または組み込み対象なし | m4max §3 | #2110 系の結果次第 |
-| Metal NAX／MPP（本番結線） | 契約・物理 | Neural Accelerator 非搭載。N>=2048 で後退。再訪条件は M5 世代実機・MPP 可用性・classic が REQ-8 未達の 3 点 | `backend-metal-mlx-classic-nax-decision.md` §3、m4max §5 | M5 世代実機の入手、Metal Toolchain の導入 |
+| Metal NAX（本番結線） | 契約・物理 | Neural Accelerator 非搭載。N>=2048 で後退。再訪条件は M5 世代実機・MPP 可用性・classic が REQ-8 未達の 3 点 | `backend-metal-mlx-classic-nax-decision.md` §3、m4max §5 | M5 世代実機の入手、Metal Toolchain の導入 |
+| Metal MPP Route C（本番結線） | 契約（承認待ち） | M4 Max で実装・実測済み（診断テスト限定）。採否は REQ-1 の解釈に関するユーザー判断待ちで、NAX の物理制約（M5 世代実機待ち）とは別 | `backend-metal-mpp-tensor-decision.md` §2・§6、m4max §5 | §6 の (a)〜(c) のユーザー判断 |
 | ROCm 本体 | リソース・承認 | (a)' 未承認・クラウドスパイク未実施。spec は Won't（条件付き） | `rocm-grade-up-conditions-v2-spec-proposal.md` §8 | (a)' の承認・(c) 実測・(b) 費用確認の三者が揃う |
 
 注意: Metal UMA readback の first-touch は仮説段階であり、Non-Goal の根拠には使わない（m4max §7）。
@@ -241,7 +242,7 @@ flowchart LR
 |---|---|---|---|---|---|
 | CTA→SM 分布プローブ（`%smid`・`%globaltimer`） | #2121 | なし | 診断のみ | 高 | 不要 |
 | TMA N=256 判別実験 | #2121 | なし | 診断のみ | 高 | 不要 |
-| C1 TMA Stage 2 opt-in 実装と GB10 実測 | #2121 | 上記判別実験 | A〜D | 中 | `CUtensorMap` の raw FFI を伴いうる。監査必須 |
+| C1 TMA Stage 2 の P-diag 実装と GB10 実測（本番非到達の診断限定。本番結線はゲート A〜D 全合格後の別段階） | #2121 | 上記判別実験 | A〜D | 中 | `CUtensorMap` の raw FFI を伴いうる。監査必須 |
 | C3(a) cooperative fixup | #2121 | #2127 | A〜D | 中 | raw FFI。監査・承認必須 |
 | C3(b) クラスタ内還元、C2 warp specialization | #2121 | #2122 | A〜D | 未設定 | 監査必須 |
 | 3×TF32 累積意味論の判別実験 | #2121 | なし | 診断のみ | 低 | 不要 |
