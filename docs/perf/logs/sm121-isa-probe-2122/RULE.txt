@@ -253,7 +253,7 @@
   比較は成否のみ（既存の TMA プローブはロード失敗・実行時エラー等を区別できない panic になるため）:
   legacy が mismatch／nvrtc_rejected（run_ok でない確定した失敗）なのに新プローブが run_ok（またはその逆）なら
   LEGACY_CONTRADICTION。legacy が timeout・process_failed（一過性の失敗を含む）なら RULE 13a と同じく
-  LEGACY_INCONCLUSIVE。tma_nvrtc_compile_probe は 6 行（3 arch x 2 変種）の記録のみで比較しない（分類 recorded）。
+  LEGACY_INCONCLUSIVE。tma_nvrtc_compile_probe は 6 行の記録のみで比較しない（分類 recorded）。6 行は（変種 cluster／cta）x（arch compute_121／121a／121f）の直積に過不足なく一致することを要求し、件数だけの検査にしない（欠落・重複・未知はいずれも完全性違反。集合照合の方針は guide_claims の claim_id 集合・setmaxnreg 終端行の arch 照合も同じ）。
 
 13a. プロセス異常の扱い（方針: 測定そのものの打ち切り・異常終了は判定不能として集計を続け、
      記録の欠落・矛盾は改ざん・欠落の疑いとして完全性違反にする）

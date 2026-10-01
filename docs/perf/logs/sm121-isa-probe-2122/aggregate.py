@@ -90,6 +90,14 @@ LEGACY_NAMES = {
     "tma_probe_real_device@tma_execution_probe": ("tma.base_cluster", None, "tma_exec_cluster"),
     "tma_probe_real_device@tma_execution_probe_cta": ("tma.base_cta", None, "tma_exec_cta"),
 }
+# 既存 tma_probe_real_device の PROBE_ARCHS と compile 行の変種（RULE.txt 12。tma_compile の 6 行は
+# この 2 集合の直積に過不足なく一致する。件数だけでは arch の入れ替わり・重複を見逃すため）。
+TMA_LEGACY_ARCHS = ("compute_121", "compute_121a", "compute_121f")
+TMA_LEGACY_VARIANTS = ("cluster", "cta")
+# R-GUIDE の claim_id 集合（事前登録。行の削除・追加・改名を黙って通さない）。
+EXPECTED_CLAIM_IDS = ("C01-warps-per-sm", "C02-blocks-per-sm", "C03-smem-per-sm", "C04-smem-per-block",
+                      "C05-portable-cluster-8", "C06-tcgen05-sm100plus", "C07-wgmma-unavailable",
+                      "C08-tcgen05-unavailable", "C09-cluster-1x1x1", "C10-static-smem-48kb")
 # 依存（事前登録。RULE.txt 10b）: 自身が 成立／受理のみ になるプローブは、依存先が同 target で 成立 のときだけ採る。
 TMA_BASE = "tma.base_cta"
 TMA_DEPENDENT_EXCLUDE = ("tma.base_cta", "tma.base_cluster")
@@ -599,7 +607,7 @@ def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str
         raise LogIntegrityError(f"{name}: proc 記録（終了コード）が無い")
     code = procs["proc"]["exit"]
     done = dones.get("done")
-    complete = len(cells) == len(STAGES)
+    complete = set(cells) == set(STAGES)
     if tuple(order) != STAGES[:len(order)]:
         raise LogIntegrityError(f"{name}: セルが段の実行順の接頭辞になっていない: {order}")
     n_mismatch = sum(1 for c in cells.values() if c.status == "mismatch")
@@ -738,8 +746,8 @@ def classify_legacy(text: str, name: str, exit_code: int, want_arch: str) -> str
         kv = parse_kv(main.split(), f"{name} 行 {len(terminals)}")
         stage, result = kv.get("stage"), kv.get("result")
         arch = kv.get("arch")
-        if arch is not None and arch != want_arch and stage in ("nvrtc_compile", "execute", "module_load",
-                                                                  "launch", "synchronize", "load_function"):
+        if arch != want_arch and stage in ("nvrtc_compile", "execute", "module_load",
+                                           "launch", "synchronize", "load_function"):
             raise LogIntegrityError(f"{name}: arch が期待 {want_arch} と不一致: {raw[:160]!r}")
         if stage == "execute" and result == "success":
             terminals.append("run_ok")
@@ -801,8 +809,9 @@ def classify_tma_legacy(text: str, name: str, exit_code: int, kind: str) -> tupl
         if exit_code == 124:
             return "timeout", None
         if exit_code == 0:
-            if len(compile_lines) != 6:
-                raise LogIntegrityError(f"{name}: exit 0 なのに compile 行が 6 件（3 arch x 2 変種）でない: {len(compile_lines)}")
+            require_exact_keys(compile_lines.keys(),
+                               [(v, a) for v in TMA_LEGACY_VARIANTS for a in TMA_LEGACY_ARCHS],
+                               f"{name} compile 行の（変種, arch）集合")
             return "recorded", None
         return "process_failed", None
     if len(selected) > 1 or len(successes) > 1:
@@ -1128,6 +1137,31 @@ def compute_verdicts(rule: Rule, run: Run) -> tuple:
 
 # ------------------------------------------------------------------ R-GUIDE
 
+def validate_claims(rule: Rule, rows: list) -> None:
+    """claim の集合・測定元・比較式を、G0 不成立で評価が飛ぶ場合でも常に検査する（render が呼ぶ）。"""
+    require_exact_keys([r["id"] for r in rows], EXPECTED_CLAIM_IDS, "guide_claims の claim_id 集合")
+    for r in rows:
+        if r["probe"] != "-" and r["probe"] not in rule.probes:
+            raise LogIntegrityError(f"{r['id']}: 未知のプローブ {r['probe']}")
+        kind, _, arg = r["compare"].partition(":")
+        if kind in ("eq", "kib"):
+            ok = re.fullmatch(r"[0-9]+", arg) is not None
+        elif kind == "div":
+            ok = re.fullmatch(r"[0-9]+:[0-9]+", arg) is not None
+        elif kind in ("verdict_is", "verdict_in"):
+            ok = bool(arg) and all(w in VERDICTS for w in arg.split("|")) and (
+                kind == "verdict_in" or "|" not in arg)
+        else:
+            ok = False
+        if not ok:
+            raise LogIntegrityError(f"{r['id']}: compare の書式が不正: {r['compare']!r}")
+        if kind in ("verdict_is", "verdict_in"):
+            if r["key"] != "verdict":
+                raise LogIntegrityError(f"{r['id']}: verdict 比較の key が verdict でない")
+        elif r["probe"] != "-" and not r["key"]:
+            raise LogIntegrityError(f"{r['id']}: attr 比較の key が空")
+
+
 def load_claims(text: str) -> list:
     rows = []
     for raw in text.splitlines():
@@ -1217,6 +1251,7 @@ def tma_observation(run: Run, pid: str, target: str) -> str:
 
 
 def render(rule: Rule, run: Run, g0: list, verdicts: dict, claims: list) -> str:
+    validate_claims(rule, claims)
     out = ["# sm_121 ISA プローブ集計（イシュー #2122）", ""]
     if not run.measured:
         out += ["全セル: 未実測（ログなし）。", ""]
@@ -2134,6 +2169,30 @@ def fx_tma_legacy(rule):
     _expect(classify_tma_legacy("\n".join(six), "unit", 0, "tma_compile") == ("recorded", None), "compile 記録")
     _expect_integrity_error(lambda: classify_tma_legacy("\n".join(six[:5]), "unit", 0, "tma_compile"), "compile 行が 5 件")
     _expect_integrity_error(lambda: classify_tma_legacy("\n".join(six + six[:1]), "unit", 0, "tma_compile"), "compile 行の重複")
+    # 件数は 6 のまま中身だけ違う（compute_121 が欠け別 arch が入る・未知 arch・arch が重複）は完全性違反。
+    swap = [l.replace("arch=compute_121 ", "arch=compute_86 ") for l in six]
+    _expect_integrity_error(lambda: classify_tma_legacy("\n".join(swap), "unit", 0, "tma_compile"), "arch 入れ替わり（6 件）")
+    dup = six[:5] + [six[0].replace("result=failure", "result=success")]
+    _expect_integrity_error(lambda: classify_tma_legacy("\n".join(dup), "unit", 0, "tma_compile"), "同一キー重複で 6 件")
+    one_variant = [l.replace("variant=cta", "variant=cluster") for l in six]
+    _expect_integrity_error(lambda: classify_tma_legacy("\n".join(one_variant), "unit", 0, "tma_compile"), "変種の偏り（6 件）")
+    snr_ok = "SETMAXNREG_PROBE_RESULT stage=execute kernel=k arch=compute_121 result=success"
+    _expect(classify_legacy(snr_ok, "unit", 0, "compute_121") == "run_ok", "snr 正の例")
+    _expect_integrity_error(lambda: classify_legacy("SETMAXNREG_PROBE_RESULT stage=execute kernel=k result=success",
+                                                    "unit", 0, "compute_121"), "snr 終端行の arch 欠落")
+    _expect_integrity_error(lambda: classify_legacy(snr_ok.replace("compute_121", "compute_121a"), "unit", 0,
+                                                    "compute_121"), "snr 終端行の arch 取り違え")
+    _rows = load_claims(CLAIMS_PATH.read_text(encoding="utf-8"))
+    validate_claims(rule, _rows)
+    _expect_integrity_error(lambda: validate_claims(rule, _rows[:-1]), "claim 行の欠落")
+    _expect_integrity_error(lambda: validate_claims(rule, _rows[:-1] + [dict(_rows[-1], id="C99-other")]),
+                            "claim_id の差し替え（件数は同じ）")
+    _expect_integrity_error(lambda: validate_claims(rule, [dict(_rows[0], probe="attr.nothing")] + _rows[1:]),
+                            "未知プローブの claim（G0 不成立でも検出）")
+    _expect_integrity_error(lambda: validate_claims(rule, [dict(_rows[0], compare="eq:x")] + _rows[1:]),
+                            "比較式の書式不正")
+    _expect_integrity_error(lambda: validate_claims(rule, [dict(_rows[4], compare="verdict_is:成立|ロード失敗")] + _rows[:4] + _rows[5:]),
+                            "verdict_is に複数語")
     _expect_integrity_error(lambda: classify_tma_legacy("", "unit", 0, "tma_exec_cta"), "exit 0 で成功行なし")
     _expect_integrity_error(lambda: classify_tma_legacy("\n".join(ok_cta), "unit", 1, "tma_exec_cta"), "成功行があるのに exit 1")
     # 新プローブとの突き合わせ: 一致なら成立のまま、矛盾・比較不能は判定不能。
