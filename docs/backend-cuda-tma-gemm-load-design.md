@@ -200,7 +200,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 - `tiled_pipeline_tma_none_matches_pipeline_with_pretransposed_host_input` ✓
 - `tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap` ✓（B64 swizzle 仮説は全 7 形状で cp.async pipeline 版と bit 同一。mismatched_shapes: empty）
 - `tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact` ✓（事前 encode + launch_prepared の bit 一致）
-- 意味論プローブ 3 件（NVRTC compile probe・execution probe cta・execution probe cluster） ✓
+- 意味論プローブ 3 件（NVRTC compile probe・execution probe cta・execution probe cluster） ✓（**ラベルの訂正は直後の追記を参照**）
 
 **ゲート B（parity 非後退）**:
 - 6 バイナリ（parity_nonregression・cpu_cuda_parity 2・cpu_cuda_tiled_pipeline_parity 18・gemm_transposed_parity 5・transpose_parity 4・gemm_tiled 6）計 36 テスト
@@ -228,6 +228,8 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 **追加実装**（§10.1〜§10.6 で後述していたもの）:
 - ベンチ列 `tma_none_gpu_only_tflops`／`tma_b64_gpu_only_tflops` を `crates/backend-cuda/examples/gemm_tiled_pipeline_bench.rs` へ追加実装済み
 - tensor map 事前 encode API（`prepare_tiled_pipeline_tma_maps`／`launch_tiled_pipeline_tma_f32_prepared`）を `internal-diagnostics` 限定で追加実装済み（本番非到達）
+
+**訂正追記（イシュー #2122・2026-10-01）**: 上のゲート A の「意味論プローブ 3 件（NVRTC compile probe・execution probe cta・execution probe cluster）✓」は、§10.4 の「意味論プローブ 3 件」（要素座標の非ゼロ確認・部分 OOB box の fill 意味論・`B64` swizzle の smem 物理配置ダンプ）とは別物である。✓ が付いているのは既存プローブ（`tests/tma_probe_real_device.rs`）の 3 テストの成功で、§10.4 定義の意味論プローブ 3 件は**未実装のまま**であり、下の「未実装（申し送り）」と `cuda-sm121-gemm-candidates-design.md` §2.1 の記述が正しい。なお、`compile_ptx(src, "compute_121")` は NVRTC が PTX を出すだけで ptxas は走らず（ptxas が検証するのは `cuModuleLoadData` の時点）、既存プローブの「arch ごとのコンパイル成功」は命令の受理をほぼ示さない。この区別を段として記録するプローブ基盤は `docs/cuda-sm121-isa-probe.md`（#2122）。TMA の意味論プローブは同基盤の別 PR で追加予定（本記録時点では未実装・結果なし）。
 
 **未実装（申し送り）**:
 - 意味論プローブ 3 件（要素座標・部分 OOB・smem 配置ダンプ）
