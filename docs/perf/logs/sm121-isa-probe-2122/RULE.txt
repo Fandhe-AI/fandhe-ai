@@ -91,6 +91,9 @@
   (4) home の S2 が ok でない → 判定不能（R-HOME の理由）
   (5) compile.log の S1／S2 と exec の S1／S2 の状態が食い違う → 判定不能
       （COMPILE_EXEC_DISAGREE。非決定性・toolchain 差の疑い）
+  (5b) home が sm_90a のプローブで、compile.log の hopper 列と home 列の状態が食い違う →
+      判定不能（HOPPER_HOME_DISAGREE）。(8) の legacy 照合も (6) の連鎖より先に評価する
+      （snr.* の分類が legacy と食い違えば、連鎖の結論がどれであっても判定不能）。
   (6) 連鎖: S1 rejected → NVRTC 拒否／S1 unavailable → 判定不能（NVRTC_UNAVAILABLE）／
       S1 error → 判定不能（STAGE_ERROR）／S2 rejected かつ S3 ok → 判定不能
       （OFFLINE_JIT_DISAGREE）／S2 rejected → ptxas 拒否（オフライン）／
@@ -188,8 +191,9 @@
   ログへ追記する。終了コード 124＝timeout。exit 0 は完了記録（done）が必須、101（テストの
   panic）は mismatch または legacy の corrupted を伴う場合のみ許容、124・その他は未完了
   （セルの欠落）が必須で、完了しているのに非 0 は矛盾として拒否する。
-  開発機スモーク（--dev-smoke）は DEVTARGET 行の target で exec_matrix のうち全プローブを回し、
-  出力先を呼び出し側が指定した scratch ディレクトリに限る（リポジトリへコミットしない）。
+  開発機スモーク（--dev-smoke）は DEVTARGET 行の target で exec_matrix の全プローブを回し
+  （legacy は回さない）、出力先を呼び出し側が指定したリポジトリ外の scratch ディレクトリに
+  限る（コミットしない）。
   既存ログがある出力先では開始前に停止する（上書き・追加起動をしない）。再計測は空の別
   ディレクトリを LOG_DIR に指定する。
 
