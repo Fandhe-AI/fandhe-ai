@@ -44,7 +44,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 | `CLOCK_RATE` 等の未実測属性 | 未確定（#2122 待ち） | bytes/cycle 換算を要する分析全般 | `attr.misc`／`attr.limits`／`attr.cluster`・R-GUIDE |
 | tcgen05／TMEM の到達可否 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `tc5.alloc`／`tc5.ld`／`tc5.cross`・R-TC5 |
 | wgmma の受理 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `wgmma.m64n8k16`（受理段のみ）・R-HOPPER |
-| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast） | 未確定（#2122 PR-B でプローブ追加済み。GB10 実測待ち） | C4（TMA Stage 2）ほか §3.3 | `tma.base_cta`／`tma.base_cluster`（R-TMA-BASE）・`tma.coord`／`tma.oob_none`／`tma.oob_nan`／`tma.oob_tx_partial`／`tma.oob_neg`／`tma.swz32`／`tma.swz64`／`tma.swz128`（R-TMA-SEM。観測の記録）・`tma.store`／`tma.bulk_cta`／`tma.bulk_cluster`／`tma.prefetch`／`tma.multicast`（R-TMA-XFER） |
+| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast） | 未確定（#2122 PR-B でプローブ追加済み。GB10 実測待ち） | C4（TMA Stage 2）ほか §3.3 | `tma.base_cta`／`tma.base_cluster`（R-TMA-BASE）・`tma.coord`／`tma.oob_none`／`tma.oob_nan`／`tma.oob_neg`／`tma.swz32`／`tma.swz64`／`tma.swz128`（R-TMA-SEM。観測の記録）・`tma.store`／`tma.bulk_cta`／`tma.bulk_cluster`／`tma.prefetch`／`tma.multicast`（R-TMA-XFER） |
 | arch 接尾辞（`a`／`f`）の要否 | 未確定（#2122 待ち） | 上記各候補 | 全プローブの target 別セル（`compute_121`／`compute_121a`／`compute_121f`）・`macro.arch` |
 
 
