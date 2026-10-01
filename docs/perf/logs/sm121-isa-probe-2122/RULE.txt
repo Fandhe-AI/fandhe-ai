@@ -1,0 +1,332 @@
+イシュー #2122 事前登録判定規則（実測前に固定。結果を見てから緩和・変更しない）
+================================================================================
+
+固定日: 2026-10-01（本ファイルを含むコミット時点。GB10 実測はこの後に行う）
+対象: sm_121（DGX Spark GB10）で使える命令とアーキ固有機能のプローブ（tcgen05・
+      mma 形状・wgmma・setmaxnreg・cluster・DSMEM・デバイス属性・Hopper との差分）。
+      TMA（cp.async.bulk.tensor）の意味論プローブは本ファイルの対象外（別 PR の範囲）。
+      本ファイルは「実装が検出できること」だけを規定する。
+
+本ファイルの機械可読行（行頭が `KEY: ` で始まる行）が唯一の契約である。
+  - Rust のレジストリ（crates/backend-cuda/tests/sm121_isa_probe_common/registry.rs）
+    との一致は crates/backend-cuda/tests/sm121_isa_probe_registry.rs が検査する（CI で走る）。
+  - aggregate.py の CLAUSES・語彙・条項ごとの fixture との一致は
+    `python3 aggregate.py --self-test` が検査する（CI では走らない。開発機で実行する）。
+  - orchestrate.sh は PROBE／TARGET／PROCESS 行から起動列を導出する
+    （`--dry-run` が一覧を出し、aggregate.py の self-test が本ファイルと突き合わせる）。
+  散文（インデントした行）は機械検査の対象外で、機械可読行を言い換えたものにすぎない。
+  食い違いがあれば機械可読行を正とする。
+
+0. 検出範囲（保証しないこと）
+  - 各条項が検出するのは、aggregate.py が読む入力（compile.log・exec/*.log・
+    legacy-*.log・env_info.txt）に現れたレコードの完全性と、そこから導く判定に限る。
+  - ログが実際にその実行から生成されたことの証明（改竄の検知）、ptxas・ドライバの
+    内部の正しさ、sm_86 の結果の sm_121 への外挿の妥当性までは保証しない。
+  - 開発機（RTX 3060・sm_86）のスモークは G0 を不成立にし、全セルを判定不能にする。
+    スモークの結果を sm_121 の結論として扱わない。
+
+1. 段階モデル（R-STAGE）
+  STAGE 行は実行順。1 つの (プローブ, target) は ctl・S1〜S6 の 7 セルを必ず持ち、
+  省略しない。前段が失敗した場合の後段は not_run、設計上不実施の段は
+  not_applicable_by_design と明示する。
+    ctl           同一プロセス内で対照 ctl.copy を同じ target で S1〜S6 まで通した要約
+                  （ctl.copy 自身は not_applicable_by_design）
+    nvrtc_ptx     S1: 仮想アーキ（compute_*）の NVRTC。C++ レベルの拒否だけを捕まえる
+    nvrtc_cubin   S2: 実アーキ（sm_*）を --gpu-architecture に渡し、NVRTC 内部で ptxas を
+                  オフラインで通す。ptxas のログは全文を detail に記録する
+    module_load   S3: S1 の PTX をドライバ JIT でロード。S2 の成果物はロードしない。
+                  binary_version・ptx_version・num_regs は参考値（ゲートに使わない）
+    launch/sync   S4/S5: 実行時エラー名（ILLEGAL_INSTRUCTION 等）。
+    verify        S6: 出力語のビット一致。最初の不一致の添字と不一致語数を記録する
+  S2 は S1 と独立の枝で、S3 を止めない（S2 拒否でも S3 の実測を取る）。S3 は S1 が ok の
+  ときだけ、S4 は S3 が ok のときだけ、S5 は S4 が ok のときだけ、S6 は S5 が ok のときだけ
+  実行する。
+  方針（policy）ごとの設計上不実施の段（静的に固定。実行結果に依らない）:
+    verify        なし（S1〜S6 すべて実施）
+    accept_only   S4・S5・S6（受理段 S1〜S3 のみ。INT8/FP8・block_scale・f64 m16n8k*・
+                  wgmma・m8n8k4 f16・tc5.cross。INT8/FP8 の実行・数値は
+                  docs/int8-quant-grade-up-verification-plan.md の別プローブに委ねる）
+    record_only   S6（S5 の detail に値を記録するのみ）
+    attr          S1〜S5（デバイス属性の記録のみ。S6 で実施）
+  状態の閉じた集合は STATUS 行。rejected は S1/S2 のみ、mismatch は S6 のみ。
+  ok のとき code は "-"、rejected・error・mismatch・unavailable・not_run のとき code は
+  "-" 以外（大文字英数字と _）。timeout・process_failed は aggregate.py が合成する。
+
+2. 判定の語彙（VERDICT 行・閉じた集合）
+  成立／NVRTC 拒否／ptxas 拒否（オフライン）／ロード失敗／実行時エラー／結果不一致／
+  受理のみ（実行意味論は未検証）／判定不能（理由コード付き。INDETERMINATE 行）／未実測。
+  AC2 の突き合わせ（R-GUIDE）の語彙は GUIDE 行: 一致（12.0 の記述を外挿）／不一致／
+  判定不能。単に「一致」とは書かない。
+
+3. 前提ゲート（G0）
+  次のいずれかが不成立なら、全セルを「判定不能（G0_FAILED）」にし、理由を G0 表へ
+  列挙する（G0_ で始まる理由コード）。個別セルの判定規則はそのとき評価しない。
+    - env_info.txt が mode=gb10 で、git_head（40 桁 16 進）と git_clean=1 を持つ
+      （G0_PROVENANCE・G0_DIRTY_TREE・G0_DEV_MODE）
+    - ログ内の target がすべて TARGET 行の正式 target（DEVTARGET 行の target は
+      開発機スモーク専用で G0_DEV_TARGET）
+    - compile.log の env レコードで NVRTC が存在する（G0_NVRTC_MISSING）
+    - すべての exec の env レコードで cc が 12.1（G0_CC）、device が none でない（G0_NO_DEVICE）
+  注: ctl.copy の成否は G0 に含めない（target ごとの R-CTL が扱う。121f が toolchain で
+  受理されない場合も R-CTL が target 単位で判定不能にする）。
+
+4. 対照（R-CTL）
+  各プロセスは最初に同じ target で ctl.copy を S1〜S6 まで通す。ctl セルが ok でなければ
+  そのプロセスの全セルを判定不能にする。コードは TARGET_UNSUPPORTED（ctl.copy の S1/S2 が
+  拒否された＝toolchain がその target を受け付けない。例: compute_121f 非対応）または
+  CTL_FAILED（それ以外）。ctl.copy 自身は通常の連鎖で判定する（成立 or 各失敗）。
+
+5. 本来の対応アーキでの陽性対照（R-HOME）
+  各カーネルプローブは、本来の対応アーキ（PROBE 行の home=）でも S2 だけを通す
+  （compile.log。target=home）。home の S2 が ok のときに限り、sm_121 側の拒否を
+  アーキ起因と読む。home が rejected なら判定不能（HOME_REJECTED＝プローブ不良の疑い）、
+  それ以外の状態なら HOME_NOT_OK。home のアーキは PTX ISA の記述を記憶で決めず、
+  実測の陽性対照で確かめる前提で置いた仮説であり、home の拒否はプローブの修正対象。
+
+6. 連鎖と判定（共通・上から順に評価。最初に当たったものを採る）
+  (1) G0 不成立 → 判定不能（G0_FAILED）
+  (2) 当該プロセスの timeout／process_failed → 判定不能（TIMEOUT／PROCESS_FAILED）
+      （外部 timeout で打ち切られた＝ハング。記録できた段までを detail に残す）
+  (3) ctl が ok でない（ctl.copy 以外）→ 判定不能（R-CTL の理由）
+  (4) home の S2 が ok でない → 判定不能（R-HOME の理由）
+  (5) compile.log の S1／S2 と exec の S1／S2 の状態が食い違う → 判定不能
+      （COMPILE_EXEC_DISAGREE。非決定性・toolchain 差の疑い）
+  (6) 連鎖: S1 rejected → NVRTC 拒否／S1 unavailable → 判定不能（NVRTC_UNAVAILABLE）／
+      S1 error → 判定不能（STAGE_ERROR）／S2 rejected かつ S3 ok → 判定不能
+      （OFFLINE_JIT_DISAGREE）／S2 rejected → ptxas 拒否（オフライン）／
+      S2 unavailable → NVRTC_UNAVAILABLE／S2 error → STAGE_ERROR／
+      S3 unavailable → 判定不能（NO_DEVICE）／S3 error で code が
+      CUDA_ERROR_UNSUPPORTED_PTX_VERSION → 判定不能（UNSUPPORTED_PTX_VERSION）／
+      S3 error → ロード失敗／S4・S5 error → 実行時エラー／
+      S6 mismatch かつ layout=unverified → 判定不能（LAYOUT_UNVERIFIED）／
+      S6 mismatch → 結果不一致／S6 error → 判定不能（STAGE_ERROR）
+  (7) 全段が通ったとき: expect=reject121 のプローブは 判定不能（UNEXPECTED_ACCEPT）
+      （想定外の受理。黙って成立にしない。実行意味論は未検証として申し送る）。
+      それ以外は policy が verify なら 成立、accept_only／record_only なら
+      受理のみ（実行意味論は未検証）。
+  (8) snr.*（R-SNR）かつ legacy ログのある target では、legacy の結論と新プローブの結論の
+      分類が食い違えば 判定不能（LEGACY_CONTRADICTION）。分類は
+      run_ok／mismatch／load_failed／runtime_error／nvrtc_rejected。
+  attr.* は S6 が ok なら 成立、error なら 判定不能（STAGE_ERROR）、unavailable なら
+  判定不能（NO_DEVICE）。home・compile の突き合わせは持たない。
+  事前登録した想定（expect=reject121: tc5.alloc・tc5.ld・tc5.cross）は結果ではなく仮説で、
+  想定と違えば結果をそのまま記録して申し送る。
+
+7. fragment レイアウトの検証（R-MMA）
+  入力は f16／bf16／tf32 で正確に表せる小さな整数で、f32 累積でも結果が正確になるため
+  ビット一致で判定する（tolerance を新設・変更しない）。layout=verified の形状は開発機
+  （sm_86）で参照モデルを検証済み（registry テストと sm_86 の実機スモーク）。
+  layout=unverified の形状（stmatrix・packed f32x2）で S6 が不一致のとき、ハードウェアの
+  判定にせず 判定不能（LAYOUT_UNVERIFIED）とする。elect.sync は「ちょうど 1 lane が
+  選ばれる」ことだけを検証する（選ばれる lane は仕様上未規定）。
+
+8. tcgen05（R-TC5）
+  tc5.alloc: TMEM の割り当て・解放（dealloc の完了を S6 とする）。tc5.ld: ロードした値の
+  記録のみ。tc5.cross: compute_100a の PTX を実行 target のデバイスへロードする（S3 まで）。
+  macro.arch: 候補マクロの存在・値を記録のみ（マクロ名は事前登録した候補で、存在を主張しない）。
+  想定外の受理は 6 (7) のとおり判定不能。
+
+9. ガイドとの突き合わせ（R-GUIDE）
+  guide_claims.tsv の各行（引用元の path:line・原文引用・測定項目・比較方法）を、
+  aggregate.py の self-test が引用元ファイルの当該行と照合する（引用が実在しなければ失敗）。
+  比較は GB10 の 3 target すべての測定値に対して行う。
+    - 測定項目のプローブが無い（"-"）→ 判定不能（GUIDE_NO_PROBE）
+    - 測定値が得られない・判定不能 → 判定不能（GUIDE_UNMEASURED）
+    - すべて満たす → 一致（12.0 の記述を外挿）／どれかが満たさない → 不一致
+  .claude/skills 配下は編集しない。不一致は docs/cuda-sm121-isa-probe.md にだけ書く。
+
+10. cluster・DSMEM（R-CLU）
+  clu.dims{1,2,4,8,16}: __cluster_dims__(N,1,1) のカーネルを safe API で起動し、各 block が
+  cluster 内 rank と cluster の block 数を書く。N>8 は NON_PORTABLE_CLUSTER_SIZE_ALLOWED を
+  設定してから起動する。occupancy_max_active_clusters 等は参考値（S3 の detail）。
+  clu.dsmem: %cluster_ctarank・mapa.shared::cluster・ld.shared::cluster・barrier.cluster の
+  往復。barrier.cluster のデッドロックは外部 timeout で記録される（TIMEOUT）。
+  起動時に cluster 次元を与える cuLaunchKernelEx 経路は本規則の対象外。
+
+11. setmaxnreg・Hopper との差分（R-SNR・R-HOPPER）
+  snr.dec・snr.incdec は既存の setmaxnreg_probe_* 4 ファイルと同じ命令列を再実行する
+  （R-LEGACY の突き合わせ対象）。R-HOPPER の表は、全カーネルプローブの Hopper（sm_90a）列
+  （compile.log の target=hopper の S2）と sm_121 側の判定を並べ、本来の対応アーキが
+  sm_90／sm_90a のものと、sm_121 でだけ受理されるものの両方向を表にする。Hopper 列は
+  「GB10 上の NVRTC（ptxas）による受理の実測」であり、Hopper 実機での実行は未検証。
+  home が sm_90a のプローブでは hopper 列と home 列の状態が一致しなければならない
+  （食い違いは 判定不能 HOPPER_HOME_DISAGREE）。PTX ISA 9.0 の節番号は、確認できていない
+  ものを「要確認」と表示する。
+
+12. 既存プローブとの整合（R-LEGACY）
+  legacy-*.log（setmaxnreg_probe_* 4 ファイルの再実行。SETMAXNREG_PROBE_RESULT 行）を
+  分類し、対応する snr.* の同 target の分類と食い違えば 6 (8) のとおり判定不能とする。
+  対応: dec_base→(snr.dec, compute_121)・dec_accel→(snr.dec, compute_121a)・
+  incdec_base→(snr.incdec, compute_121)・incdec_accel→(snr.incdec, compute_121a)。
+  tma_probe_real_device の再実行は本規則の対象外。
+
+13. 入力の完全性（R-COMMON・fail-closed）
+  aggregate.py は LogIntegrityError を送出し、正式な集計を一切出力せず非ゼロ終了する:
+    - 重複したレコード（値が同一でも拒否。登録口 register_once に一本化）
+    - 未知のプローブ・target・stage・status・kind・phase・フィールド、フィールドの過不足
+    - 壊れた JSON、NaN・Infinity・浮動小数点・真偽以外の数値型・64 bit を超える整数
+    - キー集合の過不足（期待する (プローブ, target, stage) の完全集合。欠落・余剰・未知）
+    - 連鎖の矛盾（前段が失敗なのに後段が ok 等）・policy で固定された状態との不一致
+    - 完了記録（done）の欠落・件数の不一致、プロセス記録（proc）の欠落・不整合
+    - 未マスクの絶対パス（/home/<name>。検査するのはこの形のみで、ホスト名の残存は検出しない）
+    - 開発機 target と正式 target の混在
+  detail は切り詰めない。例外・警告を握り潰さない。
+  ログがまったく無い場合だけ「未実測」として exit 0、一部だけ欠けていれば exit 非 0。
+  終了コード: 0＝正常（G0 成立、または全ログ無し）／2＝完全性違反／3＝G0 不成立
+  （表は stdout に出すが --out では書かない）。出力は検証してから一時ファイル経由で
+  atomic に書く（公開値は compute 結果の 1 か所から描画する）。
+
+14. 起動プロセス（orchestrate.sh。実測前に固定。PROCESS 行が正）
+  | プロセス | 起動回数・順序 | timeout | 出力 | 判定に使う |
+  |---|---|---|---|---|
+  | env_info | 1・最初（シェルのみ） | - | env_info.txt | G0（provenance） |
+  | device_attributes_dump | 1・2 番目 | 60 秒 | device_attributes_dump.log | 記録のみ |
+  | compile | 1・3 番目 | 900 秒 | compile.log | S1／S2／home／hopper |
+  | exec_matrix | PROBE 行 × 正式 TARGET 行 を 1 プロセスずつ | 120 秒 | exec/<probe>@<target>.log | 全セル |
+  | legacy | 4（setmaxnreg_probe_* 各 1）・最後 | 180 秒 | legacy-<name>.log | R-LEGACY |
+  各プロセスに外部 timeout を付け、終了コードを proc 記録（SM121_PROBE_PROC 行）として
+  ログへ追記する。終了コード 124＝timeout。exit 0 は完了記録（done）が必須、101（テストの
+  panic）は mismatch または legacy の corrupted を伴う場合のみ許容、124・その他は未完了
+  （セルの欠落）が必須で、完了しているのに非 0 は矛盾として拒否する。
+  開発機スモーク（--dev-smoke）は DEVTARGET 行の target で exec_matrix のうち全プローブを回し、
+  出力先を呼び出し側が指定した scratch ディレクトリに限る（リポジトリへコミットしない）。
+  既存ログがある出力先では開始前に停止する（上書き・追加起動をしない）。再計測は空の別
+  ディレクトリを LOG_DIR に指定する。
+
+15. 変更しないもの
+  tolerance・baseline・ガードレール閾値・docs/spec・.claude/skills・本番経路の挙動・
+  facade の公開面・既存の tests/tma_probe_real_device.rs と tests/setmaxnreg_*。
+
+--------------------------------------------------------------------------------
+機械可読行（唯一の契約。行頭 KEY: の形式。散文と重複するが機械検査はこちらを読む）
+--------------------------------------------------------------------------------
+CLAUSE: G0
+CLAUSE: R-STAGE
+CLAUSE: R-CTL
+CLAUSE: R-HOME
+CLAUSE: R-TC5
+CLAUSE: R-GUIDE
+CLAUSE: R-MMA
+CLAUSE: R-CLU
+CLAUSE: R-SNR
+CLAUSE: R-HOPPER
+CLAUSE: R-LEGACY
+CLAUSE: R-COMMON
+STAGE: ctl
+STAGE: nvrtc_ptx
+STAGE: nvrtc_cubin
+STAGE: module_load
+STAGE: launch
+STAGE: sync
+STAGE: verify
+STATUS: ok
+STATUS: rejected
+STATUS: error
+STATUS: mismatch
+STATUS: timeout
+STATUS: process_failed
+STATUS: not_run
+STATUS: unavailable
+STATUS: not_applicable_by_design
+VERDICT: 成立
+VERDICT: NVRTC 拒否
+VERDICT: ptxas 拒否（オフライン）
+VERDICT: ロード失敗
+VERDICT: 実行時エラー
+VERDICT: 結果不一致
+VERDICT: 受理のみ（実行意味論は未検証）
+VERDICT: 判定不能
+VERDICT: 未実測
+GUIDE: 一致（12.0 の記述を外挿）
+GUIDE: 不一致
+GUIDE: 判定不能
+INDETERMINATE: G0_FAILED
+INDETERMINATE: TARGET_UNSUPPORTED
+INDETERMINATE: CTL_FAILED
+INDETERMINATE: HOME_REJECTED
+INDETERMINATE: HOME_NOT_OK
+INDETERMINATE: COMPILE_EXEC_DISAGREE
+INDETERMINATE: OFFLINE_JIT_DISAGREE
+INDETERMINATE: NVRTC_UNAVAILABLE
+INDETERMINATE: NO_DEVICE
+INDETERMINATE: UNSUPPORTED_PTX_VERSION
+INDETERMINATE: STAGE_ERROR
+INDETERMINATE: TIMEOUT
+INDETERMINATE: PROCESS_FAILED
+INDETERMINATE: LAYOUT_UNVERIFIED
+INDETERMINATE: UNEXPECTED_ACCEPT
+INDETERMINATE: LEGACY_CONTRADICTION
+INDETERMINATE: HOPPER_HOME_DISAGREE
+INDETERMINATE: GUIDE_NO_PROBE
+INDETERMINATE: GUIDE_UNMEASURED
+G0REASON: G0_PROVENANCE
+G0REASON: G0_DIRTY_TREE
+G0REASON: G0_DEV_MODE
+G0REASON: G0_DEV_TARGET
+G0REASON: G0_NVRTC_MISSING
+G0REASON: G0_CC
+G0REASON: G0_NO_DEVICE
+TARGET: compute_121 sm_121
+TARGET: compute_121a sm_121a
+TARGET: compute_121f sm_121f
+DEVTARGET: compute_86 sm_86
+PROBE: ctl.copy ac=BASE clause=R-CTL home=sm_80 policy=verify layout=none expect=none
+PROBE: macro.arch ac=AC1 clause=R-TC5 home=sm_80 policy=record_only layout=none expect=none
+PROBE: tc5.alloc ac=AC1 clause=R-TC5 home=sm_100a policy=verify layout=none expect=reject121
+PROBE: tc5.ld ac=AC1 clause=R-TC5 home=sm_100a policy=record_only layout=none expect=reject121
+PROBE: tc5.cross ac=AC1 clause=R-TC5 home=sm_100a policy=accept_only layout=none expect=reject121
+PROBE: mma.tf32.m16n8k8 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.tf32.m16n8k4 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.f16.m16n8k16.f32 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.f16.m16n8k8.f32 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.f16.m16n8k16.f16 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.bf16.m16n8k16.f32 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.bf16.m16n8k8.f32 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.f64.m8n8k4 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.f16.m8n8k4 ac=AC4 clause=R-MMA home=sm_80 policy=accept_only layout=none expect=none
+PROBE: mma.f64.m16n8k4 ac=AC4 clause=R-MMA home=sm_90 policy=accept_only layout=none expect=none
+PROBE: mma.f64.m16n8k8 ac=AC4 clause=R-MMA home=sm_90 policy=accept_only layout=none expect=none
+PROBE: mma.f64.m16n8k16 ac=AC4 clause=R-MMA home=sm_90 policy=accept_only layout=none expect=none
+PROBE: mma.s8.m16n8k32 ac=AC4 clause=R-MMA home=sm_80 policy=accept_only layout=none expect=none
+PROBE: mma.e4m3.m16n8k32 ac=AC4 clause=R-MMA home=sm_89 policy=accept_only layout=none expect=none
+PROBE: mma.e5m2.m16n8k32 ac=AC4 clause=R-MMA home=sm_89 policy=accept_only layout=none expect=none
+PROBE: mma.f8f6f4.m16n8k32 ac=AC4 clause=R-MMA home=sm_120a policy=accept_only layout=none expect=none
+PROBE: mma.block_scale.m16n8k64 ac=AC4 clause=R-MMA home=sm_120a policy=accept_only layout=none expect=none
+PROBE: mma.ldmatrix.x1 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.ldmatrix.x2 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.ldmatrix.x4 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.ldmatrix.x4_trans ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=verified expect=none
+PROBE: mma.stmatrix.x4 ac=AC4 clause=R-MMA home=sm_90 policy=verify layout=unverified expect=none
+PROBE: simt.fma_f32 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=none expect=none
+PROBE: simt.fma_f64 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=none expect=none
+PROBE: simt.fma_f16x2 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=none expect=none
+PROBE: simt.fma_bf16x2 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=none expect=none
+PROBE: simt.f32x2_add ac=AC4 clause=R-MMA home=sm_100 policy=verify layout=unverified expect=none
+PROBE: simt.f32x2_mul ac=AC4 clause=R-MMA home=sm_100 policy=verify layout=unverified expect=none
+PROBE: simt.f32x2_fma ac=AC4 clause=R-MMA home=sm_100 policy=verify layout=unverified expect=none
+PROBE: simt.cvt_tf32 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=none expect=none
+PROBE: simt.elect_sync ac=AC4 clause=R-MMA home=sm_90 policy=verify layout=none expect=none
+PROBE: simt.redux_u32 ac=AC4 clause=R-MMA home=sm_80 policy=verify layout=none expect=none
+PROBE: simt.redux_f32 ac=AC4 clause=R-MMA home=sm_100a policy=accept_only layout=none expect=none
+PROBE: wgmma.m64n8k16 ac=AC5 clause=R-HOPPER home=sm_90a policy=accept_only layout=none expect=none
+PROBE: hop.griddepcontrol ac=AC5 clause=R-HOPPER home=sm_90 policy=verify layout=none expect=none
+PROBE: hop.fence_proxy_async ac=AC5 clause=R-HOPPER home=sm_90 policy=verify layout=none expect=none
+PROBE: snr.dec ac=AC5 clause=R-SNR home=sm_90a policy=verify layout=none expect=none
+PROBE: snr.incdec ac=AC5 clause=R-SNR home=sm_90a policy=verify layout=none expect=none
+PROBE: clu.dims1 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: clu.dims2 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: clu.dims4 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: clu.dims8 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: clu.dims16 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: clu.dsmem ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: attr.limits ac=AC2 clause=R-GUIDE home=sm_80 policy=attr layout=none expect=none
+PROBE: attr.cluster ac=AC2 clause=R-GUIDE home=sm_80 policy=attr layout=none expect=none
+PROBE: attr.misc ac=AC2 clause=R-GUIDE home=sm_80 policy=attr layout=none expect=none
+PROCESS: env_info
+PROCESS: device_attributes_dump
+PROCESS: compile
+PROCESS: exec_matrix
+PROCESS: legacy setmaxnreg_probe_dec_base_real_device
+PROCESS: legacy setmaxnreg_probe_dec_accel_real_device
+PROCESS: legacy setmaxnreg_probe_incdec_base_real_device
+PROCESS: legacy setmaxnreg_probe_incdec_accel_real_device

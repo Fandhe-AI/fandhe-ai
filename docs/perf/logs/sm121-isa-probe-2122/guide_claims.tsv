@@ -1,0 +1,17 @@
+# イシュー #2122 R-GUIDE（RULE.txt 9）: ガイド・設計文書の記述と実測の突き合わせ表。
+# 列（タブ区切り・6 列）: claim_id / source（path:line。リポジトリルート起点）/
+#   quote（その行に実在する原文の一部。aggregate.py --self-test が照合する）/
+#   probe（測定元のプローブ。無ければ -）/ key（attr.* の属性名、または verdict）/
+#   compare（eq:N・kib:N・div:D:N・verdict_is:語・verdict_in:語|語）。
+# 12.0 向けの記述（CC 12.0 の表）を GB10（CC 12.1）へ外挿して比較する。引用は
+# 参照ガイド側を編集せず、不一致は docs/cuda-sm121-isa-probe.md にだけ書く。
+C01-warps-per-sm	.claude/skills/nvidia-cuda/references/blackwell-tuning/streaming-multiprocessor.md:23	| Maximum concurrent warps per SM | 64 | 48 |	attr.limits	max_threads_per_multiprocessor	div:32:48
+C02-blocks-per-sm	.claude/skills/nvidia-cuda/references/blackwell-tuning/streaming-multiprocessor.md:26	| Maximum thread blocks per SM | 32 | 32 |	attr.limits	max_blocks_per_multiprocessor	eq:32
+C03-smem-per-sm	.claude/skills/nvidia-cuda/references/blackwell-tuning/streaming-multiprocessor.md:27	| Maximum shared memory per SM | 228 KB | 128 KB |	attr.limits	max_shared_memory_per_multiprocessor	kib:128
+C04-smem-per-block	.claude/skills/nvidia-cuda/references/blackwell-tuning/streaming-multiprocessor.md:28	| Maximum shared memory per thread block | 227 KB | 99 KB |	attr.limits	max_shared_memory_per_block_optin	kib:99
+C05-portable-cluster-8	.claude/skills/nvidia-cuda/references/blackwell-tuning/streaming-multiprocessor.md:33	| Maximum portable cluster size | 8 (guaranteed to run on any Blackwell GPU) |	clu.dims8	verdict	verdict_is:成立
+C06-tcgen05-sm100plus	.claude/skills/nvidia-cuda/references/ptx-isa/instructions-matrix-multiply.md:26	`tcgen05.*` (Blackwell, sm_100+)	tc5.alloc	verdict	verdict_is:成立
+C07-wgmma-unavailable	docs/cuda-tensor-core-design.md:138	| `wgmma` | 可 | —（`tcgen05` に置換） | **不可** |	wgmma.m64n8k16	verdict	verdict_in:NVRTC 拒否|ptxas 拒否（オフライン）|ロード失敗|実行時エラー
+C08-tcgen05-unavailable	docs/cuda-tensor-core-design.md:139	| `tcgen05` / TMEM | 不可 | 可 | **不可** |	tc5.alloc	verdict	verdict_in:NVRTC 拒否|ptxas 拒否（オフライン）|ロード失敗|実行時エラー
+C09-cluster-1x1x1	docs/cuda-tensor-core-design.md:140	**実用上不可**（1×1×1 のみ）	clu.dims2	verdict	verdict_in:NVRTC 拒否|ptxas 拒否（オフライン）|ロード失敗|実行時エラー
+C10-static-smem-48kb	.claude/skills/nvidia-cuda/references/blackwell-tuning/memory-system.md:26	| Static shared memory limit | 48 KB;	attr.limits	max_shared_memory_per_block	kib:48
