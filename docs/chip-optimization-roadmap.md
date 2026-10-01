@@ -176,9 +176,11 @@ flowchart LR
   I2122 --> C3b["C3(b) cluster・DSMEM"]
   I2122 --> MC["cluster multicast の復帰判断(未判断)"]
   I2127["#2127 cooperative unsafe 整理"] --> C3a["C3(a) cooperative fixup"]
-  I2123["#2123 managed 対応 SizeClassPool"] --> UM["unified memory 既定化の再評価"]
+  SCP["managed 対応 SizeClassPool(未実装・別イシュー候補)"] --> UM["unified memory 既定化の再評価"]
   I2128["#2128 (d)' 閾値承認"] --> SPEC["spec 提案の起票"]
-  SPEC --> ROCM["ROCm の Could 再評価"]
+  A["(a)' 承認"] --> ROCM["ROCm の Could 再評価"]
+  CS["クラウドでの (c) 実測"] --> ROCM
+  B["(b) 費用と機材の確認"] --> ROCM
   RULE["#2110〜#2114 各 RULE.txt の判定"] --> CONST["定数切替(別 PR)"]
 ```
 
@@ -188,9 +190,9 @@ flowchart LR
 | #2126 | wave64／HIP マクロ | width≠32 は fail-closed。本体は #2127 以降 |
 | #2122 | C2／C3(b)／multicast 判断 | C1 は依存なし（TMA は確定済み） |
 | #2127 | C3(a) | security-auditor 監査が前提 |
-| managed 対応 `SizeClassPool` | unified memory 既定化 | 同期解放の除去が前提 |
+| 未実装の managed 対応 `SizeClassPool`（別イシュー候補。#2123 の実装ではない。§9.2） | unified memory 既定化 | 同期解放の除去が前提 |
 | (d)' 閾値のユーザー承認 | spec 提案の起票 | 閾値未記入のまま採択しない |
-| spec 提案の起票・(a)' 承認・クラウドスパイク・(b) 確認 | ROCm の Could 再評価 | 三者が揃った時点 |
+| (a)' 承認・クラウドでの (c) 実測・(b) 費用と機材の確認 | ROCm の Could 再評価 | 出典 `rocm-grade-up-conditions-v2-spec-proposal.md` §8 の発火条件。三者が揃った時点。spec 提案の起票や §0.3 の Non-Goal 確定は前提にしない |
 | #2110〜#2114 の RULE.txt 判定 | 定数切替 | ADOPT の場合のみ別 PR |
 
 ## §7 整合性確認（HEAD 上の記録との突合）
@@ -253,7 +255,7 @@ flowchart LR
 | Metal MPP の採否判断（Route A'／B・他タイル構成を含む） | #2121 | 採否のユーザー判断 | - | 未設定 | REQ-1 の解釈変更を伴う。承認必須 |
 | Metal ゼロコピー readback | #2121 | 設計承認 | - | 未設定 | 新規 `unsafe`。承認必須 |
 | 縮約カーネル残り群の `WARP_SIZE` 注入 | #2121 | #2126 | bit 一致 | 未設定 | 不要 |
-| ROCm 系: HIP FFI 依存方式の承認、HIP-Clang FP contraction の実測、cooperative 入口の実装 | （ROCm の扱い確定後） | 0.3 の確定 | - | 未設定 | 依存追加・`unsafe`。承認・監査必須 |
+| ROCm 系: HIP FFI 依存方式の承認、HIP-Clang FP contraction の実測、cooperative 入口の実装 | （ROCm の再評価時） | 再評価の発火条件（(a)' 承認・クラウドでの (c) 実測・(b) 費用と機材の確認。§6）。0.3 の Non-Goal 確定には依存しない | - | 未設定 | 依存追加・`unsafe`。承認・監査必須 |
 
 ### 9.3 spec 側への提案候補（fandhe-ai-spec。ユーザー承認待ち）
 
