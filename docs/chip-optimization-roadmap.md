@@ -252,10 +252,11 @@ flowchart LR
 | pageable 直接アクセス | #2121 | なし | - | 未設定 | ストレージ抽象変更・新規 `unsafe`。承認必須 |
 | SVE2 の実行時 VL 取得（SVE2 カーネルは VL ≥ 256 bit の機体が前提） | #2121 | なし | R-SVE2-* | 未設定 | `asm!`・`unsafe`。承認必須 |
 | Metal `MTLCounterSampleBuffer` counter set プローブ | #2121 | なし | 診断のみ | 未設定 | 不要 |
-| Metal MPP の採否判断（Route A'／B・他タイル構成を含む） | #2121 | 採否のユーザー判断 | - | 未設定 | REQ-1 の解釈変更を伴う。承認必須 |
+| Metal MPP の採否判断材料の整理（Route A'／B・他タイル構成を含む。成果物は `backend-metal-mpp-tensor-decision.md` §6 の (a)〜(c) への回答案） | #2121 | なし | §6 の (a)〜(c) のユーザー判断（本候補の成果物を入力とする出口ゲート。前提条件ではない） | 未設定 | REQ-1 の解釈変更を伴う。承認必須 |
 | Metal ゼロコピー readback | #2121 | 設計承認 | - | 未設定 | 新規 `unsafe`。承認必須 |
 | 縮約カーネル残り群の `WARP_SIZE` 注入 | #2121 | #2126 | bit 一致 | 未設定 | 不要 |
-| ROCm 系: HIP FFI 依存方式の承認、HIP-Clang FP contraction の実測、cooperative 入口の実装 | （ROCm の再評価時） | 再評価の発火条件（(a)' 承認・クラウドでの (c) 実測・(b) 費用と機材の確認。§6）。0.3 の Non-Goal 確定には依存しない | - | 未設定 | 依存追加・`unsafe`。承認・監査必須 |
+| ROCm 先行: HIP FFI 依存方式の承認申請、HIP-Clang FP contraction 実測の準備・実施（(c) 実測を含む） | （ROCm 先行。親は #2121 配下で別途決定） | なし | 実測結果（`rocm-grade-up-conditions-v2-spec-proposal.md` §8 の (c)） | 未設定 | 依存追加・`unsafe`。承認・監査必須 |
+| ROCm の Could 再評価（cooperative 入口の実装を含む） | （ROCm の再評価時） | ROCm 先行候補の完了 | 再評価の発火条件 = (a)' 承認・クラウドでの (c) 実測・(b) 費用と機材の確認の三者成立（§6）。0.3 の Non-Goal 確定には依存しない | 未設定 | 依存追加・`unsafe`。承認・監査必須 |
 
 ### 9.3 spec 側への提案候補（fandhe-ai-spec。ユーザー承認待ち）
 
