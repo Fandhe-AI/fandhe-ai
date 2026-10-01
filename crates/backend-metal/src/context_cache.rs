@@ -530,6 +530,14 @@ pub(crate) fn cached_scalar_binary_pipeline(
 /// FUSED_ELEMENTWISE_CACHE_CAP` と同一値・同一理由）。
 const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
 
+/// 融合パイプラインのキー単位スロット（キー単位 2 階層ロックの内側）。
+/// CUDA 側 `context_cache::Slot` と同型で、#2477 で `type_complexity` 解消のため分離した。
+type FusedPipelineSlot = Arc<Mutex<Option<objc2::rc::Retained<MtlPipeline>>>>;
+
+/// 融合パイプラインキャッシュ本体（キー単位 2 階層ロックの外側）。
+/// CUDA 側 `SingleFlightCache` と同型。`cached_fused_elementwise_pipeline` のみが使う。
+type FusedPipelineCache = Mutex<HashMap<String, FusedPipelineSlot>>;
+
 /// `ctx` のデバイス上で、GPU `run_fused` の elementwise allowlist 融合
 /// カーネル（[`crate::fused_elementwise::ElementwiseProgram`] 単位で
 /// 動的生成・コンパイルされる。区分 B-1・イシュー #2085）のコンパイル
@@ -578,9 +586,7 @@ pub(crate) fn cached_fused_elementwise_pipeline(
     source: &str,
     function_name: &'static str,
 ) -> Result<Option<objc2::rc::Retained<MtlPipeline>>, MetalError> {
-    static CACHE: OnceLock<
-        Mutex<HashMap<String, Arc<Mutex<Option<objc2::rc::Retained<MtlPipeline>>>>>>,
-    > = OnceLock::new();
+    static CACHE: OnceLock<FusedPipelineCache> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     let slot = {
