@@ -7,11 +7,14 @@
 //! `(in, n_in, out, n)` の ABI。起動は `cuLaunchKernelEx`（`runner.rs` の raw 経路。
 //! tensor map を値渡しするため）。出力は境界チェック付きの `ST` で書く（REQ-8）。
 //!
-//! 共通の出力レイアウト（ヘッダ長はカーネルの種類ごとに固定。`model_tma::HDR_LOAD`／`HDR_BULK` と
-//! registry テストが一致を検査する）:
-//! - tensor 系 load・multicast（スロットごと）: `[polls1, phase2（0=第 2 待ちなし・1=完了）, polls2,
-//!   smem の生ダンプ…]`（ヘッダ 3 語）
-//! - bulk（`tma.bulk_*`）: `[polls, smem 64 語]`（ヘッダ 1 語）
+//! 共通の出力レイアウト（ヘッダ 1 語 `[polls]`。`model_tma::HDR` と registry テストが一致を検査する）:
+//! - tensor 系 load・multicast（スロットごと）: `[polls, smem の生ダンプ…]`
+//! - bulk（`tma.bulk_*`）: `[polls, smem 64 語]`
+//!
+//! **tx-count の規約**: `mbarrier.arrive.expect_tx` の総量は、同じ phase で実際に届く転送量（OOB を
+//! 含む box 全体・bulk の長さ・multicast では宛先 CTA ごとの受信量）と一致させる。実際の転送量より
+//! 少なく期待すると tx-count がアンダーフローし未定義動作になるため、部分 `expect_tx`（旧
+//! `tma.oob_tx_partial`）は計測しない（撤去。RULE 10b）。待つ phase には必ず転送が来る。
 //!
 //! **待ちの方針（上限到達時に転送先の smem を読まない）**: mbarrier の待ち（`tma_wait_or_hang`）は
 //! まず上限回数（`TMA_POLL_LIMIT`。実測チューニング値ではない）まで数える。上限に達して未完了なら、
@@ -89,7 +92,7 @@ macro_rules! tma_load_src {
             $sym,
             "(\n",
             "    const __grid_constant__ CUtensorMap tm, unsigned* __restrict__ out, int n,\n",
-            "    int cx, int cy, unsigned expect_tx, unsigned dump_words, unsigned expect_tx2)\n",
+            "    int cx, int cy, unsigned expect_tx, unsigned dump_words)\n",
             r#"{
     __shared__ __align__(1024) unsigned smem[512];
     __shared__ __align__(8) unsigned long long mbar;
@@ -110,17 +113,10 @@ macro_rules! tma_load_src {
             :: "r"(sm), "l"(map), "r"(cx), "r"(cy), "r"(mb) : "memory");
         unsigned p1 = tma_wait_or_hang(mb, 0u, out, n);
         ST(0u, p1);
-        unsigned ph2 = 0u, p2 = 0u;
-        if (expect_tx2 != 0u) {
-            asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(mb), "r"(expect_tx2));
-            p2 = tma_wait_or_hang(mb, 1u, out, n);
-            ph2 = 1u;
-        }
-        ST(1u, ph2); ST(2u, p2);
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     }
     __syncthreads();
-    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(3u + i, smem[i]); }
+    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(1u + i, smem[i]); }
 }
 "#
         )
@@ -138,7 +134,7 @@ pub const TMA_STORE_CTA: &str = concat!(
     r#"
 extern "C" __global__ void __launch_bounds__(128) tma_store_cta(
     const __grid_constant__ CUtensorMap tm, unsigned* __restrict__ out, int n,
-    int cx, int cy, unsigned expect_tx, unsigned dump_words, unsigned expect_tx2)
+    int cx, int cy, unsigned expect_tx, unsigned dump_words)
 {
     __shared__ __align__(1024) unsigned smem[512];
     unsigned tid = threadIdx.x;
@@ -208,7 +204,7 @@ pub const TMA_PREFETCH: &str = concat!(
     r#"
 extern "C" __global__ void __launch_bounds__(128) tma_prefetch(
     const __grid_constant__ CUtensorMap tm, unsigned* __restrict__ out, int n,
-    int cx, int cy, unsigned expect_tx, unsigned dump_words, unsigned expect_tx2)
+    int cx, int cy, unsigned expect_tx, unsigned dump_words)
 {
     if (threadIdx.x == 0) {
         unsigned long long map = (unsigned long long)&tm;
@@ -231,14 +227,14 @@ pub const TMA_MULTICAST: &str = concat!(
     r#"
 extern "C" __global__ void __launch_bounds__(128) tma_multicast(
     const __grid_constant__ CUtensorMap tm, unsigned* __restrict__ out, int n,
-    int cx, int cy, unsigned expect_tx, unsigned dump_words, unsigned expect_tx2)
+    int cx, int cy, unsigned expect_tx, unsigned dump_words)
 {
     __shared__ __align__(1024) unsigned smem[512];
     __shared__ __align__(8) unsigned long long mbar;
     unsigned tid = threadIdx.x;
     unsigned rank;
     asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
-    unsigned slot = blockIdx.x * (3u + dump_words);
+    unsigned slot = blockIdx.x * (1u + dump_words);
     for (unsigned i = tid; i < 512u; i += blockDim.x) { smem[i] = TMA_SENTINEL; }
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     __syncthreads();
@@ -261,17 +257,10 @@ extern "C" __global__ void __launch_bounds__(128) tma_multicast(
         }
         unsigned p1 = tma_wait_or_hang(mb, 0u, out, n);
         ST(slot, p1);
-        unsigned ph2 = 0u, p2 = 0u;
-        if (expect_tx2 != 0u) {
-            asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(mb), "r"(expect_tx2));
-            p2 = tma_wait_or_hang(mb, 1u, out, n);
-            ph2 = 1u;
-        }
-        ST(slot + 1u, ph2); ST(slot + 2u, p2);
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     }
     __syncthreads();
-    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(slot + 3u + i, smem[i]); }
+    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(slot + 1u + i, smem[i]); }
     asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
     asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
 }
@@ -322,20 +311,20 @@ extern "C" __global__ void __launch_bounds__(64) ctl_raw(
 
 /// tensor map 系の引数 ABI（`CUtensorMap` 値渡し＝128 バイト整列・後続引数のオフセット）の対照。
 /// TMA 命令は使わず、後続引数の値と、tensor map がゼロ初期化でない（encode 済み）ことだけを
-/// out へ書く（`[cx, cy, expect_tx, dump_words, tm が非ゼロなら 1, expect_tx2]`）。TMA 非対応のアーキ
+/// out へ書く（`[cx, cy, expect_tx, dump_words, tm が非ゼロなら 1]`）。TMA 非対応のアーキ
 /// （開発機の sm_86 を含む）でも動くため、raw 起動の引数渡しを開発機で検証できる。
 pub const CTL_RAWMAP: &str = concat!(
     tma_pre!(),
     r#"
 extern "C" __global__ void __launch_bounds__(32) ctl_rawmap(
     const __grid_constant__ CUtensorMap tm, unsigned* __restrict__ out, int n,
-    int cx, int cy, unsigned expect_tx, unsigned dump_words, unsigned expect_tx2)
+    int cx, int cy, unsigned expect_tx, unsigned dump_words)
 {
     if (threadIdx.x == 0) {
         unsigned long long any = 0ull;
         for (int i = 0; i < 16; ++i) { any |= tm.opaque[i]; }
         ST(0u, (unsigned)cx); ST(1u, (unsigned)cy); ST(2u, expect_tx); ST(3u, dump_words);
-        ST(4u, any != 0ull ? 1u : 0u); ST(5u, expect_tx2);
+        ST(4u, any != 0ull ? 1u : 0u);
     }
 }
 "#

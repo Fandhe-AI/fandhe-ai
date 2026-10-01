@@ -165,9 +165,17 @@
   （未定義動作）は起こらない。cp.async.bulk.wait_group 0（tma.store）と barrier.cluster
   （tma.multicast・clu.dsmem）も上限を持たず外部 timeout に頼る（TIMEOUT）。ダンプ・読み戻しは待ちが
   完了した後にだけ行う。smem は転送前に番兵（0xFEEDFACE）で埋めてダンプする。
-  出力ヘッダ長はカーネルの種類ごとに固定する: tensor 系 load・multicast（スロットごと）は
-  [polls1, phase2（0=なし・1=完了）, polls2] の 3 語、bulk は [polls] の 1 語。registry テストが
-  カーネルの格納と checker の解釈の一致を検査する。
+  出力ヘッダは全 TMA カーネル共通で [polls] の 1 語（tensor 系 load・multicast はスロットごと）。
+  registry テストがカーネルの格納と checker の解釈の一致を検査する。
+  tx-count の規約: mbarrier.arrive.expect_tx の総量は、同じ phase で実際に届く転送量（OOB を含む
+  box 全体・bulk の長さ・multicast では宛先 CTA ごとの受信量）と一致させ、待つ phase には必ず転送が来る。
+  tx-count を実際の転送量より少なく期待する構成は、アンダーフロー（未定義動作）になりうるため計測しない。
+  registry テストが、宣言した box／bulk のバイト数と expect_tx の一致・init の count 1・arrive の
+  1 か所・待ちの 1 回（parity 0）をソース構造として静的に検査する（実行時の転送量までは保証しない）。
+  撤去の経緯: 旧 tma.oob_tx_partial（expect_tx を範囲内の 128 B だけにして残りを第 2 phase で追加）は、
+  同じ転送の残量を第 2 phase では補えず、第 1 待ちが完了しない／第 2 phase に転送が来ず永久に待ち続け、
+  観測が得られなかった（PR #2475 の Codex P1・Bugbot High）。部分 expect_tx は未定義動作を突くため
+  安全な観測方法がなく、プローブごと撤去した。
   順序: smem 初期化の後に全スレッドが fence.proxy.async.shared::cta、mbarrier を init したスレッドが
   fence.mbarrier_init.release.cluster を出してから（multicast は barrier.cluster 同期のあとで）発行する。
     R-TMA-BASE   tma.base_cta（shared::cta）・tma.base_cluster（shared::cluster・cluster 1 起動）:
@@ -176,27 +184,25 @@
                  「受理のみ（実行意味論は未検証）」で、観測内容は R-TMA 観測表に出す）:
                  tma.coord（class=ELEM_INNER_FIRST／TRANSPOSED／NONE）・tma.oob_none／oob_nan／
                  oob_neg（inrange・oob_fill=ZERO／NAN／SENTINEL／OTHER・oob_distinct）・
-                 tma.oob_tx_partial（expect_tx を範囲内バイト数 128 B だけにする。第 1 待ち〈部分 tx〉の結果は
-                 smem を読まずに polls1 として記録し、残りの 384 B を expect_tx で追加した第 2 待ちが完了して
-                 から（phase2=complete）smem をダンプする。部分 tx で第 1 待ちが完了しない場合は、上限なしの
-                 待ちのまま外部 timeout で打ち切られ TIMEOUT〈判定不能〉になり、これが観測の結果である。
-                 完了した場合の値は記録のみで、成否の判定には使わない）・
+                 〈OOB 要素が complete_tx のバイト数に含まれるか、の問いは oob_none／oob_nan で答える。どちらも
+                 expect_tx を OOB を含む box 全体のバイト数（512 B）にしており、完了すれば「OOB も数える」と
+                 判定し、完了しなければ上限なしの待ちのまま外部 timeout で打ち切られ TIMEOUT〈判定不能〉
+                 になる（事前登録）。tx-count を少なく期待する形では測らない〉・
                  tma.swz32／swz64／swz128（class=LINEAR／XOR_ADDR_BITS／SRC_B64_MODEL〈src の
                  tma_swizzled_chunk_a。64B のみ〉の一致集合。どれとも一致しなければ class=NONE とダンプ全文）。
                  注: 本 box（タイル先頭 1024 B 整列・行 64 B）では SRC_B64_MODEL と XOR_ADDR_BITS は全語で
                  同一になり区別できない（区別にはタイル先頭をずらす必要があるが、swizzle 使用時の smem 整列
                  要件のため作れない）。両者は常に同時に現れ、本プローブは両者の優劣を判定しない。
-                 SEM の観測は S5 の detail のキー集合をプローブごとに固定する（coord・swz*: polls・phase2〈none／
-                 complete〉・polls2・class〈NONE のとき dump が加わる〉／oob_*: polls・phase2・polls2・inrange・
-                 oob_elems・oob_fill・oob_distinct）。過不足は完全性違反。class=NONE・inrange=MISMATCH・
+                 SEM の観測は S5 の detail のキー集合をプローブごとに固定する（coord・swz*: polls・class〈NONE のとき
+                 dump が加わる〉／oob_*: polls・inrange・oob_elems・oob_fill・oob_distinct）。過不足は完全性違反。class=NONE・inrange=MISMATCH・
                  oob_fill に SENTINEL を含むものは、判定語（受理のみ）に埋もれないよう R-TMA 観測表の注意欄に
                  明示する（待ちの失敗は観測値ではなく TIMEOUT として現れる）。
     R-TMA-XFER   tma.store（global の読み戻しが既知パターンと一致）・tma.bulk_cta／bulk_cluster
                  （cp.async.bulk の 256 B コピー）・tma.prefetch（完走の目印のみ。効果は観測できない）・
                  tma.multicast（cluster 2・両 CTA の smem が一致）。成立するかを判定する。成立の detail
-                 （S6）のキー集合もヘッダ長に従い固定する（base: polls・phase2・polls2・box_words・bit_exact／
+                 （S6）のキー集合もヘッダ長に従い固定する（base: polls・box_words・bit_exact／
                  bulk: polls・words・bit_exact／store: global_words・bit_exact／prefetch: completion_magic／
-                 multicast: cta0_・cta1_ それぞれ polls・phase2・polls2・mismatched_words）。過不足は完全性違反。
+                 multicast: cta0_・cta1_ それぞれ polls・mismatched_words）。過不足は完全性違反。
   依存（事前登録。自身が 成立／受理のみ になるときに限り、依存先が同 target で 成立 でなければ
   判定不能にする。評価順）:
     - raw 起動（cuLaunchKernelEx）で動く tma.*・clu.rt2／rt4・ctl.rawmap は対照 ctl.raw に依存
@@ -454,7 +460,6 @@ PROBE: tma.base_cluster ac=AC3 clause=R-TMA-BASE home=sm_90 policy=verify layout
 PROBE: tma.coord ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
 PROBE: tma.oob_none ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
 PROBE: tma.oob_nan ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
-PROBE: tma.oob_tx_partial ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
 PROBE: tma.oob_neg ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
 PROBE: tma.swz32 ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
 PROBE: tma.swz64 ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none

@@ -1192,7 +1192,6 @@ pub fn symbol_of(id: &str) -> Option<&'static str> {
         ("tma.coord", "tma_load_cta"),
         ("tma.oob_none", "tma_load_cta"),
         ("tma.oob_nan", "tma_load_cta"),
-        ("tma.oob_tx_partial", "tma_load_cta"),
         ("tma.oob_neg", "tma_load_cta"),
         ("tma.swz32", "tma_load_cta"),
         ("tma.swz64", "tma_load_cta"),

@@ -263,9 +263,9 @@ pub fn device_stages_raw(
                 }
             }
         }
-        let (mut cx, mut cy, mut expect_tx, mut dump_words, mut expect_tx2) = spec
-            .map_or((0, 0, 0u32, 0u32, 0u32), |s| {
-                (s.cx, s.cy, s.expect_tx, s.dump_words, s.expect_tx2)
+        let (mut cx, mut cy, mut expect_tx, mut dump_words) = spec
+            .map_or((0, 0, 0u32, 0u32), |s| {
+                (s.cx, s.cy, s.expect_tx, s.dump_words)
             });
         let mut params: Vec<*mut c_void> = match tm_holder.as_mut() {
             Some(tm) => vec![
@@ -276,7 +276,6 @@ pub fn device_stages_raw(
                 &mut cy as *mut i32 as *mut c_void,
                 &mut expect_tx as *mut u32 as *mut c_void,
                 &mut dump_words as *mut u32 as *mut c_void,
-                &mut expect_tx2 as *mut u32 as *mut c_void,
             ],
             None => vec![
                 &mut in_ptr as *mut u64 as *mut c_void,
@@ -307,7 +306,7 @@ pub fn device_stages_raw(
             numAttrs: u32::from(cluster > 0),
         };
         // SAFETY: `params` は `func` のシグネチャ（tensor 系は (CUtensorMap 値・out ptr・int n・int cx・
-        // int cy・uint expect_tx・uint dump_words・uint expect_tx2)、plain は (in ptr・int n_in・out ptr・int n)）と
+        // int cy・uint expect_tx・uint dump_words)、plain は (in ptr・int n_in・out ptr・int n)）と
         // 個数・型・順序が 1:1 対応し、各要素は引数値そのものへのポインタ（driver API の契約）で
         // 同期完了までスタックに生存する。カーネル側の全ストアは `ST` で `n` に対して境界チェック
         // 済み（REQ-8）。起動形状は registry の固定値。命令の拒否で起こる実行時エラーは

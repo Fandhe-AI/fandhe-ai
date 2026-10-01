@@ -19,30 +19,10 @@ pub const SENTINEL: u32 = 0xFEED_FACE;
 pub const STORE_MAGIC: u32 = 0x5702_5E5E;
 /// `tma.prefetch` の完走の目印。
 pub const PREFETCH_MAGIC: u32 = 0x9E7F_3C11;
-/// 出力ヘッダの種類（カーネルごとに固定。`kernels_tma.rs` の格納と registry テストが一致を検査する）。
-/// 待ちが上限に達したカーネルは転送先を読まず終了もしない（外部 timeout で打ち切り）ため、ヘッダに
-/// 「待ちの失敗」の状態は持たない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TmaHeader {
-    /// tensor 系 load・multicast（スロットごと）: `[polls1, phase2（0=なし・1=完了）, polls2]`。
-    Load,
-    /// `tma.bulk_*`: `[polls]`。
-    Bulk,
-}
-
-impl TmaHeader {
-    pub const fn words(self) -> usize {
-        match self {
-            TmaHeader::Load => 3,
-            TmaHeader::Bulk => 1,
-        }
-    }
-}
-
-/// tensor 系 load・multicast のスロットのヘッダ語数。
-pub const HDR_LOAD: usize = TmaHeader::Load.words();
-/// bulk のヘッダ語数。
-pub const HDR_BULK: usize = TmaHeader::Bulk.words();
+/// 出力ヘッダの語数（全 TMA カーネル共通で `[polls]` の 1 語。`kernels_tma.rs` の格納と registry テストが
+/// 一致を検査する）。待ちが上限に達したカーネルは転送先を読まず終了もしない（外部 timeout で打ち切り）
+/// ため、ヘッダに「待ちの失敗」の状態は持たない。
+pub const HDR: usize = 1;
 /// smem の box 最大語数（`kernels_tma.rs` の `smem[512]`）。
 pub const SMEM_WORDS: u32 = 512;
 
@@ -90,10 +70,10 @@ pub struct TmaSpec {
     /// 座標（要素単位。`cx` が内側〈列〉、`cy` が外側〈行〉）。
     pub cx: i32,
     pub cy: i32,
+    /// `mbarrier.arrive.expect_tx` の総量。tx-count を実際の転送量より少なく期待するとアンダーフロー
+    /// （未定義動作）になるため、load・multicast では box 全体のバイト数（OOB を含む）と一致させる
+    /// （registry テストが検査する）。
     pub expect_tx: u32,
-    /// 第 2 待ちで追加する expect_tx（0 = 第 2 待ちなし）。部分 `expect_tx` のあとも転送中の TMA が
-    /// smem を書き続けないよう、残りのバイトを追加して phase 1 の完了を待つ（完了しなければ上限なしの待ちのまま外部 timeout）。
-    pub expect_tx2: u32,
     pub dump_words: u32,
     /// global を起動後に読み戻して out の後ろへ連結する（store 用）。
     pub readback_global: bool,
@@ -135,8 +115,8 @@ impl TmaSpec {
         if self.box_words() > SMEM_WORDS || self.dump_words > SMEM_WORDS {
             return Err("box／ダンプが smem 配列（512 語）を超える".into());
         }
-        if self.expect_tx + self.expect_tx2 > self.box_words() * 4 {
-            return Err("expect_tx（第 1・第 2 の合計）は box 全体のバイト数以下".into());
+        if self.expect_tx > self.box_words() * 4 {
+            return Err("expect_tx は box 全体のバイト数以下".into());
         }
         Ok(())
     }
@@ -202,21 +182,13 @@ fn hex_list(words: &[u32]) -> String {
         .join(",")
 }
 
-/// ヘッダの `k=v` トークン（解釈はヘッダの種類に従う。データ語を混ぜない）。
-fn header_tokens(kind: TmaHeader, out: &[u32]) -> String {
-    match kind {
-        TmaHeader::Load => format!(
-            "polls={} phase2={} polls2={}",
-            out[0],
-            if out[1] == 0 { "none" } else { "complete" },
-            out[2]
-        ),
-        TmaHeader::Bulk => format!("polls={}", out[0]),
-    }
+/// ヘッダの `k=v` トークン（ヘッダは `[polls]` の 1 語。データ語を混ぜない）。
+fn header_tokens(out: &[u32]) -> String {
+    format!("polls={}", out[0])
 }
 
 fn len_mismatch(spec: &TmaSpec, got: usize) -> Option<Outcome> {
-    let want = HDR_LOAD + spec.dump_words as usize;
+    let want = HDR + spec.dump_words as usize;
     (got != want).then(|| Outcome::Mismatch {
         first: got.min(want),
         count: got.abs_diff(want).max(1),
@@ -231,7 +203,7 @@ pub fn check_base(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
         return m;
     }
     let elems = box_elems(spec, input, false);
-    let dump = &out[HDR_LOAD..];
+    let dump = &out[HDR..];
     let bad: Vec<usize> = elems
         .iter()
         .zip(dump)
@@ -242,7 +214,7 @@ pub fn check_base(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if bad.is_empty() {
         Outcome::Match(format!(
             "{} box_words={} bit_exact=true",
-            header_tokens(TmaHeader::Load, out),
+            header_tokens(out),
             elems.len()
         ))
     } else {
@@ -251,7 +223,7 @@ pub fn check_base(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
             count: bad.len().max(1),
             detail: format!(
                 "{} mismatched_words={} dump={}",
-                header_tokens(TmaHeader::Load, out),
+                header_tokens(out),
                 bad.len(),
                 hex_list(dump)
             ),
@@ -264,7 +236,7 @@ pub fn classify_coord(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[HDR_LOAD..];
+    let dump = &out[HDR..];
     let matches = |t: bool| {
         box_elems(spec, input, t)
             .iter()
@@ -288,10 +260,7 @@ pub fn classify_coord(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     } else {
         String::new()
     };
-    Outcome::Record(format!(
-        "{} class={class}{tail}",
-        header_tokens(TmaHeader::Load, out)
-    ))
+    Outcome::Record(format!("{} class={class}{tail}", header_tokens(out)))
 }
 
 fn fill_class(v: u32) -> &'static str {
@@ -311,7 +280,7 @@ pub fn classify_oob(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[HDR_LOAD..];
+    let dump = &out[HDR..];
     let elems = box_elems(spec, input, false);
     let mut in_ok = true;
     let mut oob: Vec<u32> = Vec::new();
@@ -338,7 +307,7 @@ pub fn classify_oob(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     };
     Outcome::Record(format!(
         "{} inrange={} oob_elems={} oob_fill={fill} oob_distinct={}",
-        header_tokens(TmaHeader::Load, out),
+        header_tokens(out),
         if in_ok { "MATCH" } else { "MISMATCH" },
         oob.len(),
         if distinct.is_empty() {
@@ -355,7 +324,7 @@ pub fn classify_swizzle(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[HDR_LOAD..];
+    let dump = &out[HDR..];
     let elems = box_elems(spec, input, false);
     let fits = |phys: &dyn Fn(u32) -> u32| {
         elems
@@ -384,10 +353,7 @@ pub fn classify_swizzle(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     } else {
         String::new()
     };
-    Outcome::Record(format!(
-        "{} class={class}{tail}",
-        header_tokens(TmaHeader::Load, out)
-    ))
+    Outcome::Record(format!("{} class={class}{tail}", header_tokens(out)))
 }
 
 /// `tma.store`: out[0] が完走の目印で、global の box 領域が smem の既知パターン
@@ -449,16 +415,16 @@ pub fn check_prefetch(_spec: &TmaSpec, _input: &[u32], out: &[u32]) -> Outcome {
 /// `tma.bulk_*`: 完走し（待ちが完了しなければカーネルは終了しない）、256 バイトが入力と一致するか。
 /// out は `[polls, smem 64 語]`（ヘッダ 1 語）。
 pub fn check_bulk(input: &[u32], out: &[u32]) -> Outcome {
-    if out.len() != HDR_BULK + 64 || input.len() < 64 {
+    if out.len() != HDR + 64 || input.len() < 64 {
         return Outcome::Mismatch {
             first: 0,
             count: 1,
             detail: format!("length out={} in={}", out.len(), input.len()),
         };
     }
-    let data = &out[HDR_BULK..];
+    let data = &out[HDR..];
     let bad: Vec<usize> = (0..64).filter(|&i| data[i] != input[i]).collect();
-    let tokens = header_tokens(TmaHeader::Bulk, out);
+    let tokens = header_tokens(out);
     if bad.is_empty() {
         Outcome::Match(format!("{tokens} words=64 bit_exact=true"))
     } else {
@@ -471,9 +437,9 @@ pub fn check_bulk(input: &[u32], out: &[u32]) -> Outcome {
 }
 
 /// `tma.multicast`: 2 CTA がそれぞれ完走し、どちらの smem も box が仮説どおりか。out は
-/// CTA ごとのスロット（`HDR_LOAD + dump_words` 語）を 2 つ連結したもの。
+/// CTA ごとのスロット（`HDR + dump_words` 語）を 2 つ連結したもの。
 pub fn check_multicast(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
-    let slot = HDR_LOAD + spec.dump_words as usize;
+    let slot = HDR + spec.dump_words as usize;
     if out.len() != 2 * slot {
         return Outcome::Mismatch {
             first: out.len().min(2 * slot),
@@ -489,7 +455,7 @@ pub fn check_multicast(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
         let s = &out[cta * slot..(cta + 1) * slot];
         let bad = elems
             .iter()
-            .zip(&s[HDR_LOAD..])
+            .zip(&s[HDR..])
             .filter(|(e, d)| **e != Some(**d))
             .count();
         bad_total += bad;
@@ -497,7 +463,7 @@ pub fn check_multicast(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
             first = Some(cta * slot);
         }
         // 全トークンを k=v にする（CTA 接頭辞を付けたキー）。
-        let prefixed: Vec<String> = header_tokens(TmaHeader::Load, s)
+        let prefixed: Vec<String> = header_tokens(s)
             .split_whitespace()
             .map(|t| format!("cta{cta}_{t}"))
             .collect();

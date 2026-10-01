@@ -11,13 +11,13 @@ use super::model_tma::{self as mt, Swz, TmaSpec};
 use super::registry::{Check, Outcome, ProbeSpec};
 use super::types::{Expect, Kind, Launch, Layout, Policy};
 
-/// `(box_rows, box_cols)`・`(cx, cy)`・`(expect_tx, expect_tx2)` はそれぞれ組で渡す。
+/// `(box_rows, box_cols)`・`(cx, cy)` はそれぞれ組で渡す。`expect_tx` は box 全体のバイト数（OOB を含む）。
 const fn load_spec(
     swizzle: Swz,
     (box_rows, box_cols): (u32, u32),
     oob_nan: bool,
     (cx, cy): (i32, i32),
-    (expect_tx, expect_tx2): (u32, u32),
+    expect_tx: u32,
 ) -> TmaSpec {
     TmaSpec {
         global_rows: 64,
@@ -29,7 +29,6 @@ const fn load_spec(
         cx,
         cy,
         expect_tx,
-        expect_tx2,
         dump_words: box_rows * box_cols,
         readback_global: false,
         global_sentinel: false,
@@ -37,22 +36,19 @@ const fn load_spec(
 }
 
 /// 基本: 64x96 の f32、box 8 行 x 16 列、座標 (0,0)、box 全体の expect_tx（512 B）。
-pub static SPEC_BASE: TmaSpec = load_spec(Swz::None, (8, 16), false, (0, 0), (512, 0));
+pub static SPEC_BASE: TmaSpec = load_spec(Swz::None, (8, 16), false, (0, 0), 512);
 /// 座標: 要素座標（内側が先）か転置かを区別できる非対称な位置 (cx=24, cy=40)。
-pub static SPEC_COORD: TmaSpec = load_spec(Swz::None, (8, 16), false, (24, 40), (512, 0));
+pub static SPEC_COORD: TmaSpec = load_spec(Swz::None, (8, 16), false, (24, 40), 512);
 /// OOB（右下端をまたぐ box。列 96〜103・行 64〜67 が範囲外）。fill は NONE。
-pub static SPEC_OOB_NONE: TmaSpec = load_spec(Swz::None, (8, 16), false, (88, 60), (512, 0));
+pub static SPEC_OOB_NONE: TmaSpec = load_spec(Swz::None, (8, 16), false, (88, 60), 512);
 /// 同じ box で fill に `NAN_REQUEST_ZERO_FMA`。
-pub static SPEC_OOB_NAN: TmaSpec = load_spec(Swz::None, (8, 16), true, (88, 60), (512, 0));
-/// 同じ box で expect_tx を範囲内のバイト数（8 列 x 4 行 x 4 B = 128）だけにする。
-pub static SPEC_OOB_TX_PARTIAL: TmaSpec =
-    load_spec(Swz::None, (8, 16), false, (88, 60), (128, 384));
+pub static SPEC_OOB_NAN: TmaSpec = load_spec(Swz::None, (8, 16), true, (88, 60), 512);
 /// 負の座標（cx=-8, cy=-4。行 0〜3・列 0〜7 だけが範囲内）。
-pub static SPEC_OOB_NEG: TmaSpec = load_spec(Swz::None, (8, 16), false, (-8, -4), (512, 0));
+pub static SPEC_OOB_NEG: TmaSpec = load_spec(Swz::None, (8, 16), false, (-8, -4), 512);
 /// swizzle: box の内側が swizzle 幅ちょうど（32B=8 列・64B=16 列・128B=32 列）、8 行、座標 (0,0)。
-pub static SPEC_SWZ32: TmaSpec = load_spec(Swz::B32, (8, 8), false, (0, 0), (256, 0));
-pub static SPEC_SWZ64: TmaSpec = load_spec(Swz::B64, (8, 16), false, (0, 0), (512, 0));
-pub static SPEC_SWZ128: TmaSpec = load_spec(Swz::B128, (8, 32), false, (0, 0), (1024, 0));
+pub static SPEC_SWZ32: TmaSpec = load_spec(Swz::B32, (8, 8), false, (0, 0), 256);
+pub static SPEC_SWZ64: TmaSpec = load_spec(Swz::B64, (8, 16), false, (0, 0), 512);
+pub static SPEC_SWZ128: TmaSpec = load_spec(Swz::B128, (8, 32), false, (0, 0), 1024);
 /// store: global を番兵で初期化し、box（8x16）を (cx=16, cy=24) へ書いて global を読み戻す。
 pub static SPEC_STORE: TmaSpec = TmaSpec {
     global_rows: 64,
@@ -64,18 +60,17 @@ pub static SPEC_STORE: TmaSpec = TmaSpec {
     cx: 16,
     cy: 24,
     expect_tx: 0,
-    expect_tx2: 0,
     dump_words: 0,
     readback_global: true,
     global_sentinel: true,
 };
 /// prefetch: 基本と同じ box・座標。
-pub static SPEC_PREFETCH: TmaSpec = load_spec(Swz::None, (8, 16), false, (0, 0), (512, 0));
+pub static SPEC_PREFETCH: TmaSpec = load_spec(Swz::None, (8, 16), false, (0, 0), 512);
 /// multicast: 基本と同じ box・座標（cluster 2 の両 CTA の smem へ転送）。
-pub static SPEC_MULTICAST: TmaSpec = load_spec(Swz::None, (8, 16), false, (0, 0), (512, 0));
+pub static SPEC_MULTICAST: TmaSpec = load_spec(Swz::None, (8, 16), false, (0, 0), 512);
 
 /// raw 起動の tensor map 引数 ABI の対照（`ctl.rawmap`）: 後続引数が非自明な値になる spec。
-pub static SPEC_RAWMAP: TmaSpec = load_spec(Swz::None, (8, 16), false, (24, -4), (400, 112));
+pub static SPEC_RAWMAP: TmaSpec = load_spec(Swz::None, (8, 16), false, (24, -4), 400);
 
 /// 全 TMA spec（registry テストが一括で検証する）。
 pub fn all_tma_specs() -> Vec<(&'static str, &'static TmaSpec)> {
@@ -84,7 +79,6 @@ pub fn all_tma_specs() -> Vec<(&'static str, &'static TmaSpec)> {
         ("coord", &SPEC_COORD),
         ("oob_none", &SPEC_OOB_NONE),
         ("oob_nan", &SPEC_OOB_NAN),
-        ("oob_tx_partial", &SPEC_OOB_TX_PARTIAL),
         ("oob_neg", &SPEC_OOB_NEG),
         ("swz32", &SPEC_SWZ32),
         ("swz64", &SPEC_SWZ64),
@@ -107,9 +101,6 @@ fn in_oob_none() -> Vec<u32> {
 }
 fn in_oob_nan() -> Vec<u32> {
     mt::global_input(&SPEC_OOB_NAN)
-}
-fn in_oob_tx() -> Vec<u32> {
-    mt::global_input(&SPEC_OOB_TX_PARTIAL)
 }
 fn in_oob_neg() -> Vec<u32> {
     mt::global_input(&SPEC_OOB_NEG)
@@ -136,7 +127,7 @@ fn in_rawmap() -> Vec<u32> {
     mt::global_input(&SPEC_RAWMAP)
 }
 fn chk_rawmap(_: &[u32], o: &[u32]) -> Outcome {
-    let want = [24u32, (-4i32) as u32, 400, 128, 1, 112];
+    let want = [24u32, (-4i32) as u32, 400, 128, 1];
     if o == want {
         Outcome::Match("args_and_nonzero_map".to_string())
     } else {
@@ -173,9 +164,6 @@ fn chk_oob_none(i: &[u32], o: &[u32]) -> Outcome {
 }
 fn chk_oob_nan(i: &[u32], o: &[u32]) -> Outcome {
     mt::classify_oob(&SPEC_OOB_NAN, i, o)
-}
-fn chk_oob_tx(i: &[u32], o: &[u32]) -> Outcome {
-    mt::classify_oob(&SPEC_OOB_TX_PARTIAL, i, o)
 }
 fn chk_oob_neg(i: &[u32], o: &[u32]) -> Outcome {
     mt::classify_oob(&SPEC_OOB_NEG, i, o)
@@ -252,7 +240,7 @@ fn tma_probe(a: TmaArgs) -> ProbeSpec {
 
 /// AC3 の全プローブと、runtime cluster 次元の補助プローブ（`clu.rt*`）。
 pub fn tma_probes() -> Vec<ProbeSpec> {
-    let load_out = |s: &TmaSpec| mt::HDR_LOAD + s.dump_words as usize;
+    let load_out = |s: &TmaSpec| mt::HDR + s.dump_words as usize;
     let rec = Policy::RecordOnly;
     let ver = Policy::Verify;
     let raw0 = Launch::Raw { cluster: 0 };
@@ -320,16 +308,6 @@ pub fn tma_probes() -> Vec<ProbeSpec> {
             raw0,
             in_oob_nan,
             chk_oob_nan,
-        ),
-        load(
-            "tma.oob_tx_partial",
-            "R-TMA-SEM",
-            rec,
-            kt::TMA_LOAD_CTA,
-            &SPEC_OOB_TX_PARTIAL,
-            raw0,
-            in_oob_tx,
-            chk_oob_tx,
         ),
         load(
             "tma.oob_neg",
@@ -438,7 +416,7 @@ pub fn tma_probes() -> Vec<ProbeSpec> {
         spec: &SPEC_RAWMAP,
         launch: raw0,
         grid: 1,
-        out_words: 6,
+        out_words: 5,
         make_input: in_rawmap,
         check: chk_rawmap,
     });
@@ -467,7 +445,7 @@ pub fn tma_probes() -> Vec<ProbeSpec> {
             block: 128,
             grid: 1,
             cluster: 0,
-            out_words: mt::HDR_BULK + 64,
+            out_words: mt::HDR + 64,
             make_input: in_bulk,
             check: Check::Custom(chk_bulk),
             launch: Launch::Raw { cluster },
