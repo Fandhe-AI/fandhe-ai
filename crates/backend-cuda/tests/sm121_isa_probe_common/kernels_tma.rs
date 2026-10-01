@@ -7,15 +7,22 @@
 //! `(in, n_in, out, n)` の ABI。起動は `cuLaunchKernelEx`（`runner.rs` の raw 経路。
 //! tensor map を値渡しするため）。出力は境界チェック付きの `ST` で書く（REQ-8）。
 //!
-//! 共通の出力レイアウト（tensor 系 load・multicast）: スロットごとに
-//! `[状態語 1（0=mbarrier 完了・1=ポーリング上限に到達）, ポーリング回数 1, 状態語 2（第 2 待ち。
-//! 0=完了・1=上限・2=実施せず）, ポーリング回数 2, smem の生ダンプ…]`（ヘッダ 4 語。`model_tma::HDR`）。
+//! 共通の出力レイアウト（ヘッダ長はカーネルの種類ごとに固定。`model_tma::HDR_LOAD`／`HDR_BULK` と
+//! registry テストが一致を検査する）:
+//! - tensor 系 load・multicast（スロットごと）: `[polls1, phase2（0=第 2 待ちなし・1=完了）, polls2,
+//!   smem の生ダンプ…]`（ヘッダ 3 語）
+//! - bulk（`tma.bulk_*`）: `[polls, smem 64 語]`（ヘッダ 1 語）
 //!
-//! 待ち（`mbarrier.try_wait`）にだけ上限回数（`TMA_POLL_LIMIT`）と状態語を持たせ、mbarrier が
-//! 完了しない場合でもその待ちはハングしない（上限は実測チューニング値ではない）。**それ以外の待ち
-//! （`cp.async.bulk.wait_group 0`・`barrier.cluster`）は上限を持たず、外部 `timeout`
-//! （`orchestrate.sh`）に頼る。** 上限に達した場合、転送中の TMA が CTA の終了後も smem へ
-//! 書き続ける可能性が残る（未定義動作になりうる。記録は残るが結果の解釈は慎重に）。
+//! **待ちの方針（上限到達時に転送先の smem を読まない）**: mbarrier の待ち（`tma_wait_or_hang`）は
+//! まず上限回数（`TMA_POLL_LIMIT`。実測チューニング値ではない）まで数える。上限に達して未完了なら、
+//! 転送先の smem は**読まず**、到達の事実を global（out[0] のマーカー）へ残して
+//! `__threadfence_system()` で出したうえで、上限なしの待ちに移る。完了しなければカーネルは終了せず、
+//! 外部 `timeout`（`orchestrate.sh`）がプロセスごと打ち切り、aggregate.py は `TIMEOUT`（判定不能）と
+//! して扱う（ホストはカーネルの完了を待てないため、記録上の正は外部 timeout の proc 記録）。
+//! したがって「完了を確認する前に転送先を読む」経路と「転送中に CTA が終了する」経路はない
+//! （後者は CTA 終了後の smem への書き込み＝未定義動作を避けるため）。`cp.async.bulk.wait_group 0`
+//! （`tma.store`）と `barrier.cluster`（`tma.multicast`・`clu.dsmem`）も上限を持たず、同じく外部 timeout に
+//! 頼る。ダンプ・読み戻しは待ちが完了した後にだけ行う。
 //!
 //! 順序（CUTLASS の `fence_barrier_init`／`fence_view_async_shared` に相当）: smem を番兵で埋めた
 //! 後に全スレッドが `fence.proxy.async.shared::cta`（generic proxy の書き込みを async proxy へ
@@ -43,28 +50,30 @@ __device__ __forceinline__ unsigned smem_u32(const void* p) {
     asm volatile("{ .reg .u64 t_; cvta.to.shared.u64 t_, %1; cvt.u32.u64 %0, t_; }" : "=r"(a) : "l"(p));
     return a;
 }
-__device__ __forceinline__ unsigned tma_wait(unsigned mb, unsigned parity, unsigned* polls_out) {
-    unsigned complete = 0u, polls = 0u;
-    while (!complete && polls < TMA_POLL_LIMIT) {
-        asm volatile("{ .reg .pred p_; mbarrier.try_wait.parity.shared::cta.b64 p_, [%1], %2; selp.u32 %0, 1, 0, p_; }"
-            : "=r"(complete) : "r"(mb), "r"(parity));
-        polls++;
-    }
-    *polls_out = polls;
+#define TMA_LIMIT_MARK 0xDEAD11A1u
+__device__ __forceinline__ unsigned tma_try(unsigned mb, unsigned parity) {
+    unsigned complete;
+    asm volatile("{ .reg .pred p_; mbarrier.try_wait.parity.shared::cta.b64 p_, [%1], %2; selp.u32 %0, 1, 0, p_; }"
+        : "=r"(complete) : "r"(mb), "r"(parity));
     return complete;
 }
-// First wait (phase 0); when expect_tx2 > 0 a second bounded wait (adds the remaining bytes via expect_tx
-// and waits for phase 1) so that in-flight TMA writes are confirmed done before the CTA exits.
-__device__ __forceinline__ void tma_wait_both(unsigned mb, unsigned expect_tx2, unsigned* r) {
-    unsigned p1 = 0u, p2 = 0u;
-    unsigned c1 = tma_wait(mb, 0u, &p1);
-    unsigned t2 = 2u;
-    if (expect_tx2 != 0u) {
-        asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(mb), "r"(expect_tx2));
-        unsigned c2 = tma_wait(mb, 1u, &p2);
-        t2 = c2 ? 0u : 1u;
+// Bounded polling first. If the bound is reached without completion the destination smem is NOT read:
+// the fact is left in global memory (out marker + system fence) and the wait continues without a bound,
+// so the CTA never exits while a transfer may still be writing; an external timeout kills the process.
+// Returns the poll count of a wait that completed.
+__device__ __forceinline__ unsigned tma_wait_or_hang(unsigned mb, unsigned parity, unsigned* out, int n) {
+    unsigned polls = 0u;
+    unsigned complete = 0u;
+    while (!complete && polls < TMA_POLL_LIMIT) {
+        complete = tma_try(mb, parity);
+        polls++;
     }
-    r[0] = c1 ? 0u : 1u; r[1] = p1; r[2] = t2; r[3] = p2;
+    if (!complete) {
+        ST(0u, TMA_LIMIT_MARK);
+        __threadfence_system();
+        while (!tma_try(mb, parity)) { }
+    }
+    return polls;
 }
 "#
         )
@@ -84,7 +93,6 @@ macro_rules! tma_load_src {
             r#"{
     __shared__ __align__(1024) unsigned smem[512];
     __shared__ __align__(8) unsigned long long mbar;
-    __shared__ unsigned st[4];
     unsigned tid = threadIdx.x;
     for (unsigned i = tid; i < 512u; i += blockDim.x) { smem[i] = TMA_SENTINEL; }
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -100,12 +108,19 @@ macro_rules! tma_load_src {
             $space,
             r#".global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
             :: "r"(sm), "l"(map), "r"(cx), "r"(cy), "r"(mb) : "memory");
-        tma_wait_both(mb, expect_tx2, st);
+        unsigned p1 = tma_wait_or_hang(mb, 0u, out, n);
+        ST(0u, p1);
+        unsigned ph2 = 0u, p2 = 0u;
+        if (expect_tx2 != 0u) {
+            asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(mb), "r"(expect_tx2));
+            p2 = tma_wait_or_hang(mb, 1u, out, n);
+            ph2 = 1u;
+        }
+        ST(1u, ph2); ST(2u, p2);
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     }
     __syncthreads();
-    if (tid == 0) { ST(0u, st[0]); ST(1u, st[1]); ST(2u, st[2]); ST(3u, st[3]); }
-    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(4u + i, smem[i]); }
+    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(3u + i, smem[i]); }
 }
 "#
         )
@@ -156,8 +171,6 @@ macro_rules! tma_bulk_src {
             r#"{
     __shared__ __align__(128) unsigned smem[64];
     __shared__ __align__(8) unsigned long long mbar;
-    __shared__ unsigned st_timeout;
-    __shared__ unsigned st_polls;
     unsigned tid = threadIdx.x;
     for (unsigned i = tid; i < 64u; i += blockDim.x) { smem[i] = TMA_SENTINEL; }
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -173,15 +186,12 @@ macro_rules! tma_bulk_src {
             $space,
             r#".global.mbarrier::complete_tx::bytes [%0], [%1], 256, [%2];"
             :: "r"(sm), "l"(src), "r"(mb) : "memory");
-        unsigned polls;
-        unsigned c = tma_wait(mb, 0u, &polls);
-        st_timeout = c ? 0u : 1u;
-        st_polls = polls;
+        unsigned polls = tma_wait_or_hang(mb, 0u, out, n);
+        ST(0u, polls);
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     }
     __syncthreads();
-    if (tid == 0) { ST(0u, st_timeout); ST(1u, st_polls); }
-    for (unsigned i = tid; i < 64u; i += blockDim.x) { ST(2u + i, smem[i]); }
+    for (unsigned i = tid; i < 64u; i += blockDim.x) { ST(1u + i, smem[i]); }
 }
 "#
         )
@@ -225,11 +235,10 @@ extern "C" __global__ void __launch_bounds__(128) tma_multicast(
 {
     __shared__ __align__(1024) unsigned smem[512];
     __shared__ __align__(8) unsigned long long mbar;
-    __shared__ unsigned st[4];
     unsigned tid = threadIdx.x;
     unsigned rank;
     asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
-    unsigned slot = blockIdx.x * (4u + dump_words);
+    unsigned slot = blockIdx.x * (3u + dump_words);
     for (unsigned i = tid; i < 512u; i += blockDim.x) { smem[i] = TMA_SENTINEL; }
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     __syncthreads();
@@ -250,12 +259,19 @@ extern "C" __global__ void __launch_bounds__(128) tma_multicast(
                 "[%0], [%1, {%2, %3}], [%4], %5;"
                 :: "r"(sm), "l"(map), "r"(cx), "r"(cy), "r"(mb), "h"(mask) : "memory");
         }
-        tma_wait_both(mb, expect_tx2, st);
+        unsigned p1 = tma_wait_or_hang(mb, 0u, out, n);
+        ST(slot, p1);
+        unsigned ph2 = 0u, p2 = 0u;
+        if (expect_tx2 != 0u) {
+            asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(mb), "r"(expect_tx2));
+            p2 = tma_wait_or_hang(mb, 1u, out, n);
+            ph2 = 1u;
+        }
+        ST(slot + 1u, ph2); ST(slot + 2u, p2);
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     }
     __syncthreads();
-    if (tid == 0) { ST(slot, st[0]); ST(slot + 1u, st[1]); ST(slot + 2u, st[2]); ST(slot + 3u, st[3]); }
-    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(slot + 4u + i, smem[i]); }
+    for (unsigned i = tid; i < dump_words && i < 512u; i += blockDim.x) { ST(slot + 3u + i, smem[i]); }
     asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
     asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
 }

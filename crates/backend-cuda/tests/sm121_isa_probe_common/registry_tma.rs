@@ -252,7 +252,7 @@ fn tma_probe(a: TmaArgs) -> ProbeSpec {
 
 /// AC3 の全プローブと、runtime cluster 次元の補助プローブ（`clu.rt*`）。
 pub fn tma_probes() -> Vec<ProbeSpec> {
-    let load_out = |s: &TmaSpec| mt::HDR + s.dump_words as usize;
+    let load_out = |s: &TmaSpec| mt::HDR_LOAD + s.dump_words as usize;
     let rec = Policy::RecordOnly;
     let ver = Policy::Verify;
     let raw0 = Launch::Raw { cluster: 0 };
@@ -467,7 +467,7 @@ pub fn tma_probes() -> Vec<ProbeSpec> {
             block: 128,
             grid: 1,
             cluster: 0,
-            out_words: 66,
+            out_words: mt::HDR_BULK + 64,
             make_input: in_bulk,
             check: Check::Custom(chk_bulk),
             launch: Launch::Raw { cluster },

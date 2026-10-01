@@ -859,9 +859,9 @@ use common::registry_tma::{
 use common::types::Launch;
 
 fn dump_of(spec: &TmaSpec, elems: &[Option<u32>], oob: u32) -> Vec<u32> {
-    let mut out = vec![0u32, 7, mt::PHASE2_NONE, 0];
+    let mut out = vec![7u32, 0, 0];
     out.extend(elems.iter().map(|e| e.unwrap_or(oob)));
-    assert_eq!(out.len(), mt::HDR + spec.dump_words as usize);
+    assert_eq!(out.len(), mt::HDR_LOAD + spec.dump_words as usize);
     out
 }
 
@@ -915,7 +915,7 @@ fn tma_probe_wiring_is_consistent() {
             } else if p.id == "ctl.rawmap" {
                 6
             } else {
-                (mt::HDR + spec.dump_words as usize) * p.grid as usize
+                (mt::HDR_LOAD + spec.dump_words as usize) * p.grid as usize
             };
             assert_eq!(p.out_words, want_out, "{}", p.id);
         }
@@ -962,6 +962,199 @@ fn swizzle_candidate_models_are_bijections_and_the_src_b64_model_matches_the_xor
     assert!((0..128u32).any(|w| mt::swizzle_xor_phys_word(Swz::B64, w) != w));
     assert!((0..64u32).any(|w| mt::swizzle_xor_phys_word(Swz::B32, w) != w));
     assert!((0..256u32).any(|w| mt::swizzle_xor_phys_word(Swz::B128, w) != w));
+}
+
+/// ヘッダ長の宣言（`TmaHeader`）の対象となる出力を持つ TMA カーネルか（tensor 系 load・multicast は
+/// `Load`、bulk は `Bulk`。それ以外〈store・prefetch・ctl・clu〉はヘッダを持たない）。
+fn declared_header(id: &str) -> Option<mt::TmaHeader> {
+    match id {
+        "tma.bulk_cta" | "tma.bulk_cluster" => Some(mt::TmaHeader::Bulk),
+        "tma.base_cta" | "tma.base_cluster" | "tma.coord" | "tma.oob_none" | "tma.oob_nan"
+        | "tma.oob_tx_partial" | "tma.oob_neg" | "tma.swz32" | "tma.swz64" | "tma.swz128"
+        | "tma.multicast" => Some(mt::TmaHeader::Load),
+        _ => None,
+    }
+}
+
+/// `ST(<式>, smem[i])`（smem のダンプ）の式から、ダンプの先頭オフセット（`Nu + i` の N）を取り出す。
+fn dump_base_offset(src: &str) -> Option<usize> {
+    let end = src.find(", smem[i])")?;
+    let call = &src[..end];
+    let expr = &call[call.rfind("ST(")? + 3..];
+    let expr: String = expr.chars().filter(|c| !c.is_whitespace()).collect();
+    let tail = expr.strip_suffix("+i")?;
+    let last = tail.rsplit('+').next()?;
+    last.trim_end_matches('u').parse().ok()
+}
+
+/// カーネルのヘッダ長（出力へのダンプの先頭オフセット・multicast のスロット幅）が、checker が解釈する
+/// `TmaHeader` の語数と一致する（出力を別のヘッダ長として解釈する取り違えの検出。bulk を 4 語ヘッダと
+/// みなして解釈するのと同型の誤りを防ぐ）。
+#[test]
+fn kernel_header_length_matches_the_checker_interpretation() {
+    let mut checked = 0;
+    for p in probes() {
+        let Some(h) = declared_header(p.id) else {
+            continue;
+        };
+        assert_eq!(
+            dump_base_offset(p.src),
+            Some(h.words()),
+            "{}: smem ダンプの先頭オフセットが宣言ヘッダ長 {} と不一致",
+            p.id,
+            h.words()
+        );
+        if p.id == "tma.multicast" {
+            assert!(
+                p.src
+                    .contains(&format!("blockIdx.x * ({}u + dump_words)", h.words())),
+                "{}: スロット幅がヘッダ長と不一致",
+                p.id
+            );
+        }
+        // ヘッダ語の格納数（ST(0u,…)〜ST(N-1u,…) または slot + k）が宣言と一致する。
+        let stores = if p.id == "tma.multicast" {
+            (0..h.words())
+                .filter(|k| {
+                    p.src.contains(&format!("ST(slot + {k}u,"))
+                        || (*k == 0 && p.src.contains("ST(slot, "))
+                })
+                .count()
+        } else {
+            (0..h.words())
+                .filter(|k| {
+                    p.src.contains(&format!("ST({k}u, p"))
+                        || p.src.contains(&format!("ST({k}u, ph"))
+                })
+                .count()
+        };
+        assert_eq!(
+            stores,
+            h.words(),
+            "{}: ヘッダ語の格納数が宣言ヘッダ長と不一致",
+            p.id
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 13,
+        "対象のカーネル数（load 10・multicast 1・bulk 2）"
+    );
+    // 出力語数の宣言（registry）とヘッダ・ダンプ長の整合（bulk は 1 + 64 語）。
+    let bulk = registry::probe_by_id("tma.bulk_cta").expect("bulk");
+    assert_eq!(bulk.out_words, mt::HDR_BULK + 64);
+}
+
+/// 上限付きの待ちが未完了を返した経路で転送先の smem を読まないことの静的検査（限界: ソース構造の
+/// 検査であり、実行時の挙動は保証しない）: 共通ヘルパ `tma_wait_or_hang` は smem を参照せず、
+/// `__threadfence_system()` で到達の事実を出してから上限なしの待ちに移る。カーネルは
+/// `tma_try` を直接呼ばず、smem のダンプ（`ST(…, smem[i])`）はすべて最後の待ちの呼び出しより後にある。
+#[test]
+fn bounded_waits_never_read_the_destination_smem_before_completion() {
+    let mut checked = 0;
+    for p in probes()
+        .iter()
+        .filter(|p| p.src.contains("tma_wait_or_hang("))
+    {
+        let helper_start = p
+            .src
+            .find("__device__ __forceinline__ unsigned tma_wait_or_hang(")
+            .expect("helper");
+        let helper_end = helper_start + p.src[helper_start..].find("\n}\n").expect("helper end");
+        let helper = &p.src[helper_start..helper_end];
+        assert!(
+            !helper.contains("smem"),
+            "{}: 待ちのヘルパが smem を参照している",
+            p.id
+        );
+        assert!(
+            helper.contains("__threadfence_system()") && helper.contains("TMA_LIMIT_MARK"),
+            "{}",
+            p.id
+        );
+        // 未完了のときは上限なしの待ちへ移る（ここで return しない）。
+        let hang = helper.find("while (!tma_try(").expect("hang loop");
+        assert!(
+            helper.find("return polls;").is_some_and(|r| r > hang),
+            "{}: 未完了で戻る経路がある",
+            p.id
+        );
+        let body = &p.src[helper_end..];
+        if !body.contains("tma_wait_or_hang(") {
+            continue; // ヘルパを含むだけで待ちを呼ばないカーネル（store・prefetch・ctl.rawmap）
+        }
+        assert!(
+            !body.contains("tma_try("),
+            "{}: カーネルが上限なしでない待ちを直接呼んでいる",
+            p.id
+        );
+        let last_wait = body.rfind("tma_wait_or_hang(").expect("wait");
+        // smem の参照は、宣言（`__shared__ … smem[512]`）と番兵の初期化（`smem[i] = TMA_SENTINEL`。書き込み）を除いてすべて最後の待ちの
+        // 呼び出しより後にある（`ST(…, smem[0])` のような待ち前の読みも検出する）。
+        for (pos, _) in body.match_indices("smem[") {
+            let is_decl = body[body[..pos].rfind('\n').unwrap_or(0)..pos].contains("__shared__");
+            let is_sentinel_init = body[pos..]
+                .split(';')
+                .next()
+                .is_some_and(|stmt| stmt.contains("= TMA_SENTINEL"));
+            assert!(
+                is_decl || is_sentinel_init || pos > last_wait,
+                "{}: 待ちの完了前に smem を読んでいる",
+                p.id
+            );
+        }
+        // 部分 expect_tx の第 2 待ちがある load・multicast は、第 1 待ちの結果を smem を読まずに記録する。
+        if p.id != "tma.bulk_cta" && p.id != "tma.bulk_cluster" {
+            assert!(body.contains("expect_tx2"), "{}", p.id);
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 13, "mbarrier の待ちを持つカーネル数");
+    // wait_group を使う store は、smem を読むのは TMA 自身で、カーネルは待ち（上限なし・外部 timeout）の後に
+    // 目印だけを書いて終了する。
+    let store = registry::probe_by_id("tma.store").expect("store");
+    let (wait, magic) = (
+        store.src.find("cp.async.bulk.wait_group 0"),
+        store.src.find("ST(0u, 0x57025E5Eu)"),
+    );
+    assert!(wait.zip(magic).is_some_and(|(w, m)| w < m));
+}
+
+#[test]
+fn tma_match_details_are_all_key_value_tokens() {
+    // XFER／BASE の成立の detail も k=v のみ（aggregate.py がキー集合を固定して検査する）。
+    let data = mt::global_data(64, 96);
+    let ok = dump_of(&SPEC_BASE, &mt::box_elems(&SPEC_BASE, &data, false), 0);
+    let both: Vec<u32> = ok.iter().chain(ok.iter()).copied().collect();
+    for o in [
+        mt::check_base(&SPEC_BASE, &data, &ok),
+        mt::check_multicast(&SPEC_BASE, &data, &both),
+        mt::check_prefetch(&SPEC_BASE, &[], &[mt::PREFETCH_MAGIC]),
+    ] {
+        let Outcome::Match(d) = o else {
+            panic!("Match を期待: {o:?}")
+        };
+        assert!(d.split_whitespace().all(|t| t.contains('=')), "{d}");
+    }
+}
+
+#[test]
+fn bulk_output_is_not_interpreted_as_a_four_word_load_header() {
+    // データ語が phase2・polls2 として表示されない（Codex P2/Bugbot の指摘の再発防止）。
+    let input: Vec<u32> = (0..64).map(|i| 0xB000_0000 | (i * 7 + 1)).collect();
+    let mut out = vec![5u32];
+    out.extend(&input);
+    let Outcome::Match(d) = mt::check_bulk(&input, &out) else {
+        panic!("Match を期待")
+    };
+    assert_eq!(d, "polls=5 words=64 bit_exact=true");
+    // 4 語ヘッダ前提の長さ（66 語）は長さ不一致として拒否される。
+    let mut old_layout = vec![0u32, 5];
+    old_layout.extend(&input);
+    assert!(matches!(
+        mt::check_bulk(&input, &old_layout),
+        Outcome::Mismatch { .. }
+    ));
 }
 
 /// mbarrier を使うカーネルの初期化順序（CUTLASS の `fence_barrier_init` 相当）の静的検査: `mbarrier.init`
@@ -1057,10 +1250,10 @@ fn xor_swizzle_model_matches_hand_computed_values_from_the_nvidia_definition() {
 fn src_b64_model_and_xor_model_are_indistinguishable_on_the_aligned_64b_box() {
     let data = mt::global_data(64, 96);
     let elems = mt::box_elems(&SPEC_SWZ64, &data, false);
-    let mut dump = vec![0u32, 1, mt::PHASE2_NONE, 0];
+    let mut dump = vec![1u32, 0, 0];
     dump.extend(std::iter::repeat_n(0, 128));
     for (w, e) in elems.iter().enumerate() {
-        dump[mt::HDR + mt::swizzle_src_b64_phys_word(w as u32) as usize] = e.expect("範囲内");
+        dump[mt::HDR_LOAD + mt::swizzle_src_b64_phys_word(w as u32) as usize] = e.expect("範囲内");
     }
     let c = record(mt::classify_swizzle(&SPEC_SWZ64, &data, &dump));
     assert!(c.contains("XOR_ADDR_BITS+SRC_B64_MODEL"), "{c}");
@@ -1077,7 +1270,7 @@ fn oob_fill_classes_are_deduplicated_preserving_first_seen_order() {
         .iter()
         .enumerate()
         .filter(|(_, e)| e.is_none())
-        .map(|(i, _)| mt::HDR + i)
+        .map(|(i, _)| mt::HDR_LOAD + i)
         .collect();
     let values = [0u32, 0x1234_5678, 0x7fc0_0000, 0x8000_0001];
     for (k, i) in oob_idx.iter().enumerate() {
@@ -1162,7 +1355,7 @@ fn oob_classification_records_the_fill_kind_and_counts() {
         &mt::box_elems(&SPEC_OOB_NONE, &data, false),
         0,
     );
-    bad[mt::HDR] ^= 1;
+    bad[mt::HDR_LOAD] ^= 1;
     assert!(record(mt::classify_oob(&SPEC_OOB_NONE, &data, &bad)).contains("inrange=MISMATCH"));
     // OOB が無い box は NO_OOB_ELEMENTS。
     let d = record(mt::classify_oob(
@@ -1191,7 +1384,7 @@ fn swizzle_classification_names_each_matching_candidate() {
         // XOR モデルの配置（線形の語 w が物理 phys(w) にある）。
         let mut swz_dump = linear.clone();
         for (w, e) in elems.iter().enumerate() {
-            swz_dump[mt::HDR + mt::swizzle_xor_phys_word(swz, w as u32) as usize] =
+            swz_dump[mt::HDR_LOAD + mt::swizzle_xor_phys_word(swz, w as u32) as usize] =
                 e.expect("範囲内");
         }
         let c = record(mt::classify_swizzle(spec, &data, &swz_dump));
@@ -1206,7 +1399,7 @@ fn swizzle_classification_names_each_matching_candidate() {
         );
         // どれとも一致しない配置は NONE＋ダンプ全文。
         let mut bad = swz_dump.clone();
-        bad.swap(mt::HDR, mt::HDR + 1);
+        bad.swap(mt::HDR_LOAD, mt::HDR_LOAD + 1);
         let c = record(mt::classify_swizzle(spec, &data, &bad));
         assert!(
             c.contains("class=NONE") && c.contains("dump=0x"),
@@ -1218,20 +1411,14 @@ fn swizzle_classification_names_each_matching_candidate() {
 #[test]
 fn transfer_checks_distinguish_success_from_each_failure_kind() {
     let data = mt::global_data(64, 96);
-    // base: 完走＋ビット一致 → Match。timeout 語・1 語不一致・長さ違いは Mismatch。
+    // base: ビット一致 → Match。1 語不一致・長さ違いは Mismatch（待ちの失敗はカーネルが終了せず、外部 timeout で扱う）。
     let ok = dump_of(&SPEC_BASE, &mt::box_elems(&SPEC_BASE, &data, false), 0);
     assert!(matches!(
         mt::check_base(&SPEC_BASE, &data, &ok),
         Outcome::Match(_)
     ));
-    let mut timed_out = ok.clone();
-    timed_out[0] = 1;
-    assert!(matches!(
-        mt::check_base(&SPEC_BASE, &data, &timed_out),
-        Outcome::Mismatch { .. }
-    ));
     let mut one_off = ok.clone();
-    one_off[mt::HDR + 5] ^= 1;
+    one_off[mt::HDR_LOAD + 5] ^= 1;
     assert!(matches!(
         mt::check_base(&SPEC_BASE, &data, &one_off),
         Outcome::Mismatch { count: 1, .. }
@@ -1271,7 +1458,7 @@ fn transfer_checks_distinguish_success_from_each_failure_kind() {
     ));
     // bulk・prefetch・multicast。
     let input: Vec<u32> = (0..64).map(|i| 0xB000_0000 | (i * 7 + 1)).collect();
-    let mut bulk = vec![0u32, 3];
+    let mut bulk = vec![3u32];
     bulk.extend(&input);
     assert!(matches!(mt::check_bulk(&input, &bulk), Outcome::Match(_)));
     bulk[10] ^= 1;
@@ -1293,7 +1480,7 @@ fn transfer_checks_distinguish_success_from_each_failure_kind() {
         mt::check_multicast(&SPEC_BASE, &data, &both),
         Outcome::Match(_)
     ));
-    both[slot.len() + mt::HDR + 3] ^= 1; // 2 つ目の CTA だけ不一致
+    both[slot.len() + mt::HDR_LOAD + 3] ^= 1; // 2 つ目の CTA だけ不一致
     assert!(matches!(
         mt::check_multicast(&SPEC_BASE, &data, &both),
         Outcome::Mismatch { count: 1, .. }

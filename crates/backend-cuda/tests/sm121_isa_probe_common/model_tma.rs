@@ -19,11 +19,30 @@ pub const SENTINEL: u32 = 0xFEED_FACE;
 pub const STORE_MAGIC: u32 = 0x5702_5E5E;
 /// `tma.prefetch` の完走の目印。
 pub const PREFETCH_MAGIC: u32 = 0x9E7F_3C11;
-/// tensor 系 load・multicast の出力スロットのヘッダ語数（`kernels_tma.rs` の共通レイアウト:
-/// `[状態語 1, ポーリング回数 1, 状態語 2（0=完了・1=上限・2=実施せず）, ポーリング回数 2]`）。
-pub const HDR: usize = 4;
-/// 第 2 待ちを実施しなかったことを表す状態語 2 の値。
-pub const PHASE2_NONE: u32 = 2;
+/// 出力ヘッダの種類（カーネルごとに固定。`kernels_tma.rs` の格納と registry テストが一致を検査する）。
+/// 待ちが上限に達したカーネルは転送先を読まず終了もしない（外部 timeout で打ち切り）ため、ヘッダに
+/// 「待ちの失敗」の状態は持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmaHeader {
+    /// tensor 系 load・multicast（スロットごと）: `[polls1, phase2（0=なし・1=完了）, polls2]`。
+    Load,
+    /// `tma.bulk_*`: `[polls]`。
+    Bulk,
+}
+
+impl TmaHeader {
+    pub const fn words(self) -> usize {
+        match self {
+            TmaHeader::Load => 3,
+            TmaHeader::Bulk => 1,
+        }
+    }
+}
+
+/// tensor 系 load・multicast のスロットのヘッダ語数。
+pub const HDR_LOAD: usize = TmaHeader::Load.words();
+/// bulk のヘッダ語数。
+pub const HDR_BULK: usize = TmaHeader::Bulk.words();
 /// smem の box 最大語数（`kernels_tma.rs` の `smem[512]`）。
 pub const SMEM_WORDS: u32 = 512;
 
@@ -73,7 +92,7 @@ pub struct TmaSpec {
     pub cy: i32,
     pub expect_tx: u32,
     /// 第 2 待ちで追加する expect_tx（0 = 第 2 待ちなし）。部分 `expect_tx` のあとも転送中の TMA が
-    /// smem を書き続けないよう、残りのバイトを追加して phase 1 の完了（上限付き）を確認する。
+    /// smem を書き続けないよう、残りのバイトを追加して phase 1 の完了を待つ（完了しなければ上限なしの待ちのまま外部 timeout）。
     pub expect_tx2: u32,
     pub dump_words: u32,
     /// global を起動後に読み戻して out の後ろへ連結する（store 用）。
@@ -183,21 +202,21 @@ fn hex_list(words: &[u32]) -> String {
         .join(",")
 }
 
-fn status_tokens(dump: &[u32]) -> String {
-    let st = if dump[0] == 0 { "complete" } else { "timeout" };
-    let p2 = match dump[2] {
-        0 => "complete",
-        1 => "timeout",
-        _ => "none",
-    };
-    format!(
-        "status={st} polls={} phase2={p2} polls2={}",
-        dump[1], dump[3]
-    )
+/// ヘッダの `k=v` トークン（解釈はヘッダの種類に従う。データ語を混ぜない）。
+fn header_tokens(kind: TmaHeader, out: &[u32]) -> String {
+    match kind {
+        TmaHeader::Load => format!(
+            "polls={} phase2={} polls2={}",
+            out[0],
+            if out[1] == 0 { "none" } else { "complete" },
+            out[2]
+        ),
+        TmaHeader::Bulk => format!("polls={}", out[0]),
+    }
 }
 
 fn len_mismatch(spec: &TmaSpec, got: usize) -> Option<Outcome> {
-    let want = HDR + spec.dump_words as usize;
+    let want = HDR_LOAD + spec.dump_words as usize;
     (got != want).then(|| Outcome::Mismatch {
         first: got.min(want),
         count: got.abs_diff(want).max(1),
@@ -212,7 +231,7 @@ pub fn check_base(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
         return m;
     }
     let elems = box_elems(spec, input, false);
-    let dump = &out[HDR..];
+    let dump = &out[HDR_LOAD..];
     let bad: Vec<usize> = elems
         .iter()
         .zip(dump)
@@ -220,10 +239,10 @@ pub fn check_base(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
         .filter(|(_, (e, d))| **e != Some(**d))
         .map(|(i, _)| i)
         .collect();
-    if out[0] == 0 && bad.is_empty() {
+    if bad.is_empty() {
         Outcome::Match(format!(
-            "{} box_words={} bit_exact",
-            status_tokens(out),
+            "{} box_words={} bit_exact=true",
+            header_tokens(TmaHeader::Load, out),
             elems.len()
         ))
     } else {
@@ -232,7 +251,7 @@ pub fn check_base(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
             count: bad.len().max(1),
             detail: format!(
                 "{} mismatched_words={} dump={}",
-                status_tokens(out),
+                header_tokens(TmaHeader::Load, out),
                 bad.len(),
                 hex_list(dump)
             ),
@@ -245,7 +264,7 @@ pub fn classify_coord(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[HDR..];
+    let dump = &out[HDR_LOAD..];
     let matches = |t: bool| {
         box_elems(spec, input, t)
             .iter()
@@ -269,7 +288,10 @@ pub fn classify_coord(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     } else {
         String::new()
     };
-    Outcome::Record(format!("{} class={class}{tail}", status_tokens(out)))
+    Outcome::Record(format!(
+        "{} class={class}{tail}",
+        header_tokens(TmaHeader::Load, out)
+    ))
 }
 
 fn fill_class(v: u32) -> &'static str {
@@ -289,7 +311,7 @@ pub fn classify_oob(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[HDR..];
+    let dump = &out[HDR_LOAD..];
     let elems = box_elems(spec, input, false);
     let mut in_ok = true;
     let mut oob: Vec<u32> = Vec::new();
@@ -316,7 +338,7 @@ pub fn classify_oob(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     };
     Outcome::Record(format!(
         "{} inrange={} oob_elems={} oob_fill={fill} oob_distinct={}",
-        status_tokens(out),
+        header_tokens(TmaHeader::Load, out),
         if in_ok { "MATCH" } else { "MISMATCH" },
         oob.len(),
         if distinct.is_empty() {
@@ -333,7 +355,7 @@ pub fn classify_swizzle(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[HDR..];
+    let dump = &out[HDR_LOAD..];
     let elems = box_elems(spec, input, false);
     let fits = |phys: &dyn Fn(u32) -> u32| {
         elems
@@ -362,7 +384,10 @@ pub fn classify_swizzle(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     } else {
         String::new()
     };
-    Outcome::Record(format!("{} class={class}{tail}", status_tokens(out)))
+    Outcome::Record(format!(
+        "{} class={class}{tail}",
+        header_tokens(TmaHeader::Load, out)
+    ))
 }
 
 /// `tma.store`: out[0] が完走の目印で、global の box 領域が smem の既知パターン
@@ -398,7 +423,7 @@ pub fn check_store(spec: &TmaSpec, _input: &[u32], out: &[u32]) -> Outcome {
         }
     }
     if out[0] == STORE_MAGIC && bad == 0 {
-        Outcome::Match(format!("global_words={} bit_exact", global.len()))
+        Outcome::Match(format!("global_words={} bit_exact=true", global.len()))
     } else {
         Outcome::Mismatch {
             first: first.unwrap_or(0),
@@ -411,7 +436,7 @@ pub fn check_store(spec: &TmaSpec, _input: &[u32], out: &[u32]) -> Outcome {
 /// `tma.prefetch`: 完走の目印のみ（prefetch の効果は観測できない）。
 pub fn check_prefetch(_spec: &TmaSpec, _input: &[u32], out: &[u32]) -> Outcome {
     if out.len() == 1 && out[0] == PREFETCH_MAGIC {
-        Outcome::Match("completion_magic".to_string())
+        Outcome::Match("completion_magic=true".to_string())
     } else {
         Outcome::Mismatch {
             first: 0,
@@ -421,31 +446,34 @@ pub fn check_prefetch(_spec: &TmaSpec, _input: &[u32], out: &[u32]) -> Outcome {
     }
 }
 
-/// `tma.bulk_*`: 完走し、256 バイトが入力と一致するか。out は `[状態語, 回数, smem 64 語]`。
+/// `tma.bulk_*`: 完走し（待ちが完了しなければカーネルは終了しない）、256 バイトが入力と一致するか。
+/// out は `[polls, smem 64 語]`（ヘッダ 1 語）。
 pub fn check_bulk(input: &[u32], out: &[u32]) -> Outcome {
-    if out.len() != 66 || input.len() < 64 {
+    if out.len() != HDR_BULK + 64 || input.len() < 64 {
         return Outcome::Mismatch {
             first: 0,
             count: 1,
             detail: format!("length out={} in={}", out.len(), input.len()),
         };
     }
-    let bad: Vec<usize> = (0..64).filter(|&i| out[2 + i] != input[i]).collect();
-    if out[0] == 0 && bad.is_empty() {
-        Outcome::Match(format!("{} words=64 bit_exact", status_tokens(out)))
+    let data = &out[HDR_BULK..];
+    let bad: Vec<usize> = (0..64).filter(|&i| data[i] != input[i]).collect();
+    let tokens = header_tokens(TmaHeader::Bulk, out);
+    if bad.is_empty() {
+        Outcome::Match(format!("{tokens} words=64 bit_exact=true"))
     } else {
         Outcome::Mismatch {
-            first: bad.first().copied().unwrap_or(0),
-            count: bad.len().max(1),
-            detail: format!("{} mismatched_words={}", status_tokens(out), bad.len()),
+            first: bad[0],
+            count: bad.len(),
+            detail: format!("{tokens} mismatched_words={}", bad.len()),
         }
     }
 }
 
 /// `tma.multicast`: 2 CTA がそれぞれ完走し、どちらの smem も box が仮説どおりか。out は
-/// CTA ごとのスロット（`2 + dump_words` 語）を 2 つ連結したもの。
+/// CTA ごとのスロット（`HDR_LOAD + dump_words` 語）を 2 つ連結したもの。
 pub fn check_multicast(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
-    let slot = HDR + spec.dump_words as usize;
+    let slot = HDR_LOAD + spec.dump_words as usize;
     if out.len() != 2 * slot {
         return Outcome::Mismatch {
             first: out.len().min(2 * slot),
@@ -461,16 +489,21 @@ pub fn check_multicast(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
         let s = &out[cta * slot..(cta + 1) * slot];
         let bad = elems
             .iter()
-            .zip(&s[HDR..])
+            .zip(&s[HDR_LOAD..])
             .filter(|(e, d)| **e != Some(**d))
             .count();
-        bad_total += bad + usize::from(s[0] != 0);
-        if (bad > 0 || s[0] != 0) && first.is_none() {
+        bad_total += bad;
+        if bad > 0 && first.is_none() {
             first = Some(cta * slot);
         }
+        // 全トークンを k=v にする（CTA 接頭辞を付けたキー）。
+        let prefixed: Vec<String> = header_tokens(TmaHeader::Load, s)
+            .split_whitespace()
+            .map(|t| format!("cta{cta}_{t}"))
+            .collect();
         details.push(format!(
-            "cta{cta}:{} mismatched_words={bad}",
-            status_tokens(s)
+            "{} cta{cta}_mismatched_words={bad}",
+            prefixed.join(" ")
         ));
     }
     if bad_total == 0 {
