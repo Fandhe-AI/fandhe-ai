@@ -125,14 +125,14 @@
 | `tma.bulk_cta` | R-TMA-XFER | sm_90 | verify | none | none |
 | `tma.bulk_cluster` | R-TMA-XFER | sm_90 | verify | none | none |
 
-- 共通: global は 64x96 の f32（要素値は `r * 1000 + c`）。`cuTensorMapEncodeTiled` の引数（box・swizzle・OOB fill・座標・`expect_tx`）はプローブごとに引数化したテスト側の encoder（`model_tma.rs::TmaSpec`）で与える。期待値は持たず観測値を記録し、候補モデルと一致するかで判定する。mbarrier の待ちは上限回数（1,000,000 回）と状態語を持ち、ハングさせない（状態語 timeout は記録として残る）。smem は転送前に番兵（`0xFEEDFACE`）で埋めてダンプする。
+- 共通: global は 64x96 の f32（要素値は `r * 1000 + c`）。`cuTensorMapEncodeTiled` の引数（box・swizzle・OOB fill・座標・`expect_tx`）はプローブごとに引数化したテスト側の encoder（`model_tma.rs::TmaSpec`）で与える。期待値は持たず観測値を記録し、候補モデルと一致するかで判定する。上限付きなのは mbarrier の待ち（`mbarrier.try_wait`。上限 1,000,000 回と状態語を持ち、完了しなくてもその待ちはハングしない）だけである。`cp.async.bulk.wait_group 0`（`tma.store`）と `barrier.cluster`（`tma.multicast`・`clu.dsmem`）は上限を持たず、外部 `timeout` に頼る。上限に達した場合、転送中の TMA が CTA の終了後も smem へ書き続ける可能性が残る（未定義動作になりうるため、timeout を記録した観測は慎重に扱う）。初期化は、smem 初期化の後に全スレッドが `fence.proxy.async.shared::cta`、mbarrier を init したスレッドが `fence.mbarrier_init.release.cluster` を出してから発行する（multicast は `barrier.cluster` 同期のあと。registry テストが順序を静的に検査する）。smem は転送前に番兵（`0xFEEDFACE`）で埋めてダンプする。
 - R-TMA-BASE: `tma.base_cta`（`shared::cta`）・`tma.base_cluster`（`shared::cluster`・cluster 1 で起動）。box 転送が完走し、要素座標（内側次元が先）の仮説どおりにビット一致するかを判定する。
-- R-TMA-SEM（観測の記録。判定語は「受理のみ」で、観測内容は S5 の detail に `k=v` で残す）: `tma.coord`（`class=ELEM_INNER_FIRST`／`TRANSPOSED`／`NONE`）・`tma.oob_none`／`oob_nan`／`oob_neg`（範囲内の一致・OOB 要素のビット列の種類〈ZERO／NAN／SENTINEL／OTHER〉）・`tma.oob_tx_partial`（`expect_tx` を範囲内バイト数だけにしたときの完了／timeout）・`tma.swz32`／`swz64`／`swz128`（box の内側が swizzle 幅ちょうど。無 swizzle・標準の XOR〈アドレスビット [7,7+B) を [4,4+B) へ〉・src の B64 仮説〈`tma_swizzled_chunk_a`。64B のみ〉のどれと一致するか。どれとも一致しなければダンプ全文を記録）。
+- R-TMA-SEM（観測の記録。判定語は「受理のみ」で、観測内容は S5 の detail に `k=v` で残す）: `tma.coord`（`class=ELEM_INNER_FIRST`／`TRANSPOSED`／`NONE`）・`tma.oob_none`／`oob_nan`／`oob_neg`（範囲内の一致・OOB 要素のビット列の種類〈ZERO／NAN／SENTINEL／OTHER〉）・`tma.oob_tx_partial`（`expect_tx` を範囲内バイト数 128 B だけにしたときの完了／timeout。部分完了の観測値は記録のみで判定に使わない。第 1 待ちのあと残り 384 B を `expect_tx` で追加し phase 1 の完了を上限付きで待つことで、転送中の TMA が CTA 終了後に smem を書き続けるのを確認してから終了する。`phase2=timeout` はその危険が残ったことを示す）・`tma.swz32`／`swz64`／`swz128`（box の内側が swizzle 幅ちょうど。無 swizzle・標準の XOR〈アドレスビット [7,7+B) を [4,4+B) へ〉・src の B64 仮説〈`tma_swizzled_chunk_a`。64B のみ〉のどれと一致するか。どれとも一致しなければダンプ全文を記録）。**本 box（タイル先頭 1024 B 整列・行 64 B）では src の B64 仮説と標準の XOR モデルは全語で同一になり区別できない**（区別にはタイル先頭をずらす必要があるが、swizzle 使用時の smem 整列要件のため作れない）。両者は常に同時に現れ、優劣は判定しない。観測の `k=v` キーはプローブごとに固定し、`status=timeout`・`phase2=timeout`・`class=NONE`・`inrange=MISMATCH`・OOB 要素が番兵のままのものは、判定語（受理のみ）に埋もれないよう `aggregate.md` の「R-TMA 観測」表の注意欄に明示する。
 - R-TMA-XFER（成立の判定）: `tma.store`（global の読み戻しが既知パターンと一致）・`tma.bulk_cta`／`tma.bulk_cluster`（`cp.async.bulk` の 256 B コピー）・`tma.prefetch`（`prefetch.tensormap`＋`cp.async.bulk.prefetch.tensor`。効果は観測できず完走の目印のみ）・`tma.multicast`（cluster 2・両 CTA の smem が一致）。
-- 依存（事前登録）: `tma.base_cta` が「成立」でない target では、他の `tma.*`（`tma.base_cluster` を除く）のうち「成立」「受理のみ」になるものを「判定不能（TMA_BASE_NOT_ESTABLISHED）」にする。`tma.multicast` は加えて `clu.dims2` が「成立」でない target で「判定不能（CLU_DIMS2_NOT_ESTABLISHED）」。自身が拒否・ロード失敗・実行時エラー・結果不一致のときは、その判定をそのまま採る。
+- 依存（事前登録。自身が「成立」「受理のみ」になるときに限り、依存先が同 target で「成立」でなければ判定不能にする。評価順）: ① raw 起動（`cuLaunchKernelEx`）で動く `tma.*`・`clu.rt2`／`clu.rt4`・`ctl.rawmap` は対照 `ctl.raw` に依存（`RAW_LAUNCH_CTL_FAILED`）。tensor map 引数を使う `tma.*`（`tma.bulk_*` を除く）は `ctl.rawmap` にも依存（`RAW_TENSORMAP_CTL_FAILED`）。② `tma.base_cta` が「成立」でない target では、他の `tma.*`（`tma.base_cluster` を除く）を「判定不能（`TMA_BASE_NOT_ESTABLISHED`）」にする。③ `tma.multicast` は加えて runtime cluster 起動の `clu.rt2` が「成立」でない target で「判定不能（`CLU_RT2_NOT_ESTABLISHED`）」。自身が拒否・ロード失敗・実行時エラー・結果不一致のときは、その判定をそのまま採る。
 - swizzle の候補モデルは `fandhe_ai_backend_cuda::tma_swizzled_chunk_a`（src の B64 仮説。`internal-diagnostics` feature 限定で再公開。通常ビルドの公開面は増えない）を再利用する。標準の XOR モデルとの全語一致は registry テストが検査する。
 - 補助: `clu.rt2`／`clu.rt4`（`cuLaunchKernelEx` の `CLUSTER_DIMENSION` 属性で runtime に cluster 次元を与え、`clu.dims*` と同じ出力を観測）。対照 `ctl.raw`（raw 起動経路。tensor map なし。sm_86 でも S6 まで通る）・`ctl.rawmap`（tensor map 引数の ABI〈128 B 整列の値渡し・後続引数〉。`cuTensorMapEncodeTiled` が必要で、開発機の sm_86 では encode が `CUDA_ERROR_NOT_SUPPORTED`＝S4 の実行時エラーになる）。
-- 既存の `tma_probe_real_device`（3 テスト）は 1 テストずつ別プロセスで再実行する（legacy 名は `tma_probe_real_device@<テスト関数>`）。`tma_execution_probe`（cluster 変種）↔ `tma.base_cluster`、`tma_execution_probe_cta` ↔ `tma.base_cta`（対象 target は legacy が選択した arch）を成否で突き合わせ、食い違えば「判定不能（LEGACY_CONTRADICTION）」、legacy の timeout は「判定不能（LEGACY_INCONCLUSIVE）」とする。
+- 既存の `tma_probe_real_device`（3 テスト）は 1 テストずつ別プロセスで再実行する（legacy 名は `tma_probe_real_device@<テスト関数>`）。`tma_execution_probe`（cluster 変種）↔ `tma.base_cluster`、`tma_execution_probe_cta` ↔ `tma.base_cta`（対象 target は legacy が選択した arch）を成否で突き合わせ、確定した失敗（不一致・全 arch のコンパイル失敗）と新プローブの成否が食い違えば「判定不能（LEGACY_CONTRADICTION）」、legacy の timeout・異常終了（一過性の失敗を含む）は RULE 13a と同じく「判定不能（LEGACY_INCONCLUSIVE）」とする。比較するのは legacy が先頭で受理して選択した arch だけで、その arch が正式 target（`compute_121`／`121a`／`121f`）の外なら比較を省く（`aggregate.md` の R-LEGACY 表に注記する）。
 
 ### AC5 Hopper との差分・setmaxnreg・cluster・DSMEM（R-HOPPER・R-SNR・R-CLU）
 
@@ -149,6 +149,8 @@
 | `clu.dims8` | R-CLU | sm_90 | verify | none | none |
 | `clu.dims16` | R-CLU | sm_90 | verify | none | none |
 | `clu.dsmem` | R-CLU | sm_90 | verify | none | none |
+| `clu.rt2` | R-CLU | sm_90 | verify | none | none |
+| `clu.rt4` | R-CLU | sm_90 | verify | none | none |
 
 - `wgmma.m64n8k16` は受理段のみ（S6 は設計上不実施）。`snr.*` は既存の `setmaxnreg_probe_*` 4 ファイルと同じ命令列で、既存ファイルも再実行して結論が食い違えば「判定不能（LEGACY_CONTRADICTION）」とする（R-LEGACY）。
 - cluster: `__cluster_dims__(N,1,1)`（N = 1/2/4/8/16）を safe API で起動し、`occupancy_max_active_clusters` 等を S3 の参考値として記録する。N>8 は `NON_PORTABLE_CLUSTER_SIZE_ALLOWED` を設定してから起動する。起動時に cluster 次元を与える経路は PR-B の `clu.rt2`／`clu.rt4`（raw の `cuLaunchKernelEx`）で追加した（AC3 節）。DSMEM は `%cluster_ctarank`・`mapa.shared::cluster`・`ld.shared::cluster`・`barrier.cluster` の往復で、デッドロックは外部 `timeout` が記録する。
@@ -235,6 +237,8 @@
 | `clu.dims8` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 | `clu.dims16` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 | `clu.dsmem` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `clu.rt2` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `clu.rt4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 
 ### AC3（TMA の意味論。R-TMA-*）
 
@@ -255,6 +259,8 @@
 | `tma.multicast` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 | `tma.bulk_cta` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 | `tma.bulk_cluster` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `ctl.raw`（対照・R-CTL） | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `ctl.rawmap`（対照・R-CTL） | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 
 R-TMA-SEM の観測（`aggregate.md` の「R-TMA 観測」表。候補モデルとの一致）も、実測後に転記する（現在は未実測）。
 
