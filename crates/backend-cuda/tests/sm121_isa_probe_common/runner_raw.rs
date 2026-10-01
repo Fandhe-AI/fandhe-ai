@@ -81,6 +81,21 @@ unsafe fn encode_tensor_map(
     Ok(map)
 }
 
+/// `CUmodule` の RAII ガード。`Drop` で `cuModuleUnload` を呼ぶため、S3 以降のどの早期 return でも
+/// モジュールが漏れない（以前は末尾の 1 か所でのみ unload していた）。
+struct ModuleGuard(sys::CUmodule);
+
+impl Drop for ModuleGuard {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` は `load_data` が返した有効な `CUmodule` で、このガードが唯一の所有者
+        // （他へコピー・unload しない）。ガードは `func`（`get_function` の結果）やそれを使う起動・
+        // 同期・読み戻しがすべて終わった後（宣言順の逆順 drop）で落ちる。アンロードの失敗は握りつぶす:
+        // `Drop` はエラーを返せず、測定結果（S3〜S6 の記録）には影響せず、プロセス終了時に driver が
+        // context ごと回収するため。panic もしない（二重 panic による異常終了を避ける）。
+        unsafe { cudarc::driver::result::module::unload(self.0) }.ok();
+    }
+}
+
 fn attr_or_err(f: sys::CUfunction, a: FuncAttr) -> String {
     // SAFETY: `f` は直前に `get_function` が返した有効な `CUfunction`（モジュールは未 unload）。
     match unsafe { cudarc::driver::result::function::get_function_attribute(f, a) } {
@@ -147,6 +162,8 @@ pub fn device_stages_raw(
             return;
         }
     };
+    // 以降の早期 return・正常終了のどれでもモジュールを unload する（RAII）。
+    let _module_guard = ModuleGuard(module);
     let Ok(name) = CString::new(probe.symbol) else {
         sink(Cell::new(
             Stage::S3ModuleLoad,
@@ -246,9 +263,9 @@ pub fn device_stages_raw(
                 }
             }
         }
-        let (mut cx, mut cy, mut expect_tx, mut dump_words) = spec
-            .map_or((0, 0, 0u32, 0u32), |s| {
-                (s.cx, s.cy, s.expect_tx, s.dump_words)
+        let (mut cx, mut cy, mut expect_tx, mut dump_words, mut expect_tx2) = spec
+            .map_or((0, 0, 0u32, 0u32, 0u32), |s| {
+                (s.cx, s.cy, s.expect_tx, s.dump_words, s.expect_tx2)
             });
         let mut params: Vec<*mut c_void> = match tm_holder.as_mut() {
             Some(tm) => vec![
@@ -259,6 +276,7 @@ pub fn device_stages_raw(
                 &mut cy as *mut i32 as *mut c_void,
                 &mut expect_tx as *mut u32 as *mut c_void,
                 &mut dump_words as *mut u32 as *mut c_void,
+                &mut expect_tx2 as *mut u32 as *mut c_void,
             ],
             None => vec![
                 &mut in_ptr as *mut u64 as *mut c_void,
@@ -289,7 +307,7 @@ pub fn device_stages_raw(
             numAttrs: u32::from(cluster > 0),
         };
         // SAFETY: `params` は `func` のシグネチャ（tensor 系は (CUtensorMap 値・out ptr・int n・int cx・
-        // int cy・uint expect_tx・uint dump_words)、plain は (in ptr・int n_in・out ptr・int n)）と
+        // int cy・uint expect_tx・uint dump_words・uint expect_tx2)、plain は (in ptr・int n_in・out ptr・int n)）と
         // 個数・型・順序が 1:1 対応し、各要素は引数値そのものへのポインタ（driver API の契約）で
         // 同期完了までスタックに生存する。カーネル側の全ストアは `ST` で `n` に対して境界チェック
         // 済み（REQ-8）。起動形状は registry の固定値。命令の拒否で起こる実行時エラーは
@@ -335,7 +353,5 @@ pub fn device_stages_raw(
         Ok(v)
     };
     finish_after_launch(device, probe, &input, &mut readback, sink);
-    // SAFETY: `module` はこの後どこからも参照されない（起動・同期・読み戻しは完了済み）。
-    // アンロード失敗は測定結果に影響せず、プロセス終了時に driver が回収するため握りつぶす。
-    unsafe { cudarc::driver::result::module::unload(module) }.ok();
+    // `_module_guard` が関数を抜けるときに unload する。
 }

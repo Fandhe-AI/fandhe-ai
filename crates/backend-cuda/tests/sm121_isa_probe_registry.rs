@@ -174,6 +174,20 @@ fn sources_are_ascii_without_include_and_contain_their_opcode() {
             "{}: #include を使わない契約",
             p.id
         );
+        // マクロ連結の取り違え（raw 文字列の区切りの誤り等）でソースへ Rust の記法が混入していない。
+        for bad in ["$space", "$sym", "r#\"", "\"#"] {
+            assert!(
+                !p.src.contains(bad),
+                "{}: ソースに連結の取り違え {bad:?} が混入",
+                p.id
+            );
+        }
+        assert_eq!(
+            p.src.matches('{').count(),
+            p.src.matches('}').count(),
+            "{}: 波括弧の数が合わない",
+            p.id
+        );
         assert!(
             p.src.contains(token),
             "{}: opcode トークン {token:?} がソースに無い",
@@ -845,9 +859,9 @@ use common::registry_tma::{
 use common::types::Launch;
 
 fn dump_of(spec: &TmaSpec, elems: &[Option<u32>], oob: u32) -> Vec<u32> {
-    let mut out = vec![0u32, 7];
+    let mut out = vec![0u32, 7, mt::PHASE2_NONE, 0];
     out.extend(elems.iter().map(|e| e.unwrap_or(oob)));
-    assert_eq!(out.len(), 2 + spec.dump_words as usize);
+    assert_eq!(out.len(), mt::HDR + spec.dump_words as usize);
     out
 }
 
@@ -899,9 +913,9 @@ fn tma_probe_wiring_is_consistent() {
             } else if p.id == "tma.prefetch" {
                 1
             } else if p.id == "ctl.rawmap" {
-                5
+                6
             } else {
-                (2 + spec.dump_words as usize) * p.grid as usize
+                (mt::HDR + spec.dump_words as usize) * p.grid as usize
             };
             assert_eq!(p.out_words, want_out, "{}", p.id);
         }
@@ -948,6 +962,129 @@ fn swizzle_candidate_models_are_bijections_and_the_src_b64_model_matches_the_xor
     assert!((0..128u32).any(|w| mt::swizzle_xor_phys_word(Swz::B64, w) != w));
     assert!((0..64u32).any(|w| mt::swizzle_xor_phys_word(Swz::B32, w) != w));
     assert!((0..256u32).any(|w| mt::swizzle_xor_phys_word(Swz::B128, w) != w));
+}
+
+/// mbarrier を使うカーネルの初期化順序（CUTLASS の `fence_barrier_init` 相当）の静的検査: `mbarrier.init`
+/// の後に `fence.mbarrier_init.release.cluster` があり、cluster 同期（`barrier.cluster.arrive`）はその後に
+/// 来る。smem を generic proxy で初期化するカーネルは、最初の `__syncthreads` より前に
+/// `fence.proxy.async.shared::cta` を持つ。順序の欠落（multicast で peer の mbarrier へ complete_tx が
+/// 届く前に init が見えない等）が「結果不一致」という誤ったハードウェア結論になるのを防ぐ。
+#[test]
+fn mbarrier_kernels_fence_the_init_before_any_cross_proxy_or_cross_cta_use() {
+    let mut checked = 0;
+    for p in probes()
+        .iter()
+        .filter(|p| p.kind == Kind::Kernel && p.src.contains("mbarrier.init"))
+    {
+        let init = p.src.find("mbarrier.init").expect("init");
+        let fence = p.src.find("fence.mbarrier_init.release.cluster");
+        assert!(
+            fence.is_some_and(|f| f > init),
+            "{}: init の後に fence.mbarrier_init.release.cluster が無い",
+            p.id
+        );
+        if let Some(arrive) = p.src.find("barrier.cluster.arrive") {
+            assert!(
+                fence.is_some_and(|f| f < arrive),
+                "{}: cluster 同期より前に fence が必要",
+                p.id
+            );
+        }
+        let first_sync = p.src.find("__syncthreads();").expect("sync");
+        let proxy = p.src.find("fence.proxy.async.shared::cta");
+        assert!(
+            proxy.is_some_and(|f| f < first_sync),
+            "{}: 最初の __syncthreads より前に fence.proxy.async が必要",
+            p.id
+        );
+        // 待ちは上限付きのヘルパ経由（生の無限ループを書かない）。
+        assert!(
+            !p.src.contains("while (1)") && !p.src.contains("while(1)"),
+            "{}",
+            p.id
+        );
+        checked += 1;
+    }
+    assert!(checked >= 12, "対象が少なすぎる（{checked} 件）");
+    // store は mbarrier を使わず、smem の書き込みの後に fence.proxy.async を出してから同期する。
+    let store = registry::probe_by_id("tma.store").expect("store");
+    let (fence, sync) = (
+        store.src.find("fence.proxy.async.shared::cta"),
+        store.src.find("__syncthreads();"),
+    );
+    assert!(fence.zip(sync).is_some_and(|(f, s)| f < s));
+}
+
+/// NVIDIA の swizzle 定義（物理バイトアドレスのビット [7,7+B) をビット [4,4+B) へ XOR。B は 32B=1・
+/// 64B=2・128B=3）から**手で計算した**既知の値。実装の式を写したものではない（循環の回避）。
+#[test]
+fn xor_swizzle_model_matches_hand_computed_values_from_the_nvidia_definition() {
+    // (幅, 線形バイト, 物理バイト)。語添字は 1/4。
+    let cases: [(Swz, u32, u32); 14] = [
+        // 128B（B=3）: 行 = 128 B。行 r のチャンク c(16 B) は c ^ r。
+        (Swz::B128, 0, 0),
+        (Swz::B128, 128, 144),  // 行 1 のチャンク 0 → チャンク 1
+        (Swz::B128, 896, 1008), // 行 7 のチャンク 0 → チャンク 7
+        (Swz::B128, 144, 128),  // 行 1 のチャンク 1 → チャンク 0
+        // 64B（B=2）: 行 = 64 B。ビット [7,9) は 2 行ごとに +1。
+        (Swz::B64, 64, 64),   // 行 1: ビット 7 以上が 0 → 不変
+        (Swz::B64, 128, 144), // 行 2 のチャンク 0 → チャンク 1
+        (Swz::B64, 384, 432), // 行 6 のチャンク 0 → チャンク 3（384 ^ 48）
+        (Swz::B64, 448, 496), // 行 7 のチャンク 0 → 448 ^ 48
+        // 32B（B=1）: 行 = 32 B。ビット 7 が 4 行ごとに 1 → 1 チャンク分だけずれる。
+        (Swz::B32, 32, 32),
+        (Swz::B32, 128, 144), // 行 4 のチャンク 0 → チャンク 1
+        (Swz::B32, 160, 176), // 行 5 のチャンク 0 → チャンク 1（160 ^ 16）
+        (Swz::B32, 240, 224), // 行 7 のチャンク 1（240）→ 240 ^ 16 = 224
+        (Swz::B32, 256, 256), // 行 8: ビット 7 は 0（256 = 0b1_0000_0000）→ 不変
+        (Swz::B32, 384, 400), // 行 12: ビット 7 が 1 → 384 ^ 16
+    ];
+    for (swz, linear, phys) in cases {
+        assert_eq!(
+            mt::swizzle_xor_phys_word(swz, linear / 4) * 4,
+            phys,
+            "{swz:?}: 線形 {linear} B の物理バイトは {phys} B のはず"
+        );
+    }
+}
+
+/// 本 box では src の B64 仮説（`tma_swizzled_chunk_a`。行番号のみに依存）と標準の XOR モデル
+/// （絶対アドレスのビットに依存）を区別できない: タイル先頭が 1024 B 整列で行ストライドが 64 B なら
+/// 両者は全語で同一になる。区別するにはタイル先頭を 64 B ずらす必要があるが、TMA は swizzle 使用時に
+/// smem 先頭の整列を要求するため、区別できる box は作れない。分類が `XOR_ADDR_BITS+SRC_B64_MODEL` の
+/// 両方を返すのはこのため（RULE.txt 10b・doc に明記）。
+#[test]
+fn src_b64_model_and_xor_model_are_indistinguishable_on_the_aligned_64b_box() {
+    let data = mt::global_data(64, 96);
+    let elems = mt::box_elems(&SPEC_SWZ64, &data, false);
+    let mut dump = vec![0u32, 1, mt::PHASE2_NONE, 0];
+    dump.extend(std::iter::repeat_n(0, 128));
+    for (w, e) in elems.iter().enumerate() {
+        dump[mt::HDR + mt::swizzle_src_b64_phys_word(w as u32) as usize] = e.expect("範囲内");
+    }
+    let c = record(mt::classify_swizzle(&SPEC_SWZ64, &data, &dump));
+    assert!(c.contains("XOR_ADDR_BITS+SRC_B64_MODEL"), "{c}");
+}
+
+#[test]
+fn oob_fill_classes_are_deduplicated_preserving_first_seen_order() {
+    // 値を昇順に並べると種別が ZERO, OTHER, NAN, OTHER と並び、OTHER が連続しない重複になる。
+    let spec = &SPEC_OOB_NONE;
+    let data = mt::global_data(64, 96);
+    let elems = mt::box_elems(spec, &data, false);
+    let mut dump = dump_of(spec, &elems, 0);
+    let oob_idx: Vec<usize> = elems
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.is_none())
+        .map(|(i, _)| mt::HDR + i)
+        .collect();
+    let values = [0u32, 0x1234_5678, 0x7fc0_0000, 0x8000_0001];
+    for (k, i) in oob_idx.iter().enumerate() {
+        dump[*i] = values[k % values.len()];
+    }
+    let d = record(mt::classify_oob(spec, &data, &dump));
+    assert!(d.contains("oob_fill=ZERO+OTHER+NAN "), "{d}");
 }
 
 #[test]
@@ -1025,7 +1162,7 @@ fn oob_classification_records_the_fill_kind_and_counts() {
         &mt::box_elems(&SPEC_OOB_NONE, &data, false),
         0,
     );
-    bad[2] ^= 1;
+    bad[mt::HDR] ^= 1;
     assert!(record(mt::classify_oob(&SPEC_OOB_NONE, &data, &bad)).contains("inrange=MISMATCH"));
     // OOB が無い box は NO_OOB_ELEMENTS。
     let d = record(mt::classify_oob(
@@ -1054,7 +1191,8 @@ fn swizzle_classification_names_each_matching_candidate() {
         // XOR モデルの配置（線形の語 w が物理 phys(w) にある）。
         let mut swz_dump = linear.clone();
         for (w, e) in elems.iter().enumerate() {
-            swz_dump[2 + mt::swizzle_xor_phys_word(swz, w as u32) as usize] = e.expect("範囲内");
+            swz_dump[mt::HDR + mt::swizzle_xor_phys_word(swz, w as u32) as usize] =
+                e.expect("範囲内");
         }
         let c = record(mt::classify_swizzle(spec, &data, &swz_dump));
         assert!(
@@ -1068,7 +1206,7 @@ fn swizzle_classification_names_each_matching_candidate() {
         );
         // どれとも一致しない配置は NONE＋ダンプ全文。
         let mut bad = swz_dump.clone();
-        bad.swap(2, 3);
+        bad.swap(mt::HDR, mt::HDR + 1);
         let c = record(mt::classify_swizzle(spec, &data, &bad));
         assert!(
             c.contains("class=NONE") && c.contains("dump=0x"),
@@ -1093,7 +1231,7 @@ fn transfer_checks_distinguish_success_from_each_failure_kind() {
         Outcome::Mismatch { .. }
     ));
     let mut one_off = ok.clone();
-    one_off[5] ^= 1;
+    one_off[mt::HDR + 5] ^= 1;
     assert!(matches!(
         mt::check_base(&SPEC_BASE, &data, &one_off),
         Outcome::Mismatch { count: 1, .. }
@@ -1155,7 +1293,7 @@ fn transfer_checks_distinguish_success_from_each_failure_kind() {
         mt::check_multicast(&SPEC_BASE, &data, &both),
         Outcome::Match(_)
     ));
-    both[slot.len() + 7] ^= 1; // 2 つ目の CTA だけ不一致
+    both[slot.len() + mt::HDR + 3] ^= 1; // 2 つ目の CTA だけ不一致
     assert!(matches!(
         mt::check_multicast(&SPEC_BASE, &data, &both),
         Outcome::Mismatch { count: 1, .. }

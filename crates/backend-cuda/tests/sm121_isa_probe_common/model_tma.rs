@@ -19,6 +19,11 @@ pub const SENTINEL: u32 = 0xFEED_FACE;
 pub const STORE_MAGIC: u32 = 0x5702_5E5E;
 /// `tma.prefetch` の完走の目印。
 pub const PREFETCH_MAGIC: u32 = 0x9E7F_3C11;
+/// tensor 系 load・multicast の出力スロットのヘッダ語数（`kernels_tma.rs` の共通レイアウト:
+/// `[状態語 1, ポーリング回数 1, 状態語 2（0=完了・1=上限・2=実施せず）, ポーリング回数 2]`）。
+pub const HDR: usize = 4;
+/// 第 2 待ちを実施しなかったことを表す状態語 2 の値。
+pub const PHASE2_NONE: u32 = 2;
 /// smem の box 最大語数（`kernels_tma.rs` の `smem[512]`）。
 pub const SMEM_WORDS: u32 = 512;
 
@@ -67,6 +72,9 @@ pub struct TmaSpec {
     pub cx: i32,
     pub cy: i32,
     pub expect_tx: u32,
+    /// 第 2 待ちで追加する expect_tx（0 = 第 2 待ちなし）。部分 `expect_tx` のあとも転送中の TMA が
+    /// smem を書き続けないよう、残りのバイトを追加して phase 1 の完了（上限付き）を確認する。
+    pub expect_tx2: u32,
     pub dump_words: u32,
     /// global を起動後に読み戻して out の後ろへ連結する（store 用）。
     pub readback_global: bool,
@@ -108,8 +116,8 @@ impl TmaSpec {
         if self.box_words() > SMEM_WORDS || self.dump_words > SMEM_WORDS {
             return Err("box／ダンプが smem 配列（512 語）を超える".into());
         }
-        if self.expect_tx > self.box_words() * 4 {
-            return Err("expect_tx は box 全体のバイト数以下".into());
+        if self.expect_tx + self.expect_tx2 > self.box_words() * 4 {
+            return Err("expect_tx（第 1・第 2 の合計）は box 全体のバイト数以下".into());
         }
         Ok(())
     }
@@ -177,11 +185,19 @@ fn hex_list(words: &[u32]) -> String {
 
 fn status_tokens(dump: &[u32]) -> String {
     let st = if dump[0] == 0 { "complete" } else { "timeout" };
-    format!("status={st} polls={}", dump[1])
+    let p2 = match dump[2] {
+        0 => "complete",
+        1 => "timeout",
+        _ => "none",
+    };
+    format!(
+        "status={st} polls={} phase2={p2} polls2={}",
+        dump[1], dump[3]
+    )
 }
 
 fn len_mismatch(spec: &TmaSpec, got: usize) -> Option<Outcome> {
-    let want = 2 + spec.dump_words as usize;
+    let want = HDR + spec.dump_words as usize;
     (got != want).then(|| Outcome::Mismatch {
         first: got.min(want),
         count: got.abs_diff(want).max(1),
@@ -196,7 +212,7 @@ pub fn check_base(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
         return m;
     }
     let elems = box_elems(spec, input, false);
-    let dump = &out[2..];
+    let dump = &out[HDR..];
     let bad: Vec<usize> = elems
         .iter()
         .zip(dump)
@@ -229,7 +245,7 @@ pub fn classify_coord(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[2..];
+    let dump = &out[HDR..];
     let matches = |t: bool| {
         box_elems(spec, input, t)
             .iter()
@@ -273,7 +289,7 @@ pub fn classify_oob(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[2..];
+    let dump = &out[HDR..];
     let elems = box_elems(spec, input, false);
     let mut in_ok = true;
     let mut oob: Vec<u32> = Vec::new();
@@ -286,11 +302,13 @@ pub fn classify_oob(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     let mut distinct = oob.clone();
     distinct.sort_unstable();
     distinct.dedup();
-    let classes: Vec<&str> = {
-        let mut c: Vec<&str> = distinct.iter().map(|v| fill_class(*v)).collect();
-        c.dedup();
-        c
-    };
+    // 順序を保ったまま全重複を除去する（`Vec::dedup` は連続した重複しか除かない）。
+    let mut classes: Vec<&str> = Vec::new();
+    for c in distinct.iter().map(|v| fill_class(*v)) {
+        if !classes.contains(&c) {
+            classes.push(c);
+        }
+    }
     let fill = if oob.is_empty() {
         "NO_OOB_ELEMENTS".to_string()
     } else {
@@ -315,7 +333,7 @@ pub fn classify_swizzle(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
     if let Some(m) = len_mismatch(spec, out.len()) {
         return m;
     }
-    let dump = &out[2..];
+    let dump = &out[HDR..];
     let elems = box_elems(spec, input, false);
     let fits = |phys: &dyn Fn(u32) -> u32| {
         elems
@@ -427,7 +445,7 @@ pub fn check_bulk(input: &[u32], out: &[u32]) -> Outcome {
 /// `tma.multicast`: 2 CTA がそれぞれ完走し、どちらの smem も box が仮説どおりか。out は
 /// CTA ごとのスロット（`2 + dump_words` 語）を 2 つ連結したもの。
 pub fn check_multicast(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
-    let slot = 2 + spec.dump_words as usize;
+    let slot = HDR + spec.dump_words as usize;
     if out.len() != 2 * slot {
         return Outcome::Mismatch {
             first: out.len().min(2 * slot),
@@ -443,7 +461,7 @@ pub fn check_multicast(spec: &TmaSpec, input: &[u32], out: &[u32]) -> Outcome {
         let s = &out[cta * slot..(cta + 1) * slot];
         let bad = elems
             .iter()
-            .zip(&s[2..])
+            .zip(&s[HDR..])
             .filter(|(e, d)| **e != Some(**d))
             .count();
         bad_total += bad + usize::from(s[0] != 0);
