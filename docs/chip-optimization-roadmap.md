@@ -23,7 +23,7 @@
 2. 診断のみの issue（CTA→SM 分布プローブ、TMA N=256 判別実験）。いずれも sm121 設計 doc §7 で優先度「高」
 3. Metal の `MTLCounterSampleBuffer` counter set プローブ（推定の裏取り用。m4max §9）
 4. CUDA 候補 C1（TMA Stage 2）の P-diag 実装 → ゲート A〜D → 本番結線の順（sm121 設計 doc §6・§7。優先度「中」）
-5. 縮約カーネル残り群の `WARP_SIZE` 注入（amd-readiness §6c 後続候補。優先度は出典に記載なしのため「未設定」）
+5. C3(a) cooperative fixup（優先度「中」。#2127 と security-auditor 監査が前提。§8 の 5 位と一致。縮約カーネル残り群の `WARP_SIZE` 注入は優先度「未設定」のため §8 の 7 位で、上位 5 件には含めない）
 
 ### 0.3 ROCm の推奨（決定ではない）
 
