@@ -23,7 +23,7 @@
 | 機能 | sm_121 での状態 | 出典 |
 |---|---|---|
 | `mma.sync`・`ldmatrix`・`cp.async` | 可（実装実績あり） | `cuda-tensor-core-design.md` §11.1 |
-| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機で NVRTC compile・CTA 実行・cluster 実行の 3 プローブが成立。`shared::cta` と cluster variant の両方で bit 一致。要素座標・部分 OOB・smem 配置ダンプの意味論プローブ 3 件は未実装で、その範囲の検証は未了） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
+| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機で NVRTC compile・CTA 実行・cluster 実行の 3 プローブが成立。`shared::cta` と cluster variant の両方で bit 一致。要素座標・部分 OOB・smem 配置ダンプの意味論プローブ 3 件は GB10 では未実行で、その範囲の検証は未了（#2122 PR-B で `tma.*` として実装済み・実機未実測）） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
 | wgmma・tcgen05・TMEM | 不可（静的読解。実機での再確認は #2122 待ち） | `cuda-tensor-core-design.md` §11.1 |
 | cluster（実用） | 1×1×1 のみ（静的読解。launch 可否の実機確認は #2122 待ち） | 同 §11.1 |
 | `setmaxnreg` | **未実測**（プローブ実装はあるが実機実行は未了） | 同 §13・`backend-cuda-tma-gemm-load-design.md` §2 F2 |
@@ -35,7 +35,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 
 ### 2.3 #2122 確定値の差し込み欄（未確定）
 
-| 項目 | 状態 | 依存する候補 | プローブ ID・RULE 条項（#2122 PR-A。結果は未実測） |
+| 項目 | 状態 | 依存する候補 | プローブ ID・RULE 条項（#2122 PR-A／PR-B。結果は未実測） |
 |---|---|---|---|
 | cluster サイズ >1 の launch 可否 | 未確定（#2122 待ち） | C3(b) | `clu.dims1`／`dims2`／`dims4`／`dims8`／`dims16`・R-CLU |
 | DSMEM（`mapa`／`ld.shared::cluster`）の可否 | 未確定（#2122 待ち） | C3(b) | `clu.dsmem`・R-CLU |
@@ -44,7 +44,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 | `CLOCK_RATE` 等の未実測属性 | 未確定（#2122 待ち） | bytes/cycle 換算を要する分析全般 | `attr.misc`／`attr.limits`／`attr.cluster`・R-GUIDE |
 | tcgen05／TMEM の到達可否 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `tc5.alloc`／`tc5.ld`／`tc5.cross`・R-TC5 |
 | wgmma の受理 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `wgmma.m64n8k16`（受理段のみ）・R-HOPPER |
-| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置） | 未確定（別 PR で追加予定・未実装） | C4（TMA Stage 2）ほか §3.3 | 本 PR の範囲外（プローブ・RULE 条項なし） |
+| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast） | 未確定（#2122 PR-B でプローブ追加済み。GB10 実測待ち） | C4（TMA Stage 2）ほか §3.3 | `tma.base_cta`／`tma.base_cluster`（R-TMA-BASE）・`tma.coord`／`tma.oob_none`／`tma.oob_nan`／`tma.oob_tx_partial`／`tma.oob_neg`／`tma.swz32`／`tma.swz64`／`tma.swz128`（R-TMA-SEM。観測の記録）・`tma.store`／`tma.bulk_cta`／`tma.bulk_cluster`／`tma.prefetch`／`tma.multicast`（R-TMA-XFER） |
 | arch 接尾辞（`a`／`f`）の要否 | 未確定（#2122 待ち） | 上記各候補 | 全プローブの target 別セル（`compute_121`／`compute_121a`／`compute_121f`）・`macro.arch` |
 
 

@@ -9,7 +9,7 @@ wgmma・setmaxnreg・cluster・DSMEM・デバイス属性・Hopper との差分�
 
 - 本ディレクトリには**実測結果を含まない**（GB10 実測は後続 PR で行う）。開発機（RTX 3060・sm_86）の
   スモーク結果・ログはコミットしない（G0 が不成立になり全セルが判定不能になる設計）。
-- TMA（`cp.async.bulk.tensor`）の意味論プローブは別 PR の範囲で、本ディレクトリの規則・実装にはない。
+- TMA（`cp.async.bulk.tensor`）の意味論プローブ（`tma.*`。R-TMA-BASE／R-TMA-SEM／R-TMA-XFER）と既存 `tma_probe_real_device` の再実行（legacy 3 件）は PR-B で追加した。結果は未実測。
 
 ## 構成
 

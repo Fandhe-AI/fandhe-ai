@@ -4,13 +4,13 @@
 
 - 対応イシュー #2122（親 #2121 Phase 4。「sm_121 の使える命令とアーキ固有機能のプローブ」）。本 doc は **PR-A（プローブ基盤）** の設計・使い方・結果欄を持つ。実装は `crates/backend-cuda/tests/sm121_isa_probe_*`、判定規則（実測前に固定）は `docs/perf/logs/sm121-isa-probe-2122/RULE.txt` を正とする。
 - **結果欄はすべて「未実測」**である。GB10（DGX Spark・sm_121）での実測は後続 PR の範囲で、本 doc のどの結果セルにも実測値を書いていない。開発機（RTX 3060・sm_86）のスモーク結果は G0 を不成立にし全セルを判定不能にする設計で、sm_121 の結論としては一切扱わない。
-- **AC3（`cp.async.bulk.tensor` の意味論: 要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast）は PR-B で追加予定・未実装**である。本 PR のレジストリ・RULE・aggregate に TMA のプローブ・条項はない（PR-B が `tma.*` のプローブ行と条項を足せる構造にはしてある）。
+- **AC3（`cp.async.bulk.tensor` の意味論: 要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast）は PR-B で実装した**（`tma.*` 15 件・条項 R-TMA-BASE／R-TMA-SEM／R-TMA-XFER・既存 `tma_probe_real_device` の再実行〈R-LEGACY の拡張〉・runtime で cluster 次元を与える `cuLaunchKernelEx` の raw 起動経路）。**結果はすべて未実測**で、GB10 では一度も実行していない。TMA 系のカーネルは開発機（sm_86）で S2 の ptxas 拒否・S3 のロード失敗に分類される経路まで確認しただけである。
 - 本 PR はテストとログ規則・ドキュメントのみで、本番経路・tolerance・baseline・閾値・facade 公開面・既存の `tests/tma_probe_real_device.rs`・`tests/setmaxnreg_*` は変更しない。
 
 ## 1. 背景（既存の記録との食い違い）
 
 - 既存の TMA プローブ（`tests/tma_probe_real_device.rs`）の「arch ごとのコンパイル成功」は、命令が受理されたことをほぼ示さない。`compile_ptx(src, "compute_121")` は NVRTC が PTX テキストを出すだけで、inline PTX の中身を ptxas が検証するのは `cuModuleLoadData`（ドライバ JIT）の時点だからである。結論は実行段の成功から出ている。本基盤は「NVRTC の受理」と「ptxas の受理」を別の段として記録する。
-- `docs/backend-cuda-tma-gemm-load-design.md` §10.8 は「意味論プローブ 3 件 ✓」と書くが、§10.4 の定義（要素座標・部分 OOB・swizzle の smem 配置ダンプ）の 3 件は未実装である（同 §10.8 末尾に訂正の追記を置いた。`cuda-sm121-gemm-candidates-design.md` §2.1 の記述が正しい）。
+- `docs/backend-cuda-tma-gemm-load-design.md` §10.8 は「意味論プローブ 3 件 ✓」と書くが、§10.4 の定義（要素座標・部分 OOB・swizzle の smem 配置ダンプ）の 3 件は PR-A 時点で未実装だった（PR-B で `tma.coord`・`tma.oob_*`・`tma.swz64` として実装済み・実機未実測。同 §10.8 末尾に訂正の追記を置いた。`cuda-sm121-gemm-candidates-design.md` §2.1 の記述が正しい）。
 - 参照ガイド（`.claude/skills/nvidia-cuda/references/blackwell-tuning/streaming-multiprocessor.md`）の値は **CC 12.0**（warps/SM 48・smem 128 KB/SM・99 KB/block・portable cluster 8）で、GB10 は CC 12.1 である。12.0 の記述を 12.1 へ外挿して比較する（R-GUIDE）。スキル本体は編集しない。
 - INT8/FP8 の実行・数値は別承認の `docs/int8-quant-grade-up-verification-plan.md`（§3・§8）の別プローブに委ねる。本基盤は受理段（S1〜S3）だけを記録する。
 
@@ -105,6 +105,35 @@
 - 入力は f16／bf16／tf32 で正確に表せる小さな整数で、f32 累積でも結果が正確なためビット一致で判定する（tolerance は新設・変更しない）。`layout=verified` は開発機（sm_86）の実機で参照モデルを検証済み（検証記録: PR-A〈#2122 の最初の PR〉本文の実行記録〈検証コマンドと出力要約〉。生ログはコミットしない。再現手順は §6.2）。`layout=unverified`（`stmatrix`・packed `f32x2`）は開発機で実行できず、不一致は「判定不能（LAYOUT_UNVERIFIED）」とする。
 - accept_only: `m8n8k4 .f16`（quad-pair のレイアウトを誤りなく記述する根拠が手元にない）・f64 `m16n8k4/k8/k16`・INT8/FP8（`s8`・`e4m3`・`e5m2`・`kind::f8f6f4`）・`block_scale`・`redux.sync` の f32 版。wmma の C++ API（`mma.h`）は含めない。
 
+### AC3 `cp.async.bulk.tensor`（R-TMA-BASE・R-TMA-SEM・R-TMA-XFER。PR-B）
+
+| プローブ | 条項 | home | policy | layout | expect |
+|---|---|---|---|---|---|
+| `tma.base_cta` | R-TMA-BASE | sm_90 | verify | none | none |
+| `tma.base_cluster` | R-TMA-BASE | sm_90 | verify | none | none |
+| `tma.coord` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.oob_none` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.oob_nan` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.oob_tx_partial` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.oob_neg` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.swz32` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.swz64` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.swz128` | R-TMA-SEM | sm_90 | record_only | none | none |
+| `tma.store` | R-TMA-XFER | sm_90 | verify | none | none |
+| `tma.prefetch` | R-TMA-XFER | sm_90 | verify | none | none |
+| `tma.multicast` | R-TMA-XFER | sm_90 | verify | none | none |
+| `tma.bulk_cta` | R-TMA-XFER | sm_90 | verify | none | none |
+| `tma.bulk_cluster` | R-TMA-XFER | sm_90 | verify | none | none |
+
+- 共通: global は 64x96 の f32（要素値は `r * 1000 + c`）。`cuTensorMapEncodeTiled` の引数（box・swizzle・OOB fill・座標・`expect_tx`）はプローブごとに引数化したテスト側の encoder（`model_tma.rs::TmaSpec`）で与える。期待値は持たず観測値を記録し、候補モデルと一致するかで判定する。mbarrier の待ちは上限回数（1,000,000 回）と状態語を持ち、ハングさせない（状態語 timeout は記録として残る）。smem は転送前に番兵（`0xFEEDFACE`）で埋めてダンプする。
+- R-TMA-BASE: `tma.base_cta`（`shared::cta`）・`tma.base_cluster`（`shared::cluster`・cluster 1 で起動）。box 転送が完走し、要素座標（内側次元が先）の仮説どおりにビット一致するかを判定する。
+- R-TMA-SEM（観測の記録。判定語は「受理のみ」で、観測内容は S5 の detail に `k=v` で残す）: `tma.coord`（`class=ELEM_INNER_FIRST`／`TRANSPOSED`／`NONE`）・`tma.oob_none`／`oob_nan`／`oob_neg`（範囲内の一致・OOB 要素のビット列の種類〈ZERO／NAN／SENTINEL／OTHER〉）・`tma.oob_tx_partial`（`expect_tx` を範囲内バイト数だけにしたときの完了／timeout）・`tma.swz32`／`swz64`／`swz128`（box の内側が swizzle 幅ちょうど。無 swizzle・標準の XOR〈アドレスビット [7,7+B) を [4,4+B) へ〉・src の B64 仮説〈`tma_swizzled_chunk_a`。64B のみ〉のどれと一致するか。どれとも一致しなければダンプ全文を記録）。
+- R-TMA-XFER（成立の判定）: `tma.store`（global の読み戻しが既知パターンと一致）・`tma.bulk_cta`／`tma.bulk_cluster`（`cp.async.bulk` の 256 B コピー）・`tma.prefetch`（`prefetch.tensormap`＋`cp.async.bulk.prefetch.tensor`。効果は観測できず完走の目印のみ）・`tma.multicast`（cluster 2・両 CTA の smem が一致）。
+- 依存（事前登録）: `tma.base_cta` が「成立」でない target では、他の `tma.*`（`tma.base_cluster` を除く）のうち「成立」「受理のみ」になるものを「判定不能（TMA_BASE_NOT_ESTABLISHED）」にする。`tma.multicast` は加えて `clu.dims2` が「成立」でない target で「判定不能（CLU_DIMS2_NOT_ESTABLISHED）」。自身が拒否・ロード失敗・実行時エラー・結果不一致のときは、その判定をそのまま採る。
+- swizzle の候補モデルは `fandhe_ai_backend_cuda::tma_swizzled_chunk_a`（src の B64 仮説。`internal-diagnostics` feature 限定で再公開。通常ビルドの公開面は増えない）を再利用する。標準の XOR モデルとの全語一致は registry テストが検査する。
+- 補助: `clu.rt2`／`clu.rt4`（`cuLaunchKernelEx` の `CLUSTER_DIMENSION` 属性で runtime に cluster 次元を与え、`clu.dims*` と同じ出力を観測）。対照 `ctl.raw`（raw 起動経路。tensor map なし。sm_86 でも S6 まで通る）・`ctl.rawmap`（tensor map 引数の ABI〈128 B 整列の値渡し・後続引数〉。`cuTensorMapEncodeTiled` が必要で、開発機の sm_86 では encode が `CUDA_ERROR_NOT_SUPPORTED`＝S4 の実行時エラーになる）。
+- 既存の `tma_probe_real_device`（3 テスト）は 1 テストずつ別プロセスで再実行する（legacy 名は `tma_probe_real_device@<テスト関数>`）。`tma_execution_probe`（cluster 変種）↔ `tma.base_cluster`、`tma_execution_probe_cta` ↔ `tma.base_cta`（対象 target は legacy が選択した arch）を成否で突き合わせ、食い違えば「判定不能（LEGACY_CONTRADICTION）」、legacy の timeout は「判定不能（LEGACY_INCONCLUSIVE）」とする。
+
 ### AC5 Hopper との差分・setmaxnreg・cluster・DSMEM（R-HOPPER・R-SNR・R-CLU）
 
 | プローブ | 条項 | home | policy | layout | expect |
@@ -122,7 +151,7 @@
 | `clu.dsmem` | R-CLU | sm_90 | verify | none | none |
 
 - `wgmma.m64n8k16` は受理段のみ（S6 は設計上不実施）。`snr.*` は既存の `setmaxnreg_probe_*` 4 ファイルと同じ命令列で、既存ファイルも再実行して結論が食い違えば「判定不能（LEGACY_CONTRADICTION）」とする（R-LEGACY）。
-- cluster: `__cluster_dims__(N,1,1)`（N = 1/2/4/8/16）を safe API で起動し、`occupancy_max_active_clusters` 等を S3 の参考値として記録する。N>8 は `NON_PORTABLE_CLUSTER_SIZE_ALLOWED` を設定してから起動する。起動時に cluster 次元を与える `cuLaunchKernelEx` 経路は本 PR に含めない（TMA プローブと同時に追加する）。DSMEM は `%cluster_ctarank`・`mapa.shared::cluster`・`ld.shared::cluster`・`barrier.cluster` の往復で、デッドロックは外部 `timeout` が記録する。
+- cluster: `__cluster_dims__(N,1,1)`（N = 1/2/4/8/16）を safe API で起動し、`occupancy_max_active_clusters` 等を S3 の参考値として記録する。N>8 は `NON_PORTABLE_CLUSTER_SIZE_ALLOWED` を設定してから起動する。起動時に cluster 次元を与える経路は PR-B の `clu.rt2`／`clu.rt4`（raw の `cuLaunchKernelEx`）で追加した（AC3 節）。DSMEM は `%cluster_ctarank`・`mapa.shared::cluster`・`ld.shared::cluster`・`barrier.cluster` の往復で、デッドロックは外部 `timeout` が記録する。
 - Hopper 列は GB10 上の NVRTC（ptxas）による `sm_90a` 受理の実測であり、Hopper 実機での実行は未検証。PTX ISA 9.0 の節番号は、確認できているもの（warp-level MMA は 9.7.15・非同期 warpgroup MMA は 9.7.16・第 5 世代 Tensor Core は 9.7.17。出典: `.claude/skills/nvidia-cuda/references/ptx-isa/instructions-matrix-multiply.md`。ただし同ファイルは PTX ISA 9.3 の章番号）以外を「要確認」とする。
 
 ## 5. 結果表（すべて「未実測」。GB10 実測後の PR で結果セルだけを更新する）
@@ -207,9 +236,27 @@
 | `clu.dims16` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 | `clu.dsmem` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 
-### AC3（TMA の意味論）
+### AC3（TMA の意味論。R-TMA-*）
 
-PR-B で追加予定・未実装。結果欄なし。
+| プローブ | compute_121 | compute_121a | compute_121f | home（本来の対応アーキ）S2 | Hopper（sm_90a）S2 |
+|---|---|---|---|---|---|
+| `tma.base_cta` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.base_cluster` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.coord` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.oob_none` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.oob_nan` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.oob_tx_partial` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.oob_neg` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.swz32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.swz64` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.swz128` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.store` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.prefetch` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.multicast` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.bulk_cta` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.bulk_cluster` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+
+R-TMA-SEM の観測（`aggregate.md` の「R-TMA 観測」表。候補モデルとの一致）も、実測後に転記する（現在は未実測）。
 
 ## 6. 実行手順
 
@@ -253,7 +300,7 @@ GB10 実測後の PR で、次のセルだけを更新する（RULE.txt は変�
 
 1. `cuda-sm121-gemm-candidates-design.md` §2.3 の各行の「状態」を、対応するプローブ ID・条項（同表の列）の判定に更新する。§2.1 の wgmma・tcgen05・cluster・`setmaxnreg` の行、§1-1 の条件文への注記、§4・§7 の「#2122 次第」の行も同様。
 2. `cuda-tensor-core-design.md` §11.1・§13 の空欄・「未了」を、判定（および `snr.*` と既存 `setmaxnreg_probe_*` の整合）で更新する。
-3. `backend-cuda-tma-gemm-load-design.md` §10.8 の訂正追記はそのまま残す（TMA の意味論は PR-B）。
+3. `backend-cuda-tma-gemm-load-design.md` §10.8 の訂正追記はそのまま残し、TMA の意味論プローブ（`tma.*`）の判定・観測を追記する。
 4. `perf/sm121-device-attributes.md` の「未実測」欄を `attr.*` の記録（`aggregate.md` の R-GUIDE 表と `exec/attr.*@*.log`）で埋める。
 5. 本 doc の §5 の結果セルを更新する。
 
