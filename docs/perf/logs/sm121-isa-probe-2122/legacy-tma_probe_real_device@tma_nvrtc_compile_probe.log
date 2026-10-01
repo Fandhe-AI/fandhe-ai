@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/tma_probe_real_device.rs (<home>/work/target-fandhe-ai/debug/deps/tma_probe_real_device-6fcc8f1698ade31f)
+
+running 1 test
+environment: name="NVIDIA GB10" compute_capability=(12, 1) arch="compute_121"
+tma_compile_probe variant=cluster arch=compute_121 result=success
+tma_compile_probe variant=cluster arch=compute_121a result=success
+tma_compile_probe variant=cluster arch=compute_121f result=success
+tma_compile_probe variant=cta arch=compute_121 result=success
+tma_compile_probe variant=cta arch=compute_121a result=success
+tma_compile_probe variant=cta arch=compute_121f result=success
+test tma_nvrtc_compile_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.34s
+
+SM121_PROBE_PROC {"v":1,"kind":"proc","phase":"legacy","probe":"tma_probe_real_device@tma_nvrtc_compile_probe","target":"-","exit":0}

@@ -30,7 +30,7 @@ DeepGEMM（`csrc/jit_kernels/heuristics/sm90.hpp`）が持つ SMEM 予算・L1/L
 
 `docs/real-hardware-verification-env.md` の手順（`.rev-stamp` → rsync → SSH 実行 →
 `cargo run -p fandhe-ai-backend-cuda --example device_attributes_dump --release` → 出力回収）に従って実機実行し、
-残る「未実測」欄を埋めること。
+残る「未実測」欄を埋めること。**（2026-10-01 追記: 残欄は #2122 の GB10 実測で充足した。下の実測表の追記を参照）**
 
 ### 動作検証（sm_121 ではない代替 CUDA GPU 上での機能確認。参考値・DGX Spark GB10 の代替ではない）
 
@@ -74,32 +74,34 @@ global: n=67108864 median_secs=0.001656 bandwidth=324.26 GB/s bytes_per_cycle=18
 l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_secs=0.000006 bandwidth=190.42 GB/s bytes_per_cycle=106.2608
 ```
 
-## デバイス属性実測表（2026-08-19・GB10 実機・commit `cbc16e7`。部分実測。出典: イシュー #739）
+## デバイス属性実測表（2026-08-19・GB10 実機・commit `cbc16e7`。部分実測。出典: イシュー #739。残欄は 2026-10-01 に #2122 で充足）
 
 | 属性名（`CUdevice_attribute`） | 実測値（生値） | 単位換算値 |
 |---|---|---|
 | `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN` | 101376 | bytes |
-| `MAX_SHARED_MEMORY_PER_BLOCK` | 未実測 | bytes |
+| `MAX_SHARED_MEMORY_PER_BLOCK` | 49152（#2122・2026-10-01） | bytes |
 | `MAX_SHARED_MEMORY_PER_MULTIPROCESSOR` | 102400 | bytes |
-| `RESERVED_SHARED_MEMORY_PER_BLOCK` | 未実測 | bytes |
+| `RESERVED_SHARED_MEMORY_PER_BLOCK` | 1024（#2122・2026-10-01） | bytes |
 | `MULTIPROCESSOR_COUNT`（SM 数） | 48 | 個 |
 | `MAX_REGISTERS_PER_MULTIPROCESSOR` | 65536 | 32bit レジスタ数 |
-| `MAX_REGISTERS_PER_BLOCK` | 未実測 | 32bit レジスタ数 |
+| `MAX_REGISTERS_PER_BLOCK` | 65536（#2122・2026-10-01） | 32bit レジスタ数 |
 | `L2_CACHE_SIZE` | 25165824 | bytes |
-| `CLOCK_RATE` | 未実測 | kHz |
-| `MEMORY_CLOCK_RATE` | 未実測 | kHz |
-| `GLOBAL_MEMORY_BUS_WIDTH` | 未実測 | bit |
-| `MAX_THREADS_PER_MULTIPROCESSOR` | 未実測 | スレッド数 |
-| `MAX_THREADS_PER_BLOCK` | 未実測 | スレッド数 |
-| デバイス名 | 未実測 | — |
-| compute capability | 未実測 | (major, minor) |
-| 総メモリ容量 | 未実測 | bytes |
+| `CLOCK_RATE` | 2418000（#2122・2026-10-01） | kHz |
+| `MEMORY_CLOCK_RATE` | 8533000（#2122・2026-10-01） | kHz |
+| `GLOBAL_MEMORY_BUS_WIDTH` | 256（#2122・2026-10-01） | bit |
+| `MAX_THREADS_PER_MULTIPROCESSOR` | 1536（#2122・2026-10-01） | スレッド数 |
+| `MAX_THREADS_PER_BLOCK` | 1024（#2122・2026-10-01） | スレッド数 |
+| デバイス名 | NVIDIA GB10（#2122・2026-10-01） | — |
+| compute capability | (12, 1)（#2122・2026-10-01） | (major, minor) |
+| 総メモリ容量 | 130663235584（#2122・2026-10-01） | bytes（121.69 GiB。unified memory） |
 
-> **追記（イシュー #2122）**: 下記「未実測」の行（`MAX_SHARED_MEMORY_PER_BLOCK`・`RESERVED_SHARED_MEMORY_PER_BLOCK`・`MAX_REGISTERS_PER_BLOCK`・`CLOCK_RATE` 等）は、#2122 のプローブ基盤（`docs/cuda-sm121-isa-probe.md`）の `attr.limits`／`attr.cluster`／`attr.misc` で GB10 実測時に回収する予定である。**回収は未実施で、本表の値は変更していない**（`CLUSTER_LAUNCH` など本表にない属性も同プローブが記録する）。
+> **追記（イシュー #2122）**: 下記「未実測」の行（`MAX_SHARED_MEMORY_PER_BLOCK`・`RESERVED_SHARED_MEMORY_PER_BLOCK`・`MAX_REGISTERS_PER_BLOCK`・`CLOCK_RATE` 等）は、#2122 のプローブ基盤（`docs/cuda-sm121-isa-probe.md`）の `attr.limits`／`attr.cluster`／`attr.misc` で GB10 実測時に回収する予定である。PR-A・PR-B の時点では回収は未実施だった。
+
+> **追記（イシュー #2122 GB10 実測・2026-10-01）**: 上表で「（#2122・2026-10-01）」を付けた値は、#2122 の正式実行 1 系列（転送元 `7b6019ae`・ドライバ 580.173.02・NVRTC 13.0。`aggregate.py` exit 0）で回収した。出典は `docs/perf/logs/sm121-isa-probe-2122/exec/attr.limits@compute_121.log`・`exec/attr.misc@compute_121.log`（`attr.*` は 3 target〈`compute_121`／`121a`／`121f`〉で同値・判定はいずれも「成立」）と `docs/perf/logs/sm121-isa-probe-2122/device_attributes_dump.log`（`MAX_THREADS_PER_BLOCK`・デバイス名・compute capability・総メモリ容量は dump のみが記録）。#739 で実測済みの 5 属性（`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN` 101376・`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR` 102400・`MULTIPROCESSOR_COUNT` 48・`MAX_REGISTERS_PER_MULTIPROCESSOR` 65536・`L2_CACHE_SIZE` 25165824）は本系列でも同値。`MAX_SHARED_MEMORY_PER_BLOCK`（49152）は `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（101376）以下で、下の C-8 注記の確認条件を満たす。本表にない属性の記録値（同 `attr.*` の detail）: `max_blocks_per_multiprocessor=24`・`warp_size=32`・`cluster_launch=1`・`unified_addressing=1`・`managed_memory=1`・`concurrent_managed_access=1`・`pageable_memory_access=1`・`pageable_memory_access_uses_host_page_tables=1`・`direct_managed_mem_access_from_host=0`・`integrated=1`・`host_native_atomic_supported=1`。参照ガイド（CC 12.0）との突き合わせ（`max_blocks_per_multiprocessor` 24 と `max_shared_memory_per_multiprocessor` 102400 は「不一致」）は `docs/cuda-sm121-isa-probe.md` §5（AC2）。
 
 上記「未実測」の行は #739 実測作業では転記元（イシュー #739・#736・#740〜#743 本文）に個別値の記載が
 無いため未実測のまま残す（推定値を書かない）。実機での `device_attributes_dump` 出力全文の回収により
-充足する。
+充足する（2026-10-01 に #2122 の `attr.*`・`device_attributes_dump.log` で充足済み。上の追記）。
 
 **`MULTIPROCESSOR_COUNT`（SM 数）48 の再確認（2026-08-20・イシュー #777）**: 上表の SM 数実測値 48 は、
 2026-08-20 の GB10 実機再計測（main `0bca711` 時点）でベンチ起動診断からも再確認された。
@@ -130,8 +132,8 @@ cuda-gemm-swizzle-ab.md` §6.2 参照）**。本番経路（`gemm_auto`・`swizz
 
 | 区分 | バッファサイズ | 実効帯域（中央値） | bytes/cycle（device-wide） | 備考 |
 |---|---|---|---|---|
-| global（L2 超） | n=67108864（256 MiB/バッファ） | 212.34 GB/s | 未実測（`CLOCK_RATE` 未実測のため算出せず） | L2 非依存の参照帯域。出典: イシュー #739（`device_attributes_dump` 実行値）。`bytes_per_cycle_device_wide` は `CLOCK_RATE` が未実測のため未算出（推定計算をしない） |
-| L2（L2 未満） | `L2_CACHE_SIZE/16` 要素（`device_attributes_dump.rs` の算出式 `l2_bytes / 4 / size_of::<f32>()`） | 1237.62 GB/s | 未実測（同上） | src+dst 合計が L2 に収まる設定。出典: イシュー #739 |
+| global（L2 超） | n=67108864（256 MiB/バッファ） | 212.34 GB/s | #739 時点は未算出（`CLOCK_RATE` 未実測のため）。本系列（#2122・2026-10-01）の dump では 87.2721（同系列の帯域 211.02 GB/s を `CLOCK_RATE`＝2418000 kHz で dump が換算した参考値。左欄の 212.34 GB/s とは別系列） | L2 非依存の参照帯域。出典: イシュー #739（`device_attributes_dump` 実行値）。`bytes_per_cycle_device_wide` は #739 時点では `CLOCK_RATE` が未実測のため未算出（推定計算をしない） |
+| L2（L2 未満） | `L2_CACHE_SIZE/16` 要素（`device_attributes_dump.rs` の算出式 `l2_bytes / 4 / size_of::<f32>()`） | 1237.62 GB/s | #739 時点は未算出（同上）。本系列（#2122・2026-10-01）の dump では 557.9032（同系列の帯域 1349.01 GB/s から dump が換算した参考値。左欄とは別系列） | src+dst 合計が L2 に収まる設定。出典: イシュー #739 |
 | L1（SM あたり） | — | スペック値＋出典を記録（下記参照） | — （per-SM。上 2 行とは基準が異なる） | 本バイナリでは未実装（下記「限界」参照） |
 
 **転記前チェックの合否（2026-08-19 実測）**: 上記「転記前チェック」の条件（`l2` の実効帯域が `global`
@@ -194,7 +196,7 @@ DeepGEMM Hopper（SM90）定数と sm_121 実測値の対比表。**後続タス
 CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)` で**実行時に**取得した値を（静的
 `__shared__` 構成の per-block 上限 49,152 バイトでクランプしたうえで）渡す方式を採る。ただし
 `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`（非 OPTIN・静的 `__shared__` の既定上限）自体は
-上表のとおり本ドキュメントでは依然「未実測」であり、`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（動的確保
+上表のとおり本ドキュメントでは依然「未実測」であり（**2026-10-01 追記: #2122 の GB10 実測で 49152 bytes と確定し、OPTIN の 101376 bytes 以下であることを確認済み**）、`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（動的確保
 opt-in 時の上限。両者は異なる属性で非 OPTIN の方が通常小さい）とは別物のため両者を混同しないこと。
 実機で `MAX_SHARED_MEMORY_PER_BLOCK` を実測記入する際は、実機上の取得値が上表の
 `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（101376 bytes）以下であることを確認すること（超過は属性クエリ側
@@ -247,4 +249,4 @@ opt-in 時の上限。両者は異なる属性で非 OPTIN の方が通常小さ
   `RESERVED_SHARED_MEMORY_PER_BLOCK`・`MAX_REGISTERS_PER_BLOCK`・`CLOCK_RATE`・`MEMORY_CLOCK_RATE`・
   `GLOBAL_MEMORY_BUS_WIDTH`・`MAX_THREADS_PER_MULTIPROCESSOR`・`MAX_THREADS_PER_BLOCK`・デバイス名・
   compute capability・総メモリ容量（上表「未実測」欄）は `device_attributes_dump` 出力全文の回収により
-  充足する残課題。
+  充足する残課題（**2026-10-01 に #2122 で充足済み**。`volatile` あり／なしの比較・複数バッファサイズの追試は引き続き未実施）。

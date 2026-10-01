@@ -3,14 +3,14 @@
 ## 0. 位置づけ・スコープ
 
 - 対応イシュー #2122（親 #2121 Phase 4。「sm_121 の使える命令とアーキ固有機能のプローブ」）。本 doc は **PR-A（プローブ基盤）** の設計・使い方・結果欄を持つ。実装は `crates/backend-cuda/tests/sm121_isa_probe_*`、判定規則（実測前に固定）は `docs/perf/logs/sm121-isa-probe-2122/RULE.txt` を正とする。
-- **結果欄はすべて「未実測」**である。GB10（DGX Spark・sm_121）での実測は後続 PR の範囲で、本 doc のどの結果セルにも実測値を書いていない。開発機（RTX 3060・sm_86）のスモーク結果は G0 を不成立にし全セルを判定不能にする設計で、sm_121 の結論としては一切扱わない。
-- **AC3（`cp.async.bulk.tensor` の意味論: 要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast）は PR-B で実装した**（`tma.*` 15 件・条項 R-TMA-BASE／R-TMA-SEM／R-TMA-XFER・既存 `tma_probe_real_device` の再実行〈R-LEGACY の拡張〉・runtime で cluster 次元を与える `cuLaunchKernelEx` の raw 起動経路）。**結果はすべて未実測**で、GB10 では一度も実行していない。TMA 系のカーネルは開発機（sm_86）で S2 の ptxas 拒否・S3 のロード失敗に分類される経路まで確認しただけである。
+- **GB10 実測済み（PR-C・2026-10-01）**: §5 の結果セルは GB10（DGX Spark・sm_121）での正式実行 1 系列（転送元 `7b6019ae`・`aggregate.py` exit 0・G0 成立）の `aggregate.md` から転記した。PR-A・PR-B の時点では結果欄はすべて「未実測」だった（以下の PR-A・PR-B の説明はその時点の記述）。開発機（RTX 3060・sm_86）のスモーク結果は G0 を不成立にし全セルを判定不能にする設計で、sm_121 の結論としては一切扱わない。
+- **AC3（`cp.async.bulk.tensor` の意味論: 要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast）は PR-B で実装した**（`tma.*` 15 件・条項 R-TMA-BASE／R-TMA-SEM／R-TMA-XFER・既存 `tma_probe_real_device` の再実行〈R-LEGACY の拡張〉・runtime で cluster 次元を与える `cuLaunchKernelEx` の raw 起動経路）。PR-B の時点では結果はすべて未実測で、TMA 系のカーネルは開発機（sm_86）で S2 の ptxas 拒否・S3 のロード失敗に分類される経路まで確認しただけだった。GB10 の実測結果は §5（AC3 表・R-TMA 観測）を参照。
 - 本 PR はテストとログ規則・ドキュメントのみで、本番経路・tolerance・baseline・閾値・facade 公開面・既存の `tests/tma_probe_real_device.rs`・`tests/setmaxnreg_*` は変更しない。
 
 ## 1. 背景（既存の記録との食い違い）
 
 - 既存の TMA プローブ（`tests/tma_probe_real_device.rs`）の「arch ごとのコンパイル成功」は、命令が受理されたことをほぼ示さない。`compile_ptx(src, "compute_121")` は NVRTC が PTX テキストを出すだけで、inline PTX の中身を ptxas が検証するのは `cuModuleLoadData`（ドライバ JIT）の時点だからである。結論は実行段の成功から出ている。本基盤は「NVRTC の受理」と「ptxas の受理」を別の段として記録する。
-- `docs/backend-cuda-tma-gemm-load-design.md` §10.8 は「意味論プローブ 3 件 ✓」と書くが、§10.4 の定義（要素座標・部分 OOB・swizzle の smem 配置ダンプ）の 3 件は PR-A 時点で未実装だった（PR-B で `tma.coord`・`tma.oob_*`・`tma.swz64` として実装済み・実機未実測。同 §10.8 末尾に訂正の追記を置いた。`cuda-sm121-gemm-candidates-design.md` §2.1 の記述が正しい）。
+- `docs/backend-cuda-tma-gemm-load-design.md` §10.8 は「意味論プローブ 3 件 ✓」と書くが、§10.4 の定義（要素座標・部分 OOB・swizzle の smem 配置ダンプ）の 3 件は PR-A 時点で未実装だった（PR-B で `tma.coord`・`tma.oob_*`・`tma.swz64` として実装し、GB10 で実測済み〈§5 AC3〉。同 §10.8 末尾に訂正の追記を置いた。`cuda-sm121-gemm-candidates-design.md` §2.1 の記述が正しい）。
 - 参照ガイド（`.claude/skills/nvidia-cuda/references/blackwell-tuning/streaming-multiprocessor.md`）の値は **CC 12.0**（warps/SM 48・smem 128 KB/SM・99 KB/block・portable cluster 8）で、GB10 は CC 12.1 である。12.0 の記述を 12.1 へ外挿して比較する（R-GUIDE）。スキル本体は編集しない。
 - INT8/FP8 の実行・数値は別承認の `docs/int8-quant-grade-up-verification-plan.md`（§3・§8）の別プローブに委ねる。本基盤は受理段（S1〜S3）だけを記録する。
 
@@ -155,112 +155,141 @@
 - cluster: `__cluster_dims__(N,1,1)`（N = 1/2/4/8/16）を safe API で起動し、`occupancy_max_active_clusters` 等を S3 の参考値として記録する。N>8 は `NON_PORTABLE_CLUSTER_SIZE_ALLOWED` を設定してから起動する。起動時に cluster 次元を与える経路は PR-B の `clu.rt2`／`clu.rt4`（raw の `cuLaunchKernelEx`）で追加した（AC3 節）。DSMEM は `%cluster_ctarank`・`mapa.shared::cluster`・`ld.shared::cluster`・`barrier.cluster` の往復で、デッドロックは外部 `timeout` が記録する。
 - Hopper 列は GB10 上の NVRTC（ptxas）による `sm_90a` 受理の実測であり、Hopper 実機での実行は未検証。PTX ISA 9.0 の節番号は、確認できているもの（warp-level MMA は 9.7.15・非同期 warpgroup MMA は 9.7.16・第 5 世代 Tensor Core は 9.7.17。出典: `.claude/skills/nvidia-cuda/references/ptx-isa/instructions-matrix-multiply.md`。ただし同ファイルは PTX ISA 9.3 の章番号）以外を「要確認」とする。
 
-## 5. 結果表（すべて「未実測」。GB10 実測後の PR で結果セルだけを更新する）
+## 5. 結果表（GB10 実測済み。2026-10-01）
 
-判定の語彙は §2。表のセルは `aggregate.py` の出力（`aggregate.md`）から転記する。
+判定の語彙は §2。表のセルは `aggregate.py` の出力（`docs/perf/logs/sm121-isa-probe-2122/aggregate.md`）から逐語で転記した。各セルの段ごとの記録（ptxas のログ全文・エラー名・参考値）は `docs/perf/logs/sm121-isa-probe-2122/exec/<プローブ>@<target>.log`、home・Hopper 列は同 `compile.log` を正とする。
+
+- **実測環境**: 実測日 2026-10-01（`env_info.txt` の `start_utc=2026-10-01T06:33:39Z`〜`end_utc=2026-10-01T06:35:34Z`）・`<cuda-node>`（NVIDIA GB10・cc 12.1）・ドライバ 580.173.02・NVRTC 13.0（compile・exec の env レコード）・Linux 6.17.0-1031-nvidia aarch64。転送元コミット `7b6019aeb7856eb9cb2e28929a735b9938bc1503`（`git_source=rev-stamp`・`git_clean=1`）。
+- **占有状況**: 常駐サービス 2 プロセスが CUDA コンテキストを保持したまま（`utilization.gpu` 0%）、ユーザー承認のうえ実行した。実行前後で他の GPU プロセスの出現はない。
+- **系列の健全性**: 起動プロセス 219 件（device_attributes_dump 1・compile 1・exec 210・legacy 7）はすべて exit 0（timeout・process_failed 0 件）。`aggregate.py` は exit 0（G0 成立・完全性違反なし）。判定不能 0 件・想定外の受理（UNEXPECTED_ACCEPT）0 件・LEGACY_CONTRADICTION 0 件。home（本来の対応アーキ）の S2 は 67 件すべて ok（HOME_REJECTED なし）、対照 `ctl.copy`・`ctl.raw`・`ctl.rawmap` は 3 target すべて成立。
+- 列の値: compute_121／121a／121f は判定語。home 列は `compile.log` の target=home セルの状態（括弧内は home のアーキ）。Hopper 列は `compile.log` の target=hopper（sm_90a）の S2 の状態（GB10 上の NVRTC〈ptxas〉による受理の実測で、Hopper 実機での実行は未検証）。
 
 ### AC1（R-TC5）
 
 | プローブ | compute_121 | compute_121a | compute_121f | home（本来の対応アーキ）S2 | Hopper（sm_90a）S2 |
 |---|---|---|---|---|---|
-| `macro.arch` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tc5.alloc` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tc5.ld` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tc5.cross` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `macro.arch` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_80） | ok |
+| `tc5.alloc` | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ok（sm_100a） | rejected |
+| `tc5.ld` | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ok（sm_100a） | rejected |
+| `tc5.cross` | ロード失敗 | ロード失敗 | ロード失敗 | ok（sm_100a） | rejected |
 
 ### AC2（R-GUIDE）
 
 | claim | 出典 | 測定項目 | 判定 |
 |---|---|---|---|
-| C01-warps-per-sm | streaming-multiprocessor.md:23 | `max_threads_per_multiprocessor`（warps/SM 48 → 1536） | 未実測 |
-| C02-blocks-per-sm | 同 :26 | `max_blocks_per_multiprocessor` | 未実測 |
-| C03-smem-per-sm | 同 :27 | `max_shared_memory_per_multiprocessor` | 未実測 |
-| C04-smem-per-block | 同 :28 | `max_shared_memory_per_block_optin` | 未実測 |
-| C05-portable-cluster-8 | 同 :33 | `clu.dims8` | 未実測 |
-| C06-tcgen05-sm100plus | instructions-matrix-multiply.md:26 | `tc5.alloc` | 未実測 |
-| C07-wgmma-unavailable | cuda-tensor-core-design.md:138 | `wgmma.m64n8k16` | 未実測 |
-| C08-tcgen05-unavailable | 同 :139 | `tc5.alloc` | 未実測 |
-| C09-cluster-1x1x1 | 同 :140 | `clu.dims2` | 未実測 |
-| C10-static-smem-48kb | memory-system.md:26 | `max_shared_memory_per_block` | 未実測 |
+| C01-warps-per-sm | streaming-multiprocessor.md:23 | `max_threads_per_multiprocessor`（warps/SM 48 → 1536） | 一致（12.0 の記述を外挿）（測定値=1536,1536,1536） |
+| C02-blocks-per-sm | 同 :26 | `max_blocks_per_multiprocessor` | 不一致（測定値=24,24,24） |
+| C03-smem-per-sm | 同 :27 | `max_shared_memory_per_multiprocessor` | 不一致（測定値=102400,102400,102400） |
+| C04-smem-per-block | 同 :28 | `max_shared_memory_per_block_optin` | 一致（12.0 の記述を外挿）（測定値=101376,101376,101376） |
+| C05-portable-cluster-8 | 同 :33 | `clu.dims8` | 一致（12.0 の記述を外挿）（判定=成立,成立,成立） |
+| C06-tcgen05-sm100plus | instructions-matrix-multiply.md:26 | `tc5.alloc` | 不一致（判定=ptxas 拒否（オフライン）,ptxas 拒否（オフライン）,ptxas 拒否（オフライン）） |
+| C07-wgmma-unavailable | cuda-tensor-core-design.md:138 | `wgmma.m64n8k16` | 一致（12.0 の記述を外挿）（判定=ptxas 拒否（オフライン）,ptxas 拒否（オフライン）,ptxas 拒否（オフライン）） |
+| C08-tcgen05-unavailable | 同 :139 | `tc5.alloc` | 一致（12.0 の記述を外挿）（判定=ptxas 拒否（オフライン）,ptxas 拒否（オフライン）,ptxas 拒否（オフライン）） |
+| C09-cluster-1x1x1 | 同 :140 | `clu.dims2` | 不一致（判定=成立,成立,成立） |
+| C10-static-smem-48kb | memory-system.md:26 | `max_shared_memory_per_block` | 一致（12.0 の記述を外挿）（測定値=49152,49152,49152） |
 
 ### AC4（R-MMA）
 
 | プローブ | compute_121 | compute_121a | compute_121f | home（本来の対応アーキ）S2 | Hopper（sm_90a）S2 |
 |---|---|---|---|---|---|
-| `mma.tf32.m16n8k8` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.tf32.m16n8k4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f16.m16n8k16.f32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f16.m16n8k8.f32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f16.m16n8k16.f16` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.bf16.m16n8k16.f32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.bf16.m16n8k8.f32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f64.m8n8k4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f16.m8n8k4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f64.m16n8k4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f64.m16n8k8` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f64.m16n8k16` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.s8.m16n8k32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.e4m3.m16n8k32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.e5m2.m16n8k32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.f8f6f4.m16n8k32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.block_scale.m16n8k64` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.ldmatrix.x1` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.ldmatrix.x2` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.ldmatrix.x4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.ldmatrix.x4_trans` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `mma.stmatrix.x4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.fma_f32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.fma_f64` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.fma_f16x2` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.fma_bf16x2` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.f32x2_add` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.f32x2_mul` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.f32x2_fma` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.cvt_tf32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.elect_sync` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.redux_u32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `simt.redux_f32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `mma.tf32.m16n8k8` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.tf32.m16n8k4` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.f16.m16n8k16.f32` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.f16.m16n8k8.f32` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.f16.m16n8k16.f16` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.bf16.m16n8k16.f32` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.bf16.m16n8k8.f32` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.f64.m8n8k4` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.f16.m8n8k4` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_80） | ok |
+| `mma.f64.m16n8k4` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `mma.f64.m16n8k8` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `mma.f64.m16n8k16` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `mma.s8.m16n8k32` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_80） | ok |
+| `mma.e4m3.m16n8k32` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_89） | ok |
+| `mma.e5m2.m16n8k32` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_89） | ok |
+| `mma.f8f6f4.m16n8k32` | ptxas 拒否（オフライン） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_120a） | rejected |
+| `mma.block_scale.m16n8k64` | ptxas 拒否（オフライン） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_120a） | rejected |
+| `mma.ldmatrix.x1` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.ldmatrix.x2` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.ldmatrix.x4` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.ldmatrix.x4_trans` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `mma.stmatrix.x4` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `simt.fma_f32` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `simt.fma_f64` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `simt.fma_f16x2` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `simt.fma_bf16x2` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `simt.f32x2_add` | 成立 | 成立 | 成立 | ok（sm_100） | rejected |
+| `simt.f32x2_mul` | 成立 | 成立 | 成立 | ok（sm_100） | rejected |
+| `simt.f32x2_fma` | 成立 | 成立 | 成立 | ok（sm_100） | rejected |
+| `simt.cvt_tf32` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `simt.elect_sync` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `simt.redux_u32` | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `simt.redux_f32` | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ok（sm_100a） | rejected |
 
 ### AC5（R-HOPPER・R-SNR・R-CLU）
 
 | プローブ | compute_121 | compute_121a | compute_121f | home（本来の対応アーキ）S2 | Hopper（sm_90a）S2 |
 |---|---|---|---|---|---|
-| `wgmma.m64n8k16` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `hop.griddepcontrol` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `hop.fence_proxy_async` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `snr.dec` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `snr.incdec` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.dims1` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.dims2` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.dims4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.dims8` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.dims16` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.dsmem` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.rt2` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `clu.rt4` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `wgmma.m64n8k16` | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ptxas 拒否（オフライン） | ok（sm_90a） | ok |
+| `hop.griddepcontrol` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `hop.fence_proxy_async` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `snr.dec` | ptxas 拒否（オフライン） | 成立 | 成立 | ok（sm_90a） | ok |
+| `snr.incdec` | ptxas 拒否（オフライン） | 成立 | 成立 | ok（sm_90a） | ok |
+| `clu.dims1` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `clu.dims2` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `clu.dims4` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `clu.dims8` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `clu.dims16` | 実行時エラー | 実行時エラー | 実行時エラー | ok（sm_90） | ok |
+| `clu.dsmem` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `clu.rt2` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `clu.rt4` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
 
 ### AC3（TMA の意味論。R-TMA-*）
 
 | プローブ | compute_121 | compute_121a | compute_121f | home（本来の対応アーキ）S2 | Hopper（sm_90a）S2 |
 |---|---|---|---|---|---|
-| `tma.base_cta` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.base_cluster` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.coord` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.oob_none` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.oob_nan` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.oob_neg` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.swz32` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.swz64` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.swz128` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.store` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.prefetch` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.multicast` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.bulk_cta` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `tma.bulk_cluster` | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `ctl.raw`（対照・R-CTL） | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| `ctl.rawmap`（対照・R-CTL） | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| `tma.base_cta` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `tma.base_cluster` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `tma.coord` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `tma.oob_none` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `tma.oob_nan` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `tma.oob_neg` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `tma.swz32` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `tma.swz64` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `tma.swz128` | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | 受理のみ（実行意味論は未検証） | ok（sm_90） | ok |
+| `tma.store` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `tma.prefetch` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `tma.multicast` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `tma.bulk_cta` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `tma.bulk_cluster` | 成立 | 成立 | 成立 | ok（sm_90） | ok |
+| `ctl.raw`（対照・R-CTL） | 成立 | 成立 | 成立 | ok（sm_80） | ok |
+| `ctl.rawmap`（対照・R-CTL） | 成立 | 成立 | 成立 | ok（sm_90） | ok |
 
-R-TMA-SEM の観測（`aggregate.md` の「R-TMA 観測」表。候補モデルとの一致）も、実測後に転記する（現在は未実測）。
+R-TMA-SEM の観測（`aggregate.md` の「R-TMA 観測」表の転記。判定語はいずれも「受理のみ（実行意味論は未検証）」で、3 target とも同じ観測。注意欄はすべて `-`）:
+
+| プローブ | 観測（compute_121／121a／121f 共通） | 候補モデルとの一致 |
+|---|---|---|
+| `tma.coord` | `class=ELEM_INNER_FIRST` | 要素座標（内側次元が先）の仮説と一致 |
+| `tma.oob_none` | `inrange=MATCH oob_elems=96 oob_fill=ZERO oob_distinct=0x00000000` | 範囲内は一致・OOB 要素はゼロ埋め |
+| `tma.oob_nan` | `inrange=MATCH oob_elems=96 oob_fill=NAN oob_distinct=0x7ff77ff7` | 範囲内は一致・OOB 要素は NaN（ビット列 `0x7ff77ff7`） |
+| `tma.oob_neg` | `inrange=MATCH oob_elems=96 oob_fill=ZERO oob_distinct=0x00000000` | 負の座標の OOB 要素もゼロ埋め |
+| `tma.swz32` | `class=XOR_ADDR_BITS` | 標準の XOR モデルと一致 |
+| `tma.swz64` | `class=XOR_ADDR_BITS+SRC_B64_MODEL` | 標準の XOR モデルと src の B64 仮説の両方と一致（本 box では両者は全語で同一になり区別できない。優劣は判定しない） |
+| `tma.swz128` | `class=XOR_ADDR_BITS` | 標準の XOR モデルと一致 |
+
+`polls` は 13〜14（待ちの上限 1,000,000 回に対して）。`tma.oob_none`／`tma.oob_nan` は `expect_tx` を OOB を含む box 全体（512 B）にした構成で待ちが完了しており、事前登録（§4 AC3）のとおり「OOB 要素も `complete_tx` のバイト数に数える」と読む。
+
+### 5.1 注記（判定語の読み方と記録値）
+
+- **アーキ接尾辞（`121`／`121a`／`121f`）の差**: 3 target で判定が分かれたのは `mma.f8f6f4.m16n8k32`・`mma.block_scale.m16n8k64`（compute_121 は ptxas 拒否〈オフライン〉、121a・121f は受理のみ）と `snr.dec`・`snr.incdec`（compute_121 は ptxas 拒否〈オフライン〉、121a・121f は成立）の 4 件だけで、他は 3 target で同じ判定。ptxas のログは `Feature '.kind::f8f6f4' not supported on .target 'sm_121'`・`Instruction 'setmaxnreg.dec' not supported on .target 'sm_121'`（`exec/mma.f8f6f4.m16n8k32@compute_121.log`・`exec/snr.dec@compute_121.log`）。`aggregate.md` の R-HOPPER 表で方向列が「判定不能（target 間で不一致）」となっているのはこの 4 件で、これは方向列のラベルであり判定語（判定不能・理由コード付き）ではない。
+- **tcgen05／TMEM**: `tc5.alloc`・`tc5.ld` は 3 target とも ptxas 拒否（オフライン）（`Instruction 'tcgen05.alloc' not supported on .target 'sm_121a'` ほか。`exec/tc5.alloc@compute_121a.log`）。S3（ドライバ JIT）も `CUDA_ERROR_INVALID_PTX`。home（sm_100a）の S2 は ok で、拒否はアーキ起因と読む（R-HOME）。`tc5.cross`（compute_100a の PTX を GB10 でロード）は 3 target ともロード失敗（`CUDA_ERROR_INVALID_PTX`）。事前登録の想定（`expect=reject121`）どおりで、想定外の受理はない。
+- **`tc5.cross` の S2**: `tc5.cross` の S2 は固定アーキ sm_100a（FIXEDARCH）での受理であり、R-HOPPER 表の方向「sm_121 のみ受理（逆方向）」は sm_121 で受理されたことを意味しない（sm_121 系の S2 欄に sm_100a の結果が入っている）。
+- **wgmma**: `wgmma.m64n8k16` は 3 target とも ptxas 拒否（オフライン）（`Instruction 'wgmma.fence' not supported on .target 'sm_121a'` ほか）。Hopper（sm_90a）の S2 は ok（R-HOPPER の方向は「Hopper のみ受理」）。
+- **cluster**: `clu.dims1`〜`dims8`・`clu.dsmem`・`clu.rt2`／`rt4` は 3 target とも成立。`clu.dims16` は 3 target とも実行時エラー（S4 `CUDA_ERROR_INVALID_CLUSTER_SIZE`。S3 の参考値は `non_portable_cluster_size_allowed=set occupancy_max_active_clusters=0 occupancy_max_potential_cluster_size=12`。`exec/clu.dims16@compute_121.log`）。参考値として `clu.dims8` の `occupancy_max_active_clusters=12`、`clu.dsmem`（cluster 2）は 48。
+- **Hopper との差分（sm_121 でだけ受理）**: `simt.f32x2_add`／`mul`／`fma`（home sm_100）は Hopper（sm_90a）の S2 が rejected で、sm_121 系では 3 target とも成立。`simt.redux_f32`（home sm_100a）は Hopper・sm_121 系の両方で ptxas 拒否（オフライン）（`Instruction 'redux.f32' not supported on .target 'sm_121a'`）。
+- **`macro.arch` の記録値**（S5 の detail。存在を主張しない記録のみ）: 3 target とも `__CUDA_ARCH__=1210`・`__CUDA_ARCH_FEAT_SM121_ALL=0`・`__CUDA_ARCH_FEAT_SM120_ALL=0`・`__CUDA_ARCH_FEAT_SM100_ALL=0`・`__CUDA_ARCH_FEAT_SM90_ALL=0`・`__CUDACC_VER_MAJOR__=13`・`__CUDACC_VER_MINOR__=0`。`__CUDA_ARCH_SPECIFIC__` は compute_121a のみ 1（121・121f は 0）、`__CUDA_ARCH_FAMILY_SPECIFIC__` は compute_121a・121f で 1（121 は 0）。
+- **R-LEGACY**: `setmaxnreg_probe_*` の base（compute_121）2 件は load_failed、accel（compute_121a）2 件は run_ok で、`snr.*` の同 target の判定（compute_121 は ptxas 拒否〈オフライン〉で S3 もロード失敗・121a は成立）と食い違わない（LEGACY_CONTRADICTION・LEGACY_INCONCLUSIVE なし）。`tma_probe_real_device` の `tma_execution_probe`（cluster 変種）と `tma_execution_probe_cta` は選択 arch compute_121 で run_ok、`tma.base_cluster`・`tma.base_cta` の成立と整合。
+- **AC2（ガイドとの不一致）**: 参照ガイド（`.claude/skills/nvidia-cuda/`。CC 12.0 の記述）・設計文書（`cuda-tensor-core-design.md` §11.1）の記述と GB10（CC 12.1）の実測で「不一致」となったのは 4 件: C02（ガイドの「Maximum thread blocks per SM 32」に対し `max_blocks_per_multiprocessor` の測定値 24）・C03（ガイドの「Maximum shared memory per SM 128 KB」に対し `max_shared_memory_per_multiprocessor` の測定値 102400 B＝100 KB）・C06（ガイドの「`tcgen05.*` (Blackwell, sm_100+)」に対し、sm_121 では `tc5.alloc` が ptxas 拒否〈オフライン〉。sm_121 は「sm_100+」の範囲に含まれない）・C09（`cuda-tensor-core-design.md` の「cluster は実用上不可〈1×1×1 のみ〉」に対し、`clu.dims2` が 3 target とも成立）。C01・C04・C05・C07・C08・C10 は「一致（12.0 の記述を外挿）」（CC 12.0 の記述を 12.1 へ外挿したうえでの条件付きの一致）。各 claim の原文引用・比較方法は `docs/perf/logs/sm121-isa-probe-2122/guide_claims.tsv`、測定値は表の括弧内。`.claude/skills` は編集せず、不一致は本 doc にだけ記す（R-GUIDE）。
 
 ## 6. 実行手順
 
@@ -300,7 +329,7 @@ NVRTC 単体の S1／S2 全行列（GPU 不要）は `cargo test -p fandhe-ai-ba
 
 ## 7. §2.3（`cuda-sm121-gemm-candidates-design.md`）への反映手順
 
-GB10 実測後の PR で、次のセルだけを更新する（RULE.txt は変更しない）。起票はしない。
+GB10 実測後の PR で、次のセルだけを更新する（RULE.txt は変更しない）。起票はしない。**2026-10-01 の実測（PR-C）で 1〜5 を反映済み**。
 
 1. `cuda-sm121-gemm-candidates-design.md` §2.3 の各行の「状態」を、対応するプローブ ID・条項（同表の列）の判定に更新する。§2.1 の wgmma・tcgen05・cluster・`setmaxnreg` の行、§1-1 の条件文への注記、§4・§7 の「#2122 次第」の行も同様。
 2. `cuda-tensor-core-design.md` §11.1・§13 の空欄・「未了」を、判定（および `snr.*` と既存 `setmaxnreg_probe_*` の整合）で更新する。
