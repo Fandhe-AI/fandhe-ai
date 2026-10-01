@@ -1,0 +1,14 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running tests/setmaxnreg_probe_incdec_base_real_device.rs (<home>/work/target-fandhe-ai/debug/deps/setmaxnreg_probe_incdec_base_real_device-8eb96148a1e959a3)
+
+running 1 test
+SETMAXNREG_PROBE_RESULT stage=environment name="NVIDIA GB10" compute_capability=(12, 1) device_arch="compute_121"
+SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel=control_incdec arch=compute_121 source=diagnostic result=measured num_regs_per_thread=10
+SETMAXNREG_PROBE_RESULT stage=nvrtc_compile_start kernel=probe_setmaxnreg_incdec arch=compute_121 control_accepted=true
+SETMAXNREG_PROBE_RESULT stage=nvrtc_compile kernel=probe_setmaxnreg_incdec arch=compute_121 result=accepted
+SETMAXNREG_PROBE_RESULT stage=module_load kernel=probe_setmaxnreg_incdec arch=compute_121 result=failed detail=DriverError(CUDA_ERROR_INVALID_PTX, "a PTX JIT compilation failed")
+test setmaxnreg_incdec_base_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+SM121_PROBE_PROC {"v":1,"kind":"proc","phase":"legacy","probe":"setmaxnreg_probe_incdec_base_real_device","target":"-","exit":0}

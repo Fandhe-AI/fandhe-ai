@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/sm121_isa_probe_exec_real_device.rs (<home>/work/target-fandhe-ai/debug/deps/sm121_isa_probe_exec_real_device-13817ca06fdec9fa)
+
+running 1 test
+SM121_PROBE_JSON {"v":1,"kind":"env","phase":"exec","probe":"attr.limits","target":"compute_121","device":"NVIDIA GB10","cc":"12.1","nvrtc":"13.0"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"attr.limits","target":"compute_121","arch":"compute_121","stage":"ctl","status":"ok","code":"-","detail":"ctl.copy S1..S6 all ok"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"attr.limits","target":"compute_121","arch":"compute_121","stage":"nvrtc_ptx","status":"not_applicable_by_design","code":"-","detail":"policy=attr"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"attr.limits","target":"compute_121","arch":"sm_121","stage":"nvrtc_cubin","status":"not_applicable_by_design","code":"-","detail":"policy=attr"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"attr.limits","target":"compute_121","arch":"compute_121","stage":"module_load","status":"not_applicable_by_design","code":"-","detail":"policy=attr"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"attr.limits","target":"compute_121","arch":"compute_121","stage":"launch","status":"not_applicable_by_design","code":"-","detail":"policy=attr"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"attr.limits","target":"compute_121","arch":"compute_121","stage":"sync","status":"not_applicable_by_design","code":"-","detail":"policy=attr"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"attr.limits","target":"compute_121","arch":"compute_121","stage":"verify","status":"ok","code":"-","detail":"max_threads_per_multiprocessor=1536 max_blocks_per_multiprocessor=24 max_shared_memory_per_multiprocessor=102400 max_shared_memory_per_block=49152 max_shared_memory_per_block_optin=101376 reserved_shared_memory_per_block=1024 max_registers_per_multiprocessor=65536 max_registers_per_block=65536 warp_size=32 multiprocessor_count=48"}
+SM121_PROBE_JSON {"v":1,"kind":"done","phase":"exec","probe":"attr.limits","target":"compute_121","cells":7,"mismatch":0}
+test sm121_isa_probe_exec_selected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+SM121_PROBE_PROC {"v":1,"kind":"proc","phase":"exec","probe":"attr.limits","target":"compute_121","exit":0}

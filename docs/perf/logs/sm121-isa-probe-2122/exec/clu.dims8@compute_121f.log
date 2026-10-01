@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/sm121_isa_probe_exec_real_device.rs (<home>/work/target-fandhe-ai/debug/deps/sm121_isa_probe_exec_real_device-13817ca06fdec9fa)
+
+running 1 test
+SM121_PROBE_JSON {"v":1,"kind":"env","phase":"exec","probe":"clu.dims8","target":"compute_121f","device":"NVIDIA GB10","cc":"12.1","nvrtc":"13.0"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"clu.dims8","target":"compute_121f","arch":"compute_121f","stage":"ctl","status":"ok","code":"-","detail":"ctl.copy S1..S6 all ok"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"clu.dims8","target":"compute_121f","arch":"compute_121f","stage":"nvrtc_ptx","status":"ok","code":"-","detail":"arch=compute_121f ptx_bytes=1181 .version 9.0 .target sm_121f"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"clu.dims8","target":"compute_121f","arch":"sm_121f","stage":"nvrtc_cubin","status":"ok","code":"-","detail":"arch=sm_121f ptx_bytes=1181 .version 9.0 .target sm_121f"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"clu.dims8","target":"compute_121f","arch":"compute_121f","stage":"module_load","status":"ok","code":"-","detail":"binary_version=121 ptx_version=121 num_regs=10 occupancy_max_active_clusters=12 occupancy_max_potential_cluster_size=8"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"clu.dims8","target":"compute_121f","arch":"compute_121f","stage":"launch","status":"ok","code":"-","detail":"grid=8 block=32"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"clu.dims8","target":"compute_121f","arch":"compute_121f","stage":"sync","status":"ok","code":"-","detail":"out_words=16"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"clu.dims8","target":"compute_121f","arch":"compute_121f","stage":"verify","status":"ok","code":"-","detail":"words=16 bit_exact"}
+SM121_PROBE_JSON {"v":1,"kind":"done","phase":"exec","probe":"clu.dims8","target":"compute_121f","cells":7,"mismatch":0}
+test sm121_isa_probe_exec_selected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+SM121_PROBE_PROC {"v":1,"kind":"proc","phase":"exec","probe":"clu.dims8","target":"compute_121f","exit":0}

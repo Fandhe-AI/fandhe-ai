@@ -1,0 +1,24 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `<home>/work/target-fandhe-ai/debug/examples/device_attributes_dump`
+device: name=NVIDIA GB10 compute_capability=(12, 1) arch=compute_121
+  total_memory_bytes = 130663235584 (121.69 GiB)
+--- device attributes (docs/perf/sm121-device-attributes.md へ転記) ---
+  MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 101376
+  MAX_SHARED_MEMORY_PER_BLOCK = 49152
+  MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 102400
+  RESERVED_SHARED_MEMORY_PER_BLOCK = 1024
+  MULTIPROCESSOR_COUNT = 48
+  MAX_REGISTERS_PER_MULTIPROCESSOR = 65536
+  MAX_REGISTERS_PER_BLOCK = 65536
+  L2_CACHE_SIZE = 25165824
+  CLOCK_RATE = 2418000
+  MEMORY_CLOCK_RATE = 8533000
+  GLOBAL_MEMORY_BUS_WIDTH = 256
+  MAX_THREADS_PER_MULTIPROCESSOR = 1536
+  MAX_THREADS_PER_BLOCK = 1024
+--- L1/L2/global 実効帯域マイクロベンチ ---
+global: n=67108864 secs_per_iter=0.002544 bandwidth=211.02 GB/s bytes_per_cycle_device_wide=87.2721
+l2: n=1572864 (src+dst=12582912 bytes, L2_CACHE_SIZE=Some(25165824) bytes) secs_per_iter=0.000009 bandwidth=1349.01 GB/s bytes_per_cycle_device_wide=557.9032
+NOTE: L1 実効帯域は本バイナリでは実測しない（モジュール冒頭ドキュメンテーションコメント「L1 帯域計測の限界」参照）。docs/perf/sm121-device-attributes.md 側でスペック値＋出典として記録すること。
+NOTE: 上記の実測値は docs/perf/sm121-device-attributes.md の実測記録表へ転記すること（イシュー #482）。コストモデル定数へのコード組み込みは C-8/C-9（#521・#524 等）のスコープであり本バイナリでは行わない。
+SM121_PROBE_PROC {"v":1,"kind":"proc","phase":"dump","probe":"-","target":"-","exit":0}

@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running tests/sm121_isa_probe_exec_real_device.rs (<home>/work/target-fandhe-ai/debug/deps/sm121_isa_probe_exec_real_device-13817ca06fdec9fa)
+
+running 1 test
+SM121_PROBE_JSON {"v":1,"kind":"env","phase":"exec","probe":"tc5.cross","target":"compute_121a","device":"NVIDIA GB10","cc":"12.1","nvrtc":"13.0"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"tc5.cross","target":"compute_121a","arch":"compute_121a","stage":"ctl","status":"ok","code":"-","detail":"ctl.copy S1..S6 all ok"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"tc5.cross","target":"compute_121a","arch":"compute_100a","stage":"nvrtc_ptx","status":"ok","code":"-","detail":"arch=compute_100a ptx_bytes=1555 .version 9.0 .target sm_100a"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"tc5.cross","target":"compute_121a","arch":"sm_100a","stage":"nvrtc_cubin","status":"ok","code":"-","detail":"arch=sm_100a ptx_bytes=1555 .version 9.0 .target sm_100a"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"tc5.cross","target":"compute_121a","arch":"compute_100a","stage":"module_load","status":"error","code":"CUDA_ERROR_INVALID_PTX","detail":"load_module: DriverError(CUDA_ERROR_INVALID_PTX, \"a PTX JIT compilation failed\")"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"tc5.cross","target":"compute_121a","arch":"compute_100a","stage":"launch","status":"not_applicable_by_design","code":"-","detail":"policy=accept_only"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"tc5.cross","target":"compute_121a","arch":"compute_100a","stage":"sync","status":"not_applicable_by_design","code":"-","detail":"policy=accept_only"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"tc5.cross","target":"compute_121a","arch":"compute_100a","stage":"verify","status":"not_applicable_by_design","code":"-","detail":"policy=accept_only"}
+SM121_PROBE_JSON {"v":1,"kind":"done","phase":"exec","probe":"tc5.cross","target":"compute_121a","cells":7,"mismatch":0}
+test sm121_isa_probe_exec_selected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+SM121_PROBE_PROC {"v":1,"kind":"proc","phase":"exec","probe":"tc5.cross","target":"compute_121a","exit":0}
