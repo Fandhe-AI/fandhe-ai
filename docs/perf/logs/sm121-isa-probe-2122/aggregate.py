@@ -71,7 +71,8 @@ INDET_CODES = ("G0_FAILED", "TARGET_UNSUPPORTED", "CTL_FAILED", "HOME_REJECTED",
                "COMPILE_EXEC_DISAGREE", "OFFLINE_JIT_DISAGREE", "NVRTC_UNAVAILABLE", "NO_DEVICE",
                "UNSUPPORTED_PTX_VERSION", "STAGE_ERROR", "TIMEOUT", "PROCESS_FAILED",
                "LAYOUT_UNVERIFIED", "UNEXPECTED_ACCEPT", "LEGACY_CONTRADICTION", "LEGACY_INCONCLUSIVE",
-               "HOPPER_HOME_DISAGREE", "TMA_BASE_NOT_ESTABLISHED", "CLU_DIMS2_NOT_ESTABLISHED", "GUIDE_NO_PROBE", "GUIDE_UNMEASURED")
+               "HOPPER_HOME_DISAGREE", "TMA_BASE_NOT_ESTABLISHED", "CLU_RT2_NOT_ESTABLISHED",
+               "RAW_LAUNCH_CTL_FAILED", "RAW_TENSORMAP_CTL_FAILED", "GUIDE_NO_PROBE", "GUIDE_UNMEASURED")
 G0_REASONS = ("G0_PROVENANCE", "G0_DIRTY_TREE", "G0_DEV_MODE", "G0_DEV_TARGET", "G0_NVRTC_MISSING",
               "G0_CC", "G0_NO_DEVICE")
 POLICIES = ("verify", "accept_only", "record_only", "attr")
@@ -494,6 +495,53 @@ def validate_chain(pdef: ProbeDef, cells: dict, where: str) -> None:
             upstream_ok = False
 
 
+SEM_COMMON_KEYS = ("status", "polls", "phase2", "polls2")
+SEM_CLASS_KEYS = SEM_COMMON_KEYS + ("class",)
+SEM_OOB_KEYS = SEM_COMMON_KEYS + ("inrange", "oob_elems", "oob_fill", "oob_distinct")
+
+
+def sem_required_keys(pid: str) -> tuple:
+    """R-TMA-SEM の観測（S5 の detail）にプローブごとに必須のキー。"""
+    if pid == "tma.coord" or pid.startswith("tma.swz"):
+        return SEM_CLASS_KEYS
+    if pid.startswith("tma.oob_"):
+        return SEM_OOB_KEYS
+    raise LogIntegrityError(f"R-TMA-SEM のプローブに観測キーの定義が無い: {pid}")
+
+
+def validate_sem_observation(pid: str, detail: str, where: str) -> dict:
+    """観測は k=v トークン列。必須キーの完全一致（class=NONE のときだけ dump が加わる）・値の形を検査する。"""
+    kv = parse_kv(detail.removeprefix("record: ").split(), f"{where} TMA 観測", strict=True)
+    want = set(sem_required_keys(pid))
+    if kv.get("class") == "NONE":
+        want.add("dump")
+    require_exact_keys(kv.keys(), want, f"{where} TMA 観測のキー")
+    if kv["status"] not in ("complete", "timeout") or kv["phase2"] not in ("none", "complete", "timeout") \
+            or not kv["polls"].isdigit() or not kv["polls2"].isdigit():
+        raise LogIntegrityError(f"{where}: TMA 観測の status／phase2／polls の値が不正: {detail[:160]!r}")
+    if "inrange" in kv and kv["inrange"] not in ("MATCH", "MISMATCH"):
+        raise LogIntegrityError(f"{where}: inrange の値が不正: {kv['inrange']!r}")
+    if "oob_elems" in kv and not kv["oob_elems"].isdigit():
+        raise LogIntegrityError(f"{where}: oob_elems の値が不正: {kv['oob_elems']!r}")
+    return kv
+
+
+def sem_caution(kv: dict) -> str:
+    """R-TMA 観測表の注意欄。判定語（受理のみ）に埋もれさせたくない異常を明示する。"""
+    notes = []
+    if kv["status"] == "timeout":
+        notes.append("mbarrier が上限回数で完了せず（転送が残っている可能性）")
+    if kv["phase2"] == "timeout":
+        notes.append("第 2 待ちが上限回数で完了せず（転送が残っている可能性）")
+    if kv.get("class") == "NONE":
+        notes.append("どの候補モデルとも不一致（ダンプ全文を記録）")
+    if kv.get("inrange") == "MISMATCH":
+        notes.append("範囲内の要素が仮説と不一致")
+    if "SENTINEL" in kv.get("oob_fill", ""):
+        notes.append("OOB 要素が書かれていない（番兵のまま）")
+    return "; ".join(notes) if notes else "-"
+
+
 def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str) -> ExecProc:
     log = parse_log(text, name)
     cells: dict = {}
@@ -569,10 +617,7 @@ def load_exec_proc(rule: Rule, pdef: ProbeDef, target: str, text: str, name: str
     if pdef.is_attr and cells["verify"].status == "ok":
         parse_kv(cells["verify"].detail.split(), f"{name} attr detail", strict=True)
     if pdef.clause == "R-TMA-SEM" and cells["sync"].status == "ok":
-        # 観測は status・polls を含む k=v トークン列（候補モデルとの一致を機械可読に残す）。
-        kv = parse_kv(cells["sync"].detail.removeprefix("record: ").split(), f"{name} TMA 観測", strict=True)
-        if kv.get("status") not in ("complete", "timeout") or not kv.get("polls", "x").isdigit():
-            raise LogIntegrityError(f"{name}: TMA 観測に status／polls が無い: {cells['sync'].detail[:120]!r}")
+        validate_sem_observation(pdef.id, cells["sync"].detail, name)
     return ExecProc(pdef.id, target, envs.get("env"), cells, code, synthesized)
 
 
@@ -955,9 +1000,11 @@ def verdict_core(rule: Rule, run: Run, g0: list, pdef: ProbeDef, target: str) ->
             theirs = run.legacy[lname]["class"]
             if kind.startswith("tma_exec"):
                 # 既存 TMA プローブの失敗は panic の理由を細かく区別できない（ロード失敗・実行時エラー等が
-                # すべて process_failed になる）ため、成功か否かだけを比較する。timeout は比較不能。
-                if theirs == "timeout":
-                    return indet("LEGACY_INCONCLUSIVE", "legacy が timeout（比較できない）")
+                # すべて exit 101 になる）ため、成功か否かだけを比較する（mismatch・nvrtc_rejected と
+                # run_ok の食い違いは矛盾）。timeout・process_failed（一過性の失敗を含む）は
+                # RULE 13a と同じく比較不能（LEGACY_INCONCLUSIVE）。
+                if theirs in ("timeout", "process_failed"):
+                    return indet("LEGACY_INCONCLUSIVE", f"legacy の結論が {theirs}（比較できない）")
                 if mine is not None and (mine == "run_ok") != (theirs == "run_ok"):
                     return indet("LEGACY_CONTRADICTION", f"legacy={theirs} 新プローブ={mine}")
                 continue
@@ -1003,13 +1050,26 @@ def verdict_core(rule: Rule, run: Run, g0: list, pdef: ProbeDef, target: str) ->
     return Verdict(V_ACCEPT_ONLY, "-", "受理段まで（policy=" + pdef.policy + "）")
 
 
+RAW_TENSOR_PROBES_EXCLUDE = ("tma.bulk_cta", "tma.bulk_cluster")
+
+
 def tma_dependencies(pdef: ProbeDef) -> list:
-    """事前登録の依存（RULE.txt 10b）: (依存先プローブ, 不成立のときの理由コード) の列。"""
-    if not pdef.id.startswith("tma.") or pdef.id in TMA_DEPENDENT_EXCLUDE:
-        return []
-    deps = [(TMA_BASE, "TMA_BASE_NOT_ESTABLISHED")]
-    if pdef.id == "tma.multicast":
-        deps.append(("clu.dims2", "CLU_DIMS2_NOT_ESTABLISHED"))
+    """事前登録の依存（RULE.txt 10b）: (依存先プローブ, 不成立のときの理由コード) の列。評価順。
+
+    raw 起動（cuLaunchKernelEx）で動くプローブは対照 ctl.raw に、tensor map 引数を使うものは
+    ctl.rawmap にも依存する。tma.*（base を除く）は tma.base_cta に、tma.multicast は加えて
+    runtime cluster 起動の clu.rt2 に依存する。"""
+    pid = pdef.id
+    deps = []
+    is_tma = pid.startswith("tma.")
+    if pid == "ctl.rawmap" or pid.startswith("clu.rt") or is_tma:
+        deps.append(("ctl.raw", "RAW_LAUNCH_CTL_FAILED"))
+    if is_tma and pid not in RAW_TENSOR_PROBES_EXCLUDE:
+        deps.append(("ctl.rawmap", "RAW_TENSORMAP_CTL_FAILED"))
+    if is_tma and pid not in TMA_DEPENDENT_EXCLUDE:
+        deps.append((TMA_BASE, "TMA_BASE_NOT_ESTABLISHED"))
+    if pid == "tma.multicast":
+        deps.append(("clu.rt2", "CLU_RT2_NOT_ESTABLISHED"))
     return deps
 
 
@@ -1194,19 +1254,25 @@ def render(rule: Rule, run: Run, g0: list, verdicts: dict, claims: list) -> str:
         out.append(f"| {pid} | {p.home} | {hop_s} | {s2_s} | {verdict_s} | {direction} | 要確認 |")
     if run.measured:
         out += ["", "## R-TMA 観測（候補モデルとの一致。値は S5 の detail に記録した観測）", "",
-                "| プローブ | target | 判定 | 観測 |", "|---|---|---|---|"]
+                "| プローブ | target | 判定 | 観測 | 注意 |", "|---|---|---|---|---|"]
         for pid, p in rule.probes.items():
             if p.clause != "R-TMA-SEM":
                 continue
             for t in run.targets:
                 v = verdicts[(pid, t)]
                 word = v.word + (f"（{v.code}）" if v.code != "-" else "")
-                out.append(f"| {pid} | {t} | {word} | {tma_observation(run, pid, t)} |")
+                obs = tma_observation(run, pid, t)
+                caution = "-"
+                if obs != "-":
+                    caution = sem_caution(validate_sem_observation(pid, obs, f"{pid}@{t}"))
+                out.append(f"| {pid} | {t} | {word} | {obs} | {caution} |")
     if run.legacy:
         out += ["", "## R-LEGACY", "", "| legacy | 対応 | 結論 | exit |", "|---|---|---|---|"]
         for lname, d in sorted(run.legacy.items()):
             pid, fixed, _kind = LEGACY_NAMES[lname]
-            out.append(f"| {lname} | {pid or '-'}@{d['target'] or fixed or '-'} | {d['class']} | {d['exit']} |")
+            lt = d["target"] or fixed or "-"
+            note = " （正式 target 外のため比較せず）" if lt != "-" and lt not in run.targets else ""
+            out.append(f"| {lname} | {pid or '-'}@{lt}{note} | {d['class']} | {d['exit']} |")
     return "\n".join(out) + "\n"
 
 
@@ -1249,7 +1315,12 @@ def _synth_cells(pdef: ProbeDef, reject: bool) -> dict:
         if stage != "ctl" and stage_is_na(pdef.policy, stage):
             cells[stage] = na
     if pdef.clause == "R-TMA-SEM":
-        cells["sync"] = Cell("ok", "-", "record: status=complete polls=3 class=ELEM_INNER_FIRST")
+        base = "status=complete polls=3 phase2=none polls2=0"
+        if pdef.id.startswith("tma.oob_"):
+            det = f"{base} inrange=MATCH oob_elems=96 oob_fill=ZERO oob_distinct=0x00000000"
+        else:
+            det = f"{base} class=ELEM_INNER_FIRST"
+        cells["sync"] = Cell("ok", "-", "record: " + det)
     if pdef.is_attr:
         cells["verify"] = Cell("ok", "-", "max_threads_per_multiprocessor=1536 max_blocks_per_multiprocessor=32"
                                           " max_shared_memory_per_multiprocessor=131072"
@@ -1495,6 +1566,25 @@ def fx_ctl_ind(rule):
     _expect(v.word == V_INDET and v.code == "TARGET_UNSUPPORTED", f"TARGET_UNSUPPORTED: {v}")
     m.execs[("mma.tf32.m16n8k8", "compute_121f")]["cells"]["ctl"] = Cell("error", "CTL_FAILED", "x")
     _expect(_verdict(m, "mma.tf32.m16n8k8", "compute_121f").code == "CTL_FAILED", "CTL_FAILED")
+    # raw 起動の対照（RULE 10b）: ctl.raw が成立でなければ raw 起動で動く全プローブが判定不能。
+    m = Model(rule)
+    _break(m, "ctl.raw", "launch", "error", "CUDA_ERROR_INVALID_VALUE", exit_code=0)
+    for s_ in ("sync", "verify"):
+        m.execs[("ctl.raw", "compute_121")]["cells"][s_] = Cell("not_run", "UPSTREAM_FAILED", "x")
+    for pid in ("tma.coord", "tma.bulk_cta", "clu.rt2", "ctl.rawmap", "tma.base_cta"):
+        v = _verdict(m, pid)
+        _expect(v.word == V_INDET and v.code == "RAW_LAUNCH_CTL_FAILED", f"{pid}: {v}")
+    _expect(_verdict(m, "clu.dims2").word == V_OK, "コンパイル時 cluster 指定（plain 起動）は影響を受けない")
+    # ctl.rawmap が成立でなければ tensor map 系だけが判定不能（bulk・clu.rt は影響なし）。
+    m = Model(rule)
+    _break(m, "ctl.rawmap", "launch", "error", "CUDA_ERROR_NOT_SUPPORTED", exit_code=0)
+    for s_ in ("sync", "verify"):
+        m.execs[("ctl.rawmap", "compute_121")]["cells"][s_] = Cell("not_run", "UPSTREAM_FAILED", "x")
+    for pid in ("tma.coord", "tma.store", "tma.multicast", "tma.base_cta", "tma.prefetch"):
+        v = _verdict(m, pid)
+        _expect(v.word == V_INDET and v.code == "RAW_TENSORMAP_CTL_FAILED", f"{pid}: {v}")
+    for pid in ("tma.bulk_cta", "tma.bulk_cluster", "clu.rt2", "clu.rt4"):
+        _expect(_verdict(m, pid).word == V_OK, f"{pid} は ctl.rawmap に依存しない")
     # 対照段（env 行だけで打ち切られたプロセス）のハング・異常終了も判定不能（P1）。
     for pid in ("mma.tf32.m16n8k8", "ctl.copy"):
         for exit_code, want in ((124, "TIMEOUT"), (139, "PROCESS_FAILED")):
@@ -1923,6 +2013,31 @@ def fx_tma_sem_ind(rule):
     m = Model(rule)
     m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: class=ELEM_INNER_FIRST")
     _expect_integrity_error(lambda: _load(m), "TMA 観測に status／polls が無い")
+    # プローブごとの必須キー: class が無い・oob のキーが無い・余剰キー・class=NONE なのに dump が無い。
+    base = "status=complete polls=3 phase2=none polls2=0"
+    for pid, det, label in (
+            ("tma.coord", base, "coord に class が無い"),
+            ("tma.swz64", base + " class=LINEAR extra=1", "余剰キー"),
+            ("tma.oob_none", base + " class=LINEAR", "oob に oob_* が無い"),
+            ("tma.oob_nan", base + " inrange=MATCH oob_elems=96 oob_fill=NAN", "oob_distinct が無い"),
+            ("tma.swz32", base + " class=NONE", "class=NONE なのに dump が無い"),
+            ("tma.coord", base + " class=LINEAR dump=0x00000000", "class≠NONE なのに dump がある"),
+            ("tma.coord", "status=complete polls=3 class=LINEAR", "phase2・polls2 が無い")):
+        m = Model(rule)
+        m.execs[(pid, "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: " + det)
+        _expect_integrity_error(lambda m=m: _load(m), f"SEM 観測: {label}")
+    # 異常な観測は判定語（受理のみ）に埋もれず注意欄に出る。
+    m = Model(rule)
+    m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell(
+        "ok", "-", "record: status=timeout polls=1000000 phase2=none polls2=0 class=NONE dump=0xfeedface")
+    m.execs[("tma.oob_nan", "compute_121")]["cells"]["sync"] = Cell(
+        "ok", "-", "record: status=complete polls=3 phase2=timeout polls2=1000000 inrange=MISMATCH oob_elems=96"
+                   " oob_fill=SENTINEL+ZERO oob_distinct=0x00000000,0xfeedface")
+    run, g0, v = _load(m)
+    md = render(rule, run, g0, v, load_claims(CLAIMS_PATH.read_text(encoding="utf-8")))
+    for note in ("mbarrier が上限回数で完了せず", "どの候補モデルとも不一致", "第 2 待ちが上限回数で完了せず",
+                 "範囲内の要素が仮説と不一致", "OOB 要素が書かれていない"):
+        _expect(note in md, f"注意欄に {note!r} が出ない")
     m = Model(rule)
     m.execs[("tma.coord", "compute_121")]["cells"]["sync"] = Cell("ok", "-", "record: status=complete polls=1 polls=2")
     _expect_integrity_error(lambda: _load(m), "TMA 観測の重複キー")
@@ -1938,12 +2053,18 @@ def fx_tma_xfer(rule):
 
 def fx_tma_xfer_ind(rule):
     m = Model(rule)
+    _break(m, "clu.rt2", "launch", "error", "CUDA_ERROR_INVALID_CLUSTER_SIZE", exit_code=0)
+    for s_ in ("sync", "verify"):
+        m.execs[("clu.rt2", "compute_121")]["cells"][s_] = Cell("not_run", "UPSTREAM_FAILED", "x")
+    v = _verdict(m, "tma.multicast")
+    _expect(v.word == V_INDET and v.code == "CLU_RT2_NOT_ESTABLISHED", f"multicast: {v}")
+    _expect(_verdict(m, "tma.store").word == V_OK, "store は clu.rt2 に依存しない")
+    # clu.dims2（コンパイル時指定）が失敗しても multicast は影響を受けない（依存先は runtime 起動の clu.rt2）。
+    m = Model(rule)
     _break(m, "clu.dims2", "launch", "error", "CUDA_ERROR_INVALID_CLUSTER_SIZE", exit_code=0)
     for s_ in ("sync", "verify"):
         m.execs[("clu.dims2", "compute_121")]["cells"][s_] = Cell("not_run", "UPSTREAM_FAILED", "x")
-    v = _verdict(m, "tma.multicast")
-    _expect(v.word == V_INDET and v.code == "CLU_DIMS2_NOT_ESTABLISHED", f"multicast: {v}")
-    _expect(_verdict(m, "tma.store").word == V_OK, "store は clu.dims2 に依存しない")
+    _expect(_verdict(m, "tma.multicast").word == V_OK, "multicast は clu.dims2 に依存しない")
     # 自身が失敗していれば依存より自身の判定を採る。
     m = Model(rule)
     _break(m, "tma.base_cta")
@@ -1983,16 +2104,30 @@ def fx_tma_legacy(rule):
     m.legacy["tma_probe_real_device@tma_execution_probe"] = {"exit": 124, "lines": []}
     v = _verdict(m, "tma.base_cluster")
     _expect(v.code == "LEGACY_INCONCLUSIVE", f"legacy timeout: {v}")
-    # 異常終了（process_failed）は成否のみ比較: 新が成立なら矛盾、新も失敗なら整合（判定は新のまま）。
+    # 異常終了（process_failed。一過性の失敗を含む）は RULE 13a と同じく比較不能（新の結果に関わらず）。
+    for exit_code in (139, 101):
+        m = Model(rule)
+        m.legacy["tma_probe_real_device@tma_execution_probe"] = {"exit": exit_code, "lines": []}
+        v = _verdict(m, "tma.base_cluster")
+        _expect(v.code == "LEGACY_INCONCLUSIVE", f"legacy 異常終了 exit={exit_code}: {v}")
+    # 確定した失敗（mismatch）との成否の食い違いは矛盾、整合（ともに失敗）なら新の判定を採る。
     m = Model(rule)
-    m.legacy["tma_probe_real_device@tma_execution_probe"] = {"exit": 139, "lines": []}
-    _expect(_verdict(m, "tma.base_cluster").code == "LEGACY_CONTRADICTION", "legacy 異常終了 vs 新 成立")
-    m = Model(rule)
-    m.legacy["tma_probe_real_device@tma_execution_probe_cta"] = {"exit": 139, "lines": []}
     _break(m, "tma.base_cta", "module_load", "error", "CUDA_ERROR_INVALID_PTX", exit_code=0)
     for s_ in ("launch", "sync", "verify"):
         m.execs[("tma.base_cta", "compute_121")]["cells"][s_] = Cell("not_run", "UPSTREAM_FAILED", "x")
+    m.legacy["tma_probe_real_device@tma_execution_probe_cta"] = {"exit": 101, "lines": [
+        "tma_compile_probe variant=cta arch=compute_121 result=success (selected for execution probe)",
+        "TMA 転送結果が期待するタイル"]}
     _expect(_verdict(m, "tma.base_cta").word == V_LOAD, "legacy・新ともに失敗なら整合（新のロード失敗を採る）")
+    # legacy の選択 arch が正式 target 外なら比較しない（成立のまま）。
+    m = Model(rule)
+    m.legacy["tma_probe_real_device@tma_execution_probe_cta"] = {"exit": 101, "lines": [
+        "tma_compile_probe variant=cta arch=compute_86 result=success (selected for execution probe)",
+        "TMA 転送結果が期待するタイル"]}
+    run, g0, v = _load(m)
+    _expect(v[("tma.base_cta", "compute_121")].word == V_OK, "正式 target 外の legacy は比較を省く")
+    md = render(rule, run, g0, v, load_claims(CLAIMS_PATH.read_text(encoding="utf-8")))
+    _expect("正式 target 外のため比較せず" in md, "比較を省いた legacy は R-LEGACY 表に注記する")
 
 
 FIXTURES = {

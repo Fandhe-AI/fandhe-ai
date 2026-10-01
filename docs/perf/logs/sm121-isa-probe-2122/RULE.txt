@@ -150,29 +150,53 @@
   設定してから起動する。occupancy_max_active_clusters 等は参考値（S3 の detail）。
   clu.dsmem: %cluster_ctarank・mapa.shared::cluster・ld.shared::cluster・barrier.cluster の
   往復。barrier.cluster のデッドロックは外部 timeout で記録される（TIMEOUT）。
-  起動時に cluster 次元を与える cuLaunchKernelEx 経路は本規則の対象外。
+  起動時に cluster 次元を与える cuLaunchKernelEx 経路（clu.rt2／clu.rt4）は 10b。
 
 10b. TMA（R-TMA-BASE・R-TMA-SEM・R-TMA-XFER。イシュー #2122 PR-B）
   global は 64x96 の f32（要素値は r*1000+c）。tensor map の encoder 引数（box・swizzle・OOB fill・
-  座標・expect_tx）はプローブごとに引数化し、期待値は持たず観測値を記録する。mbarrier の待ちは
-  上限回数（1,000,000 回）と状態語を持ち、ハングさせない（状態語 timeout は記録として残る）。
-  smem は転送前に番兵（0xFEEDFACE）で埋めてダンプする。
+  座標・expect_tx）はプローブごとに引数化し、期待値は持たず観測値を記録する。上限付きなのは
+  mbarrier の待ち（mbarrier.try_wait。上限 1,000,000 回と状態語 status・polls を持ち、完了しなくても
+  その待ちはハングしない）だけである。cp.async.bulk.wait_group 0（tma.store）と barrier.cluster
+  （tma.multicast・clu.dsmem）は上限を持たず、外部 timeout（orchestrate.sh）に頼る（TIMEOUT）。
+  上限に達した場合、転送中の TMA が CTA の終了後も smem へ書き続ける可能性が残る（未定義動作になりうる
+  ため、timeout を記録した観測は慎重に扱う）。smem は転送前に番兵（0xFEEDFACE）で埋めてダンプする。
+  順序: smem 初期化の後に全スレッドが fence.proxy.async.shared::cta、mbarrier を init したスレッドが
+  fence.mbarrier_init.release.cluster を出してから（multicast は barrier.cluster 同期のあとで）発行する。
     R-TMA-BASE   tma.base_cta（shared::cta）・tma.base_cluster（shared::cluster・cluster 1 起動）:
                  box 転送が完走し、要素座標（内側次元が先）の仮説どおりにビット一致するか（成立の判定）。
     R-TMA-SEM    観測値を候補モデルと突き合わせて記録する（S5 の detail の k=v トークン。判定語は
                  「受理のみ（実行意味論は未検証）」で、観測内容は R-TMA 観測表に出す）:
                  tma.coord（class=ELEM_INNER_FIRST／TRANSPOSED／NONE）・tma.oob_none／oob_nan／
                  oob_neg（inrange・oob_fill=ZERO／NAN／SENTINEL／OTHER・oob_distinct）・
-                 tma.oob_tx_partial（expect_tx を範囲内バイト数だけにしたときの status=complete／timeout）・
+                 tma.oob_tx_partial（expect_tx を範囲内バイト数 128 B だけにしたときの status=complete／timeout。
+                 部分完了の観測値は記録のみで、成否の判定には使わない。第 1 待ちのあと残りの 384 B を
+                 expect_tx で追加し phase 1 の完了を上限付きで待つ〈phase2=complete／timeout〉ことで、転送中の
+                 TMA が CTA の終了後に smem を書き続けるのを確認してから終了する。phase2=timeout は
+                 その危険が残ったことを意味する）・
                  tma.swz32／swz64／swz128（class=LINEAR／XOR_ADDR_BITS／SRC_B64_MODEL〈src の
                  tma_swizzled_chunk_a。64B のみ〉の一致集合。どれとも一致しなければ class=NONE とダンプ全文）。
+                 注: 本 box（タイル先頭 1024 B 整列・行 64 B）では SRC_B64_MODEL と XOR_ADDR_BITS は全語で
+                 同一になり区別できない（区別にはタイル先頭をずらす必要があるが、swizzle 使用時の smem 整列
+                 要件のため作れない）。両者は常に同時に現れ、本プローブは両者の優劣を判定しない。
+                 SEM の観測は S5 の detail のキー集合をプローブごとに固定する（coord・swz*: status・polls・
+                 phase2・polls2・class〈NONE のとき dump が加わる〉／oob_*: status・polls・phase2・polls2・
+                 inrange・oob_elems・oob_fill・oob_distinct）。過不足は完全性違反。status=timeout・
+                 phase2=timeout・class=NONE・inrange=MISMATCH・oob_fill に SENTINEL を含むものは、
+                 判定語（受理のみ）に埋もれないよう R-TMA 観測表の注意欄に明示する。
     R-TMA-XFER   tma.store（global の読み戻しが既知パターンと一致）・tma.bulk_cta／bulk_cluster
                  （cp.async.bulk の 256 B コピー）・tma.prefetch（完走の目印のみ。効果は観測できない）・
                  tma.multicast（cluster 2・両 CTA の smem が一致）。成立するかを判定する。
-  依存（事前登録）: tma.base_cta が 成立 でない target では、tma.* の他のプローブ（base_cluster を除く）の
-  うち 成立／受理のみ になるものを 判定不能（TMA_BASE_NOT_ESTABLISHED）にする。tma.multicast は
-  加えて clu.dims2 が 成立 でない target で 判定不能（CLU_DIMS2_NOT_ESTABLISHED）。自身が拒否・ロード失敗・
-  実行時エラー・結果不一致の場合は、その判定をそのまま採る（依存は「動いた」結果の意味を保証する条件）。
+  依存（事前登録。自身が 成立／受理のみ になるときに限り、依存先が同 target で 成立 でなければ
+  判定不能にする。評価順）:
+    - raw 起動（cuLaunchKernelEx）で動く tma.*・clu.rt2／rt4・ctl.rawmap は対照 ctl.raw に依存
+      （判定不能 RAW_LAUNCH_CTL_FAILED）。tensor map 引数を使う tma.*（bulk_* を除く）は ctl.rawmap にも
+      依存（RAW_TENSORMAP_CTL_FAILED）。
+    - tma.base_cta が 成立 でない target では、tma.* の他のプローブ（base_cluster を除く）を
+      判定不能（TMA_BASE_NOT_ESTABLISHED）にする。
+    - tma.multicast は加えて runtime cluster 起動の clu.rt2 が 成立 でない target で
+      判定不能（CLU_RT2_NOT_ESTABLISHED）。
+  自身が拒否・ロード失敗・実行時エラー・結果不一致の場合は、その判定をそのまま採る（依存は
+  「動いた」結果の意味を保証する条件）。
   clu.rt2／clu.rt4 は起動時に cluster 次元を与える（cuLaunchKernelEx の CLUSTER_DIMENSION 属性）補助で、
   clu.dims* と同じ出力を観測する。ctl.raw／ctl.rawmap は raw 起動経路の対照で、ctl.rawmap は
   tensor map 引数の ABI（128 B 整列の値渡し・後続引数）を観測する（cuTensorMapEncodeTiled が必要。
@@ -206,10 +230,13 @@
   `tma_compile_probe ... (selected for execution probe)` 行の arch（先頭で受理された arch）。分類:
   run_ok（`tma_execution_probe ... result=success`）／mismatch（exit 101 で転送結果の不一致メッセージ）／
   nvrtc_rejected（全 arch のコンパイル失敗の panic）／process_failed（その他の異常終了。選択 arch なしを含む）／
-  timeout。選択 arch が無い（target 不明）の legacy は、対応する新プローブの全 target に適用する。
+  timeout。比較の対象 target は legacy が選択した arch のみ（先頭で受理された arch だけ。他の arch の
+  結果は比較しない）。選択 arch が正式 target（TARGET 行）の外なら比較を省く（R-LEGACY 表に注記する）。
+  選択 arch が無い（target 不明）の legacy は、対応する新プローブの全 target に適用する。
   比較は成否のみ（既存の TMA プローブはロード失敗・実行時エラー等を区別できない panic になるため）:
-  legacy が run_ok でないのに新プローブが run_ok（またはその逆）なら LEGACY_CONTRADICTION、
-  legacy が timeout なら LEGACY_INCONCLUSIVE。tma_nvrtc_compile_probe は 6 行（3 arch x 2 変種）の記録のみで比較しない（分類 recorded）。
+  legacy が mismatch／nvrtc_rejected（run_ok でない確定した失敗）なのに新プローブが run_ok（またはその逆）なら
+  LEGACY_CONTRADICTION。legacy が timeout・process_failed（一過性の失敗を含む）なら RULE 13a と同じく
+  LEGACY_INCONCLUSIVE。tma_nvrtc_compile_probe は 6 行（3 arch x 2 変種）の記録のみで比較しない（分類 recorded）。
 
 13a. プロセス異常の扱い（方針: 測定そのものの打ち切り・異常終了は判定不能として集計を続け、
      記録の欠落・矛盾は改ざん・欠落の疑いとして完全性違反にする）
@@ -342,7 +369,9 @@ INDETERMINATE: LEGACY_CONTRADICTION
 INDETERMINATE: LEGACY_INCONCLUSIVE
 INDETERMINATE: HOPPER_HOME_DISAGREE
 INDETERMINATE: TMA_BASE_NOT_ESTABLISHED
-INDETERMINATE: CLU_DIMS2_NOT_ESTABLISHED
+INDETERMINATE: CLU_RT2_NOT_ESTABLISHED
+INDETERMINATE: RAW_LAUNCH_CTL_FAILED
+INDETERMINATE: RAW_TENSORMAP_CTL_FAILED
 INDETERMINATE: GUIDE_NO_PROBE
 INDETERMINATE: GUIDE_UNMEASURED
 G0REASON: G0_PROVENANCE
