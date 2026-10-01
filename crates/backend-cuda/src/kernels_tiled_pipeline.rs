@@ -1317,12 +1317,13 @@ impl TmaSwizzleA {
 /// 実機の smem ダンプと突き合わせる際に使う想定の関数（本 issue の
 /// スコープでは未実装。設計 doc §8「スコープ外・申し送り」参照）。
 ///
-/// 現時点ではクレート内部の単体テスト（本ファイル `mod tests`）からのみ
-/// 参照するため `#[cfg(test)]` 限定とする。#1976 で外部プローブ
-/// （`tests/` 配下の integration test）から参照する際は `pub` へ戻し
-/// `lib.rs` から re-export する（`#[cfg(test)]` は crate 内部限定で
-/// integration test からは到達できないため）。
-#[cfg(test)]
+/// クレート内部の単体テスト（本ファイル `mod tests`）に加え、
+/// `internal-diagnostics` feature 有効時は `lib.rs` から再公開し、
+/// integration test（`tests/sm121_isa_probe_*`。イシュー #2122 PR-B の TMA
+/// swizzle 意味論プローブが「src の B64 仮説」を候補モデルとして実機の smem
+/// ダンプと突き合わせる）から参照する。feature なしの通常ビルドでは従来どおり
+/// コンパイルされず、公開面は増えない（`cfg(test)` 以外の既存呼び出しもない）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn tma_swizzled_chunk_a(row: u32, kk: u32) -> u32 {
     let chunk = kk / 4;
     let swz = chunk ^ ((row >> 1) & 3);

@@ -5,7 +5,7 @@
 - 対応イシュー #2130（親 #2122「sm_121 可用命令の実機プローブ」・ルート #2121 Phase 4）。**設計のみ**の記録であり、候補カーネルの実装・GB10 実機実測・新規依存の追加は行わない。tolerance 定数・`ParityBaseline`・既存の採否判断（3×TF32 のユーザー判断を含む）・facade 公開 API は変更しない
 - 目的: CUDA f32 GEMM の最適化候補のうち REJECT／非推奨となった 4 件（StreamK #1359・persistent #1347・TMA Stage 1 #1975/#1976・3×TF32 #1356）について、不採用の原因が (H) ハードウェア限界か (I) 実装の不完全さか (D) 設計・机上モデルの前提かを既存の確定記録だけで再分類し、再挑戦すべき候補とそうでない候補を分ける。あわせて新規候補の opt-in 設計と本番結線の判断フローを定める
 - **#2122 は本 doc 作成時点で未完了**（プローブ結果なし）。本 doc は既存の確定記録だけで成立する構成とし、#2122 で確定する項目は §2.3 の差し込み欄を「未確定」のまま置く。推定で埋めない。#2122 完了時は同 issue 側で §2.3 を更新する
-- **追記（#2122 PR-A）**: プローブ基盤は追加済み（`docs/cuda-sm121-isa-probe.md`。実装は `crates/backend-cuda/tests/sm121_isa_probe_*`、判定規則は `docs/perf/logs/sm121-isa-probe-2122/RULE.txt`）。**GB10 実測は未実施で、結果は未実測のまま**であり、§2.3 の値は変更していない（表の「プローブ ID・RULE 条項」列は反映先の対応を示すだけ）。TMA の意味論プローブは別 PR の範囲（未実装）
+- **追記（#2122 PR-A）**: プローブ基盤は追加済み（`docs/cuda-sm121-isa-probe.md`。実装は `crates/backend-cuda/tests/sm121_isa_probe_*`、判定規則は `docs/perf/logs/sm121-isa-probe-2122/RULE.txt`）。**GB10 実測は未実施で、結果は未実測のまま**であり、§2.3 の値は変更していない（表の「プローブ ID・RULE 条項」列は反映先の対応を示すだけ）。TMA の意味論プローブ（`tma.*`）・既存 TMA プローブの再実行・raw 起動経路は PR-B で追加済み（結果は未実測）
 - 出典の実測値は各 doc を正とし、本 doc は転記と分類のみを行う
 
 ## 1. 前提の訂正
@@ -23,7 +23,7 @@
 | 機能 | sm_121 での状態 | 出典 |
 |---|---|---|
 | `mma.sync`・`ldmatrix`・`cp.async` | 可（実装実績あり） | `cuda-tensor-core-design.md` §11.1 |
-| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機で NVRTC compile・CTA 実行・cluster 実行の 3 プローブが成立。`shared::cta` と cluster variant の両方で bit 一致。要素座標・部分 OOB・smem 配置ダンプの意味論プローブ 3 件は未実装で、その範囲の検証は未了） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
+| TMA（`cp.async.bulk.tensor`） | 可（GB10 実機で NVRTC compile・CTA 実行・cluster 実行の 3 プローブが成立。`shared::cta` と cluster variant の両方で bit 一致。要素座標・部分 OOB・smem 配置ダンプの意味論プローブ 3 件は GB10 では未実行で、その範囲の検証は未了（#2122 PR-B で `tma.*` として実装済み・実機未実測）） | `backend-cuda-tma-gemm-load-design.md` §10.8 |
 | wgmma・tcgen05・TMEM | 不可（静的読解。実機での再確認は #2122 待ち） | `cuda-tensor-core-design.md` §11.1 |
 | cluster（実用） | 1×1×1 のみ（静的読解。launch 可否の実機確認は #2122 待ち） | 同 §11.1 |
 | `setmaxnreg` | **未実測**（プローブ実装はあるが実機実行は未了） | 同 §13・`backend-cuda-tma-gemm-load-design.md` §2 F2 |
@@ -35,7 +35,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 
 ### 2.3 #2122 確定値の差し込み欄（未確定）
 
-| 項目 | 状態 | 依存する候補 | プローブ ID・RULE 条項（#2122 PR-A。結果は未実測） |
+| 項目 | 状態 | 依存する候補 | プローブ ID・RULE 条項（#2122 PR-A／PR-B。結果は未実測） |
 |---|---|---|---|
 | cluster サイズ >1 の launch 可否 | 未確定（#2122 待ち） | C3(b) | `clu.dims1`／`dims2`／`dims4`／`dims8`／`dims16`・R-CLU |
 | DSMEM（`mapa`／`ld.shared::cluster`）の可否 | 未確定（#2122 待ち） | C3(b) | `clu.dsmem`・R-CLU |
@@ -44,7 +44,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 | `CLOCK_RATE` 等の未実測属性 | 未確定（#2122 待ち） | bytes/cycle 換算を要する分析全般 | `attr.misc`／`attr.limits`／`attr.cluster`・R-GUIDE |
 | tcgen05／TMEM の到達可否 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `tc5.alloc`／`tc5.ld`／`tc5.cross`・R-TC5 |
 | wgmma の受理 | 未確定（#2122 待ち） | 本 issue では対象外（§1-1） | `wgmma.m64n8k16`（受理段のみ）・R-HOPPER |
-| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置） | 未確定（別 PR で追加予定・未実装） | C4（TMA Stage 2）ほか §3.3 | 本 PR の範囲外（プローブ・RULE 条項なし） |
+| TMA の意味論（要素座標・部分 OOB・swizzle の smem 配置・store・bulk・prefetch・multicast） | 未確定（#2122 PR-B でプローブ追加済み。GB10 実測待ち） | C4（TMA Stage 2）ほか §3.3 | `tma.base_cta`／`tma.base_cluster`（R-TMA-BASE）・`tma.coord`／`tma.oob_none`／`tma.oob_nan`／`tma.oob_neg`／`tma.swz32`／`tma.swz64`／`tma.swz128`（R-TMA-SEM。観測の記録）・`tma.store`／`tma.bulk_cta`／`tma.bulk_cluster`／`tma.prefetch`／`tma.multicast`（R-TMA-XFER） |
 | arch 接尾辞（`a`／`f`）の要否 | 未確定（#2122 待ち） | 上記各候補 | 全プローブの target 別セル（`compute_121`／`compute_121a`／`compute_121f`）・`macro.arch` |
 
 

@@ -677,6 +677,11 @@ pub use gemm_auto::{
 };
 #[cfg(feature = "internal-diagnostics")]
 pub use kernels_tiled_pipeline::TmaSwizzleA;
+// イシュー #2122（PR-B）: TMA swizzle 意味論プローブが候補モデルとして再利用する
+// ホスト側モデル（`TmaSwizzleA::B64` 仮説の逐語）。`TmaSwizzleA` と同じゲート
+// （`internal-diagnostics`。既定 off）で公開し、通常ビルドの公開面は増やさない。
+#[cfg(feature = "internal-diagnostics")]
+pub use kernels_tiled_pipeline::tma_swizzled_chunk_a;
 // `F16MatrixUnitImpl`（`CudaGemmAuto::run_f16` の内部ディスパッチ実装選択を
 // 表す列挙型）・`CudaGemmAuto::f16_matrix_unit_impl`（その診断アクセサ）は
 // 「診断・テスト用」「利用者向け切替 API ではない」という意図を持つ内部

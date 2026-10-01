@@ -13,7 +13,8 @@ use super::kernels_arch::{self as ka, MACRO_CANDIDATES, TC5_MAGIC};
 use super::kernels_cluster as kc;
 use super::kernels_mma as km;
 use super::model::{self, F32x2Op};
-use super::types::{Expect, Kind, Layout, Policy};
+use super::model_tma::TmaSpec;
+use super::types::{Expect, Kind, Launch, Layout, Policy};
 
 /// 検証結果（S6／record_only の記録）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,10 @@ pub struct ProbeSpec {
     pub out_words: usize,
     pub make_input: fn() -> Vec<u32>,
     pub check: Check,
+    /// 起動方式（TMA・runtime cluster のプローブは raw の `cuLaunchKernelEx`）。
+    pub launch: Launch,
+    /// TMA の encoder 引数（tensor map を使うプローブのみ）。
+    pub tma: Option<&'static TmaSpec>,
 }
 
 impl ProbeSpec {
@@ -364,6 +369,8 @@ macro_rules! probe {
             out_words: $out,
             make_input: $input,
             check: $check,
+            launch: Launch::Plain,
+            tma: None,
         }
     };
 }
@@ -1054,6 +1061,8 @@ pub fn probes() -> Vec<ProbeSpec> {
             out_words: (2 * n) as usize,
             make_input: in_small,
             check: Check::Exact(exp),
+            launch: Launch::Plain,
+            tma: None,
         });
     }
     v.push(ProbeSpec {
@@ -1074,7 +1083,10 @@ pub fn probes() -> Vec<ProbeSpec> {
         out_words: 2,
         make_input: in_small,
         check: Check::Exact(exp_dsmem),
+        launch: Launch::Plain,
+        tma: None,
     });
+    v.extend(super::registry_tma::tma_probes());
     // デバイス属性（R-GUIDE の測定元）。カーネルを持たない。
     for id in ["attr.limits", "attr.cluster", "attr.misc"] {
         v.push(ProbeSpec {
@@ -1095,6 +1107,8 @@ pub fn probes() -> Vec<ProbeSpec> {
             out_words: 0,
             make_input: empty,
             check: Check::Skip,
+            launch: Launch::Plain,
+            tma: None,
         });
     }
     // symbol は id の '.' を '_' に置換した C シンボル名（tc5.cross は tc5.alloc のソースを使うため
@@ -1169,6 +1183,24 @@ pub fn symbol_of(id: &str) -> Option<&'static str> {
         ("clu.dims8", "clu_dims8"),
         ("clu.dims16", "clu_dims16"),
         ("clu.dsmem", "clu_dsmem"),
+        ("ctl.raw", "ctl_raw"),
+        ("ctl.rawmap", "ctl_rawmap"),
+        ("clu.rt2", "clu_rt2"),
+        ("clu.rt4", "clu_rt4"),
+        ("tma.base_cta", "tma_load_cta"),
+        ("tma.base_cluster", "tma_load_cluster"),
+        ("tma.coord", "tma_load_cta"),
+        ("tma.oob_none", "tma_load_cta"),
+        ("tma.oob_nan", "tma_load_cta"),
+        ("tma.oob_neg", "tma_load_cta"),
+        ("tma.swz32", "tma_load_cta"),
+        ("tma.swz64", "tma_load_cta"),
+        ("tma.swz128", "tma_load_cta"),
+        ("tma.store", "tma_store_cta"),
+        ("tma.prefetch", "tma_prefetch"),
+        ("tma.multicast", "tma_multicast"),
+        ("tma.bulk_cta", "tma_bulk_cta"),
+        ("tma.bulk_cluster", "tma_bulk_cluster"),
         ("attr.limits", ""),
         ("attr.cluster", ""),
         ("attr.misc", ""),
@@ -1182,9 +1214,22 @@ pub fn probe_by_id(id: &str) -> Option<ProbeSpec> {
 }
 
 /// 条項 ID の全集合（RULE.txt の `CLAUSE:` 行・`aggregate.py` の `CLAUSES` と一致させる）。
-pub const CLAUSES: [&str; 12] = [
-    "G0", "R-STAGE", "R-CTL", "R-HOME", "R-TC5", "R-GUIDE", "R-MMA", "R-CLU", "R-SNR", "R-HOPPER",
-    "R-LEGACY", "R-COMMON",
+pub const CLAUSES: [&str; 15] = [
+    "G0",
+    "R-STAGE",
+    "R-CTL",
+    "R-HOME",
+    "R-TC5",
+    "R-GUIDE",
+    "R-MMA",
+    "R-CLU",
+    "R-SNR",
+    "R-HOPPER",
+    "R-TMA-BASE",
+    "R-TMA-SEM",
+    "R-TMA-XFER",
+    "R-LEGACY",
+    "R-COMMON",
 ];
 
 /// デバイス属性プローブが記録する属性（名前 → CUdevice_attribute）。名前は

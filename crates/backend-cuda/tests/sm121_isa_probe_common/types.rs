@@ -252,3 +252,13 @@ pub const VIRT_ARCH_WHITELIST: [&str; 5] = [
     "compute_86",
     "compute_100a",
 ];
+
+/// カーネルの起動方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// cudarc の safe な `launch_builder`（PR-A の経路）。
+    Plain,
+    /// `cuModuleLoadData`／`cuLaunchKernelEx`（raw。`CUtensorMap` の値渡しと、実行時の
+    /// cluster 次元の指定が必要なプローブ用）。`cluster` は cluster 次元（0 = 属性なし）。
+    Raw { cluster: u32 },
+}

@@ -4,7 +4,7 @@
 固定日: 2026-10-01（本ファイルを含むコミット時点。GB10 実測はこの後に行う）
 対象: sm_121（DGX Spark GB10）で使える命令とアーキ固有機能のプローブ（tcgen05・
       mma 形状・wgmma・setmaxnreg・cluster・DSMEM・デバイス属性・Hopper との差分）。
-      TMA（cp.async.bulk.tensor）の意味論プローブは本ファイルの対象外（別 PR の範囲）。
+      TMA（cp.async.bulk.tensor）の意味論プローブは 10b（R-TMA-BASE／R-TMA-SEM／R-TMA-XFER）。
       本ファイルは「実装が検出できること」だけを規定する。
 
 本ファイルの機械可読行（行頭が `KEY: ` で始まる行）が唯一の契約である。
@@ -110,7 +110,7 @@
       それ以外は policy が verify なら 成立、accept_only／record_only なら
       受理のみ（実行意味論は未検証）。
   (8) snr.*（R-SNR）の legacy 照合（正式 target の compute_121・compute_121a。legacy ログは
-      official では 4 件すべて必須で、欠ければ完全性違反。開発機スモークでは 0 件）。legacy の
+      official では 7 件すべて必須で、欠ければ完全性違反。開発機スモークでは 0 件）。legacy の
       結論と新プローブの結論の分類が食い違えば 判定不能（LEGACY_CONTRADICTION）。legacy の
       分類が inconclusive／timeout のときは比較できないため 判定不能（LEGACY_INCONCLUSIVE）。
       分類は run_ok／mismatch／load_failed／runtime_error／nvrtc_rejected／inconclusive／timeout。
@@ -150,7 +150,74 @@
   設定してから起動する。occupancy_max_active_clusters 等は参考値（S3 の detail）。
   clu.dsmem: %cluster_ctarank・mapa.shared::cluster・ld.shared::cluster・barrier.cluster の
   往復。barrier.cluster のデッドロックは外部 timeout で記録される（TIMEOUT）。
-  起動時に cluster 次元を与える cuLaunchKernelEx 経路は本規則の対象外。
+  起動時に cluster 次元を与える cuLaunchKernelEx 経路（clu.rt2／clu.rt4）は 10b。
+
+10b. TMA（R-TMA-BASE・R-TMA-SEM・R-TMA-XFER。イシュー #2122 PR-B）
+  global は 64x96 の f32（要素値は r*1000+c）。tensor map の encoder 引数（box・swizzle・OOB fill・
+  座標・expect_tx）はプローブごとに引数化し、期待値は持たず観測値を記録する。
+  待ちの方針（上限到達時に転送先の smem を読まない）: mbarrier の待ち（mbarrier.try_wait）は
+  まず上限回数（1,000,000 回）まで数える。上限に達して未完了なら、転送先の smem は読まず、到達の
+  事実を global（out[0] のマーカー）へ残して __threadfence_system() で出したうえで、上限なしの待ちに
+  移る。完了しなければカーネルは終了せず、外部 timeout（orchestrate.sh）がプロセスごと打ち切り、
+  aggregate.py は TIMEOUT（判定不能。13a）として扱う（ホストはカーネルの完了を待てないため、記録上の
+  正は外部 timeout の proc 記録で、マーカーはホストから読めない）。したがって「完了を確認する前に
+  転送先を読む」経路と「転送中に CTA が終了する」経路はなく、CTA 終了後の smem への書き込み
+  （未定義動作）は起こらない。cp.async.bulk.wait_group 0（tma.store）と barrier.cluster
+  （tma.multicast・clu.dsmem）も上限を持たず外部 timeout に頼る（TIMEOUT）。ダンプ・読み戻しは待ちが
+  完了した後にだけ行う。smem は転送前に番兵（0xFEEDFACE）で埋めてダンプする。
+  出力ヘッダは全 TMA カーネル共通で [polls] の 1 語（tensor 系 load・multicast はスロットごと）。
+  registry テストがカーネルの格納と checker の解釈の一致を検査する。
+  tx-count の規約: mbarrier.arrive.expect_tx の総量は、同じ phase で実際に届く転送量（OOB を含む
+  box 全体・bulk の長さ・multicast では宛先 CTA ごとの受信量）と一致させ、待つ phase には必ず転送が来る。
+  tx-count を実際の転送量より少なく期待する構成は、アンダーフロー（未定義動作）になりうるため計測しない。
+  registry テストが、宣言した box／bulk のバイト数と expect_tx の一致・init の count 1・arrive の
+  1 か所・待ちの 1 回（parity 0）をソース構造として静的に検査する（実行時の転送量までは保証しない）。
+  撤去の経緯: 旧 tma.oob_tx_partial（expect_tx を範囲内の 128 B だけにして残りを第 2 phase で追加）は、
+  同じ転送の残量を第 2 phase では補えず、第 1 待ちが完了しない／第 2 phase に転送が来ず永久に待ち続け、
+  観測が得られなかった（PR #2475 の Codex P1・Bugbot High）。部分 expect_tx は未定義動作を突くため
+  安全な観測方法がなく、プローブごと撤去した。
+  順序: smem 初期化の後に全スレッドが fence.proxy.async.shared::cta、mbarrier を init したスレッドが
+  fence.mbarrier_init.release.cluster を出してから（multicast は barrier.cluster 同期のあとで）発行する。
+    R-TMA-BASE   tma.base_cta（shared::cta）・tma.base_cluster（shared::cluster・cluster 1 起動）:
+                 box 転送が完走し、要素座標（内側次元が先）の仮説どおりにビット一致するか（成立の判定）。
+    R-TMA-SEM    観測値を候補モデルと突き合わせて記録する（S5 の detail の k=v トークン。判定語は
+                 「受理のみ（実行意味論は未検証）」で、観測内容は R-TMA 観測表に出す）:
+                 tma.coord（class=ELEM_INNER_FIRST／TRANSPOSED／NONE）・tma.oob_none／oob_nan／
+                 oob_neg（inrange・oob_fill=ZERO／NAN／SENTINEL／OTHER・oob_distinct）・
+                 〈OOB 要素が complete_tx のバイト数に含まれるか、の問いは oob_none／oob_nan で答える。どちらも
+                 expect_tx を OOB を含む box 全体のバイト数（512 B）にしており、完了すれば「OOB も数える」と
+                 判定し、完了しなければ上限なしの待ちのまま外部 timeout で打ち切られ TIMEOUT〈判定不能〉
+                 になる（事前登録）。tx-count を少なく期待する形では測らない〉・
+                 tma.swz32／swz64／swz128（class=LINEAR／XOR_ADDR_BITS／SRC_B64_MODEL〈src の
+                 tma_swizzled_chunk_a。64B のみ〉の一致集合。どれとも一致しなければ class=NONE とダンプ全文）。
+                 注: 本 box（タイル先頭 1024 B 整列・行 64 B）では SRC_B64_MODEL と XOR_ADDR_BITS は全語で
+                 同一になり区別できない（区別にはタイル先頭をずらす必要があるが、swizzle 使用時の smem 整列
+                 要件のため作れない）。両者は常に同時に現れ、本プローブは両者の優劣を判定しない。
+                 SEM の観測は S5 の detail のキー集合をプローブごとに固定する（coord・swz*: polls・class〈NONE のとき
+                 dump が加わる〉／oob_*: polls・inrange・oob_elems・oob_fill・oob_distinct）。過不足は完全性違反。class=NONE・inrange=MISMATCH・
+                 oob_fill に SENTINEL を含むものは、判定語（受理のみ）に埋もれないよう R-TMA 観測表の注意欄に
+                 明示する（待ちの失敗は観測値ではなく TIMEOUT として現れる）。
+    R-TMA-XFER   tma.store（global の読み戻しが既知パターンと一致）・tma.bulk_cta／bulk_cluster
+                 （cp.async.bulk の 256 B コピー）・tma.prefetch（完走の目印のみ。効果は観測できない）・
+                 tma.multicast（cluster 2・両 CTA の smem が一致）。成立するかを判定する。成立の detail
+                 （S6）のキー集合もヘッダ長に従い固定する（base: polls・box_words・bit_exact／
+                 bulk: polls・words・bit_exact／store: global_words・bit_exact／prefetch: completion_magic／
+                 multicast: cta0_・cta1_ それぞれ polls・mismatched_words）。過不足は完全性違反。
+  依存（事前登録。自身が 成立／受理のみ になるときに限り、依存先が同 target で 成立 でなければ
+  判定不能にする。評価順）:
+    - raw 起動（cuLaunchKernelEx）で動く tma.*・clu.rt2／rt4・ctl.rawmap は対照 ctl.raw に依存
+      （判定不能 RAW_LAUNCH_CTL_FAILED）。tensor map 引数を使う tma.*（bulk_* を除く）は ctl.rawmap にも
+      依存（RAW_TENSORMAP_CTL_FAILED）。
+    - tma.base_cta が 成立 でない target では、tma.* の他のプローブ（base_cluster を除く）を
+      判定不能（TMA_BASE_NOT_ESTABLISHED）にする。
+    - tma.multicast は加えて runtime cluster 起動の clu.rt2 が 成立 でない target で
+      判定不能（CLU_RT2_NOT_ESTABLISHED）。
+  自身が拒否・ロード失敗・実行時エラー・結果不一致の場合は、その判定をそのまま採る（依存は
+  「動いた」結果の意味を保証する条件）。
+  clu.rt2／clu.rt4 は起動時に cluster 次元を与える（cuLaunchKernelEx の CLUSTER_DIMENSION 属性）補助で、
+  clu.dims* と同じ出力を観測する。ctl.raw／ctl.rawmap は raw 起動経路の対照で、ctl.rawmap は
+  tensor map 引数の ABI（128 B 整列の値渡し・後続引数）を観測する（cuTensorMapEncodeTiled が必要。
+  開発機の sm_86 では encode が CUDA_ERROR_NOT_SUPPORTED になる）。
 
 11. setmaxnreg・Hopper との差分（R-SNR・R-HOPPER）
   snr.dec・snr.incdec は既存の setmaxnreg_probe_* 4 ファイルと同じ命令列を再実行する
@@ -173,7 +240,20 @@
   完全性違反）。結論が残っているのに異常終了（101 の corrupted 以外）も完全性違反。
   対応: dec_base→(snr.dec, compute_121)・dec_accel→(snr.dec, compute_121a)・
   incdec_base→(snr.incdec, compute_121)・incdec_accel→(snr.incdec, compute_121a)。
-  tma_probe_real_device の再実行は本規則の対象外。
+  official では legacy ログ 7 件（setmaxnreg 4 件・TMA 3 件）が必須。
+  TMA の既存プローブ（tests/tma_probe_real_device.rs）の 3 テストも 1 テストずつ別プロセスで再実行する
+  （legacy 名は <テストバイナリ>@<テスト関数>）: tma_execution_probe（cluster 変種）→
+  (tma.base_cluster)・tma_execution_probe_cta → (tma.base_cta)。対象 target は legacy ログの
+  `tma_compile_probe ... (selected for execution probe)` 行の arch（先頭で受理された arch）。分類:
+  run_ok（`tma_execution_probe ... result=success`）／mismatch（exit 101 で転送結果の不一致メッセージ）／
+  nvrtc_rejected（全 arch のコンパイル失敗の panic）／process_failed（その他の異常終了。選択 arch なしを含む）／
+  timeout。比較の対象 target は legacy が選択した arch のみ（先頭で受理された arch だけ。他の arch の
+  結果は比較しない）。選択・成功行の arch が正式 target（TARGET 行。既存テストの PROBE_ARCHS と同じ 3 値）の外なら、比較を省かず完全性違反（fail-closed。ログの改ざん・取り違えでしか起きない）。setmaxnreg の legacy は対象 arch が compute_121／121a の固定で、いずれも正式 target に含まれ、省略分岐は無い。
+  選択 arch が無い（target 不明）の legacy は、対応する新プローブの全 target に適用する。
+  比較は成否のみ（既存の TMA プローブはロード失敗・実行時エラー等を区別できない panic になるため）:
+  legacy が mismatch／nvrtc_rejected（run_ok でない確定した失敗）なのに新プローブが run_ok（またはその逆）なら
+  LEGACY_CONTRADICTION。legacy が timeout・process_failed（一過性の失敗を含む）なら RULE 13a と同じく
+  LEGACY_INCONCLUSIVE。tma_nvrtc_compile_probe は 6 行の記録のみで比較しない（分類 recorded）。6 行は（変種 cluster／cta）x（arch compute_121／121a／121f）の直積に過不足なく一致することを要求し、件数だけの検査にしない（欠落・重複・未知はいずれも完全性違反。集合照合の方針は guide_claims の claim_id 集合・setmaxnreg 終端行の arch 照合も同じ）。
 
 13a. プロセス異常の扱い（方針: 測定そのものの打ち切り・異常終了は判定不能として集計を続け、
      記録の欠落・矛盾は改ざん・欠落の疑いとして完全性違反にする）
@@ -185,7 +265,7 @@
   | exec（(プローブ, target) ごと） | 欠落段の先頭に timeout を合成し判定不能（TIMEOUT）。ctl 段の打ち切りを含む | 同（PROCESS_FAILED）。101 は mismatch を伴う完了のみ許容 | 完全性違反（全セル・done・env が必須）。完走しているのに非 0（101＋mismatch を除く）も完全性違反 |
   | legacy | 分類 timeout → 新プローブ側を判定不能（LEGACY_INCONCLUSIVE） | 結論なしなら分類 process_failed → 同（LEGACY_INCONCLUSIVE）。結論が残っているのは完全性違反 | 完全性違反（終端の結論がちょうど 1 つ） |
   どのプロセス種別でも、proc 記録（SM121_PROBE_PROC 行）の欠落・重複・識別子の不一致は
-  完全性違反。official では legacy 4 件・dump・compile・exec 全件のファイルが必須。
+  完全性違反。official では legacy 7 件・dump・compile・exec 全件のファイルが必須。
 
 13. 入力の完全性（R-COMMON・fail-closed）
   aggregate.py は LogIntegrityError を送出し、正式な集計を一切出力せず非ゼロ終了する:
@@ -199,7 +279,7 @@
       13a の表。dump の値は記録のみ）
     - セルの arch が期待と異なる（exec: ctl は target・S2 は実アーキ・他は仮想アーキ、
       FIXEDARCH 行のプローブは固定アーキ。compile: home は PROBE 行の home=・hopper は sm_90a）
-    - official で legacy ログが 4 件そろわない（dev では 0 件を要求）
+    - official で legacy ログが 7 件そろわない（dev では 0 件を要求）
     - k=v 形式の記録（attr の detail・legacy 行）内の重複キー
     - env_info.txt の値の不正（git_clean が 0／1 でない・時刻の書式）
     - 未マスクの絶対パス（/home/<name>。検査するのはこの形のみで、ホスト名の残存は検出しない）
@@ -217,7 +297,7 @@
   | device_attributes_dump | 1・2 番目 | PROCESS 行の timeout= | device_attributes_dump.log | 記録のみ |
   | compile | 1・3 番目 | PROCESS 行の timeout= | compile.log | S1／S2／home／hopper |
   | exec_matrix | PROBE 行 × 正式 TARGET 行 を 1 プロセスずつ | PROCESS 行の timeout= | exec/<probe>@<target>.log | 全セル |
-  | legacy | 4（setmaxnreg_probe_* 各 1）・最後 | PROCESS 行の timeout= | legacy-<name>.log | R-LEGACY |
+  | legacy | 7（setmaxnreg_probe_* 4・tma_probe_real_device の 3 テスト各 1）・最後 | PROCESS 行の timeout= | legacy-<name>.log | R-LEGACY |
   provenance（env_info.txt の git_head・git_clean）は、git 作業ツリーなら git から、GB10 ノードの
   ように .git の無い転送先では転送元が書いた .rev-stamp（1 行目: HEAD の 40 桁 16 進・
   2 行目: dirty=<件数>。dirty=0 のときだけ git_clean=1）から読む。どちらも得られなければ
@@ -254,6 +334,9 @@ CLAUSE: R-MMA
 CLAUSE: R-CLU
 CLAUSE: R-SNR
 CLAUSE: R-HOPPER
+CLAUSE: R-TMA-BASE
+CLAUSE: R-TMA-SEM
+CLAUSE: R-TMA-XFER
 CLAUSE: R-LEGACY
 CLAUSE: R-COMMON
 STAGE: ctl
@@ -302,6 +385,10 @@ INDETERMINATE: UNEXPECTED_ACCEPT
 INDETERMINATE: LEGACY_CONTRADICTION
 INDETERMINATE: LEGACY_INCONCLUSIVE
 INDETERMINATE: HOPPER_HOME_DISAGREE
+INDETERMINATE: TMA_BASE_NOT_ESTABLISHED
+INDETERMINATE: CLU_RT2_NOT_ESTABLISHED
+INDETERMINATE: RAW_LAUNCH_CTL_FAILED
+INDETERMINATE: RAW_TENSORMAP_CTL_FAILED
 INDETERMINATE: GUIDE_NO_PROBE
 INDETERMINATE: GUIDE_UNMEASURED
 G0REASON: G0_PROVENANCE
@@ -364,6 +451,24 @@ PROBE: clu.dims4 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect
 PROBE: clu.dims8 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
 PROBE: clu.dims16 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
 PROBE: clu.dsmem ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: ctl.raw ac=BASE clause=R-CTL home=sm_80 policy=verify layout=none expect=none
+PROBE: ctl.rawmap ac=BASE clause=R-CTL home=sm_90 policy=verify layout=none expect=none
+PROBE: clu.rt2 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: clu.rt4 ac=AC5 clause=R-CLU home=sm_90 policy=verify layout=none expect=none
+PROBE: tma.base_cta ac=AC3 clause=R-TMA-BASE home=sm_90 policy=verify layout=none expect=none
+PROBE: tma.base_cluster ac=AC3 clause=R-TMA-BASE home=sm_90 policy=verify layout=none expect=none
+PROBE: tma.coord ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
+PROBE: tma.oob_none ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
+PROBE: tma.oob_nan ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
+PROBE: tma.oob_neg ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
+PROBE: tma.swz32 ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
+PROBE: tma.swz64 ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
+PROBE: tma.swz128 ac=AC3 clause=R-TMA-SEM home=sm_90 policy=record_only layout=none expect=none
+PROBE: tma.store ac=AC3 clause=R-TMA-XFER home=sm_90 policy=verify layout=none expect=none
+PROBE: tma.prefetch ac=AC3 clause=R-TMA-XFER home=sm_90 policy=verify layout=none expect=none
+PROBE: tma.multicast ac=AC3 clause=R-TMA-XFER home=sm_90 policy=verify layout=none expect=none
+PROBE: tma.bulk_cta ac=AC3 clause=R-TMA-XFER home=sm_90 policy=verify layout=none expect=none
+PROBE: tma.bulk_cluster ac=AC3 clause=R-TMA-XFER home=sm_90 policy=verify layout=none expect=none
 PROBE: attr.limits ac=AC2 clause=R-GUIDE home=sm_80 policy=attr layout=none expect=none
 PROBE: attr.cluster ac=AC2 clause=R-GUIDE home=sm_80 policy=attr layout=none expect=none
 PROBE: attr.misc ac=AC2 clause=R-GUIDE home=sm_80 policy=attr layout=none expect=none
@@ -375,4 +480,7 @@ PROCESS: legacy setmaxnreg_probe_dec_base_real_device timeout=180
 PROCESS: legacy setmaxnreg_probe_dec_accel_real_device timeout=180
 PROCESS: legacy setmaxnreg_probe_incdec_base_real_device timeout=180
 PROCESS: legacy setmaxnreg_probe_incdec_accel_real_device timeout=180
+PROCESS: legacy tma_probe_real_device@tma_nvrtc_compile_probe timeout=180
+PROCESS: legacy tma_probe_real_device@tma_execution_probe timeout=180
+PROCESS: legacy tma_probe_real_device@tma_execution_probe_cta timeout=180
 FIXEDARCH: tc5.cross compute_100a sm_100a

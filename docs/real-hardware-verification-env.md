@@ -186,7 +186,7 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   ./docs/perf/logs/sm121-isa-probe-2122/orchestrate.sh'
 ```
 
-実測の結果欄は未記入（#2122 PR-A は基盤のみ）。結果の転記手順は §8「結果の記録先」と `docs/cuda-sm121-isa-probe.md` §7 に従う。
+実測の結果欄は未記入（#2122 PR-A・PR-B は基盤とプローブのみ）。legacy は `setmaxnreg_probe_*` 4 件に加え、`tma_probe_real_device` の 3 テストを `tma_probe_real_device@<テスト関数>` として 1 テストずつ別プロセスで再実行する。結果の転記手順は §8「結果の記録先」と `docs/cuda-sm121-isa-probe.md` §7 に従う。
 
 ## 5. PyTorch 参照値の再計測（同一実機）
 
