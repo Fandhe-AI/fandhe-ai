@@ -1,0 +1,7 @@
+rec kind=env platform=windows arch=x86_64
+rec kind=cache_before RUST_AI_CUDA_CACHE_DIR=C:\cache2393\nvrtc dir_exists=false files=0
+rec kind=devices available=[Cpu,_Cuda(0)]
+rec kind=tf32_opt_in enabled=false
+rec kind=cuda_select result=ok
+rec kind=gemm_run iter=0 result=err debug=Backend(CudaUnavailable("nvrtc_compile_error:_CompileError_{_nvrtc:_NvrtcError(NVRTC_ERROR_COMPILATION),_options:_[\"--gpu-architecture=compute_75\"],_log:_\"default_program(2):_catastrophic_error:_could_not_open_source_file_\\\"cuda_fp16.h\\\"_(no_directories_in_search_list)\\n__#include_<cuda_fp16.h>\\n________________________^\\n\\n1_catastrophic_error_detected_in_the_compilation_of_\\\"default_program\\\".\\nCompilation_terminated.\\n\"_}"))
+summary status=gemm_error error=Backend(CudaUnavailable("nvrtc_compile_error:_CompileError_{_nvrtc:_NvrtcError(NVRTC_ERROR_COMPILATION),_options:_[\"--gpu-architecture=compute_75\"],_log:_\"default_program(2):_catastrophic_error:_could_not_open_source_file_\\\"cuda_fp16.h\\\"_(no_directories_in_search_list)\\n__#include_<cuda_fp16.h>\\n________________________^\\n\\n1_catastrophic_error_detected_in_the_compilation_of_\\\"default_program\\\".\\nCompilation_terminated.\\n\"_}"))

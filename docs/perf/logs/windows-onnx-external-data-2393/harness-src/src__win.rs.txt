@@ -1,0 +1,207 @@
+//! Windows 専用の手書き FFI（windows-sys 等は使わない）。junction（mount point
+//! reparse）の作成・reparse 削除・ボリュームのファイルシステム名取得。
+
+use std::ffi::c_void;
+use std::io;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+
+extern "system" {
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sa: *mut c_void,
+        disp: u32,
+        flags: u32,
+        template: *mut c_void,
+    ) -> *mut c_void;
+    fn CloseHandle(h: *mut c_void) -> i32;
+    fn DeviceIoControl(
+        h: *mut c_void,
+        code: u32,
+        inbuf: *const c_void,
+        insize: u32,
+        outbuf: *mut c_void,
+        outsize: u32,
+        returned: *mut u32,
+        overlapped: *mut c_void,
+    ) -> i32;
+    fn GetVolumePathNameW(file: *const u16, buf: *mut u16, len: u32) -> i32;
+    fn GetVolumeInformationW(
+        root: *const u16,
+        vol_name: *mut u16,
+        vol_name_len: u32,
+        serial: *mut u32,
+        max_comp: *mut u32,
+        flags: *mut u32,
+        fs_name: *mut u16,
+        fs_name_len: u32,
+    ) -> i32;
+}
+
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const OPEN_EXISTING: u32 = 3;
+const SHARE_ALL: u32 = 7;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+const FSCTL_DELETE_REPARSE_POINT: u32 = 0x0009_00AC;
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+pub fn wide(p: &Path) -> Vec<u16> {
+    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn open_reparse(path: &Path) -> io::Result<*mut c_void> {
+    let w = wide(path);
+    // SAFETY: w は NUL 終端の有効な UTF-16 バッファ。他引数は NULL/定数。
+    let h = unsafe {
+        CreateFileW(
+            w.as_ptr(),
+            GENERIC_WRITE,
+            SHARE_ALL,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if h as isize == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(h)
+    }
+}
+
+/// mount point の REPARSE_DATA_BUFFER を組む（substitute = `\??\<abs>`、print = `<abs>`）。
+pub fn mount_point_buffer(target_abs: &str) -> Vec<u8> {
+    let subst: Vec<u16> = format!("\\??\\{target_abs}").encode_utf16().collect();
+    let print: Vec<u16> = target_abs.encode_utf16().collect();
+    let sl = (subst.len() * 2) as u16;
+    let pl = (print.len() * 2) as u16;
+    let path_bytes = sl as usize + 2 + pl as usize + 2;
+    let data_len = (8 + path_bytes) as u16;
+    let mut b = Vec::new();
+    b.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    b.extend_from_slice(&data_len.to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+    b.extend_from_slice(&sl.to_le_bytes());
+    b.extend_from_slice(&(sl + 2).to_le_bytes()); // PrintNameOffset
+    b.extend_from_slice(&pl.to_le_bytes());
+    for c in &subst {
+        b.extend_from_slice(&c.to_le_bytes());
+    }
+    b.extend_from_slice(&[0, 0]);
+    for c in &print {
+        b.extend_from_slice(&c.to_le_bytes());
+    }
+    b.extend_from_slice(&[0, 0]);
+    b
+}
+
+fn abs_string(p: &Path) -> io::Result<String> {
+    let a = std::path::absolute(p)?;
+    let s = a.to_string_lossy().into_owned();
+    Ok(s.strip_prefix("\\\\?\\").map(str::to_string).unwrap_or(s))
+}
+
+/// 既存ディレクトリ `dir` へ mount point reparse を設定する（FSCTL_SET_REPARSE_POINT）。
+pub fn set_mount_point(dir: &Path, target: &Path) -> io::Result<()> {
+    let buf = mount_point_buffer(&abs_string(target)?);
+    let h = open_reparse(dir)?;
+    let mut ret = 0u32;
+    // SAFETY: h は有効ハンドル、buf は buf.len() バイトの有効領域。
+    let ok = unsafe {
+        DeviceIoControl(
+            h,
+            FSCTL_SET_REPARSE_POINT,
+            buf.as_ptr() as *const c_void,
+            buf.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut ret,
+            std::ptr::null_mut(),
+        )
+    };
+    let err = io::Error::last_os_error();
+    // SAFETY: h は open_reparse が返した有効ハンドル。
+    unsafe { CloseHandle(h) };
+    if ok == 0 {
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+/// `link` を作成し junction にする（失敗時は作成したディレクトリを削除する）。
+pub fn create_junction(link: &Path, target: &Path) -> io::Result<()> {
+    std::fs::create_dir(link)?;
+    if let Err(e) = set_mount_point(link, target) {
+        let _ = std::fs::remove_dir(link);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// FSCTL_DELETE_REPARSE_POINT（mount point タグ）。
+pub fn delete_mount_point(dir: &Path) -> io::Result<()> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes());
+    let h = open_reparse(dir)?;
+    let mut ret = 0u32;
+    // SAFETY: 同上。
+    let ok = unsafe {
+        DeviceIoControl(
+            h,
+            FSCTL_DELETE_REPARSE_POINT,
+            b.as_ptr() as *const c_void,
+            b.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut ret,
+            std::ptr::null_mut(),
+        )
+    };
+    let err = io::Error::last_os_error();
+    // SAFETY: 同上。
+    unsafe { CloseHandle(h) };
+    if ok == 0 {
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+/// `path` が載るボリュームのファイルシステム名（NTFS / ReFS / exFAT 等）。
+pub fn fs_name(path: &Path) -> io::Result<String> {
+    let a = std::path::absolute(path)?;
+    let w = wide(&a);
+    let mut root = vec![0u16; 1024];
+    // SAFETY: root は 1024 要素の書き込み可能バッファ。
+    if unsafe { GetVolumePathNameW(w.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut name = vec![0u16; 64];
+    // SAFETY: root は NUL 終端、name は 64 要素。他は NULL。
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let n = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    Ok(String::from_utf16_lossy(&name[..n]))
+}

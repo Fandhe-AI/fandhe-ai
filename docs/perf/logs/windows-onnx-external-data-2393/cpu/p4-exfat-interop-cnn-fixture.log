@@ -1,0 +1,64 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests\onnx_interp_pytorch_cnn_fixture.rs (target\debug\deps\onnx_interp_pytorch_cnn_fixture-85444de5662a0a5d.exe)
+
+running 44 tests
+test avgpool1d_basic_dynamo ... ok
+test avgpool2d_ceil_overhang_incl_dynamo ... ok
+test avgpool2d_exclude_pad_ts ... ok
+test avgpool2d_ceil_overhang_excl_dynamo ... ok
+test avgpool2d_ceil_overhang_excl_ts ... ok
+test avgpool2d_ceil_overhang_incl_ts ... ok
+test avgpool2d_exclude_pad_dynamo ... ok
+test avgpool1d_basic_ts ... ok
+test avgpool2d_include_pad_dynamo ... ok
+test avgpool2d_include_pad_ts ... ok
+test bn1d_eval_dynamo ... ok
+test bn2d_eval_eps_dynamo ... ok
+test bn1d_eval_ts ... ok
+test bn2d_eval_eps_ts ... ok
+test bn2d_eval_dynamo ... ok
+test bn2d_eval_ts ... ok
+test conv1d_basic_dynamo ... ok
+test conv1d_basic_ts ... ok
+test conv2d_basic_dynamo ... ok
+test external_data_baselines_are_well_formed ... ok
+test conv2d_nobias_ts ... ok
+test conv2d_nobias_dynamo ... ok
+test external_data_fixture_bytes_entry_point_still_rejects ... ok
+test external_data_fixture_actually_uses_external_path ... ok
+test conv2d_stride_dil_group_ts ... ok
+test conv2d_stride_dil_group_dynamo ... ok
+test conv2d_basic_ts ... ok
+test expectation_table_matches_reference_cases ... ok
+test flatten_default_dynamo ... ok
+test flatten_start2_dynamo ... ok
+test flatten_default_ts ... ok
+test gap1d_dynamo ... ok
+test flatten_start2_ts ... ok
+test gap1d_ts ... ok
+test maxpool1d_basic_dynamo ... ok
+test gap2d_ts ... ok
+test gap2d_dynamo ... ok
+test external_data_fixture_matches_self_contained_reference ... ok
+test reduction_baselines_are_well_formed ... ok
+test maxpool1d_basic_ts ... ok
+test maxpool2d_basic_dynamo ... ok
+test maxpool2d_basic_ts ... ok
+test maxpool2d_pad_dil_ceil_dynamo ... ok
+test maxpool2d_pad_dil_ceil_ts ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s

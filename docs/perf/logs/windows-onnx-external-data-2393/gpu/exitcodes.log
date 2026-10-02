@@ -1,0 +1,19 @@
+g-harness-build exit=0 sec=84 cmd=cargo build --release --locked
+g-cuda-probe-no-nvrtc-path exit=0 sec=1 cmd=C:\work\src\win2393-harness\target\release\cuda_probe.exe
+g-cuda-probe-with-nvrtc-path exit=0 sec=1 cmd=C:\work\src\win2393-harness\target\release\cuda_probe.exe
+cache_dir_exists_after=False
+g-cuda-device_init exit=0 sec=36 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test device_init -- --ignored --test-threads=1
+g-cuda-cpu_cuda_parity exit=101 sec=3 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test cpu_cuda_parity -- --ignored --test-threads=1
+g-cuda-gemm_naive exit=101 sec=3 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_naive -- --ignored --test-threads=1
+g-cuda-gemm_tiled exit=101 sec=3 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_tiled -- --ignored --test-threads=1
+g-cuda-gemm_f32_variants exit=101 sec=0 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_f32_variants -- --ignored --test-threads=1
+g-cuda-gemm_transposed_parity exit=101 sec=3 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_transposed_parity -- --ignored --test-threads=1
+g-cuda-gemm_batched_parity exit=101 sec=3 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_batched_parity -- --ignored --test-threads=1
+g-facade-onnx-external-data exit=0 sec=42 cmd=cargo test -p fandhe-ai --locked --test interop_onnx_external_data
+g2-cuda-probe-with-include exit=0 sec=3 cmd=C:\work\src\win2393-harness\target\release\cuda_probe.exe
+cache_dir_exists_after=False
+g2-cuda-cpu_cuda_parity exit=0 sec=36 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test cpu_cuda_parity -- --ignored --test-threads=1
+g2-cuda-gemm_naive exit=0 sec=3 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_naive -- --ignored --test-threads=1
+g2-cuda-gemm_tiled exit=0 sec=22 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_tiled -- --ignored --test-threads=1
+g2-cuda-gemm_transposed_parity exit=0 sec=2 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_transposed_parity -- --ignored --test-threads=1
+g2-cuda-gemm_batched_parity exit=0 sec=4 cmd=cargo test -p fandhe-ai-backend-cuda --locked --test gemm_batched_parity -- --ignored --test-threads=1

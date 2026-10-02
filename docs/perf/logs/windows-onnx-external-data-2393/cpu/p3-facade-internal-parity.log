@@ -1,0 +1,36 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests\interop_onnx_internal_parity.rs (target\debug\deps\interop_onnx_internal_parity-84bd562aabb291e7.exe)
+
+running 16 tests
+test external_data_limits_default_matches_internal_default ... ok
+test onnx_export_options_default_matches_internal_export_options_default ... ok
+test synthetic_model_export_rejects_unsupported_op_and_non_default_domain ... ok
+test synthetic_model_with_negative_dim_is_rejected_as_invalid_model_via_facade ... ok
+test synthetic_model_cast_to_float16_yields_onnx_value_f16_via_facade ... ok
+test from_sequential_to_bytes_initializers_match_state_dict_bit_exact ... ok
+test synthetic_model_with_sparse_initializer_matches_internal_error_payload_via_facade ... ok
+test from_sequential_to_bytes_matches_internal_direct_call_byte_exact ... ok
+test synthetic_model_with_unknown_initializer_data_type_is_rejected_via_facade ... ok
+test synthetic_model_with_unsupported_op_is_rejected_via_facade ... ok
+test slice_repro_onnx_facade_matches_internal_direct_call_bit_exact ... ok
+test non_default_options_match_internal_export_options_byte_exact ... ok
+test model_onnx_facade_matches_internal_direct_call_bit_exact ... ok
+test to_bytes_output_graph_structurally_equal_and_satisfies_export_contract ... ok
+test to_bytes_matches_internal_direct_call_byte_exact ... ok
+test facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

@@ -1,0 +1,5 @@
+rec kind=env platform=windows model=C:\acl2393\model_a_b.onnx
+rec kind=load result=ok
+rec kind=tensor name=y0 elems=1048576 head=383.15625,690.0781,472.76563,494.5
+summary status=ok tensors=1 elems=1048576 fnv1a64=02ff42737432d780 pattern=match_seed_A
+exit=0

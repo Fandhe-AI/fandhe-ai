@@ -1,0 +1,13 @@
+rec kind=attack_stage stage=1_rename_A_to_orig:err32 count=679
+rec kind=attack_stage stage=1_rename_A_to_orig:ok count=475
+rec kind=attack_stage stage=2_link_A_to_B:ok count=475
+rec kind=attack_stage stage=3_remove_link:err32 count=47
+rec kind=attack_stage stage=3_remove_link:ok count=428
+rec kind=attack_stage stage=3_remove_link:ok_via_fsctl_fallback count=47
+rec kind=attack_stage stage=4_restore:ok count=475
+rec kind=cleanup actions=
+rec kind=load_result result=typed_err:from_path:InvalidModel:location_が不正:_経路に_reparse_point（シンボリックリンク・junction_等）を含む count=566
+rec kind=load_result result=typed_err:from_path:Io:NotFound:os=None count=871
+rec kind=load_result result=typed_err:from_path:Io:PermissionDenied:os=None count=8
+rec kind=load_result result=typed_err:from_path:Io:Uncategorized:os=None count=555
+summary status=done iterations=2000 containment_breach_B=0 other_invalid=0 attack_cycles=475 attack_attempts=1154 attack_aborted=false hold_us=300 final_state_ok=true A_exists=true A_orig_exists=false

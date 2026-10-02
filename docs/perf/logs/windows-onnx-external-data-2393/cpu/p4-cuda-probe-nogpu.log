@@ -1,0 +1,6 @@
+rec kind=env platform=windows arch=x86_64
+rec kind=cache_before RUST_AI_CUDA_CACHE_DIR=C:\cache2393\nvrtc dir_exists=false files=0
+rec kind=devices available=[Cpu]
+rec kind=tf32_opt_in enabled=false
+rec kind=cuda_select result=err debug=CudaUnavailable("CUDA_driver_library_unavailable:_libcuda_dynamic_library_not_found_(dlopen_failed);_CUDA_driver_is_not_installed_or_not_on_the_library_search_path")
+summary status=cuda_unavailable error=CudaUnavailable("CUDA_driver_library_unavailable:_libcuda_dynamic_library_not_found_(dlopen_failed);_CUDA_driver_is_not_installed_or_not_on_the_library_search_path")

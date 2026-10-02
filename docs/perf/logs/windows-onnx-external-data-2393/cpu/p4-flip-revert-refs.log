@@ -1,0 +1,8 @@
+rec kind=attack_stage stage=1_rename_A_to_orig:ok count=2
+rec kind=attack_stage stage=2_link_A_to_B:ok count=2
+rec kind=attack_stage stage=3_remove_link:err32 count=1
+rec kind=attack_stage stage=3_remove_link:ok count=1
+rec kind=attack_stage stage=4_restore:err5 count=100001
+rec kind=attack_stage stage=4_restore:ok count=1
+rec kind=load_result result=typed_err:from_path:InvalidModel:location_が不正:_経路に_reparse_point（シンボリックリンク・junction_等）を含む count=2000
+summary status=done iterations=2000 containment_breach_B=0 other_invalid=0 attack_cycles=1 restored=false A_exists=true A_orig_exists=true

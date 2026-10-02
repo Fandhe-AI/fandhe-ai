@@ -1,0 +1,104 @@
+//! cuda_probe: facade 経由で CUDA を選び 64x64x64 GEMM を CPU 参照と統一複合判定で比較する。
+//! RUST_AI_CUDA_CACHE_DIR 設定時はディスクキャッシュの生成有無も出す（非 unix は無効設計）。
+//! 注意: この変数はビルド時 workspace ルート配下（例 C:\work\src）を指すと拒否される。
+use std::time::Instant;
+use win2393_harness::*;
+
+fn count_files(p: &std::path::Path) -> u64 {
+    let mut n = 0;
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            let q = e.path();
+            if q.is_dir() { n += count_files(&q) } else { n += 1 }
+        }
+    }
+    n
+}
+
+fn main() {
+    use fandhe_ai::{tape, tape_for, Device, Tensor};
+    rec("env", &[("platform", std::env::consts::OS.into()), ("arch", std::env::consts::ARCH.into())]);
+    let cache = std::env::var_os("RUST_AI_CUDA_CACHE_DIR").map(std::path::PathBuf::from);
+    let before = cache.as_ref().map(|p| (p.exists(), count_files(p)));
+    rec("cache_before", &[
+        ("RUST_AI_CUDA_CACHE_DIR", cache.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "unset".into())),
+        ("dir_exists", before.map(|b| b.0.to_string()).unwrap_or_else(|| "n/a".into())),
+        ("files", before.map(|b| b.1.to_string()).unwrap_or_else(|| "n/a".into())),
+    ]);
+    rec("devices", &[("available", format!("{:?}", fandhe_ai::available_devices()))]);
+    rec("tf32_opt_in", &[("enabled", fandhe_ai::cuda_tf32_gemm_enabled().to_string())]);
+
+    let (m, n, k) = (64usize, 64usize, 64usize);
+    let av: Vec<f32> = (0..m * k).map(|i| pat(SEED_A, i as u64) / 128.0 - 4.0).collect();
+    let bv: Vec<f32> = (0..k * n).map(|i| pat(SEED_B, i as u64) / 128.0 - 4.0).collect();
+    let (ta, tb) = match (Tensor::new(av.clone(), &[m, k]), Tensor::new(bv.clone(), &[k, n])) {
+        (Ok(a), Ok(b)) => (a, b),
+        other => {
+            println!("summary status=input_error detail={}", san(&format!("{other:?}")));
+            return;
+        }
+    };
+    let cpu = {
+        let t = tape();
+        let r = t.var(&ta).matmul(&t.var(&tb));
+        match r {
+            Ok(v) => v.to_tensor(),
+            Err(e) => {
+                println!("summary status=cpu_ref_error detail={}", san(&format!("{e:?}")));
+                return;
+            }
+        }
+    };
+    let ct = match tape_for(Device::Cuda(0)) {
+        Ok(t) => t,
+        Err(e) => {
+            rec("cuda_select", &[("result", "err".into()), ("debug", format!("{e:?}"))]);
+            println!("summary status=cuda_unavailable error={}", san(&format!("{e:?}")));
+            return;
+        }
+    };
+    rec("cuda_select", &[("result", "ok".into())]);
+    let mut times = Vec::new();
+    let mut last = None;
+    for i in 0..5 {
+        let t0 = Instant::now();
+        let r = ct.var(&ta).matmul(&ct.var(&tb)).map(|v| v.to_tensor());
+        let us = t0.elapsed().as_micros();
+        match r {
+            Ok(t) => {
+                rec("gemm_run", &[("iter", i.to_string()), ("micros", us.to_string())]);
+                times.push(us);
+                last = Some(t);
+            }
+            Err(e) => {
+                rec("gemm_run", &[("iter", i.to_string()), ("result", "err".into()), ("debug", format!("{e:?}"))]);
+                println!("summary status=gemm_error error={}", san(&format!("{e:?}")));
+                return;
+            }
+        }
+    }
+    let after = cache.as_ref().map(|p| (p.exists(), count_files(p)));
+    rec("cache_after", &[
+        ("dir_exists", after.map(|b| b.0.to_string()).unwrap_or_else(|| "n/a".into())),
+        ("files", after.map(|b| b.1.to_string()).unwrap_or_else(|| "n/a".into())),
+        ("created_dir", match (before, after) { (Some(b), Some(a)) => (!b.0 && a.0).to_string(), _ => "n/a".into() }),
+        ("files_written", match (before, after) { (Some(b), Some(a)) => (a.1 > b.1).to_string(), _ => "n/a".into() }),
+    ]);
+    let (cs, gs) = match (cpu.as_slice(), last.as_ref().and_then(|t| t.as_slice())) {
+        (Some(c), Some(g)) => (c, g),
+        _ => {
+            println!("summary status=readback_error");
+            return;
+        }
+    };
+    match fandhe_ai_backend_cpu::compare(gs, cs) {
+        Ok(rep) => {
+            let second_faster = times.len() > 1 && times[1] < times[0];
+            println!(
+                "summary status=ok total={} fail_count={} max_abs_diff={:e} max_rel_err={:e} first_us={} second_us={} second_faster={}",
+                rep.total, rep.fail_count, rep.max_abs_diff, rep.max_rel_err, times[0], times[1], second_faster
+            );
+        }
+        Err(e) => println!("summary status=compare_error error={}", san(&format!("{e:?}"))),
+    }
+}

@@ -1,0 +1,267 @@
+//! rename_race <model_path> <ancestor_dir> <iterations>
+//! メイン: from_path ループ。別スレッド: ancestor_dir <-> <ancestor_dir>.renamed を rename して即戻す。
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::Arc;
+use win2393_harness::*;
+
+fn main() {
+    let a = args_or_usage(3, "rename_race <model_path> <ancestor_dir> <iterations> [--delay-us N,N,...|auto]");
+    if let Some(i) = a.iter().position(|x| x == "--delay-us") {
+        let spec = a.get(i + 1).cloned().unwrap_or_else(|| "auto".into());
+        delay_mode(&a, &spec);
+        return;
+    }
+    let model = PathBuf::from(&a[0]);
+    let anc = PathBuf::from(&a[1]);
+    let iters: u64 = a[2].parse().unwrap_or(0);
+    let mut renamed = anc.clone().into_os_string();
+    renamed.push(".renamed");
+    let renamed = PathBuf::from(renamed);
+    let stop = Arc::new(AtomicBool::new(false));
+    let loading = Arc::new(AtomicBool::new(false));
+    let (s2, l2, anc2, ren2) = (stop.clone(), loading.clone(), anc.clone(), renamed.clone());
+    let th = std::thread::spawn(move || {
+        // (during_load, code) -> 件数
+        let mut stat: BTreeMap<(bool, String), u64> = BTreeMap::new();
+        let mut restore_fail = 0u64;
+        while !s2.load(SeqCst) {
+            let before = l2.load(SeqCst);
+            let r = std::fs::rename(&anc2, &ren2);
+            let after = l2.load(SeqCst);
+            let during = before || after;
+            match r {
+                Ok(()) => {
+                    *stat.entry((during, "ok".into())).or_default() += 1;
+                    // 即座に戻す（失敗したら成功するまで再試行。回数を数える）
+                    let mut tries = 0;
+                    while let Err(e) = std::fs::rename(&ren2, &anc2) {
+                        restore_fail += 1;
+                        tries += 1;
+                        if tries > 100_000 {
+                            rec("restore_giveup", &[("code", code_of(&e))]);
+                            return (stat, restore_fail, false);
+                        }
+                        std::thread::yield_now();
+                    }
+                }
+                Err(e) => *stat.entry((during, code_of(&e))).or_default() += 1,
+            }
+            std::thread::yield_now();
+        }
+        (stat, restore_fail, true)
+    });
+    let mut res: BTreeMap<String, u64> = BTreeMap::new();
+    for _ in 0..iters {
+        let key = match load_and_verify(&model, &[SEED_A], Some(&loading)) {
+            LoadOutcome::Verdict(Verdict::Match(_)) => "correct".to_string(),
+            LoadOutcome::Verdict(Verdict::Invalid { detail }) => format!("INVALID:{detail}"),
+            LoadOutcome::Err(b) => format!("typed_err:{b}"),
+        };
+        *res.entry(key).or_default() += 1;
+    }
+    stop.store(true, SeqCst);
+    let (stat, restore_fail, restored) = th.join().unwrap_or((BTreeMap::new(), 0, false));
+    let mut during_ok = 0u64;
+    let mut outside_ok = 0u64;
+    for ((during, code), n) in &stat {
+        rec("rename_stat", &[("during_load", (*during as u8).to_string()), ("code", code.clone()), ("count", n.to_string())]);
+        if code == "ok" {
+            if *during { during_ok += n } else { outside_ok += n }
+        }
+    }
+    let mut invalid = 0u64;
+    for (k, n) in &res {
+        rec("load_result", &[("result", k.clone()), ("count", n.to_string())]);
+        if k.starts_with("INVALID") {
+            invalid += n;
+        }
+    }
+    let exists_orig = anc.exists();
+    let exists_renamed = renamed.exists();
+    println!(
+        "summary status=done iterations={iters} invalid_values={invalid} rename_ok_during_load={during_ok} rename_ok_outside_load={outside_ok} restore_retries={restore_fail} restored={restored} ancestor_exists={exists_orig} renamed_exists={exists_renamed}"
+    );
+}
+
+fn median(v: &mut [u128]) -> u128 {
+    v.sort_unstable();
+    v.get(v.len() / 2).copied().unwrap_or(0)
+}
+
+/// 遅延モード: load ごとに攻撃スレッドが「load 開始から delay_us 後に 1 回だけ rename、成功なら即復元」。
+fn delay_mode(a: &[String], spec: &str) {
+    use std::sync::atomic::AtomicU64;
+    use std::time::{Duration, Instant};
+    let model = PathBuf::from(&a[0]);
+    let anc = PathBuf::from(&a[1]);
+    let iters: u64 = a[2].parse().unwrap_or(0);
+    let mut renamed = anc.clone().into_os_string();
+    renamed.push(".renamed");
+    let renamed = PathBuf::from(renamed);
+
+    // 較正: 攻撃なしの from_path 所要時間（中央値）
+    let mut cal = Vec::new();
+    for _ in 0..5 {
+        let (_, _, d) = load_detail(&model, &[SEED_A], None);
+        cal.push(d.as_micros());
+    }
+    let t_load = median(&mut cal).max(1);
+    rec("calibration", &[("from_path_median_us", t_load.to_string()), ("note", "attack-free".into())]);
+    let delays: Vec<u64> = if spec == "auto" {
+        // load 時間に対する比率で窓を掃引（0 と、読み出し段階に入る後半を厚めに）
+        [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.3]
+            .iter()
+            .map(|r| (t_load as f64 * r) as u64)
+            .collect()
+    } else {
+        spec.split(',').filter_map(|x| x.trim().parse().ok()).collect()
+    };
+    if delays.is_empty() {
+        println!("summary status=bad_delay_list");
+        return;
+    }
+    rec("delays", &[("us", format!("{delays:?}"))]);
+
+    let seq = Arc::new(AtomicU64::new(0)); // main -> attacker: load 開始通知
+    let done = Arc::new(AtomicU64::new(0)); // attacker -> main: 試行完了通知
+    let stop = Arc::new(AtomicBool::new(false));
+    let loading = Arc::new(AtomicBool::new(false));
+    let cur_delay = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, String, bool, bool, u64)>();
+    let (seq2, done2, stop2, loading2, cd2, anc2, ren2) =
+        (seq.clone(), done.clone(), stop.clone(), loading.clone(), cur_delay.clone(), anc.clone(), renamed.clone());
+    let th = std::thread::spawn(move || {
+        let mut last = 0u64;
+        let mut restore_fail = 0u64;
+        loop {
+            let s = seq2.load(SeqCst);
+            if s == last {
+                if stop2.load(SeqCst) {
+                    return (restore_fail, true);
+                }
+                std::hint::spin_loop();
+                continue;
+            }
+            last = s;
+            let d = cd2.load(SeqCst);
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_micros(d) {
+                std::hint::spin_loop();
+            }
+            let before = loading2.load(SeqCst);
+            let r = std::fs::rename(&anc2, &ren2);
+            let after = loading2.load(SeqCst);
+            let at = t0.elapsed().as_micros() as u64;
+            let code = match &r {
+                Ok(()) => "ok".to_string(),
+                Err(e) => code_of(e),
+            };
+            let _ = tx.send((d, code, before, after, at));
+            if r.is_ok() {
+                let mut tries = 0;
+                while let Err(e) = std::fs::rename(&ren2, &anc2) {
+                    restore_fail += 1;
+                    tries += 1;
+                    if tries > 100_000 {
+                        rec("restore_giveup", &[("code", code_of(&e))]);
+                        done2.store(s, SeqCst);
+                        return (restore_fail, false);
+                    }
+                    std::thread::yield_now();
+                }
+            }
+            done2.store(s, SeqCst);
+        }
+    });
+
+    // delay -> load 結果 / 所要時間 / 最初のエラー詳細
+    let mut res: BTreeMap<(u64, String), u64> = BTreeMap::new();
+    let mut times: BTreeMap<u64, Vec<u128>> = BTreeMap::new();
+    let mut first_err: BTreeMap<String, String> = BTreeMap::new();
+    let mut aborted = false;
+    for i in 0..iters {
+        let d = delays[(i as usize) % delays.len()];
+        cur_delay.store(d, SeqCst);
+        let n = i + 1;
+        loading.store(true, SeqCst); // from_path 直前に立てる（load_detail 内でも立て直す）
+        seq.store(n, SeqCst);
+        let (out, detail, el) = load_detail(&model, &[SEED_A], Some(&loading));
+        // 攻撃スレッドの 1 試行（待機＋rename＋復元）完了を待つ（次の load と干渉させない）
+        let t = Instant::now();
+        while done.load(SeqCst) != n {
+            if t.elapsed() > Duration::from_secs(30) {
+                aborted = true;
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        times.entry(d).or_default().push(el.as_micros());
+        let key = match out {
+            LoadOutcome::Verdict(Verdict::Match(_)) => "correct".to_string(),
+            LoadOutcome::Verdict(Verdict::Invalid { detail }) => format!("INVALID:{detail}"),
+            LoadOutcome::Err(b) => {
+                if let Some(dt) = detail {
+                    first_err.entry(b.clone()).or_insert(dt);
+                }
+                format!("typed_err:{b}")
+            }
+        };
+        *res.entry((d, key)).or_default() += 1;
+        if aborted {
+            break;
+        }
+    }
+    stop.store(true, SeqCst);
+    let (restore_fail, restored) = th.join().unwrap_or((0, false));
+
+    // rename 結果: (delay, code, load_active_before, load_active_after) -> 件数
+    let mut rn: BTreeMap<(u64, String, bool, bool), u64> = BTreeMap::new();
+    let mut at_us: BTreeMap<(u64, String), Vec<u128>> = BTreeMap::new();
+    while let Ok((d, code, b, af, at)) = rx.try_recv() {
+        *rn.entry((d, code.clone(), b, af)).or_default() += 1;
+        at_us.entry((d, code)).or_default().push(at as u128);
+    }
+    let (mut during_ok, mut during_fail, mut outside_ok, mut outside_fail) = (0u64, 0u64, 0u64, 0u64);
+    for ((d, code, b, af), n) in &rn {
+        let during = *b || *af;
+        rec("rename_stat", &[
+            ("delay_us", d.to_string()),
+            ("code", code.clone()),
+            ("load_active_before", (*b as u8).to_string()),
+            ("load_active_after", (*af as u8).to_string()),
+            ("count", n.to_string()),
+        ]);
+        match (code == "ok", during) {
+            (true, true) => during_ok += n,
+            (false, true) => during_fail += n,
+            (true, false) => outside_ok += n,
+            (false, false) => outside_fail += n,
+        }
+    }
+    for ((d, code), v) in at_us.iter_mut() {
+        rec("rename_time", &[("delay_us", d.to_string()), ("code", code.clone()), ("median_attempt_at_us", median(v).to_string())]);
+    }
+    let mut invalid = 0u64;
+    let mut correct = 0u64;
+    for ((d, k), n) in &res {
+        rec("load_result", &[("delay_us", d.to_string()), ("result", k.clone()), ("count", n.to_string())]);
+        if k.starts_with("INVALID") { invalid += n }
+        if k == "correct" { correct += n }
+    }
+    let mut all = Vec::new();
+    for (d, v) in times.iter_mut() {
+        all.extend(v.iter().copied());
+        rec("load_time", &[("delay_us", d.to_string()), ("from_path_median_us", median(v).to_string()), ("n", v.len().to_string())]);
+    }
+    let overall = median(&mut all);
+    for (b, dt) in &first_err {
+        rec("first_error", &[("bucket", b.clone()), ("detail", dt.clone())]);
+    }
+    println!(
+        "summary status=done mode=delay iterations={iters} aborted={aborted} correct={correct} invalid_values={invalid} rename_ok_during_load={during_ok} rename_fail_during_load={during_fail} rename_ok_outside_load={outside_ok} rename_fail_outside_load={outside_fail} from_path_median_us={overall} restore_retries={restore_fail} restored={restored} ancestor_exists={} renamed_exists={}",
+        anc.exists(),
+        renamed.exists()
+    );
+}

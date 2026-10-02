@@ -1,0 +1,5 @@
+rec kind=volume path=X:\tmp\rp\reparse_probe_1164 fs=exFAT
+rec kind=set_reparse case=a_empty result=err code=1
+rec kind=set_reparse case=b_nonempty result=err code=1
+rec kind=cleanup result=Ok(())
+summary status=done fs=exFAT a_empty_ok=false b_nonempty_code=1
