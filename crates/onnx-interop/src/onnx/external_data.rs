@@ -1324,6 +1324,14 @@ mod win_contained_open {
     // 出し箇所（[`file_identity`]・[`final_real_path`]）に限定する
     // （`.claude/rules/coding-rust.md`「`unsafe` は FFI 境界等の必要
     // 最小限に留め、理由をコメントで明記」）。
+    //
+    // リンク依存は `#[link(name = "kernel32")]` で宣言的に明示する（イシュー
+    // #2486。`docs/onnx-external-data-decision.md` 10.2 の P2）。無指定でも
+    // std が `kernel32.lib` を暗黙にリンクするため MSVC では解決できていたが、
+    // それは std 内部実装への暗黙の依存だったため解消する。`kind` は既定
+    // （import library 経由）のままとし、`raw-dylib` は MinGW との挙動差が
+    // あるため意図的に採らない。
+    #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetFileInformationByHandle(
             h_file: *mut c_void,

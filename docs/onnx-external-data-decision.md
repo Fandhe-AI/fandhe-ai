@@ -891,7 +891,7 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
 - **本節に残る起票候補（2026-09-29・イシュー #2392。ユーザー承認待ち・
   起票していない）**: 10.4 節の表を正とする。(1) `extern` ブロックへの
   `#[link(name = "kernel32")]` の明示（コード修正・P2。実機リンクは
-  #2393 で確認）、(2) USN（`FSCTL_READ_FILE_USN_DATA`）による変更検知、
+  #2393 で確認。**対応済み: #2486**。`raw-dylib` は不採用）、(2) USN（`FSCTL_READ_FILE_USN_DATA`）による変更検知、
   (3) `GetFileInformationByHandleEx(FileIdInfo)`（128 bit ID）への切替。
 
 自動運転中はユーザー承認を取れないため Issue は起票せず、本節（「本節に
@@ -1102,7 +1102,7 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
 |--------|---------|------|------|
 | 指摘なし（P0／P1 なし） | `ByHandleFileInformation`・`RawFiletime` | `#[repr(C)]`・フィールド順と型幅（`u32`／FILETIME の 32 bit ペア）が winbase.h の `BY_HANDLE_FILE_INFORMATION` と一致 | なし |
 | 指摘なし | `extern "system"` 宣言 | `HANDLE=*mut c_void`・`BOOL=i32`・`DWORD=u32`・`LPWSTR=*mut u16`・呼び出し規約が winbase.h と一致 | なし |
-| P2 | `unsafe extern "system"` ブロック | `#[link(name = "kernel32")]` が無く、std が kernel32 をリンクすることに暗黙に依存する。クロス clippy はリンクしないため未検証 | #2393 で実機ビルド・リンクを確認。コード修正（`#[link]` 明示）は起票候補（7 節）。**2026-10-03 実測・#2393**: `#[link(name = "kernel32")]` の明示なしでも MSVC リンクは成功し、kernel32 の手書き `extern "system"` 宣言は解決された（実害なし）。明示化は起票候補のまま |
+| P2 | `unsafe extern "system"` ブロック | `#[link(name = "kernel32")]` が無く、std が kernel32 をリンクすることに暗黙に依存する。クロス clippy はリンクしないため未検証 | #2393 で実機ビルド・リンクを確認。コード修正（`#[link]` 明示）は **対応済み（#2486）**: `#[link(name = "kernel32")]` を明示（既定 `kind`。`raw-dylib` は MinGW との挙動差のため不採用）。**2026-10-03 実測・#2393**: `#[link(name = "kernel32")]` の明示なしでも MSVC リンクは成功し、kernel32 の手書き `extern "system"` 宣言は解決された（実害なし）。明示化は #2486 で対応済み |
 | 指摘なし | `final_real_path` | 成功時は終端 NUL を除く文字数、不足時は NUL 込みの必要文字数を返す契約に対し、成功判定 `n < buf.len()`・不足時 `resize(n)`・上限 8 回後の `Unsupported`（fail-closed）が整合。`buf.len() as u32` は 32K 文字規模のため切り詰めは起きない | なし |
 | 指摘なし | `file_identity` | 全フィールドが整数で零値が有効なビットパターンのため、`zeroed` → 成功時のみ `assume_init` は健全。失敗時は構造体を使わない | なし |
 | P3（文言） | 4.6・9 節・モジュール doc | `unsafe` 式は FFI 呼び出し 2 か所と `assume_init` 1 か所の計 3 つ。「2 か所」は不正確 | 4.6・9 節は本 PR で是正済み。ソースのコメントは範囲外（コード変更なし） |
@@ -1151,7 +1151,7 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
 | (d) NTFS 以外: flip の検出 | 実所在検証は NTFS の空ディレクトリ規則に依存しないため、影響度は下がる | 不要 | なし |
 | (d) ReFS の `nFileIndex` | 64 bit の `nFileIndex` は ReFS で一意とは限らず、`FileKey` の実体同一性に関わる | `GetFileInformationByHandleEx(FileIdInfo)`（128 bit ID）へ切替可能 | 起票候補（ユーザー承認待ち） |
 | (d) ReFS・exFAT の意味論 | reparse・共有モードの意味論は未確認 | 不可（実機依存） | #2393 の実機確認項目 |
-| リンク解決 | `#[link(name = "kernel32")]` の明示（10.2 の P2） | コード修正 | #2393 で確認、修正は起票候補 |
+| リンク解決 | `#[link(name = "kernel32")]` の明示（10.2 の P2） | コード修正 | #2393 で確認、**対応済み（#2486）** |
 | テスト網羅 | `overlapping_regions_via_hard_link_are_rejected` は `cfg(unix)` のまま | テスト変更 | #2393 へ申し送り |
 
 **2026-10-03 実測・#2393（上の表の #2393 行への結果。出典 `docs/perf/logs/windows-onnx-external-data-2393/README.md`）**:
@@ -1159,7 +1159,7 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
 | 項目 | 実測結果 |
 |------|---------|
 | (d) ReFS・exFAT の意味論 | ReFS: NTFS と同じ結果（非空ディレクトリへの reparse 設定は 145・`onnx_external_data` 51 passed・flip-and-revert 764 サイクルで breach 0）。exFAT: reparse 設定が空・非空とも 1（`ERROR_INVALID_FUNCTION`）で reparse point 自体を持たず、junction・symlink・hard link は作成できない（テストの fixture 作成失敗であり封じ込め判定の失敗ではない）。**ReFS の `nFileIndex` 一意性は実測していない（行はそのまま）** |
-| リンク解決 | `#[link]` 明示なしでも実機リンク成功（上の P2 行）。実害なし・明示化は起票候補のまま |
+| リンク解決 | `#[link]` 明示なしでも実機リンク成功（上の P2 行）。実害なし・明示化は #2486 で対応済み |
 | テスト網羅 | VM 上でのみ cfg を `any(unix, windows)` に変えて NTFS・ReFS で pass。リポジトリのテストは未変更で、cfg 拡張は起票候補（未起票・ユーザー承認待ち） |
 
 ### 10.5 PR #2351 の記録との関係

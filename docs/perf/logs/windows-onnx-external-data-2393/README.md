@@ -51,7 +51,7 @@
 
 `#[link(name = "kernel32")]` の明示なしでも、`win_contained_open` の kernel32 手書き `extern "system"` 宣言は
 リンクで解決された（`LNK` エラーなし）。`docs/onnx-external-data-decision.md` §10.2 の P2 は**実害なし**。
-ただし明示化はコード修正の起票候補のまま。
+ただし明示化はコード修正の起票候補のまま（対応済み: #2486）。
 
 ### NTFS（C:。CPU VM）
 
@@ -261,7 +261,7 @@ Windows 固有のテスト分離漏れ（下記）であり、封じ込め・ext
    （NTFS・ReFS で pass）。
 5. **facade**: external data のエラー写像で raw OS エラーが失われ診断しにくい（`Io(Kind(Uncategorized))`）。
 
-既存の起票候補（`onnx-external-data-decision.md` §10.2 P2 の `#[link(name = "kernel32")]` 明示化・§10.4 の USN 変更検知・
+既存の起票候補（`onnx-external-data-decision.md` §10.2 P2 の `#[link(name = "kernel32")]` 明示化〈対応済み: #2486〉・§10.4 の USN 変更検知・
 `FileIdInfo`〈128 bit ID〉への切替）は本実測では変わらず、そのまま残る。
 
 ## 期待と異なった点（訂正）
