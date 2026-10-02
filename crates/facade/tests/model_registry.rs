@@ -407,6 +407,77 @@ fn load_succeeds_when_root_itself_is_a_symlink() {
 // （codex-review 指摘・PR #2226。`resolve_model_file` 参照）
 // ============================================================================
 
+/// Unix ソケットを葉に置くテスト専用の短パス・キャッシュルート（RAII）。
+///
+/// 共通ガード `TempDirGuard` の一意名は約 62 文字あり、macOS 既定の
+/// `TMPDIR`（約 49 文字）では葉 `mlp/v1/model.safetensors` までで
+/// `sun_path`（macOS 104 バイト・Linux 108 バイト）を超え `bind` が
+/// `InvalidInput` で失敗する（イシュー #2483）。ここでは検査自体を
+/// スキップせず、短い一意名 `fa-<pid>-<seq>-<label>` を `temp_dir()`、
+/// 収まらなければ `/tmp` 直下に排他作成する。macOS の `/tmp` は
+/// `/private/tmp` への symlink のため `canonicalize` 済みの実体パスを
+/// 使う。長さを満たせない場合は黙って通さず panic で気づける。
+#[cfg(unix)]
+struct ShortSocketRoot {
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl ShortSocketRoot {
+    /// bind 対象に使える `sun_path` の上限（macOS の 104 から終端 NUL を除く）。
+    const MAX_LEAF_BYTES: usize = 103;
+
+    fn new(label: &str) -> Self {
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let mut worst = 0;
+        for cand in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+            let Ok(base) = cand.canonicalize() else {
+                continue;
+            };
+            for _ in 0..64 {
+                let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+                let name = format!("fa-{}-{seq}-{label}", std::process::id());
+                let path = base.join(name);
+                let leaf = path.join("mlp").join("v1").join("model.safetensors");
+                worst = worst.max(leaf.as_os_str().as_bytes().len());
+                if leaf.as_os_str().as_bytes().len() > Self::MAX_LEAF_BYTES {
+                    break;
+                }
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self { path },
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => panic!("ソケット用ルートの作成に失敗: {path:?}: {e}"),
+                }
+            }
+        }
+        panic!(
+            "葉パスが sun_path 上限 {} バイトに収まる作業ディレクトリを確保できない（最短でも {worst} バイト）",
+            Self::MAX_LEAF_BYTES
+        );
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+/// 葉が実際に Unix ソケットであること（拒否検査の前提）を lstat で確認する。
+#[cfg(unix)]
+fn is_socket(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_socket())
+}
+
+#[cfg(unix)]
+impl Drop for ShortSocketRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 /// 葉ファイル（`model.safetensors`）が Unix ドメインソケットの場合、
 /// `load` は `is_dir() == false` だけでは通過してしまう非通常ファイル
 /// を拒否し `NotFound` を返す（`must_be_dir == false` は
@@ -416,14 +487,15 @@ fn load_succeeds_when_root_itself_is_a_symlink() {
 #[cfg(unix)]
 #[test]
 fn load_rejects_non_regular_leaf_unix_socket() {
-    // ラベルを短くする: UNIX ソケットパスは SUN_LEN（約 108 バイト）未満が必要。
-    let guard = TempDirGuard::new("mr-sock");
+    // 短い専用ルート: UNIX ソケットパスは sun_path 上限未満が必要（#2483）。
+    let guard = ShortSocketRoot::new("sock");
     let root = guard.path().to_path_buf();
     let version_dir = root.join("mlp").join("v1");
     fs::create_dir_all(&version_dir).unwrap();
 
     let leaf = version_dir.join("model.safetensors");
     let _listener = std::os::unix::net::UnixListener::bind(&leaf).unwrap();
+    assert!(is_socket(&leaf), "葉が socket でなく検査が空洞化している");
 
     let registry = ModelRegistry::with_cache_dir(&root);
     match registry.load("mlp", "v1") {
@@ -440,13 +512,17 @@ fn load_rejects_non_regular_leaf_unix_socket() {
 #[cfg(unix)]
 #[test]
 fn available_models_excludes_non_regular_leaf() {
-    // ラベルを短くする: UNIX ソケットパスは SUN_LEN（約 108 バイト）未満が必要。
-    let guard = TempDirGuard::new("mr-avail-sock");
+    // 短い専用ルート: UNIX ソケットパスは sun_path 上限未満が必要（#2483）。
+    let guard = ShortSocketRoot::new("avail-sock");
     let root = guard.path().to_path_buf();
     let version_dir = root.join("mlp").join("v1");
     fs::create_dir_all(&version_dir).unwrap();
     let _listener =
         std::os::unix::net::UnixListener::bind(version_dir.join("model.safetensors")).unwrap();
+    assert!(
+        is_socket(&version_dir.join("model.safetensors")),
+        "葉が socket でなく検査が空洞化している"
+    );
 
     let registry = ModelRegistry::with_cache_dir(&root);
     assert_eq!(
