@@ -257,7 +257,7 @@ Windows 固有のテスト分離漏れ（下記）であり、封じ込め・ext
    `tape_ref_declared_once_with_crate_private_field` 1 件も失敗（`src/lib.rs` の読み込み・パス処理）。
 3. （対応済み: #2482）リポジトリに Windows 予約名のディレクトリ `docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux` があり、
    Windows では作成できなかった（git clone／展開で失敗）。`aux-ab` へ改名して解消した。
-4. **onnx-interop**: `overlapping_regions_via_hard_link_are_rejected` を `cfg(any(unix, windows))` へ広げられる
+4. （対応済み: #2485）**onnx-interop**: `overlapping_regions_via_hard_link_are_rejected` を `cfg(any(unix, windows))` へ広げられる
    （NTFS・ReFS で pass）。
 5. **facade**: external data のエラー写像で raw OS エラーが失われ診断しにくい（`Io(Kind(Uncategorized))`）。
 
