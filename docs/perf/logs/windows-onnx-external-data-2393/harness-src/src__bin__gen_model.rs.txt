@@ -1,0 +1,45 @@
+//! gen_model <out_dir> <size_mb> [--layout a/b]: external data 付き ONNX を生成する。
+//! 配置: <out_dir>/model_<layout の / を _ に>.onnx と <out_dir>/<layout>/w.bin（祖先複数）。
+use win2393_harness::*;
+
+fn main() {
+    let a = args_or_usage(2, "gen_model <out_dir> <size_mb> [--layout a/b]");
+    let out = std::path::PathBuf::from(&a[0]);
+    let size_mb: u64 = match a[1].parse() {
+        Ok(v) if v > 0 => v,
+        _ => {
+            println!("summary status=bad_size_mb");
+            return;
+        }
+    };
+    let layout = a.iter().position(|x| x == "--layout").and_then(|i| a.get(i + 1)).cloned().unwrap_or_else(|| "a".into());
+    if layout.is_empty() || layout.starts_with('/') || layout.contains('\\') || layout.contains("..") {
+        println!("summary status=bad_layout");
+        return;
+    }
+    let loc = format!("{layout}/w.bin");
+    let elems = size_mb * 1024 * 1024 / 4;
+    let bin = out.join(&layout).join("w.bin");
+    if let Err(e) = write_pattern_file(&bin, elems, SEED_A) {
+        rec("write", &[("result", "err".into()), ("debug", format!("{e:?}"))]);
+        println!("summary status=write_error");
+        return;
+    }
+    let model = out.join(format!("model_{}.onnx", layout.replace('/', "_")));
+    if let Err(e) = std::fs::write(&model, build_model_bytes(&loc, elems)) {
+        rec("write", &[("result", "err".into()), ("debug", format!("{e:?}"))]);
+        println!("summary status=write_error");
+        return;
+    }
+    let chunks = elems.div_ceil(CHUNK_ELEMS);
+    rec("generated", &[
+        ("model", model.display().to_string()),
+        ("data", bin.display().to_string()),
+        ("ancestor_dir", out.join(layout.split('/').next().unwrap_or(&layout)).display().to_string()),
+        ("location", loc),
+        ("elems", elems.to_string()),
+        ("tensors", chunks.to_string()),
+        ("seed", format!("{SEED_A:#x}")),
+    ]);
+    println!("summary status=ok bytes={} tensors={chunks}", elems * 4);
+}

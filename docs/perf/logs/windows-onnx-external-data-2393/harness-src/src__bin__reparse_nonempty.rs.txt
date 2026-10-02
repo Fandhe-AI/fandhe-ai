@@ -1,0 +1,47 @@
+//! reparse_nonempty <dir_on_target_volume>: 空/非空ディレクトリへ FSCTL_SET_REPARSE_POINT(mount point)。
+//! 期待: NTFS では (a) 成功 (b) ERROR_DIR_NOT_EMPTY(145)。ReFS・exFAT での挙動を観察する。
+#[cfg(windows)]
+fn main() {
+    use win2393_harness::*;
+    let a = args_or_usage(1, "reparse_nonempty <dir_on_target_volume>");
+    let root = std::path::PathBuf::from(&a[0]).join(format!("reparse_probe_{}", std::process::id()));
+    let target = root.join("target");
+    let empty = root.join("empty");
+    let nonempty = root.join("nonempty");
+    let setup = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&target)?;
+        std::fs::create_dir_all(&empty)?;
+        std::fs::create_dir_all(&nonempty)?;
+        std::fs::write(nonempty.join("f.txt"), b"x")
+    })();
+    if let Err(e) = setup {
+        rec("setup", &[("result", "err".into()), ("debug", format!("{e:?}"))]);
+        println!("summary status=setup_error");
+        return;
+    }
+    let fsn = win::fs_name(&root).unwrap_or_else(|e| format!("err:{e:?}"));
+    rec("volume", &[("path", root.display().to_string()), ("fs", fsn.clone())]);
+    let mut ok_a = false;
+    let mut code_b = String::new();
+    for (label, d) in [("a_empty", &empty), ("b_nonempty", &nonempty)] {
+        let r = win::set_mount_point(d, &target);
+        let (res, code) = match &r {
+            Ok(()) => ("ok".to_string(), "0".to_string()),
+            Err(e) => ("err".to_string(), code_of(e)),
+        };
+        rec("set_reparse", &[("case", label.into()), ("result", res.clone()), ("code", code.clone())]);
+        if label == "a_empty" { ok_a = r.is_ok() } else { code_b = code }
+        if r.is_ok() {
+            let d1 = win::delete_mount_point(d);
+            rec("delete_reparse", &[("case", label.into()), ("result", format!("{d1:?}"))]);
+        }
+    }
+    let cl = std::fs::remove_dir_all(&root);
+    rec("cleanup", &[("result", format!("{cl:?}"))]);
+    println!("summary status=done fs={fsn} a_empty_ok={ok_a} b_nonempty_code={code_b}");
+}
+#[cfg(not(windows))]
+fn main() {
+    println!("rec kind=unsupported reason=windows_only");
+    println!("summary status=unsupported");
+}

@@ -1,0 +1,12 @@
+rec kind=env platform=windows arch=x86_64
+rec kind=cache_before RUST_AI_CUDA_CACHE_DIR=C:\cache2393\nvrtc dir_exists=false files=0
+rec kind=devices available=[Cpu,_Cuda(0)]
+rec kind=tf32_opt_in enabled=false
+rec kind=cuda_select result=ok
+rec kind=gemm_run iter=0 micros=2600720
+rec kind=gemm_run iter=1 micros=1520
+rec kind=gemm_run iter=2 micros=1180
+rec kind=gemm_run iter=3 micros=1159
+rec kind=gemm_run iter=4 micros=1239
+rec kind=cache_after dir_exists=false files=0 created_dir=false files_written=false
+summary status=ok total=4096 fail_count=0 max_abs_diff=0e0 max_rel_err=0e0 first_us=2600720 second_us=1520 second_faster=true

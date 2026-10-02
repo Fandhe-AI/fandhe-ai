@@ -1,0 +1,8 @@
+# GPU VM で取得した CUDA 13.0 redist の一覧（取得スクリプトの指定値の転記）
+# 各 zip は下記 sha256 と照合した。cudart・crt・cccl の照合結果は gpu/gpu-env.txt の `sha256_ok=True` 行。
+# nvrtc の照合結果は VM のセットアップログ（未収録）の次の行の転記: `nvrtc sha256=8c50a524...c5d29 expected=8c50a524...c5d29`（一致）
+# 配布元: https://developer.download.nvidia.com/compute/cuda/redist/
+cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-13.0.88-archive.zip   8c50a52467826167e0dbe99936140c52d62272bfc5849fe2d6587d050c8c5d29
+cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-13.0.96-archive.zip a2ed875f9997aa24904fb70cc9db3acd9308433cde99bc8e63ec1271c9da31b4
+cuda_crt/windows-x86_64/cuda_crt-windows-x86_64-13.0.88-archive.zip       ff413c89dbd96ed3b3dcfac923437de78acea32fb90309277197c8a127588112
+cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-13.0.85-archive.zip     f4f5187f7976d8057d76e1e04e72c8b7d0a2a22793107a671ad709b1d8d3408d

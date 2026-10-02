@@ -1,0 +1,71 @@
+rec kind=calibration from_path_median_us=7757 note=attack-free
+rec kind=delays us=[0,_387,_775,_1551,_2327,_3102,_3878,_4654,_5429,_6205,_6981,_7757,_10084]
+rec kind=rename_stat delay_us=0 code=ok load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=387 code=32 load_active_before=1 load_active_after=1 count=9
+rec kind=rename_stat delay_us=387 code=ok load_active_before=1 load_active_after=0 count=1
+rec kind=rename_stat delay_us=775 code=32 load_active_before=1 load_active_after=1 count=2
+rec kind=rename_stat delay_us=775 code=5 load_active_before=1 load_active_after=1 count=7
+rec kind=rename_stat delay_us=775 code=ok load_active_before=1 load_active_after=0 count=1
+rec kind=rename_stat delay_us=1551 code=5 load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=2327 code=5 load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=3102 code=5 load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=3878 code=5 load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=4654 code=5 load_active_before=1 load_active_after=1 count=2
+rec kind=rename_stat delay_us=4654 code=ok load_active_before=1 load_active_after=1 count=8
+rec kind=rename_stat delay_us=5429 code=ok load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=6205 code=ok load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=6981 code=ok load_active_before=1 load_active_after=1 count=10
+rec kind=rename_stat delay_us=7757 code=ok load_active_before=0 load_active_after=0 count=1
+rec kind=rename_stat delay_us=7757 code=ok load_active_before=1 load_active_after=0 count=6
+rec kind=rename_stat delay_us=7757 code=ok load_active_before=1 load_active_after=1 count=3
+rec kind=rename_stat delay_us=10084 code=ok load_active_before=0 load_active_after=0 count=10
+rec kind=rename_time delay_us=0 code=ok median_attempt_at_us=380
+rec kind=rename_time delay_us=387 code=32 median_attempt_at_us=414
+rec kind=rename_time delay_us=387 code=ok median_attempt_at_us=711
+rec kind=rename_time delay_us=775 code=32 median_attempt_at_us=829
+rec kind=rename_time delay_us=775 code=5 median_attempt_at_us=1089
+rec kind=rename_time delay_us=775 code=ok median_attempt_at_us=1062
+rec kind=rename_time delay_us=1551 code=5 median_attempt_at_us=1876
+rec kind=rename_time delay_us=2327 code=5 median_attempt_at_us=2719
+rec kind=rename_time delay_us=3102 code=5 median_attempt_at_us=3433
+rec kind=rename_time delay_us=3878 code=5 median_attempt_at_us=4193
+rec kind=rename_time delay_us=4654 code=5 median_attempt_at_us=5105
+rec kind=rename_time delay_us=4654 code=ok median_attempt_at_us=4923
+rec kind=rename_time delay_us=5429 code=ok median_attempt_at_us=5687
+rec kind=rename_time delay_us=6205 code=ok median_attempt_at_us=6465
+rec kind=rename_time delay_us=6981 code=ok median_attempt_at_us=7235
+rec kind=rename_time delay_us=7757 code=ok median_attempt_at_us=8114
+rec kind=rename_time delay_us=10084 code=ok median_attempt_at_us=10365
+rec kind=load_result delay_us=0 result=correct count=1
+rec kind=load_result delay_us=0 result=typed_err:from_path:Io:NotFound:os=None count=6
+rec kind=load_result delay_us=0 result=typed_err:from_path:Io:Uncategorized:os=None count=3
+rec kind=load_result delay_us=387 result=correct count=9
+rec kind=load_result delay_us=387 result=typed_err:from_path:Io:Uncategorized:os=None count=1
+rec kind=load_result delay_us=775 result=correct count=9
+rec kind=load_result delay_us=775 result=typed_err:from_path:Io:Uncategorized:os=None count=1
+rec kind=load_result delay_us=1551 result=correct count=10
+rec kind=load_result delay_us=2327 result=correct count=10
+rec kind=load_result delay_us=3102 result=correct count=10
+rec kind=load_result delay_us=3878 result=correct count=10
+rec kind=load_result delay_us=4654 result=correct count=10
+rec kind=load_result delay_us=5429 result=correct count=10
+rec kind=load_result delay_us=6205 result=correct count=10
+rec kind=load_result delay_us=6981 result=correct count=10
+rec kind=load_result delay_us=7757 result=correct count=10
+rec kind=load_result delay_us=10084 result=correct count=10
+rec kind=load_time delay_us=0 from_path_median_us=634 n=10
+rec kind=load_time delay_us=387 from_path_median_us=8241 n=10
+rec kind=load_time delay_us=775 from_path_median_us=7898 n=10
+rec kind=load_time delay_us=1551 from_path_median_us=8022 n=10
+rec kind=load_time delay_us=2327 from_path_median_us=7932 n=10
+rec kind=load_time delay_us=3102 from_path_median_us=8113 n=10
+rec kind=load_time delay_us=3878 from_path_median_us=8013 n=10
+rec kind=load_time delay_us=4654 from_path_median_us=7973 n=10
+rec kind=load_time delay_us=5429 from_path_median_us=8019 n=10
+rec kind=load_time delay_us=6205 from_path_median_us=7972 n=10
+rec kind=load_time delay_us=6981 from_path_median_us=7980 n=10
+rec kind=load_time delay_us=7757 from_path_median_us=8050 n=10
+rec kind=load_time delay_us=10084 from_path_median_us=8134 n=10
+rec kind=first_error bucket=from_path:Io:NotFound:os=None detail=Display=ONNX_ファイル_I/O_失敗（読み込みまたは書き込み）:_entity_not_found_|_Debug=Io(Kind(NotFound))
+rec kind=first_error bucket=from_path:Io:Uncategorized:os=None detail=Display=ONNX_ファイル_I/O_失敗（読み込みまたは書き込み）:_uncategorized_error_|_Debug=Io(Kind(Uncategorized))
+summary status=done mode=delay iterations=130 aborted=false correct=119 invalid_values=0 rename_ok_during_load=59 rename_fail_during_load=60 rename_ok_outside_load=11 rename_fail_outside_load=0 from_path_median_us=7960 restore_retries=0 restored=true ancestor_exists=true renamed_exists=false

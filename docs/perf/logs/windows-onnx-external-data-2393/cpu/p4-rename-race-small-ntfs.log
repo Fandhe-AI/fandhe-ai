@@ -1,0 +1,5 @@
+rec kind=rename_stat during_load=1 code=32 count=67
+rec kind=rename_stat during_load=1 code=ok count=152
+rec kind=load_result result=typed_err:from_path:Io:NotFound:os=None count=148
+rec kind=load_result result=typed_err:from_path:Io:Uncategorized:os=None count=152
+summary status=done iterations=300 invalid_values=0 rename_ok_during_load=152 rename_ok_outside_load=0 restore_retries=0 restored=true ancestor_exists=true renamed_exists=false

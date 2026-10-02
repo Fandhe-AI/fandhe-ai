@@ -1,0 +1,317 @@
+//! #2393 検証ハーネス共通部（使い捨て・非コミット）。
+//!
+//! 出力規約: 1 行 1 レコード `rec kind=<種別> key=value ...`（空白は `_` へ置換）。
+//! 各 bin は最後に `summary ...` 行を出す。panic させずエラーは Debug 表示で記録する。
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use fandhe_ai::interop::onnx::{OnnxError, OnnxModel, OnnxValue};
+use fandhe_ai_onnx_interop::onnx::proto::{
+    data_location, data_type, encode_model, GraphProto, ModelProto, NodeProto,
+    OperatorSetIdProto, StringStringEntryProto, TensorProto, ValueInfoProto,
+};
+
+#[cfg(windows)]
+pub mod win;
+
+/// 1 テンソル（チャンク）あたりの要素数（f32 で 64 MiB）。external data の合計上限
+/// （既定 64 GiB）・ファイル数上限（4096）には、同一ファイルを offset 違いで共有する
+/// 分割テンソル構成で抵触しない（distinct ファイル 1 件・合計 = size_mb）。
+pub const CHUNK_ELEMS: u64 = 16 * 1024 * 1024;
+pub const SEED_A: u32 = 0x1111_AAAA;
+pub const SEED_B: u32 = 0x2222_BBBB;
+
+/// 1 行 1 レコードを stdout へ出す。値中の空白・改行は `_` へ置換する。
+pub fn rec(kind: &str, kv: &[(&str, String)]) {
+    let mut s = format!("rec kind={}", san(kind));
+    for (k, v) in kv {
+        s.push(' ');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(&san(v));
+    }
+    println!("{s}");
+}
+
+pub fn san(v: &str) -> String {
+    v.chars()
+        .map(|c| if c.is_whitespace() || c.is_control() { '_' } else { c })
+        .collect()
+}
+
+/// 決定的パターン（インデックス＋シード由来。0..1024 の 1/64 刻みで f32 に厳密表現でき非負。
+/// 非負なので Relu を通しても恒等になる）。
+pub fn pat(seed: u32, idx: u64) -> f32 {
+    let mut x = (idx as u32) ^ ((idx >> 32) as u32).wrapping_mul(0x9E37_79B1);
+    x = x.wrapping_add(seed.wrapping_mul(0x85EB_CA6B));
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7FEB_352D);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846C_A68B);
+    x ^= x >> 16;
+    ((x & 0xFFFF) as f32) / 64.0
+}
+
+/// `total_elems` 個のパターン f32 を LE で書き出す（8 MiB ずつ）。
+pub fn write_pattern_file(path: &Path, total_elems: u64, seed: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let mut f = std::io::BufWriter::with_capacity(8 << 20, std::fs::File::create(path)?);
+    for i in 0..total_elems {
+        f.write_all(&pat(seed, i).to_le_bytes())?;
+    }
+    f.flush()
+}
+
+fn entry(k: &str, v: String) -> StringStringEntryProto {
+    StringStringEntryProto { key: k.to_string(), value: v }
+}
+
+/// external data を `location`（model.onnx からの相対・`/` 区切り）の 1 ファイルから
+/// チャンク分割して参照するモデル（w{k}: external initializer → Relu → y{k}）を組み立てる。
+pub fn build_model_bytes(location: &str, total_elems: u64) -> Vec<u8> {
+    let mut inits = Vec::new();
+    let mut nodes = Vec::new();
+    let mut outs = Vec::new();
+    let mut done = 0u64;
+    let mut k = 0usize;
+    while done < total_elems {
+        let n = (total_elems - done).min(CHUNK_ELEMS);
+        inits.push(TensorProto {
+            dims: vec![n as i64],
+            data_type: data_type::FLOAT,
+            float_data: Vec::new(),
+            int64_data: Vec::new(),
+            name: format!("w{k}"),
+            raw_data: Vec::new(),
+            external_data: vec![
+                entry("location", location.to_string()),
+                entry("offset", (done * 4).to_string()),
+                entry("length", (n * 4).to_string()),
+            ],
+            data_location: data_location::EXTERNAL,
+        });
+        nodes.push(NodeProto {
+            input: vec![format!("w{k}")],
+            output: vec![format!("y{k}")],
+            name: format!("relu{k}"),
+            op_type: "Relu".to_string(),
+            attribute: Vec::new(),
+            domain: String::new(),
+        });
+        outs.push(ValueInfoProto { name: format!("y{k}") });
+        done += n;
+        k += 1;
+    }
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "win2393".to_string(),
+        graph: Some(GraphProto {
+            node: nodes,
+            name: "g".to_string(),
+            initializer: inits,
+            input: Vec::new(),
+            output: outs,
+            value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
+        }),
+        opset_import: vec![OperatorSetIdProto { domain: String::new(), version: 13 }],
+    };
+    encode_model(&model)
+}
+
+/// エラーの種別キー（Debug 由来。tensor 名など可変部は除く）。
+pub fn bucket(e: &OnnxError) -> String {
+    match e {
+        OnnxError::Io(io) => format!("Io:{:?}:os={:?}", io.kind(), io.raw_os_error()),
+        OnnxError::InvalidModel { message } | OnnxError::Execution { message } => {
+            let variant = if matches!(e, OnnxError::InvalidModel { .. }) {
+                "InvalidModel"
+            } else {
+                "Execution"
+            };
+            let head = message.split("（tensor=").next().unwrap_or(message);
+            let tail = message.split_once("）").map(|x| x.1).unwrap_or("");
+            let mut s = format!("{variant}:{head}{tail}");
+            s.truncate(s.char_indices().nth(120).map(|x| x.0).unwrap_or(s.len()));
+            s
+        }
+        other => {
+            let mut s = format!("{other:?}");
+            s.truncate(s.char_indices().nth(120).map(|x| x.0).unwrap_or(s.len()));
+            s
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// 全要素が `seeds[i]` のパターンと一致。
+    Match(usize),
+    /// どのシードとも全一致しない（不正値）。
+    Invalid { detail: String },
+}
+
+/// run 出力 y0..yN を `seeds` の各パターンと照合する。
+pub fn verify(outputs: &HashMap<String, OnnxValue>, seeds: &[u32]) -> Verdict {
+    let mut mism = vec![0u64; seeds.len()];
+    let mut total = 0u64;
+    let mut k = 0usize;
+    while let Some(v) = outputs.get(&format!("y{k}")) {
+        let OnnxValue::F32(t) = v else {
+            return Verdict::Invalid { detail: format!("y{k}_not_f32") };
+        };
+        let Some(s) = t.as_slice() else {
+            return Verdict::Invalid { detail: format!("y{k}_not_contiguous") };
+        };
+        for (i, x) in s.iter().enumerate() {
+            let idx = k as u64 * CHUNK_ELEMS + i as u64;
+            for (si, seed) in seeds.iter().enumerate() {
+                if x.to_bits() != pat(*seed, idx).to_bits() {
+                    mism[si] += 1;
+                }
+            }
+        }
+        total += s.len() as u64;
+        k += 1;
+    }
+    if total == 0 {
+        return Verdict::Invalid { detail: "no_outputs".into() };
+    }
+    for (i, m) in mism.iter().enumerate() {
+        if *m == 0 {
+            return Verdict::Match(i);
+        }
+    }
+    Verdict::Invalid { detail: format!("total={total} mismatches_per_seed={mism:?}") }
+}
+
+pub enum LoadOutcome {
+    Verdict(Verdict),
+    Err(String),
+}
+
+/// `load_and_verify` の詳細版: (結果, 型付きエラーの Display+Debug, from_path の所要時間)。
+pub fn load_detail(
+    path: &Path,
+    seeds: &[u32],
+    flag: Option<&std::sync::atomic::AtomicBool>,
+) -> (LoadOutcome, Option<String>, std::time::Duration) {
+    use std::sync::atomic::Ordering::SeqCst;
+    if let Some(f) = flag {
+        f.store(true, SeqCst);
+    }
+    let t0 = std::time::Instant::now();
+    let r = OnnxModel::from_path(path);
+    let el = t0.elapsed();
+    if let Some(f) = flag {
+        f.store(false, SeqCst);
+    }
+    match r {
+        Err(e) => (
+            LoadOutcome::Err(format!("from_path:{}", bucket(&e))),
+            Some(format!("Display={e} | Debug={e:?}")),
+            el,
+        ),
+        Ok(m) => match m.run(HashMap::new()) {
+            Err(e) => (
+                LoadOutcome::Err(format!("run:{}", bucket(&e))),
+                Some(format!("Display={e} | Debug={e:?}")),
+                el,
+            ),
+            Ok(out) => (LoadOutcome::Verdict(verify(&out, seeds)), None, el),
+        },
+    }
+}
+
+/// `OnnxModel::from_path`（呼び出し直前後に `flag` を立て/倒す）→ `run` → 照合。
+pub fn load_and_verify(
+    path: &Path,
+    seeds: &[u32],
+    flag: Option<&std::sync::atomic::AtomicBool>,
+) -> LoadOutcome {
+    load_detail(path, seeds, flag).0
+}
+
+/// リンク（junction/symlink）削除の頑健版。戻り値は (最初の remove の失敗, 最終的にリンクが消えたか)。
+/// Windows では remove_dir 失敗時に reparse データを FSCTL で外してから再度 remove_dir する。
+pub fn remove_dir_link_robust(link: &Path) -> (Option<std::io::Error>, bool) {
+    match remove_dir_link(link) {
+        Ok(()) => (None, true),
+        Err(first) => {
+            #[cfg(windows)]
+            {
+                let _ = win::delete_mount_point(link);
+                let _ = std::fs::remove_dir(link);
+            }
+            let gone = std::fs::symlink_metadata(link).is_err();
+            (Some(first), gone)
+        }
+    }
+}
+
+/// reparse point（junction/symlink 等）か。
+pub fn is_reparse(p: &Path) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(p) else {
+        return false;
+    };
+    if m.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return m.file_attributes() & 0x400 != 0;
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+/// ディレクトリリンク作成（Windows: junction、unix: symlink。flip_revert 用）。
+pub fn make_dir_link(link: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        win::create_junction(link, target)
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (link, target);
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
+
+/// `make_dir_link` で作ったリンク自体の削除。
+pub fn remove_dir_link(link: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::fs::remove_dir(link)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(link)
+    }
+}
+
+pub fn code_of(e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        Some(c) => c.to_string(),
+        None => format!("kind:{:?}", e.kind()),
+    }
+}
+
+pub fn args_or_usage(min: usize, usage: &str) -> Vec<String> {
+    let a: Vec<String> = std::env::args().skip(1).collect();
+    if a.len() < min {
+        rec("usage", &[("usage", usage.to_string())]);
+        println!("summary status=usage_error");
+        std::process::exit(2);
+    }
+    a
+}

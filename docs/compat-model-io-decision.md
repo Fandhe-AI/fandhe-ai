@@ -1245,6 +1245,39 @@ safetensors ファイルと古い manifest が同一ディレクトリに共存�
 - 記録事項: NTFS 必須（可能なら ReFS も）・Windows と Rust toolchain の版。結果の
   反映先は本節
 
+**7. Windows 実機の実測結果（2026-10-03・#2393）**
+
+出典: `docs/perf/logs/windows-onnx-external-data-2393/README.md`（生ログ `cpu/p4-wsave-ntfs.log`・`cpu/p4-wsave-refs.log`・
+`cpu/p3-facade-model-io.log`）。環境は Windows Server 2022 Datacenter 21H2 build 20348.5622 の GCE VM（物理機ではない）・
+Rust 1.99.0（x86_64-pc-windows-msvc）・NTFS（C:）と ReFS（R:）。**本節は (c) への緩和条件の判断材料を記録するだけで、
+決定（Windows の `save_model` は fail-closed）は変えない。**
+
+- **W-save-1**: facade `compat_sequential_model_io` 2 passed。非 unix で `save_model`／`load_model` が `Unsupported` を返すことを
+  実機で確認した。
+- **W-save-2**（`std::fs::rename(tmp, manifest.json)`・Rust 1.99.0。いずれも参照先の内容は書き換わらない〔`target_written_through=false`〕。参照先のタイムスタンプは未確認）:
+
+  | 置換先 | NTFS | ReFS |
+  |---|---|---|
+  | ファイル symlink | rename 成功・リンク自体が通常ファイルに置換 | 同左 |
+  | ディレクトリ symlink | rename 成功・リンク自体が通常ファイルに置換 | `ERROR_ACCESS_DENIED`(5)・リンク不変（tmp 残存） |
+  | junction | rename 成功・リンク自体が通常ファイルに置換 | `ERROR_ACCESS_DENIED`(5)・リンク不変（tmp 残存） |
+  | dangling ファイル symlink | rename 成功・リンク自体が通常ファイルに置換 | 同左 |
+
+  すなわちこの観測範囲（上記 4 種・NTFS／ReFS）では、`rename` は参照先へ書き込まず、リンク自体の置換またはエラーのいずれかだった。
+  1 節表の「ファイル symlink／ディレクトリ symlink／junction の置換先」の「未確認」はこの範囲で実測により埋まった。
+- **W-save-3**: ハーネスは `std::fs::rename` の最終結果しか観測できないため、`MoveFileExW` が `ERROR_ACCESS_DENIED` を返して
+  `FileRenameInfoEx`（POSIX semantics）フォールバックに入ったかどうかは**判別できなかった**。NTFS の成功・ReFS の
+  ディレクトリ symlink／junction の `ERROR_ACCESS_DENIED` がどちらの段の結果かは未特定（特定には `MoveFileExW` と
+  `SetFileInformationByHandle` を個別に呼ぶ追加実験か API トレースが要る）。
+- **W-save-4（1 節表の「想定」の訂正）**: `OpenOptions::create_new` は、ファイル symlink・dangling ファイル symlink では
+  `AlreadyExists`(80) になったが、**ディレクトリ symlink・junction では `PermissionDenied`(5)**（`AlreadyExists` ではない）だった。
+  NTFS・ReFS とも同じ。1 節表の「既存の symlink〈dangling を含む〉があれば `AlreadyExists` になる想定」は、ファイル symlink 系
+  のみ成立する。
+- **緩和条件（4 節）への影響**: 条件 1（ファイル symlink／ディレクトリ symlink／junction／その他の reparse タグのすべてで参照先へ
+  書き込まないこと）に対し、AppExecLink・クラウドプレースホルダ（OneDrive 等）の reparse タグは**未検証**で、明文出典の確認も
+  未了のため、条件 1 は部分的にしか満たされていない。条件 2（§13.6 の Windows 実装手段）・条件 3（`load_model` の Windows 対応）も
+  未充足。したがって本実測で決定は変わらない（(c) への移行にはユーザー承認が引き続き必要）。
+
 ## 13. ファイル I/O 脅威の全数棚卸し（C。PR #2317 review 再々確認・
 2026-09-27・指摘 1・2 の是正に伴う網羅確認）
 

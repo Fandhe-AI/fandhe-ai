@@ -1,0 +1,118 @@
+//! wsave <work_dir>: compat-model-io-decision §12.4 W-save-2〜4 の観察（Windows 管理者で実行）。
+//! 置換先 dst を (i) ファイル symlink (ii) ディレクトリ symlink (iii) junction (iv) dangling ファイル
+//! symlink にして rename(tmp, dst) し、結果・dst の種別・参照先の変化を記録。さらに create_new を観察。
+#[cfg(windows)]
+fn main() {
+    use std::fs;
+    use std::io::ErrorKind;
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    use std::path::{Path, PathBuf};
+    use win2393_harness::*;
+
+    let a = args_or_usage(1, "wsave <work_dir>");
+    let root = PathBuf::from(&a[0]).join(format!("wsave_{}", std::process::id()));
+    if let Err(e) = fs::create_dir_all(&root) {
+        rec("setup", &[("result", "err".into()), ("debug", format!("{e:?}"))]);
+        println!("summary status=setup_error");
+        return;
+    }
+    rec("volume", &[("fs", win::fs_name(&root).unwrap_or_else(|e| format!("err:{e:?}")))]);
+
+    #[derive(Clone, Copy)]
+    enum Kind { FileSym, DirSym, Junction, Dangling }
+    let kinds = [
+        ("i_file_symlink", Kind::FileSym),
+        ("ii_dir_symlink", Kind::DirSym),
+        ("iii_junction", Kind::Junction),
+        ("iv_dangling_file_symlink", Kind::Dangling),
+    ];
+    // 各ケース: <root>/<case>/{dst(link), target.txt | targetdir/inner.txt, tmp.txt}
+    let setup_case = |name: &str, kind: Kind| -> std::io::Result<(PathBuf, PathBuf)> {
+        let d = root.join(name);
+        fs::create_dir_all(&d)?;
+        let dst = d.join("dst");
+        let content_path = match kind {
+            Kind::FileSym | Kind::Dangling => d.join("target.txt"),
+            Kind::DirSym | Kind::Junction => d.join("targetdir").join("inner.txt"),
+        };
+        if !matches!(kind, Kind::Dangling) {
+            fs::create_dir_all(content_path.parent().unwrap_or(Path::new(".")))?;
+            fs::write(&content_path, b"ORIG")?;
+        }
+        match kind {
+            Kind::FileSym | Kind::Dangling => symlink_file(d.join("target.txt"), &dst)?,
+            Kind::DirSym => symlink_dir(d.join("targetdir"), &dst)?,
+            Kind::Junction => win::create_junction(&dst, &d.join("targetdir"))?,
+        }
+        Ok((dst, content_path))
+    };
+    let describe = |p: &Path| -> String {
+        match fs::symlink_metadata(p) {
+            Ok(m) => {
+                let ft = m.file_type();
+                format!("is_symlink={} is_file={} is_dir={}", ft.is_symlink(), ft.is_file(), ft.is_dir())
+            }
+            Err(e) => format!("err{}", code_of(&e)),
+        }
+    };
+    let mut cases = 0;
+    for (name, kind) in kinds {
+        let (dst, content) = match setup_case(&format!("rn_{name}"), kind) {
+            Ok(x) => x,
+            Err(e) => {
+                rec("rename_case", &[("case", name.into()), ("setup", format!("err{}:{:?}", code_of(&e), e.kind()))]);
+                continue;
+            }
+        };
+        cases += 1;
+        let tmp = dst.with_file_name("tmp.txt");
+        let _ = fs::write(&tmp, b"NEW");
+        let before = describe(&dst);
+        let r = fs::rename(&tmp, &dst);
+        let after = describe(&dst);
+        let orig_now = fs::read(&content).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|e| format!("err{}", code_of(&e)));
+        // dangling の場合は書き込みが target.txt を作ったかを見る
+        let dst_read = fs::read(&dst).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|e| format!("err{}", code_of(&e)));
+        rec("rename_case", &[
+            ("case", name.into()),
+            ("rename", match &r { Ok(()) => "ok".into(), Err(e) => format!("err{}:{:?}", code_of(e), e.kind()) }),
+            ("dst_before", before),
+            ("dst_after", after),
+            ("link_target_content_now", orig_now.clone()),
+            ("dst_read_now", dst_read),
+            ("tmp_still_exists", tmp.exists().to_string()),
+            ("target_written_through", (orig_now == "NEW").to_string()),
+        ]);
+    }
+    for (name, kind) in kinds {
+        let (dst, _c) = match setup_case(&format!("cn_{name}"), kind) {
+            Ok(x) => x,
+            Err(e) => {
+                rec("create_new_case", &[("case", name.into()), ("setup", format!("err{}", code_of(&e)))]);
+                continue;
+            }
+        };
+        let r = fs::OpenOptions::new().write(true).create_new(true).open(&dst);
+        let (res, already) = match &r {
+            Ok(_) => ("ok_UNEXPECTED_opened".to_string(), false),
+            Err(e) => (format!("err{}:{:?}", code_of(e), e.kind()), e.kind() == ErrorKind::AlreadyExists),
+        };
+        rec("create_new_case", &[("case", name.into()), ("result", res), ("already_exists", already.to_string())]);
+    }
+    // 後始末: リンク自体を先に外してから全体削除
+    for entry in fs::read_dir(&root).into_iter().flatten().flatten() {
+        let dst = entry.path().join("dst");
+        if let Ok(m) = fs::symlink_metadata(&dst) {
+            let ft = m.file_type();
+            let _ = if ft.is_symlink() && !ft.is_dir() { fs::remove_file(&dst) } else if ft.is_dir() || ft.is_symlink() { fs::remove_dir(&dst) } else { fs::remove_file(&dst) };
+        }
+    }
+    let cl = fs::remove_dir_all(&root);
+    rec("cleanup", &[("result", format!("{cl:?}"))]);
+    println!("summary status=done rename_cases={cases}");
+}
+#[cfg(not(windows))]
+fn main() {
+    println!("rec kind=unsupported reason=windows_only");
+    println!("summary status=unsupported");
+}

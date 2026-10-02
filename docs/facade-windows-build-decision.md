@@ -67,7 +67,7 @@
 ## 6. サポート対象 OS の階層（本書を正とする）
 
 - **Linux／macOS**: 全機能（ディスクキャッシュは fd pin の TOCTOU 対策付き）。
-- **Windows（x86_64-pc-windows-msvc）**: #2390・#2391 によりビルド可能（CI の Windows クロス clippy で継続検査）。ディスクキャッシュは設計上無効。CUDA 実行時動作は #2393 まで未検証。
+- **Windows（x86_64-pc-windows-msvc）**: #2390・#2391 によりビルド可能（CI の Windows クロス clippy で継続検査）。ディスクキャッシュは設計上無効。CUDA 実行時動作は #2393 まで未検証。**2026-10-03 実測・#2393**: Windows Server 2022（GCE VM・Tesla T4）で、`CUDA_INCLUDE_PATH` を明示すれば CUDA GEMM が動作し CPU 参照と統一複合判定で一致した。未指定では全カーネルのコンパイルが失敗する（§9 の実測結果）。
 - **その他の非 unix**: ビルド可能だが未検証。
 
 `docs/backend-switching-design.md` にはサポート対象 OS の明文がなく、`nvrtc.rs` 冒頭コメントが同 doc を出典として引いているのは引用のずれである。同 doc へは本書への 1 行参照のみ追加した。
@@ -75,6 +75,8 @@
 ## 7. cudarc の Windows 動的ロード
 
 cudarc 0.19.8 `src/lib.rs:204-243` の `get_lib_name_candidates` は、Windows では `DLL_PREFIX=""`・`DLL_SUFFIX=".dll"` で `{lib}{64}_{major}{minor}_0` 等を候補にする。CUDA 13.0（`cuda-13000`）では NVRTC 側の候補に `nvrtc64_130_0.dll`、driver 側は `nvcuda.dll` などが含まれる。ビルド可否は §2 の実測（cudarc が msvc 向けにコンパイル可）に基づく。DLL の実配置（`bin\` か `bin\x64\`）・`PATH` 要件は **未検証 → #2393**（推定を事実として書かない）。
+
+**2026-10-03 実測・#2393（上の「未検証」への結果。出典 `docs/perf/logs/windows-onnx-external-data-2393/README.md`）**: Windows Server 2022 の GCE VM（Tesla T4・ドライバ 596.86）で、`nvcuda.dll` は `System32`、NVRTC は CUDA 13.0 redist 13.0.88 の `bin\x64\`（`nvrtc64_130_0.dll`・`nvrtc-builtins64_130.dll`）に配置されていた。NVRTC を含むディレクトリが `PATH` に無い場合は NVRTC がロードされず型付きエラーになり、`PATH` へ追加するとロードされた（`gpu/gpu-env.txt`・`gpu/g-cuda-probe-*.log`）。
 
 ## 8. CI の追加方法（required contexts を変えない）
 
@@ -96,6 +98,19 @@ cudarc 0.19.8 `src/lib.rs:204-243` の `get_lib_name_candidates` は、Windows �
 4. ディスクキャッシュが実際に無効であること（キャッシュディレクトリ非作成・`RUST_AI_CUDA_CACHE_DIR` 設定でも書き込まれない）とプロセス内 LRU の再利用。
 5. facade `OnnxModel::from_path` から external data を読めること（#2391 後）。
 6. GPU 搭載 Windows 実機で GEMM の CPU 参照との数値一致（統一複合判定）。
+
+### 実測結果（2026-10-03・#2393）
+
+出典: `docs/perf/logs/windows-onnx-external-data-2393/README.md`（CPU VM＝Windows Server 2022 Datacenter 21H2 build 20348.5622・GPU なし。GPU VM＝同 OS・Tesla T4〔compute capability 7.5・sm_75〕・ドライバ 596.86。いずれも GCE VM で物理機ではない。Rust 1.99.0）。T4 は本リポの主対象 GB10（sm_121）ではなく、TF32／mma 系（sm_80 以上）は対象外。
+
+1. **確認（条件付き）**: `nvcuda.dll` は `System32` から解決された。`nvrtc64_130_0.dll` は CUDA 13.0 redist 13.0.88 の `bin\x64\` に置かれ、PATH へ追加するとロードされた。PATH に NVRTC が無い場合は `Device::Cuda` の選択自体は成功し、GEMM 実行時に `CudaUnavailable("CUDA NVRTC library unavailable ...")` の型付きエラーになった（`gpu/g-cuda-probe-no-nvrtc-path.log`）。
+2. **確認**: `nvrtc-builtins64_130.dll` は `nvrtc64_130_0.dll` と同じ `bin\x64\` にあり、PATH 追加後に NVRTC のコンパイルが実行できた（`CUDA_INCLUDE_PATH` 指定後の `g2-*` で全 GEMM カーネルのコンパイルが成功。DLL のロード可否は個別観測ではなくコンパイル成功からの間接確認。`gpu/g2-cuda-probe-with-include.log`）。
+3. **確認（エラー名の観測値）**: DLL 不在時は panic せず型付きエラー。CPU VM（ドライバなし）は `Device::Cuda` 選択時に `CudaUnavailable("CUDA driver library unavailable ...")`、GPU VM（NVRTC が PATH に無い）は GEMM 実行時に `CudaUnavailable("CUDA NVRTC library unavailable ...")`。想定していた `DriverUnavailable`／`NvrtcUnavailable` という名前ではなく、実際は `CudaUnavailable(<メッセージ>)` の 1 バリアントだった（`cpu/p4-cuda-probe-nogpu.log`）。
+4. **確認**: `RUST_AI_CUDA_CACHE_DIR` を設定してもディレクトリ・ファイルは作成されなかった（CPU VM は `cache_dir_exists_after=False`、GPU VM は `created_dir=false files_written=false`）。プロセス内 LRU は 64x64x64 GEMM の 1 回目 約 2.6 s（NVRTC コンパイル）→ 2 回目以降 約 1.2〜1.5 ms で再利用された（`gpu/g2-cuda-probe-with-include.log`）。
+5. **確認**: facade `OnnxModel::from_path` で external data を読めた（`interop_onnx_external_data` 2 passed。CPU VM の NTFS・ReFS・exFAT と GPU VM）。詳細は `docs/onnx-external-data-decision.md` §8 の 2026-10-03 追記。
+6. **確認（`CUDA_INCLUDE_PATH` 指定が前提）**: PATH に NVRTC を追加しただけでは**全カーネルのコンパイルが `cuda_fp16.h` を開けず失敗**した（`NVRTC_ERROR_COMPILATION`）。原因は `crates/backend-cuda/src/nvrtc.rs` の `compile_ptx` の include 候補が `CUDA_INCLUDE_PATH` と Linux 固定パスのみで、Windows の CUDA ヘッダ位置を探さないこと（起票候補。未起票・ユーザー承認待ち）。CUDA 13.0 redist の cudart 13.0.96・crt 13.0.88・cccl 13.0.85 のヘッダ（版数と sha256 は `gpu/redist-manifest.txt`。取得スクリプトの指定値の転記）を 1 ディレクトリにまとめて `CUDA_INCLUDE_PATH` で指定すると、`cpu_cuda_parity` 2・`gemm_naive` 3・`gemm_tiled` 6・`gemm_transposed_parity` 5・`gemm_batched_parity` 2 が passed、`device_init` 1 passed（初回から）、64x64x64 GEMM が CPU 参照と統一複合判定で `fail_count=0`（`max_abs_diff` 0）だった。`gemm_f32_variants` は `internal-diagnostics` feature 必須のため未実行。
+
+結論として、§9 の 6 項目はいずれも Windows 実機で確認できたが、6 は `CUDA_INCLUDE_PATH` の明示指定が必要で、既定構成のままでは Windows の CUDA が動かない（§6 の Windows 階層の「CUDA 実行時動作は未検証」は、この制約付きの動作確認済みに更新する）。
 
 ## 10. 他 doc・コードに残るずれ（別イシューで是正）
 

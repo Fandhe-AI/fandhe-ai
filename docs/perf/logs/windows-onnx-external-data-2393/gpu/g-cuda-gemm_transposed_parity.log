@@ -1,0 +1,64 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+   Compiling fandhe-ai-backend-cuda v0.9.0 (C:\work\src\crates\backend-cuda)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.48s
+     Running tests\gemm_transposed_parity.rs (target\debug\deps\gemm_transposed_parity-0fa3645548cc93de.exe)
+
+running 5 tests
+test gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device ... FAILED
+test gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... FAILED
+test gemm_resident_lhs_nt_transposed_view_matches_contiguous_on_real_device ... FAILED
+test gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... FAILED
+test gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device ... FAILED
+
+failures:
+
+---- gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device stdout ----
+
+thread 'gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device' (1884) panicked at crates\backend-cuda\tests\gemm_transposed_parity.rs:180:54:
+called `Result::unwrap()` on an `Err` value: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_75\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device stdout ----
+
+thread 'gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device' (5256) panicked at crates\backend-cuda\tests\gemm_transposed_parity.rs:73:58:
+called `Result::unwrap()` on an `Err` value: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_75\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+
+---- gemm_resident_lhs_nt_transposed_view_matches_contiguous_on_real_device stdout ----
+
+thread 'gemm_resident_lhs_nt_transposed_view_matches_contiguous_on_real_device' (7160) panicked at crates\backend-cuda\tests\gemm_transposed_parity.rs:213:63:
+called `Result::unwrap()` on an `Err` value: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_75\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+
+---- gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device stdout ----
+
+thread 'gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device' (796) panicked at crates\backend-cuda\tests\gemm_transposed_parity.rs:117:58:
+called `Result::unwrap()` on an `Err` value: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_75\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+
+---- gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device stdout ----
+
+thread 'gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device' (6856) panicked at crates\backend-cuda\tests\gemm_transposed_parity.rs:153:56:
+called `Result::unwrap()` on an `Err` value: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_75\"], log: \"default_program(2): catastrophic error: could not open source file \\\"cuda_fp16.h\\\" (no directories in search list)\\n  #include <cuda_fp16.h>\\n                        ^\\n\\n1 catastrophic error detected in the compilation of \\\"default_program\\\".\\nCompilation terminated.\\n\" }")
+
+
+failures:
+    gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device
+    gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device
+    gemm_resident_lhs_nt_transposed_view_matches_contiguous_on_real_device
+    gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device
+    gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_transposed_parity`

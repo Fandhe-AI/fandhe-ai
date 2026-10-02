@@ -1,0 +1,22 @@
+os_product=Windows Server 2022 Datacenter
+os_display_version=21H2
+os_build=20348.5622
+edition=ServerDatacenter
+cpu=Intel(R) Xeon(R) CPU @ 2.80GHz
+logical_cpus=8
+msvc=14.44.35207
+winsdk=10.0.22621.0
+info: syncing channel updates for stable-x86_64-pc-windows-msvc
+info: latest update on 2026-10-01 for version 1.99.0 (b940084d7 2026-09-28)
+info: downloading 2 components
+rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: x86_64-pc-windows-msvc
+release: 1.99.0
+LLVM version: 23.1.1
+cargo 1.99.0 (5f94df478 2026-08-27)
+volume C: NTFS
+volume R: ReFS
+volume X: exFAT

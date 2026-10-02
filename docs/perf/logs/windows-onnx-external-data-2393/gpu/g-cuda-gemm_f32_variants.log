@@ -1,0 +1,2 @@
+error: target `gemm_f32_variants` in package `fandhe-ai-backend-cuda` requires the features: `internal-diagnostics`
+Consider enabling them by passing, e.g., `--features="internal-diagnostics"`

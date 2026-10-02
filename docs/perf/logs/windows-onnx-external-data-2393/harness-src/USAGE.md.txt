@@ -1,0 +1,58 @@
+# win2393-harness 使い方（#2393 使い捨て。ビルド対象外の参考資料として .txt 化してコミット）
+
+配置: リポジトリを `C:\work\src` に展開 → `C:\work\src\win2393-harness\` に本ディレクトリを置く。
+`cargo build --release`（`Cargo.lock` は本体の写し。外部依存の追加なし）。bin は `target\release\*.exe`。
+全 bin は `rec kind=... key=value ...` を 1 行 1 レコードで出し、最後に `summary ...` 行を出す。panic しない。
+
+## 共通: 生成データ
+- 値は決定的パターン（シード A=0x1111AAAA、B=0x2222BBBB）。external は 64 MiB チャンクの複数テンソル
+  （同一ファイルを offset 違いで共有 → distinct ファイル 1 件・合計 = size_mb で既定上限 64 GiB/4096 件に非抵触）。
+- グラフは `w{k}`(external initializer) → Relu → `y{k}`（値は非負なので恒等）。
+
+## 1. gen_model `<out_dir> <size_mb> [--layout a/b]`
+`<out_dir>/<layout>/w.bin` と `<out_dir>/model_<layout の / を _ に>.onnx` を作る（location は `<layout>/w.bin`）。
+`generated` 行の `ancestor_dir` が rename_race 用の祖先。例: `gen_model D:\t 300 --layout a/b`。
+
+## 2. load_once `<model_path>`
+`OnnxModel::from_path` → `run`。`summary status=ok ... pattern=match_seed_A` なら値正当。
+失敗は `status=load_error bucket=...`（FILE_TRAVERSE 拒否 ACL を非管理者で試す用途。エラー種別を見る）。
+注意: facade は ExternalDataError を `InvalidModel{message}`／`Io(kind)` に写像する（`Io` は raw_os_error が None になる）。
+
+## 3. rename_race `<model_path> <ancestor_dir> <iterations>`
+`from_path` 中（フラグは from_path の直前後）に別スレッドが `<ancestor>` ↔ `<ancestor>.renamed` を rename し即戻す。
+- `rename_stat during_load=1 code=32|5|ok count=N`: load 中の rename 結果（32=SHARING_VIOLATION, 5=ACCESS_DENIED）。
+  封じ込めが効いていれば `during_load=1 code=ok` は 0（フラグは前後どちらかで立っていれば 1）。
+- `load_result`: `correct` / `typed_err:...` / `INVALID:...`。summary の `invalid_values` は **0 必須**。
+- 小さいモデル（1〜8 MB）推奨。model は ancestor の外に置く（中だと rename 中に本体読みが NotFound になる）。
+
+### 3b. rename_race 遅延モード（`--delay-us N,N,...|auto`）
+`rename_race <model> <ancestor> <iterations> --delay-us 0,2000,5000,10000,20000,50000,100000`。
+各 load ごとに攻撃スレッドが「load 開始から delay_us 待って rename を 1 回だけ試み、成功なら即復元」し、メインはその完了を待ってから次の load へ進む。
+delay を iteration ごとに順に回す。`auto` は攻撃なしで測った from_path 中央値 T（`calibration` 行）の 0〜1.3 倍を掃引（モデルの大きさに自動追従）。
+出力: `rename_stat delay_us code load_active_before/after count`（code=32 が共有違反）、`load_result delay_us result count`、
+`load_time`（delay 別 from_path 中央値）、`first_error`（型付きエラー bucket ごとの最初の Display/Debug 全文）。
+256MB モデルは T が大きいので `auto` か、T に合わせた手動リストを使う。
+
+## 4. flip_revert `<work_dir> <iterations> [--hold-us N] [--min-cycles N]`
+`<work_dir>\base\{A,B}\w.bin` と `base\model.onnx`（A を参照）を作り、攻撃スレッドが
+A→A_orig、A を B への junction（FSCTL_SET_REPARSE_POINT）、300µs 待ち、junction 削除、A_orig→A を反復。
+攻撃は load と独立に回る。段 3 は junction A 自体を削除（失敗時は FSCTL で reparse を外して再削除・リトライ）、段 4 の復元はサイクルごと上限 3000 回リトライ（残骸の空ディレクトリ A は除去）、3 サイクル連続で復元不能なら攻撃停止（`attack_aborted=true`）。終了時は必ず A=実ディレクトリ・A_orig なしへ戻す（`cleanup` 行・`final_state_ok`）。`--min-cycles N` は攻撃が N 周するまで iterations を超えて継続（上限 20 倍）。`attack_cycles`/`attack_attempts` が周回数。`attack_stage` に各段・各エラーコードの件数、`load_result` に `A_correct` / `typed_err:...` /
+`B_value_CONTAINMENT_BREACH`（**0 必須**）/ `OTHER_INVALID`（0 必須）。復元に失敗すると `restored=false`。
+
+## 5. reparse_nonempty `<dir_on_target_volume>`（Windows のみ）
+空・非空ディレクトリへ mount point reparse を設定。`volume fs=NTFS|ReFS|exFAT`、`set_reparse case=a_empty|b_nonempty
+result code`。NTFS 期待: a=ok、b=145（ERROR_DIR_NOT_EMPTY）。後始末あり（失敗時は `cleanup` 行を確認）。
+
+## 6. wsave `<work_dir>`（Windows・管理者・NTFS/可能なら ReFS）
+`rename_case`: dst を (i)ファイル symlink (ii)ディレクトリ symlink (iii)junction (iv)dangling にして `rename(tmp,dst)`。
+`rename`（ok/err コード）、`dst_before/after`（symlink のままか通常ファイルか）、`target_written_through`（参照先が "NEW" に
+なったか）。`create_new_case`: 既存リンクへの `create_new` が `AlreadyExists` か（`already_exists=true` 期待）。
+非 Windows は unsupported。
+
+## 7. cuda_probe
+`available_devices` → `tape_for(Device::Cuda(0))` → 64x64x64 GEMM を 5 回（`gemm_run micros`）→ CPU 参照
+（`CpuBackendOps` matmul）と `fandhe_ai_backend_cpu::compare`（統一複合判定）で比較。`summary` に `fail_count`（0 期待）、
+`first_us/second_us/second_faster`（プロセス内 LRU 再利用の目安）。CUDA 不可は `status=cuda_unavailable error=<BackendError Debug>`。
+`RUST_AI_CUDA_CACHE_DIR`（絶対パス・**ビルド時 workspace ルート `C:\work\src` 配下は拒否される**ので `D:\cache` 等）を設定すると
+`cache_before/after` でディレクトリ生成・ファイル書き込みの有無を出す（非 unix は無効設計なので `created_dir=false` 期待）。
+TF32 は既定 OFF のまま（`cuda_tf32_gemm_enabled` を表示）。

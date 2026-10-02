@@ -1,0 +1,11 @@
+C:\acl2393\a <win-vm>\<lowpriv-user>:(DENY)(S,X)
+             <win-vm>\<lowpriv-user>:(OI)(CI)(RX)
+             <win-vm>\<lowpriv-user>:(I)(OI)(CI)(RX)
+             NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)
+             BUILTIN\Administrators:(I)(OI)(CI)(F)
+             BUILTIN\Users:(I)(OI)(CI)(RX)
+             BUILTIN\Users:(I)(CI)(AD)
+             BUILTIN\Users:(I)(CI)(WD)
+             CREATOR OWNER:(I)(OI)(CI)(IO)(F)
+
+Successfully processed 1 files; Failed processing 0 files

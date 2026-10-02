@@ -1,0 +1,57 @@
+rec kind=calibration from_path_median_us=248001 note=attack-free
+rec kind=delays us=[0,_12400,_24800,_49600,_74400,_99200,_124000,_148800,_173600,_198400,_223200,_248001,_322401]
+rec kind=rename_stat delay_us=0 code=ok load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=12400 code=5 load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=24800 code=5 load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=49600 code=5 load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=74400 code=5 load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=99200 code=5 load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=124000 code=5 load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=148800 code=ok load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=173600 code=ok load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=198400 code=ok load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=223200 code=ok load_active_before=1 load_active_after=1 count=4
+rec kind=rename_stat delay_us=248001 code=ok load_active_before=0 load_active_after=0 count=4
+rec kind=rename_stat delay_us=322401 code=ok load_active_before=0 load_active_after=0 count=4
+rec kind=rename_time delay_us=0 code=ok median_attempt_at_us=448
+rec kind=rename_time delay_us=12400 code=5 median_attempt_at_us=12762
+rec kind=rename_time delay_us=24800 code=5 median_attempt_at_us=25164
+rec kind=rename_time delay_us=49600 code=5 median_attempt_at_us=49967
+rec kind=rename_time delay_us=74400 code=5 median_attempt_at_us=74791
+rec kind=rename_time delay_us=99200 code=5 median_attempt_at_us=99550
+rec kind=rename_time delay_us=124000 code=5 median_attempt_at_us=124385
+rec kind=rename_time delay_us=148800 code=ok median_attempt_at_us=149357
+rec kind=rename_time delay_us=173600 code=ok median_attempt_at_us=173914
+rec kind=rename_time delay_us=198400 code=ok median_attempt_at_us=198703
+rec kind=rename_time delay_us=223200 code=ok median_attempt_at_us=223511
+rec kind=rename_time delay_us=248001 code=ok median_attempt_at_us=248303
+rec kind=rename_time delay_us=322401 code=ok median_attempt_at_us=322721
+rec kind=load_result delay_us=0 result=correct count=2
+rec kind=load_result delay_us=0 result=typed_err:from_path:Io:NotFound:os=None count=2
+rec kind=load_result delay_us=12400 result=correct count=4
+rec kind=load_result delay_us=24800 result=correct count=4
+rec kind=load_result delay_us=49600 result=correct count=4
+rec kind=load_result delay_us=74400 result=correct count=4
+rec kind=load_result delay_us=99200 result=correct count=4
+rec kind=load_result delay_us=124000 result=correct count=4
+rec kind=load_result delay_us=148800 result=correct count=4
+rec kind=load_result delay_us=173600 result=correct count=4
+rec kind=load_result delay_us=198400 result=correct count=4
+rec kind=load_result delay_us=223200 result=correct count=4
+rec kind=load_result delay_us=248001 result=correct count=4
+rec kind=load_result delay_us=322401 result=correct count=4
+rec kind=load_time delay_us=0 from_path_median_us=237260 n=4
+rec kind=load_time delay_us=12400 from_path_median_us=244165 n=4
+rec kind=load_time delay_us=24800 from_path_median_us=254343 n=4
+rec kind=load_time delay_us=49600 from_path_median_us=247758 n=4
+rec kind=load_time delay_us=74400 from_path_median_us=236155 n=4
+rec kind=load_time delay_us=99200 from_path_median_us=242274 n=4
+rec kind=load_time delay_us=124000 from_path_median_us=244412 n=4
+rec kind=load_time delay_us=148800 from_path_median_us=236062 n=4
+rec kind=load_time delay_us=173600 from_path_median_us=233619 n=4
+rec kind=load_time delay_us=198400 from_path_median_us=242428 n=4
+rec kind=load_time delay_us=223200 from_path_median_us=242514 n=4
+rec kind=load_time delay_us=248001 from_path_median_us=238597 n=4
+rec kind=load_time delay_us=322401 from_path_median_us=243308 n=4
+rec kind=first_error bucket=from_path:Io:NotFound:os=None detail=Display=ONNX_ファイル_I/O_失敗（読み込みまたは書き込み）:_entity_not_found_|_Debug=Io(Kind(NotFound))
+summary status=done mode=delay iterations=52 aborted=false correct=50 invalid_values=0 rename_ok_during_load=20 rename_fail_during_load=24 rename_ok_outside_load=8 rename_fail_outside_load=0 from_path_median_us=237471 restore_retries=0 restored=true ancestor_exists=true renamed_exists=false

@@ -1,0 +1,60 @@
+    Updating crates.io index
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling zerocopy v0.8.56
+   Compiling getrandom v0.3.4
+   Compiling cfg-if v1.0.4
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.1
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling num-traits v0.2.19
+   Compiling rayon-core v1.13.0
+   Compiling serde_core v1.0.229
+   Compiling rand_core v0.9.5
+   Compiling cudarc v0.19.8
+   Compiling windows-link v0.2.1
+   Compiling zmij v1.0.23
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling libloading v0.9.0
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling fandhe-ai-backend-cpu v0.9.0 (C:\work\src\crates\backend-cpu)
+   Compiling either v1.17.0
+   Compiling rayon v1.12.0
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.9.0 (C:\work\src\crates\tensor-core)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+   Compiling fandhe-ai-backend-cuda v0.9.0 (C:\work\src\crates\backend-cuda)
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+   Compiling bench-harness v0.9.0 (C:\work\src\crates\bench-harness)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 35.31s
+     Running tests\device_init.rs (target\debug\deps\device_init-2036db0de9ca39ca.exe)
+
+running 1 test
+test new_returns_ok_with_valid_metadata_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.43s

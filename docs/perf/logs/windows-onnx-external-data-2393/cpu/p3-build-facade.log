@@ -1,0 +1,48 @@
+ Downloading crates ...
+  Downloaded rand_core v0.9.5
+  Downloaded libloading v0.9.0
+  Downloaded getrandom v0.3.4
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded windows-link v0.2.1
+  Downloaded rand_chacha v0.9.0
+  Downloaded autocfg v1.5.1
+  Downloaded num-traits v0.2.19
+  Downloaded rand v0.9.5
+  Downloaded rand_distr v0.5.1
+  Downloaded libm v0.2.16
+  Downloaded cudarc v0.19.8
+   Compiling getrandom v0.3.4
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling windows-link v0.2.1
+   Compiling cudarc v0.19.8
+   Compiling libloading v0.9.0
+   Compiling num-traits v0.2.19
+   Compiling rand_core v0.9.5
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.9.0 (C:\work\src\crates\tensor-core)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+   Compiling fandhe-ai-backend-cpu v0.9.0 (C:\work\src\crates\backend-cpu)
+   Compiling fandhe-ai-autodiff v0.9.0 (C:\work\src\crates\autodiff)
+   Compiling fandhe-ai-backend-cuda v0.9.0 (C:\work\src\crates\backend-cuda)
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+   Compiling bench-harness v0.9.0 (C:\work\src\crates\bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.9.0 (C:\work\src\crates\onnx-interop)
+   Compiling fandhe-ai v0.9.0 (C:\work\src\crates\facade)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 39s

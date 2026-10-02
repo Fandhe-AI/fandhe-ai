@@ -1,0 +1,22 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+   Compiling fandhe-ai-onnx-interop v0.9.0 (C:\work\src\crates\onnx-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.08s
+     Running tests\onnx_external_data.rs (target\debug\deps\onnx_external_data-bd43f320775f74cd.exe)
+
+running 1 test
+test overlapping_regions_via_hard_link_are_rejected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.01s

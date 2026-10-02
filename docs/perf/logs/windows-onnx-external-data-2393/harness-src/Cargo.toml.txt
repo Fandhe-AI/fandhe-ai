@@ -1,0 +1,18 @@
+# イシュー #2393 用の使い捨て検証ハーネス（コミットしない）。
+# リポジトリルート直下に置かれる前提（path 依存は ../crates/*）。
+# 空の [workspace] で本体 workspace から独立させる。外部クレートの追加はなし。
+[package]
+name = "win2393-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+fandhe-ai = { path = "../crates/facade" }
+fandhe-ai-onnx-interop = { path = "../crates/onnx-interop" }
+fandhe-ai-backend-cpu = { path = "../crates/backend-cpu" }
+
+[profile.release]
+debug = false

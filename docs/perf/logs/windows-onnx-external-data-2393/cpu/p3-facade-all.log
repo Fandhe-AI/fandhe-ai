@@ -1,0 +1,2784 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+   Compiling fandhe-ai v0.9.0 (C:\work\src\crates\facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.56s
+     Running unittests src\lib.rs (target\debug\deps\fandhe_ai-c482a8bf41ba6ea1.exe)
+
+running 201 tests
+test compat::callbacks::tests::early_stopping_first_observation_always_improves ... ok
+test compat::array::tests::array_2d_jagged_input_is_rejected ... ok
+test compat::array::tests::array_empty_1d_is_valid_zero_size_axis ... ok
+test compat::array::tests::array_2d_literal_infers_shape_row_major ... ok
+test compat::array::tests::array_1d_literal_infers_shape ... ok
+test compat::array::tests::array_2d_vec_infers_shape_row_major ... ok
+test compat::array::tests::array_1d_vec_infers_shape ... ok
+test compat::array::tests::array_1d_slice_infers_shape ... ok
+test compat::callbacks::tests::early_stopping_nan_first_observation_never_becomes_best ... ok
+test compat::callbacks::tests::early_stopping_patience_zero_does_not_stop_on_improving_epoch ... ok
+test compat::callbacks::tests::early_stopping_reset_for_fit_clears_state ... ok
+test compat::callbacks::tests::early_stopping_restore_best_weights_off_never_snapshots ... ok
+test compat::callbacks::tests::lr_schedule_per_epoch_advance_increments_epoch_without_monitor ... ok
+test compat::callbacks::tests::lr_schedule_plateau_requires_validation_by_default ... ok
+test compat::callbacks::tests::max_mode_improvement_respects_min_delta ... ok
+test compat::callbacks::tests::lr_schedule_plateau_advance_without_monitor_value_is_rejected ... ok
+test compat::callbacks::tests::early_stopping_restore_best_weights_on_snapshots_only_on_improvement ... ok
+test compat::callbacks::tests::min_mode_improvement_respects_min_delta ... ok
+test compat::callbacks::tests::monitor_requires_validation_only_for_val_loss ... ok
+test compat::callbacks::tests::model_checkpoint_save_best_only_false_keeps_last_epoch_snapshot ... ok
+test compat::callbacks::tests::model_checkpoint_mode_max_after_new_uses_correct_initial_best ... ok
+test compat::callbacks::tests::model_checkpoint_epoch_counter_persists_across_observe_calls ... ok
+test compat::callbacks::tests::monitor_value_at_reads_correct_column ... ok
+test compat::callbacks::tests::nan_best_never_blocks_a_finite_improvement ... ok
+test compat::callbacks::tests::nan_value_is_never_an_improvement ... ok
+test compat::metrics::tests::compute_rejects_non_rank2_logits ... ok
+test compat::metrics::tests::compute_rejects_zero_samples ... ok
+test compat::metrics::tests::compute_rejects_target_shape_mismatch ... ok
+test compat::metrics::tests::accuracy_matches_hand_computation ... ok
+test compat::metrics::tests::confusion_matrix_layout_is_row_true_col_pred_and_only_requested_when_asked ... ok
+test compat::metrics::tests::macro_f1_is_mean_of_per_class_f1_not_harmonic_mean_of_macro_pr ... ok
+test compat::metrics::tests::macro_precision_recall_match_hand_computation ... ok
+test compat::metrics::tests::new_rejects_huge_num_classes_without_panicking ... ok
+test compat::model_io::compiled::tests::check_lbfgs_history_counts_canonical_keys_only ... ok
+test compat::model_io::compiled::tests::check_slot_shapes_rejects_count_and_shape_mismatch ... ok
+test compat::model_io::compiled::tests::parse_compiled_rejects_schema_violations ... ok
+test compat::model_io::compiled::tests::parse_enforces_lbfgs_limits_and_shape ... ok
+test compat::metrics::tests::compute_end_to_end_matches_manual_argmax_accuracy ... ok
+test compat::metrics::tests::compute_rejects_out_of_range_target_index ... ok
+test compat::model_io::compiled::tests::render_then_parse_round_trips_every_optimizer_and_amp ... ok
+test compat::model_io::tests::as_f32_accepts_only_finite_canonical_real ... ok
+test compat::model_io::tests::all_thirty_kinds_are_covered_and_round_trip_through_params_schema ... ok
+test compat::model_io::tests::expected_buffer_keys_match_real_bn_buffers ... ok
+test compat::model_io::tests::manifest_round_trips_through_strict_parser ... ok
+test compat::model_io::compiled::tests::prepare_save_rejects_optimizer_slots_inconsistent_with_parameters ... ok
+test compat::model_io::tests::manifest_with_buffers_round_trips_through_strict_parser ... ok
+test compat::model_io::compiled::tests::restore_compiled_rejects_inconsistent_lbfgs_snapshots ... ok
+test compat::model_io::tests::non_unix_platform_is_rejected_as_unsupported ... ok
+test compat::model_io::tests::out_of_range_values_are_rejected_by_constructors_on_build ... ok
+test compat::model_io::tests::parse_manifest_accepts_legacy_empty_buffer_keys_for_batch_norm ... ok
+test compat::model_io::tests::expected_keys_match_real_state_dict_for_all_kinds ... ok
+test compat::model_io::tests::parser_accepts_v1_shapes ... ok
+test compat::model_io::tests::parser_keeps_fraction_exponent_and_sign_as_real_lexemes ... ok
+test compat::model_io::tests::parse_manifest_rejects_buffer_key_tampering ... ok
+test compat::model_io::tests::parse_manifest_rejects_unknown_keys_and_unsupported_features ... ok
+test compat::model_io::tests::parser_rejects_escapes_control_chars_and_bom ... ok
+test compat::model_io::tests::parser_rejects_duplicate_keys ... ok
+test compat::model_io::tests::parser_rejects_excess_depth_before_recursing ... ok
+test compat::model_io::tests::parser_rejects_leading_zero_fraction_exponent_and_sign ... ok
+test compat::model_io::tests::parser_rejects_trailing_garbage_and_trailing_comma ... ok
+test compat::model_io::tests::prepare_save_rejects_mode_mismatch ... ok
+test compat::model_io::tests::prepare_save_rejects_unsupported_and_compiled_models ... ok
+test compat::model_io::tests::safetensors_file_name_pattern_is_exact ... ok
+test compat::model_io::tests::spec_from_kind_rejects_schema_violations ... ok
+test compat::sequential::tests::add_linear_propagates_invalid_argument ... ok
+test compat::sequential::tests::apply_parameters_leaves_model_unchanged_on_excess_element_count ... ok
+test compat::sequential::tests::apply_parameters_leaves_model_unchanged_on_mid_sequence_shape_error ... ok
+test compat::sequential::tests::apply_parameters_leaves_model_unchanged_on_mid_sequence_weight_shape_error ... ok
+test compat::sequential::tests::apply_parameters_propagates_bias_shape_mismatch ... ok
+test compat::sequential::tests::apply_parameters_rejects_element_count_mismatch ... ok
+test compat::sequential::tests::apply_parameters_rejects_interlayer_consistent_resize ... ok
+test compat::sequential::tests::apply_parameters_rejects_weight_shape_change ... ok
+test compat::sequential::tests::apply_parameters_reports_partial_update_when_rollback_fails ... ok
+test compat::model_io::tests::parser_caps_array_length_and_object_keys ... ok
+test compat::sequential::tests::apply_parameters_updates_weights_used_by_subsequent_predict ... ok
+test compat::sequential::tests::apply_parameters_rolls_back_when_custom_layer_set_parameter_fails ... ok
+test compat::sequential::tests::apply_parameters_updates_bias_less_layer ... ok
+test compat::sequential::tests::bind_returns_linear_vars_in_layer_order_with_mixed_bias ... ok
+test compat::sequential::tests::build_device_chain_steps_fuses_linear_relu ... ok
+test compat::sequential::tests::build_device_chain_steps_includes_none_bias_for_no_bias_linear ... ok
+test compat::sequential::tests::build_device_chain_steps_returns_none_for_empty_sequential ... ok
+test compat::sequential::tests::build_device_chain_steps_returns_none_for_leaf_count_mismatch ... ok
+test compat::sequential::tests::run_loader_inference_counts_samples_from_input_batch_axis_not_output_shape ... ok
+test compat::sequential::tests::build_device_chain_steps_returns_none_for_sigmoid_mix ... ok
+test compat::sequential::tests::first_untracked_parametric_layer_detects_only_custom_parametric_layers ... ok
+test compat::sequential::tests::run_loader_inference_ignores_labels_in_tuple_dataset ... ok
+test compat::sequential::tests::run_loader_inference_matches_predict_per_batch_bit_exact ... ok
+test compat::sequential::tests::run_loader_inference_on_empty_loader_returns_empty_vec ... ok
+test compat::sequential::tests::run_loader_inference_records_phase_stats_for_tape_free_path ... ok
+test compat::sequential::tests::run_loader_inference_records_tape_build_when_falling_back ... ok
+test compat::sequential::tests::run_loader_inference_phase_stats_do_not_leak_across_threads ... ok
+test compat::model_io::compiled::tests::strong_wolfe_lbfgs_round_trips_through_snapshot_and_restore ... ok
+test compat::sequential::tests::run_loader_inference_rejects_shuffle_without_consuming_rng ... ok
+test compat::sequential::tests::run_loader_inference_respects_drop_last ... ok
+test compat::sequential::tests::run_loader_inference_since_returns_only_the_second_run_delta ... ok
+test compat::sequential::tests::sequential_forward_fuses_linear_relu_into_single_gemm_bias_act_launch ... ok
+test compat::sequential::tests::sequential_builds_and_predicts_two_layer_mlp ... ok
+test compat::sequential::tests::sequential_forward_matches_manual_forward_bit_exact ... ok
+test compat::sequential::tests::sequential_predict_linear_sigmoid_linear_matches_manual_composition ... ok
+test compat::sequential::tests::sequential_forward_on_external_tape_supports_backward ... ok
+test compat::sequential::tests::sequential_predict_public_builder_tape_free_matches_via_tape ... ok
+test compat::sequential::tests::sequential_predict_tape_free_does_not_fuse_non_relu_activation ... ok
+test compat::sequential::tests::sequential_predict_tape_free_fuses_linear_relu_into_single_gemm_bias_act_call ... ok
+test compat::sequential::tests::sequential_vars_forward_matches_manual_forward_bit_exact ... ok
+test compat::sequential::tests::sequential_predict_tape_free_matches_via_tape_bit_exact ... ok
+test compat::sequential::tests::trainable_parameters_order_contract_weight_then_bias_per_layer ... ok
+test compat::sequential::tests::sequential_predict_tape_free_matches_via_tape_bit_exact_with_1714_layers ... ok
+test compat::sequential::tests::sequential_vars_forward_with_activation_grad_matches_manual_composition ... ok
+test compat::training::accumulate_tests::accumulate_steps_gt_one_rejected_with_amp ... ok
+test compat::training::accumulate_tests::accumulate_steps_gt_one_rejected_with_lbfgs ... ok
+test compat::model_io::tests::parse_manifest_rejects_layer_count_over_bound ... ok
+test compat::training::accumulate_tests::accumulate_steps_zero_is_rejected ... ok
+test compat::training::accumulate_tests::accumulate_matches_large_batch_equivalent_within_req2_tolerance ... ok
+test compat::training::accumulate_tests::accumulate_steps_three_matches_manual_window_loop_bit_exact ... ok
+test compat::training::accumulate_tests::accumulate_steps_one_matches_default_fit_bit_exact ... ok
+test compat::training::train_step_tests::custom_step_error_propagates_and_keeps_compiled ... ok
+test compat::training::lbfgs_fit_failure_tests::lbfgs_fit_restores_params_and_keeps_compiled_after_multi_eval_failure ... ok
+test compat::training::train_step_tests::custom_step_none_update_leaves_params_unchanged ... ok
+test compat::training::train_step_tests::custom_step_rejected_with_accumulate_steps_gt_one ... ok
+test compat::training::train_step_tests::custom_step_rejected_with_amp ... ok
+test compat::training::train_step_tests::custom_step_rejected_with_lbfgs ... ok
+test compat::training::train_step_tests::custom_step_shape_mismatch_update_is_rejected ... ok
+test compat::training::train_step_tests::custom_step_reimplementing_default_matches_fit_bit_exact_adamw ... ok
+test compat::training::train_step_tests::custom_step_reimplementing_default_matches_fit_bit_exact_sgd ... ok
+test fs_guard::tests::open_leaf_checked_reads_regular_file_exactly ... FAILED
+test fs_guard::tests::open_leaf_checked_rejects_over_bound_without_reading ... FAILED
+test inference::batch::recorded::tests::inference_phase_stats_since_returns_only_the_later_delta ... ok
+test inference::batch::recorded::tests::loader_inference_input_ignores_labels ... ok
+test inference::batch::recorded::tests::merge_accumulates_across_multiple_deltas ... ok
+test inference::batch::recorded::tests::phase_stat_add_accumulates_total_and_calls ... ok
+test compat::training::train_step_tests::custom_step_with_validation_and_callbacks ... ok
+test inference::batch::recorded::tests::thread_local_snapshot_is_isolated_per_thread ... ok
+test inference::batch::recorded::tests::phase_stat_add_saturates_instead_of_panicking ... ok
+test inference::batch::recorded::tests::phase_stat_saturating_sub_never_underflows ... ok
+test interop::onnx::map_graph_error_tests::allocation_failed_maps_to_io_out_of_memory ... ok
+test interop::onnx::map_graph_error_tests::export_allocation_failed_maps_to_io_out_of_memory ... ok
+test interop::onnx::map_graph_error_tests::external_io_error_keeps_kind ... ok
+test interop::onnx::map_graph_error_tests::too_many_external_files_maps_to_invalid_model ... ok
+test interop::onnx::map_graph_error_tests::interp_allocation_failed_maps_to_io_out_of_memory ... ok
+test interop::onnx::map_graph_error_tests::other_external_errors_map_to_invalid_model ... ok
+test model::tests::default_cache_dir_from_home_appends_fixed_suffix ... ok
+test model::tests::enforce_size_limit_accepts_within_bound ... ok
+test model::tests::default_cache_dir_from_none_is_none ... ok
+test model::tests::enforce_size_limit_rejects_over_bound ... ok
+test model::tests::non_empty_os_string_filters_empty_value ... ok
+test model::tests::non_empty_os_string_keeps_non_empty_value ... ok
+test model::tests::load_with_limit_rejects_over_bound ... FAILED
+test model::tests::non_empty_os_string_none_stays_none ... ok
+test model::tests::reserve_read_buffer_maps_alloc_failure_to_out_of_memory ... ok
+test model::tests::reserve_read_buffer_succeeds_for_small_capacity ... ok
+test model::tests::select_home_var_falls_back_when_preferred_is_empty_string ... ok
+test model::tests::select_home_var_none_when_both_empty_strings ... ok
+test model::tests::resolve_model_file_with_limit_accepts_at_bound ... FAILED
+test model::tests::resolve_model_file_with_limit_rejects_over_bound ... FAILED
+test compat::model_io::compiled::tests::snapshot_restore_preserves_scale_and_growth_tracker_for_every_phase ... ok
+test model::tests::select_home_var_none_when_both_unset ... ok
+test model::tests::select_home_var_prefers_home_on_non_windows ... ok
+test model::tests::select_home_var_prefers_userprofile_on_windows ... ok
+test model::tests::validate_component_accepts_ascii_allowlist ... ok
+test model::tests::too_large_error_display_includes_sizes ... ok
+test model::tests::validate_component_rejects_traversal_and_unsafe_values ... ok
+test nn::container::tests::adapter_in_autodiff_module_dict_restores_mixed_facade_container_per_leaf ... ok
+test nn::container::tests::adapter_in_autodiff_module_list_rejects_children_only_composite_before_mutation ... ok
+test nn::container::tests::adapter_in_autodiff_module_list_rejects_swapped_children_mut_before_mutation ... ok
+test nn::container::tests::adapter_in_autodiff_module_list_detects_child_swapped_during_freeze ... ok
+test nn::container::tests::adapter_in_autodiff_module_list_restores_user_composite_per_leaf ... ok
+test nn::container::tests::adapter_in_autodiff_module_list_restores_mixed_facade_container_per_leaf ... ok
+test nn::container::tests::adapter_in_autodiff_module_list_skips_own_setter_when_child_swapped ... ok
+test nn::container::tests::adapter_restore_rejects_foreign_snapshot ... ok
+test nn::container::tests::adapter_restores_composite_own_flag_after_later_failure ... ok
+test nn::container::tests::adapter_in_autodiff_sequential_restores_mixed_facade_container_per_leaf ... ok
+test nn::container::tests::facade_list_restores_composite_own_flag_after_failure ... ok
+test nn::container::tests::module_dict_freeze_propagates_and_aggregates ... ok
+test nn::container::tests::freeze_propagates_and_aggregates ... ok
+test nn::container::tests::names_and_errors_match_autodiff_container ... ok
+test nn::container::tests::module_dict_matches_autodiff_module_dict ... ok
+test nn::container::tests::nested_module_dict_mixed_state_restored_per_leaf_on_failure ... ok
+test nn::container::tests::nested_sequential_mixed_state_restored_per_leaf_on_failure ... ok
+test nn::container::tests::nested_module_list_mixed_state_restored_per_leaf_on_failure ... ok
+test nn::container::tests::rollback_calls_setter_even_when_trait_getter_looks_unchanged ... ok
+test nn::container::tests::restore_shape_mismatch_is_fail_closed ... ok
+test nn::container::tests::rollback_failures_are_aggregated_and_continue ... ok
+test nn::container::tests::rollback_restores_failed_child_itself ... ok
+test nn::container::tests::sequential_delegates_and_nested_uniform_rollback ... ok
+test nn::module::tests::adapter_delegates_set_requires_grad_and_requires_grad ... ok
+test nn::module::tests::adapter_delegates_type_name_but_not_children ... ok
+test nn::container::tests::summary_matches_autodiff_summary ... ok
+test nn::module::tests::adapter_host_inference_is_fail_closed ... ok
+test nn::module::tests::adapter_propagates_training_flag ... ok
+test nn::module::tests::adapter_state_dict_semantics_match_facade_layer ... ok
+test nn::module::tests::default_requires_grad_for_stateless_layer ... ok
+test nn::module::tests::bridge_forward_matches_direct_forward ... ok
+test nn::module::tests::default_set_parameter_message_matches_autodiff ... ok
+test nn::module::tests::default_set_requires_grad_message_matches_autodiff ... ok
+test tape_ref_tests::from_autodiff_leaf_receives_gradient ... ok
+test nn::module::tests::adapter_in_autodiff_sequential_matches_manual_chain ... ok
+test nn::module::tests::load_state_dict_errors_and_rollback_via_bridge ... ok
+test compat::sequential::tests::sequential_predict_matches_manual_unfused_composition_bit_exact ... ok
+test compat::training::train_step_tests::custom_loss_and_host_sgd_converges ... ok
+test compat::model_io::tests::prepare_save_rejects_models_whose_manifest_cannot_be_read_back ... ok
+test compat::model_io::compiled::tests::prepare_save_accepts_lbfgs_and_reports_too_large_for_huge_optimizer_state ... ok
+
+failures:
+
+---- fs_guard::tests::open_leaf_checked_reads_regular_file_exactly stdout ----
+
+thread 'fs_guard::tests::open_leaf_checked_reads_regular_file_exactly' (6436) panicked at crates\facade\src\fs_guard.rs:296:51:
+開けるはず: Io(Custom { kind: Unsupported, error: "このプラットフォームでは葉ファイルのシンボリックリンク追跡なし オープンを実装していないため、TOCTOU 対策として fail-closed で オープンを拒否します（Linux／macOS のみ対応）" })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- fs_guard::tests::open_leaf_checked_rejects_over_bound_without_reading stdout ----
+
+thread 'fs_guard::tests::open_leaf_checked_rejects_over_bound_without_reading' (4812) panicked at crates\facade\src\fs_guard.rs:307:9:
+assertion failed: matches!(open_leaf_checked(&path, 16), Err(LeafError::TooLarge { limit: 16 }))
+
+---- model::tests::load_with_limit_rejects_over_bound stdout ----
+
+thread 'model::tests::load_with_limit_rejects_over_bound' (4564) panicked at crates\facade\src\model.rs:974:9:
+ModelError::TooLarge { len: 9, max: 8, .. } を期待したが Io(Custom { kind: Unsupported, error: "このプラットフォームでは葉ファイルのシンボリックリンク追跡なし オープンを実装していないため、TOCTOU 対策として fail-closed で オープンを拒否します（Linux／macOS のみ対応）" }) だった
+
+---- model::tests::resolve_model_file_with_limit_accepts_at_bound stdout ----
+
+thread 'model::tests::resolve_model_file_with_limit_accepts_at_bound' (3348) panicked at crates\facade\src\model.rs:955:9:
+assertion failed: registry.resolve_model_file_with_limit("mlp", "v1", 8).is_ok()
+
+---- model::tests::resolve_model_file_with_limit_rejects_over_bound stdout ----
+
+thread 'model::tests::resolve_model_file_with_limit_rejects_over_bound' (6604) panicked at crates\facade\src\model.rs:940:22:
+ModelError::TooLarge を期待したが Io(Custom { kind: Unsupported, error: "このプラットフォームでは葉ファイルのシンボリックリンク追跡なし オープンを実装していないため、TOCTOU 対策として fail-closed で オープンを拒否します（Linux／macOS のみ対応）" }) だった
+
+
+failures:
+    fs_guard::tests::open_leaf_checked_reads_regular_file_exactly
+    fs_guard::tests::open_leaf_checked_rejects_over_bound_without_reading
+    model::tests::load_with_limit_rejects_over_bound
+    model::tests::resolve_model_file_with_limit_accepts_at_bound
+    model::tests::resolve_model_file_with_limit_rejects_over_bound
+
+test result: FAILED. 196 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.67s
+
+error: test failed, to rerun pass `-p fandhe-ai --lib`
+     Running tests\activation_gelu_softplus_backend_parity.rs (target\debug\deps\activation_gelu_softplus_backend_parity-2297914acceb2cb0.exe)
+
+running 8 tests
+test cuda_gelu_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_gelu_tanh_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_softplus_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_gelu_forward_matches_naive_reference_bit_exact ... ok
+test cpu_gelu_tanh_forward_matches_naive_reference_bit_exact ... ok
+test cpu_softplus_forward_matches_naive_reference_bit_exact ... ok
+test cpu_matmul_gelu_backward_matches_naive_reference ... ok
+test cpu_matmul_softplus_backward_matches_naive_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\activation_ops_backend_parity.rs (target\debug\deps\activation_ops_backend_parity-eaa084ced1316211.exe)
+
+running 8 tests
+test cuda_bit_exact_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/activation-ops-2146/README.md 参照
+test cuda_bit_exact_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/activation-ops-2146/README.md 参照
+test cuda_req2_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/activation-ops-2146/README.md 参照
+test cuda_req2_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/activation-ops-2146/README.md 参照
+test cpu_req2_forward_matches_naive_reference_within_tolerance ... ok
+test cpu_bit_exact_forward_matches_naive_reference ... ok
+test cpu_bit_exact_backward_matches_naive_reference ... ok
+test cpu_req2_backward_matches_naive_reference_within_tolerance ... ok
+
+test result: ok. 4 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\adaptive_max_global_pool_backend_parity.rs (target\debug\deps\adaptive_max_global_pool_backend_parity-a9f0cb13674caa98.exe)
+
+running 6 tests
+test cuda_adaptive_max_pool2d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_global_pool_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cpu_adaptive_max_pool2d_forward_matches_naive_reference ... ok
+test cpu_adaptive_max_pool2d_backward_matches_naive_reference ... ok
+test cpu_adaptive_max_pool1d_forward_and_backward_matches_naive_reference ... ok
+test cpu_global_pool_forward_and_backward_matches_naive_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\amp_conv_mha_low_precision_backend_parity.rs (target\debug\deps\amp_conv_mha_low_precision_backend_parity-a14f05555558a130.exe)
+
+running 2 tests
+test cuda_mha_low_precision_forward_bf16_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_mha_low_precision_forward_f16_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\api_surface.rs (target\debug\deps\api_surface-fb6316e6ba08aa2e.exe)
+
+running 297 tests
+test amp_fit_types_are_reachable_via_facade ... ok
+test approved_onnx_surface_yields_no_offenses ... ok
+test approved_shape_synthetic_input_is_not_flagged ... ok
+test adaptive_max_global_pool_hold_doctest_probe_body_matches_fixed_contract ... ok
+test activation_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test bool_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test cast_types_are_reachable_via_facade ... ok
+test collect_pub_use_leaves_expands_nested_groups_and_source_side_renames ... ok
+test callbacks_loggers_hold_doctest_probe_body_matches_fixed_contract ... ok
+test collect_public_module_paths_recursive_ignores_private_mod_subtree ... ok
+test collect_top_level_enum_variant_idents_detects_each_category ... ok
+test available_devices_is_reachable_via_facade ... ok
+test collect_type_impls_detects_each_category ... ok
+test collect_public_module_paths_recursive_resolves_file_child_of_inline_mod ... ok
+test compat_callback_enum_variants_are_exactly_expected_while_2178_on_hold ... ok
+test compat_loss_enum_variants_are_exactly_mse_and_cross_entropy ... ok
+test compat_public_functions_do_not_accept_raw_autodiff_tape_argument ... ok
+test compat_sequential_add_module_is_sole_approved_entry_detects_offense ... ok
+test adaptive_max_global_pool_hold_doctest_globs_all_pub_modules ... ok
+test compat_sequential_does_not_expose_adaptive_max_global_pool_add_methods_detects_offense ... ok
+test activation_ops_hold_doctest_globs_all_pub_modules ... ok
+test compat_sequential_does_not_expose_adaptive_max_global_pool_add_methods ... ok
+test bool_ops_hold_doctest_globs_all_pub_modules ... ok
+test compat_sequential_does_not_expose_dropout_embedding_bag_add_methods_detects_offense ... ok
+test compat_sequential_does_not_expose_mha_options_add_methods_detects_offense ... ok
+test compat_sequential_does_not_expose_dropout_embedding_bag_add_methods ... ok
+test compat_sequential_does_not_expose_mha_options_add_methods ... ok
+test compat_sequential_does_not_expose_module_add_methods_detects_offense ... ok
+test compat_sequential_does_not_expose_pixel_shuffle_add_methods_detects_offense ... ok
+test compat_sequential_does_not_expose_pixel_shuffle_add_methods ... ok
+test callbacks_loggers_hold_doctest_globs_all_pub_modules ... ok
+test compat_sequential_does_not_expose_spatial_layer_add_methods_detects_offense ... ok
+test compat_sequential_does_not_expose_transformer_decoder_add_methods ... ok
+test compat_sequential_does_not_expose_transformer_decoder_add_methods_detects_offense ... ok
+test compat_sequential_does_not_expose_spatial_layer_add_methods ... ok
+test compat_sequential_has_no_introspection_methods ... ok
+test compile_loss_variants_hold_doctest_probe_body_matches_fixed_contract ... ok
+test contains_pub_fn_declaration_detects_variants ... ok
+test compat_sequential_add_module_is_sole_approved_entry ... ok
+test conv3d_hold_doctest_probe_body_matches_fixed_contract ... ok
+test count_fn_declarations_by_name_detects_all_declaration_contexts ... ok
+test count_fn_declarations_by_name_detects_hook_registration_fn_names ... ok
+test count_fn_declarations_by_name_detects_register_hook ... ok
+test creation_tensor_generators_are_reachable_via_facade ... ok
+test cuda_onnx_gpu_execution_optin_is_reachable_via_facade ... ok
+test compat_sequential_does_not_expose_rnn_add_methods ... ok
+test custom_function_hold_doctest_probe_body_matches_fixed_contract ... ok
+test compile_loss_variants_hold_doctest_globs_all_pub_modules ... ok
+test data_hooks_hold_doctest_probe_body_matches_fixed_contract ... ok
+test data_module_is_pure_reexport ... ok
+test data_module_reexports_exactly_expected_surface ... ok
+test data_types_are_reachable_via_facade_only ... ok
+test conv3d_hold_doctest_globs_all_pub_modules ... ok
+test declares_pub_fn_detects_extern_qualified_declaration ... ok
+test declares_fn_named_detects_trait_method_and_ignores_comments_and_strings ... ok
+test declares_pub_fn_detects_newline_separated_declaration ... ok
+test dependency_section_header_with_trailing_comment_is_recognized ... ok
+test dependencies_table_form_is_flagged ... ok
+test determinism_hold_doctest_probe_body_matches_fixed_contract ... ok
+test custom_function_hold_doctest_globs_all_pub_modules ... ok
+test dropout_embedding_bag_hold_doctest_probe_body_matches_fixed_contract ... ok
+test compat_sequential_does_not_expose_custom_add_method ... ok
+test einsum_batch_hold_doctest_probe_body_matches_fixed_contract ... ok
+test data_hooks_hold_doctest_globs_all_pub_modules ... ok
+test ema_hold_doctest_probe_body_matches_fixed_contract ... ok
+test determinism_hold_doctest_globs_all_pub_modules ... ok
+test extremum_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test facade_cargo_toml_does_not_depend_on_half ... ok
+test facade_cargo_toml_keeps_doctests_enabled ... ok
+test dropout_embedding_bag_hold_doctest_globs_all_pub_modules ... ok
+test facade_declares_no_nn_module_items_detects_each_category ... ok
+test facade_depends_on_onnx_interop_only_in_approved_shape ... ok
+test einsum_batch_hold_doctest_globs_all_pub_modules ... ok
+test compat_optimizer_enum_has_lbfgs_variant ... ok
+test ema_hold_doctest_globs_all_pub_modules ... ok
+test extremum_ops_hold_doctest_globs_all_pub_modules ... ok
+test facade_does_not_expose_low_level_allocator_types ... ok
+test facade_does_not_expose_pool_implementation_types ... ok
+test facade_does_not_expose_rng_internal_types ... ok
+test facade_does_not_reexport_cast_ops ... ok
+test facade_does_not_reexport_create_graph_result ... ok
+test compat_sequential_does_not_expose_module_add_methods ... ok
+test facade_does_not_reexport_custom_function ... ok
+test facade_does_not_reexport_device_provider_internals ... ok
+test facade_does_not_reexport_module_dict_or_summary_detects_each_category ... ok
+test facade_does_not_reexport_half ... ok
+test facade_does_not_reexport_multihead_attention_config ... ok
+test facade_does_not_reexport_nn_init ... ok
+test facade_does_not_reexport_nn_module_or_containers_detects_each_category ... ok
+test facade_does_not_declare_fit_config_accumulate_steps ... ok
+test facade_does_not_expose_kv_cache_stateful_attention ... ok
+test facade_does_not_expose_generate_items ... ok
+test facade_does_not_reexport_or_declare_callback_loggers_detects_each_category ... ok
+test facade_declares_no_nn_module_items ... ok
+test facade_does_not_reexport_module_dict_or_summary ... ok
+test facade_does_not_reexport_nn_module_or_containers ... ok
+test facade_does_not_reexport_or_declare_activation_ops ... ok
+test facade_does_not_reexport_or_declare_callback_loggers ... ok
+test facade_does_not_reexport_or_declare_ema_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_conv3d ... ok
+test facade_does_not_reexport_or_declare_bool_ops ... ok
+test facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_data_hooks ... ok
+test facade_does_not_reexport_or_declare_generate_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_determinism_fns ... ok
+test facade_does_not_reexport_or_declare_grad_scaler_from_state_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_einsum_batch ... ok
+test facade_does_not_reexport_or_declare_ema_items ... ok
+test facade_does_not_reexport_or_declare_kv_cache_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_extremum_ops ... ok
+test facade_does_not_reexport_or_declare_lbfgs_items_detects_each_category ... ok
+test autodiff_declares_no_register_hook_fn ... ok
+test facade_does_not_reexport_or_declare_generate_items ... ok
+test facade_does_not_reexport_or_declare_fit_weighting_items ... ok
+test facade_does_not_reexport_or_declare_lr_scheduler_ext_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_grad_scaler_from_state ... ok
+test facade_does_not_reexport_or_declare_kv_cache_items ... ok
+test facade_does_not_reexport_or_declare_indexing_ops ... ok
+test facade_does_not_reexport_or_declare_optimizer_ext_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_optimizer_state_dict ... ok
+test facade_does_not_reexport_or_declare_lbfgs_items ... ok
+test facade_does_not_reexport_or_declare_linalg_ops ... ok
+test facade_does_not_reexport_or_declare_predict_batches_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_lr_scheduler_ext_items ... ok
+test facade_does_not_reexport_or_declare_matrix_ops ... ok
+test facade_does_not_reexport_or_declare_loss_ops ... ok
+test facade_does_not_reexport_or_declare_optimizer_ext_items ... ok
+test facade_does_not_reexport_or_declare_npy_io ... ok
+test facade_does_not_reexport_or_declare_param_groups ... ok
+test facade_does_not_reexport_or_declare_predict_batches_items ... ok
+test facade_does_not_reexport_or_declare_train_step_items_detects_each_category ... ok
+test facade_does_not_reexport_or_declare_prefetch ... ok
+test facade_exposes_available_devices_and_tape_transfer ... ok
+test facade_exposes_pool_release_api_and_pool_stats_reexport ... ok
+test facade_exposes_typed_ops_accessors_on_tape ... ok
+test facade_model_io_public_surface_detects_each_category ... ok
+test facade_does_not_reexport_tape_or_backend_ops ... ok
+test facade_nn_module_trait_guards_detect_each_category ... ok
+test facade_nn_module_trait_methods_match_approved_set ... ok
+test facade_nn_module_trait_signatures_hide_internal_types ... ok
+test facade_does_not_reexport_or_declare_rearrange_ops ... ok
+test facade_pub_use_leaves_are_not_modules_detects_unapproved_lowercase_leaf ... ok
+test facade_does_not_reexport_or_declare_rng_distributions ... ok
+test facade_does_not_reexport_or_declare_reduce_ops ... ok
+test facade_public_functions_do_not_accept_backend_ops_argument ... ok
+test facade_public_functions_do_not_take_custom_function ... ok
+test facade_sources_reference_onnx_interop_only_in_interop_module ... ok
+test facade_tape_does_not_expose_backward_create_graph_method ... ok
+test facade_does_not_reexport_or_declare_topk_unique_ops ... ok
+test fit_config_keeps_copy_eq_for_0_9_0_compat ... ok
+test fit_types_are_reachable_via_facade_only ... ok
+test facade_tape_does_not_expose_custom_forwarding_method ... ok
+test fit_weighting_hold_doctest_probe_body_matches_fixed_contract ... ok
+test facade_does_not_reexport_or_declare_scalar_unary_ops ... ok
+test generate_hold_doctest_probe_body_matches_fixed_contract ... ok
+test git_source_override_is_flagged ... ok
+test facade_does_not_reexport_or_declare_train_step_items ... ok
+test grad_accumulation_hold_doctest_probe_body_matches_fixed_contract ... ok
+test fit_weighting_hold_doctest_globs_all_pub_modules ... ok
+test generate_hold_doctest_globs_all_pub_modules ... ok
+test hold_doctest_probe_blocks_reference_every_glob_imported_item ... ok
+test hooks_hold_doctest_probe_body_matches_fixed_contract ... ok
+test grad_accumulation_hold_doctest_globs_all_pub_modules ... ok
+test grad_scaler_from_state_positive_probes_compile_and_glob_list_matches_lib_rs ... ok
+test facade_pub_use_leaves_are_not_modules ... ok
+test interop_safetensors_module_is_pure_reexport ... ok
+test interop_safetensors_reexport_scanner_rejects_root_path_and_glob ... ok
+test interop_safetensors_reexports_exactly_expected_surface ... ok
+test interop_safetensors_types_are_reachable_via_facade ... ok
+test indexing_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test interop_module_exposes_only_approved_onnx_surface ... ok
+test kv_cache_hold_doctest_probe_body_matches_fixed_contract ... ok
+test lbfgs_hold_doctest_probe_body_matches_fixed_contract ... ok
+test hooks_hold_doctest_globs_all_pub_modules ... ok
+test indexing_ops_hold_doctest_globs_all_pub_modules ... ok
+test linalg_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test loss_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test facade_source_uses_only_modelable_structures ... ok
+test lr_scheduler_ext_hold_doctest_probe_body_matches_fixed_contract ... ok
+test manual_seed_is_reachable_via_facade ... ok
+test kv_cache_hold_doctest_globs_all_pub_modules ... ok
+test lbfgs_hold_doctest_globs_all_pub_modules ... ok
+test metrics_types_are_reachable_via_facade_only ... ok
+test matrix_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test mha_options_hold_doctest_probe_body_matches_fixed_contract ... ok
+test linalg_ops_hold_doctest_globs_all_pub_modules ... ok
+test loss_ops_hold_doctest_globs_all_pub_modules ... ok
+test model_io_items_are_reachable_via_facade ... ok
+test lr_scheduler_ext_hold_doctest_globs_all_pub_modules ... ok
+test model_io_hold_doctest_probe_body_matches_fixed_contract ... ok
+test model_types_are_reachable_via_facade ... ok
+test model_module_exposes_only_approved_surface ... ok
+test multiline_return_type_internal_leak_is_flagged ... ok
+test nn_container_rs_public_items_match_expected_set ... ok
+test nn_mod_declares_only_rnn_submodule ... ok
+test model_io_module_exposes_only_approved_surface ... ok
+test nn_mod_public_items_match_expected_set ... ok
+test mha_options_hold_doctest_globs_all_pub_modules ... ok
+test nn_module_types_are_reachable_via_facade_only ... ok
+test nn_rnn_module_is_pure_reexport ... ok
+test nn_rnn_module_reexports_exactly_expected_surface ... ok
+test nn_public_item_set_scanners_detect_each_category ... ok
+test nn_module_rs_public_items_match_expected_set ... ok
+test nn_rnn_types_are_reachable_via_facade_only ... ok
+test onnx_export_from_sequential_is_reachable_via_facade ... ok
+test onnx_export_types_are_reachable_via_facade ... ok
+test onnx_external_data_limits_are_reachable_via_facade ... ok
+test matrix_ops_hold_doctest_globs_all_pub_modules ... ok
+test onnx_import_types_are_reachable_via_facade ... ok
+test model_io_hold_doctest_globs_all_pub_modules ... ok
+test npy_io_hold_doctest_probe_body_matches_fixed_contract ... ok
+test optim_module_reexports_exactly_expected_surface ... ok
+test optim_types_are_reachable_via_facade_only ... ok
+test onnx_forbidden_nn_module_substring_does_not_collide_with_facade_nn_module ... ok
+test optim_module_is_pure_reexport ... ok
+test optimizer_ext_hold_doctest_probe_body_matches_fixed_contract ... ok
+test package_rename_bypass_is_flagged_regardless_of_quote_style ... ok
+test optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract ... ok
+test param_groups_hold_doctest_probe_body_matches_fixed_contract ... ok
+test nn_containers_inherent_and_trait_impls_match_expected_set ... ok
+test pixel_shuffle_hold_doctest_probe_body_matches_fixed_contract ... ok
+test facade_model_io_public_surface_matches_approved_contract ... ok
+test npy_io_hold_doctest_globs_all_pub_modules ... ok
+test predict_batches_hold_doctest_probe_body_matches_fixed_contract ... ok
+test optimizer_state_dict_hold_doctest_globs_all_pub_modules ... ok
+test rearrange_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test optimizer_ext_hold_doctest_globs_all_pub_modules ... ok
+test release_cached_memory_and_pool_stats_are_reachable_via_facade ... ok
+test param_groups_hold_doctest_globs_all_pub_modules ... ok
+test reduce_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test rng_distributions_hold_doctest_probe_body_matches_fixed_contract ... ok
+test rng_tensor_generators_are_reachable_via_facade ... ok
+test pixel_shuffle_hold_doctest_globs_all_pub_modules ... ok
+test rnn_config_hold_doctest_probe_body_matches_fixed_contract ... ok
+test facade_source_declares_no_custom_fn_in_any_context ... ok
+test scalar_unary_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test scan_hold_probe_blocks_in_doc_run_panics_on_unclosed_fence - should panic ... ok
+test scan_facade_unmodelable_structures_detects_each_category ... ok
+test scan_hold_probe_blocks_in_doc_run_survives_quad_fence_quotation_in_prose ... ok
+test scan_optimizer_enum_variants_for_lbfgs_detects_each_category ... ok
+test scan_unapproved_model_io_pub_items_detects_offense ... ok
+test scan_top_level_pub_mods_rejects_unmodelable_mod_forms ... ok
+test scan_unapproved_model_pub_items_detects_offense ... ok
+test spatial_layers_hold_doctest_probe_body_matches_fixed_contract ... ok
+test table_form_package_rename_bypass_is_flagged ... ok
+test predict_batches_hold_doctest_globs_all_pub_modules ... ok
+test tape_for_accepts_device_identifier_only ... ok
+test tape_reexport_wires_cpu_backend_ops ... ok
+test rearrange_ops_hold_doctest_globs_all_pub_modules ... ok
+test reduce_ops_hold_doctest_globs_all_pub_modules ... ok
+test rng_distributions_hold_doctest_globs_all_pub_modules ... ok
+test topk_unique_ops_hold_doctest_probe_body_matches_fixed_contract ... ok
+test scalar_unary_ops_hold_doctest_globs_all_pub_modules ... ok
+test rnn_config_hold_doctest_globs_all_pub_modules ... ok
+test train_step_hold_doctest_probe_body_matches_fixed_contract ... ok
+test transformer_decoder_hold_doctest_probe_body_matches_fixed_contract ... ok
+test typed_ops_types_are_reachable_via_facade ... ok
+test unapproved_onnx_export_pub_items_remain_flagged ... ok
+test spatial_layers_hold_doctest_globs_all_pub_modules ... ok
+test unapproved_onnx_external_data_items_are_flagged ... ok
+test unapproved_onnx_pub_fn_is_flagged ... ok
+test unapproved_onnx_pub_fn_with_qualifiers_is_flagged ... ok
+test var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold ... ok
+test unapproved_onnx_pub_use_reexport_is_flagged ... ok
+test version_drift_or_missing_version_is_flagged ... ok
+test topk_unique_ops_hold_doctest_globs_all_pub_modules ... ok
+test train_step_hold_doctest_globs_all_pub_modules ... ok
+test transformer_decoder_hold_doctest_globs_all_pub_modules ... ok
+test tape_ref_declared_once_with_crate_private_field ... FAILED
+test tape_ref_public_surface_is_exactly_var_family ... ok
+test tape_ref_pub_fns_do_not_return_raw_tape ... ok
+test workspace_declares_einsum_batched_fn_only_in_autodiff_einsum_batch ... ok
+test workspace_declares_custom_fn_only_on_tape ... ok
+test workspace_declares_determinism_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_conv3d_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops ... ok
+test workspace_declares_extremum_ops_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_data_hooks_names_only_in_tensor_core_data ... ok
+test workspace_declares_bool_ops_fn_names_only_in_autodiff_bool_ops ... ok
+test workspace_declares_grad_scaler_from_state_only_in_autodiff_amp ... ok
+test workspace_declares_indexing_ops_fn_names_only_in_autodiff_indexing_ops ... ok
+test workspace_declares_model_io_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_linalg_ops_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_no_hook_registration_fns ... ok
+test workspace_declares_matrix_ops_fn_names_only_in_autodiff_matrix_ops ... ok
+test workspace_declares_loss_ops_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_npy_io_names_only_in_allowed_locations ... ok
+test workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_prefetch_names_only_in_tensor_core_data ... ok
+test workspace_declares_predict_batches_fn_names_nowhere ... ok
+test workspace_declares_param_group_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_rng_distribution_names_only_in_allowed_locations ... ok
+test workspace_declares_reduce_ops_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_rearrange_ops_fn_names_only_in_autodiff_rearrange_ops ... ok
+test workspace_declares_scalar_unary_ops_fn_names_only_in_autodiff_scalar_unary_ops ... ok
+test workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_locations ... ok
+test workspace_declares_topk_unique_ops_fn_names_only_in_allowed_locations ... ok
+
+failures:
+
+---- tape_ref_declared_once_with_crate_private_field stdout ----
+
+thread 'tape_ref_declared_once_with_crate_private_field' (4180) panicked at crates\facade\tests\api_surface.rs:18278:5:
+宣言は src/lib.rs: C:\work\src\crates\facade\src\lib.rs
+
+
+failures:
+    tape_ref_declared_once_with_crate_private_field
+
+test result: FAILED. 296 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.43s
+
+error: test failed, to rerun pass `-p fandhe-ai --test api_surface`
+     Running tests\attention_backend_parity.rs (target\debug\deps\attention_backend_parity-8eac17b7e2aacd50.exe)
+
+running 7 tests
+test cuda_sdpa_backward_dq_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_sdpa_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test scaled_dot_product_attention_reachable_via_facade_var_reexport ... ok
+test cpu_sdpa_forward_matches_naive_reference_no_mask ... ok
+test cpu_sdpa_forward_matches_naive_reference_is_causal ... ok
+test cpu_sdpa_backward_matches_naive_reference_no_mask ... ok
+test cpu_sdpa_backward_matches_naive_reference_is_causal ... ok
+
+test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\backward_accumulate_backend_parity.rs (target\debug\deps\backward_accumulate_backend_parity-a197f70c03e1c988.exe)
+
+running 2 tests
+test cuda_backward_accumulate_weight_grad_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_backward_accumulate_weight_grad_matches_naive_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\batch_norm_backend_parity.rs (target\debug\deps\batch_norm_backend_parity-72a23f91f9d84e19.exe)
+
+running 7 tests
+test cuda_batch_norm_infer_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_batch_norm_train_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_batch_norm_train_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_batch_norm_train_forward_rank4_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_batch_norm_infer_forward_matches_naive_reference ... ok
+test cpu_batch_norm_train_forward_matches_naive_reference ... ok
+test cpu_batch_norm_train_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\batched_matmul_backend_parity.rs (target\debug\deps\batched_matmul_backend_parity-5e032eb09561eb30.exe)
+
+running 5 tests
+test cuda_batched_matmul_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_batched_matmul_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_batched_matmul_forward_broadcast_matches_naive_reference ... ok
+test cpu_batched_matmul_forward_matches_naive_reference ... ok
+test cpu_batched_matmul_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\bce_backend_parity.rs (target\debug\deps\bce_backend_parity-28b15c1d55792d62.exe)
+
+running 4 tests
+test cuda_bce_with_logits_loss_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない
+test cpu_bce_with_logits_loss_matches_naive_reference ... ok
+test cpu_bce_loss_probabilities_matches_naive_reference ... ok
+test cpu_bce_loss_probabilities_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\bool_ops_backend_parity.rs (target\debug\deps\bool_ops_backend_parity-2175d8c7d5cbb5ac.exe)
+
+running 4 tests
+test cuda_bool_ops_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。bool_ops は既存の比較・castカーネル（イシュー #1712／#1751）を再利用する合成のため実装は既に存在するが、本エージェント実行環境に CUDA 実機への到達手段がないため未実測（イシュー #2141）
+test cpu_masked_select_matches_naive_reference ... ok
+test cpu_logical_composition_matches_naive_reference ... ok
+test cpu_compare_bool_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\bool_ops_torch_behavior.rs (target\debug\deps\bool_ops_torch_behavior-ed70dbdc64eb4807.exe)
+
+running 3 tests
+test logical_not_or_truth_table_with_nan_matches_torch_semantics ... ok
+test logical_and_range_mask_with_masked_select_matches_torch_semantics ... ok
+test where_cond_with_gt_bool_matches_torch_where_semantics ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cast_backend_parity.rs (target\debug\deps\cast_backend_parity-45ef3fd58edcafb2.exe)
+
+running 3 tests
+test cuda_cast_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。イシュー #1751 で 8 方向すべてのカーネルを実装済み
+test cpu_var_from_matches_naive_reference ... ok
+test cpu_cast_from_f32_matches_naive_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\checkpoint_backend_bit_identity.rs (target\debug\deps\checkpoint_backend_bit_identity-aca241180ede1b6d.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential.rs (target\debug\deps\compat_sequential-98694130e116483c.exe)
+
+running 7 tests
+test jagged_array_input_is_rejected_before_sequential_predict ... ok
+test sequential_forward_on_external_tape_reaches_backward ... ok
+test sequential_builds_two_layer_mlp_and_predicts ... ok
+test array_output_feeds_directly_into_sequential_predict ... ok
+test sequential_forward_matches_manual_nn_forward_bit_exact ... ok
+test predict_matches_manual_forward_and_naive_reference ... ok
+test sequential_predict_matches_manual_forward_with_1714_layers ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\compat_sequential_activation_shape.rs (target\debug\deps\compat_sequential_activation_shape-6a2911510ad14ef9.exe)
+
+running 14 tests
+test add_softplus_rejects_non_finite_threshold ... ok
+test add_softplus_rejects_zero_beta ... ok
+test add_softplus_rejects_nan_beta ... ok
+test add_softmax_dim_out_of_range_is_rejected_at_forward_time ... ok
+test add_flatten_end_dim_out_of_range_is_rejected_at_forward_time ... ok
+test add_flatten_on_non_contiguous_input_is_rejected_identically_via_both_paths ... ok
+test mixed_model_trainable_parameters_only_contains_linear_weights ... ok
+test mixed_model_init_device_param_store_succeeds_with_flatten_and_softmax ... ok
+test softplus_pytorch_defaults_match_analytic_value_at_zero ... ok
+test mixed_model_predict_resident_matches_predict ... ok
+test log_softmax_predict_matches_forward_bit_exact ... ok
+test mixed_model_predict_matches_forward_bit_exact ... ok
+test gelu_gelu_tanh_softplus_predict_matches_forward_bit_exact ... ok
+test mixed_model_forward_on_external_tape_reaches_backward ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\compat_sequential_activation_shape_backend_parity.rs (target\debug\deps\compat_sequential_activation_shape_backend_parity-81950a37622fcef4.exe)
+
+running 3 tests
+test cuda_flatten_only_bit_exact ... ignored, CUDA 実機必須
+test cuda_flatten_softmax_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #2065 の申し送り先（GB10 セッション）へ引き継ぐ
+test cuda_log_softmax_gelu_softplus_matches_cpu ... ignored, CUDA 実機必須
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_callbacks.rs (target\debug\deps\compat_sequential_callbacks-5ce56c6edc681a98.exe)
+
+running 17 tests
+test early_stopping_min_delta_rejects_nan_and_negative ... ok
+test callbacks_error_keeps_model_compiled_and_restores_mode ... ok
+test fit_with_callbacks_rejects_huge_epochs_without_panicking ... ok
+test early_stopping_patience_zero_stops_at_first_non_improving_epoch ... ok
+test early_stopping_stops_after_patience_with_constant_loss ... ok
+test early_stopping_restore_best_weights_survives_mid_fit_error ... ok
+test history_lr_records_optimizer_lr_without_callbacks ... ok
+test early_stopping_state_resets_at_fit_start ... ok
+test monitor_val_loss_without_validation_is_rejected ... ok
+test fit_with_callbacks_empty_matches_fit_bit_exact ... ok
+test lr_schedule_per_epoch_matches_manual_set_lr_loop ... ok
+test lr_schedule_epoch_counter_persists_across_fit_calls ... ok
+test early_stopping_restore_best_weights_bit_exact ... ok
+test validation_val_loss_matches_evaluate_bit_exact ... ok
+test lr_schedule_plateau_reduces_lr_and_history_reflects_it ... ok
+test model_checkpoint_keeps_best_state_dict ... ok
+test fit_with_callbacks_alongside_shuffle_is_reproducible_under_manual_seed ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\compat_sequential_checkpoint_file.rs (target\debug\deps\compat_sequential_checkpoint_file-12e4d9fcba688c94.exe)
+
+running 9 tests
+test checkpoint_file_roundtrip_on_cuda ... ignored, CUDA 実機（DGX Spark GB10）依存。docs/perf/logs/model-checkpoint-file-2073/README.md 参照
+test to_file_save_failure_propagates_as_invalid_argument_and_restores_mode ... ok
+test to_file_save_failure_rolls_back_best_and_retries_on_next_fit_call ... ok
+test to_file_then_load_state_dict_predict_matches_source_model_bit_exact ... ok
+test to_file_does_not_change_in_memory_training_behavior ... ok
+test to_file_with_save_best_only_false_persists_last_epoch ... ok
+test to_file_saves_best_snapshot_and_roundtrips_bit_exact ... ok
+test to_file_across_multiple_fit_calls_keeps_best_continuation_contract ... ok
+test to_file_combined_with_early_stopping_restore_best_weights_bit_exact ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests\compat_sequential_conv.rs (target\debug\deps\compat_sequential_conv-87ba2666f8da772f.exe)
+
+running 11 tests
+test add_conv2d_rejects_in_channels_not_divisible_by_groups ... ok
+test add_conv2d_rejects_zero_groups ... ok
+test init_device_param_store_rejects_conv_layer ... ok
+test apply_parameters_rejects_conv_weight_shape_change ... ok
+test trainable_parameters_order_matches_named_parameters_for_mixed_model ... ok
+test apply_parameters_updates_conv_weight_used_by_subsequent_predict ... ok
+test conv1d_predict_matches_forward_bit_exact ... ok
+test conv2d_predict_matches_forward_bit_exact ... ok
+test state_dict_round_trip_with_conv2d ... ok
+test bind_trainable_vars_and_grads_count_matches_trainable_parameters ... ok
+test train_loop_with_sgd_reduces_loss ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\compat_sequential_custom_module.rs (target\debug\deps\compat_sequential_custom_module-25dd988e1074740f.exe)
+
+running 11 tests
+test set_training_propagates_to_custom_layer ... ok
+test parameters_are_listed_in_layer_order_and_apply_parameters_updates_custom_layer ... ok
+test resident_entries_reject_parametric_custom_layer ... ok
+test fit_rejects_parametric_custom_layer_without_side_effects ... ok
+test evaluate_still_works_with_parametric_custom_layer ... ok
+test forward_and_predict_match_manual_composition_bitwise ... ok
+test load_state_dict_rejects_bad_key_and_shape_without_mutation ... ok
+test state_dict_uses_index_prefixed_keys_and_round_trips ... ok
+test bind_rejects_forward_and_trainable_grads_for_parametric_custom_layer ... ok
+test stateless_custom_layer_passes_resident_train_step ... ok
+test stateless_custom_layer_trains_identically_to_builtin_activation ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\compat_sequential_ema_manual.rs (target\debug\deps\compat_sequential_ema_manual-befeefa77bd15031.exe)
+
+running 1 test
+test ema_shadow_weights_achieve_above_chance_accuracy_without_mutating_training_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests\compat_sequential_fit.rs (target\debug\deps\compat_sequential_fit-d945f7c14758f021.exe)
+
+running 16 tests
+test fit_and_evaluate_reject_uncompiled_model ... ok
+test evaluate_rejects_zero_batch_size ... ok
+test fit_rejects_huge_epochs_without_panicking ... ok
+test fit_rejects_sample_count_mismatch ... ok
+test fit_rejects_zero_batch_size ... ok
+test fit_rejects_zero_epochs ... ok
+test fit_rejects_loss_target_dtype_mismatch ... ok
+test evaluate_full_batch_matches_direct_loss_bit_exact ... ok
+test evaluate_minibatch_matches_weighted_mean_of_manual_batches ... ok
+test recompile_replaces_optimizer_state ... ok
+test fit_twice_equals_fit_once_with_double_epochs ... ok
+test fit_matches_manual_loop_bit_exact ... ok
+test fit_minibatch_shuffle_is_reproducible_under_manual_seed ... ok
+test fit_cross_entropy_with_i32_targets_converges ... ok
+test fit_restores_training_mode_and_evaluate_is_deterministic_with_dropout ... ok
+test fit_sgd_mse_converges ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests\compat_sequential_fit_amp.rs (target\debug\deps\compat_sequential_fit_amp-238322eef5969e50.exe)
+
+running 6 tests
+test compile_with_amp_rejects_invalid_scaler_config_and_keeps_previous_compiled ... ok
+test fit_without_amp_is_unchanged_by_amp_wiring ... ok
+test fit_amp_matches_manual_low_precision_gradscaler_loop_bit_exact_bf16 ... ok
+test fit_amp_matches_manual_low_precision_gradscaler_loop_bit_exact_f16 ... ok
+test fit_amp_skip_and_backoff_matches_gradscaler_bit_exact ... ok
+test fit_amp_state_persists_across_fit_calls ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\compat_sequential_fit_amp_conv_mha.rs (target\debug\deps\compat_sequential_fit_amp_conv_mha-33a1878dfee8b1f6.exe)
+
+running 5 tests
+test conv2d_fit_without_amp_is_deterministic ... ok
+test conv2d_amp_bf16_matches_f32_within_req2_composite_tolerance ... ok
+test conv2d_amp_f16_matches_f32_within_req2_composite_tolerance ... ok
+test mha_fit_without_amp_is_deterministic ... ok
+test mha_amp_f16_matches_f32_within_req2_composite_tolerance ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests\compat_sequential_fit_lbfgs.rs (target\debug\deps\compat_sequential_fit_lbfgs-c426a15689779d1d.exe)
+
+running 2 tests
+test compile_with_amp_rejects_lbfgs ... ok
+test fit_lbfgs_learning_curve_matches_or_beats_sgd ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.76s
+
+     Running tests\compat_sequential_fit_optimizers.rs (target\debug\deps\compat_sequential_fit_optimizers-c157b7d7d2e4bb0d.exe)
+
+running 17 tests
+test compile_rejects_invalid_rmsprop_config ... ok
+test compile_rejects_invalid_lamb_config ... ok
+test compile_rejects_invalid_adagrad_config ... ok
+test compile_with_amp_smoke_rmsprop ... ok
+test compile_with_amp_smoke_adagrad ... ok
+test fit_twice_equals_fit_once_with_double_epochs_adagrad ... ok
+test compile_with_amp_smoke_lamb ... ok
+test fit_twice_equals_fit_once_with_double_epochs_lamb ... ok
+test fit_with_callbacks_rejects_lr_schedule_for_adagrad ... ok
+test fit_with_callbacks_rejects_lr_schedule_for_lamb ... ok
+test fit_with_callbacks_rejects_lr_schedule_for_rmsprop ... ok
+test fit_twice_equals_fit_once_with_double_epochs_rmsprop ... ok
+test fit_matches_manual_loop_bit_exact_adagrad ... ok
+test fit_matches_manual_loop_bit_exact_lamb ... ok
+test fit_with_callbacks_empty_matches_fit_lamb ... ok
+test fit_matches_manual_loop_bit_exact_rmsprop ... ok
+test recompile_discards_optimizer_state_rmsprop ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\compat_sequential_layers.rs (target\debug\deps\compat_sequential_layers-e10818dc08f632b7.exe)
+
+running 30 tests
+test add_embedding_rejects_padding_idx_out_of_range ... ok
+test add_multihead_attention_rejects_indivisible_heads ... ok
+test add_transformer_encoder_rejects_indivisible_heads ... ok
+test add_batch_norm2d_rejects_momentum_out_of_range ... ok
+test add_embedding_rejects_zero_num_embeddings ... ok
+test add_rms_norm_rejects_nan_eps ... ok
+test add_layer_norm_rejects_negative_eps ... ok
+test add_batch_norm1d_rejects_zero_num_features ... ok
+test add_transformer_encoder_rejects_zero_dim_feedforward ... ok
+test batch_norm1d_train_forward_rejects_batch_size_one ... ok
+test apply_parameters_rejects_layer_norm_weight_shape_change ... ok
+test embedding_rejects_nan_id ... ok
+test embedding_rejects_negative_id ... ok
+test batch_norm_eval_predict_does_not_update_running_stats ... ok
+test embedding_rejects_non_integer_id ... ok
+test batch_norm1d_predict_matches_forward_bit_exact_rank3 ... ok
+test batch_norm1d_predict_matches_forward_bit_exact_rank2 ... ok
+test batch_norm2d_predict_matches_forward_bit_exact ... ok
+test apply_parameters_preserves_batch_norm_running_stats_and_mode ... ok
+test mixed_model_init_device_param_store_rejects_resident_unsupported_layers ... ok
+test mixed_model_trainable_parameters_order_matches_named_parameters ... ok
+test rms_norm_predict_matches_forward_bit_exact ... ok
+test embedding_predict_matches_forward_bit_exact ... ok
+test layer_norm_predict_matches_forward_bit_exact ... ok
+test apply_parameters_updates_mixed_model_weight_used_by_subsequent_predict ... ok
+test mixed_model_bind_trainable_vars_and_grads_count_matches_trainable_parameters ... ok
+test multihead_attention_predict_matches_forward_bit_exact ... ok
+test transformer_encoder_predict_matches_forward_bit_exact ... ok
+test transformer_encoder_bind_trainable_vars_and_grads_count_matches_trainable_parameters ... ok
+test mixed_model_sgd_training_loop_reduces_loss ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\compat_sequential_layers_backend_parity.rs (target\debug\deps\compat_sequential_layers_backend_parity-74ebfe604d83ecd9.exe)
+
+running 4 tests
+test cuda_batch_norm2d_matches_cpu ... ignored, CUDA 実機必須
+test cuda_multihead_attention_matches_cpu ... ignored, CUDA 実機必須
+test cuda_norm_embedding_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1760 の申し送り先（GB10 セッション）へ引き継ぐ
+test cuda_transformer_encoder_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #2068 の申し送り先（GB10 セッション）へ引き継ぐ
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_lbfgs_manual.rs (target\debug\deps\compat_sequential_lbfgs_manual-88253f4fccec8a73.exe)
+
+running 5 tests
+test lbfgs_on_sequential_nan_input_fails_closed_and_restores_params ... ok
+test lbfgs_on_sequential_restores_params_after_trial_write_then_failure ... ok
+test lbfgs_on_sequential_evaluates_closure_multiple_times ... ok
+test lbfgs_and_adamw_can_alternate_on_same_sequential ... ok
+test lbfgs_on_sequential_converges_mnist_shaped ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests\compat_sequential_lr_scheduler_ext.rs (target\debug\deps\compat_sequential_lr_scheduler_ext-b9ef24ec17156d17.exe)
+
+running 5 tests
+test lambda_lr_per_epoch_matches_manual_loop ... ok
+test cyclic_lr_per_epoch_matches_manual_loop ... ok
+test sequential_lr_per_epoch_matches_manual_loop ... ok
+test cosine_annealing_warm_restarts_per_epoch_matches_manual_loop ... ok
+test multi_step_lr_per_epoch_matches_manual_loop ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\compat_sequential_metrics.rs (target\debug\deps\compat_sequential_metrics-ea7ee02b78317512.exe)
+
+running 10 tests
+test fit_with_metrics_rejects_val_metric_not_in_requested_metrics ... ok
+test fit_with_metrics_rejects_mse_target ... ok
+test fit_with_metrics_rejects_non_empty_metrics_without_validation ... ok
+test fit_with_metrics_rejects_val_metric_confusion_matrix ... ok
+test fit_with_metrics_rejects_huge_epochs_without_panicking ... ok
+test early_stopping_and_lr_schedule_are_driven_by_val_metric ... ok
+test fit_with_metrics_empty_matches_fit_with_callbacks_bit_exact ... ok
+test metrics_computation_does_not_perturb_loss_or_params ... ok
+test model_checkpoint_tracks_best_val_accuracy_with_max_mode ... ok
+test val_metrics_matches_independent_predict_and_compute_per_epoch ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\compat_sequential_metrics_backend_parity.rs (target\debug\deps\compat_sequential_metrics_backend_parity-095ba7ba4ff5b096.exe)
+
+running 1 test
+test cuda_metrics_result_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #2072 の申し送り先（GB10 セッション）へ引き継ぐ
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_mode.rs (target\debug\deps\compat_sequential_mode-a49e02a570068f1b.exe)
+
+running 10 tests
+test add_dropout_rejects_out_of_range_p ... ok
+test named_parameters_order_matches_trainable_parameters ... ok
+test named_parameters_index_prefix_contract ... ok
+test training_mode_toggle ... ok
+test dropout_model_eval_predict_matches_model_without_dropout ... ok
+test predict_output_unaffected_by_training_mode ... ok
+test dropout_model_train_predict_is_deterministic_and_matches_tape_path ... ok
+test dropout_model_set_training_false_propagates_to_bind_forward_too ... ok
+test backward_gradients_unaffected_by_training_mode ... ok
+test predict_fallback_to_via_tape_does_not_double_apply_dropout_side_effects ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\compat_sequential_model_io.rs (target\debug\deps\compat_sequential_model_io-5a397eab5f3bf7ee.exe)
+
+running 2 tests
+test save_model_is_unsupported_on_non_unix ... ok
+test load_model_is_unsupported_on_non_unix ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_model_io_batch_norm.rs (target\debug\deps\compat_sequential_model_io_batch_norm-8077a5e7a2ba0400.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_model_io_compiled.rs (target\debug\deps\compat_sequential_model_io_compiled-69a87e17f1658b81.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_model_io_fs_threats.rs (target\debug\deps\compat_sequential_model_io_fs_threats-f0efca7827432706.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_model_io_layers.rs (target\debug\deps\compat_sequential_model_io_layers-0dd4d73a532a5ae3.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_model_io_lbfgs.rs (target\debug\deps\compat_sequential_model_io_lbfgs-3d4908519002d9b9.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_model_io_manual.rs (target\debug\deps\compat_sequential_model_io_manual-6dd56451cf7aac86.exe)
+
+running 3 tests
+test embedding_mha_stack_roundtrip_bit_identical ... ok
+test deep_heterogeneous_stack_params_roundtrip_bit_identical ... ok
+test transformer_encoder_residual_stack_roundtrip_bit_identical ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\compat_sequential_model_io_tamper.rs (target\debug\deps\compat_sequential_model_io_tamper-74bbc7904dcd169c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_optim_ext.rs (target\debug\deps\compat_sequential_optim_ext-62b9030a1b9d71f9.exe)
+
+running 12 tests
+test nadam_manual_loop_is_deterministic ... ok
+test adadelta_manual_loop_is_deterministic ... ok
+test radam_manual_loop_is_deterministic ... ok
+test adamax_manual_loop_is_deterministic ... ok
+test adadelta_sequential_training_loop_matches_manual_loop_bit_exact ... ok
+test nadam_sequential_training_loop_matches_manual_loop_bit_exact ... ok
+test adamax_sequential_training_loop_matches_manual_loop_bit_exact ... ok
+test radam_sequential_training_loop_matches_manual_loop_bit_exact ... ok
+test sequential_adamax_training_loop_reduces_loss ... ok
+test sequential_adadelta_training_loop_reduces_loss ... ok
+test sequential_radam_training_loop_reduces_loss ... ok
+test sequential_nadam_training_loop_reduces_loss ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests\compat_sequential_param_groups.rs (target\debug\deps\compat_sequential_param_groups-0ffe6ea5ab330e8c.exe)
+
+running 4 tests
+test adamw_frozen_layer_group_stays_bit_unchanged_while_other_layer_trains ... ok
+test sgd_momentum_all_default_group_bit_matches_empty_groups ... ok
+test adamw_all_default_group_bit_matches_empty_groups ... ok
+test adamw_per_layer_lr_converges ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests\compat_sequential_pooling.rs (target\debug\deps\compat_sequential_pooling-76508cc4292c7f24.exe)
+
+running 26 tests
+test add_adaptive_avg_pool2d_rejects_zero_output_size ... ok
+test add_adaptive_avg_pool1d_rejects_zero_output_size ... ok
+test add_max_pool2d_rejects_zero_dilation ... ok
+test add_max_pool2d_rejects_zero_stride ... ok
+test add_avg_pool2d_rejects_padding_exceeding_half_kernel ... ok
+test add_max_pool2d_rejects_zero_kernel_size ... ok
+test avg_pool1d_rejects_rank4_input ... ok
+test adaptive_avg_pool2d_predict_matches_direct_call_bit_exact ... ok
+test avg_pool2d_predict_matches_forward_bit_exact ... ok
+test avg_pool1d_predict_matches_direct_call_bit_exact ... ok
+test adaptive_avg_pool1d_predict_matches_direct_call_bit_exact ... ok
+test init_device_param_store_rejects_pooling_layer ... ok
+test avg_pool2d_predict_matches_direct_call_bit_exact_count_include_pad_true ... ok
+test avg_pool2d_predict_matches_direct_call_bit_exact_count_include_pad_false ... ok
+test max_pool1d_predict_matches_direct_call_bit_exact ... ok
+test forward_resident_rejects_pooling_layer ... ok
+test max_pool2d_predict_is_mode_independent ... ok
+test max_pool2d_predict_matches_direct_call_bit_exact ... ok
+test max_pool2d_predict_matches_forward_bit_exact ... ok
+test max_pool2d_rejects_rank3_input ... ok
+test predict_resident_rejects_pooling_layer ... ok
+test avg_pool2d_backward_matches_direct_graph_bit_exact ... ok
+test max_pool2d_backward_matches_direct_graph_bit_exact ... ok
+test max_pool2d_does_not_contribute_trainable_parameters ... ok
+test conv_relu_avg_pool2d_training_loop_reduces_loss ... ok
+test conv_relu_max_pool2d_training_loop_reduces_loss ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\compat_sequential_pooling_backend_parity.rs (target\debug\deps\compat_sequential_pooling_backend_parity-a5cb74f1899daa48.exe)
+
+running 2 tests
+test cuda_pool1d_chain_matches_cpu ... ignored, CUDA 実機必須
+test cuda_pool2d_chain_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1957 の申し送り先（GB10 セッション）へ引き継ぐ
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_state_dict.rs (target\debug\deps\compat_sequential_state_dict-d482b5442d9d478c.exe)
+
+running 9 tests
+test state_dict_keys_and_values_match_named_parameters ... ok
+test state_dict_excludes_dropout_layer ... ok
+test state_dict_reflects_apply_parameters_updates ... ok
+test load_state_dict_from_another_model_matches_predict_output ... ok
+test load_state_dict_round_trip_is_no_op_for_predict ... ok
+test load_state_dict_rejects_shape_mismatch_and_leaves_model_unchanged ... ok
+test load_state_dict_rejects_unexpected_key_and_leaves_model_unchanged ... ok
+test load_state_dict_rejects_missing_key_and_leaves_model_unchanged ... ok
+test load_state_dict_from_another_model_matches_bind_forward_output ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\compat_sequential_train.rs (target\debug\deps\compat_sequential_train-46b3e6296a773c84.exe)
+
+running 4 tests
+test trainable_grads_rejects_unreached_parameter ... ok
+test sequential_training_loop_matches_manual_loop_bit_exact ... ok
+test sequential_adamw_training_loop_reduces_loss ... ok
+test sequential_sgd_training_loop_converges ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\constant_pad_backend_parity.rs (target\debug\deps\constant_pad_backend_parity-9bc8721cccb2ad0d.exe)
+
+running 6 tests
+test cuda_pad_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_pad_huge_width_on_empty_input_is_rejected_before_alloc ... ok
+test naive_pad_huge_width_on_empty_input_is_rejected_before_alloc ... ok
+test cpu_pad_forward_matches_naive_reference_with_negative_zero ... ok
+test cpu_pad_forward_matches_naive_reference ... ok
+test cpu_pad_backward_matches_naive_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\conv1d_backend_parity.rs (target\debug\deps\conv1d_backend_parity-04cdeadc8161daca.exe)
+
+running 7 tests
+test cuda_conv1d_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_conv1d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_conv1d_forward_matches_cpu_groups_dilation ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_conv1d_matches_manual_reshape_conv2d_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_conv1d_forward_matches_naive_reference_groups_no_bias ... ok
+test cpu_conv1d_forward_matches_naive_reference ... ok
+test cpu_conv1d_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\conv2d_backend_parity.rs (target\debug\deps\conv2d_backend_parity-b75d515e69ea64a3.exe)
+
+running 5 tests
+test cuda_conv2d_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_conv2d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_conv2d_forward_matches_naive_reference_groups_no_bias ... ok
+test cpu_conv2d_forward_matches_naive_reference ... ok
+test cpu_conv2d_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\conv3d_backend_parity.rs (target\debug\deps\conv3d_backend_parity-9eb907c953ba7079.exe)
+
+running 5 tests
+test cuda_conv3d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cpu_conv3d_kernel_depth_one_matches_conv2d_via_reshape ... ok
+test cpu_conv3d_forward_matches_naive_reference ... ok
+test cpu_conv3d_forward_matches_naive_reference_groups_no_bias ... ok
+test cpu_conv3d_backward_matches_naive_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\conv_transpose2d_backend_parity.rs (target\debug\deps\conv_transpose2d_backend_parity-0cf905127017c83d.exe)
+
+running 5 tests
+test cuda_conv_transpose2d_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_conv_transpose2d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_conv_transpose2d_forward_matches_conv2d_vjp_d_input ... ok
+test cpu_conv_transpose2d_forward_matches_naive_reference ... ok
+test cpu_conv_transpose2d_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\cpu_predict_resident_fixedcost_diag.rs (target\debug\deps\cpu_predict_resident_fixedcost_diag-251401c1327eedee.exe)
+
+running 2 tests
+test cpu_predict_resident_fixedcost_phases ... ignored, 実機計測用の record-only 診断（RULE.txt・orchestrate.sh 参照）
+test cpu_predict_resident_decomposition_matches_public_api_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\cpu_reuse_device_update_diag.rs (target\debug\deps\cpu_reuse_device_update_diag-93298c3dbfe3947b.exe)
+
+running 2 tests
+test cpu_reuse_device_update_phases ... ignored, 実機計測用の record-only 診断（RULE.txt・orchestrate.sh 参照）
+test cpu_reuse_device_update_decomposition_matches_public_api_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.02s
+
+     Running tests\cpu_reuse_step_grad_bit_dump.rs (target\debug\deps\cpu_reuse_step_grad_bit_dump-32b7c196ac966381.exe)
+
+running 1 test
+test dump_cpu_reuse_step_grad_bits ... ignored, before/after ツリー間 diff 専用（通常 CI では不要）。--nocapture 必須
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cpu_sme_gate_bit_dump.rs (target\debug\deps\cpu_sme_gate_bit_dump-eec6da2a6efdfa29.exe)
+
+running 1 test
+test dump_cpu_sme_gate_bits ... ignored, before/after ツリー間 diff 専用（通常 CI では不要）。--release --nocapture 必須
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\creation_tensor_generation.rs (target\debug\deps\creation_tensor_generation-757eb3d9fc994a99.exe)
+
+running 6 tests
+test arange_upload_to_cuda_tape_round_trips ... ignored, 実機（CUDA）依存。DGX Spark GB10 等で手動実行する
+test arange_rejects_invalid_step_via_facade ... ok
+test eye_rejects_overflow_via_facade ... ok
+test arange_linspace_eye_upload_to_cpu_tape_are_bit_identical ... ok
+test zeros_like_ones_like_via_facade_follow_var_shape ... ok
+test matmul_with_eye_is_bit_exact_on_cpu ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cuda_graph_step_bit_identity.rs (target\debug\deps\cuda_graph_step_bit_identity-5cfb93590e140184.exe)
+
+running 3 tests
+test eager_baseline ... ignored, CUDA 実機（DGX Spark GB10 等）必須。docs/real-hardware-verification-env.md 参照。--exact 単独実行必須
+test graph_capture ... ignored, CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_STEP=1 の別プロセスで --exact 単独実行すること
+test graph_capture_completes_training_loop_without_error ... ignored, CUDA 実機（DGX Spark GB10 等）必須。単独プロセスで --exact 単独実行すること（opt-in をプロセスワイドに変更するため）
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cuda_graph_step_optin.rs (target\debug\deps\cuda_graph_step_optin-d27c6ac360b21133.exe)
+
+running 2 tests
+test default_is_disabled ... ok
+test set_true_then_false_round_trips ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cuda_graph_step_two_gpu_bit_identity.rs (target\debug\deps\cuda_graph_step_two_gpu_bit_identity-9ee5fb270111a32c.exe)
+
+running 1 test
+test graph_capture_matches_eager_baseline_bit_identical_across_two_gpus ... ignored, CUDA 実機（2 GPU 構成）必須。単独プロセスで実行すること（opt-in をプロセスワイドに変更するため）。単一 GPU 環境では device_count() < 2 のため早期 return する
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cuda_tf32_gemm_optin.rs (target\debug\deps\cuda_tf32_gemm_optin-587c6073b00016e2.exe)
+
+running 4 tests
+test default_is_disabled ... ok
+test set_true_then_false_round_trips ... ok
+test legacy_bool_api_maps_correctly_to_and_from_tf32x3 ... ok
+test set_cuda_gemm_precision_round_trips_across_all_three_modes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\cuda_train_forward_resident_diag.rs (target\debug\deps\cuda_train_forward_resident_diag-95e8bf624b3b70cd.exe)
+
+running 3 tests
+test cuda_train_forward_resident_decomposition_bit_identical_cuda ... ignored, CUDA 実機必須
+test cuda_train_forward_resident_phases ... ignored, CUDA 実機計測用の record-only 診断（RULE.txt・orchestrate.sh 参照）
+test cuda_train_forward_resident_decomposition_bit_identical_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running tests\data_loader.rs (target\debug\deps\data_loader-130eeeff26c8b1e7.exe)
+
+running 4 tests
+test batch_upload_round_trips_on_cuda_tape ... ignored, 実機（CUDA）依存。DGX Spark GB10 等で手動実行する
+test batch_upload_to_cpu_tape_is_bit_identical ... ok
+test minibatch_training_with_data_loader_converges_via_facade_only ... ok
+test classification_batches_pair_f32_features_with_i32_targets ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests\data_loader_prefetch.rs (target\debug\deps\data_loader_prefetch-56d50a046c2bba70.exe)
+
+running 2 tests
+test prefetch_data_loader_matches_facade_data_loader_bit_identical ... ok
+test prefetch_training_loop_matches_sequential_bit_identical_final_params ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests\data_loader_prefetch_bench.rs (target\debug\deps\data_loader_prefetch_bench-f2850b4a9178821e.exe)
+
+running 2 tests
+test w1_prefetch_reduces_epoch_wall_clock_when_batch_is_slow ... ignored, 性能 A/B（R3〜R5）。--release --nocapture での明示実行を想定
+test w2_prefetch_training_matches_sequential_checksum_and_records_ratio ... ignored, 性能 A/B（R3〜R5）。--release --nocapture での明示実行を想定
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\data_sampler_hooks.rs (target\debug\deps\data_sampler_hooks-4950dd2d281f1463.exe)
+
+running 3 tests
+test hooked_data_loader_matches_facade_data_loader_bit_identical ... ok
+test sampler_data_loader_tuple_dataset_classification_smoke ... ok
+test weighted_sampler_transform_collate_training_converges ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\device_enumeration.rs (target\debug\deps\device_enumeration-65f94a19ae904d9e.exe)
+
+running 5 tests
+test available_devices_always_includes_cpu ... ok
+test all_available_devices_are_constructible_via_tape_for ... ok
+test non_macos_build_never_yields_metal_variant ... ok
+test cuda_devices_presence_matches_provider_availability ... ok
+test available_devices_is_deterministic_across_calls ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\device_param_store_adagrad_train.rs (target\debug\deps\device_param_store_adagrad_train-a83d7b55c28d4fd7.exe)
+
+running 4 tests
+test adagrad_rejects_nan_lr_and_leaves_params_unchanged ... ok
+test adagrad_rejects_hyperparameter_change_mid_training ... ok
+test adagrad_device_step_matches_host_reference_per_step ... ok
+test adagrad_lr_decay_device_step_matches_host_reference_per_step ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\device_param_store_adam_train.rs (target\debug\deps\device_param_store_adam_train-87d480b43732f5c0.exe)
+
+running 6 tests
+test adam_rejects_nan_lr_and_leaves_params_unchanged ... ok
+test sgd_then_adam_on_same_store_is_rejected ... ok
+test adam_then_adamw_on_same_store_is_rejected ... ok
+test adam_rejects_hyperparameter_change_mid_training ... ok
+test adamw_device_step_matches_host_reference_per_step ... ok
+test adam_device_step_matches_host_reference_per_step ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\device_param_store_amp_train.rs (target\debug\deps\device_param_store_amp_train-ce50d24f6cb6eb78.exe)
+
+running 4 tests
+test step_amp_skip_on_overflow_leaves_params_unchanged_and_backoffs ... ok
+test step_adam_amp_scale_one_matches_non_amp_per_step_bit_exact ... ok
+test step_amp_sgd_scale_one_matches_non_amp_per_step_bit_exact ... ok
+test step_adamw_amp_scale_one_matches_non_amp_per_step_bit_exact ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\device_param_store_backend_parity.rs (target\debug\deps\device_param_store_backend_parity-f4df705007cef0f0.exe)
+
+running 2 tests
+test device_resident_matches_host_sgd_on_cuda_across_100_steps ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test grad_readout_contract_on_cuda ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\device_param_store_bench.rs (target\debug\deps\device_param_store_bench-8710441ca7546c9a.exe)
+
+running 2 tests
+test legacy_vs_resident_per_step_cuda ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test legacy_vs_resident_per_step_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests\device_param_store_grad_readout.rs (target\debug\deps\device_param_store_grad_readout-5cd4eadd5b1fe46c.exe)
+
+running 4 tests
+test grad_readout_after_step_is_invalid_argument_via_facade ... ok
+test resident_grads_to_host_weight_matches_matmul_reference_fma ... ok
+test grad_readout_rejects_stale_gradients_via_facade ... ok
+test param_grads_to_host_matches_host_only_path_two_layer ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\device_param_store_lamb_train.rs (target\debug\deps\device_param_store_lamb_train-c77d8c787b285936.exe)
+
+running 4 tests
+test lamb_rejects_nan_lr_and_leaves_params_unchanged ... ok
+test lamb_rejects_hyperparameter_change_mid_training ... ok
+test lamb_device_step_matches_host_reference_per_step ... ok
+test lamb_wd_zero_device_step_matches_host_reference_per_step ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\device_param_store_metal_mixed_shape_grad.rs (target\debug\deps\device_param_store_metal_mixed_shape_grad-f3ab0ae06d692138.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\device_param_store_rmsprop_train.rs (target\debug\deps\device_param_store_rmsprop_train-f85988ef846c4d71.exe)
+
+running 5 tests
+test rmsprop_rejects_nan_lr_and_leaves_params_unchanged ... ok
+test sgd_then_rmsprop_on_same_store_is_rejected ... ok
+test rmsprop_rejects_hyperparameter_change_mid_training ... ok
+test rmsprop_device_step_matches_host_reference_per_step ... ok
+test rmsprop_centered_and_momentum_device_step_matches_host_reference_per_step ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\device_param_store_train.rs (target\debug\deps\device_param_store_train-2616448576fa5a28.exe)
+
+running 5 tests
+test forward_resident_rolls_back_pending_on_forward_error ... ok
+test predict_resident_matches_predict_after_training ... ok
+test device_resident_matches_host_sgd_within_composite_tolerance ... ok
+test device_resident_training_loop_converges ... ok
+test device_resident_matches_host_sgd_across_100_steps_final_value_only ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests\device_transfer_backend_parity.rs (target\debug\deps\device_transfer_backend_parity-5225356548bbd18e.exe)
+
+running 3 tests
+test cuda_matmul_transferred_to_cpu_matches_within_req2_tolerance ... ignored, CUDA 実機（DGX Spark GB10 等）必須。イシュー #1614
+test transfer_from_naive_tape_to_facade_cpu_tape_is_bit_exact ... ok
+test transfer_from_facade_cpu_tape_to_naive_tape_materializes_and_is_bit_exact ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\dropout_backend_parity.rs (target\debug\deps\dropout_backend_parity-3806f8ead9be5d75.exe)
+
+running 3 tests
+test cuda_dropout_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cpu_dropout_backward_matches_naive_reference ... ok
+test cpu_dropout_forward_matches_naive_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\dropout_variants_backend_parity.rs (target\debug\deps\dropout_variants_backend_parity-b1f5942994bc1f4c.exe)
+
+running 6 tests
+test cuda_alpha_dropout_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_dropout2d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cpu_alpha_dropout_backward_matches_naive_reference ... ok
+test cpu_dropout2d_forward_matches_naive_reference ... ok
+test cpu_dropout2d_backward_matches_naive_reference ... ok
+test cpu_alpha_dropout_forward_matches_naive_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\dtype_f64_integration.rs (target\debug\deps\dtype_f64_integration-138883d571d08c8d.exe)
+
+running 4 tests
+test cuda_typed_ops_f64_accessor_is_some_and_gemm_matches_parity ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test facade_typed_ops_f64_accessor_is_some_on_cpu_and_computes_gemm_sum_max ... ok
+test facade_typed_ops_f64_matches_tape_f64_native_forward ... ok
+test cpu_native_matmul_sum_mean_max_backward_matches_host_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\einsum_backend_parity.rs (target\debug\deps\einsum_backend_parity-715aad72e2e44d98.exe)
+
+running 4 tests
+test cuda_einsum_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_einsum_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_einsum_forward_matches_naive_reference ... ok
+test cpu_einsum_backward_matches_naive_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\einsum_batch_backend_parity.rs (target\debug\deps\einsum_batch_backend_parity-630e1538425cd848.exe)
+
+running 5 tests
+test cuda_einsum_batch_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_einsum_batch_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test facade_var_einsum_still_rejects_batch_contraction ... ok
+test cpu_einsum_batch_forward_matches_naive_reference ... ok
+test cpu_einsum_batch_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\elementwise_vjp_bench.rs (target\debug\deps\elementwise_vjp_bench-b9bee4e87220b899.exe)
+
+running 1 test
+test elementwise_vjp_backward_cases ... ignored, 実機実測専用（FANDHE_BENCH_DEVICE で対象デバイス指定。イシュー #1583）
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\embedding_bag_backend_parity.rs (target\debug\deps\embedding_bag_backend_parity-fee8b298ce37bbf8.exe)
+
+running 5 tests
+test cuda_embedding_bag_sum_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cpu_embedding_bag_max_forward_matches_naive_reference_bit_exact ... ok
+test cpu_embedding_bag_mean_forward_matches_naive_reference ... ok
+test cpu_embedding_bag_sum_backward_matches_naive_reference ... ok
+test cpu_embedding_bag_sum_forward_matches_naive_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\example_lenet_mnist.rs (target\debug\deps\example_lenet_mnist-89e9b531fc68c700.exe)
+
+running 5 tests
+test lenet_rejects_rank_mismatch_and_invalid_num_classes ... ok
+test lenet_pytorch_param_map_detects_sequential_mut_replacement ... ok
+test lenet_structure_matches_pytorch_reference ... ok
+test lenet_forward_shape_and_eval_determinism ... ok
+test lenet_synthetic_mnist_one_epoch_loss_halves ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 49.73s
+
+     Running tests\example_mlp_mnist.rs (target\debug\deps\example_mlp_mnist-db1138e8abbf0085.exe)
+
+running 6 tests
+test mlp_rejects_invalid_args ... ok
+test mlp_new_validates_dropout_even_with_empty_hidden_dims ... ok
+test mlp_pytorch_param_map_detects_sequential_mut_replacement ... ok
+test mlp_structure_matches_pytorch_reference ... ok
+test mlp_forward_shape_and_eval_determinism ... ok
+test mlp_synthetic_mnist_one_epoch_loss_halves ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests\example_resnet_cifar10.rs (target\debug\deps\example_resnet_cifar10-8db11fd9d0d8cff0.exe)
+
+running 19 tests
+test accuracy_rejects_logits_shape_mismatch_with_matching_element_count ... ok
+test cross_entropy_mean_rejects_logits_column_mismatch ... ok
+test accuracy_restores_original_training_mode_after_success ... ok
+test resnet_rejects_invalid_args ... ok
+test resnet_rejects_width_multiplication_overflow ... ok
+test resnet_block_and_model_implement_reference_module ... ok
+test resnet_train_step_rejects_wrong_input_shape ... ok
+test resnet_structure_and_shortcut_branches ... ok
+test sub_tensor_f32_and_i32_reject_start_plus_len_overflow ... ok
+test accuracy_rejects_out_of_range_label ... ok
+test sub_tensor_i32_rejects_rank_2_input ... ok
+test synthetic_cifar10_rejects_element_count_overflow ... ok
+test accuracy_rejects_label_shape_mismatch ... ok
+test to_row_tokens_rejects_length_mismatch ... ok
+test to_row_tokens_reorders_chw_to_hcw ... ok
+test resnet_predict_shape_and_eval_determinism ... ok
+test resnet_train_step_forces_train_mode ... ok
+test predict_in_eval_prevents_batchnorm_running_stats_pollution ... ok
+test resnet_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.42s
+
+     Running tests\example_transformer_cifar10.rs (target\debug\deps\example_transformer_cifar10-64a09d71e0cd9b46.exe)
+
+running 9 tests
+test transformer_config_cifar10_rejects_embed_dim_doubling_overflow ... ok
+test transformer_rejects_invalid_args ... ok
+test transformer_rejects_seq_len_times_embed_dim_overflow ... ok
+test transformer_config_cifar10_preset ... ok
+test transformer_forward_rejects_wrong_input_shape ... ok
+test transformer_implements_reference_module ... ok
+test transformer_predict_shape_and_eval_determinism ... ok
+test transformer_train_step_forces_train_mode ... ok
+test transformer_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.88s
+
+     Running tests\extremum_ops_backend_parity.rs (target\debug\deps\extremum_ops_backend_parity-b3d0e986f39acd34.exe)
+
+running 5 tests
+test cuda_amax_amin_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/amax-amin-2154/README.md 参照
+test cuda_amax_amin_gradient_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/amax-amin-2154/README.md 参照
+test cpu_amax_rejects_huge_broadcast_before_materializing ... ok
+test cpu_amax_amin_forward_bit_matches_naive_reference ... ok
+test cpu_amax_amin_gradient_bit_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\fusion_default_parity.rs (target\debug\deps\fusion_default_parity-72f5d24f11aed3ab.exe)
+
+running 2 tests
+test cpu_backend_ops_run_fused_supports_representative_chain ... ok
+test default_facade_tape_matches_naive_reference_within_parity ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\gemm_fresh_overhead_diag.rs (target\debug\deps\gemm_fresh_overhead_diag-bbf0d3107880f585.exe)
+
+running 1 test
+test gemm_fresh_overhead_diag_toggle_comparison ... ignored, CUDA 実機（NVRTC 搭載・compute capability 8.0 以上。DGX Spark GB10 想定）必須。#956
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\generate_backend_parity.rs (target\debug\deps\generate_backend_parity-960bc937ab4720c0.exe)
+
+running 3 tests
+test cuda_backend_ops_matches_cpu_backend_ops_for_greedy_generation ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_backend_ops_matches_naive_ops_for_greedy_generation ... ok
+test cpu_backend_ops_matches_naive_ops_for_top_k_generation_with_same_seed ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\gpu_elementwise_fusion_bench.rs (target\debug\deps\gpu_elementwise_fusion_bench-ee6c635c5b20e979.exe)
+
+running 1 test
+test gpu_elementwise_fusion_cases ... ignored, 実機実測専用（FANDHE_BENCH_DEVICE／FANDHE_BENCH_GPU_EW_FUSION で指定。イシュー #2085）
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\gpu_elementwise_fusion_grad_bit_identity.rs (target\debug\deps\gpu_elementwise_fusion_grad_bit_identity-cd3d5f5b4ef58ef3.exe)
+
+running 2 tests
+test forward_output_matches_bit_exact_between_host_model_and_cpu_fused_kernel ... ok
+test gradient_matches_bit_exact_between_host_model_and_cpu_fused_kernel ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\gpu_min_log_softmax_bench.rs (target\debug\deps\gpu_min_log_softmax_bench-b1a99e0799ac22e2.exe)
+
+running 2 tests
+test log_softmax_forward_fixed_shapes ... ignored, 実機実測専用（FANDHE_BENCH_DEVICE で対象デバイス指定。イシュー #2155）
+test min_forward_fixed_shapes ... ignored, 実機実測専用（FANDHE_BENCH_DEVICE で対象デバイス指定。イシュー #2155）
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\group_instance_norm_backend_parity.rs (target\debug\deps\group_instance_norm_backend_parity-b431cd9b482e0986.exe)
+
+running 6 tests
+test cuda_group_norm_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_instance_norm_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_instance_norm_forward_matches_naive_reference ... ok
+test cpu_group_norm_forward_matches_naive_reference ... ok
+test cpu_group_norm_backward_matches_naive_reference ... ok
+test cpu_instance_norm_backward_matches_naive_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\host_view_readout.rs (target\debug\deps\host_view_readout-5a5c6a97a19f3f63.exe)
+
+running 1 test
+test host_view_matches_to_tensor_on_default_cpu_tape ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\huber_backend_parity.rs (target\debug\deps\huber_backend_parity-9f83cc4b0d6993df.exe)
+
+running 3 tests
+test cuda_huber_loss_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_smooth_l1_loss_forward_and_backward_match_naive_fallback ... ok
+test cpu_huber_loss_forward_and_backward_match_naive_fallback ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\index_ops_backend_parity.rs (target\debug\deps\index_ops_backend_parity-acb44138ea61fc71.exe)
+
+running 11 tests
+test cuda_masked_fill_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_narrow_matmul_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_one_hot_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_where_cond_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_where_cond_forward_matches_naive_reference ... ok
+test cpu_one_hot_forward_matches_naive_reference ... ok
+test cpu_one_hot_backward_is_explicit_zero_on_both_paths ... ok
+test cpu_masked_fill_matches_naive_reference ... ok
+test cpu_where_cond_backward_matches_naive_reference ... ok
+test cpu_narrow_matmul_matches_naive_reference ... ok
+test cpu_narrow_add_matches_naive_reference ... ok
+
+test result: ok. 7 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\indexing_ops_backend_parity.rs (target\debug\deps\indexing_ops_backend_parity-49526cc0cdc67de9.exe)
+
+running 9 tests
+test cuda_advanced_indexing_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照
+test cuda_advanced_indexing_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照
+test cuda_index_put_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照
+test cuda_index_put_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/indexing-inplace-2148/README.md 参照
+test cpu_advanced_indexing_preserves_nan_payload ... ok
+test cpu_advanced_indexing_forward_bit_matches_naive_reference ... ok
+test cpu_index_put_overwrite_forward_bit_matches_naive_reference ... ok
+test cpu_index_put_accumulate_forward_matches_naive_reference ... ok
+test cpu_indexing_backward_matches_naive_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\infer_device_chain_metal.rs (target\debug\deps\infer_device_chain_metal-f053c9fa4a2401e5.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\infer_fixed_cost_bench.rs (target\debug\deps\infer_fixed_cost_bench-fc9cc1c0622045e1.exe)
+
+running 1 test
+test infer_forward_fixed_cost_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
+
+     Running tests\infer_predict_phase_diag.rs (target\debug\deps\infer_predict_phase_diag-17b95fd67e8b6d3e.exe)
+
+running 1 test
+test infer_predict_phase_diag_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.29s
+
+     Running tests\interop_onnx_conv_pool_import.rs (target\debug\deps\interop_onnx_conv_pool_import-d7bd5adc1a50881e.exe)
+
+running 4 tests
+test max_pool_import_succeeds_but_export_is_unsupported ... ok
+test max_pool_facade_matches_internal_direct_call_bit_exact ... ok
+test conv1d_facade_matches_internal_direct_call_bit_exact ... ok
+test conv2d_then_max_pool_via_public_api_matches_nn_forward_host_chain ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\interop_onnx_export.rs (target\debug\deps\interop_onnx_export-af7c8a36ab0389da.exe)
+
+running 8 tests
+test onnx_error_wildcard_match_compiles_facade_only ... ok
+test synthetic_model_with_disallowed_op_type_is_rejected_at_export_fail_closed ... ok
+test to_path_with_nonexistent_parent_directory_returns_io_error ... ok
+test to_bytes_is_deterministic_and_a_fixed_point ... ok
+test slice_repro_onnx_export_import_roundtrip_matches_original_bit_exact ... ok
+test model_onnx_export_import_roundtrip_matches_original_bit_exact ... ok
+test non_default_export_options_still_roundtrip_but_produce_different_bytes ... ok
+test to_path_writes_bytes_matching_to_bytes_and_roundtrips ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\interop_onnx_export_layers_parity.rs (target\debug\deps\interop_onnx_export_layers_parity-f8566a592bc9d9e8.exe)
+
+running 4 tests
+test softmax_model_parity ... ok
+test layer_norm_model_parity ... ok
+test gelu_model_parity ... ok
+test conv2d_model_parity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\interop_onnx_export_sequential.rs (target\debug\deps\interop_onnx_export_sequential-8b7bcd696018bf22.exe)
+
+running 13 tests
+test empty_sequential_is_rejected_with_invalid_model ... ok
+test sequential_with_conv1d_is_rejected_with_unsupported_layer_conv1d ... ok
+test sequential_with_tanh_is_rejected_with_unsupported_layer ... ok
+test sequential_with_sigmoid_is_rejected_with_unsupported_layer ... ok
+test sequential_with_softmax_and_flatten_is_rejected_with_unsupported_layer ... ok
+test sequential_with_conv2d_is_accepted ... ok
+test run_with_wrong_feed_name_returns_missing_feed ... ok
+test unsupported_layer_after_supported_layers_is_still_rejected ... ok
+test to_path_does_not_create_file_when_export_fails ... ok
+test from_sequential_direct_graph_matches_from_bytes_roundtrip_bit_exact ... ok
+test from_sequential_to_bytes_is_deterministic_and_idempotent ... ok
+test large_shape_crossing_block_tile_boundary_matches_predict_bit_exact ... ok
+test trained_mlp_roundtrip_matches_predict_bit_exact ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests\interop_onnx_external_data.rs (target\debug\deps\interop_onnx_external_data-365a8280e4a5e8a3.exe)
+
+running 2 tests
+test from_bytes_still_rejects_external_data_fixture ... ok
+test from_path_resolves_external_data_and_matches_manifest_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\interop_onnx_external_data_limits.rs (target\debug\deps\interop_onnx_external_data_limits-28efd477e2f9f982.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\interop_onnx_gpu_execution_optin.rs (target\debug\deps\interop_onnx_gpu_execution_optin-4b0b5139820fa148.exe)
+
+running 4 tests
+test cuda_onnx_gpu_execution_defaults_to_disabled ... ok
+test onnx_model_run_is_bit_unchanged_when_opt_in_is_off ... ok
+test cuda_onnx_gpu_execution_setter_getter_round_trip ... ok
+test cuda_onnx_gpu_execution_on_is_fail_closed_or_matches_off_within_req2 ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\interop_onnx_gpu_execution_parity.rs (target\debug\deps\interop_onnx_gpu_execution_parity-7b08665544a3fb09.exe)
+
+running 1 test
+test cuda_onnx_gpu_execution_on_matches_off_within_req2_on_real_device ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\interop_onnx_import.rs (target\debug\deps\interop_onnx_import-3b65f6ec18a67f00.exe)
+
+running 12 tests
+test from_path_rejects_nonexistent_path_with_io_error ... ok
+test from_bytes_rejects_sparse_initializer_fixture ... ok
+test from_path_rejects_sparse_initializer_fixture ... ok
+test from_bytes_rejects_empty_bytes_with_invalid_model ... ok
+test from_bytes_rejects_garbage_bytes_with_decode_error ... ok
+test onnx_error_is_matchable_via_facade_only ... ok
+test sparse_initializer_error_display_names_tensor ... ok
+test run_rejects_missing_required_feed ... ok
+test run_rejects_unknown_feed_name ... ok
+test model_onnx_matches_reference_via_from_bytes ... ok
+test slice_repro_onnx_end_to_end_via_from_path ... ok
+test model_onnx_matches_reference_via_from_path_within_req7_tolerance ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\interop_onnx_import_cnn_ops.rs (target\debug\deps\interop_onnx_import_cnn_ops-a8c3e59b99ccc5f2.exe)
+
+running 3 tests
+test facade_global_average_pool_flatten_export_roundtrip_matches_original_run_bit_exact ... ok
+test facade_bn_relu_gap_flatten_matches_internal_direct_call_bit_exact ... ok
+test facade_global_average_pool_flatten_matches_compat_sequential_predict ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\interop_onnx_internal_parity.rs (target\debug\deps\interop_onnx_internal_parity-84bd562aabb291e7.exe)
+
+running 16 tests
+test external_data_limits_default_matches_internal_default ... ok
+test onnx_export_options_default_matches_internal_export_options_default ... ok
+test synthetic_model_export_rejects_unsupported_op_and_non_default_domain ... ok
+test from_sequential_to_bytes_initializers_match_state_dict_bit_exact ... ok
+test synthetic_model_cast_to_float16_yields_onnx_value_f16_via_facade ... ok
+test from_sequential_to_bytes_matches_internal_direct_call_byte_exact ... ok
+test synthetic_model_with_negative_dim_is_rejected_as_invalid_model_via_facade ... ok
+test synthetic_model_with_sparse_initializer_matches_internal_error_payload_via_facade ... ok
+test non_default_options_match_internal_export_options_byte_exact ... ok
+test synthetic_model_with_unknown_initializer_data_type_is_rejected_via_facade ... ok
+test synthetic_model_with_unsupported_op_is_rejected_via_facade ... ok
+test slice_repro_onnx_facade_matches_internal_direct_call_bit_exact ... ok
+test model_onnx_facade_matches_internal_direct_call_bit_exact ... ok
+test to_bytes_matches_internal_direct_call_byte_exact ... ok
+test facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution ... ok
+test to_bytes_output_graph_structurally_equal_and_satisfies_export_contract ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\interop_onnx_model_zoo.rs (target\debug\deps\interop_onnx_model_zoo-a71472db186e91c5.exe)
+
+running 1 test
+test mnist12_facade_and_internal_agree_on_unsupported_conv_auto_pad ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\interop_safetensors_hf_layout.rs (target\debug\deps\interop_safetensors_hf_layout-4963a0ca962fd3dd.exe)
+
+running 12 tests
+test split_in_proj_huge_embed_dim_is_typed_error_not_overflow ... ok
+test in_proj_shape_mismatch_is_typed_error ... ok
+test duplicate_normalized_index_prefix_is_rejected_in_group_by_index_too ... ok
+test duplicate_normalized_index_prefix_is_rejected_not_silently_overwritten ... ok
+test unsupported_dtype_is_typed_error ... ok
+test unexpected_key_is_rejected_not_dropped ... ok
+test in_proj_rank1_weight_is_typed_error_not_panic ... ok
+test missing_keys_are_reported_in_full ... ok
+test head_weight_is_separated_via_allowlist ... ok
+test unexpected_prefixed_key_within_layer_is_rejected_not_dropped ... ok
+test synthetic_checkpoint_bytes_are_deterministic ... ok
+test hf_layout_roundtrip_restores_sequential_bit_exact ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\interop_safetensors_optimizer_state.rs (target\debug\deps\interop_safetensors_optimizer_state-ee2419739a6ceed0.exe)
+
+running 13 tests
+test adamax_state_dict_safetensors_bytes_roundtrip ... ok
+test adamw_empty_state_dict_safetensors_bytes_roundtrip ... ok
+test adagrad_state_dict_safetensors_bytes_roundtrip ... ok
+test adamw_state_dict_safetensors_bytes_roundtrip ... ok
+test adadelta_state_dict_safetensors_bytes_roundtrip ... ok
+test adam_state_dict_safetensors_bytes_roundtrip ... ok
+test lamb_state_dict_safetensors_bytes_roundtrip ... ok
+test nadam_state_dict_safetensors_bytes_roundtrip ... ok
+test radam_state_dict_safetensors_bytes_roundtrip ... ok
+test rmsprop_state_dict_safetensors_bytes_roundtrip ... ok
+test adamw_state_dict_safetensors_file_roundtrip ... ok
+test checkpoint_resume_at_step_zero_matches_uninterrupted_training ... ok
+test checkpoint_resume_via_safetensors_files_matches_uninterrupted_training ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests\interop_safetensors_roundtrip.rs (target\debug\deps\interop_safetensors_roundtrip-62febb62a78d4110.exe)
+
+running 12 tests
+test save_error_type_is_usable_via_facade ... ok
+test nonexistent_path_is_rejected_with_io_error ... ok
+test save_to_bytes_is_deterministic ... ok
+test corrupted_bytes_are_rejected_with_safetensors_format_error ... ok
+test dtype_mismatch_is_rejected_with_unsupported_dtype ... ok
+test no_implicit_transpose_on_roundtrip ... ok
+test missing_key_is_rejected_with_all_missing_keys_and_load_state_dict_is_atomic ... ok
+test special_float_values_survive_bytes_roundtrip_bit_exact ... ok
+test shape_mismatch_is_rejected_and_load_state_dict_is_atomic ... ok
+test state_dict_bytes_roundtrip_is_bit_exact ... ok
+test sequential_state_dict_roundtrip_via_safetensors_bytes_matches_predict_output ... ok
+test file_roundtrip_is_bit_exact_and_leaves_no_tmp_file ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\interpolate_backend_parity.rs (target\debug\deps\interpolate_backend_parity-2fae621e095ade41.exe)
+
+running 13 tests
+test cpu_interpolate_forward_matches_naive_reference ... ok
+test cpu_interpolate_bilinear_forward_matches_naive_reference ... ok
+test cuda_interpolate_bilinear_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_interpolate_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_interpolate_new_modes_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test interpolate_mode_new_variants_are_facade_reachable ... ok
+test cpu_interpolate_area_matches_naive_reference ... ok
+test cpu_interpolate_backward_matches_naive_reference ... ok
+test cpu_interpolate_linear_matches_naive_reference ... ok
+test cpu_interpolate_nearest_exact_matches_naive_reference ... ok
+test cpu_interpolate_bilinear_backward_matches_naive_reference ... ok
+test cpu_interpolate_trilinear_matches_naive_reference ... ok
+test cpu_interpolate_bicubic_matches_naive_reference ... ok
+
+test result: ok. 10 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\kv_cache_backend_parity.rs (target\debug\deps\kv_cache_backend_parity-6b14e394a5645f86.exe)
+
+running 3 tests
+test cuda_decode_cache_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_prefill_then_decode_matches_naive_reference ... ok
+test cpu_prefill_then_decode_matches_full_recompute_on_cpu_backend ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\linalg_facade.rs (target\debug\deps\linalg_facade-22ac7f74f2d917f2.exe)
+
+running 9 tests
+test facade_tape_reaches_cpu_backend_ops_linalg_inv_directly ... ok
+test cholesky_non_positive_definite_is_invalid_argument_on_cpu_production_path ... ok
+test det_matches_between_facade_and_naive_fallback ... ok
+test cholesky_matches_between_facade_and_naive_fallback ... ok
+test solve_matches_between_facade_and_naive_fallback ... ok
+test inv_matches_between_facade_and_naive_fallback ... ok
+test qr_matches_between_facade_and_naive_fallback ... ok
+test svd_matches_between_facade_and_naive_fallback ... ok
+test matrix_norm_matches_between_facade_and_naive_fallback_for_all_ord ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\linalg_ops_backend_parity.rs (target\debug\deps\linalg_ops_backend_parity-97faedf44ad88b53.exe)
+
+running 15 tests
+test cpu_eigh_singular_shape_is_invalid_argument ... ok
+test cpu_lstsq_row_mismatch_is_invalid_argument ... ok
+test cpu_matrix_rank_gradient_is_bit_exact_zero ... ok
+test cpu_matrix_rank_forward_is_bit_exact_vs_naive ... ok
+test cpu_eigh_forward_matches_naive_reference_within_tolerance ... ok
+test cpu_pinv_forward_matches_naive_reference_within_tolerance ... ok
+test cpu_lstsq_forward_matches_naive_reference_within_tolerance ... ok
+test cuda_eigh_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/linalg-ops-2150/README.md 参照
+test cpu_slogdet_forward_matches_naive_reference_within_tolerance ... ok
+test cuda_pinv_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/linalg-ops-2150/README.md 参照
+test cpu_slogdet_backward_matches_naive_reference_within_tolerance ... ok
+test cpu_slogdet_singular_is_invalid_argument_on_backward ... ok
+test cpu_eigh_backward_matches_naive_reference_within_tolerance ... ok
+test cpu_pinv_backward_matches_naive_reference_within_tolerance ... ok
+test cpu_lstsq_backward_matches_naive_reference_within_tolerance ... ok
+
+test result: ok. 13 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\loss_ops_backend_parity.rs (target\debug\deps\loss_ops_backend_parity-562c6dacc0d7b320.exe)
+
+running 15 tests
+test cpu_cross_entropy_loss_with_default_options_matches_existing_method_bit_exact ... ok
+test cuda_cosine_embedding_loss_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_cross_entropy_loss_with_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_ctc_loss_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_l1_loss_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_margin_ranking_loss_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_poisson_nll_loss_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_triplet_margin_loss_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cpu_poisson_nll_loss_forward_and_backward_match_naive_reference ... ok
+test cpu_margin_ranking_loss_forward_and_backward_match_naive_reference ... ok
+test cpu_cosine_embedding_loss_forward_and_backward_match_naive_reference ... ok
+test cpu_cross_entropy_loss_with_options_forward_and_backward_match_naive_reference ... ok
+test cpu_l1_loss_forward_and_backward_match_naive_reference ... ok
+test cpu_ctc_loss_forward_and_backward_match_naive_reference ... ok
+test cpu_triplet_margin_loss_forward_and_backward_match_naive_reference ... ok
+
+test result: ok. 8 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\matmul_checksum_readout.rs (target\debug\deps\matmul_checksum_readout-d7c69f9e9ac118e1.exe)
+
+running 1 test
+test matmul_checksum_reaches_cpu_backend_via_facade_tape ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\matrix_ops_backend_parity.rs (target\debug\deps\matrix_ops_backend_parity-919f6f0b8c20452c.exe)
+
+running 9 tests
+test cuda_bit_exact_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照
+test cuda_copy_ops_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照
+test cuda_outer_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照
+test cuda_reduce_ops_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-matrix-ops-2144/README.md 参照
+test cpu_forward_masked_positions_are_zero_and_nan_bits_preserved ... ok
+test cpu_reduce_ops_forward_matches_naive_reference_within_tolerance ... ok
+test cpu_outer_backward_matches_naive_reference_within_tolerance ... ok
+test cpu_copy_ops_forward_bit_matches_naive_reference ... ok
+test cpu_bit_exact_backward_matches_naive_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\memory_pool_api.rs (target\debug\deps\memory_pool_api-c84389e295e0f7b6.exe)
+
+running 3 tests
+test release_cached_memory_on_cuda_drains_pool_after_gemm ... ignored
+test memory_pool_stats_on_cpu_is_ok_none ... ok
+test release_cached_memory_on_cpu_is_ok ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\metal_infer_tape_build_fixedcost_diag.rs (target\debug\deps\metal_infer_tape_build_fixedcost_diag-8a489e9848bb5b38.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\metal_reuse_step_grad_bit_dump.rs (target\debug\deps\metal_reuse_step_grad_bit_dump-a5147fa7440c6ae1.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\metal_train_forward_encode_only_bit_identity.rs (target\debug\deps\metal_train_forward_encode_only_bit_identity-14ba2c257ccd5ae2.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\mha_backend_parity.rs (target\debug\deps\mha_backend_parity-8d9cfb5bbafefd75.exe)
+
+running 5 tests
+test cuda_forward_matches_cpu_causal ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_forward_matches_cpu_no_mask ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_forward_matches_naive_reference_causal_self_attention ... ok
+test cpu_forward_matches_naive_reference_no_mask ... ok
+test cpu_backward_matches_naive_reference_no_mask ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\mha_options_backend_parity.rs (target\debug\deps\mha_options_backend_parity-933fb9c11d3f17c3.exe)
+
+running 4 tests
+test cuda_forward_matches_cpu_asymmetric_kdim_vdim ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_forward_matches_naive_reference_key_padding_mask_with_causal ... ok
+test cpu_forward_matches_naive_reference_batch_first_false ... ok
+test cpu_forward_matches_naive_reference_asymmetric_kdim_vdim ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\mnist_amp_low_precision_parity.rs (target\debug\deps\mnist_amp_low_precision_parity-ff5ddf19c4fb2bc3.exe)
+
+running 2 tests
+test amp_bf16_matches_f32_within_req2_composite_tolerance ... ok
+test amp_f16_matches_f32_within_req2_composite_tolerance ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
+
+     Running tests\mnist_scale_train_reuse_bench.rs (target\debug\deps\mnist_scale_train_reuse_bench-c8b393119771f5b3.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\model_registry.rs (target\debug\deps\model_registry-896f0dc39fa55849.exe)
+
+running 8 tests
+test invalid_components_are_rejected_before_fs_access ... ok
+test cache_dir_returns_configured_root ... ok
+test available_models_on_missing_root_is_empty ... ok
+test load_missing_model_is_not_found ... ok
+test corrupted_file_is_reported_as_load_error ... FAILED
+test load_roundtrips_state_dict_bit_exact ... FAILED
+test available_models_lists_only_complete_entries_sorted ... FAILED
+test model_error_is_std_error_with_source ... ok
+
+failures:
+
+---- corrupted_file_is_reported_as_load_error stdout ----
+
+thread 'corrupted_file_is_reported_as_load_error' (5720) panicked at crates\facade\tests\model_registry.rs:202:18:
+Load エラーを期待したが Err(Io(Custom { kind: Unsupported, error: "このプラットフォームでは葉ファイルのシンボリックリンク追跡なし オープンを実装していないため、TOCTOU 対策として fail-closed で オープンを拒否します（Linux／macOS のみ対応）" })) だった
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- load_roundtrips_state_dict_bit_exact stdout ----
+
+thread 'load_roundtrips_state_dict_bit_exact' (5940) panicked at crates\facade\tests\model_registry.rs:71:45:
+called `Result::unwrap()` on an `Err` value: Io(Custom { kind: Unsupported, error: "このプラットフォームでは葉ファイルのシンボリックリンク追跡なし オープンを実装していないため、TOCTOU 対策として fail-closed で オープンを拒否します（Linux／macOS のみ対応）" })
+
+---- available_models_lists_only_complete_entries_sorted stdout ----
+
+thread 'available_models_lists_only_complete_entries_sorted' (5212) panicked at crates\facade\tests\model_registry.rs:124:5:
+assertion `left == right` failed
+  left: []
+ right: [("a", ["x"]), ("b", ["1", "2"])]
+
+
+failures:
+    available_models_lists_only_complete_entries_sorted
+    corrupted_file_is_reported_as_load_error
+    load_roundtrips_state_dict_bit_exact
+
+test result: FAILED. 5 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p fandhe-ai --test model_registry`
+     Running tests\mse_backward_bench.rs (target\debug\deps\mse_backward_bench-7952181c62669e13.exe)
+
+running 1 test
+test mse_backward_cases ... ignored, 実機実測専用（FANDHE_BENCH_DEVICE で対象デバイス指定。イシュー #1692）
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\nll_kl_div_backend_parity.rs (target\debug\deps\nll_kl_div_backend_parity-d5c5cfa7ed8cbf9d.exe)
+
+running 8 tests
+test cuda_kl_div_loss_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない
+test cuda_kl_div_loss_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない
+test cuda_nll_loss_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない
+test cpu_kl_div_loss_with_log_target_matches_naive_reference ... ok
+test cpu_nll_loss_matches_naive_reference ... ok
+test cpu_nll_loss_backward_matches_naive_reference ... ok
+test cpu_kl_div_loss_matches_naive_reference ... ok
+test cpu_kl_div_loss_backward_matches_naive_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\nn_containers.rs (target\debug\deps\nn_containers-6926abc82a5e99ad.exe)
+
+running 8 tests
+test accessors_conversions_and_dyn_nesting ... ok
+test set_training_propagates_and_push_does_not_sync ... ok
+test nested_containers_use_nested_prefix_and_route_set_parameter ... ok
+test set_parameter_is_fail_closed_and_state_unchanged ... ok
+test empty_containers ... ok
+test state_dict_uses_index_prefix_and_roundtrips ... ok
+test load_state_dict_is_fail_closed ... ok
+test sequential_add_and_push_match_hand_composition ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\nn_conv_backend_parity.rs (target\debug\deps\nn_conv_backend_parity-7f916ddf9971f292.exe)
+
+running 8 tests
+test cuda_sequential_conv1d_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1771 へ引き継ぎ
+test cuda_sequential_conv1d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1771 へ引き継ぎ
+test cuda_sequential_conv1d_matches_manual_reshape_conv2d_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1771 へ引き継ぎ
+test cuda_sequential_conv2d_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1771 へ引き継ぎ
+test cuda_sequential_conv2d_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1771 へ引き継ぎ
+test cuda_sequential_conv2d_sgd_steps_record_only ... ignored, CUDA 実機（DGX Spark GB10 等）必須。実行は #1771 へ引き継ぎ。record-only（ADOPT／REJECT 非対象）
+test cpu_sequential_conv2d_predict_matches_naive_conv2d_layer ... ok
+test cpu_sequential_conv2d_backward_matches_naive_conv2d_layer ... ok
+
+test result: ok. 2 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\nn_module_children_mut_rollback.rs (target\debug\deps\nn_module_children_mut_rollback-7b083de1d04e2d2a.exe)
+
+running 19 tests
+test builtin_containers_children_mut_matches_children ... ok
+test different_child_object_with_same_name_is_rejected_before_any_mutation ... ok
+test inconsistent_children_mut_names_are_rejected_before_any_mutation ... ok
+test module_dict_restores_user_composite_per_leaf_after_later_failure ... ok
+test module_list_restores_user_composite_per_leaf_after_later_failure ... ok
+test composite_failing_inside_restores_its_own_partial_leaves ... ok
+test children_only_composite_is_rejected_before_any_mutation ... ok
+test restore_detects_child_swapped_during_own_setter_post_check ... ok
+test restore_does_not_call_own_setter_when_child_swapped_during_freeze ... ok
+test rollback_detects_child_swapped_during_freeze ... ok
+test restore_does_not_call_setter_on_leaf_that_grew_children ... ok
+test same_size_different_type_swap_is_detected_on_restore ... ok
+test same_size_different_type_swap_is_rejected_by_precheck ... ok
+test same_type_same_slot_replacement_is_restored_by_position ... ok
+test sequential_restores_two_level_nested_user_composite_per_leaf ... ok
+test slot_variants_share_size_and_address ... ok
+test success_propagates_to_every_leaf_and_aggregates ... ok
+test module_list_restores_composite_own_flag_leaves_and_forward_tracking ... ok
+test sequential_and_dict_restore_composite_own_flag_after_failure ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\nn_module_dict_summary.rs (target\debug\deps\nn_module_dict_summary-6a81f43cd52cfd77.exe)
+
+running 14 tests
+test set_training_propagates_and_own_flag_wins ... ok
+test preserves_insertion_order_and_replaces_in_place ... ok
+test rejects_invalid_keys_without_mutation ... ok
+test set_parameter_routes_by_key_and_fails_closed ... ok
+test forward_is_rejected ... ok
+test summary_dedups_shared_child_to_first_path ... ok
+test nests_in_sequential_and_works_via_dyn ... ok
+test state_dict_roundtrip_is_bit_exact_and_strict ... ok
+test summary_empty_dict_is_leaf ... ok
+test summary_keeps_repeated_zst_children ... ok
+test summary_leaf_root ... ok
+test summary_strips_generics ... ok
+test summary_nested_format_is_fixed ... ok
+test summary_terminates_on_cycle ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\nn_module_freeze_backend_parity.rs (target\debug\deps\nn_module_freeze_backend_parity-d848b197072d4484.exe)
+
+running 2 tests
+test cuda_freeze_linear_output_and_input_grad_match_unfrozen ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_freeze_linear_output_and_input_grad_match_unfrozen ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\nn_module_introspection.rs (target\debug\deps\nn_module_introspection-4cf6b0663b55401e.exe)
+
+running 11 tests
+test leaf_defaults_are_empty ... ok
+test module_list_children_names ... ok
+test indirect_cycle_terminates ... ok
+test multiple_zst_layers_are_not_dropped ... ok
+test offset_zero_first_child_is_not_dropped ... ok
+test nested_enumeration_order ... ok
+test parameter_count_sums_numel ... ok
+test dyn_dispatch_and_type_name ... ok
+test paths_join_with_named_parameters ... ok
+test self_cycle_terminates_empty ... ok
+test shared_child_is_listed_once ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\nn_module_requires_grad.rs (target\debug\deps\nn_module_requires_grad-5e9be32372bed61b.exe)
+
+running 4 tests
+test default_is_fail_closed_for_parameterized_layers ... ok
+test freeze_is_independent_of_training_and_state_dict ... ok
+test freeze_takes_effect_from_next_forward_only ... ok
+test freeze_keeps_forward_and_dx_bit_identical_and_disables_param_grads ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\nn_module_trait.rs (target\debug\deps\nn_module_trait-e81c2c94bb028943.exe)
+
+running 8 tests
+test mode_dependent_layer_overrides_via_dyn ... ok
+test state_dict_roundtrip ... ok
+test stateless_defaults ... ok
+test rollback_failure_reports_partial_application ... ok
+test load_state_dict_rolls_back_applied_keys ... ok
+test load_state_dict_is_fail_closed_and_state_unchanged ... ok
+test dyn_module_is_usable ... ok
+test forward_backward_matches_hand_composition ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\nn_module_user_defined.rs (target\debug\deps\nn_module_user_defined-d4acf801a138cd11.exe)
+
+running 4 tests
+test set_training_propagates_through_nested_sequential ... ok
+test leaf_mapping_matches_hand_composition_bit_exact ... ok
+test state_dict_roundtrip_restores_trained_model_bit_exact ... ok
+test user_defined_block_trains_via_facade_nn_sequential ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests\nn_rnn_facade_bit_identity.rs (target\debug\deps\nn_rnn_facade_bit_identity-fb0f0b37cf135ae8.exe)
+
+running 6 tests
+test cuda_rnn_backward_dweight_ih_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_rnn_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test rnn_forward_seq_no_bias_facade_matches_reference_bit_exact ... ok
+test rnn_forward_seq_facade_matches_reference_bit_exact ... ok
+test gru_forward_seq_facade_matches_reference_bit_exact ... ok
+test lstm_forward_seq_facade_matches_reference_bit_exact ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\no_grad_detach_backend_parity.rs (target\debug\deps\no_grad_detach_backend_parity-ab18299d6b16ef40.exe)
+
+running 3 tests
+test cuda_detach_weight_grad_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_detach_weight_grad_matches_naive_reference ... ok
+test cpu_var_no_grad_weight_grad_matches_naive_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\norm_backend_parity.rs (target\debug\deps\norm_backend_parity-0bf40a9d5366aacb.exe)
+
+running 8 tests
+test cuda_layer_norm_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_layer_norm_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_rms_norm_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_rms_norm_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_rms_norm_forward_matches_naive_reference ... ok
+test cpu_layer_norm_forward_matches_naive_reference ... ok
+test cpu_rms_norm_backward_matches_naive_reference ... ok
+test cpu_layer_norm_backward_matches_naive_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\optim_amp_low_precision_fit.rs (target\debug\deps\optim_amp_low_precision_fit-3422d6a3f226562b.exe)
+
+running 1 test
+test amp_f16_fit_converges_via_facade_only ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\optim_amp_train_loop.rs (target\debug\deps\optim_amp_train_loop-31337b537f09e2a8.exe)
+
+running 3 tests
+test amp_non_finite_step_is_skipped_and_scaler_backs_off ... ok
+test amp_one_step_grads_match_non_amp_bit_exact_on_cpu ... ok
+test sgd_with_amp_and_clip_converges_via_facade_only ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests\optim_lbfgs_closure.rs (target\debug\deps\optim_lbfgs_closure-519cd2f42f30adbb.exe)
+
+running 1 test
+test lbfgs_closure_over_facade_tape_converges ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\optim_reduce_lr_on_plateau.rs (target\debug\deps\optim_reduce_lr_on_plateau-34d53c1d34de56d0.exe)
+
+running 1 test
+test reduce_lr_on_plateau_drives_sgd_config_via_facade_only ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\optim_train_loop.rs (target\debug\deps\optim_train_loop-7ca1eba3e3eee67f.exe)
+
+running 11 tests
+test clip_before_step_order_contract_is_documented_and_effective ... ok
+test lr_scheduler_drives_sgd_config_via_facade_only ... ok
+test one_cycle_lr_scheduler_drives_sgd_config_via_facade_only ... ok
+test cosine_annealing_lr_scheduler_drives_sgd_config_via_facade_only ... ok
+test adamw_with_clip_converges_via_facade_only ... ok
+test adam_with_clip_converges_via_facade_only ... ok
+test lamb_with_clip_converges_via_facade_only ... ok
+test sgd_with_clip_converges_via_facade_only ... ok
+test sgd_with_clip_value_converges_via_facade_only ... ok
+test adagrad_with_clip_converges_via_facade_only ... ok
+test rmsprop_with_clip_converges_via_facade_only ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests\pixel_shuffle_backend_parity.rs (target\debug\deps\pixel_shuffle_backend_parity-bc86a061ca46edb3.exe)
+
+running 6 tests
+test cuda_pixel_shuffle_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_pixel_unshuffle_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_pixel_shuffle_forward_bit_exact_vs_naive ... ok
+test cpu_pixel_unshuffle_forward_bit_exact_vs_naive ... ok
+test cpu_pixel_shuffle_backward_bit_exact_vs_naive ... ok
+test cpu_pixel_unshuffle_backward_bit_exact_vs_naive ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\pooling_backend_parity.rs (target\debug\deps\pooling_backend_parity-a5f21d1b739e3dec.exe)
+
+running 8 tests
+test cuda_adaptive_avg_pool2d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_avg_pool2d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cuda_max_pool2d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10）依存。CI では実行しない
+test cpu_avg_pool2d_forward_matches_naive_reference ... ok
+test cpu_max_pool2d_forward_matches_naive_reference ... ok
+test cpu_avg_pool2d_backward_matches_naive_reference ... ok
+test cpu_adaptive_avg_pool2d_forward_and_backward_matches_naive_reference ... ok
+test cpu_max_pool2d_backward_matches_naive_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\predict_device_chain_cpu_bit_exact.rs (target\debug\deps\predict_device_chain_cpu_bit_exact-13562858def6a14a.exe)
+
+running 3 tests
+test bits_vec_distinguishes_signed_zero ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_no_activation_fusion ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_relu_fusion ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\predict_device_chain_cuda_bit_identity.rs (target\debug\deps\predict_device_chain_cuda_bit_identity-a25264336416ce11.exe)
+
+running 7 tests
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test predict_resident_bit_dump_cuda ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test predict_resident_matches_cpu_reference_on_cuda ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test bench_common_xorshift64_star_matches_upstream_bit_exact ... ok
+test bits_vec_distinguishes_signed_zero ... ok
+
+test result: ok. 2 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\predict_device_chain_cuda_graph_bit_identity.rs (target\debug\deps\predict_device_chain_cuda_graph_bit_identity-63c00a628c98dbef.exe)
+
+running 3 tests
+test predict_resident_bit_dump_cuda_graph_batch_1024 ... ignored, CUDA 実機（DGX Spark GB10 等）必須。--exact で単独実行（OFF/ON の 2 プロセス）
+test predict_resident_bit_dump_cuda_graph_batch_4096 ... ignored, CUDA 実機（DGX Spark GB10 等）必須。--exact で単独実行（OFF/ON の 2 プロセス）
+test predict_resident_bit_dump_cuda_graph_batch_64 ... ignored, CUDA 実機（DGX Spark GB10 等）必須。--exact で単独実行（OFF/ON の 2 プロセス）
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rearrange_ops_backend_parity.rs (target\debug\deps\rearrange_ops_backend_parity-5c783403bc802070.exe)
+
+running 7 tests
+test cuda_flip_roll_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照
+test cuda_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照
+test cuda_repeat_tile_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照
+test cpu_forward_preserves_nan_bits ... ok
+test cpu_forward_matches_naive_reference ... ok
+test cpu_flip_roll_backward_bit_matches_naive_reference ... ok
+test cpu_repeat_tile_backward_matches_naive_reference_within_tolerance ... ok
+
+test result: ok. 4 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\reduce_backend_parity.rs (target\debug\deps\reduce_backend_parity-98b1e81cc42d31b0.exe)
+
+running 11 tests
+test cpu_min_all_forward_and_backward_match_analytic_values ... ok
+test cpu_max_all_forward_and_backward_match_analytic_values ... ok
+test cpu_sum_all_forward_and_backward_match_analytic_values ... ok
+test cpu_sum_axis_forward_and_backward_match_analytic_values ... ok
+test cpu_min_axis_forward_and_backward_match_analytic_values ... ok
+test cpu_argmax_and_argmin_match_analytic_values ... ok
+test cpu_mean_matches_reduction_mean_bit_exact ... ok
+test cpu_max_axis_forward_and_backward_match_analytic_values ... ok
+test cuda_sum_and_max_forward_and_backward_match_cpu_tape_on_real_device ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_sum_max_mean_dims_forward_and_backward_match_cpu_tape_on_real_device ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_sum_max_mean_dims_match_analytic_values ... ok
+
+test result: ok. 9 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\reduce_ops_backend_parity.rs (target\debug\deps\reduce_ops_backend_parity-2e39a0ec3b8b5c9e.exe)
+
+running 10 tests
+test cuda_any_all_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/reduce-ops-2147/README.md 参照
+test cuda_any_all_gradient_is_bit_exact_zero ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/reduce-ops-2147/README.md 参照
+test cuda_prod_logsumexp_norm_p_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/reduce-ops-2147/README.md 参照
+test cuda_prod_logsumexp_norm_p_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/reduce-ops-2147/README.md 参照
+test cpu_norm_p_two_rejects_huge_broadcast_before_delegating ... ok
+test cpu_prod_logsumexp_norm_p_forward_matches_naive_reference_within_tolerance ... ok
+test cpu_prod_logsumexp_norm_p_backward_matches_naive_reference_within_tolerance ... ok
+test cpu_any_all_gradient_is_bit_exact_zero ... ok
+test cpu_any_all_forward_bit_matches_naive_reference ... ok
+test cpu_logsumexp_vector_norm_p_forward_bit_matches_naive_reference_across_chunk_boundary ... ok
+
+test result: ok. 6 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\rng_tensor_generation.rs (target\debug\deps\rng_tensor_generation-4fcc574126251961.exe)
+
+running 5 tests
+test randn_upload_to_cuda_tape_round_trips ... ignored, 実機（CUDA）依存。DGX Spark GB10 等で手動実行する
+test manual_seed_then_randn_rand_randint_are_deterministic_via_facade ... ok
+test randint_output_is_usable_as_index_select_index ... ok
+test randint_rejects_invalid_range_via_facade ... ok
+test randn_upload_to_cpu_tape_is_bit_identical_and_sum_matches_host_computation ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\rnn_stacked_backend_parity.rs (target\debug\deps\rnn_stacked_backend_parity-3ab0199e8318f444.exe)
+
+running 4 tests
+test cuda_stacked_rnn_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_stacked_lstm_forward_matches_naive_reference ... ok
+test cpu_stacked_gru_forward_matches_naive_reference ... ok
+test cpu_stacked_rnn_forward_and_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\scalar_ops_backend_parity.rs (target\debug\deps\scalar_ops_backend_parity-7f0b2f6a9f6e677c.exe)
+
+running 14 tests
+test cpu_sqrt_forward_matches_naive_reference_bit_exact ... ok
+test cpu_div_forward_matches_naive_reference_bit_exact ... ok
+test cpu_clamp_forward_matches_naive_reference_bit_exact ... ok
+test cpu_sub_forward_matches_naive_reference_bit_exact ... ok
+test cpu_pow_forward_matches_naive_reference ... ok
+test cpu_comparisons_forward_match_naive_reference_bit_exact ... ok
+test cuda_clamp_forward_matches_cpu_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_comparisons_forward_match_cpu_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_div_forward_matches_cpu_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_pow_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_sqrt_forward_matches_cpu_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_sub_forward_matches_cpu_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_scalar_ops_backward_matches_naive_reference_with_broadcast ... ok
+test cpu_clamp_and_comparison_backward_matches_naive_reference ... ok
+
+test result: ok. 8 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\scalar_unary_ops_backend_parity.rs (target\debug\deps\scalar_unary_ops_backend_parity-fa5442a2191ad5a9.exe)
+
+running 4 tests
+test cuda_backward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/scalar-unary-ops-2145/README.md 参照
+test cuda_forward_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/scalar-unary-ops-2145/README.md 参照
+test cpu_forward_matches_naive_reference ... ok
+test cpu_backward_matches_naive_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\scalar_unary_transcendental_backend_parity.rs (target\debug\deps\scalar_unary_transcendental_backend_parity-9f640c27f20b42c3.exe)
+
+running 12 tests
+test cpu_abs_forward_matches_naive_reference ... ok
+test cpu_log_forward_matches_naive_reference ... ok
+test cpu_cos_forward_matches_naive_reference ... ok
+test cpu_log10_forward_matches_naive_reference ... ok
+test cpu_neg_forward_matches_naive_reference ... ok
+test cpu_log2_forward_matches_naive_reference ... ok
+test cpu_sin_forward_matches_naive_reference ... ok
+test cuda_abs_and_neg_forward_matches_cpu_bit_exact ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_log_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_sin_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_tan_forward_matches_naive_reference ... ok
+test cpu_matmul_log_backward_matches_naive_reference ... ok
+
+test result: ok. 9 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\scan_ops_backend_parity.rs (target\debug\deps\scan_ops_backend_parity-50675455469c03ca.exe)
+
+running 2 tests
+test cpu_cumsum_forward_and_backward_match_analytic_values ... ok
+test cpu_cumprod_forward_and_backward_match_analytic_values ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\shape_ops_backend_parity.rs (target\debug\deps\shape_ops_backend_parity-53ed66e1e79c7322.exe)
+
+running 5 tests
+test cuda_permute_matmul_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_squeeze_unsqueeze_flatten_matches_naive_reference ... ok
+test cpu_permute_matmul_forward_matches_naive_reference ... ok
+test cpu_broadcast_to_add_matches_naive_reference ... ok
+test cpu_permute_matmul_backward_matches_naive_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\softmax_backend_parity.rs (target\debug\deps\softmax_backend_parity-bfea55a62e98b61a.exe)
+
+running 6 tests
+test cuda_log_softmax_backward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_log_softmax_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_softmax_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_softmax_forward_matches_naive_reference ... ok
+test cpu_log_softmax_forward_matches_naive_reference ... ok
+test cpu_softmax_backward_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\sort_topk_backend_parity.rs (target\debug\deps\sort_topk_backend_parity-f553e52a535b6b38.exe)
+
+running 5 tests
+test cuda_sort_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_topk_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_argsort_matches_naive_reference ... ok
+test cpu_sort_matches_naive_reference ... ok
+test cpu_topk_matches_naive_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\spatial_layers_backend_parity.rs (target\debug\deps\spatial_layers_backend_parity-69d4606ab6484ed3.exe)
+
+running 9 tests
+test cuda_conv_transpose1d_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_upsample_bilinear_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_identity_forward_bit_exact_vs_naive ... ok
+test cpu_unflatten_forward_bit_exact_vs_naive ... ok
+test cpu_zero_pad2d_forward_bit_exact_vs_naive ... ok
+test cpu_upsample_nearest_forward_bit_exact_vs_naive ... ok
+test cpu_upsample_bilinear_forward_matches_naive_reference ... ok
+test cpu_conv_transpose1d_forward_matches_naive_reference ... ok
+test cpu_conv_transpose1d_backward_matches_naive_reference ... ok
+
+test result: ok. 7 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\tape_arena_bit_identity.rs (target\debug\deps\tape_arena_bit_identity-25a8a2a4987aface.exe)
+
+running 4 tests
+test arena_is_default_off ... ok
+test fresh_tape_per_step_is_bit_identical ... ok
+test reset_same_tape_is_bit_identical ... ok
+test checkpoint_is_bit_identical ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\tape_construction.rs (target\debug\deps\tape_construction-501bbd7f12a74cc0.exe)
+
+running 6 tests
+test default_tape_forward_backward_succeeds ... ok
+test tape_for_cpu_succeeds_and_matches_default_semantics ... ok
+test tape_for_cuda_out_of_range_ordinal_returns_err ... ok
+test tape_for_cuda_out_of_range_ordinal_repeated_calls_stay_err ... ok
+test tape_for_cuda_adapts_to_runtime_availability ... ok
+test tape_for_cuda_repeated_calls_are_fail_fast_and_do_not_cache_errors ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests\tape_cuda_cache_bench.rs (target\debug\deps\tape_cuda_cache_bench-689574b07749ea30.exe)
+
+running 1 test
+test tape_for_cuda_second_call_avoids_reinitialization_cost ... ignored, CUDA 実機必須。イシュー #929 受け入れ条件 1（cold/warm 初期化コスト比較）
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\tape_matmul_cpu_bit_exact.rs (target\debug\deps\tape_matmul_cpu_bit_exact-acde1bb919ed8a63.exe)
+
+running 3 tests
+test large_square_shapes_facade_matmul_bit_exact ... ignored, release ビルドでの実機実行専用（大形状 GEMM は debug では低速）
+test small_shapes_facade_matmul_bit_exact ... ok
+test threshold_boundary_low_k_facade_matmul_bit_exact ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests\tape_ref.rs (target\debug\deps\tape_ref-f746e837167098be.exe)
+
+running 5 tests
+test traits_and_into ... ok
+test mixed_leaves_on_one_tape_share_backward ... ok
+test var_from_backward_is_bit_identical ... ok
+test var_backward_is_bit_identical ... ok
+test var_no_grad_has_no_gradient_and_grad_leaf_matches ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\tape_reuse.rs (target\debug\deps\tape_reuse-703eb7a0ae1848f0.exe)
+
+running 4 tests
+test cuda_gemm_reuse_vs_fresh_n512_1024_2048 ... ignored, CUDA 実機必須。イシュー #1048 受け入れ条件 R2 の実機側計測
+test facade_tape_reset_keeps_leaf_prefix ... ok
+test cpu_gemm_reuse_matches_fresh_bit_exact_n256 ... ok
+test cpu_gemm_reuse_is_not_drastically_slower_than_fresh_n256 ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests\tensor_display.rs (target\debug\deps\tensor_display-260a1d726075f90d.exe)
+
+running 5 tests
+test display_and_debug_reachable_via_facade ... ok
+test truncation_bounds_output_for_large_tensor_via_facade ... ok
+test view_transpose_display_matches_contiguous_via_facade ... ok
+test truncation_bounds_output_when_no_single_axis_exceeds_edge_items_via_facade ... ok
+test extreme_rank_does_not_overflow_stack_via_facade ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\topk_unique_ops_backend_parity.rs (target\debug\deps\topk_unique_ops_backend_parity-bfb545f57bf60051.exe)
+
+running 7 tests
+test cuda_topk_sorted_false_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/topk-unique-2153/README.md 参照
+test cuda_unique_with_options_matches_cpu_reference ... ignored, CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/topk-unique-2153/README.md 参照
+test cpu_unique_with_options_dim_none_bit_matches_naive_reference ... ok
+test cpu_unique_consecutive_bit_matches_naive_reference ... ok
+test cpu_unique_with_options_dim_specified_bit_matches_naive_reference ... ok
+test cpu_topk_sorted_false_negative_dim_forward_bit_matches_naive_reference ... ok
+test cpu_topk_sorted_false_gradient_bit_matches_naive_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\train_step_fusion_bench.rs (target\debug\deps\train_step_fusion_bench-58038ace0912a513.exe)
+
+running 1 test
+test train_step_epilogue_fusion_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.96s
+
+     Running tests\transformer_decoder_backend_parity.rs (target\debug\deps\transformer_decoder_backend_parity-6e39e249f52d24b3.exe)
+
+running 4 tests
+test cuda_transformer_decoder_layer_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cuda_transformer_forward_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_transformer_decoder_layer_forward_and_backward_matches_naive_reference ... ok
+test cpu_transformer_forward_matches_naive_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\unique_backend_parity.rs (target\debug\deps\unique_backend_parity-bdd2299fcf20b928.exe)
+
+running 3 tests
+test cuda_unique_matches_cpu ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test facade_unique_output_shape_is_bounded_by_input_numel ... ok
+test cpu_unique_matches_naive_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\var_f64_autograd_backend_parity.rs (target\debug\deps\var_f64_autograd_backend_parity-f729392a8f2c5183.exe)
+
+running 2 tests
+test cuda_f64_autograd_forward_and_grad_match_host_reference ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_f64_autograd_forward_and_grad_match_host_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\var_norm_backend_parity.rs (target\debug\deps\var_norm_backend_parity-0cdf2d7ce40aa8ad.exe)
+
+running 8 tests
+test cuda_var_and_norm_forward_and_backward_match_cpu_tape_on_real_device ... ignored, CUDA 実機（DGX Spark GB10 等）必須
+test cpu_norm_l2_rejects_huge_broadcast_before_dispatch ... ok
+test cpu_var_std_reject_huge_broadcast_before_dispatch ... ok
+test cpu_std_all_forward_matches_analytic_value ... ok
+test cpu_var_all_forward_matches_analytic_value ... ok
+test cpu_norm_l1_all_forward_and_backward_match_analytic_values ... ok
+test cpu_norm_l2_all_forward_and_backward_match_analytic_values ... ok
+test cpu_var_axis_forward_and_backward_match_analytic_values ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests fandhe_ai
+
+running 46 tests
+test crates\facade\src\interop\onnx.rs - interop::onnx::OnnxExternalDataLimits (line 476) - compile ... ok
+test crates\facade\src\lib.rs - CallbacksLoggersHoldDoctestGuard (line 5001) ... ok
+test crates\facade\src\lib.rs - DataHooksHoldDoctestGuard (line 5266) ... ok
+test crates\facade\src\interop\safetensors.rs - interop::safetensors (line 61) ... ok
+test crates\facade\src\compat\sequential.rs - compat::sequential (line 38) ... ok
+test crates\facade\src\lib.rs - AdaptiveMaxGlobalPoolHoldDoctestGuard (line 3481) ... ok
+test crates\facade\src\lib.rs - DeterminismHoldDoctestGuard (line 3018) ... ok
+test crates\facade\src\lib.rs - CompileLossVariantsHoldDoctestGuard (line 4913) ... ok
+test crates\facade\src\lib.rs - DropoutEmbeddingBagHoldDoctestGuard (line 3596) ... ok
+test crates\facade\src\lib.rs - EmaHoldDoctestGuard (line 4812) ... ok
+test crates\facade\src\lib.rs - FitWeightingHoldDoctestGuard (line 5085) ... ok
+test crates\facade\src\lib.rs - GenerateHoldDoctestGuard (line 5663) ... ok
+test crates\facade\src\lib.rs - GradAccumulationHoldDoctestGuard (line 5198) ... ok
+test crates\facade\src\lib.rs - LbfgsHoldDoctestGuard (line 4740) ... ok
+test crates\facade\src\lib.rs - KvCacheHoldDoctestGuard (line 2013) ... ok
+test crates\facade\src\lib.rs - LossOpsHoldDoctestGuard (line 4130) ... ok
+test crates\facade\src\lib.rs - LrSchedulerExtHoldDoctestGuard (line 4666) ... ok
+test crates\facade\src\lib.rs - MhaOptionsHoldDoctestGuard (line 3735) ... ok
+test crates\facade\src\lib.rs - ModelIoHoldDoctestGuard (line 5575) ... ok
+test crates\facade\src\lib.rs - NpyIoHoldDoctestGuard (line 5468) ... ok
+test crates\facade\src\lib.rs - OptimizerExtHoldDoctestGuard (line 4437) ... ok
+test crates\facade\src\lib.rs - OptimizerStateDictHoldDoctestGuard (line 4515) ... ok
+test crates\facade\src\lib.rs - ParamGroupsHoldDoctestGuard (line 4291) ... ok
+test crates\facade\src\lib.rs - PredictBatchesHoldDoctestGuard (line 5769) ... ok
+test crates\facade\src\lib.rs - PixelShuffleHoldDoctestGuard (line 3936) ... ok
+test crates\facade\src\lib.rs - RngDistributionsHoldDoctestGuard (line 3104) ... ok
+test crates\facade\src\lib.rs - RnnConfigHoldDoctestGuard (line 3808) ... ok
+test crates\facade\src\lib.rs - SpatialLayersHoldDoctestGuard (line 3204) ... ok
+test crates\facade\src\lib.rs - TrainStepHoldDoctestGuard (line 5373) ... ok
+test crates\facade\src\lib.rs - TransformerDecoderHoldDoctestGuard (line 4048) ... ok
+test crates\facade\src\lib.rs - VarActivationOpsHoldDoctestGuard (line 2458) ... ok
+test crates\facade\src\lib.rs - VarBoolOpsHoldDoctestGuard (line 1439) ... ok
+test crates\facade\src\lib.rs - VarCustomHoldDoctestGuard (line 1337) ... ok
+test crates\facade\src\lib.rs - VarConv3dHoldDoctestGuard (line 3363) ... ok
+test crates\facade\src\lib.rs - VarEinsumBatchHoldDoctestGuard (line 2611) ... ok
+test crates\facade\src\lib.rs - VarHooksHoldDoctestGuard (line 1872) ... ok
+test crates\facade\src\lib.rs - VarExtremumOpsHoldDoctestGuard (line 2916) ... ok
+test crates\facade\src\lib.rs - VarIndexingOpsHoldDoctestGuard (line 2702) ... ok
+test crates\facade\src\lib.rs - VarLinalgOpsHoldDoctestGuard (line 2328) ... ok
+test crates\facade\src\lib.rs - VarMatrixOpsHoldDoctestGuard (line 2084) ... ok
+test crates\facade\src\lib.rs - VarRearrangeOpsHoldDoctestGuard (line 1609) ... ok
+test crates\facade\src\lib.rs - VarReduceOpsHoldDoctestGuard (line 2208) ... ok
+test crates\facade\src\lib.rs - VarScalarUnaryOpsHoldDoctestGuard (line 1723) ... ok
+test crates\facade\src\lib.rs - VarTopkUniqueOpsHoldDoctestGuard (line 2809) ... ok
+test crates\facade\src\lib.rs - data (line 147) ... ok
+test crates\facade\src\nn\rnn.rs - nn::rnn (line 59) ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+all doctests ran in 3.06s; merged doctests compilation took 2.59s
+error: 3 targets failed:
+    `-p fandhe-ai --lib`
+    `-p fandhe-ai --test api_surface`
+    `-p fandhe-ai --test model_registry`

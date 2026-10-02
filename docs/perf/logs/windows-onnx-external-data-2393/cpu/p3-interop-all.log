@@ -1,0 +1,949 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+   Compiling fandhe-ai-onnx-interop v0.9.0 (C:\work\src\crates\onnx-interop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.47s
+     Running unittests src\lib.rs (target\debug\deps\fandhe_ai_onnx_interop-52b45d2cb63ad012.exe)
+
+running 344 tests
+test onnx::external_data::alloc_tests::alloc_region_buf_rejects_lengths_beyond_isize_max_before_allocating ... ok
+test onnx::external_data::alloc_tests::try_alloc_vec_reports_capacity_overflow_as_allocation_failed ... ok
+test onnx::export::alloc_tests::encode_le_reports_unallocatable_length ... ok
+test onnx::external_data::alloc_tests::read_region_short_read_is_unexpected_eof ... ok
+test onnx::export::alloc_tests::encode_tensor_raw_data_matches_previous_serialization ... ok
+test onnx::external_data::alloc_tests::try_decode_matches_decode_tensor_for_all_dtypes ... ok
+test onnx::export::alloc_tests::try_encode_model_matches_encode_model ... ok
+test onnx::external_data::alloc_tests::try_decode_rejects_partial_element_as_internal ... ok
+test onnx::external_data::overlap_tests::adjacent_regions_sharing_one_byte_overlap ... ok
+test onnx::external_data::overlap_tests::adjacent_touching_regions_do_not_overlap ... ok
+test onnx::external_data::overlap_tests::containing_region_is_detected ... ok
+test onnx::external_data::overlap_tests::same_offset_regions_are_reported_deterministically ... ok
+test onnx::external_data::overlap_tests::unsorted_input_is_judged_by_position ... ok
+test onnx::external_data::overlap_tests::zero_length_regions_are_excluded ... ok
+test onnx::external_data::windows_lexical_tests::alternate_data_stream_is_rejected ... ok
+test onnx::external_data::windows_lexical_tests::forbidden_characters_are_rejected ... ok
+test onnx::external_data::windows_lexical_tests::ordinary_names_are_accepted ... ok
+test onnx::external_data::windows_lexical_tests::reserved_device_names_are_rejected ... ok
+test onnx::external_data::windows_lexical_tests::trailing_dot_or_space_is_rejected ... ok
+test onnx::fallible_alloc::tests::attr_tensor_label_matches_loader_naming ... ok
+test onnx::fallible_alloc::tests::try_alloc_vec_reports_unallocatable_request ... ok
+test onnx::fallible_alloc::tests::try_clone_nodes_equals_clone ... ok
+test onnx::fallible_alloc::tests::try_clone_slice_matches_to_vec_with_exact_capacity ... ok
+test onnx::fallible_alloc::tests::try_decode_tensor_matches_decode_tensor ... ok
+test onnx::interp::tests::attr_helpers_fall_back_to_default_when_absent ... ok
+test onnx::external_data::alloc_tests::read_region_fills_exact_capacity_without_realloc ... ok
+test onnx::interp::tests::compute_average_pool_i64_input_rejected ... ok
+test onnx::interp::tests::compute_average_pool_default_count_include_pad_is_zero ... ok
+test onnx::interp::tests::compute_average_pool_missing_kernel_shape_rejected ... ok
+test onnx::interp::tests::compute_batch_normalization_accepts_typed_attrs ... ok
+test onnx::interp::tests::compute_batch_normalization_falls_back_to_defaults_when_attrs_omitted ... ok
+test onnx::interp::tests::compute_batch_normalization_rejects_axis_style_output_arity ... ok
+test onnx::interp::tests::compute_batch_normalization_rejects_epsilon_wrong_type ... ok
+test onnx::interp::tests::compute_batch_normalization_rejects_spatial_zero ... ok
+test onnx::interp::tests::compute_batch_normalization_rejects_training_mode_nonzero ... ok
+test onnx::interp::tests::compute_batch_normalization_rejects_wrong_input_arity ... ok
+test onnx::interp::tests::compute_conv_accepts_auto_pad_omitted_as_notset ... ok
+test onnx::interp::tests::compute_conv_falls_back_to_defaults_when_attrs_omitted ... ok
+test onnx::interp::tests::compute_conv_rejects_auto_pad_with_mismatched_attribute_type ... ok
+test onnx::interp::tests::compute_conv_rejects_dilations_with_mismatched_attribute_type ... ok
+test onnx::interp::tests::compute_conv_rejects_duplicate_attribute ... ok
+test onnx::interp::tests::compute_conv_rejects_four_inputs ... ok
+test onnx::interp::tests::compute_conv_rejects_group_with_mismatched_attribute_type ... ok
+test onnx::interp::tests::compute_conv_rejects_kernel_shape_with_mismatched_attribute_type ... ok
+test onnx::interp::tests::compute_conv_rejects_pads_with_mismatched_attribute_type ... ok
+test onnx::interp::tests::compute_conv_rejects_present_but_empty_auto_pad ... ok
+test onnx::interp::tests::compute_conv_rejects_present_but_empty_ints_attribute ... ok
+test onnx::interp::tests::compute_conv_rejects_strides_with_mismatched_attribute_type ... ok
+test onnx::interp::tests::compute_conv_rejects_zero_inputs ... ok
+test onnx::interp::tests::compute_conv_third_input_empty_placeholder_treated_as_no_bias ... ok
+test onnx::interp::tests::compute_flatten_axis_default_and_explicit ... ok
+test onnx::interp::tests::compute_flatten_rejects_axis_out_of_range ... ok
+test onnx::interp::tests::compute_flatten_rejects_wrong_input_arity ... ok
+test onnx::interp::tests::compute_gather_i64_accepts_consistent_indices_shape ... ok
+test onnx::interp::tests::compute_global_average_pool_averages_spatial_axes ... ok
+test onnx::interp::tests::compute_global_average_pool_rejects_wrong_input_arity ... ok
+test onnx::interp::tests::compute_max_pool_basic ... ok
+test onnx::interp::tests::compute_max_pool_missing_kernel_shape_rejected ... ok
+test onnx::interp::tests::compute_max_pool_ceil_mode_and_storage_order_accepted ... ok
+test onnx::interp::tests::compute_max_pool_rejects_duplicate_attribute ... ok
+test onnx::interp::tests::compute_max_pool_rejects_kernel_shape_type_mismatch ... ok
+test onnx::interp::tests::compute_max_pool_rejects_two_inputs ... ok
+test onnx::interp::tests::raw_to_value_converts_all_dtypes ... ok
+test onnx::interp::tests::dispatch_max_pool_and_average_pool_via_run ... ok
+test onnx::interp::tests::run_end_to_end_add ... ok
+test onnx::interp::tests::run_end_to_end_add_i64 ... ok
+test onnx::interp::tests::run_end_to_end_batch_normalization_matches_ops_directly ... ok
+test onnx::interp::tests::run_end_to_end_cast_f32_to_i64 ... ok
+test onnx::interp::tests::run_end_to_end_constant_tensor_attribute ... ok
+test onnx::interp::tests::run_end_to_end_constant_value_int ... ok
+test onnx::interp::tests::run_end_to_end_constant_value_ints ... ok
+test onnx::interp::tests::run_end_to_end_conv_accepts_correctly_typed_attrs ... ok
+test onnx::interp::tests::run_end_to_end_div_i64 ... ok
+test onnx::interp::tests::run_end_to_end_global_average_pool_and_flatten_chain ... ok
+test onnx::interp::tests::run_end_to_end_layer_normalization ... ok
+test onnx::interp::tests::run_end_to_end_matmul ... ok
+test onnx::interp::tests::run_end_to_end_mod_i64 ... ok
+test onnx::interp::tests::run_end_to_end_mul_i64 ... ok
+test onnx::interp::tests::run_end_to_end_relu ... ok
+test onnx::interp::tests::run_end_to_end_reshape ... ok
+test onnx::interp::tests::run_end_to_end_softmax ... ok
+test onnx::interp::tests::run_end_to_end_transpose_default_reverses_axes ... ok
+test onnx::interp::tests::run_gather_multidim_i64_shape_no_longer_restricted ... ok
+test onnx::interp::tests::run_layer_normalization_multi_output_rejected ... ok
+test onnx::interp::tests::run_rejects_missing_feed ... ok
+test onnx::interp::tests::run_rejects_i64_div_by_zero ... ok
+test onnx::interp::tests::run_rejects_unknown_feed ... ok
+test onnx::interp::tests::run_rejects_mixed_f32_i64_div ... ok
+test onnx::interp::tests::run_rejects_unsupported_cast_combination ... ok
+test onnx::interp::tests::run_rejects_unsupported_op ... ok
+test onnx::interp::tests::unsqueeze_i64_with_scalar_gather_shim_delegates_multi_element_to_generic_unsqueeze ... ok
+test onnx::interp::tests::unsqueeze_i64_with_scalar_gather_shim_keeps_flat_shape_for_single_element ... ok
+test onnx::interp_ext::tests::pad_rejects_output_exceeding_materialize_limit ... ok
+test onnx::interp_ext::tests::reduce_mean_empty_axes_attr_with_noop_one_is_identity ... ok
+test onnx::interp_ext::tests::reduce_mean_empty_axes_attr_with_noop_zero_reduces_all_axes ... ok
+test onnx::proto::tests::decode_rejects_garbage_bytes ... ok
+test onnx::interp_ext::tests::where_rejects_broadcast_output_exceeding_materialize_limit ... ok
+test onnx::proto::tests::encode_then_decode_roundtrips ... ok
+test ops::activation::tests::erf_asymptotic_values_converge_to_one ... ok
+test ops::activation::tests::erf_is_odd_function ... ok
+test ops::activation::tests::erf_known_values ... ok
+test ops::activation::tests::erf_on_non_contiguous_view ... ok
+test ops::activation::tests::relu_clamps_negative_to_zero ... ok
+test ops::activation::tests::relu_on_non_contiguous_view ... ok
+test ops::activation::tests::relu_propagates_nan ... ok
+test ops::activation::tests::sigmoid_known_values ... ok
+test ops::activation::tests::sigmoid_near_boundary_does_not_collapse_to_exact_zero_or_one ... ok
+test ops::activation::tests::sigmoid_saturates_to_correctly_rounded_extremes ... ok
+test ops::arith::tests::add_broadcast_incompatible_rejected ... ok
+test ops::arith::tests::add_broadcast_row_and_column ... ok
+test ops::arith::tests::add_i64_broadcast_incompatible_rejected ... ok
+test ops::arith::tests::add_i64_known_values ... ok
+test ops::arith::tests::add_i64_overflow_rejected ... ok
+test ops::arith::tests::add_same_shape ... ok
+test ops::arith::tests::div_by_zero_follows_ieee754 ... ok
+test ops::arith::tests::div_i64_by_zero_rejected ... ok
+test ops::arith::tests::div_i64_min_by_neg_one_rejected ... ok
+test ops::arith::tests::div_i64_truncates_toward_zero ... ok
+test ops::arith::tests::div_known_values ... ok
+test ops::arith::tests::mod_i64_by_zero_rejected ... ok
+test ops::arith::tests::mod_i64_fmod_false_sign_follows_divisor ... ok
+test ops::arith::tests::mod_i64_fmod_true_sign_follows_dividend ... ok
+test ops::arith::tests::modulo_fmod_matches_c_fmod_semantics ... ok
+test ops::arith::tests::modulo_python_style_rejected_for_float_input ... ok
+test ops::arith::tests::mul_broadcast_scalar ... ok
+test ops::arith::tests::mul_i64_known_values ... ok
+test ops::arith::tests::mul_i64_overflow_rejected ... ok
+test ops::arith::tests::sqrt_known_values ... ok
+test ops::arith::tests::sqrt_negative_is_nan ... ok
+test ops::batch_norm::tests::empty_dim_yields_empty_output ... ok
+test ops::batch_norm::tests::infinite_variance_rejected ... ok
+test ops::batch_norm::tests::nan_propagates ... ok
+test ops::batch_norm::tests::nan_variance_rejected ... ok
+test ops::batch_norm::tests::negative_eps_rejected ... ok
+test ops::batch_norm::tests::negative_variance_rejected ... ok
+test ops::batch_norm::tests::non_finite_eps_rejected ... ok
+test ops::batch_norm::tests::param_length_mismatch_rejected ... ok
+test ops::batch_norm::tests::param_rank_mismatch_rejected ... ok
+test ops::batch_norm::tests::rank3_and_rank2_supported ... ok
+test ops::batch_norm::tests::rank4_matches_reference ... ok
+test ops::batch_norm::tests::rank_mismatch_rejected ... ok
+test ops::batch_norm::tests::variance_rescued_by_epsilon_accepted ... ok
+test ops::batch_norm::tests::variance_still_negative_after_epsilon_rejected ... ok
+test ops::batch_norm::tests::zero_batch_with_large_spatial_dims_returns_empty_without_overflow ... ok
+test ops::batch_norm::tests::zero_sum_variance_plus_epsilon_rejected ... ok
+test ops::cast::tests::bool_to_f32_converts ... ok
+test ops::cast::tests::f32_to_bool_nonzero_is_true ... ok
+test ops::cast::tests::f32_to_f16_and_back_round_trips_representable_values ... ok
+test ops::cast::tests::f32_to_i64_truncates_toward_zero ... ok
+test ops::cast::tests::i64_to_f32_converts ... ok
+test ops::cast::tests::supported_targets_accepted ... ok
+test ops::cast::tests::unsupported_target_rejected ... ok
+test ops::concat::tests::concat_axis0 ... ok
+test ops::concat::tests::concat_axis1_negative ... ok
+test ops::concat::tests::concat_empty_inputs_rejected ... ok
+test ops::concat::tests::concat_rank_mismatch_rejected ... ok
+test ops::concat::tests::concat_shape_mismatch_rejected ... ok
+test ops::concat::tests::concat_single_input_is_identity ... ok
+test ops::concat::tests::concat_three_inputs ... ok
+test ops::constant::tests::constant_float_variant_is_rank0 ... ok
+test ops::constant::tests::constant_floats_variant_is_rank1 ... ok
+test ops::constant::tests::constant_tensor_shape_mismatch_rejected ... ok
+test ops::constant::tests::constant_tensor_variant ... ok
+test ops::conv::tests::asymmetric_kernel_catches_transposed_pads ... ok
+test ops::conv::tests::asymmetric_pads_rejected ... ok
+test ops::conv::tests::bias_is_added_per_out_channel ... ok
+test ops::conv::tests::bias_length_mismatch_rejected ... ok
+test ops::conv::tests::cin_group_mismatch_rejected_via_conv2d_out_shape ... ok
+test ops::conv::tests::conv1d_asymmetric_pads_rejected ... ok
+test ops::conv::tests::conv1d_bias_stride_dilation_group ... ok
+test ops::conv::tests::conv1d_identity_kernel_no_padding ... ok
+test ops::conv::tests::conv1d_kernel_shape_length_mismatch_rejected ... ok
+test ops::conv::tests::conv1d_matches_2d_lift_with_same_weights ... ok
+test ops::conv::tests::conv1d_weight_rank_mismatch_rejected ... ok
+test ops::conv::tests::conv_out_buffer_len_normal_shape_ok ... ok
+test ops::conv::tests::conv_out_buffer_len_overflow_detected_even_when_trailing_dim_is_zero ... ok
+test ops::conv::tests::ensure_conv_out_bound_accepts_at_cap_and_rejects_over_cap ... ok
+test ops::conv::tests::groups_split_channels ... ok
+test ops::conv::tests::huge_pads_and_strides_no_longer_panic_and_yield_zero_output ... ok
+test ops::conv::tests::identity_1x1_kernel_no_padding ... ok
+test ops::conv::tests::kernel_shape_mismatch_rejected ... ok
+test ops::conv::tests::known_value_3x3_input_2x2_kernel ... ok
+test ops::conv::tests::negative_pads_rejected ... ok
+test ops::conv::tests::non_notset_auto_pad_rejected ... ok
+test ops::conv::tests::rank5_input_rejected_via_2d_path ... ok
+test ops::conv::tests::rank_mismatch_rejected ... ok
+test ops::conv::tests::small_spatial_but_large_cout_and_pads_rejected ... ok
+test ops::gather::tests::gather_axis1_with_negative_index ... ok
+test ops::gather::tests::gather_index_out_of_range_rejected ... ok
+test ops::gather::tests::gather_indices_length_mismatch_rejected ... ok
+test ops::gather::tests::gather_negative_axis ... ok
+test ops::gather::tests::gather_rows_axis0 ... ok
+test ops::gemm::tests::alpha_beta_and_bias_broadcast ... ok
+test ops::gemm::tests::c_broadcast_from_scalar_shape ... ok
+test ops::gemm::tests::inner_dim_mismatch_rejected ... ok
+test ops::gemm::tests::plain_matmul_no_bias ... ok
+test ops::gemm::tests::rank_mismatch_rejected ... ok
+test ops::gemm::tests::trans_a_and_trans_b ... ok
+test ops::gemm::tests::trans_a_only ... ok
+test ops::gemm::tests::trans_b_only ... ok
+test ops::global_average_pool::tests::rank2_rejected ... ok
+test ops::global_average_pool::tests::rank3_averages_single_spatial_axis ... ok
+test ops::global_average_pool::tests::rank4_averages_spatial_axes ... ok
+test ops::global_average_pool::tests::rank5_supported ... ok
+test ops::global_average_pool::tests::zero_batch_yields_empty_output ... ok
+test ops::global_average_pool::tests::zero_spatial_rejected ... ok
+test ops::layer_norm::tests::axis_out_of_range_rejected ... ok
+test ops::layer_norm::tests::basic_2d_axis_minus_one ... ok
+test ops::layer_norm::tests::bias_none_means_zero ... ok
+test ops::layer_norm::tests::empty_normalized_set_rejected ... ok
+test ops::layer_norm::tests::epsilon_default_matches_onnx_spec ... ok
+test ops::layer_norm::tests::non_finite_epsilon_rejected ... ok
+test ops::layer_norm::tests::outer_size_zero_produces_empty_output ... ok
+test ops::layer_norm::tests::positive_and_negative_axis_are_equivalent ... ok
+test ops::layer_norm::tests::rank3_multi_dim_normalized_set_axis1 ... ok
+test ops::layer_norm::tests::scale_and_bias_are_applied ... ok
+test ops::layer_norm::tests::scale_bias_degenerate_shape_broadcasts_across_outer_normalized_dim ... ok
+test ops::layer_norm::tests::scale_shape_mismatch_rejected ... ok
+test ops::matmul::tests::batch_incompatible_rejected ... ok
+test ops::matmul::tests::element_count_overflow_rejected_via_a_realization_size ... ok
+test ops::matmul::tests::element_count_overflow_rejected_via_b_realization_size ... ok
+test ops::matmul::tests::element_count_overflow_rejected_via_batch_product ... ok
+test ops::matmul::tests::element_count_overflow_rejected_via_empty_batch_stride ... ok
+test ops::matmul::tests::element_count_overflow_rejected_via_out_len ... ok
+test ops::matmul::tests::element_count_within_bounds_accepted ... ok
+test ops::matmul::tests::inner_dim_mismatch_rejected ... ok
+test ops::matmul::tests::matmul_1d_dot_1d_yields_scalar ... ok
+test ops::matmul::tests::matmul_1d_vector_times_matrix ... ok
+test ops::matmul::tests::matmul_1d_vector_times_matrix_accepts_non_contiguous_broadcast_input ... ok
+test ops::matmul::tests::matmul_2d_matches_gemm_known_values ... ok
+test ops::matmul::tests::matmul_3d_same_batch ... ok
+test ops::matmul::tests::matmul_batch_broadcast_lhs_no_batch ... ok
+test ops::matmul::tests::matmul_batch_broadcast_size_one ... ok
+test ops::matmul::tests::matmul_empty_batch_with_huge_batch_dim_does_not_hang ... ok
+test ops::matmul::tests::matmul_end_to_end_rejects_empty_batch_with_huge_matrix_dims ... ok
+test ops::matmul::tests::matmul_matrix_times_1d_vector ... ok
+test ops::matmul::tests::rank_zero_rejected ... ok
+test ops::normalize_axis_tests::negative_wraps_from_end ... ok
+test ops::normalize_axis_tests::out_of_range_returns_none ... ok
+test ops::normalize_axis_tests::positive_within_range ... ok
+test ops::output_elements_within_bound_tests::accepts_at_cap_and_rejects_over_cap ... ok
+test ops::output_elements_within_bound_tests::checks_the_product_of_all_axes_not_just_a_subset ... ok
+test ops::output_elements_within_bound_tests::overflow_is_rejected ... ok
+test ops::pool::tests::average_pool_1d_matches_2d_lift ... ok
+test ops::pool::tests::average_pool_ceil_mode_accepts_partial_window_when_kernel_exceeds_padded ... ok
+test ops::pool::tests::average_pool_count_include_pad_false ... ok
+test ops::pool::tests::average_pool_count_include_pad_true ... ok
+test ops::pool::tests::average_pool_dilation_not_one_rejected ... ok
+test ops::pool::tests::average_pool_empty_window_count_include_pad_false_rejected ... ok
+test ops::pool::tests::average_pool_empty_window_count_include_pad_true_accepted ... ok
+test ops::pool::tests::average_pool_f64_accumulation_order ... ok
+test ops::pool::tests::average_pool_huge_pads_producing_huge_out_len_rejected_fast ... ok
+test ops::pool::tests::average_pool_small_spatial_but_large_channel_count_rejected ... ok
+test ops::pool::tests::average_pool_zero_batch_with_huge_pads_rejected_fast_count_include_pad_false ... ok
+test ops::pool::tests::average_pool_zero_batch_with_huge_pads_rejected_fast_count_include_pad_true ... ok
+test ops::pool::tests::ceil_mode_out_of_range_rejected ... ok
+test ops::pool::tests::empty_window_rejected ... ok
+test ops::pool::tests::ensure_pool_out_bound_accepts_at_cap_and_rejects_over_cap ... ok
+test ops::pool::tests::ensure_pool_out_bound_rejects_huge_axis_even_when_n_or_c_is_zero ... ok
+test ops::pool::tests::huge_pads_and_strides_no_panic ... ok
+test ops::pool::tests::kernel_shape_length_mismatch_rejected ... ok
+test ops::pool::tests::kernel_shape_missing_rejected ... ok
+test ops::pool::tests::max_pool_1d_matches_2d_lift ... ok
+test ops::pool::tests::max_pool_2x2_stride2_no_padding ... ok
+test ops::pool::tests::max_pool_asymmetric_pads_accepted ... ok
+test ops::pool::tests::max_pool_ceil_mode_accepts_partial_window_when_kernel_exceeds_padded ... ok
+test ops::pool::tests::max_pool_ceil_mode_adjusts_output_length ... ok
+test ops::pool::tests::max_pool_ceil_mode_rejects_when_deficit_reaches_stride ... ok
+test ops::pool::tests::max_pool_floor_mode_rejects_kernel_exceeding_padded ... ok
+test ops::pool::tests::max_pool_huge_kernel_shape_with_single_valid_tap_completes_fast ... ok
+test ops::pool::tests::max_pool_huge_pads_producing_huge_out_len_rejected_fast ... ok
+test ops::pool::tests::max_pool_nan_propagates ... ok
+test ops::pool::tests::max_pool_overlapping_windows ... ok
+test ops::pool::tests::max_pool_small_spatial_but_large_channel_count_rejected ... ok
+test ops::pool::tests::max_pool_tie_first_match_wins ... ok
+test ops::pool::tests::max_pool_zero_batch_with_huge_pads_rejected_fast ... ok
+test ops::pool::tests::max_pool_zero_channel_with_huge_pads_rejected_fast ... ok
+test ops::pool::tests::negative_kernel_rejected ... ok
+test ops::pool::tests::rank5_rejected ... ok
+test ops::pool::tests::same_upper_auto_pad_rejected ... ok
+test ops::pool::tests::zero_kernel_rejected ... ok
+test ops::pool::tests::zero_stride_rejected ... ok
+test ops::shape_ops::tests::shape_of_rank_one ... ok
+test ops::shape_ops::tests::shape_of_rank_zero_is_empty ... ok
+test ops::shape_ops::tests::shape_returns_dims_as_i64 ... ok
+test ops::shape_ops::tests::unsqueeze_axis_out_of_range_rejected ... ok
+test ops::shape_ops::tests::unsqueeze_duplicate_axis_rejected ... ok
+test ops::shape_ops::tests::unsqueeze_inserts_axis_at_position ... ok
+test ops::shape_ops::tests::unsqueeze_multiple_axes ... ok
+test ops::shape_ops::tests::unsqueeze_negative_axis ... ok
+test ops::shape_ops::tests::unsqueeze_negative_axis_out_of_range_rejected ... ok
+test ops::shape_transform::tests::flatten_axis_0_yields_row_vector ... ok
+test ops::shape_transform::tests::flatten_axis_1_merges_trailing_dims ... ok
+test ops::shape_transform::tests::flatten_axis_equal_rank_yields_column_vector ... ok
+test ops::shape_transform::tests::flatten_axis_out_of_range_rejected ... ok
+test ops::shape_transform::tests::flatten_i64_and_bool_dtypes ... ok
+test ops::shape_transform::tests::flatten_negative_axis_equivalent_to_positive ... ok
+test ops::shape_transform::tests::flatten_rank0_axis0_yields_1x1 ... ok
+test ops::shape_transform::tests::flatten_zero_dim_shape ... ok
+test ops::shape_transform::tests::reshape_basic ... ok
+test ops::shape_transform::tests::reshape_element_count_mismatch_rejected ... ok
+test ops::shape_transform::tests::reshape_infers_minus_one ... ok
+test ops::shape_transform::tests::reshape_multiple_minus_one_rejected ... ok
+test ops::shape_transform::tests::reshape_zero_copies_input_dim ... ok
+test ops::shape_transform::tests::squeeze_explicit_empty_axes_drops_all_size_one ... ok
+test ops::shape_transform::tests::squeeze_negative_axis ... ok
+test ops::shape_transform::tests::squeeze_non_size_one_axis_rejected ... ok
+test ops::shape_transform::tests::squeeze_with_axes ... ok
+test ops::shape_transform::tests::squeeze_without_axes_drops_all_size_one ... ok
+test ops::shape_transform::tests::transpose_default_reverses_axes ... ok
+test ops::shape_transform::tests::transpose_explicit_perm_rank3 ... ok
+test ops::shape_transform::tests::transpose_perm_duplicate_rejected ... ok
+test ops::shape_transform::tests::transpose_perm_length_mismatch_rejected ... ok
+test ops::shape_transform::tests::transpose_perm_negative_axis_rejected ... ok
+test ops::shape_transform::tests::transpose_perm_out_of_range_rejected ... ok
+test ops::slice::tests::basic_positive_step ... ok
+test ops::slice::tests::duplicate_axis_rejected ... ok
+test ops::slice::tests::empty_range_yields_zero_length_axis ... ok
+test ops::slice::tests::int_max_sentinel_end_clamps ... ok
+test ops::slice::tests::lengths_mismatch_rejected ... ok
+test ops::slice::tests::multi_axis_2d ... ok
+test ops::slice::tests::negative_indices_and_axes ... ok
+test ops::slice::tests::negative_step_reverses ... ok
+test ops::slice::tests::step_two_positive_dim ... ok
+test ops::slice::tests::step_zero_rejected ... ok
+test ops::softmax::tests::axis_out_of_range_rejected ... ok
+test ops::softmax::tests::softmax_1d_known_values ... ok
+test ops::softmax::tests::softmax_2d_axis1_rows_sum_to_one ... ok
+test ops::softmax::tests::softmax_3d_middle_axis ... ok
+test ops::softmax::tests::softmax_empty_axis_with_huge_sibling_dim_does_not_hang ... ok
+test ops::softmax::tests::softmax_negative_axis_matches_last_axis ... ok
+test ops::softmax::tests::softmax_numerically_stable_for_large_values ... ok
+test require_keys::tests::all_keys_present_is_ok ... ok
+test require_keys::tests::duplicate_expected_keys_do_not_duplicate_missing_report ... ok
+test require_keys::tests::empty_expected_keys_is_ok_even_for_empty_map ... ok
+test require_keys::tests::missing_key_is_reported_not_skipped ... ok
+test require_keys::tests::multiple_missing_keys_are_reported_in_deterministic_order ... ok
+test st_load::tests::require_keys_ok_when_all_present ... ok
+test st_load::tests::require_keys_reports_all_missing_not_just_the_first ... ok
+test st_save::tests::empty_map_round_trips ... ok
+test st_save::tests::output_is_deterministic_across_calls ... ok
+test st_save::tests::single_tensor_round_trips_with_bit_exact_values ... ok
+test st_save::tests::save_with_bare_relative_filename_writes_into_current_dir ... ok
+test onnx::external_data::overlap_tests::many_non_overlapping_unit_regions_are_accepted ... ok
+
+test result: ok. 344 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests\cpu_row_kernel_naive_parity.rs (target\debug\deps\cpu_row_kernel_naive_parity-de6bb22d23270edb.exe)
+
+running 3 tests
+test cpu_softmax_matches_onnx_naive_softmax_2d ... ok
+test cpu_rmsnorm_matches_onnx_layer_norm_under_zero_mean_equivalence ... ok
+test cpu_softmax_matches_onnx_naive_softmax_3d ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\model_zoo_parity.rs (target\debug\deps\model_zoo_parity-d7659c9e93989657.exe)
+
+running 7 tests
+test mobilenetv2_12_matches_expectation ... ignored, Model Zoo 非コミット fixture・tests/fixtures/model-zoo/README.md 参照
+test resnet50_v1_12_matches_expectation ... ignored, Model Zoo 非コミット fixture・tests/fixtures/model-zoo/README.md 参照
+test squeezenet1_0_12_matches_expectation ... ignored, Model Zoo 非コミット fixture・tests/fixtures/model-zoo/README.md 参照
+test mnist12_fixture_byte_lengths_match_recorded_sizes ... ok
+test mnist12_decodes_expected_graph_structure ... ok
+test read_file_bounded_rejects_oversized_file ... ok
+test mnist12_run_matches_expectation ... ok
+
+test result: ok. 4 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_autograd.rs (target\debug\deps\onnx_autograd-4a0eb2b9741289e3.exe)
+
+running 35 tests
+test gemm_broadcast_zero_requires_c_shape_exactly_mn_in_autograd ... ok
+test cross_tape_var_is_rejected ... ok
+test erf_forward_bit_identical ... ok
+test add_forward_bit_identical_with_broadcast ... ok
+test div_forward_bit_identical ... ok
+test gemm_broadcast_zero_requires_c_shape_exactly_mn_when_c_is_var ... ok
+test gemm_rejects_arity_outside_two_to_three_in_autograd ... ok
+test gemm_forward_bit_identical_with_trans_b_and_bias ... ok
+test layer_normalization_forward_bit_identical ... ok
+test matmul_forward_bit_identical ... ok
+test missing_feed_is_rejected ... ok
+test erf_backward_gradient_matches_finite_difference ... ok
+test div_backward_gradient_matches_finite_difference ... ok
+test mul_forward_bit_identical ... ok
+test add_backward_gradient_matches_finite_difference_with_broadcast ... ok
+test mul_backward_gradient_matches_finite_difference ... ok
+test model_onnx_forward_matches_interp_run_bit_identical ... ok
+test new_ext_op_from_issue_2186_is_rejected_fail_closed_in_autograd ... ok
+test not_single_input_output_is_rejected_for_multi_output_graph ... ok
+test relu_forward_bit_identical ... ok
+test shape_and_cast_const_paths_work_without_severing_needed_gradients ... ok
+test sigmoid_forward_bit_identical ... ok
+test softmax_forward_bit_identical ... ok
+test softmax_backward_empty_axis_with_huge_sibling_dim_does_not_hang ... ok
+test model_onnx_backward_gradient_matches_finite_difference ... ok
+test layer_normalization_backward_gradient_matches_finite_difference ... ok
+test matmul_backward_gradient_matches_finite_difference_with_batch_broadcast ... ok
+test sqrt_forward_bit_identical ... ok
+test sqrt_backward_gradient_matches_finite_difference ... ok
+test softmax_backward_large_upstream_grad_does_not_overflow ... ok
+test unknown_feed_is_rejected ... ok
+test unsupported_op_is_rejected_fail_closed ... ok
+test unknown_trainable_name_is_rejected ... ok
+test softmax_backward_gradient_matches_finite_difference_on_middle_axis ... ok
+test trainable_filter_excludes_non_listed_params_from_gradient_tracking ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_decode.rs (target\debug\deps\onnx_decode-efa2a659663962ff.exe)
+
+running 45 tests
+test broken_protobuf_bytes_are_rejected_as_decode_error ... ok
+test bool_tensor_raw_data_byte_len_mismatch_is_rejected ... ok
+test byte_length_multiply_overflow_is_rejected ... ok
+test decode_model_falls_back_to_wire_decode_error_on_malformed_length_delimiter ... ok
+test attribute_proto_round_trips_with_tensor_field ... ok
+test decode_model_and_build_graph_agree_on_256_byte_diag_name_cap_for_long_name ... ok
+test bool_tensor_raw_data_decodes_nonzero_as_true ... ok
+test decode_model_first_sparse_name_is_empty_when_first_element_has_no_name_even_if_later_has_one ... ok
+test decode_model_rejects_raw_wire_bytes_with_graph_field_15_before_full_decode ... ok
+test decode_model_sparse_tensor_name_follows_protobuf_last_wins_merge_on_duplicate_values_field ... ok
+test decode_model_still_rejects_sparse_initializer_when_malformed_field_follows_graph_at_top_level ... ok
+test decode_model_still_rejects_sparse_initializer_when_malformed_field_follows_in_same_graph ... ok
+test decode_model_sums_sparse_initializer_count_across_multiple_graph_occurrences ... ok
+test dense_twin_of_sparse_fixture_is_accepted ... ok
+test duplicate_graph_input_name_is_rejected_not_silently_absorbed ... ok
+test duplicate_graph_output_name_is_rejected_not_silently_absorbed ... ok
+test duplicate_initializer_name_is_rejected_not_silently_overwritten ... ok
+test duplicate_node_output_name_is_rejected ... ok
+test element_count_overflow_is_rejected ... ok
+test empty_data_with_nonzero_dims_is_rejected_not_silently_accepted ... ok
+test float16_tensor_raw_data_decodes_little_endian_pairs ... ok
+test graph_input_name_matching_initializer_name_is_accepted ... ok
+test model_without_graph_is_rejected ... ok
+test negative_dim_is_rejected ... ok
+test model_onnx_decodes_expected_graph_structure ... ok
+test node_output_shadowing_initializer_name_is_rejected ... ok
+test decode_model_does_not_fall_back_to_full_decode_when_large_name_sparse_initializer_is_followed_by_malformed_field ... ok
+test node_with_multiple_optional_empty_outputs_is_accepted ... ok
+test non_topological_node_order_is_rejected ... ok
+test optional_empty_string_input_is_not_treated_as_missing ... ok
+test raw_data_len_mismatch_is_rejected ... ok
+test raw_data_takes_precedence_over_typed_float_data ... ok
+test raw_data_takes_precedence_over_typed_int64_data ... ok
+test raw_wire_bytes_with_graph_field_15_are_detected_as_sparse_initializer ... ok
+test sparse_initializer_alongside_dense_initializer_is_rejected ... ok
+test sparse_initializer_is_rejected_not_silently_skipped ... ok
+test transformer_onnx_decodes_expected_graph_structure ... ignored, 12MB の transformer.onnx を非コミット方針としているため。tests/fixtures/README.md の取得手順を参照
+test sparse_initializer_with_empty_values_name_is_still_rejected ... ok
+test slice_repro_onnx_decodes_expected_graph_structure ... ok
+test truly_empty_tensor_dims_zero_is_still_accepted ... ok
+test two_nodes_with_empty_trailing_output_are_both_accepted ... ok
+test unknown_data_type_is_rejected ... ok
+test sparse_initializer_fixture_file_is_rejected ... ok
+test unknown_graph_output_is_rejected ... ok
+test decode_model_rejects_sparse_initializer_with_large_raw_data_payload_without_hanging ... ok
+
+test result: ok. 44 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_export.rs (target\debug\deps\onnx_export-4387882df531df56.exe)
+
+running 11 tests
+test encode_tensor_empty_and_scalar_shapes_roundtrip ... ok
+test encode_tensor_f16_roundtrips_bit_exact_including_nan ... ok
+test encode_tensor_f32_roundtrips_bit_exact_including_nan_and_denormals ... ok
+test encode_tensor_i64_roundtrips_bit_exact ... ok
+test encode_tensor_bool_roundtrips ... ok
+test encode_tensor_rejects_negative_dim ... ok
+test build_model_proto_value_info_is_always_empty ... ok
+test encode_tensor_rejects_shape_data_mismatch ... ok
+test build_model_proto_emits_empty_sparse_initializer ... ok
+test build_model_proto_output_is_deterministic_across_multiple_initializers ... ok
+test model_onnx_roundtrips_through_export_structurally ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\onnx_export_layers_parity.rs (target\debug\deps\onnx_export_layers_parity-15eaa892c356064a.exe)
+
+running 13 tests
+test gelu_tanh_is_rejected_as_unsupported ... ok
+test gelu_composite_export_is_deterministic ... ok
+test layer_norm_without_affine_is_rejected ... ok
+test log_softmax_is_rejected_as_unsupported ... ok
+test sigmoid_is_rejected_as_unsupported ... ok
+test softmax_layer_parity ... ok
+test layer_norm_layer_parity ... ok
+test conv2d_layer_parity_stride2 ... ok
+test conv2d_layer_parity_no_bias ... ok
+test conv2d_layer_parity_groups_and_dilation ... ok
+test composite_conv_relu_then_flatten_free_linear_head ... ok
+test conv2d_layer_parity_with_bias_and_padding ... ok
+test gelu_layer_parity ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_export_nn.rs (target\debug\deps\onnx_export_nn-63bc7eb9a5e5ca99.exe)
+
+running 10 tests
+test empty_layer_list_is_rejected ... ok
+test unsupported_layer_is_rejected_with_index_and_unknown_kind ... ok
+test unsupported_layer_after_supported_prefix_does_not_return_partial_graph ... ok
+test initializer_names_match_sequential_named_parameters ... ok
+test unsupported_layer_reports_known_kind_when_downcast_hook_matches ... ok
+test gemm_node_always_writes_default_attributes_and_bias_absent_has_two_inputs ... ok
+test relu_only_model_roundtrips ... ok
+test export_is_deterministic_across_repeated_calls ... ok
+test two_layer_mlp_roundtrip_matches_nn_bit_exact_small ... ok
+test two_layer_mlp_roundtrip_matches_nn_bit_exact_large ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\onnx_export_ops.rs (target\debug\deps\onnx_export_ops-92d2f19f3d2a723b.exe)
+
+running 43 tests
+test batch_normalization_rejects_input_count_other_than_five ... ok
+test arity_rejects_output_count_other_than_one ... ok
+test arity_rejects_too_few_and_too_many_inputs ... ok
+test build_model_proto_rejects_unsupported_op_type ... ok
+test build_model_proto_rejects_non_default_domain ... ok
+test arity_rejects_empty_required_input_but_allows_empty_optional_input ... ok
+test cast_rejects_unsupported_target_at_to_node_proto_time ... ok
+test concat_accepts_arbitrary_input_count_but_rejects_zero ... ok
+test concat_rejects_empty_string_at_any_variadic_position ... ok
+test conv_omitted_auto_pad_writes_no_auto_pad_attribute ... ok
+test constant_float_variant_matches_direct_call ... ok
+test constant_tensor_variant_uses_output_name_for_tensor_proto_name ... ok
+test cast_exports_to_attribute_and_matches_direct_call ... ok
+test concat_exports_required_axis_and_variadic_inputs ... ok
+test batch_normalization_exports_epsilon_momentum_training_mode_and_matches_direct_call ... ok
+test constant_floats_ints_int_variants_round_trip ... ok
+test conv_omitted_bias_is_accepted ... ok
+test conv_exports_all_attributes_and_matches_direct_call ... ok
+test export_op_variants_all_have_op_type_in_supported_list ... ok
+test flatten_rejects_input_count_other_than_one ... ok
+test div_export_preserves_operand_order_numerically ... ok
+test flatten_exports_axis_attribute_and_matches_direct_call ... ok
+test gather_exports_non_default_axis_and_matches_direct_call ... ok
+test gemm_exports_all_four_attributes_and_matches_direct_call ... ok
+test global_average_pool_rejects_input_count_other_than_one ... ok
+test gemm_omitted_c_input_is_accepted ... ok
+test global_average_pool_exports_no_attributes_and_matches_direct_call ... ok
+test matmul_add_mul_export_with_no_attributes_and_preserve_input_order ... ok
+test layer_normalization_exports_axis_and_epsilon_and_matches_direct_call ... ok
+test layer_normalization_omitted_bias_is_accepted ... ok
+test relu_sigmoid_export_single_input_no_attributes ... ok
+test mod_exports_fmod_attribute_and_matches_direct_call ... ok
+test reshape_exports_allowzero_attribute_and_matches_direct_call ... ok
+test shape_exports_no_attributes_and_matches_direct_call ... ok
+test slice_requires_ends_input_and_rejects_missing_or_empty ... ok
+test slice_export_uses_opset13_tensor_input_form_with_optional_axes_and_steps ... ok
+test softmax_exports_non_default_axis_and_matches_direct_call ... ok
+test squeeze_export_omitted_axes_uses_opset13_form ... ok
+test to_node_proto_is_deterministic_across_calls ... ok
+test supported_op_types_are_all_reachable_in_interp_dispatch_table ... ok
+test transpose_with_omitted_perm_has_no_attribute_and_reverses_axes ... ok
+test transpose_with_explicit_perm_attribute_present ... ok
+test unsqueeze_export_uses_opset13_tensor_input_form ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_export_roundtrip.rs (target\debug\deps\onnx_export_roundtrip-febe90e1cd1caa66.exe)
+
+running 15 tests
+test cnn_head_onnx_exported_model_is_a_fixed_point_of_export ... ok
+test exported_model_of_supported_ops_passes_check_exportable_for_all_fixtures ... ok
+test cnn_head_onnx_roundtrip_is_structurally_identical_bit_exact ... ok
+test first_unsupported_node_in_topological_order_is_reported ... ok
+test model_onnx_exported_model_is_a_fixed_point_of_export ... ok
+test model_onnx_roundtrip_is_structurally_identical_bit_exact ... ok
+test model_with_supported_op_in_custom_domain_is_rejected_at_export ... ok
+test cnn_head_onnx_exported_model_runs_bit_identical_to_import_source ... ok
+test transformer_onnx_roundtrip_and_run_are_bit_identical ... ignored, 12MB の transformer.onnx を非コミット方針としているため。tests/fixtures/README.md の取得手順を参照
+test model_with_unsupported_op_type_is_rejected_at_export ... ok
+test typed_data_initializer_roundtrips_to_raw_data_bit_exact ... ok
+test slice_repro_onnx_exported_model_is_a_fixed_point_of_export ... ok
+test slice_repro_onnx_roundtrip_is_structurally_identical_bit_exact ... ok
+test slice_repro_onnx_exported_model_runs_bit_identical_to_import_source ... ok
+test model_onnx_exported_model_runs_bit_identical_to_import_source ... ok
+
+test result: ok. 14 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_external_data.rs (target\debug\deps\onnx_external_data-bd43f320775f74cd.exe)
+
+running 53 tests
+test default_with_external_data_present_is_rejected ... ok
+test absolute_location_is_rejected ... ok
+test backslash_in_location_is_rejected ... ok
+test directory_as_location_is_rejected ... ok
+test checksum_key_is_rejected_fail_closed ... ok
+test drive_prefix_location_is_rejected ... ok
+test duplicate_initializer_name_is_rejected_before_io ... ok
+test bytes_entry_point_still_rejects_external_data_model ... ok
+test constant_attribute_tensor_external_data_resolves_and_runs ... ok
+test duplicate_key_is_rejected ... ok
+test empty_location_is_rejected ... ok
+test duplicate_identical_region_is_rejected ... ok
+test empty_offset_is_rejected ... ok
+test external_with_inline_raw_data_present_is_rejected ... ok
+test bool_and_f16_external_tensors_load ... ok
+test external_constant_attributes_run_bit_identical_to_inline_across_runs ... ok
+test external_file_count_limit_allows_shared_file_reuse ... ok
+test invalid_data_location_value_is_rejected ... ok
+test huge_length_is_rejected_before_allocation ... ok
+test f32_external_tensor_loads_and_matches_bit_exact_inline ... ok
+test int64_external_tensor_loads ... ok
+test external_file_count_limit_is_enforced ... ok
+test missing_location_key_is_rejected ... ok
+test nonexistent_base_dir_is_rejected ... ok
+test missing_file_is_io_not_found ... ok
+test length_mismatch_with_expected_bytes_is_rejected ... ok
+test negative_offset_is_rejected ... ok
+test non_numeric_offset_is_rejected ... ok
+test offset_plus_length_overflow_is_rejected ... ok
+test omitted_length_reads_to_eof ... ok
+test offset_selects_correct_region_in_shared_file ... ok
+test overlapping_regions_in_same_file_are_rejected ... ok
+test parent_dir_traversal_is_rejected ... ok
+test owned_build_keeps_topology_validation ... ok
+test overlapping_regions_via_equivalent_location_spelling_are_rejected ... ok
+test symlink_final_component_is_rejected_on_windows ... ignored, 要 SeCreateSymbolicLinkPrivilege または開発者モード（Windows 実機限定）
+test symlink_intermediate_component_is_rejected_on_windows ... ignored, 要 SeCreateSymbolicLinkPrivilege または開発者モード（Windows 実機限定）
+test too_long_location_is_rejected ... ok
+test plus_prefixed_offset_is_rejected ... ok
+test range_exceeding_file_length_is_rejected ... ok
+test unc_base_dir_is_rejected ... ignored, 管理共有（C$）の設定に依存する（Windows 実機限定）
+test u64_overflow_length_is_rejected ... ok
+test unknown_key_is_rejected ... ok
+test total_size_limit_is_enforced ... ok
+test owned_build_matches_resolve_then_build_graph ... ok
+test whitespace_offset_is_rejected ... ok
+test write_handle_causes_sharing_violation_rejection ... ok
+test zero_length_region_inside_existing_region_is_not_overlapping ... ok
+test windows_lexical_rejections_via_full_pipeline ... ok
+Junction created for C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-4692-1790972673758836100-22-external-data-win-junction-final-dir\link_dir <<===>> C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-4692-1790972673758836100-22-external-data-win-junction-final-dir\real_dir
+test junction_as_final_directory_component_is_rejected ... ok
+Junction created for C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-4692-1790972673779047800-23-external-data-win-junction-mid\link_dir <<===>> C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-4692-1790972673779047800-23-external-data-win-junction-mid\real_dir
+test junction_intermediate_component_is_rejected ... ok
+test one_overlap_among_many_unit_regions_is_rejected_with_names ... ok
+test many_non_overlapping_unit_regions_in_one_file_resolve ... ok
+
+test result: ok. 50 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+     Running tests\onnx_interp.rs (target\debug\deps\onnx_interp-9895ee1c4a9f8c01.exe)
+
+running 13 tests
+test run_rejects_graph_output_not_produced ... ok
+test run_rejects_missing_required_feed ... ok
+test run_rejects_concat_missing_axis_attribute ... ok
+test run_rejects_unknown_feed_name ... ok
+test run_rejects_output_arity_mismatch ... ok
+test run_reads_gemm_attributes_correctly ... ok
+test run_feed_overrides_initializer_pre_ir4_pattern ... ok
+test run_rejects_type_mismatch_on_gemm_input ... ok
+test run_rejects_unsupported_op_type ... ok
+test run_unsqueeze_i64_supports_multi_dim_input_rank ... ok
+test run_unsqueeze_i64_supports_output_rank_exceeding_one ... ok
+test model_onnx_end_to_end_matches_onnx_pytorch_reference_within_req7_tolerance ... ok
+test slice_repro_onnx_end_to_end_matches_reference_within_req7_tolerance ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\onnx_interp_backend_dispatch.rs (target\debug\deps\onnx_interp_backend_dispatch-6262e7a8623cb159.exe)
+
+running 18 tests
+test run_with_ops_layer_normalization_negative_epsilon_stays_on_host ... ok
+test run_with_ops_batch_norm_gap_flatten_stay_on_host_and_match_run ... ok
+test run_with_ops_layer_normalization_multi_axis_stays_on_host ... ok
+test run_with_ops_layer_normalization_last_axis_reaches_device ... ok
+test run_with_ops_conv_1d_and_pool_stay_on_host ... ok
+test run_with_ops_elementwise_ops_reach_device_bit_identical ... ok
+test run_with_ops_relu_preserves_nan_propagation_contract ... ok
+test run_with_ops_non_unsupported_backend_error_propagates_as_backend_error ... ok
+test run_with_ops_softmax_non_last_axis_stays_on_host ... ok
+test run_with_ops_softmax_last_axis_reaches_device ... ok
+test run_with_ops_unsupported_ops_falls_back_to_host_for_all_dispatch_eligible_nodes ... ok
+test run_without_ops_matmul_unchanged ... ok
+test scalar_unary_binary_enum_variants_are_reachable ... ok
+test run_with_ops_matmul_reaches_device_and_matches_within_req2 ... ok
+test run_with_ops_gemm_batched_matmul_reaches_device ... ok
+test run_with_ops_gemm_alpha_beta_bias_reaches_device_and_matches_host ... ok
+test scalar_binary_div_kind_matches_ops_semantics ... ok
+test run_with_ops_new_ext_ops_always_stay_on_host_regardless_of_dev_ops ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_interp_cnn_ops.rs (target\debug\deps\onnx_interp_cnn_ops-d6b873f86121c397.exe)
+
+running 8 tests
+test flatten_axis_out_of_range_rejected ... ok
+test flatten_axis1_matches_autodiff_flatten ... ok
+test global_average_pool_rank4_matches_adaptive_avg_pool2d_1x1 ... ok
+test global_average_pool_rank3_matches_adaptive_avg_pool1d_1 ... ok
+test batch_normalization_rank3_matches_autodiff_batch_norm1d_eval ... ok
+test batch_normalization_rank2_matches_autodiff_batch_norm1d_eval ... ok
+test batch_normalization_rank4_matches_autodiff_batch_norm2d_eval ... ok
+test pytorch_style_bn_relu_gap_flatten_gemm_chain_matches_autodiff ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\onnx_interp_conv_pool.rs (target\debug\deps\onnx_interp_conv_pool-d44d3c7662bca6a1.exe)
+
+running 11 tests
+test average_pool_asymmetric_pads_matches_hand_computed_value ... ok
+test avg_pool1d_count_include_pad_false_matches_nn_forward_host_bit_exact ... ok
+test avg_pool2d_count_include_pad_true_matches_nn_forward_host_bit_exact ... ok
+test max_pool_ceil_mode_matches_hand_computed_value ... ok
+test max_pool1d_matches_nn_forward_host_bit_exact ... ok
+test max_pool2d_matches_nn_forward_host_bit_exact ... ok
+test conv1d_matches_nn_forward_host_within_req2 ... ok
+test conv_maxpool_serialized_graph_matches_nn_within_req2 ... ok
+test composite_cnn_chain_matches_nn_within_req2 ... ok
+test conv2d_matches_nn_forward_host_within_req2 ... ok
+test conv_averagepool_serialized_graph_matches_nn_within_req2 ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_interp_ops_ext2.rs (target\debug\deps\onnx_interp_ops_ext2-ed1d2ef7be1e4cc1.exe)
+
+running 64 tests
+test clip_rejects_mixed_attr_and_input_forms ... ok
+test expand_rejects_negative_shape_element ... ok
+test clip_rejects_non_scalar_min_input ... ok
+test expand_i64_uses_pure_copy_path ... ok
+test clip_attr_form_clamps_to_min_max ... ok
+test clip_min_greater_than_max_always_returns_max ... ok
+test clip_input_form_min_only_uses_default_positive_infinity_for_max ... ok
+test expand_bidirectional_broadcast_f32 ... ok
+test expand_rejects_output_byte_size_overflow_instead_of_panicking ... ok
+test expand_rejects_output_within_isize_max_but_over_practical_byte_cap ... ok
+test gelu_approximate_tanh_matches_tanh_formula ... ok
+test gelu_rejects_unsupported_approximate_value ... ok
+test gelu_default_approximate_none_matches_erf_formula ... ok
+test gemm_broadcast_zero_requires_c_shape_exactly_mn ... ok
+test gemm_rejects_arity_outside_two_to_three ... ok
+test gemm_broadcast_zero_accepts_c_shape_exactly_mn ... ok
+test gemm_rejects_type_disguised_alpha_attribute ... ok
+test pad_attr_form_rejects_empty_pads_on_rank1_input ... ok
+test pad_attr_form_rank0_input_with_empty_pads_is_identity ... ok
+test pad_attr_form_constant_default_value_zero ... ok
+test pad_attr_form_rejects_non_empty_pads_on_rank0_input ... ok
+test pad_input_form_rank0_input_with_empty_pads_is_identity ... ok
+test pad_input_form_with_constant_value ... ok
+test pad_rejects_duplicate_axes ... ok
+test pad_rejects_mixed_value_attr_and_input_form ... ok
+test pad_rejects_negative_pads ... ok
+test pad_rejects_non_1d_axes_input ... ok
+test pad_rejects_non_1d_pads_input ... ok
+test pad_rejects_unsupported_mode ... ok
+test reduce_mean_axes_attr_with_keepdims_false ... ok
+test reduce_mean_default_reduces_all_axes_with_keepdims ... ok
+test reduce_mean_empty_axes_input_with_noop_is_identity ... ok
+test reduce_mean_omitted_axes_with_noop_is_identity ... ok
+test reduce_mean_rejects_mixed_attr_and_input_axes ... ok
+test reduce_mean_rejects_non_1d_axes_input ... ok
+test resize_axes_default_order_matches_implicit_nchw ... ok
+test resize_axes_negative_values_normalize_like_pad ... ok
+test resize_axes_partial_hw_only_leaves_scales_len_two ... ok
+test resize_axes_reversed_order_reflects_swapped_h_w_scales ... ok
+test resize_empty_axes_attr_with_empty_scales_is_identity ... ok
+test resize_linear_half_pixel_accepted ... ok
+test resize_rejects_axes_out_of_range ... ok
+test resize_nearest_asymmetric_floor_matches_integer_index_formula ... ok
+test resize_rejects_both_scales_and_sizes_specified ... ok
+test resize_rejects_cubic_mode ... ok
+test resize_rejects_default_onnx_nearest_combination ... ok
+test resize_rejects_duplicate_axes ... ok
+test resize_rejects_nc_axis_scale_near_but_not_exactly_one ... ok
+test resize_rejects_nc_axis_scale_not_one ... ok
+test resize_rejects_non_1d_scales_input ... ok
+test resize_rejects_non_1d_sizes_input ... ok
+test resize_rejects_non_integer_scale ... ok
+test resize_rejects_rank_other_than_four ... ok
+test resize_rejects_output_over_practical_byte_cap ... ok
+test resize_rejects_scale_overflowing_checked_mul_below_usize_max_guard ... ok
+test resize_rejects_scale_overflowing_usize_multiplication ... ok
+test resize_rejects_scales_len_mismatched_with_axes ... ok
+test resize_sizes_form_accepted ... ok
+test resize_two_input_form_reads_second_input_as_scales ... ok
+test tanh_rejects_wrong_arity ... ok
+test tanh_matches_known_values ... ok
+test where_rejects_non_bool_cond ... ok
+test where_broadcasts_cond_against_x_y ... ok
+test where_selects_elementwise_by_bool_cond ... ok
+
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\onnx_interp_pytorch_cnn_fixture.rs (target\debug\deps\onnx_interp_pytorch_cnn_fixture-85444de5662a0a5d.exe)
+
+running 44 tests
+test avgpool1d_basic_ts ... ok
+test avgpool1d_basic_dynamo ... ok
+test avgpool2d_ceil_overhang_incl_dynamo ... ok
+test avgpool2d_ceil_overhang_excl_ts ... ok
+test avgpool2d_ceil_overhang_incl_ts ... ok
+test avgpool2d_ceil_overhang_excl_dynamo ... ok
+test avgpool2d_exclude_pad_ts ... ok
+test avgpool2d_exclude_pad_dynamo ... ok
+test avgpool2d_include_pad_dynamo ... ok
+test bn1d_eval_ts ... ok
+test bn2d_eval_eps_dynamo ... ok
+test bn1d_eval_dynamo ... ok
+test avgpool2d_include_pad_ts ... ok
+test bn2d_eval_dynamo ... ok
+test bn2d_eval_eps_ts ... ok
+test bn2d_eval_ts ... ok
+test conv1d_basic_dynamo ... ok
+test conv1d_basic_ts ... ok
+test external_data_baselines_are_well_formed ... ok
+test conv2d_stride_dil_group_ts ... ok
+test conv2d_stride_dil_group_dynamo ... ok
+test external_data_fixture_bytes_entry_point_still_rejects ... ok
+test conv2d_basic_dynamo ... ok
+test conv2d_nobias_ts ... ok
+test conv2d_basic_ts ... ok
+test conv2d_nobias_dynamo ... ok
+test external_data_fixture_actually_uses_external_path ... ok
+test expectation_table_matches_reference_cases ... ok
+test flatten_default_dynamo ... ok
+test flatten_default_ts ... ok
+test flatten_start2_dynamo ... ok
+test flatten_start2_ts ... ok
+test gap1d_ts ... ok
+test gap1d_dynamo ... ok
+test gap2d_dynamo ... ok
+test gap2d_ts ... ok
+test maxpool1d_basic_ts ... ok
+test reduction_baselines_are_well_formed ... ok
+test maxpool1d_basic_dynamo ... ok
+test external_data_fixture_matches_self_contained_reference ... ok
+test maxpool2d_basic_ts ... ok
+test maxpool2d_pad_dil_ceil_dynamo ... ok
+test maxpool2d_basic_dynamo ... ok
+test maxpool2d_pad_dil_ceil_ts ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests\onnx_poc_v2_6_match.rs (target\debug\deps\onnx_poc_v2_6_match-c885b31b049ca52c.exe)
+
+running 2 tests
+test onnx_weights_fixture_shapes_match_reference_shapes ... ok
+test ops_forward_matches_onnx_pytorch_reference_within_req7_tolerance ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\onnx_slice_dynamic_bounds.rs (target\debug\deps\onnx_slice_dynamic_bounds-04166d89688baa48.exe)
+
+running 2 tests
+test dynamic_bounds_pipeline_matches_slice_repro_reference ... ok
+test dynamic_bounds_pipeline_rejects_mismatched_input_rank ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\onnx_transformer_e2e.rs (target\debug\deps\onnx_transformer_e2e-c0f7a488fa50e2b3.exe)
+
+running 1 test
+test transformer_onnx_end_to_end_matches_pytorch_reference_within_req7_tolerance ... ignored, 12MB の transformer.onnx を非コミット方針としているため。tests/fixtures/README.md の取得手順を参照
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\ops_cross.rs (target\debug\deps\ops_cross-ccfb264bfb593e1f.exe)
+
+running 3 tests
+test stage2_arithmetic_ops ... ok
+test stage1_preprocessing_ops ... ok
+test stage3_ffn_and_layer_norm ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\st_checkpoint.rs (target\debug\deps\st_checkpoint-bc902e3d483da305.exe)
+
+running 3 tests
+test mid_training_checkpoint_round_trips_bit_exact ... ok
+test weights_round_trip_bit_exact_even_under_momentum_training ... ok
+test resume_from_checkpoint_matches_uninterrupted_training ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests\st_load.rs (target\debug\deps\st_load-ad0757e55430576d.exe)
+
+running 7 tests
+test corrupted_bytes_return_safetensors_format_error ... ok
+test truncated_data_is_rejected_before_conversion ... ok
+test unsupported_dtype_is_reported_not_silently_skipped ... ok
+test transpose_2d_on_loaded_weight_matches_pytorch_shape_swap ... ok
+test missing_keys_reports_all_missing_keys_not_a_silent_skip ... ok
+test loads_pytorch_weights_with_expected_keys_and_shapes ... ok
+test forward_matches_pytorch_reference_within_req7_tolerance ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\st_poc_v2_6_match.rs (target\debug\deps\st_poc_v2_6_match-0e88c98b80e8aca8.exe)
+
+running 4 tests
+test transpose_2d_roundtrip_on_all_loaded_weights ... ok
+test loader_preserves_pytorch_native_layout_and_exact_key_set ... ok
+test explicit_transpose_matches_gemm_trans_b_bitwise ... ok
+test ops_forward_matches_pytorch_reference_within_req7_tolerance ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\st_roundtrip.rs (target\debug\deps\st_roundtrip-f27ca0e9a89694a8.exe)
+
+running 4 tests
+test special_float_values_round_trip_bit_exact ... ok
+test rank_zero_scalar_round_trips_bit_exact ... ok
+test save_load_save_produces_identical_bytes ... ok
+test various_ranks_round_trip_bit_exact ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\st_save.rs (target\debug\deps\st_save-ae59715796ac25f0.exe)
+
+running 7 tests
+test empty_map_round_trips_without_error ... ok
+test zero_element_tensor_round_trips_without_error ... ok
+test non_contiguous_transposed_view_round_trips_correctly ... ok
+test same_map_produces_identical_bytes_across_multiple_calls ... ok
+test round_trips_pytorch_fixture_with_bit_exact_values ... ok
+test header_has_expected_dtype_shape_and_data_offsets ... ok
+test save_to_file_produces_loadable_file ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests fandhe_ai_onnx_interop
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

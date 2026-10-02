@@ -1,0 +1,49 @@
+//! load_once <model_path>: facade OnnxModel::from_path で 1 回読み込み・先頭要素とチェックサムを出す。
+use fandhe_ai::interop::onnx::{OnnxModel, OnnxValue};
+use win2393_harness::*;
+
+fn main() {
+    let a = args_or_usage(1, "load_once <model_path>");
+    let path = std::path::PathBuf::from(&a[0]);
+    rec("env", &[("platform", std::env::consts::OS.into()), ("model", a[0].clone())]);
+    let m = match OnnxModel::from_path(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            rec("load", &[("result", "err".into()), ("bucket", bucket(&e)), ("debug", format!("{e:?}"))]);
+            println!("summary status=load_error bucket={}", san(&bucket(&e)));
+            return;
+        }
+    };
+    rec("load", &[("result", "ok".into())]);
+    let out = match m.run(Default::default()) {
+        Ok(o) => o,
+        Err(e) => {
+            rec("run", &[("result", "err".into()), ("bucket", bucket(&e)), ("debug", format!("{e:?}"))]);
+            println!("summary status=run_error bucket={}", san(&bucket(&e)));
+            return;
+        }
+    };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut total = 0u64;
+    let mut k = 0;
+    while let Some(OnnxValue::F32(t)) = out.get(&format!("y{k}")) {
+        if let Some(s) = t.as_slice() {
+            for x in s {
+                for b in x.to_bits().to_le_bytes() {
+                    hash = (hash ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            total += s.len() as u64;
+            let head: Vec<String> = s.iter().take(4).map(|x| x.to_string()).collect();
+            rec("tensor", &[("name", format!("y{k}")), ("elems", s.len().to_string()), ("head", head.join(","))]);
+        }
+        k += 1;
+    }
+    let v = verify(&out, &[SEED_A, SEED_B]);
+    let vs = match &v {
+        Verdict::Match(0) => "match_seed_A".to_string(),
+        Verdict::Match(_) => "match_seed_B".to_string(),
+        Verdict::Invalid { detail } => format!("not_gen_model_pattern({detail})"),
+    };
+    println!("summary status=ok tensors={k} elems={total} fnv1a64={hash:016x} pattern={}", san(&vs));
+}

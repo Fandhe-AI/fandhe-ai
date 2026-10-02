@@ -1,0 +1,11 @@
+rec kind=volume fs=ReFS
+rec kind=rename_case case=i_file_symlink rename=ok dst_before=is_symlink=true_is_file=false_is_dir=false dst_after=is_symlink=false_is_file=true_is_dir=false link_target_content_now=ORIG dst_read_now=NEW tmp_still_exists=false target_written_through=false
+rec kind=rename_case case=ii_dir_symlink rename=err5:PermissionDenied dst_before=is_symlink=true_is_file=false_is_dir=false dst_after=is_symlink=true_is_file=false_is_dir=false link_target_content_now=ORIG dst_read_now=err5 tmp_still_exists=true target_written_through=false
+rec kind=rename_case case=iii_junction rename=err5:PermissionDenied dst_before=is_symlink=true_is_file=false_is_dir=false dst_after=is_symlink=true_is_file=false_is_dir=false link_target_content_now=ORIG dst_read_now=err5 tmp_still_exists=true target_written_through=false
+rec kind=rename_case case=iv_dangling_file_symlink rename=ok dst_before=is_symlink=true_is_file=false_is_dir=false dst_after=is_symlink=false_is_file=true_is_dir=false link_target_content_now=err2 dst_read_now=NEW tmp_still_exists=false target_written_through=false
+rec kind=create_new_case case=i_file_symlink result=err80:AlreadyExists already_exists=true
+rec kind=create_new_case case=ii_dir_symlink result=err5:PermissionDenied already_exists=false
+rec kind=create_new_case case=iii_junction result=err5:PermissionDenied already_exists=false
+rec kind=create_new_case case=iv_dangling_file_symlink result=err80:AlreadyExists already_exists=true
+rec kind=cleanup result=Ok(())
+summary status=done rename_cases=4

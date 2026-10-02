@@ -1,0 +1,54 @@
+p3-build-interop exit=0 sec=55 cmd=cargo build -p fandhe-ai-onnx-interop --tests --locked
+p3-build-facade exit=0 sec=160 cmd=cargo build -p fandhe-ai --tests --locked
+p3-interop-external-data exit=0 sec=2 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_external_data
+p3-interop-cnn-fixture exit=0 sec=1 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_interp_pytorch_cnn_fixture
+p3-interop-lib exit=0 sec=1 cmd=cargo test -p fandhe-ai-onnx-interop --locked --lib
+unc_reachable=True
+p3-interop-external-data-ignored exit=0 sec=0 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_external_data -- --ignored
+p3-facade-external-data exit=0 sec=1 cmd=cargo test -p fandhe-ai --locked --test interop_onnx_external_data
+p3-facade-internal-parity exit=0 sec=1 cmd=cargo test -p fandhe-ai --locked --test interop_onnx_internal_parity
+p3-facade-external-data-limits exit=0 sec=0 cmd=cargo test -p fandhe-ai --locked --test interop_onnx_external_data_limits
+p3-facade-model-io exit=0 sec=1 cmd=cargo test -p fandhe-ai --locked --test compat_sequential_model_io
+p3-interop-all exit=0 sec=9 cmd=cargo test -p fandhe-ai-onnx-interop --locked --no-fail-fast
+p3-facade-all exit=101 sec=240 cmd=cargo test -p fandhe-ai --locked --no-fail-fast
+p3-hardlink-temp-cfg exit=0 sec=2 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_external_data overlapping_regions_via_hard_link_are_rejected
+p4-harness-build exit=0 sec=77 cmd=cargo build --release --locked
+p4-refs-interop-external-data exit=0 sec=2 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_external_data
+p4-refs-interop-external-data-ignored exit=0 sec=0 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_external_data -- --ignored
+p4-refs-interop-cnn-fixture exit=0 sec=0 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_interp_pytorch_cnn_fixture
+p4-refs-facade-external-data exit=0 sec=0 cmd=cargo test -p fandhe-ai --locked --test interop_onnx_external_data
+p4-exfat-interop-external-data exit=101 sec=1 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_external_data
+p4-exfat-interop-external-data-ignored exit=101 sec=0 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_external_data -- --ignored
+p4-exfat-interop-cnn-fixture exit=0 sec=0 cmd=cargo test -p fandhe-ai-onnx-interop --locked --test onnx_interp_pytorch_cnn_fixture
+p4-exfat-facade-external-data exit=0 sec=0 cmd=cargo test -p fandhe-ai --locked --test interop_onnx_external_data
+p4-reparse-nonempty-ntfs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\reparse_nonempty.exe C:\tmp2393\rp
+p4-reparse-nonempty-refs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\reparse_nonempty.exe R:\tmp\rp
+p4-reparse-nonempty-exfat exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\reparse_nonempty.exe X:\tmp\rp
+p4-gen-small-ntfs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\gen_model.exe C:\tmp2393\rr\small 8 --layout a/b
+p4-rename-race-small-ntfs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe C:\tmp2393\rr\small\model_a_b.onnx C:\tmp2393\rr\small\a 300
+p4-gen-large-ntfs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\gen_model.exe C:\tmp2393\rr\large 256 --layout a/b
+p4-rename-race-large-ntfs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe C:\tmp2393\rr\large\model_a_b.onnx C:\tmp2393\rr\large\a 20
+p4-gen-small-refs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\gen_model.exe R:\tmp\rr\small 8 --layout a/b
+p4-rename-race-small-refs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe R:\tmp\rr\small\model_a_b.onnx R:\tmp\rr\small\a 300
+p4-gen-large-refs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\gen_model.exe R:\tmp\rr\large 256 --layout a/b
+p4-rename-race-large-refs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe R:\tmp\rr\large\model_a_b.onnx R:\tmp\rr\large\a 20
+p4-flip-revert-ntfs exit=0 sec=50 cmd=C:\work\src\win2393-harness\target\release\flip_revert.exe C:\tmp2393\fr 2000
+p4-flip-revert-refs exit=0 sec=19 cmd=C:\work\src\win2393-harness\target\release\flip_revert.exe R:\tmp\fr 2000
+p4-wsave-ntfs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\wsave.exe C:\tmp2393\ws
+p4-wsave-refs exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\wsave.exe R:\tmp\ws
+p4-cuda-probe-nogpu exit=0 sec=0 cmd=C:\work\src\win2393-harness\target\release\cuda_probe.exe
+cache_dir_exists_after=False
+baseline exit=-1073741502
+deny-traverse-a exit=-1073741502
+whoami task_result=0
+baseline task_result=0
+deny-traverse-a task_result=0
+deny-traverse-plain-read task_result=0
+deny-traverse-plain-read task_result=0
+p4b-harness-build exit=0 sec=6 cmd=cargo build --release --locked
+p4b-rename-delay-small-ntfs exit=0 sec=3 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe C:\tmp2393\rr\small\model_a_b.onnx C:\tmp2393\rr\small\a 130 --delay-us auto
+p4b-rename-delay-large-ntfs exit=0 sec=37 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe C:\tmp2393\rr\large\model_a_b.onnx C:\tmp2393\rr\large\a 52 --delay-us auto
+p4b-rename-delay-small-refs exit=0 sec=3 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe R:\tmp\rr\small\model_a_b.onnx R:\tmp\rr\small\a 130 --delay-us auto
+p4b-rename-delay-large-refs exit=0 sec=38 cmd=C:\work\src\win2393-harness\target\release\rename_race.exe R:\tmp\rr\large\model_a_b.onnx R:\tmp\rr\large\a 52 --delay-us auto
+p4b-flip-revert-ntfs exit=0 sec=1 cmd=C:\work\src\win2393-harness\target\release\flip_revert.exe C:\tmp2393\fr2 2000 --min-cycles 300
+p4b-flip-revert-refs exit=0 sec=1 cmd=C:\work\src\win2393-harness\target\release\flip_revert.exe R:\tmp\fr2 2000 --min-cycles 300

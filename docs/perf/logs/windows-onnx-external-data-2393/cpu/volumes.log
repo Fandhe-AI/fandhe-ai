@@ -1,0 +1,6 @@
+
+DriveLetter FileSystem FileSystemLabel         Size
+----------- ---------- ---------------         ----
+          C NTFS                       160939618304
+          R ReFS       REFSVOL          10737418240
+          X exFAT      EXFATVOL         10716446720

@@ -1,0 +1,2 @@
+rec kind=generated model=C:\tmp2393\rr\large\model_a_b.onnx data=C:\tmp2393\rr\large\a/b\w.bin ancestor_dir=C:\tmp2393\rr\large\a location=a/b/w.bin elems=67108864 tensors=4 seed=0x1111aaaa
+summary status=ok bytes=268435456 tensors=4

@@ -1,0 +1,75 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates\tensor-core\src\pool_core.rs:496:43
+    |
+496 |         let _ = self.pending_return_bytes.fetch_update(
+    |                                           ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+496 -         let _ = self.pending_return_bytes.fetch_update(
+496 +         let _ = self.pending_return_bytes.try_update(
+    |
+
+warning: `fandhe-ai-tensor-core` (lib) generated 1 warning (run `cargo fix --lib -p fandhe-ai-tensor-core` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests\onnx_external_data.rs (target\debug\deps\onnx_external_data-bd43f320775f74cd.exe)
+
+running 53 tests
+test default_with_external_data_present_is_rejected ... ok
+test checksum_key_is_rejected_fail_closed ... ok
+test absolute_location_is_rejected ... ok
+test backslash_in_location_is_rejected ... ok
+test drive_prefix_location_is_rejected ... ok
+test directory_as_location_is_rejected ... ok
+test duplicate_initializer_name_is_rejected_before_io ... ok
+test bytes_entry_point_still_rejects_external_data_model ... ok
+test bool_and_f16_external_tensors_load ... ok
+test duplicate_key_is_rejected ... ok
+test empty_location_is_rejected ... ok
+test duplicate_identical_region_is_rejected ... ok
+test empty_offset_is_rejected ... ok
+test constant_attribute_tensor_external_data_resolves_and_runs ... ok
+test external_with_inline_raw_data_present_is_rejected ... ok
+test invalid_data_location_value_is_rejected ... ok
+test external_file_count_limit_allows_shared_file_reuse ... ok
+test huge_length_is_rejected_before_allocation ... ok
+test f32_external_tensor_loads_and_matches_bit_exact_inline ... ok
+test int64_external_tensor_loads ... ok
+test external_constant_attributes_run_bit_identical_to_inline_across_runs ... ok
+test missing_location_key_is_rejected ... ok
+test length_mismatch_with_expected_bytes_is_rejected ... ok
+test nonexistent_base_dir_is_rejected ... ok
+test external_file_count_limit_is_enforced ... ok
+test missing_file_is_io_not_found ... ok
+test negative_offset_is_rejected ... ok
+test non_numeric_offset_is_rejected ... ok
+test offset_plus_length_overflow_is_rejected ... ok
+test offset_selects_correct_region_in_shared_file ... ok
+test omitted_length_reads_to_eof ... ok
+test overlapping_regions_in_same_file_are_rejected ... ok
+test overlapping_regions_via_equivalent_location_spelling_are_rejected ... ok
+test owned_build_keeps_topology_validation ... ok
+test plus_prefixed_offset_is_rejected ... ok
+test symlink_final_component_is_rejected_on_windows ... ignored, 要 SeCreateSymbolicLinkPrivilege または開発者モード（Windows 実機限定）
+test symlink_intermediate_component_is_rejected_on_windows ... ignored, 要 SeCreateSymbolicLinkPrivilege または開発者モード（Windows 実機限定）
+test parent_dir_traversal_is_rejected ... ok
+test too_long_location_is_rejected ... ok
+test range_exceeding_file_length_is_rejected ... ok
+test total_size_limit_is_enforced ... ok
+test unc_base_dir_is_rejected ... ignored, 管理共有（C$）の設定に依存する（Windows 実機限定）
+test u64_overflow_length_is_rejected ... ok
+test whitespace_offset_is_rejected ... ok
+test owned_build_matches_resolve_then_build_graph ... ok
+test unknown_key_is_rejected ... ok
+test write_handle_causes_sharing_violation_rejection ... ok
+test zero_length_region_inside_existing_region_is_not_overlapping ... ok
+test windows_lexical_rejections_via_full_pipeline ... ok
+Junction created for C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-1204-1790972664371543100-22-external-data-win-junction-mid\link_dir <<===>> C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-1204-1790972664371543100-22-external-data-win-junction-mid\real_dir
+Junction created for C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-1204-1790972664371626500-23-external-data-win-junction-final-dir\link_dir <<===>> C:\Users\<user>\AppData\Local\Temp\fandhe-ai-onnx-interop-test-1204-1790972664371626500-23-external-data-win-junction-final-dir\real_dir
+test junction_as_final_directory_component_is_rejected ... ok
+test junction_intermediate_component_is_rejected ... ok
+test one_overlap_among_many_unit_regions_is_rejected_with_names ... ok
+test many_non_overlapping_unit_regions_in_one_file_resolve ... ok
+
+test result: ok. 50 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 1.11s

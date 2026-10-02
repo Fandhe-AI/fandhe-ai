@@ -1,0 +1,11 @@
+nvrtc_bin_dir=cuda_nvrtc-windows-x86_64-13.0.88-archive\bin\x64
+name, driver_version, compute_cap
+Tesla T4, 596.86, 7.5
+nvcuda_system32=True
+dll nvrtc-builtins64_130.dll
+dll nvrtc64_130_0.alt.dll
+dll nvrtc64_130_0.dll
+redist cudart sha256_ok=True
+redist crt sha256_ok=True
+redist cccl sha256_ok=True
+cuda_fp16_h=True

@@ -1,0 +1,4 @@
+rec kind=env platform=windows model=C:\acl2393\model_a_b.onnx
+rec kind=load result=err bucket=Io:PermissionDenied:os=None debug=Io(Kind(PermissionDenied))
+summary status=load_error bucket=Io:PermissionDenied:os=None
+exit=0

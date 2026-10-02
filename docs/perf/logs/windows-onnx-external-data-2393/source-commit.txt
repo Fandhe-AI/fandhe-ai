@@ -1,0 +1,3 @@
+# 検証 VM へ転送したソースのコミット（転送元で `git rev-parse origin/main` を記録した値）
+# 転送物は `git archive` の zip。VM 上での同一性は fixture 51 件の sha256 一致（cpu/fixtures-sha256.log・gpu/fixtures-sha256.log）で確認した
+e2f5461568d346e5117873a3e4d67ce30d76d631

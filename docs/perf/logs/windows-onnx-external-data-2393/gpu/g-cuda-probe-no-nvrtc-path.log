@@ -1,0 +1,7 @@
+rec kind=env platform=windows arch=x86_64
+rec kind=cache_before RUST_AI_CUDA_CACHE_DIR=C:\cache2393\nvrtc dir_exists=false files=0
+rec kind=devices available=[Cpu,_Cuda(0)]
+rec kind=tf32_opt_in enabled=false
+rec kind=cuda_select result=ok
+rec kind=gemm_run iter=0 result=err debug=Backend(CudaUnavailable("CUDA_NVRTC_library_unavailable:_libnvrtc_dynamic_library_not_found_(dlopen_failed);_CUDA_toolkit_is_not_installed_or_not_on_the_library_search_path"))
+summary status=gemm_error error=Backend(CudaUnavailable("CUDA_NVRTC_library_unavailable:_libnvrtc_dynamic_library_not_found_(dlopen_failed);_CUDA_toolkit_is_not_installed_or_not_on_the_library_search_path"))
