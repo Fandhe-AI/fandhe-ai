@@ -92,13 +92,13 @@ exact` 等、#1214 当時になかった新しいフラグに対応するため�
 | パス | 内容 |
 |------|------|
 | `orchestrate.sh` | 専有ゲート → `run_ab_vjp_transposed_cuda.sh` の実行ラッパー（`--dry-run` あり） |
-| `run_ignored_tests.sh` | R1（対象 `#[ignore]` テスト群）を HEAD（`REPO_ROOT`）で個別プロセス実行しログを保存する。`AUX_TREE=<after ツリー絶対パス>` を指定すると §3.2 正式補助 A/B（`gemm_transposed_perf` 5 起動）も **after ツリー内で** 続けて実行する（未指定時は aux/ をスキップし fail-closed。PR #1812 Cursor Bugbot 指摘: R1 の一部は post-#1214 API 依存のため HEAD 限定・aux はコンタミ防止のため after ツリー限定で、両者を同一 `REPO_ROOT` に一本化できない） |
+| `run_ignored_tests.sh` | R1（対象 `#[ignore]` テスト群）を HEAD（`REPO_ROOT`）で個別プロセス実行しログを保存する。`AUX_TREE=<after ツリー絶対パス>` を指定すると §3.2 正式補助 A/B（`gemm_transposed_perf` 5 起動）も **after ツリー内で** 続けて実行する（未指定時は aux-ab/ をスキップし fail-closed。PR #1812 Cursor Bugbot 指摘: R1 の一部は post-#1214 API 依存のため HEAD 限定・aux はコンタミ防止のため after ツリー限定で、両者を同一 `REPO_ROOT` に一本化できない） |
 | `aggregate_aux_ab.py` | `gemm_transposed_perf` の 5 プロセス起動ログから形状ごとの speedup 中央値表を生成する（`--self-test` あり） |
 | `env_info.txt` | 実行環境・sha・バイナリ sha256・判定結果（2026-09-16 実測済み） |
 | `ab/` | `run_ab_vjp_transposed_cuda.sh` の出力回収先（JSONL・compare md・sha・tree・uptime・skipped。2026-09-16 実測済み） |
 | `ab/rev-stamp-verification-1590.md` | 両腕の `.rev-stamp`（`rev-stamp-{before,after}-1590.txt`）とツリー内容指紋（`tree-hashes-*.txt`）の独立検証記録（PR #1909 codex P2 対応・2026-09-16） |
 | `ignored/` | `run_ignored_tests.sh` の出力回収先（テストごとのログ。2026-09-16 実測済み） |
-| `aux/` | `gemm_transposed_perf` 5 プロセス起動ログの回収先（未生成） |
+| `aux-ab/` | `gemm_transposed_perf` 5 プロセス起動ログの回収先（旧名 `aux/`。Windows 予約名のため #2482 で改名） |
 
 `scripts/bench/framework-compare/run_ab_vjp_transposed_cuda.sh`（本
 ディレクトリではなくスクリプト本体はそちらに配置。deps-policy.md の
@@ -141,9 +141,9 @@ exact` 等、#1214 当時になかった新しいフラグに対応するため�
    `cd` してから実行する（post-#1214 の CUDA 変更が正式補助 A/B の数値
    へ混入するのを防ぐため。REPO_ROOT 自体を after ツリーへ向ける方式は
    R1 の後発ケースが存在せずビルド不能になるため採らない）。`AUX_TREE`
-   を省略すると `aux/` は fail-closed でスキップされる（`aux/SKIPPED.txt`
+   を省略すると `aux-ab/` は fail-closed でスキップされる（`aux-ab/SKIPPED.txt`
    に理由を記録。R1 のみを先に確認したい場合に使う）
-3. `aggregate_aux_ab.py` で `aux/gemm_transposed_perf_run{1..5}.log` を
+3. `aggregate_aux_ab.py` で `aux-ab/gemm_transposed_perf_run{1..5}.log` を
    集計する
 4. Tier 1 A/B:
 
@@ -155,7 +155,7 @@ exact` 等、#1214 当時になかった新しいフラグに対応するため�
 
    `AB_LOAD_GATE_MODE=record_only` を付けると専有ゲートを opt-out できる
    （ユーザー明示指示がある場合のみ）
-5. 生成物を `ab/`／`ignored/`／`aux/`・`env_info.txt` へ回収し、内部
+5. 生成物を `ab/`／`ignored/`／`aux-ab/`・`env_info.txt` へ回収し、内部
    ホスト名・ユーザー名・実パスが含まれないことを確認してマスクする
 6. 結果を `docs/perf/cuda-gemm-vjp-transposed-entry.md` §3.3／§4 へ転記
    する

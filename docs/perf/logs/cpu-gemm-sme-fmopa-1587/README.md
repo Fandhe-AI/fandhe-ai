@@ -152,3 +152,13 @@
 および本ディレクトリの `RULE.txt`（イシュー #1978 用に固定した運用
 規則）を正とする。本 README は要旨のみを転記し、規則自体はそちら側を
 正とする（事後の緩和はコメント側を編集せず新規コメントで記録する規約）。
+
+## 注記（#2482: 1590 ログの `aux/` 改名）
+
+`gb10/{attribution,bitdump}/fp-*.txt` に載る
+`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux/*` は、Windows 予約名
+回避のため #2482 で `aux-ab/*` へ改名された（改名のみで 6 ファイルの内容・
+sha256 は不変）。`fp-*.txt` は記録時点の過去記録として未改変とする。
+また同ディレクトリの `README.md`・`run_ignored_tests.sh`・
+`aggregate_aux_ab.py`・`env_info.txt` は #2482 の参照更新で内容が変わったため、
+`fp-*.txt` 中のこれらの行のハッシュは記録時点のものであり現在のファイルとは一致しない。

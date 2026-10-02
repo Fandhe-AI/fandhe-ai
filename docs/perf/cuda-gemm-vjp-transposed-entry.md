@@ -127,9 +127,9 @@ logs/lowlayer-diagnosis-2026-09-12/dgx/gemm_transposed_{parity,perf}.log`
 に不変のまま残す）。
 
 **2026-09-16 実測済み → 5 プロセス起動中央値（イシュー #1590）**。出典
-`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux/
-gemm_transposed_perf_run{1..5}.log`・同 `aux/aggregate_aux.md`
-（`aggregate_aux_ab.py aux/*.log`。5 起動とも `2 passed; 0 failed`）:
+`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux-ab/
+gemm_transposed_perf_run{1..5}.log`・同 `aux-ab/aggregate_aux.md`
+（`aggregate_aux_ab.py aux-ab/*.log`。5 起動とも `2 passed; 0 failed`）:
 
 | パターン | m | k | n | before 中央値 (s) | after 中央値 (s) | 倍率中央値（5 起動） | n_runs |
 |----------|---|---|---|-------------------|-------------------|----------------------|--------|
@@ -236,7 +236,7 @@ mismatch で初期化不可）には DGX Spark GB10 実機への到達手段が�
   727 件。除外は cargo が書き換える `framework-compare/Cargo.lock` と
   ビルド成果物 `target-ab-*` のみ）。手順・一覧ハッシュは
   `ab/rev-stamp-verification-1590.md`
-- R1（HEAD ツリー `3e43bbd0`。`ignored/*.log`・`aux/*.log`）: **20/20
+- R1（HEAD ツリー `3e43bbd0`。`ignored/*.log`・`aux-ab/*.log`）: **20/20
   pass・0 fail**（`gemm_transposed_parity` 5/5・`gemm_transposed_perf`
   2/2〈5 起動すべて〉・`gemm_fp32_strict_into_parity` 4/4・
   `transpose_parity` 4/4・`repack_count_tests` 3/3・
