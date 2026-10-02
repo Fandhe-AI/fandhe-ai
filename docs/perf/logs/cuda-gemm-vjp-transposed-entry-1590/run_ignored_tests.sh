@@ -21,22 +21,22 @@
 #     docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/run_ignored_tests.sh
 #
 #   `AUX_TREE` を省略すると R1（`ignored/`）のみを実行し、正式補助 A/B
-#   （`aux/`）は fail-closed でスキップする（HEAD で代用して事実と異なる
+#   （`aux-ab/`）は fail-closed でスキップする（HEAD で代用して事実と異なる
 #   系列を正式値として記録することを防ぐため。security.md A08）。
 #
 # 出力: docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/ignored/*.log
-#       docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux/gemm_transposed_perf_run{1..5}.log
+#       docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux-ab/gemm_transposed_perf_run{1..5}.log
 #       （`AUX_TREE` 指定時のみ生成）
 set -u
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="${SELF_DIR}/ignored"
-AUX_DIR="${SELF_DIR}/aux"
+AUX_DIR="${SELF_DIR}/aux-ab"
 mkdir -p "$OUT_DIR" "$AUX_DIR"
-# 再実行時に前回の aux/ ログを残さない（codex-review 指摘・PR #1812）。
+# 再実行時に前回の aux-ab/ ログを残さない（codex-review 指摘・PR #1812）。
 # `AUX_TREE` 未指定で再実行すると SKIPPED.txt と過去の完全な 5 ログが
 # 共存し、`aggregate_aux_ab.py` の起動数・8 形状検査だけではそれが
 # 「今回の実行結果」なのか「前回の生き残り」なのか区別できない。実行の
-# たびに aux/ を空にしてから開始することで、この回の実行が完走したかどうか
+# たびに aux-ab/ を空にしてから開始することで、この回の実行が完走したかどうか
 # だけで判定できる状態を保証する（実行途中で中断された場合も、次回実行
 # 開始時に必ず一掃されるため古いログとの混在は起きない）。
 rm -f "$AUX_DIR"/gemm_transposed_perf_run*.log "$AUX_DIR/SKIPPED.txt"
@@ -75,14 +75,14 @@ run_case gemm_transposed_parity \
   --ignored --nocapture --test-threads=1
 
 # gemm_transposed_perf（2 件。§3.2 の正式補助 A/B 兼用のため 5 回
-# 個別プロセス起動して `aux/` へ保存する）。R1 とは異なりこの 5 起動は
+# 個別プロセス起動して `aux-ab/` へ保存する）。R1 とは異なりこの 5 起動は
 # **after ツリー（`AUX_TREE`。#1214 マージコミット `ab0b77d0` 自身）で
 # 実行しなければならない**（本スクリプトの他の R1 ケースは HEAD 限定の
 # ため、REPO_ROOT 自体を after へ切り替える方式は採らない。PR #1812
 # Cursor Bugbot 指摘）。`AUX_TREE` 未指定時は HEAD の数値を正式値として
 # 記録することを避けるため fail-closed でスキップする。
 if [[ -z "$AUX_TREE" ]]; then
-  echo "skip: gemm_transposed_perf の正式補助 A/B（aux/）は AUX_TREE 未指定のためスキップ（AUX_TREE=<after ツリー絶対パス> を指定して再実行すること）" | tee "$AUX_DIR/SKIPPED.txt"
+  echo "skip: gemm_transposed_perf の正式補助 A/B（aux-ab/）は AUX_TREE 未指定のためスキップ（AUX_TREE=<after ツリー絶対パス> を指定して再実行すること）" | tee "$AUX_DIR/SKIPPED.txt"
 else
   for i in $(seq 1 "$AUX_LAUNCHES"); do
     echo "== gemm_transposed_perf run$i == (tree=$AUX_TREE)" | tee "$AUX_DIR/gemm_transposed_perf_run${i}.log"
@@ -121,7 +121,7 @@ run_case device_param_store_backend_parity_cuda_grad_readout \
   cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- \
   --ignored --nocapture --exact grad_readout_contract_on_cuda
 
-echo "done. logs in $OUT_DIR (ignored) / $AUX_DIR (aux 5-launch)"
+echo "done. logs in $OUT_DIR (ignored) / $AUX_DIR (aux-ab 5-launch)"
 if [[ "$ANY_FAILED" -gt 0 ]]; then
   echo "FAILED: $ANY_FAILED test group(s) failed; see $OUT_DIR / $AUX_DIR" >&2
   exit 1

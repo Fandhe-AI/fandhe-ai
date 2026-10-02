@@ -30,7 +30,7 @@ r1_result: green（20/20 pass・0 fail。内訳: gemm_transposed_parity 5/5・ge
 
 # 正式補助 A/B（gemm_transposed_perf・5 プロセス起動）
 # 要確認: 事前登録規則（README 手順 2）は AUX_TREE=after ツリー（ab0b77d0）限定
-# だが、aux/gemm_transposed_perf_run{1..5}.log の見出しは HEAD ツリー
+# だが、aux-ab/gemm_transposed_perf_run{1..5}.log の見出しは HEAD ツリー
 # （tree=/home/<user>/work/rust-ai-library-run = 3e43bbd0）での実行を示す。
 # after ツリー限定の隔離条件を満たしていないため、下記値は「HEAD ツリーでの
 # 5 起動中央値」として記録し、§3.2 診断系列を置き換える正式値とは扱わない。
@@ -43,7 +43,7 @@ aux_ab_5launch_tn_m64_k784_n256: 2.223x (before 0.000163 s / after 0.000072 s, n
 aux_ab_5launch_tn_m64_k256_n10: 2.154x (before 0.000050 s / after 0.000023 s, n_runs=5)
 aux_ab_5launch_tn_m1024_k1024_n1024: 5.295x (before 0.002375 s / after 0.000445 s, n_runs=5)
 aux_ab_5launch_tn_m2048_k2048_n2048: 2.757x (before 0.021117 s / after 0.007755 s, n_runs=5)
-# 集計は aux/aggregate_aux.md（`aggregate_aux_ab.py aux/*.log` の出力）。オーケストレータが
+# 集計は aux-ab/aggregate_aux.md（`aggregate_aux_ab.py aux-ab/*.log` の出力）。オーケストレータが
 # 引数なしで呼んだ 1 回目は usage エラー（rc=2）で終了しており、本集計とは別。
 
 # Tier 1（train size=64。fresh／reuse 両方が判定対象）

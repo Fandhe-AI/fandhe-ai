@@ -4,7 +4,7 @@
 出力する。
 
 `run_ignored_tests.sh` が生成する
-`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux/
+`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux-ab/
 gemm_transposed_perf_run{1..5}.log` を入力とする。
 
 python3 標準ライブラリのみ（他の集計スクリプト群と同方針。追加依存
@@ -119,7 +119,7 @@ class ValidationError(ValueError):
 def validate_no_duplicate_logs(paths: list[Path]) -> None:
     """同一ログファイルの重複指定を検出する（codex-review 指摘・PR #1812）。
 
-    `docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux/
+    `docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux-ab/
     gemm_transposed_perf_run{1..5}.log` を 5 回とも異なる起動のログとして
     指定する必要があるが、`validate_run_texts` の起動数・形状検査だけでは
     同一の完全なログファイルを 5 回指定しても（各ログはそれぞれ 8 形状を
