@@ -1080,8 +1080,9 @@ fn zero_length_region_inside_existing_region_is_not_overlapping() {
 /// 込まれていた（`Path` の実装詳細に依存した偶然の回避）。より厳密な
 /// 回帰は [`overlapping_regions_via_hard_link_are_rejected`]（ハードリンク
 /// はパス文字列としても `Path::components()` 正規化後も異なるが実体は
-/// 同一のファイルであり、`file_key_for` の dev/ino ベースキーでのみ
-/// 検出できる）を参照。
+/// 同一のファイルであり、`file_key_for` の実体キー〈unix は dev/ino、
+/// Windows はボリュームシリアル + ファイルインデックス〉でのみ検出できる）
+/// を参照。
 #[cfg(any(unix, windows))]
 #[test]
 fn overlapping_regions_via_equivalent_location_spelling_are_rejected() {
@@ -1139,13 +1140,21 @@ fn overlapping_regions_via_equivalent_location_spelling_are_rejected() {
 /// 同一 inode のハードリンク）を異なるファイルとして扱い、この重複を
 /// 見落とす。`file_key_for` の dev/ino ベースキーはファイルの実体
 /// そのもので同一性判定するため、この経路のみ検出できる）。
-#[cfg(unix)]
+///
+/// Windows でも `file_key_for` は `(dwVolumeSerialNumber, nFileIndex)` の
+/// 実体キーで同一性を判定し、ハードリンクは同じキーに畳み込まれるため、
+/// 本テストは `unix` / `windows` 共通で成立する（#2485。#2393 の Windows
+/// 実機検証で cfg を一時的に広げて NTFS・ReFS の pass を確認済み。exFAT は
+/// ハードリンク非対応で fixture 作成の段階で失敗する）。
+#[cfg(any(unix, windows))]
 #[test]
 fn overlapping_regions_via_hard_link_are_rejected() {
     let dir = TempDir::new("overlap-hardlink");
     let real = dir.write_file("f.data", &[0u8; 16]);
     let alias = dir.path().join("alias.data");
-    std::fs::hard_link(&real, &alias).expect("hard_link の作成に失敗した");
+    std::fs::hard_link(&real, &alias).expect(
+        "hard_link の作成に失敗した（ハードリンクを作れるファイルシステムが前提。exFAT 等の非対応 FS では fixture 作成で失敗し、封じ込め判定の失敗ではない）",
+    );
 
     let t_a = external_tensor(
         "a",

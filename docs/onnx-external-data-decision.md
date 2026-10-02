@@ -975,7 +975,9 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
   `(dwVolumeSerialNumber, nFileIndex)` へ切り替えた PR #2351〈5 節
   (c)〉で失効している。`overlapping_regions_via_hard_link_are_rejected`
   の Windows 実行は未充足のテスト網羅として #2393〈実機検証〉へ申し
-  送る。イシュー #2392 ではテストを変更しない）。Windows 固有の新規テスト
+  送る。イシュー #2392 ではテストを変更しない。**2026-10-03 追記: #2485 で
+  cfg を `any(unix, windows)` へ広げた。Windows 実機〈NTFS〉での再確認は
+  人手**）。Windows 固有の新規テスト
   （`onnx_external_data.rs`）: junction が途中成分・最終成分（ディレクトリ
   への junction）にある場合の `ReparsePoint` 拒否、字句検査（ADS・予約
   デバイス名・禁止文字・末尾ドット/空白。`windows_lexical_rejections_
@@ -1022,7 +1024,8 @@ Windows の std にはディレクトリハンドル起点の相対オープン�
     `overlapping_regions_via_hard_link_are_rejected` の cfg を
     `any(unix, windows)` へ変えて実行し、NTFS・ReFS で pass
     （リポジトリのテストは変更していない）。cfg を広げる変更は起票候補
-    （README の起票候補 4。起票はしていない）。ReFS・exFAT の
+    （README の起票候補 4）。**2026-10-03 追記: #2485 でリポジトリのテストの
+    cfg を `any(unix, windows)` へ広げた。Windows 実機での再確認は人手**。ReFS・exFAT の
     `onnx_external_data` は、cfg 変更を戻した後 mtime が古いまま戻った
     ため cargo が再ビルドせず、hard link テストを含むバイナリ（54 件）で
     実行されている（NTFS の 53 件との差）。
@@ -1160,7 +1163,7 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
 |------|---------|
 | (d) ReFS・exFAT の意味論 | ReFS: NTFS と同じ結果（非空ディレクトリへの reparse 設定は 145・`onnx_external_data` 51 passed・flip-and-revert 764 サイクルで breach 0）。exFAT: reparse 設定が空・非空とも 1（`ERROR_INVALID_FUNCTION`）で reparse point 自体を持たず、junction・symlink・hard link は作成できない（テストの fixture 作成失敗であり封じ込め判定の失敗ではない）。**ReFS の `nFileIndex` 一意性は実測していない（行はそのまま）** |
 | リンク解決 | `#[link]` 明示なしでも実機リンク成功（上の P2 行）。実害なし・明示化は起票候補のまま |
-| テスト網羅 | VM 上でのみ cfg を `any(unix, windows)` に変えて NTFS・ReFS で pass。リポジトリのテストは未変更で、cfg 拡張は起票候補（未起票・ユーザー承認待ち） |
+| テスト網羅 | VM 上でのみ cfg を `any(unix, windows)` に変えて NTFS・ReFS で pass。リポジトリのテストは未変更で、cfg 拡張は起票候補（未起票・ユーザー承認待ち）。2026-10-03 追記: #2485 で対応済み |
 
 ### 10.5 PR #2351 の記録との関係
 
