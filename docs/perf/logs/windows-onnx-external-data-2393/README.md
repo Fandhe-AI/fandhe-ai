@@ -49,9 +49,9 @@
 | `cargo build -p fandhe-ai-onnx-interop --tests --locked` | 成功（MSVC リンク成功・55 秒） | `cpu/p3-build-interop.log` |
 | `cargo build -p fandhe-ai --tests --locked` | 成功（160 秒） | `cpu/p3-build-facade.log` |
 
-`#[link(name = "kernel32")]` の明示なしでも、`win_contained_open` の kernel32 手書き `extern "system"` 宣言は
-リンクで解決された（`LNK` エラーなし）。`docs/onnx-external-data-decision.md` §10.2 の P2 は**実害なし**。
-ただし明示化はコード修正の起票候補のまま（対応済み: #2486）。
+（#2486 対応前の実測）`#[link(name = "kernel32")]` の明示なしでも、`win_contained_open` の kernel32 手書き `extern "system"` 宣言は
+リンクで解決された（`LNK` エラーなし）。`docs/onnx-external-data-decision.md` §10.2 の P2 は**実害なし**だった。
+その後、明示化は #2486 で対応済み。
 
 ### NTFS（C:。CPU VM）
 
@@ -261,8 +261,9 @@ Windows 固有のテスト分離漏れ（下記）であり、封じ込め・ext
    （NTFS・ReFS で pass）。
 5. **facade**: external data のエラー写像で raw OS エラーが失われ診断しにくい（`Io(Kind(Uncategorized))`）。
 
-既存の起票候補（`onnx-external-data-decision.md` §10.2 P2 の `#[link(name = "kernel32")]` 明示化〈対応済み: #2486〉・§10.4 の USN 変更検知・
+既存の起票候補（`onnx-external-data-decision.md` §10.4 の USN 変更検知・
 `FileIdInfo`〈128 bit ID〉への切替）は本実測では変わらず、そのまま残る。
+（§10.2 P2 の `#[link(name = "kernel32")]` 明示化は #2486 で対応済みのため候補から除外。）
 
 ## 期待と異なった点（訂正）
 
