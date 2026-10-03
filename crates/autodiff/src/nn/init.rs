@@ -59,10 +59,10 @@
 //! コンストラクタ（`new(.., seed)`）自体はこの変更の対象外
 //! （イシュー #2140 のスコープ外。本文参照）。
 //!
-//! facade（`fandhe_ai::nn::init`）への再エクスポートは別途ユーザー承認
-//! （`docs/compat-api-scope.md` §5 経路 2）を要する公開面拡張であり、
-//! 本イシュー時点では未承認のため `crates/facade/**` には反映しない
-//! （`docs/facade-nn-init-exposure-decision.md` 参照）。
+//! facade（`fandhe_ai::nn::init`）へはイシュー #2504（ルート #2499 の
+//! 一括承認。`docs/compat-api-scope.md` §5 経路 2）で純再エクスポート
+//! として公開済み（`crates/facade/src/nn/init.rs`。
+//! `docs/facade-nn-init-exposure-decision.md` 参照）。
 
 use fandhe_ai_tensor_core::rng::{Xorshift64Star, with_global_rng};
 use fandhe_ai_tensor_core::{ShapeError, Tensor};

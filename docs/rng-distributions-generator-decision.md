@@ -71,9 +71,9 @@ PyTorch `torch.Generator` 相当。グローバル RNG（`manual_seed`／`with_g
 2. **ソース走査ガード**（`crates/facade/tests/api_surface.rs`）: glob 集合のドリフト検査 2 件・facade src 全体の再エクスポート／独自宣言の非存在検査 1 件・workspace 全体の宣言元インベントリ 1 件。
 3. **インベントリの期待集合**: `crates/autodiff/src/nn/init.rs::normal`（既存の正規宣言。1 件）＋ `crates/tensor-core/src/rng.rs` の `bernoulli`／`multinomial`／`normal`（各 2 件——自由関数 1 件 + `Generator` の同名メソッド 1 件）。private コア（`*_core` 接尾辞）は別名のためインベントリに現れない。
 
-**将来の干渉**: `nn::init` の facade 公開も保留中（`docs/facade-nn-init-exposure-decision.md`）で、同じ `normal` という名前を持つ。どちらかが先に承認された場合、もう一方の doctest プローブ（特に `normal` を含む部分）を見直す必要がある。
+**将来の干渉（解消済み・イシュー #2504）**: `nn::init` の facade 公開（`docs/facade-nn-init-exposure-decision.md`）が同じ `normal` という名前を持つため、`nn::init` が先に公開された。これに伴い、(1) `RngDistributionsHoldDoctestGuard` の自由関数 `normal` の衝突プローブを、`nn::init` を除く全 `pub mod` を glob した入れ子スコープ `__fandhe_rng_dist_normal_scope` へ分離し（ドリフトは `rng_distributions_normal_scope_globs_all_pub_modules_except_nn_init` が固定）、(2) ソース走査 `scan_rng_distributions_reexports_and_declarations` は `src/nn/init.rs`・接頭辞 `fandhe_ai_autodiff::nn::init::`・別名なしの `normal` に限り経路限定で許可した（それ以外の経路は従来どおり違反）。#2591 の保留（`tensor_core::rng::normal` を facade へ出さない）は弱めていない。
 
-**承認後の切り替え手順**（実施しない。承認取得後の参考記録）:
+**承認後の切り替え手順**（実施しない。承認取得後の参考記録。#2591 で公開する際は、上記の分離した `normal` プローブ・入れ子スコープ・ソース走査の経路限定許可も合わせて撤去する）:
 
 1. `RngDistributionsHoldDoctestGuard`・対応する否定ガード（`facade_does_not_reexport_or_declare_rng_distributions` 等）を削除する。
 2. facade に `pub use fandhe_ai_tensor_core::rng::{bernoulli, multinomial, normal, Generator};` を 1 行追加する。

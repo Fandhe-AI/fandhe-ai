@@ -2,7 +2,8 @@
 //!
 //! facade 独自の [`crate::nn::Module`]（#2395。生の `Tape` を出さず [`crate::TapeRef`] を取る
 //! 薄い trait。非公開 `mod module` と `pub use` で公開する）と、
-//! 子モジュール [`crate::nn::rnn`]（`Rnn`／`Lstm`／`Gru` の
+//! 子モジュール [`crate::nn::init`]（`torch.nn.init.*` 相当の初期化関数群。#2504。
+//! `fandhe_ai_autodiff::nn::init` からの純再エクスポート）と [`crate::nn::rnn`]（`Rnn`／`Lstm`／`Gru` の
 //! Sequence レベル API。`fandhe_ai_autodiff::nn` からの純再エクスポート）
 //! に加え、facade 側コンテナ `ModuleList`／`Sequential`（#2396。同じく非公開
 //! `mod container` と `pub use`）と、`ModuleDict`／`summary`（#2402。autodiff #2134 の鏡写し）を提供する。それ以外の `nn` 層（`Linear`・活性化関数・正規化・
@@ -11,6 +12,7 @@
 //! 経由で到達する契約のまま変更しない（[`crate::nn::rnn`] モジュール
 //! doc「`Sequential::add_*` を設けない理由」参照）。
 mod container;
+pub mod init;
 mod module;
 pub mod rnn;
 

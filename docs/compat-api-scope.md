@@ -1179,6 +1179,7 @@ facade-nn-init-exposure-decision.md` §1）、本イシューの実体は「auto
 〈`Linear::new(.., seed)` 等〉とは独立）。facade 公開面拡張（`crates/
 facade/src/nn/init.rs` の新設）は §5 経路 2 の承認取得まで実施していない。
 詳細は `docs/facade-nn-init-exposure-decision.md`。
+**→ イシュー #2504 で公開済み（本節末尾の適用記録参照）。**
 
 **#2136（`Var` 演算子オーバーロード実装。`Add`／`Mul`／`Sub`）は経路 2 未適用の
 まま承認待ちで保留した。** `crates/autodiff/src/**`・`crates/facade/src/**`
@@ -1527,3 +1528,16 @@ no-op 契約・CPU 限定の保証範囲は不変（GPU の決定性は未検証
 `fit_config_accumulate_steps_is_reachable_via_facade_only`）へ反転し、テスト専用セッター
 `with_accumulate_steps_for_test` は削除した。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
 `docs/spec/` は不変。GPU 経路には触れない（ホスト側 f32 加算のみ）。
+
+**適用記録（経路 2。イシュー #2504・親 #2500・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
+`nn::init` 初期化関数群（#2140 で内部クレート限定実装済み）を、設計判断記録
+（`docs/facade-nn-init-exposure-decision.md` §2.1・§4）の推奨形どおり
+`fandhe_ai::nn::init` の純再エクスポートモジュールとして公開した（初期化関数 9 個＋
+補助 4 個〈`FanMode`／`Nonlinearity`／`calculate_gain`／`calculate_fan_in_and_fan_out`〉の
+計 13 名。明示列挙・glob／別名なし）。新規の `Op`／`BackendOps`／VJP は追加していない
+（追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。
+保留ガード（`api_surface.rs::facade_does_not_reexport_nn_init`）は承認形のみを許す正ガード
+（`facade_reexports_nn_init_items_only_in_approved_shape`）へ反転した。
+`tensor_core::rng::normal`（#2591 の保留）とは別機能の同名のため、保留は弱めず経路限定で共存させた
+（`docs/rng-distributions-generator-decision.md` §5）。`Cargo.toml`／`Cargo.lock`・tolerance／
+baseline・`docs/spec/` は不変。GPU 経路には触れない（ホスト側生成のみ）。

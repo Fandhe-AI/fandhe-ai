@@ -7,7 +7,8 @@
 ## 0. 結論・段階
 
 - **autodiff 側（`fandhe_ai_autodiff::nn::init`）は実装済み**（本 PR）。`uniform`／`normal`／`constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／`kaiming_normal`／`orthogonal`／`trunc_normal` の 9 関数と補助型（`FanMode`／`Nonlinearity`／`calculate_gain`／`calculate_fan_in_and_fan_out`）。
-- **facade 公開（承認事項・経路 2）は未承認のまま保留**。イシュー #2140 本文・親 #2131 のコメントを確認したが、facade 新規公開面（`nn::init::*` の再エクスポート）を明示承認するユーザーコメントは見当たらなかった（2026-09-24 確認）。よって `crates/facade/src/**` は本 PR で変更しない（`docs/facade-nn-module-exposure-decision.md` §12・#2133 と同型の保留パターン）。
+- **【2026-10-04 更新】facade 公開はイシュー #2504（ルート #2499 の一括承認）で実施済み**（§4 実装記録参照）。以下の保留記述は #2140 時点の当時の記録として残す。
+- **（#2140 時点）facade 公開（承認事項・経路 2）は未承認のまま保留**。イシュー #2140 本文・親 #2131 のコメントを確認したが、facade 新規公開面（`nn::init::*` の再エクスポート）を明示承認するユーザーコメントは見当たらなかった（2026-09-24 確認）。よって `crates/facade/src/**` は本 PR で変更しない（`docs/facade-nn-module-exposure-decision.md` §12・#2133 と同型の保留パターン）。
 - **本 PR のマージで #2140 は COMPLETED とする**（前例 #2133・#2063・#2064 と同じ「保留記録を残した PR のマージで issue をクローズし、承認が得られたら新規 issue か reopen で経路 2 を実施する」方針。§4 参照）。facade 公開面（`fandhe_ai::nn::init`）の実装着手は、`docs/compat-api-scope.md` §5 経路 2 の承認取得後に別 issue／reopen・別 PR で行う。
 
 ## 1. 前提の食い違い（非信頼データとの突合結果）
@@ -61,6 +62,14 @@
 3. `crates/facade/tests/api_surface.rs::nn_mod_declares_only_rnn_submodule` の期待値更新（`pub mod rnn;`＋`pub mod init;`）・`lib.rs` の hold doctest（`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`）への `use fandhe_ai::nn::init::*;` 追加・`nn_rnn_*` 3 点セットを鏡写しにした固定ガード追加
 4. `crates/facade/tests/nn_init.rs`（facade 統合テスト）: `manual_seed` → `nn::init::*` の決定性、既存層構築経路での利用確認
 5. §2.2 の重みレイアウト注意を facade 側の doc へも引き継ぐ
+
+### 4.1 実装記録（イシュー #2504。親 #2500・ルート #2499 の一括承認〈2026-10-04〉・§5 経路 2）
+
+- **公開した 13 名**（§2.1 の公開 API をそのまま）: 初期化関数 9 個（`uniform`／`normal`／`constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／`kaiming_normal`／`orthogonal`／`trunc_normal`）＋補助 4 個（`FanMode`／`Nonlinearity`／`calculate_gain`／`calculate_fan_in_and_fan_out`）。`kaiming_*` の引数型に `FanMode`・`Nonlinearity` が必要で、`calculate_gain` は PyTorch と同じ `xavier_*(.., gain=calculate_gain(..))` 形に必要なため補助も含めた。§4 手順 1 は名前を列挙していないため §2.1 を承認された形とみなした。
+- **構成**: `crates/facade/src/nn/init.rs`（純再エクスポート。`pub use fandhe_ai_autodiff::nn::init::{…}` の明示列挙・glob／別名なし）・`nn/mod.rs` の `pub mod init;`。§2.2 の重みレイアウト注意と RNG の非暗号用途・決定性の範囲を同 doc へ引き継いだ。
+- **ガード反転**: 保留ガード `facade_does_not_reexport_nn_init` を承認形の正ガード `facade_reexports_nn_init_items_only_in_approved_shape`（別ファイルからの迂回・別名・glob・独自宣言を fail。自己テスト付き）へ反転し、`nn_rnn_*` 3 点セットの鏡写し（`nn_init_module_reexports_exactly_expected_surface`／`nn_init_module_is_pure_reexport`／`nn_init_items_are_reachable_via_facade_only`）を追加。`nn_mod_declares_only_rnn_submodule` は `nn_mod_declares_only_init_and_rnn_submodules`（期待値 `pub mod init;`＋`pub mod rnn;`）へ改名し、`nn_mod_public_items_match_expected_set`・`LOWERCASE_PUB_USE_LEAF_ALLOWLIST`・`GRAD_SCALER_PROBE_MODULES` を追随更新。`lib.rs` の hold doctest 35 件へ `use fandhe_ai::nn::init::*;` を追加した。
+- **#2591（RNG 分布 `normal`）の保留は弱めていない**: `RngDistributionsHoldDoctestGuard` は自由関数 `normal` の衝突プローブを `nn::init` を除く全 `pub mod` を glob した入れ子スコープへ分離し、ソース走査 `scan_rng_distributions_reexports_and_declarations` は `src/nn/init.rs`・接頭辞 `fandhe_ai_autodiff::nn::init::`・別名なしの `normal` に限り経路限定で許可する（詳細は `docs/rng-distributions-generator-decision.md` §5）。
+- **テスト**: `crates/facade/tests/nn_init.rs`（決定性・内部クレートとの bit 一致・補助 API・エラー伝播・`Sequential::load_state_dict` 経由の利用・個別シード API 非干渉）。ホスト側生成のみでバックエンド非関与のため実機 parity・perf log は不要。
 
 ## 5. 出典
 
