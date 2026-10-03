@@ -120,3 +120,7 @@
 ## 10. 後続 #2074
 
 §2.1「ビルドでの実証は未実施」は #2074（`docs/ddp-grade-up-conditions.md`）で実証済みに更新された（`cargo build`／`cargo test --features cudarc/nccl --locked` が exit 0・実行時プローブで `libnccl present = false`・panic なしを確認）。§6 前提 2「`Device::available()` 未実装」は #1614（`fandhe_ai::available_devices()`）により達成済みであり陳腐化している。分散学習の格上げ条件表（量子化 a〜e 相当）の文案は `docs/ddp-grade-up-conditions.md` §3・§4 を正とし、本 doc の既存本文（基準コミット固定の記録）は書き換えない。
+
+## 11. 後続 #2612
+
+`docs/ddp-grade-up-conditions.md` の §4 提案文案を #2612 で最新化した（REQ-9 追記後の spec 行番号・0.10.0 出荷後の非破壊契約・分散 RPC との区別）。FSDP は `docs/spec/` に記述がなく、DDP の提案対象外で Won't に残す扱いとした（同 doc §3a・§4 を正とする）。#1964 で現状維持が承認されており、spec 起票は未承認のままである。本文（§1〜§10）は基準コミット固定の記録のため変更しない。
