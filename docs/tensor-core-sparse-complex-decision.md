@@ -153,3 +153,153 @@ fail-closed 化」の引き継ぎ候補は、イシュー #2079 で実装済み�
 **覆していない**。`Tensor<complex64>` 等の complex dtype 自体は本
 追補後も §6 の結論どおり非対応のままである。相互参照のみで §5・§6 の
 判断内容・§10 の承認事項一覧は変更しない。
+
+## §15 追補（イシュー #2616・2026-10-04）: spec 改定提案と規模見積り
+
+基準コミット: `e30c7b2e700c69a00d66ec23494e1233d6c2b325`（`origin/main`）。`docs/spec` submodule ポインタ `2e998dd77117814f4af8ed160394ad1d6a8f888a`。本節の `file_path:line` と件数は同コミットで取得したもの（後続の変更で行番号は動くため、参照時は基準コミットで開く）。
+
+### §15.0 結論（最初に読む）
+
+- **コード変更なし**。`crates/**`・`Cargo.toml`／`Cargo.lock`・`docs/spec/`・tolerance／baseline・ガードレール閾値は一切変更していない。
+- **spec 改定文案（§15.3）は起票していない。ユーザー承認は未取得で、承認の代行もしていない**。承認事項は §15.5 に列挙した。
+- **方針の転換を明示する**。§3・§8・§11 は「spec と整合済みのため spec 提案は不要」と結論した（#1633 時点の判断）。本追補はこの立場を、ルート #2499 の到達目標（PyTorch／TensorFlow を Rust で置き換える）の追加を理由に**見直し、改定提案を新たに作る**ものである。§3・§8・§11 の本文は当時の記録として書き換えない（§13・§14 と同じ追補方式）。spec 側の追記（`docs/spec/04-requirements.md:235`、2026-09-29）と `docs/functorch-serving-hub-non-target-spec-proposal.md` §0 は、この「sparse／complex は spec 記載済みで変更なし」という結論を引用している。両者は本 PR では編集しない。提案が承認された場合は、両者の該当文言の更新も spec 側の改定に含める。
+- **推奨**（未承認）: complex dtype は §15.3 の案 (ii)（「引き続き対象外」から外して除外事項〈Won't・条件付き〉へ移し、格上げ条件表を付ける）。sparse は案 (ii) に加えて、ONNX `sparse_initializer` の dense 化 (s2) を先行させる。
+- 規模は大きい。complex は autodiff の dtype 一般化（`Var`／`Tape`）が前提で、全バックエンドの dtype dispatch に及ぶ。実装は本ツリーに含めない。
+
+### §15.1 現行 spec の記述（変更前の事実）
+
+| 箇所 | 内容 |
+|---|---|
+| `docs/spec/04-requirements.md:233` | REQ-9「引き続き対象外」列挙に「sparse／complex テンソル」が入っている |
+| `docs/spec/04-requirements.md:235` | 2026-09-29 追記（#2194）。列挙へ 3 項目を追加。sparse／complex は変更しない |
+| `docs/spec/04-requirements.md:232` | Tier 2 の dtype は「f64／f16／bf16 演算」まで。complex は含まれない |
+| `docs/spec/04-requirements.md:358`〜`363` | 除外事項「分散学習・量子化の網羅対応」（Won't・条件付き）。格上げ条件表 a〜g の前例 |
+| `docs/spec/04-requirements.md:430` | 改定履歴表の前例エントリ |
+
+スコープ件数（Should 8・Could 1・Won't 11）は同 `:359` の記述による。除外事項へ項目を足す案を採ると、この件数が変わる（§15.3）。
+
+### §15.2 規模見積り（構造で見積もる。工数の推測値は書かない）
+
+件数は基準コミットで次のコマンドにより取得した。
+
+| 指標 | コマンド | 値 |
+|---|---|---|
+| `TypedOps<T>` の fn 数 | trait 定義（`crates/tensor-core/src/typed_ops.rs:33`〜`:50`）のメソッドだけを数える。`gemm`・`add`・`mul`・`relu`・`exp`・`tanh`・`sum`・`max` の 8 つ。`grep -c "fn "` はファイル末尾のテスト用関数も数えるため使わない | 8 |
+| CUDA の kernel ファイル | `ls crates/backend-cuda/src \| grep -c kernels` | 39 |
+| Metal の shader | `ls crates/backend-metal/src/shaders \| wc -l` | 26 |
+| backend-cpu の src | `ls crates/backend-cpu/src \| wc -l`（直下）／`git ls-files crates/backend-cpu/src \| wc -l`（再帰） | 41／50 |
+| `ScalarDType::` の参照 | `git grep -n "ScalarDType::" -- crates \| wc -l` | 88 箇所（11 ファイル） |
+| autodiff の `Op` variant | `crates/autodiff/src/tape.rs:91`〜`:1281` の簡易集計 | 約 90 |
+
+#### complex
+
+1. **tensor-core**
+   - `Scalar` は `private::Sealed`（`crates/tensor-core/src/element.rs:111`）で封印され、実装は `f32`／`f64`／`f16`／`bf16` の 4 型（同 `:171`〜`:186`）である。complex 型の newtype を足し、`Sealed` と `Scalar` を実装する。
+   - `ScalarDType`（同 `:141`）は `#[non_exhaustive]` なので、variant 追加は 0.10.0 の公開 API を壊さない。ただし `ScalarDType` は facade から再公開済み（`crates/facade/src/lib.rs:270`）である。公開面が広がるため、facade の公開形は `docs/compat-api-scope.md` §5 の手続きを経る。
+   - `dispatch::DType`（`crates/tensor-core/src/dispatch.rs:31`）は `ScalarDType` とは別の enum で、`#[non_exhaustive]` が付いていない。complex を GEMM の経路選択へ載せるなら、`docs/backend-dtype-dispatch-design.md` が定める `ScalarDType → Option<dispatch::DType>` の明示マッピングの方式（complex は `None`）に従う。
+   - `TypedOps<T>` の 8 メソッドのうち、complex で意味が定まる演算だけを 3 バックエンドへ実装する。
+     - 対象にできる演算: `gemm`・`add`・`mul`・`exp`・`sum`（`tanh` は複素解析関数として定義できるが、数値契約〈実部・虚部の丸めと特異点付近の扱い〉を別途決める条件付き）。
+     - 対象外にする演算: `max`（順序が必要）と `relu`（`max(0, x)` に基づく）。complex には全順序がなく、PyTorch も complex の `max` 系を未対応にしている。順序・出力契約を新しく作る案は採らない。
+     - 非対応演算の扱い: 実装しない演算は `BackendError::Unsupported` で fail-closed に拒否し、無言で実部だけを使う等の代替はしない。
+     - 公開 API と trait 設計の前提: 現行の `TypedOps<T: Scalar>` は 8 メソッドすべてを必須にしている。complex の `Scalar` 実装でこの trait をそのまま使うと、上の対象外 2 演算も実装を強いられる。選択肢は (1) 対象外演算を常に `Unsupported` で返す実装を許容する、(2) complex 用に演算を絞った別 trait（例: `ComplexOps`）を足す、の 2 つ。既存 trait にメソッドを足す・削る変更は 0.10.0 の公開 API を壊しうるため、既存 trait は変更せず追加 API で拡張する前提とし、(1)／(2) の採否は承認事項（§15.5）に加える。
+2. **autodiff（支配的コスト）**
+   - `Var<'t>` は f32 のノード id だけを持つ。`Tape` は `ops: Box<dyn BackendOps + Send>` を持つ（`docs/backend-dtype-dispatch-design.md` が `crates/autodiff/src/tape.rs:775` として引用）。`Tape<T>` 化は同 doc §8 が対象外と明記した作業であり、complex の勾配を扱うには**前提条件**になる。「4 型 → 5 型化」に含めて見積もってはならない。
+   - VJP の規約を決める必要がある。PyTorch は共役 Wirtinger 規約である。実数の関数が complex を経由する場合（`abs`・`angle`・`real`・`imag`）の勾配の向きも定義が要る。
+   - `Op` enum の約 90 variant について、complex 対応の要否を 1 つずつ決める。
+3. **数値契約**
+   - complex 乗算の丸め（FMA）契約を新しく定義する必要がある。`.claude/rules/coding-rust.md` の matmul 系 FMA 契約は実数を前提にしている。
+   - REQ-2 の統一複合判定は、実部と虚部のそれぞれに当てはめる案とする。判定式と tolerance は変えない。
+   - f64 アキュムレータ契約（縮約経路）も complex 版の定義が要る。
+4. **バックエンド**: CUDA の kernel 39 ファイル、Metal の shader 26 本、backend-cpu のうち該当ファイルに complex 版を足す。REQ-8 により、各カーネルに手動の境界検査を維持する。Metal は MSL が `double` に対応しないため、complex128 は soft-f64 系（`crates/backend-metal/src/soft_f64.rs`）の扱いが別途要る。GPU 経路は実機 parity が必要で、`#[ignore]` 分離と申し送りの手順に従う。
+5. **interop**
+   - ONNX は `COMPLEX64`(14)／`COMPLEX128`(15) の定数宣言とデコードが要る。現状は `GraphError::UnknownDataType`（`crates/onnx-interop/src/onnx/graph.rs:43`）で fail-closed に拒否している。
+   - safetensors のフォーマットには complex dtype がない。保存形式（実部・虚部の対にする等）は別途決める。
+
+#### sparse
+
+1. dense 専用の `Tensor<T>`（`crates/tensor-core/src/tensor.rs`）とは別に、COO／CSR のレイアウト型を新設する。あわせて `BackendOps` の拡張（spmm 等）と、VJP（values 側・dense 側の勾配）が要る。
+2. REQ-8: index 配列から読む位置の境界検査を、全カーネルに手動で入れる。
+3. ONNX `sparse_initializer` は、現状 #2079 で fail-closed に拒否している（`crates/onnx-interop/src/onnx/graph.rs:97` の `GraphError::SparseInitializerNotSupported`、`crates/facade/src/interop/onnx.rs:590` の `OnnxError::SparseInitializerNotSupported`）。候補は次の 3 つ。
+
+   | 候補 | 内容 | 規模 |
+   |---|---|---|
+   | (s1) | 拒否を維持する | 変更なし |
+   | (s2) | import 時に dense 化する | sparse テンソル型なしで成立する低コスト案。`SparseTensorProto` の `values`／`indices`／`dims` の長さ・形状・index 範囲の検証と、dense 化後の要素数の上限検査が要る。現状の検出専用型（`proto.rs` の `SparseTensorValueName`）を、中身を読む型へ拡張する |
+   | (s3) | sparse 型としてデコードする | 上記のレイアウト型の新設が前提 |
+
+4. facade での公開は `docs/compat-api-scope.md` §5 の手続きを経る。
+
+#### 依存
+
+自作の newtype とレイアウト型だけで実装でき、新規依存は不要と見込む（REQ-1 の完全自作コア）。外部 crate を使う場合は許容依存 10 区分の外になるため、別途の承認事項とする。
+
+### §15.3 spec 改定案（(b) 形式の文案。未起票）
+
+#### 候補の比較
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| (i) | 「引き続き対象外」を維持する | ルート #2499 の目標と両立しない。dtype 行の「部分的」が解消できない |
+| (ii) | 「引き続き対象外」から外し、除外事項（Won't・条件付き）へ移して格上げ条件表を付ける | 量子化・DDP の前例（`04-requirements.md:358`〜`363`）と同型。条件が満たされるまで実装しない扱いを保てる |
+| (iii) | Tier 2 へ組み入れる | 規模（§15.2）に対して時期尚早。complex は autodiff の dtype 一般化が前提で、条件の整理が先 |
+
+推奨（未承認）: complex は (ii)。sparse は (ii) とし、ONNX `sparse_initializer` の dense 化 (s2) を先行する選択肢を条件表に含める。(s2) 単独なら sparse テンソル型を足さずに済む。
+
+#### 提案文案
+
+````markdown
+## 背景
+
+REQ-9「引き続き対象外」列挙は sparse／complex テンソルを含む。実装リポ
+Fandhe-AI/fandhe-ai のルート #2499 は PyTorch／TensorFlow の置き換えを到達
+目標とし、dtype の網羅を対象に含める。実装リポの規模見積り
+（`docs/tensor-core-sparse-complex-decision.md` §15）では、complex は autodiff の
+dtype 一般化と全バックエンドの dtype dispatch に及び、sparse はレイアウト型の
+新設を要する。着手の前提を条件として明文化したい。
+
+## 提案
+
+1. REQ-9「引き続き対象外」列挙から「sparse／complex テンソル」を外す。
+2. 除外事項に「sparse／complex テンソル（Won't・条件付き）」を追加し、格上げ条件
+   表（a〜）を付ける。条件に含める項目の案:
+   (a) autodiff の dtype 一般化（`Tape`／`Var`）の設計が承認されていること。
+   (b) complex の VJP 規約（共役 Wirtinger 等）と FMA 契約が定義されていること。
+   (c) REQ-2 の統一複合判定を実部・虚部それぞれに適用する方式で、tolerance・
+       判定式を変更せずに数値一致が成立すること。
+   (d) sparse の REQ-8 境界検査（index 配列の範囲検査）が全カーネルに維持される設計であること。
+   (e) 依存追加なし（自作の newtype とレイアウト型）で成立すること。外部 crate を使う場合は REQ-1 の依存追加ルールに従い別途承認。
+   (f) ONNX `sparse_initializer` の扱いが決まっていること（拒否維持／dense 化／sparse 型）。
+3. 既存の受け入れ基準・Tier 1／Tier 2 列挙・REQ-1・REQ-2（tolerance を含む）・
+   REQ-8 は変更しない。除外事項の件数（Won't 11）が増える場合は、スコープ件数の
+   更新を同時に承認事項とする。
+
+## 改定履歴表のエントリ案
+
+| 日付 | 内容 |
+|---|---|
+| （承認日） | 実装リポ Fandhe-AI/fandhe-ai イシュー #2616（ルート #2499）。REQ-9 の対象外列挙から sparse／complex を除外事項（Won't・条件付き）へ移し、格上げ条件表を追加。受け入れ基準・Tier 列挙・REQ-1／REQ-2／REQ-8 は変更しない。 |
+````
+
+文案は起票していない。spec リポ（Fandhe-AI/fandhe-ai-spec）への起票と `docs/spec/` の編集はいずれも行わない。
+
+### §15.4 FFT（#2630）との関係
+
+- 「表現」の軸と「dtype」の軸は独立している。FFT の表現は実部・虚部の実テンソル対（`[..., n, 2]`、`torch.view_as_real` 相当。`docs/autodiff-fft-design.md`）、dtype は complex dtype である。
+- #2630 の方針は、本提案の承認結果にかかわらず変えない。§14 のとおり、案 A（complex dtype 非対応）を前提に FFT を実装できる。
+- 将来 complex dtype を採用した場合は、`view_as_real`／`view_as_complex` 相当の相互変換を移行経路にする。既存の `[..., n, 2]` 表現との間で、メモリレイアウトを変えずに行き来できる。
+
+### §15.5 承認事項（未取得。承認の代行はしていない）
+
+1. 推奨する spec 改定案の採否（sparse と complex を別々に判断する）。
+2. spec リポ（Fandhe-AI/fandhe-ai-spec）への起票の可否。
+3. `Var`／`Tape` の dtype 一般化に着手するかどうか。
+4. complex の FMA 契約と VJP 規約を新しく定義すること。
+5. sparse のレイアウト型新設と `BackendOps` の拡張。
+6. ONNX `sparse_initializer` の扱い（(s1) 拒否維持／(s2) dense 化／(s3) sparse 型）。
+7. 外部 crate を使う場合の依存追加（現時点では不要と見込む）。
+8. complex で対応する演算の選別（`gemm`・`add`・`mul`・`exp`・`sum` を対象、`max`・`relu` を対象外、`tanh` は条件付き）と、非対応演算の扱い（`Unsupported` での拒否）、およびその公開 API／trait 設計（§15.2 complex 1 の (1)／(2)）。
+9. 承認後に実装 issue を起票すること（本ツリーには含めない）。
+
+### §15.6 セキュリティ観点
+
+本追補は実行時の挙動を変えない。ただし (s2) または sparse 型を採用すると、#2079 で閉じた `sparse_initializer` のパース経路が再び開く。その場合は、`indices`・`values`・`dims` の長さ・形状・index の範囲を使用前に検証し、不正なら fail-closed で拒否すること（OWASP A03）を実装 issue の受け入れ条件にする。依存は追加しない（A06）。
