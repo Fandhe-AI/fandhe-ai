@@ -41,7 +41,9 @@
 //!    を渡すだけの薄い委譲。`step_device_param_store` 等と同型）が
 //!    入口となる。値型の再エクスポート＋薄い委譲のみで任意
 //!    `BackendOps` 注入経路を新設しないため REQ-12 と矛盾しない
-//!    （詳細は [`nn::rnn`] モジュール doc）。
+//!    （詳細は [`nn::rnn`] モジュール doc）。同じく `nn` 配下に、PyTorch
+//!    `torch.nn.init.*` 相当の初期化関数 9 個と補助 4 名を [`nn::init`] へ
+//!    純再エクスポートする（イシュー #2504。グローバル RNG に従う）。
 //!
 //! 6. **model 公開面**（[`model`]。イシュー #2087・親 #2082）:
 //!    ホームディレクトリ配下のキャッシュディレクトリを基盤とする
@@ -1370,6 +1372,7 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -1472,6 +1475,7 @@ struct VarCustomHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -1642,6 +1646,7 @@ struct VarBoolOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -1756,6 +1761,7 @@ struct VarRearrangeOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -1905,6 +1911,7 @@ struct VarScalarUnaryOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2046,6 +2053,7 @@ struct VarHooksHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2117,6 +2125,7 @@ struct KvCacheHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2241,6 +2250,7 @@ struct VarMatrixOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2361,6 +2371,7 @@ struct VarReduceOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2491,6 +2502,7 @@ struct VarLinalgOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2644,6 +2656,7 @@ struct VarActivationOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2735,6 +2748,7 @@ struct VarEinsumBatchHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2842,6 +2856,7 @@ struct VarIndexingOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -2949,6 +2964,7 @@ struct VarTopkUniqueOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3041,11 +3057,13 @@ struct VarExtremumOpsHoldDoctestGuard;
 /// 依頼用の事前設計」を参照。
 ///
 /// **注意**: `normal` は `crates/autodiff/src/nn/init.rs` の
-/// `nn::init::normal`（PyTorch `nn.init.normal_` 相当。`docs/facade-
-/// nn-init-exposure-decision.md` で facade 公開が別途保留中）と同名の
-/// 既存宣言を持つ。両者は無関係な機能だが同じ識別子を巡って承認判断が
-/// 干渉しうるため、どちらかが先に承認された場合はもう一方の doctest
-/// プローブを見直す必要がある（decision doc に記録）。
+/// `nn::init::normal`（PyTorch `nn.init.normal_` 相当）と同名の別機能で
+/// ある。`nn::init` はイシュー #2504 で先に facade 公開されたため、自由
+/// 関数 `normal` の衝突プローブは `nn::init` を除く全 `pub mod` を glob
+/// した入れ子モジュール `__fandhe_rng_dist_normal_scope` に分離している
+/// （`docs/rng-distributions-generator-decision.md` §5）。`tensor_core::
+/// rng::normal` を公開する際は、この分離と `api_surface.rs` の
+/// ソース走査の経路限定許可を合わせて撤去する。
 ///
 /// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
 /// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
@@ -3060,6 +3078,7 @@ struct VarExtremumOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3070,7 +3089,6 @@ struct VarExtremumOpsHoldDoctestGuard;
 ///     pub struct Generator;
 ///     pub fn bernoulli() {}
 ///     pub fn multinomial() {}
-///     pub fn normal() {}
 /// }
 /// use __fandhe_rng_dist_hold_probe::*;
 ///
@@ -3099,7 +3117,32 @@ struct VarExtremumOpsHoldDoctestGuard;
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
 ///     bernoulli();
 ///     multinomial();
-///     normal();
+/// }
+///
+/// // `normal` だけは `nn::init::normal`（#2504 で公開済み）が同名の
+/// // 別機能として facade に存在するため、`nn::init` を除く全 `pub mod`
+/// // だけを glob したスコープで衝突検査する（`nn::init` を含めると
+/// // 常に曖昧になる）。
+/// mod __fandhe_rng_dist_normal_scope {
+///     use fandhe_ai::*;
+///     use fandhe_ai::compat::*;
+///     use fandhe_ai::optim::*;
+///     use fandhe_ai::data::*;
+///     use fandhe_ai::nn::*;
+///     use fandhe_ai::nn::rnn::*;
+///     use fandhe_ai::interop::*;
+///     use fandhe_ai::interop::onnx::*;
+///     use fandhe_ai::interop::safetensors::*;
+///     use fandhe_ai::model::*;
+///
+///     mod __fandhe_rng_dist_normal_probe {
+///         pub fn normal() {}
+///     }
+///     use __fandhe_rng_dist_normal_probe::*;
+///
+///     pub fn __probe_normal() {
+///         normal();
+///     }
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
@@ -3160,6 +3203,7 @@ struct RngDistributionsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3319,6 +3363,7 @@ struct SpatialLayersHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3437,6 +3482,7 @@ struct VarConv3dHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3552,6 +3598,7 @@ struct AdaptiveMaxGlobalPoolHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3691,6 +3738,7 @@ struct DropoutEmbeddingBagHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3764,6 +3812,7 @@ struct MhaOptionsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -3892,6 +3941,7 @@ struct RnnConfigHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4004,6 +4054,7 @@ struct PixelShuffleHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4086,6 +4137,7 @@ struct TransformerDecoderHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4247,6 +4299,7 @@ struct LossOpsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4388,6 +4441,7 @@ struct ParamGroupsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4540,6 +4594,7 @@ struct OptimizerStateDictHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4641,6 +4696,7 @@ struct EmaHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4729,6 +4785,7 @@ struct CompileLossVariantsHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4813,6 +4870,7 @@ struct CallbacksLoggersHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -4933,6 +4991,7 @@ struct FitWeightingHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -5028,6 +5087,7 @@ struct TrainStepHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -5135,6 +5195,7 @@ struct NpyIoHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -5223,6 +5284,7 @@ struct ModelIoHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
@@ -5329,6 +5391,7 @@ struct GenerateHoldDoctestGuard;
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;

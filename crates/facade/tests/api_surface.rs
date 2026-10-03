@@ -3963,41 +3963,272 @@ fn facade_does_not_reexport_custom_function() {
     );
 }
 
-/// `crates/facade/src/` の `pub use` が `nn::init`（PyTorch `torch.nn.
-/// init.*` 相当の初期化関数群・イシュー #2140）を再エクスポートして
-/// いないことを固定する（`docs/facade-nn-init-exposure-decision.md`
-/// §0・§3「facade 公開（承認事項・経路 2）は未承認のまま保留」。
-/// `facade_does_not_reexport_custom_function` と同型の走査）。
-/// `nn_mod_declares_only_rnn_submodule` が `pub mod init;` 追加自体を
-/// 別途固定する一方、本テストは `pub use fandhe_ai_autodiff::nn::
-/// init::...` のような迂回経路（`nn/mod.rs` 以外のファイルからの
-/// 再エクスポート）も走査対象に含める。
-#[test]
-fn facade_does_not_reexport_nn_init() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with("pub use") {
-                continue;
+/// `fandhe_ai::nn::init`（PyTorch `torch.nn.init.*` 相当。イシュー #2504。
+/// ルート #2499 の一括承認・`docs/compat-api-scope.md` §5 経路 2）が公開する
+/// 13 名（初期化関数 9 個＋補助 4 個。`docs/facade-nn-init-exposure-decision.md`
+/// §2.1）。承認形の正ガード
+/// [`facade_reexports_nn_init_items_only_in_approved_shape`] と
+/// `nn_init_module_reexports_exactly_expected_surface` が共用する。
+const NN_INIT_NAMES: [&str; 13] = [
+    "FanMode",
+    "Nonlinearity",
+    "calculate_fan_in_and_fan_out",
+    "calculate_gain",
+    "constant",
+    "kaiming_normal",
+    "kaiming_uniform",
+    "normal",
+    "orthogonal",
+    "trunc_normal",
+    "uniform",
+    "xavier_normal",
+    "xavier_uniform",
+];
+
+/// [`facade_reexports_nn_init_items_only_in_approved_shape`]・その自己
+/// テストが共用する検出本体。`content`（1 ファイル分）の `pub use` から
+/// [`NN_INIT_NAMES`] の葉を集め、承認形（接頭辞 `fandhe_ai_autodiff::nn::init::`・
+/// `as` 別名なし。[`nn_init_approved_prefix`]）の出現葉を第 1 要素、承認形
+/// から外れる出現（別 path・別名・glob）と同名の独自宣言（`trait`／`struct`／
+/// `enum`／`type`／`fn`）を第 2 要素（違反）として返す。加えて path に
+/// `nn::init` を含む `pub use` は承認形でなければ（`NN_INIT_NAMES` 以外の葉を
+/// 含めて）違反とする。
+fn scan_nn_init_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<String>) {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut approved: Vec<String> = Vec::new();
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
             }
-            if trimmed.contains("nn::init") {
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let shape_ok =
+                nn_init_approved_prefix(path_tokens) && !path_tokens.iter().any(|t| t == "as");
+            let mentions_init_path = path_tokens
+                .windows(4)
+                .any(|w| w[0] == "nn" && w[1] == ":" && w[2] == ":" && w[3] == "init");
+            let hits: Vec<String> = collect_pub_use_leaves(path_tokens)
+                .into_iter()
+                .filter(|leaf| NN_INIT_NAMES.contains(&leaf.as_str()))
+                .collect();
+            if shape_ok {
+                // glob は承認形の接頭辞でも禁止（13 名の明示列挙のみ許可）。
+                if path_tokens.iter().any(|t| t == "*") {
+                    offending.push("承認形接頭辞の glob 再エクスポート".to_string());
+                }
+                approved.extend(hits);
+            } else {
+                for leaf in hits {
+                    offending.push(format!("承認形外の pub use leaf={leaf}"));
+                }
+                if mentions_init_path {
+                    offending.push("承認形外の nn::init 経由 pub use".to_string());
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(
+            tokens[i].as_str(),
+            "trait" | "struct" | "enum" | "type" | "fn"
+        ) && tokens
+            .get(i + 1)
+            .map(|t| NN_INIT_NAMES.contains(&t.as_str()))
+            .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    (approved, offending)
+}
+
+/// 承認形の正ガード（#2504 で `facade_does_not_reexport_nn_init` から反転。
+/// 先例: #2501 の `facade_reexports_optimizer_ext_items_only_in_approved_shape`）。
+/// facade src 全体で、[`NN_INIT_NAMES`] の 13 名が `src/nn/init.rs` の
+/// `pub use fandhe_ai_autodiff::nn::init::…`（別名・glob なし）としてちょうど
+/// 1 回ずつ出現し、承認形外の再エクスポート・迂回経路・同名の独自宣言が
+/// 存在しないことを fail-closed に固定する。
+#[test]
+fn facade_reexports_nn_init_items_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_init_rs: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let (approved, bad) = scan_nn_init_reexports_and_declarations(content);
+        for offense in bad {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+        if path.ends_with("src/nn/init.rs") {
+            approved_in_init_rs.extend(approved);
+        } else {
+            for leaf in approved {
                 offending.push(format!(
-                    "{}: `{trimmed}` が nn::init を含む",
+                    "{}: nn/init.rs 以外での pub use leaf={leaf}",
                     path.display()
                 ));
             }
         }
     });
+    approved_in_init_rs.sort();
+    let mut expected: Vec<String> = NN_INIT_NAMES.iter().map(|s| s.to_string()).collect();
+    expected.sort();
     assert!(
         offending.is_empty(),
-        "facade の公開面が nn::init を再エクスポートしている\
-         （facade-nn-init-exposure-decision.md §3 は未承認のまま対象外\
-         という設計判断に違反）: {offending:?}"
+        "facade の公開面が nn::init（#2504）を承認形（src/nn/init.rs の \
+         `pub use fandhe_ai_autodiff::nn::init::…`・別名・glob なし）以外で再エクスポート、\
+         または独自宣言している（`docs/facade-nn-init-exposure-decision.md` §4）: {offending:?}"
+    );
+    assert_eq!(
+        approved_in_init_rs, expected,
+        "src/nn/init.rs に承認形の 13 識別子がちょうど 1 回ずつ存在しない\
+         （過不足・重複いずれも fail。検査対象を見失った場合を含む）"
     );
 }
 
+/// [`scan_nn_init_reexports_and_declarations`] の自己テスト（正例・負例の合成入力）。
+#[test]
+fn facade_reexports_nn_init_items_only_in_approved_shape_detects_each_category() {
+    let scan = scan_nn_init_reexports_and_declarations;
+    let (ok, bad) = scan("pub use fandhe_ai_autodiff::nn::init::{constant, normal};");
+    assert!(bad.is_empty());
+    assert_eq!(ok, vec!["constant", "normal"]);
+    // 違反: 別名。
+    assert!(
+        !scan("pub use fandhe_ai_autodiff::nn::init::uniform as u;")
+            .1
+            .is_empty()
+    );
+    // 違反: 別 path 接頭辞（迂回経路）。
+    assert!(
+        !scan("pub use fandhe_ai_autodiff::nn::init as i;")
+            .1
+            .is_empty()
+    );
+    assert!(!scan("pub use crate::nn::init::orthogonal;").1.is_empty());
+    // 違反: glob。
+    assert!(
+        !scan("pub use fandhe_ai_autodiff::nn::init::*;")
+            .1
+            .is_empty()
+    );
+    // 違反: 独自宣言。
+    assert!(!scan("pub fn xavier_uniform() {}").1.is_empty());
+    assert!(!scan("pub enum FanMode {}").1.is_empty());
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use fandhe_ai_autodiff::nn::init::normal;",
+        "let s = \"uniform\";",
+        "use fandhe_ai_autodiff::nn::init::normal;",
+        "pub use fandhe_ai_autodiff::nn::optim::AdamW;",
+    ] {
+        let (ok, bad) = scan(src);
+        assert!(ok.is_empty() && bad.is_empty(), "src={src:?}");
+    }
+}
+
+fn nn_init_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/nn/init.rs")
+}
+
+/// `src/nn/init.rs` の `pub use` 行から `{...}` 内の識別子を抽出し、
+/// [`NN_INIT_NAMES`] の 13 名と完全一致（過不足とも fail）することを固定する
+/// （`nn_rnn_module_reexports_exactly_expected_surface` の鏡写し。rustfmt の
+/// 折り返しに依存しないよう、コメント除去後に `;` 区切りの文として解析する）。
+#[test]
+fn nn_init_module_reexports_exactly_expected_surface() {
+    let content = read_to_string_or_panic(&nn_init_rs_path());
+    // rustfmt が複数行へ折り返す場合があるため、コメントを除去したうえで
+    // `;` 区切りの文として解析する。
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let allowed_prefix = "pub use fandhe_ai_autodiff::nn::init::";
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut offending_lines = Vec::new();
+    for stmt in cleaned.split(';') {
+        let flat = stmt.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !flat.starts_with("pub use") {
+            continue;
+        }
+        let compact = flat.replace(' ', "");
+        let Some(rest) = compact.strip_prefix(&allowed_prefix.replace(' ', "")) else {
+            offending_lines.push(flat);
+            continue;
+        };
+        let (Some(open), Some(close)) = (rest.find('{'), rest.find('}')) else {
+            offending_lines.push(flat);
+            continue;
+        };
+        for ident in rest[open + 1..close].split(',') {
+            let ident = ident.trim();
+            if !ident.is_empty() {
+                found.insert(ident.to_string());
+            }
+        }
+    }
+    assert!(
+        offending_lines.is_empty(),
+        "src/nn/init.rs の pub use が fandhe_ai_autodiff::nn::init:: 以外の接頭辞を持つか、\
+         `{{...}}` 形式でない行を含む: {offending_lines:?}"
+    );
+    let expected: std::collections::BTreeSet<String> =
+        NN_INIT_NAMES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        found, expected,
+        "src/nn/init.rs が再エクスポートする識別子が 13 名の期待集合と一致しない"
+    );
+}
+
+/// `src/nn/init.rs` が facade 独自の型・関数を定義しない純再エクスポート
+/// モジュールであることを固定する（[`scan_forbidden_pub_items`] を再利用）。
+#[test]
+fn nn_init_module_is_pure_reexport() {
+    let content = read_to_string_or_panic(&nn_init_rs_path());
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/nn/init.rs が facade 独自の公開宣言を定義している\
+         （純再エクスポートモジュールの契約違反）: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::nn::init` の 13 名が facade のみを通じて到達可能であること
+/// のコンパイル時＋実行時固定（`fandhe_ai_autodiff` は import しない）。
+#[test]
+fn nn_init_items_are_reachable_via_facade_only() {
+    use fandhe_ai::nn::init::{
+        FanMode, Nonlinearity, calculate_fan_in_and_fan_out, calculate_gain, constant,
+        kaiming_normal, kaiming_uniform, normal, orthogonal, trunc_normal, uniform, xavier_normal,
+        xavier_uniform,
+    };
+    fandhe_ai::manual_seed(7);
+    let t: fandhe_ai::Tensor<f32> = uniform(&[2, 3], -1.0, 1.0).expect("test fixture: uniform");
+    assert_eq!(t.shape(), &[2usize, 3]);
+    normal(&[2, 3], 0.0, 1.0).expect("test fixture: normal");
+    constant(&[2], 1.5).expect("test fixture: constant");
+    xavier_uniform(&[4, 5], 1.0).expect("test fixture: xavier_uniform");
+    xavier_normal(&[4, 5], 1.0).expect("test fixture: xavier_normal");
+    kaiming_uniform(&[4, 5], 0.0, FanMode::FanIn, Nonlinearity::Relu)
+        .expect("test fixture: kaiming_uniform");
+    kaiming_normal(&[4, 5], 0.0, FanMode::FanOut, Nonlinearity::Relu)
+        .expect("test fixture: kaiming_normal");
+    orthogonal(&[3, 3], 1.0).expect("test fixture: orthogonal");
+    trunc_normal(&[2, 3], 0.0, 1.0, -2.0, 2.0).expect("test fixture: trunc_normal");
+    assert!(calculate_gain(Nonlinearity::Relu) > 1.0);
+    assert_eq!(
+        calculate_fan_in_and_fan_out(&[4, 5]).expect("test fixture: fan"),
+        (5, 4)
+    );
+}
 /// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
 /// `Tape::custom` への転送メソッドを持たないことを固定する（`Tape::
 /// var_no_grad` の前例〈`docs/autodiff-custom-function-decision.md`
@@ -4435,7 +4666,7 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
 /// モジュールであることを固定する（`data_module_is_pure_reexport` と
 /// 同じ走査ロジック〈`scan_forbidden_pub_items`〉を再利用する）。
 /// `src/nn/mod.rs`（`pub mod rnn;` を含む）は対象外
-/// （`nn_mod_declares_only_rnn_submodule` が別途固定する）。
+/// （`nn_mod_declares_only_init_and_rnn_submodules` が別途固定する）。
 #[test]
 fn nn_rnn_module_is_pure_reexport() {
     let path = nn_rnn_rs_path();
@@ -4461,7 +4692,7 @@ fn nn_rnn_module_is_pure_reexport() {
 /// `pub mod init;` 追加はこの完全一致検査により現時点では fail する。
 /// 承認後に実装する際は期待集合（`["init", "rnn"]` 等）へ更新する。
 #[test]
-fn nn_mod_declares_only_rnn_submodule() {
+fn nn_mod_declares_only_init_and_rnn_submodules() {
     let path = nn_mod_rs_path();
     let content = read_to_string_or_panic(&path);
     let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
@@ -4474,8 +4705,8 @@ fn nn_mod_declares_only_rnn_submodule() {
 
     assert_eq!(
         declared,
-        vec!["pub mod rnn;"],
-        "src/nn/mod.rs が宣言する pub mod が `pub mod rnn;` の 1 件と一致しない\
+        vec!["pub mod init;", "pub mod rnn;"],
+        "src/nn/mod.rs が宣言する pub mod が `pub mod init;`・`pub mod rnn;` の 2 件と一致しない\
          （nn 公開面の無断拡大を検知）: {declared:?}"
     );
 }
@@ -6918,6 +7149,18 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "unscale_grads",
     // `data.rs`（イシュー #2505。Sampler／フック系の自由関数 `default_collate`）。
     "default_collate",
+    // `nn/init.rs`（イシュー #2504。`torch.nn.init.*` 相当の初期化関数 9 個＋補助関数 2 個）。
+    "uniform",
+    "normal",
+    "constant",
+    "xavier_uniform",
+    "xavier_normal",
+    "kaiming_uniform",
+    "kaiming_normal",
+    "orthogonal",
+    "trunc_normal",
+    "calculate_gain",
+    "calculate_fan_in_and_fan_out",
 ];
 
 /// facade src の全 `pub use` 文（`pub(..) use` はスコープ付き可視性の
@@ -11252,7 +11495,6 @@ mod __fandhe_rng_dist_hold_probe {\n\
 \x20\x20\x20\x20pub struct Generator;\n\
 \x20\x20\x20\x20pub fn bernoulli() {}\n\
 \x20\x20\x20\x20pub fn multinomial() {}\n\
-\x20\x20\x20\x20pub fn normal() {}\n\
 }\n\
 use __fandhe_rng_dist_hold_probe::*;\n\
 \n\
@@ -11281,7 +11523,23 @@ fn __probe_free_fns(_: Generator) {\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20bernoulli();\n\
 \x20\x20\x20\x20multinomial();\n\
-\x20\x20\x20\x20normal();\n\
+}\n\
+\n\
+// `normal` だけは `nn::init::normal`（#2504 で公開済み）が同名の\n\
+// 別機能として facade に存在するため、`nn::init` を除く全 `pub mod`\n\
+// だけを glob したスコープで衝突検査する（`nn::init` を含めると\n\
+// 常に曖昧になる）。\n\
+mod __fandhe_rng_dist_normal_scope {\n\
+\x20\x20\x20\x20use fandhe_ai::*;\n\
+\n\
+\x20\x20\x20\x20mod __fandhe_rng_dist_normal_probe {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn normal() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20use __fandhe_rng_dist_normal_probe::*;\n\
+\n\
+\x20\x20\x20\x20pub fn __probe_normal() {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20normal();\n\
+\x20\x20\x20\x20}\n\
 }\n\
 \n\
 fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
@@ -11312,7 +11570,10 @@ const RNG_DISTRIBUTIONS_FN_NAMES: [&str; 3] = ["bernoulli", "multinomial", "norm
 /// 宣言文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出
 /// 契約）を違反として返す（`scan_kv_cache_reexports_and_declarations`
 /// と同型）。
-fn scan_rng_distributions_reexports_and_declarations(content: &str) -> Vec<String> {
+fn scan_rng_distributions_reexports_and_declarations(
+    content: &str,
+    is_nn_init_rs: bool,
+) -> Vec<String> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
@@ -11326,7 +11587,16 @@ fn scan_rng_distributions_reexports_and_declarations(content: &str) -> Vec<Strin
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
             let leaves = collect_pub_use_leaves(path_tokens);
+            // #2504: `nn::init::normal`（`torch.nn.init.normal_` 相当。RNG 分布 `normal`
+            // とは別機能）の承認済み再エクスポートだけを経路限定で許可する
+            // （`src/nn/init.rs`・接頭辞 `fandhe_ai_autodiff::nn::init::`・別名なし）。
+            let nn_init_shape_ok = is_nn_init_rs
+                && nn_init_approved_prefix(path_tokens)
+                && !path_tokens.iter().any(|t| t == "as");
             for leaf in leaves {
+                if leaf == "normal" && nn_init_shape_ok {
+                    continue;
+                }
                 if leaf == "Generator" || RNG_DISTRIBUTIONS_FN_NAMES.contains(&leaf.as_str()) {
                     offending.push(format!("pub use leaf={leaf}"));
                 }
@@ -11351,6 +11621,110 @@ fn scan_rng_distributions_reexports_and_declarations(content: &str) -> Vec<Strin
     offending
 }
 
+/// `pub use` の path トークン列が `fandhe_ai_autodiff :: nn :: init :: …`
+/// で始まるか（`nn::init` の承認形の接頭辞）を判定する
+/// （[`optimizer_ext_approved_prefix`] と同型）。
+fn nn_init_approved_prefix(path_tokens: &[String]) -> bool {
+    let want = [
+        "fandhe_ai_autodiff",
+        ":",
+        ":",
+        "nn",
+        ":",
+        ":",
+        "init",
+        ":",
+        ":",
+    ];
+    path_tokens.len() >= want.len() && path_tokens.iter().zip(want).all(|(a, b)| a == b)
+}
+
+/// [`scan_rng_distributions_reexports_and_declarations`] の自己テスト。
+/// `normal` の承認済み `nn::init` 再エクスポートだけが経路限定で許可され、
+/// それ以外（別ファイル・別 path・別名・RNG 分布の `normal`）は違反になる。
+#[test]
+fn scan_rng_distributions_allows_only_approved_nn_init_normal() {
+    let scan = scan_rng_distributions_reexports_and_declarations;
+    // 正例: src/nn/init.rs の承認形（group・単一とも）。
+    assert!(
+        scan(
+            "pub use fandhe_ai_autodiff::nn::init::{constant, normal, uniform};",
+            true
+        )
+        .is_empty()
+    );
+    assert!(scan("pub use fandhe_ai_autodiff::nn::init::normal;", true).is_empty());
+    // 負例: RNG 分布の `normal`（tensor_core::rng）は src/nn/init.rs でも違反。
+    assert!(!scan("pub use fandhe_ai_tensor_core::rng::normal;", true).is_empty());
+    // 負例: 承認形でも nn/init.rs 以外のファイルからは違反。
+    assert!(!scan("pub use fandhe_ai_autodiff::nn::init::normal;", false).is_empty());
+    // 負例: 別名。
+    assert!(!scan("pub use fandhe_ai_autodiff::nn::init::normal as n;", true).is_empty());
+    // 負例: 他の RNG 分布名・Generator は nn/init.rs でも違反のまま。
+    assert!(!scan("pub use fandhe_ai_autodiff::nn::init::bernoulli;", true).is_empty());
+    assert!(!scan("pub use fandhe_ai_tensor_core::rng::Generator;", true).is_empty());
+    // 負例: fn 宣言は従来どおり違反。
+    assert!(!scan("pub fn normal() {}", true).is_empty());
+}
+
+/// `RngDistributionsHoldDoctestGuard` の入れ子スコープ
+/// `__fandhe_rng_dist_normal_scope`（`nn::init` 衝突の回避用。#2504）が
+/// glob する集合が「`pub mod` 全集合から `nn::init` だけを除いたもの」と
+/// 完全一致し、ローカルの `normal` プローブと `normal();` 呼び出しを
+/// 保つことを固定する（`split_glob_imports_and_probe_body` は入れ子内の
+/// glob 行も外側と同じ集合へ吸収するため、別途検査が必要）。
+#[test]
+fn rng_distributions_normal_scope_globs_all_pub_modules_except_nn_init() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "RngDistributionsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let start = block
+        .iter()
+        .position(|l| l.trim() == "mod __fandhe_rng_dist_normal_scope {")
+        .expect("入れ子スコープ __fandhe_rng_dist_normal_scope が見つからない");
+    let mut globs = std::collections::BTreeSet::new();
+    let mut inner: Vec<String> = Vec::new();
+    for line in &block[start + 1..] {
+        if line.trim() == "}" && !line.starts_with(' ') {
+            break;
+        }
+        let t = line.trim();
+        if let Some(path) = t
+            .strip_prefix("use fandhe_ai::")
+            .and_then(|r| r.strip_suffix("::*;"))
+            && !path.is_empty()
+        {
+            globs.insert(path.to_string());
+        }
+        inner.push(t.to_string());
+    }
+    let mut expected = declared;
+    assert!(
+        expected.remove("nn::init"),
+        "nn::init が pub mod 集合にない"
+    );
+    assert_eq!(
+        globs, expected,
+        "入れ子スコープの glob 集合が `pub mod` 全集合から nn::init を除いたものと不一致"
+    );
+    for needle in [
+        "use fandhe_ai::*;",
+        "pub fn normal() {}",
+        "use __fandhe_rng_dist_normal_probe::*;",
+        "normal();",
+    ] {
+        assert!(
+            inner.iter().any(|l| l == needle),
+            "入れ子スコープに `{needle}` がない（正のプローブの骨抜き）: {inner:?}"
+        );
+    }
+    assert!(
+        !inner.iter().any(|l| l.contains("nn::init")),
+        "入れ子スコープが nn::init を glob している（常に曖昧になりプローブが無意味化する）"
+    );
+}
+
 /// facade src 全体（`crates/facade/src/**`）に、`Generator` を識別子
 /// 単位で含む `pub use`（複数行・ネストした group・別名含む）も、
 /// facade 独自の `trait`／`struct`／`enum`／`type` 宣言も、
@@ -11364,7 +11738,8 @@ fn facade_does_not_reexport_or_declare_rng_distributions() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_rng_distributions_reexports_and_declarations(content) {
+        let is_nn_init_rs = path.ends_with("src/nn/init.rs");
+        for offense in scan_rng_distributions_reexports_and_declarations(content, is_nn_init_rs) {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
@@ -18631,6 +19006,8 @@ fn nn_mod_public_items_match_expected_set() {
     assert_eq!(
         public,
         pair_set(&[
+            ("mod", "init"),
+            ("mod", "init"),
             ("mod", "rnn"),
             ("use", "Module"),
             ("use", "ModuleDict"),
@@ -18755,10 +19132,11 @@ fn nn_containers_inherent_and_trait_impls_match_expected_set() {
 /// （合成入力で各カテゴリの逸脱が検出され、現行の形が正例として通ることを確認する）。
 #[test]
 fn nn_public_item_set_scanners_detect_each_category() {
-    let base = "mod container; mod module; pub mod rnn;\n\
+    let base = "mod container; mod module; pub mod init; pub mod rnn;\n\
                 pub use container::{ModuleDict, ModuleList, Sequential, summary};\n\
                 pub use module::Module;\n";
     let expected_mod = pair_set(&[
+        ("mod", "init"),
         ("mod", "rnn"),
         ("use", "Module"),
         ("use", "ModuleDict"),
@@ -19017,7 +19395,7 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 9] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 10] = [
     "compat",
     "data",
     "interop",
@@ -19025,6 +19403,7 @@ const GRAD_SCALER_PROBE_MODULES: [&str; 9] = [
     "interop::safetensors",
     "model",
     "nn",
+    "nn::init",
     "nn::rnn",
     "optim",
 ];
@@ -19049,6 +19428,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use fandhe_ai::interop::safetensors::*;
     pub use fandhe_ai::interop::*;
     pub use fandhe_ai::model::*;
+    pub use fandhe_ai::nn::init::*;
     pub use fandhe_ai::nn::rnn::*;
     pub use fandhe_ai::nn::*;
     pub use fandhe_ai::optim::*;

@@ -154,10 +154,9 @@
 //! シード方式の既存 `pub(crate)` ヘルパー（`uniform_init` 等）とは独立
 //! に、プロセスグローバル決定的 RNG（`tensor-core::rng::manual_seed`）
 //! へ従属する（`init.rs` モジュール doc「`nn::init`」節参照）。facade
-//! への再エクスポートは別途ユーザー承認（`docs/compat-api-scope.md`
-//! §5 経路 2）を要する公開面拡張のため、本イシュー時点では未承認の
-//! まま保留し `crates/facade/**` は変更していない
-//! （`docs/facade-nn-init-exposure-decision.md` 参照）。
+//! への再エクスポートはイシュー #2504（ルート #2499 の一括承認。
+//! `docs/compat-api-scope.md` §5 経路 2）で `fandhe_ai::nn::init` として
+//! 公開済み（`docs/facade-nn-init-exposure-decision.md` 参照）。
 //! イシュー #2159（親 #2131）で [`ConvTranspose1d`]（`conv`
 //! モジュール）・[`Upsample`]（`upsample` モジュール）・[`ZeroPad2d`]
 //! （`padding` モジュール）・[`Identity`]（`identity` モジュール）・
