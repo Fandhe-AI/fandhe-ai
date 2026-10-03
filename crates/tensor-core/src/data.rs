@@ -88,9 +88,9 @@
 //! [`WeightedRandomSampler`] は [`crate::rng::multinomial`] と、それぞれ
 //! 添字列・抽選列が bit 完全一致する（各型の doc 参照）。
 //!
-//! facade（`fandhe_ai::data`）への再エクスポートは未承認のため保留中
-//! （`crates/facade/src/lib.rs::DataHooksHoldDoctestGuard`・
-//! `docs/tensor-core-data-sampler-hooks-decision.md` §5）。
+//! facade（`fandhe_ai::data`）へは #2505 で純再エクスポート済み
+//! （`DataLoader` への統合はしない。
+//! `docs/tensor-core-data-sampler-hooks-decision.md` §5・§8）。
 
 use crate::element::Element;
 use crate::error::ShapeError;

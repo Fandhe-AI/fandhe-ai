@@ -3064,11 +3064,22 @@ fn data_module_reexports_exactly_expected_surface() {
 
     let expected: std::collections::BTreeSet<String> = [
         "Batches",
+        "CollateFn",
         "DataError",
         "DataLoader",
         "DataLoaderConfig",
         "Dataset",
+        "HookedBatches",
+        "HookedDataLoader",
+        "RandomSampler",
+        "Sampler",
+        "SamplerBatches",
+        "SamplerDataLoader",
+        "SequentialSampler",
         "TensorDataset",
+        "TransformFn",
+        "WeightedRandomSampler",
+        "default_collate",
     ]
     .into_iter()
     .map(str::to_string)
@@ -3138,125 +3149,62 @@ fn data_types_are_reachable_via_facade_only() {
     let probe = fandhe_ai::data::TensorDataset::new(fandhe_ai::Tensor::<f32>::zeros(&[2]).unwrap())
         .unwrap();
     assert_is_dataset(&probe);
+
+    // Sampler 系・フック系（#2505。決定記録 §5）も facade のみで到達可能。
+    fn assert_is_sampler<S: fandhe_ai::data::Sampler>(_s: &S) {}
+    let seq = fandhe_ai::data::SequentialSampler::new(4, 2, false)
+        .unwrap_or_else(|e| panic!("test fixture: SequentialSampler::new が失敗: {e}"));
+    assert_is_sampler(&seq);
+    let rand = fandhe_ai::data::RandomSampler::new(4, 2, false)
+        .unwrap_or_else(|e| panic!("test fixture: RandomSampler::new が失敗: {e}"));
+    assert_is_sampler(&rand);
+    let weighted =
+        fandhe_ai::data::WeightedRandomSampler::new(vec![1.0, 2.0, 3.0, 4.0], 4, true, 2, false)
+            .unwrap_or_else(|e| panic!("test fixture: WeightedRandomSampler::new が失敗: {e}"));
+    assert_is_sampler(&weighted);
+
+    let feats = fandhe_ai::Tensor::<f32>::new(vec![0.0, 1.0, 2.0, 3.0], &[4, 1])
+        .unwrap_or_else(|e| panic!("test fixture: features の構築に失敗: {e}"));
+    let ds = fandhe_ai::data::TensorDataset::new(feats.clone())
+        .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new が失敗: {e}"));
+    let mut sl = fandhe_ai::data::SamplerDataLoader::new(ds, seq)
+        .unwrap_or_else(|e| panic!("test fixture: SamplerDataLoader::new が失敗: {e}"));
+    let sb: fandhe_ai::data::SamplerBatches<'_, _> = sl.iter();
+    assert_eq!(sb.count(), 2);
+
+    let ds = fandhe_ai::data::TensorDataset::new(feats)
+        .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new が失敗: {e}"));
+    let sampler = fandhe_ai::data::SequentialSampler::new(4, 2, false)
+        .unwrap_or_else(|e| panic!("test fixture: SequentialSampler::new が失敗: {e}"));
+    let mut hooked = fandhe_ai::data::HookedDataLoader::new(ds, sampler)
+        .unwrap_or_else(|e| panic!("test fixture: HookedDataLoader::new が失敗: {e}"))
+        .with_try_transform(Ok)
+        .with_try_collate(fandhe_ai::data::default_collate);
+    let hb: fandhe_ai::data::HookedBatches<'_, f32> = hooked.iter();
+    assert_eq!(hb.count(), 2);
+
+    let _t: fandhe_ai::data::TransformFn<f32> = Box::new(Ok);
+    let _c: fandhe_ai::data::CollateFn<f32> = Box::new(fandhe_ai::data::default_collate);
+    let samples = [
+        fandhe_ai::Tensor::<f32>::zeros(&[3]).unwrap_or_else(|e| panic!("fixture: {e}")),
+        fandhe_ai::Tensor::<f32>::zeros(&[3]).unwrap_or_else(|e| panic!("fixture: {e}")),
+    ];
+    let stacked = fandhe_ai::data::default_collate(&samples)
+        .unwrap_or_else(|e| panic!("test fixture: default_collate が失敗: {e}"));
+    assert_eq!(stacked.shape(), &[2, 3]);
 }
 
 // =====================================================================
-// DataHooksHoldDoctestGuard（イシュー #2182）: `RngDistributionsHold
-// DoctestGuard`（#2156）系のテスト（`rng_distributions_hold_doctest_
-// globs_all_pub_modules`／`rng_distributions_hold_doctest_probe_body_
-// matches_fixed_contract`／`facade_does_not_reexport_or_declare_rng_
-// distributions`／`workspace_declares_rng_distribution_names_only_in_
-// allowed_locations`）を鏡写しにする。
+// データフック（イシュー #2182 → #2505）: `Sampler` 系・`HookedDataLoader`
+// 系・`default_collate` 等 11 名は、#2182 では facade 公開保留として
+// `DataHooksHoldDoctestGuard` と否定ガードで固定していたが、#2505 で
+// `fandhe_ai::data` からの素の再エクスポートを承認形
+// （`docs/tensor-core-data-sampler-hooks-decision.md` §5。ルート #2499 の
+// ユーザー承認〈依頼文記載の承認日 2026-10-04〉）として公開したため、doctest ガードとその
+// ドリフト検査 2 件を削除し、ソース走査ガードを「承認した形だけを
+// 許す」正ガードへ反転した。`DataLoader` への統合（fn 宣言）は引き続き
+// 禁止する。
 // =====================================================================
-
-/// `crates/facade/src/lib.rs` の `DataHooksHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`rng_distributions_hold_doctest_globs_all_pub_modules` と同型）。
-#[test]
-fn data_hooks_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "DataHooksHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "DataHooksHoldDoctestGuard の doctest ブロックが glob import\
-         するモジュール集合が src/lib.rs の pub mod 宣言集合と\
-         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも\
-         追加すること。"
-    );
-}
-
-/// [`data_hooks_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`DATA_HOOKS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（`rng_distributions_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
-/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
-/// を骨抜きにする改変を機械的に拒否する）。
-#[test]
-fn data_hooks_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "DataHooksHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, DATA_HOOKS_HOLD_PROBE_BODY,
-        "DataHooksHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 DATA_HOOKS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_data_hooks_hold_probe モジュール・\
-         __FandheDataHooksHoldProbe トレイト・__probe_* 関数）の削除・\
-         弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`data_hooks_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `DataHooksHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const DATA_HOOKS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_data_hooks_hold_probe {\n\
-\x20\x20\x20\x20pub struct Sampler;\n\
-\x20\x20\x20\x20pub struct SequentialSampler;\n\
-\x20\x20\x20\x20pub struct RandomSampler;\n\
-\x20\x20\x20\x20pub struct WeightedRandomSampler;\n\
-\x20\x20\x20\x20pub struct SamplerDataLoader;\n\
-\x20\x20\x20\x20pub struct SamplerBatches;\n\
-\x20\x20\x20\x20pub struct HookedDataLoader;\n\
-\x20\x20\x20\x20pub struct HookedBatches;\n\
-\x20\x20\x20\x20pub struct TransformFn;\n\
-\x20\x20\x20\x20pub struct CollateFn;\n\
-\x20\x20\x20\x20pub fn default_collate() {}\n\
-}\n\
-use __fandhe_data_hooks_hold_probe::*;\n\
-\n\
-struct __FandheDataHooksHoldMarker;\n\
-\n\
-trait __FandheDataHooksHoldProbe {\n\
-\x20\x20\x20\x20fn with_sampler(&self) -> __FandheDataHooksHoldMarker;\n\
-\x20\x20\x20\x20fn with_transform(&self) -> __FandheDataHooksHoldMarker;\n\
-\x20\x20\x20\x20fn with_collate(&self) -> __FandheDataHooksHoldMarker;\n\
-\x20\x20\x20\x20fn with_try_transform(&self) -> __FandheDataHooksHoldMarker;\n\
-\x20\x20\x20\x20fn with_try_collate(&self) -> __FandheDataHooksHoldMarker;\n\
-}\n\
-\n\
-impl __FandheDataHooksHoldProbe\n\
-\x20\x20\x20\x20for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>\n\
-{\n\
-\x20\x20\x20\x20fn with_sampler(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
-\x20\x20\x20\x20fn with_transform(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
-\x20\x20\x20\x20fn with_collate(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
-\x20\x20\x20\x20fn with_try_transform(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
-\x20\x20\x20\x20fn with_try_collate(&self) -> __FandheDataHooksHoldMarker { __FandheDataHooksHoldMarker }\n\
-}\n\
-\n\
-fn __probe_free_fns(_: Sampler, _: SequentialSampler, _: RandomSampler,\n\
-\x20\x20\x20\x20_: WeightedRandomSampler, _: SamplerDataLoader, _: SamplerBatches,\n\
-\x20\x20\x20\x20_: HookedDataLoader, _: HookedBatches, _: TransformFn, _: CollateFn) {\n\
-\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
-\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20default_collate();\n\
-}\n\
-\n\
-fn __probe_data_loader(x: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>) {\n\
-\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_sampler();\n\
-\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_transform();\n\
-\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_collate();\n\
-\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_try_transform();\n\
-\x20\x20\x20\x20let _: __FandheDataHooksHoldMarker = x.with_try_collate();\n\
-}";
 
 /// 型名 10 個（イシュー #2182）。[`scan_data_hooks_reexports_and_
 /// declarations`]・[`workspace_declares_data_hooks_names_only_in_
@@ -3286,18 +3234,43 @@ const DATA_HOOKS_FN_NAMES: [&str; 5] = [
     "with_try_collate",
 ];
 
-/// [`facade_does_not_reexport_or_declare_data_hooks`]・その自己テストが
-/// 共用する検出本体（`scan_rng_distributions_reexports_and_declarations`
-/// と同型）。facade src 全体（`crates/facade/src/**`）の `pub use` から
-/// [`collect_pub_use_leaves`] で別名にする前の葉を集め
-/// [`DATA_HOOKS_TYPE_NAMES`] を検出し（単一行・複数行・ネストした
-/// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
-/// 独自宣言、[`DATA_HOOKS_FN_NAMES`]（5 個）の `fn` 宣言（可視性・宣言
-/// 文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出契約）を
-/// 違反として返す。
-fn scan_data_hooks_reexports_and_declarations(content: &str) -> Vec<String> {
+/// 承認形で公開する 11 識別子（[`DATA_HOOKS_TYPE_NAMES`] の 10 型と
+/// `default_collate`。#2505）。
+const DATA_HOOKS_APPROVED_REEXPORT_NAMES: [&str; 11] = [
+    "Sampler",
+    "SequentialSampler",
+    "RandomSampler",
+    "WeightedRandomSampler",
+    "SamplerDataLoader",
+    "SamplerBatches",
+    "HookedDataLoader",
+    "HookedBatches",
+    "TransformFn",
+    "CollateFn",
+    "default_collate",
+];
+
+/// `pub use` の path トークン列が `fandhe_ai_tensor_core :: data :: …`
+/// で始まるか（承認形の接頭辞）を判定する。
+fn data_hooks_approved_prefix(path_tokens: &[String]) -> bool {
+    let want = ["fandhe_ai_tensor_core", ":", ":", "data", ":", ":"];
+    path_tokens.len() >= want.len() && path_tokens.iter().zip(want).all(|(a, b)| a == b)
+}
+
+/// [`facade_reexports_data_hooks_items_only_in_approved_shape`]・その
+/// 自己テストが共用する検出本体。`content`（1 ファイル分のソース）の
+/// `pub use` から [`collect_pub_use_leaves`] で 11 識別子の葉を集め、
+/// 承認形（接頭辞が `fandhe_ai_tensor_core::data::` で `as` 別名を伴わない）
+/// の出現葉を第 1 要素、承認形から外れる出現（別 path 接頭辞・別名）、
+/// 10 型名の `trait`／`struct`／`enum`／`type` 独自宣言、
+/// [`DATA_HOOKS_FN_NAMES`] の `fn` 宣言（`DataLoader` への統合や facade
+/// 独自 fn の禁止。[`count_fn_declarations_by_name`] と同じ検出契約）を
+/// 第 2 要素（違反）として返す。コメント・文字列リテラル中の出現と
+/// 非公開 `use` は無視する。
+fn scan_data_hooks_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<String>) {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
+    let mut approved: Vec<String> = Vec::new();
     let mut offending: Vec<String> = Vec::new();
 
     let mut i = 0usize;
@@ -3308,10 +3281,17 @@ fn scan_data_hooks_reexports_and_declarations(content: &str) -> Vec<String> {
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if DATA_HOOKS_TYPE_NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
+            let hits: Vec<String> = collect_pub_use_leaves(path_tokens)
+                .into_iter()
+                .filter(|leaf| DATA_HOOKS_APPROVED_REEXPORT_NAMES.contains(&leaf.as_str()))
+                .collect();
+            let shape_ok =
+                data_hooks_approved_prefix(path_tokens) && !path_tokens.iter().any(|t| t == "as");
+            for leaf in hits {
+                if shape_ok {
+                    approved.push(leaf);
+                } else {
+                    offending.push(format!("承認形外の pub use leaf={leaf}"));
                 }
             }
             i = (end + 1).min(tokens.len());
@@ -3332,34 +3312,88 @@ fn scan_data_hooks_reexports_and_declarations(content: &str) -> Vec<String> {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
         }
     }
-    offending
+    (approved, offending)
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、[`DATA_HOOKS_TYPE_
-/// NAMES`]（10 個）を識別子単位で含む `pub use`（複数行・ネストした
-/// group・別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type`
-/// 宣言も、[`DATA_HOOKS_FN_NAMES`]（5 個）の `fn` 宣言も存在しないこと
-/// を固定する（`DataHooksHoldDoctestGuard` の正のプローブと多層防御を
-/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// rng_distributions` と同型）。
+/// 承認形の正ガード（#2505 で `facade_does_not_reexport_or_declare_
+/// data_hooks` から反転）。facade src 全体で、11 識別子がそれぞれ
+/// `src/data.rs` の `pub use fandhe_ai_tensor_core::data::…`（別名なし）
+/// としてちょうど 1 回だけ出現し、承認形外の再エクスポート・同名の独自
+/// 宣言・[`DATA_HOOKS_FN_NAMES`] の `fn` 宣言が存在しないことを
+/// fail-closed に固定する。
 #[test]
-fn facade_does_not_reexport_or_declare_data_hooks() {
+fn facade_reexports_data_hooks_items_only_in_approved_shape() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_data_rs: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_data_hooks_reexports_and_declarations(content) {
+        let (approved, bad) = scan_data_hooks_reexports_and_declarations(content);
+        for offense in bad {
             offending.push(format!("{}: {offense}", path.display()));
         }
+        if path.ends_with("src/data.rs") {
+            approved_in_data_rs.extend(approved);
+        } else {
+            for leaf in approved {
+                offending.push(format!(
+                    "{}: data.rs 以外での pub use leaf={leaf}",
+                    path.display()
+                ));
+            }
+        }
     });
+    approved_in_data_rs.sort();
+    let mut expected: Vec<String> = DATA_HOOKS_APPROVED_REEXPORT_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
     assert!(
         offending.is_empty(),
-        "facade の公開面が DataLoader の Sampler・collate・transform\
-         フック（#2182 の Sampler 系 6 型／HookedDataLoader 系 4 型・\
-         with_transform 等の fn。内部クレート限定の新規公開面。facade\
-         公開は承認待ちのため対象外という設計判断に違反）を\
-         再エクスポート、独自宣言、または同名の fn を宣言している: \
-         {offending:?}"
+        "facade の公開面がデータフック（#2505。Sampler 系・HookedDataLoader 系・\
+         default_collate）を承認形（src/data.rs の `pub use fandhe_ai_tensor_core::\
+         data::…`・別名なし）以外で再エクスポート、独自宣言、または DataLoader への\
+         統合用 fn を宣言している（`docs/tensor-core-data-sampler-hooks-decision.md` \
+         §5）: {offending:?}"
     );
+    assert_eq!(
+        approved_in_data_rs, expected,
+        "src/data.rs に承認形の 11 識別子がちょうど 1 回ずつ存在しない\
+         （過不足・重複いずれも fail。検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_data_hooks_reexports_and_declarations`] の自己テスト
+/// （正例・負例の合成入力）。
+#[test]
+fn facade_reexports_data_hooks_items_only_in_approved_shape_detects_each_category() {
+    let scan = scan_data_hooks_reexports_and_declarations;
+    let (ok, bad) = scan("pub use fandhe_ai_tensor_core::data::{Sampler, SequentialSampler};");
+    assert!(bad.is_empty());
+    assert_eq!(ok, vec!["Sampler", "SequentialSampler"]);
+    let (ok, bad) = scan("pub use fandhe_ai_tensor_core::data::default_collate;");
+    assert!(bad.is_empty());
+    assert_eq!(ok, vec!["default_collate"]);
+    // 違反: 別名・別 path 接頭辞・独自宣言・fn 宣言。
+    for src in [
+        "pub use fandhe_ai_tensor_core::data::HookedBatches as Foo;",
+        "pub use fandhe_ai_tensor_core::Sampler;",
+        "pub struct HookedBatches;",
+        "pub fn with_transform() {}",
+        "fn default_collate() {}",
+    ] {
+        assert!(!scan(src).1.is_empty(), "src={src:?}");
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use ...::Sampler;",
+        "let s = \"CollateFn\";",
+        "use fandhe_ai_tensor_core::data::RandomSampler;",
+        "pub use fandhe_ai_tensor_core::data::Dataset;",
+    ] {
+        let (ok, bad) = scan(src);
+        assert!(ok.is_empty() && bad.is_empty(), "src={src:?}");
+    }
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、
@@ -6790,6 +6824,8 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "scale_grads",
     "scale_loss",
     "unscale_grads",
+    // `data.rs`（イシュー #2505。Sampler／フック系の自由関数 `default_collate`）。
+    "default_collate",
 ];
 
 /// facade src の全 `pub use` 文（`pub(..) use` はスコープ付き可視性の
