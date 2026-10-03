@@ -7,12 +7,14 @@
 
 ## §0 結論
 
-`compat::Loss`（`crates/facade/src/compat/training.rs`）への facade
-公開面の拡張は**未承認のため保留**する。コード変更は保留ガード
-（`crates/facade/src/lib.rs::CompileLossVariantsHoldDoctestGuard`＋
-`crates/facade/tests/api_surface.rs` の否定ガード）のみで、`Loss`
-enum・`FitTarget::loss_for` 本体（`crates/facade/src/compat/
-training.rs`）は一切変更しない。
+**2026-10-04 更新（イシュー #2509・親 #2500・ルート #2499 の一括承認）**:
+`compat::Loss` への 7 unit variant は §2 の推奨形どおり facade へ公開済み
+（§2.5 実装記録・§4 承認記録・§5 ガード反転）。以下 §1〜§3 は #2169 時点の
+保留記録（経緯）として残す。
+
+**（#2169 時点・履歴）** `compat::Loss`（`crates/facade/src/compat/training.rs`）
+への facade 公開面の拡張は未承認のため保留した。コード変更は保留ガード
+（`CompileLossVariantsHoldDoctestGuard`＋`api_surface.rs` の否定ガード）のみ。
 
 ## §1 背景
 
@@ -129,6 +131,38 @@ match する網羅的 match（wildcard なし。同一クレート内は
 - CUDA／Metal parity は `#[ignore]` で分離し、`docs/perf/logs/
   compile-loss-variants-2169/` へ実機実測を申し送る
 
+### §2.5 実装記録（イシュー #2509）
+
+- 公開した名前: `Loss::{L1, Bce, BceWithLogits, Nll, KlDiv, Huber, SmoothL1}`
+  の 7 unit variant のみ（宣言順は `Mse, CrossEntropy, L1, Bce, BceWithLogits,
+  Nll, KlDiv, Huber, SmoothL1`）。固定パラメータは `Huber` の delta = 1.0・
+  `SmoothL1` の beta = 1.0・`KlDiv` の `log_target = false`・`Nll` の
+  `class_dim = 1`。新規 `pub fn`／`pub use` はない。`L1` は
+  `fandhe_ai_autodiff::loss_ops::l1_loss` を `training.rs` の非 `pub` な
+  `use` で呼ぶだけで、`loss_ops` モジュールの再エクスポートと `Var::l1_loss`
+  委譲メソッドは引き続き保留（`LossOpsHoldDoctestGuard` 維持）
+- target dtype: `Nll`・`CrossEntropy` は `Tensor<i32>`、他 7 種は
+  `Tensor<f32>`。不整合は `FitTarget::loss_for` の網羅 match（wildcard なし）で
+  `InvalidArgument`。`Nll` は metrics 可（log 確率の argmax は logits の
+  argmax と一致）
+- **承認形から機械的に派生する必要事項（§2 に記載のなかった点）**:
+  `compat/model_io/compiled.rs` の `loss_name`／`parse_compiled` も `Loss` の
+  網羅 match のため、loss 文字列 allowlist を 9 種（`"l1"`・`"bce"`・
+  `"bce_with_logits"`・`"nll"`・`"kl_div"`・`"huber"`・`"smooth_l1"` を追加）へ
+  拡張した。`format_version` は #2373 の lbfgs 先例どおり 2 のまま据え置く
+  （新しい値は既存ファイルに存在せず、旧リーダーは `UnsupportedModel` で
+  fail-closed）。新規 `pub` 項目はなく、`save_model`／`load_model` が扱う値が
+  増えるのみ
+- GPU: `fit`／`evaluate` は CPU 固定 tape 上で動き、新規の `Op`／`BackendOps`／
+  VJP／カーネルは追加していない。下層 `Var` 損失の CUDA／Metal parity は既存
+  記録（BCE／Huber／NLL／KLDiv は 2026-09-16 実測済み、L1 は
+  `docs/perf/logs/loss-ops-2166/` へ申し送り済み）で扱うため、本イシューでは
+  新たな `#[ignore]` 実機テスト・実測申し送りを作らない（#2508 と同扱い）
+- テスト: `crates/facade/tests/compat_sequential_fit_losses.rs`（手動ループと
+  bit 一致・evaluate 一致・dtype 不整合・metrics 可否・Bce 範囲外）、
+  `compat_sequential_model_io_compiled.rs::added_loss_kinds_are_restored`、
+  `fit_types_are_reachable_via_facade_only` への到達確認
+
 ## §3 CTC を `compile()` の対象外とする理由
 
 イシュー本文の承認事項節は CTC を列挙しているが、受け入れ条件（§1 の
@@ -143,6 +177,11 @@ match する網羅的 match（wildcard なし。同一クレート内は
 
 ## §4 承認事項
 
+**承認記録（2026-10-04）**: ルート #2499 本文「承認範囲」節の一括承認（設計判断記録の
+推奨形での facade 公開）により、下記 1・2 を #2509 で適用した（2 は `Loss::L1` の
+結線に限り、`loss_ops` の再エクスポート・`Var::l1_loss` は対象外のまま）。3 は
+スコープ外のまま。
+
 1. `Loss` への 7 unit variant（`Bce`／`BceWithLogits`／`Nll`／
    `KlDiv`／`Huber`／`SmoothL1`／`L1`）の追加（`docs/compat-api-scope.md`
    §5 経路 2）
@@ -151,7 +190,13 @@ match する網羅的 match（wildcard なし。同一クレート内は
 3. `Huber`／`SmoothL1` のパラメータ（`delta`／`beta`）を可変にしたい
    場合の `Eq` 互換ペイロード型設計（§2.1 参照。本記録のスコープ外）
 
-## §5 保留ガードの多層防御
+## §5 保留ガードの多層防御（#2509 で反転済み）
+
+**#2509 の反転内容**: 1 の `CompileLossVariantsHoldDoctestGuard`（`lib.rs`）と
+2 の `compile_loss_variants_hold_doctest_*` 2 テスト・固定文言定数を削除し、
+3 は `compat_loss_enum_variants_are_exactly_approved_set`（承認形 9 種を順序付きで
+固定する正ガード）へ置き換えた。`collect_top_level_enum_variant_idents` とその
+自己テストは callback の enum ガードと共用のため維持。以下は反転前の記録。
 
 `OptimizerExtHoldDoctestGuard`（`docs/autodiff-optimizer-adadelta-
 adamax-nadam-radam-decision.md` §8）と同型の「正のプローブ 1 ブロック

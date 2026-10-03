@@ -38,6 +38,9 @@ use crate::optim::{
 };
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
+// 非 `pub` の use のみ（`loss_ops` モジュール自体は facade へ公開しない。
+// `LossOpsHoldDoctestGuard` の保留を維持。#2509）。
+use fandhe_ai_autodiff::loss_ops::l1_loss;
 // `Lbfgs` は #2502 で `crate::optim` から公開済み（同一型）。本ファイルの
 // `OptimizerState::Lbfgs` は内部クレートの型を直接 import して保持する
 // （非 `pub use`。再エクスポートは `optim.rs` が担う）。
@@ -148,9 +151,31 @@ impl std::fmt::Debug for AmpState {
     }
 }
 
-/// `compile()` の `loss` 引数（`Reduction::Mean` 固定。`#[non_exhaustive]`
-/// のため後続の損失追加〈#1763 以降〉が既存呼び出し元の非網羅的
-/// `match` を破壊しない）。
+/// `compile()` の `loss` 引数（`Reduction::Mean` 固定の 9 種。`#[non_exhaustive]`
+/// のため後続の損失追加が既存呼び出し元の非網羅的 `match` を破壊しない）。
+///
+/// target の dtype は `Mse`・`L1`・`Bce`・`BceWithLogits`・`KlDiv`・`Huber`・
+/// `SmoothL1` が `Tensor<f32>`、`CrossEntropy`・`Nll` が `Tensor<i32>`
+/// （クラス添字）。不整合は fit／evaluate 時に `InvalidArgument` で拒否する。
+/// パラメータ付き損失は固定値（`Huber` の delta・`SmoothL1` の beta は 1.0、
+/// `KlDiv` は `log_target = false`）で、可変化は本 enum の範囲外。
+///
+/// 決定記録は `docs/facade-compile-loss-variants-decision.md`（イシュー #2509）。
+///
+/// # 例
+///
+/// ```
+/// use fandhe_ai::compat::{Loss, Optimizer, Sequential};
+/// use fandhe_ai::optim::SgdConfig;
+///
+/// let model = Sequential::new()
+///     .add_linear(2, 1, 0)
+///     .unwrap()
+///     .add_sigmoid()
+///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Bce)
+///     .unwrap();
+/// let _ = model;
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Loss {
@@ -161,6 +186,27 @@ pub enum Loss {
     /// `Reduction::Mean`）。`logits` は `[N, C]`・`target` は
     /// `Tensor<i32>` `[N]`（クラス添字）。
     CrossEntropy,
+    /// 平均絶対誤差（内部クレートの `loss_ops::l1_loss`・`Reduction::Mean`）。
+    /// `target` は `Tensor<f32>`（`pred` と同 shape）。
+    L1,
+    /// [`crate::Var::bce_loss`]（`Reduction::Mean`）。`pred` は `[0, 1]` の
+    /// 確率・`target` は `Tensor<f32>`（同 shape）。範囲外は型付きエラー。
+    Bce,
+    /// [`crate::Var::bce_with_logits_loss`]（`Reduction::Mean`）。`pred` は
+    /// logits・`target` は `Tensor<f32>`（同 shape）。
+    BceWithLogits,
+    /// [`crate::Var::nll_loss`]（`class_dim = 1`・`Reduction::Mean`）。`pred` は
+    /// `[N, C]` の log 確率・`target` は `Tensor<i32>` `[N]`（クラス添字）。
+    Nll,
+    /// [`crate::Var::kl_div_loss`]（`log_target = false`・`Reduction::Mean`）。
+    /// `pred` は log 確率・`target` は確率の `Tensor<f32>`（同 shape）。
+    KlDiv,
+    /// [`crate::Var::huber_loss`]（`delta = 1.0`・`Reduction::Mean`）。
+    /// `target` は `Tensor<f32>`（同 shape）。
+    Huber,
+    /// [`crate::Var::smooth_l1_loss`]（`beta = 1.0`・`Reduction::Mean`）。
+    /// `target` は `Tensor<f32>`（同 shape）。
+    SmoothL1,
 }
 
 /// `compile()` の `optimizer` 引数（既存 [`crate::optim`] の
@@ -363,8 +409,8 @@ pub struct History {
 }
 
 /// `fit()`／`evaluate()` の target 要素型（sealed。[`crate::CastElement`]
-/// と同型の非公開 `private::Sealed` 経由）。`f32`（[`Loss::Mse`]）・
-/// `i32`（[`Loss::CrossEntropy`]）のみ実装する——他の型を受け付ける
+/// と同型の非公開 `private::Sealed` 経由）。`f32`（[`Loss::Mse`] 等の f32 系 7 種）・
+/// `i32`（[`Loss::CrossEntropy`]・[`Loss::Nll`]）のみ実装する——他の型を受け付ける
 /// 誤用をコンパイル時に排除する（`.claude/rules/security.md` A03 の
 /// 精神を型で担保する）。
 pub trait FitTarget: Element + private::Sealed {
@@ -422,23 +468,26 @@ impl FitTarget for f32 {
         pred: &crate::Var<'t>,
         target_batch: &Tensor<f32>,
     ) -> Result<crate::Var<'t>, AutodiffError> {
+        let t = || tape.var_no_grad(target_batch);
         match loss {
-            Loss::Mse => {
-                let target_var = tape.var_no_grad(target_batch);
-                pred.mse_loss_with(&target_var, Reduction::Mean)
-            }
-            Loss::CrossEntropy => Err(AutodiffError::InvalidArgument(
-                "Sequential::fit/evaluate: Loss::CrossEntropy には Tensor<i32> の \
+            Loss::Mse => pred.mse_loss_with(&t(), Reduction::Mean),
+            Loss::L1 => l1_loss(pred, &t(), Reduction::Mean),
+            Loss::Bce => pred.bce_loss(&t(), Reduction::Mean),
+            Loss::BceWithLogits => pred.bce_with_logits_loss(&t(), Reduction::Mean),
+            Loss::KlDiv => pred.kl_div_loss(&t(), Reduction::Mean),
+            Loss::Huber => pred.huber_loss(&t(), 1.0, Reduction::Mean),
+            Loss::SmoothL1 => pred.smooth_l1_loss(&t(), 1.0, Reduction::Mean),
+            Loss::CrossEntropy | Loss::Nll => Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::fit/evaluate: Loss::{loss:?} には Tensor<i32> の \
                  target（クラス添字）が必要（Tensor<f32> が渡された）"
-                    .to_string(),
-            )),
+            ))),
         }
     }
 
     fn require_metrics_support() -> Result<(), AutodiffError> {
         Err(AutodiffError::InvalidArgument(
-            "Sequential::fit_with_metrics: metrics は Loss::CrossEntropy（Tensor<i32> \
-             target）でのみ計算できる（Tensor<f32> target が渡された）"
+            "Sequential::fit_with_metrics: metrics はクラス添字 target（Loss::CrossEntropy／\
+             Loss::Nll・Tensor<i32>）でのみ計算できる（Tensor<f32> target が渡された）"
                 .to_string(),
         ))
     }
@@ -453,11 +502,19 @@ impl FitTarget for i32 {
     ) -> Result<crate::Var<'t>, AutodiffError> {
         match loss {
             Loss::CrossEntropy => pred.cross_entropy_loss(target_batch, 1, Reduction::Mean),
-            Loss::Mse => Err(AutodiffError::InvalidArgument(
-                "Sequential::fit/evaluate: Loss::Mse には Tensor<f32> の target が必要\
+            // Nll の pred は log 確率。その argmax は logits の argmax と一致するため
+            // metrics（分類指標）もそのまま有効（`as_class_targets` が Some を返す）。
+            Loss::Nll => pred.nll_loss(target_batch, 1, Reduction::Mean),
+            Loss::Mse
+            | Loss::L1
+            | Loss::Bce
+            | Loss::BceWithLogits
+            | Loss::KlDiv
+            | Loss::Huber
+            | Loss::SmoothL1 => Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::fit/evaluate: Loss::{loss:?} には Tensor<f32> の target が必要\
                  （Tensor<i32> が渡された）"
-                    .to_string(),
-            )),
+            ))),
         }
     }
 
@@ -2103,8 +2160,8 @@ impl Sequential {
             if !metrics.is_empty() {
                 let target_batch = T::as_class_targets(&y_batch).ok_or_else(|| {
                     AutodiffError::InvalidArgument(format!(
-                        "Sequential::{method}: metrics は Loss::CrossEntropy（Tensor<i32> \
-                         target）でのみ計算できる"
+                        "Sequential::{method}: metrics はクラス添字 target（Loss::CrossEntropy／\
+                         Loss::Nll・Tensor<i32>）でのみ計算できる"
                     ))
                 })?;
                 // `Var::shape` は `pub(crate)`（autodiff クレート内限定）

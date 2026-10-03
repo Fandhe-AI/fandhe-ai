@@ -161,3 +161,5 @@ LossOpsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs` の
   従い、必要な場合は PR 上でユーザーに提案する）
 - CUDA（GB10）／Metal（M4 Max）の実機 parity は未実測。§4・
   `docs/perf/logs/loss-ops-2166/README.md` へ申し送る
+
+#2509 追記: `l1_loss` が facade に届く経路は `compat::Loss::L1`（`compile()` 経由・非 `pub` の use 結線）のみになった。`Var` への委譲メソッドと `loss_ops` モジュールの再エクスポートは引き続き保留。

@@ -370,7 +370,7 @@ version migration。
   `"sgd"`／`"adamw"`／`"adam"`／`"rmsprop"`／`"adagrad"`／`"lamb"`／
   `"lbfgs"` の 7 種（文字列 allowlist。未知の値は `UnsupportedModel`）。
   **#2372 で確定した `compiled` の形**: `null`（未 compile）または
-  `{"loss": "mse"|"cross_entropy", "optimizer": {"kind", "config"},
+  `{"loss": "mse"|"cross_entropy"|"l1"|"bce"|"bce_with_logits"|"nll"|"kl_div"|"huber"|"smooth_l1", "optimizer": {"kind", "config"},
   "optimizer_state_keys": ["optimizer.…", …], "amp": null|{"dtype": "f16"|"bf16",
   "grad_scaler_config": {"init_scale", "growth_factor", "backoff_factor", "growth_interval"},
   "scale", "growth_tracker"}}`。`config` は kind ごとの固定キー集合（f32 は `{:?}` の正準形・
@@ -1470,3 +1470,5 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 
 この手順は §13.2 の no-follow 読み取り手順と同型の「検査と実体を
 ハンドルで一体化する」設計であり、新しい対策パターンを追加しない。
+
+#2509 追記: `compiled.loss` の allowlist を 9 種へ拡張した。新しい値は既存ファイルに存在しないため `format_version` は #2373 の lbfgs 先例どおり 2 のまま据え置く（旧リーダーは `UnsupportedModel` で fail-closed）。

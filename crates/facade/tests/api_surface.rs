@@ -3799,6 +3799,13 @@ fn fit_types_are_reachable_via_facade_only() {
 
     let _loss_mse = Loss::Mse;
     let _loss_ce = Loss::CrossEntropy;
+    let _loss_l1 = Loss::L1;
+    let _loss_bce = Loss::Bce;
+    let _loss_bcewithlogits = Loss::BceWithLogits;
+    let _loss_nll = Loss::Nll;
+    let _loss_kldiv = Loss::KlDiv;
+    let _loss_huber = Loss::Huber;
+    let _loss_smoothl1 = Loss::SmoothL1;
 
     let _optimizer = Optimizer::Sgd(fandhe_ai::optim::SgdConfig::new(0.1));
     // イシュー #2170: RmsProp／Adagrad／Lamb variant の facade 経由
@@ -15242,121 +15249,21 @@ pub use crate::other::MultiStepLr;\n"
 }
 
 // =====================================================================
-// イシュー #2169（親 #2131）: `compat::Loss` enum への variant 追加
-// （BCE・BCEWithLogits・NLL・KLDiv・Huber・SmoothL1・L1）の facade
-// 公開保留を検査するテスト群。`CompileLossVariantsHoldDoctestGuard`
-// （`src/lib.rs`）の正のプローブのドリフト検査に加え、`compat::Loss`
-// 自体の variant 集合を固定する（`OptimizerExtHoldDoctestGuard`（#2501 で削除済み）系とは
-// 異なり facade 独自宣言・再エクスポートの検査ではなく、既存 enum への
-// variant 追加を検査する点が異なる）。承認事項の位置づけは `docs/
+// イシュー #2169（親 #2131）→ #2509: `compat::Loss` enum の variant 集合を
+// 承認形 9 種へ固定する正ガード（#2509 で否定ガードから反転。保留 doctest
+// `CompileLossVariantsHoldDoctestGuard` は撤去済み）。決定記録は `docs/
 // facade-compile-loss-variants-decision.md` §4・§5 を参照。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `CompileLossVariantsHoldDoctestGuard`
-/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
-/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules`（#2501 で削除済み） の
-/// `CompileLossVariantsHoldDoctestGuard` 版）。
+/// `crates/facade/src/compat/training.rs` の `Loss` enum（`compat::Loss`）の
+/// variant 集合が、承認形（`Mse`・`CrossEntropy`・`L1`・`Bce`・`BceWithLogits`・
+/// `Nll`・`KlDiv`・`Huber`・`SmoothL1` の 9 種を本順で）と完全一致することを
+/// 固定する正ガード。2026-10-04 承認（ルート #2499）により #2509 で、従来の
+/// 「2 variant のみ」否定ガード（イシュー #2169）から反転した。承認外の
+/// variant 追加・削除・並べ替えを拒否する（`docs/
+/// facade-compile-loss-variants-decision.md` §2・§4・§5）。
 #[test]
-fn compile_loss_variants_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "CompileLossVariantsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "CompileLossVariantsHoldDoctestGuard の doctest ブロックが glob\
-         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
-         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加\
-         すること。"
-    );
-}
-
-/// [`compile_loss_variants_hold_doctest_globs_all_pub_modules`] が
-/// glob import 集合の一致のみを固定するのに対し、本テストは doctest
-/// ブロックの**glob 以外の本文**（`__FandheLossVariantMarker`／
-/// `__FandheLossVariantHoldProbe`／`Loss` への impl／`__probe` 関数）が
-/// 固定文言 [`COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY`] と 1 行たりとも
-/// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの
-/// 削除・関連 const の弱体化等で正のプローブを骨抜きにする改変を
-/// 機械的に拒否する）。
-#[test]
-fn compile_loss_variants_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "CompileLossVariantsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY,
-        "CompileLossVariantsHoldDoctestGuard の doctest ブロック本文\
-         （glob 以外）が固定文言 COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY\
-         からドリフトしている。正のプローブ（__FandheLossVariantMarker・\
-         __FandheLossVariantHoldProbe・__probe 関数）の削除・弱体化・\
-         隠し行の混入がないか確認すること。\n--- actual ---\n{actual}"
-    );
-}
-
-/// [`compile_loss_variants_hold_doctest_probe_body_matches_fixed_
-/// contract`] が要求する固定文言。`crates/facade/src/lib.rs` の
-/// `CompileLossVariantsHoldDoctestGuard` doc 内の唯一の doctest
-/// ブロックから、ネスト `pub mod` の glob import 行
-/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
-/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
-const COMPILE_LOSS_VARIANTS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-struct __FandheLossVariantMarker;\n\
-\n\
-#[allow(non_upper_case_globals)]\n\
-trait __FandheLossVariantHoldProbe {\n\
-\x20\x20\x20\x20const Bce: __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const BceWithLogits: __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const Nll: __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const KlDiv: __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const Huber: __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const SmoothL1: __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const L1: __FandheLossVariantMarker;\n\
-}\n\
-\n\
-impl __FandheLossVariantHoldProbe for Loss {\n\
-\x20\x20\x20\x20const Bce: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const BceWithLogits: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const Nll: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const KlDiv: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const Huber: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const SmoothL1: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
-\x20\x20\x20\x20const L1: __FandheLossVariantMarker = __FandheLossVariantMarker;\n\
-}\n\
-\n\
-fn __probe() {\n\
-\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::Bce;\n\
-\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::BceWithLogits;\n\
-\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::Nll;\n\
-\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::KlDiv;\n\
-\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::Huber;\n\
-\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::SmoothL1;\n\
-\x20\x20\x20\x20let _: __FandheLossVariantMarker = Loss::L1;\n\
-}";
-
-/// `crates/facade/src/compat/training.rs` の `Loss` enum（`compat::
-/// Loss`。イシュー #1761 で新設・現行は `Mse`／`CrossEntropy` の 2
-/// variant のみ）が、承認なしに variant を増やされていないことを固定
-/// する（`CompileLossVariantsHoldDoctestGuard` の正のプローブは
-/// `Bce`／`BceWithLogits`／`Nll`／`KlDiv`／`Huber`／`SmoothL1`／`L1`
-/// の 7 名のみを型解決で検査するため、それ以外の名前の variant
-/// 〈例えば `BinaryCrossEntropy`〉が追加された場合はプローブに一切
-/// 触れず見逃す。本テストは `Loss` enum の variant 集合そのものを
-/// 直接走査することでこの穴を塞ぐ主防御。イシュー #2169・`docs/
-/// facade-compile-loss-variants-decision.md` §5）。
-#[test]
-fn compat_loss_enum_variants_are_exactly_mse_and_cross_entropy() {
+fn compat_loss_enum_variants_are_exactly_approved_set() {
     let path = facade_crate_root().join("src/compat/training.rs");
     let content = read_to_string_or_panic(&path);
     let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
@@ -15387,15 +15294,26 @@ fn compat_loss_enum_variants_are_exactly_mse_and_cross_entropy() {
     let variants = collect_top_level_enum_variant_idents(&tokens, match_starts[0]);
     assert_eq!(
         variants,
-        vec!["Mse".to_string(), "CrossEntropy".to_string()],
-        "compat::Loss の variant 集合が [\"Mse\", \"CrossEntropy\"] から\
-         ドリフトしている（未承認のまま variant が追加された可能性。\
-         `docs/facade-compile-loss-variants-decision.md` §4 の承認事項\
-         参照）: {variants:?}"
+        [
+            "Mse",
+            "CrossEntropy",
+            "L1",
+            "Bce",
+            "BceWithLogits",
+            "Nll",
+            "KlDiv",
+            "Huber",
+            "SmoothL1",
+        ]
+        .map(String::from)
+        .to_vec(),
+        "compat::Loss の variant 集合が承認形 9 種からドリフトしている\
+         （承認外の追加・削除・並べ替えの可能性。\
+         `docs/facade-compile-loss-variants-decision.md` §2・§4 参照）: {variants:?}"
     );
 }
 
-/// [`compat_loss_enum_variants_are_exactly_mse_and_cross_entropy`] が
+/// [`compat_loss_enum_variants_are_exactly_approved_set`] が
 /// 使う共通トークン走査。`tokens[start..]`（`pub enum <Name> {` の `{`
 /// 直後）から、対応する閉じ `}` までを brace 深さで追跡し、深さ 1 の
 /// 識別子トークンを variant 名として収集する（`#[...]` 属性・カンマは

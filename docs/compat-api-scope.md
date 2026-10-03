@@ -1144,7 +1144,7 @@ PR #2230 のコメント・レビューを再確認したが、所有者によ�
   examples の `ReferenceModule` の移行評価は
   `docs/reference-models-decision.md` §10.8 (d)
 
-**#2169（`compat::Sequential::compile()` の `Loss` enum への BCE／
+**（#2509 で公開済み。以下は #2169 時点の保留記録）#2169（`compat::Sequential::compile()` の `Loss` enum への BCE／
 BCEWithLogits／NLL／KLDiv／Huber／SmoothL1／L1 追加）は経路 2 未適用の
 まま承認待ちで保留した。** コード変更なし（`#[cfg(doctest)]` 限定の
 非公開足場 1 件を除く）。イシュー本文の承認事項節が facade 公開面の
@@ -1550,3 +1550,15 @@ no-op 契約・CPU 限定の保証範囲は不変（GPU の決定性は未検証
 `tensor_core::rng::normal`（#2591 の保留）とは別機能の同名のため、保留は弱めず経路限定で共存させた
 （`docs/rng-distributions-generator-decision.md` §5）。`Cargo.toml`／`Cargo.lock`・tolerance／
 baseline・`docs/spec/` は不変。GPU 経路には触れない（ホスト側生成のみ）。
+
+**適用記録（経路 2。イシュー #2509・親 #2500・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
+`compat::Loss` へ L1・Bce・BceWithLogits・Nll・KlDiv・Huber・SmoothL1 の 7 unit variant を、
+設計判断記録（`docs/facade-compile-loss-variants-decision.md` §2・§4）の推奨形どおり追加した。
+新規公開面はこの 7 variant のみで、新規 `pub fn`／`pub use` はない（`Copy + Eq` 維持・
+`fandhe-ai =0.10.0` の公開 API は非破壊）。`L1` は内部クレートの `loss_ops::l1_loss` を
+非 `pub` の `use` で結線しただけで、`loss_ops` の公開保留は維持している。
+保留ガード（`CompileLossVariantsHoldDoctestGuard` と `api_surface.rs` の否定テスト）は
+承認形 9 種を固定する正ガード（`compat_loss_enum_variants_are_exactly_approved_set`）へ反転した。
+`model_io` の `compiled.loss` 文字列 allowlist も 9 種へ拡張した（`format_version` は据え置き。
+決定記録 §2.5）。fit／evaluate は CPU 固定 tape のため GPU 経路には触れない。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
