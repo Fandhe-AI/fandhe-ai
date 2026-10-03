@@ -121,6 +121,8 @@ HIP の FFI を担う Rust クレートは許容依存 10 区分に存在しな�
 1. 新しい依存区分を設け、FFI バインディングクレートを `=x.y.z` 完全固定で採用する（ライセンス確認・`docs/license-matrix.md` 更新を伴う）
 2. 手書きの `unsafe extern` 宣言で済ませ、dlopen の手段（`libc` 区分の拡張か別手段か）も別途承認を得る
 
+（#2614 で推奨を決定〈未承認〉→ `docs/rocm-grade-up-conditions-v2-spec-proposal.md` §3c。実行時解決する関数ポインタ型宣言＋`libloading` の新区分直接依存〈B 案〉）
+
 ## 7. セキュリティ契約（OWASP 観点）
 
 - **A03**: HIPRTC のソースは静的テンプレートと検証済みの数値・enum からのみ組み立てる。`--gpu-architecture` 値や include パスはオプション文字列としてのみ渡し、シェル展開・ソース連結に使わない。
@@ -130,7 +132,7 @@ HIP の FFI を担う Rust クレートは許容依存 10 区分に存在しな�
 
 ## 8. 起票案（ユーザー承認後に起票する。本イシューでは起票しない）
 
-1. HIP FFI の依存方式（§6.3）の承認
+1. HIP FFI の依存方式（§6.3）の承認（#2614 で推奨を決定〈未承認〉→ `rocm-grade-up-conditions-v2-spec-proposal.md` §3c）
 2. HIP-Clang の FP contraction 既定値の実測と FMA 契約統一の判定
 3. cooperative 入口の実装と security-auditor 監査
 4. ROCm を対象範囲に入れる場合の spec 提案（fandhe-ai-spec 側）（→ #2128 で (b) 形式 draft 化: `docs/rocm-grade-up-conditions-v2-spec-proposal.md`。未起票）
