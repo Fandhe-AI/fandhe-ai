@@ -170,7 +170,7 @@
 //! [`crate::optim::RAdam`]／[`crate::optim::RAdamConfig`] を
 //! `fandhe_ai_autodiff::nn::optim` から素の再エクスポートで公開する
 //! （`docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md`
-//! §8 の推奨形。2026-10-04 ルート #2499 のユーザー一括承認）。
+//! §8 の推奨形。ルート #2499 本文「承認範囲」節のユーザー一括承認）。
 //! `step()` シグネチャは [`crate::optim::AdamW::step`] と同一
 //! （`&[(&Tensor<f32>, &Tensor<f32>)]`）で、`Tape`／`Var`／`BackendOps`
 //! に依存しない値型・純関数。位置対応契約（「呼び出し文脈」節）が
