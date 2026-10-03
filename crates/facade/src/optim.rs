@@ -41,6 +41,37 @@
 //! （`cycle_momentum` 等）は対象外。状態保持型で残る対象外は
 //! `ReduceLROnPlateau`（兄弟イシュー #1746）のみ。
 //!
+//! **LR スケジューラ拡張 5 種（イシュー #2176 実装・#2503 公開。親 #2499）**:
+//! [`crate::optim::MultiStepLr`]／[`crate::optim::CosineAnnealingWarmRestarts`]／
+//! [`crate::optim::CyclicLr`]／[`crate::optim::LambdaLr`]／
+//! [`crate::optim::SequentialLr`] を `fandhe_ai_autodiff::nn::optim`
+//! （実体は `nn::optim::lr_scheduler` モジュール）から素の再エクスポートで
+//! 公開する（`docs/autodiff-lr-scheduler-ext-decision.md` §2・§8。2026-10-04
+//! ルート #2499 の一括承認）。いずれも既存 6 種と同じ
+//! [`crate::optim::LrScheduler::lr_at`] のみを持つ stateless な値型で、
+//! `compat::Sequential` とは識別子単位で別物である。
+//!
+//! ```
+//! use fandhe_ai::optim::{LrScheduler, MultiStepLr, SequentialLr, StepLr};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let ms = MultiStepLr::new(0.1, &[2, 4], 0.5)?;
+//! assert_eq!(ms.lr_at(0), 0.1);
+//! assert_eq!(ms.lr_at(2), 0.05);
+//! assert_eq!(ms.lr_at(4), 0.025);
+//!
+//! let seq = SequentialLr::new(
+//!     vec![
+//!         Box::new(StepLr::new(0.1, 1, 0.5)?) as Box<dyn LrScheduler>,
+//!         Box::new(MultiStepLr::new(0.1, &[2], 0.5)?) as Box<dyn LrScheduler>,
+//!     ],
+//!     vec![2],
+//! )?;
+//! assert!(seq.lr_at(0).is_finite());
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
 //! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
@@ -294,12 +325,14 @@ pub use fandhe_ai_autodiff::nn::optim::{Adamax, AdamaxConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
+pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingWarmRestarts, CyclicLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
 // イシュー #2502（親 #2500・ルート #2499 本文「承認範囲」節の一括承認）: L-BFGS
 // の 3 型を `docs/autodiff-lbfgs-decision.md` §8 の波括弧形で公開する
 // （`LbfgsConfig` は #2198 で公開済み。`Lbfgs`〈closure 駆動の本体〉・
 // `LbfgsLineSearch`〈line search 方式選択〉を追加）。
+pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, MultiStepLr, SequentialLr};
 pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
 pub use fandhe_ai_autodiff::nn::optim::{NAdam, NAdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};

@@ -43,10 +43,9 @@
 //! PyTorch 準拠のスケジューラである。周期・段階の位置決定はいずれも
 //! 整数演算（`usize`／`u128`）で行い、浮動小数の `floor`／`log` は
 //! 使わない（`CosineAnnealingWarmRestarts` の doc「PyTorch との意図的な
-//! 相違」節参照）。facade（`fandhe_ai::optim`）への公開は本イシューでは
-//! 保留する（`crates/facade/src/lib.rs::LrSchedulerExtHoldDoctestGuard`・
-//! `docs/autodiff-lr-scheduler-ext-decision.md` §8「承認事項」参照。
-//! `Adadelta`／`Adamax`／`NAdam`／`RAdam`〈#2171〉と同型の保留）。
+//! 相違」節参照）。facade（`fandhe_ai::optim`）へはイシュー #2503
+//! （ルート #2499 の一括承認）で純再エクスポート済み
+//! （`docs/autodiff-lr-scheduler-ext-decision.md` §8 参照）。
 //!
 //! いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する
 //! （`cos`／`powf` の libm 差による ULP 揺れを `f32` 直計算より抑える

@@ -130,8 +130,8 @@ facade テストはいずれもこの前提で構築している）。
 
 §1.2 の scheduler 行（`ConstantLr／StepLr／CosineAnnealingLr／
 ExponentialLr／LinearWarmupLr／ReduceLROnPlateau／OneCycleLr` を
-列挙している行）へ、本イシューで追加した 5 種を追記する（実装済み・
-facade 公開は保留の旨を明記）。
+列挙している行）へ、本イシューで追加した 5 種を追記する（実装済み。
+facade 公開は #2503 で実施済み。§8 参照）。
 
 ## 6. OWASP Top 10 観点
 
@@ -151,7 +151,8 @@ facade 公開は保留の旨を明記）。
   でのみ使い、CI にも依存グラフにも入れない。
 - **A08 データ整合性**: fixture の生成条件と sha256 を README に記録
   する。facade の公開保留は正のプローブ doctest とソース走査テストの
-  多層構成で固定し、承認なしで公開面が広がる経路を塞ぐ。
+  多層構成で固定し、承認なしで公開面が広がる経路を塞いでいた
+  （#2503 で公開後は、承認形のみを許す正ガードへ反転済み。§8）。
 
 ## 7. GPU（該当なし）
 
@@ -160,7 +161,9 @@ facade 公開は保留の旨を明記）。
 数値一致の複合判定（REQ-2）・tolerance 定数は対象外。実機依存テスト・
 `docs/perf/logs` への申し送りもない。
 
-## 8. 承認事項（本 PR では実施しない）
+## 8. 承認事項（#2176 では実施せず、#2503 で実施済み）
+
+（以下の箇条と「承認後の作業」は #2176 時点の記述。#2503 で承認形どおり実施済み。）
 
 - **facade 純再エクスポート**（`docs/compat-api-scope.md` §5 経路 2）:
   `fandhe_ai::optim::{MultiStepLr, CosineAnnealingWarmRestarts,
@@ -176,12 +179,46 @@ facade 公開は保留の旨を明記）。
   （doctest ドリフト検査 2 件・ソース走査 1 件＋自己テスト）で多層
   固定する。
 
-承認後の作業: `optim.rs` へ `pub use fandhe_ai_autodiff::nn::optim::
-{MultiStepLr, CosineAnnealingWarmRestarts, CyclicLr, LambdaLr,
-SequentialLr};` を追加、`api_surface.rs` の
-`optim_module_reexports_exactly_expected_surface` 期待集合・
-`optim_types_are_reachable_via_facade_only` への追加、
+承認後の作業（#2503 で実施済み。実装記録は次節）: `optim.rs` へ
+`pub use fandhe_ai_autodiff::nn::optim::{MultiStepLr,
+CosineAnnealingWarmRestarts, CyclicLr, LambdaLr, SequentialLr};` を
+追加、`api_surface.rs` の `optim_module_reexports_exactly_expected_surface`
+期待集合・`optim_types_are_reachable_via_facade_only` への追加、
 `LrSchedulerExtHoldDoctestGuard`・対応する 4 テストの削除。
+
+### 8.1 実装記録（イシュー #2503・親 #2499。2026-10-04 ルート #2499 の一括承認）
+
+ルート #2499 本文「承認範囲」節の一括承認（Phase 1〜3 の facade 公開を
+設計判断記録の推奨形で実装してよい）に基づき、上記の推奨形（§2 の
+シグネチャ・新メソッド追加なし・Config 構造体なし）どおりに実装した。
+
+- **公開した名前**: `fandhe_ai::optim::{MultiStepLr,
+  CosineAnnealingWarmRestarts, CyclicLr, LambdaLr, SequentialLr}`。
+  内部クレートの型そのままの純再エクスポートで、newtype・別名・facade
+  独自宣言はない。`fandhe-ai =0.10.0` の既存公開 API は不変（追加のみ）。
+- **`pub use` を 2 行に分けた理由**: 5 名を 1 行に収めると約 117 桁になり
+  rustfmt が複数行に折り返す。`optim_module_reexports_exactly_expected_
+  surface` が `pub use` を行単位で走査する契約（`optim.rs` の「1 文 1 行」）
+  を保つため、`{CosineAnnealingWarmRestarts, CyclicLr}` と
+  `{LambdaLr, MultiStepLr, SequentialLr}` の 2 行にした。名前と経路は
+  §8 の推奨形と同一。
+- **削除したガード**: `lib.rs::LrSchedulerExtHoldDoctestGuard`、
+  `api_surface.rs` の `lr_scheduler_ext_hold_doctest_globs_all_pub_modules`・
+  `lr_scheduler_ext_hold_doctest_probe_body_matches_fixed_contract`・
+  `LR_SCHEDULER_EXT_HOLD_PROBE_BODY`・
+  `facade_does_not_reexport_or_declare_lr_scheduler_ext_items`・
+  その自己テスト。
+- **反転後の正ガード**: `facade_reexports_lr_scheduler_ext_items_only_in_
+  approved_shape`（5 名が `optim.rs` の `pub use fandhe_ai_autodiff::nn::
+  optim::…` の葉としてちょうど 1 回ずつ現れることを要求し、他ファイルでの
+  再エクスポート・`as` 別名・独自宣言・欠落・重複を fail-closed で拒否）と
+  自己テスト `…_detects_each_category`。`optim_module_reexports_exactly_
+  expected_surface` の期待集合にも 5 名を追加済み（過不足とも fail）。
+- **到達性・利用例**: `optim_types_are_reachable_via_facade_only` で 5 型を
+  facade のみから構築し `&dyn LrScheduler` へ coerce、`optim.rs` モジュール
+  doc に facade のみで通る doctest を追加。`compat_sequential_lr_scheduler_
+  ext.rs` は内部クレートを import せず `fandhe_ai::optim` から 5 種を
+  import する形へ切り替えた（期待値は不変）。
 
 ## 9. スコープ外
 
