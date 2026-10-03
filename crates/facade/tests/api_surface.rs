@@ -304,15 +304,10 @@ fn optim_module_reexports_exactly_expected_surface() {
         };
         // `pub use <prefix>{A, B, C};` の `{...}` 部分を抽出する。
         //
-        // イシュー #2172（2026-09-27 承認）: `LbfgsConfig` は本ファイルで
-        // 唯一の単一識別子再エクスポート（`Lbfgs`／`LbfgsLineSearch` は
-        // 承認範囲外のため道連れで再エクスポートできない。`optim.rs`
-        // 冒頭コメント「L-BFGS」節参照）。rustfmt は `{X}`（1 要素の
-        // group）を波括弧なしの `X` へ自動整形するため、`{`/`}` が
-        // 見つからない行は「単一識別子の `pub use <prefix>Name;`」形式
-        // として扱う（不正形式ではなく許容形式へ拡張。過去は `{}` なしを
-        // 一律 `offending_lines` としていたが、単一識別子行が 1 件でも
-        // 増えると rustfmt との往復で赤くなる欠陥を修正した）。
+        // 単一識別子の `pub use <prefix>Name;` 形（`{...}` なし）も許容する。
+        // rustfmt は `{X}`（1 要素の group）を波括弧なしへ整形するため、
+        // 1 件でも単一識別子行が増えると往復で赤くなるのを避ける（#2172 で
+        // 導入。#2502 で L-BFGS は 3 型の波括弧形になったが許容は維持）。
         let rest = &trimmed[prefix.len()..];
         match (rest.find('{'), rest.find('}')) {
             (Some(open), Some(close)) => {
@@ -368,7 +363,9 @@ fn optim_module_reexports_exactly_expected_surface() {
         "AdamWConfig",
         "Lamb",
         "LambConfig",
+        "Lbfgs",
         "LbfgsConfig",
+        "LbfgsLineSearch",
         "ClipGradResult",
         "clip_grad_norm",
         "clip_grad_value",
@@ -13858,8 +13855,10 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
         ("autodiff/src/nn/optim/nadam.rs::load_state_dict", 1usize),
         ("autodiff/src/nn/optim/radam.rs::state_dict", 1usize),
         ("autodiff/src/nn/optim/radam.rs::load_state_dict", 1usize),
-        // イシュー #2366: `Lbfgs` 専用 inherent API（トレイト非実装。
-        // `Lbfgs` は facade 非公開のため公開面は広がらない）。
+        // イシュー #2366: `Lbfgs` 専用 inherent API（トレイト非実装）。
+        // `Lbfgs` は #2502 で facade 公開済みのため `fandhe_ai::optim::Lbfgs`
+        // から到達可能。`OptimizerStateDict` トレイトの facade 公開は #2555
+        // の範囲（定義元は増えないため期待件数は不変）。
         ("autodiff/src/nn/optim/lbfgs.rs::state_dict", 1usize),
         ("autodiff/src/nn/optim/lbfgs.rs::load_state_dict", 1usize),
         // イシュー #2367: `Sgd`（`crate::optim`。momentum の velocity のみ）。
@@ -13881,211 +13880,63 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
 }
 
 // =====================================================================
-// イシュー #2198（親 #2172・ルート #2131）: LBFGS の facade 公開・
-// `compile()` 統合を検査するテスト群。2026-09-27 所有者承認（#2172
-// コメント）により `compat::Optimizer::Lbfgs(LbfgsConfig)` variant・
-// `LbfgsConfig` の facade 再エクスポート・`compile()`/`fit()` 統合の
-// 3 点は実装済み（承認範囲は `docs/autodiff-lbfgs-decision.md` §9）。
-// `Lbfgs`（optimizer 本体）・`LbfgsLineSearch`（line search 方式選択）は
-// 承認範囲外のまま非公開を維持し、`LbfgsHoldDoctestGuard`（`src/lib.rs`）
-// の正のプローブ 1 ブロック方式のドリフト検査＋facade src 全体への
-// 非再エクスポート・非独自宣言で固定する。
+// イシュー #2198（親 #2172・ルート #2131）・#2502（親 #2500・ルート #2499）:
+// LBFGS の facade 公開・`compile()` 統合を検査するテスト群。#2198（2026-09-27
+// 所有者承認）で `compat::Optimizer::Lbfgs(LbfgsConfig)` variant・
+// `LbfgsConfig` の再エクスポート・`compile()`/`fit()` 統合を、#2502
+// （ルート #2499 本文「承認範囲」節の一括承認。`docs/autodiff-lbfgs-decision.md` §8）で
+// `Lbfgs`・`LbfgsLineSearch` の再エクスポートを実装済み。旧否定ガード
+// （`LbfgsHoldDoctestGuard` と facade src 走査 6 項目）は #2502 で撤去し、
+// 承認した形だけを許す正ガード（`optim_module_reexports_exactly_expected_surface`
+// の期待集合・`lbfgs_types_are_reachable_via_facade_only`）へ反転した。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `LbfgsHoldDoctestGuard` doc 内の唯一の
-/// doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`optimizer_ext_hold_doctest_globs_all_pub_modules`（#2501 で削除済み） の
-/// `LbfgsHoldDoctestGuard` 版）。
+/// `Lbfgs`／`LbfgsConfig`／`LbfgsLineSearch` が facade だけの import で到達でき、
+/// strong Wolfe 指定の手動 closure ループが動くことの固定（`fandhe_ai_autodiff`
+/// は import しない。`nn_module_types_are_reachable_via_facade_only` と同型）。
 #[test]
-fn lbfgs_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "LbfgsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "LbfgsHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
-         いる（declared={declared:?}, doctest={globbed:?}）。新しい\
-         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
+fn lbfgs_types_are_reachable_via_facade_only() {
+    use fandhe_ai::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
+    use fandhe_ai::{AutodiffError, Tensor};
 
-/// [`lbfgs_hold_doctest_globs_all_pub_modules`] が glob import 集合の
-/// 一致のみを固定するのに対し、本テストは doctest ブロックの**glob
-/// 以外の本文**（`__fandhe_lbfgs_hold_probe` モジュール・`__probe`
-/// 関数）が固定文言 [`LBFGS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
-/// することを固定する（rustdoc の `# ` 隠し行・プローブの削除・別名への
-/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否する）。
-#[test]
-fn lbfgs_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "LbfgsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, LBFGS_HOLD_PROBE_BODY,
-        "LbfgsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 LBFGS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_lbfgs_hold_probe モジュール・__probe 関数）の\
-         削除・弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`lbfgs_hold_doctest_probe_body_matches_fixed_contract`] が要求する
-/// 固定文言。`crates/facade/src/lib.rs` の `LbfgsHoldDoctestGuard` doc
-/// 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行
-/// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
-/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
-/// 2026-09-27 承認（#2172 コメント）で `LbfgsConfig` は承認済みとなり
-/// プローブから外れたため（`optim.rs` が実際に再エクスポート済み）、
-/// 残る `Lbfgs`／`LbfgsLineSearch` の 2 個のみを固定する。
-const LBFGS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_lbfgs_hold_probe {\n\
-\x20\x20\x20\x20pub struct Lbfgs;\n\
-\x20\x20\x20\x20pub struct LbfgsLineSearch;\n\
-}\n\
-use __fandhe_lbfgs_hold_probe::*;\n\
-\n\
-fn __probe(_: Lbfgs, _: LbfgsLineSearch) {}";
-
-/// [`facade_does_not_reexport_or_declare_lbfgs_items`]・その自己テストが
-/// 共用する検出本体。facade src 全体（`crates/facade/src/**`）の
-/// `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
-/// `Lbfgs`／`LbfgsLineSearch` を検出し（単一行・複数行・ネストした
-/// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
-/// 独自宣言を違反として返す（`scan_optimizer_ext_reexports_and_declarations`
-/// と同型。`Lbfgs` は `compat::Sequential`／`Var` への inherent メソッド
-/// 追加を伴わない値型 API のため `fn` 宣言の検出は不要）。
-///
-/// **2026-09-27 承認（#2172 コメント）で `LbfgsConfig` は承認範囲**
-/// （`compat::Optimizer::Lbfgs(LbfgsConfig)` variant・facade 再エクス
-/// ポート・`compile()`/`fit()` 統合の 3 点）**となったため `NAMES` から
-/// 外した**（`crates/facade/src/optim.rs` が `LbfgsConfig` を実際に
-/// 再エクスポートしており、これを違反として検出すると自己矛盾になる）。
-/// 残る `Lbfgs`（optimizer 本体）・`LbfgsLineSearch`（line search 方式
-/// 選択）の再エクスポート・独自宣言のみを引き続き禁止する。
-fn scan_lbfgs_reexports_and_declarations(content: &str) -> Vec<String> {
-    const NAMES: [&str; 2] = ["Lbfgs", "LbfgsLineSearch"];
-    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-    let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
-
-    let mut i = 0usize;
-    while i < tokens.len() {
-        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-            let mut end = i + 2;
-            while end < tokens.len() && tokens[end] != ";" {
-                end += 1;
-            }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
-                }
-            }
-            i = (end + 1).min(tokens.len());
-            continue;
+    // 2 variant とも名指しできること（`#[non_exhaustive]` のため `_` 腕が必要）。
+    for ls in [LbfgsLineSearch::None, LbfgsLineSearch::StrongWolfe] {
+        match ls {
+            LbfgsLineSearch::None | LbfgsLineSearch::StrongWolfe => {}
+            _ => {}
         }
-        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
-            && tokens
-                .get(i + 1)
-                .map(|t| NAMES.contains(&t.as_str()))
-                .unwrap_or(false)
-        {
-            offending.push(format!(
-                "{} {} 宣言",
-                tokens[i],
-                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
-            ));
-        }
-        i += 1;
     }
 
-    offending
-}
+    let target = [1.0_f32, -2.0, 3.0];
+    let quad = |p: &[Tensor<f32>]| -> (f32, Vec<Tensor<f32>>) {
+        let x = p[0].contiguous();
+        let x = x.as_slice().expect("test fixture: contiguous");
+        let loss: f32 = x.iter().zip(target).map(|(a, c)| (a - c) * (a - c)).sum();
+        let g: Vec<f32> = x.iter().zip(target).map(|(a, c)| 2.0 * (a - c)).collect();
+        (
+            loss,
+            vec![Tensor::new(g, &[3]).expect("test fixture: shape")],
+        )
+    };
 
-/// facade src 全体（`crates/facade/src/**`）に、`Lbfgs`／`LbfgsLineSearch`
-/// （2 個の型名）を識別子単位で含む `pub use`（複数行・ネストした
-/// group・別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type`
-/// 宣言も存在しないことを固定する（`LbfgsHoldDoctestGuard` の正の
-/// プローブと多層防御を成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_or_declare_optimizer_ext_items`（#2501 で `facade_reexports_optimizer_ext_items_only_in_approved_shape` へ反転）と同型）。
-#[test]
-fn facade_does_not_reexport_or_declare_lbfgs_items() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_lbfgs_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
-    });
+    let cfg = LbfgsConfig {
+        line_search: LbfgsLineSearch::StrongWolfe,
+        ..LbfgsConfig::default()
+    };
+    let mut opt = Lbfgs::new(cfg).expect("Lbfgs::new");
+    let params = vec![Tensor::new(vec![0.0_f32; 3], &[3]).expect("test fixture: shape")];
+    let (initial, _) = quad(&params);
+    let updated = opt.step_closure(&params, quad).expect("step_closure");
+    let (after, _) = quad(&updated);
     assert!(
-        offending.is_empty(),
-        "facade の公開面が LBFGS（イシュー #2198。Lbfgs／LbfgsLineSearch）\
-         を再エクスポート、または独自宣言している（`docs/\
-         autodiff-lbfgs-decision.md` §9 の承認範囲〈LbfgsConfig のみ〉に\
-         違反）: {offending:?}"
+        after.is_finite() && after < initial,
+        "L-BFGS(strong Wolfe) の損失が減少していない: {initial} -> {after}"
     );
-}
 
-/// [`scan_lbfgs_reexports_and_declarations`]（[`facade_does_not_reexport_
-/// or_declare_lbfgs_items`]）の自己テスト（正例・負例の合成入力）。
-#[test]
-fn facade_does_not_reexport_or_declare_lbfgs_items_detects_each_category() {
-    // 正例: 単一行 pub use。
-    assert!(
-        !scan_lbfgs_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::optim::Lbfgs;")
-            .is_empty()
-    );
-    // 正例: 複数行 pub use（group）。
-    assert!(
-        !scan_lbfgs_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::{\n    Lbfgs,\n    LbfgsLineSearch,\n};"
-        )
-        .is_empty()
-    );
-    // 正例: 別名 pub use。
-    assert!(
-        !scan_lbfgs_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::LbfgsLineSearch as Foo;"
-        )
-        .is_empty()
-    );
-    // 正例: 独自 struct 宣言。
-    assert!(!scan_lbfgs_reexports_and_declarations("pub struct LbfgsLineSearch;").is_empty());
-    // 負例: コメント中の出現。
-    assert!(scan_lbfgs_reexports_and_declarations("// pub use ...::Lbfgs;").is_empty());
-    // 負例: 文字列リテラル中の出現。
-    assert!(scan_lbfgs_reexports_and_declarations("let s = \"LbfgsLineSearch\";").is_empty());
-    // 負例: 非公開 use。
-    assert!(
-        scan_lbfgs_reexports_and_declarations("use fandhe_ai_autodiff::nn::optim::Lbfgs;")
-            .is_empty()
-    );
-    // 負例: 無関係な pub use。
-    assert!(
-        scan_lbfgs_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::optim::AdamW;")
-            .is_empty()
-    );
-    // 負例: 承認済み `LbfgsConfig` の再エクスポートは違反ではない
-    // （2026-09-27 承認。`crates/facade/src/optim.rs` の実際の行）。
-    assert!(
-        scan_lbfgs_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::LbfgsConfig;"
-        )
-        .is_empty()
-    );
+    // 可失敗 closure 版の戻り値エラー型が facade の `AutodiffError` に固定されること。
+    let r: Result<Vec<Tensor<f32>>, AutodiffError> =
+        opt.try_step_closure(&updated, |p| Ok(quad(p)));
+    assert!(r.is_ok());
 }
 
 /// facade src 全体（`crates/facade/src/**`）を走査し、`enum Optimizer`
@@ -14183,8 +14034,8 @@ fn scan_optimizer_enum_variants_for_lbfgs(content: &str) -> Option<Vec<String>> 
 /// variant に `Lbfgs`（表記揺れなし・ちょうど 1 個）が存在することを
 /// 固定する（2026-09-27 承認〈#2172 コメント〉により
 /// `compat_optimizer_enum_has_no_lbfgs_variant` から反転した正のガード。
-/// `LbfgsHoldDoctestGuard` の variant プローブ削除〈lib.rs 参照〉と対を
-/// 成す）。`enum Optimizer` 定義がワークスペース全体で 1 件も見つからない
+/// 旧 `LbfgsHoldDoctestGuard`〈#2502 で撤去〉の variant プローブ削除と対を
+/// 成していた）。`enum Optimizer` 定義がワークスペース全体で 1 件も見つからない
 /// 場合は、検査対象自体を見失ったものとして fail-closed に失敗する。
 #[test]
 fn compat_optimizer_enum_has_lbfgs_variant() {
@@ -14305,8 +14156,8 @@ fn scan_optimizer_enum_variants_for_lbfgs_detects_each_category() {
 /// `crates/facade/src/lib.rs` の `EmaHoldDoctestGuard` doc 内の唯一の
 /// doctest ブロックが glob import するネスト `pub mod` 集合と、
 /// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`lbfgs_hold_doctest_globs_all_pub_modules` の `EmaHoldDoctestGuard`
-/// 版）。
+/// （`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// `EmaHoldDoctestGuard` 版）。
 #[test]
 fn ema_hold_doctest_globs_all_pub_modules() {
     let content = read_to_string_or_panic(&lib_rs_path());
@@ -14411,7 +14262,7 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 /// `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
 /// `ExponentialMovingAverage` を検出し（単一行・複数行・ネストした
 /// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
-/// 独自宣言を違反として返す（`scan_lbfgs_reexports_and_declarations`
+/// 独自宣言を違反として返す（`scan_optimizer_ext_reexports_and_declarations`
 /// と同型）。加えて `EmaHoldDoctestGuard` のプローブ 2「inherent
 /// メソッド追加」に対応するソース走査として、`fn use_ema`／
 /// `fn ema_decay` 宣言（可視性・宣言文脈を問わない）も違反として返す
