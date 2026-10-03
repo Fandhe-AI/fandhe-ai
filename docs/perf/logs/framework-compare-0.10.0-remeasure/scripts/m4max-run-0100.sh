@@ -44,4 +44,11 @@ for n in 256 512 1024 2048; do pyrun "${PT}" --framework scipy --task gemm --dev
 pyrun "${PT}" --framework scipy --task train --device cpu --size 64; pyrun "${PT}" --framework scipy --task infer --device cpu --size 64
 rm -f "${LOGD}/err.tmp"
 uptime | tee "${LOGD}/uptime_after.txt"
+# 期待行数の検査（計測後に追加。実行時の版は 8c152036）: Rust 48 行・Python 32 行、skipped は
+# burn Metal GEMM N=512〜4096 の既知の記録拒否 4 件だけ。外れたら非零で終了する
+rows=$(wc -l < "${OUT}" | tr -d ' '); pyrows=$(wc -l < "${PYOUT}" | tr -d ' ')
+unexpected=$(grep -vcE '^bench-burn gemm metal (512|1024|2048|4096) fresh: MEASURE_ERROR: gemm checksum is degenerate' "${SKIP}")
+if [ "${rows}" != 48 ] || [ "${pyrows}" != 32 ] || [ "${unexpected}" != 0 ]; then
+  echo "round FAILED rows=${rows} pyrows=${pyrows} unexpected_skipped=${unexpected}"; exit 1
+fi
 echo "done. rows=$(wc -l < "${OUT}") pyrows=$(wc -l < "${PYOUT}") skipped=$(wc -l < "${SKIP}") $(date -u +%FT%TZ)"
