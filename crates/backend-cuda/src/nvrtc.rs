@@ -7,8 +7,9 @@
 //!
 //! # A03（インジェクション）対応
 //!
-//! `CUDA_INCLUDE_PATH` 環境変数はコンパイルオプションの include パス
-//! 文字列としてのみ `CompileOptions::include_paths` へ渡し、シェル展開・
+//! `CUDA_INCLUDE_PATH`・`CUDA_PATH`（Windows のみ。#2487）環境変数は
+//! コンパイルオプションの include パス文字列としてのみ
+//! `CompileOptions::include_paths` へ渡し、シェル展開・
 //! コマンド実行には一切使わない（`.claude/rules/security.md`）。
 //!
 //! `src` 引数の契約（イシュー #516 で更新）: 従来は「コンパイル時定数
@@ -3929,8 +3930,10 @@ fn overflow_err(step: &str) -> CudaError {
 ///    経路があるため。cudarc-0.19.8/src/nvrtc/sys/mod.rs:529）。
 ///    不在なら `CudaError::NvrtcUnavailable` を返す。
 /// 2. include_paths なしでコンパイルを試みる。
-/// 3. 失敗した場合のみ、`CUDA_INCLUDE_PATH` 環境変数または既知の候補
-///    パス（CUDA 13.0 標準インストール先）で順に再試行する
+/// 3. 失敗した場合のみ、`CUDA_INCLUDE_PATH` 環境変数、Windows では
+///    `%CUDA_PATH%\include`（#2487）、既知の候補パス（CUDA 13.0 標準
+///    インストール先）の順に再試行する（候補列挙は
+///    `nvrtc_include_candidates`）
 ///    （`cuda_fp16.h` 等が NVRTC 組み込みで解決できない環境向け。
 ///    PoC-v2-3 の 2 段構えを踏襲）。
 ///
@@ -3970,13 +3973,13 @@ pub fn compile_ptx(src: &str, arch: &str) -> Result<Ptx, CudaError> {
         return Ok(ptx);
     }
 
-    let candidates = [
-        std::env::var("CUDA_INCLUDE_PATH").ok(),
-        Some("/usr/local/cuda/include".to_string()),
-        Some("/usr/local/cuda-13.0/targets/sbsa-linux/include".to_string()),
-        Some("/usr/local/cuda-13.0/targets/x86_64-linux/include".to_string()),
-    ];
-    for path in candidates.into_iter().flatten() {
+    let platform = if cfg!(windows) {
+        IncludeSearchPlatform::Windows
+    } else {
+        IncludeSearchPlatform::Other
+    };
+    let candidates = nvrtc_include_candidates(platform, |k| std::env::var(k).ok());
+    for path in candidates {
         let opts = CompileOptions {
             include_paths: vec![path],
             ..base.clone()
@@ -3992,6 +3995,48 @@ pub fn compile_ptx(src: &str, arch: &str) -> Result<Ptx, CudaError> {
     compile_ptx_with_opts(src, base).map_err(CudaError::from)
 }
 
+/// [`nvrtc_include_candidates`] が候補を切り替えるプラットフォーム区分。
+/// `compile_ptx` が `cfg!(windows)` から導出して渡す（テストで Linux CI
+/// からも Windows 分岐を検証できるよう、関数内で cfg 判定しない）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IncludeSearchPlatform {
+    Windows,
+    Other,
+}
+
+/// NVRTC の include パス再試行候補を優先順に列挙する（`compile_ptx` から呼ばれる）。
+///
+/// 順序: `CUDA_INCLUDE_PATH`（最優先・値はそのまま）→ Windows のみ
+/// `<CUDA_PATH>\include`（#2487。#2393 の Windows 実機検証で Toolkit 既定
+/// 構成では `cuda_fp16.h` を開けず全カーネルが失敗したため）→ Linux 固定
+/// パス 3 件。`Other` では従来の 4 件と完全に同一で `CUDA_PATH` は無視する。
+/// 空の `CUDA_PATH` は CWD 基準の相対パス探索を避けるため候補にしない。
+/// 区切り文字はホスト非依存に `\` を明示する。値は cudarc 0.19.8
+/// `src/nvrtc/safe.rs:272-274` が独立した `--include-path=` オプション文字列
+/// として渡すだけでシェルを通らないため、空白を含んでも quote 不要
+/// （A03: シェル展開・ログ出力はしない）。環境変数は `env` 経由で注入する。
+fn nvrtc_include_candidates(
+    platform: IncludeSearchPlatform,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(p) = env("CUDA_INCLUDE_PATH") {
+        out.push(p);
+    }
+    if platform == IncludeSearchPlatform::Windows
+        && let Some(root) = env("CUDA_PATH")
+    {
+        let root = root.trim_end_matches(['\\', '/']);
+        if !root.is_empty() {
+            out.push(format!("{root}\\include"));
+        }
+    }
+    out.push("/usr/local/cuda/include".to_string());
+    out.push("/usr/local/cuda-13.0/targets/sbsa-linux/include".to_string());
+    out.push("/usr/local/cuda-13.0/targets/x86_64-linux/include".to_string());
+    out
+}
+
 // 実機非依存テスト（descriptor 入力検証・キャッシュキー生成・パス正規化・
 // pipeline stages 境界値検証）は非 unix でも実行するため `cfg(test)` とする。
 // ディスクキャッシュ I/O（`cfg(unix)` 限定）を参照するテストと専用ヘルパーだけ
@@ -4005,6 +4050,87 @@ mod tests {
     use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
 
     use super::*;
+
+    // --- nvrtc_include_candidates（#2487。環境変数は注入し set_var を使わない） ---
+
+    fn cand(p: IncludeSearchPlatform, vars: &[(&str, &str)]) -> Vec<String> {
+        let m: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        nvrtc_include_candidates(p, |k| m.get(k).cloned())
+    }
+
+    const FIXED: [&str; 3] = [
+        "/usr/local/cuda/include",
+        "/usr/local/cuda-13.0/targets/sbsa-linux/include",
+        "/usr/local/cuda-13.0/targets/x86_64-linux/include",
+    ];
+    const WIN_ROOT: &str = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0";
+    const WIN_INC: &str = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\include";
+
+    #[test]
+    fn include_candidates_other_unset_is_fixed_three() {
+        assert_eq!(cand(IncludeSearchPlatform::Other, &[]), FIXED);
+    }
+
+    #[test]
+    fn include_candidates_other_with_include_path_is_legacy_four() {
+        let mut want = vec!["/opt/inc".to_string()];
+        want.extend(FIXED.iter().map(|s| s.to_string()));
+        assert_eq!(
+            cand(
+                IncludeSearchPlatform::Other,
+                &[("CUDA_INCLUDE_PATH", "/opt/inc")]
+            ),
+            want
+        );
+    }
+
+    #[test]
+    fn include_candidates_other_ignores_cuda_path() {
+        assert_eq!(
+            cand(IncludeSearchPlatform::Other, &[("CUDA_PATH", WIN_ROOT)]),
+            FIXED
+        );
+    }
+
+    #[test]
+    fn include_candidates_windows_adds_cuda_path_include_before_fixed() {
+        let got = cand(IncludeSearchPlatform::Windows, &[("CUDA_PATH", WIN_ROOT)]);
+        let mut want = vec![WIN_INC.to_string()];
+        want.extend(FIXED.iter().map(|s| s.to_string()));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn include_candidates_windows_include_path_has_priority() {
+        let got = cand(
+            IncludeSearchPlatform::Windows,
+            &[("CUDA_INCLUDE_PATH", "X:\\inc"), ("CUDA_PATH", WIN_ROOT)],
+        );
+        assert_eq!(got[0], "X:\\inc");
+        assert_eq!(got[1], WIN_INC);
+        assert_eq!(got.len(), 5);
+    }
+
+    #[test]
+    fn include_candidates_windows_trims_trailing_separator() {
+        for suffix in ["\\", "/"] {
+            let root = format!("{WIN_ROOT}{suffix}");
+            let got = cand(IncludeSearchPlatform::Windows, &[("CUDA_PATH", &root)]);
+            assert_eq!(got[0], WIN_INC);
+        }
+    }
+
+    #[test]
+    fn include_candidates_windows_empty_cuda_path_is_skipped() {
+        assert_eq!(
+            cand(IncludeSearchPlatform::Windows, &[("CUDA_PATH", "")]),
+            FIXED
+        );
+        assert_eq!(cand(IncludeSearchPlatform::Windows, &[]), FIXED);
+    }
 
     fn sample_descriptor() -> CudaKernelDescriptor {
         CudaKernelDescriptor::new_with_compiled_dims(
