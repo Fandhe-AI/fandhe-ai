@@ -535,6 +535,18 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > 更新した（`scripts/bench/framework-compare/`）。`git diff v0.9.0..HEAD
 > -- crates/` は空（facade 差分なし）。
 
+> **追補（2026-10-03）**: `.github/workflows/release-all.yml`
+> （run 37112020053）により公開 7 クレートの **v0.10.0 の公開を完了した**
+> （7 クレート crates.io 反映確認済み。`fandhe-ai-onnx-interop` は本版が
+> 初回公開。ユーザー指示「最新の crate を release し、html の値を測り直して」
+> （2026-10-03）に基づく公開承認）。リリースタグ `v0.10.0` はコミット
+> `e8d91bc6` として付与済み。framework-compare の承認ピン
+> （`.claude/rules/deps-policy.md` 第 9 区分）は、v0.10.0 公開完了を受けて
+> `fandhe-ai =0.9.0` から `=0.10.0` へ更新した
+> （`scripts/bench/framework-compare/`。`Cargo.lock` へ推移的に加わるのは
+> `fandhe-ai-onnx-interop`・`prost`・`prost-derive` のみ）。`git diff
+> v0.10.0..HEAD -- crates/` は空（ピン更新時点）。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -708,9 +720,9 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 ## 13. 7 クレート目 `fandhe-ai-onnx-interop` の公開準備と検証記録（#1963）
 
 イシュー #1963 のユーザー承認（2026-09-17）を受け、`onnx-interop` を
-`fandhe-ai-onnx-interop` として公開対象へ追加した。本節時点では**公開準備の
-みで実 publish は未実施**（次回リリースサイクルで `release-all.yml` を通じて
-ユーザーが実行する）。
+`fandhe-ai-onnx-interop` として公開対象へ追加した。本節の記述時点（2026-09-17）では**公開準備の
+みで実 publish は未実施**だった。その後 v0.10.0（2026-10-03）で
+`release-all.yml`（run 37112020053）を通じて**初回公開を完了した**（§10 追補）。
 
 ### 13.1 依存グラフ上の位置づけ
 
@@ -866,6 +878,14 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-03（v0.10.0 ピン更新）: `.github/workflows/release-all.yml`（run
+  37112020053）で v0.10.0 の crates.io 公開が完了した（7 クレート反映確認済み。
+  `fandhe-ai-onnx-interop` は初回公開＝13 節の公開準備の実 publish 完了）ことを
+  受け、framework-compare の承認ピン（`.claude/rules/deps-policy.md` 第 9
+  区分）を `fandhe-ai =0.9.0` → `=0.10.0` へ更新した（ユーザー指示「最新の
+  crate を release し、html の値を測り直して」〈2026-10-03〉に基づく公開・
+  ピン更新承認）。リリースタグ `v0.10.0` はコミット `e8d91bc6` として付与済み。
+  `git diff v0.10.0..HEAD -- crates/` は空。§10 に追補を記録した。
 - 2026-10-03（v0.10.0 リリースサイクル）: 公開 7 クレートの `workspace.version` を
   0.9.0 → 0.10.0 へ lockstep バンプした（0.9.0 公開〈2026-09-17〉以降の 274
   コミット。#2058 ツリーの対応表穴埋め・Windows ビルド対応〈#2481 ツリー〉・
