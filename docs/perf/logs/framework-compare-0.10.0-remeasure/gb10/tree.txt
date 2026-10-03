@@ -1,0 +1,14 @@
+GEMM_GATE_PATCH_FACADE_PATH=unset
+bench-fandhe v0.1.0 (~/work/rust-ai-library-run/scripts/bench/framework-compare/bench-fandhe)
+├── bench-common v0.1.0 (~/work/rust-ai-library-run/scripts/bench/framework-compare/bench-common)
+└── fandhe-ai v0.10.0
+name = "fandhe-ai"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+       Fresh fandhe-ai-tensor-core v0.10.0
+       Fresh fandhe-ai-autodiff v0.10.0
+       Fresh fandhe-ai-backend-cpu v0.10.0
+       Fresh fandhe-ai-backend-cuda v0.10.0
+       Fresh fandhe-ai-onnx-interop v0.10.0
+       Fresh fandhe-ai v0.10.0
+    Finished `release` profile [optimized] target(s) in 0.07s

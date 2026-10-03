@@ -1,0 +1,28 @@
+M4 Max  gemm Metal N=256       僅差   vs candle     0.97x  0.9.0 比 0.86×  [ノイズ帯: 対照 2 位 0.85x]
+M4 Max  gemm Metal N=512       2 位  vs candle     0.68x  0.9.0 比 0.89×
+M4 Max  gemm Metal N=1024      2 位  vs candle     0.69x  0.9.0 比 0.73×
+M4 Max  gemm Metal N=2048      2 位  vs candle     0.69x  0.9.0 比 0.91×
+M4 Max  gemm Metal N=4096      2 位  vs candle     0.57x  0.9.0 比 0.91×
+M4 Max  gemm CPU N=256         2 位  vs pytorch    0.70x  0.9.0 比 0.99×
+M4 Max  gemm CPU N=512         1 位  vs pytorch    1.05x  0.9.0 比 1.05×  [ノイズ帯: 対照 2 位 0.88x]
+M4 Max  gemm CPU N=1024        僅差   vs pytorch    0.99x  0.9.0 比 1.01×  [ノイズ帯: 対照 4 位 0.62x]
+M4 Max  gemm CPU N=2048        2 位  vs pytorch    0.76x  0.9.0 比 1.03×
+M4 Max  train Metal            3 位  vs pytorch    0.41x  0.9.0 比 0.96×
+M4 Max  infer Metal            1 位  vs pytorch    1.45x  0.9.0 比 1.76×  [ノイズ帯: 対照 2 位 0.86x]
+M4 Max  train CPU              5 位  vs pytorch    0.26x  0.9.0 比 0.87×
+M4 Max  infer CPU              4 位  vs pytorch    0.20x  0.9.0 比 1.09×
+GB10    gemm CUDA N=256        2 位  vs candle     0.84x  0.9.0 比 0.98×
+GB10    gemm CUDA N=512        3 位  vs candle     0.44x  0.9.0 比 0.96×
+GB10    gemm CUDA N=1024       3 位  vs candle     0.41x  0.9.0 比 1.01×
+GB10    gemm CUDA N=2048       3 位  vs burn       0.48x  0.9.0 比 1.01×
+GB10    gemm CUDA N=4096       1 位  vs burn       1.01x  0.9.0 比 1.02×
+GB10    gemm CPU N=256         3 位  vs pytorch    0.68x  0.9.0 比 1.03×
+GB10    gemm CPU N=512         2 位  vs candle     0.73x  0.9.0 比 1.00×
+GB10    gemm CPU N=1024        1 位  vs candle     1.01x  0.9.0 比 0.98×
+GB10    gemm CPU N=2048        1 位  vs tensorflow 1.05x  0.9.0 比 1.01×
+GB10    gemm CPU N=4096        1 位  vs tensorflow 1.19x  0.9.0 比 1.01×
+GB10    train CUDA             2 位  vs candle     0.82x  0.9.0 比 1.05×
+GB10    infer CUDA             3 位  vs pytorch    0.41x  0.9.0 比 1.00×
+GB10    train CPU              3 位  vs pytorch    0.33x  0.9.0 比 1.01×
+GB10    infer CPU              2 位  vs pytorch    0.68x  0.9.0 比 1.03×
+tally 6 2 19 invalid 1 noise 4 total 27
