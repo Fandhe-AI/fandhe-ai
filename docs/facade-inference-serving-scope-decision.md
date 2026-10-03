@@ -159,3 +159,7 @@
 ## 14. 後続 #2618
 
 イシュー #2618 で、TF／Keras 本体側の事実補正（`TextVectorization` は Keras 本体、サブワード系は別パッケージ）と対象内化／非目標明記の 2 案比較を `docs/tokenizer-non-target-spec-proposal.md` §9 に記録し、ユーザー承認を依頼した（推奨は未承認）。本 doc §5.2／§6 の判定は、ユーザー承認があるまで変更しない。
+
+## 15. 後続 #2624
+
+イシュー #2624 で、サービング基盤（HTTP サーバ・連続バッチング・paged attention・speculative decoding・量子化 KV）の REQ-9 改定提案を `docs/facade-serving-infrastructure-spec-proposal.md` に記録し、ユーザー承認を依頼した（推奨は未承認・spec 未起票）。本 doc §5.1 案 C／§6「明確に非目標とするもの」の判定は、ユーザー承認があるまで変更しない。
