@@ -1342,16 +1342,23 @@ fandhe-ai --example main`）。承認取得後の移行手順（`src/models/` �
 `api_surface.rs` の期待値更新）は #2201 と同じ（`docs/reference-
 models-decision.md` §3.1）で、詳細は同 doc §10.1・§10.2 を参照。
 
-**保留記録（イシュー #2141・親 #2131）**: bool を返す比較 6 種
-（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）・
-logical 3 種（`logical_and`／`logical_or`／`logical_not`）・
-`masked_select` の facade 公開（`Var` への委譲メソッド追加）は未承認の
-まま保留した。実装自体は `fandhe_ai_autodiff::bool_ops`（内部クレート
-限定の自由関数モジュール）として完了済み。`crates/facade/src/
-lib.rs::VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
-`crates/facade/tests/api_surface.rs` のソース走査・workspace
-インベントリ（4 テスト）で多層固定している。詳細は
-`docs/autodiff-bool-ops-exposure-decision.md` §0・§6 を参照。
+**保留記録（イシュー #2141・親 #2131。#2510 で 7 件を公開済みのため logical 3 件に縮小）**:
+logical 3 種（`logical_and`／`logical_or`／`logical_not`）の facade 公開形（`Var` の
+関連関数か facade 直下の関数か）は未決のまま保留（#2594）。実装自体は
+`fandhe_ai_autodiff::bool_ops`（内部クレート限定の自由関数モジュール）。
+`crates/facade/src/lib.rs::VarBoolOpsHoldDoctestGuard` と `api_surface.rs` の
+ソース走査・workspace インベントリで logical 3 件の配置・`Tensor`／`Tape` 上への配置・
+モジュール再エクスポートを固定している。詳細は
+`docs/autodiff-bool-ops-exposure-decision.md` §0・§6・§6.1 を参照。
+
+**適用記録（経路 2。イシュー #2510・親 #2499・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
+bool 比較 6 種（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）と
+`masked_select` を、設計判断記録（`docs/autodiff-bool-ops-exposure-decision.md` §6）の
+推奨形どおり `Var` の委譲メソッド 7 件として公開した（`bool_ops` 自由関数への 1 式委譲・
+非微分・tape 非記録）。新規の型・`pub use`・`Op`／`BackendOps`・VJP は追加していない。
+保留ガードは承認形のみを許す正ガードへ部分反転した（`workspace_declares_bool_ops_fn_names_in_approved_places_only`
+が委譲本体を固定。doctest は logical 3 件の保留を維持）。スコープ外: logical 3 件（#2594）・
+微分可能な `masked_select`・GPU 専用カーネル。
 
 **保留記録（イシュー #2174・親 #2131）**: `fandhe_ai::optim::
 OptimizerStateDict` の再エクスポートまたは `AdamW`／`Adam`／

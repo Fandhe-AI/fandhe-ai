@@ -938,8 +938,8 @@ impl<'t> Var<'t> {
     /// 比較演算 6 種（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は共通の出力・
     /// 勾配規約を持つ: 出力は f32 の `0.0`／`1.0`（厳密な `Tensor<bool>`
     /// 出力版は `fandhe_ai_autodiff::bool_ops::gt_bool` 等〈イシュー
-    /// #2141。facade 公開は承認待ちで保留〉が本メソッドとは独立に
-    /// 提供する。`docs/scalar-op-dispatch-design.md` §3.2）。IEEE 754
+    /// #2141。`Var::gt_bool` 等の委譲メソッドとして #2510 で facade 公開済み〉
+    /// が本メソッドとは独立に提供する。`docs/scalar-op-dispatch-design.md` §3.2）。IEEE 754
     /// 準拠の比較（`NaN` を含む比較は `eq` を含め常に
     /// 偽・`ne` のみ真）。VJP は両入力とも常にゼロ勾配（比較演算は
     /// 局所的に階段関数のため微分不可能。`eval::scalar::binary_partials`
@@ -983,6 +983,108 @@ impl<'t> Var<'t> {
     /// が絡む比較は常に真）。イシュー #1712（親 #1593）。
     pub fn ne(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.scalar_binary(other, ScalarBinaryOp::Ne)
+    }
+
+    /// ブロードキャスト付き要素ごとの大なり（`self > other`）比較の bool 出力版
+    /// （PyTorch `torch.gt` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::gt_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::gt`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn gt_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::gt_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの以上（`self >= other`）比較の bool 出力版
+    /// （PyTorch `torch.ge` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::ge_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::ge`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn ge_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::ge_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの小なり（`self < other`）比較の bool 出力版
+    /// （PyTorch `torch.lt` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::lt_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::lt`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn lt_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::lt_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの以下（`self <= other`）比較の bool 出力版
+    /// （PyTorch `torch.le` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::le_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::le`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn le_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::le_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの等価（`self == other`）比較の bool 出力版
+    /// （PyTorch `torch.eq` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::eq_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::eq`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn eq_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::eq_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの非等価（`self != other`）比較の bool 出力版
+    /// （PyTorch `torch.ne` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::ne_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::ne`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn ne_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::ne_bool(self, other)
+    }
+
+    /// bool マスクで `self` の要素を row-major 順に選び rank 1 の
+    /// `Tensor<f32>` で返す（PyTorch `torch.masked_select` 相当）。
+    ///
+    /// `crate::bool_ops::masked_select` への薄い委譲（イシュー #2141 で実装・
+    /// #2510 で facade 公開）。PyTorch と異なり**非微分**（tape 非記録・
+    /// detached。微分可能版は決定記録 §6 項目 2 の別イシュー）。マスクは
+    /// `self` の shape へブロードキャストされ、全て偽なら shape `[0]` を
+    /// 返す。選ばれた要素の `NaN` は bit 保存される。
+    pub fn masked_select(&self, mask: &Tensor<bool>) -> Result<Tensor<f32>, AutodiffError> {
+        crate::bool_ops::masked_select(self, mask)
     }
 
     /// GELU（誤差関数版。PyTorch `F.gelu(x, approximate='none')`

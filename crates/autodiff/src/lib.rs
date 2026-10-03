@@ -162,9 +162,10 @@
 //! （`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）・
 //! logical 3 種（`logical_and`／`logical_or`／`logical_not`）・
 //! `masked_select` を [`bool_ops`] へ追加した。いずれも非微分・tape
-//! 非記録の自由関数（`Var` への inherent メソッドではない）で、facade
-//! 公開は承認待ちのため意図的に再エクスポートしない（`docs/autodiff-
-//! bool-ops-exposure-decision.md`・モジュール doc 参照）。
+//! 非記録の自由関数で、比較 6 種と `masked_select` は #2510 で `Var` の
+//! 委譲メソッドとして facade 公開済み。logical 3 種と自由関数自体は
+//! 公開しない（`docs/autodiff-bool-ops-exposure-decision.md`・
+//! モジュール doc 参照）。
 
 //! イシュー #2195（親 #2142「f64 autograd の最小集合」の第 1 段）で
 //! `f32` の `Tape`/`Var` とは完全に独立した f64 専用グラフ
