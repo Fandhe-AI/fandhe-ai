@@ -3,7 +3,8 @@
 //!
 //! `fandhe_ai_tensor_core::data`（`Dataset`・`TensorDataset`・
 //! `DataLoader`・`DataLoaderConfig`・`Batches`・`DataError`）と、
-//! イシュー #2182 で追加し #2505（ルート #2499 のユーザー承認〈依頼文記載の承認日 2026-10-04〉、
+//! イシュー #2182 で追加し #2505（ルート #2499 本文「承認範囲」節の一括承認。適用記録は
+//! `docs/compat-api-scope.md`、公開形は
 //! `docs/tensor-core-data-sampler-hooks-decision.md` §5）で公開した
 //! Sampler／フック系 11 名（`Sampler`・`SequentialSampler`・
 //! `RandomSampler`・`WeightedRandomSampler`・`SamplerDataLoader`・
