@@ -8,7 +8,7 @@
 - **コード変更なし**（`crates/**`・`Cargo.toml`／`Cargo.lock`・`docs/spec/`・tolerance／baseline・ガードレール閾値は一切変更していない）。
 - 本書は、#2194（`docs/functorch-serving-hub-non-target-spec-proposal.md`・PR #2330）で REQ-9「引き続き対象外」に加えた (1)「利用者向けの汎用 forward-mode AD API・vmap・`torch.func` 相当の合成関数変換」を、**対象内へ戻す方向で見直す**改定提案である（`docs/spec/04-requirements.md:235`、変更履歴 `:436`）。ルート #2499 の目標（PyTorch／TF の置き換え）に対し、「自動微分」行の網羅に必要なため。
 - **spec の「HVP 用途の内部 JVP〈`Tape::backward_create_graph`〉」という呼称は実体と異なる**。`backward_create_graph` は子テープ方式の reverse-over-reverse（VJP を `Var` 演算として子テープへ記録し、さらに `backward` する方式）であり、JVP ではない。forward-over-reverse の JVP は `docs/autodiff-higher-order-grad-decision.md` §4 案 C に**記録されているだけで未実装**。つまり「forward-mode の土台が既にある」前提での見積りはできない（§2・§4）。spec 文案に呼称の訂正を含める（§5）。
-- 推奨は**案 C（段階化）**。段階 1 で、reverse-mode 単一系統を保ったまま「関数型ラッパー（`grad`／`vjp`／`jacrev`／`hessian`／`hvp` 相当）」「double-VJP 法による JVP（実現可能性の検証が条件）」「ループ＋stack 版 vmap」を対象内へ移す。段階 2 の「ネイティブ forward-mode（全 Op への JVP 規則）」「Op ごとのバッチ規則型 vmap」は対象外に残し、再開条件を明記する。**決定はユーザーに委ねる**（§6）。
+- 推奨は**案 C（段階化）**。段階 1 で、reverse-mode 単一系統を保ったまま「関数型ラッパー（`grad`／`vjp`／`jacrev`／`hessian`／`hvp` 相当）」「double-VJP 法による JVP（実現可能性の検証が条件）」「ループ＋stack 版 vmap」を対象内へ移す。段階 2 の「ネイティブ forward-mode（対象 Op への JVP 規則。resident／fused／非追跡ペイロードの linalg は対象外）」「Op ごとのバッチ規則型 vmap」は対象外に残し、再開条件を明記する。**決定はユーザーに委ねる**（§6）。
 - 規模見積りは本書の推測であり、確定値ではない（§3）。
 - spec 文案（§5）は**未起票**。spec リポ（Fandhe-AI/fandhe-ai-spec）への投稿はユーザー承認事項であり、本 issue では実施しない。承認の代行もしていない。
 
@@ -44,8 +44,8 @@
 |---|---|---|---|---|---|
 | (a) 関数型ラッパー | `grad`／`vjp`／`jacrev`／`hessian`／`hvp` 相当。既存 `Tape`＋`backward`＋`backward_create_graph` の薄い合成。reverse-mode のみ | 不要 | なし | 6〜10 | facade 公開は #2543〜#2546 の完了が前提。公開面の追加は `docs/compat-api-scope.md` §5 の手続き |
 | (b) double-VJP 法の JVP | `y = f(x)` に対し葉 `u` で `s = Σ(y·u)` を作り、`g = Jᵀu`（`x` についての勾配）を子テープの `Var` として得て、`t = Σ(g·v)` を `u` で微分すると `J v` になる。`jvp`／`jacfwd` 相当を Op 規則の追加なしで作れる**可能性** | 不要（対象 Op の範囲で） | なし | 検証 2〜3＋実装 4〜8 | **実現可能性は未検証**。成立するかは検証 issue の結果次第。非対象 Op（`Softmax`・`LogSoftmax`・`Max`・`Min`・正規化系・`Op::Custom`・linalg・resident）では fail-closed。計算量は reverse 2 回分で、本物の forward-mode より重い |
-| (c) ネイティブ forward-mode | 接ベクトル伝播（双対数）。全 Op に JVP 規則 | 約 90 variant 分 | CUDA／Metal は既定の `Unsupported`（ホスト計算）フォールバックで到達させる前提 | 40〜70 | elementwise／view は容易。`f64` アキュムレータ縮約・先勝ちタイ規則などの数値契約を持つ Op は JVP 側にも独自の数値契約が要り、**承認事項**。linalg は合成経路が未整備、resident／fused は対象外。VJP との二重保守が恒久化する |
-| (d-1) ループ版 vmap | バッチ軸でスライスし、関数を各要素に適用して `stack`。意味論は等価、性能は保証しない | 不要 | なし | 3〜5 | 副作用のない関数が前提。性能目標を掲げない |
+| (c) ネイティブ forward-mode | 接ベクトル伝播（双対数）。**対象 Op**（create_graph の対象分類と同じ区分で、elementwise・view・rank 2 の `MatMul` 等に加え、数値契約を承認した Op）に JVP 規則を置く。resident／fused／非追跡ペイロード（linalg）は対象外で fail-closed | 約 90 variant のうち対象 Op 分 | CUDA／Metal は既定の `Unsupported`（ホスト計算）フォールバックで到達させる前提 | 40〜70 | elementwise／view は容易。`f64` アキュムレータ縮約・先勝ちタイ規則などの数値契約を持つ Op は JVP 側にも独自の数値契約が要り、**承認事項**。linalg は合成経路が未整備、resident／fused は上記のとおり対象外（「全 Op」への網羅は主張しない）。VJP との二重保守が恒久化する |
+| (d-1) ループ版 vmap | バッチ軸でスライスし、関数を各要素に適用して `stack`。**対象範囲内**（下記の前提を満たす関数）では意味論は等価、性能は保証しない | 不要 | なし | 3〜5 | 副作用のない関数が前提。`Var::stack` は空配列と非 contiguous な入力を拒否するため、(1) バッチ長 0（空バッチ）は対象外とし型付きエラーで fail-closed（空の結果形状を推定しない）、(2) 関数の出力が非 contiguous（`transpose` 等の view 結果）の場合は、vmap 側で contiguous 化してから `stack` する設計を実装 issue で確定する（確定できない間は fail-closed）、(3) 各要素の出力形状・dtype の不一致も fail-closed とする。性能目標を掲げない |
 | (d-2) バッチ規則型 vmap | Op ごとに `in_dims`／`out_dims` のバッチ規則（functorch の BatchedTensor 型） | 約 90 variant 分 | 拡張の可能性あり | 40〜70 | プログラム変換に当たり、区分 C との関係整理と承認が必要 |
 | (e) `torch.func` の合成 | `jacfwd(jacrev(f))`、`vmap(grad(f))` など | — | — | (a)〜(d) に従属 | 下表参照 |
 
@@ -54,10 +54,10 @@
 | 合成 | 成立条件 |
 |---|---|
 | `hessian`／`hvp` | (a) のみ。create_graph の対象 Op の範囲 |
-| `jvp`／`jacfwd`（単独） | (b) の検証が成立すれば対象 Op の範囲。(c) があれば全 Op |
-| `jacfwd(jacrev(f))` | (b)＋(a)。二階微分（Hessian 相当）になり、double-VJP 法の対象 Op は二階微分可能な範囲に限られる。(c) があれば素直に成立 |
+| `jvp`／`jacfwd`（単独） | (b) の検証が成立すれば対象 Op の範囲。(c) があれば (c) の対象 Op の範囲 |
+| `jacfwd(jacrev(f))` | (b)＋(a)。二階微分（Hessian 相当）になり、double-VJP 法の対象 Op は二階微分可能な範囲に限られる。(c) があれば (c) の対象 Op の範囲で成立 |
 | `vmap(grad(f))`（per-sample gradient） | (d-1)＋(a)。ループ版のため速度は出ない |
-| `vmap(jvp)` | (d-1)＋(b) または (c) |
+| `vmap(jvp)` | (d-1)＋(b) または (c)（いずれも各自の対象 Op の範囲、かつ (d-1) の出力前提の範囲） |
 
 ### 3.3 改定形の候補
 
@@ -79,7 +79,7 @@
 
 ## §5 spec 改定文案（起票用 draft。未起票）
 
-タイトル案: `REQ-9: 関数型 AD ラッパー・ループ版 vmap を対象内へ移し、double-VJP による JVP は検証成立を条件に移す（forward-mode 全 Op 規則・バッチ規則型 vmap は対象外のまま）`
+タイトル案: `REQ-9: 関数型 AD ラッパー・ループ版 vmap を対象内へ移し、double-VJP による JVP は検証成立を条件に移す（ネイティブ forward-mode の JVP 規則・バッチ規則型 vmap は対象外のまま）`
 
 ````markdown
 ## 背景
@@ -87,8 +87,8 @@
 
 ## 提案
 1. 「引き続き対象外」(1) を次へ改める。
-   - 対象外: 全 Op への JVP 規則の追加を要する forward-mode AD（双対数・接ベクトル伝播）、Op ごとのバッチ規則を要する vmap。
-   - 対象内（Tier 2）: reverse-mode テープ＋VJP を土台にした関数型ラッパー（`grad`／`vjp`／`jacrev`／`hessian`／`hvp` 相当）、ループ＋stack による意味論等価な vmap（性能保証なし）。
+   - 対象外: 対象 Op への JVP 規則の追加を要するネイティブ forward-mode AD（双対数・接ベクトル伝播）、Op ごとのバッチ規則を要する vmap。
+   - 対象内（Tier 2）: reverse-mode テープ＋VJP を土台にした関数型ラッパー（`grad`／`vjp`／`jacrev`／`hessian`／`hvp` 相当）、ループ＋stack による vmap（空バッチ・形状不一致は fail-closed、非 contiguous 出力は contiguous 化して扱うか fail-closed。前提を満たす範囲で意味論等価、性能保証なし）。
    - 条件付き（検証成立が移行条件）: double-VJP 法による `jvp`／`jacfwd` 相当（対象 Op の範囲・非対象 Op は fail-closed）。§3 の実現可能性検証（検証 issue）が成立するまで対象外に留め、成立した時点で Tier 2 へ移す。
 2. 呼称の訂正: 「HVP 用途の内部 JVP〈`Tape::backward_create_graph`〉」を「HVP 用途の reverse-over-reverse 高階微分〈`Tape::backward_create_graph`〉」に改める。
 
@@ -96,7 +96,7 @@
 既存の受け入れ基準・REQ-2（統一複合判定）・REQ-8・REQ-12 は変更しない。新機能の数値一致は既存の統一複合判定の範囲で扱い、新しい判定契約が必要になった場合は別途承認を得る。
 
 ## 各項目の再開条件（対象外に残す項目）
-- forward-mode の全 Op 規則: 段階 1 の利用実績で double-VJP 法の計算量または対象 Op の範囲が不足と確認された場合。
+- ネイティブ forward-mode の JVP 規則: 段階 1 の利用実績で double-VJP 法の計算量または対象 Op の範囲が不足と確認された場合。
 - バッチ規則型 vmap: ループ版の性能不足が実測で示され、区分 C との関係が整理された場合。
 
 ## 実装リポ側との取り決め
