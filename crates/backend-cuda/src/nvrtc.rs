@@ -4043,7 +4043,6 @@ fn nvrtc_include_candidates(
 // 個別に `#[cfg(unix)]` を付ける（`docs/facade-windows-build-decision.md`）。
 #[cfg(test)]
 mod tests {
-
     use std::collections::HashMap;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
