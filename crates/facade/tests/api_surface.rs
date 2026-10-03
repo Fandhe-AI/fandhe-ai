@@ -3200,7 +3200,7 @@ fn data_types_are_reachable_via_facade_only() {
 // `DataHooksHoldDoctestGuard` と否定ガードで固定していたが、#2505 で
 // `fandhe_ai::data` からの素の再エクスポートを承認形
 // （`docs/tensor-core-data-sampler-hooks-decision.md` §5。ルート #2499 の
-// 2026-10-04 ユーザー承認）として公開したため、doctest ガードとその
+// ユーザー承認〈依頼文記載の承認日 2026-10-04〉）として公開したため、doctest ガードとその
 // ドリフト検査 2 件を削除し、ソース走査ガードを「承認した形だけを
 // 許す」正ガードへ反転した。`DataLoader` への統合（fn 宣言）は引き続き
 // 禁止する。
