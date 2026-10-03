@@ -146,6 +146,18 @@ fandhe-ai 自身の中央値は、GB10 の reuse 行で 0.9.0 比 0.96〜1.05× 
 | 主な変化 | 相互運用（ONNX import／export・safetensors・`save_model`／`load_model`）が facade から到達可能になった。NN 層（Conv・Pool・Norm・Embedding・MHA・TransformerEncoder・RNN）、optimizer 7 種と LR scheduler 7 種、DataLoader・`fit`・AMP、`ModelRegistry` を反映した |
 | 他列 | PyTorch・TensorFlow・SciPy・Hugging Face・LangChain の列は変更していない |
 
+## DGX スクリプトの失敗検知（事後確認）
+
+`scripts/dgx-run-0100.sh` は計測時に実行したものをそのまま収納している。各段階の失敗は終了コードの表示（`run_all rc=`）と `FAIL` 行の出力だけで、ラウンドを中止しない。このため、次の 3 点を事後に確認した。
+
+| 確認項目 | 結果 |
+|---|---|
+| `run_all rc=` | 5 ラウンドとも 0 |
+| 各段階の行数 | 全ラウンドで stage1 112 行・skipped 0、stage2 8 行、stage3 28 行 |
+| 失敗の痕跡 | `FAIL` 行・`extra.err`・`py.err` は全ラウンド空 |
+
+5 ラウンドの結果 JSONL はすべて内容が異なり、前ラウンドの成果物を流用したものはない。集計の `median_rounds.py` も、セルの欠損・重複があればエラー終了する。次回以降のスクリプトは、失敗時に非零で終了させる。
+
 ## 再現
 
 ```bash
