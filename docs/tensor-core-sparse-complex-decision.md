@@ -184,7 +184,7 @@ fail-closed 化」の引き継ぎ候補は、イシュー #2079 で実装済み�
 
 | 指標 | コマンド | 値 |
 |---|---|---|
-| `TypedOps<T>` の fn 数 | `grep -c "fn " crates/tensor-core/src/typed_ops.rs`（trait 定義は同 `:33`） | 15 |
+| `TypedOps<T>` の fn 数 | trait 定義（`crates/tensor-core/src/typed_ops.rs:33`〜`:50`）のメソッドだけを数える。`gemm`・`add`・`mul`・`relu`・`exp`・`tanh`・`sum`・`max` の 8 つ。`grep -c "fn "` はファイル末尾のテスト用関数も数えるため使わない | 8 |
 | CUDA の kernel ファイル | `ls crates/backend-cuda/src \| grep -c kernels` | 39 |
 | Metal の shader | `ls crates/backend-metal/src/shaders \| wc -l` | 26 |
 | backend-cpu の src | `ls crates/backend-cpu/src \| wc -l`（直下）／`git ls-files crates/backend-cpu/src \| wc -l`（再帰） | 41／50 |
@@ -197,7 +197,11 @@ fail-closed 化」の引き継ぎ候補は、イシュー #2079 で実装済み�
    - `Scalar` は `private::Sealed`（`crates/tensor-core/src/element.rs:111`）で封印され、実装は `f32`／`f64`／`f16`／`bf16` の 4 型（同 `:171`〜`:186`）である。complex 型の newtype を足し、`Sealed` と `Scalar` を実装する。
    - `ScalarDType`（同 `:141`）は `#[non_exhaustive]` なので、variant 追加は 0.10.0 の公開 API を壊さない。ただし `ScalarDType` は facade から再公開済み（`crates/facade/src/lib.rs:270`）である。公開面が広がるため、facade の公開形は `docs/compat-api-scope.md` §5 の手続きを経る。
    - `dispatch::DType`（`crates/tensor-core/src/dispatch.rs:31`）は `ScalarDType` とは別の enum で、`#[non_exhaustive]` が付いていない。complex を GEMM の経路選択へ載せるなら、`docs/backend-dtype-dispatch-design.md` が定める `ScalarDType → Option<dispatch::DType>` の明示マッピングの方式（complex は `None`）に従う。
-   - `TypedOps<T>` の 15 fn を 3 バックエンドそれぞれに実装する。
+   - `TypedOps<T>` の 8 メソッドのうち、complex で意味が定まる演算だけを 3 バックエンドへ実装する。
+     - 対象にできる演算: `gemm`・`add`・`mul`・`exp`・`sum`（`tanh` は複素解析関数として定義できるが、数値契約〈実部・虚部の丸めと特異点付近の扱い〉を別途決める条件付き）。
+     - 対象外にする演算: `max`（順序が必要）と `relu`（`max(0, x)` に基づく）。complex には全順序がなく、PyTorch も complex の `max` 系を未対応にしている。順序・出力契約を新しく作る案は採らない。
+     - 非対応演算の扱い: 実装しない演算は `BackendError::Unsupported` で fail-closed に拒否し、無言で実部だけを使う等の代替はしない。
+     - 公開 API と trait 設計の前提: 現行の `TypedOps<T: Scalar>` は 8 メソッドすべてを必須にしている。complex の `Scalar` 実装でこの trait をそのまま使うと、上の対象外 2 演算も実装を強いられる。選択肢は (1) 対象外演算を常に `Unsupported` で返す実装を許容する、(2) complex 用に演算を絞った別 trait（例: `ComplexOps`）を足す、の 2 つ。既存 trait にメソッドを足す・削る変更は 0.10.0 の公開 API を壊しうるため、既存 trait は変更せず追加 API で拡張する前提とし、(1)／(2) の採否は承認事項（§15.5）に加える。
 2. **autodiff（支配的コスト）**
    - `Var<'t>` は f32 のノード id だけを持つ。`Tape` は `ops: Box<dyn BackendOps + Send>` を持つ（`docs/backend-dtype-dispatch-design.md` が `crates/autodiff/src/tape.rs:775` として引用）。`Tape<T>` 化は同 doc §8 が対象外と明記した作業であり、complex の勾配を扱うには**前提条件**になる。「4 型 → 5 型化」に含めて見積もってはならない。
    - VJP の規約を決める必要がある。PyTorch は共役 Wirtinger 規約である。実数の関数が complex を経由する場合（`abs`・`angle`・`real`・`imag`）の勾配の向きも定義が要る。
@@ -293,7 +297,8 @@ dtype 一般化と全バックエンドの dtype dispatch に及び、sparse は
 5. sparse のレイアウト型新設と `BackendOps` の拡張。
 6. ONNX `sparse_initializer` の扱い（(s1) 拒否維持／(s2) dense 化／(s3) sparse 型）。
 7. 外部 crate を使う場合の依存追加（現時点では不要と見込む）。
-8. 承認後に実装 issue を起票すること（本ツリーには含めない）。
+8. complex で対応する演算の選別（`gemm`・`add`・`mul`・`exp`・`sum` を対象、`max`・`relu` を対象外、`tanh` は条件付き）と、非対応演算の扱い（`Unsupported` での拒否）、およびその公開 API／trait 設計（§15.2 complex 1 の (1)／(2)）。
+9. 承認後に実装 issue を起票すること（本ツリーには含めない）。
 
 ### §15.6 セキュリティ観点
 
