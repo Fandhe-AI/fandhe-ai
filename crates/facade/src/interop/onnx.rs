@@ -882,8 +882,9 @@ mod map_graph_error_tests {
     /// `OnnxError::Io` へ写る（イシュー #2488）。
     #[test]
     fn external_io_error_keeps_raw_os_error() {
-        let missing = std::env::temp_dir().join("fandhe-ai-2488-missing-file.data");
-        let os_err = std::fs::File::open(&missing).expect_err("存在しないパスのはず");
+        // 環境のファイル有無に依存しないよう、OS エラーコードを直接用意する
+        // （ENOENT 相当。Unix は 2・Windows は ERROR_FILE_NOT_FOUND=2 で共通）。
+        let os_err = std::io::Error::from_raw_os_error(2);
         let code = os_err.raw_os_error().expect("OS 由来のエラーのはず");
         let e = map_graph_error(GraphError::ExternalData(ExternalDataError::Io {
             tensor_name: "w".to_string(),
