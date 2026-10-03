@@ -1081,8 +1081,9 @@ impl<'t> Var<'t> {
     /// `crate::bool_ops::masked_select` への薄い委譲（イシュー #2141 で実装・
     /// #2510 で facade 公開）。PyTorch と異なり**非微分**（tape 非記録・
     /// detached。微分可能版は決定記録 §6 項目 2 の別イシュー）。マスクは
-    /// `self` の shape へブロードキャストされ、全て偽なら shape `[0]` を
-    /// 返す。選ばれた要素の `NaN` は bit 保存される。
+    /// `self` と共通形状へ相互にブロードキャストされる（`broadcast_shape`。
+    /// マスク側の次元が大きければ `self` も拡張されて選択対象になる）。
+    /// 全て偽なら shape `[0]` を返す。選ばれた要素の `NaN` は bit 保存される。
     pub fn masked_select(&self, mask: &Tensor<bool>) -> Result<Tensor<f32>, AutodiffError> {
         crate::bool_ops::masked_select(self, mask)
     }
