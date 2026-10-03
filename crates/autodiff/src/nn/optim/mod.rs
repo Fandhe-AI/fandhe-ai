@@ -316,11 +316,7 @@ pub use state_dict::OptimizerStateDict;
 // （意図的な逸脱。`CosineAnnealingWarmRestarts` doc「PyTorch との
 // 意図的な相違」節参照）。
 //
-// **facade（`fandhe_ai::optim`）への公開は保留**（`Adadelta`／
-// `Adamax`／`NAdam`／`RAdam`〈#2171〉・param groups〈#2173〉と同型。
-// 親 #2131 が定める「facade 公開面の拡張は設計判断記録 → 承認 → 実装
-// の 2 段」規則により、本イシュー時点で所有者の承認コメントがないため
-// `crates/facade/src/optim.rs` への追記を行っていない）。承認事項・
-// 保留固定の設計は `docs/autodiff-lr-scheduler-ext-decision.md`
-// §8「承認事項」を参照（`crates/facade/src/lib.rs::
-// LrSchedulerExtHoldDoctestGuard` が正のプローブで固定する）。
+// **facade（`fandhe_ai::optim`）へは #2503（親 #2499）で公開済み**
+// （`crates/facade/src/optim.rs` の純再エクスポート。2026-10-04 ルート
+// #2499 の一括承認。経緯・実装記録は `docs/autodiff-lr-scheduler-ext-
+// decision.md` §8）。

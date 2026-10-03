@@ -3,19 +3,18 @@
 //! [`LambdaLr`]・[`SequentialLr`]）を `Sequential::fit_with_callbacks`
 //! （`LrSchedule::per_epoch`）経由で駆動した際の統合テスト。
 //!
-//! facade（`fandhe_ai::optim`）への公開は本イシューでは保留のため
-//! （`crates/facade/src/lib.rs::LrSchedulerExtHoldDoctestGuard`）、
-//! 5 種は `fandhe_ai_autodiff::nn::optim` から直接 import する
+//! 5 種は #2503 で facade（`fandhe_ai::optim`）へ公開済みのため、
+//! 内部クレートへ依存せず `fandhe_ai::optim` から import する
 //! （`compat_sequential_callbacks.rs::lr_schedule_per_epoch_matches_
 //! manual_set_lr_loop` と同じ検証方式・同じ決定的 fixture）。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::{Callback, FitConfig, Loss, LrSchedule, Optimizer, Sequential};
-use fandhe_ai::{Tensor, tape};
-use fandhe_ai_autodiff::nn::optim::{
-    CosineAnnealingWarmRestarts, CyclicLr, LambdaLr, LrScheduler, MultiStepLr, StepLr,
+use fandhe_ai::optim::{
+    CosineAnnealingWarmRestarts, CyclicLr, LambdaLr, LrScheduler, MultiStepLr, Sgd, SgdConfig,
+    StepLr,
 };
-use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
+use fandhe_ai::{Tensor, tape};
 
 const N: usize = 16;
 const D_IN: usize = 4;
@@ -214,7 +213,7 @@ fn sequential_lr_per_epoch_matches_manual_loop() {
     let make = || -> Box<dyn LrScheduler> {
         let s1: Box<dyn LrScheduler> = Box::new(StepLr::new(0.1, 1, 0.5).unwrap());
         let s2: Box<dyn LrScheduler> = Box::new(StepLr::new(0.1, 1, 0.9).unwrap());
-        Box::new(fandhe_ai_autodiff::nn::optim::SequentialLr::new(vec![s1, s2], vec![2]).unwrap())
+        Box::new(fandhe_ai::optim::SequentialLr::new(vec![s1, s2], vec![2]).unwrap())
     };
     assert_per_epoch_matches_manual_loop("SequentialLr", make, make, EPOCHS, 0.1);
 }
