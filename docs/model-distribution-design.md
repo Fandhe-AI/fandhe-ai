@@ -64,6 +64,8 @@
 1. **HTTP クライアント（＋ TLS スタック）の新規区分追加**（現行の許容依存 9 区分に続く第 10 区分相当）。`ModelRegistry::download` の実装に必須。候補は同期専用の `ureq`／`minreq`／`attohttpc`（`reqwest` は `tokio` を推移的に引き込むため非推奨。`docs/model-download-design.md` §3）。ライセンス（推移的依存を含む）は未実測のまま「承認後に `cargo tree` 実測を行う」と記録されている。
 2. **キャッシュ書き込みの dirfd 相対操作用 OS 呼び出しラッパー（`libc` または `rustix` 等）の新規区分追加**（1 の第 10 区分に続く第 11 区分相当。両者は承認単位が異なるため別区分として扱う）。`std::fs` は dirfd 相対のオープン・rename を提供しないため、シンボリックリンク経由のキャッシュルート脱出対策（TOCTOU を構造的に閉じる設計。`docs/model-download-design.md` §6）の実装に必須。
 
+**追記（2026-10-03・#2621）**: 上記 1 は第 11 区分相当、2 は新規区分ではなく、2026-09-28 承認済みの第 10 区分 `libc` の用途拡張（または onnx-interop ヘルパーの公開）に読み替える。詳細・推奨・承認チェックリストは `docs/model-download-design.md` §14 を正とする（いずれも未承認）。上の本文は作成時点の記述であり書き換えない。
+
 上記 2 件に付随して、`docs/model-download-design.md` §7 は facade 公開面の拡張（`ModelRegistry::download`・`download_with`・`DownloadOptions`・`Sha256Pin`・`DownloadProgress` の追加・`api_surface.rs` 到達性テストの追加）も承認事項として列挙しているが、これは依存追加そのものではなく、1・2 の承認を前提に実施する公開面拡張である。`docs/license-matrix.md` への行追加・承認後の実装イシュー起票（`.claude/rules/out-of-scope-tracking.md` によりユーザー承認が必要）も同様に 1・2 の後続事項として同 doc §7 に記録されている。
 
 ## 5. HF hub 連携の方針（#2082 のスコープ外・ユーザー決定 2026-09-24）

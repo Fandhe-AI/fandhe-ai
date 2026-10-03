@@ -48,6 +48,8 @@
 
 推奨候補（**確定はユーザー承認事項。§7-1**）: facade は同期 API のみを公開する設計（`load_safetensors_f32` 等）であり、本リポの設計方針（feature フラグなし・cfg ベース・非同期ランタイム不使用）とも整合するため、同期専用の `ureq`／`minreq`／`attohttpc` のいずれかを推奨する。`reqwest` は非同期ランタイム（`tokio`）を推移的に引き込み設計方針と相性が悪いため非推奨とする。3 候補間の最終選定は §8-1 のライセンス実測結果で行う。
 
+**追記（2026-10-03・#2621）**: 推奨 crate の選定は §14.3 で行った（未承認の起案）。本節の本文は書き換えない。
+
 ## 4. 依存の配置案（列挙のみ。確定は親 #2082 とユーザー承認）
 
 | 案 | 内容 | 影響 |
@@ -96,6 +98,8 @@
 
 ## 7. 承認事項（本イシュー時点ではいずれも未取得）
 
+**追記（2026-10-03・#2621）**: 区分番号・承認項目の現行版は §14（特に §14.2 の対応表・§14.6 のチェックリスト）を正とする。以下の本文は作成時点（2026-09-23〜24）の記述であり書き換えない。
+
 1. HTTP クライアント（＋ TLS スタック）を許容依存へ新規区分として追加すること（現行の許容依存 9 区分〈`.claude/rules/deps-policy.md`〉に続く第 10 区分相当。配置案（§4）の選択を含む）
 2. facade 公開面の拡張: `ModelRegistry::download`・`ModelRegistry::download_with`・`DownloadOptions`・`Sha256Pin`・`DownloadProgress`（§5。2026-09-24 追記で pin・進捗の渡し口を追加）と `ModelError` の追加バリアントの追加、および `api_surface.rs` 到達性テストの追加
 3. `docs/license-matrix.md` への行追加（依存追加とセット。承認前は行を増やさない）
@@ -141,7 +145,7 @@
 
 ## 12. 出典一覧
 
-`.claude/rules/deps-policy.md`・`.claude/rules/security.md`・`.claude/rules/coding-rust.md`・`docs/license-matrix.md`・`deny.toml`・`crates/facade/src/interop/safetensors.rs`・`crates/facade/tests/api_surface.rs`・`docs/facade-safetensors-exposure-decision.md`・`docs/facade-onnx-import-exposure-decision.md`・イシュー #2082／#2087／#2088／#2620（§13 の実測）。HF hub 連携の追跡先: イシュー #2243（#2244／#2245／#2246）。
+`.claude/rules/deps-policy.md`・`.claude/rules/security.md`・`.claude/rules/coding-rust.md`・`docs/license-matrix.md`・`deny.toml`・`crates/facade/src/interop/safetensors.rs`・`crates/facade/tests/api_surface.rs`・`docs/facade-safetensors-exposure-decision.md`・`docs/facade-onnx-import-exposure-decision.md`・イシュー #2082／#2087／#2088／#2620（§13 の実測）／#2621（§14 の起案）。HF hub 連携の追跡先: イシュー #2243（#2244／#2245／#2246）。
 
 ## 13. 候補 crate のライセンス・推移依存の実測（#2620）
 
@@ -201,6 +205,8 @@ HTTP クライアント候補 4 種を feature 組合せ×ターゲット別に�
 - MPL 等コピーレフトの推移的混入は、`attohttpc` の**直接ライセンス**（MPL-2.0）以外では検出されなかった（全 feature 組合せ・全ターゲット。`GPL`／`LGPL`／`AGPL`／`MPL`／`EPL`／`CDDL` の式を機械抽出し、該当は `attohttpc` のみ）。
 - `ring 0.17.14` は式 `Apache-2.0 AND ISC` で、両識別子が allow に含まれるため通る（`ureq` ①②はこの経路を含む）。`aws-lc-rs 1.18.1`（`ISC AND (Apache-2.0 OR ISC)`）も通るが、同 `aws-lc-sys` は複合式の中に BSD-3-Clause を含み落ちる。
 
+**注記（2026-10-03・#2621）**: `ureq`③（`rustls-no-provider`＋`platform-verifier`）は暗号プロバイダを同梱しない。`cargo info ureq@3.4.2` の feature 定義では `rustls = [rustls-no-provider, _ring, rustls-webpki-roots]` で、`_ring`（`rustls` の `ring` 有効化）は内部 feature のため、③は単体では TLS が成立しない構成である。実使用には呼び出し側での別途のプロバイダ指定が要り、現行 allow で通るかの判定対象としては不完全（実測数値は変更しない）。
+
 ### 13.3 重点検証点の結果
 
 | 対象 | 解決版 | ライセンス式 | 判定 |
@@ -234,3 +240,98 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 - 本体 `Cargo.toml`／`Cargo.lock`／`deny.toml` は変更していない（差分なしを確認済み）。一時パッケージはリポジトリ外で実測し、削除済み。
 - 実測値は 2026-10-03 時点の crates.io 解決版に依存する。承認後の依存追加 PR では再実測する。
 - 推奨 crate、区分起案、承認依頼は #2621 で扱う。`docs/license-matrix.md` §10 に下書きの要約を置いた（未承認）。
+
+## 14. 依存区分の起案と承認依頼（#2621）
+
+### 14.1 位置づけ
+
+- **本節は未承認の起案である。承認の代行は行わない**。依存追加・`.claude/rules/deps-policy.md`／`deny.toml`／`Cargo.toml`／`Cargo.lock` の変更は本 PR に含めない。
+- 根拠は §13 の実測（#2620）のみで、新たな `cargo build`／実測は行っていない。API・feature の確認は `cargo info`・docs.rs の公開ドキュメントによる。固定版は 2026-10-03 時点の crates.io 解決版であり、承認後の依存追加 PR で再実測する。
+- 承認を得ても本 doc は deps-policy を書き換えない。規約・`license-matrix.md`・`deny.toml` への正式反映は承認後の別 PR で行う。
+
+### 14.2 区分番号の対応表（旧記述 → 現行）
+
+| 旧記述 | 現行の読み方 |
+|---|---|
+| §2「許容依存 9 区分（第 1〜8）」 | 現行は 10 区分。本体 workspace の直接依存は第 1〜8 区分と第 10 区分（`libc`） |
+| §7-1「第 10 区分相当」（HTTP／TLS） | **第 11 区分相当** |
+| §7-5「`libc`／`rustix` の新規区分（第 11 区分相当）」 | 新規区分ではない。`libc` は 2026-09-28 に第 10 区分として承認済み（用途は onnx-interop の external data に限定）。**第 10 区分の用途拡張**、または onnx-interop ヘルパーの公開（§14.5-2） |
+| `model-distribution-design.md` §4-1・§4-2 | 上の 2 行と同じ読み替え |
+| `hf-hub-integration-design.md` の承認表（「第 10/11 区分相当」） | 旧番号の引用として同じく読み替える（同 doc は #2622 の担当範囲のため本 PR では編集しない） |
+
+### 14.3 推奨 crate の選定
+
+**除外**: `attohttpc`（直接ライセンスが MPL-2.0。§13.2）・`reqwest`（推移依存 90〜108 個で `tokio` を内包。現行 allow で通る組合せなし）。
+
+現行 allow で `licenses` が通る 3 組合せの比較（§13.2・§13.4 の値を引用。`cargo build` は未実行）:
+
+| 軸 | `ureq =3.4.2` ⑥ `native-tls-no-default` | `minreq =3.0.0` ③ `https-native-tls` | `minreq` ④ `https-openssl` |
+|---|---|---|---|
+| (a) 直接ライセンスと deps-policy の適合基準（MIT OR Apache-2.0 系） | MIT OR Apache-2.0。合致 | ISC。allow 内だが基準の記述から外れ、例外扱いの記録が要る | 同左 |
+| (b) §5・§6 の API 要件 | 下表のとおり大半を公開 API で確認 | 未確認（承認後に確認） | 未確認（承認後に確認） |
+| (c) 推移依存数（x86_64-linux／aarch64-linux／aarch64-darwin／x86_64-windows）・MSRV | 34／34／29／19・1.85 | 21／21／15／5・1.63 | 19／19／19／19・1.63 |
+| (d) システムライブラリ | Linux は `openssl-sys`（OpenSSL 開発パッケージ）が要る | 同左 | `openssl/vendored` により C ツールチェーンでソースビルド（全ターゲット） |
+
+(b) の確認結果（`ureq =3.4.2`。docs.rs の公開ドキュメントによる。実装時に再確認する）:
+
+| 要件（§5・§6） | 確認結果 |
+|---|---|
+| リダイレクトの各ホップで `https` 限定を検証 | `max_redirects` の既定が 0（自動追従しない）。呼び出し側で `Location` を検証しながら手動追従できる。`https_only` 設定もある |
+| 接続・読み取りのタイムアウト | `timeout_connect`／`timeout_recv_body`／`timeout_global` 等を確認 |
+| ストリーミング受信・`Content-Length`／`ETag` の取得 | ボディのリーダー経由の受信とヘッダ取得ができる設計。サイズ上限・ハッシュ計算を逐次行えるかは承認後に実装で確認 |
+| `If-None-Match` の付与と 304 判別 | 任意ヘッダ付与と 304 の取得は可能な想定。ただし `>=400` をエラー化する既定の扱いは実装時に確認 |
+| 証明書検証を無効化しない既定 | 既定は検証有効。`disable_verification` が存在するため、facade からこの設定を出さないことを条件にする |
+| `native-tls-no-default` での実行時設定 | TLS プロバイダ（native-tls）とルート証明書源（OS ストア）をどう指定するかは**未確認（承認後に確認）**。同 feature は `webpki-root-certs` を含まない |
+
+**推奨案**: `ureq =3.4.2`・`default-features = false`・`features = ["native-tls-no-default"]`。直接ライセンスが MIT OR Apache-2.0 で、現行 allow を変えずに `licenses` が通る。`minreq` は依存数が最小だが、直接ライセンスが基準外で API 要件も未確認のため次点とする。
+
+**代替案**（allow リスト変更の別途承認が要る）: `ureq` ②（`rustls`＝`ring`＋`webpki-roots`、推移依存 25 個）。システム OpenSSL が不要になる代わり、allow に `BSD-3-Clause`（`subtle`）と `CDLA-Permissive-2.0`（`webpki-roots`）の追加承認が要る（いずれもコピーレフトではない。§13.3）。
+
+**トレードオフ**: 推奨案は Linux のビルドに OpenSSL 開発パッケージを要求する。現行の `Dockerfile` は `pkg-config`・`build-essential` 等は入れるが `libssl-dev` を入れていない。CI の `ubuntu-latest` の有無は未確認。開発コンテナ・CI への導入要否は承認後の実ビルドで確認する（推測で「入っている」と書かない）。代替案はこの要件を避けられるが、allow 追加の承認が要る。
+
+### 14.4 配置案と `cfg` 範囲
+
+§4 の案 A／B／C を TLS 方式との組合せで再評価する。
+
+| 配置案 | 推奨案（native-tls）との組合せ | 代替案（rustls）との組合せ |
+|---|---|---|
+| A: `facade` の無条件依存 | 全 `fandhe-ai` 利用者（Linux）のビルドに OpenSSL 開発パッケージを要求する | 利用者の追加要件は C コンパイラ程度（`ring`）。依存数が増える |
+| B: cargo feature で opt-in | 本リポに optional 依存の前例なし。要件を download 利用者に限定できる | 同左 |
+| C: 非公開の別クレート | §4 の構造問題（公開クレートから非公開クレートへ依存できない）を再生産する | 同左 |
+
+`cfg` 範囲の選択肢:
+
+- **`cfg(unix)` 限定（推奨）**: §6 (c) で Windows の download は fail-closed の非対応と確定済み。`libc`（第 10 区分）の前例と同型で、Windows の依存ツリーが増えない。
+- 全ターゲット: 将来 Windows 対応の余地を残すが、現状は使われない依存を載せる。
+
+配置案と `cfg` 範囲の採否はユーザー承認事項とする。
+
+### 14.5 deps-policy 表形式の起案
+
+**1. 第 11 区分（HTTP クライアント／TLS）**
+
+| 区分 | クレート | 条件 |
+|---|---|---|
+| HTTP クライアント／TLS（第 11 区分） | 推奨: `ureq`（`default-features = false`・`native-tls-no-default`） | `=3.4.2` 完全固定。`cfg` 範囲は §14.4 の承認結果に従う。用途は `ModelRegistry::download`／`download_with` による HTTPS 取得に限る。HTTP crate の型を facade の公開面に出さない（`api_surface.rs` のテストで担保。§8-5）。TLS 証明書検証を無効化するオプションを設けない（§6）。非同期ランタイム（`tokio`／`hyper`）を推移依存に含めない。依存追加 PR で `docs/license-matrix.md` に行を追加し `cargo tree` を再実測する。`cargo deny check advisories bans licenses sources` と `scripts/check-forbidden-deps.sh` を通す。代替案（`rustls`）を採る場合は allow 追加（`BSD-3-Clause`・`CDLA-Permissive-2.0`）を別途承認する。HF hub 連携の別クレート（#2243・#2622）が同じ区分を再利用する場合も承認単位は別とする |
+
+**2. dirfd 相対操作（§6・§7-5）**。第 10 区分 `libc` はすでに承認済みのため、新規区分ではなく次の二択にする。
+
+- **案 B-1（推奨）**: 第 10 区分の用途を `crates/facade/src/model.rs` のキャッシュ書き込み（`openat`／`openat2`／`mkdirat`／`renameat`）へ拡張する。版は `=0.2.189` のまま `cfg(unix)` 限定で facade に直接依存させる。新規 `unsafe` は FFI 境界に限り、理由コメントと security-auditor のレビューを必須とする。公開クレートの公開面を広げず、既承認ピンと同型である。
+- 案 B-2: `onnx-interop/src/onnx/external_data.rs` の `pub(super)` ヘルパー（`open_chain_openat2`・`openat_no_follow` 等）を公開して facade から使う。`libc` の用途拡張は不要だが、crates.io 公開クレート `fandhe-ai-onnx-interop` の公開面が増える。また `mkdirat`／`renameat` は既存ヘルパーにないため追加が要る。
+
+どちらでも §6 の symlink 脱出防御と、Windows 非対応の fail-closed 契約は変更しない。
+
+### 14.6 承認チェックリスト（ユーザーが選ぶ。すべて未承認）
+
+- [ ] HTTP／TLS 依存の第 11 区分を新設すること、および crate と feature（推奨案 `ureq` `native-tls-no-default`／代替案 `rustls`）
+- [ ] 代替案を採る場合の allow 追加（`BSD-3-Clause`・`CDLA-Permissive-2.0`）
+- [ ] 配置案（A／B／C）と `cfg` 範囲（`cfg(unix)` 限定／全ターゲット）
+- [ ] dirfd 経路の扱い（B-1／B-2）
+- [ ] facade 公開面の拡張（§7-2 のとおり）
+- [ ] 承認後の実装 issue の起票（§9 の草案を基にする。起票自体もユーザー承認事項）
+- [ ] deps-policy・`docs/license-matrix.md`・`deny.toml` への正式反映を承認後の別 PR で行うこと
+
+### 14.7 承認後の手順との対応
+
+- §8-1 の「HTTP クライアント候補」は §14.5-1 の承認結果の crate・feature・`cfg` を指す。「OS 呼び出しラッパー」は新規依存ではなく、B-1 なら第 10 区分 `libc` の用途拡張、B-2 なら onnx-interop ヘルパーの公開を指す。
+- 依存追加 PR では、(1) §13 の実測を承認時点の解決版で再実測し、(2) 未実施の `cargo deny check advisories` を実施する。
