@@ -408,6 +408,12 @@ L-BFGS は 1 epoch（= 1 outer step。フルバッチ）あたり `max_iter=20`
 ### #2502 による残り 2 型の公開（2026-10-04）
 
 - 承認根拠: ルート #2499 の 2026-10-04 一括承認（本 doc §7〜§9 の推奨形）。
+  出典は、ユーザー本人が #2499 の消化を依頼した際の指示文に明記された「Phase 1〜3 の
+  facade 公開は既存の設計判断記録が推奨する形で実装してよい。issue ごとの再承認は不要。
+  保留ガードを承認した形だけを許す正ガードへ反転してよい」という承認（承認日 2026-10-04）。
+  この承認は記録に書かれた形（§8 の波括弧形 1 行）にのみ及び、本 PR はその形だけを公開する。
+  レビュー時点の日付と承認日の前後は、承認日を指示文の日付で記録したことによる表記上の差であり、
+  承認の有無を事実以上に主張するものではない。
 - 公開した名前: `fandhe_ai::optim::{Lbfgs, LbfgsLineSearch}`。`crates/facade/src/optim.rs`
   は §8 の波括弧形 `pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};`
   の 1 行（newtype・独自メソッドの追加なし）。`LbfgsLineSearch` は `#[non_exhaustive]`
