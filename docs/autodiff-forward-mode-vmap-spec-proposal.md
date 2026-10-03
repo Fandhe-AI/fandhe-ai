@@ -55,7 +55,7 @@
 |---|---|
 | `hessian`／`hvp` | (a) のみ。create_graph の対象 Op の範囲 |
 | `jvp`／`jacfwd`（単独） | (b) の検証が成立すれば対象 Op の範囲。(c) があれば全 Op |
-| `jacfwd(jacrev(f))` | (b)＋(a)。三階相当の微分になり、対象 Op の範囲はさらに狭い。(c) があれば素直に成立 |
+| `jacfwd(jacrev(f))` | (b)＋(a)。二階微分（Hessian 相当）になり、double-VJP 法の対象 Op は二階微分可能な範囲に限られる。(c) があれば素直に成立 |
 | `vmap(grad(f))`（per-sample gradient） | (d-1)＋(a)。ループ版のため速度は出ない |
 | `vmap(jvp)` | (d-1)＋(b) または (c) |
 
@@ -79,7 +79,7 @@
 
 ## §5 spec 改定文案（起票用 draft。未起票）
 
-タイトル案: `REQ-9: 関数型 AD ラッパー・double-VJP による JVP・ループ版 vmap を対象内へ移す（forward-mode 全 Op 規則・バッチ規則型 vmap は対象外のまま）`
+タイトル案: `REQ-9: 関数型 AD ラッパー・ループ版 vmap を対象内へ移し、double-VJP による JVP は検証成立を条件に移す（forward-mode 全 Op 規則・バッチ規則型 vmap は対象外のまま）`
 
 ````markdown
 ## 背景
@@ -88,7 +88,8 @@
 ## 提案
 1. 「引き続き対象外」(1) を次へ改める。
    - 対象外: 全 Op への JVP 規則の追加を要する forward-mode AD（双対数・接ベクトル伝播）、Op ごとのバッチ規則を要する vmap。
-   - 対象内（Tier 2）: reverse-mode テープ＋VJP を土台にした関数型ラッパー（`grad`／`vjp`／`jacrev`／`hessian`／`hvp` 相当）、double-VJP 法による `jvp`／`jacfwd` 相当（対象 Op の範囲・非対象 Op は fail-closed）、ループ＋stack による意味論等価な vmap（性能保証なし）。
+   - 対象内（Tier 2）: reverse-mode テープ＋VJP を土台にした関数型ラッパー（`grad`／`vjp`／`jacrev`／`hessian`／`hvp` 相当）、ループ＋stack による意味論等価な vmap（性能保証なし）。
+   - 条件付き（検証成立が移行条件）: double-VJP 法による `jvp`／`jacfwd` 相当（対象 Op の範囲・非対象 Op は fail-closed）。§3 の実現可能性検証（検証 issue）が成立するまで対象外に留め、成立した時点で Tier 2 へ移す。
 2. 呼称の訂正: 「HVP 用途の内部 JVP〈`Tape::backward_create_graph`〉」を「HVP 用途の reverse-over-reverse 高階微分〈`Tape::backward_create_graph`〉」に改める。
 
 ## 受け入れ基準への影響
