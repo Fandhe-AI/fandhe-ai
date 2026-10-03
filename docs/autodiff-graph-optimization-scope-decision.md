@@ -264,3 +264,18 @@ fused_elementwise.rs`・`fused_elementwise_source.rs`）とも、CPU
   src/context_cache.rs` の融合カーネルキャッシュ実装）。
 - B-2 以降（XLA 相当のクロス演算融合・`Sigmoid` 等 allowlist 拡張）は
   引き続き対象外のまま。
+
+## #2615 追補
+
+基準コミット `7aab882f` 時点の区分 B 状況（5 節本文・既存の追補は書き換えない）。
+
+| 候補 | HEAD 状況 |
+|---|---|
+| B-1 | #2085 で実装済み。opt-in は backend クレート内 `pub` のみで facade 未公開。GB10／M4 Max は未実測 |
+| B-2 | 未着手（`Op::is_lazy_elementwise` は 5 演算のまま） |
+| B-3 | 推論チェーンの forward capture は #2115 で別機構（環境変数 opt-in・既定 OFF・GB10 未実測）として実装済み。学習 step の forward／backward capture は `d_input`／loss の常駐化ゲートが未充足 |
+| B-4 | 未実装（新規 `unsafe` FFI が前提） |
+| B-5 | 未着手（step 全体 capture と同時導入が前提） |
+| B-6 | #1690・#1912 が REJECT の最新記録 |
+
+10 節の承認事項は、#2085 追補の新規 `unsafe` 4 か所を含め、承認を得たかが記録上確認できない。本 doc は取得済みとは記さない。区分 B と「spec 改定が要る汎用 JIT」の分離、spec 改定案（対象外として確定／範囲を限って対象内化）、ユーザー承認依頼は `docs/graph-compile-scope-spec-proposal.md` を正とする（#2615）。
