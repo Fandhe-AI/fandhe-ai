@@ -3,13 +3,10 @@
 //! **facade-only 契約**（`compat_sequential_lbfgs_manual.rs` とは対照的に
 //! `fandhe_ai_autodiff` へ直接依存しない）。
 //!
-//! **承認範囲の制約**: `LbfgsConfig` のみが facade 再エクスポート対象
-//! （`Lbfgs`／`LbfgsLineSearch` は未承認のまま非公開。`crate::optim`
-//! モジュール doc「L-BFGS」節参照）のため、本ファイルは
-//! `LbfgsConfig::line_search` を明示的に指定できず、既定の固定ステップ
-//! （`LbfgsLineSearch::None` 相当）のみで検証する。strong Wolfe line
-//! search を使う検証は `compat_sequential_lbfgs_manual.rs`（内部 import
-//! 契約ファイル）が担う。
+//! **line search**: #2502 で `LbfgsLineSearch` が facade 公開済みのため、
+//! 学習曲線の比較は既定の固定ステップ（`LbfgsLineSearch::None`）で、
+//! strong Wolfe 指定の `compile`/`fit` は縮小データの別テストで検証する。
+//! 内部 import の手動ループ契約は `compat_sequential_lbfgs_manual.rs`。
 //!
 //! **受け入れ条件（親 #2172 コメント「残る受入条件」）**: fit（MNIST
 //! 規模を模した合成回帰）での learning curve が SGD 相当同等以上の
@@ -40,7 +37,7 @@
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential};
-use fandhe_ai::optim::{LbfgsConfig, SgdConfig};
+use fandhe_ai::optim::{LbfgsConfig, LbfgsLineSearch, SgdConfig};
 
 const D_IN: usize = 784;
 const D_HIDDEN: usize = 16;
@@ -189,6 +186,39 @@ fn fit_lbfgs_learning_curve_matches_or_beats_sgd() {
          lbfgs_history={:?} sgd_history={:?}",
         history_lbfgs.loss,
         history_sgd.loss
+    );
+}
+
+/// #2502: facade だけで `LbfgsLineSearch::StrongWolfe` を指定した
+/// `compile`/`fit` が動き、損失が有限で初回より減少すること（縮小データ）。
+#[test]
+fn fit_lbfgs_strong_wolfe_via_facade_decreases_loss() {
+    let (x_data, y_data) = gen_regression_data();
+    let mut model = build_model();
+    model
+        .compile(
+            Optimizer::Lbfgs(LbfgsConfig {
+                lr: 1.0,
+                max_iter: 10,
+                line_search: LbfgsLineSearch::StrongWolfe,
+                ..LbfgsConfig::default()
+            }),
+            Loss::Mse,
+        )
+        .unwrap_or_else(|e| panic!("StrongWolfe の compile に失敗: {e}"));
+    let before = model
+        .evaluate(&x_data, &y_data, N)
+        .unwrap_or_else(|e| panic!("evaluate に失敗: {e}"));
+    let history = model
+        .fit(&x_data, &y_data, FitConfig::new(2, N))
+        .unwrap_or_else(|e| panic!("StrongWolfe の fit に失敗: {e}"));
+    let after = model
+        .evaluate(&x_data, &y_data, N)
+        .unwrap_or_else(|e| panic!("evaluate に失敗: {e}"));
+    assert!(history.loss.iter().all(|l| l.is_finite()));
+    assert!(
+        after.is_finite() && after < before,
+        "strong Wolfe の損失が減少していない: {before} -> {after}"
     );
 }
 

@@ -38,14 +38,9 @@ use crate::optim::{
 };
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
-// イシュー #2172 コメント（2026-09-27 承認）: `Lbfgs`（optimizer 本体）
-// 自体は facade 再エクスポートの承認範囲外（`crate::optim::LbfgsConfig`
-// のみ承認済み。`optim.rs` 冒頭コメント「L-BFGS」節参照）のため、
-// `OptimizerState` 内部実装専用に内部クレートから直接 import する
-// （非 `pub use`。`tests/api_surface.rs::
-// facade_does_not_reexport_or_declare_lbfgs_items` が facade 側の
-// 再エクスポート・独自宣言のみを検査するため、この内部専用 `use` は
-// 検査対象外——`Lbfgs` は本ファイルの外へ一切公開しない）。
+// `Lbfgs` は #2502 で `crate::optim` から公開済み（同一型）。本ファイルの
+// `OptimizerState::Lbfgs` は内部クレートの型を直接 import して保持する
+// （非 `pub use`。再エクスポートは `optim.rs` が担う）。
 use fandhe_ai_autodiff::nn::optim::Lbfgs;
 // イシュー #2372: `save_model`／`load_model` が optimizer 内部状態と GradScaler の
 // 状態を往復させるための内部専用 import（`pub use` にしない。facade 公開面へ
@@ -222,12 +217,10 @@ pub enum Optimizer {
     /// のため、本 variant 固有の追加対応は不要（保留解除時に横断対応
     /// する）。
     ///
-    /// **facade のみで使う場合の制約**: `fandhe_ai_autodiff::nn::optim::
-    /// {Lbfgs, LbfgsLineSearch}` 自体は承認範囲外のため facade 未
-    /// 再エクスポート——`LbfgsConfig::line_search` を明示的に
-    /// `LbfgsLineSearch::StrongWolfe` へ変更できず、既定の固定ステップ
-    /// （`LbfgsLineSearch::None` 相当）のみが選べる（`crate::optim`
-    /// モジュール doc「L-BFGS」節参照）。
+    /// **line search**: `Lbfgs`／`LbfgsLineSearch` は #2502 で facade
+    /// （`crate::optim`）から公開済みのため、`LbfgsConfig::line_search` に
+    /// `LbfgsLineSearch::StrongWolfe` を指定できる（既定は固定ステップの
+    /// `LbfgsLineSearch::None`。`crate::optim` モジュール doc「L-BFGS」節）。
     Lbfgs(LbfgsConfig),
 }
 

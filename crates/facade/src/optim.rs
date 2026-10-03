@@ -267,27 +267,52 @@
 //! `AdamW::step`／`Adam::step` と同一（`&[(&Tensor<f32>, &Tensor<f32>)]`
 //! を受け取り更新後 `Tensor<f32>` の列を返す）。
 //!
-//! # L-BFGS（イシュー #2172 コメント・2026-09-27 所有者承認）
+//! # L-BFGS（イシュー #2172 コメント・#2502）
 //!
-//! [`crate::optim::LbfgsConfig`]（ハイパーパラメータのみ）を
-//! `fandhe_ai_autodiff::nn::optim` から再エクスポートする。
-//! [`crate::compat::Optimizer::Lbfgs`] へそのまま渡し、
-//! [`crate::compat::Sequential::compile`]／[`crate::compat::Sequential::fit`]
-//! が内部で `Lbfgs::try_step_closure` を駆動する（`compat::training`
-//! モジュール doc「L-BFGS（closure 駆動 optimizer）」節参照）。
+//! [`crate::optim::Lbfgs`]（closure 駆動の optimizer 本体）・
+//! [`crate::optim::LbfgsConfig`]（ハイパーパラメータ）・
+//! [`crate::optim::LbfgsLineSearch`]（line search 方式選択）を
+//! `fandhe_ai_autodiff::nn::optim` から素の再エクスポートで公開する
+//! （`LbfgsConfig` は #2198・2026-09-27 承認、残る 2 型は #2502・
+//! ルート #2499 本文「承認範囲」節の一括承認。形は
+//! `docs/autodiff-lbfgs-decision.md` §8）。
 //!
-//! **承認範囲の非対称性**: L-BFGS optimizer 本体
-//! （`fandhe_ai_autodiff::nn::optim::Lbfgs`）と line search 方式選択
-//! （`LbfgsLineSearch`）は本モジュールへ再エクスポートしていない
-//! （承認事項に含まれないため）。この結果、`fandhe_ai` のみに依存する
-//! 利用者は [`crate::compat::Sequential::compile`] 経由でしか L-BFGS を
-//! 使えず、かつ `LbfgsConfig::line_search` を明示的に指定できない
-//! （型を名指しできないため）——既定値 `LbfgsConfig::default()` の
-//! 固定ステップ（`line_search_fn=None` 相当）のみが選べる。
-//! strong Wolfe line search を使う手動 closure ループが必要な場合は
-//! 引き続き `fandhe_ai_autodiff` への直接依存が必要（`crates/facade/tests/
-//! compat_sequential_lbfgs_manual.rs` 参照）。詳細は
-//! `docs/autodiff-lbfgs-decision.md` §9。
+//! - [`crate::compat::Optimizer::Lbfgs`] へ `LbfgsConfig` を渡すと
+//!   [`crate::compat::Sequential::compile`]／[`crate::compat::Sequential::fit`]
+//!   が内部で `Lbfgs::try_step_closure` を駆動する（`compat::training`
+//!   モジュール doc「L-BFGS（closure 駆動 optimizer）」節）。
+//! - `torch.optim.LBFGS.step(closure)` 相当の手動 closure ループは
+//!   `Lbfgs::new` → `step_closure`／`try_step_closure` で書ける。
+//! - strong Wolfe は
+//!   `LbfgsConfig { line_search: LbfgsLineSearch::StrongWolfe, ..Default::default() }`
+//!   で指定できる。
+//! - `Lbfgs` の inherent `state_dict`／`load_state_dict`／`history_len`
+//!   （#2366）も到達可能になる。`OptimizerStateDict` trait の facade 公開は
+//!   本節の対象外（#2555）。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
+//!
+//! let cfg = LbfgsConfig {
+//!     line_search: LbfgsLineSearch::StrongWolfe,
+//!     ..LbfgsConfig::default()
+//! };
+//! let mut opt = Lbfgs::new(cfg).unwrap();
+//! let params = vec![Tensor::new(vec![0.0_f32; 2], &[2]).unwrap()];
+//! // f(x) = Σ (x - 1)^2 を最小化する。
+//! let updated = opt
+//!     .step_closure(&params, |p| {
+//!         let x = p[0].contiguous();
+//!         let x = x.as_slice().unwrap();
+//!         let loss = x.iter().map(|v| (v - 1.0) * (v - 1.0)).sum::<f32>();
+//!         let g = x.iter().map(|v| 2.0 * (v - 1.0)).collect::<Vec<f32>>();
+//!         (loss, vec![Tensor::new(g, &[2]).unwrap()])
+//!     })
+//!     .unwrap();
+//! let x = updated[0].contiguous();
+//! assert!(x.as_slice().unwrap().iter().all(|v| (v - 1.0).abs() < 1e-3));
+//! ```
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
@@ -303,16 +328,12 @@ pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, Linear
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingWarmRestarts, CyclicLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
-// イシュー #2172 コメント（2026-09-27 所有者承認）: L-BFGS の `*Config`
-// 型のみを再エクスポートする（`Lbfgs`〈closure 駆動の optimizer 本体〉・
-// `LbfgsLineSearch`〈line search 方式選択〉は承認範囲外のまま内部クレート
-// 限定を維持する。`crates/facade/src/lib.rs::LbfgsHoldDoctestGuard`・
-// `docs/autodiff-lbfgs-decision.md` §9 参照）。単一識別子のみのため
-// `{...}` 波括弧は rustfmt が剥がすが、本行 1 件のみ波括弧なしの
-// `pub use` 形を許容するよう `tests/api_surface.rs::
-// optim_module_reexports_exactly_expected_surface` の走査を拡張済み。
-pub use fandhe_ai_autodiff::nn::optim::LbfgsConfig;
+// イシュー #2502（親 #2500・ルート #2499 本文「承認範囲」節の一括承認）: L-BFGS
+// の 3 型を `docs/autodiff-lbfgs-decision.md` §8 の波括弧形で公開する
+// （`LbfgsConfig` は #2198 で公開済み。`Lbfgs`〈closure 駆動の本体〉・
+// `LbfgsLineSearch`〈line search 方式選択〉を追加）。
 pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, MultiStepLr, SequentialLr};
+pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
 pub use fandhe_ai_autodiff::nn::optim::{NAdam, NAdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};
 pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
