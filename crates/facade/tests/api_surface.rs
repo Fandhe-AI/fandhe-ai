@@ -10843,6 +10843,50 @@ fn workspace_declares_extremum_ops_fn_names_only_in_allowed_locations() {
 /// が共用する。
 const DETERMINISM_FN_NAMES: [&str; 2] = ["set_deterministic", "is_deterministic"];
 
+/// 承認形の関数本体（トークンを空白連結した形）。引数名 `enabled` も固定する。
+const DETERMINISM_FN_EXPECTED_BODIES: [(&str, &str); 2] = [
+    (
+        "set_deterministic",
+        "fandhe_ai_autodiff : : determinism : : set_deterministic ( enabled ) ;",
+    ),
+    (
+        "is_deterministic",
+        "fandhe_ai_autodiff : : determinism : : is_deterministic ( )",
+    ),
+];
+
+/// トークン列から `pub fn <fn_name>` 宣言の本体（最外 `{ }` の内側）を
+/// 空白連結で返す。宣言が `pub` 付きでちょうど 1 件でなければ `None`。
+fn determinism_fn_body(tokens: &[String], fn_name: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        if token != "fn" || !fn_declaration_target_name_matches(tokens, i, fn_name) {
+            continue;
+        }
+        if found.is_some() || i == 0 || tokens[i - 1] != "pub" {
+            return None;
+        }
+        let open = (i..tokens.len()).find(|&j| tokens[j] == "{")?;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (j, t) in tokens.iter().enumerate().skip(open) {
+            match t.as_str() {
+                "{" => depth += 1,
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        found = Some(tokens[open + 1..close?].join(" "));
+    }
+    found
+}
+
 /// 承認形（イシュー #2507・2026-10-04 承認）の固定: [`DETERMINISM_FN_NAMES`]
 /// の `fn` 宣言が `crates/facade/src/lib.rs` にちょうど 1 件ずつあり、
 /// 他の facade src には無いこと、`fandhe_ai_autodiff::determinism::*` へ
@@ -10884,13 +10928,16 @@ fn facade_declares_determinism_fns_only_as_approved_root_delegations() {
             }
         }
         if is_root {
-            let joined = tokens.join(" ");
-            for fn_name in DETERMINISM_FN_NAMES {
-                let call = format!("fandhe_ai_autodiff : : determinism : : {fn_name} (");
-                if !joined.contains(&call) {
-                    offending.push(format!(
-                        "lib.rs: `{fn_name}` が `fandhe_ai_autodiff::determinism::{fn_name}` へ委譲していない"
-                    ));
+            // 各 `pub fn` の本体全体が、対応する内部関数への委譲 1 文だけで
+            // あることを固定する（呼び出しが lib.rs のどこかにあるだけでは
+            // 別関数へ移したり独自実装へ差し替えても通るため。codex-review
+            // 指摘・PR #2699）。
+            for (fn_name, expected_body) in DETERMINISM_FN_EXPECTED_BODIES {
+                match determinism_fn_body(&tokens, fn_name) {
+                    Some(body) if body == expected_body => {}
+                    other => offending.push(format!(
+                        "lib.rs: `{fn_name}` の本体が `fandhe_ai_autodiff::determinism::{fn_name}` への委譲のみではない（期待 `{expected_body}`・実際 {other:?}）"
+                    )),
                 }
             }
         }
