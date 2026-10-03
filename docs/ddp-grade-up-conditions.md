@@ -86,7 +86,7 @@ fn main() {
 | (a) | cudarc `nccl` feature が `dynamic-loading` 下で link-time の `libnccl` を要求しない（CI `build-no-cuda-toolkit` 不変条件と両立）こと | **達成済み**（本イシュー実測。§2.2〜§2.3） |
 | (b) | デバイス列挙 API（`Device::available()` 相当）が facade 公開面に存在すること | **達成済み**（#1614 `fandhe_ai::available_devices()`〈#2074 時点 `crates/facade/src/lib.rs:602`、#2612 時点の現行は `crates/facade/src/lib.rs:772`〉。#1628 doc §6 前提 2「`Device::available()` 未実装」は陳腐化しており本 doc で訂正する） |
 | (c) | ネットワーク層方式（#1628 §4 案 A〜D）の確定と、それに伴う cudarc 許容 feature 列挙拡張（`.claude/rules/deps-policy.md`）・新規区分の要否について個別ユーザー承認があること。NCCL 採用時は `is_culib_present()` probe → 型付き `CudaError` variant（`crates/backend-cuda/src/device.rs:287-293` と同型）で panic 経路（`culib()` の `panic_no_lib_found`）を閉じる設計が確認されていること | 未達（承認事項） |
-| (d) | 実機側の分母: 複数 CUDA ordinal を持つ実機（または 2 ノード構成）が確保され、インストール済み NCCL 版数が cudarc ピン（`nccl-02030` = NCCL 2.30 系）と整合することがプローブ記録されていること。GB10 は現状 `nvidia-smi -L` 1 行のみの記録（`docs/perf/gemm-peak-memory-measurement.md:66`）で複数 ordinal の記録がないため、単一ノード内複数 GPU という初期スコープ自体の実現可能性を実機で確認する必要がある | 未達（実機未検証。GB10 の NCCL 版数・ordinal 数のプローブは未実施で、数値の記録はない。申し送りは `docs/perf/logs/ddp-nccl-link-contract-2074/README.md` 参照） |
+| (d) | 実機側の分母: 単一ノード内に複数 CUDA ordinal を持つ実機が確保され（複数ノード構成は §3a の初期スコープ外のため本条件では満たさない。複数ノードは将来の別段階として別途条件を定める）、インストール済み NCCL 版数が cudarc ピン（`nccl-02030` = NCCL 2.30 系）と整合することがプローブ記録されていること。GB10 は現状 `nvidia-smi -L` 1 行のみの記録（`docs/perf/gemm-peak-memory-measurement.md:66`）で複数 ordinal の記録がないため、単一ノード内複数 GPU という初期スコープ自体の実現可能性を実機で確認する必要がある | 未達（実機未検証。GB10 の NCCL 版数・ordinal 数のプローブは未実施で、数値の記録はない。申し送りは `docs/perf/logs/ddp-nccl-link-contract-2074/README.md` 参照） |
 | (e) | 依存追加なし（新規クレートなし・許容依存区分内）で成立し、REQ-2 統一複合判定・tolerance・baseline を一切変更せずに all-reduce 後の勾配（平均化の縮約順序）の数値一致検証が成立する設計が確認されていること | 未達 |
 
 **Could→Should 案（量子化表の f・g と同型の 2 段目。文案に含める）**:
@@ -130,8 +130,8 @@ docs(requirements): 除外事項「分散学習・量子化の網羅対応」に
 再開の道筋自体が未定義である。実装リポ側の設計記録（`docs/facade-multi-gpu-ddp-decision.md`
 〈#1628〉・`docs/ddp-grade-up-conditions.md`〈#2074〉）でこの非対称を確認し、量子化と
 同形式の格上げ条件表を提案する。実装リポは `fandhe-ai =0.10.0` を crates.io へ出荷済みで
-公開 API の非破壊が契約になっている。比較スコアボード上では PyTorch／TensorFlow 側に
-DDP／FSDP があり、fandhe-ai 側との差分が残っている（FSDP は spec に記述がなく、本提案の
+公開 API の非破壊が契約になっている。比較スコアボード上では PyTorch 列に「DDP/FSDP」、TensorFlow 列に
+「分散戦略」が載っており、fandhe-ai 側との差分が残っている（FSDP は spec に記述がなく、本提案の
 対象外とする）。
 
 ## 提案: DDP 格上げ条件表の追加
@@ -142,7 +142,7 @@ DDP／FSDP があり、fandhe-ai 側との差分が残っている（FSDP は sp
 | 現状 | 格上げ先 | 格上げ条件（すべて満たすこと） |
 |------|---------|------------------------------|
 | 対象 | DDP（パラメータ複製＋勾配 all-reduce のデータ並列）に限る | FSDP／ZeRO・tensor／pipeline／model parallel は対象外で、本項目の Won't（条件整理なし）に残す |
-| Won't | Could | (a) cudarc `nccl` feature が `dynamic-loading` 下で link-time の `libnccl` を要求しないこと（実装リポで実証済み・実装リポ Fandhe-AI/fandhe-ai#2074）。(b) デバイス列挙 API（`Device::available()` 相当）が facade 公開面に存在すること（実装リポで実装済み・Fandhe-AI/fandhe-ai#1614）。(c) ネットワーク層方式の確定と、それに伴う依存追加（cudarc `nccl` feature の許容依存列挙への追加を含む）についての個別ユーザー承認があること（未達）。なお許容依存は現行 10 区分（本体直接依存は第 1〜8・第 10 区分）で、ネットワーク／分散通信の区分はない。本提案は既存の CUDA 区分の feature 列挙拡張に限り、新規区分は追加しない。(d) 実機側の分母（複数 CUDA ordinal を持つ実機または複数ノード構成）が確保され、NCCL 版数の整合がプローブ記録されていること（未達・実機未検証）。(e) 依存追加なし（新規クレートなし）で REQ-2 統一複合判定・tolerance・baseline を変更せずに all-reduce 後の勾配の数値一致検証が成立する設計が確認されていること（未達）。 |
+| Won't | Could | (a) cudarc `nccl` feature が `dynamic-loading` 下で link-time の `libnccl` を要求しないこと（実装リポで実証済み・実装リポ Fandhe-AI/fandhe-ai#2074）。(b) デバイス列挙 API（`Device::available()` 相当）が facade 公開面に存在すること（実装リポで実装済み・Fandhe-AI/fandhe-ai#1614）。(c) ネットワーク層方式の確定と、それに伴う依存追加（cudarc `nccl` feature の許容依存列挙への追加を含む）についての個別ユーザー承認があること（未達）。なお許容依存は現行 10 区分（本体直接依存は第 1〜8・第 10 区分）で、ネットワーク／分散通信の区分はない。本提案は既存の CUDA 区分の feature 列挙拡張に限り、新規区分は追加しない。(d) 実機側の分母（単一ノード内に複数 CUDA ordinal を持つ実機。複数ノード構成は初期スコープ外）が確保され、NCCL 版数の整合がプローブ記録されていること（未達・実機未検証）。(e) 依存追加なし（新規クレートなし）で REQ-2 統一複合判定・tolerance・baseline を変更せずに all-reduce 後の勾配の数値一致検証が成立する設計が確認されていること（未達）。 |
 | Could | Should | Could の条件に加え、(f) 実測でのスケーリング効率の確認、(g) REQ-12 との整合を保った facade 公開面の非破壊拡張の確認（いずれも未達）。 |
 
 **承認時に固定する契約**（格上げ後に新 REQ を起票する際も引き継ぐ前提。先取りの設計確定
