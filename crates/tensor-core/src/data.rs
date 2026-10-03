@@ -1024,7 +1024,7 @@ pub const PREFETCH_MAX_DEPTH: usize = 64;
 /// Element`] が要求する `half` のみであり、rayon を追加すると
 /// `.claude/rules/deps-policy.md` の許容依存区分への新規追加になる
 /// （ユーザー承認が必要な変更であり本イシューのスコープ外。
-/// `docs/tensor-core-data-prefetch-decision.md` §2.1 に承認事項として
+/// `docs/tensor-core-data-prefetch-decision.md` §1.1・§8 に承認事項として
 /// 記録する）。加えて `backend-cpu` の GEMM 等は rayon のグローバル
 /// pool を使うため、loader の worker を同じ pool に載せると学習ステップの
 /// カーネルと prefetch 用の worker が競合する。専用の OS スレッド
@@ -1121,7 +1121,7 @@ impl PrefetchConfig {
 /// transform／collate フック（[`HookedDataLoader`] 相当）の並列化は
 /// 対象外（worker 上の transform がグローバル RNG を使うと消費順が
 /// スケジューリングに依存し決定性契約を破るため。
-/// `docs/tensor-core-data-prefetch-decision.md` §2.2）。
+/// `docs/tensor-core-data-prefetch-decision.md` §1.2・§6）。
 ///
 /// # ライフサイクル
 ///

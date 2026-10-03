@@ -10,6 +10,12 @@
 //! `RandomSampler`・`WeightedRandomSampler`・`SamplerDataLoader`・
 //! `SamplerBatches`・`HookedDataLoader`・`HookedBatches`・`TransformFn`・
 //! `CollateFn`・`default_collate`）をそのまま再エクスポートする
+//! さらにイシュー #2183 のマルチワーカー prefetch 3 名（`PrefetchConfig`・
+//! `PrefetchDataLoader`・`PrefetchBatches`）も #2506（ルート #2499 の承認。
+//! 公開形は `docs/tensor-core-data-prefetch-decision.md` §4・§8）で公開した。
+//! prefetch は `std::thread`／`mpsc` ベースで rayon は使わず、
+//! `Sequential::fit` へは結線しない。
+//! これらをそのまま再エクスポートする
 //! **純再エクスポートモジュール**（`crate::optim` と同型。facade 独自の
 //! 型・関数は持ち込まず、既存 `DataLoader` への統合もしない）。
 //!
@@ -64,9 +70,32 @@
 //! assert_eq!(seen, vec![0.0, 10.0, 20.0, 30.0]);
 //! ```
 
+//! # マルチワーカー prefetch の利用例
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::data::{PrefetchConfig, PrefetchDataLoader, SequentialSampler, TensorDataset};
+//!
+//! let features = Tensor::new(vec![0.0f32, 1.0, 2.0, 3.0], &[4, 1]).unwrap();
+//! let dataset = TensorDataset::new(features).unwrap();
+//! let sampler = SequentialSampler::new(4, 2, false).unwrap();
+//! let cfg = PrefetchConfig::new(2, 2).unwrap();
+//! let mut loader = PrefetchDataLoader::new(dataset, sampler, cfg).unwrap();
+//! let mut seen = Vec::new();
+//! let mut batches = 0;
+//! for batch in loader.iter() {
+//!     let b = batch.unwrap();
+//!     seen.extend(b.host_slice().iter().copied());
+//!     batches += 1;
+//! }
+//! assert_eq!(batches, 2);
+//! assert_eq!(seen, vec![0.0, 1.0, 2.0, 3.0]);
+//! ```
+
 pub use fandhe_ai_tensor_core::data::{Batches, DataError, DataLoader};
 pub use fandhe_ai_tensor_core::data::{CollateFn, TransformFn, default_collate};
 pub use fandhe_ai_tensor_core::data::{DataLoaderConfig, Dataset, TensorDataset};
 pub use fandhe_ai_tensor_core::data::{HookedBatches, HookedDataLoader};
+pub use fandhe_ai_tensor_core::data::{PrefetchBatches, PrefetchConfig, PrefetchDataLoader};
 pub use fandhe_ai_tensor_core::data::{RandomSampler, Sampler, SequentialSampler};
 pub use fandhe_ai_tensor_core::data::{SamplerBatches, SamplerDataLoader, WeightedRandomSampler};

@@ -3071,6 +3071,9 @@ fn data_module_reexports_exactly_expected_surface() {
         "Dataset",
         "HookedBatches",
         "HookedDataLoader",
+        "PrefetchBatches",
+        "PrefetchConfig",
+        "PrefetchDataLoader",
         "RandomSampler",
         "Sampler",
         "SamplerBatches",
@@ -3192,6 +3195,28 @@ fn data_types_are_reachable_via_facade_only() {
     let stacked = fandhe_ai::data::default_collate(&samples)
         .unwrap_or_else(|e| panic!("test fixture: default_collate が失敗: {e}"));
     assert_eq!(stacked.shape(), &[2, 3]);
+
+    // マルチワーカー prefetch（#2506。決定記録 §4・§8）も facade のみで到達可能。
+    // 逐次経路（num_workers=0）と並列経路（num_workers>=1）の双方を固定する。
+    for workers in [0usize, 2] {
+        let cfg = fandhe_ai::data::PrefetchConfig::new(workers, 2)
+            .unwrap_or_else(|e| panic!("test fixture: PrefetchConfig::new が失敗: {e}"));
+        assert_eq!(cfg.num_workers(), workers);
+        assert_eq!(cfg.prefetch_depth(), 2);
+        let ds = fandhe_ai::data::TensorDataset::new(
+            fandhe_ai::Tensor::<f32>::new(vec![0.0, 1.0, 2.0, 3.0], &[4, 1])
+                .unwrap_or_else(|e| panic!("test fixture: features の構築に失敗: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new が失敗: {e}"));
+        let sampler = fandhe_ai::data::SequentialSampler::new(4, 2, false)
+            .unwrap_or_else(|e| panic!("test fixture: SequentialSampler::new が失敗: {e}"));
+        let mut pl = fandhe_ai::data::PrefetchDataLoader::new(ds, sampler, cfg)
+            .unwrap_or_else(|e| panic!("test fixture: PrefetchDataLoader::new が失敗: {e}"));
+        assert_eq!(pl.num_batches(), Some(2));
+        assert_eq!(pl.config().num_workers(), workers);
+        let pb: fandhe_ai::data::PrefetchBatches<'_, _> = pl.iter();
+        assert_eq!(pb.count(), 2);
+    }
 }
 
 // =====================================================================
@@ -3534,22 +3559,24 @@ fn workspace_declares_data_hooks_names_only_in_tensor_core_data() {
     );
 }
 
-/// マルチワーカー prefetch（イシュー #2183）の新規公開型 3 個。facade
-/// 公開は承認待ち（`docs/tensor-core-data-prefetch-decision.md` §2.4）
-/// のため、[`DATA_HOOKS_TYPE_NAMES`] と同じ多層防御方式で内部クレート
-/// 限定を固定する。fn 名は追加していない
-/// （`PrefetchConfig::new`／`num_workers`／`prefetch_depth`、
-/// `PrefetchDataLoader::new`／`dataset`／`config`／`num_batches`／
-/// `iter` はいずれも [`DATA_HOOKS_FN_NAMES`] 等の既存名と衝突しない
-/// ため、fn 名インベントリの対象外）。
+/// マルチワーカー prefetch（イシュー #2183）の公開型 3 個。#2183 では
+/// facade 公開を保留して否定ガードで固定していたが、#2506（ルート #2499
+/// の承認。Issue 記載の承認日 2026-10-04。公開形は
+/// `docs/tensor-core-data-prefetch-decision.md` §4・§8）で承認形
+/// （`src/data.rs` の `pub use fandhe_ai_tensor_core::data::…`・別名なし）
+/// の正ガードへ反転した。fn 名インベントリは持たない（`new`／`iter`／
+/// `config` 等の汎用名は検出力がないため。決定記録 §4・§5）。
 const PREFETCH_TYPE_NAMES: [&str; 3] = ["PrefetchConfig", "PrefetchDataLoader", "PrefetchBatches"];
 
-/// [`facade_does_not_reexport_or_declare_prefetch`]・その自己テストが
-/// 共用する検出本体（[`scan_data_hooks_reexports_and_declarations`] と
-/// 同型。fn 名インベントリを持たない点のみ異なる）。
-fn scan_prefetch_reexports_and_declarations(content: &str) -> Vec<String> {
+/// [`facade_reexports_prefetch_items_only_in_approved_shape`]・その
+/// 自己テストが共用する検出本体（[`scan_data_hooks_reexports_and_
+/// declarations`] と同型。fn 名インベントリを持たない点のみ異なる）。
+/// 承認形の出現葉を第 1 要素、承認形外の再エクスポート（別 path 接頭辞・
+/// 別名）と独自宣言を第 2 要素（違反）として返す。
+fn scan_prefetch_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<String>) {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
+    let mut approved: Vec<String> = Vec::new();
     let mut offending: Vec<String> = Vec::new();
 
     let mut i = 0usize;
@@ -3560,10 +3587,17 @@ fn scan_prefetch_reexports_and_declarations(content: &str) -> Vec<String> {
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if PREFETCH_TYPE_NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
+            let hits: Vec<String> = collect_pub_use_leaves(path_tokens)
+                .into_iter()
+                .filter(|leaf| PREFETCH_TYPE_NAMES.contains(&leaf.as_str()))
+                .collect();
+            let shape_ok =
+                data_hooks_approved_prefix(path_tokens) && !path_tokens.iter().any(|t| t == "as");
+            for leaf in hits {
+                if shape_ok {
+                    approved.push(leaf);
+                } else {
+                    offending.push(format!("承認形外の pub use leaf={leaf}"));
                 }
             }
             i = (end + 1).min(tokens.len());
@@ -3577,30 +3611,88 @@ fn scan_prefetch_reexports_and_declarations(content: &str) -> Vec<String> {
         }
         i += 1;
     }
-    offending
+    (approved, offending)
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、[`PREFETCH_TYPE_NAMES`]
-/// （3 個）を識別子単位で含む `pub use`（複数行・ネストした group・
-/// 別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type` 宣言も
-/// 存在しないことを固定する（`facade_does_not_reexport_or_declare_data_
-/// hooks` と同型の最内層ソース走査ガード）。
+/// 承認形の正ガード（#2506 で `facade_does_not_reexport_or_declare_
+/// prefetch` から反転）。facade src 全体で、3 識別子がそれぞれ
+/// `src/data.rs` の `pub use fandhe_ai_tensor_core::data::…`（別名なし）
+/// としてちょうど 1 回だけ出現し、承認形外の再エクスポート・同名の独自
+/// 宣言が存在しないことを fail-closed に固定する。
 #[test]
-fn facade_does_not_reexport_or_declare_prefetch() {
+fn facade_reexports_prefetch_items_only_in_approved_shape() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_data_rs: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_prefetch_reexports_and_declarations(content) {
+        let (approved, bad) = scan_prefetch_reexports_and_declarations(content);
+        for offense in bad {
             offending.push(format!("{}: {offense}", path.display()));
         }
+        if path.ends_with("src/data.rs") {
+            approved_in_data_rs.extend(approved);
+        } else {
+            for leaf in approved {
+                offending.push(format!(
+                    "{}: data.rs 以外での pub use leaf={leaf}",
+                    path.display()
+                ));
+            }
+        }
     });
+    approved_in_data_rs.sort();
+    let mut expected: Vec<String> = PREFETCH_TYPE_NAMES.iter().map(|s| s.to_string()).collect();
+    expected.sort();
     assert!(
         offending.is_empty(),
-        "facade の公開面が DataLoader マルチワーカー prefetch（#2183 の\
-         PrefetchConfig・PrefetchDataLoader・PrefetchBatches。内部クレート\
-         限定の新規公開面。facade 公開は承認待ちのため対象外という設計\
-         判断に違反）を再エクスポートまたは独自宣言している: {offending:?}"
+        "facade の公開面が DataLoader マルチワーカー prefetch（#2506。\
+         PrefetchConfig・PrefetchDataLoader・PrefetchBatches）を承認形（src/data.rs の \
+         `pub use fandhe_ai_tensor_core::data::…`・別名なし）以外で再エクスポートまたは\
+         独自宣言している（`docs/tensor-core-data-prefetch-decision.md` §4・§8）: \
+         {offending:?}"
     );
+    assert_eq!(
+        approved_in_data_rs, expected,
+        "src/data.rs に承認形の 3 識別子がちょうど 1 回ずつ存在しない\
+         （過不足・重複いずれも fail。検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_prefetch_reexports_and_declarations`] の自己テスト
+/// （正例・負例の合成入力）。
+#[test]
+fn facade_reexports_prefetch_items_only_in_approved_shape_detects_each_category() {
+    let scan = scan_prefetch_reexports_and_declarations;
+    let (ok, bad) = scan(
+        "pub use fandhe_ai_tensor_core::data::{PrefetchBatches, PrefetchConfig, PrefetchDataLoader};",
+    );
+    assert!(bad.is_empty());
+    assert_eq!(
+        ok,
+        vec!["PrefetchBatches", "PrefetchConfig", "PrefetchDataLoader"]
+    );
+    let (ok, bad) = scan("pub use fandhe_ai_tensor_core::data::PrefetchConfig;");
+    assert!(bad.is_empty());
+    assert_eq!(ok, vec!["PrefetchConfig"]);
+    // 違反: 別名・別 path 接頭辞・独自宣言。
+    for src in [
+        "pub use fandhe_ai_tensor_core::data::PrefetchConfig as Foo;",
+        "pub use fandhe_ai_tensor_core::PrefetchConfig;",
+        "pub struct PrefetchBatches;",
+        "type PrefetchConfig = u8;",
+    ] {
+        assert!(!scan(src).1.is_empty(), "src={src:?}");
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use ...::PrefetchConfig;",
+        "let s = \"PrefetchDataLoader\";",
+        "use fandhe_ai_tensor_core::data::PrefetchBatches;",
+        "pub use fandhe_ai_tensor_core::data::Dataset;",
+    ] {
+        let (ok, bad) = scan(src);
+        assert!(ok.is_empty() && bad.is_empty(), "src={src:?}");
+    }
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`PREFETCH_TYPE_
@@ -3608,7 +3700,7 @@ fn facade_does_not_reexport_or_declare_prefetch() {
 /// （`workspace_declares_data_hooks_names_only_in_tensor_core_data` と
 /// 同型のインベントリ）。
 ///
-/// **期待集合**（着手前確認のグレップで型名の衝突は 0 件だった。
+/// **期待集合**（再エクスポートは宣言ではないため #2506 の反転後も不変。着手前確認のグレップで型名の衝突は 0 件だった。
 /// 実装後の実測ですべて `crates/tensor-core/src/data.rs` 1 箇所ずつに
 /// 定義された）。
 #[test]

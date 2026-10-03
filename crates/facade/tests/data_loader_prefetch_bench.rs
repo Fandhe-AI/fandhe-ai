@@ -26,11 +26,11 @@ use bench_harness::median_q1_q3;
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::data::TensorDataset;
-use fandhe_ai::optim::{Sgd, SgdConfig};
-use fandhe_ai_tensor_core::data::{
-    Dataset, PrefetchConfig, PrefetchDataLoader, RandomSampler, SequentialSampler,
+use fandhe_ai::data::{
+    DataError, Dataset, PrefetchConfig, PrefetchDataLoader, RandomSampler, SequentialSampler,
+    TensorDataset,
 };
+use fandhe_ai::optim::{Sgd, SgdConfig};
 
 /// 5 回計測中央値方針（`.claude/rules/coding-rust.md`）。
 const TRIALS: usize = 5;
@@ -61,14 +61,11 @@ impl Dataset for HeavyDataset {
         self.inner.len()
     }
 
-    fn validate(&self) -> Result<(), fandhe_ai_tensor_core::data::DataError> {
+    fn validate(&self) -> Result<(), DataError> {
         self.inner.validate()
     }
 
-    fn batch(
-        &self,
-        indices: &[usize],
-    ) -> Result<Self::Batch, fandhe_ai_tensor_core::data::DataError> {
+    fn batch(&self, indices: &[usize]) -> Result<Self::Batch, DataError> {
         let mut acc: u64 = indices.len() as u64;
         for i in 0..self.cost_iters {
             acc = acc.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(i);
@@ -204,8 +201,8 @@ fn w2_build_model() -> Sequential {
 
 /// `num_workers` に応じて逐次経路（`0`）または prefetch 経路（`>=1`）で
 /// `W2_EPOCHS` epoch 分の学習を回し、`(所要秒, 最終パラメータの
-/// checksum)` を返す。`Sequential::fit` は経由しない（facade 保留方針。
-/// `docs/tensor-core-data-prefetch-decision.md` §2.4）。
+/// checksum)` を返す。`Sequential::fit` は経由しない（結線は #2603 の担当。
+/// `docs/tensor-core-data-prefetch-decision.md` §4）。
 ///
 /// 特徴量・ラベルの 2 つの `TensorDataset` はタプル `(ds_x, ds_y)` の
 /// まま `PrefetchDataLoader` へ渡す（`Dataset for (A, B)` の

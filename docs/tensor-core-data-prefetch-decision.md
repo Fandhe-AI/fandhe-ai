@@ -8,7 +8,7 @@
 
 - **内部クレート側（`tensor-core::data`）は実装済み**（本 PR）。`PrefetchConfig`（`num_workers`／`prefetch_depth` の検証付き設定）・`PrefetchDataLoader<D>`（`Sampler` の添字を worker スレッドへ分配して並列に `Dataset::batch` を実行し、結果を呼び出し順に並べ直す）・`PrefetchBatches<D>`（そのイテレータ）。
 - **rayon ではなく `std::thread`／`std::sync::mpsc` を使う**（§1.1。イシュータイトルは「rayon」と書いているが、本 PR の契約〈`Cargo.toml`／`Cargo.lock` 変更なし・依存追加は承認事項〉と両立しないため意図的に差し替えた。rayon への切り替え自体は §8 の承認事項として記録する）。
-- **facade 公開（`docs/compat-api-scope.md` §5 経路 2 相当）・`Sequential::fit` への結線はいずれも未承認のまま保留**。#2183・親 #2131 のいずれにも承認コメントは見当たらない（着手時点確認）。よって `crates/facade/src/**` は変更せず、`PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` は一切公開しない（兄弟イシュー #2182〈`docs/tensor-core-data-sampler-hooks-decision.md`〉と同型の保留パターン。ただし本イシューは新規の保留 doctest 足場を追加していない——理由は §5 参照）。既存の facade 公開面は不変。
+- **（#2506 で facade 公開済み。§4・§8 参照。以下は #2183 時点の記録）** **facade 公開（`docs/compat-api-scope.md` §5 経路 2 相当）・`Sequential::fit` への結線はいずれも未承認のまま保留**。#2183・親 #2131 のいずれにも承認コメントは見当たらない（着手時点確認）。よって `crates/facade/src/**` は変更せず、`PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` は一切公開しない（兄弟イシュー #2182〈`docs/tensor-core-data-sampler-hooks-decision.md`〉と同型の保留パターン。ただし本イシューは新規の保留 doctest 足場を追加していない——理由は §5 参照）。既存の facade 公開面は不変。
 - **本 PR のマージで #2183 は COMPLETED とする**（前例と同じ「保留記録を残した PR のマージで issue をクローズし、承認が得られたら新規 issue か reopen で経路 2 を実施する」方針）。
 
 ## 1. 依存・並行処理方式の設計判断
@@ -58,6 +58,13 @@
   - **#2182 との差分（意図的）**: #2182 は `DataHooksHoldDoctestGuard`（正のプローブ doctest。facade の全 `pub mod` を glob import した状態で新規メソッドを未修飾呼び出しし、コンパイルが通れば「まだ公開されていない」ことを確認する形）を追加したが、本イシューは追加していない。理由: プローブ doctest は「将来 facade が同名のメソッド・関数を実装して迂回する」ことを検出する多層防御だが、`PrefetchConfig::new`／`num_workers`／`prefetch_depth`、`PrefetchDataLoader::new`／`dataset`／`config`／`num_batches`／`iter` はいずれも既存の facade 公開型（`DataLoaderConfig`／`DataLoader` 等）が持たない新規メソッド名ではなく、他の多数の型が同名メソッドを持ちうる汎用的な名前（`new`／`config`／`iter` 等）であるため、glob import プローブで「facade のどの型がこの名前を実装してもコンパイルが通らなくなる」形の固定は作れない（`DATA_HOOKS_FN_NAMES` が `with_transform` 等の非汎用名だったのとは異なる）。ソース走査ガード（型名 3 個の `pub use`／独自宣言の不在固定）のみで多層防御としては十分と判断した。
 - `Sequential::fit`（`crates/facade/src/compat/training.rs::run_fit`）への結線もしない。`FitConfig` に `num_workers` を足すことは facade 公開面の拡張であり、承認事項として記録するだけにする（§8）。
 
+### #2506 実装記録（facade 公開。親 #2500・ルート #2499）
+
+- `PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` の 3 名を `crates/facade/src/data.rs` に `pub use fandhe_ai_tensor_core::data::{…};` 1 行で素の再エクスポートした（別名・facade 独自の型／関数なし。純再エクスポートの契約は不変）。`PREFETCH_MAX_WORKERS`／`PREFETCH_MAX_DEPTH` は承認範囲外のため公開しない。`Sequential::fit` への結線（#2603）・rayon 化は含まない。
+- ガード反転: 否定ガード `facade_does_not_reexport_or_declare_prefetch` を承認形のみを許す正ガード `facade_reexports_prefetch_items_only_in_approved_shape` へ反転し、自己テスト `…_detects_each_category` を追加した。インベントリ `workspace_declares_prefetch_names_only_in_tensor_core_data` は再エクスポートが宣言でないため維持。`data_module_reexports_exactly_expected_surface` の期待集合は 17 名から 20 名へ更新した。
+- `data_types_are_reachable_via_facade_only` を拡張（`num_workers` が 0／2 の双方）し、`crates/facade/src/data.rs` に利用例 doctest を追加した。統合テスト `data_loader_prefetch.rs`・`#[ignore]` ベンチ `data_loader_prefetch_bench.rs` は `fandhe_ai::data` 経由の import へ切り替えた。
+- CUDA／Metal 実機 parity は対象外（ホスト側で完結し `Op`／`BackendOps`／VJP を経由しないため。#2505 と同じ扱い）。承認日は Issue #2506 記載のとおり。
+
 ## 5. 保留 doctest 足場を追加しない理由
 
 上記§4 の説明のとおり、`PrefetchHoldDoctestGuard` のような正のプローブ doctest は本イシューの新規公開名（汎用的なメソッド名）に対しては検出力を持たないため追加していない。ソース走査ガード（`facade_does_not_reexport_or_declare_prefetch`）とインベントリ（`workspace_declares_prefetch_names_only_in_tensor_core_data`）の 2 層で「facade 未公開」状態を機械固定する。
@@ -68,7 +75,7 @@
 - persistent workers（epoch をまたぐ worker スレッドの再利用）・`pin_memory`。
 - GPU DMA prefetch・デバイス常駐データセット（GPU 上でのバッチ切り出し）。
 - iterable-style dataset。
-- facade 公開・`Sequential::fit` への結線（§4・§8）。
+- `Sequential::fit` への結線（§4・§8。facade 公開は #2506 で実施済み）。
 
 ## 7. セキュリティ考慮（OWASP Top 10）
 
@@ -80,7 +87,7 @@
 ## 8. 承認事項（本 PR では実施しない）
 
 - `rayon.workspace = true` を `fandhe-ai-tensor-core` の依存へ追加し、worker pool を rayon へ移すこと（manifest の変更。イシュータイトルが挙げる方式だが依存管理規約上の承認事項）。
-- facade（`fandhe_ai::data`）への `PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` の再エクスポート（`docs/compat-api-scope.md` §5 経路 2）。
+- facade（`fandhe_ai::data`）への `PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` の再エクスポート（`docs/compat-api-scope.md` §5 経路 2）。→ **#2506 で実施済み**（§4）。
 - `Sequential::fit` への結線（`FitConfig` に `num_workers`／`prefetch_depth` を追加。facade 公開面の拡張）。
 
 ## 9. 実装記録
@@ -89,7 +96,7 @@
 - `crates/facade/tests/api_surface.rs`: `facade_does_not_reexport_or_declare_prefetch`・`workspace_declares_prefetch_names_only_in_tensor_core_data` を追加。
 - `crates/facade/tests/data_loader_prefetch.rs`（新規）: `fandhe_ai_tensor_core::data` を直接 import する統合テスト（bit 完全一致確認・ミニバッチ学習ループでの loss 減少・最終パラメータ bit 完全一致）。
 - `crates/facade/tests/data_loader_prefetch_bench.rs`（新規・`#[ignore]`）: 性能 A/B（W1: 取得ボトルネック構成、W2: fit 相当の大型データセット学習）。5 run 中央値・checksum hard assert・比率 record_only。実測は `docs/perf/logs/data-loader-prefetch-2183/README.md`。
-- facade 新規公開面: なし（既存 6 型のまま不変）。新規 `Op`／`BackendOps`／VJP なし。
+- facade 新規公開面: なし（既存 6 型のまま不変。#2506 で 3 名を公開。§4 参照）。新規 `Op`／`BackendOps`／VJP なし。
 
 ## 10. レビュー是正（PR #2315・codex-review P1 2 件）
 
