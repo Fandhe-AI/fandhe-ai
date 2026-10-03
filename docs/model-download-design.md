@@ -29,14 +29,14 @@
 
 ## 3. HTTP クライアント候補の比較
 
-**ライセンスは推移的依存を含め実測が前提**（`docs/license-matrix.md` §1「feature 除外による回避を推定で記述しない」・旧 issue #2 の教訓）。本 PR は依存を一切追加しないため `cargo tree` 実測は実施していない（実測手順は §8 の承認後手順 1 で行う）。以下は候補の一次情報（公開されているライセンスメタデータ・アーキテクチャ）に基づく整理であり、推移的依存の allow 集合適合は**未実測**として扱う。
+**ライセンスは推移的依存を含め実測が前提**（`docs/license-matrix.md` §1「feature 除外による回避を推定で記述しない」・旧 issue #2 の教訓）。本 PR（#2088）は依存を一切追加しないため `cargo tree` 実測は実施していなかった。以下は候補の一次情報に基づく当時の整理であり、**2026-10-03 の #2620 で候補 4 種を feature 組合せ×ターゲット別に実測し、結果を §13 に記録した**（表の「直接依存ライセンス」の 2 行〈`minreq`・`attohttpc`〉は実測で誤りと判明したため是正済み。推奨候補の選定と区分起案は #2621 の担当で、本節は書き換えない）。
 
 | 候補 | 同期／非同期 | TLS 選択肢 | 直接依存ライセンス | 推移的依存の allow 集合適合 | 備考 |
 |---|---|---|---|---|---|
-| `ureq` | 同期 | `rustls` feature | MIT OR Apache-2.0 | 未実測 | 小規模・依存ツリーが薄いとされる |
-| `minreq` | 同期 | `https-rustls` feature | Apache-2.0 | 未実測 | 最小構成志向 |
-| `attohttpc` | 同期 | `tls-rustls` feature | MIT OR Apache-2.0 | 未実測 | 同期専用設計 |
-| `reqwest` | 非同期既定（`blocking` feature でも `tokio` 内包） | `rustls-tls`／`native-tls` | MIT OR Apache-2.0 | 未実測 | `tokio`／`hyper` ツリーを引き込むため依存ツリー肥大の懸念 |
+| `ureq` | 同期 | `rustls`／`platform-verifier`／`native-tls` feature | MIT OR Apache-2.0 | 実測済み（§13。全 rustls 系組合せが現行 allow 外を含む） | 小規模・依存ツリーが薄いとされる |
+| `minreq` | 同期 | `https`（= `https-rustls`）・`https-rustls-probe`・`https-native-tls`・`https-openssl` feature | ISC（2026-10-03 #2620 実測で是正。旧記載 Apache-2.0 は誤り） | 実測済み（§13。rustls 系は allow 外を含み、native-tls／openssl 系のみ allow 適合） | 最小構成志向 |
+| `attohttpc` | 同期 | `tls-native`（既定）・`tls-rustls-webpki-roots` 等 | **MPL-2.0**（2026-10-03 #2620 実測で是正。旧記載 MIT OR Apache-2.0 は誤り） | 実測済み（§13。直接ライセンスが allow 外のため feature によらず不適合） | 同期専用設計 |
+| `reqwest` | 非同期既定（`blocking` feature でも `tokio` 内包） | `rustls`（既定）／`native-tls` | MIT OR Apache-2.0 | 実測済み（§13。推移依存 90〜108 個で最大。allow 外を含む） | `tokio`／`hyper` ツリーを引き込むため依存ツリー肥大の懸念 |
 | `std` のみ（TLS なし） | — | なし | — | — | 却下: HTTPS 不可 |
 | 外部プロセス委譲（`curl`／`wget` を `std::process::Command` で起動） | — | — | — | — | 却下候補: 環境依存・OWASP A03（引数経由のインジェクション面）・エラー処理の不透明さ・ライブラリ利用者への暗黙の実行時要件 |
 
@@ -141,4 +141,96 @@
 
 ## 12. 出典一覧
 
-`.claude/rules/deps-policy.md`・`.claude/rules/security.md`・`.claude/rules/coding-rust.md`・`docs/license-matrix.md`・`deny.toml`・`crates/facade/src/interop/safetensors.rs`・`crates/facade/tests/api_surface.rs`・`docs/facade-safetensors-exposure-decision.md`・`docs/facade-onnx-import-exposure-decision.md`・イシュー #2082／#2087／#2088。HF hub 連携の追跡先: イシュー #2243（#2244／#2245／#2246）。
+`.claude/rules/deps-policy.md`・`.claude/rules/security.md`・`.claude/rules/coding-rust.md`・`docs/license-matrix.md`・`deny.toml`・`crates/facade/src/interop/safetensors.rs`・`crates/facade/tests/api_surface.rs`・`docs/facade-safetensors-exposure-decision.md`・`docs/facade-onnx-import-exposure-decision.md`・イシュー #2082／#2087／#2088／#2620（§13 の実測）。HF hub 連携の追跡先: イシュー #2243（#2244／#2245／#2246）。
+
+## 13. 候補 crate のライセンス・推移依存の実測（#2620）
+
+HTTP クライアント候補 4 種を feature 組合せ×ターゲット別に実測し、§3 の「未実測」を埋める。親: #2619（Phase 5 #2606 配下）。**推奨 crate の選定・deps-policy の区分起案・ユーザー承認依頼は兄弟 #2621 の担当であり、本節は実測値の記録に徹する**（承認は未取得・依存は未追加）。
+
+区分番号の注記: `libc` が 2026-09-28 に第 10 区分として新設済み（`.claude/rules/deps-policy.md`）のため、HTTP／TLS 依存は**第 11 区分相当**になる。§2 の「9 区分」・§7-1 の「第 10 区分相当」・§7-5 の `libc` 未承認扱いは本 doc 作成時点（2026-09-23〜24）の記述であり、§7 の本文は書き換えない。
+
+### 13.1 実測環境と手順
+
+| 項目 | 値 |
+|---|---|
+| 実測日 | 2026-10-03 |
+| 基準コミット | `eb27531c7ea30354c58c3259d30f91526d60a856`（`origin/main`） |
+| ツール | cargo 1.98.1・rustc 1.98.1・cargo-deny 0.19.8 |
+| 固定版 | `ureq =3.4.2`・`minreq =3.0.0`・`attohttpc =0.31.0`・`reqwest =0.13.5`（いずれも `=x.y.z`。crates.io 由来） |
+| 実測対象 | 本体 workspace の外に作った一時パッケージ（独自 `[workspace]`・`<tmp>` 配下・実測後に削除）。本体の `Cargo.toml`／`Cargo.lock`／`deny.toml` は変更していない |
+| ターゲット | `x86_64-unknown-linux-gnu`・`aarch64-unknown-linux-gnu`・`aarch64-apple-darwin`（license-matrix §3 の軸 1）と、参考の `x86_64-pc-windows-msvc`（§6 (c) のとおり Windows の download は fail-closed 非対応のため、公開前提の参考値） |
+
+手順（組合せごと。`<pkg>` は一時パッケージ）:
+
+1. `cargo generate-lockfile`（`<pkg>` 内）で解決版を確定する
+2. 推移依存数: `cargo tree --locked -e normal,build --target <t> --prefix none` の出力を `sort -u` し、ルート自身を除いた個数
+3. ライセンス式: `cargo metadata --locked --format-version 1 --filter-platform <t>` の resolve に含まれる全パッケージの `license` を `jq` で抽出し、`MPL`・`GPL`・`CDLA`・`OpenSSL`・`BSD-3`・`AND` 結合・`0BSD` 等を機械的に洗い出す
+4. `cargo deny --manifest-path <pkg>/Cargo.toml --locked check --config <deny.toml> licenses bans sources`。設定はルート `deny.toml` の複製に `[graph] targets = ["<t>"]` を足したもの（allow リストは不変。ターゲット別判定のため）。さらにルート `deny.toml` そのまま（全ターゲット）でも実行した
+5. **`cargo build`／`cargo check` は実行していない**（未承認 crate の build script〈`aws-lc-sys`・`openssl-sys`・`ring`〉を走らせないため）。システムライブラリ要件は `cargo tree` の依存関係から判断した
+6. `advisories` は未実施（承認後に実施する。依存を追加する PR では `deny-checks` に含まれ CI が検査する）
+
+ルート `deny.toml` の allow は `MIT`・`Apache-2.0`・`Apache-2.0 WITH LLVM-exception`・`ISC`・`Zlib`・`Unicode-3.0`・`Unlicense`・`BSD-2-Clause` の 8 種で、本実測では免除も緩和もしていない（fail は測定結果として記録）。
+
+### 13.2 実測結果
+
+推移依存数は「x86_64-linux／aarch64-linux／aarch64-darwin／x86_64-windows」の順（ルート自身を除く。normal＋build エッジ）。`deny` は `licenses`／`bans`／`sources` の 3 検査で、`bans`・`sources` は全組合せ ok、差が出るのは `licenses` のみ。ターゲット別判定と全ターゲット判定で allow 外 crate の集合は一致した（ターゲット間差なし）。
+
+| 候補 | feature 組合せ | 推移依存数 | `deny licenses` | allow 外の crate と識別子 |
+|---|---|---|---|---|
+| `ureq` | ① 既定（`rustls`＋`gzip`） | 30／30／30／29 | FAILED | `subtle 2.6.1`（BSD-3-Clause）・`webpki-roots 1.0.9`（CDLA-Permissive-2.0） |
+| `ureq` | ② `rustls` のみ（`--no-default-features`） | 25／25／25／24 | FAILED | 同上 |
+| `ureq` | ③ `rustls-no-provider`＋`platform-verifier` | 20／20／24／20 | FAILED | `subtle 2.6.1`（BSD-3-Clause）のみ |
+| `ureq` | ④ `native-tls`（`native-tls-webpki-roots` を含む） | 35／35／30／20 | FAILED | `webpki-root-certs 1.0.9`（CDLA-Permissive-2.0）のみ |
+| `ureq` | ⑥ `native-tls-no-default` | 34／34／29／19 | **ok** | なし |
+| `ureq` | ⑤ TLS なし（`--no-default-features`。基準線） | 10／10／10／10 | ok | なし |
+| `minreq` | ① `https`（= `https-rustls`） | 21／21／21／21 | FAILED | `aws-lc-sys 0.45.0`（`ISC AND … AND BSD-3-Clause AND …`）・`subtle`（BSD-3-Clause）・`webpki-roots`（CDLA-Permissive-2.0） |
+| `minreq` | ② `https-rustls-probe` | 23／23／26／23 | FAILED | `aws-lc-sys`・`subtle`・`webpki-root-certs`（CDLA-Permissive-2.0） |
+| `minreq` | ③ `https-native-tls` | 21／21／15／5 | **ok** | なし |
+| `minreq` | ④ `https-openssl` | 19／19／19／19 | **ok** | なし |
+| `minreq` | ⑤ TLS なし（基準線） | 1／1／1／1 | ok | なし |
+| `attohttpc` | ① 既定（`compress`＋`tls-native`） | 59／59／57／48 | FAILED | `attohttpc 0.31.0` 自身（**MPL-2.0**） |
+| `attohttpc` | ② `tls-rustls-webpki-roots`（`--no-default-features`） | 57／57／57／57 | FAILED | `attohttpc`（MPL-2.0）・`aws-lc-sys`・`subtle`・`webpki-roots` |
+| `attohttpc` | ③ TLS なし（`--no-default-features`） | 38／38／38／38 | FAILED | `attohttpc`（MPL-2.0）のみ |
+| `reqwest` | ① `blocking`＋`rustls`（`--no-default-features`） | 90／90／92／90 | FAILED | `aws-lc-sys`・`subtle`・`webpki-root-certs` |
+| `reqwest` | ② 既定＋`blocking`（`charset` を含む） | 104／103／108／107 | FAILED | 上記に加え `encoding_rs 0.8.42`（`(Apache-2.0 OR MIT) AND BSD-3-Clause`） |
+
+読み取れること（事実のみ）:
+
+- 現行 allow で通る組合せは「TLS なし」を除くと、`ureq`⑥（`native-tls-no-default`）・`minreq`③④（`https-native-tls`・`https-openssl`）だけである。いずれも OS の TLS（Linux は OpenSSL、macOS は Security.framework、Windows は schannel）を使う。
+- rustls 系は全組合せで現行 allow 外を含む。要因は `subtle`（BSD-3-Clause）、`webpki-roots`／`webpki-root-certs`（CDLA-Permissive-2.0）、`aws-lc-sys`（複合式中の BSD-3-Clause）、`encoding_rs`（BSD-3-Clause との AND）で、いずれもコピーレフトではなく許容的ライセンスだが、**allow リストへの追加はユーザー承認事項**（deps-policy・license-matrix §1）である。
+- MPL 等コピーレフトの推移的混入は、`attohttpc` の**直接ライセンス**（MPL-2.0）以外では検出されなかった（全 feature 組合せ・全ターゲット。`GPL`／`LGPL`／`AGPL`／`MPL`／`EPL`／`CDDL` の式を機械抽出し、該当は `attohttpc` のみ）。
+- `ring 0.17.14` は式 `Apache-2.0 AND ISC` で、両識別子が allow に含まれるため通る（`ureq` ①②はこの経路を含む）。`aws-lc-rs 1.18.1`（`ISC AND (Apache-2.0 OR ISC)`）も通るが、同 `aws-lc-sys` は複合式の中に BSD-3-Clause を含み落ちる。
+
+### 13.3 重点検証点の結果
+
+| 対象 | 解決版 | ライセンス式 | 判定 |
+|---|---|---|---|
+| `webpki-roots`（`ureq` `rustls`・`minreq` `https-rustls`・`attohttpc` `tls-rustls-webpki-roots`） | 1.0.9 | CDLA-Permissive-2.0 | allow 外 |
+| `webpki-root-certs`（`ureq` `native-tls-webpki-roots`・`minreq` `https-rustls-probe`・`reqwest` `rustls`） | 1.0.9 | CDLA-Permissive-2.0 | allow 外 |
+| `ring`（`ureq` `_ring`） | 0.17.14 | Apache-2.0 AND ISC | 適合 |
+| `aws-lc-rs`／`aws-lc-sys`（`reqwest` `rustls`・`minreq` の rustls 系・`attohttpc` rustls） | 1.18.1／0.45.0 | `ISC AND (Apache-2.0 OR ISC)`／`ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND …` | `-sys` が allow 外（BSD-3-Clause） |
+| `subtle`（rustls 経路で共通） | 2.6.1 | BSD-3-Clause | allow 外 |
+| `rustls-platform-verifier` 系 | 0.6.2（`minreq`）／0.7.1（`ureq`・`reqwest`） | 本体は適合。Linux は `rustls-native-certs`・`openssl-probe`、macOS は `security-framework` が加わり、Windows は追加なし | 推移集合がターゲットで異なる（件数差の要因）。ただし `ureq`③の allow 外は `subtle` のみ |
+| `encoding_rs`（`reqwest` 既定の `charset`） | 0.8.42 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` | allow 外 |
+| `attohttpc` | 0.31.0 | MPL-2.0（直接） | feature によらず allow 外（TLS なし③でも fail） |
+| `minreq` | 3.0.0 | ISC（直接） | allow 内 |
+
+### 13.4 システムライブラリ・ビルド要件・MSRV
+
+ライセンスとは別の運用上の制約。`cargo build` は実行していないため依存関係と manifest からの判断であり、実ビルドでの確認は承認後の実装手順（§8）で行う。
+
+| 経路 | 要件 |
+|---|---|
+| `native-tls`／`https-native-tls`／`attohttpc` 既定 | Linux は `openssl-sys 0.9.117`（システム OpenSSL の開発ヘッダ／ライブラリ、または `vendored` feature）。macOS は `security-framework 3.7.0`、Windows は `schannel 0.1.29` で追加の C ライブラリ不要。§3 の「環境非依存の開発コンテナ」方針との整合は要検証 |
+| `minreq` `https-openssl` | 全ターゲットで `openssl-sys`（`openssl/vendored` を feature に含むため、C ツールチェーンで OpenSSL をソースビルドする経路） |
+| `aws-lc-sys`（`reqwest` `rustls`・`minreq` の rustls 系・`attohttpc` rustls） | `cmake`（`cmake 0.1.58`）と C コンパイラを要する build script。全ターゲットで依存に現れる |
+| `ring`（`ureq` `rustls`） | C／アセンブリのビルド（`cc`）。cmake は不要 |
+| TLS なし | なし |
+
+MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 1.85.0・`attohttpc` は未宣言。解決集合内で宣言された最大値は rustls 系が `zeroize` の 1.85、`reqwest`／`attohttpc` が `icu_provider` の 1.88（`url` 経由）、`openssl-sys` 経路が 1.80。toolchain は stable（`rust-toolchain.toml`）で、開発コンテナのベースは rust:1.88。
+
+### 13.5 本記録の範囲と後続
+
+- 本体 `Cargo.toml`／`Cargo.lock`／`deny.toml` は変更していない（差分なしを確認済み）。一時パッケージはリポジトリ外で実測し、削除済み。
+- 実測値は 2026-10-03 時点の crates.io 解決版に依存する。承認後の依存追加 PR では再実測する。
+- 推奨 crate、区分起案、承認依頼は #2621 で扱う。`docs/license-matrix.md` §10 に下書きの要約を置いた（未承認）。
