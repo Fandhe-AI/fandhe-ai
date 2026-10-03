@@ -1455,7 +1455,7 @@ from_path_resolves_external_data_and_matches_manifest_reference` を
 参照（詳細は `docs/onnx-external-data-decision.md`・`docs/
 facade-onnx-import-exposure-decision.md` §15 を参照）。
 
-**適用記録（経路 2。イシュー #2501・親 #2499・2026-10-04 ユーザー承認）**:
+**適用記録（経路 2。イシュー #2501・親 #2499・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
 `Adadelta`／`AdadeltaConfig`・`Adamax`／`AdamaxConfig`・`NAdam`／`NAdamConfig`・
 `RAdam`／`RAdamConfig`（#2171 で内部クレート限定実装済み）の
 `fandhe_ai::optim` からの素の再エクスポートを、設計判断記録
