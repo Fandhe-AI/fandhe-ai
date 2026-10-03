@@ -6,7 +6,7 @@
 <main>
 <p class="eyebrow">fandhe-ai · framework-compare · candle · burn · PyTorch · TensorFlow · SciPy · f32 · warmup 20 + 計測 20（GEMM）／100 step（学習）· M4 Max 2026-10-03 · GB10 2026-10-03（UTC）· 2026-10-03 更新</p>
 <h1>他フレームワークとの勝敗スコアボード</h1>
-<p class="lede">crates.io 公開版 <code>fandhe-ai =0.10.0</code>（2026-10-03 公開）を、同一ハーネス・同一 xorshift64* シード入力で <code>candle-core =0.11.0</code>・<code>burn =0.21.0</code>・PyTorch 2.14.0・TensorFlow（M4 Max 2.16.2＋Metal プラグイン／GB10 2.21.0 CPU）・SciPy 1.18.1 と比較。Hugging Face transformers と LangChain は計算層ではないため性能比較の対象外とし、下の役割対応表で扱う。<b>0.10.0 では Python 3 フレームワーク（PyTorch／TensorFlow／SciPy）も両機体で再計測し、fandhe-ai・candle・burn と同じラウンドの中で同席計測した</b>（0.9.0 版の転記・別セッション流用は解消）。<b>Apple M4 Max（Metal／CPU）は 2026-10-03 に 5 ラウンド計測</b>（{m4_series}。{m4_load}）、<b>DGX Spark GB10（CUDA／CPU）は 2026-10-03（UTC）に 5 ラウンド計測</b>（{gb_load}）し、いずれもセルごとの 5 ラウンド中央値を採った。「勝敗」は fandhe-ai の中央値を有効な他フレームワーク最速と比べた順位。値は中央値 ms（GEMM は GFLOP/s 併記）、推論はバッチ/秒。「0.9.0 比」は同一セル・同一モードの fandhe-ai 中央値の比（&lt;1 が高速化。推論は &gt;1 が改善）。0.9.0 に同モードの記録がないセルは fresh 同士の比とし「（fresh 同士）」と表示する。</p>
+<p class="lede">crates.io 公開版 <code>fandhe-ai =0.10.0</code>（2026-10-03 公開）を、同一ハーネス・同一 xorshift64* シード入力で <code>candle-core =0.11.0</code>・<code>burn =0.21.0</code>・PyTorch 2.14.0・TensorFlow（M4 Max 2.16.2＋Metal プラグイン／GB10 2.21.0 CPU）・SciPy 1.18.1 と比較。Hugging Face transformers と LangChain は計算層ではないため性能比較の対象外とし、下の役割対応表で扱う。<b>0.10.0 では Python 3 フレームワーク（PyTorch／TensorFlow／SciPy）も両機体で再計測し、fandhe-ai・candle・burn と同じラウンドの中で同席計測した</b>（0.9.0 版の転記・別セッション流用は解消）。<b>Apple M4 Max（Metal／CPU）は 2026-10-03 に 5 ラウンド計測</b>（{m4_series}。{m4_load}）、<b>DGX Spark GB10（CUDA／CPU）は 2026-10-03（UTC）に 5 ラウンド計測</b>（{gb_load}）し、いずれもセルごとの 5 ラウンド中央値を採った。「勝敗」の区分（1 位／僅差／負け）と「最速他 FW ÷ fandhe-ai」の比は、事前登録規則どおり同一ラウンド内の比（そのラウンドの有効な他フレームワーク最速 ÷ fandhe-ai）の 5 ラウンド中央値で決める（&gt;1 で 1 位、0.90 以上で僅差）。負けの「N 位」と「vs」の相手名は 5 ラウンド中央値で数える。値は中央値 ms（GEMM は GFLOP/s 併記）、推論はバッチ/秒。「0.9.0 比」は同一セル・同一モードの fandhe-ai 中央値の比（&lt;1 が高速化。推論は &gt;1 が改善）。0.9.0 に同モードの記録がないセルは fresh 同士の比とし「（fresh 同士）」と表示する。</p>
 <div class="tally"><div class="w"><b>{n_win}</b><span>1 位（勝ち）</span></div><div class="n"><b>{n_near}</b><span>僅差（最速の 90% 以内）</span></div><div class="l"><b>{n_loss}</b><span>負け</span></div><div><b>{n_invalid}</b><span>判定不能セル（要素検証超過・順位に含めない）／判定対象 {n_total} 行</span></div></div>
 
 <h2>Apple M4 Max（Metal／CPU）— 2026-10-03・6 フレームワーク同席計測（5 ラウンド中央値・{m4_series}）</h2>
@@ -25,7 +25,7 @@
 <div class="kv">
 {m4_cards}
 {gb_cards}
-<div><h3>何が変わったか（0.9.0→0.10.0。v0.10.0 に含まれる変更）</h3><span class="v">既定経路の性能変更はなし（性能候補はすべて opt-in）</span><p>v0.10.0 は 0.9.0 公開以降の 274 コミットで、中心は機能網羅（#2058 ツリー: optimizer 拡充・param groups・LR scheduler・EMA・勾配累積・Transformer／AdaptiveMaxPool 等の層・CTC 損失・DataLoader 拡張・npy／npz・generate()・バッチ推論 API・ONNX import／export の op 拡大と external data 対応・facade の <code>nn::Module</code>／<code>ModuleList</code>／<code>ModuleDict</code>・<code>compat::save_model</code>／<code>load_model</code>）と Windows ビルド対応（#2481 ツリー）。性能改善候補は CPU（tape arena 再利用 #2448・縮約の逐次フォールバック閾値 #2446）・CUDA（推論チェーンの CUDA Graph #2460・pinned staging 再利用 #2463・elementwise 融合 #2232）・Metal（train forward の encode-only 化 #2457・readback 分割並列コピー #2456・GEMM 候補 #2455・tape_build キャッシュ #2458）がいずれも <b>既定 OFF の opt-in</b> として入っただけで、本表が測る registry 既定経路の GEMM・学習・推論の選択ロジックは変わっていない（TMA Stage 1 は #2041 で不採用）。したがって上の「0.9.0 比」は主に計測日・負荷の違いによる揺れで、M4 Max の絶対 ms は共有負荷の交絡を含む参考値（判定は同一ラウンド内で同席計測した対戦相手との比が主）。</p></div>
+<div><h3>何が変わったか（0.9.0→0.10.0。v0.10.0 に含まれる変更）</h3><span class="v">既定経路の性能変更はなし（性能候補はすべて opt-in）</span><p>v0.10.0 は 0.9.0 公開以降の 274 コミットで、中心は機能網羅（#2058 ツリー。facade から使えるようになったものは optimizer・LR scheduler の拡充、Transformer エンコーダ／Pool 等の層、AMP、ONNX import／export の op 拡大と external data 対応、<code>nn::Module</code>／<code>ModuleList</code>／<code>ModuleDict</code>、<code>compat::save_model</code>／<code>load_model</code> など。param groups・EMA・CTC 損失・npy／npz・generate()・バッチ推論 API などは内部クレートに実装されたが facade には未公開。詳細は下の対応表）と Windows ビルド対応（#2481 ツリー）。性能改善候補は CPU（tape arena 再利用 #2448・縮約の逐次フォールバック閾値 #2446）・CUDA（推論チェーンの CUDA Graph #2460・pinned staging 再利用 #2463・elementwise 融合 #2232）・Metal（train forward の encode-only 化 #2457・readback 分割並列コピー #2456・GEMM 候補 #2455・tape_build キャッシュ #2458）がいずれも <b>既定 OFF の opt-in</b> として入っただけで、本表が測る registry 既定経路の GEMM・学習・推論の選択ロジックは変わっていない（TMA Stage 1 は #2041 で不採用）。したがって上の「0.9.0 比」は主に計測日・負荷の違いによる揺れで、M4 Max の絶対 ms は共有負荷の交絡を含む参考値（判定は同一ラウンド内で同席計測した対戦相手との比が主）。</p></div>
 </div>
 
 <h2>役割・機能の対応表 — fandhe-ai は何であり、何でないか</h2>
@@ -157,7 +157,7 @@
 <div class="kv">
 <div><h3>勝っている領域（{n_win}）</h3><p>{win_list}</p></div><div><h3>僅差（{n_near}）</h3><p>{near_list}</p></div><div><h3>負けている領域（{n_loss}）</h3><p>{loss_list}</p></div>
 <div><h3>ノイズ帯（{n_noise}）</h3><p>{noise_list}</p></div>
-<div><h3>読み方</h3><p>内訳は上記「勝っている領域」「僅差」「負けている領域」のとおり（詳細は各表の行を参照）。勝敗区分は「別々に選んだ 5 ラウンド中央値同士の比」で判定しており、candle 比ゲートの正式判定（同一 run 内比の中央値）とは別物。HEAD 側の opt-in 性能改善候補（既定 OFF）は registry 既定経路の比較である本表には反映されない。</p></div>
+<div><h3>読み方</h3><p>内訳は上記「勝っている領域」「僅差」「負けている領域」のとおり（詳細は各表の行を参照）。勝敗区分は同一ラウンド内の対戦相手比の 5 ラウンド中央値で判定している（相手は全フレームワークの有効セル最速で、candle 単独と比べる candle 比ゲートとは対象が異なる）。中央値同士の比で判定すると GB10 CPU N=1024 だけが 1 位（1.01×）になる。HEAD 側の opt-in 性能改善候補（既定 OFF）は registry 既定経路の比較である本表には反映されない。</p></div>
 </div>
 
 <h2>計測条件・再現手順</h2>

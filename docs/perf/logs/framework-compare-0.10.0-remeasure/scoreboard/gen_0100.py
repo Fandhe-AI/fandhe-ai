@@ -14,10 +14,16 @@ gen_090.py（0.9.0 版・0.8.0 比）の改変版。0.10.0 の結果を、直前
 - GB10: --gb ＋ --gb-extra ＋ --gb-py（fandhe-ai/candle/burn と Python 3 FW を同一セッションで計測）。
   run_all_cuda.sh の TF32 opt-in スイープ（#1983。fandhe-ai／candle の `"tf32": true` 行）は
   f32 同士の判定から除外する（burn は TF32 が既定でその行しかないため従来どおり残す）。
+- 勝敗区分と「最速他 FW ÷ fandhe-ai」の比は、事前登録規則 RULE.txt の主判定「同一 run 内の対戦相手比」で
+  出す（--m4-runs／--m4-alt-runs／--gb-runs の run1〜run5）。run ごとに「その run の有効な相手最速の
+  median_s ÷ fandhe-ai reuse の median_s」（推論スループット比と同値）を求め、5 run の中央値を採る。
+  表のセル値・順位（N 位）・「vs」の相手名は従来どおり framework ごとに選んだ 5 ラウンド中央値から出す。
+  中央値同士の比で区分が変わる行は標準出力に「中央値同士比」として併記する（PR #2498 codex P2）。
 - 0.9.0 比: --m4-prev（既定 0.9.0 系列 B の 5 ラウンド中央値）／--gb-prev（既定 0.9.0 の
   results-dgx-0.9.0{,-extra}.jsonl）。
 """
 import argparse
+import statistics
 import json
 import html
 from pathlib import Path
@@ -35,6 +41,9 @@ def parse_args():
     p.add_argument('--m4-py', required=True, help='0.10.0 M4 Max Python 3 FW（5 ラウンド中央値）JSONL')
     p.add_argument('--m4-alt', default='', help='対照系列の M4 Max（fandhe/candle/burn）JSONL（ノイズ帯判定用・任意）')
     p.add_argument('--m4-py-alt', default='', help='対照系列の M4 Max Python 3 FW JSONL（ノイズ帯判定用・任意）')
+    p.add_argument('--m4-runs', required=True, help='正式系列の M4 Max run ディレクトリ群の親（run1〜run5 を含む。同一 run 内比の算出用）')
+    p.add_argument('--m4-alt-runs', default='', help='対照系列の M4 Max run ディレクトリ群の親（ノイズ帯の同一 run 内比用。--m4-alt と併用）')
+    p.add_argument('--gb-runs', required=True, help='GB10 run ディレクトリ群の親（run1〜run5 を含む）')
     p.add_argument('--m4-prev', default=str(PREV / 'm4max-series-b/results-m4max-0.9.0-median5.jsonl'), help='0.9.0 M4 Max JSONL')
     p.add_argument('--gb', required=True, help='0.10.0 GB10（fandhe/candle/burn 本体）JSONL')
     p.add_argument('--gb-extra', required=True, help='0.10.0 GB10 追加計測（CPU GEMM reuse 等）JSONL')
@@ -92,6 +101,20 @@ for f in ARGS.gb_prev:
     gb_prev_rows += load(f)
 gb_prev = index(gb_prev_rows)
 
+NRUNS = 5
+M4_RUN_FILES = ('results-m4max-0.10.0.jsonl', 'results-m4max-py-0.10.0.jsonl')
+GB_RUN_FILES = ('results-dgx-0.10.0.jsonl', 'results-dgx-0.10.0-extra.jsonl', 'results-dgx-py-0.10.0.jsonl')
+
+def load_runs(parent, names):
+    """run1〜run5 の索引を run 順に返す。ファイル欠損は open() が例外で止める。"""
+    return [index(sum((load(Path(parent) / f'run{i}' / n) for n in names), [])) for i in range(1, NRUNS + 1)]
+
+m4_runs = load_runs(ARGS.m4_runs, M4_RUN_FILES)
+m4_alt_runs = load_runs(ARGS.m4_alt_runs, M4_RUN_FILES) if ARGS.m4_alt_runs else None
+if (m4_alt is None) != (m4_alt_runs is None):
+    raise SystemExit('--m4-alt と --m4-alt-runs は併用する')
+gb_runs = load_runs(ARGS.gb_runs, GB_RUN_FILES)
+
 # M4 Max burn Metal N>=512 は結果テンソル全ゼロで記録拒否（skipped-m4max-0.10.0.log。0.8.0／0.9.0 と同一の
 # upstream 既知バグによる継続現象）
 M4_SKIP = {('burn', 'gemm', 'metal', n): '結果テンソルが全ゼロ（upstream 既知バグ）のため記録拒否' for n in (512, 1024, 2048, 4096)}
@@ -126,8 +149,32 @@ def metric(r, task):
 def better(a, b, task):
     return a > b if task == 'infer' else a < b
 
-def judge(data, task, device, size):
-    """(区分 cls, 表示 verdict, ratio, best fw, rank) を返す。build_row と対照系列の反転判定で共用する。"""
+def paired_ratio(runs, task, device, size):
+    """同一 run 内の対戦相手比の 5 run 中央値と run 別の値を返す（RULE.txt の主判定）。
+
+    run ごとに「その run の有効な相手最速 median_s ÷ fandhe-ai reuse median_s」を求める。推論は
+    スループット比（fandhe ÷ 相手最速）だが、スループット = 1/median_s のため同じ式になる。
+    run 欠損・判定側の要素検証不合格・有効な相手の不在は生成を止める（fail-closed）。"""
+    rs = []
+    for i, d in enumerate(runs, 1):
+        me = d.get(('fandhe-ai', task, device, size, 'reuse'))
+        if me is None:
+            raise SystemExit(f'run{i}: fandhe-ai reuse 欠損 {task} {device} N={size}')
+        if (me.get('parity_fail_count') or 0) > 0:
+            raise SystemExit(f'run{i}: fandhe-ai reuse の要素検証が不合格 {task} {device} N={size}')
+        comp = [r['median_s'] for fw in FW_ORDER
+                for r in [d.get((fw, task, device, size, 'fresh'))]
+                if r is not None and (r.get('parity_fail_count') or 0) == 0]
+        if not comp:
+            raise SystemExit(f'run{i}: 有効な比較相手がない {task} {device} N={size}')
+        rs.append(min(comp) / me['median_s'])
+    return statistics.median(rs), rs
+
+def judge(data, task, device, size, runs):
+    """(区分 cls, 表示 verdict, ratio, best fw, rank, 中央値同士比, run 別比) を返す。
+
+    区分と ratio は同一 run 内比の中央値（paired_ratio）で決める。順位・相手名は 5 ラウンド中央値
+    （data）で数える。build_row と対照系列の反転判定で共用する。"""
     me = data.get(('fandhe-ai', task, device, size, 'reuse'))
     assert me is not None, (task, device, size)
     # 判定側（fandhe-ai）の要素検証が不合格なら順位を出さない。判定不能行を集計
@@ -149,21 +196,25 @@ def judge(data, task, device, size):
         if best is None or better(v, best[1], task):
             best = (fw, v)
     rank = 1 + sum(1 for fw, v in comp if better(v, mine, task))
-    ratio = (mine / best[1]) if task == 'infer' else (best[1] / mine)
-    if rank == 1:
-        return 'win', '1 位', ratio, best[0], rank
+    mm_ratio = (mine / best[1]) if task == 'infer' else (best[1] / mine)
+    ratio, runs_r = paired_ratio(runs, task, device, size)
+    if ratio > 1:
+        return 'win', '1 位', ratio, best[0], rank, mm_ratio, runs_r
     if ratio >= 0.90:
-        return 'near', '僅差', ratio, best[0], rank
-    return 'loss', f'{rank} 位', ratio, best[0], rank
+        return 'near', '僅差', ratio, best[0], rank, mm_ratio, runs_r
+    if rank == 1:
+        # 中央値では最速なのに同一 run 内比が 0.90 未満という表示不能な組み合わせ。黙って丸めない
+        raise SystemExit(f'順位 1 位だが同一 run 内比 {ratio:.2f}: {task} {device} N={size}')
+    return 'loss', f'{rank} 位', ratio, best[0], rank, mm_ratio, runs_r
 
 CLS_JA = {'win': '1 位', 'near': '僅差', 'loss': '負け'}
 
-def build_row(data, data_prev, machine, task, device, size, skip, alt=None):
+def build_row(data, data_prev, machine, task, device, size, skip, runs, alt=None, alt_runs=None):
     label = {'gemm': f'gemm {DEVNAME[device]} N={size}', 'train': f'train {DEVNAME[device]}', 'infer': f'infer {DEVNAME[device]}'}[task]
     desc = {'gemm': 'f32 正方 GEMM・reuse', 'train': '784→256→10 MLP・バッチ 64・1 step・reuse（デバイス常駐 SGD）', 'infer': '同 MLP forward・バッチ 64・reuse'}[task]
     me = data.get(('fandhe-ai', task, device, size, 'reuse'))
     me_fresh = data.get(('fandhe-ai', task, device, size, 'fresh'))
-    cls, verdict, ratio, best_fw, rank = judge(data, task, device, size)
+    cls, verdict, ratio, best_fw, rank, mm_ratio, runs_r = judge(data, task, device, size, runs)
     cells = []
     for fw in FW_ORDER:
         r = data.get((fw, task, device, size, 'fresh'))
@@ -187,7 +238,7 @@ def build_row(data, data_prev, machine, task, device, size, skip, alt=None):
     # 対照系列との区分反転（ノイズ帯）
     noise = None
     if alt is not None:
-        acls, averdict, aratio, abest, _ = judge(alt, task, device, size)
+        acls, averdict, aratio, abest = judge(alt, task, device, size, alt_runs)[:4]
         if acls != cls:
             noise = dict(cls=acls, verdict=averdict, ratio=aratio, best=abest)
     # {PREV_VER} 比
@@ -225,7 +276,7 @@ def build_row(data, data_prev, machine, task, device, size, skip, alt=None):
           f'<td class="num me">{me_txt} <small>reuse</small></td>'
           f'<td class="num me2">{fresh_txt}{" <small>fresh</small>" if me_fresh else ""}</td>'
           f'{cells_html}</tr>')
-    return dict(tr=tr, cls=cls, verdict=verdict, ratio=ratio, label=label, machine=machine, best=best_fw, vprev=vprev, vprevs=vprevs,
+    return dict(tr=tr, cls=cls, verdict=verdict, ratio=ratio, mm_ratio=mm_ratio, runs_r=runs_r, label=label, machine=machine, best=best_fw, vprev=vprev, vprevs=vprevs,
                 me=me, me_fresh=me_fresh, old=old, fresh_note=fresh_note, noise=noise)
 
 DEVNAME = {'metal': 'Metal', 'cpu': 'CPU', 'cuda': 'CUDA'}
@@ -236,8 +287,8 @@ M4_ROWS = [('gemm', 'metal', n) for n in (256, 512, 1024, 2048, 4096)] + [('gemm
 GB_ROWS = [('gemm', 'cuda', n) for n in (256, 512, 1024, 2048, 4096)] + [('gemm', 'cpu', n) for n in (256, 512, 1024, 2048, 4096)] + \
           [('train', 'cuda', 64), ('infer', 'cuda', 64), ('train', 'cpu', 64), ('infer', 'cpu', 64)]
 
-m4_rows = [build_row(m4, m4_prev, 'M4 Max', *r, M4_SKIP, m4_alt) for r in M4_ROWS]
-gb_rows = [build_row(gb, gb_prev, 'GB10', *r, {}) for r in GB_ROWS]
+m4_rows = [build_row(m4, m4_prev, 'M4 Max', *r, M4_SKIP, m4_runs, m4_alt, m4_alt_runs) for r in M4_ROWS]
+gb_rows = [build_row(gb, gb_prev, 'GB10', *r, {}, gb_runs) for r in GB_ROWS]
 allrows = m4_rows + gb_rows
 wins = [r for r in allrows if r['cls'] == 'win']
 nears = [r for r in allrows if r['cls'] == 'near']
@@ -362,5 +413,8 @@ Path(ARGS.out).write_text(out)
 # 検証出力
 for r in allrows:
     nz = f'  [ノイズ帯: 対照 {r["noise"]["verdict"]} {r["noise"]["ratio"]:.2f}x]' if r['noise'] else ''
-    print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best']:10} {r['ratio']:.2f}x  {r['vprevs']}{nz}")
+    mm_cls = 'win' if r['mm_ratio'] > 1 else ('near' if r['mm_ratio'] >= 0.90 else 'loss')
+    mm = f'  [中央値同士比 {r["mm_ratio"]:.2f}x で区分が {CLS_JA[mm_cls]}]' if mm_cls != r['cls'] else ''
+    runs_s = ' '.join(f'{x:.2f}' for x in r['runs_r'])
+    print(f"{r['machine']:7} {r['label']:22} {r['verdict']:4} vs {r['best']:10} {r['ratio']:.2f}x  run別 [{runs_s}]  {r['vprevs']}{nz}{mm}")
 print('tally', len(wins), len(nears), len(losses), 'invalid', invalid_n, 'noise', len(noisy), 'total', len(allrows))
