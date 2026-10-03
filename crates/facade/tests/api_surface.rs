@@ -10830,148 +10830,154 @@ fn workspace_declares_extremum_ops_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// #2157（親 #2131）の facade 公開保留固定（`DeterminismHoldDoctestGuard`）。
-// `VarExtremumOpsHoldDoctestGuard`（イシュー #2153 系）と同型の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリを持つ。`determinism` は crate ルートの自由関数として
-// 公開されうるため、モジュール再エクスポート・crate ルート `pub fn` の両方を
-// 走査対象とする。承認事項・多層防御の位置づけは
+// #2157 実装・#2507 公開（親 #2499）の決定論モード正ガード。旧否定ガード
+// （`DeterminismHoldDoctestGuard`）を、承認形（crate ルートの委譲 `pub fn`
+// 2 件）だけを許す形へ反転した（先例 #2198・#2690）。モジュール再エクス
+// ポート・別名・独自実装へのすり替えは拒否する。公開形の記録は
 // `docs/autodiff-determinism-mode-design.md` §6 参照。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `DeterminismHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`reduce_ops_hold_doctest_globs_all_pub_modules` の
-/// `DeterminismHoldDoctestGuard` 版）。
-#[test]
-fn determinism_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "DeterminismHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "DeterminismHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// [`determinism_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`DETERMINISM_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
-/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
-/// する改変を機械的に拒否する）。
-#[test]
-fn determinism_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "DeterminismHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, DETERMINISM_HOLD_PROBE_BODY,
-        "DeterminismHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 DETERMINISM_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_determinism_hold_probe モジュール・\
-         __probe_module_path／__probe_root_path 関数）の削除・弱体化・\
-         隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`determinism_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `DeterminismHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const DETERMINISM_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_determinism_hold_probe {\n\
-\x20\x20\x20\x20pub mod determinism {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn set_deterministic(_enabled: bool) {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn is_deterministic() -> bool {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20false\n\
-\x20\x20\x20\x20\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20pub fn set_deterministic(_enabled: bool) {}\n\
-\x20\x20\x20\x20pub fn is_deterministic() -> bool {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20false\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_determinism_hold_probe::*;\n\
-\n\
-fn __probe_module_path() {\n\
-\x20\x20\x20\x20// `determinism::` を経由した経路解決（`use fandhe_ai::*;` が\n\
-\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
-\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20determinism::set_deterministic(true);\n\
-\x20\x20\x20\x20let _: bool = determinism::is_deterministic();\n\
-}\n\
-\n\
-fn __probe_root_path() {\n\
-\x20\x20\x20\x20// crate ルート直下の自由関数経路（`use fandhe_ai::*;` が同名の\n\
-\x20\x20\x20\x20// `pub fn` を glob 公開していれば同様に E0659 でコンパイル失敗\n\
-\x20\x20\x20\x20// する）。\n\
-\x20\x20\x20\x20set_deterministic(true);\n\
-\x20\x20\x20\x20let _: bool = is_deterministic();\n\
-}";
-
 /// `set_deterministic`・`is_deterministic`（2 個の関数名。イシュー
-/// #2157）。[`facade_does_not_reexport_or_declare_determinism_fns`]・
+/// #2157・#2507）。[`facade_declares_determinism_fns_only_as_approved_root_delegations`]・
 /// [`workspace_declares_determinism_fn_names_only_in_allowed_locations`]
 /// が共用する。
 const DETERMINISM_FN_NAMES: [&str; 2] = ["set_deterministic", "is_deterministic"];
 
-/// facade src 全体（`crates/facade/src/**`）に、`determinism` を参照
-/// する `pub use`（`pub use fandhe_ai_autodiff::determinism;` 等の
-/// モジュール再エクスポート・別名含む）も、[`DETERMINISM_FN_NAMES`]
-/// （2 個）の `fn` 宣言（可視性・宣言文脈を問わない。
-/// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
-/// 固定する（`DeterminismHoldDoctestGuard` の正のプローブと多層防御を
-/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// reduce_ops` と同型）。
+/// 承認形の関数本体（トークンを空白連結した形）。引数名 `enabled` も固定する。
+const DETERMINISM_FN_EXPECTED_BODIES: [(&str, &str); 2] = [
+    (
+        "set_deterministic",
+        "fandhe_ai_autodiff : : determinism : : set_deterministic ( enabled ) ;",
+    ),
+    (
+        "is_deterministic",
+        "fandhe_ai_autodiff : : determinism : : is_deterministic ( )",
+    ),
+];
+
+/// トークン列から `pub fn <fn_name>` 宣言の本体（最外 `{ }` の内側）を
+/// 空白連結で返す。宣言が `pub` 付きでちょうど 1 件でなければ `None`。
+fn determinism_fn_body(tokens: &[String], fn_name: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        if token != "fn" || !fn_declaration_target_name_matches(tokens, i, fn_name) {
+            continue;
+        }
+        if found.is_some() || i == 0 || tokens[i - 1] != "pub" {
+            return None;
+        }
+        let open = (i..tokens.len()).find(|&j| tokens[j] == "{")?;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (j, t) in tokens.iter().enumerate().skip(open) {
+            match t.as_str() {
+                "{" => depth += 1,
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        found = Some(tokens[open + 1..close?].join(" "));
+    }
+    found
+}
+
+/// 承認形（イシュー #2507・2026-10-04 承認）の固定: [`DETERMINISM_FN_NAMES`]
+/// の `fn` 宣言が `crates/facade/src/lib.rs` にちょうど 1 件ずつあり、
+/// 他の facade src には無いこと、`fandhe_ai_autodiff::determinism::*` へ
+/// 委譲していること、`determinism` を識別子に含む `pub use`（モジュール
+/// 再エクスポート・別名）が無いことを固定する（旧否定ガードの反転）。
 #[test]
-fn facade_does_not_reexport_or_declare_determinism_fns() {
+fn facade_declares_determinism_fns_only_as_approved_root_delegations() {
     let src_dir = facade_crate_root().join("src");
+    let lib_rs = lib_rs_path();
     let mut offending: Vec<String> = Vec::new();
+    let mut root_counts: std::collections::BTreeMap<&str, usize> =
+        DETERMINISM_FN_NAMES.iter().map(|n| (*n, 0usize)).collect();
+    let mut root_seen = false;
     visit_rs_files(&src_dir, &mut |path, content| {
         for line in content.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("pub use") && line_contains_identifier(trimmed, "determinism") {
                 offending.push(format!(
-                    "{}: `{trimmed}` が `determinism` を識別子単位で含む",
+                    "{}: `{trimmed}` が `determinism` を識別子単位で含む（承認形外）",
                     path.display()
                 ));
             }
         }
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
         let tokens = tokenize_including_punctuation(&cleaned);
+        let is_root = path == lib_rs;
+        if is_root {
+            root_seen = true;
+        }
         for fn_name in DETERMINISM_FN_NAMES {
             let count = count_fn_declarations_by_name(&tokens, fn_name);
-            if count > 0 {
+            if is_root {
+                *root_counts.entry(fn_name).or_insert(0) += count;
+            } else if count > 0 {
                 offending.push(format!(
-                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    "{}: `fn {fn_name}` 宣言が lib.rs 以外に {count} 件",
                     path.display()
                 ));
             }
         }
+        if is_root {
+            // 各 `pub fn` の本体全体が、対応する内部関数への委譲 1 文だけで
+            // あることを固定する（呼び出しが lib.rs のどこかにあるだけでは
+            // 別関数へ移したり独自実装へ差し替えても通るため。codex-review
+            // 指摘・PR #2699）。
+            for (fn_name, expected_body) in DETERMINISM_FN_EXPECTED_BODIES {
+                match determinism_fn_body(&tokens, fn_name) {
+                    Some(body) if body == expected_body => {}
+                    other => offending.push(format!(
+                        "lib.rs: `{fn_name}` の本体が `fandhe_ai_autodiff::determinism::{fn_name}` への委譲のみではない（期待 `{expected_body}`・実際 {other:?}）"
+                    )),
+                }
+            }
+        }
     });
     assert!(
-        offending.is_empty(),
-        "facade の公開面が determinism（イシュー #2157 の内部クレート限定\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+        root_seen,
+        "facade src から lib.rs を見失った（fail-closed）: {}",
+        lib_rs.display()
     );
+    for (name, count) in &root_counts {
+        if *count != 1 {
+            offending.push(format!(
+                "lib.rs: `fn {name}` 宣言が {count} 件（ちょうど 1 件であること）"
+            ));
+        }
+    }
+    assert!(
+        offending.is_empty(),
+        "facade の determinism 公開が承認形（イシュー #2507: crate ルートの\
+         `pub fn` 2 件が `fandhe_ai_autodiff::determinism::*` へ委譲）から\
+         逸脱している（モジュール再エクスポート・別名・独自実装は承認形外）: \
+         {offending:?}"
+    );
+}
+
+/// `fandhe_ai::{set_deterministic, is_deterministic}`（イシュー #2507）が
+/// facade 経由で到達でき、委譲先の内部クレートと状態を共有することを
+/// 固定する。同一バイナリ内の並列テストと競合しないよう LOCK で直列化し、
+/// 元の値へ戻す。
+#[test]
+fn determinism_mode_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _: fn(bool) = fandhe_ai::set_deterministic;
+    let _: fn() -> bool = fandhe_ai::is_deterministic;
+    let original = fandhe_ai::is_deterministic();
+    fandhe_ai::set_deterministic(true);
+    assert!(fandhe_ai::is_deterministic());
+    assert!(fandhe_ai_autodiff::determinism::is_deterministic());
+    fandhe_ai::set_deterministic(original);
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`DETERMINISM_FN_NAMES`]
@@ -10980,7 +10986,8 @@ fn facade_does_not_reexport_or_declare_determinism_fns() {
 /// トリ）。
 ///
 /// **期待集合**: `set_deterministic`・`is_deterministic` は
-/// `crates/autodiff/src/determinism.rs` にのみ 1 件ずつ存在する。
+/// `crates/autodiff/src/determinism.rs` と `crates/facade/src/lib.rs`
+/// （#2507 の委譲 `pub fn`）に 1 件ずつ存在する（計 4 エントリ）。
 #[test]
 fn workspace_declares_determinism_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -11028,13 +11035,18 @@ fn workspace_declares_determinism_fn_names_only_in_allowed_locations() {
 
     let expected: std::collections::BTreeMap<String, usize> = DETERMINISM_FN_NAMES
         .iter()
-        .map(|name| (format!("autodiff/src/determinism.rs::{name}"), 1usize))
+        .flat_map(|name| {
+            [
+                (format!("autodiff/src/determinism.rs::{name}"), 1usize),
+                (format!("facade/src/lib.rs::{name}"), 1usize),
+            ]
+        })
         .collect();
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の determinism 系 `fn` 宣言集合が\
-         `crates/autodiff/src/determinism.rs`（2 件）のみという期待と\
+         `autodiff/src/determinism.rs`・`facade/src/lib.rs`（各 2 件）のみという期待と\
          一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
          が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
          なのかを確認すること）: {found:?}"
