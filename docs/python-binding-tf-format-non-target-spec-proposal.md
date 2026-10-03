@@ -6,7 +6,7 @@
 
 - **コード変更なし**（`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・`docs/spec/`〈正本 submodule〉・tolerance／baseline・ガードレール閾値は一切変更していない）。
 - **#2193 の提案はすでに spec へ反映済み**。`docs/spec/04-requirements.md:234` に「2026-09-29 追記・#2193」として REQ-9「引き続き対象外」列挙へ Python バインディング・TF 系モデル形式が追記され、変更履歴 `:435` に「PR #2321、2026-09-29 ユーザー承認」とある。したがって §4 の文案は履歴であり、起票待ちではない。
-- **#2623 の推奨: 非目標を維持する（案 D）**。対象内化した場合の依存・`unsafe`・攻撃面の見積りは §3b に並べた。到達目標「PyTorch／TF を Rust で置き換える」は Rust から使えることで満たされ、Python から呼べることを必要条件としない。TF 系形式は ONNX（`tf2onnx`／`onnx2tf` 経由）で代替できる。
+- **#2623 の推奨: 非目標を維持する（案 D）**。対象内化した場合の依存・`unsafe`・攻撃面の見積りは §3b に並べた。到達目標「PyTorch／TF を Rust で置き換える」は Rust から使えることで満たされ、Python から呼べることを必要条件としない。TF 系形式は ONNX（`tf2onnx` 経由）で代替できる。
 - 実依存の追加・`cargo tree` 実測・C FFI／PyO3 の実装は行わない。未決の判断は §5 に承認事項として残し、#2623 のコメントで承認を依頼する。
 - 提案の範囲は Python バインディングと TensorFlow 系モデル形式に閉じる。トークナイザ（#2086・最新化 #2618）・サービング（#2624）・モデルハブは別 doc／別 issue で扱う（§6）。
 
@@ -75,7 +75,7 @@
 
 1. **REQ-7 の相互運用範囲の外**: REQ-7（`docs/spec/04-requirements.md:172`）は相互運用の範囲を safetensors／ONNX と明示しており、TF 系形式はその外の未定義の残余にあたる。
 2. **依存と攻撃面**: TFLite は FlatBuffers、Keras H5 は HDF5（C ライブラリ）のデコードを要し、どちらも許容依存区分外。SavedModel は protobuf（`prost` は許容済み）でデコード自体は可能だが、TF グラフ演算の意味論全体（数千種類の op）を解釈する必要があり、非信頼入力パース面（A03）を大きく増やす。
-3. **書き出しは ONNX に一本化**（§1.1-b の現状）。TF 系形式との変換が必要な場合は、利用者側で第三者ツール（例: `tf2onnx`・`onnx2tf` 等）の利用を推奨する。本リポはこれら第三者ツールの動作を検証していない。
+3. **書き出しは ONNX に一本化**（§1.1-b の現状）。TF 系形式との変換が必要な場合は、利用者側で第三者ツール（例: `tf2onnx`）の利用を推奨する。本リポはこれら第三者ツールの動作を検証していない。
 4. TFLite の非対応は、既存の「モバイル／エッジ向け変換」対象外（REQ-9「引き続き対象外」列挙）と重なる部分があり、新規追加ではなく明確化にあたる。
 
 ### 比較表
@@ -104,7 +104,7 @@
 
 - 新規依存 0・新規 `unsafe` 0・攻撃面は増えない。本体の許容依存 10 区分と `facade` 一本化方針（`compat-api-scope.md` §0）を保てる。
 - 代替経路:
-  - TF 系 → 利用者側で第三者ツール（`tf2onnx`／`onnx2tf` 等）により ONNX へ変換 → facade の ONNX import。ONNX import は 36 op・推論専用という制約がある（`body_0100.html:107`）。第三者ツールの動作は本リポでは検証していない。
+  - TF 系 → 利用者側で第三者ツール（`tf2onnx` 等）により ONNX へ変換 → facade の ONNX import。ONNX import は 36 op・推論専用という制約がある（`body_0100.html:107`）。第三者ツールの動作は本リポでは検証していない。
   - safetensors 保存／読込・`save_model`／`load_model`・`state_dict`／`load_state_dict`。
   - Python からの利用は提供しない。
 
@@ -112,7 +112,7 @@
 
 1. すでに spec :234 に反映済みで、承認済みの方針と一致する。
 2. 到達目標「PyTorch／TF を Rust で置き換える」とは独立している。置き換え先の利用者は Rust から使う前提で、Python から呼べることは必要条件ではない。
-3. いずれの対象内化も許容依存区分外の追加を伴い、非信頼入力パース面（A03）か FFI の `unsafe` 面が増える。
+3. 対象内化はいずれも実装負荷か攻撃面を増やす。Python バインディング（`pyo3`）・TFLite の `flatbuffers` 利用・Keras H5（HDF5 系 crate）は許容依存区分外の追加を伴いユーザー承認が要る。SavedModel（許容済みの `prost` で可）・自前 TFLite パーサ・（参考）C FFI は追加依存なしで書けるが、TF グラフ op の意味論解釈・境界検査の自作・公開 ABI の新設により、非信頼入力パース面（A03）か `unsafe`／FFI 面が増える。
 
 ### 再評価の発火条件（日付ではなく条件で書く）
 
@@ -175,7 +175,7 @@ REQ-9「引き続き対象外」列挙（該当箇所）の末尾へ、次の 1 
 - モデルの保存・読み込み: ONNX import／export（`fandhe_ai::interop::onnx::
   OnnxModel`）・safetensors save／load（`fandhe_ai::interop::safetensors`）・
   `state_dict`／`load_state_dict`。
-- TF 系形式との相互運用: 利用者側で第三者ツール（`tf2onnx`・`onnx2tf` 等）
+- TF 系形式との相互運用: 利用者側で第三者ツール（`tf2onnx` 等）
   による変換を経由し、本リポの ONNX import／export を利用する。本リポは
   これら第三者ツールの動作を検証していない。
 - Python からの呼び出し: 現状提供していない。C FFI（`cdylib`・公開
