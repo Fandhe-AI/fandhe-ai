@@ -375,6 +375,11 @@ fn optim_module_reexports_exactly_expected_surface() {
         "ExponentialLr",
         "LinearWarmupLr",
         "LrScheduler",
+        "CosineAnnealingWarmRestarts",
+        "CyclicLr",
+        "LambdaLr",
+        "MultiStepLr",
+        "SequentialLr",
         "OneCycleAnneal",
         "OneCycleLr",
         "OneCycleLrConfig",
@@ -925,6 +930,45 @@ fn optim_types_are_reachable_via_facade_only() {
         updated_lr, 0.1,
         "test fixture: 初回観測（改善扱い）では減衰しないはず"
     );
+
+    // LR スケジューラ拡張 5 種（イシュー #2176 実装・#2503 公開）が facade
+    // のみを通じて構築でき、`&dyn LrScheduler` へ coerce できることの固定。
+    let multi_step = fandhe_ai::optim::MultiStepLr::new(0.1, &[2, 4], 0.5)
+        .unwrap_or_else(|e| panic!("test fixture: MultiStepLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &multi_step;
+    assert_eq!(fandhe_ai::optim::LrScheduler::lr_at(&multi_step, 2), 0.05);
+
+    let warm_restarts = fandhe_ai::optim::CosineAnnealingWarmRestarts::new(0.1, 4, 2, 0.0)
+        .unwrap_or_else(|e| {
+            panic!("test fixture: CosineAnnealingWarmRestarts::new が失敗した: {e}")
+        });
+    let _: &dyn fandhe_ai::optim::LrScheduler = &warm_restarts;
+    assert_eq!(fandhe_ai::optim::LrScheduler::lr_at(&warm_restarts, 0), 0.1);
+
+    let cyclic = fandhe_ai::optim::CyclicLr::new(0.01, 0.1, 2, None)
+        .unwrap_or_else(|e| panic!("test fixture: CyclicLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &cyclic;
+    assert_eq!(fandhe_ai::optim::LrScheduler::lr_at(&cyclic, 0), 0.01);
+
+    let lambda = fandhe_ai::optim::LambdaLr::new(0.1, |step| 0.5_f64.powi(step as i32))
+        .unwrap_or_else(|e| panic!("test fixture: LambdaLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &lambda;
+    assert_eq!(fandhe_ai::optim::LrScheduler::lr_at(&lambda, 1), 0.05);
+
+    let first = fandhe_ai::optim::StepLr::new(0.1, 1, 0.5)
+        .unwrap_or_else(|e| panic!("test fixture: StepLr::new が失敗した: {e}"));
+    let second = fandhe_ai::optim::ConstantLr::new(0.01)
+        .unwrap_or_else(|e| panic!("test fixture: ConstantLr::new が失敗した: {e}"));
+    let sequential = fandhe_ai::optim::SequentialLr::new(
+        vec![
+            Box::new(first) as Box<dyn fandhe_ai::optim::LrScheduler>,
+            Box::new(second) as Box<dyn fandhe_ai::optim::LrScheduler>,
+        ],
+        vec![2],
+    )
+    .unwrap_or_else(|e| panic!("test fixture: SequentialLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &sequential;
+    assert_eq!(fandhe_ai::optim::LrScheduler::lr_at(&sequential, 2), 0.01);
 }
 
 /// デバイスメモリプール（イシュー #1021）の公開面固定（受入基準
@@ -14448,110 +14492,98 @@ fn facade_does_not_reexport_or_declare_ema_items_detects_each_category() {
 }
 
 // =====================================================================
-// LrSchedulerExtHoldDoctestGuard（イシュー #2176。親 #2131）の否定ガード
-// =====================================================================
-// `OptimizerExtHoldDoctestGuard`（#2171。#2501 で削除済み）と同型の 4 テスト構成。
-// decision doc §8 を参照。
+// LR スケジューラ拡張 5 種（イシュー #2176 実装・#2503 公開。親 #2499）の
+// 正ガード。旧 `LrSchedulerExtHoldDoctestGuard` 系の否定ガード 4 テストを
+// 「承認した形だけを許す」形へ反転した（決定記録
+// `docs/autodiff-lr-scheduler-ext-decision.md` §8 実装記録。先例: #2198
+// `compat_optimizer_enum_has_lbfgs_variant`）。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `LrSchedulerExtHoldDoctestGuard` doc
-/// 内の唯一の doctest ブロックが glob import するネスト `pub mod`
-/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules`（#2501 で削除済み） の
-/// `LrSchedulerExtHoldDoctestGuard` 版）。
-#[test]
-fn lr_scheduler_ext_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "LrSchedulerExtHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "LrSchedulerExtHoldDoctestGuard の doctest ブロックが glob import\
-         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
-         している（declared={declared:?}, doctest={globbed:?}）。新しい\
-         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
+/// 承認形で公開する 5 名。
+const LR_SCHEDULER_EXT_NAMES: [&str; 5] = [
+    "MultiStepLr",
+    "CosineAnnealingWarmRestarts",
+    "CyclicLr",
+    "LambdaLr",
+    "SequentialLr",
+];
+
+/// `pub use` の use tree を宣言単位（完全なパス + `as` 別名）の
+/// エントリへ展開する（[`scan_lr_scheduler_ext_items`] の下請け）。
+/// `tokens[i..]` の 1 ノード（単一パス or `{ ... }` グループ）を `prefix`
+/// 付きで解析し、`(完全パスのセグメント列, 別名)` を `out` へ積んで
+/// 消費後の index を返す。`*`（glob）は個別の識別子を持たないため積まない。
+fn lr_ext_parse_use_tree(
+    tokens: &[String],
+    mut i: usize,
+    prefix: &[String],
+    out: &mut Vec<(Vec<String>, Option<String>)>,
+) -> usize {
+    let mut path: Vec<String> = prefix.to_vec();
+    if tokens.get(i).map(String::as_str) == Some(":")
+        && tokens.get(i + 1).map(String::as_str) == Some(":")
+    {
+        i += 2;
+    }
+    loop {
+        match tokens.get(i).map(String::as_str) {
+            Some("{") => {
+                i += 1;
+                loop {
+                    match tokens.get(i).map(String::as_str) {
+                        Some("}") => {
+                            i += 1;
+                            break;
+                        }
+                        Some(",") => i += 1,
+                        None => break,
+                        _ => i = lr_ext_parse_use_tree(tokens, i, &path, out),
+                    }
+                }
+                return i;
+            }
+            Some("*") => return i + 1,
+            Some(seg) if seg != "as" && seg != "," && seg != "}" => {
+                path.push(seg.to_string());
+                i += 1;
+                if tokens.get(i).map(String::as_str) == Some(":")
+                    && tokens.get(i + 1).map(String::as_str) == Some(":")
+                {
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        break;
+    }
+    let mut alias = None;
+    if tokens.get(i).map(String::as_str) == Some("as") {
+        alias = tokens.get(i + 1).cloned();
+        i += 2;
+    }
+    // `a::b::{self}` のように `self` で終わる場合は直前セグメントを葉とみなす。
+    if path.last().map(String::as_str) == Some("self") && path.len() > 1 {
+        path.pop();
+    }
+    if path.len() > prefix.len() {
+        out.push((path, alias));
+    }
+    i
 }
 
-/// [`lr_scheduler_ext_hold_doctest_globs_all_pub_modules`] が glob
-/// import 集合の一致のみを固定するのに対し、本テストは doctest
-/// ブロックの**glob 以外の本文**（`__fandhe_lr_scheduler_ext_hold_probe`
-/// モジュール・`__probe` 関数）が固定文言
-/// [`LR_SCHEDULER_EXT_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致する
-/// ことを固定する（rustdoc の `# ` 隠し行・プローブの削除・別名への
-/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否する）。
-#[test]
-fn lr_scheduler_ext_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "LrSchedulerExtHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, LR_SCHEDULER_EXT_HOLD_PROBE_BODY,
-        "LrSchedulerExtHoldDoctestGuard の doctest ブロック本文（glob\
-         以外）が固定文言 LR_SCHEDULER_EXT_HOLD_PROBE_BODY からドリフト\
-         している。正のプローブ（__fandhe_lr_scheduler_ext_hold_probe\
-         モジュール・__probe 関数）の削除・弱体化・隠し行の混入がないか\
-         確認すること。"
-    );
-}
-
-/// [`lr_scheduler_ext_hold_doctest_probe_body_matches_fixed_contract`]
-/// が要求する固定文言。`crates/facade/src/lib.rs` の
-/// `LrSchedulerExtHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const LR_SCHEDULER_EXT_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_lr_scheduler_ext_hold_probe {\n\
-\x20\x20\x20\x20pub struct MultiStepLr;\n\
-\x20\x20\x20\x20pub struct CosineAnnealingWarmRestarts;\n\
-\x20\x20\x20\x20pub struct CyclicLr;\n\
-\x20\x20\x20\x20pub struct LambdaLr;\n\
-\x20\x20\x20\x20pub struct SequentialLr;\n\
-}\n\
-use __fandhe_lr_scheduler_ext_hold_probe::*;\n\
-\n\
-fn __probe(\n\
-\x20\x20\x20\x20_: MultiStepLr,\n\
-\x20\x20\x20\x20_: CosineAnnealingWarmRestarts,\n\
-\x20\x20\x20\x20_: CyclicLr,\n\
-\x20\x20\x20\x20_: LambdaLr,\n\
-\x20\x20\x20\x20_: SequentialLr,\n\
-) {\n\
-}";
-
-/// [`facade_does_not_reexport_or_declare_lr_scheduler_ext_items`]・その
-/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/
-/// src/**`）の `pub use` から [`collect_pub_use_leaves`] で別名にする
-/// 前の葉を集め `MultiStepLr`／`CosineAnnealingWarmRestarts`／
-/// `CyclicLr`／`LambdaLr`／`SequentialLr` を検出し（単一行・複数行・
-/// ネストした group・別名も検出）、`trait`／`struct`／`enum`／`type`
-/// 直後の同名独自宣言を違反として返す（`scan_optimizer_ext_reexports_
-/// and_declarations` と同型。本 5 種は `compat::Sequential`／`Var` への
-/// inherent メソッド追加を伴わない値型 API のため `fn` 宣言の検出は
-/// 不要）。
-fn scan_lr_scheduler_ext_reexports_and_declarations(content: &str) -> Vec<String> {
-    const NAMES: [&str; 5] = [
-        "MultiStepLr",
-        "CosineAnnealingWarmRestarts",
-        "CyclicLr",
-        "LambdaLr",
-        "SequentialLr",
-    ];
+/// 正ガード・自己テストが共用する検出本体。`content` の `pub use` を
+/// **宣言単位**（完全パス + 別名）に展開し、葉または公開される別名が
+/// 5 名のいずれかであるエントリと、`trait`／`struct`／`enum`／`type` の
+/// 同名独自宣言を `(種別, 名前)` で返す。種別 `"pub use"` は完全パスが
+/// ちょうど `fandhe_ai_autodiff::nn::optim::<名>` で別名なしの承認形のみ。
+/// それ以外（別経路・別名公開・承認名への別名付け替え・他型を承認名で
+/// 公開）は `"pub use(非承認経路)"`／`"alias"` として返す。コメント・
+/// 文字列リテラルは除去済みの走査対象のみを見る。
+fn scan_lr_scheduler_ext_items(content: &str) -> Vec<(String, String)> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
-
+    let mut found: Vec<(String, String)> = Vec::new();
     let mut i = 0usize;
     while i < tokens.len() {
         if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
@@ -14560,10 +14592,34 @@ fn scan_lr_scheduler_ext_reexports_and_declarations(content: &str) -> Vec<String
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
+            let mut entries: Vec<(Vec<String>, Option<String>)> = Vec::new();
+            let mut j = 0usize;
+            while j < path_tokens.len() {
+                if path_tokens[j] == "," {
+                    j += 1;
+                } else {
+                    j = lr_ext_parse_use_tree(path_tokens, j, &[], &mut entries);
+                }
+            }
+            for (segs, alias) in entries {
+                let leaf = segs.last().cloned().unwrap_or_default();
+                let leaf_hit = LR_SCHEDULER_EXT_NAMES.contains(&leaf.as_str());
+                let alias_hit = alias
+                    .as_deref()
+                    .is_some_and(|a| LR_SCHEDULER_EXT_NAMES.contains(&a));
+                if !leaf_hit && !alias_hit {
+                    continue;
+                }
+                let approved_path = segs.len() == 4
+                    && segs[0] == "fandhe_ai_autodiff"
+                    && segs[1] == "nn"
+                    && segs[2] == "optim";
+                if leaf_hit && alias.is_none() && approved_path {
+                    found.push(("pub use".to_string(), leaf));
+                } else if let Some(a) = alias.filter(|_| alias_hit) {
+                    found.push(("alias".to_string(), a));
+                } else {
+                    found.push((format!("pub use(非承認経路 {})", segs.join("::")), leaf));
                 }
             }
             i = (end + 1).min(tokens.len());
@@ -14572,109 +14628,138 @@ fn scan_lr_scheduler_ext_reexports_and_declarations(content: &str) -> Vec<String
         if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
             && tokens
                 .get(i + 1)
-                .map(|t| NAMES.contains(&t.as_str()))
-                .unwrap_or(false)
+                .is_some_and(|t| LR_SCHEDULER_EXT_NAMES.contains(&t.as_str()))
         {
-            offending.push(format!(
-                "{} {} 宣言",
-                tokens[i],
-                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
-            ));
+            found.push((tokens[i].clone(), tokens[i + 1].clone()));
         }
         i += 1;
     }
-
-    offending
+    found
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、MultiStepLr／
-/// CosineAnnealingWarmRestarts／CyclicLr／LambdaLr／SequentialLr
-/// （5 個の型名）を識別子単位で含む `pub use`（複数行・ネストした
-/// group・別名含む）も、facade 独自の `trait`／`struct`／`enum`／
-/// `type` 宣言も存在しないことを固定する
-/// （`LrSchedulerExtHoldDoctestGuard` の正のプローブと多層防御を成す
-/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// optimizer_ext_items` と同型）。
-#[test]
-fn facade_does_not_reexport_or_declare_lr_scheduler_ext_items() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_lr_scheduler_ext_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
+/// 承認形（`optim.rs` の `pub use fandhe_ai_autodiff::nn::optim::…` の
+/// 葉としてちょうど 1 回ずつ。宣言単位で完全パスを検証済み）以外の
+/// 出現を違反として返す。`optim.rs` 以外での再エクスポート・別名・
+/// 独自宣言、承認形の欠落・重複は fail-closed。
+fn lr_scheduler_ext_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut approved: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (rel, content) in files {
+        let is_optim = rel == "optim.rs";
+        for (kind, name) in scan_lr_scheduler_ext_items(content) {
+            if is_optim
+                && kind == "pub use"
+                && let Some(n) = LR_SCHEDULER_EXT_NAMES.iter().find(|n| **n == name)
+            {
+                *approved.entry(n).or_insert(0) += 1;
+                continue;
+            }
+            violations.push(format!("{rel}: {kind} {name}"));
         }
+    }
+    for n in LR_SCHEDULER_EXT_NAMES {
+        let c = approved.get(n).copied().unwrap_or(0);
+        if c != 1 {
+            violations.push(format!(
+                "optim.rs: {n} の承認形再エクスポートが {c} 回（期待 1 回）"
+            ));
+        }
+    }
+    violations
+}
+
+/// facade src 全体で、LR スケジューラ拡張 5 名が `src/optim.rs` の
+/// `pub use fandhe_ai_autodiff::nn::optim::…` としてちょうど 1 回ずつ
+/// 公開され、他ファイルでの再エクスポート・別名・独自宣言が無いことを
+/// 固定する（検出 0 件なら検査対象を見失ったとして失敗する）。
+#[test]
+fn facade_reexports_lr_scheduler_ext_items_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
     });
+    let violations = lr_scheduler_ext_violations(&files);
     assert!(
-        offending.is_empty(),
-        "facade の公開面が LR scheduler 拡張（#2176。MultiStepLr／\
-         CosineAnnealingWarmRestarts／CyclicLr／LambdaLr／SequentialLr）\
-         を再エクスポート、または独自宣言している\
-         （`docs/autodiff-lr-scheduler-ext-decision.md` §8 承認事項が\
-         未取得のまま対象外としている設計判断に違反）: {offending:?}"
+        violations.is_empty(),
+        "LR スケジューラ拡張 5 種の facade 公開が承認形\
+         （`docs/autodiff-lr-scheduler-ext-decision.md` §8）から外れている: {violations:?}"
     );
 }
 
-/// [`scan_lr_scheduler_ext_reexports_and_declarations`]（[`facade_does_
-/// not_reexport_or_declare_lr_scheduler_ext_items`]）の自己テスト
-/// （正例・負例の合成入力）。`SequentialLr`（本イシューの型）と
-/// 既存の `compat::Sequential`（別の型）が識別子単位で衝突しない
-/// （word-boundary 一致）ことも負例として確認する。
+/// [`lr_scheduler_ext_violations`] の自己テスト（正例・負例の合成入力）。
+/// `SequentialLr` と既存の `compat::Sequential` は識別子単位で衝突しない。
 #[test]
-fn facade_does_not_reexport_or_declare_lr_scheduler_ext_items_detects_each_category() {
-    // 正例: 単一行 pub use。
+fn facade_reexports_lr_scheduler_ext_items_only_in_approved_shape_detects_each_category() {
+    let approved_optim = "pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingWarmRestarts, CyclicLr};\n\
+pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, MultiStepLr, SequentialLr};\n";
+    let with_lib = |extra: &str| {
+        vec![
+            ("optim.rs".to_string(), approved_optim.to_string()),
+            ("lib.rs".to_string(), extra.to_string()),
+        ]
+    };
+    // 正例（承認形のみ・無関係な出現は誤検出しない）。
+    assert!(lr_scheduler_ext_violations(&with_lib("")).is_empty());
     assert!(
-        !scan_lr_scheduler_ext_reexports_and_declarations(
+        lr_scheduler_ext_violations(&with_lib("pub use crate::compat::Sequential;")).is_empty()
+    );
+    assert!(lr_scheduler_ext_violations(&with_lib("// pub use x::MultiStepLr;")).is_empty());
+    assert!(lr_scheduler_ext_violations(&with_lib("let s = \"CyclicLr\";")).is_empty());
+    // 負例: 別ファイルでの再エクスポート。
+    assert!(
+        !lr_scheduler_ext_violations(&with_lib(
             "pub use fandhe_ai_autodiff::nn::optim::MultiStepLr;"
-        )
+        ))
         .is_empty()
     );
-    // 正例: 複数行 pub use（group）。
+    // 負例: 別名。
+    let aliased = vec![(
+        "optim.rs".to_string(),
+        format!("{approved_optim}pub use fandhe_ai_autodiff::nn::optim::CyclicLr as Foo;\n"),
+    )];
+    assert!(!lr_scheduler_ext_violations(&aliased).is_empty());
+    // 負例: 別ファイルでの別名公開（元の葉が承認名でなくても検出する）。
     assert!(
-        !scan_lr_scheduler_ext_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::{\n    CyclicLr,\n    LambdaLr,\n};"
-        )
-        .is_empty()
-    );
-    // 正例: 別名 pub use。
-    assert!(
-        !scan_lr_scheduler_ext_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::SequentialLr as Foo;"
-        )
-        .is_empty()
-    );
-    // 正例: 独自 struct 宣言。
-    assert!(
-        !scan_lr_scheduler_ext_reexports_and_declarations(
-            "pub struct CosineAnnealingWarmRestarts;"
-        )
-        .is_empty()
-    );
-    // 負例: コメント中の出現。
-    assert!(
-        scan_lr_scheduler_ext_reexports_and_declarations("// pub use ...::MultiStepLr;").is_empty()
-    );
-    // 負例: 文字列リテラル中の出現。
-    assert!(scan_lr_scheduler_ext_reexports_and_declarations("let s = \"CyclicLr\";").is_empty());
-    // 負例: 非公開 use。
-    assert!(
-        scan_lr_scheduler_ext_reexports_and_declarations(
-            "use fandhe_ai_autodiff::nn::optim::SequentialLr;"
-        )
-        .is_empty()
-    );
-    // 負例: 無関係な pub use（既存 `compat::Sequential` の再エクスポート
-    // は `SequentialLr` と識別子単位で衝突しない）。
-    assert!(
-        scan_lr_scheduler_ext_reexports_and_declarations("pub use crate::compat::Sequential;")
+        !lr_scheduler_ext_violations(&with_lib("pub use crate::other::Other as MultiStepLr;"))
             .is_empty()
     );
-    // 負例: 無関係な pub use（`StepLr` も同様に衝突しない）。
-    assert!(
-        scan_lr_scheduler_ext_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::StepLr;"
-        )
-        .is_empty()
-    );
+    // 負例: optim.rs 内でも承認名を別経路・他型から公開する（正しい行が
+    // 他に残っていても承認形として数えない）。
+    let wrong_path = vec![(
+        "optim.rs".to_string(),
+        format!("{approved_optim}pub use crate::other::CyclicLr;\n"),
+    )];
+    assert!(!lr_scheduler_ext_violations(&wrong_path).is_empty());
+    let wrong_alias = vec![(
+        "optim.rs".to_string(),
+        format!("{approved_optim}pub use crate::other::Other as LambdaLr;\n"),
+    )];
+    assert!(!lr_scheduler_ext_violations(&wrong_alias).is_empty());
+    // 負例: 承認形の 1 つを別経路に差し替えると承認形の欠落でも失敗する。
+    let swapped = vec![(
+        "optim.rs".to_string(),
+        "pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingWarmRestarts, CyclicLr};\n\
+pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, SequentialLr};\n\
+pub use crate::other::MultiStepLr;\n"
+            .to_string(),
+    )];
+    assert!(!lr_scheduler_ext_violations(&swapped).is_empty());
+    // 負例: 独自 struct 宣言。
+    assert!(!lr_scheduler_ext_violations(&with_lib("pub struct LambdaLr;")).is_empty());
+    // 負例: 承認形の欠落（検査対象を見失った場合も fail-closed）。
+    assert!(!lr_scheduler_ext_violations(&[("optim.rs".to_string(), String::new())]).is_empty());
+    // 負例: 重複公開。
+    let dup = vec![(
+        "optim.rs".to_string(),
+        format!("{approved_optim}pub use fandhe_ai_autodiff::nn::optim::SequentialLr;\n"),
+    )];
+    assert!(!lr_scheduler_ext_violations(&dup).is_empty());
 }
 
 // =====================================================================
