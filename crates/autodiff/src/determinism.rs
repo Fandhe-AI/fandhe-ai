@@ -2,15 +2,13 @@
 //! `torch.use_deterministic_algorithms` に相当する、プロセスワイドな
 //! opt-in 状態を管理する。
 //!
-//! **facade 非公開（意図的）**: `crate::matrix_ops`／`crate::reduce_ops`
-//! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への
-//! inherent メソッド追加は即座に facade 公開面へ出てしまう。本モジュール
-//! は `Var` を経由しない自由関数のみで構成し、facade 公開（crate ルート
-//! `fandhe_ai::set_deterministic`／`fandhe_ai::is_deterministic`）は
-//! 承認事項として保留する（`docs/autodiff-determinism-mode-design.md`
-//! §6）。承認後は facade 側の保留ガード（`crates/facade/src/lib.rs::
-//! DeterminismHoldDoctestGuard`）を撤去し、薄い委譲関数を追加する。
+//! **facade 公開（イシュー #2507。2026-10-04 承認・ルート #2499）**:
+//! crate ルート `fandhe_ai::set_deterministic`／`fandhe_ai::is_deterministic`
+//! が本モジュールへの薄い委譲として公開済み。本モジュール自体の再エクスポート
+//! （`fandhe_ai::determinism`）は承認形外で、facade の正ガードが拒否する
+//! （`docs/autodiff-determinism-mode-design.md` §6）。`Var` を経由しない
+//! 自由関数で構成するのは、`Var` への inherent メソッド追加が即座に facade
+//! 公開面へ出てしまうため（`crate::matrix_ops`／`crate::reduce_ops` と同じ判断）。
 //!
 //! **no-op 契約**（`docs/autodiff-determinism-mode-design.md` §0・§3。
 //! 必読）: `crates/backend-cpu` の棚卸し結果、`Tape::new()`（`NaiveOps`）

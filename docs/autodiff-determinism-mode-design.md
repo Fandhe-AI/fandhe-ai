@@ -20,6 +20,7 @@ autodiff に追加するにあたり、非決定的な経路（rayon 縮約順�
 - facade（`fandhe_ai`）への公開は本イシューでは**未承認のまま保留**
   する（§6）。内部クレート（`fandhe_ai_autodiff`）限定の到達入口として
   実装する。
+  - 2026-10-04 追記: facade 公開は #2507 で完了（§6・§8）。
 - GPU（CUDA／Metal）の `Tape` は棚卸し対象外（別 issue。§5・§7）。
   `set_deterministic` はどの `Tape` に対しても等しく no-op であり、
   GPU 経路を拒否も検査もしない。
@@ -436,23 +437,35 @@ CUDA／Metal の `Tape` に対して `set_deterministic` を呼んでも拒否�
   フックが必要になり、GPU の決定的 opt-in（TF32 等）まで一律に塞いで
   しまう。
 
-## §6 承認事項（未承認）
+## §6 承認事項（2026-10-04 承認済み・#2507 で実装）
 
 - **facade 公開**（`fandhe_ai::set_deterministic`／
-  `fandhe_ai::is_deterministic` の crate ルート公開）は未承認のまま
-  対象外とする。`DeterminismHoldDoctestGuard`（`crates/facade/src/
-  lib.rs`）＋`crates/facade/tests/api_surface.rs` の 4 テストで多層
-  固定する。
+  `fandhe_ai::is_deterministic` の crate ルート公開）は、ルート #2499 の
+  2026-10-04 ユーザー一括承認（`docs/compat-api-scope.md` §5 経路 2）に
+  基づき #2507 で実装した（旧記述: 未承認のまま対象外。発端 #2157 時点の
+  記録）。
+  - 公開形: crate ルートの `pub fn` 2 件
+    （`set_cuda_gemm_precision` と同型）が
+    `fandhe_ai_autodiff::determinism::*` へ委譲する。no-op 契約・CPU 限定の
+    保証範囲（§3）は不変。
+  - 承認形外: モジュール再エクスポート（`fandhe_ai::determinism`）・別名
+    公開・独自実装へのすり替え。
+  - ガード反転: `DeterminismHoldDoctestGuard`・ドリフト検査 2 件・固定文言
+    定数を削除。否定ガードを
+    `facade_declares_determinism_fns_only_as_approved_root_delegations`
+    （lib.rs に各 1 件の宣言・委譲先の固定・`determinism` を含む `pub use`
+    の拒否）へ反転。インベントリ
+    `workspace_declares_determinism_fn_names_only_in_allowed_locations` の
+    期待集合を 4 エントリ（autodiff と facade lib.rs）へ拡張。到達性
+    テスト `determinism_mode_is_reachable_via_facade` と
+    `crates/facade/tests/determinism_mode.rs`（no-op bit 一致）を追加。
 - spec（`docs/spec/`）への変更提案はなし。
 
 ## §7 スコープ外・申し送り
 
 - GPU（CUDA／Metal）の非決定性の体系的棚卸しと、必要なら fail-closed
   化は別 issue とする（起票はユーザー承認後）。
-- facade 公開（§6）の承認後は `crates/facade/src/lib.rs::
-  DeterminismHoldDoctestGuard`・`crates/facade/tests/api_surface.rs`
-  の対応する 4 テストを削除し、`fandhe_ai::set_deterministic`／
-  `fandhe_ai::is_deterministic` を追加する。
+- facade 公開（§6）: 完了（#2507）。ガード反転と関数追加を実施済み。
 
 ## §8 実装記録
 
@@ -470,3 +483,11 @@ CUDA／Metal の `Tape` に対して `set_deterministic` を呼んでも拒否�
 - `crates/facade/tests/api_surface.rs`: 対応する 4 テスト追加。
 - `docs/README.md`・`docs/compat-api-scope.md`: 索引・Tier 1 表への
   最小追記。
+
+### #2507 での実装記録（facade 公開）
+
+実装記録の本体は §6。変更ファイル: `crates/facade/src/lib.rs`
+（`set_deterministic`／`is_deterministic` 追加・`DeterminismHoldDoctestGuard`
+削除）、`crates/facade/tests/api_surface.rs`（正ガード反転）、
+`crates/facade/tests/determinism_mode.rs`（新規）、
+`crates/autodiff/src/determinism.rs`（モジュール doc のみ）。
