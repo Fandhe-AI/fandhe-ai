@@ -1172,3 +1172,18 @@ PR #2351 のレビュー是正で main に入った `win_contained_open`
 PR #2351 の本文と squash コミットのメッセージにある「対象外」の記載は、同 PR
 内のレビュー是正より前の記述である。履歴は書き換えず、本決定記録を正とする。
 起票候補（7 節）は自動運転中のため起票していない。
+
+## 11. I/O エラーの OS エラーコード保持（イシュー #2488）
+
+#2393 の Windows 実機検証で、`ERROR_SHARING_VIOLATION`(32) が `Uncategorized`、
+`ERROR_ACCESS_DENIED`(5) が `PermissionDenied` としてしか見えず、facade の利用者が
+OS のエラーコードで区別できないことが分かった（`ExternalDataError::Io` が
+`e.kind()` だけを保持し、facade が `Error::from(kind)` で作り直していたため）。
+
+| 項目 | 決定 |
+|------|------|
+| `ExternalDataError::Io` | `raw_os_error: Option<i32>` を追加。`kind` は合成 kind（読み込み不足の `UnexpectedEof` 等）のため残す。生成は private ヘルパー `io_error` に統一し、`kind` と `raw_os_error` を同じ `io::Error` から取る |
+| facade の写像 | `Some(code)` なら `io::Error::from_raw_os_error(code)`、`None` なら `Error::from(kind)`。std が kind をコードから導出するため同一プラットフォームでは kind も一致する。`OnnxError` の variant 構成・公開シグネチャは不変 |
+| semver | `fandhe-ai-onnx-interop` は未 publish でサポート面は facade のみのため、struct variant のフィールド追加は 0.9.0 契約の対象外。facade では `OnnxError::Io` の `Display` に OS メッセージが付き、`raw_os_error()` が `Some` になる挙動変更がある |
+| `Display` | `raw_os_error` が `Some` のとき末尾に ` (os error N)` を付ける |
+| 対象外 | `InvalidBaseDir { kind }` は facade で `InvalidModel` へ写像されるため未対応。Windows 実機での `raw_os_error() == Some(32 / 5)` の実測も未実施 |

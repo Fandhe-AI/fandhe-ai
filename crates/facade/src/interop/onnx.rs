@@ -569,6 +569,12 @@ pub enum OnnxError {
     /// 専用 variant は設けず（薄いラッパー原則。`std::io::Error` 自体は
     /// 操作の別を保持しない）、[`fmt::Display`] 側で「I/O 失敗」と中立に
     /// 表現する。
+    ///
+    /// external data 由来の OS 起因の失敗では `raw_os_error()` が OS の
+    /// エラーコード（unix は errno、Windows は Win32 エラーコード）を返し、
+    /// 共有違反とアクセス拒否のような原因を区別できる（イシュー #2488）。
+    /// OS コードを持たない合成エラー（読み込み不足の `UnexpectedEof`・確保
+    /// 失敗の `OutOfMemory` 等）では `None`。
     Io(std::io::Error),
     /// protobuf デコード失敗（壊れたバイト列等）。`prost::DecodeError` は
     /// `Display` 文字列のみを保持する（`prost` 型を公開面に出さない）。
@@ -695,9 +701,19 @@ fn map_graph_error(e: GraphError) -> OnnxError {
         // `tensor_name` は `std::io::Error` に保持できないため落ちる
         // （`OnnxError::Io` は `std::fs::read` の I/O 失敗も同じ理由で
         // メッセージ以外のコンテキストを持たない設計であり整合する）。
-        GraphError::ExternalData(ExternalDataError::Io { kind, .. }) => {
-            OnnxError::Io(std::io::Error::from(kind))
-        }
+        // OS 由来の失敗は `raw_os_error` から `from_raw_os_error` で復元し、
+        // 利用者が `raw_os_error()` で OS コードを取得できるようにする
+        // （イシュー #2488）。std には kind と OS コードを同時に持たせる
+        // コンストラクタがないが、`from_raw_os_error` の kind は std が
+        // コードから導出し、元の OS 由来 `io::Error` の `kind()` も同じ
+        // コードから導出されるため、同一プラットフォームでは kind は一致する。
+        // OS コードを持たない合成エラー（`UnexpectedEof` 等）は kind のみ。
+        GraphError::ExternalData(ExternalDataError::Io {
+            kind, raw_os_error, ..
+        }) => OnnxError::Io(match raw_os_error {
+            Some(code) => std::io::Error::from_raw_os_error(code),
+            None => std::io::Error::from(kind),
+        }),
         // external data の読み込みバッファ・復号先の確保失敗（PR #2348
         // codex P0 是正で abort から型付きエラーへ変更）は、既存の
         // `OnnxError::Io`（`ErrorKind::OutOfMemory`）へ写像する（新規
@@ -854,10 +870,32 @@ mod map_graph_error_tests {
         let e = map_graph_error(GraphError::ExternalData(ExternalDataError::Io {
             tensor_name: "w".to_string(),
             kind: std::io::ErrorKind::NotFound,
+            raw_os_error: None,
         }));
         match e {
             OnnxError::Io(io) => assert_eq!(io.kind(), std::io::ErrorKind::NotFound),
             other => panic!("OnnxError::Io(NotFound) を期待したが {other:?}"),
+        }
+    }
+
+    /// OS 由来の `ExternalDataError::Io` は OS コードと kind を保持して
+    /// `OnnxError::Io` へ写る（イシュー #2488）。
+    #[test]
+    fn external_io_error_keeps_raw_os_error() {
+        let missing = std::env::temp_dir().join("fandhe-ai-2488-missing-file.data");
+        let os_err = std::fs::File::open(&missing).expect_err("存在しないパスのはず");
+        let code = os_err.raw_os_error().expect("OS 由来のエラーのはず");
+        let e = map_graph_error(GraphError::ExternalData(ExternalDataError::Io {
+            tensor_name: "w".to_string(),
+            kind: os_err.kind(),
+            raw_os_error: Some(code),
+        }));
+        match e {
+            OnnxError::Io(io) => {
+                assert_eq!(io.raw_os_error(), Some(code));
+                assert_eq!(io.kind(), os_err.kind());
+            }
+            other => panic!("OnnxError::Io を期待したが {other:?}"),
         }
     }
 
