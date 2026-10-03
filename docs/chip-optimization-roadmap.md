@@ -139,7 +139,7 @@ Issue 本文の想定と HEAD の記録が食い違う点を、黙って直さ�
 | readiness 1（#2125 `warp_width`） | 実装済み | 4.1 参照 | amd-readiness §6b |
 | readiness 2（#2126 `WARP_SIZE` 注入） | 実装済み | CUDA 側のみ。Metal は 32 固定のまま | amd-readiness §6c |
 | readiness 3（#2127 cooperative・HIPRTC・unsafe 整理） | 設計済み | 設計（草案）のみ。unsafe は未承認 | `rocm-cooperative-hiprtc-unsafe-readiness-decision.md` |
-| spec 提案（#2128 格上げ条件の v2 再定義） | 設計済み | 未起票。承認事項（§6）はすべて未実施 | `rocm-grade-up-conditions-v2-spec-proposal.md` §0・§6 |
+| spec 提案（#2128 格上げ条件の v2 再定義） | 設計済み | 未起票。承認事項（§6）はすべて未実施 | `rocm-grade-up-conditions-v2-spec-proposal.md` §0・§6（#2614 で最新化・承認依頼中） |
 | `backend-rocm` 本体 | Non-Goal（**推奨**・未承認） | spec は Won't（条件付き）据え置き。確定の手順は §0.3 | 同 §8、`docs/backend-matrix.md` §3.4 |
 
 ## §5 Non-Goal の根拠リスト
@@ -268,7 +268,7 @@ flowchart LR
 ## §10 spec 除外事項「ROCm」への参照
 
 - **現行条文**: `docs/spec/04-requirements.md:367`（@ `2e998dd`。「ROCm バックエンドの正式対応（Won't・条件付き、2026-07-29 更新）」）と `docs/spec/03-poc/poc-10-rocm-promotion/README.md` §2〜§4。行番号は submodule 更新でずれうる
-- **未反映の提案**: `docs/rocm-grade-up-conditions-v2-spec-proposal.md`（#2128）の §0 結論表・§5 文案（未起票）・§6 承認事項（未実施）・§8 発火条件。spec は旧条件のままで、「反映済み」とは書かない
+- **未反映の提案**: `docs/rocm-grade-up-conditions-v2-spec-proposal.md`（#2128）の §0 結論表・§5 文案（未起票）・§6 承認事項（未実施）・§8 発火条件（#2614 で最新化・承認依頼中。2 段構成化と依存方式の推奨を追加）。spec は旧条件のままで、「反映済み」とは書かない
 - **関係**: #2128 は「Won't のまま据え置き、Could 再評価は発火条件待ち」とし、本 doc の 0.3 は同 §8 の「Non-Goal 確定の推奨条件」を適用して推奨するもの。どちらも決定ではない
 - spec リポは private のため、repo 内の相対パスで参照する
 
