@@ -228,3 +228,23 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 `docs/oss-comparison-harness-decision.md`（イシュー #755）を出典として参照する
 （本節では転記しない）。allow リストの実体は本表と二重管理しない
 （`scripts/bench/oss-gemm-compare/deny.toml` 冒頭コメント参照）。
+
+## 10. 下書き（未承認・依存未追加）: HTTP／TLS 候補 crate の実測（第 11 区分相当・イシュー #2620）
+
+モデルの汎用 HTTPS ダウンロード（`docs/model-download-design.md`・イシュー #2088）に必要な HTTP クライアント＋TLS 依存の候補を、承認依頼（#2619／#2621）の材料として実測した下書きである。
+
+- **未承認の下書き**: 本節は 2 節の可否表に含めず、`deny.toml` の allow リストの変更も含意しない。依存は本体 workspace に追加していない。正式反映は承認後に行う。
+- 区分番号: `libc` が第 10 区分（2026-09-28）のため、HTTP／TLS は第 11 区分相当。区分の起案は #2621。
+- 実測日 2026-10-03・基準コミット `eb27531c7ea30354c58c3259d30f91526d60a856`・cargo 1.98.1／cargo-deny 0.19.8。本体 workspace の外の一時パッケージで `cargo tree`／`cargo metadata`／`cargo deny licenses bans sources` を実行（`cargo build` は未実行）。ターゲットは 3 節の軸 1 の 3 種に参考として `x86_64-pc-windows-msvc` を加えた。詳細表・手順・システム要件・MSRV の正は `docs/model-download-design.md` §13 とする（本節で二重管理しない）。
+
+| 候補（固定版） | 直接ライセンス | 現行 allow で `licenses` が通る組合せ | 通らない主因（crate と識別子） |
+|---|---|---|---|
+| `ureq =3.4.2` | MIT OR Apache-2.0 | `native-tls-no-default`（TLS なしを除く） | rustls 系: `subtle`（BSD-3-Clause）・`webpki-roots`／`webpki-root-certs`（CDLA-Permissive-2.0）。`native-tls`（`native-tls-webpki-roots` 込み）: `webpki-root-certs` |
+| `minreq =3.0.0` | ISC | `https-native-tls`・`https-openssl` | rustls 系: `aws-lc-sys`（複合式中の BSD-3-Clause）・`subtle`・`webpki-roots`／`webpki-root-certs` |
+| `attohttpc =0.31.0` | **MPL-2.0** | なし | 直接ライセンスが allow 外（feature によらず） |
+| `reqwest =0.13.5` | MIT OR Apache-2.0 | なし（`blocking`＋`rustls`／既定とも） | `aws-lc-sys`・`subtle`・`webpki-root-certs`、既定の `charset` は `encoding_rs`（`(Apache-2.0 OR MIT) AND BSD-3-Clause`）。推移依存 90〜108 個 |
+
+- MPL 等コピーレフトの推移的混入は、`attohttpc` の直接ライセンス以外では検出されなかった（全 feature 組合せ×全ターゲット）。
+- rustls 系の allow 外は BSD-3-Clause・CDLA-Permissive-2.0 という許容的ライセンスだが、allow 追加はユーザー承認事項（1 節・`.claude/rules/deps-policy.md`）。
+- `docs/model-download-design.md` §3 の旧記載のうち `minreq`（Apache-2.0 → 実測 ISC）・`attohttpc`（MIT OR Apache-2.0 → 実測 MPL-2.0）は誤りだったため、同 doc 側で日付付きで是正した。
+- `advisories` は未実施（承認後に実施）。
