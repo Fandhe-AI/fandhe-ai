@@ -155,3 +155,7 @@
 ## 13. 後続 #2086
 
 イシュー #2086「トークナイザ非目標の spec 明記提案（(b) 形式・実装しない）」は、本 doc §5.2／§6 が確定した「トークナイザは非目標（案 D）」判定を変更せず、spec 正本（`docs/spec/04-requirements.md`）へ明記するための (b) 形式提案文案を `docs/tokenizer-non-target-spec-proposal.md` に確定した（未起票。実起票は §10 承認事項 4 のまま未取得）。追記先は REQ-9「引き続き対象外」列挙（`docs/spec/04-requirements.md:233`）であることを同 doc で再確認済み。本 doc §1〜§12 の既存本文は不変。
+
+## 14. 後続 #2618
+
+イシュー #2618 で、TF／Keras 本体側の事実補正（`TextVectorization` は Keras 本体、サブワード系は別パッケージ）と対象内化／非目標明記の 2 案比較を `docs/tokenizer-non-target-spec-proposal.md` §9 に記録し、ユーザー承認を依頼した（推奨は未承認）。本 doc §5.2／§6 の判定は、ユーザー承認があるまで変更しない。
