@@ -517,6 +517,14 @@ fn missing_file_is_io_not_found() {
             ..
         }
     ));
+    // OS 由来の失敗は OS のエラーコードを保持する（イシュー #2488）
+    assert!(matches!(
+        err,
+        ExternalDataError::Io {
+            raw_os_error: Some(_),
+            ..
+        }
+    ));
 }
 
 #[cfg(any(unix, windows))]

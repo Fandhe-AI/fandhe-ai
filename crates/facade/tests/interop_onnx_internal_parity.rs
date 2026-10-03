@@ -821,6 +821,11 @@ fn facade_from_bytes_rejects_external_data_model_from_path_attempts_resolution()
         matches!(&err, OnnxError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound),
         "companion ファイル不在は OnnxError::Io(NotFound) を期待したが: {err:?}"
     );
+    // OS 由来の失敗は OS のエラーコードを保持して facade まで伝わる（イシュー #2488）
+    assert!(
+        matches!(&err, OnnxError::Io(io_err) if io_err.raw_os_error().is_some()),
+        "companion ファイル不在は raw_os_error() が Some を期待したが: {err:?}"
+    );
 }
 
 /// 上記テストの unix・Windows 以外向け契約版（Cursor Bugbot 指摘・

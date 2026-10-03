@@ -401,9 +401,16 @@ pub enum ExternalDataError {
     /// （A04 資源枯渇対策。`ExternalDataOptions::max_external_files`）。
     TooManyExternalFiles { limit: usize },
     /// ファイル I/O の失敗（`NotFound`／権限エラー等）。
+    ///
+    /// `raw_os_error` は OS 由来の失敗なら `io::Error::raw_os_error()` の値
+    /// （unix は errno、Windows は Win32 エラーコード）を保持する。facade の
+    /// `OnnxError::Io` が OS コードで失敗原因（例: 共有違反と権限拒否）を
+    /// 区別できるようにするため（イシュー #2488）。読み込み不足の
+    /// `UnexpectedEof` のように合成した kind は OS コードを持たず `None`。
     Io {
         tensor_name: String,
         kind: std::io::ErrorKind,
+        raw_os_error: Option<i32>,
     },
     /// パス 2 で再 open したハンドル（または各区間の読み込み直前に同じ
     /// ハンドルへ取り直した `fstat`）のファイル長・実体識別子・変更時刻
@@ -520,11 +527,19 @@ impl fmt::Display for ExternalDataError {
                 f,
                 "external data ファイル数（実体単位）が上限を超過: limit={limit}"
             ),
-            ExternalDataError::Io { tensor_name, kind } => {
+            ExternalDataError::Io {
+                tensor_name,
+                kind,
+                raw_os_error,
+            } => {
                 write!(
                     f,
                     "external data の I/O エラー（tensor={tensor_name}）: {kind:?}"
-                )
+                )?;
+                if let Some(code) = raw_os_error {
+                    write!(f, " (os error {code})")?;
+                }
+                Ok(())
             }
             ExternalDataError::FileChangedDuringLoad { tensor_name } => write!(
                 f,
@@ -554,6 +569,18 @@ impl fmt::Display for ExternalDataError {
 }
 
 impl std::error::Error for ExternalDataError {}
+
+/// `io::Error` を [`ExternalDataError::Io`] へ写す唯一の入口（イシュー #2488）。
+/// `kind` と `raw_os_error` を同じ `io::Error` から取って整合を保ち、facade の
+/// `OnnxError::Io` が OS のエラーコードを失わないようにする。`tensor_name` は
+/// [`cap_name`] で切り詰める。
+fn io_error(tensor_name: &str, e: &std::io::Error) -> ExternalDataError {
+    ExternalDataError::Io {
+        tensor_name: cap_name(tensor_name),
+        kind: e.kind(),
+        raw_os_error: e.raw_os_error(),
+    }
+}
 
 /// 診断用テンソル名を `cap_sparse_tensor_diag_name` と同じ上限で切り詰める。
 fn cap_name(name: &str) -> String {
@@ -1808,17 +1835,11 @@ fn resolve_and_open(
                 reason: LocationRejectReason::NotRegularFile,
             }
         } else {
-            ExternalDataError::Io {
-                tensor_name: cap_name(tensor_name),
-                kind: e.kind(),
-            }
+            io_error(tensor_name, &e)
         }
     })?;
 
-    let meta = file.metadata().map_err(|e| ExternalDataError::Io {
-        tensor_name: cap_name(tensor_name),
-        kind: e.kind(),
-    })?;
+    let meta = file.metadata().map_err(|e| io_error(tensor_name, &e))?;
     if !meta.is_file() {
         return Err(ExternalDataError::InvalidLocation {
             tensor_name: cap_name(tensor_name),
@@ -1857,10 +1878,7 @@ fn resolve_and_open(
             tensor_name: cap_name(tensor_name),
             reason: LocationRejectReason::OutsideBaseDir,
         },
-        win_contained_open::OpenError::Io(e) => ExternalDataError::Io {
-            tensor_name: cap_name(tensor_name),
-            kind: e.kind(),
-        },
+        win_contained_open::OpenError::Io(e) => io_error(tensor_name, &e),
     })
 }
 
@@ -1990,16 +2008,17 @@ fn read_region<R: Read>(
     length: u64,
 ) -> Result<Vec<u8>, ExternalDataError> {
     let mut buf = alloc_region_buf(tensor_name, length)?;
-    let io_err = |kind: std::io::ErrorKind| ExternalDataError::Io {
-        tensor_name: cap_name(tensor_name),
-        kind,
-    };
     let read = file
         .take(length)
         .read_to_end(&mut buf)
-        .map_err(|e| io_err(e.kind()))?;
+        .map_err(|e| io_error(tensor_name, &e))?;
     if read as u64 != length {
-        return Err(io_err(std::io::ErrorKind::UnexpectedEof));
+        // 合成した kind なので OS コードは持たない
+        return Err(ExternalDataError::Io {
+            tensor_name: cap_name(tensor_name),
+            kind: std::io::ErrorKind::UnexpectedEof,
+            raw_os_error: None,
+        });
     }
     Ok(buf)
 }
@@ -2146,10 +2165,7 @@ fn file_key_for(
 ) -> Result<FileKey, ExternalDataError> {
     win_contained_open::file_identity(&opened.file)
         .map(|(volume_serial_number, file_index)| FileKey(volume_serial_number, file_index))
-        .map_err(|e| ExternalDataError::Io {
-            tensor_name: cap_name(tensor_name),
-            kind: e.kind(),
-        })
+        .map_err(|e| io_error(tensor_name, &e))
 }
 #[cfg(not(any(unix, windows)))]
 fn file_key_for(
@@ -2719,12 +2735,10 @@ fn load(
             // 残存窓であり、truncate なら `read_region` の `UnexpectedEof`
             // として `ExternalDataError::Io` で fail-closed になる（モジュール
             // doc「TOCTOU の論拠」節）。
-            let meta = opened.file.metadata().map_err(|e| {
-                GraphError::ExternalData(ExternalDataError::Io {
-                    tensor_name: cap_name(&entry.tensor_name),
-                    kind: e.kind(),
-                })
-            })?;
+            let meta = opened
+                .file
+                .metadata()
+                .map_err(|e| GraphError::ExternalData(io_error(&entry.tensor_name, &e)))?;
             ensure_unchanged(
                 &entry.tensor_name,
                 &planned.snapshot,
@@ -2735,12 +2749,7 @@ fn load(
             opened
                 .file
                 .seek(SeekFrom::Start(entry.offset))
-                .map_err(|e| {
-                    GraphError::ExternalData(ExternalDataError::Io {
-                        tensor_name: cap_name(&entry.tensor_name),
-                        kind: e.kind(),
-                    })
-                })?;
+                .map_err(|e| GraphError::ExternalData(io_error(&entry.tensor_name, &e)))?;
             // 区間バッファは失敗可能確保で用意する（PR #2348 codex P0 是正。
             // 旧実装の `vec![0u8; buf_len]` は確保失敗でプロセスが abort
             // しえた。`max_total_bytes` 以内でも既定 64 GiB は利用可能
@@ -3405,9 +3414,14 @@ mod alloc_tests {
     fn read_region_short_read_is_unexpected_eof() {
         let mut cur = std::io::Cursor::new(vec![1u8, 2, 3]);
         match read_region(&mut cur, "t", 8) {
-            Err(ExternalDataError::Io { tensor_name, kind }) => {
+            Err(ExternalDataError::Io {
+                tensor_name,
+                kind,
+                raw_os_error,
+            }) => {
                 assert_eq!(tensor_name, "t");
                 assert_eq!(kind, std::io::ErrorKind::UnexpectedEof);
+                assert_eq!(raw_os_error, None);
             }
             other => panic!("Io(UnexpectedEof) を期待したが {other:?}"),
         }
