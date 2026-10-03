@@ -33,10 +33,10 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{
-    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, ConstantLr, CosineAnnealingLr,
-    ExponentialLr, Lamb, LambConfig, LinearWarmupLr, LrScheduler, OneCycleAnneal, OneCycleLr,
-    OneCycleLrConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig, StepLr, clip_grad_norm,
-    clip_grad_value,
+    Adadelta, AdadeltaConfig, Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Adamax,
+    AdamaxConfig, ConstantLr, CosineAnnealingLr, ExponentialLr, Lamb, LambConfig, LinearWarmupLr,
+    LrScheduler, NAdam, NAdamConfig, OneCycleAnneal, OneCycleLr, OneCycleLrConfig, RAdam,
+    RAdamConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
 };
 
 const BATCH: usize = 4;
@@ -475,6 +475,134 @@ fn adagrad_with_clip_converges_via_facade_only() {
         final_loss < 0.5 * initial,
         "loss did not converge sufficiently: initial={initial} final={final_loss}"
     );
+}
+
+// =====================================================================
+// Adadelta／Adamax／NAdam／RAdam + clip（イシュー #2501。#2171 実装の
+// facade 公開）。4 種とも `step` は `AdamW::step` と同一の
+// `&[(&Tensor<f32>, &Tensor<f32>)]` シグネチャのため、step 呼び出しを
+// クロージャで差し替える共通ループで `backward → clip → step` を固定する。
+// =====================================================================
+
+/// `train_with_adagrad_and_clip` と同型。optimizer の `step` をクロージャ
+/// （更新後パラメータ列を返す）として受け取る。
+fn train_with_step_and_clip<F>(
+    model: &mut Sequential,
+    steps: usize,
+    max_norm: f32,
+    mut step: F,
+) -> Vec<f32>
+where
+    F: FnMut(&[(&Tensor<f32>, &Tensor<f32>)]) -> Vec<Tensor<f32>>,
+{
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let mut log = Vec::with_capacity(steps);
+
+    for _ in 0..steps {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            let clip_result = clip_grad_norm(&grad_refs, max_norm)
+                .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
+            let param_refs = model.trainable_parameters();
+            let params_and_grads: Vec<(&Tensor<f32>, &Tensor<f32>)> = param_refs
+                .into_iter()
+                .zip(clip_result.grads.iter())
+                .collect();
+            step(&params_and_grads)
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    log
+}
+
+/// 100 step で最終 loss が初期 loss の半分未満になること。
+fn assert_converged(log: &[f32], steps: usize) {
+    assert_eq!(log.len(), steps);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < 0.5 * initial,
+        "loss did not converge sufficiently: initial={initial} final={final_loss}"
+    );
+}
+
+/// `fandhe_ai::optim::{Adadelta, clip_grad_norm}` のみを使った学習ループ。
+#[test]
+fn adadelta_with_clip_converges_via_facade_only() {
+    let mut opt = Adadelta::new(AdadeltaConfig::default())
+        .unwrap_or_else(|e| panic!("test fixture: Adadelta::new が失敗した: {e}"));
+    let mut model = build_model();
+    let log = train_with_step_and_clip(&mut model, 100, 10.0, |pg| {
+        opt.step(pg)
+            .unwrap_or_else(|e| panic!("test fixture: Adadelta::step が失敗した: {e}"))
+    });
+    assert_converged(&log, 100);
+}
+
+/// `fandhe_ai::optim::{Adamax, clip_grad_norm}` のみを使った学習ループ。
+#[test]
+fn adamax_with_clip_converges_via_facade_only() {
+    let mut opt = Adamax::new(AdamaxConfig::default())
+        .unwrap_or_else(|e| panic!("test fixture: Adamax::new が失敗した: {e}"));
+    let mut model = build_model();
+    let log = train_with_step_and_clip(&mut model, 100, 10.0, |pg| {
+        opt.step(pg)
+            .unwrap_or_else(|e| panic!("test fixture: Adamax::step が失敗した: {e}"))
+    });
+    assert_converged(&log, 100);
+}
+
+/// `fandhe_ai::optim::{NAdam, clip_grad_norm}` のみを使った学習ループ。
+#[test]
+fn nadam_with_clip_converges_via_facade_only() {
+    let mut opt = NAdam::new(NAdamConfig::default())
+        .unwrap_or_else(|e| panic!("test fixture: NAdam::new が失敗した: {e}"));
+    let mut model = build_model();
+    let log = train_with_step_and_clip(&mut model, 100, 10.0, |pg| {
+        opt.step(pg)
+            .unwrap_or_else(|e| panic!("test fixture: NAdam::step が失敗した: {e}"))
+    });
+    assert_converged(&log, 100);
+}
+
+/// `fandhe_ai::optim::{RAdam, clip_grad_norm}` のみを使った学習ループ。
+/// `lr=0.01` は `compat_sequential_optim_ext.rs`・`nn_optim_radam.rs` と同じ。
+#[test]
+fn radam_with_clip_converges_via_facade_only() {
+    let cfg = RAdamConfig {
+        lr: 0.01,
+        ..RAdamConfig::default()
+    };
+    let mut opt =
+        RAdam::new(cfg).unwrap_or_else(|e| panic!("test fixture: RAdam::new が失敗した: {e}"));
+    let mut model = build_model();
+    let log = train_with_step_and_clip(&mut model, 100, 10.0, |pg| {
+        opt.step(pg)
+            .unwrap_or_else(|e| panic!("test fixture: RAdam::step が失敗した: {e}"))
+    });
+    assert_converged(&log, 100);
 }
 
 // =====================================================================

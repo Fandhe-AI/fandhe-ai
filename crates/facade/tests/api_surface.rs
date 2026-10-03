@@ -352,6 +352,14 @@ fn optim_module_reexports_exactly_expected_surface() {
     );
 
     let expected: std::collections::BTreeSet<String> = [
+        "Adadelta",
+        "AdadeltaConfig",
+        "Adamax",
+        "AdamaxConfig",
+        "NAdam",
+        "NAdamConfig",
+        "RAdam",
+        "RAdamConfig",
         "Adagrad",
         "AdagradConfig",
         "Adam",
@@ -718,6 +726,37 @@ fn optim_types_are_reachable_via_facade_only() {
     let mut adagrad = fandhe_ai::optim::Adagrad::new(adagrad_config)
         .unwrap_or_else(|e| panic!("test fixture: Adagrad::new が失敗した: {e}"));
     let _ = &mut adagrad;
+
+    // Adadelta／Adamax／NAdam／RAdam（イシュー #2501。#2171 実装の facade 公開）
+    // の facade のみ経由の到達性＋既定値ドリフトガード（値は
+    // `nn::optim::{adadelta,adamax,nadam,radam}` の `Default` 実装と一致）。
+    let adadelta_config = fandhe_ai::optim::AdadeltaConfig::default();
+    assert_eq!(adadelta_config.lr, 1.0, "AdadeltaConfig の既定 lr は 1.0");
+    assert_eq!(adadelta_config.rho, 0.9, "AdadeltaConfig の既定 rho は 0.9");
+    let mut adadelta = fandhe_ai::optim::Adadelta::new(adadelta_config)
+        .unwrap_or_else(|e| panic!("test fixture: Adadelta::new が失敗した: {e}"));
+    let _ = &mut adadelta;
+
+    let adamax_config = fandhe_ai::optim::AdamaxConfig::default();
+    assert_eq!(adamax_config.lr, 2e-3, "AdamaxConfig の既定 lr は 2e-3");
+    let mut adamax = fandhe_ai::optim::Adamax::new(adamax_config)
+        .unwrap_or_else(|e| panic!("test fixture: Adamax::new が失敗した: {e}"));
+    let _ = &mut adamax;
+
+    let nadam_config = fandhe_ai::optim::NAdamConfig::default();
+    assert_eq!(
+        nadam_config.momentum_decay, 4e-3,
+        "NAdamConfig の既定 momentum_decay は 4e-3"
+    );
+    let mut nadam = fandhe_ai::optim::NAdam::new(nadam_config)
+        .unwrap_or_else(|e| panic!("test fixture: NAdam::new が失敗した: {e}"));
+    let _ = &mut nadam;
+
+    let radam_config = fandhe_ai::optim::RAdamConfig::default();
+    assert_eq!(radam_config.lr, 1e-3, "RAdamConfig の既定 lr は 1e-3");
+    let mut radam = fandhe_ai::optim::RAdam::new(radam_config)
+        .unwrap_or_else(|e| panic!("test fixture: RAdam::new が失敗した: {e}"));
+    let _ = &mut radam;
 
     // LAMB（イシュー #1744）の facade 到達性固定。既定値ドリフトガード
     // （`eps=1e-6` は AdamW／Adam の `1e-8` と異なる・`weight_decay=0.0`。
@@ -13358,118 +13397,56 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
     );
 }
 // =====================================================================
-// イシュー #2171（親 #2131）: Adadelta／Adamax／NAdam／RAdam の facade
-// 公開保留を検査するテスト群。`OptimizerExtHoldDoctestGuard`（`src/
-// lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査に加え、facade
-// src 全体への非再エクスポート・非独自宣言を固定する。承認事項の位置
-// づけは `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md`
-// §8 を参照。
+// イシュー #2171（親 #2131）→ #2501（親 #2499）: Adadelta／Adamax／
+// NAdam／RAdam の facade 公開（承認形の正ガード）。#2171 では公開保留を
+// `OptimizerExtHoldDoctestGuard`（`src/lib.rs`）と否定テストで固定して
+// いたが、#2501 で `fandhe_ai::optim` からの素の再エクスポートを承認形
+// （`docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md`
+// §8）として公開したため、doctest ガードとそのドリフト検査 2 件を削除し、
+// ソース走査ガードを「承認した形だけを許す」正ガードへ反転した。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `OptimizerExtHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`dropout_embedding_bag_hold_doctest_globs_all_pub_modules` の
-/// `OptimizerExtHoldDoctestGuard` 版）。
-#[test]
-fn optimizer_ext_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerExtHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "OptimizerExtHoldDoctestGuard の doctest ブロックが glob import\
-         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
-         している（declared={declared:?}, doctest={globbed:?}）。新しい\
-         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
+/// 承認形で公開する 8 識別子（Adadelta／Adamax／NAdam／RAdam と各 `*Config`）。
+const OPTIMIZER_EXT_NAMES: [&str; 8] = [
+    "Adadelta",
+    "AdadeltaConfig",
+    "Adamax",
+    "AdamaxConfig",
+    "NAdam",
+    "NAdamConfig",
+    "RAdam",
+    "RAdamConfig",
+];
 
-/// [`optimizer_ext_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**（`__fandhe_optim_ext_hold_probe` モジュール・
-/// `__probe` 関数）が固定文言 [`OPTIMIZER_EXT_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
-/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
-/// する改変を機械的に拒否する）。
-#[test]
-fn optimizer_ext_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerExtHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, OPTIMIZER_EXT_HOLD_PROBE_BODY,
-        "OptimizerExtHoldDoctestGuard の doctest ブロック本文（glob 以外）\
-         が固定文言 OPTIMIZER_EXT_HOLD_PROBE_BODY からドリフトしている。\
-         正のプローブ（__fandhe_optim_ext_hold_probe モジュール・__probe\
-         関数）の削除・弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`optimizer_ext_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `OptimizerExtHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const OPTIMIZER_EXT_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_optim_ext_hold_probe {\n\
-\x20\x20\x20\x20pub struct Adadelta;\n\
-\x20\x20\x20\x20pub struct AdadeltaConfig;\n\
-\x20\x20\x20\x20pub struct Adamax;\n\
-\x20\x20\x20\x20pub struct AdamaxConfig;\n\
-\x20\x20\x20\x20pub struct NAdam;\n\
-\x20\x20\x20\x20pub struct NAdamConfig;\n\
-\x20\x20\x20\x20pub struct RAdam;\n\
-\x20\x20\x20\x20pub struct RAdamConfig;\n\
-}\n\
-use __fandhe_optim_ext_hold_probe::*;\n\
-\n\
-fn __probe(\n\
-\x20\x20\x20\x20_: Adadelta,\n\
-\x20\x20\x20\x20_: AdadeltaConfig,\n\
-\x20\x20\x20\x20_: Adamax,\n\
-\x20\x20\x20\x20_: AdamaxConfig,\n\
-\x20\x20\x20\x20_: NAdam,\n\
-\x20\x20\x20\x20_: NAdamConfig,\n\
-\x20\x20\x20\x20_: RAdam,\n\
-\x20\x20\x20\x20_: RAdamConfig,\n\
-) {\n\
-}";
-
-/// [`facade_does_not_reexport_or_declare_optimizer_ext_items`]・その
-/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/
-/// src/**`）の `pub use` から [`collect_pub_use_leaves`] で別名にする
-/// 前の葉を集め `Adadelta`／`AdadeltaConfig`／`Adamax`／`AdamaxConfig`／
-/// `NAdam`／`NAdamConfig`／`RAdam`／`RAdamConfig` を検出し（単一行・
-/// 複数行・ネストした group・別名も検出）、`trait`／`struct`／`enum`／
-/// `type` 直後の同名独自宣言を違反として返す（`scan_kv_cache_
-/// reexports_and_declarations` と同型。本 4 種は `compat::Sequential`／
-/// `Var` への inherent メソッド追加を伴わない値型 API のため `fn`
-/// 宣言の検出は不要）。
-fn scan_optimizer_ext_reexports_and_declarations(content: &str) -> Vec<String> {
-    const NAMES: [&str; 8] = [
-        "Adadelta",
-        "AdadeltaConfig",
-        "Adamax",
-        "AdamaxConfig",
-        "NAdam",
-        "NAdamConfig",
-        "RAdam",
-        "RAdamConfig",
+/// `pub use` の path トークン列が `fandhe_ai_autodiff :: nn :: optim :: …`
+/// で始まるか（承認形の接頭辞）を判定する。
+fn optimizer_ext_approved_prefix(path_tokens: &[String]) -> bool {
+    let want = [
+        "fandhe_ai_autodiff",
+        ":",
+        ":",
+        "nn",
+        ":",
+        ":",
+        "optim",
+        ":",
+        ":",
     ];
+    path_tokens.len() >= want.len() && path_tokens.iter().zip(want).all(|(a, b)| a == b)
+}
+
+/// [`facade_reexports_optimizer_ext_items_only_in_approved_shape`]・その
+/// 自己テストが共用する検出本体。`content`（1 ファイル分のソース）の
+/// `pub use` から [`collect_pub_use_leaves`] で 8 識別子の葉を集め、
+/// 承認形（接頭辞が `fandhe_ai_autodiff::nn::optim::` で `as` 別名を
+/// 伴わない）の出現葉を第 1 要素、承認形から外れる出現（別 path 接頭辞・
+/// 別名）と同名の `trait`／`struct`／`enum`／`type` 独自宣言を第 2 要素
+/// （違反）として返す。コメント・文字列リテラル中の出現と非公開 `use` は
+/// 無視する。
+fn scan_optimizer_ext_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<String>) {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
+    let mut approved: Vec<String> = Vec::new();
     let mut offending: Vec<String> = Vec::new();
 
     let mut i = 0usize;
@@ -13480,10 +13457,17 @@ fn scan_optimizer_ext_reexports_and_declarations(content: &str) -> Vec<String> {
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
+            let hits: Vec<String> = collect_pub_use_leaves(path_tokens)
+                .into_iter()
+                .filter(|leaf| OPTIMIZER_EXT_NAMES.contains(&leaf.as_str()))
+                .collect();
+            let shape_ok = optimizer_ext_approved_prefix(path_tokens)
+                && !path_tokens.iter().any(|t| t == "as");
+            for leaf in hits {
+                if shape_ok {
+                    approved.push(leaf);
+                } else {
+                    offending.push(format!("承認形外の pub use leaf={leaf}"));
                 }
             }
             i = (end + 1).min(tokens.len());
@@ -13492,7 +13476,7 @@ fn scan_optimizer_ext_reexports_and_declarations(content: &str) -> Vec<String> {
         if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
             && tokens
                 .get(i + 1)
-                .map(|t| NAMES.contains(&t.as_str()))
+                .map(|t| OPTIMIZER_EXT_NAMES.contains(&t.as_str()))
                 .unwrap_or(false)
         {
             offending.push(format!(
@@ -13504,81 +13488,89 @@ fn scan_optimizer_ext_reexports_and_declarations(content: &str) -> Vec<String> {
         i += 1;
     }
 
-    offending
+    (approved, offending)
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、Adadelta／Adamax／
-/// NAdam／RAdam（8 個の型名）を識別子単位で含む `pub use`（複数行・
-/// ネストした group・別名含む）も、facade 独自の `trait`／`struct`／
-/// `enum`／`type` 宣言も存在しないことを固定する
-/// （`OptimizerExtHoldDoctestGuard` の正のプローブと多層防御を成す
-/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_kv_
-/// cache_items` と同型）。
+/// 承認形の正ガード（#2501 で `facade_does_not_reexport_or_declare_
+/// optimizer_ext_items` から反転）。facade src 全体で、8 識別子がそれぞれ
+/// `src/optim.rs` の `pub use fandhe_ai_autodiff::nn::optim::…`（別名なし）
+/// としてちょうど 1 回だけ出現し、承認形外の再エクスポート・同名の独自
+/// 宣言が存在しないことを fail-closed に固定する。
 #[test]
-fn facade_does_not_reexport_or_declare_optimizer_ext_items() {
+fn facade_reexports_optimizer_ext_items_only_in_approved_shape() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_optim_rs: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_optimizer_ext_reexports_and_declarations(content) {
+        let (approved, bad) = scan_optimizer_ext_reexports_and_declarations(content);
+        for offense in bad {
             offending.push(format!("{}: {offense}", path.display()));
         }
+        if path.ends_with("src/optim.rs") {
+            approved_in_optim_rs.extend(approved);
+        } else {
+            for leaf in approved {
+                offending.push(format!(
+                    "{}: optim.rs 以外での pub use leaf={leaf}",
+                    path.display()
+                ));
+            }
+        }
     });
+    approved_in_optim_rs.sort();
+    let mut expected: Vec<String> = OPTIMIZER_EXT_NAMES.iter().map(|s| s.to_string()).collect();
+    expected.sort();
     assert!(
         offending.is_empty(),
-        "facade の公開面が optimizer 拡張（#2171。Adadelta／Adamax／\
-         NAdam／RAdam）を再エクスポート、または独自宣言している\
-         （`docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md`\
-         §8 承認事項が未取得のまま対象外としている設計判断に違反）: \
-         {offending:?}"
+        "facade の公開面が optimizer 拡張（#2501。Adadelta／Adamax／NAdam／RAdam）を\
+         承認形（src/optim.rs の `pub use fandhe_ai_autodiff::nn::optim::…`・別名なし）\
+         以外で再エクスポート、または独自宣言している（`docs/autodiff-optimizer-\
+         adadelta-adamax-nadam-radam-decision.md` §8）: {offending:?}"
+    );
+    assert_eq!(
+        approved_in_optim_rs, expected,
+        "src/optim.rs に承認形の 8 識別子がちょうど 1 回ずつ存在しない\
+         （過不足・重複いずれも fail。検査対象を見失った場合を含む）"
     );
 }
 
-/// [`scan_optimizer_ext_reexports_and_declarations`]（[`facade_does_not_
-/// reexport_or_declare_optimizer_ext_items`]）の自己テスト（正例・負例の
-/// 合成入力）。
+/// [`scan_optimizer_ext_reexports_and_declarations`] の自己テスト
+/// （正例・負例の合成入力）。
 #[test]
-fn facade_does_not_reexport_or_declare_optimizer_ext_items_detects_each_category() {
-    // 正例: 単一行 pub use。
+fn facade_reexports_optimizer_ext_items_only_in_approved_shape_detects_each_category() {
+    let scan = scan_optimizer_ext_reexports_and_declarations;
+    // 承認形: group・単一識別子。違反なし・葉が承認側に載る。
+    let (ok, bad) = scan("pub use fandhe_ai_autodiff::nn::optim::{Adadelta, AdadeltaConfig};");
+    assert!(bad.is_empty());
+    assert_eq!(ok, vec!["Adadelta", "AdadeltaConfig"]);
+    let (ok, bad) = scan("pub use fandhe_ai_autodiff::nn::optim::NAdam;");
+    assert!(bad.is_empty());
+    assert_eq!(ok, vec!["NAdam"]);
+    // 違反: 別名。
     assert!(
-        !scan_optimizer_ext_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::Adadelta;"
-        )
-        .is_empty()
-    );
-    // 正例: 複数行 pub use（group）。
-    assert!(
-        !scan_optimizer_ext_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::{\n    Adamax,\n    AdamaxConfig,\n};"
-        )
-        .is_empty()
-    );
-    // 正例: 別名 pub use。
-    assert!(
-        !scan_optimizer_ext_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::NAdam as Foo;"
-        )
-        .is_empty()
-    );
-    // 正例: 独自 struct 宣言。
-    assert!(!scan_optimizer_ext_reexports_and_declarations("pub struct RAdamConfig;").is_empty());
-    // 負例: コメント中の出現。
-    assert!(scan_optimizer_ext_reexports_and_declarations("// pub use ...::Adadelta;").is_empty());
-    // 負例: 文字列リテラル中の出現。
-    assert!(scan_optimizer_ext_reexports_and_declarations("let s = \"Adamax\";").is_empty());
-    // 負例: 非公開 use。
-    assert!(
-        scan_optimizer_ext_reexports_and_declarations("use fandhe_ai_autodiff::nn::optim::RAdam;")
+        !scan("pub use fandhe_ai_autodiff::nn::optim::NAdam as Foo;")
+            .1
             .is_empty()
     );
-    // 負例: 無関係な pub use。
+    // 違反: 別 path 接頭辞。
     assert!(
-        scan_optimizer_ext_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::optim::AdamW;"
-        )
-        .is_empty()
+        !scan("pub use fandhe_ai_autodiff::optim::Adamax;")
+            .1
+            .is_empty()
     );
+    // 違反: 独自宣言。
+    assert!(!scan("pub struct RAdamConfig;").1.is_empty());
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use ...::Adadelta;",
+        "let s = \"Adamax\";",
+        "use fandhe_ai_autodiff::nn::optim::RAdam;",
+        "pub use fandhe_ai_autodiff::nn::optim::AdamW;",
+    ] {
+        let (ok, bad) = scan(src);
+        assert!(ok.is_empty() && bad.is_empty(), "src={src:?}");
+    }
 }
-
 // =====================================================================
 // イシュー #2174（親 #2131）: optimizer state_dict（save/load・
 // safetensors 経由）の facade 公開保留を検査するテスト群。
@@ -13903,7 +13895,7 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
 /// `crates/facade/src/lib.rs` の `LbfgsHoldDoctestGuard` doc 内の唯一の
 /// doctest ブロックが glob import するネスト `pub mod` 集合と、
 /// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// （`optimizer_ext_hold_doctest_globs_all_pub_modules`（#2501 で削除済み） の
 /// `LbfgsHoldDoctestGuard` 版）。
 #[test]
 fn lbfgs_hold_doctest_globs_all_pub_modules() {
@@ -14028,7 +14020,7 @@ fn scan_lbfgs_reexports_and_declarations(content: &str) -> Vec<String> {
 /// group・別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type`
 /// 宣言も存在しないことを固定する（`LbfgsHoldDoctestGuard` の正の
 /// プローブと多層防御を成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_or_declare_optimizer_ext_items` と同型）。
+/// `facade_does_not_reexport_or_declare_optimizer_ext_items`（#2501 で `facade_reexports_optimizer_ext_items_only_in_approved_shape` へ反転）と同型）。
 #[test]
 fn facade_does_not_reexport_or_declare_lbfgs_items() {
     let src_dir = facade_crate_root().join("src");
@@ -14571,14 +14563,14 @@ fn facade_does_not_reexport_or_declare_ema_items_detects_each_category() {
 // =====================================================================
 // LrSchedulerExtHoldDoctestGuard（イシュー #2176。親 #2131）の否定ガード
 // =====================================================================
-// `OptimizerExtHoldDoctestGuard`（#2171）と同型の 4 テスト構成。
+// `OptimizerExtHoldDoctestGuard`（#2171。#2501 で削除済み）と同型の 4 テスト構成。
 // decision doc §8 を参照。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `LrSchedulerExtHoldDoctestGuard` doc
 /// 内の唯一の doctest ブロックが glob import するネスト `pub mod`
 /// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules`（#2501 で削除済み） の
 /// `LrSchedulerExtHoldDoctestGuard` 版）。
 #[test]
 fn lr_scheduler_ext_hold_doctest_globs_all_pub_modules() {
@@ -14803,7 +14795,7 @@ fn facade_does_not_reexport_or_declare_lr_scheduler_ext_items_detects_each_categ
 // （BCE・BCEWithLogits・NLL・KLDiv・Huber・SmoothL1・L1）の facade
 // 公開保留を検査するテスト群。`CompileLossVariantsHoldDoctestGuard`
 // （`src/lib.rs`）の正のプローブのドリフト検査に加え、`compat::Loss`
-// 自体の variant 集合を固定する（`OptimizerExtHoldDoctestGuard` 系とは
+// 自体の variant 集合を固定する（`OptimizerExtHoldDoctestGuard`（#2501 で削除済み）系とは
 // 異なり facade 独自宣言・再エクスポートの検査ではなく、既存 enum への
 // variant 追加を検査する点が異なる）。承認事項の位置づけは `docs/
 // facade-compile-loss-variants-decision.md` §4・§5 を参照。
@@ -14812,7 +14804,7 @@ fn facade_does_not_reexport_or_declare_lr_scheduler_ext_items_detects_each_categ
 /// `crates/facade/src/lib.rs` の `CompileLossVariantsHoldDoctestGuard`
 /// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
 /// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules`（#2501 で削除済み） の
 /// `CompileLossVariantsHoldDoctestGuard` 版）。
 #[test]
 fn compile_loss_variants_hold_doctest_globs_all_pub_modules() {
@@ -15054,7 +15046,7 @@ fn collect_top_level_enum_variant_idents_detects_each_category() {
 /// `crates/facade/src/lib.rs` の `CallbacksLoggersHoldDoctestGuard`
 /// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
 /// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules` の
+/// 固定する（`optimizer_ext_hold_doctest_globs_all_pub_modules`（#2501 で削除済み） の
 /// `CallbacksLoggersHoldDoctestGuard` 版）。
 #[test]
 fn callbacks_loggers_hold_doctest_globs_all_pub_modules() {
@@ -15197,7 +15189,7 @@ fn scan_callback_loggers_reexports_and_declarations(content: &str) -> Vec<String
 /// `trait`／`struct`／`enum`／`type` 宣言も、`on_epoch_end` の `fn`
 /// 宣言も存在しないことを固定する（`CallbacksLoggersHoldDoctestGuard`
 /// の正のプローブと多層防御を成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_or_declare_optimizer_ext_items` と同型）。
+/// `facade_does_not_reexport_or_declare_optimizer_ext_items`（#2501 で `facade_reexports_optimizer_ext_items_only_in_approved_shape` へ反転）と同型）。
 #[test]
 fn facade_does_not_reexport_or_declare_callback_loggers() {
     let src_dir = facade_crate_root().join("src");
