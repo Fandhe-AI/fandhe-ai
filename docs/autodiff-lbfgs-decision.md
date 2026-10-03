@@ -26,7 +26,9 @@ facade（`fandhe_ai::optim`）への公開・`compile()` 統合は**別イシュ
 （`compat::Optimizer::Lbfgs(LbfgsConfig)` variant・`LbfgsConfig` の
 facade 再エクスポート・`compile()`/`fit()` 統合の 3 点。#2172 コメント）
 し、実装済みである。`Lbfgs`（optimizer 本体）・`LbfgsLineSearch`
-（line search 方式選択）は承認範囲外のまま非公開を維持する。保留の
+（line search 方式選択）も **2026-10-04 にルート #2499 の一括承認で
+イシュー #2502 が facade（`fandhe_ai::optim`）へ公開済み**（§8 の形。
+保留ガードは全撤去。§9 末尾「#2502 による残り 2 型の公開」参照）。保留の
 詳細・再開条件は §7、承認前の実装設計（事前提示）は §8、承認後の
 実装記録は §9 を参照。
 
@@ -173,8 +175,8 @@ f32 テンソル演算に合わせ `f32`。`|loss - prev_loss| < tolerance_chang
   `compat::Sequential::compile()` との統合は別イシュー **#2198**
   （facade 公開面拡張はユーザー承認事項）で 2026-09-27 に承認・実装
   済み（§9 参照）。`Lbfgs`（optimizer 本体）・`LbfgsLineSearch`
-  （line search 方式選択）自体の facade 再エクスポートは承認範囲外の
-  まま**引き続きスコープ外**（§7・§9 参照）
+  （line search 方式選択）自体の facade 再エクスポートは #2198 では
+  スコープ外だったが、#2502（2026-10-04）で公開済み（§9 末尾参照）
 - `crate::optim::device_store::DeviceParamStore` 常駐経路への対応
 - param groups（`nn::optim::param_group::ParamGroupStep`。#2173）への
   対応
@@ -187,7 +189,8 @@ f32 テンソル演算に合わせ `f32`。`|loss - prev_loss| < tolerance_chang
 Lbfgs(LbfgsConfig)` variant・`LbfgsConfig` の facade 再エクスポート・
 `compile()`/`fit()` 統合を承認し実装済みである（承認範囲は §9 が
 提示する 3 点のみで、本節が示す「3 型すべての再エクスポート」より
-狭い）。`Lbfgs`／`LbfgsLineSearch` は引き続き非公開（下記の保留ガードは
+狭い）。`Lbfgs`／`LbfgsLineSearch` は当時は非公開（2026-10-04 の #2502 で公開し
+保留ガードは全撤去。以下は当時の記録。下記の保留ガードは
 この 2 型のみを対象とする形へ縮小済み。`compat_optimizer_enum_has_no_
 lbfgs_variant` は variant 追加自体が承認されたため
 `compat_optimizer_enum_has_lbfgs_variant`〈正のガード〉へ反転した）。
@@ -331,7 +334,8 @@ lbfgs_items`。`NAMES` から `LbfgsConfig` を除外）で固定する。
     param groups（#2173）はいずれも facade 側で別途保留中（未承認）の
     ため、`Optimizer::Lbfgs` 固有の追加対応は行っていない（両者の保留
     解除時に横断的に対応する）。
-- **facade のみで使う場合の既知の制約**: `LbfgsLineSearch` を facade
+- **facade のみで使う場合の既知の制約（#2502 で解消済み。当時の記録）**:
+  `LbfgsLineSearch` を facade
   から名指しできないため、`fandhe_ai` のみに依存する利用者は
   `LbfgsConfig::line_search` を明示指定できず、既定の固定ステップ
   （`LbfgsLineSearch::None`）のみで L-BFGS を使うことになる。strong
@@ -401,11 +405,36 @@ L-BFGS は 1 epoch（= 1 outer step。フルバッチ）あたり `max_iter=20`
 同じ理由（内部反復あたり 1 回の forward／backward）で想定どおり。
 
 
+### #2502 による残り 2 型の公開（2026-10-04）
+
+- 承認根拠: ルート #2499 の 2026-10-04 一括承認（本 doc §7〜§9 の推奨形）。
+- 公開した名前: `fandhe_ai::optim::{Lbfgs, LbfgsLineSearch}`。`crates/facade/src/optim.rs`
+  は §8 の波括弧形 `pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};`
+  の 1 行（newtype・独自メソッドの追加なし）。`LbfgsLineSearch` は `#[non_exhaustive]`
+  なので将来の variant 追加も非破壊。`FitConfig`・`fandhe-ai =0.10.0` の既存 API は不変。
+- 削除したガード: `LbfgsHoldDoctestGuard`（`lib.rs`）、`api_surface.rs` の
+  `lbfgs_hold_doctest_globs_all_pub_modules`・`lbfgs_hold_doctest_probe_body_matches_fixed_contract`・
+  `LBFGS_HOLD_PROBE_BODY`・`scan_lbfgs_reexports_and_declarations`・
+  `facade_does_not_reexport_or_declare_lbfgs_items`（および `_detects_each_category`）。
+- 正ガード: `optim_module_reexports_exactly_expected_surface` の期待集合へ
+  `Lbfgs`・`LbfgsLineSearch` を追加（承認した形だけを許す）、
+  `lbfgs_types_are_reachable_via_facade_only`（facade のみの import で strong Wolfe の
+  手動 closure ループを実行）を新設。`compat_optimizer_enum_has_lbfgs_variant` は維持。
+- 利用例テスト: `compat_sequential_fit_lbfgs.rs::fit_lbfgs_strong_wolfe_via_facade_decreases_loss`
+  （facade のみで `LbfgsLineSearch::StrongWolfe` を指定した `compile`/`fit`）と
+  `optim.rs` モジュール doc の doctest。§9 の「既知の制約」は解消した。
+- 帰結: `Lbfgs` の inherent `state_dict`／`load_state_dict`／`history_len`（§10）も
+  `fandhe_ai::optim::Lbfgs` から到達可能になった。`OptimizerStateDict` trait は
+  再エクスポートしておらず（#2555 の範囲）、`OptimizerStateDictHoldDoctestGuard` は不変。
+  直接 `load_state_dict` を呼ぶ場合の履歴長上限（`MAX_LBFGS_HISTORY`）は `load_model`
+  経路側で強制されるため、呼び出し元が渡す `HashMap` の大きさに資源消費は依存する。
+
 ## §10 状態保存・復元 API（イシュー #2366）
 
 `Lbfgs` の大域状態を保存・復元する専用 inherent API を内部クレート
-（`fandhe_ai_autodiff::nn::optim::Lbfgs`。facade 非公開のため公開面は
-広がらない）に追加した（`crates/autodiff/src/nn/optim/lbfgs.rs`）。
+（`fandhe_ai_autodiff::nn::optim::Lbfgs`。追加時点は facade 非公開。
+#2502 以降は `fandhe_ai::optim::Lbfgs` から inherent メソッドとして
+到達可能だが、`OptimizerStateDict` trait の facade 公開は #2555 の範囲）に追加した（`crates/autodiff/src/nn/optim/lbfgs.rs`）。
 `docs/compat-model-io-decision.md` §2 item 2・§4・§13.5 の内部 API 部分の実装。
 
 ### API
