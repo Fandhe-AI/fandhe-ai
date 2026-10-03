@@ -231,7 +231,7 @@ facade テストへ置き換え）。
 cargo fmt --all -- --check
 cargo clippy -p fandhe-ai --all-targets --no-deps -- -D warnings
 cargo test -p fandhe-ai --lib compat::training::train_step_tests
-cargo test -p fandhe-ai --lib compat::training::accumulate_tests
+cargo test -p fandhe-ai --test compat_sequential_accumulate
 cargo test -p fandhe-ai --test compat_sequential_fit \
   --test compat_sequential_callbacks --test compat_sequential_metrics \
   --test compat_sequential_fit_amp --test compat_sequential_fit_optimizers
