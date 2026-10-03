@@ -29,10 +29,10 @@
 </div>
 
 <h2>役割・機能の対応表 — fandhe-ai は何であり、何でないか</h2>
-<p class="note"><b>注記</b>: 本表の内容は 0.8.0 版（2026-09-12）時点の記述のままで、0.10.0 基準への再監査は未実施。0.9.0 公開面での行ごとの再判定は <code>docs/perf/framework-compare-feature-matrix-0.9.0.md</code>（#1938）にあり、v0.9.0 の Conv／Pooling／BatchNorm／Embedding／Attention／RNN／Dropout／state_dict 等と、v0.10.0 の optimizer 拡充（Adadelta・Adamax・NAdam・RAdam・RmsProp・Adagrad・LAMB・LBFGS）・param groups・LR scheduler・Transformer 層・CTC 損失・DataLoader 拡張・npy／npz・generate()・facade の ONNX import／export と safetensors・<code>fandhe-ai-onnx-interop</code> の crates.io 初回公開などは本表に反映していない。</p>
-<p class="note">fandhe-ai 列は 0.8.0 版時点の facade（crates.io 公開面）から到達できる範囲を「ある」とし、リポジトリ内にはあるが当時非公開だったクレート（onnx-interop・guardrail・self-repair・bench-harness）にとどまるものは「リポ内」と区別している。他列は各プロジェクトの公開ドキュメント上の一般的事実。Hugging Face と LangChain は fandhe-ai と同じ層の製品ではなく、性能比較の相手ではない。</p>
+<p class="note"><b>注記</b>: fandhe-ai 列は 2026-10-03 に <code>fandhe-ai =0.10.0</code>（タグ <code>v0.10.0</code>）の facade 公開面で再監査した。facade の <code>pub use</code>／<code>pub mod</code> から到達できるものだけを「ある」とし、内部クレートに実装があっても facade から到達できないもの（高階微分・generate()・KV キャッシュ・npy／npz・Adadelta 等）は「未公開」と書いている。0.9.0 時点の行ごとの再判定は <code>docs/perf/framework-compare-feature-matrix-0.9.0.md</code>（#1938）。</p>
+<p class="note">他列は各プロジェクトの公開ドキュメント上の一般的事実。Hugging Face と LangChain は fandhe-ai と同じ層の製品ではなく、性能比較の相手ではない。</p>
 <div class="wrap"><table class="pos"><thead><tr><th>項目</th>
-<th>fandhe-ai（0.8.0 版時点の記述）</th>
+<th>fandhe-ai 0.10.0</th>
 <th>PyTorch</th>
 <th>TensorFlow (Keras 3)</th>
 <th>SciPy / NumPy</th>
@@ -40,7 +40,7 @@
 <th>LangChain</th>
 </tr></thead><tbody>
 <tr><th scope="row"><span class="ph">層・役割</span></th>
-<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust 製の自作コア（テンソル・動的テープ autodiff・カーネル・バックエンド抽象）＋薄い compat 層。REQ-1 で既存 ML フレームワークへの依存を排除</span></td>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust 製の完全自作コア（テンソル・動的テープ autodiff・カーネル・バックエンド抽象）。facade が唯一の公開面で、compat（array・Sequential・fit）に nn・optim・data・interop・model を載せる。REQ-1 で既存 ML フレームワークへの依存を排除</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">汎用 DL フレームワーク（テンソル・autograd・nn・分散）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">汎用 DL フレームワーク（Keras 3 高水準 API・XLA）</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">科学計算（BLAS/LAPACK・最適化・統計・信号処理）。NN・autodiff の層ではない</span></td>
@@ -48,15 +48,15 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">LLM アプリのオーケストレーション（チェーン・エージェント・RAG）。数値計算をしない</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">言語・配布</span></th>
-<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust のみ。crates.io 6 クレート・MIT OR Apache-2.0。Python バインディングなし</span></td>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust のみ（Python バインディングなし）。crates.io 7 クレート（0.10.0 で onnx-interop 初公開）・MIT OR Apache-2.0。Windows はビルド可・CUDA は CUDA_INCLUDE_PATH 明示で実機動作確認（CUDA_PATH からの自動探索は 0.10.0 で追加・実機未確認）。Windows の save_model／load_model は非対応</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Python（C++ コア libtorch）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Python（C++ コア）・JS/Lite</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Python（C/Fortran）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Python</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Python・JS</span></td>
 </tr>
-<tr><th scope="row"><span class="ph">dtype</span><span class="ds">facade の演算セットは f32</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">演算は f32 固定。f16 GEMM は GPU 内部のみ・CUDA TF32／3×TF32 は既定 OFF の opt-in。f64/i32/i64/bool は生成・view のみ</span></td>
+<tr><th scope="row"><span class="ph">dtype</span><span class="ds">autograd 演算は f32</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">autograd を通る演算は f32 のみ。f64／f16／bf16 は勾配なしの 8 演算（TypedOps）。compile_with_amp で Linear／Conv2d／MHA の forward を f16／bf16 化（f32 master weight・GradScaler）。CUDA TF32／3×TF32 は既定 OFF の opt-in</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">f16/bf16/f32/f64/int/bool/量子化型</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">同左＋mixed precision policy</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">f32/f64/complex/int（NN 用の低精度型はない）</span></td>
@@ -64,7 +64,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">自動微分</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">動的テープ・1 階のみ。高階微分・no_grad・カスタム VJP・requires_grad 制御なし（テープ登録は pub(crate)）</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">動的テープ・1 階のみ。no_grad 相当（var_no_grad・detach）・勾配蓄積・checkpoint・層単位の requires_grad／freeze はある。高階微分・カスタム VJP は内部実装のみで facade 未公開</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">動的 autograd・高階・カスタム Function・functorch</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">GradientTape・高階・tf.function</span></td>
 <td class="pc"><span class="pill loss">ない</span><span class="pt">なし（有限差分・手書き勾配）</span></td>
@@ -72,7 +72,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">演算の範囲</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">matmul・add・mul・relu・tanh・exp・sum・max（sum/max の CUDA/Metal カーネルは Unsupported）・MSE・CrossEntropy。conv・softmax 単体・LayerNorm/RMSNorm・reshape 以外の高度な index 操作は公開面になし</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">Var の演算約 110（算術・比較・活性化・softmax・conv／pool・attention・RNN セル・損失・正規化・形状・gather／scatter・sort／topk・cumsum・einsum・線形代数）。線形代数は CPU のみ（CUDA／Metal は Unsupported）。数千 op 級の網羅ではない</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">網羅（数千 op）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">網羅</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">線形代数・FFT・疎行列・最適化（NN 向けではない）</span></td>
@@ -80,7 +80,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">NN 層・モデル構築</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">compat::Sequential（add_linear/add_relu/add_sigmoid/add_tanh）。Conv・Norm・Embedding・Attention・RNN は 0.8.0 時点では意図的スコープ外だったが、0.9.0 では Tier 1／2 の実装が進行中（docs/compat-api-scope.md。本表の他行は 0.8.0 時点の記述のまま未監査）</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">Sequential に 30 種の add_*（Linear・活性化・Conv1d／2d・Pool 6 種・BatchNorm・LayerNorm・RMSNorm・Embedding・MHA・TransformerEncoder・Dropout）＋独自層の add_module。RNN／LSTM／GRU は nn::rnn、nn::Module に state_dict。Transformer デコーダ・GroupNorm 等は未公開</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.nn 網羅</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras レイヤー網羅</span></td>
 <td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
@@ -88,7 +88,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">最適化・学習ループ</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">SGD（momentum/nesterov/weight_decay）・AdamW・ConstantLr/StepLr・grad clip。fit()/compile()・DataLoader・混合精度なし。DeviceParamStore によるデバイス常駐更新は独自</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">SGD・Adam・AdamW・RMSprop・Adagrad・LAMB・L-BFGS、LR scheduler 7 種、grad clip、DataLoader（batch／shuffle）、fit／evaluate／callbacks／metrics、AMP。param groups・EMA・Adadelta／NAdam 等・マルチワーカー DataLoader は未公開</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.optim 網羅・DataLoader・AMP</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras optimizer 網羅・fit()・tf.data</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">scipy.optimize（L-BFGS 等。NN 学習用ではない）</span></td>
@@ -96,7 +96,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">バックエンド・ハード</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">CPU（BLIS 風自作 GEMM・rayon）／CUDA（NVRTC 自作カーネル）／Metal（simdgroup 自作カーネル）を cfg 切替。単一デバイスのみ・分散なし・AMD なし</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">CPU（BLIS 風自作 GEMM・rayon）／CUDA（NVRTC 自作カーネル）／Metal（simdgroup 自作カーネル）を cfg 切替・available_devices() で列挙。単一デバイスのみ・分散なし・AMD なし</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">CPU/CUDA/ROCm/MPS/XPU・DDP/FSDP</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">CPU/CUDA/TPU・Metal はプラグイン（本計測は 2.16.2＋tensorflow-metal／GB10 は 2.21.0 CPU）・分散戦略</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">CPU（Accelerate/OpenBLAS）</span></td>
@@ -104,7 +104,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">相互運用（重み・モデル形式）</span></th>
-<td class="pc me"><span class="pill solo">リポ内</span><span class="pt">safetensors ロード/セーブ・ONNX インポート（21 op のインタープリタ）はリポジトリ内 onnx-interop にあるが非公開クレートで facade から到達不能（site/guides/interop.md）。ONNX エクスポートは HEAD で実装済み・未公開</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">facade から ONNX import（36 op・推論専用）・export（import 済みモデルの往復と Sequential 6 層）・safetensors 保存／読込（F32）・save_model／load_model。npy／npz は内部クレートのみで未公開</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.export・ONNX export・safetensors</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">SavedModel・TFLite・ONNX（tf2onnx）</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">npy/npz・scipy.io（MATLAB・netCDF）</span></td>
@@ -112,7 +112,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">事前学習済みモデル</span></th>
-<td class="pc me"><span class="pill loss">ない</span><span class="pt">なし。0.9.0 時点でも事前学習済みモデルの配布・ロード機構自体はない（個別レイヤーの実装状況は上行を参照）</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">同梱重み・ダウンロード・モデルハブはない。ONNX／safetensors の取り込みと、ローカル配置済み重みを読む ModelRegistry（読み取り専用）がある</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torchvision・torch.hub</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras Applications・TF Hub</span></td>
 <td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
@@ -120,7 +120,7 @@
 <td class="pc"><span class="pill near">部分的</span><span class="pt">モデルは API・ローカルランタイム経由で利用</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">推論・サービング</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">predict／predict_resident（デバイス常駐チェーン）。量子化・KV キャッシュ・トークナイザ・コンパイルなし</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">predict／predict_resident（デバイス常駐チェーン）・ONNX の run。generate()・KV キャッシュは内部実装のみで facade 未公開。量子化・トークナイザ・グラフコンパイルなし</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.compile・TorchScript・量子化・TorchServe</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">TFLite・TF Serving・XLA</span></td>
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>

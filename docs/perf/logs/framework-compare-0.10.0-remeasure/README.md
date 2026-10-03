@@ -136,6 +136,16 @@ GB10 で round_spread が 1.5 を超えたセルとその値:
 
 fandhe-ai 自身の中央値は、GB10 の reuse 行で 0.9.0 比 0.96〜1.05× の範囲だった。v0.10.0 の性能改善候補はすべて既定 OFF の opt-in で、既定経路の GEMM・学習・推論の選択ロジックは変わっていない。
 
+## 役割・機能の対応表（計測外）
+
+ページ下部の「役割・機能の対応表」の fandhe-ai 列は、2026-10-03 にタグ `v0.10.0` の facade 公開面で再監査した（0.9.0 版ページまでは 0.8.0 時点の記述のままだった）。
+
+| 項目 | 内容 |
+|---|---|
+| 判定基準 | facade の `pub use`／`pub mod` から到達できるものだけを「ある」とする。内部クレートにだけ実装があるもの（高階微分・`generate()`・KV キャッシュ・npy／npz・Adadelta 等）は「未公開」と書く |
+| 主な変化 | 相互運用（ONNX import／export・safetensors・`save_model`／`load_model`）が facade から到達可能になった。NN 層（Conv・Pool・Norm・Embedding・MHA・TransformerEncoder・RNN）、optimizer 7 種と LR scheduler 7 種、DataLoader・`fit`・AMP、`ModelRegistry` を反映した |
+| 他列 | PyTorch・TensorFlow・SciPy・Hugging Face・LangChain の列は変更していない |
+
 ## 再現
 
 ```bash
