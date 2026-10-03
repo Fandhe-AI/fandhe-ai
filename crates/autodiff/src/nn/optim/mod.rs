@@ -231,7 +231,7 @@ pub use state_dict::OptimizerStateDict;
 // （`crates/facade/src/optim.rs`・`crates/facade/src/compat/
 // training.rs::OptimizerState::Lbfgs`）。`Lbfgs`（本体）・
 // `LbfgsLineSearch`（line search 方式選択）の facade 再エクスポートも
-// #2502（2026-10-04 ルート #2499 一括承認）で実装済み
+// #2502（ルート #2499 本文「承認範囲」節の一括承認）で実装済み
 // （`docs/autodiff-lbfgs-decision.md` §8・§9）。`DeviceParamStore` 非対応（デバイス常駐化は親 #2172 のスコープ外）。
 
 // イシュー #2366: `Lbfgs` の状態保存・復元（専用 inherent API

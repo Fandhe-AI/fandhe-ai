@@ -26,7 +26,7 @@ facade（`fandhe_ai::optim`）への公開・`compile()` 統合は**別イシュ
 （`compat::Optimizer::Lbfgs(LbfgsConfig)` variant・`LbfgsConfig` の
 facade 再エクスポート・`compile()`/`fit()` 統合の 3 点。#2172 コメント）
 し、実装済みである。`Lbfgs`（optimizer 本体）・`LbfgsLineSearch`
-（line search 方式選択）も **2026-10-04 にルート #2499 の一括承認で
+（line search 方式選択）も **ルート #2499 本文「承認範囲」節の一括承認で
 イシュー #2502 が facade（`fandhe_ai::optim`）へ公開済み**（§8 の形。
 保留ガードは全撤去。§9 末尾「#2502 による残り 2 型の公開」参照）。保留の
 詳細・再開条件は §7、承認前の実装設計（事前提示）は §8、承認後の
@@ -176,7 +176,7 @@ f32 テンソル演算に合わせ `f32`。`|loss - prev_loss| < tolerance_chang
   （facade 公開面拡張はユーザー承認事項）で 2026-09-27 に承認・実装
   済み（§9 参照）。`Lbfgs`（optimizer 本体）・`LbfgsLineSearch`
   （line search 方式選択）自体の facade 再エクスポートは #2198 では
-  スコープ外だったが、#2502（2026-10-04）で公開済み（§9 末尾参照）
+  スコープ外だったが、#2502 で公開済み（§9 末尾参照）
 - `crate::optim::device_store::DeviceParamStore` 常駐経路への対応
 - param groups（`nn::optim::param_group::ParamGroupStep`。#2173）への
   対応
@@ -189,7 +189,7 @@ f32 テンソル演算に合わせ `f32`。`|loss - prev_loss| < tolerance_chang
 Lbfgs(LbfgsConfig)` variant・`LbfgsConfig` の facade 再エクスポート・
 `compile()`/`fit()` 統合を承認し実装済みである（承認範囲は §9 が
 提示する 3 点のみで、本節が示す「3 型すべての再エクスポート」より
-狭い）。`Lbfgs`／`LbfgsLineSearch` は当時は非公開（2026-10-04 の #2502 で公開し
+狭い）。`Lbfgs`／`LbfgsLineSearch` は当時は非公開（#2502 で公開し
 保留ガードは全撤去。以下は当時の記録。下記の保留ガードは
 この 2 型のみを対象とする形へ縮小済み。`compat_optimizer_enum_has_no_
 lbfgs_variant` は variant 追加自体が承認されたため
@@ -405,13 +405,15 @@ L-BFGS は 1 epoch（= 1 outer step。フルバッチ）あたり `max_iter=20`
 同じ理由（内部反復あたり 1 回の forward／backward）で想定どおり。
 
 
-### #2502 による残り 2 型の公開（2026-10-04）
+### #2502 による残り 2 型の公開
 
-- 承認根拠: ルート #2499 の 2026-10-04 一括承認（本 doc §7〜§9 の推奨形）。
-  出典は、ユーザー本人が #2499 の消化を依頼した際の指示文に明記された「Phase 1〜3 の
-  facade 公開は既存の設計判断記録が推奨する形で実装してよい。issue ごとの再承認は不要。
-  保留ガードを承認した形だけを許す正ガードへ反転してよい」という承認（承認日 2026-10-04）。
-  この承認は記録に書かれた形（§8 の波括弧形 1 行）にのみ及び、本 PR はその形だけを公開する。
+- 承認根拠: ルート #2499 の Issue 本文「承認範囲」節（Phase 1〜3 の facade 公開は
+  既存の設計判断記録が推奨する形で実装してよく、issue ごとの再承認は不要。保留ガードを
+  承認した形だけを許す正ガードへ反転してよい）。確認先は
+  https://github.com/Fandhe-AI/fandhe-ai/issues/2499 の本文。本 doc 内で推奨形を
+  名指ししているのは §8（`Lbfgs`／`LbfgsConfig`／`LbfgsLineSearch` の波括弧形 1 行）であり、
+  §9 冒頭の 2026-09-27 承認（#2172 コメント）は別件の先行承認で `Lbfgs`・`LbfgsLineSearch` を
+  含まない。この承認は記録に書かれた形（§8 の波括弧形 1 行）にのみ及び、本 PR はその形だけを公開する。
 - 公開した名前: `fandhe_ai::optim::{Lbfgs, LbfgsLineSearch}`。`crates/facade/src/optim.rs`
   は §8 の波括弧形 `pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};`
   の 1 行（newtype・独自メソッドの追加なし）。`LbfgsLineSearch` は `#[non_exhaustive]`

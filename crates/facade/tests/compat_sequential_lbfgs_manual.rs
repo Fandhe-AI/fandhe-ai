@@ -5,7 +5,7 @@
 //! 組んだ手動 closure ループの検証。
 //!
 //! **位置づけ（#2502 での変化）**: `Lbfgs`・`LbfgsLineSearch` は #2502
-//! （2026-10-04 ルート #2499 一括承認）で facade（`fandhe_ai::optim`）から
+//! （ルート #2499 本文「承認範囲」節の一括承認）で facade（`fandhe_ai::optim`）から
 //! 公開済みで、facade だけで同じ手動ループを書ける（到達性は
 //! `api_surface.rs::lbfgs_types_are_reachable_via_facade_only`）。本ファイルは
 //! 履歴上の契約として**引き続き `fandhe_ai_autodiff::nn::optim::Lbfgs` を

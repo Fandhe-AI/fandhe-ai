@@ -243,7 +243,7 @@
 //! [`crate::optim::LbfgsLineSearch`]（line search 方式選択）を
 //! `fandhe_ai_autodiff::nn::optim` から素の再エクスポートで公開する
 //! （`LbfgsConfig` は #2198・2026-09-27 承認、残る 2 型は #2502・
-//! 2026-10-04 のルート #2499 一括承認。形は
+//! ルート #2499 本文「承認範囲」節の一括承認。形は
 //! `docs/autodiff-lbfgs-decision.md` §8）。
 //!
 //! - [`crate::compat::Optimizer::Lbfgs`] へ `LbfgsConfig` を渡すと
@@ -296,7 +296,7 @@ pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
-// イシュー #2502（親 #2500・ルート #2499。2026-10-04 一括承認）: L-BFGS
+// イシュー #2502（親 #2500・ルート #2499 本文「承認範囲」節の一括承認）: L-BFGS
 // の 3 型を `docs/autodiff-lbfgs-decision.md` §8 の波括弧形で公開する
 // （`LbfgsConfig` は #2198 で公開済み。`Lbfgs`〈closure 駆動の本体〉・
 // `LbfgsLineSearch`〈line search 方式選択〉を追加）。

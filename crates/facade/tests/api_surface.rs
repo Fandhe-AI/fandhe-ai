@@ -13884,7 +13884,7 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
 // LBFGS の facade 公開・`compile()` 統合を検査するテスト群。#2198（2026-09-27
 // 所有者承認）で `compat::Optimizer::Lbfgs(LbfgsConfig)` variant・
 // `LbfgsConfig` の再エクスポート・`compile()`/`fit()` 統合を、#2502
-// （2026-10-04 ルート #2499 一括承認。`docs/autodiff-lbfgs-decision.md` §8）で
+// （ルート #2499 本文「承認範囲」節の一括承認。`docs/autodiff-lbfgs-decision.md` §8）で
 // `Lbfgs`・`LbfgsLineSearch` の再エクスポートを実装済み。旧否定ガード
 // （`LbfgsHoldDoctestGuard` と facade src 走査 6 項目）は #2502 で撤去し、
 // 承認した形だけを許す正ガード（`optim_module_reexports_exactly_expected_surface`
