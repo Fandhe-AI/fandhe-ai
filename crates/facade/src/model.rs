@@ -916,6 +916,13 @@ mod tests {
     /// へ到達することは別途要検証）。`max` を引数化しているため、
     /// `MAX_MODEL_FILE_BYTES`〈1 GiB〉相当の実ファイルを用意せずに
     /// 9 バイトのファイル・上限 8 バイトで同じ経路を再現できる。
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
     #[test]
     fn resolve_model_file_with_limit_rejects_over_bound() {
         let dir = TempDirGuard::new("resolve-over-bound");
@@ -946,6 +953,13 @@ mod tests {
     /// bound` と同じ境界を保つことの確認。安全側検証のため意図的に
     /// safetensors として不正な中身を使い、この後段の
     /// `load_safetensors_f32_from_bytes` 側のエラーとは切り分ける）。
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
     #[test]
     fn resolve_model_file_with_limit_accepts_at_bound() {
         let dir = TempDirGuard::new("resolve-at-bound");
@@ -964,6 +978,13 @@ mod tests {
     /// ことを、公開 `load` と同じ配線（`resolve_model_file_with_limit`
     /// → `Read::take` 二段構え）を通して検証する（モジュール doc
     /// 「非信頼入力の扱い」節手順 5〜6）。
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
     #[test]
     fn load_with_limit_rejects_over_bound() {
         let dir = TempDirGuard::new("load-over-bound");
@@ -974,6 +995,44 @@ mod tests {
         assert!(
             matches!(err, ModelError::TooLarge { len: 9, max: 8, .. }),
             "ModelError::TooLarge {{ len: 9, max: 8, .. }} を期待したが {err:?} だった"
+        );
+    }
+
+    /// 非対応プラットフォーム（Windows 等）の fail-closed 契約の回帰検査
+    /// （モジュール doc の「load は `ModelError::Io`」記述を固定する）。
+    /// open がサイズ判定より先に拒否するため、上限超過でも `TooLarge` ではなく
+    /// `Io(Unsupported)` になる。述語の正は `fs_guard::open_leaf_no_follow`。
+    #[cfg(not(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    )))]
+    #[test]
+    fn load_is_unsupported_on_non_supported_platform() {
+        let dir = TempDirGuard::new("unsupported");
+        write_leaf(dir.path(), b"12345678");
+        let registry = ModelRegistry::with_cache_dir(dir.path());
+        let err = registry
+            .resolve_model_file_with_limit("mlp", "v1", 8)
+            .unwrap_err();
+        assert!(
+            matches!(&err, ModelError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported),
+            "Io(Unsupported) を期待したが {err:?} だった"
+        );
+        write_leaf(dir.path(), b"123456789");
+        let err = registry
+            .resolve_model_file_with_limit("mlp", "v1", 8)
+            .unwrap_err();
+        assert!(
+            matches!(&err, ModelError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported),
+            "TooLarge ではなく Io(Unsupported) を期待したが {err:?} だった"
+        );
+        let err = registry.load_with_limit("mlp", "v1", 8).unwrap_err();
+        assert!(
+            matches!(&err, ModelError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported),
+            "Io(Unsupported) を期待したが {err:?} だった"
         );
     }
 }

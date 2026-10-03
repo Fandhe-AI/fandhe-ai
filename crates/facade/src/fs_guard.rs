@@ -286,6 +286,16 @@ mod tests {
         dir
     }
 
+    // 対応環境の述語は `open_leaf_no_follow`（本ファイル上部）の cfg と同一。
+    // 変更時は同期すること。対応側テストと `cfg(not)` 側テストが対になり、
+    // 実装の対応範囲がずれるとどちらかが該当プラットフォームで落ちる。
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
     #[test]
     fn open_leaf_checked_reads_regular_file_exactly() {
         let dir = temp_dir("ok");
@@ -299,6 +309,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
     #[test]
     fn open_leaf_checked_rejects_over_bound_without_reading() {
         let dir = temp_dir("big");
@@ -307,6 +324,39 @@ mod tests {
         assert!(matches!(
             open_leaf_checked(&path, 16),
             Err(LeafError::TooLarge { limit: 16 })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 非対応プラットフォーム（Windows 等）の fail-closed 契約の回帰検査。
+    /// 葉オープンは `ErrorKind::Unsupported` で拒否され、上限超過ファイルでも
+    /// サイズ判定（`TooLarge`）より先に拒否される。Linux／macOS の CI では
+    /// コンパイル対象外のため、Windows クロス clippy と実機検証（#2393）で担保する。
+    /// 述語の正は `open_leaf_no_follow`。
+    #[cfg(not(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    )))]
+    #[test]
+    fn open_leaf_checked_is_unsupported_on_non_supported_platform() {
+        let dir = temp_dir("unsupported");
+        // 先に実在させないと symlink_metadata が NotFound を返し open 拒否へ到達しない。
+        let small = dir.join("small.bin");
+        std::fs::File::create(&small)
+            .and_then(|mut f| f.write_all(b"hello"))
+            .expect("書き込めるはず");
+        let big = dir.join("big.bin");
+        std::fs::write(&big, vec![0u8; 17]).expect("書き込めるはず");
+        assert!(matches!(
+            open_leaf_checked(&small, 16),
+            Err(LeafError::Io(e)) if e.kind() == std::io::ErrorKind::Unsupported
+        ));
+        assert!(matches!(
+            open_leaf_checked(&big, 16),
+            Err(LeafError::Io(e)) if e.kind() == std::io::ErrorKind::Unsupported
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
