@@ -866,6 +866,19 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-03（v0.10.0 リリースサイクル）: 公開 7 クレートの `workspace.version` を
+  0.9.0 → 0.10.0 へ lockstep バンプした（0.9.0 公開〈2026-09-17〉以降の 274
+  コミット。#2058 ツリーの対応表穴埋め・Windows ビルド対応〈#2481 ツリー〉・
+  各バックエンドの opt-in 性能改善候補と A/B 基盤。目的は framework-compare の
+  対戦成績を `fandhe-ai =0.10.0` で再計測すること。ユーザー指示「最新の crate を
+  release し、html の値を測り直して」〈2026-10-03〉。§11 手順 1）。内部依存
+  `version = "=0.10.0"`（6 クレート・12 箇所。#2017・#2036 で facade →
+  onnx-interop・onnx-interop → autodiff が加わり 0.9.0 時の 9 箇所から増えた）・
+  ルート `Cargo.lock`（`cargo update -w --offline`）・
+  `scripts/bench/oss-gemm-compare/Cargo.lock`（`fandhe-ai-*` 4 クレート・
+  `bench-harness` のみ狙い撃ち）を更新した。`fandhe-ai-onnx-interop` は本版が
+  初回公開となる（13 節）。framework-compare の承認ピン更新（`=0.9.0` →
+  `=0.10.0`）は公開完了後に §10 追補へ記録する。
 - 2026-09-18（#2036）: `fandhe-ai-onnx-interop` の `[dependencies]` へ
   `fandhe-ai-autodiff`（`version = "=0.9.0"` 併記）を追加し、
   `onnx::export_nn`（`nn::Module` 層列 -> `ExportNode`／`Graph`。facade
