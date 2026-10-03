@@ -58,7 +58,7 @@
 - facade から到達できる相互運用面（`crates/facade/src/interop/onnx.rs`）: `OnnxModel::from_bytes`（237 行目）・`from_path`（282）・`from_path_with_limits`（298。#2623 時点で新規）・`from_sequential`（333。対応層のみ・全層事前検証で fail-closed に `UnsupportedLayer`）・`run`（363）・`to_bytes`（402）・`to_path`（412）。
 - `crates/facade/src/interop/safetensors.rs:95-98`: `fandhe_ai_onnx_interop::st_load::{LoadError, load_safetensors_f32}`・`load_safetensors_f32_from_bytes`／`require_keys`・`st_save::save_safetensors_f32_to_bytes`・`SaveError`／`save_safetensors_f32` の素の再エクスポート（変更なし）。
 - `state_dict`／`load_state_dict`（`compat::Sequential`）。
-- `tensor-core::io` の npy／npz は内部クレート限定のまま保留（`crates/facade/src/lib.rs:5206-5278` 付近の hold doctest guard。`save_model`／`load_model` の保留ガードは :5313 以降）。facade 公開はユーザー承認前。
+- `tensor-core::io` の npy／npz は内部クレート限定のまま保留（`crates/facade/src/lib.rs:5206-5278` 付近の hold doctest guard）。`save_model`／`load_model` は自由関数版（`compat::save_model`／`compat::load_model`・`compat::ModelIoError`）が #2369 で公開済み（`lib.rs:5326`）で、保留が残るのは `Sequential` の inherent メソッド版（`save`／`load`／`save_model`／`load_model`。`:5313` 以降の保留ガード）のみ。npy／npz の facade 公開はユーザー承認前。
 - PyO3・maturin・FlatBuffers（TFLite が使う形式）・HDF5（H5 が使う C ライブラリ）系 crate は、`.claude/rules/deps-policy.md` の許容依存 10 区分（本体の直接依存は第 1〜8・第 10 の 9 区分）のいずれにも含まれない。
 
 ## §3 非目標の理由
@@ -245,7 +245,7 @@ TF 系モデル形式の実装・関連する新規依存の追加を起票・�
 | `docs/spec/04-requirements.md:233-235`・`:435` | REQ-9「引き続き対象外」列挙と追記（:234 が本提案の反映、:235 が #2194）・変更履歴 |
 | `crates/facade/src/interop/onnx.rs:237-412` | facade の ONNX 公開面（`OnnxModel` の各メソッド） |
 | `crates/facade/src/interop/safetensors.rs:95-98` | facade の safetensors 公開面（素の再エクスポート） |
-| `crates/facade/src/lib.rs:5206-5278`・`:5313` 以降 | npy／npz io・`save_model`／`load_model` の facade 公開保留状態（hold doctest guard） |
+| `crates/facade/src/lib.rs:5206-5278`・`:5313` 以降 | npy／npz io および `Sequential` inherent メソッド版 `save`／`load`／`save_model`／`load_model` の facade 公開保留状態（hold doctest guard。自由関数版 `compat::save_model`／`load_model` は #2369 で公開済み） |
 | `docs/perf/logs/framework-compare-0.10.0-remeasure/scoreboard/body_0100.html:51`・`:106-109`・`:123-125` | スコアボードの言語・配布／相互運用／推論行 |
 | `.claude/rules/deps-policy.md` | 許容依存 10 区分 |
 | `.claude/rules/coding-rust.md` | 完全自作コア・unsafe 最小方針 |
