@@ -230,14 +230,15 @@ pub use state_dict::OptimizerStateDict;
 // 2026-09-27 ユーザー承認（#2172 コメント）を得て実装済み
 // （`crates/facade/src/optim.rs`・`crates/facade/src/compat/
 // training.rs::OptimizerState::Lbfgs`）。`Lbfgs`（本体）・
-// `LbfgsLineSearch`（line search 方式選択）自体の facade 再エクスポートは
-// 承認範囲外のまま非公開を維持する（`docs/autodiff-lbfgs-decision.md`
-// §9）。`DeviceParamStore` 非対応（デバイス常駐化は親 #2172 のスコープ外）。
+// `LbfgsLineSearch`（line search 方式選択）の facade 再エクスポートも
+// #2502（ルート #2499 本文「承認範囲」節の一括承認）で実装済み
+// （`docs/autodiff-lbfgs-decision.md` §8・§9）。`DeviceParamStore` 非対応（デバイス常駐化は親 #2172 のスコープ外）。
 
 // イシュー #2366: `Lbfgs` の状態保存・復元（専用 inherent API
 // `Lbfgs::state_dict`／`load_state_dict`／`history_len`。`lbfgs` モジュール
 // doc「状態の保存・復元」節・`docs/autodiff-lbfgs-decision.md` §10）。
-// `OptimizerStateDict` は実装せず facade 公開面も広げない。
+// `OptimizerStateDict` は実装しない（`Lbfgs` 自体は #2502 で facade 公開済みのため
+// inherent API は `fandhe_ai::optim::Lbfgs` から到達可能。trait の公開は #2555）。
 
 // イシュー #2367: `crate::optim::Sgd` が `OptimizerStateDict` を実装した
 // （momentum の velocity を `state.<i>.momentum_buffer` として保存・復元。

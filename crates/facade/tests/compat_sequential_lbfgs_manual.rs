@@ -4,20 +4,17 @@
 //! optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch}`（**内部 import**）で
 //! 組んだ手動 closure ループの検証。
 //!
-//! **2026-09-27 所有者承認（#2172 コメント）による位置づけの変化**:
-//! 承認事項は `compat::Optimizer::Lbfgs(LbfgsConfig)` variant・
-//! `LbfgsConfig` の facade 再エクスポート・`compile()`/`fit()` 統合の
-//! 3 点に限られ、`Lbfgs`（optimizer 本体。closure 駆動）・
-//! `LbfgsLineSearch`（line search 方式選択）は引き続き承認範囲外で
-//! facade 未再エクスポートのまま（`crates/facade/src/lib.rs::
-//! LbfgsHoldDoctestGuard` が機械固定する）。このため**本ファイルは
-//! 引き続き `fandhe_ai_autodiff::nn::optim::Lbfgs` を直接 import する
-//! 契約ファイル**であり（`compat_sequential_optim_ext.rs` と同型の
+//! **位置づけ（#2502 での変化）**: `Lbfgs`・`LbfgsLineSearch` は #2502
+//! （ルート #2499 本文「承認範囲」節の一括承認）で facade（`fandhe_ai::optim`）から
+//! 公開済みで、facade だけで同じ手動ループを書ける（到達性は
+//! `api_surface.rs::lbfgs_types_are_reachable_via_facade_only`）。本ファイルは
+//! 履歴上の契約として**引き続き `fandhe_ai_autodiff::nn::optim::Lbfgs` を
+//! 直接 import する内部 import 契約ファイル**であり（`compat_sequential_optim_ext.rs` と同型の
 //! 位置づけ）、facade 再エクスポートのみを使う契約のテストファイルへ
 //! 混入させない。`compile()`／`fit()` 統合（`LbfgsConfig` のみを使う
 //! facade-only 契約）は別ファイル `compat_sequential_fit_lbfgs.rs` へ
 //! 実装した。両ファイルの関係: 本ファイルは strong Wolfe line search
-//! （facade からは選べない）を使う手動ループの受け入れ裏付けを、
+//! を使う手動ループの受け入れ裏付けを、
 //! `compat_sequential_fit_lbfgs.rs` は facade `compile()`/`fit()` 経由の
 //! 固定ステップ（既定 `LbfgsLineSearch::None`）の学習曲線検証を担う。
 //!
