@@ -8,7 +8,8 @@
 //! # A03（インジェクション）対応
 //!
 //! `CUDA_INCLUDE_PATH`・`CUDA_PATH`（Windows のみ。#2487）環境変数は
-//! コンパイルオプションの include パス文字列としてのみ `CompileOptions::include_paths` へ渡し、シェル展開・
+//! コンパイルオプションの include パス文字列としてのみ
+//! `CompileOptions::include_paths` へ渡し、シェル展開・
 //! コマンド実行には一切使わない（`.claude/rules/security.md`）。
 //!
 //! `src` 引数の契約（イシュー #516 で更新）: 従来は「コンパイル時定数
@@ -3930,7 +3931,7 @@ fn overflow_err(step: &str) -> CudaError {
 ///    不在なら `CudaError::NvrtcUnavailable` を返す。
 /// 2. include_paths なしでコンパイルを試みる。
 /// 3. 失敗した場合のみ、`CUDA_INCLUDE_PATH` 環境変数、Windows では
-///    `%CUDA_PATH%\\include`（#2487）、既知の候補パス（CUDA 13.0 標準
+///    `%CUDA_PATH%\include`（#2487）、既知の候補パス（CUDA 13.0 標準
 ///    インストール先）の順に再試行する（候補列挙は
 ///    [`nvrtc_include_candidates`]）
 ///    （`cuda_fp16.h` 等が NVRTC 組み込みで解決できない環境向け。
@@ -4006,11 +4007,11 @@ enum IncludeSearchPlatform {
 /// NVRTC の include パス再試行候補を優先順に列挙する（`compile_ptx` から呼ばれる）。
 ///
 /// 順序: `CUDA_INCLUDE_PATH`（最優先・値はそのまま）→ Windows のみ
-/// `<CUDA_PATH>\\include`（#2487。#2393 の Windows 実機検証で Toolkit 既定
+/// `<CUDA_PATH>\include`（#2487。#2393 の Windows 実機検証で Toolkit 既定
 /// 構成では `cuda_fp16.h` を開けず全カーネルが失敗したため）→ Linux 固定
 /// パス 3 件。`Other` では従来の 4 件と完全に同一で `CUDA_PATH` は無視する。
 /// 空の `CUDA_PATH` は CWD 基準の相対パス探索を避けるため候補にしない。
-/// 区切り文字はホスト非依存に `\\` を明示する。値は cudarc 0.19.8
+/// 区切り文字はホスト非依存に `\` を明示する。値は cudarc 0.19.8
 /// `src/nvrtc/safe.rs:272-274` が独立した `--include-path=` オプション文字列
 /// として渡すだけでシェルを通らないため、空白を含んでも quote 不要
 /// （A03: シェル展開・ログ出力はしない）。環境変数は `env` 経由で注入する。
@@ -4042,6 +4043,14 @@ fn nvrtc_include_candidates(
 // 個別に `#[cfg(unix)]` を付ける（`docs/facade-windows-build-decision.md`）。
 #[cfg(test)]
 mod tests {
+
+    use std::collections::HashMap;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
+
+    use super::*;
 
     // --- nvrtc_include_candidates（#2487。環境変数は注入し set_var を使わない） ---
 
@@ -4123,13 +4132,6 @@ mod tests {
         );
         assert_eq!(cand(IncludeSearchPlatform::Windows, &[]), FIXED);
     }
-    use std::collections::HashMap;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
-
-    use super::*;
 
     fn sample_descriptor() -> CudaKernelDescriptor {
         CudaKernelDescriptor::new_with_compiled_dims(
