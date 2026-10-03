@@ -30,6 +30,10 @@ with_accumulate_steps_for_test` 経由でのみ `accumulate_steps` を
 変更でき、通常経路（公開 API のみ）では常に `1`（既存挙動）のまま
 固定される。
 
+**追記（#2508）**: 上記の公開ビルダーは、ルート #2499（2026-10-04）の
+一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉
+に基づき #2508 で公開した（§5 に実装記録）。
+
 **AMP（`compile_with_amp`）との併用は未実装**: `accumulate_steps > 1`
 と AMP の組み合わせは、引数検査で `InvalidArgument`（fail-closed）に
 拒否する（§3「AMP との関係」節）。
@@ -151,8 +155,8 @@ unscale → step/skip → scaler.update`）のまま、既存の bit 完全一�
 ## §4 数値一致
 
 - `accumulate_steps == 1`（既定）は既存の `fit`／`fit_with_callbacks`／
-  `fit_with_metrics` と **bit 完全一致**（`crates/facade/src/compat/
-  training.rs::accumulate_tests::
+  `fit_with_metrics` と **bit 完全一致**（`crates/facade/tests/
+  compat_sequential_accumulate.rs::
   accumulate_steps_one_matches_default_fit_bit_exact` で検証）
 - `accumulate_steps == 3`（バッチ数 7・割り切れない構成）は独立に組んだ
   手動累積ループ（bind → forward → loss_for → backward →
@@ -193,30 +197,36 @@ CUDA／Metal 固有の処理は追加していないため、実機 parity の
 累積側は 30 epoch を通じて単調減少（1 度も loss が上がらない）であり、
 基準側より安定して収束する傾向を定性的に確認できた（R4）。
 
-## §5 承認事項（未承認のため保留）
+## §5 承認事項（#2508 で承認・実装済み）
 
-facade（`compat::FitConfig`）公開面の拡張は次が未承認。
-`crates/facade/src/lib.rs::GradAccumulationHoldDoctestGuard`（正の
-プローブ doctest）・`crates/facade/tests/api_surface.rs` の 3 テスト
-（`grad_accumulation_hold_doctest_globs_all_pub_modules`・
-`grad_accumulation_hold_doctest_probe_body_matches_fixed_contract`・
-`facade_does_not_declare_fit_config_accumulate_steps`）が機械的に
-固定する:
+ルート #2499 本文「承認範囲」節の一括承認（2026-10-04。Phase 1〜3 の
+facade 公開を設計判断記録の推奨形で実装してよい）に基づき、本節の推奨形
+（単一案）を #2508 で実装した。
 
-1. `FitConfig::accumulate_steps(mut self, n: u32) -> Self`（ビルダー。
-   `shuffle`／`drop_last` と同型）の公開
-2. 承認後の作業手順: ビルダー追加・テストの `#[cfg(test)] mod
-   accumulate_tests`（`crates/facade/src/compat/training.rs`）から
-   `crates/facade/tests/compat_sequential_accumulate.rs`（外部統合
-   テストクレート）への移設・`with_accumulate_steps_for_test` の削除・
-   `GradAccumulationHoldDoctestGuard` と対応する 3 テストの削除（正の
-   ガード・facade テストへ置き換え）
-
-承認を得た日が来たら、上記を実施する。
+1. 公開: `FitConfig::accumulate_steps(mut self, n: u32) -> Self`
+   （`shuffle`／`drop_last` と同型のビルダー）。フィールドは非公開のまま・
+   `Copy + Eq` 維持。`n == 0` はビルダーでは検査せず `fit` 系呼び出し時に
+   `InvalidArgument`（従来どおり）
+2. 削除: `GradAccumulationHoldDoctestGuard`（`lib.rs`）・`api_surface.rs` の
+   否定テスト 3 件と `GRAD_ACCUMULATION_HOLD_PROBE_BODY`・
+   `with_accumulate_steps_for_test`
+3. 追加した正ガード（`api_surface.rs`）:
+   `facade_declares_fit_config_accumulate_steps_exactly_once`（宣言が
+   `src/compat/training.rs` にちょうど 1 件）・
+   `facade_does_not_declare_with_accumulate_steps_for_test`・
+   `fit_config_accumulate_steps_is_reachable_via_facade_only`（facade のみの
+   import で到達・シグネチャ・値の書き換えを固定）。`FitConfig` の
+   `Copy + Eq` は既存の `fit_config_keeps_copy_eq_for_0_9_0_compat` が固定
+4. テスト移設: `accumulate_tests` の T1〜T6 を `crates/facade/tests/
+   compat_sequential_accumulate.rs`（facade 公開 API のみ）へ移した。T2 の
+   手動参照ループは公開 `SequentialVars::forward`・`Var::mse_loss` に置換
+   （`forward_with_precision(None)`／`mse_loss_with(Mean)` と演算列が bit
+   同一）。カスタム step フックとの併用拒否（`train_step_tests::
+   custom_step_rejected_with_accumulate_steps_gt_one`）はフック入口が
+   `#[cfg(test)]` 限定のため src 内に残し、公開ビルダーを使う形に更新
 
 ## §6 スコープ外（out-of-scope-tracking）
 
-- 公開ビルダー `FitConfig::accumulate_steps`（§5 参照）
 - 累積回数による勾配正規化（`N` で割る処理）
 - `DeviceParamStore` 常駐経路（`step_device_param_store` 系）での
   勾配累積
@@ -230,7 +240,8 @@ facade（`compat::FitConfig`）公開面の拡張は次が未承認。
 ```
 cargo fmt --all -- --check
 cargo clippy -p fandhe-ai --all-targets --no-deps -- -D warnings
-cargo test -p fandhe-ai --lib compat::training::accumulate_tests
+cargo test -p fandhe-ai --test compat_sequential_accumulate
+cargo test -p fandhe-ai --lib compat::training::train_step_tests
 cargo test -p fandhe-ai --test compat_sequential_fit \
   --test compat_sequential_callbacks --test compat_sequential_metrics \
   --test compat_sequential_fit_amp --test compat_sequential_fit_optimizers

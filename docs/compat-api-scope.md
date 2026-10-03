@@ -976,6 +976,7 @@ accumulate_tests`）は本イシューの実装スコープとして通常どお
 の否定ガード）で機械的に固定する。`Cargo.toml`／`Cargo.lock`・
 tolerance／baseline・`docs/spec/` は不変。承認後の完全な公開 API 案・
 数値契約は `docs/compat-grad-accumulation-decision.md` §5 を参照。
+→ イシュー #2508 で公開済み（本節末尾の適用記録を参照）。
 
 **保留記録（イシュー #2184・親 #2131）**: 学習 step カスタムフック
 （Keras `Model.train_step()` 相当。`fit()` の既定バッチ処理を丸ごと
@@ -1498,3 +1499,16 @@ optim.rs` の `pub use` 2 行追加のみ。rustfmt の折り返しを避ける�
 承認形のみを許す正ガード
 （`facade_declares_determinism_fns_only_as_approved_root_delegations`）へ反転した。
 no-op 契約・CPU 限定の保証範囲は不変（GPU の決定性は未検証）。
+
+**適用記録（経路 2。イシュー #2508・親 #2500・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
+勾配累積（#2180 で内部実装済み）を、設計判断記録
+（`docs/compat-grad-accumulation-decision.md` §5）の推奨形どおり
+`compat::FitConfig::accumulate_steps(mut self, n: u32) -> Self`（`shuffle`／`drop_last` と
+同型のビルダー）として公開した。新規公開面はこの `pub fn` 1 件のみで、フィールドは非公開・
+`Copy + Eq` も維持している（追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。
+保留ガード（`GradAccumulationHoldDoctestGuard` と `api_surface.rs` の否定テスト 3 件）は
+承認形のみを許す正ガード（`facade_declares_fit_config_accumulate_steps_exactly_once`・
+`facade_does_not_declare_with_accumulate_steps_for_test`・
+`fit_config_accumulate_steps_is_reachable_via_facade_only`）へ反転し、テスト専用セッター
+`with_accumulate_steps_for_test` は削除した。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
+`docs/spec/` は不変。GPU 経路には触れない（ホスト側 f32 加算のみ）。
