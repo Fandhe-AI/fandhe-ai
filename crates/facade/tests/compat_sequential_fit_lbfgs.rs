@@ -246,12 +246,10 @@ fn compile_with_amp_rejects_lbfgs() {
     );
 }
 
-// `accumulate_steps > 1`・カスタム学習 step フックとの併用拒否は
-// `FitConfig::with_accumulate_steps_for_test`／カスタム学習 step フック
-// 入口がいずれも `#[cfg(test)]` 限定・crate 内部専用（`private_interfaces`
-// 回避のため `pub(crate)` にもできない）のため、本ファイル（外部統合
-// テストクレート）からは呼べない。対応する単体テストは
-// `crates/facade/src/compat/training.rs::accumulate_tests::
-// accumulate_steps_gt_one_rejected_with_lbfgs`・
+// `accumulate_steps > 1` との併用拒否は、公開ビルダー化（#2508）に伴い
+// `tests/compat_sequential_accumulate.rs::
+// accumulate_steps_gt_one_rejected_with_lbfgs` に置く。カスタム学習 step
+// フックとの併用拒否は、フック入口が引き続き `#[cfg(test)]` 限定・crate
+// 内部専用のため外部統合テストクレートからは呼べず、
 // `crates/facade/src/compat/training.rs::train_step_tests::
 // custom_step_rejected_with_lbfgs` に置く。
