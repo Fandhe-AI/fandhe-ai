@@ -234,7 +234,7 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 モデルの汎用 HTTPS ダウンロード（`docs/model-download-design.md`・イシュー #2088）に必要な HTTP クライアント＋TLS 依存の候補を、承認依頼（#2619／#2621）の材料として実測した下書きである。
 
 - **未承認の下書き**: 本節は 2 節の可否表に含めず、`deny.toml` の allow リストの変更も含意しない。依存は本体 workspace に追加していない。正式反映は承認後に行う。
-- 区分番号: `libc` が第 10 区分（2026-09-28）のため、HTTP／TLS は第 11 区分相当。区分の起案は #2621。
+- 区分番号: `libc` が第 10 区分（2026-09-28）のため、HTTP／TLS は第 11 区分相当。推奨と区分の起案は `docs/model-download-design.md` §14（#2621・未承認。本節の allow 可否には影響しない）。
 - 実測日 2026-10-03・基準コミット `eb27531c7ea30354c58c3259d30f91526d60a856`・cargo 1.98.1／cargo-deny 0.19.8。本体 workspace の外の一時パッケージで `cargo tree`／`cargo metadata`／`cargo deny licenses bans sources` を実行（`cargo build` は未実行）。ターゲットは 3 節の軸 1 の 3 種に参考として `x86_64-pc-windows-msvc` を加えた。詳細表・手順・システム要件・MSRV の正は `docs/model-download-design.md` §13 とする（本節で二重管理しない）。
 
 | 候補（固定版） | 直接ライセンス | 現行 allow で `licenses` が通る組合せ | 通らない主因（crate と識別子） |
