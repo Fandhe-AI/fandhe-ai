@@ -7,7 +7,7 @@
 ## 0. 結論・段階
 
 - **内部クレート側（`tensor-core::data`）は実装済み**（本 PR）。`Sampler` trait（`SequentialSampler`／`RandomSampler`／`WeightedRandomSampler` の 3 実装）・`SamplerDataLoader<D>`・`HookedDataLoader<T>`（`TransformFn`／`CollateFn`・既定 `default_collate`）。
-- **facade 公開（承認事項・`docs/compat-api-scope.md` §5 経路 2）は未承認のまま保留**。イシュー #2182 本文には facade 公開の言及があるが、承認前の実施を禁じる契約であり、#2182・親 #2131 のいずれにも承認コメントは見当たらない（着手時点確認）。よって `crates/facade/src/**` は保留 doctest 足場（`DataHooksHoldDoctestGuard`）を追加するのみで、`Sampler` 系 6 型・`TransformFn`／`CollateFn`／`default_collate` は一切公開しない（兄弟イシュー #2156〈`docs/rng-distributions-generator-decision.md`〉と同型の保留パターン）。既存の facade 公開面（`fandhe_ai::data::{Batches, DataError, DataLoader, DataLoaderConfig, Dataset, TensorDataset}` の 6 型）は不変。
+- **（#2505 で公開済み。§8 参照。以下は #2182 時点の記録）facade 公開（承認事項・`docs/compat-api-scope.md` §5 経路 2）は未承認のまま保留**。イシュー #2182 本文には facade 公開の言及があるが、承認前の実施を禁じる契約であり、#2182・親 #2131 のいずれにも承認コメントは見当たらない（着手時点確認）。よって `crates/facade/src/**` は保留 doctest 足場（`DataHooksHoldDoctestGuard`）を追加するのみで、`Sampler` 系 6 型・`TransformFn`／`CollateFn`／`default_collate` は一切公開しない（兄弟イシュー #2156〈`docs/rng-distributions-generator-decision.md`〉と同型の保留パターン）。既存の facade 公開面（`fandhe_ai::data::{Batches, DataError, DataLoader, DataLoaderConfig, Dataset, TensorDataset}` の 6 型）は不変。
 - **本 PR のマージで #2182 は COMPLETED とする**（前例と同じ「保留記録を残した PR のマージで issue をクローズし、承認が得られたら新規 issue か reopen で経路 2 を実施する」方針）。facade 公開面（`fandhe_ai::data::{Sampler, SequentialSampler, RandomSampler, WeightedRandomSampler, SamplerDataLoader, SamplerBatches, HookedDataLoader, HookedBatches, TransformFn, CollateFn, default_collate}`）の実装着手は、`docs/compat-api-scope.md` §5 経路 2 の承認取得後に別 issue／reopen・別 PR で行う。
 
 ## 1. API 設計（`crates/tensor-core/src/data.rs`）
@@ -97,6 +97,8 @@ facade `src/data.rs`（6 型の純再エクスポート）は無変更。
 
 ## 5. facade 保留と承認依頼用の事前設計
 
+> **#2505 で実施済み**（ルート #2499 のユーザー承認（承認日は依頼文記載の 2026-10-04。コミット作成日とは前後しうる。Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい）に基づく）。以下は当時の事前設計の記録であり、実装結果は §8「#2505 実装記録」を参照。
+
 承認後に `crates/facade/src/data.rs` へ追加する想定の `pub use` 行（純再エクスポート方式。`DataLoader` への統合はしない設計を維持）:
 
 ```rust
@@ -137,3 +139,14 @@ pub use fandhe_ai_tensor_core::data::{
 - `crates/facade/tests/api_surface.rs`: 否定ガード 4 件を追加（既存 `data_module_reexports_exactly_expected_surface` 等の 3 テストは不変）。
 - `crates/facade/tests/data_sampler_hooks.rs`（新規）: `HookedDataLoader` と既存 `DataLoader` の bit 完全一致・`SamplerDataLoader`（タプル）の分類スモーク・`WeightedRandomSampler` + transform + collate の組み合わせ学習ループ（loss 減少確認）の 3 件。
 - facade 新規公開面: なし（既存 6 型のみ。保留）。
+
+### #2505 実装記録（facade 公開。親 #2500・ルート #2499）
+
+- 公開した 11 名: `Sampler`・`SequentialSampler`・`RandomSampler`・`WeightedRandomSampler`・`SamplerDataLoader`・`SamplerBatches`・`HookedDataLoader`・`HookedBatches`・`TransformFn`・`CollateFn`・`default_collate`。`crates/facade/src/data.rs` に純再エクスポート（別名なし）。`DataLoader`／`DataLoaderConfig` は不変で、統合もしない。
+- §5 のコードブロックは複数行だが、既存 `data_module_reexports_exactly_expected_surface` のパーサが 1 行完結の `pub use …::{…};` を要求するため、単一行 4 本に分けて記述した（パーサは拡張していない）。
+- 削除: `DataHooksHoldDoctestGuard`（lib.rs）・doctest ドリフト検査 2 件・`DATA_HOOKS_HOLD_PROBE_BODY`。
+- 反転: `facade_does_not_reexport_or_declare_data_hooks` → `facade_reexports_data_hooks_items_only_in_approved_shape`（＋自己テスト）。承認形（`fandhe_ai_tensor_core::data::` 接頭辞・別名なし）が `src/data.rs` にちょうど 1 回ずつ存在することを固定し、facade 独自の型宣言と `with_transform` 等の `fn` 宣言（`DataLoader` への統合）は引き続き違反とする。
+- 維持: `workspace_declares_data_hooks_names_only_in_tensor_core_data`（定義元インベントリ。再エクスポートは宣言ではないため反転後も真）。
+- 更新: `data_module_reexports_exactly_expected_surface` の期待集合を 6 → 17 名へ。`data_types_are_reachable_via_facade_only` を Sampler／フック系に拡張。`facade_pub_use_leaves_are_not_modules` の小文字葉 allowlist に `default_collate` を追加。`data_sampler_hooks.rs` の import を `fandhe_ai::data` 経由へ切替。
+- 利用例 doctest を `crates/facade/src/data.rs` に追加。
+- GPU parity: 本機能はホスト側で完結し `Op`／`BackendOps`／VJP を経由しない（§4）ため、実機 parity テスト・`docs/perf/logs` の申し送りは不要。

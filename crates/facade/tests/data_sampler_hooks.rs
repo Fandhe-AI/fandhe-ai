@@ -2,12 +2,9 @@
 //! 統合テスト。
 //!
 //! `SamplerDataLoader`／`HookedDataLoader`／`Sampler` 系（3 実装）は
-//! facade（`fandhe_ai::data`）への再エクスポートが未承認のため保留中
-//! （`crates/facade/src/lib.rs::DataHooksHoldDoctestGuard`・
-//! `docs/tensor-core-data-sampler-hooks-decision.md` §5）。本ファイルは
-//! `data_loader.rs`（`fandhe_ai_autodiff::Reduction` を直接 import する
-//! 既存の先例）と同型に、facade 未公開の内部クレート
-//! `fandhe_ai_tensor_core::data` を直接 import する。
+//! #2505 で facade（`fandhe_ai::data`）へ公開済み
+//! （`docs/tensor-core-data-sampler-hooks-decision.md` §5・§8）。本
+//! ファイルは facade のみ経由で import する。
 //!
 //! グローバル RNG（`manual_seed`）を消費するテストを含むため、ファイル
 //! 局所 `Mutex` で直列化する（`data_loader.rs` と同型）。
@@ -17,12 +14,11 @@ use std::sync::Mutex;
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::data::{DataLoader, DataLoaderConfig, TensorDataset};
-use fandhe_ai::optim::{Sgd, SgdConfig};
-use fandhe_ai_tensor_core::data::{
-    DataError, HookedDataLoader, RandomSampler, SamplerDataLoader, SequentialSampler,
-    WeightedRandomSampler,
+use fandhe_ai::data::{
+    DataError, DataLoader, DataLoaderConfig, HookedDataLoader, RandomSampler, SamplerDataLoader,
+    SequentialSampler, TensorDataset, WeightedRandomSampler,
 };
+use fandhe_ai::optim::{Sgd, SgdConfig};
 
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -250,7 +246,7 @@ fn weighted_sampler_transform_collate_training_converges() {
         })
         .with_try_collate(
             |samples: &[Tensor<f32>]| -> Result<Tensor<f32>, DataError> {
-                fandhe_ai_tensor_core::data::default_collate(samples)
+                fandhe_ai::data::default_collate(samples)
             },
         );
 

@@ -228,8 +228,9 @@ decision.md` を正とする。要点のみ記す:
   既存の `DataLoader`／`DataLoaderConfig`（本ドキュメント §3）は
   **不変**のまま維持する（フィールド追加・inherent メソッド追加とも
   行わない）。
-- facade（`fandhe_ai::data`）への再エクスポートは未承認のまま保留
-  （`crates/facade/src/lib.rs::DataHooksHoldDoctestGuard`）。§10 の
+- facade（`fandhe_ai::data`）への再エクスポートは #2182 時点では未承認のまま
+  保留だったが、#2505 で 11 名を純再エクスポートとして公開済み
+  （`docs/tensor-core-data-sampler-hooks-decision.md` §5・§8）。§10 の
   6 型再エクスポートは不変。
 - 上記 §9 の残る対象外（`num_workers` 並列プリフェッチのみ #2183 で
   実装。§12。`pin_memory`・iterable-style dataset・`ConcatDataset`／
