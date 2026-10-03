@@ -9,8 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.9.0`。2026-09-17 に crates.io 公開済み
-  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.9.0 リリースサイクルで `=0.8.0` から更新）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.10.0`。2026-10-03 に crates.io 公開済み
+  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.10.0 リリースサイクルで `=0.9.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -30,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.9.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.10.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -38,7 +38,7 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.9.0）の存在
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.10.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
      `source = "registry+https://github.com/rust-lang/crates.io-index"` を
      伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
@@ -134,6 +134,18 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   reduction カーネル是正（#1893／#1894）を crates.io 公開版としてフレーム
   ワーク横並びベンチの比較対象に反映するため。`git diff v0.9.0..HEAD --
   crates/` は空（facade 差分なし）
+- 2026-10-03: ユーザー指示「最新の crate を release し、html の値を測り直して」
+  （2026-10-03）に基づき、v0.10.0 の crates.io 公開と `fandhe-ai` 承認ピンの
+  `=0.10.0` への更新を承認（`.github/workflows/release-all.yml` run
+  37112020053・tag `v0.10.0` = `e8d91bc6`。7 クレート公開。
+  `fandhe-ai-onnx-interop` は初回公開）。ピン更新理由は v0.9.0 公開（2026-09-17）
+  以降の #2058 ツリー（対応表穴埋め）・Windows ビルド対応（#2481 ツリー）・
+  各バックエンドの opt-in 性能改善候補を crates.io 公開版としてフレームワーク
+  横並びベンチの比較対象に反映するため。`Cargo.lock` には自社の
+  `fandhe-ai-onnx-interop` と第 3 区分の承認済み依存 `prost`・`prost-derive` が
+  推移的依存として加わる（外部依存の新規追加はこれのみ。ライセンスは
+  `docs/license-matrix.md` 8b）。`git diff v0.10.0..HEAD -- crates/` は空
+  （ピン更新時点）
 
 ## 5. tch-rs を計測対象に含めない判断
 

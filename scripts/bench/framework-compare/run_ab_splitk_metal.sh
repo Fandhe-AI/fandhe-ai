@@ -2,7 +2,7 @@
 # イシュー #1545: Metal split-K opt-in 経路の runtime トグル
 # （`fandhe_ai::set_metal_split_k_gemm_enabled`/`metal_split_k_gemm_enabled`。
 # `#[cfg(target_os = "macos")]`。crates.io 公開版 `fandhe-ai =0.8.0` には
-# 未収録だったが `=0.9.0`（v0.9.0 ピン更新）で収録済み。feature 分岐は
+# 未収録だったが `=0.10.0`（v0.10.0 ピン更新）で収録済み。feature 分岐は
 # 既定 OFF のまま維持しているため `bench-fandhe` の `metal-split-k-toggle`
 # feature〈既定無効〉経由のビルド限定。API 自体は registry 版で到達
 # 可能だが、本スクリプトは HEAD ソース計測を主目的とするため
