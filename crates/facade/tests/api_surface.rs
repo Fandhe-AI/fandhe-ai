@@ -14621,10 +14621,78 @@ const LR_SCHEDULER_EXT_NAMES: [&str; 5] = [
     "SequentialLr",
 ];
 
-/// 正ガード・自己テストが共用する検出本体。`content` の `pub use` から
-/// 5 名の葉（`as` 別名は別名側も）と、`trait`／`struct`／`enum`／`type`
-/// の同名独自宣言を `(種別, 名前)` で返す。コメント・文字列リテラルは
-/// 除去済みの走査対象のみを見る。
+/// `pub use` の use tree を宣言単位（完全なパス + `as` 別名）の
+/// エントリへ展開する（[`scan_lr_scheduler_ext_items`] の下請け）。
+/// `tokens[i..]` の 1 ノード（単一パス or `{ ... }` グループ）を `prefix`
+/// 付きで解析し、`(完全パスのセグメント列, 別名)` を `out` へ積んで
+/// 消費後の index を返す。`*`（glob）は個別の識別子を持たないため積まない。
+fn lr_ext_parse_use_tree(
+    tokens: &[String],
+    mut i: usize,
+    prefix: &[String],
+    out: &mut Vec<(Vec<String>, Option<String>)>,
+) -> usize {
+    let mut path: Vec<String> = prefix.to_vec();
+    if tokens.get(i).map(String::as_str) == Some(":")
+        && tokens.get(i + 1).map(String::as_str) == Some(":")
+    {
+        i += 2;
+    }
+    loop {
+        match tokens.get(i).map(String::as_str) {
+            Some("{") => {
+                i += 1;
+                loop {
+                    match tokens.get(i).map(String::as_str) {
+                        Some("}") => {
+                            i += 1;
+                            break;
+                        }
+                        Some(",") => i += 1,
+                        None => break,
+                        _ => i = lr_ext_parse_use_tree(tokens, i, &path, out),
+                    }
+                }
+                return i;
+            }
+            Some("*") => return i + 1,
+            Some(seg) if seg != "as" && seg != "," && seg != "}" => {
+                path.push(seg.to_string());
+                i += 1;
+                if tokens.get(i).map(String::as_str) == Some(":")
+                    && tokens.get(i + 1).map(String::as_str) == Some(":")
+                {
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        break;
+    }
+    let mut alias = None;
+    if tokens.get(i).map(String::as_str) == Some("as") {
+        alias = tokens.get(i + 1).cloned();
+        i += 2;
+    }
+    // `a::b::{self}` のように `self` で終わる場合は直前セグメントを葉とみなす。
+    if path.last().map(String::as_str) == Some("self") && path.len() > 1 {
+        path.pop();
+    }
+    if path.len() > prefix.len() {
+        out.push((path, alias));
+    }
+    i
+}
+
+/// 正ガード・自己テストが共用する検出本体。`content` の `pub use` を
+/// **宣言単位**（完全パス + 別名）に展開し、葉または公開される別名が
+/// 5 名のいずれかであるエントリと、`trait`／`struct`／`enum`／`type` の
+/// 同名独自宣言を `(種別, 名前)` で返す。種別 `"pub use"` は完全パスが
+/// ちょうど `fandhe_ai_autodiff::nn::optim::<名>` で別名なしの承認形のみ。
+/// それ以外（別経路・別名公開・承認名への別名付け替え・他型を承認名で
+/// 公開）は `"pub use(非承認経路)"`／`"alias"` として返す。コメント・
+/// 文字列リテラルは除去済みの走査対象のみを見る。
 fn scan_lr_scheduler_ext_items(content: &str) -> Vec<(String, String)> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
@@ -14637,17 +14705,34 @@ fn scan_lr_scheduler_ext_items(content: &str) -> Vec<(String, String)> {
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            for leaf in collect_pub_use_leaves(path_tokens) {
-                if LR_SCHEDULER_EXT_NAMES.contains(&leaf.as_str()) {
-                    found.push(("pub use".to_string(), leaf));
+            let mut entries: Vec<(Vec<String>, Option<String>)> = Vec::new();
+            let mut j = 0usize;
+            while j < path_tokens.len() {
+                if path_tokens[j] == "," {
+                    j += 1;
+                } else {
+                    j = lr_ext_parse_use_tree(path_tokens, j, &[], &mut entries);
                 }
             }
-            // `X as Alias` は葉が元側の名前になるため、別名側も別途拾う。
-            for w in 0..path_tokens.len().saturating_sub(2) {
-                if LR_SCHEDULER_EXT_NAMES.contains(&path_tokens[w].as_str())
-                    && path_tokens[w + 1] == "as"
-                {
-                    found.push(("alias".to_string(), path_tokens[w + 2].clone()));
+            for (segs, alias) in entries {
+                let leaf = segs.last().cloned().unwrap_or_default();
+                let leaf_hit = LR_SCHEDULER_EXT_NAMES.contains(&leaf.as_str());
+                let alias_hit = alias
+                    .as_deref()
+                    .is_some_and(|a| LR_SCHEDULER_EXT_NAMES.contains(&a));
+                if !leaf_hit && !alias_hit {
+                    continue;
+                }
+                let approved_path = segs.len() == 4
+                    && segs[0] == "fandhe_ai_autodiff"
+                    && segs[1] == "nn"
+                    && segs[2] == "optim";
+                if leaf_hit && alias.is_none() && approved_path {
+                    found.push(("pub use".to_string(), leaf));
+                } else if let Some(a) = alias.filter(|_| alias_hit) {
+                    found.push(("alias".to_string(), a));
+                } else {
+                    found.push((format!("pub use(非承認経路 {})", segs.join("::")), leaf));
                 }
             }
             i = (end + 1).min(tokens.len());
@@ -14666,21 +14751,16 @@ fn scan_lr_scheduler_ext_items(content: &str) -> Vec<(String, String)> {
 }
 
 /// 承認形（`optim.rs` の `pub use fandhe_ai_autodiff::nn::optim::…` の
-/// 葉としてちょうど 1 回ずつ）以外の出現を違反として返す。`optim.rs`
-/// 以外での再エクスポート・別名・独自宣言、承認形の欠落・重複は
-/// fail-closed。
+/// 葉としてちょうど 1 回ずつ。宣言単位で完全パスを検証済み）以外の
+/// 出現を違反として返す。`optim.rs` 以外での再エクスポート・別名・
+/// 独自宣言、承認形の欠落・重複は fail-closed。
 fn lr_scheduler_ext_violations(files: &[(String, String)]) -> Vec<String> {
     let mut violations = Vec::new();
     let mut approved: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for (rel, content) in files {
         let is_optim = rel == "optim.rs";
-        let from_nn_optim = content.lines().any(|l| {
-            l.trim_start()
-                .starts_with("pub use fandhe_ai_autodiff::nn::optim::")
-        });
         for (kind, name) in scan_lr_scheduler_ext_items(content) {
             if is_optim
-                && from_nn_optim
                 && kind == "pub use"
                 && let Some(n) = LR_SCHEDULER_EXT_NAMES.iter().find(|n| **n == name)
             {
@@ -14757,6 +14837,32 @@ pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, MultiStepLr, SequentialLr};\n"
         format!("{approved_optim}pub use fandhe_ai_autodiff::nn::optim::CyclicLr as Foo;\n"),
     )];
     assert!(!lr_scheduler_ext_violations(&aliased).is_empty());
+    // 負例: 別ファイルでの別名公開（元の葉が承認名でなくても検出する）。
+    assert!(
+        !lr_scheduler_ext_violations(&with_lib("pub use crate::other::Other as MultiStepLr;"))
+            .is_empty()
+    );
+    // 負例: optim.rs 内でも承認名を別経路・他型から公開する（正しい行が
+    // 他に残っていても承認形として数えない）。
+    let wrong_path = vec![(
+        "optim.rs".to_string(),
+        format!("{approved_optim}pub use crate::other::CyclicLr;\n"),
+    )];
+    assert!(!lr_scheduler_ext_violations(&wrong_path).is_empty());
+    let wrong_alias = vec![(
+        "optim.rs".to_string(),
+        format!("{approved_optim}pub use crate::other::Other as LambdaLr;\n"),
+    )];
+    assert!(!lr_scheduler_ext_violations(&wrong_alias).is_empty());
+    // 負例: 承認形の 1 つを別経路に差し替えると承認形の欠落でも失敗する。
+    let swapped = vec![(
+        "optim.rs".to_string(),
+        "pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingWarmRestarts, CyclicLr};\n\
+pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, SequentialLr};\n\
+pub use crate::other::MultiStepLr;\n"
+            .to_string(),
+    )];
+    assert!(!lr_scheduler_ext_violations(&swapped).is_empty());
     // 負例: 独自 struct 宣言。
     assert!(!lr_scheduler_ext_violations(&with_lib("pub struct LambdaLr;")).is_empty());
     // 負例: 承認形の欠落（検査対象を見失った場合も fail-closed）。
