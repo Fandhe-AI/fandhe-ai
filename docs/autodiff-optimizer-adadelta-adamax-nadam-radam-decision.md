@@ -201,25 +201,56 @@ else:
 GB10）・Metal 実機での parity テストは**構造上 N/A**であり、
 `docs/perf/logs` への Mac／GB10 実測申し送りは作成しない。
 
-## 8. 承認事項（本 PR では実施しない）
+## 8. 承認事項（#2501 で実施済み）
+
+本節は当初「未承認のため保留」としていた記述である。ルート #2499 本文「承認範囲」節
+に記録されたユーザー一括承認（承認範囲は「Phase 1〜3 の facade 公開を既存の設計判断記録が
+推奨する形で実装してよい」であり、本 4 種の再エクスポートはこの範囲に含まれる。承認日の
+表記は依頼文の記載に依存するため本書では日付を断定しない。確認先は
+`gh issue view 2499`）を受け、イシュー #2501 で実施済み（実装記録は §8.1）。
+以下は承認対象の記録として残す。
 
 - **facade 純再エクスポート**（`docs/compat-api-scope.md` §5 経路 2）:
   `fandhe_ai::optim::{Adadelta, AdadeltaConfig, Adamax, AdamaxConfig,
   NAdam, NAdamConfig, RAdam, RAdamConfig}` の `crates/facade/src/
   optim.rs` への追加。`AdamW`／`Adam`／`RmsProp`／`Adagrad`／`LAMB`
-  はすでにこの経路で公開済みだが、本 4 種は未承認のため保留する。
-  保留固定は `crates/facade/src/lib.rs::OptimizerExtHoldDoctestGuard`
+  はすでにこの経路で公開済みだが、本 4 種は当初未承認のため保留していた。
+  保留固定（#2501 で削除・反転済み）は `crates/facade/src/lib.rs::OptimizerExtHoldDoctestGuard`
   （正のプローブ 1 ブロック方式。型名のみが対象で inherent メソッド
   追加を伴わないため trait プローブは不要）と `crates/facade/tests/
   api_surface.rs` の 3 テスト（doctest ドリフト検査 2 件・ソース
-  走査 1 件＋自己テスト）で多層固定する。
+  走査 1 件＋自己テスト）で多層固定していた。
 
-承認後の作業: `optim.rs` へ `pub use fandhe_ai_autodiff::nn::optim::
+承認後の作業（#2501 で実施済み）: `optim.rs` へ `pub use fandhe_ai_autodiff::nn::optim::
 {Adadelta, AdadeltaConfig, Adamax, AdamaxConfig, NAdam, NAdamConfig,
 RAdam, RAdamConfig};` を追加、`api_surface.rs` の
 `optim_module_reexports_exactly_expected_surface` 期待集合・
 `optim_types_are_reachable_via_facade_only` への追加、
 `OptimizerExtHoldDoctestGuard`・対応する 3 テストの削除。
+
+### 8.1 実装記録（イシュー #2501・ユーザー一括承認〈ルート #2499 本文「承認範囲」節〉）
+
+本節の推奨形（単一案）を、ルート #2499 の一括承認に基づき実装した。
+
+- 公開した名前: `fandhe_ai::optim::{Adadelta, AdadeltaConfig, Adamax, AdamaxConfig,
+  NAdam, NAdamConfig, RAdam, RAdamConfig}`（`crates/facade/src/optim.rs`。
+  `fandhe_ai_autodiff::nn::optim` からの素の再エクスポート）。`pub use` は
+  `optim_module_reexports_exactly_expected_surface` が行単位で `{`／`}` を
+  解析し rustfmt が 100 桁で折り返すため、optimizer ごとに 4 行へ分割した。
+  `OptimizerStateDict`／`ParamGroupStep` 等の trait、`compat::Optimizer`
+  variant、`DeviceParamStore` 結線は追加していない（公開面は上記 8 名に限る）。
+- ガード反転: 削除は `OptimizerExtHoldDoctestGuard`（`src/lib.rs`）と
+  doctest ドリフト検査 2 件（`optimizer_ext_hold_doctest_*`）・固定文言定数。
+  反転は `facade_does_not_reexport_or_declare_optimizer_ext_items` →
+  `facade_reexports_optimizer_ext_items_only_in_approved_shape`（8 名が
+  `src/optim.rs` の `fandhe_ai_autodiff::nn::optim::` 接頭辞・別名なしで
+  ちょうど 1 回ずつ出現し、承認形外の再エクスポートと同名の独自宣言が無いことを
+  fail-closed に固定。自己テストも反転）。追加は `optim_module_reexports_exactly_
+  expected_surface` 期待集合・`optim_types_are_reachable_via_facade_only`（既定値
+  ドリフト込み）・`optim_train_loop.rs` の facade のみ import 学習ループ 4 件。
+- 本節冒頭の「3 テスト削除」との差分: ソース走査ガードは削除ではなく、
+  ユーザー指示（承認した形だけを許す正ガードへの反転）に従い反転した。
+- GPU カーネルを持たないホスト値型のため CUDA／Metal の parity 申し送りは対象外。
 
 ## 9. スコープ外
 

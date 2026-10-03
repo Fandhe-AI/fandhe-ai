@@ -286,12 +286,9 @@ pub use state_dict::OptimizerStateDict;
 // 介した `step()` のみ）。param groups（層別学習率・weight decay）は
 // イシュー #2298（親 #2131）で対応済み（上記 #2173 ブロック参照）。
 //
-// **facade（`fandhe_ai::optim`）への公開は保留**（`AdamW`／`Adam`／
-// `RmsProp`／`Adagrad`／`LAMB` とは異なり、本イシューでは
-// `crates/facade/src/optim.rs` への追記を行っていない）。承認事項・
-// 保留固定の設計は `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-
-// decision.md` §8「承認事項」を参照（`crates/facade/src/lib.rs::
-// OptimizerExtHoldDoctestGuard` が正のプローブで固定する）。
+// **facade（`fandhe_ai::optim`）へはイシュー #2501（親 #2499）で素の
+// 再エクスポートとして公開済み**（`crates/facade/src/optim.rs`。承認形は
+// `docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md` §8）。
 
 // イシュー #2174（親 #2131）: optimizer state_dict（[`state_dict::
 // OptimizerStateDict`]。save/load・safetensors 経由）を追加した
