@@ -91,7 +91,18 @@ members = [
 # （#1213／#1214／#1215）・reduction カーネル是正（#1893 CUDA NVRTC INFINITY・
 # #1894 Metal sum）——を含めて crates.io へ公開し、framework-compare の対戦成績を
 # `fandhe-ai =0.9.0` で再判定するため 0.8.0 → 0.9.0 とする。
-version = "0.9.0"
+#
+# v0.10.0（2026-10-03）: 0.9.0 公開（2026-09-17）以降の 274 コミット——#2058 ツリー
+# （対応表穴埋め。optimizer 拡充〈Adadelta・Adamax・NAdam・RAdam・RmsProp・Adagrad・
+# LAMB・LBFGS〉・param groups・LR scheduler・EMA・勾配累積・optimizer state_dict・
+# Transformer／AdaptiveMaxPool 等の層・CTC 損失・DataLoader 拡張・npy／npz・
+# generate()・バッチ推論 API・ONNX import／export の op 拡大と external data 対応・
+# facade の nn::Module／ModuleList／ModuleDict・compat::save_model／load_model）・
+# Windows ビルド対応（#2481 ツリー）・各バックエンドの opt-in 性能改善候補と A/B
+# 基盤——を含めて crates.io へ公開し（`fandhe-ai-onnx-interop` の初回公開を含む
+# 7 クレート）、framework-compare の対戦成績を `fandhe-ai =0.10.0` で再判定する
+# ため 0.9.0 → 0.10.0 とする。
+version = "0.10.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
