@@ -3933,7 +3933,7 @@ fn overflow_err(step: &str) -> CudaError {
 /// 3. 失敗した場合のみ、`CUDA_INCLUDE_PATH` 環境変数、Windows では
 ///    `%CUDA_PATH%\include`（#2487）、既知の候補パス（CUDA 13.0 標準
 ///    インストール先）の順に再試行する（候補列挙は
-///    [`nvrtc_include_candidates`]）
+///    `nvrtc_include_candidates`）
 ///    （`cuda_fp16.h` 等が NVRTC 組み込みで解決できない環境向け。
 ///    PoC-v2-3 の 2 段構えを踏襲）。
 ///
