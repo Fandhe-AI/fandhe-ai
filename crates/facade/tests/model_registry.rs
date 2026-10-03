@@ -12,11 +12,23 @@
 //! 4. `ModelError` が `std::error::Error` として `source()`・`Display`
 //!    を持つ
 
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::interop::safetensors::save_safetensors_f32;
 use fandhe_ai::model::{ModelError, ModelRegistry};
 use std::fs;
+
+// 対応環境の述語は `fandhe_ai` 内部の `fs_guard::open_leaf_no_follow`
+// （`src/fs_guard.rs`）の cfg と同一。変更時は同期すること。対応側テストと
+// `cfg(not)` 側テストが対になり、実装の対応範囲がずれるとどちらかが該当
+// プラットフォームで落ちる（ドリフト検知）。
 
 mod common;
 use common::temp_dir::TempDirGuard;
@@ -30,10 +42,24 @@ fn build_model() -> Sequential {
         .unwrap()
 }
 
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 fn sample_input() -> Tensor<f32> {
     Tensor::new(vec![0.1_f32, -0.2, 0.3, -0.4], &[1, 4]).unwrap()
 }
 
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 fn assert_tensor_bit_exact(a: &Tensor<f32>, b: &Tensor<f32>, label: &str) {
     assert_eq!(a.shape(), b.shape(), "{label}: shape 不一致");
     let a_bits: Vec<u32> = a
@@ -56,6 +82,13 @@ fn assert_tensor_bit_exact(a: &Tensor<f32>, b: &Tensor<f32>, label: &str) {
 /// レイアウト規定どおりに配置したモデルを `load` で読み戻すと state
 /// dict が全キー・全要素 bit 完全一致し、別モデルへ `load_state_dict`
 /// した後の推論出力も元モデルと bit 一致する。
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn load_roundtrips_state_dict_bit_exact() {
     let guard = TempDirGuard::new("model-registry-load_roundtrips");
@@ -96,6 +129,13 @@ fn load_roundtrips_state_dict_bit_exact() {
 /// する `<name>/<version>`）のみを name・version とも昇順で列挙し、
 /// 不完全エントリ（ファイル欠落）・非承認名（空文字・隠しディレクト
 /// リ）・無関係なファイルはスキップする。
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn available_models_lists_only_complete_entries_sorted() {
     let guard = TempDirGuard::new("model-registry-available_models_complete");
@@ -184,6 +224,13 @@ fn invalid_components_are_rejected_before_fs_access() {
 
 /// 壊れた safetensors バイト列は `ModelError::Load` として fail-closed
 /// に拒否される（`crate::interop::safetensors` への委譲を確認する）。
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 #[test]
 fn corrupted_file_is_reported_as_load_error() {
     let guard = TempDirGuard::new("model-registry-corrupted_file");
@@ -201,6 +248,67 @@ fn corrupted_file_is_reported_as_load_error() {
         Err(ModelError::Load(_)) => {}
         other => panic!("Load エラーを期待したが {other:?} だった"),
     }
+}
+
+/// 非対応プラットフォーム（Windows 等）では葉オープンが fail-closed で
+/// `Unsupported` になり、`load` は（パースより前に）`ModelError::Io` を返す。
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+)))]
+#[test]
+fn load_is_unsupported_on_non_supported_platform() {
+    let guard = TempDirGuard::new("model-registry-load_unsupported");
+    let root = guard.path().to_path_buf();
+    let version_dir = root.join("mlp").join("v1");
+    fs::create_dir_all(&version_dir).unwrap();
+    save_safetensors_f32(
+        &version_dir.join("model.safetensors"),
+        &build_model().state_dict(),
+    )
+    .unwrap();
+    let registry = ModelRegistry::with_cache_dir(&root);
+    let result = registry.load("mlp", "v1");
+    assert!(
+        matches!(&result, Err(ModelError::Io(e)) if e.kind() == std::io::ErrorKind::Unsupported),
+        "Io(Unsupported) を期待したが {result:?} だった"
+    );
+
+    let broken_dir = root.join("broken").join("v1");
+    fs::create_dir_all(&broken_dir).unwrap();
+    fs::write(broken_dir.join("model.safetensors"), b"garbage").unwrap();
+    let result = registry.load("broken", "v1");
+    assert!(
+        matches!(&result, Err(ModelError::Io(e)) if e.kind() == std::io::ErrorKind::Unsupported),
+        "Load ではなく Io(Unsupported) を期待したが {result:?} だった"
+    );
+}
+
+/// 非対応プラットフォームでは完全なエントリがあっても `available_models` は空。
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+)))]
+#[test]
+fn available_models_is_empty_on_non_supported_platform() {
+    let guard = TempDirGuard::new("model-registry-available_unsupported");
+    let root = guard.path().to_path_buf();
+    for (name, version) in [("b", "2"), ("b", "1"), ("a", "x")] {
+        let dir = root.join(name).join(version);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("model.safetensors"), b"dummy").unwrap();
+    }
+    let registry = ModelRegistry::with_cache_dir(&root);
+    assert_eq!(
+        registry.available_models(),
+        Vec::<(String, Vec<String>)>::new()
+    );
 }
 
 /// `cache_dir()` は `with_cache_dir` に渡したパスをそのまま返す。

@@ -18265,7 +18265,7 @@ fn tape_ref_declared_once_with_crate_private_field() {
                 let mut rec = field_vis;
                 rec.push("|".to_string());
                 rec.extend(derives);
-                decls.push((path.display().to_string(), rec));
+                decls.push((path.to_string_lossy().replace('\\', "/"), rec));
             }
         }
     });
