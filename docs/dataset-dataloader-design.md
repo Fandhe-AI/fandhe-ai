@@ -257,9 +257,9 @@ README.md` を正とする。要点のみ記す:
   `(num_workers, prefetch_depth)` の組み合わせで bit 完全一致する
   （決定性契約。前提は `Dataset::batch` が添字だけで決まる純関数で
   あること）。
-- facade（`fandhe_ai::data`）への再エクスポート、`Sequential::fit`
-  （`compat::training::run_fit`）への結線はいずれも未承認のまま保留
-  （承認事項。`docs/tensor-core-data-prefetch-decision.md` §8）。
+- facade（`fandhe_ai::data`）への再エクスポートは #2506 で公開済み。
+  `Sequential::fit`（`compat::training::run_fit`）への結線は引き続き保留
+  （`docs/tensor-core-data-prefetch-decision.md` §8）。
 - 上記 §9 の残る対象外（`pin_memory`・iterable-style dataset・
   `ConcatDataset`／`Subset`／`random_split`・タプルデータセットでの
   サンプル単位フック・transform／collate フックの並列化・persistent

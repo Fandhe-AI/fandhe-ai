@@ -1,14 +1,12 @@
 //! マルチワーカー prefetch（`PrefetchConfig`／`PrefetchDataLoader`。
 //! イシュー #2183・親 #2131）の統合テスト。
 //!
-//! `PrefetchDataLoader`／`PrefetchConfig`／`PrefetchBatches` は facade
-//! （`fandhe_ai::data`）への再エクスポートが未承認のため保留中
-//! （`crates/facade/tests/api_surface.rs::
-//! facade_does_not_reexport_or_declare_prefetch`・
-//! `docs/tensor-core-data-prefetch-decision.md` §2.4）。本ファイルは
-//! `data_sampler_hooks.rs`（`fandhe_ai_tensor_core::data` を直接
-//! import する既存の先例）と同型に、facade 未公開の内部クレートを
-//! 直接 import する。
+//! `PrefetchDataLoader`／`PrefetchConfig`／`PrefetchBatches` は #2506
+//! （ルート #2499 の承認。`crates/facade/tests/api_surface.rs::
+//! facade_reexports_prefetch_items_only_in_approved_shape`・
+//! `docs/tensor-core-data-prefetch-decision.md` §4・§8）で facade
+//! （`fandhe_ai::data`）へ公開済みであり、本ファイルは facade のみを
+//! import する。
 //!
 //! グローバル RNG（`manual_seed`）を消費するテストを含むため、ファイル
 //! 局所 `Mutex` で直列化する（`data_sampler_hooks.rs` と同型）。
@@ -18,9 +16,11 @@ use std::sync::Mutex;
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::data::{DataLoader, DataLoaderConfig, TensorDataset};
+use fandhe_ai::data::{
+    DataLoader, DataLoaderConfig, PrefetchConfig, PrefetchDataLoader, RandomSampler,
+    SamplerDataLoader, TensorDataset,
+};
 use fandhe_ai::optim::{Sgd, SgdConfig};
-use fandhe_ai_tensor_core::data::{PrefetchConfig, PrefetchDataLoader, RandomSampler};
 
 fn test_lock() -> &'static Mutex<()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -115,9 +115,8 @@ fn prefetch_data_loader_matches_facade_data_loader_bit_identical() {
 /// `PrefetchDataLoader(RandomSampler, workers=4)` の双方で同一
 /// `manual_seed` から回し、最終パラメータが bit 完全一致すること・
 /// loss が減少することを確認する（R5。`Sequential::fit` は経由しない
-/// ——`docs/tensor-core-data-prefetch-decision.md` §2.4 の facade 保留
-/// 方針に基づき、`compat::training::run_fit` への結線は承認事項として
-/// 対象外）。
+/// ——`docs/tensor-core-data-prefetch-decision.md` §4 のとおり
+/// `compat::training::run_fit` への結線は #2603 の担当で対象外）。
 ///
 /// # 検証する経路（レビュー指摘・イシュー #2183 コメント対応）
 ///
@@ -206,7 +205,7 @@ fn prefetch_training_loop_matches_sequential_bit_identical_final_params() {
             .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new(y) が失敗: {e}"));
         let sampler = RandomSampler::new(N, 4, false)
             .unwrap_or_else(|e| panic!("test fixture: RandomSampler::new が失敗: {e}"));
-        let mut loader = fandhe_ai_tensor_core::data::SamplerDataLoader::new((ds_x, ds_y), sampler)
+        let mut loader = SamplerDataLoader::new((ds_x, ds_y), sampler)
             .unwrap_or_else(|e| panic!("test fixture: SamplerDataLoader::new が失敗: {e}"));
         train_with_batches(|| {
             loader
