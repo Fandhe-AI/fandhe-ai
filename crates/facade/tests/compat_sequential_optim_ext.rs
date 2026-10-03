@@ -2,8 +2,8 @@
 //! facade 側テスト: `compat::Sequential` 経由の手動 step 学習ループと
 //! `nn::Linear` 直組みの手動ループが、Adadelta／Adamax／NAdam／RAdam
 //! （いずれも `fandhe_ai_autodiff::nn::optim` 直接 import。facade
-//! 再エクスポートは未承認のため保留——`crates/facade/src/lib.rs::
-//! OptimizerExtHoldDoctestGuard` 参照）で bit 完全一致すること、および
+//! 再エクスポートはイシュー #2501 で公開済みで、facade のみ import 版の
+//! 学習ループは `optim_train_loop.rs` が担う）で bit 完全一致すること、および
 //! 各 optimizer が損失を減少させることを確認する。
 //!
 //! `crates/facade/tests/compat_sequential_train.rs::

@@ -162,6 +162,23 @@
 //! step_device_param_store_adagrad`]。「デバイス常駐更新との違い」節
 //! 参照）。
 //!
+//! # Adadelta／Adamax／NAdam／RAdam（イシュー #2171・#2501・親 #2499）
+//!
+//! [`crate::optim::Adadelta`]／[`crate::optim::AdadeltaConfig`]・
+//! [`crate::optim::Adamax`]／[`crate::optim::AdamaxConfig`]・
+//! [`crate::optim::NAdam`]／[`crate::optim::NAdamConfig`]・
+//! [`crate::optim::RAdam`]／[`crate::optim::RAdamConfig`] を
+//! `fandhe_ai_autodiff::nn::optim` から素の再エクスポートで公開する
+//! （`docs/autodiff-optimizer-adadelta-adamax-nadam-radam-decision.md`
+//! §8 の推奨形。ルート #2499 本文「承認範囲」節のユーザー一括承認）。
+//! `step()` シグネチャは [`crate::optim::AdamW::step`] と同一
+//! （`&[(&Tensor<f32>, &Tensor<f32>)]`）で、`Tape`／`Var`／`BackendOps`
+//! に依存しない値型・純関数。位置対応契約（「呼び出し文脈」節）が
+//! そのまま適用される。**`crate::DeviceParamStore` 非対応**（決定記録
+//! §7）、**`crate::compat::Optimizer`（`compile()`）にも未統合**（同 §9）。
+//! 状態保存用の `OptimizerStateDict`／`ParamGroupStep` trait は facade
+//! 非公開のままで、facade のみの import ではそれらのメソッドに到達しない。
+//!
 //! # ReduceLrOnPlateau（イシュー #1746・親 #1611）
 //!
 //! [`crate::optim::ReduceLrOnPlateau`]／[`crate::optim::ReduceLrOnPlateauConfig`]・
@@ -269,9 +286,11 @@
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
 // 契約に合わせる。`src/lib.rs` 冒頭コメントと同じ理由）。
+pub use fandhe_ai_autodiff::nn::optim::{Adadelta, AdadeltaConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adagrad, AdagradConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
+pub use fandhe_ai_autodiff::nn::optim::{Adamax, AdamaxConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
@@ -282,8 +301,10 @@ pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
 // （`LbfgsConfig` は #2198 で公開済み。`Lbfgs`〈closure 駆動の本体〉・
 // `LbfgsLineSearch`〈line search 方式選択〉を追加）。
 pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
+pub use fandhe_ai_autodiff::nn::optim::{NAdam, NAdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};
 pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
+pub use fandhe_ai_autodiff::nn::optim::{RAdam, RAdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};
 pub use fandhe_ai_autodiff::nn::optim::{RmsProp, RmsPropConfig};
 pub use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
