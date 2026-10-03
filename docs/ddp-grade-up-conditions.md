@@ -2,12 +2,17 @@
 
 基準コミット: `d81d7801caa4621d450572ea8226ef5e0a6a0a2d`（2026-09-22）。`file_path:line` は同コミット時点のもの。後続の変更で行番号がずれる可能性があるため、参照する際は当該コミット、または近傍のコミットで再確認すること。
 
+#2612 改訂の基準: HEAD `4be494be`、`docs/spec` submodule `2e998dd7`（2026-09-29）。§0・§3・§3a・§4・§5・§8・§9 の最新行番号はこの時点のもの（§2 は #2074 時点のまま不変）。
+
 ## §0 結論（最初に読む）
 
 - **コード変更なし**（`crates/**`・`Cargo.toml`／`Cargo.lock`・`docs/spec/`〈正本 submodule〉・tolerance／baseline・ガードレール閾値は一切変更していない）。
 - `docs/facade-multi-gpu-ddp-decision.md`（#1628）が確定した**段階 0（現時点非対応）は不変**。本 doc はその再開条件を「格上げ条件表」という具体的な形に構造化し、条件 (a)（nccl リンク契約）を実測で裏付けたものである。
 - §4 の spec (b) 形式提案文案は**起票していない**（未実施。§5 の承認事項 1 を参照）。
 - 量子化（除外事項の同じ Won't 項目）には既に格上げ条件表 a〜e（`docs/spec/04-requirements.md:360`）が存在するが、分散学習（複数 GPU／DDP）には存在しない（`docs/spec/04-requirements.md:356`「分散学習の網羅対応は本項目のまま Won't（条件整理なし）を維持する」）。本 doc の §3 はこの非対称を埋める文案である。
+- **#2612 で追記した点**: 上記の `04-requirements.md:356`・`:360` は #2074 時点の行番号で、現行（submodule `2e998dd7`）では除外事項が `:358`、量子化の格上げ条件表が `:360-363`、承認時固定契約・取り決めが `:364-365` である。§4 文案を現時点の事実（REQ-9 追記 #2193／#2194・0.10.0 出荷・deps-policy 第 10 区分新設）へ最新化した（差分は §9）。
+- **FSDP は `docs/spec/` に記述が 0 件**で、本提案の格上げ条件表の対象外とする（§3a）。FSDP 用の条件は創作していない。
+- #1964（2026-09-17）で「現状維持（選択肢 C）」がユーザー承認済み。§4 の spec 起票は引き続き**未起票・未承認**である（§5）。
 
 ## §1 位置づけ
 
@@ -79,9 +84,9 @@ fn main() {
 | 条件 | 内容 | 現時点の記載 |
 |---|---|---|
 | (a) | cudarc `nccl` feature が `dynamic-loading` 下で link-time の `libnccl` を要求しない（CI `build-no-cuda-toolkit` 不変条件と両立）こと | **達成済み**（本イシュー実測。§2.2〜§2.3） |
-| (b) | デバイス列挙 API（`Device::available()` 相当）が facade 公開面に存在すること | **達成済み**（#1614 `fandhe_ai::available_devices()`〈`crates/facade/src/lib.rs:602`〉。#1628 doc §6 前提 2「`Device::available()` 未実装」は陳腐化しており本 doc で訂正する） |
+| (b) | デバイス列挙 API（`Device::available()` 相当）が facade 公開面に存在すること | **達成済み**（#1614 `fandhe_ai::available_devices()`〈#2074 時点 `crates/facade/src/lib.rs:602`、#2612 時点の現行は `crates/facade/src/lib.rs:772`〉。#1628 doc §6 前提 2「`Device::available()` 未実装」は陳腐化しており本 doc で訂正する） |
 | (c) | ネットワーク層方式（#1628 §4 案 A〜D）の確定と、それに伴う cudarc 許容 feature 列挙拡張（`.claude/rules/deps-policy.md`）・新規区分の要否について個別ユーザー承認があること。NCCL 採用時は `is_culib_present()` probe → 型付き `CudaError` variant（`crates/backend-cuda/src/device.rs:287-293` と同型）で panic 経路（`culib()` の `panic_no_lib_found`）を閉じる設計が確認されていること | 未達（承認事項） |
-| (d) | 実機側の分母: 複数 CUDA ordinal を持つ実機（または 2 ノード構成）が確保され、インストール済み NCCL 版数が cudarc ピン（`nccl-02030` = NCCL 2.30 系）と整合することがプローブ記録されていること。GB10 は現状 `nvidia-smi -L` 1 行のみの記録（`docs/perf/gemm-peak-memory-measurement.md:66`）で複数 ordinal の記録がないため、単一ノード内複数 GPU という初期スコープ自体の実現可能性を実機で確認する必要がある | 未達（GB10 申し送り。`docs/perf/logs/ddp-nccl-link-contract-2074/README.md` 参照） |
+| (d) | 実機側の分母: 複数 CUDA ordinal を持つ実機（または 2 ノード構成）が確保され、インストール済み NCCL 版数が cudarc ピン（`nccl-02030` = NCCL 2.30 系）と整合することがプローブ記録されていること。GB10 は現状 `nvidia-smi -L` 1 行のみの記録（`docs/perf/gemm-peak-memory-measurement.md:66`）で複数 ordinal の記録がないため、単一ノード内複数 GPU という初期スコープ自体の実現可能性を実機で確認する必要がある | 未達（実機未検証。GB10 の NCCL 版数・ordinal 数のプローブは未実施で、数値の記録はない。申し送りは `docs/perf/logs/ddp-nccl-link-contract-2074/README.md` 参照） |
 | (e) | 依存追加なし（新規クレートなし・許容依存区分内）で成立し、REQ-2 統一複合判定・tolerance・baseline を一切変更せずに all-reduce 後の勾配（平均化の縮約順序）の数値一致検証が成立する設計が確認されていること | 未達 |
 
 **Could→Should 案（量子化表の f・g と同型の 2 段目。文案に含める）**:
@@ -91,14 +96,26 @@ fn main() {
 | (f) | 実測でのスケーリング効率（例: 2 GPU で 1 GPU 比の学習スループット改善）が確認されていること | 未達 |
 | (g) | facade 公開面の非破壊拡張（REQ-12「融合制御 API を提供しない」との整合）が確認されていること | 未達 |
 
+## §3a FSDP・その他の並列化方式の扱い（#2612 で再確認）
+
+スコアボード（`docs/perf/logs/framework-compare-0.10.0-remeasure/scoreboard/body_0100.html:100`）の PyTorch 列には「DDP/FSDP」が載っている。spec 側の扱いを再確認した結果を記録する。
+
+- **検索**: `grep -rniE 'fsdp|fully ?sharded|zero-?[123]|tensor parallel|pipeline parallel|model parallel' docs/spec`（submodule `2e998dd7`）の結果は **0 件**。FSDP・ZeRO・sharded・tensor／pipeline／model parallel のいずれも spec に記述がない。実装リポ側では `docs/compat-feature-gap.md:52` が「多 GPU 学習（DDP・model/tensor parallel）はない」と記すのみである。
+- **spec の関連記述は 3 つだけ**: (1) 除外事項「分散学習・量子化の網羅対応」（`04-requirements.md:358`。分散学習は Won't・条件整理なし）、(2) REQ-9 Tier 2 の「複数 GPU／DDP」（`:232`。(1) に従属）、(3) 「引き続き対象外」の「分散 RPC」（`:233`）。FSDP は明示されていないが、(1) の包括的な「分散学習の網羅対応」に含まれ Won't と読む。
+- **本提案の対象**: 格上げ条件表の対象は **DDP（パラメータ複製＋勾配 all-reduce によるデータ並列。初期スコープは単一ノード内の複数 GPU）に限定**する。
+- **対象外（Won't・条件整理なしのまま）**: FSDP（PyTorch `FullyShardedDataParallel`）・ZeRO 系の optimizer state／勾配／パラメータ分割・tensor／pipeline／model parallel・TF の `MultiWorkerMirroredStrategy`／`ParameterServerStrategy` 相当。これらの格上げ条件は本 doc で創作しない。扱う場合は DDP の格上げ後に別の (b) 形式提案として検討する（§5 の項 6）。
+- **分散 RPC**（`torch.distributed.rpc` 相当）は REQ-9 の「引き続き対象外」であり、DDP の格上げとは別項目。本提案はこの列挙を変えない。
+
 ## §4 spec (b) 形式提案文案（起票用 draft。未起票）
 
 以下は `docs/spec-proposal-req2-candle-parity-tolerance.md` §2 と同型の「タイトル案 + ````markdown フェンスの本文案」形式で用意した draft である。**ユーザー承認（§5 の項 1）を得るまで実起票はしない。**
 
+（#2612 で最新化。#2074 版との差分は §9。起票時は spec 側の現行行番号を再確認すること。）
+
 **タイトル案**:
 
 ```
-docs(requirements): 除外事項「分散学習・量子化の網羅対応」に DDP（複数 GPU）の格上げ条件表を新規追加する（実装リポ Fandhe-AI/fandhe-ai#2074 提案）
+docs(requirements): 除外事項「分散学習・量子化の網羅対応」に DDP（複数 GPU）の格上げ条件表を新規追加する（実装リポ Fandhe-AI/fandhe-ai#2074・#2612 提案）
 ```
 
 **本文案**:
@@ -106,12 +123,16 @@ docs(requirements): 除外事項「分散学習・量子化の網羅対応」に
 ````markdown
 ## 背景
 
-除外事項「分散学習・量子化の網羅対応」（`04-requirements.md` 該当箇所）は、量子化
+除外事項「分散学習・量子化の網羅対応」（`04-requirements.md` 該当箇所。2026-09-29 の REQ-9
+追記〈実装リポ #2193／#2194〉後も、分散学習は「Won't（条件整理なし）」のまま）は、量子化
 （FP8/INT8 GEMM）には格上げ条件表（Won't→Could の a〜e、Could→Should の f・g）を
 定義済みだが、分散学習（複数 GPU／DDP）には「Won't（条件整理なし）」とのみ記載され、
 再開の道筋自体が未定義である。実装リポ側の設計記録（`docs/facade-multi-gpu-ddp-decision.md`
 〈#1628〉・`docs/ddp-grade-up-conditions.md`〈#2074〉）でこの非対称を確認し、量子化と
-同形式の格上げ条件表を提案する。
+同形式の格上げ条件表を提案する。実装リポは `fandhe-ai =0.10.0` を crates.io へ出荷済みで
+公開 API の非破壊が契約になっている。比較スコアボード上では PyTorch／TensorFlow 側に
+DDP／FSDP があり、fandhe-ai 側との差分が残っている（FSDP は spec に記述がなく、本提案の
+対象外とする）。
 
 ## 提案: DDP 格上げ条件表の追加
 
@@ -120,28 +141,32 @@ docs(requirements): 除外事項「分散学習・量子化の網羅対応」に
 
 | 現状 | 格上げ先 | 格上げ条件（すべて満たすこと） |
 |------|---------|------------------------------|
-| Won't | Could | (a) cudarc `nccl` feature が `dynamic-loading` 下で link-time の `libnccl` を要求しないこと（実装リポで実証済み・実装リポ Fandhe-AI/fandhe-ai#2074）。(b) デバイス列挙 API（`Device::available()` 相当）が facade 公開面に存在すること（実装リポで実装済み・Fandhe-AI/fandhe-ai#1614）。(c) ネットワーク層方式の確定と、それに伴う依存追加（cudarc `nccl` feature の許容依存列挙への追加を含む）についての個別ユーザー承認があること（未達）。(d) 実機側の分母（複数 CUDA ordinal を持つ実機または複数ノード構成）が確保され、NCCL 版数の整合がプローブ記録されていること（未達）。(e) 依存追加なし（新規クレートなし）で REQ-2 統一複合判定・tolerance・baseline を変更せずに all-reduce 後の勾配の数値一致検証が成立する設計が確認されていること（未達）。 |
+| 対象 | DDP（パラメータ複製＋勾配 all-reduce のデータ並列）に限る | FSDP／ZeRO・tensor／pipeline／model parallel は対象外で、本項目の Won't（条件整理なし）に残す |
+| Won't | Could | (a) cudarc `nccl` feature が `dynamic-loading` 下で link-time の `libnccl` を要求しないこと（実装リポで実証済み・実装リポ Fandhe-AI/fandhe-ai#2074）。(b) デバイス列挙 API（`Device::available()` 相当）が facade 公開面に存在すること（実装リポで実装済み・Fandhe-AI/fandhe-ai#1614）。(c) ネットワーク層方式の確定と、それに伴う依存追加（cudarc `nccl` feature の許容依存列挙への追加を含む）についての個別ユーザー承認があること（未達）。なお許容依存は現行 10 区分（本体直接依存は第 1〜8・第 10 区分）で、ネットワーク／分散通信の区分はない。本提案は既存の CUDA 区分の feature 列挙拡張に限り、新規区分は追加しない。(d) 実機側の分母（複数 CUDA ordinal を持つ実機または複数ノード構成）が確保され、NCCL 版数の整合がプローブ記録されていること（未達・実機未検証）。(e) 依存追加なし（新規クレートなし）で REQ-2 統一複合判定・tolerance・baseline を変更せずに all-reduce 後の勾配の数値一致検証が成立する設計が確認されていること（未達）。 |
 | Could | Should | Could の条件に加え、(f) 実測でのスケーリング効率の確認、(g) REQ-12 との整合を保った facade 公開面の非破壊拡張の確認（いずれも未達）。 |
 
 **承認時に固定する契約**（格上げ後に新 REQ を起票する際も引き継ぐ前提。先取りの設計確定
 ではない）: REQ-2・REQ-7 の既存 tolerance と REQ-8 の下限値は変更しない／カーネル側の
 手動境界チェックを省略しない（REQ-8 受け入れ基準と同一）／許容依存区分（deps-policy.md）
-の外側への新規区分追加はしない（cudarc の feature 列挙拡張のみ）。
+の外側への新規区分追加はしない（cudarc の feature 列挙拡張のみ）／公開 API の非破壊（拡張は追加
+API・opt-in・`#[non_exhaustive]` enum への variant 追加に限り、出荷済み 0.10.0 の公開面を壊さない）／
+CI `build-no-cuda-toolkit` の不変条件（CUDA toolkit・NCCL 非搭載でもビルドが成立すること）の維持。
 
 **実装リポ側との取り決め**: spec 側で本提案が承認されるまで、実装リポは DDP の通信層・
 NCCL 呼び出しコードを起票・実装しない。
 
-本提案は除外事項の Won't 判断自体・REQ-9 Tier 2 の従属関係・Phase 4 判定追補のスコープ
-件数（Won't 11）を変更しない。
+本提案は除外事項の Won't 判断自体・REQ-9 Tier 2 の従属関係・「引き続き対象外」の分散 RPC・
+Phase 4 判定追補のスコープ件数（Should 8・Could 1・Won't 11）・REQ-2／REQ-7／REQ-8 を変更しない。
 ````
 
 ## §5 ユーザー承認事項（未実施）
 
-1. spec リポ（Fandhe-AI/fandhe-ai-spec）への §4 (b) 形式提案の起票可否。
-2. cudarc 許容 feature 列挙への `nccl` 追加（`.claude/rules/deps-policy.md` 更新）の可否（条件 (c)）。
+1. spec リポ（Fandhe-AI/fandhe-ai-spec）への §4 (b) 形式提案の起票可否。#1964（2026-09-17）で承認されたのは「現状維持（選択肢 C）」であり、起票（同 issue の選択肢 D）は未承認。判断の選択肢: (i) 現状維持を継続する／(ii) §4 文案を spec リポへ起票する。
+2. cudarc 許容 feature 列挙への `nccl` 追加（`.claude/rules/deps-policy.md` 更新）の可否（条件 (c)）。nccl feature の再実測と依存承認依頼は #2613 が扱う。
 3. ネットワーク層方式（#1628 §4 案 A〜D）の選択。
 4. 実装着手時の新規 `unsafe`（NCCL FFI 境界）・facade 公開面拡張・`CudaError` variant 追加の可否。
 5. GB10 実機での NCCL 版数・ordinal 数プローブの実施（本イシューでは申し送り。`docs/perf/logs/ddp-nccl-link-contract-2074/README.md` 参照）。
+6. FSDP 等（§3a の対象外方式）を別の (b) 形式提案で扱うかどうか。扱う場合も DDP の格上げ後に検討し、本 doc では条件を創作しない。
 
 ## §6 スコープ外・申し送り
 
@@ -165,12 +190,16 @@ NCCL 呼び出しコードを起票・実装しない。
 | `docs/facade-multi-gpu-ddp-decision.md` | 段階 0（現時点非対応）確定の元となった設計判断記録（#1628） |
 | `docs/compat-api-scope.md:512` | 「#1628 の設計記録は…完了した」の既存確定記述 |
 | `docs/compat-feature-gap.md:334` | 「複数 GPU・`DataParallel`/`DDP`」行の現状評価（なし・難度 XL） |
-| `docs/spec/04-requirements.md:222-235` | REQ-9 2026-09-12 追記の Tier 2 列挙・除外事項への従属関係 |
-| `docs/spec/04-requirements.md:356` | 除外事項「分散学習・量子化の網羅対応」（分散学習は Won't・条件整理なし） |
-| `docs/spec/04-requirements.md:357-363` | 量子化の格上げ条件表（a〜g）・承認時固定契約・実装リポ側との取り決めの記載形式（本 doc §3・§4 が踏襲した precedent） |
-| `crates/facade/src/lib.rs:602` | `fandhe_ai::available_devices()`（#1614）。#1628 doc §6 前提 2 の陳腐化を訂正する根拠 |
+| `docs/spec/04-requirements.md:232-235, 358-365`（#2612 時点。submodule `2e998dd7`） | Tier 2「複数 GPU／DDP」・「引き続き対象外」（分散 RPC）・#2193／#2194 追記・除外事項と量子化の格上げ条件表（現行行番号） |
+| `crates/facade/src/lib.rs:772`・`Cargo.toml:137-143`（#2612 時点） | `available_devices()` と cudarc の workspace 依存（版 `=0.19.8`・feature 不変）の現行位置 |
+| #1964 のコメント（2026-09-17） | 量子化・DDP の格上げ条件の再棚卸しで「現状維持（C）」を承認。spec 起票（D）は未承認 |
+| `docs/perf/logs/framework-compare-0.10.0-remeasure/scoreboard/body_0100.html:100`・`docs/compat-feature-gap.md:52` | スコアボードの PyTorch 列「DDP/FSDP」・実装リポ側の多 GPU 学習の現状評価 |
+| `docs/spec/04-requirements.md:222-235`（#2074 時点） | REQ-9 2026-09-12 追記の Tier 2 列挙・除外事項への従属関係 |
+| `docs/spec/04-requirements.md:356`（#2074 時点。現行は `:358`） | 除外事項「分散学習・量子化の網羅対応」（分散学習は Won't・条件整理なし） |
+| `docs/spec/04-requirements.md:357-363`（#2074 時点。現行は `:359-365`） | 量子化の格上げ条件表（a〜g）・承認時固定契約・実装リポ側との取り決めの記載形式（本 doc §3・§4 が踏襲した precedent） |
+| `crates/facade/src/lib.rs:602`（#2074 時点） | `fandhe_ai::available_devices()`（#1614）。#1628 doc §6 前提 2 の陳腐化を訂正する根拠 |
 | `crates/backend-cuda/src/device.rs:273-293` | `is_culib_present()` probe → `CudaError::DriverUnavailable` の既存パターン |
-| `Cargo.toml:122-128` | workspace の cudarc feature 指定（`dynamic-loading` を含む。nccl 非有効化） |
+| `Cargo.toml:122-128`（#2074 時点） | workspace の cudarc feature 指定（`dynamic-loading` を含む。nccl 非有効化） |
 | cudarc `=0.19.8` `Cargo.toml:127, 139` | `nccl = ["nccl-02030"]`・`nccl-02030 = ["driver"]` |
 | cudarc `=0.19.8` `build.rs:149-150, 186-205` | `dynamic_linking()` が `dynamic-linking` feature 限定で呼び出される経路・`cargo:rustc-link-lib=dylib=nccl` 発行条件 |
 | cudarc `=0.19.8` `src/nccl/sys/mod.rs:10-12, 1363-1385` | `dynamic-loading` feature 下の NCCL 遅延シンボル解決・`libnccl` dlopen |
@@ -179,3 +208,14 @@ NCCL 呼び出しコードを起票・実装しない。
 | `docs/spec-proposal-req2-candle-parity-tolerance.md` §2 | (b) 形式起票用本文の precedent 形式 |
 | `docs/perf/logs/adam-device-step-cuda-2069/README.md` | 実機未到達時の申し送り README の構成 precedent |
 | `docs/perf/logs/ddp-nccl-link-contract-2074/README.md` | 本イシューの Linux 側実測ログ・GB10 実機申し送り |
+
+## §9 改訂履歴（#2612）
+
+§4 文案の #2074 版からの差分（コード変更・spec 起票・承認の代行はなし）:
+
+- タイトル案に #2612 を併記した。
+- 背景: 2026-09-29 の REQ-9 追記（#2193／#2194）後も分散学習は Won't（条件整理なし）のままであること、`fandhe-ai =0.10.0` 出荷済み、スコアボード上の DDP／FSDP の差分を追記した。
+- 条件表: 対象を DDP に限る行を追加した（FSDP／ZeRO・tensor／pipeline／model parallel は Won't に残す）。(c) に現行の許容依存区分（第 1〜8・第 10 区分、ネットワーク区分なし）との整合を、(d) に「実機未検証」を明記した。
+- 承認時固定契約: 公開 API の非破壊と CI `build-no-cuda-toolkit` 不変条件の維持を追加した。
+- 不変事項: 「引き続き対象外」の分散 RPC・スコープ件数（Should 8・Could 1・Won't 11）・REQ-2／REQ-7／REQ-8 を追加した。
+- §3a（FSDP の扱い）・§5 項 6 を新設し、§0・§8 に最新の行番号を追記した。§2（実測）は変更していない。
