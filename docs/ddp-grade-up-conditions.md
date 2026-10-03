@@ -2,7 +2,9 @@
 
 基準コミット: `d81d7801caa4621d450572ea8226ef5e0a6a0a2d`（2026-09-22）。`file_path:line` は同コミット時点のもの。後続の変更で行番号がずれる可能性があるため、参照する際は当該コミット、または近傍のコミットで再確認すること。
 
-#2612 改訂の基準: HEAD `4be494be`、`docs/spec` submodule `2e998dd7`（2026-09-29）。§0・§3・§3a・§4・§5・§8・§9 の最新行番号はこの時点のもの（§2 は #2074 時点のまま不変）。
+#2612 改訂の基準: HEAD `4be494be`、`docs/spec` submodule `2e998dd7`（2026-09-29）。§0・§3・§3a・§4・§5・§8・§9 の最新行番号はこの時点のもの（§2 は #2074 時点のまま不変。ただし §2.2 末尾に #2613 の小節を追記した）。
+
+#2613 実測の基準: HEAD `1c6f9735`（2026-10-03）。§2.2 の「#2613 追記」小節、§0 の該当 bullet、§5 項 2、§9 の #2613 節がこの時点のもの。
 
 ## §0 結論（最初に読む）
 
@@ -13,6 +15,7 @@
 - **#2612 で追記した点**: 上記の `04-requirements.md:356`・`:360` は #2074 時点の行番号で、現行（submodule `2e998dd7`）では除外事項が `:358`、量子化の格上げ条件表が `:360-363`、承認時固定契約・取り決めが `:364-365` である。§4 文案を現時点の事実（REQ-9 追記 #2193／#2194・0.10.0 出荷・deps-policy 第 10 区分新設）へ最新化した（差分は §9）。
 - **FSDP は `docs/spec/` に記述が 0 件**で、本提案の格上げ条件表の対象外とする（§3a）。FSDP 用の条件は創作していない。
 - #1964（2026-09-17）で「現状維持（選択肢 C）」がユーザー承認済み。§4 の spec 起票は引き続き**未起票・未承認**である（§5）。
+- **#2613 で追記した点**: `[workspace.dependencies].cudarc.features` に `nccl` を足した一時複製での実測（§2.2 末尾）では、`Cargo.lock` は byte 一致のまま（`--locked` 成功）、ワークスペース全体の crate 集合差分はゼロ、`cargo deny` の bans／licenses／sources は ok、テスト実行ファイルの `NEEDED` に `libnccl`／`libcuda`／`libnvrtc` は現れなかった。deps-policy への `nccl` 追加は**承認依頼済み・承認未取得**（#2613 コメント）。本リポの `Cargo.toml`／`Cargo.lock`／deps-policy／license-matrix は変更していない。
 
 ## §1 位置づけ
 
@@ -53,6 +56,29 @@ cudarc `=0.19.8`（`~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cudar
 | 7 | `git status --porcelain -- Cargo.toml Cargo.lock` | 空 | **空**（変更なし） |
 
 コマンド 1〜7 はいずれも `Cargo.toml` を編集せず `--features cudarc/nccl`（CLI 一時指定）のみで実施した。
+
+#### #2613 追記: ワークスペースマニフェスト変更時の実測（一時複製）
+
+#2074 の上記測定は `-p fandhe-ai-backend-cuda -e normal` に CLI の `--features cudarc/nccl` を一時指定したものだった。ここではワークスペースの `[workspace.dependencies].cudarc.features`（`Cargo.toml`）に `"nccl"` を 1 行足した場合の影響を、`mktemp -d` で作った**一時複製**（`.git`・`target`・`.claude`・`.codex` を除いてコピーし、複製側の `Cargo.toml` だけを編集。測定後に削除済み。本リポの `Cargo.toml`／`Cargo.lock` は未変更）で測った。base は本リポ（HEAD `1c6f9735`）。`CARGO_NET_OFFLINE=true`。
+
+環境: Linux x86_64。`bash scripts/check-cuda-toolkit-absent.sh assert` は OK（`libcuda.so` ドライバは検出されるが toolkit ではないため判定対象外）。`ldconfig -p | grep -i nccl` は該当なし（libnccl 非搭載）。`nvidia-smi -L` は NVIDIA GeForce RTX 3060 を 1 基検出。
+
+| # | コマンド（複製側で実行。#2 の base は本リポ側） | 期待 | 実測結果 |
+|---|---|---|---|
+| 1 | `cargo tree --locked --workspace`（`--locked` のまま解決できるか）と `cmp <複製>/Cargo.lock <本リポ>/Cargo.lock` | `--locked` 成功・byte 一致 | **exit 0・byte 一致**（`Cargo.toml` 1 行の変更で `Cargo.lock` は不変） |
+| 2 | `cargo tree --workspace --all-features --locked -e normal,build,dev --target all --prefix none`（`check-forbidden-deps.sh tree` と同形）の base／複製を、ワークスペースメンバーのパス表記を正規化したうえで `sort -u` して `diff` | 差分ゼロ | **146 行ずつ・差分ゼロ**（新規 crate なし） |
+| 3 | `cargo tree --locked --workspace -e features -i cudarc`（`-p` なし） | `nccl`／`nccl-02030` がマニフェスト由来で有効化 | `cudarc` の feature として `nccl`／`nccl-02030` が現れ、有効化元は `fandhe-ai-backend-cuda`・`bench-harness`（`cudarc.workspace = true` で継承）。facade（`fandhe-ai`）は `fandhe-ai-backend-cuda` 経由。CLI 指定（`(command-line)`）ではない |
+| 4 | `cargo build -p fandhe-ai-backend-cuda --locked --tests` | exit 0 | **成功**（21.2s。初回ビルド） |
+| 5 | `target/.../build/cudarc-*/output` の `rustc-link-lib` 行 | `nccl` 行なし | **`rustc-link-lib` 行は 0 件**（`dynamic-loading` 下では build script がリンク指示を一切出力しない、という観測結果。複製側に出力自体がないため base との出力比較は省略） |
+| 6 | `cargo test -p fandhe-ai-backend-cuda --locked --no-run --message-format=json` で得た実行ファイル 83 本に `readelf -d <exe>` の `NEEDED` 検査 | `libnccl`／`libcuda`／`libnvrtc` を含まない | **83 本すべてで該当なし**（`NEEDED` は `libc.so.6`・`libgcc_s.so.1`・`ld-linux-x86-64.so.2`、一部に `libm.so.6` のみ） |
+| 7 | `cargo test -p fandhe-ai-backend-cuda --locked` | 全 pass・panic なし | **1317 passed; 0 failed; 292 ignored**（`test result` 82 行の合計。`panicked`／`FAILED` は 0 件） |
+| 8 | `cargo deny --manifest-path <複製>/Cargo.toml --locked check --config <複製>/deny.toml bans licenses sources` | ok | **`bans ok, licenses ok, sources ok`**（`advisories` はネットワーク取得が要るため未実施） |
+| 9 | 複製ルートで `bash scripts/check-forbidden-deps.sh tree` | PASS | **OK**（依存禁止リストの混入なし） |
+| 10 | 本リポで `git status --porcelain -- Cargo.toml Cargo.lock` | 空 | **空** |
+
+#2074 との違い: (i) CLI の一時指定ではなくマニフェスト変更、(ii) `-p` 単体ではなく `--workspace --all-features --target all`・dev／build エッジまで含む、(iii) `Cargo.lock` の byte 比較、(iv) 生成した実行ファイルの `NEEDED` 検査、(v) `cargo deny` と `check-forbidden-deps.sh` の実行。§2.3 の実行時プローブは再実施していない（#2074 の結果が不変のため）。
+
+結論（上記の実測の範囲）: `nccl` を許容 feature に加える場合の変更は `Cargo.toml` の 1 行、`.claude/rules/deps-policy.md` の CUDA 行と `docs/license-matrix.md` の cudarc 行の記載更新だけで済む。`Cargo.lock`・crate 集合・リンク要件・既存テストは変わらない。ただしネットワーク層方式（§5 項 3）が未決のうちは `nccl` feature を有効にしても使う側のコードがない。GB10 実機の NCCL 版数・ordinal 数は未確認（§5 項 5）。
 
 ### §2.3 実行時プローブ（scratchpad の使い捨て Cargo プロジェクト。リポにはコミットしない）
 
@@ -162,7 +188,7 @@ Phase 4 判定追補のスコープ件数（Should 8・Could 1・Won't 11）・R
 ## §5 ユーザー承認事項（未実施）
 
 1. spec リポ（Fandhe-AI/fandhe-ai-spec）への §4 (b) 形式提案の起票可否。#1964（2026-09-17）で承認されたのは「現状維持（選択肢 C）」であり、起票（同 issue の選択肢 D）は未承認。判断の選択肢: (i) 現状維持を継続する／(ii) §4 文案を spec リポへ起票する。
-2. cudarc 許容 feature 列挙への `nccl` 追加（`.claude/rules/deps-policy.md` 更新）の可否（条件 (c)）。nccl feature の再実測と依存承認依頼は #2613 が扱う。
+2. cudarc 許容 feature 列挙への `nccl` 追加（`.claude/rules/deps-policy.md` 更新）の可否（条件 (c)）。**実測済み**（§2.2 の #2613 小節）・**承認依頼済み**（#2613 コメント）・**承認未取得**。判断の選択肢: (i) 保留（#1964 の現状維持 C と整合）／(ii) 承認し、別 issue で deps-policy・license-matrix・`Cargo.toml` の 1 行追加を実施する。
 3. ネットワーク層方式（#1628 §4 案 A〜D）の選択。
 4. 実装着手時の新規 `unsafe`（NCCL FFI 境界）・facade 公開面拡張・`CudaError` variant 追加の可否。
 5. GB10 実機での NCCL 版数・ordinal 数プローブの実施（本イシューでは申し送り。`docs/perf/logs/ddp-nccl-link-contract-2074/README.md` 参照）。
@@ -219,3 +245,9 @@ Phase 4 判定追補のスコープ件数（Should 8・Could 1・Won't 11）・R
 - 承認時固定契約: 公開 API の非破壊と CI `build-no-cuda-toolkit` 不変条件の維持を追加した。
 - 不変事項: 「引き続き対象外」の分散 RPC・スコープ件数（Should 8・Could 1・Won't 11）・REQ-2／REQ-7／REQ-8 を追加した。
 - §3a（FSDP の扱い）・§5 項 6 を新設し、§0・§8 に最新の行番号を追記した。§2（実測）は変更していない。
+
+## §9 改訂履歴（#2613）
+
+- §2.2 に「#2613 追記」小節を新設した（マニフェスト変更時の `Cargo.lock` 不変・crate 集合差分ゼロ・feature 伝播・`NEEDED` 検査・`cargo deny`）。#2074 の §2.2 表と §2.3・§2.4 は書き換えていない。
+- §0 に #2613 の要約を、§5 項 2 に実測済み・承認依頼済み・承認未取得の状態を追記した。
+- コード・依存・`Cargo.toml`／`Cargo.lock`・deps-policy・license-matrix・`docs/spec/` は変更していない。承認の代行も spec 起票もしていない。
