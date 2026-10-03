@@ -20,7 +20,7 @@ autodiff に追加するにあたり、非決定的な経路（rayon 縮約順�
 - facade（`fandhe_ai`）への公開は本イシューでは**未承認のまま保留**
   する（§6）。内部クレート（`fandhe_ai_autodiff`）限定の到達入口として
   実装する。
-  - 2026-10-04 追記: facade 公開は #2507 で完了（§6・§8）。
+  - 追記: facade 公開は #2507 で完了（§6・§8）。
 - GPU（CUDA／Metal）の `Tape` は棚卸し対象外（別 issue。§5・§7）。
   `set_deterministic` はどの `Tape` に対しても等しく no-op であり、
   GPU 経路を拒否も検査もしない。
@@ -437,11 +437,11 @@ CUDA／Metal の `Tape` に対して `set_deterministic` を呼んでも拒否�
   フックが必要になり、GPU の決定的 opt-in（TF32 等）まで一律に塞いで
   しまう。
 
-## §6 承認事項（2026-10-04 承認済み・#2507 で実装）
+## §6 承認事項（ルート #2499 の一括承認に基づき #2507 で実装）
 
 - **facade 公開**（`fandhe_ai::set_deterministic`／
   `fandhe_ai::is_deterministic` の crate ルート公開）は、ルート #2499 の
-  2026-10-04 ユーザー一括承認（`docs/compat-api-scope.md` §5 経路 2）に
+  Phase 1〜3 の facade 公開を既存の設計判断記録が推奨する形で行うユーザー一括承認（`docs/compat-api-scope.md` §5 経路 2）に
   基づき #2507 で実装した（旧記述: 未承認のまま対象外。発端 #2157 時点の
   記録）。
   - 公開形: crate ルートの `pub fn` 2 件

@@ -2,7 +2,7 @@
 //! `torch.use_deterministic_algorithms` に相当する、プロセスワイドな
 //! opt-in 状態を管理する。
 //!
-//! **facade 公開（イシュー #2507。2026-10-04 承認・ルート #2499）**:
+//! **facade 公開（イシュー #2507。ルート #2499 のユーザー一括承認に基づく）**:
 //! crate ルート `fandhe_ai::set_deterministic`／`fandhe_ai::is_deterministic`
 //! が本モジュールへの薄い委譲として公開済み。本モジュール自体の再エクスポート
 //! （`fandhe_ai::determinism`）は承認形外で、facade の正ガードが拒否する
