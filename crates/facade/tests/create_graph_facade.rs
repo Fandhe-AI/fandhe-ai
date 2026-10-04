@@ -216,13 +216,13 @@ fn child_built_with_tape_for_parent_device_works() {
     let x = parent.var(&t(x0.to_vec(), &[3]));
     let loss = cubic_loss(&x);
     let cg = parent.backward_create_graph(&loss, &child).unwrap();
-    assert!(cg.child_var(&x).unwrap().is_some(), "ミラー取得");
-    assert!(cg.grad(&x).unwrap().is_some(), "子テープ上の勾配");
-    let second = hessian_diag_cubic(
-        &fandhe_ai::tape(),
-        &fandhe_ai::tape_for(Device::Cpu).expect("CPU テープは常に構築可能"),
-        &x0,
-    );
+    let g = cg.grad(&x).unwrap().expect("子テープ上の勾配");
+    // 構築した子テープ自身で 2 階微分する（x^3 の Hessian は対角のため行和＝対角）。
+    let grads2 = child
+        .backward(&g.sum(None).unwrap())
+        .expect("child backward");
+    let xc = cg.child_var(&x).unwrap().expect("ミラー取得");
+    let second = vals(grads2.get(&xc).unwrap().expect("second order"));
     for (h, &v) in second.iter().zip(x0.iter()) {
         assert!(req2_close(*h as f64, 6.0 * v as f64), "2階 {h}");
     }
