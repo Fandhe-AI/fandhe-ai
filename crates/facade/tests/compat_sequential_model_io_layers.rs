@@ -1,8 +1,8 @@
 //! `fandhe_ai::compat::{save_model, load_model}` の全 50 層対応（イシュー #2370・親 #2362）の
 //! 統合テスト。facade の公開 API と `std` のみで次の受入基準を検証する。
 //!
-//! - (a) 51 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
-//!   `predict` 出力が bit 一致する（51 種の網羅は保存した manifest の `kind` 集合で検査する）。
+//! - (a) 52 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
+//!   `predict` 出力が bit 一致する（52 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
@@ -22,7 +22,7 @@ mod common;
 use common::temp_dir::TempDirGuard;
 
 /// allowlist の 45 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-const ALL_KINDS: [&str; 51] = [
+const ALL_KINDS: [&str; 52] = [
     "linear",
     "relu",
     "sigmoid",
@@ -58,6 +58,7 @@ const ALL_KINDS: [&str; 51] = [
     "multihead_attention",
     "multihead_attention_config",
     "transformer_encoder",
+    "transformer_decoder_layer",
     "max_pool2d",
     "max_pool1d",
     "avg_pool2d",
@@ -154,7 +155,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------
-// (a) 51 種の bit 一致
+// (a) 52 種の bit 一致
 // ---------------------------------------------------------------------
 
 /// rank 2 入力 `[3, 6]`: 活性化・正規化・dropout・BatchNorm1d（rank 2）・softmax 系。
@@ -260,6 +261,7 @@ fn sequence_model(padding_idx: Option<usize>) -> Built {
             45,
         )?
         .add_transformer_encoder(8, 2, 16, 43)?
+        .add_transformer_decoder_layer(8, 2, 16, 47)?
         .add_layer_norm(8, 1e-5)?
         .add_flatten(1, 2)
         .add_linear(40, 3, 44)?;
@@ -318,7 +320,7 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
         ));
     }
     let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(seen, expected, "51 種の kind をすべて往復させたはず");
+    assert_eq!(seen, expected, "52 種の kind をすべて往復させたはず");
 }
 
 /// train モードのまま保存・復元しても `training` フラグが往復し、dropout を含む構成で

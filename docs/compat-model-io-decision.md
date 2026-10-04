@@ -1497,6 +1497,16 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
   `format_version` は #2714 と同じ理由で据え置き
 - 復元は `add_multihead_attention_with_config` を再実行し、0 次元・割り切れない値は構築時検査で拒否する
 
+## 追補（イシュー #2532）: `transformer_decoder_layer` kind の追加
+
+- kind `transformer_decoder_layer`（params: `d_model`・`num_heads`・`dim_feedforward`。活性化は `relu`・eps は既定固定のため記録しない）を
+  allowlist に追加（51 → 52 種）。`LayerSpec::Unsupported` は `add_module` 専用のため使わない
+- 1 層あたりのパラメータは 26 要素（self_attn／multihead_attn 各 q/k/v/out の weight+bias = 16、linear1／linear2 = 4、norm1〜3 = 6）。
+  期待キー・shape は層構成からの算術で導く。JSON 配列・object の上限（`MAX_ARRAY_LEN`・キー数上限）の閾値は変更せず、
+  超過は書き込み前の `verify_round_trip` が `TooLarge` で拒否する（#2370 の「最大 16 要素」の記述は TE 基準で、decoder は最大 26 要素）
+- `format_version` は 2 のまま据え置き（旧リーダーは未知 kind を `Manifest` で fail-closed 拒否）
+- 復元は `add_transformer_decoder_layer` を再実行し、0 次元・割り切れない head 数は構築時検査で拒否する
+
 ## 追補（イシュー #2529）: 活性化 5 種の kind 追加
 
 - `mish`／`hardtanh`（`min_val`／`max_val`）／`relu6`／`glu`（`dim`）／`prelu`（`num_parameters`）を allowlist に追加（45 → 50 種）。

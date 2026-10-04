@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 51 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 52 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -307,7 +307,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 51 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 52 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -345,6 +345,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::MultiheadAttention { .. } => Some("multihead_attention"),
         LayerSpec::MultiheadAttentionConfig { .. } => Some("multihead_attention_config"),
         LayerSpec::TransformerEncoder { .. } => Some("transformer_encoder"),
+        LayerSpec::TransformerDecoderLayer { .. } => Some("transformer_decoder_layer"),
         LayerSpec::MaxPool2d { .. } => Some("max_pool2d"),
         LayerSpec::MaxPool1d { .. } => Some("max_pool1d"),
         LayerSpec::AvgPool2d { .. } => Some("avg_pool2d"),
@@ -562,6 +563,38 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
                 ("norm1.bias", vec![*d_model]),
                 ("norm2.weight", vec![*d_model]),
                 ("norm2.bias", vec![*d_model]),
+            ]);
+            out
+        }
+        // イシュー #2532。`TransformerDecoderLayer::named_parameters` の列挙順
+        // （self_attn → multihead_attn → linear1 → linear2 → norm1〜3。計 26 キー）。
+        LayerSpec::TransformerDecoderLayer {
+            d_model,
+            dim_feedforward,
+            ..
+        } => {
+            let mut out = mha_parameters(*d_model, true, true);
+            let dm = *d_model;
+            let ff = *dim_feedforward;
+            out.extend([
+                ("multihead_attn.q_proj.weight", vec![dm, dm]),
+                ("multihead_attn.q_proj.bias", vec![dm]),
+                ("multihead_attn.k_proj.weight", vec![dm, dm]),
+                ("multihead_attn.k_proj.bias", vec![dm]),
+                ("multihead_attn.v_proj.weight", vec![dm, dm]),
+                ("multihead_attn.v_proj.bias", vec![dm]),
+                ("multihead_attn.out_proj.weight", vec![dm, dm]),
+                ("multihead_attn.out_proj.bias", vec![dm]),
+                ("linear1.weight", vec![dm, ff]),
+                ("linear1.bias", vec![ff]),
+                ("linear2.weight", vec![ff, dm]),
+                ("linear2.bias", vec![dm]),
+                ("norm1.weight", vec![dm]),
+                ("norm1.bias", vec![dm]),
+                ("norm2.weight", vec![dm]),
+                ("norm2.bias", vec![dm]),
+                ("norm3.weight", vec![dm]),
+                ("norm3.bias", vec![dm]),
             ]);
             out
         }
@@ -928,6 +961,15 @@ fn render_params(spec: &LayerSpec) -> String {
             put_bool(&mut f, "batch_first", *batch_first);
         }
         LayerSpec::TransformerEncoder {
+            d_model,
+            num_heads,
+            dim_feedforward,
+        } => {
+            put_num(&mut f, "d_model", *d_model);
+            put_num(&mut f, "num_heads", *num_heads);
+            put_num(&mut f, "dim_feedforward", *dim_feedforward);
+        }
+        LayerSpec::TransformerDecoderLayer {
             d_model,
             num_heads,
             dim_feedforward,
@@ -1832,6 +1874,13 @@ fn build_model(
             } => model
                 .add_transformer_encoder(*d_model, *num_heads, *dim_feedforward, 0)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::TransformerDecoderLayer {
+                d_model,
+                num_heads,
+                dim_feedforward,
+            } => model
+                .add_transformer_decoder_layer(*d_model, *num_heads, *dim_feedforward, 0)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::MaxPool2d {
                 kernel_size,
                 stride,
@@ -2724,6 +2773,14 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 dim_feedforward: p.usize("dim_feedforward")?,
             })
         }
+        "transformer_decoder_layer" => {
+            let p = Params::new(params, &["d_model", "num_heads", "dim_feedforward"])?;
+            Ok(LayerSpec::TransformerDecoderLayer {
+                d_model: p.usize("d_model")?,
+                num_heads: p.usize("num_heads")?,
+                dim_feedforward: p.usize("dim_feedforward")?,
+            })
+        }
         "max_pool2d" => {
             let p = Params::new(
                 params,
@@ -3259,7 +3316,7 @@ mod tests {
         ));
     }
 
-    /// 51 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 52 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3397,6 +3454,11 @@ mod tests {
                 num_heads: 2,
                 dim_feedforward: 16,
             },
+            LayerSpec::TransformerDecoderLayer {
+                d_model: 8,
+                num_heads: 2,
+                dim_feedforward: 16,
+            },
             LayerSpec::MaxPool2d {
                 kernel_size: [2, 2],
                 stride: Some([2, 1]),
@@ -3491,7 +3553,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 51, "kind allowlist は 51 種: {kinds:?}");
+        assert_eq!(kinds.len(), 52, "kind allowlist は 52 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3509,9 +3571,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 51 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 52 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("51 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("52 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3519,7 +3581,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("51 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("52 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -3946,7 +4008,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("51 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("52 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

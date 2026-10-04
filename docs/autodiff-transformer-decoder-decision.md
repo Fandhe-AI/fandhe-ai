@@ -174,3 +174,23 @@ input`（decoder）・`src = tgt = input`（Transformer）とする。mask は
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`
 - `git diff origin/main --stat -- Cargo.toml Cargo.lock docs/spec`
   が空であることを確認済み（依存・spec に変更なし）
+
+## 実装記録（#2532・親 #2531）
+
+承認事項のうち decoder 1 層の分を facade へ公開した（ルート #2499 の一括承認。`docs/compat-api-scope.md` §5 経路 2）。
+
+- **公開名**: `fandhe_ai::nn::TransformerDecoderLayer`・`fandhe_ai::nn::TransformerConfig`（`crates/facade/src/nn/mod.rs` の独立した 1 文の `pub use`）と
+  `compat::Sequential::add_transformer_decoder_layer(d_model, num_heads, dim_feedforward, seed)`。
+- **配置の理由**: autodiff 側のパス（`nn::*`）の鏡写しにした。新しい `pub mod` は作らない（`nn_mod_declares_only_init_and_rnn_submodules` と、全 `*HoldDoctestGuard` の
+  glob 一覧への波及を避けるため）。
+- **Sequential 内の意味論**: `tgt = memory = 直前層の出力`・mask なし・非 causal・`relu`・eps は `LAYER_NORM_DEFAULT_EPS` 固定。
+  `Module::forward` と同じ呼び出しなので `predict` と `bind().forward` は bit 一致する。
+- **保存・復元**: kind `transformer_decoder_layer`（params は `d_model`・`num_heads`・`dim_feedforward`）を 31 種目以降として allowlist へ追加（合計 52 種）。
+  `LayerSpec::Unsupported` は `add_module` 専用のため使わなかった。
+- **ガードの縮小**: `TransformerDecoderHoldDoctestGuard` のプローブと `compat_sequential_does_not_expose_transformer_decoder_add_methods` は `Transformer`／
+  `add_transformer` だけに縮めた（#2533 が残りを反転する）。正ガードは `api_surface.rs` の
+  `facade_reexports_transformer_decoder_items_only_in_approved_shape`・`compat_sequential_declares_add_transformer_decoder_layer_exactly_once` ほか。
+- **限界（後続候補）**: `TransformerDecoderLayer::new` は `FeedForwardActivation`、`from_parameters` は `MultiheadAttention`／`Linear`／`LayerNorm`、`bind` は生の `Tape` を取るため、
+  facade 利用者は型名・アクセサには触れるが、単体での構築・forward は行えない（承認形の範囲外のため再エクスポート・委譲は追加していない。必要になれば本記録への追記と承認が要る）。
+- **#2533 に残る範囲**: `Transformer`／`add_transformer`・その保存往復・残りの保留ガードの削除。
+- 実機 parity（CUDA／Metal）は `docs/perf/logs/transformer-decoder-sequential-2532/README.md` へ申し送り。

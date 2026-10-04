@@ -16,6 +16,8 @@
 //!   ／`trainable_grads()` の件数が `trainable_parameters()`（16 件）
 //!   と一致する（レビュー指摘の回帰ガード。`self.encoders` を収集し
 //!   忘れると 0 件になり黙って学習されない罠を防ぐ）。
+//! - `TransformerDecoderLayer`（#2532）も同様（26 パラメータ・`predict`／`forward` bit 一致・
+//!   encoder との混在・常駐経路 `Unsupported`）。
 //! - SGD 学習ループで loss 減少。
 //! - `apply_parameters`: shape 保存更新が `predict` に反映・
 //!   BatchNorm の running stats／`training` が in-place 更新後も保持
@@ -550,4 +552,239 @@ fn embedding_rejects_nan_id() {
     let ids = tensor(vec![f32::NAN], &[1]);
     let err = model.predict(&ids).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+// --- TransformerDecoderLayer（イシュー #2532・親 #2531）---
+//
+// `add_transformer_decoder_layer` は `tgt = memory = 直前層の出力`・mask なし・非 causal 固定。
+// 1 層あたり 26 パラメータ（self_attn・multihead_attn 各 q/k/v/out の weight+bias = 16、
+// linear1/linear2 = 4、norm1〜3 の weight+bias = 6）。
+
+fn decoder_input() -> Tensor<f32> {
+    tensor(
+        (0..2 * 3 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
+        &[2, 3, 4],
+    )
+}
+
+#[test]
+fn add_transformer_decoder_layer_rejects_indivisible_heads() {
+    let err = Sequential::new()
+        .add_transformer_decoder_layer(6, 4, 8, SEED1)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn add_transformer_decoder_layer_rejects_zero_dim_feedforward() {
+    let err = Sequential::new()
+        .add_transformer_decoder_layer(4, 2, 0, SEED1)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn add_transformer_decoder_layer_rejects_zero_d_model() {
+    let err = Sequential::new()
+        .add_transformer_decoder_layer(0, 1, 8, SEED1)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn transformer_decoder_layer_predict_matches_forward_bit_exact() {
+    let model = Sequential::new()
+        .add_transformer_decoder_layer(4, 2, 8, SEED1)
+        .unwrap();
+    let x = decoder_input();
+
+    let predicted = model.predict(&x).unwrap();
+    let tape = fandhe_ai::tape();
+    let xv = tape.var(&x);
+    let forwarded = model.forward(&tape, &xv).unwrap().to_tensor();
+
+    assert_eq!(predicted.shape(), &[2, 3, 4]);
+    assert_eq!(dense_vec(&predicted), dense_vec(&forwarded));
+}
+
+#[test]
+fn transformer_decoder_layer_bind_trainable_vars_and_grads_count_matches_trainable_parameters() {
+    // `SequentialVars::trainable_vars`／`trainable_grads` が `self.decoders` を収集し忘れると
+    // 0 件になり黙って学習されない罠の回帰ガード（encoder 版と同型）。
+    let model = Sequential::new()
+        .add_transformer_decoder_layer(4, 2, 8, SEED1)
+        .unwrap();
+    let x = decoder_input();
+    let target = tensor(vec![0.0f32; 2 * 3 * 4], &[2, 3, 4]);
+
+    let param_count = model.trainable_parameters().len();
+    assert_eq!(param_count, 26);
+
+    let tape = fandhe_ai::tape();
+    let bound = model.bind(&tape);
+    let xv = tape.var(&x);
+    let tv = tape.var(&target);
+    let pred = bound.forward(&tape, &xv).unwrap();
+    let loss = pred.mse_loss(&tv).unwrap();
+
+    assert_eq!(bound.trainable_vars().len(), param_count);
+
+    let grads = tape.backward(&loss).unwrap();
+    let grad_refs = bound.trainable_grads(&grads).unwrap();
+    assert_eq!(grad_refs.len(), param_count);
+}
+
+#[test]
+fn transformer_decoder_layer_trainable_vars_and_grads_follow_named_parameters_order() {
+    let model = Sequential::new()
+        .add_transformer_decoder_layer(4, 2, 8, SEED1)
+        .unwrap();
+    let x = decoder_input();
+    let target = tensor(vec![0.0f32; 2 * 3 * 4], &[2, 3, 4]);
+
+    let named_shapes: Vec<Vec<usize>> = model
+        .named_parameters()
+        .iter()
+        .map(|(_, t)| t.contiguous().shape().to_vec())
+        .collect();
+    let trainable_shapes: Vec<Vec<usize>> = model
+        .trainable_parameters()
+        .iter()
+        .map(|t| t.contiguous().shape().to_vec())
+        .collect();
+    assert_eq!(named_shapes, trainable_shapes);
+
+    let tape = fandhe_ai::tape();
+    let bound = model.bind(&tape);
+    let xv = tape.var(&x);
+    let tv = tape.var(&target);
+    let loss = bound.forward(&tape, &xv).unwrap().mse_loss(&tv).unwrap();
+    let var_shapes: Vec<Vec<usize>> = bound
+        .trainable_vars()
+        .iter()
+        .map(|v| v.to_tensor().shape().to_vec())
+        .collect();
+    assert_eq!(var_shapes, trainable_shapes);
+    let grads = tape.backward(&loss).unwrap();
+    let grad_shapes: Vec<Vec<usize>> = bound
+        .trainable_grads(&grads)
+        .unwrap()
+        .iter()
+        .map(|g| g.contiguous().shape().to_vec())
+        .collect();
+    assert_eq!(grad_shapes, trainable_shapes);
+}
+
+#[test]
+fn transformer_decoder_layer_sgd_training_loop_reduces_loss() {
+    let mut model = Sequential::new()
+        .add_transformer_decoder_layer(4, 2, 8, SEED1)
+        .unwrap();
+    let x = decoder_input();
+    let target = tensor(
+        (0..2 * 3 * 4)
+            .map(|i| ((i % 5) as f32) * 0.1 - 0.2)
+            .collect(),
+        &[2, 3, 4],
+    );
+
+    let mut sgd = Sgd::new(SgdConfig::new(0.05)).unwrap();
+    let mut losses = Vec::new();
+    for _ in 0..30 {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let xv = tape.var(&x);
+            let tv = tape.var(&target);
+            let pred = bound.forward(&tape, &xv).unwrap();
+            let loss = pred.mse_loss(&tv).unwrap();
+            losses.push(loss.to_tensor().get(&[]).unwrap());
+
+            let grads = tape.backward(&loss).unwrap();
+            let grad_refs = bound.trainable_grads(&grads).unwrap();
+            let param_refs = model.trainable_parameters();
+            sgd.step(&param_refs, &grad_refs).unwrap()
+        };
+        model.apply_parameters(updated).unwrap();
+    }
+
+    let first = losses[0];
+    let last = *losses.last().unwrap();
+    assert!(
+        last < first * 0.9,
+        "loss should decrease: first={first} last={last}"
+    );
+}
+
+#[test]
+fn transformer_decoder_layer_resident_paths_reject_unsupported() {
+    let model = Sequential::new()
+        .add_transformer_decoder_layer(4, 2, 8, SEED1)
+        .unwrap();
+    let tape = fandhe_ai::tape();
+    let err = model.init_device_param_store(&tape).unwrap_err();
+    assert!(matches!(err, BackendError::Unsupported(_)));
+
+    // 他モデル由来の store を渡しても decoder 層を含むモデルの常駐経路は入口で拒否する。
+    let linear = Sequential::new().add_linear(4, 4, SEED2).unwrap();
+    let store = linear.init_device_param_store(&tape).unwrap();
+    let err = model
+        .predict_resident(&store, &decoder_input())
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Backend(BackendError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn transformer_encoder_then_decoder_then_linear_forward_and_training_consume_vars_in_order() {
+    // encoder／decoder／linear の Vars 消費順が崩れていないことの回帰確認。
+    let mut model = Sequential::new()
+        .add_transformer_encoder(4, 2, 8, SEED1)
+        .unwrap()
+        .add_transformer_decoder_layer(4, 2, 8, SEED2)
+        .unwrap()
+        .add_flatten(1, 2)
+        .add_linear(12, 2, SEED1)
+        .unwrap();
+    let x = decoder_input();
+    let target = tensor(
+        (0..2 * 2).map(|i| ((i % 3) as f32) * 0.1).collect(),
+        &[2, 2],
+    );
+    assert_eq!(model.trainable_parameters().len(), 16 + 26 + 2);
+
+    let predicted = model.predict(&x).unwrap();
+    {
+        let tape = fandhe_ai::tape();
+        let bound = model.bind(&tape);
+        let xv = tape.var(&x);
+        let forwarded = bound.forward(&tape, &xv).unwrap().to_tensor();
+        assert_eq!(predicted.shape(), &[2, 2]);
+        assert_eq!(dense_vec(&predicted), dense_vec(&forwarded));
+    }
+
+    let mut sgd = Sgd::new(SgdConfig::new(0.05)).unwrap();
+    let mut losses = Vec::new();
+    for _ in 0..30 {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let xv = tape.var(&x);
+            let tv = tape.var(&target);
+            let loss = bound.forward(&tape, &xv).unwrap().mse_loss(&tv).unwrap();
+            losses.push(loss.to_tensor().get(&[]).unwrap());
+            let grads = tape.backward(&loss).unwrap();
+            let grad_refs = bound.trainable_grads(&grads).unwrap();
+            assert_eq!(grad_refs.len(), 16 + 26 + 2);
+            let param_refs = model.trainable_parameters();
+            sgd.step(&param_refs, &grad_refs).unwrap()
+        };
+        model.apply_parameters(updated).unwrap();
+    }
+    assert!(*losses.last().unwrap() < losses[0] * 0.9, "{losses:?}");
 }

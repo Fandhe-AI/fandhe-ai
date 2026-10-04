@@ -1801,3 +1801,17 @@ Sequential は self-attention 固定のため `kdim`/`vdim != embed_dim` は追�
 既存 kind `multihead_attention` は不変）。保留ガード（`MhaOptionsHoldDoctestGuard`・否定ガード）は承認形の正ガードへ反転した。
 保留継続: `key_padding_mask` の Sequential 経由指定・cross-attention・ONNX export の対象層拡大。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
 実機 parity は `docs/perf/logs/mha-config-sequential-2530/README.md` へ申し送り。
+
+**適用記録（経路 2。イシュー #2532・親 #2531・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`TransformerDecoderLayer`・`TransformerConfig`（#2165）を `fandhe_ai::nn::TransformerDecoderLayer`・`fandhe_ai::nn::TransformerConfig`
+（`nn/mod.rs` の 1 文の再エクスポート）と `compat::Sequential::add_transformer_decoder_layer(d_model, num_heads, dim_feedforward, seed)` として公開した
+（追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊。`docs/autodiff-transformer-decoder-decision.md` §承認事項の承認形のうち decoder 1 層の分）。
+`Sequential` は単一入力列のため `tgt = memory = 直前層の出力`・mask なし・非 causal 固定で、`predict` と `bind().forward` が bit 一致する。
+`bind`／`SequentialVars::forward`／`trainable_vars`／`trainable_grads`／`contains_resident_unsupported_layer` へ結線済み（既存の `as_transformer_decoder_layer`
+フックを使用。`nn::Module` へのメソッド追加なし）。1 層 26 パラメータ。resident 経路は `Unsupported`（fail-closed）、AMP 低精度経路は decoder を f32 のまま通す。
+`save_model`／`load_model` は kind `transformer_decoder_layer` を追加した（51 → 52 種。`format_version` 不変。manifest 上限の閾値は変更しない）。
+ONNX export は `UnsupportedLayer`。保留ガード（`TransformerDecoderHoldDoctestGuard`・否定ガード）は decoder 1 層の分だけ縮め、承認形は `api_surface.rs` の
+正ガード（`facade_reexports_transformer_decoder_items_only_in_approved_shape`・`compat_sequential_declares_add_transformer_decoder_layer_exactly_once`）で固定した。
+保留継続: `Transformer`・`add_transformer`（#2533）・`FeedForwardActivation` の再エクスポートや `Tape` 委譲メソッド（単体構築・単体 forward。承認形の範囲外のため未実施）・
+`tgt`／`memory` を別々に与える 2 入力 API・mask／causal 指定・Dropout 結線・GPU 専用カーネル。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
+実機 parity は `docs/perf/logs/transformer-decoder-sequential-2532/README.md` へ申し送り。

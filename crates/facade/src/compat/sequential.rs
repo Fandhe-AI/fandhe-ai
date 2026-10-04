@@ -123,9 +123,10 @@ use fandhe_ai_autodiff::nn::{
     EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm, Identity, InstanceNorm,
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module,
     MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
-    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, TransformerEncoderLayer,
-    TransformerEncoderLayerVars, Unflatten, Upsample, ZeroPad2d, conv2d_forward_low_precision,
-    linear_forward_low_precision, multihead_attention_forward_low_precision,
+    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, TransformerDecoderLayer,
+    TransformerDecoderLayerVars, TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten,
+    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
+    multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -330,6 +331,13 @@ pub(super) enum LayerSpec {
         batch_first: bool,
     },
     TransformerEncoder {
+        d_model: usize,
+        num_heads: usize,
+        dim_feedforward: usize,
+    },
+    /// イシュー #2532。`add_transformer_decoder_layer` が積む（Relu・eps 既定固定のため
+    /// 活性化・eps は記録しない）。
+    TransformerDecoderLayer {
         d_model: usize,
         num_heads: usize,
         dim_feedforward: usize,
@@ -1342,6 +1350,60 @@ impl Sequential {
         Ok(self)
     }
 
+    /// TransformerDecoderLayer 層を追加する
+    /// （`nn::TransformerDecoderLayer`。イシュー #2532・親 #2531・ルート #2499 の
+    /// 一括承認。`docs/autodiff-transformer-decoder-decision.md`）。
+    /// self-attention → residual → LayerNorm → cross-attention → residual →
+    /// LayerNorm → FFN（`relu` 活性化固定）→ residual → LayerNorm の post-norm 合成
+    /// （PyTorch `nn.TransformerDecoderLayer` の既定 `norm_first=False`・
+    /// `activation="relu"` と揃える）。
+    ///
+    /// `Sequential` は単一入力列のため `tgt = memory = 直前層の出力`・mask なし・
+    /// 非 causal 固定で呼ぶ（cross-attention は自身の入力を参照する。
+    /// `nn::Module for TransformerDecoderLayer::forward` と同じ意味論で、
+    /// `predict` と `bind().forward` が bit 一致する）。`tgt`／`memory` を別々に
+    /// 与える 2 入力 API・mask・causal 指定は本メソッドの対象外。Dropout は結線しない。
+    /// `eps` は `nn::LAYER_NORM_DEFAULT_EPS` 固定。
+    /// `d_model == 0`・`dim_feedforward == 0`・`d_model % num_heads != 0` は
+    /// `TransformerDecoderLayer::new` が拒否する。デバイス常駐経路は未対応
+    /// （`BackendError::Unsupported`）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_transformer_decoder_layer(4, 2, 8, 0)?;
+    /// let x = Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[2, 3, 4]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_transformer_decoder_layer(
+        mut self,
+        d_model: usize,
+        num_heads: usize,
+        dim_feedforward: usize,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let layer = TransformerDecoderLayer::new(
+            d_model,
+            num_heads,
+            dim_feedforward,
+            FeedForwardActivation::Relu,
+            LAYER_NORM_DEFAULT_EPS,
+            seed,
+        )?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::TransformerDecoderLayer {
+            d_model,
+            num_heads,
+            dim_feedforward,
+        });
+        Ok(self)
+    }
+
     /// 2 次元 MaxPool 層を追加する（`nn::MaxPool2d`。イシュー #1957・
     /// 親 #1618。2026-09-17 ユーザー承認〈選択肢 A・6 メソッド一括
     /// 追加〉）。`ceil_mode=false` 固定（`MaxPool2d::new` doc 参照）。
@@ -2102,6 +2164,13 @@ impl Sequential {
             .filter_map(|layer| layer.as_transformer_encoder_layer())
             .map(|enc| enc.bind(&tape.0))
             .collect();
+        let decoders = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_transformer_decoder_layer())
+            .map(|dec| dec.bind(&tape.0))
+            .collect();
         SequentialVars {
             model: self,
             linears,
@@ -2118,6 +2187,7 @@ impl Sequential {
             prelus,
             mhas,
             encoders,
+            decoders,
         }
     }
 
@@ -2188,6 +2258,7 @@ impl Sequential {
                 && layer.as_prelu().is_none()
                 && layer.as_multihead_attention().is_none()
                 && layer.as_transformer_encoder_layer().is_none()
+                && layer.as_transformer_decoder_layer().is_none()
                 && !layer.named_parameters().is_empty()
         })
     }
@@ -2244,7 +2315,7 @@ impl Sequential {
     /// 含まれるかどうか（旧 `contains_conv_layer`。イシュー #1770 で
     /// `Conv2d`／`Conv1d` 向けに新設し、イシュー #1760 で LayerNorm／
     /// RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
-    /// MultiheadAttention へ、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d、イシュー #2525 で GroupNorm／InstanceNorm を追加、イシュー #1957 で Pooling（MaxPool／
+    /// MultiheadAttention へ、イシュー #2532 で TransformerDecoderLayer を追加、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d、イシュー #2525 で GroupNorm／InstanceNorm を追加、イシュー #1957 で Pooling（MaxPool／
     /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名した）。
     /// これらの層は `forward_from_flat_leaves`（`Linear` 層のみを
     /// 消費する走査）の対象外のため、常駐経路の入口で明示的に拒否する
@@ -2267,6 +2338,7 @@ impl Sequential {
                 || layer.as_prelu().is_some()
                 || layer.as_multihead_attention().is_some()
                 || layer.as_transformer_encoder_layer().is_some()
+                || layer.as_transformer_decoder_layer().is_some()
                 || layer.is_pooling()
         })
     }
@@ -3047,6 +3119,9 @@ pub struct SequentialVars<'m, 't> {
     /// 保持し `'m` を借用しない（`nn::transformer_encoder_layer::
     /// TransformerEncoderLayerVars` の定義参照）。
     encoders: Vec<TransformerEncoderLayerVars<'t>>,
+    /// `TransformerDecoderLayer` 層（イシュー #2532）を層順で収集する。`encoders` と同じく
+    /// `Var<'t>` のみを保持し `'m` を借用しない。
+    decoders: Vec<TransformerDecoderLayerVars<'t>>,
 }
 
 impl<'m, 't> SequentialVars<'m, 't> {
@@ -3076,7 +3151,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
     /// （イシュー #1961・#2071・`docs/autodiff-low-precision-linear-
     /// design.md` §7「facade 統合（#1961）」・§8「Conv2d・
     /// MultiheadAttention 拡張（#2071）」）。それ以外の層（活性化・
-    /// `Conv1d`／`LayerNorm`／`TransformerEncoderLayer` 等）は
+    /// `Conv1d`／`LayerNorm`／`TransformerEncoderLayer`／`TransformerDecoderLayer` 等）は
     /// `low_precision` の値に関わらず常に f32 のまま——各低精度自由関数
     /// 自体が対応する層 1 種の forward 計算のみを対象とする opt-in
     /// 経路であり、他層への拡張は本イシューのスコープ外（`docs/
@@ -3137,6 +3212,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut prelus = self.prelus.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
+        let mut decoders = self.decoders.iter();
         let layers = self.model.inner.layers();
         let mut i = 0;
         while i < layers.len() {
@@ -3331,6 +3407,20 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward(&current, None, false)?;
                 i += 1;
+            } else if layer.as_transformer_decoder_layer().is_some() {
+                // `tgt = memory = current`・mask なし・非 causal 固定（イシュー #2532。
+                // `Sequential::add_transformer_decoder_layer` doc・`nn::Module for
+                // TransformerDecoderLayer::forward` と同一の意味論）。
+                let vars = decoders.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み TransformerDecoderLayerVars が \
+                         model.layers の TransformerDecoderLayer 層数より少ない（bind/forward \
+                         間の TransformerDecoderLayer 層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current, &current, None, None, false, false)?;
+                i += 1;
             } else {
                 // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`
                 // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
@@ -3368,6 +3458,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut prelus = self.prelus.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
+        let mut decoders = self.decoders.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -3509,6 +3600,71 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 if let Some(b) = &vars.norm2.bias {
                     out.push(b);
                 }
+            } else if layer.as_transformer_decoder_layer().is_some()
+                && let Some(vars) = decoders.next()
+            {
+                // `named_parameters`（`self_attn` → `multihead_attn` → `linear1` →
+                // `linear2` → `norm1` → `norm2` → `norm3` の順。
+                // `crates/autodiff/src/nn/transformer_decoder_layer.rs` の同メソッド）と
+                // 同じ順序で 26 個の `Var` を push する（イシュー #2532）。
+                out.push(&vars.self_attn.q.weight);
+                if let Some(b) = &vars.self_attn.q.bias {
+                    out.push(b);
+                }
+                out.push(&vars.self_attn.k.weight);
+                if let Some(b) = &vars.self_attn.k.bias {
+                    out.push(b);
+                }
+                out.push(&vars.self_attn.v.weight);
+                if let Some(b) = &vars.self_attn.v.bias {
+                    out.push(b);
+                }
+                out.push(&vars.self_attn.out.weight);
+                if let Some(b) = &vars.self_attn.out.bias {
+                    out.push(b);
+                }
+                out.push(&vars.multihead_attn.q.weight);
+                if let Some(b) = &vars.multihead_attn.q.bias {
+                    out.push(b);
+                }
+                out.push(&vars.multihead_attn.k.weight);
+                if let Some(b) = &vars.multihead_attn.k.bias {
+                    out.push(b);
+                }
+                out.push(&vars.multihead_attn.v.weight);
+                if let Some(b) = &vars.multihead_attn.v.bias {
+                    out.push(b);
+                }
+                out.push(&vars.multihead_attn.out.weight);
+                if let Some(b) = &vars.multihead_attn.out.bias {
+                    out.push(b);
+                }
+                out.push(&vars.linear1.weight);
+                if let Some(b) = &vars.linear1.bias {
+                    out.push(b);
+                }
+                out.push(&vars.linear2.weight);
+                if let Some(b) = &vars.linear2.bias {
+                    out.push(b);
+                }
+                if let Some(w) = &vars.norm1.weight {
+                    out.push(w);
+                }
+                if let Some(b) = &vars.norm1.bias {
+                    out.push(b);
+                }
+                if let Some(w) = &vars.norm2.weight {
+                    out.push(w);
+                }
+                if let Some(b) = &vars.norm2.bias {
+                    out.push(b);
+                }
+                if let Some(w) = &vars.norm3.weight {
+                    out.push(w);
+                }
+                if let Some(b) = &vars.norm3.bias {
+                    out.push(b);
+                }
             }
         }
         out
@@ -3593,6 +3749,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut prelus = self.prelus.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
+        let mut decoders = self.decoders.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -3702,6 +3859,88 @@ impl<'m, 't> SequentialVars<'m, 't> {
                     grads,
                     vars.norm2.weight.as_ref(),
                     vars.norm2.bias.as_ref(),
+                )?;
+            } else if layer.as_transformer_decoder_layer().is_some()
+                && let Some(vars) = decoders.next()
+            {
+                // `trainable_vars` と同一順序契約（イシュー #2532）。
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.q.weight,
+                    vars.self_attn.q.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.k.weight,
+                    vars.self_attn.k.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.v.weight,
+                    vars.self_attn.v.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.out.weight,
+                    vars.self_attn.out.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.multihead_attn.q.weight,
+                    vars.multihead_attn.q.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.multihead_attn.k.weight,
+                    vars.multihead_attn.k.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.multihead_attn.v.weight,
+                    vars.multihead_attn.v.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.multihead_attn.out.weight,
+                    vars.multihead_attn.out.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.linear1.weight,
+                    vars.linear1.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.linear2.weight,
+                    vars.linear2.bias.as_ref(),
+                )?;
+                push_opt_weight_bias(
+                    &mut out,
+                    grads,
+                    vars.norm1.weight.as_ref(),
+                    vars.norm1.bias.as_ref(),
+                )?;
+                push_opt_weight_bias(
+                    &mut out,
+                    grads,
+                    vars.norm2.weight.as_ref(),
+                    vars.norm2.bias.as_ref(),
+                )?;
+                push_opt_weight_bias(
+                    &mut out,
+                    grads,
+                    vars.norm3.weight.as_ref(),
+                    vars.norm3.bias.as_ref(),
                 )?;
             }
         }
