@@ -9,16 +9,13 @@
 //! `g / k` の除算のみで加算縮約を経由しないため
 //! `.claude/rules/coding-rust.md` の f64 長軸縮約契約は対象外とする。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/reduce_ops.rs`
-//! モジュール doc（イシュー #2147）・`matrix_ops.rs` と同じ理由・同じ
-//! 判断枠組みによる。`Var` は facade（`fandhe_ai` クレート）から直接
-//! 再エクスポートされるため、`Var` への inherent メソッド追加は即座に
-//! facade 公開面へ出てしまう。イシュー #2154 本文は facade 公開面
-//! （`Var::amax`／`amin` の委譲メソッド追加）を承認事項として明示して
-//! おり、承認が取れるまでは自由関数として `Var` の外に置き到達不能に
-//! する。承認後は `Var::amax`／`amin` の薄い委譲メソッドを追加し、
-//! facade 側の保留ガード（`crates/facade/src/lib.rs::
-//! VarExtremumOpsHoldDoctestGuard`）を撤去する。
+//! **公開形（イシュー #2514 で承認済み・公開済み）**: `Var` は facade
+//! （`fandhe_ai` クレート）から直接再エクスポートされるため、承認形は
+//! `Var::amax`／`amin` の 1 行委譲メソッド（`var.rs`）のみで、本モジュール
+//! 自体は facade から再エクスポートしない（ルート #2499 の一括承認。
+//! `docs/autodiff-amax-grad-distribution-decision.md` §9）。すり替えは
+//! facade の正ガード（`api_surface.rs::var_extremum_ops_methods_are_thin_delegations`
+//! 等）が拒否する。
 //!
 //! **PyTorch 相当・数値契約**:
 //!
