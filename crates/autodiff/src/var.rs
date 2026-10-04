@@ -4520,6 +4520,50 @@ impl<'t> Var<'t> {
         self.gather(dim, &index_bc)
     }
 
+    // ---- activation_ops 委譲メソッド（#2146 実装・#2516 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::activation_ops` の自由関数（`softplus`・`tanh`・`mul`・`clamp`・
+    // `where_cond` 等の合成。新規 `Op` なし）。本体は 1 行委譲に固定し、検査の迂回や
+    // 独自実装へのすり替えを facade の正ガード
+    // （`var_activation_ops_methods_are_thin_delegations`）で拒否する。
+    // 数値契約: `hardtanh`／`relu6` の forward は `clamp` と bit 一致で境界勾配は 0。
+    // `mish`／`glu` と `prelu` の weight 勾配は REQ-2 統一複合判定
+    // （`docs/autodiff-activation-ops-decision.md`）。
+    // PyTorch との差異: `mish` の softplus 閾値は 20・`glu` は負の軸番号非対応。
+
+    /// Mish（`x * tanh(softplus(x))`。`torch.nn.functional.mish` 相当。イシュー
+    /// #2146・#2516）。`crate::activation_ops::mish` へ委譲する。
+    pub fn mish(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::mish(self)
+    }
+
+    /// `[min, max]` へのクランプ（`torch.nn.functional.hardtanh` 相当。イシュー
+    /// #2146・#2516）。`crate::activation_ops::hardtanh` へ委譲する。NaN または
+    /// `min >= max` は `AutodiffError::InvalidArgument` で拒否する。
+    pub fn hardtanh(&self, min: f32, max: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::hardtanh(self, min, max)
+    }
+
+    /// `[0, 6]` へのクランプ（`torch.nn.functional.relu6` 相当。イシュー
+    /// #2146・#2516）。`crate::activation_ops::relu6` へ委譲する。
+    pub fn relu6(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::relu6(self)
+    }
+
+    /// PReLU（`torch.nn.functional.prelu` 相当。イシュー #2146・#2516）。
+    /// `crate::activation_ops::prelu` へ委譲する。`weight` の rank・チャネル数
+    /// 不一致は `Shape`、要素数 0 は `InvalidArgument` で拒否する。
+    pub fn prelu(&self, weight: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::prelu(self, weight)
+    }
+
+    /// GLU（`torch.nn.functional.glu` 相当。イシュー #2146・#2516）。
+    /// `crate::activation_ops::glu` へ委譲する。範囲外の軸は `Shape`、奇数長は
+    /// `InvalidArgument` で拒否する。
+    pub fn glu(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::glu(self, dim)
+    }
+
     // ---- rearrange_ops 委譲メソッド（#2143 実装・#2511 公開。親 #2500・ルート #2499）----
     //
     // 実体は `crate::rearrange_ops` の自由関数（`index_select`・`broadcast_to`・

@@ -188,10 +188,10 @@
 //! モジュール doc 参照）。
 
 //! イシュー #2146（親 #2131）で `mish`／`hardtanh`／`relu6`／`prelu`／
-//! `glu` の 5 活性化演算を [`activation_ops`] へ追加した。[`matrix_ops`]
-//! と同じく非公開の自由関数群で、facade 公開は承認待ちのため意図的に
-//! 再エクスポートしない（`docs/autodiff-activation-ops-decision.md`・
-//! モジュール doc 参照）。
+//! `glu` の 5 活性化演算を [`activation_ops`] へ追加した。facade へは #2516 で
+//! `Var` の委譲メソッドとして公開済み（モジュール自体は意図的に再エクスポート
+//! しない。`compat::Sequential::add_*` は #2529 で保留。
+//! `docs/autodiff-activation-ops-decision.md`・モジュール doc 参照）。
 
 //! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
 //! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。

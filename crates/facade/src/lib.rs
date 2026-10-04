@@ -1846,21 +1846,25 @@ struct VarHooksHoldDoctestGuard;
 #[allow(dead_code)]
 struct KvCacheHoldDoctestGuard;
 
-/// イシュー #2146（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）と同型の「正の
-/// プローブ 1 ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを
-/// 併用する（`VarHooksHoldDoctestGuard` と同じ理由）:
+/// イシュー #2146（親 #2131）の facade 公開のうち、承認形外の配置を引き続き
+/// 固定する doctest 足場（#2516 で `Var` 委譲メソッド 5 件を公開したため部分反転。
+/// `VarBoolOpsHoldDoctestGuard` と同じ #2510 型の部分反転）。承認形は
+/// `Var::{mish, hardtanh, relu6, prelu, glu}` の 1 行委譲のみで、その正ガードは
+/// `crates/facade/tests/api_surface.rs::var_activation_ops_methods_are_thin_delegations`・
+/// `var_activation_ops_are_reachable_via_facade_only` が担う。本ガードは 2 種類の
+/// 衝突プローブを併用する（`VarHooksHoldDoctestGuard` と同じ理由）:
 ///
-/// (a) `Var` への委譲メソッド衝突プローブ（`VarMatrixOpsHoldDoctestGuard`
-/// 方式）。facade の全 `pub mod` を glob import したスコープに、本
-/// ブロック内でのみ定義したローカルの自由関数群
+/// (a) 承認形外の配置の衝突プローブ。facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカルの自由関数群
 /// （`__fandhe_activation_hold_probe::activation_ops::{mish, hardtanh,
 /// relu6, prelu, glu}`）とトレイト（`__FandheActivationHoldProbe`）を
-/// 導入し、`Var`／`Tensor<f32>`／`Tape` に実装して実際に使う。facade が
-/// `activation_ops` というモジュール名や 5 個の関数名を公開しても、
-/// ローカル定義との glob 衝突、または呼び出しシグネチャの不一致
-/// （inherent メソッドがトレイトメソッドより優先解決されるため）で
-/// コンパイルが失敗する。
+/// 導入し、`Tensor<f32>`／`Tape` に実装して実際に使う。facade が
+/// `activation_ops` というモジュール名や 5 個の関数名を `Tensor<f32>`／`Tape`
+/// 上へ公開しても、ローカル定義との glob 衝突、または呼び出しシグネチャの
+/// 不一致（inherent メソッドがトレイトメソッドより優先解決されるため）で
+/// コンパイルが失敗する。`Var` への実装と `__probe_var` は、`Var` に inherent
+/// メソッドが載ったことで引数なし呼び出しが inherent 側へ解決され型エラーに
+/// なるため削除した。
 ///
 /// (b) `compat::Sequential::add_*` 5 種の衝突プローブ（承認事項の 2 つ目。
 /// `crate::compat::sequential::Sequential` の既存 `add_relu`／
@@ -1876,13 +1880,12 @@ struct KvCacheHoldDoctestGuard;
 /// activation_ops_hold_doctest_globs_all_pub_modules`・
 /// `activation_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_activation_ops`・
-/// `workspace_declares_activation_ops_fn_names_only_in_autodiff_
-/// activation_ops`）との多層防御の位置づけは
-/// `docs/autodiff-activation-ops-decision.md` §6「承認事項」を参照。
+/// `workspace_declares_activation_ops_fn_names_only_in_approved_locations`）
+/// との多層防御の位置づけは `docs/autodiff-activation-ops-decision.md` §6
+/// 「承認事項」を参照。
 ///
-/// 承認（facade 公開・`Var` への委譲メソッド追加・`compat::Sequential::
-/// add_*` 追加）を得た日が来たら、本モジュール・本 doctest 自体を
-/// 削除する（ソース走査側の対応する否定ガードと同時に外す）。
+/// 撤去条件: #2529 で `compat::Sequential::add_*` が承認・実装されたら、
+/// 本 doctest 自体を削除する（ソース走査側の対応する否定ガードと同時に外す）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -1919,14 +1922,6 @@ struct KvCacheHoldDoctestGuard;
 ///     fn relu6(&self) -> __FandheActivationMarker;
 ///     fn prelu(&self) -> __FandheActivationMarker;
 ///     fn glu(&self) -> __FandheActivationMarker;
-/// }
-///
-/// impl<'t> __FandheActivationHoldProbe for fandhe_ai::Var<'t> {
-///     fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
 /// }
 ///
 /// impl __FandheActivationHoldProbe for fandhe_ai::Tensor<f32> {
@@ -1970,13 +1965,6 @@ struct KvCacheHoldDoctestGuard;
 ///     activation_ops::relu6();
 ///     activation_ops::prelu();
 ///     activation_ops::glu();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheActivationMarker = fandhe_ai::Var::mish(x);
-///     let _: __FandheActivationMarker = x.mish();
-///     let _: __FandheActivationMarker = fandhe_ai::Var::glu(x);
-///     let _: __FandheActivationMarker = x.glu();
 /// }
 ///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
