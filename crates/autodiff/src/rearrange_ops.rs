@@ -9,17 +9,13 @@
 //! エンドに経路があり（`gather` は既定 `Unsupported` でホスト参照実装へ
 //! フォールバック）、専用カーネルなしで到達可能。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/bool_ops.rs`
-//! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への
-//! inherent メソッド追加は即座に facade 公開面へ出てしまう。イシュー
-//! #2143 本文は facade 公開面を承認事項として明示し、親 #2131 はこの
-//! ツリーに限り「設計判断記録 → 承認 → 実装」の 2 段階を定めるため、
-//! 承認が取れるまでは自由関数として `Var` の外に置き到達不能にする
-//! （`docs/autodiff-rearrange-ops-decision.md` §2.1）。承認後は
-//! `Var::repeat` 等の薄い委譲メソッドを追加し、facade 側の保留ガード
-//! （`crates/facade/src/lib.rs::VarRearrangeOpsHoldDoctestGuard`）を
-//! 撤去する。
+//! **公開形（#2511 で承認済み・公開済み）**: `Var` は facade（`fandhe_ai`
+//! クレート）から直接再エクスポートされるため、`Var::flip`／`roll`／
+//! `repeat`／`tile` の薄い委譲メソッド（`crates/autodiff/src/var.rs`。本体は
+//! 本モジュールの同名自由関数への 1 行委譲）が facade 公開面になる
+//! （`docs/autodiff-rearrange-ops-decision.md` §2.1・ルート #2499 一括承認）。
+//! 本モジュール自体は facade から再エクスポートしない（承認形以外の経路は
+//! `crates/facade/tests/api_surface.rs` の正ガードが拒否する）。
 //!
 //! **数値契約**: forward は値のコピーのみ（算術を含まない）ため 3
 //! バックエンド間で構造的に bit 完全一致する（`NaN` の payload も保存
@@ -30,8 +26,7 @@
 //! の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で
 //! 比較する（`.claude/rules/coding-rust.md`）。
 //!
-//! **PyTorch との差分（doc に明記。承認後の facade 版でも据え置く
-//! 予定）**:
+//! **PyTorch との差分（doc に明記。facade 公開版でも据え置く）**:
 //! - `roll` の `dims: None`（flatten してから roll する形）は非対応。
 //!   `Var::reshape` の contiguous 制約（`ShapeError::
 //!   NonContiguousReshape`）を回避する設計上の理由による
