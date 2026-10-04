@@ -292,3 +292,64 @@ fn sequential_with_all_five_layers_builds_and_summarizes() {
     let text = summary(&seq_frozen);
     assert!(!text.is_empty());
 }
+// ---------------------------------------------------------------------
+// イシュー #2521: `Var::conv_transpose1d`／`Var::unflatten` は層経路
+// （`ConvTranspose1dVars::forward`／`Unflatten::forward`）と forward 本体を
+// 共有する。bit 一致と、エラー時に孤児ノードを残さないことを固定する。
+// ---------------------------------------------------------------------
+
+#[test]
+fn var_conv_transpose1d_matches_layer_forward_bit_exact() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let layer = ConvTranspose1d::new(2, 4, 3, 2, 1, 1, 1, 2, true, 9).unwrap();
+    let vars = layer.bind(&tape);
+    let x = tape.var(&t(
+        (0..2 * 2 * 5).map(|i| i as f32 * 0.1 - 0.4).collect(),
+        &[2, 2, 5],
+    ));
+    let via_layer = vars.forward(&x).unwrap().to_tensor();
+    let via_var = x
+        .conv_transpose1d(&vars.weight, vars.bias.as_ref(), 2, 1, 1, 1, 2)
+        .unwrap()
+        .to_tensor();
+    assert_eq!(via_layer.shape(), via_var.shape());
+    assert_eq!(dense(&via_layer), dense(&via_var));
+}
+
+#[test]
+fn var_conv_transpose1d_rejects_invalid_args_without_leaving_orphan_nodes() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let layer = ConvTranspose1d::new(2, 3, 3, 2, 0, 0, 1, 1, true, 5).unwrap();
+    let vars = layer.bind(&tape);
+    let x = tape.var(&t(vec![0.5; 2 * 4], &[1, 2, 4]));
+    let bad = tape.var(&t(vec![0.5; 4], &[2, 2]));
+    let len_before = tape.len();
+    // output_padding >= stride
+    assert!(
+        x.conv_transpose1d(&vars.weight, vars.bias.as_ref(), 2, 0, 2, 1, 1)
+            .is_err()
+    );
+    // rank 違反
+    assert!(
+        bad.conv_transpose1d(&vars.weight, vars.bias.as_ref(), 2, 0, 0, 1, 1)
+            .is_err()
+    );
+    assert_eq!(tape.len(), len_before, "孤児ノードが残っている");
+}
+
+#[test]
+fn var_unflatten_matches_layer_and_rejects_without_orphans() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t((0..12).map(|i| i as f32).collect(), &[2, 6]));
+    let layer = Unflatten::new(1, vec![2, 3]).unwrap();
+    let via_layer = layer.forward(&x).unwrap().to_tensor();
+    let via_var = x.unflatten(1, &[2, 3]).unwrap().to_tensor();
+    assert_eq!(via_var.shape(), &[2, 2, 3]);
+    assert_eq!(dense(&via_layer), dense(&via_var));
+
+    let len_before = tape.len();
+    assert!(x.unflatten(1, &[]).is_err(), "空 sizes");
+    assert!(x.unflatten(5, &[2, 3]).is_err(), "dim 範囲外");
+    assert!(x.unflatten(1, &[4, 2]).is_err(), "積の不一致");
+    assert_eq!(tape.len(), len_before, "孤児ノードが残っている");
+}

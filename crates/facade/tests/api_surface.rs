@@ -11733,17 +11733,12 @@ mod __fandhe_spatial_hold_probe {\n\
 use __fandhe_spatial_hold_probe::*;\n\
 \n\
 trait __FandheSpatialAddProbe {\n\
-\x20\x20\x20\x20fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker;\n\
 \x20\x20\x20\x20fn add_upsample(&self) -> __FandheSpatialHoldMarker;\n\
 \x20\x20\x20\x20fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker;\n\
 \x20\x20\x20\x20fn add_identity(&self) -> __FandheSpatialHoldMarker;\n\
-\x20\x20\x20\x20fn add_unflatten(&self) -> __FandheSpatialHoldMarker;\n\
 }\n\
 \n\
 impl __FandheSpatialAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
-\x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn add_upsample(&self) -> __FandheSpatialHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
 \x20\x20\x20\x20}\n\
@@ -11751,23 +11746,6 @@ impl __FandheSpatialAddProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn add_identity(&self) -> __FandheSpatialHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_unflatten(&self) -> __FandheSpatialHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-trait __FandheSpatialVarProbe {\n\
-\x20\x20\x20\x20fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker;\n\
-\x20\x20\x20\x20fn unflatten(&self) -> __FandheSpatialHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheSpatialVarProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn unflatten(&self) -> __FandheSpatialHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheSpatialHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -11779,45 +11757,30 @@ fn __probe(\n\
 \x20\x20\x20\x20_: Identity,\n\
 \x20\x20\x20\x20_: Unflatten,\n\
 \x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_conv_transpose1d();\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_upsample();\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_zero_pad2d();\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_identity();\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = add_unflatten();\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose1d(seq);\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_conv_transpose1d();\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_upsample(seq);\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_upsample();\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_zero_pad2d(seq);\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_zero_pad2d();\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_identity(seq);\n\
 \x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_identity();\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_unflatten(seq);\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = seq.add_unflatten();\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::Var::conv_transpose1d(v);\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = v.conv_transpose1d();\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = fandhe_ai::Var::unflatten(v);\n\
-\x20\x20\x20\x20let _: __FandheSpatialHoldMarker = v.unflatten();\n\
 }";
 
-/// `src/compat` 配下に `add_conv_transpose1d`／`add_upsample`／
-/// `add_zero_pad2d`／`add_identity`／`add_unflatten` の `pub fn` 宣言が
-/// 存在しないことを固定する（イシュー #2159。
+/// `src/compat` 配下に `add_upsample`／`add_zero_pad2d`／`add_identity` の
+/// `pub fn` 宣言が存在しないことを固定する（イシュー #2159。
+/// `add_conv_transpose1d`／`add_unflatten` は #2521 で公開済みのため対象外。
 /// `compat_sequential_does_not_expose_rnn_add_methods` と同型。
 /// `docs/autodiff-spatial-layers-decision.md` §6 承認事項 1 が未承認の
 /// まま対象外としている設計判断の固定）。
 #[test]
 fn compat_sequential_does_not_expose_spatial_layer_add_methods() {
     let compat_dir = facade_crate_root().join("src/compat");
-    let forbidden = [
-        "add_conv_transpose1d",
-        "add_upsample",
-        "add_zero_pad2d",
-        "add_identity",
-        "add_unflatten",
-    ];
+    let forbidden = ["add_upsample", "add_zero_pad2d", "add_identity"];
     let mut offenses = Vec::new();
     visit_rs_files(&compat_dir, &mut |path, content| {
         for name in forbidden {
@@ -11839,13 +11802,223 @@ fn compat_sequential_does_not_expose_spatial_layer_add_methods() {
 #[test]
 fn compat_sequential_does_not_expose_spatial_layer_add_methods_detects_offense() {
     assert!(contains_pub_fn_declaration(
-        "pub fn add_conv_transpose1d(&mut self, l: ConvTranspose1d) {}",
-        "add_conv_transpose1d"
+        "pub fn add_upsample(&mut self, l: Upsample) {}",
+        "add_upsample"
     ));
     assert!(!contains_pub_fn_declaration(
         "pub fn add_linear(&mut self, l: Linear) {}",
-        "add_conv_transpose1d"
+        "add_upsample"
     ));
+}
+// =====================================================================
+// イシュー #2521（親 #2520・ルート #2499 の一括承認）: `ConvTranspose1d`／
+// `Unflatten` の facade 公開の正ガード。保留ガード
+// （`SpatialLayersHoldDoctestGuard`）から該当 2 層の add_*／Var メソッドの
+// プローブを外し、承認形（`Var` の 1 行委譲メソッド 2 個・`compat::Sequential`
+// の add_* 2 個）だけを許す形へ反転した。型の再エクスポートと自由関数での
+// 公開は保留ガードの衝突プローブで引き続き禁止する。承認事項は
+// `docs/autodiff-spatial-layers-decision.md` §6 参照。
+// =====================================================================
+
+/// #2521 で公開する 4 名の `fn` 名（`Var` 2 個 + `Sequential` 2 個）。
+const SPATIAL_FACADE_FN_NAMES: [&str; 4] = [
+    "conv_transpose1d",
+    "unflatten",
+    "add_conv_transpose1d",
+    "add_unflatten",
+];
+
+/// workspace 全体（`crates/*/src/`）で [`SPATIAL_FACADE_FN_NAMES`] の `fn`
+/// 宣言の定義元集合を固定する（過不足とも fail-closed。迂回実装の混入検出）。
+#[test]
+fn workspace_declares_spatial_facade_fn_names_only_in_approved_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .expect("workspace crates ディレクトリが読めない")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty());
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in SPATIAL_FACADE_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/var.rs::conv_transpose1d",
+        "autodiff/src/var.rs::unflatten",
+        "facade/src/compat/sequential.rs::add_conv_transpose1d",
+        "facade/src/compat/sequential.rs::add_unflatten",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "#2521 の 4 名の fn 宣言の定義元集合が承認形とずれている（新たな定義元が\
+         承認済みの実装なのか迂回経路なのかを確認すること）: {found:?}"
+    );
+}
+
+/// `var.rs` の 2 メソッド本体の承認形（`nn` 側共有 forward への 1 行委譲）。
+const SPATIAL_VAR_EXPECTED_BODIES: [(&str, &str); 2] = [
+    (
+        "conv_transpose1d",
+        "crate : : nn : : conv_transpose1d_forward ( self , weight , bias , stride , padding , output_padding , dilation , groups , )",
+    ),
+    (
+        "unflatten",
+        "crate : : nn : : unflatten_forward ( self , dim , sizes )",
+    ),
+];
+
+/// `Var::conv_transpose1d`／`Var::unflatten` が共有 forward への薄い委譲で
+/// あることを固定する（スタブ・独自実装へのすり替えを拒否）。
+#[test]
+fn var_spatial_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in SPATIAL_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（共有 forward への 1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけで 2 メソッドへ到達でき、シグネチャが
+/// 承認形と一致し、実際に適用して期待 shape・値が得られることを固定する。
+#[test]
+fn var_spatial_methods_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+
+    type ConvTSig<'t> = fn(
+        &Var<'t>,
+        &Var<'t>,
+        Option<&Var<'t>>,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) -> Result<Var<'t>, AutodiffError>;
+    fn sig_conv_t<'t>() -> ConvTSig<'t> {
+        Var::<'t>::conv_transpose1d
+    }
+    fn sig_unflatten<'t>() -> fn(&Var<'t>, usize, &[usize]) -> Result<Var<'t>, AutodiffError> {
+        Var::<'t>::unflatten
+    }
+
+    let tape = fandhe_ai::tape();
+    // x: [1, 1, 3] = [1, 2, 3]、w: [1, 1, 2] = [1, 1]、stride 1 → [1, 1, 4]
+    let x = tape.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0], &[1, 1, 3]).expect("tensor"));
+    let w = tape.var(&Tensor::new(vec![1.0_f32, 1.0], &[1, 1, 2]).expect("tensor"));
+    let y = sig_conv_t()(&x, &w, None, 1, 0, 0, 1, 1).expect("conv_transpose1d");
+    assert_eq!(y.to_tensor().shape(), [1, 1, 4]);
+    assert_eq!(
+        y.to_tensor().host_slice().into_owned(),
+        [1.0, 3.0, 5.0, 3.0]
+    );
+
+    let flat = tape.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 6]).expect("t"));
+    let u = sig_unflatten()(&flat, 1, &[2, 3]).expect("unflatten");
+    assert_eq!(u.to_tensor().shape(), [1, 2, 3]);
+    assert!(sig_unflatten()(&flat, 1, &[]).is_err());
+    assert!(sig_unflatten()(&flat, 1, &[4, 2]).is_err());
+}
+
+/// `Sequential::add_conv_transpose1d`／`add_unflatten` の宣言部（`pub fn` から
+/// 本体開始 `{` まで）が承認形か判定する。
+fn sequential_spatial_add_signature_ok(cleaned: &str, name: &str, expected_params: &str) -> bool {
+    let needle = format!("pub fn {name}");
+    let Some(start) = cleaned.find(&needle) else {
+        return false;
+    };
+    let Some(len) = cleaned[start..].find('{') else {
+        return false;
+    };
+    let sig: String = cleaned[start..start + len]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let want: String = format!("pub fn {name}({expected_params}")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    // rustfmt の末尾カンマ有無に依存しないよう `,)` を `)` へ正規化して比較する。
+    sig.replace(",)", ")") == want.replace(",)", ")")
+}
+
+const ADD_CONV_TRANSPOSE1D_PARAMS: &str = "mut self, in_channels: usize, out_channels: usize, kernel_size: usize, stride: usize, padding: usize, output_padding: usize, dilation: usize, groups: usize, seed: u64, ) -> Result<Self, AutodiffError>";
+const ADD_UNFLATTEN_PARAMS: &str =
+    "mut self, dim: usize, unflattened_size: Vec<usize>, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential` の 2 add_* が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_spatial_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_conv_transpose1d"),
+        1
+    );
+    assert_eq!(count_fn_declarations_by_name(&tokens, "add_unflatten"), 1);
+    assert!(sequential_spatial_add_signature_ok(
+        &cleaned,
+        "add_conv_transpose1d",
+        ADD_CONV_TRANSPOSE1D_PARAMS
+    ));
+    assert!(sequential_spatial_add_signature_ok(
+        &cleaned,
+        "add_unflatten",
+        ADD_UNFLATTEN_PARAMS
+    ));
+}
+
+/// [`compat_sequential_spatial_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_spatial_add_methods_have_approved_signatures_detects_offense() {
+    let ok = "pub fn add_unflatten(mut self, dim: usize, unflattened_size: Vec<usize>,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "add_unflatten",
+        ADD_UNFLATTEN_PARAMS
+    ));
+    for bad in [
+        "pub fn add_unflatten(mut self, dim: usize, unflattened_size: Vec<usize>) -> Self {",
+        "pub fn add_unflatten(mut self, dim: i64, unflattened_size: Vec<usize>,) -> Result<Self, AutodiffError> {",
+        "pub fn add_unflatten(mut self, unflattened_size: Vec<usize>, dim: usize,) -> Result<Self, AutodiffError> {",
+        "pub fn add_linear(mut self) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_unflatten", ADD_UNFLATTEN_PARAMS),
+            "{bad}"
+        );
+    }
 }
 
 // =====================================================================

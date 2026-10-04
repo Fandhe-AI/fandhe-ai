@@ -164,8 +164,9 @@
 //! 既存 `Var` 演算（`conv_transpose2d`／`interpolate`／`pad`／
 //! `reshape`）の薄いラッパーで新規 `Op`／`BackendOps`／VJP／カーネル
 //! は追加しない。`compat::Sequential::add_conv_transpose1d`／
-//! `add_upsample`／`add_zero_pad2d`／`add_identity`／`add_unflatten`
-//! の facade 公開（経路 2）は未承認のため保留する
+//! `add_unflatten`（と `Var::conv_transpose1d`／`Var::unflatten`）は
+//! イシュー #2521 で facade 公開済み。`add_upsample`／`add_zero_pad2d`／
+//! `add_identity` の facade 公開（経路 2）は未承認のため保留する
 //! （`crates/facade/src/lib.rs` の `SpatialLayersHoldDoctestGuard`・
 //! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
 //! `docs/autodiff-spatial-layers-decision.md` §6 承認事項）。
@@ -253,6 +254,7 @@ pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
 };
 pub use container::{ModuleDict, ModuleList, Sequential, summary};
+pub(crate) use conv::conv_transpose1d_forward;
 pub use conv::{
     Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
     ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, conv2d_forward_low_precision,
@@ -293,4 +295,5 @@ pub use transformer_encoder_layer::{
     FeedForwardActivation, TransformerEncoderLayer, TransformerEncoderLayerVars,
 };
 pub use unflatten::Unflatten;
+pub(crate) use unflatten::unflatten_forward;
 pub use upsample::{Upsample, UpsampleSize};

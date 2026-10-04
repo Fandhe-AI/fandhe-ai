@@ -2144,10 +2144,15 @@ struct RngDistributionsHoldDoctestGuard;
 /// 本プローブの trait 経由呼び出しが型・引数不一致でコンパイル失敗
 /// する）でエラーコードに依存せずコンパイルが失敗する。
 ///
-/// `Var::conv_transpose1d`／`Var::unflatten`（`nn::ConvTranspose1d`／
-/// `nn::Unflatten` の forward 相当の inherent メソッド追加）も同じ
-/// ブロックで併せて保留固定する（経路 1・経路 2 のどちらの facade
-/// 公開拡張も未承認のため。実装計画 §4「facade 公開の保留ガード」）。
+/// **イシュー #2521 での更新**: `ConvTranspose1d`／`Unflatten` の 2 層は
+/// `compat::Sequential::add_conv_transpose1d`／`add_unflatten` と
+/// `Var::conv_transpose1d`／`Var::unflatten` を承認形として公開済みのため、
+/// それらの trait 経由プローブ（`__FandheSpatialVarProbe` 全体と
+/// `__FandheSpatialAddProbe` の該当 2 メソッド）は本ブロックから外した
+/// （承認形だけを許す正ガードは `api_surface.rs` の
+/// `*_spatial_*` テスト群）。型名の衝突プローブと自由関数のプローブは、
+/// 型の再エクスポート・自由関数での公開が未承認のまま残るため維持する。
+/// 残り 3 層（`Upsample`／`ZeroPad2d`／`Identity`）の公開は #2522 の担当。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// spatial_layers_hold_doctest_globs_all_pub_modules`・`spatial_
@@ -2156,9 +2161,11 @@ struct RngDistributionsHoldDoctestGuard;
 /// 多層防御の位置づけ・承認未取得の経緯は
 /// `docs/autodiff-spatial-layers-decision.md` §6「承認事項」節を参照。
 ///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
+/// 残り 3 層（`Upsample`／`ZeroPad2d`／`Identity`。#2522）の facade 公開
+/// （ユーザー承認）がされる日が来たら、本モジュール・本 doctest 自体を
+/// 削除する（ソース走査側の対応する否定ガードも同時に正ガードへ置き換える）。
+/// 型の再エクスポート・自由関数での公開は引き続き未承認のため、2 層の公開後も
+/// 型名・自由関数の衝突プローブは本 doctest に残す。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2202,17 +2209,12 @@ struct RngDistributionsHoldDoctestGuard;
 /// use __fandhe_spatial_hold_probe::*;
 ///
 /// trait __FandheSpatialAddProbe {
-///     fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker;
 ///     fn add_upsample(&self) -> __FandheSpatialHoldMarker;
 ///     fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker;
 ///     fn add_identity(&self) -> __FandheSpatialHoldMarker;
-///     fn add_unflatten(&self) -> __FandheSpatialHoldMarker;
 /// }
 ///
 /// impl __FandheSpatialAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
 ///     fn add_upsample(&self) -> __FandheSpatialHoldMarker {
 ///         __FandheSpatialHoldMarker
 ///     }
@@ -2220,23 +2222,6 @@ struct RngDistributionsHoldDoctestGuard;
 ///         __FandheSpatialHoldMarker
 ///     }
 ///     fn add_identity(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     fn add_unflatten(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-/// }
-///
-/// trait __FandheSpatialVarProbe {
-///     fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker;
-///     fn unflatten(&self) -> __FandheSpatialHoldMarker;
-/// }
-///
-/// impl<'t> __FandheSpatialVarProbe for fandhe_ai::Var<'t> {
-///     fn conv_transpose1d(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     fn unflatten(&self) -> __FandheSpatialHoldMarker {
 ///         __FandheSpatialHoldMarker
 ///     }
 /// }
@@ -2248,27 +2233,18 @@ struct RngDistributionsHoldDoctestGuard;
 ///     _: Identity,
 ///     _: Unflatten,
 ///     seq: &fandhe_ai::compat::Sequential,
-///     v: &fandhe_ai::Var<'_>,
 /// ) {
 ///     let _: __FandheSpatialHoldMarker = add_conv_transpose1d();
 ///     let _: __FandheSpatialHoldMarker = add_upsample();
 ///     let _: __FandheSpatialHoldMarker = add_zero_pad2d();
 ///     let _: __FandheSpatialHoldMarker = add_identity();
 ///     let _: __FandheSpatialHoldMarker = add_unflatten();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose1d(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_conv_transpose1d();
 ///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_upsample(seq);
 ///     let _: __FandheSpatialHoldMarker = seq.add_upsample();
 ///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_zero_pad2d(seq);
 ///     let _: __FandheSpatialHoldMarker = seq.add_zero_pad2d();
 ///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_identity(seq);
 ///     let _: __FandheSpatialHoldMarker = seq.add_identity();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_unflatten(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_unflatten();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::Var::conv_transpose1d(v);
-///     let _: __FandheSpatialHoldMarker = v.conv_transpose1d();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::Var::unflatten(v);
-///     let _: __FandheSpatialHoldMarker = v.unflatten();
 /// }
 /// ```
 #[cfg(doctest)]
