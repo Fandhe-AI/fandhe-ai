@@ -43,11 +43,13 @@
 //! 遅延グラフ）とは別軸のため抵触しない（設計 doc §9「REQ-12 整理」。
 //! 子テープに記録された `Var` 演算自体は通常どおり融合対象になりうる）。
 //!
-//! **facade 非公開**（設計 doc §9「facade」・§10 承認事項 5 は未承認）:
-//! `crates/facade` の `Tape` newtype は本モジュールの型・メソッドを
-//! 一切再エクスポートしない。`docs/compat-api-scope.md` §5 の範囲拡張
-//! 手続きを経ていないため、内部クレート（`fandhe_ai_autodiff`）限定の
-//! 機能として留める。
+//! **facade 公開済み**（イシュー #2545・決定記録 §17）: facade は
+//! `CreateGraphResult` を crate ルートで再エクスポートし、facade `Tape` に
+//! 本メソッドへの薄い委譲 `Tape::backward_create_graph` を 1 件だけ持つ
+//! （利用者は `fandhe_ai::tape()`／`tape_for(..)` で作った空の `Tape` を
+//! 子テープとして渡す）。`TapeRef` 版・子テープ構築ヘルパー・HVP 専用 API
+//! は公開していない（§17.3。`crates/facade/tests/api_surface.rs` の正ガード
+//! が固定）。
 //!
 //! **対象スコープ（設計 doc §8。`Op::supports_create_graph` が判定する
 //! 対象）**: `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・

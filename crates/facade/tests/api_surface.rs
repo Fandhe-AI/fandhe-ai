@@ -5041,55 +5041,88 @@ fn compat_sequential_does_not_expose_rnn_add_methods() {
     );
 }
 
-/// `crates/facade/src/` の `pub use` が `CreateGraphResult`（子テープ
-/// 方式の高階微分結果型。イシュー #1942／#1943 で内部クレート
-/// `fandhe_ai_autodiff` に実装済み）を再エクスポートしていないことを
-/// 固定する（`docs/autodiff-higher-order-grad-decision.md` §10 承認
-/// 事項 5「facade 公開面への高階 API 追加」はイシュー #2063 時点で
-/// リポジトリ所有者の明示的な承認コメントが確認できず未承認のまま
-/// 対象外。`facade_does_not_reexport_custom_function` と同型の走査）。
+/// `CreateGraphResult`（子テープ方式の高階微分結果型。イシュー #2545）の
+/// 再エクスポートが、承認形 `pub use fandhe_ai_autodiff::CreateGraphResult;`
+/// の `lib.rs` 内ちょうど 1 行だけであることを固定する（決定記録
+/// `docs/autodiff-higher-order-grad-decision.md` §17.2。別名・glob・別
+/// モジュール経由の再エクスポートは拒否）。#2063 の否定ガードを反転した
+/// 正ガード（#2546 の担当分を CI green 維持のため #2545 へ前倒し）。
 #[test]
-fn facade_does_not_reexport_create_graph_result() {
+fn facade_reexports_create_graph_result_in_approved_shape() {
     let src_dir = facade_crate_root().join("src");
-    let mut offending = Vec::new();
+    let mut hits: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
         for line in content.lines() {
             let trimmed = line.trim_start();
-            if !trimmed.starts_with("pub use") {
-                continue;
-            }
-            if trimmed.contains("CreateGraphResult") {
-                offending.push(format!(
-                    "{}: `{trimmed}` が CreateGraphResult を含む",
-                    path.display()
-                ));
+            if trimmed.starts_with("pub use") && trimmed.contains("CreateGraphResult") {
+                let rel = path
+                    .strip_prefix(&src_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                hits.push(format!("{rel}: {trimmed}"));
             }
         }
     });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面が CreateGraphResult を再エクスポートしている\
-         （承認事項 5 は未承認のまま対象外という設計判断に違反）: {offending:?}"
+    assert_eq!(
+        hits,
+        vec!["lib.rs: pub use fandhe_ai_autodiff::CreateGraphResult;".to_string()],
+        "CreateGraphResult の再エクスポートが承認形（lib.rs の 1 行）と一致しない"
     );
 }
 
-/// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
-/// `Tape::backward_create_graph` への委譲メソッドを持たないことを
-/// 固定する（`Tape::var_no_grad` の前例と同じ「委譲メソッドを追加
-/// しない限り facade から到達不能」という設計を、委譲メソッド自体が
-/// 生えていないことで直接検査する）。承認事項 5 の承認を得て委譲
-/// メソッドを追加する際は本テストを正ガードへ更新する。
+/// facade `Tape::backward_create_graph` が `pub fn` として宣言され、本体が
+/// `self.0.backward_create_graph(loss, &child.0)` だけの薄い委譲である
+/// ことを固定する（#2545・決定記録 §17.2。独自実装へのすり替えを拒否）。
 #[test]
-fn facade_tape_does_not_expose_backward_create_graph_method() {
+fn facade_tape_backward_create_graph_is_thin_delegation() {
     let lib_rs = facade_crate_root().join("src/lib.rs");
     let content = read_to_string_or_panic(&lib_rs);
     assert!(
-        !contains_pub_fn_declaration(&content, "backward_create_graph"),
-        "facade 独自の Tape に `pub fn backward_create_graph(...)` 宣言\
-         （ジェネリクス・lifetime 付き `pub fn backward_create_graph<'c>(`\
-         を含む）が見つかった（承認事項 5 未承認のまま到達可能に\
-         してしまっている）"
+        contains_pub_fn_declaration(&content, "backward_create_graph"),
+        "facade の Tape に `pub fn backward_create_graph` 宣言が見つからない"
     );
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "backward_create_graph").as_deref(),
+        Some("self . 0 . backward_create_graph ( loss , & child . 0 )"),
+        "Tape::backward_create_graph の本体が承認形（1 行委譲）と一致しない"
+    );
+}
+
+/// `backward_create_graph` の `fn` 宣言が workspace 内で autodiff の本体と
+/// facade の委譲の各 1 件のみであること（`TapeRef` 版等の承認範囲外の
+/// 追加を fail-closed で拒否。決定記録 §17.3）。
+#[test]
+fn workspace_declares_backward_create_graph_only_in_approved_locations() {
+    let found = scan_workspace_fn_declarations(&["backward_create_graph"]);
+    let expected: std::collections::BTreeMap<String, usize> = [
+        (
+            "autodiff/src/create_graph.rs::backward_create_graph".to_string(),
+            1,
+        ),
+        ("facade/src/lib.rs::backward_create_graph".to_string(), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(found, expected);
+}
+
+/// facade 公開シグネチャの固定と、CPU での最小呼び出し成功の確認（#2545）。
+#[test]
+fn tape_backward_create_graph_is_reachable_via_facade() {
+    use fandhe_ai::{AutodiffError, CreateGraphResult, Tape, Tensor, Var};
+    type Sig<'c> = fn(&Tape, &Var<'_>, &'c Tape) -> Result<CreateGraphResult<'c>, AutodiffError>;
+    fn sig<'c>() -> Sig<'c> {
+        Tape::backward_create_graph
+    }
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&Tensor::<f32>::new(vec![1.5_f32], &[1usize]).expect("fixture"));
+    let loss = x.mul(&x).expect("mul").sum(None).expect("sum");
+    let cg = sig()(&tape, &loss, &child).expect("backward_create_graph");
+    assert!(cg.grad(&x).expect("grad").is_some());
 }
 
 /// `pub fn <name>` 宣言（`pub fn <name>(` に加え、ジェネリクス・
