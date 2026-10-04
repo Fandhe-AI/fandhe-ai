@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 34 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 35 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -306,7 +306,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 34 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 35 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -325,6 +325,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Flatten { .. } => Some("flatten"),
         LayerSpec::Dropout { .. } => Some("dropout"),
         LayerSpec::Conv2d { .. } => Some("conv2d"),
+        LayerSpec::Conv3d { .. } => Some("conv3d"),
         LayerSpec::ConvTranspose2d { .. } => Some("conv_transpose2d"),
         LayerSpec::Conv1d { .. } => Some("conv1d"),
         LayerSpec::LayerNorm { .. } => Some("layer_norm"),
@@ -430,6 +431,26 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
                     in_channels.checked_div(*groups).unwrap_or(0),
                     kernel_size[0],
                     kernel_size[1],
+                ],
+            ),
+            ("bias", vec![*out_channels]),
+        ],
+        // イシュー #2524: weight は `[out, in/groups, kD, kH, kW]`（Conv2d の空間 3 軸版）。
+        LayerSpec::Conv3d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            groups,
+            ..
+        } => vec![
+            (
+                "weight",
+                vec![
+                    *out_channels,
+                    in_channels.checked_div(*groups).unwrap_or(0),
+                    kernel_size[0],
+                    kernel_size[1],
+                    kernel_size[2],
                 ],
             ),
             ("bias", vec![*out_channels]),
@@ -593,6 +614,14 @@ fn put_pair(f: &mut ParamFields, base: &str, v: [usize; 2]) {
     put_num(f, &format!("{base}_w"), v[1]);
 }
 
+/// `[usize; 3]` は `{base}_d`／`{base}_h`／`{base}_w` の平坦な 3 キーへ展開する
+/// （`put_pair` と同じ理由。イシュー #2524）。
+fn put_triple(f: &mut ParamFields, base: &str, v: [usize; 3]) {
+    put_num(f, &format!("{base}_d"), v[0]);
+    put_num(f, &format!("{base}_h"), v[1]);
+    put_num(f, &format!("{base}_w"), v[2]);
+}
+
 fn put_opt_pair(f: &mut ParamFields, base: &str, v: Option<[usize; 2]>) {
     put_opt(f, &format!("{base}_h"), v.map(|x| x[0]));
     put_opt(f, &format!("{base}_w"), v.map(|x| x[1]));
@@ -679,6 +708,23 @@ fn render_params(spec: &LayerSpec) -> String {
             put_pair(&mut f, "stride", *stride);
             put_pair(&mut f, "padding", *padding);
             put_pair(&mut f, "dilation", *dilation);
+            put_num(&mut f, "groups", *groups);
+        }
+        LayerSpec::Conv3d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+        } => {
+            put_num(&mut f, "in_channels", *in_channels);
+            put_num(&mut f, "out_channels", *out_channels);
+            put_triple(&mut f, "kernel_size", *kernel_size);
+            put_triple(&mut f, "stride", *stride);
+            put_triple(&mut f, "padding", *padding);
+            put_triple(&mut f, "dilation", *dilation);
             put_num(&mut f, "groups", *groups);
         }
         LayerSpec::ConvTranspose2d {
@@ -1464,6 +1510,26 @@ fn build_model(
                     0,
                 )
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Conv3d {
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+                groups,
+            } => model
+                .add_conv3d(
+                    *in_channels,
+                    *out_channels,
+                    *kernel_size,
+                    *stride,
+                    *padding,
+                    *dilation,
+                    *groups,
+                    0,
+                )
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::ConvTranspose2d {
                 in_channels,
                 out_channels,
@@ -2081,6 +2147,15 @@ impl<'a> Params<'a> {
         ])
     }
 
+    /// `{base}_d`／`{base}_h`／`{base}_w` の 3 キーを `[usize; 3]` として読む（イシュー #2524）。
+    fn triple(&self, base: &str) -> Result<[usize; 3], ModelIoError> {
+        Ok([
+            self.usize(&format!("{base}_d"))?,
+            self.usize(&format!("{base}_h"))?,
+            self.usize(&format!("{base}_w"))?,
+        ])
+    }
+
     /// `{base}_h`／`{base}_w` が「両方 `null`」または「両方整数」の `Option<[usize; 2]>`。
     /// 片方だけ `null` は書き手が出さない形のため `Manifest` で拒否する。
     fn opt_pair(&self, base: &str) -> Result<Option<[usize; 2]>, ModelIoError> {
@@ -2213,6 +2288,28 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 check_conv_groups(*in_channels, *out_channels, *groups)?;
             }
             Ok(spec)
+        }
+        "conv3d" => {
+            let keys: Vec<String> = ["kernel_size", "stride", "padding", "dilation"]
+                .iter()
+                .flat_map(|b| ["d", "h", "w"].map(|a| format!("{b}_{a}")))
+                .chain(["in_channels", "out_channels", "groups"].map(String::from))
+                .collect();
+            let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+            let p = Params::new(params, &key_refs)?;
+            let in_channels = p.usize("in_channels")?;
+            let out_channels = p.usize("out_channels")?;
+            let groups = p.usize("groups")?;
+            check_conv_groups(in_channels, out_channels, groups)?;
+            Ok(LayerSpec::Conv3d {
+                in_channels,
+                out_channels,
+                kernel_size: p.triple("kernel_size")?,
+                stride: p.triple("stride")?,
+                padding: p.triple("padding")?,
+                dilation: p.triple("dilation")?,
+                groups,
+            })
         }
         "conv_transpose2d" => {
             let p = Params::new(
@@ -2841,7 +2938,7 @@ mod tests {
         ));
     }
 
-    /// 34 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 35 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -2878,6 +2975,15 @@ mod tests {
                 stride: [1, 2],
                 padding: [1, 0],
                 dilation: [1, 1],
+                groups: 2,
+            },
+            LayerSpec::Conv3d {
+                in_channels: 4,
+                out_channels: 6,
+                kernel_size: [2, 3, 2],
+                stride: [1, 2, 1],
+                padding: [0, 1, 1],
+                dilation: [1, 1, 2],
                 groups: 2,
             },
             LayerSpec::ConvTranspose2d {
@@ -3009,7 +3115,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 34, "kind allowlist は 34 種: {kinds:?}");
+        assert_eq!(kinds.len(), 35, "kind allowlist は 35 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3027,9 +3133,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 34 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 35 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("34 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("35 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3037,7 +3143,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("34 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("35 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -3106,6 +3212,27 @@ mod tests {
             (
                 "conv_transpose2d",
                 r#"{"in_channels":4,"out_channels":2,"kernel_size_h":3,"kernel_size_w":3,"stride_h":2,"stride_w":2,"padding_h":0,"padding_w":0,"output_padding_h":0,"output_padding_w":0,"dilation_h":1,"dilation_w":1,"groups":1,"x":1}"#,
+            ),
+            // イシュー #2524: conv3d の非信頼入力（_d キー欠落・groups 割り切れ違反・負値・小数・余分なキー）。
+            (
+                "conv3d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size_h":3,"kernel_size_w":3,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":1}"#,
+            ),
+            (
+                "conv3d",
+                r#"{"in_channels":4,"out_channels":3,"kernel_size_d":3,"kernel_size_h":3,"kernel_size_w":3,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":2}"#,
+            ),
+            (
+                "conv3d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size_d":3,"kernel_size_h":3,"kernel_size_w":3,"stride_d":-1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":1}"#,
+            ),
+            (
+                "conv3d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size_d":3,"kernel_size_h":3,"kernel_size_w":3,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0.5,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":1}"#,
+            ),
+            (
+                "conv3d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size_d":3,"kernel_size_h":3,"kernel_size_w":3,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":1,"x":1}"#,
             ),
             // イシュー #2522: upsample / zero_pad2d / identity の非信頼入力。
             ("identity", r#"{"x":1}"#),
@@ -3306,7 +3433,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("34 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("35 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

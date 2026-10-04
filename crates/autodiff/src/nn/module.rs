@@ -303,10 +303,10 @@ pub trait Module {
 
     /// [`Module::as_linear`] と同型の明示フック（イシュー #2158）。
     /// `Conv3d` 層向け。既定 `None`。`compat::Sequential::add_conv3d`
-    /// （facade 公開面）の接続はユーザー承認待ち（`docs/conv-ops-
-    /// design.md` §16「承認事項」節）であり、本フック自体は `compat`
-    /// 層と独立に `nn::Sequential`（autodiff 汎用コンテナ）から利用
-    /// できる（[`Module::as_conv_transpose2d`] と同じ位置付け）。
+    /// （facade 公開面）はイシュー #2524 で接続済み（`docs/conv-ops-
+    /// design.md` §16.7）。本フック自体は `compat` 層と独立に
+    /// `nn::Sequential`（autodiff 汎用コンテナ）から利用できる
+    /// （[`Module::as_conv_transpose2d`] と同じ位置付け）。
     fn as_conv3d(&self) -> Option<&Conv3d> {
         None
     }

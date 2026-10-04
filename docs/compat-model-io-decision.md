@@ -438,6 +438,7 @@ version migration。
   | `dropout` | `p`（f32） | なし |
   | `conv2d` | `in_channels`・`out_channels`・`kernel_size_{h,w}`・`stride_{h,w}`・`padding_{h,w}`・`dilation_{h,w}`・`groups` | `weight: [out, in/groups, kh, kw]`・`bias: [out]` |
   | `conv_transpose2d`（#2523） | `in_channels`・`out_channels`・`kernel_size_{h,w}`・`stride_{h,w}`・`padding_{h,w}`・`output_padding_{h,w}`・`dilation_{h,w}`・`groups` | `weight: [in, out/groups, kH, kW]`（`conv2d` と先頭 2 軸が逆）・`bias: [out]` |
+  | `conv3d`（#2524） | `in_channels`・`out_channels`・`kernel_size_{d,h,w}`・`stride_{d,h,w}`・`padding_{d,h,w}`・`dilation_{d,h,w}`・`groups`（15 キー） | `weight: [out, in/groups, kD, kH, kW]`・`bias: [out]` |
   | `conv1d` | `in_channels`・`out_channels`・`kernel_size`・`stride`・`padding`・`dilation`・`groups` | `weight: [out, in/groups, k]`・`bias: [out]` |
   | `layer_norm` | `normalized_size`・`eps`（f32） | `weight: [n]`・`bias: [n]` |
   | `rms_norm` | `normalized_size`・`eps`（f32） | `weight: [n]` |

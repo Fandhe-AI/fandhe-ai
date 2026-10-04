@@ -3,17 +3,13 @@
 //! `docs/conv-ops-design.md` §16）。`Var::conv2d` の空間 3 軸一般化
 //! （im2col3d＋GEMM の段階的合成）。
 //!
-//! **facade 非公開（意図的）**: [`crate::reduce_ops`] モジュール doc
-//! と同じ理由・同じ判断枠組みによる。`Var` は facade（`fandhe_ai`
-//! クレート）から直接再エクスポートされるため、`Var` への inherent
-//! メソッド追加は即座に facade 公開面へ出てしまう。イシュー #2158 は
-//! `Var::conv3d`（委譲メソッド）・`compat::Sequential::add_conv3d`
-//! （facade 公開）を承認事項として明示するが、本 PR 時点で承認の記録
-//! が無いため、承認が取れるまでは自由関数として `Var` の外に置き
-//! 到達不能にする（`docs/conv-ops-design.md` §16「承認事項」）。承認後
-//! は `Var::conv3d` の薄い委譲メソッドと `compat::Sequential::
-//! add_conv3d` を追加し、facade 側の保留ガード
-//! （`crates/facade/src/lib.rs::VarConv3dHoldDoctestGuard`）を撤去する。
+//! **facade 公開（イシュー #2524。ルート #2499 の一括承認）**: `Var` は
+//! facade（`fandhe_ai` クレート）から直接再エクスポートされるため、
+//! `Var::conv3d`（本自由関数への 1 行委譲メソッド）として公開され、
+//! `compat::Sequential::add_conv3d` からも学習・保存経路で使える
+//! （`docs/conv-ops-design.md` §16.7）。本モジュール自体と `nn::Conv3d`
+//! 型は facade から再エクスポートしない（承認範囲外。`crates/facade/
+//! src/lib.rs::VarConv3dHoldDoctestGuard` が縮小して衝突プローブを残す）。
 //!
 //! **新規 `Op`**: `crate::tape::Op::Conv3d`。`Op::Conv2d` と同じ
 //! 段階的合成（`ops.conv3d`〈override フック〉→ im2col3d →
