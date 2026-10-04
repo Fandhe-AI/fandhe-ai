@@ -17,10 +17,12 @@ autodiff/src/matrix_ops.rs`）として実装した（案 C。§2.1 参照。
 （`Op::BroadcastTo`）・`Var::transpose`（`Op::Transpose`）・
 `Var::pad`（`Op::Pad`）・`Var::squeeze`（`Var::reshape` へ委譲）・
 `Var::mul`（`Op::Mul`）・`Var::sum`（`Op::Sum`）の合成のみで構成した。
-facade 公開（`Var` への委譲メソッド追加）は承認待ちのまま対象外とし、
-`crates/facade/src/lib.rs::VarMatrixOpsHoldDoctestGuard`（正の
-プローブ doctest）と `crates/facade/tests/api_surface.rs` のソース走査・
-workspace インベントリ（4 テスト）で多層固定している。
+facade 公開（`Var` への委譲メソッド追加）は当初承認待ちのまま対象外とし、
+保留ガード（`VarMatrixOpsHoldDoctestGuard`・`api_surface.rs` の 4 テスト）で
+固定していたが、イシュー #2513 でルート #2499 の一括承認に基づき
+`Var::tril`／`triu`／`diag`／`trace`／`outer`／`dot` の委譲メソッドとして
+公開済み（§6 の「実装記録（イシュー #2513）」参照。保留ガードは承認形のみを
+許す正ガードへ反転済み）。
 
 ## §1 背景
 
@@ -152,7 +154,7 @@ Issue の対象範囲には「`backend-cpu/src/ops.rs` に CPU 参照実装」�
 
 ## §5 スコープ外
 
-- facade 公開（`Var::tril` 等の委譲メソッド化と保留ガードの撤去）
+- facade 公開（`Var::tril` 等の委譲メソッド化と保留ガードの撤去。#2513 で実装済み。§6 参照）
 - `trace`／`diag` の rank 3 以上（バッチ trace・`torch.diagonal`
   相当）
 - GPU 専用カーネル（現状は `masked_fill`／`gather`／`pad` の既存
@@ -160,9 +162,39 @@ Issue の対象範囲には「`backend-cpu/src/ops.rs` に CPU 参照実装」�
 
 ## §6 承認事項（未承認として列挙）
 
-1. facade 公開（上記スコープ外 1 と同じ）
+1. facade 公開（上記スコープ外 1 と同じ。#2513 で承認・実装済み）
 2. `trace`／`diag` の rank 3 以上対応
 3. GPU 専用カーネル
+
+### 実装記録（イシュー #2513・2026-10-04）
+
+ルート #2499 本文「承認範囲」節の一括承認（Phase 1〜3 の facade 公開を設計判断記録の
+推奨形で実装してよい）に基づき、§2.1 案 A の形で公開した（追加 API のみ。
+`fandhe-ai =0.10.0` の公開 API は非破壊）。
+
+- 公開したメソッド（`crates/autodiff/src/var.rs` の `impl<'t> Var<'t>`。本体は
+  `crate::matrix_ops::*` への 1 行委譲）:
+  `tril(&self, diagonal: isize)`・`triu(&self, diagonal: isize)`・
+  `diag(&self, diagonal: isize)`・`trace(&self)`・
+  `outer(&self, other: &Var<'t>)`・`dot(&self, other: &Var<'t>)`
+  （いずれも `Result<Var<'t>, AutodiffError>`）
+- ガードの反転: `VarMatrixOpsHoldDoctestGuard` と
+  `matrix_ops_hold_doctest_globs_all_pub_modules`・
+  `matrix_ops_hold_doctest_probe_body_matches_fixed_contract`（および固定文言
+  `MATRIX_OPS_HOLD_PROBE_BODY`）を削除。`facade_does_not_reexport_or_declare_matrix_ops`
+  は名前・検査ロジックを維持（承認形以外の経路を拒否する正ガードの一部）。
+  `workspace_declares_matrix_ops_fn_names_only_in_autodiff_matrix_ops` は
+  `workspace_declares_matrix_ops_fn_names_only_in_approved_locations` へ改名し、期待集合に
+  `autodiff/src/var.rs::<name>` 各 1 件を追加。新設:
+  `var_matrix_ops_methods_are_thin_delegations`（本体が 1 行委譲と完全一致）・
+  `var_matrix_ops_are_reachable_via_facade_only`（`fandhe_ai::Var` のみで到達・
+  シグネチャ固定・適用結果の検証）
+- 利用例・単体テスト: `crates/facade/tests/matrix_ops_facade.rs`（新規）
+- facade では `matrix_ops` モジュールを再エクスポートしない（`Var` メソッドのみ）。
+  `Tensor`／`Tape` への同名メソッド追加・rank 3 以上の `trace`／`diag`・GPU 専用カーネルは
+  本実装の対象外（上記承認事項 2・3）
+- `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・GPU カーネルは不変。
+  実機 parity の申し送りは §7 のまま有効（委譲先は #2144 と同一経路）
 
 ## §7 実機実測の申し送り
 
@@ -203,7 +235,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 - `docs/compat-api-scope.md`: §1.2 へ追補
 - `docs/README.md`: 本 doc・perf log README の索引行を追加
 
-承認取得後の追随（本イシューでは未実施）: `Var::tril` 等の薄い
+承認取得後の追随（本イシューでは未実施。#2513 で実施済み）: `Var::tril` 等の薄い
 委譲メソッド追加、facade 保留ガード（`VarMatrixOpsHoldDoctestGuard`・
 対応する否定ガード 4 件）の撤去。
 
