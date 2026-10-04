@@ -40,11 +40,18 @@
 //! （`&self.0` を渡すだけの薄い委譲。`crate::Tape::
 //! step_device_param_store` 等と同型）を入口として使う。
 //!
-//! # 再エクスポート対象を 8 型に限定する理由
+//! # 再エクスポート対象を 14 型に限定する理由
 //!
-//! `forward_seq` の呼び出し・戻り値の利用に必要な型（本体 3 型・
-//! 戻り値型 2 型・`params` フィールド型 3 型）のみを再エクスポート
-//! する。以下は意図して対象外とする:
+//! `forward_seq` の呼び出し・戻り値の利用に必要な型（単層の本体 3 型・
+//! 戻り値型 2 型・`params` フィールド型 3 型）に加え、イシュー #2535
+//! （親 #2534・ルート #2499 の一括承認。`docs/autodiff-rnn-stacked-
+//! config-decision.md` §8・§9）で多層・双方向・層間 dropout 版の
+//! `RnnConfig`（構築オプション）・`StackedRnn`／`StackedLstm`／
+//! `StackedGru`（本体 3 型）・`StackedRnnSeqOutput`／
+//! `StackedLstmSeqOutput`（戻り値型 2 型）の計 6 型を追加した。
+//! 多層版の入口は [`crate::Tape::stacked_rnn_forward_seq`]／
+//! [`crate::Tape::stacked_lstm_forward_seq`]／
+//! [`crate::Tape::stacked_gru_forward_seq`]。以下は意図して対象外とする:
 //!
 //! - `RnnCell`／`LstmCell`／`GruCell`: `forward_seq` の入出力には
 //!   現れない（`Rnn::cell()` の戻り値型を facade から名指しできない
@@ -53,6 +60,15 @@
 //! - `Module` trait: `Rnn`／`Lstm`／`Gru` の `named_parameters`／
 //!   `state_dict`／`forward_host`（`&dyn BackendOps` 引数を取る）は
 //!   facade へ `BackendOps` を露出させずには到達できない（REQ-12）
+//! - `Rnn`／`Lstm`／`Gru::with_config`: `docs/autodiff-rnn-stacked-
+//!   config-decision.md` §2.1 で不採用（多層は `Stacked*` を使う）
+//!
+//! # 既知の制限（eval モード）
+//!
+//! `Stacked*::new` は training=true で構築され、`set_training` は
+//! autodiff の `Module` trait にしかないため facade からは到達できない。
+//! `dropout > 0` の場合 facade 経由の forward は常に学習モードとなる。
+//! 推論用途では `dropout = 0.0` で構築する。
 //!
 //! # 利用例
 //!
@@ -72,6 +88,29 @@
 //! // 学習に使ったパラメータの勾配は `out.params` 経由で取得する。
 //! assert!(grads.get(&out.params.weight_ih).unwrap().is_some());
 //! ```
+//!
+//! 2 層・双方向の `StackedLstm`（イシュー #2535）:
+//!
+//! ```
+//! use fandhe_ai::nn::rnn::{RnnConfig, StackedLstm};
+//! use fandhe_ai::Tensor;
+//!
+//! let tape = fandhe_ai::tape();
+//! let cfg = RnnConfig::new().with_num_layers(2).with_bidirectional(true);
+//! let lstm = StackedLstm::new(3, 4, true, 0, cfg).unwrap();
+//! // x: [T=2, B=1, D=3]
+//! let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[2, 1, 3]).unwrap();
+//! let out = tape.stacked_lstm_forward_seq(&lstm, &x, None, None).unwrap();
+//! // h_n は num_layers * num_directions = 4 本。出力は [B, 2H]。
+//! assert_eq!(out.h_n.len(), 4);
+//! assert_eq!(out.outputs[0].to_tensor().shape(), &[1usize, 8]);
+//!
+//! let loss = out.outputs.last().unwrap().sum(None).unwrap();
+//! let grads = tape.backward(&loss).unwrap();
+//! assert!(grads.get(&out.params[0].weight_ih).unwrap().is_some());
+//! ```
 
 pub use fandhe_ai_autodiff::nn::{Gru, GruCellVars, Lstm, LstmCellVars, LstmSeqOutput};
 pub use fandhe_ai_autodiff::nn::{Rnn, RnnCellVars, RnnSeqOutput};
+pub use fandhe_ai_autodiff::nn::{RnnConfig, StackedGru, StackedLstm, StackedRnn};
+pub use fandhe_ai_autodiff::nn::{StackedLstmSeqOutput, StackedRnnSeqOutput};
