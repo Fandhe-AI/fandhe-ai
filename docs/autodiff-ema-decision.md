@@ -209,7 +209,12 @@ parity テストは不要。デバイス常駐経路（`DeviceParamStore`）へ�
   メソッドは内部の同名メソッドへの委譲で、数値契約（§2）・原子性（§3）は不変。
   `new(decay, &[&Tensor<f32>])`・`from_named`・`decay`・`num_updates`・`update`・
   `update_named`・`shadow`・`shadow_parameters`・`shadow_state_dict` は内部と同一
-  シグネチャ（`Result<_, AutodiffError>`）。`from_module`／`update_from_module`／
+  シグネチャ。戻り値は個別に次のとおり（一律に `Result` ではない）:
+  `new`／`from_named`／`update`／`update_named` は
+  `Result<_, AutodiffError>`、`decay` は `f32`、`num_updates` は `u64`、
+  `shadow` は `Option<&Tensor<f32>>`、`shadow_parameters` は
+  `Vec<&Tensor<f32>>`、`shadow_state_dict` は
+  `HashMap<String, Tensor<f32>>`。`from_module`／`update_from_module`／
   `apply`／`restore` は facade の `&dyn nn::Module` を受け、facade `Module` の
   `named_parameters`／`state_dict`／`load_state_dict` 経由で委譲する（初回公開面に
   含めるかは承認事項。代替: 初回は位置対応・名前付き API のみ）。
