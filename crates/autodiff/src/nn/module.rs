@@ -272,9 +272,9 @@ pub trait Module {
 
     /// [`Module::as_linear`] と同型の明示フック（イシュー #2067）。
     /// `ConvTranspose2d` 層向け。既定 `None`。`compat::Sequential::
-    /// add_conv_transpose2d`（facade 公開面）の接続はユーザー承認待ち
+    /// add_conv_transpose2d`（facade 公開面）はイシュー #2523 で接続済み
     /// （`docs/compat-api-scope.md` §5・設計 `docs/conv-ops-design.md`
-    /// §15「承認事項」節）であり、本フック自体は `compat` 層と独立に
+    /// §15「#2523 実装記録」）。本フック自体は `compat` 層と独立に
     /// `nn::Sequential`（autodiff 汎用コンテナ）から利用できる。
     fn as_conv_transpose2d(&self) -> Option<&ConvTranspose2d> {
         None

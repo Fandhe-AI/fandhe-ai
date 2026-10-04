@@ -594,8 +594,8 @@ channels_last・`padding_mode ≠ zeros`・`padding='same'`／`'valid'`
 常駐推論チェーン（`linear_forward_device` 相当）・ONNX `Conv`／
 `ConvTranspose` export／import マッピング・CPU im2col／col2im 並列化・
 `gemm_bias_act` epilogue 融合の Conv 適用・framework-compare への Conv
-ベンチ追加・`compat::Sequential::add_conv*`／`add_conv_transpose2d` の
-実装判断（#1645・#2067）。
+ベンチ追加・`compat::Sequential::add_conv*` の実装判断（#1645。
+`add_conv_transpose2d` は #2523 で実装済み。§15 参照）。
 
 ## 12. 承認事項（#1642 着手前の前提）
 
@@ -1338,13 +1338,37 @@ Conv2d 基盤（`im2col`／`col2im`／`gemm_batched`）の流用で実装した
   `crates/facade/tests/conv_transpose2d_backend_parity.rs`（
   `CpuBackendOps` 経由）・`crates/autodiff/src/grad.rs` unit test
   （`NaiveOps` 経由の構造検証）で固定した。
-- **承認待ち（facade 公開面拡張）**: `compat::Sequential::
-  add_conv_transpose2d` は `docs/compat-api-scope.md` §1.3 の Tier 2
-  表に含まれないため未実装（本 issue では追加しない。§11 参照）。
+- **facade 公開面拡張**: `compat::Sequential::add_conv_transpose2d` は
+  #2067 時点では `docs/compat-api-scope.md` §1.3 の Tier 2 表に含まれず
+  未実装だったが、ルート #2499 の一括承認に基づき #2523 で公開した
+  （下記「#2523 実装記録」）。
 - **実機未実測**: CUDA（DGX Spark GB10）・Metal（Apple Silicon）の
   `#[ignore]` parity テストは本環境（実機非到達）では未実行のまま
   出荷し、`docs/perf/logs/conv-transpose2d-2067/README.md` へ実行
   コマンドを申し送る。
+
+### 15.x #2523 実装記録（`compat::Sequential::add_conv_transpose2d` の公開）
+
+- **公開名とシグネチャ**: 本 doc は公開名 `add_conv_transpose2d` のみを挙げ、具体シグネチャは
+  記載していなかった（競合する代替案はない）。兄弟 #2521 の `autodiff-spatial-layers-decision.md` §6 と
+  同じ記述粒度のため、既存の内部 API から機械的に導いた:
+  `add_conv_transpose2d(in_channels, out_channels, kernel_size: [usize; 2], stride: [usize; 2],
+  padding: [usize; 2], output_padding: [usize; 2], dilation: [usize; 2], groups: usize, seed: u64)
+  -> Result<Self, AutodiffError>`（`add_conv2d` の `padding` 直後に `output_padding` を挿入・bias あり固定）。
+  検査は `ConvTranspose2d::new` に任せる（`output_padding < stride` の意図的な PyTorch 非互換を含む）。
+- **学習経路**: #2521 と同じ型付きカーソル方式（`SequentialVars::conv_transpose2ds`）。
+  `trainable_parameters`／`apply_parameters` は汎用 `named_parameters`／`set_parameter` 分岐で処理し
+  `Rebuilt` は使わない。`first_untracked_parametric_layer` から除外し、常駐 3 入口は
+  `contains_resident_unsupported_layer` で `BackendError::Unsupported`（fail-closed）。
+- **保存**: manifest kind `conv_transpose2d`（13 キー: `conv2d` の 11 キー + `output_padding_{h,w}`）で
+  `save_model`／`load_model` に対応（`format_version` 不変）。weight の期待 shape は
+  `[in, out/groups, kH, kW]`（`conv2d` と先頭 2 軸が逆）。kind は 34 種になった。
+  `ConvTranspose1d` は `Unsupported` のまま（1d との非対称。別 issue 候補）。
+- **ガード**: 保留ガード・否定プローブは存在しなかったため反転対象なし。`api_surface.rs` に
+  シグネチャ一致と `pub fn` ちょうど 1 件の正ガードを新設した。
+- **AMP**: 低精度 forward は存在しないため dtype を無視して f32 で forward する。
+- **ONNX export**: `OnnxError::UnsupportedLayer`（現行挙動を固定）。
+- **実機未実測**: `docs/perf/logs/compat-sequential-conv-transpose2d-2523/README.md` へ申し送り。
 
 ## 16. #2158（Conv3d。im2col の空間 3 軸一般化）
 

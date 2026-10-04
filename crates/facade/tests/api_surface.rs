@@ -11993,6 +11993,89 @@ fn compat_sequential_exposes_spatial_layer_add_methods_issue_2522_counts_declara
 }
 
 // =====================================================================
+// イシュー #2523（親 #2520・ルート #2499 の 2026-10-04 一括承認）:
+// `compat::Sequential::add_conv_transpose2d` の正ガード。保留ガードは存在しなかった
+// （`ConvTranspose2d` を禁じるプローブ・否定テストなし）ため反転対象はなく、承認形
+// だけを許す正ガード（シグネチャ一致・`pub fn` ちょうど 1 件）を新設する。
+// `docs/conv-ops-design.md` §15「#2523 実装記録」参照。
+// =====================================================================
+
+const ADD_CONV_TRANSPOSE2D_PARAMS: &str = "mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], output_padding: [usize; 2], dilation: [usize; 2], groups: usize, seed: u64, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_conv_transpose2d` が承認シグネチャで 1 件だけ存在する。
+#[test]
+fn compat_sequential_conv_transpose2d_add_method_has_approved_signature() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_conv_transpose2d"),
+        1
+    );
+    assert!(sequential_spatial_add_signature_ok(
+        &cleaned,
+        "add_conv_transpose2d",
+        ADD_CONV_TRANSPOSE2D_PARAMS
+    ));
+}
+
+/// [`compat_sequential_conv_transpose2d_add_method_has_approved_signature`] の自己テスト。
+#[test]
+fn compat_sequential_conv_transpose2d_add_method_has_approved_signature_detects_offense() {
+    let ok = "pub fn add_conv_transpose2d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], output_padding: [usize; 2], dilation: [usize; 2], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "add_conv_transpose2d",
+        ADD_CONV_TRANSPOSE2D_PARAMS
+    ));
+    for bad in [
+        // output_padding 欠落
+        "pub fn add_conv_transpose2d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // 引数順の入替（output_padding と dilation）
+        "pub fn add_conv_transpose2d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2], output_padding: [usize; 2], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // 型違い（スカラー）
+        "pub fn add_conv_transpose2d(mut self, in_channels: usize, out_channels: usize, kernel_size: usize, stride: [usize; 2], padding: [usize; 2], output_padding: [usize; 2], dilation: [usize; 2], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_conv_transpose2d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], output_padding: [usize; 2], dilation: [usize; 2], groups: usize, seed: u64,) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(
+                bad,
+                "add_conv_transpose2d",
+                ADD_CONV_TRANSPOSE2D_PARAMS
+            ),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_conv_transpose2d(` がちょうど 1 件（0 件＝公開の脱落、
+/// 2 件以上＝重複宣言の混入を拒否する正ガード）。
+#[test]
+fn compat_sequential_exposes_conv_transpose2d_add_method_issue_2523() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut count = 0usize;
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        count += count_pub_fn_declarations(content, "add_conv_transpose2d");
+    });
+    assert_eq!(
+        count, 1,
+        "src/compat 配下の add_conv_transpose2d の pub fn 宣言数が 1 件でない（count={count}）"
+    );
+}
+
+/// [`compat_sequential_exposes_conv_transpose2d_add_method_issue_2523`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_conv_transpose2d_add_method_issue_2523_counts_declarations() {
+    let one = "    pub fn add_conv_transpose2d(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_conv_transpose2d"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_conv_transpose1d"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_conv_transpose2d"), 2);
+}
+
+// =====================================================================
 // イシュー #2162（親 #2131）: PixelShuffle・PixelUnshuffle の facade
 // 公開保留を検査するテスト群。`PixelShuffleHoldDoctestGuard`（`src/
 // lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査と、
