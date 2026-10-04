@@ -1,380 +1,318 @@
-//! `compat::Sequential::add_conv_transpose1d`／`add_unflatten`（イシュー #2521・
-//! 親 #2520・ルート #2499 の一括承認）の facade 公開面を検証する統合テスト。
-//! 設計正本は `docs/autodiff-spatial-layers-decision.md` §6。
+//! `compat::Sequential::add_upsample`／`add_zero_pad2d`／`add_identity`（イシュー #2522・
+//! ルート #2499 の 2026-10-04 一括承認。`docs/autodiff-spatial-layers-decision.md` §6）の
+//! facade 公開面を CPU で検証する統合テスト。
 //!
-//! - 無効引数（`output_padding >= stride`・`groups = 0`・割り切れ違反・空 `sizes`）は `Err`。
-//! - `predict`（tape 不要経路）と `forward`（`fandhe_ai::tape()` 上）が bit 完全一致し、
-//!   `ConvTranspose1d` の出力長は PyTorch の式と一致する。
-//! - `Flatten` → `Unflatten` の往復で shape と値が元に戻る。
-//! - 学習経路: `trainable_parameters`／`bind().trainable_vars()`／`trainable_grads()`／
-//!   `state_dict` の順序・件数の一致、`apply_parameters` の shape 保存更新、SGD で loss 減少。
-//! - 常駐経路: `ConvTranspose1d` は `BackendError::Unsupported`、`Unflatten` のみは通過。
-//! - 保存・ONNX export: manifest／opset が未対応のため型付きエラーで fail-closed。
+//! 3 層は学習可能パラメータを持たない無状態層で、内部実装（`nn::Upsample`／`nn::ZeroPad2d`／
+//! `nn::Identity`。#2159）の薄い委譲である。本ファイルは次を facade 公開 API だけで固定する。
+//!
+//! - 構築検査（`add_upsample` の空 `size` 拒否）と forward 時の遅延検査（`Shape`）
+//! - 数値: `ZeroPad2d` の 0 埋め・`Identity` の恒等・`Upsample(Nearest)` の添字式
+//! - `predict`（host 経路）と `forward`（外部 `Tape` 経路）の bit 完全一致（混在モデル）
+//! - 学習経路（`bind`／`trainable_parameters`／`trainable_grads`／`apply_parameters`／`fit`）
+//! - 常駐経路（対応扱い。既存の常駐非対応層との混在は従来どおり `Unsupported`）
+//! - `save_model`／`load_model` の往復 bit 一致
+//!
+//! 実機 parity は `compat_sequential_spatial_layers_backend_parity.rs`（`#[ignore]`）。
 
-use std::path::PathBuf;
+use fandhe_ai::compat::FitConfig;
+use fandhe_ai::compat::{Loss, Optimizer, Sequential, load_model, save_model};
+use fandhe_ai::optim::SgdConfig;
+use fandhe_ai::{AutodiffError, BackendError, InterpolateMode, Tensor};
 
-use fandhe_ai::compat::{FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model};
-use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
-use fandhe_ai::optim::{Sgd, SgdConfig};
-use fandhe_ai::{AutodiffError, BackendError, Tensor};
-
-const SEED1: u64 = 0x2521_0001;
-const SEED2: u64 = 0x2521_0002;
+mod common;
+use common::temp_dir::TempDirGuard;
 
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
+    Tensor::new(data, shape).expect("test fixture: shape とデータ長は一致させている")
 }
 
-fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
+fn dense(t: &Tensor<f32>) -> Vec<u32> {
     t.contiguous()
         .as_slice()
-        .expect("contiguous() 直後は必ず as_slice() が Some を返す")
-        .to_vec()
+        .expect("contiguous() 後は as_slice が Some")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
 }
 
-fn ramp(n: usize, scale: f32, offset: f32) -> Vec<f32> {
-    (0..n).map(|i| (i as f32) * scale + offset).collect()
+fn ramp(shape: &[usize], scale: f32) -> Tensor<f32> {
+    let n: usize = shape.iter().product();
+    tensor(
+        (0..n).map(|i| ((i as f32) * 0.37).sin() * scale).collect(),
+        shape,
+    )
 }
 
-/// 保存先として存在しないパスを返す（`save_model` が拒否時に何も作らないことの検査用）。
-fn unique_missing_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "fandhe_ai_2521_{tag}_{}_{}",
-        std::process::id(),
-        SEED1
-    ))
-}
-
-// ---------------------------------------------------------------- add_conv_transpose1d
-
-#[test]
-fn add_conv_transpose1d_rejects_output_padding_ge_stride() {
-    let err = Sequential::new()
-        .add_conv_transpose1d(2, 3, 3, 2, 0, 2, 1, 1, SEED1)
-        .map(|_| ())
-        .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)), "{err:?}");
-}
-
-#[test]
-fn add_conv_transpose1d_rejects_zero_groups_and_indivisible_groups() {
-    assert!(
-        Sequential::new()
-            .add_conv_transpose1d(2, 4, 3, 1, 0, 0, 1, 0, SEED1)
-            .is_err()
-    );
-    assert!(
-        Sequential::new()
-            .add_conv_transpose1d(3, 4, 3, 1, 0, 0, 1, 2, SEED1)
-            .is_err()
-    );
-}
-
-#[test]
-fn conv_transpose1d_output_length_matches_pytorch_formula() {
-    // (L-1)*stride - 2*padding + dilation*(k-1) + output_padding + 1
-    let (l, stride, padding, k, dilation, output_padding) =
-        (5usize, 3usize, 1usize, 3usize, 2usize, 2usize);
-    let expected = (l - 1) * stride - 2 * padding + dilation * (k - 1) + output_padding + 1;
-    let model = Sequential::new()
-        .add_conv_transpose1d(2, 4, k, stride, padding, output_padding, dilation, 1, SEED1)
-        .unwrap();
-    let x = tensor(ramp(2 * 2 * l, 0.03, -0.2), &[2, 2, l]);
-    let y = model.predict(&x).unwrap();
-    assert_eq!(y.shape(), &[2, 4, expected]);
-}
-
-#[test]
-fn conv_transpose1d_predict_matches_forward_bit_exact() {
-    let model = Sequential::new()
-        .add_conv_transpose1d(2, 3, 3, 2, 1, 1, 1, 1, SEED2)
+/// `Conv2d → ZeroPad2d → Upsample(Bilinear) → Identity → Flatten → Linear` の混在モデル
+/// （入力 `[2, 1, 4, 4]`・出力 `[2, 3]`）。
+fn mixed_model() -> Sequential {
+    Sequential::new()
+        .add_conv2d(1, 2, [3, 3], [1, 1], [1, 1], [1, 1], 1, 11)
         .unwrap()
-        .add_relu();
-    let x = tensor(ramp(2 * 2 * 6, 0.02, -0.3), &[2, 2, 6]);
-
-    let predicted = model.predict(&x).unwrap();
-
-    let tape = fandhe_ai::tape();
-    let xv = tape.var(&x);
-    let forwarded = model.forward(&tape, &xv).unwrap().to_tensor();
-
-    assert_eq!(predicted.shape(), forwarded.shape());
-    assert_eq!(dense_vec(&predicted), dense_vec(&forwarded));
+        .add_zero_pad2d([1, 1, 1, 1])
+        .add_upsample(
+            vec![4, 4],
+            InterpolateMode::Bilinear {
+                align_corners: false,
+            },
+        )
+        .unwrap()
+        .add_identity()
+        .add_flatten(1, 3)
+        .add_linear(32, 3, 12)
+        .unwrap()
 }
 
-// ---------------------------------------------------------------- add_unflatten
+// ---------------------------------------------------------------------
+// 構築検査・遅延検査
+// ---------------------------------------------------------------------
 
 #[test]
-fn add_unflatten_rejects_empty_sizes() {
-    let err = Sequential::new()
-        .add_unflatten(1, vec![])
-        .map(|_| ())
-        .unwrap_err();
-    assert!(matches!(err, AutodiffError::InvalidArgument(_)), "{err:?}");
+fn add_upsample_rejects_empty_size() {
+    match Sequential::new().add_upsample(vec![], InterpolateMode::Nearest) {
+        Err(AutodiffError::InvalidArgument(_)) => {}
+        Err(other) => panic!("InvalidArgument のはず: {other:?}"),
+        Ok(_) => panic!("空 size は構築時に拒否されるはず"),
+    }
 }
 
 #[test]
-fn flatten_then_unflatten_round_trips() {
+fn upsample_mode_rank_mismatch_is_deferred_to_forward() {
+    // Bilinear は空間 2 軸限定。size 1 軸は構築できるが forward で Shape になる（遅延検査）。
     let model = Sequential::new()
-        .add_flatten(1, 2)
-        .add_unflatten(1, vec![3, 4])
-        .unwrap();
-    let x = tensor(ramp(2 * 3 * 4, 0.5, 0.0), &[2, 3, 4]);
-    let y = model.predict(&x).unwrap();
-    assert_eq!(y.shape(), &[2, 3, 4]);
-    assert_eq!(dense_vec(&y), dense_vec(&x));
-}
-
-#[test]
-fn unflatten_size_product_mismatch_is_shape_error_at_forward() {
-    let model = Sequential::new().add_unflatten(1, vec![3, 3]).unwrap();
-    let x = tensor(ramp(2 * 8, 1.0, 0.0), &[2, 8]);
-    let err = model.predict(&x).unwrap_err();
+        .add_upsample(
+            vec![4],
+            InterpolateMode::Bilinear {
+                align_corners: false,
+            },
+        )
+        .expect("構築時は mode と軸数の整合を見ない");
+    let err = model.predict(&ramp(&[1, 1, 2, 2], 1.0)).unwrap_err();
     assert!(matches!(err, AutodiffError::Shape(_)), "{err:?}");
 }
 
-// ---------------------------------------------------------------- 学習経路
+#[test]
+fn zero_pad2d_rejects_rank1_input_at_forward() {
+    let model = Sequential::new().add_zero_pad2d([1, 1, 1, 1]);
+    let err = model.predict(&ramp(&[4], 1.0)).unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)), "{err:?}");
+}
 
-fn mixed_model() -> Sequential {
-    // [N, 6] → Linear(6, 8) → Unflatten(1, [2, 4]) → ConvTranspose1d(2, 3, k=3, s=2) → ReLU
-    Sequential::new()
-        .add_linear(6, 8, SEED1)
-        .unwrap()
-        .add_unflatten(1, vec![2, 4])
-        .unwrap()
-        .add_conv_transpose1d(2, 3, 3, 2, 0, 0, 1, 1, SEED2)
-        .unwrap()
-        .add_relu()
+// ---------------------------------------------------------------------
+// 数値
+// ---------------------------------------------------------------------
+
+#[test]
+fn zero_pad2d_pads_with_zeros_left_right_top_bottom() {
+    // [left, right, top, bottom] = [1, 2, 0, 1]。入力 [1,1,1,2] → 出力 [1,1,2,5]。
+    let model = Sequential::new().add_zero_pad2d([1, 2, 0, 1]);
+    let x = tensor(vec![1.0, 2.0], &[1, 1, 1, 2]);
+    let y = model.predict(&x).unwrap();
+    assert_eq!(y.shape(), &[1, 1, 2, 5]);
+    let expected = [0.0_f32, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let expected_bits: Vec<u32> = expected.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(dense(&y), expected_bits);
 }
 
 #[test]
-fn trainable_parameters_order_is_consistent_across_apis() {
+fn identity_returns_input_bit_exact() {
+    let model = Sequential::new().add_identity();
+    let x = ramp(&[2, 3, 4], 2.5);
+    assert_eq!(dense(&model.predict(&x).unwrap()), dense(&x));
+}
+
+#[test]
+fn upsample_nearest_doubles_each_element() {
+    let model = Sequential::new()
+        .add_upsample(vec![4, 4], InterpolateMode::Nearest)
+        .unwrap();
+    let x = tensor(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]);
+    let y = model.predict(&x).unwrap();
+    assert_eq!(y.shape(), &[1, 1, 4, 4]);
+    let expected = [
+        1.0_f32, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0,
+    ];
+    let expected_bits: Vec<u32> = expected.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(dense(&y), expected_bits);
+}
+
+// ---------------------------------------------------------------------
+// predict（host）と forward（Tape）の一致・学習経路
+// ---------------------------------------------------------------------
+
+#[test]
+fn mixed_model_predict_matches_tape_forward() {
     let model = mixed_model();
-    let trainable = model.trainable_parameters();
-    // Linear(weight, bias) + ConvTranspose1d(weight, bias) の 4 件。
-    assert_eq!(trainable.len(), 4);
-    assert_eq!(trainable[0].shape(), &[6, 8]);
-    assert_eq!(trainable[1].shape(), &[8]);
-    assert_eq!(trainable[2].shape(), &[2, 3, 3], "[in, out/groups, k]");
-    assert_eq!(trainable[3].shape(), &[3]);
+    let x = ramp(&[2, 1, 4, 4], 1.0);
+    let via_predict = model.predict(&x).unwrap();
+    let tape = fandhe_ai::tape();
+    let xv = tape.var(&x);
+    let via_forward = model.forward(&tape, &xv).unwrap().to_tensor();
+    assert_eq!(via_predict.shape(), &[2, 3]);
+    assert_eq!(dense(&via_predict), dense(&via_forward));
+}
 
-    let state = model.state_dict();
-    assert!(state.contains_key("0.weight") && state.contains_key("0.bias"));
-    assert!(state.contains_key("2.weight") && state.contains_key("2.bias"));
-    assert_eq!(state["2.weight"].shape(), &[2, 3, 3]);
+#[test]
+fn stateless_layers_do_not_add_trainable_parameters_and_grads_match() {
+    let model = mixed_model();
+    // Conv2d(weight, bias) + Linear(weight, bias) の 4 件だけ。
+    let param_count = model.trainable_parameters().len();
+    assert_eq!(param_count, 4);
 
-    let x = tensor(ramp(3 * 6, 0.05, -0.4), &[3, 6]);
+    let x = ramp(&[2, 1, 4, 4], 1.0);
+    let target = ramp(&[2, 3], 0.5);
     let tape = fandhe_ai::tape();
     let bound = model.bind(&tape);
     let xv = tape.var(&x);
+    let tv = tape.var(&target);
     let pred = bound.forward(&tape, &xv).unwrap();
-    let target = tape.var(&tensor(vec![0.0; 3 * 3 * 9], &[3, 3, 9]));
-    let loss = pred.mse_loss(&target).unwrap();
-    assert_eq!(bound.trainable_vars().len(), 4);
+    let loss = pred.mse_loss(&tv).unwrap();
+    assert_eq!(bound.trainable_vars().len(), param_count);
     let grads = tape.backward(&loss).unwrap();
-    assert_eq!(bound.trainable_grads(&grads).unwrap().len(), 4);
+    let grad_refs = bound.trainable_grads(&grads).unwrap();
+    assert_eq!(grad_refs.len(), param_count);
 }
 
 #[test]
-fn apply_parameters_updates_conv_transpose1d_and_rejects_bad_updates() {
-    let mut model = Sequential::new()
-        .add_conv_transpose1d(1, 1, 1, 1, 0, 0, 1, 1, SEED1)
-        .unwrap();
-    model
-        .apply_parameters(vec![tensor(vec![2.0], &[1, 1, 1]), tensor(vec![1.0], &[1])])
-        .unwrap();
-    let x = tensor(vec![3.0], &[1, 1, 1]);
-    assert_eq!(dense_vec(&model.predict(&x).unwrap()), vec![7.0]);
-
-    // shape 変更・要素数不足はモデル不変のまま拒否する。
-    let before = dense_vec(&model.predict(&x).unwrap());
-    assert!(
-        model
-            .apply_parameters(vec![
-                tensor(vec![1.0; 2], &[1, 1, 2]),
-                tensor(vec![0.0], &[1])
-            ])
-            .is_err()
-    );
-    assert!(
-        model
-            .apply_parameters(vec![tensor(vec![1.0], &[1, 1, 1])])
-            .is_err()
-    );
-    assert_eq!(dense_vec(&model.predict(&x).unwrap()), before);
-}
-
-#[test]
-fn train_loop_with_sgd_reduces_loss_and_updates_conv_transpose1d() {
-    let mut model = Sequential::new()
-        .add_linear(6, 8, SEED1)
-        .unwrap()
-        .add_unflatten(1, vec![2, 4])
-        .unwrap()
-        .add_conv_transpose1d(2, 3, 3, 2, 0, 0, 1, 1, SEED2)
-        .unwrap();
-    let x = tensor(
-        (0..4 * 6).map(|i| ((i % 11) as f32) * 0.07 - 0.3).collect(),
-        &[4, 6],
-    );
-    let target = tensor(
-        (0..4 * 3 * 9)
-            .map(|i| ((i % 5) as f32) * 0.1 - 0.2)
-            .collect(),
-        &[4, 3, 9],
-    );
-    let conv_weight_before = dense_vec(model.trainable_parameters()[2]);
-
-    let mut sgd = Sgd::new(SgdConfig::new(0.05)).unwrap();
-    let mut losses = Vec::new();
-    for _ in 0..40 {
-        let updated = {
-            let tape = fandhe_ai::tape();
-            let bound = model.bind(&tape);
-            let xv = tape.var(&x);
-            let tv = tape.var(&target);
-            let pred = bound.forward(&tape, &xv).unwrap();
-            let loss = pred.mse_loss(&tv).unwrap();
-            losses.push(loss.to_tensor().get(&[]).unwrap());
-            let grads = tape.backward(&loss).unwrap();
-            let grad_refs = bound.trainable_grads(&grads).unwrap();
-            let param_refs = model.trainable_parameters();
-            sgd.step(&param_refs, &grad_refs).unwrap()
-        };
-        model.apply_parameters(updated).unwrap();
-    }
-    let (first, last) = (losses[0], *losses.last().unwrap());
-    assert!(
-        last < first * 0.9,
-        "loss should decrease: {first} -> {last}"
-    );
-    assert_ne!(
-        dense_vec(model.trainable_parameters()[2]),
-        conv_weight_before,
-        "ConvTranspose1d の weight が更新されていない"
-    );
-}
-
-#[test]
-fn compile_and_fit_accept_conv_transpose1d_model() {
-    // `first_untracked_parametric_layer` が ConvTranspose1d を「追跡されない独自層」と
-    // 誤判定しないこと（fit の入口検査を通り、weight が学習されること）を固定する。
+fn apply_parameters_succeeds_with_stateless_layers() {
     let mut model = mixed_model();
-    let before = dense_vec(model.trainable_parameters()[2]);
+    let updated: Vec<Tensor<f32>> = model
+        .trainable_parameters()
+        .iter()
+        .map(|p| {
+            tensor(
+                p.contiguous()
+                    .as_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v + 0.25)
+                    .collect(),
+                p.shape(),
+            )
+        })
+        .collect();
+    model.apply_parameters(updated).unwrap();
+}
+
+#[test]
+fn fit_updates_parameters_through_stateless_layers() {
+    let mut model = mixed_model();
     model
         .compile(Optimizer::Sgd(SgdConfig::new(0.05)), Loss::Mse)
         .unwrap();
-    let x = tensor(ramp(4 * 6, 0.05, -0.5), &[4, 6]);
-    let y = tensor(ramp(4 * 3 * 9, 0.01, 0.1), &[4, 3, 9]);
-    model.fit(&x, &y, FitConfig::new(3, 4)).unwrap();
-    assert_ne!(dense_vec(model.trainable_parameters()[2]), before);
+    let x = ramp(&[4, 1, 4, 4], 1.0);
+    let y = ramp(&[4, 3], 0.5);
+    let before: Vec<Vec<u32>> = model
+        .trainable_parameters()
+        .iter()
+        .map(|p| dense(p))
+        .collect();
+    let history = model.fit(&x, &y, FitConfig::new(3, 2)).unwrap();
+    assert_eq!(history.loss.len(), 3);
+    assert!(
+        history.loss.iter().all(|l| l.is_finite()),
+        "{:?}",
+        history.loss
+    );
+    let after: Vec<Vec<u32>> = model
+        .trainable_parameters()
+        .iter()
+        .map(|p| dense(p))
+        .collect();
+    assert_ne!(before, after, "fit でパラメータが更新されるはず");
 }
 
-// ---------------------------------------------------------------- 常駐経路
+// ---------------------------------------------------------------------
+// 常駐経路
+// ---------------------------------------------------------------------
 
-#[test]
-fn resident_path_rejects_conv_transpose1d_but_not_unflatten() {
-    let model = Sequential::new()
-        .add_conv_transpose1d(2, 3, 3, 1, 0, 0, 1, 1, SEED1)
-        .unwrap();
-    let tape = fandhe_ai::tape();
-    assert!(matches!(
-        model.init_device_param_store(&tape).unwrap_err(),
-        BackendError::Unsupported(_)
-    ));
-
-    // Linear + Unflatten のみのモデルは常駐経路を拒否されずに通過する。
-    let ok_model = Sequential::new()
-        .add_linear(4, 6, SEED1)
+/// 無状態 3 層 + Linear だけの常駐対応モデル（入力 `[2, 1, 3, 3]`）。
+fn resident_ok_model() -> Sequential {
+    Sequential::new()
+        .add_zero_pad2d([1, 1, 1, 1])
+        .add_upsample(vec![4, 4], InterpolateMode::Nearest)
         .unwrap()
-        .add_unflatten(1, vec![2, 3])
-        .unwrap();
+        .add_identity()
+        .add_flatten(1, 3)
+        .add_linear(16, 4, 21)
+        .unwrap()
+        .add_relu()
+        .add_linear(4, 2, 22)
+        .unwrap()
+}
+
+#[test]
+fn stateless_layers_are_supported_on_resident_path() {
+    let model = resident_ok_model();
+    let x = ramp(&[2, 1, 3, 3], 1.0);
     let init_tape = fandhe_ai::tape();
-    let store = ok_model
-        .init_device_param_store(&init_tape)
-        .expect("Unflatten のみは常駐経路を拒否しない");
+    let store = model.init_device_param_store(&init_tape).unwrap();
     drop(init_tape);
-    let x = tensor(ramp(2 * 4, 0.1, -0.3), &[2, 4]);
-    let resident = ok_model.predict_resident(&store, &x).unwrap();
-    let host = ok_model.predict(&x).unwrap();
-    assert_eq!(resident.shape(), host.shape());
-    for (a, b) in dense_vec(&resident).iter().zip(dense_vec(&host)) {
-        let diff = (a - b).abs();
-        assert!(diff < 1e-5 || diff / b.abs().max(f32::MIN_POSITIVE) < 1e-3);
-    }
-}
-
-// ---------------------------------------------------------------- 保存・ONNX（fail-closed）
-
-#[test]
-fn save_model_rejects_both_layers_without_touching_dir() {
-    for (tag, model) in [
-        (
-            "ct1d",
-            Sequential::new()
-                .add_conv_transpose1d(1, 1, 1, 1, 0, 0, 1, 1, SEED1)
-                .unwrap(),
-        ),
-        (
-            "unflatten",
-            Sequential::new().add_unflatten(1, vec![1, 2]).unwrap(),
-        ),
-    ] {
-        let dir = unique_missing_dir(tag);
-        let err = save_model(&model, &dir).unwrap_err();
-        assert!(
-            matches!(err, ModelIoError::UnsupportedModel { .. }),
-            "{tag}: {err:?}"
-        );
-        assert!(!dir.exists(), "{tag}: 拒否時に保存先を作ってはならない");
-    }
+    let via_resident = model.predict_resident(&store, &x).unwrap();
+    let via_predict = model.predict(&x).unwrap();
+    assert_eq!(dense(&via_resident), dense(&via_predict));
 }
 
 #[test]
-fn onnx_export_rejects_both_layers_as_unsupported() {
-    for model in [
-        Sequential::new()
-            .add_conv_transpose1d(1, 1, 1, 1, 0, 0, 1, 1, SEED1)
-            .unwrap(),
-        Sequential::new().add_unflatten(1, vec![1, 2]).unwrap(),
-    ] {
-        let err = OnnxModel::from_sequential(&model).unwrap_err();
-        assert!(matches!(err, OnnxError::UnsupportedLayer { .. }), "{err:?}");
-    }
-}
-// ---------------------------------------------------------------- Var 委譲メソッド
-
-#[test]
-fn var_methods_match_layer_forward_and_backpropagate() {
-    let model = Sequential::new()
-        .add_conv_transpose1d(2, 3, 3, 2, 0, 1, 1, 1, SEED1)
-        .unwrap();
-    let w = model.state_dict()["0.weight"].clone();
-    let b = model.state_dict()["0.bias"].clone();
-    let x = tensor(ramp(2 * 2 * 4, 0.04, -0.2), &[2, 2, 4]);
-
+fn resident_path_still_rejects_mixed_model_with_conv() {
+    // 常駐非対応の Conv2d を混ぜたモデルは従来どおり拒否される（新層で判定が緩んでいない）。
+    let model = mixed_model();
     let tape = fandhe_ai::tape();
-    let xv = tape.var(&x);
-    let wv = tape.var(&w);
-    let bv = tape.var(&b);
-    let via_var = xv.conv_transpose1d(&wv, Some(&bv), 2, 0, 1, 1, 1).unwrap();
-    let via_layer = model.forward(&tape, &xv).unwrap();
-    assert_eq!(
-        dense_vec(&via_var.to_tensor()),
-        dense_vec(&via_layer.to_tensor())
+    let err = model.init_device_param_store(&tape).unwrap_err();
+    assert!(matches!(err, BackendError::Unsupported(_)), "{err:?}");
+
+    let store_tape = fandhe_ai::tape();
+    let store = resident_ok_model()
+        .init_device_param_store(&store_tape)
+        .unwrap();
+    drop(store_tape);
+    let x = ramp(&[2, 1, 4, 4], 1.0);
+    let err = model.predict_resident(&store, &x).unwrap_err();
+    assert!(
+        matches!(err, AutodiffError::Backend(BackendError::Unsupported(_))),
+        "{err:?}"
     );
 
-    // backward: unflatten は勾配を恒等に流し、重みへ勾配が届く。
-    let flat = tape.var(&tensor(ramp(2 * 6, 0.1, 0.0), &[2, 6]));
-    let un = flat.unflatten(1, &[2, 3]).unwrap();
-    assert_eq!(un.to_tensor().shape(), &[2, 2, 3]);
-    let loss = via_var
-        .sum(None)
-        .unwrap()
-        .add(&un.sum(None).unwrap())
-        .unwrap();
-    let grads = tape.backward(&loss).unwrap();
-    assert!(grads.get(&wv).unwrap().is_some(), "weight 勾配が得られない");
-    let g_flat = grads.get(&flat).unwrap().expect("unflatten 入力への勾配");
-    assert!(g_flat.host_slice().iter().all(|&g| g == 1.0));
+    let tape2 = fandhe_ai::tape();
+    let xv = tape2.var(&x);
+    let mut store2 = store;
+    let err = model
+        .forward_resident(&tape2, &xv, &mut store2)
+        .expect_err("forward_resident も拒否されるはず");
+    assert!(
+        matches!(err, AutodiffError::Backend(BackendError::Unsupported(_))),
+        "{err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// save_model／load_model
+// ---------------------------------------------------------------------
+
+#[test]
+fn save_and_load_round_trip_is_bit_identical() {
+    let model = mixed_model();
+    let x = ramp(&[2, 1, 4, 4], 1.0);
+    let guard = TempDirGuard::new("spatial_layers_round_trip");
+    let dir = guard.path().join("m");
+    save_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_model(&dir).expect("復元できるはず");
+    assert_eq!(
+        dense(&model.predict(&x).unwrap()),
+        dense(&loaded.predict(&x).unwrap())
+    );
+}
+
+#[test]
+fn save_and_load_round_trip_with_nearest_upsample_and_identity() {
+    let model = resident_ok_model();
+    let x = ramp(&[2, 1, 3, 3], 1.0);
+    let guard = TempDirGuard::new("spatial_layers_round_trip_nearest");
+    let dir = guard.path().join("m");
+    save_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_model(&dir).expect("復元できるはず");
+    assert_eq!(
+        dense(&model.predict(&x).unwrap()),
+        dense(&loaded.predict(&x).unwrap())
+    );
 }

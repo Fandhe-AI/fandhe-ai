@@ -2130,11 +2130,16 @@ struct RngDistributionsHoldDoctestGuard;
 /// イシュー #2159（親 #2131。設計正本 `docs/autodiff-spatial-layers-
 /// decision.md` §6 承認事項 1）の facade 公開保留を固定する doctest
 /// 足場。`KvCacheHoldDoctestGuard`（#2084）と同型の「正のプローブ 1
-/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
-/// スコープに、本ブロック内でのみ定義したローカル
+/// ブロック方式」を採る。**イシュー #2522 で `add_upsample`／
+/// `add_zero_pad2d`／`add_identity` の 3 メソッドは承認・公開済み**のため
+/// メソッド／自由関数プローブから外した（型名 `Upsample`／`ZeroPad2d`／
+/// `Identity` の再エクスポートは未承認のため型名プローブは維持する。
+/// 公開済み 3 メソッドは `api_surface.rs::compat_sequential_exposes_
+/// spatial_layer_add_methods_issue_2522` が正ガードで固定する）。残る保留は
+/// `ConvTranspose1d`／`Unflatten` 系と 5 型名。facade の全 `pub mod` を
+/// glob import したスコープに、本ブロック内でのみ定義したローカル
 /// `__fandhe_spatial_hold_probe::{ConvTranspose1d, Upsample, ZeroPad2d,
-/// Identity, Unflatten, add_conv_transpose1d, add_upsample,
-/// add_zero_pad2d, add_identity, add_unflatten}` を導入し、実際に使う
+/// Identity, Unflatten, add_conv_transpose1d, add_unflatten}` を導入し、実際に使う
 /// 関数を書く。facade がどの経路（単一行・複数行・ネストした group で
 /// の `pub use`・別名エクスポート・facade 独自の `struct`／`type`
 /// 宣言・`compat::Sequential`／`Var` への inherent メソッド追加）でこれら
@@ -2144,28 +2149,22 @@ struct RngDistributionsHoldDoctestGuard;
 /// 本プローブの trait 経由呼び出しが型・引数不一致でコンパイル失敗
 /// する）でエラーコードに依存せずコンパイルが失敗する。
 ///
-/// **イシュー #2521 での更新**: `ConvTranspose1d`／`Unflatten` の 2 層は
-/// `compat::Sequential::add_conv_transpose1d`／`add_unflatten` と
-/// `Var::conv_transpose1d`／`Var::unflatten` を承認形として公開済みのため、
-/// それらの trait 経由プローブ（`__FandheSpatialVarProbe` 全体と
-/// `__FandheSpatialAddProbe` の該当 2 メソッド）は本ブロックから外した
-/// （承認形だけを許す正ガードは `api_surface.rs` の
-/// `*_spatial_*` テスト群）。型名の衝突プローブと自由関数のプローブは、
-/// 型の再エクスポート・自由関数での公開が未承認のまま残るため維持する。
-/// 残り 3 層（`Upsample`／`ZeroPad2d`／`Identity`）の公開は #2522 の担当。
+/// **イシュー #2521・#2522 での更新**: 5 層すべての `add_*`／`Var` メソッド
+/// （`add_conv_transpose1d`／`add_unflatten`／`add_upsample`／`add_zero_pad2d`／
+/// `add_identity`・`Var::conv_transpose1d`／`Var::unflatten`）は承認形として
+/// 公開済みのため、trait 経由プローブ（`__FandheSpatialAddProbe`・
+/// `__FandheSpatialVarProbe`）は本ブロックから外した（承認形だけを許す正ガードは
+/// `api_surface.rs` の `*_spatial_*` テスト群）。型名の衝突プローブと自由関数の
+/// プローブは、型の再エクスポート・自由関数での公開が未承認のまま残るため維持する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// spatial_layers_hold_doctest_globs_all_pub_modules`・`spatial_
-/// layers_hold_doctest_probe_body_matches_fixed_contract`・
-/// `compat_sequential_does_not_expose_spatial_layer_add_methods`）との
+/// layers_hold_doctest_probe_body_matches_fixed_contract`）との
 /// 多層防御の位置づけ・承認未取得の経緯は
 /// `docs/autodiff-spatial-layers-decision.md` §6「承認事項」節を参照。
 ///
-/// 残り 3 層（`Upsample`／`ZeroPad2d`／`Identity`。#2522）の facade 公開
-/// （ユーザー承認）がされる日が来たら、本モジュール・本 doctest 自体を
-/// 削除する（ソース走査側の対応する否定ガードも同時に正ガードへ置き換える）。
-/// 型の再エクスポート・自由関数での公開は引き続き未承認のため、2 層の公開後も
-/// 型名・自由関数の衝突プローブは本 doctest に残す。
+/// 型の再エクスポート・自由関数での公開は引き続き未承認のため、型名・自由関数の
+/// 衝突プローブのみを本 doctest に残す。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2193,38 +2192,11 @@ struct RngDistributionsHoldDoctestGuard;
 ///     pub fn add_conv_transpose1d() -> __FandheSpatialHoldMarker {
 ///         __FandheSpatialHoldMarker
 ///     }
-///     pub fn add_upsample() -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     pub fn add_zero_pad2d() -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     pub fn add_identity() -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
 ///     pub fn add_unflatten() -> __FandheSpatialHoldMarker {
 ///         __FandheSpatialHoldMarker
 ///     }
 /// }
 /// use __fandhe_spatial_hold_probe::*;
-///
-/// trait __FandheSpatialAddProbe {
-///     fn add_upsample(&self) -> __FandheSpatialHoldMarker;
-///     fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker;
-///     fn add_identity(&self) -> __FandheSpatialHoldMarker;
-/// }
-///
-/// impl __FandheSpatialAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_upsample(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     fn add_identity(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-/// }
 ///
 /// fn __probe(
 ///     _: ConvTranspose1d,
@@ -2232,19 +2204,9 @@ struct RngDistributionsHoldDoctestGuard;
 ///     _: ZeroPad2d,
 ///     _: Identity,
 ///     _: Unflatten,
-///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
 ///     let _: __FandheSpatialHoldMarker = add_conv_transpose1d();
-///     let _: __FandheSpatialHoldMarker = add_upsample();
-///     let _: __FandheSpatialHoldMarker = add_zero_pad2d();
-///     let _: __FandheSpatialHoldMarker = add_identity();
 ///     let _: __FandheSpatialHoldMarker = add_unflatten();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_upsample(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_upsample();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_zero_pad2d(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_zero_pad2d();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_identity(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_identity();
 /// }
 /// ```
 #[cfg(doctest)]

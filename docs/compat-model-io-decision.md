@@ -450,6 +450,9 @@ version migration。
   | `avg_pool1d` | `kernel_size`・`stride`（`null` 可）・`padding`・`count_include_pad`（bool） | なし |
   | `adaptive_avg_pool2d` | `output_size_{h,w}` | なし |
   | `adaptive_avg_pool1d` | `output_size` | なし |
+  | `upsample`（#2522） | `mode`（文字列 allowlist: `nearest`・`nearest_exact`・`area`・`linear`・`bilinear`・`bicubic`・`trilinear`）・`align_corners`（bool。`align_corners` を持たない mode は常に `false`〈`true` は `Manifest`〉）・`size_len`（1..=3）・`size_0`・`size_1`・`size_2`（添字 `< size_len` は整数、それ以外は `null`。違反は `Manifest`） | なし |
+  | `zero_pad2d`（#2522） | `left`・`right`・`top`・`bottom` | なし |
+  | `identity`（#2522） | なし | なし |
 
   期待キー・shape は非信頼な整数から純粋な算術だけで導く（`Vec` の事前確保に使わない。
   conv の `in/groups` は `groups >= 1` かつ割り切れることを `Manifest` として先に検査し、

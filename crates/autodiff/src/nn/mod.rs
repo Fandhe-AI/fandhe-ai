@@ -165,9 +165,10 @@
 //! `reshape`）の薄いラッパーで新規 `Op`／`BackendOps`／VJP／カーネル
 //! は追加しない。`compat::Sequential::add_conv_transpose1d`／
 //! `add_unflatten`（と `Var::conv_transpose1d`／`Var::unflatten`）は
-//! イシュー #2521 で facade 公開済み。`add_upsample`／`add_zero_pad2d`／
-//! `add_identity` の facade 公開（経路 2）は未承認のため保留する
-//! （`crates/facade/src/lib.rs` の `SpatialLayersHoldDoctestGuard`・
+//! イシュー #2521 で、`add_upsample`／`add_zero_pad2d`／`add_identity` は
+//! イシュー #2522 で facade 公開済み（`add_upsample` は size 指定のみ）。
+//! 公開前の否定ガードは `crates/facade/src/lib.rs` の
+//! `SpatialLayersHoldDoctestGuard`・
 //! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
 //! `docs/autodiff-spatial-layers-decision.md` §6 承認事項）。
 //! イシュー #2161（親 #2131）で [`Dropout2d`]／[`AlphaDropout`]

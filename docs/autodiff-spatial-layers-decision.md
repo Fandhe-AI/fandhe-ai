@@ -21,7 +21,7 @@ SpatialLayersHoldDoctestGuard`（正のプローブ doctest）と
 テスト）で多層固定していた。**イシュー #2521 で `ConvTranspose1d`／
 `Unflatten` の 2 層（`add_conv_transpose1d`／`add_unflatten`・
 `Var::conv_transpose1d`／`Var::unflatten`）は公開済み**（§6 実装記録）。
-残り 3 層（`Upsample`／`ZeroPad2d`／`Identity`）は #2522 の担当で保留のまま。
+残り 3 層（`Upsample`／`ZeroPad2d`／`Identity`）は #2522 で公開済み（§8）。
 
 ## §1 背景
 
@@ -126,16 +126,16 @@ ZST 特例（`module.rs::collect_named_modules`）の対象になる。
 - `crates/facade/src/lib.rs::SpatialLayersHoldDoctestGuard`（正の
   プローブ doctest）・`crates/facade/tests/api_surface.rs` の
   `spatial_layers_hold_doctest_globs_all_pub_modules`・
-  `spatial_layers_hold_doctest_probe_body_matches_fixed_contract`・
-  `compat_sequential_does_not_expose_spatial_layer_add_methods`
-  （＋自己テスト）
+  `spatial_layers_hold_doctest_probe_body_matches_fixed_contract`
+  （`compat_sequential_does_not_expose_spatial_layer_add_methods` は #2521・#2522 で
+  禁止対象が 0 件になったため削除）
 
 ## §5 スコープ外（`out-of-scope-tracking.md` に従う。Issue 起票は
 ユーザー承認後）
 
-- `compat::Sequential::add_upsample`／`add_zero_pad2d`／`add_identity` の
-  facade 公開（#2522 の担当。保留）。`add_conv_transpose1d`／`add_unflatten`・
-  `Var::conv_transpose1d`／`Var::unflatten` は #2521 で公開済み
+- `compat::Sequential::add_*` 5 種・`Var::conv_transpose1d`／`Var::unflatten` の
+  facade 公開は #2521（`add_conv_transpose1d`／`add_unflatten`・`Var` 2 メソッド）と
+  #2522（`add_upsample`／`add_zero_pad2d`／`add_identity`。§8）で全件公開済み
 - `save_model`／`load_model` での `conv_transpose1d`／`unflatten` の構成保存
   （manifest スキーマ拡張が必要。#2521 は型付きエラーで fail-closed）
 - `nn::ConvTranspose1d`／`nn::Unflatten` の型の facade 再エクスポート
@@ -192,7 +192,7 @@ ZST 特例（`module.rs::collect_named_modules`）の対象になる。
   （`__FandheSpatialVarProbe` 全体・`__FandheSpatialAddProbe` の該当 2 メソッド）を削除し、
   `api_surface.rs::SPATIAL_LAYERS_HOLD_PROBE_BODY` と 1 行も違わず同期した。型名の衝突プローブと
   自由関数プローブは残し、型の再エクスポート・自由関数での公開は引き続き禁止する。
-  `compat_sequential_does_not_expose_spatial_layer_add_methods` は残り 3 種に縮小し、正ガード
+  `compat_sequential_does_not_expose_spatial_layer_add_methods` は #2522 との統合で禁止対象が 0 件になり削除し、正ガード
   （`workspace_declares_spatial_facade_fn_names_only_in_approved_locations`・
   `var_spatial_methods_are_thin_delegations`・`var_spatial_methods_are_reachable_via_facade_only`・
   `compat_sequential_spatial_add_methods_have_approved_signatures`）を新設した。
@@ -204,3 +204,33 @@ ZST 特例（`module.rs::collect_named_modules`）の対象になる。
 CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に無いため
 `#[ignore]` テストを未実行のまま出荷する。実行コマンド・記入欄は
 `docs/perf/logs/spatial-layers-2159/README.md` を参照。
+
+## §8 実装記録（イシュー #2522・ルート #2499 の 2026-10-04 一括承認）
+
+§6 承認事項 1 のうち `add_upsample`／`add_zero_pad2d`／`add_identity` の 3 件を実装した
+（`add_conv_transpose1d`／`add_unflatten` と `Var` 委譲メソッドは別イシュー〈#2521 系〉の対象で保留のまま）。
+
+- **公開面**: `compat::Sequential` に `pub fn` 3 件のみ。型（`Upsample`／`ZeroPad2d`／`Identity`／`UpsampleSize`）の
+  facade 再エクスポートはしない（§6 に記録がなく未承認）。
+  - `add_upsample(self, size: Vec<usize>, mode: InterpolateMode) -> Result<Self, AutodiffError>`
+    （`Upsample::with_size` への 1:1 委譲。**size 指定のみ**。`scale_factor` 経路は公開形が未承認のため保留）
+  - `add_zero_pad2d(self, padding: [usize; 4]) -> Self`（`[left, right, top, bottom]`）
+  - `add_identity(self) -> Self`
+- **`as_*` フックは追加しない**: Issue 本文は `nn::Module` への `as_*` フック追加を例示するが、`save_model`／`load_model` は
+  `LayerSpec`（`compat::sequential`）だけを根拠にするため不要であり、crates.io 公開済み `fandhe-ai-autodiff` の trait 面を
+  広げない判断とした（Issue 本文の例示からの意図的な逸脱）。
+- **学習経路**: 3 層はパラメータを持たない無状態層のため、`bind`／`trainable_parameters`／`apply_parameters`／
+  `trainable_vars`／`trainable_grads` の既存走査をそのまま素通しする（`Flatten`〈#2065〉と同型・コード分岐の追加なし）。
+- **常駐経路**: `Flatten` の先例どおり対応扱い（`contains_resident_unsupported_layer` に追加しない）。常駐非対応層
+  （`Conv2d` 等）との混在は従来どおり `Unsupported` で拒否される（テストで固定）。
+- **保存経路**: kind `upsample`・`zero_pad2d`・`identity` を追加（スキーマは `docs/compat-model-io-decision.md` §4）。
+  `size` の軸数が 1..=3 外、または `InterpolateMode`（`#[non_exhaustive]`）の未知 variant は保存前に `UnsupportedModel`
+  で拒否し `dir` へ副作用を出さない。`format_version` は不変。
+- **保留ガードの反転**: `SpatialLayersHoldDoctestGuard` から 3 メソッドの自由関数・trait・呼び出しプローブを撤去し、
+  型名プローブ（5 型）と `add_conv_transpose1d`／`add_unflatten`／`Var` 2 種のプローブは維持。`api_surface.rs` の否定テストの
+  禁止リストは 2 件へ縮め、`compat_sequential_exposes_spatial_layer_add_methods_issue_2522`（3 メソッドが各ちょうど 1 件の
+  `pub fn` であることを fail-closed で検査する正ガード＋自己テスト）を追加した。
+- **残課題（要承認）**: `add_upsample` の `scale_factor` 指定（`UpsampleSize` 再エクスポートまたは別名メソッド）・型の再エクスポート・
+  `ZeroPad2d::uniform`／負パディングの facade 公開・ONNX export 対応（`UnsupportedLayer` で fail-closed のまま）。
+- **実機 parity**: `crates/facade/tests/compat_sequential_spatial_layers_backend_parity.rs`（`#[ignore]`）。
+  未実測のまま `docs/perf/logs/compat-sequential-spatial-2522/README.md` で GB10／M4 Max へ申し送る。
