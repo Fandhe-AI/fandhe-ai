@@ -12,11 +12,7 @@
 //! 実機（CUDA／Metal）は不要（CPU のみ。実機 parity は `compat_sequential_layers_backend_parity.rs`
 //! の `#[ignore]` テスト）。
 
-use std::path::Path;
-
-use fandhe_ai::compat::{
-    FitConfig, Loss, ModelIoError, Optimizer, Sequential, load_model, save_model,
-};
+use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential};
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::nn::TransformerConfig;
 use fandhe_ai::optim::{Sgd, SgdConfig};
@@ -352,6 +348,10 @@ fn onnx_export_rejects_transformer_layer() {
 #[cfg(unix)]
 mod model_io {
     use super::*;
+
+    use std::path::Path;
+
+    use fandhe_ai::compat::{ModelIoError, load_model, save_model};
 
     use crate::common::temp_dir::TempDirGuard;
 
