@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 45 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 50 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -306,7 +306,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 45 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 50 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -322,6 +322,11 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Softmax { .. } => Some("softmax"),
         LayerSpec::LogSoftmax { .. } => Some("log_softmax"),
         LayerSpec::Softplus { .. } => Some("softplus"),
+        LayerSpec::Mish => Some("mish"),
+        LayerSpec::Hardtanh { .. } => Some("hardtanh"),
+        LayerSpec::Relu6 => Some("relu6"),
+        LayerSpec::Glu { .. } => Some("glu"),
+        LayerSpec::PRelu { .. } => Some("prelu"),
         LayerSpec::Flatten { .. } => Some("flatten"),
         LayerSpec::Dropout { .. } => Some("dropout"),
         LayerSpec::Dropout2d { .. } => Some("dropout2d"),
@@ -365,6 +370,8 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
         LayerSpec::LeakyRelu { negative_slope } => negative_slope.is_finite(),
         LayerSpec::Elu { alpha } => alpha.is_finite(),
         LayerSpec::Softplus { beta, threshold } => beta.is_finite() && threshold.is_finite(),
+        // `Hardtanh::new` は ±inf を受理するが JSON 数値として書けないため保存は拒否する（#2529）。
+        LayerSpec::Hardtanh { min_val, max_val } => min_val.is_finite() && max_val.is_finite(),
         LayerSpec::Dropout { p } | LayerSpec::Dropout2d { p } | LayerSpec::AlphaDropout { p } => {
             p.is_finite()
         }
@@ -530,6 +537,7 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
             embedding_dim,
             ..
         } => vec![("weight", vec![*num_embeddings, *embedding_dim])],
+        LayerSpec::PRelu { num_parameters } => vec![("weight", vec![*num_parameters])],
         LayerSpec::MultiheadAttention { embed_dim, .. } => mha_parameters(*embed_dim, false),
         LayerSpec::TransformerEncoder {
             d_model,
@@ -561,6 +569,10 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::Softmax { .. }
         | LayerSpec::LogSoftmax { .. }
         | LayerSpec::Softplus { .. }
+        | LayerSpec::Mish
+        | LayerSpec::Hardtanh { .. }
+        | LayerSpec::Relu6
+        | LayerSpec::Glu { .. }
         | LayerSpec::Flatten { .. }
         | LayerSpec::Dropout { .. }
         | LayerSpec::Dropout2d { .. }
@@ -759,6 +771,12 @@ fn render_params(spec: &LayerSpec) -> String {
             put_real(&mut f, "beta", *beta);
             put_real(&mut f, "threshold", *threshold);
         }
+        LayerSpec::Hardtanh { min_val, max_val } => {
+            put_real(&mut f, "min_val", *min_val);
+            put_real(&mut f, "max_val", *max_val);
+        }
+        LayerSpec::Glu { dim } => put_num(&mut f, "dim", *dim),
+        LayerSpec::PRelu { num_parameters } => put_num(&mut f, "num_parameters", *num_parameters),
         LayerSpec::Flatten { start_dim, end_dim } => {
             put_num(&mut f, "start_dim", *start_dim);
             put_num(&mut f, "end_dim", *end_dim);
@@ -995,6 +1013,8 @@ fn render_params(spec: &LayerSpec) -> String {
         | LayerSpec::Hardswish
         | LayerSpec::Gelu
         | LayerSpec::GeluTanh
+        | LayerSpec::Mish
+        | LayerSpec::Relu6
         | LayerSpec::Identity
         | LayerSpec::Unsupported { .. } => {}
     }
@@ -1614,6 +1634,17 @@ fn build_model(
             LayerSpec::LogSoftmax { dim } => model.add_log_softmax(*dim),
             LayerSpec::Softplus { beta, threshold } => model
                 .add_softplus(*beta, *threshold)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Mish => model.add_mish(),
+            LayerSpec::Hardtanh { min_val, max_val } => model
+                .add_hardtanh(*min_val, *max_val)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Relu6 => model.add_relu6(),
+            LayerSpec::Glu { dim } => model.add_glu(*dim),
+            // `init` は直後の `load_state_dict` で `weight` が上書きされるため PyTorch 既定の
+            // 0.25 を渡す（manifest には記録しない。#2529）。
+            LayerSpec::PRelu { num_parameters } => model
+                .add_prelu(*num_parameters, 0.25)
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Flatten { start_dim, end_dim } => model.add_flatten(*start_dim, *end_dim),
             LayerSpec::Dropout { p } => model.add_dropout(*p).map_err(ModelIoError::Autodiff)?,
@@ -2401,6 +2432,27 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 threshold: p.f32("threshold")?,
             })
         }
+        "mish" => none(LayerSpec::Mish),
+        "relu6" => none(LayerSpec::Relu6),
+        "hardtanh" => {
+            let p = Params::new(params, &["min_val", "max_val"])?;
+            Ok(LayerSpec::Hardtanh {
+                min_val: p.f32("min_val")?,
+                max_val: p.f32("max_val")?,
+            })
+        }
+        "glu" => {
+            let p = Params::new(params, &["dim"])?;
+            Ok(LayerSpec::Glu {
+                dim: p.usize("dim")?,
+            })
+        }
+        "prelu" => {
+            let p = Params::new(params, &["num_parameters"])?;
+            Ok(LayerSpec::PRelu {
+                num_parameters: p.usize("num_parameters")?,
+            })
+        }
         "flatten" => {
             let p = Params::new(params, &["start_dim", "end_dim"])?;
             Ok(LayerSpec::Flatten {
@@ -3166,7 +3218,7 @@ mod tests {
         ));
     }
 
-    /// 45 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 50 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3191,6 +3243,14 @@ mod tests {
                 beta: 2.0,
                 threshold: 20.0,
             },
+            LayerSpec::Mish,
+            LayerSpec::Hardtanh {
+                min_val: -2.0,
+                max_val: 3.0,
+            },
+            LayerSpec::Relu6,
+            LayerSpec::Glu { dim: 1 },
+            LayerSpec::PRelu { num_parameters: 3 },
             LayerSpec::Flatten {
                 start_dim: 1,
                 end_dim: 3,
@@ -3384,7 +3444,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 45, "kind allowlist は 45 種: {kinds:?}");
+        assert_eq!(kinds.len(), 50, "kind allowlist は 50 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3402,9 +3462,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 45 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 50 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("45 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("50 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3412,7 +3472,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("45 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("50 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -3569,6 +3629,23 @@ mod tests {
                 "embedding_bag",
                 r#"{"num_embeddings":-1,"embedding_dim":2,"mode":"sum","padding_idx":null}"#,
             ),
+            // イシュー #2529: mish / relu6 / hardtanh / glu / prelu の非信頼入力。
+            ("mish", r#"{"x":1}"#),
+            ("relu6", r#"{"x":1}"#),
+            ("hardtanh", r#"{}"#),
+            ("hardtanh", r#"{"min_val":-1.0}"#),
+            ("hardtanh", r#"{"min_val":-1.0,"max_val":"a"}"#),
+            ("hardtanh", r#"{"min_val":-1.0,"max_val":1.0,"x":1}"#),
+            ("glu", r#"{}"#),
+            ("glu", r#"{"dim":"a"}"#),
+            ("glu", r#"{"dim":-1}"#),
+            ("glu", r#"{"dim":1.5}"#),
+            ("glu", r#"{"dim":1,"x":1}"#),
+            ("prelu", r#"{}"#),
+            ("prelu", r#"{"num_parameters":"a"}"#),
+            ("prelu", r#"{"num_parameters":-1}"#),
+            ("prelu", r#"{"num_parameters":1.5}"#),
+            ("prelu", r#"{"num_parameters":1,"x":1}"#),
             // イシュー #2526: pixel_shuffle / pixel_unshuffle の非信頼入力。
             ("pixel_shuffle", r#"{}"#),
             ("pixel_shuffle", r#"{"upscale_factor":2,"x":1}"#),
@@ -3713,6 +3790,15 @@ mod tests {
                 beta: -1.0,
                 threshold: 20.0,
             },
+            LayerSpec::Hardtanh {
+                min_val: 1.0,
+                max_val: 1.0,
+            },
+            LayerSpec::Hardtanh {
+                min_val: f32::NAN,
+                max_val: 1.0,
+            },
+            LayerSpec::PRelu { num_parameters: 0 },
             LayerSpec::MaxPool1d {
                 kernel_size: 0,
                 stride: None,
@@ -3813,7 +3899,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("45 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("50 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

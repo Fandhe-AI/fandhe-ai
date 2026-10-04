@@ -9427,10 +9427,11 @@ fn var_matrix_ops_are_reachable_via_facade_only() {
 
 // =====================================================================
 // #2146 実装・#2516 公開（親 #2500・ルート #2499）の正ガード。
-// `Var` 委譲メソッド 5 件（承認形）だけを許し、`compat::Sequential::add_*`
-// 5 種（#2529 まで保留）・`Tensor<f32>`／`Tape` 上への配置・モジュール
-// 再エクスポートは引き続き拒否する（#2510 型の部分反転。先例 #2198・#2338・
-// #2511）。承認事項・多層防御の位置づけは
+// `Var` 委譲メソッド 5 件（承認形）だけを許し、`Tensor<f32>`／`Tape` 上への
+// 配置・モジュール再エクスポートは引き続き拒否する（#2510 型の部分反転。先例
+// #2198・#2338・#2511）。`compat::Sequential::add_*` 5 種は #2529 で公開済みで、
+// 承認形だけを許す正ガードを本節末尾の #2529 節へ新設した（#2528 の
+// `DropoutEmbeddingBagHoldDoctestGuard` 縮小と同じ部分反転）。承認事項・多層防御の位置づけは
 // `docs/autodiff-activation-ops-decision.md` §6 参照。
 // =====================================================================
 
@@ -9479,8 +9480,7 @@ fn activation_ops_hold_doctest_probe_body_matches_fixed_contract() {
         "VarActivationOpsHoldDoctestGuard の doctest ブロック本文（glob\
          以外）が固定文言 ACTIVATION_OPS_HOLD_PROBE_BODY からドリフト\
          している。正のプローブ（__fandhe_activation_hold_probe\
-         モジュール・__FandheActivationHoldProbe／\
-         __FandheActivationAddProbe トレイト・__probe_* 関数）の削除・\
+         モジュール・__FandheActivationHoldProbe トレイト・__probe_* 関数）の削除・\
          弱体化・隠し行の混入がないか確認すること。"
     );
 }
@@ -9530,22 +9530,6 @@ impl __FandheActivationHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
 }\n\
 \n\
-trait __FandheActivationAddProbe {\n\
-\x20\x20\x20\x20fn add_mish(&self) -> __FandheActivationMarker;\n\
-\x20\x20\x20\x20fn add_hardtanh(&self) -> __FandheActivationMarker;\n\
-\x20\x20\x20\x20fn add_relu6(&self) -> __FandheActivationMarker;\n\
-\x20\x20\x20\x20fn add_prelu(&self) -> __FandheActivationMarker;\n\
-\x20\x20\x20\x20fn add_glu(&self) -> __FandheActivationMarker;\n\
-}\n\
-\n\
-impl __FandheActivationAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn add_hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn add_relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn add_prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn add_glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-}\n\
-\n\
 fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// `activation_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
 \x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
@@ -9565,14 +9549,6 @@ fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
 fn __probe_tape(x: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Tape::prelu(x);\n\
 \x20\x20\x20\x20let _: __FandheActivationMarker = x.prelu();\n\
-}\n\
-\n\
-fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_mish(x);\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_hardtanh(x);\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_relu6(x);\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_prelu(x);\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_glu(x);\n\
 }";
 
 /// `mish`・`hardtanh`・`relu6`・`prelu`・`glu`（5 個の関数名。イシュー
@@ -9581,29 +9557,18 @@ fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
 /// が共用する。
 const ACTIVATION_OPS_FN_NAMES: [&str; 5] = ["mish", "hardtanh", "relu6", "prelu", "glu"];
 
-/// `add_mish`・`add_hardtanh`・`add_relu6`・`add_prelu`・`add_glu`
-/// （5 個の関数名。承認事項の 2 つ目〈`compat::Sequential::add_*`〉。
-/// [`facade_does_not_reexport_or_declare_activation_ops`] が使う）。
-const ACTIVATION_OPS_ADD_FN_NAMES: [&str; 5] = [
-    "add_mish",
-    "add_hardtanh",
-    "add_relu6",
-    "add_prelu",
-    "add_glu",
-];
-
 /// facade src 全体（`crates/facade/src/**`）に、`activation_ops` を
 /// 参照する `pub use`（`pub use fandhe_ai_autodiff::activation_ops;` 等
 /// のモジュール再エクスポート・別名含む）も、[`ACTIVATION_OPS_FN_NAMES`]
-/// （5 個）・[`ACTIVATION_OPS_ADD_FN_NAMES`]（5 個）の `fn` 宣言
+/// （5 個）の `fn` 宣言
 /// （可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`] と
 /// 同じ検出契約）も存在しないことを固定する
 /// （`VarActivationOpsHoldDoctestGuard` の正のプローブと多層防御を成す
 /// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// matrix_ops` と同型。`ACTIVATION_OPS_ADD_FN_NAMES` は `matrix_ops`
-/// 版に無い追加検査——`compat::Sequential::add_*` は既存の
-/// `add_relu`／`add_silu` 等と同型の inherent メソッド追加経路のため、
-/// ソース走査でも独立に検出する）。
+/// matrix_ops` と同型。`compat::Sequential::add_*`〈`add_mish` 等〉は #2529 で
+/// 承認形として公開済みのため本テストの検査対象から外し、正ガード
+/// `compat_sequential_activation_layers_add_methods_have_approved_signatures`
+/// ほかが担う）。
 #[test]
 fn facade_does_not_reexport_or_declare_activation_ops() {
     let src_dir = facade_crate_root().join("src");
@@ -9630,21 +9595,12 @@ fn facade_does_not_reexport_or_declare_activation_ops() {
                 ));
             }
         }
-        for fn_name in ACTIVATION_OPS_ADD_FN_NAMES {
-            let count = count_fn_declarations_by_name(&tokens, fn_name);
-            if count > 0 {
-                offending.push(format!(
-                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
-                    path.display()
-                ));
-            }
-        }
     });
     assert!(
         offending.is_empty(),
         "facade の公開面が activation_ops（承認形は autodiff の `Var` 委譲\
-         メソッドのみ。facade 側の再エクスポート・宣言と\
-         compat::Sequential::add_* 追加〈#2529 まで保留〉は承認形外）を\
+         メソッドと #2529 の `compat::Sequential::add_*` のみ。facade 側の\
+         モジュール再エクスポート・同名 fn の宣言は承認形外）を\
          再エクスポート、または同名の fn を宣言している: {offending:?}"
     );
 }
@@ -11988,6 +11944,166 @@ fn compat_sequential_exposes_spatial_layer_add_methods_issue_2522_counts_declara
     assert_eq!(count_pub_fn_declarations(&dup, "add_identity"), 2);
     assert_eq!(
         count_pub_fn_declarations("// pub fn add_identity() {}", "add_identity"),
+        0
+    );
+}
+
+// =====================================================================
+// イシュー #2529（親 #2520・ルート #2499 の 2026-10-04 一括承認）:
+// `compat::Sequential::add_mish`／`add_hardtanh`／`add_relu6`／`add_glu`／`add_prelu` の
+// 正ガード。旧 `VarActivationOpsHoldDoctestGuard` の (b) `add_*` 衝突プローブを撤去し、
+// 承認形だけを許す正ガード（シグネチャ一致・`pub fn` ちょうど 1 件）へ反転した。
+// `activation_ops` のモジュール再エクスポート・`Tensor<f32>`／`Tape` 上への配置を拒む
+// 保留ガードは未承認のまま残す。`docs/autodiff-activation-ops-decision.md` §9 参照。
+// =====================================================================
+
+const ADD_MISH_PARAMS: &str = "mut self) -> Self";
+const ADD_HARDTANH_PARAMS: &str =
+    "mut self, min_val: f32, max_val: f32, ) -> Result<Self, AutodiffError>";
+const ADD_RELU6_PARAMS: &str = "mut self) -> Self";
+const ADD_GLU_PARAMS: &str = "mut self, dim: usize) -> Self";
+const ADD_PRELU_PARAMS: &str =
+    "mut self, num_parameters: usize, init: f32, ) -> Result<Self, AutodiffError>";
+
+const ACTIVATION_LAYER_ADD_METHODS: [(&str, &str); 5] = [
+    ("add_mish", ADD_MISH_PARAMS),
+    ("add_hardtanh", ADD_HARDTANH_PARAMS),
+    ("add_relu6", ADD_RELU6_PARAMS),
+    ("add_glu", ADD_GLU_PARAMS),
+    ("add_prelu", ADD_PRELU_PARAMS),
+];
+
+/// `compat::Sequential` の 5 add_* が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_activation_layers_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in ACTIVATION_LAYER_ADD_METHODS {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_activation_layers_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_activation_layers_add_methods_have_approved_signatures_detects_offense() {
+    for (ok, name, params) in [
+        (
+            "pub fn add_mish(mut self) -> Self {",
+            "add_mish",
+            ADD_MISH_PARAMS,
+        ),
+        (
+            "pub fn add_hardtanh(mut self, min_val: f32, max_val: f32,) -> Result<Self, AutodiffError> {",
+            "add_hardtanh",
+            ADD_HARDTANH_PARAMS,
+        ),
+        (
+            "pub fn add_relu6(mut self) -> Self {",
+            "add_relu6",
+            ADD_RELU6_PARAMS,
+        ),
+        (
+            "pub fn add_glu(mut self, dim: usize) -> Self {",
+            "add_glu",
+            ADD_GLU_PARAMS,
+        ),
+        (
+            "pub fn add_prelu(mut self, num_parameters: usize, init: f32,) -> Result<Self, AutodiffError> {",
+            "add_prelu",
+            ADD_PRELU_PARAMS,
+        ),
+    ] {
+        assert!(
+            sequential_spatial_add_signature_ok(ok, name, params),
+            "{ok}"
+        );
+    }
+    for (bad, name, params) in [
+        // 引数の追加
+        (
+            "pub fn add_mish(mut self, beta: f32) -> Self {",
+            "add_mish",
+            ADD_MISH_PARAMS,
+        ),
+        // 戻り値が Result
+        (
+            "pub fn add_relu6(mut self) -> Result<Self, AutodiffError> {",
+            "add_relu6",
+            ADD_RELU6_PARAMS,
+        ),
+        // 引数の欠落
+        (
+            "pub fn add_hardtanh(mut self, min_val: f32,) -> Result<Self, AutodiffError> {",
+            "add_hardtanh",
+            ADD_HARDTANH_PARAMS,
+        ),
+        // 引数順の入替
+        (
+            "pub fn add_hardtanh(mut self, max_val: f32, min_val: f32,) -> Result<Self, AutodiffError> {",
+            "add_hardtanh",
+            ADD_HARDTANH_PARAMS,
+        ),
+        // 型違い（dim: isize）
+        (
+            "pub fn add_glu(mut self, dim: isize) -> Self {",
+            "add_glu",
+            ADD_GLU_PARAMS,
+        ),
+        // 戻り値が Self
+        (
+            "pub fn add_prelu(mut self, num_parameters: usize, init: f32,) -> Self {",
+            "add_prelu",
+            ADD_PRELU_PARAMS,
+        ),
+        // init の欠落
+        (
+            "pub fn add_prelu(mut self, num_parameters: usize,) -> Result<Self, AutodiffError> {",
+            "add_prelu",
+            ADD_PRELU_PARAMS,
+        ),
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, name, params),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で 5 メソッドがそれぞれちょうど 1 件の `pub fn` として宣言されている
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード）。
+#[test]
+fn compat_sequential_exposes_activation_layers_add_methods_issue_2529() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut counts = [0usize; 5];
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        for (i, (name, _)) in ACTIVATION_LAYER_ADD_METHODS.iter().enumerate() {
+            counts[i] += count_pub_fn_declarations(content, name);
+        }
+    });
+    assert_eq!(
+        counts,
+        [1, 1, 1, 1, 1],
+        "src/compat 配下の add_mish／add_hardtanh／add_relu6／add_glu／add_prelu の pub fn 宣言数が\
+         各 1 件でない（counts={counts:?}）"
+    );
+}
+
+/// [`compat_sequential_exposes_activation_layers_add_methods_issue_2529`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_activation_layers_add_methods_issue_2529_counts_declarations() {
+    let one = "    pub fn add_mish(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_mish"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_relu6"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_mish"), 2);
+    assert_eq!(
+        count_pub_fn_declarations("// pub fn add_mish() {}", "add_mish"),
         0
     );
 }

@@ -20,8 +20,9 @@ GPU 専用カーネルは追加していない——いずれも既存の `Var::
 （`Op::ScalarUnary`）・`Var::clamp`（`Op::ScalarUnary`）・
 `Var::where_cond`（`Op::Where`）・`Var::detach`・`Var::narrow`・
 `Var::sigmoid`（`Op::Sigmoid`）・`Var::reshape` の合成のみで構成した。
-facade 公開は #2516 で `Var` 委譲メソッドとして公開済み（ガードは部分反転、
-`compat::Sequential::add_*` 5 種は #2529 まで保留）。実装時点（#2146）の
+facade 公開は #2516 で `Var` 委譲メソッドとして、#2529 で
+`compat::Sequential::add_*` 5 種として公開済み（ガードは部分反転。#2529 の
+実装記録は §10）。実装時点（#2146）の
 固定内容は次のとおり（`Var` プローブ・`add_*` は承認待ちとして）、`crates/facade/src/
 lib.rs::VarActivationOpsHoldDoctestGuard`（正のプローブ doctest。
 `Var` への衝突プローブと `compat::Sequential::add_*` への衝突プローブ
@@ -163,7 +164,7 @@ max` を必須とする。違反は `AutodiffError::InvalidArgument` を返す�
 ## §6 承認事項（未承認として列挙）
 
 1. facade 公開（`Var` への委譲メソッド追加）— #2516 で実施済み（下記「実装記録」参照）
-2. `compat::Sequential::add_*` 5 種（#2529 で扱う。未承認のまま）
+2. `compat::Sequential::add_*` 5 種 — #2529 で実施済み（ルート #2499 一括承認。§10 参照）
 3. GPU 専用カーネル（別イシュー）
 
 ## §7 実機実測の申し送り
@@ -212,7 +213,9 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 - `docs/README.md`: 本 doc・perf log README の索引行を追加
 
 承認取得後の追随: `Var` 委譲メソッド追加は #2516 で実施済み。
-`compat::Sequential::add_*` 5 種追加とガードの完全撤去は #2529。
+`compat::Sequential::add_*` 5 種追加とガードの層の部分の反転は #2529
+（§10。ガードの完全撤去は `activation_ops` 再エクスポート・`Tensor<f32>`／`Tape` 配置の
+承認待ちのため行わない）。
 
 **手動検証（実装計画「手順 6」）**: `crates/facade/src/lib.rs` へ
 `pub use fandhe_ai_autodiff::activation_ops;` を仮に追加し、
@@ -269,3 +272,49 @@ logs/activation-ops-2146/README.md` の「代表とする」という誤記述�
   REQ-2 判定の定数は新設・変更なし）
 - **不変**: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・
   GPU カーネル。§7 の実機申し送りは委譲先が同一経路のため引き続き有効
+
+## §10 実装記録（イシュー #2529・2026-10-04）
+
+- **承認根拠**: ルート #2499 本文の「承認範囲」節（2026-10-04 ユーザー承認: Phase 1〜3 は既存決定記録の
+  推奨形で facade 公開を実装してよい。issue 単位の再承認不要）と、§2.1 案 C の項の承認後の公開形
+  （`Var::mish` 等の委譲メソッドと `compat::Sequential::add_*`）。メソッド名 5 個は
+  `VarActivationOpsHoldDoctestGuard` のプローブと `api_surface.rs` で既に固定済みで、引数は §2.4 の
+  各層コンストラクタで一意に決まる。承認範囲外（`activation_ops` モジュールの再エクスポート・
+  `Tensor<f32>`／`Tape` 上の配置・層型の再エクスポート・`PRelu::from_parameters` の公開・
+  GPU 専用カーネル・ONNX export の対象拡大）は行っていない
+- **公開シグネチャ（`compat::Sequential`。`crates/facade/src/compat/sequential.rs`）**:
+  `add_mish(self) -> Self`・`add_hardtanh(self, min_val: f32, max_val: f32) -> Result<Self, AutodiffError>`・
+  `add_relu6(self) -> Self`・`add_glu(self, dim: usize) -> Self`（軸・奇数長は forward 時に検査。
+  `add_softmax` と同型の遅延検査）・`add_prelu(self, num_parameters: usize, init: f32) -> Result<Self, AutodiffError>`
+  （`num_parameters == 0` を構築時に拒否。`init` は検証せず IEEE のまま扱う）
+- **学習経路**: 状態を持つのは `PRelu` のみ。`nn::Module` に既定 `None` の `as_prelu`／`as_prelu_mut`
+  を追加（既定実装付きのため非破壊）し、`Sequential::bind`（`PReluVars` の層順収集）・
+  `SequentialVars::forward`（汎用 `layer.forward` より前の分岐。葉の作り直しによる勾配消失を避ける）・
+  `trainable_vars`／`trainable_grads`・`first_untracked_parametric_layer`（除外漏れは `fit` 等の誤拒否）へ結線。
+  `trainable_parameters`／`apply_parameters`／`state_dict` は汎用の `named_parameters` 経由で `"{i}.weight"`
+- **常駐経路**: `PRelu` は `forward_from_flat_leaves` が `Linear` 以外の葉を消費しないため
+  `contains_resident_unsupported_layer` に加え fail-closed（`BackendError::Unsupported`）。
+  無状態 4 層は既存の活性化と同じく汎用 forward を通過し、CPU 常駐の `predict_resident` が `predict` と
+  bit 一致することをテストで固定。GPU（CUDA／Metal）上の常駐通過は未実測
+- **保存経路**: `crates/facade/src/compat/model_io.rs`（kind 5 種: `mish`／`hardtanh`／`relu6`／`glu`／
+  `prelu`。45 → 50 種）。`Hardtanh` の `min_val`／`max_val` は有限値のみ保存可（±inf は構築できるが
+  JSON 数値として書けないため `UnsupportedModel`）。`PRelu` の `init` は初期化にしか使われず直後の
+  `load_state_dict` で `weight` が上書きされるため記録しない（`seed` と同じ。`load_model` は 0.25 で再構築）。
+  なお Issue 本文の対象範囲に挙がる `crates/facade/src/model.rs` は `ModelRegistry`（ローカル重みレジストリ）で
+  層構成の保存とは無関係のため変更していない
+- **ONNX export**: 5 層とも `OnnxError::UnsupportedLayer` のまま（テストで固定）
+- **ガード反転（部分反転。#2528 の `DropoutEmbeddingBagHoldDoctestGuard` 縮小と同型）**:
+  `VarActivationOpsHoldDoctestGuard` の (b)（`__FandheActivationAddProbe`・`__probe_sequential_add`）を撤去し、
+  (a)（`activation_ops` モジュール glob 衝突・`Tensor<f32>`／`Tape` プローブ）は未承認のため維持。
+  §8 の「ガードの完全撤去は #2529」から逸脱する理由は、完全撤去には残る 2 面の承認が必要なため。
+  `api_surface.rs`: 固定文言 `ACTIVATION_OPS_HOLD_PROBE_BODY` を再生成・
+  `facade_does_not_reexport_or_declare_activation_ops` から `add_*` 宣言の拒否を削除（`ACTIVATION_OPS_ADD_FN_NAMES`
+  定数も削除）・正ガード `compat_sequential_activation_layers_add_methods_have_approved_signatures`
+  （自己テスト付き）／`compat_sequential_exposes_activation_layers_add_methods_issue_2529`（自己テスト付き）を新設
+- **新テスト**: `crates/facade/tests/compat_sequential_activation_layers.rs`（CPU。構築・遅延検査・Var との
+  bit 一致・学習経路・常駐経路・保存往復と改竄拒否・ONNX）、
+  `compat_sequential_activation_layers_backend_parity.rs`（`#[ignore]`。CUDA／Metal は未実測。
+  `docs/perf/logs/compat-sequential-activation-layers-2529/README.md` へ申し送り）
+- **手動の反証確認**: `first_untracked_parametric_layer` の `as_prelu` 除外を外すと PRelu の `fit` が
+  `InvalidArgument`（独自層扱い）で FAILED になることを確認し元に戻した
+- **不変**: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・GPU カーネル

@@ -29,7 +29,7 @@
 //! （`crate::activation_ops` の自由関数への薄いラッパー。`activation_ops`
 //! は facade 非公開の内部専用モジュールのため、本 5 層自体も
 //! `nn::activation` 経由でのみ到達可能——`Var` 委譲メソッドは #2516 で公開済みだが、
-//! 本 5 層の facade 公開（`compat::Sequential::add_*`）は #2529 で保留。
+//! 本 5 層は #2529 で `compat::Sequential::add_*` として facade 公開済み（層型自体は非再エクスポート）。
 //! `crate::activation_ops` モジュール doc 参照）。さらなる追加活性化は
 //! 必要になった時点の後続イシューに委ねる。
 

@@ -1,8 +1,8 @@
-//! `fandhe_ai::compat::{save_model, load_model}` の全 45 層対応（イシュー #2370・親 #2362）の
+//! `fandhe_ai::compat::{save_model, load_model}` の全 50 層対応（イシュー #2370・親 #2362）の
 //! 統合テスト。facade の公開 API と `std` のみで次の受入基準を検証する。
 //!
-//! - (a) 45 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
-//!   `predict` 出力が bit 一致する（45 種の網羅は保存した manifest の `kind` 集合で検査する）。
+//! - (a) 50 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
+//!   `predict` 出力が bit 一致する（50 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
@@ -22,7 +22,7 @@ mod common;
 use common::temp_dir::TempDirGuard;
 
 /// allowlist の 45 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-const ALL_KINDS: [&str; 45] = [
+const ALL_KINDS: [&str; 50] = [
     "linear",
     "relu",
     "sigmoid",
@@ -36,6 +36,11 @@ const ALL_KINDS: [&str; 45] = [
     "softmax",
     "log_softmax",
     "softplus",
+    "mish",
+    "hardtanh",
+    "relu6",
+    "glu",
+    "prelu",
     "flatten",
     "dropout",
     "dropout2d",
@@ -148,7 +153,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------
-// (a) 45 種の bit 一致
+// (a) 50 種の bit 一致
 // ---------------------------------------------------------------------
 
 /// rank 2 入力 `[3, 6]`: 活性化・正規化・dropout・BatchNorm1d（rank 2）・softmax 系。
@@ -165,12 +170,17 @@ fn mlp_model() -> Built {
         .add_gelu()
         .add_gelu_tanh()
         .add_softplus(1.5, 20.0)?
+        .add_mish()
+        .add_hardtanh(-2.0, 2.0)?
+        .add_relu6()
+        .add_prelu(8, 0.2)?
         .add_dropout(0.3)?
         .add_alpha_dropout(0.2)?
         .add_layer_norm(8, 1e-5)?
         .add_rms_norm(8, 1e-6)?
         .add_batch_norm1d(8, 1e-5, 0.1)?
-        .add_linear(8, 5, 12)?
+        .add_glu(1)
+        .add_linear(4, 5, 12)?
         .add_softmax(1)
         .add_log_softmax(1);
     m.eval();
@@ -301,7 +311,7 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
         ));
     }
     let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(seen, expected, "45 種の kind をすべて往復させたはず");
+    assert_eq!(seen, expected, "50 種の kind をすべて往復させたはず");
 }
 
 /// train モードのまま保存・復元しても `training` フラグが往復し、dropout を含む構成で

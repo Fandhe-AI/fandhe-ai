@@ -1885,15 +1885,11 @@ struct KvCacheHoldDoctestGuard;
 /// メソッドが載ったことで引数なし呼び出しが inherent 側へ解決され型エラーに
 /// なるため削除した。
 ///
-/// (b) `compat::Sequential::add_*` 5 種の衝突プローブ（承認事項の 2 つ目。
-/// `crate::compat::sequential::Sequential` の既存 `add_relu`／
-/// `add_silu` 等と同型の命名）。トレイト（`__FandheActivationAddProbe`）
-/// を `fandhe_ai::compat::Sequential` に実装し、**UFCS 形のみ**
-/// （`fandhe_ai::compat::Sequential::add_mish(x)`）で呼ぶ。
-/// `compat::Sequential::add_*` の既存メソッド（`add_relu` 等）は値で
-/// `self` を取る inherent メソッドであり、メソッド呼び出し形
-/// （`x.add_mish()`）だとトレイト側より inherent 側が優先解決される
-/// ため、衝突を検出できない（メソッド呼び出し形は使わない）。
+/// (b) `compat::Sequential::add_*` 5 種は #2529 で承認形（`add_mish`・
+/// `add_hardtanh`・`add_relu6`・`add_glu`・`add_prelu`）として公開済みのため、
+/// 衝突プローブ（`__FandheActivationAddProbe`）は撤去した。承認形の正ガードは
+/// `crates/facade/tests/api_surface.rs::
+/// compat_sequential_activation_layers_add_methods_have_approved_signatures` が担う。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// activation_ops_hold_doctest_globs_all_pub_modules`・
@@ -1903,8 +1899,10 @@ struct KvCacheHoldDoctestGuard;
 /// との多層防御の位置づけは `docs/autodiff-activation-ops-decision.md` §6
 /// 「承認事項」を参照。
 ///
-/// 撤去条件: #2529 で `compat::Sequential::add_*` が承認・実装されたら、
-/// 本 doctest 自体を削除する（ソース走査側の対応する否定ガードと同時に外す）。
+/// 撤去条件: `activation_ops` モジュールの再エクスポート・`Tensor<f32>`／`Tape` 上への
+/// 配置が承認されたら、本 doctest 自体を削除する（ソース走査側の対応する否定ガードと
+/// 同時に外す）。`compat::Sequential::add_*` の部分は #2529 で正ガードへ反転済み
+/// （#2528 の `DropoutEmbeddingBagHoldDoctestGuard` 縮小と同じ部分反転）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -1959,22 +1957,6 @@ struct KvCacheHoldDoctestGuard;
 ///     fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
 /// }
 ///
-/// trait __FandheActivationAddProbe {
-///     fn add_mish(&self) -> __FandheActivationMarker;
-///     fn add_hardtanh(&self) -> __FandheActivationMarker;
-///     fn add_relu6(&self) -> __FandheActivationMarker;
-///     fn add_prelu(&self) -> __FandheActivationMarker;
-///     fn add_glu(&self) -> __FandheActivationMarker;
-/// }
-///
-/// impl __FandheActivationAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn add_hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn add_relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn add_prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn add_glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-/// }
-///
 /// fn __probe_free_fns() {
 ///     // `activation_ops::` を経由した経路解決（`use fandhe_ai::*;` が
 ///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
@@ -1994,14 +1976,6 @@ struct KvCacheHoldDoctestGuard;
 /// fn __probe_tape(x: &fandhe_ai::Tape) {
 ///     let _: __FandheActivationMarker = fandhe_ai::Tape::prelu(x);
 ///     let _: __FandheActivationMarker = x.prelu();
-/// }
-///
-/// fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {
-///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_mish(x);
-///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_hardtanh(x);
-///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_relu6(x);
-///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_prelu(x);
-///     let _: __FandheActivationMarker = fandhe_ai::compat::Sequential::add_glu(x);
 /// }
 /// ```
 #[cfg(doctest)]

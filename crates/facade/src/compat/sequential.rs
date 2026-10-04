@@ -11,7 +11,8 @@
 //! BatchNorm1d/BatchNorm2d/Embedding/MultiheadAttention〈#1760〉・
 //! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
 //! AdaptiveAvgPool1d〈#1957〉・AdaptiveMaxPool2d/AdaptiveMaxPool1d/
-//! GlobalPool〈#2527〉・Dropout2d/AlphaDropout/EmbeddingBag〈#2528〉・Softmax/LogSoftmax・
+//! GlobalPool〈#2527〉・Dropout2d/AlphaDropout/EmbeddingBag〈#2528〉・
+//! Mish/Hardtanh/Relu6/Glu/PRelu〈#2529〉・Softmax/LogSoftmax・
 //! GELU（誤差関数版・tanh 近似版）/Softplus・Flatten〈#2065 で
 //! `add_softmax`／`add_log_softmax`／`add_gelu`／`add_gelu_tanh`／
 //! `add_softplus`／`add_flatten` として追加済み〉）。dropout 系（`Dropout`・`Dropout2d`・`AlphaDropout`〈#2528〉）は
@@ -111,8 +112,8 @@ use crate::{
     InterpolateMode, LinearVars, ResidentLeaf, Tape, Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
-    Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
-    Tanh,
+    Elu, Gelu, GeluTanh, Glu, Hardswish, Hardtanh, LeakyRelu, LogSoftmax, Mish, PRelu, PReluVars,
+    Relu, Relu6, Sigmoid, Silu, Softmax, Softplus, Tanh,
 };
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
@@ -176,7 +177,7 @@ pub struct Sequential {
 
 /// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
 ///
-/// `add_*` 45 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
+/// `add_*` 50 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
 /// `add_*` を呼んで再構築する（イシュー #2369・#2370。`docs/compat-model-io-decision.md`
 /// §5）。`add_*` の内部で固定している値（conv／linear の `bias=true`・pool の
 /// `ceil_mode=false`・TE の活性化と eps 等）は記録しない（同じ `add_*` が再現するため）。
@@ -289,6 +290,24 @@ pub(super) enum LayerSpec {
         num_embeddings: usize,
         embedding_dim: usize,
         padding_idx: Option<usize>,
+    },
+    /// イシュー #2529。
+    Mish,
+    /// イシュー #2529。
+    Hardtanh {
+        min_val: f32,
+        max_val: f32,
+    },
+    /// イシュー #2529。
+    Relu6,
+    /// イシュー #2529。
+    Glu {
+        dim: usize,
+    },
+    /// イシュー #2529。`init` は初期化にしか使われず直後の `load_state_dict` で
+    /// `weight` が上書きされるため記録しない（`seed` と同じ扱い）。
+    PRelu {
+        num_parameters: usize,
     },
     /// イシュー #2528。
     EmbeddingBag {
@@ -518,6 +537,83 @@ impl Sequential {
         let layer = Softplus::new(beta, threshold)?;
         self.inner.push(Box::new(layer));
         self.specs.push(LayerSpec::Softplus { beta, threshold });
+        Ok(self)
+    }
+
+    /// Mish 層を追加する（`nn::activation::Mish`。イシュー #2529）。
+    /// `x * tanh(softplus(x))`。ユニット構造体のため構築時検査は無く、
+    /// [`Sequential::add_silu`] と同様融合対象外。無状態層のため学習経路・常駐経路を通過する。
+    pub fn add_mish(mut self) -> Self {
+        self.inner.push(Box::new(Mish));
+        self.specs.push(LayerSpec::Mish);
+        self
+    }
+
+    /// Hardtanh 層を追加する（`nn::activation::Hardtanh`。イシュー #2529）。
+    /// 入力を `[min_val, max_val]` へクランプする。`Hardtanh::new` が NaN と
+    /// `min_val >= max_val` を構築時に拒否するため `Result` を返す
+    /// （`±inf` は構築できるが `save_model` では拒否される）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_hardtanh(-1.0, 1.0)?;
+    /// let x = Tensor::new(vec![-2.0, 0.5, 3.0], &[1, 3])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.host_slice().into_owned(), vec![-1.0, 0.5, 1.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_hardtanh(mut self, min_val: f32, max_val: f32) -> Result<Self, AutodiffError> {
+        let layer = Hardtanh::new(min_val, max_val)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Hardtanh { min_val, max_val });
+        Ok(self)
+    }
+
+    /// ReLU6 層を追加する（`nn::activation::Relu6`。イシュー #2529）。
+    /// `min(max(x, 0), 6)`。ユニット構造体のため構築時検査は無い。
+    pub fn add_relu6(mut self) -> Self {
+        self.inner.push(Box::new(Relu6));
+        self.specs.push(LayerSpec::Relu6);
+        self
+    }
+
+    /// GLU 層を追加する（`nn::activation::Glu`。イシュー #2529）。`dim` 軸を 2 分割し
+    /// `a * sigmoid(b)` を返す。軸の範囲・偶数長の検査は構築時ではなく forward 時に
+    /// 行われるため（`Glu::new` は infallible）、[`Sequential::add_softmax`] と同型の
+    /// 遅延検査契約として `Self` を返す。
+    pub fn add_glu(mut self, dim: usize) -> Self {
+        self.inner.push(Box::new(Glu::new(dim)));
+        self.specs.push(LayerSpec::Glu { dim });
+        self
+    }
+
+    /// PReLU 層を追加する（`nn::activation::PRelu`。イシュー #2529）。`num_parameters`
+    /// 個のチャネル別傾き `weight`（shape `[num_parameters]`）を `init`（PyTorch 既定は
+    /// `0.25`）で初期化する学習可能な活性化層。`num_parameters == 0` は構築時に
+    /// `AutodiffError` で拒否する。`init` は検証せず IEEE のまま扱う。
+    /// 学習経路（`bind`／`trainable_parameters`／`fit`）に対応するが、常駐経路
+    /// （`init_device_param_store` 等）は fail-closed で拒否する。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_prelu(1, 0.25)?;
+    /// let x = Tensor::new(vec![-4.0, 2.0], &[2, 1])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.host_slice().into_owned(), vec![-1.0, 2.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_prelu(mut self, num_parameters: usize, init: f32) -> Result<Self, AutodiffError> {
+        let layer = PRelu::new(num_parameters, init)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::PRelu { num_parameters });
         Ok(self)
     }
 
@@ -1927,6 +2023,14 @@ impl Sequential {
             .filter_map(|layer| layer.as_embedding_bag())
             .map(|bag| bag.bind(&tape.0))
             .collect();
+        // イシュー #2529: PRelu も同じ層順フィルタ方式で収集する。
+        let prelus = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_prelu())
+            .map(|p| p.bind(&tape.0))
+            .collect();
         let mhas = self
             .inner
             .layers()
@@ -1954,6 +2058,7 @@ impl Sequential {
             batch_norms,
             embeddings,
             embedding_bags,
+            prelus,
             mhas,
             encoders,
         }
@@ -2023,6 +2128,7 @@ impl Sequential {
                 && layer.as_batch_norm2d().is_none()
                 && layer.as_embedding().is_none()
                 && layer.as_embedding_bag().is_none()
+                && layer.as_prelu().is_none()
                 && layer.as_multihead_attention().is_none()
                 && layer.as_transformer_encoder_layer().is_none()
                 && !layer.named_parameters().is_empty()
@@ -2080,6 +2186,7 @@ impl Sequential {
                 || layer.as_batch_norm2d().is_some()
                 || layer.as_embedding().is_some()
                 || layer.as_embedding_bag().is_some()
+                || layer.as_prelu().is_some()
                 || layer.as_multihead_attention().is_some()
                 || layer.as_transformer_encoder_layer().is_some()
                 || layer.is_pooling()
@@ -2513,8 +2620,8 @@ impl Sequential {
         // 作らない）。
         if self.contains_resident_unsupported_layer() {
             return Err(BackendError::Unsupported(
-                "Sequential::init_device_param_store: Conv／Norm／Embedding／Attention／Pooling 層を \
-                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957）"
+                "Sequential::init_device_param_store: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
                     .to_string(),
             ));
         }
@@ -2567,8 +2674,8 @@ impl Sequential {
         // 渡す誤用も想定した fail-closed）。
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::forward_resident: Conv／Norm／Embedding／Attention／Pooling 層を \
-                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957）"
+                "Sequential::forward_resident: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
                     .to_string(),
             )));
         }
@@ -2624,8 +2731,8 @@ impl Sequential {
         // ガード。
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::predict_resident: Conv／Norm／Embedding／Attention／Pooling 層を \
-                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957）"
+                "Sequential::predict_resident: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
                     .to_string(),
             )));
         }
@@ -2854,6 +2961,8 @@ pub struct SequentialVars<'m, 't> {
     embeddings: Vec<EmbeddingVars<'t>>,
     /// イシュー #2528。`EmbeddingBag` 層の bind 結果（層順）。
     embedding_bags: Vec<EmbeddingBagVars<'t>>,
+    /// イシュー #2529。`PRelu` 層の bind 結果（層順）。
+    prelus: Vec<PReluVars<'t>>,
     mhas: Vec<MultiheadAttentionVars<'t>>,
     /// `TransformerEncoderLayer` 層（イシュー #2068）を層順で収集する。
     /// `TransformerEncoderLayerVars<'t>` は `mhas` 同様 `Var<'t>` のみを
@@ -2947,6 +3056,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
         let mut embedding_bags = self.embedding_bags.iter();
+        let mut prelus = self.prelus.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         let layers = self.model.inner.layers();
@@ -3097,6 +3207,18 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward_from_var(&current)?;
                 i += 1;
+            } else if layer.as_prelu().is_some() {
+                // bind 済みの `PReluVars` で forward する（`Module::forward` は新しい葉を
+                // 作り直し勾配が失われるため使わない。イシュー #2529）。
+                let vars = prelus.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み PReluVars が model.layers の \
+                         PRelu 層数より少ない（bind/forward 間の PRelu 層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current)?;
+                i += 1;
             } else if layer.as_multihead_attention().is_some() {
                 // self-attention 固定（`q = k = v = current`・mask
                 // なし・非 causal。`nn/attention.rs` モジュール doc
@@ -3165,6 +3287,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
         let mut embedding_bags = self.embedding_bags.iter();
+        let mut prelus = self.prelus.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         for layer in self.model.inner.layers() {
@@ -3239,6 +3362,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 out.push(&vars.weight);
             } else if layer.as_embedding_bag().is_some()
                 && let Some(vars) = embedding_bags.next()
+            {
+                out.push(&vars.weight);
+            } else if layer.as_prelu().is_some()
+                && let Some(vars) = prelus.next()
             {
                 out.push(&vars.weight);
             } else if layer.as_multihead_attention().is_some()
@@ -3385,6 +3512,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
         let mut embedding_bags = self.embedding_bags.iter();
+        let mut prelus = self.prelus.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         for layer in self.model.inner.layers() {
@@ -3430,6 +3558,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 push_weight_bias(&mut out, grads, &vars.weight, None)?;
             } else if layer.as_embedding_bag().is_some()
                 && let Some(vars) = embedding_bags.next()
+            {
+                push_weight_bias(&mut out, grads, &vars.weight, None)?;
+            } else if layer.as_prelu().is_some()
+                && let Some(vars) = prelus.next()
             {
                 push_weight_bias(&mut out, grads, &vars.weight, None)?;
             } else if layer.as_multihead_attention().is_some()
@@ -3660,6 +3792,19 @@ mod tests {
         assert_eq!(tracked.first_untracked_parametric_layer(), None);
         let with_param = tracked.add_module(P(Tensor::from_slice(&[1.0], &[1]).unwrap()));
         assert_eq!(with_param.first_untracked_parametric_layer(), Some(3));
+    }
+
+    /// イシュー #2529: `PRelu`（`weight` を持つ型付き追跡層）は独自層扱いされない。
+    /// 除外が漏れると `fit`／`forward`／`trainable_grads` がすべて拒否される。
+    #[test]
+    fn first_untracked_parametric_layer_does_not_flag_prelu() {
+        let model = Sequential::new()
+            .add_linear(2, 2, SEED1)
+            .unwrap()
+            .add_prelu(2, 0.25)
+            .unwrap()
+            .add_mish();
+        assert_eq!(model.first_untracked_parametric_layer(), None);
     }
 
     #[test]
