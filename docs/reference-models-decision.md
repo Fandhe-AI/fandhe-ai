@@ -410,3 +410,81 @@ exposure-decision.md` §13.5 の「承認取得後に実施する変更範囲」
 
 以上により #2338 受け入れ条件 5 の評価は「現行公開面では不可（条件付き）」で確定する。
 (c) の本文は事前評価として残し、結論は (d) で改めた。
+
+## 11. #2541（facade 公開）の着手時判定と承認依頼
+
+### 11.1 経緯
+
+- #2541（ルート #2499・Phase 2 #2520）は、2026-10-04 時点のルート #2499
+  の一括承認の下で、§3.1・§10 の「推奨形」による参照モデル 4 種の
+  facade 公開を求めた。一括承認が及ぶのは記録に書かれた形に限られる。
+- 着手時に本記録を突合した結果、推奨形が 1 つに決まっておらず、記録の
+  作成後に生じた公開面の変化とも衝突していたため、issue 自身の停止条項
+  （推奨形が未記載または複数案のままなら実装せず、記録追記と承認依頼に
+  切り替える）に従って facade のコードを変更しなかった（先例: #2536）。
+  本節は承認の取得を意味しない。
+
+### 11.2 着手時判定（停止条項に該当する根拠）
+
+調査基準は origin/main `503ba88d`。
+
+1. **公開経路が複数案のまま**: §3.1 の移行手順は「`pub mod models`（または
+   個別 `pub use`）」と 2 案を併記する。`docs/compat-api-scope.md` §5 の
+   #2201／#2202 台帳も同様である。
+2. **`Mlp`／`LeNet` の API 形は公開契約として設計されていない**: §3.1・§4
+   は examples の利用者コードとして扱う。公開すると 0.10.x の非破壊契約で
+   次が凍結される: `Mlp::new`／`Mlp::with_seed`、`sequential()`／
+   `sequential_mut()`（`&mut compat::Sequential` を外へ渡す）、
+   `pytorch_param_map()` と pub フィールド構造体 `MlpParamMap`、
+   `dropout()`、`LeNet::new`／`sequential_mut`／`pytorch_param_map`／
+   `LeNetParamMap`。
+3. **`ResNet`／`Transformer` の推奨形は記録に無い**: §10.2 は §3.1 と同じ
+   保留理由を参照するのみである。両モデルは examples 限定の
+   `ReferenceModule`／`Trainable` と補助関数（`cross_entropy_mean`・
+   `scalar_of`・`fit_epochs`・`accuracy`・`predict_in_eval`）に依存し、
+   §10.8 (d) は現行の公開面では facade `nn::Module` への委譲が不可と
+   確定している（成立には (i)〜(iii) の別承認が要る）。
+4. **名前の衝突（記録作成後の変化）**: #2532・#2533 により
+   `fandhe_ai::nn::{Transformer, TransformerConfig, TransformerDecoderLayer}`
+   が公開済み（`crates/facade/src/nn/mod.rs`）。参照モデルの
+   `Transformer`／`TransformerConfig` を公開すると同名の別型が 2 つとなり、
+   glob import の併用で曖昧性エラーになりうる。改名またはモジュール境界の
+   決定が要るが記録に無い。
+5. **issue のテンプレート型受け入れ条件が当てはまらない**: 新しい
+   `compat::Sequential::add_*` は不要（4 モデルとも既存 API の組み合わせ）。
+   `nn::Module` の `as_*` フックの対象外。反転すべき保留ガードは存在しない
+   （§3.1・§10.2 のとおり否定ガードは追加していない）。ResNet／Transformer
+   は複数の `Sequential` と学習しない位置符号 `Tensor` からなり、
+   `save_model`／`load_model` の単一 `Sequential` 前提に乗らない。
+
+補足（本節では修正しない）: `docs/compat-api-scope.md` §5 の #2201 台帳は
+移行手順の参照先を本記録 §5 としているが、実際は §3.1 である。
+
+### 11.3 ユーザーに決めてほしい事項
+
+- (a) 公開経路: `pub mod models` か、ルートへの個別 `pub use` か。
+- (b) 公開する名前: 参照モデルの `Transformer`／`TransformerConfig` を改名
+  するか、モジュール境界で `nn::Transformer` と区別するか。
+- (c) `ResNet`／`Transformer` の学習・推論 API の形: `ReferenceModule`／
+  `Trainable` を公開 trait にするか、固有メソッドにするか、§10.8 (d) の
+  (i)〜(iii) のどれで facade `nn::Module` に乗せるか。
+- (d) 保存経路: 複数 `Sequential` と位置符号を持つモデルの
+  `save_model`／`load_model` に対応するか、型付きエラーで fail-closed に
+  拒否するか。
+
+### 11.4 選択肢
+
+- **A**: (a)〜(d) をすべて決めた推奨形を記録し、承認後に 4 モデルを一括公開
+  する。公開と同時に `api_surface.rs` へ正ガードを追加する。
+- **B**: `Mlp`／`LeNet` のみ公開経路と凍結シグネチャを承認して先に公開し、
+  `ResNet`／`Transformer` は (b)〜(d) の決定待ちにする。
+- **C**: examples 限定を維持して #2541 を not planned で閉じる（スコアボード
+  対応表の行への影響は Phase 6 の再監査で扱う）。
+- いずれも 0.10.0 の公開 API の非破壊が前提であり、A／B は別 issue での
+  実装となる（起票はユーザー承認後）。
+
+### 11.5 本 PR で行わないこと
+
+- facade コードの変更、ガードの追加・反転、`docs/compat-api-scope.md` §5 の
+  適用記録は行わない（適用していないため）。
+- #2541 の閉じ方と親 #2520 の完了条件は、ユーザー判断待ちとする。
