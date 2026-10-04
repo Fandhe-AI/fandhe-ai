@@ -118,10 +118,11 @@
 //! 各終端 LayerNorm の合成）を追加した。いずれも新規 `Op`／
 //! `BackendOps`／VJP／カーネルを追加しない既存部品の合成（
 //! `transformer_decoder_layer.rs`・`transformer.rs` の各モジュール doc
-//! 参照）。facade 公開（`compat::Sequential::add_transformer_decoder_layer`／
-//! `add_transformer` 相当）は未承認のため保留（
-//! `crates/facade/src/lib.rs` の `TransformerDecoderHoldDoctestGuard`
-//! で固定）。イシュー #2134
+//! 参照）。facade 公開は、decoder 1 層（`TransformerDecoderLayer`・
+//! `TransformerConfig` の再エクスポートと `compat::Sequential::
+//! add_transformer_decoder_layer`）をイシュー #2532 で公開済み。`Transformer`／
+//! `add_transformer` 相当は #2533 まで保留（`crates/facade/src/lib.rs` の
+//! `TransformerDecoderHoldDoctestGuard` で固定）。イシュー #2134
 //! （親 #2131）で [`Module`] trait に `children`／`named_modules`／
 //! `parameter_count`／`type_name`（PyTorch `Module.children()`／
 //! `named_modules()`／`sum(p.numel() for p in model.parameters())`

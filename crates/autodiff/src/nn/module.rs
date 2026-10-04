@@ -459,9 +459,9 @@ pub trait Module {
     /// 層向け（self-attention → cross-attention → FFN の合成。
     /// `nn/transformer_decoder_layer.rs` モジュール doc 参照）。
     /// `compat::Sequential` の学習経路が本層を認識するために使う。
-    /// facade 結線（`compat::Sequential::add_transformer_decoder_layer`）
-    /// 自体は承認待ちのため未実装（`crates/facade/src/lib.rs` の
-    /// `TransformerDecoderHoldDoctestGuard` 参照）。既定 `None`。
+    /// facade 結線（`compat::Sequential::add_transformer_decoder_layer`）は
+    /// イシュー #2532（親 #2531）で実装済み（`bind`／`trainable_vars`／
+    /// `trainable_grads`／常駐ガードが本フックで層を認識する）。既定 `None`。
     fn as_transformer_decoder_layer(&self) -> Option<&TransformerDecoderLayer> {
         None
     }

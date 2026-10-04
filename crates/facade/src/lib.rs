@@ -2666,21 +2666,23 @@ struct RnnConfigHoldDoctestGuard;
 struct PixelShuffleHoldDoctestGuard;
 
 /// イシュー #2165（親 #2131・#2068 の対）の facade 公開保留を固定する
-/// doctest 足場。旧 MHA 保留ガード（#2163。#2530 で撤去済み）と同型の「正の
+/// doctest 足場。**イシュー #2532（親 #2531）で `TransformerDecoderLayer`・
+/// `TransformerConfig` の再エクスポートと `compat::Sequential::
+/// add_transformer_decoder_layer` を公開済みのため、本ガードの保留対象は
+/// `Transformer`・`add_transformer` のみに縮めた**（残りは #2533 で反転する）。
+/// 旧 MHA 保留ガード（#2163。#2530 で撤去済み）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_transformer_decoder_hold_probe::{TransformerDecoderLayer,
-/// Transformer}` を導入する。facade がどの経路（単一行・複数行・
-/// ネストした group での `pub use`・別名エクスポート）でこれらの名前を
-/// 公開しても、ローカル定義との glob 衝突（E0659）でコンパイルが
-/// 失敗する。
+/// `__fandhe_transformer_decoder_hold_probe::Transformer` を導入する。facade が
+/// どの経路（単一行・複数行・ネストした group での `pub use`・別名
+/// エクスポート）でこの名前を公開しても、ローカル定義との glob 衝突
+/// （E0659）でコンパイルが失敗する。
 ///
-/// `compat::Sequential::add_transformer_decoder_layer`／
-/// `add_transformer` の衝突プローブ
+/// `compat::Sequential::add_transformer` の衝突プローブ
 /// （`__FandheTransformerDecoderAddProbe` トレイト・
 /// 旧 MHA 保留ガード（#2163。#2530 で撤去済み） の `__FandheMhaOptionsAddProbe` と
 /// 同方式）も同じブロックで併せて保留固定する。**UFCS 形のみ**
-/// （`fandhe_ai::compat::Sequential::add_transformer_decoder_layer(seq)`）
+/// （`fandhe_ai::compat::Sequential::add_transformer(seq)`）
 /// で呼ぶ（`compat::Sequential::add_*` の既存メソッドは値で `self` を
 /// 取る inherent メソッドのため、メソッド呼び出し形だと inherent 側が
 /// 優先解決され衝突を検出できない——旧 MHA 保留ガード（#2163。#2530 で撤去済み） doc
@@ -2693,9 +2695,8 @@ struct PixelShuffleHoldDoctestGuard;
 /// との多層防御の位置づけは `docs/autodiff-transformer-decoder-
 /// decision.md` §承認事項を参照。
 ///
-/// 承認（`compat::Sequential::add_transformer_decoder_layer`／
-/// `add_transformer` の追加・`TransformerDecoderLayer`／`Transformer`
-/// の facade 再エクスポート）を得た日が来たら、本モジュール・本
+/// 承認（`compat::Sequential::add_transformer` の追加・`Transformer`
+/// の facade 再エクスポート。#2533）を実装する日が来たら、本モジュール・本
 /// doctest 自体を削除する（ソース走査側の対応する否定ガードと同時に
 /// 外す）。
 ///
@@ -2716,7 +2717,6 @@ struct PixelShuffleHoldDoctestGuard;
 /// use fandhe_ai::model::*;
 ///
 /// mod __fandhe_transformer_decoder_hold_probe {
-///     pub struct TransformerDecoderLayer;
 ///     pub struct Transformer;
 /// }
 /// use __fandhe_transformer_decoder_hold_probe::*;
@@ -2724,22 +2724,16 @@ struct PixelShuffleHoldDoctestGuard;
 /// struct __FandheTransformerDecoderMarker;
 ///
 /// trait __FandheTransformerDecoderAddProbe {
-///     fn add_transformer_decoder_layer(&self) -> __FandheTransformerDecoderMarker;
 ///     fn add_transformer(&self) -> __FandheTransformerDecoderMarker;
 /// }
 ///
 /// impl __FandheTransformerDecoderAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_transformer_decoder_layer(&self) -> __FandheTransformerDecoderMarker {
-///         __FandheTransformerDecoderMarker
-///     }
 ///     fn add_transformer(&self) -> __FandheTransformerDecoderMarker {
 ///         __FandheTransformerDecoderMarker
 ///     }
 /// }
 ///
-/// fn __probe(_: TransformerDecoderLayer, _: Transformer, seq: &fandhe_ai::compat::Sequential) {
-///     let _: __FandheTransformerDecoderMarker =
-///         fandhe_ai::compat::Sequential::add_transformer_decoder_layer(seq);
+/// fn __probe(_: Transformer, seq: &fandhe_ai::compat::Sequential) {
 ///     let _: __FandheTransformerDecoderMarker =
 ///         fandhe_ai::compat::Sequential::add_transformer(seq);
 /// }
