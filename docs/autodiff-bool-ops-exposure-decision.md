@@ -14,7 +14,9 @@ src/bool_ops.rs`）として実装した（案 C。§3 参照）。`Var` に inh
 7 件は #2510 で `Var` の委譲メソッドとして追加済み。logical 3 件は
 未公開のまま #2594 で扱う。§6.1 参照）。新規 `Op`・`BackendOps` メソッド・VJP・tape
 ノードは追加していない。facade 公開（`Var` への委譲メソッド追加）は
-承認待ちのまま対象外とし、`crates/facade/src/lib.rs::
+#2141 時点では承認待ちのまま対象外とした（履歴。現状は比較 6 種・
+`masked_select` が #2510 で公開済みで、保留中なのは logical 3 件のみ）。
+logical 3 件の保留は `crates/facade/src/lib.rs::
 VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
 `crates/facade/tests/api_surface.rs` のソース走査・workspace インベント
 リ（4 テスト）で多層固定している。
