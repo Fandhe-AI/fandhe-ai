@@ -16,10 +16,13 @@
 `PowScalar` は #1634 で定義済みで本モジュールは入口関数の追加のみ）へ
 の薄い委譲のみで構成した。GPU 専用カーネルはスコープ外（既定の
 `Unsupported` → ホスト参照実装フォールバック）。facade 公開（`Var`
-への委譲メソッド追加）は承認待ちのまま対象外とし、`crates/facade/
-src/lib.rs::VarScalarUnaryOpsHoldDoctestGuard`（正のプローブ
-doctest）と `crates/facade/tests/api_surface.rs` のソース走査・
-workspace インベントリ（4 テスト）で多層固定している。
+への委譲メソッド追加）は #2145 時点では承認待ちのため
+`VarScalarUnaryOpsHoldDoctestGuard` 等の保留ガードで固定していたが、
+ルート #2499 の一括承認を受けて **#2512 で `Var::floor`／`ceil`／
+`round`／`sign`／`reciprocal`／`rsqrt`／`erf`／`pow_scalar` の委譲
+メソッドとして公開済み**（保留ガードは承認形のみを許す正ガードへ反転。
+§8 末尾の実装記録参照）。上記の「`Var` に inherent の `pub fn` は
+追加していない」は #2145 時点の記述である。
 
 ## §1 背景
 
@@ -169,18 +172,42 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
   未実測。`docs/perf/logs/scalar-unary-ops-2145/README.md` 参照）
 - `docs/README.md`: 本 doc・perf log README の索引行を追加
 
+### 実装記録（イシュー #2512・2026-10-04）
+
+- `crates/autodiff/src/var.rs`: `Var::floor`／`ceil`／`round`／`sign`／
+  `reciprocal`／`rsqrt`／`erf`（`&self` → `Result<Var, AutodiffError>`）と
+  `Var::pow_scalar(&self, exponent: f32)` を追加。本体は
+  `crate::scalar_unary_ops::<name>(self[, exponent])` への 1 行委譲。
+  `scalar_unary_ops` モジュール自体は facade から再エクスポートしない
+- `crates/facade/src/lib.rs`: `VarScalarUnaryOpsHoldDoctestGuard` を削除
+- `crates/facade/tests/api_surface.rs`: 削除したテスト
+  `scalar_unary_ops_hold_doctest_globs_all_pub_modules`・
+  `scalar_unary_ops_hold_doctest_probe_body_matches_fixed_contract`
+  （と固定本文定数）。残して文言を承認形へ更新したテスト
+  `facade_does_not_reexport_or_declare_scalar_unary_ops`。改名したテスト
+  `workspace_declares_scalar_unary_ops_fn_names_only_in_approved_locations`
+  （期待集合へ `autodiff/src/var.rs` 各 1 件を追加）。新設したテスト
+  `var_scalar_unary_ops_methods_are_thin_delegations`・
+  `var_scalar_unary_ops_are_reachable_via_facade_only`。
+  `MIN_KNOWN_PROBE_BLOCKS` は 29 へ更新
+- `crates/facade/tests/scalar_unary_ops_facade.rs`（新規）: facade 経由の
+  forward／backward／bit 一致／エラー伝播
+- 不変: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・
+  GPU カーネル。実機 parity の申し送りは §7 のまま
+
 ## §9 承認事項（未承認として列挙）
 
 1. facade 公開（`Var::floor`／`ceil`／`round`／`sign`／
    `reciprocal`／`rsqrt`／`erf`／`pow_scalar` の委譲メソッド追加と
-   保留ガードの撤去）
+   保留ガードの撤去）— **#2512 で実施済み（2026-10-04 ルート #2499
+   一括承認）**
 2. GPU 専用カーネル（CUDA／Metal の `floor`／`ceil`／`round`／
    `sign`／`reciprocal`／`rsqrt`／`erf` 専用実装）
 3. `create_graph`（二階微分）対応
 
 ## §10 スコープ外
 
-- facade 公開（上記承認事項 1 と同じ）
+- facade 公開（上記承認事項 1 と同じ。#2512 で実施済みのため対象外ではなくなった）
 - GPU 専用カーネル（上記承認事項 2 と同じ）
 - `create_graph`（二階微分）対応（上記承認事項 3 と同じ。`crate::
   create_graph::scalar_unary_replayable` は新 7 kind に触れておらず

@@ -12,18 +12,13 @@
 //! フォールバック）・tape 記録を担う共通経路であり、本モジュールは
 //! それぞれの `ScalarUnaryOp` variant を選ぶだけの自由関数を並べる。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/rearrange_ops.rs`・
-//! `bool_ops.rs` モジュール doc と同じ理由・同じ判断枠組みによる。
-//! `Var` は facade（`fandhe_ai` クレート）から直接再エクスポートされる
-//! ため、`Var` への inherent メソッド追加は即座に facade 公開面へ出て
-//! しまう。親 #2131 はこのツリーに限り「設計判断記録 → 承認 → 実装」
-//! の 2 段階を定め、イシュー #2145 本文も facade 公開面（`Var::floor`
-//! 等の委譲メソッド追加）を承認事項として明示するため、承認が取れる
-//! まではこれらを自由関数として `Var` の外に置き到達不能にする
-//! （`docs/autodiff-scalar-unary-ops-decision.md` §9「承認事項」）。
-//! 承認後は `Var::floor` 等の薄い委譲メソッドを追加し、facade 側の
-//! 保留ガード（`crates/facade/src/lib.rs::
-//! VarScalarUnaryOpsHoldDoctestGuard`）を撤去する。
+//! **公開形（イシュー #2512 で承認済み・公開済み）**: facade への公開は
+//! `Var::floor`／`ceil`／`round`／`sign`／`reciprocal`／`rsqrt`／`erf`／
+//! `pow_scalar` の薄い委譲メソッド（本モジュールの自由関数へ 1 行委譲）
+//! としてのみ行い、本モジュール自体は facade から再エクスポートしない
+//! （ルート #2499 の一括承認。`crates/autodiff/src/rearrange_ops.rs` と同型。
+//! 委譲本体の固定は facade の `var_scalar_unary_ops_methods_are_thin_
+//! delegations` が担う。`docs/autodiff-scalar-unary-ops-decision.md` §9）。
 //!
 //! **数値規約（`docs/autodiff-scalar-unary-ops-decision.md` §3 が正。
 //! forward 数式の単一情報源は `tensor_core::scalar_op::ScalarUnaryOp::
