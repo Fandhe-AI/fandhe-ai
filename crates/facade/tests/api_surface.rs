@@ -9419,12 +9419,12 @@ fn var_matrix_ops_are_reachable_via_facade_only() {
 }
 
 // =====================================================================
-// #2146（親 #2131）の facade 公開保留固定（`VarActivationOpsHoldDoctestGuard`）。
-// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）と同型の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリと、`compat::Sequential::add_*` 5 種の非宣言を持つ。
-// 承認事項・多層防御の位置づけは `docs/autodiff-activation-ops-decision.md`
-// §6 参照。
+// #2146 実装・#2516 公開（親 #2500・ルート #2499）の正ガード。
+// `Var` 委譲メソッド 5 件（承認形）だけを許し、`compat::Sequential::add_*`
+// 5 種（#2529 まで保留）・`Tensor<f32>`／`Tape` 上への配置・モジュール
+// 再エクスポートは引き続き拒否する（#2510 型の部分反転。先例 #2198・#2338・
+// #2511）。承認事項・多層防御の位置づけは
+// `docs/autodiff-activation-ops-decision.md` §6 参照。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `VarActivationOpsHoldDoctestGuard` doc
@@ -9507,14 +9507,6 @@ trait __FandheActivationHoldProbe {\n\
 \x20\x20\x20\x20fn glu(&self) -> __FandheActivationMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheActivationHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-\x20\x20\x20\x20fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
-}\n\
-\n\
 impl __FandheActivationHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
 \x20\x20\x20\x20fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }\n\
@@ -9558,13 +9550,6 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20activation_ops::glu();\n\
 }\n\
 \n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Var::mish(x);\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = x.mish();\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Var::glu(x);\n\
-\x20\x20\x20\x20let _: __FandheActivationMarker = x.glu();\n\
-}\n\
-\n\
 fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
 \x20\x20\x20\x20let _: __FandheActivationMarker = fandhe_ai::Tensor::hardtanh(x);\n\
 \x20\x20\x20\x20let _: __FandheActivationMarker = x.hardtanh();\n\
@@ -9585,7 +9570,7 @@ fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
 
 /// `mish`・`hardtanh`・`relu6`・`prelu`・`glu`（5 個の関数名。イシュー
 /// #2146）。[`facade_does_not_reexport_or_declare_activation_ops`]・
-/// [`workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops`]
+/// [`workspace_declares_activation_ops_fn_names_only_in_approved_locations`]
 /// が共用する。
 const ACTIVATION_OPS_FN_NAMES: [&str; 5] = ["mish", "hardtanh", "relu6", "prelu", "glu"];
 
@@ -9650,9 +9635,9 @@ fn facade_does_not_reexport_or_declare_activation_ops() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が activation_ops（イシュー #2146 の内部クレート\
-         限定新規公開面。facade 公開・compat::Sequential::add_* 追加は\
-         いずれも承認待ちのため対象外という設計判断に違反）を\
+        "facade の公開面が activation_ops（承認形は autodiff の `Var` 委譲\
+         メソッドのみ。facade 側の再エクスポート・宣言と\
+         compat::Sequential::add_* 追加〈#2529 まで保留〉は承認形外）を\
          再エクスポート、または同名の fn を宣言している: {offending:?}"
     );
 }
@@ -9667,7 +9652,7 @@ fn facade_does_not_reexport_or_declare_activation_ops() {
 /// 定義。着手前確認の実測 grep で判明。実装計画「インベントリを実測
 /// する」手順）**。
 #[test]
-fn workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops() {
+fn workspace_declares_activation_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -9715,17 +9700,103 @@ fn workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops() 
         .iter()
         .map(|name| (format!("autodiff/src/activation_ops.rs::{name}"), 1usize))
         .collect();
+    for name in ACTIVATION_OPS_FN_NAMES {
+        expected.insert(format!("autodiff/src/var.rs::{name}"), 1usize);
+    }
     expected.insert("tensor-core/src/scalar_op.rs::relu6".to_string(), 1usize);
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の activation_ops 系 `fn` 宣言\
          集合が期待（`crates/autodiff/src/activation_ops.rs` 各 1 件・\
+         `autodiff/src/var.rs` 各 1 件・\
          `crates/tensor-core/src/scalar_op.rs::relu6` 1 件）と一致しない\
          （過不足いずれも fail-closed に検出する。新たな定義元が見つかった\
          場合、それが承認済みの実装なのか迂回経路の混入なのかを確認\
          すること）: {found:?}"
     );
+}
+
+/// `var.rs` の 5 委譲メソッド本体の承認形（`activation_ops` 自由関数への
+/// 1 行委譲。引数名も固定）。独自実装・スタブへのすり替えと境界検査の
+/// 迂回を拒否する（#2516。[`REARRANGE_OPS_VAR_EXPECTED_BODIES`] と同型）。
+const ACTIVATION_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 5] = [
+    ("mish", "crate : : activation_ops : : mish ( self )"),
+    (
+        "hardtanh",
+        "crate : : activation_ops : : hardtanh ( self , min , max )",
+    ),
+    ("relu6", "crate : : activation_ops : : relu6 ( self )"),
+    (
+        "prelu",
+        "crate : : activation_ops : : prelu ( self , weight )",
+    ),
+    ("glu", "crate : : activation_ops : : glu ( self , dim )"),
+];
+
+/// `var.rs` の 5 委譲メソッドの本体が [`ACTIVATION_OPS_VAR_EXPECTED_BODIES`]
+/// と一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
+#[test]
+fn var_activation_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in ACTIVATION_OPS_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（activation_ops 自由関数への \
+             1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけで 5 メソッドへ到達でき、シグネチャが
+/// 承認形と一致し、実際に適用して厳密に決まる期待値が得られることを固定する
+/// （スタブでは通らない。#2516）。
+#[test]
+fn var_activation_ops_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+
+    fn sig_mish<'t>() -> fn(&Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Var::<'t>::mish
+    }
+    fn sig_hardtanh<'t>() -> fn(&Var<'t>, f32, f32) -> Result<Var<'t>, AutodiffError> {
+        Var::<'t>::hardtanh
+    }
+    fn sig_relu6<'t>() -> fn(&Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Var::<'t>::relu6
+    }
+    fn sig_prelu<'t>() -> fn(&Var<'t>, &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Var::<'t>::prelu
+    }
+    fn sig_glu<'t>() -> fn(&Var<'t>, usize) -> Result<Var<'t>, AutodiffError> {
+        Var::<'t>::glu
+    }
+    fn vals(v: &Var<'_>) -> Vec<f32> {
+        v.to_tensor().host_slice().into_owned()
+    }
+
+    let tape = fandhe_ai::tape();
+    let z = tape.var(&Tensor::new(vec![0.0_f32], &[1]).expect("tensor"));
+    assert_eq!(vals(&sig_mish()(&z).expect("mish")), [0.0]);
+
+    let x = tape.var(&Tensor::new(vec![-2.0_f32, 0.5, 2.0], &[3]).expect("tensor"));
+    assert_eq!(
+        vals(&sig_hardtanh()(&x, -1.0, 1.0).expect("hardtanh")),
+        [-1.0, 0.5, 1.0]
+    );
+
+    let r = tape.var(&Tensor::new(vec![-1.0_f32, 3.0, 7.0], &[3]).expect("tensor"));
+    assert_eq!(vals(&sig_relu6()(&r).expect("relu6")), [0.0, 3.0, 6.0]);
+
+    let p = tape.var(&Tensor::new(vec![-2.0_f32, 3.0], &[2]).expect("tensor"));
+    let w = tape.var(&Tensor::new(vec![0.25_f32], &[1]).expect("tensor"));
+    assert_eq!(vals(&sig_prelu()(&p, &w).expect("prelu")), [-0.5, 3.0]);
+
+    let g = tape.var(&Tensor::new(vec![2.0_f32, 4.0, 0.0, 0.0], &[4]).expect("tensor"));
+    assert_eq!(vals(&sig_glu()(&g, 0).expect("glu")), [1.0, 2.0]);
 }
 
 // =====================================================================
@@ -12170,8 +12241,7 @@ fn facade_does_not_reexport_or_declare_conv3d() {
 /// `conv3d`・`im2col3d`・`col2im3d`（3 個の関数名。イシュー #2158）の
 /// workspace 全体（`crates/*/src/`）における `fn` 宣言の定義元集合が、
 /// 実装計画で列挙した許容集合とちょうど一致することを固定する
-/// （`workspace_declares_activation_ops_fn_names_only_in_autodiff_
-/// activation_ops` と同型のインベントリ）。
+/// （`workspace_declares_activation_ops_fn_names_only_in_approved_locations` と同型のインベントリ）。
 ///
 /// **期待集合（着手時に `grep -rn "fn conv3d\b\|fn im2col3d\b\|fn
 /// col2im3d\b" crates/*/src` で実測確認済み）**:
