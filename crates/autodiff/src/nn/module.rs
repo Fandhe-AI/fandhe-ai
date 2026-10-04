@@ -2487,10 +2487,9 @@ impl Module for GroupNorm {
     }
 
     /// イシュー #2066: `as_linear` と同型の明示フック。`compat::
-    /// Sequential` 側の `add_group_norm` 等（facade 統合。`docs/
-    /// compat-api-scope.md` §5 の承認待ち）が実装された際に `GroupNorm`
-    /// 層を認識するための入口として用意するが、本イシュー時点では
-    /// `crates/facade` を変更しておらず未結線。
+    /// Sequential::add_group_norm`（イシュー #2525 で結線済み）が
+    /// 常駐経路の拒否判定（`contains_resident_unsupported_layer`）で
+    /// `GroupNorm` 層を認識するための入口。
     fn as_group_norm(&self) -> Option<&GroupNorm> {
         Some(self)
     }
@@ -2528,10 +2527,8 @@ impl Module for InstanceNorm {
     }
 
     /// イシュー #2066: `as_linear` と同型の明示フック。`compat::
-    /// Sequential` 側の `add_instance_norm` 等（facade 統合。`docs/
-    /// compat-api-scope.md` §5 の承認待ち）が実装された際に
-    /// `InstanceNorm` 層を認識するための入口として用意するが、本イシュー
-    /// 時点では `crates/facade` を変更しておらず未結線。
+    /// Sequential::add_instance_norm`（イシュー #2525 で結線済み）が
+    /// 常駐経路の拒否判定で `InstanceNorm` 層を認識するための入口。
     fn as_instance_norm(&self) -> Option<&InstanceNorm> {
         Some(self)
     }

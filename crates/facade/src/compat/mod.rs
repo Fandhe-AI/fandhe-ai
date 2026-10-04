@@ -59,7 +59,7 @@
 //! 親 #2059・`metrics` モジュール）で実装済み。`DataLoader` を直接
 //! 受ける `fit` 入口は対象外のまま。層構成ごとのディレクトリ保存・復元
 //! （[`crate::compat::save_model`]・[`crate::compat::load_model`]・[`crate::compat::ModelIoError`]。イシュー #2369・親 #2362）は
-//! `add_*` 全 33 層（`add_module` の利用者定義層を除く。イシュー #2370）と、`compile`／
+//! `add_*` 全 37 層（`add_module` の利用者定義層を除く。イシュー #2370）と、`compile`／
 //! `compile_with_amp` 済みの状態（loss・optimizer 内部状態・AMP。#2372・#2373）に対応する
 //! （BatchNorm の running stats も保存・復元する〈`num_batches_tracked` は非復元。#2371〉。
 //! 旧世代ファイルの手動掃除・並行 save／load の非サポート・fsync 非保証の契約は

@@ -3,9 +3,10 @@
 //! と同型）。
 //!
 //! GroupNorm／InstanceNorm は `docs/compat-api-scope.md` の Tier 1／
-//! Tier 2 列挙に個別の行を持たず、facade 公開面拡張（`compat::
-//! Sequential::add_group_norm`／`add_instance_norm`）は同 §5 の承認が
-//! 未取得のため、本テストは facade を経由せず
+//! Tier 2 列挙に個別の行を持たず、facade 公開面（`compat::
+//! Sequential::add_group_norm`／`add_instance_norm`）はイシュー #2525 で
+//! 公開済み（facade 経由の parity は `compat_sequential_group_instance_norm_backend_parity.rs`）。
+//! 本テストは facade の `Sequential` を経由せず
 //! `fandhe_ai_autodiff::nn::{GroupNorm, InstanceNorm}` を直接呼ぶ
 //! （`mha_backend_parity.rs` が `MultiheadAttentionVars::new` を直接
 //! 呼ぶのと同型。`fandhe_ai::Tape`〈facade newtype〉と

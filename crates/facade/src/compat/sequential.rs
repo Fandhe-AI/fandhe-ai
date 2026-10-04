@@ -117,10 +117,11 @@ use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d,
     BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
     ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, Dropout, Embedding, EmbeddingVars,
-    FeedForwardActivation, Flatten, Identity, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars,
-    Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention, MultiheadAttentionVars, RmsNorm,
-    RmsNormVars, Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars,
-    Unflatten, Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
+    FeedForwardActivation, Flatten, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS,
+    LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention,
+    MultiheadAttentionVars, RmsNorm, RmsNormVars, Sequential as NnSequential,
+    TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten, Upsample, ZeroPad2d,
+    conv2d_forward_low_precision, linear_forward_low_precision,
     multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
@@ -173,7 +174,7 @@ pub struct Sequential {
 
 /// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
 ///
-/// `add_*` 33 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
+/// `add_*` 37 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
 /// `add_*` を呼んで再構築する（イシュー #2369・#2370。`docs/compat-model-io-decision.md`
 /// §5）。`add_*` の内部で固定している値（conv／linear の `bias=true`・pool の
 /// `ceil_mode=false`・TE の活性化と eps 等）は記録しない（同じ `add_*` が再現するため）。
@@ -326,6 +327,13 @@ pub(super) enum LayerSpec {
         padding: [usize; 4],
     },
     Identity,
+    GroupNorm {
+        groups: usize,
+        eps: f32,
+    },
+    InstanceNorm {
+        eps: f32,
+    },
     /// 保存対象外の層（`add_module` の利用者定義層と、manifest スキーマ未対応の組み込み層
     /// 〈`conv_transpose1d`／`unflatten`。イシュー #2521〉。`kind` はエラー文言で読む）。
     Unsupported {
@@ -810,6 +818,49 @@ impl Sequential {
             normalized_size,
             eps,
         });
+        Ok(self)
+    }
+
+    /// GroupNorm 層を追加する（`nn::GroupNorm`。イシュー #2525・
+    /// `docs/norm-ops-design.md` §11）。`[N, C, *S]` の C 軸を `groups` 個に分け、
+    /// グループごと（グループ内チャネル × 空間）に平均 0・分散 1 へ正規化する。
+    /// **affine（チャネルごとの weight／bias）は持たない**（f64 縮約契約との兼ね合いで
+    /// 別 issue。`num_channels` 引数も内部層が保持しないため取らない）。
+    /// `groups == 0`・非有限／負の `eps` は構築時に `AutodiffError::InvalidArgument`。
+    /// `C % groups != 0` と rank < 2 は forward 時の遅延検査（[`Sequential::add_flatten`]
+    /// と同型）。無状態層のため学習経路をそのまま通過し `save_model`／`load_model` に
+    /// 対応する。デバイス常駐経路は未実測のため fail-closed で拒否する
+    /// （`BackendError::Unsupported`）。ONNX export は `UnsupportedLayer`。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new()
+    ///     .add_group_norm(2, 1e-5)?
+    ///     .add_instance_norm(1e-5)?;
+    /// let x = Tensor::new((0..36).map(|i| i as f32).collect::<Vec<_>>(), &[1, 4, 3, 3])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[1, 4, 3, 3]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_group_norm(mut self, groups: usize, eps: f32) -> Result<Self, AutodiffError> {
+        let layer = GroupNorm::new(groups, eps)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::GroupNorm { groups, eps });
+        Ok(self)
+    }
+
+    /// InstanceNorm 層を追加する（`nn::InstanceNorm`。イシュー #2525）。
+    /// 各サンプル・各チャネルを空間軸ごとに独立に正規化する（`GroupNorm` の
+    /// `groups == C` と bit 一致）。rank < 3 は forward 時の遅延検査。affine なし・
+    /// 常駐経路拒否・保存対応は [`Sequential::add_group_norm`] と同じ。
+    pub fn add_instance_norm(mut self, eps: f32) -> Result<Self, AutodiffError> {
+        let layer = InstanceNorm::new(eps)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::InstanceNorm { eps });
         Ok(self)
     }
 
@@ -1771,7 +1822,7 @@ impl Sequential {
     /// 含まれるかどうか（旧 `contains_conv_layer`。イシュー #1770 で
     /// `Conv2d`／`Conv1d` 向けに新設し、イシュー #1760 で LayerNorm／
     /// RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
-    /// MultiheadAttention へ、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d を追加、イシュー #1957 で Pooling（MaxPool／
+    /// MultiheadAttention へ、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d、イシュー #2525 で GroupNorm／InstanceNorm を追加、イシュー #1957 で Pooling（MaxPool／
     /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名した）。
     /// これらの層は `forward_from_flat_leaves`（`Linear` 層のみを
     /// 消費する走査）の対象外のため、常駐経路の入口で明示的に拒否する
@@ -1783,6 +1834,8 @@ impl Sequential {
                 || layer.as_conv_transpose1d().is_some()
                 || layer.as_conv_transpose2d().is_some()
                 || layer.as_conv3d().is_some()
+                || layer.as_group_norm().is_some()
+                || layer.as_instance_norm().is_some()
                 || layer.as_layer_norm().is_some()
                 || layer.as_rms_norm().is_some()
                 || layer.as_batch_norm1d().is_some()

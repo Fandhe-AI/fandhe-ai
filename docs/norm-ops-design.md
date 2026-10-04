@@ -448,11 +448,10 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
   契約への抵触を避けるため、affine 対応は別イシューのスコープとして
   見送った。
 - **facade 公開**: `Module` trait への統合（`as_group_norm`／
-  `as_instance_norm`）は行ったが、`docs/compat-api-scope.md` の
-  Tier 1／Tier 2 列挙に GroupNorm／InstanceNorm の行がなく、facade
-  公開面拡張（`compat::Sequential::add_group_norm`／
-  `add_instance_norm`）は同 §5 の承認（経路 1 または経路 2）が未取得の
-  ため実施していない。
+  `as_instance_norm`）は行った。facade 公開面（`compat::Sequential::
+  add_group_norm`／`add_instance_norm`）は #2066 時点では未取得の承認が
+  必要だったが、ルート #2499 の 2026-10-04 一括承認に基づき #2525 で
+  公開済み（§11.x 参照）。
 - **正しさ検証**: `crates/autodiff/src/nn/normalization.rs` の単体
   テスト 19 件（構築時検査・shape 検査・手計算値突合・`groups=1` の
   `layer_norm` との bit 一致・`groups=channels` の `InstanceNorm` との
@@ -465,3 +464,45 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
   実行環境に CUDA／Metal 実機への到達手段がないため。専用カーネルは
   追加していないため既存 `layer_norm` カーネルの正しさに全面的に依存
   する構造上、リグレッションのリスクは低いと考えられるが実測は未実施）。
+
+### 11.x #2525 実装記録（facade 公開）
+
+イシュー #2525（親 #2520・ルート #2499 の 2026-10-04 一括承認）で
+`compat::Sequential` に次の `pub fn` 2 件だけを追加した（追加 API のみ。
+`fandhe-ai =0.10.0` の公開 API は非破壊）。
+
+- `add_group_norm(mut self, groups: usize, eps: f32) -> Result<Self, AutodiffError>`
+  （`GroupNorm::new(groups, eps)` への 1:1 委譲）
+- `add_instance_norm(mut self, eps: f32) -> Result<Self, AutodiffError>`
+  （`InstanceNorm::new(eps)` への 1:1 委譲）
+
+- **シグネチャの導出**: 本文書・`docs/compat-api-scope.md` は公開名のみを単一案として
+  挙げ、競合する代替案も具体シグネチャも記録していない。#2523（`add_conv_transpose2d`）と
+  同じ記述粒度であり、内部コンストラクタから機械的に導出した（停止条件には当たらないと判断）。
+- **入れないもの**: `num_channels` 引数（内部層が保持しない）・affine（上記「affine 非対応」
+  のとおり別イシュー）・既定 eps の別名メソッド・`GroupNorm`／`InstanceNorm` 型や既定 eps 定数の
+  facade 再エクスポート。
+- **検査の分担**: `groups == 0`・非有限／負の `eps` は構築時に `InvalidArgument`。
+  `C % groups != 0`（`InvalidArgument`）・rank 不足（`Shape`）は forward 時の遅延検査。
+- **学習経路**: 2 層とも `named_parameters()` が空の無状態層のため、`bind`／
+  `trainable_parameters`／`apply_parameters`／`trainable_vars`／`trainable_grads` の既存走査を
+  そのまま通過する（コード分岐の追加なし）。AMP では低精度版を持たず f32 で forward する。
+- **常駐経路は fail-closed**: `contains_resident_unsupported_layer` に `as_group_norm`／
+  `as_instance_norm` を追加し、`init_device_param_store`／`forward_resident`／`predict_resident` を
+  `BackendError::Unsupported` で拒否する。理由は、常駐テンソル上で `contiguous → reshape →
+  layer_norm` を通す経路の GPU 実測がないこと、および拒否は後から外せる追加的変更だが許可した
+  ものを後で拒否すると破壊的変更になること。将来の解除は別イシュー。
+- **保存**: manifest kind `group_norm`（`groups`・`eps`）・`instance_norm`（`eps`）を追加
+  （パラメータ・buffer なし。`format_version` 不変。kind allowlist は 37 種）。非信頼 manifest は
+  `Params` の厳密キー allowlist と、再構築時のコンストラクタ検査で拒否する。
+- **ONNX export**: 対象外。`OnnxModel::from_sequential` は `UnsupportedLayer`（テストで固定）。
+- **ガード**: 保留ガード・否定テストは存在しなかったため反転対象なし。`crates/facade/tests/
+  api_surface.rs` に承認形だけを許す正ガード 4 件
+  （`compat_sequential_group_instance_norm_add_methods_have_approved_signatures` とその
+  `_detects_offense`、`compat_sequential_exposes_group_instance_norm_add_methods_issue_2525` と
+  その `_counts_declarations`）を新設した。
+- **検証**: `crates/facade/tests/compat_sequential_group_instance_norm.rs`（CPU。手組み
+  `reshape → layer_norm → reshape` との bit 一致・学習・常駐拒否・保存往復と改竄拒否・ONNX 拒否）。
+- **実機 parity は未実測**: `compat_sequential_group_instance_norm_backend_parity.rs`
+  （`#[ignore]`）を整備し、`docs/perf/logs/compat-sequential-group-instance-norm-2525/README.md`
+  へ GB10／M4 Max 向けに申し送る。
