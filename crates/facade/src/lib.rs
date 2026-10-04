@@ -2703,7 +2703,14 @@ struct PixelShuffleHoldDoctestGuard;
 /// `var_loss_ops_are_reachable_via_facade_var`）。`loss_ops` モジュール・
 /// `Tensor`／`Tape` 上の同名メソッド・残り 5 名の `Var` への公開は引き続き拒否する。
 ///
-/// 撤去条件: #2539・#2540 で残る `Var` 名が公開されたら `__probe_var` と
+/// **#2539 での追加の部分反転**（同一の一括承認）: `Var::cosine_embedding_loss`・
+/// `Var::margin_ranking_loss`・`Var::triplet_margin_loss`・`Var::poisson_nll_loss`
+/// も委譲メソッドとして公開済みのため、`__probe_var` から該当 8 行を削除した
+/// （正ガードは `var_loss_ops_methods_are_thin_delegations` 6 件化・
+/// `var_distance_poisson_loss_ops_are_reachable_via_facade_var`）。`__probe_var` には
+/// `ctc_loss` の 2 行のみが残る。
+///
+/// 撤去条件: #2540 で残る `Var` 名（`ctc_loss`）が公開されたら `__probe_var` と
 /// `Var` の impl を外す。`Tensor`／`Tape`／モジュール再エクスポートの拒否は維持する。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
@@ -2791,14 +2798,6 @@ struct PixelShuffleHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheLossMarker = fandhe_ai::Var::cosine_embedding_loss(x);
-///     let _: __FandheLossMarker = x.cosine_embedding_loss();
-///     let _: __FandheLossMarker = fandhe_ai::Var::margin_ranking_loss(x);
-///     let _: __FandheLossMarker = x.margin_ranking_loss();
-///     let _: __FandheLossMarker = fandhe_ai::Var::triplet_margin_loss(x);
-///     let _: __FandheLossMarker = x.triplet_margin_loss();
-///     let _: __FandheLossMarker = fandhe_ai::Var::poisson_nll_loss(x);
-///     let _: __FandheLossMarker = x.poisson_nll_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Var::ctc_loss(x);
 ///     let _: __FandheLossMarker = x.ctc_loss();
 /// }

@@ -26,8 +26,8 @@
 //! - #2167（親イシュー #2131）で距離ベースの損失 3 種
 //!   （`CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`）
 //!   と `PoissonNllLoss` を追加した。`L1Loss` と同じく `crate::loss_ops`
-//!   の自由関数（これらの 4 損失は `Var` に委譲メソッドを持たない。facade
-//!   非公開）を呼ぶだけの薄いラッパー。
+//!   の自由関数を呼ぶだけの薄いラッパー（`Var` の委譲メソッドは #2539 で
+//!   facade 公開済み。本構造体自体の facade 公開は #2600 の範囲）。
 //! - #2168（親イシュー #2131）で `CtcLoss`（`crate::loss_ops::ctc_loss`
 //!   の薄いラッパー。PyTorch `nn.CTCLoss` 相当）を追加した。上記と同じ
 //!   「自由関数を呼ぶだけ」パターン。

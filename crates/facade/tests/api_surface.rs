@@ -14529,9 +14529,10 @@ fn __probe(\n\
 }";
 
 // =====================================================================
-// #2166 実装・#2538 で `Var` 2 メソッドを公開（親 #2537・ルート #2499）。
-// `LossOpsHoldDoctestGuard` は部分反転（`Var::{l1_loss, cross_entropy_loss_with}`
-// のプローブのみ削除。残り 5 名・Tensor／Tape・モジュール再エクスポートの保留は維持）。
+// #2166 実装・#2538 で `Var` 2 メソッド、#2539 で 4 メソッドを公開（親 #2537・ルート #2499）。
+// `LossOpsHoldDoctestGuard` は部分反転（`Var::{l1_loss, cross_entropy_loss_with,
+// cosine_embedding_loss, margin_ranking_loss, triplet_margin_loss, poisson_nll_loss}`
+// のプローブのみ削除。残り 1 名（ctc_loss）・Tensor／Tape・モジュール再エクスポートの保留は維持）。
 // `VarReduceOpsHoldDoctestGuard`（イシュー #2147。#2514 で削除済み）と同型の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
 // 定義元インベントリを持つ。承認事項・多層防御の位置づけは
@@ -14665,14 +14666,6 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::cosine_embedding_loss(x);\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = x.cosine_embedding_loss();\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::margin_ranking_loss(x);\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = x.margin_ranking_loss();\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::triplet_margin_loss(x);\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = x.triplet_margin_loss();\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::poisson_nll_loss(x);\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = x.poisson_nll_loss();\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::ctc_loss(x);\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.ctc_loss();\n\
 }\n\
@@ -14753,7 +14746,7 @@ fn facade_does_not_reexport_or_declare_loss_ops() {
     assert!(
         offending.is_empty(),
         "facade の公開面が loss_ops を再エクスポート、または同名の fn を宣言\
-         している（承認形は autodiff の `Var` 委譲メソッド 2 件のみ。#2538）:\
+         している（承認形は autodiff の `Var` 委譲メソッド 6 件のみ。#2538・#2539）:\
          {offending:?}"
     );
 }
@@ -14769,8 +14762,10 @@ fn facade_does_not_reexport_or_declare_loss_ops() {
 /// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167）・
 /// `ctc_loss`（イシュー #2168）は
 /// いずれも `crates/autodiff/src/loss_ops.rs` に 1 件ずつ存在する。加えて
-/// #2538 で `l1_loss`・`cross_entropy_loss_with` の `Var` 委譲メソッドが
-/// `crates/autodiff/src/var.rs` に 1 件ずつ存在する（承認形）。
+/// #2538 で `l1_loss`・`cross_entropy_loss_with`、#2539 で
+/// `cosine_embedding_loss`・`margin_ranking_loss`・`triplet_margin_loss`・
+/// `poisson_nll_loss` の `Var` 委譲メソッドが `crates/autodiff/src/var.rs` に
+/// 1 件ずつ存在する（承認形）。
 #[test]
 fn workspace_declares_loss_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
@@ -14826,6 +14821,10 @@ fn workspace_declares_loss_ops_fn_names_only_in_approved_locations() {
         ("autodiff/src/loss_ops.rs::ctc_loss", 1usize),
         ("autodiff/src/var.rs::l1_loss", 1usize),
         ("autodiff/src/var.rs::cross_entropy_loss_with", 1usize),
+        ("autodiff/src/var.rs::cosine_embedding_loss", 1usize),
+        ("autodiff/src/var.rs::margin_ranking_loss", 1usize),
+        ("autodiff/src/var.rs::triplet_margin_loss", 1usize),
+        ("autodiff/src/var.rs::poisson_nll_loss", 1usize),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -14834,17 +14833,17 @@ fn workspace_declares_loss_ops_fn_names_only_in_approved_locations() {
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の loss_ops 系 `fn` 宣言集合が\
-         期待（`crates/autodiff/src/loss_ops.rs` 7 件＋`autodiff/src/var.rs` 2 件）と一致しない\
+         期待（`crates/autodiff/src/loss_ops.rs` 7 件＋`autodiff/src/var.rs` 6 件）と一致しない\
          （過不足いずれも fail-closed に検出する。新たな定義元が\
          見つかった場合、それが承認済みの実装なのか迂回経路の混入なのか\
          を確認すること）: {found:?}"
     );
 }
 
-/// `var.rs` の 2 委譲メソッド本体の承認形（`loss_ops` 自由関数への 1 行委譲。
+/// `var.rs` の 6 委譲メソッド本体の承認形（`loss_ops` 自由関数への 1 行委譲。
 /// 引数名も固定）。独自実装・スタブへのすり替えと入口検査の迂回を拒否する
 /// （#2538。[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。
-const LOSS_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 2] = [
+const LOSS_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 6] = [
     (
         "l1_loss",
         "crate : : loss_ops : : l1_loss ( self , target , reduction )",
@@ -14853,9 +14852,25 @@ const LOSS_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 2] = [
         "cross_entropy_loss_with",
         "crate : : loss_ops : : cross_entropy_loss_with ( self , targets , class_dim , reduction , options )",
     ),
+    (
+        "cosine_embedding_loss",
+        "crate : : loss_ops : : cosine_embedding_loss ( self , x2 , y , margin , reduction )",
+    ),
+    (
+        "margin_ranking_loss",
+        "crate : : loss_ops : : margin_ranking_loss ( self , x2 , y , margin , reduction )",
+    ),
+    (
+        "triplet_margin_loss",
+        "crate : : loss_ops : : triplet_margin_loss ( self , positive , negative , options , reduction )",
+    ),
+    (
+        "poisson_nll_loss",
+        "crate : : loss_ops : : poisson_nll_loss ( self , target , options , reduction )",
+    ),
 ];
 
-/// `var.rs` の 2 委譲メソッドの本体が [`LOSS_OPS_VAR_EXPECTED_BODIES`] と
+/// `var.rs` の 6 委譲メソッドの本体が [`LOSS_OPS_VAR_EXPECTED_BODIES`] と
 /// 一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
 #[test]
 fn var_loss_ops_methods_are_thin_delegations() {
@@ -14921,6 +14936,79 @@ fn var_loss_ops_are_reachable_via_facade_var() {
     assert!(
         (out[0] - std::f32::consts::LN_2).abs() < 1e-5,
         "ce(smoothing=0.2, 一様 logits) = ln 2 のはず: {out:?}"
+    );
+}
+
+/// `Var` の距離・Poisson 系 4 委譲メソッドが facade 経由で到達でき、シグネチャが
+/// 承認形と一致し、厳密に決まる期待値が得られることを固定する（#2539）。
+#[test]
+fn var_distance_poisson_loss_ops_are_reachable_via_facade_var() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    use fandhe_ai_autodiff::Reduction;
+    use fandhe_ai_autodiff::loss_ops::{PoissonNllOptions, TripletMarginOptions};
+
+    type PairFn<'t> =
+        fn(&Var<'t>, &Var<'t>, &Tensor<f32>, f32, Reduction) -> Result<Var<'t>, AutodiffError>;
+    type TripletFn<'t> = fn(
+        &Var<'t>,
+        &Var<'t>,
+        &Var<'t>,
+        &TripletMarginOptions,
+        Reduction,
+    ) -> Result<Var<'t>, AutodiffError>;
+    type PoissonFn<'t> =
+        fn(&Var<'t>, &Var<'t>, &PoissonNllOptions, Reduction) -> Result<Var<'t>, AutodiffError>;
+    fn sig_cos<'t>() -> PairFn<'t> {
+        Var::<'t>::cosine_embedding_loss
+    }
+    fn sig_mr<'t>() -> PairFn<'t> {
+        Var::<'t>::margin_ranking_loss
+    }
+    fn sig_tm<'t>() -> TripletFn<'t> {
+        Var::<'t>::triplet_margin_loss
+    }
+    fn sig_pn<'t>() -> PoissonFn<'t> {
+        Var::<'t>::poisson_nll_loss
+    }
+    fn vals(v: &Var<'_>) -> Vec<f32> {
+        v.to_tensor().host_slice().into_owned()
+    }
+    fn close(a: f32, e: f32) -> bool {
+        (a - e).abs() < 1e-5 || (a - e).abs() / e.abs() < 1e-3
+    }
+
+    let tape = fandhe_ai::tape();
+    let y = Tensor::new(vec![1.0_f32, -1.0], &[2]).expect("y");
+
+    // cosine: L = [1 - 0, max(0, 1 - 0.5)] = [1, 0.5]
+    let x1 = tape.var(&Tensor::new(vec![1.0_f32, 0.0, 1.0, 0.0], &[2, 2]).expect("x1"));
+    let x2 = tape.var(&Tensor::new(vec![0.0_f32, 1.0, 1.0, 0.0], &[2, 2]).expect("x2"));
+    let out = vals(&sig_cos()(&x1, &x2, &y, 0.5, Reduction::Sum).expect("cos"));
+    assert!(close(out[0], 1.5), "cosine sum: {out:?}");
+
+    // margin ranking: L = [max(0, -(1-2)), max(0, -(2-1))] = [1, 0]
+    let a = tape.var(&Tensor::new(vec![1.0_f32, 2.0], &[2]).expect("a"));
+    let b = tape.var(&Tensor::new(vec![2.0_f32, 1.0], &[2]).expect("b"));
+    let ones = Tensor::new(vec![1.0_f32, 1.0], &[2]).expect("ones");
+    let out = vals(&sig_mr()(&a, &b, &ones, 0.0, Reduction::Mean).expect("mr"));
+    assert!(close(out[0], 0.5), "margin_ranking mean: {out:?}");
+
+    // triplet: d_ap = 5, d_an = 1, margin 1 -> 5
+    let an = tape.var(&Tensor::new(vec![0.0_f32, 0.0], &[1, 2]).expect("an"));
+    let po = tape.var(&Tensor::new(vec![3.0_f32, 4.0], &[1, 2]).expect("po"));
+    let ne = tape.var(&Tensor::new(vec![0.0_f32, 1.0], &[1, 2]).expect("ne"));
+    let opts = TripletMarginOptions::default().eps(0.0);
+    let out = vals(&sig_tm()(&an, &po, &ne, &opts, Reduction::Mean).expect("tm"));
+    assert!(close(out[0], 5.0), "triplet: {out:?}");
+
+    // poisson (log_input): exp(0) - 1*0 = 1, exp(1) - 2*1 = e - 2 -> mean (e-1)/2
+    let xi = tape.var(&Tensor::new(vec![0.0_f32, 1.0], &[2]).expect("xi"));
+    let ti = tape.var(&Tensor::new(vec![1.0_f32, 2.0], &[2]).expect("ti"));
+    let out =
+        vals(&sig_pn()(&xi, &ti, &PoissonNllOptions::default(), Reduction::Mean).expect("pn"));
+    assert!(
+        close(out[0], (std::f32::consts::E - 1.0) / 2.0),
+        "poisson: {out:?}"
     );
 }
 

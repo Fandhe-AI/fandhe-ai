@@ -4666,14 +4666,16 @@ impl<'t> Var<'t> {
         self.gather(dim, &index_bc)
     }
 
-    // ---- loss_ops 委譲メソッド（#2166 実装・#2538 公開。親 #2537・ルート #2499）----
+    // ---- loss_ops 委譲メソッド（#2166／#2167 実装・#2538／#2539 公開。親 #2537・ルート #2499）----
     //
-    // 実体は `crate::loss_ops` の自由関数（`l1_loss`・`cross_entropy_loss_with`）。
+    // 実体は `crate::loss_ops` の自由関数（`l1_loss`・`cross_entropy_loss_with`・
+    // `cosine_embedding_loss`・`margin_ranking_loss`・`triplet_margin_loss`・`poisson_nll_loss`）。
     // 本体は 1 行委譲に固定し、入口検査（テープ一致・shape・確保前バイト数上限・
     // label_smoothing／class_weight／target 添字の範囲）の迂回や独自実装への
     // すり替えを facade の正ガード（`var_loss_ops_methods_are_thin_delegations`）で
     // 拒否する。`loss_ops` モジュール・`CrossEntropyOptions` の再エクスポートは
-    // 未承認（`docs/autodiff-loss-ops-decision.md` §6）。
+    // 未承認（`docs/autodiff-loss-ops-decision.md` §6。距離・Poisson 系の
+    // `TripletMarginOptions`・`PoissonNllOptions` も同様。`docs/autodiff-distance-poisson-loss-ops-decision.md` §6）。
     // PyTorch との差異（`ignore_index` 既定は `None`・ゼロ分母は 0.0・負の重みは拒否）は
     // 同決定記録 §3 参照。
 
@@ -4700,6 +4702,58 @@ impl<'t> Var<'t> {
         options: &crate::loss_ops::CrossEntropyOptions,
     ) -> Result<Var<'t>, AutodiffError> {
         crate::loss_ops::cross_entropy_loss_with(self, targets, class_dim, reduction, options)
+    }
+
+    /// コサイン埋め込み損失（`torch.nn.CosineEmbeddingLoss` 相当。`self` が x1。
+    /// イシュー #2167・#2539）。`crate::loss_ops::cosine_embedding_loss` へ委譲する。
+    /// テープ不一致・shape 不一致・`y` が ±1 以外・`margin` 非有限は型付きエラーで
+    /// 拒否する。PyTorch との差分は決定記録 `docs/autodiff-distance-poisson-loss-ops-decision.md` §3 参照。
+    pub fn cosine_embedding_loss(
+        &self,
+        x2: &Var<'t>,
+        y: &Tensor<f32>,
+        margin: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::loss_ops::cosine_embedding_loss(self, x2, y, margin, reduction)
+    }
+
+    /// マージンランキング損失（`torch.nn.MarginRankingLoss` 相当。`self` が x1。
+    /// イシュー #2167・#2539）。`crate::loss_ops::margin_ranking_loss` へ委譲する。
+    /// テープ不一致・shape 不一致・`y` が ±1 以外・`margin` 非有限は型付きエラーで拒否する。
+    pub fn margin_ranking_loss(
+        &self,
+        x2: &Var<'t>,
+        y: &Tensor<f32>,
+        margin: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::loss_ops::margin_ranking_loss(self, x2, y, margin, reduction)
+    }
+
+    /// トリプレットマージン損失（`torch.nn.TripletMarginLoss` 相当。`self` が anchor。
+    /// イシュー #2167・#2539）。`crate::loss_ops::triplet_margin_loss` へ委譲する。
+    /// テープ不一致・shape 不一致・`p < 1`・`eps` 負などは型付きエラーで拒否する。
+    pub fn triplet_margin_loss(
+        &self,
+        positive: &Var<'t>,
+        negative: &Var<'t>,
+        options: &crate::loss_ops::TripletMarginOptions,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::loss_ops::triplet_margin_loss(self, positive, negative, options, reduction)
+    }
+
+    /// Poisson 負の対数尤度損失（`torch.nn.PoissonNLLLoss` 相当。`self` が input。
+    /// イシュー #2167・#2539）。`crate::loss_ops::poisson_nll_loss` へ委譲する。
+    /// テープ不一致・shape 不一致・`eps` 不正は型付きエラーで拒否する。
+    pub fn poisson_nll_loss(
+        &self,
+        target: &Var<'t>,
+        options: &crate::loss_ops::PoissonNllOptions,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::loss_ops::poisson_nll_loss(self, target, options, reduction)
     }
 
     // ---- activation_ops 委譲メソッド（#2146 実装・#2516 公開。親 #2500・ルート #2499）----
