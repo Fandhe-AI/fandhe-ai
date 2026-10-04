@@ -13,11 +13,11 @@ pixel_shuffle.rs`）へ追加した。いずれも既存 `Var` 演算
 いない。`Var` に inherent の `pub fn` は追加していない（`Var` は
 facade から再エクスポートされるため。#2159 の先例）。facade 公開
 （`compat::Sequential::add_pixel_shuffle`／`add_pixel_unshuffle`・
-`Var::pixel_shuffle`／`Var::pixel_unshuffle` の委譲メソッド）は承認
-待ちのまま対象外とし、`crates/facade/src/lib.rs::
-PixelShuffleHoldDoctestGuard`（正のプローブ doctest）と
-`crates/facade/tests/api_surface.rs` のソース走査（2 テスト＋自己
-テスト）で多層固定している。
+`Var::pixel_shuffle`／`Var::pixel_unshuffle` の委譲メソッド）は
+イシュー #2526（親 #2520・ルート #2499 の一括承認）で公開済み
+（§6 実装記録）。型の再エクスポート・自由関数公開は未承認のままで、
+`crates/facade/src/lib.rs::PixelShuffleHoldDoctestGuard`（縮小後の
+正のプローブ doctest）で保留固定している。
 
 ## §1 背景
 
@@ -63,7 +63,9 @@ shape 検査は `pixel_shuffle_out_shape`／`pixel_unshuffle_out_shape`
 拒否する（rank・整除性の検査は入力 shape に依存するため forward 時へ
 遅延させる `Unflatten::new` と同じ契約）。
 
-### §2.2 facade 公開・compat::Sequential の add_* — 保留
+### §2.2 facade 公開・compat::Sequential の add_* — 保留（#2526 で公開済みに反転）
+
+本節は #2162 時点の判断記録。#2526 で承認形を公開した結果は §6 実装記録を参照。
 
 イシュー #2162 は「facade への 2 個の `add_*` メソッド」を承認事項
 として挙げ「承認前に実施しない」と定めている。コメントでの承認も
@@ -116,9 +118,8 @@ inherent メソッド追加。経路 1）も同様に未承認のため見送っ
 ## §5 スコープ外（`out-of-scope-tracking.md` に従う。Issue 起票は
 ユーザー承認後）
 
-- `compat::Sequential::add_pixel_shuffle`／`add_pixel_unshuffle`・
-  `Var::pixel_shuffle`／`Var::pixel_unshuffle` の facade 公開
-  （承認待ち）
+- `PixelShuffle`／`PixelUnshuffle` 型の facade 再エクスポート・自由関数
+  としての公開（未承認。`add_*`／`Var` メソッドは #2526 で公開済み）
 - GPU 専用の並べ替えカーネル
 - ONNX `DepthToSpace`／`SpaceToDepth` との相互運用（`onnx-interop`
   の import／export）
@@ -141,3 +142,36 @@ inherent メソッド追加。経路 1）も同様に未承認のため見送っ
 CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に無いため
 `#[ignore]` テストを未実行のまま出荷する。実行コマンド・記入欄は
 `docs/perf/logs/pixel-shuffle-2162/README.md` を参照。
+
+## §6 実装記録（イシュー #2526・親 #2520・ルート #2499 本文「承認範囲」節の一括承認）
+
+§6 の承認事項 1・2 を 2026-10-04 のルート #2499 の一括承認（Phase 1〜3 の facade 公開を設計判断記録の
+推奨形で実装してよい）に基づき実装した。追加 API のみで `fandhe-ai =0.10.0` の公開 API は非破壊。
+
+- 公開した 4 名: `Sequential::add_pixel_shuffle(upscale_factor: usize) -> Result<Self, AutodiffError>`・
+  `Sequential::add_pixel_unshuffle(downscale_factor: usize) -> Result<Self, AutodiffError>`・
+  `Var::pixel_shuffle(&self, upscale_factor: usize) -> Result<Var<'t>, AutodiffError>`・
+  `Var::pixel_unshuffle(&self, downscale_factor: usize) -> Result<Var<'t>, AutodiffError>`。
+  シグネチャは §6 に明記がなかったため `PixelShuffle::new`／`add_unflatten`／`Var::unflatten` の先例から
+  機械的に導いた。`Result` を返すのは `new(0)` が `Err` になるため。
+- 共有 forward への一本化: `nn::pixel_shuffle_forward`／`pixel_unshuffle_forward`（`pub(crate)`）を新設し、
+  `PixelShuffle::forward`／`PixelUnshuffle::forward` と `Var` メソッドの双方が呼ぶ。`Var` メソッドは
+  `new()` を経由しないため、倍率 `0` の `InvalidArgument` 拒否をこの共有関数に置き、層経路と判定基準を
+  一本化した（`.claude/rules/security.md` A08）。shape 検査が tape 操作より先のため孤児ノードを残さない。
+- `Module` の `as_*` フックは追加しない（無状態層で、保存は `LayerSpec`、学習・常駐経路の判定は
+  `named_parameters()` で足りるため。§2.3・`Identity`／`Unflatten`／`ZeroPad2d` の先例）。
+- 学習経路・常駐経路: 既存走査の汎用分岐で素通しされる（`contains_resident_unsupported_layer` に追加しない
+  ＝常駐経路は対応扱い。Conv2d 等の未対応層との混在は従来どおり `BackendError::Unsupported`）。
+- 保存: kind `pixel_shuffle`（`upscale_factor`）・`pixel_unshuffle`（`downscale_factor`）を追加
+  （allowlist 37 → 39 種・`format_version` 不変）。非信頼 manifest は固定キー allowlist と `usize` 厳密
+  パースで検査し、`0` は構築時の `InvalidArgument` で型付き拒否する。ONNX export は `UnsupportedLayer`。
+- ガード: `PixelShuffleHoldDoctestGuard` から `__FandhePixelShuffleAddProbe`／`__FandhePixelShuffleVarProbe`
+  と `seq.*`／`v.*` の呼び出しを撤去し、型名・自由関数の衝突プローブだけを残した。`api_surface.rs` の
+  否定ガード（`compat_sequential_does_not_expose_pixel_shuffle_add_methods` と自己テスト）を撤去し、
+  正ガード（`workspace_declares_pixel_shuffle_facade_fn_names_only_in_approved_locations`・
+  `var_pixel_shuffle_methods_are_thin_delegations`・`var_pixel_shuffle_methods_are_reachable_via_facade_only`・
+  `compat_sequential_pixel_shuffle_add_methods_have_approved_signatures` と自己テスト）へ置換した。
+- テスト: `crates/facade/tests/compat_sequential_pixel_shuffle.rs`（CPU）・
+  `compat_sequential_pixel_shuffle_backend_parity.rs`（`#[ignore]` 実機・bit 完全一致。実測は
+  `docs/perf/logs/compat-sequential-pixel-shuffle-2526/README.md` へ申し送り）。
+- スコープ外: 型の再エクスポート・自由関数公開、ONNX `DepthToSpace`／`SpaceToDepth`、GPU 専用カーネル。

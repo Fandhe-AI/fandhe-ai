@@ -263,10 +263,9 @@ InstanceNorm」行と同じ理由で、本 Tier 1 表（1 節）にも Tier 2（
 追加）の対象外と判断した。`Module` trait への統合（`forward`／
 `forward_host`）は行ったが、**facade 公開面拡張
 （`compat::Sequential::add_pixel_shuffle`／`add_pixel_unshuffle`・
-`Var::pixel_shuffle`／`Var::pixel_unshuffle`）は本文書 §5 の承認
-（経路 1 または経路 2）が未取得のため実施していない**——facade
-からは到達できないまま内部クレート限定で残る。詳細は
-`docs/autodiff-pixel-shuffle-decision.md`。
+`Var::pixel_shuffle`／`Var::pixel_unshuffle`）はイシュー #2526 で
+公開済み**（§5「適用記録（経路 2。イシュー #2526）」。型の再エクスポート
+は未承認のまま）。詳細は `docs/autodiff-pixel-shuffle-decision.md`。
 
 ### 1.3 Tier 2（長尾。対象範囲・未実装）
 
@@ -1739,3 +1738,16 @@ affine・`num_channels` 引数は持たない。学習経路へ結線し、常�
 保留ガードは存在しなかったため、`api_surface.rs` に承認形だけを許す正ガード 4 件を新設した。
 保留継続: affine 付き構成・型／既定 eps 定数の再エクスポート・常駐経路対応・ONNX export 対応・GPU 専用カーネル。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は `docs/perf/logs/compat-sequential-group-instance-norm-2525/README.md` へ申し送り。
+
+**適用記録（経路 2。イシュー #2526・親 #2520・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`PixelShuffle`／`PixelUnshuffle`（#2162）を `compat::Sequential::add_pixel_shuffle(upscale_factor)`・
+`add_pixel_unshuffle(downscale_factor)` と `Var::pixel_shuffle`／`Var::pixel_unshuffle` の `pub fn` 各 1 件として公開した
+（追加 API のみ・新規公開型なし。`fandhe-ai =0.10.0` の公開 API は非破壊）。具体シグネチャは
+`docs/autodiff-pixel-shuffle-decision.md` §6 に記載がなかったため内部コンストラクタと `Var::unflatten` から機械的に導出した。
+`Var` メソッドと層は共有 forward を通し、倍率 `0` の `InvalidArgument` 判定を一本化した。学習経路・常駐経路は無状態層として通過し
+（未対応層との混在は従来どおり `Unsupported`）、`save_model`／`load_model` は kind `pixel_shuffle`／`pixel_unshuffle` を追加した
+（`format_version` 不変）。ONNX export は `UnsupportedLayer`。`Module` の `as_*` フックは追加していない。
+保留ガードは型名・自由関数のプローブだけに縮小し、承認形は `api_surface.rs` の正ガードで固定した。
+保留継続: 型の再エクスポート・自由関数公開・ONNX `DepthToSpace`／`SpaceToDepth`・GPU 専用カーネル。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は
+`docs/perf/logs/compat-sequential-pixel-shuffle-2526/README.md` へ申し送り。

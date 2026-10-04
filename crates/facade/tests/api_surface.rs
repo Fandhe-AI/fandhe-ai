@@ -12185,7 +12185,8 @@ fn compat_sequential_exposes_group_instance_norm_add_methods_issue_2525_counts_d
 
 // =====================================================================
 // イシュー #2162（親 #2131）: PixelShuffle・PixelUnshuffle の facade
-// 公開保留を検査するテスト群。`PixelShuffleHoldDoctestGuard`（`src/
+// 公開保留（#2526 で add_*／Var メソッドは公開済みに反転、型・自由関数のみ保留継続）を
+// 検査するテスト群。`PixelShuffleHoldDoctestGuard`（`src/
 // lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査と、
 // `compat::Sequential::add_pixel_shuffle`／`add_pixel_unshuffle` の
 // 非宣言を持つ。`spatial_layers_hold_doctest_*`（#2159）と同型。
@@ -12224,9 +12225,7 @@ fn pixel_shuffle_hold_doctest_globs_all_pub_modules() {
 /// [`pixel_shuffle_hold_doctest_globs_all_pub_modules`] が glob import
 /// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
 /// **glob 以外の本文**（`__fandhe_pixel_shuffle_hold_probe` モジュール・
-/// `__FandhePixelShuffleAddProbe`／`__FandhePixelShuffleVarProbe`
-/// トレイト定義・`compat::Sequential`／`Var` への実装・`__probe`
-/// 関数）が固定文言 [`PIXEL_SHUFFLE_HOLD_PROBE_BODY`] と 1 行たりとも
+/// `__probe` 関数）が固定文言 [`PIXEL_SHUFFLE_HOLD_PROBE_BODY`] と 1 行たりとも
 /// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの
 /// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
 /// 機械的に拒否する。イシュー #2162）。
@@ -12242,8 +12241,7 @@ fn pixel_shuffle_hold_doctest_probe_body_matches_fixed_contract() {
         "PixelShuffleHoldDoctestGuard の doctest ブロック本文（glob\
          以外）が固定文言 PIXEL_SHUFFLE_HOLD_PROBE_BODY からドリフト\
          している。正のプローブ（__fandhe_pixel_shuffle_hold_probe\
-         モジュール・__FandhePixelShuffleAddProbe／\
-         __FandhePixelShuffleVarProbe トレイト・__probe 関数）の削除・\
+         モジュール・__probe 関数）の削除・\
          弱体化・隠し行の混入がないか確認すること。"
     );
 }
@@ -12269,89 +12267,197 @@ mod __fandhe_pixel_shuffle_hold_probe {\n\
 }\n\
 use __fandhe_pixel_shuffle_hold_probe::*;\n\
 \n\
-trait __FandhePixelShuffleAddProbe {\n\
-\x20\x20\x20\x20fn add_pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
-\x20\x20\x20\x20fn add_pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
-}\n\
-\n\
-impl __FandhePixelShuffleAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-trait __FandhePixelShuffleVarProbe {\n\
-\x20\x20\x20\x20fn pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
-\x20\x20\x20\x20fn pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandhePixelShuffleVarProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePixelShuffleHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe(\n\
 \x20\x20\x20\x20_: PixelShuffle,\n\
 \x20\x20\x20\x20_: PixelUnshuffle,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = add_pixel_shuffle();\n\
 \x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = add_pixel_unshuffle();\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::compat::Sequential::add_pixel_shuffle(seq);\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = seq.add_pixel_shuffle();\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::compat::Sequential::add_pixel_unshuffle(seq);\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = seq.add_pixel_unshuffle();\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::Var::pixel_shuffle(v);\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = v.pixel_shuffle();\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = fandhe_ai::Var::pixel_unshuffle(v);\n\
-\x20\x20\x20\x20let _: __FandhePixelShuffleHoldMarker = v.pixel_unshuffle();\n\
 }";
 
-/// `src/compat` 配下に `add_pixel_shuffle`／`add_pixel_unshuffle` の
-/// `pub fn` 宣言が存在しないことを固定する（イシュー #2162。
-/// `compat_sequential_does_not_expose_spatial_layer_add_methods` と
-/// 同型。`docs/autodiff-pixel-shuffle-decision.md` §6 承認事項が未承認
-/// のまま対象外としている設計判断の固定）。
+// =====================================================================
+// イシュー #2526（親 #2520・ルート #2499 の一括承認）: `PixelShuffle`／
+// `PixelUnshuffle` の facade 公開の正ガード。保留ガード
+// （`PixelShuffleHoldDoctestGuard`）から add_*／Var メソッドのプローブを外し、
+// 承認形（`Var` の 1 行委譲メソッド 2 個・`compat::Sequential` の add_* 2 個）
+// だけを許す形へ反転した。型の再エクスポートと自由関数での公開は保留ガードの
+// 衝突プローブで引き続き禁止する。承認事項は
+// `docs/autodiff-pixel-shuffle-decision.md` §6 参照。
+// =====================================================================
+
+/// #2526 で公開する 4 名の `fn` 名（`Var` 2 個 + `Sequential` 2 個）。
+const PIXEL_SHUFFLE_FACADE_FN_NAMES: [&str; 4] = [
+    "pixel_shuffle",
+    "pixel_unshuffle",
+    "add_pixel_shuffle",
+    "add_pixel_unshuffle",
+];
+
+/// workspace 全体（`crates/*/src/`）で [`PIXEL_SHUFFLE_FACADE_FN_NAMES`] の
+/// `fn` 宣言の定義元集合を固定する（過不足とも fail-closed。迂回実装の混入検出）。
 #[test]
-fn compat_sequential_does_not_expose_pixel_shuffle_add_methods() {
-    let compat_dir = facade_crate_root().join("src/compat");
-    let forbidden = ["add_pixel_shuffle", "add_pixel_unshuffle"];
-    let mut offenses = Vec::new();
-    visit_rs_files(&compat_dir, &mut |path, content| {
-        for name in forbidden {
-            if contains_pub_fn_declaration(content, name) {
-                offenses.push(format!("{}: pub fn {name}", path.display()));
-            }
+fn workspace_declares_pixel_shuffle_facade_fn_names_only_in_approved_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .expect("workspace crates ディレクトリが読めない")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty());
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
         }
-    });
-    assert!(
-        offenses.is_empty(),
-        "src/compat 配下に PixelShuffle／PixelUnshuffle 系 add_* が\
-         見つかった（承認スコープ〈#2162〉は Sequential への追加を\
-         認めていない）: {offenses:?}"
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in PIXEL_SHUFFLE_FACADE_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/var.rs::pixel_shuffle",
+        "autodiff/src/var.rs::pixel_unshuffle",
+        "facade/src/compat/sequential.rs::add_pixel_shuffle",
+        "facade/src/compat/sequential.rs::add_pixel_unshuffle",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "#2526 の 4 名の fn 宣言の定義元集合が承認形とずれている（新たな定義元が\
+         承認済みの実装なのか迂回経路なのかを確認すること）: {found:?}"
     );
 }
 
-/// [`compat_sequential_does_not_expose_pixel_shuffle_add_methods`] の
-/// 自己テスト（合成入力で検出できることを確認する）。
+/// `var.rs` の 2 メソッド本体の承認形（`nn` 側共有 forward への 1 行委譲）。
+const PIXEL_SHUFFLE_VAR_EXPECTED_BODIES: [(&str, &str); 2] = [
+    (
+        "pixel_shuffle",
+        "crate : : nn : : pixel_shuffle_forward ( self , upscale_factor )",
+    ),
+    (
+        "pixel_unshuffle",
+        "crate : : nn : : pixel_unshuffle_forward ( self , downscale_factor )",
+    ),
+];
+
+/// `Var::pixel_shuffle`／`Var::pixel_unshuffle` が共有 forward への薄い委譲で
+/// あることを固定する（スタブ・独自実装へのすり替えを拒否）。
 #[test]
-fn compat_sequential_does_not_expose_pixel_shuffle_add_methods_detects_offense() {
-    assert!(contains_pub_fn_declaration(
-        "pub fn add_pixel_shuffle(&mut self, l: PixelShuffle) {}",
-        "add_pixel_shuffle"
+fn var_pixel_shuffle_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in PIXEL_SHUFFLE_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（共有 forward への 1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけで 2 メソッドへ到達でき、シグネチャが
+/// 承認形と一致し、実際に適用して期待 shape・値が得られることを固定する。
+#[test]
+fn var_pixel_shuffle_methods_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+
+    type Sig<'t> = fn(&Var<'t>, usize) -> Result<Var<'t>, AutodiffError>;
+    fn sig_shuffle<'t>() -> Sig<'t> {
+        Var::<'t>::pixel_shuffle
+    }
+    fn sig_unshuffle<'t>() -> Sig<'t> {
+        Var::<'t>::pixel_unshuffle
+    }
+
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&Tensor::new(vec![0.0_f32, 1.0, 2.0, 3.0], &[1, 4, 1, 1]).expect("tensor"));
+    let y = sig_shuffle()(&x, 2).expect("pixel_shuffle");
+    assert_eq!(y.to_tensor().shape(), [1, 1, 2, 2]);
+    assert_eq!(
+        y.to_tensor().host_slice().into_owned(),
+        [0.0, 1.0, 2.0, 3.0]
+    );
+    let z = sig_unshuffle()(&y, 2).expect("pixel_unshuffle");
+    assert_eq!(z.to_tensor().shape(), [1, 4, 1, 1]);
+    assert!(sig_shuffle()(&x, 0).is_err());
+    assert!(sig_shuffle()(&x, 3).is_err());
+    assert!(sig_unshuffle()(&x, 0).is_err());
+}
+
+const ADD_PIXEL_SHUFFLE_PARAMS: &str =
+    "mut self, upscale_factor: usize) -> Result<Self, AutodiffError>";
+const ADD_PIXEL_UNSHUFFLE_PARAMS: &str =
+    "mut self, downscale_factor: usize) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential` の 2 add_* が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_pixel_shuffle_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_pixel_shuffle"),
+        1
+    );
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_pixel_unshuffle"),
+        1
+    );
+    assert!(sequential_spatial_add_signature_ok(
+        &cleaned,
+        "add_pixel_shuffle",
+        ADD_PIXEL_SHUFFLE_PARAMS
     ));
-    assert!(!contains_pub_fn_declaration(
-        "pub fn add_linear(&mut self, l: Linear) {}",
-        "add_pixel_shuffle"
+    assert!(sequential_spatial_add_signature_ok(
+        &cleaned,
+        "add_pixel_unshuffle",
+        ADD_PIXEL_UNSHUFFLE_PARAMS
     ));
+}
+
+/// [`compat_sequential_pixel_shuffle_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_pixel_shuffle_add_methods_have_approved_signatures_detects_offense() {
+    let ok = "pub fn add_pixel_shuffle(mut self, upscale_factor: usize,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "add_pixel_shuffle",
+        ADD_PIXEL_SHUFFLE_PARAMS
+    ));
+    for bad in [
+        "pub fn add_pixel_shuffle(mut self, upscale_factor: usize) -> Self {",
+        "pub fn add_pixel_shuffle(mut self, upscale_factor: i64) -> Result<Self, AutodiffError> {",
+        "pub fn add_pixel_shuffle(&mut self, upscale_factor: usize) -> Result<Self, AutodiffError> {",
+        "pub fn add_linear(mut self) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(
+                bad,
+                "add_pixel_shuffle",
+                ADD_PIXEL_SHUFFLE_PARAMS
+            ),
+            "{bad}"
+        );
+    }
 }
 
 // =====================================================================
