@@ -265,3 +265,105 @@ doctest）・`crates/facade/tests/api_surface.rs` の 4 テスト
 - `git diff --stat` で `crates/facade/src/**`・`Cargo.toml`／
   `Cargo.lock`・`docs/spec`・既存 fixture テスト 4 本に差分がないこと
   を確認済み
+
+## §9 #2552 facade 公開形の着手時判定と承認依頼
+
+イシュー #2552（親 #2551・ルート #2499）の記録。調査基準は `origin/main`
+`2e6a166b`。**本節は推奨案の記録と承認依頼であり、承認を取得したことを
+意味しない。** ルート #2499 の一括承認は「決定記録に書かれた推奨形」に
+しか及ばないため、推奨形が無い論点は実装せずに停止する（#2732・#2728
+と同型）。§5 の本文・見出しは変更しない。
+
+### 9.1 着手時判定（§5 に確定した推奨形は無い）
+
+| §5 項目 | 記録の文言 | 状態 |
+|---|---|---|
+| 1. `compile_with_param_groups` | 「追加」「委譲とする**案**」。戻り値型・エラー型・AMP／`LrSchedule` との組み合わせは未記載 | 案の段階 |
+| 2. 再エクスポート | `ParamGroupStep` は「**必要なら**」 | 未決 |
+| 3. `LrSchedule` とグループ lr | 「**未決の設計論点**」。案 A／案 B 併記、`History::lr` の意味は「承認時に決める」 | 複数案 |
+| 4. スロット添字ヘルパー | 「**要否**」 | 未決 |
+| エラー型 | §5 に記載なし（§2.3 は内部の `AutodiffError::InvalidArgument`） | 記載なし |
+
+記録済みの事実: エラー型は既存の `AutodiffError::InvalidArgument`、
+配置候補は `fandhe_ai::optim` と `compat::Sequential`。以降は推奨案
+（承認待ち）である。
+
+### 9.2 推奨案（承認待ち）
+
+1. **エントリ**: `compat::Sequential` の inherent method として
+   `pub fn compile_with_param_groups(&mut self, optimizer: Optimizer, loss:
+   Loss, param_groups: &[ParamGroup]) -> Result<(), AutodiffError>` を追加
+   する。`Vec<ParamGroup>` は非公開の `Compiled` に保持する。既存
+   `compile()` のシグネチャ・意味は変えない（内部で `&[]` へ委譲する場合は
+   bit 完全一致テストを必須とする）。状態への代入は全構築成功後に行う
+   （`compile_with_amp` と同じ construct-before-assign）。
+2. **再エクスポート**: `fandhe_ai::optim` へ `ParamGroup` と
+   `ParamGroupStep` の両方を素の `pub use` で出す（手動学習ループで
+   `step_with_groups` を呼ぶには trait が必要。`optim.rs` の 1 文 1 行規約
+   に従う）。公開後は `step_with_groups` のシグネチャが 0.10.x の間固定
+   される。trait は sealed ではないため、メソッド追加は default 実装付き
+   に限る。
+3. **`LrSchedule`**: 案 B を推奨する。`param_groups` が空でないとき
+   `Callback::LrSchedule` が渡されたら、`fit_with_callbacks`（`_named`）の
+   引数検査で状態変更前に `InvalidArgument` で拒否する（`RmsProp`／
+   `Adagrad`／`Lamb` と `LrSchedule` の併用拒否と同型）。`History::lr` は
+   現行どおり既定グループの lr の意味のまま。案 A（比でスケール。
+   `compile_lr == 0` の扱いが要る）は後続の opt-in に回す。拒否を後で受理
+   に変えるのは非破壊方向の変更である。
+4. **スロット添字ヘルパー**: 追加しない。`compat::Sequential::
+   named_parameters()` は `trainable_parameters()` と同一順序（層順・層内
+   weight → bias。`sequential.rs` の順序契約 doc、#1758 のテストで固定）
+   なので、キー（`"{index}.{name}"`）の列挙位置がそのままスロット添字に
+   なる。対応関係を `compile_with_param_groups` の doc に書くだけにする
+   （新規 API ゼロ）。
+5. **エラー型**: 既存の `AutodiffError::InvalidArgument` のみ。新 variant・
+   新エラー型は追加しない。検証規則（params が空・範囲外・重複・非有限・
+   負値）は §2.3 のまま。
+
+### 9.3 記録に無かった追加論点（推奨はいずれも fail-closed）
+
+- `Optimizer::Lbfgs` と空でない groups: `ParamGroupStep` 未実装のため
+  compile 時に `InvalidArgument`。
+- `compile_with_amp` との併用: 組み合わせ用 API は今回追加しない（必要なら
+  別の承認事項）。
+- カスタム学習 step フック・`accumulate_steps > 1` と groups: 実装時に
+  `optimizer.step` を迂回する経路を確認し、`step_with_groups` 経由で
+  対応できなければ拒否する。
+- スロット添字の検証時期: step 時の既存検証（`resolve_slot_hparams`）で
+  必ず行う。compile 時に先行検証する場合も `pub(crate)` は公開せず、件数
+  検査を facade 側に置く。
+- compile 経路が届くのは `Optimizer` の 6 種（Sgd・AdamW・Adam・RmsProp・
+  Adagrad・Lamb）。`Adadelta`／`Adamax`／`NAdam`／`RAdam` は variant が無く
+  手動ループ（項目 2 の trait）でのみ使える。
+- `DeviceParamStore` 常駐経路は従来どおりスコープ外（§6）。
+
+### 9.4 `fandhe-ai =0.10.0` 公開 API の非破壊確認（推奨案ごと）
+
+- 項目 1: inherent `pub fn` の追加のみ。`compile`・`compile_with_amp`・
+  `fit*` のシグネチャと意味は不変。`FitConfig`（`Copy + Eq`）・
+  `History`／`Optimizer`（`#[non_exhaustive]`）は変更しない。
+- 項目 2: `pub use` の追加のみ（minor 変更）。glob import 利用者の自前
+  同名定義との衝突の可能性を注記する。`crates/facade/src` に
+  `ParamGroup`／`ParamGroupStep` の既存公開定義は無いことを確認済み。
+- 項目 3: groups 無しの既定経路の `LrSchedule` 挙動は不変。拒否されるのは
+  新 API 使用時のみ。
+- 項目 4: 追加しないため変更ゼロ。
+- エラー型: 既存の型・variant のみ。
+
+### 9.5 ユーザーに決めてほしい事項
+
+- (a) 9.2 項目 1 のシグネチャ
+- (b) 項目 2 で `ParamGroup` と `ParamGroupStep` を両方出すか
+- (c) 項目 3 を案 B（拒否）とするか案 A とするか
+- (d) 項目 4 でヘルパーを追加しない方針
+- (e) 9.3 の fail-closed 方針
+
+推奨案を一括承認するか、論点ごとに代替を選ぶ。承認されるまで #2553
+（facade 公開の実装）・#2554（保留ガード反転）は着手不可（blocked）。
+
+### 9.6 本イシューで行わないこと
+
+- `crates/facade/**` の変更、保留ガード（`ParamGroupsHoldDoctestGuard`・
+  `api_surface.rs` の 4 テスト）の撤去・反転
+- `docs/compat-api-scope.md` §5 への適用記録（公開を適用していないため）
+- 追跡 Issue の起票（ユーザー承認が必要）
