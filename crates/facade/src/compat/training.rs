@@ -1397,6 +1397,11 @@ impl Sequential {
             self.compiled = Some(compiled);
             return Err(e);
         }
+        // イシュー #2530: batch_first=false の MHA は DataLoader の第 0 軸分割と不整合のため拒否。
+        if let Err(e) = self.reject_seq_first_layer_for_fit(&format!("Sequential::{method}")) {
+            self.compiled = Some(compiled);
+            return Err(e);
+        }
         // (1.5) 勾配累積（イシュー #2180）の引数検査。`accumulate_steps
         // == 0` はウィンドウ幅として意味を持たない（fail-closed）。
         if config.accumulate_steps == 0 {
@@ -2126,6 +2131,7 @@ impl Sequential {
         metrics: &[Metrics],
         method: &str,
     ) -> Result<(f32, Option<MetricsResult>), AutodiffError> {
+        self.reject_seq_first_layer_for_fit(&format!("Sequential::{method}"))?;
         let to_invalid_arg = |e: fandhe_ai_tensor_core::data::DataError| {
             AutodiffError::InvalidArgument(format!("Sequential::{method}: {e}"))
         };
@@ -3064,5 +3070,49 @@ mod lbfgs_fit_failure_tests {
             .unwrap_or_else(|e| panic!("再 compile 後の fit に失敗: {e}"));
         assert_eq!(history.loss.len(), 1);
         assert!(history.loss[0].is_finite());
+    }
+}
+
+/// イシュー #2530・PR #2724 レビュー指摘: `batch_first=false` の MultiheadAttention を含む
+/// モデルは、DataLoader の第 0 軸分割と不整合になるため `fit`／`evaluate` が型付きで拒否する。
+#[cfg(test)]
+mod seq_first_mha_fit_rejection_tests {
+    use super::super::MultiheadAttentionConfig;
+    use super::*;
+
+    fn data() -> (Tensor<f32>, Tensor<f32>) {
+        (
+            Tensor::new(vec![0.1; 4 * 2 * 8], &[4, 2, 8]).unwrap(),
+            Tensor::new(vec![0.2; 4 * 2 * 8], &[4, 2, 8]).unwrap(),
+        )
+    }
+
+    fn compiled(batch_first: bool) -> Sequential {
+        let cfg = MultiheadAttentionConfig::new(8, 2).with_batch_first(batch_first);
+        let mut m = Sequential::new()
+            .add_multihead_attention_with_config(cfg, 1)
+            .unwrap();
+        m.compile(Optimizer::Sgd(SgdConfig::new(0.01)), Loss::Mse)
+            .unwrap();
+        m
+    }
+
+    #[test]
+    fn fit_and_evaluate_reject_batch_first_false() {
+        let (x, y) = data();
+        let mut m = compiled(false);
+        let err = m.fit(&x, &y, FitConfig::new(1, 2)).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(m.is_compiled(), "拒否後も compiled を保持する");
+        let err = m.evaluate(&x, &y, 2).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn batch_first_true_still_accepted() {
+        let (x, y) = data();
+        let mut m = compiled(true);
+        m.fit(&x, &y, FitConfig::new(1, 2)).unwrap();
+        m.evaluate(&x, &y, 2).unwrap();
     }
 }

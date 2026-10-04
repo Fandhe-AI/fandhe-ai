@@ -199,11 +199,9 @@
 //! `key_padding_mask.is_none()` の既定経路はテープに積むノード列が
 //! 変更前と bit 同一（`attention.rs` モジュール doc「構築時オプション」
 //! ／「呼び出し時オプション」節参照）。facade 公開（`compat::
-//! Sequential` のオプション付き構築メソッド・`MultiheadAttentionConfig`
-//! の再エクスポート）は未承認のため保留する（`crates/facade/src/lib.rs`
-//! の `MhaOptionsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs`
-//! の否定ガードで固定。`docs/autodiff-mha-options-decision.md` §承認
-//! 事項）。
+//! Sequential::add_multihead_attention_with_config`・`compat::
+//! MultiheadAttentionConfig` の再エクスポート）はイシュー #2530 で
+//! 公開済み（`docs/autodiff-mha-options-decision.md` §承認事項）。
 //! イシュー #2179（親 #2131）で [`ExponentialMovingAverage`]（`ema`
 //! モジュール）を追加した。学習中にパラメータの shadow copy を保持し
 //! `update`／`update_named`／`update_from_module` で指数平滑更新、
