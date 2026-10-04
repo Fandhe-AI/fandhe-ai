@@ -7,7 +7,7 @@
 //! #2374 の正常系 bit 一致行列）。
 //!
 //! `mod roundtrip_matrix`（#2374）は `docs/compat-model-io-decision.md` §6 の正常系を
-//! 「アーキテクチャ（34 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
+//! 「アーキテクチャ（35 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
 //! 6 optimizer × AMP・GradScaler 非初期・Lbfgs 履歴 未満／到達済み）」の直積で固定し、全セルで
 //! 再保存したファイルのバイト一致を検査する。単一軸の深掘りは `compat_sequential_model_io_{layers,
 //! batch_norm,compiled,lbfgs}.rs` が担う（対応表は同 doc §6.1）。
@@ -473,8 +473,8 @@ mod roundtrip_matrix {
 
     use crate::common::temp_dir::TempDirGuard;
 
-    /// allowlist の 34 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-    const ALL_KINDS: [&str; 34] = [
+    /// allowlist の 35 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+    const ALL_KINDS: [&str; 35] = [
         "linear",
         "relu",
         "sigmoid",
@@ -492,6 +492,7 @@ mod roundtrip_matrix {
         "dropout",
         "conv2d",
         "conv_transpose2d",
+        "conv3d",
         "conv1d",
         "layer_norm",
         "rms_norm",
@@ -600,6 +601,17 @@ mod roundtrip_matrix {
             .add_avg_pool2d([1, 1], None, [0, 0], false)?
             .add_flatten(1, 3)
             .add_linear(4, 3, 23)?;
+        m.eval();
+        Ok(m)
+    }
+
+    /// rank 5 入力 `[2, 2, 3, 3, 3]`: conv3d（groups・stride・dilation 非自明）・flatten（イシュー #2524）。
+    fn cnn3d_model() -> Built {
+        let mut m = Sequential::new()
+            .add_conv3d(2, 4, [2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1], 2, 25)?
+            .add_relu()
+            .add_flatten(1, 4)
+            .add_linear(32, 3, 26)?;
         m.eval();
         Ok(m)
     }
@@ -907,7 +919,7 @@ mod roundtrip_matrix {
 
     // -- テスト ---------------------------------------------------------------
 
-    /// A-30 × eval: 34 種の kind の和集合（未 compile）。
+    /// A-30 × eval: 35 種の kind の和集合（未 compile）。
     #[test]
     fn matrix_thirty_kinds_eval_round_trip_and_resave_identical() {
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -924,6 +936,11 @@ mod roundtrip_matrix {
                 tensor(&[2, 3, 10], 2.5),
             ),
             (
+                "cnn3d",
+                cnn3d_model().expect("構築"),
+                tensor(&[2, 2, 3, 3, 3], 3.5),
+            ),
+            (
                 "seq-pad",
                 sequence_model(Some(0)).expect("構築"),
                 ids(&[2, 5], 10),
@@ -938,7 +955,7 @@ mod roundtrip_matrix {
             seen.extend(check_cell(label, &mut model, &input, None));
         }
         let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-        assert_eq!(seen, expected, "34 種の kind をすべて往復させたはず");
+        assert_eq!(seen, expected, "35 種の kind をすべて往復させたはず");
     }
 
     /// A-deep × {eval, train 後の BN}: train モードで predict を回し running stats を動かした状態。

@@ -12250,9 +12250,11 @@ fn compat_sequential_does_not_expose_pixel_shuffle_add_methods_detects_offense()
 // イシュー #2158（親 #2131）: Conv3d の facade 公開保留を検査する
 // テスト群。`VarConv3dHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリと、`compat::Sequential::add_conv3d` の非宣言を
-// 持つ。承認事項・多層防御の位置づけは `docs/conv-ops-design.md` §16
-// 参照。
+// 定義元インベントリを持つ。イシュー #2524（ルート #2499 の一括承認）で
+// `Var::conv3d`／`compat::Sequential::add_conv3d` の 2 形が公開されたため、
+// 保留ガードは承認外の形（`conv3d_ops` 再エクスポート・`Tensor`／`Tape` の
+// `conv3d`）だけを禁じる縮小形になり、承認形は正ガード（シグネチャ・宣言数・
+// 委譲本体の固定）で守る。多層防御の位置づけは `docs/conv-ops-design.md` §16.7 参照。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `VarConv3dHoldDoctestGuard` doc 内の
@@ -12326,10 +12328,6 @@ trait __FandheConv3dHoldProbe {\n\
 \x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheConv3dHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
-}\n\
-\n\
 impl __FandheConv3dHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
 }\n\
@@ -12338,24 +12336,11 @@ impl __FandheConv3dHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
 }\n\
 \n\
-trait __FandheConv3dAddProbe {\n\
-\x20\x20\x20\x20fn add_conv3d(&self) -> __FandheConv3dMarker;\n\
-}\n\
-\n\
-impl __FandheConv3dAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }\n\
-}\n\
-\n\
 fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// `conv3d_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
 \x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
 \x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20conv3d_ops::conv3d();\n\
-}\n\
-\n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheConv3dMarker = fandhe_ai::Var::conv3d(x);\n\
-\x20\x20\x20\x20let _: __FandheConv3dMarker = x.conv3d();\n\
 }\n\
 \n\
 fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
@@ -12366,20 +12351,16 @@ fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
 fn __probe_tape(x: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheConv3dMarker = fandhe_ai::Tape::conv3d(x);\n\
 \x20\x20\x20\x20let _: __FandheConv3dMarker = x.conv3d();\n\
-}\n\
-\n\
-fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandheConv3dMarker = fandhe_ai::compat::Sequential::add_conv3d(x);\n\
 }";
 
 /// facade src 全体（`crates/facade/src/**`）に、`conv3d_ops` を参照する
-/// `pub use`（モジュール再エクスポート・別名含む）も、`fn conv3d`／
-/// `fn add_conv3d` の宣言（可視性・宣言文脈を問わない）も存在しないこと
-/// を固定する（`VarConv3dHoldDoctestGuard` の正のプローブと多層防御を
-/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// activation_ops` と同型）。
+/// `pub use`（モジュール再エクスポート・別名含む）も、`fn conv3d` の宣言も
+/// 存在せず、`fn add_conv3d` は承認形として `src/compat/sequential.rs` にだけ
+/// ちょうど 1 件あることを固定する（`VarConv3dHoldDoctestGuard` の正の
+/// プローブと多層防御を成すソース走査ガード。イシュー #2524 で `add_conv3d`
+/// を「0 件」から「承認ファイルに 1 件」へ反転した）。
 #[test]
-fn facade_does_not_reexport_or_declare_conv3d() {
+fn facade_declares_conv3d_names_only_in_approved_form() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
@@ -12394,11 +12375,15 @@ fn facade_does_not_reexport_or_declare_conv3d() {
         }
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
         let tokens = tokenize_including_punctuation(&cleaned);
-        for fn_name in ["conv3d", "add_conv3d"] {
+        let is_sequential = path.ends_with("compat/sequential.rs");
+        for (fn_name, allowed) in [
+            ("conv3d", 0usize),
+            ("add_conv3d", usize::from(is_sequential)),
+        ] {
             let count = count_fn_declarations_by_name(&tokens, fn_name);
-            if count > 0 {
+            if count != allowed {
                 offending.push(format!(
-                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    "{}: `fn {fn_name}` 宣言が {count} 件（許容 {allowed} 件）",
                     path.display()
                 ));
             }
@@ -12406,13 +12391,106 @@ fn facade_does_not_reexport_or_declare_conv3d() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が conv3d（イシュー #2158 の内部クレート限定新規\
-         公開面。facade 公開・compat::Sequential::add_conv3d 追加はいず\
-         れも承認待ちのため対象外という設計判断に違反）を再エクスポート、\
-         または同名の fn を宣言している: {offending:?}"
+        "facade の公開面が conv3d の承認形（Var::conv3d 委譲・compat::Sequential::\
+         add_conv3d。イシュー #2524）から逸脱している: {offending:?}"
     );
 }
 
+const ADD_CONV3D_PARAMS: &str = "mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_conv3d` が承認シグネチャで 1 件だけ存在する（イシュー #2524）。
+#[test]
+fn add_conv3d_signature_matches_approved_contract() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(count_fn_declarations_by_name(&tokens, "add_conv3d"), 1);
+    assert!(sequential_spatial_add_signature_ok(
+        &cleaned,
+        "add_conv3d",
+        ADD_CONV3D_PARAMS
+    ));
+}
+
+/// [`add_conv3d_signature_matches_approved_contract`] の自己テスト。
+#[test]
+fn add_conv3d_signature_matches_approved_contract_detects_offense() {
+    let ok = "pub fn add_conv3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "add_conv3d",
+        ADD_CONV3D_PARAMS
+    ));
+    for bad in [
+        // groups 欠落
+        "pub fn add_conv3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], dilation: [usize; 3], seed: u64,) -> Result<Self, AutodiffError> {",
+        // 引数順の入替（stride と padding）
+        "pub fn add_conv3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], padding: [usize; 3], stride: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // 型違い（2 軸）
+        "pub fn add_conv3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 2], stride: [usize; 3], padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_conv3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_conv3d", ADD_CONV3D_PARAMS),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_conv3d(` がちょうど 1 件（0 件＝公開の脱落、
+/// 2 件以上＝重複宣言の混入を拒否する正ガード）。
+#[test]
+fn compat_sequential_exposes_conv3d_add_method_issue_2524() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut count = 0usize;
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        count += count_pub_fn_declarations(content, "add_conv3d");
+    });
+    assert_eq!(
+        count, 1,
+        "src/compat 配下の add_conv3d の pub fn 宣言数が 1 件でない（count={count}）"
+    );
+}
+
+/// [`compat_sequential_exposes_conv3d_add_method_issue_2524`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_conv3d_add_method_issue_2524_counts_declarations() {
+    let one = "    pub fn add_conv3d(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_conv3d"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_conv2d"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_conv3d"), 2);
+}
+
+/// `Var::conv3d`（`autodiff/src/var.rs`）の本体が `conv3d_ops::conv3d` への 1 式委譲で
+/// あることを固定し、facade の `fandhe_ai::Var` だけで承認シグネチャの関数ポインタへ
+/// 束縛でき、実際に適用して期待 shape・値が得られることを確認する（イシュー #2524）。
+#[test]
+fn var_conv3d_is_thin_delegation_with_approved_signature() {
+    let path = workspace_crates_dir().join("autodiff/src/var.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "conv3d").as_deref(),
+        Some(
+            "crate : : conv3d_ops : : conv3d ( self , weight , bias , stride , padding , dilation , groups )"
+        ),
+        "Var::conv3d の本体が承認形（conv3d_ops::conv3d への 1 式委譲）と一致しない"
+    );
+
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&fandhe_ai::Tensor::new(vec![1.0_f32; 8], &[1, 1, 2, 2, 2]).unwrap());
+    let w = tape.var(&fandhe_ai::Tensor::new(vec![1.0_f32; 8], &[1, 1, 2, 2, 2]).unwrap());
+    // UFCS で呼ぶことで引数順・型（`[usize; 3]` ×3・`usize`・`Option<&Var>`）を承認形に固定する。
+    let y: Result<fandhe_ai::Var<'_>, fandhe_ai::AutodiffError> =
+        fandhe_ai::Var::conv3d(&x, &w, None, [1; 3], [0; 3], [1; 3], 1);
+    let out = y.unwrap().to_tensor();
+    assert_eq!(out.shape(), &[1, 1, 1, 1, 1]);
+    assert_eq!(out.contiguous().as_slice().unwrap(), &[8.0_f32]);
+}
 /// `conv3d`・`im2col3d`・`col2im3d`（3 個の関数名。イシュー #2158）の
 /// workspace 全体（`crates/*/src/`）における `fn` 宣言の定義元集合が、
 /// 実装計画で列挙した許容集合とちょうど一致することを固定する
@@ -12422,7 +12500,9 @@ fn facade_does_not_reexport_or_declare_conv3d() {
 /// col2im3d\b" crates/*/src` で実測確認済み）**:
 /// - `conv3d`: `tensor-core/src/backend_ops.rs`（`BackendOps` trait の
 ///   既定実装）・`autodiff/src/conv3d_ops.rs`（自由関数。CPU は
-///   `conv3d` を override しないため他に無い）
+///   `conv3d` を override しないため他に無い）・`autodiff/src/var.rs`
+///   （`Var::conv3d` 委譲メソッド。イシュー #2524）
+/// - `add_conv3d`: `facade/src/compat/sequential.rs`（イシュー #2524）
 /// - `im2col3d`／`col2im3d`: `tensor-core/src/backend_ops.rs`（trait 既定
 ///   実装）・`backend-cpu/src/im2col.rs`（本体）・`backend-cpu/src/
 ///   ops.rs`（override）・`autodiff/src/eval.rs`（ホスト参照実装）
@@ -12458,7 +12538,7 @@ fn workspace_declares_conv3d_fn_names_only_in_allowed_locations() {
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in ["conv3d", "im2col3d", "col2im3d"] {
+            for fn_name in ["conv3d", "add_conv3d", "im2col3d", "col2im3d"] {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -12481,7 +12561,12 @@ fn workspace_declares_conv3d_fn_names_only_in_allowed_locations() {
             vec![
                 "tensor-core/src/backend_ops.rs (1)".to_string(),
                 "autodiff/src/conv3d_ops.rs (1)".to_string(),
+                "autodiff/src/var.rs (1)".to_string(),
             ],
+        ),
+        (
+            "add_conv3d".to_string(),
+            vec!["facade/src/compat/sequential.rs (1)".to_string()],
         ),
         (
             "im2col3d".to_string(),
@@ -12848,7 +12933,7 @@ fn compat_sequential_does_not_expose_mha_options_add_methods_detects_offense() {
 /// を参照する `pub use`（モジュール再エクスポート・別名含む）が存在
 /// しないことを固定する（`MhaOptionsHoldDoctestGuard` の正のプローブと
 /// 多層防御を成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_or_declare_conv3d` と同型）。
+/// `facade_declares_conv3d_names_only_in_approved_form` と同型）。
 #[test]
 fn facade_does_not_reexport_multihead_attention_config() {
     let src_dir = facade_crate_root().join("src");

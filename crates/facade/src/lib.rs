@@ -2214,9 +2214,12 @@ struct RngDistributionsHoldDoctestGuard;
 struct SpatialLayersHoldDoctestGuard;
 
 /// イシュー #2158（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// イシュー #2524（ルート #2499 の一括承認）で `Var::conv3d`（委譲メソッド）と
+/// `compat::Sequential::add_conv3d` の 2 形を公開したため、本ガードは
+/// **承認済みの 2 形のプローブだけを外して縮小**し、承認外の形への衝突
+/// プローブを残している（#2716 の `SpatialLayersHoldDoctestGuard` と同じ判断）。
 /// `VarActivationOpsHoldDoctestGuard`（イシュー #2146）と同型の「正の
-/// プローブ 1 ブロック方式」を採るが、本ガードは 3 種類の衝突プローブを
-/// 併用する:
+/// プローブ 1 ブロック方式」を採り、2 種類の衝突プローブを併用する:
 ///
 /// (a) 自由関数の衝突プローブ（`conv3d_ops::conv3d`。`VarActivationOps
 /// HoldDoctestGuard` の `__probe_free_fns` と同方式）。facade の全
@@ -2225,22 +2228,19 @@ struct SpatialLayersHoldDoctestGuard;
 /// conv3d`）を導入し、`conv3d_ops::conv3d()` という経路解決で使う。
 /// facade が `pub use fandhe_ai_autodiff::conv3d_ops;` のようなモジュール
 /// 再エクスポートで `conv3d_ops` を公開すれば、ローカル定義との glob
-/// 衝突（E0659）でコンパイルが失敗する。
+/// 衝突（E0659）でコンパイルが失敗する（承認範囲外のため引き続き禁止）。
 ///
-/// (b) `Var`／`Tensor<f32>`／`Tape` への `conv3d` メソッド衝突プローブ
+/// (b) `Tensor<f32>`／`Tape` への `conv3d` メソッド衝突プローブ
 /// （`__FandheConv3dHoldProbe` トレイト。`VarActivationOpsHoldDoctestGuard`
-/// の `__FandheActivationHoldProbe` と同方式）。`Var::conv3d` 等の
-/// inherent メソッドが追加されれば、トレイトメソッドより優先解決される
-/// ため戻り値型が `__FandheConv3dMarker` ではなくなり型エラーになる。
+/// の `__FandheActivationHoldProbe` と同方式）。`Tensor::conv3d`／
+/// `Tape::conv3d` の inherent メソッドが追加されれば、トレイトメソッドより
+/// 優先解決されるため戻り値型が `__FandheConv3dMarker` ではなくなり型エラー
+/// になる（`Var::conv3d` は承認済みのためプローブから外した）。
 ///
-/// (c) `compat::Sequential::add_conv3d` の衝突プローブ（承認事項の
-/// 2 つ目）。`__FandheConv3dAddProbe` トレイトを `fandhe_ai::compat::
-/// Sequential` に実装し、**UFCS 形のみ**（`fandhe_ai::compat::
-/// Sequential::add_conv3d(x)`）で呼ぶ（`VarActivationOpsHoldDoctestGuard`
-/// の `__probe_sequential_add` と同じ理由: `compat::Sequential::add_*`
-/// の既存メソッドは値で `self` を取る inherent メソッドのため、メソッド
-/// 呼び出し形〈`x.add_conv3d()`〉だと inherent 側が優先解決され衝突を
-/// 検出できない）。
+/// 撤去した項目（イシュー #2524 で承認・公開済み。以降の正ガードは
+/// `api_surface.rs` の `add_conv3d_signature_matches_approved_contract` 等が担う）:
+/// `Var` への `__FandheConv3dHoldProbe` impl と `__probe_var`、
+/// `__FandheConv3dAddProbe` トレイトと `__probe_sequential_add`。
 ///
 /// facade の `nn` は `pub mod rnn;` にのみ固定済み
 /// （`nn_mod_declares_only_rnn_submodule`）のため、`Conv3d` 型自体の
@@ -2249,14 +2249,10 @@ struct SpatialLayersHoldDoctestGuard;
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// conv3d_hold_doctest_globs_all_pub_modules`・`conv3d_hold_doctest_
-/// probe_body_matches_fixed_contract`・`facade_does_not_reexport_or_
-/// declare_conv3d`・`workspace_declares_conv3d_fn_names_only_in_
+/// probe_body_matches_fixed_contract`・`facade_declares_conv3d_names_only_
+/// in_approved_form`・`workspace_declares_conv3d_fn_names_only_in_
 /// allowed_locations`）との多層防御の位置づけは `docs/conv-ops-
-/// design.md` §16「承認事項」を参照。
-///
-/// 承認（`Var::conv3d` の委譲メソッド追加・`compat::Sequential::
-/// add_conv3d` 追加）を得た日が来たら、本モジュール・本 doctest 自体を
-/// 削除する（ソース走査側の対応する否定ガードと同時に外す）。
+/// design.md` §16.7 を参照。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2287,10 +2283,6 @@ struct SpatialLayersHoldDoctestGuard;
 ///     fn conv3d(&self) -> __FandheConv3dMarker;
 /// }
 ///
-/// impl<'t> __FandheConv3dHoldProbe for fandhe_ai::Var<'t> {
-///     fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
-/// }
-///
 /// impl __FandheConv3dHoldProbe for fandhe_ai::Tensor<f32> {
 ///     fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
 /// }
@@ -2299,24 +2291,11 @@ struct SpatialLayersHoldDoctestGuard;
 ///     fn conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
 /// }
 ///
-/// trait __FandheConv3dAddProbe {
-///     fn add_conv3d(&self) -> __FandheConv3dMarker;
-/// }
-///
-/// impl __FandheConv3dAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_conv3d(&self) -> __FandheConv3dMarker { __FandheConv3dMarker }
-/// }
-///
 /// fn __probe_free_fns() {
 ///     // `conv3d_ops::` を経由した経路解決（`use fandhe_ai::*;` が
 ///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
 ///     // なり E0659 でコンパイル失敗する）。
 ///     conv3d_ops::conv3d();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheConv3dMarker = fandhe_ai::Var::conv3d(x);
-///     let _: __FandheConv3dMarker = x.conv3d();
 /// }
 ///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
@@ -2327,10 +2306,6 @@ struct SpatialLayersHoldDoctestGuard;
 /// fn __probe_tape(x: &fandhe_ai::Tape) {
 ///     let _: __FandheConv3dMarker = fandhe_ai::Tape::conv3d(x);
 ///     let _: __FandheConv3dMarker = x.conv3d();
-/// }
-///
-/// fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {
-///     let _: __FandheConv3dMarker = fandhe_ai::compat::Sequential::add_conv3d(x);
 /// }
 /// ```
 #[cfg(doctest)]
@@ -2614,7 +2589,7 @@ struct DropoutEmbeddingBagHoldDoctestGuard;
 ///
 /// (b) `compat::Sequential::add_multihead_attention_with_config` の
 /// 衝突プローブ（`__FandheMhaOptionsAddProbe` トレイト。
-/// `VarConv3dHoldDoctestGuard` の `__FandheConv3dAddProbe` と同方式）。
+/// 旧 `VarConv3dHoldDoctestGuard` の `__FandheConv3dAddProbe`〈#2524 で撤去〉と同方式）。
 /// **UFCS 形のみ**（`fandhe_ai::compat::Sequential::
 /// add_multihead_attention_with_config(seq)`）で呼ぶ
 /// （`compat::Sequential::add_*` の既存メソッドは値で `self` を取る
@@ -2693,7 +2668,7 @@ struct MhaOptionsHoldDoctestGuard;
 /// コンストラクタ追加。実装計画 §3.2「なぜ `Rnn`／`Lstm`／`Gru` に
 /// `with_config` を足さないか」参照）も同じブロックで保留固定する
 /// （trait 経由のプローブ呼び出しが inherent メソッドの型・引数不一致で
-/// コンパイル失敗する。`VarConv3dHoldDoctestGuard` の `__probe_var` 等と
+/// コンパイル失敗する。旧 `VarConv3dHoldDoctestGuard` の `__probe_var` 等〈#2524 で撤去〉と
 /// 同方式）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::

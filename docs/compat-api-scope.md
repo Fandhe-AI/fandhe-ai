@@ -1720,3 +1720,13 @@ GPU 専用カーネル・checkpoint／`create_graph` 対応・`amax_dims`／keep
 保留ガードは存在せず反転対象なし。`api_surface.rs` に正ガードを新設した。
 保留継続: `nn::ConvTranspose2d` 型の再エクスポート・bias なし構成・AMP 低精度 forward・`output_padding >= stride`・ONNX export 対応・GPU 専用カーネル。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は `docs/perf/logs/compat-sequential-conv-transpose2d-2523/README.md` へ申し送り。
+
+**適用記録（経路 2。イシュー #2524・親 #2520・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`Conv3d`（#2158）を `Var::conv3d(weight, bias, stride, padding, dilation, groups)`（`[usize; 3]` 引数。`conv3d_ops::conv3d` への 1 式委譲）と
+`compat::Sequential::add_conv3d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, seed)`（bias あり固定）の
+`pub fn` 各 1 件として公開した（追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。
+具体シグネチャは `docs/conv-ops-design.md` に記載がなかったため `Var::conv2d`／`add_conv2d` から機械的に導出した（§16.7）。
+学習経路へ結線し、常駐経路は `BackendError::Unsupported` で fail-closed、`save_model`／`load_model` は kind `conv3d` を追加して対応した（`format_version` 不変）。
+`VarConv3dHoldDoctestGuard` は承認した 2 形のプローブだけを外して縮小し、承認外の形（`conv3d_ops` 再エクスポート・`Tensor`／`Tape` の `conv3d`）の衝突プローブは残した。
+保留継続: `conv3d_ops`／`nn::Conv3d` 型の再エクスポート・bias なし構成・AMP 低精度 conv3d・ONNX export 対応・GPU 専用カーネル。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は `docs/perf/logs/compat-sequential-conv3d-2524/README.md` へ申し送り。

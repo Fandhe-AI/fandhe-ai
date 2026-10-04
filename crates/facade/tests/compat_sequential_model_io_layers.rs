@@ -1,8 +1,8 @@
-//! `fandhe_ai::compat::{save_model, load_model}` の全 34 層対応（イシュー #2370・親 #2362）の
+//! `fandhe_ai::compat::{save_model, load_model}` の全 35 層対応（イシュー #2370・親 #2362）の
 //! 統合テスト。facade の公開 API と `std` のみで次の受入基準を検証する。
 //!
-//! - (a) 34 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
-//!   `predict` 出力が bit 一致する（34 種の網羅は保存した manifest の `kind` 集合で検査する）。
+//! - (a) 35 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
+//!   `predict` 出力が bit 一致する（35 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
@@ -21,8 +21,8 @@ use fandhe_ai::{AutodiffError, InterpolateMode, Tensor};
 mod common;
 use common::temp_dir::TempDirGuard;
 
-/// allowlist の 34 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-const ALL_KINDS: [&str; 34] = [
+/// allowlist の 35 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+const ALL_KINDS: [&str; 35] = [
     "linear",
     "relu",
     "sigmoid",
@@ -40,6 +40,7 @@ const ALL_KINDS: [&str; 34] = [
     "dropout",
     "conv2d",
     "conv_transpose2d",
+    "conv3d",
     "conv1d",
     "layer_norm",
     "rms_norm",
@@ -137,7 +138,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------
-// (a) 34 種の bit 一致
+// (a) 35 種の bit 一致
 // ---------------------------------------------------------------------
 
 /// rank 2 入力 `[3, 6]`: 活性化・正規化・dropout・BatchNorm1d（rank 2）・softmax 系。
@@ -184,6 +185,17 @@ fn cnn_model() -> Built {
         .add_avg_pool2d([1, 1], None, [0, 0], false)?
         .add_flatten(1, 3)
         .add_linear(4, 3, 23)?;
+    m.eval();
+    Ok(m)
+}
+
+/// rank 5 入力 `[2, 2, 3, 3, 3]`: conv3d（groups・stride・dilation 非自明）・flatten（イシュー #2524）。
+fn cnn3d_model() -> Built {
+    let mut m = Sequential::new()
+        .add_conv3d(2, 4, [2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1], 2, 25)?
+        .add_relu()
+        .add_flatten(1, 4)
+        .add_linear(32, 3, 26)?;
     m.eval();
     Ok(m)
 }
@@ -237,6 +249,11 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
         &cnn1d_model().expect("構築できるはず"),
         &tensor(&[2, 3, 10], 2.5),
     ));
+    seen.extend(round_trip(
+        "cnn3d",
+        &cnn3d_model().expect("構築できるはず"),
+        &tensor(&[2, 2, 3, 3, 3], 3.5),
+    ));
     for padding_idx in [Some(0), None] {
         seen.extend(round_trip(
             "sequence",
@@ -245,7 +262,7 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
         ));
     }
     let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(seen, expected, "34 種の kind をすべて往復させたはず");
+    assert_eq!(seen, expected, "35 種の kind をすべて往復させたはず");
 }
 
 /// train モードのまま保存・復元しても `training` フラグが往復し、dropout を含む構成で

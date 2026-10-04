@@ -1422,30 +1422,20 @@ CUDA／Metal は既定 `Unsupported`（override なし）のままホスト
 追加した。`Conv3dVars::forward` は `Var::conv2d` の代わりに
 `conv3d_ops::conv3d`（自由関数）へ委譲する点のみが異なる。
 
-### 16.5 承認事項（facade 公開・未実装のまま保留）
+### 16.5 承認事項（facade 公開。#2524 で公開済み）
 
-- **`Var::conv3d`（委譲メソッド）・`compat::Sequential::add_conv3d`
-  （facade 公開）は未承認のため本 PR では実装しない**。窓口はイシュー
-  #2158／親 #2131。
+- `Var::conv3d`（委譲メソッド）・`compat::Sequential::add_conv3d`
+  （facade 公開）は #2158 時点では未承認のため実装を保留していたが、
+  ルート #2499 の一括承認に基づき #2524 で公開した（§16.7）。
 - `Var` は facade（`fandhe_ai` クレート）から直接再エクスポートされる
-  ため、`Var::conv3d` を inherent メソッドとして追加するとそれだけで
-  facade 公開面が広がる（#2144／#2146／#2147 と同じ判断枠組み）。承認
-  が取れるまでは自由関数 `conv3d_ops::conv3d` として `Var` の外に置き
-  到達不能にする。
+  ため、`Var::conv3d` の inherent メソッド追加はそれだけで facade 公開面
+  を広げる（#2144／#2146／#2147 と同じ判断枠組み）。承認範囲は上記 2 形
+  のみで、`conv3d_ops` モジュール・`nn::Conv3d` 型の再エクスポートや
+  `Tensor`／`Tape` への `conv3d` メソッドは引き続き未承認である。
 - 保留は `crates/facade/src/lib.rs::VarConv3dHoldDoctestGuard`（正の
-  プローブ 1 ブロック方式。自由関数・`conv3d` メソッド・
-  `compat::Sequential::add_conv3d` の 3 種の衝突プローブ）と
-  `crates/facade/tests/api_surface.rs` の 4 テスト（`conv3d_hold_
-  doctest_globs_all_pub_modules`・`conv3d_hold_doctest_probe_body_
-  matches_fixed_contract`・`facade_does_not_reexport_or_declare_
-  conv3d`・`workspace_declares_conv3d_fn_names_only_in_allowed_
-  locations`）で機械的に固定する。承認後はガードを外し、`Var::conv3d`
-  の委譲メソッドと `add_conv3d` を追加する。
-- `compat::Sequential` に任意の `Box<dyn Module>` を積む公開経路は
-  無い（`from_boxed_layers` は `#[cfg(test)]` 限定）ため、
-  `trainable_parameters`／`bind` 等が `Conv3d` を認識しない問題には
-  facade から到達できない。追加の fail-closed ガードは不要と判断した
-  （承認後 `add_conv3d` を実装する際に併せて解消する）。
+  プローブ 1 ブロック方式）と `crates/facade/tests/api_surface.rs` の
+  ソース走査テストで機械的に固定していた。#2524 で承認した 2 形の
+  プローブだけを外して縮小し、承認外の形への衝突プローブは残した（§16.7）。
 
 ### 16.6 テスト・実測
 
@@ -1467,7 +1457,41 @@ CUDA／Metal は既定 `Unsupported`（override なし）のままホスト
   出荷し、`docs/perf/logs/conv3d-2158/README.md` へ実行コマンドを
   申し送る。
 
-### 16.7 スコープ外（本 issue では対応しない）
+### 16.7 #2524 実装記録（`Var::conv3d`・`compat::Sequential::add_conv3d` の公開）
+
+- **承認根拠と公開名**: 旧 §16.5 は推奨形が 1 つに決まっており（複数案は
+  残っていない）、ルート #2499 の一括承認はこの 2 形に及ぶ。具体シグネチャは
+  記録に無かったため、既存 API から機械的に導いた（#2717 の §15.x と同じ）。
+  - `Var::conv3d(&self, weight, bias: Option<&Var>, stride: [usize; 3],
+    padding: [usize; 3], dilation: [usize; 3], groups: usize)
+    -> Result<Var, AutodiffError>`: `Var::conv2d` の引数順を 3 軸化したもの。
+    本体は `conv3d_ops::conv3d` への 1 式委譲（独自検査なし）。
+  - `Sequential::add_conv3d(in_channels, out_channels, kernel_size: [usize; 3],
+    stride: [usize; 3], padding: [usize; 3], dilation: [usize; 3], groups: usize,
+    seed: u64) -> Result<Self, AutodiffError>`: `add_conv2d` を 3 軸化したもの。
+    bias あり固定。引数検査は `Conv3d::new` に任せる。
+- **学習経路**: #2521／#2523 と同じ型付きカーソル方式
+  （`SequentialVars::conv3ds`）。`trainable_parameters`／`apply_parameters` は汎用
+  `named_parameters`／`set_parameter` 分岐で処理し `Rebuilt` は使わない。
+  `first_untracked_parametric_layer` から除外し、常駐 3 入口は
+  `contains_resident_unsupported_layer` で `BackendError::Unsupported`（fail-closed）。
+- **保存**: manifest kind `conv3d`（15 キー: `kernel_size`／`stride`／`padding`／
+  `dilation` を `_d`／`_h`／`_w` の 3 キーへ展開 + `in_channels`／`out_channels`／
+  `groups`）。`MAX_OBJECT_KEYS = 16` の範囲内で上限は変えない。`format_version`
+  不変。weight の期待 shape は `[out, in/groups, kD, kH, kW]`。kind は 35 種になった。
+- **ガードの縮小**: `VarConv3dHoldDoctestGuard` は全削除せず、`Var` への
+  `__FandheConv3dHoldProbe` impl と `__probe_var`、`__FandheConv3dAddProbe` と
+  `__probe_sequential_add` だけを外した。`conv3d_ops` 再エクスポート（自由関数の
+  衝突プローブ）と `Tensor<f32>`／`Tape` の `conv3d` メソッド衝突プローブは、
+  承認範囲外のため残している（旧記述の「承認後は doctest ごと削除」より安全側。
+  #2716 の先例）。ソース走査は `facade_declares_conv3d_names_only_in_approved_form`
+  （`add_conv3d` は `compat/sequential.rs` に 1 件だけ）へ反転し、シグネチャ一致・
+  宣言数・`Var::conv3d` の委譲本体の正ガードを `api_surface.rs` に新設した。
+- **AMP**: 低精度 conv3d は存在しないため dtype を無視して f32 で forward する。
+- **ONNX export**: `OnnxError::UnsupportedLayer`（現行挙動を固定）。
+- **実機未実測**: `docs/perf/logs/compat-sequential-conv3d-2524/README.md` へ申し送り。
+
+### 16.8 スコープ外（本 issue では対応しない）
 
 CUDA／Metal 専用の `im2col3d`／`col2im3d`／直接畳み込みカーネル・
 groups 機構の拡張（既存 `[N, G, K_g, P]` レイアウトをそのまま 3D へ

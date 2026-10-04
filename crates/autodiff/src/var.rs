@@ -3287,6 +3287,26 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// 3 次元畳み込み（`torch.nn.functional.conv3d` 相当。NCDHW 固定。
+    /// イシュー #2524・設計 `docs/conv-ops-design.md` §16.7）。
+    /// [`crate::conv3d_ops::conv3d`] への 1 行委譲で、引数順は
+    /// [`Var::conv2d`] を空間 3 軸に一般化したもの。`self`（`input`）:
+    /// `[N, Cin, D, H, W]`・`weight`: `[Cout, Cin/groups, kD, kH, kW]`・
+    /// `bias`: `Some` なら `[Cout]`。検査順序・エラー時に tape を操作
+    /// しない契約は自由関数と同一。
+    #[allow(clippy::too_many_arguments)] // `conv2d` と同じ理由（PyTorch conv3d の全引数を受理する必要があるため）。
+    pub fn conv3d(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: [usize; 3],
+        padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::conv3d_ops::conv3d(self, weight, bias, stride, padding, dilation, groups)
+    }
+
     /// 2 次元畳み込み（`torch.nn.functional.conv2d` 相当の
     /// cross-correlation。NCHW 固定。イシュー #1764・設計 `docs/
     /// conv-ops-design.md`）。`self`（`input`）: `[N, Cin, H, W]`・

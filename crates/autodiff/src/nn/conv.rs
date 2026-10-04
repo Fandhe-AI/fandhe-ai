@@ -1743,8 +1743,8 @@ impl<'t> Conv3dVars<'t> {
 
     /// `y = conv3d_ops::conv3d(input, weight, bias, stride, padding,
     /// dilation, groups)`（自由関数への薄い委譲。`Conv2dVars::forward`
-    /// が `Var::conv2d` を呼ぶのと対応するが、`Conv3d` は facade 未承認
-    /// のため自由関数を呼ぶ点が異なる。モジュール doc 参照）。
+    /// が `Var::conv2d` を呼ぶのと対応する。`Var::conv3d` も同じ自由関数へ
+    /// 委譲するため、どちらから呼んでも結果は bit 一致する。イシュー #2524）。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         conv3d_ops::conv3d(
             input,

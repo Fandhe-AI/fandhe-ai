@@ -1,9 +1,10 @@
-//! `fandhe_ai_autodiff::conv3d_ops::conv3d`（イシュー #2158・facade
-//! 非公開の内部入口。`crates/autodiff/src/conv3d_ops.rs` モジュール
-//! doc 参照）のバックエンド間 parity テスト（`conv2d_backend_parity.rs`
+//! `fandhe_ai_autodiff::conv3d_ops::conv3d`（イシュー #2158。facade は
+//! `Var::conv3d` 経由でのみ到達でき、モジュール自体は再エクスポート
+//! しない〈イシュー #2524〉。`crates/autodiff/src/conv3d_ops.rs`
+//! モジュール doc 参照）のバックエンド間 parity テスト（`conv2d_backend_parity.rs`
 //! の空間 3 軸一般化）。
 //!
-//! `conv3d_ops` は facade から再エクスポートされないため、本テストは
+//! `conv3d_ops` は facade から再エクスポートされないため（`Var::conv3d` は同関数への委譲）、本テストは
 //! `fandhe_ai_autodiff::conv3d_ops::conv3d` を直接 use する（facade の
 //! dev 依存に `fandhe-ai-autodiff` が既に含まれている）。
 //!
