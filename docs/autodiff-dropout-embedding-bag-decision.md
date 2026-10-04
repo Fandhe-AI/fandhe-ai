@@ -16,10 +16,12 @@ PyTorch の `nn.Dropout2d`・`nn.AlphaDropout`・`nn.EmbeddingBag` に
 #2146・#2159 の先例）。facade 公開（`compat::Sequential::
 add_dropout2d`／`add_alpha_dropout`／`add_embedding_bag`・`Var::
 dropout2d`／`alpha_dropout`／`embedding_bag` の委譲メソッド）は
-承認待ちのまま対象外とし、`crates/facade/src/lib.rs::
+#2161 時点では承認待ちのまま対象外とし、`crates/facade/src/lib.rs::
 DropoutEmbeddingBagHoldDoctestGuard`（正のプローブ doctest）と
 `crates/facade/tests/api_surface.rs` のソース走査（2 テスト＋自己
-テスト）で多層固定している。
+テスト）で多層固定していた。**その後イシュー #2528（親 #2520・ルート
+#2499 の一括承認）で承認・実装済み**（§8 参照。層型の再エクスポートと
+自由関数での公開は未承認のまま保留ガードで固定を継続）。
 
 ## §1 背景
 
@@ -145,7 +147,7 @@ tape 登録済み型。`pub weight: Var<'t>`）は `Embedding`／
 
 - facade `compat::Sequential::add_dropout2d`／`add_alpha_dropout`／
   `add_embedding_bag`、および `Var::dropout2d`／`alpha_dropout`／
-  `embedding_bag` の facade 公開（承認待ち）
+  `embedding_bag` の facade 公開（#2161 時点の記述。#2528 で承認・実装済み。§8 参照）
 - GPU 専用カーネル（既存の `mul`／`add`／`gather`／`sum`／`max` の
   経路と、ホストフォールバックだけで到達させる）
 - Dropout2d の 3D 入力（PyTorch でバージョンにより意味が変わる）・
@@ -157,7 +159,7 @@ tape 登録済み型。`pub weight: Var<'t>`）は `Embedding`／
 - ONNX export（`onnx-interop::export_nn`）での 3 層への対応
 - CUDA（GB10）・Metal 実機での `#[ignore]` parity の実測（申し送る）
 
-## §6 承認事項（未承認として列挙）
+## §6 承認事項（#2161 時点の列挙。#2528 で承認・実装済み。§8 参照）
 
 1. facade `compat::Sequential` への `add_dropout2d`／
    `add_alpha_dropout`／`add_embedding_bag` の追加（経路 2）と、
@@ -174,3 +176,72 @@ tape 登録済み型。`pub weight: Var<'t>`）は `Embedding`／
 CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に無いため
 `#[ignore]` テストを未実行のまま出荷する。実行コマンド・記入欄は
 `docs/perf/logs/dropout-embedding-bag-2161/README.md` を参照。
+
+## §8 実装記録（イシュー #2528・親 #2520・ルート #2499 本文「承認範囲」節の一括承認）
+
+§6 の承認事項 1・2 を、ルート #2499（2026-10-04 一括承認: Phase 1〜3 は既存決定記録の推奨形で
+facade 公開を実装してよい）に基づき実装した。§6 は名前だけを挙げ具体シグネチャを定めていなかったため、
+既存の `Var::dropout`・`Var::embedding`・`add_dropout`・`add_embedding` の規約から機械的に導出した
+（#2527 の `docs/autodiff-adaptive-max-global-pool-decision.md` §8 と同じ判断）。
+`fandhe-ai =0.10.0` の公開 API は非破壊（追加のみ）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
+`docs/spec/` は不変。新規 `Op`／`BackendOps`／VJP／GPU カーネルの追加なし。
+
+### 8.1 公開した名前
+
+| 公開面 | シグネチャ |
+|---|---|
+| `Var::dropout2d` | `fn(&self, p: f32, training: bool) -> Result<Var<'t>, AutodiffError>`（`nn::dropout2d_forward` への 1 行委譲） |
+| `Var::alpha_dropout` | `fn(&self, p: f32, training: bool) -> Result<Var<'t>, AutodiffError>`（`nn::alpha_dropout_forward` への 1 行委譲） |
+| `Var::embedding_bag` | `fn(&self, ids: &Tensor<i32>, mode: EmbeddingBagMode, padding_idx: Option<usize>) -> Result<Var<'t>, AutodiffError>`（`self` は weight `[num_embeddings, D]`・`ids` は `[B, L]`・戻り値は `[B, D]`。`nn::embedding_bag_forward` への 1 行委譲） |
+| `compat::Sequential::add_dropout2d` | `fn(self, p: f32) -> Result<Self, AutodiffError>` |
+| `compat::Sequential::add_alpha_dropout` | `fn(self, p: f32) -> Result<Self, AutodiffError>` |
+| `compat::Sequential::add_embedding_bag` | `fn(self, num_embeddings: usize, embedding_dim: usize, mode: EmbeddingBagMode, padding_idx: Option<usize>, seed: u64) -> Result<Self, AutodiffError>` |
+| `fandhe_ai::EmbeddingBagMode` | ルートへ `pub use fandhe_ai_autodiff::nn::EmbeddingBagMode;` 1 行 |
+
+判断:
+
+- 3 つの `Var` メソッドの本体は、層（`Dropout2d`／`AlphaDropout`／`EmbeddingBag`）の `forward` と共有する
+  `pub(crate)` の forward 関数（`nn/dropout.rs`・`nn/embedding_bag.rs`）へ 1 行で委譲する。`Var` 経由は層の `new()` 検査を通らない
+  ため、`p` の検査（有限かつ `[0, 1]`）・rank 検査・`padding_idx` の範囲検査を共有 forward 側へ移し、tape 操作より前に終える
+  （`Err` で孤児ノードを残さない。autodiff の unit test で固定）。層の挙動・数値は変えない。
+- `EmbeddingBagMode` は `add_embedding_bag`／`Var::embedding_bag` の引数型で、公開しないと呼び出せないため、承認した名前から
+  必然的に要る最小限の型公開としてルートへ再エクスポートした（先例: #2527 の `GlobalPoolMode`・#1757 の `InterpolateMode`）。
+  `Dropout2d`／`AlphaDropout`／`EmbeddingBag`／`EmbeddingBagVars` の層型は再エクスポートしない（未承認のまま）。
+- `Var` には可変長 bag（offsets）用のメソッドを公開しない（§6 に無い。`forward_with_offsets` は層型側のみ）。
+
+### 8.2 学習・常駐・保存経路
+
+- `Dropout2d`／`AlphaDropout` は無状態層で、`bind`／`trainable_*`／`apply_parameters` は既存走査のまま通過する。
+  `set_training`／`eval()` は `Dropout` と同じく層へ伝播する（`Module::training` を保持）。常駐経路は `Dropout` と同じく
+  `Module::forward` で処理されるため通過する（CPU の `predict_resident` が eval で `predict` と bit 一致することをテストで固定）。
+- `EmbeddingBag` は `weight` 1 件を学習パラメータとして追跡する（`Sequential::bind` が `EmbeddingBagVars` を層順に収集し、
+  `SequentialVars::forward` は bind 済み vars で `forward_from_var` を呼ぶ〈`Module::forward` は葉を作り直して勾配が失われるため使わない〉。
+  `trainable_vars`／`trainable_grads` は weight を 1 件返し、`first_untracked_parametric_layer` の対象から外す）。入力は
+  `add_embedding` と同じく id を f32 で詰めた `Tensor<f32>`（厳格に整数 id へ変換）。`contains_resident_unsupported_layer` に
+  加え、常駐経路（`init_device_param_store`／`forward_resident`／`predict_resident`）は `Unsupported` で fail-closed に拒否する
+  （テストで 3 入口とも固定）。
+- `save_model`／`load_model`: kind `dropout2d`（`p`）・`alpha_dropout`（`p`）・`embedding_bag`（`num_embeddings`・`embedding_dim`・
+  `mode`: `"sum"`／`"mean"`／`"max"`・`padding_idx`）を追加（allowlist 42 → 45・`format_version` 不変）。`EmbeddingBagMode` は
+  `#[non_exhaustive]` のため、未知 variant は保存前に `UnsupportedModel` で拒否し dir に副作用を残さない。dropout 2 種は
+  `Dropout` と同じく層とモデルの training 食い違いを保存時に拒否する。
+- `Module` の `as_*` フックは追加していない（`as_embedding_bag` は #2161 で既存。`save_model`／`load_model` は `LayerSpec` だけを根拠にし、
+  crates.io 公開済み `fandhe-ai-autodiff` の trait 面を広げないため。#2522・#2526・#2527 と同じ）。ONNX export は `UnsupportedLayer`
+  で fail-closed（テストで固定）。
+
+### 8.3 ガード反転
+
+- `DropoutEmbeddingBagHoldDoctestGuard` から `Sequential`／`Var` のプローブと `EmbeddingBagMode` の型プローブを撤去し、
+  層型 4 種と自由関数 3 個の衝突プローブだけを残した。
+- `api_surface.rs` の否定テスト `compat_sequential_does_not_expose_dropout_embedding_bag_add_methods`（と自己テスト）を削除し、
+  正ガードを新設した: `workspace_declares_dropout_embedding_bag_facade_fn_names_only_in_approved_locations`（定義元集合）・
+  `var_dropout_embedding_bag_methods_are_thin_delegations`・`var_dropout_embedding_bag_methods_are_reachable_via_facade_only`・
+  `compat_sequential_dropout_embedding_bag_add_methods_have_approved_signatures`（＋自己テスト）・
+  `facade_reexports_embedding_bag_mode_only_in_approved_shape`（＋自己テスト。層型が再エクスポートされないことも検査）。
+  固定文言 `DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY` は縮小後の doctest に合わせて更新した。
+
+### 8.4 保留継続
+
+層型（`Dropout2d`／`AlphaDropout`／`EmbeddingBag`／`EmbeddingBagVars`）の facade 再エクスポート・自由関数での公開・可変長 bag
+（offsets）の `Var`／`Sequential` 経路・`per_sample_weights`／`max_norm`・Dropout2d の 3D 入力・GPU 専用カーネル・ONNX export の
+対象層の拡大。CUDA／Metal 実機 parity は
+`docs/perf/logs/compat-sequential-dropout-embedding-bag-2528/README.md` へ申し送り（未実測）。

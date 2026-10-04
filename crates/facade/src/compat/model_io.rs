@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 42 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 45 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -86,7 +86,7 @@ use self::compiled::{
 use super::sequential::{LayerSpec, Sequential};
 use crate::fs_guard::{LeafError, MAX_MODEL_FILE_BYTES, OpenedLeaf, open_leaf_checked};
 use crate::interop::safetensors::{load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes};
-use crate::{GlobalPoolMode, InterpolateMode, Tensor};
+use crate::{EmbeddingBagMode, GlobalPoolMode, InterpolateMode, Tensor};
 
 /// manifest のファイル名（`dir` 直下の固定名）。
 const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -306,7 +306,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 42 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 45 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -324,6 +324,8 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Softplus { .. } => Some("softplus"),
         LayerSpec::Flatten { .. } => Some("flatten"),
         LayerSpec::Dropout { .. } => Some("dropout"),
+        LayerSpec::Dropout2d { .. } => Some("dropout2d"),
+        LayerSpec::AlphaDropout { .. } => Some("alpha_dropout"),
         LayerSpec::Conv2d { .. } => Some("conv2d"),
         LayerSpec::Conv3d { .. } => Some("conv3d"),
         LayerSpec::ConvTranspose2d { .. } => Some("conv_transpose2d"),
@@ -333,6 +335,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::BatchNorm1d { .. } => Some("batch_norm1d"),
         LayerSpec::BatchNorm2d { .. } => Some("batch_norm2d"),
         LayerSpec::Embedding { .. } => Some("embedding"),
+        LayerSpec::EmbeddingBag { .. } => Some("embedding_bag"),
         LayerSpec::MultiheadAttention { .. } => Some("multihead_attention"),
         LayerSpec::TransformerEncoder { .. } => Some("transformer_encoder"),
         LayerSpec::MaxPool2d { .. } => Some("max_pool2d"),
@@ -362,7 +365,9 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
         LayerSpec::LeakyRelu { negative_slope } => negative_slope.is_finite(),
         LayerSpec::Elu { alpha } => alpha.is_finite(),
         LayerSpec::Softplus { beta, threshold } => beta.is_finite() && threshold.is_finite(),
-        LayerSpec::Dropout { p } => p.is_finite(),
+        LayerSpec::Dropout { p } | LayerSpec::Dropout2d { p } | LayerSpec::AlphaDropout { p } => {
+            p.is_finite()
+        }
         LayerSpec::LayerNorm { eps, .. }
         | LayerSpec::RmsNorm { eps, .. }
         | LayerSpec::GroupNorm { eps, .. }
@@ -519,6 +524,11 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
             num_embeddings,
             embedding_dim,
             ..
+        }
+        | LayerSpec::EmbeddingBag {
+            num_embeddings,
+            embedding_dim,
+            ..
         } => vec![("weight", vec![*num_embeddings, *embedding_dim])],
         LayerSpec::MultiheadAttention { embed_dim, .. } => mha_parameters(*embed_dim, false),
         LayerSpec::TransformerEncoder {
@@ -553,6 +563,8 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::Softplus { .. }
         | LayerSpec::Flatten { .. }
         | LayerSpec::Dropout { .. }
+        | LayerSpec::Dropout2d { .. }
+        | LayerSpec::AlphaDropout { .. }
         | LayerSpec::MaxPool2d { .. }
         | LayerSpec::MaxPool1d { .. }
         | LayerSpec::AvgPool2d { .. }
@@ -698,6 +710,28 @@ fn global_pool_mode_from_wire(name: &str) -> Option<GlobalPoolMode> {
     }
 }
 
+/// `EmbeddingBagMode` ↔ manifest 文字列（allowlist の正。イシュー #2528）。
+/// `EmbeddingBagMode` は `#[non_exhaustive]` のため、未知 variant は `None`
+/// （保存側が `UnsupportedModel` で fail-closed にする）。
+fn embedding_bag_mode_to_wire(mode: EmbeddingBagMode) -> Option<&'static str> {
+    match mode {
+        EmbeddingBagMode::Sum => Some("sum"),
+        EmbeddingBagMode::Mean => Some("mean"),
+        EmbeddingBagMode::Max => Some("max"),
+        _ => None,
+    }
+}
+
+/// [`embedding_bag_mode_to_wire`] の逆変換（文字列 allowlist）。
+fn embedding_bag_mode_from_wire(name: &str) -> Option<EmbeddingBagMode> {
+    match name {
+        "sum" => Some(EmbeddingBagMode::Sum),
+        "mean" => Some(EmbeddingBagMode::Mean),
+        "max" => Some(EmbeddingBagMode::Max),
+        _ => None,
+    }
+}
+
 /// 保存可能な `Upsample` か（`size` の軸数が `1..=3` かつ mode が既知）。
 fn upsample_is_savable(size: &[usize], mode: InterpolateMode) -> bool {
     (1..=UPSAMPLE_MAX_SIZE_LEN).contains(&size.len()) && upsample_mode_to_wire(mode).is_some()
@@ -729,7 +763,9 @@ fn render_params(spec: &LayerSpec) -> String {
             put_num(&mut f, "start_dim", *start_dim);
             put_num(&mut f, "end_dim", *end_dim);
         }
-        LayerSpec::Dropout { p } => put_real(&mut f, "p", *p),
+        LayerSpec::Dropout { p } | LayerSpec::Dropout2d { p } | LayerSpec::AlphaDropout { p } => {
+            put_real(&mut f, "p", *p)
+        }
         LayerSpec::Conv2d {
             in_channels,
             out_channels,
@@ -832,6 +868,19 @@ fn render_params(spec: &LayerSpec) -> String {
         } => {
             put_num(&mut f, "num_embeddings", *num_embeddings);
             put_num(&mut f, "embedding_dim", *embedding_dim);
+            put_opt(&mut f, "padding_idx", *padding_idx);
+        }
+        LayerSpec::EmbeddingBag {
+            num_embeddings,
+            embedding_dim,
+            mode,
+            padding_idx,
+        } => {
+            // 保存前検査（`embedding_bag_mode_to_wire`）通過後にだけ呼ばれる。
+            let name = embedding_bag_mode_to_wire(*mode).unwrap_or("");
+            put_num(&mut f, "num_embeddings", *num_embeddings);
+            put_num(&mut f, "embedding_dim", *embedding_dim);
+            f.push(("mode".to_string(), format!("\"{name}\"")));
             put_opt(&mut f, "padding_idx", *padding_idx);
         }
         LayerSpec::MultiheadAttention {
@@ -1032,6 +1081,13 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
                 reason: format!("層 {i}（global_pool）の mode が保存に未対応です"),
             });
         }
+        if let LayerSpec::EmbeddingBag { mode, .. } = spec
+            && embedding_bag_mode_to_wire(*mode).is_none()
+        {
+            return Err(ModelIoError::UnsupportedModel {
+                reason: format!("層 {i}（embedding_bag）の mode が保存に未対応です"),
+            });
+        }
         check_layer_state(model, i, spec)?;
     }
 
@@ -1142,7 +1198,11 @@ fn check_layer_state(model: &Sequential, i: usize, spec: &LayerSpec) -> Result<(
     let layer = &model.layers()[i];
     let mode_dependent = matches!(
         spec,
-        LayerSpec::Dropout { .. } | LayerSpec::BatchNorm1d { .. } | LayerSpec::BatchNorm2d { .. }
+        LayerSpec::Dropout { .. }
+            | LayerSpec::Dropout2d { .. }
+            | LayerSpec::AlphaDropout { .. }
+            | LayerSpec::BatchNorm1d { .. }
+            | LayerSpec::BatchNorm2d { .. }
     );
     if mode_dependent && layer.training() != model.training() {
         return Err(ModelIoError::UnsupportedModel {
@@ -1557,6 +1617,12 @@ fn build_model(
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Flatten { start_dim, end_dim } => model.add_flatten(*start_dim, *end_dim),
             LayerSpec::Dropout { p } => model.add_dropout(*p).map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Dropout2d { p } => {
+                model.add_dropout2d(*p).map_err(ModelIoError::Autodiff)?
+            }
+            LayerSpec::AlphaDropout { p } => model
+                .add_alpha_dropout(*p)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Conv2d {
                 in_channels,
                 out_channels,
@@ -1681,6 +1747,14 @@ fn build_model(
                 padding_idx,
             } => model
                 .add_embedding(*num_embeddings, *embedding_dim, *padding_idx, 0)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::EmbeddingBag {
+                num_embeddings,
+                embedding_dim,
+                mode,
+                padding_idx,
+            } => model
+                .add_embedding_bag(*num_embeddings, *embedding_dim, *mode, *padding_idx, 0)
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::MultiheadAttention {
                 embed_dim,
@@ -2338,6 +2412,14 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
             let p = Params::new(params, &["p"])?;
             Ok(LayerSpec::Dropout { p: p.f32("p")? })
         }
+        "dropout2d" => {
+            let p = Params::new(params, &["p"])?;
+            Ok(LayerSpec::Dropout2d { p: p.f32("p")? })
+        }
+        "alpha_dropout" => {
+            let p = Params::new(params, &["p"])?;
+            Ok(LayerSpec::AlphaDropout { p: p.f32("p")? })
+        }
         "conv2d" => {
             let p = Params::new(
                 params,
@@ -2516,6 +2598,21 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
             Ok(LayerSpec::Embedding {
                 num_embeddings: p.usize("num_embeddings")?,
                 embedding_dim: p.usize("embedding_dim")?,
+                padding_idx: p.opt_usize("padding_idx")?,
+            })
+        }
+        "embedding_bag" => {
+            let p = Params::new(
+                params,
+                &["num_embeddings", "embedding_dim", "mode", "padding_idx"],
+            )?;
+            let mode_name = as_str(p.get("mode")?, "mode")?;
+            let mode = embedding_bag_mode_from_wire(mode_name)
+                .ok_or_else(|| manifest_error("embedding_bag の mode が allowlist 外です"))?;
+            Ok(LayerSpec::EmbeddingBag {
+                num_embeddings: p.usize("num_embeddings")?,
+                embedding_dim: p.usize("embedding_dim")?,
+                mode,
                 padding_idx: p.opt_usize("padding_idx")?,
             })
         }
@@ -3069,7 +3166,7 @@ mod tests {
         ));
     }
 
-    /// 42 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 45 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3099,6 +3196,8 @@ mod tests {
                 end_dim: 3,
             },
             LayerSpec::Dropout { p: 0.25 },
+            LayerSpec::Dropout2d { p: 0.25 },
+            LayerSpec::AlphaDropout { p: 0.25 },
             LayerSpec::Conv2d {
                 in_channels: 4,
                 out_channels: 6,
@@ -3162,6 +3261,24 @@ mod tests {
             LayerSpec::Embedding {
                 num_embeddings: 7,
                 embedding_dim: 4,
+                padding_idx: None,
+            },
+            LayerSpec::EmbeddingBag {
+                num_embeddings: 7,
+                embedding_dim: 4,
+                mode: EmbeddingBagMode::Sum,
+                padding_idx: Some(0),
+            },
+            LayerSpec::EmbeddingBag {
+                num_embeddings: 7,
+                embedding_dim: 4,
+                mode: EmbeddingBagMode::Mean,
+                padding_idx: None,
+            },
+            LayerSpec::EmbeddingBag {
+                num_embeddings: 7,
+                embedding_dim: 4,
+                mode: EmbeddingBagMode::Max,
                 padding_idx: None,
             },
             LayerSpec::MultiheadAttention {
@@ -3267,7 +3384,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 42, "kind allowlist は 42 種: {kinds:?}");
+        assert_eq!(kinds.len(), 45, "kind allowlist は 45 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3285,9 +3402,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 42 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 45 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("42 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("45 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3295,7 +3412,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("42 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("45 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -3421,6 +3538,37 @@ mod tests {
             ("global_pool", r#"{"mode":"max","keepdims":1}"#),
             ("global_pool", r#"{"mode":"max","keepdims":"true"}"#),
             ("global_pool", r#"{"mode":"max","keepdims":true,"x":1}"#),
+            // イシュー #2528: dropout2d / alpha_dropout / embedding_bag の非信頼入力。
+            ("dropout2d", r#"{}"#),
+            ("dropout2d", r#"{"p":"a"}"#),
+            ("dropout2d", r#"{"p":0.5,"x":1}"#),
+            ("alpha_dropout", r#"{}"#),
+            ("alpha_dropout", r#"{"p":"a"}"#),
+            ("alpha_dropout", r#"{"p":0.5,"x":1}"#),
+            (
+                "embedding_bag",
+                r#"{"num_embeddings":3,"embedding_dim":2,"padding_idx":null}"#,
+            ),
+            (
+                "embedding_bag",
+                r#"{"num_embeddings":3,"embedding_dim":2,"mode":"min","padding_idx":null}"#,
+            ),
+            (
+                "embedding_bag",
+                r#"{"num_embeddings":3,"embedding_dim":2,"mode":1,"padding_idx":null}"#,
+            ),
+            (
+                "embedding_bag",
+                r#"{"num_embeddings":3,"embedding_dim":2,"mode":"sum"}"#,
+            ),
+            (
+                "embedding_bag",
+                r#"{"num_embeddings":3,"embedding_dim":2,"mode":"sum","padding_idx":null,"x":1}"#,
+            ),
+            (
+                "embedding_bag",
+                r#"{"num_embeddings":-1,"embedding_dim":2,"mode":"sum","padding_idx":null}"#,
+            ),
             // イシュー #2526: pixel_shuffle / pixel_unshuffle の非信頼入力。
             ("pixel_shuffle", r#"{}"#),
             ("pixel_shuffle", r#"{"upscale_factor":2,"x":1}"#),
@@ -3547,6 +3695,20 @@ mod tests {
         // 意味上の範囲（p の範囲・kernel=0・beta<=0 等）は load 時の `add_*` が拒否する。
         for spec in [
             LayerSpec::Dropout { p: 2.0 },
+            LayerSpec::Dropout2d { p: 2.0 },
+            LayerSpec::AlphaDropout { p: 2.0 },
+            LayerSpec::EmbeddingBag {
+                num_embeddings: 3,
+                embedding_dim: 2,
+                mode: EmbeddingBagMode::Sum,
+                padding_idx: Some(3),
+            },
+            LayerSpec::EmbeddingBag {
+                num_embeddings: 0,
+                embedding_dim: 2,
+                mode: EmbeddingBagMode::Sum,
+                padding_idx: None,
+            },
             LayerSpec::Softplus {
                 beta: -1.0,
                 threshold: 20.0,
@@ -3651,7 +3813,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("42 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("45 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

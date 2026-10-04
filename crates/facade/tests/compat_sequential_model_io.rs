@@ -7,7 +7,7 @@
 //! #2374 の正常系 bit 一致行列）。
 //!
 //! `mod roundtrip_matrix`（#2374）は `docs/compat-model-io-decision.md` §6 の正常系を
-//! 「アーキテクチャ（42 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
+//! 「アーキテクチャ（45 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
 //! 6 optimizer × AMP・GradScaler 非初期・Lbfgs 履歴 未満／到達済み）」の直積で固定し、全セルで
 //! 再保存したファイルのバイト一致を検査する。単一軸の深掘りは `compat_sequential_model_io_{layers,
 //! batch_norm,compiled,lbfgs}.rs` が担う（対応表は同 doc §6.1）。
@@ -469,12 +469,12 @@ mod roundtrip_matrix {
         AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, LbfgsConfig,
         RmsPropConfig, SgdConfig,
     };
-    use fandhe_ai::{AutodiffError, GlobalPoolMode, InterpolateMode, Tensor};
+    use fandhe_ai::{AutodiffError, EmbeddingBagMode, GlobalPoolMode, InterpolateMode, Tensor};
 
     use crate::common::temp_dir::TempDirGuard;
 
-    /// allowlist の 42 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-    const ALL_KINDS: [&str; 42] = [
+    /// allowlist の 45 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+    const ALL_KINDS: [&str; 45] = [
         "linear",
         "relu",
         "sigmoid",
@@ -490,6 +490,8 @@ mod roundtrip_matrix {
         "softplus",
         "flatten",
         "dropout",
+        "dropout2d",
+        "alpha_dropout",
         "conv2d",
         "conv_transpose2d",
         "conv3d",
@@ -499,6 +501,7 @@ mod roundtrip_matrix {
         "batch_norm1d",
         "batch_norm2d",
         "embedding",
+        "embedding_bag",
         "multihead_attention",
         "transformer_encoder",
         "max_pool2d",
@@ -580,6 +583,7 @@ mod roundtrip_matrix {
             .add_gelu_tanh()
             .add_softplus(1.5, 20.0)?
             .add_dropout(0.3)?
+            .add_alpha_dropout(0.2)?
             .add_layer_norm(8, 1e-5)?
             .add_rms_norm(8, 1e-6)?
             .add_batch_norm1d(8, 1e-5, 0.1)?
@@ -596,6 +600,7 @@ mod roundtrip_matrix {
             .add_conv2d(2, 4, [3, 3], [1, 1], [1, 1], [1, 1], 1, 21)?
             .add_batch_norm2d(4, 1e-5, 0.1)?
             .add_relu()
+            .add_dropout2d(0.2)?
             .add_group_norm(2, 1e-5)?
             .add_instance_norm(1e-5)?
             .add_conv_transpose2d(4, 4, [3, 3], [1, 1], [1, 1], [0, 0], [1, 1], 2, 24)?
@@ -656,6 +661,15 @@ mod roundtrip_matrix {
             .add_layer_norm(8, 1e-5)?
             .add_flatten(1, 2)
             .add_linear(40, 3, 44)?;
+        m.eval();
+        Ok(m)
+    }
+
+    /// 整数 id 入力 `[2, 5]`: EmbeddingBag（イシュー #2528）。
+    fn bag_model(mode: EmbeddingBagMode, padding_idx: Option<usize>) -> Built {
+        let mut m = Sequential::new()
+            .add_embedding_bag(10, 8, mode, padding_idx, 45)?
+            .add_linear(8, 3, 46)?;
         m.eval();
         Ok(m)
     }
@@ -933,7 +947,7 @@ mod roundtrip_matrix {
 
     // -- テスト ---------------------------------------------------------------
 
-    /// A-30 × eval: 42 種の kind の和集合（未 compile）。
+    /// A-30 × eval: 45 種の kind の和集合（未 compile）。
     #[test]
     fn matrix_thirty_kinds_eval_round_trip_and_resave_identical() {
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -964,12 +978,27 @@ mod roundtrip_matrix {
                 sequence_model(None).expect("構築"),
                 ids(&[2, 5], 10),
             ),
+            (
+                "bag-sum-pad",
+                bag_model(EmbeddingBagMode::Sum, Some(0)).expect("構築"),
+                ids(&[2, 5], 10),
+            ),
+            (
+                "bag-mean",
+                bag_model(EmbeddingBagMode::Mean, None).expect("構築"),
+                ids(&[2, 5], 10),
+            ),
+            (
+                "bag-max",
+                bag_model(EmbeddingBagMode::Max, None).expect("構築"),
+                ids(&[2, 5], 10),
+            ),
         ];
         for (label, mut model, input) in cases {
             seen.extend(check_cell(label, &mut model, &input, None));
         }
         let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-        assert_eq!(seen, expected, "42 種の kind をすべて往復させたはず");
+        assert_eq!(seen, expected, "45 種の kind をすべて往復させたはず");
     }
 
     /// A-deep × {eval, train 後の BN}: train モードで predict を回し running stats を動かした状態。

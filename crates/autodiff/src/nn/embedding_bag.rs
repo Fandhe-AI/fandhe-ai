@@ -238,6 +238,45 @@ pub struct EmbeddingBagVars<'t> {
     padding_idx: Option<usize>,
 }
 
+/// `Var::embedding_bag`（facade 公開の委譲メソッド。イシュー #2528）の
+/// 本体。`pub(crate)`。`weight`（`[num_embeddings, D]`）を直接受け取り、
+/// `EmbeddingBagVars` の `forward`（長さの揃った bag `ids: [B, L]`）へ
+/// 委譲する。`EmbeddingBagVars` の `mode`／`padding_idx` は非公開
+/// フィールドのため、構築はこのファイル内でのみ行える。
+///
+/// tape を操作する前に weight の rank（2 でなければ
+/// `Shape(RankMismatch)`）と `padding_idx < num_embeddings`（違反は
+/// `InvalidArgument`）を検査する。`ids` の rank・id 範囲の検査と孤児
+/// ノードを残さない規律は `EmbeddingBagVars::forward` に従う。
+pub(crate) fn embedding_bag_forward<'t>(
+    weight: &Var<'t>,
+    ids: &Tensor<i32>,
+    mode: EmbeddingBagMode,
+    padding_idx: Option<usize>,
+) -> Result<Var<'t>, AutodiffError> {
+    let shape = weight.shape();
+    if shape.len() != 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    if let Some(p) = padding_idx
+        && p >= shape[0]
+    {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "embedding_bag: padding_idx {p} が範囲 [0, {}) を外れている",
+            shape[0]
+        )));
+    }
+    EmbeddingBagVars {
+        weight: *weight,
+        mode,
+        padding_idx,
+    }
+    .forward(ids)
+}
+
 impl<'t> EmbeddingBagVars<'t> {
     /// 長さの揃った bag（`ids`: `[B, L]`）をまとめて処理する。
     ///
@@ -955,5 +994,33 @@ mod tests {
             panic!("shape 不一致は Err を返すはず")
         };
         assert!(matches!(err, AutodiffError::Shape(_)));
+    }
+
+    /// `Var::embedding_bag`（イシュー #2528）は weight の rank・`padding_idx`・ids の rank・
+    /// 範囲外 id の検査を tape 操作より前に終えるため、`Err` では孤児ノードを残さない。
+    #[test]
+    fn var_embedding_bag_rejects_invalid_arguments_without_orphan_nodes() {
+        let tape = tape();
+        let w = tape.var(&Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]).unwrap());
+        let w1 = tape.var(&Tensor::<f32>::new(vec![1.0, 2.0], &[2]).unwrap());
+        let ids = Tensor::<i32>::new(vec![0, 1, 2, 0], &[2, 2]).unwrap();
+        let flat = Tensor::<i32>::new(vec![0, 1], &[2]).unwrap();
+        let oob = Tensor::<i32>::new(vec![0, 3, 1, 2], &[2, 2]).unwrap();
+        let neg = Tensor::<i32>::new(vec![0, -1, 1, 2], &[2, 2]).unwrap();
+        let before = tape.len();
+        for mode in [
+            EmbeddingBagMode::Sum,
+            EmbeddingBagMode::Mean,
+            EmbeddingBagMode::Max,
+        ] {
+            assert!(w1.embedding_bag(&ids, mode, None).is_err());
+            assert!(w.embedding_bag(&ids, mode, Some(3)).is_err());
+            assert!(w.embedding_bag(&flat, mode, None).is_err());
+            assert!(w.embedding_bag(&oob, mode, None).is_err());
+            assert!(w.embedding_bag(&neg, mode, None).is_err());
+            assert!(w.embedding_bag(&oob, mode, Some(0)).is_err());
+        }
+        assert_eq!(tape.len(), before, "Err 経路でノードを積まない");
+        assert!(w.embedding_bag(&ids, EmbeddingBagMode::Sum, None).is_ok());
     }
 }

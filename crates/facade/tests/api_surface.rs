@@ -12824,11 +12824,11 @@ fn workspace_declares_conv3d_fn_names_only_in_allowed_locations() {
 
 // =====================================================================
 // イシュー #2161（親 #2131）: Dropout2d・AlphaDropout・EmbeddingBag の
-// facade 公開保留を検査するテスト群。`DropoutEmbeddingBagHoldDoctestGuard`
-// （`src/lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査に加え、
-// `compat::Sequential::add_dropout2d`／`add_alpha_dropout`／
-// `add_embedding_bag` の非宣言を持つ。承認事項・多層防御の位置づけは
-// `docs/autodiff-dropout-embedding-bag-decision.md` §6 参照。
+// facade 公開保留（#2528 で `Var` メソッド・`Sequential::add_*`・
+// `EmbeddingBagMode` は公開済みに反転。層型・自由関数のみ保留継続）を
+// 検査するテスト群。`DropoutEmbeddingBagHoldDoctestGuard`（`src/lib.rs`）の
+// 正のプローブ 1 ブロック方式のドリフト検査を持つ。承認事項・多層防御の
+// 位置づけは `docs/autodiff-dropout-embedding-bag-decision.md` §6・§8 参照。
 // =====================================================================
 
 /// `DropoutEmbeddingBagHoldDoctestGuard` の唯一の doctest ブロックが
@@ -12860,9 +12860,7 @@ fn dropout_embedding_bag_hold_doctest_globs_all_pub_modules() {
 /// [`dropout_embedding_bag_hold_doctest_globs_all_pub_modules`] が glob
 /// import 集合の一致のみを固定するのに対し、本テストは doctest
 /// ブロックの**glob 以外の本文**（`__fandhe_dropout_embedding_bag_hold_
-/// probe` モジュール・`__FandheDropoutEmbeddingBagAddProbe`／
-/// `__FandheDropoutEmbeddingBagVarProbe` トレイト定義・
-/// `compat::Sequential`／`Var` への実装・`__probe` 関数）が固定文言
+/// probe` モジュール・`__probe` 関数）が固定文言
 /// [`DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY`] と 1 行たりとも違わず
 /// 一致することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
 /// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
@@ -12879,9 +12877,7 @@ fn dropout_embedding_bag_hold_doctest_probe_body_matches_fixed_contract() {
         "DropoutEmbeddingBagHoldDoctestGuard の doctest ブロック本文\
          （glob 以外）が固定文言 DROPOUT_EMBEDDING_BAG_HOLD_PROBE_BODY\
          からドリフトしている。正のプローブ（__fandhe_dropout_\
-         embedding_bag_hold_probe モジュール・\
-         __FandheDropoutEmbeddingBagAddProbe／\
-         __FandheDropoutEmbeddingBagVarProbe トレイト・__probe 関数）の\
+         embedding_bag_hold_probe モジュール・__probe 関数）の\
          削除・弱体化・隠し行の混入がないか確認すること。"
     );
 }
@@ -12900,7 +12896,6 @@ mod __fandhe_dropout_embedding_bag_hold_probe {\n\
 \x20\x20\x20\x20pub struct AlphaDropout;\n\
 \x20\x20\x20\x20pub struct EmbeddingBag;\n\
 \x20\x20\x20\x20pub struct EmbeddingBagVars;\n\
-\x20\x20\x20\x20pub struct EmbeddingBagMode;\n\
 \x20\x20\x20\x20pub struct __FandheDropoutEmbeddingBagHoldMarker;\n\
 \x20\x20\x20\x20pub fn add_dropout2d() -> __FandheDropoutEmbeddingBagHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
@@ -12914,105 +12909,371 @@ mod __fandhe_dropout_embedding_bag_hold_probe {\n\
 }\n\
 use __fandhe_dropout_embedding_bag_hold_probe::*;\n\
 \n\
-trait __FandheDropoutEmbeddingBagAddProbe {\n\
-\x20\x20\x20\x20fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
-\x20\x20\x20\x20fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
-\x20\x20\x20\x20fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
-}\n\
-\n\
-impl __FandheDropoutEmbeddingBagAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-trait __FandheDropoutEmbeddingBagVarProbe {\n\
-\x20\x20\x20\x20fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
-\x20\x20\x20\x20fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
-\x20\x20\x20\x20fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheDropoutEmbeddingBagVarProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn dropout2d(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn alpha_dropout(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn embedding_bag(&self) -> __FandheDropoutEmbeddingBagHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDropoutEmbeddingBagHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe(\n\
 \x20\x20\x20\x20_: Dropout2d,\n\
 \x20\x20\x20\x20_: AlphaDropout,\n\
 \x20\x20\x20\x20_: EmbeddingBag,\n\
 \x20\x20\x20\x20_: EmbeddingBagVars,\n\
-\x20\x20\x20\x20_: EmbeddingBagMode,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_dropout2d();\n\
 \x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_alpha_dropout();\n\
 \x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = add_embedding_bag();\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_dropout2d(seq);\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_dropout2d();\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_alpha_dropout(seq);\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_alpha_dropout();\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::compat::Sequential::add_embedding_bag(seq);\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = seq.add_embedding_bag();\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::dropout2d(v);\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.dropout2d();\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::alpha_dropout(v);\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.alpha_dropout();\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = fandhe_ai::Var::embedding_bag(v);\n\
-\x20\x20\x20\x20let _: __FandheDropoutEmbeddingBagHoldMarker = v.embedding_bag();\n\
 }";
 
-/// `src/compat` 配下に `add_dropout2d`／`add_alpha_dropout`／
-/// `add_embedding_bag` の `pub fn` 宣言が存在しないことを固定する
-/// （イシュー #2161。`compat_sequential_does_not_expose_spatial_layer_
-/// add_methods` と同型。`docs/autodiff-dropout-embedding-bag-decision.md`
-/// §6 が未承認のまま対象外としている設計判断の固定）。
+// =====================================================================
+// イシュー #2528（親 #2520・ルート #2499 の一括承認）: Dropout2d・
+// AlphaDropout・EmbeddingBag の facade 公開の正ガード。保留ガード
+// （`DropoutEmbeddingBagHoldDoctestGuard`）から `Sequential`／`Var` の
+// プローブと `EmbeddingBagMode` の型プローブを外し、承認形（`Var` の 1 行
+// 委譲メソッド 3 個・`compat::Sequential` の add_* 3 個・ルートの
+// `EmbeddingBagMode` 再エクスポート 1 行）だけを許す形へ反転した。層型
+// （`Dropout2d`／`AlphaDropout`／`EmbeddingBag`／`EmbeddingBagVars`）の
+// 再エクスポートと自由関数での公開は未承認のまま禁止する。承認事項は
+// `docs/autodiff-dropout-embedding-bag-decision.md` §6・§8 参照。
+// =====================================================================
+
+/// #2528 で公開する 6 名の `fn` 名（`Var` 3 個 + `Sequential` 3 個）。
+const DROPOUT_EMBEDDING_BAG_FACADE_FN_NAMES: [&str; 6] = [
+    "dropout2d",
+    "alpha_dropout",
+    "embedding_bag",
+    "add_dropout2d",
+    "add_alpha_dropout",
+    "add_embedding_bag",
+];
+
+/// workspace 全体（`crates/*/src/`）で [`DROPOUT_EMBEDDING_BAG_FACADE_FN_NAMES`] の
+/// `fn` 宣言の定義元集合を固定する（過不足とも fail-closed。迂回実装・自由関数公開の
+/// 混入検出）。
 #[test]
-fn compat_sequential_does_not_expose_dropout_embedding_bag_add_methods() {
-    let compat_dir = facade_crate_root().join("src/compat");
-    let forbidden = ["add_dropout2d", "add_alpha_dropout", "add_embedding_bag"];
-    let mut offenses = Vec::new();
-    visit_rs_files(&compat_dir, &mut |path, content| {
-        for name in forbidden {
-            if contains_pub_fn_declaration(content, name) {
-                offenses.push(format!("{}: pub fn {name}", path.display()));
+fn workspace_declares_dropout_embedding_bag_facade_fn_names_only_in_approved_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .expect("workspace crates ディレクトリが読めない")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty());
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in DROPOUT_EMBEDDING_BAG_FACADE_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/var.rs::dropout2d",
+        "autodiff/src/var.rs::alpha_dropout",
+        "autodiff/src/var.rs::embedding_bag",
+        "facade/src/compat/sequential.rs::add_dropout2d",
+        "facade/src/compat/sequential.rs::add_alpha_dropout",
+        "facade/src/compat/sequential.rs::add_embedding_bag",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "#2528 の fn 宣言の定義元集合が承認形とずれている（新たな定義元が承認済みの\
+         実装なのか迂回経路なのかを確認すること）: {found:?}"
+    );
+}
+
+/// `var.rs` の 3 メソッド本体の承認形（`nn` の共有 forward への 1 行委譲）。
+const DROPOUT_EMBEDDING_BAG_VAR_EXPECTED_BODIES: [(&str, &str); 3] = [
+    (
+        "dropout2d",
+        "crate : : nn : : dropout2d_forward ( self , p , training )",
+    ),
+    (
+        "alpha_dropout",
+        "crate : : nn : : alpha_dropout_forward ( self , p , training )",
+    ),
+    (
+        "embedding_bag",
+        "crate : : nn : : embedding_bag_forward ( self , ids , mode , padding_idx )",
+    ),
+];
+
+/// `Var::dropout2d`／`alpha_dropout`／`embedding_bag` が共有 forward への薄い委譲で
+/// あることを固定する（スタブ・独自実装へのすり替えを拒否）。
+#[test]
+fn var_dropout_embedding_bag_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in DROPOUT_EMBEDDING_BAG_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（共有 forward への 1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけで 3 メソッドへ到達でき、シグネチャが承認形と
+/// 一致し、実際に適用して期待 shape・値が得られ、エラー経路が `Err` になることを固定する。
+#[test]
+fn var_dropout_embedding_bag_methods_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, EmbeddingBagMode, Tensor, Var};
+
+    type DropSig<'t> = fn(&Var<'t>, f32, bool) -> Result<Var<'t>, AutodiffError>;
+    type BagSig<'t> = fn(
+        &Var<'t>,
+        &Tensor<i32>,
+        EmbeddingBagMode,
+        Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError>;
+    fn drop2d<'t>() -> DropSig<'t> {
+        Var::<'t>::dropout2d
+    }
+    fn alpha<'t>() -> DropSig<'t> {
+        Var::<'t>::alpha_dropout
+    }
+    fn bag<'t>() -> BagSig<'t> {
+        Var::<'t>::embedding_bag
+    }
+
+    let tape = fandhe_ai::tape();
+    let data: Vec<f32> = (0..8).map(|v| v as f32).collect();
+    let x = tape.var(&Tensor::new(data.clone(), &[1, 2, 2, 2]).expect("tensor"));
+    // eval（training=false）・p=0 は恒等。
+    for f in [drop2d(), alpha()] {
+        let y = f(&x, 0.5, false).expect("eval は恒等");
+        assert_eq!(y.to_tensor().host_slice().into_owned(), data);
+        let y = f(&x, 0.0, true).expect("p=0 は恒等");
+        assert_eq!(y.to_tensor().host_slice().into_owned(), data);
+        // p の範囲外・NaN は Err。
+        assert!(f(&x, 1.5, true).is_err());
+        assert!(f(&x, -0.1, true).is_err());
+        assert!(f(&x, f32::NAN, true).is_err());
+    }
+    // p=1.0 は全要素 0（Dropout2d は全チャネル drop・AlphaDropout は特例）。
+    for f in [drop2d(), alpha()] {
+        let y = f(&x, 1.0, true).expect("p=1");
+        assert_eq!(y.to_tensor().shape(), [1, 2, 2, 2]);
+        assert!(y.to_tensor().host_slice().iter().all(|v| *v == 0.0));
+    }
+    // Dropout2d は rank 4 限定。
+    let x3 = tape.var(&Tensor::new(vec![1.0_f32; 8], &[2, 2, 2]).expect("tensor"));
+    assert!(drop2d()(&x3, 0.5, true).is_err());
+    assert!(drop2d()(&x3, 0.5, false).is_err());
+    // AlphaDropout は任意 rank。
+    assert!(alpha()(&x3, 1.0, true).is_ok());
+
+    // EmbeddingBag: weight [4, 2]・ids [2, 2]。
+    let w = tape.var(
+        &Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[4, 2]).expect("weight"),
+    );
+    let ids = Tensor::<i32>::new(vec![0, 1, 2, 3], &[2, 2]).expect("ids");
+    let sum = bag()(&w, &ids, EmbeddingBagMode::Sum, None).expect("sum");
+    assert_eq!(sum.to_tensor().shape(), [2, 2]);
+    assert_eq!(
+        sum.to_tensor().host_slice().into_owned(),
+        [4.0, 6.0, 12.0, 14.0]
+    );
+    let mean = bag()(&w, &ids, EmbeddingBagMode::Mean, None).expect("mean");
+    assert_eq!(
+        mean.to_tensor().host_slice().into_owned(),
+        [2.0, 3.0, 6.0, 7.0]
+    );
+    let max = bag()(&w, &ids, EmbeddingBagMode::Max, None).expect("max");
+    assert_eq!(
+        max.to_tensor().host_slice().into_owned(),
+        [3.0, 4.0, 7.0, 8.0]
+    );
+    // padding_idx に一致する id は縮約から除外される。
+    let padded = bag()(&w, &ids, EmbeddingBagMode::Sum, Some(0)).expect("padding");
+    assert_eq!(
+        padded.to_tensor().host_slice().into_owned(),
+        [3.0, 4.0, 12.0, 14.0]
+    );
+    // エラー経路: padding_idx 範囲外・範囲外 id・ids の rank 違い・weight の rank 違い。
+    assert!(bag()(&w, &ids, EmbeddingBagMode::Sum, Some(4)).is_err());
+    let bad_ids = Tensor::<i32>::new(vec![0, 4, 2, 3], &[2, 2]).expect("ids");
+    assert!(bag()(&w, &bad_ids, EmbeddingBagMode::Sum, None).is_err());
+    let neg_ids = Tensor::<i32>::new(vec![0, -1, 2, 3], &[2, 2]).expect("ids");
+    assert!(bag()(&w, &neg_ids, EmbeddingBagMode::Sum, None).is_err());
+    let flat_ids = Tensor::<i32>::new(vec![0, 1], &[2]).expect("ids");
+    assert!(bag()(&w, &flat_ids, EmbeddingBagMode::Sum, None).is_err());
+    let w1 = tape.var(&Tensor::new(vec![1.0_f32, 2.0], &[2]).expect("weight"));
+    assert!(bag()(&w1, &ids, EmbeddingBagMode::Sum, None).is_err());
+}
+
+const ADD_DROPOUT2D_PARAMS: &str = "mut self, p: f32) -> Result<Self, AutodiffError>";
+const ADD_ALPHA_DROPOUT_PARAMS: &str = "mut self, p: f32) -> Result<Self, AutodiffError>";
+const ADD_EMBEDDING_BAG_PARAMS: &str = "mut self, num_embeddings: usize, embedding_dim: usize, mode: EmbeddingBagMode, padding_idx: Option<usize>, seed: u64, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential` の 3 add_* が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_dropout_embedding_bag_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in [
+        ("add_dropout2d", ADD_DROPOUT2D_PARAMS),
+        ("add_alpha_dropout", ADD_ALPHA_DROPOUT_PARAMS),
+        ("add_embedding_bag", ADD_EMBEDDING_BAG_PARAMS),
+    ] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_dropout_embedding_bag_add_methods_have_approved_signatures`]
+/// の自己テスト。
+#[test]
+fn compat_sequential_dropout_embedding_bag_add_methods_have_approved_signatures_detects_offense() {
+    let ok = "pub fn add_dropout2d(mut self, p: f32,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "add_dropout2d",
+        ADD_DROPOUT2D_PARAMS
+    ));
+    for bad in [
+        "pub fn add_dropout2d(mut self, p: f64) -> Result<Self, AutodiffError> {",
+        "pub fn add_dropout2d(mut self, p: f32) -> Self {",
+        "pub fn add_dropout2d(&mut self, p: f32) -> Result<Self, AutodiffError> {",
+        "pub fn add_linear(mut self) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_dropout2d", ADD_DROPOUT2D_PARAMS),
+            "{bad}"
+        );
+    }
+    let ok_bag = "pub fn add_embedding_bag(mut self, num_embeddings: usize, embedding_dim: usize, mode: EmbeddingBagMode, padding_idx: Option<usize>, seed: u64,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok_bag,
+        "add_embedding_bag",
+        ADD_EMBEDDING_BAG_PARAMS
+    ));
+    // 引数順の入れ替え・mode の欠落は不一致。
+    for bad in [
+        "pub fn add_embedding_bag(mut self, embedding_dim: usize, num_embeddings: usize, mode: EmbeddingBagMode, padding_idx: Option<usize>, seed: u64,) -> Result<Self, AutodiffError> {",
+        "pub fn add_embedding_bag(mut self, num_embeddings: usize, embedding_dim: usize, padding_idx: Option<usize>, seed: u64,) -> Result<Self, AutodiffError> {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(
+                bad,
+                "add_embedding_bag",
+                ADD_EMBEDDING_BAG_PARAMS
+            ),
+            "{bad}"
+        );
+    }
+}
+
+/// ルートで再エクスポートを許す型の唯一の承認形（`src/lib.rs`）。
+const EMBEDDING_BAG_MODE_APPROVED_LINE: &str = "pub use fandhe_ai_autodiff::nn::EmbeddingBagMode;";
+
+/// facade が再エクスポートしてはならない層型（未承認）。
+const DROPOUT_EMBEDDING_BAG_LAYER_TYPE_NAMES: [&str; 4] = [
+    "Dropout2d",
+    "AlphaDropout",
+    "EmbeddingBag",
+    "EmbeddingBagVars",
+];
+
+/// facade src の 1 ファイル内容から、`EmbeddingBagMode` または未承認の層型名を識別子として
+/// 含む `pub use` 行（空白正規化済み）を集める検出本体。コメント・文字列リテラルは無視する。
+fn scan_embedding_bag_pub_use_lines(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("pub use") || l.starts_with("pub(crate) use"))
+        .filter(|l| {
+            line_contains_identifier(l, "EmbeddingBagMode")
+                || DROPOUT_EMBEDDING_BAG_LAYER_TYPE_NAMES
+                    .iter()
+                    .any(|n| line_contains_identifier(l, n))
+        })
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// `EmbeddingBagMode` の再エクスポートが `src/lib.rs` の承認形 1 行だけで、層型
+/// （`Dropout2d`／`AlphaDropout`／`EmbeddingBag`／`EmbeddingBagVars`）が facade の
+/// どこからも再エクスポートされないことを固定する。
+#[test]
+fn facade_reexports_embedding_bag_mode_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_lib_rs = 0usize;
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in scan_embedding_bag_pub_use_lines(content) {
+            if path.ends_with("src/lib.rs") && line == EMBEDDING_BAG_MODE_APPROVED_LINE {
+                approved_in_lib_rs += 1;
+            } else {
+                offending.push(format!("{}: `{line}`", path.display()));
             }
         }
     });
     assert!(
-        offenses.is_empty(),
-        "src/compat 配下に Dropout2d／AlphaDropout／EmbeddingBag 系\
-         add_* が見つかった（承認スコープ〈#2161〉は Sequential への\
-         追加を認めていない）: {offenses:?}"
+        offending.is_empty(),
+        "facade が EmbeddingBagMode を承認形（src/lib.rs の `{EMBEDDING_BAG_MODE_APPROVED_LINE}` \
+         1 行）以外で、または層型（Dropout2d／AlphaDropout／EmbeddingBag／EmbeddingBagVars）を\
+         再エクスポートしている（#2528）: {offending:?}"
+    );
+    assert_eq!(
+        approved_in_lib_rs, 1,
+        "src/lib.rs に承認形の再エクスポート行がちょうど 1 行存在しない\
+         （検査対象を見失った場合を含む）"
     );
 }
 
-/// [`compat_sequential_does_not_expose_dropout_embedding_bag_add_methods`]
-/// の自己テスト（合成入力で検出できることを確認する）。
+/// [`scan_embedding_bag_pub_use_lines`] の自己テスト（合成入力）。
 #[test]
-fn compat_sequential_does_not_expose_dropout_embedding_bag_add_methods_detects_offense() {
-    assert!(contains_pub_fn_declaration(
-        "pub fn add_dropout2d(&mut self, l: Dropout2d) {}",
-        "add_dropout2d"
-    ));
-    assert!(!contains_pub_fn_declaration(
-        "pub fn add_linear(&mut self, l: Linear) {}",
-        "add_dropout2d"
-    ));
+fn facade_reexports_embedding_bag_mode_only_in_approved_shape_detects_each_category() {
+    let scan = scan_embedding_bag_pub_use_lines;
+    assert_eq!(
+        scan(EMBEDDING_BAG_MODE_APPROVED_LINE),
+        vec![EMBEDDING_BAG_MODE_APPROVED_LINE.to_string()]
+    );
+    // 違反: 層型・別名・別経路・グループ形（承認形と文字列一致しない行として検出される）。
+    for src in [
+        "pub use fandhe_ai_autodiff::nn::Dropout2d;",
+        "pub use fandhe_ai_autodiff::nn::AlphaDropout;",
+        "pub use fandhe_ai_autodiff::nn::EmbeddingBag;",
+        "pub use fandhe_ai_autodiff::nn::{EmbeddingBagVars, EmbeddingBagMode};",
+        "pub use fandhe_ai_autodiff::nn::EmbeddingBagMode as Mode;",
+        "pub(crate) use fandhe_ai_autodiff::nn::EmbeddingBag;",
+    ] {
+        let hits = scan(src);
+        assert_eq!(hits.len(), 1, "src={src:?}");
+        assert_ne!(hits[0], EMBEDDING_BAG_MODE_APPROVED_LINE, "src={src:?}");
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use fandhe_ai_autodiff::nn::EmbeddingBag;",
+        "let s = \"pub use x::EmbeddingBagMode;\";",
+        "use fandhe_ai_autodiff::nn::EmbeddingBag;",
+        "pub use fandhe_ai_autodiff::Var;",
+    ] {
+        assert!(scan(src).is_empty(), "src={src:?}");
+    }
 }
 
 // =====================================================================

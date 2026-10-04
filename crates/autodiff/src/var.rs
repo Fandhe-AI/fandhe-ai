@@ -3020,6 +3020,47 @@ impl<'t> Var<'t> {
         crate::nn::unflatten_forward(self, dim, sizes)
     }
 
+    /// チャネル単位 dropout（PyTorch `F.dropout2d(input, p, training)` 相当。
+    /// イシュー #2528）。`[N, C, H, W]`（rank 4 限定）の `(n, c)` チャネルを
+    /// まとめて確率 `p` で 0 に落とし、残すチャネルは `1/(1-p)` 倍する。
+    ///
+    /// `p` が非有限または `[0, 1]` の範囲外は `InvalidArgument`、rank 4 以外は
+    /// `Shape(RankMismatch)`。検査は tape 操作より前に完了するため `Err` で
+    /// 孤児ノードを残さない。`training == false` または `p == 0.0` は `self` を
+    /// そのまま返す（ノードを積まず RNG も消費しない）。本体は `nn::Dropout2d`
+    /// と共有する forward（`pub(crate)`）への 1 行委譲。
+    pub fn dropout2d(&self, p: f32, training: bool) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::dropout2d_forward(self, p, training)
+    }
+
+    /// AlphaDropout（PyTorch `F.alpha_dropout(input, p, training)` 相当。
+    /// イシュー #2528）。SELU 系ネットワーク向けに、drop 後の出力が入力の
+    /// 平均・分散を保つようアフィン補正する。入力 rank は任意。
+    ///
+    /// `p` の検査・早期リターン・孤児ノードを残さない規律は [`Self::dropout2d`]
+    /// と同じ。本体は `nn::AlphaDropout` と共有する forward への 1 行委譲。
+    pub fn alpha_dropout(&self, p: f32, training: bool) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::alpha_dropout_forward(self, p, training)
+    }
+
+    /// EmbeddingBag（PyTorch `F.embedding_bag(ids, weight, mode=..)` の長さの
+    /// 揃った bag 形式相当。イシュー #2528）。`self` は weight
+    /// `[num_embeddings, D]`、`ids` は `[B, L]`、戻り値は `[B, D]`
+    /// （bag ごとに `mode` で縮約）。`padding_idx` に一致する id は縮約から除外する。
+    ///
+    /// weight の rank 不一致・`padding_idx >= num_embeddings`・`ids` の rank 不一致・
+    /// 範囲外 id は `Err`。検査は tape 操作より前に完了するため `Err` で孤児ノードを
+    /// 残さない。本体は `nn::EmbeddingBag` と共有する forward への 1 行委譲。
+    /// 可変長 bag（offsets）は未公開。
+    pub fn embedding_bag(
+        &self,
+        ids: &Tensor<i32>,
+        mode: crate::nn::EmbeddingBagMode,
+        padding_idx: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::embedding_bag_forward(self, ids, mode, padding_idx)
+    }
+
     /// チャネル軸を空間軸へ並べ替える（PyTorch `F.pixel_shuffle` 相当。イシュー #2526）。
     ///
     /// `[*, C*r*r, H, W]` → `[*, C, H*r, W*r]`（`r = upscale_factor`）。軸の並びは

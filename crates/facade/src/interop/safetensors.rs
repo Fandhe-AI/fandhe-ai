@@ -81,7 +81,7 @@
 //! `compat::Sequential` の層構成シリアライズ（manifest.json ＋
 //! safetensors の組み合わせによる `save_model`／`load_model`）は、
 //! イシュー #2369（親 #2362）で `compat::save_model`／`compat::load_model` として
-//! 公開済み（全 42 層・BatchNorm の buffer・compile 状態まで #2373 で実装完了。
+//! 公開済み（全 45 層・BatchNorm の buffer・compile 状態まで #2373 で実装完了。
 //! 設計は `docs/compat-model-io-decision.md`。本モジュールの
 //! `save_safetensors_f32_to_bytes`／`load_safetensors_f32_from_bytes` を再利用する。
 //! 本モジュール自体への変更はなく、案 A の素の再エクスポートのみのまま）。F32 以外の

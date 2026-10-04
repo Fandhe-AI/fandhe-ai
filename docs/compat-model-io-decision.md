@@ -436,6 +436,8 @@ version migration。
   | `softplus` | `beta`・`threshold`（f32） | なし |
   | `flatten` | `start_dim`・`end_dim` | なし |
   | `dropout` | `p`（f32） | なし |
+  | `dropout2d`（#2528） | `p`（f32） | なし |
+  | `alpha_dropout`（#2528） | `p`（f32） | なし |
   | `conv2d` | `in_channels`・`out_channels`・`kernel_size_{h,w}`・`stride_{h,w}`・`padding_{h,w}`・`dilation_{h,w}`・`groups` | `weight: [out, in/groups, kh, kw]`・`bias: [out]` |
   | `conv_transpose2d`（#2523） | `in_channels`・`out_channels`・`kernel_size_{h,w}`・`stride_{h,w}`・`padding_{h,w}`・`output_padding_{h,w}`・`dilation_{h,w}`・`groups` | `weight: [in, out/groups, kH, kW]`（`conv2d` と先頭 2 軸が逆）・`bias: [out]` |
   | `conv3d`（#2524） | `in_channels`・`out_channels`・`kernel_size_{d,h,w}`・`stride_{d,h,w}`・`padding_{d,h,w}`・`dilation_{d,h,w}`・`groups`（15 キー） | `weight: [out, in/groups, kD, kH, kW]`・`bias: [out]` |
@@ -445,6 +447,7 @@ version migration。
   | `pixel_unshuffle`（#2526） | `downscale_factor` | なし |
   | `adaptive_max_pool2d`（#2527） | `output_size_{h,w}` | なし |
   | `adaptive_max_pool1d`（#2527） | `output_size` | なし |
+  | `embedding_bag`（#2528） | `num_embeddings`・`embedding_dim`・`mode`（文字列 `"sum"`／`"mean"`／`"max"` の allowlist。未知値は manifest 拒否・保存側の未知 variant は `UnsupportedModel`）・`padding_idx`（`null` 可） | `weight: [num_embeddings, embedding_dim]` |
   | `global_pool`（#2527） | `mode`（文字列 `"avg"`／`"max"` の allowlist。未知値は manifest 拒否・保存側の未知 variant は `UnsupportedModel`）・`keepdims`（bool） | なし |
   | `conv1d` | `in_channels`・`out_channels`・`kernel_size`・`stride`・`padding`・`dilation`・`groups` | `weight: [out, in/groups, k]`・`bias: [out]` |
   | `layer_norm` | `normalized_size`・`eps`（f32） | `weight: [n]`・`bias: [n]` |
