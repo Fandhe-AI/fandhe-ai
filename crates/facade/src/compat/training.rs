@@ -39,7 +39,8 @@ use crate::optim::{
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
 // 非 `pub` の use のみ（`loss_ops` モジュール自体は facade へ公開しない。
-// `LossOpsHoldDoctestGuard` の保留を維持。#2509）。
+// `LossOpsHoldDoctestGuard` の保留を維持。#2509。`Var::l1_loss` は #2538 で
+// 委譲メソッドとして公開済みだが、本ファイルは自由関数呼び出しのまま）。
 use fandhe_ai_autodiff::loss_ops::l1_loss;
 // `Lbfgs` は #2502 で `crate::optim` から公開済み（同一型）。本ファイルの
 // `OptimizerState::Lbfgs` は内部クレートの型を直接 import して保持する

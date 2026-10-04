@@ -14529,7 +14529,9 @@ fn __probe(\n\
 }";
 
 // =====================================================================
-// #2166（親 #2131）の facade 公開保留固定（`LossOpsHoldDoctestGuard`）。
+// #2166 実装・#2538 で `Var` 2 メソッドを公開（親 #2537・ルート #2499）。
+// `LossOpsHoldDoctestGuard` は部分反転（`Var::{l1_loss, cross_entropy_loss_with}`
+// のプローブのみ削除。残り 5 名・Tensor／Tape・モジュール再エクスポートの保留は維持）。
 // `VarReduceOpsHoldDoctestGuard`（イシュー #2147。#2514 で削除済み）と同型の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
 // 定義元インベントリを持つ。承認事項・多層防御の位置づけは
@@ -14663,10 +14665,6 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::l1_loss(x);\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = x.l1_loss();\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::cross_entropy_loss_with(x);\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = x.cross_entropy_loss_with();\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::cosine_embedding_loss(x);\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = x.cosine_embedding_loss();\n\
 \x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::margin_ranking_loss(x);\n\
@@ -14706,7 +14704,7 @@ fn __probe_tape(x: &fandhe_ai::Tape) {\n\
 /// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167）・
 /// `ctc_loss`（イシュー #2168。7 個の関数名）。
 /// [`facade_does_not_reexport_or_declare_loss_ops`]・
-/// [`workspace_declares_loss_ops_fn_names_only_in_allowed_locations`]
+/// [`workspace_declares_loss_ops_fn_names_only_in_approved_locations`]
 /// が共用する。
 const LOSS_OPS_FN_NAMES: [&str; 7] = [
     "l1_loss",
@@ -14754,9 +14752,9 @@ fn facade_does_not_reexport_or_declare_loss_ops() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が loss_ops（イシュー #2166 の内部クレート限定\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+        "facade の公開面が loss_ops を再エクスポート、または同名の fn を宣言\
+         している（承認形は autodiff の `Var` 委譲メソッド 2 件のみ。#2538）:\
+         {offending:?}"
     );
 }
 
@@ -14770,9 +14768,11 @@ fn facade_does_not_reexport_or_declare_loss_ops() {
 /// #2166）・`cosine_embedding_loss`・`margin_ranking_loss`・
 /// `triplet_margin_loss`・`poisson_nll_loss`（イシュー #2167）・
 /// `ctc_loss`（イシュー #2168）は
-/// いずれも `crates/autodiff/src/loss_ops.rs` にのみ 1 件ずつ存在する。
+/// いずれも `crates/autodiff/src/loss_ops.rs` に 1 件ずつ存在する。加えて
+/// #2538 で `l1_loss`・`cross_entropy_loss_with` の `Var` 委譲メソッドが
+/// `crates/autodiff/src/var.rs` に 1 件ずつ存在する（承認形）。
 #[test]
-fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
+fn workspace_declares_loss_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -14824,6 +14824,8 @@ fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
         ("autodiff/src/loss_ops.rs::triplet_margin_loss", 1usize),
         ("autodiff/src/loss_ops.rs::poisson_nll_loss", 1usize),
         ("autodiff/src/loss_ops.rs::ctc_loss", 1usize),
+        ("autodiff/src/var.rs::l1_loss", 1usize),
+        ("autodiff/src/var.rs::cross_entropy_loss_with", 1usize),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -14832,10 +14834,93 @@ fn workspace_declares_loss_ops_fn_names_only_in_allowed_locations() {
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の loss_ops 系 `fn` 宣言集合が\
-         期待（`crates/autodiff/src/loss_ops.rs` 7 件）と一致しない\
+         期待（`crates/autodiff/src/loss_ops.rs` 7 件＋`autodiff/src/var.rs` 2 件）と一致しない\
          （過不足いずれも fail-closed に検出する。新たな定義元が\
          見つかった場合、それが承認済みの実装なのか迂回経路の混入なのか\
          を確認すること）: {found:?}"
+    );
+}
+
+/// `var.rs` の 2 委譲メソッド本体の承認形（`loss_ops` 自由関数への 1 行委譲。
+/// 引数名も固定）。独自実装・スタブへのすり替えと入口検査の迂回を拒否する
+/// （#2538。[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。
+const LOSS_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 2] = [
+    (
+        "l1_loss",
+        "crate : : loss_ops : : l1_loss ( self , target , reduction )",
+    ),
+    (
+        "cross_entropy_loss_with",
+        "crate : : loss_ops : : cross_entropy_loss_with ( self , targets , class_dim , reduction , options )",
+    ),
+];
+
+/// `var.rs` の 2 委譲メソッドの本体が [`LOSS_OPS_VAR_EXPECTED_BODIES`] と
+/// 一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
+#[test]
+fn var_loss_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in LOSS_OPS_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（loss_ops 自由関数への \
+             1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由で 2 メソッドへ到達でき、シグネチャが承認形と
+/// 一致し、実際に適用して厳密に決まる期待値が得られることを固定する（スタブでは
+/// 通らない。#2538）。`Reduction`／`CrossEntropyOptions` の facade 再エクスポートは
+/// 未承認（決定記録 §6）のため `fandhe_ai_autodiff` から import する。そのため
+/// テスト名は `_facade_only` ではなく `_facade_var` とする。
+#[test]
+fn var_loss_ops_are_reachable_via_facade_var() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    use fandhe_ai_autodiff::Reduction;
+    use fandhe_ai_autodiff::loss_ops::CrossEntropyOptions;
+
+    fn sig_l1<'t>() -> fn(&Var<'t>, &Var<'t>, Reduction) -> Result<Var<'t>, AutodiffError> {
+        Var::<'t>::l1_loss
+    }
+    type CeFn<'t> = fn(
+        &Var<'t>,
+        &Tensor<i32>,
+        usize,
+        Reduction,
+        &CrossEntropyOptions,
+    ) -> Result<Var<'t>, AutodiffError>;
+    fn sig_ce<'t>() -> CeFn<'t> {
+        Var::<'t>::cross_entropy_loss_with
+    }
+    fn vals(v: &Var<'_>) -> Vec<f32> {
+        v.to_tensor().host_slice().into_owned()
+    }
+
+    let tape = fandhe_ai::tape();
+    let pred = tape.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3]).expect("tensor"));
+    let target = tape.var(&Tensor::new(vec![0.0_f32, 4.0, 3.0], &[3]).expect("tensor"));
+    assert_eq!(
+        vals(&sig_l1()(&pred, &target, Reduction::Mean).expect("l1 mean")),
+        [1.0]
+    );
+    assert_eq!(
+        vals(&sig_l1()(&pred, &target, Reduction::Sum).expect("l1 sum")),
+        [3.0]
+    );
+
+    // 一様 logits（2 クラス）・label_smoothing=0.2 → 損失は ln 2。
+    let logits = tape.var(&Tensor::new(vec![0.0_f32, 0.0], &[1, 2]).expect("tensor"));
+    let targets = Tensor::new(vec![0_i32], &[1]).expect("targets");
+    let opts = CrossEntropyOptions::default().label_smoothing(0.2);
+    let out = vals(&sig_ce()(&logits, &targets, 1, Reduction::Mean, &opts).expect("ce"));
+    assert!(
+        (out[0] - std::f32::consts::LN_2).abs() < 1e-5,
+        "ce(smoothing=0.2, 一様 logits) = ln 2 のはず: {out:?}"
     );
 }
 

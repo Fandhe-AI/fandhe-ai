@@ -26,8 +26,8 @@
 //! - #2167（親イシュー #2131）で距離ベースの損失 3 種
 //!   （`CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`）
 //!   と `PoissonNllLoss` を追加した。`L1Loss` と同じく `crate::loss_ops`
-//!   の自由関数（`Var` に委譲メソッドを持たない。facade 非公開）を
-//!   呼ぶだけの薄いラッパー。
+//!   の自由関数（これらの 4 損失は `Var` に委譲メソッドを持たない。facade
+//!   非公開）を呼ぶだけの薄いラッパー。
 //! - #2168（親イシュー #2131）で `CtcLoss`（`crate::loss_ops::ctc_loss`
 //!   の薄いラッパー。PyTorch `nn.CTCLoss` 相当）を追加した。上記と同じ
 //!   「自由関数を呼ぶだけ」パターン。
@@ -78,9 +78,9 @@ impl MseLoss {
 
 /// L1 損失（`|pred − target|` の縮約。PyTorch `nn.L1Loss` 相当。
 /// イシュー #2166・親イシュー #2131）。`crate::loss_ops::l1_loss` の
-/// 薄いラッパー（`Var` に委譲メソッドを持たないため直接自由関数を
-/// 呼ぶ。`crate::loss_ops` モジュール doc「facade 非公開（意図的）」
-/// 参照）。`Default` は `Reduction::Mean`（PyTorch `nn.L1Loss` の
+/// 薄いラッパー（直接自由関数を呼ぶ。`Var::l1_loss` は #2538 で
+/// 委譲メソッドとして公開済みだが、本構造体の facade 公開は別イシュー
+/// #2600 の範囲。`crate::loss_ops` モジュール doc 参照）。`Default` は `Reduction::Mean`（PyTorch `nn.L1Loss` の
 /// 既定 `reduction='mean'` と一致）。
 #[derive(Debug, Clone, Copy)]
 pub struct L1Loss {

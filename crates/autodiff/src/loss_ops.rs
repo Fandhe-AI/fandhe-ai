@@ -15,9 +15,13 @@
 //! #2166 実装計画は facade 公開面（`Var::l1_loss`／`Var::
 //! cross_entropy_loss_with` の委譲メソッド追加）を承認事項として明示し、
 //! 承認が取れるまでは自由関数として `Var` の外に置き到達不能にする
-//! （`docs/autodiff-loss-ops-decision.md` §5「承認事項」）。承認後は
-//! `Var` への薄い委譲メソッドを追加し、facade 側の保留ガード
-//! （`crates/facade/src/lib.rs::LossOpsHoldDoctestGuard`）を撤去する。
+//! （`docs/autodiff-loss-ops-decision.md` §5「承認事項」）。
+//! **#2538 で [`l1_loss`]・[`cross_entropy_loss_with`] の 2 関数は `Var` の
+//! 薄い委譲メソッド（`Var::l1_loss`・`Var::cross_entropy_loss_with`）として
+//! facade 公開済み**（ルート #2499 一括承認）。残り 5 関数・`loss_ops`
+//! モジュール自体・`CrossEntropyOptions` 等のオプション型は引き続き非公開で、
+//! facade 側の保留ガード（`crates/facade/src/lib.rs::LossOpsHoldDoctestGuard`）が
+//! `Var` の残り 5 名・`Tensor`／`Tape`・モジュール再エクスポートを拒否し続ける。
 //!
 //! **既存 API との関係（R3・後方互換）**: 既存 `Var::cross_entropy_loss`
 //! （`var.rs`）のシグネチャ・数値経路は本モジュールの追加によって
