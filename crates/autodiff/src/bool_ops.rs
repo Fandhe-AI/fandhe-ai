@@ -8,20 +8,14 @@
 //! `Var::masked_fill`（同ファイル）は既に条件として `&Tensor<bool>` を
 //! 受け取るため、ここで作った bool マスクをそのまま接続できる。
 //!
-//! **facade 非公開（意図的）**: 本モジュールは `crate::lib::pub mod
-//! bool_ops` として crate ルートから到達可能だが、`facade`
-//! （`fandhe_ai` クレート）はこれを再エクスポートしない。`Var`
-//! そのものは facade から直接再エクスポートされる（`crates/facade/
-//! src/lib.rs`）ため、`Var` への inherent メソッド追加は即座に facade
-//! 公開面へ出てしまう。イシュー #2141 本文は facade 公開面（10 項目）
-//! を承認事項として明示列挙しており、親 #2131 はこのツリーに限り
-//! 「設計判断記録 → 承認 → 実装」の 2 段階を定めるため、承認が
-//! 取れるまでは自由関数として `Var` の外に置き到達不能にする
-//! （`docs/autodiff-bool-ops-exposure-decision.md` §3・
-//! `docs/unique-facade-exposure-decision.md` §4 と同じ判断枠組み）。
-//! 承認後は `Var::gt_bool` 等の薄い委譲メソッドを追加し、facade 側の
-//! 保留ガード（`crates/facade/src/lib.rs::VarBoolOpsHoldDoctestGuard`）
-//! を撤去する。
+//! **facade 公開範囲（#2510。ルート #2499 一括承認）**: 比較 6 種と
+//! `masked_select` の 7 件は `Var` の薄い委譲メソッド（`Var::gt_bool` 等。
+//! `var.rs`）として facade（`fandhe_ai::Var`）経由で公開済み。本モジュール
+//! の自由関数そのもの・`bool_ops` モジュールの再エクスポートは引き続き
+//! 内部クレート限定である。logical 3 種（`logical_and`／`logical_or`／
+//! `logical_not`）は公開形が未決のため facade 非公開のまま保留
+//! （#2594。`crates/facade/src/lib.rs::VarBoolOpsHoldDoctestGuard` が
+//! 固定。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
 //!
 //! **数値契約**: 比較 6 種は IEEE 754 準拠（`NaN` を含む比較は `eq` を
 //! 含め常に偽・`ne` のみ真。`-0.0 == +0.0` は真）。出力は既存の f32

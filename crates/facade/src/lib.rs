@@ -1439,32 +1439,38 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 struct VarCustomHoldDoctestGuard;
 
 /// イシュー #2141（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）
-/// と同型の「正のプローブ 1 ブロック方式」を採る:
-/// facade の全 `pub mod` を glob import したスコープに、本ブロック内で
-/// のみ定義したローカルの自由関数群（`__fandhe_bool_hold_probe::
-/// bool_ops::{gt_bool, ge_bool, lt_bool, le_bool, eq_bool, ne_bool,
-/// logical_and, logical_or, logical_not, masked_select}`）とトレイト
-/// （`__FandheBoolHoldProbe`）を導入し、実際に使う関数を書く。facade が
-/// どの経路（`pub use fandhe_ai_autodiff::bool_ops;` のようなモジュール
-/// 再エクスポート・`Var`／`Tensor<bool>` への inherent メソッド追加・
-/// 別名 `pub use`）で `bool_ops` という名前や 10 個の関数名を公開しても、
-/// ローカル定義との glob 衝突（モジュール名の場合）または呼び出し
-/// シグネチャの不一致（inherent メソッドがトレイトメソッドより優先
-/// 解決されるため、引数なしの `x.gt_bool()` 呼び出しが `Var::gt_bool
-/// (&self, other: &Var<'t>)` に解決されて型・引数数エラーになる）で
-/// コンパイルが失敗する。
+/// #2510（ルート #2499 一括承認）で比較 6 種（`gt_bool`／`ge_bool`／
+/// `lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）と `masked_select` の 7 件は
+/// `Var` の委譲メソッドとして公開済みのため、本ガードが固定するのは
+/// 次の「承認形外」の配置に絞られる:
+///
+/// - logical 3 種（`logical_and`／`logical_or`／`logical_not`）の `Var`
+///   への配置（公開形は未決・#2594）
+/// - 10 関数の `Tensor<bool>`／`Tensor<f32>`／`Tape` 上への配置
+/// - `bool_ops` モジュールの再エクスポート・別名 `pub use`
+///
+/// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除
+/// 済み）と同型の「正のプローブ 1 ブロック方式」を採る: facade の全
+/// `pub mod` を glob import したスコープに、本ブロック内でのみ定義した
+/// ローカルの自由関数群（`__fandhe_bool_hold_probe::bool_ops::*`）と
+/// トレイト（`__FandheBoolHoldProbe`）を導入し、実際に使う関数を書く。
+/// 未承認の経路でモジュール名・関数名が公開されると、ローカル定義との
+/// glob 衝突（モジュール名の場合）または呼び出しシグネチャの不一致
+/// （inherent メソッドがトレイトメソッドより優先解決されるため、引数なしの
+/// `x.logical_and()` が inherent 側に解決されて型・引数数エラーになる）で
+/// コンパイルが失敗する。`Var` 用トレイト impl の 7 件分は inherent に
+/// 隠れて呼ばれないが、トレイトが 10 メソッドを要求するため残す。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// bool_ops_hold_doctest_globs_all_pub_modules`・`bool_ops_hold_
 /// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
 /// reexport_or_declare_bool_ops`・`workspace_declares_bool_ops_fn_
-/// names_only_in_autodiff_bool_ops`）との多層防御の位置づけは
-/// `docs/autodiff-bool-ops-exposure-decision.md` §6「承認事項」を参照。
+/// names_in_approved_places_only`）との多層防御の位置づけは
+/// `docs/autodiff-bool-ops-exposure-decision.md` §6「承認事項」・§6.1
+/// を参照。
 ///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
+/// 撤去条件: #2594 で logical 3 種の公開形が承認・実装されたとき、本
+/// モジュール・本 doctest 自体を削除する（ソース走査側と同時に外す）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -1584,10 +1590,12 @@ struct VarCustomHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheBoolMarker = fandhe_ai::Var::gt_bool(x);
-///     let _: __FandheBoolMarker = x.gt_bool();
-///     let _: __FandheBoolMarker = fandhe_ai::Var::masked_select(x);
-///     let _: __FandheBoolMarker = x.masked_select();
+///     let _: __FandheBoolMarker = fandhe_ai::Var::logical_and(x);
+///     let _: __FandheBoolMarker = x.logical_and();
+///     let _: __FandheBoolMarker = fandhe_ai::Var::logical_or(x);
+///     let _: __FandheBoolMarker = x.logical_or();
+///     let _: __FandheBoolMarker = fandhe_ai::Var::logical_not(x);
+///     let _: __FandheBoolMarker = x.logical_not();
 /// }
 ///
 /// fn __probe_tensor_bool(x: &fandhe_ai::Tensor<bool>) {
