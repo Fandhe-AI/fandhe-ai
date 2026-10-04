@@ -395,3 +395,40 @@ doctest）・`crates/facade/tests/api_surface.rs` の 4 テスト
   `api_surface.rs` の 4 テスト）の撤去・反転
 - `docs/compat-api-scope.md` §5 への適用記録（公開を適用していないため）
 - 追跡 Issue の起票（ユーザー承認が必要）
+
+## §11 #2554 着手時判定（#2553 未実装・§9 未承認のため停止）
+
+調査基準は `origin/main` の `28384093`（2026-10-04 確認）。本節は停止の記録であり、
+承認を取得したことを意味しない。
+
+### 11.1 判定
+
+- 依存の #2553 は PR #2740 で §10 を記録してクローズされた。facade 公開
+  （`compat::Sequential::compile_with_param_groups`・`fandhe_ai::optim::{ParamGroup, ParamGroupStep}`
+  の再エクスポート）は `crates/facade/` に存在しない
+  （`compile_with_param_groups` は保留ガードの doctest 足場と doc コメントにのみ現れる）
+- 正ガードへの反転は「承認して公開した形だけを許す」検査であり、公開物が無い状態では
+  反転先が存在しない
+- §9.5 の (a)〜(e) は未承認のまま。#2499・#2551・#2552・#2553・#2554 に承認コメントは
+  付いていない（`gh api` でコメント一覧を確認）。ルート #2499 の一括承認は §9.2 に及ばない
+  （§10.1 と同じ）
+
+### 11.2 結論
+
+停止条項に従い、`ParamGroupsHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の 4 テスト
+（`param_groups_hold_doctest_globs_all_pub_modules`・
+`param_groups_hold_doctest_probe_body_matches_fixed_contract`・
+`facade_does_not_reexport_or_declare_param_groups`・
+`workspace_declares_param_group_fn_names_only_in_allowed_locations`）は撤去も反転もせず現状維持とした。
+
+- 解除の順序: §9.5 のユーザー承認 → #2553 の reopen または新しい実装イシューでの facade 公開
+  → 保留ガードの反転（#2554 の受入基準）。承認だけでは解除されない
+- #2554 の受入基準 3 点（ガード反転・`compat-api-scope.md` §5 の適用記録・facade 経由の利用例テスト）
+  は未達であり、公開の実装後に行う
+
+### 11.3 本イシューで行わないこと
+
+- `crates/facade/**` の変更、保留ガードの撤去・反転
+- `docs/compat-api-scope.md` §5 への適用記録
+- facade 経由の利用例 doctest・テストの追加（対象 API が存在しないため）
+- 追跡 Issue の起票（ユーザー承認が必要）
