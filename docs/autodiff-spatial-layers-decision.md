@@ -72,7 +72,7 @@ ScaleFactor(Vec<f64>) }`（`#[non_exhaustive]`）で表現し、`size` と
 `Unflatten` は PyTorch の `-1`（1 軸だけ自動推論）を `usize` では
 表現できないため非対応とした。
 
-### §2.2 facade 公開・compat::Sequential の add_* — 2 層は #2521 で公開、3 層は保留
+### §2.2 facade 公開・compat::Sequential の add_* — 2 層は #2521、3 層は #2522 で公開
 
 イシュー #2159 は「facade への 5 個の `add_*` メソッド」を承認事項
 として挙げ「承認前に実施しない」と定めている。コメントでの承認も
@@ -82,8 +82,9 @@ ScaleFactor(Vec<f64>) }`（`#[non_exhaustive]`）で表現し、`size` と
 `SpatialLayersHoldDoctestGuard` の同一 doctest ブロックで併せて
 保留固定している（`crates/facade/src/lib.rs` 参照）。
 
-（#2521 更新）`ConvTranspose1d`／`Unflatten` の 2 層に限り §6 の承認
-（ルート #2499 の一括承認）に基づき公開した。残り 3 層の `add_*` は保留。
+（#2521 更新）`ConvTranspose1d`／`Unflatten` の 2 層は §6 の承認
+（ルート #2499 の一括承認）に基づき公開した。残り 3 層の `add_*` は
+#2522 で公開済み（§8）。以上の本節前半は #2159 時点の当初判断の記録である。
 
 ### §2.3 `Module` trait への統合
 
@@ -208,7 +209,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 ## §8 実装記録（イシュー #2522・ルート #2499 の 2026-10-04 一括承認）
 
 §6 承認事項 1 のうち `add_upsample`／`add_zero_pad2d`／`add_identity` の 3 件を実装した
-（`add_conv_transpose1d`／`add_unflatten` と `Var` 委譲メソッドは別イシュー〈#2521 系〉の対象で保留のまま）。
+（`add_conv_transpose1d`／`add_unflatten` と `Var` 委譲メソッドは別イシュー〈#2521〉の対象で、そちらで公開済み。§6 実装記録）。
 
 - **公開面**: `compat::Sequential` に `pub fn` 3 件のみ。型（`Upsample`／`ZeroPad2d`／`Identity`／`UpsampleSize`）の
   facade 再エクスポートはしない（§6 に記録がなく未承認）。
