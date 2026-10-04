@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 30 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 33 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -84,9 +84,9 @@ use self::compiled::{
     render_compiled, split_optimizer_tensors,
 };
 use super::sequential::{LayerSpec, Sequential};
-use crate::Tensor;
 use crate::fs_guard::{LeafError, MAX_MODEL_FILE_BYTES, OpenedLeaf, open_leaf_checked};
 use crate::interop::safetensors::{load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes};
+use crate::{InterpolateMode, Tensor};
 
 /// manifest のファイル名（`dir` 直下の固定名）。
 const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -306,7 +306,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 30 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 33 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -339,6 +339,9 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::AvgPool1d { .. } => Some("avg_pool1d"),
         LayerSpec::AdaptiveAvgPool2d { .. } => Some("adaptive_avg_pool2d"),
         LayerSpec::AdaptiveAvgPool1d { .. } => Some("adaptive_avg_pool1d"),
+        LayerSpec::Upsample { .. } => Some("upsample"),
+        LayerSpec::ZeroPad2d { .. } => Some("zero_pad2d"),
+        LayerSpec::Identity => Some("identity"),
         LayerSpec::Unsupported { .. } => None,
     }
 }
@@ -505,6 +508,9 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::AvgPool1d { .. }
         | LayerSpec::AdaptiveAvgPool2d { .. }
         | LayerSpec::AdaptiveAvgPool1d { .. }
+        | LayerSpec::Upsample { .. }
+        | LayerSpec::ZeroPad2d { .. }
+        | LayerSpec::Identity
         | LayerSpec::Unsupported { .. } => Vec::new(),
     }
 }
@@ -570,6 +576,45 @@ fn put_pair(f: &mut ParamFields, base: &str, v: [usize; 2]) {
 fn put_opt_pair(f: &mut ParamFields, base: &str, v: Option<[usize; 2]>) {
     put_opt(f, &format!("{base}_h"), v.map(|x| x[0]));
     put_opt(f, &format!("{base}_w"), v.map(|x| x[1]));
+}
+
+/// `Upsample` の `size` に許す軸数の上限（`size_0`..`size_2` の固定キー。非信頼な整数から
+/// 確保しないための上限。`InterpolateMode::Trilinear` の 3 軸が最大。イシュー #2522）。
+const UPSAMPLE_MAX_SIZE_LEN: usize = 3;
+
+/// `InterpolateMode` ↔ manifest 文字列 + `align_corners`（allowlist の正）。
+/// `InterpolateMode` は `#[non_exhaustive]` のため、未知 variant は `None`（保存側が
+/// `UnsupportedModel` で fail-closed にする）。`align_corners` を持たない mode は常に `false`。
+fn upsample_mode_to_wire(mode: InterpolateMode) -> Option<(&'static str, bool)> {
+    match mode {
+        InterpolateMode::Nearest => Some(("nearest", false)),
+        InterpolateMode::NearestExact => Some(("nearest_exact", false)),
+        InterpolateMode::Area => Some(("area", false)),
+        InterpolateMode::Linear { align_corners } => Some(("linear", align_corners)),
+        InterpolateMode::Bilinear { align_corners } => Some(("bilinear", align_corners)),
+        InterpolateMode::Bicubic { align_corners } => Some(("bicubic", align_corners)),
+        InterpolateMode::Trilinear { align_corners } => Some(("trilinear", align_corners)),
+        _ => None,
+    }
+}
+
+/// [`upsample_mode_to_wire`] の逆変換（文字列 allowlist。`align_corners` の正準形は呼び出し側が検査）。
+fn upsample_mode_from_wire(name: &str, align_corners: bool) -> Option<InterpolateMode> {
+    match name {
+        "nearest" => Some(InterpolateMode::Nearest),
+        "nearest_exact" => Some(InterpolateMode::NearestExact),
+        "area" => Some(InterpolateMode::Area),
+        "linear" => Some(InterpolateMode::Linear { align_corners }),
+        "bilinear" => Some(InterpolateMode::Bilinear { align_corners }),
+        "bicubic" => Some(InterpolateMode::Bicubic { align_corners }),
+        "trilinear" => Some(InterpolateMode::Trilinear { align_corners }),
+        _ => None,
+    }
+}
+
+/// 保存可能な `Upsample` か（`size` の軸数が `1..=3` かつ mode が既知）。
+fn upsample_is_savable(size: &[usize], mode: InterpolateMode) -> bool {
+    (1..=UPSAMPLE_MAX_SIZE_LEN).contains(&size.len()) && upsample_mode_to_wire(mode).is_some()
 }
 
 /// 層の `params` を manifest 用の JSON object 文字列にする（キー順固定。整数は 10 進、
@@ -733,6 +778,22 @@ fn render_params(spec: &LayerSpec) -> String {
         LayerSpec::AdaptiveAvgPool1d { output_size } => {
             put_num(&mut f, "output_size", *output_size)
         }
+        LayerSpec::Upsample { size, mode } => {
+            // 保存前検査（`upsample_is_savable`）通過後にだけ呼ばれる。
+            let (name, align_corners) = upsample_mode_to_wire(*mode).unwrap_or(("", false));
+            f.push(("mode".to_string(), format!("\"{name}\"")));
+            put_bool(&mut f, "align_corners", align_corners);
+            put_num(&mut f, "size_len", size.len());
+            for i in 0..UPSAMPLE_MAX_SIZE_LEN {
+                put_opt(&mut f, &format!("size_{i}"), size.get(i).copied());
+            }
+        }
+        LayerSpec::ZeroPad2d { padding } => {
+            put_num(&mut f, "left", padding[0]);
+            put_num(&mut f, "right", padding[1]);
+            put_num(&mut f, "top", padding[2]);
+            put_num(&mut f, "bottom", padding[3]);
+        }
         LayerSpec::Relu
         | LayerSpec::Sigmoid
         | LayerSpec::Tanh
@@ -740,6 +801,7 @@ fn render_params(spec: &LayerSpec) -> String {
         | LayerSpec::Hardswish
         | LayerSpec::Gelu
         | LayerSpec::GeluTanh
+        | LayerSpec::Identity
         | LayerSpec::Unsupported { .. } => {}
     }
     let body: Vec<String> = f.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
@@ -806,6 +868,16 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
         if !spec_f32_fields_are_finite(spec) {
             return Err(ModelIoError::UnsupportedModel {
                 reason: format!("層 {i} の f32 引数が有限ではないため保存できません"),
+            });
+        }
+        if let LayerSpec::Upsample { size, mode } = spec
+            && !upsample_is_savable(size, *mode)
+        {
+            return Err(ModelIoError::UnsupportedModel {
+                reason: format!(
+                    "層 {i}（upsample）の size 軸数（{}）または mode が保存に未対応です",
+                    size.len()
+                ),
             });
         }
         check_layer_state(model, i, spec)?;
@@ -1467,6 +1539,11 @@ fn build_model(
             LayerSpec::AdaptiveAvgPool1d { output_size } => model
                 .add_adaptive_avg_pool1d(*output_size)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Upsample { size, mode } => model
+                .add_upsample(size.clone(), *mode)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::ZeroPad2d { padding } => model.add_zero_pad2d(*padding),
+            LayerSpec::Identity => model.add_identity(),
             LayerSpec::Unsupported { kind } => {
                 return Err(ModelIoError::UnsupportedModel {
                     reason: format!("層 {kind} は復元に未対応です"),
@@ -2230,6 +2307,71 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 output_size: p.usize("output_size")?,
             })
         }
+        "identity" => {
+            Params::new(params, &[])?;
+            Ok(LayerSpec::Identity)
+        }
+        "zero_pad2d" => {
+            let p = Params::new(params, &["left", "right", "top", "bottom"])?;
+            Ok(LayerSpec::ZeroPad2d {
+                padding: [
+                    p.usize("left")?,
+                    p.usize("right")?,
+                    p.usize("top")?,
+                    p.usize("bottom")?,
+                ],
+            })
+        }
+        "upsample" => {
+            let p = Params::new(
+                params,
+                &[
+                    "mode",
+                    "align_corners",
+                    "size_len",
+                    "size_0",
+                    "size_1",
+                    "size_2",
+                ],
+            )?;
+            let align_corners = p.bool("align_corners")?;
+            let mode_name = as_str(p.get("mode")?, "mode")?;
+            let mode = upsample_mode_from_wire(mode_name, align_corners)
+                .ok_or_else(|| manifest_error("upsample の mode が allowlist 外です"))?;
+            // align_corners を持たない mode は true を書き手が出さない（正準形の強制）。
+            if align_corners
+                && matches!(
+                    mode,
+                    InterpolateMode::Nearest
+                        | InterpolateMode::NearestExact
+                        | InterpolateMode::Area
+                )
+            {
+                return Err(manifest_error(
+                    "upsample の mode は align_corners=true を持てません",
+                ));
+            }
+            let size_len = p.usize("size_len")?;
+            if !(1..=UPSAMPLE_MAX_SIZE_LEN).contains(&size_len) {
+                return Err(manifest_error(
+                    "upsample の size_len は 1..=3 である必要があります",
+                ));
+            }
+            let mut size = Vec::with_capacity(size_len);
+            for i in 0..UPSAMPLE_MAX_SIZE_LEN {
+                let v = p.opt_usize(&format!("size_{i}"))?;
+                match (i < size_len, v) {
+                    (true, Some(x)) => size.push(x),
+                    (false, None) => {}
+                    _ => {
+                        return Err(manifest_error(
+                            "upsample の size_i は size_len 未満が整数、以上が null である必要があります",
+                        ));
+                    }
+                }
+            }
+            Ok(LayerSpec::Upsample { size, mode })
+        }
         other => Err(ModelIoError::UnsupportedModel {
             reason: format!("未対応の層 kind {}", clip(other)),
         }),
@@ -2604,7 +2746,7 @@ mod tests {
         ));
     }
 
-    /// 30 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 33 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -2741,6 +2883,20 @@ mod tests {
                 output_size: [2, 3],
             },
             LayerSpec::AdaptiveAvgPool1d { output_size: 4 },
+            LayerSpec::Upsample {
+                size: vec![6, 6],
+                mode: InterpolateMode::Nearest,
+            },
+            LayerSpec::Upsample {
+                size: vec![8, 8],
+                mode: InterpolateMode::Bilinear {
+                    align_corners: true,
+                },
+            },
+            LayerSpec::ZeroPad2d {
+                padding: [1, 2, 3, 4],
+            },
+            LayerSpec::Identity,
         ]
     }
 
@@ -2748,7 +2904,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 30, "kind allowlist は 30 種: {kinds:?}");
+        assert_eq!(kinds.len(), 33, "kind allowlist は 33 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -2766,9 +2922,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 30 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 33 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("30 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("33 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -2776,7 +2932,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("30 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("33 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -2825,12 +2981,114 @@ mod tests {
                 "conv2d",
                 r#"{"in_channels":4,"out_channels":3,"kernel_size_h":3,"kernel_size_w":3,"stride_h":1,"stride_w":1,"padding_h":0,"padding_w":0,"dilation_h":1,"dilation_w":1,"groups":2}"#,
             ),
+            // イシュー #2522: upsample / zero_pad2d / identity の非信頼入力。
+            ("identity", r#"{"x":1}"#),
+            ("zero_pad2d", r#"{"left":1,"right":1,"top":1}"#),
+            ("zero_pad2d", r#"{"left":-1,"right":1,"top":1,"bottom":1}"#),
+            ("zero_pad2d", r#"{"left":1.5,"right":1,"top":1,"bottom":1}"#),
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":false,"size_len":2,"size_0":4,"size_1":4}"#,
+            ),
+            // 未知 mode。
+            (
+                "upsample",
+                r#"{"mode":"cubic","align_corners":false,"size_len":2,"size_0":4,"size_1":4,"size_2":null}"#,
+            ),
+            // align_corners を持たない mode に true（正準形違反）。
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":true,"size_len":2,"size_0":4,"size_1":4,"size_2":null}"#,
+            ),
+            // size_len の範囲外。
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":false,"size_len":0,"size_0":null,"size_1":null,"size_2":null}"#,
+            ),
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":false,"size_len":4,"size_0":1,"size_1":1,"size_2":1}"#,
+            ),
+            // size_i の整数／null 配置が size_len と不整合。
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":false,"size_len":2,"size_0":4,"size_1":4,"size_2":4}"#,
+            ),
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":false,"size_len":2,"size_0":4,"size_1":null,"size_2":null}"#,
+            ),
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":false,"size_len":2,"size_0":-4,"size_1":4,"size_2":null}"#,
+            ),
+            (
+                "upsample",
+                r#"{"mode":"nearest","align_corners":false,"size_len":2,"size_0":4.5,"size_1":4,"size_2":null}"#,
+            ),
         ] {
             assert!(
                 is_manifest_err(spec_from_kind(kind, &p(params))),
                 "{kind} {params} は Manifest で拒否されるはず"
             );
         }
+    }
+
+    #[test]
+    fn upsample_zero_pad2d_identity_round_trip_and_reject_unsavable() {
+        let p = |s: &str| parse_json(s).expect("JSON として読めるはず");
+        for spec in [
+            LayerSpec::Identity,
+            LayerSpec::ZeroPad2d {
+                padding: [0, 1, 2, 3],
+            },
+            LayerSpec::Upsample {
+                size: vec![5],
+                mode: InterpolateMode::Linear {
+                    align_corners: false,
+                },
+            },
+            LayerSpec::Upsample {
+                size: vec![2, 3, 4],
+                mode: InterpolateMode::Trilinear {
+                    align_corners: true,
+                },
+            },
+            LayerSpec::Upsample {
+                size: vec![2, 3],
+                mode: InterpolateMode::Area,
+            },
+        ] {
+            let kind = spec_kind(&spec).expect("保存可能");
+            let back = spec_from_kind(kind, &p(&render_params(&spec))).expect("往復できるはず");
+            assert_eq!(back, spec);
+        }
+
+        // 4 軸の Nearest は構築できるが保存は UnsupportedModel（dir には何も作らない）。
+        let model = Sequential::new()
+            .add_upsample(vec![1, 2, 3, 4], InterpolateMode::Nearest)
+            .expect("Nearest は軸数を構築時に見ない");
+        assert!(matches!(
+            prepare_save(&model),
+            Err(ModelIoError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsavable_upsample_leaves_no_trace_in_dir() {
+        let model = Sequential::new()
+            .add_upsample(vec![1, 2, 3, 4], InterpolateMode::Nearest)
+            .expect("Nearest は軸数を構築時に見ない");
+        let dir = temp_dir("upsample-unsavable");
+        let target = dir.join("m");
+        assert!(matches!(
+            save_model(&model, &target),
+            Err(ModelIoError::UnsupportedModel { .. })
+        ));
+        let leftovers = std::fs::read_dir(&dir).expect("読めるはず").count();
+        assert_eq!(leftovers, 0, "拒否時は dir に何も作らない");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2922,7 +3180,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("30 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("33 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {
