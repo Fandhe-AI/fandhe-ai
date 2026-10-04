@@ -591,3 +591,10 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 - #2545: 17.2 の確定形のみを実装する（`create_graph.rs` のモジュール doc 更新を含む）。17.3 の項目は追加しない
 - #2546: 否定ガード 2 件の正ガード化、`docs/compat-api-scope.md` §5 適用記録、`docs/compat-feature-gap.md` の更新
 - #2063（先行 issue）のクローズ判断は本節の範囲外
+
+## 18. 実装記録（#2545）
+
+- §17.2 の確定形のみを実装した: crate ルート `pub use fandhe_ai_autodiff::CreateGraphResult;`（1 行）と facade `Tape::backward_create_graph`（`self.0.backward_create_graph(loss, &child.0)` の薄い委譲 1 件）。autodiff 側のロジック変更なし（`create_graph.rs` のモジュール doc のみ更新）。§17.3 の項目は追加していない
+- **ガード反転の前倒し**: §17.5 は否定ガード 2 件の正ガード化を #2546 に割り当てていたが、公開と同時にそれらが失敗し `cargo test --workspace` が green にならないため、#2545 で `tests/api_surface.rs` を正ガード 4 件（再エクスポート形状・薄い委譲本体・宣言インベントリ・シグネチャ到達性）へ置き換えた（#2727・#2729〜#2731 と同じ運用）
+- **#2546 の残りスコープ**: `docs/compat-api-scope.md` §5 適用記録・`docs/compat-feature-gap.md` §2.11 の更新（必要なら追加のガード強化）
+- 公開経路テストは `crates/facade/tests/create_graph_facade.rs`（CPU 9 件・GPU `#[ignore]`）と `Tape::backward_create_graph` の doctest。GPU 実機手順は `docs/perf/logs/create-graph-facade-2545/README.md`

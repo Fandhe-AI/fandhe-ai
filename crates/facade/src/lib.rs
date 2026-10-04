@@ -274,6 +274,13 @@ pub use fandhe_ai_autodiff::nn::GlobalPoolMode;
 // `EmbeddingBagVars` 層型の再エクスポートは未承認のため行わない
 // （`DropoutEmbeddingBagHoldDoctestGuard` と `tests/api_surface.rs` の正ガードが固定）。
 pub use fandhe_ai_autodiff::nn::EmbeddingBagMode;
+// `CreateGraphResult`（子テープ方式の高階微分結果型。イシュー #2545。
+// `Tape::backward_create_graph` の戻り値型）も 1 文 1 行で再エクスポートする。
+// 承認根拠はルート #2499 の一括承認（2026-10-04）と
+// `docs/autodiff-higher-order-grad-decision.md` §17.2 の確定形。フィールドは
+// 非公開で利用者は構築できない。`TapeRef` 版・子テープ構築ヘルパーは
+// §17.3 により公開しない（`tests/api_surface.rs` の正ガードが固定）。
+pub use fandhe_ai_autodiff::CreateGraphResult;
 // `CastDType`／`CastElement`（イシュー #1750。`Var::cast`／`Tape::
 // var_from` の型境界・dtype タグ）も 1 文 1 行で再エクスポートする
 // （上記コメント「1 文 1 行を維持する」と同じ理由）。`CastOps`（動的
@@ -598,6 +605,53 @@ impl Tape {
     /// doc comment を参照。
     pub fn transfer(&self, source: &Var<'_>) -> Result<Var<'_>, AutodiffError> {
         source.to_tape(&self.0)
+    }
+
+    /// 子テープ方式の高階微分（`create_graph`）入口（イシュー #2545・
+    /// `fandhe_ai_autodiff::Tape::backward_create_graph` への薄い委譲。
+    /// 公開形は `docs/autodiff-higher-order-grad-decision.md` §17.2）。
+    ///
+    /// `loss` を `self`（親テープ）上で逆伝播し、1 階勾配の計算過程を
+    /// `child`（子テープ）へ `Var` 演算として記録する。返る
+    /// [`CreateGraphResult`] の `grad`／`child_var` で得た子テープ上の
+    /// `Var` を `child.backward(..)` でさらに微分すれば二階勾配（Hessian・
+    /// HVP）が得られる。`first_order()` は通常の [`Tape::backward`] と
+    /// bit 同一。
+    ///
+    /// `child` は [`tape`]／[`tape_for`] で作った**空**の `Tape` で、`self`
+    /// と別のものでなければならない。`BackendOps` を露出しない薄い委譲
+    /// （REQ-12）。エラー契約は既存 [`AutodiffError`] の variant のみ:
+    /// `Backward`（同一テープ・非空の子・checkpoint・未対応 Op）／
+    /// `TapeMismatch`／`DeviceMismatch`／`GradientTrackingDisabled`。
+    /// 拒否時は `child` へ何も書き込まない。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![2.0_f32], &[1])?);
+    /// let loss = x.mul(&x)?.mul(&x)?.sum(None)?; // x^3
+    /// let cg = t.backward_create_graph(&loss, &child)?;
+    /// // 1 階: 3x^2 = 12
+    /// let first = cg.first_order().get(&x)?.unwrap().as_slice().unwrap().to_vec();
+    /// assert!((first[0] - 12.0).abs() < 1e-4);
+    /// // 2 階: 6x = 12（子テープ上でもう一度逆伝播する）
+    /// let g = cg.grad(&x)?.unwrap();
+    /// let grads2 = child.backward(&g.sum(None)?)?;
+    /// let xc = cg.child_var(&x)?.unwrap();
+    /// let second = grads2.get(&xc)?.unwrap().as_slice().unwrap().to_vec();
+    /// assert!((second[0] - 12.0).abs() < 1e-4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn backward_create_graph<'c>(
+        &self,
+        loss: &Var<'_>,
+        child: &'c Tape,
+    ) -> Result<CreateGraphResult<'c>, AutodiffError> {
+        self.0.backward_create_graph(loss, &child.0)
     }
 
     /// [`fandhe_ai_autodiff::nn::Rnn::forward_seq`] への委譲入口
