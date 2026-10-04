@@ -20,8 +20,9 @@ GPU 専用カーネルは追加していない——いずれも既存の `Var::
 （`Op::ScalarUnary`）・`Var::clamp`（`Op::ScalarUnary`）・
 `Var::where_cond`（`Op::Where`）・`Var::detach`・`Var::narrow`・
 `Var::sigmoid`（`Op::Sigmoid`）・`Var::reshape` の合成のみで構成した。
-facade 公開（`Var` への委譲メソッド追加・`compat::Sequential::add_*`
-5 種）は承認待ちのまま対象外とし、`crates/facade/src/
+facade 公開は #2516 で `Var` 委譲メソッドとして公開済み（ガードは部分反転、
+`compat::Sequential::add_*` 5 種は #2529 まで保留）。実装時点（#2146）の
+固定内容は次のとおり（`Var` プローブ・`add_*` は承認待ちとして）、`crates/facade/src/
 lib.rs::VarActivationOpsHoldDoctestGuard`（正のプローブ doctest。
 `Var` への衝突プローブと `compat::Sequential::add_*` への衝突プローブ
 の 2 種併用）と `crates/facade/tests/api_surface.rs` のソース走査・
@@ -152,7 +153,8 @@ max` を必須とする。違反は `AutodiffError::InvalidArgument` を返す�
 
 ## §5 スコープ外
 
-- facade 公開（`Var::mish` 等の委譲メソッド化と保留ガードの撤去）
+- facade 公開（`Var::mish` 等の委譲メソッド化と保留ガードの撤去。
+  委譲メソッド化は #2516 で実施済み・2026-10-04・ルート #2499 一括承認）
 - `compat::Sequential::add_*` 5 種（承認事項として明示保留）
 - GPU 専用カーネル（現状は既存カーネル・ホストフォールバックのみで
   到達）
@@ -160,8 +162,8 @@ max` を必須とする。違反は `AutodiffError::InvalidArgument` を返す�
 
 ## §6 承認事項（未承認として列挙）
 
-1. facade 公開（`Var` への委譲メソッド追加）
-2. `compat::Sequential::add_*` 5 種
+1. facade 公開（`Var` への委譲メソッド追加）— #2516 で実施済み（下記「実装記録」参照）
+2. `compat::Sequential::add_*` 5 種（#2529 で扱う。未承認のまま）
 3. GPU 専用カーネル（別イシュー）
 
 ## §7 実機実測の申し送り
@@ -209,10 +211,8 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
   追補
 - `docs/README.md`: 本 doc・perf log README の索引行を追加
 
-承認取得後の追随（本イシューでは未実施）: `Var::mish` 等の薄い委譲
-メソッド追加、`compat::Sequential::add_*` 5 種追加、facade 保留
-ガード（`VarActivationOpsHoldDoctestGuard`・対応する否定ガード 4 件）
-の撤去。
+承認取得後の追随: `Var` 委譲メソッド追加は #2516 で実施済み。
+`compat::Sequential::add_*` 5 種追加とガードの完全撤去は #2529。
 
 **手動検証（実装計画「手順 6」）**: `crates/facade/src/lib.rs` へ
 `pub use fandhe_ai_autodiff::activation_ops;` を仮に追加し、
@@ -240,3 +240,32 @@ CPU 版のテスト本体をそのまま device 版へ複製し、4 テストと
 版と同じ演算・セル数（3 セル）を網羅するよう是正した（`docs/perf/
 logs/activation-ops-2146/README.md` の「代表とする」という誤記述も
 同時に修正）。
+
+### 実装記録（イシュー #2516・2026-10-04）
+
+- **承認根拠**: §2.1 案 C の項に「承認後は `Var::mish` 等の委譲メソッドを
+  追加し、保留ガードを撤去する」と承認後の公開形が一意に記載済みで、
+  ルート #2499 の一括承認（Phase 1〜3 の facade 公開を設計判断記録の推奨形で
+  実装してよい）の範囲に入る。§6 の項目 2（`compat::Sequential::add_*`。
+  #2529）と項目 3（GPU 専用カーネル）は未承認のまま
+- **公開したシグネチャ（`Var` の inherent・1 行委譲）**:
+  `mish(&self)`・`hardtanh(&self, min: f32, max: f32)`・`relu6(&self)`・
+  `prelu(&self, weight: &Var<'t>)`・`glu(&self, dim: usize)`（いずれも
+  `Result<Var<'t>, AutodiffError>`。`crates/autodiff/src/var.rs`）。
+  `activation_ops` モジュールは facade から再エクスポートしない
+- **ガード反転（部分反転。#2510 の bool_ops 型）**: `VarActivationOpsHoldDoctestGuard`
+  は名前を維持し、`__probe_var` と `Var` 用 impl を削除（`Var` に inherent
+  メソッドが載ると引数なし呼び出しが inherent 側へ解決され型エラーになるため）。
+  `Tensor<f32>`／`Tape`・`add_*`・`activation_ops` モジュール glob 衝突の
+  プローブは維持。`api_surface.rs`: 固定文言 `ACTIVATION_OPS_HOLD_PROBE_BODY`
+  を追従・`workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops`
+  を `…_only_in_approved_locations` へ改名し期待集合に `autodiff/src/var.rs`
+  各 1 件を追加・`var_activation_ops_methods_are_thin_delegations`
+  （本体固定）と `var_activation_ops_are_reachable_via_facade_only`
+  （シグネチャ・適用）を新設。`facade_does_not_reexport_or_declare_activation_ops`
+  は維持（facade 側の再エクスポート・宣言と `add_*` 宣言を拒否）
+- **新テスト**: `crates/facade/tests/activation_ops_facade.rs`（forward・
+  backward・clamp との bit 一致・自由関数との bit 一致・エラー伝播。
+  REQ-2 判定の定数は新設・変更なし）
+- **不変**: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・
+  GPU カーネル。§7 の実機申し送りは委譲先が同一経路のため引き続き有効
