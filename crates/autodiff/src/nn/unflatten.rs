@@ -52,6 +52,24 @@ pub(crate) fn unflatten_out_shape(
     Ok(out)
 }
 
+/// [`Unflatten::forward`] と `Var::unflatten`（イシュー #2521）が共有する
+/// forward 本体。空の `sizes` を拒否し（`Unflatten::new` と同じ契約）、
+/// shape 検査を通るまで tape を操作しない（孤児ノードを残さない）。
+pub(crate) fn unflatten_forward<'t>(
+    input: &Var<'t>,
+    dim: usize,
+    sizes: &[usize],
+) -> Result<Var<'t>, AutodiffError> {
+    if sizes.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "Unflatten: unflattened_size must not be empty".to_string(),
+        ));
+    }
+    let in_shape = input.shape();
+    let out_shape = unflatten_out_shape(&in_shape, dim, sizes).map_err(AutodiffError::Shape)?;
+    input.reshape(&out_shape)
+}
+
 /// 軸 `dim` を `unflattened_size` の複数軸へ展開する層。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unflatten {
@@ -90,10 +108,7 @@ impl Unflatten {
     /// `unflatten_out_shape` で出力 shape を求め [`Var::reshape`]
     /// へ委譲する。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        let in_shape = input.shape();
-        let out_shape = unflatten_out_shape(&in_shape, self.dim, &self.unflattened_size)
-            .map_err(AutodiffError::Shape)?;
-        input.reshape(&out_shape)
+        unflatten_forward(input, self.dim, &self.unflattened_size)
     }
 
     /// [`crate::nn::module::Module::forward_host`]（`Unflatten` 実装）

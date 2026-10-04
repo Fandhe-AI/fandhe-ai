@@ -2,8 +2,9 @@
 //! `nn::Identity`／`nn::Unflatten`（イシュー #2159・親 #2131）の
 //! バックエンド間 parity（REQ-2）対応テスト。`conv_transpose2d_
 //! backend_parity.rs`・`activation_ops_backend_parity.rs` と同型。
-//! facade は本 5 層を再エクスポートしていない（`docs/autodiff-
-//! spatial-layers-decision.md` §6 承認事項 1・
+//! facade は本 5 層の型を再エクスポートしていない（`ConvTranspose1d`／
+//! `Unflatten` の `add_*`／`Var` メソッドのみ #2521 で公開済み。
+//! `docs/autodiff-spatial-layers-decision.md` §6・
 //! `SpatialLayersHoldDoctestGuard`）ため、`fandhe_ai_autodiff::nn::*`
 //! を直接 `use` する（dev-dependencies に既に含まれている）。
 //!

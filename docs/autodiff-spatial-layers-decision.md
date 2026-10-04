@@ -15,10 +15,13 @@ VJP・GPU 専用カーネルは追加していない。`Var` に inherent の `p
 は追加していない（`Var` は facade から再エクスポートされるため。
 #2143・#2144・#2146 の先例）。facade 公開（`compat::Sequential::
 add_*` 5 種・`Var::conv_transpose1d`／`Var::unflatten` の委譲メソッド）
-は承認待ちのまま対象外とし、`crates/facade/src/lib.rs::
+は当初承認待ちのまま対象外とし、`crates/facade/src/lib.rs::
 SpatialLayersHoldDoctestGuard`（正のプローブ doctest）と
 `crates/facade/tests/api_surface.rs` のソース走査（2 テスト＋自己
-テスト）で多層固定している。
+テスト）で多層固定していた。**イシュー #2521 で `ConvTranspose1d`／
+`Unflatten` の 2 層（`add_conv_transpose1d`／`add_unflatten`・
+`Var::conv_transpose1d`／`Var::unflatten`）は公開済み**（§6 実装記録）。
+残り 3 層（`Upsample`／`ZeroPad2d`／`Identity`）は #2522 で公開済み（§8）。
 
 ## §1 背景
 
@@ -69,7 +72,7 @@ ScaleFactor(Vec<f64>) }`（`#[non_exhaustive]`）で表現し、`size` と
 `Unflatten` は PyTorch の `-1`（1 軸だけ自動推論）を `usize` では
 表現できないため非対応とした。
 
-### §2.2 facade 公開・compat::Sequential の add_* — 保留
+### §2.2 facade 公開・compat::Sequential の add_* — 2 層は #2521、3 層は #2522 で公開
 
 イシュー #2159 は「facade への 5 個の `add_*` メソッド」を承認事項
 として挙げ「承認前に実施しない」と定めている。コメントでの承認も
@@ -78,6 +81,10 @@ ScaleFactor(Vec<f64>) }`（`#[non_exhaustive]`）で表現し、`size` と
 メソッド追加。経路 1）も同様に未承認のため見送った。両者を
 `SpatialLayersHoldDoctestGuard` の同一 doctest ブロックで併せて
 保留固定している（`crates/facade/src/lib.rs` 参照）。
+
+（#2521 更新）`ConvTranspose1d`／`Unflatten` の 2 層は §6 の承認
+（ルート #2499 の一括承認）に基づき公開した。残り 3 層の `add_*` は
+#2522 で公開済み（§8）。以上の本節前半は #2159 時点の当初判断の記録である。
 
 ### §2.3 `Module` trait への統合
 
@@ -120,15 +127,19 @@ ZST 特例（`module.rs::collect_named_modules`）の対象になる。
 - `crates/facade/src/lib.rs::SpatialLayersHoldDoctestGuard`（正の
   プローブ doctest）・`crates/facade/tests/api_surface.rs` の
   `spatial_layers_hold_doctest_globs_all_pub_modules`・
-  `spatial_layers_hold_doctest_probe_body_matches_fixed_contract`・
-  `compat_sequential_does_not_expose_spatial_layer_add_methods`
-  （＋自己テスト）
+  `spatial_layers_hold_doctest_probe_body_matches_fixed_contract`
+  （`compat_sequential_does_not_expose_spatial_layer_add_methods` は #2521・#2522 で
+  禁止対象が 0 件になったため削除）
 
 ## §5 スコープ外（`out-of-scope-tracking.md` に従う。Issue 起票は
 ユーザー承認後）
 
-- `compat::Sequential::add_*` 5 種・`Var::conv_transpose1d`／
-  `Var::unflatten` の facade 公開（承認待ち。うち `add_upsample`／`add_zero_pad2d`／`add_identity` は #2522 で公開済み。§8）
+- `compat::Sequential::add_*` 5 種・`Var::conv_transpose1d`／`Var::unflatten` の
+  facade 公開は #2521（`add_conv_transpose1d`／`add_unflatten`・`Var` 2 メソッド）と
+  #2522（`add_upsample`／`add_zero_pad2d`／`add_identity`。§8）で全件公開済み
+- `save_model`／`load_model` での `conv_transpose1d`／`unflatten` の構成保存
+  （manifest スキーマ拡張が必要。#2521 は型付きエラーで fail-closed）
+- `nn::ConvTranspose1d`／`nn::Unflatten` の型の facade 再エクスポート
 - GPU 専用カーネル（`ConvTranspose1d`・`Upsample` の新モード向け）
 - `ZeroPad2d` の負パディング（クロップ）
 - `Unflatten` の `-1` 推論
@@ -138,7 +149,7 @@ ZST 特例（`module.rs::collect_named_modules`）の対象になる。
   契約の拡張が必要。#2067 から継承）
 - ONNX export（`onnx-interop::export_nn`）での 5 層への対応
 
-## §6 承認事項（未承認として列挙）
+## §6 承認事項（未承認として列挙。ConvTranspose1d／Unflatten は #2521 で適用済み）
 
 1. facade `compat::Sequential` への `add_conv_transpose1d`／
    `add_upsample`／`add_zero_pad2d`／`add_identity`／`add_unflatten`
@@ -149,6 +160,46 @@ ZST 特例（`module.rs::collect_named_modules`）の対象になる。
    （経路 1）と保留ガード（`SpatialLayersHoldDoctestGuard`・
    `api_surface.rs` の対応する否定ガード）の撤去
 
+### §6 実装記録（イシュー #2521・親 #2520・ルート #2499 本文「承認範囲」節の一括承認）
+
+上記 1・2 のうち `ConvTranspose1d`／`Unflatten` の 2 層分を、推奨形で実装した
+（`fandhe-ai =0.10.0` の公開 API に対する追加のみで非破壊）。本節に具体シグネチャの
+記載がなかったため、既存の内部 API（`ConvTranspose1d::new`・`Unflatten::new`・`Var::conv1d`・
+`Var::flatten`・`add_conv1d`）から機械的に導いた。
+
+| 公開面 | シグネチャ（導出元） |
+|---|---|
+| `compat::Sequential::add_conv_transpose1d` | `(self, in_channels, out_channels, kernel_size, stride, padding, output_padding, dilation, groups, seed: u64) -> Result<Self, AutodiffError>`（`add_conv1d` に `output_padding` を加えた形・bias あり固定） |
+| `compat::Sequential::add_unflatten` | `(self, dim: usize, unflattened_size: Vec<usize>) -> Result<Self, AutodiffError>`（`Unflatten::new` が空 `sizes` を拒否するため `Result`） |
+| `Var::conv_transpose1d` | `(&self, weight, bias: Option<&Var>, stride, padding, output_padding, dilation, groups: usize) -> Result<Var, AutodiffError>`（`Var::conv1d`／`conv_transpose2d` のスカラー版） |
+| `Var::unflatten` | `(&self, dim: usize, sizes: &[usize]) -> Result<Var, AutodiffError>`（`Var::flatten` と対） |
+
+- **forward 本体の一本化**: `nn/conv.rs::conv_transpose1d_forward`・`nn/unflatten.rs::unflatten_forward`
+  （いずれも `pub(crate)`）へ集約し、層経路（`ConvTranspose1dVars::forward`／`Unflatten::forward`）と
+  `Var` 経路が同じ検査順序を共有する（判定迂回経路を作らない）。shape 検査は tape 操作の前に完了し
+  孤児ノードを残さない。`Var::unflatten` は空 `sizes` を `InvalidArgument` で拒否する。
+- **`compat::Sequential` 結線**: `bind`／`SequentialVars::forward`／`trainable_vars`／`trainable_grads`／
+  `first_untracked_parametric_layer`／`contains_resident_unsupported_layer`（`ConvTranspose1d` のみ。
+  常駐経路は `BackendError::Unsupported`）へ結線した。`trainable_parameters`／`apply_parameters` は
+  `named_parameters`（weight → bias）と `Module::set_parameter` による汎用分岐のまま処理する
+  （層別 `requires_grad` を保持でき、兄弟 #2523 との競合面を減らせるため `Rebuilt` 方式を採らない）。
+  `Unflatten` は `Flatten` と同じく無パラメータで、常駐経路も通過する。AMP 低精度は `Conv1d` と同じく無視し
+  f32 で forward する。
+- **保存は fail-closed**: `LayerSpec::Unsupported { kind: "conv_transpose1d" | "unflatten" }` とし、
+  `save_model` は `dir` に触れる前に `ModelIoError::UnsupportedModel` を返す。`unflattened_size` は可変長で
+  manifest の固定キー方式（`MAX_JSON_DEPTH = 4`）に乗らず、スキーマ拡張は本件の承認範囲を超えるため。
+  ONNX export も既存どおり `OnnxError::UnsupportedLayer`。
+- **保留ガードの反転（該当名のみ）**: `SpatialLayersHoldDoctestGuard` から 2 層分の trait 経由プローブ
+  （`__FandheSpatialVarProbe` 全体・`__FandheSpatialAddProbe` の該当 2 メソッド）を削除し、
+  `api_surface.rs::SPATIAL_LAYERS_HOLD_PROBE_BODY` と 1 行も違わず同期した。型名の衝突プローブと
+  自由関数プローブは残し、型の再エクスポート・自由関数での公開は引き続き禁止する。
+  `compat_sequential_does_not_expose_spatial_layer_add_methods` は #2522 との統合で禁止対象が 0 件になり削除し、正ガード
+  （`workspace_declares_spatial_facade_fn_names_only_in_approved_locations`・
+  `var_spatial_methods_are_thin_delegations`・`var_spatial_methods_are_reachable_via_facade_only`・
+  `compat_sequential_spatial_add_methods_have_approved_signatures`）を新設した。
+- **実機 parity**: 新規カーネルなし。CUDA／Metal は既存の `#[ignore]` テストと申し送り
+  （`docs/perf/logs/spatial-layers-2159/README.md`）が有効で、本件では未実測。
+
 ## §7 実機実測の申し送り
 
 CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に無いため
@@ -158,7 +209,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 ## §8 実装記録（イシュー #2522・ルート #2499 の 2026-10-04 一括承認）
 
 §6 承認事項 1 のうち `add_upsample`／`add_zero_pad2d`／`add_identity` の 3 件を実装した
-（`add_conv_transpose1d`／`add_unflatten` と `Var` 委譲メソッドは別イシュー〈#2521 系〉の対象で保留のまま）。
+（`add_conv_transpose1d`／`add_unflatten` と `Var` 委譲メソッドは別イシュー〈#2521〉の対象で、そちらで公開済み。§6 実装記録）。
 
 - **公開面**: `compat::Sequential` に `pub fn` 3 件のみ。型（`Upsample`／`ZeroPad2d`／`Identity`／`UpsampleSize`）の
   facade 再エクスポートはしない（§6 に記録がなく未承認）。

@@ -3010,6 +3010,45 @@ impl<'t> Var<'t> {
         self.reshape(&out_shape)
     }
 
+    /// 軸 `dim` を `sizes` の複数軸へ展開する（`torch.unflatten(input, dim, sizes)`
+    /// 相当。[`Var::flatten`] の逆変換。イシュー #2521）。
+    ///
+    /// `sizes` が空・`dim >= rank`・`sizes` の積が `shape[dim]` と不一致
+    /// （`checked_mul` オーバーフロー含む）は `Err`。shape 検査を通るまで
+    /// tape を操作しないため、エラー時に孤児ノードを残さない。
+    pub fn unflatten(&self, dim: usize, sizes: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::unflatten_forward(self, dim, sizes)
+    }
+
+    /// 1 次元転置畳み込み（PyTorch `F.conv_transpose1d`。イシュー #2521）。
+    ///
+    /// `self` は `[N, Cin, L]`、`weight` は `[Cin, Cout/groups, k]`、`bias` は
+    /// `[Cout]`。`nn::ConvTranspose1dVars::forward` と同じ本体
+    /// （reshape 併合 → `conv_transpose2d`）へ委譲する。shape 検査は
+    /// tape 操作の前に完了し、エラー時に孤児ノードを残さない。
+    #[allow(clippy::too_many_arguments)] // PyTorch `F.conv_transpose1d` の全引数を受理するため。
+    pub fn conv_transpose1d(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::conv_transpose1d_forward(
+            self,
+            weight,
+            bias,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+        )
+    }
+
     /// 複数の `Var` を `dim` 軸で連結する（`torch.cat` 相当。イシュー
     /// #1598）。関連関数（`&self` を取らない）——`Var` は `Copy` の
     /// ため `&[Var<'t>]` で受ける。
