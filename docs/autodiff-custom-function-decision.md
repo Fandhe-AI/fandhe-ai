@@ -579,6 +579,74 @@ tests/api_surface.rs::collect_public_module_paths`（トークン列を
 
 イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。
 
+## 16. facade 公開形の確定（#2548）
+
+ルート #2499（Phase 3）の一括承認（2026-10-04）は、本 doc §12.5 (b)・§15 に**書かれた**推奨形にだけ及ぶ。
+本節はその推奨形を読み取って確定形として列挙し、`fandhe-ai =0.10.0` に対する公開 API の非破壊性を
+論点ごとに確認した記録である。本節は §12.5 (b)・§15 の形をそのまま写したもので、上記の一括承認を
+超える承認は主張しない。推奨形が記録にない論点、または複数案のまま未決の論点は見つからなかった
+（見つかった場合は推奨案をここへ追記して承認を依頼し停止する運用とする）。
+
+### 16.1 確定形
+
+| 論点 | 確定形 | 根拠 |
+|---|---|---|
+| (a) 配置・再エクスポート | `crates/facade/src/lib.rs` の crate ルートへ `pub use fandhe_ai_autodiff::CustomFunction;` を 1 行追加し `fandhe_ai::CustomFunction` として公開する。trait の形（`name`／`output_shape`／`forward`／`backward`・`Send + Sync + 'static`）は §12.4 のとおり不変 | §12.5 (b)・§15 |
+| (b) 入口 | facade 独自 `struct Tape` の inherent method `custom`。本体は `self.0.custom(func, inputs)` を返すだけの薄い委譲（`transfer`／`rnn_forward_seq` と同形）。`Var::custom` は設けない | §12.4「入口」・§12.5 (a)(b)・§15 |
+| (c) シグネチャ | `pub fn custom<'t>(&'t self, func: std::sync::Arc<dyn CustomFunction>, inputs: &[Var<'t>]) -> Result<Var<'t>, AutodiffError>` | §15「薄い委譲」・`crates/autodiff/src/tape.rs:2571` |
+| (d) エラー型 | 既存の `AutodiffError`（facade 再エクスポート済み・`#[non_exhaustive]`）。新 variant は追加しない | §12.4「エラー型」・§13.2 |
+
+訂正注記: §12.4「入口」行のスケッチは `inputs: &[&Var<'t>]` だが、#1946 の実装と autodiff 0.10.0 の出荷形は
+`inputs: &[Var<'t>]`（`Var: Copy`）である。§15 が facade の入口を「内部への薄い委譲」と定めているため型は出荷形に一意に決まり、
+内部を `&[&Var]` へ変えると出荷済みの `fandhe-ai-autodiff 0.10.0` を壊す。**出荷形が正**とする（2 案からの選択ではない）。
+
+### 16.2 確定形に含めないもの
+
+- `TapeRef::custom`: `TapeRef` の公開メソッドは `var`／`var_from`／`var_no_grad` の 3 件に型 doc と `api_surface.rs` で固定済み（REQ-12。#2407）
+- `Var::custom`／`Var::add_custom`・`Tape::add_custom`・`Sequential::custom`／`add_custom`・`nn::Module`／`add_module`（§12.4・§12.5 (e)・§9）
+- 二階微分のための trait 拡張（§14。`Op::Custom` は `supports_create_graph()=false` のまま fail-closed）
+
+### 16.3 公開 API 非破壊の確認（`fandhe-ai =0.10.0` 基準）
+
+実測（`git show v0.10.0:<path>`。タグ `v0.10.0` は `git tag` の並びで `v0.5.0` より前に出る点に注意）:
+
+| 確認 | 結果 |
+|---|---|
+| autodiff 0.10.0 の `pub use custom::CustomFunction` | `crates/autodiff/src/lib.rs:281` に存在 |
+| autodiff 0.10.0 の `Tape::custom` | `crates/autodiff/src/tape.rs:2571`、`inputs: &[Var<'t>]`（HEAD と同一） |
+| facade 0.10.0 の `pub use fandhe_ai_autodiff::CustomFunction` | 0 件（追加のみ） |
+| facade 0.10.0 の `pub fn custom` | 0 件（追加のみ） |
+| facade 0.10.0 の autodiff 依存 | `fandhe-ai-autodiff = { …, version = "=0.10.0" }`（同一出荷形に固定） |
+
+| 論点 | 判定 | 理由 |
+|---|---|---|
+| `fandhe_ai::CustomFunction` の追加 | 非破壊（追加のみ） | 0.10.0 に同名項目なし。下流の glob import と重なってもローカル項目が優先される（semver 慣行上 minor） |
+| facade `Tape::custom` の追加 | 非破壊（inherent method の追加） | 0.10.0 の `Tape` に `custom` なし。既存メソッドの署名・意味論は不変 |
+| エラー型 | 非破壊 | 既存 `#[non_exhaustive]` 型で variant を追加しない |
+| 既存型（`Var`・`Tape`・`TapeRef`・`Gradients`・`compat::Sequential`・`FitConfig`） | 変更なし | フィールド・既存メソッドに触れない |
+| REQ-12（`BackendOps`／生 `Tape` 非露出） | 維持 | trait の引数は host `Tensor<f32>` のみ（`architecture_boundaries.rs::custom_function_trait_signatures_are_host_tensor_only` を維持） |
+| 将来の制約（注記） | — | `CustomFunction` はユーザーが実装する trait（sealed ではない）。メソッドを足す場合は既定実装付きでなければ破壊的変更になる |
+
+### 16.4 #2549／#2550 への引き継ぎ（HEAD 時点のガード一覧と処置）
+
+§15「承認取得後に実施する変更範囲」は PR #2212 の多層ガード導入前に書かれたため、次で上書きする
+（行は `crates/facade/tests/api_surface.rs`、確定時点 HEAD）。
+
+| ガード | 位置 | 処置 |
+|---|---|---|
+| `facade_does_not_reexport_custom_function` | `:3949` | 正ガードへ反転（再エクスポートが `CustomFunction` 1 件だけであることを固定） |
+| `facade_tape_does_not_expose_custom_forwarding_method` | `:4249` | 正ガードへ反転（`pub fn custom` が 1 件・本体が `self.0.custom(func, inputs)`） |
+| `facade_public_functions_do_not_take_custom_function` | `:4280` | 縮小（`CustomFunction` の出現を `pub use` 1 行と `Tape::custom` 1 件に限定） |
+| `facade_source_declares_no_custom_fn_in_any_context` | `:4376` | 縮小（`lib.rs` の `impl Tape` 内 `fn custom` 1 件のみ許可。`add_custom` は禁止のまま） |
+| `workspace_declares_custom_fn_only_on_tape` | `:6942` | 定義元 allowlist に `crates/facade/src/lib.rs` を追加 |
+| `VarCustomHoldDoctestGuard` の `__probe_tape` 内 `custom` プローブ 2 行 | `lib.rs` 1494 行付近 | **削除**（正のプローブ doctest であり、実在する inherent `Tape::custom` に解決されると引数個数不一致で失敗する）。`Tape::add_custom` のプローブは残す |
+| `custom_function_hold_doctest_probe_body_matches_fixed_contract` | `:6048` | 固定文字列を上の削除に合わせて更新 |
+| `Var`／`Sequential` の `custom`／`add_custom` プローブ、`compat_sequential_does_not_expose_custom_add_method`（`:4301`）、`custom_function_hold_doctest_globs_all_pub_modules`（`:6018`） | — | 維持 |
+| `architecture_boundaries.rs::custom_function_trait_signatures_are_host_tensor_only`・`autodiff_src_does_not_declare_pub_fn_custom_on_var` | `crates/autodiff/tests/` | 維持 |
+
+統合テスト（`crates/facade/tests/custom_function_facade.rs`）・autodiff モジュール doc の「facade 非公開」記述更新・
+`docs/perf/logs/facade-custom-function-<issue>/README.md`（host 実行のため REQ-2 対象外の申し送り）は §15 の列挙どおり #2549／#2550 が担当する。
+
 ## 否定ガードの方針転換（PR #2212 レビュー収束ラウンド。2026-09）
 
 上記「ソース文字列走査ガードの多層防御化」節で `VarCustomHoldDoctestGuard`
