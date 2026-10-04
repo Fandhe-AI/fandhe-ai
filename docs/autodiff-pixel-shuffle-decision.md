@@ -15,7 +15,7 @@ facade から再エクスポートされるため。#2159 の先例）。facade 
 （`compat::Sequential::add_pixel_shuffle`／`add_pixel_unshuffle`・
 `Var::pixel_shuffle`／`Var::pixel_unshuffle` の委譲メソッド）は
 イシュー #2526（親 #2520・ルート #2499 の一括承認）で公開済み
-（§6 実装記録）。型の再エクスポート・自由関数公開は未承認のままで、
+（§8 実装記録）。型の再エクスポート・自由関数公開は未承認のままで、
 `crates/facade/src/lib.rs::PixelShuffleHoldDoctestGuard`（縮小後の
 正のプローブ doctest）で保留固定している。
 
@@ -65,7 +65,7 @@ shape 検査は `pixel_shuffle_out_shape`／`pixel_unshuffle_out_shape`
 
 ### §2.2 facade 公開・compat::Sequential の add_* — 保留（#2526 で公開済みに反転）
 
-本節は #2162 時点の判断記録。#2526 で承認形を公開した結果は §6 実装記録を参照。
+本節は #2162 時点の判断記録。#2526 で承認形を公開した結果は §8 実装記録を参照。
 
 イシュー #2162 は「facade への 2 個の `add_*` メソッド」を承認事項
 として挙げ「承認前に実施しない」と定めている。コメントでの承認も
@@ -143,7 +143,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 `#[ignore]` テストを未実行のまま出荷する。実行コマンド・記入欄は
 `docs/perf/logs/pixel-shuffle-2162/README.md` を参照。
 
-## §6 実装記録（イシュー #2526・親 #2520・ルート #2499 本文「承認範囲」節の一括承認）
+## §8 実装記録（イシュー #2526・親 #2520・ルート #2499 本文「承認範囲」節の一括承認）
 
 §6 の承認事項 1・2 を 2026-10-04 のルート #2499 の一括承認（Phase 1〜3 の facade 公開を設計判断記録の
 推奨形で実装してよい）に基づき実装した。追加 API のみで `fandhe-ai =0.10.0` の公開 API は非破壊。
