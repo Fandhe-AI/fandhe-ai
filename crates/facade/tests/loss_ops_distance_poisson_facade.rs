@@ -119,6 +119,19 @@ fn triplet_margin_forward_swap_and_equivalence() {
         .expect("swap");
     assert_req2_close(&vals(&swapped), &[5.0]);
 
+    // swap が結果を変える入力: neg = (3, 3) とすると d_an = sqrt(18) ≈ 4.2426、d_pn = |pos - neg| = 1 < d_an。
+    // swap なし: 5 - 4.2426 + 1 ≈ 1.7574、swap あり: d_an が d_pn = 1 に置換され 5 - 1 + 1 = 5。
+    // swap 分岐が無視されると後者が 1.7574 になり、この検証で検出できる。
+    let neg2 = tape.var(&t(vec![3.0, 3.0], &[1, 2]));
+    let no_swap2 = anchor
+        .triplet_margin_loss(&pos, &neg2, &opts, Reduction::Mean)
+        .expect("no swap (d_pn < d_an)");
+    assert_req2_close(&vals(&no_swap2), &[5.0 - 18.0_f32.sqrt() + 1.0]);
+    let swapped2 = anchor
+        .triplet_margin_loss(&pos, &neg2, &opts.clone().swap(true), Reduction::Mean)
+        .expect("swap (d_pn < d_an)");
+    assert_req2_close(&vals(&swapped2), &[5.0]);
+
     let free =
         loss_ops::triplet_margin_loss(&anchor, &pos, &neg, &opts, Reduction::Mean).expect("free");
     assert_eq!(bits(&vals(&out)), bits(&vals(&free)));
