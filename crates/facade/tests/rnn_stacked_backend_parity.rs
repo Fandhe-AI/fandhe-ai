@@ -1,9 +1,11 @@
 //! `nn::rnn_stacked::{StackedRnn, StackedLstm, StackedGru}`（イシュー
 //! #2164・親 #2131）のバックエンド間 parity（REQ-2）対応テスト。
-//! `spatial_layers_backend_parity.rs` と同型: facade は本 3 型を
-//! 再エクスポートしていない（`docs/autodiff-rnn-stacked-config-
-//! decision.md` §8・`RnnConfigHoldDoctestGuard`）ため、
-//! `fandhe_ai_autodiff::nn::*` を直接 `use` する。
+//! `spatial_layers_backend_parity.rs` と同型: 本 3 型は #2535 で facade へ
+//! 再エクスポート済み（`docs/autodiff-rnn-stacked-config-decision.md` §9）
+//! だが、本ファイルは任意 `BackendOps`（`NaiveOps`・CUDA・Metal）の `Tape`
+//! を生で組み立てて内部クレートの `forward_seq` を直接呼ぶ必要があるため、
+//! 引き続き `fandhe_ai_autodiff::nn::*` を直接 `use` する（facade 経由の
+//! CPU bit 一致は `nn_rnn_stacked_facade_bit_identity.rs`）。
 //!
 //! - 属性なし: `CpuBackendOps` と `NaiveOps`（`fandhe_ai_autodiff::
 //!   Tape::new()`）で forward・backward を突き合わせる（REQ-2 統一

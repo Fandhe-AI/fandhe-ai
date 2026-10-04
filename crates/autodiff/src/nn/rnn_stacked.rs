@@ -12,10 +12,11 @@
 //! 含む）を純再エクスポートしている（イシュー #1955）。既存型へ
 //! inherent メソッド（例 `Rnn::with_config`）を追加すると、facade の
 //! 公開面が引数型を facade から名指しできなくても `Default::default()`
-//! の型推論経由で**自動的に**広がってしまう。本 issue は facade への
-//! `RnnConfig` 公開を未承認事項として保留する（`docs/compat-api-scope.md`
-//! §5 経路 2。`crates/facade/src/lib.rs::RnnConfigHoldDoctestGuard`
-//! 参照）ため、多層化は既存型に触れず新しい型（[`StackedRnn`]／
+//! の型推論経由で**自動的に**広がってしまう。facade への `RnnConfig`・
+//! `Stacked*` 公開はイシュー #2535 で承認済み・実装済みだが、既存型への
+//! `with_config` 追加は引き続き不採用（`docs/compat-api-scope.md` §5
+//! 経路 2。`crates/facade/src/lib.rs::RnnConfigHoldDoctestGuard` は
+//! `with_config` 禁止のみを固定する）ため、多層化は既存型に触れず新しい型（[`StackedRnn`]／
 //! [`StackedLstm`]／[`StackedGru`]）で提供する。`rnn.rs` の公開
 //! シグネチャ・`RnnCell`／`LstmCell`／`GruCell`・`Rnn`／`Lstm`／`Gru`
 //! 自体は一切変更しない。

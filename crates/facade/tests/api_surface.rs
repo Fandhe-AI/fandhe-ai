@@ -4654,7 +4654,13 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
         "LstmSeqOutput",
         "Rnn",
         "RnnCellVars",
+        "RnnConfig",
         "RnnSeqOutput",
+        "StackedGru",
+        "StackedLstm",
+        "StackedLstmSeqOutput",
+        "StackedRnn",
+        "StackedRnnSeqOutput",
     ]
     .into_iter()
     .map(str::to_string)
@@ -4800,6 +4806,194 @@ fn nn_rnn_types_are_reachable_via_facade_only() {
             .is_some()
     );
     let _: &Option<fandhe_ai::Var<'_>> = &out.params.bias_hh;
+}
+/// `fandhe_ai::nn::rnn` の多層版 6 型（`RnnConfig`・`Stacked*`。イシュー
+/// #2535）と `Tape::stacked_{rnn,lstm,gru}_forward_seq` が facade のみ
+/// （`fandhe_ai_autodiff` を import しない）で到達でき、シグネチャが承認形と
+/// 一致し、L=2・双方向で実際に forward・backward できることを固定する
+/// （スタブでは通らない正ガード）。
+#[test]
+fn nn_rnn_stacked_types_are_reachable_via_facade_only() {
+    use fandhe_ai::nn::rnn::{
+        GruCellVars, RnnCellVars, RnnConfig, StackedGru, StackedLstm, StackedLstmSeqOutput,
+        StackedRnn, StackedRnnSeqOutput,
+    };
+    use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
+
+    type RnnSig<'t> = fn(
+        &'t Tape,
+        &StackedRnn,
+        &Tensor<f32>,
+        Option<&[Var<'t>]>,
+    ) -> Result<StackedRnnSeqOutput<'t, RnnCellVars<'t>>, AutodiffError>;
+    type LstmSig<'t> = fn(
+        &'t Tape,
+        &StackedLstm,
+        &Tensor<f32>,
+        Option<&[Var<'t>]>,
+        Option<&[Var<'t>]>,
+    ) -> Result<StackedLstmSeqOutput<'t>, AutodiffError>;
+    type GruSig<'t> = fn(
+        &'t Tape,
+        &StackedGru,
+        &Tensor<f32>,
+        Option<&[Var<'t>]>,
+    ) -> Result<StackedRnnSeqOutput<'t, GruCellVars<'t>>, AutodiffError>;
+    fn sig_rnn<'t>() -> RnnSig<'t> {
+        Tape::stacked_rnn_forward_seq
+    }
+    fn sig_lstm<'t>() -> LstmSig<'t> {
+        Tape::stacked_lstm_forward_seq
+    }
+    fn sig_gru<'t>() -> GruSig<'t> {
+        Tape::stacked_gru_forward_seq
+    }
+
+    let cfg = RnnConfig::new().with_num_layers(2).with_bidirectional(true);
+    assert_eq!(cfg.num_directions(), 2);
+    let tape = fandhe_ai::tape();
+    // x: [T=3, B=1, D=2]
+    let x = Tensor::<f32>::new(vec![0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3usize, 1, 2])
+        .expect("test fixture: x tensor の構築に失敗");
+
+    let rnn = StackedRnn::new(2, 3, true, 1, cfg).expect("test fixture: StackedRnn::new");
+    let out = sig_rnn()(&tape, &rnn, &x, None).expect("test fixture: stacked_rnn_forward_seq");
+    assert_eq!(out.h_n.len(), 4);
+    assert_eq!(out.outputs.len(), 3);
+    assert_eq!(out.outputs[0].to_tensor().shape(), &[1usize, 6]);
+    let loss = out.outputs.last().expect("outputs").sum(None).expect("sum");
+    let grads = tape.backward(&loss).expect("backward");
+    assert!(grads.get(&out.params[0].weight_ih).expect("get").is_some());
+
+    let lstm = StackedLstm::new(2, 3, true, 2, cfg).expect("test fixture: StackedLstm::new");
+    let zero = Tensor::<f32>::zeros(&[1, 3]).expect("zeros");
+    let h0: Vec<Var<'_>> = (0..4).map(|_| tape.var(&zero)).collect();
+    let c0: Vec<Var<'_>> = (0..4).map(|_| tape.var(&zero)).collect();
+    let lout = sig_lstm()(&tape, &lstm, &x, Some(&h0), Some(&c0))
+        .expect("test fixture: stacked_lstm_forward_seq");
+    assert_eq!(lout.c_n.len(), 4);
+    let lloss = lout.c_n[0].sum(None).expect("sum");
+    let lgrads = tape.backward(&lloss).expect("backward");
+    assert!(
+        lgrads
+            .get(&lout.params[0].weight_hh)
+            .expect("get")
+            .is_some()
+    );
+
+    let gru = StackedGru::new(2, 3, true, 3, cfg).expect("test fixture: StackedGru::new");
+    let gout = sig_gru()(&tape, &gru, &x, None).expect("test fixture: stacked_gru_forward_seq");
+    assert_eq!(gout.h_n.len(), 4);
+    // 長さ契約違反（h0 が 1 本）はエラーになる。
+    assert!(sig_gru()(&tape, &gru, &x, Some(&h0[..1])).is_err());
+}
+
+/// `lib.rs` の `Tape::stacked_{rnn,lstm,gru}_forward_seq` の本体が
+/// `&self.0` を渡す 1 行委譲であることを固定する（#2535。独自実装・
+/// スタブへのすり替えを拒否）。
+#[test]
+fn tape_stacked_rnn_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected) in [
+        (
+            "stacked_rnn_forward_seq",
+            "rnn . forward_seq ( & self . 0 , x , h0 )",
+        ),
+        (
+            "stacked_lstm_forward_seq",
+            "lstm . forward_seq ( & self . 0 , x , h0 , c0 )",
+        ),
+        (
+            "stacked_gru_forward_seq",
+            "gru . forward_seq ( & self . 0 , x , h0 )",
+        ),
+    ] {
+        assert_eq!(
+            determinism_fn_body(&tokens, name).as_deref(),
+            Some(expected),
+            "Tape::{name} の本体が承認形（`&self.0` を渡す 1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// workspace 全体（`crates/*/src/`）の `fn` 宣言のうち `names` に該当する
+/// ものを `<crate 相対パス>::<名前>` → 件数で数える（#2535 の宣言
+/// インベントリ検査用）。
+fn scan_workspace_fn_declarations(names: &[&str]) -> std::collections::BTreeMap<String, usize> {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let entries = std::fs::read_dir(&crates_dir).unwrap_or_else(|_| {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        )
+    });
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for name in names {
+                let count = count_fn_declarations_by_name(&tokens, name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    found
+}
+
+/// `stacked_{rnn,lstm,gru}_forward_seq` の `fn` 宣言が workspace 内で
+/// `facade/src/lib.rs` の各 1 件のみであること（過不足とも fail-closed。
+/// #2535）。
+#[test]
+fn workspace_declares_stacked_rnn_tape_fn_names_only_in_facade_lib() {
+    let names = [
+        "stacked_rnn_forward_seq",
+        "stacked_lstm_forward_seq",
+        "stacked_gru_forward_seq",
+    ];
+    let found = scan_workspace_fn_declarations(&names);
+    let expected: std::collections::BTreeMap<String, usize> = names
+        .iter()
+        .map(|n| (format!("facade/src/lib.rs::{n}"), 1usize))
+        .collect();
+    assert_eq!(
+        found, expected,
+        "stacked RNN の Tape 委譲メソッドの宣言集合が承認形（facade/src/lib.rs 各 1 件）\
+         と一致しない: {found:?}"
+    );
+}
+
+/// `Rnn`／`Lstm`／`Gru::with_config` は未承認（決定記録 §2.1・§8。多層は
+/// `Stacked*` を使う）のため、workspace に `fn with_config` 宣言が 0 件で
+/// あることを固定する（`RnnConfigHoldDoctestGuard` の正のプローブとの多層
+/// 防御。他の型が正当に `with_config` を持つ場合は本期待を明示更新する）。
+#[test]
+fn workspace_declares_no_rnn_with_config_fn() {
+    let found = scan_workspace_fn_declarations(&["with_config"]);
+    assert!(
+        found.is_empty(),
+        "workspace に `fn with_config` の宣言が現れた（Rnn／Lstm／Gru::with_config は未承認）: {found:?}"
+    );
 }
 
 /// `compat::Sequential` に `add_rnn`／`add_lstm`／`add_gru` が存在
@@ -14283,9 +14477,8 @@ fn rnn_config_hold_doctest_probe_body_matches_fixed_contract() {
         actual, RNN_CONFIG_HOLD_PROBE_BODY,
         "RnnConfigHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
          固定文言 RNN_CONFIG_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_rnn_config_hold_probe モジュール・\
-         __FandheRnnConfigTapeProbe／__FandheRnnConfigWithConfigProbe\
-         トレイト・__probe 関数）の削除・弱体化・隠し行の混入がないか\
+         プローブ（__FandheRnnConfigWithConfigProbe トレイト・\
+         __probe 関数）の削除・弱体化・隠し行の混入がないか\
          確認すること。"
     );
 }
@@ -14298,35 +14491,7 @@ fn rnn_config_hold_doctest_probe_body_matches_fixed_contract() {
 /// `use fandhe_ai::*;` は本文に含む）。
 const RNN_CONFIG_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
-mod __fandhe_rnn_config_hold_probe {\n\
-\x20\x20\x20\x20pub struct RnnConfig;\n\
-\x20\x20\x20\x20pub struct StackedRnn;\n\
-\x20\x20\x20\x20pub struct StackedLstm;\n\
-\x20\x20\x20\x20pub struct StackedGru;\n\
-\x20\x20\x20\x20pub struct StackedRnnSeqOutput;\n\
-\x20\x20\x20\x20pub struct StackedLstmSeqOutput;\n\
-}\n\
-use __fandhe_rnn_config_hold_probe::*;\n\
-\n\
 struct __FandheRnnConfigMarker;\n\
-\n\
-trait __FandheRnnConfigTapeProbe {\n\
-\x20\x20\x20\x20fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker;\n\
-\x20\x20\x20\x20fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker;\n\
-\x20\x20\x20\x20fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker;\n\
-}\n\
-\n\
-impl __FandheRnnConfigTapeProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheRnnConfigMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
 \n\
 trait __FandheRnnConfigWithConfigProbe {\n\
 \x20\x20\x20\x20fn with_config(&self) -> __FandheRnnConfigMarker;\n\
@@ -14351,23 +14516,10 @@ impl __FandheRnnConfigWithConfigProbe for fandhe_ai::nn::rnn::Gru {\n\
 }\n\
 \n\
 fn __probe(\n\
-\x20\x20\x20\x20_: RnnConfig,\n\
-\x20\x20\x20\x20_: StackedRnn,\n\
-\x20\x20\x20\x20_: StackedLstm,\n\
-\x20\x20\x20\x20_: StackedGru,\n\
-\x20\x20\x20\x20_: StackedRnnSeqOutput,\n\
-\x20\x20\x20\x20_: StackedLstmSeqOutput,\n\
-\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20rnn: &fandhe_ai::nn::rnn::Rnn,\n\
 \x20\x20\x20\x20lstm: &fandhe_ai::nn::rnn::Lstm,\n\
 \x20\x20\x20\x20gru: &fandhe_ai::nn::rnn::Gru,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_rnn_forward_seq(tape);\n\
-\x20\x20\x20\x20let _: __FandheRnnConfigMarker = tape.stacked_rnn_forward_seq();\n\
-\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_lstm_forward_seq(tape);\n\
-\x20\x20\x20\x20let _: __FandheRnnConfigMarker = tape.stacked_lstm_forward_seq();\n\
-\x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_gru_forward_seq(tape);\n\
-\x20\x20\x20\x20let _: __FandheRnnConfigMarker = tape.stacked_gru_forward_seq();\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Rnn::with_config(rnn);\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = rnn.with_config();\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Lstm::with_config(lstm);\n\
@@ -18058,10 +18210,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519・#2530・#2533 の保留ガード削除後は 20）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519・#2530・#2533・#2535 の保留ガード削除後は 19）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 20;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 19;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\

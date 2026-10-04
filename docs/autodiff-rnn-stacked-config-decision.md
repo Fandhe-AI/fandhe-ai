@@ -10,8 +10,9 @@
 既存 `Rnn`／`Lstm`／`Gru` とは別型）を実装した。`RnnConfig::default()`
 （`num_layers=1`・`bidirectional=false`・`dropout=0.0`）で構築した
 `Stacked*` は既存の `Rnn`／`Lstm`／`Gru` と bit 完全一致する。facade
-（`fandhe_ai`）への公開は未承認のまま対象外とし、`RnnConfigHoldDoctestGuard`
-（正のプローブ doctest）＋`api_surface.rs` の 2 テストで保留を多層固定する。
+（`fandhe_ai`）への公開は #2164 時点では未承認のまま対象外とし、
+`RnnConfigHoldDoctestGuard` ＋`api_surface.rs` の 2 テストで保留を多層固定
+した。**#2535 で facade 公開済み**（§9 実装記録。ルート #2499 の一括承認）。
 
 ## §1 背景
 
@@ -173,3 +174,55 @@ CUDA（DGX Spark GB10）・Metal（M4 Max）実機での `Stacked*` の
    `nn_rnn_module_reexports_exactly_expected_surface` の期待集合を
    更新し、`RnnConfigHoldDoctestGuard`・対応する `api_surface.rs` の
    否定ガードを正ガードへ置き換える。
+
+## §9 実装記録（イシュー #2535・2026-10-04・親 #2534・ルート #2499 の一括承認）
+
+§8 の推奨形（1 案に確定）をそのまま実施した。§8 本文は履歴として残す。
+
+### 公開した名前
+
+- `fandhe_ai::nn::rnn`（`crates/facade/src/nn/rnn.rs`）へ 6 型を純再エクスポート
+  （既存 8 型と合わせ 14 型）: `RnnConfig`・`StackedRnn`・`StackedLstm`・
+  `StackedGru`・`StackedRnnSeqOutput`・`StackedLstmSeqOutput`。
+- `Tape` の委譲メソッド 3 件（`&self.0` を渡すだけ。`crates/facade/src/lib.rs`）:
+  - `stacked_rnn_forward_seq(&StackedRnn, &Tensor<f32>, Option<&[Var]>) ->
+    Result<StackedRnnSeqOutput<RnnCellVars>, AutodiffError>`
+  - `stacked_lstm_forward_seq(&StackedLstm, &Tensor<f32>, Option<&[Var]>,
+    Option<&[Var]>) -> Result<StackedLstmSeqOutput, AutodiffError>`
+  - `stacked_gru_forward_seq(&StackedGru, &Tensor<f32>, Option<&[Var]>) ->
+    Result<StackedRnnSeqOutput<GruCellVars>, AutodiffError>`
+  - `h0`／`c0` は長さ `num_layers * num_directions`（index = `layer *
+    num_directions + direction`）。
+
+### ガード反転
+
+- `RnnConfigHoldDoctestGuard` を縮小: 公開済みの `RnnConfig`／`Stacked*`・
+  `Tape` メソッドのプローブを撤去し、未承認の `Rnn`／`Lstm`／`Gru::with_config`
+  禁止のみを残した（`PixelShuffleHoldDoctestGuard` の #2526 縮小形と同型）。
+  `RNN_CONFIG_HOLD_PROBE_BODY` も同期更新。
+- `api_surface.rs` の正ガード: `nn_rnn_module_reexports_exactly_expected_surface`
+  （期待集合 8 → 14）・`nn_rnn_stacked_types_are_reachable_via_facade_only`・
+  `tape_stacked_rnn_methods_are_thin_delegations`・
+  `workspace_declares_stacked_rnn_tape_fn_names_only_in_facade_lib`・
+  `workspace_declares_no_rnn_with_config_fn`。
+  `MIN_KNOWN_PROBE_BLOCKS` は 20 → 19（プローブモジュール 1 件減）。
+
+### 検証
+
+- `crates/facade/tests/nn_rnn_stacked_facade_bit_identity.rs`: facade 経路と内部
+  クレート直接経路（`CpuBackendOps`）の forward・backward bit 一致（L=2 双方向・
+  L=3 単方向・h0/c0 明示・dropout=0.5 同シード・既定 config と facade `Rnn` の
+  bit 一致）。
+- CUDA／Metal 実機 parity は §7 の申し送りがそのまま有効（新設せず）。
+
+### 既知の制限と対象外
+
+- facade からは `set_training(false)`（eval モード）へ到達できない
+  （`Module` trait 非公開）。`dropout > 0` の facade 経由 forward は常に学習
+  モード。推論用途は `dropout = 0.0` で構築する（`Tape::stacked_*_forward_seq`
+  doc に明記）。
+- 引き続き対象外: `Rnn`／`Lstm`／`Gru::with_config`（§2.1）・
+  `compat::Sequential::add_rnn` 等（#1955「選択肢 C」）・`Stacked*` の facade
+  `nn::Module` 実装・`from_cells`／`batch_first`／`proj_size` 等。
+- 不変: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・
+  新規 `unsafe` なし・新規 Op／カーネルなし。

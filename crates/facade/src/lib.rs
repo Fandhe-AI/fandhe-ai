@@ -39,7 +39,11 @@
 //!    取るため facade 利用者からは直接呼べず、`impl Tape` に追加した
 //!    `rnn_forward_seq`／`lstm_forward_seq`／`gru_forward_seq`（`&self.0`
 //!    を渡すだけの薄い委譲。`step_device_param_store` 等と同型）が
-//!    入口となる。値型の再エクスポート＋薄い委譲のみで任意
+//!    入口となる。イシュー #2535 で多層・双方向・層間 dropout 版
+//!    （`RnnConfig`・`StackedRnn`／`StackedLstm`／`StackedGru`・戻り値型 2 型）
+//!    も同モジュールへ再エクスポートし、`stacked_rnn_forward_seq`／
+//!    `stacked_lstm_forward_seq`／`stacked_gru_forward_seq` を追加した。
+//!    値型の再エクスポート＋薄い委譲のみで任意
 //!    `BackendOps` 注入経路を新設しないため REQ-12 と矛盾しない
 //!    （詳細は [`nn::rnn`] モジュール doc）。同じく `nn` 配下に、PyTorch
 //!    `torch.nn.init.*` 相当の初期化関数 9 個と補助 4 名を [`nn::init`] へ
@@ -132,7 +136,8 @@ pub mod optim;
 pub mod data;
 
 /// `nn` 公開面（イシュー #1955）。[`nn::rnn`]
-/// （`Rnn`／`Lstm`／`Gru` の Sequence レベル API の純再エクスポート）と、
+/// （`Rnn`／`Lstm`／`Gru` と多層版 `Stacked*`・`RnnConfig` の Sequence レベル
+/// API の純再エクスポート）と、
 /// facade 独自の [`nn::Module`]（#2395）を提供する。`forward_seq` の呼び出しには [`Tape::rnn_forward_seq`]
 /// 等（本モジュール自体ではなく `impl Tape` の薄い委譲メソッド）を
 /// 使う（詳細は [`nn::rnn`] モジュール doc 参照）。
@@ -639,6 +644,53 @@ impl Tape {
         x: &Tensor<f32>,
         h0: Option<&Var<'t>>,
     ) -> Result<nn::rnn::RnnSeqOutput<'t, nn::rnn::GruCellVars<'t>>, AutodiffError> {
+        gru.forward_seq(&self.0, x, h0)
+    }
+
+    /// 多層・双方向・層間 dropout 付き RNN の `Tape` 委譲メソッド
+    /// （イシュー #2535・`docs/autodiff-rnn-stacked-config-decision.md`
+    /// §9・`docs/compat-api-scope.md` §5 経路 2）。[`Self::rnn_forward_seq`]
+    /// と同じ理由（生の `fandhe_ai_autodiff::Tape` を取り出せない）の
+    /// 薄い委譲で、`&self.0` を渡すだけ。
+    ///
+    /// `h0` は `Some` の場合、長さ `num_layers * num_directions`
+    /// （index = `layer * num_directions + direction`）でなければならない。
+    /// 双方向時の各 step 出力は `[B, 2H]`（forward と reverse の連結）。
+    ///
+    /// **既知の制限**: `StackedRnn::new` は training=true で構築され、
+    /// `Module::set_training` は facade から到達できないため、`dropout > 0`
+    /// の場合は常に層間 dropout を適用してグローバル RNG
+    /// （[`manual_seed`] で再現可能。消費順は layer 昇順 → t 昇順）を
+    /// 消費する。推論用途では `dropout = 0.0` で構築する。
+    pub fn stacked_rnn_forward_seq<'t>(
+        &'t self,
+        rnn: &nn::rnn::StackedRnn,
+        x: &Tensor<f32>,
+        h0: Option<&[Var<'t>]>,
+    ) -> Result<nn::rnn::StackedRnnSeqOutput<'t, nn::rnn::RnnCellVars<'t>>, AutodiffError> {
+        rnn.forward_seq(&self.0, x, h0)
+    }
+
+    /// [`Self::stacked_rnn_forward_seq`] の LSTM 版（イシュー #2535）。
+    /// `h0`／`c0` は `Some` の場合ともに長さ `num_layers * num_directions`。
+    /// eval モード不可・dropout の RNG 消費は同メソッドの doc を参照。
+    pub fn stacked_lstm_forward_seq<'t>(
+        &'t self,
+        lstm: &nn::rnn::StackedLstm,
+        x: &Tensor<f32>,
+        h0: Option<&[Var<'t>]>,
+        c0: Option<&[Var<'t>]>,
+    ) -> Result<nn::rnn::StackedLstmSeqOutput<'t>, AutodiffError> {
+        lstm.forward_seq(&self.0, x, h0, c0)
+    }
+
+    /// [`Self::stacked_rnn_forward_seq`] の GRU 版（イシュー #2535）。
+    pub fn stacked_gru_forward_seq<'t>(
+        &'t self,
+        gru: &nn::rnn::StackedGru,
+        x: &Tensor<f32>,
+        h0: Option<&[Var<'t>]>,
+    ) -> Result<nn::rnn::StackedRnnSeqOutput<'t, nn::rnn::GruCellVars<'t>>, AutodiffError> {
         gru.forward_seq(&self.0, x, h0)
     }
 
@@ -2466,36 +2518,26 @@ struct AdaptiveMaxGlobalPoolHoldDoctestGuard;
 struct DropoutEmbeddingBagHoldDoctestGuard;
 
 /// イシュー #2164（親 #2131。設計正本 `docs/autodiff-rnn-stacked-config-
-/// decision.md` §8 承認事項）の facade 公開保留を固定する doctest 足場。
-/// `SpatialLayersHoldDoctestGuard`（イシュー #2159）と同型の「正の
-/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_rnn_config_hold_probe::{RnnConfig, StackedRnn, StackedLstm,
-/// StackedGru, StackedRnnSeqOutput, StackedLstmSeqOutput}` を導入する。
-/// facade がどの経路（単一行・複数行・ネストした group での `pub use`・
-/// 別名エクスポート）でこれらの名前を公開しても、ローカル定義との glob
-/// 衝突（E0659）でコンパイルが失敗する。
+/// decision.md` §8）の facade 公開保留のうち、イシュー #2535（親 #2534・
+/// ルート #2499 の一括承認）の後も残る分を固定する doctest 足場
+/// （`PixelShuffleHoldDoctestGuard` の #2526 縮小形と同型）。
 ///
-/// あわせて `fandhe_ai::Tape::{stacked_rnn_forward_seq,
-/// stacked_lstm_forward_seq, stacked_gru_forward_seq}`（多層・双方向
-/// スタックの `Tape` 委譲メソッド追加）と `fandhe_ai::nn::rnn::{Rnn,
-/// Lstm, Gru}::with_config`（既存型への `RnnConfig` 引数付き
-/// コンストラクタ追加。実装計画 §3.2「なぜ `Rnn`／`Lstm`／`Gru` に
-/// `with_config` を足さないか」参照）も同じブロックで保留固定する
-/// （trait 経由のプローブ呼び出しが inherent メソッドの型・引数不一致で
-/// コンパイル失敗する。旧 `VarConv3dHoldDoctestGuard` の `__probe_var` 等〈#2524 で撤去〉と
-/// 同方式）。
+/// #2535 で公開済みのもの（`RnnConfig`・`Stacked*` 6 型の再エクスポートと
+/// `Tape::{stacked_rnn_forward_seq, stacked_lstm_forward_seq,
+/// stacked_gru_forward_seq}`）の保留プローブは撤去した。承認形は
+/// `crates/facade/tests/api_surface.rs` の正ガード
+/// （`nn_rnn_module_reexports_exactly_expected_surface`・
+/// `nn_rnn_stacked_types_are_reachable_via_facade_only`・
+/// `tape_stacked_rnn_methods_are_thin_delegations` 等）が固定する。
 ///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// rnn_config_hold_doctest_globs_all_pub_modules`・`rnn_config_hold_
-/// doctest_probe_body_matches_fixed_contract`）との多層防御の位置づけ・
-/// 承認未取得の経緯は `docs/autodiff-rnn-stacked-config-decision.md` §8
-/// 「承認事項」節を参照。
+/// 残す保留は `fandhe_ai::nn::rnn::{Rnn, Lstm, Gru}::with_config`（既存型への
+/// `RnnConfig` 引数付きコンストラクタ追加）のみ。決定記録 §2.1 で不採用、
+/// §8 の承認範囲にも含まれない（trait 経由のプローブ呼び出しが inherent
+/// メソッドの型・引数不一致でコンパイル失敗する）。
 ///
-/// 承認（facade への `RnnConfig`／`Stacked*` 再エクスポート・`Tape` の
-/// 委譲メソッド新設）を得た日が来たら、本モジュール・本 doctest 自体を
-/// 削除する（ソース走査側の対応する否定ガードも同時に正ガードへ
-/// 置き換える）。
+/// ソース走査ガード（`rnn_config_hold_doctest_globs_all_pub_modules`・
+/// `rnn_config_hold_doctest_probe_body_matches_fixed_contract`・
+/// `workspace_declares_no_rnn_with_config_fn`）との多層防御。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2513,35 +2555,7 @@ struct DropoutEmbeddingBagHoldDoctestGuard;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
 ///
-/// mod __fandhe_rnn_config_hold_probe {
-///     pub struct RnnConfig;
-///     pub struct StackedRnn;
-///     pub struct StackedLstm;
-///     pub struct StackedGru;
-///     pub struct StackedRnnSeqOutput;
-///     pub struct StackedLstmSeqOutput;
-/// }
-/// use __fandhe_rnn_config_hold_probe::*;
-///
 /// struct __FandheRnnConfigMarker;
-///
-/// trait __FandheRnnConfigTapeProbe {
-///     fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker;
-///     fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker;
-///     fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker;
-/// }
-///
-/// impl __FandheRnnConfigTapeProbe for fandhe_ai::Tape {
-///     fn stacked_rnn_forward_seq(&self) -> __FandheRnnConfigMarker {
-///         __FandheRnnConfigMarker
-///     }
-///     fn stacked_lstm_forward_seq(&self) -> __FandheRnnConfigMarker {
-///         __FandheRnnConfigMarker
-///     }
-///     fn stacked_gru_forward_seq(&self) -> __FandheRnnConfigMarker {
-///         __FandheRnnConfigMarker
-///     }
-/// }
 ///
 /// trait __FandheRnnConfigWithConfigProbe {
 ///     fn with_config(&self) -> __FandheRnnConfigMarker;
@@ -2566,23 +2580,10 @@ struct DropoutEmbeddingBagHoldDoctestGuard;
 /// }
 ///
 /// fn __probe(
-///     _: RnnConfig,
-///     _: StackedRnn,
-///     _: StackedLstm,
-///     _: StackedGru,
-///     _: StackedRnnSeqOutput,
-///     _: StackedLstmSeqOutput,
-///     tape: &fandhe_ai::Tape,
 ///     rnn: &fandhe_ai::nn::rnn::Rnn,
 ///     lstm: &fandhe_ai::nn::rnn::Lstm,
 ///     gru: &fandhe_ai::nn::rnn::Gru,
 /// ) {
-///     let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_rnn_forward_seq(tape);
-///     let _: __FandheRnnConfigMarker = tape.stacked_rnn_forward_seq();
-///     let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_lstm_forward_seq(tape);
-///     let _: __FandheRnnConfigMarker = tape.stacked_lstm_forward_seq();
-///     let _: __FandheRnnConfigMarker = fandhe_ai::Tape::stacked_gru_forward_seq(tape);
-///     let _: __FandheRnnConfigMarker = tape.stacked_gru_forward_seq();
 ///     let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Rnn::with_config(rnn);
 ///     let _: __FandheRnnConfigMarker = rnn.with_config();
 ///     let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Lstm::with_config(lstm);
