@@ -257,9 +257,11 @@ resolve_rcond` を `linalg_ops.rs` の入口で 1 回呼んで確定させた値
 - `crates/facade/tests/linalg_ops_backend_parity.rs`（新規）: CPU vs
   NaiveOps の forward／backward parity（13 件）＋ CUDA／Metal 実機
   `#[ignore]`（4 件。§7 参照）。
-- `crates/facade/src/lib.rs`・`tests/api_surface.rs`:
+- `crates/facade/src/lib.rs`・`tests/api_surface.rs`: 当初は
   `VarLinalgOpsHoldDoctestGuard`（正のプローブ doctest）＋ 4 件の
-  ソース走査ガード（多層防御。§6 参照）。
+  ソース走査ガードを置いたが、#2515 で doctest と否定ガード 2 件を
+  削除・反転済み（残る 2 件は thin-delegation 正ガード・到達性ガード。
+  §6 の実施済み記録参照）。
 
 ## §6 承認事項・多層防御
 
