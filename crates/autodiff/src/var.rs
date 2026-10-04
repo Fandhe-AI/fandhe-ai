@@ -4557,6 +4557,61 @@ impl<'t> Var<'t> {
         crate::rearrange_ops::tile(self, reps)
     }
 
+    // ---- scalar_unary_ops 委譲メソッド（#2145 実装・#2512 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::scalar_unary_ops` の自由関数（既存 `Op::ScalarUnary` への
+    // dispatch。新規 `Op` なし）。本体は 1 行委譲に固定し、すり替えを facade の
+    // 正ガード（`var_scalar_unary_ops_methods_are_thin_delegations`）で拒否する。
+    // 数値契約は `docs/autodiff-scalar-unary-ops-decision.md` §3 が正。
+
+    /// 要素ごとの床関数（`torch.floor` 相当）。勾配は恒等的に 0（区分定数）。
+    /// `crate::scalar_unary_ops::floor` へ委譲する（イシュー #2145・#2512）。
+    pub fn floor(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::floor(self)
+    }
+
+    /// 要素ごとの天井関数（`torch.ceil` 相当）。勾配は恒等的に 0（区分定数）。
+    /// `crate::scalar_unary_ops::ceil` へ委譲する（イシュー #2145・#2512）。
+    pub fn ceil(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::ceil(self)
+    }
+
+    /// 要素ごとの偶数丸め（`torch.round` 相当。`2.5 -> 2`）。勾配は恒等的に 0。
+    /// `crate::scalar_unary_ops::round` へ委譲する（イシュー #2145・#2512）。
+    pub fn round(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::round(self)
+    }
+
+    /// 要素ごとの符号（`torch.sign` 相当。`sign(±0) = 0`）。勾配は恒等的に 0。
+    /// `crate::scalar_unary_ops::sign` へ委譲する（イシュー #2145・#2512）。
+    pub fn sign(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::sign(self)
+    }
+
+    /// 要素ごとの逆数（`torch.reciprocal` 相当）。`0` は IEEE のまま `inf` で panic しない。
+    /// `crate::scalar_unary_ops::reciprocal` へ委譲する（イシュー #2145・#2512）。
+    pub fn reciprocal(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::reciprocal(self)
+    }
+
+    /// 要素ごとの逆平方根（`torch.rsqrt` 相当）。負数は IEEE のまま NaN で panic しない。
+    /// `crate::scalar_unary_ops::rsqrt` へ委譲する（イシュー #2145・#2512）。
+    pub fn rsqrt(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::rsqrt(self)
+    }
+
+    /// 要素ごとの誤差関数（`torch.erf` 相当）。
+    /// `crate::scalar_unary_ops::erf` へ委譲する（イシュー #2145・#2512）。
+    pub fn erf(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::erf(self)
+    }
+
+    /// 要素ごとの `x ^ exponent`（スカラー指数。`torch.pow(x, scalar)` 相当）。
+    /// `crate::scalar_unary_ops::pow_scalar` へ委譲する（イシュー #2145・#2512）。
+    pub fn pow_scalar(&self, exponent: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::pow_scalar(self, exponent)
+    }
+
     /// embedding テーブル（`self`。`[num_embeddings, embedding_dim]`）
     /// から `index` が指す行を抽出する（`nn::Embedding` の forward
     /// 本体。`torch.nn.functional.embedding` 相当。イシュー #1604）。
