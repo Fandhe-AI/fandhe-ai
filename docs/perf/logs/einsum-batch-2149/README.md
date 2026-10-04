@@ -26,7 +26,7 @@ cargo test -p fandhe-ai --test einsum_batch_backend_parity -- --ignored --nocapt
 CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト
 （`cpu_einsum_batch_forward_matches_naive_reference`・
 `cpu_einsum_batch_backward_matches_naive_reference`・
-`facade_var_einsum_still_rejects_batch_contraction`）で既に検証済み
+`facade_var_einsum_accepts_batch_contraction_matching_einsum_batched`。#2517 で旧拒否ガードから反転）で既に検証済み
 （green）。CPU 版は `assert_parity`（REQ-2 統一複合判定）で NaiveOps
 （ホスト参照実装）と突き合わせている。
 
@@ -50,3 +50,10 @@ backward が判定不能になりうるため。`ibj,bjk->bik`〈batch 軸が先
 想定外の丸めが混入した等）は本 README の「期待結果」を更新し、想定
 した契約を維持できない事実を型付き findings として PR へ記録すること
 （tolerance の単独緩和は行わない。`.claude/rules/coding-rust.md`）。
+
+## 追記（イシュー #2517）
+
+`Var::einsum` が batch 添字付き縮約を受理するよう拡張され facade 公開された
+（`docs/autodiff-einsum-batch-decision.md` §11）。`#[ignore]` の CUDA／Metal
+テストは公開入口 `Var::einsum` 経由に切り替えたため、実機実測は公開経路を
+測る。測定コマンド・期待結果・記入欄は上記のまま有効（テスト名は不変）。

@@ -204,11 +204,11 @@
 //! （両オペランドと出力に共通する添字。例 `"bij,bjk->bik"`）を伴う
 //! 2 項縮約を、その後実装済みの rank≥3 `Var::matmul`（イシュー
 //! #1715）へ分解する経路として `crate::einsum` 内に実装した。
-//! `Var::einsum` 自体の挙動は不変（facade 公開は承認事項のため未
-//! 実施）で、内部クレート限定の到達入口を [`einsum_batch`] へ追加
-//! した（[`bool_ops`]／[`rearrange_ops`]／[`matrix_ops`] と同じ
-//! 「承認待ち保留」の枠組み。`docs/autodiff-einsum-batch-decision.md`・
-//! モジュール doc 参照）。
+//! 当初は承認待ちのため内部クレート限定の到達入口 [`einsum_batch`]
+//! だけを公開していたが、イシュー #2517 で `Var::einsum` 自体が
+//! batch 添字付き縮約を受理するよう拡張され facade へ公開された
+//! （`docs/autodiff-einsum-batch-decision.md` §11）。[`einsum_batch`]
+//! は公開済み 0.10.0 互換の同一挙動の薄い委譲として維持する。
 
 //! イシュー #2153（親 #2131）で、`Var::topk`（`sorted=True` 固定・
 //! 非負 `dim` のみ）・`Var::unique`（`dim`／`return_inverse`／

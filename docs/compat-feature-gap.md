@@ -674,7 +674,7 @@ compat-api-scope.md` §5 の手続きは Tier 1 列挙済み機能につき再�
   正規化してから rank≥3 `Var::matmul`（`gemm_batched`）を 1 回呼ぶ
   経路を通る。新規 `Op`・新規 VJP は追加していない（既存の
   `permute`／`reshape`／`matmul` への分解のまま）。
-- **facade 公開は本イシューの承認事項のため未実施**: `Var::einsum`
+- **（#2517 で facade 公開済み。ルート #2499 の一括承認。`Var::einsum` が batch 添字付き縮約を受理し `BatchContraction` モードは撤去、保留ガードは正ガードへ反転。`docs/autodiff-einsum-batch-decision.md` §11）以下は #2149 時点の記録**: facade 公開は本イシューの承認事項のため未実施だった。`Var::einsum`
   （facade `fandhe_ai::Var::einsum` へそのまま到達する公開入口）は
   引き続き `Reject` モードで呼び出し、batch 添字を伴う縮約を
   `AutodiffError::InvalidArgument` で拒否する。内部クレート限定の

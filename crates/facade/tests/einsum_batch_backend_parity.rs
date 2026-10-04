@@ -1,8 +1,6 @@
-//! `fandhe_ai_autodiff::einsum_batch::einsum_batched`（イシュー #2149・
-//! 親 #2131）の facade 到達経路の受け入れ条件対応テスト
-//! （`einsum_backend_parity.rs` と同型）。facade（`fandhe_ai`）自体は
-//! `einsum_batch` を再エクスポートしないため、`fandhe_ai_autodiff::
-//! einsum_batch::einsum_batched` を直接呼び、`fandhe_ai::tape()`
+//! facade 公開入口 `fandhe_ai::Var::einsum` の batch 添字縮約
+//! （イシュー #2149・#2517。親 #2131）の受け入れ条件対応テスト
+//! （`einsum_backend_parity.rs` と同型）。`fandhe_ai::tape()`
 //! （`CpuBackendOps`）が経由する `BackendOps::gemm_batched` の
 //! parity を検証する（`einsum` 自体は新規カーネルを追加していない
 //! ため「該当バックエンドすべてに実装」は rank≥3 `Var::matmul`
@@ -11,21 +9,22 @@
 //! - 属性なし: `fandhe_ai::tape()`（`CpuBackendOps`）と
 //!   `fandhe_ai_autodiff::Tape::new()`（`NaiveOps`）で forward／backward
 //!   を REQ-2 統一複合判定で突き合わせる（`ibj,bjk->bik`。batch 軸が
-//!   先頭にない非恒等 permute 経路）。加えて `Var::einsum`（facade
-//!   公開入口）が同じ spec で引き続き `InvalidArgument` を返すことを
-//!   固定する保留ガード（`facade_var_einsum_still_rejects_batch_
-//!   contraction`）を持つ。
+//!   先頭にない非恒等 permute 経路）。加えて `Var::einsum` が互換入口
+//!   `einsum_batched` と bit 一致して受理することを固定する
+//!   （`facade_var_einsum_accepts_batch_contraction_matching_einsum_batched`。
+//!   #2517 で旧拒否ガードから反転）。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
-//!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の同経路を CPU
-//!   tape と `assert_parity` で比較する（GEMM カーネルが異なるため
-//!   bit 同一は主張しない。GPU 側の GEMM は per-batch 経路と異なる
-//!   結合順序を取りうるため REQ-2 統一複合判定で判定する）。実機実測
-//!   の申し送りは `docs/perf/logs/einsum-batch-2149/README.md`。
+//!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の同経路（公開入口
+//!   `Var::einsum` 経由）を CPU tape と `assert_parity` で比較する
+//!   （GEMM カーネルが異なるため bit 同一は主張しない。GPU 側の GEMM は
+//!   per-batch 経路と異なる結合順序を取りうるため REQ-2 統一複合判定で
+//!   判定する）。実機実測の申し送りは
+//!   `docs/perf/logs/einsum-batch-2149/README.md`。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
+use fandhe_ai_autodiff::Var;
 use fandhe_ai_autodiff::einsum_batch::einsum_batched;
-use fandhe_ai_autodiff::{AutodiffError, Var};
 use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_tensor_core::Tensor;
 
@@ -74,7 +73,7 @@ const B_SHAPE: [usize; 3] = [2, 4, 5]; // [b, j, k]
 const TARGET_SHAPE: [usize; 3] = [2, 3, 5]; // [b, i, k]
 
 fn einsum_batch_forward<'t>(a: &Var<'t>, b: &Var<'t>) -> Tensor<f32> {
-    einsum_batched("ibj,bjk->bik", &[a, b])
+    Var::einsum("ibj,bjk->bik", &[a, b])
         .expect("einsum_batched: 形状適合（b/j 次元一致）")
         .to_tensor()
 }
@@ -94,7 +93,7 @@ fn cpu_einsum_batch_forward_matches_naive_reference() {
     let out_naive = einsum_batch_forward(&a_naive, &b_naive);
 
     assert_parity(
-        "fandhe_ai::tape()（CpuBackendOps 経由 einsum_batched \"ibj,bjk->bik\"）vs NaiveOps",
+        "fandhe_ai::tape()（CpuBackendOps 経由 Var::einsum \"ibj,bjk->bik\"）vs NaiveOps",
         &contiguous_slice(&out_cpu),
         &contiguous_slice(&out_naive),
     );
@@ -109,7 +108,7 @@ fn cpu_einsum_batch_backward_matches_naive_reference() {
     let a_cpu = cpu_tape.make_var(&leaf(1, &A_SHAPE));
     let b_cpu = cpu_tape.make_var(&leaf(2, &B_SHAPE));
     let t_cpu = cpu_tape.make_var(&leaf(3, &TARGET_SHAPE));
-    let y_cpu = einsum_batched("ibj,bjk->bik", &[&a_cpu, &b_cpu]).unwrap();
+    let y_cpu = Var::einsum("ibj,bjk->bik", &[&a_cpu, &b_cpu]).unwrap();
     let loss_cpu = y_cpu.mse_loss(&t_cpu).unwrap();
     let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
     let da_cpu = grads_cpu.get(&a_cpu).unwrap().expect("到達する");
@@ -119,37 +118,43 @@ fn cpu_einsum_batch_backward_matches_naive_reference() {
     let a_naive = naive_tape.make_var(&leaf(1, &A_SHAPE));
     let b_naive = naive_tape.make_var(&leaf(2, &B_SHAPE));
     let t_naive = naive_tape.make_var(&leaf(3, &TARGET_SHAPE));
-    let y_naive = einsum_batched("ibj,bjk->bik", &[&a_naive, &b_naive]).unwrap();
+    let y_naive = Var::einsum("ibj,bjk->bik", &[&a_naive, &b_naive]).unwrap();
     let loss_naive = y_naive.mse_loss(&t_naive).unwrap();
     let grads_naive = naive_tape.backward(&loss_naive).unwrap();
     let da_naive = grads_naive.get(&a_naive).unwrap().expect("到達する");
     let db_naive = grads_naive.get(&b_naive).unwrap().expect("到達する");
 
     assert_parity(
-        "fandhe_ai::tape()（CpuBackendOps 経由 einsum_batched \"ibj,bjk->bik\"）da vs NaiveOps",
+        "fandhe_ai::tape()（CpuBackendOps 経由 Var::einsum \"ibj,bjk->bik\"）da vs NaiveOps",
         &contiguous_slice(da_cpu),
         &contiguous_slice(da_naive),
     );
     assert_parity(
-        "fandhe_ai::tape()（CpuBackendOps 経由 einsum_batched \"ibj,bjk->bik\"）db vs NaiveOps",
+        "fandhe_ai::tape()（CpuBackendOps 経由 Var::einsum \"ibj,bjk->bik\"）db vs NaiveOps",
         &contiguous_slice(db_cpu),
         &contiguous_slice(db_naive),
     );
 }
 
-/// facade の唯一の公開入口 `Var::einsum` は、`einsum_batch` 追加後も
-/// batch 添字を伴う縮約を引き続き `InvalidArgument` で拒否すること
-/// （facade 公開はイシュー #2149 の承認事項であり、承認前に
-/// `Var::einsum` の facade から観測される挙動を変えない設計判断の
-/// 実行時ガード。`VarEinsumBatchHoldDoctestGuard`〈`crates/facade/
-/// src/lib.rs`〉と多層防御を成す）。
+/// facade の公開入口 `Var::einsum` が batch 添字を伴う縮約を受理し、
+/// 互換入口 `einsum_batched` と bit 一致すること（イシュー #2517。
+/// 旧 `facade_var_einsum_still_rejects_batch_contraction` の反転）。
 #[test]
-fn facade_var_einsum_still_rejects_batch_contraction() {
+fn facade_var_einsum_accepts_batch_contraction_matching_einsum_batched() {
     let tape = fandhe_ai::tape();
     let a = tape.make_var(&leaf(1, &A_SHAPE));
     let b = tape.make_var(&leaf(2, &B_SHAPE));
-    let result = Var::einsum("ibj,bjk->bik", &[&a, &b]);
-    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    let via_var = Var::einsum("ibj,bjk->bik", &[&a, &b]).expect("batch 縮約は受理される");
+    let via_batched = einsum_batched("ibj,bjk->bik", &[&a, &b]).expect("einsum_batched");
+    assert_eq!(via_var.to_tensor().shape(), via_batched.to_tensor().shape());
+    let x = contiguous_slice(&via_var.to_tensor());
+    let y = contiguous_slice(&via_batched.to_tensor());
+    assert!(
+        x.iter()
+            .zip(y.iter())
+            .all(|(p, q)| p.to_bits() == q.to_bits()),
+        "Var::einsum と einsum_batched が bit 一致しない"
+    );
 }
 
 // --- 実機横断（`#[ignore]`。Metal／CUDA） ---
@@ -166,7 +171,7 @@ fn einsum_batch_backward_da_on(device: Device) -> Tensor<f32> {
     let a = tape.make_var(&leaf(1, &A_SHAPE));
     let b = tape.make_var(&leaf(2, &B_SHAPE));
     let t = tape.make_var(&leaf(3, &TARGET_SHAPE));
-    let y = einsum_batched("ibj,bjk->bik", &[&a, &b]).unwrap();
+    let y = Var::einsum("ibj,bjk->bik", &[&a, &b]).unwrap();
     let loss = y.mse_loss(&t).unwrap();
     let grads = tape.backward(&loss).unwrap();
     grads.get(&a).unwrap().expect("到達する").clone()
@@ -184,7 +189,7 @@ fn metal_einsum_batch_forward_matches_cpu() {
     let cpu_out = einsum_batch_forward_on(Device::Cpu);
 
     assert_parity(
-        "einsum_batched \"ibj,bjk->bik\" forward: Metal tape_for vs CPU tape_for",
+        "Var::einsum \"ibj,bjk->bik\" forward: Metal tape_for vs CPU tape_for",
         &contiguous_slice(&metal_out),
         &contiguous_slice(&cpu_out),
     );
@@ -198,7 +203,7 @@ fn metal_einsum_batch_backward_matches_cpu() {
     let cpu_da = einsum_batch_backward_da_on(Device::Cpu);
 
     assert_parity(
-        "einsum_batched \"ibj,bjk->bik\" backward: Metal tape_for vs CPU tape_for",
+        "Var::einsum \"ibj,bjk->bik\" backward: Metal tape_for vs CPU tape_for",
         &contiguous_slice(&metal_da),
         &contiguous_slice(&cpu_da),
     );
@@ -211,7 +216,7 @@ fn cuda_einsum_batch_forward_matches_cpu() {
     let cpu_out = einsum_batch_forward_on(Device::Cpu);
 
     assert_parity(
-        "einsum_batched \"ibj,bjk->bik\" forward: CUDA tape_for vs CPU tape_for",
+        "Var::einsum \"ibj,bjk->bik\" forward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
     );
@@ -224,7 +229,7 @@ fn cuda_einsum_batch_backward_matches_cpu() {
     let cpu_da = einsum_batch_backward_da_on(Device::Cpu);
 
     assert_parity(
-        "einsum_batched \"ibj,bjk->bik\" backward: CUDA tape_for vs CPU tape_for",
+        "Var::einsum \"ibj,bjk->bik\" backward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_da),
         &contiguous_slice(&cpu_da),
     );

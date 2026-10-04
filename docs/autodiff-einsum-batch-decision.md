@@ -21,6 +21,12 @@ einsum_batch::einsum_batched` を追加した（`bool_ops`〈#2141〉・
 `rearrange_ops`〈#2143〉・`matrix_ops`〈#2144〉と同じ「facade 公開
 承認待ち保留」の判断枠組み）。
 
+**【#2517 で公開済み】** ルート #2499 の 2026-10-04 一括承認（推奨形で
+実装してよい）に基づき、案 A（`Var::einsum` の直接拡張）で facade へ
+公開した。`Var::einsum` は batch 添字付き縮約を受理する（従来 `Err` だった
+入力が `Ok` になる非破壊拡張。新しい公開名なし）。以降の §3・§6 の
+「未承認・保留」記述は #2149 時点の記録であり、実施内容は §11 を正とする。
+
 ## §1 背景
 
 イシュー #2149・親 #2131 にはコメントが 0 件で、facade 公開の承認
@@ -130,6 +136,10 @@ batch 経路は rank≥3 `Var::matmul`（`gemm_batched`）をそのまま呼ぶ
 親 #2131 のツリー方針（facade 公開面の拡張は承認を経る）に従う方が
 安全側である。案 A の非破壊性自体は§6 に記録し、承認を推奨する。
 
+**承認後の実装（#2517・2026-10-04 ルート #2499 一括承認）**: 本節が
+推奨していた案 A を実施した。承認の根拠はルート #2499 本文「承認範囲」
+節の一括承認のみ（`docs/compat-api-scope.md` §5 適用記録〈経路 2〉）。
+
 ## §4 対象ファイル・変更箇所
 
 | パス | 変更内容 |
@@ -194,6 +204,18 @@ batch 経路は rank≥3 `Var::matmul`（`gemm_batched`）をそのまま呼ぶ
    `fandhe_ai_autodiff::einsum_batch::einsum_batched` 呼び出し元が
    あるか）に従って判断する。
 
+**実施記録（#2517）**: 手順 1 は `BatchContraction` モード自体の撤去として
+実施（`Reject` を構築する非テストコードが無くなると `pub(crate)` enum の
+variant が未構築となり `dead_code` で `clippy -D warnings` が落ちるため。
+`#[allow]` は使わない）。手順 2〜5 は実施（手順 4 は否定テスト 2 件の削除と
+`facade_does_not_reexport_or_declare_einsum_batch`・
+`workspace_declares_einsum_batched_fn_only_in_autodiff_einsum_batch` の
+正ガード化。手順 5 は `facade_var_einsum_accepts_batch_contraction_
+matching_einsum_batched` への反転）。手順 6 は実施。手順 7 は**維持**と
+確定（`einsum_batch.rs` は公開済み `fandhe-ai-autodiff 0.10.0` に含まれ、
+撤去すると公開 `pub fn` が消える semver 破壊になるため。本体は
+`crate::einsum::einsum` への 1 行委譲）。
+
 ## §7 実機 parity の申し送り
 
 CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に無いため
@@ -202,8 +224,8 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 
 ## §8 スコープ外
 
-- facade 公開（`Var::einsum` の `Allow` 化と保留ガードの撤去。§3・§6
-  参照）
+- ~~facade 公開（`Var::einsum` の `Allow` 化と保留ガードの撤去）~~
+  → #2517 で公開済み（§11）
 - GPU 専用カーネル（現状は既存の `matmul`／`permute`／`reshape` の
   合成のみで到達）
 - ellipsis（`...`）・3 オペランド以上（`crate::einsum` の既存対象外
@@ -214,8 +236,9 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 
 ## §9 承認事項（未承認として列挙）
 
-1. facade 公開（`Var::einsum` の batch 添字対応拡張。§3・§6 参照）
-2. GPU 専用カーネル
+1. ~~facade 公開（`Var::einsum` の batch 添字対応拡張。§3・§6 参照）~~
+   → 承認・実装済み（#2517。ルート #2499 の 2026-10-04 一括承認。§11）
+2. GPU 専用カーネル（未承認のまま）
 
 ## §10 実装記録（イシュー #2149）
 
@@ -254,3 +277,38 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 化、facade 保留ガード（`VarEinsumBatchHoldDoctestGuard`・対応する
 否定ガード 4 件・facade parity テストの保留ガード 1 件）の撤去
 （§6 参照）。
+
+## §11 実装記録（イシュー #2517）
+
+親 #2500・ルート #2499。ルート本文「承認範囲」節の一括承認（Phase 1〜3 の
+facade 公開を設計判断記録の推奨形で実装してよい）に基づく。
+
+- **公開した名前**: 新しい名前はなし。既存の `Var::einsum` の受理範囲を
+  拡張した（batch∧contract 非空の拒否分岐を削除）。
+- **非破壊性**: シグネチャ不変・既に受理していた入力は分類・計画・実行経路が
+  従来と同一で bit 同一・`Err` → `Ok` の拡張のみ。`fandhe-ai =0.10.0` の
+  公開 API を壊さない。新規 `Op`／`BackendOps`／VJP／GPU カーネルなし。
+- **autodiff**: `BatchContraction` モード・`einsum_with`・`mode` 引数を撤去
+  し `crate::einsum::einsum` へ統合（D2）。`einsum_batch::einsum_batched` は
+  互換のため維持し `crate::einsum::einsum` へ 1 行委譲（D1。`#[deprecated]`
+  は付けない）。単体テスト・統合テストは受理テストへ反転。
+- **ガード反転**: `VarEinsumBatchHoldDoctestGuard` と否定テスト
+  `einsum_batch_hold_doctest_globs_all_pub_modules`・
+  `einsum_batch_hold_doctest_probe_body_matches_fixed_contract` を削除。
+  承認形だけを許す正ガード 4 件: `facade_does_not_reexport_or_declare_
+  einsum_batch`・`workspace_declares_einsum_batched_fn_only_in_autodiff_
+  einsum_batch`（検査ロジック不変・位置づけのみ変更）、新設
+  `var_einsum_and_einsum_batched_are_thin_delegations`（本体トークン列を
+  `crate::einsum::einsum(spec, operands)` に固定）・
+  `var_einsum_batch_contraction_is_reachable_via_facade_only`（facade 経由
+  のみでシグネチャ・形状・`Var::matmul` との bit 一致を確認）。
+  `hold_doctest_probe_blocks_reference_every_glob_imported_item` の下限を
+  26 → 25 へ更新（ガード 1 件削除に伴う機械的な追随。tolerance ではない）。
+- **facade 利用例**: `crates/facade/tests/einsum_batch_facade.rs`（新規）。
+  `#[ignore]` の CUDA／Metal テストは公開入口 `Var::einsum` 経由へ切替え。
+- **既知の制約（不変）**: create_graph 下では rank≥3 `MatMul` のため
+  `AutodiffError::Backward`・size-1 broadcast なし・複数 batch 添字は bit
+  同一を主張しない。
+- **不変事項**: `Cargo.toml`／`Cargo.lock`・tolerance／baseline 定数・
+  `docs/spec/` は不変。実機 parity は #2149 の申し送り
+  （`docs/perf/logs/einsum-batch-2149/README.md`）を引き継ぐ。

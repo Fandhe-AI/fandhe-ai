@@ -22,8 +22,8 @@
 //! - 境界: contract 次元サイズ 0（K=0）・batch 次元サイズ 0・
 //!   batch 添字の次元サイズ不一致（`InvalidArgument`）。いずれも
 //!   panic しないことを確認する。
-//! - `Var::einsum`（facade 公開入口）は同じ spec で引き続き
-//!   `InvalidArgument` を返し、tape を壊さないこと（保留契約の固定）。
+//! - `Var::einsum`（facade 公開入口）が同じ spec を受理し、
+//!   `einsum_batched`・`Var::matmul` と bit 同一であること（#2517）。
 //! - `Tape::backward_create_graph` 下で batch einsum を使うと型付き
 //!   エラー（`AutodiffError::Backward`）になること（panic しないこと
 //!   の確認。`crate::create_graph::validate_ancestors` が rank≥3
@@ -296,7 +296,7 @@ fn single_batch_axis_matches_var_matmul_directly_forward_and_backward() {
 
     // ノード数（tape へ push される `Op::MatMul` が 1 個のみである
     // こと）の検証は `crate::einsum::tests::
-    // einsum_with_allow_accepts_batch_contraction_as_single_matmul_node`
+    // einsum_accepts_batch_contraction_as_single_matmul_node`
     // （`tape.nodes` が `pub(crate)` のため単体テスト限定。統合テスト
     // からはアクセスできない）で行う。本テストは bit 同一性のみを
     // 検証する。
@@ -518,20 +518,36 @@ fn mismatched_batch_dimension_size_is_invalid_argument() {
     assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
 }
 
-// --- Var::einsum（facade 公開入口）の保留契約の固定 --------------------
+// --- Var::einsum（facade 公開入口）と einsum_batched の同一性（#2517） --
 
 #[test]
-fn var_einsum_still_rejects_batch_contraction_after_einsum_batch_addition() {
+fn var_einsum_matches_einsum_batched_and_matmul_bit_identically() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let a = tape.var(&t(vec![0.0; 2 * 3 * 4], &[2, 3, 4]));
-    let b = tape.var(&t(vec![0.0; 2 * 4 * 5], &[2, 4, 5]));
-    // 迷子ノードが残らないこと自体の検証は
-    // `crate::einsum::tests::einsum_rejects_batch_contraction_without_
-    // pushing_nodes`（単体テスト限定。`tape.nodes` が `pub(crate)`）で
-    // 行う。本テストは `Var::einsum` が einsum_batch 追加後も
-    // `InvalidArgument` を返し続けることのみを固定する。
-    let result = Var::einsum("bij,bjk->bik", &[&a, &b]);
-    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    let a = tape.var(&t(
+        (0..24).map(|i| i as f32 * 0.1 - 1.0).collect(),
+        &[2, 3, 4],
+    ));
+    let b = tape.var(&t(
+        (0..40).map(|i| i as f32 * 0.05 - 0.5).collect(),
+        &[2, 4, 5],
+    ));
+    let via_var = Var::einsum("bij,bjk->bik", &[&a, &b]).unwrap();
+    let via_batched = einsum_batched("bij,bjk->bik", &[&a, &b]).unwrap();
+    let direct = a.matmul(&b).unwrap();
+    assert_bit_identical(
+        "var_vs_batched",
+        &via_var.to_tensor(),
+        &via_batched.to_tensor(),
+    );
+    assert_bit_identical("var_vs_matmul", &via_var.to_tensor(), &direct.to_tensor());
+
+    let g_var = tape.backward(&via_var.sum(None).unwrap()).unwrap();
+    let g_direct = tape.backward(&direct.sum(None).unwrap()).unwrap();
+    for (label, v) in [("da", &a), ("db", &b)] {
+        let x = g_var.get(v).unwrap().cloned().unwrap();
+        let y = g_direct.get(v).unwrap().cloned().unwrap();
+        assert_bit_identical(label, &x, &y);
+    }
 }
 
 // --- create_graph（高階微分）下での型付きエラー ------------------------
