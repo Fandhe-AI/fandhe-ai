@@ -349,3 +349,44 @@ momentum 付き `Sgd` を bit 一致で再開するための内部 API（manifes
 本節は承認の取得を意味しない。§5 の保留と `OptimizerStateDictHoldDoctestGuard`・
 4 テストは維持している。本 PR では `crates/`・`Cargo.*`・tolerance・`docs/spec`
 を変更していない。
+
+## §10 #2557 着手時判定（#2556 未実装・§9 未承認のため停止）
+
+調査基準は `origin/main` `795894c6`（2026-10-04 確認）。本節は停止の記録であり、
+承認を取得したことを意味しない。
+
+### 10.1 判定
+
+- 依存の #2556 は PR #2741 で §9（推奨案 A・承認依頼）を記録してクローズされた。
+  `fandhe_ai::optim` への `OptimizerStateDict` 再エクスポートも各型への inherent
+  メソッド追加も `crates/facade/` には存在しない（`optim.rs` の出現はモジュール doc
+  のみ）。
+- 正ガードへの反転は「承認・公開済みの形だけを許す」検査であり、公開物が無い状態では
+  反転先が存在しない。
+- §9.4 (a)〜(e) は未承認。#2499・#2555・#2556・#2557 に承認コメントは無い。§4・§5 には
+  推奨形が無く（§5 項目 1 は再エクスポートと inherent メソッド追加の 2 案併記）、
+  ルート #2499 の一括承認は §9 の推奨案に及ばない（`docs/autodiff-param-groups-decision.md`
+  §10.1 と同じ判断）。
+
+### 10.2 結論
+
+- 停止条項に従い、`OptimizerStateDictHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
+  `crates/facade/tests/api_surface.rs` の次の 4 テストは撤去も反転もせず現状維持する。
+  - `optimizer_state_dict_hold_doctest_globs_all_pub_modules`
+  - `optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract`
+  - `facade_does_not_reexport_or_declare_optimizer_state_dict`
+  - `workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations`
+- 解除の順序は、§9.4 (a)〜(e) のユーザー承認 → #2556 の reopen または新規実装イシューでの
+  facade 公開 → 保留ガードの反転（#2557 の受入条件）。承認だけでは解除されない。
+- #2557 の受入条件 3 点（ガード反転・`docs/compat-api-scope.md` §5 の適用記録・facade
+  経由の利用例テスト）は未達。受入条件 2 のうち §4・§5 への実装記録（公開した名前・
+  ガード反転内容）は、公開・反転を行っていないため書けない。
+- §8 のフォローアップ（保留ガードのプローブへの `Sgd` 追加）は、承認後の正ガードで
+  10 型を固定して吸収する方針（§9.4 (b)）のため本イシューでは行わない。
+
+### 10.3 本イシューで行わないこと
+
+- `crates/facade/**` の変更、保留ガードの撤去・反転
+- `docs/compat-api-scope.md` §5 への適用記録（公開を適用していないため）
+- facade 経由の利用例 doctest・テストの追加（対象 API が存在しないため）
+- 追跡 Issue の起票・#2556 の reopen（ユーザー承認が必要）
