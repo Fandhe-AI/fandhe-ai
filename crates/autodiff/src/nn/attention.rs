@@ -61,11 +61,11 @@
 //! 本メソッドへ委譲するのみで、テープに積むノード列は変更前と完全に
 //! 同一（bit 同一保証。`forward` doc 参照）。
 //!
-//! **facade 公開は保留（承認事項）**: `MultiheadAttentionConfig` の
-//! facade 再エクスポート・`compat::Sequential` のオプション付き構築
-//! メソッドはいずれも未承認のため追加していない
-//! （`crates/facade/src/lib.rs` の `MhaOptionsHoldDoctestGuard`・
-//! `crates/facade/tests/api_surface.rs` の否定ガードで固定）。
+//! **facade 公開（イシュー #2530・ルート #2499 の一括承認で公開済み）**:
+//! `MultiheadAttentionConfig` は `fandhe_ai::compat::MultiheadAttentionConfig`
+//! として再エクスポートされ、`compat::Sequential::add_multihead_attention_with_config`
+//! から使える（Sequential は self-attention 固定のため `kdim`/`vdim` は
+//! `embed_dim` 固定。`docs/autodiff-mha-options-decision.md` §承認事項）。
 //!
 //! **`Module` trait との関係**: `impl Module for MultiheadAttention` の
 //! `forward` は self-attention（`q=k=v=input`・mask なし・非 causal）を

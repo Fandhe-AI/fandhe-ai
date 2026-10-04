@@ -1488,6 +1488,15 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 
 #2509 追記: `compiled.loss` の allowlist を 9 種へ拡張した。新しい値は既存ファイルに存在しないため `format_version` は #2373 の lbfgs 先例どおり 2 のまま据え置く（旧リーダーは `UnsupportedModel` で fail-closed）。
 
+## 追補（イシュー #2530）: `multihead_attention_config` kind の追加
+
+- kind `multihead_attention_config`（params: `embed_dim`・`num_heads`・`bias`・`batch_first`。
+  kdim/vdim は Sequential では `embed_dim` 固定のため記録しない）を allowlist に追加（50 → 51 種）。
+  期待キーは `bias=false` のとき bias キーを含まない weight 4 本（`mha_parameters` の `bias` 引数）
+- 既存 kind `multihead_attention` のスキーマは変えない（旧 manifest を読めなくしないため）。
+  `format_version` は #2714 と同じ理由で据え置き
+- 復元は `add_multihead_attention_with_config` を再実行し、0 次元・割り切れない値は構築時検査で拒否する
+
 ## 追補（イシュー #2529）: 活性化 5 種の kind 追加
 
 - `mish`／`hardtanh`（`min_val`／`max_val`）／`relu6`／`glu`（`dim`）／`prelu`（`num_parameters`）を allowlist に追加（45 → 50 種）。

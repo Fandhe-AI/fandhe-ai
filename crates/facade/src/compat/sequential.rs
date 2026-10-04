@@ -122,10 +122,10 @@ use fandhe_ai_autodiff::nn::{
     ConvTranspose2dVars, Dropout, Dropout2d, Embedding, EmbeddingBag, EmbeddingBagVars,
     EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm, Identity, InstanceNorm,
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module,
-    MultiheadAttention, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
-    Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten,
-    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
-    multihead_attention_forward_low_precision,
+    MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
+    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, TransformerEncoderLayer,
+    TransformerEncoderLayerVars, Unflatten, Upsample, ZeroPad2d, conv2d_forward_low_precision,
+    linear_forward_low_precision, multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -319,6 +319,15 @@ pub(super) enum LayerSpec {
     MultiheadAttention {
         embed_dim: usize,
         num_heads: usize,
+    },
+    /// イシュー #2530。`add_multihead_attention_with_config` が積む。kdim/vdim は
+    /// 追加時に `embed_dim` 固定へ制限されるため記録しない。既存 kind
+    /// `multihead_attention` のスキーマを変えないための別 variant。
+    MultiheadAttentionConfig {
+        embed_dim: usize,
+        num_heads: usize,
+        bias: bool,
+        batch_first: bool,
     },
     TransformerEncoder {
         d_model: usize,
@@ -1229,11 +1238,9 @@ impl Sequential {
     /// `nn.MultiheadAttention` の既定 `bias=True` と揃える）。
     /// `embed_dim % num_heads != 0` は `MultiheadAttention::new` が
     /// 拒否する。本メソッドは既定 config（`batch_first=true`・
-    /// `kdim=vdim=embed_dim`）固定のまま——オプション指定版
-    /// （`batch_first`・`kdim`/`vdim`・`key_padding_mask`。イシュー
-    /// #2163）の facade 公開は承認待ちのため保留する
-    /// （`crates/facade/src/lib.rs` の `MhaOptionsHoldDoctestGuard`
-    /// 参照）。
+    /// `kdim=vdim=embed_dim`）固定のまま——オプション指定版は
+    /// [`Sequential::add_multihead_attention_with_config`]
+    /// （イシュー #2530）を使う。
     pub fn add_multihead_attention(
         mut self,
         embed_dim: usize,
@@ -1245,6 +1252,52 @@ impl Sequential {
         self.specs.push(LayerSpec::MultiheadAttention {
             embed_dim,
             num_heads,
+        });
+        Ok(self)
+    }
+
+    /// オプション指定付きの MultiheadAttention 層を追加する
+    /// （`nn::MultiheadAttention::from_config`。イシュー #2530・ルート #2499。
+    /// 承認記録は `docs/autodiff-mha-options-decision.md`）。
+    ///
+    /// `Module::forward` は self-attention（`q = k = v = input`・mask なし・
+    /// 非 causal）固定のため、Sequential で選べるのは `bias` と `batch_first`
+    /// のみ。`kdim`／`vdim` が `embed_dim` と異なる config は、`k_proj`／`v_proj`
+    /// が `[.., embed_dim]` の入力を受けられず「使えないのに保存できる層」に
+    /// なるため `AutodiffError::InvalidArgument` で fail-closed に拒否する。
+    /// `key_padding_mask` は呼び出し時オプションで本 API の対象外。
+    /// 0 次元・`embed_dim % num_heads != 0` は `from_config` が拒否する。
+    /// `add_multihead_attention` の挙動・保存形式は変えない。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{MultiheadAttentionConfig, Sequential};
+    ///
+    /// let cfg = MultiheadAttentionConfig::new(8, 2).with_bias(false).with_batch_first(false);
+    /// let model = Sequential::new().add_multihead_attention_with_config(cfg, 1).unwrap();
+    /// assert_eq!(model.trainable_parameters().len(), 4);
+    ///
+    /// let bad = MultiheadAttentionConfig::new(8, 2).with_kdim(10);
+    /// assert!(Sequential::new().add_multihead_attention_with_config(bad, 1).is_err());
+    /// ```
+    pub fn add_multihead_attention_with_config(
+        mut self,
+        config: MultiheadAttentionConfig,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        if config.kdim() != config.embed_dim() || config.vdim() != config.embed_dim() {
+            return Err(AutodiffError::InvalidArgument(
+                "add_multihead_attention_with_config: Sequential の self-attention では \
+                 kdim/vdim = embed_dim 必須（kdim/vdim 指定は未対応）"
+                    .to_string(),
+            ));
+        }
+        let layer = MultiheadAttention::from_config(&config, seed)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::MultiheadAttentionConfig {
+            embed_dim: config.embed_dim(),
+            num_heads: config.num_heads(),
+            bias: config.bias(),
+            batch_first: config.batch_first(),
         });
         Ok(self)
     }

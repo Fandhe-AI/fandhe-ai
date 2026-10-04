@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 50 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 51 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -76,6 +76,7 @@ use std::io;
 use std::path::Path;
 
 use fandhe_ai_autodiff::AutodiffError;
+use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;
 
 mod compiled;
 
@@ -306,7 +307,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 50 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 51 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -342,6 +343,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Embedding { .. } => Some("embedding"),
         LayerSpec::EmbeddingBag { .. } => Some("embedding_bag"),
         LayerSpec::MultiheadAttention { .. } => Some("multihead_attention"),
+        LayerSpec::MultiheadAttentionConfig { .. } => Some("multihead_attention_config"),
         LayerSpec::TransformerEncoder { .. } => Some("transformer_encoder"),
         LayerSpec::MaxPool2d { .. } => Some("max_pool2d"),
         LayerSpec::MaxPool1d { .. } => Some("max_pool1d"),
@@ -387,7 +389,9 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
 
 /// MultiheadAttention 相当（q／k／v／out の 4 本の Linear。`kdim = vdim = embed_dim`）の
 /// パラメータ名と shape。`with_prefix` は TE の `self_attn.` 接頭辞付きの名前を返す。
-fn mha_parameters(embed: usize, with_prefix: bool) -> Vec<(&'static str, Vec<usize>)> {
+/// `bias = false`（`multihead_attention_config` kind。イシュー #2530）は bias キーを
+/// 返さず weight 4 本のみ（`Module::named_parameters` の列挙順と一致）。
+fn mha_parameters(embed: usize, with_prefix: bool, bias: bool) -> Vec<(&'static str, Vec<usize>)> {
     let names: [&'static str; 8] = if with_prefix {
         [
             "self_attn.q_proj.weight",
@@ -414,6 +418,7 @@ fn mha_parameters(embed: usize, with_prefix: bool) -> Vec<(&'static str, Vec<usi
     names
         .into_iter()
         .enumerate()
+        .filter(|(i, _)| bias || i % 2 == 0)
         .map(|(i, name)| {
             let shape = if i % 2 == 0 {
                 vec![embed, embed]
@@ -538,13 +543,16 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
             ..
         } => vec![("weight", vec![*num_embeddings, *embedding_dim])],
         LayerSpec::PRelu { num_parameters } => vec![("weight", vec![*num_parameters])],
-        LayerSpec::MultiheadAttention { embed_dim, .. } => mha_parameters(*embed_dim, false),
+        LayerSpec::MultiheadAttention { embed_dim, .. } => mha_parameters(*embed_dim, false, true),
+        LayerSpec::MultiheadAttentionConfig {
+            embed_dim, bias, ..
+        } => mha_parameters(*embed_dim, false, *bias),
         LayerSpec::TransformerEncoder {
             d_model,
             dim_feedforward,
             ..
         } => {
-            let mut out = mha_parameters(*d_model, true);
+            let mut out = mha_parameters(*d_model, true, true);
             out.extend([
                 ("linear1.weight", vec![*d_model, *dim_feedforward]),
                 ("linear1.bias", vec![*dim_feedforward]),
@@ -907,6 +915,17 @@ fn render_params(spec: &LayerSpec) -> String {
         } => {
             put_num(&mut f, "embed_dim", *embed_dim);
             put_num(&mut f, "num_heads", *num_heads);
+        }
+        LayerSpec::MultiheadAttentionConfig {
+            embed_dim,
+            num_heads,
+            bias,
+            batch_first,
+        } => {
+            put_num(&mut f, "embed_dim", *embed_dim);
+            put_num(&mut f, "num_heads", *num_heads);
+            put_bool(&mut f, "bias", *bias);
+            put_bool(&mut f, "batch_first", *batch_first);
         }
         LayerSpec::TransformerEncoder {
             d_model,
@@ -1793,6 +1812,19 @@ fn build_model(
             } => model
                 .add_multihead_attention(*embed_dim, *num_heads, 0)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::MultiheadAttentionConfig {
+                embed_dim,
+                num_heads,
+                bias,
+                batch_first,
+            } => model
+                .add_multihead_attention_with_config(
+                    MultiheadAttentionConfig::new(*embed_dim, *num_heads)
+                        .with_bias(*bias)
+                        .with_batch_first(*batch_first),
+                    0,
+                )
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::TransformerEncoder {
                 d_model,
                 num_heads,
@@ -2675,6 +2707,15 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 num_heads: p.usize("num_heads")?,
             })
         }
+        "multihead_attention_config" => {
+            let p = Params::new(params, &["embed_dim", "num_heads", "bias", "batch_first"])?;
+            Ok(LayerSpec::MultiheadAttentionConfig {
+                embed_dim: p.usize("embed_dim")?,
+                num_heads: p.usize("num_heads")?,
+                bias: p.bool("bias")?,
+                batch_first: p.bool("batch_first")?,
+            })
+        }
         "transformer_encoder" => {
             let p = Params::new(params, &["d_model", "num_heads", "dim_feedforward"])?;
             Ok(LayerSpec::TransformerEncoder {
@@ -3218,7 +3259,7 @@ mod tests {
         ));
     }
 
-    /// 50 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 51 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3345,6 +3386,12 @@ mod tests {
                 embed_dim: 8,
                 num_heads: 2,
             },
+            LayerSpec::MultiheadAttentionConfig {
+                embed_dim: 8,
+                num_heads: 2,
+                bias: false,
+                batch_first: false,
+            },
             LayerSpec::TransformerEncoder {
                 d_model: 8,
                 num_heads: 2,
@@ -3444,7 +3491,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 50, "kind allowlist は 50 種: {kinds:?}");
+        assert_eq!(kinds.len(), 51, "kind allowlist は 51 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3462,9 +3509,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 50 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 51 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("50 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("51 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3472,7 +3519,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("50 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("51 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -3899,7 +3946,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("50 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("51 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

@@ -198,6 +198,46 @@ fn metal_multihead_attention_matches_cpu() {
     run_multihead_attention_parity(Device::Metal);
 }
 
+// --- add_multihead_attention_with_config（イシュー #2530。bias=false・batch_first=false） ---
+
+/// `[L, B, E] = [3, 2, 4]` 入力で config 付き MHA の forward が CPU と一致することを
+/// 確認する（新規カーネルなし。`MultiheadAttention::from_config` は既存 `Op` の合成）。
+fn run_multihead_attention_config_parity(device: Device) {
+    let cfg = fandhe_ai::compat::MultiheadAttentionConfig::new(4, 2)
+        .with_bias(false)
+        .with_batch_first(false);
+    let model = Sequential::new()
+        .add_multihead_attention_with_config(cfg, SEED2)
+        .unwrap();
+    let x = tensor(
+        (0..3 * 2 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
+        &[3, 2, 4],
+    );
+    let cpu_out = model.predict(&x).unwrap();
+    let tape = fandhe_ai::tape_for(device)
+        .expect("実機必須（本テストは #[ignore]。実行時は事前に到達確認する）");
+    let xv = tape.var(&x);
+    let device_out = model.forward(&tape, &xv).unwrap().to_tensor();
+    assert_parity(
+        "compat::Sequential(add_multihead_attention_with_config) device vs CPU",
+        &dense(&device_out),
+        &dense(&cpu_out),
+    );
+}
+
+#[test]
+#[ignore = "CUDA 実機必須。実測は docs/perf/logs/mha-config-sequential-2530/README.md へ申し送り"]
+fn cuda_multihead_attention_config_matches_cpu() {
+    run_multihead_attention_config_parity(Device::Cuda(0));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機必須。実測は docs/perf/logs/mha-config-sequential-2530/README.md へ申し送り"]
+fn metal_multihead_attention_config_matches_cpu() {
+    run_multihead_attention_config_parity(Device::Metal);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）必須。実行は #2068 の申し送り先（Mac セッション）へ \

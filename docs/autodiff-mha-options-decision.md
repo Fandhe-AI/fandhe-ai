@@ -93,12 +93,11 @@ green を維持する（既存 CI テストが後退非退行の根拠）。
 embed_dim`）を渡すと `InvalidArgument` で拒否する（無言で batch-first
 解釈しない）。
 
-## 承認事項（facade 公開は保留）
+## 承認事項（#2530 で facade 公開済み）
 
-以下は本 PR では実施していない。承認まで
-`crates/facade/src/lib.rs::MhaOptionsHoldDoctestGuard`（正のプローブ
-doctest）・`crates/facade/tests/api_surface.rs` の否定ガード（ソース
-走査）で固定する。
+#2163 の PR では実施せず、`MhaOptionsHoldDoctestGuard`（正のプローブ
+doctest）・`api_surface.rs` の否定ガードで保留固定していた。ルート #2499 の
+一括承認（2026-10-04）を受け、#2530 で実施した（下記「実装記録（#2530）」）。
 
 1. `compat::Sequential` へのオプション付き MHA 追加メソッド（例:
    `add_multihead_attention_with_config(config, seed)`）の facade 公開
@@ -106,6 +105,44 @@ doctest）・`crates/facade/tests/api_surface.rs` の否定ガード（ソース
 
 承認後は本ガード（`MhaOptionsHoldDoctestGuard`・対応する否定ガード）を
 削除し、正の実装へ置き換える。
+
+## 実装記録（#2530・ルート #2499）
+
+- **公開した名前と配置**: `fandhe_ai::compat::MultiheadAttentionConfig`
+  （`compat/mod.rs` の `pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;`
+  1 行・別名なし）と `compat::Sequential::add_multihead_attention_with_config(self,
+  config, seed) -> Result<Self, AutodiffError>`。承認形は 2 点のみで、再エクスポートの
+  配置（モジュールパス）は記録に定めがなく本イシューで判断した。`nn/mod.rs` は
+  `pub use` 集合が完全一致で固定され「nn 層は `Sequential::add_*` 経由で到達する契約」の
+  ため避け、メソッドの引数型であり `FitConfig`／`AmpConfig` の先例がある `compat` に置いた。
+- **kdim/vdim の拒否**: Sequential の `Module::forward` は self-attention
+  （`q = k = v = input`）固定で、`k_proj: [kdim, E]` は `[.., E]` を受けられない。
+  使えないのに保存できる層を作らないよう、`kdim`/`vdim != embed_dim` は追加時に
+  `InvalidArgument` で拒否する。Sequential で選べるのは `bias`・`batch_first`。
+  `key_padding_mask` は呼び出し時オプションで本 API の対象外。
+- **manifest**: 新 kind `multihead_attention_config`（params は `embed_dim`・
+  `num_heads`・`bias`・`batch_first` の固定 4 キー）を追加（kind 50 → 51 種）。既存 kind
+  `multihead_attention` のスキーマ・`add_multihead_attention` の挙動は不変。
+  `format_version` は #2714 の `compiled.loss` 拡張と同じく据え置き。
+- **学習・推論経路**: 構築した層は `MultiheadAttention` そのもので既存の
+  `as_multihead_attention` フックに結線済みのため、`bind`／`trainable_parameters`／
+  `apply_parameters`／`SequentialVars::forward` は追加実装なしで `bias=false`・
+  `batch_first=false` を保つ。facade の `nn::Module` trait にメソッドは追加しない。
+  resident は既存どおり `Unsupported`。AMP（低精度 forward）は非既定 config を
+  `InvalidArgument` で拒否する（`compile_with_amp` 後の `fit` が `Err`）。
+  ONNX export は従来どおり MHA を `UnsupportedLayer` で拒否する。
+- **ガードの反転（旧 → 新）**:
+  - `MhaOptionsHoldDoctestGuard`（lib.rs）→ 撤去（`MIN_KNOWN_PROBE_BLOCKS` 22 → 21）
+  - `mha_options_hold_doctest_*`・`MHA_OPTIONS_HOLD_PROBE_BODY` → 撤去
+  - `compat_sequential_does_not_expose_mha_options_add_methods`（と自己テスト）→
+    `compat_sequential_declares_mha_options_add_method_exactly_once`（と自己テスト）
+  - `facade_does_not_reexport_multihead_attention_config` →
+    `facade_reexports_multihead_attention_config_only_from_compat`（と自己テスト）・
+    `multihead_attention_config_is_reachable_via_facade_only`
+- **検証**: `cargo test -p fandhe-ai --test api_surface --test compat_sequential_mha_config
+  --test compat_sequential_model_io --test compat_sequential_model_io_layers`、
+  `cargo test -p fandhe-ai --lib compat::model_io`。CUDA／Metal 実機 parity は
+  `#[ignore]` で未実測（`docs/perf/logs/mha-config-sequential-2530/README.md`）。
 
 ## スコープ外
 

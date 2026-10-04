@@ -13393,163 +13393,164 @@ fn facade_reexports_embedding_bag_mode_only_in_approved_shape_detects_each_categ
 }
 
 // =====================================================================
-// イシュー #2163（親 #2131）: MultiheadAttention のオプション
-// （batch_first・kdim/vdim・key_padding_mask）の facade 公開保留を
-// 検査するテスト群。`MhaOptionsHoldDoctestGuard`（`src/lib.rs`）の
-// 正のプローブ 1 ブロック方式のドリフト検査に加え、
-// `compat::Sequential::add_multihead_attention_with_config` の
-// 非宣言・`MultiheadAttentionConfig` の facade 非再エクスポートを持つ。
-// 承認事項の位置づけは `docs/autodiff-mha-options-decision.md` 参照。
+// イシュー #2530（ルート #2499 の一括承認）: MultiheadAttention の
+// オプション（`MultiheadAttentionConfig`）の facade 公開を固定する正ガード群。
+// 旧保留ガード（#2163。`MhaOptionsHoldDoctestGuard`・否定ガード）を反転した
+// もので、公開面は承認形の 2 点（`compat::MultiheadAttentionConfig` の
+// 再エクスポート 1 件・`compat::Sequential::add_multihead_attention_with_config`
+// 1 件）に限り完全一致で固定する。根拠は `docs/autodiff-mha-options-decision.md`。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `MhaOptionsHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`conv3d_hold_doctest_globs_all_pub_modules` の `MhaOptionsHoldDoctestGuard`
-/// 版）。
-#[test]
-fn mha_options_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "MhaOptionsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "MhaOptionsHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
-         いる（declared={declared:?}, doctest={globbed:?}）。新しい pub\
-         mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
+/// `src/compat` 配下の `fn add_multihead_attention_with_config` 宣言の
+/// 件数と、宣言ファイルの相対パス一覧を返す（トークン単位。コメント・
+/// 文字列中の同名テキストは数えない）。
+fn mha_options_add_method_declarations(files: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let n = count_fn_declarations_by_name(&tokens, "add_multihead_attention_with_config");
+        for _ in 0..n {
+            found.push(rel.clone());
+        }
+    }
+    found
 }
 
-/// [`mha_options_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`MHA_OPTIONS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
-/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
-/// する改変を機械的に拒否する）。
+/// `add_multihead_attention_with_config` がちょうど 1 件・
+/// `compat/sequential.rs` で宣言されていること（0 件・2 件以上・別ファイルは
+/// fail-closed で失敗）。
 #[test]
-fn mha_options_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "MhaOptionsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, MHA_OPTIONS_HOLD_PROBE_BODY,
-        "MhaOptionsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 MHA_OPTIONS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_mha_options_hold_probe モジュール・\
-         __FandheMhaOptionsAddProbe トレイト・__probe 関数）の削除・\
-         弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`mha_options_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `MhaOptionsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行を除いた本文と 1 行単位で完全一致
-/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
-/// 含む）。
-const MHA_OPTIONS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_mha_options_hold_probe {\n\
-\x20\x20\x20\x20pub struct MultiheadAttentionConfig;\n\
-}\n\
-use __fandhe_mha_options_hold_probe::*;\n\
-\n\
-struct __FandheMhaOptionsMarker;\n\
-\n\
-trait __FandheMhaOptionsAddProbe {\n\
-\x20\x20\x20\x20fn add_multihead_attention_with_config(&self) -> __FandheMhaOptionsMarker;\n\
-}\n\
-\n\
-impl __FandheMhaOptionsAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_multihead_attention_with_config(&self) -> __FandheMhaOptionsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheMhaOptionsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe(_: MultiheadAttentionConfig, seq: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandheMhaOptionsMarker =\n\
-\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::add_multihead_attention_with_config(seq);\n\
-}";
-
-/// `src/compat` 配下に `add_multihead_attention_with_config` の
-/// `pub fn` 宣言が存在しないことを固定する（イシュー #2163。
-/// `compat_sequential_does_not_expose_spatial_layer_add_methods` と
-/// 同型。`docs/autodiff-mha-options-decision.md` §承認事項が未承認の
-/// まま対象外としている設計判断の固定）。
-#[test]
-fn compat_sequential_does_not_expose_mha_options_add_methods() {
+fn compat_sequential_declares_mha_options_add_method_exactly_once() {
     let compat_dir = facade_crate_root().join("src/compat");
-    let forbidden = ["add_multihead_attention_with_config"];
-    let mut offenses = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     visit_rs_files(&compat_dir, &mut |path, content| {
-        for name in forbidden {
-            if contains_pub_fn_declaration(content, name) {
-                offenses.push(format!("{}: pub fn {name}", path.display()));
-            }
-        }
+        let rel = path
+            .strip_prefix(&compat_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
     });
-    assert!(
-        offenses.is_empty(),
-        "src/compat 配下に MHA オプション付き構築 add_* が見つかった\
-         （承認スコープ〈#2163〉は Sequential への追加を認めていない）: \
-         {offenses:?}"
+    assert_eq!(
+        mha_options_add_method_declarations(&files),
+        vec!["sequential.rs".to_string()],
+        "add_multihead_attention_with_config は compat/sequential.rs の 1 件のみ（イシュー #2530）"
     );
 }
 
-/// [`compat_sequential_does_not_expose_mha_options_add_methods`] の
-/// 自己テスト（合成入力で検出できることを確認する）。
+/// [`compat_sequential_declares_mha_options_add_method_exactly_once`] の
+/// 自己テスト（0 件・2 重宣言・別ファイル宣言・コメント内を区別できること）。
 #[test]
-fn compat_sequential_does_not_expose_mha_options_add_methods_detects_offense() {
-    assert!(contains_pub_fn_declaration(
-        "pub fn add_multihead_attention_with_config(&mut self, c: MultiheadAttentionConfig) {}",
-        "add_multihead_attention_with_config"
-    ));
-    assert!(!contains_pub_fn_declaration(
-        "pub fn add_multihead_attention(&mut self, e: usize, h: usize) {}",
-        "add_multihead_attention_with_config"
-    ));
+fn compat_sequential_declares_mha_options_add_method_detects_offense() {
+    let decl = "impl S { pub fn add_multihead_attention_with_config(self) {} }";
+    let files = vec![
+        ("sequential.rs".to_string(), decl.to_string()),
+        ("other.rs".to_string(), decl.to_string()),
+        (
+            "doc.rs".to_string(),
+            "// fn add_multihead_attention_with_config(self) {}".to_string(),
+        ),
+        ("dup.rs".to_string(), format!("{decl} {decl}")),
+    ];
+    assert_eq!(
+        mha_options_add_method_declarations(&files),
+        vec!["sequential.rs", "other.rs", "dup.rs", "dup.rs"]
+    );
+    assert!(mha_options_add_method_declarations(&[]).is_empty());
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、`MultiheadAttentionConfig`
-/// を参照する `pub use`（モジュール再エクスポート・別名含む）が存在
-/// しないことを固定する（`MhaOptionsHoldDoctestGuard` の正のプローブと
-/// 多層防御を成す最内層のソース走査ガード。
-/// `facade_declares_conv3d_names_only_in_approved_form` と同型）。
-#[test]
-fn facade_does_not_reexport_multihead_attention_config() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("pub use")
-                && line_contains_identifier(trimmed, "MultiheadAttentionConfig")
+/// `MultiheadAttentionConfig` を識別子として含む `pub use` 文（`;` 終端まで）
+/// を `(ファイル相対パス, 空白なしトークン連結)` で全件返す。facade 独自の
+/// `struct`／`type`／`enum` 宣言は `(ファイル, "<decl>")` として返す。
+fn mha_config_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for (i, t) in tokens.iter().enumerate() {
+            if matches!(t.as_str(), "struct" | "enum" | "type" | "union")
+                && tokens.get(i + 1).map(String::as_str) == Some("MultiheadAttentionConfig")
             {
-                offending.push(format!(
-                    "{}: `{trimmed}` が `MultiheadAttentionConfig` を識別子単位で含む",
-                    path.display()
-                ));
+                out.push((rel.clone(), "<decl>".to_string()));
+            }
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                let stmt = &tokens[i + 2..end];
+                if stmt.iter().any(|x| x == "MultiheadAttentionConfig") {
+                    out.push((rel.clone(), stmt.concat()));
+                }
             }
         }
+    }
+    out
+}
+
+/// facade src 全体で `MultiheadAttentionConfig` の公開は
+/// `compat/mod.rs` の `pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;`
+/// ちょうど 1 件（別名・グループ化・別ファイル・独自型宣言はすべて拒否）。
+#[test]
+fn facade_reexports_multihead_attention_config_only_from_compat() {
+    let src_dir = facade_crate_root().join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
     });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面が MultiheadAttentionConfig（イシュー #2163 の\
-         autodiff クレート限定新規公開面。facade 再エクスポート・\
-         compat::Sequential へのオプション付き追加メソッドはいずれも\
-         承認待ちのため対象外という設計判断に違反）を再エクスポート\
-         している: {offending:?}"
+    assert_eq!(
+        mha_config_exposures(&files),
+        vec![(
+            "compat/mod.rs".to_string(),
+            "fandhe_ai_autodiff::nn::MultiheadAttentionConfig".to_string()
+        )],
+        "MultiheadAttentionConfig の facade 公開は compat/mod.rs の承認形 1 件のみ（イシュー #2530）"
     );
+}
+
+/// [`facade_reexports_multihead_attention_config_only_from_compat`] の自己テスト。
+#[test]
+fn facade_reexports_multihead_attention_config_detects_offense() {
+    let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
+    let ok = "pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;";
+    assert_eq!(
+        mha_config_exposures(&f("compat/mod.rs", ok)),
+        vec![(
+            "compat/mod.rs".to_string(),
+            "fandhe_ai_autodiff::nn::MultiheadAttentionConfig".to_string()
+        )]
+    );
+    for bad in [
+        "pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig as Cfg;",
+        "pub use fandhe_ai_autodiff::nn::{Linear, MultiheadAttentionConfig};",
+        "pub struct MultiheadAttentionConfig;",
+    ] {
+        let got = mha_config_exposures(&f("compat/mod.rs", bad));
+        assert_eq!(got.len(), 1, "{bad}");
+        assert_ne!(
+            got[0].1, "fandhe_ai_autodiff::nn::MultiheadAttentionConfig",
+            "{bad}"
+        );
+    }
+    assert!(mha_config_exposures(&f("a.rs", "// pub use x::MultiheadAttentionConfig;")).is_empty());
+}
+
+/// 公開面だけで（`fandhe_ai::compat` のみ import）config を作り、
+/// `add_multihead_attention_with_config` → `predict` まで通る（実行時の正プローブ）。
+#[test]
+fn multihead_attention_config_is_reachable_via_facade_only() {
+    use fandhe_ai::compat::{MultiheadAttentionConfig, Sequential};
+    let cfg = MultiheadAttentionConfig::new(4, 2).with_bias(false);
+    let model = Sequential::new()
+        .add_multihead_attention_with_config(cfg, 1)
+        .expect("承認形の公開面で構築できる");
+    assert_eq!(model.trainable_parameters().len(), 4);
 }
 // =====================================================================
 // イシュー #2160（親 #2131）: AdaptiveMaxPool2d／AdaptiveMaxPool1d／
@@ -14101,14 +14102,14 @@ fn __probe(\n\
 // `TransformerDecoderHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、`compat::Sequential::
 // add_transformer_decoder_layer`／`add_transformer` の非宣言を持つ
-// （`mha_options_hold_doctest_*` と同型）。承認事項の位置づけは
+// （旧 `mha_options_hold_doctest_*`〈#2530 で撤去済み〉と同型）。承認事項の位置づけは
 // `docs/autodiff-transformer-decoder-decision.md` 参照。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `TransformerDecoderHoldDoctestGuard`
 /// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
 /// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`mha_options_hold_doctest_globs_all_pub_modules` の
+/// 固定する（旧 `mha_options_hold_doctest_globs_all_pub_modules`〈#2530 で撤去済み〉 の
 /// `TransformerDecoderHoldDoctestGuard` 版）。
 #[test]
 fn transformer_decoder_hold_doctest_globs_all_pub_modules() {
@@ -14196,7 +14197,7 @@ fn __probe(_: TransformerDecoderLayer, _: Transformer, seq: &fandhe_ai::compat::
 
 /// `src/compat` 配下に `add_transformer_decoder_layer`／
 /// `add_transformer` の `pub fn` 宣言が存在しないことを固定する
-/// （イシュー #2165。`compat_sequential_does_not_expose_mha_options_add_methods`
+/// （イシュー #2165。旧 `compat_sequential_does_not_expose_mha_options_add_methods`〈#2530 で反転〉
 /// と同型。`docs/autodiff-transformer-decoder-decision.md` §承認事項が
 /// 未承認のまま対象外としている設計判断の固定）。`contains_pub_fn_declaration`
 /// は識別子境界で判定するため、既存の `add_transformer_encoder`
@@ -17925,10 +17926,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519 の保留ガード削除後は 22）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519・#2530 の保留ガード削除後は 21）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 22;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 21;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\
