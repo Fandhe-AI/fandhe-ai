@@ -285,7 +285,7 @@ declares_linalg_ops_fn_names_only_in_approved_locations`（定義元インベン
 `autodiff/src/var.rs` の各 1 件を承認形として許容）③`var_linalg_ops_methods_are_
 thin_delegations`（本体を 1 行委譲に固定し入口検証の迂回を拒否）④`var_linalg_ops_
 are_reachable_via_facade_only`（facade 経由のシグネチャ・pub フィールド・動作固定）。
-`hold_doctest_probe_blocks_reference_every_glob_imported_item` の下限は 28 から 27
+`hold_doctest_probe_blocks_reference_every_glob_imported_item` の下限は 26 から 25
 へ更新した。
 
 ## §7 実装記録
