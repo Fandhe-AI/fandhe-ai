@@ -4117,6 +4117,34 @@ impl<'t> Var<'t> {
         out4.reshape(&[n, c, lout])
     }
 
+    /// 2 次元 adaptive max pooling（PyTorch `F.adaptive_max_pool2d(...,
+    /// return_indices=True)` 相当。NCHW 固定。イシュー #2527・設計
+    /// `docs/autodiff-adaptive-max-global-pool-decision.md` §8）。
+    /// 戻り値は `(values, index)` で、`index` は `(n, c)` 平面内の flat
+    /// 添字 `h·W+w`（[`Self::max_pool2d`] と同じ意味論）。
+    ///
+    /// `self`: `[N, C, H, W]`・`output_size: [Hout, Wout]`。rank 不一致・
+    /// `output_size` の 0・空間軸ゼロ・`H·W > i32::MAX` は `Err`。検査は
+    /// tape 操作より前に完了するため `Err` で孤児ノードを残さない。
+    /// 本体は非公開モジュール `adaptive_max_pool_ops` の共有 forward
+    /// （`nn::AdaptiveMaxPool2d` と共通）への 1 行委譲。
+    pub fn adaptive_max_pool2d(
+        &self,
+        output_size: [usize; 2],
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::adaptive_max_pool_ops::adaptive_max_pool2d(self, output_size)
+    }
+
+    /// 1 次元 adaptive max pooling（[`Self::adaptive_max_pool2d`] の `H`
+    /// 軸固定版。イシュー #2527）。`self`: `[N, C, L]`。`index` は `l`
+    /// 軸の flat 添字。エラー条件・検査順序は 2d 版と同じ。
+    pub fn adaptive_max_pool1d(
+        &self,
+        output_size: usize,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::adaptive_max_pool_ops::adaptive_max_pool1d(self, output_size)
+    }
+
     /// 指定した各長さ（`sizes`）で `dim` 軸を分割する（`torch.split`
     /// の list 形式相当。イシュー #1598）。各出力は [`Self::narrow`]
     /// （zero-copy view）。

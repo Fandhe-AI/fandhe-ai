@@ -7,7 +7,7 @@
 //! #2374 の正常系 bit 一致行列）。
 //!
 //! `mod roundtrip_matrix`（#2374）は `docs/compat-model-io-decision.md` §6 の正常系を
-//! 「アーキテクチャ（39 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
+//! 「アーキテクチャ（42 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
 //! 6 optimizer × AMP・GradScaler 非初期・Lbfgs 履歴 未満／到達済み）」の直積で固定し、全セルで
 //! 再保存したファイルのバイト一致を検査する。単一軸の深掘りは `compat_sequential_model_io_{layers,
 //! batch_norm,compiled,lbfgs}.rs` が担う（対応表は同 doc §6.1）。
@@ -469,12 +469,12 @@ mod roundtrip_matrix {
         AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, LbfgsConfig,
         RmsPropConfig, SgdConfig,
     };
-    use fandhe_ai::{AutodiffError, InterpolateMode, Tensor};
+    use fandhe_ai::{AutodiffError, GlobalPoolMode, InterpolateMode, Tensor};
 
     use crate::common::temp_dir::TempDirGuard;
 
-    /// allowlist の 39 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-    const ALL_KINDS: [&str; 39] = [
+    /// allowlist の 42 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+    const ALL_KINDS: [&str; 42] = [
         "linear",
         "relu",
         "sigmoid",
@@ -507,6 +507,9 @@ mod roundtrip_matrix {
         "avg_pool1d",
         "adaptive_avg_pool2d",
         "adaptive_avg_pool1d",
+        "adaptive_max_pool2d",
+        "adaptive_max_pool1d",
+        "global_pool",
         "upsample",
         "zero_pad2d",
         "identity",
@@ -605,8 +608,10 @@ mod roundtrip_matrix {
             .add_conv2d(4, 4, [1, 1], [1, 1], [0, 0], [1, 1], 2, 22)?
             .add_avg_pool2d([2, 2], Some([1, 1]), [1, 1], true)?
             .add_adaptive_avg_pool2d([2, 2])?
+            .add_adaptive_max_pool2d([2, 2])?
             .add_max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1])?
             .add_avg_pool2d([1, 1], None, [0, 0], false)?
+            .add_global_pool(GlobalPoolMode::Avg, true)
             .add_flatten(1, 3)
             .add_linear(4, 3, 23)?;
         m.eval();
@@ -635,8 +640,9 @@ mod roundtrip_matrix {
             .add_max_pool1d(2, Some(2), 0, 1)?
             .add_avg_pool1d(1, None, 0, false)?
             .add_adaptive_avg_pool1d(2)?
-            .add_flatten(1, 2)
-            .add_linear(8, 2, 32)?;
+            .add_adaptive_max_pool1d(2)?
+            .add_global_pool(GlobalPoolMode::Max, false)
+            .add_linear(4, 2, 32)?;
         m.eval();
         Ok(m)
     }
@@ -927,7 +933,7 @@ mod roundtrip_matrix {
 
     // -- テスト ---------------------------------------------------------------
 
-    /// A-30 × eval: 39 種の kind の和集合（未 compile）。
+    /// A-30 × eval: 42 種の kind の和集合（未 compile）。
     #[test]
     fn matrix_thirty_kinds_eval_round_trip_and_resave_identical() {
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -963,7 +969,7 @@ mod roundtrip_matrix {
             seen.extend(check_cell(label, &mut model, &input, None));
         }
         let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-        assert_eq!(seen, expected, "39 種の kind をすべて往復させたはず");
+        assert_eq!(seen, expected, "42 種の kind をすべて往復させたはず");
     }
 
     /// A-deep × {eval, train 後の BN}: train モードで predict を回し running stats を動かした状態。

@@ -10,7 +10,8 @@
 //! LeakyRelu/Elu/Dropout・Conv2d/Conv1d〈#1770〉・LayerNorm/RmsNorm/
 //! BatchNorm1d/BatchNorm2d/Embedding/MultiheadAttention〈#1760〉・
 //! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
-//! AdaptiveAvgPool1d〈#1957〉・Softmax/LogSoftmax・
+//! AdaptiveAvgPool1d〈#1957〉・AdaptiveMaxPool2d/AdaptiveMaxPool1d/
+//! GlobalPool〈#2527〉・Softmax/LogSoftmax・
 //! GELU（誤差関数版・tanh 近似版）/Softplus・Flatten〈#2065 で
 //! `add_softmax`／`add_log_softmax`／`add_gelu`／`add_gelu_tanh`／
 //! `add_softplus`／`add_flatten` として追加済み〉）。`Dropout` は
@@ -106,23 +107,23 @@ use crate::inference::batch::{
     LoaderInferenceInput, TimingPhaseRecorder, merge_inference_phase_stats,
 };
 use crate::{
-    AutodiffError, BackendError, DeviceParamStore, Gradients, InterpolateMode, LinearVars,
-    ResidentLeaf, Tape, Tensor, Var,
+    AutodiffError, BackendError, DeviceParamStore, GlobalPoolMode, Gradients, InterpolateMode,
+    LinearVars, ResidentLeaf, Tape, Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
     Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
     Tanh,
 };
 use fandhe_ai_autodiff::nn::{
-    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d,
-    BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
-    ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, Dropout, Embedding, EmbeddingVars,
-    FeedForwardActivation, Flatten, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS,
-    LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention,
-    MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
-    Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten,
-    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
-    multihead_attention_forward_low_precision,
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
+    AvgPool2d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars,
+    Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars,
+    Dropout, Embedding, EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm,
+    Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d,
+    MaxPool2d, Module, MultiheadAttention, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle,
+    RmsNorm, RmsNormVars, Sequential as NnSequential, TransformerEncoderLayer,
+    TransformerEncoderLayerVars, Unflatten, Upsample, ZeroPad2d, conv2d_forward_low_precision,
+    linear_forward_low_precision, multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -174,7 +175,7 @@ pub struct Sequential {
 
 /// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
 ///
-/// `add_*` 39 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
+/// `add_*` 42 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
 /// `add_*` を呼んで再構築する（イシュー #2369・#2370。`docs/compat-model-io-decision.md`
 /// §5）。`add_*` の内部で固定している値（conv／linear の `bias=true`・pool の
 /// `ceil_mode=false`・TE の活性化と eps 等）は記録しない（同じ `add_*` が再現するため）。
@@ -318,6 +319,19 @@ pub(super) enum LayerSpec {
     },
     AdaptiveAvgPool1d {
         output_size: usize,
+    },
+    /// イシュー #2527。
+    AdaptiveMaxPool2d {
+        output_size: [usize; 2],
+    },
+    /// イシュー #2527。
+    AdaptiveMaxPool1d {
+        output_size: usize,
+    },
+    /// イシュー #2527。
+    GlobalPool {
+        mode: GlobalPoolMode,
+        keepdims: bool,
     },
     Upsample {
         size: Vec<usize>,
@@ -1189,6 +1203,75 @@ impl Sequential {
         self.specs
             .push(LayerSpec::AdaptiveAvgPool1d { output_size });
         Ok(self)
+    }
+
+    /// 2 次元 AdaptiveMaxPool 層を追加する（`nn::AdaptiveMaxPool2d`。イシュー #2527）。
+    /// 入力 `[N, C, H, W]` → 出力 `[N, C, Hout, Wout]`（PyTorch `nn.AdaptiveMaxPool2d`
+    /// 相当。forward は値のみを返し、索引が要る場合は [`crate::Var::adaptive_max_pool2d`]）。
+    /// `output_size` に `0` を含む場合は `AutodiffError`。学習可能パラメータを持たない
+    /// 無状態層のため学習経路をそのまま通過し、常駐経路は Pooling 層として `Unsupported`
+    /// で fail-closed に拒否され、`save_model`／`load_model` に対応する。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_adaptive_max_pool2d([2, 2])?;
+    /// let x = Tensor::new((0..16).map(|v| v as f32).collect::<Vec<_>>(), &[1, 1, 4, 4])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[1, 1, 2, 2]);
+    /// assert_eq!(y.host_slice().into_owned(), [5.0, 7.0, 13.0, 15.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_adaptive_max_pool2d(
+        mut self,
+        output_size: [usize; 2],
+    ) -> Result<Self, AutodiffError> {
+        let layer = AdaptiveMaxPool2d::new(output_size)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::AdaptiveMaxPool2d { output_size });
+        Ok(self)
+    }
+
+    /// 1 次元 AdaptiveMaxPool 層を追加する（`nn::AdaptiveMaxPool1d`。イシュー #2527）。
+    /// 入力は `NCL`（rank 3）。`output_size` が `0` の場合は `AutodiffError`。
+    /// 学習・常駐・保存経路の扱いは [`Sequential::add_adaptive_max_pool2d`] と同じ。
+    pub fn add_adaptive_max_pool1d(mut self, output_size: usize) -> Result<Self, AutodiffError> {
+        let layer = AdaptiveMaxPool1d::new(output_size)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::AdaptiveMaxPool1d { output_size });
+        Ok(self)
+    }
+
+    /// GlobalPool 層を追加する（`nn::GlobalPool`。イシュー #2527）。空間軸全体を
+    /// 単一値へ縮約する（Keras `GlobalAveragePooling*`／`GlobalMaxPooling*`・ONNX
+    /// `GlobalAveragePool`／`GlobalMaxPool` 相当）。rank 3・rank 4 を受理し、
+    /// `keepdims = true` は空間軸を `1` のまま残し（`[N,C,1]`／`[N,C,1,1]`）、
+    /// `false` は `[N,C]` へ潰す。構築は失敗しないため `Self` を返す
+    /// （[`Sequential::add_identity`] と同型）。rank の検査は forward 時に行う。
+    /// 学習・常駐・保存経路の扱いは [`Sequential::add_adaptive_max_pool2d`] と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::{GlobalPoolMode, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_global_pool(GlobalPoolMode::Max, false);
+    /// let x = Tensor::new((0..8).map(|v| v as f32).collect::<Vec<_>>(), &[1, 2, 2, 2])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[1, 2]);
+    /// assert_eq!(y.host_slice().into_owned(), [3.0, 7.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_global_pool(mut self, mode: GlobalPoolMode, keepdims: bool) -> Self {
+        self.inner.push(Box::new(GlobalPool::new(mode, keepdims)));
+        self.specs.push(LayerSpec::GlobalPool { mode, keepdims });
+        self
     }
 
     /// Upsample 層を追加する（`nn::Upsample::with_size`。イシュー #2522・

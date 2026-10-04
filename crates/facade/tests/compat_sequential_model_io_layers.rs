@@ -1,8 +1,8 @@
-//! `fandhe_ai::compat::{save_model, load_model}` の全 39 層対応（イシュー #2370・親 #2362）の
+//! `fandhe_ai::compat::{save_model, load_model}` の全 42 層対応（イシュー #2370・親 #2362）の
 //! 統合テスト。facade の公開 API と `std` のみで次の受入基準を検証する。
 //!
-//! - (a) 39 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
-//!   `predict` 出力が bit 一致する（39 種の網羅は保存した manifest の `kind` 集合で検査する）。
+//! - (a) 42 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
+//!   `predict` 出力が bit 一致する（42 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
@@ -16,13 +16,13 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use fandhe_ai::compat::{ModelIoError, Sequential, load_model, save_model};
-use fandhe_ai::{AutodiffError, InterpolateMode, Tensor};
+use fandhe_ai::{AutodiffError, GlobalPoolMode, InterpolateMode, Tensor};
 
 mod common;
 use common::temp_dir::TempDirGuard;
 
-/// allowlist の 39 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-const ALL_KINDS: [&str; 39] = [
+/// allowlist の 42 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+const ALL_KINDS: [&str; 42] = [
     "linear",
     "relu",
     "sigmoid",
@@ -55,6 +55,9 @@ const ALL_KINDS: [&str; 39] = [
     "avg_pool1d",
     "adaptive_avg_pool2d",
     "adaptive_avg_pool1d",
+    "adaptive_max_pool2d",
+    "adaptive_max_pool1d",
+    "global_pool",
     "upsample",
     "zero_pad2d",
     "identity",
@@ -142,7 +145,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------
-// (a) 39 種の bit 一致
+// (a) 42 種の bit 一致
 // ---------------------------------------------------------------------
 
 /// rank 2 入力 `[3, 6]`: 活性化・正規化・dropout・BatchNorm1d（rank 2）・softmax 系。
@@ -189,8 +192,10 @@ fn cnn_model() -> Built {
         .add_conv2d(4, 4, [1, 1], [1, 1], [0, 0], [1, 1], 2, 22)?
         .add_avg_pool2d([2, 2], Some([1, 1]), [1, 1], true)?
         .add_adaptive_avg_pool2d([2, 2])?
+        .add_adaptive_max_pool2d([2, 2])?
         .add_max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1])?
         .add_avg_pool2d([1, 1], None, [0, 0], false)?
+        .add_global_pool(GlobalPoolMode::Avg, true)
         .add_flatten(1, 3)
         .add_linear(4, 3, 23)?;
     m.eval();
@@ -220,8 +225,9 @@ fn cnn1d_model() -> Built {
         .add_max_pool1d(2, Some(2), 0, 1)?
         .add_avg_pool1d(1, None, 0, false)?
         .add_adaptive_avg_pool1d(2)?
-        .add_flatten(1, 2)
-        .add_linear(8, 2, 32)?;
+        .add_adaptive_max_pool1d(2)?
+        .add_global_pool(GlobalPoolMode::Max, false)
+        .add_linear(4, 2, 32)?;
     m.eval();
     Ok(m)
 }
@@ -270,7 +276,7 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
         ));
     }
     let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(seen, expected, "39 種の kind をすべて往復させたはず");
+    assert_eq!(seen, expected, "42 種の kind をすべて往復させたはず");
 }
 
 /// train モードのまま保存・復元しても `training` フラグが往復し、dropout を含む構成で

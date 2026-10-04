@@ -31,11 +31,11 @@ forward の VJP は新規 `Op` を追加せず既存 `crate::tape::Op::MaxPool2d
 
 facade 公開（`compat::Sequential::add_adaptive_max_pool2d`／
 `add_adaptive_max_pool1d`／`add_global_pool`・`Var::adaptive_max_pool2d`／
-`adaptive_max_pool1d` の委譲メソッド）は承認待ちのまま対象外とし、
-`crates/facade/src/lib.rs::AdaptiveMaxGlobalPoolHoldDoctestGuard`
-（正のプローブ doctest）と `crates/facade/tests/api_surface.rs` の
-ソース走査（2 テスト＋ `compat::Sequential` 非公開検査＋自己テスト）
-で多層固定している。
+`adaptive_max_pool1d` の委譲メソッド）は #2160 時点では承認待ちのまま
+対象外とし、`AdaptiveMaxGlobalPoolHoldDoctestGuard` とソース走査で
+多層固定していた。**イシュー #2527（親 #2520・ルート #2499 の一括承認）で
+公開済み**（§8 実装記録。層型の再エクスポート・`Tensor`／`Tape` への
+同名メソッドは未承認のまま保留継続）。
 
 ## §1 背景
 
@@ -198,7 +198,7 @@ GlobalPool の行・命名の指定がないため、次のとおり定めた。
   import／export（#2200 系）・CUDA／Metal 実機での parity 実測
   （perf log へ申し送り）
 
-## §6 承認事項（未承認として列挙）
+## §6 承認事項（#2160 時点の列挙。#2527 で承認・実装済み。§8 参照）
 
 1. facade `compat::Sequential` への `add_adaptive_max_pool2d`／
    `add_global_pool`（必要なら `add_adaptive_max_pool1d` も）の追加
@@ -213,3 +213,60 @@ GlobalPool の行・命名の指定がないため、次のとおり定めた。
 CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に無いため
 `#[ignore]` テストを未実行のまま出荷する。実行コマンド・記入欄は
 `docs/perf/logs/adaptive-max-global-pool-2160/README.md` を参照。
+
+## §8 実装記録（イシュー #2527・親 #2520・ルート #2499 本文「承認範囲」節の一括承認）
+
+§6 の承認事項 1・2 を、ルート #2499（2026-10-04 一括承認: Phase 1〜3 は既存決定記録の推奨形で
+facade 公開を実装してよい）に基づき実装した。§6 は名前だけを挙げ具体シグネチャを定めていなかったため、
+既存の `Var::max_pool2d`／`max_pool1d`・`add_adaptive_avg_pool1d`・`add_identity` の規約から機械的に導出した。
+`fandhe-ai =0.10.0` の公開 API は非破壊（追加のみ）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
+`docs/spec/` は不変。新規 `Op`／`BackendOps`／VJP／GPU カーネルの追加なし。
+
+### 8.1 公開した名前
+
+| 公開面 | シグネチャ |
+|---|---|
+| `Var::adaptive_max_pool2d` | `fn(&self, [usize; 2]) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>`（`adaptive_max_pool_ops` への 1 行委譲） |
+| `Var::adaptive_max_pool1d` | `fn(&self, usize) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>`（同上） |
+| `compat::Sequential::add_adaptive_max_pool2d` | `fn(self, [usize; 2]) -> Result<Self, AutodiffError>` |
+| `compat::Sequential::add_adaptive_max_pool1d` | `fn(self, usize) -> Result<Self, AutodiffError>` |
+| `compat::Sequential::add_global_pool` | `fn(self, GlobalPoolMode, bool) -> Self`（構築が失敗しないため `Self`。`add_identity` と同型） |
+| `fandhe_ai::GlobalPoolMode` | ルートへ `pub use fandhe_ai_autodiff::nn::GlobalPoolMode;` 1 行 |
+
+判断:
+
+- §6 の「必要なら `add_adaptive_max_pool1d` も」は**含める**と解決した（#1957 で avg 系を 1d／2d の対で承認した先例。
+  保留ガードもプローブ済みだった）。
+- `Var` メソッドの戻り値は `Var::max_pool2d`／`max_pool1d` と同じ `(values, index)` 形（index を捨てる別形は作らない）。
+  層経由の forward は値のみを返す。
+- `GlobalPoolMode` は `add_global_pool` の引数型で、公開しないと呼び出せないため、承認した `add_global_pool` から必然的に
+  要る最小限の型公開としてルートへ再エクスポートした（先例: #1757 の `InterpolateMode`）。`AdaptiveMaxPool2d`／
+  `AdaptiveMaxPool1d`／`GlobalPool` の層型は再エクスポートしない（未承認のまま）。
+
+### 8.2 学習・常駐・保存経路
+
+- 3 層とも無状態のため `bind`／`trainable_parameters`／`apply_parameters`／`trainable_vars`／`trainable_grads` は既存走査のまま通過する
+  （コード分岐の追加なし）。
+- 3 型は `Module::is_pooling()` が `true` のため、`contains_resident_unsupported_layer` が常駐経路
+  （`init_device_param_store`／`forward_resident`／`predict_resident`）を `Unsupported` で fail-closed に拒否する（変更なし。テストで固定）。
+- `save_model`／`load_model`: kind `adaptive_max_pool2d`（`output_size_{h,w}`）・`adaptive_max_pool1d`（`output_size`）・
+  `global_pool`（`mode`: `"avg"`／`"max"`・`keepdims`: bool）を追加（allowlist 39 → 42・`format_version` 不変）。
+  `GlobalPoolMode` は `#[non_exhaustive]` のため、未知 variant は保存前に `UnsupportedModel` で拒否し dir に副作用を残さない
+  （`Upsample` の mode と同方式）。
+- `Module` の `as_*` フックは追加していない（`save_model`／`load_model` は `LayerSpec` だけを根拠にし、crates.io 公開済み
+  `fandhe-ai-autodiff` の trait 面を広げないため。#2522・#2526 と同じ意図的な逸脱）。ONNX export は `UnsupportedLayer` で fail-closed。
+
+### 8.3 ガード反転
+
+- `AdaptiveMaxGlobalPoolHoldDoctestGuard` から `Var`・`Sequential` のプローブを撤去し、`Tensor<f32>`／`Tape` の同名メソッド衝突プローブだけを残した。
+- `api_surface.rs` の否定テスト `compat_sequential_does_not_expose_adaptive_max_global_pool_add_methods`（と自己テスト）を削除し、
+  正ガードを新設した: `workspace_declares_adaptive_max_global_pool_facade_fn_names_only_in_approved_locations`（定義元集合）・
+  `var_adaptive_max_pool_methods_are_thin_delegations`・`var_adaptive_max_pool_methods_are_reachable_via_facade_only`・
+  `compat_sequential_adaptive_max_global_pool_add_methods_have_approved_signatures`（＋自己テスト）・
+  `facade_reexports_global_pool_mode_only_in_approved_shape`（＋自己テスト。層型が再エクスポートされないことも検査）。
+
+### 8.4 保留継続
+
+層型の facade 再エクスポート・自由関数公開・`Tensor`／`Tape` への同名メソッド・GPU 専用カーネル・ONNX `GlobalMaxPool`／
+`GlobalAveragePool` の import／export・MaxUnpool・3d 版。CUDA／Metal 実機 parity は
+`docs/perf/logs/compat-sequential-adaptive-max-global-pool-2527/README.md` へ申し送り（未実測）。

@@ -1,20 +1,14 @@
 //! AdaptiveMaxPool（1d／2d。PyTorch `nn.AdaptiveMaxPool2d`／`1d`
 //! 相当。イシュー #2160・設計 `docs/pooling-ops-design.md` §11）。
 //!
-//! **facade 非公開（意図的・保留）**: [`crate::conv3d_ops`] モジュール
-//! doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var`
-//! への inherent メソッド追加は即座に facade 公開面へ出てしまう。
-//! イシュー #2160 は `Var::adaptive_max_pool2d`（委譲メソッド）・
-//! `compat::Sequential::add_adaptive_max_pool2d`（facade 公開）を
-//! 承認事項として明示するが、本 PR 時点で承認の記録が無いため、
-//! `conv3d_ops` よりもさらに一段保守的に、`Var` の外の自由関数
-//! （非 `pub mod`・`pub(crate) fn`）として実装し、`nn::pooling` の
-//! 層のみから呼ばれる経路に限定する（承認前は `Var` への衝突
-//! プローブすら成立させない）。承認後は `Var::adaptive_max_pool2d`
-//! の薄い委譲メソッドと `compat::Sequential::add_adaptive_max_pool2d`
-//! を追加し、facade 側の保留ガード（`crates/facade/src/lib.rs::
-//! AdaptiveMaxGlobalPoolHoldDoctestGuard`）を撤去する。
+//! **公開面（イシュー #2527）**: 本モジュール自体は非 `pub mod`（
+//! `pub(crate) fn`）のまま、`Var::adaptive_max_pool2d`／
+//! `adaptive_max_pool1d`（1 行委譲メソッド）と facade
+//! `compat::Sequential::add_adaptive_max_pool2d`／`add_adaptive_max_pool1d`／
+//! `add_global_pool` が本モジュールの共有 forward を呼ぶ。自由関数
+//! としての公開・層型の再エクスポートは未承認で、facade 側の保留ガード
+//! （`crates/facade/src/lib.rs::AdaptiveMaxGlobalPoolHoldDoctestGuard`）が
+//! 引き続き固定する。
 //!
 //! **既存 `Op` の再利用**: 新規 `Op` は追加しない。forward は
 //! `crate::tape::Op::MaxPool2d { input, index }` をそのまま記録する
@@ -148,4 +142,26 @@ pub(crate) fn adaptive_max_pool1d<'t>(
     let out = out4.reshape(&[n, c, lout])?;
     let index = index.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)?;
     Ok((out, index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tape::Tape;
+
+    /// `Var::adaptive_max_pool2d`／`adaptive_max_pool1d`（イシュー #2527）は検査を tape 操作より
+    /// 前に終えるため、`Err` では孤児ノードを残さない（`Var` 経由は層の `new()` 検査を通らない）。
+    #[test]
+    fn var_methods_reject_invalid_arguments_without_orphan_nodes() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x4 = tape.var(&Tensor::new(vec![0.0_f32; 16], &[1, 1, 4, 4]).unwrap());
+        let x3 = tape.var(&Tensor::new(vec![0.0_f32; 4], &[1, 1, 4]).unwrap());
+        let before = tape.len();
+        assert!(x4.adaptive_max_pool2d([0, 2]).is_err());
+        assert!(x4.adaptive_max_pool2d([2, 0]).is_err());
+        assert!(x3.adaptive_max_pool2d([2, 2]).is_err());
+        assert!(x4.adaptive_max_pool1d(2).is_err());
+        assert!(x3.adaptive_max_pool1d(0).is_err());
+        assert_eq!(tape.len(), before);
+    }
 }

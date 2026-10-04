@@ -257,6 +257,12 @@ pub use fandhe_ai_tensor_core::SvdFactors;
 // （イシュー #1762）追加時も新規公開アイテムは発生しない
 // （`InterpolateMode` 自体の再エクスポートのみで完結する）。
 pub use fandhe_ai_tensor_core::InterpolateMode;
+// `GlobalPoolMode`（イシュー #2527。`compat::Sequential::add_global_pool`
+// の `mode` 引数型。`#[non_exhaustive]`）も 1 文 1 行で再エクスポートする。
+// `GlobalPool` 層型・`AdaptiveMaxPool2d`／`AdaptiveMaxPool1d` 層型の
+// 再エクスポートは未承認のため行わない（`AdaptiveMaxGlobalPoolHoldDoctestGuard`
+// と `tests/api_surface.rs` の正ガードが固定）。
+pub use fandhe_ai_autodiff::nn::GlobalPoolMode;
 // `CastDType`／`CastElement`（イシュー #1750。`Var::cast`／`Tape::
 // var_from` の型境界・dtype タグ）も 1 文 1 行で再エクスポートする
 // （上記コメント「1 文 1 行を維持する」と同じ理由）。`CastOps`（動的
@@ -2312,45 +2318,38 @@ struct SpatialLayersHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarConv3dHoldDoctestGuard;
 
-/// イシュー #2160（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarConv3dHoldDoctestGuard`（イシュー #2158）と同型の「正のプローブ
-/// 1 ブロック方式」だが、`adaptive_max_pool_ops`（`crates/autodiff/src/
-/// adaptive_max_pool_ops.rs`）自体が非 `pub mod`（`Var` の外の自由関数
-/// を `pub(crate)` に留める、`conv3d_ops` よりもさらに一段保守的な設計。
-/// 同モジュール doc 参照）のため、自由関数の衝突プローブ（(a)）は不要
-/// で 2 種類のみを併用する:
+/// イシュー #2160（親 #2131）の facade 公開保留のうち、イシュー #2527
+/// （親 #2520・ルート #2499 の一括承認）の後も残る分を固定する doctest
+/// 足場。`VarConv3dHoldDoctestGuard`（#2524 の縮小形）と同型の「正のプローブ
+/// 1 ブロック方式」を採る。
 ///
-/// (a) `Var`／`Tensor<f32>`／`Tape` への `adaptive_max_pool2d`／
-/// `adaptive_max_pool1d` メソッド衝突プローブ（`__FandheAdaptiveMax
-/// PoolHoldProbe` トレイト。`VarConv3dHoldDoctestGuard` の
-/// `__FandheConv3dHoldProbe` と同方式）。`Var::adaptive_max_pool2d` 等の
-/// inherent メソッドが追加されれば、トレイトメソッドより優先解決される
-/// ため戻り値型が `__FandheAdaptiveMaxPoolMarker` ではなくなり型エラー
-/// になる。
+/// イシュー #2527 で公開済みの `Var::adaptive_max_pool2d`／
+/// `adaptive_max_pool1d`・`compat::Sequential::add_adaptive_max_pool2d`／
+/// `add_adaptive_max_pool1d`／`add_global_pool` のプローブ（inherent メソッド
+/// 追加を trait 経由呼び出しの不一致で検出していた
+/// `__FandheAdaptiveMaxPoolAddProbe` と `__probe_var`／
+/// `__probe_sequential_add`）は撤去した。これらの承認形（定義元集合・1 行
+/// 委譲本体・シグネチャ・実値）は `crates/facade/tests/api_surface.rs` の
+/// 正ガード群（`workspace_declares_adaptive_max_global_pool_facade_fn_names_
+/// only_in_approved_locations` ほか）が固定する。
 ///
-/// (b) `compat::Sequential::add_adaptive_max_pool2d`／
-/// `add_adaptive_max_pool1d`／`add_global_pool` の衝突プローブ（承認
-/// 事項）。`__FandheAdaptiveMaxPoolAddProbe` トレイトを `fandhe_ai::
-/// compat::Sequential` に実装し、**UFCS 形のみ**（`VarConv3dHoldDoctest
-/// Guard` の `__probe_sequential_add` と同じ理由）で呼ぶ。
+/// まだ承認していない `Tensor<f32>`／`Tape` への同名メソッド追加は、
+/// `__FandheAdaptiveMaxPoolHoldProbe` トレイトの衝突プローブ（inherent
+/// メソッドはトレイトメソッドより優先解決されるため、追加されれば戻り値型が
+/// `__FandheAdaptiveMaxPoolMarker` ではなくなり型エラーになる）で引き続き
+/// 禁止する。層型（`AdaptiveMaxPool2d`／`AdaptiveMaxPool1d`／`GlobalPool`）の
+/// facade 再エクスポートは未承認で、`api_surface.rs` の
+/// `facade_reexports_global_pool_mode_only_in_approved_shape` が固定する
+/// （facade の `nn` は `pub mod rnn;` にのみ固定済みのため glob 衝突プローブは
+/// 不要。`GlobalPoolMode` だけがルート再エクスポートの承認対象）。
 ///
-/// facade の `nn` は `pub mod rnn;` にのみ固定済み
-/// （`nn_mod_declares_only_rnn_submodule`）のため、`AdaptiveMaxPool2d`／
-/// `AdaptiveMaxPool1d`／`GlobalPool` 型自体の glob 衝突プローブは不要
-/// （`VarConv3dHoldDoctestGuard` の `Conv3d` と同じ理由）。
+/// ソース走査ガード（`api_surface.rs::adaptive_max_global_pool_hold_doctest_
+/// globs_all_pub_modules`・`adaptive_max_global_pool_hold_doctest_probe_body_
+/// matches_fixed_contract`）との多層防御の位置づけ・承認の経緯は
+/// `docs/autodiff-adaptive-max-global-pool-decision.md` §6・§8 を参照。
 ///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// adaptive_max_global_pool_hold_doctest_globs_all_pub_modules`・
-/// `adaptive_max_global_pool_hold_doctest_probe_body_matches_fixed_
-/// contract`・`compat_sequential_does_not_expose_adaptive_max_global_
-/// pool_add_methods`）との多層防御の位置づけは `docs/autodiff-
-/// adaptive-max-global-pool-decision.md`「承認事項」を参照。
-///
-/// 承認（`Var::adaptive_max_pool2d`／`adaptive_max_pool1d` の委譲
-/// メソッド追加・`compat::Sequential::add_adaptive_max_pool2d`／
-/// `add_adaptive_max_pool1d`／`add_global_pool` 追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
+/// `Tensor<f32>`／`Tape` への追加が承認される日が来たら、本モジュール・本
+/// doctest 自体を削除する（対応する固定文言も同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2375,11 +2374,6 @@ struct VarConv3dHoldDoctestGuard;
 ///     fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker;
 /// }
 ///
-/// impl<'t> __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Var<'t> {
-///     fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
-///     fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
-/// }
-///
 /// impl __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Tensor<f32> {
 ///     fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
 ///     fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
@@ -2388,25 +2382,6 @@ struct VarConv3dHoldDoctestGuard;
 /// impl __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Tape {
 ///     fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
 ///     fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
-/// }
-///
-/// trait __FandheAdaptiveMaxPoolAddProbe {
-///     fn add_adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker;
-///     fn add_adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker;
-///     fn add_global_pool(&self) -> __FandheAdaptiveMaxPoolMarker;
-/// }
-///
-/// impl __FandheAdaptiveMaxPoolAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
-///     fn add_adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
-///     fn add_global_pool(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Var::adaptive_max_pool2d(x);
-///     let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool2d();
-///     let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Var::adaptive_max_pool1d(x);
-///     let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool1d();
 /// }
 ///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
@@ -2421,12 +2396,6 @@ struct VarConv3dHoldDoctestGuard;
 ///     let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool2d();
 ///     let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Tape::adaptive_max_pool1d(x);
 ///     let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool1d();
-/// }
-///
-/// fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {
-///     let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_adaptive_max_pool2d(x);
-///     let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_adaptive_max_pool1d(x);
-///     let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_global_pool(x);
 /// }
 /// ```
 #[cfg(doctest)]
