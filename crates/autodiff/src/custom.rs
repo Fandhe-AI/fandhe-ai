@@ -7,13 +7,14 @@
 //! [`crate::Tape::custom`] 経由でグラフへ登録できるようにするための
 //! 唯一の拡張口をここに設ける。
 //!
-//! **内部クレート限定の公開範囲（§12.5 (a)）**: 本 trait・
-//! [`crate::Tape::custom`] は `fandhe_ai_autodiff` クレート内の `pub`
-//! API であり crates.io 公開クレートの一部になるが、facade（唯一の
-//! サポート対象公開面。`docs/compat-api-scope.md` §0）は再エクスポート
-//! しない（`crates/facade/tests/api_surface.rs` の否定ガードで機械
-//! 固定する）。facade 公開（§12.5 (b)）は本イシューの対象外で、別途
-//! ユーザー承認を得てから着手する。
+//! **公開範囲**: 本 trait・[`crate::Tape::custom`] は
+//! `fandhe_ai_autodiff` クレート内の `pub` API であり、facade（唯一の
+//! サポート対象公開面。`docs/compat-api-scope.md` §0）へはイシュー
+//! #2549（ルート #2499 の一括承認・`docs/autodiff-custom-function-decision.md`
+//! §16.1）で `fandhe_ai::CustomFunction` の再エクスポートと facade `Tape::custom`
+//! の薄い委譲として公開済み。`Var::custom`・`Sequential::add_custom` 等の
+//! 承認範囲外の入口は設けず、`crates/facade/tests/api_surface.rs` のガードで
+//! 機械固定する（§16.4）。
 
 use std::fmt;
 use std::sync::Arc;
