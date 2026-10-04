@@ -303,7 +303,7 @@ facade 公開を設計判断記録の推奨形で実装してよい）に基づ�
   `var_einsum_batch_contraction_is_reachable_via_facade_only`（facade 経由
   のみでシグネチャ・形状・`Var::matmul` との bit 一致を確認）。
   `hold_doctest_probe_blocks_reference_every_glob_imported_item` の下限を
-  26 → 25 へ更新（ガード 1 件削除に伴う機械的な追随。tolerance ではない）。
+  25 → 24 へ更新（ガード 1 件削除に伴う機械的な追随。tolerance ではない）。
 - **facade 利用例**: `crates/facade/tests/einsum_batch_facade.rs`（新規）。
   `#[ignore]` の CUDA／Metal テストは公開入口 `Var::einsum` 経由へ切替え。
 - **既知の制約（不変）**: create_graph 下では rank≥3 `MatMul` のため
