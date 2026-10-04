@@ -1,11 +1,12 @@
-//! `fandhe_ai_autodiff::scalar_unary_ops`（イシュー #2145・facade 非公開
-//! の内部入口。`crates/autodiff/src/scalar_unary_ops.rs` モジュール doc
-//! 参照）のバックエンド間 parity テスト（`rearrange_ops_backend_parity.rs`
+//! `fandhe_ai_autodiff::scalar_unary_ops`（イシュー #2145。`Var::floor` 等の
+//! facade 公開は #2512。`crates/autodiff/src/scalar_unary_ops.rs` モジュール
+//! doc 参照）のバックエンド間 parity テスト（`rearrange_ops_backend_parity.rs`
 //! と同型）。
 //!
-//! `scalar_unary_ops` は facade から再エクスポートされないため、本テストは
+//! `scalar_unary_ops` モジュール自体は facade から再エクスポートされない
+//! （`Var` の委譲メソッドとしてのみ公開）ため、本テストは自由関数
 //! `fandhe_ai_autodiff::scalar_unary_ops::*` を直接 use する（facade の
-//! dev 依存に `fandhe-ai-autodiff` が既に含まれている）。
+//! dev 依存に `fandhe-ai-autodiff` が既に含まれている。委譲メソッドは同一経路）。
 //!
 //! 本ファイルの契約は `floor`／`ceil`／`round`／`sign`／`reciprocal`／
 //! `rsqrt`／`erf`／`pow_scalar` の 8 演算 × {forward, backward} ×
