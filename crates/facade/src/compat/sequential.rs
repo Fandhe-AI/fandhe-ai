@@ -123,9 +123,10 @@ use fandhe_ai_autodiff::nn::{
     EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm, Identity, InstanceNorm,
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module,
     MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
-    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, TransformerDecoderLayer,
-    TransformerDecoderLayerVars, TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten,
-    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
+    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, Transformer,
+    TransformerConfig, TransformerDecoderLayer, TransformerDecoderLayerVars,
+    TransformerEncoderLayer, TransformerEncoderLayerVars, TransformerVars, Unflatten, Upsample,
+    ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
     multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
@@ -341,6 +342,16 @@ pub(super) enum LayerSpec {
         d_model: usize,
         num_heads: usize,
         dim_feedforward: usize,
+    },
+    /// イシュー #2533。`add_transformer` が積む（活性化は Relu 限定のため記録しない。
+    /// `eps` は `TransformerConfig::with_eps` で変えられるため保存・復元する）。
+    Transformer {
+        d_model: usize,
+        num_heads: usize,
+        num_encoder_layers: usize,
+        num_decoder_layers: usize,
+        dim_feedforward: usize,
+        eps: f32,
     },
     MaxPool2d {
         kernel_size: [usize; 2],
@@ -1404,6 +1415,69 @@ impl Sequential {
         Ok(self)
     }
 
+    /// Transformer（encoder スタック＋decoder スタック。`nn::Transformer`）層を追加する
+    /// （イシュー #2533・親 #2531・ルート #2499 の一括承認。
+    /// `docs/autodiff-transformer-decoder-decision.md`）。
+    /// encoder（TransformerEncoderLayer を `num_encoder_layers` 段 → 最終 LayerNorm）と
+    /// decoder（TransformerDecoderLayer を `num_decoder_layers` 段 → 最終 LayerNorm）の
+    /// post-norm 合成で、PyTorch `nn.Transformer`（`norm_first=False`・
+    /// `activation="relu"`）と揃える。構成は `TransformerConfig`（`fandhe_ai::nn`）で与える。
+    ///
+    /// `Sequential` は単一入力列のため `src = tgt = 直前層の出力`・mask なし・
+    /// 非 causal 固定で呼ぶ（`nn::Module for Transformer::forward` と同じ意味論で、
+    /// `predict` と `bind().forward` が bit 一致する）。`src`／`tgt` を別々に与える
+    /// 2 入力 API・mask・causal 指定は本メソッドの対象外。Dropout は結線しない。
+    /// 活性化は `relu` のみ対応で、`TransformerConfig::with_activation` で他を指定した
+    /// 場合は `InvalidArgument`（`FeedForwardActivation` は facade から到達できず、
+    /// 保存 manifest にも活性化を持たせないため。fail-closed）。
+    /// 層数 0・`d_model == 0`・`dim_feedforward == 0`・`d_model % num_heads != 0` は
+    /// `Transformer::new` が拒否する。パラメータ数は
+    /// `16 * num_encoder_layers + 2 + 26 * num_decoder_layers + 2`。デバイス常駐経路は
+    /// 未対応（`BackendError::Unsupported`）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::nn::TransformerConfig;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = TransformerConfig::new(4, 2)
+    ///     .with_num_encoder_layers(1)
+    ///     .with_num_decoder_layers(1)
+    ///     .with_dim_feedforward(8);
+    /// let model = Sequential::new().add_transformer(config, 0)?;
+    /// let x = Tensor::new(vec![0.1f32; 2 * 3 * 4], &[2, 3, 4])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[2, 3, 4]);
+    /// assert_eq!(model.trainable_parameters().len(), 16 + 2 + 26 + 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_transformer(
+        mut self,
+        config: TransformerConfig,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        if config.activation() != FeedForwardActivation::Relu {
+            return Err(AutodiffError::InvalidArgument(
+                "add_transformer: 活性化は relu のみ対応（保存 manifest に活性化を持たせないため。\
+                 イシュー #2533）"
+                    .to_string(),
+            ));
+        }
+        let layer = Transformer::new(&config, seed)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Transformer {
+            d_model: config.d_model(),
+            num_heads: config.num_heads(),
+            num_encoder_layers: config.num_encoder_layers(),
+            num_decoder_layers: config.num_decoder_layers(),
+            dim_feedforward: config.dim_feedforward(),
+            eps: config.eps(),
+        });
+        Ok(self)
+    }
+
     /// 2 次元 MaxPool 層を追加する（`nn::MaxPool2d`。イシュー #1957・
     /// 親 #1618。2026-09-17 ユーザー承認〈選択肢 A・6 メソッド一括
     /// 追加〉）。`ceil_mode=false` 固定（`MaxPool2d::new` doc 参照）。
@@ -2171,6 +2245,13 @@ impl Sequential {
             .filter_map(|layer| layer.as_transformer_decoder_layer())
             .map(|dec| dec.bind(&tape.0))
             .collect();
+        let transformers = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_transformer())
+            .map(|t| t.bind(&tape.0))
+            .collect();
         SequentialVars {
             model: self,
             linears,
@@ -2188,6 +2269,7 @@ impl Sequential {
             mhas,
             encoders,
             decoders,
+            transformers,
         }
     }
 
@@ -2259,6 +2341,7 @@ impl Sequential {
                 && layer.as_multihead_attention().is_none()
                 && layer.as_transformer_encoder_layer().is_none()
                 && layer.as_transformer_decoder_layer().is_none()
+                && layer.as_transformer().is_none()
                 && !layer.named_parameters().is_empty()
         })
     }
@@ -2315,7 +2398,7 @@ impl Sequential {
     /// 含まれるかどうか（旧 `contains_conv_layer`。イシュー #1770 で
     /// `Conv2d`／`Conv1d` 向けに新設し、イシュー #1760 で LayerNorm／
     /// RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
-    /// MultiheadAttention へ、イシュー #2532 で TransformerDecoderLayer を追加、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d、イシュー #2525 で GroupNorm／InstanceNorm を追加、イシュー #1957 で Pooling（MaxPool／
+    /// MultiheadAttention へ、イシュー #2532 で TransformerDecoderLayer を、イシュー #2533 で Transformer を追加、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d、イシュー #2525 で GroupNorm／InstanceNorm を追加、イシュー #1957 で Pooling（MaxPool／
     /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名した）。
     /// これらの層は `forward_from_flat_leaves`（`Linear` 層のみを
     /// 消費する走査）の対象外のため、常駐経路の入口で明示的に拒否する
@@ -2339,6 +2422,7 @@ impl Sequential {
                 || layer.as_multihead_attention().is_some()
                 || layer.as_transformer_encoder_layer().is_some()
                 || layer.as_transformer_decoder_layer().is_some()
+                || layer.as_transformer().is_some()
                 || layer.is_pooling()
         })
     }
@@ -3122,6 +3206,8 @@ pub struct SequentialVars<'m, 't> {
     /// `TransformerDecoderLayer` 層（イシュー #2532）を層順で収集する。`encoders` と同じく
     /// `Var<'t>` のみを保持し `'m` を借用しない。
     decoders: Vec<TransformerDecoderLayerVars<'t>>,
+    /// `Transformer` 層（イシュー #2533）の bind 結果（層順）。
+    transformers: Vec<TransformerVars<'t>>,
 }
 
 impl<'m, 't> SequentialVars<'m, 't> {
@@ -3213,6 +3299,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         let mut decoders = self.decoders.iter();
+        let mut transformers = self.transformers.iter();
         let layers = self.model.inner.layers();
         let mut i = 0;
         while i < layers.len() {
@@ -3421,6 +3508,20 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward(&current, &current, None, None, false, false)?;
                 i += 1;
+            } else if layer.as_transformer().is_some() {
+                // `src = tgt = current`・mask なし・非 causal 固定（イシュー #2533。
+                // `Sequential::add_transformer` doc・`nn::Module for Transformer::forward`
+                // と同一の意味論）。
+                let vars = transformers.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み TransformerVars が model.layers の \
+                         Transformer 層数より少ない（bind/forward 間の Transformer 層数対応が \
+                         崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current, &current, None, None, None, false)?;
+                i += 1;
             } else {
                 // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`
                 // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
@@ -3459,6 +3560,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         let mut decoders = self.decoders.iter();
+        let mut transformers = self.transformers.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -3559,112 +3661,15 @@ impl<'m, 't> SequentialVars<'m, 't> {
             } else if layer.as_transformer_encoder_layer().is_some()
                 && let Some(vars) = encoders.next()
             {
-                // `named_parameters`（`self_attn` → `linear1` →
-                // `linear2` → `norm1` → `norm2` の順。
-                // `crates/autodiff/src/nn/transformer_encoder_layer.rs`
-                // の同メソッド doc「命名契約」）と同じ順序で 16 個の
-                // `Var` を push する。
-                out.push(&vars.self_attn.q.weight);
-                if let Some(b) = &vars.self_attn.q.bias {
-                    out.push(b);
-                }
-                out.push(&vars.self_attn.k.weight);
-                if let Some(b) = &vars.self_attn.k.bias {
-                    out.push(b);
-                }
-                out.push(&vars.self_attn.v.weight);
-                if let Some(b) = &vars.self_attn.v.bias {
-                    out.push(b);
-                }
-                out.push(&vars.self_attn.out.weight);
-                if let Some(b) = &vars.self_attn.out.bias {
-                    out.push(b);
-                }
-                out.push(&vars.linear1.weight);
-                if let Some(b) = &vars.linear1.bias {
-                    out.push(b);
-                }
-                out.push(&vars.linear2.weight);
-                if let Some(b) = &vars.linear2.bias {
-                    out.push(b);
-                }
-                if let Some(w) = &vars.norm1.weight {
-                    out.push(w);
-                }
-                if let Some(b) = &vars.norm1.bias {
-                    out.push(b);
-                }
-                if let Some(w) = &vars.norm2.weight {
-                    out.push(w);
-                }
-                if let Some(b) = &vars.norm2.bias {
-                    out.push(b);
-                }
+                push_encoder_layer_vars(&mut out, vars);
             } else if layer.as_transformer_decoder_layer().is_some()
                 && let Some(vars) = decoders.next()
             {
-                // `named_parameters`（`self_attn` → `multihead_attn` → `linear1` →
-                // `linear2` → `norm1` → `norm2` → `norm3` の順。
-                // `crates/autodiff/src/nn/transformer_decoder_layer.rs` の同メソッド）と
-                // 同じ順序で 26 個の `Var` を push する（イシュー #2532）。
-                out.push(&vars.self_attn.q.weight);
-                if let Some(b) = &vars.self_attn.q.bias {
-                    out.push(b);
-                }
-                out.push(&vars.self_attn.k.weight);
-                if let Some(b) = &vars.self_attn.k.bias {
-                    out.push(b);
-                }
-                out.push(&vars.self_attn.v.weight);
-                if let Some(b) = &vars.self_attn.v.bias {
-                    out.push(b);
-                }
-                out.push(&vars.self_attn.out.weight);
-                if let Some(b) = &vars.self_attn.out.bias {
-                    out.push(b);
-                }
-                out.push(&vars.multihead_attn.q.weight);
-                if let Some(b) = &vars.multihead_attn.q.bias {
-                    out.push(b);
-                }
-                out.push(&vars.multihead_attn.k.weight);
-                if let Some(b) = &vars.multihead_attn.k.bias {
-                    out.push(b);
-                }
-                out.push(&vars.multihead_attn.v.weight);
-                if let Some(b) = &vars.multihead_attn.v.bias {
-                    out.push(b);
-                }
-                out.push(&vars.multihead_attn.out.weight);
-                if let Some(b) = &vars.multihead_attn.out.bias {
-                    out.push(b);
-                }
-                out.push(&vars.linear1.weight);
-                if let Some(b) = &vars.linear1.bias {
-                    out.push(b);
-                }
-                out.push(&vars.linear2.weight);
-                if let Some(b) = &vars.linear2.bias {
-                    out.push(b);
-                }
-                if let Some(w) = &vars.norm1.weight {
-                    out.push(w);
-                }
-                if let Some(b) = &vars.norm1.bias {
-                    out.push(b);
-                }
-                if let Some(w) = &vars.norm2.weight {
-                    out.push(w);
-                }
-                if let Some(b) = &vars.norm2.bias {
-                    out.push(b);
-                }
-                if let Some(w) = &vars.norm3.weight {
-                    out.push(w);
-                }
-                if let Some(b) = &vars.norm3.bias {
-                    out.push(b);
-                }
+                push_decoder_layer_vars(&mut out, vars);
+            } else if layer.as_transformer().is_some()
+                && let Some(vars) = transformers.next()
+            {
+                push_transformer_vars(&mut out, vars);
             }
         }
         out
@@ -3689,51 +3694,6 @@ impl<'m, 't> SequentialVars<'m, 't> {
     ) -> Result<Vec<&'g Tensor<f32>>, AutodiffError> {
         self.model
             .reject_untracked_parametric_layer("SequentialVars::trainable_grads")?;
-        fn push_weight_bias<'g>(
-            out: &mut Vec<&'g Tensor<f32>>,
-            grads: &'g Gradients,
-            weight: &Var<'_>,
-            bias: Option<&Var<'_>>,
-        ) -> Result<(), AutodiffError> {
-            let weight_grad = grads.get(weight)?.ok_or_else(|| {
-                AutodiffError::InvalidArgument(
-                    "SequentialVars::trainable_grads: weight に到達する勾配がない \
-                     (loss へ未到達)"
-                        .to_string(),
-                )
-            })?;
-            out.push(weight_grad);
-            if let Some(bias) = bias {
-                let bias_grad = grads.get(bias)?.ok_or_else(|| {
-                    AutodiffError::InvalidArgument(
-                        "SequentialVars::trainable_grads: bias に到達する勾配がない \
-                         (loss へ未到達)"
-                            .to_string(),
-                    )
-                })?;
-                out.push(bias_grad);
-            }
-            Ok(())
-        }
-
-        /// [`push_weight_bias`] の weight 自体が `Option`（`LayerNorm`
-        /// の bias・`RmsNorm`／`BatchNorm` の weight・bias。affine なし
-        /// 構成では `None`）な層向けの版（イシュー #1760）。
-        fn push_opt_weight_bias<'g>(
-            out: &mut Vec<&'g Tensor<f32>>,
-            grads: &'g Gradients,
-            weight: Option<&Var<'_>>,
-            bias: Option<&Var<'_>>,
-        ) -> Result<(), AutodiffError> {
-            if let Some(w) = weight {
-                push_weight_bias(out, grads, w, None)?;
-            }
-            if let Some(b) = bias {
-                push_weight_bias(out, grads, b, None)?;
-            }
-            Ok(())
-        }
-
         let mut out = Vec::new();
         let mut linears = self.linears.iter();
         let mut conv2ds = self.conv2ds.iter();
@@ -3750,6 +3710,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         let mut decoders = self.decoders.iter();
+        let mut transformers = self.transformers.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -3809,143 +3770,228 @@ impl<'m, 't> SequentialVars<'m, 't> {
             } else if layer.as_transformer_encoder_layer().is_some()
                 && let Some(vars) = encoders.next()
             {
-                // `trainable_vars` と同一順序契約
-                // （`self_attn.q/k/v/out` → `linear1` → `linear2` →
-                // `norm1` → `norm2`）。
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.q.weight,
-                    vars.self_attn.q.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.k.weight,
-                    vars.self_attn.k.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.v.weight,
-                    vars.self_attn.v.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.out.weight,
-                    vars.self_attn.out.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.linear1.weight,
-                    vars.linear1.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.linear2.weight,
-                    vars.linear2.bias.as_ref(),
-                )?;
-                push_opt_weight_bias(
-                    &mut out,
-                    grads,
-                    vars.norm1.weight.as_ref(),
-                    vars.norm1.bias.as_ref(),
-                )?;
-                push_opt_weight_bias(
-                    &mut out,
-                    grads,
-                    vars.norm2.weight.as_ref(),
-                    vars.norm2.bias.as_ref(),
-                )?;
+                push_encoder_layer_grads(&mut out, grads, vars)?;
             } else if layer.as_transformer_decoder_layer().is_some()
                 && let Some(vars) = decoders.next()
             {
-                // `trainable_vars` と同一順序契約（イシュー #2532）。
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.q.weight,
-                    vars.self_attn.q.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.k.weight,
-                    vars.self_attn.k.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.v.weight,
-                    vars.self_attn.v.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.self_attn.out.weight,
-                    vars.self_attn.out.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.multihead_attn.q.weight,
-                    vars.multihead_attn.q.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.multihead_attn.k.weight,
-                    vars.multihead_attn.k.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.multihead_attn.v.weight,
-                    vars.multihead_attn.v.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.multihead_attn.out.weight,
-                    vars.multihead_attn.out.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.linear1.weight,
-                    vars.linear1.bias.as_ref(),
-                )?;
-                push_weight_bias(
-                    &mut out,
-                    grads,
-                    &vars.linear2.weight,
-                    vars.linear2.bias.as_ref(),
-                )?;
-                push_opt_weight_bias(
-                    &mut out,
-                    grads,
-                    vars.norm1.weight.as_ref(),
-                    vars.norm1.bias.as_ref(),
-                )?;
-                push_opt_weight_bias(
-                    &mut out,
-                    grads,
-                    vars.norm2.weight.as_ref(),
-                    vars.norm2.bias.as_ref(),
-                )?;
-                push_opt_weight_bias(
-                    &mut out,
-                    grads,
-                    vars.norm3.weight.as_ref(),
-                    vars.norm3.bias.as_ref(),
-                )?;
+                push_decoder_layer_grads(&mut out, grads, vars)?;
+            } else if layer.as_transformer().is_some()
+                && let Some(vars) = transformers.next()
+            {
+                push_transformer_grads(&mut out, grads, vars)?;
             }
         }
         Ok(out)
     }
+}
+
+// ---------------------------------------------------------------------
+// trainable_vars / trainable_grads 共通の層別ヘルパー
+// （イシュー #2533。`Transformer` が encoder／decoder 層を内包するため、
+// 単体層の分岐と `Transformer` 分岐で同一の順序契約を共有する。順序の正は
+// `nn::Module::named_parameters`。encoder 16・decoder 26 個）
+// ---------------------------------------------------------------------
+
+fn push_weight_bias<'g>(
+    out: &mut Vec<&'g Tensor<f32>>,
+    grads: &'g Gradients,
+    weight: &Var<'_>,
+    bias: Option<&Var<'_>>,
+) -> Result<(), AutodiffError> {
+    let weight_grad = grads.get(weight)?.ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "SequentialVars::trainable_grads: weight に到達する勾配がない \
+             (loss へ未到達)"
+                .to_string(),
+        )
+    })?;
+    out.push(weight_grad);
+    if let Some(bias) = bias {
+        let bias_grad = grads.get(bias)?.ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "SequentialVars::trainable_grads: bias に到達する勾配がない \
+                 (loss へ未到達)"
+                    .to_string(),
+            )
+        })?;
+        out.push(bias_grad);
+    }
+    Ok(())
+}
+
+/// [`push_weight_bias`] の weight 自体が `Option`（`LayerNorm`
+/// の bias・`RmsNorm`／`BatchNorm` の weight・bias。affine なし
+/// 構成では `None`）な層向けの版（イシュー #1760）。
+fn push_opt_weight_bias<'g>(
+    out: &mut Vec<&'g Tensor<f32>>,
+    grads: &'g Gradients,
+    weight: Option<&Var<'_>>,
+    bias: Option<&Var<'_>>,
+) -> Result<(), AutodiffError> {
+    if let Some(w) = weight {
+        push_weight_bias(out, grads, w, None)?;
+    }
+    if let Some(b) = bias {
+        push_weight_bias(out, grads, b, None)?;
+    }
+    Ok(())
+}
+
+fn push_mha_vars<'a, 't>(out: &mut Vec<&'a Var<'t>>, mha: &'a MultiheadAttentionVars<'t>) {
+    for lin in [&mha.q, &mha.k, &mha.v, &mha.out] {
+        out.push(&lin.weight);
+        if let Some(b) = &lin.bias {
+            out.push(b);
+        }
+    }
+}
+
+fn push_linear_vars<'a, 't>(out: &mut Vec<&'a Var<'t>>, lin: &'a LinearVars<'t>) {
+    out.push(&lin.weight);
+    if let Some(b) = &lin.bias {
+        out.push(b);
+    }
+}
+
+fn push_layer_norm_vars<'a, 't>(out: &mut Vec<&'a Var<'t>>, norm: &'a LayerNormVars<'t>) {
+    if let Some(w) = &norm.weight {
+        out.push(w);
+    }
+    if let Some(b) = &norm.bias {
+        out.push(b);
+    }
+}
+
+/// `TransformerEncoderLayer::named_parameters` の順
+/// （`self_attn` → `linear1` → `linear2` → `norm1` → `norm2`。16 個）。
+fn push_encoder_layer_vars<'a, 't>(
+    out: &mut Vec<&'a Var<'t>>,
+    vars: &'a TransformerEncoderLayerVars<'t>,
+) {
+    push_mha_vars(out, &vars.self_attn);
+    push_linear_vars(out, &vars.linear1);
+    push_linear_vars(out, &vars.linear2);
+    push_layer_norm_vars(out, &vars.norm1);
+    push_layer_norm_vars(out, &vars.norm2);
+}
+
+/// `TransformerDecoderLayer::named_parameters` の順
+/// （`self_attn` → `multihead_attn` → `linear1` → `linear2` → `norm1` → `norm2` →
+/// `norm3`。26 個。イシュー #2532）。
+fn push_decoder_layer_vars<'a, 't>(
+    out: &mut Vec<&'a Var<'t>>,
+    vars: &'a TransformerDecoderLayerVars<'t>,
+) {
+    push_mha_vars(out, &vars.self_attn);
+    push_mha_vars(out, &vars.multihead_attn);
+    push_linear_vars(out, &vars.linear1);
+    push_linear_vars(out, &vars.linear2);
+    push_layer_norm_vars(out, &vars.norm1);
+    push_layer_norm_vars(out, &vars.norm2);
+    push_layer_norm_vars(out, &vars.norm3);
+}
+
+/// `Transformer::named_parameters` の順（`encoder.layers.{i}` → `encoder.norm` →
+/// `decoder.layers.{i}` → `decoder.norm`。イシュー #2533）。
+fn push_transformer_vars<'a, 't>(out: &mut Vec<&'a Var<'t>>, vars: &'a TransformerVars<'t>) {
+    for layer in vars.encoder_layers() {
+        push_encoder_layer_vars(out, layer);
+    }
+    push_layer_norm_vars(out, &vars.encoder_norm);
+    for layer in vars.decoder_layers() {
+        push_decoder_layer_vars(out, layer);
+    }
+    push_layer_norm_vars(out, &vars.decoder_norm);
+}
+
+fn push_mha_grads<'g>(
+    out: &mut Vec<&'g Tensor<f32>>,
+    grads: &'g Gradients,
+    mha: &MultiheadAttentionVars<'_>,
+) -> Result<(), AutodiffError> {
+    for lin in [&mha.q, &mha.k, &mha.v, &mha.out] {
+        push_weight_bias(out, grads, &lin.weight, lin.bias.as_ref())?;
+    }
+    Ok(())
+}
+
+fn push_encoder_layer_grads<'g>(
+    out: &mut Vec<&'g Tensor<f32>>,
+    grads: &'g Gradients,
+    vars: &TransformerEncoderLayerVars<'_>,
+) -> Result<(), AutodiffError> {
+    push_mha_grads(out, grads, &vars.self_attn)?;
+    push_weight_bias(out, grads, &vars.linear1.weight, vars.linear1.bias.as_ref())?;
+    push_weight_bias(out, grads, &vars.linear2.weight, vars.linear2.bias.as_ref())?;
+    push_opt_weight_bias(
+        out,
+        grads,
+        vars.norm1.weight.as_ref(),
+        vars.norm1.bias.as_ref(),
+    )?;
+    push_opt_weight_bias(
+        out,
+        grads,
+        vars.norm2.weight.as_ref(),
+        vars.norm2.bias.as_ref(),
+    )?;
+    Ok(())
+}
+
+fn push_decoder_layer_grads<'g>(
+    out: &mut Vec<&'g Tensor<f32>>,
+    grads: &'g Gradients,
+    vars: &TransformerDecoderLayerVars<'_>,
+) -> Result<(), AutodiffError> {
+    push_mha_grads(out, grads, &vars.self_attn)?;
+    push_mha_grads(out, grads, &vars.multihead_attn)?;
+    push_weight_bias(out, grads, &vars.linear1.weight, vars.linear1.bias.as_ref())?;
+    push_weight_bias(out, grads, &vars.linear2.weight, vars.linear2.bias.as_ref())?;
+    push_opt_weight_bias(
+        out,
+        grads,
+        vars.norm1.weight.as_ref(),
+        vars.norm1.bias.as_ref(),
+    )?;
+    push_opt_weight_bias(
+        out,
+        grads,
+        vars.norm2.weight.as_ref(),
+        vars.norm2.bias.as_ref(),
+    )?;
+    push_opt_weight_bias(
+        out,
+        grads,
+        vars.norm3.weight.as_ref(),
+        vars.norm3.bias.as_ref(),
+    )?;
+    Ok(())
+}
+
+fn push_transformer_grads<'g>(
+    out: &mut Vec<&'g Tensor<f32>>,
+    grads: &'g Gradients,
+    vars: &TransformerVars<'_>,
+) -> Result<(), AutodiffError> {
+    for layer in vars.encoder_layers() {
+        push_encoder_layer_grads(out, grads, layer)?;
+    }
+    push_opt_weight_bias(
+        out,
+        grads,
+        vars.encoder_norm.weight.as_ref(),
+        vars.encoder_norm.bias.as_ref(),
+    )?;
+    for layer in vars.decoder_layers() {
+        push_decoder_layer_grads(out, grads, layer)?;
+    }
+    push_opt_weight_bias(
+        out,
+        grads,
+        vars.decoder_norm.weight.as_ref(),
+        vars.decoder_norm.bias.as_ref(),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

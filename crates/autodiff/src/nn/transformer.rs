@@ -24,9 +24,8 @@
 //! **対象外（PR 本文に記載・`out-of-scope-tracking.md`）**:
 //! `src_is_causal`／`memory_is_causal`（`Transformer::forward` 引数
 //! として。明示 mask で代替できる）・`src_key_padding_mask` 等・
-//! カスタム encoder／decoder の注入・facade 公開（承認事項。
-//! `crates/facade/src/lib.rs` の `TransformerDecoderHoldDoctestGuard`
-//! で保留固定）。
+//! カスタム encoder／decoder の注入・facade 単体公開以外の拡張
+//! （`Transformer`／`compat::Sequential::add_transformer` はイシュー #2533 で公開済み）。
 //!
 //! **`Module` trait との関係**: `forward` は `src = tgt = input`・
 //! mask なし・非 causal を表す（`nn/transformer_encoder_layer.rs`・

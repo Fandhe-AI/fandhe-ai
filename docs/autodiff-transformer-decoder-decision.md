@@ -116,9 +116,9 @@ input`（decoder）・`src = tgt = input`（Transformer）とする。mask は
 `module_forward_matches_bind_forward_with_input_as_src_and_tgt`）で
 `bind().forward(..)` との bit 一致を固定する。
 
-## 承認事項（facade 公開は保留）
+## 承認事項（facade 公開。#2532・#2533 で実施済み）
 
-以下は本 PR では実施していない。承認まで
+以下は #2165 の PR では実施せず保留していた（#2532 で decoder 1 層、#2533 で残りを公開済み。末尾の実装記録参照）。承認まで
 `crates/facade/src/lib.rs::TransformerDecoderHoldDoctestGuard`（正の
 プローブ doctest）・`crates/facade/tests/api_surface.rs` の否定ガード
 （ソース走査）で固定する。
@@ -194,3 +194,26 @@ input`（decoder）・`src = tgt = input`（Transformer）とする。mask は
   facade 利用者は型名・アクセサには触れるが、単体での構築・forward は行えない（承認形の範囲外のため再エクスポート・委譲は追加していない。必要になれば本記録への追記と承認が要る）。
 - **#2533 に残る範囲**: `Transformer`／`add_transformer`・その保存往復・残りの保留ガードの削除。
 - 実機 parity（CUDA／Metal）は `docs/perf/logs/transformer-decoder-sequential-2532/README.md` へ申し送り。
+
+## 実装記録（#2533・親 #2531）
+
+承認事項の残り（`Transformer`／`add_transformer`・保存往復・保留ガードの撤去）を実装した（ルート #2499 の一括承認。`docs/compat-api-scope.md` §5 経路 2）。
+
+- **公開名**: `fandhe_ai::nn::Transformer`（`crates/facade/src/nn/mod.rs` の 1 文の `pub use` に追加。`TransformerConfig`・`TransformerDecoderLayer` と合わせ 3 名形）と
+  `compat::Sequential::add_transformer(config: TransformerConfig, seed: u64) -> Result<Self, AutodiffError>`。
+- **シグネチャを config 方式にした理由**: 本記録の承認事項は「構築は `TransformerConfig` 経由の `Transformer::new(&config, seed)` のみ」を前提としており、
+  位置引数にすると 7 個以上になりビルダーと重複する。`TransformerConfig` は `Copy` で、`add_multihead_attention_with_config(config, seed)` の前例に合わせて値渡しとした。
+- **活性化**: `relu` のみ。`with_activation` で他を指定した config は `InvalidArgument`（`FeedForwardActivation` は facade から到達できず、manifest に活性化を持たせない。#2530 の kdim/vdim 拒否と同型）。
+- **eps**: `with_eps` は facade から到達できるため `LayerSpec::Transformer` に持たせ、保存・復元する（往復の bit 一致に必要）。非有限値は保存時に `UnsupportedModel`。
+- **Sequential 内の意味論**: `src = tgt = 直前層の出力`・mask なし・非 causal。`Module::forward` と同じ呼び出しのため `predict` と `bind().forward` は bit 一致する。
+- **パラメータ数**: `16 * N_enc + 2 + 26 * N_dec + 2`。順序は `Transformer::named_parameters`（encoder 層 → `encoder.norm` → decoder 層 → `decoder.norm`）。
+- **保存・復元**: kind `transformer`（params 6 キー）を allowlist へ追加（合計 53 種）。load 側は `layer_parameter_count`（checked 算術）で全層のキー数を実キー数と照合してから期待キー列を作り、
+  0 層は `spec_from_kind` で早期拒否する。`MAX_ARRAY_LEN`・`MAX_OBJECT_KEYS`・`MAX_LAYERS` は変更しない。
+- **リファクタ（挙動不変）**: `trainable_vars`／`trainable_grads` の encoder／decoder 分岐を Transformer 分岐と共有するヘルパー関数へ抽出。`model_io.rs` の TE／TD のキー列も関数化した。
+- **ガードの反転**: `TransformerDecoderHoldDoctestGuard`（`lib.rs`）と、`api_surface.rs` の `transformer_decoder_hold_doctest_globs_all_pub_modules`・
+  `transformer_decoder_hold_doctest_probe_body_matches_fixed_contract`・`compat_sequential_does_not_expose_transformer_decoder_add_methods`（および `_detects_offense`）・
+  `TRANSFORMER_DECODER_HOLD_PROBE_BODY` を撤去。正ガードは `facade_reexports_transformer_decoder_items_only_in_approved_shape`（3 名形）・
+  `compat_sequential_declares_add_transformer_exactly_once`・`transformer_decoder_types_are_reachable_via_facade_only`。
+  `hold_doctest_probe_blocks_reference_every_glob_imported_item` の検出数下限は保留ガード 1 件の撤去に合わせて 21 → 20。
+- **対象外**: 2 入力 API・mask／causal・pre-norm・Dropout・Gelu の選択・`FeedForwardActivation` の再エクスポート・`Tape` 委譲による単体 forward・GPU 専用カーネル・ONNX export 対応。
+- 実機 parity（CUDA／Metal）は `docs/perf/logs/transformer-sequential-2533/README.md` へ申し送り。

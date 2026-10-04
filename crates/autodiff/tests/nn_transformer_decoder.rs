@@ -1,9 +1,8 @@
 //! `TransformerDecoderLayer`・`Transformer`（イシュー #2165・親 #2131・
 //! #2068 の対）の統合テスト。`nn::Sequential`（autodiff 汎用コンテナ。
 //! `nn::container::Sequential::add<M: Module + 'static>` は任意の
-//! `Module` 実装を受け付けるため、facade `compat::Sequential`（本 2 層
-//! の追加は承認待ち・`TransformerDecoderHoldDoctestGuard` で保留）を
-//! 経由せずとも積める）に積んで forward・backward・`state_dict`／
+//! `Module` 実装を受け付けるため、facade `compat::Sequential`
+//! （本 2 層の追加は #2532・#2533 で公開済み）を経由せずとも積める）に積んで forward・backward・`state_dict`／
 //! `load_state_dict` 往復・`freeze` を検証する。
 
 mod common;
