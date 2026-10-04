@@ -205,6 +205,13 @@ use fandhe_ai_autodiff::nn::optim::{
     AdagradConfig, AdamConfig, AdamWConfig, GradScaler, LambConfig, RmsPropConfig,
 };
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
+// ユーザー定義 forward／backward（カスタム VJP）の trait を facade の
+// crate ルートへ再エクスポートする（イシュー #2549。ルート #2499 の一括
+// 承認・`docs/autodiff-custom-function-decision.md` §16.1 (a)・
+// `docs/compat-api-scope.md` §5 経路 2）。利用者は `Tape::custom` へ
+// `Arc<dyn fandhe_ai::CustomFunction>` を渡す。1 文 1 行・別名なし・
+// グループ形なしを維持する（`tests/api_surface.rs` が行単位で固定する）。
+pub use fandhe_ai_autodiff::CustomFunction;
 // `VarHostView`（借用ビュー読み出し API。イシュー #1335）は 1 文 1 行を
 // 維持する（`tests/api_surface.rs` が `pub use` を行単位で走査するため。
 // 上記コメント「1 文 1 行を維持する」参照）。
@@ -652,6 +659,83 @@ impl Tape {
         child: &'c Tape,
     ) -> Result<CreateGraphResult<'c>, AutodiffError> {
         self.0.backward_create_graph(loss, &child.0)
+    }
+
+    /// [`fandhe_ai_autodiff::Tape::custom`] への委譲入口（イシュー #2549。
+    /// ルート #2499 の一括承認・`docs/autodiff-custom-function-decision.md`
+    /// §16.1 (b)(c)(d)）。
+    ///
+    /// 利用者実装の [`CustomFunction`]（host の `Tensor<f32>` だけを受け渡す
+    /// forward／backward 対）を 1 ノードとして Tape へ記録し、出力 [`Var`]
+    /// を返す。`facade::Tape` は内部の autodiff `Tape` を隠すため、本メソッド
+    /// が facade 経由の唯一の入口になる（`Var::custom` は設けない）。
+    ///
+    /// # 契約
+    ///
+    /// - `forward`／`backward` は常に host 実行で `BackendOps` を経由しない
+    ///   ため、REQ-2 のバックエンド間数値一致の判定対象外
+    /// - `backward` は `Tape::backward_accumulate` 等で複数回呼ばれうる。
+    ///   実装は入力だけに依存する純関数・冪等にすること
+    /// - 二階微分（`create_graph`）には非対応（fail-closed で `Err`）
+    ///
+    /// # エラー
+    ///
+    /// - 空の `inputs` → [`AutodiffError::InvalidArgument`]
+    /// - 別の Tape の入力 → [`AutodiffError::TapeMismatch`]
+    /// - 宣言 shape と実出力の不一致 → `Shape`／`Backward` 系
+    /// - `requires_grad = true` の入力に `None` を返した backward →
+    ///   `Backward`（逆伝播時）
+    ///
+    /// # 使用例
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use fandhe_ai::{AutodiffError, CustomFunction, Tensor};
+    ///
+    /// // y = 2x（要素ごと）。backward は upstream を 2 倍する。
+    /// struct Double;
+    ///
+    /// impl CustomFunction for Double {
+    ///     fn name(&self) -> &str {
+    ///         "double"
+    ///     }
+    ///     fn output_shape(&self, shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+    ///         Ok(shapes[0].to_vec())
+    ///     }
+    ///     fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+    ///         let d: Vec<f32> = inputs[0].host_slice().iter().map(|v| v * 2.0).collect();
+    ///         Tensor::new(d, inputs[0].shape()).map_err(AutodiffError::Shape)
+    ///     }
+    ///     fn backward(
+    ///         &self,
+    ///         inputs: &[&Tensor<f32>],
+    ///         _out_value: &Tensor<f32>,
+    ///         upstream: &Tensor<f32>,
+    ///         _requires_grad: &[bool],
+    ///     ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+    ///         let d: Vec<f32> = upstream.host_slice().iter().map(|g| g * 2.0).collect();
+    ///         let g = Tensor::new(d, inputs[0].shape()).map_err(AutodiffError::Shape)?;
+    ///         Ok(vec![Some(g)])
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> Result<(), AutodiffError> {
+    /// let tape = fandhe_ai::tape();
+    /// let x = tape.var(&Tensor::new(vec![1.0, -2.0, 3.0], &[3]).unwrap());
+    /// let y = tape.custom(Arc::new(Double), &[x])?;
+    /// let loss = y.sum(None)?;
+    /// let grads = tape.backward(&loss)?;
+    /// let dx = grads.get(&x)?.expect("x は loss に寄与する");
+    /// assert_eq!(dx.host_slice().as_ref(), &[2.0, 2.0, 2.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn custom<'t>(
+        &'t self,
+        func: std::sync::Arc<dyn CustomFunction>,
+        inputs: &[Var<'t>],
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.0.custom(func, inputs)
     }
 
     /// [`fandhe_ai_autodiff::nn::Rnn::forward_seq`] への委譲入口
@@ -1410,8 +1494,9 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
     crate::interop::onnx::metal_onnx_gpu_execution_enabled()
 }
 
-/// `Tape::custom`（ユーザー定義 forward／backward 抽象。イシュー #2064
-/// §12.5 (b)）が facade の公開面から到達不能であることを、
+/// `Var`／`Sequential` の `custom`／`add_custom` と `Tape::add_custom`
+/// （ユーザー定義 forward／backward 抽象の合成入口。イシュー #2064
+/// §12.5）が facade の公開面から到達不能であることを、
 /// `crates/autodiff/tests/architecture_boundaries.rs`・`crates/facade/
 /// tests/api_surface.rs` のソース文字列走査（heuristics）とは独立に、
 /// **コンパイラそのもの**で固定するための非公開足場
@@ -1459,7 +1544,7 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// 経由の到達は、本プローブの呼び出し形（メソッド形・型パス形の
 /// いずれも `Var`／`Tape`／`compat::Sequential` 自体に対する呼び出し）
 /// だけでは拾いきれない可能性がある。この限界は、[`crates/facade/
-/// tests/api_surface.rs::workspace_declares_custom_fn_only_on_tape`]
+/// tests/api_surface.rs::workspace_declares_custom_fn_only_on_tape_and_facade_delegation`]
 /// （workspace 全体を対象に `fn custom`／`fn add_custom` の**定義元**を
 /// インベントリする多層防御）が、facade からの到達可能性とは独立に
 /// 「そもそも `crates/autodiff/src/tape.rs`（`Tape::custom`）以外の
@@ -1484,9 +1569,11 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// トレイト・関数宣言は `///` コメントの中身のため、コメント除去後の
 /// トークン走査には現れず誤検出しない）。
 ///
-/// (b) がユーザー承認され `Tape::custom` を facade から公開する日が
-/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードと同時に外す）。
+/// `Tape::custom` はイシュー #2549（ルート #2499 の一括承認・
+/// `docs/autodiff-custom-function-decision.md` §16.1）で承認形のまま公開済み
+/// のため、`__probe_tape` から `Tape::custom` の 2 行だけを外した。本ガードは
+/// 承認範囲外（`Var`／`Sequential` の `custom`／`add_custom`・
+/// `Tape::add_custom`）の非公開を固定し続ける（§16.4）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -1546,8 +1633,6 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// }
 ///
 /// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheHoldMarker = fandhe_ai::Tape::custom(x);
-///     let _: __FandheHoldMarker = x.custom();
 ///     let _: __FandheHoldMarker = fandhe_ai::Tape::add_custom(x);
 ///     let _: __FandheHoldMarker = x.add_custom();
 /// }

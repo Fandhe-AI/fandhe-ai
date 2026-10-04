@@ -2543,12 +2543,12 @@ impl Tape {
     ///
     /// `Var::custom` ではなく本メソッド（`Tape::custom`）に置く理由:
     /// facade は `pub use fandhe_ai_autodiff::Var` で `Var` 型そのものを
-    /// 再エクスポート済みのため、`Var` に生やすと facade が本 issue の
-    /// 対象外（§12.5 (b)。未承認）である公開面を無断で持ち込んでしまう。
-    /// `fandhe_ai_autodiff::Tape` 自体は facade の機械検査
-    /// （`facade_does_not_reexport_tape_or_backend_ops`）で再エクスポート
-    /// 禁止が固定されているため、本メソッドは facade 側 `Tape` へ対応
-    /// する転送メソッドを追加しない限り facade から到達不能なまま保てる。
+    /// 再エクスポート済みのため、`Var` に生やすと承認範囲外の公開面を
+    /// 無断で持ち込んでしまう。`fandhe_ai_autodiff::Tape` 自体は facade が
+    /// 再エクスポートしない（`facade_does_not_reexport_tape_or_backend_ops`
+    /// で固定）。facade からはイシュー #2549（`docs/autodiff-custom-function-
+    /// decision.md` §16.1）で追加された facade `Tape::custom`（本メソッドへの
+    /// 1 行委譲）経由でのみ到達できる。
     ///
     /// 検査順序（§12.4「forward 時の評価」）:
     /// 1. `inputs` が空なら `AutodiffError::InvalidArgument`
