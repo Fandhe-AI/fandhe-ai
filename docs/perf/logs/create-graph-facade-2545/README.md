@@ -8,16 +8,18 @@
 
 ## 実行コマンド
 
-CUDA（DGX Spark GB10）:
+CUDA（DGX Spark GB10。CUDA 専用 2 テストのみをテスト名で絞って実行する）:
 
 ```
-cargo test -p fandhe-ai --test create_graph_facade -- --ignored
+cargo test -p fandhe-ai --test create_graph_facade -- --ignored cuda device_mismatch
 ```
 
-Metal（Apple Silicon。`create_graph_hessian_metal_matches_cpu` は macOS のみ）:
+Metal（Apple Silicon。`create_graph_hessian_metal_matches_cpu` は macOS のみ。`--ignored` 単独だと CUDA 専用の
+`create_graph_hessian_cuda_matches_cpu`・`create_graph_rejects_device_mismatch` も実行され CUDA なし環境で失敗するため、
+テスト名で絞る）:
 
 ```
-cargo test -p fandhe-ai --test create_graph_facade -- --ignored
+cargo test -p fandhe-ai --test create_graph_facade -- --ignored metal
 ```
 
 ## 記入欄
