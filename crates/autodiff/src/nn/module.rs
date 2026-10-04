@@ -399,9 +399,9 @@ pub trait Module {
 
     /// [`Module::as_embedding`] と同型の明示フック（イシュー #2161・親
     /// #2131）。`EmbeddingBag` 層向け。既定 `None`。
-    /// `compat::Sequential::add_embedding_bag`（facade 公開面）の接続は
-    /// ユーザー承認待ち（`docs/autodiff-dropout-embedding-bag-decision.md`
-    /// §6「承認事項」節）であり、本フック自体は `compat` 層と独立に
+    /// `compat::Sequential::add_embedding_bag`（facade 公開面）は
+    /// イシュー #2528 で接続済み（`docs/autodiff-dropout-embedding-bag-decision.md`
+    /// §6・§8）であり、本フック自体は `compat` 層と独立に
     /// `nn::Sequential`（autodiff 汎用コンテナ）から利用できる。
     fn as_embedding_bag(&self) -> Option<&EmbeddingBag> {
         None

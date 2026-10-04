@@ -11,10 +11,10 @@
 //! BatchNorm1d/BatchNorm2d/Embedding/MultiheadAttention〈#1760〉・
 //! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
 //! AdaptiveAvgPool1d〈#1957〉・AdaptiveMaxPool2d/AdaptiveMaxPool1d/
-//! GlobalPool〈#2527〉・Softmax/LogSoftmax・
+//! GlobalPool〈#2527〉・Dropout2d/AlphaDropout/EmbeddingBag〈#2528〉・Softmax/LogSoftmax・
 //! GELU（誤差関数版・tanh 近似版）/Softplus・Flatten〈#2065 で
 //! `add_softmax`／`add_log_softmax`／`add_gelu`／`add_gelu_tanh`／
-//! `add_softplus`／`add_flatten` として追加済み〉）。`Dropout` は
+//! `add_softplus`／`add_flatten` として追加済み〉）。dropout 系（`Dropout`・`Dropout2d`・`AlphaDropout`〈#2528〉）は
 //! 本クレート内実装で
 //! 唯一 `set_training`／`training`（イシュー #1758）を実際に保持する
 //! 層のため、`Sequential::set_training` の伝播がここで初めて実挙動差
@@ -107,23 +107,24 @@ use crate::inference::batch::{
     LoaderInferenceInput, TimingPhaseRecorder, merge_inference_phase_stats,
 };
 use crate::{
-    AutodiffError, BackendError, DeviceParamStore, GlobalPoolMode, Gradients, InterpolateMode,
-    LinearVars, ResidentLeaf, Tape, Tensor, Var,
+    AutodiffError, BackendError, DeviceParamStore, EmbeddingBagMode, GlobalPoolMode, Gradients,
+    InterpolateMode, LinearVars, ResidentLeaf, Tape, Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
     Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
     Tanh,
 };
 use fandhe_ai_autodiff::nn::{
-    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
-    AvgPool2d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars,
-    Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars,
-    Dropout, Embedding, EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm,
-    Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d,
-    MaxPool2d, Module, MultiheadAttention, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle,
-    RmsNorm, RmsNormVars, Sequential as NnSequential, TransformerEncoderLayer,
-    TransformerEncoderLayerVars, Unflatten, Upsample, ZeroPad2d, conv2d_forward_low_precision,
-    linear_forward_low_precision, multihead_attention_forward_low_precision,
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
+    AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d,
+    Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d,
+    ConvTranspose2dVars, Dropout, Dropout2d, Embedding, EmbeddingBag, EmbeddingBagVars,
+    EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm, Identity, InstanceNorm,
+    LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module,
+    MultiheadAttention, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
+    Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten,
+    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
+    multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -175,7 +176,7 @@ pub struct Sequential {
 
 /// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
 ///
-/// `add_*` 42 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
+/// `add_*` 45 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
 /// `add_*` を呼んで再構築する（イシュー #2369・#2370。`docs/compat-model-io-decision.md`
 /// §5）。`add_*` の内部で固定している値（conv／linear の `bias=true`・pool の
 /// `ceil_mode=false`・TE の活性化と eps 等）は記録しない（同じ `add_*` が再現するため）。
@@ -217,6 +218,14 @@ pub(super) enum LayerSpec {
         end_dim: usize,
     },
     Dropout {
+        p: f32,
+    },
+    /// イシュー #2528。
+    Dropout2d {
+        p: f32,
+    },
+    /// イシュー #2528。
+    AlphaDropout {
         p: f32,
     },
     Conv2d {
@@ -279,6 +288,13 @@ pub(super) enum LayerSpec {
     Embedding {
         num_embeddings: usize,
         embedding_dim: usize,
+        padding_idx: Option<usize>,
+    },
+    /// イシュー #2528。
+    EmbeddingBag {
+        num_embeddings: usize,
+        embedding_dim: usize,
+        mode: EmbeddingBagMode,
         padding_idx: Option<usize>,
     },
     MultiheadAttention {
@@ -533,6 +549,46 @@ impl Sequential {
         let dropout = Dropout::new(p)?;
         self.inner.push(Box::new(dropout));
         self.specs.push(LayerSpec::Dropout { p });
+        Ok(self)
+    }
+
+    /// チャネル単位 Dropout2d 層を追加する（`nn::Dropout2d`。イシュー #2528）。
+    /// `[N, C, H, W]`（rank 4 限定）の `(n, c)` チャネルをまとめて確率 `p` で 0 に落とし、
+    /// 残すチャネルは `1/(1-p)` 倍する。`p` は有限かつ `[0, 1]`（違反は `AutodiffError`）。
+    /// rank 4 以外の入力は forward 時に `AutodiffError`（Shape）で拒否する。
+    /// 追加時点の `training` は `true`。[`Sequential::set_training`]／[`Sequential::eval`]
+    /// の伝播で恒等写像へ切り替わる（[`Sequential::add_dropout`] と同じ）。
+    /// 学習可能パラメータを持たない無状態層のため学習経路・常駐経路をそのまま通過し、
+    /// `save_model`／`load_model` に対応する。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut model = Sequential::new().add_dropout2d(0.5)?;
+    /// model.eval();
+    /// let x = Tensor::new((0..8).map(|v| v as f32).collect::<Vec<_>>(), &[1, 2, 2, 2])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.host_slice().into_owned(), x.host_slice().into_owned());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_dropout2d(mut self, p: f32) -> Result<Self, AutodiffError> {
+        let layer = Dropout2d::new(p)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Dropout2d { p });
+        Ok(self)
+    }
+
+    /// AlphaDropout 層を追加する（`nn::AlphaDropout`。イシュー #2528）。SELU 系
+    /// ネットワーク向けに、drop 後の出力が入力の平均・分散を保つようアフィン補正する。
+    /// 入力 rank は任意。`p` の検査・`training` の扱い・学習／常駐／保存経路は
+    /// [`Sequential::add_dropout2d`] と同じ。
+    pub fn add_alpha_dropout(mut self, p: f32) -> Result<Self, AutodiffError> {
+        let layer = AlphaDropout::new(p)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::AlphaDropout { p });
         Ok(self)
     }
 
@@ -1019,6 +1075,50 @@ impl Sequential {
         self.specs.push(LayerSpec::Embedding {
             num_embeddings,
             embedding_dim,
+            padding_idx,
+        });
+        Ok(self)
+    }
+
+    /// EmbeddingBag 層を追加する（`nn::EmbeddingBag`。イシュー #2528）。
+    /// 長さの揃った bag（入力 `[B, L]`）の埋め込みを `mode`（`Sum`／`Mean`／`Max`）で
+    /// 縮約して `[B, D]` を返す。決定的シードで `N(0, 1)` 初期化する
+    /// （`EmbeddingBag::new` 参照。`num_embeddings == 0`・`padding_idx` の範囲外は
+    /// `AutodiffError`）。
+    ///
+    /// **入力契約**: [`Sequential::add_embedding`] と同じく、入力は id を `f32` として
+    /// 詰めた `Tensor<f32>`（各要素を厳格に整数 id へ変換する。非有限・非整数・負・範囲外は
+    /// `AutodiffError::InvalidArgument`）。`padding_idx` に一致する id は縮約から除外する。
+    /// 可変長 bag（offsets）は未公開。学習経路は `weight` を 1 件のパラメータとして
+    /// 追跡する。常駐経路は `Unsupported` で fail-closed に拒否し、`save_model`／
+    /// `load_model` に対応する（ONNX export は非対応）。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::{EmbeddingBagMode, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_embedding_bag(8, 4, EmbeddingBagMode::Sum, None, 7)?;
+    /// let ids = Tensor::new(vec![0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3])?;
+    /// let y = model.predict(&ids)?;
+    /// assert_eq!(y.shape(), &[2, 4]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_embedding_bag(
+        mut self,
+        num_embeddings: usize,
+        embedding_dim: usize,
+        mode: EmbeddingBagMode,
+        padding_idx: Option<usize>,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let layer = EmbeddingBag::new(num_embeddings, embedding_dim, mode, padding_idx, seed)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::EmbeddingBag {
+            num_embeddings,
+            embedding_dim,
+            mode,
             padding_idx,
         });
         Ok(self)
@@ -1819,6 +1919,14 @@ impl Sequential {
             .filter_map(|layer| layer.as_embedding())
             .map(|emb| emb.bind(&tape.0))
             .collect();
+        // イシュー #2528: EmbeddingBag も同じ層順フィルタ方式で収集する。
+        let embedding_bags = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_embedding_bag())
+            .map(|bag| bag.bind(&tape.0))
+            .collect();
         let mhas = self
             .inner
             .layers()
@@ -1845,6 +1953,7 @@ impl Sequential {
             rms_norms,
             batch_norms,
             embeddings,
+            embedding_bags,
             mhas,
             encoders,
         }
@@ -1894,7 +2003,7 @@ impl Sequential {
         out
     }
 
-    /// `bind` が追跡する 11 種の型付き層のどれでもなく、かつ学習可能パラメータ
+    /// `bind` が追跡する型付き層（EmbeddingBag〈#2528〉を含む）のどれでもなく、かつ学習可能パラメータ
     /// （`named_parameters()` が非空）を持つ最初の層の index を返す（イシュー #2398）。
     /// `add_module` で積んだパラメータ持ちの独自層がこれに当たる。
     /// `fit`／`SequentialVars::forward`／`trainable_grads`／常駐経路の入口検査から呼ばれる。
@@ -1913,6 +2022,7 @@ impl Sequential {
                 && layer.as_batch_norm1d().is_none()
                 && layer.as_batch_norm2d().is_none()
                 && layer.as_embedding().is_none()
+                && layer.as_embedding_bag().is_none()
                 && layer.as_multihead_attention().is_none()
                 && layer.as_transformer_encoder_layer().is_none()
                 && !layer.named_parameters().is_empty()
@@ -1969,6 +2079,7 @@ impl Sequential {
                 || layer.as_batch_norm1d().is_some()
                 || layer.as_batch_norm2d().is_some()
                 || layer.as_embedding().is_some()
+                || layer.as_embedding_bag().is_some()
                 || layer.as_multihead_attention().is_some()
                 || layer.as_transformer_encoder_layer().is_some()
                 || layer.is_pooling()
@@ -2741,6 +2852,8 @@ pub struct SequentialVars<'m, 't> {
     /// forward の都度更新するため。
     batch_norms: Vec<BatchNormVars<'t, 'm>>,
     embeddings: Vec<EmbeddingVars<'t>>,
+    /// イシュー #2528。`EmbeddingBag` 層の bind 結果（層順）。
+    embedding_bags: Vec<EmbeddingBagVars<'t>>,
     mhas: Vec<MultiheadAttentionVars<'t>>,
     /// `TransformerEncoderLayer` 層（イシュー #2068）を層順で収集する。
     /// `TransformerEncoderLayerVars<'t>` は `mhas` 同様 `Var<'t>` のみを
@@ -2833,6 +2946,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
+        let mut embedding_bags = self.embedding_bags.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         let layers = self.model.inner.layers();
@@ -2970,6 +3084,19 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward_from_var(&current)?;
                 i += 1;
+            } else if layer.as_embedding_bag().is_some() {
+                // bind 済みの `EmbeddingBagVars` で forward する（`Module::forward` は
+                // 新しい葉を作り直し勾配が失われるため使わない。イシュー #2528）。
+                let vars = embedding_bags.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み EmbeddingBagVars が model.layers の \
+                         EmbeddingBag 層数より少ない（bind/forward 間の EmbeddingBag 層数対応が \
+                         崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward_from_var(&current)?;
+                i += 1;
             } else if layer.as_multihead_attention().is_some() {
                 // self-attention 固定（`q = k = v = current`・mask
                 // なし・非 causal。`nn/attention.rs` モジュール doc
@@ -3037,6 +3164,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
+        let mut embedding_bags = self.embedding_bags.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         for layer in self.model.inner.layers() {
@@ -3107,6 +3235,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 }
             } else if layer.as_embedding().is_some()
                 && let Some(vars) = embeddings.next()
+            {
+                out.push(&vars.weight);
+            } else if layer.as_embedding_bag().is_some()
+                && let Some(vars) = embedding_bags.next()
             {
                 out.push(&vars.weight);
             } else if layer.as_multihead_attention().is_some()
@@ -3252,6 +3384,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
+        let mut embedding_bags = self.embedding_bags.iter();
         let mut mhas = self.mhas.iter();
         let mut encoders = self.encoders.iter();
         for layer in self.model.inner.layers() {
@@ -3293,6 +3426,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 push_opt_weight_bias(&mut out, grads, vars.weight.as_ref(), vars.bias.as_ref())?;
             } else if layer.as_embedding().is_some()
                 && let Some(vars) = embeddings.next()
+            {
+                push_weight_bias(&mut out, grads, &vars.weight, None)?;
+            } else if layer.as_embedding_bag().is_some()
+                && let Some(vars) = embedding_bags.next()
             {
                 push_weight_bias(&mut out, grads, &vars.weight, None)?;
             } else if layer.as_multihead_attention().is_some()

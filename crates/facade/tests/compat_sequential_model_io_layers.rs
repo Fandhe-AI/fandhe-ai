@@ -1,8 +1,8 @@
-//! `fandhe_ai::compat::{save_model, load_model}` の全 42 層対応（イシュー #2370・親 #2362）の
+//! `fandhe_ai::compat::{save_model, load_model}` の全 45 層対応（イシュー #2370・親 #2362）の
 //! 統合テスト。facade の公開 API と `std` のみで次の受入基準を検証する。
 //!
-//! - (a) 42 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
-//!   `predict` 出力が bit 一致する（42 種の網羅は保存した manifest の `kind` 集合で検査する）。
+//! - (a) 45 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
+//!   `predict` 出力が bit 一致する（45 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
@@ -16,13 +16,13 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use fandhe_ai::compat::{ModelIoError, Sequential, load_model, save_model};
-use fandhe_ai::{AutodiffError, GlobalPoolMode, InterpolateMode, Tensor};
+use fandhe_ai::{AutodiffError, EmbeddingBagMode, GlobalPoolMode, InterpolateMode, Tensor};
 
 mod common;
 use common::temp_dir::TempDirGuard;
 
-/// allowlist の 42 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-const ALL_KINDS: [&str; 42] = [
+/// allowlist の 45 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+const ALL_KINDS: [&str; 45] = [
     "linear",
     "relu",
     "sigmoid",
@@ -38,6 +38,8 @@ const ALL_KINDS: [&str; 42] = [
     "softplus",
     "flatten",
     "dropout",
+    "dropout2d",
+    "alpha_dropout",
     "conv2d",
     "conv_transpose2d",
     "conv3d",
@@ -47,6 +49,7 @@ const ALL_KINDS: [&str; 42] = [
     "batch_norm1d",
     "batch_norm2d",
     "embedding",
+    "embedding_bag",
     "multihead_attention",
     "transformer_encoder",
     "max_pool2d",
@@ -145,7 +148,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------
-// (a) 42 種の bit 一致
+// (a) 45 種の bit 一致
 // ---------------------------------------------------------------------
 
 /// rank 2 入力 `[3, 6]`: 活性化・正規化・dropout・BatchNorm1d（rank 2）・softmax 系。
@@ -163,6 +166,7 @@ fn mlp_model() -> Built {
         .add_gelu_tanh()
         .add_softplus(1.5, 20.0)?
         .add_dropout(0.3)?
+        .add_alpha_dropout(0.2)?
         .add_layer_norm(8, 1e-5)?
         .add_rms_norm(8, 1e-6)?
         .add_batch_norm1d(8, 1e-5, 0.1)?
@@ -180,6 +184,7 @@ fn cnn_model() -> Built {
         .add_conv2d(2, 4, [3, 3], [1, 1], [1, 1], [1, 1], 1, 21)?
         .add_batch_norm2d(4, 1e-5, 0.1)?
         .add_relu()
+        .add_dropout2d(0.2)?
         .add_group_norm(2, 1e-5)?
         .add_instance_norm(1e-5)?
         .add_conv_transpose2d(4, 4, [3, 3], [1, 1], [1, 1], [0, 0], [1, 1], 2, 24)?
@@ -245,6 +250,15 @@ fn sequence_model(padding_idx: Option<usize>) -> Built {
     Ok(m)
 }
 
+/// 整数 id 入力 `[2, 5]`: EmbeddingBag（mode・padding_idx の組み合わせ。イシュー #2528）。
+fn bag_model(mode: EmbeddingBagMode, padding_idx: Option<usize>) -> Built {
+    let mut m = Sequential::new()
+        .add_embedding_bag(10, 8, mode, padding_idx, 45)?
+        .add_linear(8, 3, 46)?;
+    m.eval();
+    Ok(m)
+}
+
 #[test]
 fn all_thirty_layer_kinds_round_trip_bit_identically() {
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -275,8 +289,19 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
             &ids(&[2, 5], 10),
         ));
     }
+    for (mode, padding_idx) in [
+        (EmbeddingBagMode::Sum, Some(0)),
+        (EmbeddingBagMode::Mean, None),
+        (EmbeddingBagMode::Max, None),
+    ] {
+        seen.extend(round_trip(
+            "bag",
+            &bag_model(mode, padding_idx).expect("構築できるはず"),
+            &ids(&[2, 5], 10),
+        ));
+    }
     let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(seen, expected, "42 種の kind をすべて往復させたはず");
+    assert_eq!(seen, expected, "45 種の kind をすべて往復させたはず");
 }
 
 /// train モードのまま保存・復元しても `training` フラグが往復し、dropout を含む構成で

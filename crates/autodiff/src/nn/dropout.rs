@@ -191,19 +191,68 @@ impl Dropout2d {
     /// 早期リターンは新しいノードを積まず RNG も消費しない
     /// （[`Dropout::forward`] と同じ規律）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        let shape = input.shape();
-        if shape.len() != 4 {
-            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
-                expected: 4,
-                actual: shape.len(),
-            }));
-        }
-        if !self.training || self.p == 0.0 {
-            return Ok(*input);
-        }
-        let mask = crate::grad::feature_dropout_mask(&shape, self.p)?;
-        input.dropout_with_mask(mask)
+        dropout2d_forward(input, self.p, self.training)
     }
+}
+
+/// `Dropout2d::forward`（`nn` 層）と `Var::dropout2d`（facade 公開の委譲
+/// メソッド。イシュー #2528）が共有する forward 本体。`pub(crate)`。
+///
+/// 処理順: `p` 検査（有限かつ `[0, 1]`。違反は `InvalidArgument`）→ rank 4
+/// 検査（違反は `Shape(RankMismatch)`）→ 早期リターン（`!training ||
+/// p == 0.0`。ノードを積まず RNG も消費しない）→
+/// `crate::grad::feature_dropout_mask` → `Var::dropout_with_mask`。
+/// 検査は tape 操作より前に完了するため `Err` で孤児ノードを残さない。
+pub(crate) fn dropout2d_forward<'t>(
+    input: &Var<'t>,
+    p: f32,
+    training: bool,
+) -> Result<Var<'t>, AutodiffError> {
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "dropout2d: p must be finite and in [0, 1], got {p}"
+        )));
+    }
+    let shape = input.shape();
+    if shape.len() != 4 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 4,
+            actual: shape.len(),
+        }));
+    }
+    if !training || p == 0.0 {
+        return Ok(*input);
+    }
+    let mask = crate::grad::feature_dropout_mask(&shape, p)?;
+    input.dropout_with_mask(mask)
+}
+
+/// `AlphaDropout::forward` と `Var::alpha_dropout`（イシュー #2528）が
+/// 共有する forward 本体。`pub(crate)`。処理順は `p` 検査 → 早期リターン →
+/// `p == 1.0` 特例 → `crate::grad::alpha_dropout_mask_and_bias` →
+/// `Var::dropout_with_mask` → 定数バイアス加算（`AlphaDropout` doc 参照）。
+pub(crate) fn alpha_dropout_forward<'t>(
+    input: &Var<'t>,
+    p: f32,
+    training: bool,
+) -> Result<Var<'t>, AutodiffError> {
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "alpha_dropout: p must be finite and in [0, 1], got {p}"
+        )));
+    }
+    if !training || p == 0.0 {
+        return Ok(*input);
+    }
+    let shape = input.shape();
+    if p == 1.0 {
+        let zeros = Tensor::<f32>::zeros(&shape).map_err(AutodiffError::Shape)?;
+        return input.dropout_with_mask(zeros);
+    }
+    let (noise, bias) = crate::grad::alpha_dropout_mask_and_bias(&shape, p)?;
+    let y = input.dropout_with_mask(noise)?;
+    let b = y.tape().var_no_grad(&bias);
+    y.add(&b)
 }
 
 impl Default for Dropout2d {
@@ -307,20 +356,10 @@ impl AlphaDropout {
         self.p
     }
 
-    /// モジュール doc「数式」節・「`p == 1.0` の特例」節参照。
+    /// 数式・`p == 1.0` の特例は型 doc 参照。本体は `Var::alpha_dropout`
+    /// （イシュー #2528）と共有する `alpha_dropout_forward`（`pub(crate)`）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        if !self.training || self.p == 0.0 {
-            return Ok(*input);
-        }
-        let shape = input.shape();
-        if self.p == 1.0 {
-            let zeros = Tensor::<f32>::zeros(&shape).map_err(AutodiffError::Shape)?;
-            return input.dropout_with_mask(zeros);
-        }
-        let (noise, bias) = crate::grad::alpha_dropout_mask_and_bias(&shape, self.p)?;
-        let y = input.dropout_with_mask(noise)?;
-        let b = y.tape().var_no_grad(&bias);
-        y.add(&b)
+        alpha_dropout_forward(input, self.p, self.training)
     }
 }
 
@@ -508,5 +547,32 @@ mod tests {
         .unwrap();
         let out = d.forward_host(&ops, &input).unwrap();
         assert_eq!(out.as_slice().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// `Var::dropout2d`／`alpha_dropout`（イシュー #2528）は検査を tape 操作より前に終えるため、
+    /// `Err` では孤児ノードを残さず、早期リターンはノードを積まない（`Var` 経由は層の `new()`
+    /// 検査を通らないため `p` の事前検査が共有 forward 側に要る）。
+    #[test]
+    fn var_methods_check_before_tape_ops_without_orphan_nodes() {
+        let tape = tape();
+        let x4 = tape.var(&Tensor::new(vec![1.0_f32; 16], &[1, 2, 2, 4]).unwrap());
+        let x3 = tape.var(&Tensor::new(vec![1.0_f32; 8], &[2, 2, 2]).unwrap());
+        let before = tape.len();
+        for p in [-0.5_f32, 1.5, f32::NAN, f32::INFINITY] {
+            assert!(x4.dropout2d(p, true).is_err());
+            assert!(x4.alpha_dropout(p, true).is_err());
+            // training=false でも `p` の不正は拒否される（`Var::dropout` と同じ）。
+            assert!(x4.dropout2d(p, false).is_err());
+            assert!(x4.alpha_dropout(p, false).is_err());
+        }
+        assert!(x3.dropout2d(0.5, true).is_err());
+        assert!(x3.dropout2d(0.5, false).is_err());
+        assert_eq!(tape.len(), before, "Err 経路でノードを積まない");
+        // 早期リターン（eval・p=0）もノードを積まない。
+        assert!(x4.dropout2d(0.5, false).is_ok());
+        assert!(x4.dropout2d(0.0, true).is_ok());
+        assert!(x4.alpha_dropout(0.5, false).is_ok());
+        assert!(x3.alpha_dropout(0.0, true).is_ok());
+        assert_eq!(tape.len(), before, "早期リターンでノードを積まない");
     }
 }

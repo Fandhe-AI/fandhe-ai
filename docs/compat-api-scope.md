@@ -1764,3 +1764,17 @@ affine・`num_channels` 引数は持たない。学習経路へ結線し、常�
 保留継続: 層型の再エクスポート・自由関数公開・`Tensor`／`Tape` メソッド・GPU 専用カーネル・ONNX `GlobalMaxPool`／`GlobalAveragePool`。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は
 `docs/perf/logs/compat-sequential-adaptive-max-global-pool-2527/README.md` へ申し送り。
+
+**適用記録（経路 2。イシュー #2528・親 #2520・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`Dropout2d`／`AlphaDropout`／`EmbeddingBag`（#2161）を `compat::Sequential::add_dropout2d(p)`・`add_alpha_dropout(p)`・
+`add_embedding_bag(num_embeddings, embedding_dim, mode, padding_idx, seed)` と `Var::dropout2d(p, training)`・
+`Var::alpha_dropout(p, training)`・`Var::embedding_bag(ids, mode, padding_idx)` の `pub fn` として公開し、`add_embedding_bag`／
+`Var::embedding_bag` の引数型 `EmbeddingBagMode` をルートへ再エクスポートした（追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。
+具体シグネチャは `docs/autodiff-dropout-embedding-bag-decision.md` §6 が名前だけを挙げていたため既存規約から機械的に導出した（同 §8）。
+Dropout2d／AlphaDropout は無状態層として学習経路・常駐経路を通過し（`set_training` は伝播する）、EmbeddingBag は `weight` 1 件を
+学習パラメータとして追跡し常駐経路では `Unsupported`（fail-closed）とした。`save_model`／`load_model` は kind `dropout2d`／`alpha_dropout`／
+`embedding_bag` を追加した（`format_version` 不変）。ONNX export は `UnsupportedLayer`。`Module` の `as_*` フックは追加していない。
+保留ガードは層型・自由関数のプローブだけに縮小し、承認形は `api_surface.rs` の正ガードで固定した。
+保留継続: 層型の再エクスポート・自由関数公開・可変長 bag（offsets）・GPU 専用カーネル・ONNX export の対象層の拡大。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は
+`docs/perf/logs/compat-sequential-dropout-embedding-bag-2528/README.md` へ申し送り。

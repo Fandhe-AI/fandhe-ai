@@ -177,11 +177,13 @@
 //! 再利用する合成、`EmbeddingBag` は `Var::embedding` と
 //! `sum`／`mean`／`max` 縮約の合成で、いずれも新規 `Op`／`BackendOps`／
 //! VJP／カーネルは追加しない。`compat::Sequential::add_dropout2d`／
-//! `add_alpha_dropout`／`add_embedding_bag` の facade 公開（経路 2）は
-//! 未承認のため保留する（`crates/facade/src/lib.rs` の
-//! `DropoutEmbeddingBagHoldDoctestGuard`・`crates/facade/tests/
-//! api_surface.rs` の否定ガードで固定。
-//! `docs/autodiff-dropout-embedding-bag-decision.md` §6 承認事項）。
+//! `add_alpha_dropout`／`add_embedding_bag`・`Var::dropout2d`／
+//! `alpha_dropout`／`embedding_bag` は、イシュー #2528（親 #2520・ルート
+//! #2499 の一括承認）で facade 公開済み（層型そのものの再エクスポートは
+//! 未承認のまま。`crates/facade/src/lib.rs` の
+//! `DropoutEmbeddingBagHoldDoctestGuard`〈縮小形〉・`crates/facade/tests/
+//! api_surface.rs` の正ガードで固定。
+//! `docs/autodiff-dropout-embedding-bag-decision.md` §6・§8）。
 //! イシュー #2162（親 #2131）で [`PixelShuffle`]／[`PixelUnshuffle`]
 //! （`pixel_shuffle` モジュール）を追加した。既存 `Var::reshape`／
 //! `permute`／`contiguous` の合成のみで新規 `Op`／`BackendOps`／VJP／
@@ -258,8 +260,10 @@ pub use conv::{
     ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, conv2d_forward_low_precision,
 };
 pub use dropout::{AlphaDropout, Dropout, Dropout2d};
+pub(crate) use dropout::{alpha_dropout_forward, dropout2d_forward};
 pub use ema::ExponentialMovingAverage;
 pub use embedding::{Embedding, EmbeddingVars};
+pub(crate) use embedding_bag::embedding_bag_forward;
 pub use embedding_bag::{EmbeddingBag, EmbeddingBagMode, EmbeddingBagVars};
 pub use flatten::Flatten;
 pub use identity::Identity;
