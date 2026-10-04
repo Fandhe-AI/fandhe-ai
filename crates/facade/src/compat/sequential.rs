@@ -1269,6 +1269,10 @@ impl Sequential {
     /// 0 次元・`embed_dim % num_heads != 0` は `from_config` が拒否する。
     /// `add_multihead_attention` の挙動・保存形式は変えない。
     ///
+    /// `batch_first=false`（`[Len, B, E]`）の層を含むモデルは、`fit*`／`evaluate` が
+    /// DataLoader の第 0 軸をサンプル軸として分割し系列を切断してしまうため
+    /// `InvalidArgument` で拒否される（`predict`／forward は利用可能）。
+    ///
     /// ```
     /// use fandhe_ai::compat::{MultiheadAttentionConfig, Sequential};
     ///
@@ -2197,6 +2201,27 @@ impl Sequential {
             Some(i) => Err(AutodiffError::InvalidArgument(format!(
                 "{ctx}: 層 {i} は bind が追跡しない独自層（add_module）のパラメータを持ち、\
                  学習経路は非対応（イシュー #2398）"
+            ))),
+        }
+    }
+
+    /// `batch_first=false`（`[Len, B, E]` 系列先頭形式）の MultiheadAttention 層を持つ場合、
+    /// 学習・評価経路（`fit*`／`evaluate`）を `InvalidArgument` で拒否する（イシュー #2530・
+    /// PR #2724 レビュー指摘）。`fit`／`evaluate` は `TensorDataset`／`DataLoader` で第 0 軸を
+    /// サンプル軸として分割・シャッフルするため、系列先頭形式では系列が切断され
+    /// 教師データのバッチ軸と不整合になる。系列先頭形式対応の fit が入るまで fail-closed。
+    pub(super) fn reject_seq_first_layer_for_fit(&self, ctx: &str) -> Result<(), AutodiffError> {
+        let pos = self.inner.layers().iter().position(|layer| {
+            layer
+                .as_multihead_attention()
+                .is_some_and(|m| !m.batch_first())
+        });
+        match pos {
+            None => Ok(()),
+            Some(i) => Err(AutodiffError::InvalidArgument(format!(
+                "{ctx}: 層 {i} は batch_first=false（[Len, B, E]）の MultiheadAttention で、\
+                 DataLoader は第 0 軸をサンプル軸として分割するため fit／evaluate は未対応\
+                 （batch_first=true を使うこと。イシュー #2530）"
             ))),
         }
     }
