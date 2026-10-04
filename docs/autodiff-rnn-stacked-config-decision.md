@@ -226,3 +226,42 @@ CUDA（DGX Spark GB10）・Metal（M4 Max）実機での `Stacked*` の
   `nn::Module` 実装・`from_cells`／`batch_first`／`proj_size` 等。
 - 不変: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・
   新規 `unsafe` なし・新規 Op／カーネルなし。
+
+## §10 イシュー #2536 の扱い（承認依頼・未承認・実施しない）
+
+イシュー #2536 の受け入れ条件のうち、(1)「`nn_rnn_module_reexports_exactly_expected_surface`
+の期待集合更新」は #2535（PR #2727）で実施済み（§9「ガード反転」。期待集合 8 → 14）。
+残る (2)〜(4) は §8 の承認範囲（ルート #2499 の一括承認が及ぶのは記録に形が書かれた
+推奨形のみ）の外であり、§5・§9「既知の制限と対象外」および #1955 の承認済み決定
+「選択肢 C」と矛盾するため、本記録の時点では**実施しない**。承認は未取得である。
+
+### 実施しない項目と根拠
+
+| 項目 | 根拠 |
+|------|------|
+| `compat::Sequential` への Stacked 系 `add_*` と学習経路（`bind`・`trainable_parameters` 等）への結線 | §5・§9 が対象外と明記。`crates/facade/src/nn/rnn.rs` のモジュール doc が構造的不整合（入力が `&Tensor<f32>` `[T,B,D]`・隠れ状態の引き回し・複数 `Var` を返す戻り値）を説明。`impl Module for Stacked*`（`crates/autodiff/src/nn/rnn_stacked.rs`）の `forward` は設計上 `Err` で、Sequential の層として積んでも forward できない。`add_stacked_*` という別名での追加は否定ガード `compat_sequential_does_not_expose_rnn_add_methods` の字面上は検出されないが、趣旨上の抜け道であり採らない |
+| `nn::Module` への `as_*` フック追加・`save_model`／`load_model` 対応 | `as_*` は autodiff 内部 `Module`（`crates/autodiff/src/nn/module.rs`）のフックで、facade の `nn::Module`（`crates/facade/src/nn/module.rs`）は REQ-12 により内部フックを載せない。§9 は `Stacked*` の facade `nn::Module` 実装を対象外とする。保存経路は `crates/facade/src/compat/model_io.rs`（`&Sequential` のみ）で、`add_module` の利用者定義層は既に `ModelIoError::UnsupportedModel` で fail-closed |
+| resident 経路の未対応層拒否テスト | 上記 2 項目が前提（Sequential に載せない限り対象層が存在しない） |
+
+### イシュー本文との食い違い
+
+- 対象として挙がる `crates/facade/src/model.rs` は事前学習済みモデルのハブ読み込みで、
+  保存経路ではない（正は `compat/model_io.rs`）。
+- 同種の食い違い処理の先例: §5（#2164）・`docs/compat-fit-sample-weighting-decision.md`。
+
+### ユーザーが選ぶ選択肢
+
+- **案 A（推奨）**: 選択肢 C を維持し、#2536 を「対象外として完了」とする。保存需要は
+  既存の `named_parameters` 経由の保存経路を案内する。あわせて否定ガードの禁止集合へ
+  `add_stacked_rnn`／`add_stacked_lstm`／`add_stacked_gru` を加える別 PR の可否も判断する。
+- **案 B**: 選択肢 C を覆し、系列入力・隠れ状態を扱える Sequential 側 API を新設する。
+  `Var -> Var` 平坦鎖前提の再設計・否定ガード反転・manifest kind 追加・resident 拒否の設計が
+  必要なため、別の設計記録（記録作成 → 承認 → 実装）が要る。
+- **案 C**: Sequential を経由せず `Stacked*` 単体の保存・復元 API のみ公開する。公開形
+  （関数名・エラー型・manifest 形式）が未決のため、これも記録作成 → 承認の 2 段が要る。
+
+### 不変事項
+
+コード変更なし・新規 `unsafe` なし・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
+`docs/spec/` 不変。#2536 は本記録では close しない（親 #2534 の完了条件に影響するため
+ユーザー判断を待つ）。
