@@ -10576,132 +10576,12 @@ fn var_indexing_ops_are_reachable_via_facade_only() {
 }
 
 // =====================================================================
-// #2153（親 #2131）の facade 公開保留固定（`VarTopkUniqueOpsHoldDoctestGuard`）。
-// `VarIndexingOpsHoldDoctestGuard`（イシュー #2148。#2518 で削除済み）と同型の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// #2153 実装・#2519 公開（親 #2500・ルート #2499）の topk_unique_ops 正ガード。
+// 旧否定ガード（`VarTopkUniqueOpsHoldDoctestGuard`）を、承認形（`Var` の 1 行
+// 委譲メソッド 3 件と、入出力型 3 個の autodiff ルート経由 `pub use` のみ）だけを
+// 許す形へ反転した（先例 #2198・#2338・#2511・#2518）。公開形の記録は
 // `docs/autodiff-topk-unique-ops-decision.md` §6 参照。
 // =====================================================================
-
-/// `crates/facade/src/lib.rs` の `VarTopkUniqueOpsHoldDoctestGuard` doc
-/// 内の唯一の doctest ブロックが glob import するネスト `pub mod`
-/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`indexing_ops_hold_doctest_globs_all_pub_modules`〈#2518 で削除済み〉の
-/// `VarTopkUniqueOpsHoldDoctestGuard` 版）。
-#[test]
-fn topk_unique_ops_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarTopkUniqueOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "VarTopkUniqueOpsHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// [`topk_unique_ops_hold_doctest_globs_all_pub_modules`] が glob
-/// import 集合の一致のみを固定するのに対し、本テストは doctest
-/// ブロックの**glob 以外の本文**が固定文言
-/// [`TOPK_UNIQUE_OPS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
-/// することを固定する（旧 `indexing_ops_hold_doctest_probe_body_matches_
-/// fixed_contract`〈#2518 で削除済み〉と同じ理由: rustdoc の `# ` 隠し行・プローブの
-/// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
-/// 機械的に拒否する）。
-#[test]
-fn topk_unique_ops_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarTopkUniqueOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, TOPK_UNIQUE_OPS_HOLD_PROBE_BODY,
-        "VarTopkUniqueOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 TOPK_UNIQUE_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_topk_unique_hold_probe モジュール・\
-         __FandheTopkUniqueHoldProbe トレイト・__probe_* 関数）の削除・\
-         弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`topk_unique_ops_hold_doctest_probe_body_matches_fixed_contract`]
-/// が要求する固定文言。`crates/facade/src/lib.rs` の
-/// `VarTopkUniqueOpsHoldDoctestGuard` doc 内の唯一の doctest ブロック
-/// から、ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）
-/// を除いた本文と 1 行単位で完全一致する必要がある（クレートルート
-/// 自体の `use fandhe_ai::*;` は本文に含む）。
-const TOPK_UNIQUE_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_topk_unique_hold_probe {\n\
-\x20\x20\x20\x20pub mod topk_unique_ops {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn topk_with_options() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn unique_with_options() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn unique_consecutive() {}\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_topk_unique_hold_probe::*;\n\
-\n\
-struct __FandheTopkUniqueMarker;\n\
-\n\
-trait __FandheTopkUniqueHoldProbe {\n\
-\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker;\n\
-\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker;\n\
-\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheTopkUniqueHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-}\n\
-\n\
-impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tensor<f32> {\n\
-\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-}\n\
-\n\
-impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-\x20\x20\x20\x20fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-\x20\x20\x20\x20fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }\n\
-}\n\
-\n\
-fn __probe_free_fns() {\n\
-\x20\x20\x20\x20// `topk_unique_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
-\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
-\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20topk_unique_ops::topk_with_options();\n\
-\x20\x20\x20\x20topk_unique_ops::unique_with_options();\n\
-\x20\x20\x20\x20topk_unique_ops::unique_consecutive();\n\
-}\n\
-\n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Var::topk_with_options(x);\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.topk_with_options();\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Var::unique_with_options(x);\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.unique_with_options();\n\
-}\n\
-\n\
-fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Tensor::unique_consecutive(x);\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.unique_consecutive();\n\
-}\n\
-\n\
-fn __probe_tape(x: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = fandhe_ai::Tape::topk_with_options(x);\n\
-\x20\x20\x20\x20let _: __FandheTopkUniqueMarker = x.topk_with_options();\n\
-}";
 
 /// `topk_with_options`・`unique_with_options`・`unique_consecutive`
 /// （3 個の関数名。イシュー #2153）。[`facade_does_not_reexport_or_
@@ -10718,9 +10598,10 @@ const TOPK_UNIQUE_OPS_FN_NAMES: [&str; 3] = [
 /// 等のモジュール再エクスポート・別名含む）も、
 /// [`TOPK_UNIQUE_OPS_FN_NAMES`]（3 個）の `fn` 宣言（可視性・宣言
 /// 文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出契約）
-/// も存在しないことを固定する（`VarTopkUniqueOpsHoldDoctestGuard` の
-/// 正のプローブと多層防御を成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_or_declare_indexing_ops` と同型）。
+/// も存在しないことを固定する。承認形は autodiff の `Var` 委譲メソッド
+/// （とクレートルート経由の型 3 個）のみで、facade でのモジュール再エクスポート・
+/// 別名・独自 `fn` 宣言は引き続き拒否する（#2519 で正ガードの一部へ位置づけ
+/// を変更。`facade_does_not_reexport_or_declare_indexing_ops` と同型）。
 #[test]
 fn facade_does_not_reexport_or_declare_topk_unique_ops() {
     let src_dir = facade_crate_root().join("src");
@@ -10751,9 +10632,8 @@ fn facade_does_not_reexport_or_declare_topk_unique_ops() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が topk_unique_ops（イシュー #2153 の内部クレート限定\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+        "facade が topk_unique_ops を再エクスポート、または同名の fn を宣言\
+         している（承認形は autodiff の `Var` 委譲メソッドのみ。#2519）: {offending:?}"
     );
 }
 
@@ -10762,11 +10642,12 @@ fn facade_does_not_reexport_or_declare_topk_unique_ops() {
 /// 固定する（`workspace_declares_indexing_ops_fn_names_only_in_
 /// approved_locations`〈旧 only_in_autodiff_indexing_ops。#2518 で改名〉と同型のインベントリ）。
 ///
-/// **期待集合**（着手前確認の再 grep で判明）: `topk_with_options`・
-/// `unique_with_options`・`unique_consecutive` はいずれも
-/// `crates/autodiff/src/topk_unique_ops.rs` にのみ 1 件ずつ存在する。
+/// **期待集合**: `topk_with_options`・`unique_with_options`・
+/// `unique_consecutive` はいずれも `crates/autodiff/src/topk_unique_ops.rs`
+/// （各 1 件）と `crates/autodiff/src/var.rs`（`Var` 委譲メソッド。各 1 件。
+/// #2519）にのみ存在する。
 #[test]
-fn workspace_declares_topk_unique_ops_fn_names_only_in_allowed_locations() {
+fn workspace_declares_topk_unique_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -10810,21 +10691,191 @@ fn workspace_declares_topk_unique_ops_fn_names_only_in_allowed_locations() {
         });
     }
 
-    let expected: std::collections::BTreeMap<String, usize> = TOPK_UNIQUE_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = TOPK_UNIQUE_OPS_FN_NAMES
         .iter()
         .map(|name| (format!("autodiff/src/topk_unique_ops.rs::{name}"), 1usize))
         .collect();
+    for name in TOPK_UNIQUE_OPS_FN_NAMES {
+        expected.insert(format!("autodiff/src/var.rs::{name}"), 1usize);
+    }
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の topk_unique_ops 系 `fn` 宣言集合が\
-         `crates/autodiff/src/topk_unique_ops.rs`（3 件）のみという期待と\
-         一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
+         期待（`crates/autodiff/src/topk_unique_ops.rs` 各 1 件 +\
+         `autodiff/src/var.rs` 各 1 件）と一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
          が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
          なのかを確認すること）: {found:?}"
     );
 }
 
+/// `var.rs` の 3 委譲メソッド本体の承認形（`topk_unique_ops` 自由関数への
+/// 1 行委譲。引数名も固定）。確保前検査・0-d 拒否・`i32` 上限検査の迂回や
+/// 独自実装・スタブへのすり替えを拒否する（#2519）。
+const TOPK_UNIQUE_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 3] = [
+    (
+        "topk_with_options",
+        "crate : : topk_unique_ops : : topk_with_options ( self , k , opts )",
+    ),
+    (
+        "unique_with_options",
+        "crate : : topk_unique_ops : : unique_with_options ( self , opts )",
+    ),
+    (
+        "unique_consecutive",
+        "crate : : topk_unique_ops : : unique_consecutive ( self , opts )",
+    ),
+];
+
+/// `var.rs` の 3 委譲メソッドの本体が [`TOPK_UNIQUE_OPS_VAR_EXPECTED_BODIES`]
+/// と一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
+#[test]
+fn var_topk_unique_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in TOPK_UNIQUE_OPS_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（topk_unique_ops 自由関数への \
+             1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai` 経由だけ（`fandhe_ai_autodiff` を import しない）で
+/// 3 メソッドと入出力型 3 個へ到達でき、シグネチャが承認形と一致し、実際に
+/// 適用して期待値が得られることを固定する（スタブでは通らない。#2519）。
+#[test]
+fn var_topk_unique_ops_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, TopkOptions, UniqueOptions, UniqueOutput, Var};
+
+    type TopkSig<'t> =
+        fn(&Var<'t>, usize, TopkOptions) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>;
+    type UniqueSig<'t> = fn(&Var<'t>, UniqueOptions) -> Result<UniqueOutput, AutodiffError>;
+    fn sig_topk<'t>() -> TopkSig<'t> {
+        Var::<'t>::topk_with_options
+    }
+    fn sig_unique<'t>() -> UniqueSig<'t> {
+        Var::<'t>::unique_with_options
+    }
+    fn sig_consecutive<'t>() -> UniqueSig<'t> {
+        Var::<'t>::unique_consecutive
+    }
+
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&Tensor::new(vec![3.0_f32, 1.0, 2.0], &[3]).expect("tensor"));
+    let opts = TopkOptions::default().with_dim(-1).with_sorted(false);
+    let (values, index) = sig_topk()(&x, 2, opts).expect("topk_with_options");
+    assert_eq!(values.to_tensor().host_slice().into_owned(), [3.0, 2.0]);
+    assert_eq!(index.host_slice().into_owned(), [0, 2]);
+
+    let y = tape.var(&Tensor::new(vec![2.0_f32, 2.0, 1.0, 2.0], &[4]).expect("tensor"));
+    let uo = UniqueOptions::default()
+        .with_return_inverse(true)
+        .with_return_counts(true);
+    let out = sig_unique()(&y, uo).expect("unique_with_options");
+    assert_eq!(out.values.host_slice().into_owned(), [1.0, 2.0]);
+    assert_eq!(
+        out.inverse.expect("inverse").host_slice().into_owned(),
+        [1, 1, 0, 1]
+    );
+    assert_eq!(
+        out.counts.expect("counts").host_slice().into_owned(),
+        [1, 3]
+    );
+    let out = sig_consecutive()(&y, uo).expect("unique_consecutive");
+    assert_eq!(out.values.host_slice().into_owned(), [2.0, 1.0, 2.0]);
+    assert_eq!(
+        out.counts.expect("counts").host_slice().into_owned(),
+        [2, 1, 1]
+    );
+}
+
+/// `topk_unique_ops` の入出力型 3 個（#2519）。
+const TOPK_UNIQUE_TYPE_NAMES: [&str; 3] = ["TopkOptions", "UniqueOptions", "UniqueOutput"];
+
+/// 承認形の唯一の `pub use` 行（`src/lib.rs`。autodiff ルート経由・別名なし）。
+const TOPK_UNIQUE_TYPES_APPROVED_LINE: &str =
+    "pub use fandhe_ai_autodiff::{TopkOptions, UniqueOptions, UniqueOutput};";
+
+/// facade src の 1 ファイル内容から、3 型名を識別子として含む `pub use` 行
+/// （空白正規化済み）を集める検出本体。コメント・文字列リテラルは無視する。
+fn scan_topk_unique_type_pub_use_lines(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("pub use") || l.starts_with("pub(crate) use"))
+        .filter(|l| {
+            TOPK_UNIQUE_TYPE_NAMES
+                .iter()
+                .any(|n| line_contains_identifier(l, n))
+        })
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// 3 型の再エクスポートが `src/lib.rs` の承認形 1 行だけであることを固定する
+/// （別名・`topk_unique_ops::` 経由・別モジュールからの再エクスポートは fail。
+/// `facade_reexports_prefetch_items_only_in_approved_shape` と同型）。
+#[test]
+fn facade_reexports_topk_unique_types_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_lib_rs = 0usize;
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in scan_topk_unique_type_pub_use_lines(content) {
+            if path.ends_with("src/lib.rs") && line == TOPK_UNIQUE_TYPES_APPROVED_LINE {
+                approved_in_lib_rs += 1;
+            } else {
+                offending.push(format!("{}: `{line}`", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が TopkOptions・UniqueOptions・UniqueOutput を承認形（src/lib.rs の \
+         `{TOPK_UNIQUE_TYPES_APPROVED_LINE}` 1 行）以外で再エクスポートしている \
+         （#2519）: {offending:?}"
+    );
+    assert_eq!(
+        approved_in_lib_rs, 1,
+        "src/lib.rs に承認形の再エクスポート行がちょうど 1 行存在しない\
+         （検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_topk_unique_type_pub_use_lines`] の自己テスト（合成入力）。
+#[test]
+fn facade_reexports_topk_unique_types_only_in_approved_shape_detects_each_category() {
+    let scan = scan_topk_unique_type_pub_use_lines;
+    assert_eq!(
+        scan(TOPK_UNIQUE_TYPES_APPROVED_LINE),
+        vec![TOPK_UNIQUE_TYPES_APPROVED_LINE.to_string()]
+    );
+    // 違反: 別名・別経路・部分再エクスポート（承認形と文字列一致しない行として検出される）。
+    for src in [
+        "pub use fandhe_ai_autodiff::TopkOptions as Foo;",
+        "pub use fandhe_ai_autodiff::topk_unique_ops::UniqueOutput;",
+        "pub use fandhe_ai_autodiff::{UniqueOptions};",
+    ] {
+        let hits = scan(src);
+        assert_eq!(hits.len(), 1, "src={src:?}");
+        assert_ne!(hits[0], TOPK_UNIQUE_TYPES_APPROVED_LINE, "src={src:?}");
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use fandhe_ai_autodiff::TopkOptions;",
+        "let s = \"pub use x::UniqueOutput;\";",
+        "use fandhe_ai_autodiff::TopkOptions;",
+        "pub use fandhe_ai_autodiff::Var;",
+    ] {
+        assert!(scan(src).is_empty(), "src={src:?}");
+    }
+}
 // =====================================================================
 // #2154 実装・#2514 公開（親 #2500・ルート #2499）の extremum_ops 正ガード。
 // 旧否定ガード（`VarExtremumOpsHoldDoctestGuard`）を、承認形（`Var` の 1 行
@@ -16836,10 +16887,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518 の保留ガード削除後は 23）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519 の保留ガード削除後は 22）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 23;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 22;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\

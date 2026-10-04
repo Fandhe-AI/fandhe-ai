@@ -1,12 +1,12 @@
 //! `topk`・`unique` のオプション拡張（イシュー #2153・親 #2131
 //! 「5-B 演算」）。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/reduce_ops.rs`
-//! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への
-//! inherent メソッド追加は即座に facade 公開面へ出てしまう。承認が
-//! 取れるまでは `Var` の外に自由関数として置き到達不能にする
-//! （`docs/autodiff-topk-unique-ops-decision.md` §0）。
+//! **facade 公開形（イシュー #2519 で承認・公開済み）**: facade には `Var` の
+//! 1 行委譲メソッド（`topk_with_options`・`unique_with_options`・
+//! `unique_consecutive`）としてのみ公開する。本モジュール自体は再エクスポート
+//! せず、入出力型（`TopkOptions`・`UniqueOptions`・`UniqueOutput`）だけを
+//! クレートルート経由で公開する（`docs/autodiff-topk-unique-ops-decision.md`
+//! §6）。委譲メソッドの本体は facade の正ガードが 1 行委譲に固定する。
 //!
 //! **PyTorch 相当・出力型**（詳細は `docs/autodiff-topk-unique-ops-
 //! decision.md` §1 の表を参照）:

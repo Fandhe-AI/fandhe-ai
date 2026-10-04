@@ -214,10 +214,11 @@
 //! 非負 `dim` のみ）・`Var::unique`（`dim`／`return_inverse`／
 //! `return_counts` 非対応）のオプション拡張（`sorted=false`・負
 //! `dim`・unique の `dim` 指定・`return_inverse`・`return_counts`・
-//! `unique_consecutive`）を [`topk_unique_ops`] へ追加した。
-//! [`reduce_ops`] と同じく非公開の自由関数群で、facade 公開は承認待ち
-//! のため意図的に再エクスポートしない（`docs/autodiff-topk-unique-
-//! ops-decision.md`・モジュール doc 参照）。
+//! `unique_consecutive`）を [`topk_unique_ops`] へ追加した。イシュー #2519 で
+//! `Var::topk_with_options`／`unique_with_options`／`unique_consecutive` の
+//! 1 行委譲メソッドとして facade へ公開済み（入出力型 `TopkOptions`／
+//! `UniqueOptions`／`UniqueOutput` はルートから再エクスポート。モジュール自体は
+//! facade へ再エクスポートしない。`docs/autodiff-topk-unique-ops-decision.md` §6）。
 
 //! イシュー #2154（親 #2131）で `amax`／`amin`（PyTorch `torch.amax`／
 //! `amin` 相当。タイに勾配を均等分配する VJP）を [`extremum_ops`] へ
@@ -307,4 +308,7 @@ pub use fandhe_ai_tensor_core::rng::{
 pub use fandhe_ai_tensor_core::creation::{
     CreationError, arange, eye, linspace, ones_like, zeros_like,
 };
+// `topk_unique_ops` の入出力型（イシュー #2519。facade が `Var` の委譲メソッドと
+// ともに再エクスポートする。`QrVars`／`SvdVars` と同じ「ルート経由」の形）。
+pub use topk_unique_ops::{TopkOptions, UniqueOptions, UniqueOutput};
 pub use var::{GateParams, QrVars, Reduction, SvdVars, Var, VarHostView};

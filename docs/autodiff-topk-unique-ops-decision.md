@@ -2,9 +2,11 @@
 
 イシュー #2153「topk・unique のオプション拡張（sorted・dim・return_* など）」（親 #2131「PyTorch／TF 置き換えの API 網羅」5-B 演算）の設計判断記録。`docs/autodiff-reduce-ops-decision.md`・`docs/autodiff-indexing-inplace-design.md` と同型の「内部モジュール＋facade 保留ガード」枠組みを踏襲する。
 
-## 0. facade 非公開（意図的）
+## 0. facade 公開形（#2519 で公開済み。#2153 時点の非公開方針は履歴）
 
-`Var` は facade（`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への inherent メソッド追加は即座に facade 公開面へ出てしまう。本イシューは facade 公開（`Var` への委譲メソッド追加）を承認事項として明示するため、承認が取れるまでは新 API を `Var` の外に自由関数として `fandhe_ai_autodiff::topk_unique_ops`（`crates/autodiff/src/topk_unique_ops.rs`）へ置き、facade から到達不能にする。`crates/facade/src/lib.rs::VarTopkUniqueOpsHoldDoctestGuard`（正のプローブ doctest）＋`crates/facade/tests/api_surface.rs` の 4 テストで多層防御を固定する。
+**現状（#2519 以降）**: `Var::topk_with_options`・`Var::unique_with_options`・`Var::unique_consecutive` を `fandhe_ai_autodiff::topk_unique_ops` 自由関数への 1 行委譲メソッドとして facade へ公開済み（§6 実装記録）。以下は #2153 時点の履歴である。
+
+（履歴）`Var` は facade（`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への inherent メソッド追加は即座に facade 公開面へ出てしまう。#2153 は facade 公開（`Var` への委譲メソッド追加）を承認事項として明示するため、承認が取れるまでは新 API を `Var` の外に自由関数として `fandhe_ai_autodiff::topk_unique_ops`（`crates/autodiff/src/topk_unique_ops.rs`）へ置き、facade から到達不能にし、`VarTopkUniqueOpsHoldDoctestGuard`（正のプローブ doctest）＋`api_surface.rs` の 4 テストで多層防御を固定していた（#2519 で正ガードへ反転）。
 
 ## 1. API 表
 
@@ -57,9 +59,23 @@ CPU 実装（`crates/backend-cpu/src/unique.rs::unique_ext`）は `fandhe_ai_aut
 
 3 つの公開入口（`topk_with_options`・`unique_with_options`・`unique_consecutive`）すべての冒頭・あらゆる分岐（`sorted=true`／`dim=None` かつ追加出力なしの既存委譲経路を含む）より前に `topk_unique_ops::ensure_alloc_fits_f32`（`crate::bool_ops::checked_bytes_for` 経由）で入力 shape の要素数積オーバーフロー・`isize::MAX` バイト超過を検査する。`unique` 系はさらに対象要素数の `i32` 上限を dispatch 前に検査する（§2.3）。
 
-## 6. 承認事項（本 PR では実施しない）
+## 6. 承認事項
 
-- facade への再エクスポート（`Var` への委譲メソッド追加を含む）。窓口は #2153／#2131。
+- facade への再エクスポート（`Var` への委譲メソッド追加を含む）。窓口は #2153／#2131。**#2519 で実施済み**（下記実装記録）。
+
+### 実装記録（イシュー #2519・2026-10-04）
+
+ルート #2499 本文「承認範囲」節の一括承認（Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい）に基づく。
+
+- 公開した委譲メソッド（`impl Var`。本体は `topk_unique_ops` 自由関数への 1 行委譲）:
+  - `Var::topk_with_options(&self, k: usize, opts: TopkOptions) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>`
+  - `Var::unique_with_options(&self, opts: UniqueOptions) -> Result<UniqueOutput, AutodiffError>`
+  - `Var::unique_consecutive(&self, opts: UniqueOptions) -> Result<UniqueOutput, AutodiffError>`
+  - 既存の `Var::topk`・`Var::unique` は不変（追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。
+- 入出力型の到達形: `TopkOptions`・`UniqueOptions`・`UniqueOutput` を autodiff クレートルートの `pub use` 経由で facade ルートへ `pub use fandhe_ai_autodiff::{TopkOptions, UniqueOptions, UniqueOutput};`（1 行）として再エクスポートした。§6 の「再エクスポート」を facade の既存ルート `pub use` 規約（`QrVars`／`SvdVars` と同型）で具体化したもの（入力型が名前で参照できないと委譲メソッドを呼べないため。イシュー対象範囲の 3 型到達に対応）。モジュール `topk_unique_ops` 自体は再エクスポートしない。
+- ガード反転（`crates/facade/src/lib.rs`・`crates/facade/tests/api_surface.rs`）: `VarTopkUniqueOpsHoldDoctestGuard`・`topk_unique_ops_hold_doctest_globs_all_pub_modules`・`topk_unique_ops_hold_doctest_probe_body_matches_fixed_contract`・定数 `TOPK_UNIQUE_OPS_HOLD_PROBE_BODY` を削除。`facade_does_not_reexport_or_declare_topk_unique_ops` は維持（モジュール再エクスポート・独自 `fn` 宣言の拒否）。`workspace_declares_topk_unique_ops_fn_names_only_in_allowed_locations` を `…_only_in_approved_locations` へ改名し期待集合に `autodiff/src/var.rs` 各 1 件を追加。新設: `var_topk_unique_ops_methods_are_thin_delegations`・`var_topk_unique_ops_are_reachable_via_facade_only`・`facade_reexports_topk_unique_types_only_in_approved_shape`（＋自己テスト `…_detects_each_category`）。`MIN_KNOWN_PROBE_BLOCKS` は 23 から 22 へ更新。
+- 不変: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec/`。新規の `Op`／`BackendOps`／GPU カーネル／`unsafe` なし。
+- 実機 parity（CUDA GB10・Metal M4 Max）は §7・§8 のとおり `docs/perf/logs/topk-unique-2153/README.md` の申し送りが有効（委譲先は同一経路のため新たな申し送りなし）。
 
 ## 7. スコープ外
 
@@ -74,3 +90,4 @@ CPU 実装（`crates/backend-cpu/src/unique.rs::unique_ext`）は `fandhe_ai_aut
 
 - CPU: `cargo test -p fandhe-ai-tensor-core`・`cargo test -p fandhe-ai-backend-cpu --lib unique`・`cargo test -p fandhe-ai-autodiff --test topk_unique_parity`・`cargo test -p fandhe-ai --test topk_unique_ops_backend_parity`・`cargo test -p fandhe-ai --test api_surface` すべて green（実装 PR で実行済み）。
 - CUDA（DGX Spark GB10）／Metal（Apple Silicon）実機 parity（`#[ignore]` テスト）は本実装環境に到達手段がないため未実施。`docs/perf/logs/topk-unique-2153/README.md` へ申し送る。
+- #2519（facade 公開）: `cargo test -p fandhe-ai --test topk_unique_ops_facade`・`cargo test -p fandhe-ai --test api_surface` green。
