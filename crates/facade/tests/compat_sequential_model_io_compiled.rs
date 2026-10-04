@@ -450,10 +450,7 @@ fn tampered_kind_is_rejected() {
 fn tampered_loss_and_dtype_are_rejected() {
     let (_g, dir) = compiled_dir("loss", true);
     let good = read_manifest(&dir);
-    write_manifest(
-        &dir,
-        &good.replace("\"loss\":\"mse\"", "\"loss\":\"huber\""),
-    );
+    write_manifest(&dir, &good.replace("\"loss\":\"mse\"", "\"loss\":\"ctc\""));
     assert!(matches!(
         load_err(&dir),
         ModelIoError::UnsupportedModel { .. }
@@ -615,4 +612,60 @@ fn tampered_amp_state_is_rejected() {
     // 改竄していない manifest は読める（テストの前提確認）
     write_manifest(&dir, &good);
     assert!(load_model(&dir).is_ok());
+}
+/// #2509 で追加した 7 loss（L1・Bce・BceWithLogits・Nll・KlDiv・Huber・SmoothL1）の種別が
+/// save → load で復元され、続きの `fit` が bit 一致する（`format_version` は据え置き）。
+#[test]
+fn added_loss_kinds_are_restored() {
+    let (x, _) = data();
+    let y_f: Vec<f32> = (0..N * 2)
+        .map(|i| 0.3 + 0.4 * ((i as f32) * 0.9).sin().abs())
+        .collect();
+    let y_f = Tensor::new(y_f, &[N, 2]).expect("y_f");
+    let y_i = Tensor::new((0..N as i32).map(|i| i % 2).collect::<Vec<_>>(), &[N]).expect("y_i");
+    // 各行 [p, 1-p] にして KlDiv の確率分布条件も満たす。
+    let dist: Vec<f32> = (0..N)
+        .flat_map(|i| {
+            let p = 0.3 + 0.4 * ((i as f32) * 0.9).sin().abs();
+            [p, 1.0 - p]
+        })
+        .collect();
+    let y_dist = Tensor::new(dist, &[N, 2]).expect("y_dist");
+
+    for (name, loss) in [
+        ("l1", Loss::L1),
+        ("bce", Loss::Bce),
+        ("bce_with_logits", Loss::BceWithLogits),
+        ("nll", Loss::Nll),
+        ("kl_div", Loss::KlDiv),
+        ("huber", Loss::Huber),
+        ("smooth_l1", Loss::SmoothL1),
+    ] {
+        let mut m = match loss {
+            Loss::Bce => Sequential::new()
+                .add_linear(3, 2, 7)
+                .map(|m| m.add_sigmoid())
+                .expect("build"),
+            Loss::Nll | Loss::KlDiv => Sequential::new()
+                .add_linear(3, 2, 7)
+                .map(|m| m.add_log_softmax(1))
+                .expect("build"),
+            _ => Sequential::new().add_linear(3, 2, 7).expect("build"),
+        };
+        m.compile(Optimizer::Sgd(SgdConfig::new(0.05)), loss)
+            .expect("compile");
+        let fit = |m: &mut Sequential| match loss {
+            Loss::Nll => m.fit(&x, &y_i, FitConfig::new(1, 4)),
+            Loss::KlDiv => m.fit(&x, &y_dist, FitConfig::new(1, 4)),
+            _ => m.fit(&x, &y_f, FitConfig::new(1, 4)),
+        };
+        fit(&mut m).expect("fit");
+        let guard = TempDirGuard::new(name);
+        let dir = guard.path().join("m");
+        save_model(&m, &dir).expect("save");
+        let mut m2 = load(&dir);
+        let h1 = fit(&mut m).expect("fit");
+        let h2 = fit(&mut m2).expect("fit");
+        assert_eq!(f32_bits(&h1.loss), f32_bits(&h2.loss), "{name}");
+    }
 }

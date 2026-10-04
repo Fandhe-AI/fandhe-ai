@@ -131,6 +131,13 @@ fn loss_name(loss: Loss) -> &'static str {
     match loss {
         Loss::Mse => "mse",
         Loss::CrossEntropy => "cross_entropy",
+        Loss::L1 => "l1",
+        Loss::Bce => "bce",
+        Loss::BceWithLogits => "bce_with_logits",
+        Loss::Nll => "nll",
+        Loss::KlDiv => "kl_div",
+        Loss::Huber => "huber",
+        Loss::SmoothL1 => "smooth_l1",
     }
 }
 
@@ -496,6 +503,13 @@ pub(super) fn parse_compiled(value: &Json) -> Result<Option<CompiledMeta>, Model
     let loss = match as_str(f[0], "compiled.loss")? {
         "mse" => Loss::Mse,
         "cross_entropy" => Loss::CrossEntropy,
+        "l1" => Loss::L1,
+        "bce" => Loss::Bce,
+        "bce_with_logits" => Loss::BceWithLogits,
+        "nll" => Loss::Nll,
+        "kl_div" => Loss::KlDiv,
+        "huber" => Loss::Huber,
+        "smooth_l1" => Loss::SmoothL1,
         other => {
             return Err(ModelIoError::UnsupportedModel {
                 reason: format!("未対応の loss {}", clip(other)),
