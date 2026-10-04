@@ -443,6 +443,9 @@ version migration。
   | `instance_norm`（#2525） | `eps`（f32） | なし |
   | `pixel_shuffle`（#2526） | `upscale_factor` | なし |
   | `pixel_unshuffle`（#2526） | `downscale_factor` | なし |
+  | `adaptive_max_pool2d`（#2527） | `output_size_{h,w}` | なし |
+  | `adaptive_max_pool1d`（#2527） | `output_size` | なし |
+  | `global_pool`（#2527） | `mode`（文字列 `"avg"`／`"max"` の allowlist。未知値は manifest 拒否・保存側の未知 variant は `UnsupportedModel`）・`keepdims`（bool） | なし |
   | `conv1d` | `in_channels`・`out_channels`・`kernel_size`・`stride`・`padding`・`dilation`・`groups` | `weight: [out, in/groups, k]`・`bias: [out]` |
   | `layer_norm` | `normalized_size`・`eps`（f32） | `weight: [n]`・`bias: [n]` |
   | `rms_norm` | `normalized_size`・`eps`（f32） | `weight: [n]` |

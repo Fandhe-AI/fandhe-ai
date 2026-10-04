@@ -13176,18 +13176,11 @@ fn facade_does_not_reexport_multihead_attention_config() {
 }
 // =====================================================================
 // イシュー #2160（親 #2131）: AdaptiveMaxPool2d／AdaptiveMaxPool1d／
-// GlobalPool の facade 公開保留を検査するテスト群。
-// `AdaptiveMaxGlobalPoolHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、`compat::Sequential::
-// add_adaptive_max_pool2d`／`add_adaptive_max_pool1d`／`add_global_pool`
-// の非宣言を持つ。`adaptive_max_pool_ops` 自体が非 `pub mod`
-// （`Var` の外の `pub(crate)` 自由関数）のため、`conv3d` 系の
-// `facade_does_not_reexport_or_declare_*`／`workspace_declares_*_fn_
-// names_only_in_allowed_locations` に相当する走査（`pub use` 再
-// エクスポート検査・fn 宣言インベントリ）は対象外（そもそも facade
-// から到達できるモジュールパスが存在しないため）。承認事項・多層防御の
-// 位置づけは `docs/autodiff-adaptive-max-global-pool-decision.md`
-// 参照。
+// GlobalPool の facade 公開保留（#2527 で `Var` メソッド・`Sequential::add_*`・
+// `GlobalPoolMode` は公開済みに反転。層型・`Tensor`／`Tape` メソッドのみ保留継続）
+// を検査するテスト群。`AdaptiveMaxGlobalPoolHoldDoctestGuard`（`src/lib.rs`）の
+// 正のプローブ 1 ブロック方式のドリフト検査を持つ。承認事項・多層防御の位置づけは
+// `docs/autodiff-adaptive-max-global-pool-decision.md` §6・§8 参照。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `AdaptiveMaxGlobalPoolHoldDoctestGuard`
@@ -13238,8 +13231,7 @@ fn adaptive_max_global_pool_hold_doctest_probe_body_matches_fixed_contract() {
         "AdaptiveMaxGlobalPoolHoldDoctestGuard の doctest ブロック本文\
          （glob 以外）が固定文言 ADAPTIVE_MAX_GLOBAL_POOL_HOLD_PROBE_BODY\
          からドリフトしている。正のプローブ\
-         （__FandheAdaptiveMaxPoolHoldProbe／__FandheAdaptiveMaxPoolAddProbe\
-         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか\
+         （__FandheAdaptiveMaxPoolHoldProbe トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか\
          確認すること。"
     );
 }
@@ -13259,11 +13251,6 @@ trait __FandheAdaptiveMaxPoolHoldProbe {\n\
 \x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
-\x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
-}\n\
-\n\
 impl __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
 \x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
@@ -13272,25 +13259,6 @@ impl __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Tensor<f32> {\n\
 impl __FandheAdaptiveMaxPoolHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
 \x20\x20\x20\x20fn adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
-}\n\
-\n\
-trait __FandheAdaptiveMaxPoolAddProbe {\n\
-\x20\x20\x20\x20fn add_adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
-\x20\x20\x20\x20fn add_adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
-\x20\x20\x20\x20fn add_global_pool(&self) -> __FandheAdaptiveMaxPoolMarker;\n\
-}\n\
-\n\
-impl __FandheAdaptiveMaxPoolAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_adaptive_max_pool2d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
-\x20\x20\x20\x20fn add_adaptive_max_pool1d(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
-\x20\x20\x20\x20fn add_global_pool(&self) -> __FandheAdaptiveMaxPoolMarker { __FandheAdaptiveMaxPoolMarker }\n\
-}\n\
-\n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Var::adaptive_max_pool2d(x);\n\
-\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool2d();\n\
-\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Var::adaptive_max_pool1d(x);\n\
-\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool1d();\n\
 }\n\
 \n\
 fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
@@ -13305,58 +13273,307 @@ fn __probe_tape(x: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool2d();\n\
 \x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::Tape::adaptive_max_pool1d(x);\n\
 \x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = x.adaptive_max_pool1d();\n\
-}\n\
-\n\
-fn __probe_sequential_add(x: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_adaptive_max_pool2d(x);\n\
-\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_adaptive_max_pool1d(x);\n\
-\x20\x20\x20\x20let _: __FandheAdaptiveMaxPoolMarker = fandhe_ai::compat::Sequential::add_global_pool(x);\n\
 }";
 
-/// `src/compat` 配下に `add_adaptive_max_pool2d`／
-/// `add_adaptive_max_pool1d`／`add_global_pool` の `pub fn` 宣言が
-/// 存在しないことを固定する（イシュー #2160。
-/// `compat_sequential_does_not_expose_spatial_layer_add_methods` と
-/// 同型。`docs/autodiff-adaptive-max-global-pool-decision.md`
-/// 「承認事項」が未承認のまま対象外としている設計判断の固定）。
+// =====================================================================
+// イシュー #2527（親 #2520・ルート #2499 の一括承認）: AdaptiveMaxPool2d／
+// AdaptiveMaxPool1d／GlobalPool の facade 公開の正ガード。保留ガード
+// （`AdaptiveMaxGlobalPoolHoldDoctestGuard`）から `Var`・`Sequential` の
+// プローブを外し、承認形（`Var` の 1 行委譲メソッド 2 個・`compat::Sequential`
+// の add_* 3 個・ルートの `GlobalPoolMode` 再エクスポート 1 行）だけを許す
+// 形へ反転した。層型の再エクスポートと `Tensor`／`Tape` への同名メソッドは
+// 未承認のまま禁止する。承認事項は
+// `docs/autodiff-adaptive-max-global-pool-decision.md` §6・§8 参照。
+// =====================================================================
+
+/// #2527 で公開する 5 名の `fn` 名（`Var` 2 個 + `Sequential` 3 個）に、
+/// 既存の定義元（内部クレート）を持つ同名 `fn` を含めた検査対象。
+const ADAPTIVE_MAX_GLOBAL_POOL_FACADE_FN_NAMES: [&str; 5] = [
+    "adaptive_max_pool2d",
+    "adaptive_max_pool1d",
+    "add_adaptive_max_pool2d",
+    "add_adaptive_max_pool1d",
+    "add_global_pool",
+];
+
+/// workspace 全体（`crates/*/src/`）で [`ADAPTIVE_MAX_GLOBAL_POOL_FACADE_FN_NAMES`]
+/// の `fn` 宣言の定義元集合を固定する（過不足とも fail-closed。迂回実装の混入検出）。
+/// `adaptive_max_pool2d` は #2160 の内部実装（`adaptive_max_pool_ops`・`eval`・
+/// `backend-cpu`・`tensor-core` の BackendOps）にも同名定義があるため、それらを
+/// 含む全集合で固定する。
 #[test]
-fn compat_sequential_does_not_expose_adaptive_max_global_pool_add_methods() {
-    let compat_dir = facade_crate_root().join("src/compat");
-    let forbidden = [
-        "add_adaptive_max_pool2d",
-        "add_adaptive_max_pool1d",
+fn workspace_declares_adaptive_max_global_pool_facade_fn_names_only_in_approved_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .expect("workspace crates ディレクトリが読めない")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty());
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in ADAPTIVE_MAX_GLOBAL_POOL_FACADE_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        // #2527 で公開した承認形。
+        "autodiff/src/var.rs::adaptive_max_pool2d",
+        "autodiff/src/var.rs::adaptive_max_pool1d",
+        "facade/src/compat/sequential.rs::add_adaptive_max_pool2d",
+        "facade/src/compat/sequential.rs::add_adaptive_max_pool1d",
+        "facade/src/compat/sequential.rs::add_global_pool",
+        // #2160 の内部実装（共有 forward・ホスト参照実装・BackendOps）。
+        "autodiff/src/adaptive_max_pool_ops.rs::adaptive_max_pool2d",
+        "autodiff/src/adaptive_max_pool_ops.rs::adaptive_max_pool1d",
+        "autodiff/src/eval.rs::adaptive_max_pool2d",
+        "backend-cpu/src/pooling.rs::adaptive_max_pool2d",
+        "backend-cpu/src/ops.rs::adaptive_max_pool2d",
+        "tensor-core/src/backend_ops.rs::adaptive_max_pool2d",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "#2527 の fn 宣言の定義元集合が承認形とずれている（新たな定義元が承認済みの\
+         実装なのか迂回経路なのかを確認すること）: {found:?}"
+    );
+}
+
+/// `var.rs` の 2 メソッド本体の承認形（非公開モジュール `adaptive_max_pool_ops` の
+/// 共有 forward への 1 行委譲）。
+const ADAPTIVE_MAX_POOL_VAR_EXPECTED_BODIES: [(&str, &str); 2] = [
+    (
+        "adaptive_max_pool2d",
+        "crate : : adaptive_max_pool_ops : : adaptive_max_pool2d ( self , output_size )",
+    ),
+    (
+        "adaptive_max_pool1d",
+        "crate : : adaptive_max_pool_ops : : adaptive_max_pool1d ( self , output_size )",
+    ),
+];
+
+/// `Var::adaptive_max_pool2d`／`adaptive_max_pool1d` が共有 forward への薄い委譲で
+/// あることを固定する（スタブ・独自実装へのすり替えを拒否）。
+#[test]
+fn var_adaptive_max_pool_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in ADAPTIVE_MAX_POOL_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（共有 forward への 1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけで 2 メソッドへ到達でき、シグネチャが
+/// 承認形と一致し、実際に適用して期待 shape・値・索引が得られることを固定する。
+#[test]
+fn var_adaptive_max_pool_methods_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+
+    type Sig2<'t> = fn(&Var<'t>, [usize; 2]) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>;
+    type Sig1<'t> = fn(&Var<'t>, usize) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>;
+    fn sig2<'t>() -> Sig2<'t> {
+        Var::<'t>::adaptive_max_pool2d
+    }
+    fn sig1<'t>() -> Sig1<'t> {
+        Var::<'t>::adaptive_max_pool1d
+    }
+
+    let tape = fandhe_ai::tape();
+    let data: Vec<f32> = (0..16).map(|v| v as f32).collect();
+    let x = tape.var(&Tensor::new(data, &[1, 1, 4, 4]).expect("tensor"));
+    let (y, idx) = sig2()(&x, [2, 2]).expect("adaptive_max_pool2d");
+    assert_eq!(y.to_tensor().shape(), [1, 1, 2, 2]);
+    assert_eq!(
+        y.to_tensor().host_slice().into_owned(),
+        [5.0, 7.0, 13.0, 15.0]
+    );
+    assert_eq!(idx.host_slice().into_owned(), [5, 7, 13, 15]);
+    assert!(sig2()(&x, [0, 2]).is_err());
+    assert!(sig2()(&x, [2, 0]).is_err());
+
+    let x1 = tape.var(&Tensor::new(vec![1.0_f32, 3.0, 2.0, 5.0], &[1, 1, 4]).expect("tensor"));
+    let (y1, idx1) = sig1()(&x1, 2).expect("adaptive_max_pool1d");
+    assert_eq!(y1.to_tensor().shape(), [1, 1, 2]);
+    assert_eq!(y1.to_tensor().host_slice().into_owned(), [3.0, 5.0]);
+    assert_eq!(idx1.host_slice().into_owned(), [1, 3]);
+    assert!(sig1()(&x1, 0).is_err());
+    // rank 不一致は Err（1d 層へ rank 4）。
+    assert!(sig1()(&x, 2).is_err());
+}
+
+const ADD_ADAPTIVE_MAX_POOL2D_PARAMS: &str =
+    "mut self, output_size: [usize; 2]) -> Result<Self, AutodiffError>";
+const ADD_ADAPTIVE_MAX_POOL1D_PARAMS: &str =
+    "mut self, output_size: usize) -> Result<Self, AutodiffError>";
+const ADD_GLOBAL_POOL_PARAMS: &str = "mut self, mode: GlobalPoolMode, keepdims: bool) -> Self";
+
+/// `compat::Sequential` の 3 add_* が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_adaptive_max_global_pool_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in [
+        ("add_adaptive_max_pool2d", ADD_ADAPTIVE_MAX_POOL2D_PARAMS),
+        ("add_adaptive_max_pool1d", ADD_ADAPTIVE_MAX_POOL1D_PARAMS),
+        ("add_global_pool", ADD_GLOBAL_POOL_PARAMS),
+    ] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_adaptive_max_global_pool_add_methods_have_approved_signatures`]
+/// の自己テスト。
+#[test]
+fn compat_sequential_adaptive_max_global_pool_add_methods_have_approved_signatures_detects_offense()
+{
+    let ok = "pub fn add_global_pool(mut self, mode: GlobalPoolMode, keepdims: bool,) -> Self {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
         "add_global_pool",
-    ];
-    let mut offenses = Vec::new();
-    visit_rs_files(&compat_dir, &mut |path, content| {
-        for name in forbidden {
-            if contains_pub_fn_declaration(content, name) {
-                offenses.push(format!("{}: pub fn {name}", path.display()));
+        ADD_GLOBAL_POOL_PARAMS
+    ));
+    for bad in [
+        "pub fn add_global_pool(mut self, mode: GlobalPoolMode, keepdims: bool) -> Result<Self, AutodiffError> {",
+        "pub fn add_global_pool(mut self, mode: GlobalPoolMode) -> Self {",
+        "pub fn add_global_pool(&mut self, mode: GlobalPoolMode, keepdims: bool) -> Self {",
+        "pub fn add_linear(mut self) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_global_pool", ADD_GLOBAL_POOL_PARAMS),
+            "{bad}"
+        );
+    }
+    let ok2 = "pub fn add_adaptive_max_pool2d(mut self, output_size: [usize; 2]) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok2,
+        "add_adaptive_max_pool2d",
+        ADD_ADAPTIVE_MAX_POOL2D_PARAMS
+    ));
+    assert!(!sequential_spatial_add_signature_ok(
+        "pub fn add_adaptive_max_pool2d(mut self, output_size: usize) -> Result<Self, AutodiffError> {",
+        "add_adaptive_max_pool2d",
+        ADD_ADAPTIVE_MAX_POOL2D_PARAMS
+    ));
+}
+
+/// ルートで再エクスポートを許す型の唯一の承認形（`src/lib.rs`）。
+const GLOBAL_POOL_MODE_APPROVED_LINE: &str = "pub use fandhe_ai_autodiff::nn::GlobalPoolMode;";
+
+/// facade が再エクスポートしてはならない層型（未承認）。
+const ADAPTIVE_MAX_GLOBAL_POOL_LAYER_TYPE_NAMES: [&str; 3] =
+    ["AdaptiveMaxPool2d", "AdaptiveMaxPool1d", "GlobalPool"];
+
+/// facade src の 1 ファイル内容から、`GlobalPoolMode` または未承認の層型名を識別子として
+/// 含む `pub use` 行（空白正規化済み）を集める検出本体。コメント・文字列リテラルは無視する。
+fn scan_global_pool_pub_use_lines(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("pub use") || l.starts_with("pub(crate) use"))
+        .filter(|l| {
+            line_contains_identifier(l, "GlobalPoolMode")
+                || ADAPTIVE_MAX_GLOBAL_POOL_LAYER_TYPE_NAMES
+                    .iter()
+                    .any(|n| line_contains_identifier(l, n))
+        })
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// `GlobalPoolMode` の再エクスポートが `src/lib.rs` の承認形 1 行だけで、
+/// `AdaptiveMaxPool2d`／`AdaptiveMaxPool1d`／`GlobalPool` の層型が facade のどこからも
+/// 再エクスポートされないことを固定する（`facade_reexports_topk_unique_types_only_in_
+/// approved_shape` と同型）。
+#[test]
+fn facade_reexports_global_pool_mode_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_lib_rs = 0usize;
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in scan_global_pool_pub_use_lines(content) {
+            if path.ends_with("src/lib.rs") && line == GLOBAL_POOL_MODE_APPROVED_LINE {
+                approved_in_lib_rs += 1;
+            } else {
+                offending.push(format!("{}: `{line}`", path.display()));
             }
         }
     });
     assert!(
-        offenses.is_empty(),
-        "src/compat 配下に AdaptiveMaxPool／GlobalPool 系 add_* が見つ\
-         かった（承認スコープ〈#2160〉は Sequential への追加を認めて\
-         いない）: {offenses:?}"
+        offending.is_empty(),
+        "facade が GlobalPoolMode を承認形（src/lib.rs の `{GLOBAL_POOL_MODE_APPROVED_LINE}` \
+         1 行）以外で、または層型（AdaptiveMaxPool2d／AdaptiveMaxPool1d／GlobalPool）を再エクスポート\
+         している（#2527）: {offending:?}"
+    );
+    assert_eq!(
+        approved_in_lib_rs, 1,
+        "src/lib.rs に承認形の再エクスポート行がちょうど 1 行存在しない\
+         （検査対象を見失った場合を含む）"
     );
 }
 
-/// [`compat_sequential_does_not_expose_adaptive_max_global_pool_add_
-/// methods`] の自己テスト（合成入力で検出できることを確認する）。
+/// [`scan_global_pool_pub_use_lines`] の自己テスト（合成入力）。
 #[test]
-fn compat_sequential_does_not_expose_adaptive_max_global_pool_add_methods_detects_offense() {
-    assert!(contains_pub_fn_declaration(
-        "pub fn add_adaptive_max_pool2d(&mut self, l: AdaptiveMaxPool2d) {}",
-        "add_adaptive_max_pool2d"
-    ));
-    assert!(!contains_pub_fn_declaration(
-        "pub fn add_linear(&mut self, l: Linear) {}",
-        "add_adaptive_max_pool2d"
-    ));
+fn facade_reexports_global_pool_mode_only_in_approved_shape_detects_each_category() {
+    let scan = scan_global_pool_pub_use_lines;
+    assert_eq!(
+        scan(GLOBAL_POOL_MODE_APPROVED_LINE),
+        vec![GLOBAL_POOL_MODE_APPROVED_LINE.to_string()]
+    );
+    // 違反: 層型・別名・別経路・グループ形（承認形と文字列一致しない行として検出される）。
+    for src in [
+        "pub use fandhe_ai_autodiff::nn::GlobalPool;",
+        "pub use fandhe_ai_autodiff::nn::AdaptiveMaxPool2d;",
+        "pub use fandhe_ai_autodiff::nn::{AdaptiveMaxPool1d, GlobalPoolMode};",
+        "pub use fandhe_ai_autodiff::nn::GlobalPoolMode as Mode;",
+        "pub(crate) use fandhe_ai_autodiff::nn::GlobalPool;",
+    ] {
+        let hits = scan(src);
+        assert_eq!(hits.len(), 1, "src={src:?}");
+        assert_ne!(hits[0], GLOBAL_POOL_MODE_APPROVED_LINE, "src={src:?}");
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use fandhe_ai_autodiff::nn::GlobalPool;",
+        "let s = \"pub use x::GlobalPoolMode;\";",
+        "use fandhe_ai_autodiff::nn::GlobalPool;",
+        "pub use fandhe_ai_autodiff::Var;",
+    ] {
+        assert!(scan(src).is_empty(), "src={src:?}");
+    }
 }
-
 // =====================================================================
 // イシュー #2164（親 #2131）: RNN／LSTM／GRU の多層・双方向・dropout
 // （`RnnConfig`）の facade 公開保留を検査するテスト群。

@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 39 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 42 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -86,7 +86,7 @@ use self::compiled::{
 use super::sequential::{LayerSpec, Sequential};
 use crate::fs_guard::{LeafError, MAX_MODEL_FILE_BYTES, OpenedLeaf, open_leaf_checked};
 use crate::interop::safetensors::{load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes};
-use crate::{InterpolateMode, Tensor};
+use crate::{GlobalPoolMode, InterpolateMode, Tensor};
 
 /// manifest のファイル名（`dir` 直下の固定名）。
 const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -306,7 +306,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 39 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 42 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -341,6 +341,9 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::AvgPool1d { .. } => Some("avg_pool1d"),
         LayerSpec::AdaptiveAvgPool2d { .. } => Some("adaptive_avg_pool2d"),
         LayerSpec::AdaptiveAvgPool1d { .. } => Some("adaptive_avg_pool1d"),
+        LayerSpec::AdaptiveMaxPool2d { .. } => Some("adaptive_max_pool2d"),
+        LayerSpec::AdaptiveMaxPool1d { .. } => Some("adaptive_max_pool1d"),
+        LayerSpec::GlobalPool { .. } => Some("global_pool"),
         LayerSpec::Upsample { .. } => Some("upsample"),
         LayerSpec::ZeroPad2d { .. } => Some("zero_pad2d"),
         LayerSpec::Identity => Some("identity"),
@@ -556,6 +559,9 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::AvgPool1d { .. }
         | LayerSpec::AdaptiveAvgPool2d { .. }
         | LayerSpec::AdaptiveAvgPool1d { .. }
+        | LayerSpec::AdaptiveMaxPool2d { .. }
+        | LayerSpec::AdaptiveMaxPool1d { .. }
+        | LayerSpec::GlobalPool { .. }
         | LayerSpec::Upsample { .. }
         | LayerSpec::ZeroPad2d { .. }
         | LayerSpec::Identity
@@ -668,6 +674,26 @@ fn upsample_mode_from_wire(name: &str, align_corners: bool) -> Option<Interpolat
         "bilinear" => Some(InterpolateMode::Bilinear { align_corners }),
         "bicubic" => Some(InterpolateMode::Bicubic { align_corners }),
         "trilinear" => Some(InterpolateMode::Trilinear { align_corners }),
+        _ => None,
+    }
+}
+
+/// `GlobalPoolMode` ↔ manifest 文字列（allowlist の正。イシュー #2527）。`GlobalPoolMode` は
+/// `#[non_exhaustive]` のため、未知 variant は `None`（保存側が `UnsupportedModel` で
+/// fail-closed にする）。
+fn global_pool_mode_to_wire(mode: GlobalPoolMode) -> Option<&'static str> {
+    match mode {
+        GlobalPoolMode::Avg => Some("avg"),
+        GlobalPoolMode::Max => Some("max"),
+        _ => None,
+    }
+}
+
+/// [`global_pool_mode_to_wire`] の逆変換（文字列 allowlist）。
+fn global_pool_mode_from_wire(name: &str) -> Option<GlobalPoolMode> {
+    match name {
+        "avg" => Some(GlobalPoolMode::Avg),
+        "max" => Some(GlobalPoolMode::Max),
         _ => None,
     }
 }
@@ -874,6 +900,18 @@ fn render_params(spec: &LayerSpec) -> String {
         LayerSpec::AdaptiveAvgPool1d { output_size } => {
             put_num(&mut f, "output_size", *output_size)
         }
+        LayerSpec::AdaptiveMaxPool2d { output_size } => {
+            put_pair(&mut f, "output_size", *output_size)
+        }
+        LayerSpec::AdaptiveMaxPool1d { output_size } => {
+            put_num(&mut f, "output_size", *output_size)
+        }
+        LayerSpec::GlobalPool { mode, keepdims } => {
+            // 保存前検査（`global_pool_mode_to_wire`）通過後にだけ呼ばれる。
+            let name = global_pool_mode_to_wire(*mode).unwrap_or("");
+            f.push(("mode".to_string(), format!("\"{name}\"")));
+            put_bool(&mut f, "keepdims", *keepdims);
+        }
         LayerSpec::Upsample { size, mode } => {
             // 保存前検査（`upsample_is_savable`）通過後にだけ呼ばれる。
             let (name, align_corners) = upsample_mode_to_wire(*mode).unwrap_or(("", false));
@@ -985,6 +1023,13 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
                     "層 {i}（upsample）の size 軸数（{}）または mode が保存に未対応です",
                     size.len()
                 ),
+            });
+        }
+        if let LayerSpec::GlobalPool { mode, .. } = spec
+            && global_pool_mode_to_wire(*mode).is_none()
+        {
+            return Err(ModelIoError::UnsupportedModel {
+                reason: format!("層 {i}（global_pool）の mode が保存に未対応です"),
             });
         }
         check_layer_state(model, i, spec)?;
@@ -1688,6 +1733,13 @@ fn build_model(
             LayerSpec::AdaptiveAvgPool1d { output_size } => model
                 .add_adaptive_avg_pool1d(*output_size)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::AdaptiveMaxPool2d { output_size } => model
+                .add_adaptive_max_pool2d(*output_size)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::AdaptiveMaxPool1d { output_size } => model
+                .add_adaptive_max_pool1d(*output_size)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::GlobalPool { mode, keepdims } => model.add_global_pool(*mode, *keepdims),
             LayerSpec::Upsample { size, mode } => model
                 .add_upsample(size.clone(), *mode)
                 .map_err(ModelIoError::Autodiff)?,
@@ -2556,6 +2608,28 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 output_size: p.usize("output_size")?,
             })
         }
+        "adaptive_max_pool2d" => {
+            let p = Params::new(params, &["output_size_h", "output_size_w"])?;
+            Ok(LayerSpec::AdaptiveMaxPool2d {
+                output_size: p.pair("output_size")?,
+            })
+        }
+        "adaptive_max_pool1d" => {
+            let p = Params::new(params, &["output_size"])?;
+            Ok(LayerSpec::AdaptiveMaxPool1d {
+                output_size: p.usize("output_size")?,
+            })
+        }
+        "global_pool" => {
+            let p = Params::new(params, &["mode", "keepdims"])?;
+            let mode_name = as_str(p.get("mode")?, "mode")?;
+            let mode = global_pool_mode_from_wire(mode_name)
+                .ok_or_else(|| manifest_error("global_pool の mode が allowlist 外です"))?;
+            Ok(LayerSpec::GlobalPool {
+                mode,
+                keepdims: p.bool("keepdims")?,
+            })
+        }
         "identity" => {
             Params::new(params, &[])?;
             Ok(LayerSpec::Identity)
@@ -2995,7 +3069,7 @@ mod tests {
         ));
     }
 
-    /// 39 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 42 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3151,6 +3225,18 @@ mod tests {
                 output_size: [2, 3],
             },
             LayerSpec::AdaptiveAvgPool1d { output_size: 4 },
+            LayerSpec::AdaptiveMaxPool2d {
+                output_size: [2, 3],
+            },
+            LayerSpec::AdaptiveMaxPool1d { output_size: 4 },
+            LayerSpec::GlobalPool {
+                mode: GlobalPoolMode::Avg,
+                keepdims: true,
+            },
+            LayerSpec::GlobalPool {
+                mode: GlobalPoolMode::Max,
+                keepdims: false,
+            },
             LayerSpec::Upsample {
                 size: vec![6, 6],
                 mode: InterpolateMode::Nearest,
@@ -3181,7 +3267,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 39, "kind allowlist は 39 種: {kinds:?}");
+        assert_eq!(kinds.len(), 42, "kind allowlist は 42 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3199,9 +3285,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 39 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 42 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("39 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("42 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3209,7 +3295,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("39 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("42 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -3310,6 +3396,31 @@ mod tests {
             ("instance_norm", r#"{}"#),
             ("instance_norm", r#"{"eps":1e-5,"x":1}"#),
             ("instance_norm", r#"{"eps":"a"}"#),
+            // イシュー #2527: adaptive_max_pool2d / adaptive_max_pool1d / global_pool の非信頼入力。
+            ("adaptive_max_pool2d", r#"{"output_size_h":2}"#),
+            (
+                "adaptive_max_pool2d",
+                r#"{"output_size_h":2,"output_size_w":2,"x":1}"#,
+            ),
+            (
+                "adaptive_max_pool2d",
+                r#"{"output_size_h":-1,"output_size_w":2}"#,
+            ),
+            (
+                "adaptive_max_pool2d",
+                r#"{"output_size_h":1.5,"output_size_w":2}"#,
+            ),
+            ("adaptive_max_pool1d", r#"{}"#),
+            ("adaptive_max_pool1d", r#"{"output_size":"a"}"#),
+            ("adaptive_max_pool1d", r#"{"output_size":-1}"#),
+            ("adaptive_max_pool1d", r#"{"output_size":2,"x":1}"#),
+            ("global_pool", r#"{"mode":"max"}"#),
+            ("global_pool", r#"{"keepdims":true}"#),
+            ("global_pool", r#"{"mode":"min","keepdims":true}"#),
+            ("global_pool", r#"{"mode":1,"keepdims":true}"#),
+            ("global_pool", r#"{"mode":"max","keepdims":1}"#),
+            ("global_pool", r#"{"mode":"max","keepdims":"true"}"#),
+            ("global_pool", r#"{"mode":"max","keepdims":true,"x":1}"#),
             // イシュー #2526: pixel_shuffle / pixel_unshuffle の非信頼入力。
             ("pixel_shuffle", r#"{}"#),
             ("pixel_shuffle", r#"{"upscale_factor":2,"x":1}"#),
@@ -3469,6 +3580,13 @@ mod tests {
             LayerSpec::PixelUnshuffle {
                 downscale_factor: 0,
             },
+            LayerSpec::AdaptiveMaxPool2d {
+                output_size: [0, 2],
+            },
+            LayerSpec::AdaptiveMaxPool2d {
+                output_size: [2, 0],
+            },
+            LayerSpec::AdaptiveMaxPool1d { output_size: 0 },
         ] {
             assert!(
                 matches!(
@@ -3533,7 +3651,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("39 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("42 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

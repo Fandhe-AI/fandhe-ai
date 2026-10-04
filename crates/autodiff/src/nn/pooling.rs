@@ -316,10 +316,10 @@ impl AdaptiveAvgPool1d {
 }
 
 /// PyTorch `torch.nn.AdaptiveMaxPool2d` 相当（イシュー #2160）。
-/// **内部クレート限定**（facade 未公開。`crate::adaptive_max_pool_ops`
-/// モジュール doc §承認事項を参照。`Var::adaptive_max_pool2d` の
-/// 公開委譲メソッド・facade `compat::Sequential::
-/// add_adaptive_max_pool2d` は未承認のため追加しない）。
+/// イシュー #2527 で facade 公開済み（`compat::Sequential::
+/// add_adaptive_max_pool2d` と `Var::adaptive_max_pool2d`）。層型
+/// そのものの facade 再エクスポートは未承認のため行わない
+/// （`crate::adaptive_max_pool_ops` は非公開モジュールのまま）。
 ///
 /// [`AdaptiveAvgPool2d`] と異なり `forward` は `(values, index)` を
 /// 返す（[`MaxPool2d::forward`] と同型。索引は `(n,c)` 平面内 flat
@@ -359,8 +359,9 @@ impl AdaptiveMaxPool2d {
 
 /// PyTorch `torch.nn.AdaptiveMaxPool1d` 相当（イシュー #2160）。
 /// [`AdaptiveMaxPool2d`] を `H` 軸固定（`output_size[0]=1`）で保持
-/// する薄いラッパー（[`AdaptiveAvgPool1d`] と同型）。**内部クレート
-/// 限定**（[`AdaptiveMaxPool2d`] の doc 参照）。
+/// する薄いラッパー（[`AdaptiveAvgPool1d`] と同型）。facade へは
+/// `compat::Sequential::add_adaptive_max_pool1d`／`Var::adaptive_max_pool1d`
+/// として公開済み（イシュー #2527。層型の再エクスポートは未承認）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdaptiveMaxPool1d {
     output_size: usize,
@@ -400,7 +401,9 @@ impl AdaptiveMaxPool1d {
 /// 相当を単一の型 [`GlobalPool`] へ集約するための variant。
 /// `#[non_exhaustive]` により将来の variant 追加（例: `GlobalLp`）を
 /// 破壊的変更なしで行えるようにする（`docs/compat-api-scope.md` の
-/// 非破壊拡張方針）。
+/// 非破壊拡張方針）。facade ルートから `fandhe_ai::GlobalPoolMode` として
+/// 再エクスポート済み（イシュー #2527。`compat::Sequential::add_global_pool`
+/// の引数型。`GlobalPool` 層型自体の再エクスポートは未承認）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GlobalPoolMode {
