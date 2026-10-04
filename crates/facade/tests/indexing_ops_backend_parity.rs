@@ -1,10 +1,12 @@
-//! `fandhe_ai_autodiff::indexing_ops`（イシュー #2148・facade 非公開の
-//! 内部入口。`crates/autodiff/src/indexing_ops.rs` モジュール doc 参照）
+//! `fandhe_ai_autodiff::indexing_ops`（イシュー #2148。モジュール自体は facade から
+//! 再エクスポートされず、`Var::advanced_indexing`／`index_put`／`index_put_` の
+//! 1 行委譲メソッドとしてのみ facade 公開済み〈#2518〉。
+//! `crates/autodiff/src/indexing_ops.rs` モジュール doc 参照）
 //! のバックエンド間 parity テスト（`reduce_ops_backend_parity.rs` と
 //! 同型）。
 //!
-//! `indexing_ops` は facade から再エクスポートされないため、本テストは
-//! `fandhe_ai_autodiff::indexing_ops::*` を直接 use する（facade の dev
+//! 委譲メソッドは同じ経路を通るが、本テストは `fandhe_ai_autodiff::indexing_ops::*`
+//! を直接 use する（facade の dev
 //! 依存に `fandhe-ai-autodiff` が既に含まれている）。
 //!
 //! 網羅表（`matrix_ops_backend_parity.rs` の教訓: 代表 1 演算で他を

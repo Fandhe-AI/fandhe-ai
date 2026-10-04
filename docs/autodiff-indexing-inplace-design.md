@@ -30,7 +30,9 @@ inherent メソッドを 1 つ足すだけで facade の公開面が広がる。
 （親 #2131）の先例に倣い、承認が取れるまで **autodiff に新設した
 モジュール `indexing_ops` の自由関数 3 個**で満たす（承認後に追加する
 作業は `Var::advanced_indexing` 等の薄い委譲メソッドと facade ガードの
-撤去のみ）。
+撤去のみ）。**ルート #2499 の一括承認を受けて #2518 で
+`Var::advanced_indexing`／`index_put`／`index_put_` の委譲メソッドとして
+公開済み**（§6 の実装記録参照。保留ガードは正ガードへ反転済み）。
 
 ## §1 背景
 
@@ -38,6 +40,10 @@ inherent メソッドを 1 つ足すだけで facade の公開面が広がる。
 前に `gh issue view --json comments` で確認済み）。親 #2131 はこの
 ツリーでの facade 公開面の拡張を「設計判断記録 → 承認 → 実装」の 2
 段階と定めているため、本実装は内部クレート限定に倒す。
+
+2026-10-04 に、ルート #2499 本文「承認範囲」節の一括承認（Phase 1〜3 の
+facade 公開を設計判断記録の推奨形で実装してよい）を得たため、経路 2 の
+承認として扱い #2518 で公開した（§6 の実装記録）。
 
 課題: `Var::gather`／`index_select`／`scatter`／`scatter_add`（#1776）
 は単一軸の索引しか扱えない。PyTorch の複数軸整数配列索引（`x[i0,
@@ -207,7 +213,7 @@ Issue の契約は追加作業なしで満たせる。
 
 - facade 公開（`Var::advanced_indexing`／`index_put`／`index_put_` の
   委譲メソッド追加と保留ガードの撤去）: 経路 2 の承認待ち。窓口は
-  #2148・#2131。
+  #2148・#2131。**#2518 で実施済み（2026-10-04 ルート #2499 一括承認）**
 - 負の添字の wrap-around・int64 添字・スライスと混在する指定・先頭
   以外の軸への索引・bool マスク索引（`x[mask]`）: §4 参照。
 - 演算子構文 `x[idx] = v`（Rust の `IndexMut` の契約上作れない）。
@@ -218,11 +224,44 @@ Issue の契約は追加作業なしで満たせる。
 
 ## §6 承認事項（未承認として列挙）
 
-1. facade 公開面の拡張（Issue 記載の承認事項）
+1. facade 公開面の拡張（Issue 記載の承認事項）— **#2518 で実施済み（下記）**
 2. 負の添字の wrap-around の受け入れ（`gather`／`scatter` の既存契約
    の変更を伴う）
 3. `backend-cpu`／GPU の専用カーネル・`BackendOps` の拡張
    （`tensor-core` の公開 trait を広げる）
+
+### 実装記録（イシュー #2518・2026-10-04）
+
+ルート #2499 本文「承認範囲」節の一括承認（Phase 1〜3 の facade 公開を設計判断記録の
+推奨形で実装してよい）に基づき、§0・§5・§6 第 1 項の形で公開した（追加 API のみ。
+`fandhe-ai =0.10.0` の公開 API は非破壊）。
+
+- 公開したメソッド（`crates/autodiff/src/var.rs` の `impl<'t> Var<'t>`。本体は
+  `crate::indexing_ops::*` への 1 行委譲）:
+  `advanced_indexing(&self, indices: &[Tensor<i32>])`・
+  `index_put(&self, indices: &[Tensor<i32>], values: &Var<'t>, accumulate: bool)`
+  （いずれも `Result<Var<'t>, AutodiffError>`）・
+  `index_put_(&mut self, indices: &[Tensor<i32>], values: &Var<'t>, accumulate: bool)`
+  （`Result<(), AutodiffError>`。再束縛の糖衣）
+- ガードの反転: `VarIndexingOpsHoldDoctestGuard` と
+  `indexing_ops_hold_doctest_globs_all_pub_modules`・
+  `indexing_ops_hold_doctest_probe_body_matches_fixed_contract`（および固定文言
+  `INDEXING_OPS_HOLD_PROBE_BODY`）を削除。`facade_does_not_reexport_or_declare_indexing_ops`
+  は名前・検査ロジックを維持（承認形以外の経路を拒否する正ガードの一部）。
+  `workspace_declares_indexing_ops_fn_names_only_in_autodiff_indexing_ops` は
+  `workspace_declares_indexing_ops_fn_names_only_in_approved_locations` へ改名し、期待集合に
+  `autodiff/src/var.rs::<name>` 各 1 件を追加。新設:
+  `var_indexing_ops_methods_are_thin_delegations`（本体が 1 行委譲と完全一致）・
+  `var_indexing_ops_are_reachable_via_facade_only`（`fandhe_ai::Var` のみで到達・
+  シグネチャ固定・適用結果の検証）。`hold_doctest_probe_blocks_reference_every_glob_imported_item`
+  の `MIN_KNOWN_PROBE_BLOCKS` は保留ガード 1 件の削除に合わせて 24 → 23
+- 利用例・単体テスト: `crates/facade/tests/indexing_ops_facade.rs`（新規。forward・
+  重複添字・再束縛の意味論・backward・自由関数との bit 一致・エラー伝播）
+- facade では `indexing_ops` モジュールを再エクスポートしない（`Var` メソッドのみ）。
+  `Tensor`／`Tape` への同名メソッド追加・負の添字の wrap-around・GPU 専用カーネル・
+  `BackendOps` の拡張は本実装の対象外（上記承認事項 2・3）
+- `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・GPU カーネルは不変。
+  実機 parity の申し送りは §7 のまま有効（委譲先は #2148 と同一経路）
 
 ## §7 実機実測の申し送り
 
@@ -239,7 +278,7 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
   再束縛意味論）
 - `crates/autodiff/src/lib.rs`: `pub mod indexing_ops;`
 - `crates/facade/src/lib.rs`: `VarIndexingOpsHoldDoctestGuard`（正の
-  プローブ 1 ブロック方式。`matrix_ops`／`reduce_ops` と同型）
+  プローブ 1 ブロック方式。`matrix_ops`／`reduce_ops` と同型。#2518 で撤去）
 - `crates/facade/tests/api_surface.rs`: 4 テスト追加
   （`indexing_ops_hold_doctest_globs_all_pub_modules`・
   `indexing_ops_hold_doctest_probe_body_matches_fixed_contract`・

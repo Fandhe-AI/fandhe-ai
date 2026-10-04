@@ -1,18 +1,14 @@
 //! advanced indexing（複数軸整数配列索引の読み出し）・`index_put`・
 //! `index_put_`（イシュー #2148・親 #2131「5-B 演算」）。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/reduce_ops.rs`
-//! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への
-//! inherent メソッド追加は即座に facade 公開面へ出てしまう。イシュー
-//! #2148 本文は facade 公開面（`Var::advanced_indexing`／`index_put`／
-//! `index_put_` の委譲メソッド）を承認事項として明示し、親 #2131 は
-//! このツリーに限り「設計判断記録 → 承認 → 実装」の 2 段階を定めるため、
-//! 承認が取れるまでは自由関数として `Var` の外に置き到達不能にする
-//! （`docs/autodiff-indexing-inplace-design.md` §6）。承認後は
-//! `Var::advanced_indexing` 等の薄い委譲メソッドを追加し、facade 側の
-//! 保留ガード（`crates/facade/src/lib.rs::
-//! VarIndexingOpsHoldDoctestGuard`）を撤去する。
+//! **facade 公開形（イシュー #2518 で承認済み・公開済み）**: `Var` は facade
+//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` の
+//! inherent メソッドは即座に facade 公開面になる。ルート #2499 の一括承認を
+//! 受け、`Var::advanced_indexing`／`index_put`／`index_put_` を本モジュールの
+//! 自由関数への 1 行委譲メソッドとして追加した（`crates/autodiff/src/var.rs`。
+//! 正ガードは `crates/facade/tests/api_surface.rs::
+//! var_indexing_ops_methods_are_thin_delegations`）。本モジュール自体は facade
+//! から再エクスポートしない（`docs/autodiff-indexing-inplace-design.md` §6）。
 //!
 //! **「in-place」の解釈（不変値 API との整合）**: `Var<'t>` は `Copy` な
 //! ハンドル、`Tensor<f32>` は `Arc` を共有する immutable 値、tape は

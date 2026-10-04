@@ -4600,6 +4600,50 @@ impl<'t> Var<'t> {
         crate::rearrange_ops::tile(self, reps)
     }
 
+    // ---- indexing_ops 委譲メソッド（#2148 実装・#2518 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::indexing_ops` の自由関数（`index_select`・`scatter`・
+    // `scatter_add`・view 系の合成。新規 `Op` なし）。本体は 1 行委譲に固定し、
+    // 添字検査（範囲・k・broadcast・確保前サイズ検査）の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_indexing_ops_methods_are_thin_delegations`）
+    // で拒否する。PyTorch との差異: 負の添字は拒否（wrap-around なし）・先頭の
+    // 連続 k 軸のみ・添字は i32 のみ・重複添字の overwrite は最後の書き手が勝つ。
+    // 数値契約は `docs/autodiff-indexing-inplace-design.md` §3 を正とする。
+
+    /// 先頭 `indices.len()` 軸を複数軸整数配列索引で読み出す（`x[i0, i1, …]`
+    /// 相当。イシュー #2148・#2518）。`crate::indexing_ops::advanced_indexing`
+    /// へ委譲する。範囲外・負の添字・k 不正は `InvalidArgument`。
+    pub fn advanced_indexing(&self, indices: &[Tensor<i32>]) -> Result<Var<'t>, AutodiffError> {
+        crate::indexing_ops::advanced_indexing(self, indices)
+    }
+
+    /// 索引位置へ `values` を代入した新しい `Var` を返す非破壊版（`Tensor.index_put`
+    /// 相当。イシュー #2148・#2518）。`crate::indexing_ops::index_put` へ委譲する。
+    /// `accumulate=true` は重複添字を加算、`false` は最後の書き手が勝つ。別 tape の
+    /// `values` は `TapeMismatch`、broadcast 不能は `Shape`。
+    pub fn index_put(
+        &self,
+        indices: &[Tensor<i32>],
+        values: &Var<'t>,
+        accumulate: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::indexing_ops::index_put(self, indices, values, accumulate)
+    }
+
+    /// [`Var::index_put`] を呼んで `self` を再束縛する糖衣（`Tensor.index_put_`
+    /// 相当。イシュー #2148・#2518）。`crate::indexing_ops::index_put_` へ委譲する。
+    /// `Var` は `Copy` なハンドルで tape ノードも `Tensor` も書き換えないため、同じ
+    /// ノードを指す他のコピーは古い値のまま残り、旧ノードは tape に残る
+    /// （`docs/autodiff-indexing-inplace-design.md` §2.1）。
+    pub fn index_put_(
+        &mut self,
+        indices: &[Tensor<i32>],
+        values: &Var<'t>,
+        accumulate: bool,
+    ) -> Result<(), AutodiffError> {
+        crate::indexing_ops::index_put_(self, indices, values, accumulate)
+    }
+
     // ---- linalg_ops 委譲メソッド（#2150 実装・#2515 公開。親 #2500・ルート #2499）----
     //
     // 実体は `crate::linalg_ops` の自由関数（専用 `Op` あり。CPU 本番実装・
