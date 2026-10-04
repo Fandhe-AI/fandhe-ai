@@ -3,14 +3,20 @@
 イシュー #2150（親 #2131）。`docs/autodiff-reduce-ops-decision.md`
 （#2147）と同型の記録。
 
-## §0 結論・facade 非公開
+## §0 結論・facade 公開形（#2515 で公開済み）
+
+**#2515（親 #2500・ルート #2499 一括承認）で、本節の推奨形どおり `Var::eigh`／
+`slogdet`／`pinv`／`matrix_rank`／`lstsq` を `linalg_ops` 自由関数への 1 行委譲メソッド
+として公開した。`linalg_ops` モジュールと `EighVars`／`SlogdetVars` 型は facade・
+autodiff ルートへ再エクスポートしていない**（型の再エクスポートは §6 の残る承認事項）。
+以下は #2150 時点の履歴記述。
 
 PyTorch `torch.linalg` 互換の 5 演算（`eigh`／`slogdet`／`pinv`／
 `matrix_rank`／`lstsq`）を、**`fandhe_ai_autodiff` のうち facade が
 再エクスポートしない自由関数モジュール `linalg_ops`**（`crates/
 autodiff/src/linalg_ops.rs`）として実装した（`reduce_ops`〈#2147〉・
-`matrix_ops`〈#2144〉と同じ判断枠組み）。`Var` に inherent の
-`pub fn` は追加していない。
+`matrix_ops`〈#2144〉と同じ判断枠組み）。#2150 時点では `Var` に inherent の
+`pub fn` は追加していなかった。
 
 イシュー #2150 本文は「facade への 5 メソッドの `pub use` 再エクス
 ポート（経路 2）」を承認事項として明示しているが、`facade` は `Var`
@@ -18,15 +24,15 @@ autodiff/src/linalg_ops.rs`）として実装した（`reduce_ops`〈#2147〉・
 ため、`Var` に inherent メソッドを 1 つ足すだけで facade の公開面が
 広がる。このツリー（親 #2131）の先例に倣い、承認が取れるまで
 **autodiff に新設したモジュール `linalg_ops` の自由関数 5 個**で
-「5 メソッド」を満たす（承認後に追加する作業は `Var::eigh` 等の薄い
+「5 メソッド」を満たした（承認後に追加する作業は `Var::eigh` 等の薄い
 委譲メソッドと facade ガード〈`VarLinalgOpsHoldDoctestGuard`〉の
-撤去のみ）。
+撤去のみ、と記録していた。#2515 で実施済み）。
 
 多出力の戻り値型 `EighVars`／`SlogdetVars`（`linalg_ops.rs` 内）・
 値型 `EighFactors`／`SlogdetFactors`（`tensor-core::backend_ops`）も
 autodiff のクレートルート／facade へは再エクスポートしない
-（`Var::qr` の `QrVars` は承認済み公開だが、本イシューの 5 演算は
-未承認のため対称にしない）。
+（`Var::qr` の `QrVars` は承認済み公開だが、5 演算の戻り値型の再エクスポートは
+未承認のため対称にしていない）。
 
 ## §1 PyTorch 対応表・差分
 
@@ -251,31 +257,36 @@ resolve_rcond` を `linalg_ops.rs` の入口で 1 回呼んで確定させた値
 - `crates/facade/tests/linalg_ops_backend_parity.rs`（新規）: CPU vs
   NaiveOps の forward／backward parity（13 件）＋ CUDA／Metal 実機
   `#[ignore]`（4 件。§7 参照）。
-- `crates/facade/src/lib.rs`・`tests/api_surface.rs`:
+- `crates/facade/src/lib.rs`・`tests/api_surface.rs`: 当初は
   `VarLinalgOpsHoldDoctestGuard`（正のプローブ doctest）＋ 4 件の
-  ソース走査ガード（多層防御。§6 参照）。
+  ソース走査ガードを置いたが、#2515 で doctest と否定ガード 2 件を
+  削除・反転済み（残る 2 件は thin-delegation 正ガード・到達性ガード。
+  §6 の実施済み記録参照）。
 
 ## §6 承認事項・多層防御
 
-承認待ち（未実施）:
+**実施済み（#2515・ルート #2499 一括承認）**:
 
-- facade への 5 演算の公開（`pub use fandhe_ai_autodiff::linalg_ops;`
-  等の経路 2）
 - `Var::eigh`／`Var::slogdet`／`Var::pinv`／`Var::matrix_rank`／
-  `Var::lstsq` の委譲メソッド追加
-- 上記に伴う `VarLinalgOpsHoldDoctestGuard`・`api_surface.rs` の
-  4 ガードテストの撤去
+  `Var::lstsq` の委譲メソッド追加（`crates/autodiff/src/var.rs`。
+  モジュール再エクスポート〈経路 2 の `pub use`〉は行わない）
+- `VarLinalgOpsHoldDoctestGuard` と `api_surface.rs` の否定ガード 2 件
+  （`linalg_ops_hold_doctest_globs_all_pub_modules`・
+  `linalg_ops_hold_doctest_probe_body_matches_fixed_contract`）の削除
 
-多層防御（`reduce_ops`〈#2147〉と同型）: ①facade 非公開（自由関数
-モジュール）②`VarLinalgOpsHoldDoctestGuard`（正のプローブ doctest。
-facade がどの経路で公開しても名前衝突・シグネチャ不一致でコンパイル
-失敗する）③`linalg_ops_hold_doctest_globs_all_pub_modules`（doctest の
-glob import 集合と実際の `pub mod` 宣言のドリフト検査）④`linalg_ops_
-hold_doctest_probe_body_matches_fixed_contract`（doctest 本文の改変・
-弱体化を機械検出）⑤`facade_does_not_reexport_or_declare_linalg_ops`
-（facade src の `pub use`／`fn` 宣言を直接走査）⑥`workspace_declares_
-linalg_ops_fn_names_only_in_allowed_locations`（workspace 全体の
-定義元インベントリを固定）。
+**残る承認事項（未実施）**: `EighVars`／`SlogdetVars` の autodiff ルート／
+facade への再エクスポート（`QrVars` と揃える形）。現状 facade 利用者は
+`pub` フィールド（`eigenvalues`／`eigenvectors`／`sign`／`logabsdet`）で結果へ
+到達できるが、型名を書く使い方（型注釈・型名での分割代入）はできない。
+
+正ガード（承認形だけを許す。`api_surface.rs`）: ①`facade_does_not_reexport_or_
+declare_linalg_ops`（facade src の `pub use`／`fn` 宣言を直接走査）②`workspace_
+declares_linalg_ops_fn_names_only_in_approved_locations`（定義元インベントリ。
+`autodiff/src/var.rs` の各 1 件を承認形として許容）③`var_linalg_ops_methods_are_
+thin_delegations`（本体を 1 行委譲に固定し入口検証の迂回を拒否）④`var_linalg_ops_
+are_reachable_via_facade_only`（facade 経由のシグネチャ・pub フィールド・動作固定）。
+`hold_doctest_probe_blocks_reference_every_glob_imported_item` の下限は 26 から 25
+へ更新した。
 
 ## §7 実装記録
 
@@ -284,6 +295,11 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機への到達手段が�
 の `#[ignore]` 4 件（`eigh`／`pinv` forward × CUDA／Metal）は未実測
 のまま `docs/perf/logs/linalg-ops-2150/README.md` へ申し送る。CPU 版
 （属性なし・13 件）はいずれも green。
+
+**#2515 の記録**: 公開した名前は `Var::eigh`／`slogdet`／`pinv`／`matrix_rank`／`lstsq`
+（追加 API のみ・新規 `Op`／`BackendOps`／VJP なし・`Cargo.toml`／tolerance／`docs/spec/`
+不変）。facade 経由の利用例は `crates/facade/tests/linalg_ops_facade.rs`（厳密に表せる
+入力での完全一致・自由関数との bit 一致・エラー伝播）。実機 parity は上記申し送りが引き続き有効。
 
 ## §8 スコープ外
 

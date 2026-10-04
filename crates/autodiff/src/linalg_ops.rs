@@ -1,16 +1,13 @@
 //! `eigh`・`slogdet`・`pinv`・`matrix_rank`・`lstsq` の 5 線形代数演算
 //! （イシュー #2150・親 #2131「Tier 2 追加分」）。
 //!
-//! **facade 非公開（意図的）**: `crate::reduce_ops`／`crate::matrix_ops`
-//! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への
-//! inherent メソッド追加は即座に facade 公開面へ出てしまう。イシュー
-//! #2150 本文は facade 公開面（`Var::eigh` 等の委譲メソッド）を承認
-//! 事項として明示するため、承認が取れるまでは自由関数として `Var` の
-//! 外に置き到達不能にする（`docs/autodiff-linalg-ops-decision.md`
-//! §0）。承認後は `Var::eigh` 等の薄い委譲メソッドを追加し、facade
-//! 側の保留ガード（`crates/facade/src/lib.rs::
-//! VarLinalgOpsHoldDoctestGuard`）を撤去する。
+//! **公開形（#2515 で承認済み・公開済み。ルート #2499 一括承認・
+//! `docs/autodiff-linalg-ops-decision.md` §0）**: facade 公開面は
+//! `Var::eigh`・`Var::slogdet`・`Var::pinv`・`Var::matrix_rank`・
+//! `Var::lstsq` の 5 件の 1 行委譲メソッド（`crate::var`）のみ。本モジュール
+//! と [`EighVars`]／[`SlogdetVars`] は facade から再エクスポートしない
+//! （型の再エクスポートは決定記録 §6 の残る承認事項）。承認形以外の経路は
+//! `crates/facade/tests/api_surface.rs` の正ガードが拒否する。
 //!
 //! **PyTorch 相当**（詳細は `docs/autodiff-linalg-ops-decision.md` §1）:
 //!

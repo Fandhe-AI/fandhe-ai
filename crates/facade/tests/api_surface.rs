@@ -9943,152 +9943,23 @@ fn workspace_declares_reduce_ops_fn_names_only_in_approved_locations() {
 }
 
 // =====================================================================
-// #2150（親 #2131）の facade 公開保留固定（`VarLinalgOpsHoldDoctestGuard`）。
-// `VarReduceOpsHoldDoctestGuard`（イシュー #2147。#2514 で削除済み）と同型の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
-// `docs/autodiff-linalg-ops-decision.md` §6 参照。
+// #2150 実装・#2515 公開（親 #2500・ルート #2499）の正ガード。旧否定ガード
+// （`VarLinalgOpsHoldDoctestGuard`・doctest 固定文言 2 件）を、承認形（`Var` の
+// 1 行委譲メソッドのみ）だけを許す形へ反転した（先例 #2198・#2338・#2510・#2511）。
+// 承認事項・残る承認事項は `docs/autodiff-linalg-ops-decision.md` §6 参照。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `VarLinalgOpsHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`reduce_ops_hold_doctest_globs_all_pub_modules`〈#2514 で削除済み〉の
-/// `VarLinalgOpsHoldDoctestGuard` 版）。
-#[test]
-fn linalg_ops_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarLinalgOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "VarLinalgOpsHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// [`linalg_ops_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`LINALG_OPS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する。
-#[test]
-fn linalg_ops_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarLinalgOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, LINALG_OPS_HOLD_PROBE_BODY,
-        "VarLinalgOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 LINALG_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_linalg_hold_probe モジュール・\
-         __FandheLinalgHoldProbe トレイト・__probe_* 関数）の削除・\
-         弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`linalg_ops_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `VarLinalgOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行を除いた本文と 1 行単位で完全一致
-/// する必要がある。
-const LINALG_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_linalg_hold_probe {\n\
-\x20\x20\x20\x20pub mod linalg_ops {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn eigh() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn slogdet() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn pinv() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn matrix_rank() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn lstsq() {}\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_linalg_hold_probe::*;\n\
-\n\
-struct __FandheLinalgMarker;\n\
-\n\
-trait __FandheLinalgHoldProbe {\n\
-\x20\x20\x20\x20fn eigh(&self) -> __FandheLinalgMarker;\n\
-\x20\x20\x20\x20fn slogdet(&self) -> __FandheLinalgMarker;\n\
-\x20\x20\x20\x20fn pinv(&self) -> __FandheLinalgMarker;\n\
-\x20\x20\x20\x20fn matrix_rank(&self) -> __FandheLinalgMarker;\n\
-\x20\x20\x20\x20fn lstsq(&self) -> __FandheLinalgMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheLinalgHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-}\n\
-\n\
-impl __FandheLinalgHoldProbe for fandhe_ai::Tensor<f32> {\n\
-\x20\x20\x20\x20fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-}\n\
-\n\
-impl __FandheLinalgHoldProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-\x20\x20\x20\x20fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }\n\
-}\n\
-\n\
-fn __probe_free_fns() {\n\
-\x20\x20\x20\x20// `linalg_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
-\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
-\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20linalg_ops::eigh();\n\
-\x20\x20\x20\x20linalg_ops::slogdet();\n\
-\x20\x20\x20\x20linalg_ops::pinv();\n\
-\x20\x20\x20\x20linalg_ops::matrix_rank();\n\
-\x20\x20\x20\x20linalg_ops::lstsq();\n\
-}\n\
-\n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = fandhe_ai::Var::eigh(x);\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = x.eigh();\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = fandhe_ai::Var::slogdet(x);\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = x.slogdet();\n\
-}\n\
-\n\
-fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = fandhe_ai::Tensor::pinv(x);\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = x.pinv();\n\
-}\n\
-\n\
-fn __probe_tape(x: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = fandhe_ai::Tape::matrix_rank(x);\n\
-\x20\x20\x20\x20let _: __FandheLinalgMarker = x.matrix_rank();\n\
-}";
-
 /// `eigh`・`slogdet`・`pinv`・`matrix_rank`・`lstsq`（5 個の関数名。
-/// イシュー #2150）。[`facade_does_not_reexport_or_declare_linalg_ops`]・
-/// [`workspace_declares_linalg_ops_fn_names_only_in_allowed_locations`]
+/// イシュー #2150・#2515）。[`facade_does_not_reexport_or_declare_linalg_ops`]・
+/// [`workspace_declares_linalg_ops_fn_names_only_in_approved_locations`]
 /// が共用する。
 const LINALG_OPS_FN_NAMES: [&str; 5] = ["eigh", "slogdet", "pinv", "matrix_rank", "lstsq"];
 
 /// facade src 全体（`crates/facade/src/**`）に、`linalg_ops` を参照
 /// する `pub use`（モジュール再エクスポート・別名含む）も、
 /// [`LINALG_OPS_FN_NAMES`]（5 個）の `fn` 宣言も存在しないことを固定
-/// する（`VarLinalgOpsHoldDoctestGuard` の正のプローブと多層防御を成す
-/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// reduce_ops` と同型）。
+/// する（承認形は autodiff の `Var` 委譲メソッドのみ。イシュー #2515。
+/// `facade_does_not_reexport_or_declare_rearrange_ops` と同型）。
 #[test]
 fn facade_does_not_reexport_or_declare_linalg_ops() {
     let src_dir = facade_crate_root().join("src");
@@ -10117,25 +9988,26 @@ fn facade_does_not_reexport_or_declare_linalg_ops() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が linalg_ops（イシュー #2150 の内部クレート限定\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+        "facade の公開面が linalg_ops を再エクスポート、または同名の fn を\
+         宣言している（承認形は autodiff の `Var` 委譲メソッドのみ。\
+         イシュー #2515）: {offending:?}"
     );
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`LINALG_OPS_FN_NAMES`]
 /// （5 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_
-/// reduce_ops_fn_names_only_in_allowed_locations` と同型のインベン
-/// トリ）。
+/// rearrange_ops_fn_names_only_in_approved_locations` と同型のインベン
+/// トリ。#2515 で `autodiff/src/var.rs` の委譲メソッド各 1 件を承認形として追加）。
 ///
 /// **期待集合**（実測: `eigh`・`slogdet`・`pinv`・`matrix_rank`・
 /// `lstsq` は `crates/autodiff/src/linalg_ops.rs`（公開入口）・
 /// `crates/autodiff/src/eval/linalg.rs`（ホスト参照実装。`slogdet` は
 /// `slogdet_logabsdet_vjp` 等の別名のため 1 件のまま）・
 /// `crates/backend-cpu/src/linalg.rs`（CPU 本番実装）にそれぞれ 1 件
-/// ずつ存在する）。
+/// ずつ存在する。加えて #2515 で `crates/autodiff/src/var.rs` の `Var`
+/// 委譲メソッドが各 1 件）。
 #[test]
-fn workspace_declares_linalg_ops_fn_names_only_in_allowed_locations() {
+fn workspace_declares_linalg_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -10195,6 +10067,11 @@ fn workspace_declares_linalg_ops_fn_names_only_in_allowed_locations() {
         ("backend-cpu/src/linalg.rs::pinv", 1usize),
         ("backend-cpu/src/linalg.rs::matrix_rank", 1usize),
         ("backend-cpu/src/linalg.rs::lstsq", 1usize),
+        ("autodiff/src/var.rs::eigh", 1usize),
+        ("autodiff/src/var.rs::slogdet", 1usize),
+        ("autodiff/src/var.rs::pinv", 1usize),
+        ("autodiff/src/var.rs::matrix_rank", 1usize),
+        ("autodiff/src/var.rs::lstsq", 1usize),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -10204,9 +10081,107 @@ fn workspace_declares_linalg_ops_fn_names_only_in_allowed_locations() {
         found, expected,
         "workspace 全体（crates/*/src/）の linalg_ops 系 `fn` 宣言集合が\
          期待（`autodiff/src/linalg_ops.rs`・`autodiff/src/eval/linalg.rs`・\
-         `backend-cpu/src/linalg.rs` に各 5 件）と一致しない（過不足いずれも\
+         `backend-cpu/src/linalg.rs`・`autodiff/src/var.rs` に各 5 件）と一致しない（過不足いずれも\
          fail-closed に検出する。新たな定義元が見つかった場合、それが\
          承認済みの実装なのか迂回経路の混入なのかを確認すること）: {found:?}"
+    );
+}
+
+/// `var.rs` の 5 委譲メソッド本体の承認形（`linalg_ops` 自由関数への
+/// 1 行委譲。引数名も固定）。独自実装・スタブへのすり替えと入口検証
+/// （`require_finite`・`rcond` 検査・確保前上限検査）の迂回を拒否する
+/// （#2515。[`REARRANGE_OPS_VAR_EXPECTED_BODIES`] と同型）。
+const LINALG_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 5] = [
+    ("eigh", "crate : : linalg_ops : : eigh ( self )"),
+    ("slogdet", "crate : : linalg_ops : : slogdet ( self )"),
+    ("pinv", "crate : : linalg_ops : : pinv ( self , rcond )"),
+    (
+        "matrix_rank",
+        "crate : : linalg_ops : : matrix_rank ( self , rcond )",
+    ),
+    (
+        "lstsq",
+        "crate : : linalg_ops : : lstsq ( self , b , rcond )",
+    ),
+];
+
+/// `var.rs` の 5 委譲メソッドの本体が [`LINALG_OPS_VAR_EXPECTED_BODIES`]
+/// と一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
+#[test]
+fn var_linalg_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in LINALG_OPS_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（linalg_ops 自由関数への \
+             1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけ（`fandhe_ai_autodiff` を import
+/// しない）で 5 メソッドへ到達でき、シグネチャ・pub フィールドが承認形と
+/// 一致し、実際に適用して期待値が得られることを固定する（#2515）。
+/// `EighVars`／`SlogdetVars` は facade から名前で書けないため fn ポインタでは
+/// 固定せず、`Var::eigh(&x)`／`x.eigh()` の両呼び出しとフィールド型で固定する。
+#[test]
+fn var_linalg_ops_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+
+    type RcondSig<'t> = fn(&Var<'t>, Option<f32>) -> Result<Var<'t>, AutodiffError>;
+    fn sig_pinv<'t>() -> RcondSig<'t> {
+        Var::<'t>::pinv
+    }
+    fn sig_matrix_rank<'t>() -> RcondSig<'t> {
+        Var::<'t>::matrix_rank
+    }
+    type LstsqSig<'t> = fn(&Var<'t>, &Var<'t>, Option<f32>) -> Result<Var<'t>, AutodiffError>;
+    fn sig_lstsq<'t>() -> LstsqSig<'t> {
+        Var::<'t>::lstsq
+    }
+    fn vals(v: &Var<'_>) -> Vec<f32> {
+        v.to_tensor().host_slice().into_owned()
+    }
+
+    let tape = fandhe_ai::tape();
+    let d = tape.var(&Tensor::new(vec![3.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("tensor"));
+
+    let e1 = Var::eigh(&d).expect("eigh");
+    let e2 = d.eigh().expect("eigh method");
+    let ev: &Var<'_> = &e1.eigenvalues;
+    let evec: &Var<'_> = &e2.eigenvectors;
+    assert_eq!(vals(ev), [1.0, 3.0]);
+    assert_eq!(evec.to_tensor().shape(), &[2, 2]);
+
+    let neg = tape.var(&Tensor::new(vec![1.0_f32, 0.0, 0.0, -2.0], &[2, 2]).expect("tensor"));
+    let s1 = Var::slogdet(&neg).expect("slogdet");
+    let s2 = neg.slogdet().expect("slogdet method");
+    let sign: &Var<'_> = &s1.sign;
+    let logabs: &Var<'_> = &s2.logabsdet;
+    assert_eq!(vals(sign), [-1.0]);
+    assert_eq!(vals(logabs).len(), 1);
+
+    let p = tape.var(&Tensor::new(vec![2.0_f32, 0.0, 0.0, 4.0], &[2, 2]).expect("tensor"));
+    assert_eq!(
+        vals(&sig_pinv()(&p, None).expect("pinv")),
+        [0.5, 0.0, 0.0, 0.25]
+    );
+
+    let r = tape.var(&Tensor::new(vec![1.0_f32, 0.0, 0.0, 0.0], &[2, 2]).expect("tensor"));
+    assert_eq!(
+        vals(&sig_matrix_rank()(&r, None).expect("matrix_rank")),
+        [1.0]
+    );
+
+    let i2 = tape.var(&Tensor::new(vec![1.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("tensor"));
+    let b = tape.var(&Tensor::new(vec![5.0_f32, 7.0], &[2, 1]).expect("tensor"));
+    assert_eq!(
+        vals(&sig_lstsq()(&i2, &b, None).expect("lstsq")),
+        [5.0, 7.0]
     );
 }
 
@@ -16899,10 +16874,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2517 の保留ガード削除後は 25）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517 の保留ガード削除後は 24）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 25;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 24;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\
