@@ -10,7 +10,7 @@ PyTorch `nn.CosineEmbeddingLoss`・`nn.MarginRankingLoss`・
 `nn.TripletMarginLoss`・`nn.PoissonNLLLoss` 相当の 4 API を、#2166 と
 同じく **`fandhe_ai_autodiff::loss_ops`（facade 非公開の自由関数
 モジュール）** へ追加した。`Var` に inherent の `pub fn` は追加して
-いない。
+いない（#2539 で 4 委譲メソッドを追加し facade 公開した。§5 実装記録参照）。
 
 - `cosine_embedding_loss(x1, x2, y, margin, reduction)`: 新規
   `Op::CosineEmbeddingLoss`
@@ -231,7 +231,36 @@ LossOpsHoldDoctestGuard`（#2166 で導入・本イシューで対象を 6 関�
 テストのうち該当名を撤去する（#2166 の 2 関数分は引き続き保留対象の
 まま残る場合、ガードは該当関数名のみ縮小する）。
 
+### 実装記録（#2539・ルート #2499 一括承認）
+
+上記 4 メソッドは §5 の推奨形どおり `Var` の薄い委譲メソッドとして公開した
+（`crates/autodiff/src/var.rs`。本体は `crate::loss_ops::*` への 1 行委譲。
+`Var` は facade が再エクスポートするため `fandhe_ai::Var` 経由で到達。追加のみで
+`fandhe-ai =0.10.0` の公開 API は非破壊）。
+
+- `cosine_embedding_loss(&self, x2: &Var, y: &Tensor<f32>, margin: f32, reduction: Reduction)`
+- `margin_ranking_loss(&self, x2: &Var, y: &Tensor<f32>, margin: f32, reduction: Reduction)`
+- `triplet_margin_loss(&self, positive: &Var, negative: &Var, options: &TripletMarginOptions, reduction: Reduction)`
+- `poisson_nll_loss(&self, target: &Var, options: &PoissonNllOptions, reduction: Reduction)`
+
+ガード反転: `LossOpsHoldDoctestGuard` の `__probe_var` から 4 名 × 2 行 = 8 行のみ
+削除した（`ctc_loss` の `Var` プローブ・`Tensor`／`Tape` プローブ・`loss_ops`
+モジュールのプローブは維持）。正ガードは `api_surface.rs` の
+`var_loss_ops_methods_are_thin_delegations`（6 件化）・
+`var_distance_poisson_loss_ops_are_reachable_via_facade_var`（新規）・
+インベントリ `workspace_declares_loss_ops_fn_names_only_in_approved_locations`
+（`var.rs` 4 件追加）。facade 経由の利用例は
+`crates/facade/tests/loss_ops_distance_poisson_facade.rs`。
+不変: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`。新規
+`Op`・カーネル・`unsafe`・依存なし。
+
 ## §6 スコープ外（out-of-scope-tracking.md）
+
+- **#2539 追記**: `TripletMarginOptions`・`PoissonNllOptions`・`Reduction`・`loss_ops`
+  モジュールの facade 再エクスポートは §5 の推奨形に含まれず一括承認の範囲外
+  （facade 単独では非既定オプションを名前で構築できない既知ギャップ。#2538 と同じ論点）。
+  CUDA／Metal 実機 parity は `docs/perf/logs/loss-ops-2167/README.md` の申し送りが有効
+  （ホスト計算経路は不変）。
 
 - `compat::Loss`（`compile()`）への 4 損失の追加は #2169 の担当。
   本 PR では `crates/facade/src/compat/training.rs` を変更しない
