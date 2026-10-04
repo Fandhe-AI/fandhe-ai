@@ -4644,6 +4644,46 @@ impl<'t> Var<'t> {
         crate::indexing_ops::index_put_(self, indices, values, accumulate)
     }
 
+    // ---- topk_unique_ops 委譲メソッド（#2153 実装・#2519 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::topk_unique_ops` の自由関数。本体は 1 行委譲に固定し、
+    // 確保前検査・0-d 拒否・`i32` 上限検査の迂回や独自実装へのすり替えを
+    // facade の正ガード（`var_topk_unique_ops_methods_are_thin_delegations`）で
+    // 拒否する。既存の [`Var::topk`]／[`Var::unique`] は変更しない。
+    // `sorted=false` の順序は元添字昇順の決定的契約
+    // （`docs/autodiff-topk-unique-ops-decision.md` §2.3）。
+
+    /// `dim` 軸の上位／下位 `k` 個を選ぶ（`torch.topk(k, dim, largest, sorted)`
+    /// 相当。イシュー #2153・#2519）。`crate::topk_unique_ops::topk_with_options`
+    /// へ委譲する。負 `dim`・`sorted=false` に対応し、0-d 入力は拒否する。
+    pub fn topk_with_options(
+        &self,
+        k: usize,
+        opts: crate::topk_unique_ops::TopkOptions,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::topk_unique_ops::topk_with_options(self, k, opts)
+    }
+
+    /// 一意値集合（`torch.unique(sorted=True, return_inverse, return_counts, dim)`
+    /// 相当。イシュー #2153・#2519）。`crate::topk_unique_ops::unique_with_options`
+    /// へ委譲する。非微分で戻り値は detached。
+    pub fn unique_with_options(
+        &self,
+        opts: crate::topk_unique_ops::UniqueOptions,
+    ) -> Result<crate::topk_unique_ops::UniqueOutput, AutodiffError> {
+        crate::topk_unique_ops::unique_with_options(self, opts)
+    }
+
+    /// 連続する重複のみを畳む（`torch.unique_consecutive` 相当。イシュー
+    /// #2153・#2519）。`crate::topk_unique_ops::unique_consecutive` へ委譲する。
+    /// 非微分で戻り値は detached。
+    pub fn unique_consecutive(
+        &self,
+        opts: crate::topk_unique_ops::UniqueOptions,
+    ) -> Result<crate::topk_unique_ops::UniqueOutput, AutodiffError> {
+        crate::topk_unique_ops::unique_consecutive(self, opts)
+    }
+
     // ---- linalg_ops 委譲メソッド（#2150 実装・#2515 公開。親 #2500・ルート #2499）----
     //
     // 実体は `crate::linalg_ops` の自由関数（専用 `Op` あり。CPU 本番実装・

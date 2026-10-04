@@ -1664,3 +1664,15 @@ GPU 専用カーネル・checkpoint／`create_graph` 対応・`amax_dims`／keep
 `var_indexing_ops_are_reachable_via_facade_only`）へ反転した。対象外: 負の添字の wrap-around（設計判断記録 §6 承認事項 2）・
 `BackendOps` の拡張と GPU 専用カーネル（同 承認事項 3）・`Tensor`／`Tape` への同名メソッド。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
 `docs/spec/` は不変。実機 parity は #2148 の申し送り（`docs/perf/logs/indexing-inplace-2148/README.md`）が有効。
+
+**適用記録（経路 2。イシュー #2519・親 #2500・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
+`topk_with_options`・`unique_with_options`・`unique_consecutive`（#2153）を、設計判断記録（`docs/autodiff-topk-unique-ops-decision.md` §0・§6）の形どおり
+`Var::topk_with_options(&self, k: usize, opts: TopkOptions)`・`Var::unique_with_options(&self, opts: UniqueOptions)`・
+`Var::unique_consecutive(&self, opts: UniqueOptions)` の薄い委譲メソッド 3 件として公開した（本体は `topk_unique_ops` 自由関数への 1 行委譲。
+同モジュール自体は facade から再エクスポートしない。追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。入出力型 `TopkOptions`・`UniqueOptions`・
+`UniqueOutput` は autodiff ルート経由で facade ルートへ 1 行 `pub use` した（§6 の「再エクスポート」を既存規約で具体化したもの）。
+新規の `Op`／`BackendOps`／VJP／GPU カーネルは追加していない。保留ガード（`VarTopkUniqueOpsHoldDoctestGuard` と `api_surface.rs` の否定テスト 2 件・固定文言）は削除し、
+承認形のみを許す正ガード（`facade_does_not_reexport_or_declare_topk_unique_ops`・`workspace_declares_topk_unique_ops_fn_names_only_in_approved_locations`・
+`var_topk_unique_ops_methods_are_thin_delegations`・`var_topk_unique_ops_are_reachable_via_facade_only`・`facade_reexports_topk_unique_types_only_in_approved_shape`）へ反転した。
+対象外: `sorted=false` 専用カーネル・CUDA／Metal の `unique_ext` 専用カーネル・`Tensor`／`Tape` への同名メソッド。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
+`docs/spec/` は不変。実機 parity は #2153 の申し送り（`docs/perf/logs/topk-unique-2153/README.md`）が有効。

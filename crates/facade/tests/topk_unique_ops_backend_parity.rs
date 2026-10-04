@@ -1,10 +1,10 @@
-//! `fandhe_ai_autodiff::topk_unique_ops`（イシュー #2153・facade 非公開
-//! の内部入口。`crates/autodiff/src/topk_unique_ops.rs` モジュール doc
-//! 参照）のバックエンド間 parity テスト（`reduce_ops_backend_parity.rs`
-//! と同型）。
+//! `fandhe_ai_autodiff::topk_unique_ops`（イシュー #2153。モジュール自体は
+//! facade へ再エクスポートせず、`Var` の 1 行委譲メソッドとしてのみ公開済み
+//! 〈#2519〉。`crates/autodiff/src/topk_unique_ops.rs` モジュール doc 参照）の
+//! バックエンド間 parity テスト（`reduce_ops_backend_parity.rs` と同型）。
 //!
-//! `topk_unique_ops` は facade から再エクスポートされないため、本
-//! テストは `fandhe_ai_autodiff::topk_unique_ops::*` を直接 use する。
+//! 本テストは自由関数 `fandhe_ai_autodiff::topk_unique_ops::*` を直接 use する
+//! （委譲メソッドと同一経路。facade 経由の利用例は `topk_unique_ops_facade.rs`）。
 //!
 //! 選択演算（丸めなし）のため REQ-2 複合判定ではなく **bit 完全一致**
 //! で突合する（tolerance を持ち込まない。`fandhe_ai_tensor_core::
