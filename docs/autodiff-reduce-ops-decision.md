@@ -5,6 +5,8 @@
 
 ## §0 結論
 
+> 注記（#2514）: 本節の「facade 非公開」は #2147 時点の記述である。`Var::prod` 等 5 メソッドは #2514 で委譲メソッドとして公開済み（§9）。
+
 PyTorch 互換の縮約演算 5 種（`prod`／`logsumexp`／`any`／`all`／
 `norm_p`）を、**`fandhe_ai_autodiff` のうち facade が再エクスポート
 しない自由関数モジュール `reduce_ops`**（`crates/autodiff/src/
@@ -420,7 +422,7 @@ alloc_fits_f32` が前提とする「中間バッファはいずれも `f32`」�
 
 ## §6 承認事項（未承認として列挙）
 
-1. facade 公開（経路 2。上記スコープ外 1 と同じ）
+1. facade 公開（経路 2。上記スコープ外 1 と同じ）— **#2514 で実施済み**（ルート #2499 の一括承認。§9）
 2. bool 出力版の `any`／`all`（#2141 側の承認事項）
 3. GPU 専用カーネル
 4. `p ∈ {0, ±inf, 負}` のノルム（#2154 の決定待ち）
@@ -490,3 +492,11 @@ CUDA（DGX Spark GB10）・Metal 実機は本エージェント実行環境に�
 承認取得後の追随（本イシューでは未実施）: `Var::prod` 等の薄い委譲
 メソッド追加、facade 保留ガード（`VarReduceOpsHoldDoctestGuard`・
 対応する否定ガード 4 件）の撤去。
+
+## §9 実装記録（イシュー #2514。ルート #2499 の一括承認による facade 公開）
+
+- `crates/autodiff/src/var.rs`: `Var::prod`／`logsumexp`／`any`／`all`（`dim: Option<usize>`）・`Var::norm_p`（`p: f32, dim: Option<usize>`）を `reduce_ops` 自由関数への 1 行委譲メソッドとして追加（§0・§8 の推奨形どおり）
+- `crates/facade/src/lib.rs`: 保留ガード `VarReduceOpsHoldDoctestGuard` を削除
+- `crates/facade/tests/api_surface.rs`: 否定ガード 4 件を正ガードへ反転（doctest 系 2 件と `REDUCE_OPS_HOLD_PROBE_BODY` を削除、`facade_does_not_reexport_or_declare_reduce_ops` を維持、インベントリを `..._in_approved_locations` へ改名して `var.rs` 5 件を期待に追加、`var_reduce_ops_methods_are_thin_delegations`・`var_reduce_ops_are_reachable_via_facade_only` を新設）。`MIN_KNOWN_PROBE_BLOCKS` は 27
+- `crates/facade/tests/reduce_ops_facade.rs`: facade 経由の forward／backward／自由関数との bit 一致／エラー伝播
+- 新規 `Op`・VJP・GPU カーネルなし。tolerance／baseline／`Cargo.toml`／`Cargo.lock` 不変。実機 parity は §7 の申し送りが有効

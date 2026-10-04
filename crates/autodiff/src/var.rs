@@ -4612,6 +4612,59 @@ impl<'t> Var<'t> {
         crate::scalar_unary_ops::pow_scalar(self, exponent)
     }
 
+    // ---- reduce_ops 委譲メソッド（#2147 実装・#2514 公開。親 #2500・ルート #2499）----
+    //
+    // 本体は 1 行委譲に固定する（すり替えは facade の
+    // `var_reduce_ops_methods_are_thin_delegations` が拒否する）。数値契約の正本は
+    // `docs/autodiff-reduce-ops-decision.md` §3。
+
+    /// 積縮約（`torch.prod` 相当。`dim = None` は全要素）。
+    /// `crate::reduce_ops::prod` へ委譲する（イシュー #2147・#2514）。
+    pub fn prod(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::prod(self, dim)
+    }
+
+    /// 数値安定な log-sum-exp（`torch.logsumexp` 相当）。空縮約は `InvalidArgument`。
+    /// `crate::reduce_ops::logsumexp` へ委譲する（イシュー #2147・#2514）。
+    pub fn logsumexp(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::logsumexp(self, dim)
+    }
+
+    /// 非ゼロ要素の有無（`torch.any` 相当）を f32 の 0.0／1.0 マスクで返す。勾配はゼロ。
+    /// `crate::reduce_ops::any` へ委譲する（イシュー #2147・#2514）。
+    pub fn any(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::any(self, dim)
+    }
+
+    /// 全要素が非ゼロか（`torch.all` 相当）を f32 の 0.0／1.0 マスクで返す。勾配はゼロ。
+    /// `crate::reduce_ops::all` へ委譲する（イシュー #2147・#2514）。
+    pub fn all(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::all(self, dim)
+    }
+
+    /// `p` ノルム（`torch.linalg.vector_norm` 相当）。`p` は有限かつ正の値のみ許容する。
+    /// `crate::reduce_ops::norm_p` へ委譲する（イシュー #2147・#2514）。
+    pub fn norm_p(&self, p: f32, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::norm_p(self, p, dim)
+    }
+
+    // ---- extremum_ops 委譲メソッド（#2154 実装・#2514 公開。親 #2500・ルート #2499）----
+    //
+    // 本体は 1 行委譲に固定する。同値タイへ勾配を均等分配する（`Var::max`／`min` は先勝ちで
+    // 異なる）。契約の正本は `docs/autodiff-amax-grad-distribution-decision.md` §5。
+
+    /// 最大値縮約（`torch.amax` 相当）。同値タイに勾配を `g/k` で均等分配する。
+    /// `crate::extremum_ops::amax` へ委譲する（イシュー #2154・#2514）。
+    pub fn amax(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::extremum_ops::amax(self, dim)
+    }
+
+    /// 最小値縮約（`torch.amin` 相当）。同値タイに勾配を `g/k` で均等分配する。
+    /// `crate::extremum_ops::amin` へ委譲する（イシュー #2154・#2514）。
+    pub fn amin(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::extremum_ops::amin(self, dim)
+    }
+
     /// embedding テーブル（`self`。`[num_embeddings, embedding_dim]`）
     /// から `index` が指す行を抽出する（`nn::Embedding` の forward
     /// 本体。`torch.nn.functional.embedding` 相当。イシュー #1604）。

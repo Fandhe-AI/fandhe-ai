@@ -55,6 +55,7 @@
 ## 8. 承認事項（`amax`／`amin` 実装時に確認する事項）
 
 - facade 直下への新規公開面の要否（`docs/compat-api-scope.md` §5「範囲拡張手続き」の対象か、`unique`〈#1734〉と同様に既存 `Var` 再エクスポート経由で足りるかの判断）。
+  - 回答（#2514）: 新規 `pub use` は不要で、既存の `Var` 再エクスポート経由の委譲メソッド `Var::amax`／`amin` として公開した（§9.7）。
 - `Op::Amax`／`Op::Amin` という新規 `Op` variant 追加そのものはガードレール上の破壊的変更に該当しないが（既存 `Op::Max`／`Op::Min` の挙動を変えない加算的変更）、実装 PR のレビューで改めて確認する。
 
 ## 9. 実装記録（イシュー #2154。親 #2131「Phase 5」）
@@ -68,7 +69,7 @@
 - `crates/autodiff/src/grad.rs`: `vjp()` に `Op::Amax { input, dim } | Op::Amin { input, dim }` の共有アームを追加（`extremum_first_match_vjp` を `Op::Max`／`Op::Min` が共有する構成と同型）。新規ヘルパー `extremum_even_split_vjp`（`extremum_first_match_vjp` と同じ「外側×走査軸×内側」3 段走査。各 lane を 2 周し、1 周目で一致要素数 `k` を数え、2 周目で `g/k` を書く）。
 - `crates/autodiff/src/lib.rs`: `pub mod extremum_ops;` を追加。
 
-### 9.2 facade 非公開の判断（§8 承認事項の回答）
+### 9.2 facade 非公開の判断（§8 承認事項の回答。#2154 時点の記述。#2514 で公開済み・§9.7）
 
 Issue 本文は facade への `Var::amax`／`amin` 委譲メソッド追加を承認事項として明示している。自動運転（ユーザー承認を得られない実行文脈）での実装のため、承認前提の公開は行わず、`crates/autodiff/src/reduce_ops.rs`（#2147）・`matrix_ops.rs`（#2144）と同じ「自由関数として `Var` の外に置き到達不能にする」判断枠組みを適用した。`crates/facade/src/lib.rs::VarExtremumOpsHoldDoctestGuard`（正のプローブ 1 ブロック方式）＋ `crates/facade/tests/api_surface.rs` の 4 テスト（`extremum_ops_hold_doctest_globs_all_pub_modules`／`_probe_body_matches_fixed_contract`／`facade_does_not_reexport_or_declare_extremum_ops`／`workspace_declares_extremum_ops_fn_names_only_in_allowed_locations`）が多層防御を構成する。承認後は `Var::amax`／`amin` の薄い委譲メソッドを追加し、本ガード一式を撤去する。
 
@@ -98,3 +99,11 @@ Issue 本文は facade への `Var::amax`／`amin` 委譲メソッド追加を�
 - GPU 専用カーネル（forward は既存 `max`／`min` カーネルを再利用する契約〈§5〉のため対象外のまま）。
 - f64 autograd（`OpF64`）版の `amax`／`amin`。
 - facade 公開（`Var::amax`／`amin` の委譲メソッド追加・保留ガード撤去）: 経路 2 の承認待ち。窓口は #2154・#2131。
+
+### 9.7 実装記録（イシュー #2514。ルート #2499 の一括承認による facade 公開）
+
+- `crates/autodiff/src/var.rs`: `Var::amax`／`amin(&self, dim: Option<usize>)` を `extremum_ops` 自由関数への 1 行委譲メソッドとして追加（§9.2 の推奨形どおり。モジュール自体は再エクスポートしない）
+- `crates/facade/src/lib.rs`: 保留ガード `VarExtremumOpsHoldDoctestGuard` を削除
+- `crates/facade/tests/api_surface.rs`: 否定ガード 4 件を正ガードへ反転（doctest 系 2 件と `EXTREMUM_OPS_HOLD_PROBE_BODY` を削除、`facade_does_not_reexport_or_declare_extremum_ops` を維持、インベントリを `..._in_approved_locations` へ改名して `var.rs` 2 件を期待に追加、`var_extremum_ops_methods_are_thin_delegations`・`var_extremum_ops_are_reachable_via_facade_only` を新設）
+- `crates/facade/tests/extremum_ops_facade.rs`: forward が `Var::max`／`min` と bit 一致・タイの均等分配 `g/k`・タイなし時の先勝ち一致・`Var::max` の先勝ち勾配の回帰・自由関数との bit 一致・エラー伝播
+- 新規 `Op`・VJP・GPU カーネルなし。実機 parity は §9.5 の申し送りが有効。§9.6 の facade 公開は #2514 で実施済み

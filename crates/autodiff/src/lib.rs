@@ -195,10 +195,9 @@
 
 //! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
 //! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。
-//! [`matrix_ops`] と同じく非公開の自由関数群（`Var` への inherent
-//! メソッドではない）で、facade 公開は承認待ちのため意図的に
-//! 再エクスポートしない（`docs/autodiff-reduce-ops-decision.md`・
-//! モジュール doc 参照）。
+//! #2514（ルート #2499 の一括承認）で `Var` の 1 行委譲メソッドとして
+//! facade へ公開済み（モジュール自体は再エクスポートしない。
+//! `docs/autodiff-reduce-ops-decision.md`・モジュール doc 参照）。
 
 //! イシュー #2149（親 #2131）で、[`crate::var::Var::einsum`] が
 //! rank≥3 `matmul`（#1600 未実装）を理由に拒否していた batch 添字
@@ -225,10 +224,10 @@
 //! 追加した。既存 `Var::max`／`min`／`max_dims`（先勝ち決定的方式。
 //! イシュー #1718 で出荷済み挙動として維持を確定）とは独立の `Op`
 //! （`tape::Op::Amax`／`Amin`）・VJP として実装し、既存経路の勾配値は
-//! 変えない。[`reduce_ops`] と同じく非公開の自由関数群（`Var` への
-//! inherent メソッドではない）で、facade 公開は承認待ちのため意図的に
-//! 再エクスポートしない（`docs/autodiff-amax-grad-distribution-
-//! decision.md`・モジュール doc 参照）。
+//! 変えない。#2514（ルート #2499 の一括承認）で `Var::amax`／`amin` の
+//! 1 行委譲メソッドとして facade へ公開済み（モジュール自体は再エクスポート
+//! しない。`docs/autodiff-amax-grad-distribution-decision.md`・モジュール
+//! doc 参照）。
 
 pub mod activation_ops;
 mod adaptive_max_pool_ops;
