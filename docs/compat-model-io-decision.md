@@ -441,6 +441,8 @@ version migration。
   | `conv3d`（#2524） | `in_channels`・`out_channels`・`kernel_size_{d,h,w}`・`stride_{d,h,w}`・`padding_{d,h,w}`・`dilation_{d,h,w}`・`groups`（15 キー） | `weight: [out, in/groups, kD, kH, kW]`・`bias: [out]` |
   | `group_norm`（#2525） | `groups`・`eps`（f32） | なし |
   | `instance_norm`（#2525） | `eps`（f32） | なし |
+  | `pixel_shuffle`（#2526） | `upscale_factor` | なし |
+  | `pixel_unshuffle`（#2526） | `downscale_factor` | なし |
   | `conv1d` | `in_channels`・`out_channels`・`kernel_size`・`stride`・`padding`・`dilation`・`groups` | `weight: [out, in/groups, k]`・`bias: [out]` |
   | `layer_norm` | `normalized_size`・`eps`（f32） | `weight: [n]`・`bias: [n]` |
   | `rms_norm` | `normalized_size`・`eps`（f32） | `weight: [n]` |

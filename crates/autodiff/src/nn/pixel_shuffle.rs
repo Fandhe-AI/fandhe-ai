@@ -122,6 +122,77 @@ pub(crate) fn pixel_unshuffle_out_shape(
     Ok(out)
 }
 
+/// `PixelShuffle::forward` と `Var::pixel_shuffle`（イシュー #2526）の共有本体。
+/// `Var` メソッドは `new()` を経由しないため `upscale_factor == 0` の拒否
+/// （`InvalidArgument`）をここで行い、層経路と判定基準を一本化する
+/// （`.claude/rules/security.md` A08）。shape 検査が tape 操作より先に完了するため
+/// `Err` 経路で孤児ノードを残さない。
+pub(crate) fn pixel_shuffle_forward<'t>(
+    input: &Var<'t>,
+    upscale_factor: usize,
+) -> Result<Var<'t>, AutodiffError> {
+    if upscale_factor == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "PixelShuffle::new: upscale_factor must not be 0".to_string(),
+        ));
+    }
+    let in_shape = input.shape();
+    let out_shape =
+        pixel_shuffle_out_shape(&in_shape, upscale_factor).map_err(AutodiffError::Shape)?;
+    let rank = in_shape.len();
+    let nb = rank - 3;
+    let r = upscale_factor;
+    let c = out_shape[nb];
+    let h = in_shape[rank - 2];
+    let w = in_shape[rank - 1];
+
+    let mut mid_shape: Vec<usize> = in_shape[..nb].to_vec();
+    mid_shape.extend_from_slice(&[c, r, r, h, w]);
+
+    let mut perm: Vec<usize> = (0..nb).collect();
+    perm.extend_from_slice(&[nb, nb + 3, nb + 1, nb + 4, nb + 2]);
+
+    let x = input.contiguous()?;
+    let x = x.reshape(&mid_shape)?;
+    let x = x.permute(&perm)?;
+    let x = x.contiguous()?;
+    x.reshape(&out_shape)
+}
+
+/// `PixelUnshuffle::forward` と `Var::pixel_unshuffle`（イシュー #2526）の共有本体。
+/// [`pixel_shuffle_forward`] と対称（`0` 倍率の拒否・孤児ノード無しの規律も同じ）。
+pub(crate) fn pixel_unshuffle_forward<'t>(
+    input: &Var<'t>,
+    downscale_factor: usize,
+) -> Result<Var<'t>, AutodiffError> {
+    if downscale_factor == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "PixelUnshuffle::new: downscale_factor must not be 0".to_string(),
+        ));
+    }
+    let in_shape = input.shape();
+    let out_shape =
+        pixel_unshuffle_out_shape(&in_shape, downscale_factor).map_err(AutodiffError::Shape)?;
+    let rank = in_shape.len();
+    let nb = rank - 3;
+    let r = downscale_factor;
+    let c = in_shape[rank - 3];
+    let h_out = out_shape[nb + 1];
+    let w_out = out_shape[nb + 2];
+
+    let mut mid_shape: Vec<usize> = in_shape[..nb].to_vec();
+    mid_shape.extend_from_slice(&[c, h_out, r, w_out, r]);
+
+    let mut perm: Vec<usize> = (0..nb).collect();
+    perm.extend_from_slice(&[nb, nb + 2, nb + 4, nb + 1, nb + 3]);
+
+    let x = input.contiguous()?;
+    let x = x.reshape(&mid_shape)?;
+    let x = x.permute(&perm)?;
+    let x = x.contiguous()?;
+    x.reshape(&out_shape)
+}
+
 /// チャネル軸を空間軸へ並べ替える層（`torch.nn.PixelShuffle` 相当）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PixelShuffle {
@@ -155,27 +226,7 @@ impl PixelShuffle {
     /// `reshape`／`permute` 呼び出しは既に整合が取れた shape 値のみ
     /// を扱い、`Err` 経路は shape 検査の時点で確定する。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        let in_shape = input.shape();
-        let out_shape = pixel_shuffle_out_shape(&in_shape, self.upscale_factor)
-            .map_err(AutodiffError::Shape)?;
-        let rank = in_shape.len();
-        let nb = rank - 3;
-        let r = self.upscale_factor;
-        let c = out_shape[nb];
-        let h = in_shape[rank - 2];
-        let w = in_shape[rank - 1];
-
-        let mut mid_shape: Vec<usize> = in_shape[..nb].to_vec();
-        mid_shape.extend_from_slice(&[c, r, r, h, w]);
-
-        let mut perm: Vec<usize> = (0..nb).collect();
-        perm.extend_from_slice(&[nb, nb + 3, nb + 1, nb + 4, nb + 2]);
-
-        let x = input.contiguous()?;
-        let x = x.reshape(&mid_shape)?;
-        let x = x.permute(&perm)?;
-        let x = x.contiguous()?;
-        x.reshape(&out_shape)
+        pixel_shuffle_forward(input, self.upscale_factor)
     }
 
     /// [`crate::nn::module::Module::forward_host`]（`PixelShuffle`
@@ -240,27 +291,7 @@ impl PixelUnshuffle {
     /// `contiguous → reshape → permute → contiguous → reshape` の
     /// 5 手順を積む（[`PixelShuffle::forward`] と対称の構成）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        let in_shape = input.shape();
-        let out_shape = pixel_unshuffle_out_shape(&in_shape, self.downscale_factor)
-            .map_err(AutodiffError::Shape)?;
-        let rank = in_shape.len();
-        let nb = rank - 3;
-        let r = self.downscale_factor;
-        let c = in_shape[rank - 3];
-        let h_out = out_shape[nb + 1];
-        let w_out = out_shape[nb + 2];
-
-        let mut mid_shape: Vec<usize> = in_shape[..nb].to_vec();
-        mid_shape.extend_from_slice(&[c, h_out, r, w_out, r]);
-
-        let mut perm: Vec<usize> = (0..nb).collect();
-        perm.extend_from_slice(&[nb, nb + 2, nb + 4, nb + 1, nb + 3]);
-
-        let x = input.contiguous()?;
-        let x = x.reshape(&mid_shape)?;
-        let x = x.permute(&perm)?;
-        let x = x.contiguous()?;
-        x.reshape(&out_shape)
+        pixel_unshuffle_forward(input, self.downscale_factor)
     }
 
     /// [`crate::nn::module::Module::forward_host`]（`PixelUnshuffle`
@@ -301,6 +332,22 @@ mod tests {
     use super::*;
     use crate::eval::dense_vec;
     use crate::tape::Tape;
+
+    #[test]
+    fn shared_forward_rejects_zero_without_orphan_nodes() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![0.0; 4], &[1, 4, 1, 1]).unwrap());
+        let before = tape.len();
+        assert!(matches!(
+            pixel_shuffle_forward(&x, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            pixel_unshuffle_forward(&x, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert_eq!(tape.len(), before);
+    }
 
     #[test]
     fn pixel_shuffle_new_rejects_zero() {

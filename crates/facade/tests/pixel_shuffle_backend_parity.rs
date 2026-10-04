@@ -1,8 +1,10 @@
 //! `nn::PixelShuffle`／`nn::PixelUnshuffle`（イシュー #2162・親
 //! #2131）のバックエンド間 parity（REQ-2）対応テスト。
 //! `spatial_layers_backend_parity.rs`（#2159）と同型。facade は本 2 層
-//! を再エクスポートしていない（`docs/autodiff-pixel-shuffle-
-//! decision.md` §6 承認事項・`PixelShuffleHoldDoctestGuard`）ため、
+//! の型を再エクスポートしていない（型の再エクスポートは未承認で
+//! `PixelShuffleHoldDoctestGuard` が保留固定。`add_pixel_shuffle`／
+//! `add_pixel_unshuffle`・`Var` メソッドはイシュー #2526 で公開済みで、
+//! `docs/autodiff-pixel-shuffle-decision.md` §6）ため、
 //! `fandhe_ai_autodiff::nn::*` を直接 `use` する（dev-dependencies に
 //! 既に含まれている）。
 //!

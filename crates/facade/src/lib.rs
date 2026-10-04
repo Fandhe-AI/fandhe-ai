@@ -2780,36 +2780,34 @@ struct MhaOptionsHoldDoctestGuard;
 #[allow(dead_code)]
 struct RnnConfigHoldDoctestGuard;
 
-/// イシュー #2162（親 #2131）の facade 公開保留を固定する doctest
-/// 足場。`SpatialLayersHoldDoctestGuard`（#2159）と同型の「正の
+/// イシュー #2162（親 #2131）の facade 公開保留のうち、イシュー #2526
+/// （親 #2520・ルート #2499 の一括承認）の後も残る分を固定する doctest
+/// 足場。`SpatialLayersHoldDoctestGuard`（#2521 の縮小形）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカル
 /// `__fandhe_pixel_shuffle_hold_probe::{PixelShuffle, PixelUnshuffle,
 /// add_pixel_shuffle, add_pixel_unshuffle}` を導入し、実際に使う関数を
-/// 書く。facade がどの経路（単一行・複数行・ネストした group での
-/// `pub use`・別名エクスポート・facade 独自の `struct`／`type` 宣言・
-/// `compat::Sequential`／`Var` への inherent メソッド追加）でこれらの
-/// 名前を公開しても、ローカル定義との glob 衝突（型名の場合。E0659
-/// 等）または呼び出しシグネチャの不一致（`compat::Sequential`／`Var`
-/// への inherent メソッドはトレイトメソッドより優先解決されるため、
-/// 本プローブの trait 経由呼び出しが型・引数不一致でコンパイル失敗
-/// する）でエラーコードに依存せずコンパイルが失敗する。
+/// 書く。facade がどの経路（`pub use`・別名エクスポート・facade 独自の
+/// `struct`／`type` 宣言・自由関数での公開）でこれらの名前を公開しても、
+/// ローカル定義との glob 衝突でエラーコードに依存せずコンパイルが失敗する。
 ///
-/// `Var::pixel_shuffle`／`Var::pixel_unshuffle`（`nn::PixelShuffle`／
-/// `nn::PixelUnshuffle` の forward 相当の inherent メソッド追加）も
-/// 同じブロックで併せて保留固定する（経路 1・経路 2 のどちらの
-/// facade 公開拡張も未承認のため。実装計画 §4「facade 保留ガード」）。
+/// イシュー #2526 で公開済みの `compat::Sequential::add_pixel_shuffle`／
+/// `add_pixel_unshuffle`・`Var::pixel_shuffle`／`pixel_unshuffle` のプローブ
+/// （inherent メソッド追加を trait 経由呼び出しの不一致で検出していた
+/// `__FandhePixelShuffleAddProbe`／`__FandhePixelShuffleVarProbe` と
+/// `seq.*`／`v.*` の呼び出し）は撤去した。これらの承認形（定義元集合・
+/// 1 行委譲本体・シグネチャ・実値）は `crates/facade/tests/api_surface.rs`
+/// の正ガード群（`workspace_declares_pixel_shuffle_facade_fn_names_only_in_
+/// approved_locations` ほか）が固定する。型の再エクスポートと自由関数での
+/// 公開は未承認のため、本プローブで引き続き禁止する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// pixel_shuffle_hold_doctest_globs_all_pub_modules`・`pixel_shuffle_
-/// hold_doctest_probe_body_matches_fixed_contract`・
-/// `compat_sequential_does_not_expose_pixel_shuffle_add_methods`）との
-/// 多層防御の位置づけ・承認未取得の経緯は
-/// `docs/autodiff-pixel-shuffle-decision.md` §6「承認事項」節を参照。
+/// hold_doctest_probe_body_matches_fixed_contract`）との多層防御の位置
+/// づけ・承認の経緯は `docs/autodiff-pixel-shuffle-decision.md` §6 を参照。
 ///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
+/// 型の再エクスポート・自由関数公開が承認される日が来たら、本モジュール・
+/// 本 doctest 自体を削除する（対応する固定文言も同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2840,50 +2838,12 @@ struct RnnConfigHoldDoctestGuard;
 /// }
 /// use __fandhe_pixel_shuffle_hold_probe::*;
 ///
-/// trait __FandhePixelShuffleAddProbe {
-///     fn add_pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker;
-///     fn add_pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker;
-/// }
-///
-/// impl __FandhePixelShuffleAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker {
-///         __FandhePixelShuffleHoldMarker
-///     }
-///     fn add_pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker {
-///         __FandhePixelShuffleHoldMarker
-///     }
-/// }
-///
-/// trait __FandhePixelShuffleVarProbe {
-///     fn pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker;
-///     fn pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker;
-/// }
-///
-/// impl<'t> __FandhePixelShuffleVarProbe for fandhe_ai::Var<'t> {
-///     fn pixel_shuffle(&self) -> __FandhePixelShuffleHoldMarker {
-///         __FandhePixelShuffleHoldMarker
-///     }
-///     fn pixel_unshuffle(&self) -> __FandhePixelShuffleHoldMarker {
-///         __FandhePixelShuffleHoldMarker
-///     }
-/// }
-///
 /// fn __probe(
 ///     _: PixelShuffle,
 ///     _: PixelUnshuffle,
-///     seq: &fandhe_ai::compat::Sequential,
-///     v: &fandhe_ai::Var<'_>,
 /// ) {
 ///     let _: __FandhePixelShuffleHoldMarker = add_pixel_shuffle();
 ///     let _: __FandhePixelShuffleHoldMarker = add_pixel_unshuffle();
-///     let _: __FandhePixelShuffleHoldMarker = fandhe_ai::compat::Sequential::add_pixel_shuffle(seq);
-///     let _: __FandhePixelShuffleHoldMarker = seq.add_pixel_shuffle();
-///     let _: __FandhePixelShuffleHoldMarker = fandhe_ai::compat::Sequential::add_pixel_unshuffle(seq);
-///     let _: __FandhePixelShuffleHoldMarker = seq.add_pixel_unshuffle();
-///     let _: __FandhePixelShuffleHoldMarker = fandhe_ai::Var::pixel_shuffle(v);
-///     let _: __FandhePixelShuffleHoldMarker = v.pixel_shuffle();
-///     let _: __FandhePixelShuffleHoldMarker = fandhe_ai::Var::pixel_unshuffle(v);
-///     let _: __FandhePixelShuffleHoldMarker = v.pixel_unshuffle();
 /// }
 /// ```
 #[cfg(doctest)]

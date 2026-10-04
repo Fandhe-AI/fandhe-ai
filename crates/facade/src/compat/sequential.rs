@@ -119,9 +119,9 @@ use fandhe_ai_autodiff::nn::{
     ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, Dropout, Embedding, EmbeddingVars,
     FeedForwardActivation, Flatten, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS,
     LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention,
-    MultiheadAttentionVars, RmsNorm, RmsNormVars, Sequential as NnSequential,
-    TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten, Upsample, ZeroPad2d,
-    conv2d_forward_low_precision, linear_forward_low_precision,
+    MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
+    Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars, Unflatten,
+    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
     multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
@@ -174,7 +174,7 @@ pub struct Sequential {
 
 /// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
 ///
-/// `add_*` 37 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
+/// `add_*` 39 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
 /// `add_*` を呼んで再構築する（イシュー #2369・#2370。`docs/compat-model-io-decision.md`
 /// §5）。`add_*` の内部で固定している値（conv／linear の `bias=true`・pool の
 /// `ceil_mode=false`・TE の活性化と eps 等）は記録しない（同じ `add_*` が再現するため）。
@@ -333,6 +333,14 @@ pub(super) enum LayerSpec {
     },
     InstanceNorm {
         eps: f32,
+    },
+    /// イシュー #2526。
+    PixelShuffle {
+        upscale_factor: usize,
+    },
+    /// イシュー #2526。
+    PixelUnshuffle {
+        downscale_factor: usize,
     },
     /// 保存対象外の層（`add_module` の利用者定義層と、manifest スキーマ未対応の組み込み層
     /// 〈`conv_transpose1d`／`unflatten`。イシュー #2521〉。`kind` はエラー文言で読む）。
@@ -1226,6 +1234,43 @@ impl Sequential {
         self.inner.push(Box::new(ZeroPad2d::new(padding)));
         self.specs.push(LayerSpec::ZeroPad2d { padding });
         self
+    }
+
+    /// PixelShuffle 層を追加する（`nn::PixelShuffle`。イシュー #2526）。
+    /// `[*, C*r*r, H, W]` を `[*, C, H*r, W*r]` へ並べ替える（`r = upscale_factor`・
+    /// PyTorch `nn.PixelShuffle` 相当・`Var::pixel_shuffle` と同一の共有 forward）。`0` は即時
+    /// `Err`（`AutodiffError::InvalidArgument`）で、rank 3 未満・チャネル軸の非整除は
+    /// forward 時の `Err`（遅延検査）。無状態層で、学習・常駐経路を通過し保存に対応する。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_pixel_shuffle(2)?;
+    /// let x = Tensor::new(vec![0.0_f32, 1.0, 2.0, 3.0], &[1, 4, 1, 1])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[1, 1, 2, 2]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_pixel_shuffle(mut self, upscale_factor: usize) -> Result<Self, AutodiffError> {
+        let layer = PixelShuffle::new(upscale_factor)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::PixelShuffle { upscale_factor });
+        Ok(self)
+    }
+
+    /// PixelUnshuffle 層を追加する（`nn::PixelUnshuffle`。イシュー #2526）。
+    /// [`Sequential::add_pixel_shuffle`] の逆変換で、`[*, C, H*r, W*r]` を
+    /// `[*, C*r*r, H, W]` へ並べ替える（`r = downscale_factor`）。エラー条件・無状態層としての
+    /// 扱いは `add_pixel_shuffle` と同じ。
+    pub fn add_pixel_unshuffle(mut self, downscale_factor: usize) -> Result<Self, AutodiffError> {
+        let layer = PixelUnshuffle::new(downscale_factor)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::PixelUnshuffle { downscale_factor });
+        Ok(self)
     }
 
     /// Identity 層を追加する（`nn::Identity`。イシュー #2522）。入力をそのまま返す

@@ -186,11 +186,9 @@
 //! （`pixel_shuffle` モジュール）を追加した。既存 `Var::reshape`／
 //! `permute`／`contiguous` の合成のみで新規 `Op`／`BackendOps`／VJP／
 //! カーネルは追加しない。`compat::Sequential::add_pixel_shuffle`／
-//! `add_pixel_unshuffle`・`Var::pixel_shuffle`／`pixel_unshuffle` の
-//! facade 公開は未承認のため保留する（`crates/facade/src/lib.rs` の
-//! `PixelShuffleHoldDoctestGuard`・`crates/facade/tests/api_surface.rs`
-//! の否定ガードで固定。`docs/autodiff-pixel-shuffle-decision.md` §6
-//! 承認事項）。
+//! `add_pixel_unshuffle`・`Var::pixel_shuffle`／`pixel_unshuffle` は
+//! イシュー #2526（親 #2520）で facade 公開済み（`Module` の `as_*` フックは
+//! 無状態層のため追加しない。`docs/autodiff-pixel-shuffle-decision.md` §6）。
 //! イシュー #2163（親 #2131）で [`MultiheadAttention`] に
 //! [`attention::MultiheadAttentionConfig`]（`batch_first`・`kdim`・
 //! `vdim`）・`MultiheadAttentionVars::forward_with_key_padding_mask`
@@ -275,6 +273,7 @@ pub use normalization::{
 };
 pub use padding::ZeroPad2d;
 pub use pixel_shuffle::{PixelShuffle, PixelUnshuffle};
+pub(crate) use pixel_shuffle::{pixel_shuffle_forward, pixel_unshuffle_forward};
 pub use pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
     AvgPool2d, GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d,

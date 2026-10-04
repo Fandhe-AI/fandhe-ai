@@ -3020,6 +3020,25 @@ impl<'t> Var<'t> {
         crate::nn::unflatten_forward(self, dim, sizes)
     }
 
+    /// チャネル軸を空間軸へ並べ替える（PyTorch `F.pixel_shuffle` 相当。イシュー #2526）。
+    ///
+    /// `[*, C*r*r, H, W]` → `[*, C, H*r, W*r]`（`r = upscale_factor`）。軸の並びは
+    /// `out[.., c, h*r+i, w*r+j] = in[.., c*r*r+i*r+j, h, w]`。rank 3 以上を受理する。
+    /// `0`・rank 3 未満・チャネル軸の非整除・オーバーフローは `Err` で、shape 検査を
+    /// 通るまで tape を操作しないためエラー時に孤児ノードを残さない。
+    pub fn pixel_shuffle(&self, upscale_factor: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::pixel_shuffle_forward(self, upscale_factor)
+    }
+
+    /// 空間軸をチャネル軸へ並べ替える（PyTorch `F.pixel_unshuffle` 相当。
+    /// [`Var::pixel_shuffle`] の逆変換。イシュー #2526）。
+    ///
+    /// `[*, C, H*r, W*r]` → `[*, C*r*r, H, W]`（`r = downscale_factor`）。
+    /// エラー条件・孤児ノード無しの規律は [`Var::pixel_shuffle`] と同じ。
+    pub fn pixel_unshuffle(&self, downscale_factor: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::nn::pixel_unshuffle_forward(self, downscale_factor)
+    }
+
     /// 1 次元転置畳み込み（PyTorch `F.conv_transpose1d`。イシュー #2521）。
     ///
     /// `self` は `[N, Cin, L]`、`weight` は `[Cin, Cout/groups, k]`、`bias` は
