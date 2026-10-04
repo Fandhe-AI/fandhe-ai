@@ -340,6 +340,18 @@ pub trait Module {
         None
     }
 
+    /// [`Module::as_rms_norm`] と同型の明示フック（イシュー #2529）。
+    /// `PRelu` 層向け（`weight` を持つ唯一の活性化層。`compat::Sequential` が
+    /// bind／勾配回収／常駐拒否の判定に使う）。既定 `None`。
+    fn as_prelu(&self) -> Option<&PRelu> {
+        None
+    }
+
+    /// [`Module::as_prelu`] の可変版。
+    fn as_prelu_mut(&mut self) -> Option<&mut PRelu> {
+        None
+    }
+
     /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #1760）。
     /// `BatchNorm1d` 層向け。既定 `None`。
     fn as_batch_norm1d(&self) -> Option<&BatchNorm1d> {
@@ -2274,6 +2286,17 @@ impl Module for Glu {
 /// （`where_cond` を経由する多段合成の bit 一致を未検証）で既定のまま
 /// ・`supports_forward_host` を `false` へオーバーライドする。
 impl Module for PRelu {
+    /// イシュー #2529: `compat::Sequential` の学習経路が `PRelu` 層を
+    /// 認識するためのフック（`as_rms_norm` と同型）。
+    fn as_prelu(&self) -> Option<&PRelu> {
+        Some(self)
+    }
+
+    /// [`Module::as_prelu`] の可変版。
+    fn as_prelu_mut(&mut self) -> Option<&mut PRelu> {
+        Some(self)
+    }
+
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.bind(tape).forward(input)
     }

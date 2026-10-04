@@ -1487,3 +1487,12 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 ハンドルで一体化する」設計であり、新しい対策パターンを追加しない。
 
 #2509 追記: `compiled.loss` の allowlist を 9 種へ拡張した。新しい値は既存ファイルに存在しないため `format_version` は #2373 の lbfgs 先例どおり 2 のまま据え置く（旧リーダーは `UnsupportedModel` で fail-closed）。
+
+## 追補（イシュー #2529）: 活性化 5 種の kind 追加
+
+- `mish`／`hardtanh`（`min_val`／`max_val`）／`relu6`／`glu`（`dim`）／`prelu`（`num_parameters`）を allowlist に追加（45 → 50 種）。
+  期待キーは `prelu` のみ `{index}.weight`（shape `[num_parameters]`）
+- `hardtanh` の `±inf` は `Hardtanh::new` が受理するが JSON 数値として書けないため、保存側で `UnsupportedModel` にする
+- `prelu` の `init` は manifest に記録しない（`seed` と同じ理由。初期化にしか使われず、直後の `load_state_dict` で
+  `weight` が上書きされる。復元時は PyTorch 既定の `0.25` で再構築）
+- 非信頼入力（A03）は既存の `Params`（厳密なキー集合）・`p.usize`／`p.f32`（正準形）・`add_*` の構築時検査で拒否する

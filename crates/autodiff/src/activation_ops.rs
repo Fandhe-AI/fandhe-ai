@@ -17,9 +17,9 @@
 //! 再エクスポートしない。委譲本体の固定は facade の正ガード
 //! （`crates/facade/tests/api_surface.rs::
 //! var_activation_ops_methods_are_thin_delegations`）が担う。
-//! `compat::Sequential::add_*` 5 種は #2529 で保留中のため、facade 側の
-//! `VarActivationOpsHoldDoctestGuard`（`Tensor<f32>`／`Tape` 上の配置と
-//! `add_*` の衝突プローブ）は部分反転のまま残している
+//! `compat::Sequential::add_*` 5 種は #2529 で公開済みで、facade 側の
+//! `VarActivationOpsHoldDoctestGuard` は `Tensor<f32>`／`Tape` 上の配置と
+//! モジュール再エクスポートのプローブだけを残している
 //! （`docs/autodiff-activation-ops-decision.md` §6）。
 //!
 //! **数値契約**（詳細は `docs/autodiff-activation-ops-decision.md` §3

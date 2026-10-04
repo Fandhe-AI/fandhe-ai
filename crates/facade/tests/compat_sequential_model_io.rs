@@ -7,7 +7,7 @@
 //! #2374 の正常系 bit 一致行列）。
 //!
 //! `mod roundtrip_matrix`（#2374）は `docs/compat-model-io-decision.md` §6 の正常系を
-//! 「アーキテクチャ（45 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
+//! 「アーキテクチャ（50 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
 //! 6 optimizer × AMP・GradScaler 非初期・Lbfgs 履歴 未満／到達済み）」の直積で固定し、全セルで
 //! 再保存したファイルのバイト一致を検査する。単一軸の深掘りは `compat_sequential_model_io_{layers,
 //! batch_norm,compiled,lbfgs}.rs` が担う（対応表は同 doc §6.1）。
@@ -474,7 +474,7 @@ mod roundtrip_matrix {
     use crate::common::temp_dir::TempDirGuard;
 
     /// allowlist の 45 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-    const ALL_KINDS: [&str; 45] = [
+    const ALL_KINDS: [&str; 50] = [
         "linear",
         "relu",
         "sigmoid",
@@ -488,6 +488,11 @@ mod roundtrip_matrix {
         "softmax",
         "log_softmax",
         "softplus",
+        "mish",
+        "hardtanh",
+        "relu6",
+        "glu",
+        "prelu",
         "flatten",
         "dropout",
         "dropout2d",
@@ -582,12 +587,17 @@ mod roundtrip_matrix {
             .add_gelu()
             .add_gelu_tanh()
             .add_softplus(1.5, 20.0)?
+            .add_mish()
+            .add_hardtanh(-2.0, 2.0)?
+            .add_relu6()
+            .add_prelu(8, 0.2)?
             .add_dropout(0.3)?
             .add_alpha_dropout(0.2)?
             .add_layer_norm(8, 1e-5)?
             .add_rms_norm(8, 1e-6)?
             .add_batch_norm1d(8, 1e-5, 0.1)?
-            .add_linear(8, 5, 12)?
+            .add_glu(1)
+            .add_linear(4, 5, 12)?
             .add_softmax(1)
             .add_log_softmax(1);
         m.eval();
@@ -947,7 +957,7 @@ mod roundtrip_matrix {
 
     // -- テスト ---------------------------------------------------------------
 
-    /// A-30 × eval: 45 種の kind の和集合（未 compile）。
+    /// A-30 × eval: 50 種の kind の和集合（未 compile）。
     #[test]
     fn matrix_thirty_kinds_eval_round_trip_and_resave_identical() {
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -998,7 +1008,7 @@ mod roundtrip_matrix {
             seen.extend(check_cell(label, &mut model, &input, None));
         }
         let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-        assert_eq!(seen, expected, "45 種の kind をすべて往復させたはず");
+        assert_eq!(seen, expected, "50 種の kind をすべて往復させたはず");
     }
 
     /// A-deep × {eval, train 後の BN}: train モードで predict を回し running stats を動かした状態。
