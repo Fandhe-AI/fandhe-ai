@@ -2708,10 +2708,14 @@ struct PixelShuffleHoldDoctestGuard;
 /// も委譲メソッドとして公開済みのため、`__probe_var` から該当 8 行を削除した
 /// （正ガードは `var_loss_ops_methods_are_thin_delegations` 6 件化・
 /// `var_distance_poisson_loss_ops_are_reachable_via_facade_var`）。`__probe_var` には
-/// `ctc_loss` の 2 行のみが残る。
+/// `ctc_loss` の 2 行のみが残っていた。
 ///
-/// 撤去条件: #2540 で残る `Var` 名（`ctc_loss`）が公開されたら `__probe_var` と
-/// `Var` の impl を外す。`Tensor`／`Tape`／モジュール再エクスポートの拒否は維持する。
+/// **#2540 での反転**（同一の一括承認）: `Var::ctc_loss` を委譲メソッドとして公開した
+/// ため、`__probe_var` と `Var` 向けトレイト impl を撤去した（正ガードは
+/// `var_loss_ops_methods_are_thin_delegations` 7 件化・`var_ctc_loss_is_reachable_via_facade_var`）。
+///
+/// 撤去条件: `Var` 側の撤去は #2540 で完了。`Tensor`／`Tape`／モジュール再エクスポート／
+/// オプション型の拒否は維持する（解除には別途承認が必要）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2754,16 +2758,6 @@ struct PixelShuffleHoldDoctestGuard;
 ///     fn ctc_loss(&self) -> __FandheLossMarker;
 /// }
 ///
-/// impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {
-///     fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
-///     fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }
-///     fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
-///     fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
-///     fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
-///     fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
-///     fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
-/// }
-///
 /// impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {
 ///     fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }
 ///     fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }
@@ -2795,11 +2789,6 @@ struct PixelShuffleHoldDoctestGuard;
 ///     loss_ops::triplet_margin_loss();
 ///     loss_ops::poisson_nll_loss();
 ///     loss_ops::ctc_loss();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheLossMarker = fandhe_ai::Var::ctc_loss(x);
-///     let _: __FandheLossMarker = x.ctc_loss();
 /// }
 ///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {

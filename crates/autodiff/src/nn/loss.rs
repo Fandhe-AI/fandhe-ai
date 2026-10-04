@@ -30,7 +30,8 @@
 //!   facade 公開済み。本構造体自体の facade 公開は #2600 の範囲）。
 //! - #2168（親イシュー #2131）で `CtcLoss`（`crate::loss_ops::ctc_loss`
 //!   の薄いラッパー。PyTorch `nn.CTCLoss` 相当）を追加した。上記と同じ
-//!   「自由関数を呼ぶだけ」パターン。
+//!   「自由関数を呼ぶだけ」パターン。`Var::ctc_loss` は #2540 で facade 公開済み
+//!   （本構造体自体の facade 公開は #2600 の範囲）。
 //!
 //! `Reduction`（mean/sum 縮約）は MSE・CrossEntropy の両損失で共有する
 //! ため `crate::var::Reduction`（#190 が定義）をそのまま再利用し、
