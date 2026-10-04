@@ -1515,3 +1515,14 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - `prelu` の `init` は manifest に記録しない（`seed` と同じ理由。初期化にしか使われず、直後の `load_state_dict` で
   `weight` が上書きされる。復元時は PyTorch 既定の `0.25` で再構築）
 - 非信頼入力（A03）は既存の `Params`（厳密なキー集合）・`p.usize`／`p.f32`（正準形）・`add_*` の構築時検査で拒否する
+
+## 追補（イシュー #2533）: `transformer` kind の追加
+
+- kind `transformer`（params: `d_model`・`num_heads`・`num_encoder_layers`・`num_decoder_layers`・`dim_feedforward`・`eps` の 6 キー。活性化は `relu` 限定のため記録しない）を
+  allowlist に追加（52 → 53 種）
+- パラメータは `16 * num_encoder_layers + 2 + 26 * num_decoder_layers + 2` 要素。期待キーは `encoder.layers.{i}.*` → `encoder.norm.*` → `decoder.layers.{i}.*` → `decoder.norm.*` の順で
+  層構成からの算術で導く。JSON 配列・object の上限（`MAX_ARRAY_LEN`・`MAX_OBJECT_KEYS`・`MAX_LAYERS`）の閾値は変更せず、超過は書き込み前の `verify_round_trip` が `TooLarge` で拒否する
+- load 側は非信頼な層数で巨大な期待キー列を確保しないよう、全層のキー数を checked 算術で求めて実キー数（パーサが `MAX_ARRAY_LEN` 以下を保証）と一致することを確認してから期待キー列を作る。
+  不一致は `Mismatch`。0 層は `Manifest` で早期拒否する
+- `format_version` は 2 のまま据え置き（旧リーダーは未知 kind を fail-closed 拒否）
+- 復元は `add_transformer` を再実行し、0 次元・割り切れない head 数は構築時検査で拒否する

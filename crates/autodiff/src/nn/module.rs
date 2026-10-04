@@ -475,8 +475,7 @@ pub trait Module {
     /// （イシュー #2165・親 #2131）。`Transformer`（encoder スタック＋
     /// decoder スタック＋各終端 LayerNorm の合成。`nn/transformer.rs`
     /// モジュール doc 参照）向け。facade 結線（`compat::Sequential::
-    /// add_transformer`）自体は承認待ちのため未実装（
-    /// `TransformerDecoderHoldDoctestGuard` 参照）。既定 `None`。
+    /// add_transformer`）はイシュー #2533 で実装済み。既定 `None`。
     fn as_transformer(&self) -> Option<&Transformer> {
         None
     }

@@ -1,8 +1,8 @@
 //! `nn::{TransformerDecoderLayer, Transformer}`（イシュー #2165・親
 //! #2131・#2068 の対）のバックエンド間 parity（REQ-2）対応テスト。
-//! `rnn_stacked_backend_parity.rs` と同型: facade は本 2 型を
-//! 再エクスポートしていない（`docs/autodiff-transformer-decoder-
-//! decision.md` §承認事項・`TransformerDecoderHoldDoctestGuard`）ため、
+//! `rnn_stacked_backend_parity.rs` と同型: facade は `Transformer`・
+//! `TransformerDecoderLayer` を型として再エクスポート済み（#2532・#2533）だが、
+//! 単体構築・forward 用の公開面（`FeedForwardActivation`・`Tape` 委譲）は承認形の範囲外のため、
 //! `fandhe_ai_autodiff::nn::*` を直接 `use` する。
 //!
 //! - 属性なし: `CpuBackendOps` と `NaiveOps`（`fandhe_ai_autodiff::

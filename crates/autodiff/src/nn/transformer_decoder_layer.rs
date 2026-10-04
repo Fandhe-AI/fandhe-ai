@@ -25,9 +25,8 @@
 //!
 //! **対象外（PR 本文に記載・`out-of-scope-tracking.md`）**: pre-norm・
 //! Dropout 結線・`batch_first=False`・`tgt_key_padding_mask`／
-//! `memory_key_padding_mask`・facade 公開（`compat::Sequential::
-//! add_transformer_decoder_layer` 相当。承認事項。`crates/facade/src/lib.rs`
-//! の `TransformerDecoderHoldDoctestGuard` で保留固定）・
+//! `memory_key_padding_mask`・facade 単体公開以外の拡張（`compat::Sequential::
+//! add_transformer_decoder_layer`。イシュー #2532 で公開済み）・
 //! `forward_host`（tape 不要推論経路。trait 既定のまま `Unsupported`
 //! fail-safe）・AMP 低精度（#2071）・KV キャッシュ（#2083／#2084）。
 //!

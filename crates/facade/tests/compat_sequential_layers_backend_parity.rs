@@ -147,6 +147,35 @@ fn run_transformer_encoder_parity(device: Device) {
     );
 }
 
+/// `add_transformer`（イシュー #2533・親 #2531）の parity。`src = tgt = 入力`・mask なし・
+/// 非 causal 固定の forward を CPU と対象デバイスで比較する。新規カーネルは追加していない
+/// （`Transformer::forward` は既存の encoder／decoder 層の合成のみ）。tolerance は変更しない。
+fn run_transformer_parity(device: Device) {
+    use fandhe_ai::nn::TransformerConfig;
+    let config = TransformerConfig::new(4, 2)
+        .with_num_encoder_layers(1)
+        .with_num_decoder_layers(1)
+        .with_dim_feedforward(8);
+    let model = Sequential::new().add_transformer(config, SEED2).unwrap();
+    let x = tensor(
+        (0..2 * 3 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
+        &[2, 3, 4],
+    );
+
+    let cpu_out = model.predict(&x).unwrap();
+
+    let tape = fandhe_ai::tape_for(device)
+        .expect("実機必須（本テストは #[ignore]。実行時は事前に到達確認する）");
+    let xv = tape.var(&x);
+    let device_out = model.forward(&tape, &xv).unwrap().to_tensor();
+
+    assert_parity(
+        "compat::Sequential(add_transformer) device vs CPU",
+        &dense(&device_out),
+        &dense(&cpu_out),
+    );
+}
+
 /// `add_transformer_decoder_layer`（イシュー #2532・親 #2531）の parity。
 /// `tgt = memory = 入力`・mask なし・非 causal 固定の forward を CPU と対象デバイスで比較する。
 /// 新規カーネルは追加していない（`TransformerDecoderLayer::forward` は既存の
@@ -207,6 +236,13 @@ fn cuda_transformer_encoder_matches_cpu() {
             へ引き継ぐ"]
 fn cuda_transformer_decoder_layer_matches_cpu() {
     run_transformer_decoder_layer_parity(Device::Cuda(0));
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。実行は #2533 の申し送り先（GB10 セッション）\
+            へ引き継ぐ"]
+fn cuda_transformer_matches_cpu() {
+    run_transformer_parity(Device::Cuda(0));
 }
 
 // --- Metal（本エージェント実行環境に実機なし。Mac セッションへ申し送り） ---
@@ -287,4 +323,12 @@ fn metal_transformer_encoder_matches_cpu() {
             引き継ぐ"]
 fn metal_transformer_decoder_layer_matches_cpu() {
     run_transformer_decoder_layer_parity(Device::Metal);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須。実行は #2533 の申し送り先（Mac セッション）へ \
+            引き継ぐ"]
+fn metal_transformer_matches_cpu() {
+    run_transformer_parity(Device::Metal);
 }

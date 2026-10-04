@@ -13553,26 +13553,30 @@ fn multihead_attention_config_is_reachable_via_facade_only() {
     assert_eq!(model.trainable_parameters().len(), 4);
 }
 // =====================================================================
-// イシュー #2532（親 #2531・ルート #2499 の一括承認）: TransformerDecoderLayer・
-// TransformerConfig の facade 再エクスポートと
-// `compat::Sequential::add_transformer_decoder_layer` の公開を固定する正ガード群。
-// 旧保留ガード（#2165）を decoder 1 層の分だけ反転したもので、公開面は承認形
-// （`nn/mod.rs` の 1 文の再エクスポート・`add_transformer_decoder_layer` 1 件）に
-// 完全一致で限定する（`Transformer`／`add_transformer` は #2533 まで保留継続）。
+// イシュー #2532・#2533（親 #2531・ルート #2499 の一括承認）: Transformer・
+// TransformerDecoderLayer・TransformerConfig の facade 再エクスポートと
+// `compat::Sequential::add_transformer_decoder_layer`／`add_transformer` の公開を固定する
+// 正ガード群。旧保留ガード（#2165。#2533 で `TransformerDecoderHoldDoctestGuard` ごと撤去）
+// を反転したもので、公開面は承認形（`nn/mod.rs` の 1 文の再エクスポート・
+// `add_transformer_decoder_layer`／`add_transformer` 各 1 件）に完全一致で限定する。
 // 根拠は `docs/autodiff-transformer-decoder-decision.md`。
 // =====================================================================
 
-/// `nn/mod.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの）。#2533 が
-/// `Transformer` を加える際はこの定数を更新する。
+/// `nn/mod.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの。#2533 で
+/// `Transformer` を加えた 3 名形）。
 const TRANSFORMER_DECODER_APPROVED_REEXPORT: &str =
-    "fandhe_ai_autodiff::nn::{TransformerConfig,TransformerDecoderLayer}";
+    "fandhe_ai_autodiff::nn::{Transformer,TransformerConfig,TransformerDecoderLayer}";
 
-/// `TransformerDecoderLayer`／`TransformerConfig` を識別子として含む `pub use` 文を
+/// `Transformer`／`TransformerDecoderLayer`／`TransformerConfig` を識別子として含む `pub use` 文を
 /// `(ファイル相対パス, 空白なしトークン連結)` で、facade 独自の `struct`／`enum`／`type`／
 /// `union` 宣言を `(ファイル, "<decl>")` で全件返す。コメント・文字列リテラルは無視する。
 /// `pub(crate) use` は `pub` の次が `(` のため走査対象外だが、crate 内専用で公開面に現れない。
 fn transformer_decoder_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
-    const NAMES: [&str; 2] = ["TransformerDecoderLayer", "TransformerConfig"];
+    const NAMES: [&str; 3] = [
+        "Transformer",
+        "TransformerDecoderLayer",
+        "TransformerConfig",
+    ];
     let mut out = Vec::new();
     for (rel, content) in files {
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
@@ -13620,7 +13624,7 @@ fn facade_reexports_transformer_decoder_items_only_in_approved_shape() {
             "nn/mod.rs".to_string(),
             TRANSFORMER_DECODER_APPROVED_REEXPORT.to_string()
         )],
-        "TransformerDecoderLayer／TransformerConfig の facade 公開は nn/mod.rs の承認形 1 文のみ（イシュー #2532）"
+        "Transformer／TransformerDecoderLayer／TransformerConfig の facade 公開は nn/mod.rs の承認形 1 文のみ（イシュー #2532・#2533）"
     );
 }
 
@@ -13629,7 +13633,7 @@ fn facade_reexports_transformer_decoder_items_only_in_approved_shape() {
 #[test]
 fn facade_reexports_transformer_decoder_items_only_in_approved_shape_detects_each_category() {
     let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
-    let ok = "pub use fandhe_ai_autodiff::nn::{TransformerConfig, TransformerDecoderLayer};";
+    let ok = "pub use fandhe_ai_autodiff::nn::{Transformer, TransformerConfig, TransformerDecoderLayer};";
     assert_eq!(
         transformer_decoder_exposures(&f("nn/mod.rs", ok)),
         vec![(
@@ -13646,7 +13650,11 @@ fn facade_reexports_transformer_decoder_items_only_in_approved_shape_detects_eac
         "pub use fandhe_ai_autodiff::nn::TransformerDecoderLayer as Layer;",
         "pub use fandhe_ai_autodiff::nn::TransformerDecoderLayer;",
         "pub use fandhe_ai_autodiff::nn::{TransformerDecoderLayer, TransformerConfig};",
-        "pub use fandhe_ai_autodiff::nn::{Transformer, TransformerConfig, TransformerDecoderLayer};",
+        "pub use fandhe_ai_autodiff::nn::{TransformerConfig, TransformerDecoderLayer};",
+        "pub use fandhe_ai_autodiff::nn::{TransformerConfig, Transformer, TransformerDecoderLayer};",
+        "pub use fandhe_ai_autodiff::nn::Transformer as T;",
+        "pub use fandhe_ai_autodiff::nn::Transformer;",
+        "pub struct Transformer;",
         "pub struct TransformerConfig;",
         "pub enum TransformerDecoderLayer {}",
     ] {
@@ -13671,7 +13679,7 @@ fn facade_reexports_transformer_decoder_items_only_in_approved_shape_detects_eac
         "// pub use x::TransformerConfig;",
         "let s = \"pub use x::TransformerDecoderLayer;\";",
         "use fandhe_ai_autodiff::nn::TransformerConfig;",
-        "pub use fandhe_ai_autodiff::nn::Transformer;",
+        "use fandhe_ai_autodiff::nn::Transformer;",
     ] {
         assert!(
             transformer_decoder_exposures(&f("nn/mod.rs", src)).is_empty(),
@@ -13740,20 +13748,89 @@ fn compat_sequential_declares_add_transformer_decoder_layer_detects_offense() {
     assert!(transformer_decoder_add_declarations(&[]).is_empty());
 }
 
+/// `add_transformer` の `fn` 宣言を持つファイルの相対パスを宣言件数分返す（イシュー #2533）。
+/// トークン単位のため `add_transformer_encoder`／`add_transformer_decoder_layer` は数えない。
+fn transformer_add_declarations(files: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let n = count_fn_declarations_by_name(&tokens, "add_transformer");
+        for _ in 0..n {
+            found.push(rel.clone());
+        }
+    }
+    found
+}
+
+/// `add_transformer` がちょうど 1 件・`compat/sequential.rs` で宣言されていること
+/// （0 件・2 件以上・別ファイルは fail-closed で失敗）。
+#[test]
+fn compat_sequential_declares_add_transformer_exactly_once() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&compat_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
+    });
+    assert_eq!(
+        transformer_add_declarations(&files),
+        vec!["sequential.rs".to_string()],
+        "add_transformer は compat/sequential.rs の 1 件のみ（イシュー #2533）"
+    );
+}
+
+/// [`compat_sequential_declares_add_transformer_exactly_once`] の自己テスト。
+#[test]
+fn compat_sequential_declares_add_transformer_detects_offense() {
+    let decl = "impl S { pub fn add_transformer(self) {} }";
+    let files = vec![
+        ("sequential.rs".to_string(), decl.to_string()),
+        ("other.rs".to_string(), decl.to_string()),
+        (
+            "doc.rs".to_string(),
+            "// fn add_transformer(self) {}".to_string(),
+        ),
+        ("dup.rs".to_string(), format!("{decl} {decl}")),
+        (
+            "enc.rs".to_string(),
+            "impl S { pub fn add_transformer_encoder(self) {} pub fn add_transformer_decoder_layer(self) {} }"
+                .to_string(),
+        ),
+    ];
+    assert_eq!(
+        transformer_add_declarations(&files),
+        vec!["sequential.rs", "other.rs", "dup.rs", "dup.rs"]
+    );
+    assert!(transformer_add_declarations(&[]).is_empty());
+}
+
 /// 公開面だけで（`fandhe_ai` のみ import。`fandhe_ai_autodiff` は使わない）型名が解決でき、
-/// `add_transformer_decoder_layer` まで通る（実行時の正プローブ）。
+/// `add_transformer_decoder_layer`／`add_transformer` まで通る（実行時の正プローブ）。
 #[test]
 fn transformer_decoder_types_are_reachable_via_facade_only() {
     use fandhe_ai::compat::Sequential;
-    use fandhe_ai::nn::{TransformerConfig, TransformerDecoderLayer};
-    let cfg = TransformerConfig::new(4, 2);
+    use fandhe_ai::nn::{Transformer, TransformerConfig, TransformerDecoderLayer};
+    let cfg = TransformerConfig::new(4, 2)
+        .with_num_encoder_layers(1)
+        .with_num_decoder_layers(1)
+        .with_dim_feedforward(8);
     assert_eq!(cfg.d_model(), 4);
+    let _ = std::any::type_name::<Transformer>();
     // 型名がパスとして解決できること（構築は `FeedForwardActivation` 非公開のため行わない）。
     let _ = std::any::type_name::<TransformerDecoderLayer>();
     let model = Sequential::new()
         .add_transformer_decoder_layer(4, 2, 8, 1)
         .expect("承認形の公開面で構築できる");
     assert_eq!(model.trainable_parameters().len(), 26);
+    let model = Sequential::new()
+        .add_transformer(cfg, 1)
+        .expect("承認形の公開面で構築できる");
+    assert_eq!(model.trainable_parameters().len(), 16 + 2 + 26 + 2);
 }
 // =====================================================================
 // イシュー #2160（親 #2131）: AdaptiveMaxPool2d／AdaptiveMaxPool1d／
@@ -14298,153 +14375,6 @@ fn __probe(\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = fandhe_ai::nn::rnn::Gru::with_config(gru);\n\
 \x20\x20\x20\x20let _: __FandheRnnConfigMarker = gru.with_config();\n\
 }";
-
-// =====================================================================
-// イシュー #2165（親 #2131・#2068 の対）: TransformerDecoderLayer・
-// Transformer の facade 公開保留を検査するテスト群。
-// `TransformerDecoderHoldDoctestGuard`（`src/lib.rs`）の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、`compat::Sequential::
-// add_transformer_decoder_layer`／`add_transformer` の非宣言を持つ
-// （旧 `mha_options_hold_doctest_*`〈#2530 で撤去済み〉と同型）。承認事項の位置づけは
-// `docs/autodiff-transformer-decoder-decision.md` 参照。
-// =====================================================================
-
-/// `crates/facade/src/lib.rs` の `TransformerDecoderHoldDoctestGuard`
-/// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
-/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（旧 `mha_options_hold_doctest_globs_all_pub_modules`〈#2530 で撤去済み〉 の
-/// `TransformerDecoderHoldDoctestGuard` 版）。
-#[test]
-fn transformer_decoder_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "TransformerDecoderHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "TransformerDecoderHoldDoctestGuard の doctest ブロックが glob\
-         import するモジュール集合が src/lib.rs の pub mod 宣言集合と\
-         ドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも\
-         追加すること。"
-    );
-}
-
-/// [`transformer_decoder_hold_doctest_globs_all_pub_modules`] が glob
-/// import 集合の一致のみを固定するのに対し、本テストは doctest
-/// ブロックの**glob 以外の本文**が固定文言
-/// [`TRANSFORMER_DECODER_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
-/// することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
-/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
-/// 拒否する）。
-#[test]
-fn transformer_decoder_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "TransformerDecoderHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, TRANSFORMER_DECODER_HOLD_PROBE_BODY,
-        "TransformerDecoderHoldDoctestGuard の doctest ブロック本文\
-         （glob 以外）が固定文言 TRANSFORMER_DECODER_HOLD_PROBE_BODY から\
-         ドリフトしている。正のプローブ（\
-         __fandhe_transformer_decoder_hold_probe モジュール・\
-         __FandheTransformerDecoderAddProbe トレイト・__probe 関数）の\
-         削除・弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`transformer_decoder_hold_doctest_probe_body_matches_fixed_contract`]
-/// が要求する固定文言。`crates/facade/src/lib.rs` の
-/// `TransformerDecoderHoldDoctestGuard` doc 内の唯一の doctest
-/// ブロックから、ネスト `pub mod` の glob import 行を除いた本文と
-/// 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const TRANSFORMER_DECODER_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_transformer_decoder_hold_probe {\n\
-\x20\x20\x20\x20pub struct Transformer;\n\
-}\n\
-use __fandhe_transformer_decoder_hold_probe::*;\n\
-\n\
-struct __FandheTransformerDecoderMarker;\n\
-\n\
-trait __FandheTransformerDecoderAddProbe {\n\
-\x20\x20\x20\x20fn add_transformer(&self) -> __FandheTransformerDecoderMarker;\n\
-}\n\
-\n\
-impl __FandheTransformerDecoderAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_transformer(&self) -> __FandheTransformerDecoderMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTransformerDecoderMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe(_: Transformer, seq: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandheTransformerDecoderMarker =\n\
-\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::add_transformer(seq);\n\
-}";
-
-/// `src/compat` 配下に `add_transformer` の `pub fn` 宣言が存在しないことを固定する
-/// （イシュー #2165。旧 `compat_sequential_does_not_expose_mha_options_add_methods`〈#2530 で反転〉
-/// と同型。`docs/autodiff-transformer-decoder-decision.md` §承認事項が
-/// 未承認のまま対象外としている設計判断の固定）。`contains_pub_fn_declaration`
-/// は識別子境界で判定するため、既存の `add_transformer_encoder`
-/// （#2068 で実装済み）を `add_transformer` の誤検出として拾わない
-/// （直後の自己テストで確認する）。
-#[test]
-fn compat_sequential_does_not_expose_transformer_decoder_add_methods() {
-    let compat_dir = facade_crate_root().join("src/compat");
-    // #2532 で `add_transformer_decoder_layer` は公開済み（正ガード
-    // `compat_sequential_declares_add_transformer_decoder_layer_exactly_once` が担う）。
-    // 残る保留は `add_transformer`（#2533）のみ。
-    let forbidden = ["add_transformer"];
-    let mut offenses = Vec::new();
-    visit_rs_files(&compat_dir, &mut |path, content| {
-        for name in forbidden {
-            if contains_pub_fn_declaration(content, name) {
-                offenses.push(format!("{}: pub fn {name}", path.display()));
-            }
-        }
-    });
-    assert!(
-        offenses.is_empty(),
-        "src/compat 配下に Transformer の add_transformer が見つかった\
-         （#2532 の承認形は decoder 1 層のみ。#2533 まで保留）: {offenses:?}"
-    );
-}
-
-/// [`compat_sequential_does_not_expose_transformer_decoder_add_methods`]
-/// の自己テスト（合成入力で検出できることを確認する）。既存の
-/// `add_transformer_encoder`（#2068 で実装済み）を `add_transformer`
-/// の誤検出として拾わないことも確認する（`contains_pub_fn_declaration`
-/// の識別子境界判定・実装計画 §3「注記」参照）。
-#[test]
-fn compat_sequential_does_not_expose_transformer_decoder_add_methods_detects_offense() {
-    assert!(contains_pub_fn_declaration(
-        "pub fn add_transformer_decoder_layer(&mut self, d_model: usize) {}",
-        "add_transformer_decoder_layer"
-    ));
-    assert!(contains_pub_fn_declaration(
-        "pub fn add_transformer(&mut self, d_model: usize) {}",
-        "add_transformer"
-    ));
-    assert!(!contains_pub_fn_declaration(
-        "pub fn add_transformer_encoder(&mut self, d_model: usize) {}",
-        "add_transformer"
-    ));
-    // #2532: 公開済みの `add_transformer_decoder_layer` を `add_transformer` と誤検出しない。
-    assert!(!contains_pub_fn_declaration(
-        "pub fn add_transformer_decoder_layer(&mut self, d_model: usize) {}",
-        "add_transformer"
-    ));
-}
 
 // =====================================================================
 // #2166（親 #2131）の facade 公開保留固定（`LossOpsHoldDoctestGuard`）。
@@ -18128,10 +18058,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519・#2530 の保留ガード削除後は 21）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519・#2530・#2533 の保留ガード削除後は 20）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 21;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 20;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\
@@ -20044,9 +19974,9 @@ fn nn_src(file: &str) -> String {
 }
 
 /// 正ガード: `src/nn/mod.rs` の全種別の公開 item が
-/// `pub mod rnn` と `pub use` の 7 件（`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
-/// `ModuleDict`／`summary` は #2402 で承認済み。`TransformerConfig`／`TransformerDecoderLayer` は
-/// #2532 で承認済み）に完全一致する。
+/// `pub mod rnn` と `pub use` の 8 件（`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
+/// `ModuleDict`／`summary` は #2402 で承認済み。`Transformer`／`TransformerConfig`／
+/// `TransformerDecoderLayer` は #2532・#2533 で承認済み）に完全一致する。
 /// `pub fn`／`pub struct` 等の追加や `pub mod container;` 等の新設は fail する。
 #[test]
 fn nn_mod_public_items_match_expected_set() {
@@ -20061,6 +19991,7 @@ fn nn_mod_public_items_match_expected_set() {
             ("use", "ModuleDict"),
             ("use", "ModuleList"),
             ("use", "Sequential"),
+            ("use", "Transformer"),
             ("use", "TransformerConfig"),
             ("use", "TransformerDecoderLayer"),
             ("use", "summary"),
