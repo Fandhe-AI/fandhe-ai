@@ -106,8 +106,8 @@ use crate::inference::batch::{
     LoaderInferenceInput, TimingPhaseRecorder, merge_inference_phase_stats,
 };
 use crate::{
-    AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, ResidentLeaf, Tape,
-    Tensor, Var,
+    AutodiffError, BackendError, DeviceParamStore, Gradients, InterpolateMode, LinearVars,
+    ResidentLeaf, Tape, Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
     Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
@@ -116,10 +116,10 @@ use fandhe_ai_autodiff::nn::activation::{
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d,
     BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout, Embedding, EmbeddingVars,
-    FeedForwardActivation, Flatten, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear,
-    MaxPool1d, MaxPool2d, Module, MultiheadAttention, MultiheadAttentionVars, RmsNorm, RmsNormVars,
-    Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars,
-    conv2d_forward_low_precision, linear_forward_low_precision,
+    FeedForwardActivation, Flatten, Identity, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars,
+    Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention, MultiheadAttentionVars, RmsNorm,
+    RmsNormVars, Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars,
+    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
     multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
@@ -172,7 +172,7 @@ pub struct Sequential {
 
 /// `Sequential` に積んだ層の構成記録（`compat::model_io` 専用の内部型）。
 ///
-/// `add_*` 30 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
+/// `add_*` 33 メソッドの引数（`seed` を除く）をそのまま記録し、`load_model` が同じ
 /// `add_*` を呼んで再構築する（イシュー #2369・#2370。`docs/compat-model-io-decision.md`
 /// §5）。`add_*` の内部で固定している値（conv／linear の `bias=true`・pool の
 /// `ceil_mode=false`・TE の活性化と eps 等）は記録しない（同じ `add_*` が再現するため）。
@@ -296,6 +296,14 @@ pub(super) enum LayerSpec {
     AdaptiveAvgPool1d {
         output_size: usize,
     },
+    Upsample {
+        size: Vec<usize>,
+        mode: InterpolateMode,
+    },
+    ZeroPad2d {
+        padding: [usize; 4],
+    },
+    Identity,
     /// 保存対象外の層（`add_module` の利用者定義層。`kind` はエラー文言で読む）。
     Unsupported {
         kind: &'static str,
@@ -908,6 +916,59 @@ impl Sequential {
         self.specs
             .push(LayerSpec::AdaptiveAvgPool1d { output_size });
         Ok(self)
+    }
+
+    /// Upsample 層を追加する（`nn::Upsample::with_size`。イシュー #2522・
+    /// `docs/autodiff-spatial-layers-decision.md` §6）。出力の空間サイズ `size`
+    /// を明示指定する形のみ公開する（`scale_factor` 指定は未公開。決定記録 §6 参照）。
+    /// `size` が空なら構築時に `AutodiffError::InvalidArgument`。`mode` と空間軸数の
+    /// 整合は forward 時に検査する遅延検査（[`Sequential::add_flatten`] と同型）。
+    /// 学習可能パラメータを持たない無状態層のため学習経路・常駐経路をそのまま通過し、
+    /// `save_model`／`load_model` に対応する。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::{InterpolateMode, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new()
+    ///     .add_zero_pad2d([1, 1, 1, 1])
+    ///     .add_upsample(vec![8, 8], InterpolateMode::Nearest)?
+    ///     .add_identity();
+    /// let x = Tensor::new(vec![1.0_f32; 9], &[1, 1, 3, 3])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.shape(), &[1, 1, 8, 8]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_upsample(
+        mut self,
+        size: Vec<usize>,
+        mode: InterpolateMode,
+    ) -> Result<Self, AutodiffError> {
+        let layer = Upsample::with_size(size.clone(), mode)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Upsample { size, mode });
+        Ok(self)
+    }
+
+    /// ZeroPad2d 層を追加する（`nn::ZeroPad2d`。イシュー #2522）。`padding` は
+    /// `[left, right, top, bottom]`（PyTorch `nn.ZeroPad2d` の 4-tuple と同順）で、
+    /// 末尾 2 軸 `(H, W)` を 0 埋めする（`Var::pad` への委譲）。shape 不整合は
+    /// forward 時の `AutodiffError::Shape`（遅延検査のため `Self` を返す）。
+    /// 無状態層で、学習・常駐経路を通過し保存に対応する。
+    pub fn add_zero_pad2d(mut self, padding: [usize; 4]) -> Self {
+        self.inner.push(Box::new(ZeroPad2d::new(padding)));
+        self.specs.push(LayerSpec::ZeroPad2d { padding });
+        self
+    }
+
+    /// Identity 層を追加する（`nn::Identity`。イシュー #2522）。入力をそのまま返す
+    /// 無状態層（PyTorch `nn.Identity` 相当）。学習・常駐経路を通過し保存に対応する。
+    pub fn add_identity(mut self) -> Self {
+        self.inner.push(Box::new(Identity::new()));
+        self.specs.push(LayerSpec::Identity);
+        self
     }
 
     /// facade 独自の [`crate::nn::Module`] 実装（利用者が facade だけに依存して書いた独自層）を

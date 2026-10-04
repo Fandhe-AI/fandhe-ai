@@ -163,10 +163,10 @@
 //! [`Unflatten`]（`unflatten` モジュール）の 5 層を追加した。いずれも
 //! 既存 `Var` 演算（`conv_transpose2d`／`interpolate`／`pad`／
 //! `reshape`）の薄いラッパーで新規 `Op`／`BackendOps`／VJP／カーネル
-//! は追加しない。`compat::Sequential::add_conv_transpose1d`／
-//! `add_upsample`／`add_zero_pad2d`／`add_identity`／`add_unflatten`
-//! の facade 公開（経路 2）は未承認のため保留する
-//! （`crates/facade/src/lib.rs` の `SpatialLayersHoldDoctestGuard`・
+//! は追加しない。`compat::Sequential::add_upsample`／`add_zero_pad2d`／
+//! `add_identity` はイシュー #2522 で facade 公開済み（size 指定のみ）。
+//! `add_conv_transpose1d`／`add_unflatten` の facade 公開（経路 2）は
+//! 未承認のため保留する（`crates/facade/src/lib.rs` の `SpatialLayersHoldDoctestGuard`・
 //! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
 //! `docs/autodiff-spatial-layers-decision.md` §6 承認事項）。
 //! イシュー #2161（親 #2131）で [`Dropout2d`]／[`AlphaDropout`]

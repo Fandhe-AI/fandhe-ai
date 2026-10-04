@@ -2130,11 +2130,16 @@ struct RngDistributionsHoldDoctestGuard;
 /// イシュー #2159（親 #2131。設計正本 `docs/autodiff-spatial-layers-
 /// decision.md` §6 承認事項 1）の facade 公開保留を固定する doctest
 /// 足場。`KvCacheHoldDoctestGuard`（#2084）と同型の「正のプローブ 1
-/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
-/// スコープに、本ブロック内でのみ定義したローカル
+/// ブロック方式」を採る。**イシュー #2522 で `add_upsample`／
+/// `add_zero_pad2d`／`add_identity` の 3 メソッドは承認・公開済み**のため
+/// メソッド／自由関数プローブから外した（型名 `Upsample`／`ZeroPad2d`／
+/// `Identity` の再エクスポートは未承認のため型名プローブは維持する。
+/// 公開済み 3 メソッドは `api_surface.rs::compat_sequential_exposes_
+/// spatial_layer_add_methods_issue_2522` が正ガードで固定する）。残る保留は
+/// `ConvTranspose1d`／`Unflatten` 系と 5 型名。facade の全 `pub mod` を
+/// glob import したスコープに、本ブロック内でのみ定義したローカル
 /// `__fandhe_spatial_hold_probe::{ConvTranspose1d, Upsample, ZeroPad2d,
-/// Identity, Unflatten, add_conv_transpose1d, add_upsample,
-/// add_zero_pad2d, add_identity, add_unflatten}` を導入し、実際に使う
+/// Identity, Unflatten, add_conv_transpose1d, add_unflatten}` を導入し、実際に使う
 /// 関数を書く。facade がどの経路（単一行・複数行・ネストした group で
 /// の `pub use`・別名エクスポート・facade 独自の `struct`／`type`
 /// 宣言・`compat::Sequential`／`Var` への inherent メソッド追加）でこれら
@@ -2186,15 +2191,6 @@ struct RngDistributionsHoldDoctestGuard;
 ///     pub fn add_conv_transpose1d() -> __FandheSpatialHoldMarker {
 ///         __FandheSpatialHoldMarker
 ///     }
-///     pub fn add_upsample() -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     pub fn add_zero_pad2d() -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     pub fn add_identity() -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
 ///     pub fn add_unflatten() -> __FandheSpatialHoldMarker {
 ///         __FandheSpatialHoldMarker
 ///     }
@@ -2203,23 +2199,11 @@ struct RngDistributionsHoldDoctestGuard;
 ///
 /// trait __FandheSpatialAddProbe {
 ///     fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker;
-///     fn add_upsample(&self) -> __FandheSpatialHoldMarker;
-///     fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker;
-///     fn add_identity(&self) -> __FandheSpatialHoldMarker;
 ///     fn add_unflatten(&self) -> __FandheSpatialHoldMarker;
 /// }
 ///
 /// impl __FandheSpatialAddProbe for fandhe_ai::compat::Sequential {
 ///     fn add_conv_transpose1d(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     fn add_upsample(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     fn add_zero_pad2d(&self) -> __FandheSpatialHoldMarker {
-///         __FandheSpatialHoldMarker
-///     }
-///     fn add_identity(&self) -> __FandheSpatialHoldMarker {
 ///         __FandheSpatialHoldMarker
 ///     }
 ///     fn add_unflatten(&self) -> __FandheSpatialHoldMarker {
@@ -2251,18 +2235,9 @@ struct RngDistributionsHoldDoctestGuard;
 ///     v: &fandhe_ai::Var<'_>,
 /// ) {
 ///     let _: __FandheSpatialHoldMarker = add_conv_transpose1d();
-///     let _: __FandheSpatialHoldMarker = add_upsample();
-///     let _: __FandheSpatialHoldMarker = add_zero_pad2d();
-///     let _: __FandheSpatialHoldMarker = add_identity();
 ///     let _: __FandheSpatialHoldMarker = add_unflatten();
 ///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose1d(seq);
 ///     let _: __FandheSpatialHoldMarker = seq.add_conv_transpose1d();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_upsample(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_upsample();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_zero_pad2d(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_zero_pad2d();
-///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_identity(seq);
-///     let _: __FandheSpatialHoldMarker = seq.add_identity();
 ///     let _: __FandheSpatialHoldMarker = fandhe_ai::compat::Sequential::add_unflatten(seq);
 ///     let _: __FandheSpatialHoldMarker = seq.add_unflatten();
 ///     let _: __FandheSpatialHoldMarker = fandhe_ai::Var::conv_transpose1d(v);

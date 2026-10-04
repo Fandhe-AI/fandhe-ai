@@ -7,7 +7,7 @@
 //! #2374 の正常系 bit 一致行列）。
 //!
 //! `mod roundtrip_matrix`（#2374）は `docs/compat-model-io-decision.md` §6 の正常系を
-//! 「アーキテクチャ（30 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
+//! 「アーキテクチャ（33 種の和集合・深い異種スタック・transformer）× 状態（eval・train 後の BN・
 //! 6 optimizer × AMP・GradScaler 非初期・Lbfgs 履歴 未満／到達済み）」の直積で固定し、全セルで
 //! 再保存したファイルのバイト一致を検査する。単一軸の深掘りは `compat_sequential_model_io_{layers,
 //! batch_norm,compiled,lbfgs}.rs` が担う（対応表は同 doc §6.1）。
@@ -469,12 +469,12 @@ mod roundtrip_matrix {
         AdagradConfig, AdamConfig, AdamWConfig, GradScalerConfig, LambConfig, LbfgsConfig,
         RmsPropConfig, SgdConfig,
     };
-    use fandhe_ai::{AutodiffError, Tensor};
+    use fandhe_ai::{AutodiffError, InterpolateMode, Tensor};
 
     use crate::common::temp_dir::TempDirGuard;
 
-    /// allowlist の 30 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-    const ALL_KINDS: [&str; 30] = [
+    /// allowlist の 33 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+    const ALL_KINDS: [&str; 33] = [
         "linear",
         "relu",
         "sigmoid",
@@ -505,6 +505,9 @@ mod roundtrip_matrix {
         "avg_pool1d",
         "adaptive_avg_pool2d",
         "adaptive_avg_pool1d",
+        "upsample",
+        "zero_pad2d",
+        "identity",
     ];
 
     type Built = Result<Sequential, AutodiffError>;
@@ -584,6 +587,9 @@ mod roundtrip_matrix {
             .add_conv2d(2, 4, [3, 3], [1, 1], [1, 1], [1, 1], 1, 21)?
             .add_batch_norm2d(4, 1e-5, 0.1)?
             .add_relu()
+            .add_zero_pad2d([1, 1, 1, 1])
+            .add_upsample(vec![8, 8], InterpolateMode::Nearest)?
+            .add_identity()
             .add_max_pool2d([2, 2], None, [0, 0], [1, 1])?
             .add_conv2d(4, 4, [1, 1], [1, 1], [0, 0], [1, 1], 2, 22)?
             .add_avg_pool2d([2, 2], Some([1, 1]), [1, 1], true)?
