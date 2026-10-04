@@ -1657,7 +1657,7 @@ fn autodiff_src_does_not_declare_pub_fn_custom_on_var() {
     assert!(
         violations.is_empty(),
         "crates/autodiff/src 配下の impl Var ブロックに未承認の custom／\
-         add_custom 宣言が見つかった（§12.5 (b) 未承認のまま Var 経由の到達口を\
+         add_custom 宣言が見つかった（§16.2 で承認形外の Var 経由の到達口を\
          設けてしまっている。`pub`・`fn`・関数名の間に改行・ブロックコメントを\
          挟んだ宣言も、`src/var.rs` 以外のファイルに書かれた impl ブロックも、\
          同一ファイル内の import alias 経由の宣言も、trait impl 経由の\
