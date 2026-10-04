@@ -621,7 +621,7 @@ tests/api_surface.rs::collect_public_module_paths`（トークン列を
 | 論点 | 判定 | 理由 |
 |---|---|---|
 | `fandhe_ai::CustomFunction` の追加 | 非破壊（追加のみ） | 0.10.0 に同名項目なし。下流の glob import と重なってもローカル項目が優先される（semver 慣行上 minor） |
-| facade `Tape::custom` の追加 | 非破壊（inherent method の追加） | 0.10.0 の `Tape` に `custom` なし。既存メソッドの署名・意味論は不変 |
+| facade `Tape::custom` の追加 | 原則非破壊（inherent method の追加。下記の例外を除く） | 0.10.0 の `Tape` に `custom` なし。既存メソッドの署名・意味論は不変。**互換性上の例外**: 下流が自前 trait に `custom` という同名メソッドを定義し `Tape` へ実装して `tape.custom(..)` を呼んでいる場合、inherent method が trait method より優先されるためメソッド解決が変わり、コンパイルエラーまたは意図しない呼び出し先への切替が起こりうる（Rust API Evolution の「minor で許容される破壊」の範疇）。公開実施時（#2549 以降）にこの衝突可能性を判断に含め、リリースノートへ明記するか否かを決める |
 | エラー型 | 非破壊 | 既存 `#[non_exhaustive]` 型で variant を追加しない |
 | 既存型（`Var`・`Tape`・`TapeRef`・`Gradients`・`compat::Sequential`・`FitConfig`） | 変更なし | フィールド・既存メソッドに触れない |
 | REQ-12（`BackendOps`／生 `Tape` 非露出） | 維持 | trait の引数は host `Tensor<f32>` のみ（`architecture_boundaries.rs::custom_function_trait_signatures_are_host_tensor_only` を維持） |
