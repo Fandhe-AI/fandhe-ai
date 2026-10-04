@@ -254,9 +254,12 @@ CUDA（DGX Spark GB10）・Metal（M4 Max）実機での `Stacked*` の
 - **案 A（推奨）**: 選択肢 C を維持し、#2536 を「対象外として完了」とする。保存需要には
   既存の保存経路は存在しない旨を案内する（`save_model`／`load_model` は `&Sequential` 専用で
   `Stacked*` は扱えない。`named_parameters` は命名契約に従うパラメータの列挙 API であり
-  保存・復元 API ではない）。利用者が自前で保存する場合は、`named_parameters` で列挙した
-  テンソルを利用者側で書き出し、復元時は `set_parameter` で同じキーへ書き戻す手動運用となる
-  （形式・検証・エラー型は本ライブラリの保証外。公式の保存・復元 API は案 C の記録作成・承認後）。あわせて否定ガードの禁止集合へ
+  保存・復元 API ではない）。`named_parameters`／`set_parameter` は autodiff の `Module` trait のメソッドで、
+  facade（`crates/facade/src/nn/rnn.rs`）は同 trait を再エクスポートしないため、**facade のみに
+  依存する利用者は手動保存も行えない**（facade 単独では保存経路が一切無い）。手動で保存する場合は
+  内部クレート `autodiff` への直接依存が必要で、`named_parameters` で列挙したテンソルを利用者側で
+  書き出し、復元時は `set_parameter` で同じキーへ書き戻す運用となる（`facade` が唯一のサポート対象
+  公開面である方針の外。形式・検証・エラー型は本ライブラリの保証外。公式の保存・復元 API は案 C の記録作成・承認後）。あわせて否定ガードの禁止集合へ
   `add_stacked_rnn`／`add_stacked_lstm`／`add_stacked_gru` を加える別 PR の可否も判断する。
 - **案 B**: 選択肢 C を覆し、系列入力・隠れ状態を扱える Sequential 側 API を新設する。
   `Var -> Var` 平坦鎖前提の再設計・否定ガード反転・manifest kind 追加・resident 拒否の設計が
