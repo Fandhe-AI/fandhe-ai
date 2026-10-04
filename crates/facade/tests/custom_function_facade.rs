@@ -7,7 +7,8 @@
 //! 到達できることと主要契約（組み込み relu との bit 一致・fail-closed のエラー・
 //! `backward_accumulate`・`Send + Sync`）を固定する。`forward`／`backward` は
 //! host 実行で REQ-2 の判定対象外のため CPU Tape のみで検証し、実機依存の
-//! テストは追加しない（tolerance は新設・変更しない）。
+//! テストは追加しない（tolerance は新設・変更しない）。イシュー #2550 で空 `inputs` の
+//! 拒否を facade 経由の利用例として補った。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -527,6 +528,15 @@ fn tape_custom_rejects_cross_tape_inputs() {
     let b = tape_b.var(&t(vec![2.0], &[]));
     let result = tape_a.custom(Arc::new(CustomMul), &[a, b]);
     assert!(matches!(result, Err(AutodiffError::TapeMismatch)));
+}
+
+/// `inputs` が空の呼び出しは `AutodiffError::InvalidArgument`（委譲先
+/// `Tape::custom` の doc 契約。イシュー #2550 で facade 経由の検証を補った）。
+#[test]
+fn tape_custom_rejects_empty_inputs() {
+    let tape = fandhe_ai::tape();
+    let result = tape.custom(Arc::new(CustomRelu), &[]);
+    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
 }
 
 /// `Tape: Send` 静的アサーション（`Op::Custom` 追加後もコンパイルを

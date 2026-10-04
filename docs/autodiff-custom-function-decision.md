@@ -109,6 +109,8 @@ facade 非公開・`Sequential` に `add_module` がないことは、独自層�
   バックエンド選択に留まる
 - 案 E は既存契約への影響がゼロで、前提が揃っていない現時点で選べる唯一の安全な選択肢
 
+追記（#2550）: 段階 1（案 B）は #1946 で内部実装、#2548 で facade 公開形を確定（§16）、#2549 で facade 公開、実装記録は §17。
+
 ## 6. 数値一致・既存テストとの整合
 
 1 階 backward・parity・bit 一致テスト群は不変。段階 1 で `Op::Custom`（案 B）を実装する場合、
@@ -317,6 +319,8 @@ pub trait CustomFunction: Send + Sync + 'static {
 
 本 PR は上記いずれの承認も取得しない。実装（#1946）は (a) の範囲のみで着手可能であり、(b) は
 別途のユーザー承認を得てから着手する。
+
+追記（#2550）: (b) はルート #2499 の一括承認の範囲として §16.1 の形で #2549 にて実施済み。(b) 第 3 項の機械検査は `architecture_boundaries.rs::custom_function_trait_signatures_are_host_tensor_only` で維持している。
 
 ### 12.6 #1946 への引き継ぎ（テスト候補の追補）
 
@@ -579,6 +583,8 @@ tests/api_surface.rs::collect_public_module_paths`（トークン列を
 
 イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。
 
+追記（#2550）: 経路 B は #2549（PR #2736）で実施済み。上記「承認取得後に実施する変更範囲」は §16.4 で上書きされ、実施結果は §17 を正とする。
+
 ## 16. facade 公開形の確定（#2548）
 
 ルート #2499（Phase 3）の一括承認（2026-10-04）は、本 doc §12.5 (b)・§15 に**書かれた**推奨形にだけ及ぶ。
@@ -646,6 +652,53 @@ tests/api_surface.rs::collect_public_module_paths`（トークン列を
 
 統合テスト（`crates/facade/tests/custom_function_facade.rs`）・autodiff モジュール doc の「facade 非公開」記述更新・
 `docs/perf/logs/facade-custom-function-<issue>/README.md`（host 実行のため REQ-2 対象外の申し送り）は §15 の列挙どおり #2549／#2550 が担当する。
+
+## 17. facade 公開の実装記録（#2549／#2550）
+
+§16.1 の確定形は PR #2736（#2549。`f15c76c0`）で facade へ公開済みである。本節は公開した名前と、
+§16.4 のガード処置の実施結果（旧名から現行名への対応）を記録する。ルート #2499 の一括承認が及ぶ範囲は §16 の
+とおりで、本節はそれを超える承認を主張しない。
+
+### 17.1 公開した名前
+
+- `fandhe_ai::CustomFunction`: `crates/facade/src/lib.rs` の crate ルートの `pub use fandhe_ai_autodiff::CustomFunction;`（1 件）
+- facade `Tape::custom<'t>(&'t self, func: Arc<dyn CustomFunction>, inputs: &[Var<'t>]) -> Result<Var<'t>, AutodiffError>`:
+  本体は `self.0.custom(func, inputs)` の 1 行委譲
+
+### 17.2 ガード反転の対応表（`crates/facade/tests/api_surface.rs`）
+
+| §16.4 のガード | 実施内容 | 現行のテスト名 |
+|---|---|---|
+| `facade_does_not_reexport_custom_function` | 正ガードへ反転 | `facade_reexports_custom_function_only_at_crate_root` |
+| `facade_tape_does_not_expose_custom_forwarding_method` | 正ガードへ反転（本体と型を固定） | `facade_tape_custom_is_approved_thin_delegation` |
+| `facade_public_functions_do_not_take_custom_function` | 縮小（`lib.rs` 内の出現を 2 件に限定） | 名前は不変 |
+| `facade_source_declares_no_custom_fn_in_any_context` | 縮小（`lib.rs` の `fn custom` 1 件のみ許可。`add_custom` は禁止のまま） | 名前は不変 |
+| `workspace_declares_custom_fn_only_on_tape` | allowlist に `crates/facade/src/lib.rs` を追加 | `workspace_declares_custom_fn_only_on_tape_and_facade_delegation` |
+| `VarCustomHoldDoctestGuard` の `Tape::custom` プローブ 2 行 | 削除（部分反転。`Tape::add_custom`・`Var`・`Sequential` のプローブは維持） | 構造体は残置 |
+| `custom_function_hold_doctest_probe_body_matches_fixed_contract` | 固定文言を上の削除に合わせて更新 | 名前は不変 |
+| `compat_sequential_does_not_expose_custom_add_method`・`custom_function_hold_doctest_globs_all_pub_modules`・`architecture_boundaries.rs` の 2 件 | 維持 | 名前は不変 |
+
+#2550 では判定ロジックを変更していない。`compat_sequential_does_not_expose_custom_add_method` と
+`architecture_boundaries.rs` の `autodiff_src_does_not_declare_pub_fn_custom_on_var` について、
+失敗メッセージの根拠を「§12.5 (b) 未承認」から「§16.2 で承認形外」へ更新しただけである。
+
+### 17.3 テスト・利用例
+
+- doctest: facade `Tape::custom` の rustdoc
+- `crates/facade/tests/custom_function_facade.rs`: 組み込み relu との bit 一致・2 入力・shape 不一致と必要な勾配が `None` の
+  fail-closed・`requires_grad` の受け渡し・`backward_accumulate`・cross-tape の拒否・`Send + Sync`。#2550 で
+  `tape_custom_rejects_empty_inputs`（空 `inputs` が `InvalidArgument`）を追加
+
+### 17.4 保留継続（承認範囲外）
+
+§16.2 のとおり、`Var::custom`／`add_custom`・`Tape::add_custom`・`Sequential::custom`／`add_custom`・`TapeRef::custom`・
+`nn::Module`／`add_module`・二階微分向けの trait 拡張は公開していない。
+
+### 17.5 数値契約・実機・互換性
+
+- `forward`／`backward` は host 実行で REQ-2 の判定対象外。tolerance・baseline は不変（申し送りは `docs/perf/logs/facade-custom-function-2549/README.md`）
+- §16.3 の inherent method による同名 trait メソッドの遮蔽は、次リリースのリリースノートへ明記する事項として #2736 で申し送り済み（本節では判断しない）
+- `Cargo.toml`／`Cargo.lock`・`docs/spec/`・`crates/*/src` は #2550 で変更していない
 
 ## 否定ガードの方針転換（PR #2212 レビュー収束ラウンド。2026-09）
 

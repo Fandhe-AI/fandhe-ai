@@ -4303,7 +4303,7 @@ fn facade_public_functions_do_not_take_custom_function() {
 /// メソッド（`pub fn add_custom`）が生えていないことを固定する
 /// （イシュー #2064 AC-4。`compat_sequential_does_not_expose_rnn_add_
 /// methods` と同型。`Sequential` 平坦鎖への `CustomFunction` 合成入口を
-/// 承認 (b) 前に設けないことの機械固定）。
+/// 承認範囲外（§16.2）のまま設けないことの機械固定）。
 #[test]
 fn compat_sequential_does_not_expose_custom_add_method() {
     let compat_dir = facade_crate_root().join("src/compat");
@@ -4317,7 +4317,7 @@ fn compat_sequential_does_not_expose_custom_add_method() {
     assert!(
         offending.is_empty(),
         "src/compat 配下に add_custom が見つかった\
-         （§12.5 (b) 未承認のまま Sequential への合成入口を設けてしまっている）: {offending:?}"
+         （§16.2 で承認形外と確定した Sequential への合成入口を設けてしまっている）: {offending:?}"
     );
 }
 
