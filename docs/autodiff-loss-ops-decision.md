@@ -10,7 +10,7 @@ ignore_index=, weight=)` 相当の 2 API を、**`fandhe_ai_autodiff` の
 うち facade が再エクスポートしない自由関数モジュール `loss_ops`**
 （`crates/autodiff/src/loss_ops.rs`）として実装した（`reduce_ops`
 〈#2147〉・`matrix_ops`〈#2144〉と同じ判断枠組み）。`Var` に inherent
-の `pub fn` は追加していない。
+の `pub fn` は追加していない（**#2538 で `Var::l1_loss`／`cross_entropy_loss_with` の 2 委譲メソッドを追加し facade 公開。§5 実装記録参照**）。
 
 - `l1_loss(pred, target, reduction)`: 新規 `Op::L1Loss`。`BackendOps`
   に対応メソッドを持たず常にホスト参照実装（`eval::l1_loss_forward`）
@@ -150,6 +150,13 @@ LossOpsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs` の
 `cross_entropy_loss_with` を呼ぶだけ）を追加し、
 `LossOpsHoldDoctestGuard`・対応する api_surface の 4 テストを撤去する。
 
+### 実装記録（#2538・ルート #2499 一括承認）
+
+- 公開名: `Var::l1_loss(&self, target: &Var<'t>, reduction: Reduction)`・`Var::cross_entropy_loss_with(&self, targets: &Tensor<i32>, class_dim: usize, reduction: Reduction, options: &CrossEntropyOptions)`。本体は `loss_ops` 自由関数への 1 行委譲（検査は委譲先が担う）
+- `LossOpsHoldDoctestGuard` は部分反転: `__probe_var` から 2 名分 4 行のみ削除。`Tensor`／`Tape`・`loss_ops` モジュール・残り 5 名のプローブは維持
+- 正ガード: `var_loss_ops_methods_are_thin_delegations`・`var_loss_ops_are_reachable_via_facade_var`。インベントリは `..._only_in_approved_locations` へ改名し `var.rs` 各 1 件を期待集合へ追加
+- 不変: `Cargo.toml`／`Cargo.lock`・tolerance・`docs/spec/`。新規 `Op`／カーネル／`unsafe` なし
+
 ## §6 スコープ外（out-of-scope-tracking.md）
 
 - `compat::Loss`（`compile()`）への L1・CE オプション対応は #2169 が
@@ -163,3 +170,5 @@ LossOpsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs` の
   `docs/perf/logs/loss-ops-2166/README.md` へ申し送る
 
 #2509 追記: `l1_loss` が facade に届く経路は `compat::Loss::L1`（`compile()` 経由・非 `pub` の use 結線）のみになった。`Var` への委譲メソッドと `loss_ops` モジュールの再エクスポートは引き続き保留。
+
+#2538 追記（残る承認事項）: `CrossEntropyOptions`・`Reduction` の facade 再エクスポートは記録に推奨形がなく一括承認の範囲外。facade 単独の利用者は非既定オプションを名前で構築できない既知ギャップであり、公開するなら「記録追記 → ユーザー承認」が要る（兄弟 #2539／#2540 のオプション型も同じ論点）。

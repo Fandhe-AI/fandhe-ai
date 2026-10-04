@@ -2685,20 +2685,26 @@ struct PixelShuffleHoldDoctestGuard;
 /// `loss_ops` という名前や 7 個の関数名を公開しても、ローカル定義との
 /// glob 衝突（モジュール名の場合）または呼び出しシグネチャの不一致
 /// （inherent メソッドがトレイトメソッドより優先解決されるため、引数
-/// なしの `x.l1_loss()` 呼び出しが実際の `Var::l1_loss(&self, target,
-/// reduction)`〈引数数不一致〉に解決されて型・引数数エラーになる）で
+/// なしの `x.cosine_embedding_loss()` 呼び出しが実際の inherent メソッド
+/// 〈引数数不一致〉に解決されて型・引数数エラーになる）で
 /// コンパイルが失敗する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// loss_ops_hold_doctest_globs_all_pub_modules`・`loss_ops_hold_
 /// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
 /// reexport_or_declare_loss_ops`・`workspace_declares_loss_ops_
-/// fn_names_only_in_allowed_locations`）との多層防御の位置づけは
+/// fn_names_only_in_approved_locations`）との多層防御の位置づけは
 /// `docs/autodiff-loss-ops-decision.md` §5「承認事項」を参照。
 ///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
+/// **#2538 での部分反転**（ルート #2499 一括承認。`VarActivationOpsHoldDoctestGuard`
+/// の #2516 型）: `Var::l1_loss`・`Var::cross_entropy_loss_with` は委譲メソッド
+/// として facade 公開済みのため、`__probe_var` から該当 4 行だけを削除した
+/// （正ガードは `api_surface.rs::var_loss_ops_methods_are_thin_delegations`・
+/// `var_loss_ops_are_reachable_via_facade_var`）。`loss_ops` モジュール・
+/// `Tensor`／`Tape` 上の同名メソッド・残り 5 名の `Var` への公開は引き続き拒否する。
+///
+/// 撤去条件: #2539・#2540 で残る `Var` 名が公開されたら `__probe_var` と
+/// `Var` の impl を外す。`Tensor`／`Tape`／モジュール再エクスポートの拒否は維持する。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2785,10 +2791,6 @@ struct PixelShuffleHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheLossMarker = fandhe_ai::Var::l1_loss(x);
-///     let _: __FandheLossMarker = x.l1_loss();
-///     let _: __FandheLossMarker = fandhe_ai::Var::cross_entropy_loss_with(x);
-///     let _: __FandheLossMarker = x.cross_entropy_loss_with();
 ///     let _: __FandheLossMarker = fandhe_ai::Var::cosine_embedding_loss(x);
 ///     let _: __FandheLossMarker = x.cosine_embedding_loss();
 ///     let _: __FandheLossMarker = fandhe_ai::Var::margin_ranking_loss(x);

@@ -2202,8 +2202,8 @@ impl<'t> Var<'t> {
     ///
     /// 本メソッドのシグネチャ・数値経路は不変（イシュー #2166）。
     /// label_smoothing・ignore_index・class_weight の各オプションは
-    /// `crate::loss_ops::cross_entropy_loss_with`（内部クレート限定。
-    /// facade 公開は承認待ち）で追加提供する。
+    /// `Self::cross_entropy_loss_with`（`crate::loss_ops` への委譲。
+    /// #2538 で facade 公開）で追加提供する。
     pub fn cross_entropy_loss(
         &self,
         targets: &Tensor<i32>,
@@ -4664,6 +4664,42 @@ impl<'t> Var<'t> {
             .broadcast_to(&out_shape)
             .map_err(AutodiffError::Shape)?;
         self.gather(dim, &index_bc)
+    }
+
+    // ---- loss_ops 委譲メソッド（#2166 実装・#2538 公開。親 #2537・ルート #2499）----
+    //
+    // 実体は `crate::loss_ops` の自由関数（`l1_loss`・`cross_entropy_loss_with`）。
+    // 本体は 1 行委譲に固定し、入口検査（テープ一致・shape・確保前バイト数上限・
+    // label_smoothing／class_weight／target 添字の範囲）の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_loss_ops_methods_are_thin_delegations`）で
+    // 拒否する。`loss_ops` モジュール・`CrossEntropyOptions` の再エクスポートは
+    // 未承認（`docs/autodiff-loss-ops-decision.md` §6）。
+    // PyTorch との差異（`ignore_index` 既定は `None`・ゼロ分母は 0.0・負の重みは拒否）は
+    // 同決定記録 §3 参照。
+
+    /// L1 損失（`torch.nn.L1Loss` 相当。イシュー #2166・#2538）。
+    /// `crate::loss_ops::l1_loss` へ委譲する。テープ不一致・shape 不一致は型付き
+    /// エラーで拒否する。
+    pub fn l1_loss(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::loss_ops::l1_loss(self, target, reduction)
+    }
+
+    /// label_smoothing・ignore_index・class_weight 付き CrossEntropy
+    /// （`torch.nn.CrossEntropyLoss(label_smoothing=, ignore_index=, weight=)` 相当。
+    /// イシュー #2166・#2538）。`crate::loss_ops::cross_entropy_loss_with` へ委譲する。
+    /// `options` が既定値なら `Self::cross_entropy_loss` へ丸ごと委譲される（R3）。
+    pub fn cross_entropy_loss_with(
+        &self,
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        reduction: Reduction,
+        options: &crate::loss_ops::CrossEntropyOptions,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::loss_ops::cross_entropy_loss_with(self, targets, class_dim, reduction, options)
     }
 
     // ---- activation_ops 委譲メソッド（#2146 実装・#2516 公開。親 #2500・ルート #2499）----
