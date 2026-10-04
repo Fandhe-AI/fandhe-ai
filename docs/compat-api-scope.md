@@ -1857,3 +1857,11 @@ manifest 上限の閾値は変更しない）。load 側は改竄 manifest の�
 保留継続: `TripletMarginOptions`・`PoissonNllOptions`・`Reduction`・`loss_ops` モジュールの facade 再エクスポート（推奨形の記載がなく一括承認の範囲外）・
 `ctc_loss`（#2540）・`nn::loss` 構造体の公開（#2600）・GPU 専用カーネル。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
 実機 parity は `docs/perf/logs/loss-ops-2167/README.md` の申し送りが有効（ホスト計算経路は不変）。
+
+**適用記録（経路 2。イシュー #2540・親 #2537・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`docs/autodiff-ctc-design.md` §5 の推奨形（単一案）どおり、`Var::ctc_loss(&self, targets, input_lengths, target_lengths, options, reduction)`
+を `crate::loss_ops::ctc_loss` への 1 行委譲メソッドとして公開した（`fandhe-ai =0.10.0` の公開 API に追加のみ・非破壊）。
+`LossOpsHoldDoctestGuard` から `Var` 側プローブ（`__probe_var`・`Var` impl）を撤去し、承認形は `api_surface.rs` の正ガード
+（`var_loss_ops_methods_are_thin_delegations`〈7 件化〉・`var_ctc_loss_is_reachable_via_facade_var`）とインベントリ（`var.rs::ctc_loss` 追加）で固定した。
+保留継続: `CtcLossOptions`・`Reduction`・`loss_ops` モジュールの facade 再エクスポート（推奨形外）・`nn::loss::CtcLoss` の公開（#2600）・GPU 専用カーネル。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は `docs/perf/logs/ctc-loss-2168/README.md` の申し送りが有効（ホスト計算経路は不変）。

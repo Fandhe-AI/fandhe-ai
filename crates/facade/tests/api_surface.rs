@@ -14529,10 +14529,9 @@ fn __probe(\n\
 }";
 
 // =====================================================================
-// #2166 実装・#2538 で `Var` 2 メソッド、#2539 で 4 メソッドを公開（親 #2537・ルート #2499）。
-// `LossOpsHoldDoctestGuard` は部分反転（`Var::{l1_loss, cross_entropy_loss_with,
-// cosine_embedding_loss, margin_ranking_loss, triplet_margin_loss, poisson_nll_loss}`
-// のプローブのみ削除。残り 1 名（ctc_loss）・Tensor／Tape・モジュール再エクスポートの保留は維持）。
+// #2166 実装・#2538 で `Var` 2 メソッド、#2539 で 4 メソッド、#2540 で `ctc_loss` を公開
+// （親 #2537・ルート #2499）。`LossOpsHoldDoctestGuard` は #2540 で `Var` 側プローブを全撤去
+// （Tensor／Tape・モジュール再エクスポートの保留は維持）。
 // `VarReduceOpsHoldDoctestGuard`（イシュー #2147。#2514 で削除済み）と同型の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
 // 定義元インベントリを持つ。承認事項・多層防御の位置づけは
@@ -14622,16 +14621,6 @@ trait __FandheLossHoldProbe {\n\
 \x20\x20\x20\x20fn ctc_loss(&self) -> __FandheLossMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheLossHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
-\x20\x20\x20\x20fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
-\x20\x20\x20\x20fn cosine_embedding_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
-\x20\x20\x20\x20fn margin_ranking_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
-\x20\x20\x20\x20fn triplet_margin_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
-\x20\x20\x20\x20fn poisson_nll_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
-\x20\x20\x20\x20fn ctc_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
-}\n\
-\n\
 impl __FandheLossHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn l1_loss(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
 \x20\x20\x20\x20fn cross_entropy_loss_with(&self) -> __FandheLossMarker { __FandheLossMarker }\n\
@@ -14663,11 +14652,6 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20loss_ops::triplet_margin_loss();\n\
 \x20\x20\x20\x20loss_ops::poisson_nll_loss();\n\
 \x20\x20\x20\x20loss_ops::ctc_loss();\n\
-}\n\
-\n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = fandhe_ai::Var::ctc_loss(x);\n\
-\x20\x20\x20\x20let _: __FandheLossMarker = x.ctc_loss();\n\
 }\n\
 \n\
 fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
@@ -14712,7 +14696,7 @@ const LOSS_OPS_FN_NAMES: [&str; 7] = [
 /// facade src 全体（`crates/facade/src/**`）に、`loss_ops` を参照
 /// する `pub use`（`pub use fandhe_ai_autodiff::loss_ops;` 等の
 /// モジュール再エクスポート・別名含む）も、[`LOSS_OPS_FN_NAMES`]
-/// （2 個）の `fn` 宣言（可視性・宣言文脈を問わない。
+/// （7 個）の `fn` 宣言（可視性・宣言文脈を問わない。
 /// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
 /// 固定する（`LossOpsHoldDoctestGuard` の正のプローブと多層防御を
 /// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
@@ -14746,7 +14730,7 @@ fn facade_does_not_reexport_or_declare_loss_ops() {
     assert!(
         offending.is_empty(),
         "facade の公開面が loss_ops を再エクスポート、または同名の fn を宣言\
-         している（承認形は autodiff の `Var` 委譲メソッド 6 件のみ。#2538・#2539）:\
+         している（承認形は autodiff の `Var` 委譲メソッド 7 件のみ。#2538・#2539・#2540）:\
          {offending:?}"
     );
 }
@@ -14764,8 +14748,8 @@ fn facade_does_not_reexport_or_declare_loss_ops() {
 /// いずれも `crates/autodiff/src/loss_ops.rs` に 1 件ずつ存在する。加えて
 /// #2538 で `l1_loss`・`cross_entropy_loss_with`、#2539 で
 /// `cosine_embedding_loss`・`margin_ranking_loss`・`triplet_margin_loss`・
-/// `poisson_nll_loss` の `Var` 委譲メソッドが `crates/autodiff/src/var.rs` に
-/// 1 件ずつ存在する（承認形）。
+/// `poisson_nll_loss`、#2540 で `ctc_loss` の `Var` 委譲メソッドが
+/// `crates/autodiff/src/var.rs` に 1 件ずつ存在する（承認形）。
 #[test]
 fn workspace_declares_loss_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
@@ -14825,6 +14809,7 @@ fn workspace_declares_loss_ops_fn_names_only_in_approved_locations() {
         ("autodiff/src/var.rs::margin_ranking_loss", 1usize),
         ("autodiff/src/var.rs::triplet_margin_loss", 1usize),
         ("autodiff/src/var.rs::poisson_nll_loss", 1usize),
+        ("autodiff/src/var.rs::ctc_loss", 1usize),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -14833,17 +14818,17 @@ fn workspace_declares_loss_ops_fn_names_only_in_approved_locations() {
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の loss_ops 系 `fn` 宣言集合が\
-         期待（`crates/autodiff/src/loss_ops.rs` 7 件＋`autodiff/src/var.rs` 6 件）と一致しない\
+         期待（`crates/autodiff/src/loss_ops.rs` 7 件＋`autodiff/src/var.rs` 7 件）と一致しない\
          （過不足いずれも fail-closed に検出する。新たな定義元が\
          見つかった場合、それが承認済みの実装なのか迂回経路の混入なのか\
          を確認すること）: {found:?}"
     );
 }
 
-/// `var.rs` の 6 委譲メソッド本体の承認形（`loss_ops` 自由関数への 1 行委譲。
+/// `var.rs` の 7 委譲メソッド本体の承認形（`loss_ops` 自由関数への 1 行委譲。
 /// 引数名も固定）。独自実装・スタブへのすり替えと入口検査の迂回を拒否する
 /// （#2538。[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。
-const LOSS_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 6] = [
+const LOSS_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 7] = [
     (
         "l1_loss",
         "crate : : loss_ops : : l1_loss ( self , target , reduction )",
@@ -14868,9 +14853,13 @@ const LOSS_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 6] = [
         "poisson_nll_loss",
         "crate : : loss_ops : : poisson_nll_loss ( self , target , options , reduction )",
     ),
+    (
+        "ctc_loss",
+        "crate : : loss_ops : : ctc_loss ( self , targets , input_lengths , target_lengths , options , reduction , )",
+    ),
 ];
 
-/// `var.rs` の 6 委譲メソッドの本体が [`LOSS_OPS_VAR_EXPECTED_BODIES`] と
+/// `var.rs` の 7 委譲メソッドの本体が [`LOSS_OPS_VAR_EXPECTED_BODIES`] と
 /// 一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
 #[test]
 fn var_loss_ops_methods_are_thin_delegations() {
@@ -15010,6 +14999,52 @@ fn var_distance_poisson_loss_ops_are_reachable_via_facade_var() {
         close(out[0], (std::f32::consts::E - 1.0) / 2.0),
         "poisson: {out:?}"
     );
+}
+
+/// `Var::ctc_loss` が facade 経由で到達でき、シグネチャが承認形と一致し、閉形式で
+/// 決まる期待値が得られることを固定する（#2540。REQ-2 複合判定）。`Reduction`／
+/// `CtcLossOptions` の facade 再エクスポートは未承認のため `fandhe_ai_autodiff` から import する。
+#[test]
+fn var_ctc_loss_is_reachable_via_facade_var() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+    use fandhe_ai_autodiff::Reduction;
+    use fandhe_ai_autodiff::loss_ops::CtcLossOptions;
+
+    type CtcFn<'t> = fn(
+        &Var<'t>,
+        &Tensor<i32>,
+        &[usize],
+        &[usize],
+        &CtcLossOptions,
+        Reduction,
+    ) -> Result<Var<'t>, AutodiffError>;
+    fn sig_ctc<'t>() -> CtcFn<'t> {
+        Var::<'t>::ctc_loss
+    }
+    fn vals(v: &Var<'_>) -> Vec<f32> {
+        v.to_tensor().host_slice().into_owned()
+    }
+    fn close(a: f32, e: f32) -> bool {
+        (a - e).abs() < 1e-5 || (a - e).abs() / e.abs() < 1e-3
+    }
+
+    let tape = fandhe_ai::tape();
+    let opts = CtcLossOptions::default();
+
+    // (a) T=1, N=1, C=2, target 長 0: 全フレーム blank → nll = -ln 0.25 = ln 4。
+    let lp = tape.var(&Tensor::new(vec![0.25_f32.ln(), 0.75_f32.ln()], &[1, 1, 2]).expect("lp"));
+    let empty = Tensor::new(vec![1_i32, 1], &[1, 2]).expect("targets(padded)");
+    let out = vals(&sig_ctc()(&lp, &empty, &[1], &[0], &opts, Reduction::Sum).expect("ctc a"));
+    assert!(close(out[0], 4.0_f32.ln()), "ctc (a): {out:?}");
+
+    // (b) T=2, N=1, C=3, targets=[1, 2]: 唯一の経路 [1, 2] → nll = 1 + 2 = 3。
+    let lp = tape
+        .var(&Tensor::new(vec![-0.5_f32, -1.0, -0.7, -0.9, -0.4, -2.0], &[2, 1, 3]).expect("lp"));
+    let tg = Tensor::new(vec![1_i32, 2], &[2]).expect("targets(concat)");
+    let sum = vals(&sig_ctc()(&lp, &tg, &[2], &[2], &opts, Reduction::Sum).expect("ctc b sum"));
+    assert!(close(sum[0], 3.0), "ctc (b) sum: {sum:?}");
+    let mean = vals(&sig_ctc()(&lp, &tg, &[2], &[2], &opts, Reduction::Mean).expect("ctc b mean"));
+    assert!(close(mean[0], 1.5), "ctc (b) mean: {mean:?}");
 }
 
 // =====================================================================

@@ -4666,10 +4666,11 @@ impl<'t> Var<'t> {
         self.gather(dim, &index_bc)
     }
 
-    // ---- loss_ops 委譲メソッド（#2166／#2167 実装・#2538／#2539 公開。親 #2537・ルート #2499）----
+    // ---- loss_ops 委譲メソッド（#2166／#2167／#2168 実装・#2538／#2539／#2540 公開。親 #2537・ルート #2499）----
     //
     // 実体は `crate::loss_ops` の自由関数（`l1_loss`・`cross_entropy_loss_with`・
-    // `cosine_embedding_loss`・`margin_ranking_loss`・`triplet_margin_loss`・`poisson_nll_loss`）。
+    // `cosine_embedding_loss`・`margin_ranking_loss`・`triplet_margin_loss`・`poisson_nll_loss`・
+    // `ctc_loss`）。`CtcLossOptions` の再エクスポートも未承認（`docs/autodiff-ctc-design.md` §5）。
     // 本体は 1 行委譲に固定し、入口検査（テープ一致・shape・確保前バイト数上限・
     // label_smoothing／class_weight／target 添字の範囲）の迂回や独自実装への
     // すり替えを facade の正ガード（`var_loss_ops_methods_are_thin_delegations`）で
@@ -4754,6 +4755,28 @@ impl<'t> Var<'t> {
         reduction: Reduction,
     ) -> Result<Var<'t>, AutodiffError> {
         crate::loss_ops::poisson_nll_loss(self, target, options, reduction)
+    }
+
+    /// CTC 損失（`torch.nn.CTCLoss` 相当。`self` が `log_probs`〈`[T, N, C]`〉。
+    /// イシュー #2168・#2540）。`crate::loss_ops::ctc_loss` へ委譲する。
+    /// rank／長さ不一致・`blank >= C`・target 値域外・確保前上限超過は型付きエラーで拒否する。
+    /// 数式・VJP 規約・PyTorch との差分は `docs/autodiff-ctc-design.md` 参照。
+    pub fn ctc_loss(
+        &self,
+        targets: &Tensor<i32>,
+        input_lengths: &[usize],
+        target_lengths: &[usize],
+        options: &crate::loss_ops::CtcLossOptions,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::loss_ops::ctc_loss(
+            self,
+            targets,
+            input_lengths,
+            target_lengths,
+            options,
+            reduction,
+        )
     }
 
     // ---- activation_ops 委譲メソッド（#2146 実装・#2516 公開。親 #2500・ルート #2499）----

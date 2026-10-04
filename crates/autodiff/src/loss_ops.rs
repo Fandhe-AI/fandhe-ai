@@ -21,10 +21,11 @@
 //! facade 公開済み**（ルート #2499 一括承認）。**#2539 で
 //! [`cosine_embedding_loss`]・[`margin_ranking_loss`]・[`triplet_margin_loss`]・
 //! [`poisson_nll_loss`] の 4 関数も同じ形で `Var` の委譲メソッドとして公開済み**。
-//! 残り 1 関数（`ctc_loss`・#2540）・`loss_ops` モジュール自体・`CrossEntropyOptions`
-//! 等のオプション型は引き続き非公開で、facade 側の保留ガード
-//! （`crates/facade/src/lib.rs::LossOpsHoldDoctestGuard`）が `Var` の残り 1 名・
-//! `Tensor`／`Tape`・モジュール再エクスポートを拒否し続ける。
+//! **#2540 で [`ctc_loss`] も `Var::ctc_loss` として公開済み**で、7 関数すべてが
+//! `Var` の委譲メソッドとして facade から到達できる。`loss_ops` モジュール自体・
+//! `CrossEntropyOptions`・`CtcLossOptions` 等のオプション型は引き続き非公開で、
+//! facade 側の保留ガード（`crates/facade/src/lib.rs::LossOpsHoldDoctestGuard`）が
+//! `Tensor`／`Tape` 上の同名メソッド・モジュール再エクスポートを拒否し続ける。
 //!
 //! **既存 API との関係（R3・後方互換）**: 既存 `Var::cross_entropy_loss`
 //! （`var.rs`）のシグネチャ・数値経路は本モジュールの追加によって

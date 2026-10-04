@@ -9,8 +9,9 @@
 
 PyTorch `nn.CTCLoss`（Connectionist Temporal Classification）相当の
 API を、#2166・#2167 と同じく **`fandhe_ai_autodiff::loss_ops`
-（facade 非公開の自由関数モジュール）** へ追加した。`Var` に inherent
-の `pub fn` は追加していない。
+（facade 非公開の自由関数モジュール）** へ追加した。実装時点では `Var` に inherent
+の `pub fn` は追加していない（#2540 で `Var::ctc_loss` 委譲メソッドを追加し facade 公開した。
+§5 実装記録参照）。
 
 - `ctc_loss(log_probs, targets, input_lengths, target_lengths, options,
   reduction)`: 新規 `Op::CtcLoss`（`options: &CtcLossOptions`）
@@ -43,7 +44,7 @@ facade_does_not_reexport_or_declare_loss_ops`・同
 `workspace_declares_loss_ops_fn_names_only_in_allowed_locations`。
 #2166／#2167 と同様、`crates/autodiff/src/loss_ops.rs` に自由関数
 `ctc_loss` として置く（`Var::ctc_loss`〈薄い委譲メソッド〉は承認後の
-別作業）。
+別作業。**#2540 で追加済み**。上記は #2168 時点の判断）。
 
 ## §2 設計
 
@@ -251,6 +252,28 @@ LossOpsHoldDoctestGuard`（#2166 で導入・本イシューで対象を 7 関�
 を呼ぶだけ）を追加し、`LossOpsHoldDoctestGuard`・対応する
 api_surface のテストのうち `ctc_loss` を撤去する（#2166／#2167 分は
 引き続き保留対象のまま残る場合、ガードは該当関数名のみ縮小する）。
+
+### 実装記録（#2540・ルート #2499 一括承認）
+
+上記推奨形どおり `Var` の薄い委譲メソッドとして公開した（`crates/autodiff/src/var.rs`。
+本体は `crate::loss_ops::ctc_loss` への 1 行委譲。`Var` は facade が再エクスポートするため
+`fandhe_ai::Var` 経由で到達。追加のみで `fandhe-ai =0.10.0` の公開 API は非破壊）。
+
+- `ctc_loss(&self, targets: &Tensor<i32>, input_lengths: &[usize], target_lengths: &[usize], options: &CtcLossOptions, reduction: Reduction)`
+  （`self` が `log_probs`〈`[T, N, C]`〉）
+
+ガード反転: `LossOpsHoldDoctestGuard` から `Var` 向けトレイト impl と `__probe_var`（`ctc_loss`
+の 2 行）を撤去した（`Tensor`／`Tape` プローブ・`loss_ops` モジュールのプローブは維持）。
+正ガードは `api_surface.rs` の `var_loss_ops_methods_are_thin_delegations`（7 件化）・
+`var_ctc_loss_is_reachable_via_facade_var`（新規）と、インベントリ
+`workspace_declares_loss_ops_fn_names_only_in_approved_locations` への `var.rs::ctc_loss` 追加で固定した。
+利用例・単体テストは `crates/facade/tests/loss_ops_ctc_facade.rs`（forward 閉形式・自由関数との
+bit 一致・勾配 bit 一致・パディング／連結形式の一致・`zero_infinity`・型付きエラー）。
+
+保留継続: `CtcLossOptions`・`Reduction`・`loss_ops` モジュールの facade 再エクスポート
+（推奨形の記載がなく一括承認の範囲外）・`nn::loss::CtcLoss` の公開（#2600）・GPU 専用カーネル。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変（新規 `Op`／カーネル／`unsafe`／依存なし）。
+実機 parity は `docs/perf/logs/ctc-loss-2168/README.md` の申し送りが有効（ホスト計算経路は不変）。
 
 ## §6 スコープ外（out-of-scope-tracking.md）
 
