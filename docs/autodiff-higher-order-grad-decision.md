@@ -524,3 +524,70 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 
 内部ホスト名・秘密情報は含めない。
 
+
+## 17. facade 公開形の確定記録（イシュー #2544）
+
+基準コミット: `origin/main` `89bb480a`。ルート #2499 → Phase 3 #2542 → #2543
+（高階微分の公開）の第 1 段として、§5・§10・§15 に**書かれた形**を確定形として
+読み出し、`fandhe-ai =0.10.0` に対する非破壊性を論点別に確認した記録。
+本節は既存節（§5／§10／§15）を書き換えず、承認範囲を超える新しい形は導入しない
+（ルート #2499 の一括承認〈2026-10-04〉は決定記録に書かれた形にのみ及ぶものとして読む）。
+
+### 17.1 論点の判定（推奨形が一意に記載済みか）
+
+| 論点 | 記録上の根拠 | 判定 |
+|------|-------------|------|
+| 方式 | §5 主案 A-2（子テープ方式） | 確定 |
+| `ops` 供給 | §7 (i)（呼び出し側が空の子 `Tape` を渡す）。§10 承認事項 2 の推奨と同一 | 確定 |
+| facade の型 | §9「facade」: newtype `Tape` が子テープもラップ・`new_with_ops` は非公開維持 | 確定 |
+| 公開シグネチャ・配置 | §15「承認取得後に実施する変更範囲」: crate ルートの再エクスポート 1 行＋`impl Tape` への薄い委譲 1 件 | 確定 |
+| エラー型 | §9 の比較のうち既存 `AutodiffError::Backward(String)` 流用（専用 variant 新設なし）。§15 の変更範囲にも variant 追加がない | 確定 |
+| 1 階勾配 bit 同一性 | §9 選択肢 (i)（2 パス方式。1 階は無変更の `backward_impl`） | 確定 |
+| `tape.child()` 等の補助ヘルパー | §7 (i) の評価欄に言及があるのみで §15 の変更範囲に含まれない | 含めない（17.3） |
+
+未決・複数案のまま残る論点はないため、承認依頼のための停止は行わない。
+
+### 17.2 確定形
+
+- **再エクスポート**: `crates/facade/src/lib.rs` の crate ルートに `pub use fandhe_ai_autodiff::CreateGraphResult;`
+- **委譲メソッド**: facade `impl Tape` に
+  `pub fn backward_create_graph<'c>(&self, loss: &Var<'_>, child: &'c Tape) -> Result<CreateGraphResult<'c>, AutodiffError>`
+  を追加し、本体は `self.0.backward_create_graph(loss, &child.0)` のみとする
+  （`transfer`／`rnn_forward_seq` と同型の薄い委譲。§15 本文の先頭 `&` は表記揺れであり、戻り値は所有値の `Result`）。
+  `child` は facade の newtype `Tape`。子テープは既存の `fandhe_ai::tape()`／`tape_for(parent.device())` で構築する
+- **エラー型**: 既存 `AutodiffError`（`#[non_exhaustive]`・0.10.0 で再エクスポート済み）の既存 variant のみ。
+  `Backward(String)`（未対応 Op・同一テープ指定・非空の子テープ・checkpoint 併用・resident／fused 経路・rank≥3 matmul 等）、
+  `TapeMismatch`、`DeviceMismatch`、`GradientTrackingDisabled` ほか内部から伝播しうる既存 variant。新規 variant は追加しない
+- **`CreateGraphResult` の公開メソッド**: `first_order() -> &Gradients`、
+  `grad(&Var) -> Result<Option<Var<'c>>, AutodiffError>`、`child_var(&Var) -> Result<Option<Var<'c>>, AutodiffError>` を無変更で公開
+  （`crates/autodiff/src/create_graph.rs`）。フィールドは非公開のため外部構築不可。
+  シグネチャに現れる `Gradients`・`Var`・`AutodiffError` はいずれも 0.10.0 で facade 再エクスポート済みで、
+  `NodeId`／`TapeId`／`BackendOps` は露出しない
+- **モジュール配置**: 新規モジュールなし（crate ルート＋既存 `Tape` 型上のメソッド）
+
+### 17.3 本公開形に含めないもの
+
+- `tape.child()` 等の補助ヘルパー（§15 の変更範囲に無く、一括承認の範囲を広げない）。#2545 で追加しない
+- `TapeRef::backward_create_graph`、`new_with_ops` への到達経路（REQ-12 の非公開維持）
+- HVP 専用 API（案 C）、`backward_accumulate` 併用、checkpoint 併用、残る非対象 Op の拡張
+- いずれも必要になれば別途「決定記録の作成 → ユーザー承認」の 2 段を経る
+
+### 17.4 `fandhe-ai =0.10.0` 非破壊確認（`v0.10.0` タグ対 `89bb480a`）
+
+| 論点 | 確認結果 |
+|------|---------|
+| crate ルート `CreateGraphResult` の再エクスポート | 0.10.0 の facade `lib.rs` に `CreateGraph`／`backward_create_graph` の出現が 0 件。追加のみ（minor）。利用者側 glob import との同名衝突は Cargo SemVer ガイド上 minor 扱いで、既存の再エクスポート追加と同じ受容 |
+| `Tape::backward_create_graph` | 0.10.0 `Tape` に同名メソッドなし（`api_surface.rs` の否定ガード 2 件〈`facade_does_not_reexport_create_graph_result`・`facade_tape_does_not_expose_backward_create_graph_method`〉が同タグに存在＝未公開の証跡）。inherent メソッド追加のみで既存メソッドの意味論は不変 |
+| エラー型 | `AutodiffError` は 0.10.0 で `#[non_exhaustive]` かつ再エクスポート済み。使用 variant（`Backward`・`TapeMismatch`・`DeviceMismatch`・`GradientTrackingDisabled`）はすべて 0.10.0 に存在し、variant 追加なし |
+| 戻り値型に現れる型 | `Gradients`／`Var`／`AutodiffError` は 0.10.0 で公開済み。新たな内部型の露出なし |
+| 子テープ構築 | 既存 `tape()`／`tape_for(Device)`／`Tape::device()` が 0.10.0 に存在し、新規構築子は不要。`new_with_ops` 非公開は不変 |
+| 内部シグネチャ | `backward_create_graph` と `CreateGraphResult` の公開メソッド（`first_order`／`grad`／`child_var`）は `v0.10.0` と `89bb480a` で差分なし |
+| 既存 1 階 backward | `backward_create_graph` は既存 `Tape::backward` を無変更で呼ぶのみ（§13）で、`Tape::backward` の意味論は不変 |
+
+結論: 追加のみ（minor 相当）で 0.10.0 に対する破壊的変更はない。tolerance／baseline／ガードレール閾値／依存は変更しない。
+
+### 17.5 後続イシューへの申し送り
+
+- #2545: 17.2 の確定形のみを実装する（`create_graph.rs` のモジュール doc 更新を含む）。17.3 の項目は追加しない
+- #2546: 否定ガード 2 件の正ガード化、`docs/compat-api-scope.md` §5 適用記録、`docs/compat-feature-gap.md` の更新
+- #2063（先行 issue）のクローズ判断は本節の範囲外
