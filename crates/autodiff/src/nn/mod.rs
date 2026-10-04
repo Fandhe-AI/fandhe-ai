@@ -94,9 +94,8 @@
 //! モジュール doc「affine 非対応」節参照。`.claude/rules/
 //! coding-rust.md` の勾配長軸縮約契約との抵触を避けるため）。`Module`
 //! trait への統合（`as_group_norm`／`as_instance_norm`）はあるが、
-//! `docs/compat-api-scope.md` §5 の facade 公開面拡張承認が未取得の
-//! ため `compat::Sequential::add_group_norm`／`add_instance_norm` は
-//! 追加していない。イシュー #2065（親 #2059）で [`Flatten`]（`flatten`
+//! `compat::Sequential::add_group_norm`／`add_instance_norm` は
+//! イシュー #2525 で facade に公開済み（`docs/norm-ops-design.md` §11）。イシュー #2065（親 #2059）で [`Flatten`]（`flatten`
 //! モジュール）を追加した。`Var::flatten`（#1597）を薄くラップする
 //! のみで新規 `Op`／`BackendOps`／VJP は追加しない。同イシューで
 //! `fandhe_ai_facade::compat::sequential::Sequential` に

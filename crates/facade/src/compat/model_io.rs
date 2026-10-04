@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 35 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 37 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -306,7 +306,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 35 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 37 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -344,6 +344,8 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Upsample { .. } => Some("upsample"),
         LayerSpec::ZeroPad2d { .. } => Some("zero_pad2d"),
         LayerSpec::Identity => Some("identity"),
+        LayerSpec::GroupNorm { .. } => Some("group_norm"),
+        LayerSpec::InstanceNorm { .. } => Some("instance_norm"),
         LayerSpec::Unsupported { .. } => None,
     }
 }
@@ -356,7 +358,10 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
         LayerSpec::Elu { alpha } => alpha.is_finite(),
         LayerSpec::Softplus { beta, threshold } => beta.is_finite() && threshold.is_finite(),
         LayerSpec::Dropout { p } => p.is_finite(),
-        LayerSpec::LayerNorm { eps, .. } | LayerSpec::RmsNorm { eps, .. } => eps.is_finite(),
+        LayerSpec::LayerNorm { eps, .. }
+        | LayerSpec::RmsNorm { eps, .. }
+        | LayerSpec::GroupNorm { eps, .. }
+        | LayerSpec::InstanceNorm { eps } => eps.is_finite(),
         LayerSpec::BatchNorm1d { eps, momentum, .. }
         | LayerSpec::BatchNorm2d { eps, momentum, .. } => eps.is_finite() && momentum.is_finite(),
         _ => true,
@@ -552,6 +557,8 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::Upsample { .. }
         | LayerSpec::ZeroPad2d { .. }
         | LayerSpec::Identity
+        | LayerSpec::GroupNorm { .. }
+        | LayerSpec::InstanceNorm { .. }
         | LayerSpec::Unsupported { .. } => Vec::new(),
     }
 }
@@ -873,6 +880,11 @@ fn render_params(spec: &LayerSpec) -> String {
                 put_opt(&mut f, &format!("size_{i}"), size.get(i).copied());
             }
         }
+        LayerSpec::GroupNorm { groups, eps } => {
+            put_num(&mut f, "groups", *groups);
+            put_real(&mut f, "eps", *eps);
+        }
+        LayerSpec::InstanceNorm { eps } => put_real(&mut f, "eps", *eps),
         LayerSpec::ZeroPad2d { padding } => {
             put_num(&mut f, "left", padding[0]);
             put_num(&mut f, "right", padding[1]);
@@ -1671,6 +1683,12 @@ fn build_model(
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::ZeroPad2d { padding } => model.add_zero_pad2d(*padding),
             LayerSpec::Identity => model.add_identity(),
+            LayerSpec::GroupNorm { groups, eps } => model
+                .add_group_norm(*groups, *eps)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::InstanceNorm { eps } => model
+                .add_instance_norm(*eps)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Unsupported { kind } => {
                 return Err(ModelIoError::UnsupportedModel {
                     reason: format!("層 {kind} は復元に未対応です"),
@@ -2386,6 +2404,17 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 eps: p.f32("eps")?,
             })
         }
+        "group_norm" => {
+            let p = Params::new(params, &["groups", "eps"])?;
+            Ok(LayerSpec::GroupNorm {
+                groups: p.usize("groups")?,
+                eps: p.f32("eps")?,
+            })
+        }
+        "instance_norm" => {
+            let p = Params::new(params, &["eps"])?;
+            Ok(LayerSpec::InstanceNorm { eps: p.f32("eps")? })
+        }
         "batch_norm1d" => {
             let p = Params::new(params, &["num_features", "eps", "momentum"])?;
             Ok(LayerSpec::BatchNorm1d {
@@ -2938,7 +2967,7 @@ mod tests {
         ));
     }
 
-    /// 35 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 37 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3108,6 +3137,11 @@ mod tests {
                 padding: [1, 2, 3, 4],
             },
             LayerSpec::Identity,
+            LayerSpec::GroupNorm {
+                groups: 2,
+                eps: 1e-5,
+            },
+            LayerSpec::InstanceNorm { eps: 1e-5 },
         ]
     }
 
@@ -3115,7 +3149,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 35, "kind allowlist は 35 種: {kinds:?}");
+        assert_eq!(kinds.len(), 37, "kind allowlist は 37 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3133,9 +3167,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 35 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 37 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("35 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("37 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3143,7 +3177,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("35 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("37 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -3234,6 +3268,16 @@ mod tests {
                 "conv3d",
                 r#"{"in_channels":4,"out_channels":2,"kernel_size_d":3,"kernel_size_h":3,"kernel_size_w":3,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":1,"x":1}"#,
             ),
+            // イシュー #2525: group_norm / instance_norm の非信頼入力（キー欠落・未知キー・型違い）。
+            ("group_norm", r#"{"groups":2}"#),
+            ("group_norm", r#"{"eps":1e-5}"#),
+            ("group_norm", r#"{"groups":2,"eps":1e-5,"x":1}"#),
+            ("group_norm", r#"{"groups":-1,"eps":1e-5}"#),
+            ("group_norm", r#"{"groups":1.5,"eps":1e-5}"#),
+            ("group_norm", r#"{"groups":2,"eps":"a"}"#),
+            ("instance_norm", r#"{}"#),
+            ("instance_norm", r#"{"eps":1e-5,"x":1}"#),
+            ("instance_norm", r#"{"eps":"a"}"#),
             // イシュー #2522: upsample / zero_pad2d / identity の非信頼入力。
             ("identity", r#"{"x":1}"#),
             ("zero_pad2d", r#"{"left":1,"right":1,"top":1}"#),
@@ -3369,6 +3413,15 @@ mod tests {
                 eps: 1e-5,
                 momentum: 2.0,
             },
+            LayerSpec::GroupNorm {
+                groups: 0,
+                eps: 1e-5,
+            },
+            LayerSpec::GroupNorm {
+                groups: 2,
+                eps: -1.0,
+            },
+            LayerSpec::InstanceNorm { eps: -1.0 },
         ] {
             assert!(
                 matches!(
@@ -3433,7 +3486,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("35 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("37 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

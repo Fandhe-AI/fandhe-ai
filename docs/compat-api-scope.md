@@ -248,11 +248,10 @@ reshape」で呼ぶ合成のみで新規 `Op`／`BackendOps` を追加しない�
 `weight`／`bias`）を持たない**（`docs/norm-ops-design.md` §11「affine
 非対応」参照。`.claude/rules/coding-rust.md` の勾配長軸縮約契約との
 抵触を避けるため別イシューへ見送り）。`Module` trait への統合
-（`as_group_norm`／`as_instance_norm`）は行ったが、**facade 公開面
-拡張（`compat::Sequential::add_group_norm`／`add_instance_norm`）は
-本文書 §5 の承認（経路 1 または経路 2）が未取得のため実施していない**
-——facade からは到達できないまま内部クレート限定で残る。詳細は
-`docs/norm-ops-design.md` §11。
+（`as_group_norm`／`as_instance_norm`）を行い、**facade 公開面
+（`compat::Sequential::add_group_norm`／`add_instance_norm`）は
+イシュー #2525 で公開済み**（§5「適用記録（経路 2。イシュー #2525）」）。
+詳細は `docs/norm-ops-design.md` §11・§11.x。
 
 **PixelShuffle／PixelUnshuffle（#2162・親 #2131）**: 上記「GroupNorm／
 InstanceNorm」行と同じ理由で、本 Tier 1 表（1 節）にも Tier 2（1.3
@@ -1730,3 +1729,13 @@ GPU 専用カーネル・checkpoint／`create_graph` 対応・`amax_dims`／keep
 `VarConv3dHoldDoctestGuard` は承認した 2 形のプローブだけを外して縮小し、承認外の形（`conv3d_ops` 再エクスポート・`Tensor`／`Tape` の `conv3d`）の衝突プローブは残した。
 保留継続: `conv3d_ops`／`nn::Conv3d` 型の再エクスポート・bias なし構成・AMP 低精度 conv3d・ONNX export 対応・GPU 専用カーネル。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は `docs/perf/logs/compat-sequential-conv3d-2524/README.md` へ申し送り。
+
+**適用記録（経路 2。イシュー #2525・親 #2520・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`GroupNorm`／`InstanceNorm`（#2066）を `compat::Sequential::add_group_norm(groups, eps)`・`add_instance_norm(eps)` の
+`pub fn` 各 1 件として公開した（追加 API のみ・新規公開型なし。`fandhe-ai =0.10.0` の公開 API は非破壊）。
+具体シグネチャは `docs/norm-ops-design.md` に記載がなかったため内部コンストラクタから機械的に導出した（§11.x）。
+affine・`num_channels` 引数は持たない。学習経路へ結線し、常駐経路は `BackendError::Unsupported` で fail-closed、
+`save_model`／`load_model` は kind `group_norm`／`instance_norm` を追加して対応した（`format_version` 不変）。ONNX export は `UnsupportedLayer`。
+保留ガードは存在しなかったため、`api_surface.rs` に承認形だけを許す正ガード 4 件を新設した。
+保留継続: affine 付き構成・型／既定 eps 定数の再エクスポート・常駐経路対応・ONNX export 対応・GPU 専用カーネル。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は `docs/perf/logs/compat-sequential-group-instance-norm-2525/README.md` へ申し送り。

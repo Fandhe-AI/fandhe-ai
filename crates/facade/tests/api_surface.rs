@@ -12076,6 +12076,114 @@ fn compat_sequential_exposes_conv_transpose2d_add_method_issue_2523_counts_decla
 }
 
 // =====================================================================
+// イシュー #2525（親 #2520・ルート #2499 の 2026-10-04 一括承認）:
+// `compat::Sequential::add_group_norm`／`add_instance_norm` の正ガード。保留ガードは
+// 存在しなかった（`GroupNorm`／`InstanceNorm` を禁じるプローブ・否定テストなし）ため
+// 反転対象はなく、承認形だけを許す正ガード（シグネチャ一致・`pub fn` ちょうど 1 件）を
+// 新設する。`num_channels` 引数・affine 引数は承認形に含まれない。
+// `docs/norm-ops-design.md` §11「#2525 実装記録」参照。
+// =====================================================================
+
+const ADD_GROUP_NORM_PARAMS: &str =
+    "mut self, groups: usize, eps: f32, ) -> Result<Self, AutodiffError>";
+const ADD_INSTANCE_NORM_PARAMS: &str = "mut self, eps: f32, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_group_norm`／`add_instance_norm` が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_group_instance_norm_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in [
+        ("add_group_norm", ADD_GROUP_NORM_PARAMS),
+        ("add_instance_norm", ADD_INSTANCE_NORM_PARAMS),
+    ] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_group_instance_norm_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_group_instance_norm_add_methods_have_approved_signatures_detects_offense() {
+    let ok_g = "pub fn add_group_norm(mut self, groups: usize, eps: f32,) -> Result<Self, AutodiffError> {";
+    let ok_i = "pub fn add_instance_norm(mut self, eps: f32,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok_g,
+        "add_group_norm",
+        ADD_GROUP_NORM_PARAMS
+    ));
+    assert!(sequential_spatial_add_signature_ok(
+        ok_i,
+        "add_instance_norm",
+        ADD_INSTANCE_NORM_PARAMS
+    ));
+    for bad in [
+        // groups 欠落
+        "pub fn add_group_norm(mut self, eps: f32,) -> Result<Self, AutodiffError> {",
+        // num_channels の追加
+        "pub fn add_group_norm(mut self, groups: usize, num_channels: usize, eps: f32,) -> Result<Self, AutodiffError> {",
+        // 型違い
+        "pub fn add_group_norm(mut self, groups: usize, eps: f64,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_group_norm(mut self, groups: usize, eps: f32,) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_group_norm", ADD_GROUP_NORM_PARAMS),
+            "{bad}"
+        );
+    }
+    for bad in [
+        // 引数欠落
+        "pub fn add_instance_norm(mut self) -> Result<Self, AutodiffError> {",
+        // affine 引数の追加
+        "pub fn add_instance_norm(mut self, eps: f32, affine: bool,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_instance_norm(mut self, eps: f32,) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(
+                bad,
+                "add_instance_norm",
+                ADD_INSTANCE_NORM_PARAMS
+            ),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_group_norm(`／`add_instance_norm(` が各ちょうど 1 件
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード）。
+#[test]
+fn compat_sequential_exposes_group_instance_norm_add_methods_issue_2525() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let (mut group, mut instance) = (0usize, 0usize);
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        group += count_pub_fn_declarations(content, "add_group_norm");
+        instance += count_pub_fn_declarations(content, "add_instance_norm");
+    });
+    assert_eq!(group, 1, "add_group_norm の pub fn 宣言数が 1 件でない");
+    assert_eq!(
+        instance, 1,
+        "add_instance_norm の pub fn 宣言数が 1 件でない"
+    );
+}
+
+/// [`compat_sequential_exposes_group_instance_norm_add_methods_issue_2525`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_group_instance_norm_add_methods_issue_2525_counts_declarations() {
+    let one = "    pub fn add_group_norm(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_group_norm"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_instance_norm"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_group_norm"), 2);
+}
+
+// =====================================================================
 // イシュー #2162（親 #2131）: PixelShuffle・PixelUnshuffle の facade
 // 公開保留を検査するテスト群。`PixelShuffleHoldDoctestGuard`（`src/
 // lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査と、

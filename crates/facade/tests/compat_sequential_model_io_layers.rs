@@ -1,8 +1,8 @@
-//! `fandhe_ai::compat::{save_model, load_model}` の全 35 層対応（イシュー #2370・親 #2362）の
+//! `fandhe_ai::compat::{save_model, load_model}` の全 37 層対応（イシュー #2370・親 #2362）の
 //! 統合テスト。facade の公開 API と `std` のみで次の受入基準を検証する。
 //!
-//! - (a) 35 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
-//!   `predict` 出力が bit 一致する（35 種の網羅は保存した manifest の `kind` 集合で検査する）。
+//! - (a) 37 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
+//!   `predict` 出力が bit 一致する（37 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
@@ -21,8 +21,8 @@ use fandhe_ai::{AutodiffError, InterpolateMode, Tensor};
 mod common;
 use common::temp_dir::TempDirGuard;
 
-/// allowlist の 35 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-const ALL_KINDS: [&str; 35] = [
+/// allowlist の 37 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+const ALL_KINDS: [&str; 37] = [
     "linear",
     "relu",
     "sigmoid",
@@ -58,6 +58,8 @@ const ALL_KINDS: [&str; 35] = [
     "upsample",
     "zero_pad2d",
     "identity",
+    "group_norm",
+    "instance_norm",
 ];
 
 type Built = Result<Sequential, AutodiffError>;
@@ -138,7 +140,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------
-// (a) 35 種の bit 一致
+// (a) 37 種の bit 一致
 // ---------------------------------------------------------------------
 
 /// rank 2 入力 `[3, 6]`: 活性化・正規化・dropout・BatchNorm1d（rank 2）・softmax 系。
@@ -173,6 +175,8 @@ fn cnn_model() -> Built {
         .add_conv2d(2, 4, [3, 3], [1, 1], [1, 1], [1, 1], 1, 21)?
         .add_batch_norm2d(4, 1e-5, 0.1)?
         .add_relu()
+        .add_group_norm(2, 1e-5)?
+        .add_instance_norm(1e-5)?
         .add_conv_transpose2d(4, 4, [3, 3], [1, 1], [1, 1], [0, 0], [1, 1], 2, 24)?
         .add_zero_pad2d([1, 1, 1, 1])
         .add_upsample(vec![8, 8], InterpolateMode::Nearest)?
@@ -262,7 +266,7 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
         ));
     }
     let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(seen, expected, "35 種の kind をすべて往復させたはず");
+    assert_eq!(seen, expected, "37 種の kind をすべて往復させたはず");
 }
 
 /// train モードのまま保存・復元しても `training` フラグが往復し、dropout を含む構成で
