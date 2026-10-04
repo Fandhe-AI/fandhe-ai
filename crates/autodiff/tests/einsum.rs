@@ -498,18 +498,16 @@ fn rejects_three_or_more_operands() {
 }
 
 #[test]
-fn rejects_batch_axis_contraction() {
-    // batch 添字（b）を伴う縮約は、Var::einsum（facade 公開入口）では
-    // イシュー #2149 の facade 公開承認待ちのため拒否する
-    // （`compute_binary_plan` の `BatchContraction::Reject` 判定。
-    // 内部には rank>=3 matmul〈#1715〉への分解として実装済みで
-    // `fandhe_ai_autodiff::einsum_batch::einsum_batched` から到達
-    // 可能。モジュール doc「受理範囲」参照）。
+fn accepts_batch_axis_contraction() {
+    // batch 添字（b）を伴う縮約は rank>=3 matmul〈#1715〉への分解で
+    // 受理する（イシュー #2517。従来は #2149 の facade 公開承認待ちで
+    // 拒否していた）。値は Var::matmul と一致する。
     let tape = Tape::new_with_ops(common::naive_ops());
-    let a = tape.var(&t(vec![0.0; 2 * 3 * 4], &[2, 3, 4]));
-    let b = tape.var(&t(vec![0.0; 2 * 4 * 5], &[2, 4, 5]));
-    let result = Var::einsum("bij,bjk->bik", &[&a, &b]);
-    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    let a = tape.var(&t((0..24).map(|x| x as f32).collect(), &[2, 3, 4]));
+    let b = tape.var(&t((0..40).map(|x| x as f32).collect(), &[2, 4, 5]));
+    let out = Var::einsum("bij,bjk->bik", &[&a, &b]).expect("batch 縮約は受理される");
+    let direct = a.matmul(&b).unwrap();
+    assert_bit_identical(&out.to_tensor(), &direct.to_tensor());
 }
 
 #[test]
@@ -564,9 +562,8 @@ fn rejects_operand_count_spec_mismatch() {
 #[test]
 fn tape_remains_usable_after_rejected_einsum_call() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let a = tape.var(&t(vec![0.0; 2 * 3 * 4], &[2, 3, 4]));
-    let b = tape.var(&t(vec![0.0; 2 * 4 * 5], &[2, 4, 5]));
-    let rejected = Var::einsum("bij,bjk->bik", &[&a, &b]);
+    let a = tape.var(&t(vec![0.0; 4], &[2, 2]));
+    let rejected = Var::einsum("ii->i", &[&a]);
     assert!(matches!(rejected, Err(AutodiffError::InvalidArgument(_))));
 
     // 同じ tape 上で通常の演算・backward が問題なく動く。

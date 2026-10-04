@@ -26,20 +26,14 @@
 //!   に従いユーザー承認後に別途対応する）。
 //! - 2 項の縮約で、両オペランドと出力に共通する「batch 添字」
 //!   （例 `"bij,bjk->bik"`）を伴うものは、rank≥3 `Var::matmul`
-//!   （イシュー #1715。親 #1600）実装後の現在は内部的に分解できる
-//!   （`compute_binary_plan` の `BatchContraction::Allow` モード。
-//!   `[batch..., L, K]×[batch..., K, R]` への正規化 → rank≥3
-//!   `Var::matmul` 1 回 → 出力形状への復元。イシュー #2149）。ただし
-//!   **公開入口 [`crate::var::Var::einsum`] は引き続き `Reject`
-//!   モードで呼び出し、batch 添字を伴う縮約を拒否する**——facade
-//!   （`fandhe_ai::Var` は本クレートの `Var` を直接再エクスポートする
-//!   composition root）への公開はイシュー #2149 の承認事項であり、
-//!   承認前に `Var::einsum` の挙動を変えると facade 公開面が変わって
-//!   しまうため（`docs/autodiff-einsum-batch-decision.md` §5）。内部
-//!   クレート限定の到達経路は [`crate::einsum_batch::einsum_batched`]
-//!   （`Allow` モードへの薄い委譲）。batch 添字を伴わない縮約（GEMM
-//!   相当の単一 contract 軸群・要素ごと乗算相当）は従来どおり
-//!   `Var::einsum` からも対応する。
+//!   （イシュー #1715。親 #1600）への分解で受理する
+//!   （`[batch..., L, K]×[batch..., K, R]` への正規化 → rank≥3
+//!   `Var::matmul` 1 回 → 出力形状への復元。実装はイシュー #2149、
+//!   公開入口 [`crate::var::Var::einsum`]（facade `fandhe_ai::Var`
+//!   経由）への開放はイシュー #2517。従来 `Err` だった入力が `Ok`
+//!   になるだけで、既に受理していた入力の挙動は不変）。
+//!   [`crate::einsum_batch::einsum_batched`] は公開済み 0.10.0
+//!   互換のための同一挙動の薄い委譲として維持する。
 //!
 //! **数値契約**: GEMM 経路（`contract` が非空・`batch` が空）は
 //! `Var::matmul` をそのまま呼ぶため、CUDA TF32 opt-in の挙動を含めて
@@ -188,43 +182,15 @@ fn parse(spec: &str) -> Result<EinsumSpec, AutodiffError> {
     Ok(EinsumSpec { inputs, output })
 }
 
-/// batch 添字を伴う 2 項縮約（例 `"bij,bjk->bik"`）を受理するか拒否
-/// するかを切り替えるモード（イシュー #2149）。`Reject` は
-/// [`crate::var::Var::einsum`]（facade `fandhe_ai::Var::einsum` へ
-/// そのまま到達する公開入口）が使う既定値。`Allow` は
-/// [`crate::einsum_batch::einsum_batched`]（内部クレート限定・facade
-/// 非公開）だけが使う。両モードとも batch 添字を伴わない縮約の挙動は
-/// 完全に同一（分岐するのは `compute_binary_plan` の拒否判定 1 箇所
-/// のみ）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BatchContraction {
-    /// batch 添字を伴う縮約を `AutodiffError::InvalidArgument` で拒否
-    /// する（`Var::einsum` の既定・facade から観測される挙動）。
-    Reject,
-    /// batch 添字を伴う縮約を rank≥3 `Var::matmul` への分解で受理する
-    /// （`einsum_batch::einsum_batched` 限定。facade 非公開）。
-    Allow,
-}
-
 /// [`crate::var::Var::einsum`] の実装本体（`pub(crate)`。`Var::einsum`
-/// から呼ばれる唯一の呼び出し元）。`einsum_with(spec, operands,
-/// BatchContraction::Reject)` の薄いラッパーで、batch 添字を伴う
-/// 縮約を拒否する従来どおりの挙動を維持する（facade 公開面を
-/// 承認前に変えないための境界。モジュール doc「受理範囲」参照）。
+/// と [`crate::einsum_batch::einsum_batched`]（公開済み 0.10.0 互換の
+/// 薄い委譲）から呼ばれる）。batch 添字を伴う 2 項縮約も受理する
+/// （イシュー #2517。旧 `BatchContraction` モードは撤去済み）。
+/// クロステープ検査 → パース → オペランド数・rank 一致検査 → 次元
+/// サイズ一致検査 → 分解ドライバの順で処理する（tape へノードを push
+/// するのは分解ドライバ内部の検証完了後のみ。モジュール doc「検証と
+/// Var 操作の分離」参照）。
 pub(crate) fn einsum<'t>(spec: &str, operands: &[&Var<'t>]) -> Result<Var<'t>, AutodiffError> {
-    einsum_with(spec, operands, BatchContraction::Reject)
-}
-
-/// `einsum`（`Reject`）／[`crate::einsum_batch::einsum_batched`]
-/// （`Allow`）が共有する実装本体。クロステープ検査 → パース →
-/// オペランド数・rank 一致検査 → 次元サイズ一致検査 → 分解ドライバの
-/// 順で処理する（tape へノードを push するのは分解ドライバ内部の
-/// 検証完了後のみ。モジュール doc「検証と Var 操作の分離」参照）。
-pub(crate) fn einsum_with<'t>(
-    spec: &str,
-    operands: &[&Var<'t>],
-    mode: BatchContraction,
-) -> Result<Var<'t>, AutodiffError> {
     if operands.is_empty() {
         return Err(AutodiffError::InvalidArgument(
             "einsum: オペランドが指定されていない".to_string(),
@@ -281,7 +247,6 @@ pub(crate) fn einsum_with<'t>(
             &parsed.inputs[1],
             &parsed.output,
             &dim_of,
-            mode,
         ),
         n => Err(AutodiffError::InvalidArgument(format!(
             "einsum: オペランド数 {n} 個（3 個以上）は本イシュー（#1620）のスコープ外のため未対応"
@@ -412,7 +377,7 @@ struct BinaryPlan {
 }
 
 /// 2 項 einsum の添字を batch／contract／left／right へ分類し、
-/// presum 計画・内部整合性検査・batch∧contract 非空の拒否判定まで
+/// presum 計画・内部整合性検査まで
 /// すべて添字集合のみで（`Var` に一切触れず）完了させる。
 ///
 /// presum（相手にも出力にも現れない添字を先に和で除去。PyTorch
@@ -426,7 +391,6 @@ fn compute_binary_plan(
     a_labels_in: &[char],
     b_labels_in: &[char],
     out_labels: &[char],
-    mode: BatchContraction,
 ) -> Result<BinaryPlan, AutodiffError> {
     let set_a: HashSet<char> = a_labels_in.iter().copied().collect();
     let set_b: HashSet<char> = b_labels_in.iter().copied().collect();
@@ -487,15 +451,6 @@ fn compute_binary_plan(
         ));
     }
 
-    if !contract.is_empty() && !batch.is_empty() && mode == BatchContraction::Reject {
-        return Err(AutodiffError::InvalidArgument(
-            "einsum: batch 添字を伴う縮約は Var::einsum では facade 公開承認待ち\
-             （イシュー #2149）のため未対応。内部には実装済みで\
-             fandhe_ai_autodiff::einsum_batch::einsum_batched から到達可能"
-                .to_string(),
-        ));
-    }
-
     Ok(BinaryPlan {
         a_presum,
         a_labels,
@@ -519,9 +474,8 @@ fn einsum_binary<'t>(
     b_labels: &[char],
     out_labels: &[char],
     dim_of: &HashMap<char, usize>,
-    mode: BatchContraction,
 ) -> Result<Var<'t>, AutodiffError> {
-    let plan = compute_binary_plan(a_labels, b_labels, out_labels, mode)?;
+    let plan = compute_binary_plan(a_labels, b_labels, out_labels)?;
 
     let a = apply_presum(a, &plan.a_presum)?;
     let b = apply_presum(b, &plan.b_presum)?;
@@ -655,8 +609,7 @@ struct EinsumMatmulPlan<'a, 't> {
 /// 2 次元 `[L,K]×[K,R]` 経路（従来どおり）、非空なら
 /// `[B,L,K]×[B,K,R]` の rank-3 `Var::matmul`（`gemm_batched`。イシュー
 /// #1715）へ分解する経路（イシュー #2149。`compute_binary_plan` が
-/// `BatchContraction::Allow` のときのみ batch 非空を許すため、本関数
-/// 自体はどちらのモードから呼ばれたかを意識しない）。`contract` に
+/// batch 非空も受理する）。`contract` に
 /// 複数添字が含まれる場合は、それらをまとめて 1 本の `K` 軸へ
 /// `reshape` してから `matmul` を 1 回呼ぶ（多軸縮約を単一 GEMM
 /// 呼び出しへ帰着させる標準的な手法）。恒等 permute・shape 不変の
@@ -898,44 +851,39 @@ mod tests {
         }
     }
 
-    /// `Err` を返す入口（batch 添字を伴う縮約の拒否）の後、tape に
-    /// ノードが 1 つも push されていないこと（迷子ノードが残らない
-    /// こと）を確認する。`crate::einsum::einsum`（`Var::einsum` の
-    /// 実装本体。`BatchContraction::Reject`）を直接呼び、presum の
-    /// `Var::sum` が実行される**前**に `compute_binary_plan` の拒否
-    /// 判定へ到達する設計（モジュール doc「検証と Var 操作の分離」）を
-    /// 検証する回帰テスト（イシュー #1620）。`Reject` は rank≥3
-    /// `Var::matmul`（イシュー #1715）実装後の現在も、`Var::einsum`
-    /// の facade 公開保留（イシュー #2149）のため維持している既定値
-    /// であり、本テストの意図は変わらない。
+    /// `Err` を返す入口（次元不一致）の後、tape にノードが 1 つも
+    /// push されていないこと（迷子ノードが残らないこと）を確認する。
+    /// `crate::einsum::einsum`（`Var::einsum` の実装本体）を直接呼び、
+    /// presum の `Var::sum` が実行される**前**に検証が完了する設計
+    /// （モジュール doc「検証と Var 操作の分離」）を検証する回帰テスト
+    /// （イシュー #1620。#2517 で拒否例を batch 縮約から次元不一致へ
+    /// 差し替え）。
     #[test]
-    fn einsum_rejects_batch_contraction_without_pushing_nodes() {
+    fn einsum_rejects_invalid_input_without_pushing_nodes() {
         let tape = Tape::new();
         let a = tape.var(&t(vec![0.0; 2 * 3 * 4], &[2, 3, 4]));
-        let b = tape.var(&t(vec![0.0; 2 * 4 * 5], &[2, 4, 5]));
+        let b = tape.var(&t(vec![0.0; 3 * 4 * 5], &[3, 4, 5]));
         let nodes_before = tape.nodes.borrow().len();
         let result = einsum("bij,bjk->bik", &[&a, &b]);
         assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
         let nodes_after = tape.nodes.borrow().len();
         assert_eq!(
             nodes_before, nodes_after,
-            "batch 添字を伴う縮約の拒否は Var::sum（presum）を一切 push しない"
+            "検証エラーは Var::sum（presum）を一切 push しない"
         );
     }
 
-    /// [`einsum_with`]（`BatchContraction::Allow`）は同じ spec
-    /// （`"bij,bjk->bik"`）を受理し、tape へ `Op::MatMul` ノードを
-    /// 1 個だけ push すること（恒等 permute・shape 不変 reshape の
-    /// スキップにより `Var::matmul` 直接呼び出しと同じノード数になる
-    /// 根拠。イシュー #2149）。
+    /// batch 添字を伴う縮約（`"bij,bjk->bik"`）は tape へ `Op::MatMul`
+    /// ノードを 1 個だけ push して受理される（恒等 permute・shape 不変
+    /// reshape のスキップにより `Var::matmul` 直接呼び出しと同じノード
+    /// 数になる根拠。イシュー #2149・#2517）。
     #[test]
-    fn einsum_with_allow_accepts_batch_contraction_as_single_matmul_node() {
+    fn einsum_accepts_batch_contraction_as_single_matmul_node() {
         let tape = Tape::new();
         let a = tape.var(&t((0..24).map(|x| x as f32).collect(), &[2, 3, 4]));
         let b = tape.var(&t((0..40).map(|x| x as f32).collect(), &[2, 4, 5]));
         let nodes_before = tape.nodes.borrow().len();
-        let out = einsum_with("bij,bjk->bik", &[&a, &b], BatchContraction::Allow)
-            .expect("batch 添字を伴う縮約は Allow モードで受理される");
+        let out = einsum("bij,bjk->bik", &[&a, &b]).expect("batch 添字を伴う縮約は受理される");
         let nodes_after = tape.nodes.borrow().len();
         assert_eq!(out.shape(), vec![2, 3, 5]);
         assert_eq!(
@@ -948,32 +896,21 @@ mod tests {
         assert_eq!(out.value().as_slice(), direct.value().as_slice());
     }
 
-    /// [`compute_binary_plan`] の `Allow`／`Reject` の分類結果
-    /// （`batch`／`contract`／`left`／`right`／presum 計画）が完全に
-    /// 一致し、差は拒否判定の有無だけであることを確認する
-    /// （イシュー #2149）。
+    /// [`compute_binary_plan`] の batch／contract／left／right 分類
+    /// （イシュー #2149・#2517）。
     #[test]
-    fn compute_binary_plan_allow_and_reject_classify_identically() {
+    fn compute_binary_plan_classifies_batch_contract_left_right() {
         let a_labels = ['b', 'i', 'j'];
         let b_labels = ['b', 'j', 'k'];
         let out_labels = ['b', 'i', 'k'];
 
-        let allow_result =
-            compute_binary_plan(&a_labels, &b_labels, &out_labels, BatchContraction::Allow);
-        let allow = match allow_result {
+        let plan = match compute_binary_plan(&a_labels, &b_labels, &out_labels) {
             Ok(plan) => plan,
-            Err(_) => panic!("Allow は batch∧contract を受理する"),
+            Err(_) => panic!("batch∧contract は受理される"),
         };
-        let reject_result =
-            compute_binary_plan(&a_labels, &b_labels, &out_labels, BatchContraction::Reject);
-        assert!(
-            matches!(reject_result, Err(AutodiffError::InvalidArgument(_))),
-            "Reject は batch∧contract を拒否する"
-        );
-
-        assert_eq!(allow.batch, vec!['b']);
-        assert_eq!(allow.contract, vec!['j']);
-        assert_eq!(allow.left, vec!['i']);
-        assert_eq!(allow.right, vec!['k']);
+        assert_eq!(plan.batch, vec!['b']);
+        assert_eq!(plan.contract, vec!['j']);
+        assert_eq!(plan.left, vec!['i']);
+        assert_eq!(plan.right, vec!['k']);
     }
 }
