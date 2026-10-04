@@ -209,6 +209,13 @@ pub use fandhe_ai_autodiff::VarHostView;
 // （上記コメント「1 文 1 行を維持する」と同じ理由）。
 pub use fandhe_ai_autodiff::QrVars;
 pub use fandhe_ai_autodiff::SvdVars;
+// `topk_unique_ops`（イシュー #2153 実装・#2519 公開）の入出力型。
+// `Var::topk_with_options`／`unique_with_options`／`unique_consecutive` の
+// 引数（`TopkOptions`／`UniqueOptions`）と戻り値（`UniqueOutput`）で、これらが
+// 無いと委譲メソッドを呼べない。モジュール `topk_unique_ops` 自体は
+// 再エクスポートしない（型だけを autodiff ルート経由で 1 文 1 行で公開する。
+// `api_surface.rs::facade_reexports_topk_unique_types_only_in_approved_shape`）。
+pub use fandhe_ai_autodiff::{TopkOptions, UniqueOptions, UniqueOutput};
 pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
 // `RngError`（イシュー #1725）: `randint` の戻り値型（`low >= high` の
 // 範囲不正を表す）。`Tape`／`BackendOps` を含まない単純なエラー型のため
@@ -1439,32 +1446,38 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 struct VarCustomHoldDoctestGuard;
 
 /// イシュー #2141（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）
-/// と同型の「正のプローブ 1 ブロック方式」を採る:
-/// facade の全 `pub mod` を glob import したスコープに、本ブロック内で
-/// のみ定義したローカルの自由関数群（`__fandhe_bool_hold_probe::
-/// bool_ops::{gt_bool, ge_bool, lt_bool, le_bool, eq_bool, ne_bool,
-/// logical_and, logical_or, logical_not, masked_select}`）とトレイト
-/// （`__FandheBoolHoldProbe`）を導入し、実際に使う関数を書く。facade が
-/// どの経路（`pub use fandhe_ai_autodiff::bool_ops;` のようなモジュール
-/// 再エクスポート・`Var`／`Tensor<bool>` への inherent メソッド追加・
-/// 別名 `pub use`）で `bool_ops` という名前や 10 個の関数名を公開しても、
-/// ローカル定義との glob 衝突（モジュール名の場合）または呼び出し
-/// シグネチャの不一致（inherent メソッドがトレイトメソッドより優先
-/// 解決されるため、引数なしの `x.gt_bool()` 呼び出しが `Var::gt_bool
-/// (&self, other: &Var<'t>)` に解決されて型・引数数エラーになる）で
-/// コンパイルが失敗する。
+/// #2510（ルート #2499 一括承認）で比較 6 種（`gt_bool`／`ge_bool`／
+/// `lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）と `masked_select` の 7 件は
+/// `Var` の委譲メソッドとして公開済みのため、本ガードが固定するのは
+/// 次の「承認形外」の配置に絞られる:
+///
+/// - logical 3 種（`logical_and`／`logical_or`／`logical_not`）の `Var`
+///   への配置（公開形は未決・#2594）
+/// - 10 関数の `Tensor<bool>`／`Tensor<f32>`／`Tape` 上への配置
+/// - `bool_ops` モジュールの再エクスポート・別名 `pub use`
+///
+/// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除
+/// 済み）と同型の「正のプローブ 1 ブロック方式」を採る: facade の全
+/// `pub mod` を glob import したスコープに、本ブロック内でのみ定義した
+/// ローカルの自由関数群（`__fandhe_bool_hold_probe::bool_ops::*`）と
+/// トレイト（`__FandheBoolHoldProbe`）を導入し、実際に使う関数を書く。
+/// 未承認の経路でモジュール名・関数名が公開されると、ローカル定義との
+/// glob 衝突（モジュール名の場合）または呼び出しシグネチャの不一致
+/// （inherent メソッドがトレイトメソッドより優先解決されるため、引数なしの
+/// `x.logical_and()` が inherent 側に解決されて型・引数数エラーになる）で
+/// コンパイルが失敗する。`Var` 用トレイト impl の 7 件分は inherent に
+/// 隠れて呼ばれないが、トレイトが 10 メソッドを要求するため残す。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// bool_ops_hold_doctest_globs_all_pub_modules`・`bool_ops_hold_
 /// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
 /// reexport_or_declare_bool_ops`・`workspace_declares_bool_ops_fn_
-/// names_only_in_autodiff_bool_ops`）との多層防御の位置づけは
-/// `docs/autodiff-bool-ops-exposure-decision.md` §6「承認事項」を参照。
+/// names_in_approved_places_only`）との多層防御の位置づけは
+/// `docs/autodiff-bool-ops-exposure-decision.md` §6「承認事項」・§6.1
+/// を参照。
 ///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
+/// 撤去条件: #2594 で logical 3 種の公開形が承認・実装されたとき、本
+/// モジュール・本 doctest 自体を削除する（ソース走査側と同時に外す）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -1584,10 +1597,12 @@ struct VarCustomHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheBoolMarker = fandhe_ai::Var::gt_bool(x);
-///     let _: __FandheBoolMarker = x.gt_bool();
-///     let _: __FandheBoolMarker = fandhe_ai::Var::masked_select(x);
-///     let _: __FandheBoolMarker = x.masked_select();
+///     let _: __FandheBoolMarker = fandhe_ai::Var::logical_and(x);
+///     let _: __FandheBoolMarker = x.logical_and();
+///     let _: __FandheBoolMarker = fandhe_ai::Var::logical_or(x);
+///     let _: __FandheBoolMarker = x.logical_or();
+///     let _: __FandheBoolMarker = fandhe_ai::Var::logical_not(x);
+///     let _: __FandheBoolMarker = x.logical_not();
 /// }
 ///
 /// fn __probe_tensor_bool(x: &fandhe_ai::Tensor<bool>) {
@@ -1610,258 +1625,6 @@ struct VarCustomHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct VarBoolOpsHoldDoctestGuard;
-
-/// イシュー #2143（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
-/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
-/// スコープに、本ブロック内でのみ定義したローカルの自由関数群
-/// （`__fandhe_rearrange_hold_probe::rearrange_ops::{repeat, tile, flip,
-/// roll}`）とトレイト（`__FandheRearrangeHoldProbe`）を導入し、実際に
-/// 使う関数を書く。facade がどの経路（`pub use
-/// fandhe_ai_autodiff::rearrange_ops;` のようなモジュール再エクスポート・
-/// `Var` への inherent メソッド追加・別名 `pub use`）で `rearrange_ops`
-/// という名前や 4 個の関数名を公開しても、ローカル定義との glob 衝突
-/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
-/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
-/// `x.flip()` 呼び出しが `Var::flip(&self, dims: &[usize])` に解決されて
-/// 型・引数数エラーになる）でコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// rearrange_ops_hold_doctest_globs_all_pub_modules`・`rearrange_ops_
-/// hold_doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_rearrange_ops`・`workspace_declares_rearrange_
-/// ops_fn_names_only_in_autodiff_rearrange_ops`）との多層防御の位置づけは
-/// `docs/autodiff-rearrange-ops-decision.md` §6「承認事項」を参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_rearrange_hold_probe {
-///     pub mod rearrange_ops {
-///         pub fn repeat() {}
-///         pub fn tile() {}
-///         pub fn flip() {}
-///         pub fn roll() {}
-///     }
-/// }
-/// use __fandhe_rearrange_hold_probe::*;
-///
-/// struct __FandheRearrangeMarker;
-///
-/// trait __FandheRearrangeHoldProbe {
-///     fn repeat(&self) -> __FandheRearrangeMarker;
-///     fn tile(&self) -> __FandheRearrangeMarker;
-///     fn flip(&self) -> __FandheRearrangeMarker;
-///     fn roll(&self) -> __FandheRearrangeMarker;
-/// }
-///
-/// impl<'t> __FandheRearrangeHoldProbe for fandhe_ai::Var<'t> {
-///     fn repeat(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn tile(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn flip(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn roll(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-/// }
-///
-/// impl __FandheRearrangeHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn repeat(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn tile(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn flip(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn roll(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-/// }
-///
-/// impl __FandheRearrangeHoldProbe for fandhe_ai::Tape {
-///     fn repeat(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn tile(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn flip(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-///     fn roll(&self) -> __FandheRearrangeMarker { __FandheRearrangeMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `rearrange_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     rearrange_ops::repeat();
-///     rearrange_ops::tile();
-///     rearrange_ops::flip();
-///     rearrange_ops::roll();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheRearrangeMarker = fandhe_ai::Var::flip(x);
-///     let _: __FandheRearrangeMarker = x.flip();
-///     let _: __FandheRearrangeMarker = fandhe_ai::Var::roll(x);
-///     let _: __FandheRearrangeMarker = x.roll();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheRearrangeMarker = fandhe_ai::Tensor::repeat(x);
-///     let _: __FandheRearrangeMarker = x.repeat();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheRearrangeMarker = fandhe_ai::Tape::tile(x);
-///     let _: __FandheRearrangeMarker = x.tile();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarRearrangeOpsHoldDoctestGuard;
-
-/// イシュー #2145（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarRearrangeOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ
-/// 1 ブロック方式」を採る: facade の全 `pub mod` を glob import した
-/// スコープに、本ブロック内でのみ定義したローカルの自由関数群
-/// （`__fandhe_scalar_unary_hold_probe::scalar_unary_ops::{floor, ceil,
-/// round, sign, reciprocal, rsqrt, erf, pow_scalar}`）とトレイト
-/// （`__FandheScalarUnaryHoldProbe`）を導入し、実際に使う関数を書く。
-/// facade がどの経路（`pub use fandhe_ai_autodiff::scalar_unary_ops;`
-/// のようなモジュール再エクスポート・`Var` への inherent メソッド追加・
-/// 別名 `pub use`）で `scalar_unary_ops` という名前や 8 個の関数名を
-/// 公開しても、ローカル定義との glob 衝突（モジュール名の場合）または
-/// 呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッドより
-/// 優先解決されるため、引数なしの `x.floor()` 呼び出しが
-/// `Var::floor(&self)` に解決されて戻り値型の不一致でコンパイルが失敗
-/// する）でコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// scalar_unary_ops_hold_doctest_globs_all_pub_modules`・
-/// `scalar_unary_ops_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_scalar_unary_ops`・
-/// `workspace_declares_scalar_unary_ops_fn_names_only_in_autodiff_
-/// scalar_unary_ops`）との多層防御の位置づけは
-/// `docs/autodiff-scalar-unary-ops-decision.md` §9「承認事項」を参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_scalar_unary_hold_probe {
-///     pub mod scalar_unary_ops {
-///         pub fn floor() {}
-///         pub fn ceil() {}
-///         pub fn round() {}
-///         pub fn sign() {}
-///         pub fn reciprocal() {}
-///         pub fn rsqrt() {}
-///         pub fn erf() {}
-///         pub fn pow_scalar() {}
-///     }
-/// }
-/// use __fandhe_scalar_unary_hold_probe::*;
-///
-/// struct __FandheScalarUnaryMarker;
-///
-/// trait __FandheScalarUnaryHoldProbe {
-///     fn floor(&self) -> __FandheScalarUnaryMarker;
-///     fn ceil(&self) -> __FandheScalarUnaryMarker;
-///     fn round(&self) -> __FandheScalarUnaryMarker;
-///     fn sign(&self) -> __FandheScalarUnaryMarker;
-///     fn reciprocal(&self) -> __FandheScalarUnaryMarker;
-///     fn rsqrt(&self) -> __FandheScalarUnaryMarker;
-///     fn erf(&self) -> __FandheScalarUnaryMarker;
-///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker;
-/// }
-///
-/// impl<'t> __FandheScalarUnaryHoldProbe for fandhe_ai::Var<'t> {
-///     fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-/// }
-///
-/// impl __FandheScalarUnaryHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-/// }
-///
-/// impl __FandheScalarUnaryHoldProbe for fandhe_ai::Tape {
-///     fn floor(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn ceil(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn round(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn sign(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn reciprocal(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn rsqrt(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn erf(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-///     fn pow_scalar(&self) -> __FandheScalarUnaryMarker { __FandheScalarUnaryMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `scalar_unary_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     scalar_unary_ops::floor();
-///     scalar_unary_ops::ceil();
-///     scalar_unary_ops::round();
-///     scalar_unary_ops::sign();
-///     scalar_unary_ops::reciprocal();
-///     scalar_unary_ops::rsqrt();
-///     scalar_unary_ops::erf();
-///     scalar_unary_ops::pow_scalar();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheScalarUnaryMarker = fandhe_ai::Var::floor(x);
-///     let _: __FandheScalarUnaryMarker = x.floor();
-///     let _: __FandheScalarUnaryMarker = fandhe_ai::Var::erf(x);
-///     let _: __FandheScalarUnaryMarker = x.erf();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheScalarUnaryMarker = fandhe_ai::Tensor::sign(x);
-///     let _: __FandheScalarUnaryMarker = x.sign();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheScalarUnaryMarker = fandhe_ai::Tape::reciprocal(x);
-///     let _: __FandheScalarUnaryMarker = x.reciprocal();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarScalarUnaryOpsHoldDoctestGuard;
 
 /// イシュー #2139（親 #2138・#2131）の facade 公開保留を固定する doctest
 /// 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）／
@@ -2090,386 +1853,25 @@ struct VarHooksHoldDoctestGuard;
 #[allow(dead_code)]
 struct KvCacheHoldDoctestGuard;
 
-/// イシュー #2144（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarRearrangeOpsHoldDoctestGuard`（イシュー #2143）と同型の「正の
-/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカルの自由
-/// 関数群（`__fandhe_matrix_hold_probe::matrix_ops::{tril, triu, diag,
-/// trace, outer, dot}`）とトレイト（`__FandheMatrixHoldProbe`）を導入
-/// し、実際に使う関数を書く。facade がどの経路（`pub use
-/// fandhe_ai_autodiff::matrix_ops;` のようなモジュール再エクスポート・
-/// `Var` への inherent メソッド追加・別名 `pub use`）で `matrix_ops`
-/// という名前や 6 個の関数名を公開しても、ローカル定義との glob 衝突
-/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
-/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
-/// `x.tril()` 呼び出しが `Var::tril(&self, diagonal: isize)` に解決
-/// されて型・引数数エラーになる）でコンパイルが失敗する。
+/// イシュー #2146（親 #2131）の facade 公開のうち、承認形外の配置を引き続き
+/// 固定する doctest 足場（#2516 で `Var` 委譲メソッド 5 件を公開したため部分反転。
+/// `VarBoolOpsHoldDoctestGuard` と同じ #2510 型の部分反転）。承認形は
+/// `Var::{mish, hardtanh, relu6, prelu, glu}` の 1 行委譲のみで、その正ガードは
+/// `crates/facade/tests/api_surface.rs::var_activation_ops_methods_are_thin_delegations`・
+/// `var_activation_ops_are_reachable_via_facade_only` が担う。本ガードは 2 種類の
+/// 衝突プローブを併用する（`VarHooksHoldDoctestGuard` と同じ理由）:
 ///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// matrix_ops_hold_doctest_globs_all_pub_modules`・`matrix_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_matrix_ops`・`workspace_declares_matrix_ops_
-/// fn_names_only_in_autodiff_matrix_ops`）との多層防御の位置づけは
-/// `docs/autodiff-matrix-ops-decision.md` §6「承認事項」を参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_matrix_hold_probe {
-///     pub mod matrix_ops {
-///         pub fn tril() {}
-///         pub fn triu() {}
-///         pub fn diag() {}
-///         pub fn trace() {}
-///         pub fn outer() {}
-///         pub fn dot() {}
-///     }
-/// }
-/// use __fandhe_matrix_hold_probe::*;
-///
-/// struct __FandheMatrixMarker;
-///
-/// trait __FandheMatrixHoldProbe {
-///     fn tril(&self) -> __FandheMatrixMarker;
-///     fn triu(&self) -> __FandheMatrixMarker;
-///     fn diag(&self) -> __FandheMatrixMarker;
-///     fn trace(&self) -> __FandheMatrixMarker;
-///     fn outer(&self) -> __FandheMatrixMarker;
-///     fn dot(&self) -> __FandheMatrixMarker;
-/// }
-///
-/// impl<'t> __FandheMatrixHoldProbe for fandhe_ai::Var<'t> {
-///     fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-/// }
-///
-/// impl __FandheMatrixHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-/// }
-///
-/// impl __FandheMatrixHoldProbe for fandhe_ai::Tape {
-///     fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-///     fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `matrix_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     matrix_ops::tril();
-///     matrix_ops::triu();
-///     matrix_ops::diag();
-///     matrix_ops::trace();
-///     matrix_ops::outer();
-///     matrix_ops::dot();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheMatrixMarker = fandhe_ai::Var::tril(x);
-///     let _: __FandheMatrixMarker = x.tril();
-///     let _: __FandheMatrixMarker = fandhe_ai::Var::trace(x);
-///     let _: __FandheMatrixMarker = x.trace();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheMatrixMarker = fandhe_ai::Tensor::triu(x);
-///     let _: __FandheMatrixMarker = x.triu();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheMatrixMarker = fandhe_ai::Tape::diag(x);
-///     let _: __FandheMatrixMarker = x.diag();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarMatrixOpsHoldDoctestGuard;
-
-/// イシュー #2147（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の「正の
-/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカルの自由
-/// 関数群（`__fandhe_reduce_hold_probe::reduce_ops::{prod, logsumexp,
-/// any, all, norm_p}`）とトレイト（`__FandheReduceHoldProbe`）を導入
-/// し、実際に使う関数を書く。facade がどの経路（`pub use
-/// fandhe_ai_autodiff::reduce_ops;` のようなモジュール再エクスポート・
-/// `Var` への inherent メソッド追加・別名 `pub use`）で `reduce_ops`
-/// という名前や 5 個の関数名を公開しても、ローカル定義との glob 衝突
-/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
-/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
-/// `x.prod()` 呼び出しが `Var::prod(&self, dim: Option<usize>)` に
-/// 解決されて型・引数数エラーになる）でコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// reduce_ops_hold_doctest_globs_all_pub_modules`・`reduce_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_reduce_ops`・`workspace_declares_reduce_ops_
-/// fn_names_only_in_allowed_locations`）との多層防御の位置づけは
-/// `docs/autodiff-reduce-ops-decision.md` §6「承認事項」を参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_reduce_hold_probe {
-///     pub mod reduce_ops {
-///         pub fn prod() {}
-///         pub fn logsumexp() {}
-///         pub fn any() {}
-///         pub fn all() {}
-///         pub fn norm_p() {}
-///     }
-/// }
-/// use __fandhe_reduce_hold_probe::*;
-///
-/// struct __FandheReduceMarker;
-///
-/// trait __FandheReduceHoldProbe {
-///     fn prod(&self) -> __FandheReduceMarker;
-///     fn logsumexp(&self) -> __FandheReduceMarker;
-///     fn any(&self) -> __FandheReduceMarker;
-///     fn all(&self) -> __FandheReduceMarker;
-///     fn norm_p(&self) -> __FandheReduceMarker;
-/// }
-///
-/// impl<'t> __FandheReduceHoldProbe for fandhe_ai::Var<'t> {
-///     fn prod(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn logsumexp(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn any(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn all(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn norm_p(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-/// }
-///
-/// impl __FandheReduceHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn prod(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn logsumexp(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn any(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn all(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn norm_p(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-/// }
-///
-/// impl __FandheReduceHoldProbe for fandhe_ai::Tape {
-///     fn prod(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn logsumexp(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn any(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn all(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-///     fn norm_p(&self) -> __FandheReduceMarker { __FandheReduceMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `reduce_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     reduce_ops::prod();
-///     reduce_ops::logsumexp();
-///     reduce_ops::any();
-///     reduce_ops::all();
-///     reduce_ops::norm_p();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheReduceMarker = fandhe_ai::Var::prod(x);
-///     let _: __FandheReduceMarker = x.prod();
-///     let _: __FandheReduceMarker = fandhe_ai::Var::logsumexp(x);
-///     let _: __FandheReduceMarker = x.logsumexp();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheReduceMarker = fandhe_ai::Tensor::any(x);
-///     let _: __FandheReduceMarker = x.any();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheReduceMarker = fandhe_ai::Tape::all(x);
-///     let _: __FandheReduceMarker = x.all();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarReduceOpsHoldDoctestGuard;
-
-/// イシュー #2150（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
-/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカルの自由
-/// 関数群（`__fandhe_linalg_hold_probe::linalg_ops::{eigh, slogdet,
-/// pinv, matrix_rank, lstsq}`）とトレイト（`__FandheLinalgHoldProbe`）を
-/// 導入し、実際に使う関数を書く。facade がどの経路（`pub use
-/// fandhe_ai_autodiff::linalg_ops;` のようなモジュール再エクスポート・
-/// `Var` への inherent メソッド追加・別名 `pub use`）で `linalg_ops`
-/// という名前や 5 個の関数名を公開しても、ローカル定義との glob 衝突
-/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
-/// メソッドがトレイトメソッドより優先解決されるため、引数なしの
-/// `x.eigh()` 呼び出しが実際の `Var::eigh(&self)`〈引数は一致しても
-/// 戻り値型が `EighVars` になり `__FandheLinalgMarker` 型注釈と
-/// 不一致〉・`x.pinv()`〈実際は `rcond: Option<f32>` を要求〉に
-/// 解決されて型・引数数エラーになる）でコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// linalg_ops_hold_doctest_globs_all_pub_modules`・`linalg_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_linalg_ops`・`workspace_declares_linalg_ops_
-/// fn_names_only_in_allowed_locations`）との多層防御の位置づけは
-/// `docs/autodiff-linalg-ops-decision.md` §6「承認事項」を参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_linalg_hold_probe {
-///     pub mod linalg_ops {
-///         pub fn eigh() {}
-///         pub fn slogdet() {}
-///         pub fn pinv() {}
-///         pub fn matrix_rank() {}
-///         pub fn lstsq() {}
-///     }
-/// }
-/// use __fandhe_linalg_hold_probe::*;
-///
-/// struct __FandheLinalgMarker;
-///
-/// trait __FandheLinalgHoldProbe {
-///     fn eigh(&self) -> __FandheLinalgMarker;
-///     fn slogdet(&self) -> __FandheLinalgMarker;
-///     fn pinv(&self) -> __FandheLinalgMarker;
-///     fn matrix_rank(&self) -> __FandheLinalgMarker;
-///     fn lstsq(&self) -> __FandheLinalgMarker;
-/// }
-///
-/// impl<'t> __FandheLinalgHoldProbe for fandhe_ai::Var<'t> {
-///     fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-/// }
-///
-/// impl __FandheLinalgHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-/// }
-///
-/// impl __FandheLinalgHoldProbe for fandhe_ai::Tape {
-///     fn eigh(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn slogdet(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn pinv(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn matrix_rank(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-///     fn lstsq(&self) -> __FandheLinalgMarker { __FandheLinalgMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `linalg_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     linalg_ops::eigh();
-///     linalg_ops::slogdet();
-///     linalg_ops::pinv();
-///     linalg_ops::matrix_rank();
-///     linalg_ops::lstsq();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheLinalgMarker = fandhe_ai::Var::eigh(x);
-///     let _: __FandheLinalgMarker = x.eigh();
-///     let _: __FandheLinalgMarker = fandhe_ai::Var::slogdet(x);
-///     let _: __FandheLinalgMarker = x.slogdet();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheLinalgMarker = fandhe_ai::Tensor::pinv(x);
-///     let _: __FandheLinalgMarker = x.pinv();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheLinalgMarker = fandhe_ai::Tape::matrix_rank(x);
-///     let _: __FandheLinalgMarker = x.matrix_rank();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarLinalgOpsHoldDoctestGuard;
-
-/// イシュー #2146（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の「正の
-/// プローブ 1 ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを
-/// 併用する（`VarHooksHoldDoctestGuard` と同じ理由）:
-///
-/// (a) `Var` への委譲メソッド衝突プローブ（`VarMatrixOpsHoldDoctestGuard`
-/// 方式）。facade の全 `pub mod` を glob import したスコープに、本
-/// ブロック内でのみ定義したローカルの自由関数群
+/// (a) 承認形外の配置の衝突プローブ。facade の全 `pub mod` を glob import した
+/// スコープに、本ブロック内でのみ定義したローカルの自由関数群
 /// （`__fandhe_activation_hold_probe::activation_ops::{mish, hardtanh,
 /// relu6, prelu, glu}`）とトレイト（`__FandheActivationHoldProbe`）を
-/// 導入し、`Var`／`Tensor<f32>`／`Tape` に実装して実際に使う。facade が
-/// `activation_ops` というモジュール名や 5 個の関数名を公開しても、
-/// ローカル定義との glob 衝突、または呼び出しシグネチャの不一致
-/// （inherent メソッドがトレイトメソッドより優先解決されるため）で
-/// コンパイルが失敗する。
+/// 導入し、`Tensor<f32>`／`Tape` に実装して実際に使う。facade が
+/// `activation_ops` というモジュール名や 5 個の関数名を `Tensor<f32>`／`Tape`
+/// 上へ公開しても、ローカル定義との glob 衝突、または呼び出しシグネチャの
+/// 不一致（inherent メソッドがトレイトメソッドより優先解決されるため）で
+/// コンパイルが失敗する。`Var` への実装と `__probe_var` は、`Var` に inherent
+/// メソッドが載ったことで引数なし呼び出しが inherent 側へ解決され型エラーに
+/// なるため削除した。
 ///
 /// (b) `compat::Sequential::add_*` 5 種の衝突プローブ（承認事項の 2 つ目。
 /// `crate::compat::sequential::Sequential` の既存 `add_relu`／
@@ -2485,13 +1887,12 @@ struct VarLinalgOpsHoldDoctestGuard;
 /// activation_ops_hold_doctest_globs_all_pub_modules`・
 /// `activation_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_activation_ops`・
-/// `workspace_declares_activation_ops_fn_names_only_in_autodiff_
-/// activation_ops`）との多層防御の位置づけは
-/// `docs/autodiff-activation-ops-decision.md` §6「承認事項」を参照。
+/// `workspace_declares_activation_ops_fn_names_only_in_approved_locations`）
+/// との多層防御の位置づけは `docs/autodiff-activation-ops-decision.md` §6
+/// 「承認事項」を参照。
 ///
-/// 承認（facade 公開・`Var` への委譲メソッド追加・`compat::Sequential::
-/// add_*` 追加）を得た日が来たら、本モジュール・本 doctest 自体を
-/// 削除する（ソース走査側の対応する否定ガードと同時に外す）。
+/// 撤去条件: #2529 で `compat::Sequential::add_*` が承認・実装されたら、
+/// 本 doctest 自体を削除する（ソース走査側の対応する否定ガードと同時に外す）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2528,14 +1929,6 @@ struct VarLinalgOpsHoldDoctestGuard;
 ///     fn relu6(&self) -> __FandheActivationMarker;
 ///     fn prelu(&self) -> __FandheActivationMarker;
 ///     fn glu(&self) -> __FandheActivationMarker;
-/// }
-///
-/// impl<'t> __FandheActivationHoldProbe for fandhe_ai::Var<'t> {
-///     fn mish(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn hardtanh(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn relu6(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn prelu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
-///     fn glu(&self) -> __FandheActivationMarker { __FandheActivationMarker }
 /// }
 ///
 /// impl __FandheActivationHoldProbe for fandhe_ai::Tensor<f32> {
@@ -2581,13 +1974,6 @@ struct VarLinalgOpsHoldDoctestGuard;
 ///     activation_ops::glu();
 /// }
 ///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheActivationMarker = fandhe_ai::Var::mish(x);
-///     let _: __FandheActivationMarker = x.mish();
-///     let _: __FandheActivationMarker = fandhe_ai::Var::glu(x);
-///     let _: __FandheActivationMarker = x.glu();
-/// }
-///
 /// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
 ///     let _: __FandheActivationMarker = fandhe_ai::Tensor::hardtanh(x);
 ///     let _: __FandheActivationMarker = x.hardtanh();
@@ -2610,428 +1996,8 @@ struct VarLinalgOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarActivationOpsHoldDoctestGuard;
 
-/// イシュー #2149（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarRearrangeOpsHoldDoctestGuard`（イシュー #2143）と同型の正の
-/// プローブ方式を採る: facade の全 `pub mod` を glob import した
-/// スコープに、本ブロック内でのみ定義したローカルの自由関数
-/// （`__fandhe_einsum_batch_hold_probe::einsum_batch::einsum_batched`）
-/// とトレイト（`__FandheEinsumBatchHoldProbe`）を導入し、実際に使う
-/// 関数を書く。facade がどの経路（`pub use fandhe_ai_autodiff::
-/// einsum_batch;` のようなモジュール再エクスポート・`Var` への
-/// inherent メソッド追加・別名 `pub use`）で `einsum_batch` という
-/// 名前や `einsum_batched` を公開しても、ローカル定義との glob 衝突
-/// （モジュール名の場合）またはメソッド呼び出し形の型不一致で
-/// コンパイルが失敗する。
-///
-/// **`Var::einsum` と同様に「`self` を取らない関連関数」として追加
-/// されうる点への対応**: 既存の `Var::einsum(spec, operands)` に
-/// ならい、将来 `Var::einsum_batched(spec, operands)` が同じ形（`self`
-/// レシーバなし）で追加された場合、本 doctest のメソッド呼び出し形
-/// プローブ（`x.einsum_batched()`）はメソッド呼び出し構文の候補に
-/// ならないため検出できない可能性がある（`self` を取らない関連関数は
-/// メソッド呼び出し構文の解決対象にならないため）。この経路は
-/// `crates/facade/tests/api_surface.rs::
-/// facade_does_not_reexport_or_declare_einsum_batch`（`fn
-/// einsum_batched` 宣言の有無を可視性・`self` の有無を問わず走査する
-/// `count_fn_declarations_by_name`）が多層防御として捕捉する分担と
-/// する（`docs/autodiff-einsum-batch-decision.md` §6 参照）。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// einsum_batch_hold_doctest_globs_all_pub_modules`・`einsum_batch_
-/// hold_doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_einsum_batch`・`workspace_declares_einsum_
-/// batched_fn_only_in_autodiff_einsum_batch`）との多層防御の位置づけは
-/// `docs/autodiff-einsum-batch-decision.md` §6「承認事項」を参照。
-///
-/// 承認（facade 公開・`Var::einsum` の batch 添字対応拡張）を得た日が
-/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_einsum_batch_hold_probe {
-///     pub mod einsum_batch {
-///         pub fn einsum_batched() {}
-///     }
-/// }
-/// use __fandhe_einsum_batch_hold_probe::*;
-///
-/// struct __FandheEinsumBatchMarker;
-///
-/// trait __FandheEinsumBatchHoldProbe {
-///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker;
-/// }
-///
-/// impl<'t> __FandheEinsumBatchHoldProbe for fandhe_ai::Var<'t> {
-///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }
-/// }
-///
-/// impl __FandheEinsumBatchHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }
-/// }
-///
-/// impl __FandheEinsumBatchHoldProbe for fandhe_ai::Tape {
-///     fn einsum_batched(&self) -> __FandheEinsumBatchMarker { __FandheEinsumBatchMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `einsum_batch::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     einsum_batch::einsum_batched();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheEinsumBatchMarker = fandhe_ai::Var::einsum_batched(x);
-///     let _: __FandheEinsumBatchMarker = x.einsum_batched();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheEinsumBatchMarker = fandhe_ai::Tensor::einsum_batched(x);
-///     let _: __FandheEinsumBatchMarker = x.einsum_batched();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheEinsumBatchMarker = fandhe_ai::Tape::einsum_batched(x);
-///     let _: __FandheEinsumBatchMarker = x.einsum_batched();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarEinsumBatchHoldDoctestGuard;
-
-/// イシュー #2148（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
-/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカルの自由
-/// 関数群（`__fandhe_indexing_hold_probe::indexing_ops::{
-/// advanced_indexing, index_put, index_put_}`）とトレイト
-/// （`__FandheIndexingHoldProbe`）を導入し、実際に使う関数を書く。
-/// facade がどの経路（`pub use fandhe_ai_autodiff::indexing_ops;`
-/// のようなモジュール再エクスポート・`Var` への inherent メソッド
-/// 追加・別名 `pub use`）で `indexing_ops` という名前や 3 個の関数名を
-/// 公開しても、ローカル定義との glob 衝突（モジュール名の場合）または
-/// 呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッドより
-/// 優先解決されるため）でコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// indexing_ops_hold_doctest_globs_all_pub_modules`・`indexing_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_indexing_ops`・`workspace_declares_indexing_
-/// ops_fn_names_only_in_autodiff_indexing_ops`）との多層防御の位置づけは
-/// `docs/autodiff-indexing-inplace-design.md` §6「承認事項」を参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_indexing_hold_probe {
-///     pub mod indexing_ops {
-///         pub fn advanced_indexing() {}
-///         pub fn index_put() {}
-///         pub fn index_put_() {}
-///     }
-/// }
-/// use __fandhe_indexing_hold_probe::*;
-///
-/// struct __FandheIndexingMarker;
-///
-/// trait __FandheIndexingHoldProbe {
-///     fn advanced_indexing(&self) -> __FandheIndexingMarker;
-///     fn index_put(&self) -> __FandheIndexingMarker;
-///     fn index_put_(&self) -> __FandheIndexingMarker;
-/// }
-///
-/// impl<'t> __FandheIndexingHoldProbe for fandhe_ai::Var<'t> {
-///     fn advanced_indexing(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-///     fn index_put(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-///     fn index_put_(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-/// }
-///
-/// impl __FandheIndexingHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn advanced_indexing(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-///     fn index_put(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-///     fn index_put_(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-/// }
-///
-/// impl __FandheIndexingHoldProbe for fandhe_ai::Tape {
-///     fn advanced_indexing(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-///     fn index_put(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-///     fn index_put_(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `indexing_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     indexing_ops::advanced_indexing();
-///     indexing_ops::index_put();
-///     indexing_ops::index_put_();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheIndexingMarker = fandhe_ai::Var::advanced_indexing(x);
-///     let _: __FandheIndexingMarker = x.advanced_indexing();
-///     let _: __FandheIndexingMarker = fandhe_ai::Var::index_put(x);
-///     let _: __FandheIndexingMarker = x.index_put();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheIndexingMarker = fandhe_ai::Tensor::index_put_(x);
-///     let _: __FandheIndexingMarker = x.index_put_();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheIndexingMarker = fandhe_ai::Tape::advanced_indexing(x);
-///     let _: __FandheIndexingMarker = x.advanced_indexing();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarIndexingOpsHoldDoctestGuard;
-
-/// イシュー #2153（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarIndexingOpsHoldDoctestGuard`（イシュー #2148）と同型の「正の
-/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカルの自由
-/// 関数群（`__fandhe_topk_unique_hold_probe::topk_unique_ops::{
-/// topk_with_options, unique_with_options, unique_consecutive}`）と
-/// トレイト（`__FandheTopkUniqueHoldProbe`）を導入し、実際に使う関数を
-/// 書く。facade がどの経路（`pub use fandhe_ai_autodiff::
-/// topk_unique_ops;` のようなモジュール再エクスポート・`Var` への
-/// inherent メソッド追加・別名 `pub use`）で `topk_unique_ops` という
-/// 名前や 3 個の関数名を公開しても、ローカル定義との glob 衝突
-/// （モジュール名の場合）または呼び出しシグネチャの不一致（inherent
-/// メソッドがトレイトメソッドより優先解決されるため）でコンパイルが
-/// 失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// topk_unique_ops_hold_doctest_globs_all_pub_modules`・`topk_unique_
-/// ops_hold_doctest_probe_body_matches_fixed_contract`・`facade_does_
-/// not_reexport_or_declare_topk_unique_ops`・`workspace_declares_
-/// topk_unique_ops_fn_names_only_in_allowed_locations`）との多層防御の
-/// 位置づけは `docs/autodiff-topk-unique-ops-decision.md` §6「承認
-/// 事項」を参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_topk_unique_hold_probe {
-///     pub mod topk_unique_ops {
-///         pub fn topk_with_options() {}
-///         pub fn unique_with_options() {}
-///         pub fn unique_consecutive() {}
-///     }
-/// }
-/// use __fandhe_topk_unique_hold_probe::*;
-///
-/// struct __FandheTopkUniqueMarker;
-///
-/// trait __FandheTopkUniqueHoldProbe {
-///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker;
-///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker;
-///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker;
-/// }
-///
-/// impl<'t> __FandheTopkUniqueHoldProbe for fandhe_ai::Var<'t> {
-///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-/// }
-///
-/// impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-/// }
-///
-/// impl __FandheTopkUniqueHoldProbe for fandhe_ai::Tape {
-///     fn topk_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-///     fn unique_with_options(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-///     fn unique_consecutive(&self) -> __FandheTopkUniqueMarker { __FandheTopkUniqueMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `topk_unique_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     topk_unique_ops::topk_with_options();
-///     topk_unique_ops::unique_with_options();
-///     topk_unique_ops::unique_consecutive();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheTopkUniqueMarker = fandhe_ai::Var::topk_with_options(x);
-///     let _: __FandheTopkUniqueMarker = x.topk_with_options();
-///     let _: __FandheTopkUniqueMarker = fandhe_ai::Var::unique_with_options(x);
-///     let _: __FandheTopkUniqueMarker = x.unique_with_options();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheTopkUniqueMarker = fandhe_ai::Tensor::unique_consecutive(x);
-///     let _: __FandheTopkUniqueMarker = x.unique_consecutive();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheTopkUniqueMarker = fandhe_ai::Tape::topk_with_options(x);
-///     let _: __FandheTopkUniqueMarker = x.topk_with_options();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarTopkUniqueOpsHoldDoctestGuard;
-
-/// イシュー #2154（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
-/// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカルの自由
-/// 関数群（`__fandhe_extremum_hold_probe::extremum_ops::{amax, amin}`）
-/// とトレイト（`__FandheExtremumHoldProbe`）を導入し、実際に使う関数を
-/// 書く。facade がどの経路（`pub use fandhe_ai_autodiff::extremum_ops;`
-/// のようなモジュール再エクスポート・`Var` への inherent メソッド
-/// 追加・別名 `pub use`）で `extremum_ops` という名前や 2 個の関数名を
-/// 公開しても、ローカル定義との glob 衝突（モジュール名の場合）または
-/// 呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッドより
-/// 優先解決されるため、引数なしの `x.amax()` 呼び出しが
-/// `Var::amax(&self, dim: Option<usize>)` に解決されて型・引数数
-/// エラーになる）でコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// extremum_ops_hold_doctest_globs_all_pub_modules`・`extremum_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_extremum_ops`・`workspace_declares_extremum_
-/// ops_fn_names_only_in_allowed_locations`）との多層防御の位置づけは
-/// `docs/autodiff-amax-grad-distribution-decision.md` §9「実装記録」を
-/// 参照。
-///
-/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_extremum_hold_probe {
-///     pub mod extremum_ops {
-///         pub fn amax() {}
-///         pub fn amin() {}
-///     }
-/// }
-/// use __fandhe_extremum_hold_probe::*;
-///
-/// struct __FandheExtremumMarker;
-///
-/// trait __FandheExtremumHoldProbe {
-///     fn amax(&self) -> __FandheExtremumMarker;
-///     fn amin(&self) -> __FandheExtremumMarker;
-/// }
-///
-/// impl<'t> __FandheExtremumHoldProbe for fandhe_ai::Var<'t> {
-///     fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
-///     fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
-/// }
-///
-/// impl __FandheExtremumHoldProbe for fandhe_ai::Tensor<f32> {
-///     fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
-///     fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
-/// }
-///
-/// impl __FandheExtremumHoldProbe for fandhe_ai::Tape {
-///     fn amax(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
-///     fn amin(&self) -> __FandheExtremumMarker { __FandheExtremumMarker }
-/// }
-///
-/// fn __probe_free_fns() {
-///     // `extremum_ops::` を経由した経路解決（`use fandhe_ai::*;` が
-///     // 同名モジュールを glob 公開していれば、名前解決自体が曖昧に
-///     // なり E0659 でコンパイル失敗する）。
-///     extremum_ops::amax();
-///     extremum_ops::amin();
-/// }
-///
-/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
-///     let _: __FandheExtremumMarker = fandhe_ai::Var::amax(x);
-///     let _: __FandheExtremumMarker = x.amax();
-///     let _: __FandheExtremumMarker = fandhe_ai::Var::amin(x);
-///     let _: __FandheExtremumMarker = x.amin();
-/// }
-///
-/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
-///     let _: __FandheExtremumMarker = fandhe_ai::Tensor::amax(x);
-///     let _: __FandheExtremumMarker = x.amax();
-/// }
-///
-/// fn __probe_tape(x: &fandhe_ai::Tape) {
-///     let _: __FandheExtremumMarker = fandhe_ai::Tape::amin(x);
-///     let _: __FandheExtremumMarker = x.amin();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct VarExtremumOpsHoldDoctestGuard;
-
 /// イシュー #2156（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）・`KvCacheHoldDoctestGuard`
+/// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）・`KvCacheHoldDoctestGuard`
 /// （#2084）と同型の「正のプローブ 1 ブロック方式」を採る: facade の
 /// 全 `pub mod` を glob import したスコープに、本ブロック内でのみ定義
 /// したローカルの自由関数群（`__fandhe_rng_dist_hold_probe::{bernoulli,
@@ -4101,7 +3067,7 @@ struct TransformerDecoderHoldDoctestGuard;
 /// した。イシュー #2168（親 #2131）で `ctc_loss`（CTC 損失）を追加した
 /// （7 関数名。`crate::loss_ops` モジュール doc「facade 非公開
 /// （意図的）」と同じ判断枠組み）。
-/// `VarReduceOpsHoldDoctestGuard`（イシュー #2147）と同型の「正の
+/// `VarReduceOpsHoldDoctestGuard`（イシュー #2147。#2514 で削除済み）と同型の「正の
 /// プローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカルの自由
 /// 関数群（`__fandhe_loss_hold_probe::loss_ops::{l1_loss,

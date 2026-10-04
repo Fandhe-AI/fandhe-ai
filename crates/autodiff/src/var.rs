@@ -938,8 +938,8 @@ impl<'t> Var<'t> {
     /// 比較演算 6 種（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は共通の出力・
     /// 勾配規約を持つ: 出力は f32 の `0.0`／`1.0`（厳密な `Tensor<bool>`
     /// 出力版は `fandhe_ai_autodiff::bool_ops::gt_bool` 等〈イシュー
-    /// #2141。facade 公開は承認待ちで保留〉が本メソッドとは独立に
-    /// 提供する。`docs/scalar-op-dispatch-design.md` §3.2）。IEEE 754
+    /// #2141。`Var::gt_bool` 等の委譲メソッドとして #2510 で facade 公開済み〉
+    /// が本メソッドとは独立に提供する。`docs/scalar-op-dispatch-design.md` §3.2）。IEEE 754
     /// 準拠の比較（`NaN` を含む比較は `eq` を含め常に
     /// 偽・`ne` のみ真）。VJP は両入力とも常にゼロ勾配（比較演算は
     /// 局所的に階段関数のため微分不可能。`eval::scalar::binary_partials`
@@ -983,6 +983,109 @@ impl<'t> Var<'t> {
     /// が絡む比較は常に真）。イシュー #1712（親 #1593）。
     pub fn ne(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.scalar_binary(other, ScalarBinaryOp::Ne)
+    }
+
+    /// ブロードキャスト付き要素ごとの大なり（`self > other`）比較の bool 出力版
+    /// （PyTorch `torch.gt` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::gt_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::gt`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn gt_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::gt_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの以上（`self >= other`）比較の bool 出力版
+    /// （PyTorch `torch.ge` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::ge_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::ge`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn ge_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::ge_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの小なり（`self < other`）比較の bool 出力版
+    /// （PyTorch `torch.lt` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::lt_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::lt`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn lt_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::lt_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの以下（`self <= other`）比較の bool 出力版
+    /// （PyTorch `torch.le` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::le_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::le`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn le_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::le_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの等価（`self == other`）比較の bool 出力版
+    /// （PyTorch `torch.eq` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::eq_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::eq`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn eq_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::eq_bool(self, other)
+    }
+
+    /// ブロードキャスト付き要素ごとの非等価（`self != other`）比較の bool 出力版
+    /// （PyTorch `torch.ne` 相当。厳密な `Tensor<bool>` を返す）。
+    ///
+    /// `crate::bool_ops::ne_bool` への薄い委譲（イシュー #2141 で実装・#2510 で
+    /// facade 公開。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+    /// 非微分・tape 非記録で、返す `Tensor<bool>` は tape から切り離される
+    /// （f32 マスクを `Var` で返す [`Var::ne`] とは独立）。IEEE 754 準拠
+    /// （`NaN` を含む比較は `ne` のみ真・`-0.0 == +0.0`）。結果は
+    /// [`Var::where_cond`]／[`Var::masked_fill`] の条件へそのまま渡せる。
+    /// `other` が別 tape なら `TapeMismatch`、ブロードキャスト不能なら
+    /// shape エラー。
+    pub fn ne_bool(&self, other: &Var<'t>) -> Result<Tensor<bool>, AutodiffError> {
+        crate::bool_ops::ne_bool(self, other)
+    }
+
+    /// bool マスクで `self` の要素を row-major 順に選び rank 1 の
+    /// `Tensor<f32>` で返す（PyTorch `torch.masked_select` 相当）。
+    ///
+    /// `crate::bool_ops::masked_select` への薄い委譲（イシュー #2141 で実装・
+    /// #2510 で facade 公開）。PyTorch と異なり**非微分**（tape 非記録・
+    /// detached。微分可能版は決定記録 §6 項目 2 の別イシュー）。マスクは
+    /// `self` と共通形状へ相互にブロードキャストされる（`broadcast_shape`。
+    /// マスク側の次元が大きければ `self` も拡張されて選択対象になる）。
+    /// 全て偽なら shape `[0]` を返す。選ばれた要素の `NaN` は bit 保存される。
+    pub fn masked_select(&self, mask: &Tensor<bool>) -> Result<Tensor<f32>, AutodiffError> {
+        crate::bool_ops::masked_select(self, mask)
     }
 
     /// GELU（誤差関数版。PyTorch `F.gelu(x, approximate='none')`
@@ -2607,16 +2710,15 @@ impl<'t> Var<'t> {
     ///
     /// **受理範囲（v1・安全側）**: 添字は ASCII 英字のみ（空白は無視）。
     /// オペランドは 1〜2 個限定。ellipsis（`...`）・同一オペランド内の
-    /// 添字重複（対角／trace）・出力添字の重複・batch 添字を伴う縮約
-    /// （両オペランドと出力に共通する添字を伴うもの。例
-    /// `"bij,bjk->bik"`）は `AutodiffError::InvalidArgument` で拒否する。
-    /// batch 添字を伴う縮約は内部には rank≥3 `matmul`（イシュー
-    /// #1715）への分解として実装済みだが、facade 公開はイシュー
-    /// #2149 の承認待ちのため本メソッド（facade `fandhe_ai::Var::
-    /// einsum` へそのまま到達する）では未対応のまま維持している
-    /// （内部クレート限定で `fandhe_ai_autodiff::einsum_batch::
-    /// einsum_batched` から到達可能。`docs/autodiff-einsum-batch-
-    /// decision.md` 参照）。`->` 省略時は NumPy `einsum` 既定（入力に
+    /// 添字重複（対角／trace）・出力添字の重複は
+    /// `AutodiffError::InvalidArgument` で拒否する。両オペランドと
+    /// 出力に共通する batch 添字を伴う 2 項縮約（例 `"bij,bjk->bik"`）
+    /// は rank≥3 `matmul`（イシュー #1715。`gemm_batched`）への分解で
+    /// 受理する（イシュー #2517。従来 `Err` だった入力が `Ok` になる
+    /// 非破壊拡張）。既知の制約: create_graph 下（高階微分）では
+    /// rank≥3 `MatMul` のため `AutodiffError::Backward` を返す・
+    /// size-1 broadcast なし・複数 batch 添字の bit 同一は主張しない。
+    /// `->` 省略時は NumPy `einsum` 既定（入力に
     /// 1 回だけ現れる添字を ASCII 昇順）を出力とみなす。詳細な受理
     /// 範囲・分解アルゴリズムは `crate::einsum` モジュール doc を参照。
     ///
@@ -4415,6 +4517,371 @@ impl<'t> Var<'t> {
             .broadcast_to(&out_shape)
             .map_err(AutodiffError::Shape)?;
         self.gather(dim, &index_bc)
+    }
+
+    // ---- activation_ops 委譲メソッド（#2146 実装・#2516 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::activation_ops` の自由関数（`softplus`・`tanh`・`mul`・`clamp`・
+    // `where_cond` 等の合成。新規 `Op` なし）。本体は 1 行委譲に固定し、検査の迂回や
+    // 独自実装へのすり替えを facade の正ガード
+    // （`var_activation_ops_methods_are_thin_delegations`）で拒否する。
+    // 数値契約: `hardtanh`／`relu6` の forward は `clamp` と bit 一致で境界勾配は 0。
+    // `mish`／`glu` と `prelu` の weight 勾配は REQ-2 統一複合判定
+    // （`docs/autodiff-activation-ops-decision.md`）。
+    // PyTorch との差異: `mish` の softplus 閾値は 20・`glu` は負の軸番号非対応。
+
+    /// Mish（`x * tanh(softplus(x))`。`torch.nn.functional.mish` 相当。イシュー
+    /// #2146・#2516）。`crate::activation_ops::mish` へ委譲する。
+    pub fn mish(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::mish(self)
+    }
+
+    /// `[min, max]` へのクランプ（`torch.nn.functional.hardtanh` 相当。イシュー
+    /// #2146・#2516）。`crate::activation_ops::hardtanh` へ委譲する。NaN または
+    /// `min >= max` は `AutodiffError::InvalidArgument` で拒否する。
+    pub fn hardtanh(&self, min: f32, max: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::hardtanh(self, min, max)
+    }
+
+    /// `[0, 6]` へのクランプ（`torch.nn.functional.relu6` 相当。イシュー
+    /// #2146・#2516）。`crate::activation_ops::relu6` へ委譲する。
+    pub fn relu6(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::relu6(self)
+    }
+
+    /// PReLU（`torch.nn.functional.prelu` 相当。イシュー #2146・#2516）。
+    /// `crate::activation_ops::prelu` へ委譲する。`weight` の rank・チャネル数
+    /// 不一致は `Shape`、要素数 0 は `InvalidArgument` で拒否する。
+    pub fn prelu(&self, weight: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::prelu(self, weight)
+    }
+
+    /// GLU（`torch.nn.functional.glu` 相当。イシュー #2146・#2516）。
+    /// `crate::activation_ops::glu` へ委譲する。範囲外の軸は `Shape`、奇数長は
+    /// `InvalidArgument` で拒否する。
+    pub fn glu(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_ops::glu(self, dim)
+    }
+
+    // ---- rearrange_ops 委譲メソッド（#2143 実装・#2511 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::rearrange_ops` の自由関数（`index_select`・`broadcast_to`・
+    // `reshape` の合成。新規 `Op` なし）。本体は 1 行委譲に固定し、検査の迂回や
+    // 独自実装へのすり替えを facade の正ガード
+    // （`var_rearrange_ops_methods_are_thin_delegations`）で拒否する。
+    // PyTorch との差異: `roll` の `dims=None` 非対応・負の軸番号非対応。
+    // 数値契約: forward は値コピーのみで bit 一致、`repeat`／`tile` の backward は
+    // REQ-2 統一複合判定（`docs/autodiff-rearrange-ops-decision.md`）。
+
+    /// 指定軸を反転する（`torch.flip` 相当。イシュー #2143・#2511）。
+    /// `crate::rearrange_ops::flip` へ委譲する。軸範囲外・重複は
+    /// `AutodiffError::Shape` で拒否し、`dims` が空なら恒等。
+    pub fn flip(&self, dims: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::flip(self, dims)
+    }
+
+    /// 指定軸を循環シフトする（`torch.roll(shifts, dims)` 相当。イシュー
+    /// #2143・#2511）。`crate::rearrange_ops::roll` へ委譲する。`shifts` と
+    /// `dims` の長さ不一致は `InvalidArgument`。`dims=None` 形は非対応。
+    pub fn roll(&self, shifts: &[isize], dims: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::roll(self, shifts, dims)
+    }
+
+    /// 各軸を `repeats` 回繰り返す（`Tensor.repeat` 相当。イシュー #2143・
+    /// #2511）。`crate::rearrange_ops::repeat` へ委譲する。`repeats.len()` が
+    /// rank 未満なら `InvalidArgument`、巨大確保は確保前に拒否する。
+    pub fn repeat(&self, repeats: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::repeat(self, repeats)
+    }
+
+    /// `torch.tile` 相当（`reps` が rank 未満なら先頭を 1 で埋める。イシュー
+    /// #2143・#2511）。`crate::rearrange_ops::tile` へ委譲する。
+    pub fn tile(&self, reps: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::tile(self, reps)
+    }
+
+    // ---- indexing_ops 委譲メソッド（#2148 実装・#2518 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::indexing_ops` の自由関数（`index_select`・`scatter`・
+    // `scatter_add`・view 系の合成。新規 `Op` なし）。本体は 1 行委譲に固定し、
+    // 添字検査（範囲・k・broadcast・確保前サイズ検査）の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_indexing_ops_methods_are_thin_delegations`）
+    // で拒否する。PyTorch との差異: 負の添字は拒否（wrap-around なし）・先頭の
+    // 連続 k 軸のみ・添字は i32 のみ・重複添字の overwrite は最後の書き手が勝つ。
+    // 数値契約は `docs/autodiff-indexing-inplace-design.md` §3 を正とする。
+
+    /// 先頭 `indices.len()` 軸を複数軸整数配列索引で読み出す（`x[i0, i1, …]`
+    /// 相当。イシュー #2148・#2518）。`crate::indexing_ops::advanced_indexing`
+    /// へ委譲する。範囲外・負の添字・k 不正は `InvalidArgument`。
+    pub fn advanced_indexing(&self, indices: &[Tensor<i32>]) -> Result<Var<'t>, AutodiffError> {
+        crate::indexing_ops::advanced_indexing(self, indices)
+    }
+
+    /// 索引位置へ `values` を代入した新しい `Var` を返す非破壊版（`Tensor.index_put`
+    /// 相当。イシュー #2148・#2518）。`crate::indexing_ops::index_put` へ委譲する。
+    /// `accumulate=true` は重複添字を加算、`false` は最後の書き手が勝つ。別 tape の
+    /// `values` は `TapeMismatch`、broadcast 不能は `Shape`。
+    pub fn index_put(
+        &self,
+        indices: &[Tensor<i32>],
+        values: &Var<'t>,
+        accumulate: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::indexing_ops::index_put(self, indices, values, accumulate)
+    }
+
+    /// [`Var::index_put`] を呼んで `self` を再束縛する糖衣（`Tensor.index_put_`
+    /// 相当。イシュー #2148・#2518）。`crate::indexing_ops::index_put_` へ委譲する。
+    /// `Var` は `Copy` なハンドルで tape ノードも `Tensor` も書き換えないため、同じ
+    /// ノードを指す他のコピーは古い値のまま残り、旧ノードは tape に残る
+    /// （`docs/autodiff-indexing-inplace-design.md` §2.1）。
+    pub fn index_put_(
+        &mut self,
+        indices: &[Tensor<i32>],
+        values: &Var<'t>,
+        accumulate: bool,
+    ) -> Result<(), AutodiffError> {
+        crate::indexing_ops::index_put_(self, indices, values, accumulate)
+    }
+
+    // ---- topk_unique_ops 委譲メソッド（#2153 実装・#2519 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::topk_unique_ops` の自由関数。本体は 1 行委譲に固定し、
+    // 確保前検査・0-d 拒否・`i32` 上限検査の迂回や独自実装へのすり替えを
+    // facade の正ガード（`var_topk_unique_ops_methods_are_thin_delegations`）で
+    // 拒否する。既存の [`Var::topk`]／[`Var::unique`] は変更しない。
+    // `sorted=false` の順序は元添字昇順の決定的契約
+    // （`docs/autodiff-topk-unique-ops-decision.md` §2.3）。
+
+    /// `dim` 軸の上位／下位 `k` 個を選ぶ（`torch.topk(k, dim, largest, sorted)`
+    /// 相当。イシュー #2153・#2519）。`crate::topk_unique_ops::topk_with_options`
+    /// へ委譲する。負 `dim`・`sorted=false` に対応し、0-d 入力は拒否する。
+    pub fn topk_with_options(
+        &self,
+        k: usize,
+        opts: crate::topk_unique_ops::TopkOptions,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::topk_unique_ops::topk_with_options(self, k, opts)
+    }
+
+    /// 一意値集合（`torch.unique(sorted=True, return_inverse, return_counts, dim)`
+    /// 相当。イシュー #2153・#2519）。`crate::topk_unique_ops::unique_with_options`
+    /// へ委譲する。非微分で戻り値は detached。
+    pub fn unique_with_options(
+        &self,
+        opts: crate::topk_unique_ops::UniqueOptions,
+    ) -> Result<crate::topk_unique_ops::UniqueOutput, AutodiffError> {
+        crate::topk_unique_ops::unique_with_options(self, opts)
+    }
+
+    /// 連続する重複のみを畳む（`torch.unique_consecutive` 相当。イシュー
+    /// #2153・#2519）。`crate::topk_unique_ops::unique_consecutive` へ委譲する。
+    /// 非微分で戻り値は detached。
+    pub fn unique_consecutive(
+        &self,
+        opts: crate::topk_unique_ops::UniqueOptions,
+    ) -> Result<crate::topk_unique_ops::UniqueOutput, AutodiffError> {
+        crate::topk_unique_ops::unique_consecutive(self, opts)
+    }
+
+    // ---- linalg_ops 委譲メソッド（#2150 実装・#2515 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::linalg_ops` の自由関数（専用 `Op` あり。CPU 本番実装・
+    // GPU は `Unsupported` を受けてホストへフォールバック）。本体は 1 行委譲に
+    // 固定し、入口検証（非有限入力・`rcond`・確保前上限検査）の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_linalg_ops_methods_are_thin_delegations`）で拒否する。
+    // PyTorch との差異: 非有限入力は `InvalidArgument`、`matrix_rank` は f32 出力で
+    // 勾配ゼロ、`lstsq` は解のみを返す。`rcond` は tolerance ではなく特異値の
+    // 打ち切り比（`docs/autodiff-linalg-ops-decision.md`）。
+
+    /// 対称行列の固有分解（`torch.linalg.eigh` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::eigh` へ委譲し、`[n, n]` から昇順の固有値 `[n]` と
+    /// 固有ベクトル `[n, n]` を返す。非正方・非有限入力は拒否する。
+    pub fn eigh(&self) -> Result<crate::linalg_ops::EighVars<'t>, AutodiffError> {
+        crate::linalg_ops::eigh(self)
+    }
+
+    /// 符号と対数絶対行列式（`torch.linalg.slogdet` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::slogdet` へ委譲する。特異行列は `(0, -inf)` を返す。
+    pub fn slogdet(&self) -> Result<crate::linalg_ops::SlogdetVars<'t>, AutodiffError> {
+        crate::linalg_ops::slogdet(self)
+    }
+
+    /// Moore-Penrose 擬似逆行列（`torch.linalg.pinv` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::pinv` へ委譲し、`[m, n]` から `[n, m]` を返す。
+    /// `rcond` が不正（負・非有限）なら拒否する。
+    pub fn pinv(&self, rcond: Option<f32>) -> Result<Var<'t>, AutodiffError> {
+        crate::linalg_ops::pinv(self, rcond)
+    }
+
+    /// 行列の階数（`torch.linalg.matrix_rank` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::matrix_rank` へ委譲し、f32 のスカラー（形状 `[]`）を返す。
+    pub fn matrix_rank(&self, rcond: Option<f32>) -> Result<Var<'t>, AutodiffError> {
+        crate::linalg_ops::matrix_rank(self, rcond)
+    }
+
+    /// 最小二乗解（`torch.linalg.lstsq` 相当。解のみ返す。イシュー #2150・#2515）。
+    /// `self` が `A`（`[m, n]`）、`b` が `[m, k]` のとき `crate::linalg_ops::lstsq`
+    /// へ委譲して `[n, k]` を返す。
+    pub fn lstsq(&self, b: &Var<'t>, rcond: Option<f32>) -> Result<Var<'t>, AutodiffError> {
+        crate::linalg_ops::lstsq(self, b, rcond)
+    }
+
+    // ---- matrix_ops 委譲メソッド（#2144 実装・#2513 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::matrix_ops` の自由関数（`masked_fill`・`gather`・`narrow`・
+    // `broadcast_to`・`mul`・`sum` 等の合成。新規 `Op` なし）。本体は 1 行委譲に
+    // 固定し、検査の迂回や独自実装へのすり替えを facade の正ガード
+    // （`var_matrix_ops_methods_are_thin_delegations`）で拒否する。
+    // PyTorch との差異: `trace`／`diag` は rank 2 まで（rank 3 以上は非対応）。
+    // 数値契約: `docs/autodiff-matrix-ops-decision.md` §3（forward は
+    // `trace`／`dot` の縮約を除きコピー系で bit 一致、縮約は REQ-2 統一複合判定）。
+
+    /// 下三角以外を 0 にする（`torch.tril` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::tril` へ委譲する。rank 2 以上のみ受け付け、
+    /// 不適合は `AutodiffError::Shape` で拒否する。
+    pub fn tril(&self, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::tril(self, diagonal)
+    }
+
+    /// 上三角以外を 0 にする（`torch.triu` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::triu` へ委譲する。rank 条件・エラーは `tril` と同じ。
+    pub fn triu(&self, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::triu(self, diagonal)
+    }
+
+    /// 対角の抽出（2-D→1-D）または対角行列の構築（1-D→2-D）
+    /// （`torch.diag` 相当。イシュー #2144・#2513）。`crate::matrix_ops::diag`
+    /// へ委譲する。rank 3 以上は `InvalidArgument`。
+    pub fn diag(&self, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::diag(self, diagonal)
+    }
+
+    /// 2-D の対角和（`torch.trace` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::trace` へ委譲する。rank 2 以外は `AutodiffError::Shape`。
+    pub fn trace(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::trace(self)
+    }
+
+    /// 1-D 同士の外積（`torch.outer` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::outer` へ委譲する。rank 1 以外は `AutodiffError::Shape`。
+    pub fn outer(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::outer(self, other)
+    }
+
+    /// 1-D 同士の内積（`torch.dot` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::dot` へ委譲する。rank 1 以外・長さ不一致は
+    /// `AutodiffError::Shape`。
+    pub fn dot(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::dot(self, other)
+    }
+
+    // ---- scalar_unary_ops 委譲メソッド（#2145 実装・#2512 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::scalar_unary_ops` の自由関数（既存 `Op::ScalarUnary` への
+    // dispatch。新規 `Op` なし）。本体は 1 行委譲に固定し、すり替えを facade の
+    // 正ガード（`var_scalar_unary_ops_methods_are_thin_delegations`）で拒否する。
+    // 数値契約は `docs/autodiff-scalar-unary-ops-decision.md` §3 が正。
+
+    /// 要素ごとの床関数（`torch.floor` 相当）。勾配は恒等的に 0（区分定数）。
+    /// `crate::scalar_unary_ops::floor` へ委譲する（イシュー #2145・#2512）。
+    pub fn floor(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::floor(self)
+    }
+
+    /// 要素ごとの天井関数（`torch.ceil` 相当）。勾配は恒等的に 0（区分定数）。
+    /// `crate::scalar_unary_ops::ceil` へ委譲する（イシュー #2145・#2512）。
+    pub fn ceil(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::ceil(self)
+    }
+
+    /// 要素ごとの偶数丸め（`torch.round` 相当。`2.5 -> 2`）。勾配は恒等的に 0。
+    /// `crate::scalar_unary_ops::round` へ委譲する（イシュー #2145・#2512）。
+    pub fn round(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::round(self)
+    }
+
+    /// 要素ごとの符号（`torch.sign` 相当。`sign(±0) = 0`）。勾配は恒等的に 0。
+    /// `crate::scalar_unary_ops::sign` へ委譲する（イシュー #2145・#2512）。
+    pub fn sign(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::sign(self)
+    }
+
+    /// 要素ごとの逆数（`torch.reciprocal` 相当）。`0` は IEEE のまま `inf` で panic しない。
+    /// `crate::scalar_unary_ops::reciprocal` へ委譲する（イシュー #2145・#2512）。
+    pub fn reciprocal(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::reciprocal(self)
+    }
+
+    /// 要素ごとの逆平方根（`torch.rsqrt` 相当）。負数は IEEE のまま NaN で panic しない。
+    /// `crate::scalar_unary_ops::rsqrt` へ委譲する（イシュー #2145・#2512）。
+    pub fn rsqrt(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::rsqrt(self)
+    }
+
+    /// 要素ごとの誤差関数（`torch.erf` 相当）。
+    /// `crate::scalar_unary_ops::erf` へ委譲する（イシュー #2145・#2512）。
+    pub fn erf(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::erf(self)
+    }
+
+    /// 要素ごとの `x ^ exponent`（スカラー指数。`torch.pow(x, scalar)` 相当）。
+    /// `crate::scalar_unary_ops::pow_scalar` へ委譲する（イシュー #2145・#2512）。
+    pub fn pow_scalar(&self, exponent: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::scalar_unary_ops::pow_scalar(self, exponent)
+    }
+
+    // ---- reduce_ops 委譲メソッド（#2147 実装・#2514 公開。親 #2500・ルート #2499）----
+    //
+    // 本体は 1 行委譲に固定する（すり替えは facade の
+    // `var_reduce_ops_methods_are_thin_delegations` が拒否する）。数値契約の正本は
+    // `docs/autodiff-reduce-ops-decision.md` §3。
+
+    /// 積縮約（`torch.prod` 相当。`dim = None` は全要素）。
+    /// `crate::reduce_ops::prod` へ委譲する（イシュー #2147・#2514）。
+    pub fn prod(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::prod(self, dim)
+    }
+
+    /// 数値安定な log-sum-exp（`torch.logsumexp` 相当）。空縮約は `InvalidArgument`。
+    /// `crate::reduce_ops::logsumexp` へ委譲する（イシュー #2147・#2514）。
+    pub fn logsumexp(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::logsumexp(self, dim)
+    }
+
+    /// 非ゼロ要素の有無（`torch.any` 相当）を f32 の 0.0／1.0 マスクで返す。勾配はゼロ。
+    /// `crate::reduce_ops::any` へ委譲する（イシュー #2147・#2514）。
+    pub fn any(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::any(self, dim)
+    }
+
+    /// 全要素が非ゼロか（`torch.all` 相当）を f32 の 0.0／1.0 マスクで返す。勾配はゼロ。
+    /// `crate::reduce_ops::all` へ委譲する（イシュー #2147・#2514）。
+    pub fn all(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::all(self, dim)
+    }
+
+    /// `p` ノルム（`torch.linalg.vector_norm` 相当）。`p` は有限かつ正の値のみ許容する。
+    /// `crate::reduce_ops::norm_p` へ委譲する（イシュー #2147・#2514）。
+    pub fn norm_p(&self, p: f32, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::reduce_ops::norm_p(self, p, dim)
+    }
+
+    // ---- extremum_ops 委譲メソッド（#2154 実装・#2514 公開。親 #2500・ルート #2499）----
+    //
+    // 本体は 1 行委譲に固定する。同値タイへ勾配を均等分配する（`Var::max`／`min` は先勝ちで
+    // 異なる）。契約の正本は `docs/autodiff-amax-grad-distribution-decision.md` §5。
+
+    /// 最大値縮約（`torch.amax` 相当）。同値タイに勾配を `g/k` で均等分配する。
+    /// `crate::extremum_ops::amax` へ委譲する（イシュー #2154・#2514）。
+    pub fn amax(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::extremum_ops::amax(self, dim)
+    }
+
+    /// 最小値縮約（`torch.amin` 相当）。同値タイに勾配を `g/k` で均等分配する。
+    /// `crate::extremum_ops::amin` へ委譲する（イシュー #2154・#2514）。
+    pub fn amin(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::extremum_ops::amin(self, dim)
     }
 
     /// embedding テーブル（`self`。`[num_embeddings, embedding_dim]`）

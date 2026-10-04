@@ -1,11 +1,12 @@
-//! `fandhe_ai_autodiff::rearrange_ops`（イシュー #2143・facade 非公開の
-//! 内部入口。`crates/autodiff/src/rearrange_ops.rs` モジュール doc
-//! 参照）のバックエンド間 parity テスト（`bool_ops_backend_parity.rs`・
+//! `fandhe_ai_autodiff::rearrange_ops`（イシュー #2143。`Var::flip` 等の
+//! facade 公開は #2511。`crates/autodiff/src/rearrange_ops.rs` モジュール
+//! doc 参照）のバックエンド間 parity テスト（`bool_ops_backend_parity.rs`・
 //! `unique_backend_parity.rs` と同型）。
 //!
-//! `rearrange_ops` は facade から再エクスポートされないため、本テストは
+//! `rearrange_ops` モジュール自体は facade から再エクスポートされない
+//! （`Var` の委譲メソッドとしてのみ公開）ため、本テストは自由関数
 //! `fandhe_ai_autodiff::rearrange_ops::*` を直接 use する（facade の dev
-//! 依存に `fandhe-ai-autodiff` が既に含まれている）。
+//! 依存に `fandhe-ai-autodiff` が既に含まれている。委譲メソッドは同一経路）。
 //!
 //! 本ファイルの契約は `repeat`／`tile`／`flip`／`roll` の 4 演算 ×
 //! {forward, backward} × {CPU vs NaiveOps, CUDA vs CPU, Metal vs CPU}

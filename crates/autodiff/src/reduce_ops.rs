@@ -1,17 +1,13 @@
 //! `prod`・`logsumexp`・`any`・`all`・`norm_p`（p-ノルム）の 5 縮約
 //! （イシュー #2147・親 #2131「5-B 演算」）。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/matrix_ops.rs`
-//! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への
-//! inherent メソッド追加は即座に facade 公開面へ出てしまう。イシュー
-//! #2147 本文は facade 公開面（`Var::prod` 等の委譲メソッド）を承認
-//! 事項として明示し、親 #2131 はこのツリーに限り「設計判断記録 →
-//! 承認 → 実装」の 2 段階を定めるため、承認が取れるまでは自由関数と
-//! して `Var` の外に置き到達不能にする（`docs/autodiff-reduce-ops-
-//! decision.md` §0）。承認後は `Var::prod` 等の薄い委譲メソッドを追加
-//! し、facade 側の保留ガード（`crates/facade/src/lib.rs::
-//! VarReduceOpsHoldDoctestGuard`）を撤去する。
+//! **公開形（イシュー #2514 で承認済み・公開済み）**: `Var` は facade
+//! （`fandhe_ai` クレート）から直接再エクスポートされるため、承認形は
+//! `Var::prod`／`logsumexp`／`any`／`all`／`norm_p` の 1 行委譲メソッド
+//! （`var.rs`）のみで、本モジュール自体は facade から再エクスポートしない
+//! （ルート #2499 の一括承認。`docs/autodiff-reduce-ops-decision.md` §0・§8・§9）。
+//! すり替えは facade の正ガード（`api_surface.rs::
+//! var_reduce_ops_methods_are_thin_delegations` 等）が拒否する。
 //!
 //! **PyTorch 相当・出力型**（詳細は `docs/autodiff-reduce-ops-
 //! decision.md` §1 の表を参照）:

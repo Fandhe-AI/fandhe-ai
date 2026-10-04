@@ -11,18 +11,16 @@
 //! フォールバック）、専用カーネルなしで到達可能。`crates/backend-*`・
 //! `crates/tensor-core` は変更しない。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/matrix_ops.rs`・
-//! `rearrange_ops.rs` モジュール doc と同じ理由・同じ判断枠組みによる。
-//! `Var` は facade（`fandhe_ai` クレート）から直接再エクスポートされる
-//! ため、`Var` への inherent メソッド追加は即座に facade 公開面へ
-//! 出てしまう。イシュー #2146 本文は facade 公開面（`Var` への委譲
-//! メソッド・`compat::Sequential::add_*` 5 種）を承認事項として明示し、
-//! 親 #2131 はこのツリーに限り「設計判断記録 → 承認 → 実装」の 2 段階
-//! を定めるため、承認が取れるまでは自由関数として `Var` の外に置き
-//! 到達不能にする（`docs/autodiff-activation-ops-decision.md` §2.1）。
-//! 承認後は `Var::mish` 等の薄い委譲メソッドを追加し、facade 側の
-//! 保留ガード（`crates/facade/src/lib.rs::
-//! VarActivationOpsHoldDoctestGuard`）を撤去する。
+//! **公開形（#2516 で承認済み・公開済み）**: facade 公開面は `Var::mish`／
+//! `hardtanh`／`relu6`／`prelu`／`glu` の薄い 1 行委譲メソッド
+//! （`crates/autodiff/src/var.rs`）で、本モジュール自体は facade から
+//! 再エクスポートしない。委譲本体の固定は facade の正ガード
+//! （`crates/facade/tests/api_surface.rs::
+//! var_activation_ops_methods_are_thin_delegations`）が担う。
+//! `compat::Sequential::add_*` 5 種は #2529 で保留中のため、facade 側の
+//! `VarActivationOpsHoldDoctestGuard`（`Tensor<f32>`／`Tape` 上の配置と
+//! `add_*` の衝突プローブ）は部分反転のまま残している
+//! （`docs/autodiff-activation-ops-decision.md` §6）。
 //!
 //! **数値契約**（詳細は `docs/autodiff-activation-ops-decision.md` §3
 //! の表を参照）:

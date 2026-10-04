@@ -162,9 +162,10 @@
 //! （`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）・
 //! logical 3 種（`logical_and`／`logical_or`／`logical_not`）・
 //! `masked_select` を [`bool_ops`] へ追加した。いずれも非微分・tape
-//! 非記録の自由関数（`Var` への inherent メソッドではない）で、facade
-//! 公開は承認待ちのため意図的に再エクスポートしない（`docs/autodiff-
-//! bool-ops-exposure-decision.md`・モジュール doc 参照）。
+//! 非記録の自由関数で、比較 6 種と `masked_select` は #2510 で `Var` の
+//! 委譲メソッドとして facade 公開済み。logical 3 種と自由関数自体は
+//! 公開しない（`docs/autodiff-bool-ops-exposure-decision.md`・
+//! モジュール doc 参照）。
 
 //! イシュー #2195（親 #2142「f64 autograd の最小集合」の第 1 段）で
 //! `f32` の `Tape`/`Var` とは完全に独立した f64 専用グラフ
@@ -187,47 +188,47 @@
 //! モジュール doc 参照）。
 
 //! イシュー #2146（親 #2131）で `mish`／`hardtanh`／`relu6`／`prelu`／
-//! `glu` の 5 活性化演算を [`activation_ops`] へ追加した。[`matrix_ops`]
-//! と同じく非公開の自由関数群で、facade 公開は承認待ちのため意図的に
-//! 再エクスポートしない（`docs/autodiff-activation-ops-decision.md`・
-//! モジュール doc 参照）。
+//! `glu` の 5 活性化演算を [`activation_ops`] へ追加した。facade へは #2516 で
+//! `Var` の委譲メソッドとして公開済み（モジュール自体は意図的に再エクスポート
+//! しない。`compat::Sequential::add_*` は #2529 で保留。
+//! `docs/autodiff-activation-ops-decision.md`・モジュール doc 参照）。
 
 //! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
 //! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。
-//! [`matrix_ops`] と同じく非公開の自由関数群（`Var` への inherent
-//! メソッドではない）で、facade 公開は承認待ちのため意図的に
-//! 再エクスポートしない（`docs/autodiff-reduce-ops-decision.md`・
-//! モジュール doc 参照）。
+//! #2514（ルート #2499 の一括承認）で `Var` の 1 行委譲メソッドとして
+//! facade へ公開済み（モジュール自体は再エクスポートしない。
+//! `docs/autodiff-reduce-ops-decision.md`・モジュール doc 参照）。
 
 //! イシュー #2149（親 #2131）で、[`crate::var::Var::einsum`] が
 //! rank≥3 `matmul`（#1600 未実装）を理由に拒否していた batch 添字
 //! （両オペランドと出力に共通する添字。例 `"bij,bjk->bik"`）を伴う
 //! 2 項縮約を、その後実装済みの rank≥3 `Var::matmul`（イシュー
 //! #1715）へ分解する経路として `crate::einsum` 内に実装した。
-//! `Var::einsum` 自体の挙動は不変（facade 公開は承認事項のため未
-//! 実施）で、内部クレート限定の到達入口を [`einsum_batch`] へ追加
-//! した（[`bool_ops`]／[`rearrange_ops`]／[`matrix_ops`] と同じ
-//! 「承認待ち保留」の枠組み。`docs/autodiff-einsum-batch-decision.md`・
-//! モジュール doc 参照）。
+//! 当初は承認待ちのため内部クレート限定の到達入口 [`einsum_batch`]
+//! だけを公開していたが、イシュー #2517 で `Var::einsum` 自体が
+//! batch 添字付き縮約を受理するよう拡張され facade へ公開された
+//! （`docs/autodiff-einsum-batch-decision.md` §11）。[`einsum_batch`]
+//! は公開済み 0.10.0 互換の同一挙動の薄い委譲として維持する。
 
 //! イシュー #2153（親 #2131）で、`Var::topk`（`sorted=True` 固定・
 //! 非負 `dim` のみ）・`Var::unique`（`dim`／`return_inverse`／
 //! `return_counts` 非対応）のオプション拡張（`sorted=false`・負
 //! `dim`・unique の `dim` 指定・`return_inverse`・`return_counts`・
-//! `unique_consecutive`）を [`topk_unique_ops`] へ追加した。
-//! [`reduce_ops`] と同じく非公開の自由関数群で、facade 公開は承認待ち
-//! のため意図的に再エクスポートしない（`docs/autodiff-topk-unique-
-//! ops-decision.md`・モジュール doc 参照）。
+//! `unique_consecutive`）を [`topk_unique_ops`] へ追加した。イシュー #2519 で
+//! `Var::topk_with_options`／`unique_with_options`／`unique_consecutive` の
+//! 1 行委譲メソッドとして facade へ公開済み（入出力型 `TopkOptions`／
+//! `UniqueOptions`／`UniqueOutput` はルートから再エクスポート。モジュール自体は
+//! facade へ再エクスポートしない。`docs/autodiff-topk-unique-ops-decision.md` §6）。
 
 //! イシュー #2154（親 #2131）で `amax`／`amin`（PyTorch `torch.amax`／
 //! `amin` 相当。タイに勾配を均等分配する VJP）を [`extremum_ops`] へ
 //! 追加した。既存 `Var::max`／`min`／`max_dims`（先勝ち決定的方式。
 //! イシュー #1718 で出荷済み挙動として維持を確定）とは独立の `Op`
 //! （`tape::Op::Amax`／`Amin`）・VJP として実装し、既存経路の勾配値は
-//! 変えない。[`reduce_ops`] と同じく非公開の自由関数群（`Var` への
-//! inherent メソッドではない）で、facade 公開は承認待ちのため意図的に
-//! 再エクスポートしない（`docs/autodiff-amax-grad-distribution-
-//! decision.md`・モジュール doc 参照）。
+//! 変えない。#2514（ルート #2499 の一括承認）で `Var::amax`／`amin` の
+//! 1 行委譲メソッドとして facade へ公開済み（モジュール自体は再エクスポート
+//! しない。`docs/autodiff-amax-grad-distribution-decision.md`・モジュール
+//! doc 参照）。
 
 pub mod activation_ops;
 mod adaptive_max_pool_ops;
@@ -307,4 +308,7 @@ pub use fandhe_ai_tensor_core::rng::{
 pub use fandhe_ai_tensor_core::creation::{
     CreationError, arange, eye, linspace, ones_like, zeros_like,
 };
+// `topk_unique_ops` の入出力型（イシュー #2519。facade が `Var` の委譲メソッドと
+// ともに再エクスポートする。`QrVars`／`SvdVars` と同じ「ルート経由」の形）。
+pub use topk_unique_ops::{TopkOptions, UniqueOptions, UniqueOutput};
 pub use var::{GateParams, QrVars, Reduction, SvdVars, Var, VarHostView};

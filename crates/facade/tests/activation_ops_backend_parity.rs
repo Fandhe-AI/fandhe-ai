@@ -1,9 +1,10 @@
-//! `fandhe_ai_autodiff::activation_ops`（イシュー #2146・facade 非公開の
-//! 内部入口。`crates/autodiff/src/activation_ops.rs` モジュール doc
+//! `fandhe_ai_autodiff::activation_ops`（イシュー #2146。facade 公開は #2516 の
+//! `Var::mish` 等の委譲メソッドで、委譲先は本入口と同一経路。
+//! `crates/autodiff/src/activation_ops.rs` モジュール doc
 //! 参照）のバックエンド間 parity テスト（`matrix_ops_backend_parity.rs`
 //! と同型）。
 //!
-//! `activation_ops` は facade から再エクスポートされないため、本テスト
+//! `activation_ops` モジュール自体は facade から再エクスポートされないため、本テスト
 //! は `fandhe_ai_autodiff::activation_ops::*` を直接 use する（facade
 //! の dev 依存に `fandhe-ai-autodiff` が既に含まれている）。
 //!

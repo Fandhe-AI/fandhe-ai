@@ -10,9 +10,13 @@ bool を返す比較 6 種（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／
 `logical_not`）・`masked_select` を、**`fandhe_ai_autodiff` のうち facade
 が再エクスポートしない自由関数モジュール `bool_ops`**（`crates/autodiff/
 src/bool_ops.rs`）として実装した（案 C。§3 参照）。`Var` に inherent の
-`pub fn` は追加していない。新規 `Op`・`BackendOps` メソッド・VJP・tape
+`pub fn` は追加していない（#2141 時点の記述。比較 6 種・`masked_select` の
+7 件は #2510 で `Var` の委譲メソッドとして追加済み。logical 3 件は
+未公開のまま #2594 で扱う。§6.1 参照）。新規 `Op`・`BackendOps` メソッド・VJP・tape
 ノードは追加していない。facade 公開（`Var` への委譲メソッド追加）は
-承認待ちのまま対象外とし、`crates/facade/src/lib.rs::
+#2141 時点では承認待ちのまま対象外とした（履歴。現状は比較 6 種・
+`masked_select` が #2510 で公開済みで、保留中なのは logical 3 件のみ）。
+logical 3 件の保留は `crates/facade/src/lib.rs::
 VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
 `crates/facade/tests/api_surface.rs` のソース走査・workspace インベント
 リ（4 テスト）で多層固定している。
@@ -84,7 +88,8 @@ VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
 
 1. facade 公開: `Var` への委譲メソッド 7 件（比較 6 種・`masked_select`）
    および logical 3 件の公開形（`Var` の関連関数にするか facade 直下の
-   関数にするか）
+   関数にするか）。**7 件は #2510 で適用済み（ルート #2499 一括承認）。
+   logical 3 件の公開形は未決のまま #2594**
 2. 微分可能な `masked_select`
 3. `Var` 入力の logical 版
 4. GPU 専用カーネル（ホストでの bool 化・logical・select の GPU 化）
@@ -119,6 +124,27 @@ VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
   `torch.logical_and` + `masked_select`・`torch.logical_not`/`or` の
   真理値表と NaN）
 
-承認取得後の追随（本イシューでは未実施）: `Var::gt_bool` 等の薄い委譲
-メソッド追加、facade 保留ガード（`VarBoolOpsHoldDoctestGuard`・
-対応する否定ガード 4 件）の撤去。
+承認取得後の追随: `Var::gt_bool` 等の薄い委譲メソッド 7 件は #2510 で実施済み
+（§6.1）。logical 3 件分の保留ガード（`VarBoolOpsHoldDoctestGuard`・対応する
+ソース走査）は #2594 まで残置し、その時点で撤去する。
+
+### §6.1 実装記録（#2510・ルート #2499 一括承認）
+
+- 公開した名前: `Var::{gt_bool, ge_bool, lt_bool, le_bool, eq_bool, ne_bool}
+  (&self, &Var<'t>) -> Result<Tensor<bool>, AutodiffError>`・
+  `Var::masked_select(&self, &Tensor<bool>) -> Result<Tensor<f32>,
+  AutodiffError>`（`crates/autodiff/src/var.rs`。本体は
+  `crate::bool_ops::<name>` への 1 式委譲。非微分・tape 非記録・意味論は
+  自由関数と同一）。新規の型・`pub use`・`Op`・`BackendOps`・VJP なし
+- ガード反転: `VarBoolOpsHoldDoctestGuard` の `__probe_var` を logical 3 件
+  のプローブへ差し替え（モジュールプローブ・Tensor／Tape プローブは維持）。
+  `api_surface.rs` は定数を承認 7 件／保留 3 件へ分割し、workspace
+  インベントリを `workspace_declares_bool_ops_fn_names_in_approved_places_only`
+  へ改名・正ガード化（7 名は `bool_ops.rs`＋`var.rs` に各 1 件・logical は
+  `bool_ops.rs` のみ・`var.rs` の 7 委譲本体のトークン一致を固定）
+- 手動確認（fail-closed）: `Var` への仮 `logical_and` 追加で doctest・
+  インベントリが失敗することを確認し元に戻した
+- 利用テスト: `crates/facade/tests/bool_ops_var_methods.rs`（6 件・CPU）
+- CUDA／Metal: 委譲のみでカーネルを新設しないため新規の `#[ignore]` テスト・
+  実測申し送りは無い（既存の `bool_ops_backend_parity.rs`・
+  `docs/perf/logs/bool-ops-2141/README.md` のまま）
