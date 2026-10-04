@@ -205,6 +205,47 @@ fn grad_with_foreign_tape_var_returns_tape_mismatch() {
     assert!(matches!(cg.child_var(&y), Err(AutodiffError::TapeMismatch)));
 }
 
+/// §17.2 推奨の子テープ構築（`tape_for(parent.device())`）が facade だけで
+/// 完結し、ミラー取得と 2 階微分が閉形式（`6x`）と一致すること（イシュー
+/// #2546。利用例テスト）。
+#[test]
+fn child_built_with_tape_for_parent_device_works() {
+    let x0 = [0.5_f32, -1.0, 2.0];
+    let parent = fandhe_ai::tape();
+    let child = fandhe_ai::tape_for(parent.device()).expect("CPU テープは常に構築可能");
+    let x = parent.var(&t(x0.to_vec(), &[3]));
+    let loss = cubic_loss(&x);
+    let cg = parent.backward_create_graph(&loss, &child).unwrap();
+    assert!(cg.child_var(&x).unwrap().is_some(), "ミラー取得");
+    assert!(cg.grad(&x).unwrap().is_some(), "子テープ上の勾配");
+    let second = hessian_diag_cubic(
+        &fandhe_ai::tape(),
+        &fandhe_ai::tape_for(Device::Cpu).expect("CPU テープは常に構築可能"),
+        &x0,
+    );
+    for (h, &v) in second.iter().zip(x0.iter()) {
+        assert!(req2_close(*h as f64, 6.0 * v as f64), "2階 {h}");
+    }
+}
+
+/// facade 到達可能な `Var::checkpoint_from` で親へ checkpoint 区間を登録
+/// すると `backward_create_graph` が fail-closed で拒否し、子を変更しない
+/// こと（イシュー #2546）。
+#[test]
+fn rejects_parent_with_registered_checkpoint_via_facade() {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let h = x.sigmoid();
+    let hc = h.checkpoint_from(&[&x]).expect("checkpoint 区間の登録");
+    let loss = hc.sum(None).unwrap();
+    assert!(matches!(
+        tape.backward_create_graph(&loss, &child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert_eq!(child.leaf_count(), 0, "拒否時に child を変更しない");
+}
+
 /// 公開型 `CreateGraphResult` が facade ルートから名指しできること。
 #[test]
 fn create_graph_result_is_nameable() {

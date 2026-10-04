@@ -277,8 +277,8 @@ pub use backward::Gradients;
 // `docs/autodiff-higher-order-grad-decision.md` §7〜§9）: `Tape::
 // backward_create_graph`（`impl Tape` ブロック内で定義。`create_graph.rs`
 // を参照）に加え、その戻り値型 `CreateGraphResult` を公開する。facade
-// へは再エクスポートしない（同 doc §9「facade」・#10 承認事項 5 は
-// 未承認のまま。内部クレート限定の機能）。
+// は `fandhe_ai::CreateGraphResult` として再エクスポート済み（#2545。
+// 同 doc §17.2・§19。承認はルート #2499 の一括承認）。
 pub use create_graph::CreateGraphResult;
 pub use custom::CustomFunction;
 pub use error::AutodiffError;

@@ -85,6 +85,8 @@
   - 案 C（JVP／HVP 限定）はテープ再設計が不要で契約への影響が最小だが、提供できる機能が HVP に限られ「grad of grad」の一般形（任意階数の `create_graph`）には届かない。段階 1 の代替案として位置づける
   - 案 D（有限差分）は実装難度が最小だが数値精度が ε 依存であり REQ-2 の統一複合判定の対象にできない。診断・デバッグ用途の暫定手段としてのみ有効
 
+（#2545／#2546 追記）主案 A-2 は facade へ公開済み。実装記録は §18・§19。
+
 ## 6. 数値一致・既存テストとの整合
 
 - 1 階 backward の不変性テスト（既存 `crates/autodiff/tests/backward.rs`・`tape_recording.rs` 等）の非後退を、段階 1 実装 issue の受入条件として引き継ぐ
@@ -163,6 +165,8 @@ func: CustomFn }` も「非対象」に分類する。`CustomFunction::backward`
 7. 二階微分の数値判定方式（新規 tolerance／baseline を伴う場合）
 8. `Op::supports_create_graph()` 機構の新設可否（§8「機構案」）
 9. 段階 1 実装 issue の起票
+
+（#2545／#2546 追記）承認事項 5 について、ルート #2499 本文の一括承認（2026-10-04）の範囲として #2545 で §17.2 の確定形を公開した。記録は §17〜§19。本追記は他の承認事項の状態には言及しない。
 
 ## 11. スコープ外（不変）
 
@@ -437,6 +441,9 @@ not_expose_backward_create_graph_method`）を追加して「facade 未公開」
   適用記録の追記
 
 イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。
+
+（#2545／#2546 追記）本節の保留は #2545 で解除済み。事前提示した変更範囲との対応は §19。
+
 ## 16. 実装記録（イシュー #2062・§8「対象」区分の残り Op 拡張）
 
 `Op::supports_create_graph()`（`tape.rs`）が判定する対象を、#1942・
@@ -596,5 +603,62 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 
 - §17.2 の確定形のみを実装した: crate ルート `pub use fandhe_ai_autodiff::CreateGraphResult;`（1 行）と facade `Tape::backward_create_graph`（`self.0.backward_create_graph(loss, &child.0)` の薄い委譲 1 件）。autodiff 側のロジック変更なし（`create_graph.rs` のモジュール doc のみ更新）。§17.3 の項目は追加していない
 - **ガード反転の前倒し**: §17.5 は否定ガード 2 件の正ガード化を #2546 に割り当てていたが、公開と同時にそれらが失敗し `cargo test --workspace` が green にならないため、#2545 で `tests/api_surface.rs` を正ガード 4 件（再エクスポート形状・薄い委譲本体・宣言インベントリ・シグネチャ到達性）へ置き換えた（#2727・#2729〜#2731 と同じ運用）
-- **#2546 の残りスコープ**: `docs/compat-api-scope.md` §5 適用記録・`docs/compat-feature-gap.md` §2.11 の更新（必要なら追加のガード強化）
+- **#2546 の残りスコープ**: `docs/compat-api-scope.md` §5 適用記録・`docs/compat-feature-gap.md` §2.11 の更新（必要なら追加のガード強化）。**#2546 で実施済み（§19）**
 - 公開経路テストは `crates/facade/tests/create_graph_facade.rs`（CPU 9 件・GPU `#[ignore]`）と `Tape::backward_create_graph` の doctest。GPU 実機手順は `docs/perf/logs/create-graph-facade-2545/README.md`
+
+## 19. facade 公開の実装記録（#2545／#2546）
+
+§17.2 の確定形は PR #2735（#2545。`0e5737f1`）で公開済みである。承認の範囲はルート #2499 本文の一括承認（2026-10-04）に基づく §17 のとおりで、本節はそれを超える承認を主張しない。本節は #2546 による記録であり、公開面は変更しない。
+
+### 19.1 公開した名前
+
+- crate ルート `pub use fandhe_ai_autodiff::CreateGraphResult;`（1 件）
+- facade `Tape::backward_create_graph<'c>(&self, loss: &Var<'_>, child: &'c Tape) -> Result<CreateGraphResult<'c>, AutodiffError>`（本体は `self.0.backward_create_graph(loss, &child.0)` の 1 行委譲）
+- `CreateGraphResult` の公開メソッド `first_order`／`grad`／`child_var`（無変更）
+
+### 19.2 ガード反転の対応表
+
+| #2063 の否定ガード | 現行の正ガード（`crates/facade/tests/api_surface.rs`） |
+|---|---|
+| `facade_does_not_reexport_create_graph_result` | `facade_reexports_create_graph_result_in_approved_shape`（`lib.rs` の 1 行再エクスポートのみ許可） |
+| `facade_tape_does_not_expose_backward_create_graph_method` | `facade_tape_backward_create_graph_is_thin_delegation`（宣言の存在＋本体 `self.0.backward_create_graph(loss, &child.0)` の固定） |
+| （新設） | `workspace_declares_backward_create_graph_only_in_approved_locations`（workspace 内の `fn backward_create_graph` は autodiff 本体 1＋facade 委譲 1 のみ） |
+| （新設） | `tape_backward_create_graph_is_reachable_via_facade`（公開シグネチャ固定＋CPU 最小呼び出し） |
+
+反転の実施は #2735（#2545 での前倒し。§18）で、#2546 では判定ロジック・メッセージとも変更していない。追加のガード強化は不要と判断した。理由は次のとおり。
+
+- 宣言インベントリが facade 側の `backward_create_graph` を 1 件に固定しており、同ファイル内で `TapeRef` 版などを追加すると件数 2 で fail-closed に検出される
+- create_graph 用の `*HoldDoctestGuard`（部分反転が必要な doctest プローブ）は存在しない
+- 4 正ガードの失敗メッセージは既に §17.2 を根拠としている
+
+### 19.3 テスト・利用例
+
+- `Tape::backward_create_graph` の rustdoc doctest
+- `crates/facade/tests/create_graph_facade.rs`（#2545 の CPU 9 件・GPU `#[ignore]` 群）
+- #2546 で追加した 2 件（CPU のみ・tolerance は新設せず既存 `req2_close` を使用）:
+  - `child_built_with_tape_for_parent_device_works`（§17.2 の子テープ構築 `tape_for(parent.device())`・ミラー取得・2 階微分の閉形式一致）
+  - `rejects_parent_with_registered_checkpoint_via_facade`（facade 到達可能な `Var::checkpoint_from` で登録した親を `Err(AutodiffError::Backward(_))` で拒否し、子を変更しない）
+
+### 19.4 保留継続（承認範囲外）
+
+§17.3 の列挙をそのまま維持する。
+
+- `tape.child()` 等の子テープ構築ヘルパー
+- `TapeRef::backward_create_graph`、`new_with_ops` への到達経路
+- HVP 専用 API（案 C）、`backward_accumulate` 併用、checkpoint 併用、残る非対象 Op の拡張
+
+### 19.5 数値契約・実機・互換性
+
+- tolerance／baseline／ガードレール閾値は不変。数値判定は REQ-2 統一複合判定のまま
+- GPU 実機手順は `docs/perf/logs/create-graph-facade-2545/README.md` の申し送りが有効（#2546 の追加テストは CPU のみ）
+- `Cargo.toml`／`Cargo.lock`・`docs/spec/` は不変。`fandhe-ai =0.10.0` に対する非破壊の結論は §17.4 を参照
+- 適用記録は `docs/compat-api-scope.md` §5、追記は `docs/compat-feature-gap.md`
+
+### 19.6 §15 事前提示の変更範囲との対応
+
+| §15 の事前提示 | 実施 |
+|---|---|
+| `crates/facade/src/lib.rs` の再エクスポート＋委譲メソッド | #2735（#2545） |
+| `crates/autodiff/src/create_graph.rs` のモジュール doc 更新 | #2735（#2545） |
+| `api_surface.rs` の否定ガード 2 件の差し替え | #2735（#2545。§19.2） |
+| `docs/compat-api-scope.md`・`docs/compat-feature-gap.md` の記録 | #2546（本節） |
