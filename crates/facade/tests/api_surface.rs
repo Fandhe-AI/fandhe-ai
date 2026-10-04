@@ -3938,26 +3938,28 @@ fn metrics_types_are_reachable_via_facade_only() {
     assert_eq!(history.val_metrics.len(), 1);
 }
 
-/// `crates/facade/src/` の `pub use` が `CustomFunction`（ユーザー定義
-/// forward／backward プラグイン機構。イシュー #1946・案 B）を
-/// 再エクスポートしていないことを固定する（`docs/autodiff-custom-
-/// function-decision.md` §12.5 (b)「facade 公開面」は未承認のまま対象外。
-/// `facade_does_not_reexport_cast_ops` と同型の走査）。
-/// **イシュー #2064（2026-09-22）時点でも §12.5 (b) の承認コメントが
-/// 確認できなかったため未承認のまま維持する**（同 doc §15 保留記録）。
+/// `CustomFunction`（ユーザー定義 forward／backward 抽象。イシュー #1946・案 B）の
+/// facade 再エクスポートが承認形（`lib.rs` の `pub use fandhe_ai_autodiff::
+/// CustomFunction;` ちょうど 1 件。別名・グループ形・他ファイルなし）だけであることを
+/// 固定する（#2549。ルート #2499 の一括承認・`docs/autodiff-custom-function-decision.md`
+/// §16.1 (a)・§16.4。旧否定ガード `facade_does_not_reexport_custom_function` の反転）。
 #[test]
-fn facade_does_not_reexport_custom_function() {
+fn facade_reexports_custom_function_only_at_crate_root() {
     let src_dir = facade_crate_root().join("src");
+    let lib_rs = lib_rs_path();
     let mut offending = Vec::new();
+    let mut approved = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
         for line in content.lines() {
             let trimmed = line.trim_start();
-            if !trimmed.starts_with("pub use") {
+            if !trimmed.starts_with("pub use") || !trimmed.contains("CustomFunction") {
                 continue;
             }
-            if trimmed.contains("CustomFunction") {
+            if path == lib_rs && trimmed == "pub use fandhe_ai_autodiff::CustomFunction;" {
+                approved += 1;
+            } else {
                 offending.push(format!(
-                    "{}: `{trimmed}` が CustomFunction を含む",
+                    "{}: `{trimmed}` は承認形外の CustomFunction 再エクスポート",
                     path.display()
                 ));
             }
@@ -3965,8 +3967,12 @@ fn facade_does_not_reexport_custom_function() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が CustomFunction を再エクスポートしている\
-         （§12.5 (b) は未承認のまま対象外という設計判断に違反）: {offending:?}"
+        "CustomFunction の再エクスポートが承認形（lib.rs の 1 行 `pub use`）外にある\
+         （§16.1 (a) 違反）: {offending:?}"
+    );
+    assert_eq!(
+        approved, 1,
+        "lib.rs の `pub use fandhe_ai_autodiff::CustomFunction;` がちょうど 1 件であること"
     );
 }
 
@@ -4236,59 +4242,60 @@ fn nn_init_items_are_reachable_via_facade_only() {
         (5, 4)
     );
 }
-/// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
-/// `Tape::custom` への転送メソッドを持たないことを固定する（`Tape::
-/// var_no_grad` の前例〈`docs/autodiff-custom-function-decision.md`
-/// §12.4「入口」〉と同じ「転送メソッドを追加しない限り facade から
-/// 到達不能」という設計を、転送メソッド自体が生えていないことで直接
-/// 検査する）。承認 (b) を得て転送メソッドを追加する際は本テストを
-/// 更新する。**イシュー #2064（2026-09-22）時点でも §12.5 (b) の承認
-/// コメントが確認できなかったため未承認のまま維持する**（同 doc §15
-/// 保留記録）。
+/// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）の `pub fn custom` が
+/// 承認形（`self.0.custom(func, inputs)` の 1 行委譲・`pub fn` ちょうど 1 件）であり、
+/// シグネチャが §16.1 (c) と一致することを固定する（#2549。旧否定ガード
+/// `facade_tape_does_not_expose_custom_forwarding_method` の反転。
+/// `tape_stacked_rnn_methods_are_thin_delegations` と同型）。
 #[test]
-fn facade_tape_does_not_expose_custom_forwarding_method() {
-    let lib_rs = facade_crate_root().join("src/lib.rs");
-    let content = read_to_string_or_panic(&lib_rs);
-    // コメント・文字列・char リテラルを除去してから `declares_pub_fn`
-    // （トークン列の連続一致で `pub`・`fn`・関数名の間の空白量に影響
-    // されず、`unsafe`／`const`／`async` 修飾子の挿入にも対応する）で
-    // 判定する（codex-review 指摘・PR #2212: 旧実装
-    // `contains_pub_fn_custom_declaration` は固定文字列 `"pub fn custom"`
-    // の部分一致のため `pub async fn custom`／`pub unsafe fn custom` の
-    // ような修飾子挿入で否定ガードを迂回できた。`compat_sequential_does_
-    // not_expose_custom_add_method` と同じ前処理＋判定の組み合わせに
-    // 揃える）。
+fn facade_tape_custom_is_approved_thin_delegation() {
+    let content = read_to_string_or_panic(&lib_rs_path());
     let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
-    assert!(
-        !declares_pub_fn(&cleaned, "custom"),
-        "facade 独自の Tape に `pub fn custom(...)` 宣言（ジェネリクス・\
-         lifetime 付き `pub fn custom<'t>(`・`unsafe`／`const`／`async` \
-         修飾子付きを含む）が見つかった\
-         （§12.5 (b) 未承認のまま到達可能にしてしまっている）"
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "custom").as_deref(),
+        Some("self . 0 . custom ( func , inputs )"),
+        "Tape::custom の本体が承認形（autodiff Tape::custom への 1 行委譲）と一致しない"
     );
+
+    // シグネチャ（§16.1 (c)）をコンパイル時に固定する。
+    type CustomSig = for<'t> fn(
+        &'t fandhe_ai::Tape,
+        std::sync::Arc<dyn fandhe_ai::CustomFunction>,
+        &[fandhe_ai::Var<'t>],
+    ) -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError>;
+    let _sig: CustomSig = fandhe_ai::Tape::custom;
 }
 
-/// `crates/facade/src/` に `CustomFunction` 識別子が一切現れないことを
-/// 固定する（イシュー #2064 AC-4。`facade_does_not_reexport_custom_
-/// function` は `pub use` 行のみを走査するため、CUDA Graph step との
-/// 結線・gradcheck 相当の補助関数等、`pub use` を経由しない別の合成
-/// 入口〈`pub fn foo(f: CustomFunction)` のような新規シグネチャ〉が
-/// 生えても検出できない。本テストは `facade_does_not_expose_pool_
-/// implementation_types` と同型のファイル全文走査で、承認 (b) 前に
-/// そうした合成入口が facade へ混入することを構造的に遮断する）。
+/// `crates/facade/src/` に `CustomFunction` 識別子が現れる箇所が、承認形の 2 件
+/// （`lib.rs` の `pub use` と `Tape::custom` のシグネチャ）だけであることを固定する
+/// （イシュー #2064 AC-4 の縮小。#2549・§16.4）。コメント・文字列を除いたトークン列で
+/// 数えるため、doc／doctest の言及では落ちない。`pub fn foo(f: CustomFunction)` のような
+/// 新規の合成入口（他ファイルや `lib.rs` 内の 3 件目）は fail-closed に検出する。
 #[test]
 fn facade_public_functions_do_not_take_custom_function() {
     let src_dir = facade_crate_root().join("src");
+    let lib_rs = lib_rs_path();
     let mut offending = Vec::new();
+    let mut lib_count = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
-        if content.contains("CustomFunction") {
-            offending.push(path.display().to_string());
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let count = tokens.iter().filter(|t| *t == "CustomFunction").count();
+        if path == lib_rs {
+            lib_count += count;
+        } else if count > 0 {
+            offending.push(format!("{}: {count} 件", path.display()));
         }
     });
     assert!(
         offending.is_empty(),
-        "facade の src/ に CustomFunction 識別子が現れている\
-         （§12.5 (b) 未承認のまま合成入口を設けてしまっている）: {offending:?}"
+        "lib.rs 以外の facade src に CustomFunction 識別子が現れている\
+         （§16.1 の承認形外の合成入口）: {offending:?}"
+    );
+    assert_eq!(
+        lib_count, 2,
+        "lib.rs の CustomFunction 識別子は `pub use` と `Tape::custom` の計 2 件のみ"
     );
 }
 
@@ -4360,10 +4367,11 @@ fn declares_fn_named_detects_trait_method_and_ignores_comments_and_strings() {
     assert!(!declares_fn_named("fn custom_extra(&self) {}", "custom"));
 }
 
-/// facade 全ソース（`crates/facade/src/` 配下の全 `.rs`）に `fn custom`／
-/// `fn add_custom` の宣言が可視性・宣言文脈（inherent impl・trait impl・
-/// trait 定義・自由関数のいずれか）を問わず一切現れないことを固定する
-/// （codex-review 指摘・PR #2212）。`facade_tape_does_not_expose_custom_
+/// facade 全ソース（`crates/facade/src/` 配下の全 `.rs`）に `fn add_custom` の宣言が
+/// 一切なく、`fn custom` の宣言が承認形の `lib.rs`（`Tape::custom`）の 1 件だけで
+/// あることを、可視性・宣言文脈（inherent impl・trait impl・trait 定義・自由関数の
+/// いずれか）を問わず固定する（codex-review 指摘・PR #2212。#2549 で `custom` 1 件を
+/// 許す形へ縮小）。`facade_tape_does_not_expose_custom_
 /// forwarding_method`（`lib.rs` の `pub fn custom` のみ）・
 /// `compat_sequential_does_not_expose_custom_add_method`（`src/compat/`
 /// 配下の `pub fn add_custom` のみ）はいずれも `pub fn` 形の宣言しか
@@ -4375,18 +4383,31 @@ fn declares_fn_named_detects_trait_method_and_ignores_comments_and_strings() {
 #[test]
 fn facade_source_declares_no_custom_fn_in_any_context() {
     let src_dir = facade_crate_root().join("src");
+    let lib_rs = lib_rs_path();
     let mut offending = Vec::new();
+    let mut lib_custom = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
-        for fn_name in ["custom", "add_custom"] {
-            if declares_fn_named(content, fn_name) {
-                offending.push(format!("{}: `fn {fn_name}` 宣言", path.display()));
-            }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        // `fn custom` は承認形の `lib.rs`（`Tape::custom`）に 1 件だけ許す（#2549・§16.4）。
+        let custom = count_fn_declarations_by_name(&tokens, "custom");
+        if path == lib_rs {
+            lib_custom += custom;
+        } else if custom > 0 {
+            offending.push(format!("{}: `fn custom` 宣言 {custom} 件", path.display()));
+        }
+        if declares_fn_named(content, "add_custom") {
+            offending.push(format!("{}: `fn add_custom` 宣言", path.display()));
         }
     });
     assert!(
         offending.is_empty(),
-        "facade の src/ に `fn custom`／`fn add_custom` 宣言が可視性・文脈を問わず\
-         見つかった（§12.5 (b) 未承認のまま合成入口を設けてしまっている）: {offending:?}"
+        "facade の src/ に承認形外の `fn custom`／`fn add_custom` 宣言が可視性・文脈を問わず\
+         見つかった（§16.1・§16.2 の範囲外の合成入口）: {offending:?}"
+    );
+    assert_eq!(
+        lib_custom, 1,
+        "lib.rs の `fn custom` 宣言は `Tape::custom` の 1 件のみ"
     );
 }
 
@@ -6109,8 +6130,6 @@ fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
 }\n\
 \n\
 fn __probe_tape(x: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::Tape::custom(x);\n\
-\x20\x20\x20\x20let _: __FandheHoldMarker = x.custom();\n\
 \x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::Tape::add_custom(x);\n\
 \x20\x20\x20\x20let _: __FandheHoldMarker = x.add_custom();\n\
 }\n\
@@ -6849,7 +6868,7 @@ fn count_fn_declarations_by_name(tokens: &[String], target_name: &str) -> usize 
 /// 参照型への impl・raw identifier・extern ABI 修飾子付き）を問わず
 /// `fn custom`／`fn add_custom` 宣言を検出し、コメント・文字列・raw
 /// 文字列中の同型テキストは検出しないことを固定する合成入力テスト
-/// （[`workspace_declares_custom_fn_only_on_tape`] の検出ロジック自体の
+/// （[`workspace_declares_custom_fn_only_on_tape_and_facade_delegation`] の検出ロジック自体の
 /// 自己テスト）。
 #[test]
 fn count_fn_declarations_by_name_detects_all_declaration_contexts() {
@@ -6929,8 +6948,9 @@ fn workspace_crates_dir() -> std::path::PathBuf {
 /// 形）の宣言が、可視性・宣言文脈（inherent impl・trait impl・trait
 /// 定義〈デフォルトメソッド含む〉・blanket impl・自由関数・マクロ本体
 /// 内のいずれか）を問わず現れる箇所を全て数え上げ、その集合が
-/// `crates/autodiff/src/tape.rs`（`Tape::custom`。イシュー #1946 案 B）
-/// の 1 件のみであることを固定する（workspace 全体の定義元インベント
+/// `crates/autodiff/src/tape.rs`（`Tape::custom`。イシュー #1946 案 B）と
+/// `crates/facade/src/lib.rs`（facade `Tape::custom` の委譲。#2549）の各 1 件のみで
+/// あることを固定する（workspace 全体の定義元インベント
 /// リ。イシュー #2064 PR #2212 codex-review 指摘〈P2〉への対応: facade
 /// のソース走査・`VarCustomHoldDoctestGuard` の正のプローブはいずれも
 /// 「facade から到達可能か」しか見ないため、facade の外
@@ -6939,7 +6959,7 @@ fn workspace_crates_dir() -> std::path::PathBuf {
 /// できる形で将来公開してしまった場合に備え、そもそもの定義元を先に
 /// 塞ぐ多層防御の最内層とする）。
 #[test]
-fn workspace_declares_custom_fn_only_on_tape() {
+fn workspace_declares_custom_fn_only_on_tape_and_facade_delegation() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -6983,17 +7003,19 @@ fn workspace_declares_custom_fn_only_on_tape() {
         });
     }
 
-    let expected: std::collections::BTreeMap<String, usize> =
-        [("autodiff/src/tape.rs::custom".to_string(), 1usize)]
-            .into_iter()
-            .collect();
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("autodiff/src/tape.rs::custom".to_string(), 1usize),
+        ("facade/src/lib.rs::custom".to_string(), 1usize),
+    ]
+    .into_iter()
+    .collect();
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の `fn custom`／`fn add_custom` 宣言\
-         集合が `crates/autodiff/src/tape.rs::custom`（1 件）のみという\
-         期待と一致しない（過不足いずれも fail-closed に検出する。新たな\
-         定義元が見つかった場合、それが承認済みの §12.5 (b) 実装なのか\
+         集合が `crates/autodiff/src/tape.rs::custom`・`crates/facade/src/lib.rs::custom`\
+         （各 1 件。#2549・§16.1）のみという期待と一致しない（過不足いずれも\
+         fail-closed に検出する。新たな定義元が見つかった場合、それが承認形なのか\
          迂回経路の混入なのかを確認すること）: {found:?}"
     );
 }
@@ -7143,7 +7165,7 @@ fn scan_facade_unmodelable_structures(content: &str) -> Vec<String> {
 /// facade src 全体が [`scan_facade_unmodelable_structures`] の違反を
 /// 一切含まないことを固定する（イシュー #2064 codex P2 指摘への対応。
 /// `facade_source_declares_no_custom_fn_in_any_context`・
-/// `workspace_declares_custom_fn_only_on_tape` 等の否定ガードは、いずれも
+/// `workspace_declares_custom_fn_only_on_tape_and_facade_delegation` 等の否定ガードは、いずれも
 /// 「コメント・文字列リテラルを除去したソーステキストのトークン走査」
 /// という前提の上に成り立つ。この前提を崩す構造（`#[path]` による
 /// ファイル分割の隠蔽・`cfg` によるビルド構成依存の公開面・

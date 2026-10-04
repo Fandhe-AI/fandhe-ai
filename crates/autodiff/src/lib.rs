@@ -154,9 +154,10 @@
 //! variant）を追加した。[`CustomFunction`]（`custom.rs`）を実装し
 //! `Tape::custom` へ渡すことで、組み込み演算では表現できない独自の
 //! 勾配（straight-through estimator・gradient reversal 等）をグラフへ
-//! 登録できる。内部クレート限定の `pub` API（`docs/autodiff-custom-
-//! function-decision.md` §12.5 (a)）であり、facade（唯一のサポート
-//! 対象公開面）は再エクスポートしない（(b) は未承認のまま対象外）。
+//! 登録できる。facade（唯一のサポート対象公開面）へはイシュー #2549
+//! （`docs/autodiff-custom-function-decision.md` §16.1）で
+//! `fandhe_ai::CustomFunction` の再エクスポートと facade `Tape::custom`
+//! の薄い委譲として公開済み（`Var::custom` は設けない）。
 
 //! イシュー #2141（親 #2131）で bool を返す比較 6 種
 //! （`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）・
