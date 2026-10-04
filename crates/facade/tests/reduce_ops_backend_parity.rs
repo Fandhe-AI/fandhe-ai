@@ -1,5 +1,5 @@
-//! `fandhe_ai_autodiff::reduce_ops`（イシュー #2147・facade 非公開の
-//! 内部入口。`crates/autodiff/src/reduce_ops.rs` モジュール doc 参照）
+//! `fandhe_ai_autodiff::reduce_ops`（イシュー #2147・`Var` 委譲メソッドとしてのみ公開。
+//! モジュール自体は facade 非再エクスポート。`crates/autodiff/src/reduce_ops.rs` モジュール doc 参照）
 //! のバックエンド間 parity テスト（`matrix_ops_backend_parity.rs` と
 //! 同型）。
 //!

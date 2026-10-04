@@ -1,5 +1,5 @@
-//! `fandhe_ai_autodiff::extremum_ops`（イシュー #2154・facade 非公開の
-//! 内部入口。`crates/autodiff/src/extremum_ops.rs` モジュール doc 参照）
+//! `fandhe_ai_autodiff::extremum_ops`（イシュー #2154・`Var` 委譲メソッドとしてのみ公開。
+//! モジュール自体は facade 非再エクスポート。`crates/autodiff/src/extremum_ops.rs` モジュール doc 参照）
 //! のバックエンド間 parity テスト（`reduce_ops_backend_parity.rs` と
 //! 同型）。
 //!
