@@ -10370,135 +10370,16 @@ fn var_einsum_batch_contraction_is_reachable_via_facade_only() {
 }
 
 // =====================================================================
-// #2148（親 #2131）の facade 公開保留固定（`VarIndexingOpsHoldDoctestGuard`）。
-// `VarReduceOpsHoldDoctestGuard`（イシュー #2147。#2514 で削除済み）と同型の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// #2148 実装・#2518 公開（親 #2500・ルート #2499）の正ガード。旧否定ガード
+// （`VarIndexingOpsHoldDoctestGuard`・対応するテスト 2 件・固定文言）を、承認形
+// （`Var::advanced_indexing`／`index_put`／`index_put_` の 1 行委譲）だけを許す形へ
+// 反転した（先例 #2198・#2338・#2511）。承認事項は
 // `docs/autodiff-indexing-inplace-design.md` §6 参照。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `VarIndexingOpsHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`reduce_ops_hold_doctest_globs_all_pub_modules`〈#2514 で削除済み〉の
-/// `VarIndexingOpsHoldDoctestGuard` 版）。
-#[test]
-fn indexing_ops_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarIndexingOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "VarIndexingOpsHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// [`indexing_ops_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`INDEXING_OPS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（`reduce_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`と同じ理由: rustdoc の
-/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
-/// を骨抜きにする改変を機械的に拒否する）。
-#[test]
-fn indexing_ops_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarIndexingOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, INDEXING_OPS_HOLD_PROBE_BODY,
-        "VarIndexingOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 INDEXING_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_indexing_hold_probe モジュール・\
-         __FandheIndexingHoldProbe トレイト・__probe_* 関数）の削除・\
-         弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`indexing_ops_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `VarIndexingOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const INDEXING_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_indexing_hold_probe {\n\
-\x20\x20\x20\x20pub mod indexing_ops {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn advanced_indexing() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn index_put() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn index_put_() {}\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_indexing_hold_probe::*;\n\
-\n\
-struct __FandheIndexingMarker;\n\
-\n\
-trait __FandheIndexingHoldProbe {\n\
-\x20\x20\x20\x20fn advanced_indexing(&self) -> __FandheIndexingMarker;\n\
-\x20\x20\x20\x20fn index_put(&self) -> __FandheIndexingMarker;\n\
-\x20\x20\x20\x20fn index_put_(&self) -> __FandheIndexingMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheIndexingHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn advanced_indexing(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-\x20\x20\x20\x20fn index_put(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-\x20\x20\x20\x20fn index_put_(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-}\n\
-\n\
-impl __FandheIndexingHoldProbe for fandhe_ai::Tensor<f32> {\n\
-\x20\x20\x20\x20fn advanced_indexing(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-\x20\x20\x20\x20fn index_put(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-\x20\x20\x20\x20fn index_put_(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-}\n\
-\n\
-impl __FandheIndexingHoldProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn advanced_indexing(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-\x20\x20\x20\x20fn index_put(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-\x20\x20\x20\x20fn index_put_(&self) -> __FandheIndexingMarker { __FandheIndexingMarker }\n\
-}\n\
-\n\
-fn __probe_free_fns() {\n\
-\x20\x20\x20\x20// `indexing_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
-\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
-\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20indexing_ops::advanced_indexing();\n\
-\x20\x20\x20\x20indexing_ops::index_put();\n\
-\x20\x20\x20\x20indexing_ops::index_put_();\n\
-}\n\
-\n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = fandhe_ai::Var::advanced_indexing(x);\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = x.advanced_indexing();\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = fandhe_ai::Var::index_put(x);\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = x.index_put();\n\
-}\n\
-\n\
-fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = fandhe_ai::Tensor::index_put_(x);\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = x.index_put_();\n\
-}\n\
-\n\
-fn __probe_tape(x: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = fandhe_ai::Tape::advanced_indexing(x);\n\
-\x20\x20\x20\x20let _: __FandheIndexingMarker = x.advanced_indexing();\n\
-}";
-
 /// `advanced_indexing`・`index_put`・`index_put_`（3 個の関数名。イシュー
 /// #2148）。[`facade_does_not_reexport_or_declare_indexing_ops`]・
-/// [`workspace_declares_indexing_ops_fn_names_only_in_autodiff_indexing_ops`]
+/// [`workspace_declares_indexing_ops_fn_names_only_in_approved_locations`]
 /// が共用する。
 const INDEXING_OPS_FN_NAMES: [&str; 3] = ["advanced_indexing", "index_put", "index_put_"];
 
@@ -10507,9 +10388,10 @@ const INDEXING_OPS_FN_NAMES: [&str; 3] = ["advanced_indexing", "index_put", "ind
 /// モジュール再エクスポート・別名含む）も、[`INDEXING_OPS_FN_NAMES`]
 /// （3 個）の `fn` 宣言（可視性・宣言文脈を問わない。
 /// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
-/// 固定する（`VarIndexingOpsHoldDoctestGuard` の正のプローブと多層防御を
-/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// reduce_ops` と同型）。
+/// 固定する。承認形は autodiff 側の `Var` の inherent 委譲メソッドのみで、
+/// facade でのモジュール再エクスポート・別名・独自の `fn` 宣言は引き続き
+/// 拒否する（#2518 で保留ガードから正ガードの一部へ位置づけを変更。検査
+/// ロジックは不変）。
 #[test]
 fn facade_does_not_reexport_or_declare_indexing_ops() {
     let src_dir = facade_crate_root().join("src");
@@ -10538,9 +10420,8 @@ fn facade_does_not_reexport_or_declare_indexing_ops() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が indexing_ops（イシュー #2148 の内部クレート限定\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+        "facade が indexing_ops を再エクスポート、または同名の fn を宣言している\
+         （承認形は autodiff の `Var` 委譲メソッドのみ。イシュー #2518）: {offending:?}"
     );
 }
 
@@ -10551,10 +10432,11 @@ fn facade_does_not_reexport_or_declare_indexing_ops() {
 ///
 /// **期待集合**（着手前確認の再 grep で判明。実装計画「インベントリを
 /// 実測する」手順）: `advanced_indexing`・`index_put`・`index_put_` は
-/// いずれも `crates/autodiff/src/indexing_ops.rs` にのみ 1 件ずつ存在
-/// する。
+/// いずれも `crates/autodiff/src/indexing_ops.rs`（各 1 件）と
+/// `crates/autodiff/src/var.rs`（`Var` 委譲メソッド。各 1 件。#2518）に
+/// のみ存在する。
 #[test]
-fn workspace_declares_indexing_ops_fn_names_only_in_autodiff_indexing_ops() {
+fn workspace_declares_indexing_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -10584,38 +10466,118 @@ fn workspace_declares_indexing_ops_fn_names_only_in_autodiff_indexing_ops() {
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
             for fn_name in INDEXING_OPS_FN_NAMES {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
-                    let rel = path
-                        .strip_prefix(&crates_dir)
-                        .unwrap_or(path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
                     *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
                 }
             }
         });
     }
 
-    let expected: std::collections::BTreeMap<String, usize> = INDEXING_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = INDEXING_OPS_FN_NAMES
         .iter()
         .map(|name| (format!("autodiff/src/indexing_ops.rs::{name}"), 1usize))
         .collect();
+    for name in INDEXING_OPS_FN_NAMES {
+        expected.insert(format!("autodiff/src/var.rs::{name}"), 1usize);
+    }
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の indexing_ops 系 `fn` 宣言集合が\
-         `crates/autodiff/src/indexing_ops.rs`（3 件）のみという期待と\
-         一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
+         期待（`crates/autodiff/src/indexing_ops.rs` 各 1 件 +\
+         `autodiff/src/var.rs` 各 1 件）と一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
          が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
          なのかを確認すること）: {found:?}"
     );
 }
 
+/// `var.rs` の 3 委譲メソッド本体の承認形（`indexing_ops` 自由関数への
+/// 1 行委譲。引数名も固定）。独自実装・スタブへのすり替えと添字検査の
+/// 迂回を拒否する（#2518。[`REARRANGE_OPS_VAR_EXPECTED_BODIES`] と同型）。
+const INDEXING_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 3] = [
+    (
+        "advanced_indexing",
+        "crate : : indexing_ops : : advanced_indexing ( self , indices )",
+    ),
+    (
+        "index_put",
+        "crate : : indexing_ops : : index_put ( self , indices , values , accumulate )",
+    ),
+    (
+        "index_put_",
+        "crate : : indexing_ops : : index_put_ ( self , indices , values , accumulate )",
+    ),
+];
+
+/// `var.rs` の 3 委譲メソッドの本体が [`INDEXING_OPS_VAR_EXPECTED_BODIES`]
+/// と一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
+#[test]
+fn var_indexing_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in INDEXING_OPS_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（indexing_ops 自由関数への \
+             1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけ（`fandhe_ai_autodiff` を import
+/// しない）で 3 メソッドへ到達でき、シグネチャが承認形と一致し、実際に
+/// 適用して期待値が得られることを固定する（スタブでは通らない。#2518）。
+#[test]
+fn var_indexing_ops_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+
+    type ReadSig<'t> = fn(&Var<'t>, &[Tensor<i32>]) -> Result<Var<'t>, AutodiffError>;
+    type PutSig<'t> =
+        fn(&Var<'t>, &[Tensor<i32>], &Var<'t>, bool) -> Result<Var<'t>, AutodiffError>;
+    type PutInPlaceSig<'t> =
+        fn(&mut Var<'t>, &[Tensor<i32>], &Var<'t>, bool) -> Result<(), AutodiffError>;
+    fn sig_read<'t>() -> ReadSig<'t> {
+        Var::<'t>::advanced_indexing
+    }
+    fn sig_put<'t>() -> PutSig<'t> {
+        Var::<'t>::index_put
+    }
+    fn sig_put_in_place<'t>() -> PutInPlaceSig<'t> {
+        Var::<'t>::index_put_
+    }
+    fn vals(v: &Var<'_>) -> Vec<f32> {
+        v.to_tensor().host_slice().into_owned()
+    }
+
+    let tape = fandhe_ai::tape();
+    let mut x = tape.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3]).expect("tensor"));
+    let idx = [Tensor::new(vec![2_i32, 0], &[2]).expect("index")];
+    let v = tape.var(&Tensor::new(vec![10.0_f32, 20.0], &[2]).expect("values"));
+    assert_eq!(
+        vals(&sig_read()(&x, &idx).expect("advanced_indexing")),
+        [3.0, 1.0]
+    );
+    assert_eq!(
+        vals(&sig_put()(&x, &idx, &v, false).expect("index_put")),
+        [20.0, 2.0, 10.0]
+    );
+    sig_put_in_place()(&mut x, &idx, &v, true).expect("index_put_");
+    assert_eq!(vals(&x), [21.0, 2.0, 13.0]);
+}
+
 // =====================================================================
 // #2153（親 #2131）の facade 公開保留固定（`VarTopkUniqueOpsHoldDoctestGuard`）。
-// `VarIndexingOpsHoldDoctestGuard`（イシュー #2148）と同型の正のプローブ
+// `VarIndexingOpsHoldDoctestGuard`（イシュー #2148。#2518 で削除済み）と同型の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
 // 定義元インベントリを持つ。承認事項・多層防御の位置づけは
 // `docs/autodiff-topk-unique-ops-decision.md` §6 参照。
@@ -10624,7 +10586,7 @@ fn workspace_declares_indexing_ops_fn_names_only_in_autodiff_indexing_ops() {
 /// `crates/facade/src/lib.rs` の `VarTopkUniqueOpsHoldDoctestGuard` doc
 /// 内の唯一の doctest ブロックが glob import するネスト `pub mod`
 /// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`indexing_ops_hold_doctest_globs_all_pub_modules` の
+/// 固定する（`indexing_ops_hold_doctest_globs_all_pub_modules`〈#2518 で削除済み〉の
 /// `VarTopkUniqueOpsHoldDoctestGuard` 版）。
 #[test]
 fn topk_unique_ops_hold_doctest_globs_all_pub_modules() {
@@ -10651,8 +10613,8 @@ fn topk_unique_ops_hold_doctest_globs_all_pub_modules() {
 /// import 集合の一致のみを固定するのに対し、本テストは doctest
 /// ブロックの**glob 以外の本文**が固定文言
 /// [`TOPK_UNIQUE_OPS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致
-/// することを固定する（`indexing_ops_hold_doctest_probe_body_matches_
-/// fixed_contract` と同じ理由: rustdoc の `# ` 隠し行・プローブの
+/// することを固定する（旧 `indexing_ops_hold_doctest_probe_body_matches_
+/// fixed_contract`〈#2518 で削除済み〉と同じ理由: rustdoc の `# ` 隠し行・プローブの
 /// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
 /// 機械的に拒否する）。
 #[test]
@@ -10798,7 +10760,7 @@ fn facade_does_not_reexport_or_declare_topk_unique_ops() {
 /// workspace 全体（`crates/*/src/`）を再帰走査し、
 /// [`TOPK_UNIQUE_OPS_FN_NAMES`]（3 個）の `fn` 宣言の定義元集合を
 /// 固定する（`workspace_declares_indexing_ops_fn_names_only_in_
-/// autodiff_indexing_ops` と同型のインベントリ）。
+/// approved_locations`〈旧 only_in_autodiff_indexing_ops。#2518 で改名〉と同型のインベントリ）。
 ///
 /// **期待集合**（着手前確認の再 grep で判明）: `topk_with_options`・
 /// `unique_with_options`・`unique_consecutive` はいずれも
@@ -16874,10 +16836,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517 の保留ガード削除後は 24）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518 の保留ガード削除後は 23）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 24;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 23;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\
