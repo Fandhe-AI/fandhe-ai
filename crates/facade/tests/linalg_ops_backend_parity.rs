@@ -1,10 +1,12 @@
-//! `fandhe_ai_autodiff::linalg_ops`（イシュー #2150・facade 非公開の
-//! 内部入口。`crates/autodiff/src/linalg_ops.rs` モジュール doc 参照）
+//! `fandhe_ai_autodiff::linalg_ops`（イシュー #2150。モジュール自体は
+//! facade 非再エクスポートで `Var` の委譲メソッドとしてのみ公開〈#2515〉。
+//! `crates/autodiff/src/linalg_ops.rs` モジュール doc 参照）
 //! のバックエンド間 parity テスト（`reduce_ops_backend_parity.rs` と
 //! 同型）。
 //!
-//! `linalg_ops` は facade から再エクスポートされないため、本テストは
-//! `fandhe_ai_autodiff::linalg_ops::*` を直接 use する。
+//! `linalg_ops` モジュールは facade から再エクスポートされないため、本テストは
+//! `fandhe_ai_autodiff::linalg_ops::*` を直接 use する（`Var` の委譲メソッドは
+//! 同一経路）。
 //!
 //! 属性なし（`fandhe_ai::tape()`〈`CpuBackendOps`〉と
 //! `fandhe_ai_autodiff::Tape::new()`〈`NaiveOps`〉の突き合わせ）:
