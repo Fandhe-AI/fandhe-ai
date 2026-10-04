@@ -4520,6 +4520,43 @@ impl<'t> Var<'t> {
         self.gather(dim, &index_bc)
     }
 
+    // ---- rearrange_ops 委譲メソッド（#2143 実装・#2511 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::rearrange_ops` の自由関数（`index_select`・`broadcast_to`・
+    // `reshape` の合成。新規 `Op` なし）。本体は 1 行委譲に固定し、検査の迂回や
+    // 独自実装へのすり替えを facade の正ガード
+    // （`var_rearrange_ops_methods_are_thin_delegations`）で拒否する。
+    // PyTorch との差異: `roll` の `dims=None` 非対応・負の軸番号非対応。
+    // 数値契約: forward は値コピーのみで bit 一致、`repeat`／`tile` の backward は
+    // REQ-2 統一複合判定（`docs/autodiff-rearrange-ops-decision.md`）。
+
+    /// 指定軸を反転する（`torch.flip` 相当。イシュー #2143・#2511）。
+    /// `crate::rearrange_ops::flip` へ委譲する。軸範囲外・重複は
+    /// `AutodiffError::Shape` で拒否し、`dims` が空なら恒等。
+    pub fn flip(&self, dims: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::flip(self, dims)
+    }
+
+    /// 指定軸を循環シフトする（`torch.roll(shifts, dims)` 相当。イシュー
+    /// #2143・#2511）。`crate::rearrange_ops::roll` へ委譲する。`shifts` と
+    /// `dims` の長さ不一致は `InvalidArgument`。`dims=None` 形は非対応。
+    pub fn roll(&self, shifts: &[isize], dims: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::roll(self, shifts, dims)
+    }
+
+    /// 各軸を `repeats` 回繰り返す（`Tensor.repeat` 相当。イシュー #2143・
+    /// #2511）。`crate::rearrange_ops::repeat` へ委譲する。`repeats.len()` が
+    /// rank 未満なら `InvalidArgument`、巨大確保は確保前に拒否する。
+    pub fn repeat(&self, repeats: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::repeat(self, repeats)
+    }
+
+    /// `torch.tile` 相当（`reps` が rank 未満なら先頭を 1 で埋める。イシュー
+    /// #2143・#2511）。`crate::rearrange_ops::tile` へ委譲する。
+    pub fn tile(&self, reps: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        crate::rearrange_ops::tile(self, reps)
+    }
+
     /// embedding テーブル（`self`。`[num_embeddings, embedding_dim]`）
     /// から `index` が指す行を抽出する（`nn::Embedding` の forward
     /// 本体。`torch.nn.functional.embedding` 相当。イシュー #1604）。

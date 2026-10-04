@@ -14,10 +14,11 @@ PyTorch 互換の形状演算 4 種（`repeat`／`tile`／`flip`／`roll`）を�
 既存の `Var::index_select`（実体は `Var::gather` → `Op::Gather`）・
 `Var::broadcast_to`（`Op::BroadcastTo`）・`Var::reshape`（`Op::Reshape`。
 `repeat` の空テンソル最終化のみで使用。§8 参照）の合成のみで構成した。facade
-公開（`Var` への委譲メソッド追加）は承認待ちのまま対象外とし、
-`crates/facade/src/lib.rs::VarRearrangeOpsHoldDoctestGuard`（正の
-プローブ doctest）と `crates/facade/tests/api_surface.rs` のソース走査・
-workspace インベントリ（4 テスト）で多層固定している。
+公開（`Var` への委譲メソッド追加）は #2143 時点では承認待ちとして
+保留ガードで固定していたが、**ルート #2499 の一括承認を受けて #2511 で
+`Var::flip`／`roll`／`repeat`／`tile` の委譲メソッドとして公開済み**
+（§6 の「実装記録（イシュー #2511）」参照。保留ガードは承認形のみを許す
+正ガードへ反転済み）。
 
 ## §1 背景
 
@@ -134,16 +135,45 @@ forward は値のコピーのみ（算術を含まない）ため 3 バックエ
 ## §5 スコープ外
 
 - facade 公開（`Var::repeat`／`tile`／`flip`／`roll` の委譲メソッド化と
-  保留ガードの撤去）
+  保留ガードの撤去）— **#2511 で実施済み（2026-10-04 ルート #2499 一括承認）**
 - `roll` の `dims=None`（flatten 形）対応
 - GPU 専用カーネル（現状は `gather` の既存カーネル・ホスト
   フォールバックのみで到達）
 
 ## §6 承認事項（未承認として列挙）
 
-1. facade 公開（上記スコープ外 1 と同じ）
+1. facade 公開（上記スコープ外 1 と同じ）— **#2511 で実施済み（下記）**
 2. `roll` の `dims=None` 対応
 3. GPU 専用カーネル
+
+### 実装記録（イシュー #2511・2026-10-04）
+
+ルート #2499 本文「承認範囲」節の一括承認（Phase 1〜3 の facade 公開を設計判断記録の
+推奨形で実装してよい）に基づき、§2.1 案 A の形で公開した（追加 API のみ。
+`fandhe-ai =0.10.0` の公開 API は非破壊）。
+
+- 公開したメソッド（`crates/autodiff/src/var.rs` の `impl<'t> Var<'t>`。本体は
+  `crate::rearrange_ops::*` への 1 行委譲）:
+  `flip(&self, dims: &[usize])`・`roll(&self, shifts: &[isize], dims: &[usize])`・
+  `repeat(&self, repeats: &[usize])`・`tile(&self, reps: &[usize])`
+  （いずれも `Result<Var<'t>, AutodiffError>`）
+- ガードの反転: `VarRearrangeOpsHoldDoctestGuard` と
+  `rearrange_ops_hold_doctest_globs_all_pub_modules`・
+  `rearrange_ops_hold_doctest_probe_body_matches_fixed_contract`（および固定文言
+  `REARRANGE_OPS_HOLD_PROBE_BODY`）を削除。`facade_does_not_reexport_or_declare_rearrange_ops`
+  は名前・検査ロジックを維持（承認形以外の経路を拒否する正ガードの一部）。
+  `workspace_declares_rearrange_ops_fn_names_only_in_autodiff_rearrange_ops` は
+  `workspace_declares_rearrange_ops_fn_names_only_in_approved_locations` へ改名し、期待集合に
+  `autodiff/src/var.rs::<name>` 各 1 件を追加。新設:
+  `var_rearrange_ops_methods_are_thin_delegations`（本体が 1 行委譲と完全一致）・
+  `var_rearrange_ops_are_reachable_via_facade_only`（`fandhe_ai::Var` のみで到達・
+  シグネチャ固定・適用結果の検証）
+- 利用例・単体テスト: `crates/facade/tests/rearrange_ops_facade.rs`（新規）
+- facade では `rearrange_ops` モジュールを再エクスポートしない（`Var` メソッドのみ）。
+  `Tensor`／`Tape` への同名メソッド追加・`roll` の `dims=None`・GPU 専用カーネルは本実装の
+  対象外（上記承認事項 2・3）
+- `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・GPU カーネルは不変。
+  実機 parity の申し送りは §7 のまま有効（委譲先は #2143 と同一経路）
 
 ## §7 実機実測の申し送り
 
@@ -224,9 +254,9 @@ README.md` も新テスト名に追随済み。
 が `flip` の `NaN` payload 保存しか検証していなかった）も同時に是正
 し、`roll`／`repeat`／`tile` の `NaN` payload 保存検証を追加した。
 
-承認取得後の追随（本イシューでは未実施）: `Var::repeat`／`tile`／
-`flip`／`roll` 等の薄い委譲メソッド追加、facade 保留ガード
-（`VarRearrangeOpsHoldDoctestGuard`・対応する否定ガード 4 件）の撤去。
+承認取得後の追随（#2143 時点では未実施 → **#2511 で実施済み**。§6 参照）:
+`Var::repeat`／`tile`／`flip`／`roll` の薄い委譲メソッド追加、facade 保留
+ガード（`VarRearrangeOpsHoldDoctestGuard`・対応する否定ガード 4 件）の撤去。
 
 **追記（PR #2256 CI・レビュー指摘対応。2026-09-24）**: `cargo doc`
 （`-D rustdoc::private-intra-doc-links` 相当。`-D warnings` 暗黙包含）が
