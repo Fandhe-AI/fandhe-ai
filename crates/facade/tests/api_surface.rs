@@ -7963,7 +7963,7 @@ fn bool_ops_hold_doctest_globs_all_pub_modules() {
 /// 定義・`Var`／`Tensor<bool>`／`Tensor<f32>`／`Tape` への実装・
 /// `__probe_*` 関数群）が固定文言 [`BOOL_OPS_HOLD_PROBE_BODY`] と 1 行
 /// たりとも違わず一致することを固定する（`custom_function_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// doctest_probe_body_matches_fixed_contract`と同じ理由: rustdoc の
 /// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
 /// を骨抜きにする改変を機械的に拒否する）。
 #[test]
@@ -9146,153 +9146,16 @@ fn count_fn_declarations_by_name_detects_hook_registration_fn_names() {
 }
 
 // =====================================================================
-// #2144（親 #2131）の facade 公開保留固定（`VarMatrixOpsHoldDoctestGuard`）。
-// `VarRearrangeOpsHoldDoctestGuard`（#2143。#2511 で削除済み）と同型の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
+// #2144 実装・#2513 公開（親 #2500・ルート #2499）の正ガード。旧否定ガード
+// （`VarMatrixOpsHoldDoctestGuard`・対応するソース走査 4 件）を、承認形
+// （`Var::tril`／`triu`／`diag`／`trace`／`outer`／`dot` の 1 行委譲）だけを
+// 許す形へ反転した（先例 #2198・#2338・#2511）。承認事項は
 // `docs/autodiff-matrix-ops-decision.md` §6 参照。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `VarMatrixOpsHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （旧 `rearrange_ops_hold_doctest_globs_all_pub_modules`〈#2511 で削除済み〉の
-/// `VarMatrixOpsHoldDoctestGuard` 版）。
-#[test]
-fn matrix_ops_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarMatrixOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "VarMatrixOpsHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// [`matrix_ops_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`MATRIX_OPS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（旧 `rearrange_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`〈#2511 で削除済み〉と同じ理由: rustdoc の
-/// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
-/// を骨抜きにする改変を機械的に拒否する）。
-#[test]
-fn matrix_ops_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarMatrixOpsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, MATRIX_OPS_HOLD_PROBE_BODY,
-        "VarMatrixOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 MATRIX_OPS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_matrix_hold_probe モジュール・\
-         __FandheMatrixHoldProbe トレイト・__probe_* 関数）の削除・\
-         弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`matrix_ops_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `VarMatrixOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const MATRIX_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_matrix_hold_probe {\n\
-\x20\x20\x20\x20pub mod matrix_ops {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn tril() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn triu() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn diag() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn trace() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn outer() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn dot() {}\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_matrix_hold_probe::*;\n\
-\n\
-struct __FandheMatrixMarker;\n\
-\n\
-trait __FandheMatrixHoldProbe {\n\
-\x20\x20\x20\x20fn tril(&self) -> __FandheMatrixMarker;\n\
-\x20\x20\x20\x20fn triu(&self) -> __FandheMatrixMarker;\n\
-\x20\x20\x20\x20fn diag(&self) -> __FandheMatrixMarker;\n\
-\x20\x20\x20\x20fn trace(&self) -> __FandheMatrixMarker;\n\
-\x20\x20\x20\x20fn outer(&self) -> __FandheMatrixMarker;\n\
-\x20\x20\x20\x20fn dot(&self) -> __FandheMatrixMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheMatrixHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-}\n\
-\n\
-impl __FandheMatrixHoldProbe for fandhe_ai::Tensor<f32> {\n\
-\x20\x20\x20\x20fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-}\n\
-\n\
-impl __FandheMatrixHoldProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn tril(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn triu(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn diag(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn trace(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn outer(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-\x20\x20\x20\x20fn dot(&self) -> __FandheMatrixMarker { __FandheMatrixMarker }\n\
-}\n\
-\n\
-fn __probe_free_fns() {\n\
-\x20\x20\x20\x20// `matrix_ops::` を経由した経路解決（`use fandhe_ai::*;` が\n\
-\x20\x20\x20\x20// 同名モジュールを glob 公開していれば、名前解決自体が曖昧に\n\
-\x20\x20\x20\x20// なり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20matrix_ops::tril();\n\
-\x20\x20\x20\x20matrix_ops::triu();\n\
-\x20\x20\x20\x20matrix_ops::diag();\n\
-\x20\x20\x20\x20matrix_ops::trace();\n\
-\x20\x20\x20\x20matrix_ops::outer();\n\
-\x20\x20\x20\x20matrix_ops::dot();\n\
-}\n\
-\n\
-fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = fandhe_ai::Var::tril(x);\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = x.tril();\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = fandhe_ai::Var::trace(x);\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = x.trace();\n\
-}\n\
-\n\
-fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = fandhe_ai::Tensor::triu(x);\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = x.triu();\n\
-}\n\
-\n\
-fn __probe_tape(x: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = fandhe_ai::Tape::diag(x);\n\
-\x20\x20\x20\x20let _: __FandheMatrixMarker = x.diag();\n\
-}";
-
 /// `tril`・`triu`・`diag`・`trace`・`outer`・`dot`（6 個の関数名。
 /// イシュー #2144）。[`facade_does_not_reexport_or_declare_matrix_ops`]・
-/// [`workspace_declares_matrix_ops_fn_names_only_in_autodiff_matrix_ops`]
+/// [`workspace_declares_matrix_ops_fn_names_only_in_approved_locations`]
 /// が共用する。
 const MATRIX_OPS_FN_NAMES: [&str; 6] = ["tril", "triu", "diag", "trace", "outer", "dot"];
 
@@ -9301,9 +9164,10 @@ const MATRIX_OPS_FN_NAMES: [&str; 6] = ["tril", "triu", "diag", "trace", "outer"
 /// モジュール再エクスポート・別名含む）も、[`MATRIX_OPS_FN_NAMES`]
 /// （6 個）の `fn` 宣言（可視性・宣言文脈を問わない。
 /// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
-/// 固定する（`VarMatrixOpsHoldDoctestGuard` の正のプローブと多層防御を
-/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// rearrange_ops` と同型）。
+/// 固定する。承認形は `Var` の inherent 委譲メソッド（`autodiff` 側）のみで、
+/// facade でのモジュール再エクスポート・別名・独自 `fn` 宣言は承認形に
+/// 含まれないため引き続き拒否する（#2513 で保留ガードから正ガードの一部へ
+/// 位置づけを変更。検査ロジックは不変）。
 #[test]
 fn facade_does_not_reexport_or_declare_matrix_ops() {
     let src_dir = facade_crate_root().join("src");
@@ -9332,9 +9196,8 @@ fn facade_does_not_reexport_or_declare_matrix_ops() {
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が matrix_ops（イシュー #2144 の内部クレート限定\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+        "facade が matrix_ops を再エクスポート、または同名の fn を宣言している\
+         （承認形は autodiff の `Var` 委譲メソッドのみ。イシュー #2513）: {offending:?}"
     );
 }
 
@@ -9343,11 +9206,11 @@ fn facade_does_not_reexport_or_declare_matrix_ops() {
 /// rearrange_ops_fn_names_only_in_approved_locations`（#2511 で改名）と同型の
 /// インベントリ）。
 ///
-/// **期待集合は `crates/autodiff/src/matrix_ops.rs`（各 1 件）のみ**
-/// （着手前確認の再 grep で他クレートとの衝突は見つからなかった。実装
-/// 計画「インベントリを実測する」手順）。
+/// **期待集合は `crates/autodiff/src/matrix_ops.rs`（各 1 件）・
+/// `crates/autodiff/src/var.rs`（`Var` 委譲メソッド。各 1 件。#2513）**
+/// （他クレートとの衝突は見つからなかった）。
 #[test]
-fn workspace_declares_matrix_ops_fn_names_only_in_autodiff_matrix_ops() {
+fn workspace_declares_matrix_ops_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -9391,23 +9254,113 @@ fn workspace_declares_matrix_ops_fn_names_only_in_autodiff_matrix_ops() {
         });
     }
 
-    let expected: std::collections::BTreeMap<String, usize> = MATRIX_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = MATRIX_OPS_FN_NAMES
         .iter()
         .map(|name| (format!("autodiff/src/matrix_ops.rs::{name}"), 1usize))
         .collect();
+    for name in MATRIX_OPS_FN_NAMES {
+        expected.insert(format!("autodiff/src/var.rs::{name}"), 1usize);
+    }
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の matrix_ops 系 `fn` 宣言集合が\
-         期待（`crates/autodiff/src/matrix_ops.rs` 各 1 件のみ）と\
+         期待（`crates/autodiff/src/matrix_ops.rs` 各 1 件 +\
+         `crates/autodiff/src/var.rs` 各 1 件）と\
          一致しない（過不足いずれも fail-closed に検出する。新たな定義元\
          が見つかった場合、それが承認済みの実装なのか迂回経路の混入\
          なのかを確認すること）: {found:?}"
     );
 }
+
+/// `var.rs` の 6 委譲メソッド本体の承認形（`matrix_ops` 自由関数への
+/// 1 行委譲。引数名も固定）。独自実装・スタブへのすり替えと境界検査の
+/// 迂回を拒否する（#2513。[`REARRANGE_OPS_VAR_EXPECTED_BODIES`] と同型）。
+const MATRIX_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 6] = [
+    ("tril", "crate : : matrix_ops : : tril ( self , diagonal )"),
+    ("triu", "crate : : matrix_ops : : triu ( self , diagonal )"),
+    ("diag", "crate : : matrix_ops : : diag ( self , diagonal )"),
+    ("trace", "crate : : matrix_ops : : trace ( self )"),
+    ("outer", "crate : : matrix_ops : : outer ( self , other )"),
+    ("dot", "crate : : matrix_ops : : dot ( self , other )"),
+];
+
+/// `var.rs` の 6 委譲メソッドの本体が [`MATRIX_OPS_VAR_EXPECTED_BODIES`]
+/// と一致することを固定する（本体抽出は [`determinism_fn_body`] を再利用）。
+#[test]
+fn var_matrix_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in MATRIX_OPS_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}` の本体が承認形（matrix_ops 自由関数への \
+             1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// facade の `fandhe_ai::Var` 経由だけ（`fandhe_ai_autodiff` を import
+/// しない）で 6 メソッドへ到達でき、シグネチャが承認形と一致し、実際に
+/// 適用して期待値が得られることを固定する（スタブでは通らない。#2513）。
+#[test]
+fn var_matrix_ops_are_reachable_via_facade_only() {
+    use fandhe_ai::{AutodiffError, Tensor, Var};
+
+    type DiagSig<'t> = fn(&Var<'t>, isize) -> Result<Var<'t>, AutodiffError>;
+    type TraceSig<'t> = fn(&Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    type PairSig<'t> = fn(&Var<'t>, &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    fn sig_tril<'t>() -> DiagSig<'t> {
+        Var::<'t>::tril
+    }
+    fn sig_triu<'t>() -> DiagSig<'t> {
+        Var::<'t>::triu
+    }
+    fn sig_diag<'t>() -> DiagSig<'t> {
+        Var::<'t>::diag
+    }
+    fn sig_trace<'t>() -> TraceSig<'t> {
+        Var::<'t>::trace
+    }
+    fn sig_outer<'t>() -> PairSig<'t> {
+        Var::<'t>::outer
+    }
+    fn sig_dot<'t>() -> PairSig<'t> {
+        Var::<'t>::dot
+    }
+    fn vals(v: &Var<'_>) -> Vec<f32> {
+        v.to_tensor().host_slice().into_owned()
+    }
+
+    let tape = fandhe_ai::tape();
+    let data: Vec<f32> = (1..=9).map(|v| v as f32).collect();
+    let m = tape.var(&Tensor::new(data, &[3, 3]).expect("tensor"));
+    assert_eq!(
+        vals(&sig_tril()(&m, 0).expect("tril")),
+        [1.0, 0.0, 0.0, 4.0, 5.0, 0.0, 7.0, 8.0, 9.0]
+    );
+    assert_eq!(
+        vals(&sig_triu()(&m, 0).expect("triu")),
+        [1.0, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 0.0, 9.0]
+    );
+    assert_eq!(vals(&sig_diag()(&m, 0).expect("diag")), [1.0, 5.0, 9.0]);
+    assert_eq!(vals(&sig_trace()(&m).expect("trace")), [15.0]);
+
+    let a = tape.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3]).expect("tensor"));
+    let b = tape.var(&Tensor::new(vec![4.0_f32, 5.0, 6.0], &[3]).expect("tensor"));
+    assert_eq!(vals(&sig_dot()(&a, &b).expect("dot")), [32.0]);
+    assert_eq!(
+        vals(&sig_outer()(&a, &b).expect("outer")),
+        [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 12.0, 15.0, 18.0]
+    );
+}
+
 // =====================================================================
 // #2146（親 #2131）の facade 公開保留固定（`VarActivationOpsHoldDoctestGuard`）。
-// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の正のプローブ
+// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）と同型の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
 // 定義元インベントリと、`compat::Sequential::add_*` 5 種の非宣言を持つ。
 // 承認事項・多層防御の位置づけは `docs/autodiff-activation-ops-decision.md`
@@ -9417,7 +9370,7 @@ fn workspace_declares_matrix_ops_fn_names_only_in_autodiff_matrix_ops() {
 /// `crates/facade/src/lib.rs` の `VarActivationOpsHoldDoctestGuard` doc
 /// 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合
 /// と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`matrix_ops_hold_doctest_globs_all_pub_modules` の
+/// （旧 `matrix_ops_hold_doctest_globs_all_pub_modules`〈#2513 で削除済み〉 の
 /// `VarActivationOpsHoldDoctestGuard` 版）。
 #[test]
 fn activation_ops_hold_doctest_globs_all_pub_modules() {
@@ -9443,8 +9396,8 @@ fn activation_ops_hold_doctest_globs_all_pub_modules() {
 /// [`activation_ops_hold_doctest_globs_all_pub_modules`] が glob import
 /// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
 /// **glob 以外の本文**が固定文言 [`ACTIVATION_OPS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（`matrix_ops_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// 1 行たりとも違わず一致することを固定する（旧 `matrix_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`〈#2513 で削除済み〉と同じ理由: rustdoc の
 /// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
 /// を骨抜きにする改変を機械的に拒否する）。
 #[test]
@@ -9717,7 +9670,7 @@ fn workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops() 
 
 // =====================================================================
 // #2147（親 #2131）の facade 公開保留固定（`VarReduceOpsHoldDoctestGuard`）。
-// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の正のプローブ
+// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）と同型の正のプローブ
 // 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
 // 定義元インベントリを持つ。承認事項・多層防御の位置づけは
 // `docs/autodiff-reduce-ops-decision.md` §6 参照。
@@ -9726,7 +9679,7 @@ fn workspace_declares_activation_ops_fn_names_only_in_autodiff_activation_ops() 
 /// `crates/facade/src/lib.rs` の `VarReduceOpsHoldDoctestGuard` doc 内の
 /// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
 /// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`matrix_ops_hold_doctest_globs_all_pub_modules` の
+/// （旧 `matrix_ops_hold_doctest_globs_all_pub_modules`〈#2513 で削除済み〉 の
 /// `VarReduceOpsHoldDoctestGuard` 版）。
 #[test]
 fn reduce_ops_hold_doctest_globs_all_pub_modules() {
@@ -9752,8 +9705,8 @@ fn reduce_ops_hold_doctest_globs_all_pub_modules() {
 /// [`reduce_ops_hold_doctest_globs_all_pub_modules`] が glob import
 /// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
 /// **glob 以外の本文**が固定文言 [`REDUCE_OPS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（`matrix_ops_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// 1 行たりとも違わず一致することを固定する（旧 `matrix_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`〈#2513 で削除済み〉と同じ理由: rustdoc の
 /// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
 /// を骨抜きにする改変を機械的に拒否する）。
 #[test]
@@ -9904,7 +9857,7 @@ fn facade_does_not_reexport_or_declare_reduce_ops() {
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`REDUCE_OPS_FN_NAMES`]
 /// （5 個）の `fn` 宣言の定義元集合を固定する（`workspace_declares_
-/// matrix_ops_fn_names_only_in_autodiff_matrix_ops` と同型のインベン
+/// matrix_ops_fn_names_only_in_approved_locations`（#2513 で改名）と同型のインベン
 /// トリ）。
 ///
 /// **期待集合**（着手前確認の再 grep で判明。実装計画「インベントリを
@@ -10521,7 +10474,7 @@ fn indexing_ops_hold_doctest_globs_all_pub_modules() {
 /// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
 /// **glob 以外の本文**が固定文言 [`INDEXING_OPS_HOLD_PROBE_BODY`] と
 /// 1 行たりとも違わず一致することを固定する（`reduce_ops_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// doctest_probe_body_matches_fixed_contract`と同じ理由: rustdoc の
 /// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
 /// を骨抜きにする改変を機械的に拒否する）。
 #[test]
@@ -11015,7 +10968,7 @@ fn extremum_ops_hold_doctest_globs_all_pub_modules() {
 /// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
 /// **glob 以外の本文**が固定文言 [`EXTREMUM_OPS_HOLD_PROBE_BODY`] と
 /// 1 行たりとも違わず一致することを固定する（`reduce_ops_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// doctest_probe_body_matches_fixed_contract`と同じ理由: rustdoc の
 /// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
 /// を骨抜きにする改変を機械的に拒否する）。
 #[test]
@@ -11444,7 +11397,7 @@ fn workspace_declares_determinism_fn_names_only_in_allowed_locations() {
 
 // =====================================================================
 // #2156（親 #2131）の facade 公開保留固定（`RngDistributionsHoldDoctestGuard`）。
-// `VarMatrixOpsHoldDoctestGuard`（イシュー #2144）と同型の正のプローブ 1
+// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）と同型の正のプローブ 1
 // ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
 // 定義元インベントリを持つ。承認事項・多層防御の位置づけは
 // `docs/rng-distributions-generator-decision.md` 参照。
@@ -11453,7 +11406,7 @@ fn workspace_declares_determinism_fn_names_only_in_allowed_locations() {
 /// `crates/facade/src/lib.rs` の `RngDistributionsHoldDoctestGuard` doc
 /// 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合
 /// と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`matrix_ops_hold_doctest_globs_all_pub_modules` の
+/// （旧 `matrix_ops_hold_doctest_globs_all_pub_modules`〈#2513 で削除済み〉 の
 /// `RngDistributionsHoldDoctestGuard` 版）。
 #[test]
 fn rng_distributions_hold_doctest_globs_all_pub_modules() {
@@ -11480,8 +11433,8 @@ fn rng_distributions_hold_doctest_globs_all_pub_modules() {
 /// [`rng_distributions_hold_doctest_globs_all_pub_modules`] が glob
 /// import 集合の一致のみを固定するのに対し、本テストは doctest ブロック
 /// の**glob 以外の本文**が固定文言 [`RNG_DISTRIBUTIONS_HOLD_PROBE_BODY`]
-/// と 1 行たりとも違わず一致することを固定する（`matrix_ops_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// と 1 行たりとも違わず一致することを固定する（旧 `matrix_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`〈#2513 で削除済み〉と同じ理由: rustdoc の
 /// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
 /// を骨抜きにする改変を機械的に拒否する）。
 #[test]
@@ -13366,7 +13319,7 @@ fn loss_ops_hold_doctest_globs_all_pub_modules() {
 /// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
 /// **glob 以外の本文**が固定文言 [`LOSS_OPS_HOLD_PROBE_BODY`] と
 /// 1 行たりとも違わず一致することを固定する（`reduce_ops_hold_
-/// doctest_probe_body_matches_fixed_contract` と同じ理由: rustdoc の
+/// doctest_probe_body_matches_fixed_contract`と同じ理由: rustdoc の
 /// `# ` 隠し行・プローブの削除・別名へのシャドーイング等で正のプローブ
 /// を骨抜きにする改変を機械的に拒否する）。
 #[test]
@@ -17099,10 +17052,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511 の保留ガード削除後は 30）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2513 の保留ガード削除後は 29）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 30;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 29;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\

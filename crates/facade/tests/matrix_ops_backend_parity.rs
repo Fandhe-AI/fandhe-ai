@@ -1,7 +1,7 @@
-//! `fandhe_ai_autodiff::matrix_ops`（イシュー #2144・facade 非公開の
-//! 内部入口。`crates/autodiff/src/matrix_ops.rs` モジュール doc 参照）
-//! のバックエンド間 parity テスト（`rearrange_ops_backend_parity.rs`
-//! と同型）。
+//! `fandhe_ai_autodiff::matrix_ops`（イシュー #2144。facade 公開は `Var` の
+//! 委譲メソッドとしてのみ〈#2513〉で、モジュール自体は再エクスポートしない。
+//! `crates/autodiff/src/matrix_ops.rs` モジュール doc 参照） のバックエンド間 parity テスト
+//! （`rearrange_ops_backend_parity.rs` と同型）。
 //!
 //! `matrix_ops` は facade から再エクスポートされないため、本テストは
 //! `fandhe_ai_autodiff::matrix_ops::*` を直接 use する（facade の dev

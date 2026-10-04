@@ -4557,6 +4557,55 @@ impl<'t> Var<'t> {
         crate::rearrange_ops::tile(self, reps)
     }
 
+    // ---- matrix_ops 委譲メソッド（#2144 実装・#2513 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::matrix_ops` の自由関数（`masked_fill`・`gather`・`narrow`・
+    // `broadcast_to`・`mul`・`sum` 等の合成。新規 `Op` なし）。本体は 1 行委譲に
+    // 固定し、検査の迂回や独自実装へのすり替えを facade の正ガード
+    // （`var_matrix_ops_methods_are_thin_delegations`）で拒否する。
+    // PyTorch との差異: `trace`／`diag` は rank 2 まで（rank 3 以上は非対応）。
+    // 数値契約: `docs/autodiff-matrix-ops-decision.md` §3（forward は
+    // `trace`／`dot` の縮約を除きコピー系で bit 一致、縮約は REQ-2 統一複合判定）。
+
+    /// 下三角以外を 0 にする（`torch.tril` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::tril` へ委譲する。rank 2 以上のみ受け付け、
+    /// 不適合は `AutodiffError::Shape` で拒否する。
+    pub fn tril(&self, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::tril(self, diagonal)
+    }
+
+    /// 上三角以外を 0 にする（`torch.triu` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::triu` へ委譲する。rank 条件・エラーは `tril` と同じ。
+    pub fn triu(&self, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::triu(self, diagonal)
+    }
+
+    /// 対角の抽出（2-D→1-D）または対角行列の構築（1-D→2-D）
+    /// （`torch.diag` 相当。イシュー #2144・#2513）。`crate::matrix_ops::diag`
+    /// へ委譲する。rank 3 以上は `InvalidArgument`。
+    pub fn diag(&self, diagonal: isize) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::diag(self, diagonal)
+    }
+
+    /// 2-D の対角和（`torch.trace` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::trace` へ委譲する。rank 2 以外は `AutodiffError::Shape`。
+    pub fn trace(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::trace(self)
+    }
+
+    /// 1-D 同士の外積（`torch.outer` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::outer` へ委譲する。rank 1 以外は `AutodiffError::Shape`。
+    pub fn outer(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::outer(self, other)
+    }
+
+    /// 1-D 同士の内積（`torch.dot` 相当。イシュー #2144・#2513）。
+    /// `crate::matrix_ops::dot` へ委譲する。rank 1 以外・長さ不一致は
+    /// `AutodiffError::Shape`。
+    pub fn dot(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::matrix_ops::dot(self, other)
+    }
+
     /// embedding テーブル（`self`。`[num_embeddings, embedding_dim]`）
     /// から `index` が指す行を抽出する（`nn::Embedding` の forward
     /// 本体。`torch.nn.functional.embedding` 相当。イシュー #1604）。

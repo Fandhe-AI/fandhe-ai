@@ -15,17 +15,13 @@
 //! `pub(crate)` で非公開のため rustdoc intra-doc link は張らずコード
 //! 表記のみとする）のみ `pub(crate)` へ昇格して共有する）。
 //!
-//! **facade 非公開（意図的）**: `crates/autodiff/src/rearrange_ops.rs`
-//! モジュール doc と同じ理由・同じ判断枠組みによる。`Var` は facade
-//! （`fandhe_ai` クレート）から直接再エクスポートされるため、`Var` への
-//! inherent メソッド追加は即座に facade 公開面へ出てしまう。イシュー
-//! #2144 本文は facade 公開面を承認事項として明示し、親 #2131 はこの
-//! ツリーに限り「設計判断記録 → 承認 → 実装」の 2 段階を定めるため、
-//! 承認が取れるまでは自由関数として `Var` の外に置き到達不能にする
-//! （`docs/autodiff-matrix-ops-decision.md` §2.1）。承認後は
-//! `Var::tril` 等の薄い委譲メソッドを追加し、facade 側の保留ガード
-//! （`crates/facade/src/lib.rs::VarMatrixOpsHoldDoctestGuard`）を撤去
-//! する。
+//! **公開形（#2513 で承認済み・公開済み）**: `Var` は facade（`fandhe_ai`
+//! クレート）から直接再エクスポートされるため、`Var::tril`／`triu`／`diag`／
+//! `trace`／`outer`／`dot` の薄い委譲メソッド（`crates/autodiff/src/var.rs`。
+//! 本体は本モジュールの同名自由関数への 1 行委譲）が facade 公開面になる
+//! （`docs/autodiff-matrix-ops-decision.md` §2.1・ルート #2499 一括承認）。
+//! 本モジュール自体は facade から再エクスポートしない（承認形以外の経路は
+//! `crates/facade/tests/api_surface.rs` の正ガードが拒否する）。
 //!
 //! **数値契約**（§ ごとの詳細は `docs/autodiff-matrix-ops-decision.md`
 //! §3 の表を参照）:
@@ -55,7 +51,7 @@
 //!   判定で比較する。backward（`g * other`。乗算 1 回のみ）は bit 一致
 //!   する。
 //!
-//! **PyTorch との差分（doc に明記。承認後の facade 版でも据え置く
+//! **PyTorch との差分（doc に明記。facade 公開版でも据え置く
 //! 予定）**:
 //! - `trace`・`diag` の 2-D 入力は rank 2 限定（`torch.diagonal` の
 //!   rank 3 以上・バッチ trace は非対応）。
