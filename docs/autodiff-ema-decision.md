@@ -18,7 +18,7 @@ facade（`fandhe_ai::optim` 等への再エクスポート・`compat::FitConfig`
 自動更新）は**別途ユーザー承認**が必要な facade 公開面拡張（親 #2131
 の「facade 公開面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則）で
 あり、本イシュー時点では未承認のため保留する（多層ガードで固定。
-§4・§7）。
+§4・§7）。#2559 の着手時判定と承認依頼は §10。
 
 ## §1 使い方（内部クレート）
 
@@ -169,6 +169,107 @@ parity テストは不要。デバイス常駐経路（`DeviceParamStore`）へ�
   （`min(decay, (1 + n) / (10 + n))`）。
 - `use_buffers=True` 相当（BatchNorm running stats も EMA 対象へ含める
   オプション）。
+
+## §10 #2559 facade 公開形の着手時判定と承認依頼
+
+イシュー #2559（親 #2558）。本節は docs のみの追記であり、facade コード・
+保留ガード（`EmaHoldDoctestGuard`・`api_surface.rs` の EMA 否定ガード）・
+`docs/compat-api-scope.md` は変更しない。**以下の推奨案は未承認**で、承認前は
+兄弟 #2560（facade 公開の実装）・#2561（保留ガードの反転）に着手しない。
+
+### 10.1 着手時判定
+
+判定根拠は §4・§5 の本文（判定に使った `origin/main` は `4fa1b3e9`）。
+そのまま実装できる確定した推奨形は無いと判断した。
+
+1. §5 で唯一「推奨」の案 A（`FitConfig::use_ema(bool)`）は、値の保持に
+   `FitConfig` へのフィールド追加を要する。#2558 の契約は `FitConfig` の
+   `Copy + Eq` 固定のためフィールド追加を行わず非破壊な代替経路で結線すると
+   定めており、案 A は採れない。decay の保持先（`EmaDecay` newtype）も配置未定。
+   （実測: v0.10.0 の `FitConfig` は `#[derive(Debug, Clone, Copy, PartialEq,
+   Eq)]`。契約が明示的に禁じるため採用しない）
+2. 案 B（`Callback::Ema { decay: f32 }`）は「推奨」でなく、仕様が不足する。
+   既存 variant（`EarlyStopping`・`ModelCheckpoint`・`LrSchedule`）は構築時検証
+   型を包む tuple variant で形が揃わない。fit 後の shadow 取得経路、および
+   `DeviceParamStore`・L-BFGS・`compile_with_amp`・`accumulate_steps > 1`・
+   カスタム train_step フック・`ModelCheckpoint`／`EarlyStopping` との組合せが
+   未記載。
+3. §4 項目 1 は「（または相当の型）」で型の形が未確定。内部型の素の
+   `pub use` は `from_module`／`update_from_module`／`apply`／`restore` の
+   シグネチャに内部 `nn::Module` を露出し、facade 独自の `fandhe_ai::nn::Module`
+   を持つ方針（`docs/facade-nn-module-exposure-decision.md` §1.3・REQ-12）に反する。
+
+結論: 停止条項に従い、推奨案を記録して承認を依頼する。
+
+### 10.2 推奨案（未承認）
+
+- **(a) 配置**: `fandhe_ai::optim::ExponentialMovingAverage`。crate ルート・
+  `nn` 配下には置かない。
+- **(b) 型の形**: 内部型を 1 フィールドで保持する facade 独自の薄いラッパー。
+  メソッドは内部の同名メソッドへの委譲で、数値契約（§2）・原子性（§3）は不変。
+  `new(decay, &[&Tensor<f32>])`・`from_named`・`decay`・`num_updates`・`update`・
+  `update_named`・`shadow`・`shadow_parameters`・`shadow_state_dict` は内部と同一
+  シグネチャ（`Result<_, AutodiffError>`）。`from_module`／`update_from_module`／
+  `apply`／`restore` は facade の `&dyn nn::Module` を受け、facade `Module` の
+  `named_parameters`／`state_dict`／`load_state_dict` 経由で委譲する（初回公開面に
+  含めるかは承認事項。代替: 初回は位置対応・名前付き API のみ）。
+  `compat::Sequential` は facade `nn::Module` 非実装のため、既存公開 API と
+  `from_named`／`update_named`／`shadow_state_dict` を結線する
+  （`compat_sequential_ema_manual.rs` が先例）。不採用: 素の
+  `pub use fandhe_ai_autodiff::nn::ExponentialMovingAverage;`（内部 trait 露出）。
+- **(c) エラー型**: 既存 `AutodiffError::InvalidArgument` のみ。新 variant・新エラー
+  型は作らない。検証は §3 と同一。
+- **(d) fit への結線**: `FitConfig` は変更しない。案 B を整形した
+  `Callback::Ema(EmaCallback)`（既存と同じ tuple variant）。
+  `EmaCallback::new(decay: f32) -> Result<Self, AutodiffError>` で構築時に検証し、
+  `Debug` を実装する。
+- **(e) 更新位置**: §5 を踏襲（`apply_parameters` 直後に `update_named`、
+  `accumulate_steps > 1` は実際に step した時のみ更新。評価は shadow 差し替え →
+  評価 → best 判定 → 復帰。`ModelCheckpoint`／`EarlyStopping` は EMA 適用後の
+  重みで判定）。
+- **(f) 終了時挙動**: fit 終了時にモデル重みを自動上書きしない（既存意味論を
+  変えない opt-in）。`EmaCallback` に `shadow_state_dict()` 等の accessor を設け、
+  呼び出し元が `load_state_dict` で適用する。代替: 終了時に shadow で上書き
+  （Keras `ema_overwrite_frequency=None` 相当）。
+- **(g) fail-closed**: `fit_with_callbacks` は次を `InvalidArgument` で拒否する:
+  `DeviceParamStore`／resident 経路（shadow が stale 化）・L-BFGS・カスタム
+  train_step フックとの併用。`compile_with_amp` の skip step は「拒否」か
+  「skip に追従して更新しない」かを論点とする。
+
+### 10.3 記録に無かった追加論点（推奨はいずれも fail-closed）
+
+- `Callback::Ema` の複数指定は拒否する。
+- 名前集合の不一致は既存の two-pass 検証で拒否する。
+- 非有限値は §2 のとおり伝播させる。
+- `num_updates` ウォームアップ（§9）・BatchNorm buffer（§8）は対象外のまま。
+
+### 10.4 `fandhe-ai =0.10.0` 公開 API の非破壊確認
+
+| 論点 | 確認結果 |
+|------|----------|
+| (a)(b) | v0.10.0 の facade に EMA の実項目は無い（`git grep v0.10.0 -- crates/facade/src` の一致は保留ガードの doc コメントのみ）。追加のみで既存の名前・シグネチャは不変 |
+| (c) | エラー型は不変 |
+| (d) | v0.10.0 の `Callback` は `#[non_exhaustive]`＋`#[derive(Debug)]`（#2170 と同じ論証で variant 追加は非破壊）。payload に必要なのは `Debug` のみ |
+| `FitConfig` | フィールド・derive（`Copy`・`Eq`）とも不変 |
+| `compat::Sequential` | inherent メソッドを追加しない（`EmaHoldDoctestGuard` の衝突プローブの守る対象を維持） |
+| 既存 API の意味論 | 不変（opt-in の callback のみ） |
+
+### 10.5 承認を依頼する事項
+
+1. (a) の配置。
+2. (b) ラッパーか素の再エクスポートか、`Module` 系 4 メソッドを初回に含めるか。
+3. (c) エラー型。
+4. (d) `Callback::Ema(EmaCallback)` 形を採るか、fit への結線を後回しにするか。
+5. (f) 終了時に上書きするか、accessor にするか。
+6. (g)／10.3 の fail-closed 一覧（AMP skip の扱いを含む）。
+
+承認された形だけが #2560／#2561 の実装範囲になる。承認が得られるまで両イシューは
+blocked とする。
+
+### 10.6 本節で行わないこと
+
+`crates/facade/**` の変更、保留ガードの反転・`docs/compat-api-scope.md` §5 の更新
+（#2561）、依存追加・`unsafe`・tolerance の変更。
 
 ## OWASP Top 10 観点
 
