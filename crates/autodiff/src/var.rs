@@ -4557,6 +4557,49 @@ impl<'t> Var<'t> {
         crate::rearrange_ops::tile(self, reps)
     }
 
+    // ---- linalg_ops 委譲メソッド（#2150 実装・#2515 公開。親 #2500・ルート #2499）----
+    //
+    // 実体は `crate::linalg_ops` の自由関数（専用 `Op` あり。CPU 本番実装・
+    // GPU は `Unsupported` を受けてホストへフォールバック）。本体は 1 行委譲に
+    // 固定し、入口検証（非有限入力・`rcond`・確保前上限検査）の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_linalg_ops_methods_are_thin_delegations`）で拒否する。
+    // PyTorch との差異: 非有限入力は `InvalidArgument`、`matrix_rank` は f32 出力で
+    // 勾配ゼロ、`lstsq` は解のみを返す。`rcond` は tolerance ではなく特異値の
+    // 打ち切り比（`docs/autodiff-linalg-ops-decision.md`）。
+
+    /// 対称行列の固有分解（`torch.linalg.eigh` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::eigh` へ委譲し、`[n, n]` から昇順の固有値 `[n]` と
+    /// 固有ベクトル `[n, n]` を返す。非正方・非有限入力は拒否する。
+    pub fn eigh(&self) -> Result<crate::linalg_ops::EighVars<'t>, AutodiffError> {
+        crate::linalg_ops::eigh(self)
+    }
+
+    /// 符号と対数絶対行列式（`torch.linalg.slogdet` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::slogdet` へ委譲する。特異行列は `(0, -inf)` を返す。
+    pub fn slogdet(&self) -> Result<crate::linalg_ops::SlogdetVars<'t>, AutodiffError> {
+        crate::linalg_ops::slogdet(self)
+    }
+
+    /// Moore-Penrose 擬似逆行列（`torch.linalg.pinv` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::pinv` へ委譲し、`[m, n]` から `[n, m]` を返す。
+    /// `rcond` が不正（負・非有限）なら拒否する。
+    pub fn pinv(&self, rcond: Option<f32>) -> Result<Var<'t>, AutodiffError> {
+        crate::linalg_ops::pinv(self, rcond)
+    }
+
+    /// 行列の階数（`torch.linalg.matrix_rank` 相当。イシュー #2150・#2515）。
+    /// `crate::linalg_ops::matrix_rank` へ委譲し、f32 のスカラー（形状 `[]`）を返す。
+    pub fn matrix_rank(&self, rcond: Option<f32>) -> Result<Var<'t>, AutodiffError> {
+        crate::linalg_ops::matrix_rank(self, rcond)
+    }
+
+    /// 最小二乗解（`torch.linalg.lstsq` 相当。解のみ返す。イシュー #2150・#2515）。
+    /// `self` が `A`（`[m, n]`）、`b` が `[m, k]` のとき `crate::linalg_ops::lstsq`
+    /// へ委譲して `[n, k]` を返す。
+    pub fn lstsq(&self, b: &Var<'t>, rcond: Option<f32>) -> Result<Var<'t>, AutodiffError> {
+        crate::linalg_ops::lstsq(self, b, rcond)
+    }
+
     // ---- matrix_ops 委譲メソッド（#2144 実装・#2513 公開。親 #2500・ルート #2499）----
     //
     // 実体は `crate::matrix_ops` の自由関数（`masked_fill`・`gather`・`narrow`・
