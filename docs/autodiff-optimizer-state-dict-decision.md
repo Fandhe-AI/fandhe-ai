@@ -266,3 +266,86 @@ momentum 付き `Sgd` を bit 一致で再開するための内部 API（manifes
   `api_surface.rs` の定義元インベントリに `sgd.rs` の 2 エントリを追加
 - 新規 `Op`／`BackendOps`／カーネル／`unsafe`／依存の追加なし。
   `step()` の演算列は不変（bit ドリフトなし）
+
+## §9 #2556（facade 公開形）の着手時判定と承認依頼
+
+### 9.1 経緯
+
+親 #2555（その親 #2542）は、学習の再開のため `OptimizerStateDict` を facade
+へ公開することを求める。子は #2556（公開形の確定と公開。本件）と #2557
+（保留ガードの正ガード化と docs 更新）。#2556 の受入条件は「§4・§5 の推奨形を
+確定形として公開する。推奨形がない、または複数案のままなら、記録へ推奨案を
+追記し承認依頼を残して停止する」である。
+
+### 9.2 着手時判定（停止条項を適用）
+
+調査基準は origin/main `6787457d`。
+
+1. **公開経路が 2 案併記のまま**: §5 項目 1 は「再エクスポート、または
+   inherent メソッド追加」と併記し、どちらを採るか決めていない。§4・§5 に
+   推奨形の記述はない。#2499 の一括承認は記録に書かれた推奨形にのみ及ぶため、
+   本件には及ばない。
+2. **公開されるメソッドの範囲が未決**: `OptimizerStateDict` の impl は 10 型
+   （`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・`Adadelta`・`Adamax`・
+   `NAdam`・`RAdam`・`Sgd`。`crates/autodiff/src/nn/optim/*.rs`・
+   `crates/autodiff/src/optim/sgd.rs:432`）で、いずれも facade 公開済み。§5 項目 1
+   が挙げる 5 型より多く、保留ガードのプローブも 5 型のみ（§8）。
+3. **trait の sealing が未決**: facade から `pub` trait を再エクスポートすると、
+   下流クレートが impl でき、後からのメソッド追加が破壊的変更になる。sealing は
+   `autodiff` 側の変更を要し「facade へ公開」の範囲を超える。
+4. **`Lbfgs` との関係**: `Lbfgs` は trait を実装せず、シグネチャの異なる
+   inherent の `state_dict`／`load_state_dict`
+   （`crates/autodiff/src/nn/optim/lbfgs.rs:403`・`:450`。#2366）を持ち、#2502 以降
+   facade から到達できる。trait の再エクスポートと名前は衝突しない。
+5. **§5 項目 2・3 は本件の対象外**: `compat::Sequential` の optimizer 状態 API
+   （`fit` 再開）と complete checkpoint は #2556 に含めない。
+
+### 9.3 推奨案 A（承認待ち。確定形ではない）
+
+`crates/facade/src/optim.rs` に
+`pub use fandhe_ai_autodiff::nn::optim::OptimizerStateDict;` を 1 文 1 行で
+追加する。根拠:
+
+- `crates/autodiff/src/nn/optim/mod.rs:122` で crate 内の公開再エクスポートが
+  既にある。
+- シグネチャが使う `HashMap`・`Tensor<f32>`・`AutodiffError` は facade から名前で
+  指せる（`AutodiffError` は `crates/facade/src/lib.rs` で再エクスポート済み）。
+- §1 は facade の再エクスポートが 1 行で済むよう別 trait として設計した経緯を
+  記す。既存の optim 公開も素の再エクスポートである
+  （`docs/facade-optimizer-promotion-decision.md` §4 案 A）。
+- 案 B（inherent メソッド）は、facade 側から外部型へ inherent impl を足せない
+  ため `autodiff` 側に 10 型分の重複メソッドが要り、trait メソッドと名前が重なる。
+
+### 9.4 ユーザーに決めてほしい事項
+
+- (a) 公開経路: 案 A（trait 再エクスポート）か案 B（inherent）か。推奨は A。
+- (b) 到達できる impl 集合: 10 型（`Sgd` 含む）すべてを受け入れるか。推奨は
+  受け入れる。保留ガードのプローブとの差（5 型 / 10 型）は反転後の正ガードで
+  10 型を固定して吸収する。
+- (c) sealing: 下流 impl を許すままにし、メソッドを追加しない契約を記録するか。
+  sealing する場合は `autodiff` 側の別 issue と別承認が要る。推奨は
+  sealing しない。
+- (d) `Lbfgs` を trait の対象外のままにする（#2366 の inherent API を維持）
+  ことの確認。
+- (e) #2556 の閉じ方: 承認後に新規 issue で本実装するか、#2556 を reopen するか。
+  #2557 は本承認待ちでブロックされている。
+
+### 9.5 承認後の実装スケッチ（本 PR では実施しない）
+
+- `optim.rs` に `pub use` を 1 行追加し、モジュール doc に対象 10 型・`Lbfgs`
+  対象外・config を保存しないため同じ config で `new` してから load する契約・
+  種別マーカーによる fail-closed・`save_safetensors_f32`／
+  `load_safetensors_f32` での往復を示す doctest を追加。「facade 非公開」の
+  記述を更新する。
+- `lib.rs` の `OptimizerStateDictHoldDoctestGuard` を撤去し、`api_surface.rs` の
+  保留 4 テストのうち否定ガードを、承認した形だけを許す正ガードへ反転する。
+  `optim_module_reexports_exactly_expected_surface` の期待集合へ追加する。
+- facade のみを import した単体テスト（10 型の往復・load 失敗時の状態不変・
+  種別違いの拒否）を追加する。
+- 新規 `Op`／カーネル／`unsafe`／依存はなく、CUDA／Metal parity の申し送りは不要。
+
+### 9.6 本節の位置づけ
+
+本節は承認の取得を意味しない。§5 の保留と `OptimizerStateDictHoldDoctestGuard`・
+4 テストは維持している。本 PR では `crates/`・`Cargo.*`・tolerance・`docs/spec`
+を変更していない。
