@@ -17842,7 +17842,8 @@ fn facade_train_step_public_surface_matches_approved_contract() {
 }
 
 /// 宣言直前の属性行（doc コメント除去・空白除去済みの連結）を返す。
-/// 空行または `}`／`;` で終わる行に当たるまで遡る。宣言が見つからなければ `None`。
+/// 空行は読み飛ばし、`}`／`;` で終わる行に当たるまで遡る（属性と宣言の間に空行を
+/// 挟んで承認外属性を隠す迂回を防ぐ）。宣言が見つからなければ `None`。
 fn attrs_before_pub_struct(content: &str, name: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let idx = lines.iter().position(|l| {
@@ -17853,15 +17854,27 @@ fn attrs_before_pub_struct(content: &str, name: &str) -> Option<String> {
     let mut attrs: Vec<&str> = Vec::new();
     for l in lines[..idx].iter().rev() {
         let t = l.trim();
-        if t.is_empty() || t.ends_with('}') || t.ends_with(';') {
+        if t.ends_with('}') || t.ends_with(';') {
             break;
         }
-        if !t.starts_with("//") {
+        if !t.is_empty() && !t.starts_with("//") {
             attrs.push(t);
         }
     }
     attrs.reverse();
     Some(attrs.concat().split_whitespace().collect())
+}
+
+/// 合成入力で `attrs_before_pub_struct` が空行越しの属性も収集することを確認する。
+#[test]
+fn attrs_before_pub_struct_collects_attrs_across_blank_lines() {
+    let src = "use a::b;\n\n#[non_exhaustive]\n\n#[derive(Clone)]\n\n/// doc\npub struct S {\n    x: u8,\n}\n";
+    assert_eq!(
+        attrs_before_pub_struct(src, "S").as_deref(),
+        Some("#[non_exhaustive]#[derive(Clone)]")
+    );
+    let clean = "fn f() {}\n\npub struct S {}\n";
+    assert_eq!(attrs_before_pub_struct(clean, "S").as_deref(), Some(""));
 }
 
 /// `struct <name>` 本体の中括弧内に `pub` トークンがあるか（pub フィールドの検出）。
