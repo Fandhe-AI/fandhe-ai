@@ -4263,6 +4263,168 @@ struct FftOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct TrigOpsHoldDoctestGuard;
 
+/// 非有限値の判定・置換（`isnan`・`isinf`・`isfinite`・`nan_to_num`。イシュー #2635・
+/// 親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// （`TrigOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `nonfinite_ops` と 4 メソッドを持つプローブ用トレイトを置き、
+/// 修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>`／`Tensor<bool>` の
+/// 修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob
+/// 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せず
+/// コンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、
+/// `tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::nonfinite_ops`・
+/// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）。保留対象は facade
+/// 公開面（`Var::isnan` 等の委譲メソッド）のみで、公開形は未承認（承認依頼は
+/// #2677・公開自体は承認後の #2678。推奨案は
+/// `docs/autodiff-nonfinite-ops-decision.md` §7。同記録は推奨案の記録であり
+/// 承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// nonfinite_ops_hold_doctest_globs_all_pub_modules`・
+/// `nonfinite_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_nonfinite_ops`・
+/// `workspace_declares_nonfinite_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_nonfinite_hold_probe {
+///     pub mod nonfinite_ops {
+///         pub fn isnan() {}
+///         pub fn isinf() {}
+///         pub fn isfinite() {}
+///         pub fn nan_to_num() {}
+///     }
+/// }
+/// use __fandhe_nonfinite_hold_probe::*;
+///
+/// struct __FandheNonfiniteOpsHoldMarker;
+///
+/// trait __FandheNonfiniteOpsHoldProbe {
+///     fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker;
+///     fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker;
+///     fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker;
+///     fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheNonfiniteOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheNonfiniteOpsHoldProbe for fandhe_ai::Tape {
+///     fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheNonfiniteOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheNonfiniteOpsHoldProbe for fandhe_ai::Tensor<bool> {
+///     fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+///     fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker {
+///         __FandheNonfiniteOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     nonfinite_ops::isnan();
+///     nonfinite_ops::isinf();
+///     nonfinite_ops::isfinite();
+///     nonfinite_ops::nan_to_num();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     tb: &fandhe_ai::Tensor<bool>,
+/// ) {
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isnan(v);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isinf(v);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isfinite(v);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::nan_to_num(v);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isnan(tape);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isinf(tape);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isfinite(tape);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::nan_to_num(tape);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<f32>::isnan(tf);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<f32>::isinf(tf);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<f32>::isfinite(tf);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<f32>::nan_to_num(tf);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<bool>::isnan(tb);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<bool>::isinf(tb);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<bool>::isfinite(tb);
+///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tensor::<bool>::nan_to_num(tb);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct NonfiniteOpsHoldDoctestGuard;
+
 /// `Var`／`Tape` の低精度 forward 入口（`matmul_low_precision`・
 /// `add_low_precision`・`mul_low_precision`・`relu_low_precision`・
 /// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・
