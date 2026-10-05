@@ -36,7 +36,7 @@
 | `MarginRankingLoss`（426 行付近） | 同上 | **pub**（`margin`・`reduction`） | `new(f32, Reduction)`・`Default` | `&Var, &Var, &Tensor<f32>` |
 | `TripletMarginLoss`・`PoissonNllLoss`・`CtcLoss` | `Debug, Clone`（`Copy` なし） | 非公開（`options`・`reduction`） | `new(<Options>, Reduction)`・`Default` | `Var` 3 本／`Var` 2 本／`&Var, &Tensor<i32>, &[usize], &[usize]` |
 
-- 戻り値は全て `Result<Var<'t>, AutodiffError>`。14 件とも `#[non_exhaustive]`・`PartialEq` なし
+- 戻り値は全て `Result<Var<'t>, AutodiffError>`。14 件とも `#[non_exhaustive]` なし（`crates/autodiff/src/nn/loss.rs` に `non_exhaustive` は 0 件）・`PartialEq` なし
 - どのシグネチャにも生の `Tape`・`BackendOps` が現れない（`nn::rnn` のような `Tape` 委譲メソッドは不要）
 - 本体は `Var` メソッドまたは `loss_ops` 自由関数への 1 式委譲の薄いラッパーで、入力検査は委譲先が担う
 - `nn/loss.rs:44-47` が 4 オプション型と `Reduction` を `pub use` している
