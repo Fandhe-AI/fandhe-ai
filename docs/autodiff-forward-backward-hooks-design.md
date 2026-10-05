@@ -511,3 +511,105 @@ lifetime とエラー伝播・#2139 の受入基準改訂・facade 公開〈経�
 
 本 PR のマージで #2139 を一旦閉じ、承認後は新規イシューまたは reopen で
 実装する運用とする（前例: #2064・#2133 と同型）。
+
+## 14. #2585（公開形の確定）の着手時判定と承認依頼
+
+### 14.1 経緯
+
+イシュー #2585 は、ルート #2499 の一括承認（2026-10-04）の下で、本 doc §4・§7・§11・§13 の
+**推奨形**により forward／backward hooks の公開形を確定することを求めた。一括承認が及ぶのは
+本 doc に書かれた形だけであり、推奨形が無い論点・複数案併記のままの論点が残る場合は、
+実装せずに記録追記と承認依頼へ切り替える（イシューの停止条項）。基準コミット `47ded9cf`
+（origin/main）で突合した結果、14.3 の論点が残っていたため **facade・autodiff のコードは
+変更していない**。**本節は承認の取得を意味しない**（§11 承認事項 5 は本節追記後も未取得。
+#2585・#2584・#2542・#2499 のコメントは着手時点で 0 件）。
+
+### 14.2 確定済みの形（本 doc に一意に書かれた内部形）
+
+| 項目 | 形 | 出典 |
+|---|---|---|
+| 保持場所 | `Tape` の side table（案 C。`hooks: RefCell<HookRegistry>`、node → 登録順 `Vec<(seq, Arc<dyn Fn…>)>`）。`Var`／`TapeNode` フィールド案は不採用 | §4.1 |
+| backward hook の型 | `Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + Sync + 'static`（観察専用・戻り値 `()`） | §5.2 |
+| 登録入口 | autodiff の `Tape::register_backward_hook(&self, var: &Var<'_>, hook) -> Result<HookHandle, AutodiffError>`・`Tape::remove_hook`。`Var` には `pub fn` を足さない | §7 |
+| 発火位置・順序 | `backward_impl` の逆走査で確定勾配の直後・`grad::vjp` の前。同一ノード内 FIFO・ノード間は NodeId 降順 | §5.2・§5.5 |
+| エラー | 既存 variant のみ（別テープ・stale handle は `TapeMismatch`、`requires_grad == false` は `GradientTrackingDisabled`、hook の `Err` は最初の `Err` で打ち切り伝播）。新規 variant なし | §5.5〜§5.7・§13.4 |
+| lifetime | `HookHandle { tape_id, epoch, node, seq }`。`Tape::reset` で全 hook 消去 | §5.6・§5.7 |
+| forward hook | `Var` 単位は不採用。Module レベルのラッパー。型は `Fn(&ForwardHookCtx<'_>) -> Result<(), AutodiffError> + Send + Sync + 'static`。ctx は `Var` を露出せず `output_value() -> Result<Tensor<f32>, AutodiffError>` で値を返す | §5.3・§5.5 |
+| 数値契約 | backward hook の有無で勾配 bit 一致。forward hook は値を読まなければ bit 一致 | §6 |
+| 役割分担 | `Op::Custom` は値の定義・変更、hook は観察専用。新規 `Op` なし | §5.4 |
+
+### 14.3 停止根拠（未決の論点）
+
+1. §7 は `Tape::register_backward_hook`／`remove_hook` を「例」として autodiff 側に置くと述べるのみで、
+   facade 側のシグネチャ・再エクスポート集合・配置が無い。facade 公開は §11 承認事項 5 へ先送りのまま。
+2. §5.3 は forward 側ラッパーの名称を #2139 で確定するとしており未確定。
+3. §13.4 の facade 項目は「承認された項目に限りガードを置換」という一般文のみで、具体形が無い。
+4. **記録作成後の前提変化**: facade は独自の `fandhe_ai::nn::Module`（第 1 引数 `TapeRef<'t>`・
+   `forward_host` なし。`crates/facade/src/nn/module.rs:45`）を公開済みで、autodiff の `nn::Module`
+   （第 1 引数 `&'t Tape`・`forward_host` あり。`crates/autodiff/src/nn/module.rs:141`）とは別 trait。
+   §7 の「facade の `nn` は未公開」は現状と合わず、forward hook の facade 到達経路が未検討。
+5. §5.6 は resident 葉への登録を fail-closed で `Err` とするだけで variant を指定していない。
+6. `HookHandle` の derive・フィールド可視性・二重解除の扱い、`ForwardHookCtx` の shape accessor 名、
+   `ForwardHooked` の構築子が未記載。
+
+### 14.4 論点ごとの推奨案（いずれも未承認）
+
+| 論点 | 推奨案 | 比較した他案 |
+|---|---|---|
+| P1 型名 | `HookHandle`・`ForwardHooked`・`ForwardHookCtx` を最終名とする（仮称・保留ガードのプローブ名と一致） | 改名（記録・ガードと乖離） |
+| P2 backward hook の facade 入口 | facade `impl Tape` に薄い委譲 2 件のみ: `register_backward_hook<F>(&self, var: &Var<'_>, hook: F) -> Result<HookHandle, AutodiffError>`（`F: Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + Sync + 'static`）・`remove_hook(&self, handle: HookHandle) -> Result<(), AutodiffError>`。本体は `self.0` への委譲のみ。`Var`・`compat::Sequential`・`TapeRef` には足さない（`TapeRef` は 3 メソッド固定を維持） | (a) 引数を `Arc<dyn Fn…>` にする (b) `TapeRef` にも委譲（REQ-12 の固定面を変えるため別承認） (c) `Var::register_hook`（§7 で不採用） |
+| P3 `HookHandle` | crate ルートの純再エクスポート 1 行。不透明型（フィールド非公開・`TapeId`／`NodeId` の accessor なし）。derive は `Debug` のみ、`remove_hook` は値で消費（二重解除が型上起きない）。`Clone`／`Copy` の後付けは非破壊・削除は破壊的のため最小から始める | `Clone + Copy` を付け二重解除を冪等 `Ok(())` または `Err` にする |
+| P4 配置 | `HookHandle` は crate ルート、`ForwardHooked`／`ForwardHookCtx` は `fandhe_ai::nn`。`pub mod hooks` は新設しない | `fandhe_ai::hooks` へ集約（新規 `pub mod` で保留ガードの glob 一覧更新が要る） |
+| P5 forward hook の到達経路 | facade 独自ラッパー `fandhe_ai::nn::ForwardHooked<M: fandhe_ai::nn::Module>` を `nn` に置く（`ModuleList`／`Sequential` と同型）。facade `Module` の全メソッドを inner へ委譲し tape 経路のみ。`compat::Sequential::add_module(ForwardHooked::new(layer, hook))` で積める | (a) autodiff `ForwardHooked` の純再エクスポート（autodiff `Module` を要求し facade の `Tape` に繋がらない） (b) `Sequential::register_forward_hook(index, hook)`（§5.3 が退けた登録型に近い） (c) forward hook は facade 非公開のまま |
+| P5′ ctx の構築元 | facade ラッパーは crate 内専用の `FacadeModuleAdapter` で inner を包み autodiff 側 `nn::ForwardHooked` を再利用する。hook 呼び出しと ctx 構築は autodiff の単一実装、ctx 構築子は autodiff 非公開、facade は `ForwardHookCtx` を純再エクスポート。成立性はコンパイル未検証で、#2587 で成立しなければ実装せず記録へ差し戻す | (a) autodiff に `pub` な ctx 構築子を足す (b) facade 独自の ctx 型（`Var::shape` が `pub(crate)`（`crates/autodiff/src/var.rs:191`）のため `Var` の公開メソッド追加が要り §7 に反する） |
+| P6 メソッド集合 | `ForwardHooked::new(inner: M, hook: F) -> Self`・`inner`・`inner_mut`・`into_inner`。`ForwardHookCtx::input_shape`・`output_shape`（`&[usize]`、構築時保持値で実体化しない）・`output_value`。入力値の取得は設けない | `set_hook` 後付け・複数登録（§5.5 で不採用） |
+| P7 resident 葉への登録拒否 | 既存 `AutodiffError::InvalidArgument(String)`（`requires_grad` は有効で、`GradientTrackingDisabled` の意味と異なる） | `GradientTrackingDisabled` 流用／新規 variant（公開面が増える） |
+| P8 追加しない名前 | `register_forward_hook`・`register_hook`・`remove_backward_hook` はどの型にも追加しない。`register_backward_hook`／`remove_hook` は `Tape` 以外に追加しない | なし |
+| P9 ガード | 承認後に `VarHooksHoldDoctestGuard`（`crates/facade/src/lib.rs:1976`）と `api_surface.rs` の hooks 系テストを「承認形のみ許す」正ガード＋定義元インベントリへ部分反転する。今回は実施しない | なし |
+
+推奨案の選定基準は「§5・§7 の内部形を facade へ薄く写す最小形」。承認コメントが形を名指しするまで
+後続（#2586・#2587）は着手しない。
+
+### 14.5 `fandhe-ai =0.10.0` 非破壊の確認（論点別）
+
+`git grep` で `v0.10.0` タグ時点を突合した（`crates/autodiff/src` で `HookHandle`・`ForwardHooked`・
+`ForwardHookCtx`・`register_backward_hook`・`register_forward_hook`・`remove_hook` は 0 件、
+`crates/facade/src` では `lib.rs` の保留ガード doc ブロックのみ＝未公開の証跡）。
+
+| 論点 | 確認結果 |
+|---|---|
+| 名前の新規性 | 上記のとおり 0.10.0 の公開面に存在せず、追加のみ |
+| P2 `Tape` 委譲 | inherent メソッドの追加のみ。既存メソッドのシグネチャ・意味論は不変 |
+| P3／P4 再エクスポート | crate ルート・`nn` への項目追加のみ（minor 相当） |
+| P5／P5′／P6 ラッパー | 新規型の追加のみ。facade `nn::Module` に required メソッドを足さない |
+| エラー型 | `AutodiffError` は `#[non_exhaustive]` かつ再エクスポート済み。`TapeMismatch`・`GradientTrackingDisabled`・`InvalidArgument` は既存。variant 追加なし |
+| `Var: Copy`／`Tape: Send` | `Var` にフィールドもメソッドも足さず不変。hook は `Send + Sync` の `Arc` で保持し `Tape: Send` 不変 |
+| 既存 backward | hook 未登録時は空 registry 参照のみで数値経路不変（bit 一致） |
+| `Tape::reset` | hook 消去が加わるが hook は新 API でのみ登録されるため 0.10.0 利用者の挙動は不変 |
+
+結論: 推奨案はいずれも追加のみで破壊的変更なし。ただし推奨案の採否は未承認。
+
+### 14.6 ユーザーに決めてほしい事項
+
+- A: P1〜P9 の推奨案で承認する
+- B: 推奨案の一部を差し替える（例: P2 で `TapeRef` にも委譲／P3 を `Clone + Copy`＋冪等解除／P5 を backward のみ公開／P7 を `GradientTrackingDisabled`）
+- C: facade 公開を保留のままにする（#2586 の扱いも併せて指示）
+- 併せて 14.7 の 2 点（#2586 の着手可否・ガード縮小の時期）への回答
+
+### 14.7 後続イシューへの申し送り
+
+- **#2587（facade 公開・ガード反転）**: 14.6 の承認コメントが形を名指しするまで着手しない。
+- **#2586（CPU 本体実装）は「内部のみ」では完結しない**。`crates/facade/tests/api_surface.rs` の
+  `workspace_declares_no_hook_registration_fns`（定数 `HOOK_REGISTRATION_FN_NAMES`）は `crates/*/src/`
+  全体で `register_backward_hook`／`remove_hook` の `fn` 宣言 0 件を固定しているため、autodiff の `Tape` に
+  追加した時点で facade 公開の有無に関係なく失敗する。#2586 は同一 PR でこの否定ガードを定義元
+  `autodiff/src/tape.rs` のみ許すインベントリへ縮小する必要がある（前例: `docs/kv-cache-design.md` §12.3）。
+  §13.3 はガード変更を承認後の作業としているため、facade 形が未承認のまま縮小してよいかはユーザー判断事項。
+- `docs/compat-api-scope.md` §5 は「§11 の 5 項目がそろうまで内部実装も着手不可」と記す。一括承認が
+  §11 承認事項 1〜4 に及ぶと読めるかは本節では解決せず、#2586 の着手時判定とユーザー判断に委ねる。
+- 実機 parity: hook は数値経路を追加しないため `docs/perf/logs/` への申し送りは発生しない。
+
+### 14.8 本記録で行わないこと
+
+facade／autodiff のコード変更、保留ガードの削除・反転、`compat-api-scope.md` §5 適用記録、Issue 起票・コメント投稿、
+spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§13 の書き換え。
