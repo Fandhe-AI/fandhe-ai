@@ -3966,13 +3966,14 @@ struct GenerateHoldDoctestGuard;
 #[allow(dead_code)]
 struct PredictBatchesHoldDoctestGuard;
 
-/// イシュー #2631・#2632（親 #2630・ルート #2499 Phase 4。`rfft`／`irfft`／
-/// `fft`／`ifft`）の facade 公開保留を固定する doctest 足場。`PredictBatchesHoldDoctestGuard`（#2192）と同型の
+/// イシュー #2631・#2632・#2633（親 #2630・ルート #2499 Phase 4。`rfft`／`irfft`／
+/// `fft`／`ifft`／`stft`／`istft`）の facade 公開保留を固定する doctest 足場。`PredictBatchesHoldDoctestGuard`（#2192）と同型の
 /// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob import
 /// したスコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_fft_hold_probe::{FftNorm, fft_ops::{rfft, irfft, fft, ifft}, fft::__mark}`
+/// `__fandhe_fft_hold_probe::{FftNorm, StftOptions, IstftOptions, StftPadMode,
+/// fft_ops::{rfft, irfft, fft, ifft, stft, istft}, fft::__mark}`
 /// を導入し、実際に使う名前・呼び出しを書く。facade がどの経路（`pub use` に
-/// よる再エクスポート・型宣言・`Var`／`Tape` への `rfft`／`irfft`／`fft`／`ifft` inherent
+/// よる再エクスポート・型宣言・`Var`／`Tape` への `rfft`／`irfft`／`fft`／`ifft`／`stft`／`istft` inherent
 /// メソッド追加・`pub mod fft_ops`／`pub mod fft` の新設）でこれらの名前を
 /// 公開しても、ローカル定義との glob 衝突（モジュール名・型名の場合。E0659
 /// 等）または呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッド
@@ -3980,10 +3981,11 @@ struct PredictBatchesHoldDoctestGuard;
 /// 不一致でコンパイル失敗する）でエラーコードに依存せずコンパイルが失敗する。
 ///
 /// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::fft_ops::{rfft,
-/// irfft, fft, ifft}`・`fandhe_ai_tensor_core::{FftNorm, fft}`）。保留対象は
-/// facade 公開面（`Var::rfft`／`Var::irfft`／`Var::fft`／`Var::ifft` の
-/// 委譲メソッドと `FftNorm` の
-/// 再エクスポート）のみで、公開形は未承認（承認依頼は #2677・公開自体は
+/// irfft, fft, ifft, stft, istft, StftOptions, IstftOptions}`・
+/// `fandhe_ai_tensor_core::{FftNorm, StftPadMode, fft}`）。保留対象は
+/// facade 公開面（`Var::rfft`／`Var::irfft`／`Var::fft`／`Var::ifft`／
+/// `Var::stft`／`Var::istft` の委譲メソッドと `FftNorm`・`StftOptions`・
+/// `IstftOptions`・`StftPadMode` の再エクスポート）のみで、公開形は未承認（承認依頼は #2677・公開自体は
 /// 承認後の #2678。推奨案は `docs/autodiff-fft-ops-decision.md` §7）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
@@ -4014,11 +4016,16 @@ struct PredictBatchesHoldDoctestGuard;
 ///
 /// mod __fandhe_fft_hold_probe {
 ///     pub struct FftNorm;
+///     pub struct StftOptions;
+///     pub struct IstftOptions;
+///     pub struct StftPadMode;
 ///     pub mod fft_ops {
 ///         pub fn rfft() {}
 ///         pub fn irfft() {}
 ///         pub fn fft() {}
 ///         pub fn ifft() {}
+///         pub fn stft() {}
+///         pub fn istft() {}
 ///     }
 ///     pub mod fft {
 ///         pub fn __mark() {}
@@ -4033,6 +4040,8 @@ struct PredictBatchesHoldDoctestGuard;
 ///     fn irfft(&self) -> __FandheFftHoldMarker;
 ///     fn fft(&self) -> __FandheFftHoldMarker;
 ///     fn ifft(&self) -> __FandheFftHoldMarker;
+///     fn stft(&self) -> __FandheFftHoldMarker;
+///     fn istft(&self) -> __FandheFftHoldMarker;
 /// }
 ///
 /// impl<'t> __FandheFftHoldProbe for fandhe_ai::Var<'t> {
@@ -4046,6 +4055,12 @@ struct PredictBatchesHoldDoctestGuard;
 ///         __FandheFftHoldMarker
 ///     }
 ///     fn ifft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
+///     fn stft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
+///     fn istft(&self) -> __FandheFftHoldMarker {
 ///         __FandheFftHoldMarker
 ///     }
 /// }
@@ -4063,15 +4078,23 @@ struct PredictBatchesHoldDoctestGuard;
 ///     fn ifft(&self) -> __FandheFftHoldMarker {
 ///         __FandheFftHoldMarker
 ///     }
+///     fn stft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
+///     fn istft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
 /// }
 ///
-/// fn __probe_free_fns(_: FftNorm) {
+/// fn __probe_free_fns(_: FftNorm, _: StftOptions, _: IstftOptions, _: StftPadMode) {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
 ///     fft_ops::rfft();
 ///     fft_ops::irfft();
 ///     fft_ops::fft();
 ///     fft_ops::ifft();
+///     fft_ops::stft();
+///     fft_ops::istft();
 ///     fft::__mark();
 /// }
 ///
@@ -4080,10 +4103,14 @@ struct PredictBatchesHoldDoctestGuard;
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Var::irfft(v);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Var::fft(v);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Var::ifft(v);
+///     let _: __FandheFftHoldMarker = fandhe_ai::Var::stft(v);
+///     let _: __FandheFftHoldMarker = fandhe_ai::Var::istft(v);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::rfft(tape);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::irfft(tape);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::fft(tape);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::ifft(tape);
+///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::stft(tape);
+///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::istft(tape);
 /// }
 /// ```
 #[cfg(doctest)]

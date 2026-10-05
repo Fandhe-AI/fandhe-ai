@@ -20247,11 +20247,13 @@ fn workspace_declares_predict_batches_fn_names_nowhere() {
 }
 
 // =====================================================================
-// FftOpsHoldDoctestGuard（イシュー #2631・#2632・親 #2630・ルート #2499 Phase 4）:
+// FftOpsHoldDoctestGuard（イシュー #2631・#2632・#2633・親 #2630・ルート #2499 Phase 4）:
 // `PredictBatchesHoldDoctestGuard`（#2192）系のテストを鏡写しにする。
-// 実装は内部クレート（`fandhe_ai_autodiff::fft_ops::{rfft, irfft, fft, ifft}`・
-// `fandhe_ai_tensor_core::{FftNorm, fft}`）に閉じ、facade 公開形（`Var::rfft`／
-// `Var::irfft` と `FftNorm` の再エクスポート）は未承認（承認依頼は #2677）。
+// 実装は内部クレート（`fandhe_ai_autodiff::fft_ops::{rfft, irfft, fft, ifft, stft,
+// istft}`・`fandhe_ai_tensor_core::{FftNorm, StftPadMode, fft}`）に閉じ、facade
+// 公開形（`Var::rfft`／`Var::irfft`／`Var::stft`／`Var::istft` と `FftNorm`・
+// `StftOptions`・`IstftOptions`・`StftPadMode` の再エクスポート）は未承認
+// （承認依頼は #2677）。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `FftOpsHoldDoctestGuard` doc 内の唯一の
@@ -20306,11 +20308,16 @@ const FFT_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_fft_hold_probe {\n\
 \x20\x20\x20\x20pub struct FftNorm;\n\
+\x20\x20\x20\x20pub struct StftOptions;\n\
+\x20\x20\x20\x20pub struct IstftOptions;\n\
+\x20\x20\x20\x20pub struct StftPadMode;\n\
 \x20\x20\x20\x20pub mod fft_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn rfft() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn irfft() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn fft() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn ifft() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn stft() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn istft() {}\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20pub mod fft {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
@@ -20325,6 +20332,8 @@ trait __FandheFftHoldProbe {\n\
 \x20\x20\x20\x20fn irfft(&self) -> __FandheFftHoldMarker;\n\
 \x20\x20\x20\x20fn fft(&self) -> __FandheFftHoldMarker;\n\
 \x20\x20\x20\x20fn ifft(&self) -> __FandheFftHoldMarker;\n\
+\x20\x20\x20\x20fn stft(&self) -> __FandheFftHoldMarker;\n\
+\x20\x20\x20\x20fn istft(&self) -> __FandheFftHoldMarker;\n\
 }\n\
 \n\
 impl<'t> __FandheFftHoldProbe for fandhe_ai::Var<'t> {\n\
@@ -20338,6 +20347,12 @@ impl<'t> __FandheFftHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn ifft(&self) -> __FandheFftHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn stft(&self) -> __FandheFftHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn istft(&self) -> __FandheFftHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -20355,15 +20370,23 @@ impl __FandheFftHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn ifft(&self) -> __FandheFftHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
 \x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn stft(&self) -> __FandheFftHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn istft(&self) -> __FandheFftHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
+\x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: FftNorm) {\n\
+fn __probe_free_fns(_: FftNorm, _: StftOptions, _: IstftOptions, _: StftPadMode) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20fft_ops::rfft();\n\
 \x20\x20\x20\x20fft_ops::irfft();\n\
 \x20\x20\x20\x20fft_ops::fft();\n\
 \x20\x20\x20\x20fft_ops::ifft();\n\
+\x20\x20\x20\x20fft_ops::stft();\n\
+\x20\x20\x20\x20fft_ops::istft();\n\
 \x20\x20\x20\x20fft::__mark();\n\
 }\n\
 \n\
@@ -20372,18 +20395,45 @@ fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::irfft(v);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::fft(v);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::ifft(v);\n\
+\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::stft(v);\n\
+\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::istft(v);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::rfft(tape);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::irfft(tape);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::fft(tape);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::ifft(tape);\n\
+\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::stft(tape);\n\
+\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::istft(tape);\n\
 }";
 
 /// FFT 保留対象の fn 名（イシュー #2631 の `rfft`／`irfft`・#2632 の
-/// `fft`／`ifft`）。
-const FFT_OPS_FN_NAMES: [&str; 4] = ["rfft", "irfft", "fft", "ifft"];
+/// `fft`／`ifft`・#2633 の `stft`／`istft`）。
+const FFT_OPS_FN_NAMES: [&str; 6] = ["rfft", "irfft", "fft", "ifft", "stft", "istft"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const FFT_OPS_IDENTS: [&str; 4] = ["fft_ops", "FftNorm", "FftError", "fft"];
+/// `StftOptions`／`IstftOptions`（autodiff）・`StftPadMode`／`StftParams`／
+/// `IstftParams`（tensor-core。イシュー #2633）を含む。
+const FFT_OPS_IDENTS: [&str; 9] = [
+    "fft_ops",
+    "FftNorm",
+    "FftError",
+    "fft",
+    "StftOptions",
+    "IstftOptions",
+    "StftPadMode",
+    "StftParams",
+    "IstftParams",
+];
+
+/// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
+/// （[`FFT_OPS_IDENTS`] のうち型として存在するもの）。
+const FFT_OPS_TYPE_NAMES: [&str; 6] = [
+    "FftNorm",
+    "StftOptions",
+    "IstftOptions",
+    "StftPadMode",
+    "StftParams",
+    "IstftParams",
+];
 
 /// [`facade_does_not_reexport_or_declare_fft_ops`]・その自己テストが共用する
 /// 検出本体。facade src の `pub use` で [`FFT_OPS_IDENTS`] を経路の識別子
@@ -20425,9 +20475,10 @@ fn scan_fft_ops_reexports_and_declarations(content: &str) -> Vec<String> {
             continue;
         }
         if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
-            && tokens.get(i + 1).map(String::as_str) == Some("FftNorm")
+            && let Some(name) = tokens.get(i + 1)
+            && FFT_OPS_TYPE_NAMES.contains(&name.as_str())
         {
-            offending.push(format!("{} FftNorm 宣言", tokens[i]));
+            offending.push(format!("{} {name} 宣言", tokens[i]));
         }
         if tokens[i] == "pub"
             && tokens.get(i + 1).map(String::as_str) == Some("mod")
@@ -20496,6 +20547,23 @@ fn facade_does_not_reexport_or_declare_fft_ops_detects_each_category() {
     assert!(offense("pub use fandhe_ai_tensor_core::fft;"));
     // 正例: 独自宣言・fn 宣言・pub mod。
     assert!(offense("pub enum FftNorm { Backward }"));
+    // 正例（#2633）: STFT 関連の型・関数の再エクスポート／独自宣言。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::fft_ops::{stft, istft};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::fft_ops::{IstftOptions, StftOptions};"
+    ));
+    assert!(offense("pub use fandhe_ai_tensor_core::StftPadMode;"));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::fft::StftParams as P;"
+    ));
+    assert!(offense("pub use fandhe_ai_tensor_core::fft::IstftParams;"));
+    assert!(offense("pub struct StftOptions;"));
+    assert!(offense("pub struct IstftOptions { pub n: usize }"));
+    assert!(offense("pub enum StftPadMode { Reflect }"));
+    assert!(offense("pub fn stft() {}"));
+    assert!(offense("impl Var { pub fn istft(&self) {} }"));
     assert!(offense("pub fn rfft() {}"));
     assert!(offense("impl Var { pub fn irfft(&self) {} }"));
     assert!(offense("pub fn fft() {}"));
@@ -20506,6 +20574,10 @@ fn facade_does_not_reexport_or_declare_fft_ops_detects_each_category() {
     // 負例: コメント・文字列リテラル中の出現。
     assert!(!offense("// pub use fandhe_ai_autodiff::fft_ops;"));
     assert!(!offense("let s = \"pub fn rfft() {}\";"));
+    assert!(!offense(
+        "// pub use fandhe_ai_autodiff::fft_ops::{stft, istft};"
+    ));
+    assert!(!offense("use fandhe_ai_tensor_core::StftPadMode;"));
     // 負例: 無関係な再エクスポート・非公開 use。
     assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
     assert!(!offense("use fandhe_ai_autodiff::fft_ops;"));
@@ -20562,12 +20634,14 @@ fn workspace_declares_fft_ops_fn_names_only_in_allowed_locations() {
         ("autodiff/src/fft_ops.rs::irfft".to_string(), 1usize),
         ("autodiff/src/fft_ops.rs::fft".to_string(), 1usize),
         ("autodiff/src/fft_ops.rs::ifft".to_string(), 1usize),
+        ("autodiff/src/fft_ops.rs::stft".to_string(), 1usize),
+        ("autodiff/src/fft_ops.rs::istft".to_string(), 1usize),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         found, expected,
-        "workspace 全体（crates/*/src/）の rfft／irfft／fft／ifft の `fn` 宣言が承認済みの\
+        "workspace 全体（crates/*/src/）の rfft／irfft／fft／ifft／stft／istft の `fn` 宣言が承認済みの\
          置き場所（autodiff/src/fft_ops.rs の各 1 件）と一致しない。迂回経路\
          （facade／Var への inherent メソッド追加等）の混入か、未承認の実装\
          追加でないか確認すること"

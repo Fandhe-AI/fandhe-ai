@@ -31,6 +31,8 @@ use fandhe_ai_tensor_core::{
     bf16, f16,
 };
 
+use fandhe_ai_tensor_core::fft::{IstftParams, StftParams};
+
 use crate::error::AutodiffError;
 use crate::grad::cast_to_f32_with_fallback;
 use crate::var::matmul_forward;
@@ -841,6 +843,26 @@ pub(crate) enum Op {
         n: usize,
         dim: usize,
         norm: FftNorm,
+    },
+    /// 短時間フーリエ変換（実 `[L]`／`[B, L]` → `[N, T, 2]`／`[B, N, T, 2]`。
+    /// イシュー #2633・`docs/autodiff-fft-ops-decision.md` §13）。`window` は
+    /// forward 時点で解決済みの実効窓（長さ `n_fft`・非追跡。窓への勾配は流れない。
+    /// `Op::Dropout { mask }` と同じ非追跡ペイロード）、`params` は検査済みの
+    /// 解決済み引数。`crate::fft_ops::stft` からのみ積まれ、facade には公開しない。
+    /// VJP は入力値を必要としない線形演算（`grad.rs`）。分類は [`Op::Rfft`] と
+    /// 同じ（非融合・非 checkpoint・高階微分非対応）。
+    Stft {
+        input: NodeId,
+        window: Tensor<f32>,
+        params: StftParams,
+    },
+    /// 逆短時間フーリエ変換（`[N, T, 2]`／`[B, N, T, 2]` → 実 `[L_out]`／
+    /// `[B, L_out]`。イシュー #2633）。`crate::fft_ops::istft` からのみ積まれる。
+    /// 分類は [`Op::Stft`] と同じ。
+    Istft {
+        input: NodeId,
+        window: Tensor<f32>,
+        params: IstftParams,
     },
     /// `Var::permute` が記録する view ノード（イシュー #1597。`Reshape`/
     /// `Transpose` と同じ「forward のたびにバッファ確保しない」骨格を
@@ -1657,12 +1679,14 @@ impl Op {
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
             // `Op::Rfft`／`Op::Irfft`（イシュー #2631）・`Op::Fft`／`Op::Ifft`
-            // （イシュー #2632）も `recompute_value` に再計算分岐を持たない
+            // （イシュー #2632）・`Op::Stft`／`Op::Istft`（イシュー #2633）も `recompute_value` に再計算分岐を持たない
             // ため非適格のまま保持する。
             | Op::Rfft { .. }
             | Op::Irfft { .. }
             | Op::Fft { .. }
             | Op::Ifft { .. }
+            | Op::Stft { .. }
+            | Op::Istft { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::RmsNorm { .. }
@@ -1838,6 +1862,8 @@ impl Op {
             | Op::Irfft { input, .. }
             | Op::Fft { input, .. }
             | Op::Ifft { input, .. }
+            | Op::Stft { input, .. }
+            | Op::Istft { input, .. }
             | Op::Permute { input, .. }
             | Op::BroadcastTo { input }
             | Op::Narrow { input, .. }
@@ -2172,11 +2198,13 @@ impl Op {
             | Op::Pinv { .. }
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
-            // イシュー #2631・#2632 の FFT 4 演算も初期スコープ外（非対応）。
+            // イシュー #2631・#2632・#2633 の FFT 6 演算も初期スコープ外（非対応）。
             | Op::Rfft { .. }
             | Op::Irfft { .. }
             | Op::Fft { .. }
             | Op::Ifft { .. }
+            | Op::Stft { .. }
+            | Op::Istft { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::MaskedFill { .. }

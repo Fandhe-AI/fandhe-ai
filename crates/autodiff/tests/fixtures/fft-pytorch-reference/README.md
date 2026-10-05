@@ -61,3 +61,79 @@ ee374b7131504aaed73594123e465e3720ecc4b78de809fa8f32779c0e99459b  fft_reference.
 ```
 
 `gen_reference.py` を変更した場合は JSON を再生成し、上記を更新する。
+
+# stft／istft PyTorch 参照値フィクスチャ（イシュー #2633）
+
+`tests/stft_parity.rs` が参照する固定フィクスチャ `stft_reference.json` と生成
+スクリプト `gen_stft_reference.py`。**上記の `fft_reference.json`／
+`gen_reference.py`（69 件）は変更していない**（sha256 は上記のまま。STFT 専用に
+別ファイルとして生成し、既存値を構造的に動かさない）。
+
+## 生成条件
+
+- **実 PyTorch 実行値**。`torch.__version__ == "2.14.0+cpu"`・Python 3.14.4
+  （JSON の `torch_version`／`python_version` に記録）。numpy や手計算値で
+  代替していない。
+- 複素 autograd の規約差を避けるため `torch.view_as_real`／`view_as_complex` で
+  末尾次元 2 の実テンソル対として扱い、損失は実数 `(out * g).sum()`（`g` は固定
+  シード `20261005` の `torch.randn`）。
+  - stft: 実の葉 `x`（`[L]`／`[B, L]`）→ `view_as_real(torch.stft(x, n_fft,
+    hop_length, win_length, window, center, pad_mode, normalized, onesided,
+    return_complex=True))`・`x.grad`（出力軸順は `[B, N, T, 2]`）
+  - istft: 実の葉 `xr`（`[N, T, 2]`／`[B, N, T, 2]`）→ `torch.istft(
+    view_as_complex(xr), n_fft, hop_length, win_length, window, center,
+    normalized, onesided, length)`・`xr.grad`
+  - 窓は `requires_grad=False`（窓への勾配は Rust 側でも流さない）。
+- 入力・窓・上流勾配・出力・入力勾配・shape・全引数を JSON に保存する（Rust 側で
+  再生成しない）。dtype は float32。生成時に NaN を含まないことを assert 済み。
+- ケース（`gen_stft_reference.py::STFT_CASES`／`ISTFT_CASES`＋往復 1 件、計 42 件。
+  stft 21＋istft 21）:
+  - stft: 既定（矩形窓）・Hann 窓・`hop` が `n_fft` の非約数・奇数 `n_fft`・
+    `win_length < n_fft`（中央寄せゼロ詰め）・`center=False`・
+    `pad_mode="constant"`（短信号を含む）・`normalized=True`・`onesided=False`
+    （偶数／奇数 `n_fft`）・バッチ・`T = 1`・小さい `n_fft`（4・2・1）・
+    `n_fft > L`（`center=True`）・反射パディングの最小信号長（`L = n_fft/2+1`）
+  - istft: Hann・`hop = n_fft/4`・`center=False`（端が 0 でない窓）・
+    `normalized=True`・**`onesided=False` は意図的に非 Hermitian な入力**（上位 bin の
+    勾配が 0 であることが突合される）・`onesided` 省略での両側推定・`length`
+    短／長・バッチ・`win_length < n_fft`・奇数 `n_fft`・小さい `n_fft`・
+    torch の `stft` 出力をそのまま入れる往復
+- `error_cases`（37 件）: torch が例外を出すか否かを実測して記録する境界ケース
+  （Rust 側の拒否方針との突き合わせ用）。実測結果の要点（`torch_raises`）:
+  - stft: `n_fft=0`・`n_fft > L`（`center=False`）・`hop=0`・`n_fft < 4` で `hop` 省略・
+    `win_length` が 0 または `n_fft` 超・窓長不一致（`win_length` 省略時の既定
+    `n_fft` との不一致を含む）・窓長が `n_fft` 超・反射パディング幅 `>= L`・rank 0／3・
+    空信号（`L=0`／`B=0`）は**例外**。`n_fft > L` でも `center=True` で `L_pad` に
+    収まれば受理・反射パディング幅 `< L` は受理・`pad_mode="constant"` の短信号は
+    受理・`hop > win_length` は stft では受理
+  - istft: `hop > win_length`・`hop=0`・bin 数不一致・`onesided=True` で全 bin 入力・
+    `onesided=False` で片側 bin 入力・`T=0`・`length=0`・rank 5（複素 rank 4）・
+    rank 2・空バッチ・窓長不一致・`n_fft=0`・NOLA 違反（Hann・`center=False`）・
+    `center=True` かつ `T=1`（偶数 `n_fft`）の空出力は**例外**
+  - **NOLA 境界ペア**（矩形窓・`hop = n_fft = 8`・`center=False`・窓先頭値だけを
+    変更）: 先頭値 `3.1e-6`（包絡 9.61e-12）は例外・`3.2e-6`（包絡 1.024e-11）は
+    受理。窓二乗の重畳和の最小絶対値のしきい値は `1e-11` の前後に収まる
+    （実測で挟めた区間。`fft::ISTFT_NOLA_MIN_ENVELOPE`）
+  - `n_fft=1`・`center=True`・`length` 省略の istft は torch が例外（終端 `-(n_fft/2)`
+    が `-0 = 0` になり空出力で `min()` が失敗する実装の取りこぼし）。本実装は
+    意味論どおり長さ `L` を返すため、`stft_parity.rs` の明示的な許可リストに載せている
+
+## 再生成手順
+
+```bash
+python3 -m venv /path/to/venv
+/path/to/venv/bin/pip install --no-cache-dir \
+  --index-url https://download.pytorch.org/whl/cpu \
+  --extra-index-url https://pypi.org/simple torch==2.14.0
+/path/to/venv/bin/python gen_stft_reference.py > stft_reference.json
+rm -rf /path/to/venv
+```
+
+## sha256
+
+```
+0238e6d89521257e1bc9d1dba72b8d8e33a5ef2e59034cc34715b60592dbe8cd  stft_reference.json
+402c8dd39be7c90ba02e63e66576ff836e7aeb1752454116cf8dd62b391e3dd9  gen_stft_reference.py
+```
+
+`gen_stft_reference.py` を変更した場合は JSON を再生成し、上記を更新する。

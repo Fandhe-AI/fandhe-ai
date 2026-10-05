@@ -1,8 +1,10 @@
-//! `rfft`・`irfft`・`fft`・`ifft` の自由関数（イシュー #2631・#2632・親 #2630
-//! 「FFT」。ルート #2499 Phase 4）。
+//! `rfft`・`irfft`・`fft`・`ifft`・`stft`・`istft` の自由関数（イシュー #2631・
+//! #2632・#2633・親 #2630「FFT」。ルート #2499 Phase 4）。
 //!
 //! **facade 非公開（保留）**: 公開形（`Var::rfft`／`Var::irfft`／`Var::fft`／
-//! `Var::ifft` の委譲メソッドと `FftNorm` の再エクスポート）は未承認で、承認依頼は #2677
+//! `Var::ifft`／`Var::stft`／`Var::istft` の委譲メソッドと `FftNorm`・
+//! `StftOptions`・`IstftOptions`・`StftPadMode` の再エクスポート）は未承認で、
+//! 承認依頼は #2677
 //! （公開自体は承認後の #2678）。本モジュールは内部クレート限定の入口で、
 //! `Var` に inherent メソッドを足さない。保留は `crates/facade/src/lib.rs`
 //! の `FftOpsHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の
@@ -16,6 +18,8 @@
 //! | [`irfft`] | `torch.fft.irfft(torch.view_as_complex(x), n, dim, norm)` | `[..., m, ..., 2]` → 実 `[..., n, ...]` |
 //! | `fft` | `torch.view_as_real(torch.fft.fft(torch.view_as_complex(x), n, dim, norm))` | `[..., L, ..., 2]` → `[..., n, ..., 2]` |
 //! | `ifft` | `torch.view_as_real(torch.fft.ifft(torch.view_as_complex(x), n, dim, norm))` | 同上 |
+//! | [`stft`] | `torch.view_as_real(torch.stft(x, n_fft, hop, win_length, window, center, pad_mode, normalized, onesided, return_complex=True))` | 実 `[L]`／`[B, L]` → `[N, T, 2]`／`[B, N, T, 2]`（**周波数軸がフレーム軸より前**） |
+//! | [`istft`] | `torch.istft(torch.view_as_complex(x), n_fft, hop, win_length, window, center, normalized, onesided, length)` | `[N, T, 2]`／`[B, N, T, 2]` → 実 `[L_out]`／`[B, L_out]` |
 //!
 //! 複素数は末尾次元 2 の `f32` 実テンソル `(re, im)` で表す（complex dtype
 //! は非目標）。`dim` は `usize`（負の添字は受けない）。`irfft` の `dim` は
@@ -29,7 +33,11 @@
 //! カーネル `fft::rfft_host`／`irfft_host`／`fft_host`／`ifft_host` へ
 //! フォールバックし、他のエラーは伝播する）→ ④ 専用 `Op`（`Op::Rfft`／
 //! `Op::Irfft`／`Op::Fft`／`Op::Ifft`）を積む。VJP は `grad.rs`（共有カーネルの
-//! `*_vjp_host`）。
+//! `*_vjp_host`）。`stft`／`istft` も同じ経路（`fft_stft`／`fft_istft`・
+//! `stft_host`／`istft_host`・`Op::Stft`／`Op::Istft`）で、`istft` は NOLA 検査
+//! （`fft::istft_check_nola`）をバックエンド呼び出し前にも行い迂回させない。
+//! 窓は非追跡の `Tensor<f32>` で、**窓への勾配は流れない**（PyTorch との差分。
+//! 入力信号／スペクトルへの勾配のみ。`docs/autodiff-fft-ops-decision.md` §13）。
 //!
 //! **数値契約**: 内部は `f64` 逐次・固定順序で、最後に 1 回だけ `f32` へ
 //! downcast（`fandhe_ai_tensor_core::fft` のモジュール doc が正。直接 DFT
@@ -38,8 +46,8 @@
 //! 高階微分（`create_graph`）・activation checkpoint・f64 自動微分経路は
 //! 対象外。
 
-use fandhe_ai_tensor_core::fft::{self, FftLayout};
-use fandhe_ai_tensor_core::{BackendError, FftNorm, ShapeError, Tensor};
+use fandhe_ai_tensor_core::fft::{self, FftLayout, IstftParams, StftParams};
+use fandhe_ai_tensor_core::{BackendError, FftNorm, ShapeError, StftPadMode, Tensor};
 
 use crate::error::AutodiffError;
 use crate::tape::{Op, materialize_fallible};
@@ -248,5 +256,258 @@ fn c2c<'t>(
         },
     };
     let id = x.tape().push_eager(op, value);
+    Ok(Var::from_raw(x.tape(), id))
+}
+
+/// [`stft`] のオプション（`torch.stft` の `hop_length`／`win_length`／`center`／
+/// `pad_mode`／`normalized`／`onesided` 引数相当）。PyTorch 既定を [`Default`] と
+/// する。非破壊拡張に備え `#[non_exhaustive]`・`with_*` ビルダ方式を採る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StftOptions {
+    /// フレーム間隔。`None` は `n_fft/4`（0 になる `n_fft < 4` では拒否）。
+    pub hop_length: Option<usize>,
+    /// 窓長。`None` は `n_fft`。`window` の長さと一致する必要がある。
+    pub win_length: Option<usize>,
+    /// `true` なら両端を `n_fft/2` 拡張してからフレーム化する。
+    pub center: bool,
+    /// `center = true` 時の端パディング種別。
+    pub pad_mode: StftPadMode,
+    /// `true` なら `1/√n_fft` で正規化する（`false` はスケールなし）。
+    pub normalized: bool,
+    /// `true` なら片側スペクトル（`n_fft/2+1` bin）、`false` なら全 bin。
+    pub onesided: bool,
+}
+
+impl Default for StftOptions {
+    fn default() -> Self {
+        Self {
+            hop_length: None,
+            win_length: None,
+            center: true,
+            pad_mode: StftPadMode::Reflect,
+            normalized: false,
+            onesided: true,
+        }
+    }
+}
+
+impl StftOptions {
+    /// フレーム間隔を設定する。
+    pub fn with_hop_length(mut self, hop_length: usize) -> Self {
+        self.hop_length = Some(hop_length);
+        self
+    }
+    /// 窓長を設定する。
+    pub fn with_win_length(mut self, win_length: usize) -> Self {
+        self.win_length = Some(win_length);
+        self
+    }
+    /// 両端パディングの有無を設定する。
+    pub fn with_center(mut self, center: bool) -> Self {
+        self.center = center;
+        self
+    }
+    /// 端パディング種別を設定する。
+    pub fn with_pad_mode(mut self, pad_mode: StftPadMode) -> Self {
+        self.pad_mode = pad_mode;
+        self
+    }
+    /// 正規化の有無を設定する。
+    pub fn with_normalized(mut self, normalized: bool) -> Self {
+        self.normalized = normalized;
+        self
+    }
+    /// 片側スペクトルか否かを設定する。
+    pub fn with_onesided(mut self, onesided: bool) -> Self {
+        self.onesided = onesided;
+        self
+    }
+}
+
+/// [`istft`] のオプション（`torch.istft` の `hop_length`／`win_length`／`center`／
+/// `normalized`／`onesided`／`length` 引数相当）。PyTorch 既定を [`Default`] と
+/// する。[`StftOptions`] と同じく `#[non_exhaustive]`・`with_*` ビルダ方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IstftOptions {
+    /// フレーム間隔。`None` は `n_fft/4`。`win_length` 以下である必要がある。
+    pub hop_length: Option<usize>,
+    /// 窓長。`None` は `n_fft`。
+    pub win_length: Option<usize>,
+    /// `true` なら両端の `n_fft/2` を切り落とす。
+    pub center: bool,
+    /// `true` なら `1/√n_fft` 正規化（`stft` の `normalized` と対）。
+    pub normalized: bool,
+    /// `None` は入力 bin 数 ≠ `n_fft` なら片側と推定。`Some(false)` は先頭
+    /// `n_fft/2+1` bin だけを読む（PyTorch 2.14.0 の実測。上位 bin の勾配は 0）。
+    pub onesided: Option<bool>,
+    /// 出力長。`None` は `center` に応じた既定長。期待長を超える分は 0 詰め。
+    pub length: Option<usize>,
+}
+
+impl Default for IstftOptions {
+    fn default() -> Self {
+        Self {
+            hop_length: None,
+            win_length: None,
+            center: true,
+            normalized: false,
+            onesided: None,
+            length: None,
+        }
+    }
+}
+
+impl IstftOptions {
+    /// フレーム間隔を設定する。
+    pub fn with_hop_length(mut self, hop_length: usize) -> Self {
+        self.hop_length = Some(hop_length);
+        self
+    }
+    /// 窓長を設定する。
+    pub fn with_win_length(mut self, win_length: usize) -> Self {
+        self.win_length = Some(win_length);
+        self
+    }
+    /// 両端の切り落としの有無を設定する。
+    pub fn with_center(mut self, center: bool) -> Self {
+        self.center = center;
+        self
+    }
+    /// 正規化の有無を設定する。
+    pub fn with_normalized(mut self, normalized: bool) -> Self {
+        self.normalized = normalized;
+        self
+    }
+    /// 片側スペクトルか否かを明示する。
+    pub fn with_onesided(mut self, onesided: bool) -> Self {
+        self.onesided = Some(onesided);
+        self
+    }
+    /// 出力長を指定する。
+    pub fn with_length(mut self, length: usize) -> Self {
+        self.length = Some(length);
+        self
+    }
+}
+
+/// 窓テンソル（rank 1）を実効窓（長さ `n_fft`・中央寄せゼロ詰め）へ解決する。
+fn resolve_window(
+    window: Option<&Tensor<f32>>,
+    win_length: usize,
+    n_fft: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let data = match window {
+        Some(w) => {
+            if w.shape().len() != 1 {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 1,
+                    actual: w.shape().len(),
+                }));
+            }
+            fft::stft_window(Some(&w.host_slice()), Some(win_length), n_fft)?
+        }
+        None => fft::stft_window(None, Some(win_length), n_fft)?,
+    };
+    Tensor::new(data, &[n_fft]).map_err(AutodiffError::Shape)
+}
+
+/// 短時間フーリエ変換（実 `[L]`／`[B, L]` → `Var`（`[N, T, 2]`／`[B, N, T, 2]`））。
+///
+/// `N = n_fft/2+1`（`onesided`）または `n_fft`、`T = 1 + (L_pad − n_fft)/hop`。
+/// `window` は rank 1・長さ `win_length`（`None` は矩形窓）で、`win_length <
+/// n_fft` なら中央寄せでゼロ詰めされる。窓は非追跡で、窓への勾配は流れない。
+///
+/// **確保前の検査**: `n_fft`・`hop`・窓長・rank・反射パディング幅・フレーム数・
+/// 作業／出力バッファの要素数とバイト数を実体化より前に検査し、違反は型付き
+/// エラーで拒否する。**非有限入力**は拒否せず伝播する。
+pub fn stft<'t>(
+    x: &Var<'t>,
+    n_fft: usize,
+    window: Option<&Tensor<f32>>,
+    options: &StftOptions,
+) -> Result<Var<'t>, AutodiffError> {
+    let params = StftParams::new(
+        n_fft,
+        options.hop_length,
+        options.center,
+        options.pad_mode,
+        options.normalized,
+        options.onesided,
+    )?;
+    let win = resolve_window(window, options.win_length.unwrap_or(n_fft), n_fft)?;
+    let layout = fft::stft_layout(&x.shape(), &params)?;
+    let input = materialize_one(x)?;
+    let value = match x.tape().ops().fft_stft(&input, &win, &params) {
+        Ok(v) => {
+            verify_shape(v.shape(), layout.out_shape())?;
+            v
+        }
+        Err(BackendError::Unsupported(_)) => Tensor::new(
+            fft::stft_host(&input.host_slice(), &win.host_slice(), &layout)?,
+            layout.out_shape(),
+        )
+        .map_err(AutodiffError::Shape)?,
+        Err(other) => return Err(unify_backend_error(other)),
+    };
+    let id = x.tape().push_eager(
+        Op::Stft {
+            input: x.node_id(),
+            window: win,
+            params,
+        },
+        value,
+    );
+    Ok(Var::from_raw(x.tape(), id))
+}
+
+/// 逆短時間フーリエ変換（`[N, T, 2]`／`[B, N, T, 2]` → `Var`（実 `[L_out]`／
+/// `[B, L_out]`））。
+///
+/// 各フレームを逆変換して窓を掛け、重畳加算した結果を窓二乗の重畳和（包絡）で
+/// 割る。包絡の最小値が `fft::ISTFT_NOLA_MIN_ENVELOPE` 未満（NOLA 違反）なら
+/// バックエンド呼び出し前に `InvalidArgument` で拒否する。`onesided = false` は
+/// 先頭 `n_fft/2+1` bin だけを読む。確保前の検査・窓・非有限入力の扱いは
+/// [`stft`] と同じ。
+pub fn istft<'t>(
+    x: &Var<'t>,
+    n_fft: usize,
+    window: Option<&Tensor<f32>>,
+    options: &IstftOptions,
+) -> Result<Var<'t>, AutodiffError> {
+    let params = IstftParams::new(
+        n_fft,
+        options.hop_length,
+        options.win_length,
+        options.center,
+        options.normalized,
+        options.onesided,
+        options.length,
+    )?;
+    let win = resolve_window(window, params.win_length(), n_fft)?;
+    let layout = fft::istft_layout(&x.shape(), &params)?;
+    fft::istft_check_nola(&win.host_slice(), &layout)?;
+    let input = materialize_one(x)?;
+    let value = match x.tape().ops().fft_istft(&input, &win, &params) {
+        Ok(v) => {
+            verify_shape(v.shape(), layout.out_shape())?;
+            v
+        }
+        Err(BackendError::Unsupported(_)) => Tensor::new(
+            fft::istft_host(&input.host_slice(), &win.host_slice(), &layout)?,
+            layout.out_shape(),
+        )
+        .map_err(AutodiffError::Shape)?,
+        Err(other) => return Err(unify_backend_error(other)),
+    };
+    let id = x.tape().push_eager(
+        Op::Istft {
+            input: x.node_id(),
+            window: win,
+            params,
+        },
+        value,
+    );
     Ok(Var::from_raw(x.tape(), id))
 }
