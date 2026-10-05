@@ -256,6 +256,12 @@ pub fn logcumsumexp_vjp_host(
 ) -> Result<Vec<f32>, ShapeError> {
     layout.check_len(x.len())?;
     layout.check_len(upstream.len())?;
+    // 空レイアウト（numel == 0）は走査対象の要素が無い。`axis_len` は
+    // `[usize::MAX, 0]` のように巨大でありうるため、prefix 確保前に空勾配を返す
+    // （巨大確保による OOM・panic を避ける。境界検査の契約）。
+    if layout.numel == 0 {
+        return Ok(Vec::new());
+    }
     let mut d_x = vec![0.0_f32; layout.numel];
     let mut prefix = vec![0.0_f64; layout.axis_len];
     for o in 0..layout.outer {
@@ -428,6 +434,20 @@ mod tests {
         );
         assert_eq!(log_add_exp(f64::NEG_INFINITY, 2.0), 2.0);
         assert_eq!(log_add_exp(f64::INFINITY, f64::NEG_INFINITY), f64::INFINITY);
+    }
+
+    #[test]
+    fn vjp_on_empty_layout_does_not_allocate_axis_prefix() {
+        // axis_len が巨大でも numel == 0 なら確保せず空勾配を返す。
+        for shape in [[usize::MAX, 0], [1 << 40, 0]] {
+            let l = layout(&shape, 0);
+            assert_eq!(l.numel(), 0);
+            assert_eq!(
+                logcumsumexp_vjp_host(&[], &[], &l).unwrap(),
+                Vec::<f32>::new()
+            );
+            assert!(logcumsumexp_host(&[], &l).unwrap().is_empty());
+        }
     }
 
     #[test]
