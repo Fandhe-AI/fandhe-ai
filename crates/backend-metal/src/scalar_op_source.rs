@@ -263,6 +263,17 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         | ScalarUnaryOp::Reciprocal
         | ScalarUnaryOp::Rsqrt
         | ScalarUnaryOp::Erf => None,
+        // イシュー #2634: 逆三角関数・双曲線関数 8 kind の GPU 専用カーネル
+        // も別イシューのスコープ。明示 `None` でホスト参照実装
+        // （`ScalarUnaryOp::apply`）へフォールバックする。
+        ScalarUnaryOp::Atan
+        | ScalarUnaryOp::Asin
+        | ScalarUnaryOp::Acos
+        | ScalarUnaryOp::Sinh
+        | ScalarUnaryOp::Cosh
+        | ScalarUnaryOp::Asinh
+        | ScalarUnaryOp::Acosh
+        | ScalarUnaryOp::Atanh => None,
         _ => None,
     }
 }
@@ -371,6 +382,9 @@ fn binary_expr(op: ScalarBinaryOp) -> Option<&'static str> {
         ScalarBinaryOp::Le => Some("(a_v <= b_v) ? 1.0f : 0.0f"),
         ScalarBinaryOp::Eq => Some("(a_v == b_v) ? 1.0f : 0.0f"),
         ScalarBinaryOp::Ne => Some("(a_v != b_v) ? 1.0f : 0.0f"),
+        // イシュー #2634: `Atan2` の GPU 専用カーネルは別イシューのスコープ。
+        // 明示 `None` でホスト参照実装へフォールバックする。
+        ScalarBinaryOp::Atan2 => None,
         _ => None,
     }
 }
@@ -605,6 +619,29 @@ mod tests {
                 "{op:?}: GPU カーネル未実装のため None のはず"
             );
         }
+    }
+
+    /// イシュー #2634: 逆三角関数・双曲線関数 9 kind の GPU 専用カーネルは
+    /// スコープ外で、`unary_kernel_source`／`binary_kernel_source` は明示的に
+    /// `None` を返す。
+    #[test]
+    fn new_2634_kinds_are_unsupported() {
+        for op in [
+            ScalarUnaryOp::Atan,
+            ScalarUnaryOp::Asin,
+            ScalarUnaryOp::Acos,
+            ScalarUnaryOp::Sinh,
+            ScalarUnaryOp::Cosh,
+            ScalarUnaryOp::Asinh,
+            ScalarUnaryOp::Acosh,
+            ScalarUnaryOp::Atanh,
+        ] {
+            assert!(
+                unary_kernel_source(op).is_none(),
+                "{op:?}: GPU カーネル未実装のため None のはず"
+            );
+        }
+        assert!(binary_kernel_source(ScalarBinaryOp::Atan2).is_none());
     }
 
     /// 超越関数系 8 kind すべてが REQ-8 境界チェック・buffer index

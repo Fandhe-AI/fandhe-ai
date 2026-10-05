@@ -58,6 +58,16 @@
 //! #1823 の教訓）。CUDA／Metal のカーネル実装は本イシューのスコープ
 //! 外で、既定の `Unsupported` のままホスト参照実装へフォールバックする
 //! （`docs/autodiff-scalar-unary-ops-decision.md` 参照）。
+//!
+//! ## イシュー #2634 で追加した 9 variant
+//!
+//! 単項 8 種（`Atan`／`Asin`／`Acos`／`Sinh`／`Cosh`／`Asinh`／`Acosh`／
+//! `Atanh`）と 2 項 1 種（`ScalarBinaryOp::Atan2`）。forward は `f32`
+//! 標準ライブラリの同名関数をそのまま使い、定義域外・極・overflow は
+//! IEEE 754 のまま伝播する（マスクも panic もしない。`Tan`／`Log` と同
+//! 規約）。区分定数ではないので `is_piecewise_constant`／
+//! `is_comparison` は `false`。CUDA／Metal は既定 `Unsupported` から
+//! ホスト参照実装へフォールバックする（`docs/autodiff-trig-ops-decision.md`）。
 
 /// [`ScalarUnaryOp`]／[`ScalarBinaryOp`] の NVRTC キャッシュキー等に使う
 /// 安定な判別子文字列を返す（`Debug` 出力はペイロード値を含むため
@@ -184,6 +194,22 @@ pub enum ScalarUnaryOp {
     /// `1.5e-7`）を再利用し、`f64` で計算してから `f32` へ 1 回だけ
     /// downcast する。
     Erf,
+    /// `atan(x)`（PyTorch `torch.atan` 相当。イシュー #2634）。逆正接。値域 `(-π/2, π/2)`。全実数で定義。panic・マスクなし。
+    Atan,
+    /// `asin(x)`（PyTorch `torch.asin` 相当。イシュー #2634）。逆正弦。定義域 `[-1, 1]`、外側は `NaN`（IEEE のまま）。panic・マスクなし。
+    Asin,
+    /// `acos(x)`（PyTorch `torch.acos` 相当。イシュー #2634）。逆余弦。定義域 `[-1, 1]`、外側は `NaN`（IEEE のまま）。panic・マスクなし。
+    Acos,
+    /// `sinh(x)`（PyTorch `torch.sinh` 相当。イシュー #2634）。双曲線正弦。大きな `|x|` は `±inf`（IEEE のまま）。panic・マスクなし。
+    Sinh,
+    /// `cosh(x)`（PyTorch `torch.cosh` 相当。イシュー #2634）。双曲線余弦。大きな `|x|` は `+inf`（IEEE のまま）。panic・マスクなし。
+    Cosh,
+    /// `asinh(x)`（PyTorch `torch.asinh` 相当。イシュー #2634）。逆双曲線正弦。全実数で定義。panic・マスクなし。
+    Asinh,
+    /// `acosh(x)`（PyTorch `torch.acosh` 相当。イシュー #2634）。逆双曲線余弦。定義域 `x >= 1`、`x < 1` は `NaN`。panic・マスクなし。
+    Acosh,
+    /// `atanh(x)`（PyTorch `torch.atanh` 相当。イシュー #2634）。逆双曲線正接。定義域 `(-1, 1)`、`±1` は `±inf`、外側は `NaN`。panic・マスクなし。
+    Atanh,
 }
 
 impl ScalarOpKind for ScalarUnaryOp {
@@ -218,6 +244,14 @@ impl ScalarOpKind for ScalarUnaryOp {
             Self::Reciprocal => "reciprocal",
             Self::Rsqrt => "rsqrt",
             Self::Erf => "erf",
+            Self::Atan => "atan",
+            Self::Asin => "asin",
+            Self::Acos => "acos",
+            Self::Sinh => "sinh",
+            Self::Cosh => "cosh",
+            Self::Asinh => "asinh",
+            Self::Acosh => "acosh",
+            Self::Atanh => "atanh",
         }
     }
 }
@@ -336,6 +370,14 @@ impl ScalarUnaryOp {
             Self::Reciprocal => 1.0 / x,
             Self::Rsqrt => 1.0 / x.sqrt(),
             Self::Erf => erf_f64(x as f64) as f32,
+            Self::Atan => x.atan(),
+            Self::Asin => x.asin(),
+            Self::Acos => x.acos(),
+            Self::Sinh => x.sinh(),
+            Self::Cosh => x.cosh(),
+            Self::Asinh => x.asinh(),
+            Self::Acosh => x.acosh(),
+            Self::Atanh => x.atanh(),
         }
     }
 
@@ -384,6 +426,8 @@ pub enum ScalarBinaryOp {
     Le,
     Eq,
     Ne,
+    /// `atan2(a, b)`（PyTorch `torch.atan2(input, other)` 相当で `a = y`・`b = x`。イシュー #2634）。IEEE のまま（`atan2(0, 0) = 0`・符号付きゼロ・`NaN` 伝播）。
+    Atan2,
 }
 
 impl ScalarOpKind for ScalarBinaryOp {
@@ -402,6 +446,7 @@ impl ScalarOpKind for ScalarBinaryOp {
             Self::Le => "le",
             Self::Eq => "eq",
             Self::Ne => "ne",
+            Self::Atan2 => "atan2",
         }
     }
 }
@@ -423,6 +468,7 @@ impl ScalarBinaryOp {
             Self::Le => bool_to_f32(a <= b),
             Self::Eq => bool_to_f32(a == b),
             Self::Ne => bool_to_f32(a != b),
+            Self::Atan2 => a.atan2(b),
         }
     }
 
@@ -954,5 +1000,100 @@ mod tests {
             "gelu_tanh_grad(-1e20) は NaN であってはならない"
         );
         assert_close(neg, 0.0, 1e-3, "gelu_tanh_grad huge negative x");
+    }
+
+    // --- イシュー #2634: 逆三角関数・双曲線関数 ---
+
+    const NEW_2634_UNARY: [ScalarUnaryOp; 8] = [
+        ScalarUnaryOp::Atan,
+        ScalarUnaryOp::Asin,
+        ScalarUnaryOp::Acos,
+        ScalarUnaryOp::Sinh,
+        ScalarUnaryOp::Cosh,
+        ScalarUnaryOp::Asinh,
+        ScalarUnaryOp::Acosh,
+        ScalarUnaryOp::Atanh,
+    ];
+
+    #[test]
+    fn new_2634_known_values() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        assert_close(ScalarUnaryOp::Atan.apply(1.0), FRAC_PI_4, EPS, "atan(1)");
+        assert_close(ScalarUnaryOp::Asin.apply(1.0), FRAC_PI_2, EPS, "asin(1)");
+        assert_close(ScalarUnaryOp::Acos.apply(-1.0), PI, EPS, "acos(-1)");
+        assert_close(ScalarUnaryOp::Sinh.apply(0.0), 0.0, EPS, "sinh(0)");
+        assert_close(ScalarUnaryOp::Cosh.apply(0.0), 1.0, EPS, "cosh(0)");
+        assert_close(
+            ScalarUnaryOp::Asinh.apply(1.0),
+            0.881_373_6,
+            EPS,
+            "asinh(1)",
+        );
+        assert_close(ScalarUnaryOp::Acosh.apply(1.0), 0.0, EPS, "acosh(1)");
+        assert_close(
+            ScalarUnaryOp::Atanh.apply(0.5),
+            0.549_306_14,
+            EPS,
+            "atanh(.5)",
+        );
+    }
+
+    #[test]
+    fn new_2634_domain_edges_follow_ieee() {
+        assert!(ScalarUnaryOp::Asin.apply(1.5).is_nan());
+        assert!(ScalarUnaryOp::Acos.apply(-1.5).is_nan());
+        assert!(ScalarUnaryOp::Acosh.apply(0.5).is_nan());
+        assert!(ScalarUnaryOp::Atanh.apply(1.5).is_nan());
+        assert_eq!(ScalarUnaryOp::Atanh.apply(1.0), f32::INFINITY);
+        assert_eq!(ScalarUnaryOp::Atanh.apply(-1.0), f32::NEG_INFINITY);
+        assert_eq!(ScalarUnaryOp::Sinh.apply(100.0), f32::INFINITY);
+        assert_eq!(ScalarUnaryOp::Cosh.apply(100.0), f32::INFINITY);
+    }
+
+    #[test]
+    fn new_2634_huge_finite_inputs_stay_finite() {
+        for x in [3.0e38_f32, -3.0e38] {
+            assert!(ScalarUnaryOp::Asinh.apply(x).is_finite(), "asinh({x})");
+        }
+        assert!(ScalarUnaryOp::Acosh.apply(3.0e38).is_finite());
+    }
+
+    #[test]
+    fn new_2634_signed_zero_and_nan_propagation() {
+        assert!(ScalarUnaryOp::Asinh.apply(-0.0).is_sign_negative());
+        for op in NEW_2634_UNARY {
+            assert!(op.apply(f32::NAN).is_nan(), "{op:?}(NaN)");
+        }
+        assert!(ScalarBinaryOp::Atan2.apply(f32::NAN, 1.0).is_nan());
+        assert!(ScalarBinaryOp::Atan2.apply(1.0, f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn new_2634_atan2_quadrants_and_zeros() {
+        use std::f32::consts::{FRAC_PI_4, PI};
+        let f = |y: f32, x: f32| ScalarBinaryOp::Atan2.apply(y, x);
+        assert_close(f(1.0, 1.0), FRAC_PI_4, EPS, "Q1");
+        assert_close(f(1.0, -1.0), 3.0 * FRAC_PI_4, EPS, "Q2");
+        assert_close(f(-1.0, -1.0), -3.0 * FRAC_PI_4, EPS, "Q3");
+        assert_close(f(-1.0, 1.0), -FRAC_PI_4, EPS, "Q4");
+        assert_eq!(f(0.0, 0.0), 0.0);
+        assert_close(f(0.0, -0.0), PI, EPS, "atan2(0,-0)");
+        assert_close(f(-0.0, -0.0), -PI, EPS, "atan2(-0,-0)");
+    }
+
+    #[test]
+    fn new_2634_kinds_are_not_piecewise_constant_and_names_are_stable() {
+        for op in NEW_2634_UNARY {
+            assert!(!op.is_piecewise_constant(), "{op:?}");
+        }
+        assert!(!ScalarBinaryOp::Atan2.is_comparison());
+        let names: Vec<&str> = NEW_2634_UNARY.iter().map(|o| o.kind_name()).collect();
+        assert_eq!(
+            names,
+            [
+                "atan", "asin", "acos", "sinh", "cosh", "asinh", "acosh", "atanh"
+            ]
+        );
+        assert_eq!(ScalarBinaryOp::Atan2.kind_name(), "atan2");
     }
 }

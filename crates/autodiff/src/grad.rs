@@ -8986,7 +8986,16 @@ mod tests {
             // is_always_zero` で解析値を直接検証する。
             (ScalarUnaryOp::Reciprocal, general.clone()), // general は 0 を含まない
             (ScalarUnaryOp::Rsqrt, positive),
-            (ScalarUnaryOp::Erf, general),
+            (ScalarUnaryOp::Erf, general.clone()),
+            // イシュー #2634: 定義域の内側（境界 |x| = 1 は避ける）
+            (ScalarUnaryOp::Atan, general.clone()),
+            (ScalarUnaryOp::Asin, vec![-0.7, -0.2, 0.3, 0.8]),
+            (ScalarUnaryOp::Acos, vec![-0.7, -0.2, 0.3, 0.8]),
+            (ScalarUnaryOp::Sinh, general.clone()),
+            (ScalarUnaryOp::Cosh, general.clone()),
+            (ScalarUnaryOp::Asinh, general),
+            (ScalarUnaryOp::Acosh, vec![1.3, 2.0, 3.5, 5.0]),
+            (ScalarUnaryOp::Atanh, vec![-0.7, -0.2, 0.3, 0.8]),
         ]
     }
 
@@ -9104,6 +9113,12 @@ mod tests {
                 vec![0.1, -1.5, 3.0, -0.2],
             ),
             (ScalarBinaryOp::Minimum, a, vec![0.1, -1.5, 3.0, -0.2]),
+            // イシュー #2634: 原点から離した 4 象限
+            (
+                ScalarBinaryOp::Atan2,
+                vec![1.3, 0.7, -1.1, -0.9],
+                vec![0.6, -1.8, -1.2, 2.4],
+            ),
         ]
     }
 
