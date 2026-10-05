@@ -251,6 +251,10 @@ pub fn unbind<'t>(x: &Var<'t>, dim: usize) -> Result<Vec<Var<'t>>, AutodiffError
     let shape = x.shape();
     checked_axis_in_range(dim, shape.len())?;
     let n = shape[dim];
+    // 零長軸はメタデータだけで空 Vec を返す（strides_probe による materialize を起こさない）。
+    if n == 0 {
+        return Ok(Vec::new());
+    }
     let mut out_shape = shape;
     out_shape.remove(dim);
     // narrow・contiguous・reshape の最大 3 ノード。
