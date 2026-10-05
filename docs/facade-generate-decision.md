@@ -241,3 +241,67 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 - `.claude/rules/security.md`（A02／A03／A04 の適用箇所）。
 - `.claude/rules/delegation-impl.md`（実装 Agent が依存追加・公開面
   拡張を自己判断で行わない制約）。
+
+## 13. #2574（facade 公開形の確定）の着手時判定と承認依頼
+
+### 13.1 経緯
+
+- イシュー #2574（親 #2573・ルート #2499）は、2026-10-04 の一括承認の
+  下で、§2・§8・§10 の**推奨形**による facade 公開形の確定を求めた。
+- 一括承認が及ぶのは記録に書かれた形だけである。§8 の見出しは「承認
+  事項」で、項目 1 は「第一候補」、項目 2 は「前提条件になりうる」、
+  項目 3・4 は「承認時に判断する」と書くにとどまり、確定可能な推奨形
+  が揃っていない。
+- 着手時に現状と突合した結果、停止条項に該当したため facade のコード
+  は変更していない。**本節は承認を得たことを意味しない**。推奨案はすべて
+  「承認待ち」であり、確定ではない（先例: #2536 → PR #2728、
+  #2541 → PR #2732〈`docs/reference-models-decision.md` §11〉）。
+
+### 13.2 着手時判定（調査基準: origin/main `0a541598`）
+
+| §8 項目 | (i) 記録上の状態 | (ii) 新たに分かった事実 | (iii) 推奨案（承認待ち） |
+|---|---|---|---|
+| 1. 配置 | 第一候補として `inference::{generate, GenerateConfig, SamplingStrategy, AutoregressiveModel}` の純再エクスポート（`nn::rnn` と同型）を挙げるのみ | facade には非公開の `mod inference;`（`crates/facade/src/lib.rs:170`）が既にあり、predict_batches のバッチ推論実装用で公開は #2581〜#2583 で保留中。`crates/facade/tests/api_surface.rs` の `facade_does_not_reexport_or_declare_predict_batches_items` は `pub mod inference` の宣言を違反として検出する。`docs/facade-predict-batches-phase-metrics-decision.md` §5 項目 4 でも `pub mod inference` への昇格は未承認。第一候補をそのまま採ると別ツリーの保留ガードと衝突する（本記録に未記載だった点） | 2 案併記。(A) predict_batches（#2581〜#2583）の決着後に `pub mod inference` へ相乗りする。(B) 別配置（例: `fandhe_ai::generate` サブモジュール）にする。推奨は (A)（#2191 本文の配置との整合・推論 API の名前空間一元化）。決定はユーザーに委ねる |
+| 2. `pub fn generate` の署名と型の公開範囲 | 「#2084 K-2 の先行承認が前提条件になりうる」と書くのみ | `AutoregressiveModel::forward_step(&self, &Tensor<i32>, &mut [KvCache])`（`crates/autodiff/src/generate.rs:223-238`）の実装には `KvCache` の名指しが要るが、`KvCache` は facade から到達できない（`KvCacheHoldDoctestGuard`〈`crates/facade/src/lib.rs`〉で保留固定。#2577〜#2580 は未完了）。`docs/kv-cache-design.md` §10.3 (a)(b) により K-2 後も `MultiheadAttention`／`forward_with_cache` は facade から到達できず、facade のみの利用者が KV キャッシュを結線する手段が無い。既存の `crates/facade/tests/generate_backend_parity.rs:23-28` は `fandhe_ai_autodiff` から直接 import しており、facade からの到達可能性の証明にはなっていない | `KvCache` の facade 公開（#2577 ツリー・`docs/kv-cache-design.md` §10.3）を先行条件として明記する。加えて `MultiheadAttention`／`forward_with_cache` の到達経路も必要 |
+| 3. `GenerateConfig` のフィールド公開方針 | 「5 フィールド公開か builder／getter か」を承認時判断として 2 案併記 | `generate` は `fandhe-ai-autodiff` の `pub mod generate`（`crates/autodiff/src/lib.rs:256`）で、導入コミット `bbb4ca89` は `v0.10.0` の祖先であり、5 つの pub フィールドを持つ `#[non_exhaustive]` struct は `fandhe-ai-autodiff =0.10.0` として出荷済み。autodiff 側の getter 化は同クレートの破壊的変更になる。facade 既存慣習（`RnnConfig` は private フィールド＋builder。`crates/autodiff/src/nn/rnn_stacked.rs`）とは形が異なる | autodiff の形（pub フィールド＋`#[non_exhaustive]`＋`new`／`with_*`＋`validate`）をそのまま再エクスポートする。理由は 0.10.0 を壊さないことと、`validate`（§3）が fail-closed で矛盾を拒否するため pub フィールド書き換えでも A03 の安全性が保たれること。facade newtype（builder／getter）案は追加的で非破壊だが二重管理になる |
+| 4. エラー型 | 「`AutodiffError` をそのまま出すか facade の集約方針に合わせるか」を承認時確定 | facade に統一の `Error` 型は無い。`AutodiffError` は既にルートから再エクスポート済み（`crates/facade/src/lib.rs:207`）で `#[non_exhaustive]`（`crates/autodiff/src/error.rs:19`） | 既存再エクスポートの `AutodiffError` を流用する |
+
+### 13.3 公開 API の非破壊確認（`fandhe-ai =0.10.0`）
+
+- 項目 1: どの配置案も新規モジュールの追加で既存名と衝突しない。ただし
+  `pub mod inference` は predict_batches の保留ガードと衝突する。
+- 項目 2: 型の追加再エクスポートであり非破壊。
+- 項目 3: 再エクスポート案・facade newtype 案とも非破壊。autodiff 側の
+  getter 化のみが `fandhe-ai-autodiff =0.10.0` に対する破壊的変更。
+- 項目 4: 既存型の流用であり非破壊。
+- いずれも `FitConfig` 等の既存型・メソッドには触れない。
+
+### 13.4 セキュリティ上の公開条件（承認時に維持を確認）
+
+- A03: `generate` の入口で `GenerateConfig::validate` を必ず呼ぶ契約を
+  維持する（pub フィールド公開の前提）。
+- A04: facade 利用者が `AutoregressiveModel` を実装できるようになると
+  `forward_step` の戻り shape・値は信頼できない出力になる。既存の
+  `validate_forward_step_output` と非有限値の検査（§3）を維持する。
+- A02: `Generator`（xorshift64*）は暗号学的に安全な PRNG ではない。この
+  注記を facade 公開後の doc にも引き継ぐ。
+
+### 13.5 ユーザーに決めてほしい事項と選択肢
+
+決定事項: (a) 配置、(b) KV キャッシュの先行公開を待つか否かと順序、
+(c) `GenerateConfig` の公開形、(d) エラー型。
+
+- **A**: (a)〜(d) を決めた推奨形を記録し、KV キャッシュ公開（#2578／
+  #2579）の後に #2575／#2576 で公開する。
+- **B**: `SamplingStrategy`／`GenerateConfig` だけを先に公開し、
+  `AutoregressiveModel`／`generate` は KV キャッシュ公開を待つ。ただし
+  `generate` を呼べない公開になるため価値は低い。
+- **C**: 内部クレート限定を維持し、#2573 ツリーを not planned で閉じる。
+
+いずれも 0.10.0 の非破壊を前提とし、実装は別 PR で行う。
+
+### 13.6 本 PR で行わないこと
+
+- facade のコード変更・ガードの追加／反転・`docs/compat-api-scope.md`
+  §5 への記録・#2575／#2576 への着手。
+- #2574／#2573 の閉じ方と #2575／#2576 の扱い（ユーザー判断）。
