@@ -2319,9 +2319,11 @@ pub(crate) struct TapeNode {
     /// 経由で forward 値を計算した `Op::MatMul` ノード）と、
     /// `crate::low_precision_ops` の自由関数が積む `Op::Add`／`Mul`／
     /// `Relu`／`Exp`／`Tanh` ノードにのみ `true` を立てる（以下の
-    /// 説明は MatMul を例にするが、検査は Op を問わず本フラグで行う）。`fp32_strict` と同じ理由（`Op::MatMul` variant 自体は
-    /// forward 精度の情報を持たない）で、このノード単位のフラグが
-    /// 「低精度で計算された」事実を 2 箇所へ伝える:
+    /// 説明は MatMul を例にするが、検査は Op を問わず本フラグで行う）。
+    ///
+    /// `fp32_strict` と同じ理由（`Op::MatMul` variant 自体は forward
+    /// 精度の情報を持たない）で、このノード単位のフラグが「低精度で
+    /// 計算された」事実を 2 箇所へ伝える:
     ///
     /// 1. [`release_checkpoint_region`]（`fp32_strict` と同列で解放対象
     ///    から除外。解放して非低精度な `matmul_forward`〈`ops.gemm`〉で
