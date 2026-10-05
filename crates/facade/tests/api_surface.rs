@@ -17246,9 +17246,11 @@ fn check_callback_logger_accessor_surface(files: &[(String, String)]) -> Vec<Str
 }
 
 /// 正ガード（#2572）: ロガー 3 型は承認形の公開 fn（`new`／`append`／`on_epoch_end`）と
-/// `Debug` の手書き impl 以外を持たない。公開アクセサ（`path()` 等）や `Clone` 等の追加は
-/// fail する（`facade_declares_callback_loggers_only_in_approved_shape` は宣言・再エクスポート
-/// の形のみを検査するため、型の公開面の拡大はこのテストが固定する）。
+/// `Debug` の手書き impl 以外を持たない。公開アクセサ（`path()` 等）や手書きの
+/// `impl Clone for ...` 等の追加は fail する。検出範囲は「手書きの `impl Trait for Type` と
+/// 固有 `impl` の `pub fn`」のみで、`#[derive(...)]` による trait 追加は対象外（検査しない）。
+/// `facade_declares_callback_loggers_only_in_approved_shape` は宣言・再エクスポートの形のみを
+/// 検査するため、型の公開面の拡大のうち上記範囲をこのテストが固定する。
 #[test]
 fn callback_logger_types_expose_only_approved_methods_and_traits() {
     let src_dir = facade_crate_root().join("src");

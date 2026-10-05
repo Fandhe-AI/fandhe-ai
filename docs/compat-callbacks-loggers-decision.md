@@ -365,7 +365,9 @@ CUDA／Metal 実機申し送りは §4-10 のとおり不要。
 - **補強ガード**: §9「§3 以外の公開アクセサは設けない」を機械的に固定する。
   `CsvLogger`／`JsonLogger` の制限なし `pub fn` は `new`・`append`、
   `LambdaCallback` は `on_epoch_end` のみ、手書き trait impl は 3 型とも
-  `Debug` のみ、固有 impl は `compat/callbacks.rs` 限定。`pub(super)`／
+  `Debug` のみ、固有 impl は `compat/callbacks.rs` 限定。**検出範囲は手書きの
+  `impl Trait for Type` と固有 impl の `pub fn` のみで、`#[derive(Clone)]` 等の
+  derive による trait 追加は対象外**（derive 検査は設けていない）。`pub(super)`／
   private の fn は外部から到達できないため許容する。
 - **利用例**: doctest は各型の `# Examples`（#2571）。統合テストは
   `compat_sequential_callbacks.rs` の 18 節（#2571・12 件）に加え、
