@@ -205,7 +205,7 @@ impl Sequential {
   import したスコープで、ローカル定義の `FitWeights`／
   `validation_split`／`class_weight`／`sample_weight`／
   `fit_with_weights`／`fit_weighted` を UFCS で呼び出す `__probe`
-  関数がコンパイルできることを確認する（`CallbacksLoggersHoldDoctestGuard`
+  関数がコンパイルできることを確認する（`CallbacksLoggersHoldDoctestGuard`〈#2571 で削除済み〉
   と同型。UFCS 呼び出しは inherent の関連項目を優先解決するため、
   `&self` トレイトメソッドがビルダー〈`self` 受け〉より先に解決されて
   検出漏れになるのを防ぐ）

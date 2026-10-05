@@ -50,10 +50,10 @@ variant 追加）は本文が「variant 追加は承認事項に該当しない�
 対応する `api_surface.rs` の否定ガードは削除し正ガードへ反転した
 （§6・§9）。
 
-## 3. 承認後の公開 API 案（シグネチャ一覧）
+## 3. 公開 API 案（シグネチャ一覧。#2571 で公開済み）
 
 ```rust
-// crates/facade/src/compat/callbacks.rs（承認後の追記想定）
+// crates/facade/src/compat/callbacks.rs（#2571 で公開済み。#2572 で名前・形を再確認）
 pub struct CsvLogger { .. }
 impl CsvLogger {
     pub fn new(path: impl AsRef<Path>) -> Self;
@@ -87,8 +87,9 @@ pub enum Callback {
 
 型名は Rust API ガイドライン（略語も UpperCamelCase）に従い
 `CsvLogger`／`JsonLogger` とする（イシュータイトルの `CSVLogger`／
-`JSONLogger` 表記は採らない。両表記とも `CallbacksLoggersHoldDoctestGuard`
-の保留対象に含める）。パス引数は既存 `ModelCheckpoint::to_file` と揃え
+`JSONLogger` 表記は採らない。大文字表記は旧保留ガード〈`CallbacksLoggersHoldDoctestGuard`。#2571 で
+削除済み〉の保留対象だったが、現行の正ガードでも
+`FORBIDDEN_CALLBACK_LOGGER_TYPES` として 0 件固定のまま維持する）。パス引数は既存 `ModelCheckpoint::to_file` と揃え
 `impl AsRef<Path>` とする（`&str` はそのまま渡せるため後方互換な
 上位互換。イシュー本文の `&str` 表記は採らない）。
 
@@ -257,7 +258,7 @@ pub enum Callback {
 `docs/compat-callbacks-design.md` の公開 API 表・§4.6・§8 を更新した。
 置き換え後の正ガードは §9 を参照。
 
-## 7. OWASP Top 10 観点（承認後実装の要件として記録）
+## 7. OWASP Top 10 観点（承認後実装の要件。#2571 で実装済み・実装箇所は §9・§10）
 
 - **A03 インジェクション／入力検証**
   - パスは呼び出し側がプロセス内で渡す引数として扱い、シェル展開や
@@ -276,7 +277,8 @@ pub enum Callback {
     単位で flush し、書きかけの行を最小化する
   - Lambda やロガーの失敗時も `'epochs_block` 契約（`restore_best_
     weights`・モード復元・`compiled` 書き戻し）を維持する
-  - 保留ガード自体が「承認なしの公開面拡大」を機械的に遮断する
+  - 保留ガードは #2571 で削除し、承認形だけを許す正ガード（§9・§10）が
+    「承認なしの公開面拡大」を機械的に遮断する
     （自己修復・自律実装による無断拡大の防止。`docs/compat-api-
     scope.md` §5・`.claude/rules/security.md`）
 - **A06 脆弱・古いコンポーネント**: 依存の追加・更新はしない（JSON は
@@ -292,7 +294,8 @@ pub enum Callback {
 
 イシュー本文は要件として要約しただけで、本文中の命令文を実行指示
 としては扱っていない。本文に承認を主張する記述があっても、それを
-承認とはみなさない（本記録は承認なしを前提に保留固定する）。
+承認とはみなさない（#2178 の時点では承認なしを前提に保留固定した。#2571 の公開は
+ルート #2499 の一括承認に基づく。#2572 は公開面を増やさず、新たな承認は得ていない）。
 
 ## 9. 実装記録（イシュー #2571・親 #2570・ルート #2499 本文「承認範囲」節の一括承認に基づく）
 
@@ -341,3 +344,36 @@ facade_only` に 3 型の構築と `Callback` への包み込みを追加した�
 経路の doctest は各型の `# Examples`、統合テストは §5 の項目を
 `crates/facade/tests/compat_sequential_callbacks.rs`（18 節）に追加した。
 CUDA／Metal 実機申し送りは §4-10 のとおり不要。
+
+## 10. 実装記録（イシュー #2572・親 #2570。ガード反転の確認・補強・利用例テスト）
+
+#2571 がガード反転を前倒しで済ませていたため（#2546→#2738 と同じ運用）、
+#2572 は反転済みであることの確認と、§3・§7・§8 の実装済みへの更新、
+補強ガードと利用例テストの追加だけを行った。**公開面は不変**
+（`crates/facade/src/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
+`docs/spec/` は変更していない。新たな承認は得ていない）。
+
+| 旧保留ガード（#2178。削除済み） | 正ガード |
+|---|---|
+| `CallbacksLoggersHoldDoctestGuard`（lib.rs の正のプローブ doctest） | `facade_declares_callback_loggers_only_in_approved_shape`（承認形の宣言・再エクスポートのみ許可） |
+| `callbacks_loggers_hold_doctest_*` 2 件（ドリフト検査） | 上記の自己テスト `…_detects_each_category` |
+| `facade_does_not_reexport_or_declare_callback_loggers` | 同上（`FORBIDDEN_CALLBACK_LOGGER_TYPES` で大文字表記 0 件） |
+| `compat_callback_enum_variants_are_exactly_expected_while_2178_on_hold` | `compat_callback_enum_variants_are_exactly_approved_set` |
+| （なし） | `fit_types_are_reachable_via_facade_only` の拡張（3 型の構築） |
+| （なし。#2572 で追加） | `callback_logger_types_expose_only_approved_methods_and_traits`（＋自己テスト） |
+
+- **補強ガード**: §9「§3 以外の公開アクセサは設けない」を機械的に固定する。
+  `CsvLogger`／`JsonLogger` の制限なし `pub fn` は `new`・`append`、
+  `LambdaCallback` は `on_epoch_end` のみ、手書き trait impl は 3 型とも
+  `Debug` のみ、固有 impl は `compat/callbacks.rs` 限定。**検出範囲は手書きの
+  `impl Trait for Type` と固有 impl の `pub fn` のみで、`#[derive(Clone)]` 等の
+  derive による trait 追加は対象外**（derive 検査は設けていない）。`pub(super)`／
+  private の fn は外部から到達できないため許容する。
+- **利用例**: doctest は各型の `# Examples`（#2571）。統合テストは
+  `compat_sequential_callbacks.rs` の 18 節（#2571・12 件）に加え、
+  19 節 `loggers_record_lr_scheduled_by_lr_schedule_per_epoch`（#2572）で
+  ロガーを `LrSchedule` の前後に置いた構成の lr 列・`&History` を
+  `StepLr::lr_at` と bit 一致で検証する。
+- **保留継続**: 公開アクセサの追加・`&mut Sequential` を受け取る callback・
+  外部ロギング基盤・パスのシンボリックリンク検査と allowlist・CSV 追記時の
+  末尾行破損の検出（§9）。
