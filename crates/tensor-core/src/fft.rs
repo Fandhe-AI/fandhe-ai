@@ -280,16 +280,16 @@ impl Twiddle {
     fn new(n: usize) -> Self {
         let mut cos = Vec::with_capacity(n);
         let mut sin = Vec::with_capacity(n);
-        let quarter = if n % 4 == 0 { n / 4 } else { 0 };
+        let quarter = if n.is_multiple_of(4) { n / 4 } else { 0 };
         for t in 0..n {
-            let (s, c) = if quarter != 0 && t % quarter == 0 {
+            let (s, c) = if quarter != 0 && t.is_multiple_of(quarter) {
                 match t / quarter {
                     0 => (0.0, 1.0),
                     1 => (1.0, 0.0),
                     2 => (0.0, -1.0),
                     _ => (-1.0, 0.0),
                 }
-            } else if n % 2 == 0 && t == n / 2 {
+            } else if n.is_multiple_of(2) && t == n / 2 {
                 (0.0, -1.0)
             } else {
                 (2.0 * std::f64::consts::PI * (t as f64) / (n as f64)).sin_cos()
@@ -309,7 +309,7 @@ fn len_error(what: &str, expected: usize, actual: usize) -> FftError {
 
 /// bin `k` が DC または（`n` 偶数の）Nyquist か。
 fn is_real_bin(k: usize, n: usize) -> bool {
-    k == 0 || (n % 2 == 0 && k == n / 2)
+    k == 0 || (n.is_multiple_of(2) && k == n / 2)
 }
 
 /// `rfft` forward（実入力 → 片側スペクトル。出力は `layout.out_shape` の連続配置）。
@@ -406,9 +406,9 @@ pub fn rfft_vjp_host(g: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Vec
 /// `irfft` forward（片側スペクトル → 実出力。出力は `layout.out_shape`）。
 ///
 /// 入力 bin を `n/2+1` 個へ切り詰め／ゼロ詰めし、Hermitian 折り畳み形
-/// `x_j = t·[X_0.re + Σ_{k=1}^{⌈n/2⌉-1} 2(X_k.re·cos θ − X_k.im·sin θ)
-/// + (n 偶数なら X_{n/2}.re·(−1)^j)]` を評価する。DC・Nyquist の虚部は
-/// 読まない（PyTorch の C2R と同じ）。
+/// `x_j = t·[X_0.re + Σ_{k=1}^{⌈n/2⌉-1} 2(X_k.re·cos θ − X_k.im·sin θ)`
+/// に、`n` 偶数なら `X_{n/2}.re·(−1)^j` を加えた値を評価する。DC・Nyquist の
+/// 虚部は読まない（PyTorch の C2R と同じ）。
 pub fn irfft_host(x: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Vec<f32>, FftError> {
     let (n, m, inner) = (layout.n, layout.in_len, layout.inner);
     let in_numel = checked_numel(&[layout.outer, m, inner, 2])?;
@@ -439,7 +439,7 @@ pub fn irfft_host(x: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Vec<f3
                     if idx >= n {
                         idx -= n;
                     }
-                    if n % 2 == 0 && k == n / 2 {
+                    if n.is_multiple_of(2) && k == n / 2 {
                         acc += re * tw.cos[idx];
                     } else {
                         acc += 2.0 * (re * tw.cos[idx] - im * tw.sin[idx]);
@@ -532,10 +532,10 @@ mod tests {
         for n in [1usize, 2, 4, 8, 6, 12] {
             let tw = Twiddle::new(n);
             assert_eq!((tw.cos[0], tw.sin[0]), (1.0, 0.0));
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 assert_eq!((tw.cos[n / 2], tw.sin[n / 2]), (-1.0, 0.0), "n={n}");
             }
-            if n % 4 == 0 {
+            if n.is_multiple_of(4) {
                 assert_eq!((tw.cos[n / 4], tw.sin[n / 4]), (0.0, 1.0), "n={n}");
                 assert_eq!((tw.cos[3 * n / 4], tw.sin[3 * n / 4]), (0.0, -1.0), "n={n}");
             }
