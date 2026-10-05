@@ -67,13 +67,17 @@
 
 mod array;
 mod callbacks;
+mod logger_io;
 mod metrics;
 mod model_io;
 mod sequential;
 mod training;
 
 pub use array::{ArrayData, array};
-pub use callbacks::{Callback, EarlyStopping, LrSchedule, ModelCheckpoint, Monitor, MonitorMode};
+pub use callbacks::{
+    Callback, CsvLogger, EarlyStopping, JsonLogger, LambdaCallback, LrSchedule, ModelCheckpoint,
+    Monitor, MonitorMode,
+};
 /// `Sequential::add_multihead_attention_with_config` の引数型（イシュー #2530・ルート #2499 の
 /// 承認形。再エクスポートはこの 1 行のみで `api_surface.rs` が完全一致で固定する）。
 pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;

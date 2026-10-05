@@ -75,6 +75,13 @@ Sequential::fit_with_callbacks_named` は「compiled optimizer がこの
 pub enum Monitor { Loss, ValLoss }               // #[non_exhaustive]。既定は文脈依存
 pub enum MonitorMode { Min, Max }                // #[non_exhaustive]。既定 Min
 
+// #2571 で追加（`docs/compat-callbacks-loggers-decision.md` §3・§9）。
+// `Callback` は #[non_exhaustive] のまま 3 variant 追加:
+//   CsvLogger(CsvLogger) / JsonLogger(JsonLogger) / Lambda(LambdaCallback)
+pub struct CsvLogger { .. }      // new(path: impl AsRef<Path>) / append(bool)（既定 false）
+pub struct JsonLogger { .. }     // 同上
+pub struct LambdaCallback { .. } // on_epoch_end(FnMut(usize, &History) -> Result<(), AutodiffError> + 'static)
+
 pub struct EarlyStopping { .. }
 impl EarlyStopping {
     pub fn new(patience: usize) -> Self;                          // monitor=ValLoss, mode=Min, min_delta=0.0, restore_best_weights=false
@@ -246,6 +253,11 @@ optimizer への即時書き戻しは行わない——次回の epoch 開始同
   ここでの「epoch」は**その callback インスタンスが観測した epoch 末
   呼び出しの通算回数**
 
+- `CsvLogger`・`JsonLogger`・`LambdaCallback`（#2571）は内部状態を
+  fit をまたいで持たず（ファイルハンドル等は fit 開始〜終了のみ）、
+  `epoch` 列・クロージャの第 1 引数は**fit ローカル**（`History` の
+  添字と同じ 0 始まり。Keras も同じ）
+
 両者の定義は独立であり、`History` の添字（常に fit 呼び出しローカル）
 とは別物であることに注意する（`crates/facade/src/compat/callbacks.rs`
 モジュール冒頭 doc に明記）。
@@ -393,13 +405,13 @@ facade 経由到達性を固定した。`fandhe_ai::optim`（`optim.rs`）は純
 
 ## 8. 対象外・切り出し候補
 
-- CSV／JSON ロガー（`CsvLogger`／`JsonLogger`）・`LambdaCallback`
-  （`on_epoch_end` ラムダ。ユーザー定義 callback とは異なり `&mut
-  Sequential` ではなく `&History` のみを渡す限定形）は #2178（親
-  #2131）で設計記録済み（`docs/compat-callbacks-loggers-decision.md`）
-  だが、facade 公開（`Callback` への 3 variant 追加を含む）は未承認
-  のため保留固定のみ実施した。下記「ユーザー定義 callback」とは
-  `&mut Sequential` を渡すか否かで区別される別項目である
+- ~~CSV／JSON ロガー・`LambdaCallback`~~: #2178（親 #2131）で設計記録
+  したのち、**#2571（親 #2570・ルート #2499 本文「承認範囲」節の一括
+  承認に基づく）で facade へ公開済み**（`Callback::{CsvLogger,
+  JsonLogger, Lambda}`。`docs/compat-callbacks-loggers-decision.md`
+  §9）。`LambdaCallback` は `&mut Sequential` ではなく `&History` のみを
+  渡す限定形で、下記「ユーザー定義 callback」とは `&mut Sequential` を
+  渡すか否かで区別される別項目である
 - ユーザー定義 callback（trait object による拡張点）
 - `ModelCheckpoint::restore_best_weights` 相当のビルダー・safetensors
   metadata（best 値・epoch）の埋め込み（`ModelCheckpoint` のファイル
