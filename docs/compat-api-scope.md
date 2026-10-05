@@ -1909,3 +1909,10 @@ facade 公開面は追加していない（保留ガード `FftOpsHoldDoctestGua
 公開形（`Var::rfft`／`Var::irfft` と `FftNorm` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。
 内部実装はルート #2499 の Phase 4 方針（内部実装＋保留ガードまで先行・公開は承認後）に基づく。詳細は `docs/autodiff-fft-ops-decision.md`。
+
+**適用記録（イシュー #2628・親 #2626・ルート #2499 Phase 4。低精度 forward の Op 拡張）**:
+MatMul と elementwise 5 演算（Add／Mul／Relu／Exp／Tanh）の opt-in 低精度 forward を内部クレート限定（`fandhe_ai_autodiff::low_precision_ops`・`fandhe_ai_tensor_core::*_low_precision`）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `VarLowPrecisionOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::{matmul,add,mul,relu,exp,tanh}_low_precision(.., dtype)`）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。
+内部実装はルート #2499 の Phase 4 方針（内部実装＋保留ガードまで先行・公開は承認後）に基づく。詳細は `docs/autodiff-low-precision-op-extension-decision.md` 6 節。

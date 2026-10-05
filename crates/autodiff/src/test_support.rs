@@ -15,7 +15,9 @@
 
 #![cfg(test)]
 
-use fandhe_ai_tensor_core::{BackendError, BackendOps, Device, Tensor, gemm_out_shape};
+use fandhe_ai_tensor_core::{
+    BackendError, BackendOps, Device, Tensor, TypedOps, bf16, f16, gemm_out_shape,
+};
 
 /// `eval.rs` の naive 参照実装へ委譲するテスト専用 `BackendOps`。
 /// `gemm`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max` はいずれも
@@ -75,4 +77,96 @@ impl BackendOps for TestOps {
 /// `Tape::new_with_ops(test_ops())` の形で使う（`src/` 内 `#[cfg(test)]` 専用）。
 pub(crate) fn test_ops() -> Box<dyn BackendOps + Send> {
     Box::new(TestOps)
+}
+
+/// 低精度 forward（`TypedOps<f16>`／`TypedOps<bf16>`）を持つテスト専用
+/// `BackendOps`（イシュー #2628）。f32 側は [`TestOps`] へ委譲し、
+/// `TypedOps<T>` の 8 演算は「f32 へ昇格 → `TestOps` の f32 演算 → 1 回丸め」
+/// で実装する（`backend-cpu` の `typed_f16.rs`／`typed_bf16.rs` と同じ数値方式。
+/// `autodiff` は `backend-cpu` に依存しないため独立に持つ）。
+/// `low_precision_ops` の単体テストが、typed ops を持たない [`TestOps`]
+/// では検証できない成功経路（丸めオラクル一致・backward）に使う。
+pub(crate) struct LowPrecisionTestOps;
+
+macro_rules! impl_typed_test_ops {
+    ($t:ty, $up:ident, $down:ident) => {
+        fn $up(t: &Tensor<$t>) -> Tensor<f32> {
+            let data: Vec<f32> = t.host_slice().iter().map(|v| v.to_f32()).collect();
+            Tensor::new(data, t.shape()).expect("test: shape 不変")
+        }
+        fn $down(t: &Tensor<f32>) -> Tensor<$t> {
+            let data: Vec<$t> = t.host_slice().iter().map(|&v| <$t>::from_f32(v)).collect();
+            Tensor::new(data, t.shape()).expect("test: shape 不変")
+        }
+        impl TypedOps<$t> for LowPrecisionTestOps {
+            fn gemm(&self, a: &Tensor<$t>, b: &Tensor<$t>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.gemm(&$up(a), &$up(b))?))
+            }
+            fn add(&self, a: &Tensor<$t>, b: &Tensor<$t>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.add(&$up(a), &$up(b))?))
+            }
+            fn mul(&self, a: &Tensor<$t>, b: &Tensor<$t>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.mul(&$up(a), &$up(b))?))
+            }
+            fn relu(&self, a: &Tensor<$t>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.relu(&$up(a))?))
+            }
+            fn exp(&self, a: &Tensor<$t>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.exp(&$up(a))?))
+            }
+            fn tanh(&self, a: &Tensor<$t>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.tanh(&$up(a))?))
+            }
+            fn sum(&self, a: &Tensor<$t>, dim: Option<usize>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.sum(&$up(a), dim)?))
+            }
+            fn max(&self, a: &Tensor<$t>, dim: Option<usize>) -> Result<Tensor<$t>, BackendError> {
+                Ok($down(&TestOps.max(&$up(a), dim)?))
+            }
+        }
+    };
+}
+
+impl_typed_test_ops!(f16, up_f16, down_f16);
+impl_typed_test_ops!(bf16, up_bf16, down_bf16);
+
+impl BackendOps for LowPrecisionTestOps {
+    fn device(&self) -> Device {
+        Device::Cpu
+    }
+    fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.gemm(a, b)
+    }
+    fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.add(a, b)
+    }
+    fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.mul(a, b)
+    }
+    fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.relu(a)
+    }
+    fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.exp(a)
+    }
+    fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.tanh(a)
+    }
+    fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.sum(a, dim)
+    }
+    fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        TestOps.max(a, dim)
+    }
+    fn typed_ops_f16(&self) -> Option<&dyn TypedOps<f16>> {
+        Some(self)
+    }
+    fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
+        Some(self)
+    }
+}
+
+/// `Tape::new_with_ops(low_precision_test_ops())` の形で使う。
+pub(crate) fn low_precision_test_ops() -> Box<dyn BackendOps + Send> {
+    Box::new(LowPrecisionTestOps)
 }

@@ -2314,10 +2314,12 @@ pub(crate) struct TapeNode {
     /// `false`（既存の `Var::matmul`〈`Op::MatMul` 通常版〉・他の全
     /// Op variant は checkpoint 解放判定に影響しない）。
     pub(crate) fp32_strict: bool,
-    /// **低精度 forward 契約フラグ（イシュー #2071）**:
+    /// **低精度 forward 契約フラグ（イシュー #2071・#2628）**:
     /// [`crate::var::Var::matmul_low_precision`]（`TypedOps<f16/bf16>`
-    /// 経由で forward 値を計算した `Op::MatMul` ノード）にのみ `true`
-    /// を立てる。`fp32_strict` と同じ理由（`Op::MatMul` variant 自体は
+    /// 経由で forward 値を計算した `Op::MatMul` ノード）と、
+    /// `crate::low_precision_ops` の自由関数が積む `Op::Add`／`Mul`／
+    /// `Relu`／`Exp`／`Tanh` ノードにのみ `true` を立てる（以下の
+    /// 説明は MatMul を例にするが、検査は Op を問わず本フラグで行う）。`fp32_strict` と同じ理由（`Op::MatMul` variant 自体は
     /// forward 精度の情報を持たない）で、このノード単位のフラグが
     /// 「低精度で計算された」事実を 2 箇所へ伝える:
     ///

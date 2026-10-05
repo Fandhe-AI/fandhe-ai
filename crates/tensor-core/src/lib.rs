@@ -249,7 +249,9 @@ pub use interpolate::{
     nearest_exact_src_coord, trilinear_blend,
 };
 pub use low_precision::{
-    conv2d_forward_low_precision, linear_forward_low_precision, matmul_low_precision,
+    add_low_precision, conv2d_forward_low_precision, exp_low_precision,
+    linear_forward_low_precision, matmul_low_precision, mul_low_precision, relu_low_precision,
+    tanh_low_precision,
 };
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{

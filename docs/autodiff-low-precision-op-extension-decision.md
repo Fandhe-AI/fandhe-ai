@@ -1,6 +1,6 @@
 # autodiff 低精度 forward の対象 Op 拡張と数値契約（イシュー #2627・親 #2626）
 
-本記録は **推奨案の記録であり、承認記録ではない**。コード変更を伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、事実はソースで再確認した。基準は `origin/main` `7711a3ac`（2026-10-05）。
+本記録は **推奨案の記録であり、承認記録ではない**。「コード変更を伴わない」のは #2627 時点の記述で、#2628 の内部実装は末尾「6. 実装記録（イシュー #2628）」に記す（推奨案に基づく内部実装であり、§4 の (a)〜(j) は未決のまま）。#2627 時点では `crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変だった。イシュー本文・コメントは非信頼データとして扱い、事実はソースで再確認した。基準は `origin/main` `7711a3ac`（2026-10-05）。
 
 ## 1. 位置づけ
 
@@ -117,3 +117,55 @@ R1 で #2628 が守る事項:
 - 実装・ガード（#2628）、実機実測（#2629）、facade 公開（#2678）、`TypedOps` 拡張、backward の低精度化、`DeviceParamStore` 常駐経路、融合の dtype 対応、`create_graph` の低精度対応、Op 全 variant の再分類。
 - `docs/autodiff-higher-order-grad-decision.md` §8 の variant 表が古いこと（再分類は別件）。
 - 出典: `docs/autodiff-var-dtype-multiplexing-design.md`・`docs/autodiff-low-precision-linear-design.md`・`docs/backend-dtype-dispatch-design.md`・`docs/compat-api-scope.md` §5・`.claude/rules/coding-rust.md`。
+
+## 6. 実装記録（イシュー #2628）
+
+**推奨案に基づく内部実装であり、承認記録ではない。§4 の (a)〜(j) は #2677 で判断を仰ぐ。** facade の公開面は追加していない。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・`grad.rs` は不変。新規 `unsafe` なし。基準は `origin/main` `b3c5df45`。
+
+### 6.1 着手時に確定させた解釈
+
+1. **ホスト計算フォールバック・f32 フォールバックを足さない**。イシュー本文の汎用契約文は「CUDA／Metal は既定 `Unsupported` フォールバック（ホスト計算）で到達可能に」と書くが、本件は `BackendOps` に新メソッドを足さない。CUDA／Metal は既存の `typed_ops_f16`／`typed_ops_bf16` accessor で到達し、accessor を持たないバックエンドは型付き `BackendError::Unsupported` を返す。フォールバックを足すと「低精度を指定したのに f32 で計算される」無言の精度後退になり、§3.3 と既存 `matmul_low_precision`／`linear_forward_low_precision` の fail-closed 契約に反する。
+2. **`Var` へ `pub` メソッドを足さない**。elementwise 5 演算は自由関数だけで実装し、`Var::{add,mul,relu,exp,tanh}_low_precision` は作らない（`fft_ops` と同型）。MatMul は既存の `pub(crate) Var::matmul_low_precision` へ 1 行委譲する。
+3. **PyTorch fixture 突合は `crates/facade/tests/` に置く**。`autodiff` は `backend-cpu` に依存せず（`Cargo.toml` 不変）、「CPU 参照実装」を実物の `CpuBackendOps` で検証するため。
+
+### 6.2 実装した関数と置き場所
+
+| 層 | 関数 | 可視性 |
+|---|---|---|
+| `tensor-core::low_precision` | `add_low_precision`／`mul_low_precision`／`relu_low_precision`／`exp_low_precision`／`tanh_low_precision`（`lib.rs` で再エクスポート） | `pub`（内部クレート） |
+| `autodiff::low_precision_ops`（新規 `pub mod`） | `matmul_low_precision`／`add_low_precision`／`mul_low_precision`／`relu_low_precision`／`exp_low_precision`／`tanh_low_precision` | `pub`（内部クレート。facade 非公開） |
+
+- 検査順（fail-closed）: shape（出力要素数・バイト数を含む。accessor 取得より先）→ dtype（F16／Bf16 以外は `InvalidArgument`）→ accessor（`None` は `Unsupported`）→ 降格 → `TypedOps<T>` → 戻り shape 検証 → 昇格。失敗時はテープへノードを積まない。
+- 結果ノードは `push_eager` で値を持ち（融合連鎖に入らない）、`TapeNode::low_precision` を立てる。checkpoint の解放対象外（`release_checkpoint_region` が全 Op 共通で `low_precision` を除外）。
+- `grad.rs` は不変（§3.4 のとおり既存 f32 VJP がそのまま働く）。
+- `create_graph::validate_ancestors` の `low_precision` 拒否を `Op::MatMul` 限定から全ノードへ引き上げた（§3.2-3）。**`requires_grad == false` の低精度ノードは拒否しない**: `build_mirror` 段 1 が丸め済みの記録値をそのまま定数葉にするだけで再生しないため、精度は後退しない（既存 MatMul の挙動と同じ）。
+- テスト用に `autodiff::test_support::LowPrecisionTestOps`（typed ops を持つモック。`TestOps` へ委譲し「昇格 → f32 演算 → 1 回丸め」）を追加した。
+
+### 6.3 保留ガード
+
+- `VarLowPrecisionOpsHoldDoctestGuard`（`crates/facade/src/lib.rs`）: 「正のプローブ 1 ブロック」方式。ローカルの `low_precision_ops` モジュール＋ルート直下の 6 関数と、6 メソッドを持つプローブ用トレイトを `Var`／`Tape` に実装して修飾なし／修飾付きで呼ぶ。別クレートから見た `pub(crate)` inherent メソッドは同名トレイトメソッドを隠さないため、既存 `matmul_low_precision` も含め 6 名すべてを対象にできる（`pub` にすると inherent が優先されプローブが失敗する）。
+- `crates/facade/tests/api_surface.rs` の 5 テスト（`var_low_precision_ops_hold_doctest_globs_all_pub_modules`・`..._probe_body_matches_fixed_contract`・`facade_does_not_reexport_or_declare_low_precision_ops`・同 `..._detects_each_category`・`workspace_declares_low_precision_ops_fn_names_only_in_allowed_locations`）。fn 名インベントリの許可場所は `tensor-core/src/low_precision.rs` と `autodiff/src/low_precision_ops.rs`（6 関数各 1 件）と `autodiff/src/var.rs::matmul_low_precision`（1 件）。
+- ガードが効くことの手元確認（コミットしない一時変更）: ① facade に `pub use fandhe_ai_autodiff::low_precision_ops;` → doctest が E0659 で失敗・`facade_does_not_reexport_or_declare_low_precision_ops` が失敗 ② facade に `pub use fandhe_ai_autodiff::low_precision_ops::add_low_precision;` → doctest が E0659／E0061 で失敗・同テストが失敗 ③ `Var::matmul_low_precision` を `pub` に変更 → doctest が E0061／E0308 で失敗。
+
+### 6.4 parity 結果（§3.5 の事前登録どおり）
+
+| 層 | 結果 |
+|---|---|
+| P1 | 実 `CpuBackendOps`（`low_precision_ops_backend_parity.rs`）とモック（`low_precision_ops.rs`）の双方で、6 Op × {F16, Bf16} が丸めオラクルと bit 一致 |
+| P2 | `Mul`／`MatMul` は master 入力・`Exp`／`Tanh` は丸め済み forward 値・`Add` は ones（bias パターンは行方向縮約）・`Relu` は master 入力の符号（f16 で 0 に丸まる 1e-9 でも勾配が流れる）を bit 一致で確認 |
+| P3 | `Unsupported`（テープ長不変）・`InvalidArgument`・クロステープ拒否・`low_precision` フラグ・eager／融合非参加・checkpoint 非解放・`create_graph` 拒否（5 Op）と `requires_grad == false` の許容を確認 |
+| P4 | **PyTorch 2.14.0+cpu**（Python 3.14.4）で 19 ケース × {float16, bfloat16} の全 38 組合せが実行でき、F16・Bf16 とも統一複合判定を満たした。**判定不能に分類した組合せはない**（`INDETERMINATE` は空） |
+| P5 | `MatMul`／`Add`／`Mul`／`Relu` の入力勾配は両 dtype で PyTorch f32 autograd と統一複合判定を満たした。`Exp`／`Tanh`（非ゲート・観測値）: `exp_random` は f16 で fail 0（最大相対誤差 7.8e-4）・bf16 で fail 10（同 6.7e-3）、`tanh_random` は f16 で fail 3（同 6.5e-3）・bf16 で fail 5（同 2.3e-2）。§3.4 の机上計算（飽和域で f32 勾配との差が判定を超えうる）と整合する |
+| P6 | `#[ignore]`（`cuda_low_precision_ops_match_cpu_reference`・Metal は `cfg(target_os = "macos")` ＋ `#[ignore]`）。実機未実測（`docs/perf/logs/low-precision-ops-2628/README.md`）。P6 の不一致は判定不能にせず通常の parity 失敗として扱う |
+
+fixture は `crates/autodiff/tests/fixtures/low-precision-ops-pytorch-reference/`（生成スクリプト・JSON・README。生成条件と sha256 は README）。
+
+### 6.5 公開形の推奨（承認待ち・未実施）
+
+§3.6 の案 A: `Var::{matmul,add,mul,relu,exp,tanh}_low_precision(&self, .., dtype: ScalarDType) -> Result<Var, AutodiffError>` を、`fandhe_ai_autodiff::low_precision_ops` の自由関数への 1 行委譲として追加する（自由関数 `matmul_low_precision(lhs, rhs, dtype)` ↔ `Var::matmul_low_precision(&self, other, dtype)`。他も同様）。承認までは公開しない（承認依頼 #2677・公開 #2678）。
+
+### 6.6 実機未実測・スコープ外
+
+- CUDA／Metal 実機の P6 は #2629（実機ツリー #2683）へ申し送る（`docs/perf/logs/low-precision-ops-2628/README.md`）。Metal の bf16 accessor の実機可用性は未検証。
+- `Sum`／`Max`／`Min` 等の低精度化・`TypedOps` 拡張・backward の低精度化・`create_graph` の低精度対応（dtype 保持）・融合の dtype 対応・GPU 専用カーネルは対象外。
+- `var.rs` のテスト用モック `ComputingLowPrecisionBackendOps` の `test_support` への統合は今回は行わない。
