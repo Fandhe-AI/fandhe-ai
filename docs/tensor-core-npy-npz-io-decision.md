@@ -45,6 +45,8 @@ Tensor, ...};` で `Tensor` を再エクスポートしているため、inheren
 実装し、facade 側の公開形式（自由関数か `Tensor` inherent メソッドか）
 は承認事項として保留する（§7）。
 
+（#2589 追記: facade 公開形の候補比較と推奨案は §10 に記録した。承認は未取得。）
+
 ## 4. npy ヘッダの受理形（専用最小パーサ）
 
 汎用 Python リテラルパーサは作らず、次の形だけを受理する専用パーサ
@@ -146,6 +148,9 @@ pub fn save_npz<P: AsRef<Path>>(map: &HashMap<String, Tensor<f32>>, path: P) -> 
 
 新規 `unsafe`: 追加しない。依存追加: なし。spec 変更の提案: なし。
 
+（#2589 追記: 上記の署名案は想定止まりで形が未確定のため、候補比較・推奨案・
+ユーザー承認依頼を §10 に記録した。承認は未取得で、本節の保留は継続する。）
+
 ## 8. テスト
 
 - 単体テスト: ヘッダパーサ（キー順・空白・トレーリングカンマ・rank0/1・
@@ -169,3 +174,107 @@ pub fn save_npz<P: AsRef<Path>>(map: &HashMap<String, Tensor<f32>>, path: P) -> 
 - 並列実行中の兄弟イシューと `crates/facade/src/lib.rs`・
   `api_surface.rs` の末尾を編集して競合しうる。追記位置は既存ガード群
   の末尾とし、rebase 時は hold ガードを両方残す形で解消する
+
+## 10. #2589（facade 公開形の決定）の候補比較・推奨案・承認依頼
+
+### 10.1 経緯
+
+- §3 は「自由関数か `Tensor` のメソッドか」を、§7 は公開形（署名案は想定止まり・
+  拡張トレイト案を併記）を保留しており、形が 1 つに決まっていない。このため
+  一括承認（2026-10-04）の対象外で、親 #2588 は「記録作成（#2589）→ ユーザー
+  承認 → 実装（#2590）」の 2 段で進める
+- 調査基準コミット: `origin/main` `1c98db9a`（2026-10-05）
+- **本節は承認の取得を意味しない**。facade・tensor-core のコードと保留ガード
+  （`NpyIoHoldDoctestGuard`・`api_surface.rs` の 4 テスト）は変更していない
+
+### 10.2 確定済みの内部 API（突合結果）
+
+| 項目 | 内容 | 出典 |
+|------|------|------|
+| パス版 4 関数 | `load_npy`／`save_npy`／`load_npz`／`save_npz` | `crates/tensor-core/src/io/npy.rs`・`io/npz.rs` |
+| バイト列版 4 関数 | `read_npy_bytes`／`write_npy_bytes`／`read_npz_bytes`／`write_npz_bytes`（保留ガードの走査対象外） | 同上 |
+| `NpyError` | `#[non_exhaustive]`・`#[derive(Debug)]` のみ（`std::io::Error` を内包し `Clone`／`PartialEq` なし）。`Display`・`std::error::Error`・`From<std::io::Error>`・`From<ShapeError>` を実装 | `crates/tensor-core/src/io/mod.rs` |
+| 読み込み | `read_file_bounded`（1 回の `File::open` で上限付き読み込み。上限 1 GiB）。std のみで cfg 分岐なし。symlink は辿る | `io/mod.rs` |
+| 書き出し | `std::fs::write`（原子的でない）。`interop::safetensors::save_safetensors_f32`（一時ファイル + rename）とは挙動が異なる | `io/npy.rs`・`io/npz.rs` |
+| 出力の決定性 | `write_npz_bytes` はキー昇順。npz の型は `HashMap<String, Tensor<f32>>` で `Sequential::state_dict`・safetensors と同形 | `io/npz.rs` |
+| 出荷状況 | `tensor-core::io` は `fandhe-ai-tensor-core 0.10.0` に既に含まれる（#2318 のコミット `9fe4b523` は `v0.10.0` の祖先であることを確認済み）。ただし内部クレートはサポート対象外（`docs/compat-api-scope.md` §0）で facade からは未到達 | タグ祖先関係の実測 |
+
+facade は `Tensor`・`ShapeError` を `tensor-core` から再エクスポートしている
+（`crates/facade/src/lib.rs`）。`Tensor` は他クレート定義の型なので facade から
+inherent メソッドは足せない（E0116）。メソッド形にするなら `tensor-core` 側の
+inherent 追加か、facade の拡張トレイトの 2 通りに限られる。
+
+### 10.3 候補比較
+
+| 候補 | 形 | 判定 |
+|------|----|------|
+| (a) メソッド委譲 | a-1: `Var` に生やす。読み書きはホスト常駐 `Tensor<f32>` の話で tape・勾配と無関係。`tape.var(load_npy(p)?)` の 1 式で足りる。a-2: `tensor-core` の `Tensor<f32>` に inherent 追加。facade が `Tensor` を再エクスポート済みのため内部変更がそのまま公開面になる（§3 の不採用理由）。利用者の同名拡張トレイトメソッドより inherent が優先され、挙動が黙って変わる。a-3: facade の拡張トレイト（§7 併記案）。`use` が必要で、`load_*` は `self` を取らない関連関数・`load_npz` は `Tensor` を返さないため `Tensor` に載せる意味が薄い。sealed にしないと後からメソッドを足せない | 不採用 |
+| (b) モジュール純再エクスポート | `tensor-core::io` の関数と `NpyError` を facade の 1 モジュールから `pub use` するだけ。ロジック複製ゼロ。先例は `interop::safetensors`（案 A） | **推奨** |
+| (c) facade 独自型 | c-1: `interop::onnx` 型の薄いラッパー。隠すべき内部型が無い（署名に出るのは `Tensor<f32>`・`HashMap`・`Path`・`NpyError` のみ）ため写像層が増えるだけ。c-2: §7 の署名案（`src/tensor_io.rs` に facade 側 `pub fn` を定義して委譲）。宣言元が 2 箇所になり、workspace インベントリの期待集合と doc が二重管理になる | 不採用 |
+
+比較軸と結果: 0.10.0 非破壊性は (b) が追加のみで最小／名前衝突は (b) が
+クレートルートに名前を足さず最小／既存保留群との整合は 10.6／ロジック重複は
+(b) のみゼロ／#2590 のガード反転の手間は (b) が `interop::safetensors` の
+正ガードと同型で最小。
+
+### 10.4 推奨案（いずれも未承認）
+
+| 論点 | 推奨 | 比較した他案 |
+|------|------|--------------|
+| P1 形 | 純再エクスポート（型・関数・`impl` を facade に定義しない） | 10.3 の (a)(c) |
+| P2 配置・名前 | `fandhe_ai::interop::npy`（新ファイル `crates/facade/src/interop/npy.rs`、`interop/mod.rs` に `pub mod npy;` を 1 行）。npy・npz を 1 モジュールに平らに置く（エラー型が共通の `NpyError` で、関数名が `_npy`／`_npz` で区別済みのため） | `compat` 配下（`compat` は numpy／Keras 慣習の API 形状の層で、ファイル形式の入出力は safetensors・ONNX と同じく `interop` に置く整理）／トップレベル `fandhe_ai::tensor_io`（§7 案。外部フォーマット入出力が 2 箇所に分かれる）／`interop::numpy`（名前の代替）／`interop::npy` と `interop::npz` の 2 モジュール（`NpyError` の置き場が割れ `pub mod` が 2 つ増える）／クレートルート直下（`use fandhe_ai::*` の利用者スコープに 5 名が入る） |
+| P3 再エクスポート集合 | `NpyError`・`load_npy`・`save_npy`・`load_npz`・`save_npz` の 5 名（親 #2588 と §7 が名指しする範囲）。別名は付けない | バイト列版 4 関数も出す（10.7 の B） |
+| P4 `Tensor` のメソッド | 追加しない（§3 を維持）。#2590 では `NpyIoHoldDoctestGuard` のうち `Tensor<f32>` への関連関数追加を検出するプローブを残す部分反転を推奨 | 全撤去 |
+| P5 書き出しの非原子性 | 現状のまま公開し、モジュール doc に「`std::fs::write` で原子的でない。`interop::safetensors` の一時ファイル + rename とは異なる」と明記。原子化は `tensor-core` の挙動変更のため別 issue | 公開前に原子化 |
+| P6 読み込みのパス扱い | 現状のまま（symlink を辿る・上限 1 GiB・TOCTOU 対策済みの `read_file_bounded`）。`interop::safetensors` と同じ姿勢。信頼できないパスを渡すかは呼び出し側の責任と doc に明記。no-follow が要る用途の受け皿は B のバイト列版 | facade でラップして `fs_guard` を通す（純再エクスポートでなくなり、非対応 OS で fail-closed になる挙動差が生じる） |
+| P7 ガード（#2590 で実施。本 issue ではしない） | 否定ガード 4 件を「`src/interop/npy.rs` が `fandhe_ai_tensor_core::io` 接頭辞の 5 名だけを別名なしで再エクスポートする」正ガードへ反転（先例: `interop_safetensors_module_is_pure_reexport`・`interop_safetensors_reexports_exactly_expected_surface`）。facade 経由の往復 doctest を 1 つ置く | なし |
+
+バイト列版を推奨に含めない理由: (1) 親 #2588・§7・保留ガードの名指し範囲の外。
+(2) 名前が `read_*_bytes`／`write_*_bytes` で、safetensors の
+`load_*_from_bytes`／`save_*_to_bytes` と揃っておらず、公開すると名前が固定される。
+(3) 後から足しても非破壊。含める利点（メモリ上の入出力・呼び出し側で安全な
+オープンや原子的書き込みを組める）もあり、判断はユーザーに委ねる。
+
+### 10.5 `fandhe-ai =0.10.0` 非破壊の確認
+
+| 観点 | 確認結果 |
+|------|----------|
+| 追加の種類 | `pub mod` 1 件と `pub use` 5 名の追加のみ。既存の `pub mod`／`pub use`／メソッドの署名・意味論は不変 |
+| 名前衝突 | クレートルートに名前を足さないので `use fandhe_ai::*` の利用者に影響しない。`use fandhe_ai::interop::*` の利用者スコープに `npy` が増えるが、glob 由来の名前はローカル定義に隠れ、glob 同士の曖昧さは使った箇所でしか出ない（minor 変更の通常範囲）。facade 内に同名の既存項目は無い（`facade_does_not_reexport_or_declare_npy_io` が現に green） |
+| メソッド解決 | `Tensor` にメソッドを足さないので、利用者の拡張トレイトとの解決順は変わらない |
+| 公開後に固定されるもの | 5 名の署名（`P: AsRef<Path>`・`HashMap<String, Tensor<f32>>`）と `NpyError` の既存 variant の形。variant 追加は `#[non_exhaustive]` で非破壊だが、既存 variant のフィールド変更・削除は破壊的。`Display` 文言は契約にしない旨を doc に書くことを推奨 |
+| 依存・unsafe | 依存追加なし・新規 `unsafe` なし・`Cargo.toml` 不変 |
+| 対応 OS | 実装は std のみで cfg 分岐が無く、facade の Windows ビルド（#2390・#2391）を壊さない見込み（#2590 で再確認） |
+
+### 10.6 既存保留群との整合（#2590 の波及）
+
+- `pub mod` を 1 つ足すと、その時点で残る保留 doctest すべての glob 一覧に
+  `use fandhe_ai::interop::npy::*;` を足す必要がある（`*_globs_all_pub_modules`
+  ガードが facade の全 `pub mod` との一致を要求するため。基準コミットでの
+  対象は npy 以外の標準プローブ 21 件 + rng の入れ子スコープ 1 件の計 22 箇所。
+  兄弟 PR のマージで増減しうるため #2590 で再計数する）。配置をどこにしても
+  同じ。クレートルート直下案だけはこの手間が無いが、10.5 の衝突面が広がる
+- 新モジュールの 5 名が他の保留プローブのローカル名と重なると E0659 になる。
+  現時点で重なりは見当たらないが、#2590 で `cargo test -p fandhe-ai --doc` で実測する
+- `interop_module_exposes_only_approved_onnx_surface` の「`pub mod` は丁度 2 件」を
+  3 件へ更新する必要がある
+- 同じ Phase 3 ツリー（#2542）で `pub mod` を足す兄弟（`nn::kv_cache`・
+  `pub mod inference` 等）と glob 一覧の編集が競合しうる。rebase 時は双方の行を残す（§9 と同じ）
+- `docs/compat-api-scope.md` §5 の保留記録（#2189）は #2590 で適用記録へ書き換える。本 issue では触れない
+- `compat::save_model`／`load_model`・`interop::safetensors` とは名前も型も重ならない。
+  `state_dict` の `HashMap<String, Tensor<f32>>` をそのまま `save_npz` に渡せる
+
+### 10.7 ユーザーに決めてほしい事項
+
+- A: 10.4 の推奨案（`fandhe_ai::interop::npy` に 5 名を純再エクスポート。P4〜P6 は現状維持で doc に明記）で承認する
+- B: A に加えてバイト列版 4 関数も同じモジュールから再エクスポートする
+- C: 別の形を指定する（例: `interop::numpy`／`fandhe_ai::tensor_io`／`Tensor::<f32>::load_npy(path)` 形の拡張トレイト）
+- D: 保留のままにする
+
+承認コメントが形（A〜D、C は具体形）を名指しするまで #2590 は着手しない。
+承認は #2590（または #2589 と #2590 の両方）に残すこと（#2590 は着手前に自 issue 上の承認コメントを確認する条件のため）。
+
+### 10.8 本 PR で行わないこと
+
+facade／tensor-core のコード変更、保留ガードの削除・反転、`compat-api-scope.md`
+への適用記録、Issue 起票、spec 提案、原子的書き込みへの変更、非 f32 dtype 対応（§6 のまま）。
