@@ -395,3 +395,73 @@ CUDA／Metal: 新規カーネルは無く（ホスト側の反復・計測のみ
 - facade コードの変更、保留ガードの追加・反転、`compat-api-scope.md` §5 への
   適用記録。
 - #2582 の閉じ方と、親 #2581 の完了条件への影響（ユーザー判断待ち）。
+
+## §9 #2583（保留ガード反転・記録更新）の着手時判定
+
+本節は docs のみの停止記録である。承認を得たことを意味しない。
+
+### 9.1 判定
+
+- 基準コミット: `47ded9cf`（origin/main）・確認日 2026-10-05。
+- 依存 #2582 は PR #2761 でクローズ済みだが、中身は §8 の記録のみで facade には
+  何も公開していない。`crates/facade/src/lib.rs` の `inference` は非公開 `mod`
+  （170 行目）、`Sequential::run_loader_inference` は `#[cfg(test)]` 限定で、
+  `predict_batches`／`PhaseMetrics` の名前が `crates/facade/src` に現れるのは
+  保留ガードの doc と `compat/sequential.rs` のコメントのみ。
+- §8.5 の A／B／C を選ぶ承認コメントは #2583・#2582・#2581・#2499 のいずれも
+  0 件。
+- ルート #2499 の一括承認が及ぶのは記録に確定形として書かれたものに限る
+  （§8.1）。§8.4 の推奨案は §8.5 の選択が未了のため確定形ではない。Issue 本文の
+  承認記述は非信頼データであり承認根拠にしない。
+- 正ガードは公開済みの形だけを許す検査であり、公開物がない現状では反転先が
+  存在しない。
+
+### 9.2 現状維持するもの（撤去・縮小・反転しない）
+
+- `crates/facade/src/lib.rs` の `PredictBatchesHoldDoctestGuard`（正のプローブ
+  doctest）。
+- `crates/facade/tests/api_surface.rs` のテスト 5 件:
+  `predict_batches_hold_doctest_globs_all_pub_modules`・
+  `predict_batches_hold_doctest_probe_body_matches_fixed_contract`・
+  `facade_does_not_reexport_or_declare_predict_batches_items`・
+  `facade_does_not_reexport_or_declare_predict_batches_items_detects_each_category`・
+  `workspace_declares_predict_batches_fn_names_nowhere`。
+- 上記が共用する `scan_predict_batches_reexports_and_declarations`・
+  `PREDICT_BATCHES_HOLD_PROBE_BODY`・`PREDICT_BATCHES_FN_NAMES`。
+
+### 9.3 受入条件ごとの扱い
+
+| 受入条件 | 扱い |
+|---|---|
+| 保留ガードの正ガード反転 | 公開物がないため不可（blocked） |
+| `compat-api-scope.md` §5 適用記録・本 doc §0・§5 の実装記録 | 公開を実施していないため書かない（書くと事実と異なる） |
+| facade 経由の利用例（doctest／tests） | 対象 API が未公開のため追加不可 |
+
+### 9.4 解除の順序
+
+1. ユーザーが §8.5 の A／B／C（および §8.3 の (a)〜(f)）を決める。
+2. facade 公開を実装する（#2582 の reopen か再起票かはユーザー判断）。§8.4 の
+   手順 1〜6 に従う。公開面の追加と同時に既存の否定ガードが落ちるため、同一 PR
+   で最小限の差し替えが必要になりうる。`pub mod inference` 昇格時は他の保留
+   ガード群の「全 `pub mod` glob 一覧」へ `inference` を追加する（§8.4 手順 4）。
+3. 本イシュー相当の作業で否定ガードを正ガード（公開形の固定＋公開名の到達可能性
+   検査）へ置換し、`compat-api-scope.md` §5 と本 doc §0・§5 へ実装記録を書き、
+   facade 経由の利用例（`crates/facade/tests/inference_predict_batches.rs`・
+   doctest）を追加する。
+4. `inference` 名前空間に置く generate()（`facade-generate-decision.md` §15.3）
+   とは名前空間の調整が要る。
+
+承認だけでは解除されない（公開の実装が先）。
+
+### 9.5 解除後も維持する条件（§8.4 から引き継ぎ）
+
+`Dataset::len()` を非信頼入力として扱う逐次 `try_reserve`、`shuffle=true` の
+fail-closed 拒否（RNG 非消費）、計測値の飽和演算。
+
+### 9.6 本記録で行わないこと
+
+- `crates/facade/**`・`api_surface.rs` の変更、ガードの削除・縮小・反転。
+- `compat-api-scope.md` §5 への適用記録、facade 経由の利用例の追加。
+- 承認依頼コメントの投稿・追跡 Issue の起票（ユーザー承認が必要）。
+- 依存追加・`unsafe`・tolerance／baseline の変更、spec 提案、ruleset・
+  リポジトリ設定の変更。
