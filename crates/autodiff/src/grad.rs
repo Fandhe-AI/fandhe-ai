@@ -2090,6 +2090,37 @@ pub(crate) fn vjp(
             let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, da)]
         }
+        // 短時間フーリエ変換（イシュー #2633）。線形演算のため入力値は不要で、
+        // 入力ノードの shape と `params` からレイアウトを再構築して共有カーネルの
+        // VJP を呼ぶ（`fft::stft_vjp_host`。窓は非追跡のため窓の勾配は無い）。
+        Op::Stft {
+            input,
+            window,
+            params,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout = fft::stft_layout(&input_shape, &params).map_err(AutodiffError::from)?;
+            check_fft_upstream_shape(upstream, layout.out_shape(), "Stft")?;
+            let data = fft::stft_vjp_host(&upstream.host_slice(), &window.host_slice(), &layout)
+                .map_err(AutodiffError::from)?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
+        }
+        // 逆短時間フーリエ変換（イシュー #2633）。`fft::istft_vjp_host`
+        // （包絡除算 → 窓掛け → c2r の VJP。forward が読まなかった bin の勾配は 0）。
+        Op::Istft {
+            input,
+            window,
+            params,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout = fft::istft_layout(&input_shape, &params).map_err(AutodiffError::from)?;
+            check_fft_upstream_shape(upstream, layout.out_shape(), "Istft")?;
+            let data = fft::istft_vjp_host(&upstream.host_slice(), &window.host_slice(), &layout)
+                .map_err(AutodiffError::from)?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
+        }
         // `Var::permute` が記録する view ノード（イシュー #1597）。
         // 逆写像は逆置換（`inverse_permutation`）で `upstream` を
         // permute するだけで閉じる（zero-copy。`tape::Op::Permute`

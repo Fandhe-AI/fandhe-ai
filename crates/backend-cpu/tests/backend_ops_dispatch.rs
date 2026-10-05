@@ -318,6 +318,30 @@ fn cuda_linalg_ops_return_unsupported_not_panic() {
         cuda.fft_ifft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
         Err(BackendError::Unsupported(_))
     ));
+    // イシュー #2633 の STFT 2 演算も同じ契約。
+    let stft_x = Tensor::<f32>::new(vec![0.0; 16], &[16]).unwrap();
+    let stft_w = Tensor::<f32>::new(vec![1.0; 4], &[4]).unwrap();
+    let stft_p = fandhe_ai_tensor_core::fft::StftParams::new(
+        4,
+        None,
+        true,
+        fandhe_ai_tensor_core::StftPadMode::Reflect,
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(matches!(
+        cuda.fft_stft(&stft_x, &stft_w, &stft_p),
+        Err(BackendError::Unsupported(_))
+    ));
+    let istft_x = Tensor::<f32>::new(vec![0.0; 3 * 5 * 2], &[3, 5, 2]).unwrap();
+    let istft_p =
+        fandhe_ai_tensor_core::fft::IstftParams::new(4, None, None, true, false, None, None)
+            .unwrap();
+    assert!(matches!(
+        cuda.fft_istft(&istft_x, &stft_w, &istft_p),
+        Err(BackendError::Unsupported(_))
+    ));
 }
 
 /// [`cuda_linalg_ops_return_unsupported_not_panic`] の Metal 版
@@ -401,6 +425,30 @@ fn metal_linalg_ops_return_unsupported_not_panic() {
     ));
     assert!(matches!(
         metal.fft_ifft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
+    // イシュー #2633 の STFT 2 演算も同じ契約。
+    let stft_x = Tensor::<f32>::new(vec![0.0; 16], &[16]).unwrap();
+    let stft_w = Tensor::<f32>::new(vec![1.0; 4], &[4]).unwrap();
+    let stft_p = fandhe_ai_tensor_core::fft::StftParams::new(
+        4,
+        None,
+        true,
+        fandhe_ai_tensor_core::StftPadMode::Reflect,
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(matches!(
+        metal.fft_stft(&stft_x, &stft_w, &stft_p),
+        Err(BackendError::Unsupported(_))
+    ));
+    let istft_x = Tensor::<f32>::new(vec![0.0; 3 * 5 * 2], &[3, 5, 2]).unwrap();
+    let istft_p =
+        fandhe_ai_tensor_core::fft::IstftParams::new(4, None, None, true, false, None, None)
+            .unwrap();
+    assert!(matches!(
+        metal.fft_istft(&istft_x, &stft_w, &istft_p),
         Err(BackendError::Unsupported(_))
     ));
 }

@@ -1,4 +1,5 @@
-//! `fandhe_ai_autodiff::fft_ops`（イシュー #2631・#2632・`rfft`／`irfft`／`fft`／`ifft`。facade
+//! `fandhe_ai_autodiff::fft_ops`（イシュー #2631・#2632・#2633・`rfft`／`irfft`／`fft`／`ifft`／
+//! `stft`／`istft`。facade
 //! 非公開のため `fandhe_ai_autodiff::fft_ops::*` を直接 use する。
 //! `crates/autodiff/src/fft_ops.rs` モジュール doc 参照）のバックエンド間
 //! parity テスト（`linalg_ops_backend_parity.rs` と同型）。
@@ -21,9 +22,9 @@
 //! 確認するものであり、GPU カーネル自体の parity ではない。
 
 use fandhe_ai::Device;
-use fandhe_ai_autodiff::fft_ops::{fft, ifft, irfft, rfft};
+use fandhe_ai_autodiff::fft_ops::{IstftOptions, StftOptions, fft, ifft, irfft, istft, rfft, stft};
 use fandhe_ai_autodiff::{AutodiffError, Var};
-use fandhe_ai_tensor_core::{FftNorm, Tensor};
+use fandhe_ai_tensor_core::{FftNorm, StftPadMode, Tensor};
 
 trait VarSource {
     fn make_var(&self, tensor: &Tensor<f32>) -> Var<'_>;
@@ -252,6 +253,96 @@ fn cpu_c2c_invalid_arguments_are_typed_errors() {
 }
 
 // ---------------------------------------------------------------------
+// stft／istft（イシュー #2633）
+// ---------------------------------------------------------------------
+
+fn stft_signal() -> Tensor<f32> {
+    t(seeded(2 * 40, 10), &[2, 40])
+}
+
+fn stft_window() -> Tensor<f32> {
+    let w: Vec<f32> = (0..8)
+        .map(|i| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * f64::from(i) / 8.0).cos()) as f32)
+        .collect();
+    t(w, &[8])
+}
+
+/// 任意の tape 上の `stft → istft` の forward 出力と入力勾配（損失 `Σ y²`）。
+/// 戻り値は `(spectrum, signal, grad)`。
+fn stft_grad_on<T: VarSource + HasBackward>(
+    tape: &T,
+    opts: &StftOptions,
+) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let data = stft_signal();
+    let w = stft_window();
+    let x = tape.make_var(&data);
+    let s = stft(&x, 8, Some(&w), opts).unwrap();
+    let io = IstftOptions::default()
+        .with_hop_length(2)
+        .with_normalized(opts.normalized)
+        .with_length(40);
+    let y = istft(&s, 8, Some(&w), &io).unwrap();
+    let loss = s
+        .mul(&s)
+        .unwrap()
+        .sum(None)
+        .unwrap()
+        .add(&y.mul(&y).unwrap().sum(None).unwrap())
+        .unwrap();
+    let dx = tape.grad_of(&loss, &x);
+    (s.to_tensor(), y.to_tensor(), dx)
+}
+
+#[test]
+fn cpu_stft_istft_forward_and_backward_match_naive_reference() {
+    for opts in [
+        StftOptions::default().with_hop_length(2),
+        StftOptions::default()
+            .with_hop_length(2)
+            .with_normalized(true)
+            .with_pad_mode(StftPadMode::Constant),
+    ] {
+        let (s_cpu, y_cpu, dx_cpu) = stft_grad_on(&fandhe_ai::tape(), &opts);
+        let (s_naive, y_naive, dx_naive) = stft_grad_on(&fandhe_ai_autodiff::Tape::new(), &opts);
+        assert_parity("stft forward: cpu vs naive", &s_cpu, &s_naive);
+        assert_parity("istft forward: cpu vs naive", &y_cpu, &y_naive);
+        assert_parity("stft/istft backward: cpu vs naive", &dx_cpu, &dx_naive);
+    }
+}
+
+#[test]
+fn cpu_stft_invalid_arguments_are_typed_errors() {
+    let tape = fandhe_ai::tape();
+    let x = tape.make_var(&t(vec![1.0; 4], &[4]));
+    // 反射パディング幅 `n_fft/2` が信号長以上。
+    assert!(matches!(
+        stft(&x, 8, None, &StftOptions::default()),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    let c = tape.make_var(&t(vec![1.0; 5 * 17 * 2], &[5, 17, 2]));
+    // NOLA 違反（Hann・center=false）は CPU 本番経路でも拒否される。
+    assert!(matches!(
+        istft(
+            &c,
+            8,
+            Some(&stft_window()),
+            &IstftOptions::default().with_center(false)
+        ),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    // 窓の長さ不一致。
+    assert!(matches!(
+        stft(
+            &tape.make_var(&t(vec![1.0; 32], &[32])),
+            8,
+            Some(&t(vec![1.0; 7], &[7])),
+            &StftOptions::default()
+        ),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+}
+
+// ---------------------------------------------------------------------
 // 実機バックエンド（`#[ignore]`）: Mac／DGX Spark GB10 実機セッションへ
 // 申し送る（`docs/perf/logs/fft-rfft-irfft-2631/README.md`）。
 // ---------------------------------------------------------------------
@@ -326,4 +417,36 @@ fn metal_fft_c2c_matches_cpu_reference() {
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/fft-fft-ifft-2632/README.md 参照"]
 fn cuda_fft_c2c_matches_cpu_reference() {
     assert_device_c2c_matches_cpu(Device::Cuda(0), "cuda");
+}
+
+fn assert_device_stft_matches_cpu(device: Device, label: &str) {
+    let device_tape =
+        fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let opts = StftOptions::default()
+        .with_hop_length(2)
+        .with_normalized(true);
+    let (s_cpu, y_cpu, dx_cpu) = stft_grad_on(&fandhe_ai::tape(), &opts);
+    let (s_dev, y_dev, dx_dev) = stft_grad_on(&device_tape, &opts);
+    assert_parity(&format!("stft forward: cpu vs {label}"), &s_cpu, &s_dev);
+    assert_parity(&format!("istft forward: cpu vs {label}"), &y_cpu, &y_dev);
+    assert_parity(
+        &format!("stft/istft backward: cpu vs {label}"),
+        &dx_cpu,
+        &dx_dev,
+    );
+}
+
+/// stft／istft の forward・backward の CPU／Metal 実機比較（#2633）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/fft-stft-istft-2633/README.md 参照"]
+fn metal_stft_matches_cpu_reference() {
+    assert_device_stft_matches_cpu(Device::Metal, "metal");
+}
+
+/// stft／istft の forward・backward の CPU／CUDA 実機（DGX Spark GB10）比較（#2633）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/fft-stft-istft-2633/README.md 参照"]
+fn cuda_stft_matches_cpu_reference() {
+    assert_device_stft_matches_cpu(Device::Cuda(0), "cuda");
 }

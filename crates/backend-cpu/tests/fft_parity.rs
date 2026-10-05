@@ -1,5 +1,6 @@
-//! `CpuBackendOps::fft_rfft`／`fft_irfft` の直接呼び出し統合テスト
-//! （イシュー #2631・`docs/autodiff-fft-ops-decision.md`）。
+//! `CpuBackendOps::fft_rfft`／`fft_irfft`／`fft_fft`／`fft_ifft`／`fft_stft`／
+//! `fft_istft` の直接呼び出し統合テスト
+//! （イシュー #2631・#2632・#2633・`docs/autodiff-fft-ops-decision.md`）。
 //!
 //! 共有カーネル（`fandhe_ai_tensor_core::fft`）の単体テストは tensor-core
 //! 側にあり、本ファイルは `BackendOps` 経由の到達性・解析解との REQ-2
@@ -181,4 +182,103 @@ fn c2c_invalid_arguments_are_typed_errors() {
             Err(BackendError::ShapeMismatch(_))
         ));
     }
+}
+
+// ---- stft / istft（イシュー #2633） ----
+
+use fandhe_ai_tensor_core::StftPadMode;
+use fandhe_ai_tensor_core::fft::{IstftParams, StftParams, stft_window};
+
+fn sp(n: usize, hop: Option<usize>, center: bool, one: bool) -> StftParams {
+    StftParams::new(n, hop, center, StftPadMode::Reflect, false, one).unwrap()
+}
+
+#[test]
+fn stft_hop_equals_nfft_matches_blockwise_rfft() {
+    let ops = CpuBackendOps::new();
+    let x: Vec<f32> = (0..8).map(|i| (i as f32 * 0.7).cos()).collect();
+    let w = t(vec![1.0; 4], &[4]);
+    let y = ops
+        .fft_stft(&t(x.clone(), &[8]), &w, &sp(4, Some(4), false, true))
+        .unwrap();
+    assert_eq!(y.shape(), &[3, 2, 2]);
+    for blk in 0..2 {
+        let r = ops
+            .fft_rfft(
+                &t(x[blk * 4..blk * 4 + 4].to_vec(), &[4]),
+                4,
+                0,
+                FftNorm::Backward,
+            )
+            .unwrap();
+        let r = dense(&r);
+        let y = dense(&y);
+        for k in 0..3 {
+            assert_eq!(y[(k * 2 + blk) * 2], r[k * 2]);
+            assert_eq!(y[(k * 2 + blk) * 2 + 1], r[k * 2 + 1]);
+        }
+    }
+}
+
+#[test]
+fn stft_istft_roundtrip_deterministic() {
+    let ops = CpuBackendOps::new();
+    let x = t((0..40).map(|i| (i as f32 * 0.37).sin()).collect(), &[40]);
+    let win: Vec<f32> = (0..8)
+        .map(|i| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 8.0).cos()) as f32)
+        .collect();
+    let w = t(win, &[8]);
+    let s = ops.fft_stft(&x, &w, &sp(8, Some(2), true, true)).unwrap();
+    let s2 = ops.fft_stft(&x, &w, &sp(8, Some(2), true, true)).unwrap();
+    assert!(
+        dense(&s)
+            .iter()
+            .zip(dense(&s2))
+            .all(|(p, q)| p.to_bits() == q.to_bits())
+    );
+    let ip = IstftParams::new(8, Some(2), None, true, false, None, Some(40)).unwrap();
+    let y = ops.fft_istft(&s, &w, &ip).unwrap();
+    assert_eq!(y.shape(), &[40]);
+    assert_parity("stft_roundtrip", &dense(&y), &dense(&x));
+}
+
+#[test]
+fn stft_invalid_arguments_are_typed_errors() {
+    let ops = CpuBackendOps::new();
+    let w = t(stft_window(None, None, 8).unwrap(), &[8]);
+    // 反射パディング幅が信号長以上。
+    assert!(matches!(
+        ops.fft_stft(&t(vec![1.0; 4], &[4]), &w, &sp(8, Some(2), true, true)),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    // rank 違い。
+    assert!(matches!(
+        ops.fft_stft(
+            &t(vec![1.0; 8], &[1, 2, 4]),
+            &w,
+            &sp(8, Some(2), true, true)
+        ),
+        Err(BackendError::ShapeMismatch(_))
+    ));
+    // 窓長が n_fft と一致しない。
+    assert!(matches!(
+        ops.fft_stft(
+            &t(vec![1.0; 32], &[32]),
+            &t(vec![1.0; 7], &[7]),
+            &sp(8, Some(2), true, true)
+        ),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    // NOLA 違反（Hann・center=false）はバックエンドでも拒否される。
+    let hann = t(
+        (0..8)
+            .map(|i| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 8.0).cos()) as f32)
+            .collect(),
+        &[8],
+    );
+    let ip = IstftParams::new(8, Some(2), None, false, false, None, None).unwrap();
+    assert!(matches!(
+        ops.fft_istft(&t(vec![0.0; 5 * 17 * 2], &[5, 17, 2]), &hann, &ip),
+        Err(BackendError::InvalidArgument(_))
+    ));
 }

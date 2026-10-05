@@ -217,7 +217,7 @@ pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel}
 pub use dispatch_failure::DispatchFailureCell;
 pub use element::{Element, Scalar, ScalarDType};
 pub use error::ShapeError;
-pub use fft::{FftError, FftNorm};
+pub use fft::{FftError, FftNorm, StftPadMode};
 // `half::f16`／`half::bf16` の再エクスポート（イシュー #1960 codex-review
 // 対応）。`Scalar`（`element.rs`）は sealed trait で実装対象を
 // `f32`／`f64`／`half::f16`／`half::bf16` の 4 型に封印しており、本クレート

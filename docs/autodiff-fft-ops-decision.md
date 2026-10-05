@@ -2,7 +2,7 @@
 
 イシュー #2631（親 #2630「FFT」・ルート #2499 Phase 4）。基準コミット
 `7711a3ac`（main HEAD）。設計の正は `docs/autodiff-fft-design.md`（#2151。案 B）で、
-本書はその実装記録である。`fft`／`ifft` は #2632（§12 に追記済み）、`stft`／`istft` は #2633 が本書へ追記する。
+本書はその実装記録である。`fft`／`ifft` は #2632（§12 に追記済み）、`stft`／`istft` は #2633（§13 に追記済み）。
 
 ## §0 結論
 
@@ -127,7 +127,7 @@ facade が唯一のサポート公開面であるという方針（`docs/compat-
 
 ## §8 スコープ外
 
-- `fft`／`ifft`（#2632。§12 で実装済み）・`stft`／`istft`（#2633）
+- `fft`／`ifft`（#2632。§12 で実装済み）・`stft`／`istft`（#2633。§13 で実装済み）
 - facade 公開と `compat-api-scope.md` §1／`compat-feature-gap.md` の判定変更、spec（REQ-9）改定
 - GPU 専用 FFT カーネル・O(n log n) 化（radix-2・Bluestein）・`fft2`／`fftn`／`hfft`／`ihfft`／`fftshift`／`fftfreq`・ONNX `DFT`
 - `create_graph`（高階微分）・activation checkpoint 対象化・f64 自動微分経路での FFT
@@ -267,3 +267,138 @@ CUDA／Metal は既定 `Unsupported`（GPU カーネルなし）。
   `stft`／`istft`（#2633）・`fft2`／`fftn` 等・GPU 専用カーネル・O(n log n) 化・高階微分・checkpoint・f64 経路。
 - 実機（CUDA／Metal）は未実測のまま `#[ignore]`（`cuda_fft_c2c_matches_cpu_reference`／
   `metal_fft_c2c_matches_cpu_reference`）。申し送りは `docs/perf/logs/fft-fft-ifft-2632/README.md`。
+
+## §13 stft・istft の追記（#2633）
+
+イシュー #2633（親 #2630・ルート #2499 Phase 4）。基準コミット `b41b73af`（#2632 マージ後の main）。
+`stft`／`istft`（窓付き短時間フーリエ変換とその逆変換）を、§0〜§12 と同じ内部クレート限定の方式で追加した。
+`docs/autodiff-fft-design.md` §9 は STFT を「スコープ外」とし設計判断を記録していないため、本節が STFT の
+設計判断の記録である。着手根拠は §1 と同じ整理（ルート #2499 Phase 4 の「内部実装＋保留ガードまで先行・
+公開は承認後」）で、facade 公開の承認は得ていない。
+
+### 13.1 PyTorch 相当・API
+
+| 演算 | PyTorch 相当 | 入力 → 出力 |
+|---|---|---|
+| `fft_ops::stft(x, n_fft, window, &StftOptions)` | `view_as_real(torch.stft(x, n_fft, hop_length, win_length, window, center, pad_mode, normalized, onesided, return_complex=True))` | 実 `[L]`／`[B, L]` → `[N, T, 2]`／`[B, N, T, 2]`（**周波数軸がフレーム軸より前**） |
+| `fft_ops::istft(x, n_fft, window, &IstftOptions)` | `torch.istft(view_as_complex(x), n_fft, hop_length, win_length, window, center, normalized, onesided, length)` | `[N, T, 2]`／`[B, N, T, 2]` → 実 `[L_out]`／`[B, L_out]` |
+
+`N = n_fft/2+1`（片側）または `n_fft`、`T = 1 + (L_pad − n_fft)/hop`（`L_pad = L + 2·(n_fft/2)`〈`center`〉）。
+`StftOptions`（`hop_length`〈既定 `n_fft/4`〉・`win_length`〈既定 `n_fft`〉・`center = true`・`pad_mode = Reflect`・
+`normalized = false`・`onesided = true`）と `IstftOptions`（`hop_length`・`win_length`・`center = true`・
+`normalized = false`・`onesided: Option<bool>`〈`None` は入力 bin 数 ≠ `n_fft` なら片側と推定〉・`length`）は
+`#[non_exhaustive]`＋`Default`（PyTorch 既定）＋`with_*` ビルダ（`TopkOptions` の先例）。`StftPadMode`
+（`Reflect`／`Constant`。`#[non_exhaustive]`）・`StftParams`／`IstftParams`（検査付きコンストラクタ経由でのみ
+生成）は `tensor-core::fft` に置く。`normalized` は順変換 `1/√n_fft`・逆変換 `1/√n_fft`（否なら順変換は
+スケールなし・逆変換は `1/n_fft`）で、fixture が確認している。
+
+### 13.2 実装方式（専用 `Op`＋共有ホストカーネル）
+
+- 共有カーネルは `crates/tensor-core/src/fft/stft.rs`（`fft.rs` の子モジュール）。フレームごとの変換は既存の
+  `rfft_host`／`rfft_vjp_host`／`irfft_host`／`irfft_vjp_host` を `[B·T, n_fft]` レイアウト（`dim = 1`）で呼ぶ
+  だけで、**マージ済みカーネルの演算順序は変えていない**（既存 69 ケースの fixture 値・sha256 は不変）。
+  新規の数式は「フレーム切り出し・端パディング写像・窓掛け・重畳加算・包絡除算」の添字計算だけ。
+- `BackendOps::fft_stft`／`fft_istft`（既定 `Unsupported`）→ `Unsupported` のときだけ `stft_host`／`istft_host`
+  へフォールバック（他のエラーは伝播・`Ok` は shape 検証）→ `Op::Stft`／`Op::Istft`（非融合・非 checkpoint・
+  高階微分非対応）。`backend-cpu` の `CpuBackendOps` は `*_layout` で再検査して共有カーネルを呼ぶだけ。
+  CUDA／Metal は既定 `Unsupported`（GPU カーネルなし）。
+- 不採用: 既存 `Var` 演算の合成（`index_select`→`mul`→`rfft`→`permute`、逆は `irfft`→`mul`→`scatter_add`→`div`）。
+  技術的には可能だが、(i) 「CUDA／Metal は既定 `Unsupported`→ホスト計算」の契約から外れ GPU 上で gather／scatter の
+  実カーネルが走る未実測の組み合わせになる、(ii) 単一情報源のカーネルを `backend-cpu` と共有できない、
+  (iii) テープに多数のノードと `B·T·n_fft` 要素の添字が載る、ため採らない。テストでは独立実装の `f64` 直接 DFT
+  オラクル（フレーム化・端パディング・重畳加算を別の書き方で再実装）で突合する（合成そのものは使っていない）。
+
+### 13.3 数値契約
+
+- フレームの窓掛けは `f32` 積（PyTorch と同じ丸め位置）→ 既存カーネルの `f64` 逐次・固定順序の変換。
+- `istft` の重畳加算・窓包絡・除算と、`stft` VJP の散布加算（反射パディング・重畳の随伴）は **`f64` アキュムレータに
+  `t` 昇順 → `j` 昇順で蓄積し最後に 1 回だけ `f32` へ downcast**（勾配の長軸縮約の f64 契約と同方針）。`mul_add` は
+  使わない。matmul 系 FMA 契約には触れない。
+- 同一入力は run-to-run で bit 一致。クレート間 bit 同一は受入条件にしない（`sin_cos` が libm 依存。REQ-2 で判定）。
+- 非有限入力は拒否せず伝播する（§3 と同じ）。DC／Nyquist 虚部のリテラル `+0.0` は `rfft_host` 由来でそのまま保たれる。
+- 計算量はフレームあたり O(`n_fft`²)（直接 DFT）。恣意的な上限は新設せず、確保サイズだけを fail-closed に検査する。
+
+### 13.4 境界検査（確保・実体化より前）
+
+| 拒否理由 | エラー | 検査箇所 |
+|---|---|---|
+| `n_fft = 0`・`hop_length = 0`（省略時の既定 `n_fft/4` が 0 になる `n_fft < 4` を含む） | `InvalidArgument` | `StftParams::new`／`IstftParams::new` |
+| `win_length` が 0 または `n_fft` 超・窓長 ≠ `win_length`・窓が rank 1 でない | `InvalidArgument`／`Shape(RankMismatch)` | `stft_window`・`fft_ops` |
+| `istft` の `hop_length > win_length`・`length = 0` | `InvalidArgument` | `IstftParams::new` |
+| `stft` 入力 rank が 1・2 以外・空次元 | `Shape(RankMismatch)`／`InvalidArgument` | `stft_layout` |
+| 反射パディング幅 `n_fft/2 >= L`・`n_fft > L_pad` | `InvalidArgument` | `stft_layout` |
+| `istft` 入力 rank が 3・4 以外・末尾次元 ≠ 2・空次元 | `Shape`／`InvalidArgument` | `istft_layout` |
+| bin 数が `onesided` の期待値（`n_fft/2+1` または `n_fft`）と不一致 | `InvalidArgument` | `istft_layout` |
+| 期待長・`start + length`・フレーム数・作業／出力バッファの `checked_add`／`checked_mul` 超過・バイト数 `> isize::MAX`（`f64` 幅で保守的に評価） | `Shape(ElementCountOverflow)` | 両 `*_layout` |
+| 出力長 0 以下（`center` かつ `T = 1`・偶数 `n_fft` で `length` 省略 等） | `InvalidArgument` | `istft_layout` |
+| NOLA 違反（窓二乗の重畳和の最小絶対値 `< 1e-11`） | `InvalidArgument` | `istft_check_nola` |
+
+NOLA 検査はカーネル内と `fft_ops::istft`（バックエンド呼び出し前）の両方で行い、バックエンド実装が迂回できない
+（バックエンドが `Ok` を返す構成でも拒否されることをテストで固定）。カーネルはスライス長も再検査し、
+添字写像の結果は境界検査付きアクセスで読む（`unsafe`／`get_unchecked` 不使用）。
+
+**NOLA しきい値 `1e-11`（`fft::ISTFT_NOLA_MIN_ENVELOPE`）**: 演算の意味論を PyTorch 2.14.0 の実測に合わせて
+定めた**新設定数**であり、REQ-2 の tolerance・ガードレール閾値・テスト許容誤差ではない（既存定数は一切変更していない）。
+実測の境界ペア（矩形窓・`hop = n_fft = 8`・`center = false`・窓先頭値のみ変更）で、先頭値 `3.1e-6`（包絡 9.61e-12）は
+torch が拒否・`3.2e-6`（包絡 1.024e-11）は受理だった。Rust 側のしきい値 `1e-11` はこの区間に収まり、
+`nola_threshold_boundary_matches_pytorch_pair` が同じペアで同じ判定になることを固定している（区間内の厳密な
+境界値は実測で特定していない。fixture が確認しているのはこの区間と定性的な拒否まで）。
+
+### 13.5 PyTorch 2.14.0 との差分（実測ベース）
+
+| 項目 | 本実装 | 備考 |
+|---|---|---|
+| 窓への勾配 | **流れない** | 窓は非追跡の `Tensor<f32>`（`Op` の payload）。torch は窓も微分対象にできる。追跡窓は将来拡張 |
+| `pad_mode` | `Reflect`／`Constant` のみ | torch の `replicate`／`circular` は非対応（`#[non_exhaustive]` のため後から足せる） |
+| `istft` の `onesided = false` | 先頭 `n_fft/2+1` bin だけを読む c2r | **fixture 実測で確定**（非 Hermitian 入力の forward と勾配が torch と一致することを fixture で確認。内部実装の推測はしない）。非 Hermitian 入力でも forward が一致し、上位 bin の勾配は 0。DC／Nyquist 虚部は読まない |
+| 入力 rank | `stft` は 1・2、`istft` は 3・4（末尾 2） | torch の複素 rank 1・2／2・3 に対応。それ以外は torch も例外 |
+| 空入力 | 0 要素の次元は拒否 | torch も `L = 0`・`B = 0` は例外 |
+| `hop_length > win_length` | `stft` は受理・`istft` は拒否 | torch の実測と同じ |
+| `istft` で `n_fft = 1`・`center = true`・`length` 省略 | 受理（長さ `L`） | torch は終端 `-(n_fft/2) = -0` を 0 と解釈して空出力となり例外。`stft_parity.rs` の明示的な許可リストに載せている |
+| 複素入力の `stft`・`return_complex = false` の `istft` 相当・`align_to_window`・窓生成関数（`hann_window` 等） | 非対応 | スコープ外 |
+| 非有限入力 | 拒否せず伝播 | NaN／inf の配置が torch と一致することは保証しない |
+
+`error_cases`（37 件）で torch の拒否有無を実測し、上記の 1 件を除いて Rust 側の拒否有無が一致する
+（`error_cases_follow_pytorch_rejections`）。実測結果の詳細は `fixtures/fft-pytorch-reference/README.md`。
+
+### 13.6 テスト構成
+
+- fixture: `crates/autodiff/tests/fixtures/fft-pytorch-reference/stft_reference.json`（実 PyTorch 2.14.0 実行値。
+  stft 21＋istft 21〈torch の `stft` 出力を入れる往復 1 件を含む〉= 計 42 ケース。生成は `gen_stft_reference.py`・
+  sha256 は README に記録）。**既存の `fft_reference.json`／`gen_reference.py`（69 ケース）は変更していない**。
+  REQ-2 統一複合判定（`common::req2_close`）で forward・入力勾配を突合。tolerance 定数は新設・変更していない。
+- `crates/autodiff/tests/stft_parity.rs`: fixture 突合・`error_cases` 突合・独立実装の `f64` 直接 DFT オラクル
+  （`center`×`pad_mode`×`normalized`×`onesided`×`hop`×`win_length`、`length` 有無）・中心差分・`stft → istft` 往復・
+  bit 決定性・DC／Nyquist 虚部の bit 0・境界エラー・NOLA 境界ペア・確保前拒否・非有限入力の伝播・モック
+  `BackendOps`（`Unsupported` 以外のエラー伝播・フォールバック・誤 shape 拒否・NOLA 違反の迂回拒否）。
+- `crates/tensor-core/src/fft/stft.rs` 単体: 検査表の各行・添字写像（反射・定数）・解析解（`hop = n_fft`・
+  `center = false` はブロックごとの `rfft_host` と一致）・**随伴恒等式** `⟨A x, g⟩ = ⟨x, Aᵀ g⟩`
+  （`center`×`pad_mode`×`onesided`×`normalized`×`hop`×`win_length < n_fft`×奇数 `n_fft`、`stft`・`istft` 両方）・
+  `istft(stft(x)) ≈ x`・NOLA 拒否・共役対称・巨大サイズの確保前拒否。
+- `crates/backend-cpu/tests/fft_parity.rs`・`backend_ops_dispatch.rs`（CPU 直接呼び出し・CUDA／Metal の `Unsupported`）、
+  `crates/facade/tests/fft_ops_backend_parity.rs`（CPU tape 対 naive tape。実機 2 件は `#[ignore]`）。
+
+### 13.7 facade 公開形の推奨案（未承認）
+
+**推奨案（1 つ）**: §7・§12.7 と同一方針。`Var::stft`／`Var::istft` を `fft_ops` への 1 行委譲メソッドとして公開し、
+`StftOptions`／`IstftOptions`／`StftPadMode` を `fandhe_ai` ルートへ再エクスポートする（`fft_ops` モジュール自体は
+再エクスポートしない）。`Sequential::add_*` は層ではないため対象外。**未承認**で、承認依頼は #2677、公開自体は
+承認後の #2678。本 issue では一切公開していない。
+
+### 13.8 保留ガードの更新点
+
+`FftOpsHoldDoctestGuard` のプローブへ `stft`／`istft`（`fft_ops` 内の自由関数・`Var`／`Tape` の `Type::method`
+呼び出し）と型 `StftOptions`／`IstftOptions`／`StftPadMode`（`__probe_free_fns` の引数型として実際に使用）を追加し、
+`api_surface.rs` の `FFT_OPS_HOLD_PROBE_BODY`・`FFT_OPS_FN_NAMES`（6 件）・`FFT_OPS_IDENTS`（`StftOptions`・
+`IstftOptions`・`StftPadMode`・`StftParams`・`IstftParams` を追加）・型宣言検出の対象名リスト・自己テスト・
+workspace インベントリ期待値（`autodiff/src/fft_ops.rs` の `stft`／`istft` が各 1 件）を更新した。素の
+`fn stft`／`fn istft` の宣言は `fft_ops.rs` の各 1 件だけで、trait メソッドは `fft_stft`／`fft_istft`、共有カーネルは
+`stft_host`／`istft_host` 等、形状検査は `stft_layout`／`istft_layout` と命名して衝突させない。公開面の追加は一切ない。
+
+### 13.9 スコープ外・実機申し送り
+
+- スコープ外: facade 公開（#2677→#2678）・`compat-api-scope.md` §1／`compat-feature-gap.md` の判定変更・spec 改定・
+  追跡窓（窓への勾配）・複素入力 `stft`／複素出力 `istft`・`pad_mode` の `replicate`／`circular`・`align_to_window`・
+  窓生成関数・GPU 専用カーネル・O(n log n) 化・`create_graph`・checkpoint・f64 自動微分経路・CUDA／Metal 実機計測。
+- 実機（CUDA／Metal）は未実測のまま `#[ignore]`（`cuda_stft_matches_cpu_reference`／`metal_stft_matches_cpu_reference`）。
+  申し送りは `docs/perf/logs/fft-stft-istft-2633/README.md`。

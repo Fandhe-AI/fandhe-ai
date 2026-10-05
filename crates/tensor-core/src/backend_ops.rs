@@ -4379,6 +4379,44 @@ pub trait BackendOps {
         ))
     }
 
+    /// 短時間フーリエ変換（`input: [L]`／`[B, L]` → `[N, T, 2]`／`[B, N, T, 2]`。
+    /// イシュー #2633）。`torch.stft`（`return_complex=True` の
+    /// `view_as_real`）相当。`window` は `fft::stft_window` で解決済みの長さ
+    /// `n_fft` の実効窓、`params` は `fft::StftParams`（検査済み）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::fft_rfft`] と同じ非破壊拡張・フォールバック契約
+    /// （`Unsupported` のときだけホスト参照実装 `fft::stft_host` へフォールバックする）。
+    fn fft_stft(
+        &self,
+        _input: &Tensor<f32>,
+        _window: &Tensor<f32>,
+        _params: &crate::fft::StftParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "fft_stft: default fail-safe (no device-side FFT kernel available)".into(),
+        ))
+    }
+
+    /// 逆短時間フーリエ変換（`input: [N, T, 2]`／`[B, N, T, 2]` → 実
+    /// `[L_out]`／`[B, L_out]`。イシュー #2633）。`torch.istft` 相当。
+    /// `window` は解決済みの実効窓（長さ `n_fft`）。NOLA 検査
+    /// （`fft::istft_check_nola`）は呼び出し側が事前に済ませるが、実装側も
+    /// 共有カーネルを通すことで迂回できない。
+    ///
+    /// # デフォルト実装
+    /// [`Self::fft_stft`] と同じ契約。
+    fn fft_istft(
+        &self,
+        _input: &Tensor<f32>,
+        _window: &Tensor<f32>,
+        _params: &crate::fft::IstftParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "fft_istft: default fail-safe (no device-side FFT kernel available)".into(),
+        ))
+    }
+
     /// 分散（`Var: [.., dim_len, ..] → reduce_out_shape(dim)`。イシュー
     /// #1723。`torch.var(dim, correction)`／`tf.math.reduce_variance`
     /// 相当）。`dim=None` は全要素縮約（スカラー出力）。`correction`
@@ -5366,6 +5404,35 @@ mod tests {
         assert!(matches!(r, Err(BackendError::Unsupported(_))));
         let r = ops.fft_ifft(&b, 2, 0, crate::fft::FftNorm::Backward);
         assert!(matches!(r, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::fft_stft`]／[`BackendOps::fft_istft`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返し panic しないことのガード
+    /// （イシュー #2633。GPU 専用 STFT カーネルは対象外）。
+    #[test]
+    fn fft_stft_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![0.0_f32; 16], &[16]).unwrap();
+        let w = Tensor::new(vec![1.0_f32; 4], &[4]).unwrap();
+        let sp = crate::fft::StftParams::new(
+            4,
+            None,
+            true,
+            crate::fft::StftPadMode::Reflect,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            ops.fft_stft(&x, &w, &sp),
+            Err(BackendError::Unsupported(_))
+        ));
+        let ip = crate::fft::IstftParams::new(4, None, None, true, false, None, None).unwrap();
+        let s = Tensor::new(vec![0.0_f32; 3 * 5 * 2], &[3, 5, 2]).unwrap();
+        assert!(matches!(
+            ops.fft_istft(&s, &w, &ip),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     /// [`BackendOps::scalar_unary`] の既定実装が fail-safe
