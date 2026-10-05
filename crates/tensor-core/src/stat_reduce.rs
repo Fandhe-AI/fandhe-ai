@@ -207,6 +207,13 @@ pub fn stat_layout(shape: &[usize], dim: Option<usize>) -> Result<StatLayout, Sh
     if shape.contains(&0) {
         let axis_len = dim.map_or(0, |d| shape[d]);
         let out_numel = checked_numel(&out_shape)?;
+        // 空入力でも出力 `Vec<f32>` のバイト数と lane 作業バッファのサイズを確保前に検査する
+        // （`[0, usize::MAX]` の軸 0 縮約等で巨大確保 panic させない。REQ-8）。
+        check_alloc_bytes(out_numel, std::mem::size_of::<f32>())?;
+        check_alloc_bytes(
+            axis_len,
+            std::mem::size_of::<usize>() + std::mem::size_of::<f32>(),
+        )?;
         // 空入力。縮約軸が長さ 0 のときだけ出力 lane が残る（空 lane）。
         let (outer, inner) = if axis_len == 0 {
             (out_numel, 1)
@@ -252,6 +259,17 @@ pub fn stat_layout(shape: &[usize], dim: Option<usize>) -> Result<StatLayout, Sh
         shape: shape.to_vec(),
         out_shape,
     })
+}
+
+/// `count * elem_bytes` の `checked_mul` と `isize::MAX` 上限を検査する。
+fn check_alloc_bytes(count: usize, elem_bytes: usize) -> Result<(), ShapeError> {
+    let bytes = count
+        .checked_mul(elem_bytes)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    Ok(())
 }
 
 fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
@@ -510,7 +528,8 @@ pub fn quantile_vjp_host(
             }
             let (lo, hi, w) = quantile_positions(q, n, interp);
             if lo == hi {
-                d_x[layout.pos(o, order[lo], i)] = (g * (1.0 - w) + g * w) as f32;
+                // 単一要素選択は g を直接代入する（g=inf・w=0 で inf + inf*0 = NaN を避ける）。
+                d_x[layout.pos(o, order[lo], i)] = g as f32;
             } else {
                 d_x[layout.pos(o, order[lo], i)] = (g * (1.0 - w)) as f32;
                 d_x[layout.pos(o, order[hi], i)] = (g * w) as f32;
@@ -783,6 +802,15 @@ mod tests {
             Err(ShapeError::AxisOutOfRange { .. })
         ));
         assert!(stat_layout(&[], None).is_ok());
+        // 空入力でも出力バイト数・作業バッファを確保前に検査する。
+        assert!(matches!(
+            stat_layout(&[0, usize::MAX], Some(0)),
+            Err(ShapeError::ElementCountOverflow)
+        ));
+        assert!(matches!(
+            stat_layout(&[0, usize::MAX], Some(1)),
+            Err(ShapeError::ElementCountOverflow)
+        ));
         let l = stat_layout(&[usize::MAX / 8], Some(0));
         assert!(matches!(l, Err(ShapeError::ElementCountOverflow)));
     }
@@ -844,6 +872,11 @@ mod tests {
         assert_eq!(g, vec![2.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let g = quantile_vjp_host(&x, &[2.0], &l, 0.3, QuantileInterpolation::Higher).unwrap();
         assert_eq!(g, vec![0.0, 0.0, 0.0, 0.0, 2.0, 0.0]);
+        // 単一要素選択で g=inf でも NaN にならない（inf + inf*0 を避ける）。
+        let g = quantile_vjp_host(&x, &[f32::INFINITY], &l, 0.0, QuantileInterpolation::Linear)
+            .unwrap();
+        assert_eq!(g[0], f32::INFINITY);
+        assert!(g.iter().all(|v| !v.is_nan()));
     }
 
     #[test]
