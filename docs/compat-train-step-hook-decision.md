@@ -251,3 +251,73 @@ fandhe-ai --all-targets`（`--no-deps` なし・`--all-features` 付き）で
 `dead_code` lint は `docs/compat-grad-accumulation-decision.md` §7 の
 注記と同じ既知事象（origin/main でも再現・本 PR の変更とは無関係）で
 あり、`--no-deps` を付けると green になることを確認済み。
+
+## §8 facade 公開形の確定（#2567）
+
+本節は #2567（親 #2566・ルート #2499）で §5 の推奨形を確定形として列挙
+したものである。ルート #2499 の 2026-10-04 一括承認は §5 に書かれた形に
+のみ及び、本節はそれ以上の承認を主張しない。**未決論点は無く、#2568 は
+§8.1〜§8.4 に従って着手できる**。判定基準は「#2568 の実装時に利用者から
+観測できる挙動・API 形状を選ぶ必要があり、かつ §2〜§5 も `origin/main`
+の既存コードも固定していない論点だけを未決とする」である。以下はすべて
+§5 に記載された形、または既存コードから一意に導出される形に収まった。
+
+### §8.1 確定形
+
+| # | 項目 | 確定形 | 出典 |
+|---|------|--------|------|
+| 1 | `TrainStepFn` | `pub type TrainStepFn<'h, T> = dyn FnMut(&Sequential, &Tensor<f32>, &Tensor<T>, &mut TrainStepOptimizer<'_>) -> Result<TrainStepOutput, AutodiffError> + 'h;`。`T: FitTarget` 境界は型エイリアスでは強制されないため `fit_with_train_step` 側に置く | §5-1・導出 |
+| 2 | `TrainStepOptimizer<'a>` | `step(&mut self, params: &[&Tensor<f32>], grads: &[&Tensor<f32>]) -> Result<Vec<Tensor<f32>>, AutodiffError>` と `lr(&self) -> f32`。`set_lr` は出さない。非公開フィールド `&'a mut OptimizerState` を持ち公開コンストラクタは無い（facade 内部のみが構築する最小権限設計）。`step`／`lr` は `OptimizerState::step`／`lr`（`crates/facade/src/compat/training.rs:645`／`:587`）へ 1:1 委譲し、長さ不一致の `InvalidArgument` もそのまま返す。1 バッチ内の `step` 呼び出し回数は制限しない | §5-2・導出 |
+| 3 | `TrainStepOutput` | `#[non_exhaustive] pub struct`。`TrainStepOutput::new(loss)`／`with_updated(params)`。フィールドは非公開・getter なし（値を読むのは crate 内の `run_fit` のみで利用者から差は観測できない。getter や pub フィールドは後から追加しても非破壊だが、pub を先に出すと戻せないため意識的に出さない） | §5-3・導出 |
+| 4 | 入口 | `Sequential::fit_with_train_step<T: FitTarget>(&mut self, x: &Tensor<f32>, y: &Tensor<T>, config: FitConfig, validation: Option<(&Tensor<f32>, &Tensor<T>)>, callbacks: &mut [Callback], metrics: &[Metrics], train_step: &mut TrainStepFn<'_, T>) -> Result<History, AutodiffError>`。引数型は `fit_with_metrics`（`training.rs:1337`）と同一。`#[allow(clippy::too_many_arguments)]`、内部 `method` 名は `"fit_with_train_step"` | §5-4・導出 |
+| 5 | `FitConfig::train_step_fn` | 採らない（`FitConfig` は `Copy + Eq` 固定。フィールド・メソッドを追加しない） | §5-5 |
+| 6 | エラー型 | 既存 `AutodiffError::InvalidArgument` のみ。variant 追加なし | 導出 |
+| 7 | モジュール配置 | 定義は `compat/training.rs`、`compat/mod.rs:83` の `pub use training::{…}` に 3 型を追加し `fandhe_ai::compat::{TrainStepFn, TrainStepOptimizer, TrainStepOutput}` として公開（`training` モジュールは非公開のまま）。派生 trait は追加しない（後から追加しても非破壊） | 導出 |
+| 8 | 意味論 | §2.3／§2.4 を継承。AMP・`accumulate_steps > 1`・`Lbfgs` との併用は `InvalidArgument` で fail-closed。既存 3 入口は `None` 委譲で bit 不変。`Some(updated)` は既存 `apply_parameters` 経路、`None` は更新スキップ。フック実行中は `compiled` が取り外されるためフック内の `is_compiled()` は false | §2.3／§2.4 |
+| 9 | 実装方式 | 新規 `Op`／`BackendOps`／カーネルなし。利用者の `train_step` を shim クロージャで包み、`&mut OptimizerState` から `TrainStepOptimizer` を組み、`TrainStepOutput` を内部の `(f32, Option<Vec<_>>)` へ写して `fit_with_callbacks_named(.., Some(shim))` へ委譲する。内部 `CustomStepHook` は維持 | 導出 |
+
+### §8.2 訂正注記（記録の意図・出荷形から一意に決まるもの。選択ではない）
+
+1. §1・§4 の非破壊基準 `=0.9.0` は現行 `=0.10.0` に読み替える（テスト名
+   `fit_config_keeps_copy_eq_for_0_9_0_compat` は改名しない）。
+2. §2.3／§6 に書かれていない「フック × `Optimizer::Lbfgs`」は、コード側が
+   `fit_with_callbacks_named`（`training.rs:1469`）で `InvalidArgument` と
+   して fail-closed 拒否済み（テスト `custom_step_rejected_with_lbfgs`・
+   `training.rs:2758`。根拠は `docs/autodiff-lbfgs-decision.md` の
+   #2172 の節）。よって `TrainStepOptimizer::step` が `Lbfgs` を受け取る
+   ことはない。未決論点ではない。
+3. §4 のテスト一覧に上記 `custom_step_rejected_with_lbfgs` を加えて読む。
+4. §5 見出しの「未承認のため保留」は #2184 時点の記述。2026-10-04 にルート
+   #2499 の一括承認があり、確定形は本節を参照する。
+5. §5「承認後の作業手順」の分担は §8.4 で上書きする。
+
+### §8.3 公開 API 非破壊の確認（`fandhe-ai =0.10.0` 基準）
+
+実測: `git grep -n "TrainStep\|train_step\|fit_with_train_step" v0.10.0 --
+crates/facade/src` のヒットは `training.rs`（コメント `:28`〜`:30`・`:816`
+〜`:823`、`#[cfg(test)] mod train_step_tests` `:2551`）と `lib.rs` の
+`#[cfg(doctest)]` 保留ガード doc（`:5337` 以降）のみで、宣言・再エクスポート
+は 0 件。v0.10.0 の `compat/mod.rs:80` の `pub use training::{…}` に該当名は
+無く、`FitConfig` は `training.rs:81` で `#[derive(Debug, Clone, Copy,
+PartialEq, Eq)]`。
+
+| 論点 | 判定 |
+|------|------|
+| `compat` への 3 型追加 | 非破壊（追加のみ。下流のローカル定義は glob import より優先され、glob 間衝突は RFC 1105 の minor 変更の範囲） |
+| `Sequential::fit_with_train_step`（inherent）追加 | 非破壊。ただし下流が自前 trait の同名メソッドを `Sequential` に実装して呼ぶ場合は inherent が優先され解決先が変わりうる（`docs/compat-fit-sample-weighting-decision.md` §11.5 と同じ扱い） |
+| エラー型 | 非破壊（variant 追加なし） |
+| `FitConfig` | 変更なし（`Copy + Eq` 維持） |
+| 既存 3 入口・`History`・`Loss`・`Optimizer`・`FitTarget` | シグネチャ・意味論とも不変（`None` 委譲。bit 一致は §4 T1 の既存テストで固定済み） |
+| `TrainStepOutput` の `#[non_exhaustive]`／非公開フィールド | 新規型のため破壊対象ではない。将来の getter 追加も非破壊 |
+
+### §8.4 #2568／#2569 への引き継ぎ（§5「承認後の作業手順」を上書き）
+
+| 対象 | 処置 |
+|------|------|
+| `lib.rs::TrainStepHoldDoctestGuard` | #2568: 公開後は実在する型・inherent に解決され doctest が失敗するため、`__fandhe_train_step_hold_probe` のローカル 3 型と `__probe_type`（glob 衝突）、`Sequential::fit_with_train_step` の UFCS プローブ行を削除する。禁止経路のプローブ（`FitConfig::train_step_fn`・`FitConfig::fit_with_train_step`・`Sequential::train_step_fn`）は残す |
+| `api_surface.rs::train_step_hold_doctest_probe_body_matches_fixed_contract` | #2568: 上の削除に合わせて固定文字列を更新 |
+| `api_surface.rs::train_step_hold_doctest_globs_all_pub_modules` | 維持 |
+| `api_surface.rs::facade_does_not_reexport_or_declare_train_step_items` と自己テスト | #2568: 許可を `compat/mod.rs` の `pub use` の葉 3 型・`training.rs` の 3 型宣言・`impl Sequential` 内の `fit_with_train_step` のみに縮める（`train_step_fn` は禁止のまま）。#2569: 承認された形だけを許す正ガードへ反転 |
+| `fit_custom_step_for_test`・`mod train_step_tests` | #2568／#2569: 公開入口経由で `crates/facade/tests/compat_sequential_train_step.rs` へ移すか src 内に残すかを #2568 の計画で決める。注意: T2 の `Reduction::Sum` は facade から名前で参照できない（#2538 の保留）ため外部テストでは dev 依存の `fandhe_ai_autodiff::Reduction` を使う。T1 の `forward_with_precision(None)` は公開 `SequentialVars::forward` に置換できる（同一経路の委譲） |
+| #2569 の追加作業 | `docs/compat-api-scope.md` §5 の保留記録への適用記録、本記録への実装記録 |
+| CUDA／Metal | 新規演算が無いため実機 parity の申し送りは不要見込み（§4 末尾と同じ）。#2568 で再確認する |
