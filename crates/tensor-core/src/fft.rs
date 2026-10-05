@@ -7,6 +7,11 @@
 //! `ifft_vjp_host`）は符号 σ とスケール c だけが異なる 1 本の非公開コアで
 //! 実装し、随伴（共役転置・`n` 倍なし・二重スケールなし）を構造的に満たす。
 //!
+//! `stft`／`istft`（イシュー #2633）は子モジュール `stft` に置き、フレーム
+//! ごとの変換は上記の `rfft`／`irfft` カーネルを `[B·T, n_fft]` レイアウトで
+//! 呼ぶだけにする（窓掛け・端パディング・重畳加算・包絡除算の添字計算と
+//! `f64` アキュムレータ契約は同モジュールのドキュメントが正）。
+//!
 //! # 役割と呼び出し元
 //!
 //! - `autodiff::fft_ops`（`BackendOps` が `Unsupported` のときのホスト
@@ -44,6 +49,14 @@
 
 use crate::device::BackendError;
 use crate::error::ShapeError;
+
+mod stft;
+
+pub use stft::{
+    ISTFT_NOLA_MIN_ENVELOPE, IstftLayout, IstftParams, StftLayout, StftPadMode, StftParams,
+    istft_check_nola, istft_host, istft_layout, istft_vjp_host, stft_host, stft_layout,
+    stft_vjp_host, stft_window,
+};
 
 /// FFT の正規化種別（`torch.fft` の `norm` 引数相当）。
 ///
