@@ -184,6 +184,7 @@ pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
 pub mod scalar_op;
+pub mod stat_reduce;
 // プールの共通コアロジック（サイズクラス・フリーリスト・統計）。`backend-cuda`／
 // `backend-metal` が具体ハンドル型で実装を組み立てるためのクレート横断内部面で
 // あり、サポート対象の公開 API ではない（PR #1063 codex-review P1 対応。公開契約
@@ -219,6 +220,7 @@ pub use dispatch_failure::DispatchFailureCell;
 pub use element::{Element, Scalar, ScalarDType};
 pub use error::ShapeError;
 pub use fft::{FftError, FftNorm, StftPadMode};
+pub use stat_reduce::{QuantileInterpolation, StatReduceError};
 // `half::f16`／`half::bf16` の再エクスポート（イシュー #1960 codex-review
 // 対応）。`Scalar`（`element.rs`）は sealed trait で実装対象を
 // `f32`／`f64`／`half::f16`／`half::bf16` の 4 型に封印しており、本クレート

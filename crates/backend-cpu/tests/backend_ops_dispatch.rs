@@ -545,3 +545,69 @@ fn metal_scan_ops_are_unsupported_not_panic() {
         Err(BackendError::Unsupported(_))
     ));
 }
+/// イシュー #2637: `stat_*` 6 メソッドは CUDA に専用カーネルがなく既定の
+/// `Unsupported` を返す（autodiff 側が共有ホストカーネルへフォールバックする契約。
+/// panic しない）。
+#[test]
+fn cuda_stat_reduce_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::QuantileInterpolation;
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    assert!(matches!(
+        cuda.stat_kthvalue(&a, 1, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.stat_median_dim(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.stat_median_all(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.stat_quantile(&a, 0.5, None, QuantileInterpolation::Linear),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.stat_nansum(&a, None),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.stat_nanmean(&a, Some(0)),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #2637: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_stat_reduce_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::QuantileInterpolation;
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    assert!(matches!(
+        metal.stat_kthvalue(&a, 1, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.stat_median_dim(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.stat_median_all(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.stat_quantile(&a, 0.5, None, QuantileInterpolation::Linear),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.stat_nansum(&a, None),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.stat_nanmean(&a, Some(0)),
+        Err(BackendError::Unsupported(_))
+    ));
+}

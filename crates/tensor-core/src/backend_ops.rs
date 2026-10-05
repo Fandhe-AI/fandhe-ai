@@ -2463,6 +2463,86 @@ pub trait BackendOps {
         ))
     }
 
+    /// `kthvalue`（`k` は 1 始まり。値と索引。`torch.kthvalue` 相当。イシュー #2637・
+    /// `docs/autodiff-stat-reduce-ops-decision.md`）。出力は `dim` 軸を落とした shape
+    /// で、索引は `dim` 軸上の位置（`i32`）。順序規則（安定昇順・NaN 最大）の正は
+    /// [`crate::stat_reduce`]。
+    ///
+    /// # デフォルト実装
+    /// [`Self::scan_cummax`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::stat_reduce_ops::kthvalue` は `Unsupported` のときだけ
+    /// ホスト参照実装 [`crate::stat_reduce::kthvalue_host`] へフォールバックし、
+    /// それ以外のエラーは伝播する。実装側も `stat_reduce::stat_layout` で形状を
+    /// 再検査する（fail-closed）。
+    fn stat_kthvalue(
+        &self,
+        _x: &Tensor<f32>,
+        _k: usize,
+        _dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "stat_kthvalue: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 軸指定の `median`（下側中央値。値と索引。イシュー #2637）。契約は
+    /// [`Self::stat_kthvalue`] と同じ。
+    fn stat_median_dim(
+        &self,
+        _x: &Tensor<f32>,
+        _dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "stat_median_dim: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 全要素の `median`（0 次元の値のみ。イシュー #2637）。契約は
+    /// [`Self::stat_kthvalue`] と同じ。
+    fn stat_median_all(&self, _x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "stat_median_all: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// スカラー `q` の `quantile`（`dim = None` は全要素。イシュー #2637）。契約は
+    /// [`Self::stat_kthvalue`] と同じ（出力は縮約後 shape の値のみ）。
+    fn stat_quantile(
+        &self,
+        _x: &Tensor<f32>,
+        _q: f32,
+        _dim: Option<usize>,
+        _interpolation: crate::stat_reduce::QuantileInterpolation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "stat_quantile: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// `nansum`（NaN を無視した和。`dim = None` は全要素。イシュー #2637）。
+    /// 契約は [`Self::stat_quantile`] と同じ。
+    fn stat_nansum(
+        &self,
+        _x: &Tensor<f32>,
+        _dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "stat_nansum: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// `nanmean`（NaN を無視した平均。`dim = None` は全要素。イシュー #2637）。
+    /// 契約は [`Self::stat_quantile`] と同じ。
+    fn stat_nanmean(
+        &self,
+        _x: &Tensor<f32>,
+        _dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "stat_nanmean: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// 行方向 log_softmax（`x − m − ln(Σ exp(x − m))`。`m` は行 max）の
     /// 独立エントリ（イシュー #1594）。[`Self::softmax`] と同じ最終軸
     /// 限定契約・非破壊拡張・フォールバック規律に従う
@@ -5700,6 +5780,39 @@ mod tests {
         ));
         assert!(matches!(
             ops.scan_logcumsumexp(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
+
+    /// [`BackendOps::stat_kthvalue`] ほか `stat_*` 6 メソッドの既定実装が fail-safe を
+    /// 返し panic しないことの確認（イシュー #2637）。
+    #[test]
+    fn stat_defaults_are_unsupported() {
+        use crate::stat_reduce::QuantileInterpolation;
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        assert!(matches!(
+            ops.stat_kthvalue(&x, 1, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.stat_median_dim(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.stat_median_all(&x),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.stat_quantile(&x, 0.5, None, QuantileInterpolation::Linear),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.stat_nansum(&x, None),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.stat_nanmean(&x, Some(0)),
             Err(BackendError::Unsupported(_))
         ));
     }

@@ -1148,6 +1148,38 @@ pub(crate) enum Op {
     /// `tensor_core::cumulative::logcumsumexp_vjp_host` で求める（`Op::Cumprod`
     /// と同型に入力を実体化する）。分類は [`Op::Cummax`] と同じ。
     Logcumsumexp { input: NodeId, dim: usize },
+    /// `kthvalue`／`median`（軸指定）の選択（イシュー #2637・
+    /// `docs/autodiff-stat-reduce-ops-decision.md`）。`index` は forward が返した
+    /// `dim` 軸上の位置（縮約後 shape。非追跡データ。`Op::Topk` と同じ payload）。
+    /// `crate::stat_reduce_ops::{kthvalue, median_with_indices, median}` からのみ
+    /// 積まれ、facade には公開しない。VJP は `scatter_with_fallback`（`Add`）で
+    /// upstream を選ばれた 1 要素へ流す（lane ごとに出力 1 個のため索引は重複しない）。
+    /// 非融合・非 checkpoint・高階微分非対応（`Op::Cummax` と同じ分類）。
+    OrderSelect {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+    },
+    /// 全要素 `median`（イシュー #2637）。VJP は入力から中央値を再計算し、中央値と
+    /// 等しい要素へ均等分配する（`tensor_core::stat_reduce::median_all_vjp_host`）。
+    /// 分類は [`Op::OrderSelect`] と同じ。
+    MedianAll { input: NodeId },
+    /// `quantile`（スカラー `q`。イシュー #2637）。VJP は入力から lane を再ソートして
+    /// 下側・上側と重みを導出する（`stat_reduce::quantile_vjp_host`。
+    /// `Op::Logcumsumexp` と同じ「入力から再計算」方式）。分類は [`Op::OrderSelect`]
+    /// と同じ。
+    Quantile {
+        input: NodeId,
+        q: f32,
+        dim: Option<usize>,
+        interpolation: fandhe_ai_tensor_core::QuantileInterpolation,
+    },
+    /// `nansum`（イシュー #2637）。VJP は `stat_reduce::nan_reduce_vjp_host`。
+    /// 分類は [`Op::OrderSelect`] と同じ。
+    Nansum { input: NodeId, dim: Option<usize> },
+    /// `nanmean`（イシュー #2637）。VJP は `stat_reduce::nan_reduce_vjp_host`
+    /// （`mean = true`）。分類は [`Op::OrderSelect`] と同じ。
+    Nanmean { input: NodeId, dim: Option<usize> },
     /// `Var::interpolate`（`torch.nn.functional.interpolate`
     /// 相当。イシュー #1757・#1762・#2152）。空間軸（末尾
     /// `size.len()` 軸）を `size` へリサンプリングする。`mode` で
@@ -1707,6 +1739,11 @@ impl Op {
             | Op::Cummax { .. }
             | Op::Cummin { .. }
             | Op::Logcumsumexp { .. }
+            | Op::OrderSelect { .. }
+            | Op::MedianAll { .. }
+            | Op::Quantile { .. }
+            | Op::Nansum { .. }
+            | Op::Nanmean { .. }
             | Op::Irfft { .. }
             | Op::Fft { .. }
             | Op::Ifft { .. }
@@ -1888,6 +1925,11 @@ impl Op {
             | Op::Cummax { input, .. }
             | Op::Cummin { input, .. }
             | Op::Logcumsumexp { input, .. }
+            | Op::OrderSelect { input, .. }
+            | Op::MedianAll { input }
+            | Op::Quantile { input, .. }
+            | Op::Nansum { input, .. }
+            | Op::Nanmean { input, .. }
             | Op::Fft { input, .. }
             | Op::Ifft { input, .. }
             | Op::Stft { input, .. }
@@ -2231,6 +2273,11 @@ impl Op {
             | Op::Cummax { .. }
             | Op::Cummin { .. }
             | Op::Logcumsumexp { .. }
+            | Op::OrderSelect { .. }
+            | Op::MedianAll { .. }
+            | Op::Quantile { .. }
+            | Op::Nansum { .. }
+            | Op::Nanmean { .. }
             | Op::Irfft { .. }
             | Op::Fft { .. }
             | Op::Ifft { .. }

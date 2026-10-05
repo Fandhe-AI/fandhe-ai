@@ -1946,3 +1946,9 @@ facade 公開面は追加していない（保留ガード `NonfiniteOpsHoldDoct
 facade 公開面は追加していない（保留ガード `CumulativeOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var::cummax` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-cumulative-ops-decision.md`。
+
+**適用記録（イシュー #2637・親 #2625・ルート #2499 Phase 4。順序統計・NaN 無視縮約）**:
+`median`／`kthvalue`／`quantile`／`nanmean`／`nansum` の 5 演算を内部クレート限定（`fandhe_ai_autodiff::stat_reduce_ops`・`fandhe_ai_tensor_core::stat_reduce`・`BackendOps::stat_*`）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `StatReduceOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::median` 等の委譲メソッドと `QuantileInterpolation` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-stat-reduce-ops-decision.md`。

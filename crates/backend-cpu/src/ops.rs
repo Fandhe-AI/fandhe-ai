@@ -3135,6 +3135,97 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::stat_kthvalue`] の CPU 実装（イシュー
+    /// #2637）。共有カーネル `fandhe_ai_tensor_core::stat_reduce::kthvalue_host` を
+    /// 呼ぶだけで順序規則は持たない（autodiff のホストフォールバックと単一情報源）。
+    /// `dim`・shape は `stat_layout` で再検査する（fail-closed）。
+    fn stat_kthvalue(
+        &self,
+        x: &Tensor<f32>,
+        k: usize,
+        dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        use fandhe_ai_tensor_core::stat_reduce as sr;
+        let x = x.contiguous();
+        let layout = sr::stat_layout(x.shape(), Some(dim)).map_err(BackendError::ShapeMismatch)?;
+        let (v, i) = sr::kthvalue_host(&x.host_slice(), &layout, k)?;
+        Ok((
+            Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(i, layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::stat_median_dim`] の CPU 実装（イシュー
+    /// #2637）。[`Self::stat_kthvalue`] と同型。
+    fn stat_median_dim(
+        &self,
+        x: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        use fandhe_ai_tensor_core::stat_reduce as sr;
+        let x = x.contiguous();
+        let layout = sr::stat_layout(x.shape(), Some(dim)).map_err(BackendError::ShapeMismatch)?;
+        let (v, i) = sr::median_dim_host(&x.host_slice(), &layout)?;
+        Ok((
+            Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(i, layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::stat_median_all`] の CPU 実装（イシュー
+    /// #2637）。[`Self::stat_kthvalue`] と同型（出力は 0 次元）。
+    fn stat_median_all(&self, x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::stat_reduce as sr;
+        let x = x.contiguous();
+        let layout = sr::stat_layout(x.shape(), None).map_err(BackendError::ShapeMismatch)?;
+        let v = sr::median_all_host(&x.host_slice(), &layout)?;
+        Tensor::new(vec![v], layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::stat_quantile`] の CPU 実装（イシュー
+    /// #2637）。[`Self::stat_kthvalue`] と同型。
+    fn stat_quantile(
+        &self,
+        x: &Tensor<f32>,
+        q: f32,
+        dim: Option<usize>,
+        interpolation: fandhe_ai_tensor_core::QuantileInterpolation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::stat_reduce as sr;
+        let x = x.contiguous();
+        let layout = sr::stat_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let v = sr::quantile_host(&x.host_slice(), &layout, q, interpolation)?;
+        Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::stat_nansum`] の CPU 実装（イシュー
+    /// #2637）。[`Self::stat_kthvalue`] と同型。
+    fn stat_nansum(
+        &self,
+        x: &Tensor<f32>,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::stat_reduce as sr;
+        let x = x.contiguous();
+        let layout = sr::stat_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let v = sr::nansum_host(&x.host_slice(), &layout)?;
+        Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::stat_nanmean`] の CPU 実装（イシュー
+    /// #2637）。[`Self::stat_kthvalue`] と同型。
+    fn stat_nanmean(
+        &self,
+        x: &Tensor<f32>,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::stat_reduce as sr;
+        let x = x.contiguous();
+        let layout = sr::stat_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let v = sr::nanmean_host(&x.host_slice(), &layout)?;
+        Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::fft_fft`] の CPU 実装（イシュー
     /// #2632）。[`Self::fft_rfft`] と同型で、`fft_layout` で再検査してから
     /// 共有カーネル `fft_host` を呼ぶ。
