@@ -3557,42 +3557,25 @@ struct CallbacksLoggersHoldDoctestGuard;
 #[allow(dead_code)]
 struct FitWeightingHoldDoctestGuard;
 
-/// イシュー #2184（親 #2131）の facade 公開保留を固定する doctest
-/// 足場。`FitWeightingHoldDoctestGuard`（#2177）と同型の「正のプローブ
-/// 1 ブロック方式」を採る: facade の全 `pub mod` を glob import した
-/// スコープに、本ブロック内でのみ定義したローカル型
-/// （`__fandhe_train_step_hold_probe::{TrainStepFn, TrainStepOptimizer,
-/// TrainStepOutput}`）と、`fandhe_ai::compat::FitConfig`／
-/// `fandhe_ai::compat::Sequential` への inherent メソッドを装うトレイト
-/// （`__FandheTrainStepHoldProbe`）を導入し、実際に使う名前・呼び出しを
-/// 書く。facade がどの経路（`pub use` による再エクスポート・型宣言・
-/// `train_step_fn`／`fit_with_train_step` という名前のメソッド追加）で
-/// これらの名前を公開しても、ローカル定義との glob 衝突（型名の場合。
-/// E0659 等）または呼び出しシグネチャの不一致（inherent メソッドが
-/// トレイトメソッドより優先解決されるため、本プローブの trait 経由
-/// 呼び出しが型・引数不一致でコンパイル失敗する）でエラーコードに
-/// 依存せずコンパイルが失敗する。
-///
-/// カスタム学習 step フック本体（`crates/facade/src/compat/
-/// training.rs::CustomStepHook`・`Sequential::run_fit` への配線）は
-/// 実装済みで、保留対象は facade 公開面 3 件（`TrainStepFn`／
-/// `TrainStepOptimizer`／`TrainStepOutput`・`Sequential::
-/// fit_with_train_step`）のみ。テストからは `#[cfg(test)] fn
-/// Sequential::fit_custom_step_for_test`（`crates/facade/src/compat/
-/// training.rs`）経由でのみ到達できる（命名を意図的に違え、下記
-/// ソース走査ガードとの衝突を避けている）。
+/// イシュー #2184（親 #2131）・#2568 の train_step フック公開形を固定する
+/// doctest 足場。承認形（`TrainStepFn`／`TrainStepOptimizer`／
+/// `TrainStepOutput` の 3 型と inherent `Sequential::fit_with_train_step`）
+/// は #2568 で公開済みのため、本プローブは**残る禁止経路**だけを固定する:
+/// `FitConfig::train_step_fn`（フックを設定へ持たせる形。`FitConfig` は
+/// `Copy + Eq` を維持するため不可）・`FitConfig::fit_with_train_step`・
+/// `Sequential::train_step_fn`（承認形にない名前）。
+/// `FitWeightingHoldDoctestGuard`（#2177）と同型の「正のプローブ 1 ブロック
+/// 方式」で、facade の全 `pub mod` を glob import したスコープに、これらの
+/// 名前を持つトレイト（`__FandheTrainStepHoldProbe`）を導入して UFCS で
+/// 呼ぶ。facade が inherent メソッドとして公開すると trait 経由呼び出しが
+/// 型・引数不一致でコンパイル失敗する（inherent が優先解決されるため）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// train_step_hold_doctest_globs_all_pub_modules`・
 /// `train_step_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_train_step_items`）との多層
-/// 防御の位置づけ・承認未取得の経緯は
-/// `docs/compat-train-step-hook-decision.md` §5「承認事項」節を参照。
-///
-/// 承認（`TrainStepFn`／`TrainStepOptimizer`／`TrainStepOutput`・
-/// `Sequential::fit_with_train_step` の新設）を得た日が来たら、本
-/// モジュール・本 doctest 自体を削除する（ソース走査側の対応する否定
-/// ガードも同時に正ガードへ置き換える）。
+/// `facade_does_not_reexport_or_declare_train_step_items`）との多層防御の
+/// 位置づけは `docs/compat-train-step-hook-decision.md` §8.4 を参照。
+/// 正ガードへの反転は #2569 で行う。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -3609,13 +3592,6 @@ struct FitWeightingHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
-///
-/// mod __fandhe_train_step_hold_probe {
-///     pub struct TrainStepFn;
-///     pub struct TrainStepOptimizer;
-///     pub struct TrainStepOutput;
-/// }
-/// use __fandhe_train_step_hold_probe::*;
 ///
 /// struct __FandheTrainStepHoldMarker;
 ///
@@ -3642,13 +3618,13 @@ struct FitWeightingHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_type(_: TrainStepFn, _: TrainStepOptimizer, _: TrainStepOutput) {}
-///
 /// fn __probe(cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {
 ///     let _: __FandheTrainStepHoldMarker =
 ///         fandhe_ai::compat::FitConfig::train_step_fn(cfg);
 ///     let _: __FandheTrainStepHoldMarker =
-///         fandhe_ai::compat::Sequential::fit_with_train_step(seq);
+///         fandhe_ai::compat::FitConfig::fit_with_train_step(cfg);
+///     let _: __FandheTrainStepHoldMarker =
+///         fandhe_ai::compat::Sequential::train_step_fn(seq);
 /// }
 /// ```
 #[cfg(doctest)]

@@ -22,15 +22,16 @@
 //! 受ける `fit` 入口は対象外のまま（`docs/compat-callbacks-design.md`
 //! §8 参照）。
 //!
-//! **カスタム学習 step フック（イシュー #2184・親 #2131）について**:
+//! **カスタム学習 step フック（イシュー #2184・親 #2131・#2568）について**:
 //! [`Sequential::run_fit`] の既定バッチ処理を丸ごと差し替える内部
-//! フック（`CustomStepHook`）を配線済みだが、facade 公開面（Keras
-//! `Model.train_step()` 相当）は承認待ちのため未公開のまま
-//! （`docs/compat-train-step-hook-decision.md`。
-//! `crate::TrainStepHoldDoctestGuard` が機械的に固定する）。既存 3 入口
-//! （[`Sequential::fit`]／[`Sequential::fit_with_callbacks`]／
-//! [`Sequential::fit_with_metrics`]）はいずれもフック `None` で
-//! [`Sequential::run_fit`] へ委譲するため挙動は変わらない。
+//! フック（`CustomStepHook`）を、公開入口
+//! [`Sequential::fit_with_train_step`]（Keras `Model.train_step()` 相当。
+//! 公開型は [`TrainStepFn`]／[`TrainStepOptimizer`]／[`TrainStepOutput`]）
+//! として facade へ公開済み（`docs/compat-train-step-hook-decision.md`
+//! §8.1 の確定形）。既存 3 入口（[`Sequential::fit`]／
+//! [`Sequential::fit_with_callbacks`]／[`Sequential::fit_with_metrics`]）は
+//! いずれもフック `None` で `Sequential::run_fit` へ委譲するため挙動は
+//! 変わらない。
 
 use crate::optim::{
     Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, GradScaler, GradScalerConfig,
@@ -649,8 +650,8 @@ impl OptimizerState {
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
         if params.len() != grads.len() {
             return Err(AutodiffError::InvalidArgument(format!(
-                "Sequential::fit: trainable_parameters().len() ({}) != \
-                 trainable_grads().len() ({})",
+                "optimizer step: params.len() ({}) != \
+                 grads.len() ({})",
                 params.len(),
                 grads.len()
             )));
@@ -870,16 +871,106 @@ fn not_compiled(method: &str) -> AutodiffError {
     ))
 }
 
+/// `Sequential::fit_with_train_step` へ渡すカスタム学習 step フックの型
+/// （イシュー #2568・親 #2499。Keras `Model.train_step()` 相当）。
+///
+/// 引数は `(&Sequential, x_batch, y_batch, &mut TrainStepOptimizer)`。
+/// `&Sequential`（`&mut` ではない）にしているのは、フック内からの
+/// `compile`／`fit`／`set_training` 再入を型で防ぐため。パラメータ更新は
+/// [`TrainStepOutput::with_updated`] で返し、`fit_with_train_step` 側が
+/// `apply_parameters`（個数・shape 検査付き）で反映する。`FnMut` なので
+/// 状態を持つクロージャも渡せる。型エイリアスは `T: FitTarget` 境界を
+/// 持たない（強制されないため）。境界は `fit_with_train_step` 側にある。
+pub type TrainStepFn<'h, T> = dyn FnMut(
+        &Sequential,
+        &Tensor<f32>,
+        &Tensor<T>,
+        &mut TrainStepOptimizer<'_>,
+    ) -> Result<TrainStepOutput, AutodiffError>
+    + 'h;
+
+/// [`TrainStepFn`] へ渡される optimizer ハンドル（イシュー #2568）。
+/// `compile` で選んだ optimizer の内部状態（momentum・step_count 等）を
+/// 借用し、`step`／`lr` だけを公開する。構築は facade 内部のみで、
+/// 公開コンストラクタ・`set_lr`・派生 trait は持たない
+/// （`docs/compat-train-step-hook-decision.md` §8.1）。
+pub struct TrainStepOptimizer<'a> {
+    state: &'a mut OptimizerState,
+}
+
+impl TrainStepOptimizer<'_> {
+    /// optimizer を 1 step 進め、更新後パラメータを新しい `Vec` で返す
+    /// （モデルは書き換えない。反映は [`TrainStepOutput::with_updated`] で
+    /// 返して `fit_with_train_step` に任せる）。
+    ///
+    /// `params`／`grads` は位置対応で、`Sequential::trainable_parameters`／
+    /// `SequentialVars::trainable_grads` と同じ順序契約。長さ不一致は
+    /// `InvalidArgument`（黙って切り詰めない）。呼ぶたびに optimizer の
+    /// 内部状態（momentum・step_count 等）が進む。1 バッチ内の呼び出し
+    /// 回数に制限はない。
+    ///
+    /// # Errors
+    ///
+    /// 長さ不一致・optimizer 内部の検査失敗で `AutodiffError` を返す。
+    pub fn step(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        self.state.step(params, grads)
+    }
+
+    /// 現在の学習率。epoch 開始時に `LrSchedule` callback が同期した値。
+    #[must_use]
+    pub fn lr(&self) -> f32 {
+        self.state.lr()
+    }
+}
+
+/// [`TrainStepFn`] の戻り値（イシュー #2568）。そのバッチの損失スカラーと、
+/// 任意の更新後パラメータを持つ。フィールドは非公開で、`new`／
+/// `with_updated` でのみ構築する（`#[non_exhaustive]`）。
+#[non_exhaustive]
+pub struct TrainStepOutput {
+    loss: f32,
+    updated: Option<Vec<Tensor<f32>>>,
+}
+
+impl TrainStepOutput {
+    /// 損失 `loss` だけを持つ出力を作る（更新スキップ。パラメータは
+    /// 変更されず、損失のみ `History.loss` の集計へ合流する）。
+    #[must_use]
+    pub fn new(loss: f32) -> Self {
+        Self {
+            loss,
+            updated: None,
+        }
+    }
+
+    /// 更新後パラメータ（`TrainStepOptimizer::step` の戻り値等。位置は
+    /// `trainable_parameters` と同順）を持たせる。反映時に個数・shape が
+    /// 検査される。
+    #[must_use]
+    pub fn with_updated(mut self, params: Vec<Tensor<f32>>) -> Self {
+        self.updated = Some(params);
+        self
+    }
+}
+
+/// [`CustomStepHook`] の戻り値（`clippy::type_complexity` 回避。損失と任意の更新後パラメータ）。
+type CustomStepOutcome = Result<(f32, Option<Vec<Tensor<f32>>>), AutodiffError>;
+
 /// カスタム学習 step フック（イシュー #2184・親 #2131。Keras
 /// `Model.train_step()` 相当）。[`Sequential::run_fit`] の既定バッチ
 /// 処理（`bind → forward → T::loss_for → backward → trainable_grads →
 /// optimizer.step → apply_parameters`）を、このフックの呼び出しへ
 /// 丸ごと差し替える。
 ///
-/// **facade 公開面は承認待ちのため未公開**（本エイリアス自体も
-/// `pub` にしない。crate 内部専用）。承認後の公開面案
-/// （`TrainStepFn`／`TrainStepOptimizer`／`TrainStepOutput`）は
-/// `docs/compat-train-step-hook-decision.md` §5 を参照。
+/// 本エイリアス自体は `pub` にしない crate 内部専用の型で、公開入口
+/// [`Sequential::fit_with_train_step`]（イシュー #2568）が公開型
+/// （[`TrainStepFn`]／[`TrainStepOptimizer`]／[`TrainStepOutput`]）を
+/// 本型へ写す shim クロージャ経由で委譲する
+/// （`docs/compat-train-step-hook-decision.md` §8.1）。
 ///
 /// 引数は `(&Sequential, x_batch, y_batch, &mut OptimizerState)`。
 /// `&Sequential`（`&mut` ではない）にしているのは、フック内から
@@ -895,13 +986,8 @@ fn not_compiled(method: &str) -> AutodiffError {
 /// `FnMut`（`Fn` ではない）にしているのは、状態を持つ自作 optimizer や
 /// 呼び出し回数の計測など、呼び出しごとに内部状態を変える利用を許す
 /// ため。
-type CustomStepHook<'h, T> = dyn FnMut(
-        &Sequential,
-        &Tensor<f32>,
-        &Tensor<T>,
-        &mut OptimizerState,
-    ) -> Result<(f32, Option<Vec<Tensor<f32>>>), AutodiffError>
-    + 'h;
+type CustomStepHook<'h, T> =
+    dyn FnMut(&Sequential, &Tensor<f32>, &Tensor<T>, &mut OptimizerState) -> CustomStepOutcome + 'h;
 
 /// 勾配累積（イシュー #2180）: `acc`（累積中の勾配。位置は
 /// [`Sequential::trainable_grads`] と同じ順序契約）へ `grads`（このマイクロ
@@ -1355,6 +1441,121 @@ impl Sequential {
         )
     }
 
+    /// カスタム学習 step フック付きの `fit`（イシュー #2568・親 #2499。
+    /// Keras `Model.train_step()` 相当）。既定のバッチ処理（`bind →
+    /// forward → loss → backward → trainable_grads → optimizer.step →
+    /// apply_parameters`）を `train_step` の呼び出しへ丸ごと差し替える。
+    /// epoch ループ・バッチ分割・callbacks・validation・metrics・
+    /// `History` 集計は [`Self::fit_with_metrics`] と共通
+    /// （`docs/compat-train-step-hook-decision.md` §8.1）。
+    ///
+    /// フックは `(&Sequential, x_batch, y_batch, &mut TrainStepOptimizer)`
+    /// を受け取り、[`TrainStepOutput`] を返す。`Some(updated)`（
+    /// [`TrainStepOutput::with_updated`]）は `apply_parameters` の個数・
+    /// shape 検査を経て適用され、`None`（[`TrainStepOutput::new`] のみ）
+    /// なら更新をスキップする。損失はサンプル数で重み付けした平均として
+    /// `History.loss` に記録される。
+    ///
+    /// # 意味論
+    ///
+    /// - フック実行中は `is_compiled()` が `false` になる（内部で compiled
+    ///   状態を一時的に取り出すため）。
+    /// - train モードは fit 開始時に `true` にし、終了時に必ず元へ戻す。
+    /// - `lr` は epoch 開始時に `LrSchedule` callback が同期した値で、
+    ///   [`TrainStepOptimizer::lr`] から読める。
+    /// - validation は `compile` 時の [`Loss`] で評価される。
+    /// - フックが `Err` を返した場合は fit が `Err` になり、compiled 状態と
+    ///   モードは維持される。
+    ///
+    /// # Panics
+    ///
+    /// フックが panic した場合は捕捉しない。モデルは未 compile 状態に落ち
+    /// （compiled を取り出した後のため）、以後の `fit` 系は
+    /// `InvalidArgument` を返す。
+    ///
+    /// # エラー
+    ///
+    /// [`Self::fit_with_metrics`] の既存エラー契約に加え、次はいずれも
+    /// `InvalidArgument`:
+    /// - 未 compile
+    /// - AMP（`compile_with_amp`）との併用
+    /// - `accumulate_steps > 1`
+    /// - `Optimizer::Lbfgs`（closure 駆動のためフックの `step` 経路と
+    ///   併用できない）
+    ///
+    /// # 例
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{
+    ///     FitConfig, Loss, Optimizer, Sequential, TrainStepFn, TrainStepOptimizer,
+    ///     TrainStepOutput,
+    /// };
+    /// use fandhe_ai::optim::SgdConfig;
+    /// use fandhe_ai::{AutodiffError, Tensor};
+    ///
+    /// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+    /// model
+    ///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+    ///     .unwrap();
+    /// let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3, 2]).unwrap();
+    /// let y = Tensor::new(vec![0.0f32, 1.0, 0.5], &[3, 1]).unwrap();
+    ///
+    /// let mut step = |m: &Sequential,
+    ///                 xb: &Tensor<f32>,
+    ///                 yb: &Tensor<f32>,
+    ///                 opt: &mut TrainStepOptimizer<'_>|
+    ///  -> Result<TrainStepOutput, AutodiffError> {
+    ///     let tape = fandhe_ai::tape();
+    ///     let bound = m.bind(&tape);
+    ///     let pred = bound.forward(&tape, &tape.var(xb))?;
+    ///     let loss = pred.mse_loss(&tape.var(yb))?;
+    ///     let loss_value = loss.to_tensor().get(&[]).unwrap_or(f32::NAN);
+    ///     let grads = tape.backward(&loss)?;
+    ///     let grad_refs = bound.trainable_grads(&grads)?;
+    ///     let stepped = opt.step(&m.trainable_parameters(), &grad_refs)?;
+    ///     Ok(TrainStepOutput::new(loss_value).with_updated(stepped))
+    /// };
+    /// let hook: &mut TrainStepFn<'_, f32> = &mut step;
+    /// let history = model
+    ///     .fit_with_train_step(&x, &y, FitConfig::new(2, 2), None, &mut [], &[], hook)
+    ///     .unwrap();
+    /// assert_eq!(history.loss.len(), 2);
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_with_train_step<T: FitTarget>(
+        &mut self,
+        x: &Tensor<f32>,
+        y: &Tensor<T>,
+        config: FitConfig,
+        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
+        callbacks: &mut [Callback],
+        metrics: &[Metrics],
+        train_step: &mut TrainStepFn<'_, T>,
+    ) -> Result<History, AutodiffError> {
+        // 公開型を内部フック型（`CustomStepHook`）へ写す shim。`OptimizerState`
+        // は `TrainStepOptimizer` に包んで渡し、出力は `(loss, updated)` へ分解する。
+        let mut shim = |m: &Sequential,
+                        xb: &Tensor<f32>,
+                        yb: &Tensor<T>,
+                        opt: &mut OptimizerState|
+         -> CustomStepOutcome {
+            let mut handle = TrainStepOptimizer { state: opt };
+            let out = train_step(m, xb, yb, &mut handle)?;
+            Ok((out.loss, out.updated))
+        };
+        let hook: &mut CustomStepHook<'_, T> = &mut shim;
+        self.fit_with_callbacks_named(
+            "fit_with_train_step",
+            x,
+            y,
+            config,
+            validation,
+            callbacks,
+            metrics,
+            Some(hook),
+        )
+    }
+
     /// `method`（呼び出し元の公開メソッド名。[`Self::fit`]／
     /// [`Self::fit_with_callbacks`]／[`Self::fit_with_metrics`] の
     /// いずれか）を渡し、エラーメッセージが実際に呼ばれた公開メソッド
@@ -1588,8 +1789,8 @@ impl Sequential {
     /// `metrics`（イシュー #2072）を追加したことで引数が 9 個になり、
     /// `custom_step`（イシュー #2184。[`CustomStepHook`] doc 参照）で
     /// 10 個になった。呼び出し元は [`Self::fit_with_callbacks_named`]
-    /// の 1 箇所のみのため、引数の構造体化は公開入口が確定する承認後に
-    /// まとめて検討する（`docs/compat-train-step-hook-decision.md`）。
+    /// の 1 箇所のみのため、引数の構造体化は現状維持とする
+    /// （`docs/compat-train-step-hook-decision.md` §6）。
     #[allow(clippy::too_many_arguments)]
     fn run_fit<T: FitTarget>(
         &mut self,
@@ -2208,674 +2409,6 @@ impl Sequential {
             None => None,
         };
         Ok((avg_loss, metrics_result))
-    }
-}
-
-/// カスタム学習 step フック（イシュー #2184）のテスト専用入口。
-/// [`CustomStepHook`]（非公開・crate 内部専用）を型に含むシグネチャの
-/// ため `pub(crate)` にはできない（`private_interfaces` lint に掛かる）。
-/// 同じ `training.rs` モジュール内の `#[cfg(test)] mod` はこの非公開
-/// メソッドを問題なく呼べる。
-#[cfg(test)]
-impl Sequential {
-    #[allow(clippy::too_many_arguments)]
-    fn fit_custom_step_for_test<T: FitTarget>(
-        &mut self,
-        x: &Tensor<f32>,
-        y: &Tensor<T>,
-        config: FitConfig,
-        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
-        callbacks: &mut [Callback],
-        metrics: &[Metrics],
-        hook: &mut CustomStepHook<'_, T>,
-    ) -> Result<History, AutodiffError> {
-        self.fit_with_callbacks_named(
-            "fit",
-            x,
-            y,
-            config,
-            validation,
-            callbacks,
-            metrics,
-            Some(hook),
-        )
-    }
-}
-
-/// カスタム学習 step フック（イシュー #2184・親 #2131）の単体テスト。
-/// `Sequential::fit_custom_step_for_test`（`#[cfg(test)]` 限定）は本
-/// クレート内からしか呼べないため、`crates/facade/tests/*` ではなく
-/// ここに置く（勾配累積の外部テストは
-/// `tests/compat_sequential_accumulate.rs`）。
-#[cfg(test)]
-mod train_step_tests {
-    use super::super::callbacks::EarlyStopping;
-    use super::*;
-
-    /// [`CustomStepHook`] の戻り値型（`clippy::type_complexity` 回避の
-    /// テスト局所エイリアス。本体側は `type CustomStepHook` の定義自体が
-    /// 「型定義への factoring」を満たすため対象外だが、テスト側の各
-    /// フック関数・クロージャの戻り値注釈は同じ複合型を直書きするため
-    /// 必要）。
-    type StepOutcome = Result<(f32, Option<Vec<Tensor<f32>>>), AutodiffError>;
-
-    const D_IN: usize = 3;
-    const D_HIDDEN: usize = 4;
-    const D_OUT: usize = 2;
-    const SEED_L1: u64 = 0x7570_1111;
-    const SEED_L2: u64 = 0x7570_2222;
-
-    fn build_model() -> Sequential {
-        Sequential::new()
-            .add_linear(D_IN, D_HIDDEN, SEED_L1)
-            .unwrap_or_else(|e| panic!("test fixture: 層 1 の構築に失敗: {e}"))
-            .add_relu()
-            .add_linear(D_HIDDEN, D_OUT, SEED_L2)
-            .unwrap_or_else(|e| panic!("test fixture: 層 2 の構築に失敗: {e}"))
-    }
-
-    /// `tests/compat_sequential_accumulate.rs` の `deterministic_fill` と同型の局所実装
-    /// （splitmix64。値域 `(-0.5, 0.5)`）。
-    fn deterministic_fill(seed: u64, n: usize) -> Vec<f32> {
-        let mut state = seed;
-        (0..n)
-            .map(|_| {
-                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                z ^= z >> 31;
-                ((z >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
-            })
-            .collect()
-    }
-
-    fn gen_regression_data(seed: u64, n: usize) -> (Tensor<f32>, Tensor<f32>) {
-        let x = deterministic_fill(seed, n * D_IN);
-        let y = deterministic_fill(seed ^ 0x5555_5555_5555_5555, n * D_OUT);
-        (
-            Tensor::new(x, &[n, D_IN])
-                .unwrap_or_else(|e| panic!("test fixture: x の shape 構築に失敗: {e}")),
-            Tensor::new(y, &[n, D_OUT])
-                .unwrap_or_else(|e| panic!("test fixture: y の shape 構築に失敗: {e}")),
-        )
-    }
-
-    fn params_bit_exact(a: &[&Tensor<f32>], b: &[&Tensor<f32>]) -> bool {
-        if a.len() != b.len() {
-            return false;
-        }
-        for (x, y) in a.iter().zip(b.iter()) {
-            let xd = x.host_slice();
-            let yd = y.host_slice();
-            if xd.len() != yd.len() {
-                return false;
-            }
-            if xd
-                .iter()
-                .zip(yd.iter())
-                .any(|(xv, yv)| xv.to_bits() != yv.to_bits())
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// 既定 step（`bind → forward → mse_loss(Reduction::Mean) →
-    /// backward → trainable_grads → opt.step`）を手で再実装したフック。
-    /// T1 が使う——既定の `fit` と bit 完全一致することの証明になる。
-    fn default_step_hook(
-        m: &Sequential,
-        x_batch: &Tensor<f32>,
-        y_batch: &Tensor<f32>,
-        opt: &mut OptimizerState,
-    ) -> StepOutcome {
-        let tape = crate::tape();
-        let bound = m.bind(&tape);
-        let x_var = tape.var(x_batch);
-        let pred = bound.forward_with_precision(&tape, &x_var, None)?;
-        let target_var = tape.var(y_batch);
-        let loss_var = pred.mse_loss_with(&target_var, Reduction::Mean)?;
-        let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
-            AutodiffError::InvalidArgument("test fixture: loss の shape が [] ではない".to_string())
-        })?;
-        let grads = tape.backward(&loss_var)?;
-        let grad_refs = bound.trainable_grads(&grads)?;
-        let param_refs = m.trainable_parameters();
-        let stepped = opt.step(&param_refs, &grad_refs)?;
-        Ok((loss_scalar, Some(stepped)))
-    }
-
-    /// T1（配線・n_batch 重み付け・step/apply 順序の証明）: 既定 step を
-    /// 手で再実装したフックで fit すると、`History.loss`・学習後
-    /// パラメータが既定の `fit` と bit 完全一致する（SGD 構成）。
-    /// epochs=3・端数バッチを含む構成（N=7・batch=2）。
-    #[test]
-    fn custom_step_reimplementing_default_matches_fit_bit_exact_sgd() {
-        const N: usize = 7;
-        const BATCH: usize = 2;
-        const EPOCHS: usize = 3;
-        let (x, y) = gen_regression_data(0x7570_AAAA, N);
-
-        let mut default_model = build_model();
-        default_model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let default_history = default_model
-            .fit(&x, &y, FitConfig::new(EPOCHS, BATCH))
-            .unwrap_or_else(|e| panic!("既定 fit に失敗: {e}"));
-
-        let mut hook_model = build_model();
-        hook_model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let hook_history = hook_model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(EPOCHS, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut default_step_hook,
-            )
-            .unwrap_or_else(|e| panic!("フック fit に失敗: {e}"));
-
-        assert_eq!(
-            hook_history.loss, default_history.loss,
-            "既定 step を再実装したフックの History.loss（SGD）が既定の fit と bit 一致しない"
-        );
-        assert!(
-            params_bit_exact(
-                &default_model.trainable_parameters(),
-                &hook_model.trainable_parameters()
-            ),
-            "既定 step を再実装したフックの学習後パラメータ（SGD）が既定の fit と bit 一致しない"
-        );
-    }
-
-    /// T1 の AdamW 構成版（optimizer 種別に依存しないことの確認）。
-    #[test]
-    fn custom_step_reimplementing_default_matches_fit_bit_exact_adamw() {
-        const N: usize = 7;
-        const BATCH: usize = 2;
-        const EPOCHS: usize = 3;
-        let (x, y) = gen_regression_data(0x7570_BBBB, N);
-
-        let mut default_model = build_model();
-        default_model
-            .compile(
-                Optimizer::AdamW(AdamWConfig {
-                    lr: 0.01,
-                    ..Default::default()
-                }),
-                Loss::Mse,
-            )
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let default_history = default_model
-            .fit(&x, &y, FitConfig::new(EPOCHS, BATCH))
-            .unwrap_or_else(|e| panic!("既定 fit に失敗: {e}"));
-
-        let mut hook_model = build_model();
-        hook_model
-            .compile(
-                Optimizer::AdamW(AdamWConfig {
-                    lr: 0.01,
-                    ..Default::default()
-                }),
-                Loss::Mse,
-            )
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let hook_history = hook_model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(EPOCHS, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut default_step_hook,
-            )
-            .unwrap_or_else(|e| panic!("フック fit に失敗: {e}"));
-
-        assert_eq!(
-            hook_history.loss, default_history.loss,
-            "既定 step を再実装したフックの History.loss（AdamW）が既定の fit と bit 一致しない"
-        );
-        assert!(
-            params_bit_exact(
-                &default_model.trainable_parameters(),
-                &hook_model.trainable_parameters()
-            ),
-            "既定 step を再実装したフックの学習後パラメータ（AdamW）が既定の fit と bit 一致しない"
-        );
-    }
-
-    /// T2（R4）: 損失を自作（`Reduction::Sum`。`Loss` enum に存在しない
-    /// 組み合わせ）し、optimizer を使わずホスト側で `p - lr * g` を
-    /// 計算する手書き SGD で更新するフック。(a) 独立に組んだ手動ループ
-    /// （facade 公開 `DataLoader` を直接使い、同じフック関数を呼ぶ）と
-    /// `History.loss`・パラメータが bit 完全一致し、(b) 固定シードで
-    /// 決定的に収束する（epoch 0 の loss より最終 epoch の loss が
-    /// 小さい）ことを確認する。
-    fn custom_loss_host_sgd_hook(
-        m: &Sequential,
-        x_batch: &Tensor<f32>,
-        y_batch: &Tensor<f32>,
-        _opt: &mut OptimizerState,
-    ) -> StepOutcome {
-        const LR: f32 = 0.02;
-        let tape = crate::tape();
-        let bound = m.bind(&tape);
-        let x_var = tape.var(x_batch);
-        let pred = bound.forward_with_precision(&tape, &x_var, None)?;
-        let target_var = tape.var(y_batch);
-        let loss_var = pred.mse_loss_with(&target_var, Reduction::Sum)?;
-        let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
-            AutodiffError::InvalidArgument("test fixture: loss の shape が [] ではない".to_string())
-        })?;
-        let grads = tape.backward(&loss_var)?;
-        let grad_refs = bound.trainable_grads(&grads)?;
-        let param_refs = m.trainable_parameters();
-        let mut updated: Vec<Tensor<f32>> = Vec::new();
-        for (p, g) in param_refs.iter().zip(grad_refs.iter()) {
-            let ps = p.host_slice();
-            let gs = g.host_slice();
-            let new_vals: Vec<f32> = ps
-                .iter()
-                .zip(gs.iter())
-                .map(|(pv, gv)| pv - LR * gv)
-                .collect();
-            updated.push(Tensor::new(new_vals, p.shape())?);
-        }
-        Ok((loss_scalar, Some(updated)))
-    }
-
-    #[test]
-    fn custom_loss_and_host_sgd_converges() {
-        const N: usize = 16;
-        const BATCH: usize = 4;
-        const EPOCHS: usize = 30;
-        let (x, y) = gen_regression_data(0x7570_CCCC, N);
-
-        let mut hook_model = build_model();
-        hook_model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let hook_history = hook_model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(EPOCHS, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut custom_loss_host_sgd_hook,
-            )
-            .unwrap_or_else(|e| panic!("フック fit に失敗: {e}"));
-
-        // (a) 独立に組んだ手動ループ（facade 公開 `DataLoader` を直接
-        // 使う。同じ初期重み・同じフック関数・同じバッチ順序〈shuffle
-        // なし〉のため bit 完全一致するはず）。
-        let mut manual_model = build_model();
-        let mut dummy_opt = OptimizerState::new(Optimizer::Sgd(SgdConfig::new(0.1)))
-            .unwrap_or_else(|e| panic!("test fixture: OptimizerState 構築に失敗: {e}"));
-        let x_dataset = TensorDataset::new(x.clone())
-            .unwrap_or_else(|e| panic!("test fixture: x データセット構築に失敗: {e}"));
-        let y_dataset = TensorDataset::new(y.clone())
-            .unwrap_or_else(|e| panic!("test fixture: y データセット構築に失敗: {e}"));
-        let loader = DataLoader::new((x_dataset, y_dataset), DataLoaderConfig::new(BATCH))
-            .unwrap_or_else(|e| panic!("test fixture: DataLoader 構築に失敗: {e}"));
-        let mut manual_loss: Vec<f32> = Vec::new();
-        for _ in 0..EPOCHS {
-            let mut weighted_sum = 0.0f64;
-            let mut count = 0usize;
-            for batch in &loader {
-                let (xb, yb) =
-                    batch.unwrap_or_else(|e| panic!("test fixture: バッチ取得に失敗: {e}"));
-                let n_batch = xb.shape().first().copied().unwrap_or(0);
-                let (loss_scalar, updated) =
-                    custom_loss_host_sgd_hook(&manual_model, &xb, &yb, &mut dummy_opt)
-                        .unwrap_or_else(|e| panic!("手動ループのフック呼び出しに失敗: {e}"));
-                weighted_sum += loss_scalar as f64 * n_batch as f64;
-                count += n_batch;
-                if let Some(u) = updated {
-                    manual_model
-                        .apply_parameters(u)
-                        .unwrap_or_else(|e| panic!("手動ループの apply_parameters に失敗: {e}"));
-                }
-            }
-            manual_loss.push((weighted_sum / count as f64) as f32);
-        }
-
-        assert_eq!(
-            hook_history.loss, manual_loss,
-            "フック fit の History.loss が独立な手動ループと bit 一致しない"
-        );
-        assert!(
-            params_bit_exact(
-                &manual_model.trainable_parameters(),
-                &hook_model.trainable_parameters()
-            ),
-            "フック fit の学習後パラメータが独立な手動ループと bit 一致しない"
-        );
-
-        // (b) 決定的な収束確認（固定シードのためフレーキーにならない）。
-        let first = *hook_history
-            .loss
-            .first()
-            .unwrap_or_else(|| panic!("test fixture: history.loss が空"));
-        let last = *hook_history
-            .loss
-            .last()
-            .unwrap_or_else(|| panic!("test fixture: history.loss が空"));
-        assert!(
-            last < first,
-            "自作損失・ホスト SGD の学習ループが収束していない（first={first}, last={last}）"
-        );
-    }
-
-    /// T3: 常に `(loss, None)` を返すフックはパラメータを一切更新せず
-    /// （bit 完全一致で不変）、loss は記録される。
-    #[test]
-    fn custom_step_none_update_leaves_params_unchanged() {
-        const N: usize = 6;
-        const BATCH: usize = 2;
-        const EPOCHS: usize = 2;
-        let (x, y) = gen_regression_data(0x7570_DDDD, N);
-
-        let mut model = build_model();
-        model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let before: Vec<Tensor<f32>> = model.trainable_parameters().into_iter().cloned().collect();
-
-        let mut hook = |m: &Sequential,
-                        x_batch: &Tensor<f32>,
-                        y_batch: &Tensor<f32>,
-                        _opt: &mut OptimizerState|
-         -> StepOutcome {
-            let tape = crate::tape();
-            let bound = m.bind(&tape);
-            let x_var = tape.var(x_batch);
-            let pred = bound.forward_with_precision(&tape, &x_var, None)?;
-            let target_var = tape.var(y_batch);
-            let loss_var = pred.mse_loss_with(&target_var, Reduction::Mean)?;
-            let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
-                AutodiffError::InvalidArgument(
-                    "test fixture: loss の shape が [] ではない".to_string(),
-                )
-            })?;
-            Ok((loss_scalar, None))
-        };
-
-        let history = model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(EPOCHS, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut hook,
-            )
-            .unwrap_or_else(|e| panic!("フック fit に失敗: {e}"));
-
-        assert_eq!(history.loss.len(), EPOCHS);
-        let before_refs: Vec<&Tensor<f32>> = before.iter().collect();
-        assert!(
-            params_bit_exact(&before_refs, &model.trainable_parameters()),
-            "(loss, None) を返すフックでパラメータが変化してしまった"
-        );
-    }
-
-    /// T4: フックが `Err` を返すと fit が `Err` になり、その後も
-    /// `is_compiled()` は true・training モードは呼び出し前の値に戻る。
-    #[test]
-    fn custom_step_error_propagates_and_keeps_compiled() {
-        const N: usize = 4;
-        const BATCH: usize = 2;
-        let (x, y) = gen_regression_data(0x7570_EEEE, N);
-
-        let mut model = build_model();
-        model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let prev_training = model.training();
-
-        let mut hook = |_m: &Sequential,
-                        _x_batch: &Tensor<f32>,
-                        _y_batch: &Tensor<f32>,
-                        _opt: &mut OptimizerState|
-         -> StepOutcome {
-            Err(AutodiffError::InvalidArgument(
-                "test fixture: フックの意図的な失敗".to_string(),
-            ))
-        };
-
-        let err = model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(1, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut hook,
-            )
-            .expect_err("フックが Err を返したので fit も Err のはず");
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
-        assert!(
-            model.is_compiled(),
-            "エラー後も compiled 状態が維持されるはず"
-        );
-        assert_eq!(
-            model.training(),
-            prev_training,
-            "エラー後も training モードが呼び出し前の値へ復元されるはず"
-        );
-    }
-
-    /// T5a: カスタム学習 step フックは AMP（`compile_with_amp`）と
-    /// 併用できない（fail-closed）。
-    #[test]
-    fn custom_step_rejected_with_amp() {
-        const N: usize = 4;
-        const BATCH: usize = 2;
-        let (x, y) = gen_regression_data(0x7570_1AAA, N);
-
-        let mut model = build_model();
-        model
-            .compile_with_amp(
-                Optimizer::Sgd(SgdConfig::new(0.1)),
-                Loss::Mse,
-                AmpConfig::new(AmpDType::F16),
-            )
-            .unwrap_or_else(|e| panic!("test fixture: compile_with_amp に失敗: {e}"));
-        let before: Vec<Tensor<f32>> = model.trainable_parameters().into_iter().cloned().collect();
-
-        let mut hook = default_step_hook;
-        let err = model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(1, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut hook,
-            )
-            .expect_err("カスタム学習 step フックと AMP の併用は Err のはず");
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
-        assert!(
-            model.is_compiled(),
-            "エラー後も compiled 状態が維持されるはず"
-        );
-        let before_refs: Vec<&Tensor<f32>> = before.iter().collect();
-        assert!(
-            params_bit_exact(&before_refs, &model.trainable_parameters()),
-            "拒否されたはずのフックでパラメータが変化してしまった"
-        );
-    }
-
-    /// T5b: カスタム学習 step フックは勾配累積（`accumulate_steps >
-    /// 1`）と併用できない（fail-closed）。
-    #[test]
-    fn custom_step_rejected_with_accumulate_steps_gt_one() {
-        const N: usize = 4;
-        const BATCH: usize = 2;
-        let (x, y) = gen_regression_data(0x7570_1BBB, N);
-
-        let mut model = build_model();
-        model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let before: Vec<Tensor<f32>> = model.trainable_parameters().into_iter().cloned().collect();
-
-        let config = FitConfig::new(1, BATCH).accumulate_steps(2);
-        let mut hook = default_step_hook;
-        let err = model
-            .fit_custom_step_for_test(&x, &y, config, None, &mut [], &[], &mut hook)
-            .expect_err("カスタム学習 step フックと accumulate_steps > 1 の併用は Err のはず");
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
-        assert!(
-            model.is_compiled(),
-            "エラー後も compiled 状態が維持されるはず"
-        );
-        let before_refs: Vec<&Tensor<f32>> = before.iter().collect();
-        assert!(
-            params_bit_exact(&before_refs, &model.trainable_parameters()),
-            "拒否されたはずのフックでパラメータが変化してしまった"
-        );
-    }
-
-    /// T5c（イシュー #2172）: カスタム学習 step フックは
-    /// `Optimizer::Lbfgs` とも併用できない（fail-closed。フックは
-    /// `&Sequential`〈不変参照〉しか受け取らず、trial パラメータを
-    /// 書き込む L-BFGS closure をフック内から駆動できないため）。
-    #[test]
-    fn custom_step_rejected_with_lbfgs() {
-        const N: usize = 4;
-        const BATCH: usize = 2;
-        let (x, y) = gen_regression_data(0x7570_1CCC, N);
-
-        let mut model = build_model();
-        model
-            .compile(Optimizer::Lbfgs(LbfgsConfig::default()), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-        let before: Vec<Tensor<f32>> = model.trainable_parameters().into_iter().cloned().collect();
-
-        let mut hook = default_step_hook;
-        let err = model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(1, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut hook,
-            )
-            .expect_err("カスタム学習 step フックと Optimizer::Lbfgs の併用は Err のはず");
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
-        assert!(
-            model.is_compiled(),
-            "エラー後も compiled 状態が維持されるはず"
-        );
-        let before_refs: Vec<&Tensor<f32>> = before.iter().collect();
-        assert!(
-            params_bit_exact(&before_refs, &model.trainable_parameters()),
-            "拒否されたはずのフックでパラメータが変化してしまった"
-        );
-    }
-
-    /// T6: validation・callbacks（`EarlyStopping`）併用時も
-    /// `val_loss` が埋まり、callbacks が動く（学習側の演算列はフックが
-    /// 決めるが、validation フェーズは既存の `run_evaluate` 経路の
-    /// ままであることの確認）。
-    #[test]
-    fn custom_step_with_validation_and_callbacks() {
-        const N: usize = 8;
-        const BATCH: usize = 2;
-        const EPOCHS: usize = 3;
-        let (x, y) = gen_regression_data(0x7570_2CCC, N);
-        let (x_val, y_val) = gen_regression_data(0x7570_2DDD, 4);
-
-        let mut model = build_model();
-        model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-
-        let mut callbacks = [Callback::EarlyStopping(EarlyStopping::new(100))];
-        let mut hook = default_step_hook;
-        let history = model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(EPOCHS, BATCH),
-                Some((&x_val, &y_val)),
-                &mut callbacks,
-                &[],
-                &mut hook,
-            )
-            .unwrap_or_else(|e| panic!("フック fit（validation・callbacks 併用）に失敗: {e}"));
-
-        assert_eq!(
-            history.val_loss.len(),
-            EPOCHS,
-            "validation 併用時は val_loss が epoch 数分埋まるはず"
-        );
-        assert_eq!(history.loss.len(), EPOCHS);
-    }
-
-    /// T7: フックが shape の違うパラメータを返すと、`apply_parameters`
-    /// 経由で `Err` になる。
-    #[test]
-    fn custom_step_shape_mismatch_update_is_rejected() {
-        const N: usize = 4;
-        const BATCH: usize = 2;
-        let (x, y) = gen_regression_data(0x7570_3EEE, N);
-
-        let mut model = build_model();
-        model
-            .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
-            .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
-
-        let mut hook = |m: &Sequential,
-                        x_batch: &Tensor<f32>,
-                        y_batch: &Tensor<f32>,
-                        _opt: &mut OptimizerState|
-         -> StepOutcome {
-            let tape = crate::tape();
-            let bound = m.bind(&tape);
-            let x_var = tape.var(x_batch);
-            let pred = bound.forward_with_precision(&tape, &x_var, None)?;
-            let target_var = tape.var(y_batch);
-            let loss_var = pred.mse_loss_with(&target_var, Reduction::Mean)?;
-            let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
-                AutodiffError::InvalidArgument(
-                    "test fixture: loss の shape が [] ではない".to_string(),
-                )
-            })?;
-            // 意図的に shape の違うパラメータ集合を返す（1 要素だけ、
-            // 元の 1 個目のパラメータと異なる shape）。
-            let bogus = Tensor::new(vec![0.0f32; 1], &[1])?;
-            Ok((loss_scalar, Some(vec![bogus])))
-        };
-
-        let err = model
-            .fit_custom_step_for_test(
-                &x,
-                &y,
-                FitConfig::new(1, BATCH),
-                None,
-                &mut [],
-                &[],
-                &mut hook,
-            )
-            .expect_err("shape の違うパラメータ更新は Err のはず");
-        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 }
 
