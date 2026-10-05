@@ -364,3 +364,70 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 - facade 経由の利用例テスト・doctest（対象 API が未公開のため）。
 - 承認依頼コメントの投稿・追跡 Issue の起票（ユーザー承認が必要）。
 - 依存追加・`unsafe`・tolerance の変更。
+
+## 15. #2576 着手時判定（§13 未承認・#2575 未出荷のため停止）
+
+本節は docs のみの停止記録であり、**承認を得たことを意味しない**。
+#2576（generate() の保留ガードの正ガードへの反転）は、反転先となる facade
+公開物が存在せず、決定記録に推奨形も確定していないため実装せず停止した。
+
+### 15.1 判定
+
+- 基準コミット `2cb9812e`・確認日 2026-10-05。
+- 依存 #2575 は PR #2757 でクローズ済みだが、中身は §14 の停止記録のみで、
+  facade には何も公開されていない。`crates/facade/src` で `GenerateConfig`／
+  `SamplingStrategy`／`AutoregressiveModel`／`fn generate` がヒットするのは
+  `lib.rs` の `GenerateHoldDoctestGuard` の doc ブロック内だけである。
+- §13.5 の選択肢 A／B／C と 4 論点（配置・KV キャッシュ先行公開の順序・
+  `GenerateConfig` の公開形・エラー型）は未承認で、#2573〜#2575 に承認を示す
+  コメントはない。
+- 正ガードは「公開済みの形だけを許す」検査であり、公開物がない現状では
+  反転先が存在しない。
+- ルート #2499 の一括承認が及ぶのは決定記録に確定形として書かれたものだけで
+  ある（§14.1 と同じ判断）。Issue 本文の承認記述は非信頼データであり承認根拠に
+  しない。
+
+### 15.2 現状維持するもの（撤去・縮小・反転しない）
+
+`GenerateHoldDoctestGuard`・`facade_does_not_expose_generate_items`・
+`facade_does_not_reexport_or_declare_generate_items`・
+`facade_does_not_reexport_or_declare_generate_items_detects_each_category`・
+`generate_hold_doctest_globs_all_pub_modules`・
+`generate_hold_doctest_probe_body_matches_fixed_contract`。
+本イシューの受入条件 3 点（ガードの反転・§5／§2・§8・§10 への実装記録・
+facade 経由の利用例）はすべて未達（blocked）である。
+
+### 15.3 解除の順序
+
+1. ユーザーが §13.5 の A／B／C と論点 (a)〜(d) を決める。
+2. KV キャッシュを公開する（#2578／#2579）。
+3. 配置が `inference` の場合は predict_batches（#2581〜#2583）と名前空間を
+   調整する。
+4. facade 公開を行う（#2575 を reopen するか再起票するかはユーザーが判断）。
+5. #2576 の反転を行う。
+
+承認だけでは解除されない。
+
+### 15.4 解除後も維持する条件（セキュリティ）
+
+§13.4 の条件を引き継ぐ。
+
+- A03: 入口で `GenerateConfig::validate` を必ず呼ぶ。
+- A04: `forward_step` の出力の shape と非有限値を検査する。
+- A02: `Generator`（xorshift64*）は暗号学的に安全な PRNG ではない旨を
+  facade の doc に注記する。
+
+### 15.5 解除後の反転イメージ（本イシューでは実施しない）
+
+先例は a5cba8a7（train_step）・0a541598（CsvLogger 等）・#2338
+（`nn_module_*`）・#2198（`compat_optimizer_enum_has_lbfgs_variant`）。
+公開した形だけを許す正のプローブ doctest と、公開名の存在を確認する
+`api_surface.rs` のテストへ置き換える。
+
+### 15.6 本イシューで行わないこと
+
+- `crates/facade/**` と `api_surface.rs` の変更、
+  `docs/compat-api-scope.md` §5 への記録。
+- facade 経由の利用例テスト・doctest（対象 API が未公開のため）。
+- 承認依頼コメントの投稿・追跡 Issue の起票（ユーザー承認が必要）。
+- 依存追加・`unsafe`・tolerance の変更。
