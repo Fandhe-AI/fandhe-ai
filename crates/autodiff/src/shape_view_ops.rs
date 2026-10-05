@@ -256,9 +256,23 @@ pub fn unbind<'t>(x: &Var<'t>, dim: usize) -> Result<Vec<Var<'t>>, AutodiffError
     // narrow・contiguous・reshape の最大 3 ノード。
     checked_output_count(n, 3)?;
     let mut out = reserve_outputs(n)?;
+    // 全スライスをコピーした場合の総要素数（stride 0 の broadcast view では実体より
+    // 巨大になりうる）。コピーが必要になった時点で 1 GiB 上限を確保前に検査する。
+    let total_elems = out_shape
+        .iter()
+        .try_fold(n, |acc, &d| acc.checked_mul(d))
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
     for i in 0..n {
-        let slice = x.narrow(dim, i, 1)?.contiguous()?;
-        out.push(slice.reshape(&out_shape)?);
+        let view = x.narrow(dim, i, 1)?;
+        let slice = match view.reshape(&out_shape) {
+            Ok(v) => v,
+            Err(AutodiffError::Shape(ShapeError::NonContiguousReshape)) => {
+                checked_index_alloc_len(total_elems)?;
+                view.contiguous()?.reshape(&out_shape)?
+            }
+            Err(e) => return Err(e),
+        };
+        out.push(slice);
     }
     Ok(out)
 }
@@ -566,6 +580,19 @@ mod tests {
             Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
         ));
         assert_eq!(tape.len(), before);
+    }
+
+    #[test]
+    fn unbind_huge_slice_copy_is_rejected_before_allocation() {
+        // stride 0 の broadcast view は実体なしに巨大なスライスを持てる。
+        // 先頭軸以外の unbind は contiguous コピーが要るため確保前に弾く。
+        let tape = Tape::new();
+        let x = tape.var(&seq(&[2]));
+        let big = x.broadcast_to(&[1 << 31, 2]).unwrap();
+        assert!(matches!(
+            unbind(&big, 1),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
     }
 
     #[test]
