@@ -3272,6 +3272,15 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// 入力の実体の strides を、ノードを積まずに取り出す（`shape_view_ops::unbind` が
+    /// 「スライスのコピーが要るか」をノード作成前に判定するための内部 API）。
+    /// 実体化は `narrow` と同じ層 1（`materialize_fallible`）で行い、失敗は `Err` で返す。
+    pub(crate) fn strides_probe(&self) -> Result<Vec<isize>, AutodiffError> {
+        let nodes = self.tape.nodes.borrow();
+        let val = materialize_fallible(&nodes, self.tape.ops(), self.id)?;
+        Ok(val.strides().to_vec())
+    }
+
     /// 各軸を定数値 `value` で拡張する（`torch.nn.functional.pad
     /// (mode='constant')` 相当。イシュー #1756）。`pads[i] = (before,
     /// after)` は先頭次元から順に対応する（PyTorch `F.pad` の「末尾

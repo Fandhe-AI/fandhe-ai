@@ -243,7 +243,7 @@ pub fn tensor_split_indices<'t>(
 /// 軸 `dim` を取り除きながら長さ 1 ずつに分解する（`torch.unbind` 相当）。
 ///
 /// `shape[dim]` 本（0 なら空の `Vec`）を返し、各片は軸 `dim` を除いた shape を持つ。
-/// 各片は `narrow(dim, i, 1)` → 必要時 `Var::contiguous` → `reshape`（`Var::reshape` は
+/// コピー要否と確保上限はノード作成前に判定する。各片は `narrow(dim, i, 1)` → 必要時 `Var::contiguous` → `reshape`（`Var::reshape` は
 /// 非 contiguous を拒否するため）の合成で、先頭軸以外ではスライスごとにコピーする
 /// （PyTorch は view を返す差分。値は bit 一致）。rank 0 と `dim >= rank` は
 /// `AxisOutOfRange`。出力本数は確保前に検査する。
@@ -262,12 +262,32 @@ pub fn unbind<'t>(x: &Var<'t>, dim: usize) -> Result<Vec<Var<'t>>, AutodiffError
         .iter()
         .try_fold(n, |acc, &d| acc.checked_mul(d))
         .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+    // コピーの要否と確保上限は、narrow ノードを積む前に判定する（引数起因のエラーで
+    // 孤児ノードを tape に残さない）。各スライスは `narrow(dim, i, 1)` の view で、
+    // strides は x と同じ。size 1 の軸を除き行優先 strides と一致すれば reshape だけで済む。
+    let strides = x.strides_probe()?;
+    let in_shape = x.shape();
+    let mut narrow_shape = in_shape.clone();
+    narrow_shape[dim] = 1;
+    let mut expected: isize = 1;
+    let mut needs_copy = false;
+    if narrow_shape.iter().all(|&d| d != 0) {
+        for (ax, &d) in narrow_shape.iter().enumerate().rev() {
+            if d > 1 && strides[ax] != expected {
+                needs_copy = true;
+                break;
+            }
+            expected = expected.saturating_mul(isize::try_from(d).unwrap_or(isize::MAX));
+        }
+    }
+    if needs_copy && n > 0 {
+        checked_index_alloc_len(total_elems)?;
+    }
     for i in 0..n {
         let view = x.narrow(dim, i, 1)?;
         let slice = match view.reshape(&out_shape) {
             Ok(v) => v,
             Err(AutodiffError::Shape(ShapeError::NonContiguousReshape)) => {
-                checked_index_alloc_len(total_elems)?;
                 view.contiguous()?.reshape(&out_shape)?
             }
             Err(e) => return Err(e),
@@ -589,10 +609,13 @@ mod tests {
         let tape = Tape::new();
         let x = tape.var(&seq(&[2]));
         let big = x.broadcast_to(&[1 << 31, 2]).unwrap();
+        let before = tape.len();
         assert!(matches!(
             unbind(&big, 1),
             Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
         ));
+        // 孤児ノードを残さない（narrow を積む前に判定する）。
+        assert_eq!(tape.len(), before);
     }
 
     #[test]
