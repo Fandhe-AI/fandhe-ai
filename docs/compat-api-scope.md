@@ -992,6 +992,7 @@ TrainStepHoldDoctestGuard`（正のプローブ doctest）＋
 テスト）で機械的に固定する。`Cargo.toml`／`Cargo.lock`・tolerance／
 baseline・`docs/spec/` は不変。承認後の完全な公開 API 案・数値契約は
 `docs/compat-train-step-hook-decision.md` §5 を参照。
+→ イシュー #2568 で公開、#2569 で正ガードへ反転済み（本節末尾の適用記録を参照）。
 
 **実装記録（イシュー #2362〈#2369〜#2377〉。#2188 の保留記録を更新）**: 2026-09-29 に親 #2362 で
 承認を受け、`compat::Sequential` の層構成シリアライズの主案（`fandhe_ai::compat::{save_model, load_model}`・
@@ -1873,6 +1874,20 @@ facade `Tape::backward_create_graph`（`self.0.backward_create_graph(loss, &chil
 利用例テストとして `child_built_with_tape_for_parent_device_works`・`rejects_parent_with_registered_checkpoint_via_facade` を `crates/facade/tests/create_graph_facade.rs` に追加した。
 保留継続: `tape.child()` 等の子テープ構築ヘルパー・`TapeRef::backward_create_graph`・`new_with_ops` への到達経路・HVP 専用 API（案 C）・`backward_accumulate`／checkpoint 併用・残る非対象 Op の拡張。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。GPU 実機の申し送りは `docs/perf/logs/create-graph-facade-2545/README.md`。
+
+**適用記録（経路 2。イシュー #2568・#2569・親 #2566・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`docs/compat-train-step-hook-decision.md` §8.1 の確定形（単一案）どおり、`fandhe_ai::compat::{TrainStepFn, TrainStepOptimizer, TrainStepOutput}`
+（`compat/mod.rs` の `pub use` 葉 3 件）と inherent `Sequential::fit_with_train_step`（`compat/training.rs`）の 7 要素を公開した（実施は #2751）。
+`fandhe-ai =0.10.0` の公開 API に追加のみ・非破壊（`FitConfig` は `Copy + Eq` のまま不変。inherent メソッドの解決先が変わりうる注記は同 doc §8.3）。
+保留ガードは承認形だけを許す正ガードへ反転した（`facade_train_step_public_surface_matches_approved_contract`・
+`facade_train_step_optimizer_and_output_shapes_match_approved_contract`・`workspace_declares_train_step_fn_names_only_in_approved_location`・
+`train_step_types_are_reachable_via_facade_only`。実施は #2569、対応表は同 doc §9）。`TrainStepHoldDoctestGuard` は禁止経路
+（`FitConfig::train_step_fn`・`FitConfig::fit_with_train_step`・`Sequential::train_step_fn`）専用の doctest として維持した。
+利用例テストは `crates/facade/tests/compat_sequential_train_step.rs`（`f32` target の既存テストに加え、#2569 で `i32` クラス添字 target の
+`fit_with_train_step_class_index_target_cross_entropy` を追加）。
+保留継続: `test_step_fn`／`predict_step_fn`・AMP／勾配累積／L-BFGS とフックの併用・`TrainStepOptimizer::set_lr`・`DeviceParamStore` 常駐経路でのフック（同 doc §6）、
+`Reduction` の facade 再エクスポート（#2538 の保留）。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。新規演算は無く CPU のみで検証できるため実機 parity の申し送りは不要。
 
 **適用記録（経路 2。イシュー #2571・親 #2570・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
 `docs/compat-callbacks-loggers-decision.md` §3 の推奨形（単一案）どおり、`compat::{CsvLogger, JsonLogger, LambdaCallback}` と

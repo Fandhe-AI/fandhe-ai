@@ -20,6 +20,8 @@ OptimizerState)` を受け取り `(loss: f32, updated: Option<Vec<Tensor
 （`compile_with_amp`）・勾配累積（`accumulate_steps > 1`）との併用は
 引数検査で `InvalidArgument`（fail-closed）に拒否する。
 
+**（#2184 時点の記述。#2568 で公開・#2569 で正ガードへ反転済み。§9 参照）**
+
 **facade 公開面は追加していない（承認待ち）**: イシュー #2184・親
 #2131 のいずれにも所有者の承認コメントはない（着手前に `gh issue view
 --json comments` で確認済み）。親 #2131 の「facade 公開面の拡張は
@@ -213,6 +215,8 @@ facade テストへ置き換え）。
 
 承認を得た日が来たら、上記を実施する。
 
+承認後の実装記録は §9 を参照（承認の事実はルート #2499 の 2026-10-04 一括承認〈§5 に書かれた形に限る〉のみ）。
+
 ## §6 スコープ外（out-of-scope-tracking）
 
 - facade 公開面の新設（§5 参照）
@@ -321,3 +325,41 @@ PartialEq, Eq)]`。
 | `fit_custom_step_for_test`・`mod train_step_tests` | #2568／#2569: 公開入口経由で `crates/facade/tests/compat_sequential_train_step.rs` へ移すか src 内に残すかを #2568 の計画で決める。注意: T2 の `Reduction::Sum` は facade から名前で参照できない（#2538 の保留）ため外部テストでは dev 依存の `fandhe_ai_autodiff::Reduction` を使う。T1 の `forward_with_precision(None)` は公開 `SequentialVars::forward` に置換できる（同一経路の委譲） |
 | #2569 の追加作業 | `docs/compat-api-scope.md` §5 の保留記録への適用記録、本記録への実装記録 |
 | CUDA／Metal | 新規演算が無いため実機 parity の申し送りは不要見込み（§4 末尾と同じ）。#2568 で再確認する |
+
+## §9 実装記録（#2568／#2569）
+
+承認の事実はルート #2499 の 2026-10-04 一括承認（§5 の形に限る）のみで、本節はそれ以上の承認を主張しない。
+
+### §9.1 公開した名前（#2568・PR #2751）
+
+`fandhe_ai::compat::{TrainStepFn, TrainStepOptimizer, TrainStepOutput}`（`compat/mod.rs` の `pub use` 葉 3 件）、
+`compat/training.rs` の型宣言 3 件、inherent `Sequential::fit_with_train_step` 1 件の計 7 要素（§8.1 のとおり）。
+
+### §9.2 ガード反転の対応表（#2569）
+
+| 旧 | 新 | 処置 |
+|----|----|------|
+| `facade_does_not_reexport_or_declare_train_step_items` | `facade_train_step_public_surface_matches_approved_contract` | 要素ごと（葉 3・型宣言 3・`impl Sequential` 内 `fit_with_train_step` 1）にちょうど 1 件を固定。欠落・二重化・別名・別の場所での宣言・`fn train_step_fn` は fail |
+| `facade_does_not_reexport_or_declare_train_step_items_detects_each_category` | `facade_train_step_public_surface_guards_detect_each_category` | 既存の正例・負例を引き継ぎ、欠落・二重化・`impl Sequential` 外・形状逸脱の合成入力を追加 |
+| （新規） | `facade_train_step_optimizer_and_output_shapes_match_approved_contract` | `TrainStepOptimizer` の inherent pub fn が `step`／`lr` のみ・`TrainStepOutput` が `new`／`with_updated` のみ。trait impl 0・pub フィールド 0・属性は `TrainStepOutput` の `#[non_exhaustive]` のみ |
+| （新規） | `workspace_declares_train_step_fn_names_only_in_approved_location` | workspace 全体の `fit_with_train_step`／`train_step_fn` の fn 宣言が `facade/src/compat/training.rs` の `fit_with_train_step` 1 件のみ |
+| （新規） | `train_step_types_are_reachable_via_facade_only` | `fandhe_ai` のみの import でシグネチャ（`f32`／`i32` target）を型検査 |
+| `train_step_hold_doctest_globs_all_pub_modules`・`train_step_hold_doctest_probe_body_matches_fixed_contract` | 維持 | 禁止経路専用の `TrainStepHoldDoctestGuard` のドリフト検査（コンパイル面の露出を型検査レベルで検出し続ける） |
+
+### §9.3 §8.4 引き継ぎ表の消化状況
+
+- #2568 実施分: `TrainStepHoldDoctestGuard` のプローブ縮小・固定文字列更新・否定ガードの縮小・テストの `compat_sequential_train_step.rs` への移設。
+- #2569 実施分: 否定ガードの正ガード化（§9.2）・本記録・`docs/compat-api-scope.md` §5 の適用記録・利用例テストの追加。
+- CUDA／Metal: 新規演算が無く CPU のみで実行できるため実機 parity の申し送りは不要（再確認済み）。
+
+### §9.4 追加した利用例テスト
+
+`crates/facade/tests/compat_sequential_train_step.rs::fit_with_train_step_class_index_target_cross_entropy`:
+`Tensor<i32>` target・`Loss::CrossEntropy` で、既定 step を手書きしたフックが既定の `fit` と `History.loss`・学習後パラメータとも bit 完全一致し、
+`History.loss` の長さが epoch 数に一致することを固定する。
+
+### §9.5 検証
+
+`cargo fmt --all -- --check`・`cargo clippy -p fandhe-ai --all-targets --no-deps -- -D warnings`・
+`cargo test -p fandhe-ai`（`api_surface`・`compat_sequential_train_step`・doctest を含む）・
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` を実行した（結果は PR の検証欄を参照）。

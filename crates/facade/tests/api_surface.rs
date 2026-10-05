@@ -17666,12 +17666,18 @@ fn fit_config_accumulate_steps_is_reachable_via_facade_only() {
 }
 
 // =====================================================================
-// #2184（親 #2131）の facade 公開保留固定（`TrainStepHoldDoctestGuard`）を、
-// #2568 で承認形（`TrainStepFn`／`TrainStepOptimizer`／`TrainStepOutput` の
-// 3 型と inherent `Sequential::fit_with_train_step`。決定記録 §8.1）の公開に
-// 合わせて「承認形の許可だけを残す否定ガード」へ縮めた。禁止経路
-// （`train_step_fn` 名・承認形以外の場所での再エクスポート／宣言・別名）は
-// 引き続き違反。正ガードへの反転は #2569。
+// #2184（親 #2131）で導入し、#2568 で承認形（`TrainStepFn`／
+// `TrainStepOptimizer`／`TrainStepOutput` の 3 型と inherent
+// `Sequential::fit_with_train_step`。決定記録 §8.1）の公開に合わせて縮小し、
+// #2569 で正ガードへ反転した facade 公開面の固定。ソース走査は「承認した
+// 形が承認した場所にちょうど 1 件ずつ存在すること」を固定する正ガード
+// （`facade_train_step_public_surface_matches_approved_contract`・
+// `facade_train_step_optimizer_and_output_shapes_match_approved_contract`・
+// `workspace_declares_train_step_fn_names_only_in_approved_location`・
+// `train_step_types_are_reachable_via_facade_only`）になった。残る禁止経路
+// （`FitConfig::train_step_fn`／`FitConfig::fit_with_train_step`／
+// `Sequential::train_step_fn`）は `TrainStepHoldDoctestGuard`（禁止経路専用へ
+// 縮小）が型検査レベルで維持する。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `TrainStepHoldDoctestGuard` doc 内の
@@ -17763,25 +17769,28 @@ fn __probe(cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequenti
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::train_step_fn(seq);\n\
 }";
 
-/// [`facade_does_not_reexport_or_declare_train_step_items`]・その
-/// 自己テストが共用する検出本体（#2568 で承認形の許可だけを残す形へ縮小）。
-/// `rel`（`crates/facade/src` からの `/` 区切り相対パス）と `content` を受け、
-/// `(違反一覧, 許可した出現数)` を返す。許可は次の 3 種のみ:
-/// (a) `compat/mod.rs` の `pub use` 葉 `TrainStepFn`／`TrainStepOptimizer`／
-/// `TrainStepOutput`（`as` による別名は違反）、(b) `compat/training.rs` の
-/// `type TrainStepFn`／`struct TrainStepOptimizer`／`struct TrainStepOutput`
-/// 宣言、(c) `compat/training.rs` の `fn fit_with_train_step` 宣言 1 件。
-/// それ以外の場所・種別の出現と、`fn train_step_fn` 宣言（全域）は違反。
-/// 許可数を返すのは、走査の空振り（常に 0 件で通ってしまう）を呼び出し側で
-/// 検出するため。
-fn scan_train_step_reexports_and_declarations(rel: &str, content: &str) -> (Vec<String>, usize) {
+/// [`facade_train_step_public_surface_matches_approved_contract`]・その
+/// 自己テストが共用する検出本体（#2569 で正ガード化）。`rel`
+/// （`crates/facade/src` からの `/` 区切り相対パス）と `content` を受け、
+/// `(違反一覧, 確認できた承認要素の鍵一覧)` を返す。承認要素の鍵は次の 7 種:
+/// (a) `compat/mod.rs` の `pub use` 葉 `use:TrainStepFn`／`use:TrainStepOptimizer`／
+/// `use:TrainStepOutput`（`as` による別名は違反）、(b) `compat/training.rs` の
+/// `type:TrainStepFn`／`struct:TrainStepOptimizer`／`struct:TrainStepOutput` 宣言、
+/// (c) `compat/training.rs` の `impl Sequential` 内 `fn:fit_with_train_step` 宣言。
+/// それ以外の場所・種別の出現（`impl Sequential` 外の `fit_with_train_step` を含む）と、
+/// `fn train_step_fn` 宣言（全域）は違反。鍵を返すのは、呼び出し側が
+/// 「要素ごとにちょうど 1 件」を数えて欠落・二重化・空振りを検出するため。
+fn scan_train_step_reexports_and_declarations(
+    rel: &str,
+    content: &str,
+) -> (Vec<String>, Vec<String>) {
     const TYPE_NAMES: [&str; 3] = ["TrainStepFn", "TrainStepOptimizer", "TrainStepOutput"];
     let is_mod_rs = rel == "compat/mod.rs";
     let is_training_rs = rel == "compat/training.rs";
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
-    let mut allowed = 0usize;
+    let mut allowed: Vec<String> = Vec::new();
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -17810,7 +17819,7 @@ fn scan_train_step_reexports_and_declarations(rel: &str, content: &str) -> (Vec<
                         continue;
                     }
                     if is_mod_rs {
-                        allowed += 1;
+                        allowed.push(format!("use:{leaf}"));
                     } else {
                         offending.push(format!("pub use leaf={leaf}（{rel}）"));
                     }
@@ -17833,7 +17842,7 @@ fn scan_train_step_reexports_and_declarations(rel: &str, content: &str) -> (Vec<
                         | ("struct", "TrainStepOutput")
                 );
             if approved {
-                allowed += 1;
+                allowed.push(format!("{kind}:{name}"));
             } else {
                 offending.push(format!("{kind} {name} 宣言（{rel}）"));
             }
@@ -17842,9 +17851,13 @@ fn scan_train_step_reexports_and_declarations(rel: &str, content: &str) -> (Vec<
     }
 
     let fit_decls = count_fn_declarations_by_name(&tokens, "fit_with_train_step");
+    let in_impl_sequential = is_training_rs
+        && scan_type_impl_surface(content, "Sequential")
+            .0
+            .contains("fit_with_train_step");
     for n in 0..fit_decls {
-        if is_training_rs && n == 0 {
-            allowed += 1;
+        if in_impl_sequential && n == 0 {
+            allowed.push("fn:fit_with_train_step".to_string());
         } else {
             offending.push(format!("fn fit_with_train_step 宣言（{rel}）"));
         }
@@ -17857,18 +17870,48 @@ fn scan_train_step_reexports_and_declarations(rel: &str, content: &str) -> (Vec<
     (offending, allowed)
 }
 
-/// facade src 全体（`crates/facade/src/**`）で、承認形（#2568・決定記録
-/// §8.1）以外の `TrainStepFn`／`TrainStepOptimizer`／`TrainStepOutput` の
-/// 再エクスポート・宣言、`fn train_step_fn` 宣言、承認位置以外の
-/// `fn fit_with_train_step` 宣言が存在しないことを固定する
-/// （`TrainStepHoldDoctestGuard` と多層防御を成す最内層のソース走査ガード）。
-/// 許可した出現数は 7（葉 3・型宣言 3・メソッド 1）ちょうどであることも
-/// 固定し、走査の空振りを検出する。
+/// 承認形（#2568・決定記録 §8.1）の鍵 7 種。各ちょうど 1 件であることを
+/// 正ガードが固定する。
+const TRAIN_STEP_APPROVED_KEYS: [&str; 7] = [
+    "use:TrainStepFn",
+    "use:TrainStepOptimizer",
+    "use:TrainStepOutput",
+    "type:TrainStepFn",
+    "struct:TrainStepOptimizer",
+    "struct:TrainStepOutput",
+    "fn:fit_with_train_step",
+];
+
+/// 承認要素の鍵一覧が [`TRAIN_STEP_APPROVED_KEYS`] とちょうど一致する
+/// （各 1 件。欠落・二重化・予期しない鍵なし）ことを検査し、逸脱を返す。
+fn train_step_inventory_violations(allowed: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in TRAIN_STEP_APPROVED_KEYS {
+        let n = allowed.iter().filter(|k| k.as_str() == key).count();
+        if n == 0 {
+            out.push(format!("承認形の欠落: {key}"));
+        } else if n > 1 {
+            out.push(format!("承認形の二重化: {key}（{n} 件）"));
+        }
+    }
+    for k in allowed {
+        if !TRAIN_STEP_APPROVED_KEYS.contains(&k.as_str()) {
+            out.push(format!("承認形からの逸脱: {k}"));
+        }
+    }
+    out
+}
+
+/// 正ガード: facade src 全体（`crates/facade/src/**`）で、承認形
+/// （#2568・決定記録 §8.1）が承認した場所に 1 件ずつ存在し
+/// （`compat/mod.rs` の `pub use` 葉 3・`compat/training.rs` の型宣言 3・
+/// `impl Sequential` 内の `fit_with_train_step` 1）、それ以外の形・場所の
+/// 再エクスポート／宣言・別名・`fn train_step_fn` が 0 件であることを固定する。
 #[test]
-fn facade_does_not_reexport_or_declare_train_step_items() {
+fn facade_train_step_public_surface_matches_approved_contract() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
-    let mut allowed_total = 0usize;
+    let mut allowed_all: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
         let rel = path
             .strip_prefix(&src_dir)
@@ -17876,29 +17919,205 @@ fn facade_does_not_reexport_or_declare_train_step_items() {
             .to_string_lossy()
             .replace('\\', "/");
         let (found, allowed) = scan_train_step_reexports_and_declarations(&rel, content);
-        allowed_total += allowed;
+        allowed_all.extend(allowed);
         for offense in found {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面がカスタム学習 step フックの承認形（#2568・\
+        "承認形からの逸脱: facade の公開面がカスタム学習 step フックの承認形（#2568・\
          `docs/compat-train-step-hook-decision.md` §8.1）以外の形で\
          公開・宣言されている: {offending:?}"
     );
-    assert_eq!(
-        allowed_total, 7,
-        "承認形の出現数（葉 3・型宣言 3・fit_with_train_step 1）が 7 件でない\
-         （走査の空振り、または承認形の欠落）"
+    let violations = train_step_inventory_violations(&allowed_all);
+    assert!(
+        violations.is_empty(),
+        "承認形の欠落・二重化（走査の空振りを含む）: {violations:?}"
     );
 }
 
-/// [`scan_train_step_reexports_and_declarations`]（[`facade_does_not_
-/// reexport_or_declare_train_step_items`]）の自己テスト（正例・負例の
-/// 合成入力）。
+/// 宣言直前の属性行（doc コメント除去・空白除去済みの連結）を返す。
+/// 空行は読み飛ばし、`}`／`;` で終わる行に当たるまで遡る（属性と宣言の間に空行を
+/// 挟んで承認外属性を隠す迂回を防ぐ）。宣言が見つからなければ `None`。
+fn attrs_before_pub_struct(content: &str, name: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = lines.iter().position(|l| {
+        let t = l.trim_start();
+        t.starts_with(&format!("pub struct {name}<"))
+            || t.starts_with(&format!("pub struct {name} "))
+    })?;
+    let mut attrs: Vec<&str> = Vec::new();
+    for l in lines[..idx].iter().rev() {
+        let t = l.trim();
+        if t.ends_with('}') || t.ends_with(';') {
+            break;
+        }
+        if !t.is_empty() && !t.starts_with("//") {
+            attrs.push(t);
+        }
+    }
+    attrs.reverse();
+    Some(attrs.concat().split_whitespace().collect())
+}
+
+/// 合成入力で `attrs_before_pub_struct` が空行越しの属性も収集することを確認する。
 #[test]
-fn facade_does_not_reexport_or_declare_train_step_items_detects_each_category() {
+fn attrs_before_pub_struct_collects_attrs_across_blank_lines() {
+    let src = "use a::b;\n\n#[non_exhaustive]\n\n#[derive(Clone)]\n\n/// doc\npub struct S {\n    x: u8,\n}\n";
+    assert_eq!(
+        attrs_before_pub_struct(src, "S").as_deref(),
+        Some("#[non_exhaustive]#[derive(Clone)]")
+    );
+    let clean = "fn f() {}\n\npub struct S {}\n";
+    assert_eq!(attrs_before_pub_struct(clean, "S").as_deref(), Some(""));
+}
+
+/// `struct <name>` 本体の中括弧内に `pub` トークンがあるか（pub フィールドの検出）。
+fn struct_body_has_pub_field(content: &str, name: &str) -> bool {
+    let tokens = tokens_of(content);
+    let Some(i) = tokens
+        .windows(2)
+        .position(|w| w[0] == "struct" && w[1] == name)
+    else {
+        return false;
+    };
+    let Some(open) = tokens[i..].iter().position(|t| t == "{").map(|o| o + i) else {
+        return false;
+    };
+    let Some(close) = matching_close(&tokens, open, "{", "}") else {
+        return true;
+    };
+    tokens[open..close].iter().any(|t| t == "pub")
+}
+
+/// `compat/training.rs` 内容から `TrainStepOptimizer`／`TrainStepOutput` の
+/// 形状（inherent pub fn 集合・trait impl・pub フィールド・直前属性）の逸脱を返す。
+fn train_step_shape_violations(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (ty, expected_fns, expected_attrs) in [
+        ("TrainStepOptimizer", ["lr", "step"], ""),
+        (
+            "TrainStepOutput",
+            ["new", "with_updated"],
+            "#[non_exhaustive]",
+        ),
+    ] {
+        let (public, nonpublic, traits) = scan_type_impl_surface(content, ty);
+        let expected: std::collections::BTreeSet<String> =
+            expected_fns.iter().map(|s| s.to_string()).collect();
+        if public != expected {
+            out.push(format!(
+                "{ty} の inherent pub fn 集合が承認形と不一致: {public:?}"
+            ));
+        }
+        if !nonpublic.is_empty() {
+            out.push(format!("{ty} の非 pub fn が存在する: {nonpublic:?}"));
+        }
+        if !traits.is_empty() {
+            out.push(format!("{ty} に手書き trait impl がある: {traits:?}"));
+        }
+        if struct_body_has_pub_field(content, ty) {
+            out.push(format!("{ty} に pub フィールドがある"));
+        }
+        match attrs_before_pub_struct(content, ty) {
+            Some(a) if a == expected_attrs => {}
+            Some(a) => out.push(format!("{ty} の直前属性が承認形と不一致: {a:?}")),
+            None => out.push(format!("{ty} の宣言が見つからない")),
+        }
+    }
+    out
+}
+
+/// 正ガード: `TrainStepOptimizer` は `step`／`lr` のみ（`set_lr`・公開
+/// コンストラクタ・trait impl・属性なし）、`TrainStepOutput` は
+/// `new`／`with_updated` のみ（`#[non_exhaustive]` 以外の属性・pub フィールド・
+/// trait impl なし）という承認形の「形」を固定する（決定記録 §8.1）。
+#[test]
+fn facade_train_step_optimizer_and_output_shapes_match_approved_contract() {
+    let content = read_to_string_or_panic(&facade_crate_root().join("src/compat/training.rs"));
+    let violations = train_step_shape_violations(&content);
+    assert!(
+        violations.is_empty(),
+        "TrainStepOptimizer／TrainStepOutput の形が承認形から逸脱している: {violations:?}"
+    );
+}
+
+/// workspace 全体で `fn fit_with_train_step`／`fn train_step_fn` の宣言が
+/// `facade/src/compat/training.rs` の `fit_with_train_step` 1 件のみである
+/// こと（過不足とも fail-closed。`train_step_fn` は 0 件）。
+#[test]
+fn workspace_declares_train_step_fn_names_only_in_approved_location() {
+    let found = scan_workspace_fn_declarations(&["fit_with_train_step", "train_step_fn"]);
+    let expected: std::collections::BTreeMap<String, usize> = [(
+        "facade/src/compat/training.rs::fit_with_train_step".to_string(),
+        1,
+    )]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "train_step フックの fn 宣言が承認位置（facade の training.rs 内 1 件）と不一致"
+    );
+}
+
+/// 承認形が facade だけの import で到達でき、シグネチャが固定されていること
+/// （`fandhe_ai_autodiff` は import しない。`lbfgs_types_are_reachable_via_facade_only`
+/// と同型）。`f32`／`i32` の両 target で `fit_with_train_step` を型検査する。
+#[test]
+fn train_step_types_are_reachable_via_facade_only() {
+    use fandhe_ai::compat::{
+        FitConfig, History, Sequential, TrainStepFn, TrainStepOptimizer, TrainStepOutput,
+    };
+    use fandhe_ai::{AutodiffError, Tensor};
+
+    // 実行しない型検査専用関数（lifetime が early-bound のため fn ポインタへは強制しない）。
+    fn _check_optimizer(
+        o: &mut TrainStepOptimizer<'_>,
+        p: &[&Tensor<f32>],
+    ) -> (Result<Vec<Tensor<f32>>, AutodiffError>, f32) {
+        (o.step(p, p), o.lr())
+    }
+    fn _check_fit_f32(
+        m: &mut Sequential,
+        x: &Tensor<f32>,
+        y: &Tensor<f32>,
+        h: &mut TrainStepFn<'_, f32>,
+    ) -> Result<History, AutodiffError> {
+        m.fit_with_train_step::<f32>(x, y, FitConfig::new(1, 1), None, &mut [], &[], h)
+    }
+    fn _check_fit_i32(
+        m: &mut Sequential,
+        x: &Tensor<f32>,
+        y: &Tensor<i32>,
+        h: &mut TrainStepFn<'_, i32>,
+    ) -> Result<History, AutodiffError> {
+        m.fit_with_train_step::<i32>(x, y, FitConfig::new(1, 1), None, &mut [], &[], h)
+    }
+
+    let _: TrainStepOutput = TrainStepOutput::new(0.0).with_updated(Vec::new());
+    let mut f32_hook =
+        |_m: &Sequential,
+         _x: &Tensor<f32>,
+         _y: &Tensor<f32>,
+         _o: &mut TrainStepOptimizer<'_>|
+         -> Result<TrainStepOutput, AutodiffError> { Ok(TrainStepOutput::new(0.0)) };
+    let _f32_dyn: &mut TrainStepFn<'_, f32> = &mut f32_hook;
+    let mut i32_hook =
+        |_m: &Sequential,
+         _x: &Tensor<f32>,
+         _y: &Tensor<i32>,
+         _o: &mut TrainStepOptimizer<'_>|
+         -> Result<TrainStepOutput, AutodiffError> { Ok(TrainStepOutput::new(0.0)) };
+    let _i32_dyn: &mut TrainStepFn<'_, i32> = &mut i32_hook;
+}
+
+/// [`scan_train_step_reexports_and_declarations`]・
+/// [`train_step_inventory_violations`]・[`train_step_shape_violations`]（正ガード
+/// 群）の自己テスト。違反カテゴリごとの合成入力が検出され、承認形は許可される
+/// ことを固定する。
+#[test]
+fn facade_train_step_public_surface_guards_detect_each_category() {
     let scan = scan_train_step_reexports_and_declarations;
     // 正例: lib.rs での再エクスポート。
     assert!(!scan("lib.rs", "pub use compat::TrainStepFn;").0.is_empty());
@@ -17943,7 +18162,7 @@ fn facade_does_not_reexport_or_declare_train_step_items_detects_each_category() 
         .0
         .is_empty()
     );
-    // 正例: fit_with_train_step の承認位置以外・2 件目。
+    // 正例: fit_with_train_step の承認位置以外（別ファイル・impl Sequential 外）・2 件目。
     assert!(
         !scan(
             "compat/sequential.rs",
@@ -17955,34 +18174,116 @@ fn facade_does_not_reexport_or_declare_train_step_items_detects_each_category() 
     assert!(
         !scan(
             "compat/training.rs",
-            "impl S { pub fn fit_with_train_step(&mut self) {} pub fn fit_with_train_step(&mut self) {} }"
+            "impl FitConfig { pub fn fit_with_train_step(&mut self) {} }"
+        )
+        .0
+        .is_empty()
+    );
+    assert!(
+        !scan(
+            "compat/training.rs",
+            "impl Sequential { pub fn fit_with_train_step(&mut self) {} pub fn fit_with_train_step(&mut self) {} }"
         )
         .0
         .is_empty()
     );
     // 負例（許可）: 承認形の再エクスポート・宣言・メソッド。
-    let (off, n) = scan(
+    let (off, keys) = scan(
         "compat/mod.rs",
         "pub use training::{FitConfig, TrainStepFn, TrainStepOptimizer, TrainStepOutput};",
     );
     assert!(off.is_empty(), "{off:?}");
-    assert_eq!(n, 3);
-    let (off, n) = scan(
-        "compat/training.rs",
-        "pub type TrainStepFn<'h, T> = dyn FnMut() + 'h; pub struct TrainStepOptimizer<'a> { x: &'a u8 } \
-         pub struct TrainStepOutput { y: u8 } impl Sequential { pub fn fit_with_train_step(&mut self) {} }",
-    );
+    assert_eq!(keys.len(), 3);
+    let training_ok = "pub type TrainStepFn<'h, T> = dyn FnMut() + 'h; \
+         pub struct TrainStepOptimizer<'a> { x: &'a u8 } \
+         pub struct TrainStepOutput { y: u8 } \
+         impl Sequential { pub fn fit_with_train_step(&mut self) {} }";
+    let (off, keys) = scan("compat/training.rs", training_ok);
     assert!(off.is_empty(), "{off:?}");
-    assert_eq!(n, 4);
+    assert_eq!(keys.len(), 4);
     // 負例: コメント中の出現・無関係な名前。
-    assert_eq!(scan("lib.rs", "// pub use ...::TrainStepFn;"), (vec![], 0));
+    assert_eq!(
+        scan("lib.rs", "// pub use ...::TrainStepFn;"),
+        (vec![], vec![])
+    );
     assert_eq!(
         scan(
             "lib.rs",
             "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
         ),
-        (vec![], 0)
+        (vec![], vec![])
     );
+
+    // インベントリ: 完全一致のみ許可。欠落・二重化・予期しない鍵は逸脱。
+    let full: Vec<String> = TRAIN_STEP_APPROVED_KEYS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(train_step_inventory_violations(&full).is_empty());
+    let mut missing_dup = full.clone();
+    missing_dup.retain(|k| k != "use:TrainStepOutput");
+    missing_dup.push("use:TrainStepFn".to_string());
+    let v = train_step_inventory_violations(&missing_dup);
+    assert!(
+        v.iter().any(|m| m.contains("欠落: use:TrainStepOutput")),
+        "{v:?}"
+    );
+    assert!(
+        v.iter().any(|m| m.contains("二重化: use:TrainStepFn")),
+        "{v:?}"
+    );
+    let mut extra = full;
+    extra.push("fn:train_step_fn".to_string());
+    assert!(!train_step_inventory_violations(&extra).is_empty());
+
+    // 形状ガード: 承認形は通り、各逸脱は検出される。
+    let ok = "pub struct TrainStepOptimizer<'a> { s: &'a u8 }\n\
+         impl TrainStepOptimizer<'_> { pub fn step(&mut self) {} pub fn lr(&self) {} }\n\n\
+         /// doc\n#[non_exhaustive]\npub struct TrainStepOutput { l: f32 }\n\
+         impl TrainStepOutput { pub fn new() {} pub fn with_updated(self) {} }\n";
+    assert_eq!(train_step_shape_violations(ok), Vec::<String>::new());
+    for (label, bad) in [
+        (
+            "set_lr 追加",
+            ok.replace(
+                "pub fn lr(&self) {}",
+                "pub fn lr(&self) {} pub fn set_lr(&mut self) {}",
+            ),
+        ),
+        (
+            "公開コンストラクタ追加",
+            ok.replace(
+                "pub fn step(&mut self) {}",
+                "pub fn step(&mut self) {} pub fn new() {}",
+            ),
+        ),
+        (
+            "trait impl 追加",
+            format!("{ok}impl Clone for TrainStepOptimizer<'_> {{}}\n"),
+        ),
+        ("pub フィールド", ok.replace("{ l: f32 }", "{ pub l: f32 }")),
+        (
+            "derive 追加",
+            ok.replace("#[non_exhaustive]", "#[derive(Debug)]\n#[non_exhaustive]"),
+        ),
+        ("non_exhaustive 欠落", ok.replace("#[non_exhaustive]\n", "")),
+        (
+            "Optimizer 側へ属性",
+            ok.replace(
+                "pub struct TrainStepOptimizer",
+                "#[derive(Debug)]\npub struct TrainStepOptimizer",
+            ),
+        ),
+        (
+            "with_updated 欠落",
+            ok.replace(" pub fn with_updated(self) {}", ""),
+        ),
+    ] {
+        assert!(
+            !train_step_shape_violations(&bad).is_empty(),
+            "形状ガードが逸脱を検出しない: {label}"
+        );
+    }
 }
 // =====================================================================
 // #2188（親 #2131）で導入し、#2369（親 #2362）で正ガードへ反転した

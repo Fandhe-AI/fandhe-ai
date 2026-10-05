@@ -3495,12 +3495,15 @@ struct FitWeightingHoldDoctestGuard;
 /// 呼ぶ。facade が inherent メソッドとして公開すると trait 経由呼び出しが
 /// 型・引数不一致でコンパイル失敗する（inherent が優先解決されるため）。
 ///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// train_step_hold_doctest_globs_all_pub_modules`・
-/// `train_step_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_train_step_items`）との多層防御の
-/// 位置づけは `docs/compat-train-step-hook-decision.md` §8.4 を参照。
-/// 正ガードへの反転は #2569 で行う。
+/// ソース走査の正ガード（#2569 で反転済み。`crates/facade/tests/api_surface.rs::
+/// facade_train_step_public_surface_matches_approved_contract`・
+/// `facade_train_step_optimizer_and_output_shapes_match_approved_contract`・
+/// `workspace_declares_train_step_fn_names_only_in_approved_location`・
+/// `train_step_types_are_reachable_via_facade_only`）が承認形の存在と形を固定し、
+/// 本 doctest は禁止経路専用として型検査レベルで維持する
+/// （`train_step_hold_doctest_globs_all_pub_modules`・
+/// `train_step_hold_doctest_probe_body_matches_fixed_contract` がドリフトを検出）。
+/// 多層防御の位置づけは `docs/compat-train-step-hook-decision.md` §8.4・§9 を参照。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
