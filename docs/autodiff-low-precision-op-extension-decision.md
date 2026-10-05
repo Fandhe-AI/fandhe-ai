@@ -1,0 +1,118 @@
+# autodiff 低精度 forward の対象 Op 拡張と数値契約（イシュー #2627・親 #2626）
+
+本記録は **推奨案の記録であり、承認記録ではない**。コード変更を伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、事実はソースで再確認した。基準は `origin/main` `7711a3ac`（2026-10-05）。
+
+## 1. 位置づけ
+
+- `docs/autodiff-var-dtype-multiplexing-design.md` の案 C（forward のみ低精度・backward は f32・master 値は f32 の narrow opt-in。`Var<T>` 一般化は採らない）を、Linear／Conv2d／MHA 以外の Op へ広げる計画の第 1 段。
+- 本記録が確定させる推奨案: 対象 Op・記録方式・昇格規則・backward 契約・parity 判定・facade 公開形。
+- 後続: #2628（CPU 実装・fixture・保留ガード）→ #2629（実機 parity。実機ツリー #2683）→ 承認は #2677 の一括依頼 → 公開は #2678。
+- 依存 #2598（f64 自動微分）の推奨案は承認待ちで、承認済みとは扱わない。共有する前提は「`Var<T>` を採らない」のみ（型名・入口は衝突しない）。
+- multiplexing doc §10 の承認事項 1（案 C の標準化）は、#2626 が案 C の拡張を作業内容にしているという事実の引用に留め、承認を得たとは書かない。承認事項 2（`TypedOps` 拡張）・4・5 は消費しない。
+
+## 2. 着手時判定（基準 sha で確認した事実）
+
+- `TypedOps<T>` は 8 演算固定: `gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`（`crates/tensor-core/src/typed_ops.rs`）。
+- 既存の低精度入口: `tensor-core::low_precision::{linear_forward_low_precision (:182), matmul_low_precision (:374), conv2d_forward_low_precision (:432)}`、`Var::{linear_act_low_precision (var.rs:577), conv2d_low_precision (:3500), matmul_low_precision (:3614)}`（いずれも `pub(crate)`）、`nn::{linear,conv2d,multihead_attention}_forward_low_precision`（`pub` 自由関数）。**MatMul は #2071 で実装済み**。
+- `Var::matmul_low_precision` は値を先に計算し `Tape::push_eager`（`tape.rs:2973`）で記録、`TapeNode::low_precision`（`tape.rs:2306`）を事後に立てる（`var.rs:3614` 以降）。
+- `Op::Add`／`Mul`／`Relu`／`Exp`／`Tanh` は遅延記録で融合対象（`Op::is_lazy_elementwise`。`tape.rs:1466`）。`FusionPlan` は f32 固定。
+- `low_precision` は checkpoint 解放除外（`tape.rs:3502`）と `create_graph` 拒否に使われるが、**`create_graph::validate_ancestors` の `low_precision` 検査は `if let Op::MatMul` の内側にしかない**（`create_graph.rs:414-441`）。
+- VJP が読む値（`grad.rs:210-268`）: `MatMul`・`Mul` は入力の f32 値、`Add` は shape のみ（bias パターンは `reduce_bias_grad` の f64 縮約）、**`Relu` は入力値 `a_val > 0`**（`LinearAct` は出力値でマスク）、**`Exp`・`Tanh` は forward 記録値 `out_value` を再利用**。
+- `ScalarDType` は facade 直下に再エクスポート済み（`crates/facade/src/lib.rs:310`。#1939）。`docs/autodiff-low-precision-linear-design.md` §6・§7.1 の「再エクスポートは未承認」は古い記述。
+- 現行 `Op` は `docs/autodiff-higher-order-grad-decision.md` §8 の「69／70 variant」から増えている（`LogSumExp`・`PNorm`・`L1Loss`・`CtcLoss`・`ConvTranspose2d`・`Conv3d`・`Eigh*`・`Slogdet*`・`Pinv` 等）。本記録の射程は「現行 `TypedOps` 8 演算に直接対応する Op」に限定し、全 variant の再分類は対象外とする。
+
+## 3. 推奨案
+
+### 3.1 対象 Op（推奨: MatMul ＋ elementwise 5 演算）
+
+選定基準: 「現行 `TypedOps` 8 演算に直接対応し、既存 f32 VJP を無変更で使え、`TypedOps`／`BackendOps`／`Op` を拡張しないもの」。
+
+| Op | 判定 | 理由 |
+|---|---|---|
+| `MatMul` | 対象（自由関数の入口整備のみ） | `Var::matmul_low_precision` は実装済み。新 Op・新カーネル不要 |
+| `Add`／`Mul`／`Relu`／`Exp`／`Tanh` | 対象 | `TypedOps` に直接対応。数値方式の再設計が不要 |
+| `Sum` | 見送り | f16 は総和が 65504 を超え ±inf になりやすい。二段丸め（f64 → f32 → 目的 dtype）が絡む唯一の演算。checkpoint 適格のため解放除外の追加検証も要る |
+| `Max` | 見送り | VJP（`grad.rs:6937` `extremum_first_match_vjp`）が forward 記録値と入力を `==` 比較して位置を特定する。記録値が丸め済みだと master 入力と一致せず勾配が全ゼロになりうる。VJP 変更が要るため別イシュー |
+| `Min`・`Amax`・`Amin`・`Mean` ほか | 対象外 | 現行 8 演算の外。`TypedOps` 拡張は multiplexing doc §10 承認事項 2（未承認）を消費する |
+
+### 3.2 記録方式（推奨 R1）
+
+| 案 | 内容 | 判定 |
+|---|---|---|
+| **R1** | 値を先に計算し `push_eager`、`TapeNode::low_precision = true` を事後設定（#2071 の MatMul と同じ）。`Op` enum 無変更 | 推奨 |
+| R2 | 5 variant に `compute_dtype` を足す | タプル variant の形が変わり、全 `match`・融合・replay へ波及するため不採用 |
+| R3 | 新 variant を足す | VJP・網羅 `match` の重複が増えるため不採用 |
+
+R1 で #2628 が守る事項:
+
+1. 低精度 elementwise は**融合連鎖に入らない**（値を持つノードは融合対象外。`FusionPlan` f32 固定を維持）。入力は `materialize_fallible` で実体化してから渡す。
+2. checkpoint: elementwise 5 演算は元から非適格、MatMul は既存の `!node.low_precision` で除外済み。追加変更なし。
+3. **`create_graph::validate_ancestors` の `low_precision` 拒否を MatMul 限定から全ノードへ引き上げる（必須）**。放置すると低精度 `Add`／`Exp` 等が子テープで f32 として静かに再生され、opt-in が精度について嘘をつく（`.claude/rules/security.md` A04）。
+4. `low_precision` は dtype（F16／Bf16）を保持しない。replay を全面拒否する限り不要。将来 replay 対応する場合は dtype 保持が要る。
+5. `Tape::reset`・`no_grad`・`requires_grad` 伝播は `push_eager` の既存機構のまま。
+
+### 3.3 昇格規則と forward 数値契約
+
+- f32 テープ値 → `half::{f16,bf16}::from_f32`（最近接偶数丸め）→ `TypedOps<T>` の該当演算 → `to_f32` で昇格して `Tensor<f32>` として記録。CPU では「f32 昇格 → 既存 f32 カーネル → 1 回丸め」と構造的に等しい。二段丸めは `sum` 固有で、対象 6 Op には現れない。
+- shape 検査（broadcast・`matmul_out_shape`）は accessor 取得より先。
+- fail-closed: `typed_ops_f16()`／`typed_ops_bf16()` が `None` なら `BackendError::Unsupported`、dtype が F16／Bf16 以外は `InvalidArgument`。f32 への無言フォールバックはしない。
+- CUDA／Metal: 対象 6 Op は既存 `TypedOps<f16／bf16>` カーネル（#1703〜#1706。Metal bf16 の実機可用性は未検証）で到達でき、新規 GPU カーネルもホスト計算フォールバックも足さない。accessor を持たないバックエンド（`NaiveOps` 等）は型付き `Unsupported`。
+- 表現範囲: f16 は |x| > 65504 で ±inf（`exp` は入力が約 11.09 を超えると ±inf）。IEEE 挙動のまま伝播させる。
+
+### 3.4 backward 契約
+
+- 既存 f32 VJP を**無変更**で使う（`grad.rs` 不変）。master 値・勾配・optimizer は f32。
+- `Exp`／`Tanh` は丸め済み forward 値を読む straight-through、`Mul`／`MatMul` は丸め前の master 値、`Add` は shape のみ。
+- **`Relu` マスク（推奨）**: 既存 VJP のまま入力値 `a_val > 0` でマスク。`LinearAct` 低精度（出力値マスク）と違い、丸めで 0 に落ちる微小正値（f16 で概ね 3e-8 未満）でも勾配が流れる。出力値マスクへ揃える案は `grad.rs` に `low_precision` 分岐が要るため不採用。
+- **`Tanh`／`Exp` の勾配精度の注意**: `1 - y²` を丸め済み `y` から計算するため、飽和域で f32 勾配との差が統一複合判定を超えうる。**机上計算（実測ではない）**: 半 ulp の相対誤差 2^-11 を仮定すると、因子の相対誤差は `2y²·2^-11/(1-y²)` で、f16 は |y| が約 0.71 を超えると 1e-3 を超えうる。bf16（2^-8）はより広い範囲で外れる。master 入力から f32 で再計算する VJP は `grad.rs` 変更と追加 forward を要するため不採用とし、§4 でユーザー判断事項に挙げる。
+- 数値微分（gradcheck）は丸めが区分定数のため適用しない。
+- PyTorch autocast は backward も低精度で行う。本方式との差は意図的（`docs/autodiff-low-precision-linear-design.md` §2 と同じ）。
+
+### 3.5 parity 判定（事前登録。tolerance・baseline は不変）
+
+| 層 | 対象 | 判定 | 実行 |
+|---|---|---|---|
+| P1 | forward（CPU） | 丸めオラクルと bit 一致（既存 `*_matches_rounding_oracle` と同型） | CI |
+| P2 | backward（CPU） | 既存 f32 VJP に「master 入力・記録済み低精度 forward 値」を与えた結果と bit 一致 | CI |
+| P3 | fail-closed | accessor 不在 → `Unsupported`、非対応 dtype → `InvalidArgument`、`create_graph` 拒否、checkpoint 非解放、融合連鎖に入らない | CI |
+| P4 | PyTorch 2.14.0+cpu fixture（forward） | `op(x.to(dtype)).float()` と統一複合判定（`fandhe_ai_backend_cpu::parity::compare`。定数不変）。F16 を主判定・Bf16 を副判定（#1961 AC-b の先例） | CI（コミット済み JSON のみ） |
+| P5 | PyTorch fixture（勾配） | 参照は PyTorch f32 autograd（同一 master 入力）。ゲートは VJP が forward 記録値を読まない `MatMul`／`Add`／`Mul`／`Relu` に限る。`Exp`／`Tanh` は P2 のみゲートとし、PyTorch との差は非ゲートの観測値として記録 | CI |
+| P6 | CUDA／Metal vs CPU | 同一 dtype の forward を統一複合判定。`#[ignore]` | 実機（#2629） |
+
+事前登録事項:
+
+- f16 の 1 ulp は相対 2^-10（約 9.8e-4）以下で、丸め境界の 1 ulp ずれは判定内。**bf16 の 1 ulp は相対 2^-7（約 7.8e-3）で、1 ulp ずれただけで外れる**（絶対 1e-5 未満の微小値を除く）。#2071 の MHA Bf16 FAIL と同じ構造。
+- 外れた場合は**判定不能として記録し、tolerance・baseline は変えない**。自カーネルの不具合なら直す。副判定を落とす場合は理由をコメントと記録に残す。
+- fixture は既存 `crates/autodiff/tests/fixtures/*-pytorch-reference/` と同じ運用（`gen_reference.py`・README に生成条件と sha256・CI は Python 非依存）。入力は有限・表現範囲内、MatMul は小さい K。対象 dtype で厳密に表現できる入力のケースを 1 つ含める。
+- PyTorch 2.14.0 の CPU が各 Op × dtype を実行できるか・内部累積精度は**本記録では未確認**（作成環境に torch がない）。#2628 の fixture 生成時に確認し、実行できない組合せは理由付きで対象外にする。
+- 実機未実測分は #2628 が `docs/perf/logs/low-precision-ops-2628/README.md` に測定コマンドと記入欄を申し送る（`amp-conv-mha-low-precision-2071/README.md` と同型）。
+
+### 3.6 facade 公開形（推奨 A）
+
+| 案 | 形 | 評価 |
+|---|---|---|
+| **A** | `Var::{matmul,add,mul,relu,exp,tanh}_low_precision(.., dtype: ScalarDType) -> Result<Var, AutodiffError>` の 1 行委譲 | 既存の公開パターンと同形。`ScalarDType` は公開済みで新しい型が要らない |
+| B | `pub use fandhe_ai_autodiff::low_precision_ops;` | `facade_pub_use_leaves_are_not_modules`（`api_surface.rs`）が拒否。内部モジュール名が公開名になる |
+| C | `Sequential::add_*` | 演算であって層ではない |
+| D | `compile_with_amp` の対象層を活性化まで自動拡大 | 既存メソッドの数値挙動が変わる（0.10.0 の意味論不変に反する）ため不採用 |
+
+- 追加は新メソッドのみ。既存項目のシグネチャ・意味論・`FitConfig` は不変。低精度版は `Unsupported` がありうるため `Result` を返す（f32 版の `relu`／`exp`／`tanh` は非 fallible）。
+- **承認までは公開しない**。承認は #2677 の一括依頼、公開は #2678。
+
+### 3.7 #2628 への実装スケッチ（本記録では実施しない）
+
+- `tensor-core::low_precision` に elementwise の低精度関数を追加（既存 `downcast`／`upcast` を再利用。依存追加・`unsafe` なし）。
+- `crates/autodiff/src/low_precision_ops.rs`（新規 `pub mod`）に自由関数 6 件。`Var` 側は `pub(crate)` のまま。
+- `create_graph::validate_ancestors` の拒否範囲の引き上げ（§3.2-3）。
+- facade の保留固定: `VarLowPrecisionOpsHoldDoctestGuard`（`VarActivationOpsHoldDoctestGuard` と同型）と `api_surface.rs` の否定ガード・`*_hold_doctest_globs_all_pub_modules` 系固定。
+- テストは §3.5 の P1〜P5、`#[ignore]` の P6、perf logs の申し送り。
+
+## 4. ユーザーに決めてほしい事項
+
+(a) 対象 Op 集合（MatMul ＋ elementwise 5。`Sum`／`Max` の見送り） (b) 記録方式 R1 (c) `Relu` マスク基準 (d) `Exp`／`Tanh` の VJP を forward 記録値再利用のままにするか (e) parity の層構成と F16 主・Bf16 副 (f) PyTorch 勾配ゲートを 4 Op に限ること (g) 公開形 A とメソッド名 (h) `compile_with_amp` の対象層を変えないこと (i) 実機未実測のまま内部実装を進めてよいか (j) `Sum`／`Max`／`Min` 等の後続起票の要否。
+
+## 5. スコープ外・申し送り
+
+- 実装・ガード（#2628）、実機実測（#2629）、facade 公開（#2678）、`TypedOps` 拡張、backward の低精度化、`DeviceParamStore` 常駐経路、融合の dtype 対応、`create_graph` の低精度対応、Op 全 variant の再分類。
+- `docs/autodiff-higher-order-grad-decision.md` §8 の variant 表が古いこと（再分類は別件）。
+- 出典: `docs/autodiff-var-dtype-multiplexing-design.md`・`docs/autodiff-low-precision-linear-design.md`・`docs/backend-dtype-dispatch-design.md`・`docs/compat-api-scope.md` §5・`.claude/rules/coding-rust.md`。
