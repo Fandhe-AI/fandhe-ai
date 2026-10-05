@@ -7,6 +7,10 @@
 `docs/spec/`・tolerance／baseline は不変）。以下の `file_path:line`
 参照はいずれも基準コミット時点の値である。
 
+**実装記録（#2631）**: `rfft`／`irfft` は内部クレート限定で実装済み（facade 非公開・公開形は未承認）。
+実装方式・数値契約・テスト構成・公開形の推奨案は `docs/autodiff-fft-ops-decision.md` を参照する。
+以下の本文は設計判断の記録であり、書き換えない。
+
 ## §0 結論
 
 PyTorch の `torch.fft.{fft, ifft, rfft, irfft}` に当たる 4 演算を、
