@@ -260,6 +260,10 @@ pub mod indexing_ops;
 mod layout;
 pub mod linalg_ops;
 pub mod loss_ops;
+// MatMul と elementwise 5 演算の opt-in 低精度 forward（イシュー #2628）。
+// facade への公開は保留（承認依頼 #2677・公開 #2678。
+// `docs/autodiff-low-precision-op-extension-decision.md`）。
+pub mod low_precision_ops;
 pub mod matrix_ops;
 pub mod nn;
 pub mod optim;

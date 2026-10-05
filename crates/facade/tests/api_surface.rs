@@ -20573,6 +20573,351 @@ fn workspace_declares_fft_ops_fn_names_only_in_allowed_locations() {
          追加でないか確認すること"
     );
 }
+// =====================================================================
+// VarLowPrecisionOpsHoldDoctestGuard（イシュー #2628・親 #2626・ルート #2499
+// Phase 4）: `FftOpsHoldDoctestGuard`（#2631）系のテストを鏡写しにする。
+// 実装は内部クレート（`fandhe_ai_autodiff::low_precision_ops`・
+// `fandhe_ai_tensor_core::*_low_precision`）に閉じ、facade 公開形
+// （`Var::{matmul,add,mul,relu,exp,tanh}_low_precision(.., dtype)` の委譲
+// メソッド）は未承認（承認依頼は #2677。公開は承認後の #2678）。
+// =====================================================================
+
+/// `VarLowPrecisionOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが
+/// glob import するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod`
+/// 宣言集合が一致することを固定する
+/// （`fft_ops_hold_doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn var_low_precision_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarLowPrecisionOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarLowPrecisionOpsHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を追加した\
+         場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言
+/// [`VAR_LOW_PRECISION_OPS_HOLD_PROBE_BODY`] と 1 行たりとも違わず一致する
+/// ことを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
+#[test]
+fn var_low_precision_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarLowPrecisionOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, VAR_LOW_PRECISION_OPS_HOLD_PROBE_BODY,
+        "VarLowPrecisionOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 VAR_LOW_PRECISION_OPS_HOLD_PROBE_BODY からドリフトしている。\
+         正のプローブ（__fandhe_low_precision_ops_hold_probe モジュール・\
+         __FandheLowPrecisionHoldProbe トレイト・__probe_* 関数）の削除・弱体化・\
+         隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`var_low_precision_ops_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言（`VarLowPrecisionOpsHoldDoctestGuard` doc 内の唯一の
+/// doctest ブロックから、ネスト `pub mod` の glob import 行を除いた本文と
+/// 1 行単位で完全一致する）。
+const VAR_LOW_PRECISION_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_low_precision_ops_hold_probe {\n\
+\x20\x20\x20\x20pub mod low_precision_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn matmul_low_precision() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn add_low_precision() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn mul_low_precision() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn relu_low_precision() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn exp_low_precision() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn tanh_low_precision() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn matmul_low_precision() {}\n\
+\x20\x20\x20\x20pub fn add_low_precision() {}\n\
+\x20\x20\x20\x20pub fn mul_low_precision() {}\n\
+\x20\x20\x20\x20pub fn relu_low_precision() {}\n\
+\x20\x20\x20\x20pub fn exp_low_precision() {}\n\
+\x20\x20\x20\x20pub fn tanh_low_precision() {}\n\
+}\n\
+use __fandhe_low_precision_ops_hold_probe::*;\n\
+\n\
+struct __FandheLowPrecisionHoldMarker;\n\
+\n\
+trait __FandheLowPrecisionHoldProbe {\n\
+\x20\x20\x20\x20fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
+\x20\x20\x20\x20fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
+\x20\x20\x20\x20fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
+\x20\x20\x20\x20fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
+\x20\x20\x20\x20fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
+\x20\x20\x20\x20fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheLowPrecisionHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheLowPrecisionHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20low_precision_ops::matmul_low_precision();\n\
+\x20\x20\x20\x20low_precision_ops::add_low_precision();\n\
+\x20\x20\x20\x20low_precision_ops::mul_low_precision();\n\
+\x20\x20\x20\x20low_precision_ops::relu_low_precision();\n\
+\x20\x20\x20\x20low_precision_ops::exp_low_precision();\n\
+\x20\x20\x20\x20low_precision_ops::tanh_low_precision();\n\
+\x20\x20\x20\x20matmul_low_precision();\n\
+\x20\x20\x20\x20add_low_precision();\n\
+\x20\x20\x20\x20mul_low_precision();\n\
+\x20\x20\x20\x20relu_low_precision();\n\
+\x20\x20\x20\x20exp_low_precision();\n\
+\x20\x20\x20\x20tanh_low_precision();\n\
+}\n\
+\n\
+fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::matmul_low_precision(v);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::add_low_precision(v);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::mul_low_precision(v);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::relu_low_precision(v);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::exp_low_precision(v);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::tanh_low_precision(v);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::matmul_low_precision(tape);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::add_low_precision(tape);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::mul_low_precision(tape);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::relu_low_precision(tape);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::exp_low_precision(tape);\n\
+\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::tanh_low_precision(tape);\n\
+}";
+/// 低精度 forward 入口の保留対象 fn 名（イシュー #2628）。
+const LOW_PRECISION_OPS_FN_NAMES: [&str; 6] = [
+    "matmul_low_precision",
+    "add_low_precision",
+    "mul_low_precision",
+    "relu_low_precision",
+    "exp_low_precision",
+    "tanh_low_precision",
+];
+
+/// [`facade_does_not_reexport_or_declare_low_precision_ops`]・その自己テストが
+/// 共用する検出本体。facade src の `pub use` で `low_precision_ops` を経路の
+/// 識別子単位で含むもの（別名・複数行・ネストした group を含む）、
+/// [`LOW_PRECISION_OPS_FN_NAMES`] を leaf に持つ `pub use`、内部クレート
+/// （`fandhe_ai_autodiff`／`fandhe_ai_tensor_core`）の glob 再エクスポート、
+/// `pub mod low_precision_ops` の宣言、[`LOW_PRECISION_OPS_FN_NAMES`] の `fn`
+/// 宣言（可視性・宣言文脈を問わない）を違反として返す。
+fn scan_low_precision_ops_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            if path_tokens.iter().any(|t| t == "low_precision_ops") {
+                offending.push("pub use が `low_precision_ops` を含む".to_string());
+            }
+            let from_internal = path_tokens
+                .iter()
+                .any(|t| t == "fandhe_ai_autodiff" || t == "fandhe_ai_tensor_core");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if LOW_PRECISION_OPS_FN_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && tokens.get(i + 2).map(String::as_str) == Some("low_precision_ops")
+        {
+            offending.push("pub mod low_precision_ops 宣言".to_string());
+        }
+        i += 1;
+    }
+
+    for fn_name in LOW_PRECISION_OPS_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に低精度 forward 入口の再エクスポート・
+/// 同名 `fn`・`pub mod` が存在しないことを固定する
+/// （`VarLowPrecisionOpsHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
+/// ソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_low_precision_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_low_precision_ops_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が低精度 forward 入口（#2628 の `low_precision_ops`／\
+         `*_low_precision`。facade 公開形は未承認で承認依頼は #2677）を\
+         再エクスポート、または同名の fn／pub mod を宣言している: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_low_precision_ops`] の自己テスト
+/// （各違反カテゴリの合成ソースを検出できることを恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_low_precision_ops_detects_each_category() {
+    let offense = |src: &str| !scan_low_precision_ops_reexports_and_declarations(src).is_empty();
+    // 正例: モジュールの再エクスポート（別名含む）。
+    assert!(offense("pub use fandhe_ai_autodiff::low_precision_ops;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::low_precision_ops as lp;"
+    ));
+    // 正例: 関数の個別再エクスポート（単一・group・別名）。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::low_precision_ops::add_low_precision;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::{\n    Device,\n    exp_low_precision,\n};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::tanh_low_precision as t;"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    // 正例: fn 宣言・pub mod。
+    assert!(offense("pub fn mul_low_precision() {}"));
+    assert!(offense("impl Var { pub fn relu_low_precision(&self) {} }"));
+    assert!(offense("fn matmul_low_precision() {}"));
+    assert!(offense("pub mod low_precision_ops {}"));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense(
+        "// pub use fandhe_ai_autodiff::low_precision_ops;"
+    ));
+    assert!(!offense("let s = \"pub fn add_low_precision() {}\";"));
+    // 負例: 無関係な再エクスポート・非公開 use。
+    assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
+    assert!(!offense("use fandhe_ai_autodiff::low_precision_ops;"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`LOW_PRECISION_OPS_FN_NAMES`]
+/// の `fn` 宣言が承認済みの置き場所（tensor-core の `low_precision.rs` と
+/// autodiff の `low_precision_ops.rs`・`var.rs`）のみであることを固定する。
+/// 注意: `#[cfg(test)]` 内の宣言も数えるため、テスト関数名は 6 関数名と完全一致
+/// させない（接尾辞を付ける）。
+#[test]
+fn workspace_declares_low_precision_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in LOW_PRECISION_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for fn_name in LOW_PRECISION_OPS_FN_NAMES {
+        expected.insert(format!("tensor-core/src/low_precision.rs::{fn_name}"), 1);
+        expected.insert(format!("autodiff/src/low_precision_ops.rs::{fn_name}"), 1);
+    }
+    expected.insert("autodiff/src/var.rs::matmul_low_precision".to_string(), 1);
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の低精度 forward 入口の `fn` 宣言が承認済みの\
+         置き場所と一致しない。迂回経路（facade／Var への inherent メソッド追加等）\
+         の混入か、未承認の実装追加でないか確認すること"
+    );
+}
 // ==== #2394 TapeRef（借用ハンドル型。var 系メソッドのみ）のガード ====
 //
 // `TapeRef` は `src/lib.rs` に `pub struct` として直接定義する（`pub use` を
