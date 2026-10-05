@@ -168,6 +168,7 @@ mod broadcast;
 pub mod buffer;
 pub mod cast;
 pub mod creation;
+pub mod cumulative;
 pub mod data;
 pub mod device;
 pub mod dispatch;

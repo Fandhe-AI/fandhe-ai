@@ -504,3 +504,44 @@ fn metal_scalar_unary_nonfinite_kinds_are_unsupported() {
         );
     }
 }
+
+/// イシュー #2636: `scan_cummax`／`scan_cummin`／`scan_logcumsumexp` は CUDA に
+/// 専用カーネルがなく既定の `Unsupported` を返す（autodiff 側が共有ホストカーネルへ
+/// フォールバックする契約。panic しない）。
+#[test]
+fn cuda_scan_ops_are_unsupported_not_panic() {
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    assert!(matches!(
+        cuda.scan_cummax(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.scan_cummin(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.scan_logcumsumexp(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #2636: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_scan_ops_are_unsupported_not_panic() {
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    assert!(matches!(
+        metal.scan_cummax(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.scan_cummin(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.scan_logcumsumexp(&a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+}

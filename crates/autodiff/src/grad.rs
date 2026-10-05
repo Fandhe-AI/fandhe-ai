@@ -2403,6 +2403,45 @@ pub(crate) fn vjp(
         // 単射のため）ので `ScatterReduce::Add` と `Overwrite` は同値
         // だが、`Op::Gather` VJP と実装を揃え `Add`（`f64` 経路も
         // `0.0 + x` で bit 一致）を使う。
+        // 累積最大／最小値（イシュー #2636）。各出力要素は `index` が指す単一の
+        // 入力要素の複製のため、VJP は upstream を `index` の位置へ scatter-add
+        // する。**`Op::Sort`／`Op::Topk` と異なり `index` は重複する**（累積最大の
+        // 索引は単調非減少で、例 `[3,1,2]` → `[0,0,0]`）ため、`Add`（出力位置
+        // ごと `f64` アキュムレータ・1 回 downcast。f64 長軸縮約契約）は必須で
+        // `Overwrite` とは同値でない。そのため上記 Sort／Topk の腕に相乗りしない。
+        Op::Cummax { input, dim, index } | Op::Cummin { input, dim, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            check_fft_upstream_shape(upstream, &input_shape, "Cummax/Cummin")?;
+            let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            let d_input = scatter_with_fallback(
+                ops,
+                &zeros,
+                dim,
+                &index,
+                upstream,
+                ScatterReduce::Add,
+                &input_shape,
+            )?;
+            vec![(input, d_input)]
+        }
+        // 累積 logsumexp（イシュー #2636）。`Op::Cumprod` と同型に入力 `x` を
+        // 実体化し、共有カーネルの O(n) 逆向き再帰 VJP を呼ぶ（f32 へ丸めた
+        // forward 記録値は使わず lane 内で `f64` prefix を再計算する）。
+        Op::Logcumsumexp { input, dim } => {
+            let input_shape = nodes[input.0].shape.clone();
+            check_fft_upstream_shape(upstream, &input_shape, "Logcumsumexp")?;
+            let layout = fandhe_ai_tensor_core::cumulative::cumulative_layout(&input_shape, dim)
+                .map_err(AutodiffError::Shape)?;
+            let x_val = materialize_fallible(nodes, ops, input)?;
+            let data = fandhe_ai_tensor_core::cumulative::logcumsumexp_vjp_host(
+                &x_val.contiguous().host_slice(),
+                &upstream.contiguous().host_slice(),
+                &layout,
+            )
+            .map_err(AutodiffError::Shape)?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
+        }
         Op::Sort { input, dim, index } | Op::Topk { input, dim, index } => {
             let input_shape = nodes[input.0].shape.clone();
             let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;

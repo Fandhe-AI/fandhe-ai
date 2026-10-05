@@ -1940,3 +1940,9 @@ facade 公開面は追加していない（保留ガード `TrigOpsHoldDoctestGu
 facade 公開面は追加していない（保留ガード `NonfiniteOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var::isnan` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-nonfinite-ops-decision.md`。
+
+**適用記録（イシュー #2636・親 #2625・ルート #2499 Phase 4。累積演算）**:
+`cummax`／`cummin`／`logcumsumexp` の 3 演算を内部クレート限定（`fandhe_ai_autodiff::cumulative_ops`・`fandhe_ai_tensor_core::cumulative`・`BackendOps::scan_*`）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `CumulativeOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::cummax` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-cumulative-ops-decision.md`。

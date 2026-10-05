@@ -1126,6 +1126,28 @@ pub(crate) enum Op {
         dim: usize,
         index: Tensor<i32>,
     },
+    /// 累積最大値（イシュー #2636・`docs/autodiff-cumulative-ops-decision.md`）。
+    /// `index` は forward が返した `dim` 軸上の位置（非追跡データ。`Op::Topk`
+    /// と同じ payload）。`crate::cumulative_ops::cummax` からのみ積まれ、
+    /// facade には公開しない。VJP は `scatter_with_fallback`（`Add`）。
+    /// **`Op::Sort`／`Op::Topk` と異なり索引は重複する**（例 `[3,1,2]` →
+    /// `[0,0,0]`）ため `Add` は必須で `Overwrite` とは同値でない。非融合・非
+    /// checkpoint・高階微分非対応（`Op::Rfft` と同じ分類）。
+    Cummax {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+    },
+    /// 累積最小値（イシュー #2636）。payload・VJP・分類は [`Op::Cummax`] と同じ。
+    Cummin {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+    },
+    /// 累積 `logsumexp`（イシュー #2636）。VJP は入力値と上流勾配から共有カーネル
+    /// `tensor_core::cumulative::logcumsumexp_vjp_host` で求める（`Op::Cumprod`
+    /// と同型に入力を実体化する）。分類は [`Op::Cummax`] と同じ。
+    Logcumsumexp { input: NodeId, dim: usize },
     /// `Var::interpolate`（`torch.nn.functional.interpolate`
     /// 相当。イシュー #1757・#1762・#2152）。空間軸（末尾
     /// `size.len()` 軸）を `size` へリサンプリングする。`mode` で
@@ -1682,6 +1704,9 @@ impl Op {
             // （イシュー #2632）・`Op::Stft`／`Op::Istft`（イシュー #2633）も `recompute_value` に再計算分岐を持たない
             // ため非適格のまま保持する。
             | Op::Rfft { .. }
+            | Op::Cummax { .. }
+            | Op::Cummin { .. }
+            | Op::Logcumsumexp { .. }
             | Op::Irfft { .. }
             | Op::Fft { .. }
             | Op::Ifft { .. }
@@ -1860,6 +1885,9 @@ impl Op {
             | Op::MatrixRank { input, .. }
             | Op::Rfft { input, .. }
             | Op::Irfft { input, .. }
+            | Op::Cummax { input, .. }
+            | Op::Cummin { input, .. }
+            | Op::Logcumsumexp { input, .. }
             | Op::Fft { input, .. }
             | Op::Ifft { input, .. }
             | Op::Stft { input, .. }
@@ -2200,6 +2228,9 @@ impl Op {
             | Op::MatrixRank { .. }
             // イシュー #2631・#2632・#2633 の FFT 6 演算も初期スコープ外（非対応）。
             | Op::Rfft { .. }
+            | Op::Cummax { .. }
+            | Op::Cummin { .. }
+            | Op::Logcumsumexp { .. }
             | Op::Irfft { .. }
             | Op::Fft { .. }
             | Op::Ifft { .. }

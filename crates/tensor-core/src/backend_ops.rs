@@ -2418,6 +2418,51 @@ pub trait BackendOps {
         ))
     }
 
+    /// 累積最大値（値と索引。`torch.cummax` 相当。イシュー #2636・
+    /// `docs/autodiff-cumulative-ops-decision.md`）。出力はいずれも入力と同
+    /// shape で、索引は `dim` 軸上の位置（`i32`）。タイは後勝ち・NaN は伝播
+    /// （規則の正は [`crate::cumulative`]）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::fft_rfft`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::cumulative_ops::cummax` は `Unsupported` のときだけ
+    /// ホスト参照実装 [`crate::cumulative::cummax_host`] へフォールバックし、
+    /// それ以外のエラーは伝播する。実装側も `cumulative::cumulative_layout` で
+    /// 形状を再検査する（fail-closed）。
+    fn scan_cummax(
+        &self,
+        _x: &Tensor<f32>,
+        _dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "scan_cummax: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 累積最小値（値と索引。`torch.cummin` 相当。イシュー #2636）。
+    /// 契約は [`Self::scan_cummax`] と同じ。
+    fn scan_cummin(
+        &self,
+        _x: &Tensor<f32>,
+        _dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "scan_cummin: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 累積 `logsumexp`（`torch.logcumsumexp` 相当。イシュー #2636）。
+    /// 契約は [`Self::scan_cummax`] と同じ（出力は入力と同 shape の値のみ）。
+    fn scan_logcumsumexp(
+        &self,
+        _x: &Tensor<f32>,
+        _dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "scan_logcumsumexp: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// 行方向 log_softmax（`x − m − ln(Σ exp(x − m))`。`m` は行 max）の
     /// 独立エントリ（イシュー #1594）。[`Self::softmax`] と同じ最終軸
     /// 限定契約・非破壊拡張・フォールバック規律に従う
@@ -5637,6 +5682,26 @@ mod tests {
         let result = ops.cumprod(&x, 0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::scan_cummax`]／`scan_cummin`／`scan_logcumsumexp` の
+    /// 既定実装が fail-safe を返し panic しないことの確認（イシュー #2636）。
+    #[test]
+    fn scan_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        assert!(matches!(
+            ops.scan_cummax(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.scan_cummin(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.scan_logcumsumexp(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     /// [`BackendOps::log_softmax`] の既定実装が fail-safe を返すことを
