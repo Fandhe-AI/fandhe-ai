@@ -257,7 +257,10 @@ pub fn bincount_check(shape: &[usize], weighted: bool) -> Result<usize, BinningE
 }
 
 /// 全要素を検証して出力長 `max(max + 1, minlength)` を返す（確保より前。負値は拒否）。
-fn bincount_out_len(input: &[i32], minlength: usize) -> Result<usize, BinningError> {
+///
+/// 公開 API 層（`autodiff::binning_ops`）がバックエンド呼び出し前の負値拒否と、バックエンド
+/// 出力長の完全一致検証（契約どおりの長さ）に使う。
+pub fn bincount_out_len(input: &[i32], minlength: usize) -> Result<usize, BinningError> {
     let mut max_v: Option<i32> = None;
     for &v in input {
         if v < 0 {
@@ -273,6 +276,20 @@ fn bincount_out_len(input: &[i32], minlength: usize) -> Result<usize, BinningErr
             .ok_or(ShapeError::ElementCountOverflow)?,
     };
     Ok(needed.max(minlength))
+}
+
+/// 重み付き `bincount` の重み shape 検査。rank 1 で入力と同長であること。
+/// 呼び出し側は空入力のとき本検査を行わない（PyTorch と同じく重みを見ない）。
+pub fn bincount_weights_check(
+    input_len: usize,
+    weights_shape: &[usize],
+) -> Result<(), BinningError> {
+    if weights_shape.len() != 1 || weights_shape[0] != input_len {
+        return Err(invalid(
+            "bincount: weights should be 1-d and have the same length as input",
+        ));
+    }
+    Ok(())
 }
 
 /// 重みなし `torch.bincount` のホスト参照実装。出力長 `max(max(input) + 1, minlength)`・

@@ -636,3 +636,47 @@ fn wrong_backend_result_shape_is_a_typed_error() {
         );
     }
 }
+
+/// バックエンドが `minlength` 以上でも契約長（`max(max+1, minlength)`）と異なる長さを返したら
+/// 型付きエラー（完全一致検証。bincount・bincount_weighted 両経路）。
+#[test]
+fn bincount_backend_length_must_match_contract_exactly() {
+    // WrongShape モックは常に [2, 2] を返すため別の長さのモックで検証する。
+    let (tape, _) = mock_tape(Mode::WrongShape);
+    let idx = ti(vec![0, 1], &[2]);
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    assert!(bincount(&tape, &idx, 0).is_err());
+    assert!(bincount_weighted(&tape, &idx, &x, 0).is_err());
+}
+
+/// 負の入力値・重み長不一致はバックエンド呼び出し前に拒否する（呼び出し回数 0）。
+#[test]
+fn bincount_invalid_arguments_rejected_before_backend_call() {
+    let (tape, calls) = mock_tape(Mode::Unsupported);
+    let neg = ti(vec![0, -1], &[2]);
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let short = tape.var(&t(vec![1.0], &[1]));
+    let e1 = bincount(&tape, &neg, 0);
+    let e2 = bincount_weighted(&tape, &neg, &x, 0);
+    assert!(matches!(
+        (&e1, &e2),
+        (
+            Err(AutodiffError::InvalidArgument(_)),
+            Err(AutodiffError::InvalidArgument(_))
+        )
+    ));
+    let ok = ti(vec![0, 1], &[2]);
+    assert!(bincount_weighted(&tape, &ok, &short, 0).is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// 空入力の重み付き版は重みの rank を見ずに `minlength` 個の零を返す。
+#[test]
+fn bincount_weighted_empty_input_ignores_weights() {
+    let (tape, calls) = mock_tape(Mode::Unsupported);
+    let w = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let out = bincount_weighted(&tape, &ti(vec![], &[0]), &w, 3).unwrap();
+    assert_eq!(out.shape(), [3]);
+    assert_eq!(out.host_slice().into_owned(), [0.0, 0.0, 0.0]);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

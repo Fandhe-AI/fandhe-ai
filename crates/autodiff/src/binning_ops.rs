@@ -73,10 +73,11 @@ where
     }
 }
 
-fn verify_vector_len(shape: &[usize], min_len: usize) -> Result<(), AutodiffError> {
+/// バックエンド出力が契約どおりの長さ（`expected` と完全一致）の 1 次元であることを検証する。
+fn verify_vector_len(shape: &[usize], expected: usize) -> Result<(), AutodiffError> {
     match shape {
-        [n] if *n >= min_len => Ok(()),
-        _ => Err(shape_mismatch(shape, &[min_len])),
+        [n] if *n == expected => Ok(()),
+        _ => Err(shape_mismatch(shape, &[expected])),
     }
 }
 
@@ -122,10 +123,12 @@ pub fn bincount(
     minlength: usize,
 ) -> Result<Tensor<i32>, AutodiffError> {
     binning::bincount_check(input.shape(), false)?;
+    // 負値拒否と契約上の出力長の算出をバックエンド呼び出し前に行う（全バックエンド共通の検証）。
+    let expected = binning::bincount_out_len(&input.contiguous().host_slice(), minlength)?;
     let backend = tape.ops().binning_bincount(input, minlength);
     resolve(
         backend,
-        |shape| verify_vector_len(shape, minlength),
+        |shape| verify_vector_len(shape, expected),
         || {
             let v = binning::bincount_host(&input.contiguous().host_slice(), minlength)?;
             let n = v.len();
@@ -149,13 +152,21 @@ pub fn bincount_weighted<'t>(
     if weights.tape_id() != tape.id {
         return Err(AutodiffError::TapeMismatch);
     }
-    binning::bincount_check(input.shape(), true)?;
-    binning::bincount_check(&weights.shape(), true)?;
+    let n = binning::bincount_check(input.shape(), true)?;
+    let expected = binning::bincount_out_len(&input.contiguous().host_slice(), minlength)?;
+    if n == 0 {
+        // 空入力は重みの rank・長さを見ず、実体化もせず minlength 個の零を返す（PyTorch 同様）。
+        return Tensor::new(vec![0.0f32; expected], &[expected]).map_err(AutodiffError::Shape);
+    }
+    // 重みの実体化・バックエンド呼び出しより前に rank・長さ不一致を拒否する。
+    let wshape = weights.shape();
+    binning::bincount_check(&wshape, true)?;
+    binning::bincount_weights_check(n, &wshape)?;
     let w = materialize_one(weights)?;
     let backend = tape.ops().binning_bincount_weighted(input, &w, minlength);
     resolve(
         backend,
-        |shape| verify_vector_len(shape, minlength),
+        |shape| verify_vector_len(shape, expected),
         || {
             let v = binning::bincount_weighted_host(
                 &input.contiguous().host_slice(),
