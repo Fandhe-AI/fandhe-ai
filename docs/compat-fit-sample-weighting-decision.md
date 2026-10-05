@@ -332,3 +332,29 @@ sample_weight 適用は再開時に選択肢として提示する。新規 Issue
 | `api_surface.rs::fit_config_keeps_copy_eq_for_0_9_0_compat`（:17444） | 維持（名称も維持） |
 | #2565 追加作業 | 到達性テスト・`docs/compat-api-scope.md` §5 適用記録・`docs/compat-fit-evaluate-design.md` §3.7 更新・本記録の実装記録 |
 | CUDA／Metal | 新規演算なしのため実機 parity 申し送りは不要見込み（§5）。#2564 で再確認 |
+
+## 12. #2564 着手時判定（§11.3 未承認のため停止）
+
+イシュー #2564（親 #2562）。本節は docs のみの追記であり、facade コード・保留ガード（`FitWeightingHoldDoctestGuard`・`api_surface.rs` の fit weighting ガード群）・`docs/compat-api-scope.md`・`docs/compat-fit-evaluate-design.md` は変更しない。
+
+### 12.1 判定
+
+- 判定に使った `origin/main` は `6c966886`、確認日は 2026-10-05。
+- §11.1 の確定形は記録に書かれた形だが、§11.3 の 2 論点（再掲せず §11.3 を参照）は §11 本文のとおり**未承認**である。
+- #2564・#2563・#2562・ルート #2499 のいずれにも §11.3 の承認を示すコメントは無い（各コメント 0 件）。
+- ルート #2499 の一括承認は「記録が公開形を決めていない項目」に及ばず、§11.3 の推奨案を承認する記述も無い。§11.3 の論点は実装時に必ずいずれかの挙動を選ぶもので、§11.1 の部分集合だけを先に公開することもできない（`fit_with_weights` の公開と同時に 7 種の `Loss`・`Lbfgs` との組み合わせの挙動が確定するため）。
+
+### 12.2 結論
+
+#2564 の停止条項に従い、facade 公開（`FitConfig::validation_split`・`FitWeights`・`Sequential::fit_with_weights`・`compat/mod.rs` への再エクスポート）は**実装せず停止した**。#2564 の実装本体と #2565（保留ガードの正ガード化、`compat-api-scope.md` §5・`compat-fit-evaluate-design.md` §3.7 の更新）は引き続き blocked とする。
+
+解除の順序: ユーザーが §11.3 を承認する（推奨案か代替案かを選ぶ）→ #2564 を reopen するか新しい実装イシューを起票する（ユーザーが判断）→ §11.1／§11.2／§11.4／§11.6 と承認された §11.3 の形で実装する。
+
+### 12.3 本イシューで行わないこと
+
+- `crates/facade/**` の変更。
+- `FitWeightingHoldDoctestGuard` の縮小・撤去（§11.6 の #2564 担当分も承認まで保留）。
+- `api_surface.rs` の否定ガードの許可縮小・反転。
+- `docs/compat-api-scope.md` §5 への適用記録。
+- 追跡 Issue の起票（ユーザー承認が必要）。
+- 依存追加・`unsafe`・tolerance の変更。
