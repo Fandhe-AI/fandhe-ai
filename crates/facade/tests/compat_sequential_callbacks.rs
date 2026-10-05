@@ -1307,3 +1307,58 @@ fn loggers_write_the_epoch_where_early_stopping_stops() {
     assert_eq!(read_csv(&tmp.path("e.csv")).1.len(), 3);
     assert_eq!(read_json(&tmp.path("e.json")).len(), 3);
 }
+
+// =====================================================================
+// 19. ロガー × LrSchedule（イシュー #2572。facade 経由の利用例）:
+//     ロガーを `LrSchedule` の前後どちらに置いても、CSV／JSON の lr 列と
+//     Lambda が見る `&History` は `StepLr::lr_at` と bit 一致する
+// =====================================================================
+
+#[test]
+fn loggers_record_lr_scheduled_by_lr_schedule_per_epoch() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    const EPOCHS: usize = 3;
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("lrsched");
+    let step_lr = StepLr::new(0.1, 1, 0.5).unwrap();
+
+    let seen: Rc<RefCell<Vec<Vec<f32>>>> = Rc::new(RefCell::new(Vec::new()));
+    let seen_in_cb = Rc::clone(&seen);
+    let mut model = compiled_regression_model(0.1);
+    let mut cbs = [
+        Callback::CsvLogger(CsvLogger::new(tmp.path("lr.csv"))),
+        Callback::LrSchedule(LrSchedule::per_epoch(StepLr::new(0.1, 1, 0.5).unwrap())),
+        Callback::JsonLogger(JsonLogger::new(tmp.path("lr.json"))),
+        Callback::Lambda(LambdaCallback::on_epoch_end(move |_, h| {
+            seen_in_cb.borrow_mut().push(h.lr.clone());
+            Ok(())
+        })),
+    ];
+    let h = model
+        .fit_with_callbacks(&x, &y, FitConfig::new(EPOCHS, N), None, &mut cbs)
+        .unwrap();
+
+    assert_eq!(h.lr.len(), EPOCHS);
+    let (header, rows) = read_csv(&tmp.path("lr.csv"));
+    assert_eq!(header, ["epoch", "loss", "lr"]);
+    let json = read_json(&tmp.path("lr.json"));
+    assert_eq!(rows.len(), EPOCHS);
+    assert_eq!(json.len(), EPOCHS);
+    for e in 0..EPOCHS {
+        assert_eq!(h.lr[e].to_bits(), step_lr.lr_at(e).to_bits(), "epoch {e}");
+        assert!(csv_token_matches(&rows[e][2], h.lr[e]), "csv lr e={e}");
+        assert_eq!(json[e][2].0, "lr");
+        assert!(json_token_matches(&json[e][2].1, h.lr[e]), "json lr e={e}");
+    }
+    // Lambda が見る History の lr は epoch ごとに 1 要素ずつ伸び、最終 history と先頭一致する。
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), EPOCHS);
+    for (e, lrs) in seen.iter().enumerate() {
+        assert_eq!(lrs.len(), e + 1, "epoch {e}: history.lr の長さ");
+        for (i, v) in lrs.iter().enumerate() {
+            assert_eq!(v.to_bits(), h.lr[i].to_bits(), "epoch {e} idx {i}");
+        }
+    }
+}

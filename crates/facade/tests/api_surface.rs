@@ -17204,6 +17204,100 @@ fn compat_callback_enum_variants_are_exactly_approved_set() {
     );
 }
 
+/// callbacks ロガー 3 型の公開アクセサ・trait impl の承認形（決定記録 §3・§9「§3 以外の公開
+/// アクセサは設けない」）違反を返す。`files` は (相対パス, 内容) の組。固有 impl の制限なし
+/// `pub fn` 集合・手書き trait impl 集合・固有 impl を持つファイルを型ごとに照合する
+/// （`pub(super)`／private の fn は外部から到達できないため許容）。
+fn check_callback_logger_accessor_surface(files: &[(String, String)]) -> Vec<String> {
+    let approved: [(&str, &[&str]); 3] = [
+        ("CsvLogger", &["new", "append"]),
+        ("JsonLogger", &["new", "append"]),
+        ("LambdaCallback", &["on_epoch_end"]),
+    ];
+    let mut violations = Vec::new();
+    for (ty, fns) in approved {
+        let mut public = NameSet::new();
+        let mut traits = NameSet::new();
+        for (rel, content) in files {
+            let (p, np, t) = scan_type_impl_surface(content, ty);
+            let has_inherent = !p.is_empty() || !np.is_empty();
+            if has_inherent && rel != "compat/callbacks.rs" {
+                violations.push(format!(
+                    "{ty}: 固有 impl が {rel} にある（callbacks.rs 限定）"
+                ));
+            }
+            public.extend(p);
+            traits.extend(t);
+        }
+        let want_fns: NameSet = fns.iter().map(|s| s.to_string()).collect();
+        if public != want_fns {
+            violations.push(format!(
+                "{ty}: 公開 fn 集合 {public:?} != 承認形 {want_fns:?}"
+            ));
+        }
+        let want_traits: NameSet = ["Debug".to_string()].into_iter().collect();
+        if traits != want_traits {
+            violations.push(format!(
+                "{ty}: 手書き trait impl 集合 {traits:?} != 承認形 {want_traits:?}"
+            ));
+        }
+    }
+    violations
+}
+
+/// 正ガード（#2572）: ロガー 3 型は承認形の公開 fn（`new`／`append`／`on_epoch_end`）と
+/// `Debug` の手書き impl 以外を持たない。公開アクセサ（`path()` 等）や `Clone` 等の追加は
+/// fail する（`facade_declares_callback_loggers_only_in_approved_shape` は宣言・再エクスポート
+/// の形のみを検査するため、型の公開面の拡大はこのテストが固定する）。
+#[test]
+fn callback_logger_types_expose_only_approved_methods_and_traits() {
+    let src_dir = facade_crate_root().join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
+    });
+    let violations = check_callback_logger_accessor_surface(&files);
+    assert!(
+        violations.is_empty(),
+        "callbacks ロガーの公開アクセサ・trait impl が承認形（`docs/compat-callbacks-loggers-\
+         decision.md` §3・§9）から外れている: {violations:?}"
+    );
+}
+
+/// [`check_callback_logger_accessor_surface`] の自己テスト（承認形の正例と違反の負例）。
+#[test]
+fn callback_logger_types_expose_only_approved_methods_and_traits_detects_each_category() {
+    let ok = "impl CsvLogger { pub fn new() {} pub fn append() {} fn open() {} pub(super) fn end() {} }\n\
+         impl std::fmt::Debug for CsvLogger {}\n\
+         impl JsonLogger { pub fn new() {} pub fn append() {} }\n\
+         impl std::fmt::Debug for JsonLogger {}\n\
+         impl LambdaCallback { pub fn on_epoch_end() {} pub(super) fn invoke() {} }\n\
+         impl std::fmt::Debug for LambdaCallback {}";
+    let base = || vec![("compat/callbacks.rs".to_string(), ok.to_string())];
+    assert!(check_callback_logger_accessor_surface(&base()).is_empty());
+    let mut v = base();
+    v.push((
+        "compat/other.rs".into(),
+        "impl CsvLogger { pub fn path(&self) {} }".into(),
+    ));
+    assert!(!check_callback_logger_accessor_surface(&v).is_empty());
+    let mut v = base();
+    v.push(("lib.rs".into(), "impl Clone for JsonLogger {}".into()));
+    assert!(!check_callback_logger_accessor_surface(&v).is_empty());
+    // 負例: 承認形と同じファイル内での公開アクセサ追加。
+    let mut v = base();
+    v.push((
+        "compat/callbacks.rs".into(),
+        "impl LambdaCallback { pub fn call_count(&self) {} }".into(),
+    ));
+    assert!(!check_callback_logger_accessor_surface(&v).is_empty());
+}
+
 // #2177（親 #2131）の facade 公開保留固定（`FitWeightingHoldDoctestGuard`）。
 // 旧 `CallbacksLoggersHoldDoctestGuard`（#2178。#2571 で削除済み）と同型の 4 テスト構成。
 
