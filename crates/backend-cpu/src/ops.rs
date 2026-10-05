@@ -3085,6 +3085,56 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::scan_cummax`] の CPU 実装（イシュー
+    /// #2636）。共有カーネル `fandhe_ai_tensor_core::cumulative::cummax_host`
+    /// を呼ぶだけで走査規則は持たない（autodiff のホストフォールバックと
+    /// 単一情報源）。`dim`・shape は `cumulative_layout` で再検査する
+    /// （fail-closed）。
+    fn scan_cummax(
+        &self,
+        x: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let x = x.contiguous();
+        let layout = fandhe_ai_tensor_core::cumulative::cumulative_layout(x.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        let (v, i) = fandhe_ai_tensor_core::cumulative::cummax_host(&x.host_slice(), &layout)
+            .map_err(BackendError::ShapeMismatch)?;
+        Ok((
+            Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(i, layout.shape()).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::scan_cummin`] の CPU 実装（イシュー
+    /// #2636）。[`Self::scan_cummax`] と同型。
+    fn scan_cummin(
+        &self,
+        x: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let x = x.contiguous();
+        let layout = fandhe_ai_tensor_core::cumulative::cumulative_layout(x.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        let (v, i) = fandhe_ai_tensor_core::cumulative::cummin_host(&x.host_slice(), &layout)
+            .map_err(BackendError::ShapeMismatch)?;
+        Ok((
+            Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(i, layout.shape()).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::scan_logcumsumexp`] の CPU 実装
+    /// （イシュー #2636）。[`Self::scan_cummax`] と同型。
+    fn scan_logcumsumexp(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        let x = x.contiguous();
+        let layout = fandhe_ai_tensor_core::cumulative::cumulative_layout(x.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        let v = fandhe_ai_tensor_core::cumulative::logcumsumexp_host(&x.host_slice(), &layout)
+            .map_err(BackendError::ShapeMismatch)?;
+        Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::fft_fft`] の CPU 実装（イシュー
     /// #2632）。[`Self::fft_rfft`] と同型で、`fft_layout` で再検査してから
     /// 共有カーネル `fft_host` を呼ぶ。
