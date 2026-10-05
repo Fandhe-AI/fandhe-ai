@@ -2057,6 +2057,39 @@ pub(crate) fn vjp(
             let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, da)]
         }
+        // 複素 FFT（イシュー #2632）。随伴は共役転置（`fft::fft_vjp_host`。
+        // `n` 倍・二重スケールなし。ゼロ詰めの VJP は切り詰め）。
+        Op::Fft {
+            input,
+            n,
+            dim,
+            norm,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout =
+                fft::fft_layout(&input_shape, Some(n), Some(dim)).map_err(AutodiffError::from)?;
+            check_fft_upstream_shape(upstream, layout.out_shape(), "Fft")?;
+            let data = fft::fft_vjp_host(&upstream.host_slice(), &layout, norm)
+                .map_err(AutodiffError::from)?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
+        }
+        // 複素逆 FFT（イシュー #2632）。`fft::ifft_vjp_host`。
+        Op::Ifft {
+            input,
+            n,
+            dim,
+            norm,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout =
+                fft::fft_layout(&input_shape, Some(n), Some(dim)).map_err(AutodiffError::from)?;
+            check_fft_upstream_shape(upstream, layout.out_shape(), "Ifft")?;
+            let data = fft::ifft_vjp_host(&upstream.host_slice(), &layout, norm)
+                .map_err(AutodiffError::from)?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
+        }
         // `Var::permute` が記録する view ノード（イシュー #1597）。
         // 逆写像は逆置換（`inverse_permutation`）で `upstream` を
         // permute するだけで閉じる（zero-copy。`tape::Op::Permute`

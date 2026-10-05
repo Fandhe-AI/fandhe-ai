@@ -823,6 +823,25 @@ pub(crate) enum Op {
         dim: usize,
         norm: FftNorm,
     },
+    /// 複素 FFT（複素入力 `[..., L, ..., 2]` → 複素 `[..., n, ..., 2]`。イシュー
+    /// #2632）。`n`／`dim` は解決済み（`fandhe_ai_tensor_core::fft::fft_layout`）。
+    /// `crate::fft_ops::fft` からのみ積まれ、facade には公開しない。VJP は
+    /// 入力値を必要としない線形演算（共役転置。`grad.rs`）。分類は
+    /// [`Op::Rfft`] と同じ（非融合・非 checkpoint・高階微分非対応）。
+    Fft {
+        input: NodeId,
+        n: usize,
+        dim: usize,
+        norm: FftNorm,
+    },
+    /// 複素逆 FFT（イシュー #2632）。`crate::fft_ops::ifft` からのみ積まれる。
+    /// 分類は [`Op::Fft`] と同じ。
+    Ifft {
+        input: NodeId,
+        n: usize,
+        dim: usize,
+        norm: FftNorm,
+    },
     /// `Var::permute` が記録する view ノード（イシュー #1597。`Reshape`/
     /// `Transpose` と同じ「forward のたびにバッファ確保しない」骨格を
     /// 任意軸並べ替えへ一般化する。`docs/autodiff-view-recompute-
@@ -1637,10 +1656,13 @@ impl Op {
             | Op::Pinv { .. }
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
-            // `Op::Rfft`／`Op::Irfft`（イシュー #2631）も `recompute_value` に
-            // 再計算分岐を持たないため非適格のまま保持する。
+            // `Op::Rfft`／`Op::Irfft`（イシュー #2631）・`Op::Fft`／`Op::Ifft`
+            // （イシュー #2632）も `recompute_value` に再計算分岐を持たない
+            // ため非適格のまま保持する。
             | Op::Rfft { .. }
             | Op::Irfft { .. }
+            | Op::Fft { .. }
+            | Op::Ifft { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::RmsNorm { .. }
@@ -1814,6 +1836,8 @@ impl Op {
             | Op::MatrixRank { input, .. }
             | Op::Rfft { input, .. }
             | Op::Irfft { input, .. }
+            | Op::Fft { input, .. }
+            | Op::Ifft { input, .. }
             | Op::Permute { input, .. }
             | Op::BroadcastTo { input }
             | Op::Narrow { input, .. }
@@ -2148,9 +2172,11 @@ impl Op {
             | Op::Pinv { .. }
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
-            // イシュー #2631 の FFT 2 演算も初期スコープ外（非対応）。
+            // イシュー #2631・#2632 の FFT 4 演算も初期スコープ外（非対応）。
             | Op::Rfft { .. }
             | Op::Irfft { .. }
+            | Op::Fft { .. }
+            | Op::Ifft { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::MaskedFill { .. }

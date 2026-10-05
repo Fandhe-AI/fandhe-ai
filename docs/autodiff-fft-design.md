@@ -9,6 +9,7 @@
 
 **実装記録（#2631）**: `rfft`／`irfft` は内部クレート限定で実装済み（facade 非公開・公開形は未承認）。
 実装方式・数値契約・テスト構成・公開形の推奨案は `docs/autodiff-fft-ops-decision.md` を参照する。
+`fft`／`ifft` は #2632 で同様に実装済み（`docs/autodiff-fft-ops-decision.md` §12）。
 以下の本文は設計判断の記録であり、書き換えない。
 
 ## §0 結論
