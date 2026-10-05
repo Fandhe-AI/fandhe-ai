@@ -29,6 +29,7 @@
 //! `NaiveOps`／`TestOps`（compat・テスト経路）に限り引き続き使われる
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
+use fandhe_ai_tensor_core::fft;
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, BatchNormTrainOutput, BceKind, CastElement, HuberKind,
     KlDivTarget, Pool2dParams, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor,
@@ -86,6 +87,23 @@ fn vjp_elementwise_mul(
     rhs: &Tensor<f32>,
 ) -> Result<Tensor<f32>, AutodiffError> {
     vjp_elementwise_mul_via(ops, g, rhs, ELEMENTWISE_VJP_VIA_BACKEND_OPS)
+}
+
+/// FFT VJP の上流勾配 shape を検査する（バックエンドや呼び出し側の契約違反を
+/// 静かに呑み込まず fail-closed にする。イシュー #2631）。
+fn check_fft_upstream_shape(
+    upstream: &Tensor<f32>,
+    expected: &[usize],
+    op_name: &str,
+) -> Result<(), AutodiffError> {
+    if upstream.shape() == expected {
+        Ok(())
+    } else {
+        Err(AutodiffError::Backward(format!(
+            "grad::vjp: Op::{op_name} の上流勾配 shape {:?} が期待 {expected:?} と一致しない",
+            upstream.shape()
+        )))
+    }
 }
 
 /// [`vjp_elementwise_mul`] の実体。ゲート値を引数として受け取ることで
@@ -2003,6 +2021,41 @@ pub(crate) fn vjp(
             let input_shape = nodes[input.0].shape.clone();
             let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, d_input)]
+        }
+        // 実数 FFT（イシュー #2631）。線形演算のため入力値は不要で、入力
+        // ノードの shape（`L`）と `upstream` だけから共有カーネルの VJP を
+        // 呼ぶ（`fandhe_ai_tensor_core::fft::rfft_vjp_host`。`n` 倍は掛けない）。
+        Op::Rfft {
+            input,
+            n,
+            dim,
+            norm,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout =
+                fft::rfft_layout(&input_shape, Some(n), Some(dim)).map_err(AutodiffError::from)?;
+            check_fft_upstream_shape(upstream, &layout.out_shape, "Rfft")?;
+            let data = fft::rfft_vjp_host(&upstream.host_slice(), &layout, norm)
+                .map_err(AutodiffError::from)?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
+        }
+        // 実数逆 FFT（イシュー #2631）。生の r2c（正規化なし）に `t(norm)` と
+        // 倍加係数 `c_k` を掛ける（`fft::irfft_vjp_host`）。
+        Op::Irfft {
+            input,
+            n,
+            dim,
+            norm,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout =
+                fft::irfft_layout(&input_shape, Some(n), Some(dim)).map_err(AutodiffError::from)?;
+            check_fft_upstream_shape(upstream, &layout.out_shape, "Irfft")?;
+            let data = fft::irfft_vjp_host(&upstream.host_slice(), &layout, norm)
+                .map_err(AutodiffError::from)?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
         }
         // `Var::permute` が記録する view ノード（イシュー #1597）。
         // 逆写像は逆置換（`inverse_permutation`）で `upstream` を

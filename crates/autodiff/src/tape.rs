@@ -26,8 +26,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, CastElement, Conv2dParams, Conv3dParams, DType, Device,
-    DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, Pool2dParams,
-    ScalarBinaryOp, ScalarDType, ScalarUnaryOp, ScatterReduce, Tensor, TypedOps, bf16, f16,
+    DeviceBufferView, FftNorm, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN,
+    Pool2dParams, ScalarBinaryOp, ScalarDType, ScalarUnaryOp, ScatterReduce, Tensor, TypedOps,
+    bf16, f16,
 };
 
 use crate::error::AutodiffError;
@@ -801,6 +802,27 @@ pub(crate) enum Op {
     /// 行列のランク（イシュー #2150）。非微分（VJP は明示ゼロ。
     /// `Op::OneHot`／`SlogdetSign` と同型）。`rcond` は `Pinv` と同じ。
     MatrixRank { input: NodeId, rcond: f32 },
+    /// 実数 FFT（実入力 `[..., L, ...]` → `[..., n/2+1, ..., 2]`。イシュー
+    /// #2631・`docs/autodiff-fft-ops-decision.md`）。`n`／`dim` は forward
+    /// 時点で解決済みの値（`fandhe_ai_tensor_core::fft::rfft_layout`）。
+    /// `crate::fft_ops::rfft` からのみ積まれ、facade には公開しない。VJP は
+    /// 入力値を必要としない線形演算（`grad.rs`）。非融合・非 checkpoint・
+    /// 高階微分非対応（`Op::Pinv` と同じ分類）。
+    Rfft {
+        input: NodeId,
+        n: usize,
+        dim: usize,
+        norm: FftNorm,
+    },
+    /// 実数逆 FFT（複素入力 `[..., m, ..., 2]` → 実 `[..., n, ...]`。イシュー
+    /// #2631）。`n`／`dim` は解決済み（`irfft_layout`）。`crate::fft_ops::
+    /// irfft` からのみ積まれる。分類は [`Op::Rfft`] と同じ。
+    Irfft {
+        input: NodeId,
+        n: usize,
+        dim: usize,
+        norm: FftNorm,
+    },
     /// `Var::permute` が記録する view ノード（イシュー #1597。`Reshape`/
     /// `Transpose` と同じ「forward のたびにバッファ確保しない」骨格を
     /// 任意軸並べ替えへ一般化する。`docs/autodiff-view-recompute-
@@ -1615,6 +1637,10 @@ impl Op {
             | Op::Pinv { .. }
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
+            // `Op::Rfft`／`Op::Irfft`（イシュー #2631）も `recompute_value` に
+            // 再計算分岐を持たないため非適格のまま保持する。
+            | Op::Rfft { .. }
+            | Op::Irfft { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::RmsNorm { .. }
@@ -1786,6 +1812,8 @@ impl Op {
             | Op::SlogdetLogAbsDet { input }
             | Op::Pinv { input, .. }
             | Op::MatrixRank { input, .. }
+            | Op::Rfft { input, .. }
+            | Op::Irfft { input, .. }
             | Op::Permute { input, .. }
             | Op::BroadcastTo { input }
             | Op::Narrow { input, .. }
@@ -2120,6 +2148,9 @@ impl Op {
             | Op::Pinv { .. }
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
+            // イシュー #2631 の FFT 2 演算も初期スコープ外（非対応）。
+            | Op::Rfft { .. }
+            | Op::Irfft { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::MaskedFill { .. }
