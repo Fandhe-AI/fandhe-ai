@@ -275,7 +275,17 @@ pub fn bincount_out_len(input: &[i32], minlength: usize) -> Result<usize, Binnin
             .and_then(|m| m.checked_add(1))
             .ok_or(ShapeError::ElementCountOverflow)?,
     };
-    Ok(needed.max(minlength))
+    let out_len = needed.max(minlength);
+    // 出力（i32／f32 とも 4 バイト）のバイト数を確保前に検査する。巨大 `minlength` は
+    // バックエンド呼び出し前に型付きエラーへ変換する（OWASP A04）。
+    check_alloc_bytes(out_len, std::mem::size_of::<f32>())?;
+    Ok(out_len)
+}
+
+/// 長さ `len` の零 `f32` ベクタを、バイト数検査と `try_reserve_exact` を通して作る
+/// （空入力の重み付き `bincount` が巨大 `minlength` で abort しないための確保口）。
+pub fn bincount_zeros_f32(len: usize) -> Result<Vec<f32>, BinningError> {
+    try_filled(len, 0.0f32)
 }
 
 /// 重み付き `bincount` の重み shape 検査。rank 1 で入力と同長であること。

@@ -156,7 +156,8 @@ pub fn bincount_weighted<'t>(
     let expected = binning::bincount_out_len(&input.contiguous().host_slice(), minlength)?;
     if n == 0 {
         // 空入力は重みの rank・長さを見ず、実体化もせず minlength 個の零を返す（PyTorch 同様）。
-        return Tensor::new(vec![0.0f32; expected], &[expected]).map_err(AutodiffError::Shape);
+        let zeros = binning::bincount_zeros_f32(expected)?;
+        return Tensor::new(zeros, &[expected]).map_err(AutodiffError::Shape);
     }
     // 重みの実体化・バックエンド呼び出しより前に rank・長さ不一致を拒否する。
     let wshape = weights.shape();

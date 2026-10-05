@@ -432,6 +432,16 @@ fn huge_bins_and_minlength_are_typed_errors_not_aborts() {
         bincount(&tape, &ti(vec![0], &[1]), usize::MAX),
         Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
     ));
+    // 空入力・重み付きでも巨大 minlength は確保前に型付きエラー（abort しない）。
+    let w = tape.var(&t(vec![], &[0]));
+    assert!(matches!(
+        bincount_weighted(&tape, &ti(vec![], &[0]), &w, usize::MAX),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+    assert!(matches!(
+        bincount_weighted(&tape, &ti(vec![], &[0]), &w, usize::MAX / 4),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
 }
 
 #[test]
