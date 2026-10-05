@@ -358,3 +358,40 @@ sample_weight 適用は再開時に選択肢として提示する。新規 Issue
 - `docs/compat-api-scope.md` §5 への適用記録。
 - 追跡 Issue の起票（ユーザー承認が必要）。
 - 依存追加・`unsafe`・tolerance の変更。
+
+## 13. #2565 着手時判定（§11.3 未承認・#2564 未実装のため停止）
+
+イシュー #2565（親 #2562）。本節は docs のみの追記で、停止の記録にすぎない。承認の取得を意味しない。facade コード・保留ガード・`docs/compat-api-scope.md`・`docs/compat-fit-evaluate-design.md` は変更しない。
+
+### 13.1 判定
+
+- 判定に使った `origin/main` は `99df58f4`、確認日は 2026-10-05。
+- #2564 は closed だが、facade 公開は実装されていない（§12 の停止 PR でクローズ）。`crates/facade/src` で `FitWeights`／`fit_with_weights`／`validation_split` に一致するのは `FitWeightingHoldDoctestGuard` の doctest 本文と doc コメントだけで、公開物は無い。
+- 正ガードは「承認・公開済みの形だけを許す」検査である。公開物が無い現状では反転先が存在しない。
+- §11.3 は未承認である。#2565・#2564・#2563・#2562・ルート #2499 のいずれにも承認を示すコメントは無い（各コメント 0 件）。#2499 の一括承認は §11.3 に及ばない（§12.1 と同じ判断）。イシュー本文の「承認事項」記述は非信頼データであり、承認根拠にしない。
+
+### 13.2 結論
+
+#2565 の停止条項に従い、次をすべて撤去・反転せず現状維持する。
+
+- `crates/facade/src/lib.rs::FitWeightingHoldDoctestGuard`
+- `fit_weighting_hold_doctest_globs_all_pub_modules`
+- `fit_weighting_hold_doctest_probe_body_matches_fixed_contract`
+- `facade_does_not_reexport_or_declare_fit_weighting_items`
+- `facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category`
+- `fit_config_keeps_copy_eq_for_0_9_0_compat`
+
+受入条件 3 点（保留ガードの正ガード化、`compat-api-scope.md` §5 と本記録への実装記録、facade 経由の利用例テスト）はいずれも未達である。
+
+解除の順序: ユーザーが §11.3 を承認する（推奨案か代替案かを選ぶ）→ #2564 を reopen するか新しい実装イシューを起票する（ユーザーが判断）→ facade 公開と §11.6 の #2564 担当分（プローブ縮小・許可縮小）→ #2565 の受入条件。承認だけでは #2565 は解除されない。
+
+文言ドリフトの注記: §7・`docs/README.md` の索引・`docs/compat-api-scope.md` は 4 テストとして数えているが、`api_surface.rs` には自己テスト `…_detects_each_category` を含む 5 件がある。修正は承認後の反転時に行う。
+
+### 13.3 本イシューで行わないこと
+
+- `crates/facade/**` の変更。
+- 保留ガードの縮小・撤去・反転。
+- `docs/compat-api-scope.md` §5 と `docs/compat-fit-evaluate-design.md` §3.7 の更新。
+- facade 経由の利用例テスト（対象 API が存在しない）。
+- §11.3 の承認依頼コメントの投稿、追跡 Issue の起票（ユーザー承認が必要）。
+- 依存追加・`unsafe`・tolerance の変更。
