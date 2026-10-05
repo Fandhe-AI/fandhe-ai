@@ -278,3 +278,53 @@ inherent 追加か、facade の拡張トレイトの 2 通りに限られる。
 
 facade／tensor-core のコード変更、保留ガードの削除・反転、`compat-api-scope.md`
 への適用記録、Issue 起票、spec 提案、原子的書き込みへの変更、非 f32 dtype 対応（§6 のまま）。
+
+## 11. #2590（facade 公開の実装）の着手時判定
+
+本節は docs のみの停止記録であり、承認を得たことを意味しない。
+
+### 11.1 判定
+
+- 基準コミット: `origin/main` `6dc72e45`（2026-10-05 確認）。
+- #2590 は「ユーザーが承認した形」での公開を条件とするが、承認コメントは未取得のため着手せず停止する。
+- 依存 #2589 は PR #2764 でクローズ済みだが、成果物は §10 の候補比較・推奨案の記録のみで、facade には何も公開していない。
+- 実測: `crates/facade/src/interop/` は `mod.rs`・`onnx.rs`・`safetensors.rs` の 3 ファイル（`npy.rs` なし）。`interop/mod.rs` の `pub mod` は `onnx`・`safetensors` の 2 件。facade に npy 系の公開名はない。
+- 正ガードは「公開済みの形だけを許す」検査であり、公開形が未確定の現状では反転先が存在しない。
+
+### 11.2 承認コメントの確認範囲
+
+| issue | コメント数 |
+|---|---|
+| #2590 | 0 |
+| #2589 | 0 |
+| #2588（親） | 0 |
+| #2542（Phase 3 親） | 0 |
+| #2499（ルート） | 0 |
+
+§10.4 の推奨案は承認ではない。2026-10-04 の一括承認も §10.1 のとおり対象外である。
+
+### 11.3 現状維持するもの（撤去・縮小・反転しない）
+
+- `crates/facade/src/lib.rs` の `NpyIoHoldDoctestGuard`（正のプローブ doctest）。
+- `crates/facade/tests/api_surface.rs` の 4 テスト: `npy_io_hold_doctest_globs_all_pub_modules`・`npy_io_hold_doctest_probe_body_matches_fixed_contract`・`facade_does_not_reexport_or_declare_npy_io`・`workspace_declares_npy_io_names_only_in_allowed_locations`。
+- 共用する `NPY_IO_HOLD_PROBE_BODY`・`NPY_IO_FN_NAMES`・`scan_npy_io_reexports_and_declarations`。
+
+### 11.4 受入条件ごとの扱い
+
+| 受入条件 | 扱い |
+|---|---|
+| 承認コメントの確認 | 実施。0 件のため停止 |
+| 承認形での facade 公開 | 未承認のため不実施 |
+| 保留ガードの正ガード反転 | 公開物がなく反転先がないため不可 |
+| `compat-api-scope.md` §5 適用記録・§3／§7 実装記録 | 公開していないため書かない（§5 の #2189 保留記録はそのまま） |
+| facade 経由の利用例 | 対象 API が未公開のため追加不可 |
+
+### 11.5 解除の順序
+
+1. ユーザーが §10.7 の A〜D を選び、#2590 に承認コメントを残す
+2. #2590 を reopen するか再起票するかをユーザーが決める
+3. §10.4（P1〜P7）・§10.6 の手順で実装する
+
+### 11.6 本 PR で行わないこと
+
+コード変更、ガードの削除・反転・縮小、`compat-api-scope.md` の変更、Issue 起票・コメント投稿、spec 提案、依存追加、`unsafe`、tolerance 変更。
