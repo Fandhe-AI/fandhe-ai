@@ -2442,6 +2442,95 @@ pub(crate) fn vjp(
             let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, da)]
         }
+        // `kthvalue`／`median`（軸指定）の選択（イシュー #2637）。各出力は `index` が
+        // 指す単一の入力要素の複製で、lane ごとに出力 1 個のため `index` は重複しない。
+        // それでも `Op::Cummax` と同じく `Add`（出力位置ごと `f64` アキュムレータ・1 回
+        // downcast）で scatter する。`index`・upstream は縮約後 shape のため、`dim` 位置に
+        // サイズ 1 を挿入した keepdim 形へ作り直してから渡す。
+        Op::OrderSelect { input, dim, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            check_fft_upstream_shape(upstream, out_value.shape(), "OrderSelect")?;
+            let mut keep_shape = input_shape.clone();
+            if let Some(d) = keep_shape.get_mut(dim) {
+                *d = 1;
+            }
+            let index_keep = Tensor::new(index.contiguous().host_slice().to_vec(), &keep_shape)
+                .map_err(AutodiffError::Shape)?;
+            let upstream_keep =
+                Tensor::new(upstream.contiguous().host_slice().to_vec(), &keep_shape)
+                    .map_err(AutodiffError::Shape)?;
+            let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            let d_input = scatter_with_fallback(
+                ops,
+                &zeros,
+                dim,
+                &index_keep,
+                &upstream_keep,
+                ScatterReduce::Add,
+                &input_shape,
+            )?;
+            vec![(input, d_input)]
+        }
+        // 全要素 `median`（イシュー #2637）。入力を実体化して中央値と等しい要素へ均等
+        // 分配する（軸指定版と規則が異なる。`stat_reduce::median_all_vjp_host`）。
+        Op::MedianAll { input } => {
+            let input_shape = nodes[input.0].shape.clone();
+            check_fft_upstream_shape(upstream, out_value.shape(), "MedianAll")?;
+            let layout = fandhe_ai_tensor_core::stat_reduce::stat_layout(&input_shape, None)?;
+            let x_val = materialize_fallible(nodes, ops, input)?;
+            let data = fandhe_ai_tensor_core::stat_reduce::median_all_vjp_host(
+                &x_val.contiguous().host_slice(),
+                &upstream.contiguous().host_slice(),
+                &layout,
+            )?;
+            vec![(
+                input,
+                Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?,
+            )]
+        }
+        // `quantile`（イシュー #2637）。入力を実体化し lane の再ソートで下側・上側と
+        // 重みを導出する（`stat_reduce::quantile_vjp_host`）。
+        Op::Quantile {
+            input,
+            q,
+            dim,
+            interpolation,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            check_fft_upstream_shape(upstream, out_value.shape(), "Quantile")?;
+            let layout = fandhe_ai_tensor_core::stat_reduce::stat_layout(&input_shape, dim)?;
+            let x_val = materialize_fallible(nodes, ops, input)?;
+            let data = fandhe_ai_tensor_core::stat_reduce::quantile_vjp_host(
+                &x_val.contiguous().host_slice(),
+                &upstream.contiguous().host_slice(),
+                &layout,
+                q,
+                interpolation,
+            )?;
+            vec![(
+                input,
+                Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?,
+            )]
+        }
+        // `nansum`／`nanmean`（イシュー #2637）。非 NaN 位置へ upstream（`nanmean` は
+        // `g / 個数`）、NaN 位置へ `0 × 値`（乗算。PyTorch 2.14.0 の実測に合わせる）。
+        Op::Nansum { input, dim } | Op::Nanmean { input, dim } => {
+            let mean = matches!(op, Op::Nanmean { .. });
+            let input_shape = nodes[input.0].shape.clone();
+            check_fft_upstream_shape(upstream, out_value.shape(), "Nansum/Nanmean")?;
+            let layout = fandhe_ai_tensor_core::stat_reduce::stat_layout(&input_shape, dim)?;
+            let x_val = materialize_fallible(nodes, ops, input)?;
+            let data = fandhe_ai_tensor_core::stat_reduce::nan_reduce_vjp_host(
+                &x_val.contiguous().host_slice(),
+                &upstream.contiguous().host_slice(),
+                &layout,
+                mean,
+            )?;
+            vec![(
+                input,
+                Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?,
+            )]
+        }
         Op::Sort { input, dim, index } | Op::Topk { input, dim, index } => {
             let input_shape = nodes[input.0].shape.clone();
             let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;

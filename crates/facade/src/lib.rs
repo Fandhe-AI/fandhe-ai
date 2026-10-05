@@ -4583,6 +4583,185 @@ struct NonfiniteOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct CumulativeOpsHoldDoctestGuard;
 
+/// 順序統計・NaN 無視縮約（`median`・`kthvalue`・`quantile`・`nanmean`・`nansum`。
+/// イシュー #2637・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
+/// ガード（`CumulativeOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `stat_reduce_ops`／`stat_reduce`・型 `QuantileInterpolation`／
+/// `StatReduceError`・6 メソッドを持つプローブ用トレイトを置き、修飾なしの関数呼び出しと
+/// `Var`／`Tape`／`Tensor<f32>` の修飾付きメソッド呼び出しの両方を行う。facade が
+/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の
+/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
+/// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::stat_reduce_ops`・
+/// `fandhe_ai_tensor_core::{stat_reduce, QuantileInterpolation, StatReduceError}`・
+/// `BackendOps::stat_*`）。保留対象は facade 公開面（`Var::median` 等の委譲メソッドと
+/// 引数型 `QuantileInterpolation` の再エクスポート）のみで、公開形は未承認（承認依頼は
+/// #2677・公開自体は承認後の #2678。推奨案は
+/// `docs/autodiff-stat-reduce-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
+/// ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// stat_reduce_ops_hold_doctest_globs_all_pub_modules`・
+/// `stat_reduce_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_stat_reduce_ops`・
+/// `workspace_declares_stat_reduce_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_stat_reduce_hold_probe {
+///     pub struct QuantileInterpolation;
+///     pub struct StatReduceError;
+///     pub mod stat_reduce_ops {
+///         pub fn median() {}
+///         pub fn median_with_indices() {}
+///         pub fn kthvalue() {}
+///         pub fn quantile() {}
+///         pub fn nanmean() {}
+///         pub fn nansum() {}
+///     }
+///     pub mod stat_reduce {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_stat_reduce_hold_probe::*;
+///
+/// struct __FandheStatReduceOpsHoldMarker;
+///
+/// trait __FandheStatReduceOpsHoldProbe {
+///     fn median(&self) -> __FandheStatReduceOpsHoldMarker;
+///     fn median_with_indices(&self) -> __FandheStatReduceOpsHoldMarker;
+///     fn kthvalue(&self) -> __FandheStatReduceOpsHoldMarker;
+///     fn quantile(&self) -> __FandheStatReduceOpsHoldMarker;
+///     fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker;
+///     fn nansum(&self) -> __FandheStatReduceOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheStatReduceOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn median(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn median_with_indices(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn kthvalue(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn quantile(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn nansum(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheStatReduceOpsHoldProbe for fandhe_ai::Tape {
+///     fn median(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn median_with_indices(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn kthvalue(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn quantile(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn nansum(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheStatReduceOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn median(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn median_with_indices(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn kthvalue(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn quantile(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+///     fn nansum(&self) -> __FandheStatReduceOpsHoldMarker {
+///         __FandheStatReduceOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: QuantileInterpolation, _: StatReduceError) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     stat_reduce_ops::median();
+///     stat_reduce_ops::median_with_indices();
+///     stat_reduce_ops::kthvalue();
+///     stat_reduce_ops::quantile();
+///     stat_reduce_ops::nanmean();
+///     stat_reduce_ops::nansum();
+///     stat_reduce::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median(v);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median_with_indices(v);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::kthvalue(v);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::quantile(v);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nanmean(v);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nansum(v);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median(tape);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median_with_indices(tape);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::kthvalue(tape);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::quantile(tape);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::nanmean(tape);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::nansum(tape);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tensor::<f32>::median(tf);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tensor::<f32>::median_with_indices(tf);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tensor::<f32>::kthvalue(tf);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tensor::<f32>::quantile(tf);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tensor::<f32>::nanmean(tf);
+///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tensor::<f32>::nansum(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct StatReduceOpsHoldDoctestGuard;
+
 /// `Var`／`Tape` の低精度 forward 入口（`matmul_low_precision`・
 /// `add_low_precision`・`mul_low_precision`・`relu_low_precision`・
 /// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・
