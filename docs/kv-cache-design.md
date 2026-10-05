@@ -437,3 +437,76 @@ inherent メソッドを再エクスポートするだけの薄い層）。イ�
 K-2 とは独立に別承認が必要（§6 承認事項 3 のまま変更なし）。
 
 本節は記録のみであり、Issue 起票・spec 提案の投稿は行わない。
+
+## 11. #2578（facade 公開形の確定）の着手時判定と承認依頼
+
+### 11.1 経緯
+
+イシュー #2578 は、ルート #2499 の一括承認（2026-10-04）の下で、本 doc §2・§6・§10 の
+**推奨形**により K-2（facade 公開）の形を確定することを求めた。一括承認が及ぶのは
+本 doc に書かれた推奨形だけであり、推奨形が無い論点・複数案併記のままの論点が
+残る場合は、実装せずに記録追記と承認依頼へ切り替える（イシューの停止条項）。
+基準コミット `a5cba8a7`（origin/main）で突合した結果、後述 11.3 の論点が残っていたため
+**facade・autodiff のコードは変更していない**。**本節は承認の取得を意味しない**
+（§6 承認事項 2 は本節追記後も未取得のまま）。
+
+### 11.2 確定済みの形（内部 API。§2・§9 と実装の突合結果）
+
+| 項目 | 形 | 出典 |
+|---|---|---|
+| `KvCache` | `new`・`is_empty`・`seq_len`・`batch() -> Option<usize>`・`embed_dim() -> Option<usize>`・`clear`・`k()/v() -> Option<&Tensor<f32>>`。外から Tensor を注入するセッターは無い | `crates/autodiff/src/nn/attention.rs:1554` |
+| `forward_with_cache` | `MultiheadAttentionVars::forward_with_cache(&self, query_new, key_new, value_new, cache: &mut KvCache) -> Result<Var<'t>, AutodiffError>`。`is_causal` 引数なし。更新は原子的 | 同 `:1681` |
+| `StatefulAttention` | `new(mha: MultiheadAttention)`・`forward(&mut self, tape: &'t autodiff::Tape, x_new: &Var<'t>)`・`reset_cache`・`cache`・`seq_len`・`mha`。`Module` 非実装 | 同 `:1859`・`:1866` |
+| エラー型 | 既存の `#[non_exhaustive] AutodiffError`（variant 追加なし）。facade は既に再エクスポート済み | `crates/facade/src/lib.rs:207` |
+| `Sequential` | 結線しない（§9）。`add_stateful_attention` 形は不採用 | §9・§10.3 (b) |
+
+### 11.3 停止根拠（未決の論点）
+
+1. §2 は facade 到達経路を設計しないと明記し、§10.3 は自らを「承認依頼用の事前設計」とし
+   形の確定を承認時に行うと書く。確定形の宣言が本 doc に存在しない。
+2. §10.3 (a) の `MultiheadAttention` 到達経路は 2 案併記のまま（型とコンストラクタの公開、
+   または次元・ヘッド数を直接受ける別コンストラクタ）で、どちらを推すか未記載。
+   `crates/facade/src/nn/mod.rs` は MHA に `Sequential::add_*` 経由でのみ到達すると契約しており、
+   型を公開するなら例外の明文化が要る。
+3. §10.3 (b) の配置は候補止まり（サブモジュール名・再エクスポート集合・
+   `MultiheadAttentionConfig` を出すか）。
+4. **本 doc に無かった新論点**: facade の `Tape` は `pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`
+   （`crates/facade/src/lib.rs:329`）で、利用者は生 `Tape` を取り出せない（REQ-12）。
+   `StatefulAttention::forward`・`MultiheadAttention::bind` は生 `Tape` を取るため、
+   純再エクスポートだけでは facade から forward を呼べず、`Tape::rnn_forward_seq` と同型の
+   委譲メソッドが要る。`MultiheadAttentionVars` も facade では未再エクスポート
+   （`lib.rs:207` は `nn::LinearVars` のみ）。
+5. 派生論点: `StatefulAttention::new(mha)`／`mha()` は、MHA 型を公開しない案では
+   facade から名指しできない型を扱う公開メソッドとして残る。
+
+### 11.4 論点ごとの推奨案（いずれも未承認）
+
+| 論点 | 推奨案 | 比較した他案 |
+|---|---|---|
+| P1 配置 | 純再エクスポートの `pub mod fandhe_ai::nn::kv_cache`（新ファイル `crates/facade/src/nn/kv_cache.rs`。`nn::rnn` と同型）。`compat::Sequential` へのメソッドは追加しない | `compat::Sequential::add_stateful_attention`（§9 と矛盾するため不採用） |
+| P2 MHA 到達 | `MultiheadAttention` は公開しない。autodiff に `StatefulAttention::from_config(&MultiheadAttentionConfig, seed)` 相当の追加コンストラクタを置く。このコンストラクタは `forward_with_cache` が `InvalidArgument` で拒否する 3 条件（`batch_first=false`・`kdim != embed_dim`・`vdim != embed_dim`）を構築時に検証し、同じく `InvalidArgument` で拒否する契約とする（`MultiheadAttentionConfig` はこれらの設定を許すため、構築後の forward で初めて失敗する経路を残さない）。facade は `KvCache`・`StatefulAttention`・`MultiheadAttentionConfig` を再エクスポート。理由: `nn/mod.rs` の契約を例外化せず、`bind(&Tape)`・`q_proj()`・`from_parameters`・`Module` 実装等の広い面を 0.10.x の非破壊契約で凍結せずに済む | MHA 型とコンストラクタを公開し Transformer と同じ例外として明文化する（承認範囲が広い）。残課題: `new(mha)`／`mha()` が facade から呼べない公開メソッドとして残る点は承認者が判断する |
+| P3 forward 入口 | facade `Tape` に `stateful_attention_forward<'t>(&'t self, sa: &mut nn::kv_cache::StatefulAttention, x_new: &Var<'t>) -> Result<Var<'t>, AutodiffError>`（`&self.0` を渡すだけの薄い委譲）。`forward_with_cache` は出さない | `MultiheadAttentionVars` を再エクスポートして直接公開（Tape 問題が残る） |
+| P4 ガード | 承認後（#2579）に §10.2 の否定ガード群を、公開面の到達可能性を検査する正ガードへ置換し、prefill → decode の doctest を 1 つ置く。今回は実施しない | なし |
+
+### 11.5 `fandhe-ai =0.10.0` 非破壊の確認
+
+| 論点 | 確認結果 |
+|---|---|
+| P1 | `pub mod` の新設は追加のみ。既存の `pub mod`／`pub use` は不変。同名項目の glob 衝突は無い見込み（#2579 で再確認） |
+| P2 | `StatefulAttention` への inherent コンストラクタ追加と `MultiheadAttentionConfig` の再エクスポートは追加のみ |
+| P3 | facade `Tape` への inherent メソッド追加は追加のみ。利用者トレイトの同名メソッドとの解決順の変化は Rust の minor 変更の通常範囲として受容する |
+| P4 | ガードはテスト資産で `add_stateful_attention` もプローブ内の名前にすぎず、公開 API ではない。外しても破壊的変更にならない |
+| エラー型 | 既存 `AutodiffError` を使い variant は追加しない。既存型には触れない |
+
+### 11.6 ユーザーに決めてほしい事項
+
+- A: P1〜P4 の推奨案で承認し、#2579 で実装する
+- B: P2 を MHA 公開案に替える（`nn/mod.rs` の例外を明文化する）
+- C: K-2 を保留のままにする
+
+承認コメントが形を名指しするまで #2579 は着手しない。
+
+### 11.7 本 PR で行わないこと
+
+facade／autodiff のコード変更、ガードの削除・反転、`compat-api-scope.md` への適用記録、
+Issue 起票、spec 提案の投稿。K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
