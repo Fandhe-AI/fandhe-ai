@@ -1915,3 +1915,9 @@ facade 公開面は追加していない（保留ガード `FftOpsHoldDoctestGua
 facade 公開面は追加していない（保留ガードのプローブと `api_surface.rs` のインベントリへ `fft`／`ifft` を追加）。
 公開形（`Var::fft`／`Var::ifft`・`FftNorm` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-fft-ops-decision.md` §12。
+
+**適用記録（イシュー #2633・親 #2630・ルート #2499 Phase 4。FFT 第 3 弾）**:
+`stft`／`istft`（窓付き短時間フーリエ変換とその逆変換）を `rfft`／`irfft`／`fft`／`ifft` と同じ内部クレート限定の方式で実装した。
+facade 公開面は追加していない（保留ガードのプローブと `api_surface.rs` のインベントリへ `stft`／`istft`・`StftOptions`／`IstftOptions`／`StftPadMode` を追加）。
+公開形（`Var::stft`／`Var::istft`・`StftOptions`／`IstftOptions`／`StftPadMode` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-fft-ops-decision.md` §13。
