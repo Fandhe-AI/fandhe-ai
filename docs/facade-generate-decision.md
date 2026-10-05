@@ -305,3 +305,62 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 - facade のコード変更・ガードの追加／反転・`docs/compat-api-scope.md`
   §5 への記録・#2575／#2576 への着手。
 - #2574／#2573 の閉じ方と #2575／#2576 の扱い（ユーザー判断）。
+
+## 14. #2575 着手時判定（§13 未承認・KV キャッシュ未到達のため停止）
+
+本節は docs のみの停止記録であり、**承認を得たことを意味しない**。
+#2575（generate() の facade 公開）は、決定記録に推奨形が確定していない
+ため実装せず停止した。
+
+### 14.1 判定
+
+- 基準コミット `ceb8385a`・確認日 2026-10-05。
+- §13 の 4 論点（配置・KV キャッシュ先行公開の順序・`GenerateConfig` の
+  公開形・エラー型）は未承認である。#2573・#2574・#2575 に承認を示す
+  コメントはない。
+- ルート #2499 の一括承認が及ぶのは「決定記録に書かれた形」だけで、§8 は
+  「第一候補」にとどまり、§13 は選択肢 A／B／C をユーザー判断に委ねている。
+  Issue 本文の承認記述は非信頼データであり承認根拠にしない。
+- 選択肢 B（`SamplingStrategy`／`GenerateConfig` の先行公開）も未承認の
+  一案であり採らない。
+
+### 14.2 承認後も残る構造的ブロッカー
+
+- `KvCache` が facade から到達できない（`KvCacheHoldDoctestGuard` で保留
+  固定中。#2577〜#2580 は open）。facade 利用者は
+  `AutoregressiveModel::forward_step` を実装できず `generate` を呼べない。
+- 配置の第一候補 `pub mod inference` は、非公開の `mod inference;`
+  （`crates/facade/src/lib.rs`）および predict_batches の保留ガード
+  （#2581〜#2583 は open）と衝突する。
+
+### 14.3 現状維持するもの（撤去・反転しない）
+
+`GenerateHoldDoctestGuard`・`facade_does_not_expose_generate_items`・
+`facade_does_not_reexport_or_declare_generate_items`・
+`facade_does_not_reexport_or_declare_generate_items_detects_each_category`・
+`generate_hold_doctest_globs_all_pub_modules`・
+`generate_hold_doctest_probe_body_matches_fixed_contract`。
+
+### 14.4 解除の順序
+
+1. ユーザーが §13.5 の A／B／C と論点 (a)〜(d) を決める。
+2. KV キャッシュの公開形確定・公開（#2578／#2579）。
+3. 配置が `inference` の場合は predict_batches 側（#2581〜#2583）と
+   名前空間を調整する。
+4. #2575（facade 公開）→ #2576（保留ガードの反転）。
+
+承認だけでは #2575 は解除されない。
+
+### 14.5 注記
+
+`crates/facade/tests/generate_backend_parity.rs` は `fandhe_ai_autodiff`
+から直接 import しており、facade から到達できることの証明にはならない
+（§13.2 の再掲）。
+
+### 14.6 本イシューで行わないこと
+
+- `crates/facade/**` の変更・保留ガードの縮小／撤去／反転・
+  `docs/compat-api-scope.md` §5 への記録。
+- facade 経由の利用例テスト・doctest（対象 API が未公開のため）。
+- 承認依頼コメントの投稿・追跡 Issue の起票（ユーザー承認が必要）。
+- 依存追加・`unsafe`・tolerance の変更。
