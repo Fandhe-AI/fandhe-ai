@@ -3966,6 +3966,107 @@ struct GenerateHoldDoctestGuard;
 #[allow(dead_code)]
 struct PredictBatchesHoldDoctestGuard;
 
+/// イシュー #2631（親 #2630・ルート #2499 Phase 4）の facade 公開保留を
+/// 固定する doctest 足場。`PredictBatchesHoldDoctestGuard`（#2192）と同型の
+/// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob import
+/// したスコープに、本ブロック内でのみ定義したローカル
+/// `__fandhe_fft_hold_probe::{FftNorm, fft_ops::{rfft, irfft}, fft::__mark}`
+/// を導入し、実際に使う名前・呼び出しを書く。facade がどの経路（`pub use` に
+/// よる再エクスポート・型宣言・`Var`／`Tape` への `rfft`／`irfft` inherent
+/// メソッド追加・`pub mod fft_ops`／`pub mod fft` の新設）でこれらの名前を
+/// 公開しても、ローカル定義との glob 衝突（モジュール名・型名の場合。E0659
+/// 等）または呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッド
+/// より優先解決されるため、本プローブの `Type::method` 形式の呼び出しが型
+/// 不一致でコンパイル失敗する）でエラーコードに依存せずコンパイルが失敗する。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::fft_ops::{rfft,
+/// irfft}`・`fandhe_ai_tensor_core::{FftNorm, fft}`）。保留対象は facade
+/// 公開面（`Var::rfft`／`Var::irfft` の委譲メソッドと `FftNorm` の
+/// 再エクスポート）のみで、公開形は未承認（承認依頼は #2677・公開自体は
+/// 承認後の #2678。推奨案は `docs/autodiff-fft-ops-decision.md` §7）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// fft_ops_hold_doctest_globs_all_pub_modules`・
+/// `fft_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_fft_ops`・
+/// `workspace_declares_fft_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御の位置づけは同決定記録 §9 を参照。
+///
+/// 承認を得た日が来たら、本モジュール・本 doctest 自体を削除する（ソース
+/// 走査側の対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_fft_hold_probe {
+///     pub struct FftNorm;
+///     pub mod fft_ops {
+///         pub fn rfft() {}
+///         pub fn irfft() {}
+///     }
+///     pub mod fft {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_fft_hold_probe::*;
+///
+/// struct __FandheFftHoldMarker;
+///
+/// trait __FandheFftHoldProbe {
+///     fn rfft(&self) -> __FandheFftHoldMarker;
+///     fn irfft(&self) -> __FandheFftHoldMarker;
+/// }
+///
+/// impl<'t> __FandheFftHoldProbe for fandhe_ai::Var<'t> {
+///     fn rfft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
+///     fn irfft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
+/// }
+///
+/// impl __FandheFftHoldProbe for fandhe_ai::Tape {
+///     fn rfft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
+///     fn irfft(&self) -> __FandheFftHoldMarker {
+///         __FandheFftHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: FftNorm) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     fft_ops::rfft();
+///     fft_ops::irfft();
+///     fft::__mark();
+/// }
+///
+/// fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
+///     let _: __FandheFftHoldMarker = fandhe_ai::Var::rfft(v);
+///     let _: __FandheFftHoldMarker = fandhe_ai::Var::irfft(v);
+///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::rfft(tape);
+///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::irfft(tape);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct FftOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
