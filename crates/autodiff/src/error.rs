@@ -100,6 +100,20 @@ impl From<fandhe_ai_tensor_core::BackendError> for AutodiffError {
     }
 }
 
+/// `tensor-core::fft` の形状・引数検査失敗を写像する（イシュー #2631）。
+/// 形状違反は `Shape`、引数不正は `InvalidArgument`（バックエンド経由の
+/// `unify_backend_error` と同じ見え方に揃える）。
+impl From<fandhe_ai_tensor_core::FftError> for AutodiffError {
+    fn from(err: fandhe_ai_tensor_core::FftError) -> Self {
+        match err {
+            fandhe_ai_tensor_core::FftError::Shape(e) => AutodiffError::Shape(e),
+            fandhe_ai_tensor_core::FftError::InvalidArgument(msg) => {
+                AutodiffError::InvalidArgument(msg)
+            }
+        }
+    }
+}
+
 impl fmt::Display for AutodiffError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

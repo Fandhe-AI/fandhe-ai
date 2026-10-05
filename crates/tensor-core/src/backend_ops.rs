@@ -4305,6 +4305,47 @@ pub trait BackendOps {
         ))
     }
 
+    /// 実数 FFT（`input: [..., L, ...]` → `[..., n/2+1, ..., 2]`。末尾
+    /// 次元 2 は `(re, im)`。イシュー #2631・`docs/autodiff-fft-ops-
+    /// decision.md`）。`torch.fft.rfft` 相当。`n`・`dim` は
+    /// `fft::rfft_layout` で**解決済み**の値（`n >= 1`・`dim < rank`）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::fft_ops::rfft` は `Unsupported` のときだけ
+    /// ホスト参照実装 [`crate::fft::rfft_host`] へフォールバックし、それ以外
+    /// のエラーは伝播する。実装側も `fft::rfft_layout` で形状を再検査する
+    /// （fail-closed）。
+    fn fft_rfft(
+        &self,
+        _input: &Tensor<f32>,
+        _n: usize,
+        _dim: usize,
+        _norm: crate::fft::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "fft_rfft: default fail-safe (no device-side FFT kernel available)".into(),
+        ))
+    }
+
+    /// 実数逆 FFT（`input: [..., m, ..., 2]` → 実 `[..., n, ...]`。イシュー
+    /// #2631）。`torch.fft.irfft` 相当。`n`・`dim` は `fft::irfft_layout` で
+    /// 解決済みの値（`dim` は複素軸を除いた実軸の添字）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::fft_rfft`] と同じ非破壊拡張・フォールバック契約。
+    fn fft_irfft(
+        &self,
+        _input: &Tensor<f32>,
+        _n: usize,
+        _dim: usize,
+        _norm: crate::fft::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "fft_irfft: default fail-safe (no device-side FFT kernel available)".into(),
+        ))
+    }
+
     /// 分散（`Var: [.., dim_len, ..] → reduce_out_shape(dim)`。イシュー
     /// #1723。`torch.var(dim, correction)`／`tf.math.reduce_variance`
     /// 相当）。`dim=None` は全要素縮約（スカラー出力）。`correction`
@@ -5274,6 +5315,20 @@ mod tests {
         let result = ops.linear_chain_forward_captured(&input, &[(w_view, None, Activation::None)]);
 
         assert!(matches!(result, Ok(None)));
+    }
+
+    /// [`BackendOps::fft_rfft`]／[`BackendOps::fft_irfft`] の既定実装が
+    /// fail-safe（[`BackendError::Unsupported`]）を返し panic しないことの
+    /// ガード（イシュー #2631。GPU 専用 FFT カーネルは対象外）。
+    #[test]
+    fn fft_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let r = ops.fft_rfft(&a, 4, 0, crate::fft::FftNorm::Backward);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))));
+        let b = Tensor::new(vec![1.0_f32, 0.0, 2.0, 0.0], &[2, 2]).unwrap();
+        let r = ops.fft_irfft(&b, 2, 0, crate::fft::FftNorm::Backward);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))));
     }
 
     /// [`BackendOps::scalar_unary`] の既定実装が fail-safe

@@ -1902,3 +1902,10 @@ JSON は手書き（`serde_json` 非追加）、append 時の既存ファイル�
 ガード反転は #2571 で前倒し済みのため、#2572 では docs（`docs/compat-callbacks-loggers-decision.md` §3・§7・§8 を実装済みへ更新し §10 を追記）と、
 公開アクセサ・trait impl の承認形を固定する補強ガード（`callback_logger_types_expose_only_approved_methods_and_traits`）、
 ロガー × `LrSchedule` の利用例テスト（`compat_sequential_callbacks.rs` 19 節）だけを追加した。公開面・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
+
+**適用記録（イシュー #2631・親 #2630・ルート #2499 Phase 4。FFT 第 1 弾）**:
+`rfft`／`irfft` を内部クレート限定（`fandhe_ai_autodiff::fft_ops`・`fandhe_ai_tensor_core::{FftNorm, fft}`）で実装した。
+facade 公開面は追加していない（保留ガード `FftOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::rfft`／`Var::irfft` と `FftNorm` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。
+内部実装はルート #2499 の Phase 4 方針（内部実装＋保留ガードまで先行・公開は承認後）に基づく。詳細は `docs/autodiff-fft-ops-decision.md`。

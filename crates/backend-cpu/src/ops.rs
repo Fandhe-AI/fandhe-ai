@@ -3055,6 +3055,36 @@ impl BackendOps for CpuBackendOps {
         linalg::matrix_rank(a, rcond).map_err(linalg_error_to_backend_error)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::fft_rfft`] の CPU 実装（イシュー
+    /// #2631）。共有カーネル `fandhe_ai_tensor_core::fft::rfft_host` を呼ぶ
+    /// だけで数式は持たない（autodiff のホストフォールバックと単一情報源）。
+    /// 解決済みの `n`／`dim` も `rfft_layout` で再検査する（fail-closed）。
+    fn fft_rfft(
+        &self,
+        input: &Tensor<f32>,
+        n: usize,
+        dim: usize,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let layout = fandhe_ai_tensor_core::fft::rfft_layout(input.shape(), Some(n), Some(dim))?;
+        let data = fandhe_ai_tensor_core::fft::rfft_host(&input.host_slice(), &layout, norm)?;
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::fft_irfft`] の CPU 実装（イシュー
+    /// #2631）。[`Self::fft_rfft`] と同型。
+    fn fft_irfft(
+        &self,
+        input: &Tensor<f32>,
+        n: usize,
+        dim: usize,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let layout = fandhe_ai_tensor_core::fft::irfft_layout(input.shape(), Some(n), Some(dim))?;
+        let data = fandhe_ai_tensor_core::fft::irfft_host(&input.host_slice(), &layout, norm)?;
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::var`] の CPU 実装（イシュー
     /// #1723）。`reduction::var` へそのまま委譲し、エラーは
     /// `reduce_error_to_backend_error` で `BackendError` へ写像する
