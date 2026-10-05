@@ -1953,6 +1953,12 @@ facade 公開面は追加していない（保留ガード `StatReduceOpsHoldDoc
 公開形（`Var::median` 等の委譲メソッドと `QuantileInterpolation` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-stat-reduce-ops-decision.md`。
 
+**適用記録（イシュー #2638・親 #2625・ルート #2499 Phase 4。ヒストグラム・二分探索系）**:
+`histc`／`bincount`／`searchsorted`／`bucketize` の 4 演算（非微分）を内部クレート限定（`fandhe_ai_autodiff::binning_ops`・`fandhe_ai_tensor_core::binning`・`BackendOps::binning_*`）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `BinningOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::histc` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-binning-ops-decision.md`。
+
 **適用記録（イシュー #2639・親 #2625・ルート #2499 Phase 4。形状演算）**:
 `unbind`／`movedim`／`swapaxes`／`tensor_split`（分割数形・境界添字列形）／`meshgrid`／`rot90` を内部クレート限定（`fandhe_ai_autodiff::shape_view_ops`。新規 `Op`・`BackendOps` メソッドなしの既存 `Op` 合成）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `ShapeViewOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。

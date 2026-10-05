@@ -4762,6 +4762,192 @@ struct CumulativeOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct StatReduceOpsHoldDoctestGuard;
 
+/// ヒストグラム・二分探索系（`histc`・`bincount`・`searchsorted`・`bucketize`。
+/// イシュー #2638・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
+/// ガード（`StatReduceOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `binning_ops`／`binning`・型 `BinningError`・5 メソッドを持つ
+/// プローブ用トレイトを置き、修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>`／
+/// `Tensor<i32>`（`bincount` の入力型）の修飾付きメソッド呼び出しの両方を行う。facade が
+/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の
+/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
+/// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::binning_ops`・
+/// `fandhe_ai_tensor_core::{binning, BinningError}`・`BackendOps::binning_*`）。保留対象は
+/// facade 公開面（`Var::histc` 等の委譲メソッド）のみで、公開形は未承認（承認依頼は
+/// #2677・公開自体は承認後の #2678・#2679。推奨案は
+/// `docs/autodiff-binning-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
+/// ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// binning_ops_hold_doctest_globs_all_pub_modules`・
+/// `binning_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_binning_ops`・
+/// `workspace_declares_binning_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_binning_hold_probe {
+///     pub struct BinningError;
+///     pub mod binning_ops {
+///         pub fn histc() {}
+///         pub fn bincount() {}
+///         pub fn bincount_weighted() {}
+///         pub fn searchsorted() {}
+///         pub fn bucketize() {}
+///     }
+///     pub mod binning {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_binning_hold_probe::*;
+///
+/// struct __FandheBinningOpsHoldMarker;
+///
+/// trait __FandheBinningOpsHoldProbe {
+///     fn histc(&self) -> __FandheBinningOpsHoldMarker;
+///     fn bincount(&self) -> __FandheBinningOpsHoldMarker;
+///     fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker;
+///     fn searchsorted(&self) -> __FandheBinningOpsHoldMarker;
+///     fn bucketize(&self) -> __FandheBinningOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheBinningOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn histc(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bucketize(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheBinningOpsHoldProbe for fandhe_ai::Tape {
+///     fn histc(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bucketize(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheBinningOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn histc(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bucketize(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheBinningOpsHoldProbe for fandhe_ai::Tensor<i32> {
+///     fn histc(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+///     fn bucketize(&self) -> __FandheBinningOpsHoldMarker {
+///         __FandheBinningOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: BinningError) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     binning_ops::histc();
+///     binning_ops::bincount();
+///     binning_ops::bincount_weighted();
+///     binning_ops::searchsorted();
+///     binning_ops::bucketize();
+///     binning::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     ti: &fandhe_ai::Tensor<i32>,
+/// ) {
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::histc(v);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount(v);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount_weighted(v);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::searchsorted(v);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bucketize(v);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::histc(tape);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount(tape);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount_weighted(tape);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::searchsorted(tape);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bucketize(tape);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::histc(tf);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::bincount(tf);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::bincount_weighted(tf);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::searchsorted(tf);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::bucketize(tf);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::histc(ti);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::bincount(ti);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::bincount_weighted(ti);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::searchsorted(ti);
+///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::bucketize(ti);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct BinningOpsHoldDoctestGuard;
+
 /// `Var`／`Tape` の低精度 forward 入口（`matmul_low_precision`・
 /// `add_low_precision`・`mul_low_precision`・`relu_low_precision`・
 /// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・

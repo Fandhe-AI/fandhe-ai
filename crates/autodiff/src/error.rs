@@ -127,6 +127,19 @@ impl From<fandhe_ai_tensor_core::StatReduceError> for AutodiffError {
     }
 }
 
+/// `tensor-core::binning` の形状・引数検査失敗を写像する（イシュー #2638）。
+/// 写像規則は [`fandhe_ai_tensor_core::FftError`] 版と同じ。
+impl From<fandhe_ai_tensor_core::BinningError> for AutodiffError {
+    fn from(err: fandhe_ai_tensor_core::BinningError) -> Self {
+        match err {
+            fandhe_ai_tensor_core::BinningError::Shape(e) => AutodiffError::Shape(e),
+            fandhe_ai_tensor_core::BinningError::InvalidArgument(msg) => {
+                AutodiffError::InvalidArgument(msg)
+            }
+        }
+    }
+}
+
 impl fmt::Display for AutodiffError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

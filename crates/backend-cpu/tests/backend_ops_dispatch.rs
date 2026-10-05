@@ -611,3 +611,53 @@ fn metal_stat_reduce_ops_are_unsupported_not_panic() {
         Err(BackendError::Unsupported(_))
     ));
 }
+/// イシュー #2638: `binning_*` 4 メソッドは CUDA に専用カーネルがなく既定の
+/// `Unsupported` を返す（autodiff 側が共有ホストカーネルへフォールバックする契約。
+/// panic しない）。
+#[test]
+fn cuda_binning_ops_are_unsupported_not_panic() {
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    let i = Tensor::new(vec![0i32, 1, 1], &[3]).expect("valid tensor");
+    assert!(matches!(
+        cuda.binning_histc(&a, 4, 0.0, 4.0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.binning_bincount(&i, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.binning_bincount_weighted(&i, &a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.binning_searchsorted(&a, &a, false),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #2638: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_binning_ops_are_unsupported_not_panic() {
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    let i = Tensor::new(vec![0i32, 1, 1], &[3]).expect("valid tensor");
+    assert!(matches!(
+        metal.binning_histc(&a, 4, 0.0, 4.0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.binning_bincount(&i, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.binning_bincount_weighted(&i, &a, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.binning_searchsorted(&a, &a, false),
+        Err(BackendError::Unsupported(_))
+    ));
+}

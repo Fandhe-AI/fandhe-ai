@@ -3226,6 +3226,86 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::binning_histc`] の CPU 実装（イシュー
+    /// #2638）。共有カーネル `fandhe_ai_tensor_core::binning::histc_host` を呼ぶだけで
+    /// 範囲決定・添字算術は持たない（autodiff のホストフォールバックと単一情報源）。
+    /// 引数・形状は `histc_check` で再検査する（fail-closed）。
+    fn binning_histc(
+        &self,
+        x: &Tensor<f32>,
+        bins: usize,
+        min: f32,
+        max: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::binning as bn;
+        // 形状検証を実体化（`contiguous`）より前に行う（巨大 broadcast view で型付きエラーより先に
+        // 実体化が走らないようにする）。
+        bn::histc_check(x.shape(), bins, min, max)?;
+        let x = x.contiguous();
+        let v = bn::histc_host(&x.host_slice(), bins, min, max)?;
+        Tensor::new(v, &[bins]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::binning_bincount`] の CPU 実装（イシュー
+    /// #2638）。[`Self::binning_histc`] と同型。
+    fn binning_bincount(
+        &self,
+        input: &Tensor<i32>,
+        minlength: usize,
+    ) -> Result<Tensor<i32>, BackendError> {
+        use fandhe_ai_tensor_core::binning as bn;
+        // 形状検証を実体化より前に行う（巨大 broadcast view の先行実体化を避ける）。
+        bn::bincount_check(input.shape(), false)?;
+        let input = input.contiguous();
+        let v = bn::bincount_host(&input.host_slice(), minlength)?;
+        let n = v.len();
+        Tensor::new(v, &[n]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::binning_bincount_weighted`] の CPU 実装
+    /// （イシュー #2638）。[`Self::binning_histc`] と同型。
+    fn binning_bincount_weighted(
+        &self,
+        input: &Tensor<i32>,
+        weights: &Tensor<f32>,
+        minlength: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::binning as bn;
+        // 形状検証を実体化より前に行う（巨大 broadcast view の先行実体化を避ける）。
+        let n = bn::bincount_check(input.shape(), true)?;
+        if n == 0 {
+            // 空入力は重みの rank・長さを見ず、実体化もせず minlength 個の零を返す（PyTorch 同様）。
+            let zeros = bn::bincount_zeros_f32(bn::bincount_out_len(&[], minlength)?)?;
+            let len = zeros.len();
+            return Tensor::new(zeros, &[len]).map_err(BackendError::ShapeMismatch);
+        }
+        // 重みの rank・入力との同長を実体化より前に検査する（長さ不一致の巨大 broadcast view を
+        // `contiguous` で先に確保しない）。
+        bn::bincount_weights_check(n, weights.shape())?;
+        let input = input.contiguous();
+        let weights = weights.contiguous();
+        let v = bn::bincount_weighted_host(&input.host_slice(), &weights.host_slice(), minlength)?;
+        let n = v.len();
+        Tensor::new(v, &[n]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::binning_searchsorted`] の CPU 実装（イシュー
+    /// #2638）。[`Self::binning_histc`] と同型で、`searchsorted_layout` で再検査する。
+    fn binning_searchsorted(
+        &self,
+        sorted_sequence: &Tensor<f32>,
+        values: &Tensor<f32>,
+        right: bool,
+    ) -> Result<Tensor<i32>, BackendError> {
+        use fandhe_ai_tensor_core::binning as bn;
+        // レイアウト検証を実体化より前に行う（巨大 broadcast view の先行実体化を避ける）。
+        let layout = bn::searchsorted_layout(sorted_sequence.shape(), values.shape())?;
+        let seq = sorted_sequence.contiguous();
+        let values = values.contiguous();
+        let v = bn::searchsorted_host(&seq.host_slice(), &values.host_slice(), &layout, right)?;
+        Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::fft_fft`] の CPU 実装（イシュー
     /// #2632）。[`Self::fft_rfft`] と同型で、`fft_layout` で再検査してから
     /// 共有カーネル `fft_host` を呼ぶ。

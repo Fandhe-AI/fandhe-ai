@@ -22069,6 +22069,412 @@ fn workspace_declares_stat_reduce_ops_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
+// BinningOpsHoldDoctestGuard（イシュー #2638・親 #2625・ルート #2499 Phase 4）:
+// `StatReduceOpsHoldDoctestGuard`（#2637）系のテストを鏡写しにする。実装は内部クレート
+// （`fandhe_ai_autodiff::binning_ops`・`fandhe_ai_tensor_core::binning`・
+// `BackendOps::binning_*`）に閉じ、facade 公開形（`Var::histc` 等の委譲メソッド）は
+// 未承認（承認依頼は #2677。公開は承認後の #2678・#2679）。
+// =====================================================================
+
+/// `BinningOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import する
+/// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致する
+/// ことを固定する（`stat_reduce_ops_hold_doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn binning_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "BinningOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "BinningOpsHoldDoctestGuard の doctest ブロックが glob import するモジュール\
+         集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を追加した\
+         場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言 [`BINNING_OPS_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（正のプローブの削除・弱体化・
+/// 隠し行の混入を機械的に拒否する）。
+#[test]
+fn binning_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "BinningOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, BINNING_OPS_HOLD_PROBE_BODY,
+        "BinningOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言\
+         BINNING_OPS_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
+         （__fandhe_binning_hold_probe モジュール・__FandheBinningOpsHoldProbe\
+         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`binning_ops_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定
+/// 文言（`BinningOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト
+/// `pub mod` の glob import 行を除いた本文と 1 行単位で完全一致する）。
+const BINNING_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_binning_hold_probe {\n\
+\x20\x20\x20\x20pub struct BinningError;\n\
+\x20\x20\x20\x20pub mod binning_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn histc() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn bincount() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn bincount_weighted() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn searchsorted() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn bucketize() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub mod binning {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_binning_hold_probe::*;\n\
+\n\
+struct __FandheBinningOpsHoldMarker;\n\
+\n\
+trait __FandheBinningOpsHoldProbe {\n\
+\x20\x20\x20\x20fn histc(&self) -> __FandheBinningOpsHoldMarker;\n\
+\x20\x20\x20\x20fn bincount(&self) -> __FandheBinningOpsHoldMarker;\n\
+\x20\x20\x20\x20fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker;\n\
+\x20\x20\x20\x20fn searchsorted(&self) -> __FandheBinningOpsHoldMarker;\n\
+\x20\x20\x20\x20fn bucketize(&self) -> __FandheBinningOpsHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheBinningOpsHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn histc(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bucketize(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheBinningOpsHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn histc(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bucketize(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheBinningOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn histc(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bucketize(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheBinningOpsHoldProbe for fandhe_ai::Tensor<i32> {\n\
+\x20\x20\x20\x20fn histc(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bincount_weighted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn searchsorted(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn bucketize(&self) -> __FandheBinningOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheBinningOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_free_fns(_: BinningError) {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20binning_ops::histc();\n\
+\x20\x20\x20\x20binning_ops::bincount();\n\
+\x20\x20\x20\x20binning_ops::bincount_weighted();\n\
+\x20\x20\x20\x20binning_ops::searchsorted();\n\
+\x20\x20\x20\x20binning_ops::bucketize();\n\
+\x20\x20\x20\x20binning::__mark();\n\
+}\n\
+\n\
+fn __probe_methods(\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
+\x20\x20\x20\x20ti: &fandhe_ai::Tensor<i32>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::histc(v);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount(v);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount_weighted(v);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::searchsorted(v);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bucketize(v);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::histc(tape);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount(tape);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount_weighted(tape);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::searchsorted(tape);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bucketize(tape);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::histc(tf);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::bincount(tf);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::bincount_weighted(tf);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::searchsorted(tf);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::bucketize(tf);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::histc(ti);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::bincount(ti);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::bincount_weighted(ti);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::searchsorted(ti);\n\
+\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<i32>::bucketize(ti);\n\
+}";
+
+/// ヒストグラム・二分探索系の保留対象 fn 名（イシュー #2638）。
+const BINNING_OPS_FN_NAMES: [&str; 5] = [
+    "histc",
+    "bincount",
+    "bincount_weighted",
+    "searchsorted",
+    "bucketize",
+];
+
+/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
+const BINNING_OPS_IDENTS: [&str; 3] = ["binning_ops", "binning", "BinningError"];
+
+/// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
+/// （[`BINNING_OPS_IDENTS`] のうち型として存在するもの）。
+const BINNING_OPS_TYPE_NAMES: [&str; 1] = ["BinningError"];
+
+/// [`facade_does_not_reexport_or_declare_binning_ops`]・その自己テストが共用する
+/// 検出本体。facade src の `pub use` で [`BINNING_OPS_IDENTS`] を経路の識別子単位で
+/// 含むもの（別名・複数行・ネストした group を含む）、内部クレート
+/// （`fandhe_ai_autodiff`／`fandhe_ai_tensor_core`）の glob 再エクスポート、
+/// 5 名の leaf の個別再エクスポート、`struct`／`enum`／`type`／`trait` による
+/// [`BINNING_OPS_TYPE_NAMES`] の独自宣言、`pub mod binning_ops`／`pub mod binning` の宣言、
+/// [`BINNING_OPS_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない）を違反として返す。
+fn scan_binning_ops_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in BINNING_OPS_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            let from_internal = path_tokens
+                .iter()
+                .any(|t| t == "fandhe_ai_autodiff" || t == "fandhe_ai_tensor_core");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if BINNING_OPS_FN_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && BINNING_OPS_TYPE_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && matches!(
+                tokens.get(i + 2).map(String::as_str),
+                Some("binning_ops") | Some("binning")
+            )
+        {
+            offending.push(format!("pub mod {} 宣言", tokens[i + 2]));
+        }
+        i += 1;
+    }
+
+    for fn_name in BINNING_OPS_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）にヒストグラム・二分探索系の保留対象の
+/// 再エクスポート・型の独自宣言・同名 `fn`・`pub mod` が存在しないことを固定する
+/// （`BinningOpsHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
+/// ソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_binning_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_binning_ops_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面がヒストグラム・二分探索系の内部実装（#2638 の\
+         `binning_ops`／`BinningError`。facade 公開形は未承認で承認依頼は\
+         #2677）を再エクスポート、独自宣言、または同名の fn／pub mod を宣言している: \
+         {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_binning_ops`] の自己テスト（各違反
+/// カテゴリの合成ソースを検出できることを恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_binning_ops_detects_each_category() {
+    let offense = |src: &str| !scan_binning_ops_reexports_and_declarations(src).is_empty();
+    // 正例: モジュールの再エクスポート（別名含む）。
+    assert!(offense("pub use fandhe_ai_autodiff::binning_ops;"));
+    assert!(offense("pub use fandhe_ai_autodiff::binning_ops as bins;"));
+    assert!(offense("pub use fandhe_ai_tensor_core::binning;"));
+    // 正例: 型の再エクスポート（単一行・group・別名）。
+    assert!(offense("pub use fandhe_ai_tensor_core::BinningError;"));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::{\n    Device,\n    BinningError,\n};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::BinningError as BinErr;"
+    ));
+    // 正例: 関数の個別再エクスポート。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::binning_ops::{histc, bincount};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::binning_ops::{\n    searchsorted,\n    bucketize,\n};"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    // 正例: 型の独自宣言。
+    assert!(offense("pub enum BinningError { Shape }"));
+    assert!(offense("pub struct BinningError;"));
+    assert!(offense("pub type BinningError = u8;"));
+    assert!(offense("pub trait BinningError {}"));
+    // 正例: fn 宣言・pub mod。
+    assert!(offense("pub fn histc() {}"));
+    assert!(offense("impl Var { pub fn histc(&self) {} }"));
+    assert!(offense("impl Tape { pub fn bincount(&self) {} }"));
+    assert!(offense("impl Tape { pub fn bincount_weighted(&self) {} }"));
+    assert!(offense("impl Var { pub fn searchsorted(&self) {} }"));
+    assert!(offense("impl Var { pub fn bucketize(&self) {} }"));
+    assert!(offense("pub mod binning_ops {}"));
+    assert!(offense("pub mod binning {}"));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense("// pub use fandhe_ai_autodiff::binning_ops;"));
+    assert!(!offense("let s = \"pub fn histc() {}\";"));
+    // 負例: 無関係な再エクスポート・非公開 use・trait メソッド名 binning_*。
+    assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
+    assert!(!offense("use fandhe_ai_autodiff::binning_ops;"));
+    assert!(!offense("fn binning_histc(&self) {}"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`BINNING_OPS_FN_NAMES`] の
+/// `fn` 宣言が承認済みの置き場所だけに存在することを固定する。
+///
+/// 期待値は `autodiff/src/binning_ops.rs` の 5 名（各 1 件）のみ。共有カーネルは
+/// `*_host`、`BackendOps` のメソッドは `binning_*` と命名して同名の `fn` を作らない。
+/// これら以外への追加（facade／`Var` への inherent メソッド追加等）は fail-closed に検出する。
+#[test]
+fn workspace_declares_binning_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in BINNING_OPS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = BINNING_OPS_FN_NAMES
+        .iter()
+        .map(|n| (format!("autodiff/src/binning_ops.rs::{n}"), 1usize))
+        .collect();
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の histc／bincount／bincount_weighted／searchsorted／\
+         bucketize の `fn` 宣言が承認済みの置き場所（autodiff/src/binning_ops.rs の各 1 件）と\
+         一致しない。迂回経路（facade／Var への inherent メソッド追加等）の混入か、\
+         未承認の実装追加でないか確認すること"
+    );
+}
+
+// =====================================================================
 // VarLowPrecisionOpsHoldDoctestGuard（イシュー #2628・親 #2626・ルート #2499
 // Phase 4）: `FftOpsHoldDoctestGuard`（#2631）系のテストを鏡写しにする。
 // 実装は内部クレート（`fandhe_ai_autodiff::low_precision_ops`・
