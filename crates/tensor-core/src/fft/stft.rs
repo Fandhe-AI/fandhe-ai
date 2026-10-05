@@ -343,9 +343,13 @@ pub fn stft_host(x: &[f32], window: &[f32], layout: &StftLayout) -> Result<Vec<f
         for t in 0..t_n {
             let row = (b * t_n + t) * n;
             for j in 0..n {
-                if let Some(s) = layout.src_index(t * hop + j) {
-                    frames[row + j] = x[b * layout.len + s] * window[j];
-                }
+                // 定数パディングの範囲外サンプルは 0 として取得し、全 j に同じ窓掛けを
+                // 適用する（window[j] が NaN/inf のとき 0*window[j]=NaN となり、
+                // 非有限値の伝播契約を範囲内サンプルと揃える）。
+                let v = layout
+                    .src_index(t * hop + j)
+                    .map_or(0.0f32, |s| x[b * layout.len + s]);
+                frames[row + j] = v * window[j];
             }
         }
     }
@@ -864,6 +868,18 @@ mod tests {
         assert!(stft_layout(&[usize::MAX / 2, 4], &pc).is_err());
         let ph = sp(1 << 20, Some(1), false, StftPadMode::Reflect, false, true);
         assert!(stft_layout(&[1 << 40], &ph).is_err());
+    }
+
+    #[test]
+    fn stft_constant_pad_propagates_non_finite_window() {
+        // 範囲外（定数パディング）サンプルでも 0*NaN=NaN が窓掛けで伝播する。
+        let pc = sp(4, Some(1), true, StftPadMode::Constant, false, true);
+        let layout = stft_layout(&[5], &pc).unwrap();
+        let x = vec![1.0f32; 5];
+        let mut w = vec![1.0f32; 4];
+        w[0] = f32::NAN;
+        let out = stft_host(&x, &w, &layout).unwrap();
+        assert!(out.iter().any(|v| v.is_nan()));
     }
 
     #[test]
