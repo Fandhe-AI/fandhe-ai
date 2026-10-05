@@ -266,6 +266,7 @@ pub mod loss_ops;
 pub mod low_precision_ops;
 pub mod matrix_ops;
 pub mod nn;
+pub mod nonfinite_ops;
 pub mod optim;
 pub mod rearrange_ops;
 mod reduce_dims;

@@ -274,6 +274,13 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         | ScalarUnaryOp::Asinh
         | ScalarUnaryOp::Acosh
         | ScalarUnaryOp::Atanh => None,
+        // イシュー #2635: 非有限値の判定 3 種と `NanToNum`（3 値ペイロード）の
+        // GPU 専用カーネルも別イシューのスコープ。明示 `None` でホスト参照実装
+        // （`ScalarUnaryOp::apply`）へフォールバックする。
+        ScalarUnaryOp::IsNan
+        | ScalarUnaryOp::IsInf
+        | ScalarUnaryOp::IsFinite
+        | ScalarUnaryOp::NanToNum { .. } => None,
         _ => None,
     }
 }
@@ -613,6 +620,27 @@ mod tests {
             ScalarUnaryOp::Reciprocal,
             ScalarUnaryOp::Rsqrt,
             ScalarUnaryOp::Erf,
+        ] {
+            assert!(
+                unary_kernel_source(op).is_none(),
+                "{op:?}: GPU カーネル未実装のため None のはず"
+            );
+        }
+    }
+
+    /// イシュー #2635: 非有限値の判定 3 種と `NanToNum` の GPU 専用カーネルは
+    /// スコープ外で、`unary_kernel_source` は明示的に `None` を返す。
+    #[test]
+    fn new_2635_unary_kinds_are_unsupported() {
+        for op in [
+            ScalarUnaryOp::IsNan,
+            ScalarUnaryOp::IsInf,
+            ScalarUnaryOp::IsFinite,
+            ScalarUnaryOp::NanToNum {
+                nan: 0.0,
+                posinf: f32::MAX,
+                neginf: f32::MIN,
+            },
         ] {
             assert!(
                 unary_kernel_source(op).is_none(),

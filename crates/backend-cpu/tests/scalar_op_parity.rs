@@ -71,6 +71,16 @@ fn unary_variants() -> Vec<ScalarUnaryOp> {
         ScalarUnaryOp::Asinh,
         ScalarUnaryOp::Acosh,
         ScalarUnaryOp::Atanh,
+        // イシュー #2635: `positive_data` は全要素有限のため判定 3 種は
+        // 定数マスク・`NanToNum` は恒等になる。非有限入力は下の専用テスト。
+        ScalarUnaryOp::IsNan,
+        ScalarUnaryOp::IsInf,
+        ScalarUnaryOp::IsFinite,
+        ScalarUnaryOp::NanToNum {
+            nan: 0.0,
+            posinf: f32::MAX,
+            neginf: f32::MIN,
+        },
     ]
 }
 
@@ -317,6 +327,50 @@ fn scalar_unary_nan_inf_propagation() {
     assert!(clamp_out.get(&[0]).unwrap().is_nan(), "clamp(NaN) は NaN");
     assert_eq!(clamp_out.get(&[1]).unwrap(), 1.0, "clamp(+inf) は max");
     assert_eq!(clamp_out.get(&[2]).unwrap(), -1.0, "clamp(-inf) は min");
+}
+
+/// イシュー #2635: 非有限入力（NaN・`±inf`）・`±0`・非正規化数を含む
+/// テンソルで、判定 3 種と `NanToNum` が `apply` の逐次適用と bit 一致する
+/// （`NanToNum` は NaN を伝播しない最初の kind のため、上の NaN 伝播系
+/// テストとは別に固定する）。
+#[test]
+fn new_2635_nonfinite_variants_match_host_reference_with_nonfinite_inputs() {
+    let ops = CpuBackendOps::new();
+    let data = vec![
+        f32::NAN,
+        f32::from_bits(0xFFC0_0001),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.0,
+        -0.0,
+        f32::MIN_POSITIVE / 4.0,
+        f32::MAX,
+        f32::MIN,
+        1.25,
+    ];
+    let a = Tensor::new(data.clone(), &[2, 5]).unwrap();
+    for op in [
+        ScalarUnaryOp::IsNan,
+        ScalarUnaryOp::IsInf,
+        ScalarUnaryOp::IsFinite,
+        ScalarUnaryOp::NanToNum {
+            nan: 7.0,
+            posinf: 8.0,
+            neginf: -9.0,
+        },
+        ScalarUnaryOp::NanToNum {
+            nan: f32::INFINITY,
+            posinf: 0.0,
+            neginf: 0.0,
+        },
+    ] {
+        let expected: Vec<f32> = data.iter().map(|&x| op.apply(x)).collect();
+        let out = ops.scalar_unary(op, &a).unwrap();
+        assert!(
+            bits_eq(&out, &expected),
+            "scalar_unary({op:?}) が非有限入力で bit 一致しない"
+        );
+    }
 }
 
 #[test]

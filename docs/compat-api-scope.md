@@ -1934,3 +1934,9 @@ facade 公開面は追加していない（保留ガードのプローブと `ap
 facade 公開面は追加していない（保留ガード `TrigOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var::atan` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-trig-ops-decision.md`。
+
+**適用記録（イシュー #2635・親 #2625・ルート #2499 Phase 4。非有限値の判定・置換）**:
+`isnan`／`isinf`／`isfinite`／`nan_to_num` の 4 演算を内部クレート限定（`fandhe_ai_autodiff::nonfinite_ops`・`fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `NonfiniteOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::isnan` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-nonfinite-ops-decision.md`。
