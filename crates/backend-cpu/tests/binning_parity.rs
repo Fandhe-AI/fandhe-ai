@@ -172,3 +172,46 @@ fn results_are_bit_deterministic() {
     };
     assert_eq!(bits(&w1), bits(&w2));
 }
+
+/// 巨大な broadcast view（形状だけ大きく実体化すれば TB 級）を渡しても、検証違反は実体化より
+/// 前に型付きエラーで返る（`contiguous` の確保で panic／abort しない。PR #2782 レビュー）。
+/// 検証が実体化の後ろに回ると本テストはプロセスごと落ちる（fail-closed の回帰固定）。
+#[test]
+fn violations_are_rejected_before_materializing_huge_views() {
+    let ops = CpuBackendOps::new();
+    let huge = 1usize << 40;
+    let big_f = t(vec![1.0], &[1]).broadcast_to(&[huge]).unwrap();
+    let small_i = ti(vec![0, 1], &[2]);
+
+    // 重みの長さ不一致（rank 1）・rank 2 の巨大 view。
+    assert!(matches!(
+        ops.binning_bincount_weighted(&small_i, &big_f, 0),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    let big_f2 = t(vec![1.0], &[1, 1]).broadcast_to(&[2, huge]).unwrap();
+    assert!(matches!(
+        ops.binning_bincount_weighted(&small_i, &big_f2, 0),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    // 入力側の rank 違反（rank 2 の巨大 view）。
+    let big_i2 = ti(vec![1], &[1, 1]).broadcast_to(&[2, huge]).unwrap();
+    assert!(matches!(
+        ops.binning_bincount(&big_i2, 0),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        ops.binning_bincount_weighted(&big_i2, &t(vec![1.0], &[1]), 0),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    // histc: bins == 0 は巨大入力の実体化より前に拒否する。
+    assert!(matches!(
+        ops.binning_histc(&big_f, 0, 0.0, 1.0),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    // searchsorted: rank 不一致（seq は 2-d・values は 1-d の巨大 view）。
+    let seq = t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+    assert!(matches!(
+        ops.binning_searchsorted(&seq, &big_f, false),
+        Err(BackendError::InvalidArgument(_))
+    ));
+}

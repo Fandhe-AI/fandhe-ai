@@ -3279,7 +3279,9 @@ impl BackendOps for CpuBackendOps {
             let len = zeros.len();
             return Tensor::new(zeros, &[len]).map_err(BackendError::ShapeMismatch);
         }
-        bn::bincount_check(weights.shape(), true)?;
+        // 重みの rank・入力との同長を実体化より前に検査する（長さ不一致の巨大 broadcast view を
+        // `contiguous` で先に確保しない）。
+        bn::bincount_weights_check(n, weights.shape())?;
         let input = input.contiguous();
         let weights = weights.contiguous();
         let v = bn::bincount_weighted_host(&input.host_slice(), &weights.host_slice(), minlength)?;
