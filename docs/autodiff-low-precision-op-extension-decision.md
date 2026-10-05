@@ -82,7 +82,8 @@ R1 で #2628 が守る事項:
 事前登録事項:
 
 - f16 の 1 ulp は相対 2^-10（約 9.8e-4）以下で、丸め境界の 1 ulp ずれは判定内。**bf16 の 1 ulp は相対 2^-7（約 7.8e-3）で、1 ulp ずれただけで外れる**（絶対 1e-5 未満の微小値を除く）。#2071 の MHA Bf16 FAIL と同じ構造。
-- 外れた場合は**判定不能として記録し、tolerance・baseline は変えない**。自カーネルの不具合なら直す。副判定を落とす場合は理由をコメントと記録に残す。
+- **「判定不能」は第三者比較対象（P4・P5 の PyTorch 比較）に限る**（spec REQ-2・`coding-rust.md` の数値契約の統一）。PyTorch 側出力が統一複合判定を外れた場合は比較データの妥当性上の判定不能として記録し、tolerance・baseline は変えない。自カーネルの不具合なら直す。副判定（Bf16）を落とす場合は理由をコメントと記録に残す。
+- **P6（CUDA／Metal vs CPU。自前バックエンド間）の不一致は判定不能にせず、通常の parity 失敗として扱う**。統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を緩和せず、カーネルまたは丸め方針の不具合として修正する。
 - fixture は既存 `crates/autodiff/tests/fixtures/*-pytorch-reference/` と同じ運用（`gen_reference.py`・README に生成条件と sha256・CI は Python 非依存）。入力は有限・表現範囲内、MatMul は小さい K。対象 dtype で厳密に表現できる入力のケースを 1 つ含める。
 - PyTorch 2.14.0 の CPU が各 Op × dtype を実行できるか・内部累積精度は**本記録では未確認**（作成環境に torch がない）。#2628 の fixture 生成時に確認し、実行できない組合せは理由付きで対象外にする。
 - 実機未実測分は #2628 が `docs/perf/logs/low-precision-ops-2628/README.md` に測定コマンドと記入欄を申し送る（`amp-conv-mha-low-precision-2071/README.md` と同型）。
