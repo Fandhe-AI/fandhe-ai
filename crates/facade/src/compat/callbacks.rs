@@ -726,7 +726,9 @@ impl std::fmt::Debug for LrSchedule {
 /// を書く。`append(true)` では追記し、ファイルが存在しないか空のときだけ
 /// ヘッダを書く。既存ファイルが空でない場合は先頭行を上限付きで読み、
 /// 今回の列集合のヘッダと完全一致することを検証する（不一致・読み込み
-/// 失敗は fit を開始せず `Err`。`compiled` は書き戻される）。追記方式の
+/// 失敗は fit を開始せず `Err`。`compiled` は書き戻される）。既存ファイルの
+/// 末尾が改行で終わっていない場合（前回 fit の中断）は、改行を 1 つ補って
+/// から追記する。追記方式の
 /// ため一時ファイル＋`rename` の原子性は使えず、epoch ごとに 1 行を書いて
 /// 次へ進む（途中でクラッシュしても完了した epoch の行は残る）。親
 /// ディレクトリが無ければ作成する。I/O 失敗は
@@ -826,7 +828,7 @@ impl CsvLogger {
     }
 
     fn open_for_fit(&self, header: &str) -> Result<std::fs::File, String> {
-        use std::io::Write;
+        use std::io::{Read, Seek, SeekFrom, Write};
         logger_io::ensure_parent_dir(&self.path)?;
         let existing_nonempty = self.append
             && std::fs::metadata(&self.path)
@@ -839,10 +841,22 @@ impl CsvLogger {
                     "既存ファイルのヘッダ（{first:?}）が今回の列集合（{header:?}）と一致しない"
                 ));
             }
-            return std::fs::OpenOptions::new()
+            // 前回 fit が行の途中で中断し末尾が改行で終わっていないと、追記行が
+            // 壊れた行へ連結されるため、改行を補ってから追記する。
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
                 .append(true)
                 .open(&self.path)
-                .map_err(|e| e.to_string());
+                .map_err(|e| e.to_string())?;
+            f.seek(SeekFrom::End(-1)).map_err(|e| e.to_string())?;
+            let mut last = [0u8; 1];
+            f.read_exact(&mut last).map_err(|e| e.to_string())?;
+            if last[0] != b'\n' {
+                f.write_all(b"\n")
+                    .and_then(|_| f.flush())
+                    .map_err(|e| e.to_string())?;
+            }
+            return Ok(f);
         }
         let mut f = if self.append {
             std::fs::OpenOptions::new()

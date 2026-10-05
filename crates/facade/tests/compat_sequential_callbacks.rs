@@ -1079,6 +1079,26 @@ fn csv_append_false_overwrites_and_true_keeps_one_header() {
 }
 
 #[test]
+fn csv_append_to_file_without_trailing_newline_does_not_corrupt_rows() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("csvnonl");
+    let path = tmp.path("log.csv");
+    // 前回 fit が行の途中で中断した状態（末尾に改行なし）を作る。
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "epoch,loss,lr\n0,0.5,0.01\n1,0.4,0.01").unwrap();
+    let mut m = compiled_regression_model(0.05);
+    let mut cbs = [Callback::CsvLogger(CsvLogger::new(&path).append(true))];
+    m.fit_with_callbacks(&x, &y, FitConfig::new(2, N), None, &mut cbs)
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("epoch,loss,lr\n0,0.5,0.01\n1,0.4,0.01\n"));
+    let (_, rows) = read_csv(&path);
+    assert_eq!(rows.len(), 4, "既存 2 行 + 追記 2 行が壊れず別行になる");
+    assert_eq!(rows[2][0], "0");
+    assert_eq!(rows[3][0], "1");
+}
+
+#[test]
 fn csv_append_with_mismatched_header_fails_closed_and_keeps_model_state() {
     let (x, y) = gen_regression_data(SEED_DATA);
     let (xv, yv) = gen_regression_data(SEED_VAL);
