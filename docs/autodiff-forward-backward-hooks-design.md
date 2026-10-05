@@ -613,3 +613,65 @@ lifetime とエラー伝播・#2139 の受入基準改訂・facade 公開〈経�
 
 facade／autodiff のコード変更、保留ガードの削除・反転、`compat-api-scope.md` §5 適用記録、Issue 起票・コメント投稿、
 spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§13 の書き換え。
+
+## 15. #2586（CPU 本体実装）の着手時判定
+
+本節は docs のみの停止記録であり、承認を得たことを意味しない。§11 承認事項 1〜5 と §14.6 の選択は未取得のまま。
+
+### 15.1 経緯と判定
+
+- 基準コミット: `origin/main` `1c98db9a`（#2585 の PR #2763 マージ後）。確認日: 2026-10-05。
+- #2586 はテープ上の hook 登録・発火の CPU 参照実装を求める。概要は「facade は非公開のまま」、
+  テンプレート上の受入条件は「facade へ公開」と食い違う。どちらの読みでも下記のとおり着手できない。
+- 停止条項（推奨形が無い・複数案のままの論点があれば実装せず記録追記と承認依頼へ切り替える）に従い、
+  facade・autodiff のコードと保留ガードは変更していない。
+
+### 15.2 承認コメントの確認範囲
+
+#2586・#2585・#2587・#2584・#2542・#2499 の 6 イシューのコメントはいずれも 0 件（2026-10-05 確認）。
+§14.6 の選択肢 A／B／C を名指しする承認は存在しない。一括承認の効力は記録が形を決めている項目に限られ、
+§14.4 の推奨案（P1〜P9）は対象外である。
+
+### 15.3 「内部のみの先行実装」を取らない理由
+
+- **ガード衝突**: `workspace_declares_no_hook_registration_fns`（`crates/facade/tests/api_surface.rs:9391`・
+  `HOOK_REGISTRATION_FN_NAMES` `:9303`）は `crates/*/src/` 全体で `register_backward_hook`／`remove_hook` 等の
+  `fn` 宣言 0 件を固定する。`autodiff/src/tape.rs` への追加で失敗する。縮小の可否は §14.7 のユーザー判断事項で未回答。
+- **承認範囲の解釈**: `docs/compat-api-scope.md` §5 は §11 の 5 項目がそろうまで内部実装も着手不可と記す。
+  一括承認が §11 の 1〜4 に及ぶかは未解決で、自動運転では及ぶと断定しない。
+- **内部形の未決細部**: resident 葉への登録拒否で返す variant（P7）、`HookHandle` の derive・可視性・
+  二重解除の扱い（P3）、forward 側の名称・構築子・`ForwardHookCtx` の accessor 名（P1・P6）。
+  実装すると未承認の推奨案を先取りすることになる。
+- 現状 `crates/autodiff/src` に `HookHandle`・`ForwardHooked`・`ForwardHookCtx`・`register_backward_hook`・
+  `remove_hook` は 0 件。
+
+### 15.4 現状維持するもの
+
+`VarHooksHoldDoctestGuard`（`crates/facade/src/lib.rs:1976`）と `api_surface.rs` の hooks 保留系テスト
+（`hooks_hold_doctest_*`・`autodiff_declares_no_register_hook_fn`・`workspace_declares_no_hook_registration_fns`・
+検出器の自己テスト）は撤去・縮小・反転しない。
+
+### 15.5 受入条件ごとの扱い
+
+| 受入条件 | 扱い |
+|---|---|
+| facade への公開（不足分の CPU 先行実装を含む） | 未実施（公開形・ガード縮小・内部細部が未承認） |
+| 公開経路の単体テスト・doctest | 対象 API が存在しないため追加不可 |
+| 実機 parity の申し送り（`docs/perf/logs/`） | hook は数値経路を追加しない設計（§6）のため発生しない |
+
+### 15.6 解除の順序
+
+1. ユーザーが §14.6 の A／B／C を選び、§14.7 の 2 点（facade 形の承認前に #2586 を着手してよいか・
+   否定ガードを定義元 `autodiff/src/tape.rs` のみ許すインベントリへ縮小してよいか）と、
+   一括承認が §11 の 1〜4 に及ぶかに回答する。
+2. #2586 を再着手（reopen または再起票）し、§13.4 の範囲を実装して同一 PR で否定ガードを承認範囲に限り縮小する。
+3. #2587 で facade 公開と保留ガードの正ガード反転（§14.4 P9）、`compat-api-scope.md` §5 適用記録を行う。
+
+### 15.7 後続への影響
+
+#2587 は公開物が無いため同じ理由で停止対象になる。
+
+### 15.8 本記録で行わないこと
+
+コード変更、ガードの削除・縮小・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、
+spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§14 の書き換え。
