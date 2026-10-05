@@ -3114,6 +3114,42 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::fft_stft`] の CPU 実装（イシュー
+    /// #2633）。`stft_layout` で再検査してから共有カーネル `stft_host` を
+    /// 呼ぶだけで数式は持たない（autodiff のホストフォールバックと単一情報源）。
+    fn fft_stft(
+        &self,
+        input: &Tensor<f32>,
+        window: &Tensor<f32>,
+        params: &fandhe_ai_tensor_core::fft::StftParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let layout = fandhe_ai_tensor_core::fft::stft_layout(input.shape(), params)?;
+        let data = fandhe_ai_tensor_core::fft::stft_host(
+            &input.host_slice(),
+            &window.host_slice(),
+            &layout,
+        )?;
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::fft_istft`] の CPU 実装（イシュー
+    /// #2633）。[`Self::fft_stft`] と同型で、共有カーネル `istft_host` が
+    /// NOLA 検査を内包するため検査を迂回できない。
+    fn fft_istft(
+        &self,
+        input: &Tensor<f32>,
+        window: &Tensor<f32>,
+        params: &fandhe_ai_tensor_core::fft::IstftParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let layout = fandhe_ai_tensor_core::fft::istft_layout(input.shape(), params)?;
+        let data = fandhe_ai_tensor_core::fft::istft_host(
+            &input.host_slice(),
+            &window.host_slice(),
+            &layout,
+        )?;
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::var`] の CPU 実装（イシュー
     /// #1723）。`reduction::var` へそのまま委譲し、エラーは
     /// `reduce_error_to_backend_error` で `BackendError` へ写像する
