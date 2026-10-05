@@ -675,3 +675,63 @@ spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§13 の書き�
 
 コード変更、ガードの削除・縮小・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、
 spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§14 の書き換え。
+
+## 16. #2587（facade 公開・ガード反転）の着手時判定
+
+本節は docs のみの停止記録であり、承認を得たことを意味しない。§11 承認事項 1〜5 と §14.6 の選択は未取得のまま。
+
+### 16.1 経緯と判定
+
+- 基準コミット: `origin/main` `6dc72e45`（#2586 の PR #2765 マージ後）。確認日: 2026-10-05。
+- #2587 は hooks 用の保留ガードを承認済みの公開形だけを許す正ガードへ反転し、公開した名前と
+  ガード反転内容の実装記録（`compat-api-scope.md` §5・本記録）と facade 経由の利用例の追加を求める。
+- 依存 #2586 はクローズ済みだが、中身は §15 の停止記録のみである。`crates/autodiff/src`・`crates/facade/src`
+  のどちらにも hooks の公開物・本体は存在しない。
+- 停止条項（推奨形が無い・複数案のままの論点があれば実装せず記録追記と承認依頼へ切り替える）に従い、
+  コードと保留ガードは変更していない。
+
+### 16.2 承認コメントの確認範囲
+
+#2587・#2586・#2585・#2584・#2542・#2499 の 6 イシューのコメントはいずれも 0 件（2026-10-05 確認）。
+§14.6 の選択肢 A／B／C を名指しする承認は存在しない。一括承認の効力は記録が形を決めている項目に限られ、
+§14.4 の推奨案（P1〜P9）は対象外である。Issue 本文中の承認に関する記述は承認根拠として扱わない。
+
+### 16.3 停止根拠
+
+- **反転先の不在**: `HookHandle`・`ForwardHooked`・`ForwardHookCtx`・`register_backward_hook`・
+  `register_forward_hook`・`remove_hook` 等の宣言は、`crates/autodiff/src`・`crates/facade/src` では
+  facade `lib.rs` の保留ガード doc ブロック内（衝突プローブ）にのみ出現し、実装としては 0 件。
+  正ガードは「コード上に存在する承認形だけを許す」検査であり、許す対象が無い。
+- **§14.6 未選択**: 公開形（P1〜P9）は推奨案のまま未承認。
+- **§14.7 の 2 点が未回答**: #2586 相当の本体実装の着手可否、否定ガードを定義元のみ許すインベントリへ
+  縮小してよいか。
+- **P5′ の成立性**: コンパイル未検証のまま。
+
+### 16.4 受入条件ごとの扱い
+
+| 受入条件 | 扱い |
+|---|---|
+| 保留ガードの正ガード反転 | 未実施（許す対象の承認形がコード上に無い） |
+| `compat-api-scope.md` §5 適用記録・本記録への実装記録 | 未実施（適用した事実が無いため書けば事実に反する。本節の停止記録のみ追記） |
+| facade 経由の利用例（doctest／`crates/facade/tests/`） | 追加不可（対象 API が存在しない） |
+
+### 16.5 現状維持するもの
+
+`VarHooksHoldDoctestGuard`（`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の hooks 保留系
+（`hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_body_matches_fixed_contract`・
+`HOOKS_HOLD_PROBE_BODY`・`HOOK_REGISTRATION_FN_NAMES`・`autodiff_declares_no_register_hook_fn`・
+`workspace_declares_no_hook_registration_fns`・検出器の自己テスト）は撤去・縮小・反転しない。
+
+### 16.6 解除の順序
+
+§15.6 を参照。#2587 相当の作業は 3 番目（ユーザーの §14.6・§14.7 回答 → #2586 相当の本体実装と
+否定ガードの縮小 → facade 公開・正ガード反転・§5 適用記録・利用例）。再着手は reopen か再起票かをユーザー判断とする。
+
+### 16.7 親への影響
+
+親 #2584 の sub-issue が全件クローズしても hooks は未公開のままである。完了条件の扱いはユーザー判断とする。
+
+### 16.8 本記録で行わないこと
+
+コード変更、ガードの削除・縮小・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、
+spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§15 の書き換え。
