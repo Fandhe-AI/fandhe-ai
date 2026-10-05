@@ -12,7 +12,7 @@ bool を返す比較 6 種（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／
 src/bool_ops.rs`）として実装した（案 C。§3 参照）。`Var` に inherent の
 `pub fn` は追加していない（#2141 時点の記述。比較 6 種・`masked_select` の
 7 件は #2510 で `Var` の委譲メソッドとして追加済み。logical 3 件は
-未公開のまま #2594 で扱う。§6.1 参照）。新規 `Op`・`BackendOps` メソッド・VJP・tape
+未公開のまま #2594 で扱う。公開形の推奨案は §6.2〔承認待ち〕。§6.1 参照）。新規 `Op`・`BackendOps` メソッド・VJP・tape
 ノードは追加していない。facade 公開（`Var` への委譲メソッド追加）は
 #2141 時点では承認待ちのまま対象外とした（履歴。現状は比較 6 種・
 `masked_select` が #2510 で公開済みで、保留中なのは logical 3 件のみ）。
@@ -89,7 +89,7 @@ VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
 1. facade 公開: `Var` への委譲メソッド 7 件（比較 6 種・`masked_select`）
    および logical 3 件の公開形（`Var` の関連関数にするか facade 直下の
    関数にするか）。**7 件は #2510 で適用済み（ルート #2499 一括承認）。
-   logical 3 件の公開形は未決のまま #2594**
+   logical 3 件の公開形は未決のまま #2594（推奨案を §6.2 に記録・#2595・承認待ち。実装は承認後に #2596）**
 2. 微分可能な `masked_select`
 3. `Var` 入力の logical 版
 4. GPU 専用カーネル（ホストでの bool 化・logical・select の GPU 化）
@@ -148,3 +148,125 @@ VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
 - CUDA／Metal: 委譲のみでカーネルを新設しないため新規の `#[ignore]` テスト・
   実測申し送りは無い（既存の `bool_ops_backend_parity.rs`・
   `docs/perf/logs/bool-ops-2141/README.md` のまま）
+
+### §6.2 logical 3 件の facade 公開形（#2595・承認待ち）
+
+**本節は推奨案の記録であり、承認の取得を意味しない。確定形ではない。**
+親 #2594・祖 #2542、実装は兄弟 #2596（承認後にのみ着手）。§6 項目 1 は
+logical 3 件の公開形を「`Var` の関連関数か facade 直下の関数か」の 2 案
+併記のまま推奨形を持たず、ルート #2499 の一括承認（記録済みの推奨形にのみ
+及ぶ）の対象外である。
+
+#### 着手時判定（調査基準: `origin/main` 699847bf・2026-10-05）
+
+- 3 関数のシグネチャは `(&Tensor<bool>, &Tensor<bool>) -> Result<Tensor<bool>,
+  AutodiffError>`（`logical_not` は単項。`crates/autodiff/src/bool_ops.rs:197`・
+  `:205`・`:213`）。`Var`・`Tape` を取らずホスト常駐データのみで計算し、確保前に
+  要素数を検査する（`checked_bytes_for::<bool>`）。返しうるエラーは
+  `AutodiffError::Shape(..)`（ブロードキャスト不可・要素数 overflow）のみ
+- `AutodiffError`・`ShapeError` は `#[non_exhaustive]` で facade 直下に再
+  エクスポート済み
+- facade 直下には `Tensor` を受け取り返す委譲 `pub fn` の前例がある
+  （`eye`／`zeros_like`／`ones_like`。`crates/facade/src/lib.rs:1103-1121`）
+- facade の `pub fn`／`pub use` に `logical_*` は無い。`crates/facade/src/` での
+  出現は `VarBoolOpsHoldDoctestGuard` の doc・プローブのみ
+- `Tensor<bool>` は facade から生成（`Tensor::new`・`Var::cast::<bool>()`・
+  `Var::*_bool`）・消費（`where_cond`・`masked_fill`・`masked_select`）できる
+- 保留ガードは doctest `VarBoolOpsHoldDoctestGuard` と `api_surface.rs` の 4
+  テスト。ソース走査 `facade_does_not_reexport_or_declare_bool_ops`
+  （`api_surface.rs:8445`）は `bool_ops` を含む `pub use` 行と 3 名の `fn`
+  宣言を拒否する
+- `tensor-core` に `Tensor<bool>` 専用の inherent impl・`BitAnd`／`BitOr`／`Not`
+  の impl は無い
+
+#### 候補比較
+
+比較軸: 呼び出し形／変更クレート／0.10.0 非破壊性／名前衝突／既存保留群・既存
+公開との整合／将来拡張（§6 項目 3「`Var` 入力の logical 版」・項目 4「GPU 専用
+カーネル」）への影響。
+
+| 案 | 形 | 評価の要点 |
+|---|---|---|
+| A: `Var` 委譲（関連関数） | `Var::logical_and(&Tensor<bool>, &Tensor<bool>)` を `var.rs` に追加 | 追加のみで非破壊。公開済み 7 件と同じ委譲・同じ正ガードを流用できる。一方 3 関数は `Var`・`Tape` に触れず `Var::` 名前空間が実体と合わない。**`Var::logical_and` の名前を占有し、項目 3 の `Var` 入力版（自然な形は `x.logical_and(&y)`）を将来同名で追加できなくなる**。内部クレート `autodiff` の変更を伴う |
+| B-1: facade 直下の委譲関数 | `fandhe_ai::logical_and(&a, &b)`。`facade/src/lib.rs` に `pub fn` 3 件、本体は `fandhe_ai_autodiff::bool_ops::<name>(..)` の 1 式 | 追加のみで非破壊。直下に同名なし。`zeros_like`／`ones_like`／`eye` と同じ既存パターン。`torch.logical_and` の自由関数形に対応。`Var`／`Tensor` のメソッド名を占有せず項目 3 を妨げない。変更は facade に閉じる。`bool_ops` を含む `pub use` の全面禁止（既存ソース走査規則）を維持できる |
+| B-2: 3 関数のみ選択再エクスポート | `pub use fandhe_ai_autodiff::bool_ops::{logical_and, logical_or, logical_not};` | 利用側から見た形は B-1 と同じで本体も無い。ただし `bool_ops` を含む `pub use` を 1 行許す例外をガードに設ける必要があり、rustdoc に内部向け文面（イシュー番号を含む）がそのまま出る |
+| C: モジュール再エクスポート | `pub use fandhe_ai_autodiff::bool_ops;` | 10 関数すべてが公開され、公開済み 7 件が `Var` メソッドと自由関数の二重入口になる（§3 案 B を退けた理由と同じ）。内部モジュール名が公開名として固定される。現行ガードが明示的に拒否する配置 |
+| D: `Tensor<bool>` の inherent メソッド／演算子 | `a.logical_and(&b)`・`&`／`\|`／`!` | facade からは外部型に inherent impl を足せず `tensor-core` 側の実装が必要。`tensor-core` は `AutodiffError` を名指しできず、実装移設とエラー型変更を伴う。演算子トレイトはブロードキャスト失敗を `Result` で返しにくい。#2594 の対象範囲（facade 配下）を超える。B の上に将来追加することは妨げない |
+| E: 独自型 | `BoolMask` newtype・拡張 trait | 新しい公開型／trait が増える。既存公開 API はすべて `Tensor<bool>` を直接やり取りするため相互変換が要る。trait は sealing の論点が加わり、後で inherent へ移すと入口が二重に残る（§3 案 B と同じ） |
+
+名前衝突について:
+
+- **facade 内**: 直下の `pub fn`／`pub use` と `pub mod` 配下に 3 名は無い（着手時
+  に grep で確認。#2596 着手時に再実行する）
+- **既存の保留群**: 他の `*HoldDoctestGuard` は `use fandhe_ai::*;` したスコープへ
+  ローカル定義を置く方式で、`crates/facade/src/` で `logical_` が現れるのは
+  `VarBoolOpsHoldDoctestGuard` のみ。同ガードのプローブ本体での 3 名の参照は
+  経路付き・メソッド形・関連関数形で、裸の識別子としては使っていないため、
+  直下への 3 関数追加と衝突しない見込み（#2596 で実機検証する）。新しい
+  `pub mod` を設ける配置は、各ガードの glob import 集合を検査するテスト群
+  （`*_hold_doctest_globs_all_pub_modules`）の更新を要する
+- **下流利用者**: `use fandhe_ai::*;` と別クレートの glob import が同名を持ち、
+  かつその名前を実際に使う場合に限り曖昧性エラーになる。下流のローカル定義・
+  明示 import は glob より優先される。公開項目の追加は通常 minor 変更に分類
+  される範囲だが、本記録は互換性の保証を断定しない
+
+#### 推奨案（承認待ち）
+
+**B-1**。
+
+```rust
+pub fn logical_and(a: &Tensor<bool>, b: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError>
+pub fn logical_or(a: &Tensor<bool>, b: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError>
+pub fn logical_not(a: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError>
+```
+
+根拠:
+
+1. 3 関数は `Var`・`Tape` に触れないため、§6 項目 1 が挙げる「facade 直下の
+   関数」が実体に合う
+2. 既存の直下委譲関数と同パターンで、新しい型・trait・`pub mod`・`Op`・
+   `BackendOps`・VJP・`unsafe`・依存が不要
+3. `Var`／`Tensor` のメソッド名を空けておける
+4. 変更が facade に閉じる
+5. 意味論は内部自由関数と同一（bool 入力のみ・NumPy 互換ブロードキャスト・
+   確保前の要素数検査を迂回しない 1 式委譲）
+
+0.10.0 非破壊チェック: 既存項目のシグネチャ・意味論の変更なし／追加は直下の関数
+3 件のみ／`FitConfig` 不変／tolerance・baseline・依存・閾値・`docs/spec` 不変。
+
+#### ユーザーに決めてほしい事項
+
+- (a) 公開形: A／B-1／B-2／C／D／E のどれか。推奨は B-1
+- (b) 配置: facade 直下か新しい `pub mod` 配下か。推奨は直下
+- (c) エラー型: `AutodiffError` のまま（`Var::*_bool`・`masked_select` と同じ。将来
+  GPU 経路でバックエンド由来の失敗が加わっても型を変えずに済む）か、
+  `ShapeError` へ狭める（`zeros_like` と同じ）か。推奨は `AutodiffError`
+- (d) 保留ガード: 現行の撤去条件どおり doctest を削除するか、「承認形以外
+  （`Var`／`Tensor`／`Tape` 上の配置・`bool_ops` モジュール公開）を拒む」ガード
+  として残しソース走査だけを正ガード化するか。推奨は後者（#2510 の部分反転と
+  同じ扱い）
+- (e) §6 項目 2〜4 は引き続き対象外でよいか
+- (f) #2595 の閉じ方と #2596 の着手条件（承認コメントが付いてから着手）
+
+#### 承認後の実装スケッチ（#2596。本記録では実施しない）
+
+- `crates/facade/src/lib.rs`: `pub fn` 3 件と facade のみを import した doctest。
+  `VarBoolOpsHoldDoctestGuard` の doc を (d) の決定に合わせて更新
+- `crates/facade/tests/api_surface.rs`: `BOOL_OPS_HELD_FN_NAMES` を承認済み集合へ
+  移し、`facade_does_not_reexport_or_declare_bool_ops` を正ガードへ書き換え
+  （`bool_ops` を含む `pub use` は 0 件／logical 3 件は `lib.rs` に各 1 件で本体が
+  1 式委譲とトークン一致）。`workspace_declares_bool_ops_fn_names_in_approved_places_only`
+  の期待集合へ `facade/src/lib.rs::<name>` を追加。直下の名前解決の正のプローブ
+- `crates/autodiff/src/bool_ops.rs`・`lib.rs` の「未決・保留」doc 文言を更新
+  （挙動不変）
+- テスト: facade のみを import した利用テスト（真理値表・ブロードキャスト・
+  ブロードキャスト不可の `Shape` エラー・巨大 broadcast view の確保前拒否）
+- docs: 本記録への実装記録、`docs/compat-api-scope.md` §5 の保留記録更新、
+  `docs/README.md`
+- 新規 `Op`・カーネル・`unsafe`・依存なし。ホストのみの計算のため CUDA／Metal の
+  新規 `#[ignore]` テスト・実測申し送りは不要
+
+#### 本節の位置づけ
+
+承認は未取得。保留ガードと 4 テストは維持する。本節の追記は `crates/`・
+`Cargo.*`・tolerance・`docs/spec` を変更していない。
