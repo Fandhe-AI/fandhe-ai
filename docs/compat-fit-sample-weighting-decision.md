@@ -35,6 +35,8 @@ design.md`）に、Keras／PyTorch の 3 機構を足すのがイシューの狙
 
 ## 2. 承認事項（未承認）
 
+> #2563 の確定形・未決論点の推奨案・非破壊確認は §11 を参照（本節の履歴記述は変更しない）。
+
 facade 新規公開面の候補は次のとおり。
 
 - `FitConfig::validation_split(self, fraction: f32) -> Self`
@@ -263,3 +265,70 @@ fit_with_weights` の facade 公開について、ユーザー本人の明示承
 §3〜§6 の仕様で実装 PR を起票する。stratified split・validation 側
 sample_weight 適用は再開時に選択肢として提示する。新規 Issue の起票は
 ユーザー承認なしには行わない。
+
+
+> #2563 での確定・追記は §11 を参照。
+
+## 11. facade 公開形の確定（#2563）
+
+本節はイシュー #2563（親 #2562）で §2〜§8 の推奨形を facade 公開の確定形として読み取り列挙し、記録に推奨形が無い論点に推奨案を追記したもの。ルート #2499 の 2026-10-04 一括承認は #2563 本文が記すとおり §2〜§8 に書かれた形にのみ及ぶ。本節はそれを写したものでそれ以上の承認を主張しない。**§11.3 に未決論点があるため、#2564（facade 公開の実装）は §11.3 の承認が得られるまで着手しない。**
+
+### 11.1 確定形（記録に書かれた形）
+
+| 論点 | 確定形 | 根拠 |
+|---|---|---|
+| validation_split 入口 | `impl FitConfig { pub fn validation_split(self, fraction: f32) -> Self }`。内部表現は非公開フィールド `validation_split_bits: Option<u32>`（`f32::to_bits`）で `Copy + Eq` derive 維持 | §3 |
+| 重み型 | `#[derive(Debug, Clone, PartialEq, Default)] pub struct FitWeights<'a> { class_weight: Option<HashMap<u32, f32>>, sample_weight: Option<&'a [f32]> }`（フィールド非公開のため構造体リテラル構築不可で `#[non_exhaustive]` 不要）。`new()`／`class_weight(self, HashMap<u32, f32>) -> Self`／`sample_weight(self, &'a [f32]) -> Self` | §3 |
+| 新入口 | `Sequential::fit_with_weights(&mut self, x, y, config: FitConfig, weights: &FitWeights<'_>, validation, callbacks: &mut [Callback], metrics: &[Metrics]) -> Result<History, AutodiffError>`（`#[allow(clippy::too_many_arguments)]`） | §3 |
+| エラー型 | 既存 `AutodiffError::InvalidArgument` のみ（新 variant なし） | §4 |
+| モジュール配置 | 定義は `compat/training.rs`。`compat/mod.rs:83` の `pub use training::{…}` へ `FitWeights` を追加し `fandhe_ai::compat::FitWeights` として公開（`training` 自体は非公開のまま。既存型と同じ経路からの導出） | §3 |
+| 意味論 | Keras 流正規化 `Σ w_i·l_i / N_batch`、`w_i = sample_weight[i] × class_weight.get(y_i).unwrap_or(1.0)`。`History.loss` は重み付き値、`val_loss`・`val_metrics` は重みなしで `evaluate()` と bit 一致。validation_split は シャッフル前に `split_at = floor(N×(1−s))`、`Some(0.0)` は分割なし、非有限／`s<0`／`s>=1`／`split_at ∈ {0,N}`／明示 `validation: Some` との併用は `InvalidArgument`。入力検証は `sample_weight.len()==N`・有限非負・class キー `< C`・`checked_*`・モード変更前に拒否 | §4 |
+| class_weight × 損失 | `Loss::CrossEntropy`（`T=i32`）のときのみ有効、それ以外（`Nll` 等を含む）は `InvalidArgument` | §4 |
+| 実装方式 | 新規 `Op`／`BackendOps`／VJP なし。重み未指定かつ split 未指定なら既存 `T::loss_for` 経路を不変で通し bit 一致 | §5 |
+
+### 11.2 訂正注記（出荷形・記録の意図から一意に決まる。選択ではない）
+
+1. §3 の `y: &Tensor<T::Target>`: `FitTarget`（`crates/facade/src/compat/training.rs:417`）に関連型 `Target` は無い。既存 3 入口（`fit`:1169・`fit_with_callbacks`:1279・`fit_with_metrics`:1337）は `y: &Tensor<T>`・`validation: Option<(&Tensor<f32>, &Tensor<T>)>`。同一経路へ委譲するため `&Tensor<T>` に決まる。
+2. §3「既存 3 入口は `fit_with_weights` へ委譲」: 現行は 3 入口が非公開 `fit_with_callbacks_named`（:1369）へ委譲済み。`fit_with_weights` を 4 本目の入口として同じ非公開経路へ委譲させる形が記録の意図（bit 一致契約）の範囲内。
+3. 非破壊基準は `=0.9.0` ではなく `=0.10.0`（テスト名 `fit_config_keeps_copy_eq_for_0_9_0_compat` は改名しない）。
+4. §2 の `training.rs:175-181` は陳腐化。現行 `FitConfig` 定義は :283。
+
+### 11.3 未決論点と推奨案（未承認・承認依頼）
+
+記録作成後に公開面が拡張され、次の組み合わせの挙動は §2〜§8 に定義が無い。#2564 が実装時に必ず選ぶ挙動のため一括承認の範囲外である。
+
+1. **sample_weight × #2714 で追加された 7 種の `Loss`**（`L1`／`Bce`／`BceWithLogits`／`Nll`／`KlDiv`／`Huber`／`SmoothL1`）: §5 は CE と MSE の重み付き式のみ定義。
+2. **非既定の重み × `Optimizer::Lbfgs`**（#2197）: `lbfgs_batch_step`（`training.rs:990`）は closure 内で `T::loss_for` を直接呼ぶため、重み付き経路が及ぶか未定。
+
+**推奨案（未承認）**: §4／§5 が式を定義していない組み合わせはすべて fail-closed で `InvalidArgument`（モード変更・パラメータ更新前に拒否）。理由は、後日 `Err → Ok` へ広げるのは追加的で非破壊、逆は破壊的なため。代替案は、各損失に per-sample 重み式を定義して許可する案と、Lbfgs closure 内でも重み付き loss を使う案。validation_split 単独（重み既定）は損失・optimizer に依存しないデータ分割のため全 `Loss`・`Lbfgs` で有効（§4 からの導出）。
+
+### 11.4 導出による補足（新規決定ではない）
+
+- 重み × `accumulate_steps > 1`（#2180・#2508）: §5 は 1 マイクロバッチの `loss_var` を差し替えるのみで累積は下流。`N_batch` はマイクロバッチのサンプル数（`Reduction::Mean` と同単位）。
+- validation_split は実際に検証データを生成する場合（`Some(s)` かつ `s > 0`、§4 の検証を通過したもの）に限って「validation あり」として扱い、`Monitor::ValLoss` 系 callbacks・`metrics` の validation 必須検査を満たす。`validation_split(0.0)`（`-0.0` を含む）は分割なし（検証データを生成しない）のため、明示 `validation` も無ければこの検査を満たさない。
+- `FitConfig` の `Eq` は bit 比較のため `validation_split(0.0) != FitConfig::new(..)`、`+0.0`／`-0.0` は別値（挙動は §4 のとおり両者とも分割なし）。
+
+### 11.5 公開 API 非破壊の確認（`fandhe-ai =0.10.0` 基準）
+
+実測（`git show v0.10.0:…`・`git grep … v0.10.0`）: v0.10.0 の `crates/facade/src/compat/training.rs:242-243` で `FitConfig` は `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`・全フィールド非公開。facade src で `FitWeights`／`fit_with_weights`／`validation_split`／`class_weight`／`sample_weight` が現れるのは `lib.rs` の `#[cfg(doctest)]` 保留ガード doc 内のみ（宣言・再エクスポート 0 件）。`crates/facade/tests/` に `FitConfig` の `Debug` 出力固定は無い。`History` は `#[non_exhaustive]`。
+
+| 論点 | 判定 |
+|---|---|
+| `FitConfig::validation_split` 追加 | 非破壊（inherent 追加。非公開フィールド追加は `Copy + Eq` 維持・リテラル構築不可）。例外注記: 下流が自前 trait の同名メソッドを `FitConfig` に実装し呼ぶ場合は inherent 優先で解決が変わりうるが、Rust API Evolution の minor で許容される範疇 |
+| `FitWeights` 追加 | 非破壊（追加のみ。glob import とはローカル項目優先） |
+| `Sequential::fit_with_weights` 追加 | 非破壊（同上の trait 名衝突注記） |
+| エラー型 | 非破壊（variant 追加なし） |
+| 既存 3 入口・`History`・`Loss`・`FitTarget` | シグネチャ・意味論不変（重み既定かつ split 未指定の bit 一致を #2564 のテストで固定） |
+| `FitConfig` の既存値の `Eq`／`Debug` | 既存ビルダーのみの値同士の比較結果は不変（新フィールド既定 `None`）。`Debug` 表示は変化するが固定テスト無し（公開 API 契約外） |
+
+### 11.6 #2564／#2565 への引き継ぎ（§7「まとめて削除」を上書き）
+
+| 対象 | 処置 |
+|---|---|
+| `lib.rs::FitWeightingHoldDoctestGuard`（:3558） | #2564: ローカル `FitWeights` 型プローブ・`FitConfig::validation_split`・`Sequential::fit_with_weights` の UFCS プローブを削除（実在 inherent に解決され doctest が失敗するため）。禁止経路（`class_weight`／`sample_weight`／`fit_weighted` 系）のプローブは維持 |
+| `api_surface.rs::fit_weighting_hold_doctest_probe_body_matches_fixed_contract`（:17189） | #2564: 上の削除に合わせ固定文字列を更新 |
+| `api_surface.rs::fit_weighting_hold_doctest_globs_all_pub_modules`（:17162） | 維持 |
+| `api_surface.rs::facade_does_not_reexport_or_declare_fit_weighting_items`（:17353）と検出テスト（:17376） | #2564: 許可を `compat/mod.rs` の `pub use` 葉 `FitWeights`・`impl FitConfig` 内 `validation_split`・`impl FitWeights` 内 `new`／`class_weight`／`sample_weight`・`impl Sequential` 内 `fit_with_weights` のみへ縮小（`fit_weighted` は禁止のまま）。#2565: 承認形だけを許す正ガードへ反転 |
+| `api_surface.rs::fit_config_keeps_copy_eq_for_0_9_0_compat`（:17444） | 維持（名称も維持） |
+| #2565 追加作業 | 到達性テスト・`docs/compat-api-scope.md` §5 適用記録・`docs/compat-fit-evaluate-design.md` §3.7 更新・本記録の実装記録 |
+| CUDA／Metal | 新規演算なしのため実機 parity 申し送りは不要見込み（§5）。#2564 で再確認 |
