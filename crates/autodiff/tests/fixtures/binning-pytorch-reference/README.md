@@ -42,8 +42,10 @@ rm -rf /path/to/venv
 ## sha256
 
 ```
-999f1b88a3e4aca3e33ed5c2ab61cf105a1c21e3cb1961e00072afc7b2bbf215  binning_reference.json
-e088aff8aa7fdef82eacd8fe83b85ead445ca96c1957b95e3d1c984fb6afc1ca  gen_reference.py
+2a6b3c81220e6080df3aa964d676413ab6f26b9e80bf3f786f96c95b8b6f5aa7  binning_reference.json
+eca09e77f7a6618deded44ecd8e70c5b962aa39baa72505550326ce164f0287b  gen_reference.py
 ```
 
 `gen_reference.py` を変更した場合は JSON を再生成し、上記を更新する。
+
+出力は `dump_line_per_case` で整形済み（キーごと・16 要素ごとに改行。巨大な単一行 JSON が codex review の diff 読み込みを壊すため。データ内容は不変）。

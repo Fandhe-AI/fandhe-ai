@@ -141,6 +141,32 @@ def differentiability():
     return rows
 
 
+def dump_line_per_case(doc):
+    """dict はキーごと・長いスカラー配列は 16 要素ごとに改行して整形する。
+
+    巨大な単一行 JSON は codex review の diff 読み込みを壊すため（PR #2782）、
+    データは変えずに改行だけを入れる（最長行は数百バイト程度）。
+    """
+    c = lambda v: json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+
+    def fmt(v, ind):
+        pad = " " * (ind + 1)
+        if isinstance(v, dict) and v:
+            items = [pad + c(k) + ":" + fmt(x, ind + 1) for k, x in v.items()]
+            return "{\n" + ",\n".join(items) + "\n" + " " * ind + "}"
+        if isinstance(v, list) and v:
+            if all(not isinstance(x, (dict, list)) for x in v):
+                if len(v) <= 16:
+                    return c(v)
+                rows = [c(v[i:i + 16])[1:-1] for i in range(0, len(v), 16)]
+                return "[\n" + ",\n".join(pad + r for r in rows) + "\n" + " " * ind + "]"
+            items = [pad + fmt(x, ind + 1) for x in v]
+            return "[\n" + ",\n".join(items) + "\n" + " " * ind + "]"
+        return c(v)
+
+    return fmt(doc, 0) + "\n"
+
+
 def main():
     gen = torch.Generator().manual_seed(SEED)
     rnd = lambda *s: torch.randn(*s, generator=gen, dtype=torch.float32)  # noqa: E731
@@ -288,8 +314,7 @@ def main():
         "bucketize_cases": bucketize,
         "bucketize_errors": bucketize_errors,
     }
-    json.dump(doc, sys.stdout, ensure_ascii=False, separators=(",", ":"))
-    sys.stdout.write("\n")
+    sys.stdout.write(dump_line_per_case(doc))
 
 
 if __name__ == "__main__":
