@@ -1,8 +1,8 @@
-//! `rfft`・`irfft` の自由関数（イシュー #2631・親 #2630「FFT」。ルート
-//! #2499 Phase 4）。
+//! `rfft`・`irfft`・`fft`・`ifft` の自由関数（イシュー #2631・#2632・親 #2630
+//! 「FFT」。ルート #2499 Phase 4）。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::rfft`／`Var::irfft` の委譲
-//! メソッドと `FftNorm` の再エクスポート）は未承認で、承認依頼は #2677
+//! **facade 非公開（保留）**: 公開形（`Var::rfft`／`Var::irfft`／`Var::fft`／
+//! `Var::ifft` の委譲メソッドと `FftNorm` の再エクスポート）は未承認で、承認依頼は #2677
 //! （公開自体は承認後の #2678）。本モジュールは内部クレート限定の入口で、
 //! `Var` に inherent メソッドを足さない。保留は `crates/facade/src/lib.rs`
 //! の `FftOpsHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の
@@ -14,17 +14,21 @@
 //! |---|---|---|
 //! | [`rfft`] | `torch.view_as_real(torch.fft.rfft(x, n, dim, norm))` | 実 `[..., L, ...]` → `[..., n/2+1, ..., 2]` |
 //! | [`irfft`] | `torch.fft.irfft(torch.view_as_complex(x), n, dim, norm)` | `[..., m, ..., 2]` → 実 `[..., n, ...]` |
+//! | `fft` | `torch.view_as_real(torch.fft.fft(torch.view_as_complex(x), n, dim, norm))` | `[..., L, ..., 2]` → `[..., n, ..., 2]` |
+//! | `ifft` | `torch.view_as_real(torch.fft.ifft(torch.view_as_complex(x), n, dim, norm))` | 同上 |
 //!
 //! 複素数は末尾次元 2 の `f32` 実テンソル `(re, im)` で表す（complex dtype
 //! は非目標）。`dim` は `usize`（負の添字は受けない）。`irfft` の `dim` は
-//! 複素軸を除いた実軸の添字（既定は rank-2）。
+//! 複素軸を除いた実軸の添字（既定は rank-2）。`fft`／`ifft` も同じ `dim` 規約で、
+//! 実入力の自動昇格（虚部 0 の付加）はしない（呼び出し側の責務）。
 //!
 //! **経路**: ① 引数解決・形状・確保サイズの検査
-//! （`fandhe_ai_tensor_core::fft::{rfft_layout, irfft_layout}`。確保・
-//! 実体化より前）→ ② 入力の実体化 → ③ `BackendOps::fft_rfft`／`fft_irfft`
-//! （`Unsupported` のときだけ共有ホストカーネル `fft::rfft_host`／
-//! `irfft_host` へフォールバックし、他のエラーは伝播する）→ ④ 専用 `Op`
-//! （`Op::Rfft`／`Op::Irfft`）を積む。VJP は `grad.rs`（共有カーネルの
+//! （`fandhe_ai_tensor_core::fft::{rfft_layout, irfft_layout, fft_layout}`。
+//! 確保・実体化より前）→ ② 入力の実体化 → ③ `BackendOps::fft_rfft`／
+//! `fft_irfft`／`fft_fft`／`fft_ifft`（`Unsupported` のときだけ共有ホスト
+//! カーネル `fft::rfft_host`／`irfft_host`／`fft_host`／`ifft_host` へ
+//! フォールバックし、他のエラーは伝播する）→ ④ 専用 `Op`（`Op::Rfft`／
+//! `Op::Irfft`／`Op::Fft`／`Op::Ifft`）を積む。VJP は `grad.rs`（共有カーネルの
 //! `*_vjp_host`）。
 //!
 //! **数値契約**: 内部は `f64` 逐次・固定順序で、最後に 1 回だけ `f32` へ
@@ -160,5 +164,89 @@ pub fn irfft<'t>(
         },
         value,
     );
+    Ok(Var::from_raw(x.tape(), id))
+}
+
+/// 複素 FFT（複素入力 `[..., L, ..., 2]` → `Var`（`[..., n, ..., 2]`））。
+///
+/// 入出力とも末尾次元 2 は `(re, im)`（`torch.view_as_real` と同レイアウト）。
+/// `n` 省略時は変換軸の長さ `L`、`dim` は複素軸を除いた実軸の添字（既定は
+/// rank-2）。変換前に入力を長さ `n` へ切り詰め／ゼロ詰めする。`norm` の既定は
+/// [`FftNorm::Backward`]。実入力は受けない（rank・末尾次元 2 を検査して拒否）。
+///
+/// 確保前の検査・非有限入力の扱いは [`rfft`] と同じ（c2c には DC／Nyquist の
+/// 構造的ゼロが無く、非有限入力はそのまま伝播する）。
+pub fn fft<'t>(
+    x: &Var<'t>,
+    n: Option<usize>,
+    dim: Option<usize>,
+    norm: FftNorm,
+) -> Result<Var<'t>, AutodiffError> {
+    c2c(x, n, dim, norm, C2c::Forward)
+}
+
+/// 複素逆 FFT。`fft` と引数・検査・経路が同じで、符号とスケールだけが逆。
+pub fn ifft<'t>(
+    x: &Var<'t>,
+    n: Option<usize>,
+    dim: Option<usize>,
+    norm: FftNorm,
+) -> Result<Var<'t>, AutodiffError> {
+    c2c(x, n, dim, norm, C2c::Inverse)
+}
+
+/// c2c の方向（`fft`／`ifft` の共通経路 [`c2c`] の分岐用）。
+#[derive(Clone, Copy)]
+enum C2c {
+    Forward,
+    Inverse,
+}
+
+/// `fft`／`ifft` の共通経路（検査 → 実体化 → バックエンド／ホストカーネル →
+/// `Op` 記録）。
+fn c2c<'t>(
+    x: &Var<'t>,
+    n: Option<usize>,
+    dim: Option<usize>,
+    norm: FftNorm,
+    dir: C2c,
+) -> Result<Var<'t>, AutodiffError> {
+    let layout = fft::fft_layout(&x.shape(), n, dim)?;
+    let input = materialize_one(x)?;
+    let ops = x.tape().ops();
+    let backend = match dir {
+        C2c::Forward => ops.fft_fft(&input, layout.n(), layout.dim(), norm),
+        C2c::Inverse => ops.fft_ifft(&input, layout.n(), layout.dim(), norm),
+    };
+    let value = match backend {
+        Ok(v) => {
+            verify_shape(v.shape(), layout.out_shape())?;
+            v
+        }
+        Err(BackendError::Unsupported(_)) => {
+            let data = match dir {
+                C2c::Forward => fft::fft_host(&input.host_slice(), &layout, norm)?,
+                C2c::Inverse => fft::ifft_host(&input.host_slice(), &layout, norm)?,
+            };
+            wrap(data, &layout)?
+        }
+        Err(other) => return Err(unify_backend_error(other)),
+    };
+    let (input_id, n, dim) = (x.node_id(), layout.n(), layout.dim());
+    let op = match dir {
+        C2c::Forward => Op::Fft {
+            input: input_id,
+            n,
+            dim,
+            norm,
+        },
+        C2c::Inverse => Op::Ifft {
+            input: input_id,
+            n,
+            dim,
+            norm,
+        },
+    };
+    let id = x.tape().push_eager(op, value);
     Ok(Var::from_raw(x.tape(), id))
 }

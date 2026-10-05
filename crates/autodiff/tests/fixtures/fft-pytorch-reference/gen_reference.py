@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""rfft／irfft の PyTorch 参照値（forward 出力と入力勾配）を生成する。
+"""rfft／irfft／fft／ifft の PyTorch 参照値（forward 出力と入力勾配）を生成する。
 
-イシュー #2631（親 #2630）の `tests/fft_parity.rs` が参照する固定
+イシュー #2631・#2632（親 #2630）の `tests/fft_parity.rs` が参照する固定
 フィクスチャ `fft_reference.json` の生成スクリプト。CI は Python／PyTorch
 に依存せず、コミット済み JSON のみを読む（`README.md` 参照）。
 
@@ -12,6 +12,10 @@
 - rfft: 実の葉 `x` → `y = view_as_real(rfft(x, n, dim, norm))`・`x.grad`。
 - irfft: 実の葉 `xr`（`[..., m, 2]`）→ `out = irfft(view_as_complex(xr),
   n, dim, norm)`・`xr.grad`。
+
+- fft／ifft（#2632）: 実の葉 `x`（`[..., L, ..., 2]`）→ `y = view_as_real(
+  torch.fft.{fft,ifft}(view_as_complex(x), n, dim, norm))`・`x.grad`。
+  複素軸の添字は Rust 側の実軸の添字と同じ（`dim` は非負）。
 
 入力・上流勾配・出力・勾配・引数はすべて JSON に保存し、Rust 側で入力を
 再生成しない。dtype は float32。NaN を含まないことを生成時に assert する。
@@ -67,6 +71,29 @@ IRFFT_CASES = [
     ("irfft_rank4_dim1", [2, 5, 3, 2], None, 1, "forward"),
 ]
 
+# (name, 入力形状〔末尾が 2〕, n, dim, norm)。fft／ifft 共通のケース集合
+# （op ごとに別々の乱数で生成する）。#2632。
+C2C_CASES = [
+    ("L1", [1, 2], None, None, "backward"),
+    ("L2", [2, 2], None, None, "backward"),
+    ("L3", [3, 2], None, None, "backward"),
+    ("L4", [4, 2], None, None, "backward"),
+    ("L5", [5, 2], None, None, "backward"),
+    ("L8", [8, 2], None, None, "backward"),
+    ("L5_ortho", [5, 2], None, None, "ortho"),
+    ("L5_forward", [5, 2], None, None, "forward"),
+    ("L8_ortho", [8, 2], None, None, "ortho"),
+    ("L8_forward", [8, 2], None, None, "forward"),
+    ("pad_6_to_8", [6, 2], 8, None, "backward"),
+    ("trunc_8_to_5", [8, 2], 5, None, "backward"),
+    ("trunc_5_to_2", [5, 2], 2, None, "ortho"),
+    ("pad_3_to_7", [3, 2], 7, None, "forward"),
+    ("batched_dim1", [2, 5, 3, 2], None, 1, "backward"),
+    ("batched_dim0_n4", [2, 5, 3, 2], 4, 0, "ortho"),
+    ("batched_default_dim", [3, 6, 2], None, None, "backward"),
+    ("rank4_dim2_forward", [2, 3, 4, 2], None, 2, "forward"),
+]
+
 # torch が例外を出すか否かを実測して記録する境界ケース（Rust 側の拒否方針
 # との突き合わせ用）。(name, op, 入力形状, n, dim)。
 ERROR_CASES = [
@@ -77,6 +104,14 @@ ERROR_CASES = [
     ("irfft_m1_default_n", "irfft", [1, 2], None, None),
     ("irfft_n0", "irfft", [3, 2], 0, None),
     ("irfft_dim_oob", "irfft", [3, 2], None, 1),
+    ("fft_n0", "fft", [4, 2], 0, None),
+    ("fft_dim_oob", "fft", [4, 2], None, 1),
+    ("fft_empty_axis_default_n", "fft", [0, 2], None, None),
+    ("fft_empty_axis_n4", "fft", [0, 2], 4, None),
+    ("ifft_n0", "ifft", [4, 2], 0, None),
+    ("ifft_dim_oob", "ifft", [4, 2], None, 1),
+    ("ifft_empty_axis_default_n", "ifft", [0, 2], None, None),
+    ("ifft_empty_axis_n4", "ifft", [0, 2], 4, None),
 ]
 
 
@@ -124,6 +159,19 @@ def make_irfft(gen, name, shape, n, dim, norm):
     }
 
 
+def make_c2c(gen, name, op, shape, n, dim, norm):
+    x = rnd(shape, gen).requires_grad_(True)
+    fn = torch.fft.fft if op == "fft" else torch.fft.ifft
+    y = torch.view_as_real(fn(torch.view_as_complex(x), **kwargs(n, dim, norm)))
+    g = rnd(list(y.shape), gen)
+    (y * g).sum().backward()
+    return {
+        "name": f"{op}_{name}", "op": op, "in_shape": shape, "n": n, "dim": dim,
+        "norm": norm, "input": flat(x), "grad_out": flat(g),
+        "out_shape": list(y.shape), "output": flat(y), "grad_in": flat(x.grad),
+    }
+
+
 def make_error(name, op, shape, n, dim):
     kw = {}
     if n is not None:
@@ -133,6 +181,9 @@ def make_error(name, op, shape, n, dim):
     try:
         if op == "rfft":
             torch.fft.rfft(torch.zeros(*shape), **kw)
+        elif op in ("fft", "ifft"):
+            fn = torch.fft.fft if op == "fft" else torch.fft.ifft
+            fn(torch.view_as_complex(torch.zeros(*shape)), **kw)
         else:
             torch.fft.irfft(torch.view_as_complex(torch.zeros(*shape)), **kw)
         return {"name": name, "op": op, "in_shape": shape, "n": n, "dim": dim,
@@ -149,6 +200,10 @@ def main():
         cases.append(make_rfft(gen, *c))
     for c in IRFFT_CASES:
         cases.append(make_irfft(gen, *c))
+    # 既存 33 ケースの乱数列を変えないよう、c2c は必ず最後に生成する（#2632）。
+    for op in ("fft", "ifft"):
+        for c in C2C_CASES:
+            cases.append(make_c2c(gen, c[0], op, *c[1:]))
     doc = {
         "torch_version": torch.__version__,
         "python_version": platform.python_version(),

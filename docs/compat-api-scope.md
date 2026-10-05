@@ -1916,3 +1916,9 @@ facade 公開面は追加していない（保留ガード `VarLowPrecisionOpsHo
 公開形（`Var::{matmul,add,mul,relu,exp,tanh}_low_precision(.., dtype)`）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。
 内部実装はルート #2499 の Phase 4 方針（内部実装＋保留ガードまで先行・公開は承認後）に基づく。詳細は `docs/autodiff-low-precision-op-extension-decision.md` 6 節。
+
+**適用記録（イシュー #2632・親 #2630・ルート #2499 Phase 4。FFT 第 2 弾）**:
+`fft`／`ifft`（実部・虚部の実テンソル対による c2c）を `rfft`／`irfft` と同じ内部クレート限定の方式で実装した。
+facade 公開面は追加していない（保留ガードのプローブと `api_surface.rs` のインベントリへ `fft`／`ifft` を追加）。
+公開形（`Var::fft`／`Var::ifft`・`FftNorm` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-fft-ops-decision.md` §12。

@@ -1,7 +1,11 @@
-//! `rfft`／`irfft` のホスト参照カーネルと正規化種別 [`FftNorm`] の
-//! **単一情報源**（イシュー #2631・親 #2630。設計は
+//! `rfft`／`irfft`／`fft`／`ifft` のホスト参照カーネルと正規化種別
+//! [`FftNorm`] の**単一情報源**（イシュー #2631・#2632・親 #2630。設計は
 //! `docs/autodiff-fft-design.md` 案 B・実装記録は
 //! `docs/autodiff-fft-ops-decision.md`）。
+//!
+//! `fft`／`ifft`（c2c）の 4 カーネル（`fft_host`／`ifft_host`／`fft_vjp_host`／
+//! `ifft_vjp_host`）は符号 σ とスケール c だけが異なる 1 本の非公開コアで
+//! 実装し、随伴（共役転置・`n` 倍なし・二重スケールなし）を構造的に満たす。
 //!
 //! # 役割と呼び出し元
 //!
@@ -158,7 +162,8 @@ impl FftLayout {
         &self.out_shape
     }
 
-    /// 片側スペクトルの bin 数 `n/2 + 1`。
+    /// 片側スペクトルの bin 数 `n/2 + 1`。r2c／c2r 専用で、c2c（`fft`／`ifft`）
+    /// のレイアウトからは使わない。
     pub fn bins(&self) -> usize {
         self.n / 2 + 1
     }
@@ -289,6 +294,60 @@ pub fn irfft_layout(
         outer: checked_numel(&in_shape[..dim])?,
         inner: checked_numel(&in_shape[dim + 1..rank - 1])?,
         in_len: m,
+        out_shape,
+    })
+}
+
+/// `fft`／`ifft`（複素入力 `[..., L, ..., 2]` → 複素 `[..., n, ..., 2]`）の引数を
+/// 解決・検査する。
+///
+/// `dim` は末尾の複素軸を除いた実軸の添字（既定は rank-2）。`n` 省略時は `L`
+/// （`L == 0` で省略すると 0 になるため拒否。`L == 0` でも `n` 明示ならゼロ詰め
+/// として受理する）。実入力の自動昇格はしない（設計 §3）。
+pub fn fft_layout(
+    in_shape: &[usize],
+    n: Option<usize>,
+    dim: Option<usize>,
+) -> Result<FftLayout, FftError> {
+    let rank = in_shape.len();
+    if rank < 2 {
+        return Err(FftError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: rank,
+        }));
+    }
+    if in_shape[rank - 1] != 2 {
+        let mut expected = in_shape.to_vec();
+        expected[rank - 1] = 2;
+        return Err(FftError::Shape(ShapeError::ShapeMismatch {
+            lhs: in_shape.to_vec(),
+            rhs: expected,
+        }));
+    }
+    let dim = dim.unwrap_or(rank - 2);
+    if dim >= rank - 1 {
+        return Err(FftError::InvalidArgument(format!(
+            "fft: dim {dim} は複素軸を除いた rank {} の範囲外",
+            rank - 1
+        )));
+    }
+    let len = in_shape[dim];
+    let n = n.unwrap_or(len);
+    if n == 0 {
+        return Err(FftError::InvalidArgument(
+            "fft: 変換長 n は 1 以上である必要がある".into(),
+        ));
+    }
+    let mut out_shape = in_shape.to_vec();
+    out_shape[dim] = n;
+    check_f32_alloc(in_shape)?;
+    check_f32_alloc(&out_shape)?;
+    Ok(FftLayout {
+        n,
+        dim,
+        outer: checked_numel(&in_shape[..dim])?,
+        inner: checked_numel(&in_shape[dim + 1..rank - 1])?,
+        in_len: len,
         out_shape,
     })
 }
@@ -526,6 +585,160 @@ pub fn irfft_vjp_host(g: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Ve
         }
     }
     Ok(out)
+}
+
+/// c2c 変換の形状パラメータ（`outer`・`inner` は layout 由来）。
+struct C2cDims {
+    outer: usize,
+    inner: usize,
+    n: usize,
+    src_len: usize,
+    dst_len: usize,
+}
+
+/// c2c の共有コア。`dst_d = c·Σ_{s<min(src_len,n)} src_s·(cos θ + iσ·sin θ)`、
+/// `θ = 2π·((s·d) mod n)/n`、`d < min(dst_len, n)`（残りの `dst` は 0）。
+///
+/// `fft`（σ=-1）・`ifft`（σ=+1）と、それぞれの VJP（共役転置。σ 反転・長さ入替）
+/// が符号 `sigma` とスケール `scale` だけで表現される（`n` 倍は掛けない）。
+/// `src`／`dst` は `[outer, len, inner, 2]` の連続配置。
+fn c2c_core(
+    what: &str,
+    src: &[f32],
+    dims: &C2cDims,
+    sigma: f64,
+    scale: f64,
+    out_numel: usize,
+) -> Result<Vec<f32>, FftError> {
+    let C2cDims {
+        outer,
+        inner,
+        n,
+        src_len,
+        dst_len,
+    } = *dims;
+    let in_numel = checked_numel(&[outer, src_len, inner, 2])?;
+    if src.len() != in_numel {
+        return Err(len_error(what, in_numel, src.len()));
+    }
+    let expect_out = checked_numel(&[outer, dst_len, inner, 2])?;
+    if expect_out != out_numel {
+        return Err(len_error(what, expect_out, out_numel));
+    }
+    let mut out = vec![0.0f32; out_numel];
+    // 空要素なら twiddle 表を確保しない（巨大 `n` × 要素数 0 の確保を避ける）。
+    if out_numel == 0 {
+        return Ok(out);
+    }
+    let tw = Twiddle::new(n);
+    let smax = src_len.min(n);
+    let dmax = dst_len.min(n);
+    let mut buf: Vec<(f64, f64)> = Vec::with_capacity(smax);
+    for o in 0..outer {
+        for i in 0..inner {
+            buf.clear();
+            buf.extend((0..smax).map(|s| {
+                let base = ((o * src_len + s) * inner + i) * 2;
+                (f64::from(src[base]), f64::from(src[base + 1]))
+            }));
+            for d in 0..dmax {
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                let mut idx = 0usize;
+                for &(a, b) in &buf {
+                    let (c, s) = (tw.cos[idx], tw.sin[idx]);
+                    re += a * c - sigma * b * s;
+                    im += b * c + sigma * a * s;
+                    idx += d;
+                    if idx >= n {
+                        idx -= n;
+                    }
+                }
+                let base = ((o * dst_len + d) * inner + i) * 2;
+                out[base] = (scale * re) as f32;
+                out[base + 1] = (scale * im) as f32;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `fft` forward（複素 → 複素。出力は `layout.out_shape` の連続配置）。
+///
+/// 変換前に `dim` 軸を長さ `n` へ切り詰め／ゼロ詰めする。
+/// `Y_k = s·Σ_j x_j·exp(-2πi·kj/n)`。c2c には DC／Nyquist の構造的ゼロが無いため
+/// rfft のリテラル `+0.0` 規則は適用しない。
+pub fn fft_host(x: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Vec<f32>, FftError> {
+    let out_numel = checked_numel(&layout.out_shape)?;
+    c2c_core(
+        "fft_host",
+        x,
+        &forward_dims(layout),
+        -1.0,
+        norm.forward_scale(layout.n),
+        out_numel,
+    )
+}
+
+/// `ifft` forward（複素 → 複素）。`fft_host` と符号（+）・スケール（逆変換側）
+/// だけが異なる。
+pub fn ifft_host(x: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Vec<f32>, FftError> {
+    let out_numel = checked_numel(&layout.out_shape)?;
+    c2c_core(
+        "ifft_host",
+        x,
+        &forward_dims(layout),
+        1.0,
+        norm.inverse_scale(layout.n),
+        out_numel,
+    )
+}
+
+/// `fft` の VJP。`g` は `layout.out_shape` の上流勾配、戻り値は入力形状
+/// （`dim` 軸長 `L`）の勾配。共役転置（σ=+1・順変換と同じスケール）で、`n` 倍は
+/// 掛けない。ゼロ詰めの VJP は切り詰め・切り詰めの VJP はゼロ詰めになる。
+pub fn fft_vjp_host(g: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Vec<f32>, FftError> {
+    let out_numel = checked_numel(&[layout.outer, layout.in_len, layout.inner, 2])?;
+    c2c_core(
+        "fft_vjp_host",
+        g,
+        &vjp_dims(layout),
+        1.0,
+        norm.forward_scale(layout.n),
+        out_numel,
+    )
+}
+
+/// `ifft` の VJP（σ=-1・逆変換と同じスケール）。
+pub fn ifft_vjp_host(g: &[f32], layout: &FftLayout, norm: FftNorm) -> Result<Vec<f32>, FftError> {
+    let out_numel = checked_numel(&[layout.outer, layout.in_len, layout.inner, 2])?;
+    c2c_core(
+        "ifft_vjp_host",
+        g,
+        &vjp_dims(layout),
+        -1.0,
+        norm.inverse_scale(layout.n),
+        out_numel,
+    )
+}
+
+fn forward_dims(layout: &FftLayout) -> C2cDims {
+    C2cDims {
+        outer: layout.outer,
+        inner: layout.inner,
+        n: layout.n,
+        src_len: layout.in_len,
+        dst_len: layout.n,
+    }
+}
+
+fn vjp_dims(layout: &FftLayout) -> C2cDims {
+    C2cDims {
+        outer: layout.outer,
+        inner: layout.inner,
+        n: layout.n,
+        src_len: layout.n,
+        dst_len: layout.in_len,
+    }
 }
 
 #[cfg(test)]
@@ -804,6 +1017,199 @@ mod tests {
         let il = irfft_layout(&[3, 2], None, None).expect("layout");
         assert!(irfft_host(&[1.0; 5], &il, FftNorm::Backward).is_err());
         assert!(irfft_vjp_host(&[1.0; 3], &il, FftNorm::Backward).is_err());
+    }
+
+    fn c2c_adjoint_gap(shape: &[usize], n: Option<usize>, norm: FftNorm, inverse: bool) -> f64 {
+        let layout = fft_layout(shape, n, None).expect("layout");
+        let numel: usize = shape.iter().product();
+        let x = rand_vec(numel, 21);
+        let y = if inverse {
+            ifft_host(&x, &layout, norm).expect("ifft")
+        } else {
+            fft_host(&x, &layout, norm).expect("fft")
+        };
+        let g = rand_vec(y.len(), 22);
+        let dx = if inverse {
+            ifft_vjp_host(&g, &layout, norm).expect("vjp")
+        } else {
+            fft_vjp_host(&g, &layout, norm).expect("vjp")
+        };
+        (dot_f64(&y, &g) - dot_f64(&x, &dx)).abs()
+    }
+
+    #[test]
+    fn c2c_adjoint_identity() {
+        for (len, n) in [(5usize, None), (4, Some(7)), (7, Some(4)), (6, Some(6))] {
+            for norm in [FftNorm::Backward, FftNorm::Ortho, FftNorm::Forward] {
+                for inverse in [false, true] {
+                    let e = c2c_adjoint_gap(&[2, len, 2], n, norm, inverse);
+                    assert!(e < 1e-4, "len={len} n={n:?} {norm:?} inv={inverse}: {e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn c2c_delta_and_exponential() {
+        let layout = fft_layout(&[4, 2], None, None).expect("layout");
+        let delta = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let y = fft_host(&delta, &layout, FftNorm::Backward).expect("fft");
+        assert_eq!(y, vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        // exp(2πi·j/4) は bin 1 のみ n
+        let x: Vec<f32> = (0..4)
+            .flat_map(|j| {
+                let t = 2.0 * std::f64::consts::PI * j as f64 / 4.0;
+                [t.cos() as f32, t.sin() as f32]
+            })
+            .collect();
+        let y = fft_host(&x, &layout, FftNorm::Backward).expect("fft");
+        assert!((y[2] - 4.0).abs() < 1e-5);
+        for k in [0usize, 2, 3] {
+            assert!(y[2 * k].abs() < 1e-5 && y[2 * k + 1].abs() < 1e-5, "k={k}");
+        }
+        assert!(y[3].abs() < 1e-5);
+    }
+
+    #[test]
+    fn c2c_odd_n_matches_manual() {
+        let layout = fft_layout(&[3, 2], None, None).expect("layout");
+        let y = fft_host(&[1.0, 0.0, 2.0, 0.0, 3.0, 0.0], &layout, FftNorm::Backward).expect("fft");
+        assert!((y[0] - 6.0).abs() < 1e-6 && y[1].abs() < 1e-6);
+        assert!((y[2] + 1.5).abs() < 1e-6 && (y[3] - 0.866_025_4).abs() < 1e-6);
+        assert!((y[4] + 1.5).abs() < 1e-6 && (y[5] + 0.866_025_4).abs() < 1e-6);
+        let l1 = fft_layout(&[1, 2], None, None).expect("layout");
+        assert_eq!(
+            fft_host(&[5.0, -2.0], &l1, FftNorm::Backward).expect("fft"),
+            vec![5.0, -2.0]
+        );
+    }
+
+    #[test]
+    fn c2c_pad_and_truncate() {
+        let padded = fft_layout(&[2, 2], Some(4), None).expect("layout");
+        let a = fft_host(&[1.0, 0.5, 2.0, -1.0], &padded, FftNorm::Ortho).expect("fft");
+        let full = fft_layout(&[4, 2], None, None).expect("layout");
+        let b = fft_host(
+            &[1.0, 0.5, 2.0, -1.0, 0.0, 0.0, 0.0, 0.0],
+            &full,
+            FftNorm::Ortho,
+        )
+        .expect("fft");
+        assert_eq!(a, b);
+        let trunc = fft_layout(&[4, 2], Some(2), None).expect("layout");
+        let c = fft_host(
+            &[1.0, 0.5, 2.0, -1.0, 9.0, 9.0, 9.0, 9.0],
+            &trunc,
+            FftNorm::Ortho,
+        )
+        .expect("fft");
+        let d = fft_layout(&[2, 2], None, None).expect("layout");
+        let e = fft_host(&[1.0, 0.5, 2.0, -1.0], &d, FftNorm::Ortho).expect("fft");
+        assert_eq!(c, e);
+    }
+
+    #[test]
+    fn c2c_roundtrip() {
+        for n in [1usize, 2, 3, 4, 5, 8, 9] {
+            for norm in [FftNorm::Backward, FftNorm::Ortho, FftNorm::Forward] {
+                let x = rand_vec(n * 2, n as u64 + 3);
+                let l = fft_layout(&[n, 2], None, None).expect("layout");
+                let y = fft_host(&x, &l, norm).expect("fft");
+                let z = ifft_host(&y, &l, norm).expect("ifft");
+                for (a, b) in x.iter().zip(&z) {
+                    assert!((a - b).abs() < 1e-5, "n={n} {norm:?}: {a} vs {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn c2c_real_input_matches_rfft_prefix() {
+        let n = 6usize;
+        let xr = rand_vec(n, 31);
+        let rl = rfft_layout(&[n], None, None).expect("layout");
+        let r = rfft_host(&xr, &rl, FftNorm::Backward).expect("rfft");
+        let cx: Vec<f32> = xr.iter().flat_map(|&v| [v, 0.0]).collect();
+        let cl = fft_layout(&[n, 2], None, None).expect("layout");
+        let c = fft_host(&cx, &cl, FftNorm::Backward).expect("fft");
+        for (a, b) in r.iter().zip(&c) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn c2c_non_last_dim_matches_transposed_lane() {
+        // [3, 4, 2] の dim=0 を、転置した [4, 3, 2] の dim=1 と比較する。
+        let a = rand_vec(24, 41);
+        let mut t = vec![0.0f32; 24];
+        for r in 0..3 {
+            for c in 0..4 {
+                for p in 0..2 {
+                    t[(c * 3 + r) * 2 + p] = a[(r * 4 + c) * 2 + p];
+                }
+            }
+        }
+        let l0 = fft_layout(&[3, 4, 2], None, Some(0)).expect("layout");
+        let y0 = fft_host(&a, &l0, FftNorm::Backward).expect("fft");
+        let l1 = fft_layout(&[4, 3, 2], None, Some(1)).expect("layout");
+        let y1 = fft_host(&t, &l1, FftNorm::Backward).expect("fft");
+        for k in 0..3 {
+            for c in 0..4 {
+                for p in 0..2 {
+                    assert_eq!(y0[(k * 4 + c) * 2 + p], y1[(c * 3 + k) * 2 + p]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn c2c_deterministic_bits() {
+        let layout = fft_layout(&[3, 9, 2], None, None).expect("layout");
+        let x = rand_vec(54, 51);
+        let a = ifft_host(&x, &layout, FftNorm::Ortho).expect("ifft");
+        let b = ifft_host(&x, &layout, FftNorm::Ortho).expect("ifft");
+        assert!(a.iter().zip(&b).all(|(p, q)| p.to_bits() == q.to_bits()));
+    }
+
+    #[test]
+    fn c2c_layout_errors_are_typed() {
+        assert!(matches!(
+            fft_layout(&[4], None, None),
+            Err(FftError::Shape(ShapeError::RankMismatch { .. }))
+        ));
+        assert!(matches!(
+            fft_layout(&[4, 3], None, None),
+            Err(FftError::Shape(ShapeError::ShapeMismatch { .. }))
+        ));
+        assert!(matches!(
+            fft_layout(&[4, 2], None, Some(1)),
+            Err(FftError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            fft_layout(&[4, 2], Some(0), None),
+            Err(FftError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            fft_layout(&[0, 2], None, None),
+            Err(FftError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            fft_layout(&[3, 2], Some(usize::MAX), None),
+            Err(FftError::Shape(ShapeError::ElementCountOverflow))
+        ));
+        // `L == 0` でも `n` 明示ならゼロ詰めとして受理する。
+        let l = fft_layout(&[0, 2], Some(3), None).expect("layout");
+        let y = fft_host(&[], &l, FftNorm::Backward).expect("fft");
+        assert_eq!(y, vec![0.0; 6]);
+        assert_eq!(
+            fft_vjp_host(&y, &l, FftNorm::Backward).expect("vjp"),
+            Vec::<f32>::new()
+        );
+        let il = fft_layout(&[3, 2], None, None).expect("layout");
+        assert!(fft_host(&[1.0; 5], &il, FftNorm::Backward).is_err());
+        assert!(ifft_host(&[1.0; 5], &il, FftNorm::Backward).is_err());
+        assert!(fft_vjp_host(&[1.0; 5], &il, FftNorm::Backward).is_err());
+        assert!(ifft_vjp_host(&[1.0; 5], &il, FftNorm::Backward).is_err());
     }
 
     #[test]

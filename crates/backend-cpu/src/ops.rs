@@ -3085,6 +3085,35 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::fft_fft`] の CPU 実装（イシュー
+    /// #2632）。[`Self::fft_rfft`] と同型で、`fft_layout` で再検査してから
+    /// 共有カーネル `fft_host` を呼ぶ。
+    fn fft_fft(
+        &self,
+        input: &Tensor<f32>,
+        n: usize,
+        dim: usize,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let layout = fandhe_ai_tensor_core::fft::fft_layout(input.shape(), Some(n), Some(dim))?;
+        let data = fandhe_ai_tensor_core::fft::fft_host(&input.host_slice(), &layout, norm)?;
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::fft_ifft`] の CPU 実装（イシュー
+    /// #2632）。[`Self::fft_fft`] と同型。
+    fn fft_ifft(
+        &self,
+        input: &Tensor<f32>,
+        n: usize,
+        dim: usize,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let layout = fandhe_ai_tensor_core::fft::fft_layout(input.shape(), Some(n), Some(dim))?;
+        let data = fandhe_ai_tensor_core::fft::ifft_host(&input.host_slice(), &layout, norm)?;
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::var`] の CPU 実装（イシュー
     /// #1723）。`reduction::var` へそのまま委譲し、エラーは
     /// `reduce_error_to_backend_error` で `BackendError` へ写像する

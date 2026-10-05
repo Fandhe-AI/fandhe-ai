@@ -309,6 +309,15 @@ fn cuda_linalg_ops_return_unsupported_not_panic() {
         cuda.fft_irfft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
         Err(BackendError::Unsupported(_))
     ));
+    // イシュー #2632 の c2c 2 演算も同じ契約。
+    assert!(matches!(
+        cuda.fft_fft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.fft_ifft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
 }
 
 /// [`cuda_linalg_ops_return_unsupported_not_panic`] の Metal 版
@@ -383,6 +392,15 @@ fn metal_linalg_ops_return_unsupported_not_panic() {
     ));
     assert!(matches!(
         metal.fft_irfft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
+    // イシュー #2632 の c2c 2 演算も同じ契約。
+    assert!(matches!(
+        metal.fft_fft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.fft_ifft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
         Err(BackendError::Unsupported(_))
     ));
 }

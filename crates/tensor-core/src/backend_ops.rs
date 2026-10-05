@@ -4346,6 +4346,39 @@ pub trait BackendOps {
         ))
     }
 
+    /// 複素 FFT（`input: [..., L, ..., 2]` → `[..., n, ..., 2]`。末尾次元 2 は
+    /// `(re, im)`。イシュー #2632）。`torch.fft.fft` 相当。`n`・`dim` は
+    /// `fft::fft_layout` で解決済みの値（`dim` は複素軸を除いた実軸の添字）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::fft_rfft`] と同じ非破壊拡張・フォールバック契約
+    /// （`Unsupported` のときだけホスト参照実装へフォールバックする）。
+    fn fft_fft(
+        &self,
+        _input: &Tensor<f32>,
+        _n: usize,
+        _dim: usize,
+        _norm: crate::fft::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "fft_fft: default fail-safe (no device-side FFT kernel available)".into(),
+        ))
+    }
+
+    /// 複素逆 FFT（`input: [..., L, ..., 2]` → `[..., n, ..., 2]`。イシュー
+    /// #2632）。`torch.fft.ifft` 相当。[`Self::fft_fft`] と同じ契約。
+    fn fft_ifft(
+        &self,
+        _input: &Tensor<f32>,
+        _n: usize,
+        _dim: usize,
+        _norm: crate::fft::FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "fft_ifft: default fail-safe (no device-side FFT kernel available)".into(),
+        ))
+    }
+
     /// 分散（`Var: [.., dim_len, ..] → reduce_out_shape(dim)`。イシュー
     /// #1723。`torch.var(dim, correction)`／`tf.math.reduce_variance`
     /// 相当）。`dim=None` は全要素縮約（スカラー出力）。`correction`
@@ -5328,6 +5361,10 @@ mod tests {
         assert!(matches!(r, Err(BackendError::Unsupported(_))));
         let b = Tensor::new(vec![1.0_f32, 0.0, 2.0, 0.0], &[2, 2]).unwrap();
         let r = ops.fft_irfft(&b, 2, 0, crate::fft::FftNorm::Backward);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))));
+        let r = ops.fft_fft(&b, 2, 0, crate::fft::FftNorm::Backward);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))));
+        let r = ops.fft_ifft(&b, 2, 0, crate::fft::FftNorm::Backward);
         assert!(matches!(r, Err(BackendError::Unsupported(_))));
     }
 
