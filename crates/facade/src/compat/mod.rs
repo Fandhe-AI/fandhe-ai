@@ -84,7 +84,10 @@ pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;
 pub use metrics::{Metrics, MetricsResult};
 pub use model_io::{ModelIoError, load_model, save_model};
 pub use sequential::{Sequential, SequentialVars};
-pub use training::{AmpConfig, AmpDType, FitConfig, FitTarget, History, Loss, Optimizer};
+pub use training::{
+    AmpConfig, AmpDType, FitConfig, FitTarget, History, Loss, Optimizer, TrainStepFn,
+    TrainStepOptimizer, TrainStepOutput,
+};
 
 /// `TryReserveError`（`Vec::try_reserve_exact` 等の確保失敗）を
 /// 非アロケーションなエラーへ写す共有ヘルパー（`training`・`metrics`
