@@ -170,6 +170,17 @@ pub(super) fn read_first_line_limited(path: &Path) -> Result<Option<String>, Str
         .map_err(|_| "先頭行が UTF-8 ではない".to_string())
 }
 
+/// 既存ファイルが存在し非空かを返す。`NotFound` のみ「無い」（`Ok(false)`）として
+/// 扱い、それ以外の取得失敗（権限・ELOOP 等）は `Err` にして書き込みへ進ませない
+/// （空ファイル扱いでヘッダ・JSON 検証を省略して追記するのを防ぐ）。
+pub(super) fn existing_nonempty(path: &Path) -> Result<bool, String> {
+    match fs::metadata(path) {
+        Ok(m) => Ok(m.len() > 0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("既存ファイルのメタデータを取得できない: {e}")),
+    }
+}
+
 /// ファイル全体を上限付きで UTF-8 文字列として読む。
 pub(super) fn read_limited(path: &Path) -> Result<String, String> {
     let f = File::open(path).map_err(|e| e.to_string())?;
@@ -296,10 +307,38 @@ fn scan_string(b: &[u8], start: usize) -> Result<(String, usize), String> {
                                 .ok_or("\\u エスケープが 16 進でない")?;
                             v = v * 16 + d;
                         }
-                        let ch = char::from_u32(v).unwrap_or('\u{FFFD}');
+                        let mut i_adv = 4;
+                        let ch = if (0xD800..0xDC00).contains(&v) {
+                            // 上位サロゲートは直後の \uDC00..=\uDFFF と対でのみ有効。
+                            let lo = if b.get(i + 6) == Some(&b'\\') && b.get(i + 7) == Some(&b'u')
+                            {
+                                let h2 = b.get(i + 8..i + 12).ok_or("\\u エスケープが短い")?;
+                                let mut w: u32 = 0;
+                                for h in h2 {
+                                    let d = (*h as char)
+                                        .to_digit(16)
+                                        .ok_or("\\u エスケープが 16 進でない")?;
+                                    w = w * 16 + d;
+                                }
+                                Some(w)
+                            } else {
+                                None
+                            };
+                            match lo {
+                                Some(w) if (0xDC00..0xE000).contains(&w) => {
+                                    i_adv = 10;
+                                    char::from_u32(0x10000 + ((v - 0xD800) << 10) + (w - 0xDC00))
+                                        .ok_or("不正なサロゲートペア")?
+                                }
+                                _ => return Err("対を持たない上位サロゲート".to_string()),
+                            }
+                        } else {
+                            // 単独の下位サロゲートはここで None になり Err。
+                            char::from_u32(v).ok_or("対を持たない下位サロゲート")?
+                        };
                         let mut tmp = [0u8; 4];
                         out.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
-                        i += 4;
+                        i += i_adv;
                     }
                     _ => return Err("不正なエスケープ".to_string()),
                 }
@@ -592,11 +631,33 @@ mod tests {
             "[{\"a\":1.}]",
             "[{\"a\":\"\\q\"}]",
             "[{\"a\":\"\\u12\"}]",
+            "[{\"a\":\"\\uD800\"}]",
+            "[{\"a\":\"\\uDC00\"}]",
+            "[{\"a\":\"\\uD800x\"}]",
+            "[{\"a\":\"\\uD800\\u0041\"}]",
             "[{\"a\":\"unterminated}]",
             "[{\"a\":tru}]",
         ] {
             assert!(parse_log_array(bad).is_err(), "should reject: {bad:?}");
         }
+    }
+
+    #[test]
+    fn parser_accepts_surrogate_pair() {
+        let v = parse_log_array("[{\"a\":\"\\uD83D\\uDE00\"}]").unwrap();
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn existing_nonempty_distinguishes_not_found_from_other_errors() {
+        let d = std::env::temp_dir().join(format!("fandhe-ne-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(existing_nonempty(&d.join("nope")), Ok(false));
+        let f = d.join("f");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(existing_nonempty(&f), Ok(true));
+        assert!(existing_nonempty(&f.join("child")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

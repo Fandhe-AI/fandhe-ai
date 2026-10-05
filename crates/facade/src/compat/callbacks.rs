@@ -830,10 +830,7 @@ impl CsvLogger {
     fn open_for_fit(&self, header: &str) -> Result<std::fs::File, String> {
         use std::io::{Read, Seek, SeekFrom, Write};
         logger_io::ensure_parent_dir(&self.path)?;
-        let existing_nonempty = self.append
-            && std::fs::metadata(&self.path)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false);
+        let existing_nonempty = self.append && logger_io::existing_nonempty(&self.path)?;
         if existing_nonempty {
             let first = logger_io::read_first_line_limited(&self.path)?.unwrap_or_default();
             if first != header {
@@ -1031,10 +1028,7 @@ impl JsonLogger {
 
     fn load_initial(&self, cols: &[&'static str]) -> Result<Vec<String>, String> {
         logger_io::ensure_parent_dir(&self.path)?;
-        let nonempty = self.append
-            && std::fs::metadata(&self.path)
-                .map(|m| m.len() > 0)
-                .unwrap_or(false);
+        let nonempty = self.append && logger_io::existing_nonempty(&self.path)?;
         if !nonempty {
             return Ok(Vec::new());
         }
