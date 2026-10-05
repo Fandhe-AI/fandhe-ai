@@ -305,7 +305,7 @@ sample_weight 適用は再開時に選択肢として提示する。新規 Issue
 ### 11.4 導出による補足（新規決定ではない）
 
 - 重み × `accumulate_steps > 1`（#2180・#2508）: §5 は 1 マイクロバッチの `loss_var` を差し替えるのみで累積は下流。`N_batch` はマイクロバッチのサンプル数（`Reduction::Mean` と同単位）。
-- validation_split は「validation あり」として扱い、`Monitor::ValLoss` 系 callbacks・`metrics` の validation 必須検査を満たす。
+- validation_split は実際に検証データを生成する場合（`Some(s)` かつ `s > 0`、§4 の検証を通過したもの）に限って「validation あり」として扱い、`Monitor::ValLoss` 系 callbacks・`metrics` の validation 必須検査を満たす。`validation_split(0.0)`（`-0.0` を含む）は分割なし（検証データを生成しない）のため、明示 `validation` も無ければこの検査を満たさない。
 - `FitConfig` の `Eq` は bit 比較のため `validation_split(0.0) != FitConfig::new(..)`、`+0.0`／`-0.0` は別値（挙動は §4 のとおり両者とも分割なし）。
 
 ### 11.5 公開 API 非破壊の確認（`fandhe-ai =0.10.0` 基準）
