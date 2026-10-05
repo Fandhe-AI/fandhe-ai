@@ -318,7 +318,15 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
   }
   ```
   - 受け付けるのは `DataLoader<D>` のみ。`SamplerDataLoader`・
-    `PrefetchDataLoader`・`HookedDataLoader` への対応は後から追加できる（非破壊）。
+    `PrefetchDataLoader`・`HookedDataLoader` は引数型が異なり、同名メソッドの
+    引数を後から generic 化・差し替えるのは破壊的である（`&DataLoader<D>` に
+    固定した時点で同名の別ローダー入口は追加できない）。このため後続対応は
+    **別名メソッド**（例: `predict_batches_sampled`・`predict_batches_prefetch`・
+    `predict_batches_hooked`）の追加で行う方針を本承認の一部として明記する
+    （既存 `predict_batches` のシグネチャは不変なので非破壊）。共通ローダー境界
+    （`BatchSource` 等の trait）を先に設ける案は、4 種のローダーの反復契約
+    （所有権・エラー伝播・prefetch の終端）が未整理で公開面を過剰に固定するため
+    却下し、必要になった時点で別名メソッドを共通 trait へ委譲する形で内部統合する。
   - `LoaderInferenceInput` を `pub trait PredictBatchInput` へ改名して公開し、
     sealed（private supertrait）とする。実装は `Tensor<f32>`・
     `(Tensor<f32>, B)`・`(Tensor<f32>, B, C)`。後から unseal するのは非破壊だが
