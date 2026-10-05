@@ -203,6 +203,19 @@ pub(crate) fn unary_grad_factor(op: ScalarUnaryOp, x: f32, y: f32) -> f32 {
             let xf = x as f64;
             (1.0 / (1.0 - xf * xf)) as f32
         }
+        // イシュー #2635: 判定 3 種は区分定数で係数 `0`（`grad.rs::vjp` は
+        // 乗算を経由せずゼロテンソルを返す。本腕は `Var::scalar_unary` を
+        // crate 内から直接呼ばれた場合に `unreachable!` へ落ちないための
+        // もの）。`NanToNum` は有限入力のみ `1`、非有限入力（置換値が
+        // 出力される位置）は `0`。
+        ScalarUnaryOp::IsNan | ScalarUnaryOp::IsInf | ScalarUnaryOp::IsFinite => 0.0,
+        ScalarUnaryOp::NanToNum { .. } => {
+            if x.is_finite() {
+                1.0
+            } else {
+                0.0
+            }
+        }
         // `ScalarUnaryOp` は `#[non_exhaustive]`（`tensor-core` 側で
         // 将来 variant を追加できるようにするため）で、crate 境界を
         // またぐ match は列挙済み variant のみでは非網羅と判定される。
@@ -438,6 +451,28 @@ mod tests {
         assert!((g(ScalarUnaryOp::Acosh, 2.0) - 1.0 / 3f32.sqrt()).abs() < 1e-6);
         // cosh の係数は sinh(x) で、負入力では負になる。
         assert!(g(ScalarUnaryOp::Cosh, -1.0) < 0.0);
+    }
+
+    #[test]
+    fn nonfinite_unary_grad_factors() {
+        let nn = ScalarUnaryOp::NanToNum {
+            nan: 0.0,
+            posinf: 1.0,
+            neginf: -1.0,
+        };
+        for op in [
+            ScalarUnaryOp::IsNan,
+            ScalarUnaryOp::IsInf,
+            ScalarUnaryOp::IsFinite,
+        ] {
+            for x in [1.0f32, f32::NAN, f32::INFINITY] {
+                assert_eq!(unary_grad_factor(op, x, op.apply(x)), 0.0, "{op:?}({x})");
+            }
+        }
+        assert_eq!(unary_grad_factor(nn, 2.0, 2.0), 1.0);
+        assert_eq!(unary_grad_factor(nn, f32::NAN, 0.0), 0.0);
+        assert_eq!(unary_grad_factor(nn, f32::INFINITY, 1.0), 0.0);
+        assert_eq!(unary_grad_factor(nn, f32::NEG_INFINITY, -1.0), 0.0);
     }
 
     #[test]

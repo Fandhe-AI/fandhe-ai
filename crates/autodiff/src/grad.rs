@@ -309,6 +309,17 @@ pub(crate) fn vjp(
                 // 避ける）。
                 let da = build_tensor(vec![0.0f32; x_val.numel()], x_val.shape());
                 vec![(input, da)]
+            } else if matches!(sop, ScalarUnaryOp::NanToNum { .. }) {
+                // イシュー #2635: `nan_to_num` の勾配は有限入力位置のみ
+                // `upstream`、非有限入力位置（置換値が出力された位置）は 0。
+                // 係数 0 を `vjp_elementwise_mul` へ渡すと upstream が
+                // `inf`／`NaN` のとき `0 * inf = NaN` に汚染される（PR #1823・
+                // #2145 と同類型）ため、`Op::Relu` と同じ要素選択ヘルパで
+                // 乗算を経由せず選ぶ。PyTorch は `grad * isfinite(x)` のため
+                // 入力が非有限かつ上流も非有限の位置だけ結果が異なる
+                // （`docs/autodiff-nonfinite-ops-decision.md` §5）。
+                let da = elementwise_mul_mask(upstream, x_val, |v| v.is_finite());
+                vec![(input, da)]
             } else {
                 let factor = eval::scalar::unary_grad_factors(x_val, out_value, sop);
                 let da = vjp_elementwise_mul(ops, upstream, &factor)?;
@@ -8993,9 +9004,18 @@ mod tests {
             (ScalarUnaryOp::Acos, vec![-0.7, -0.2, 0.3, 0.8]),
             (ScalarUnaryOp::Sinh, general.clone()),
             (ScalarUnaryOp::Cosh, general.clone()),
-            (ScalarUnaryOp::Asinh, general),
+            (ScalarUnaryOp::Asinh, general.clone()),
             (ScalarUnaryOp::Acosh, vec![1.3, 2.0, 3.5, 5.0]),
             (ScalarUnaryOp::Atanh, vec![-0.7, -0.2, 0.3, 0.8]),
+            // イシュー #2635: 有限入力のみ（導関数 1）。非有限入力は専用テスト。
+            (
+                ScalarUnaryOp::NanToNum {
+                    nan: 0.0,
+                    posinf: 1.0,
+                    neginf: -1.0,
+                },
+                general,
+            ),
         ]
     }
 
@@ -9090,6 +9110,41 @@ mod tests {
                     g.is_finite() && g == 0.0,
                     "{op:?}: upstream が inf でも勾配は有限の 0 であるべき（実際: {g}）"
                 );
+            }
+        }
+    }
+
+    /// イシュー #2635: `isnan`／`isinf`／`isfinite` 相当の kind を
+    /// `Var::scalar_unary` で直接積んだ場合も勾配は上流 `inf` で NaN に
+    /// ならず有限の 0 になる。`NanToNum` は入力が NaN／`±inf` の位置で
+    /// 上流 `inf` でも勾配が有限の 0、有限入力位置は上流をそのまま通す。
+    #[test]
+    fn nonfinite_kinds_backward_does_not_nan_with_inf_upstream() {
+        for op in [
+            ScalarUnaryOp::IsNan,
+            ScalarUnaryOp::IsInf,
+            ScalarUnaryOp::IsFinite,
+            ScalarUnaryOp::NanToNum {
+                nan: 0.0,
+                posinf: 1.0,
+                neginf: -1.0,
+            },
+        ] {
+            let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+            let x = tape.var(&t(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 2.0], &[4]));
+            let y = x.scalar_unary(op).unwrap();
+            let inf = tape.var(&t(&[f32::INFINITY; 4], &[4]));
+            let loss = y.mul(&inf).unwrap().sum(None).unwrap();
+            let grads = tape.backward(&loss).unwrap();
+            let dx = grads.get(&x).unwrap().unwrap();
+            for i in 0..3 {
+                assert_eq!(dx.get(&[i]).unwrap(), 0.0, "{op:?}[{i}]");
+            }
+            let last = dx.get(&[3]).unwrap();
+            if matches!(op, ScalarUnaryOp::NanToNum { .. }) {
+                assert_eq!(last, f32::INFINITY, "{op:?}: 有限入力位置は上流を通す");
+            } else {
+                assert_eq!(last, 0.0, "{op:?}");
             }
         }
     }
