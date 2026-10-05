@@ -874,8 +874,11 @@ mod tests {
     fn stft_constant_pad_propagates_non_finite_window() {
         // 範囲外（定数パディング）サンプルでも 0*NaN=NaN が窓掛けで伝播する。
         let pc = sp(4, Some(1), true, StftPadMode::Constant, false, true);
-        let layout = stft_layout(&[5], &pc).unwrap();
-        let x = vec![1.0f32; 5];
+        // L=1 のとき窓タップ 0 は全フレームで padded 座標 0・1（範囲外）にだけ当たる
+        // ため、NaN の出所は定数パディング由来の 0*NaN に限られる。
+        let layout = stft_layout(&[1], &pc).unwrap();
+        assert_eq!(layout.src_index(0), None);
+        let x = vec![1.0f32; 1];
         let mut w = vec![1.0f32; 4];
         w[0] = f32::NAN;
         let out = stft_host(&x, &w, &layout).unwrap();

@@ -436,8 +436,10 @@ pub fn stft<'t>(
         options.normalized,
         options.onesided,
     )?;
-    let win = resolve_window(window, options.win_length.unwrap_or(n_fft), n_fft)?;
+    // 形状検査（layout）を窓確保より先に行い、不正形状×巨大 n_fft で
+    // 型付きエラーの前に大きな確保を試みないようにする。
     let layout = fft::stft_layout(&x.shape(), &params)?;
+    let win = resolve_window(window, options.win_length.unwrap_or(n_fft), n_fft)?;
     let input = materialize_one(x)?;
     let value = match x.tape().ops().fft_stft(&input, &win, &params) {
         Ok(v) => {
@@ -485,8 +487,9 @@ pub fn istft<'t>(
         options.onesided,
         options.length,
     )?;
-    let win = resolve_window(window, params.win_length(), n_fft)?;
+    // 形状検査（layout）を窓確保より先に行う（stft と同じ理由）。
     let layout = fft::istft_layout(&x.shape(), &params)?;
+    let win = resolve_window(window, params.win_length(), n_fft)?;
     fft::istft_check_nola(&win.host_slice(), &layout)?;
     let input = materialize_one(x)?;
     let value = match x.tape().ops().fft_istft(&input, &win, &params) {
