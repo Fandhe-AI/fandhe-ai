@@ -650,8 +650,8 @@ impl OptimizerState {
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
         if params.len() != grads.len() {
             return Err(AutodiffError::InvalidArgument(format!(
-                "Sequential::fit: trainable_parameters().len() ({}) != \
-                 trainable_grads().len() ({})",
+                "optimizer step: params.len() ({}) != \
+                 grads.len() ({})",
                 params.len(),
                 grads.len()
             )));
