@@ -113,3 +113,7 @@ AMP 無効（`compiled.amp.is_none()`）のときは既存 f32 経路をその�
 - `create_graph`（二階微分）の低精度 forward ノード対応（本イシューは fail-closed 拒否のみ。§8.2 参照）。
 - CUDA／Metal 実機実測（`crates/facade/tests/amp_conv_mha_low_precision_backend_parity.rs`。実行コマンド・判定規則は `docs/perf/logs/amp-conv-mha-low-precision-2071/README.md` を参照）。同ファイルは MHA のみを対象とし、**Conv2d の実機 parity テストは対象外**とした——`nn::conv2d_forward_low_precision` が要求する `Conv2dVars` は `MultiheadAttentionVars::new`（`pub`）のような直接構築コンストラクタを持たず（`Conv2d::bind` は crate-internal な `&fandhe_ai_autodiff::Tape` を要求し facade テストから到達できない）、新規 `pub` コンストラクタの追加は facade／autodiff 公開面の拡張としてユーザー承認事項の判断になるため本イシューでは追加しなかった（`Conv2dVars::new` の新設は別途ユーザー承認を得たうえでの後続イシュー候補）。
 - CPU `TypedOps<f16/bf16>` は f32 昇格方式のため性能目標なし・ベンチ追加なし（§7.4 と同じ方針）。
+
+## 低精度 forward の対象 Op 拡張（イシュー #2627・親 #2626）
+
+Linear／Conv2d／MHA 以外（MatMul の自由関数入口・elementwise 5 演算）への拡張の対象 Op・数値契約・parity 判定・facade 公開形の推奨案は `docs/autodiff-low-precision-op-extension-decision.md` に記録した（承認待ち）。なお本 doc §6・§7.1 の「`ScalarDType` 再エクスポートは未承認」は #1939 で再エクスポート済みのため古い記述である。
