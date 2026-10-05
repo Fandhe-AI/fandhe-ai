@@ -80,7 +80,7 @@
 - **構築不能**: `TapeF64::new(tape: &'t Tape)` は生の `fandhe_ai_autodiff::Tape` を取る（`crates/autodiff/src/f64_autograd.rs:234`）。facade の `Tape` は `pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`（`crates/facade/src/lib.rs:329`）のため、型だけ再エクスポートしても facade 利用者は構築できない（§14 にも既記）
 - **`Tape` 部分文字列ガード**: `facade_does_not_reexport_tape_or_backend_ops`（`crates/facade/tests/api_surface.rs:107`）は `pub use` 行が部分文字列 `Tape` を含むと拒否する（REQ-12）。`TapeF64` の `pub use` も該当し、通すにはガードへの例外が要る
 - **モジュール再エクスポートの拒否**: `facade_pub_use_leaves_are_not_modules`（同 `:7448`）は allowlist 外の小文字葉を拒否する。`pub use fandhe_ai_autodiff::f64_autograd;` は現状通らない
-- **専用ガードなし**: f64 autograd 専用の `*HoldDoctestGuard` は無い（`crates/facade/src` に `TapeF64`／`VarF64`／`f64_autograd` の出現なし）。保留は上の 2 つの汎用ガードが担う
+- **専用ガードなし**: f64 autograd 専用の `*HoldDoctestGuard` は無い（`crates/facade/src` に `TapeF64`／`VarF64`／`f64_autograd` の出現なし）。保留を機械的に担うのは上の 2 つの汎用ガードのみで、両者が検査するのは `pub use` 行だけである（案 A〜C のような再エクスポートは拒否できる）。推奨案 D-2 の `pub struct TapeF64`／`VarF64`／`GradientsF64` の直接宣言は `pub use` ではないため**現状どのガードにも検出されず**、承認前の公開を機械的には防げない。この保留は本記録の承認待ちという運用で担保し、直接宣言を検出する保留ガードは本イシューでは足さない（正ガードは承認後に #2599 で新設）
 - **名前**: facade に `TapeF64`／`VarF64`／`GradientsF64`／`f64_autograd` は存在しない。`AutodiffError`・`Tensor` は facade 直下に到達済み
 - **新 `pub mod` のコスト**: facade に `pub mod` を足すと `*_hold_doctest_globs_all_pub_modules` 系テストと doctest の glob 一覧の更新が要る
 - **型の形**: `TapeF64<'t>`（`new`／`var`／`var_no_grad`／`backward`）、`VarF64<'g, 't>`（`Clone + Copy`。`value`／`shape`／`add`／`mul`／`div`／`pow`／`matmul`／`sum`／`mean`／`max`）、`GradientsF64`（`get`）。失敗は `Result<_, AutodiffError>`
