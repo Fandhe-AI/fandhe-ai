@@ -520,7 +520,7 @@ mod tests {
         (0..len).map(|_| lcg(&mut s)).collect()
     }
 
-    fn dot(a: &[f32], b: &[f32]) -> f64 {
+    fn dot_f64(a: &[f32], b: &[f32]) -> f64 {
         a.iter()
             .zip(b)
             .map(|(&x, &y)| f64::from(x) * f64::from(y))
@@ -646,8 +646,8 @@ mod tests {
                 let y = rfft_host(&x, &layout, norm).expect("rfft");
                 let g = rand_vec(y.len(), 4);
                 let dx = rfft_vjp_host(&g, &layout, norm).expect("vjp");
-                let lhs = dot(&y, &g);
-                let rhs = dot(&x, &dx);
+                let lhs = dot_f64(&y, &g);
+                let rhs = dot_f64(&x, &dx);
                 assert!(
                     (lhs - rhs).abs() < 1e-4,
                     "len={len} n={n:?} {norm:?}: {lhs} {rhs}"
@@ -672,8 +672,8 @@ mod tests {
                 let y = irfft_host(&x, &layout, norm).expect("irfft");
                 let g = rand_vec(y.len(), 6);
                 let dx = irfft_vjp_host(&g, &layout, norm).expect("vjp");
-                let lhs = dot(&y, &g);
-                let rhs = dot(&x, &dx);
+                let lhs = dot_f64(&y, &g);
+                let rhs = dot_f64(&x, &dx);
                 assert!(
                     (lhs - rhs).abs() < 1e-4,
                     "m={m} n={n:?} {norm:?}: {lhs} {rhs}"
