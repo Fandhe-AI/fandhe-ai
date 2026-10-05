@@ -542,3 +542,44 @@ generate() 公開（`facade-generate-decision.md`）も KvCache の facade 到�
 
 コード変更、ガードの削除・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、spec 提案。
 K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
+
+## 13. #2580（保留ガード反転・記録更新）の着手時判定
+
+本節は docs のみの停止記録であり、**承認を得たことを意味しない**。§6 承認事項 2 は未取得のままである。
+
+### 13.1 判定
+
+- 基準コミット `55646fac`（origin/main）・確認日 2026-10-05
+- 依存 #2579 は PR #2759 でクローズ済みだが、中身は §12 の停止記録のみで、facade に公開物はない。`crates/facade/src` で
+  `KvCache`／`StatefulAttention` がヒットするのは `lib.rs` の `KvCacheHoldDoctestGuard` の doc ブロック
+  （`crates/facade/src/lib.rs:1979-2057`）と他ガードからの参照コメントだけである
+- §11.6 の A／B／C を名指しする承認コメントは 0 件だった（確認対象: #2580・#2578 を直接確認。#2579・#2577・#2542・#2499 は §12.2 の確認結果を引用）
+- 正ガードは「承認した公開形だけを許す」検査であり、公開物がない状態では反転先が存在しない
+
+### 13.2 現状維持するもの
+
+`KvCacheHoldDoctestGuard`（`crates/facade/src/lib.rs:2057`）と `crates/facade/tests/api_surface.rs` の保留系 6 項目
+（`facade_does_not_expose_kv_cache_stateful_attention`・`kv_cache_hold_doctest_globs_all_pub_modules`・
+`kv_cache_hold_doctest_probe_body_matches_fixed_contract`・`scan_kv_cache_reexports_and_declarations`・
+`facade_does_not_reexport_or_declare_kv_cache_items`・`facade_does_not_reexport_or_declare_kv_cache_items_detects_each_category`）は
+撤去・縮小・反転しない。
+
+### 13.3 受入条件ごとの扱い
+
+| 受入条件 | 扱い |
+|---|---|
+| ガードの正ガード反転 | 公開物がないため不可 |
+| `compat-api-scope.md` §5 適用記録、本 doc §2・§6・§10 の実装記録 | 公開が実施されていないため書かない（書くと事実と異なる） |
+| facade 経由の利用例（doctest／tests） | 対象 API が未公開のため追加不可 |
+
+### 13.4 解除の順序
+
+1. §11.6 で A／B／C のどれを選ぶかのユーザー承認
+2. #2579 の再着手（または再起票）で facade 公開を実装する。§12.3 のとおり、公開面追加と同時に既存否定ガードが落ちるため、同一 PR での最小限の差し替えが必要になりうる
+3. 本イシュー相当の作業で §10.2 の手順に従い否定ガードを正ガード（公開面の到達可能性検査。prefill → decode の doctest を 1 つ含む。§11.4 P4）へ置換し、`compat-api-scope.md` §5 と本 doc §2・§6・§10 へ実装記録を書く
+4. generate() 公開（`facade-generate-decision.md` §15）がこれに続く
+
+### 13.5 本記録で行わないこと
+
+コード変更、ガードの削除・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、spec 提案、依存追加、`unsafe`、tolerance 変更。
+K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
