@@ -256,3 +256,142 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
 全て green（2026-09-27 実測。ローカル worktree）。
+
+## §8 #2582（facade 公開）の着手時判定と推奨案・承認依頼
+
+### 8.1 経緯
+
+- #2582（親 #2581・ルート #2499）は、ルート #2499 の一括承認の下で、本記録
+  §0・§5 の推奨形による facade 公開を求めた。一括承認が及ぶのは記録に書かれた
+  形に限られる。
+- 着手時に §5 を突合した結果、5 論点のいずれも 1 つの形に決まっていなかった。
+  issue 自身の停止条項（推奨形が未記載または複数案のままなら実装せず、記録追記と
+  承認依頼に切り替える）に従い、facade のコード・保留ガード・テストは変更して
+  いない（先例: `docs/reference-models-decision.md` §11、
+  `docs/autodiff-rnn-stacked-config-decision.md` §10）。本節は承認の取得を意味しない。
+- §1 は出荷版を `=0.9.0` と記すが、現行の出荷版は `0.10.0` である（過去の記録は
+  改変しない）。
+
+### 8.2 着手時判定（停止条項に該当する根拠）
+
+調査基準は origin/main `29d16936`。
+
+1. **入口の型境界が未決**: §5 項 1 は `DataLoader<D>` の `D` を型パラメータの
+   まま出すか `dyn` にするかを「要検討」としたまま。
+2. **`PhaseMetrics` の構成が未決**: §5 項 2 は `data_load_us` を「承認時に追加
+   するか」とし、他も「等」で閉じている。
+3. **accessor の呼称が未決**: §5 項 3 は `get_phase_metrics` と
+   `current_phase_metrics` の重複を「要整理」としたまま。
+4. **`pub mod inference` の形が未決**: §5 項 4 は `batch` サブモジュールを
+   そのまま出すかフラット化するかを併記したまま。
+5. **集計単位が未決**: §5 項 5 はスレッド単位かプロセス全体かを確認事項としたまま。
+
+確認した事実:
+
+- 保留ガード（`PredictBatchesHoldDoctestGuard`・`api_surface.rs` の 5 関数）は
+  `cargo test -p fandhe-ai --test api_surface predict_batches` で 5 件 green。
+- `Dataset` は関連型 `Batch` を持つため、`dyn` 化は `dyn Dataset<Batch = X>` の
+  形に限られ、`D` について generic な `DataLoader<D>` と合わない。
+- `pub fn` の where 句に `pub(crate)` のトレイト（現 `LoaderInferenceInput`）を
+  置くと `private_bounds` lint に抵触する。公開するなら入力トレイトも `pub` が必要。
+- 推奨名（`PhaseMetrics`・`PhaseStat`・`PredictBatchInput`・
+  `get_phase_metrics`・`reset_phase_metrics`）は facade 内で保留ガードの doc 以外に
+  現れず、現行の公開面と衝突しない（#2541 の名前衝突の再確認）。
+
+### 8.3 ユーザーに決めてほしい事項
+
+- (a) `predict_batches` の入口シグネチャと入力トレイトの公開形
+- (b) `PhaseMetrics` の構成（フィールド・accessor・時間単位）
+- (c) `InferencePhase` の公開形
+- (d) accessor 関数の呼称
+- (e) `pub mod inference` の公開パス
+- (f) 集計単位
+
+### 8.4 推奨案（1 回の承認で確定できる形）
+
+- (a) generic のまま出す。`dyn` は上記の理由で不可。
+  ```rust
+  impl Sequential {
+      pub fn predict_batches<D>(&self, loader: &DataLoader<D>)
+          -> Result<Vec<Tensor<f32>>, AutodiffError>
+      where D: Dataset, D::Batch: PredictBatchInput;
+  }
+  ```
+  - 受け付けるのは `DataLoader<D>` のみ。`SamplerDataLoader`・
+    `PrefetchDataLoader`・`HookedDataLoader` は引数型が異なり、同名メソッドの
+    引数を後から generic 化・差し替えるのは破壊的である（`&DataLoader<D>` に
+    固定した時点で同名の別ローダー入口は追加できない）。このため後続対応は
+    **別名メソッド**（例: `predict_batches_sampled`・`predict_batches_prefetch`・
+    `predict_batches_hooked`）の追加で行う方針を本承認の一部として明記する
+    （既存 `predict_batches` のシグネチャは不変なので非破壊）。共通ローダー境界
+    （`BatchSource` 等の trait）を先に設ける案は、4 種のローダーの反復契約
+    （所有権・エラー伝播・prefetch の終端）が未整理で公開面を過剰に固定するため
+    却下し、必要になった時点で別名メソッドを共通 trait へ委譲する形で内部統合する。
+  - `LoaderInferenceInput` を `pub trait PredictBatchInput` へ改名して公開し、
+    sealed（private supertrait）とする。実装は `Tensor<f32>`・
+    `(Tensor<f32>, B)`・`(Tensor<f32>, B, C)`。後から unseal するのは非破壊だが
+    逆は破壊的なため。
+  - `shuffle=true` は `InvalidArgument` で拒否し RNG を消費しない（§2.5）。
+    `training` フラグは暗黙に変えない（§3）。
+  - 代替案（却下）: `dyn` 境界、入力トレイトを open にする案。
+- (b) `InferencePhaseStats` を `PhaseMetrics` へ改名し `#[non_exhaustive]`・
+  `Debug, Clone, Copy, Default, PartialEq, Eq`。フィールドは private とし
+  accessor で読む（pub フィールドに `Copy + Eq` を固定すると追加が破壊的に
+  なるため）。accessor は `phase(InferencePhase) -> PhaseStat`・
+  `total() -> PhaseStat`・`batches() -> u64`・`samples() -> u64`・
+  `since(&before) -> PhaseMetrics`。`PhaseStat` も公開し
+  `total_micros() -> u128`・`calls() -> u64`・`total() -> Duration` を持つ。
+  `data_load` は計測実装済みのため含める。
+  - 代替案（却下）: pub フィールドの構造体。
+- (c) `InferencePhase` は `pub`・`#[non_exhaustive]` に昇格し、4 variant
+  （`DataLoad`・`TapeBuild`・`Forward`・`DeviceTransfer`）の `#[cfg(test)]` を外す。
+  `DeviceTransfer` は CPU 固定経路では常に `calls == 0`（予約）と doc に明記する。
+  `PhaseRecorder`・`NoopPhaseRecorder`・`TimingPhaseRecorder` は `pub(crate)` のまま。
+- (d) `pub fn get_phase_metrics() -> PhaseMetrics` と
+  `pub fn reset_phase_metrics()` の 2 つ。`current_phase_metrics` は作らない。
+  #2192 の要件が `get_phase_metrics` を名指ししているため合わせるが、
+  Rust API Guidelines（C-GETTER）は `get_` 接頭辞を避けるため、代替案として
+  `phase_metrics()` を併記する。
+- (e) `pub mod inference` へ昇格し、`batch` は非公開のまま `inference/mod.rs` の
+  `pub use` でフラットに公開する。公開パスは
+  `fandhe_ai::inference::{PhaseMetrics, PhaseStat, InferencePhase,
+  PredictBatchInput, get_phase_metrics, reset_phase_metrics}`。
+- (f) 現行のスレッド単位を維持する。意味は「呼び出しスレッドが
+  `predict_batches` で計測した累計」とし doc の契約にする。`predict_batches` は
+  呼び出しスレッドで同期実行され、ホットパスにロックが要らず、テストが分離できる
+  ため。プロセス全体の集計は別名の accessor として後から足せる（非破壊）。
+
+承認後も維持する防御: `Dataset::len()` を非信頼入力として扱う（`with_capacity`
+を使わず `try_reserve(1)` で逐次確保。§2.7）・`shuffle=true` の fail-closed 拒否・
+計測値の飽和演算。
+
+承認後の作業手順（§5 の手順を現行の公開面に合わせて更新）:
+
+1. `run_loader_inference` を `predict_batches` へ改名して `pub` に昇格し、
+   `#[cfg(test)]` を外す。
+2. `mod recorded` の `#[cfg(test)]` を外す。
+3. `PredictBatchesHoldDoctestGuard` と `api_surface.rs` の保留テスト（5 関数）を
+   正のガード（公開形の固定）へ置き換える。
+4. 他の保留ガード群の「全 `pub mod` glob 一覧」に `inference` を追加する
+   （追加しないと各 `*_hold_doctest_globs_all_pub_modules` が落ちる）。
+5. テストを `crates/facade/tests/inference_predict_batches.rs` へ移設・追加し、
+   doctest を追加する。
+6. `docs/compat-api-scope.md` §5 に適用記録を追記する。
+
+CUDA／Metal: 新規カーネルは無く（ホスト側の反復・計測のみ）、実機 parity の
+申し送りは発生しない見込み。
+
+### 8.5 選択肢
+
+- A: 8.4 を一括承認し、別 issue で実装する。
+- B: 8.4 を部分修正して承認する（例: accessor 名を `phase_metrics` にする、
+  トレイトを open にする）。
+- C: 公開を見送り、#2582 を not planned とする。
+
+いずれも 0.10.0 の公開 API を壊さないことが前提。実装 issue の起票は承認後に行う。
+
+### 8.6 本変更で行わないこと
+
+- facade コードの変更、保留ガードの追加・反転、`compat-api-scope.md` §5 への
+  適用記録。
+- #2582 の閉じ方と、親 #2581 の完了条件への影響（ユーザー判断待ち）。
