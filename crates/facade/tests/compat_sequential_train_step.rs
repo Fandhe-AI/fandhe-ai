@@ -12,6 +12,9 @@
 //! apply_parameters` 経路を公開 API だけで再構成するため、CPU 参照実装・
 //! 実機 parity は不要。
 //!
+//! あわせて、`FitTarget` の `i32`（クラス添字 target・`Loss::CrossEntropy`）経路が
+//! facade 公開形のまま動くことも固定する（#2569。他のテストは `f32` target）。
+//!
 //! `#[ignore]` 分離は行わない（CPU バックエンドのみで実行可能）。
 
 use fandhe_ai::compat::{
@@ -560,4 +563,69 @@ fn model_is_not_compiled_inside_hook() {
     assert!(!compiled_inside.is_empty());
     assert!(compiled_inside.iter().all(|c| !c));
     assert!(model.is_compiled());
+}
+
+/// 利用例（#2569）: クラス添字 target（`Tensor<i32>`・`Loss::CrossEntropy`）。
+/// 既定 step（`cross_entropy_loss(.., 1, Mean)`）を手書きしたフックが、既定の
+/// `fit` と bit 完全一致し、`History.loss` の長さが epoch 数に一致する。
+#[test]
+fn fit_with_train_step_class_index_target_cross_entropy() {
+    const N: usize = 7;
+    const BATCH: usize = 2;
+    const EPOCHS: usize = 3;
+    let x = Tensor::new(deterministic_fill(0x7570_CCCC, N * D_IN), &[N, D_IN]).unwrap();
+    let labels: Vec<i32> = (0..N).map(|i| (i % D_OUT) as i32).collect();
+    let y = Tensor::new(labels, &[N]).unwrap();
+
+    let mut default_model = build_model();
+    default_model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let default_history = default_model
+        .fit(&x, &y, FitConfig::new(EPOCHS, BATCH))
+        .unwrap();
+
+    let mut hook_model = build_model();
+    hook_model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let mut hook = |m: &Sequential,
+                    xb: &Tensor<f32>,
+                    yb: &Tensor<i32>,
+                    opt: &mut TrainStepOptimizer<'_>|
+     -> Result<TrainStepOutput, AutodiffError> {
+        let tape = fandhe_ai::tape();
+        let bound = m.bind(&tape);
+        let pred = bound.forward(&tape, &tape.var(xb))?;
+        let loss_var = pred.cross_entropy_loss(yb, 1, Reduction::Mean)?;
+        let loss_scalar = scalar(&loss_var);
+        let grads = tape.backward(&loss_var)?;
+        let grad_refs = bound.trainable_grads(&grads)?;
+        let stepped = opt.step(&m.trainable_parameters(), &grad_refs)?;
+        Ok(TrainStepOutput::new(loss_scalar).with_updated(stepped))
+    };
+    let hook_history = hook_model
+        .fit_with_train_step(
+            &x,
+            &y,
+            FitConfig::new(EPOCHS, BATCH),
+            None,
+            &mut [],
+            &[],
+            &mut hook,
+        )
+        .unwrap();
+
+    assert_eq!(hook_history.loss.len(), EPOCHS);
+    assert_eq!(
+        hook_history.loss, default_history.loss,
+        "CrossEntropy: フックの History.loss が既定の fit と bit 一致しない"
+    );
+    assert!(
+        params_bit_exact(
+            &default_model.trainable_parameters(),
+            &hook_model.trainable_parameters()
+        ),
+        "CrossEntropy: 学習後パラメータが既定の fit と bit 一致しない"
+    );
 }
