@@ -275,6 +275,7 @@ mod tape;
 #[cfg(test)]
 mod test_support;
 pub mod topk_unique_ops;
+pub mod trig_ops;
 mod var;
 
 pub use backward::Gradients;

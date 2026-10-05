@@ -140,7 +140,8 @@ pub(crate) fn scalar_unary_replayable(op: ScalarUnaryOp) -> bool {
 }
 
 /// [`Op::supports_create_graph`] が `Op::ScalarBinary` へ委譲する判定
-/// （イシュー #2062）。既知 13 variant はすべて `Var` 演算で VJP を
+/// （イシュー #2062）。既知 13 variant（`Add`〜`Ne`。#2634 で追加した `Atan2` は
+/// 対象外で `false`）はすべて `Var` 演算で VJP を
 /// 合成できるため `true`（[`build_cgrads`] の `Op::ScalarBinary` 腕
 /// 参照）。`ScalarBinaryOp` も `#[non_exhaustive]` のため末尾ワイルド
 /// カードは未知 variant を `false` へ倒す。

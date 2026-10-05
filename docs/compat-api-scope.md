@@ -1928,3 +1928,9 @@ facade 公開面は追加していない（保留ガードのプローブと `ap
 facade 公開面は追加していない（保留ガードのプローブと `api_surface.rs` のインベントリへ `stft`／`istft`・`StftOptions`／`IstftOptions`／`StftPadMode` を追加）。
 公開形（`Var::stft`／`Var::istft`・`StftOptions`／`IstftOptions`／`StftPadMode` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-fft-ops-decision.md` §13。
+
+**適用記録（イシュー #2634・親 #2625・ルート #2499 Phase 4。逆三角関数・双曲線関数）**:
+`atan`／`asin`／`acos`／`atan2`／`sinh`／`cosh`／`asinh`／`acosh`／`atanh` の 9 演算を内部クレート限定（`fandhe_ai_autodiff::trig_ops`・`fandhe_ai_tensor_core::{ScalarUnaryOp, ScalarBinaryOp}` の追加 variant）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `TrigOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::atan` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-trig-ops-decision.md`。

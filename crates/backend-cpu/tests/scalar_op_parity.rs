@@ -59,6 +59,18 @@ fn unary_variants() -> Vec<ScalarUnaryOp> {
         ScalarUnaryOp::Reciprocal,
         ScalarUnaryOp::Rsqrt,
         ScalarUnaryOp::Erf,
+        // イシュー #2634: `positive_data` は `[0.1, 2.1)` のため `Asin`／
+        // `Acos`／`Atanh`（`|x| < 1` 外は NaN）・`Acosh`（`x < 1` は NaN）の
+        // 一部要素は NaN になる。bit 比較は NaN も同一 bit で一致するが検証が
+        // 薄いため、定義域内の入力は下の専用テストで補う。
+        ScalarUnaryOp::Atan,
+        ScalarUnaryOp::Asin,
+        ScalarUnaryOp::Acos,
+        ScalarUnaryOp::Sinh,
+        ScalarUnaryOp::Cosh,
+        ScalarUnaryOp::Asinh,
+        ScalarUnaryOp::Acosh,
+        ScalarUnaryOp::Atanh,
     ]
 }
 
@@ -77,6 +89,7 @@ fn binary_variants() -> Vec<ScalarBinaryOp> {
         ScalarBinaryOp::Le,
         ScalarBinaryOp::Eq,
         ScalarBinaryOp::Ne,
+        ScalarBinaryOp::Atan2,
     ]
 }
 
@@ -116,6 +129,43 @@ fn scalar_unary_all_variants_match_sequential_host_reference() {
         assert!(
             bits_eq(&out, &expected),
             "scalar_unary({op:?}): 逐次ホスト参照と bit 一致しない"
+        );
+    }
+}
+
+/// イシュー #2634: 定義域が限られる新 kind を、定義域の内側へ写した入力で
+/// 逐次ホスト参照と bit 一致させる（NaN だけの比較にならないよう、出力が
+/// 全要素有限であることも確認する）。
+#[test]
+fn new_2634_unary_variants_match_host_reference_inside_domain() {
+    let ops = CpuBackendOps::new();
+    let mut rng = Xorshift64Star::new(0x2634_0001);
+    let len = 37;
+    let raw = rng.fill_vec(len);
+    for (op, map) in [
+        (
+            ScalarUnaryOp::Asin,
+            (|v: f32| v.clamp(-0.95, 0.95)) as fn(f32) -> f32,
+        ),
+        (ScalarUnaryOp::Acos, |v| v.clamp(-0.95, 0.95)),
+        (ScalarUnaryOp::Atanh, |v| v.clamp(-0.95, 0.95)),
+        (ScalarUnaryOp::Acosh, |v| v.abs() + 1.05),
+        (ScalarUnaryOp::Atan, |v| v * 4.0),
+        (ScalarUnaryOp::Sinh, |v| v * 4.0),
+        (ScalarUnaryOp::Cosh, |v| v * 4.0),
+        (ScalarUnaryOp::Asinh, |v| v * 4.0),
+    ] {
+        let data: Vec<f32> = raw.iter().map(|&v| map(v)).collect();
+        let a = Tensor::new(data.clone(), &[len]).unwrap();
+        let expected: Vec<f32> = data.iter().map(|&x| op.apply(x)).collect();
+        assert!(
+            expected.iter().all(|v| v.is_finite()),
+            "{op:?}: 入力が定義域外"
+        );
+        let out = ops.scalar_unary(op, &a).unwrap();
+        assert!(
+            bits_eq(&out, &expected),
+            "scalar_unary({op:?}) が bit 一致しない"
         );
     }
 }

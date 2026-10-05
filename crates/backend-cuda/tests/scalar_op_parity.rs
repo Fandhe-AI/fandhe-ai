@@ -896,3 +896,32 @@ fn scalar_op_matches_cpu_across_shapes() {
         .expect("empty tensor must succeed (Clamp)");
     assert_eq!(cuda_empty_clamp.shape(), &[0]);
 }
+
+/// イシュー #2634: 逆三角関数・双曲線関数 9 kind は GPU 専用カーネルが未実装で、
+/// `CudaBackendOps` は対応 kind 判定をデバイス取得より前に行うため、CUDA 非搭載
+/// 環境でも `CudaUnavailable` ではなく `Unsupported`（ホスト参照実装へ
+/// フォールバックする契約）を返す。属性なし（通常 CI で実行）。
+#[test]
+fn new_2634_kinds_return_unsupported_without_touching_device() {
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).expect("valid tensor");
+    for op in [
+        ScalarUnaryOp::Atan,
+        ScalarUnaryOp::Asin,
+        ScalarUnaryOp::Acos,
+        ScalarUnaryOp::Sinh,
+        ScalarUnaryOp::Cosh,
+        ScalarUnaryOp::Asinh,
+        ScalarUnaryOp::Acosh,
+        ScalarUnaryOp::Atanh,
+    ] {
+        assert!(
+            matches!(cuda.scalar_unary(op, &a), Err(BackendError::Unsupported(_))),
+            "{op:?}: Unsupported のはず"
+        );
+    }
+    assert!(matches!(
+        cuda.scalar_binary(ScalarBinaryOp::Atan2, &a, &a),
+        Err(BackendError::Unsupported(_))
+    ));
+}
