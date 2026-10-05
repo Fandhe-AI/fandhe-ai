@@ -4090,6 +4090,179 @@ struct PredictBatchesHoldDoctestGuard;
 #[allow(dead_code)]
 struct FftOpsHoldDoctestGuard;
 
+/// 逆三角関数・双曲線関数（`atan`・`asin`・`acos`・`atan2`・`sinh`・`cosh`・
+/// `asinh`・`acosh`・`atanh`。イシュー #2634・親 #2625・ルート #2499
+/// Phase 4）を facade 公開面から締め出す保留ガード（`FftOpsHoldDoctestGuard`
+/// と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `trig_ops` と 9 メソッドを持つプローブ用トレイトを置き、
+/// 修飾なしの関数呼び出しと `Var`／`Tape` の修飾付きメソッド呼び出しの両方を
+/// 行う。facade が同名のモジュール・関数を glob 可能な位置へ公開するか、
+/// `Var`／`Tape` へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
+/// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::trig_ops`・
+/// `fandhe_ai_tensor_core::{ScalarUnaryOp, ScalarBinaryOp}` の追加 variant）。
+/// 保留対象は facade 公開面（`Var::atan` 等の委譲メソッド）のみで、公開形は
+/// 未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
+/// `docs/autodiff-trig-ops-decision.md` §7。同記録は推奨案の記録であり
+/// 承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// trig_ops_hold_doctest_globs_all_pub_modules`・
+/// `trig_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_trig_ops`・
+/// `workspace_declares_trig_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_trig_ops_hold_probe {
+///     pub mod trig_ops {
+///         pub fn atan() {}
+///         pub fn asin() {}
+///         pub fn acos() {}
+///         pub fn sinh() {}
+///         pub fn cosh() {}
+///         pub fn asinh() {}
+///         pub fn acosh() {}
+///         pub fn atanh() {}
+///         pub fn atan2() {}
+///     }
+/// }
+/// use __fandhe_trig_ops_hold_probe::*;
+///
+/// struct __FandheTrigOpsHoldMarker;
+///
+/// trait __FandheTrigOpsHoldProbe {
+///     fn atan(&self) -> __FandheTrigOpsHoldMarker;
+///     fn asin(&self) -> __FandheTrigOpsHoldMarker;
+///     fn acos(&self) -> __FandheTrigOpsHoldMarker;
+///     fn sinh(&self) -> __FandheTrigOpsHoldMarker;
+///     fn cosh(&self) -> __FandheTrigOpsHoldMarker;
+///     fn asinh(&self) -> __FandheTrigOpsHoldMarker;
+///     fn acosh(&self) -> __FandheTrigOpsHoldMarker;
+///     fn atanh(&self) -> __FandheTrigOpsHoldMarker;
+///     fn atan2(&self) -> __FandheTrigOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheTrigOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn atan(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn asin(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn acos(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn sinh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn cosh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn asinh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn acosh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn atanh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn atan2(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheTrigOpsHoldProbe for fandhe_ai::Tape {
+///     fn atan(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn asin(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn acos(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn sinh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn cosh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn asinh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn acosh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn atanh(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+///     fn atan2(&self) -> __FandheTrigOpsHoldMarker {
+///         __FandheTrigOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     trig_ops::atan();
+///     trig_ops::asin();
+///     trig_ops::acos();
+///     trig_ops::sinh();
+///     trig_ops::cosh();
+///     trig_ops::asinh();
+///     trig_ops::acosh();
+///     trig_ops::atanh();
+///     trig_ops::atan2();
+/// }
+///
+/// fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asin(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acos(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::sinh(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::cosh(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asinh(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acosh(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atanh(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan2(v);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::atan(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::asin(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::acos(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::sinh(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::cosh(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::asinh(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::acosh(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::atanh(tape);
+///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::atan2(tape);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct TrigOpsHoldDoctestGuard;
+
 /// `Var`／`Tape` の低精度 forward 入口（`matmul_low_precision`・
 /// `add_low_precision`・`mul_low_precision`・`relu_low_precision`・
 /// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・
