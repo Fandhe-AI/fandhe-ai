@@ -61,6 +61,10 @@ pub(crate) fn binary(lhs: &Tensor<f32>, rhs: &Tensor<f32>, op: ScalarBinaryOp) -
 //   を再利用。`Sqrt`/`Exp` と同型）。`Erf` は `2/√π・exp(-x^2)`
 //   （`f64` で計算し 1 回 downcast。`tensor_core::scalar_op::
 //   erf_grad`）。
+// - イシュー #2634: `Atan`／`Asin`／`Acos`／`Sinh`／`Cosh`／`Asinh`／
+//   `Acosh`／`Atanh`／`Atan2` の係数は `f64` で計算し 1 回 downcast
+//   （定義域の境界・外側は IEEE のまま `inf`／`NaN`。PyTorch 2.14.0 と
+//   の突合は `docs/autodiff-trig-ops-decision.md` §5）。
 // - `Pow`（binary）の `db`（`∂/∂b[a^b] = a^b・ln(a)`）は `a == 0` の
 //   場合 `0` にマスクする（PyTorch のマスク規約。`ln(0) = -inf` に
 //   `y = 0` が掛かり `NaN` になるのを避ける）。`da`
@@ -168,6 +172,37 @@ pub(crate) fn unary_grad_factor(op: ScalarUnaryOp, x: f32, y: f32) -> f32 {
         ScalarUnaryOp::Reciprocal => -y * y,
         ScalarUnaryOp::Rsqrt => -0.5 * y / x,
         ScalarUnaryOp::Erf => fandhe_ai_tensor_core::scalar_op::erf_grad(x),
+        // イシュー #2634: 係数は `f64` へ昇格して計算し 1 回だけ downcast
+        // する（`f32` のまま `x*x` 等を取ると中間値が overflow／underflow
+        // しうるため）。`Sinh`／`Cosh` は forward 出力 `y` から復元せず
+        // 入力 `x` から直接計算する（`y` からの復元は符号を失う／
+        // 丸めで劣化する。`Elu` と同じ理由）。
+        ScalarUnaryOp::Atan => {
+            let xf = x as f64;
+            (1.0 / (1.0 + xf * xf)) as f32
+        }
+        ScalarUnaryOp::Asin => {
+            let xf = x as f64;
+            (1.0 / ((1.0 - xf) * (1.0 + xf)).sqrt()) as f32
+        }
+        ScalarUnaryOp::Acos => {
+            let xf = x as f64;
+            (-1.0 / ((1.0 - xf) * (1.0 + xf)).sqrt()) as f32
+        }
+        ScalarUnaryOp::Sinh => (x as f64).cosh() as f32,
+        ScalarUnaryOp::Cosh => (x as f64).sinh() as f32,
+        ScalarUnaryOp::Asinh => {
+            let xf = x as f64;
+            (1.0 / (xf * xf + 1.0).sqrt()) as f32
+        }
+        ScalarUnaryOp::Acosh => {
+            let xf = x as f64;
+            (1.0 / (xf * xf - 1.0).sqrt()) as f32
+        }
+        ScalarUnaryOp::Atanh => {
+            let xf = x as f64;
+            (1.0 / (1.0 - xf * xf)) as f32
+        }
         // `ScalarUnaryOp` は `#[non_exhaustive]`（`tensor-core` 側で
         // 将来 variant を追加できるようにするため）で、crate 境界を
         // またぐ match は列挙済み variant のみでは非網羅と判定される。
@@ -236,6 +271,24 @@ pub(crate) fn binary_partials(op: ScalarBinaryOp, a: f32, b: f32, y: f32) -> (f3
                 (0.0, 1.0)
             } else {
                 (0.5, 0.5)
+            }
+        }
+        // イシュー #2634: `atan2(a, b)`（`a = y`・`b = x`）の偏導関数
+        // `da = b/(a²+b²)`・`db = -a/(a²+b²)`。分母は `f64` で計算し
+        // `a = b = 1e-30`（`f32` では分母が 0 へ underflow して `inf`）
+        // や `1e20`（overflow）でも有限値を保つ。
+        // （PyTorch 2.14.0 は勾配 `0` を返すため原点のみ `(0, 0)` へ
+        // 合わせる。`1e-30`／`1e20` では PyTorch が `f32` の underflow／overflow
+        // で `0` を返すが、本実装は数学的に正しい有限値を返す差分があり
+        // `docs/autodiff-trig-ops-decision.md` §5 に記録する）。
+        ScalarBinaryOp::Atan2 => {
+            let (af, bf) = (a as f64, b as f64);
+            let denom = af * af + bf * bf;
+            if denom == 0.0 {
+                // 原点は PyTorch 2.14.0 の実測（勾配 `0`）に合わせる。
+                (0.0, 0.0)
+            } else {
+                ((bf / denom) as f32, (-af / denom) as f32)
             }
         }
         // 比較演算は出力が離散値（0.0/1.0）で入力に対し区分定数（傾き
@@ -367,6 +420,47 @@ mod tests {
     fn comparison_partials_are_zero() {
         assert_eq!(
             binary_partials(ScalarBinaryOp::Gt, 1.0, 2.0, 0.0),
+            (0.0, 0.0)
+        );
+    }
+
+    // --- イシュー #2634 ---
+
+    #[test]
+    fn trig_unary_grad_known_values() {
+        let g = |op, x: f32| unary_grad_factor(op, x, op.apply(x));
+        assert!((g(ScalarUnaryOp::Atan, 1.0) - 0.5).abs() < 1e-6);
+        assert!((g(ScalarUnaryOp::Asin, 0.0) - 1.0).abs() < 1e-6);
+        assert!((g(ScalarUnaryOp::Acos, 0.0) + 1.0).abs() < 1e-6);
+        assert!((g(ScalarUnaryOp::Sinh, 0.0) - 1.0).abs() < 1e-6);
+        assert!((g(ScalarUnaryOp::Asinh, 0.0) - 1.0).abs() < 1e-6);
+        assert!((g(ScalarUnaryOp::Atanh, 0.0) - 1.0).abs() < 1e-6);
+        assert!((g(ScalarUnaryOp::Acosh, 2.0) - 1.0 / 3f32.sqrt()).abs() < 1e-6);
+        // cosh の係数は sinh(x) で、負入力では負になる。
+        assert!(g(ScalarUnaryOp::Cosh, -1.0) < 0.0);
+    }
+
+    #[test]
+    fn trig_unary_grad_huge_inputs_do_not_produce_nan() {
+        for op in [ScalarUnaryOp::Atan, ScalarUnaryOp::Asinh] {
+            for x in [1e30_f32, -1e30, 3e38] {
+                let v = unary_grad_factor(op, x, op.apply(x));
+                assert!(!v.is_nan(), "{op:?}({x}) の係数が NaN");
+            }
+        }
+    }
+
+    #[test]
+    fn atan2_partials_known_values_and_underflow_overflow_regression() {
+        let (da, db) = binary_partials(ScalarBinaryOp::Atan2, 1.0, 1.0, 0.0);
+        assert!((da - 0.5).abs() < 1e-6 && (db + 0.5).abs() < 1e-6);
+        let (da, _) = binary_partials(ScalarBinaryOp::Atan2, 1e-30, 1e-30, 0.0);
+        assert!(da.is_finite() && da > 1e29, "underflow 回帰: {da}");
+        let (da, db) = binary_partials(ScalarBinaryOp::Atan2, 1e20, 1e20, 0.0);
+        assert!(da.is_finite() && db.is_finite(), "overflow 回帰");
+        // 原点は PyTorch 2.14.0 の実測に合わせて勾配 0。
+        assert_eq!(
+            binary_partials(ScalarBinaryOp::Atan2, 0.0, 0.0, 0.0),
             (0.0, 0.0)
         );
     }
