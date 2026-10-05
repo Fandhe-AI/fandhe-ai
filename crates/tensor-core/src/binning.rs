@@ -136,6 +136,13 @@ pub fn histc_check(shape: &[usize], bins: usize, min: f32, max: f32) -> Result<(
     if bins == 0 {
         return Err(invalid("histc: bins must be > 0"));
     }
+    // 明示された範囲の非有限（NaN／inf）は、バックエンド実装差で型付きエラーにならない
+    // のを避けるため呼び出し前に全バックエンド共通で拒否する。
+    if !min.is_finite() || !max.is_finite() {
+        return Err(invalid(format!(
+            "histc: range of [{min}, {max}] is not finite"
+        )));
+    }
     if f64::from(min) > f64::from(max) {
         return Err(invalid(format!(
             "histc: max must be larger than min (min={min}, max={max})"
@@ -144,6 +151,20 @@ pub fn histc_check(shape: &[usize], bins: usize, min: f32, max: f32) -> Result<(
     // 出力 `f32` とカウント用 `u64` バッファ。
     check_alloc_bytes(bins, std::mem::size_of::<f32>())?;
     check_alloc_bytes(bins, std::mem::size_of::<u64>())?;
+    Ok(())
+}
+
+/// `min == max` のとき入力の最小・最大から決まる範囲の有限性を検査する（[`histc_host`] と同じ
+/// 判定。autodiff がバックエンド呼び出し前に呼び、バックエンド結果の採用前に全経路で非有限
+/// 範囲を拒否する）。`min != max`・空入力では何もしない（明示範囲は [`histc_check`] が検査済み）。
+pub fn histc_data_range_check(x: &[f32], min: f32, max: f32) -> Result<(), BinningError> {
+    if min != max || x.is_empty() {
+        return Ok(());
+    }
+    // `aminmax`: NaN を含めば範囲は非有限、±inf を含んでも同様。
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(invalid("histc: range of data is not finite"));
+    }
     Ok(())
 }
 

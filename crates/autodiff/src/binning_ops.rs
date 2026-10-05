@@ -95,6 +95,8 @@ pub fn histc<'t>(
 ) -> Result<Tensor<f32>, AutodiffError> {
     binning::histc_check(&x.shape(), bins, min, max)?;
     let input = materialize_one(x)?;
+    // `min == max` のデータ由来範囲も、バックエンド結果の採用前に同じ有限性検査を適用する。
+    binning::histc_data_range_check(&input.contiguous().host_slice(), min, max)?;
     let backend = x.tape().ops().binning_histc(&input, bins, min, max);
     resolve(
         backend,

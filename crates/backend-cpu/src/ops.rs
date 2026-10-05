@@ -3272,7 +3272,13 @@ impl BackendOps for CpuBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         use fandhe_ai_tensor_core::binning as bn;
         // 形状検証を実体化より前に行う（巨大 broadcast view の先行実体化を避ける）。
-        bn::bincount_check(input.shape(), true)?;
+        let n = bn::bincount_check(input.shape(), true)?;
+        if n == 0 {
+            // 空入力は重みの rank・長さを見ず、実体化もせず minlength 個の零を返す（PyTorch 同様）。
+            let zeros = bn::bincount_zeros_f32(bn::bincount_out_len(&[], minlength)?)?;
+            let len = zeros.len();
+            return Tensor::new(zeros, &[len]).map_err(BackendError::ShapeMismatch);
+        }
         bn::bincount_check(weights.shape(), true)?;
         let input = input.contiguous();
         let weights = weights.contiguous();

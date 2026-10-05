@@ -93,6 +93,15 @@ fn invalid_arguments_are_typed_errors() {
         Err(BackendError::InvalidArgument(_))
     ));
     assert!(matches!(
+        ops.binning_histc(&x, 2, f32::NAN, 1.0),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    // 空入力は重みの rank を見ず minlength 個の零を返す。
+    let z = ops
+        .binning_bincount_weighted(&ti(vec![], &[0]), &t(vec![1.0], &[1, 1]), 3)
+        .unwrap();
+    assert_eq!(z.shape(), [3]);
+    assert!(matches!(
         ops.binning_histc(&x, usize::MAX, 0.0, 1.0),
         Err(BackendError::ShapeMismatch(_))
     ));
