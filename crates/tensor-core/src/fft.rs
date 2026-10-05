@@ -165,8 +165,9 @@ fn check_f32_alloc(shape: &[usize]) -> Result<usize, FftError> {
 
 /// `rfft`（実入力 `[..., L, ...]` → `[..., n/2+1, ..., 2]`）の引数を解決・検査する。
 ///
-/// `n` 省略時は `L`、`dim` 省略時は末尾軸。`n >= 1` かつ `L >= 1` を要求する
-/// （`torch.fft.rfft` も長さ 0 の変換を拒否する）。
+/// `n` 省略時は `L`、`dim` 省略時は末尾軸。`n >= 1` を要求する（`n` 省略かつ
+/// `L == 0` は `n = 0` として拒否。`torch.fft.rfft` と同じ。`L == 0` でも `n` を
+/// 明示すればゼロ詰めとして受理し、これも torch 2.14.0 の実測と一致する）。
 pub fn rfft_layout(
     in_shape: &[usize],
     n: Option<usize>,
@@ -190,11 +191,6 @@ pub fn rfft_layout(
     if n == 0 {
         return Err(FftError::InvalidArgument(
             "rfft: 変換長 n は 1 以上である必要がある".into(),
-        ));
-    }
-    if len == 0 {
-        return Err(FftError::InvalidArgument(
-            "rfft: 変換軸の入力長は 1 以上である必要がある".into(),
         ));
     }
     let mut out_shape = in_shape.to_vec();
@@ -733,9 +729,17 @@ mod tests {
             Err(FftError::InvalidArgument(_))
         ));
         assert!(matches!(
-            rfft_layout(&[0], Some(4), None),
+            rfft_layout(&[0], None, None),
             Err(FftError::InvalidArgument(_))
         ));
+        // `L == 0` でも `n` 明示ならゼロ詰めとして受理する（torch と同じ）。
+        let l = rfft_layout(&[0], Some(4), None).expect("layout");
+        let y = rfft_host(&[], &l, FftNorm::Backward).expect("rfft");
+        assert_eq!(y, vec![0.0; 6]);
+        assert_eq!(
+            rfft_vjp_host(&y, &l, FftNorm::Backward).expect("vjp"),
+            Vec::<f32>::new()
+        );
         assert!(matches!(
             irfft_layout(&[4], None, None),
             Err(FftError::Shape(ShapeError::RankMismatch { .. }))
