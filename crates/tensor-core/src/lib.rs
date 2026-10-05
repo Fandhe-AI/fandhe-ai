@@ -164,6 +164,7 @@
 #[doc(hidden)]
 pub mod alloc;
 mod backend_ops;
+pub mod binning;
 mod broadcast;
 pub mod buffer;
 pub mod cast;
@@ -210,6 +211,7 @@ pub use backend_ops::{
     checked_gemm_batched_output_len, gemm_batched_via_per_batch_gemm,
     gemm_batched_via_per_batch_gemm_fp32_strict, normalize_batched_operand, ops_for,
 };
+pub use binning::BinningError;
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};
 pub use cast::{CastDType, CastElement, CastOps, cast_from_f32, cast_to_f32};

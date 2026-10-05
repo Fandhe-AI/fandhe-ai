@@ -235,6 +235,7 @@ pub mod activation_ops;
 mod adaptive_max_pool_ops;
 mod attention;
 mod backward;
+pub mod binning_ops;
 pub mod bool_ops;
 pub mod compat;
 pub mod conv3d_ops;

@@ -2543,6 +2543,68 @@ pub trait BackendOps {
         ))
     }
 
+    /// `histc`（ヒストグラム。入力は平坦化され出力は長さ `bins` の `f32` カウント。
+    /// イシュー #2638）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::scan_cummax`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::binning_ops::histc` は `Unsupported` のときだけホスト参照実装
+    /// [`crate::binning::histc_host`] へフォールバックし、それ以外のエラーは伝播する。
+    /// 実装側も `binning::histc_check` で引数を再検査する（fail-closed）。非微分。
+    fn binning_histc(
+        &self,
+        _x: &Tensor<f32>,
+        _bins: usize,
+        _min: f32,
+        _max: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "binning_histc: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 重みなし `bincount`（`i32` カウント。イシュー #2638）。契約は
+    /// [`Self::binning_histc`] と同じ（フォールバック先は
+    /// [`crate::binning::bincount_host`]）。
+    fn binning_bincount(
+        &self,
+        _input: &Tensor<i32>,
+        _minlength: usize,
+    ) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "binning_bincount: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 重みあり `bincount`（`f32`。イシュー #2638）。契約は [`Self::binning_histc`] と
+    /// 同じ（フォールバック先は [`crate::binning::bincount_weighted_host`]）。
+    fn binning_bincount_weighted(
+        &self,
+        _input: &Tensor<i32>,
+        _weights: &Tensor<f32>,
+        _minlength: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "binning_bincount_weighted: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// `searchsorted`／`bucketize` 共通の二分探索（`right = false` は下限・`true` は上限。
+    /// 出力は `values` と同 shape の `i32` 索引。イシュー #2638）。契約は
+    /// [`Self::binning_histc`] と同じ（フォールバック先は
+    /// [`crate::binning::searchsorted_host`]）。`bucketize` は `(boundaries, input)` で呼ぶ
+    /// 1 次元特例。
+    fn binning_searchsorted(
+        &self,
+        _sorted_sequence: &Tensor<f32>,
+        _values: &Tensor<f32>,
+        _right: bool,
+    ) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "binning_searchsorted: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// 行方向 log_softmax（`x − m − ln(Σ exp(x − m))`。`m` は行 max）の
     /// 独立エントリ（イシュー #1594）。[`Self::softmax`] と同じ最終軸
     /// 限定契約・非破壊拡張・フォールバック規律に従う
@@ -5813,6 +5875,31 @@ mod tests {
         ));
         assert!(matches!(
             ops.stat_nanmean(&x, Some(0)),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
+
+    /// [`BackendOps::binning_histc`] ほか `binning_*` 4 メソッドの既定実装が fail-safe を
+    /// 返し panic しないことの確認（イシュー #2638）。
+    #[test]
+    fn binning_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let i = Tensor::new(vec![0i32, 1, 2], &[3]).unwrap();
+        assert!(matches!(
+            ops.binning_histc(&x, 4, 0.0, 4.0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.binning_bincount(&i, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.binning_bincount_weighted(&i, &x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.binning_searchsorted(&x, &x, true),
             Err(BackendError::Unsupported(_))
         ));
     }
