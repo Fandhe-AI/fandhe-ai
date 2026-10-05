@@ -13,8 +13,8 @@ use std::sync::Mutex;
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::{
-    Callback, EarlyStopping, FitConfig, Loss, LrSchedule, ModelCheckpoint, Monitor, Optimizer,
-    Sequential,
+    Callback, CsvLogger, EarlyStopping, FitConfig, JsonLogger, LambdaCallback, Loss, LrSchedule,
+    Metrics, ModelCheckpoint, Monitor, Optimizer, Sequential,
 };
 use fandhe_ai::optim::{
     LrScheduler, PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, Sgd, SgdConfig, StepLr,
@@ -833,4 +833,455 @@ fn fit_with_callbacks_rejects_huge_epochs_without_panicking() {
         was_training,
         "Err 後も train／eval モードが呼び出し前の値へ復元されること"
     );
+}
+// =====================================================================
+// 18. CsvLogger／JsonLogger／LambdaCallback（イシュー #2571・親 #2570・
+//     ルート #2499 本文「承認範囲」節の一括承認。決定記録
+//     `docs/compat-callbacks-loggers-decision.md` §5）
+// =====================================================================
+
+/// 一意な一時ディレクトリ（pid＋ナノ秒＋タグ）。`Drop` で必ず削除する。
+struct TmpDir(std::path::PathBuf);
+
+impl TmpDir {
+    fn new(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Self(std::env::temp_dir().join(format!(
+            "fandhe-callbacks-2571-{tag}-{}-{nanos}",
+            std::process::id()
+        )))
+    }
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn gen_classification_data(seed: u64) -> (Tensor<f32>, Tensor<i32>) {
+    let mut rng = Xorshift64Star::new(seed);
+    let x = rng.fill_vec(N * D_IN);
+    let y: Vec<i32> = (0..N).map(|i| (i % D_OUT) as i32).collect();
+    (
+        Tensor::new(x, &[N, D_IN]).expect("test fixture: x"),
+        Tensor::new(y, &[N]).expect("test fixture: y"),
+    )
+}
+
+fn compiled_regression_model(lr: f32) -> Sequential {
+    let mut m = build_model();
+    m.compile(Optimizer::Sgd(SgdConfig::new(lr)), Loss::Mse)
+        .unwrap();
+    m
+}
+
+fn param_bits(m: &Sequential) -> Vec<Vec<u32>> {
+    m.trainable_parameters()
+        .iter()
+        .map(|t| {
+            t.contiguous()
+                .as_slice()
+                .expect("test fixture: contiguous 化済み")
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
+        })
+        .collect()
+}
+
+/// CSV を読み戻す（ヘッダ・各行のセル）。
+fn read_csv(path: &std::path::Path) -> (Vec<String>, Vec<Vec<String>>) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<String> = lines.next().unwrap().split(',').map(String::from).collect();
+    let rows = lines
+        .map(|l| l.split(',').map(String::from).collect())
+        .collect();
+    (header, rows)
+}
+
+/// JSON ログを読み戻す（本実装の出力形式〈1 要素 1 行・固定キー〉前提の
+/// 最小パーサ）。各要素は `(key, token)` の列。
+fn read_json(path: &std::path::Path) -> Vec<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(path).unwrap();
+    text.lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('{'))
+        .map(|l| {
+            l.trim_end_matches(',')
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .split(',')
+                .map(|kv| {
+                    let (k, v) = kv.split_once(':').unwrap();
+                    (k.trim_matches('"').to_string(), v.to_string())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// CSV トークン（Rust `Display`）が `v` と一致するか。有限値は bit 一致、
+/// 非有限値は値クラス一致。
+fn csv_token_matches(tok: &str, v: f32) -> bool {
+    match tok {
+        "NaN" => v.is_nan(),
+        "inf" => v == f32::INFINITY,
+        "-inf" => v == f32::NEG_INFINITY,
+        _ => tok
+            .parse::<f32>()
+            .map(|p| p.to_bits() == v.to_bits())
+            .unwrap_or(false),
+    }
+}
+
+/// JSON トークン（有限値は number、非有限値はクォート付き文字列）が `v` と
+/// 一致するか。
+fn json_token_matches(tok: &str, v: f32) -> bool {
+    match tok {
+        "\"NaN\"" => v.is_nan(),
+        "\"Infinity\"" => v == f32::INFINITY,
+        "\"-Infinity\"" => v == f32::NEG_INFINITY,
+        _ => tok
+            .parse::<f32>()
+            .map(|p| p.to_bits() == v.to_bits())
+            .unwrap_or(false),
+    }
+}
+
+#[test]
+fn loggers_and_lambda_do_not_change_history_or_params_bit_exact() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let (xv, yv) = gen_regression_data(SEED_VAL);
+    let tmp = TmpDir::new("bitexact");
+
+    let mut plain = compiled_regression_model(0.05);
+    let h_plain = plain
+        .fit_with_callbacks(&x, &y, FitConfig::new(3, 8), Some((&xv, &yv)), &mut [])
+        .unwrap();
+
+    let mut logged = compiled_regression_model(0.05);
+    let mut cbs = [
+        Callback::CsvLogger(CsvLogger::new(tmp.path("a.csv"))),
+        Callback::JsonLogger(JsonLogger::new(tmp.path("a.json"))),
+        Callback::Lambda(LambdaCallback::on_epoch_end(|_, _| Ok(()))),
+    ];
+    let h_logged = logged
+        .fit_with_callbacks(&x, &y, FitConfig::new(3, 8), Some((&xv, &yv)), &mut cbs)
+        .unwrap();
+
+    assert_eq!(h_plain, h_logged);
+    assert_eq!(param_bits(&plain), param_bits(&logged));
+}
+
+#[test]
+fn csv_and_json_read_back_match_history_with_validation_and_metrics() {
+    let (x, y) = gen_classification_data(SEED_DATA);
+    let (xv, yv) = gen_classification_data(SEED_VAL);
+    let tmp = TmpDir::new("readback");
+    let mut model = build_model();
+    model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let mut cbs = [
+        Callback::CsvLogger(CsvLogger::new(tmp.path("log.csv"))),
+        Callback::JsonLogger(JsonLogger::new(tmp.path("nested/log.json"))),
+    ];
+    // metrics の並び・重複・ConfusionMatrix は列集合に影響しない。
+    let metrics = [
+        Metrics::F1,
+        Metrics::ConfusionMatrix,
+        Metrics::Accuracy,
+        Metrics::F1,
+    ];
+    let h = model
+        .fit_with_metrics(
+            &x,
+            &y,
+            FitConfig::new(3, N),
+            Some((&xv, &yv)),
+            &mut cbs,
+            &metrics,
+        )
+        .unwrap();
+
+    let expect_cols = ["epoch", "loss", "lr", "val_loss", "val_accuracy", "val_f1"];
+    let (header, rows) = read_csv(&tmp.path("log.csv"));
+    assert_eq!(header, expect_cols);
+    assert_eq!(rows.len(), 3);
+    let json = read_json(&tmp.path("nested/log.json"));
+    assert_eq!(json.len(), 3);
+    for e in 0..3 {
+        let want = [
+            h.loss[e],
+            h.lr[e],
+            h.val_loss[e],
+            h.val_metrics[e].accuracy.unwrap(),
+            h.val_metrics[e].f1.unwrap(),
+        ];
+        assert_eq!(rows[e][0], e.to_string());
+        assert_eq!(json[e][0], ("epoch".to_string(), e.to_string()));
+        for (i, v) in want.iter().enumerate() {
+            assert!(csv_token_matches(&rows[e][i + 1], *v), "csv e={e} col={i}");
+            assert_eq!(json[e][i + 1].0, expect_cols[i + 1]);
+            assert!(
+                json_token_matches(&json[e][i + 1].1, *v),
+                "json e={e} col={i}"
+            );
+        }
+    }
+}
+
+#[test]
+fn logger_columns_without_validation_are_epoch_loss_lr() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("cols");
+    let mut model = compiled_regression_model(0.05);
+    let mut cbs = [Callback::CsvLogger(CsvLogger::new(tmp.path("c.csv")))];
+    model
+        .fit_with_callbacks(&x, &y, FitConfig::new(2, N), None, &mut cbs)
+        .unwrap();
+    let (header, rows) = read_csv(&tmp.path("c.csv"));
+    assert_eq!(header, ["epoch", "loss", "lr"]);
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn csv_append_false_overwrites_and_true_keeps_one_header() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("csvappend");
+    let path = tmp.path("log.csv");
+    let run = |append: bool, epochs: usize| {
+        let mut m = compiled_regression_model(0.05);
+        let mut cbs = [Callback::CsvLogger(CsvLogger::new(&path).append(append))];
+        m.fit_with_callbacks(&x, &y, FitConfig::new(epochs, N), None, &mut cbs)
+            .unwrap();
+    };
+    run(false, 2);
+    run(false, 3);
+    assert_eq!(read_csv(&path).1.len(), 3, "append=false は上書き");
+    run(true, 2);
+    let (header, rows) = read_csv(&path);
+    assert_eq!(header, ["epoch", "loss", "lr"]);
+    assert_eq!(rows.len(), 5, "ヘッダ 1 行 + 全行が残る");
+    // 追記された fit の epoch は fit ローカル（0 始まり）。
+    assert_eq!(rows[3][0], "0");
+    assert_eq!(rows[4][0], "1");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text.matches("epoch,loss,lr").count(), 1);
+}
+
+#[test]
+fn csv_append_with_mismatched_header_fails_closed_and_keeps_model_state() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let (xv, yv) = gen_regression_data(SEED_VAL);
+    let tmp = TmpDir::new("csvmismatch");
+    let path = tmp.path("log.csv");
+    // validation なし（epoch,loss,lr）で既存ログを作る。
+    let mut m = compiled_regression_model(0.05);
+    m.fit_with_callbacks(
+        &x,
+        &y,
+        FitConfig::new(1, N),
+        None,
+        &mut [Callback::CsvLogger(CsvLogger::new(&path))],
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    // validation あり（val_loss 列が増える）で append すると列集合が不一致。
+    let mut m2 = compiled_regression_model(0.05);
+    let params_before = param_bits(&m2);
+    let prev_training = m2.training();
+    let mut cbs = [Callback::CsvLogger(CsvLogger::new(&path).append(true))];
+    let err = m2
+        .fit_with_callbacks(&x, &y, FitConfig::new(2, N), Some((&xv, &yv)), &mut cbs)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(m2.is_compiled());
+    assert_eq!(m2.training(), prev_training);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    assert_eq!(params_before, param_bits(&m2), "学習は行われない");
+}
+
+#[test]
+fn json_append_merges_existing_array_and_keeps_raw_elements() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("jsonappend");
+    let path = tmp.path("log.json");
+    let run = |append: bool, epochs: usize| {
+        let mut m = compiled_regression_model(0.05);
+        let mut cbs = [Callback::JsonLogger(JsonLogger::new(&path).append(append))];
+        m.fit_with_callbacks(&x, &y, FitConfig::new(epochs, N), None, &mut cbs)
+            .unwrap();
+    };
+    run(false, 2);
+    run(false, 1);
+    assert_eq!(read_json(&path).len(), 1, "append=false は空配列から開始");
+    run(true, 2);
+    let rows = read_json(&path);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[1][0].1, "0");
+    assert_eq!(rows[2][0].1, "1");
+
+    // 外部で作った（整形の異なる）既存要素も原文のまま保持される。
+    let foreign = "{\"epoch\": 9, \"loss\": 1.0, \"lr\": 0.5, \"extra\": [1,{\"a\":null}]}";
+    std::fs::write(&path, format!("[ {foreign} ]")).unwrap();
+    run(true, 1);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains(foreign));
+    assert_eq!(text.matches("\"epoch\"").count(), 2);
+}
+
+#[test]
+fn json_append_with_invalid_existing_file_fails_closed() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("jsonbad");
+    let path = tmp.path("log.json");
+    std::fs::create_dir_all(&tmp.0).unwrap();
+    for bad in [
+        "not json",
+        "{\"epoch\":0}",
+        "[1, 2]",
+        "[{\"epoch\":0,\"loss\":1.0}]", // lr キー不足
+        "[{\"epoch\":0,\"loss\":1.0,\"lr\":0.1}] trailing",
+    ] {
+        std::fs::write(&path, bad).unwrap();
+        let mut m = compiled_regression_model(0.05);
+        let mut cbs = [Callback::JsonLogger(JsonLogger::new(&path).append(true))];
+        let err = m
+            .fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut cbs)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)), "{bad}");
+        assert!(m.is_compiled());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            bad,
+            "既存ファイルは不変"
+        );
+    }
+}
+
+#[test]
+fn lambda_receives_local_epoch_and_growing_history() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = std::rc::Rc::clone(&seen);
+    let mut cbs = [Callback::Lambda(LambdaCallback::on_epoch_end(
+        move |e, h| {
+            sink.borrow_mut().push((e, h.loss.len(), h.lr.len()));
+            Ok(())
+        },
+    ))];
+    let mut m = compiled_regression_model(0.05);
+    m.fit_with_callbacks(&x, &y, FitConfig::new(3, N), None, &mut cbs)
+        .unwrap();
+    assert_eq!(*seen.borrow(), vec![(0, 1, 1), (1, 2, 2), (2, 3, 3)]);
+    // 2 回目の fit でも epoch は fit ローカル（0 始まり）。
+    seen.borrow_mut().clear();
+    m.fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut cbs)
+        .unwrap();
+    assert_eq!(*seen.borrow(), vec![(0, 1, 1)]);
+    let dbg = format!("{:?}", cbs[0]);
+    assert!(
+        dbg.contains("LambdaCallback") && dbg.contains("calls: 4"),
+        "{dbg}"
+    );
+}
+
+#[test]
+fn lambda_error_aborts_fit_and_restores_state_and_best_weights() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    const LR: f32 = 50.0; // epoch 0 が常に best になる発散 lr
+    let mut twin = compiled_regression_model(LR);
+    twin.fit(&x, &y, FitConfig::new(1, N)).unwrap();
+    let expected_best = param_bits(&twin);
+
+    let mut model = compiled_regression_model(LR);
+    let prev_training = model.training();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let c = std::rc::Rc::clone(&calls);
+    let mut cbs = [
+        Callback::Lambda(LambdaCallback::on_epoch_end(move |e, _| {
+            c.set(c.get() + 1);
+            if e == 2 {
+                Err(AutodiffError::InvalidArgument("lambda stop".to_string()))
+            } else {
+                Ok(())
+            }
+        })),
+        Callback::EarlyStopping(
+            EarlyStopping::new(10)
+                .monitor(Monitor::Loss)
+                .restore_best_weights(true),
+        ),
+    ];
+    let err = model
+        .fit_with_callbacks(&x, &y, FitConfig::new(6, N), None, &mut cbs)
+        .unwrap_err();
+    match err {
+        AutodiffError::InvalidArgument(msg) => assert_eq!(msg, "lambda stop"),
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(calls.get(), 3, "epoch 2 で打ち切られる");
+    assert!(model.is_compiled());
+    assert_eq!(model.training(), prev_training);
+    assert_eq!(expected_best, param_bits(&model));
+}
+
+#[test]
+fn unwritable_log_path_fails_closed_before_training() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("badpath");
+    std::fs::create_dir_all(&tmp.0).unwrap();
+    // 親パスが通常ファイル（ディレクトリを作れない）。
+    let blocker = tmp.path("blocker");
+    std::fs::write(&blocker, "x").unwrap();
+    let bad = blocker.join("log.out");
+    for cb in [
+        Callback::CsvLogger(CsvLogger::new(&bad)),
+        Callback::JsonLogger(JsonLogger::new(&bad)),
+    ] {
+        let mut m = compiled_regression_model(0.05);
+        let before = param_bits(&m);
+        let prev_training = m.training();
+        let mut cbs = [cb];
+        let err = m
+            .fit_with_callbacks(&x, &y, FitConfig::new(2, N), None, &mut cbs)
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert!(m.is_compiled());
+        assert_eq!(m.training(), prev_training);
+        assert_eq!(before, param_bits(&m));
+    }
+}
+
+#[test]
+fn loggers_write_the_epoch_where_early_stopping_stops() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let tmp = TmpDir::new("earlystop");
+    let mut m = compiled_regression_model(0.0); // loss 一定 → 3 epoch で停止
+    let mut cbs = [
+        Callback::EarlyStopping(
+            EarlyStopping::new(2)
+                .monitor(Monitor::Loss)
+                .min_delta(1e-6)
+                .unwrap(),
+        ),
+        Callback::CsvLogger(CsvLogger::new(tmp.path("e.csv"))),
+        Callback::JsonLogger(JsonLogger::new(tmp.path("e.json"))),
+    ];
+    let h = m
+        .fit_with_callbacks(&x, &y, FitConfig::new(10, N), None, &mut cbs)
+        .unwrap();
+    assert_eq!(h.loss.len(), 3);
+    assert_eq!(read_csv(&tmp.path("e.csv")).1.len(), 3);
+    assert_eq!(read_json(&tmp.path("e.json")).len(), 3);
 }

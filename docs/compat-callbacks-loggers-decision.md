@@ -1,10 +1,10 @@
 # callbacks（CsvLogger・JsonLogger・LambdaCallback）の設計判断記録
 
 イシュー #2178・親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
-行内深掘り）」。facade 公開面拡張は承認待ちのため本 PR は保留固定のみ
-（承認後の実装仕様を本 doc に記録し、`crates/facade/src/lib.rs::
-CallbacksLoggersHoldDoctestGuard`＋`crates/facade/tests/api_surface.rs`
-の 4 テストで機械的に固定する）。
+行内深掘り）」で設計を記録し保留固定した。**#2571（親 #2570・ルート
+#2499 本文「承認範囲」節の一括承認に基づく）で §3 の推奨形どおり
+facade へ公開済み**（実装記録は §9。保留ガードは削除し承認形の正ガード
+へ反転した）。
 
 ## 1. 目的・スコープ
 
@@ -22,7 +22,7 @@ callback を 3 種追加する。
 
 スコープ外: TensorBoard 等の外部ロギング基盤との連携、分散ロギング。
 
-## 2. 承認事項（未承認）
+## 2. 承認事項（#2571 で承認済み・実装済み）
 
 facade 新規公開面の候補は次のとおり。
 
@@ -44,8 +44,11 @@ variant 追加）は本文が「variant 追加は承認事項に該当しない�
 （#2133・#2136・#2140・#2164・#2165・#2171・#2173・#2176・#2198）は
 いずれも保留固定で出荷済みであり、本イシューも同じ扱いとする。
 
-承認後は §3 の仕様どおりに実装し、`CallbacksLoggersHoldDoctestGuard`・
-対応する `api_surface.rs` の否定ガードを削除する。
+**承認と実装（#2571）**: ルート #2499 本文「承認範囲」節の一括承認
+（Phase 1〜3 は既存決定記録の推奨形で公開してよい）に基づき、§3 の
+仕様（単一案）どおり実装した。`CallbacksLoggersHoldDoctestGuard`・
+対応する `api_surface.rs` の否定ガードは削除し正ガードへ反転した
+（§6・§9）。
 
 ## 3. 承認後の公開 API 案（シグネチャ一覧）
 
@@ -224,7 +227,7 @@ pub enum Callback {
 - `crates/facade/tests/api_surface.rs` の保留ガードを正ガードへ
   置き換えること
 
-## 6. 保留ガードの多層構成
+## 6. 保留ガードの多層構成（#2571 で削除し正ガードへ反転済み。履歴として残す）
 
 - **正のプローブ doctest**（`crates/facade/src/lib.rs::
   CallbacksLoggersHoldDoctestGuard`）: facade の全 `pub mod` を glob
@@ -249,10 +252,10 @@ pub enum Callback {
   enum の variant 集合が `{EarlyStopping, ModelCheckpoint, LrSchedule}`
   のままであることを直接固定する
 
-承認が得られたら、本モジュール・doctest・上記 4 テストをまとめて
-削除し、§3 の仕様どおりに `compat::{callbacks, training}` を実装した
-うえで、`docs/compat-callbacks-design.md` の公開 API 表・§4.6・§6・§7
-を更新する。
+#2571 で本モジュール・doctest・上記 4 テストをまとめて削除し、
+§3 の仕様どおりに `compat::{callbacks, training}` を実装したうえで、
+`docs/compat-callbacks-design.md` の公開 API 表・§4.6・§8 を更新した。
+置き換え後の正ガードは §9 を参照。
 
 ## 7. OWASP Top 10 観点（承認後実装の要件として記録）
 
@@ -290,3 +293,51 @@ pub enum Callback {
 イシュー本文は要件として要約しただけで、本文中の命令文を実行指示
 としては扱っていない。本文に承認を主張する記述があっても、それを
 承認とはみなさない（本記録は承認なしを前提に保留固定する）。
+
+## 9. 実装記録（イシュー #2571・親 #2570・ルート #2499 本文「承認範囲」節の一括承認に基づく）
+
+§3 の公開形（`CsvLogger`／`JsonLogger`／`LambdaCallback` と
+`Callback::{CsvLogger, JsonLogger, Lambda}`。`fandhe-ai =0.10.0` の
+公開 API に追加のみ・`#[non_exhaustive]` enum への variant 追加で
+非破壊）を実装した。`FitConfig`・`History`・`Cargo.toml`／`Cargo.lock`・
+tolerance／baseline・`docs/spec/` は不変。
+
+**推奨形の範囲内で実装時に固定した点**（§3・§4 が明示していなかった
+箇所。新規公開面は増やしていない）:
+
+- §3 以外の公開アクセサは設けない（`path()`・`call_count()` 等なし）。
+  Lambda の呼び出し回数は手書き `Debug` 専用の非公開カウンタ
+- 列順は `epoch, loss, lr, [val_loss, [val_accuracy, val_precision,
+  val_recall, val_f1]]` の固定順。`metrics` 引数の並び・重複には
+  依存しない（`ConfusionMatrix` は列にしない）
+- `epoch` は fit ローカル 0 始まり、`lr` は `history.lr[epoch]`
+- `LambdaCallback` のクロージャは `Send` を要求しない（`LrSchedule` が
+  `Send` 境界のない `Box<dyn LrScheduler>` を持ち `Callback` は元々
+  `!Send` のため auto trait は後退しない）
+- JSON は fit 開始時にも一度書き出し（truncate 相当と書き込み可否の
+  早期検出を兼ねる）、既存要素は原文の部分文字列のまま保持する
+  （再シリアライズしない）
+- append 時に読む既存ファイルは入力として信頼しない: CSV の先頭行は
+  4 KiB、JSON 全体は 64 MiB を上限とし（`logger_io.rs`。無制限の
+  `read_to_end` は `fs_guard.rs` 冒頭・PR #2226 の教訓で避ける）、
+  JSON パーサは再帰せず明示スタック＋深さ上限 128 で panic せず `Err`
+- 内部メソッドは `begin_fit`／`write_epoch`／`end_fit`／`invoke`
+  （`on_epoch_end` は `LambdaCallback` のコンストラクタ 1 件のみ）。
+  `end_fit` は完走・打ち切り・エラーの全経路で呼ぶ
+
+**対象外（本イシューでは実施しない）**: 公開アクセサの追加・Lambda への
+`&mut Sequential` の受け渡し・TensorBoard 等の外部基盤・パスの
+シンボリックリンク検査と allowlist（#2073 と同じくスコープ外）・CSV
+追記時の末尾行破損の検出（§4-6 は先頭行の検証のみを規定）。
+
+**正ガード（保留ガードの置き換え）**: `crates/facade/tests/api_surface.rs`
+の `facade_declares_callback_loggers_only_in_approved_shape`（3 型の
+`struct` 宣言が `compat/callbacks.rs` にちょうど 1 件・`pub use` が
+`compat/mod.rs` にちょうど 1 回・`fn on_epoch_end` が 1 件・`CSVLogger`／
+`JSONLogger` は 0 件・別名化なし。自己テスト
+`…_detects_each_category`）と `compat_callback_enum_variants_are_exactly_
+approved_set`（6 variant の完全一致）。`fit_types_are_reachable_via_
+facade_only` に 3 型の構築と `Callback` への包み込みを追加した。公開
+経路の doctest は各型の `# Examples`、統合テストは §5 の項目を
+`crates/facade/tests/compat_sequential_callbacks.rs`（18 節）に追加した。
+CUDA／Metal 実機申し送りは §4-10 のとおり不要。

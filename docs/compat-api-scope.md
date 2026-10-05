@@ -914,21 +914,12 @@ fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
 を追加して固定した。詳細は `docs/compat-callbacks-design.md` §4.3・§9
 を参照。
 
-**保留記録（イシュー #2178・親 #2131）**: `compat::Callback` への
-`CsvLogger`（CSV ロガー）／`JsonLogger`（JSON ロガー）／
-`LambdaCallback`（`on_epoch_end` ラムダ）の 3 variant 追加は、イシュー
-本文の承認事項節が facade 公開面の拡張（本節経路 2）を明記しており、
-親 #2131 の「設計判断記録 → 承認 → 実装の 2 段」規則（先例 #2171・
-#2173・#2176・#2198）に従い未承認のまま保留した。#2170（variant 追加は
-承認事項に該当しないと本文が明記）とは扱いが異なる（#2178 はその逆を
-明記）。コード変更は `crates/facade/src/lib.rs::
-CallbacksLoggersHoldDoctestGuard`（正のプローブ doctest）＋
-`crates/facade/tests/api_surface.rs` の 4 テスト（doctest ドリフト検査
-2 件・facade 再エクスポート／独自宣言の否定ガード・`Callback` enum
-variant 集合の完全一致）のみで、`compat::{callbacks, training, mod}.rs`
-本体・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は
-不変。承認後の完全な公開 API 案・数値／ファイル形式契約は
-`docs/compat-callbacks-loggers-decision.md` §3〜§5 を参照。
+**保留記録（イシュー #2178・親 #2131。#2571 で解消済み。履歴として残す）**:
+`compat::Callback` への `CsvLogger`／`JsonLogger`／`LambdaCallback` の
+3 variant 追加は、#2178 時点では未承認のまま保留した（保留ガード
+`CallbacksLoggersHoldDoctestGuard` ＋ `api_surface.rs` の 4 テスト）。
+その後ルート #2499 本文「承認範囲」節の一括承認により #2571 で公開した
+（本節末尾の「適用記録（経路 2。イシュー #2571 …）」参照）。
 
 **保留記録（イシュー #2179・親 #2131）**: EMA（指数移動平均。PyTorch
 `torch.optim.swa_utils.AveragedModel`／Keras 3 `EMAOverlay` 相当）は
@@ -1882,3 +1873,12 @@ facade `Tape::backward_create_graph`（`self.0.backward_create_graph(loss, &chil
 利用例テストとして `child_built_with_tape_for_parent_device_works`・`rejects_parent_with_registered_checkpoint_via_facade` を `crates/facade/tests/create_graph_facade.rs` に追加した。
 保留継続: `tape.child()` 等の子テープ構築ヘルパー・`TapeRef::backward_create_graph`・`new_with_ops` への到達経路・HVP 専用 API（案 C）・`backward_accumulate`／checkpoint 併用・残る非対象 Op の拡張。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。GPU 実機の申し送りは `docs/perf/logs/create-graph-facade-2545/README.md`。
+
+**適用記録（経路 2。イシュー #2571・親 #2570・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
+`docs/compat-callbacks-loggers-decision.md` §3 の推奨形（単一案）どおり、`compat::{CsvLogger, JsonLogger, LambdaCallback}` と
+`compat::Callback::{CsvLogger, JsonLogger, Lambda}`（3 variant 追加。`#[non_exhaustive]`）を公開した（`fandhe-ai =0.10.0` の公開 API に追加のみ・非破壊。`FitConfig` は不変）。
+保留ガード（`CallbacksLoggersHoldDoctestGuard` と `api_surface.rs` の 4 テスト）は削除し、承認形だけを許す正ガード
+（`facade_declares_callback_loggers_only_in_approved_shape`・`compat_callback_enum_variants_are_exactly_approved_set`・`fit_types_are_reachable_via_facade_only` の拡張）へ反転した。
+JSON は手書き（`serde_json` 非追加）、append 時の既存ファイルは上限付き読み込み＋再帰しないパーサで検証する。実装時に固定した点（列順・公開アクセサなし・読み込み上限）は同 doc §9。
+保留継続: 公開アクセサの追加・`&mut Sequential` を渡す callback・外部ロギング基盤・パスのシンボリックリンク検査。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。ホスト側のファイル I/O のみでカーネルを持たないため CUDA／Metal 実機申し送りは不要。

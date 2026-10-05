@@ -48,6 +48,8 @@
 //!   が観測した epoch 末呼び出しの通算回数**を指す（`fit(2 epochs)`
 //!   を 2 回呼べば 4 回分進む）。[`ModelCheckpoint::best_epoch`] は
 //!   この通算番号を返す。
+//! - [`CsvLogger`]・[`JsonLogger`]・[`LambdaCallback`]（イシュー #2571）は
+//!   fit をまたぐ状態を持たず、epoch 番号は常に fit ローカル（0 始まり）。
 //!
 //! 両者の定義は独立であり、`History` の添字（常に fit 呼び出し
 //! ローカル）とは別物であることに注意する。
@@ -64,6 +66,15 @@
 //! またぐ場合でも、`sched` 自身の内部状態が呼び出しをまたいで
 //! 継続するため次の fit 呼び出しの epoch 開始同期で正しい値が反映
 //! される）。
+//!
+//! # ロガーと Lambda（イシュー #2571）
+//!
+//! [`CsvLogger`]／[`JsonLogger`] は epoch 末に学習経過をファイルへ書き
+//! （形式・append・原子性は各型の doc）、[`LambdaCallback`] は epoch 末に
+//! ユーザー定義クロージャを呼ぶ。いずれもホスト側の処理のみで学習の演算列
+//! には影響しない。ファイル I/O の下請け（整形・上限付き読み込み・原子的
+//! 書き出し）は private な `logger_io` モジュールが担う（決定記録
+//! `docs/compat-callbacks-loggers-decision.md`）。
 //!
 //! # 対象外・切り出し候補
 //!
@@ -121,6 +132,7 @@ use crate::interop::safetensors::SaveError;
 use crate::optim::{LrScheduler, ReduceLrOnPlateau};
 use crate::{AutodiffError, Tensor};
 
+use super::logger_io;
 use super::metrics::Metrics;
 use super::sequential::Sequential;
 use super::training::History;
@@ -687,6 +699,461 @@ impl std::fmt::Debug for LrSchedule {
     }
 }
 
+/// 各 epoch の学習経過を CSV 1 行として書くロガー（Keras `CSVLogger`
+/// 相当。イシュー #2571・`docs/compat-callbacks-loggers-decision.md`）。
+///
+/// [`Callback::CsvLogger`] として [`Sequential::fit_with_callbacks`]／
+/// [`Sequential::fit_with_metrics`] へ渡す。学習の演算列・[`History`] には
+/// 一切影響しない（ホスト側のファイル書き込みのみ）。
+///
+/// # ファイル形式
+///
+/// - 区切りは `,`、改行は `\n`。ヘッダ行 `epoch,loss,lr` に、`validation`
+///   があれば `val_loss`、`fit_with_metrics` で要求した scalar metrics が
+///   あれば `val_accuracy`／`val_precision`／`val_recall`／`val_f1` を
+///   この固定順で追加する（`metrics` 引数の並び・重複には依存しない。
+///   [`Metrics::ConfusionMatrix`] は非スカラーのため列にしない）。列集合は
+///   fit 呼び出しの開始時に確定する。
+/// - `epoch` は fit ローカルの 0 始まり（[`History`] の添字と同じ）。`lr` は
+///   その epoch の開始時に記録された学習率。
+/// - 数値は `f32` の `Display`（最短往復表現）で書くため `parse::<f32>()`
+///   で bit 一致に読み戻せる。非有限値は `NaN`／`inf`／`-inf`（Keras の
+///   `nan` 表記とは異なる）。
+///
+/// # truncate／append と原子性
+///
+/// 既定（`append(false)`）では fit 開始時にファイルを truncate してヘッダ
+/// を書く。`append(true)` では追記し、ファイルが存在しないか空のときだけ
+/// ヘッダを書く。既存ファイルが空でない場合は先頭行を上限付きで読み、
+/// 今回の列集合のヘッダと完全一致することを検証する（不一致・読み込み
+/// 失敗は fit を開始せず `Err`。`compiled` は書き戻される）。追記方式の
+/// ため一時ファイル＋`rename` の原子性は使えず、epoch ごとに 1 行を書いて
+/// 次へ進む（途中でクラッシュしても完了した epoch の行は残る）。親
+/// ディレクトリが無ければ作成する。I/O 失敗は
+/// [`AutodiffError::InvalidArgument`] に写像して fit を打ち切る。
+///
+/// # Examples
+///
+/// ```
+/// use fandhe_ai::compat::{Callback, CsvLogger, FitConfig, Loss, Optimizer, Sequential};
+/// use fandhe_ai::optim::SgdConfig;
+/// use fandhe_ai::Tensor;
+///
+/// let dir = std::env::temp_dir().join(format!(
+///     "fandhe-csv-doc-{}-{}",
+///     std::process::id(),
+///     std::time::SystemTime::now()
+///         .duration_since(std::time::UNIX_EPOCH)
+///         .map(|d| d.as_nanos())
+///         .unwrap_or(0)
+/// ));
+/// let path = dir.join("log.csv");
+///
+/// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+/// model
+///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+///     .unwrap();
+/// let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).unwrap();
+/// let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+/// let mut cbs = [Callback::CsvLogger(CsvLogger::new(&path))];
+/// model
+///     .fit_with_callbacks(&x, &y, FitConfig::new(2, 2), None, &mut cbs)
+///     .unwrap();
+///
+/// let text = std::fs::read_to_string(&path).unwrap();
+/// let lines: Vec<&str> = text.lines().collect();
+/// assert_eq!(lines[0], "epoch,loss,lr");
+/// assert_eq!(lines.len(), 3);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// ```
+pub struct CsvLogger {
+    path: PathBuf,
+    append: bool,
+    /// fit 実行中のみ `Some`（`begin_fit`〜`end_fit`）。
+    state: Option<CsvFitState>,
+}
+
+/// [`LambdaCallback`] が保持するクロージャ型（`Send` 境界なし。型 doc 参照）。
+type EpochEndFn = Box<dyn FnMut(usize, &History) -> Result<(), AutodiffError>>;
+
+/// [`CsvLogger`] の fit 内状態（列集合と開いたファイル）。
+struct CsvFitState {
+    cols: Vec<&'static str>,
+    file: std::fs::File,
+}
+
+impl CsvLogger {
+    /// `path` へ書き出すロガーを作る（既定は `append(false)`。I/O は
+    /// fit 開始時まで発生しない）。
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            append: false,
+            state: None,
+        }
+    }
+
+    /// `true` なら既存ファイルへ追記する（既定 `false`。Keras
+    /// `append=False` と同じ）。
+    pub fn append(mut self, on: bool) -> Self {
+        self.append = on;
+        self
+    }
+
+    fn err(&self, method: &str, detail: impl std::fmt::Display) -> AutodiffError {
+        AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: CsvLogger（{}）: {detail}",
+            self.path.display()
+        ))
+    }
+
+    /// fit 開始時の準備（`training.rs` の `reset_for_fit` と同じ位置から
+    /// 呼ばれる）。列集合の確定・ファイルの truncate／ヘッダ検証。
+    pub(super) fn begin_fit(
+        &mut self,
+        method: &str,
+        has_validation: bool,
+        metrics: &[Metrics],
+    ) -> Result<(), AutodiffError> {
+        self.state = None;
+        let cols = logger_io::columns(has_validation, metrics);
+        let header = logger_io::csv_header(&cols);
+        let file = self
+            .open_for_fit(&header)
+            .map_err(|d| self.err(method, d))?;
+        self.state = Some(CsvFitState { cols, file });
+        Ok(())
+    }
+
+    fn open_for_fit(&self, header: &str) -> Result<std::fs::File, String> {
+        use std::io::Write;
+        logger_io::ensure_parent_dir(&self.path)?;
+        let existing_nonempty = self.append
+            && std::fs::metadata(&self.path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false);
+        if existing_nonempty {
+            let first = logger_io::read_first_line_limited(&self.path)?.unwrap_or_default();
+            if first != header {
+                return Err(format!(
+                    "既存ファイルのヘッダ（{first:?}）が今回の列集合（{header:?}）と一致しない"
+                ));
+            }
+            return std::fs::OpenOptions::new()
+                .append(true)
+                .open(&self.path)
+                .map_err(|e| e.to_string());
+        }
+        let mut f = if self.append {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&self.path)
+        } else {
+            std::fs::File::create(&self.path)
+        }
+        .map_err(|e| e.to_string())?;
+        f.write_all(format!("{header}\n").as_bytes())
+            .and_then(|_| f.flush())
+            .map_err(|e| e.to_string())?;
+        Ok(f)
+    }
+
+    /// epoch 末に 1 行を書く（`training.rs` の epoch 末 callbacks ループ
+    /// から呼ばれる）。
+    pub(super) fn write_epoch(
+        &mut self,
+        method: &str,
+        history: &History,
+        epoch_local: usize,
+    ) -> Result<(), AutodiffError> {
+        use std::io::Write;
+        let Some(st) = self.state.as_mut() else {
+            return Err(self.err(method, "fit 開始前に epoch 末が呼ばれた（内部契約違反）"));
+        };
+        let line = logger_io::collect_values(&st.cols, history, epoch_local)
+            .map(|v| format!("{}\n", logger_io::csv_row(epoch_local, &v)));
+        let res = line.and_then(|l| {
+            st.file
+                .write_all(l.as_bytes())
+                .and_then(|_| st.file.flush())
+                .map_err(|e| e.to_string())
+        });
+        res.map_err(|d| self.err(method, d))
+    }
+
+    /// fit 終了時のハンドル解放（成功・失敗いずれの経路でも呼ばれる）。
+    pub(super) fn end_fit(&mut self) {
+        self.state = None;
+    }
+}
+
+impl std::fmt::Debug for CsvLogger {
+    // 開いたファイルハンドルは出さず、設定値だけを出す（出力は安定 API
+    // ではない）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CsvLogger")
+            .field("path", &self.path)
+            .field("append", &self.append)
+            .finish()
+    }
+}
+
+/// 各 epoch の学習経過を JSON 配列として書くロガー（Keras の JSON 出力
+/// 系 callback 相当。イシュー #2571・`docs/compat-callbacks-loggers-
+/// decision.md`）。
+///
+/// [`Callback::JsonLogger`] として fit へ渡す。キー・列集合・`epoch`／`lr`
+/// の意味は [`CsvLogger`] と同じ（`{"epoch":0,"loss":1.5,"lr":0.1}` の
+/// ような epoch オブジェクトの配列）。
+///
+/// # 非有限値と number 文法
+///
+/// 有限値は `f32` の `Display`（JSON number に合致）。非有限値は RFC 8259
+/// 準拠のクォート付き文字列 `"NaN"`／`"Infinity"`／`"-Infinity"` で書く
+/// ため、標準の JSON パーサで読み込める。したがってフィールドの JSON 型は
+/// 値により number／string に変わる。
+///
+/// # truncate／append と原子性
+///
+/// 配列全体を in-memory に持ち、epoch ごとに一時ファイル＋`rename` で書き
+/// 直す（途中クラッシュ時も正規パスには完全な JSON だけが残る）。fit
+/// 開始時にも一度書き出し、書き込み可否を早期に検出する。`append(true)` で
+/// 既存の空でないファイルがあれば、上限付きで読み込み「オブジェクトの
+/// 配列」であること・各要素が今回の列キーを含むことを検証して初期値と
+/// する（不正は fit を開始せず `Err`。既存要素は原文のまま保持し再整形
+/// しない）。`append(false)`、またはファイルが無い・空なら空配列から
+/// 始める。I/O 失敗は [`AutodiffError::InvalidArgument`] に写像する。
+///
+/// # Examples
+///
+/// ```
+/// use fandhe_ai::compat::{Callback, FitConfig, JsonLogger, Loss, Optimizer, Sequential};
+/// use fandhe_ai::optim::SgdConfig;
+/// use fandhe_ai::Tensor;
+///
+/// let dir = std::env::temp_dir().join(format!(
+///     "fandhe-json-doc-{}-{}",
+///     std::process::id(),
+///     std::time::SystemTime::now()
+///         .duration_since(std::time::UNIX_EPOCH)
+///         .map(|d| d.as_nanos())
+///         .unwrap_or(0)
+/// ));
+/// let path = dir.join("log.json");
+///
+/// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+/// model
+///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+///     .unwrap();
+/// let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).unwrap();
+/// let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+/// let mut cbs = [Callback::JsonLogger(JsonLogger::new(&path))];
+/// model
+///     .fit_with_callbacks(&x, &y, FitConfig::new(2, 2), None, &mut cbs)
+///     .unwrap();
+///
+/// let text = std::fs::read_to_string(&path).unwrap();
+/// assert!(text.starts_with("[\n"));
+/// assert_eq!(text.matches("\"epoch\"").count(), 2);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// ```
+pub struct JsonLogger {
+    path: PathBuf,
+    append: bool,
+    /// fit 実行中のみ `Some`（`begin_fit`〜`end_fit`）。
+    state: Option<JsonFitState>,
+}
+
+/// [`JsonLogger`] の fit 内状態（列集合と配列要素の原文）。
+struct JsonFitState {
+    cols: Vec<&'static str>,
+    elems: Vec<String>,
+}
+
+impl JsonLogger {
+    /// `path` へ書き出すロガーを作る（既定は `append(false)`。I/O は
+    /// fit 開始時まで発生しない）。
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            append: false,
+            state: None,
+        }
+    }
+
+    /// `true` なら既存の JSON 配列へ追記する（既定 `false`）。
+    pub fn append(mut self, on: bool) -> Self {
+        self.append = on;
+        self
+    }
+
+    fn err(&self, method: &str, detail: impl std::fmt::Display) -> AutodiffError {
+        AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: JsonLogger（{}）: {detail}",
+            self.path.display()
+        ))
+    }
+
+    /// fit 開始時の準備（[`CsvLogger`] と同じ位置・契約）。
+    pub(super) fn begin_fit(
+        &mut self,
+        method: &str,
+        has_validation: bool,
+        metrics: &[Metrics],
+    ) -> Result<(), AutodiffError> {
+        self.state = None;
+        let cols = logger_io::columns(has_validation, metrics);
+        let elems = self
+            .load_initial(&cols)
+            .and_then(|elems| {
+                logger_io::write_atomic(&self.path, logger_io::json_array(&elems).as_bytes())
+                    .map(|_| elems)
+            })
+            .map_err(|d| self.err(method, d))?;
+        self.state = Some(JsonFitState { cols, elems });
+        Ok(())
+    }
+
+    fn load_initial(&self, cols: &[&'static str]) -> Result<Vec<String>, String> {
+        logger_io::ensure_parent_dir(&self.path)?;
+        let nonempty = self.append
+            && std::fs::metadata(&self.path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false);
+        if !nonempty {
+            return Ok(Vec::new());
+        }
+        let text = logger_io::read_limited(&self.path)?;
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let parsed = logger_io::parse_log_array(&text)
+            .map_err(|e| format!("既存ファイルが JSON ログとして不正: {e}"))?;
+        for (i, el) in parsed.iter().enumerate() {
+            for key in std::iter::once("epoch").chain(cols.iter().copied()) {
+                if !el.keys.iter().any(|k| k == key) {
+                    return Err(format!("既存の要素 {i} にキー {key:?} が無い"));
+                }
+            }
+        }
+        Ok(parsed.into_iter().map(|e| e.raw).collect())
+    }
+
+    /// epoch 末に 1 要素を追加して全体を原子的に書き直す。
+    pub(super) fn write_epoch(
+        &mut self,
+        method: &str,
+        history: &History,
+        epoch_local: usize,
+    ) -> Result<(), AutodiffError> {
+        let Some(st) = self.state.as_mut() else {
+            return Err(self.err(method, "fit 開始前に epoch 末が呼ばれた（内部契約違反）"));
+        };
+        let res = logger_io::collect_values(&st.cols, history, epoch_local).and_then(|v| {
+            st.elems
+                .push(logger_io::json_row(&st.cols, epoch_local, &v));
+            logger_io::write_atomic(&self.path, logger_io::json_array(&st.elems).as_bytes())
+        });
+        res.map_err(|d| self.err(method, d))
+    }
+
+    /// fit 終了時の in-memory 配列の解放。
+    pub(super) fn end_fit(&mut self) {
+        self.state = None;
+    }
+}
+
+impl std::fmt::Debug for JsonLogger {
+    // in-memory 配列は肥大しうるため出さず、設定値と行数だけを出す。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonLogger")
+            .field("path", &self.path)
+            .field("append", &self.append)
+            .field("rows", &self.state.as_ref().map(|s| s.elems.len()))
+            .finish()
+    }
+}
+
+/// epoch 末にユーザー定義クロージャを呼ぶ callback（Keras
+/// `LambdaCallback(on_epoch_end=…)` 相当。イシュー #2571）。
+///
+/// クロージャへ渡すのは fit ローカル epoch 番号（0 始まり）と、その epoch
+/// までの読み取り専用 [`History`] だけである（`&mut Sequential` は渡さない。
+/// `compiled` の一時取り外し・`bind` の借用と衝突するため。
+/// `docs/compat-callbacks-design.md` §4.1）。`Err` を返すと fit はその
+/// エラーで打ち切られ、`restore_best_weights`・モード復元・`compiled`
+/// 書き戻しは通常どおり実行される。学習の停止要求は引き続き
+/// [`EarlyStopping`] の責務で、本 callback は持たない。
+///
+/// クロージャは `Send` を要求しない（[`LrSchedule`] が `Send` 境界の無い
+/// `Box<dyn LrScheduler>` を持つため [`Callback`] は元々 `!Send` で、
+/// auto trait を後退させない。後から `Send` を足す変更は破壊的になる）。
+///
+/// # Examples
+///
+/// ```
+/// use fandhe_ai::compat::{Callback, FitConfig, LambdaCallback, Loss, Optimizer, Sequential};
+/// use fandhe_ai::optim::SgdConfig;
+/// use fandhe_ai::Tensor;
+/// use std::{cell::RefCell, rc::Rc};
+///
+/// let seen = Rc::new(RefCell::new(Vec::new()));
+/// let sink = Rc::clone(&seen);
+/// let mut cbs = [Callback::Lambda(LambdaCallback::on_epoch_end(move |epoch, h| {
+///     sink.borrow_mut().push((epoch, h.loss.len()));
+///     Ok(())
+/// }))];
+///
+/// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+/// model
+///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+///     .unwrap();
+/// let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).unwrap();
+/// let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+/// model
+///     .fit_with_callbacks(&x, &y, FitConfig::new(3, 2), None, &mut cbs)
+///     .unwrap();
+/// assert_eq!(*seen.borrow(), vec![(0, 1), (1, 2), (2, 3)]);
+/// ```
+pub struct LambdaCallback {
+    // `Send` 境界は意図的に付けない（型 doc 参照）。
+    f: EpochEndFn,
+    /// 手書き `Debug` 専用の呼び出し回数（公開アクセサは設けない）。
+    calls: usize,
+}
+
+impl LambdaCallback {
+    /// epoch 末に呼ぶクロージャ `f(epoch_local, &history)` を指定する。
+    pub fn on_epoch_end(
+        f: impl FnMut(usize, &History) -> Result<(), AutodiffError> + 'static,
+    ) -> Self {
+        Self {
+            f: Box::new(f),
+            calls: 0,
+        }
+    }
+
+    /// epoch 末の呼び出し（`training.rs` から。`Err` はそのまま返す）。
+    pub(super) fn invoke(
+        &mut self,
+        epoch_local: usize,
+        history: &History,
+    ) -> Result<(), AutodiffError> {
+        self.calls += 1;
+        (self.f)(epoch_local, history)
+    }
+}
+
+impl std::fmt::Debug for LambdaCallback {
+    // boxed closure は `Debug` を持たないため、型名と呼び出し回数だけを
+    // 出す（`LrSchedule` の手書き `Debug` と同型）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LambdaCallback")
+            .field("calls", &self.calls)
+            .finish()
+    }
+}
 /// [`Sequential::fit_with_callbacks`] へ渡す callback（閉じた集合。
 /// trait object によるユーザー拡張は対象外——`&mut Sequential` を
 /// callback へ渡すと `fit` 内部の借用構造〈`compiled` 取り外し・
@@ -698,6 +1165,12 @@ pub enum Callback {
     EarlyStopping(EarlyStopping),
     ModelCheckpoint(ModelCheckpoint),
     LrSchedule(LrSchedule),
+    /// CSV ロガー（[`CsvLogger`]。イシュー #2571）。
+    CsvLogger(CsvLogger),
+    /// JSON ロガー（[`JsonLogger`]。イシュー #2571）。
+    JsonLogger(JsonLogger),
+    /// epoch 末クロージャ（[`LambdaCallback`]。イシュー #2571）。
+    Lambda(LambdaCallback),
 }
 
 impl Callback {
@@ -706,6 +1179,17 @@ impl Callback {
             Callback::EarlyStopping(es) => es.requires_validation(),
             Callback::ModelCheckpoint(mc) => mc.requires_validation(),
             Callback::LrSchedule(ls) => ls.requires_validation(),
+            Callback::CsvLogger(_) | Callback::JsonLogger(_) | Callback::Lambda(_) => false,
+        }
+    }
+
+    /// fit 終了時の後始末（ロガーのハンドル・in-memory 配列の解放）。
+    /// `training.rs` が成功・失敗・打ち切りのいずれの経路でも呼ぶ。
+    pub(super) fn end_fit(&mut self) {
+        match self {
+            Callback::CsvLogger(l) => l.end_fit(),
+            Callback::JsonLogger(l) => l.end_fit(),
+            _ => {}
         }
     }
 
@@ -720,6 +1204,7 @@ impl Callback {
             Callback::EarlyStopping(es) => Some(es.monitor),
             Callback::ModelCheckpoint(mc) => Some(mc.monitor),
             Callback::LrSchedule(ls) => ls.monitor(),
+            Callback::CsvLogger(_) | Callback::JsonLogger(_) | Callback::Lambda(_) => None,
         }
     }
 }

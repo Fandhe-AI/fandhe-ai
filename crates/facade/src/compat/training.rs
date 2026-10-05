@@ -1215,6 +1215,15 @@ impl Sequential {
     ///    - [`super::callbacks::Callback::EarlyStopping`]: `observe` し、
     ///      学習打ち切りを要求されたら（同一 epoch の他 callback 処理
     ///      後に）ループを抜ける。
+    ///    - [`super::callbacks::Callback::CsvLogger`]・
+    ///      [`super::callbacks::Callback::JsonLogger`]（イシュー #2571）:
+    ///      その epoch の 1 行／1 要素を書く。ファイルの準備（truncate／
+    ///      ヘッダ・既存ファイルの検証）は fit の開始時（引数検査の後・
+    ///      モード変更の前）に行い、失敗は `InvalidArgument`。停止要求が
+    ///      あった epoch でも書く。
+    ///    - [`super::callbacks::Callback::Lambda`]（イシュー #2571）:
+    ///      fit ローカル epoch 番号と `&History` を渡してクロージャを
+    ///      呼ぶ。`Err` はそのまま返して fit を打ち切る（下記「エラー」節）。
     ///
     /// # fit 呼び出しをまたぐ状態の扱い
     ///
@@ -1227,6 +1236,11 @@ impl Sequential {
     ///   [`super::callbacks::Callback::LrSchedule`]: 内部状態は
     ///   **継続**する（optimizer 状態が `fit` 呼び出しをまたいで継続
     ///   する既存契約——`fit(1)+fit(1) == fit(2)`——と整合する）。
+    /// - [`super::callbacks::Callback::CsvLogger`]・
+    ///   [`super::callbacks::Callback::JsonLogger`]・
+    ///   [`super::callbacks::Callback::Lambda`]（イシュー #2571）:
+    ///   epoch 番号は常に fit ローカル。ロガーのファイルは呼び出しごとに
+    ///   開き直し（`append(false)` なら truncate）、終了時に閉じる。
     ///
     /// # `restore_best_weights`
     ///
@@ -1251,6 +1265,12 @@ impl Sequential {
     ///   ElementCountOverflow)`（`super::alloc_failed`。以前の
     ///   `InvalidArgument(String)` から変更）。train／eval モードの
     ///   復元・`compiled` の書き戻しは他のエラーと同様に行われる
+    /// - `CsvLogger`／`JsonLogger` のファイル準備（開始時）・書き込み
+    ///   （epoch 末）の失敗、および append 時の既存ファイルの不整合
+    ///   → `InvalidArgument`。`LambdaCallback` が返した `Err` はそのまま
+    ///   返る。いずれも `restore_best_weights` の復元・モード復元・
+    ///   `compiled` の書き戻しは通常どおり行われる（開始時の失敗は
+    ///   学習前のため `compiled` の書き戻しのみ）
     /// - `callbacks` のいずれかが `monitor == Monitor::ValLoss`
     ///   （[`super::callbacks::EarlyStopping`]／
     ///   [`super::callbacks::ModelCheckpoint`] の既定・
@@ -1553,6 +1573,23 @@ impl Sequential {
                 es.reset_for_fit();
             }
         }
+        // (2.6) ロガーの fit 開始準備（列集合の確定・truncate／ヘッダ・既存
+        // ファイルの検証。イシュー #2571）。失敗時は開いた分を解放し、
+        // モード変更前なので `compiled` の書き戻しだけで `Err` を返す。
+        for cb in callbacks.iter_mut() {
+            let r = match cb {
+                Callback::CsvLogger(l) => l.begin_fit(method, validation.is_some(), metrics),
+                Callback::JsonLogger(l) => l.begin_fit(method, validation.is_some(), metrics),
+                _ => Ok(()),
+            };
+            if let Err(e) = r {
+                for cb in callbacks.iter_mut() {
+                    cb.end_fit();
+                }
+                self.compiled = Some(compiled);
+                return Err(e);
+            }
+        }
 
         // (3) train モードへ切り替え（Dropout 入りモデルのマスク適用の
         // ため）。復元は成功・失敗いずれの経路でも必ず行う。
@@ -1570,6 +1607,11 @@ impl Sequential {
             metrics,
             custom_step,
         );
+
+        // ロガーのハンドル解放（イシュー #2571。全経路で必ず行う）。
+        for cb in callbacks.iter_mut() {
+            cb.end_fit();
+        }
 
         // (4) モード復元・compiled の書き戻し（結果を問わず必ず行う。
         // fail-closed: 失敗した fit の後もモデルを「未 compile」状態へ
@@ -2024,6 +2066,21 @@ impl Sequential {
                         Callback::LrSchedule(ls) => {
                             let value = ls.monitor_value_at(&history, epoch_local);
                             if let Err(e) = ls.advance(value) {
+                                break 'epochs_block Err(e);
+                            }
+                        }
+                        Callback::CsvLogger(l) => {
+                            if let Err(e) = l.write_epoch(method, &history, epoch_local) {
+                                break 'epochs_block Err(e);
+                            }
+                        }
+                        Callback::JsonLogger(l) => {
+                            if let Err(e) = l.write_epoch(method, &history, epoch_local) {
+                                break 'epochs_block Err(e);
+                            }
+                        }
+                        Callback::Lambda(l) => {
+                            if let Err(e) = l.invoke(epoch_local, &history) {
                                 break 'epochs_block Err(e);
                             }
                         }
