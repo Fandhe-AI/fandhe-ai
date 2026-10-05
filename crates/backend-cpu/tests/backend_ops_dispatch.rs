@@ -404,3 +404,55 @@ fn metal_linalg_ops_return_unsupported_not_panic() {
         Err(BackendError::Unsupported(_))
     ));
 }
+
+/// イシュー #2635: 非有限値の判定 3 種・`NanToNum` は CUDA の `scalar_unary`
+/// で専用カーネルを持たず、デバイス取得より前に `Unsupported` を返す
+/// （autodiff 側がホスト参照実装へフォールバックする契約。panic しない）。
+#[test]
+fn cuda_scalar_unary_nonfinite_kinds_are_unsupported() {
+    use fandhe_ai_tensor_core::ScalarUnaryOp;
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![f32::NAN, 1.0], &[2]).expect("valid tensor");
+    for op in [
+        ScalarUnaryOp::IsNan,
+        ScalarUnaryOp::IsInf,
+        ScalarUnaryOp::IsFinite,
+        ScalarUnaryOp::NanToNum {
+            nan: 0.0,
+            posinf: f32::MAX,
+            neginf: f32::MIN,
+        },
+    ] {
+        assert!(
+            matches!(cuda.scalar_unary(op, &a), Err(BackendError::Unsupported(_))),
+            "CUDA scalar_unary({op:?}) は Unsupported のはず"
+        );
+    }
+}
+
+/// イシュー #2635: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_scalar_unary_nonfinite_kinds_are_unsupported() {
+    use fandhe_ai_tensor_core::ScalarUnaryOp;
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![f32::NAN, 1.0], &[2]).expect("valid tensor");
+    for op in [
+        ScalarUnaryOp::IsNan,
+        ScalarUnaryOp::IsInf,
+        ScalarUnaryOp::IsFinite,
+        ScalarUnaryOp::NanToNum {
+            nan: 0.0,
+            posinf: f32::MAX,
+            neginf: f32::MIN,
+        },
+    ] {
+        assert!(
+            matches!(
+                metal.scalar_unary(op, &a),
+                Err(BackendError::Unsupported(_))
+            ),
+            "Metal scalar_unary({op:?}) は Unsupported のはず"
+        );
+    }
+}

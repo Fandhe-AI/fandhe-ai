@@ -68,6 +68,19 @@
 //! 規約）。区分定数ではないので `is_piecewise_constant`／
 //! `is_comparison` は `false`。CUDA／Metal は既定 `Unsupported` から
 //! ホスト参照実装へフォールバックする（`docs/autodiff-trig-ops-decision.md`）。
+//!
+//! ## イシュー #2635 で追加した 4 variant（非有限値の判定・置換）
+//!
+//! `IsNan`／`IsInf`／`IsFinite`（`1.0`／`0.0` の f32 マスクを返す。bool 化は
+//! `autodiff::nonfinite_ops` が既存 cast 経路で行う）と
+//! `NanToNum { nan, posinf, neginf }`（`torch.nan_to_num` 相当。置換値は
+//! 解決済みの `f32`）。判定 3 種は区分定数（`is_piecewise_constant` が
+//! `true`）で、`NanToNum` は有限入力で恒等・非有限入力で定数のため区分
+//! 定数ではない（勾配は有限入力のみ 1。`autodiff::grad` に専用腕）。
+//! **`NanToNum` は NaN を伝播しない最初の kind** で、置換値が NaN の場合
+//! `PartialEq`（派生）は自分自身と等しくならない（`Clamp` と同じ性質）。
+//! CUDA／Metal は既定 `Unsupported` からホスト参照実装へフォールバックする
+//! （`docs/autodiff-nonfinite-ops-decision.md`）。
 
 /// [`ScalarUnaryOp`]／[`ScalarBinaryOp`] の NVRTC キャッシュキー等に使う
 /// 安定な判別子文字列を返す（`Debug` 出力はペイロード値を含むため
@@ -210,6 +223,21 @@ pub enum ScalarUnaryOp {
     Acosh,
     /// `atanh(x)`（PyTorch `torch.atanh` 相当。イシュー #2634）。逆双曲線正接。定義域 `(-1, 1)`、`±1` は `±inf`、外側は `NaN`。panic・マスクなし。
     Atanh,
+    /// `isnan(x)` のマスク（PyTorch `torch.isnan` 相当。イシュー #2635）。`NaN`（符号・ペイロード問わず）なら `1.0`、それ以外は `0.0`。勾配は恒等的にゼロ（区分定数）。
+    IsNan,
+    /// `isinf(x)` のマスク（PyTorch `torch.isinf` 相当。イシュー #2635）。`±inf` なら `1.0`、それ以外（`NaN` を含む）は `0.0`。勾配は恒等的にゼロ。
+    IsInf,
+    /// `isfinite(x)` のマスク（PyTorch `torch.isfinite` 相当。イシュー #2635）。有限（非正規化数・`±0` を含む）なら `1.0`、`NaN`／`±inf` は `0.0`。勾配は恒等的にゼロ。
+    IsFinite,
+    /// `nan_to_num(x, nan, posinf, neginf)`（PyTorch `torch.nan_to_num` 相当。イシュー #2635）。`NaN` は `nan`・`+inf` は `posinf`・`-inf` は `neginf` へ置換し、有限値（`±0`・非正規化数を含む）はビットを変えずに通す。置換値は呼び出し側（`autodiff::nonfinite_ops::nan_to_num`）が PyTorch 既定（`0.0`／`f32::MAX`／`f32::MIN`）へ解決済みのものを渡す。置換値自体が非有限でも拒否せずそのまま書き込む。
+    NanToNum {
+        /// `NaN` の置換値。
+        nan: f32,
+        /// `+inf` の置換値。
+        posinf: f32,
+        /// `-inf` の置換値。
+        neginf: f32,
+    },
 }
 
 impl ScalarOpKind for ScalarUnaryOp {
@@ -252,6 +280,10 @@ impl ScalarOpKind for ScalarUnaryOp {
             Self::Asinh => "asinh",
             Self::Acosh => "acosh",
             Self::Atanh => "atanh",
+            Self::IsNan => "is_nan",
+            Self::IsInf => "is_inf",
+            Self::IsFinite => "is_finite",
+            Self::NanToNum { .. } => "nan_to_num",
         }
     }
 }
@@ -378,6 +410,25 @@ impl ScalarUnaryOp {
             Self::Asinh => x.asinh(),
             Self::Acosh => x.acosh(),
             Self::Atanh => x.atanh(),
+            Self::IsNan => bool_to_f32(x.is_nan()),
+            Self::IsInf => bool_to_f32(x.is_infinite()),
+            Self::IsFinite => bool_to_f32(x.is_finite()),
+            // 分岐順: NaN → +inf → -inf → それ以外（ビット不変）。
+            Self::NanToNum {
+                nan,
+                posinf,
+                neginf,
+            } => {
+                if x.is_nan() {
+                    nan
+                } else if x == f32::INFINITY {
+                    posinf
+                } else if x == f32::NEG_INFINITY {
+                    neginf
+                } else {
+                    x
+                }
+            }
         }
     }
 
@@ -390,7 +441,16 @@ impl ScalarUnaryOp {
     /// 汚染されうる（PR #1823 codex-review 指摘と同じ類型）ため、乗算を
     /// 経由せず各入力 shape のゼロテンソルを直接返す経路へ分岐させる。
     pub fn is_piecewise_constant(self) -> bool {
-        matches!(self, Self::Floor | Self::Ceil | Self::Round | Self::Sign)
+        matches!(
+            self,
+            Self::Floor
+                | Self::Ceil
+                | Self::Round
+                | Self::Sign
+                | Self::IsNan
+                | Self::IsInf
+                | Self::IsFinite
+        )
     }
 }
 
@@ -1095,5 +1155,103 @@ mod tests {
             ]
         );
         assert_eq!(ScalarBinaryOp::Atan2.kind_name(), "atan2");
+    }
+
+    // --- イシュー #2635: 非有限値の判定・置換 ---
+
+    const NEG_NAN: f32 = f32::from_bits(0xFFC0_0001);
+
+    #[test]
+    fn new_2635_predicates_truth_table() {
+        let denorm = f32::MIN_POSITIVE / 4.0;
+        let cases: [(f32, f32, f32, f32); 9] = [
+            // (x, isnan, isinf, isfinite)
+            (f32::NAN, 1.0, 0.0, 0.0),
+            (NEG_NAN, 1.0, 0.0, 0.0),
+            (f32::INFINITY, 0.0, 1.0, 0.0),
+            (f32::NEG_INFINITY, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+            (-0.0, 0.0, 0.0, 1.0),
+            (denorm, 0.0, 0.0, 1.0),
+            (f32::MAX, 0.0, 0.0, 1.0),
+            (f32::MIN, 0.0, 0.0, 1.0),
+        ];
+        for (x, n, i, f) in cases {
+            assert_eq!(ScalarUnaryOp::IsNan.apply(x), n, "isnan({x:?})");
+            assert_eq!(ScalarUnaryOp::IsInf.apply(x), i, "isinf({x:?})");
+            assert_eq!(ScalarUnaryOp::IsFinite.apply(x), f, "isfinite({x:?})");
+        }
+    }
+
+    #[test]
+    fn new_2635_nan_to_num_replaces_and_preserves_bits() {
+        let op = ScalarUnaryOp::NanToNum {
+            nan: 7.0,
+            posinf: 8.0,
+            neginf: -9.0,
+        };
+        assert_eq!(op.apply(f32::NAN), 7.0);
+        assert_eq!(op.apply(NEG_NAN), 7.0);
+        assert_eq!(op.apply(f32::INFINITY), 8.0);
+        assert_eq!(op.apply(f32::NEG_INFINITY), -9.0);
+        for x in [
+            0.0f32,
+            -0.0,
+            f32::MIN_POSITIVE / 4.0,
+            1.5,
+            f32::MAX,
+            f32::MIN,
+        ] {
+            assert_eq!(op.apply(x).to_bits(), x.to_bits(), "finite {x:?} must pass");
+        }
+        // 置換値が非有限でもそのまま書き込む（PyTorch と同じ）。
+        let weird = ScalarUnaryOp::NanToNum {
+            nan: f32::INFINITY,
+            posinf: f32::NAN,
+            neginf: f32::NEG_INFINITY,
+        };
+        assert_eq!(weird.apply(f32::NAN), f32::INFINITY);
+        assert!(weird.apply(f32::INFINITY).is_nan());
+    }
+
+    #[test]
+    fn new_2635_nan_to_num_is_first_kind_not_propagating_nan() {
+        let op = ScalarUnaryOp::NanToNum {
+            nan: 0.0,
+            posinf: 1.0,
+            neginf: -1.0,
+        };
+        assert!(op.apply(f32::NAN).is_finite());
+        assert_eq!(ScalarUnaryOp::IsNan.apply(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn new_2635_piecewise_constant_flags_and_kind_names() {
+        for op in [
+            ScalarUnaryOp::IsNan,
+            ScalarUnaryOp::IsInf,
+            ScalarUnaryOp::IsFinite,
+        ] {
+            assert!(op.is_piecewise_constant(), "{op:?}");
+        }
+        let n = ScalarUnaryOp::NanToNum {
+            nan: 0.0,
+            posinf: 1.0,
+            neginf: -1.0,
+        };
+        assert!(!n.is_piecewise_constant());
+        assert_eq!(ScalarUnaryOp::IsNan.kind_name(), "is_nan");
+        assert_eq!(ScalarUnaryOp::IsInf.kind_name(), "is_inf");
+        assert_eq!(ScalarUnaryOp::IsFinite.kind_name(), "is_finite");
+        assert_eq!(n.kind_name(), "nan_to_num");
+        assert_eq!(
+            n.kind_name(),
+            ScalarUnaryOp::NanToNum {
+                nan: 5.0,
+                posinf: 6.0,
+                neginf: 7.0
+            }
+            .kind_name()
+        );
     }
 }
