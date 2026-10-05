@@ -71,6 +71,35 @@
 - **実証済みニーズとの適合度**: C は #1960/#1961（AMP・低精度 Linear forward）で既に実利用ニーズを充足していることが実証済み。A が要求する「backward も低精度」という真の低精度学習の実需は本文書執筆時点で未実証
 - **保守面**: A は Op 追加のたびに dtype 対応漏れが起きるリスクを抱える。C は Op ごとに独立して `compute_dtype` の有無を判断・検証できるため保守性が高い
 
+### 4.1 f64 独立グラフの facade 公開形の候補比較（#2598・承認待ち）
+
+> 本節は推奨案の記録であり、承認の取得を意味しない。確定形ではない。実装は承認後の #2599。
+
+**着手時判定（基準 `origin/main` `cb34712b`・2026-10-05）**
+
+- **構築不能**: `TapeF64::new(tape: &'t Tape)` は生の `fandhe_ai_autodiff::Tape` を取る（`crates/autodiff/src/f64_autograd.rs:234`）。facade の `Tape` は `pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`（`crates/facade/src/lib.rs:329`）のため、型だけ再エクスポートしても facade 利用者は構築できない（§14 にも既記）
+- **`Tape` 部分文字列ガード**: `facade_does_not_reexport_tape_or_backend_ops`（`crates/facade/tests/api_surface.rs:107`）は `pub use` 行が部分文字列 `Tape` を含むと拒否する（REQ-12）。`TapeF64` の `pub use` も該当し、通すにはガードへの例外が要る
+- **モジュール再エクスポートの拒否**: `facade_pub_use_leaves_are_not_modules`（同 `:7448`）は allowlist 外の小文字葉を拒否する。`pub use fandhe_ai_autodiff::f64_autograd;` は現状通らない
+- **専用ガードなし**: f64 autograd 専用の `*HoldDoctestGuard` は無い（`crates/facade/src` に `TapeF64`／`VarF64`／`f64_autograd` の出現なし）。保留を機械的に担うのは上の 2 つの汎用ガードのみで、両者が検査するのは `pub use` 行だけである（案 A〜C のような再エクスポートは拒否できる）。推奨案 D-2 の `pub struct TapeF64`／`VarF64`／`GradientsF64` の直接宣言は `pub use` ではないため**現状どのガードにも検出されず**、承認前の公開を機械的には防げない。この保留は本記録の承認待ちという運用で担保し、直接宣言を検出する保留ガードは本イシューでは足さない（正ガードは承認後に #2599 で新設）
+- **名前**: facade に `TapeF64`／`VarF64`／`GradientsF64`／`f64_autograd` は存在しない。`AutodiffError`・`Tensor` は facade 直下に到達済み
+- **新 `pub mod` のコスト**: facade に `pub mod` を足すと `*_hold_doctest_globs_all_pub_modules` 系テストと doctest の glob 一覧の更新が要る
+- **型の形**: `TapeF64<'t>`（`new`／`var`／`var_no_grad`／`backward`）、`VarF64<'g, 't>`（`Clone + Copy`。`value`／`shape`／`add`／`mul`／`div`／`pow`／`matmul`／`sum`／`mean`／`max`）、`GradientsF64`（`get`）。失敗は `Result<_, AutodiffError>`
+- **既存の制約**: `matmul` は rank 2 限定、縮約は `dim: Option<usize>` のみ。全軸 `sum` の bit 一致は 4096 要素以下。Metal は常にホスト計算。CUDA／Metal 実機 parity は `#[ignore]` のまま未実測（`docs/perf/logs/var-f64-gemm-reduction-2196/README.md`）
+- **注記**: `lib.rs` 全体の `pub struct`／`pub fn` 集合を allowlist と照合するテストは調査範囲では見当たらなかった（断定しない）。`f64_autograd.rs` モジュール doc の「承認事項 1〜5」は §10 の実際の 5 項目と一致しないため、#2599 の doc 更新対象とする
+
+**候補比較**（軸: 非破壊性・名前衝突・既存ガード整合・将来拡張）
+
+| 案 | 形 | 評価の要点 |
+|---|---|---|
+| A: `Var` 委譲 | `Var`（f32）に f64 グラフ入口メソッドを足す | f64 グラフは `Var` と添字空間を共有しない別グラフで実体と合わない。`Var::cast` の detached 契約と紛れる。再エクスポート済み `Var` への inherent 追加で公開面が広がる |
+| B: モジュール再エクスポート | `pub use fandhe_ai_autodiff::f64_autograd;` | 小文字葉ガードで拒否される。公開しても構築できない。内部モジュール名が公開名として固定される |
+| C: 型の選択再エクスポート | `pub use …::{TapeF64, VarF64, GradientsF64};` | REQ-12 ガードへの例外が要る。構築不能のうえ生 `Tape` を取る `new` が露出する |
+| D-1: `TapeF64` のみ newtype | `TapeF64` は facade newtype、他 2 型は再エクスポート | 既存 `Tape` newtype の前例と同形。ただし autodiff 側 `VarF64` への `pub fn` 追加が承認なしで facade 公開面を広げる |
+| **D-2（推奨）: 3 型とも facade newtype** | `lib.rs` に `pub struct` 3 件と 1 式委譲メソッド | `pub use` ではないため既存ガードを変更せずに済む。構築は `pub(crate)` フィールド経由で解消。公開メソッド集合は facade 側の記述で決まる。代償は 1 式委譲 15 件前後のボイラープレート |
+| E: `Var<T>` 一般化 | §4 案 A | §5 で見送り済み。破壊的変更。再論しない |
+
+**名前衝突**: facade 内に同名はない。下流で `use fandhe_ai::*;` と他クレートの glob が同名を持ち、かつ使う場合に限り曖昧性エラーになる。内部型と同名の別型が 2 系統存在することになるが、facade が唯一のサポート面である（`docs/compat-api-scope.md` §0）。本記録は互換性の保証を断定しない。
+
 ## 5. 推奨（段階 0 設計確定・実装は別イシュー）
 
 - 案 C を「今後の dtype 拡張の推奨案」として本文書で記録する。後続イシュー（既存の #2071 等）が拠るべき標準契約とするかは §10 承認事項 1 のユーザー承認で確定し、承認前は「推奨案・未確定」として扱う（codex-review 指摘・2026-09-22 是正）
@@ -212,6 +241,45 @@
 3. `Var`／`LinearVars` 等への facade 新規公開面の追加（案 C 拡張時の個別イシューで都度承認を得る前提）
 4. 案 A（`Var<T>` フル一般化）への着手可否・facade 破壊的変更・版数運用（実装しない結論のため本イシューでは不承認のまま）
 5. `docs/spec/` への提案（REQ-9／REQ-11 への追記が必要になった場合。本イシューでは提案しない）
+
+### 10.1 推奨案と承認依頼事項（#2598・承認待ち）
+
+> 本節は推奨案の記録であり、承認の取得を意味しない。確定形ではない。承認コメントが付くまで #2599 は着手しない。
+
+**推奨: 案 D-2（3 型とも facade newtype）**。いずれも `fandhe_ai` 直下で `lib.rs` 内に宣言する（別モジュールに置いて `pub use` すると `Tape` 部分文字列ガードに当たるため）。
+
+```rust
+pub struct TapeF64<'t>(/* pub(crate) 内部 TapeF64 */);
+impl<'t> TapeF64<'t> {
+    pub fn new(tape: &'t Tape) -> Self;                       // fandhe_ai::Tape
+    pub fn var(&self, value: &Tensor<f64>) -> VarF64<'_, 't>;
+    pub fn var_no_grad(&self, value: &Tensor<f64>) -> VarF64<'_, 't>;
+    pub fn backward(&self, loss: &VarF64<'_, 't>) -> Result<GradientsF64, AutodiffError>;
+}
+#[derive(Clone, Copy)] pub struct VarF64<'g, 't>(/* 内部 VarF64 */);
+//   value / shape / add / mul / div / pow / matmul / sum(dim) / mean(dim) / max(dim)
+pub struct GradientsF64(/* 内部 GradientsF64 */);
+//   get(&self, var: &VarF64<'_, '_>) -> Result<Option<&Tensor<f64>>, AutodiffError>
+```
+
+- 意味論は内部実装と同一の 1 式委譲。新しい演算・`Op`・`TypedOps` 拡張・`unsafe`・依存は足さない。2 ライフタイム形と `Copy` は維持する
+- **§10 との対応**: 承認が消費するのは項目 3（facade 新規公開面）のうち f64 独立グラフ 3 型の分のみ。項目 1・2・4・5 は未承認のまま変えない
+- **0.10.0 非破壊**: 追加は直下の 3 型とそのメソッドのみ。既存項目のシグネチャ・意味論・`FitConfig` は不変
+- **#2626（f16／bf16）との関係**: あちらは案 C（`compute_dtype` opt-in）で型名・入口とも衝突しない。本決定は `Var<T>` を採らない前提のみ共有する
+
+**ユーザーに決めてほしい事項**
+
+- (a) 公開形: A／B／C／D-1／D-2／E のどれか。推奨は D-2
+- (b) 配置: facade 直下か新 `pub mod` か。推奨は直下（新 `pub mod` の glob 更新コストを避ける）
+- (c) 構築経路: `TapeF64::new(&Tape)` か `Tape` 上の accessor か。推奨は前者（内部 API と同じ呼び出し形で `Tape` のメソッド名を占有しない）
+- (d) 名前: `TapeF64`／`VarF64`／`GradientsF64` を維持するか。推奨は維持
+- (e) 公開範囲: 現行メソッド集合をそのまま公開し、既存の制約を rustdoc に明記する形でよいか
+- (f) CUDA／Metal 実機 parity が未実測のまま公開してよいか（`#[ignore]` と申し送りを継続）
+- (g) ガード: #2599 で正ガード（3 型が `lib.rs` に各 1 件・メソッド集合一致・本体が 1 式委譲）を新設し、既存の 2 ガードは変更せず否定層として残す形でよいか。本イシューでは保留ガードを足さない
+- (h) §14 の申し送り（バッチ matmul・`keepdim`・多軸縮約・`min`・GPU ネイティブカーネル・`TypedOps<f64>` 拡張）は引き続き対象外でよいか
+- (i) #2598 を承認前に PR マージで閉じてよいか、および #2599 の着手条件（承認コメントが付いてから）
+
+**承認後の実装スケッチ（#2599。本記録では実施しない）**: `lib.rs` の newtype 3 件と委譲・doctest、`api_surface.rs` の正ガードと名前解決プローブ、facade 経由の利用テスト（leaf から backward まで・`TapeMismatch`・`GradientTrackingDisabled`）、内部 doc 文言の更新、`docs/compat-api-scope.md` §5 の適用記録。
 
 ## 11. スコープ外
 
