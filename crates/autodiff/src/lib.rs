@@ -274,6 +274,10 @@ pub mod rearrange_ops;
 mod reduce_dims;
 pub mod reduce_ops;
 pub mod scalar_unary_ops;
+// 形状演算 6 種（`unbind`・`movedim`・`swapaxes`・`tensor_split`・`meshgrid`・`rot90`。
+// イシュー #2639）。既存 Op の合成のみ。facade への公開は保留（承認依頼 #2677・公開
+// #2678。`docs/autodiff-shape-view-ops-decision.md`）。
+pub mod shape_view_ops;
 pub mod stat_reduce_ops;
 mod tape;
 #[cfg(test)]

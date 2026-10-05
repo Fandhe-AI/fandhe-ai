@@ -5104,6 +5104,193 @@ struct BinningOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarLowPrecisionOpsHoldDoctestGuard;
 
+/// 形状演算 6 種（`unbind`・`movedim`・`swapaxes`・`tensor_split`・`meshgrid`・`rot90`。
+/// イシュー #2639・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
+/// ガード（`StatReduceOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `shape_view_ops`・型 `MeshgridIndexing`・7 メソッドを持つプローブ用
+/// トレイトを置き、修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>` の修飾付き
+/// メソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ
+/// 公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
+/// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は
+/// facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::shape_view_ops`。新規 `Op`・
+/// `BackendOps` メソッドはない）。保留対象は facade 公開面（`Var::unbind` 等の委譲メソッドと
+/// 引数型 `MeshgridIndexing` の再エクスポート）のみで、公開形は未承認（承認依頼は
+/// #2677・公開自体は承認後の #2678。推奨案は
+/// `docs/autodiff-shape-view-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
+/// ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// shape_view_ops_hold_doctest_globs_all_pub_modules`・
+/// `shape_view_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_shape_view_ops`・
+/// `workspace_declares_shape_view_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_shape_view_hold_probe {
+///     pub struct MeshgridIndexing;
+///     pub mod shape_view_ops {
+///         pub fn unbind() {}
+///         pub fn movedim() {}
+///         pub fn swapaxes() {}
+///         pub fn tensor_split() {}
+///         pub fn tensor_split_indices() {}
+///         pub fn meshgrid() {}
+///         pub fn rot90() {}
+///     }
+/// }
+/// use __fandhe_shape_view_hold_probe::*;
+///
+/// struct __FandheShapeViewOpsHoldMarker;
+///
+/// trait __FandheShapeViewOpsHoldProbe {
+///     fn unbind(&self) -> __FandheShapeViewOpsHoldMarker;
+///     fn movedim(&self) -> __FandheShapeViewOpsHoldMarker;
+///     fn swapaxes(&self) -> __FandheShapeViewOpsHoldMarker;
+///     fn tensor_split(&self) -> __FandheShapeViewOpsHoldMarker;
+///     fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker;
+///     fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker;
+///     fn rot90(&self) -> __FandheShapeViewOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheShapeViewOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn unbind(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn movedim(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn swapaxes(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn tensor_split(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn rot90(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheShapeViewOpsHoldProbe for fandhe_ai::Tape {
+///     fn unbind(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn movedim(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn swapaxes(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn tensor_split(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn rot90(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheShapeViewOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn unbind(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn movedim(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn swapaxes(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn tensor_split(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+///     fn rot90(&self) -> __FandheShapeViewOpsHoldMarker {
+///         __FandheShapeViewOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: MeshgridIndexing) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     shape_view_ops::unbind();
+///     shape_view_ops::movedim();
+///     shape_view_ops::swapaxes();
+///     shape_view_ops::tensor_split();
+///     shape_view_ops::tensor_split_indices();
+///     shape_view_ops::meshgrid();
+///     shape_view_ops::rot90();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::unbind(v);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::movedim(v);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::swapaxes(v);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split(v);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split_indices(v);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::meshgrid(v);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::rot90(v);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::unbind(tape);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::movedim(tape);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::swapaxes(tape);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::tensor_split(tape);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::tensor_split_indices(tape);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::meshgrid(tape);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::rot90(tape);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tensor::<f32>::unbind(tf);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tensor::<f32>::movedim(tf);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tensor::<f32>::swapaxes(tf);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tensor::<f32>::tensor_split(tf);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tensor::<f32>::tensor_split_indices(tf);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tensor::<f32>::meshgrid(tf);
+///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tensor::<f32>::rot90(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct ShapeViewOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
