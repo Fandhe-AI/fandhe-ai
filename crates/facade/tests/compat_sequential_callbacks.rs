@@ -1168,6 +1168,8 @@ fn json_append_with_invalid_existing_file_fails_closed() {
     std::fs::create_dir_all(&tmp.0).unwrap();
     for bad in [
         "not json",
+        " ", // 空白だけの非空ファイルは空扱いにせず拒否
+        "\n\n",
         "{\"epoch\":0}",
         "[1, 2]",
         "[{\"epoch\":0,\"loss\":1.0}]", // lr キー不足

@@ -1033,9 +1033,9 @@ impl JsonLogger {
             return Ok(Vec::new());
         }
         let text = logger_io::read_limited(&self.path)?;
-        if text.trim().is_empty() {
-            return Ok(Vec::new());
-        }
+        // 空扱いは長さ 0 のファイルだけ（上の `existing_nonempty` で除外済み）。
+        // 空白だけの非空ファイルは JSON ログとして不正であり、検証を迂回して
+        // 上書きしないよう `parse_log_array` のエラーへ倒す（fail-closed）。
         let parsed = logger_io::parse_log_array(&text)
             .map_err(|e| format!("既存ファイルが JSON ログとして不正: {e}"))?;
         for (i, el) in parsed.iter().enumerate() {
