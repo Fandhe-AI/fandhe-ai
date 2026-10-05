@@ -2,7 +2,7 @@
 
 イシュー #2631（親 #2630「FFT」・ルート #2499 Phase 4）。基準コミット
 `7711a3ac`（main HEAD）。設計の正は `docs/autodiff-fft-design.md`（#2151。案 B）で、
-本書はその実装記録である。`fft`／`ifft` は #2632、`stft`／`istft` は #2633 が本書へ追記する。
+本書はその実装記録である。`fft`／`ifft` は #2632（§12 に追記済み）、`stft`／`istft` は #2633 が本書へ追記する。
 
 ## §0 結論
 
@@ -127,7 +127,7 @@ facade が唯一のサポート公開面であるという方針（`docs/compat-
 
 ## §8 スコープ外
 
-- `fft`／`ifft`（#2632）・`stft`／`istft`（#2633）
+- `fft`／`ifft`（#2632。§12 で実装済み）・`stft`／`istft`（#2633）
 - facade 公開と `compat-api-scope.md` §1／`compat-feature-gap.md` の判定変更、spec（REQ-9）改定
 - GPU 専用 FFT カーネル・O(n log n) 化（radix-2・Bluestein）・`fft2`／`fftn`／`hfft`／`ihfft`／`fftshift`／`fftfreq`・ONNX `DFT`
 - `create_graph`（高階微分）・activation checkpoint 対象化・f64 自動微分経路での FFT
@@ -165,3 +165,105 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機は本実装エージ�
 | `docs/compat-api-scope.md` §0・§5 | 公開面の方針・範囲拡張手続き |
 | `crates/tensor-core/src/interpolate.rs` | 共有カーネル方式の先例 |
 | `.claude/rules/coding-rust.md` | REQ-2 統一複合判定・境界検査・FMA 契約 |
+
+## §12 fft・ifft の追記（#2632）
+
+イシュー #2632（親 #2630・ルート #2499 Phase 4）。基準コミット `b3c5df45`（#2631 マージ後の main）。
+`fft`／`ifft`（複素 → 複素の c2c。入出力とも末尾次元 2 の `f32` 実テンソル `(re, im)`）を、`rfft`／`irfft`
+（§0〜§11）と同じ内部クレート限定の方式で追加した。着手根拠は §1 と同じ整理（ルート #2499 Phase 4 の
+「内部実装＋保留ガードまで先行・公開は承認後」）で、facade 公開の承認は得ていない。
+
+### 12.1 PyTorch 相当・API
+
+| 演算 | PyTorch 相当 | 入力 → 出力 |
+|---|---|---|
+| `fft_ops::fft(x, n, dim, norm)` | `view_as_real(torch.fft.fft(view_as_complex(x), n, dim, norm))` | `[..., L, ..., 2]` → `[..., n, ..., 2]` |
+| `fft_ops::ifft(x, n, dim, norm)` | 同 `torch.fft.ifft` | 同上 |
+
+`n` 省略時は `L`、`dim` は複素軸を除いた実軸の添字（既定 rank-2・負の添字は受けない）。変換前に `dim` 軸を
+長さ `n` へ切り詰め／ゼロ詰めする。
+
+### 12.2 実装方式（単一情報源）
+
+`crates/tensor-core/src/fft.rs` の 4 カーネル（`fft_host`／`ifft_host`／`fft_vjp_host`／`ifft_vjp_host`）は、
+符号 σ とスケール c だけが異なる 1 本の非公開コア `c2c_core` で実装した。
+
+| 公開関数 | σ | c | src_len → dst_len |
+|---|---|---|---|
+| `fft_host` | -1 | `norm.forward_scale(n)` | `L` → `n` |
+| `ifft_host` | +1 | `norm.inverse_scale(n)` | `L` → `n` |
+| `fft_vjp_host` | +1 | `norm.forward_scale(n)` | `n` → `L` |
+| `ifft_vjp_host` | -1 | `norm.inverse_scale(n)` | `n` → `L` |
+
+随伴は共役転置（σ 反転・長さ入替）で、`n` 倍は掛けず、`ortho`／`forward` でも二重スケールしない。
+ゼロ詰めの VJP は切り詰め、切り詰めの VJP はゼロ詰めになる（設計 §5）。経路は `rfft` と同じ
+（`fft_layout` 検査 → 実体化 → `BackendOps::fft_fft`／`fft_ifft`〈既定 `Unsupported` のときだけ
+ホストカーネルへフォールバック〉→ `Op::Fft`／`Op::Ifft`〈非融合・非 checkpoint・高階微分非対応〉）。
+`backend-cpu` の `CpuBackendOps::fft_fft`／`fft_ifft` は `fft_layout` で再検査して共有カーネルを呼ぶだけ。
+CUDA／Metal は既定 `Unsupported`（GPU カーネルなし）。
+
+### 12.3 数値契約（§3 との差分）
+
+- `f64` 逐次・固定順序（`s` 昇順）の素の加算で蓄積し、最後に 1 回だけ `f32` へ downcast する。`mul_add` は使わない。
+- **c2c には DC／Nyquist の構造的ゼロが無い**ため、rfft のリテラル `+0.0` 書き込み規則は持ち込まない。
+- 非有限入力は拒否せず伝播する（直接 DFT のため `inf·0 = NaN` もそのまま出る）。NaN／inf の配置が
+  PyTorch（FFT アルゴリズム由来）と一致することは保証しない。
+- 空要素（出力 0 要素）は twiddle 表の確保より前に早期 return する。
+
+### 12.4 境界検査（`fft_layout`。確保・実体化より前）
+
+| 拒否理由 | エラー |
+|---|---|
+| rank < 2 | `Shape(RankMismatch)` |
+| 末尾次元 ≠ 2 | `Shape(ShapeMismatch)` |
+| `dim >= rank-1` | `InvalidArgument` |
+| 解決後 `n == 0`（`n = 0` 明示／`L == 0` で `n` 省略） | `InvalidArgument` |
+| 入出力の要素数・バイト数の `checked_mul` 超過・`isize::MAX` 超過 | `Shape(ElementCountOverflow)` |
+
+カーネルはスライス長も再検査し、`unsafe`／`get_unchecked` を使わない。計算量は 1 レーン O(n²)（直接 DFT）。
+恣意的な `n` 上限は新設せず、表現可能だが巨大な `n` での確保失敗・長時間計算は 4 演算共通の既知の性質。
+
+### 12.5 PyTorch 2.14.0 との差分
+
+- 実入力 `[..., L]` の虚部 0 への自動昇格はしない（呼び出し側の責務。設計 §3）。
+- `dim` は `usize`（負の添字は受けない）。
+- `error_cases` の実測（torch 2.14.0+cpu）: `n=0`・`dim` 範囲外・空軸で `n` 省略は torch が例外、
+  **空軸（長さ 0）で `n=4` 明示は torch が受理**（ゼロ詰め）。`fft`／`ifft` とも本実装は同じ判定。
+  rank < 2・末尾 ≠ 2 は torch 側で表現できない（複素テンソルを前提とする）ため Rust 専用の拒否。
+- 非有限入力の NaN／inf の配置は 12.3 のとおり一致を保証しない。
+
+### 12.6 テスト構成
+
+- fixture: `crates/autodiff/tests/fixtures/fft-pytorch-reference/`（実 PyTorch 2.14.0 実行値。rfft 18＋irfft 15＋
+  fft 18＋ifft 18 = 計 69 ケース）。既存 33 ケースは再生成前後で完全一致することを機械比較して確認した
+  （c2c は乱数列の末尾側で生成）。REQ-2 統一複合判定（`common::req2_close`）で forward・入力勾配を突合。
+  tolerance 定数は新設・変更していない。
+- `crates/autodiff/tests/fft_parity.rs`: DFT 行列積オラクル（cos・sin 行列 2 本の `matmul` 合成。norm 3 種・`n ≠ L`）、
+  中心差分、`fft → ifft` 往復、bit 決定性、非有限入力の伝播、境界エラー、巨大 `n` の確保前拒否、
+  モック `BackendOps` による `Unsupported` 以外のエラー伝播・フォールバック・誤 shape 戻り値の拒否。
+- `crates/tensor-core/src/fft.rs` 単体: 随伴恒等式（norm 3 種 × `n` 省略／`n>L`／`n<L`）・解析解・往復・
+  rfft との先頭 bin 一致・非末尾 `dim`・型付きエラー。
+- `crates/backend-cpu/tests/fft_parity.rs`・`backend_ops_dispatch.rs`、
+  `crates/facade/tests/fft_ops_backend_parity.rs`（CPU tape 対 naive tape。実機 2 件は `#[ignore]`）。
+
+### 12.7 facade 公開形の推奨案（未承認）
+
+**推奨案（1 つ）**: §7 と同一方針。`Var::fft`／`Var::ifft` を `fft_ops` への 1 行委譲メソッドとして公開し、
+`FftNorm` を `fandhe_ai` ルートへ再エクスポートする（`fft_ops` モジュール自体は再エクスポートしない）。
+`Sequential::add_*` は層ではないため対象外。**未承認**で、承認依頼は #2677、公開自体は承認後の #2678。
+
+### 12.8 保留ガードの更新点
+
+`FftOpsHoldDoctestGuard` のプローブへ `fft`／`ifft`（`fft_ops` 内の自由関数・`Var`／`Tape` の `Type::method`
+呼び出し）を追加し、`api_surface.rs` の `FFT_OPS_HOLD_PROBE_BODY`・`FFT_OPS_FN_NAMES`
+（`["rfft", "irfft", "fft", "ifft"]`）・自己テスト・workspace インベントリ期待値
+（`autodiff/src/fft_ops.rs` の 4 関数が各 1 件）を更新した。素の `fn fft`／`fn ifft` の宣言は
+`fft_ops.rs` の各 1 件だけで、trait メソッドは `fft_fft`／`fft_ifft`、共有カーネルは `*_host`、
+形状検査は `fft_layout` と命名して衝突させない。公開面の追加は一切ない。
+
+### 12.9 スコープ外・実機申し送り
+
+- スコープ外: facade 公開（#2678）・`compat-api-scope.md` §1／`compat-feature-gap.md` の判定変更・
+  `stft`／`istft`（#2633）・`fft2`／`fftn` 等・GPU 専用カーネル・O(n log n) 化・高階微分・checkpoint・f64 経路。
+- 実機（CUDA／Metal）は未実測のまま `#[ignore]`（`cuda_fft_c2c_matches_cpu_reference`／
+  `metal_fft_c2c_matches_cpu_reference`）。申し送りは `docs/perf/logs/fft-fft-ifft-2632/README.md`。

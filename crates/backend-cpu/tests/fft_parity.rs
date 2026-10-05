@@ -93,3 +93,92 @@ fn invalid_arguments_are_typed_errors() {
         Err(BackendError::ShapeMismatch(_))
     ));
 }
+
+// --- fft／ifft（c2c。イシュー #2632） ---
+
+#[test]
+fn fft_delta_and_odd_n_ortho_known_solutions() {
+    let ops = CpuBackendOps::new();
+    let y = ops
+        .fft_fft(
+            &t(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &[4, 2]),
+            4,
+            0,
+            FftNorm::Backward,
+        )
+        .unwrap();
+    assert_eq!(y.shape(), &[4, 2]);
+    assert_parity(
+        "fft_delta",
+        &dense(&y),
+        &[1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+    );
+    let y = ops
+        .fft_fft(
+            &t(vec![1.0, 0.0, 2.0, 0.0, 3.0, 0.0], &[3, 2]),
+            3,
+            0,
+            FftNorm::Ortho,
+        )
+        .unwrap();
+    let s = 1.0 / 3.0f32.sqrt();
+    assert_parity(
+        "fft_odd_ortho",
+        &dense(&y),
+        &[
+            6.0 * s,
+            0.0,
+            -1.5 * s,
+            0.866_025_4 * s,
+            -1.5 * s,
+            -0.866_025_4 * s,
+        ],
+    );
+}
+
+#[test]
+fn fft_ifft_roundtrip_deterministic_and_padded_shape() {
+    let ops = CpuBackendOps::new();
+    let x = t(
+        (0..24).map(|i| (i as f32 * 0.41).sin()).collect(),
+        &[2, 6, 2],
+    );
+    let y = ops.fft_fft(&x, 6, 1, FftNorm::Forward).unwrap();
+    let z = ops.fft_ifft(&y, 6, 1, FftNorm::Forward).unwrap();
+    assert_parity("c2c_roundtrip", &dense(&z), &dense(&x));
+    let padded = ops.fft_fft(&x, 8, 1, FftNorm::Backward).unwrap();
+    assert_eq!(padded.shape(), &[2, 8, 2]);
+    let a = ops.fft_ifft(&x, 6, 1, FftNorm::Ortho).unwrap();
+    let b = ops.fft_ifft(&x, 6, 1, FftNorm::Ortho).unwrap();
+    assert!(
+        dense(&a)
+            .iter()
+            .zip(dense(&b))
+            .all(|(p, q)| p.to_bits() == q.to_bits())
+    );
+}
+
+#[test]
+fn c2c_invalid_arguments_are_typed_errors() {
+    let ops = CpuBackendOps::new();
+    let x = t(vec![1.0; 8], &[4, 2]);
+    for f in [CpuBackendOps::fft_fft, CpuBackendOps::fft_ifft] {
+        assert!(matches!(
+            f(&ops, &x, 0, 0, FftNorm::Backward),
+            Err(BackendError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            f(&ops, &x, 4, 1, FftNorm::Backward),
+            Err(BackendError::InvalidArgument(_))
+        ));
+        let bad = t(vec![1.0; 6], &[2, 3]);
+        assert!(matches!(
+            f(&ops, &bad, 2, 0, FftNorm::Backward),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            f(&ops, &x, usize::MAX / 2, 0, FftNorm::Backward),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+}

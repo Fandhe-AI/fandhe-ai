@@ -1,4 +1,4 @@
-//! `fandhe_ai_autodiff::fft_ops`（イシュー #2631・`rfft`／`irfft`。facade
+//! `fandhe_ai_autodiff::fft_ops`（イシュー #2631・#2632・`rfft`／`irfft`／`fft`／`ifft`。facade
 //! 非公開のため `fandhe_ai_autodiff::fft_ops::*` を直接 use する。
 //! `crates/autodiff/src/fft_ops.rs` モジュール doc 参照）のバックエンド間
 //! parity テスト（`linalg_ops_backend_parity.rs` と同型）。
@@ -21,7 +21,7 @@
 //! 確認するものであり、GPU カーネル自体の parity ではない。
 
 use fandhe_ai::Device;
-use fandhe_ai_autodiff::fft_ops::{irfft, rfft};
+use fandhe_ai_autodiff::fft_ops::{fft, ifft, irfft, rfft};
 use fandhe_ai_autodiff::{AutodiffError, Var};
 use fandhe_ai_tensor_core::{FftNorm, Tensor};
 
@@ -164,6 +164,93 @@ fn cpu_invalid_arguments_are_typed_errors() {
     ));
 }
 
+// --- fft／ifft（c2c。イシュー #2632） ---
+
+type C2cFn =
+    for<'t> fn(&Var<'t>, Option<usize>, Option<usize>, FftNorm) -> Result<Var<'t>, AutodiffError>;
+
+fn c2c_fixture() -> Tensor<f32> {
+    t(seeded(2 * 6 * 2, 9), &[2, 6, 2])
+}
+
+/// 任意の tape 上の c2c forward 出力と入力勾配（損失 `Σ y²`。`n=8` でゼロ詰め）。
+fn c2c_grad_on<T: VarSource + HasBackward>(
+    tape: &T,
+    op: C2cFn,
+    norm: FftNorm,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let data = c2c_fixture();
+    let x = tape.make_var(&data);
+    let y = op(&x, Some(8), Some(1), norm).unwrap();
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let dx = tape.grad_of(&loss, &x);
+    (y.to_tensor(), dx)
+}
+
+/// `backward` を両 Tape 型で共通に呼ぶための薄いトレイト。
+trait HasBackward {
+    fn grad_of(&self, loss: &Var<'_>, x: &Var<'_>) -> Tensor<f32>;
+}
+
+impl HasBackward for fandhe_ai::Tape {
+    fn grad_of(&self, loss: &Var<'_>, x: &Var<'_>) -> Tensor<f32> {
+        self.backward(loss)
+            .unwrap()
+            .get(x)
+            .unwrap()
+            .unwrap()
+            .clone()
+    }
+}
+
+impl HasBackward for fandhe_ai_autodiff::Tape {
+    fn grad_of(&self, loss: &Var<'_>, x: &Var<'_>) -> Tensor<f32> {
+        self.backward(loss)
+            .unwrap()
+            .get(x)
+            .unwrap()
+            .unwrap()
+            .clone()
+    }
+}
+
+#[test]
+fn cpu_c2c_forward_and_backward_match_naive_reference() {
+    for (name, op) in [("fft", fft as C2cFn), ("ifft", ifft as C2cFn)] {
+        for norm in [FftNorm::Backward, FftNorm::Ortho, FftNorm::Forward] {
+            let (y_cpu, dx_cpu) = c2c_grad_on(&fandhe_ai::tape(), op, norm);
+            let (y_naive, dx_naive) = c2c_grad_on(&fandhe_ai_autodiff::Tape::new(), op, norm);
+            assert_parity(
+                &format!("{name} forward {norm:?}: cpu vs naive"),
+                &y_cpu,
+                &y_naive,
+            );
+            assert_parity(
+                &format!("{name} backward {norm:?}: cpu vs naive"),
+                &dx_cpu,
+                &dx_naive,
+            );
+        }
+    }
+}
+
+#[test]
+fn cpu_c2c_invalid_arguments_are_typed_errors() {
+    let tape = fandhe_ai::tape();
+    let real = tape.make_var(&t(vec![1.0; 4], &[4]));
+    let c = tape.make_var(&t(vec![1.0; 6], &[3, 2]));
+    for op in [fft as C2cFn, ifft as C2cFn] {
+        assert!(matches!(
+            op(&real, None, None, FftNorm::Backward),
+            Err(AutodiffError::Shape(_))
+        ));
+        assert!(matches!(
+            op(&c, Some(0), None, FftNorm::Backward),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+    }
+}
+
 // ---------------------------------------------------------------------
 // 実機バックエンド（`#[ignore]`）: Mac／DGX Spark GB10 実機セッションへ
 // 申し送る（`docs/perf/logs/fft-rfft-irfft-2631/README.md`）。
@@ -209,4 +296,34 @@ fn metal_fft_matches_cpu_reference() {
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/fft-rfft-irfft-2631/README.md 参照"]
 fn cuda_fft_matches_cpu_reference() {
     assert_device_matches_cpu(Device::Cuda(0), "cuda");
+}
+
+fn assert_device_c2c_matches_cpu(device: Device, label: &str) {
+    let device_tape =
+        fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    for (name, op) in [("fft", fft as C2cFn), ("ifft", ifft as C2cFn)] {
+        let (y_cpu, dx_cpu) = c2c_grad_on(&fandhe_ai::tape(), op, FftNorm::Ortho);
+        let (y_dev, dx_dev) = c2c_grad_on(&device_tape, op, FftNorm::Ortho);
+        assert_parity(&format!("{name} forward: cpu vs {label}"), &y_cpu, &y_dev);
+        assert_parity(
+            &format!("{name} backward: cpu vs {label}"),
+            &dx_cpu,
+            &dx_dev,
+        );
+    }
+}
+
+/// fft／ifft の forward・backward の CPU／Metal 実機比較（#2632）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/fft-fft-ifft-2632/README.md 参照"]
+fn metal_fft_c2c_matches_cpu_reference() {
+    assert_device_c2c_matches_cpu(Device::Metal, "metal");
+}
+
+/// fft／ifft の forward・backward の CPU／CUDA 実機（DGX Spark GB10）比較（#2632）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/fft-fft-ifft-2632/README.md 参照"]
+fn cuda_fft_c2c_matches_cpu_reference() {
+    assert_device_c2c_matches_cpu(Device::Cuda(0), "cuda");
 }

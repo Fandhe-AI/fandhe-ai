@@ -1,4 +1,4 @@
-//! `fft_ops`（イシュー #2631・`rfft`／`irfft`）の `Tape`/`Var` を経由する
+//! `fft_ops`（イシュー #2631・#2632・`rfft`／`irfft`／`fft`／`ifft`）の `Tape`/`Var` を経由する
 //! end-to-end 統合テスト。
 //!
 //! - 実 PyTorch 2.14.0 の実行値 fixture
@@ -19,7 +19,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use fandhe_ai_autodiff::fft_ops::{irfft, rfft};
+use fandhe_ai_autodiff::fft_ops::{fft, ifft, irfft, rfft};
 use fandhe_ai_autodiff::{AutodiffError, Tape};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{BackendOps, FftNorm, ShapeError, Tensor};
@@ -96,6 +96,8 @@ fn run_case(case: &Case) -> (Vec<f32>, Vec<usize>, Vec<f32>) {
     let y = match case.op.as_str() {
         "rfft" => rfft(&x, case.n, case.dim, norm),
         "irfft" => irfft(&x, case.n, case.dim, norm),
+        "fft" => fft(&x, case.n, case.dim, norm),
+        "ifft" => ifft(&x, case.n, case.dim, norm),
         other => panic!("未知の op: {other}"),
     }
     .unwrap_or_else(|e| panic!("{}: forward が失敗: {e}", case.name));
@@ -119,7 +121,12 @@ fn matches_pytorch_reference_forward_and_backward() {
         "fixture は PyTorch 2.14.0 系の実行値である必要がある: {}",
         fixture.torch_version
     );
-    assert!(!fixture.cases.is_empty());
+    for op in ["rfft", "irfft", "fft", "ifft"] {
+        assert!(
+            fixture.cases.iter().any(|c| c.op == op),
+            "fixture に {op} のケースが無い"
+        );
+    }
     for case in &fixture.cases {
         let (out, out_shape, dx) = run_case(case);
         assert_eq!(out_shape, case.out_shape, "{}: 出力 shape", case.name);
@@ -138,7 +145,10 @@ fn error_cases_follow_pytorch_rejections() {
         let x = tape.var(&t(vec![0.0; numel], &case.in_shape));
         let result = match case.op.as_str() {
             "rfft" => rfft(&x, case.n, case.dim, FftNorm::Backward),
-            _ => irfft(&x, case.n, case.dim, FftNorm::Backward),
+            "irfft" => irfft(&x, case.n, case.dim, FftNorm::Backward),
+            "fft" => fft(&x, case.n, case.dim, FftNorm::Backward),
+            "ifft" => ifft(&x, case.n, case.dim, FftNorm::Backward),
+            other => panic!("未知の op: {other}"),
         };
         assert_eq!(
             result.is_err(),
@@ -637,6 +647,30 @@ impl BackendOps for FftErrOps {
         }
         Err((self.error)())
     }
+    fn fft_fft(
+        &self,
+        _input: &Tensor<f32>,
+        _n: usize,
+        _dim: usize,
+        _norm: FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if self.wrong_shape {
+            return Ok(Tensor::new(vec![0.0; 3], &[3]).expect("shape"));
+        }
+        Err((self.error)())
+    }
+    fn fft_ifft(
+        &self,
+        _input: &Tensor<f32>,
+        _n: usize,
+        _dim: usize,
+        _norm: FftNorm,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if self.wrong_shape {
+            return Ok(Tensor::new(vec![0.0; 3], &[3]).expect("shape"));
+        }
+        Err((self.error)())
+    }
 }
 
 fn err_tape(error: fn() -> BackendError, wrong_shape: bool) -> Tape {
@@ -663,6 +697,14 @@ fn non_unsupported_backend_error_is_propagated_not_swallowed() {
         irfft(&c, None, None, FftNorm::Backward),
         Err(AutodiffError::Backend(BackendError::KernelLaunchFailed(_)))
     ));
+    assert!(matches!(
+        fft(&c, None, None, FftNorm::Backward),
+        Err(AutodiffError::Backend(BackendError::KernelLaunchFailed(_)))
+    ));
+    assert!(matches!(
+        ifft(&c, None, None, FftNorm::Backward),
+        Err(AutodiffError::Backend(BackendError::KernelLaunchFailed(_)))
+    ));
     // InvalidArgument は AutodiffError::InvalidArgument へ写像される（握りつぶさない）。
     let tape = err_tape(|| BackendError::InvalidArgument("bad".into()), false);
     let x = tape.var(&t(vec![1.0; 4], &[4]));
@@ -681,6 +723,17 @@ fn unsupported_falls_back_to_host_kernel() {
         y.to_tensor().host_slice().into_owned(),
         vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
     );
+    // c2c も同じ（デルタ → 全 bin が (1, 0)）。
+    let c = tape.var(&t(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0], &[3, 2]));
+    for y in [
+        fft(&c, None, None, FftNorm::Backward).unwrap(),
+        ifft(&c, None, None, FftNorm::Forward).unwrap(),
+    ] {
+        assert_eq!(
+            y.to_tensor().host_slice().into_owned(),
+            vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+        );
+    }
 }
 
 #[test]
@@ -691,4 +744,286 @@ fn wrong_shape_from_backend_is_rejected() {
         rfft(&x, None, None, FftNorm::Backward),
         Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
     ));
+    let c = tape.var(&t(vec![1.0; 6], &[3, 2]));
+    assert!(matches!(
+        fft(&c, None, None, FftNorm::Backward),
+        Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
+    ));
+    assert!(matches!(
+        ifft(&c, None, None, FftNorm::Backward),
+        Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
+    ));
+}
+
+// --- fft／ifft（c2c。イシュー #2632） ---
+
+type C2cFn = for<'t> fn(
+    &fandhe_ai_autodiff::Var<'t>,
+    Option<usize>,
+    Option<usize>,
+    FftNorm,
+) -> Result<fandhe_ai_autodiff::Var<'t>, AutodiffError>;
+
+const C2C_OPS: [(&str, C2cFn, f32); 2] = [("fft", fft, -1.0), ("ifft", ifft, 1.0)];
+
+fn c2c_scale(op: &str, n: usize, norm: FftNorm) -> f64 {
+    match (op, norm) {
+        (_, FftNorm::Ortho) => 1.0 / (n as f64).sqrt(),
+        ("fft", FftNorm::Backward) | ("ifft", FftNorm::Forward) => 1.0,
+        _ => 1.0 / n as f64,
+    }
+}
+
+/// DFT 行列積オラクル: re／im を別 `Var` にして `cos`・`sin` 行列 2 本の
+/// `matmul` 合成（`Re = re·C + σ'·im·S`・`Im = im·C - σ'·re·S`）で突合する。
+#[test]
+fn c2c_matches_dft_matrix_oracle() {
+    for (name, op, sigma) in C2C_OPS {
+        for (b, l, n, norm) in [
+            (2usize, 8usize, 8usize, FftNorm::Backward),
+            (3, 5, 5, FftNorm::Ortho),
+            (2, 6, 4, FftNorm::Forward),
+            (2, 3, 7, FftNorm::Backward),
+        ] {
+            let scale = c2c_scale(name, n, norm);
+            let xs = seeded(b * l * 2, 71);
+            let gs = seeded(b * n * 2, 72);
+
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(xs.clone(), &[b, l, 2]));
+            let y = op(&x, Some(n), None, norm).unwrap();
+            let gv = tape.var_no_grad(&t(gs.clone(), &[b, n, 2]));
+            let loss = y.mul(&gv).unwrap().sum(None).unwrap();
+            let dx = tape
+                .backward(&loss)
+                .unwrap()
+                .get(&x)
+                .unwrap()
+                .unwrap()
+                .clone();
+
+            // オラクル
+            let mut re = vec![0.0f32; b * l];
+            let mut im = vec![0.0f32; b * l];
+            for i in 0..b * l {
+                re[i] = xs[2 * i];
+                im[i] = xs[2 * i + 1];
+            }
+            let m = l.min(n);
+            // 行 = 入力位置 s（0..l）、列 = 出力位置 d（0..n）。s >= n の行は 0。
+            let mut cm = vec![0.0f32; l * n];
+            let mut sm = vec![0.0f32; l * n];
+            for s_i in 0..m {
+                for d in 0..n {
+                    let th = 2.0 * std::f64::consts::PI * ((s_i * d) % n) as f64 / n as f64;
+                    cm[s_i * n + d] = (scale * th.cos()) as f32;
+                    sm[s_i * n + d] = (scale * f64::from(sigma) * th.sin()) as f32;
+                }
+            }
+            let tape2 = Tape::new_with_ops(common::naive_ops());
+            let re_v = tape2.var(&t(re, &[b, l]));
+            let im_v = tape2.var(&t(im, &[b, l]));
+            let c = tape2.var_no_grad(&t(cm, &[l, n]));
+            let s = tape2.var_no_grad(&t(sm, &[l, n]));
+            // Re = re·C - σ·im·S（σ は sm に畳み込み済みのため `sm` の符号を反転して使う）
+            let out_re = re_v
+                .matmul(&c)
+                .unwrap()
+                .sub(&im_v.matmul(&s).unwrap())
+                .unwrap();
+            let out_im = im_v
+                .matmul(&c)
+                .unwrap()
+                .add(&re_v.matmul(&s).unwrap())
+                .unwrap();
+            let mut g_re = vec![0.0f32; b * n];
+            let mut g_im = vec![0.0f32; b * n];
+            for i in 0..b * n {
+                g_re[i] = gs[2 * i];
+                g_im[i] = gs[2 * i + 1];
+            }
+            let l_re = out_re
+                .mul(&tape2.var_no_grad(&t(g_re, &[b, n])))
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let l_im = out_im
+                .mul(&tape2.var_no_grad(&t(g_im, &[b, n])))
+                .unwrap()
+                .sum(None)
+                .unwrap();
+            let loss2 = l_re.add(&l_im).unwrap();
+            let grads2 = tape2.backward(&loss2).unwrap();
+            let dre = grads2
+                .get(&re_v)
+                .unwrap()
+                .unwrap()
+                .host_slice()
+                .into_owned();
+            let dim = grads2
+                .get(&im_v)
+                .unwrap()
+                .unwrap()
+                .host_slice()
+                .into_owned();
+
+            let ctx = format!("{name} oracle b={b} l={l} n={n} {norm:?}");
+            let yv = y.to_tensor().host_slice().into_owned();
+            let (rv, iv) = (
+                out_re.to_tensor().host_slice().into_owned(),
+                out_im.to_tensor().host_slice().into_owned(),
+            );
+            let mut inter = vec![0.0f32; b * n * 2];
+            for i in 0..b * n {
+                inter[2 * i] = rv[i];
+                inter[2 * i + 1] = iv[i];
+            }
+            assert_close_all(&yv, &inter, &format!("{ctx} forward"));
+            let mut inter_g = vec![0.0f32; b * l * 2];
+            for i in 0..b * l {
+                inter_g[2 * i] = dre[i];
+                inter_g[2 * i + 1] = dim[i];
+            }
+            assert_close_all(&dx.host_slice(), &inter_g, &format!("{ctx} grad"));
+        }
+    }
+}
+
+#[test]
+fn c2c_gradients_match_central_differences() {
+    let eps = 0.05f32;
+    let cases: [(usize, Vec<usize>, Option<usize>, FftNorm); 4] = [
+        (0, vec![6, 2], None, FftNorm::Ortho),
+        (0, vec![5, 2], Some(8), FftNorm::Backward),
+        (1, vec![4, 2], Some(3), FftNorm::Forward),
+        (1, vec![3, 2], Some(5), FftNorm::Backward),
+    ];
+    for (which, shape, n, norm) in cases {
+        let (name, op, _) = C2C_OPS[which];
+        let numel: usize = shape.iter().product();
+        let data = seeded(numel, 81);
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(data.clone(), &shape));
+        let y = op(&x, n, None, norm).unwrap();
+        let out_shape = y.to_tensor().shape().to_vec();
+        let g = seeded(out_shape.iter().product(), 82);
+        let gv = tape.var_no_grad(&t(g.clone(), &out_shape));
+        let loss = y.mul(&gv).unwrap().sum(None).unwrap();
+        let dx = tape
+            .backward(&loss)
+            .unwrap()
+            .get(&x)
+            .unwrap()
+            .unwrap()
+            .host_slice()
+            .into_owned();
+        let eval = |d: &[f32]| -> f64 {
+            let tp = Tape::new_with_ops(common::naive_ops());
+            let xv = tp.var(&t(d.to_vec(), &shape));
+            op(&xv, n, None, norm)
+                .unwrap()
+                .to_tensor()
+                .host_slice()
+                .iter()
+                .zip(&g)
+                .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                .sum()
+        };
+        for i in 0..numel {
+            let mut hi = data.clone();
+            let mut lo = data.clone();
+            hi[i] += eps;
+            lo[i] -= eps;
+            let fd = (eval(&hi) - eval(&lo)) / (2.0 * f64::from(eps));
+            assert!(
+                (fd - f64::from(dx[i])).abs() < 2e-3,
+                "{name} {shape:?} n={n:?} {norm:?} [{i}]: fd={fd} analytic={}",
+                dx[i]
+            );
+        }
+    }
+}
+
+#[test]
+fn c2c_roundtrip_for_all_norms() {
+    for n in [1usize, 2, 3, 4, 7, 8] {
+        for norm in [FftNorm::Backward, FftNorm::Ortho, FftNorm::Forward] {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let data = seeded(2 * n * 2, 91);
+            let x = tape.var(&t(data.clone(), &[2, n, 2]));
+            let y = fft(&x, None, None, norm).unwrap();
+            let z = ifft(&y, Some(n), Some(1), norm).unwrap();
+            assert_eq!(z.to_tensor().shape(), &[2, n, 2]);
+            assert_close_all(
+                &z.to_tensor().host_slice(),
+                &data,
+                &format!("c2c roundtrip n={n} {norm:?}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn c2c_same_input_twice_is_bit_identical() {
+    let run = || {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(seeded(42, 95), &[3, 7, 2]));
+        fft(&x, None, None, FftNorm::Ortho)
+            .unwrap()
+            .to_tensor()
+            .host_slice()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn c2c_nonfinite_input_propagates_without_rejection() {
+    for (_, op, _) in C2C_OPS {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(
+            vec![f32::NAN, 0.0, 1.0, 0.0, 2.0, 0.0, 3.0, 0.0],
+            &[4, 2],
+        ));
+        let y = op(&x, None, None, FftNorm::Backward).unwrap();
+        let v = y.to_tensor().host_slice().into_owned();
+        assert!(v.iter().any(|a| a.is_nan()), "NaN が伝播する");
+    }
+}
+
+#[test]
+fn c2c_boundary_errors_are_typed() {
+    for (_, op, _) in C2C_OPS {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let v4 = tape.var(&t(vec![1.0; 4], &[4]));
+        assert!(matches!(
+            op(&v4, None, None, FftNorm::Backward),
+            Err(AutodiffError::Shape(ShapeError::RankMismatch { .. }))
+        ));
+        let bad_last = tape.var(&t(vec![1.0; 6], &[2, 3]));
+        assert!(matches!(
+            op(&bad_last, None, None, FftNorm::Backward),
+            Err(AutodiffError::Shape(ShapeError::ShapeMismatch { .. }))
+        ));
+        let c = tape.var(&t(vec![1.0; 6], &[3, 2]));
+        assert!(matches!(
+            op(&c, Some(0), None, FftNorm::Backward),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            op(&c, None, Some(1), FftNorm::Backward),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        // 巨大 n は確保前に型付きエラー。
+        assert!(matches!(
+            op(&c, Some(usize::MAX), None, FftNorm::Backward),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+        assert!(matches!(
+            op(&c, Some(usize::MAX / 2), None, FftNorm::Backward),
+            Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+        ));
+    }
 }
