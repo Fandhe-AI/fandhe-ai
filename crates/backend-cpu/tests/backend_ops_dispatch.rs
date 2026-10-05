@@ -298,6 +298,17 @@ fn cuda_linalg_ops_return_unsupported_not_panic() {
         cuda.linalg_matrix_rank(&a, None),
         Err(BackendError::Unsupported(_))
     ));
+    // イシュー #2631 の FFT 2 演算も同じ契約（既定 `Unsupported`・panic しない）。
+    let fft_in = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+    let fft_c = Tensor::<f32>::new(vec![1.0, 0.0, 2.0, 0.0], &[2, 2]).unwrap();
+    assert!(matches!(
+        cuda.fft_rfft(&fft_in, 4, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.fft_irfft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
 }
 
 /// [`cuda_linalg_ops_return_unsupported_not_panic`] の Metal 版
@@ -361,6 +372,17 @@ fn metal_linalg_ops_return_unsupported_not_panic() {
     ));
     assert!(matches!(
         metal.linalg_matrix_rank(&a, None),
+        Err(BackendError::Unsupported(_))
+    ));
+    // イシュー #2631 の FFT 2 演算も同じ契約（既定 `Unsupported`・panic しない）。
+    let fft_in = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+    let fft_c = Tensor::<f32>::new(vec![1.0, 0.0, 2.0, 0.0], &[2, 2]).unwrap();
+    assert!(matches!(
+        metal.fft_rfft(&fft_in, 4, 0, fandhe_ai_tensor_core::FftNorm::Backward),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.fft_irfft(&fft_c, 2, 0, fandhe_ai_tensor_core::FftNorm::Backward),
         Err(BackendError::Unsupported(_))
     ));
 }
