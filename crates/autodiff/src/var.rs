@@ -3611,6 +3611,10 @@ impl<'t> Var<'t> {
     /// region`）②`create_graph::validate_ancestors` が祖先に含まれた
     /// 時点で無条件拒否、の 2 経路とも fail-closed に塞ぐ
     /// （`create_graph.rs` 側の拒否分岐 doc 参照）。
+    ///
+    /// 自由関数 `crate::low_precision_ops::matmul_low_precision`（イシュー
+    /// #2628。elementwise 5 演算と同じ入口の並び）が本メソッドへ 1 行委譲
+    /// する。可視性は `pub(crate)` のまま（facade 公開は承認後の #2678）。
     pub(crate) fn matmul_low_precision(
         &self,
         other: &Var<'t>,

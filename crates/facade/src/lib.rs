@@ -4117,6 +4117,162 @@ struct PredictBatchesHoldDoctestGuard;
 #[allow(dead_code)]
 struct FftOpsHoldDoctestGuard;
 
+/// `Var`／`Tape` の低精度 forward 入口（`matmul_low_precision`・
+/// `add_low_precision`・`mul_low_precision`・`relu_low_precision`・
+/// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・
+/// ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード（
+/// `FftOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `low_precision_ops`（と 6 関数のルート直下定義）および 6 メソッド
+/// を持つプローブ用トレイトを置き、修飾なし／修飾付きの両方で呼ぶ。facade が
+/// 同名のモジュール・関数を glob 可能な位置へ公開するか、`Var`／`Tape` へ同名の
+/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
+/// 不一致でエラーコードに依存せずコンパイルが失敗する。内部の
+/// `pub(crate)` な `Var::matmul_low_precision` は別クレートから見えず、同名
+/// トレイトメソッドを隠さないため 6 名すべてを対象にできる（`pub` に
+/// すると inherent が優先され本プローブが失敗する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::low_precision_ops`・
+/// `fandhe_ai_tensor_core` の `*_low_precision`）。保留対象は facade 公開面
+/// （`Var::{matmul,add,mul,relu,exp,tanh}_low_precision(.., dtype)` の委譲
+/// メソッド）のみで、公開形は未承認（承認依頼は #2677・公開自体は承認後の
+/// #2678。推奨案は `docs/autodiff-low-precision-op-extension-decision.md`。
+/// 同記録は推奨案の記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// var_low_precision_ops_hold_doctest_globs_all_pub_modules`・
+/// `var_low_precision_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_low_precision_ops`・
+/// `workspace_declares_low_precision_ops_fn_names_only_in_allowed_locations`）
+/// との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_low_precision_ops_hold_probe {
+///     pub mod low_precision_ops {
+///         pub fn matmul_low_precision() {}
+///         pub fn add_low_precision() {}
+///         pub fn mul_low_precision() {}
+///         pub fn relu_low_precision() {}
+///         pub fn exp_low_precision() {}
+///         pub fn tanh_low_precision() {}
+///     }
+///     pub fn matmul_low_precision() {}
+///     pub fn add_low_precision() {}
+///     pub fn mul_low_precision() {}
+///     pub fn relu_low_precision() {}
+///     pub fn exp_low_precision() {}
+///     pub fn tanh_low_precision() {}
+/// }
+/// use __fandhe_low_precision_ops_hold_probe::*;
+///
+/// struct __FandheLowPrecisionHoldMarker;
+///
+/// trait __FandheLowPrecisionHoldProbe {
+///     fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker;
+///     fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker;
+///     fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker;
+///     fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker;
+///     fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker;
+///     fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker;
+/// }
+///
+/// impl<'t> __FandheLowPrecisionHoldProbe for fandhe_ai::Var<'t> {
+///     fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+/// }
+///
+/// impl __FandheLowPrecisionHoldProbe for fandhe_ai::Tape {
+///     fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+///     fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
+///         __FandheLowPrecisionHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     low_precision_ops::matmul_low_precision();
+///     low_precision_ops::add_low_precision();
+///     low_precision_ops::mul_low_precision();
+///     low_precision_ops::relu_low_precision();
+///     low_precision_ops::exp_low_precision();
+///     low_precision_ops::tanh_low_precision();
+///     matmul_low_precision();
+///     add_low_precision();
+///     mul_low_precision();
+///     relu_low_precision();
+///     exp_low_precision();
+///     tanh_low_precision();
+/// }
+///
+/// fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::matmul_low_precision(v);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::add_low_precision(v);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::mul_low_precision(v);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::relu_low_precision(v);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::exp_low_precision(v);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::tanh_low_precision(v);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::matmul_low_precision(tape);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::add_low_precision(tape);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::mul_low_precision(tape);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::relu_low_precision(tape);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::exp_low_precision(tape);
+///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::tanh_low_precision(tape);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarLowPrecisionOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

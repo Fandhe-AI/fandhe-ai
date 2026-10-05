@@ -56,6 +56,17 @@
 //! （算術を伴わない bit 完全一致コピーのため f32 のまま呼び出し元
 //! 〈`fandhe_ai_autodiff::var::Var::conv2d_low_precision`〉が計算する）
 //! を受け取り、GEMM＋bias 加算のみを低精度化する。
+//!
+//! # elementwise 5 演算への拡張（イシュー #2628）
+//!
+//! [`add_low_precision`]・[`mul_low_precision`]・[`relu_low_precision`]・
+//! [`exp_low_precision`]・[`tanh_low_precision`] は同じ数値方式（低精度へ
+//! 丸め → `TypedOps<T>` の演算 → f32 へ 1 回昇格）を elementwise へ
+//! 横展開したもの（`docs/autodiff-low-precision-op-extension-decision.md`）。
+//! 検査順は「shape（出力要素数・バイト数含む）→ dtype → accessor →
+//! 降格 → `TypedOps<T>` → 戻り shape 検証 → 昇格」。**ホスト計算や f32 への
+//! フォールバックは持たない**（accessor 不在は `Unsupported`。低精度を
+//! 指定したのに f32 で計算される無言の精度後退を避ける）。
 
 use half::{bf16, f16};
 
@@ -571,6 +582,219 @@ fn conv2d_forward_typed<T: LowPrecisionScalar>(
     upcast::<T>(&out_t)
 }
 
+// --- elementwise 5 演算（Add／Mul／Relu／Exp／Tanh。イシュー #2628） ---
+
+/// `TypedOps<T>` の二項演算（`add`／`mul`）を指す関数ポインタ型。
+type BinaryTypedFn<T> =
+    fn(&dyn TypedOps<T>, &Tensor<T>, &Tensor<T>) -> Result<Tensor<T>, BackendError>;
+
+/// `TypedOps<T>` の単項演算（`relu`／`exp`／`tanh`）を指す関数ポインタ型。
+type UnaryTypedFn<T> = fn(&dyn TypedOps<T>, &Tensor<T>) -> Result<Tensor<T>, BackendError>;
+
+/// 低精度 elementwise 二項演算の共通本体（`T` 確定後）。`op` は
+/// `TypedOps<T>::{add,mul}` のいずれか。降格 → 演算 → 出力 shape 検証
+/// → 昇格の順で、バックエンドが返した shape が事前に確定した
+/// `expected_shape` と一致しなければ型付きエラーにする（`TypedOps` の
+/// broadcast 規則は trait doc 上「実装依存」のため独立に検証する）。
+fn binary_typed<T: LowPrecisionScalar>(
+    ops: &dyn TypedOps<T>,
+    op: BinaryTypedFn<T>,
+    lhs: &Tensor<f32>,
+    rhs: &Tensor<f32>,
+    expected_shape: &[usize],
+) -> Result<Tensor<f32>, BackendError> {
+    let l = downcast::<T>(lhs)?;
+    let r = downcast::<T>(rhs)?;
+    let out = op(ops, &l, &r)?;
+    if out.shape() != expected_shape {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: out.shape().to_vec(),
+            rhs: expected_shape.to_vec(),
+        }));
+    }
+    upcast::<T>(&out)
+}
+
+/// 低精度 elementwise 単項演算の共通本体（[`binary_typed`] の単項版）。
+fn unary_typed<T: LowPrecisionScalar>(
+    ops: &dyn TypedOps<T>,
+    op: UnaryTypedFn<T>,
+    input: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let x = downcast::<T>(input)?;
+    let out = op(ops, &x)?;
+    if out.shape() != input.shape() {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: out.shape().to_vec(),
+            rhs: input.shape().to_vec(),
+        }));
+    }
+    upcast::<T>(&out)
+}
+
+/// 二項演算 1 本分の dtype 別 `TypedOps` 関数ポインタ組。
+struct BinaryOps {
+    name: &'static str,
+    f16_op: BinaryTypedFn<f16>,
+    bf16_op: BinaryTypedFn<bf16>,
+}
+
+/// 単項演算 1 本分の dtype 別 `TypedOps` 関数ポインタ組。
+struct UnaryOps {
+    name: &'static str,
+    f16_op: UnaryTypedFn<f16>,
+    bf16_op: UnaryTypedFn<bf16>,
+}
+
+/// 二項演算の dtype ディスパッチ。shape 検査 → dtype → accessor の順
+/// （accessor 取得より先に shape を検査する。fail-closed）。
+fn binary_dispatch(
+    spec: &BinaryOps,
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    lhs: &Tensor<f32>,
+    rhs: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let name = spec.name;
+    let out_shape =
+        broadcast_shape(lhs.shape(), rhs.shape()).map_err(BackendError::ShapeMismatch)?;
+    checked_numel_for::<f16>(&out_shape).map_err(BackendError::ShapeMismatch)?;
+    match dtype {
+        ScalarDType::F16 => {
+            let typed = ops.typed_ops_f16().ok_or_else(|| {
+                BackendError::Unsupported(format!(
+                    "{name}: typed_ops_f16 unavailable on this backend"
+                ))
+            })?;
+            binary_typed(typed, spec.f16_op, lhs, rhs, &out_shape)
+        }
+        ScalarDType::Bf16 => {
+            let typed = ops.typed_ops_bf16().ok_or_else(|| {
+                BackendError::Unsupported(format!(
+                    "{name}: typed_ops_bf16 unavailable on this backend"
+                ))
+            })?;
+            binary_typed(typed, spec.bf16_op, lhs, rhs, &out_shape)
+        }
+        other => Err(BackendError::InvalidArgument(format!(
+            "{name}: unsupported dtype ({other:?}); only F16/Bf16 are accepted"
+        ))),
+    }
+}
+
+/// 単項演算の dtype ディスパッチ（[`binary_dispatch`] の単項版）。
+fn unary_dispatch(
+    spec: &UnaryOps,
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    input: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let name = spec.name;
+    checked_numel_for::<f16>(input.shape()).map_err(BackendError::ShapeMismatch)?;
+    match dtype {
+        ScalarDType::F16 => {
+            let typed = ops.typed_ops_f16().ok_or_else(|| {
+                BackendError::Unsupported(format!(
+                    "{name}: typed_ops_f16 unavailable on this backend"
+                ))
+            })?;
+            unary_typed(typed, spec.f16_op, input)
+        }
+        ScalarDType::Bf16 => {
+            let typed = ops.typed_ops_bf16().ok_or_else(|| {
+                BackendError::Unsupported(format!(
+                    "{name}: typed_ops_bf16 unavailable on this backend"
+                ))
+            })?;
+            unary_typed(typed, spec.bf16_op, input)
+        }
+        other => Err(BackendError::InvalidArgument(format!(
+            "{name}: unsupported dtype ({other:?}); only F16/Bf16 are accepted"
+        ))),
+    }
+}
+
+/// elementwise 加算の opt-in 低精度 forward（イシュー #2628）。
+///
+/// 入力（f32）を `dtype`（F16／Bf16 のみ）へ降格し `TypedOps<T>::add`
+/// （NumPy 互換 broadcast）を計算して f32 へ 1 回昇格する。
+/// `fandhe_ai_autodiff::low_precision_ops::add_low_precision` の唯一の
+/// 呼び出し元。accessor 不在は [`BackendError::Unsupported`]（f32 への
+/// フォールバックなし）、shape 検査は accessor 取得より先。
+pub fn add_low_precision(
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    lhs: &Tensor<f32>,
+    rhs: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let spec = BinaryOps {
+        name: "add_low_precision",
+        f16_op: |o, a, b| o.add(a, b),
+        bf16_op: |o, a, b| o.add(a, b),
+    };
+    binary_dispatch(&spec, ops, dtype, lhs, rhs)
+}
+
+/// elementwise 乗算の opt-in 低精度 forward（[`add_low_precision`] と同契約。
+/// イシュー #2628）。
+pub fn mul_low_precision(
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    lhs: &Tensor<f32>,
+    rhs: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let spec = BinaryOps {
+        name: "mul_low_precision",
+        f16_op: |o, a, b| o.mul(a, b),
+        bf16_op: |o, a, b| o.mul(a, b),
+    };
+    binary_dispatch(&spec, ops, dtype, lhs, rhs)
+}
+
+/// ReLU の opt-in 低精度 forward（[`add_low_precision`] と同契約の単項版。
+/// イシュー #2628）。
+pub fn relu_low_precision(
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    input: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let spec = UnaryOps {
+        name: "relu_low_precision",
+        f16_op: |o, a| o.relu(a),
+        bf16_op: |o, a| o.relu(a),
+    };
+    unary_dispatch(&spec, ops, dtype, input)
+}
+
+/// `exp` の opt-in 低精度 forward（[`relu_low_precision`] と同契約。
+/// f16 で表現範囲を超える出力は `+inf` へ丸められる。イシュー #2628）。
+pub fn exp_low_precision(
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    input: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let spec = UnaryOps {
+        name: "exp_low_precision",
+        f16_op: |o, a| o.exp(a),
+        bf16_op: |o, a| o.exp(a),
+    };
+    unary_dispatch(&spec, ops, dtype, input)
+}
+
+/// `tanh` の opt-in 低精度 forward（[`relu_low_precision`] と同契約。
+/// イシュー #2628）。
+pub fn tanh_low_precision(
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    input: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    let spec = UnaryOps {
+        name: "tanh_low_precision",
+        f16_op: |o, a| o.tanh(a),
+        bf16_op: |o, a| o.tanh(a),
+    };
+    unary_dispatch(&spec, ops, dtype, input)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,5 +1042,78 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    // --- elementwise 5 演算（イシュー #2628） ---
+
+    #[test]
+    fn elementwise_low_precision_accessor_none_returns_unsupported() {
+        let ops = NoTypedOpsBackend;
+        let a = t(&[1.0, 2.0], &[2]);
+        for dtype in [ScalarDType::F16, ScalarDType::Bf16] {
+            assert!(matches!(
+                add_low_precision(&ops, dtype, &a, &a).unwrap_err(),
+                BackendError::Unsupported(_)
+            ));
+            assert!(matches!(
+                mul_low_precision(&ops, dtype, &a, &a).unwrap_err(),
+                BackendError::Unsupported(_)
+            ));
+            assert!(matches!(
+                relu_low_precision(&ops, dtype, &a).unwrap_err(),
+                BackendError::Unsupported(_)
+            ));
+            assert!(matches!(
+                exp_low_precision(&ops, dtype, &a).unwrap_err(),
+                BackendError::Unsupported(_)
+            ));
+            assert!(matches!(
+                tanh_low_precision(&ops, dtype, &a).unwrap_err(),
+                BackendError::Unsupported(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn elementwise_low_precision_rejects_non_low_precision_dtype() {
+        let ops = NoTypedOpsBackend;
+        let a = t(&[1.0, 2.0], &[2]);
+        for dtype in [ScalarDType::F32, ScalarDType::F64] {
+            assert!(matches!(
+                add_low_precision(&ops, dtype, &a, &a).unwrap_err(),
+                BackendError::InvalidArgument(_)
+            ));
+            assert!(matches!(
+                mul_low_precision(&ops, dtype, &a, &a).unwrap_err(),
+                BackendError::InvalidArgument(_)
+            ));
+            assert!(matches!(
+                relu_low_precision(&ops, dtype, &a).unwrap_err(),
+                BackendError::InvalidArgument(_)
+            ));
+            assert!(matches!(
+                exp_low_precision(&ops, dtype, &a).unwrap_err(),
+                BackendError::InvalidArgument(_)
+            ));
+            assert!(matches!(
+                tanh_low_precision(&ops, dtype, &a).unwrap_err(),
+                BackendError::InvalidArgument(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn elementwise_binary_shape_mismatch_is_rejected_before_accessor_lookup() {
+        let ops = NoTypedOpsBackend;
+        let a = t(&[1.0; 3], &[3]);
+        let b = t(&[1.0; 2], &[2]);
+        assert!(matches!(
+            add_low_precision(&ops, ScalarDType::F16, &a, &b).unwrap_err(),
+            BackendError::ShapeMismatch(_)
+        ));
+        assert!(matches!(
+            mul_low_precision(&ops, ScalarDType::Bf16, &a, &b).unwrap_err(),
+            BackendError::ShapeMismatch(_)
+        ));
     }
 }
