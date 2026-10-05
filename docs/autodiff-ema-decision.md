@@ -305,6 +305,48 @@ reopen するか新しい実装イシューを起票するかはユーザーが�
 `crates/facade/**` の変更、保留ガードの撤去・反転、`compat-api-scope.md` §5 への
 適用記録、追跡 Issue の起票（ユーザー承認が必要）、依存追加・`unsafe`・tolerance の変更。
 
+## §12 #2561 着手時判定（§10 未承認・#2560 未実装のため停止）
+
+イシュー #2561（親 #2558）。本節は docs のみの追記であり、停止の記録である。
+承認を取得したことを意味しない。facade コード・保留ガード・
+`docs/compat-api-scope.md` は変更しない。
+
+### 12.1 判定
+
+判定に使った `origin/main` は `6c966886`（2026-10-05 確認）。
+
+1. #2560 は closed だが、facade 公開は実装されていない（§11 の停止 PR #2746 でクローズ）。
+   `crates/facade/src` 内の `ExponentialMovingAverage`・`EmaCallback`・`Callback::Ema` の
+   一致は `EmaHoldDoctestGuard` の doc コメントのみで、公開物は存在しない。
+2. 正ガードは「承認・公開済みの形だけを許す」検査であり、公開物が無い現状では反転先が無い。
+3. §10.2 の推奨案は §10 本文のとおり**未承認**である。#2561・#2560・#2559・#2558・#2499 に
+   コメントは 0 件で、承認を示す記述は無い。#2499 の一括承認は §10.2 に及ばない（§11.1 と同じ判断）。
+
+### 12.2 結論
+
+停止条項に従い、`EmaHoldDoctestGuard` と `api_surface.rs` の次の 4 テストは
+撤去も反転もせず現状維持する。
+
+- `ema_hold_doctest_globs_all_pub_modules`
+- `ema_hold_doctest_probe_body_matches_fixed_contract`
+- `facade_does_not_reexport_or_declare_ema_items`
+- `facade_does_not_reexport_or_declare_ema_items_detects_each_category`
+
+解除の順序は、§10.5 の 1〜6 のユーザー承認 → #2560 の reopen または新しい実装イシューでの
+facade 公開 → 保留ガードの反転（#2561 の受入条件）。承認だけでは解除されない。
+受入条件 3 点（ガード反転・§4／§5 と `compat-api-scope.md` §5 の記録・facade 経由の利用例テスト）は
+いずれも未達である。
+
+なお §4 と `compat-api-scope.md` は「3 テスト」と書くが、実数は上記 4 件
+（`…_detects_each_category` を含む）である。文言の修正は承認後の反転時に行う。
+
+### 12.3 本イシューで行わないこと
+
+`crates/facade/**` の変更、保留ガードの撤去・反転、`compat-api-scope.md` §5 への適用記録、
+facade 経由の利用例テストの追加（対象 API が存在しないため）、追跡 Issue の起票・
+#2560 の reopen（ユーザー承認が必要）、依存追加・`unsafe`・tolerance・baseline の変更。
+承認事項の中身は §10.5 を参照する。
+
 ## OWASP Top 10 観点
 
 - **A03 インジェクション／入力検証**: `decay`（有限・`[0, 1]`）・
