@@ -2034,7 +2034,7 @@ pub(crate) fn vjp(
             let input_shape = nodes[input.0].shape.clone();
             let layout =
                 fft::rfft_layout(&input_shape, Some(n), Some(dim)).map_err(AutodiffError::from)?;
-            check_fft_upstream_shape(upstream, &layout.out_shape, "Rfft")?;
+            check_fft_upstream_shape(upstream, layout.out_shape(), "Rfft")?;
             let data = fft::rfft_vjp_host(&upstream.host_slice(), &layout, norm)
                 .map_err(AutodiffError::from)?;
             let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
@@ -2051,7 +2051,7 @@ pub(crate) fn vjp(
             let input_shape = nodes[input.0].shape.clone();
             let layout =
                 fft::irfft_layout(&input_shape, Some(n), Some(dim)).map_err(AutodiffError::from)?;
-            check_fft_upstream_shape(upstream, &layout.out_shape, "Irfft")?;
+            check_fft_upstream_shape(upstream, layout.out_shape(), "Irfft")?;
             let data = fft::irfft_vjp_host(&upstream.host_slice(), &layout, norm)
                 .map_err(AutodiffError::from)?;
             let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;

@@ -121,23 +121,43 @@ impl From<FftError> for BackendError {
 /// 入出力はいずれも連続配置の行優先。`dim` 軸の前を `outer`・後ろ（複素
 /// 軸を除く）を `inner` として 1 レーン = `(outer 添字, inner 添字)` を
 /// 独立に変換する。
+///
+/// フィールドは非公開で、[`rfft_layout`]／[`irfft_layout`] だけが生成する。
+/// `inner`・`outer`・`out_shape` の整合性は生成時の検査で保証され、公開
+/// `*_host` カーネルが外部から改変された値で範囲外アクセスしないようにする
+/// （REQ-8）。参照は下記アクセサ経由で行う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FftLayout {
     /// 解決済みの変換長 `n`（`>= 1`）。
-    pub n: usize,
+    n: usize,
     /// 変換軸（実軸の添字）。
-    pub dim: usize,
+    dim: usize,
     /// `dim` より前の次元の積。
-    pub outer: usize,
+    outer: usize,
     /// `dim` より後ろ（複素軸を除く）の次元の積。
-    pub inner: usize,
+    inner: usize,
     /// 入力の `dim` 軸長（rfft は実長 `L`・irfft は bin 数 `m`）。
-    pub in_len: usize,
+    in_len: usize,
     /// 順変換の出力形状（rfft は複素・irfft は実）。VJP では上流勾配の形状。
-    pub out_shape: Vec<usize>,
+    out_shape: Vec<usize>,
 }
 
 impl FftLayout {
+    /// 解決済みの変換長 `n`（`>= 1`）。
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// 変換軸（実軸の添字）。
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// 順変換の出力形状（rfft は複素・irfft は実）。VJP では上流勾配の形状。
+    pub fn out_shape(&self) -> &[usize] {
+        &self.out_shape
+    }
+
     /// 片側スペクトルの bin 数 `n/2 + 1`。
     pub fn bins(&self) -> usize {
         self.n / 2 + 1
@@ -245,9 +265,13 @@ pub fn irfft_layout(
             "irfft: 変換軸の入力 bin 数は 1 以上である必要がある".into(),
         ));
     }
+    // 省略時の `2*(m-1)` は検査前に乗算するとオーバーフローしうるため
+    // `checked_mul` で求め、超過は型付きエラーで拒否する（REQ-8）。
     let n = match n {
         Some(n) => n,
-        None => 2 * (m - 1),
+        None => (m - 1)
+            .checked_mul(2)
+            .ok_or(FftError::Shape(ShapeError::ElementCountOverflow))?,
     };
     if n == 0 {
         return Err(FftError::InvalidArgument(
@@ -540,6 +564,12 @@ mod tests {
                 assert_eq!((tw.cos[3 * n / 4], tw.sin[3 * n / 4]), (0.0, -1.0), "n={n}");
             }
         }
+    }
+
+    #[test]
+    fn irfft_layout_default_n_overflow_is_typed_error() {
+        let err = irfft_layout(&[usize::MAX, 2], None, None).expect_err("overflow");
+        assert_eq!(err, FftError::Shape(ShapeError::ElementCountOverflow));
     }
 
     #[test]

@@ -3068,7 +3068,7 @@ impl BackendOps for CpuBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         let layout = fandhe_ai_tensor_core::fft::rfft_layout(input.shape(), Some(n), Some(dim))?;
         let data = fandhe_ai_tensor_core::fft::rfft_host(&input.host_slice(), &layout, norm)?;
-        Tensor::new(data, &layout.out_shape).map_err(BackendError::ShapeMismatch)
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::fft_irfft`] の CPU 実装（イシュー
@@ -3082,7 +3082,7 @@ impl BackendOps for CpuBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         let layout = fandhe_ai_tensor_core::fft::irfft_layout(input.shape(), Some(n), Some(dim))?;
         let data = fandhe_ai_tensor_core::fft::irfft_host(&input.host_slice(), &layout, norm)?;
-        Tensor::new(data, &layout.out_shape).map_err(BackendError::ShapeMismatch)
+        Tensor::new(data, layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::var`] の CPU 実装（イシュー

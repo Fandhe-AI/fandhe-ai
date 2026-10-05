@@ -75,7 +75,7 @@ fn materialize_one<'t>(x: &Var<'t>) -> Result<Tensor<f32>, AutodiffError> {
 
 /// ホスト参照カーネルの結果を `Tensor` へ包む。
 fn wrap(data: Vec<f32>, layout: &FftLayout) -> Result<Tensor<f32>, AutodiffError> {
-    Tensor::new(data, &layout.out_shape).map_err(AutodiffError::Shape)
+    Tensor::new(data, layout.out_shape()).map_err(AutodiffError::Shape)
 }
 
 /// 実数 FFT（実入力 `[..., L, ...]` → `Var`（`[..., n/2+1, ..., 2]`））。
@@ -94,9 +94,13 @@ pub fn rfft<'t>(
 ) -> Result<Var<'t>, AutodiffError> {
     let layout = fft::rfft_layout(&x.shape(), n, dim)?;
     let input = materialize_one(x)?;
-    let value = match x.tape().ops().fft_rfft(&input, layout.n, layout.dim, norm) {
+    let value = match x
+        .tape()
+        .ops()
+        .fft_rfft(&input, layout.n(), layout.dim(), norm)
+    {
         Ok(v) => {
-            verify_shape(v.shape(), &layout.out_shape)?;
+            verify_shape(v.shape(), layout.out_shape())?;
             v
         }
         Err(BackendError::Unsupported(_)) => {
@@ -107,8 +111,8 @@ pub fn rfft<'t>(
     let id = x.tape().push_eager(
         Op::Rfft {
             input: x.node_id(),
-            n: layout.n,
-            dim: layout.dim,
+            n: layout.n(),
+            dim: layout.dim(),
             norm,
         },
         value,
@@ -132,9 +136,13 @@ pub fn irfft<'t>(
 ) -> Result<Var<'t>, AutodiffError> {
     let layout = fft::irfft_layout(&x.shape(), n, dim)?;
     let input = materialize_one(x)?;
-    let value = match x.tape().ops().fft_irfft(&input, layout.n, layout.dim, norm) {
+    let value = match x
+        .tape()
+        .ops()
+        .fft_irfft(&input, layout.n(), layout.dim(), norm)
+    {
         Ok(v) => {
-            verify_shape(v.shape(), &layout.out_shape)?;
+            verify_shape(v.shape(), layout.out_shape())?;
             v
         }
         Err(BackendError::Unsupported(_)) => wrap(
@@ -146,8 +154,8 @@ pub fn irfft<'t>(
     let id = x.tape().push_eager(
         Op::Irfft {
             input: x.node_id(),
-            n: layout.n,
-            dim: layout.dim,
+            n: layout.n(),
+            dim: layout.dim(),
             norm,
         },
         value,
