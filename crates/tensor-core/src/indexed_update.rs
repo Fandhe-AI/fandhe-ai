@@ -34,8 +34,8 @@
 //!   実測。`tests/fixtures/indexed-update-pytorch-reference/`）。
 //!
 //! VJP は上流勾配を `f64` で割り戻して各要素 1 回だけ `f32` へ downcast する。
-//! `Prod` は `result / 値` を使わず「寄与のうち 0 の個数と 0 でない寄与の積」から
-//! 排他的積を求める（0 を含む lane でも有限）。`Amax`／`Amin` は結果と等しい寄与の
+//! `Prod` は `result / 値` を使わず各寄与を除いた積を前置積×後置積で直接求める
+//! （0・inf を含む lane でも他寄与の積がそのまま得られ、inf/inf の NaN を生まない）。`Amax`／`Amin` は結果と等しい寄与の
 //! 個数で上流勾配を均等に分ける。
 //!
 //! # 境界検査（REQ-8・OWASP A03）
@@ -373,41 +373,40 @@ pub fn scatter_reduce_vjp_host(
             }
         }
         ScatterReduceMode::Prod => {
-            // 位置ごとに「0 の個数 z」と「0 でない寄与の積 P」を求める。
-            let mut zeros = vec![0usize; n];
-            let mut prod = vec![1.0_f64; n];
-            let mut fold = |q: usize, v: f32| {
-                if v == 0.0 {
-                    zeros[q] += 1;
-                } else {
-                    prod[q] *= f64::from(v);
-                }
-            };
-            for (&q, &v) in pos.iter().zip(src) {
-                fold(q, v);
+            // 位置ごとの寄与列（src は走査順、include_self の自己寄与は末尾）を集め、
+            // 各寄与を除いた積を「前置積 × 後置積」で直接求める。総積を各値で割る方式は
+            // inf 寄与で inf/inf = NaN になるため使わない（0・inf を含む lane でも
+            // 他寄与の積がそのまま得られる）。slot は src の位置 p、自己寄与は usize::MAX。
+            let mut lanes: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+            for (p, (&q, &v)) in pos.iter().zip(src).enumerate() {
+                lanes[q].push((p, f64::from(v)));
             }
             if include_self {
                 for q in 0..n {
                     if cnt[q] > 0 {
-                        fold(q, input[q]);
+                        lanes[q].push((usize::MAX, f64::from(input[q])));
                     }
                 }
             }
-            let excl = |q: usize, v: f32| -> f64 {
-                match zeros[q] {
-                    0 => prod[q] / f64::from(v),
-                    1 if v == 0.0 => prod[q],
-                    _ => 0.0,
+            for (q, lane) in lanes.iter().enumerate() {
+                let k = lane.len();
+                if k == 0 {
+                    continue;
                 }
-            };
-            for (p, &q) in pos.iter().enumerate() {
-                d_src[p] = (g(q) * excl(q, src[p])) as f32;
-            }
-            if include_self {
-                for q in 0..n {
-                    if cnt[q] > 0 {
-                        d_input[q] = (g(q) * excl(q, input[q])) as f32;
+                // suffix[i] = lane[i..] の積。
+                let mut suffix = vec![1.0_f64; k + 1];
+                for i in (0..k).rev() {
+                    suffix[i] = suffix[i + 1] * lane[i].1;
+                }
+                let mut prefix = 1.0_f64;
+                for (i, &(slot, v)) in lane.iter().enumerate() {
+                    let g_excl = (g(q) * (prefix * suffix[i + 1])) as f32;
+                    if slot == usize::MAX {
+                        d_input[q] = g_excl;
+                    } else {
+                        d_src[slot] = g_excl;
                     }
+                    prefix *= v;
                 }
             }
         }
@@ -645,6 +644,24 @@ mod tests {
         )
         .expect("vjp");
         assert_eq!((dx2[0], ds2), (0.0, vec![0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn prod_vjp_does_not_divide_out_infinite_contributions() {
+        // include_self=false・src=[inf, 2]: src[0] の勾配は他寄与の積 2.0（inf/inf の NaN にしない）。
+        let l = lay(&[1], &[2], 0);
+        let (dx, ds) = scatter_reduce_vjp_host(
+            &[7.0],
+            &[0, 0],
+            &[f32::INFINITY, 2.0],
+            &[1.0],
+            &l,
+            ScatterReduceMode::Prod,
+            false,
+        )
+        .expect("vjp");
+        assert_eq!(ds, vec![2.0, f32::INFINITY]);
+        assert_eq!(dx, vec![0.0]);
     }
 
     #[test]

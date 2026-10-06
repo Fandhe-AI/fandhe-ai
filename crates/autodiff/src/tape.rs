@@ -2847,6 +2847,17 @@ impl Tape {
         self.nodes.borrow().len()
     }
 
+    /// ノード数が `len` 以下になるまで末尾を切り詰める（失敗時のロールバック専用）。
+    ///
+    /// `masked_scatter` のように「view 系ノードを積んだ後に失敗し得る処理」を持つ合成演算が、
+    /// `Err` 返却前に自分が積んだノードだけを取り除いて孤児ノードを残さないために使う
+    /// （`len` は合成開始時点の [`Tape::len`]）。他の演算が積んだノードは `len` より前に
+    /// しか存在しない前提（同一スレッド・`Tape` は `!Sync` で合成中に割り込みなし）。
+    /// checkpoint 区間は view 系合成では登録されないため触らない。
+    pub(crate) fn rollback_to(&self, len: usize) {
+        self.nodes.borrow_mut().truncate(len);
+    }
+
     /// テープにノードが 1 つも記録されていないか判定する。
     pub fn is_empty(&self) -> bool {
         self.len() == 0

@@ -267,9 +267,15 @@ pub fn masked_scatter<'t>(
         }
     }
     let flat = Tensor::new(flat, &[m]).map_err(AutodiffError::Shape)?;
-    let x_flat = x.broadcast_to(&out_shape)?.contiguous()?.reshape(&[p])?;
-    let src_flat = source.contiguous()?.reshape(&[s])?.narrow(0, 0, m)?;
-    x_flat.scatter(0, &flat, &src_flat)?.reshape(&out_shape)
+    // ここから先は view 系ノードを積む。途中で失敗しても孤児ノードを残さないよう、
+    // 開始時点のノード数へロールバックして `Err` を返す（契約: エラー時に tape 不変）。
+    let tape_len = x.tape().len();
+    let build = || -> Result<Var<'t>, AutodiffError> {
+        let x_flat = x.broadcast_to(&out_shape)?.contiguous()?.reshape(&[p])?;
+        let src_flat = source.contiguous()?.reshape(&[s])?.narrow(0, 0, m)?;
+        x_flat.scatter(0, &flat, &src_flat)?.reshape(&out_shape)
+    };
+    build().inspect_err(|_| x.tape().rollback_to(tape_len))
 }
 
 #[cfg(test)]
