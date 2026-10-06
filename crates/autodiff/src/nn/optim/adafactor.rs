@@ -62,8 +62,9 @@ pub struct AdafactorConfig {
     pub lr: f32,
     /// 第 2 モーメント減衰指数（`beta2_decay`）。有限かつ `<= 0.0`。
     pub beta2_decay: f32,
-    /// 分母の下限（`eps[0]`）。有限かつ `> 0.0`（0 は `rsqrt(0)` が inf を
-    /// 生むため拒否。PyTorch は `>= 0` を許す）。
+    /// 分母の下限（`eps[0]`）。有限かつ `eps1^2 >= f32::MIN_POSITIVE`
+    /// （約 `1.1e-19` 以上。0・極小値は `rsqrt(0)` が inf を生みゼロ勾配で
+    /// NaN になるため拒否。PyTorch は `>= 0` を許す）。
     pub eps1: f32,
     /// パラメータ RMS の下限（`eps[1]`）。有限かつ `>= 0.0`。
     pub eps2: f32,
@@ -139,15 +140,21 @@ fn lerp(start: f32, end: f32, weight: f32) -> f32 {
     }
 }
 
-/// 要素を先に `f64` へ昇格してから二乗し index 順に蓄積、`f64` で `sqrt`、
-/// 1 回だけ `f32` へ downcast した L2 ノルム。
-fn norm2(values: impl Iterator<Item = f32>) -> f32 {
+/// 要素を先に `f64` へ昇格してから二乗し index 順に蓄積、`f64` で `sqrt`
+/// した L2 ノルム（`f64` のまま返す）。RMS 等の除算まで `f64` で行う呼び出し
+/// 側向け（`[f32::MAX, f32::MAX]` でも `f32` へ落とす前なので inf にならない）。
+fn norm2_f64(values: impl Iterator<Item = f32>) -> f64 {
     let mut acc = 0.0f64;
     for v in values {
         let v = v as f64;
         acc = v.mul_add(v, acc);
     }
-    acc.sqrt() as f32
+    acc.sqrt()
+}
+
+/// [`norm2_f64`] を 1 回だけ `f32` へ downcast した L2 ノルム。
+fn norm2(values: impl Iterator<Item = f32>) -> f32 {
+    norm2_f64(values) as f32
 }
 
 fn validate_hyperparameters(who: &str, c: &AdafactorConfig) -> Result<(), AutodiffError> {
@@ -162,8 +169,17 @@ fn validate_hyperparameters(who: &str, c: &AdafactorConfig) -> Result<(), Autodi
     if !(c.beta2_decay.is_finite() && c.beta2_decay <= 0.0) {
         return bad("beta2_decay", "finite and <= 0.0", c.beta2_decay);
     }
-    if !(c.eps1.is_finite() && c.eps1 > 0.0) {
-        return bad("eps1", "finite and > 0.0", c.eps1);
+    // `eps1^2` を `f32` へ変換した値が 0 や非正規数へ潰れると、ゼロ勾配で
+    // `rsqrt(0) * 0 = NaN` になる。`eps1^2 >= f32::MIN_POSITIVE` を要求する。
+    if !(c.eps1.is_finite()
+        && c.eps1 > 0.0
+        && ((c.eps1 as f64 * c.eps1 as f64) as f32) >= f32::MIN_POSITIVE)
+    {
+        return bad(
+            "eps1",
+            "finite and > 0.0 with eps1^2 >= f32::MIN_POSITIVE (about 1.1e-19)",
+            c.eps1,
+        );
     }
     if !(c.eps2.is_finite() && c.eps2 >= 0.0) {
         return bad("eps2", "finite and >= 0.0", c.eps2);
@@ -318,7 +334,7 @@ impl Adafactor {
             let sqrt_numel = (numel as f64).sqrt();
 
             // `alpha` は weight decay より前の param の RMS から求める。
-            let rms_p = norm2(param_data.iter().copied()) as f64 / sqrt_numel;
+            let rms_p = norm2_f64(param_data.iter().copied()) / sqrt_numel;
             let alpha = py_max(cfg.eps2 as f64, rms_p) * rho;
 
             let mut new_param: Vec<f32> = param_data.to_vec();
@@ -379,7 +395,7 @@ impl Adafactor {
                 }
             }
 
-            let norm_u = norm2(update.iter().copied()) as f64;
+            let norm_u = norm2_f64(update.iter().copied());
             let denom = py_max(1.0, norm_u / (sqrt_numel * cfg.d as f64));
             let coef = (-alpha / denom) as f32;
             for i in 0..numel {
@@ -441,6 +457,7 @@ mod tests {
             },
             AdafactorConfig { eps1: 0.0, ..d },
             AdafactorConfig { eps1: -1.0, ..d },
+            AdafactorConfig { eps1: 1e-30, ..d },
             AdafactorConfig {
                 eps1: f32::INFINITY,
                 ..d
@@ -705,6 +722,36 @@ mod tests {
             SlotMoments::Full { .. } => panic!("rank 3 は Factored のはず"),
         }
         let _ = (p3, pa_t, pb_t);
+    }
+
+    /// `[f32::MAX, f32::MAX]` の param でも RMS が inf にならず（`f64` のまま
+    /// 除算してから使う）、結果が有限になる。
+    #[test]
+    fn huge_param_rms_stays_finite() {
+        let mut opt = Adafactor::new(AdafactorConfig::default()).unwrap();
+        let p = t(vec![f32::MAX, f32::MAX], &[2]);
+        let g = t(vec![1.0, 1.0], &[2]);
+        let out = opt.step(&[(&p, &g)]).unwrap();
+        assert!(vals(&out[0]).iter().all(|x| x.is_finite()));
+    }
+
+    /// 受理される最小級の `eps1` でもゼロ勾配で NaN にならない。
+    #[test]
+    fn tiny_accepted_eps1_zero_grad_is_not_nan() {
+        let cfg = AdafactorConfig {
+            eps1: 1.2e-19,
+            ..AdafactorConfig::default()
+        };
+        let mut opt = Adafactor::new(cfg).unwrap();
+        let p = t(vec![1.0, 2.0], &[2]);
+        let g = t(vec![0.0, 0.0], &[2]);
+        let out = opt.step(&[(&p, &g)]).unwrap();
+        assert!(vals(&out[0]).iter().all(|x| x.is_finite()));
+        let mut opt2 = Adafactor::new(cfg).unwrap();
+        let p2 = t(vec![1.0; 6], &[2, 3]);
+        let g2 = t(vec![0.0; 6], &[2, 3]);
+        let out2 = opt2.step(&[(&p2, &g2)]).unwrap();
+        assert!(vals(&out2[0]).iter().all(|x| x.is_finite()));
     }
 
     /// `eps2` が RMS より大きいとき、ゼロ初期化 param も動く。
