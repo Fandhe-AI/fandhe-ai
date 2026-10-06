@@ -6749,6 +6749,146 @@ struct PackedSequenceHoldDoctestGuard;
 #[allow(dead_code)]
 struct SoftminThresholdOpsHoldDoctestGuard;
 
+/// pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL（イシュー #2652・親 #2651）を
+/// facade 公開面から締め出す保留ガード（`SoftminThresholdOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `elementwise_loss_ops`・
+/// 型 `BceWithLogitsOptions`／`GaussianNllOptions` と、プローブ用トレイトのメソッド（`Var`／`Tape`／`Tensor<f32>` の
+/// `bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss`）を置き、
+/// モジュール経由の関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型を glob 可能な
+/// 位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
+/// 不一致でエラーコードに依存せずコンパイルが失敗する。検出範囲は列挙したこれらの名前・型に限り、マクロ生成や
+/// 別名経由のメソッドまでは保証しない。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::elementwise_loss_ops`）。保留対象は facade 公開面のみで、
+/// 公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
+/// `docs/autodiff-elementwise-loss-ops-decision.md` §7。同記録は推奨案の記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::elementwise_loss_ops_hold_doctest_globs_all_pub_modules`・
+/// `elementwise_loss_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_elementwise_loss_ops`・
+/// `workspace_declares_elementwise_loss_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_elementwise_loss_ops_hold_probe {
+///     pub struct BceWithLogitsOptions;
+///     pub struct GaussianNllOptions;
+///     pub mod elementwise_loss_ops {
+///         pub fn bce_with_logits_loss_with() {}
+///         pub fn hinge_embedding_loss() {}
+///         pub fn soft_margin_loss() {}
+///         pub fn gaussian_nll_loss() {}
+///     }
+/// }
+/// use __fandhe_elementwise_loss_ops_hold_probe::*;
+///
+/// struct __FandheElementwiseLossOpsHoldMarker;
+///
+/// trait __FandheElementwiseLossOpsHoldProbe {
+///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker;
+///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;
+///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;
+///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheElementwiseLossOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheElementwiseLossOpsHoldProbe for fandhe_ai::Tape {
+///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheElementwiseLossOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(
+///     _0: BceWithLogitsOptions,
+///     _1: GaussianNllOptions,
+/// ) {
+///     // モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開していれば、
+///     // 名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     elementwise_loss_ops::bce_with_logits_loss_with();
+///     elementwise_loss_ops::hinge_embedding_loss();
+///     elementwise_loss_ops::soft_margin_loss();
+///     elementwise_loss_ops::gaussian_nll_loss();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::bce_with_logits_loss_with(v);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::hinge_embedding_loss(v);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::soft_margin_loss(v);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::gaussian_nll_loss(v);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::bce_with_logits_loss_with(tape);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::hinge_embedding_loss(tape);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::soft_margin_loss(tape);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::gaussian_nll_loss(tape);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::bce_with_logits_loss_with(tf);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::hinge_embedding_loss(tf);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::soft_margin_loss(tf);
+///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::gaussian_nll_loss(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct ElementwiseLossOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
