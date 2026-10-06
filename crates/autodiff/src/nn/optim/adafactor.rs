@@ -98,7 +98,8 @@ enum SlotMoments {
         col_var: Vec<f64>,
     },
     /// rank 0・1: 要素ごとの `variance`。
-    Full { variance: Vec<f32> },
+    /// 因子分解経路と同じ理由（二乗量の overflow 回避）で `f64` 保持。
+    Full { variance: Vec<f64> },
 }
 
 struct SlotState {
@@ -123,7 +124,7 @@ fn py_max(a: f64, b: f64) -> f64 {
 
 /// torch の `clamp_min`: NaN は伝播する（`f32::max` は NaN を捨てるため
 /// 使えない）。
-fn clamp_min_nan(x: f32, lo: f32) -> f32 {
+fn clamp_min_nan(x: f64, lo: f64) -> f64 {
     if x.is_nan() {
         x
     } else if x < lo {
@@ -133,16 +134,8 @@ fn clamp_min_nan(x: f32, lo: f32) -> f32 {
     }
 }
 
-/// `lerp_(start, end, weight)`。`adamax.rs`／`rmsprop.rs` と同じ 2 分岐形。
-fn lerp(start: f32, end: f32, weight: f32) -> f32 {
-    if weight.abs() < 0.5 {
-        start + weight * (end - start)
-    } else {
-        end - (end - start) * (1.0 - weight)
-    }
-}
-
-/// `lerp` の `f64` 版（因子分解経路の `row_var`／`col_var` 用）。
+/// `lerp_(start, end, weight)`（`row_var`／`col_var`／`variance` 用。
+/// `adamax.rs`／`rmsprop.rs` と同じ 2 分岐形を `f64` で行う）。
 fn lerp64(start: f64, end: f64, weight: f64) -> f64 {
     if weight.abs() < 0.5 {
         start + weight * (end - start)
@@ -312,7 +305,7 @@ impl Adafactor {
                         }
                     } else {
                         SlotMoments::Full {
-                            variance: vec![0.0f32; param.numel()],
+                            variance: vec![0.0f64; param.numel()],
                         }
                     };
                     SlotState { shape, moments }
@@ -403,10 +396,12 @@ impl Adafactor {
                 }
                 SlotMoments::Full { variance } => {
                     for i in 0..numel {
-                        let g = grad_data[i];
-                        variance[i] = lerp(variance[i], g * g, w);
-                        let v = clamp_min_nan(variance[i], eps1_sq);
-                        update[i] = 1.0 / v.sqrt() * g;
+                        // 二乗前に `f64` へ昇格し（`g = f32::MAX` でも inf にしない）、
+                        // 分散・正規化とも `f64` のまま行い最終の 1 回だけ `f32` へ落とす。
+                        let g = grad_data[i] as f64;
+                        variance[i] = lerp64(variance[i], g * g, w as f64);
+                        let v = clamp_min_nan(variance[i], eps1_sq as f64);
+                        update[i] = (1.0 / v.sqrt() * g) as f32;
                     }
                 }
             }
@@ -460,12 +455,26 @@ mod tests {
     }
 
     #[test]
+    fn full_path_finite_for_f32_max_gradients() {
+        // rank 1（非因子分解）でも g*g を f64 で扱うため f32::MAX で更新が潰れない。
+        let mut opt = Adafactor::new(AdafactorConfig::default()).unwrap();
+        let p = t(vec![1.0; 3], &[3]);
+        let g = t(vec![f32::MAX; 3], &[3]);
+        let out = opt.step(&[(&p, &g)]).unwrap();
+        let v = vals(&out[0]);
+        assert!(v.iter().all(|x| x.is_finite()), "{v:?}");
+        assert!(v.iter().all(|x| *x != 1.0), "更新が失われた: {v:?}");
+        let out2 = opt.step(&[(&out[0], &g)]).unwrap();
+        assert!(vals(&out2[0]).iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
     fn py_max_and_clamp_min_nan_semantics() {
         assert_eq!(py_max(1.0, 2.0), 2.0);
         assert_eq!(py_max(1.0, 0.5), 1.0);
         // Python の max は NaN を第 1 引数側へ倒す。
         assert_eq!(py_max(1.0, f64::NAN), 1.0);
-        assert!(clamp_min_nan(f32::NAN, 1.0).is_nan());
+        assert!(clamp_min_nan(f64::NAN, 1.0).is_nan());
         assert_eq!(clamp_min_nan(0.5, 1.0), 1.0);
         assert_eq!(clamp_min_nan(2.0, 1.0), 2.0);
     }
