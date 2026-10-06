@@ -2024,3 +2024,9 @@ facade 公開面は追加していない（保留ガード `ActivationScalarOpsH
 facade 公開面は追加していない（保留ガード `SoftminThresholdOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var::softmin` 等の委譲メソッドと `compat::Sequential::add_softmin` 等）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-softmin-threshold-ops-decision.md`。
+
+**適用記録（イシュー #2652・親 #2651・ルート #2499 Phase 4。pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL）**:
+`bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss` を内部クレート限定（`fandhe_ai_autodiff::elementwise_loss_ops`。新規 `Op` 4 種とホスト参照実装）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `ElementwiseLossOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var` の委譲メソッド 4 本）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-elementwise-loss-ops-decision.md`。

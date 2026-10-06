@@ -372,7 +372,7 @@ impl CrossEntropyOptions {
 /// （`bool_ops::materialize_pair` と同じ「`nodes` の `RefCell` 借用を
 /// このブロック内に閉じ込め、返す前に解放する」パターン。
 /// `bool_ops::materialize_pair` は非公開関数のためここで複製する）。
-fn materialize_pair<'t>(
+pub(crate) fn materialize_pair<'t>(
     a: &Var<'t>,
     b: &Var<'t>,
 ) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
@@ -519,7 +519,7 @@ type TripleTensors = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
 
 /// `a`／`b`／`c` を層 1 で実体化した `Tensor<f32>` の組を返す
 /// （[`materialize_pair`] の 3 入力版。`triplet_margin_loss` 用）。
-fn materialize_triple<'t>(
+pub(crate) fn materialize_triple<'t>(
     a: &Var<'t>,
     b: &Var<'t>,
     c: &Var<'t>,
@@ -537,7 +537,7 @@ fn materialize_triple<'t>(
 /// `AutodiffError::InvalidArgument`。PyTorch は任意の `y` を許容するが
 /// 本実装はより厳しい制約を課す——モジュール doc「PyTorch との差分」
 /// 参照）。
-fn check_pm_one_labels(y: &Tensor<f32>, fn_name: &str) -> Result<(), AutodiffError> {
+pub(crate) fn check_pm_one_labels(y: &Tensor<f32>, fn_name: &str) -> Result<(), AutodiffError> {
     for v in eval::dense_vec(y) {
         if v != 1.0 && v != -1.0 {
             return Err(AutodiffError::InvalidArgument(format!(

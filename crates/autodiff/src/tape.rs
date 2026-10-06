@@ -400,6 +400,37 @@ pub(crate) enum Op {
         options: crate::loss_ops::PoissonNllOptions,
         reduction: crate::var::Reduction,
     },
+    /// pos_weight 付き BCEWithLogits 損失（イシュー #2652）。`input`（logits）・`target` の
+    /// 両方が追跡対象。`pos_weight` は `input` と同 shape へ展開済みの非追跡データ。
+    /// `Op::PoissonNllLoss` と同型の融合対象外・常に実体化済み。
+    BceWithLogitsPosWeightLoss {
+        input: NodeId,
+        target: NodeId,
+        pos_weight: Tensor<f32>,
+        reduction: crate::var::Reduction,
+    },
+    /// HingeEmbedding 損失（イシュー #2652）。`y`（厳密に ±1）は非追跡。
+    HingeEmbeddingLoss {
+        input: NodeId,
+        y: Tensor<f32>,
+        margin: f32,
+        reduction: crate::var::Reduction,
+    },
+    /// SoftMargin 損失（イシュー #2652）。`y`（厳密に ±1）は非追跡。
+    SoftMarginLoss {
+        input: NodeId,
+        y: Tensor<f32>,
+        reduction: crate::var::Reduction,
+    },
+    /// GaussianNLL 損失（イシュー #2652）。`input`・`target`・`var` の 3 入力すべてが
+    /// 追跡対象（`var < eps` でも `dvar` を通す。`crate::elementwise_loss_ops` doc 参照）。
+    GaussianNllLoss {
+        input: NodeId,
+        target: NodeId,
+        var: NodeId,
+        options: crate::elementwise_loss_ops::GaussianNllOptions,
+        reduction: crate::var::Reduction,
+    },
     /// CTC（Connectionist Temporal Classification）損失。PyTorch
     /// `nn.CTCLoss` 相当（イシュー #2168・親イシュー #2131）。
     /// `L1Loss`／`PoissonNllLoss` と同型の融合対象外パターンで常に
@@ -1793,6 +1824,8 @@ impl Op {
             // `MarginRankingLoss`／`TripletMarginLoss`／
             // `PoissonNllLoss`（イシュー #2167。同型の理由で非適格）／
             // `CtcLoss`（イシュー #2168。同型の理由で非適格）／
+            // `BceWithLogitsPosWeightLoss`／`HingeEmbeddingLoss`／`SoftMarginLoss`／
+            // `GaussianNllLoss`（イシュー #2652。同型の理由で非適格）／
             // `RnnCell`／
             // `Inv`／`Solve`／`Det`／`Cholesky`／`MatrixNorm`／
             // `Softmax`／`LogSoftmax`／
@@ -1815,6 +1848,10 @@ impl Op {
             | Op::MarginRankingLoss { .. }
             | Op::TripletMarginLoss { .. }
             | Op::PoissonNllLoss { .. }
+            | Op::BceWithLogitsPosWeightLoss { .. }
+            | Op::HingeEmbeddingLoss { .. }
+            | Op::SoftMarginLoss { .. }
+            | Op::GaussianNllLoss { .. }
             | Op::CtcLoss { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
@@ -2103,9 +2140,18 @@ impl Op {
                 f(*negative);
             }
             Op::CtcLoss { log_probs, .. } => f(*log_probs),
-            Op::PoissonNllLoss { input, target, .. } => {
+            Op::PoissonNllLoss { input, target, .. }
+            | Op::BceWithLogitsPosWeightLoss { input, target, .. } => {
                 f(*input);
                 f(*target);
+            }
+            Op::HingeEmbeddingLoss { input, .. } | Op::SoftMarginLoss { input, .. } => f(*input),
+            Op::GaussianNllLoss {
+                input, target, var, ..
+            } => {
+                f(*input);
+                f(*target);
+                f(*var);
             }
             Op::Where { a, b, .. } => {
                 f(*a);
@@ -2380,6 +2426,10 @@ impl Op {
             | Op::MarginRankingLoss { .. }
             | Op::TripletMarginLoss { .. }
             | Op::PoissonNllLoss { .. }
+            | Op::BceWithLogitsPosWeightLoss { .. }
+            | Op::HingeEmbeddingLoss { .. }
+            | Op::SoftMarginLoss { .. }
+            | Op::GaussianNllLoss { .. }
             | Op::CtcLoss { .. }
             | Op::NllLoss { .. }
             | Op::KlDivLoss { .. }

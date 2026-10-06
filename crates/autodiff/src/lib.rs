@@ -305,6 +305,11 @@ pub mod shape_view_ops;
 // `rrelu_with_noise`。イシュー #2650）。既存 Op の合成のみ。facade への公開は保留（承認依頼
 // #2677・公開 #2678・層化 #2679。`docs/autodiff-softmin-threshold-ops-decision.md`）。
 pub mod softmin_threshold_ops;
+// pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL（`bce_with_logits_loss_with`・
+// `hinge_embedding_loss`・`soft_margin_loss`・`gaussian_nll_loss`。イシュー #2652）。新規 Op 4 種 +
+// ホスト参照実装。facade への公開は保留（承認依頼 #2677・公開 #2678。
+// `docs/autodiff-elementwise-loss-ops-decision.md`）。
+pub mod elementwise_loss_ops;
 pub mod stat_reduce_ops;
 mod tape;
 #[cfg(test)]
