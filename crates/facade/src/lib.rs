@@ -6021,6 +6021,138 @@ struct Pool3dOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 
+/// Fold と Unfold（`fold`・`unfold`。`F.fold`／`F.unfold`・`nn.Fold`／`nn.Unfold` 相当。イシュー #2645・
+/// 親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// （`ConvTranspose3dMaxUnpoolHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `fold_ops`／`fold`・
+/// 型 `Fold`／`Unfold`・メソッド `fold`／`unfold`（`Var`／`Tape`／`Tensor<f32>`）と
+/// `add_fold`／`add_unfold`（`compat::Sequential`）を持つプローブ用トレイトを置き、修飾なしの関数呼び出しと
+/// 修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、
+/// これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、
+/// `tensor-core` 側への同名メソッド追加も検出する）。検出範囲はこれらの名前・型に限り、マクロ生成や別名経由の
+/// メソッドまでは保証しない。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::fold_ops`・`fandhe_ai_tensor_core::fold`）。
+/// 保留対象は facade 公開面（`Var::fold`／`Var::unfold` の委譲メソッド）のみで、公開形は未承認
+/// （承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は `docs/autodiff-fold-unfold-decision.md` §7。
+/// 同記録は推奨案の記録であり承認記録ではない）。層化（`compat::Sequential::add_fold`／`add_unfold`）も同じ
+/// 保留に含める（#2679 の層結線がもう一方の漏出経路のため）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::fold_unfold_hold_doctest_globs_all_pub_modules`・
+/// `fold_unfold_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_fold_unfold`・
+/// `workspace_declares_fold_unfold_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_fold_unfold_hold_probe {
+///     pub struct Fold;
+///     pub struct Unfold;
+///     pub mod fold_ops {
+///         pub fn fold() {}
+///         pub fn unfold() {}
+///     }
+///     pub mod fold {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_fold_unfold_hold_probe::*;
+///
+/// struct __FandheFoldUnfoldHoldMarker;
+///
+/// trait __FandheFoldUnfoldHoldProbe {
+///     fn fold(&self) -> __FandheFoldUnfoldHoldMarker;
+///     fn unfold(&self) -> __FandheFoldUnfoldHoldMarker;
+/// }
+///
+/// impl<'t> __FandheFoldUnfoldHoldProbe for fandhe_ai::Var<'t> {
+///     fn fold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+///     fn unfold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+/// }
+///
+/// impl __FandheFoldUnfoldHoldProbe for fandhe_ai::Tape {
+///     fn fold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+///     fn unfold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+/// }
+///
+/// impl __FandheFoldUnfoldHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn fold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+///     fn unfold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+/// }
+///
+/// trait __FandheFoldUnfoldHoldSequentialProbe {
+///     fn add_fold(&self) -> __FandheFoldUnfoldHoldMarker;
+///     fn add_unfold(&self) -> __FandheFoldUnfoldHoldMarker;
+/// }
+///
+/// impl __FandheFoldUnfoldHoldSequentialProbe for fandhe_ai::compat::Sequential {
+///     fn add_fold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+///     fn add_unfold(&self) -> __FandheFoldUnfoldHoldMarker {
+///         __FandheFoldUnfoldHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: Fold, _: Unfold) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり
+///     // E0659 でコンパイル失敗する）。
+///     fold_ops::fold();
+///     fold_ops::unfold();
+///     fold::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     seq: &fandhe_ai::compat::Sequential,
+/// ) {
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Var::fold(v);
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Var::unfold(v);
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::fold(tape);
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::unfold(tape);
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::fold(tf);
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::unfold(tf);
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::compat::Sequential::add_fold(seq);
+///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::compat::Sequential::add_unfold(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct FoldUnfoldHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

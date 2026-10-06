@@ -3287,6 +3287,61 @@ pub(crate) fn vjp(
             };
             vec![(input, d_input)]
         }
+        // `fold_ops::unfold`（イシュー #2645）。forward は `im2col`（`groups = 1`）なので、その随伴
+        // `col2im` が d_input（重なる窓は `f64` アキュムレータで加算）。shape 契約違反は panic ではなく
+        // 型付きエラーで拒否する。空（`N = 0` 等）はバックエンドを呼ばずゼロ勾配。
+        Op::Unfold { input, params } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let upstream_c = upstream.contiguous();
+            let expected = fandhe_ai_tensor_core::fold::unfold_out_shape(&input_shape, &params)
+                .map_err(|e| {
+                    AutodiffError::Backward(format!(
+                        "Op::Unfold の VJP: input {input_shape:?} が params と整合しない（{e:?}。契約違反）"
+                    ))
+                })?;
+            if upstream_c.shape() != expected.as_slice() {
+                return Err(AutodiffError::Backward(format!(
+                    "Op::Unfold の VJP: upstream {:?} が期待 shape {expected:?} と一致しない（契約違反）",
+                    upstream_c.shape()
+                )));
+            }
+            let d_input = if input_shape.iter().product::<usize>() == 0 || expected.contains(&0) {
+                Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?
+            } else {
+                let d_col = upstream_c
+                    .reshape(&[expected[0], 1, expected[1], expected[2]])
+                    .map_err(AutodiffError::Shape)?;
+                col2im_with_fallback(ops, &d_col, &input_shape, &params)?
+            };
+            vec![(input, d_input)]
+        }
+        // `fold_ops::fold`（イシュー #2645）。forward は `col2im`（`groups = 1`）なので、その随伴
+        // `im2col`（純コピー）が d_input。`output_size` は保持せず `upstream.shape()` から導出する。
+        Op::Fold { input, params } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let upstream_c = upstream.contiguous();
+            let out_shape = upstream_c.shape().to_vec();
+            let expected = fandhe_ai_tensor_core::fold::unfold_out_shape(&out_shape, &params)
+                .map_err(|e| {
+                    AutodiffError::Backward(format!(
+                        "Op::Fold の VJP: upstream {out_shape:?} が params と整合しない（{e:?}。契約違反）"
+                    ))
+                })?;
+            if input_shape != expected {
+                return Err(AutodiffError::Backward(format!(
+                    "Op::Fold の VJP: input {input_shape:?} が upstream から導出した {expected:?} と一致しない（契約違反）"
+                )));
+            }
+            let d_input = if expected.contains(&0) || out_shape.contains(&0) {
+                Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?
+            } else {
+                let col_shape = [expected[0], 1, expected[1], expected[2]];
+                im2col_with_fallback(ops, &upstream_c, &params, &col_shape)?
+                    .reshape(&input_shape)
+                    .map_err(AutodiffError::Shape)?
+            };
+            vec![(input, d_input)]
+        }
         // `pool3d_ops::avg_pool3d`（イシュー #2643）。ホスト側のみの VJP。レイアウトを
         // 再構築し共有カーネル `avg_pool3d_vjp_host` へ委譲する（`f64` アキュムレータ・1 回 downcast）。
         Op::AvgPool3d {

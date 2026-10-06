@@ -178,6 +178,7 @@ mod dispatch_failure;
 mod element;
 mod error;
 pub mod fft;
+pub mod fold;
 mod fusion;
 pub mod indexed_update;
 pub mod interpolate;
