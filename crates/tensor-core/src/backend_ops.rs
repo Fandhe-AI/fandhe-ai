@@ -2463,6 +2463,41 @@ pub trait BackendOps {
         ))
     }
 
+    /// 3D max pooling（値と索引。`torch.nn.functional.max_pool3d(..., return_indices=True)`
+    /// 相当。NCDHW 固定。イシュー #2643・`docs/autodiff-pool3d-ops-decision.md`）。
+    /// 出力は `([N,C,Dout,Hout,Wout] の値, 同 shape の `i32` 索引)`。索引は `(n, c)` 平面内
+    /// flat 添字 `d·H·W + h·W + w`、タイ先勝ち・NaN 伝播（規則の正は [`crate::pool3d`]）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::scan_cummax`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::pool3d_ops::max_pool3d` は `Unsupported` のときだけホスト参照実装
+    /// [`crate::pool3d::max_pool3d_host`] へフォールバックし、それ以外のエラーは伝播する。
+    /// 実装側も [`crate::pool3d::pool3d_layout`] で形状・パラメータを再検査する（fail-closed）。
+    fn pool3d_max(
+        &self,
+        _input: &Tensor<f32>,
+        _params: &crate::pool3d::Pool3dParams,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "pool3d_max: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// 3D average pooling（`torch.nn.functional.avg_pool3d` 相当。`ceil_mode = false`・
+    /// `divisor_override = None`。イシュー #2643）。契約は [`Self::pool3d_max`] と同じ
+    /// （フォールバック先は [`crate::pool3d::avg_pool3d_host`]）。`params.dilation()` は
+    /// `[1, 1, 1]` でなければならない（実装側が `InvalidArgument` で拒否する）。
+    fn pool3d_avg(
+        &self,
+        _input: &Tensor<f32>,
+        _params: &crate::pool3d::Pool3dParams,
+        _count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "pool3d_avg: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// 非定数モード（reflect／replicate／circular）の `pad`（`F.pad` の `mode`
     /// 相当。イシュー #2642・`docs/autodiff-pad-modes-decision.md`）。`pads` は
     /// 先頭軸から順の `(before, after)`（既存 [`Self::pad`] と同じ並び）。出力 shape は
@@ -5912,6 +5947,23 @@ mod tests {
         ));
         assert!(matches!(
             ops.scan_logcumsumexp(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
+
+    /// [`BackendOps::pool3d_max`]／`pool3d_avg` の既定実装が fail-safe を返し panic しない
+    /// ことの確認（イシュー #2643）。
+    #[test]
+    fn pool3d_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![0.0; 8], &[1, 1, 2, 2, 2]).unwrap();
+        let p = crate::pool3d::Pool3dParams::new([2, 2, 2], None, [0; 3], [1; 3]).unwrap();
+        assert!(matches!(
+            ops.pool3d_max(&x, &p),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.pool3d_avg(&x, &p, true),
             Err(BackendError::Unsupported(_))
         ));
     }

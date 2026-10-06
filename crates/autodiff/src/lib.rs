@@ -272,6 +272,9 @@ pub mod nn;
 pub mod nonfinite_ops;
 pub mod optim;
 pub mod pad_ops;
+// 3D プーリング 2 演算（`max_pool3d`・`avg_pool3d`。イシュー #2643）。facade への公開は保留
+// （承認依頼 #2677・公開 #2678。`docs/autodiff-pool3d-ops-decision.md`）。
+pub mod pool3d_ops;
 pub mod rearrange_ops;
 mod reduce_dims;
 pub mod reduce_ops;

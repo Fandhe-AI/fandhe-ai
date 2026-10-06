@@ -5696,6 +5696,144 @@ struct TensorProductOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct PadModesHoldDoctestGuard;
 
+/// 3D プーリング（`max_pool3d`・`avg_pool3d`。イシュー #2643・親 #2625・ルート #2499
+/// Phase 4）を facade 公開面から締め出す保留ガード（`PadModesHoldDoctestGuard` と同型の
+/// 正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `pool3d_ops`／`pool3d`・型 `Pool3dParams`／`MaxPool3d`／`AvgPool3d`・メソッド
+/// `max_pool3d`／`avg_pool3d`（`Var`／`Tape`／`Tensor<f32>`）と
+/// `add_max_pool3d`／`add_avg_pool3d`（`compat::Sequential`）を持つプローブ用トレイトを
+/// 置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名の
+/// モジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の inherent
+/// メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
+/// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::pool3d_ops`・
+/// `fandhe_ai_tensor_core::pool3d`・`BackendOps::pool3d_max`／`pool3d_avg`）。保留対象は
+/// facade 公開面（`Var::max_pool3d`／`avg_pool3d` の委譲メソッド）のみで、公開形は
+/// 未承認（承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
+/// `docs/autodiff-pool3d-ops-decision.md` §7。同記録は推奨案の記録であり承認記録では
+/// ない）。層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`）も同じ保留に
+/// 含める（#2679 の層結線がもう一方の漏出経路のため）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// pool3d_ops_hold_doctest_globs_all_pub_modules`・
+/// `pool3d_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_pool3d_ops`・
+/// `workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_pool3d_hold_probe {
+///     pub struct Pool3dParams;
+///     pub struct MaxPool3d;
+///     pub struct AvgPool3d;
+///     pub mod pool3d_ops {
+///         pub fn max_pool3d() {}
+///         pub fn avg_pool3d() {}
+///     }
+///     pub mod pool3d {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_pool3d_hold_probe::*;
+///
+/// struct __FandhePool3dHoldMarker;
+///
+/// trait __FandhePool3dHoldProbe {
+///     fn max_pool3d(&self) -> __FandhePool3dHoldMarker;
+///     fn avg_pool3d(&self) -> __FandhePool3dHoldMarker;
+/// }
+///
+/// impl<'t> __FandhePool3dHoldProbe for fandhe_ai::Var<'t> {
+///     fn max_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+///     fn avg_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePool3dHoldProbe for fandhe_ai::Tape {
+///     fn max_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+///     fn avg_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePool3dHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn max_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+///     fn avg_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+/// }
+///
+/// trait __FandhePool3dHoldSequentialProbe {
+///     fn add_max_pool3d(&self) -> __FandhePool3dHoldMarker;
+///     fn add_avg_pool3d(&self) -> __FandhePool3dHoldMarker;
+/// }
+///
+/// impl __FandhePool3dHoldSequentialProbe for fandhe_ai::compat::Sequential {
+///     fn add_max_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+///     fn add_avg_pool3d(&self) -> __FandhePool3dHoldMarker {
+///         __FandhePool3dHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: Pool3dParams, _: MaxPool3d, _: AvgPool3d) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     pool3d_ops::max_pool3d();
+///     pool3d_ops::avg_pool3d();
+///     pool3d::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     seq: &fandhe_ai::compat::Sequential,
+/// ) {
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::Var::max_pool3d(v);
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::Var::avg_pool3d(v);
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::max_pool3d(tape);
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::avg_pool3d(tape);
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::max_pool3d(tf);
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::avg_pool3d(tf);
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::compat::Sequential::add_max_pool3d(seq);
+///     let _: __FandhePool3dHoldMarker = fandhe_ai::compat::Sequential::add_avg_pool3d(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct Pool3dOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

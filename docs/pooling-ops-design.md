@@ -395,7 +395,7 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
   **AdaptiveMaxPool2d／AdaptiveMaxPool1d／GlobalPool はイシュー #2160
   で実装済み**（§17 参照。内部クレート限定・facade 公開は承認待ち。
   MaxUnpool はスコープ外のまま）
-- 3d 版（`MaxPool3d` 等）
+- ~~3d 版（`MaxPool3d` 等）~~ **`max_pool3d`／`avg_pool3d` はイシュー #2643 で内部実装済み**（`docs/autodiff-pool3d-ops-decision.md`。内部クレート限定・facade 公開は承認待ち。層化〈`nn::MaxPool3d` 等〉は #2679。AdaptiveAvgPool3d／AdaptiveMaxPool3d はスコープ外のまま）
 - channels_last レイアウト
 - `ceil_mode = true`
 - `divisor_override`

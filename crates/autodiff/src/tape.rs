@@ -1209,6 +1209,23 @@ pub(crate) enum Op {
     /// `nanmean`（イシュー #2637）。VJP は `stat_reduce::nan_reduce_vjp_host`
     /// （`mean = true`）。分類は [`Op::OrderSelect`] と同じ。
     Nanmean { input: NodeId, dim: Option<usize> },
+    /// 3D max pooling（`torch.nn.functional.max_pool3d` 相当。NCDHW 固定。イシュー #2643・
+    /// `docs/autodiff-pool3d-ops-decision.md`）。`crate::pool3d_ops::max_pool3d` からのみ積まれ、
+    /// facade には公開しない。`index` は forward が確定した勝者索引（`(n, c)` 平面内 flat 添字
+    /// `d·H·W + h·W + w`。非追跡データ。`Op::MaxPool2d` と同じ payload）。`params` は VJP に
+    /// 不要のため保持しない。**`Op::MaxPool2d` は VJP が rank 4 固定のため再利用しない**。
+    /// VJP（`grad.rs`）は `Op::MaxPool2d` の rank 5 版（`[N·C, D·H·W]` へ reshape して
+    /// `scatter_with_fallback`〈`Add`〉）。非融合・非 checkpoint・高階微分非対応。
+    MaxPool3d { input: NodeId, index: Tensor<i32> },
+    /// 3D average pooling（`torch.nn.functional.avg_pool3d` 相当。イシュー #2643）。
+    /// `params`／`count_include_pad` は VJP（共有カーネル
+    /// `tensor_core::pool3d::avg_pool3d_vjp_host`）に必要なため保持する（`Op::AvgPool2d` と同型）。
+    /// 分類は [`Op::MaxPool3d`] と同じ。
+    AvgPool3d {
+        input: NodeId,
+        params: fandhe_ai_tensor_core::pool3d::Pool3dParams,
+        count_include_pad: bool,
+    },
     /// `Var::interpolate`（`torch.nn.functional.interpolate`
     /// 相当。イシュー #1757・#1762・#2152）。空間軸（末尾
     /// `size.len()` 軸）を `size` へリサンプリングする。`mode` で
@@ -1768,6 +1785,8 @@ impl Op {
             | Op::Cummax { .. }
             | Op::Cummin { .. }
             | Op::Logcumsumexp { .. }
+            | Op::MaxPool3d { .. }
+            | Op::AvgPool3d { .. }
             | Op::PadMode { .. }
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
@@ -1958,6 +1977,8 @@ impl Op {
             | Op::Cummax { input, .. }
             | Op::Cummin { input, .. }
             | Op::Logcumsumexp { input, .. }
+            | Op::MaxPool3d { input, .. }
+            | Op::AvgPool3d { input, .. }
             | Op::PadMode { input, .. }
             | Op::OrderSelect { input, .. }
             | Op::MedianAll { input }
@@ -2307,6 +2328,8 @@ impl Op {
             | Op::Cummax { .. }
             | Op::Cummin { .. }
             | Op::Logcumsumexp { .. }
+            | Op::MaxPool3d { .. }
+            | Op::AvgPool3d { .. }
             | Op::PadMode { .. }
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
