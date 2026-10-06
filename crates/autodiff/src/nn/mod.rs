@@ -214,6 +214,14 @@
 //! する（`crates/facade/src/lib.rs` の `EmaHoldDoctestGuard`・
 //! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
 //! `docs/autodiff-ema-decision.md` §4 承認事項）。
+//! イシュー #2647（親 #2625）で可変長系列の [`packed_sequence`]
+//! （`pack_padded_sequence`／`pad_packed_sequence`／`PackedSequence` と
+//! `Rnn`／`Lstm`／`Gru`・`Stacked*` の packed 実行）を追加した。新規
+//! `Op`／`BackendOps`／VJP／カーネルは追加せず、`nn` 直下・クレート
+//! ルートへの `pub use` も行わない（内部パス
+//! `nn::packed_sequence::*` のみ）。facade 公開は未承認のため保留する
+//! （`PackedSequenceHoldDoctestGuard`・`api_surface.rs` の否定ガードで
+//! 固定。`docs/autodiff-packed-sequence-decision.md` §7）。
 
 mod attention;
 mod batch_norm;
@@ -244,6 +252,7 @@ mod upsample;
 pub mod activation;
 pub mod loss;
 pub mod optim;
+pub mod packed_sequence;
 
 pub use attention::{
     KvCache, MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars,

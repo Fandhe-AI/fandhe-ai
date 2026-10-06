@@ -101,7 +101,7 @@ RNN／LSTM は本問題を生じない: RNN は `tanh` の引数がそのまま�
 
 **候補 B（単一 Sequence Op）**: `Op::RnnSequence` 1 ノードが内部で forward 全 step を実行し、VJP 内で逆順ループする。テープ長は O(1) になるが、VJP が巨大化し「1 ノード＝1 VJP 寄与」という既存モデルに対する特殊化が必要（融合境界・`materialize_fallible` 層とも整合を取り直す必要がある）。
 
-**採用案**: **候補 A（unrolled）を v1 とする**。テープ成長 O(T)・保存活性化（ゲート payload 込み）メモリ O(T·B·G·H) を明記する。以下は v1 スコープ外とし §5 に記録する: truncated BPTT、`pack_padded_sequence` 相当の可変長系列、双方向（bidirectional）、**Sequence レベル API 自体**のスタック（**codex-review 指摘〈PR #1662〉を受け決定 4a で切り分け**: セル単位の per-step 交互適用〈決定 4a (i)〉は勾配連続のまま v1 で成立するが、Sequence レベル API 同士のスタック〈決定 4a (ii)〉は候補 A の `Tensor` レベル入力スライスにより前段層への逆伝播が切れるため v1 スコープ外。詳細は決定 4a）。
+**採用案**: **候補 A（unrolled）を v1 とする**。テープ成長 O(T)・保存活性化（ゲート payload 込み）メモリ O(T·B·G·H) を明記する。以下は v1 スコープ外とし §5 に記録する: truncated BPTT、`pack_padded_sequence` 相当の可変長系列（#2647 で内部実装済み。`docs/autodiff-packed-sequence-decision.md`）、双方向（bidirectional）、**Sequence レベル API 自体**のスタック（**codex-review 指摘〈PR #1662〉を受け決定 4a で切り分け**: セル単位の per-step 交互適用〈決定 4a (i)〉は勾配連続のまま v1 で成立するが、Sequence レベル API 同士のスタック〈決定 4a (ii)〉は候補 A の `Tensor` レベル入力スライスにより前段層への逆伝播が切れるため v1 スコープ外。詳細は決定 4a）。
 
 ### 決定 3: `Tape::reset` との相互作用（reuse 学習ループ）
 
@@ -222,7 +222,7 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
 ## 5. スコープ外（v1 対象外）
 
 - truncated BPTT
-- `pack_padded_sequence` 相当の可変長系列サポート
+- `pack_padded_sequence` 相当の可変長系列サポート（**#2647 で内部クレートに実装済み**。`nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence, PackedSequence}` と各 RNN の `*_forward_packed`。既存の `forward_seq` には手を入れない。facade 公開は未承認。詳細は `docs/autodiff-packed-sequence-decision.md`）
 - 双方向（bidirectional）RNN／LSTM／GRU（**#2164 で内部クレートに実装済み**。`nn::rnn_stacked::{StackedRnn, StackedLstm, StackedGru}`。既存の `Rnn`／`Lstm`／`Gru` には手を入れず新しい型で提供。詳細は `docs/autodiff-rnn-stacked-config-decision.md`）
 - Sequence レベル API 自体のスタック（決定 4a (ii): 候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため `Var::narrow`〈#1599〉による候補 B 化が前提。セル単位の per-step 交互適用〈決定 4a (i)〉は勾配連続のまま v1 で成立するためスコープ外ではない。**#2164 でこの (i) 方式による多層化を `StackedRnn`／`StackedLstm`／`StackedGru::forward_seq` 内部に実装済み**——利用者が手組みする決定 4a (i) の「勾配連続」性質を層 1 以降の入力へ前層出力 `Var` をそのまま渡す形で構造化した）
 - reuse（デバイス常駐）経路（決定 7）
