@@ -67,6 +67,11 @@
 
 mod array;
 mod callbacks;
+// イシュー #2665: Functional API の内部実装。公開形は未承認のため `#[cfg(test)]` で隔離し、
+// `pub use` は足さない（詳細は `functional.rs` のモジュール doc と
+// `docs/facade-functional-api-decision.md`）。
+#[cfg(test)]
+mod functional;
 mod logger_io;
 mod metrics;
 mod model_io;
