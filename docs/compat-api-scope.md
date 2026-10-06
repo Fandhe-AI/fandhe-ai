@@ -2006,3 +2006,9 @@ facade 公開面は追加していない（保留ガード `TensorProductOpsHold
 facade 公開面は追加していない（保留ガード `PadModesHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var::pad_with_mode` の委譲メソッドと `PadMode` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-pad-modes-decision.md`。
+
+**適用記録（イシュー #2647・親 #2625・ルート #2499 Phase 4。可変長系列）**:
+`pack_padded_sequence`／`pad_packed_sequence`／`PackedSequence` と、`Rnn`／`Lstm`／`Gru`・`StackedRnn`／`StackedLstm`／`StackedGru` の packed 実行（自由関数 8 本）を内部クレート限定（`fandhe_ai_autodiff::nn::packed_sequence`。新規 `Op`・`BackendOps` メソッドなしの既存 `Op` 合成）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `PackedSequenceHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`fandhe_ai::nn::rnn` へのモジュール再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-packed-sequence-decision.md`。

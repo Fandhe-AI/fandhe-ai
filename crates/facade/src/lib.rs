@@ -6332,6 +6332,229 @@ struct FoldUnfoldHoldDoctestGuard;
 #[allow(dead_code)]
 struct LrnWeightReparamHoldDoctestGuard;
 
+/// 可変長系列の pack／unpack（`pack_padded_sequence`・`pad_packed_sequence`・`PackedSequence`）と RNN 系の
+/// packed 実行（`rnn_forward_packed`・`gru_forward_packed`・`lstm_forward_packed`・`stacked_*_forward_packed`。
+/// `torch.nn.utils.rnn` 相当。イシュー #2647・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す
+/// 保留ガード（`LrnWeightReparamHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `packed_sequence`・型
+/// `PackedSequence`／`PackedRnnSeqOutput`／`PackedLstmSeqOutput`／`StackedPackedRnnSeqOutput`／
+/// `StackedPackedLstmSeqOutput`・トップレベル自由関数 8 名と、プローブ用トレイトのメソッド
+/// （`Var`／`Tape`／`Tensor<f32>` の `pack_padded_sequence`／`pad_packed_sequence`、`Tape` の `*_forward_packed` 6 名、
+/// `nn::rnn::{Rnn, Lstm, Gru, StackedRnn, StackedLstm, StackedGru}` の `forward_packed`）を置き、修飾なしの
+/// 関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ
+/// 公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
+/// 不一致でエラーコードに依存せずコンパイルが失敗する。推奨する公開形が自由関数の再エクスポートのため、関数名
+/// そのものの glob 衝突も検出対象にしている。検出範囲は列挙したこれらの名前・型に限り、マクロ生成や別名経由の
+/// メソッドまでは保証しない。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::nn::packed_sequence`）。保留対象は facade 公開面のみで、
+/// 公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
+/// `docs/autodiff-packed-sequence-decision.md` §7。同記録は推奨案の記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::packed_sequence_hold_doctest_globs_all_pub_modules`・
+/// `packed_sequence_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_packed_sequence`・
+/// `workspace_declares_packed_sequence_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_packed_sequence_hold_probe {
+///     pub struct PackedSequence;
+///     pub struct PackedRnnSeqOutput;
+///     pub struct PackedLstmSeqOutput;
+///     pub struct StackedPackedRnnSeqOutput;
+///     pub struct StackedPackedLstmSeqOutput;
+///     pub fn pack_padded_sequence() {}
+///     pub fn pad_packed_sequence() {}
+///     pub fn rnn_forward_packed() {}
+///     pub fn gru_forward_packed() {}
+///     pub fn lstm_forward_packed() {}
+///     pub fn stacked_rnn_forward_packed() {}
+///     pub fn stacked_gru_forward_packed() {}
+///     pub fn stacked_lstm_forward_packed() {}
+///     pub mod packed_sequence {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_packed_sequence_hold_probe::*;
+///
+/// struct __FandhePackedSequenceHoldMarker;
+///
+/// trait __FandhePackedSequenceHoldProbe {
+///     fn pack_padded_sequence(&self) -> __FandhePackedSequenceHoldMarker;
+///     fn pad_packed_sequence(&self) -> __FandhePackedSequenceHoldMarker;
+/// }
+///
+/// trait __FandhePackedSequenceHoldTapeProbe {
+///     fn rnn_forward_packed(&self) -> __FandhePackedSequenceHoldMarker;
+///     fn gru_forward_packed(&self) -> __FandhePackedSequenceHoldMarker;
+///     fn lstm_forward_packed(&self) -> __FandhePackedSequenceHoldMarker;
+///     fn stacked_rnn_forward_packed(&self) -> __FandhePackedSequenceHoldMarker;
+///     fn stacked_gru_forward_packed(&self) -> __FandhePackedSequenceHoldMarker;
+///     fn stacked_lstm_forward_packed(&self) -> __FandhePackedSequenceHoldMarker;
+/// }
+///
+/// trait __FandhePackedSequenceHoldRnnProbe {
+///     fn forward_packed(&self) -> __FandhePackedSequenceHoldMarker;
+/// }
+///
+/// impl<'t> __FandhePackedSequenceHoldProbe for fandhe_ai::Var<'t> {
+///     fn pack_padded_sequence(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn pad_packed_sequence(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldProbe for fandhe_ai::Tape {
+///     fn pack_padded_sequence(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn pad_packed_sequence(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn pack_padded_sequence(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn pad_packed_sequence(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldTapeProbe for fandhe_ai::Tape {
+///     fn rnn_forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn gru_forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn lstm_forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn stacked_rnn_forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn stacked_gru_forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+///     fn stacked_lstm_forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::Rnn {
+///     fn forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::Lstm {
+///     fn forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::Gru {
+///     fn forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::StackedRnn {
+///     fn forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::StackedLstm {
+///     fn forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::StackedGru {
+///     fn forward_packed(&self) -> __FandhePackedSequenceHoldMarker {
+///         __FandhePackedSequenceHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(
+///     _0: PackedSequence,
+///     _1: PackedRnnSeqOutput,
+///     _2: PackedLstmSeqOutput,
+///     _3: StackedPackedRnnSeqOutput,
+///     _4: StackedPackedLstmSeqOutput,
+/// ) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり
+///     // E0659 でコンパイル失敗する）。
+///     pack_padded_sequence();
+///     pad_packed_sequence();
+///     rnn_forward_packed();
+///     gru_forward_packed();
+///     lstm_forward_packed();
+///     stacked_rnn_forward_packed();
+///     stacked_gru_forward_packed();
+///     stacked_lstm_forward_packed();
+///     packed_sequence::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     rnn: &fandhe_ai::nn::rnn::Rnn,
+///     lstm: &fandhe_ai::nn::rnn::Lstm,
+///     gru: &fandhe_ai::nn::rnn::Gru,
+///     stackedrnn: &fandhe_ai::nn::rnn::StackedRnn,
+///     stackedlstm: &fandhe_ai::nn::rnn::StackedLstm,
+///     stackedgru: &fandhe_ai::nn::rnn::StackedGru,
+/// ) {
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Var::pack_padded_sequence(v);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::pack_padded_sequence(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tensor::<f32>::pack_padded_sequence(tf);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Var::pad_packed_sequence(v);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::pad_packed_sequence(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tensor::<f32>::pad_packed_sequence(tf);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::rnn_forward_packed(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::gru_forward_packed(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::lstm_forward_packed(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::stacked_rnn_forward_packed(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::stacked_gru_forward_packed(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::Tape::stacked_lstm_forward_packed(tape);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::nn::rnn::Rnn::forward_packed(rnn);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::nn::rnn::Lstm::forward_packed(lstm);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::nn::rnn::Gru::forward_packed(gru);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::nn::rnn::StackedRnn::forward_packed(stackedrnn);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::nn::rnn::StackedLstm::forward_packed(stackedlstm);
+///     let _: __FandhePackedSequenceHoldMarker = fandhe_ai::nn::rnn::StackedGru::forward_packed(stackedgru);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct PackedSequenceHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
