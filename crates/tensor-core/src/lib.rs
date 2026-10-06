@@ -186,6 +186,7 @@ pub mod memory_stats;
 mod ops_shape;
 pub mod pad_modes;
 pub mod pool;
+pub mod pool3d;
 pub mod scalar_op;
 pub mod stat_reduce;
 // プールの共通コアロジック（サイズクラス・フリーリスト・統計）。`backend-cuda`／
