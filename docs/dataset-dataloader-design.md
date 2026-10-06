@@ -276,3 +276,19 @@ README.md` を正とする。要点のみ記す:
   `ConcatDataset`／`Subset`／`random_split`・タプルデータセットでの
   サンプル単位フック・transform／collate フックの並列化・persistent
   workers・GPU DMA prefetch）は引き続き対象外。
+
+## 14. 追補（#2662）: IterableDataset・BatchSampler
+
+上記 §9 の対象外欄に挙げていた iterable-style dataset と `BatchSampler` を #2662 で
+`tensor-core::data`（`data/iterable.rs`・`data/batch_sampler.rs`）へ実装した。設計判断は
+`docs/tensor-core-iterable-dataset-batch-sampler-decision.md` を正とする。要点のみ記す:
+
+- `IterableDataset`（`iter_samples` が `Result` 要素のストリームを返す。`Dataset` を継承しない別系統の trait）・
+  `IterableDataLoader`（`StackSamples` で `Tensor`・2／3 要素タプルを積む。端数は `drop_last` で制御。
+  途中 `Err` は部分バッチを捨てて 1 回 yield し打ち切る）・`BatchSampler`（明示的な添字列を束ねる既存 `Sampler`
+  の具象型）を追加した。既存の公開型・trait へは何も足していない。
+- **facade 非公開**（承認依頼 #2677・公開は承認後の #2679。保留ガードで機械固定）。
+- 現時点で残る対象外: `pin_memory`・iterable の長さヒント／`batch_size=None` 相当／`ChainDataset`・iterable の
+  マルチワーカー供給（シャーディング）と `PrefetchDataLoader`／`Sequential::fit` への結線・タプルデータセットでの
+  サンプル単位フック・transform／collate フックの並列化・persistent workers・GPU DMA prefetch・
+  `DistributedSampler`。
