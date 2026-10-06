@@ -1503,3 +1503,7 @@ import／export。
 **ConvTranspose3d はイシュー #2644 で内部実装済み**（`docs/autodiff-conv-transpose3d-max-unpool-decision.md`。
 `conv_transpose3d_ops::conv_transpose3d`・内部クレート限定・facade 公開は承認待ち〈承認依頼 #2677〉。層化
 〈`nn::ConvTranspose3d`〉は #2679）。
+
+**Fold／Unfold はイシュー #2645 で内部実装済み**（`docs/autodiff-fold-unfold-decision.md`。
+`fold_ops::{fold, unfold}`・既存の `im2col`／`col2im` の再利用・内部クレート限定・facade 公開は承認待ち〈承認依頼 #2677〉。
+層化〈`nn::Fold`／`nn::Unfold`〉は #2679）。

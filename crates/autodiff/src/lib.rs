@@ -279,6 +279,9 @@ pub mod pool3d_ops;
 // facade への公開は保留（承認依頼 #2677・公開 #2678。
 // `docs/autodiff-conv-transpose3d-max-unpool-decision.md`）。
 pub mod conv_transpose3d_ops;
+// Fold／Unfold（`fold`・`unfold`。イシュー #2645）。既存 `im2col`／`col2im` の再利用。facade への公開は
+// 保留（承認依頼 #2677・公開 #2678。`docs/autodiff-fold-unfold-decision.md`）。
+pub mod fold_ops;
 pub mod max_unpool_ops;
 pub mod rearrange_ops;
 mod reduce_dims;

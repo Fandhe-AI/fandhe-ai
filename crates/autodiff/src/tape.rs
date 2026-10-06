@@ -1247,6 +1247,18 @@ pub(crate) enum Op {
     /// `index` から導出する）。VJP は `gather`＋last-writer マスク（`Op::Scatter { Overwrite }`
     /// の随伴と同一規則）。非融合・非 checkpoint・高階微分非対応。
     MaxUnpool { input: NodeId, index: Tensor<i32> },
+    /// Unfold（`F.unfold`／`nn.Unfold` 相当。入力 `[N, C, H, W]` → `[N, C·kH·kW, L]`。イシュー #2645・
+    /// `docs/autodiff-fold-unfold-decision.md`）。`crate::fold_ops::unfold` からのみ積まれ、facade には
+    /// 公開しない。実体は既存 `BackendOps::im2col`（`groups = 1`）の再利用。`params` は VJP
+    /// （`col2im`）に必要なため保持する。VJP は [`Op::Fold`] の随伴（`col2im`）。常に実体化済み
+    /// （`push_eager`）・非 checkpoint・高階微分非対応。
+    Unfold { input: NodeId, params: Conv2dParams },
+    /// Fold（`F.fold`／`nn.Fold` 相当。入力 `[N, C·kH·kW, L]` → `[N, C, H, W]`。イシュー #2645）。
+    /// `crate::fold_ops::fold` からのみ積まれ、facade には公開しない。実体は既存
+    /// `BackendOps::col2im`（`groups = 1`）の再利用。`output_size` は保持しない（VJP は
+    /// `upstream.shape()` から導出する）。VJP は [`Op::Unfold`] の随伴（`im2col`）。分類は
+    /// [`Op::Unfold`] と同じ。
+    Fold { input: NodeId, params: Conv2dParams },
     /// `Var::interpolate`（`torch.nn.functional.interpolate`
     /// 相当。イシュー #1757・#1762・#2152）。空間軸（末尾
     /// `size.len()` 軸）を `size` へリサンプリングする。`mode` で
@@ -1917,6 +1929,9 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため非適格（`Op::Conv3d`／`Op::MaxPool3d` と同判断）。
             Op::ConvTranspose3d { .. } => false,
             Op::MaxUnpool { .. } => false,
+            // `Op::Unfold`／`Op::Fold`（イシュー #2645）も eager 実体化演算で再計算経路を持たないため非適格。
+            Op::Unfold { .. } => false,
+            Op::Fold { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -2004,6 +2019,8 @@ impl Op {
             | Op::Logcumsumexp { input, .. }
             | Op::MaxPool3d { input, .. }
             | Op::MaxUnpool { input, .. }
+            | Op::Unfold { input, .. }
+            | Op::Fold { input, .. }
             | Op::AvgPool3d { input, .. }
             | Op::PadMode { input, .. }
             | Op::OrderSelect { input, .. }
@@ -2391,6 +2408,8 @@ impl Op {
             | Op::ConvTranspose2d { .. }
             | Op::ConvTranspose3d { .. }
             | Op::MaxUnpool { .. }
+            | Op::Unfold { .. }
+            | Op::Fold { .. }
             | Op::Conv3d { .. }
             | Op::OneHot { .. }
             | Op::MaxPool2d { .. }
@@ -5104,5 +5123,36 @@ mod typed_ops_accessor_tests {
         assert!(tape.typed_ops_f64().is_some());
         assert!(tape.typed_ops_f16().is_none());
         assert!(tape.typed_ops_bf16().is_none());
+    }
+}
+
+/// `Op::Unfold`／`Op::Fold`（イシュー #2645）のメタ性質固定: checkpoint 対象外・create_graph replay
+/// 対象外・`for_each_input` が入力ノードのみを列挙する（`Op::Conv2d` と同じ最小・安全側の判断）。
+#[cfg(test)]
+mod fold_unfold_op_tests {
+    use super::*;
+
+    fn params() -> Conv2dParams {
+        Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap()
+    }
+
+    #[test]
+    fn unfold_and_fold_op_meta_properties() {
+        for op in [
+            Op::Unfold {
+                input: NodeId(4),
+                params: params(),
+            },
+            Op::Fold {
+                input: NodeId(4),
+                params: params(),
+            },
+        ] {
+            assert!(!op.is_checkpoint_eligible());
+            assert!(!op.supports_create_graph());
+            let mut seen = Vec::new();
+            op.for_each_input(|id| seen.push(id.0));
+            assert_eq!(seen, vec![4]);
+        }
     }
 }
