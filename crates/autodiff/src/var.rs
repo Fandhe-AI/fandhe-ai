@@ -209,6 +209,13 @@ impl<'t> Var<'t> {
     ///
     /// `to_tape` は別 tape へ葉を転送する副作用を持つため、所属検証だけが目的の呼び出し側
     /// （facade の多入力グラフ forward。#2665）が tape を汚さずに不一致を拒否するために使う。
+    ///
+    /// **公開面の扱い（PR #2804 レビュー指摘）**: 呼び出し元の facade は別クレートのため
+    /// `pub(crate)` にできない。`Var` は facade が再エクスポートするので、承認済みの公開 API
+    /// ではないことを `#[doc(hidden)]` で明示し、rustdoc 上の公開面から外す（facade 利用者は
+    /// 引数の内部 `Tape` を名指しできず、実質的に呼べない）。`Tape::from_shape_fill` と同じ
+    /// 「cross-crate 内部ブリッジ」の扱い。
+    #[doc(hidden)]
     pub fn is_on_tape(&self, target: &Tape) -> bool {
         self.tape.id == target.id
     }
