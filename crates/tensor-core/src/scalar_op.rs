@@ -482,7 +482,14 @@ impl ScalarUnaryOp {
                     x
                 } else {
                     // `expm1` で `x` が 0 近傍の桁落ちを避ける（`Elu` と同方針）。
-                    alpha * (x / alpha).exp_m1()
+                    // 比・`expm1`・積を `f64` で計算し 1 回だけ `f32` へ
+                    // downcast する。`f32` の `x / alpha` は大きな `alpha`
+                    // （例 `x = -1e-10`・`alpha = 3e38`）で 0 へ
+                    // アンダーフローし出力が `-0.0` になるため、受理する
+                    // `alpha` 全範囲で値を保つ（PR #2794 codex 指摘。
+                    // 勾配係数 `eval::scalar` の Celu も同じ `f64` 方針）。
+                    let a = alpha as f64;
+                    (a * (x as f64 / a).exp_m1()) as f32
                 }
             }
             Self::Softsign => x / (1.0 + x.abs()),
@@ -1322,6 +1329,19 @@ mod tests {
     fn new_2649_celu_avoids_cancellation_near_zero() {
         let y = ScalarUnaryOp::Celu { alpha: 1.0 }.apply(-1e-8);
         assert!((y + 1e-8).abs() < 1e-12, "celu(-1e-8) = {y}");
+    }
+
+    #[test]
+    fn new_2649_celu_extreme_alpha_keeps_value() {
+        // 大きな alpha: f32 の x/alpha がアンダーフローしても値は ≈ x。
+        let y = ScalarUnaryOp::Celu { alpha: 3e38 }.apply(-1e-10);
+        assert!(y < 0.0 && ((y + 1e-10) / 1e-10).abs() < 1e-5, "y = {y}");
+        // 負の大きな alpha でも同様（alpha * expm1(x/alpha) ≈ x）。
+        let y = ScalarUnaryOp::Celu { alpha: -3e38 }.apply(-1e-10);
+        assert!(y < 0.0 && ((y + 1e-10) / 1e-10).abs() < 1e-5, "y = {y}");
+        // 極小 alpha: 負側は -alpha へ飽和する。
+        let y = ScalarUnaryOp::Celu { alpha: 1e-30 }.apply(-1.0);
+        assert!(((y + 1e-30) / 1e-30).abs() < 1e-5, "y = {y}");
     }
 
     #[test]

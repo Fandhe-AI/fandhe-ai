@@ -453,6 +453,18 @@ mod tests {
     }
 
     #[test]
+    fn new_2649_celu_grad_factor_extreme_alpha() {
+        // 大きな alpha: x/alpha が f32 ならアンダーフローする入力でも係数 ≈ 1。
+        let op = ScalarUnaryOp::Celu { alpha: 3e38 };
+        let c = unary_grad_factor(op, -1e-10, op.apply(-1e-10));
+        assert!((c - 1.0).abs() < 1e-5, "c = {c}");
+        // 極小 alpha: 負側の係数は 0 へ飽和する（NaN にならない）。
+        let op = ScalarUnaryOp::Celu { alpha: 1e-30 };
+        let c = unary_grad_factor(op, -1.0, op.apply(-1.0));
+        assert!(c == 0.0, "c = {c}");
+    }
+
+    #[test]
     fn unary_forward_matches_apply() {
         let t = build_tensor(vec![1.0, -2.0, 3.0], &[3]);
         let out = unary(&t, ScalarUnaryOp::Relu);
