@@ -177,7 +177,12 @@ impl Pool3dLayout {
     /// ことを検査する。`N`／`C`／出力が空かどうかに依存させず、実体化より前に autodiff
     /// 入口が呼ぶ（`Var::max_pool2d` の `H·W <= i32::MAX` 検査と同じ位置づけ）。
     pub fn check_i32_indices(&self) -> Result<(), ShapeError> {
-        let plane = self.in_plane();
+        // N／C が 0 の空バッチでは `pool3d_layout` の要素数検査を `D·H·W` が超えていても通る
+        // ため、ここで `checked_mul` する（panic／wrap ではなく型付きエラーにする。REQ-8）。
+        let plane = self.in_shape[2]
+            .checked_mul(self.in_shape[3])
+            .and_then(|p| p.checked_mul(self.in_shape[4]))
+            .ok_or(ShapeError::ElementCountOverflow)?;
         if plane > i32::MAX as usize {
             return Err(ShapeError::IndexRangeOverflow { index: plane });
         }
@@ -661,6 +666,19 @@ mod tests {
             Err(ShapeError::IndexRangeOverflow { .. })
         ));
         assert!(max_pool3d_host(&[], &layout).is_err());
+    }
+
+    #[test]
+    fn overflowing_plane_with_empty_batch_is_typed_error() {
+        let p = params([1; 3], None, [0; 3], [1; 3]);
+        for shape in [[0, 1, usize::MAX, 2, 1], [1, 0, usize::MAX, 2, 1]] {
+            let layout = pool3d_layout(&shape, &p).unwrap();
+            assert!(matches!(
+                layout.check_i32_indices(),
+                Err(ShapeError::ElementCountOverflow)
+            ));
+            assert!(max_pool3d_host(&[], &layout).is_err());
+        }
     }
 
     #[test]
