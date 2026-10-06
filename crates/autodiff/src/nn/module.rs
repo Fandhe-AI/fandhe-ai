@@ -125,7 +125,7 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 18 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// fail-safe（本クレート内 18 実装（イシュー #2649 で +5。下記 5 層を含めると 23）〈`Linear`・`Relu`・`Sigmoid`・
     /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Gelu`・
     /// `GeluTanh`・`Softplus`・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`
     /// （イシュー #1714）・`Flatten`（イシュー #2065）・`Hardtanh`・
