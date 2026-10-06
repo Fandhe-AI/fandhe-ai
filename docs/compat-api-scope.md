@@ -2049,3 +2049,7 @@ Lion の参照値は `torch.optim` 2.14.0 に Lion が無いため、公式参�
 facade 公開面は追加していない（保留ガード `OptimizerAdafactorLionHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`fandhe_ai::optim` への 4 名の素の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2679）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-optimizer-adafactor-lion-decision.md`。
+
+**適用記録（イシュー #2658。内部クレート限定）**: SWA 相当の `AveragedModel`（等重み平均）・`SwaLr`／`SwaAnneal`（`SWALR` 相当）を内部クレート限定（`fandhe_ai_autodiff::nn`／`nn::optim`。ホスト値型・`f32` 純関数で、新規 `Op`・`BackendOps` メソッド・VJP・カーネルなし）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `SwaHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-swa-decision.md`。

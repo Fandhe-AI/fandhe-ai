@@ -3352,6 +3352,113 @@ struct OptimizerStateDictHoldDoctestGuard;
 #[allow(dead_code)]
 struct EmaHoldDoctestGuard;
 
+/// イシュー #2658（親 #2657）の SWA（`AveragedModel`・`SwaLr`・
+/// `SwaAnneal`）の facade 公開保留を固定する doctest 足場（`EmaHoldDoctestGuard`
+/// と同型の「正のプローブ 1 ブロック方式」）。facade 公開形は未承認
+/// （推奨案の記録のみ。`docs/autodiff-swa-decision.md` §7。承認依頼は
+/// #2677、公開は #2678・#2679）。
+///
+/// 1. **型名の再エクスポート・独自宣言**: facade の全 `pub mod` を glob
+///    import したスコープに、本ブロック内でのみ定義したローカル
+///    `__fandhe_swa_hold_probe::{AveragedModel, SwaLr, SwaAnneal}` を導入し、
+///    3 名すべてを `__probe_type` の引数で参照する（未参照の `pub` 項目は
+///    横断監査が拒否する）。facade がいずれかの名前をどの経路で公開しても、
+///    ローカル定義との glob 衝突でコンパイルが失敗する。
+/// 2. **`compat::FitConfig`／`compat::Sequential` への inherent メソッド
+///    追加**: ローカル `__FandheSwaHoldProbe`（`use_swa`／`swa_start`／
+///    `swa_lr`）を両型へ実装し、UFCS 形とメソッド呼び出し形の両方で呼ぶ。
+///    同名の inherent メソッドが生えると戻り値型の不一致で失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// swa_hold_doctest_globs_all_pub_modules`・
+/// `swa_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_swa_items`）との多層防御の位置
+/// づけと検出範囲（列挙名のみ。マクロ生成・別名経由までは保証しない）は
+/// `docs/autodiff-swa-decision.md` §9 を参照。
+///
+/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
+/// doctest 自体を削除する（ソース走査側の否定ガードも同時に正ガードへ
+/// 置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_swa_hold_probe {
+///     pub struct AveragedModel;
+///     pub struct SwaLr;
+///     pub struct SwaAnneal;
+/// }
+/// use __fandhe_swa_hold_probe::*;
+///
+/// fn __probe_type(_: AveragedModel, _: SwaLr, _: SwaAnneal) {}
+///
+/// struct __FandheSwaHoldMarker;
+///
+/// trait __FandheSwaHoldProbe {
+///     fn use_swa(&self) -> __FandheSwaHoldMarker;
+///     fn swa_start(&self) -> __FandheSwaHoldMarker;
+///     fn swa_lr(&self) -> __FandheSwaHoldMarker;
+/// }
+///
+/// impl __FandheSwaHoldProbe for fandhe_ai::compat::FitConfig {
+///     fn use_swa(&self) -> __FandheSwaHoldMarker {
+///         __FandheSwaHoldMarker
+///     }
+///     fn swa_start(&self) -> __FandheSwaHoldMarker {
+///         __FandheSwaHoldMarker
+///     }
+///     fn swa_lr(&self) -> __FandheSwaHoldMarker {
+///         __FandheSwaHoldMarker
+///     }
+/// }
+///
+/// impl __FandheSwaHoldProbe for fandhe_ai::compat::Sequential {
+///     fn use_swa(&self) -> __FandheSwaHoldMarker {
+///         __FandheSwaHoldMarker
+///     }
+///     fn swa_start(&self) -> __FandheSwaHoldMarker {
+///         __FandheSwaHoldMarker
+///     }
+///     fn swa_lr(&self) -> __FandheSwaHoldMarker {
+///         __FandheSwaHoldMarker
+///     }
+/// }
+///
+/// fn __probe_fit_config(x: &fandhe_ai::compat::FitConfig) {
+///     let _: __FandheSwaHoldMarker = fandhe_ai::compat::FitConfig::use_swa(x);
+///     let _: __FandheSwaHoldMarker = x.use_swa();
+///     let _: __FandheSwaHoldMarker = fandhe_ai::compat::FitConfig::swa_start(x);
+///     let _: __FandheSwaHoldMarker = x.swa_start();
+///     let _: __FandheSwaHoldMarker = fandhe_ai::compat::FitConfig::swa_lr(x);
+///     let _: __FandheSwaHoldMarker = x.swa_lr();
+/// }
+///
+/// fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheSwaHoldMarker = fandhe_ai::compat::Sequential::use_swa(x);
+///     let _: __FandheSwaHoldMarker = x.use_swa();
+///     let _: __FandheSwaHoldMarker = fandhe_ai::compat::Sequential::swa_start(x);
+///     let _: __FandheSwaHoldMarker = x.swa_start();
+///     let _: __FandheSwaHoldMarker = fandhe_ai::compat::Sequential::swa_lr(x);
+///     let _: __FandheSwaHoldMarker = x.swa_lr();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct SwaHoldDoctestGuard;
+
 /// イシュー #2177（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
 /// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
 /// 旧 MHA 保留ガード（#2163。#2530 で撤去済み）と同型の「正のプローブ 1

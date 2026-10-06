@@ -161,7 +161,7 @@ parity テストは不要。デバイス常駐経路（`DeviceParamStore`）へ�
   （`crates/autodiff/src/nn/batch_norm.rs` で確認。PyTorch
   `AveragedModel(use_buffers=False)` 既定・Keras（trainable
   variables のみ）と同じ）。
-- SWA（Stochastic Weight Averaging）はスコープ外。
+- SWA（Stochastic Weight Averaging）はスコープ外（等重み平均 `AveragedModel` と `SwaLr` は別型・別記録として #2658 で実装した。`docs/autodiff-swa-decision.md` 参照）。
 
 ## §9 将来拡張候補
 

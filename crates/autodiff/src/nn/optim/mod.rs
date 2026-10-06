@@ -116,7 +116,7 @@ pub use lion::{Lion, LionConfig};
 pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, CosineAnnealingWarmRestarts, CyclicLr, ExponentialLr, LambdaLr,
     LinearWarmupLr, LrScheduler, MultiStepLr, OneCycleAnneal, OneCycleLr, OneCycleLrConfig,
-    SequentialLr, StepLr,
+    SequentialLr, StepLr, SwaAnneal, SwaLr,
 };
 pub use nadam::{NAdam, NAdamConfig};
 pub(crate) use param_group::SlotHparams;

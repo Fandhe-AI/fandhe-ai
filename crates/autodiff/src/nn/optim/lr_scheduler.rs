@@ -47,6 +47,11 @@
 //! （ルート #2499 の一括承認）で純再エクスポート済み
 //! （`docs/autodiff-lr-scheduler-ext-decision.md` §8 参照）。
 //!
+//! **#2658 で追加した [`SwaLr`]／[`SwaAnneal`]**（PyTorch
+//! `torch.optim.swa_utils.SWALR` 相当）も式ベース（stateless 閉形式）の
+//! スケジューラである。facade 公開は未承認のため保留する
+//! （`docs/autodiff-swa-decision.md` §7）。
+//!
 //! いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する
 //! （`cos`／`powf` の libm 差による ULP 揺れを `f32` 直計算より抑える
 //! 精度方針。bit 同一契約は主張しない。`.claude/rules/coding-rust.md`
@@ -1067,5 +1072,95 @@ impl LrScheduler for SequentialLr {
             step - self.milestones[idx - 1]
         };
         self.schedulers[idx].lr_at(local)
+    }
+}
+
+/// [`SwaLr`] の `anneal_strategy`（PyTorch `torch.optim.swa_utils.SWALR` の
+/// `anneal_strategy`。`"cos"`／`"linear"`）。
+///
+/// [`OneCycleAnneal`] を流用しないのは、意味（OneCycle は「上昇・下降」
+/// 各フェーズの補間、SWA は固定 `swa_lr` への単一アニーリング）が異なり
+/// doc が混ざるため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwaAnneal {
+    /// コサインアニーリング（PyTorch 既定）。
+    Cos,
+    /// 線形アニーリング。
+    Linear,
+}
+
+/// PyTorch `torch.optim.swa_utils.SWALR` 相当（イシュー #2658・親
+/// #2657）: 学習率を `base_lr` から `anneal_epochs` step かけて固定値
+/// `swa_lr` へアニーリングし、以降は `swa_lr` に固定する。
+///
+/// `alpha` を Linear では `t`、Cos では `sin²(π·t/2)`（`t = step /
+/// anneal_epochs`）として `lr = swa_lr·alpha + base_lr·(1 − alpha)` を
+/// `f64` で計算し最後に 1 回だけ `f32` へ落とす（stateless 閉形式。Cos を
+/// `(1 − cos(πt))/2` と書かないのは [`CosineAnnealingLr`] と同じ桁落ち
+/// 対策）。
+///
+/// # PyTorch との差分
+///
+/// - PyTorch の `SWALR` は直前の lr から初期 lr を逆算する再帰形で状態を
+///   持つ。本実装は固定 `base_lr` に対する閉形式であり、等価性は PyTorch
+///   2.14.0 実行値 fixture（`tests/nn_swa.rs`）で検証する。
+/// - `swa_lr <= 0` を拒否する（PyTorch は検査しない。意図的な差分）。
+/// - param group ごとの `swa_lr` リストは対象外。
+///
+/// 主スケジューラとの連結は [`SequentialLr::new`] で行う。SWA 段の
+/// `base_lr` には主スケジューラの切替時点の値（`main.lr_at(切替 step)`）を
+/// 渡す（PyTorch の定番ループでは SWALR の実効開始 lr が主スケジューラの
+/// 残した値になるため）。
+pub struct SwaLr {
+    base_lr: f32,
+    swa_lr: f32,
+    anneal_epochs: usize,
+    anneal: SwaAnneal,
+}
+
+impl SwaLr {
+    /// `base_lr`・`swa_lr` はともに有限かつ正でなければならない
+    /// （`swa_lr > base_lr` は許す）。`anneal_epochs` は 0 を含め全値を
+    /// 受理する（0 は全 step が `swa_lr`。PyTorch と同じ）。
+    ///
+    /// # Errors
+    ///
+    /// `base_lr`／`swa_lr` が非有限または 0 以下の場合は
+    /// `AutodiffError::InvalidArgument`（fail-closed）。
+    pub fn new(
+        base_lr: f32,
+        swa_lr: f32,
+        anneal_epochs: usize,
+        anneal: SwaAnneal,
+    ) -> Result<Self, AutodiffError> {
+        for (name, v) in [("base_lr", base_lr), ("swa_lr", swa_lr)] {
+            if !v.is_finite() || v <= 0.0 {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "{name} は有限かつ正の値でなければならない: {v}"
+                )));
+            }
+        }
+        Ok(Self {
+            base_lr,
+            swa_lr,
+            anneal_epochs,
+            anneal,
+        })
+    }
+}
+
+impl LrScheduler for SwaLr {
+    fn lr_at(&self, step: usize) -> f32 {
+        // `anneal_epochs == 0` もこの分岐で全 step が `swa_lr` になり、
+        // 下の除算でゼロ除算は起きない。
+        if step >= self.anneal_epochs {
+            return self.swa_lr;
+        }
+        let t = step as f64 / self.anneal_epochs as f64;
+        let alpha = match self.anneal {
+            SwaAnneal::Linear => t,
+            SwaAnneal::Cos => (std::f64::consts::PI * t / 2.0).sin().powi(2),
+        };
+        (self.swa_lr as f64 * alpha + self.base_lr as f64 * (1.0 - alpha)) as f32
     }
 }
