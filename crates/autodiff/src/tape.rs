@@ -2847,15 +2847,23 @@ impl Tape {
         self.nodes.borrow().len()
     }
 
-    /// ノード数が `len` 以下になるまで末尾を切り詰める（失敗時のロールバック専用）。
+    /// 合成演算の失敗時ロールバック用に、ノード数と葉プレフィックス固定状態を保存する。
+    pub(crate) fn rollback_point(&self) -> (usize, Option<usize>) {
+        (self.nodes.borrow().len(), self.retained_leaf_len.get())
+    }
+
+    /// [`Tape::rollback_point`] の状態へ戻す（失敗時のロールバック専用）。
     ///
     /// `masked_scatter` のように「view 系ノードを積んだ後に失敗し得る処理」を持つ合成演算が、
-    /// `Err` 返却前に自分が積んだノードだけを取り除いて孤児ノードを残さないために使う
-    /// （`len` は合成開始時点の [`Tape::len`]）。他の演算が積んだノードは `len` より前に
-    /// しか存在しない前提（同一スレッド・`Tape` は `!Sync` で合成中に割り込みなし）。
+    /// `Err` 返却前に自分が積んだノードだけを取り除いて孤児ノードを残さないために使う。
+    /// `push_view` は初回の非葉ノード記録時に `retained_leaf_len` を固定するため、ノードだけを
+    /// 切り詰めると固定状態が残り、以降に登録した葉が `leaf()` から見えず `reset()` で破棄される。
+    /// そのため葉プレフィックス状態も合成開始時点へ復元する。他の演算が積んだノードは開始時点より
+    /// 前にしか存在しない前提（同一スレッド・`Tape` は `!Sync` で合成中に割り込みなし）。
     /// checkpoint 区間は view 系合成では登録されないため触らない。
-    pub(crate) fn rollback_to(&self, len: usize) {
-        self.nodes.borrow_mut().truncate(len);
+    pub(crate) fn rollback_to(&self, point: (usize, Option<usize>)) {
+        self.nodes.borrow_mut().truncate(point.0);
+        self.retained_leaf_len.set(point.1);
     }
 
     /// テープにノードが 1 つも記録されていないか判定する。

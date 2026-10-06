@@ -405,20 +405,58 @@ pub fn scatter_reduce_vjp_host(
                     }
                     continue;
                 }
-                // suffix[i] = lane[i..] の積。
-                let mut suffix = vec![1.0_f64; k + 1];
+                // 各寄与を除いた積（排他的積）。0 と inf／f64 overflow した積を直接乗算すると
+                // 0 × inf = NaN になるため、先に 0・inf の個数を数えて分岐する:
+                //  - 他寄与に 0 が残る → 0（inf が混在しても 0。NaN にしない）
+                //  - 他寄与に 0 が無く inf が残る → 符号付き inf
+                //  - それ以外（有限・非 0 のみ）→ (仮数, 2 の指数) 対で積を取り overflow／underflow
+                //    を避け、最後に 1 回だけ f64 へ戻す（途中で inf・0 を作らない）。
+                let zeros = lane.iter().filter(|&&(_, v)| v == 0.0).count();
+                let infs = lane.iter().filter(|&&(_, v)| v.is_infinite()).count();
+                let neg_infs = lane
+                    .iter()
+                    .filter(|&&(_, v)| v.is_infinite() && v < 0.0)
+                    .count();
+                // 有限・非 0 の寄与のみ (仮数, 指数) へ分解（0・inf は単位元 (1, 0)）。
+                let fac: Vec<(f64, i64)> = lane
+                    .iter()
+                    .map(|&(_, v)| {
+                        if v == 0.0 || v.is_infinite() {
+                            (1.0, 0)
+                        } else {
+                            frexp_normal(v)
+                        }
+                    })
+                    .collect();
+                let mut suffix = vec![(1.0_f64, 0_i64); k + 1];
                 for i in (0..k).rev() {
-                    suffix[i] = suffix[i + 1] * lane[i].1;
+                    suffix[i] = scaled_mul(suffix[i + 1], fac[i]);
                 }
-                let mut prefix = 1.0_f64;
+                let mut prefix = (1.0_f64, 0_i64);
                 for (i, &(slot, v)) in lane.iter().enumerate() {
-                    let g_excl = (g(q) * (prefix * suffix[i + 1])) as f32;
+                    let zeros_other = zeros - usize::from(v == 0.0);
+                    let infs_other = infs - usize::from(v.is_infinite());
+                    let excl = scaled_mul(prefix, suffix[i + 1]);
+                    let g_excl = if zeros_other > 0 {
+                        0.0_f32
+                    } else if infs_other > 0 {
+                        let neg_inf_other = neg_infs - usize::from(v.is_infinite() && v < 0.0);
+                        let neg = (neg_inf_other % 2 == 1) != (excl.0 < 0.0);
+                        let inf = if neg {
+                            f64::NEG_INFINITY
+                        } else {
+                            f64::INFINITY
+                        };
+                        (g(q) * inf) as f32
+                    } else {
+                        (scaled_apply(g(q), excl)) as f32
+                    };
                     if slot == usize::MAX {
                         d_input[q] = g_excl;
                     } else {
                         d_src[slot] = g_excl;
                     }
-                    prefix *= v;
+                    prefix = scaled_mul(prefix, fac[i]);
                 }
             }
         }
@@ -454,6 +492,30 @@ pub fn scatter_reduce_vjp_host(
         }
     }
     Ok((d_input, d_src))
+}
+
+/// 有限・非 0 の正規化済み `f64` を `(仮数, 2 の指数)` へ分解する（`m × 2^e`、`|m|` は `[0.5, 1)`）。
+/// `f32` から昇格した値は常に `f64` の正規数のため部分正規数は扱わない。
+fn frexp_normal(v: f64) -> (f64, i64) {
+    let bits = v.to_bits();
+    let e = ((bits >> 52) & 0x7ff) as i64 - 1022;
+    let m = f64::from_bits((bits & !(0x7ff_u64 << 52)) | (1022_u64 << 52));
+    (m, e)
+}
+
+/// `(仮数, 指数)` 同士の積。仮数積を `[0.5, 1)` へ再正規化し、指数側へ繰り上げる
+/// （仮数は有限・非 0 のみ。仮数積は `[0.25, 1)` で常に正規数）。
+fn scaled_mul(a: (f64, i64), b: (f64, i64)) -> (f64, i64) {
+    let (m, e) = frexp_normal(a.0 * b.0);
+    (m, a.1 + b.1 + e)
+}
+
+/// `g × m × 2^e` を中間で不要に inf／0 を作らず求める（指数を 2 分割して適用）。
+fn scaled_apply(g: f64, x: (f64, i64)) -> f64 {
+    let e = x.1.clamp(-2040, 2040);
+    let h1 = (e / 2) as i32;
+    let h2 = (e - i64::from(h1)) as i32;
+    g * x.0 * 2.0_f64.powi(h1) * 2.0_f64.powi(h2)
 }
 
 #[cfg(test)]
@@ -674,6 +736,64 @@ mod tests {
         .expect("vjp");
         assert_eq!(ds, vec![2.0, f32::INFINITY]);
         assert_eq!(dx, vec![0.0]);
+    }
+
+    #[test]
+    fn prod_vjp_zero_with_infinite_contribution_is_not_nan() {
+        // src=[0, inf, 2]・include_self=false: 他に 0 が残る要素は inf が混在しても 0。
+        let l = lay(&[1], &[3], 0);
+        let (_, ds) = scatter_reduce_vjp_host(
+            &[7.0],
+            &[0, 0, 0],
+            &[0.0, f32::INFINITY, 2.0],
+            &[1.0],
+            &l,
+            ScatterReduceMode::Prod,
+            false,
+        )
+        .expect("vjp");
+        assert_eq!(ds[1], 0.0);
+        assert_eq!(ds[2], 0.0);
+        assert!(!ds[0].is_nan());
+    }
+
+    #[test]
+    fn prod_vjp_zero_with_overflowing_finite_products_is_not_nan() {
+        // 0 と 1e38 を多数: 総積は f64 でも overflow する。0 の勾配は残りの積（f32 で inf）、
+        // 他は 0。NaN にしない。
+        let l = lay(&[1], &[40], 0);
+        let mut src = vec![1.0e38_f32; 40];
+        src[0] = 0.0;
+        let idx = vec![0_i32; 40];
+        let (_, ds) = scatter_reduce_vjp_host(
+            &[1.0],
+            &idx,
+            &src,
+            &[1.0],
+            &l,
+            ScatterReduceMode::Prod,
+            false,
+        )
+        .expect("vjp");
+        assert_eq!(ds[0], f32::INFINITY);
+        assert!(ds[1..].iter().all(|&d| d == 0.0));
+        // 0 無し: 大小混在で途中 overflow／underflow しても正しい有限積（1e38^20 × 1e-38^20 = 1）。
+        let mut src2 = vec![1.0e38_f32; 20];
+        src2.extend(vec![1.0e-38_f32; 21]);
+        let idx2 = vec![0_i32; 41];
+        let l2 = lay(&[1], &[41], 0);
+        let (_, ds2) = scatter_reduce_vjp_host(
+            &[1.0],
+            &idx2,
+            &src2,
+            &[1.0],
+            &l2,
+            ScatterReduceMode::Prod,
+            false,
+        )
+        .expect("vjp");
+        // src2[0] を除く積 = 1e38^19 × 1e-38^21 = 1e-76 → f32 では 0。NaN でないことを確認。
+        assert!(ds2.iter().all(|d| !d.is_nan()));
     }
 
     #[test]
