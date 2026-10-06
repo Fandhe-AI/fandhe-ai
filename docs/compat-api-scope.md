@@ -1971,6 +1971,12 @@ facade 公開面は追加していない（保留ガード `FoldUnfoldHoldDoctes
 公開形（`Var::unfold`／`Var::fold` の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は #2679 の対象で本イシューでは実装していない。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-fold-unfold-decision.md`。
 
+**適用記録（イシュー #2646・親 #2625・ルート #2499 Phase 4。LRN・重み再パラメータ化）**:
+`local_response_norm`／`weight_norm`／`norm_except_dim`／`spectral_norm`（`F.local_response_norm`・`torch._weight_norm`・`parametrizations.spectral_norm` 相当）を内部クレート限定（`fandhe_ai_autodiff::{lrn_ops, weight_reparam_ops}`・`fandhe_ai_tensor_core::{lrn, weight_reparam}`）で CPU 実装した（新規 `BackendOps` フック 3 件・既定 `Unsupported`。CPU は共有ホストカーネルを呼ぶだけ）。
+facade 公開面は追加していない（保留ガード `LrnWeightReparamHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm` の委譲メソッドと `SpectralNormState` の公開位置）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。層化（`nn::LocalResponseNorm`・`Linear`／`Conv` への parametrization 結線・`Sequential::add_*`）は #2679 の対象で本イシューでは実装していない。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-lrn-weight-reparam-decision.md`。
+
 **適用記録（イシュー #2638・親 #2625・ルート #2499 Phase 4。ヒストグラム・二分探索系）**:
 `histc`／`bincount`／`searchsorted`／`bucketize` の 4 演算（非微分）を内部クレート限定（`fandhe_ai_autodiff::binning_ops`・`fandhe_ai_tensor_core::binning`・`BackendOps::binning_*`）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `BinningOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。

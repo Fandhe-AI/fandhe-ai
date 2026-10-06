@@ -799,3 +799,53 @@ fn metal_im2col3d_col2im3d_are_unsupported_not_panic() {
         Err(BackendError::Unsupported(_))
     ));
 }
+/// イシュー #2646: `lrn_forward`／`weight_norm_forward`／`spectral_norm_forward` は CUDA に
+/// 専用カーネルがなく既定の `Unsupported` を返す（autodiff 側が共有ホストカーネルへフォールバック
+/// する契約。panic しない）。
+#[test]
+fn cuda_lrn_weight_reparam_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::lrn::LrnParams;
+    let cuda = CudaBackendOps::new(0);
+    let x3 = Tensor::new(vec![0.0; 4], &[1, 2, 2]).expect("valid tensor");
+    let x2 = Tensor::new(vec![1.0; 4], &[2, 2]).expect("valid tensor");
+    let g = Tensor::new(vec![1.0; 2], &[2, 1]).expect("valid tensor");
+    let u = Tensor::new(vec![1.0; 2], &[2]).expect("valid tensor");
+    let p = LrnParams::new(2, 1.0, 0.75, 1.0).expect("valid params");
+    assert!(matches!(
+        cuda.lrn_forward(&x3, &p),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.weight_norm_forward(&x2, &g, Some(0)),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.spectral_norm_forward(&x2, &u, &u, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #2646: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_lrn_weight_reparam_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::lrn::LrnParams;
+    let metal = MetalBackendOps::new();
+    let x3 = Tensor::new(vec![0.0; 4], &[1, 2, 2]).expect("valid tensor");
+    let x2 = Tensor::new(vec![1.0; 4], &[2, 2]).expect("valid tensor");
+    let g = Tensor::new(vec![1.0; 2], &[2, 1]).expect("valid tensor");
+    let u = Tensor::new(vec![1.0; 2], &[2]).expect("valid tensor");
+    let p = LrnParams::new(2, 1.0, 0.75, 1.0).expect("valid params");
+    assert!(matches!(
+        metal.lrn_forward(&x3, &p),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.weight_norm_forward(&x2, &g, Some(0)),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.spectral_norm_forward(&x2, &u, &u, 0),
+        Err(BackendError::Unsupported(_))
+    ));
+}

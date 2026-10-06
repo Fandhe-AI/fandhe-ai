@@ -184,6 +184,7 @@ pub mod indexed_update;
 pub mod interpolate;
 pub mod io;
 mod low_precision;
+pub mod lrn;
 pub mod max_unpool;
 pub mod memory_stats;
 mod ops_shape;
@@ -205,6 +206,7 @@ mod tensor;
 mod tensor_fmt;
 pub mod typed;
 mod typed_ops;
+pub mod weight_reparam;
 
 pub use backend_ops::{
     Activation, AdagradStepConfig, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput,

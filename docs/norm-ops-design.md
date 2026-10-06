@@ -506,3 +506,7 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
 - **実機 parity は未実測**: `compat_sequential_group_instance_norm_backend_parity.rs`
   （`#[ignore]`）を整備し、`docs/perf/logs/compat-sequential-group-instance-norm-2525/README.md`
   へ GB10／M4 Max 向けに申し送る。
+
+**LocalResponseNorm・weight_norm・spectral_norm はイシュー #2646 で内部実装済み**
+（`docs/autodiff-lrn-weight-reparam-decision.md`。共有ホストカーネル＋専用 `Op`・内部クレート限定・facade 公開は承認待ち
+〈承認依頼 #2677〉。層化・parametrization 結線は #2679）。
