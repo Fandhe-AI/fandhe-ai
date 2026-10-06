@@ -125,7 +125,7 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 18 実装（イシュー #2649 で +5。下記 5 層を含めると 23）〈`Linear`・`Relu`・`Sigmoid`・
+    /// fail-safe（本クレート内の既存 18 実装〈`Linear`・`Relu`・`Sigmoid`・
     /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Gelu`・
     /// `GeluTanh`・`Softplus`・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`
     /// （イシュー #1714）・`Flatten`（イシュー #2065）・`Hardtanh`・
@@ -137,8 +137,8 @@ pub trait Module {
     /// はいずれもこのデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
-    /// フォールバックの合図として扱うこと）。イシュー #2649 の `Selu`・`Celu`・
-    /// `Softsign`・`Hardsigmoid`・`LogSigmoid` も同じくオーバーライドする。
+    /// フォールバックの合図として扱うこと）。イシュー #2649 で追加した 5 層（`Selu`・`Celu`・
+    /// `Softsign`・`Hardsigmoid`・`LogSigmoid`。合計 23 実装）も同じくオーバーライドする。
     fn forward_host(
         &self,
         _ops: &dyn BackendOps,
