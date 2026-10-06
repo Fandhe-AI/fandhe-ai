@@ -80,7 +80,7 @@ use crate::var::Var;
 /// 最も単純で、`x` は既に実体化済みの値を読むだけで確保量も
 /// `x` の要素数に比例する〈`broadcast_to` の stride-0 view 経由で
 /// 無関係に巨大化する余地がない〉。REQ-8 の確保前検査対象外）。
-fn build_value_mask<'t>(
+pub(crate) fn build_value_mask<'t>(
     x: &Var<'t>,
     predicate: impl Fn(f32) -> bool,
 ) -> Result<Tensor<bool>, AutodiffError> {
