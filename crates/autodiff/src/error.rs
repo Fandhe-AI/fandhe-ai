@@ -127,6 +127,19 @@ impl From<fandhe_ai_tensor_core::StatReduceError> for AutodiffError {
     }
 }
 
+/// `tensor-core::pad_modes` の形状・引数検査失敗を写像する（イシュー #2642）。
+/// 写像規則は [`fandhe_ai_tensor_core::StatReduceError`] 版と同じ。
+impl From<fandhe_ai_tensor_core::PadModeError> for AutodiffError {
+    fn from(err: fandhe_ai_tensor_core::PadModeError) -> Self {
+        match err {
+            fandhe_ai_tensor_core::PadModeError::Shape(e) => AutodiffError::Shape(e),
+            fandhe_ai_tensor_core::PadModeError::InvalidArgument(msg) => {
+                AutodiffError::InvalidArgument(msg)
+            }
+        }
+    }
+}
+
 /// `tensor-core::binning` の形状・引数検査失敗を写像する（イシュー #2638）。
 /// 写像規則は [`fandhe_ai_tensor_core::FftError`] 版と同じ。
 impl From<fandhe_ai_tensor_core::BinningError> for AutodiffError {

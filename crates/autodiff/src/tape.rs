@@ -1165,6 +1165,18 @@ pub(crate) enum Op {
     /// `tensor_core::cumulative::logcumsumexp_vjp_host` で求める（`Op::Cumprod`
     /// と同型に入力を実体化する）。分類は [`Op::Cummax`] と同じ。
     Logcumsumexp { input: NodeId, dim: usize },
+    /// 非定数モード（reflect／replicate／circular）の `pad`（イシュー #2642・
+    /// `docs/autodiff-pad-modes-decision.md`）。`pads` は先頭軸から順の
+    /// `(before, after)`（`Op::Pad` と同じ並び）。`crate::pad_ops::pad_with_mode`
+    /// からのみ積まれ、facade には公開しない。VJP は入力 shape・`pads`・`mode` から
+    /// レイアウトを再構築し共有カーネル `tensor_core::pad_modes::pad_modes_vjp_host`
+    /// （添字重複を `f64` アキュムレータで蓄積し 1 回 downcast）で求める。非融合・
+    /// 非 checkpoint・高階微分非対応（`Op::Cummax` と同じ分類）。
+    PadMode {
+        input: NodeId,
+        pads: Vec<(usize, usize)>,
+        mode: fandhe_ai_tensor_core::PadMode,
+    },
     /// `kthvalue`／`median`（軸指定）の選択（イシュー #2637・
     /// `docs/autodiff-stat-reduce-ops-decision.md`）。`index` は forward が返した
     /// `dim` 軸上の位置（縮約後 shape。非追跡データ。`Op::Topk` と同じ payload）。
@@ -1756,6 +1768,7 @@ impl Op {
             | Op::Cummax { .. }
             | Op::Cummin { .. }
             | Op::Logcumsumexp { .. }
+            | Op::PadMode { .. }
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
             | Op::Quantile { .. }
@@ -1945,6 +1958,7 @@ impl Op {
             | Op::Cummax { input, .. }
             | Op::Cummin { input, .. }
             | Op::Logcumsumexp { input, .. }
+            | Op::PadMode { input, .. }
             | Op::OrderSelect { input, .. }
             | Op::MedianAll { input }
             | Op::Quantile { input, .. }
@@ -2293,6 +2307,7 @@ impl Op {
             | Op::Cummax { .. }
             | Op::Cummin { .. }
             | Op::Logcumsumexp { .. }
+            | Op::PadMode { .. }
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
             | Op::Quantile { .. }

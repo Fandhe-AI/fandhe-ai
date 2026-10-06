@@ -1976,3 +1976,9 @@ facade 公開面は追加していない（保留ガード `IndexedUpdateOpsHold
 facade 公開面は追加していない（保留ガード `TensorProductOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var::kron` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-tensor-product-ops-decision.md`。
+
+**適用記録（イシュー #2642・親 #2625・ルート #2499 Phase 4。pad の非定数モード）**:
+`pad` の reflect／replicate／circular モードを内部クレート限定（`fandhe_ai_autodiff::pad_ops`・`fandhe_ai_tensor_core::pad_modes`・`BackendOps::pad_modes_forward`）で CPU 実装した（専用 `Op::PadMode`＋共有ホストカーネル。既存 `Var::pad`〈定数埋め〉は不変）。
+facade 公開面は追加していない（保留ガード `PadModesHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::pad_with_mode` の委譲メソッドと `PadMode` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-pad-modes-decision.md`。

@@ -2479,6 +2479,22 @@ pub(crate) fn vjp(
             let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, da)]
         }
+        // 非定数モード pad（イシュー #2642）。入力 shape・`pads`・`mode` から
+        // レイアウトを再構築し（pad 上限を再検査）、共有カーネルの scatter-add VJP
+        // （入力要素ごとの `f64` アキュムレータ・出力の行優先順・1 回 downcast）を呼ぶ。
+        // 入力値は不要のため実体化しない。
+        Op::PadMode { input, pads, mode } => {
+            let input_shape = nodes[input.0].shape.clone();
+            check_fft_upstream_shape(upstream, out_value.shape(), "PadMode")?;
+            let layout =
+                fandhe_ai_tensor_core::pad_modes::pad_modes_layout(&input_shape, &pads, mode)?;
+            let data = fandhe_ai_tensor_core::pad_modes::pad_modes_vjp_host(
+                &upstream.contiguous().host_slice(),
+                &layout,
+            )?;
+            let da = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, da)]
+        }
         // `kthvalue`／`median`（軸指定）の選択（イシュー #2637）。各出力は `index` が
         // 指す単一の入力要素の複製で、lane ごとに出力 1 個のため `index` は重複しない。
         // それでも `Op::Cummax` と同じく `Add`（出力位置ごと `f64` アキュムレータ・1 回
