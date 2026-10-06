@@ -284,7 +284,7 @@ pub fn gaussian_nll_loss<'t>(
 }
 
 /// 単一入力を層 1 で実体化する（[`materialize_pair`] の 1 入力版）。
-fn materialize_single<'t>(a: &Var<'t>) -> Result<Tensor<f32>, AutodiffError> {
+pub(crate) fn materialize_single<'t>(a: &Var<'t>) -> Result<Tensor<f32>, AutodiffError> {
     let nodes = a.tape().nodes.borrow();
     let ops = a.tape().ops();
     Ok(crate::tape::materialize_fallible(&nodes, ops, a.node_id())?.clone())

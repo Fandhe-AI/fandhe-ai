@@ -310,6 +310,11 @@ pub mod softmin_threshold_ops;
 // ホスト参照実装。facade への公開は保留（承認依頼 #2677・公開 #2678。
 // `docs/autodiff-elementwise-loss-ops-decision.md`）。
 pub mod elementwise_loss_ops;
+// MultiMargin・MultiLabelMargin・MultiLabelSoftMargin・sigmoid focal loss（`multi_margin_loss`・
+// `multilabel_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss`。イシュー #2653）。
+// 新規 Op 4 種 + ホスト参照実装。facade への公開は保留（承認依頼 #2677・公開 #2678。
+// `docs/autodiff-margin-focal-loss-ops-decision.md`）。
+pub mod margin_focal_loss_ops;
 pub mod stat_reduce_ops;
 mod tape;
 #[cfg(test)]

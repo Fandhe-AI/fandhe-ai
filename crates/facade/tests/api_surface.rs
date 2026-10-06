@@ -28807,3 +28807,404 @@ fn workspace_declares_elementwise_loss_ops_fn_names_only_in_allowed_locations() 
          未承認の実装追加でないか確認すること"
     );
 }
+
+// =====================================================================
+// MarginFocalLossOpsHoldDoctestGuard（イシュー #2653・親 #2651）:
+// `SoftminThresholdOpsHoldDoctestGuard`（#2650）系のテストを鏡写しにする。実装は内部クレート
+// （`fandhe_ai_autodiff::margin_focal_loss_ops`）に閉じ、facade 公開形（推奨は `Var` の 1 行委譲メソッド 4 本）は
+// 未承認（承認依頼は #2677。公開は承認後の #2678）。オプション型 3 つの名指しは #2600 ツリーの記録側で扱う。
+// 検出はトークン完全一致のみで行い、`bce_with_logits_loss`・`Loss::BceWithLogits` など部分一致する別トークンは
+// 違反としない（自己テストで固定）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の
+// 宣言）と、doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+// =====================================================================
+
+/// `MarginFocalLossOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
+#[test]
+fn margin_focal_loss_ops_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "MarginFocalLossOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "MarginFocalLossOpsHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
+         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言 [`MARGIN_FOCAL_LOSS_OPS_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
+#[test]
+fn margin_focal_loss_ops_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "MarginFocalLossOpsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, MARGIN_FOCAL_LOSS_OPS_HOLD_PROBE_BODY,
+        "MarginFocalLossOpsHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
+         MARGIN_FOCAL_LOSS_OPS_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
+         （__fandhe_margin_focal_loss_ops_hold_probe モジュール・__FandheMarginFocalLossOpsHoldProbe トレイト・\
+         __probe_* 関数）の削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`margin_focal_loss_ops_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
+/// （`MarginFocalLossOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行を
+/// 除いた本文と 1 行単位で完全一致する）。
+const MARGIN_FOCAL_LOSS_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_margin_focal_loss_ops_hold_probe {\n\
+\x20\x20\x20\x20pub struct MultiMarginOptions;\n\
+\x20\x20\x20\x20pub struct MultiLabelSoftMarginOptions;\n\
+\x20\x20\x20\x20pub struct SigmoidFocalLossOptions;\n\
+\x20\x20\x20\x20pub mod margin_focal_loss_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn multi_margin_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn multilabel_margin_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn multilabel_soft_margin_loss() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn sigmoid_focal_loss() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_margin_focal_loss_ops_hold_probe::*;\n\
+\n\
+struct __FandheMarginFocalLossOpsHoldMarker;\n\
+\n\
+trait __FandheMarginFocalLossOpsHoldProbe {\n\
+\x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
+\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
+\x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
+\x20\x20\x20\x20fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheMarginFocalLossOpsHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheMarginFocalLossOpsHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheMarginFocalLossOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_free_fns(\n\
+\x20\x20\x20\x20_0: MultiMarginOptions,\n\
+\x20\x20\x20\x20_1: MultiLabelSoftMarginOptions,\n\
+\x20\x20\x20\x20_2: SigmoidFocalLossOptions,\n\
+) {\n\
+\x20\x20\x20\x20// モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開していれば、\n\
+\x20\x20\x20\x20// 名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20margin_focal_loss_ops::multi_margin_loss();\n\
+\x20\x20\x20\x20margin_focal_loss_ops::multilabel_margin_loss();\n\
+\x20\x20\x20\x20margin_focal_loss_ops::multilabel_soft_margin_loss();\n\
+\x20\x20\x20\x20margin_focal_loss_ops::sigmoid_focal_loss();\n\
+}\n\
+\n\
+fn __probe_methods(\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multi_margin_loss(v);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multilabel_margin_loss(v);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multilabel_soft_margin_loss(v);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::sigmoid_focal_loss(v);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tape::multi_margin_loss(tape);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tape::multilabel_margin_loss(tape);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tape::multilabel_soft_margin_loss(tape);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tape::sigmoid_focal_loss(tape);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::multi_margin_loss(tf);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::multilabel_margin_loss(tf);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::multilabel_soft_margin_loss(tf);\n\
+\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tensor::<f32>::sigmoid_focal_loss(tf);\n\
+}";
+
+/// 保留対象 fn 名（`Var` への inherent メソッドと自由関数の両方の経路を覆う）。
+const MARGIN_FOCAL_LOSS_FN_NAMES: [&str; 4] = [
+    "multi_margin_loss",
+    "multilabel_margin_loss",
+    "multilabel_soft_margin_loss",
+    "sigmoid_focal_loss",
+];
+
+/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前。トークン完全一致のため
+/// `bce_with_logits_loss`・`BceWithLogitsLoss` のような既存の別トークンは対象外）。
+const MARGIN_FOCAL_LOSS_IDENTS: [&str; 8] = [
+    "margin_focal_loss_ops",
+    "MultiMarginOptions",
+    "MultiLabelSoftMarginOptions",
+    "SigmoidFocalLossOptions",
+    "multi_margin_loss",
+    "multilabel_margin_loss",
+    "multilabel_soft_margin_loss",
+    "sigmoid_focal_loss",
+];
+
+/// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
+const MARGIN_FOCAL_LOSS_TYPE_NAMES: [&str; 3] = [
+    "MultiMarginOptions",
+    "MultiLabelSoftMarginOptions",
+    "SigmoidFocalLossOptions",
+];
+
+/// `pub mod` 宣言を禁じるモジュール名。
+const MARGIN_FOCAL_LOSS_MOD_NAMES: [&str; 1] = ["margin_focal_loss_ops"];
+
+/// [`facade_does_not_reexport_or_declare_margin_focal_loss_ops`]・その自己テストが共用する検出本体。facade src の
+/// `pub use` で [`MARGIN_FOCAL_LOSS_IDENTS`] を経路の識別子（トークン完全一致）単位で含むもの、内部クレート
+/// （`fandhe_ai_autodiff`）の glob 再エクスポート、leaf の個別再エクスポート、`struct`／`enum`／`type`／`trait` による
+/// [`MARGIN_FOCAL_LOSS_TYPE_NAMES`] の独自宣言、[`MARGIN_FOCAL_LOSS_MOD_NAMES`] の `pub mod` 宣言、
+/// [`MARGIN_FOCAL_LOSS_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない）を違反として返す。
+fn scan_margin_focal_loss_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in MARGIN_FOCAL_LOSS_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            let from_internal = path_tokens.iter().any(|t| t == "fandhe_ai_autodiff");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if MARGIN_FOCAL_LOSS_FN_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && MARGIN_FOCAL_LOSS_TYPE_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && let Some(name) = tokens.get(i + 2)
+            && MARGIN_FOCAL_LOSS_MOD_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("pub mod {name} 宣言"));
+        }
+        i += 1;
+    }
+
+    for fn_name in MARGIN_FOCAL_LOSS_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に MultiMargin／MultiLabelMargin／MultiLabelSoftMargin／sigmoid focal loss の
+/// 保留対象の再エクスポート・型の独自宣言・同名 `fn`・`pub mod` が存在しないことを固定する
+/// （`MarginFocalLossOpsHoldDoctestGuard` の正のプローブと多層防御を成す最内層のソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_margin_focal_loss_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_margin_focal_loss_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が MultiMargin／MultiLabelMargin／MultiLabelSoftMargin／sigmoid focal loss の内部実装\
+         （#2653 の `margin_focal_loss_ops`。facade 公開形は未承認で承認依頼は #2677）を再エクスポート、\
+         独自宣言、または同名の fn／pub mod を宣言している: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_margin_focal_loss_ops`] の自己テスト（各違反カテゴリの合成ソースを
+/// 検出できること、および部分文字列に含む別トークン・呼び出し・コメント・文字列・非公開 `use` を
+/// 誤検出しないことを恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_margin_focal_loss_ops_detects_each_category() {
+    let offense = |src: &str| !scan_margin_focal_loss_reexports_and_declarations(src).is_empty();
+    // 正例: モジュールの再エクスポート（別名含む）。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops as elo;"
+    ));
+    // 正例: 関数・型の個別再エクスポート（単一行・group・複数行）。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops::sigmoid_focal_loss;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops::{multilabel_soft_margin_loss};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops::{\n    MultiMarginOptions,\n    SigmoidFocalLossOptions,\n};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops::SigmoidFocalLossOptions;"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    // 正例: 型の独自宣言。
+    assert!(offense("pub struct MultiMarginOptions;"));
+    assert!(offense("pub struct SigmoidFocalLossOptions { full: bool }"));
+    assert!(offense("pub enum MultiMarginOptions { A }"));
+    assert!(offense("pub type SigmoidFocalLossOptions = u8;"));
+    assert!(offense("pub trait MultiMarginOptions {}"));
+    assert!(offense("pub struct MultiLabelSoftMarginOptions;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops::MultiLabelSoftMarginOptions;"
+    ));
+    // 正例: fn 宣言・pub mod（同名の inherent／trait メソッド宣言を含む）。
+    assert!(offense("pub fn multilabel_margin_loss() {}"));
+    assert!(offense(
+        "impl Var { pub fn multilabel_soft_margin_loss(&self) {} }"
+    ));
+    assert!(offense("impl Var { pub fn multi_margin_loss(&self) {} }"));
+    assert!(offense("trait T { fn sigmoid_focal_loss(&self); }"));
+    assert!(offense("pub mod margin_focal_loss_ops {}"));
+    // 負例: 保留対象を部分文字列に含む既存の別トークン（既存の BCE 系・損失系の公開面を誤検出しない）。
+    assert!(!offense("pub use fandhe_ai_autodiff::BceKind;"));
+    assert!(!offense("fn bce_with_logits_loss() {}"));
+    assert!(!offense("fn smooth_l1_loss() {}"));
+    assert!(!offense("fn margin_ranking_loss() {}"));
+    assert!(!offense("pub enum Loss { BceWithLogits }"));
+    assert!(!offense("fn soft_margin_like() {}"));
+    // 負例: #2652・既存の損失系 fn 名（トークン完全一致のため誤検出しない）。
+    assert!(!offense("fn soft_margin_loss() {}"));
+    assert!(!offense("fn triplet_margin_loss() {}"));
+    assert!(!offense("fn hinge_embedding_loss() {}"));
+    assert!(!offense("fn multilabel_loss_helper() {}"));
+    // 負例: フィールド名・引数名・メソッド呼び出し（宣言ではない）。
+    assert!(!offense("struct S { margin: f32 }"));
+    assert!(!offense("fn f(margin: f32) -> f32 { margin }"));
+    assert!(!offense(
+        "fn f(v: V) { let _ = v.multilabel_margin_loss(1.0); }"
+    ));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense(
+        "// pub use fandhe_ai_autodiff::margin_focal_loss_ops;"
+    ));
+    assert!(!offense(
+        "let s = \"pub fn multilabel_soft_margin_loss() {}\";"
+    ));
+    // 負例: 非公開 use。
+    assert!(!offense("use fandhe_ai_autodiff::margin_focal_loss_ops;"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`MARGIN_FOCAL_LOSS_FN_NAMES`] の `fn` 宣言が承認済みの
+/// 置き場所だけに存在することを固定する。
+///
+/// 期待値は `autodiff/src/margin_focal_loss_ops.rs` の自由関数 4 名が各 1 件。これら以外への追加
+/// （`Var` への inherent メソッド追加等）は fail-closed に検出する。テスト用ヘルパー・eval カーネルにも
+/// 素の `fn multilabel_margin_loss` などという名前を使わないこと（インベントリに数えられる）。
+#[test]
+fn workspace_declares_margin_focal_loss_ops_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in MARGIN_FOCAL_LOSS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for n in MARGIN_FOCAL_LOSS_FN_NAMES {
+        expected.insert(format!("autodiff/src/margin_focal_loss_ops.rs::{n}"), 1);
+    }
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の multi_margin_loss／multilabel_margin_loss／multilabel_soft_margin_loss／\
+         sigmoid_focal_loss の `fn` 宣言が承認済みの置き場所（autodiff/src/margin_focal_loss_ops.rs の自由関数 4 名\
+         各 1 件のみ）と一致しない。迂回経路（facade／Var 等への inherent メソッド追加等）の混入か、\
+         未承認の実装追加でないか確認すること"
+    );
+}
